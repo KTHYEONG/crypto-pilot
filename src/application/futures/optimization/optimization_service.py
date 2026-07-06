@@ -185,8 +185,7 @@ def _log_phase_run_summary(study: optuna.Study, phase: str) -> None:
     top_reasons = sorted(prune_reasons.items(), key=lambda kv: kv[1], reverse=True)[:3]
     reasons_str = ", ".join(f"{k}:{v}" for k, v in top_reasons) if top_reasons else "-"
     _logger.info(
-        "[RUN-SUMMARY] phase=%s trials=%d complete=%d pruned=%d failed=%d"
-        " verdict=%s prune_reasons={%s}",
+        "[RUN-SUMMARY] phase=%s trials=%d complete=%d pruned=%d failed=%d verdict=%s prune_reasons={%s}",
         phase,
         len(all_trials),
         len(completed),

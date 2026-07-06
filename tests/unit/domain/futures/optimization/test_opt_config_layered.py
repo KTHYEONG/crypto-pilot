@@ -19,6 +19,7 @@ from src.domain.futures.optimization.opt_config import (
 # T8 — Regime floor 클램프
 # ---------------------------------------------------------------------------
 
+
 def test_get_layered_window_clamps_l1_start_to_regime_floor() -> None:
     """l1_start 역산 결과가 REGIME_FLOOR보다 이전이면 클램프."""
     # Arrange: 기준일을 가까운 미래로 설정 → L1 역산 = 오늘에서 ~36mo 전

@@ -86,9 +86,7 @@ def build_instrument_registry(
 
         missing = _REQUIRED_SNAPSHOT_COLUMNS - set(snapshot_df.columns)
         if missing:
-            raise ValueError(
-                f"raw_snapshot missing required columns: {sorted(missing)}"
-            )
+            raise ValueError(f"raw_snapshot missing required columns: {sorted(missing)}")
 
         for _, row in snapshot_df.iterrows():
             symbol = str(row["symbol"])
@@ -102,9 +100,7 @@ def build_instrument_registry(
             # Parse optional onboard_at
             onboard_raw = row.get("onboard_at") if "onboard_at" in row.index else None
             onboard_at: datetime | None = None
-            if onboard_raw is not None and not (
-                isinstance(onboard_raw, float) and pd.isna(onboard_raw)
-            ):
+            if onboard_raw is not None and not (isinstance(onboard_raw, float) and pd.isna(onboard_raw)):
                 if hasattr(onboard_raw, "to_pydatetime"):
                     onboard_at = onboard_raw.to_pydatetime()
                 elif isinstance(onboard_raw, str):
@@ -124,20 +120,10 @@ def build_instrument_registry(
                         if "pair" in row.index
                         else symbol.replace("USDT", "")
                     ),
-                    "quote_asset": (
-                        str(row.get("quote_asset", "USDT"))
-                        if "quote_asset" in row.index
-                        else "USDT"
-                    ),
-                    "margin_asset": (
-                        str(row.get("margin_asset", "USDT"))
-                        if "margin_asset" in row.index
-                        else "USDT"
-                    ),
+                    "quote_asset": (str(row.get("quote_asset", "USDT")) if "quote_asset" in row.index else "USDT"),
+                    "margin_asset": (str(row.get("margin_asset", "USDT")) if "margin_asset" in row.index else "USDT"),
                     "contract_type": (
-                        str(row.get("contract_type", "PERPETUAL"))
-                        if "contract_type" in row.index
-                        else "PERPETUAL"
+                        str(row.get("contract_type", "PERPETUAL")) if "contract_type" in row.index else "PERPETUAL"
                     ),
                     "onboard_at": onboard_at,
                     "status": status,

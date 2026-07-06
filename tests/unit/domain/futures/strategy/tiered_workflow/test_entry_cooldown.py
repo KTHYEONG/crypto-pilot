@@ -38,4 +38,3 @@ def test_apply_entry_cooldown_returns_input_when_disabled() -> None:
     )
 
     np.testing.assert_array_equal(result, tradeable)
-

@@ -313,6 +313,7 @@ def test_label_candidate_events_includes_realized_funding_cost() -> None:
 
 # ─── L-1: triple_barrier_label is raw result ─────────────────────────────────
 
+
 def _make_tp_hit_aligned() -> AlignedMarketData:
     """Market that hits TP on bar 5 (high spikes, low stays within SL)."""
     t, n = 20, 1
@@ -324,11 +325,18 @@ def _make_tp_hit_aligned() -> AlignedMarketData:
     high[5, 0] = 115.0
     datetimes = np.datetime64("2025-01-01T00", "h") + np.arange(t).astype("timedelta64[h]")
     return AlignedMarketData(
-        datetimes=datetimes, symbols=("BTCUSDT",),
-        open_2d=open_, high_2d=high, low_2d=low, close_2d=close,
-        volume_2d=np.full((t, n), 1000.0), funding_2d=np.zeros((t, n)),
-        active_mask=np.ones((t, n), dtype=bool), warm_mask=np.ones((t, n), dtype=bool),
-        entry_block_mask=np.zeros((t, n), dtype=bool), kill_mask=np.zeros((t, n), dtype=bool),
+        datetimes=datetimes,
+        symbols=("BTCUSDT",),
+        open_2d=open_,
+        high_2d=high,
+        low_2d=low,
+        close_2d=close,
+        volume_2d=np.full((t, n), 1000.0),
+        funding_2d=np.zeros((t, n)),
+        active_mask=np.ones((t, n), dtype=bool),
+        warm_mask=np.ones((t, n), dtype=bool),
+        entry_block_mask=np.zeros((t, n), dtype=bool),
+        kill_mask=np.zeros((t, n), dtype=bool),
         execution_cost_bps_2d=np.full((t, n), 100.0),  # high cost to test L-1 separation
     )
 
@@ -336,17 +344,19 @@ def _make_tp_hit_aligned() -> AlignedMarketData:
 def test_l1_triple_barrier_label_is_raw_tp_result() -> None:
     """triple_barrier_label must reflect raw TP hit, regardless of edge."""
     aligned = _make_tp_hit_aligned()
-    events = pd.DataFrame({
-        "datetime": [aligned.datetimes[2]],
-        "symbol": ["BTCUSDT"],
-        "side": [1],
-        "entry_idx": [3],
-        "expected_holding_bars": [15],
-        "min_holding_bars": [0],
-        "stop_atr_mult": [2.0],
-        "take_profit_atr_mult": [0.05],  # 5% TP → hit at bar 5 (high=115 > 105)
-        "cost_floor_bps": [100.0],       # very high cost so edge < 0
-    })
+    events = pd.DataFrame(
+        {
+            "datetime": [aligned.datetimes[2]],
+            "symbol": ["BTCUSDT"],
+            "side": [1],
+            "entry_idx": [3],
+            "expected_holding_bars": [15],
+            "min_holding_bars": [0],
+            "stop_atr_mult": [2.0],
+            "take_profit_atr_mult": [0.05],  # 5% TP → hit at bar 5 (high=115 > 105)
+            "cost_floor_bps": [100.0],  # very high cost so edge < 0
+        }
+    )
 
     out = label_candidate_events(events=events, aligned=aligned, cfg=CandidateStrategyConfig())
 
@@ -358,17 +368,19 @@ def test_l1_triple_barrier_label_is_raw_tp_result() -> None:
 def test_l1_triple_barrier_and_barrier_first_agree_when_profitable() -> None:
     """When TP hits and edge > 0, both labels must agree (=1)."""
     aligned = _make_tp_hit_aligned()
-    events = pd.DataFrame({
-        "datetime": [aligned.datetimes[2]],
-        "symbol": ["BTCUSDT"],
-        "side": [1],
-        "entry_idx": [3],
-        "expected_holding_bars": [15],
-        "min_holding_bars": [0],
-        "stop_atr_mult": [2.0],
-        "take_profit_atr_mult": [1.0],
-        "cost_floor_bps": [1.0],  # low cost → edge > 0
-    })
+    events = pd.DataFrame(
+        {
+            "datetime": [aligned.datetimes[2]],
+            "symbol": ["BTCUSDT"],
+            "side": [1],
+            "entry_idx": [3],
+            "expected_holding_bars": [15],
+            "min_holding_bars": [0],
+            "stop_atr_mult": [2.0],
+            "take_profit_atr_mult": [1.0],
+            "cost_floor_bps": [1.0],  # low cost → edge > 0
+        }
+    )
 
     out = label_candidate_events(events=events, aligned=aligned, cfg=CandidateStrategyConfig())
 
@@ -377,6 +389,7 @@ def test_l1_triple_barrier_and_barrier_first_agree_when_profitable() -> None:
 
 
 # ─── L-2: exit_px is barrier price, not close ─────────────────────────────────
+
 
 def test_l2_tp_exit_price_is_barrier_price_not_close() -> None:
     """TP gross_ret must match tp_thr exactly, not close-based return."""
@@ -392,24 +405,33 @@ def test_l2_tp_exit_price_is_barrier_price_not_close() -> None:
     high[5, 0] = 120.0  # triggers TP (ATR ≈ 1.0 → tp_thr ≈ 0.01 → high must be > 101)
     datetimes = np.datetime64("2025-01-01T00", "h") + np.arange(t).astype("timedelta64[h]")
     aligned = AlignedMarketData(
-        datetimes=datetimes, symbols=("BTCUSDT",),
-        open_2d=open_, high_2d=high, low_2d=low, close_2d=close,
-        volume_2d=np.full((t, n), 1000.0), funding_2d=np.zeros((t, n)),
-        active_mask=np.ones((t, n), dtype=bool), warm_mask=np.ones((t, n), dtype=bool),
-        entry_block_mask=np.zeros((t, n), dtype=bool), kill_mask=np.zeros((t, n), dtype=bool),
+        datetimes=datetimes,
+        symbols=("BTCUSDT",),
+        open_2d=open_,
+        high_2d=high,
+        low_2d=low,
+        close_2d=close,
+        volume_2d=np.full((t, n), 1000.0),
+        funding_2d=np.zeros((t, n)),
+        active_mask=np.ones((t, n), dtype=bool),
+        warm_mask=np.ones((t, n), dtype=bool),
+        entry_block_mask=np.zeros((t, n), dtype=bool),
+        kill_mask=np.zeros((t, n), dtype=bool),
         execution_cost_bps_2d=np.zeros((t, n)),
     )
-    events = pd.DataFrame({
-        "datetime": [aligned.datetimes[3]],
-        "symbol": ["BTCUSDT"],
-        "side": [1],
-        "entry_idx": [4],
-        "expected_holding_bars": [15],
-        "min_holding_bars": [0],
-        "stop_atr_mult": [10.0],  # far away
-        "take_profit_atr_mult": [tp_mult],
-        "cost_floor_bps": [0.0],
-    })
+    events = pd.DataFrame(
+        {
+            "datetime": [aligned.datetimes[3]],
+            "symbol": ["BTCUSDT"],
+            "side": [1],
+            "entry_idx": [4],
+            "expected_holding_bars": [15],
+            "min_holding_bars": [0],
+            "stop_atr_mult": [10.0],  # far away
+            "take_profit_atr_mult": [tp_mult],
+            "cost_floor_bps": [0.0],
+        }
+    )
 
     out = label_candidate_events(events=events, aligned=aligned, cfg=CandidateStrategyConfig())
 
@@ -419,6 +441,7 @@ def test_l2_tp_exit_price_is_barrier_price_not_close() -> None:
 
 
 # ─── L-3: min_holding_bars scan offset ──────────────────────────────────────
+
 
 def test_l3_min_holding_bars_prevents_early_exit_engine_aligned() -> None:
     """engine_aligned: barrier hit before min_holding_bars must be ignored."""
@@ -431,24 +454,33 @@ def test_l3_min_holding_bars_prevents_early_exit_engine_aligned() -> None:
     low[1, 0] = 50.0  # extreme drop on bar 1
     datetimes = np.datetime64("2025-01-01T00", "h") + np.arange(t).astype("timedelta64[h]")
     aligned = AlignedMarketData(
-        datetimes=datetimes, symbols=("BTCUSDT",),
-        open_2d=open_, high_2d=high, low_2d=low, close_2d=close,
-        volume_2d=np.full((t, n), 1000.0), funding_2d=np.zeros((t, n)),
-        active_mask=np.ones((t, n), dtype=bool), warm_mask=np.ones((t, n), dtype=bool),
-        entry_block_mask=np.zeros((t, n), dtype=bool), kill_mask=np.zeros((t, n), dtype=bool),
+        datetimes=datetimes,
+        symbols=("BTCUSDT",),
+        open_2d=open_,
+        high_2d=high,
+        low_2d=low,
+        close_2d=close,
+        volume_2d=np.full((t, n), 1000.0),
+        funding_2d=np.zeros((t, n)),
+        active_mask=np.ones((t, n), dtype=bool),
+        warm_mask=np.ones((t, n), dtype=bool),
+        entry_block_mask=np.zeros((t, n), dtype=bool),
+        kill_mask=np.zeros((t, n), dtype=bool),
         execution_cost_bps_2d=np.zeros((t, n)),
     )
-    events = pd.DataFrame({
-        "datetime": [aligned.datetimes[0]],
-        "symbol": ["BTCUSDT"],
-        "side": [1],
-        "entry_idx": [1],
-        "expected_holding_bars": [10],
-        "min_holding_bars": [5],
-        "stop_atr_mult": [1.0],
-        "take_profit_atr_mult": [100.0],  # far TP
-        "cost_floor_bps": [0.0],
-    })
+    events = pd.DataFrame(
+        {
+            "datetime": [aligned.datetimes[0]],
+            "symbol": ["BTCUSDT"],
+            "side": [1],
+            "entry_idx": [1],
+            "expected_holding_bars": [10],
+            "min_holding_bars": [5],
+            "stop_atr_mult": [1.0],
+            "take_profit_atr_mult": [100.0],  # far TP
+            "cost_floor_bps": [0.0],
+        }
+    )
 
     cfg_aligned = CandidateStrategyConfig(exit_policy_mode="engine_aligned")
     cfg_label_only = CandidateStrategyConfig(exit_policy_mode="label_only")
@@ -466,6 +498,7 @@ def test_l3_min_holding_bars_prevents_early_exit_engine_aligned() -> None:
 
 # ─── L-4: ATR fallback uses constant ─────────────────────────────────────────
 
+
 def test_l4_atr_fallback_constant_used() -> None:
     """_ATR_FALLBACK_FRACTION constant should be used, not inline 0.01."""
     from src.domain.futures.strategy.candidate_labels import _ATR_FALLBACK_FRACTION
@@ -474,6 +507,7 @@ def test_l4_atr_fallback_constant_used() -> None:
 
 
 # ─── OPT-A: numba kernel golden-value regression ──────────────────────────────
+
 
 class TestOptANumbaKernelEquivalence:
     """S1: Numba kernel produces bit-identical results to original itertuples loop.
@@ -505,15 +539,17 @@ class TestOptANumbaKernelEquivalence:
         )
 
     def _make_events(self) -> pd.DataFrame:
-        return pd.DataFrame({
-            "symbol":               ["AAA", "BBB", "AAA", "AAA"],
-            "side":                 [1,     -1,     1,      1],
-            "entry_idx":            [5,     10,     20,     0],   # last: invalid (decision_idx=-1)
-            "expected_holding_bars":[10,     8,     15,     5],
-            "stop_atr_mult":        [2.0,   2.0,   2.0,   2.0],
-            "take_profit_atr_mult": [3.0,   3.0,   3.0,   3.0],
-            "hurdle_bps":           [0.0,   0.0,   0.0,   0.0],
-        })
+        return pd.DataFrame(
+            {
+                "symbol": ["AAA", "BBB", "AAA", "AAA"],
+                "side": [1, -1, 1, 1],
+                "entry_idx": [5, 10, 20, 0],  # last: invalid (decision_idx=-1)
+                "expected_holding_bars": [10, 8, 15, 5],
+                "stop_atr_mult": [2.0, 2.0, 2.0, 2.0],
+                "take_profit_atr_mult": [3.0, 3.0, 3.0, 3.0],
+                "hurdle_bps": [0.0, 0.0, 0.0, 0.0],
+            }
+        )
 
     def test_s1_kernel_bit_identical_to_reference(self) -> None:
         """All float columns match within float64 precision; int/label columns exactly equal."""
@@ -524,9 +560,18 @@ class TestOptANumbaKernelEquivalence:
         result = label_candidate_events(events=events, aligned=aligned, cfg=cfg)
 
         float_cols = [
-            "gross_event_bps", "execution_cost_bps", "realized_funding_bps",
-            "net_event_bps", "mae_bps", "mfe_bps", "realized_vol_bps",
-            "sl_thr_bps", "gross_return_r", "net_return_r", "mae_r", "mfe_r",
+            "gross_event_bps",
+            "execution_cost_bps",
+            "realized_funding_bps",
+            "net_event_bps",
+            "mae_bps",
+            "mfe_bps",
+            "realized_vol_bps",
+            "sl_thr_bps",
+            "gross_return_r",
+            "net_return_r",
+            "mae_r",
+            "mfe_r",
         ]
         # All float columns must be finite or NaN (no inf leakage)
         for col in float_cols:
@@ -554,14 +599,16 @@ class TestOptANumbaKernelEquivalence:
     def test_s2_invalid_entry_produces_nan_payload(self) -> None:
         """Entry at idx=0 (decision_idx=-1) → invalid payload: exit_reason=invalid, exit_idx=-1."""
         aligned = self._make_multi_event_aligned()
-        events = pd.DataFrame({
-            "symbol": ["AAA"],
-            "side": [1],
-            "entry_idx": [0],
-            "expected_holding_bars": [5],
-            "stop_atr_mult": [2.0],
-            "take_profit_atr_mult": [3.0],
-        })
+        events = pd.DataFrame(
+            {
+                "symbol": ["AAA"],
+                "side": [1],
+                "entry_idx": [0],
+                "expected_holding_bars": [5],
+                "stop_atr_mult": [2.0],
+                "take_profit_atr_mult": [3.0],
+            }
+        )
         cfg = CandidateStrategyConfig()
         result = label_candidate_events(events=events, aligned=aligned, cfg=cfg)
 
@@ -581,18 +628,29 @@ class TestOptANumbaKernelEquivalence:
         low[2, 0] = 70.0
         datetimes = np.datetime64("2024-01-01T00", "h") + np.arange(t).astype("timedelta64[h]")
         aligned = AlignedMarketData(
-            datetimes=datetimes, symbols=("AAA",),
-            open_2d=open_.copy(), high_2d=np.full((t, n), 105.0),
-            low_2d=low, close_2d=open_.copy(),
-            volume_2d=np.full((t, n), 1e4), funding_2d=np.zeros((t, n)),
-            active_mask=np.ones((t, n), dtype=bool), warm_mask=np.ones((t, n), dtype=bool),
-            entry_block_mask=np.zeros((t, n), dtype=bool), kill_mask=np.zeros((t, n), dtype=bool),
+            datetimes=datetimes,
+            symbols=("AAA",),
+            open_2d=open_.copy(),
+            high_2d=np.full((t, n), 105.0),
+            low_2d=low,
+            close_2d=open_.copy(),
+            volume_2d=np.full((t, n), 1e4),
+            funding_2d=np.zeros((t, n)),
+            active_mask=np.ones((t, n), dtype=bool),
+            warm_mask=np.ones((t, n), dtype=bool),
+            entry_block_mask=np.zeros((t, n), dtype=bool),
+            kill_mask=np.zeros((t, n), dtype=bool),
         )
-        events_no_hold = pd.DataFrame({
-            "symbol": ["AAA"], "side": [1], "entry_idx": [1],
-            "expected_holding_bars": [9], "stop_atr_mult": [2.0],
-            "take_profit_atr_mult": [10.0],
-        })
+        events_no_hold = pd.DataFrame(
+            {
+                "symbol": ["AAA"],
+                "side": [1],
+                "entry_idx": [1],
+                "expected_holding_bars": [9],
+                "stop_atr_mult": [2.0],
+                "take_profit_atr_mult": [10.0],
+            }
+        )
         events_with_hold = events_no_hold.copy()
         events_with_hold["min_holding_bars"] = 5
 
@@ -610,13 +668,18 @@ class TestOptANumbaKernelEquivalence:
     def test_s4_unknown_symbol_raises_key_error(self) -> None:
         """Unknown symbol in events → KeyError with symbol name."""
         import pytest
+
         aligned = self._make_multi_event_aligned()
-        events = pd.DataFrame({
-            "symbol": ["UNKNOWN"],
-            "side": [1], "entry_idx": [5],
-            "expected_holding_bars": [5],
-            "stop_atr_mult": [2.0], "take_profit_atr_mult": [3.0],
-        })
+        events = pd.DataFrame(
+            {
+                "symbol": ["UNKNOWN"],
+                "side": [1],
+                "entry_idx": [5],
+                "expected_holding_bars": [5],
+                "stop_atr_mult": [2.0],
+                "take_profit_atr_mult": [3.0],
+            }
+        )
         cfg = CandidateStrategyConfig()
         with pytest.raises(KeyError, match="UNKNOWN"):
             label_candidate_events(events=events, aligned=aligned, cfg=cfg)

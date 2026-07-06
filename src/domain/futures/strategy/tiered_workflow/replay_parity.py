@@ -12,6 +12,7 @@ def _resolve_bars_per_year(obj: Any) -> float | None:
     mtf = getattr(obj, "master_tf", None)
     if isinstance(mtf, str) and mtf:
         from src.domain.futures.strategy.tiered_workflow.metrics import _bars_per_year_for_tf
+
         return _bars_per_year_for_tf(mtf)
     return None
 
@@ -89,7 +90,12 @@ def assert_selection_replay_parity(
                     _logger.warning(
                         "[L2-PARITY-SELFCHECK] side=%s stored=%.6f recomputed=%.6f "
                         "(n_rets=%d L*=%.6f bpy=%.1f) -> field/metric DECOUPLED",
-                        side, float(_stored), float(_recomputed), n_rets, float(l_star), bars_per_year,
+                        side,
+                        float(_stored),
+                        float(_recomputed),
+                        n_rets,
+                        float(l_star),
+                        bars_per_year,
                     )
             except Exception as exc:
                 _logger.debug("[L2-PARITY-SELFCHECK] side=%s skipped: %r", side, exc)

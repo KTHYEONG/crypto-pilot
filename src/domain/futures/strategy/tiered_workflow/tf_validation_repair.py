@@ -229,9 +229,7 @@ def _read_registry_top_symbols(
     for ev_list in by_symbol.values():
         if ev_list:
             for ev in ev_list:
-                fam = getattr(ev, "family", None) or getattr(
-                    getattr(ev, "key", None), "strategy_id", "-"
-                ).split(":")[0]
+                fam = getattr(ev, "family", None) or getattr(getattr(ev, "key", None), "strategy_id", "-").split(":")[0]
                 families.add(fam)
     return top_symbols, tuple(sorted(families))
 
@@ -335,15 +333,10 @@ def build_multi_tf_major_registry_census(
             if not ev_list:
                 continue
             for ev in ev_list:
-                fam = getattr(ev, "family", None) or getattr(
-                    getattr(ev, "key", None), "strategy_id", "-"
-                ).split(":")[0]
+                fam = getattr(ev, "family", None) or getattr(getattr(ev, "key", None), "strategy_id", "-").split(":")[0]
                 mean_bps = getattr(ev, "mean_incremental_bps", 0.0)
                 hard = getattr(ev, "hard_eligible", False)
-                observed = any(
-                    s.symbol == sym and s.family == fam
-                    for s in observed_sleeve_summaries
-                )
+                observed = any(s.symbol == sym and s.family == fam for s in observed_sleeve_summaries)
                 entry = MajorSymbolRegistryCensusEntry(
                     symbol=sym,
                     family=fam,
@@ -450,9 +443,7 @@ def _extract_target_pairs_from_registry(
     for sym in symbols:
         ev_list = by_symbol.get(sym, ())
         for ev in ev_list:
-            fam = getattr(ev, "family", None) or getattr(
-                getattr(ev, "key", None), "strategy_id", "-"
-            ).split(":")[0]
+            fam = getattr(ev, "family", None) or getattr(getattr(ev, "key", None), "strategy_id", "-").split(":")[0]
             pairs.add((sym, fam))
     return pairs
 
@@ -471,9 +462,7 @@ def build_major_symbol_gap_evidence(
     families: tuple[str, ...] | None = None,
     adverse_sign_mismatch_threshold: float = 0.50,
 ) -> tuple[MajorSymbolGapEvidence, ...]:
-    target_pairs: set[tuple[str, str]] = _extract_target_pairs_from_summaries(
-        observed_sleeve_summaries
-    )
+    target_pairs: set[tuple[str, str]] = _extract_target_pairs_from_summaries(observed_sleeve_summaries)
     for tf in sorted(per_tf_l1.keys()):
         target_pairs |= _extract_target_pairs_from_registry(per_tf_l1[tf], symbols)
 
@@ -522,18 +511,12 @@ def build_validation_parity_report(
     if not per_tf_l1:
         blockers.append("missing_per_tf_l1")
 
-    main_tf = summarize_main_compatible_tf_evidence(
-        per_tf_l1, candidate_tfs=candidate_tfs
-    )
+    main_tf = summarize_main_compatible_tf_evidence(per_tf_l1, candidate_tfs=candidate_tfs)
 
     if not main_tf:
         blockers.append("missing_main_tf_evidence")
 
-    blockers.extend(
-        f"candidate_tf_missing_main_l1:{ctf}"
-        for ctf in candidate_tfs
-        if ctf not in per_tf_l1
-    )
+    blockers.extend(f"candidate_tf_missing_main_l1:{ctf}" for ctf in candidate_tfs if ctf not in per_tf_l1)
 
     major_gaps = build_major_symbol_gap_evidence(
         per_tf_l1=per_tf_l1,
@@ -541,9 +524,7 @@ def build_validation_parity_report(
         symbols=symbols,
     )
 
-    needs_review = any(
-        ev.candidate_decision == "review_candidate" for ev in main_tf
-    )
+    needs_review = any(ev.candidate_decision == "review_candidate" for ev in main_tf)
     decision: Literal["diagnostic_only", "candidate_review_required"] = (
         "candidate_review_required" if needs_review else "diagnostic_only"
     )
@@ -614,18 +595,16 @@ def build_validation_parity_capture(
     probe = summarize_tf_probe_diagnostics(probe_manifest)
     main_tf = summarize_main_compatible_tf_evidence(per_tf_l1, candidate_tfs=candidate_tfs)
     registry_census = build_multi_tf_major_registry_census(
-        per_tf_l1, (), symbols=symbols,
+        per_tf_l1,
+        (),
+        symbols=symbols,
     )
     blockers: list[str] = []
     if not per_tf_l1:
         blockers.append("missing_per_tf_l1")
     if not main_tf:
         blockers.append("missing_main_tf_evidence")
-    blockers.extend(
-        f"candidate_tf_missing_main_l1:{ctf}"
-        for ctf in candidate_tfs
-        if ctf not in per_tf_l1
-    )
+    blockers.extend(f"candidate_tf_missing_main_l1:{ctf}" for ctf in candidate_tfs if ctf not in per_tf_l1)
     needs_review = any(ev.candidate_decision == "review_candidate" for ev in main_tf)
     decision: Literal["diagnostic_only", "candidate_review_required"] = (
         "candidate_review_required" if needs_review else "diagnostic_only"
@@ -650,9 +629,7 @@ def build_major_symbol_gap_evidence_from_census(
     adverse_sign_mismatch_threshold: float = 0.50,
 ) -> tuple[MajorSymbolGapEvidence, ...]:
     """Build gap evidence from pre-clear census plus later observed sleeve summaries."""
-    observed_pairs: set[tuple[str, str]] = _extract_target_pairs_from_summaries(
-        observed_sleeve_summaries
-    )
+    observed_pairs: set[tuple[str, str]] = _extract_target_pairs_from_summaries(observed_sleeve_summaries)
     evidence: list[MajorSymbolGapEvidence] = []
     seen_pairs: set[tuple[str, str, str]] = set()
     for tf, entry in registry_census:

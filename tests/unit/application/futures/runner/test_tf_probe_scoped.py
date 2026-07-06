@@ -36,10 +36,7 @@ def _make_ohlcv_df(n: int = 2000) -> pd.DataFrame:
 
 
 def make_data_stage_with_maps(symbols: tuple[str, ...]) -> DataStageResult:
-    data_maps = {
-        sym: {"1h": _make_ohlcv_df(n=2000), "4h": _make_ohlcv_df(n=500)}
-        for sym in symbols
-    }
+    data_maps = {sym: {"1h": _make_ohlcv_df(n=2000), "4h": _make_ohlcv_df(n=500)} for sym in symbols}
     return DataStageResult(
         data_maps=data_maps,
         oos_data_maps={s: {} for s in symbols},
@@ -157,14 +154,9 @@ class TestTfProbeScopedHappyPath:
         assert "clear" in order, "clear should be called"
         probe_idx = order.index("probe")
         clear_idx = order.index("clear")
-        assert probe_idx < clear_idx, (
-            f"probe at {probe_idx} should precede clear at {clear_idx}; "
-            f"full order={order}"
-        )
+        assert probe_idx < clear_idx, f"probe at {probe_idx} should precede clear at {clear_idx}; full order={order}"
 
-    def test_tf_probe_scoped_uses_independent_cfg(
-        self, mocker: MockerFixture
-    ) -> None:
+    def test_tf_probe_scoped_uses_independent_cfg(self, mocker: MockerFixture) -> None:
         """Verify probe_cfg is independent from tiered_cfg (different objects)."""
         from src.application.futures.runner.active_pipeline import (
             _run_strategy_stage,
@@ -240,18 +232,11 @@ class TestTfProbeScopedHappyPath:
 
         probe_cfg = captured_probe_cfg.get("cfg")
         assert probe_cfg is not None, "probe_cfg was not captured"
-        assert len(cfg_calls) >= 2, (
-            f"expected >=2 build_candidate_strategy_config calls, "
-            f"got {len(cfg_calls)}"
-        )
+        assert len(cfg_calls) >= 2, f"expected >=2 build_candidate_strategy_config calls, got {len(cfg_calls)}"
         cfg_0 = cfg_calls[0]
         cfg_1 = cfg_calls[1]
-        assert id(cfg_0) != id(cfg_1), (
-            "probe_cfg and tiered_cfg must be different objects"
-        )
-        assert cfg_0 is probe_cfg, (
-            "first build_candidate_strategy_config call should be probe_cfg"
-        )
+        assert id(cfg_0) != id(cfg_1), "probe_cfg and tiered_cfg must be different objects"
+        assert cfg_0 is probe_cfg, "first build_candidate_strategy_config call should be probe_cfg"
 
 
 # ---------------------------------------------------------------------------
@@ -303,8 +288,7 @@ class TestTfProbeScopedEdgeCases:
         call_kwargs = mock_probe.call_args.kwargs
         assert "symbols" in call_kwargs, "probe_timeframe_alpha called without symbols"
         assert call_kwargs["symbols"] == list(_TF_PROBE_FALLBACK_SYMBOLS), (
-            f"expected symbols={list(_TF_PROBE_FALLBACK_SYMBOLS)}, "
-            f"got {call_kwargs['symbols']}"
+            f"expected symbols={list(_TF_PROBE_FALLBACK_SYMBOLS)}, got {call_kwargs['symbols']}"
         )
 
     def test_tf_probe_scoped_l3_phase_receives_populated_data(
@@ -356,15 +340,28 @@ class TestTfProbeScopedEdgeCases:
         monkeypatch.setitem(OPT_FUTURES_CONFIG, "ENABLE_TF_PROBE", True)
 
         cell = TfCellEvidence(
-            symbol="BTCUSDT", family="dual_momentum", variant="trend",
-            archetype="trend", tf="4h", n_obs=100, n_events=50,
-            ic_mean=0.05, ic_tstat_hac=2.5, ic_fold_sign_consistency=0.8,
-            alpha_half_life_h=48.0, net_edge_bps=15.0, turnover_per_year=12.0,
-            vr_label="trend", hurst=0.6, passed_fdr=True,
+            symbol="BTCUSDT",
+            family="dual_momentum",
+            variant="trend",
+            archetype="trend",
+            tf="4h",
+            n_obs=100,
+            n_events=50,
+            ic_mean=0.05,
+            ic_tstat_hac=2.5,
+            ic_fold_sign_consistency=0.8,
+            alpha_half_life_h=48.0,
+            net_edge_bps=15.0,
+            turnover_per_year=12.0,
+            vr_label="trend",
+            hurst=0.6,
+            passed_fdr=True,
         )
         manifest = TfProbeManifest(
-            cells=(cell,), tf_grid=("4h",),
-            coverage_by_tf={"4h": 1}, diversity_corr={},
+            cells=(cell,),
+            tf_grid=("4h",),
+            coverage_by_tf={"4h": 1},
+            diversity_corr={},
         )
         mocker.patch(
             "src.domain.futures.strategy.timeframe_probe.probe_timeframe_alpha",
@@ -400,9 +397,7 @@ class TestTfProbeScopedEdgeCases:
 
 
 class TestTfProbeScopedErrorHandling:
-    def test_tf_probe_scoped_oom_guard_rejects_large_scope(
-        self, mocker: MockerFixture
-    ) -> None:
+    def test_tf_probe_scoped_oom_guard_rejects_large_scope(self, mocker: MockerFixture) -> None:
         """scope_symbols > 20 symbols raises ValueError (OOM guard)."""
         large_scope = tuple(f"SYM{i}" for i in range(25))
 
@@ -414,9 +409,7 @@ class TestTfProbeScopedErrorHandling:
                 scope_symbols=large_scope,
             )
 
-    def test_tf_probe_scoped_disabled_returns_none(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_tf_probe_scoped_disabled_returns_none(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """ENABLE_TF_PROBE=False -> _run_tf_probe_stage_scoped returns None."""
         from src.domain.futures.optimization.opt_config import OPT_FUTURES_CONFIG
 
@@ -430,9 +423,7 @@ class TestTfProbeScopedErrorHandling:
         )
         assert result is None
 
-    def test_tf_probe_scoped_probe_exception_fallback(
-        self, mocker: MockerFixture
-    ) -> None:
+    def test_tf_probe_scoped_probe_exception_fallback(self, mocker: MockerFixture) -> None:
         """probe_timeframe_alpha exception -> _run_tf_probe_stage_scoped returns None."""
 
         mocker.patch(
@@ -448,9 +439,7 @@ class TestTfProbeScopedErrorHandling:
         )
         assert result is None
 
-    def test_tf_probe_scoped_worker_exception_isolated(
-        self, mocker: MockerFixture
-    ) -> None:
+    def test_tf_probe_scoped_worker_exception_isolated(self, mocker: MockerFixture) -> None:
         """Worker exception isolation: partial cells survive as TfProbeStageResult."""
         from src.domain.futures.strategy.timeframe_probe import (
             TfCellEvidence,
@@ -458,11 +447,22 @@ class TestTfProbeScopedErrorHandling:
         )
 
         surviving_cell = TfCellEvidence(
-            symbol="BTCUSDT", family="dual_momentum", variant="trend",
-            archetype="trend", tf="4h", n_obs=100, n_events=50,
-            ic_mean=0.05, ic_tstat_hac=2.5, ic_fold_sign_consistency=0.8,
-            alpha_half_life_h=48.0, net_edge_bps=15.0, turnover_per_year=12.0,
-            vr_label="trend", hurst=0.6, passed_fdr=True,
+            symbol="BTCUSDT",
+            family="dual_momentum",
+            variant="trend",
+            archetype="trend",
+            tf="4h",
+            n_obs=100,
+            n_events=50,
+            ic_mean=0.05,
+            ic_tstat_hac=2.5,
+            ic_fold_sign_consistency=0.8,
+            alpha_half_life_h=48.0,
+            net_edge_bps=15.0,
+            turnover_per_year=12.0,
+            vr_label="trend",
+            hurst=0.6,
+            passed_fdr=True,
         )
         manifest = TfProbeManifest(
             cells=(surviving_cell,),
@@ -494,6 +494,7 @@ class TestTfProbeScopedErrorHandling:
         assert isinstance(result, TfProbeStageResult)
         assert len(result.winning_cells) > 0, "at least one cell should survive"
         assert result.winning_cells[0] is surviving_cell
+
 
 # ---------------------------------------------------------------------------
 # Scenario 1: probe_stage_result_to_raw_manifest
@@ -543,8 +544,11 @@ class TestProbeStageResultToRawManifest:
 
         good = probe_cell("4h")
         bad = SimpleNamespace(
-            symbol="BTCUSDT", family="dual_momentum", variant="trend",
-            net_edge_bps=10.0, passed_fdr=True,
+            symbol="BTCUSDT",
+            family="dual_momentum",
+            variant="trend",
+            net_edge_bps=10.0,
+            passed_fdr=True,
         )
         result = probe_result(good, bad)
         raw = probe_stage_result_to_raw_manifest(result)
@@ -632,9 +636,7 @@ class TestTfProbeManifestPipelineIntegration:
         assert "probe_manifest" in captured_kwargs
         assert captured_kwargs["probe_manifest"] is not None
 
-    def test_run_strategy_stage_uses_probe_result_argument_or_local_scoped_result(
-        self, mocker: MockerFixture
-    ) -> None:
+    def test_run_strategy_stage_uses_probe_result_argument_or_local_scoped_result(self, mocker: MockerFixture) -> None:
         """Explicit probe_result reaches run_tiered_pipeline even when scoped returns None."""
         from src.application.futures.runner.active_pipeline import _run_strategy_stage
 

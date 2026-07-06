@@ -3,6 +3,7 @@
 Conventions follow test_risk_deployment_oos_leverage.py:
 np.random.default_rng(42), BARS_PER_YEAR=2190.0, 순수 함수(No mock).
 """
+
 from __future__ import annotations
 
 import numpy as np
@@ -16,9 +17,7 @@ from src.domain.futures.strategy.tiered_workflow.risk_deployment import (
 BARS_PER_YEAR = 2190.0
 
 
-def _make_dr_series(
-    n_bars: int, dr_early: float, dr_tail: float, tail_frac: float
-) -> NDArray[np.float64]:
+def _make_dr_series(n_bars: int, dr_early: float, dr_tail: float, tail_frac: float) -> NDArray[np.float64]:
     n_tail = int(n_bars * tail_frac)
     return np.concatenate(
         [

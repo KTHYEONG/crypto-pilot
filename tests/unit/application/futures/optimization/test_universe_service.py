@@ -1,10 +1,9 @@
 from __future__ import annotations
 
 from datetime import date
+from unittest.mock import MagicMock
 
 import pandas as pd
-import pytest
-from unittest.mock import MagicMock
 from _pytest.monkeypatch import MonkeyPatch
 
 from src.application.futures.optimization import universe_service
@@ -52,7 +51,8 @@ def test_discover_universe_timeline_defaults_cfg_when_none(
             timeline=universe_service.UniverseMembershipTimeline(tf="4h", windows=()),
             snapshots=(),
             state_cube=UniverseStateCube(
-                calendar=empty, instrument_ids=(),
+                calendar=empty,
+                instrument_ids=(),
                 eligible=np.empty((0, 0), dtype=np.bool_),
                 entry_block=np.empty((0, 0), dtype=np.bool_),
                 exit_required=np.empty((0, 0), dtype=np.bool_),

@@ -55,9 +55,7 @@ def _make_first_obs(
 class TestEmptyInputs:
     def test_empty_raw_snapshots_and_empty_first_obs_returns_empty_df(self) -> None:
         # Arrange
-        empty_first_obs = pd.DataFrame(
-            columns=["instrument_id", "symbol", "first_observed_at", "last_observed_at"]
-        )
+        empty_first_obs = pd.DataFrame(columns=["instrument_id", "symbol", "first_observed_at", "last_observed_at"])
 
         # Act
         result = build_instrument_registry([], first_observations=empty_first_obs)
@@ -71,9 +69,7 @@ class TestEmptyInputs:
     def test_empty_snapshot_skipped(self) -> None:
         # Arrange
         empty_snap = pd.DataFrame(columns=["symbol", "status", "captured_at"])
-        empty_first_obs = pd.DataFrame(
-            columns=["instrument_id", "symbol", "first_observed_at", "last_observed_at"]
-        )
+        empty_first_obs = pd.DataFrame(columns=["instrument_id", "symbol", "first_observed_at", "last_observed_at"])
 
         # Act
         result = build_instrument_registry([empty_snap], first_observations=empty_first_obs)
@@ -86,9 +82,7 @@ class TestObservedRows:
     def test_observed_rows_from_raw_snapshot(self) -> None:
         # Arrange
         snap = _make_snapshot(["BTCUSDT", "ETHUSDT"], _T0)
-        empty_first_obs = pd.DataFrame(
-            columns=["instrument_id", "symbol", "first_observed_at", "last_observed_at"]
-        )
+        empty_first_obs = pd.DataFrame(columns=["instrument_id", "symbol", "first_observed_at", "last_observed_at"])
 
         # Act
         result = build_instrument_registry([snap], first_observations=empty_first_obs)
@@ -104,9 +98,7 @@ class TestObservedRows:
     def test_observed_rows_instrument_id_format(self) -> None:
         # Arrange
         snap = _make_snapshot(["SOLUSDT"], _T0)
-        empty_first_obs = pd.DataFrame(
-            columns=["instrument_id", "symbol", "first_observed_at", "last_observed_at"]
-        )
+        empty_first_obs = pd.DataFrame(columns=["instrument_id", "symbol", "first_observed_at", "last_observed_at"])
 
         # Act
         result = build_instrument_registry([snap], first_observations=empty_first_obs)
@@ -117,9 +109,7 @@ class TestObservedRows:
     def test_instrument_id_includes_onboard_ts_when_provided(self) -> None:
         # Arrange
         snap = _make_snapshot(["DOTUSDT"], _T0, extra_cols={"onboard_at": _T0})
-        empty_first_obs = pd.DataFrame(
-            columns=["instrument_id", "symbol", "first_observed_at", "last_observed_at"]
-        )
+        empty_first_obs = pd.DataFrame(columns=["instrument_id", "symbol", "first_observed_at", "last_observed_at"])
 
         # Act
         result = build_instrument_registry([snap], first_observations=empty_first_obs)
@@ -174,9 +164,7 @@ class TestValidation:
     def test_raw_snapshot_missing_required_columns_raises_value_error(self) -> None:
         # Arrange — missing 'status' column
         bad_snap = pd.DataFrame({"symbol": ["BTCUSDT"], "captured_at": [_T0]})
-        empty_first_obs = pd.DataFrame(
-            columns=["instrument_id", "symbol", "first_observed_at", "last_observed_at"]
-        )
+        empty_first_obs = pd.DataFrame(columns=["instrument_id", "symbol", "first_observed_at", "last_observed_at"])
 
         # Act / Assert
         with pytest.raises(ValueError, match="missing required columns"):
@@ -185,9 +173,7 @@ class TestValidation:
     def test_raw_snapshot_missing_symbol_raises_value_error(self) -> None:
         # Arrange — missing 'symbol' column
         bad_snap = pd.DataFrame({"status": ["TRADING"], "captured_at": [_T0]})
-        empty_first_obs = pd.DataFrame(
-            columns=["instrument_id", "symbol", "first_observed_at", "last_observed_at"]
-        )
+        empty_first_obs = pd.DataFrame(columns=["instrument_id", "symbol", "first_observed_at", "last_observed_at"])
 
         # Act / Assert
         with pytest.raises(ValueError, match="missing required columns"):
@@ -199,14 +185,10 @@ class TestMultipleSnapshotsAndDeduplication:
         # Arrange — two snapshots at different timestamps with different status
         snap1 = _make_snapshot(["BNBUSDT"], _T0, status="TRADING")
         snap2 = _make_snapshot(["BNBUSDT"], _T1, status="SETTLING")
-        empty_first_obs = pd.DataFrame(
-            columns=["instrument_id", "symbol", "first_observed_at", "last_observed_at"]
-        )
+        empty_first_obs = pd.DataFrame(columns=["instrument_id", "symbol", "first_observed_at", "last_observed_at"])
 
         # Act
-        result = build_instrument_registry(
-            [snap1, snap2], first_observations=empty_first_obs
-        )
+        result = build_instrument_registry([snap1, snap2], first_observations=empty_first_obs)
 
         # Assert — both rows present because state_valid_from differs
         bnb_rows = result[result["symbol"] == "BNBUSDT"]
@@ -218,14 +200,10 @@ class TestMultipleSnapshotsAndDeduplication:
         # Arrange — same symbol, same captured_at → should deduplicate to 1 row
         snap1 = _make_snapshot(["XRPUSDT"], _T0)
         snap2 = _make_snapshot(["XRPUSDT"], _T0)  # identical key
-        empty_first_obs = pd.DataFrame(
-            columns=["instrument_id", "symbol", "first_observed_at", "last_observed_at"]
-        )
+        empty_first_obs = pd.DataFrame(columns=["instrument_id", "symbol", "first_observed_at", "last_observed_at"])
 
         # Act
-        result = build_instrument_registry(
-            [snap1, snap2], first_observations=empty_first_obs
-        )
+        result = build_instrument_registry([snap1, snap2], first_observations=empty_first_obs)
 
         # Assert — deduplicated to single row
         xrp_rows = result[result["symbol"] == "XRPUSDT"]
@@ -234,9 +212,7 @@ class TestMultipleSnapshotsAndDeduplication:
     def test_result_sorted_by_instrument_id_and_state_valid_from(self) -> None:
         # Arrange
         snap = _make_snapshot(["ZRXUSDT", "AAVEUSDT"], _T0)
-        empty_first_obs = pd.DataFrame(
-            columns=["instrument_id", "symbol", "first_observed_at", "last_observed_at"]
-        )
+        empty_first_obs = pd.DataFrame(columns=["instrument_id", "symbol", "first_observed_at", "last_observed_at"])
 
         # Act
         result = build_instrument_registry([snap], first_observations=empty_first_obs)

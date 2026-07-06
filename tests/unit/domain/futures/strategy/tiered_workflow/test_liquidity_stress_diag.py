@@ -11,9 +11,7 @@ from src.domain.futures.strategy.tiered_workflow.liquidity_stress_diag import (
 )
 
 
-def _make_half_spread_series(
-    n_bars: int, stress_bps: float, base_bps: float = 5.0
-) -> pd.Series:
+def _make_half_spread_series(n_bars: int, stress_bps: float, base_bps: float = 5.0) -> pd.Series:
     """Create a half-spread series with uniform base and optional stress override."""
     idx = pd.date_range("2026-01-01", periods=n_bars, freq="4h")
     values = np.full(n_bars, base_bps)
@@ -128,9 +126,7 @@ def test_compute_liquidity_stress_discriminative_power_single_episode_reports_st
     half_spread = _make_half_spread_series(n_bars, stress_bps=5.0, base_bps=5.0)
     half_spread.iloc[100:120] = 15.0
 
-    episodes = (
-        ReversalEpisode(start_idx=100, end_idx=120, realized_price=-0.02),
-    )
+    episodes = (ReversalEpisode(start_idx=100, end_idx=120, realized_price=-0.02),)
 
     result = compute_liquidity_stress_discriminative_power(
         episodes=episodes,
@@ -159,9 +155,7 @@ def test_compute_liquidity_stress_discriminative_power_flags_baseline_contaminat
     half_spread = _make_half_spread_series(n_bars, stress_bps=5.0, base_bps=5.0)
     half_spread.iloc[250:270] = 15.0
 
-    episodes = (
-        ReversalEpisode(start_idx=250, end_idx=270, realized_price=-0.02),
-    )
+    episodes = (ReversalEpisode(start_idx=250, end_idx=270, realized_price=-0.02),)
 
     result = compute_liquidity_stress_discriminative_power(
         episodes=episodes,
@@ -208,9 +202,7 @@ def test_compute_liquidity_stress_discriminative_power_clips_out_of_range_episod
     risk_off_mask = np.zeros(n_bars, dtype=bool)
     half_spread = _make_half_spread_series(n_bars, stress_bps=5.0, base_bps=5.0)
 
-    episodes = (
-        ReversalEpisode(start_idx=80, end_idx=150, realized_price=-0.02),
-    )
+    episodes = (ReversalEpisode(start_idx=80, end_idx=150, realized_price=-0.02),)
 
     result = compute_liquidity_stress_discriminative_power(
         episodes=episodes,

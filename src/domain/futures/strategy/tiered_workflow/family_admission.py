@@ -27,12 +27,8 @@ def compute_trend_sleeve_corr(
     *,
     min_overlap_bars: int = MIN_CORR_OVERLAP_BARS,
 ) -> float | None:
-    candidate = realized_event_results[
-        realized_event_results["family"] == candidate_family
-    ]
-    trend = realized_event_results[
-        realized_event_results["family"].isin(trend_families)
-    ]
+    candidate = realized_event_results[realized_event_results["family"] == candidate_family]
+    trend = realized_event_results[realized_event_results["family"].isin(trend_families)]
 
     symbols = candidate["symbol"].unique()
     rhos: list[float] = []
@@ -40,12 +36,8 @@ def compute_trend_sleeve_corr(
         sym_candidate = candidate[candidate["symbol"] == sym]
         sym_trend = trend[trend["symbol"] == sym]
 
-        cand_series = sym_candidate.groupby("decision_idx")[
-            "realized_side_adjusted_gross_bps"
-        ].mean()
-        trend_series = sym_trend.groupby("decision_idx")[
-            "realized_side_adjusted_gross_bps"
-        ].mean()
+        cand_series = sym_candidate.groupby("decision_idx")["realized_side_adjusted_gross_bps"].mean()
+        trend_series = sym_trend.groupby("decision_idx")["realized_side_adjusted_gross_bps"].mean()
 
         common_idx = cand_series.index.intersection(trend_series.index)
         if len(common_idx) < min_overlap_bars:

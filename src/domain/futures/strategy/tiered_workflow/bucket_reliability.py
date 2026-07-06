@@ -22,11 +22,7 @@ def build_bucket_reliability(
     min_reliability: float,
     relaxed_reliability_threshold: float = 0.35,
 ) -> RegimeBucketReliability:
-    sign_consistent = (
-        fit_edge_bps == 0.0
-        or cal_edge_bps == 0.0
-        or np.sign(fit_edge_bps) == np.sign(cal_edge_bps)
-    )
+    sign_consistent = fit_edge_bps == 0.0 or cal_edge_bps == 0.0 or np.sign(fit_edge_bps) == np.sign(cal_edge_bps)
     fit_ratio = min(float(max(n_fit, 0)) / max(float(min_fit_n), 1.0), 1.0)
     cal_ratio = min(float(max(n_cal, 0)) / max(float(min_cal_n), 1.0), 1.0)
     cal_lift_ratio = min(abs(float(cal_edge_bps)) / max(float(min_cal_lift_bps), 1e-9), 1.0)

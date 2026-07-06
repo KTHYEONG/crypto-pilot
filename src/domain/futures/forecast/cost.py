@@ -1,4 +1,5 @@
 """CostForecast builder — Phase 1/2 with static floor and optional dynamic components."""
+
 from __future__ import annotations
 
 import logging
@@ -138,12 +139,7 @@ def build_cost_forecast(
         and low.shape == (t, n)
     ):
         # Use a conservative half-spread proxy from range/close.
-        dyn_spread_bps = (
-            0.5
-            * np.maximum(high - low, 0.0)
-            / np.maximum(np.abs(close), 1e-12)
-            * 10000.0
-        )
+        dyn_spread_bps = 0.5 * np.maximum(high - low, 0.0) / np.maximum(np.abs(close), 1e-12) * 10000.0
         dyn_spread_bps = np.nan_to_num(dyn_spread_bps, nan=0.0, posinf=0.0, neginf=0.0)
 
     ret = np.zeros((t, n), dtype=np.float64)
@@ -176,11 +172,7 @@ def build_cost_forecast(
                 )
 
     funding_buffer_bps = np.zeros((t, n), dtype=np.float64)
-    if (
-        cfg.enable_dynamic_components
-        and funding_2d is not None
-        and np.asarray(funding_2d).shape == (t, n)
-    ):
+    if cfg.enable_dynamic_components and funding_2d is not None and np.asarray(funding_2d).shape == (t, n):
         f2d = np.asarray(funding_2d, dtype=np.float64)
         funding_buffer_bps = np.abs(np.nan_to_num(f2d, nan=0.0, posinf=0.0, neginf=0.0)) * 10000.0
         funding_buffer_bps = funding_buffer_bps + float(max(cfg.funding_event_buffer_bps, 0.0))
@@ -189,9 +181,7 @@ def build_cost_forecast(
     if cfg.enable_dynamic_components:
         latency_bps = np.full((t, n), float(max(cfg.latency_buffer_bps, 0.0)), dtype=np.float64)
 
-    dynamic_total_bps = (
-        dyn_spread_bps + vol_buffer_bps + impact_bps + funding_buffer_bps + latency_bps
-    )
+    dynamic_total_bps = dyn_spread_bps + vol_buffer_bps + impact_bps + funding_buffer_bps + latency_bps
     dynamic_total_bps = np.nan_to_num(dynamic_total_bps, nan=0.0, posinf=0.0, neginf=0.0)
 
     taker_fee_bps_2d = np.full((t, n), float(max(cfg.taker_fee_bps, 0.0)), dtype=np.float64)
@@ -208,8 +198,7 @@ def build_cost_forecast(
     frac_2d = bps_2d * _BPS
     uncertainty_bps_2d = np.maximum(
         0.0,
-        _rolling_std_2d(dynamic_total_bps, cfg.vol_lookback)
-        * max(float(cfg.uncertainty_ratio), 0.0),
+        _rolling_std_2d(dynamic_total_bps, cfg.vol_lookback) * max(float(cfg.uncertainty_ratio), 0.0),
     )
     if not np.any(uncertainty_bps_2d > 0.0):
         uncertainty_bps_2d = bps_2d * max(float(cfg.uncertainty_ratio), 0.0)

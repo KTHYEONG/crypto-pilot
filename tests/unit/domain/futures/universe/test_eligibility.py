@@ -422,9 +422,7 @@ class TestScenario3PITBoundary:
 class TestScenario4OrderRules:
     """Scenario 4: order size and cost hard gates."""
 
-    def _make_obs_with_price(
-        self, iid: str, available_at: datetime, last_price: float = 100.0
-    ) -> pd.DataFrame:
+    def _make_obs_with_price(self, iid: str, available_at: datetime, last_price: float = 100.0) -> pd.DataFrame:
         rows = [
             {
                 "instrument_id": iid,
@@ -549,9 +547,7 @@ class TestScenario4OrderRules:
             ]
         )
         # ADV = 5_000_000 (above 2M floor); participation cap = 1% = 50_000 USDT
-        obs = _make_observations(
-            _eligible_obs(iid, available_at=_dt("2024-05-31T00:00:00"), adv30=5_000_000.0)
-        )
+        obs = _make_observations(_eligible_obs(iid, available_at=_dt("2024-05-31T00:00:00"), adv30=5_000_000.0))
         rules = {iid: _make_rules(iid, decision_at=decision, taker_fee_bps=4.0)}
         config = ExecutionEligibilityConfig(
             max_round_trip_cost_bps=50.0,

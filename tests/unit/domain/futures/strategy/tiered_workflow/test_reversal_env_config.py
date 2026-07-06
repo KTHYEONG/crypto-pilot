@@ -1,4 +1,5 @@
 """Spec: futures-l2-reversal-economic-replay, Scenario 1-2."""
+
 from __future__ import annotations
 
 import os
@@ -22,8 +23,14 @@ class TestReversalConfigFromEnv:
             _reversal_config_from_env()
 
     def test_reversal_config_from_env_returns_defaults_when_no_env(self) -> None:
-        for key in ("L2_REVERSAL_DD_WINDOW", "L2_REVERSAL_DD_THRESHOLD", "L2_REVERSAL_MOM_FAST",
-                     "L2_REVERSAL_MOM_SLOW", "L2_REVERSAL_RISK_OFF_FLOOR", "L2_REVERSAL_PERSISTENCE_BARS"):
+        for key in (
+            "L2_REVERSAL_DD_WINDOW",
+            "L2_REVERSAL_DD_THRESHOLD",
+            "L2_REVERSAL_MOM_FAST",
+            "L2_REVERSAL_MOM_SLOW",
+            "L2_REVERSAL_RISK_OFF_FLOOR",
+            "L2_REVERSAL_PERSISTENCE_BARS",
+        ):
             os.environ.pop(key, None)
         cfg = _reversal_config_from_env()
         assert cfg.reversal_dd_window == 90

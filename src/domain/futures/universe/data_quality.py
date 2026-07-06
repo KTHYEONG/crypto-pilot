@@ -64,22 +64,22 @@ def apply_data_quality_stage(
         gap_size_available = False
     has_nan = frame.get("has_nan", pd.Series(False, index=frame.index)).fillna(False).astype(bool)
     has_inf = frame.get("has_inf", pd.Series(False, index=frame.index)).fillna(False).astype(bool)
-    has_timestamp_issues = frame.get(
-        "has_timestamp_issues", pd.Series(False, index=frame.index)
-    ).fillna(False).astype(bool)
+    has_timestamp_issues = (
+        frame.get("has_timestamp_issues", pd.Series(False, index=frame.index)).fillna(False).astype(bool)
+    )
     has_kline = frame.get("has_kline", pd.Series(False, index=frame.index)).fillna(False)
     has_funding = frame.get("has_funding", pd.Series(False, index=frame.index)).fillna(False)
-    resolved_is_coverage = pd.to_numeric(is_coverage, errors="coerce").where(
-        pd.to_numeric(is_coverage, errors="coerce").notna(),
-        (n_is_bars / expected_is_bars).clip(lower=0.0, upper=1.0),
-    ).fillna(0.0)
+    resolved_is_coverage = (
+        pd.to_numeric(is_coverage, errors="coerce")
+        .where(
+            pd.to_numeric(is_coverage, errors="coerce").notna(),
+            (n_is_bars / expected_is_bars).clip(lower=0.0, upper=1.0),
+        )
+        .fillna(0.0)
+    )
     min_is_bars_mask = n_is_bars.fillna(0.0) >= float(cfg.min_is_bars_4h)
 
-    gap_size_mask = (
-        (gap_size <= cfg.max_gap_bars)
-        if gap_size_available
-        else pd.Series(True, index=frame.index)
-    )
+    gap_size_mask = (gap_size <= cfg.max_gap_bars) if gap_size_available else pd.Series(True, index=frame.index)
     pass_mask = (
         has_kline.astype(bool)
         & has_funding.astype(bool)

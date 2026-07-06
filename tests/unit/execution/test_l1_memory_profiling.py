@@ -1,9 +1,6 @@
 from __future__ import annotations
 
-import logging
 from unittest.mock import patch
-
-import pytest
 
 from src.application.futures.runner.active_pipeline import _get_rss_mb
 
@@ -20,7 +17,6 @@ def test_get_rss_mb_returns_neg_one_on_missing_proc() -> None:
     assert result == -1.0
 
 
-
 def test_log_mem_runs_without_exception() -> None:
     """_log_mem이 예외 없이 실행되고 None을 반환하는지 검증.
 
@@ -33,5 +29,3 @@ def test_log_mem_runs_without_exception() -> None:
 
     result = _log_mem("test_stage", 100.0, extra="n_syms=5")
     assert result is None
-
-

@@ -1,4 +1,5 @@
 """Tests for per-TF L1 architecture (TF-Architecture V2)."""
+
 from __future__ import annotations
 
 import dataclasses
@@ -72,9 +73,7 @@ def _make_l1_result(
 def _make_aligned(n_bars: int = 100, n_syms: int = 5) -> MagicMock:
     aligned = MagicMock(spec=AlignedMarketData)
     start = np.datetime64("2024-01-01")
-    aligned.datetimes = np.array(
-        [start + np.timedelta64(i, "h") for i in range(n_bars)]
-    )
+    aligned.datetimes = np.array([start + np.timedelta64(i, "h") for i in range(n_bars)])
     aligned.symbols = tuple(f"sym{i}" for i in range(n_syms))
     aligned.close_2d = np.random.randn(n_bars, n_syms)
     return aligned
@@ -108,13 +107,15 @@ def test_resolve_tf_signal_pool_falls_back_to_candidate_families() -> None:
 def test_run_per_tf_l1_passes_all_families_when_no_tf_config() -> None:
     """Scenario 2: No per-TF config → all families pass through to nested SWF."""
     cfg = CandidateStrategyConfig(per_tf_candidate_families=None, per_tf_signal_pool_enabled=False)
-    labeled = pd.DataFrame({
-        "family": ["trend_ma", "bollinger_reversion", "rsi_reversion"],
-        "strategy_id": ["a", "b", "c"],
-        "side": [1, -1, 1],
-        "entry_idx": [0, 1, 2],
-        "exit_idx": [10, 11, 12],
-    })
+    labeled = pd.DataFrame(
+        {
+            "family": ["trend_ma", "bollinger_reversion", "rsi_reversion"],
+            "strategy_id": ["a", "b", "c"],
+            "side": [1, -1, 1],
+            "entry_idx": [0, 1, 2],
+            "exit_idx": [10, 11, 12],
+        }
+    )
 
     with patch(
         "src.domain.futures.strategy.tiered_workflow.run_l1_nested_swf",
@@ -323,15 +324,20 @@ def test_aggregate_per_tf_l1_preserves_preferred_tf_registry() -> None:
 
     ev = SimpleNamespace(
         key=SimpleNamespace(strategy_id="dual_momentum:42"),
-        mean_incremental_bps=3.5, hard_eligible=True,
+        mean_incremental_bps=3.5,
+        hard_eligible=True,
     )
     reg_4h = QualifiedSignalRegistry(
-        by_symbol={"BTCUSDT": (ev,)}, ready_symbols=("BTCUSDT",),
-        trade_scope_count=1, registry_version="test",
+        by_symbol={"BTCUSDT": (ev,)},
+        ready_symbols=("BTCUSDT",),
+        trade_scope_count=1,
+        registry_version="test",
     )
     reg_8h = QualifiedSignalRegistry(
-        by_symbol={"ETHUSDT": (ev,)}, ready_symbols=("ETHUSDT",),
-        trade_scope_count=1, registry_version="test",
+        by_symbol={"ETHUSDT": (ev,)},
+        ready_symbols=("ETHUSDT",),
+        trade_scope_count=1,
+        registry_version="test",
     )
     l1_4h = dataclasses.replace(_make_l1_result(prefix="4h_"), deployment_registry=reg_4h)
     l1_8h = dataclasses.replace(_make_l1_result(prefix="8h_"), deployment_registry=reg_8h)
@@ -349,11 +355,14 @@ def test_aggregate_per_tf_l1_falls_back_to_artifact_registry() -> None:
 
     ev = SimpleNamespace(
         key=SimpleNamespace(strategy_id="dual_momentum:42"),
-        mean_incremental_bps=3.5, hard_eligible=True,
+        mean_incremental_bps=3.5,
+        hard_eligible=True,
     )
     reg_art = QualifiedSignalRegistry(
-        by_symbol={"BTCUSDT": (ev,)}, ready_symbols=("BTCUSDT",),
-        trade_scope_count=1, registry_version="test",
+        by_symbol={"BTCUSDT": (ev,)},
+        ready_symbols=("BTCUSDT",),
+        trade_scope_count=1,
+        registry_version="test",
     )
     l1 = dataclasses.replace(
         _make_l1_result(prefix="4h_"),
@@ -373,11 +382,14 @@ def test_aggregate_per_tf_l1_does_not_concat_multiple_registries() -> None:
 
     ev = SimpleNamespace(
         key=SimpleNamespace(strategy_id="dual_momentum:42"),
-        mean_incremental_bps=3.5, hard_eligible=True,
+        mean_incremental_bps=3.5,
+        hard_eligible=True,
     )
     reg = QualifiedSignalRegistry(
-        by_symbol={"BTCUSDT": (ev,)}, ready_symbols=("BTCUSDT",),
-        trade_scope_count=1, registry_version="test",
+        by_symbol={"BTCUSDT": (ev,)},
+        ready_symbols=("BTCUSDT",),
+        trade_scope_count=1,
+        registry_version="test",
     )
     l1_a = dataclasses.replace(_make_l1_result(prefix="4h_"), deployment_registry=reg)
     l1_b = dataclasses.replace(_make_l1_result(prefix="8h_"), deployment_registry=reg)
@@ -402,9 +414,7 @@ def _make_aligned_base(
 
     hpb = _HPB_BRIDGE.get(base_tf, 4.0)
     start = np.datetime64("2024-01-01")
-    aligned.datetimes = np.array(
-        [start + np.timedelta64(int(i * hpb * 3600), "s") for i in range(n_bars)]
-    )
+    aligned.datetimes = np.array([start + np.timedelta64(int(i * hpb * 3600), "s") for i in range(n_bars)])
     aligned.symbols = tuple(f"sym{i}" for i in range(n_syms))
     aligned.close_2d = np.random.randn(n_bars, n_syms).astype(np.float64)
     ones_2d = np.ones((n_bars, n_syms), dtype=bool)
@@ -776,6 +786,7 @@ def test_build_multi_tf_panels_one_tf_fails_others_succeed() -> None:
     non_base_tfs = [tf for tf in tfs if tf != base_tf]
 
     from src.domain.futures.strategy_runtime.bridge import _HPB_BRIDGE
+
     hpb_base = _HPB_BRIDGE[base_tf]
     panels_by_tf: dict[str, CandidateSignalPanel] = {}
     for tf_i in non_base_tfs:
@@ -869,14 +880,28 @@ def test_build_multi_tf_panels_one_tf_fails_others_succeed() -> None:
 def test_aggregate_per_tf_l1_key_namespacing() -> None:
     """S3: oos_stacked keys include TF prefix to prevent collision."""
     l1_4h = Layer1Result(
-        signals_per_fold=(), oos_stacked={"SYM1": MagicMock()},
-        pooled_ic=0.0, pooled_tstat=0.0, breadth=0.0, valid_coverage=0.0,
-        fold_pass_ratio=0.0, gate_passed=True, n_valid=1, n_total=1,
+        signals_per_fold=(),
+        oos_stacked={"SYM1": MagicMock()},
+        pooled_ic=0.0,
+        pooled_tstat=0.0,
+        breadth=0.0,
+        valid_coverage=0.0,
+        fold_pass_ratio=0.0,
+        gate_passed=True,
+        n_valid=1,
+        n_total=1,
     )
     l1_6h = Layer1Result(
-        signals_per_fold=(), oos_stacked={"SYM1": MagicMock()},
-        pooled_ic=0.0, pooled_tstat=0.0, breadth=0.0, valid_coverage=0.0,
-        fold_pass_ratio=0.0, gate_passed=True, n_valid=1, n_total=1,
+        signals_per_fold=(),
+        oos_stacked={"SYM1": MagicMock()},
+        pooled_ic=0.0,
+        pooled_tstat=0.0,
+        breadth=0.0,
+        valid_coverage=0.0,
+        fold_pass_ratio=0.0,
+        gate_passed=True,
+        n_valid=1,
+        n_total=1,
     )
     per_tf_l1 = {
         "4h": PerTfL1Result(tf="4h", l1_result=l1_4h, n_winning_signals=1),
@@ -895,14 +920,16 @@ def test_aggregate_per_tf_l1_key_namespacing() -> None:
 def test_run_per_tf_l1_filters_by_native_tf() -> None:
     """S4: run_per_tf_l1(tf='6h') passes only events with native_tf=='6h' to nested SWF."""
     cfg = CandidateStrategyConfig()
-    labeled = pd.DataFrame({
-        "native_tf": ["4h", "6h", "6h", "8h"],
-        "family": ["trend_ma", "trend_donchian", "rsi_reversion", "bollinger_reversion"],
-        "strategy_id": ["a", "b", "c", "d"],
-        "side": [1, -1, 1, -1],
-        "entry_idx": [0, 1, 2, 3],
-        "exit_idx": [10, 11, 12, 13],
-    })
+    labeled = pd.DataFrame(
+        {
+            "native_tf": ["4h", "6h", "6h", "8h"],
+            "family": ["trend_ma", "trend_donchian", "rsi_reversion", "bollinger_reversion"],
+            "strategy_id": ["a", "b", "c", "d"],
+            "side": [1, -1, 1, -1],
+            "entry_idx": [0, 1, 2, 3],
+            "exit_idx": [10, 11, 12, 13],
+        }
+    )
 
     with patch(
         "src.domain.futures.strategy.tiered_workflow.run_l1_nested_swf",
@@ -962,9 +989,7 @@ def test_run_candidate_strategy_native_tf_column() -> None:
 
     aligned_mock = MagicMock(spec=AlignedMarketData)
     aligned_mock.close_2d = np.random.randn(n_bars, n_syms).astype(np.float64)
-    aligned_mock.datetimes = np.array(
-        [np.datetime64("2024-01-01") + np.timedelta64(i * 4, "h") for i in range(n_bars)]
-    )
+    aligned_mock.datetimes = np.array([np.datetime64("2024-01-01") + np.timedelta64(i * 4, "h") for i in range(n_bars)])
     aligned_mock.symbols = tuple(symbols)
     aligned_mock.execution_cost_bps_2d = np.full((n_bars, n_syms), 7.5, dtype=np.float64)
     aligned_mock.active_mask = np.ones((n_bars, n_syms), dtype=bool)
@@ -974,25 +999,29 @@ def test_run_candidate_strategy_native_tf_column() -> None:
 
     panel = _make_synthetic_panel(n_bars=n_bars, n_syms=n_syms, freq_h=4.0)
 
-    labeled_df = pd.DataFrame({
-        "family": ["trend_donchian"],
-        "strategy_id": ["a"],
-        "side": [1],
-        "entry_idx": [10],
-        "exit_idx": [50],
-        "expected_holding_bars": [4],
-        "min_holding_bars": [2],
-    })
+    labeled_df = pd.DataFrame(
+        {
+            "family": ["trend_donchian"],
+            "strategy_id": ["a"],
+            "side": [1],
+            "entry_idx": [10],
+            "exit_idx": [50],
+            "expected_holding_bars": [4],
+            "min_holding_bars": [2],
+        }
+    )
 
-    aligned_events = pd.DataFrame({
-        "family": ["trend_donchian"],
-        "strategy_id": ["a"],
-        "side": [1],
-        "entry_idx": [10],
-        "exit_idx": [50],
-        "expected_holding_bars": [4],
-        "min_holding_bars": [2],
-    })
+    aligned_events = pd.DataFrame(
+        {
+            "family": ["trend_donchian"],
+            "strategy_id": ["a"],
+            "side": [1],
+            "entry_idx": [10],
+            "exit_idx": [50],
+            "expected_holding_bars": [4],
+            "min_holding_bars": [2],
+        }
+    )
 
     data_maps = {"sym0": {"4h": pd.DataFrame({"close": [100.0]})}}
 

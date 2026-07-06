@@ -1,4 +1,5 @@
 """Unit tests for compute_cost_drag_ratio fix (denom explosion bug + cap)."""
+
 from __future__ import annotations
 
 import pytest
@@ -40,9 +41,7 @@ class TestCostDragRatio:
         When: compute_cost_drag_ratio.
         Then: 30.0 / max(100.0, 1e-9) = 0.30.
         """
-        ratio = compute_cost_drag_ratio(
-            (_make_attr(realized_price=100.0, realized_cost=30.0),)
-        )
+        ratio = compute_cost_drag_ratio((_make_attr(realized_price=100.0, realized_cost=30.0),))
         assert ratio == pytest.approx(0.30, rel=1e-3)
 
     def test_negative_price_uses_abs(self) -> None:
@@ -50,9 +49,7 @@ class TestCostDragRatio:
         When: compute_cost_drag_ratio.
         Then: 분모가 abs(-50)=50 → 10.0/50.0 = 0.20.
         """
-        ratio = compute_cost_drag_ratio(
-            (_make_attr(realized_price=-50.0, realized_cost=10.0),)
-        )
+        ratio = compute_cost_drag_ratio((_make_attr(realized_price=-50.0, realized_cost=10.0),))
         assert ratio == pytest.approx(0.20, rel=1e-3)
 
     def test_zero_price_capped_at_100(self) -> None:
@@ -60,9 +57,7 @@ class TestCostDragRatio:
         When: compute_cost_drag_ratio.
         Then: total_price_abs=0 → denom=1e-9 → 5e9, capped at 100.0.
         """
-        ratio = compute_cost_drag_ratio(
-            (_make_attr(realized_price=0.0, realized_cost=5.0),)
-        )
+        ratio = compute_cost_drag_ratio((_make_attr(realized_price=0.0, realized_cost=5.0),))
         assert ratio == pytest.approx(100.0, rel=1e-3)
 
     def test_empty_attributions_returns_zero(self) -> None:
@@ -90,7 +85,5 @@ class TestCostDragRatio:
         When: compute_cost_drag_ratio.
         Then: total_price_abs=1e-10 → 분모=1e-9 → ratio capped at 100.0.
         """
-        ratio = compute_cost_drag_ratio(
-            (_make_attr(realized_price=1e-10, realized_cost=50.0),)
-        )
+        ratio = compute_cost_drag_ratio((_make_attr(realized_price=1e-10, realized_cost=50.0),))
         assert ratio == pytest.approx(100.0, rel=1e-3)

@@ -53,10 +53,7 @@ def _to_float(v: Any, default: float = 0.0) -> float:
 
 def _metrics_from_payload(payload: dict[str, Any]) -> BaselineChampionMetrics:
     raw = payload.get("metrics")
-    if isinstance(raw, dict):
-        m = raw
-    else:
-        m = payload
+    m = raw if isinstance(raw, dict) else payload
     if not isinstance(m, dict):
         return BaselineChampionMetrics()
     return BaselineChampionMetrics(
@@ -256,10 +253,7 @@ def evaluate_sequential_promotion_gate(
     promoted_to_champion = False
 
     if passed:
-        if champion is None:
-            promoted_to_champion = True
-        else:
-            promoted_to_champion = should_promote_candidate(candidate, champion)
+        promoted_to_champion = True if champion is None else should_promote_candidate(candidate, champion)
 
     return PromotionGateResult(
         passed=passed,

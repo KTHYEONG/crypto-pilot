@@ -476,12 +476,17 @@ def test_searchsorted_mask_equivalence(tmp_path: Any, monkeypatch: pytest.Monkey
     n = 6000
     datetimes = [base + pd.Timedelta(hours=i * 4) for i in range(n)]
     for tf_l in tfs:
-        df = pd.DataFrame({
-            "timestamp": [int(t.value // 1_000_000) for t in datetimes],
-            "datetime": datetimes,
-            "open": 100.0, "high": 101.0, "low": 99.0, "close": 100.0,
-            "volume": 1000.0,
-        })
+        df = pd.DataFrame(
+            {
+                "timestamp": [int(t.value // 1_000_000) for t in datetimes],
+                "datetime": datetimes,
+                "open": 100.0,
+                "high": 101.0,
+                "low": 99.0,
+                "close": 100.0,
+                "volume": 1000.0,
+            }
+        )
         pq.write_table(pa.Table.from_pandas(df), tmp_path / f"{safe_sym}_{tf_l}_enriched.parquet")
 
     monkeypatch.setattr(opt_data_utils, "compute_segment_merge_index", lambda *a, **kw: 0)

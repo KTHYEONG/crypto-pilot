@@ -88,10 +88,7 @@ def _run_wiring_block(
     full_strategy_maps: dict[str, Any] = {}
     effective_trade_syms: list[str] = ["BTCUSDT"]
 
-    _is_pit: bool = (
-        universe_result is not None
-        and getattr(run_config, "universe_engine", "stage6") == "pit"
-    )
+    _is_pit: bool = universe_result is not None and getattr(run_config, "universe_engine", "stage6") == "pit"
     _pit_state_cube = (
         universe_result.state_cube  # type: ignore[union-attr]
         if _is_pit
@@ -110,6 +107,7 @@ def _run_wiring_block(
 # Test 1 — PIT path: align_data_maps receives state_cube kwarg non-None
 # ---------------------------------------------------------------------------
 
+
 def test_align_data_maps_receives_state_cube_on_pit_path() -> None:
     """When universe_engine='pit', wiring block passes state_cube != None.
 
@@ -126,7 +124,7 @@ def test_align_data_maps_receives_state_cube_on_pit_path() -> None:
 
     with patch(_ALIGN_TARGET, return_value=aligned_obj) as mock_align:
         # Act
-        _, kwargs = _run_wiring_block(
+        _, _kwargs = _run_wiring_block(
             universe_engine="pit",
             state_cube=state_cube,
             aligned_return=aligned_obj,
@@ -135,15 +133,14 @@ def test_align_data_maps_receives_state_cube_on_pit_path() -> None:
         # Assert
         mock_align.assert_called_once()
         passed_cube = mock_align.call_args.kwargs.get("state_cube")
-        assert passed_cube is not None, (
-            "state_cube kwarg must be non-None on the pit path"
-        )
+        assert passed_cube is not None, "state_cube kwarg must be non-None on the pit path"
         assert passed_cube is state_cube
 
 
 # ---------------------------------------------------------------------------
 # Test 2 — stage6 path: align_data_maps receives state_cube=None
 # ---------------------------------------------------------------------------
+
 
 def test_align_data_maps_has_no_state_cube_on_stage6_path() -> None:
     """When universe_engine='stage6', wiring block passes state_cube=None.
@@ -161,7 +158,7 @@ def test_align_data_maps_has_no_state_cube_on_stage6_path() -> None:
 
     with patch(_ALIGN_TARGET, return_value=aligned_obj) as mock_align:
         # Act
-        _, kwargs = _run_wiring_block(
+        _, _kwargs = _run_wiring_block(
             universe_engine="stage6",
             state_cube=state_cube,
             aligned_return=aligned_obj,
@@ -170,6 +167,4 @@ def test_align_data_maps_has_no_state_cube_on_stage6_path() -> None:
         # Assert
         mock_align.assert_called_once()
         passed_cube = mock_align.call_args.kwargs.get("state_cube", None)
-        assert passed_cube is None, (
-            f"state_cube must be None on the stage6 path; got {passed_cube!r}"
-        )
+        assert passed_cube is None, f"state_cube must be None on the stage6 path; got {passed_cube!r}"

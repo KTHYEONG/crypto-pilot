@@ -18,9 +18,7 @@ def _make_aligned() -> AlignedMarketData:
     t = 240
     calm_up = np.linspace(100.0, 135.0, 120, dtype=np.float64)
     break_down = np.linspace(135.0, 112.0, 40, dtype=np.float64)
-    noisy_tail = 112.0 + np.cumsum(
-        np.where(np.arange(80) % 2 == 0, 6.5, -7.5).astype(np.float64)
-    )
+    noisy_tail = 112.0 + np.cumsum(np.where(np.arange(80) % 2 == 0, 6.5, -7.5).astype(np.float64))
     btc_close = np.concatenate([calm_up, break_down, noisy_tail])
     eth_close = btc_close * 0.97 + 2.0
     close = np.column_stack([btc_close, eth_close]).astype(np.float64)
@@ -196,10 +194,10 @@ def test_schmitt_nan_snr_preserves_current_state() -> None:
     state = _schmitt_directional_state(snr, enter_theta=0.35, exit_theta=0.15)
 
     # Assert
-    assert state[0] == 1   # BULL 진입
-    assert state[1] == 1   # NaN → 상태 유지
-    assert state[2] == 1   # NaN → 상태 유지
-    assert state[3] == 0   # snr=-0.2 <= -0.15 → NEUTRAL
+    assert state[0] == 1  # BULL 진입
+    assert state[1] == 1  # NaN → 상태 유지
+    assert state[2] == 1  # NaN → 상태 유지
+    assert state[3] == 0  # snr=-0.2 <= -0.15 → NEUTRAL
 
 
 def test_persistence_targeted_band_shape_and_default_before_min_n() -> None:
@@ -315,6 +313,7 @@ class TestRegimeCompression:
 
     def test_compress_all_states(self) -> None:
         from src.domain.futures.strategy.market_regime import compress_regime_codes
+
         codes = np.array([0, 1, 2, 3, 4, 5], dtype=np.int8)
         result = compress_regime_codes(codes)
         expected = np.array([0, 0, 1, 1, 2, 2], dtype=np.int8)
@@ -322,12 +321,14 @@ class TestRegimeCompression:
 
     def test_compress_empty(self) -> None:
         from src.domain.futures.strategy.market_regime import compress_regime_codes
+
         codes = np.array([], dtype=np.int8)
         result = compress_regime_codes(codes)
         assert result.size == 0
 
     def test_compress_single_state(self) -> None:
         from src.domain.futures.strategy.market_regime import compress_regime_codes
+
         for src, dst in [(0, 0), (1, 0), (2, 1), (3, 1), (4, 2), (5, 2)]:
             codes = np.array([src], dtype=np.int8)
             result = compress_regime_codes(codes)
@@ -335,6 +336,7 @@ class TestRegimeCompression:
 
     def test_trend_efficiency_1d_is_in_regime_context(self) -> None:
         from tests.unit.domain.futures.strategy.test_market_regime import _make_aligned
+
         aligned = _make_aligned()
         regime = compute_market_regime_context(aligned=aligned)
         assert hasattr(regime, "trend_efficiency_1d")

@@ -90,14 +90,14 @@ def log_optuna_contract(
         },
         "storage_url": storage_url,
     }
-    
+
     # Layer2 스타일 헤더의 연장선으로 심플하게 출력
     _logger.info(f"   [OPTUNA] Storage: {storage_url}")
     _logger.info(
         f"   [PHASES] Total: {planned_total} "
         f"(A1:{phase_trials['phase_a1']}, A2:{phase_trials['phase_a2']}, B:{phase_trials['phase_b']})"
     )
-    
+
     for phase_key in ("phase_a1", "phase_a2", "phase_b"):
         rationale = ""
         if phase_key == "phase_b" and int(normalized_workers.get(phase_key, 1)) == 1:
@@ -131,7 +131,7 @@ def setup_optuna_storage(project_root: str | Path) -> tuple[str, optuna.storages
     db_dir = Path(project_root) / "logs" / "futures" / "optimization"
     db_dir.mkdir(parents=True, exist_ok=True)
     db_path = db_dir / "optuna.db"
-    
+
     # Enable SQLite WAL mode before initializing optuna RDBStorage to prevent DB lock contention
     with contextlib.suppress(Exception), sqlite3.connect(str(db_path), timeout=10.0) as conn:
         conn.execute("PRAGMA journal_mode=WAL")
@@ -144,7 +144,6 @@ def setup_optuna_storage(project_root: str | Path) -> tuple[str, optuna.storages
     )
 
     return storage_url, storage
-
 
 
 def get_or_create_study(
@@ -200,9 +199,7 @@ def _distribution_for_spec(spec: Mapping[str, Any]) -> optuna.distributions.Base
     if spec_type == "categorical":
         return optuna.distributions.CategoricalDistribution(spec["choices"])
     if spec_type == "int":
-        return optuna.distributions.IntDistribution(
-            int(spec["low"]), int(spec["high"]), step=int(spec.get("step", 1))
-        )
+        return optuna.distributions.IntDistribution(int(spec["low"]), int(spec["high"]), step=int(spec.get("step", 1)))
     return optuna.distributions.FloatDistribution(
         float(spec["low"]),
         float(spec["high"]),
@@ -262,7 +259,6 @@ def update_champion_store(
     return True
 
 
-
 def adr_sharpe_pool_study_name(tag: str) -> str:
     """ADR-레벨 전량 기록(승패 무관) study 이름. champion_store_study_name과 별개 study.
     [ADR_20260705_L3_ROLLING_HOLDOUT_PANEL]
@@ -285,9 +281,7 @@ def record_adr_evaluation(
     try:
         study = optuna.load_study(study_name=study_name, storage=storage)
     except KeyError:
-        study = optuna.create_study(
-            study_name=study_name, storage=storage, direction="maximize"
-        )
+        study = optuna.create_study(study_name=study_name, storage=storage, direction="maximize")
 
     trial = optuna.trial.create_trial(
         params={},
@@ -363,9 +357,7 @@ def ml_phase_d_sampler(
     """Multivariate TPE sampler for single-objective J-score maximization."""
     if OPT_FUTURES_CONFIG.get("FUTURES_ML_ALPHA_NSGA2_ENABLED", False):
         pop = int(OPT_FUTURES_CONFIG.get("FUTURES_NSGA2_POPULATION_SIZE", 30))
-        effective_constraints = (
-            constraints_func if constraints_func is not None else _nsga2_constraints
-        )
+        effective_constraints = constraints_func if constraints_func is not None else _nsga2_constraints
         return optuna.samplers.NSGAIISampler(
             seed=seed,
             population_size=pop,
@@ -388,9 +380,7 @@ def ml_phase_d_sampler(
     )
 
 
-def ml_phase_d_sampler_coordinate(
-    seed: int, n_trials: int, phase: str
-) -> optuna.samplers.BaseSampler:
+def ml_phase_d_sampler_coordinate(seed: int, n_trials: int, phase: str) -> optuna.samplers.BaseSampler:
     """Phase B: more startup trials + multivariate TPE; phases A/C use 20 startup."""
     if OPT_FUTURES_CONFIG.get("FUTURES_ML_ALPHA_NSGA2_ENABLED", False):
         return ml_phase_d_sampler(seed, n_trials)
@@ -436,9 +426,7 @@ def ml_trial_passes_hard_gates(
         is_mdd_val = float(is_mdd)
         is_dsr_val = float(is_dsr)
         mdd_limit = float(cfg.get("FUTURES_MAX_MDD", 25.0))
-        dsr_floor = float(
-            dsr_min if dsr_min is not None else cfg.get("FUTURES_ML_GATE1_DSR_MIN", 0.30)
-        )
+        dsr_floor = float(dsr_min if dsr_min is not None else cfg.get("FUTURES_ML_GATE1_DSR_MIN", 0.30))
         if is_mdd_val >= mdd_limit:
             return False
         return is_dsr_val >= dsr_floor
@@ -448,35 +436,22 @@ def ml_trial_passes_hard_gates(
     if check_pbo and float(pbo_obs) >= pbo_lim:
         return False
     dsr = float(trial.user_attrs.get("gate1_dsr", -9.0))
-    dsr_floor = float(
-        dsr_min if dsr_min is not None else cfg.get("FUTURES_ML_GATE1_DSR_MIN", 0.80)
-    )
+    dsr_floor = float(dsr_min if dsr_min is not None else cfg.get("FUTURES_ML_GATE1_DSR_MIN", 0.80))
     if dsr < dsr_floor:
         return False
     p10_floor = float(cfg.get("FUTURES_AWF_P10_LOG_TW_MIN", -0.10))
     p10_cpcv = float(
-        trial.user_attrs.get(
-            "awf_worst_leg_log_tw", trial.user_attrs.get("ml_p10_log_growth_cpcv", -999.0)
-        )
+        trial.user_attrs.get("awf_worst_leg_log_tw", trial.user_attrs.get("ml_p10_log_growth_cpcv", -999.0))
     )
     if p10_cpcv <= p10_floor:
         return False
     mdd_limit = float(cfg.get("FUTURES_MAX_MDD", 22.0))
-    if (
-        float(
-            trial.user_attrs.get(
-                "awf_worst_mdd_pct", trial.user_attrs.get("ml_worst_mdd_cpcv", 999.0)
-            )
-        )
-        >= mdd_limit
-    ):
+    if float(trial.user_attrs.get("awf_worst_mdd_pct", trial.user_attrs.get("ml_worst_mdd_cpcv", 999.0))) >= mdd_limit:
         return False
     # Dynamic trade density: scale minimum trades with IS span to avoid regime-size bias.
     span_bars = int(trial.user_attrs.get("gate1_eff_ref_len", 0))
     bars_per_trade_est = float(cfg.get("FUTURES_BARS_PER_TRADE_EST", 200))
-    min_trades_dynamic = (
-        max(12.0, float(span_bars) / bars_per_trade_est) if span_bars > 0 else 12.0
-    )
+    min_trades_dynamic = max(12.0, float(span_bars) / bars_per_trade_est) if span_bars > 0 else 12.0
     return float(trial.user_attrs.get("avg_trades", 0.0)) >= min_trades_dynamic
 
 
@@ -495,6 +470,7 @@ def resolve_futures_parallel_policy(symbol_count: int) -> int:
 def optimize_worker(s_name: str, s_url: str, chunk_size: int) -> None:
     """Worker function for parallel Optuna optimization using global context."""
     import os
+
     with contextlib.suppress(Exception):
         # Lower CPU priority so that optimization does not lag host gaming or chrome activities
         os.nice(10)
@@ -565,10 +541,7 @@ def build_joint_study_name(
     sym_raw = json.dumps(symbols_sorted, ensure_ascii=True, separators=(",", ":"))
     sym_fp = hashlib.sha256(sym_raw.encode()).hexdigest()[:10]
     cfg_fp = cfg_hash_for_run(cfg)
-    return (
-        f"futures_joint_tpe_tf{tf}_win{fetch_start_date}_{end_date}_"
-        f"n{len(symbols_sorted)}_s{sym_fp}_c{cfg_fp}"
-    )
+    return f"futures_joint_tpe_tf{tf}_win{fetch_start_date}_{end_date}_n{len(symbols_sorted)}_s{sym_fp}_c{cfg_fp}"
 
 
 def short_git_rev(project_root: str | Path) -> str:
@@ -595,11 +568,7 @@ def build_run_id(
 ) -> str:
     """Generate a unique Run ID for a specific optimization run."""
     ts = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
-    sym_raw = json.dumps(
-        sorted(str(s) for s in symbols),
-        ensure_ascii=True,
-        separators=(",", ":")
-    )
+    sym_raw = json.dumps(sorted(str(s) for s in symbols), ensure_ascii=True, separators=(",", ":"))
     sym_fp = hashlib.sha256(sym_raw.encode()).hexdigest()[:8]
     cfg_fp = cfg_hash_for_run(cfg)[:8]
     return f"{ts}_tf{tf}_s{sym_fp}_c{cfg_fp}_{short_git_rev(project_root)}"
@@ -680,10 +649,7 @@ def collect_run_summary_from_study(
     planned_total_trials = int(
         contract.get(
             "planned_total_trials",
-            sum(
-                int(trials_per_phase.get(k, requested_trials_per_phase))
-                for k in completed_trials_per_phase
-            ),
+            sum(int(trials_per_phase.get(k, requested_trials_per_phase)) for k in completed_trials_per_phase),
         )
     )
 
@@ -717,7 +683,9 @@ def collect_run_summary_from_study(
             "awf_worst_leg_log_tw": _tmetric(best_robust, "awf_worst_leg_log_tw", -9.0),
             "awf_worst_mdd_pct": _tmetric(best_robust, "awf_worst_mdd_pct", 999.0),
             "awf_pos_frac": _tmetric(best_robust, "awf_pos_frac", 0.0),
-        } if best_robust is not None else None,
+        }
+        if best_robust is not None
+        else None,
         "best_mu": {
             "trial_number": int(best_mu.number),
             "awf_robust_score": _tmetric(best_mu, "awf_robust_score", -1e9),
@@ -725,7 +693,9 @@ def collect_run_summary_from_study(
             "awf_worst_leg_log_tw": _tmetric(best_mu, "awf_worst_leg_log_tw", -9.0),
             "awf_worst_mdd_pct": _tmetric(best_mu, "awf_worst_mdd_pct", 999.0),
             "awf_pos_frac": _tmetric(best_mu, "awf_pos_frac", 0.0),
-        } if best_mu is not None else None,
+        }
+        if best_mu is not None
+        else None,
     }
 
 
@@ -907,25 +877,30 @@ def run_optimization_loop(
 
     # 1. Prevent CPU Thrashing: Disable nested multi-threading in sub-processes
     for env_var in [
-        "NUMBA_NUM_THREADS", "OMP_NUM_THREADS", "MKL_NUM_THREADS",
-        "OPENBLAS_NUM_THREADS", "VECLIB_MAXIMUM_THREADS", "NUMEXPR_NUM_THREADS"
+        "NUMBA_NUM_THREADS",
+        "OMP_NUM_THREADS",
+        "MKL_NUM_THREADS",
+        "OPENBLAS_NUM_THREADS",
+        "VECLIB_MAXIMUM_THREADS",
+        "NUMEXPR_NUM_THREADS",
     ]:
         os.environ[env_var] = "1"
 
     from optuna.pruners import MedianPruner
-    _pruner = pruner if pruner is not None else MedianPruner(
-        n_startup_trials=int(OPT_FUTURES_CONFIG.get("FUTURES_PRUNER_STARTUP_TRIALS", 40)),
-        n_warmup_steps=int(OPT_FUTURES_CONFIG.get("FUTURES_PRUNER_WARMUP_STEPS", 2)),
+
+    _pruner = (
+        pruner
+        if pruner is not None
+        else MedianPruner(
+            n_startup_trials=int(OPT_FUTURES_CONFIG.get("FUTURES_PRUNER_STARTUP_TRIALS", 40)),
+            n_warmup_steps=int(OPT_FUTURES_CONFIG.get("FUTURES_PRUNER_WARMUP_STEPS", 2)),
+        )
     )
 
     study_ml = get_or_create_study(
         study_name=study_name,
         storage=storage,
-        sampler=(
-            sampler
-            if sampler is not None
-            else ml_phase_d_sampler(seed=seed, n_trials=n_trials)
-        ),
+        sampler=(sampler if sampler is not None else ml_phase_d_sampler(seed=seed, n_trials=n_trials)),
         resume=resume,
         pruner=_pruner,
         directions=directions,
@@ -970,16 +945,15 @@ def run_optimization_loop(
                 while not stop_event.is_set():
                     try:
                         trials = study.get_trials(
-                            deepcopy=False, 
-                            states=[TrialState.COMPLETE, TrialState.PRUNED, TrialState.FAIL]
+                            deepcopy=False, states=[TrialState.COMPLETE, TrialState.PRUNED, TrialState.FAIL]
                         )
                         if r_id:
                             trials = [t for t in trials if t.user_attrs.get("run_id") == r_id]
-                        
+
                         count = len(trials)
                         ok_count = sum(1 for t in trials if t.state == TrialState.COMPLETE)
                         pruned_count = sum(1 for t in trials if t.state == TrialState.PRUNED)
-                        
+
                         pbar.set_postfix_str(f"OK:{ok_count} | PRUNED:{pruned_count}")
                         pbar.n = min(count, target)
                         pbar.refresh()
@@ -997,9 +971,7 @@ def run_optimization_loop(
     poller_thread = None
     if poller_enabled:
         poller_thread = threading.Thread(
-            target=progress_poller,
-            args=(study_name, storage_url, n_trials, base_ctx.run_id),
-            daemon=True
+            target=progress_poller, args=(study_name, storage_url, n_trials, base_ctx.run_id), daemon=True
         )
         poller_thread.start()
     chunk_timeout_sec = int(OPT_FUTURES_CONFIG.get("FUTURES_OPT_CHUNK_TIMEOUT_SEC", 1200))
@@ -1009,10 +981,7 @@ def run_optimization_loop(
     try:
         with ProcessPoolExecutor(max_workers=n_workers, mp_context=mp_ctx) as executor:
             t_submit = time.perf_counter()
-            futures = [
-                executor.submit(optimize_worker, study_name, storage_url, c_size)
-                for c_size in chunks
-            ]
+            futures = [executor.submit(optimize_worker, study_name, storage_url, c_size) for c_size in chunks]
             _logger.debug(
                 "[PROF] opt_loop futures_submit elapsed_s=%.4f",
                 time.perf_counter() - t_submit,
@@ -1030,8 +999,7 @@ def run_optimization_loop(
                     )
                 except TimeoutError:
                     _logger.error(
-                        "Worker batch timeout (chunk %d/%d, timeout=%ss).",
-                        i, len(futures), chunk_timeout_sec
+                        "Worker batch timeout (chunk %d/%d, timeout=%ss).", i, len(futures), chunk_timeout_sec
                     )
                     # Cancel queued work and break out; completed trials remain in DB.
                     for f in futures[i:]:

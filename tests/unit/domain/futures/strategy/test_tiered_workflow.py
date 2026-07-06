@@ -103,9 +103,7 @@ def test_run_l1_swf_gate_blocked_when_no_valid_signals() -> None:
     cfg.ml_fit_fraction = 0.6
     cfg.ml_calibration_fraction = 0.2
 
-    folds = (
-        WFFold(fit_start=0, fit_end=60, cal_start=50, cal_end=60, oos_start=60, oos_end=100),
-    )
+    folds = (WFFold(fit_start=0, fit_end=60, cal_start=50, cal_end=60, oos_start=60, oos_end=100),)
 
     mock_fold_out = MagicMock()
     mock_fold_out.model_output.events = pd.DataFrame({"symbol": []})
@@ -113,12 +111,15 @@ def test_run_l1_swf_gate_blocked_when_no_valid_signals() -> None:
     mock_fold_out.oos_set = None
 
     # Act
-    with patch(
-        "src.domain.futures.strategy.tiered_workflow._fit_and_predict_single_fold",
-        return_value=mock_fold_out,
-    ), patch(
-        "src.domain.futures.strategy.config.resolve_purge_and_embargo_bars",
-        return_value=(1, 2),
+    with (
+        patch(
+            "src.domain.futures.strategy.tiered_workflow._fit_and_predict_single_fold",
+            return_value=mock_fold_out,
+        ),
+        patch(
+            "src.domain.futures.strategy.config.resolve_purge_and_embargo_bars",
+            return_value=(1, 2),
+        ),
     ):
         l1 = run_l1_swf(
             labeled_events=pd.DataFrame(),
@@ -206,18 +207,23 @@ def test_run_l1_swf_excludes_insufficient_fit_and_constant_prediction_from_poole
 
     valid_signal = SymbolSignal(raw_mu=1.0, volatility=0.01, n_obs=4, t_stat=2.0, valid=True)
 
-    with patch(
-        "os.cpu_count",
-        return_value=1,
-    ), patch(
-        "src.domain.futures.strategy.tiered_workflow._fit_and_predict_single_fold",
-        side_effect=fold_outputs,
-    ), patch(
-        "src.domain.futures.strategy.config.resolve_purge_and_embargo_bars",
-        return_value=(1, 0),
-    ), patch(
-        "src.domain.futures.strategy.tiered_workflow.compose_symbol_signals",
-        return_value={"BTC": valid_signal},
+    with (
+        patch(
+            "os.cpu_count",
+            return_value=1,
+        ),
+        patch(
+            "src.domain.futures.strategy.tiered_workflow._fit_and_predict_single_fold",
+            side_effect=fold_outputs,
+        ),
+        patch(
+            "src.domain.futures.strategy.config.resolve_purge_and_embargo_bars",
+            return_value=(1, 0),
+        ),
+        patch(
+            "src.domain.futures.strategy.tiered_workflow.compose_symbol_signals",
+            return_value={"BTC": valid_signal},
+        ),
     ):
         l1 = run_l1_swf(
             labeled_events=pd.DataFrame(),
@@ -341,6 +347,7 @@ def test_layer2result_gate_blocked_with_blocker_reason() -> None:
 # S1~S9: L2 게이트 재설계 시나리오 (spec: layer2-gate-redesign.md)
 # ---------------------------------------------------------------------------
 
+
 def _evaluate_l2_gate(
     *,
     sharpe_hybrid: float,
@@ -364,10 +371,7 @@ def _evaluate_l2_gate(
     import math
 
     deployment_ok = (
-        signal_total > 0
-        and friction_pass_pct > 0.0
-        and math.isfinite(sharpe_hybrid)
-        and math.isfinite(cagr_hybrid)
+        signal_total > 0 and friction_pass_pct > 0.0 and math.isfinite(sharpe_hybrid) and math.isfinite(cagr_hybrid)
     )
     if not deployment_ok:
         return False, "no_deployment"
@@ -394,9 +398,12 @@ class TestL2GateRedesign:
     def test_s1_happy_path_all_conditions_pass(self) -> None:
         """S1: 8조건 모두 충족 → gate=True, blocker=""."""
         gate, reason = _evaluate_l2_gate(
-            sharpe_hybrid=0.9, sharpe_baseline=0.5,
-            mdd_hybrid=0.30, mdd_baseline=0.50,
-            cagr_hybrid=0.40, mar_hybrid=0.8,
+            sharpe_hybrid=0.9,
+            sharpe_baseline=0.5,
+            mdd_hybrid=0.30,
+            mdd_baseline=0.50,
+            cagr_hybrid=0.40,
+            mar_hybrid=0.8,
             fold_pass_ratio=0.75,
         )
         assert gate is True
@@ -407,9 +414,12 @@ class TestL2GateRedesign:
         # 구식: -0.9 >= -0.85*1.20=-1.02 → 통과 (버그).
         # 신식: cagr<0 먼저 차단.
         gate, reason = _evaluate_l2_gate(
-            sharpe_hybrid=-0.9, sharpe_baseline=-0.85,
-            mdd_hybrid=0.30, mdd_baseline=0.50,
-            cagr_hybrid=-0.10, mar_hybrid=-0.3,
+            sharpe_hybrid=-0.9,
+            sharpe_baseline=-0.85,
+            mdd_hybrid=0.30,
+            mdd_baseline=0.50,
+            cagr_hybrid=-0.10,
+            mar_hybrid=-0.3,
             fold_pass_ratio=0.75,
         )
         assert gate is False
@@ -418,9 +428,12 @@ class TestL2GateRedesign:
     def test_s3_absolute_cagr_fail_blocks_even_if_beats_baseline(self) -> None:
         """S3: CAGR=-0.05 → 절대손실 → blocker=cagr."""
         gate, reason = _evaluate_l2_gate(
-            sharpe_hybrid=0.9, sharpe_baseline=0.5,
-            mdd_hybrid=0.20, mdd_baseline=0.40,
-            cagr_hybrid=-0.05, mar_hybrid=-0.2,
+            sharpe_hybrid=0.9,
+            sharpe_baseline=0.5,
+            mdd_hybrid=0.20,
+            mdd_baseline=0.40,
+            cagr_hybrid=-0.05,
+            mar_hybrid=-0.2,
             fold_pass_ratio=0.75,
         )
         assert gate is False
@@ -429,9 +442,12 @@ class TestL2GateRedesign:
     def test_s4_mar_fail(self) -> None:
         """S4: CAGR=0.1, MDD=0.45 → MAR≈0.22<0.5 → blocker=mar."""
         gate, reason = _evaluate_l2_gate(
-            sharpe_hybrid=0.9, sharpe_baseline=0.5,
-            mdd_hybrid=0.45, mdd_baseline=0.60,
-            cagr_hybrid=0.10, mar_hybrid=0.10 / (0.45 + 1e-9),
+            sharpe_hybrid=0.9,
+            sharpe_baseline=0.5,
+            mdd_hybrid=0.45,
+            mdd_baseline=0.60,
+            cagr_hybrid=0.10,
+            mar_hybrid=0.10 / (0.45 + 1e-9),
             fold_pass_ratio=0.75,
         )
         assert gate is False
@@ -440,9 +456,12 @@ class TestL2GateRedesign:
     def test_s5_absolute_mdd_upper_bound(self) -> None:
         """S5: mdd_h=0.55, mdd_base=0.67 (상대는 통과) → 절대상한 FAIL → blocker=mdd_abs."""
         gate, reason = _evaluate_l2_gate(
-            sharpe_hybrid=0.9, sharpe_baseline=0.5,
-            mdd_hybrid=0.55, mdd_baseline=0.67,
-            cagr_hybrid=0.30, mar_hybrid=0.30 / (0.55 + 1e-9),
+            sharpe_hybrid=0.9,
+            sharpe_baseline=0.5,
+            mdd_hybrid=0.55,
+            mdd_baseline=0.67,
+            cagr_hybrid=0.30,
+            mar_hybrid=0.30 / (0.55 + 1e-9),
             fold_pass_ratio=0.75,
         )
         assert gate is False
@@ -451,9 +470,12 @@ class TestL2GateRedesign:
     def test_s6_fold_consistency_fail(self) -> None:
         """S6: fold 비율=0.25<0.60 → blocker=fold."""
         gate, reason = _evaluate_l2_gate(
-            sharpe_hybrid=0.9, sharpe_baseline=0.5,
-            mdd_hybrid=0.25, mdd_baseline=0.40,
-            cagr_hybrid=0.30, mar_hybrid=1.2,
+            sharpe_hybrid=0.9,
+            sharpe_baseline=0.5,
+            mdd_hybrid=0.25,
+            mdd_baseline=0.40,
+            cagr_hybrid=0.30,
+            mar_hybrid=1.2,
             fold_pass_ratio=0.25,
         )
         assert gate is False
@@ -462,11 +484,15 @@ class TestL2GateRedesign:
     def test_s7_deployment_nan_blocked(self) -> None:
         """S7: signal_total=0 → no_deployment, 나머지 미평가."""
         gate, reason = _evaluate_l2_gate(
-            sharpe_hybrid=float("nan"), sharpe_baseline=0.5,
-            mdd_hybrid=0.20, mdd_baseline=0.40,
-            cagr_hybrid=float("nan"), mar_hybrid=float("nan"),
+            sharpe_hybrid=float("nan"),
+            sharpe_baseline=0.5,
+            mdd_hybrid=0.20,
+            mdd_baseline=0.40,
+            cagr_hybrid=float("nan"),
+            mar_hybrid=float("nan"),
             fold_pass_ratio=0.75,
-            signal_total=0, friction_pass_pct=0.0,
+            signal_total=0,
+            friction_pass_pct=0.0,
         )
         assert gate is False
         assert reason == "no_deployment"
@@ -474,9 +500,12 @@ class TestL2GateRedesign:
     def test_s8_uplift_boundary_exact(self) -> None:
         """S8: sharpe_h == sharpe_base+0.20 정확히 → uplift 경계 PASS."""
         gate, reason = _evaluate_l2_gate(
-            sharpe_hybrid=0.70, sharpe_baseline=0.50,
-            mdd_hybrid=0.25, mdd_baseline=0.40,
-            cagr_hybrid=0.30, mar_hybrid=1.2,
+            sharpe_hybrid=0.70,
+            sharpe_baseline=0.50,
+            mdd_hybrid=0.25,
+            mdd_baseline=0.40,
+            cagr_hybrid=0.30,
+            mar_hybrid=1.2,
             fold_pass_ratio=0.75,
         )
         assert gate is True
@@ -485,9 +514,12 @@ class TestL2GateRedesign:
     def test_s8_uplift_just_below_boundary_fail(self) -> None:
         """S8: sharpe_h = sharpe_base+0.19 → uplift FAIL."""
         gate, reason = _evaluate_l2_gate(
-            sharpe_hybrid=0.69, sharpe_baseline=0.50,
-            mdd_hybrid=0.25, mdd_baseline=0.40,
-            cagr_hybrid=0.30, mar_hybrid=1.2,
+            sharpe_hybrid=0.69,
+            sharpe_baseline=0.50,
+            mdd_hybrid=0.25,
+            mdd_baseline=0.40,
+            cagr_hybrid=0.30,
+            mar_hybrid=1.2,
             fold_pass_ratio=0.75,
         )
         assert gate is False
@@ -498,6 +530,7 @@ class TestL2GateRedesign:
         # 변동성 드래그(volatility drag): 평균수익>0이어도 prod(1+r) < 1 가능.
         # 예: +10%, -10% 반복 → mean=0, prod=(1.1*0.9)^n = 0.99^n < 1.
         import numpy as np
+
         rets = [0.10, -0.10, 0.10, -0.10]  # mean=0, prod=(1.1*0.9)^2≈0.9801<1
         prod_val = float(np.prod(1.0 + np.array(rets)))
         mean_positive = float(np.mean(rets)) > 0  # mean=0, not >0
@@ -723,12 +756,15 @@ def test_run_l3_holdout_computes_new_compounding_metrics() -> None:
         cache.signal_mask_2d = np.zeros((n_bars, n_syms), dtype=bool)
         return cache
 
-    with patch(
-        "src.domain.futures.strategy.tiered_workflow.pipeline._run_awf_simulation",
-        return_value=sim_result,
-    ), patch(
-        "src.domain.futures.strategy.tiered_workflow.awf_sim.build_l2_simulation_cache",
-        return_value=_make_mock_cache(n_bars=n_bars, n_syms=1),
+    with (
+        patch(
+            "src.domain.futures.strategy.tiered_workflow.pipeline._run_awf_simulation",
+            return_value=sim_result,
+        ),
+        patch(
+            "src.domain.futures.strategy.tiered_workflow.awf_sim.build_l2_simulation_cache",
+            return_value=_make_mock_cache(n_bars=n_bars, n_syms=1),
+        ),
     ):
         result = run_l3_holdout(
             signal_batch=_make_l3_signal_batch(),
@@ -779,12 +815,15 @@ def test_run_l3_holdout_gate_blocked_when_trade_count_below_minimum() -> None:
         cache.signal_mask_2d = np.zeros((n_bars, n_syms), dtype=bool)
         return cache
 
-    with patch(
-        "src.domain.futures.strategy.tiered_workflow.pipeline._run_awf_simulation",
-        return_value=sim_result,
-    ), patch(
-        "src.domain.futures.strategy.tiered_workflow.awf_sim.build_l2_simulation_cache",
-        return_value=_make_mock_cache(n_bars=n_bars, n_syms=1),
+    with (
+        patch(
+            "src.domain.futures.strategy.tiered_workflow.pipeline._run_awf_simulation",
+            return_value=sim_result,
+        ),
+        patch(
+            "src.domain.futures.strategy.tiered_workflow.awf_sim.build_l2_simulation_cache",
+            return_value=_make_mock_cache(n_bars=n_bars, n_syms=1),
+        ),
     ):
         result = run_l3_holdout(
             signal_batch=_make_l3_signal_batch(),
@@ -830,12 +869,15 @@ def test_run_l3_holdout_gate_blocked_when_mdd_exceeds_absolute_cap() -> None:
         cache.signal_mask_2d = np.zeros((n_bars, n_syms), dtype=bool)
         return cache
 
-    with patch(
-        "src.domain.futures.strategy.tiered_workflow.pipeline._run_awf_simulation",
-        return_value=sim_result,
-    ), patch(
-        "src.domain.futures.strategy.tiered_workflow.awf_sim.build_l2_simulation_cache",
-        return_value=_make_mock_cache(n_bars=len(rets_hybrid), n_syms=1),
+    with (
+        patch(
+            "src.domain.futures.strategy.tiered_workflow.pipeline._run_awf_simulation",
+            return_value=sim_result,
+        ),
+        patch(
+            "src.domain.futures.strategy.tiered_workflow.awf_sim.build_l2_simulation_cache",
+            return_value=_make_mock_cache(n_bars=len(rets_hybrid), n_syms=1),
+        ),
     ):
         result = run_l3_holdout(
             signal_batch=_make_l3_signal_batch(),
@@ -882,12 +924,15 @@ def test_run_l3_holdout_gate_blocked_when_cvar_exceeds_absolute_cap() -> None:
         cache.signal_mask_2d = np.zeros((n_bars, n_syms), dtype=bool)
         return cache
 
-    with patch(
-        "src.domain.futures.strategy.tiered_workflow.pipeline._run_awf_simulation",
-        return_value=sim_result,
-    ), patch(
-        "src.domain.futures.strategy.tiered_workflow.awf_sim.build_l2_simulation_cache",
-        return_value=_make_mock_cache(n_bars=len(rets_hybrid), n_syms=1),
+    with (
+        patch(
+            "src.domain.futures.strategy.tiered_workflow.pipeline._run_awf_simulation",
+            return_value=sim_result,
+        ),
+        patch(
+            "src.domain.futures.strategy.tiered_workflow.awf_sim.build_l2_simulation_cache",
+            return_value=_make_mock_cache(n_bars=len(rets_hybrid), n_syms=1),
+        ),
     ):
         result = run_l3_holdout(
             signal_batch=_make_l3_signal_batch(),
@@ -938,12 +983,15 @@ def test_run_l3_holdout_gate_blocked_when_total_return_negative() -> None:
         cache.signal_mask_2d = np.zeros((n_bars, n_syms), dtype=bool)
         return cache
 
-    with patch(
-        "src.domain.futures.strategy.tiered_workflow.pipeline._run_awf_simulation",
-        return_value=sim_result,
-    ), patch(
-        "src.domain.futures.strategy.tiered_workflow.awf_sim.build_l2_simulation_cache",
-        return_value=_make_mock_cache(n_bars=n_bars, n_syms=1),
+    with (
+        patch(
+            "src.domain.futures.strategy.tiered_workflow.pipeline._run_awf_simulation",
+            return_value=sim_result,
+        ),
+        patch(
+            "src.domain.futures.strategy.tiered_workflow.awf_sim.build_l2_simulation_cache",
+            return_value=_make_mock_cache(n_bars=n_bars, n_syms=1),
+        ),
     ):
         result = run_l3_holdout(
             signal_batch=_make_l3_signal_batch(),
@@ -992,12 +1040,15 @@ def test_run_l3_holdout_gate_passed_when_all_thresholds_satisfied() -> None:
         cache.signal_mask_2d = np.zeros((n_bars, n_syms), dtype=bool)
         return cache
 
-    with patch(
-        "src.domain.futures.strategy.tiered_workflow.pipeline._run_awf_simulation",
-        return_value=sim_result,
-    ), patch(
-        "src.domain.futures.strategy.tiered_workflow.awf_sim.build_l2_simulation_cache",
-        return_value=_make_mock_cache(n_bars=n_bars, n_syms=1),
+    with (
+        patch(
+            "src.domain.futures.strategy.tiered_workflow.pipeline._run_awf_simulation",
+            return_value=sim_result,
+        ),
+        patch(
+            "src.domain.futures.strategy.tiered_workflow.awf_sim.build_l2_simulation_cache",
+            return_value=_make_mock_cache(n_bars=n_bars, n_syms=1),
+        ),
     ):
         result = run_l3_holdout(
             signal_batch=_make_l3_signal_batch(),
@@ -1044,12 +1095,15 @@ def test_run_l3_holdout_gate_blocked_when_sharpe_or_sortino_below_floor() -> Non
         cache.signal_mask_2d = np.zeros((n_bars, n_syms), dtype=bool)
         return cache
 
-    with patch(
-        "src.domain.futures.strategy.tiered_workflow.pipeline._run_awf_simulation",
-        return_value=sim_result,
-    ), patch(
-        "src.domain.futures.strategy.tiered_workflow.awf_sim.build_l2_simulation_cache",
-        return_value=_make_mock_cache(n_bars=len(rets_hybrid), n_syms=1),
+    with (
+        patch(
+            "src.domain.futures.strategy.tiered_workflow.pipeline._run_awf_simulation",
+            return_value=sim_result,
+        ),
+        patch(
+            "src.domain.futures.strategy.tiered_workflow.awf_sim.build_l2_simulation_cache",
+            return_value=_make_mock_cache(n_bars=len(rets_hybrid), n_syms=1),
+        ),
     ):
         result = run_l3_holdout(
             signal_batch=_make_l3_signal_batch(),
@@ -1100,12 +1154,15 @@ def test_run_l3_holdout_applies_deployment_leverage_when_provided() -> None:
         cache.signal_mask_2d = np.zeros((n_bars, n_syms), dtype=bool)
         return cache
 
-    with patch(
-        "src.domain.futures.strategy.tiered_workflow.pipeline._run_awf_simulation",
-        return_value=sim_result,
-    ), patch(
-        "src.domain.futures.strategy.tiered_workflow.awf_sim.build_l2_simulation_cache",
-        return_value=_make_mock_cache(n_bars=n_bars, n_syms=1),
+    with (
+        patch(
+            "src.domain.futures.strategy.tiered_workflow.pipeline._run_awf_simulation",
+            return_value=sim_result,
+        ),
+        patch(
+            "src.domain.futures.strategy.tiered_workflow.awf_sim.build_l2_simulation_cache",
+            return_value=_make_mock_cache(n_bars=n_bars, n_syms=1),
+        ),
     ):
         result = run_l3_holdout(
             signal_batch=_make_l3_signal_batch(),
@@ -1165,12 +1222,15 @@ def test_run_l3_holdout_uses_unit_path_when_no_effective_leverage(
         cache.signal_mask_2d = np.zeros((n_bars, n_syms), dtype=bool)
         return cache
 
-    with patch(
-        "src.domain.futures.strategy.tiered_workflow.pipeline._run_awf_simulation",
-        return_value=sim_result,
-    ), patch(
-        "src.domain.futures.strategy.tiered_workflow.awf_sim.build_l2_simulation_cache",
-        return_value=_make_mock_cache(n_bars=n_bars, n_syms=1),
+    with (
+        patch(
+            "src.domain.futures.strategy.tiered_workflow.pipeline._run_awf_simulation",
+            return_value=sim_result,
+        ),
+        patch(
+            "src.domain.futures.strategy.tiered_workflow.awf_sim.build_l2_simulation_cache",
+            return_value=_make_mock_cache(n_bars=n_bars, n_syms=1),
+        ),
     ):
         result = run_l3_holdout(
             signal_batch=_make_l3_signal_batch(),
@@ -1218,12 +1278,15 @@ def test_run_l3_holdout_blocks_on_non_finite_deployed_metrics() -> None:
         cache.signal_mask_2d = np.zeros((n_bars, n_syms), dtype=bool)
         return cache
 
-    with patch(
-        "src.domain.futures.strategy.tiered_workflow.pipeline._run_awf_simulation",
-        return_value=sim_result,
-    ), patch(
-        "src.domain.futures.strategy.tiered_workflow.awf_sim.build_l2_simulation_cache",
-        return_value=_make_mock_cache(n_bars=40, n_syms=1),
+    with (
+        patch(
+            "src.domain.futures.strategy.tiered_workflow.pipeline._run_awf_simulation",
+            return_value=sim_result,
+        ),
+        patch(
+            "src.domain.futures.strategy.tiered_workflow.awf_sim.build_l2_simulation_cache",
+            return_value=_make_mock_cache(n_bars=40, n_syms=1),
+        ),
     ):
         result = run_l3_holdout(
             signal_batch=_make_l3_signal_batch(),
@@ -1254,15 +1317,24 @@ def test_run_l3_holdout_propagates_fold_attribution_risk_off_fields() -> None:
     rets_hybrid = [per_bar_ret] * n_bars
     rets_baseline = [per_bar_ret * 0.5] * n_bars
     attr = Layer2FoldAttribution(
-        fold_idx=0, oos_bars=40, n_rebal=5,
-        realized_total=0.0, realized_price=0.0,
-        realized_funding=0.0, realized_cost=0.0,
-        expected_net=0.0, alpha_gap=0.0,
-        mean_gross_exp=0.5, mean_net_exp=0.3,
-        sleeves_active_mean=1.0, friction_pass_ratio=1.0,
-        throttle_mult_mean=1.0, dropped_below_cost=0,
+        fold_idx=0,
+        oos_bars=40,
+        n_rebal=5,
+        realized_total=0.0,
+        realized_price=0.0,
+        realized_funding=0.0,
+        realized_cost=0.0,
+        expected_net=0.0,
+        alpha_gap=0.0,
+        mean_gross_exp=0.5,
+        mean_net_exp=0.3,
+        sleeves_active_mean=1.0,
+        friction_pass_ratio=1.0,
+        throttle_mult_mean=1.0,
+        dropped_below_cost=0,
         netting_events=0,
-        risk_off_bars=7, risk_off_realized_price=-0.05,
+        risk_off_bars=7,
+        risk_off_realized_price=-0.05,
         risk_on_realized_price=0.02,
     )
     sim_result = _make_awf_sim_result(
@@ -1287,12 +1359,15 @@ def test_run_l3_holdout_propagates_fold_attribution_risk_off_fields() -> None:
         cache.signal_mask_2d = np.zeros((n_bars, n_syms), dtype=bool)
         return cache
 
-    with patch(
-        "src.domain.futures.strategy.tiered_workflow.pipeline._run_awf_simulation",
-        return_value=sim_result,
-    ), patch(
-        "src.domain.futures.strategy.tiered_workflow.awf_sim.build_l2_simulation_cache",
-        return_value=_make_mock_cache(n_bars=n_bars, n_syms=1),
+    with (
+        patch(
+            "src.domain.futures.strategy.tiered_workflow.pipeline._run_awf_simulation",
+            return_value=sim_result,
+        ),
+        patch(
+            "src.domain.futures.strategy.tiered_workflow.awf_sim.build_l2_simulation_cache",
+            return_value=_make_mock_cache(n_bars=n_bars, n_syms=1),
+        ),
     ):
         result = run_l3_holdout(
             signal_batch=_make_l3_signal_batch(),
@@ -1341,12 +1416,15 @@ def test_run_l3_holdout_reversal_kill_active_reflects_env_independent_of_sim_moc
 
     # Case 1: env set to "1"
     monkeypatch.setenv("L2_REVERSAL_KILL", "1")
-    with patch(
-        "src.domain.futures.strategy.tiered_workflow.pipeline._run_awf_simulation",
-        return_value=sim_result,
-    ), patch(
-        "src.domain.futures.strategy.tiered_workflow.awf_sim.build_l2_simulation_cache",
-        return_value=_make_mock_cache(n_bars=n_bars, n_syms=1),
+    with (
+        patch(
+            "src.domain.futures.strategy.tiered_workflow.pipeline._run_awf_simulation",
+            return_value=sim_result,
+        ),
+        patch(
+            "src.domain.futures.strategy.tiered_workflow.awf_sim.build_l2_simulation_cache",
+            return_value=_make_mock_cache(n_bars=n_bars, n_syms=1),
+        ),
     ):
         result = run_l3_holdout(
             signal_batch=_make_l3_signal_batch(),
@@ -1360,12 +1438,15 @@ def test_run_l3_holdout_reversal_kill_active_reflects_env_independent_of_sim_moc
 
     # Case 2: env deleted
     monkeypatch.delenv("L2_REVERSAL_KILL", raising=False)
-    with patch(
-        "src.domain.futures.strategy.tiered_workflow.pipeline._run_awf_simulation",
-        return_value=sim_result,
-    ), patch(
-        "src.domain.futures.strategy.tiered_workflow.awf_sim.build_l2_simulation_cache",
-        return_value=_make_mock_cache(n_bars=n_bars, n_syms=1),
+    with (
+        patch(
+            "src.domain.futures.strategy.tiered_workflow.pipeline._run_awf_simulation",
+            return_value=sim_result,
+        ),
+        patch(
+            "src.domain.futures.strategy.tiered_workflow.awf_sim.build_l2_simulation_cache",
+            return_value=_make_mock_cache(n_bars=n_bars, n_syms=1),
+        ),
     ):
         result = run_l3_holdout(
             signal_batch=_make_l3_signal_batch(),
@@ -1407,12 +1488,15 @@ def test_run_l3_holdout_defaults_risk_off_fields_when_fold_attributions_empty() 
         cache.signal_mask_2d = np.zeros((n_bars, n_syms), dtype=bool)
         return cache
 
-    with patch(
-        "src.domain.futures.strategy.tiered_workflow.pipeline._run_awf_simulation",
-        return_value=sim_result,
-    ), patch(
-        "src.domain.futures.strategy.tiered_workflow.awf_sim.build_l2_simulation_cache",
-        return_value=_make_mock_cache(n_bars=n_bars, n_syms=1),
+    with (
+        patch(
+            "src.domain.futures.strategy.tiered_workflow.pipeline._run_awf_simulation",
+            return_value=sim_result,
+        ),
+        patch(
+            "src.domain.futures.strategy.tiered_workflow.awf_sim.build_l2_simulation_cache",
+            return_value=_make_mock_cache(n_bars=n_bars, n_syms=1),
+        ),
     ):
         result = run_l3_holdout(
             signal_batch=_make_l3_signal_batch(),
@@ -1509,11 +1593,11 @@ def test_run_l2_awf_vol_matrix_lookup_correctness() -> None:
     aligned.execution_cost_bps_2d = None
 
     from src.domain.futures.strategy.walk_forward import WFFold
-    awf_folds = (
-        WFFold(fit_start=0, fit_end=30, cal_start=30, cal_end=30, oos_start=30, oos_end=50),
-    )
+
+    awf_folds = (WFFold(fit_start=0, fit_end=30, cal_start=30, cal_end=30, oos_start=30, oos_end=50),)
 
     from src.domain.futures.portfolio.portfolio_constructor import PortfolioCaps
+
     caps = PortfolioCaps(gross=1.8, per_symbol=0.35, net=0.5, beta=1.0, target_ann_vol=0.35)
 
     from src.domain.futures.strategy.tiered_workflow import (
@@ -1610,17 +1694,17 @@ def _make_fold_out(n_events: int, sym: str = "BTC") -> MagicMock:
     """fold_out mock: n_events개 이벤트. oos_set=None (S1 index-alignment 테스트용)."""
     fold_out = MagicMock()
     if n_events == 0:
-        fold_out.model_output.events = pd.DataFrame(
-            columns=["symbol", "entry_idx", "expected_holding_bars"]
-        )
+        fold_out.model_output.events = pd.DataFrame(columns=["symbol", "entry_idx", "expected_holding_bars"])
         fold_out.model_output.expected_net_bps = np.array([], dtype=np.float64)
     else:
         rng = np.random.default_rng(42)
-        fold_out.model_output.events = pd.DataFrame({
-            "symbol": [sym] * n_events,
-            "entry_idx": np.arange(10, 10 + n_events, dtype=np.int64),
-            "expected_holding_bars": np.ones(n_events, dtype=np.int64) * 2,
-        })
+        fold_out.model_output.events = pd.DataFrame(
+            {
+                "symbol": [sym] * n_events,
+                "entry_idx": np.arange(10, 10 + n_events, dtype=np.int64),
+                "expected_holding_bars": np.ones(n_events, dtype=np.int64) * 2,
+            }
+        )
         fold_out.model_output.expected_net_bps = rng.uniform(-5, 5, n_events).astype(np.float64)
     fold_out.oos_set = None  # S1 테스트는 IC 계산 불필요
     fold_out.timing_profile = {}
@@ -1651,17 +1735,19 @@ def test_fold_diagnostic_index_alignment_no_mismatch() -> None:
         f_breadth = f_n_valid / max(1, n_total)
         f_n_events = len(fo.model_output.expected_net_bps)
         fold_ic = _compute_fold_ts_ic(fold_out=fo)
-        diags.append(FoldDiagnostic(
-            fold=i + 1,
-            ic=fold_ic,
-            breadth=f_breadth,
-            n_valid=f_n_valid,
-            n_eligible=n_total,
-            n_events=f_n_events,
-            n_fit=int(getattr(fo, "n_fit", 0)),
-            fit_status=getattr(fo, "fit_status", "trained"),
-            passed=fold_ic is not None and fold_ic > 0,
-        ))
+        diags.append(
+            FoldDiagnostic(
+                fold=i + 1,
+                ic=fold_ic,
+                breadth=f_breadth,
+                n_valid=f_n_valid,
+                n_eligible=n_total,
+                n_events=f_n_events,
+                n_fit=int(getattr(fo, "n_fit", 0)),
+                fit_status=getattr(fo, "fit_status", "trained"),
+                passed=fold_ic is not None and fold_ic > 0,
+            )
+        )
 
     # Assert: fold 0 (index 0) → n_events=0, ic=None
     assert diags[0].n_events == 0
@@ -1990,15 +2076,19 @@ def test_layer1_result_has_pooled_fields() -> None:
 
 def test_newey_west_ic_tstat_short_returns_zero() -> None:
     """S_nw_short: N=2 → 0.0 반환."""
-    assert _newey_west_ic_tstat(
-        np.array([1.0, 2.0], dtype=np.float64),
-        np.array([1.0, 2.0], dtype=np.float64),
-    ) == 0.0
+    assert (
+        _newey_west_ic_tstat(
+            np.array([1.0, 2.0], dtype=np.float64),
+            np.array([1.0, 2.0], dtype=np.float64),
+        )
+        == 0.0
+    )
 
 
 # ---------------------------------------------------------------------------
 # Phase1: compute_per_symbol_realized_stats 테스트
 # ---------------------------------------------------------------------------
+
 
 def _make_fold_tuple(
     syms: list[str],
@@ -2008,6 +2098,7 @@ def _make_fold_tuple(
 ) -> tuple[int, object, object]:
     """테스트용 fold_tuple 팩토리."""
     from types import SimpleNamespace
+
     event_index = pd.DataFrame({"symbol": syms})
     fold_out = SimpleNamespace(
         model_output=SimpleNamespace(
@@ -2187,11 +2278,7 @@ def test_stack_oos_signals_uses_realized_stats_not_last_fold() -> None:
     fold3 = {"BTC": _make_sig(0)}  # valid=False (마지막)
 
     # realized stat이 valid=True 라면 stacked도 True여야 함 (BUG-A 회귀 방지)
-    realized = {
-        "BTC": SymbolRealizedStat(
-            realized_mu_bps=3.0, t_stat=2.5, n_obs=30, ic=0.12, valid=True
-        )
-    }
+    realized = {"BTC": SymbolRealizedStat(realized_mu_bps=3.0, t_stat=2.5, n_obs=30, ic=0.12, valid=True)}
 
     stacked = _stack_oos_signals((fold1, fold2, fold3), realized_stats=realized)
 
@@ -2264,9 +2351,7 @@ def _make_diag_fold_tuple(
     )
     model_output = SimpleNamespace(
         expected_net_bps=expected_net_bps,
-        validation_diagnostics={
-            "ensemble_diagnostics": {"num_valid_regimes": num_valid_regimes}
-        },
+        validation_diagnostics={"ensemble_diagnostics": {"num_valid_regimes": num_valid_regimes}},
     )
     fold_out = SimpleNamespace(
         fit_status="trained",
@@ -2328,10 +2413,12 @@ def test_compute_prediction_decomposition_diag_s3_archetype_sign() -> None:
     n_each = 60
     arch_col = ["beta_neut"] * n_each + ["mean_rev"] * n_each
     pred = [5.0] * n_each + [-3.0] * n_each
-    real = np.concatenate([
-        rng.normal(8, 1, size=n_each),   # beta_neut: 양
-        rng.normal(-5, 1, size=n_each),  # mean: 음
-    ])
+    real = np.concatenate(
+        [
+            rng.normal(8, 1, size=n_each),  # beta_neut: 양
+            rng.normal(-5, 1, size=n_each),  # mean: 음
+        ]
+    )
 
     fold = _make_diag_fold_tuple(
         expected_net_bps=np.array(pred, dtype=np.float64),
@@ -2578,29 +2665,33 @@ def test_run_l1_swf_panel_gate_passes_option_a_thresholds() -> None:
         _make_run_l1_fold_output(preds=[1.0, 2.0, 3.0, 4.0], realized=[5.0, 4.0, 3.0, 2.0]),
     ]
     valid_signal = SymbolSignal(raw_mu=1.0, volatility=0.01, n_obs=4, t_stat=2.0, valid=True)
-    panel = tuple(
-        StrategySignal(f"s{i}:v{i}", 8.0 + i, 2.0, 0.7, 0.8, 40, 5, True)
-        for i in range(5)
-    )
+    panel = tuple(StrategySignal(f"s{i}:v{i}", 8.0 + i, 2.0, 0.7, 0.8, 40, 5, True) for i in range(5))
 
-    with patch(
-        "os.cpu_count",
-        return_value=1,
-    ), patch(
-        "src.domain.futures.strategy.tiered_workflow._fit_and_predict_single_fold",
-        side_effect=fold_outputs,
-    ), patch(
-        "src.domain.futures.strategy.config.resolve_purge_and_embargo_bars",
-        return_value=(1, 0),
-    ), patch(
-        "src.domain.futures.strategy.tiered_workflow.compose_symbol_signals",
-        return_value={"BTC": valid_signal},
-    ), patch(
-        "src.domain.futures.strategy.tiered_workflow.compute_per_strategy_oos_validation",
-        return_value=panel,
-    ), patch(
-        "src.domain.futures.strategy.tiered_workflow.compute_panel_diversity",
-        return_value=0.4,
+    with (
+        patch(
+            "os.cpu_count",
+            return_value=1,
+        ),
+        patch(
+            "src.domain.futures.strategy.tiered_workflow._fit_and_predict_single_fold",
+            side_effect=fold_outputs,
+        ),
+        patch(
+            "src.domain.futures.strategy.config.resolve_purge_and_embargo_bars",
+            return_value=(1, 0),
+        ),
+        patch(
+            "src.domain.futures.strategy.tiered_workflow.compose_symbol_signals",
+            return_value={"BTC": valid_signal},
+        ),
+        patch(
+            "src.domain.futures.strategy.tiered_workflow.compute_per_strategy_oos_validation",
+            return_value=panel,
+        ),
+        patch(
+            "src.domain.futures.strategy.tiered_workflow.compute_panel_diversity",
+            return_value=0.4,
+        ),
     ):
         l1 = run_l1_swf(
             labeled_events=pd.DataFrame(),
@@ -2649,29 +2740,33 @@ def test_run_l1_swf_panel_gate_blocks_low_diversity() -> None:
         _make_run_l1_fold_output(preds=[1.0, 2.0, 3.0, 4.0], realized=[5.0, 4.0, 3.0, 2.0]),
     ]
     valid_signal = SymbolSignal(raw_mu=1.0, volatility=0.01, n_obs=4, t_stat=2.0, valid=True)
-    panel = tuple(
-        StrategySignal(f"s{i}:v{i}", 8.0 + i, 2.0, 0.7, 0.8, 40, 5, True)
-        for i in range(5)
-    )
+    panel = tuple(StrategySignal(f"s{i}:v{i}", 8.0 + i, 2.0, 0.7, 0.8, 40, 5, True) for i in range(5))
 
-    with patch(
-        "os.cpu_count",
-        return_value=1,
-    ), patch(
-        "src.domain.futures.strategy.tiered_workflow._fit_and_predict_single_fold",
-        side_effect=fold_outputs,
-    ), patch(
-        "src.domain.futures.strategy.config.resolve_purge_and_embargo_bars",
-        return_value=(1, 0),
-    ), patch(
-        "src.domain.futures.strategy.tiered_workflow.compose_symbol_signals",
-        return_value={"BTC": valid_signal},
-    ), patch(
-        "src.domain.futures.strategy.tiered_workflow.compute_per_strategy_oos_validation",
-        return_value=panel,
-    ), patch(
-        "src.domain.futures.strategy.tiered_workflow.compute_panel_diversity",
-        return_value=0.1,
+    with (
+        patch(
+            "os.cpu_count",
+            return_value=1,
+        ),
+        patch(
+            "src.domain.futures.strategy.tiered_workflow._fit_and_predict_single_fold",
+            side_effect=fold_outputs,
+        ),
+        patch(
+            "src.domain.futures.strategy.config.resolve_purge_and_embargo_bars",
+            return_value=(1, 0),
+        ),
+        patch(
+            "src.domain.futures.strategy.tiered_workflow.compose_symbol_signals",
+            return_value={"BTC": valid_signal},
+        ),
+        patch(
+            "src.domain.futures.strategy.tiered_workflow.compute_per_strategy_oos_validation",
+            return_value=panel,
+        ),
+        patch(
+            "src.domain.futures.strategy.tiered_workflow.compute_panel_diversity",
+            return_value=0.1,
+        ),
     ):
         l1 = run_l1_swf(
             labeled_events=pd.DataFrame(),
@@ -3230,6 +3325,7 @@ def test_resolve_safe_nested_workers_oom_guard() -> None:
 # Layer2 신호 handoff / ranking 계약 회귀 방지 테스트
 # ---------------------------------------------------------------------------
 
+
 def test_run_l2_awf_signature_excludes_legacy_fold_fallback_inputs() -> None:
     """Scenario 4: production handoff는 legacy fold fallback 입력에 의존하지 않아야 한다."""
     from src.domain.futures.strategy.tiered_workflow import run_l2_awf
@@ -3313,13 +3409,13 @@ def test_psr_normal_distribution_coefficient() -> None:
     skew_val = float(_skew(arr))
     kurt_val = float(_kurt(arr, fisher=True))
     denom_correct = 1.0 - skew_val * sr_obs + (kurt_val + 2.0) / 4.0 * sr_obs**2
-    denom_wrong   = 1.0 - skew_val * sr_obs + (kurt_val + 1.0) / 4.0 * sr_obs**2
+    denom_wrong = 1.0 - skew_val * sr_obs + (kurt_val + 1.0) / 4.0 * sr_obs**2
     z_correct = (sr_obs - 0.0) * np.sqrt(n - 1) / np.sqrt(denom_correct)
     expected_psr = float(ndtr(z_correct))
 
     assert psr_result == pytest.approx(expected_psr, rel=1e-6), (
         f"PSR mismatch: got {psr_result:.6f}, expected {expected_psr:.6f}. "
-        f"Wrong denom would give {float(ndtr((sr_obs) * np.sqrt(n-1) / np.sqrt(denom_wrong))):.6f}"
+        f"Wrong denom would give {float(ndtr((sr_obs) * np.sqrt(n - 1) / np.sqrt(denom_wrong))):.6f}"
     )
     # PSR ∈ (0, 1)
     assert 0.0 < psr_result < 1.0
@@ -3680,13 +3776,12 @@ def test_run_awf_simulation_tracks_baseline_costs_and_diagnostics() -> None:
         registry_version="test",
         model_version="test",
     )
-    awf_folds = (
-        WFFold(fit_start=0, fit_end=1, cal_start=1, cal_end=1, oos_start=1, oos_end=4),
-    )
+    awf_folds = (WFFold(fit_start=0, fit_end=1, cal_start=1, cal_end=1, oos_start=1, oos_end=4),)
     config = Layer2AllocationConfig(k_rank=2, rebalance_bars=1, no_trade_band=0.0)
     caps = PortfolioCaps(gross=2.0, per_symbol=1.0, net=1.0, beta=2.0, target_ann_vol=10.0)
 
     from src.domain.futures.strategy.tiered_workflow.awf_sim import build_l2_simulation_cache
+
     sim = _run_awf_simulation(
         cache=build_l2_simulation_cache(aligned, signal_batch, "4h"),
         signal_batch=signal_batch,
@@ -3819,9 +3914,7 @@ def _run_pipeline_to_l2_and_capture_awf_call(
             model_version="test",
         ),
     )
-    monkeypatch.setattr(
-        "src.domain.futures.strategy.tiered_workflow.pipeline.run_l2_awf", _stub_run_l2_awf
-    )
+    monkeypatch.setattr("src.domain.futures.strategy.tiered_workflow.pipeline.run_l2_awf", _stub_run_l2_awf)
     monkeypatch.setattr(
         "src.domain.futures.strategy.tiered_workflow.pipeline.format_layer_header",
         lambda *_a, **_k: "",
@@ -3945,9 +4038,7 @@ def test_layer2_dsr_gate_blocked_when_dsr_below_floor() -> None:
     blocker_reason='dsr_floor'."""
     # Layer2AllocationConfig 기본값 확인
     config = Layer2AllocationConfig()
-    assert config.l2_min_dsr == pytest.approx(0.60), (
-        "l2_min_dsr 기본값이 0.60이어야 함 (STEP2 spec)"
-    )
+    assert config.l2_min_dsr == pytest.approx(0.60), "l2_min_dsr 기본값이 0.60이어야 함 (STEP2 spec)"
 
     # gate 체인 내 dsr_floor 분기: 다른 게이트 모두 통과 조건에서 dsr=0.0
     # pipeline.py gate 체인 로직을 직접 재현하여 단위 검증.
@@ -4003,9 +4094,7 @@ def test_layer2_dsr_gate_short_circuit_by_earlier_gate() -> None:
     else:
         gate_passed = True
 
-    assert blocker_reason == "cagr", (
-        "cagr 게이트가 dsr_floor보다 앞에 위치해야 함 (pipeline.py gate 체인 순서)"
-    )
+    assert blocker_reason == "cagr", "cagr 게이트가 dsr_floor보다 앞에 위치해야 함 (pipeline.py gate 체인 순서)"
     assert not gate_passed
 
 
@@ -4052,13 +4141,21 @@ def test_run_l3_holdout_computes_regime_mix_pct_from_oos_slice() -> None:
     rets_baseline = [per_bar_ret * 0.5] * n_bars
     regime_code_1d = np.array([0] * 10 + [1] * 15 + [2] * 15, dtype=np.int8)
     attr = Layer2FoldAttribution(
-        fold_idx=0, oos_bars=30, n_rebal=5,
-        realized_total=0.0, realized_price=0.0,
-        realized_funding=0.0, realized_cost=0.0,
-        expected_net=0.0, alpha_gap=0.0,
-        mean_gross_exp=0.5, mean_net_exp=0.3,
-        sleeves_active_mean=1.0, friction_pass_ratio=1.0,
-        throttle_mult_mean=1.0, dropped_below_cost=0,
+        fold_idx=0,
+        oos_bars=30,
+        n_rebal=5,
+        realized_total=0.0,
+        realized_price=0.0,
+        realized_funding=0.0,
+        realized_cost=0.0,
+        expected_net=0.0,
+        alpha_gap=0.0,
+        mean_gross_exp=0.5,
+        mean_net_exp=0.3,
+        sleeves_active_mean=1.0,
+        friction_pass_ratio=1.0,
+        throttle_mult_mean=1.0,
+        dropped_below_cost=0,
         netting_events=0,
         mean_trend_efficiency=0.42,
         trend_efficiency_corr=-0.15,
@@ -4085,12 +4182,15 @@ def test_run_l3_holdout_computes_regime_mix_pct_from_oos_slice() -> None:
         cache.signal_mask_2d = np.zeros((n_bars, n_syms), dtype=bool)
         return cache
 
-    with patch(
-        "src.domain.futures.strategy.tiered_workflow.pipeline._run_awf_simulation",
-        return_value=sim_result,
-    ), patch(
-        "src.domain.futures.strategy.tiered_workflow.awf_sim.build_l2_simulation_cache",
-        return_value=_make_mock_cache(n_bars=n_bars, n_syms=1),
+    with (
+        patch(
+            "src.domain.futures.strategy.tiered_workflow.pipeline._run_awf_simulation",
+            return_value=sim_result,
+        ),
+        patch(
+            "src.domain.futures.strategy.tiered_workflow.awf_sim.build_l2_simulation_cache",
+            return_value=_make_mock_cache(n_bars=n_bars, n_syms=1),
+        ),
     ):
         result = run_l3_holdout(
             signal_batch=_make_l3_signal_batch(),
@@ -4138,12 +4238,15 @@ def test_run_l3_holdout_defaults_regime_fields_to_zero_when_code_omitted() -> No
         cache.signal_mask_2d = np.zeros((n_bars, n_syms), dtype=bool)
         return cache
 
-    with patch(
-        "src.domain.futures.strategy.tiered_workflow.pipeline._run_awf_simulation",
-        return_value=sim_result,
-    ), patch(
-        "src.domain.futures.strategy.tiered_workflow.awf_sim.build_l2_simulation_cache",
-        return_value=_make_mock_cache(n_bars=n_bars, n_syms=1),
+    with (
+        patch(
+            "src.domain.futures.strategy.tiered_workflow.pipeline._run_awf_simulation",
+            return_value=sim_result,
+        ),
+        patch(
+            "src.domain.futures.strategy.tiered_workflow.awf_sim.build_l2_simulation_cache",
+            return_value=_make_mock_cache(n_bars=n_bars, n_syms=1),
+        ),
     ):
         result = run_l3_holdout(
             signal_batch=_make_l3_signal_batch(),
@@ -4190,12 +4293,15 @@ def test_run_l3_holdout_regime_mix_handles_array_shorter_than_holdout_end() -> N
         cache.signal_mask_2d = np.zeros((n_bars, n_syms), dtype=bool)
         return cache
 
-    with patch(
-        "src.domain.futures.strategy.tiered_workflow.pipeline._run_awf_simulation",
-        return_value=sim_result,
-    ), patch(
-        "src.domain.futures.strategy.tiered_workflow.awf_sim.build_l2_simulation_cache",
-        return_value=_make_mock_cache(n_bars=n_bars, n_syms=1),
+    with (
+        patch(
+            "src.domain.futures.strategy.tiered_workflow.pipeline._run_awf_simulation",
+            return_value=sim_result,
+        ),
+        patch(
+            "src.domain.futures.strategy.tiered_workflow.awf_sim.build_l2_simulation_cache",
+            return_value=_make_mock_cache(n_bars=n_bars, n_syms=1),
+        ),
     ):
         result = run_l3_holdout(
             signal_batch=_make_l3_signal_batch(),
@@ -4220,16 +4326,26 @@ def test_run_l3_holdout_propagates_long_short_price_split() -> None:
     rets_hybrid = [per_bar_ret] * n_bars
     rets_baseline = [per_bar_ret * 0.5] * n_bars
     attr = Layer2FoldAttribution(
-        fold_idx=0, oos_bars=40, n_rebal=5,
-        realized_total=0.0, realized_price=0.0,
-        realized_funding=0.0, realized_cost=0.0,
-        expected_net=0.0, alpha_gap=0.0,
-        mean_gross_exp=0.5, mean_net_exp=0.3,
-        sleeves_active_mean=1.0, friction_pass_ratio=1.0,
-        throttle_mult_mean=1.0, dropped_below_cost=0,
+        fold_idx=0,
+        oos_bars=40,
+        n_rebal=5,
+        realized_total=0.0,
+        realized_price=0.0,
+        realized_funding=0.0,
+        realized_cost=0.0,
+        expected_net=0.0,
+        alpha_gap=0.0,
+        mean_gross_exp=0.5,
+        mean_net_exp=0.3,
+        sleeves_active_mean=1.0,
+        friction_pass_ratio=1.0,
+        throttle_mult_mean=1.0,
+        dropped_below_cost=0,
         netting_events=0,
-        realized_price_long=-0.085, realized_price_short=0.012,
-        bars_long=38, bars_short=9,
+        realized_price_long=-0.085,
+        realized_price_short=0.012,
+        bars_long=38,
+        bars_short=9,
     )
     sim_result = _make_awf_sim_result(
         rets_hybrid=rets_hybrid,
@@ -4253,12 +4369,15 @@ def test_run_l3_holdout_propagates_long_short_price_split() -> None:
         cache.signal_mask_2d = np.zeros((n_bars, n_syms), dtype=bool)
         return cache
 
-    with patch(
-        "src.domain.futures.strategy.tiered_workflow.pipeline._run_awf_simulation",
-        return_value=sim_result,
-    ), patch(
-        "src.domain.futures.strategy.tiered_workflow.awf_sim.build_l2_simulation_cache",
-        return_value=_make_mock_cache(n_bars=n_bars, n_syms=1),
+    with (
+        patch(
+            "src.domain.futures.strategy.tiered_workflow.pipeline._run_awf_simulation",
+            return_value=sim_result,
+        ),
+        patch(
+            "src.domain.futures.strategy.tiered_workflow.awf_sim.build_l2_simulation_cache",
+            return_value=_make_mock_cache(n_bars=n_bars, n_syms=1),
+        ),
     ):
         result = run_l3_holdout(
             signal_batch=_make_l3_signal_batch(),
@@ -4305,12 +4424,15 @@ def test_run_l3_holdout_long_short_defaults_to_zero_when_no_fold_attributions() 
         cache.signal_mask_2d = np.zeros((n_bars, n_syms), dtype=bool)
         return cache
 
-    with patch(
-        "src.domain.futures.strategy.tiered_workflow.pipeline._run_awf_simulation",
-        return_value=sim_result,
-    ), patch(
-        "src.domain.futures.strategy.tiered_workflow.awf_sim.build_l2_simulation_cache",
-        return_value=_make_mock_cache(n_bars=n_bars, n_syms=1),
+    with (
+        patch(
+            "src.domain.futures.strategy.tiered_workflow.pipeline._run_awf_simulation",
+            return_value=sim_result,
+        ),
+        patch(
+            "src.domain.futures.strategy.tiered_workflow.awf_sim.build_l2_simulation_cache",
+            return_value=_make_mock_cache(n_bars=n_bars, n_syms=1),
+        ),
     ):
         result = run_l3_holdout(
             signal_batch=_make_l3_signal_batch(),
@@ -4337,16 +4459,26 @@ def test_run_l3_holdout_propagates_per_symbol_long_short_split() -> None:
     rets_hybrid = [per_bar_ret] * n_bars
     rets_baseline = [per_bar_ret * 0.5] * n_bars
     attr = Layer2FoldAttribution(
-        fold_idx=0, oos_bars=40, n_rebal=5,
-        realized_total=0.0, realized_price=0.0,
-        realized_funding=0.0, realized_cost=0.0,
-        expected_net=0.0, alpha_gap=0.0,
-        mean_gross_exp=0.5, mean_net_exp=0.3,
-        sleeves_active_mean=1.0, friction_pass_ratio=1.0,
-        throttle_mult_mean=1.0, dropped_below_cost=0,
+        fold_idx=0,
+        oos_bars=40,
+        n_rebal=5,
+        realized_total=0.0,
+        realized_price=0.0,
+        realized_funding=0.0,
+        realized_cost=0.0,
+        expected_net=0.0,
+        alpha_gap=0.0,
+        mean_gross_exp=0.5,
+        mean_net_exp=0.3,
+        sleeves_active_mean=1.0,
+        friction_pass_ratio=1.0,
+        throttle_mult_mean=1.0,
+        dropped_below_cost=0,
         netting_events=0,
-        realized_price_long=-0.085, realized_price_short=0.012,
-        bars_long=38, bars_short=9,
+        realized_price_long=-0.085,
+        realized_price_short=0.012,
+        bars_long=38,
+        bars_short=9,
         realized_price_long_by_symbol=(("ARUSDT", -0.021), ("ZRXUSDT", -0.018)),
         realized_price_short_by_symbol=(("BTCUSDT", 0.012),),
     )
@@ -4372,12 +4504,15 @@ def test_run_l3_holdout_propagates_per_symbol_long_short_split() -> None:
         cache.signal_mask_2d = np.zeros((n_bars, n_syms), dtype=bool)
         return cache
 
-    with patch(
-        "src.domain.futures.strategy.tiered_workflow.pipeline._run_awf_simulation",
-        return_value=sim_result,
-    ), patch(
-        "src.domain.futures.strategy.tiered_workflow.awf_sim.build_l2_simulation_cache",
-        return_value=_make_mock_cache(n_bars=n_bars, n_syms=1),
+    with (
+        patch(
+            "src.domain.futures.strategy.tiered_workflow.pipeline._run_awf_simulation",
+            return_value=sim_result,
+        ),
+        patch(
+            "src.domain.futures.strategy.tiered_workflow.awf_sim.build_l2_simulation_cache",
+            return_value=_make_mock_cache(n_bars=n_bars, n_syms=1),
+        ),
     ):
         result = run_l3_holdout(
             signal_batch=_make_l3_signal_batch(),
@@ -4424,12 +4559,15 @@ def test_run_l3_holdout_per_symbol_long_short_defaults_to_empty_when_no_fold_att
         cache.signal_mask_2d = np.zeros((n_bars, n_syms), dtype=bool)
         return cache
 
-    with patch(
-        "src.domain.futures.strategy.tiered_workflow.pipeline._run_awf_simulation",
-        return_value=sim_result,
-    ), patch(
-        "src.domain.futures.strategy.tiered_workflow.awf_sim.build_l2_simulation_cache",
-        return_value=_make_mock_cache(n_bars=n_bars, n_syms=1),
+    with (
+        patch(
+            "src.domain.futures.strategy.tiered_workflow.pipeline._run_awf_simulation",
+            return_value=sim_result,
+        ),
+        patch(
+            "src.domain.futures.strategy.tiered_workflow.awf_sim.build_l2_simulation_cache",
+            return_value=_make_mock_cache(n_bars=n_bars, n_syms=1),
+        ),
     ):
         result = run_l3_holdout(
             signal_batch=_make_l3_signal_batch(),
@@ -4481,36 +4619,61 @@ def test_run_awf_simulation_collects_major_symbol_snapshots_for_watched_symbols(
     signal_batch = ValidatedSignalBatch(
         events=(
             ValidatedSignalEvent(
-                decision_idx=0, decision_time=datetimes[0], symbol="BTCUSDT",
-                strategy_id="trend:fast", activation_context="all", side=1,
-                expected_net_bps=5.0, expected_gross_bps=10.0,
-                q10_net_bps=0.0, q10_gross_bps=5.0,
-                q90_net_bps=10.0, q90_gross_bps=15.0,
-                expected_holding_bars=1, reliability=0.9,
-                registry_version="test", model_version="test",
+                decision_idx=0,
+                decision_time=datetimes[0],
+                symbol="BTCUSDT",
+                strategy_id="trend:fast",
+                activation_context="all",
+                side=1,
+                expected_net_bps=5.0,
+                expected_gross_bps=10.0,
+                q10_net_bps=0.0,
+                q10_gross_bps=5.0,
+                q90_net_bps=10.0,
+                q90_gross_bps=15.0,
+                expected_holding_bars=1,
+                reliability=0.9,
+                registry_version="test",
+                model_version="test",
             ),
             ValidatedSignalEvent(
-                decision_idx=0, decision_time=datetimes[0], symbol="ETHUSDT",
-                strategy_id="trend:fast", activation_context="all", side=1,
-                expected_net_bps=5.0, expected_gross_bps=10.0,
-                q10_net_bps=0.0, q10_gross_bps=5.0,
-                q90_net_bps=10.0, q90_gross_bps=15.0,
-                expected_holding_bars=1, reliability=0.9,
-                registry_version="test", model_version="test",
+                decision_idx=0,
+                decision_time=datetimes[0],
+                symbol="ETHUSDT",
+                strategy_id="trend:fast",
+                activation_context="all",
+                side=1,
+                expected_net_bps=5.0,
+                expected_gross_bps=10.0,
+                q10_net_bps=0.0,
+                q10_gross_bps=5.0,
+                q90_net_bps=10.0,
+                q90_gross_bps=15.0,
+                expected_holding_bars=1,
+                reliability=0.9,
+                registry_version="test",
+                model_version="test",
             ),
         ),
-        start_idx=1, end_idx=3,
-        symbols=symbols, registry_version="test", model_version="test",
+        start_idx=1,
+        end_idx=3,
+        symbols=symbols,
+        registry_version="test",
+        model_version="test",
     )
     awf_folds = (WFFold(fit_start=0, fit_end=1, cal_start=1, cal_end=1, oos_start=1, oos_end=4),)
     config = Layer2AllocationConfig(k_rank=2, rebalance_bars=1, no_trade_band=0.0)
     caps = PortfolioCaps(gross=2.0, per_symbol=1.0, net=1.0, beta=2.0, target_ann_vol=10.0)
 
     from src.domain.futures.strategy.tiered_workflow.awf_sim import build_l2_simulation_cache
+
     sim = _run_awf_simulation(
         cache=build_l2_simulation_cache(aligned, signal_batch, "4h"),
-        signal_batch=signal_batch, aligned=aligned,
-        awf_folds=awf_folds, config=config, caps=caps,
+        signal_batch=signal_batch,
+        aligned=aligned,
+        awf_folds=awf_folds,
+        config=config,
+        caps=caps,
     )
 
     snapshots = sim.fold_attributions[0].major_symbol_snapshots
@@ -4557,27 +4720,43 @@ def test_run_awf_simulation_major_symbol_snapshots_empty_when_no_watched_symbol_
     signal_batch = ValidatedSignalBatch(
         events=(
             ValidatedSignalEvent(
-                decision_idx=0, decision_time=datetimes[0], symbol="SOLUSDT",
-                strategy_id="trend:fast", activation_context="all", side=1,
-                expected_net_bps=5.0, expected_gross_bps=10.0,
-                q10_net_bps=0.0, q10_gross_bps=5.0,
-                q90_net_bps=10.0, q90_gross_bps=15.0,
-                expected_holding_bars=1, reliability=0.9,
-                registry_version="test", model_version="test",
+                decision_idx=0,
+                decision_time=datetimes[0],
+                symbol="SOLUSDT",
+                strategy_id="trend:fast",
+                activation_context="all",
+                side=1,
+                expected_net_bps=5.0,
+                expected_gross_bps=10.0,
+                q10_net_bps=0.0,
+                q10_gross_bps=5.0,
+                q90_net_bps=10.0,
+                q90_gross_bps=15.0,
+                expected_holding_bars=1,
+                reliability=0.9,
+                registry_version="test",
+                model_version="test",
             ),
         ),
-        start_idx=1, end_idx=3,
-        symbols=symbols, registry_version="test", model_version="test",
+        start_idx=1,
+        end_idx=3,
+        symbols=symbols,
+        registry_version="test",
+        model_version="test",
     )
     awf_folds = (WFFold(fit_start=0, fit_end=1, cal_start=1, cal_end=1, oos_start=1, oos_end=4),)
     config = Layer2AllocationConfig(k_rank=1, rebalance_bars=1, no_trade_band=0.0)
     caps = PortfolioCaps(gross=2.0, per_symbol=1.0, net=1.0, beta=2.0, target_ann_vol=10.0)
 
     from src.domain.futures.strategy.tiered_workflow.awf_sim import build_l2_simulation_cache
+
     sim = _run_awf_simulation(
         cache=build_l2_simulation_cache(aligned, signal_batch, "4h"),
-        signal_batch=signal_batch, aligned=aligned,
-        awf_folds=awf_folds, config=config, caps=caps,
+        signal_batch=signal_batch,
+        aligned=aligned,
+        awf_folds=awf_folds,
+        config=config,
+        caps=caps,
     )
 
     snapshots = sim.fold_attributions[0].major_symbol_snapshots
@@ -4595,8 +4774,12 @@ def _snap(t: int, symbol: str, raw_mu: float, regime_code: int) -> Any:
     )
 
     return MajorSymbolRebalanceSnapshot(
-        t=t, symbol=symbol, raw_mu=raw_mu, weight=0.1 if raw_mu > 0 else -0.1,
-        regime_code=regime_code, regime_risk_mult=1.0,
+        t=t,
+        symbol=symbol,
+        raw_mu=raw_mu,
+        weight=0.1 if raw_mu > 0 else -0.1,
+        regime_code=regime_code,
+        regime_risk_mult=1.0,
     )
 
 
@@ -4608,11 +4791,22 @@ def _attr_with_snapshots(
     )
 
     return Layer2FoldAttribution(
-        fold_idx=0, oos_bars=len(snaps), n_rebal=len(snaps),
-        realized_total=0.0, realized_price=0.0, realized_funding=0.0, realized_cost=0.0,
-        expected_net=0.0, alpha_gap=0.0, mean_gross_exp=0.0, mean_net_exp=0.0,
-        sleeves_active_mean=0.0, friction_pass_ratio=0.0, throttle_mult_mean=1.0,
-        dropped_below_cost=0, netting_events=0,
+        fold_idx=0,
+        oos_bars=len(snaps),
+        n_rebal=len(snaps),
+        realized_total=0.0,
+        realized_price=0.0,
+        realized_funding=0.0,
+        realized_cost=0.0,
+        expected_net=0.0,
+        alpha_gap=0.0,
+        mean_gross_exp=0.0,
+        mean_net_exp=0.0,
+        sleeves_active_mean=0.0,
+        friction_pass_ratio=0.0,
+        throttle_mult_mean=1.0,
+        dropped_below_cost=0,
+        netting_events=0,
         major_symbol_snapshots=snaps,
     )
 
@@ -4627,10 +4821,7 @@ class TestSummarizeMajorSymbolRegimeIncoherence:
             summarize_major_symbol_regime_incoherence,
         )
 
-        snaps = tuple(
-            _snap(t=i, symbol="BTCUSDT", raw_mu=1.0, regime_code=0)
-            for i in range(5)
-        )
+        snaps = tuple(_snap(t=i, symbol="BTCUSDT", raw_mu=1.0, regime_code=0) for i in range(5))
         result = summarize_major_symbol_regime_incoherence((_attr_with_snapshots(snaps),))
         assert len(result) == 1
         s = result[0]
@@ -4717,10 +4908,12 @@ class TestSummarizeMajorSymbolRegimeIncoherence:
             _snap(t=0, symbol="BTCUSDT", raw_mu=-1.0, regime_code=1),
             _snap(t=1, symbol="BTCUSDT", raw_mu=-1.0, regime_code=1),
         )
-        result = summarize_major_symbol_regime_incoherence((
-            _attr_with_snapshots(snaps_a),
-            _attr_with_snapshots(snaps_b),
-        ))
+        result = summarize_major_symbol_regime_incoherence(
+            (
+                _attr_with_snapshots(snaps_a),
+                _attr_with_snapshots(snaps_b),
+            )
+        )
         assert len(result) == 1
         s = result[0]
         # Fold B has no transition, so total n_transitions == 1 (fold A only)
@@ -4820,19 +5013,28 @@ class TestDirectionalVetoPipeline:
 
     def make_signal(self, raw_mu: float, *, valid: bool = True) -> SymbolSignal:
         return SymbolSignal(
-            raw_mu=raw_mu, volatility=0.02, n_obs=1, t_stat=0.0,
-            valid=valid, beta_btc=None, quality_weight=1.0,
+            raw_mu=raw_mu,
+            volatility=0.02,
+            n_obs=1,
+            t_stat=0.0,
+            valid=valid,
+            beta_btc=None,
+            quality_weight=1.0,
         )
 
     def test_config_directional_veto_enabled(self) -> None:
-        cfg = Layer2AllocationConfig.from_mapping({
-            "l2_regime_directional_veto_enabled": True,
-        })
+        cfg = Layer2AllocationConfig.from_mapping(
+            {
+                "l2_regime_directional_veto_enabled": True,
+            }
+        )
         assert cfg.l2_regime_directional_veto_enabled
         assert cfg.l2_regime_directional_veto_symbols == ("BTCUSDT", "ETHUSDT")
 
     def test_config_directional_veto_validation(self) -> None:
         with pytest.raises(ValueError, match="l2_regime_directional_veto_action"):
-            Layer2AllocationConfig.from_mapping({
-                "l2_regime_directional_veto_action": "invalid",
-            })
+            Layer2AllocationConfig.from_mapping(
+                {
+                    "l2_regime_directional_veto_action": "invalid",
+                }
+            )

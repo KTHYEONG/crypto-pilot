@@ -8,6 +8,7 @@ Scenarios:
     4. uplift 제약이 infeasible trial을 올바르게 차단
     5. 빈 support → zeros 반환 (edge case)
 """
+
 from __future__ import annotations
 
 from types import SimpleNamespace
@@ -34,6 +35,7 @@ from src.domain.futures.strategy.tiered_workflow.metrics import _psr
 # Fixtures
 # ---------------------------------------------------------------------------
 
+
 def caps_default() -> PortfolioCaps:
     """기본 PortfolioCaps (per_symbol=0.5, gross=1.5, net=0.5, beta=1.0)."""
     return PortfolioCaps(per_symbol=0.5, gross=1.5, net=0.5, beta=1.0)
@@ -47,6 +49,7 @@ def default_config() -> Layer2AllocationConfig:
 # ---------------------------------------------------------------------------
 # Scenario 1: active_blocks 정의 통일 회귀 테스트
 # ---------------------------------------------------------------------------
+
 
 def test_l2_min_active_blocks_default_is_3() -> None:
     """FIX-1: l2_min_active_blocks 기본값이 3으로 현실화됐는지 확인."""
@@ -64,15 +67,33 @@ def test_active_blocks_gate_passes_with_three_folds() -> None:
     """FIX-1: 3개 fold + l2_min_active_blocks=3 → active_blocks 게이트 통과."""
     # Arrange (Given)
     block_metrics = (
-        Layer2BlockMetric(start_idx=0, end_idx=10, log_growth_hybrid=0.01,
-                          log_growth_baseline=0.005, mdd_hybrid=0.02,
-                          turnover_hybrid=0.1, active_rebalances=1),
-        Layer2BlockMetric(start_idx=10, end_idx=20, log_growth_hybrid=0.02,
-                          log_growth_baseline=0.01, mdd_hybrid=0.01,
-                          turnover_hybrid=0.1, active_rebalances=1),
-        Layer2BlockMetric(start_idx=20, end_idx=30, log_growth_hybrid=0.015,
-                          log_growth_baseline=0.008, mdd_hybrid=0.015,
-                          turnover_hybrid=0.1, active_rebalances=1),
+        Layer2BlockMetric(
+            start_idx=0,
+            end_idx=10,
+            log_growth_hybrid=0.01,
+            log_growth_baseline=0.005,
+            mdd_hybrid=0.02,
+            turnover_hybrid=0.1,
+            active_rebalances=1,
+        ),
+        Layer2BlockMetric(
+            start_idx=10,
+            end_idx=20,
+            log_growth_hybrid=0.02,
+            log_growth_baseline=0.01,
+            mdd_hybrid=0.01,
+            turnover_hybrid=0.1,
+            active_rebalances=1,
+        ),
+        Layer2BlockMetric(
+            start_idx=20,
+            end_idx=30,
+            log_growth_hybrid=0.015,
+            log_growth_baseline=0.008,
+            mdd_hybrid=0.015,
+            turnover_hybrid=0.1,
+            active_rebalances=1,
+        ),
     )
     min_active_blocks = 3
 
@@ -89,15 +110,33 @@ def test_active_block_count_fold_based_matches_pipeline_definition() -> None:
     """FIX-1: evaluate_l2_trial의 len([m for m if active_rebalances>0])가 pipeline gate와 동일."""
     # Arrange (Given): fold 기반 block_metrics (active_rebalances로 식별)
     block_metrics = [
-        Layer2BlockMetric(start_idx=0, end_idx=10, log_growth_hybrid=0.01,
-                          log_growth_baseline=0.0, mdd_hybrid=0.0,
-                          turnover_hybrid=0.1, active_rebalances=1),
-        Layer2BlockMetric(start_idx=10, end_idx=20, log_growth_hybrid=0.0,
-                          log_growth_baseline=0.0, mdd_hybrid=0.0,
-                          turnover_hybrid=0.0, active_rebalances=0),  # 비활성
-        Layer2BlockMetric(start_idx=20, end_idx=30, log_growth_hybrid=0.02,
-                          log_growth_baseline=0.0, mdd_hybrid=0.0,
-                          turnover_hybrid=0.1, active_rebalances=1),
+        Layer2BlockMetric(
+            start_idx=0,
+            end_idx=10,
+            log_growth_hybrid=0.01,
+            log_growth_baseline=0.0,
+            mdd_hybrid=0.0,
+            turnover_hybrid=0.1,
+            active_rebalances=1,
+        ),
+        Layer2BlockMetric(
+            start_idx=10,
+            end_idx=20,
+            log_growth_hybrid=0.0,
+            log_growth_baseline=0.0,
+            mdd_hybrid=0.0,
+            turnover_hybrid=0.0,
+            active_rebalances=0,
+        ),  # 비활성
+        Layer2BlockMetric(
+            start_idx=20,
+            end_idx=30,
+            log_growth_hybrid=0.02,
+            log_growth_baseline=0.0,
+            mdd_hybrid=0.0,
+            turnover_hybrid=0.1,
+            active_rebalances=1,
+        ),
     ]
 
     # Act (When): evaluate_l2_trial 정의(FIX-1 후)
@@ -115,6 +154,7 @@ def test_active_block_count_fold_based_matches_pipeline_definition() -> None:
 # Scenario 2: 순수 EW baseline이 risk-matched와 구조적으로 다름
 # ---------------------------------------------------------------------------
 
+
 def test_ew_baseline_differs_from_risk_matched_baseline() -> None:
     """FIX-2: 동질적 edge + 대각 공분산에서 EW vs risk-matched가 구조적으로 달라야 함."""
     # Arrange (Given): K=3 심볼, 불균일 vol → risk-matched는 vol 역비례, EW는 1/3
@@ -122,7 +162,7 @@ def test_ew_baseline_differs_from_risk_matched_baseline() -> None:
     bars_per_year = 8760.0
     # 불균일 vol — risk-matched와 EW가 벌어지도록
     sigma = np.array([0.01, 0.05, 0.10], dtype=np.float64)
-    mu_bps = np.array([1.0, 1.0, 1.0], dtype=np.float64)   # 동질적 edge
+    mu_bps = np.array([1.0, 1.0, 1.0], dtype=np.float64)  # 동질적 edge
     btc_beta: np.ndarray = np.zeros(n, dtype=np.float64)
     # strategy_weights: Kelly 비중은 mu/sigma^2에 비례 (불균일)
     strategy_weights = mu_bps / (sigma**2 + 1e-12)
@@ -176,14 +216,13 @@ def test_ew_baseline_is_equal_weight_in_direction() -> None:
 
     # Assert (Then): 비중이 1/3에 근사 (cap 클리핑 없는 경우)
     assert np.all(w_ew > 0), "모든 support 심볼이 양수 비중을 가져야 함"
-    assert abs(float(np.std(w_ew)) / float(np.mean(w_ew))) < 0.01, (
-        "EW baseline은 균등해야 함 (변동계수 < 1%)"
-    )
+    assert abs(float(np.std(w_ew)) / float(np.mean(w_ew))) < 0.01, "EW baseline은 균등해야 함 (변동계수 < 1%)"
 
 
 # ---------------------------------------------------------------------------
 # Scenario 3: DSR fallback = PSR 정직 하한
 # ---------------------------------------------------------------------------
+
 
 def test_dsr_fallback_equals_psr_when_no_override() -> None:
     """FIX-5: override_dsr=None 시 dsr_hybrid == psr_hybrid (±1e-9)."""
@@ -199,8 +238,7 @@ def test_dsr_fallback_equals_psr_when_no_override() -> None:
 
     # Assert (Then)
     assert abs(dsr_fallback - psr) < 1e-9, (
-        f"DSR fallback({dsr_fallback:.6f})이 PSR({psr:.6f})와 불일치. "
-        "단일-원소 degenerate 경로 재침투 의심."
+        f"DSR fallback({dsr_fallback:.6f})이 PSR({psr:.6f})와 불일치. 단일-원소 degenerate 경로 재침투 의심."
     )
 
 
@@ -215,49 +253,40 @@ def test_dsr_fallback_not_constant_half() -> None:
     psr = _psr(list(rets), bars_per_year=bars_per_year)
 
     # Assert (Then): PSR이 0.5보다 유의하게 크면 degenerate 문제 없음
-    assert psr > 0.6, (
-        f"PSR({psr:.4f})이 0.6 미만 — 양의 엣지에서도 degenerate 값 의심."
-    )
+    assert psr > 0.6, f"PSR({psr:.4f})이 0.6 미만 — 양의 엣지에서도 degenerate 값 의심."
 
 
 # ---------------------------------------------------------------------------
 # Scenario 4: uplift 제약이 infeasible trial을 올바르게 차단
 # ---------------------------------------------------------------------------
 
+
 def test_uplift_constraint_is_positive_when_hybrid_sharpe_below_threshold() -> None:
     """FIX-4: hybrid Sharpe < baseline_ew + min_uplift → 제약값 > 0 (infeasible)."""
     # Arrange (Given): hybrid Sharpe < EW baseline + 0.20
     sharpe_hac_baseline_ew = 1.0
-    sharpe_hac_hybrid = 1.10          # 차이 = 0.10 < 0.20
+    sharpe_hac_hybrid = 1.10  # 차이 = 0.10 < 0.20
     min_uplift = 0.20
 
     # Act (When): evaluate_l2_trial의 uplift 제약 계산 공식
-    constraint_uplift = (
-        sharpe_hac_baseline_ew + min_uplift - sharpe_hac_hybrid
-    )
+    constraint_uplift = sharpe_hac_baseline_ew + min_uplift - sharpe_hac_hybrid
 
     # Assert (Then): 양수면 infeasible
-    assert constraint_uplift > 0, (
-        f"uplift 제약이 infeasible을 차단하지 못함 (값={constraint_uplift:.4f})"
-    )
+    assert constraint_uplift > 0, f"uplift 제약이 infeasible을 차단하지 못함 (값={constraint_uplift:.4f})"
 
 
 def test_uplift_constraint_is_negative_when_hybrid_sharpe_above_threshold() -> None:
     """FIX-4: hybrid Sharpe >= baseline_ew + min_uplift → 제약값 ≤ 0 (feasible)."""
     # Arrange (Given): hybrid Sharpe ≥ EW baseline + 0.20
     sharpe_hac_baseline_ew = 1.0
-    sharpe_hac_hybrid = 1.25          # 차이 = 0.25 ≥ 0.20
+    sharpe_hac_hybrid = 1.25  # 차이 = 0.25 ≥ 0.20
     min_uplift = 0.20
 
     # Act (When)
-    constraint_uplift = (
-        sharpe_hac_baseline_ew + min_uplift - sharpe_hac_hybrid
-    )
+    constraint_uplift = sharpe_hac_baseline_ew + min_uplift - sharpe_hac_hybrid
 
     # Assert (Then): 음수 또는 0이면 feasible
-    assert constraint_uplift <= 0, (
-        f"uplift 제약이 feasible trial을 잘못 차단함 (값={constraint_uplift:.4f})"
-    )
+    assert constraint_uplift <= 0, f"uplift 제약이 feasible trial을 잘못 차단함 (값={constraint_uplift:.4f})"
 
 
 def test_l2_gate_blocks_worst_fold_cagr() -> None:
@@ -320,6 +349,7 @@ def test_l2_gate_block_delta_is_diagnostic() -> None:
 
 
 # ── RC-4: growth_lcb vol-matched + regression ──
+
 
 def test_gate_growth_lcb_uses_vol_matched_baseline() -> None:
     """RC-4: 저변동 hybrid가 vol-scaled baseline을 넘으면 growth_lcb 미차단."""
@@ -395,9 +425,7 @@ def test_layer2_constraints_tuple_length_is_eight() -> None:
     fallback = layer2_constraints_from_trial(mock_trial)
 
     # Assert (Then)
-    assert len(fallback) == 9, (
-        f"fallback 크기 {len(fallback)} != 9. Optuna safety constraints 9-tuple이어야 함."
-    )
+    assert len(fallback) == 9, f"fallback 크기 {len(fallback)} != 9. Optuna safety constraints 9-tuple이어야 함."
     assert all(v == 1.0 for v in fallback), "모든 fallback 값이 1.0 (infeasible) 이어야 함"
 
 
@@ -441,6 +469,7 @@ def test_layer2_constraints_legacy_values_pad_to_eight() -> None:
 # S5: Range BVA — L2_ALLOC_SPACE_V3 경계 검증
 # ---------------------------------------------------------------------------
 
+
 def test_l2_alloc_space_v3_kelly_range() -> None:
     """S5: L2_ALLOC_SPACE_V3의 kelly_fraction 범위가 [0.15, 0.55]인지 확인."""
     from src.domain.futures.optimization.opt_config import L2_ALLOC_SPACE_V3
@@ -467,9 +496,7 @@ def test_l2_alloc_space_alias_points_to_v8() -> None:
     assert "kelly_fraction" not in L2_ALLOC_SPACE, (
         "V8: kelly_fraction은 Phase B 결정론 처리로 탐색공간에서 제거되어야 함"
     )
-    assert "max_ann_vol" not in L2_ALLOC_SPACE, (
-        "V8: max_ann_vol은 Phase B 결정론 처리로 탐색공간에서 제거되어야 함"
-    )
+    assert "max_ann_vol" not in L2_ALLOC_SPACE, "V8: max_ann_vol은 Phase B 결정론 처리로 탐색공간에서 제거되어야 함"
 
 
 def test_l2_alloc_space_v9_retains_signal_dims() -> None:
@@ -495,6 +522,7 @@ def test_l2_alloc_space_v9_retains_signal_dims() -> None:
 # ---------------------------------------------------------------------------
 # Scenario 5: 빈 support → zeros 반환 (edge case)
 # ---------------------------------------------------------------------------
+
 
 def test_ew_baseline_returns_zeros_when_no_support() -> None:
     """FIX-2 edge case: strategy_weights=zeros → build_directional_equal_weight_baseline returns zeros."""
@@ -546,6 +574,7 @@ def test_ew_baseline_returns_zeros_when_direction_all_zero() -> None:
 # ---------------------------------------------------------------------------
 # Config 기본값 회귀 테스트
 # ---------------------------------------------------------------------------
+
 
 def test_l2_min_dsr_default_is_0_60() -> None:
     """FIX-3: l2_min_dsr 기본값이 0.60으로 설정됐는지 확인."""
@@ -625,6 +654,7 @@ def test_recent_fold_gate_enters_optuna_constraints() -> None:
 # S6: Fix B — argmax(dsr, cagr) champion selection (두 후보 중 높은 DSR 선택)
 # ---------------------------------------------------------------------------
 
+
 def test_s6_champion_selected_by_argmax_dsr() -> None:
     """S6: gate-pass 후보 A(dsr=0.55) vs B(dsr=0.72) → champion은 B (DSR 우선).
 
@@ -641,12 +671,8 @@ def test_s6_champion_selected_by_argmax_dsr() -> None:
     best_entry = max(passed_candidates, key=lambda x: (x[0], x[1]))
 
     # Assert (Then): DSR이 더 높은 B가 champion
-    assert best_entry[2] == "trial_B", (
-        f"champion은 DSR 최대 후보(trial_B)여야 함. 실제: {best_entry[2]}"
-    )
-    assert best_entry[0] == pytest.approx(0.72), (
-        f"champion DSR={best_entry[0]:.4f} != 0.72"
-    )
+    assert best_entry[2] == "trial_B", f"champion은 DSR 최대 후보(trial_B)여야 함. 실제: {best_entry[2]}"
+    assert best_entry[0] == pytest.approx(0.72), f"champion DSR={best_entry[0]:.4f} != 0.72"
 
 
 def test_s6_champion_tiebreak_by_cagr_when_dsr_equal() -> None:
@@ -667,6 +693,7 @@ def test_s6_champion_tiebreak_by_cagr_when_dsr_equal() -> None:
 # ---------------------------------------------------------------------------
 # S7: Fix B — zero gate-pass → fallback path returns blocker_reason
 # ---------------------------------------------------------------------------
+
 
 def test_s7_zero_gate_pass_fallback_path_returns_blocker_reason() -> None:
     """S7: passed_candidates 빈 목록 → champion_trial is None → diagnostic fallback.
@@ -690,6 +717,7 @@ def test_s7_zero_gate_pass_fallback_path_returns_blocker_reason() -> None:
 # S8: Fix C — completed_trial_sharpes pool size == len(feasible_trials)
 # ---------------------------------------------------------------------------
 
+
 def test_s8_dsr_pool_restricted_to_feasible_trials() -> None:
     """S8: complete=10, feasible=4인 경우 completed_trial_sharpes 크기가 4.
 
@@ -704,7 +732,7 @@ def test_s8_dsr_pool_restricted_to_feasible_trials() -> None:
         t = MagicMock()
         t.user_attrs = {
             "sharpe_hac_hybrid": sharpe,
-                "l2_optuna_constraint_values": [-1.0] * 9 if feasible else [1.0] * 9,
+            "l2_optuna_constraint_values": [-1.0] * 9 if feasible else [1.0] * 9,
         }
         return t
 
@@ -712,27 +740,21 @@ def test_s8_dsr_pool_restricted_to_feasible_trials() -> None:
     # feasible: trials 0~3 (constraints all ≤ 0), infeasible: 4~9
 
     # Act (When): Fix C 로직 재현 — layer2_constraints_from_trial 기반 필터
-    feasible_trials_filtered = [
-        t for t in complete_trials
-        if all(c <= 0.0 for c in layer2_constraints_from_trial(t))
-    ]
+    feasible_trials_filtered = [t for t in complete_trials if all(c <= 0.0 for c in layer2_constraints_from_trial(t))]
     pool_sharpes = np.array(
         [t.user_attrs["sharpe_hac_hybrid"] for t in feasible_trials_filtered],
         dtype=np.float64,
     )
 
     # Assert (Then)
-    assert len(feasible_trials_filtered) == 4, (
-        f"feasible 필터 후 trial 수 {len(feasible_trials_filtered)} != 4"
-    )
-    assert pool_sharpes.shape == (4,), (
-        f"completed_trial_sharpes shape {pool_sharpes.shape} != (4,)"
-    )
+    assert len(feasible_trials_filtered) == 4, f"feasible 필터 후 trial 수 {len(feasible_trials_filtered)} != 4"
+    assert pool_sharpes.shape == (4,), f"completed_trial_sharpes shape {pool_sharpes.shape} != (4,)"
 
 
 # ---------------------------------------------------------------------------
 # S9: Fix B+C — 동일 selected_rets, feasible pool(4) vs full pool(10) DSR 단조성
 # ---------------------------------------------------------------------------
+
 
 def test_s9_dsr_monotone_improvement_with_smaller_pool() -> None:
     """S9: pool 축소(10→4 feasible) 시 동일 selected_rets에서 DSR 단조 상승.

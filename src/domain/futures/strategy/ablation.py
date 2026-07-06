@@ -168,11 +168,7 @@ def _decision_bar_edge_series(events: pd.DataFrame, edge_column: str) -> NDArray
             .mean()
         )
     else:
-        grouped = (
-            frame.dropna(subset=["_edge", "_entry_idx"])
-            .groupby("_entry_idx", sort=True)["_edge"]
-            .mean()
-        )
+        grouped = frame.dropna(subset=["_edge", "_entry_idx"]).groupby("_entry_idx", sort=True)["_edge"].mean()
     return np.asarray(grouped.to_numpy(dtype=np.float64, copy=False), dtype=np.float64)
 
 
@@ -205,9 +201,9 @@ def _build_calibration_variant_priors(
         return {}, 0.0
 
     keys = (
-        calibration_set.event_index["family"].astype(str).str.cat(
-            calibration_set.event_index["variant"].astype(str), sep=":"
-        )
+        calibration_set.event_index["family"]
+        .astype(str)
+        .str.cat(calibration_set.event_index["variant"].astype(str), sep=":")
         if {"family", "variant"}.issubset(calibration_set.event_index.columns)
         else pd.Series(["__global__"] * calibration_set.X.shape[0], dtype=object)
     )
@@ -417,6 +413,7 @@ def _build_variant_prior_output(
     """Construct a prior-only edge output without residual center predictions."""
     if ensemble_model is not None:
         from src.domain.futures.strategy.candidate_ensemble import predict_regime_conditional_ensemble
+
         base_out = predict_regime_conditional_ensemble(model=ensemble_model, oos_events=oos_set.event_index, cfg=cfg)
     else:
         base_out = predict_candidate_edges(models=edge_models, dataset=oos_set, p_pass=p_pass, cfg=cfg)
@@ -552,13 +549,25 @@ def run_candidate_ablation(
         purge_bars, embargo_bars = resolve_purge_and_embargo_bars(cfg)
 
         if raw_events.empty:
-            return pd.DataFrame(columns=[
-                "variant", "mean_log_growth", "cagr", "max_drawdown", "mar",
-                "turnover", "final_equity", "pass_compound_gate",
-                "trade_count", "deployed_bar_fraction", "pred_edge_bps_p50",
-                "real_edge_bps_p50", "edge_capture_ratio", "gross_cost_bps",
-                "pass_deployment_gate",
-            ])
+            return pd.DataFrame(
+                columns=[
+                    "variant",
+                    "mean_log_growth",
+                    "cagr",
+                    "max_drawdown",
+                    "mar",
+                    "turnover",
+                    "final_equity",
+                    "pass_compound_gate",
+                    "trade_count",
+                    "deployed_bar_fraction",
+                    "pred_edge_bps_p50",
+                    "real_edge_bps_p50",
+                    "edge_capture_ratio",
+                    "gross_cost_bps",
+                    "pass_deployment_gate",
+                ]
+            )
 
         # 3. Label events and split dataset
         labeled = label_candidate_events(events=raw_events, aligned=aligned, cfg=cfg)
@@ -572,10 +581,9 @@ def run_candidate_ablation(
         )
         # Compute WF folds for fold_oos_boundaries (used by evaluate_compound_backtest DSR/PBO)
         from src.domain.futures.strategy.walk_forward import build_walk_forward_folds
+
         _wf_folds = build_walk_forward_folds(n_bars=n_bars, cfg=cfg, max_holding_bars=max_holding_bars)
-        _fold_oos_boundaries = tuple(
-            (f.oos_start, f.oos_end) for f in _wf_folds
-        )
+        _fold_oos_boundaries = tuple((f.oos_start, f.oos_end) for f in _wf_folds)
         diag, _ = _compute_rule_diagnostics_for_ablation(
             labeled=labeled,
             aligned=aligned,
@@ -587,7 +595,8 @@ def run_candidate_ablation(
             oos_start=oos_start,
             oos_end=oos_end,
         )
-        _logger.log(PERF, 
+        _logger.log(
+            PERF,
             "[DIAG][RULE_RECOMMEND_ABLATION] keep=%s flip=%s",
             ",".join(diag.recommended_keep_variants) if diag.recommended_keep_variants else "",
             ",".join(diag.recommended_flip_variants) if diag.recommended_flip_variants else "",
@@ -604,8 +613,7 @@ def run_candidate_ablation(
             )
             if labeled.empty:
                 _logger.warning(
-                    "[ABLATION][PROMO_FILTER] all candidates blocked; "
-                    "falling back to unfiltered events for ML training"
+                    "[ABLATION][PROMO_FILTER] all candidates blocked; falling back to unfiltered events for ML training"
                 )
 
         # When promo filter blocks all variants, fall back to unfiltered data so ML
@@ -638,18 +646,14 @@ def run_candidate_ablation(
     if gate_model is None or edge_models is None:
         train_events = fit_set.event_index.copy()
         train_events["net_return_bps"] = (
-            fit_set.y_return_bps
-            if fit_set.y_return_bps is not None
-            else fit_set.y_edge_bps
+            fit_set.y_return_bps if fit_set.y_return_bps is not None else fit_set.y_edge_bps
         )
         proof_events: pd.DataFrame | None = None
         proof_fold_ids: np.ndarray | None = None
         if not calibration_set.event_index.empty:
             proof_events = calibration_set.event_index.copy()
             proof_events["net_return_bps"] = (
-                calibration_set.y_return_bps
-                if calibration_set.y_return_bps is not None
-                else calibration_set.y_edge_bps
+                calibration_set.y_return_bps if calibration_set.y_return_bps is not None else calibration_set.y_edge_bps
             )
             proof_fold_ids = np.zeros(proof_events.shape[0], dtype=np.int32)
         ensemble_model = fit_regime_conditional_ensemble(
@@ -843,35 +847,34 @@ def run_candidate_ablation(
 
     t_step = time.perf_counter()
     with ThreadPoolExecutor(max_workers=min(len(tasks), 6)) as executor:
-        futures = [
-            executor.submit(_run_task, w, name, sel, bar)
-            for w, name, sel, bar in tasks
-        ]
+        futures = [executor.submit(_run_task, w, name, sel, bar) for w, name, sel, bar in tasks]
         rows = [f.result() for f in futures]
     ablation_prof["backtests"] = time.perf_counter() - t_step
 
     # Convert results to DataFrame
     t_step = time.perf_counter()
-    df_results = pd.DataFrame([
-        {
-            "variant": r.variant,
-            "mean_log_growth": r.mean_log_growth,
-            "cagr": r.cagr,
-            "max_drawdown": r.max_drawdown,
-            "mar": r.mar,
-            "turnover": r.turnover,
-            "final_equity": r.final_equity,
-            "pass_compound_gate": r.pass_compound_gate,
-            "trade_count": r.trade_count,
-            "deployed_bar_fraction": r.deployed_bar_fraction,
-            "pred_edge_bps_p50": r.pred_edge_bps_p50,
-            "real_edge_bps_p50": r.real_edge_bps_p50,
-            "edge_capture_ratio": r.edge_capture_ratio,
-            "gross_cost_bps": r.gross_cost_bps,
-            "pass_deployment_gate": r.pass_deployment_gate,
-        }
-        for r in rows
-    ])
+    df_results = pd.DataFrame(
+        [
+            {
+                "variant": r.variant,
+                "mean_log_growth": r.mean_log_growth,
+                "cagr": r.cagr,
+                "max_drawdown": r.max_drawdown,
+                "mar": r.mar,
+                "turnover": r.turnover,
+                "final_equity": r.final_equity,
+                "pass_compound_gate": r.pass_compound_gate,
+                "trade_count": r.trade_count,
+                "deployed_bar_fraction": r.deployed_bar_fraction,
+                "pred_edge_bps_p50": r.pred_edge_bps_p50,
+                "real_edge_bps_p50": r.real_edge_bps_p50,
+                "edge_capture_ratio": r.edge_capture_ratio,
+                "gross_cost_bps": r.gross_cost_bps,
+                "pass_deployment_gate": r.pass_deployment_gate,
+            }
+            for r in rows
+        ]
+    )
     ablation_prof["dataframe"] = time.perf_counter() - t_step
     breakdown = _RuntimeBreakdown(total=time.perf_counter() - t_start_all, steps=ablation_prof)
     _logger.info(
@@ -891,7 +894,6 @@ def run_candidate_ablation(
     _logger.log(PERF, "[PROFILE][ABLATION] Total ablation study run took %.4fs", breakdown.total)
 
     return df_results
-
 
 
 def _build_barrier_arrays(
@@ -956,11 +958,7 @@ def _compute_realized_edge(trades: pd.DataFrame) -> float:
 
     denominator = entry_px * amount
     valid = (
-        np.isfinite(pnl)
-        & np.isfinite(entry_fee)
-        & np.isfinite(entry_px)
-        & np.isfinite(amount)
-        & (denominator > 1e-12)
+        np.isfinite(pnl) & np.isfinite(entry_fee) & np.isfinite(entry_px) & np.isfinite(amount) & (denominator > 1e-12)
     )
     if not bool(valid.any()):
         return float("nan")
@@ -1031,6 +1029,7 @@ def _run_backtest_and_evaluate(
         "compound_eval": 0.0,
     }
     from src.domain.futures.strategy.rule_signals import _atr_2d
+
     t_step = time.perf_counter()
     if start_idx is None and end_idx is None:
         aligned_eval = aligned
@@ -1137,11 +1136,9 @@ def _run_backtest_and_evaluate(
     _local_boundaries: tuple[tuple[int, int], ...] | None = None
     if fold_oos_boundaries and start_idx is not None:
         _offset = int(start_idx)
-        _local_boundaries = tuple(
-            (max(0, s - _offset), max(0, e - _offset))
-            for s, e in fold_oos_boundaries
-            if e > _offset
-        ) or None
+        _local_boundaries = (
+            tuple((max(0, s - _offset), max(0, e - _offset)) for s, e in fold_oos_boundaries if e > _offset) or None
+        )
     elif fold_oos_boundaries:
         _local_boundaries = fold_oos_boundaries
     t_step = time.perf_counter()
@@ -1157,8 +1154,7 @@ def _run_backtest_and_evaluate(
 
     # Deployment integrity gate
     pass_deployment_gate = (
-        trade_count >= cfg.min_deployment_trade_count
-        and deployed_bar_fraction >= cfg.min_deployment_capital_fraction
+        trade_count >= cfg.min_deployment_trade_count and deployed_bar_fraction >= cfg.min_deployment_capital_fraction
     )
 
     _capture_ratio = (
@@ -1168,7 +1164,8 @@ def _run_backtest_and_evaluate(
     )
 
     if cfg.edge_attribution_enabled:
-        _logger.log(PERF, 
+        _logger.log(
+            PERF,
             "[DIAG][EDGE_ATTRIB] variant=%s trades=%d deployed=%.3f "
             "pred_p50=%.1fbps real_p50=%.1fbps capture=%.3f "
             "cost=%.1fbps pass_deploy=%s",
@@ -1253,20 +1250,22 @@ def validate_candidate_signals(
         oos_events = _oos_only_events(labeled=events_df, oos_start=oos_start, oos_end=oos_end)
         n_events = len(oos_events)
         if n_events == 0:
-            reports.append(SignalValidationReport(
-                variant=variant_name,
-                n_events=0,
-                net_edge_bps_p50=float("nan"),
-                net_edge_bps_stress_p50=float("nan"),
-                net_edge_bps_mean=float("nan"),
-                net_edge_bps_stress_mean=float("nan"),
-                hit_rate=0.0,
-                hac_t_stat=0.0,
-                survives_cost=False,
-                deployment_count=0,
-                decision_bar_count=0,
-                fail_reasons=("no_oos_events",),
-            ))
+            reports.append(
+                SignalValidationReport(
+                    variant=variant_name,
+                    n_events=0,
+                    net_edge_bps_p50=float("nan"),
+                    net_edge_bps_stress_p50=float("nan"),
+                    net_edge_bps_mean=float("nan"),
+                    net_edge_bps_stress_mean=float("nan"),
+                    hit_rate=0.0,
+                    hac_t_stat=0.0,
+                    survives_cost=False,
+                    deployment_count=0,
+                    decision_bar_count=0,
+                    fail_reasons=("no_oos_events",),
+                )
+            )
             continue
 
         edge_col = "edge_after_hurdle_bps"
@@ -1306,11 +1305,7 @@ def validate_candidate_signals(
         decision_bar_count = int(decision_bar_edge.size)
 
         if cfg.blend_survival_use_mean:
-            survives = (
-                np.isfinite(mean_net_stress)
-                and mean_net_stress > stress_floor
-                and hac_t >= hac_floor
-            )
+            survives = np.isfinite(mean_net_stress) and mean_net_stress > stress_floor and hac_t >= hac_floor
         else:
             # legacy median path (회귀 대비 보존)
             survives = np.isfinite(net_stress_p50) and net_stress_p50 > 0.0 and hac_t >= hac_floor
@@ -1324,19 +1319,21 @@ def validate_candidate_signals(
         if hac_t < hac_floor:
             fail_reasons.append("hac_t_below_floor")
 
-        reports.append(SignalValidationReport(
-            variant=variant_name,
-            n_events=n_events,
-            net_edge_bps_p50=net_p50,
-            net_edge_bps_stress_p50=net_stress_p50,
-            net_edge_bps_mean=mean_net,
-            net_edge_bps_stress_mean=mean_net_stress,
-            hit_rate=hit_rate,
-            hac_t_stat=hac_t,
-            survives_cost=survives,
-            deployment_count=int(n_events),
-            decision_bar_count=decision_bar_count,
-            fail_reasons=tuple(fail_reasons),
-        ))
+        reports.append(
+            SignalValidationReport(
+                variant=variant_name,
+                n_events=n_events,
+                net_edge_bps_p50=net_p50,
+                net_edge_bps_stress_p50=net_stress_p50,
+                net_edge_bps_mean=mean_net,
+                net_edge_bps_stress_mean=mean_net_stress,
+                hit_rate=hit_rate,
+                hac_t_stat=hac_t,
+                survives_cost=survives,
+                deployment_count=int(n_events),
+                decision_bar_count=decision_bar_count,
+                fail_reasons=tuple(fail_reasons),
+            )
+        )
 
     return reports

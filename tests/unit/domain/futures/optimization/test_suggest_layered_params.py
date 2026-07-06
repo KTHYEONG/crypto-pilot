@@ -152,9 +152,7 @@ def test_objective_l1_ic_does_not_call_sharpe() -> None:
             "src.domain.futures.strategy.tiered_workflow.pipeline.run_l1_swf",
             return_value=_l1_result,
         ),
-        patch(
-            "src.domain.futures.strategy.tiered_workflow.pipeline.run_l2_awf"
-        ) as mock_l2,
+        patch("src.domain.futures.strategy.tiered_workflow.pipeline.run_l2_awf") as mock_l2,
         patch(
             "src.domain.futures.strategy.walk_forward.build_l1_swf_folds",
             return_value=(MagicMock(),),
@@ -166,6 +164,7 @@ def test_objective_l1_ic_does_not_call_sharpe() -> None:
         patch("numpy.searchsorted", return_value=100),
     ):
         import datetime
+
         ctx = MagicMock()
         ctx.aligned.datetimes.__len__ = MagicMock(return_value=200)
         ctx.window.l1_start = datetime.date(2023, 1, 1)
@@ -178,7 +177,7 @@ def test_objective_l1_ic_does_not_call_sharpe() -> None:
         val = objective_l1_ic(trial, ctx)
 
     assert val == pytest.approx(0.04)
-    mock_l2.assert_not_called()   # Sharpe 미참조 핵심 검증
+    mock_l2.assert_not_called()  # Sharpe 미참조 핵심 검증
 
 
 def test_objective_l2_growth_sets_constraint_attrs(caplog: pytest.LogCaptureFixture) -> None:

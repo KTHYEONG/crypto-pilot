@@ -6,6 +6,7 @@ strings intended to be passed to logging.info() by callers.
 Time Complexity: O(n) where n is the length of optional detail lists.
 Space Complexity: O(n) for output string construction.
 """
+
 from __future__ import annotations
 
 import math
@@ -21,6 +22,7 @@ from src.domain.futures.optimization.opt_config import LayeredWindow
 # ---------------------------------------------------------------------------
 # Internal helpers
 # ---------------------------------------------------------------------------
+
 
 def _gate(passed: bool) -> str:
     """Return 'PASS' or 'BLOCKED' based on gate status."""
@@ -44,7 +46,7 @@ def _format_top_symbol_contributions(
     ascending: bool,
 ) -> str:
     """Format top symbol contributions sorted by value.
-    
+
     Empty input returns "n/a".
     """
     if not pairs:
@@ -66,8 +68,8 @@ def _format_major_symbol_sleeve_diag_line(summary: Any) -> str:
     return (
         f"{summary.symbol}/{summary.family}: "
         f"mu={summary.mean_raw_mu_sleeve:.3f} qw={summary.mean_quality_weight_sleeve:.3f} "
-        f"mismatch={summary.sign_mismatch_pct*100:.1f}% "
-        f"adverse_mismatch={summary.regime_adverse_sign_mismatch_pct*100:.1f}%"
+        f"mismatch={summary.sign_mismatch_pct * 100:.1f}% "
+        f"adverse_mismatch={summary.regime_adverse_sign_mismatch_pct * 100:.1f}%"
     )
 
 
@@ -78,10 +80,10 @@ def _format_major_symbol_diag_line(summary: Any) -> str:
       "BTCUSDT: mu_bull=50.0% w_long=75.0% stale_long=25.0% cap_engaged=25.0% avg_mult=0.933"
     """
     return (
-        f"{summary.symbol}: mu_bull={summary.mu_bullish_pct*100:.1f}% "
-        f"w_long={summary.weight_long_pct*100:.1f}% "
-        f"stale_long={summary.stale_long_pct*100:.1f}% "
-        f"cap_engaged={summary.regime_cap_engaged_pct*100:.1f}% "
+        f"{summary.symbol}: mu_bull={summary.mu_bullish_pct * 100:.1f}% "
+        f"w_long={summary.weight_long_pct * 100:.1f}% "
+        f"stale_long={summary.stale_long_pct * 100:.1f}% "
+        f"cap_engaged={summary.regime_cap_engaged_pct * 100:.1f}% "
         f"avg_mult={summary.mean_regime_risk_mult_when_long:.3f}"
     )
 
@@ -107,14 +109,16 @@ def _format_directional_veto_line(summary: Any) -> str:
 
 
 def _format_major_symbol_incoherence_line(summary: Any) -> str:
-    lag_str = f"{summary.mean_reversal_lag_bars:.1f}bars" if (
-        summary.mean_reversal_lag_bars == summary.mean_reversal_lag_bars
-    ) else "n/a"
+    lag_str = (
+        f"{summary.mean_reversal_lag_bars:.1f}bars"
+        if (summary.mean_reversal_lag_bars == summary.mean_reversal_lag_bars)
+        else "n/a"
+    )
     return (
-        f"{summary.symbol}: adverse_mu_bull={summary.regime_adverse_mu_bullish_pct*100:.1f}% "
+        f"{summary.symbol}: adverse_mu_bull={summary.regime_adverse_mu_bullish_pct * 100:.1f}% "
         f"transitions={summary.n_transitions} "
         f"lag={lag_str} "
-        f"censored={summary.censored_pct*100:.1f}%"
+        f"censored={summary.censored_pct * 100:.1f}%"
     )
 
 
@@ -131,6 +135,7 @@ def _format_symbol_preview(symbols: Sequence[Any], *, max_symbols: int = 8) -> s
 # ---------------------------------------------------------------------------
 # §9.0 System Dashboard & Headers
 # ---------------------------------------------------------------------------
+
 
 def format_system_context_dashboard(
     *,
@@ -170,7 +175,6 @@ def format_system_context_dashboard(
     return "\n".join(lines)
 
 
-
 def format_layer_header(layer: int, title: str) -> str:
     """섹션 상/하단에 굵은 선을 배치한 레이어 헤더 스타일."""
     border = "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
@@ -186,7 +190,7 @@ def format_data_integrity_summary(
 ) -> str:
     """하단 얇은 선과 트리 구조를 적용한 데이터 무결성 감사 결과."""
     sep = "──────────────────────────────────────────────────────────────────────────────"
-    
+
     if total == passed:
         lines = [
             "",
@@ -196,10 +200,10 @@ def format_data_integrity_summary(
             f"  METRICS : Total Bars: {bars:,}",
             f"  DETAIL  : [NaN: {nan_pct:.1f}%] [Zero/Neg: {zero_pct:.1f}%] [Range: PASS]",
             sep,
-            ""
+            "",
         ]
         return "\n".join(lines)
-        
+
     lines = [
         "",
         "● [DATA-INTEGRITY AUDIT]",
@@ -208,7 +212,7 @@ def format_data_integrity_summary(
         f"  METRICS : Total Bars: {bars:,}",
         f"  DETAIL  : [NaN: {nan_pct:.1f}%] [Zero/Neg: {zero_pct:.1f}%]",
         sep,
-        ""
+        "",
     ]
     return "\n".join(lines)
 
@@ -216,6 +220,7 @@ def format_data_integrity_summary(
 # ---------------------------------------------------------------------------
 # §9.1 Window table
 # ---------------------------------------------------------------------------
+
 
 def format_window_table(w: LayeredWindow) -> str:
     """Format LayeredWindow as a pipe-table string (§9.1).
@@ -246,6 +251,7 @@ def format_window_table(w: LayeredWindow) -> str:
 # §9.2 Layer 1 table
 # ---------------------------------------------------------------------------
 
+
 def format_layer1_table(
     r: Any,
     *,
@@ -257,8 +263,9 @@ def format_layer1_table(
     DEBUG 레벨에서는 AI가 기계적으로 파싱 가능한 로우 형태의 정보를 로깅합니다.
     """
     import logging
+
     logger = logging.getLogger(__name__)
-    
+
     n_valid: int = getattr(r, "n_valid", 0)
     n_total: int = getattr(r, "n_total", 0)
     n_trade_scope: int = getattr(r, "n_trade_scope", n_total)
@@ -277,16 +284,28 @@ def format_layer1_table(
         logger.debug(
             "[DEBUG-L1-RAW] cs_ic_mean=%f cs_ic_tstat=%f cs_ic_fold_pass_ratio=%f decile_lift_bps=%f "
             "n_valid_strategies=%d/%d panel_diversity=%f breadth=%f n_valid=%d n_trade_scope=%d gate=%s",
-            cs_ic_mean, cs_ic_tstat, cs_ic_fold_pass_ratio, decile_lift_bps,
-            n_valid_strategies, strategy_panel_count, panel_diversity,
-            float(getattr(r, 'breadth', 0.0)), n_valid, n_trade_scope, gate_str
+            cs_ic_mean,
+            cs_ic_tstat,
+            cs_ic_fold_pass_ratio,
+            decile_lift_bps,
+            n_valid_strategies,
+            strategy_panel_count,
+            panel_diversity,
+            float(getattr(r, "breadth", 0.0)),
+            n_valid,
+            n_trade_scope,
+            gate_str,
         )
         if fold_details:
             for fd in fold_details:
                 logger.debug(
                     "[DEBUG-L1-FOLD-RAW] fold=%d ic=%s breadth=%f n_valid=%d n_events=%d pass=%s",
-                    fd.get("fold", 0), str(fd.get("ic")), fd.get("breadth", 0.0),
-                    fd.get("n_valid", 0), fd.get("n_events", 0), str(fd.get("pass"))
+                    fd.get("fold", 0),
+                    str(fd.get("ic")),
+                    fd.get("breadth", 0.0),
+                    fd.get("n_valid", 0),
+                    fd.get("n_events", 0),
+                    str(fd.get("pass")),
                 )
 
     lines: list[str] = [
@@ -296,8 +315,7 @@ def format_layer1_table(
         f"  ├─ CS Fold Pass%: {_pct(cs_ic_fold_pass_ratio)} (Target >=60%)",
         f"  ├─ Strat Panel : {n_valid_strategies}/{strategy_panel_count} "
         f"(Target >=5, Diversity: {panel_diversity:.3f})",
-        f"  └─ Valid Syms  : {n_valid}/{n_trade_scope} "
-        f"(Breadth: {getattr(r, 'breadth', 0.0):.3f})"
+        f"  └─ Valid Syms  : {n_valid}/{n_trade_scope} (Breadth: {getattr(r, 'breadth', 0.0):.3f})",
     ]
 
     # Backward compatibility fallback to keep unit tests happy if they search for specific headers
@@ -337,7 +355,7 @@ def format_layer1_gate_table(report: Any) -> str:
     """하드 게이트 체크 항목을 극단적으로 압축된 Inline Pipeline 형태로 표현 (예시 2)."""
     checks = tuple(getattr(report, "checks", ()) or ())
     passed = bool(getattr(report, "passed", False))
-    
+
     display_gate_map = {
         "fold_cov": "Cov",
         "match_ratio": "Qual",
@@ -345,13 +363,13 @@ def format_layer1_gate_table(report: Any) -> str:
         "fold_ratio": "Fld",
         "probe_bps": "Prf",
     }
-    
+
     n_checks = len(checks)
     n_passed = sum(1 for c in checks if bool(getattr(c, "passed", False)))
-    
+
     status_icon = "✅" if passed else "❌"
     status_text = "PASSED" if passed else "BLOCKED"
-    
+
     parts = []
     for check in checks:
         key_str = getattr(check, "key", "")
@@ -360,12 +378,9 @@ def format_layer1_gate_table(report: Any) -> str:
         comparator = ">=" if getattr(check, "comparator", "ge") == "ge" else ">"
         threshold = getattr(check, "threshold", 0.0)
         parts.append(f"{display_key}:{value:.3f}({comparator}{threshold:.2f})")
-        
+
     blockers = tuple(getattr(report, "blockers", ()) or ())
-    log_msg = (
-        f"🏁 STATUS : {status_icon} {status_text} ({n_passed}/{n_checks} Passed)\n"
-        f"  👉 {' | '.join(parts)}"
-    )
+    log_msg = f"🏁 STATUS : {status_icon} {status_text} ({n_passed}/{n_checks} Passed)\n  👉 {' | '.join(parts)}"
     if blockers:
         log_msg += f"\n  🔒 BLOCKER: {', '.join(str(b) for b in blockers)}"
     return log_msg
@@ -380,19 +395,19 @@ def format_layer1_outer_fold_table(
     """폴드별 준비 상태 진단을 트리 뷰 구조로 변경."""
     n_folds = len(reports)
     n_passed = sum(1 for r in reports if bool(getattr(r, "passed", False)))
-    
+
     status_icon = "✅" if n_passed > 0 else "❌"
     status_text = "READY" if n_passed > 0 else "BLOCKED"
-    
+
     sep = "──────────────────────────────────────────────────────────────────────────────"
     lines = [
         "",
         "● [LAYER 1 OUTER FOLD READINESS]",
         sep,
         f"  STATUS  : {status_icon} {status_text} ({n_passed}/{n_folds} Folds Ready)",
-        ""
+        "",
     ]
-    
+
     for r in reports:
         passed = bool(getattr(r, "passed", False))
         icon = "✅" if passed else "❌"
@@ -400,7 +415,7 @@ def format_layer1_outer_fold_table(
         fit_end = int(getattr(r, "registry_source_end_idx", 0))
         oos_start = int(getattr(r, "outer_oos_start_idx", 0))
         oos_end = int(getattr(r, "outer_oos_end_idx", 0))
-        
+
         ready_symbols = tuple(getattr(r, "ready_symbols", ()) or ())
         ready_count = len(ready_symbols)
         times = int(getattr(r, "valid_opportunity_timestamp_count", 0))
@@ -431,14 +446,14 @@ def format_layer1_outer_fold_table(
         lines.append(f"       ├─ Events  : {times} unique events")
         maturity_suffix = f" [censored: {dropped}]" if dropped > 0 else ""
         lines.append(f"       └─ Quality : Edge: {probe:.2f} bps{maturity_suffix}")
-        
+
         if not passed:
             blockers = tuple(getattr(r, "blockers", ()) or ())
             if blockers:
                 blocker_str = ", ".join(blockers)
                 lines.append(f"       └─ BLOCKERS: {blocker_str}")
         lines.append("")
-        
+
     lines.append(sep)
     return "\n".join(lines)
 
@@ -448,8 +463,8 @@ def format_layer_universe_audit_table(audits: Sequence[Any]) -> str:
     sep = "──────────────────────────────────────────────────────────────────────────────"
     # SYMS(>4), ENTRY(>9), KILL(>6) 등 숫자 컬럼은 우측 정렬 적용
     header = f"  {'LAYER':<6} {'WINDOW RANGE':<31} {'SYMS':>4}   {'ACTIVE (min/med/max)':<21} {'ENTRY':>10}  {'KILL':>6}  {'WARNINGS'}"  # noqa: E501
-    divider = f"  {'─'*5:<6} {'─'*30:<31} {'─'*4:>4}   {'─'*20:<21} {'─'*10:>10}  {'─'*6:>6}  {'─'*8}"
-    
+    divider = f"  {'─' * 5:<6} {'─' * 30:<31} {'─' * 4:>4}   {'─' * 20:<21} {'─' * 10:>10}  {'─' * 6:>6}  {'─' * 8}"
+
     lines: list[str] = [
         "",
         "● [LAYER UNIVERSE AUDIT]",
@@ -471,7 +486,7 @@ def format_layer_universe_audit_table(audits: Sequence[Any]) -> str:
         kill_count = int(getattr(audit, "kill_count", 0))
         warnings = tuple(getattr(audit, "warnings", ()) or ())
         warning_str = ", ".join(warnings) if warnings else "—"
-        
+
         lines.append(
             f"  {layer:<6} {window:<31} {symbol_count:>4}   {active_str:<21} {entry_count:>10,}  {kill_count:>6}  {warning_str}"  # noqa: E501
         )
@@ -491,6 +506,7 @@ def format_layer1_deployment_registry_table(
     압축된 1번 예시 포맷 적용 및 DEBUG AI 로깅 기능 통합.
     """
     import logging
+
     logger = logging.getLogger(__name__)
 
     by_symbol = getattr(registry, "by_symbol", {}) or {}
@@ -511,18 +527,22 @@ def format_layer1_deployment_registry_table(
         evidence_items = tuple(by_symbol.get(symbol, ()) or ())
         for ev in evidence_items:
             key = getattr(ev, "key", None)
-            all_entries.append({
-                "symbol": symbol,
-                "strategy_id": getattr(key, "strategy_id", ""),
-                "context": getattr(key, "activation_context", "all"),
-                "edge": float(getattr(ev, "mean_incremental_bps", 0.0)),
-                "tstat": float(getattr(ev, "block_tstat_incremental", getattr(ev, "bootstrap_tstat_incremental", 0.0))),
-                "lcb": float(getattr(ev, "lcb_net_bps", 0.0)),
-                "prob_pos": float(getattr(ev, "probability_positive", 0.0)),
-                "pos_fold_ratio": float(getattr(ev, "positive_fold_ratio", 0.0)),
-                "n_folds": int(getattr(ev, "n_folds", 0)),
-                "q_value": float(getattr(ev, "q_value", 0.0)),
-            })
+            all_entries.append(
+                {
+                    "symbol": symbol,
+                    "strategy_id": getattr(key, "strategy_id", ""),
+                    "context": getattr(key, "activation_context", "all"),
+                    "edge": float(getattr(ev, "mean_incremental_bps", 0.0)),
+                    "tstat": float(
+                        getattr(ev, "block_tstat_incremental", getattr(ev, "bootstrap_tstat_incremental", 0.0))
+                    ),
+                    "lcb": float(getattr(ev, "lcb_net_bps", 0.0)),
+                    "prob_pos": float(getattr(ev, "probability_positive", 0.0)),
+                    "pos_fold_ratio": float(getattr(ev, "positive_fold_ratio", 0.0)),
+                    "n_folds": int(getattr(ev, "n_folds", 0)),
+                    "q_value": float(getattr(ev, "q_value", 0.0)),
+                }
+            )
 
     all_entries.sort(key=lambda x: x["lcb"], reverse=True)
 
@@ -531,13 +551,20 @@ def format_layer1_deployment_registry_table(
         for entry in all_entries:
             logger.debug(
                 "[DEBUG-L1-PROMOTION-RAW] sym=%s strategy=%s ctx=%s edge=%f lcb=%f conv=%f folds=%d/%d tstat=%f q=%f",
-                entry["symbol"], entry["strategy_id"], entry["context"], entry["edge"],
-                entry["lcb"], entry["prob_pos"], round(entry["pos_fold_ratio"] * entry["n_folds"]),
-                entry["n_folds"], entry["tstat"], entry["q_value"]
+                entry["symbol"],
+                entry["strategy_id"],
+                entry["context"],
+                entry["edge"],
+                entry["lcb"],
+                entry["prob_pos"],
+                round(entry["pos_fold_ratio"] * entry["n_folds"]),
+                entry["n_folds"],
+                entry["tstat"],
+                entry["q_value"],
             )
 
     header = f"  {'RANK':<5} {'SYMBOL':<12} {'STRATEGY (Family)':<32} {'EDGE(bps)':>9}  {'LCB(bps)':>8}  {'CONV':>6}  {'FOLDS':>7}  {'t(blk)':>7}"  # noqa: E501
-    divider = f"  {'─'*4:<5} {'─'*10:<12} {'─'*31:<32} {'─'*9:>9}  {'─'*8:>8}  {'─'*6:>6}  {'─'*7:>7}  {'─'*7:>7}"
+    divider = f"  {'─' * 4:<5} {'─' * 10:<12} {'─' * 31:<32} {'─' * 9:>9}  {'─' * 8:>8}  {'─' * 6:>6}  {'─' * 7:>7}  {'─' * 7:>7}"  # noqa: E501
 
     title = f"🏆 [L1 FINAL PROMOTION SUMMARY] 🚀 (Top 5 / {len(all_entries)} Promoted)"
     lines: list[str] = ["", title, header, divider]
@@ -547,7 +574,7 @@ def format_layer1_deployment_registry_table(
         strat_parts = entry["strategy_id"].split(":")
         family = strat_parts[0] if len(strat_parts) > 1 else entry["strategy_id"]
         variant = strat_parts[1] if len(strat_parts) > 1 else ""
-        ctx_suffix = f" [{entry['context']}]" if entry['context'] != "all" else ""
+        ctx_suffix = f" [{entry['context']}]" if entry["context"] != "all" else ""
         strat_display = f"{family} ({variant}){ctx_suffix}" if variant else f"{family}{ctx_suffix}"
         if len(strat_display) > 31:
             strat_display = strat_display[:28] + "..."
@@ -572,8 +599,7 @@ def format_layer1_deployment_registry_table(
         rem_count = len(remaining_symbols) - len(preview_syms)
         suffix = f", +{rem_count} more" if rem_count > 0 else ""
         lines.append(
-            f"  └─ 🚀 And {len(remaining_symbols)} more pairs promoted "
-            f"(e.g. {', '.join(preview_syms)}{suffix})"
+            f"  └─ 🚀 And {len(remaining_symbols)} more pairs promoted (e.g. {', '.join(preview_syms)}{suffix})"
         )
 
     if not all_entries:
@@ -584,12 +610,14 @@ def format_layer1_deployment_registry_table(
     # FAIL summary — only when all_evidence is provided
     if all_evidence:
         failed = [
-            ev for ev in all_evidence
+            ev
+            for ev in all_evidence
             if (
                 getattr(getattr(ev, "key", None), "symbol", ""),
                 getattr(getattr(ev, "key", None), "strategy_id", ""),
                 getattr(getattr(ev, "key", None), "activation_context", "all"),
-            ) not in admitted_keys
+            )
+            not in admitted_keys
         ]
         if failed:
             reason_counter: Counter[str] = Counter(
@@ -597,10 +625,7 @@ def format_layer1_deployment_registry_table(
                 for ev in failed
                 for r in (tuple(getattr(ev, "structural_reasons", None) or ()) or ("quality_weight_zero",))
             )
-            top_reasons = ", ".join(
-                f"{reason}x{cnt}"
-                for reason, cnt in reason_counter.most_common(max_fail_reasons)
-            )
+            top_reasons = ", ".join(f"{reason}x{cnt}" for reason, cnt in reason_counter.most_common(max_fail_reasons))
             lines.append(f"  [NOT PROMOTED] {len(failed)} pairs | top: {top_reasons}")
             if logger.isEnabledFor(logging.DEBUG):
                 lines.extend(render_family_rejection_funnel(failed))
@@ -637,9 +662,7 @@ def render_family_rejection_funnel(
     for family in family_order:
         counter = by_family[family]
         total = sum(counter.values())
-        top = ", ".join(
-            f"{reason}x{cnt}" for reason, cnt in counter.most_common(max_reasons_per_family)
-        )
+        top = ", ".join(f"{reason}x{cnt}" for reason, cnt in counter.most_common(max_reasons_per_family))
         lines.append(f"  [L1-FAMILY-FUNNEL] {family}: total={total} | {top}")
     return lines
 
@@ -669,6 +692,7 @@ def evaluation_window_bottleneck_verdict(
 # ---------------------------------------------------------------------------
 # §9.3 Layer 2 table
 # ---------------------------------------------------------------------------
+
 
 def format_layer2_table(
     r: Any,
@@ -800,23 +824,10 @@ def format_layer2_table(
             f"Friction: {_f(friction_pct, '.1%')}"
         ),
         f"  {_status(uplift_ok)} [Uplift    ] Sharpe Uplift: {_f(uplift_val, '+.2f')} (>=+0.20)",
-        (
-            f"  {_status(integrity_ok)} [Integrity ] "
-            f"DSR: {_f(dsr_val)} (>={min_dsr:.2f}) | "
-            f"PSR: {_f(psr_val)} (diag)"
-        ),
-        (
-            f"  [Diag     ] "
-            f"RelMDD: {_f(mdd_rel_display, '.2f')}x | "
-            f"Turnover: {turnover:.3f}"
-        ),
-        (
-            f"  [L2-REGIME] "
-            f"Trend Efficiency(ER): mean={_f(mean_er, '.3f')} corr={_f(er_corr, '+.3f')}"
-        ),
-        (
-            f"  [L2-LONGSHORT] Realized Price: long={_f(price_long, '+.4f')} short={_f(price_short, '+.4f')}"
-        ),
+        (f"  {_status(integrity_ok)} [Integrity ] DSR: {_f(dsr_val)} (>={min_dsr:.2f}) | PSR: {_f(psr_val)} (diag)"),
+        (f"  [Diag     ] RelMDD: {_f(mdd_rel_display, '.2f')}x | Turnover: {turnover:.3f}"),
+        (f"  [L2-REGIME] Trend Efficiency(ER): mean={_f(mean_er, '.3f')} corr={_f(er_corr, '+.3f')}"),
+        (f"  [L2-LONGSHORT] Realized Price: long={_f(price_long, '+.4f')} short={_f(price_short, '+.4f')}"),
     ]
     long_by_sym: tuple[tuple[str, float], ...] = getattr(r, "realized_price_long_by_symbol", ())
     short_by_sym: tuple[tuple[str, float], ...] = getattr(r, "realized_price_short_by_symbol", ())
@@ -827,10 +838,7 @@ def format_layer2_table(
         ]
     )
     _major_diag_line = getattr(r, "major_symbol_diag", ())
-    lines.extend(
-        f"  [L2-MAJOR-DIAG] {_format_major_symbol_diag_line(_summary)}"
-        for _summary in _major_diag_line
-    )
+    lines.extend(f"  [L2-MAJOR-DIAG] {_format_major_symbol_diag_line(_summary)}" for _summary in _major_diag_line)
     _major_sleeve_diag_line = getattr(r, "major_symbol_sleeve_diag", ())
     lines.extend(
         f"  [L2-MAJOR-SLEEVE-DIAG] {_format_major_symbol_sleeve_diag_line(_summary)}"
@@ -843,19 +851,15 @@ def format_layer2_table(
     )
     _veto_summary = getattr(r, "directional_veto_summary", ())
     if _veto_summary:
-        lines.extend(
-            f"  [L2-DIRECTIONAL-VETO] {_format_directional_veto_line(s)}"
-            for s in _veto_summary
-        )
+        lines.extend(f"  [L2-DIRECTIONAL-VETO] {_format_directional_veto_line(s)}" for s in _veto_summary)
     lines.append(sep)
-
 
     if awf_folds:
         lines.append("")
         lines.append("  [ FOLD DETAIL BREAKDOWN ]")
         lines.append("  ──────────────────────────────────────────────────────────────────────────")
         for i, af in enumerate(awf_folds):
-            is_last = (i == len(awf_folds) - 1)
+            is_last = i == len(awf_folds) - 1
             prefix = "└─" if is_last else "├─"
             pass_icon = "✅" if af.get("pass") else "❌"
             sharpe_v = af["sharpe"]
@@ -879,19 +883,15 @@ def format_layer2_table(
             symbols = tuple(af.get("symbols", ()) or ())
             if symbols:
                 symbol_preview = _format_symbol_preview(symbols, max_symbols=8)
-                lines.append(
-                    f"       Symbols: {len(symbols)} [{symbol_preview}]"
-                )
+                lines.append(f"       Symbols: {len(symbols)} [{symbol_preview}]")
 
     if topk_selection:
         lines.append("")
         lines.append(f"  {'Rank':<5} {'Symbol':<12} {'Score':>7} {'Sel':>4}")
-        lines.append(f"  {'-'*5} {'-'*12} {'-'*7} {'-'*4}")
+        lines.append(f"  {'-' * 5} {'-' * 12} {'-' * 7} {'-' * 4}")
         for ts in topk_selection:
             sel_str: str = "Y" if ts.get("selected") else "N"
-            lines.append(
-                f"  {ts['rank']:<5} {ts['symbol']!s:<12} {ts['score']:>7.3f} {sel_str:>4}"
-            )
+            lines.append(f"  {ts['rank']:<5} {ts['symbol']!s:<12} {ts['score']:>7.3f} {sel_str:>4}")
 
     if awf_folds:
         _covered, _detail = evaluation_window_bottleneck_verdict(awf_folds)
@@ -908,6 +908,7 @@ def format_layer2_table(
 # ---------------------------------------------------------------------------
 # §9.4 Layer 3 table
 # ---------------------------------------------------------------------------
+
 
 def format_layer3_table(
     r: Any,
@@ -936,11 +937,7 @@ def format_layer3_table(
     end = holdout_end or ho_end or "—"
 
     def _resolve_status(result: Any) -> tuple[str, str]:
-        blocker = str(
-            getattr(result, "blocker_reason", "")
-            or getattr(result, "blocker", "")
-            or ""
-        )
+        blocker = str(getattr(result, "blocker_reason", "") or getattr(result, "blocker", "") or "")
         raw_status = str(getattr(result, "status", "") or "").upper()
         if raw_status == "L3_ERROR":
             return "ERROR", blocker or "layer3_execution_error"
@@ -961,7 +958,7 @@ def format_layer3_table(
         return "✅" if passed else "❌"
 
     status, blocker = _resolve_status(r)
-    
+
     # Header & Initial summary
     sep_main = "──────────────────────────────────────────────────────────────────────────────"
     final_icon = "✅" if status == "PASS" else "❌"
@@ -976,12 +973,14 @@ def format_layer3_table(
     ]
 
     if status == "ERROR":
-        lines.extend([
-            f"  {'STATUS':<20} [ {'ERROR':>8} ] ({'—':>11} )  {'—':>14} {'❌':>7}",
-            f"  Error Summary   {blocker or 'layer3_execution_error'}",
-            "",
-            f"  >> FINAL RESULT : ❌ ERROR ({blocker or 'layer3_execution_error'})"
-        ])
+        lines.extend(
+            [
+                f"  {'STATUS':<20} [ {'ERROR':>8} ] ({'—':>11} )  {'—':>14} {'❌':>7}",
+                f"  Error Summary   {blocker or 'layer3_execution_error'}",
+                "",
+                f"  >> FINAL RESULT : ❌ ERROR ({blocker or 'layer3_execution_error'})",
+            ]
+        )
         return "\n".join(lines)
 
     # Metrics
@@ -1003,53 +1002,48 @@ def format_layer3_table(
     max_cvar95 = float(getattr(r, "max_cvar95", 0.06))
 
     # Category status determination (Absolute gates)
-    growth_ok = (total_return > 0.0)
+    growth_ok = total_return > 0.0
     efficiency_ok = sharpe_h >= min_sharpe and sortino_h >= min_sortino
     risk_ok = mdd_h <= max_mdd_abs and cvar95 <= max_cvar95
-    robust_ok = (n_trades >= min_trades)
+    robust_ok = n_trades >= min_trades
 
-    lines.extend([
-        (
-            f"  {_status(growth_ok)} [GROWTH    ] "
-            f"CAGR: {_f(cagr_h, '+.1%')} | "
-            f"Total Return: {_f(total_return, '+.1%')} (> 0.0%) | "
-            f"Equity x{equity_multiple:.2f}"
-        ),
-        (
-            f"  {_status(efficiency_ok)} [EFFICIENCY] "
-            f"Sharpe: {_f(sharpe_h)} (>={min_sharpe:.3f}) | "
-            f"Sortino: {_f(sortino_h)} (>={min_sortino:.3f}) | "
-            f"Baseline Sharpe: {_f(sharpe_b)}"
-        ),
-        (
-            f"  {_status(risk_ok)} [RISK      ] "
-            f"MDD: {_pct(mdd_h)} (<= {max_mdd_abs:.1%}) | "
-            f"CVaR95: {_pct(cvar95)} (<= {max_cvar95:.1%}) | "
-            f"Exposure: {avg_gross_exposure:.1f}x"
-        ),
-        (
-            f"  {_status(robust_ok)} [DEPLOY-READY] "
-            f"Trades: {n_trades} (>= {min_trades})"
-        ),
-        sep_main,
-        ""
-    ])
+    lines.extend(
+        [
+            (
+                f"  {_status(growth_ok)} [GROWTH    ] "
+                f"CAGR: {_f(cagr_h, '+.1%')} | "
+                f"Total Return: {_f(total_return, '+.1%')} (> 0.0%) | "
+                f"Equity x{equity_multiple:.2f}"
+            ),
+            (
+                f"  {_status(efficiency_ok)} [EFFICIENCY] "
+                f"Sharpe: {_f(sharpe_h)} (>={min_sharpe:.3f}) | "
+                f"Sortino: {_f(sortino_h)} (>={min_sortino:.3f}) | "
+                f"Baseline Sharpe: {_f(sharpe_b)}"
+            ),
+            (
+                f"  {_status(risk_ok)} [RISK      ] "
+                f"MDD: {_pct(mdd_h)} (<= {max_mdd_abs:.1%}) | "
+                f"CVaR95: {_pct(cvar95)} (<= {max_cvar95:.1%}) | "
+                f"Exposure: {avg_gross_exposure:.1f}x"
+            ),
+            (f"  {_status(robust_ok)} [DEPLOY-READY] Trades: {n_trades} (>= {min_trades})"),
+            sep_main,
+            "",
+        ]
+    )
 
     # Optional Metrics (if present)
     has_opt = False
     if hasattr(r, "growth_lcb"):
         has_opt = True
         val_h = float(getattr(r, "growth_lcb", 0.0))
-        lines.append(
-            f"  {_status(True)} [INTEGRITY ] Growth LCB: {_pct(val_h)}"
-        )
-    
+        lines.append(f"  {_status(True)} [INTEGRITY ] Growth LCB: {_pct(val_h)}")
+
     if hasattr(r, "total_cost_bps"):
         has_opt = True
         val_h = float(getattr(r, "total_cost_bps", 0.0))
-        lines.append(
-            f"  {_status(True)} [INTEGRITY ] Cost Drag: {val_h/100:>+8.1%}"
-        )
+        lines.append(f"  {_status(True)} [INTEGRITY ] Cost Drag: {val_h / 100:>+8.1%}")
 
     if hasattr(r, "reversal_kill_active"):
         has_opt = True
@@ -1109,22 +1103,21 @@ def format_layer3_table(
         _veto_summary = getattr(r, "directional_veto_summary", ())
         if _veto_summary:
             lines.extend(
-                f"  {_status(True)} [L3-DIRECTIONAL-VETO] {_format_directional_veto_line(s)}"
-                for s in _veto_summary
+                f"  {_status(True)} [L3-DIRECTIONAL-VETO] {_format_directional_veto_line(s)}" for s in _veto_summary
             )
 
     if has_opt:
         lines.append("")
 
     lines.append(f"  >> FINAL RESULT : {final_icon} {final_status}")
-    
-    return "\n".join(lines)
 
+    return "\n".join(lines)
 
 
 # ---------------------------------------------------------------------------
 # §9.5 System status table
 # ---------------------------------------------------------------------------
+
 
 def format_system_status(
     l1: Any,
@@ -1144,6 +1137,7 @@ def format_system_status(
     Time Complexity: O(1).
     Space Complexity: O(1).
     """
+
     def _layer_status(r: Any | None, *, skip_if_none: bool = True) -> tuple[str, str]:
         """Return (status, blocker) tuple for a layer result."""
         if r is None and skip_if_none:
@@ -1151,11 +1145,7 @@ def format_system_status(
         if r is None:
             return "SKIP", "—"
         raw_status = str(getattr(r, "status", "") or "").upper()
-        blocker: str = str(
-            getattr(r, "blocker_reason", "")
-            or getattr(r, "blocker", "")
-            or "—"
-        )
+        blocker: str = str(getattr(r, "blocker_reason", "") or getattr(r, "blocker", "") or "—")
         if raw_status == "L3_ERROR" or bool(getattr(r, "error", False) or getattr(r, "errored", False)):
             return "L3_ERROR", blocker
         passed: bool = getattr(r, "gate_passed", False)

@@ -13,12 +13,14 @@ from src.domain.futures.strategy.tiered_workflow.family_admission import (
 
 @pytest.fixture
 def promotions_df() -> pd.DataFrame:
-    return pd.DataFrame({
-        "symbol": ["AUSDT", "BUSDT", "CUSDT", "DUSDT", "AUSDT"],
-        "family": ["residual_reversion"] * 4 + ["trend_ma"],
-        "variant": ["v1", "v1", "v2", "v1", "ma"],
-        "lcb_bps": [12.0, 8.0, 3.0, -1.0, 50.0],
-    })
+    return pd.DataFrame(
+        {
+            "symbol": ["AUSDT", "BUSDT", "CUSDT", "DUSDT", "AUSDT"],
+            "family": ["residual_reversion"] * 4 + ["trend_ma"],
+            "variant": ["v1", "v1", "v2", "v1", "ma"],
+            "lcb_bps": [12.0, 8.0, 3.0, -1.0, 50.0],
+        }
+    )
 
 
 class TestComputeTrendSleeveCorr:
@@ -28,36 +30,46 @@ class TestComputeTrendSleeveCorr:
         rows: list[dict[str, object]] = []
 
         for sym, values in [
-            ("AUSDT", base),          # identical → r ≈ +1.0
-            ("BUSDT", -base),         # inverse → r ≈ -1.0
+            ("AUSDT", base),  # identical → r ≈ +1.0
+            ("BUSDT", -base),  # inverse → r ≈ -1.0
         ]:
             for i, v in enumerate(values):
-                rows.append({
-                    "symbol": sym,
-                    "family": "residual_reversion",
-                    "decision_idx": i,
-                    "realized_side_adjusted_gross_bps": v,
-                })
-                rows.append({
-                    "symbol": sym,
-                    "family": "trend_ma",
-                    "decision_idx": i,
-                    "realized_side_adjusted_gross_bps": v if sym == "AUSDT" else -v,
-                })
+                rows.append(
+                    {
+                        "symbol": sym,
+                        "family": "residual_reversion",
+                        "decision_idx": i,
+                        "realized_side_adjusted_gross_bps": v,
+                    }
+                )
+                rows.append(
+                    {
+                        "symbol": sym,
+                        "family": "trend_ma",
+                        "decision_idx": i,
+                        "realized_side_adjusted_gross_bps": v if sym == "AUSDT" else -v,
+                    }
+                )
 
         sym = "CUSDT"
-        rows.extend({
-            "symbol": sym,
-            "family": "residual_reversion",
-            "decision_idx": i,
-            "realized_side_adjusted_gross_bps": 1.0,
-        } for i in range(20))
-        rows.extend({
-            "symbol": sym,
-            "family": "trend_ma",
-            "decision_idx": i,
-            "realized_side_adjusted_gross_bps": 1.0,
-        } for i in range(20, 40))
+        rows.extend(
+            {
+                "symbol": sym,
+                "family": "residual_reversion",
+                "decision_idx": i,
+                "realized_side_adjusted_gross_bps": 1.0,
+            }
+            for i in range(20)
+        )
+        rows.extend(
+            {
+                "symbol": sym,
+                "family": "trend_ma",
+                "decision_idx": i,
+                "realized_side_adjusted_gross_bps": 1.0,
+            }
+            for i in range(20, 40)
+        )
 
         df = pd.DataFrame(rows)
         result = compute_trend_sleeve_corr(
@@ -72,10 +84,12 @@ class TestComputeTrendSleeveCorr:
 
 class TestEvaluateFamilyAdmission:
     def test_three_symbols_positive_lcb_admitted(
-        self, promotions_df: pd.DataFrame,
+        self,
+        promotions_df: pd.DataFrame,
     ) -> None:
         verdict = evaluate_family_admission(
-            promotions_df, "residual_reversion",
+            promotions_df,
+            "residual_reversion",
             trend_sleeve_corr=0.2,
         )
         assert verdict.admitted is True
@@ -85,33 +99,37 @@ class TestEvaluateFamilyAdmission:
         assert verdict.trend_sleeve_corr == 0.2
 
     def test_below_min_symbols_rejected(
-        self, promotions_df: pd.DataFrame,
+        self,
+        promotions_df: pd.DataFrame,
     ) -> None:
-        filtered = promotions_df[
-            promotions_df["symbol"] != "CUSDT"
-        ].reset_index(drop=True)
+        filtered = promotions_df[promotions_df["symbol"] != "CUSDT"].reset_index(drop=True)
         verdict = evaluate_family_admission(
-            filtered, "residual_reversion",
+            filtered,
+            "residual_reversion",
             trend_sleeve_corr=0.2,
         )
         assert verdict.admitted is False
         assert "n_symbols_lt_3" in verdict.reasons
 
     def test_high_trend_corr_rejected(
-        self, promotions_df: pd.DataFrame,
+        self,
+        promotions_df: pd.DataFrame,
     ) -> None:
         verdict = evaluate_family_admission(
-            promotions_df, "residual_reversion",
+            promotions_df,
+            "residual_reversion",
             trend_sleeve_corr=0.7,
         )
         assert verdict.admitted is False
         assert "trend_corr_gt_max" in verdict.reasons
 
     def test_missing_corr_skips_gate(
-        self, promotions_df: pd.DataFrame,
+        self,
+        promotions_df: pd.DataFrame,
     ) -> None:
         verdict = evaluate_family_admission(
-            promotions_df, "residual_reversion",
+            promotions_df,
+            "residual_reversion",
             trend_sleeve_corr=None,
         )
         assert verdict.admitted is True
@@ -119,10 +137,12 @@ class TestEvaluateFamilyAdmission:
         assert verdict.n_promoted_symbols == 3
 
     def test_unknown_family_rejected(
-        self, promotions_df: pd.DataFrame,
+        self,
+        promotions_df: pd.DataFrame,
     ) -> None:
         verdict = evaluate_family_admission(
-            promotions_df, "nonexistent",
+            promotions_df,
+            "nonexistent",
             trend_sleeve_corr=0.2,
         )
         assert verdict.admitted is False
@@ -130,17 +150,21 @@ class TestEvaluateFamilyAdmission:
         assert verdict.min_lcb_bps != verdict.min_lcb_bps  # nan
 
     def test_zero_lcb_excluded(
-        self, promotions_df: pd.DataFrame,
+        self,
+        promotions_df: pd.DataFrame,
     ) -> None:
-        extra = pd.DataFrame({
-            "symbol": ["ZUSDT"],
-            "family": ["residual_reversion"],
-            "variant": ["v1"],
-            "lcb_bps": [0.0],
-        })
+        extra = pd.DataFrame(
+            {
+                "symbol": ["ZUSDT"],
+                "family": ["residual_reversion"],
+                "variant": ["v1"],
+                "lcb_bps": [0.0],
+            }
+        )
         df = pd.concat([promotions_df, extra], ignore_index=True)
         verdict = evaluate_family_admission(
-            df, "residual_reversion",
+            df,
+            "residual_reversion",
             trend_sleeve_corr=0.2,
         )
         assert verdict.n_promoted_symbols == 3

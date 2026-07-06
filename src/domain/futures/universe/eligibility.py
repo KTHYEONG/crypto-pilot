@@ -196,16 +196,12 @@ def resolve_execution_rules(
     Time Complexity: O(R) where R = rows for instrument_id.
     Space Complexity: O(R) filtered subset.
     """
-    mask = (rule_history["instrument_id"] == instrument_id) & (
-        rule_history["available_at"] <= decision_at
-    )
+    mask = (rule_history["instrument_id"] == instrument_id) & (rule_history["available_at"] <= decision_at)
     subset = rule_history.loc[mask]
 
     if subset.empty:
         if not fallback_policy.allow_reconstructed:
-            raise RuntimeError(
-                f"MISSING_RULES: no execution rules for {instrument_id} at {decision_at}"
-            )
+            raise RuntimeError(f"MISSING_RULES: no execution rules for {instrument_id} at {decision_at}")
         _LOG.warning(
             "resolve_execution_rules: no rows for %s at %s; using conservative fallback",
             instrument_id,
@@ -391,28 +387,20 @@ def evaluate_execution_eligibility(
             .last()
             .reset_index()
         )
-        obs_pivot = latest_obs.pivot(
-            index="instrument_id", columns="metric", values="value"
-        )
+        obs_pivot = latest_obs.pivot(index="instrument_id", columns="metric", values="value")
 
     eligibilities: list[ExecutionEligibility] = []
 
     for _, inst_row in instruments.iterrows():
         iid: str = str(inst_row["instrument_id"])
-        notional: float = float(
-            intended_notional_usdt.get(iid, config.default_intended_notional_usdt)
-        )
+        notional: float = float(intended_notional_usdt.get(iid, config.default_intended_notional_usdt))
 
         # ------------------------------------------------------------------
         # Gate 0: LEVERAGED_TOKEN - structural exclusion (spec G0 / R6)
         # Leveraged tokens (UP/DOWN/BULL/BEAR) have tracking error and
         # roll costs that make them structurally unsuitable for directional alpha.
         # ------------------------------------------------------------------
-        _excl_lev = (
-            config.exclude_leveraged
-            if hasattr(config, "exclude_leveraged")
-            else True
-        )
+        _excl_lev = config.exclude_leveraged if hasattr(config, "exclude_leveraged") else True
         if _excl_lev:
             _sym_upper = iid.upper()
             if any(pat in _sym_upper for pat in _LEVERAGED_PATTERNS):
@@ -493,9 +481,7 @@ def evaluate_execution_eligibility(
         # Gate 3: DATA_CONFIDENCE_LOW
         # ------------------------------------------------------------------
         raw_conf = inst_row.get("confidence", DataConfidence.UNKNOWN)
-        inst_confidence = (
-            DataConfidence(raw_conf) if isinstance(raw_conf, str) else raw_conf
-        )
+        inst_confidence = DataConfidence(raw_conf) if isinstance(raw_conf, str) else raw_conf
         if not _confidence_ge(inst_confidence, config.min_data_confidence):
             eligibilities.append(
                 ExecutionEligibility(
@@ -574,9 +560,7 @@ def evaluate_execution_eligibility(
         # Recency sub-check: last bar age from staleness_bars field in obs_row
         # obs_row is the instrument row from instruments DataFrame
         _staleness = int(inst_row.get("staleness_bars", 0)) if "staleness_bars" in inst_row.index else 0
-        _max_stale = (
-            config.max_staleness_bars if hasattr(config, "max_staleness_bars") else 2
-        )
+        _max_stale = config.max_staleness_bars if hasattr(config, "max_staleness_bars") else 2
         if _staleness > _max_stale:
             eligibilities.append(
                 ExecutionEligibility(
@@ -611,9 +595,7 @@ def evaluate_execution_eligibility(
         _has_nan = bool(inst_row.get("has_nan", False)) if "has_nan" in inst_row.index else False
         _has_inf = bool(inst_row.get("has_inf", False)) if "has_inf" in inst_row.index else False
         _has_ts = (
-            bool(inst_row.get("has_timestamp_issues", False))
-            if "has_timestamp_issues" in inst_row.index
-            else False
+            bool(inst_row.get("has_timestamp_issues", False)) if "has_timestamp_issues" in inst_row.index else False
         )
 
         _min_cov = config.min_coverage_ratio if hasattr(config, "min_coverage_ratio") else 0.95
@@ -719,9 +701,7 @@ def evaluate_execution_eligibility(
         # ------------------------------------------------------------------
         # Gate 8: COST_TOO_HIGH
         # ------------------------------------------------------------------
-        round_trip_cost = _compute_round_trip_cost(
-            notional, adv30, exec_rules.taker_fee_bps
-        )
+        round_trip_cost = _compute_round_trip_cost(notional, adv30, exec_rules.taker_fee_bps)
         if round_trip_cost > config.max_round_trip_cost_bps:
             eligibilities.append(
                 ExecutionEligibility(
@@ -749,9 +729,7 @@ def evaluate_execution_eligibility(
         # ------------------------------------------------------------------
         # ELIGIBLE - compute capacity and risk metadata
         # ------------------------------------------------------------------
-        cap_cost = _capacity_from_cost(
-            adv30, exec_rules.taker_fee_bps, config.max_round_trip_cost_bps
-        )
+        cap_cost = _capacity_from_cost(adv30, exec_rules.taker_fee_bps, config.max_round_trip_cost_bps)
         cap_participation = adv30 * config.max_participation_rate
         capacity = min(cap_cost, cap_participation)
 
@@ -775,9 +753,7 @@ def evaluate_execution_eligibility(
         )
 
     eligible_count = sum(1 for e in eligibilities if e.eligible)
-    instrument_ids: tuple[str, ...] = tuple(
-        str(r["instrument_id"]) for _, r in instruments.iterrows()
-    )
+    instrument_ids: tuple[str, ...] = tuple(str(r["instrument_id"]) for _, r in instruments.iterrows())
 
     return EligibilitySnapshot(
         decision_at=decision_at,
@@ -831,10 +807,7 @@ def build_universe_state_cube(
     for snap in snapshots:
         for elig in snap.eligibilities:
             if elig.instrument_id not in inst_index:
-                raise ValueError(
-                    f"universe symbol axis mismatch: "
-                    f"'{elig.instrument_id}' not in instruments tuple"
-                )
+                raise ValueError(f"universe symbol axis mismatch: '{elig.instrument_id}' not in instruments tuple")
 
     # Index snapshots by decision_at (pd.Timestamp UTC)
     snap_index: dict[pd.Timestamp, EligibilitySnapshot] = {}
@@ -863,10 +836,7 @@ def build_universe_state_cube(
         bar_pd = pd.Timestamp(bar_ts)
 
         # Advance cursor to include all snapshots with decision_at <= bar_ts
-        while (
-            snap_cursor < len(sorted_snap_times)
-            and sorted_snap_times[snap_cursor] <= bar_pd
-        ):
+        while snap_cursor < len(sorted_snap_times) and sorted_snap_times[snap_cursor] <= bar_pd:
             prev_snap = snap_index[sorted_snap_times[snap_cursor]]
             snap_cursor += 1
 

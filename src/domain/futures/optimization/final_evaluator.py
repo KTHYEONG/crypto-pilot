@@ -390,8 +390,7 @@ def run_final_oos_evaluation(
             m_mdd = m_port.get("mdd_pct", 0.0)
             m_trades = m_port.get("total_trades", m_port.get("trade_count", 0))
             _logger.info(
-                "[ENSEMBLE_MEMBER] member=%d/%d cagr_pct=%.2f mdd_pct=%.2f "
-                "trades=%d trial=%d status=cached",
+                "[ENSEMBLE_MEMBER] member=%d/%d cagr_pct=%.2f mdd_pct=%.2f trades=%d trial=%d status=cached",
                 i + 1,
                 len(selected_ensemble_results),
                 m_cagr,
@@ -458,8 +457,7 @@ def run_final_oos_evaluation(
         m_mdd = m_port.get("mdd_pct", 0.0)
         m_trades = m_port.get("total_trades", m_port.get("trade_count", 0))
         _logger.info(
-            "[ENSEMBLE_MEMBER] member=%d/%d cagr_pct=%.2f mdd_pct=%.2f "
-            "trades=%d trial=%d status=fresh",
+            "[ENSEMBLE_MEMBER] member=%d/%d cagr_pct=%.2f mdd_pct=%.2f trades=%d trial=%d status=fresh",
             i + 1,
             len(selected_ensemble_results),
             m_cagr,
@@ -468,8 +466,7 @@ def run_final_oos_evaluation(
             res["trial"].number,
         )
         _logger.info(
-            "[ENSEMBLE_PROF] member=%d/%d build_alpha_s=%.2f merge_s=%.2f "
-            "oos_eval_s=%.2f total_s=%.2f",
+            "[ENSEMBLE_PROF] member=%d/%d build_alpha_s=%.2f merge_s=%.2f oos_eval_s=%.2f total_s=%.2f",
             i + 1,
             len(selected_ensemble_results),
             build_alpha_sec,
@@ -642,10 +639,7 @@ def run_final_oos_evaluation(
         if split_cost_source != is_meta:
             split_cost_source_mismatch.append(f"{split_name}:cost_source")
     if split_cost_source_mismatch:
-        raise RuntimeError(
-            "split cost source mismatch: "
-            + ", ".join(split_cost_source_mismatch)
-        )
+        raise RuntimeError("split cost source mismatch: " + ", ".join(split_cost_source_mismatch))
 
     def _augment_port_metrics(p: dict[str, Any], hrs_tf: int) -> None:
         eq = p.get("equity_curve", np.array([float(FUTURES_INITIAL_BALANCE)]))
@@ -778,9 +772,7 @@ def run_final_oos_evaluation(
         oos_short_pf=float(_spf_oos),
         is_cagr_pct=float(is_cagr_v),
         is_sharpe=float(is_sharpe_v),
-        is_survival_min_cagr=float(
-            OPT_FUTURES_CONFIG.get("FUTURES_IS_SURVIVAL_MIN_CAGR_PCT", 15.0)
-        ),
+        is_survival_min_cagr=float(OPT_FUTURES_CONFIG.get("FUTURES_IS_SURVIVAL_MIN_CAGR_PCT", 15.0)),
         is_survival_min_sharpe=float(OPT_FUTURES_CONFIG.get("FUTURES_IS_SURVIVAL_MIN_SHARPE", 1.5)),
         worst_leg_log_tw=float(worst_leg),
         awf_p10_log_tw_floor=float(p10_floor),
@@ -799,12 +791,8 @@ def run_final_oos_evaluation(
     gate_failures = list(_gf_codes)
 
     if bool(OPT_FUTURES_CONFIG.get("FUTURES_STEP4_DEPLOYABILITY_ENABLED", False)):
-        _step4_chop_trade_max = float(
-            OPT_FUTURES_CONFIG.get("FUTURES_STEP4_CHOP_TRADE_SHARE_MAX", 0.70)
-        )
-        _step4_turnover_max = float(
-            OPT_FUTURES_CONFIG.get("FUTURES_STEP4_TURNOVER_COST_RATIO_MAX", 0.35)
-        )
+        _step4_chop_trade_max = float(OPT_FUTURES_CONFIG.get("FUTURES_STEP4_CHOP_TRADE_SHARE_MAX", 0.70))
+        _step4_turnover_max = float(OPT_FUTURES_CONFIG.get("FUTURES_STEP4_TURNOVER_COST_RATIO_MAX", 0.35))
         _step4_chop_pf_floor = float(OPT_FUTURES_CONFIG.get("FUTURES_STEP4_CHOP_PF_FLOOR", 0.95))
         _chop_trade = float(champion_awf_diag.get("awf_chop_trade_share", 0.0))
         _turnover_cost_ratio = float(champion_awf_diag.get("awf_turnover_cost_ratio", 0.0))
@@ -821,10 +809,7 @@ def run_final_oos_evaluation(
                 gate_failures.append("STEP4_CHOP_PF_TOO_LOW")
                 gate_ok = False
 
-    if (
-        bool(OPT_FUTURES_CONFIG.get("FUTURES_TMP_LAYER3_HARD_GATE", False))
-        and stab_tmp_layer3_awf_fail
-    ):
+    if bool(OPT_FUTURES_CONFIG.get("FUTURES_TMP_LAYER3_HARD_GATE", False)) and stab_tmp_layer3_awf_fail:
         gate_failures.append("TMP_LAYER3_STABILITY_LAYER1")
         gate_ok = False
 
@@ -878,9 +863,7 @@ def run_final_oos_evaluation(
             _met = _c.get("metrics", {})
             champ_m = {
                 "pbo": safe_float(_met.get("pbo_paired", _met.get("pbo", 0.5)), 0.5, 1.0) * 100.0,
-                "p10": safe_float(
-                    _met.get("awf_worst_leg_log_tw", _met.get("cpcv_p10_log_tw", 0.0)), 0.0, 100.0
-                ),
+                "p10": safe_float(_met.get("awf_worst_leg_log_tw", _met.get("cpcv_p10_log_tw", 0.0)), 0.0, 100.0),
                 "dsr": safe_float(_met.get("dsr", 0.0), 0.0, 1e3),
                 "tw": safe_float(_met.get("oos_terminal_wealth", 1.0), 1.0, 1e6),
                 "cagr": safe_float(_met.get("oos_cagr_pct", 0.0), 0.0, 1e5),
@@ -894,9 +877,7 @@ def run_final_oos_evaluation(
                 "avg_pnl": safe_float(_met.get("oos_avg_trade_pnl_pct", 0.0), 0.0, 1e5),
                 "pf": safe_float(_met.get("oos_profit_factor", 1.0), 1.0, 1e3),
                 "ev_cost_ratio": safe_float(_met.get("ev_cost_ratio", 1e3), 1e3, 1e6),
-                "oos_retention_expectancy_pct": safe_float(
-                    _met.get("oos_retention_expectancy_pct", 0.0), 0.0, 1e6
-                ),
+                "oos_retention_expectancy_pct": safe_float(_met.get("oos_retention_expectancy_pct", 0.0), 0.0, 1e6),
             }
         except Exception as _ce:
             _logger.debug("Champion metrics parse failed: %s", _ce)
@@ -991,9 +972,7 @@ def run_final_oos_evaluation(
             _logger.warning(" [CHAMPION GUARD] HOLD reason=%s", reason)
 
     _verdict = (
-        "PROMOTE ✅"
-        if gate_ok
-        else ("HOLD (CHAMPION_BLOCKED) 🛡️" if gate_ok_before_champ else "HOLD (GATE_FAIL) ⚠️")
+        "PROMOTE ✅" if gate_ok else ("HOLD (CHAMPION_BLOCKED) 🛡️" if gate_ok_before_champ else "HOLD (GATE_FAIL) ⚠️")
     )
 
     # Final result logging & saving logic...

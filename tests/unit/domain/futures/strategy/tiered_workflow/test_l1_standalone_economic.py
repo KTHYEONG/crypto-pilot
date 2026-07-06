@@ -1,4 +1,5 @@
 """V1: L1 알파 단독 경제성 검증 — 사이징 우회 EW 백테스트."""
+
 import numpy as np
 import pytest
 
@@ -10,6 +11,7 @@ from src.domain.futures.strategy.tiered_workflow.awf_sim import (
 def _synthetic_signals(n_sym: int, n_events: int, mu_bps: float = 30.0):
     """고정 양의 net edge를 가진 합성 신호 딕셔너리."""
     from src.domain.futures.strategy.cs_rank import SymbolSignal
+
     syms = [f"SYM{i:02d}" for i in range(n_sym)]
     signals = {
         s: SymbolSignal(
@@ -29,6 +31,7 @@ def _synthetic_signals(n_sym: int, n_events: int, mu_bps: float = 30.0):
 def test_l1_ew_book_positive_cagr_given_positive_edge():
     """Arrange: 30bps/bar net edge, 52 symbols. Act: EW book. Then: CAGR > 0."""
     from src.domain.futures.portfolio.portfolio_constructor import PortfolioCaps
+
     n_sym = 10
     signals, _syms = _synthetic_signals(n_sym, n_events=100, mu_bps=30.0)
     mu_arr = np.array([s.raw_mu for s in signals.values()])
@@ -55,6 +58,7 @@ def test_l1_ew_book_positive_cagr_given_positive_edge():
 def test_l1_ew_book_zero_edge_gives_no_return():
     """Arrange: 0bps edge. Act: EW book. Then: expected return = 0."""
     from src.domain.futures.portfolio.portfolio_constructor import PortfolioCaps
+
     n_sym = 5
     mu_arr = np.zeros(n_sym)
     sig_arr = np.full(n_sym, 0.02)

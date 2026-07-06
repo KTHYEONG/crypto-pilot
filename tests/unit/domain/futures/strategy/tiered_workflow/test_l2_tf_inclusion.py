@@ -235,10 +235,12 @@ class TestTfInclusionRegression:
 
     def test_from_mapping_parses_correctly(self) -> None:
         """from_mapping이 신규 필드를 올바르게 파싱."""
-        config = Layer2AllocationConfig.from_mapping({
-            "l2_tf_inclusion_enabled": False,
-            "l2_tf_inclusion_min_edge": 0.005,
-        })
+        config = Layer2AllocationConfig.from_mapping(
+            {
+                "l2_tf_inclusion_enabled": False,
+                "l2_tf_inclusion_min_edge": 0.005,
+            }
+        )
         assert config.l2_tf_inclusion_enabled is False
         assert config.l2_tf_inclusion_min_edge == 0.005
 

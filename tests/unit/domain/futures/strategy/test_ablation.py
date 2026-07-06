@@ -26,23 +26,25 @@ from src.domain.futures.strategy.execution_cost import ExecutionCostModel
 def _make_mock_data_maps(t: int = 150) -> dict[str, dict[str, Any]]:
     symbols = ["BTCUSDT", "ETHUSDT"]
     datetimes = pd.date_range("2025-01-01", periods=t, freq="4h")
-    
+
     maps = {}
     for sym in symbols:
         base = np.linspace(100.0, 130.0, t) if sym == "BTCUSDT" else np.linspace(10.0, 13.0, t)
-        df = pd.DataFrame({
-            "datetime": datetimes,
-            "open": base,
-            "high": base * 1.01,
-            "low": base * 0.99,
-            "close": base,
-            "volume": np.full(t, 1000.0, dtype=np.float64),
-            "funding_rate": np.zeros(t, dtype=np.float64),
-            "universe_active_mask": np.ones(t, dtype=bool),
-            "universe_entry_warm_mask": np.ones(t, dtype=bool),
-            "entry_block_mask": np.zeros(t, dtype=bool),
-            "kill_signal": np.zeros(t, dtype=bool),
-        })
+        df = pd.DataFrame(
+            {
+                "datetime": datetimes,
+                "open": base,
+                "high": base * 1.01,
+                "low": base * 0.99,
+                "close": base,
+                "volume": np.full(t, 1000.0, dtype=np.float64),
+                "funding_rate": np.zeros(t, dtype=np.float64),
+                "universe_active_mask": np.ones(t, dtype=bool),
+                "universe_entry_warm_mask": np.ones(t, dtype=bool),
+                "entry_block_mask": np.zeros(t, dtype=bool),
+                "kill_signal": np.zeros(t, dtype=bool),
+            }
+        )
         maps[sym] = {"4h": df}
     return maps
 
@@ -73,6 +75,7 @@ def test_run_candidate_ablation_returns_correct_ablation_dataframe(monkeypatch: 
 
     def _fake_predict_candidate_edges(*, dataset: Any, p_pass: np.ndarray, **__: Any) -> CandidateModelOutput:
         from src.domain.futures.strategy.candidate_contracts import EdgeSource
+
         n = dataset.X.shape[0]
         zeros = np.zeros(n, dtype=np.float64)
         return CandidateModelOutput(
@@ -214,6 +217,7 @@ def test_build_variant_prior_output_uses_calibration_set_prior(monkeypatch: Any)
 
     def _fake_predict_candidate_edges(*_: Any, **__: Any) -> CandidateModelOutput:
         from src.domain.futures.strategy.candidate_contracts import EdgeSource
+
         zeros = np.zeros(2, dtype=np.float64)
         return CandidateModelOutput(
             events=oos_set.event_index,
@@ -275,6 +279,7 @@ def test_ablation_returns_attribution_columns(monkeypatch: Any) -> None:
 
     def _fake_edges(*, dataset: Any, p_pass: np.ndarray, **__: Any) -> CandidateModelOutput:
         from src.domain.futures.strategy.candidate_contracts import EdgeSource
+
         n = dataset.X.shape[0]
         zeros = np.zeros(n, dtype=np.float64)
         return CandidateModelOutput(
@@ -299,23 +304,31 @@ def test_ablation_returns_attribution_columns(monkeypatch: Any) -> None:
     monkeypatch.setattr("src.domain.futures.strategy.ablation.predict_candidate_edges", _fake_edges)
 
     df_ablation = run_candidate_ablation(
-        data_maps=data_maps, symbols=("BTCUSDT", "ETHUSDT"), tf="4h", cfg=cfg,
+        data_maps=data_maps,
+        symbols=("BTCUSDT", "ETHUSDT"),
+        tf="4h",
+        cfg=cfg,
     )
 
     if not df_ablation.empty:
         required_attr_cols = {
-            "trade_count", "deployed_bar_fraction",
-            "pred_edge_bps_p50", "gross_cost_bps", "pass_deployment_gate",
+            "trade_count",
+            "deployed_bar_fraction",
+            "pred_edge_bps_p50",
+            "gross_cost_bps",
+            "pass_deployment_gate",
         }
         assert required_attr_cols.issubset(df_ablation.columns), (
             f"Missing attribution columns: {required_attr_cols - set(df_ablation.columns)}"
         )
-        assert df_ablation["trade_count"].dtype in (
-            "int64", "int32", object
-        ) or df_ablation["trade_count"].apply(lambda x: isinstance(x, int)).all()
-        assert df_ablation["pass_deployment_gate"].dtype == bool or df_ablation[
-            "pass_deployment_gate"
-        ].apply(lambda x: isinstance(x, bool)).all()
+        assert (
+            df_ablation["trade_count"].dtype in ("int64", "int32", object)
+            or df_ablation["trade_count"].apply(lambda x: isinstance(x, int)).all()
+        )
+        assert (
+            df_ablation["pass_deployment_gate"].dtype == bool
+            or df_ablation["pass_deployment_gate"].apply(lambda x: isinstance(x, bool)).all()
+        )
 
 
 def test_deployment_gate_blocks_near_zero_trading_variant() -> None:
@@ -351,6 +364,7 @@ def test_deployment_gate_blocks_near_zero_trading_variant() -> None:
 
 # ── Phase 0 tests ──────────────────────────────────────────────────────────────
 
+
 def test_compute_realized_edge_returns_nan_for_empty_trades() -> None:
     """Phase 0: empty trade DataFrame yields NaN realized edge."""
     result = _compute_realized_edge(pd.DataFrame())
@@ -359,12 +373,14 @@ def test_compute_realized_edge_returns_nan_for_empty_trades() -> None:
 
 def test_compute_realized_edge_returns_median_net_bps() -> None:
     """Phase 0: realized edge uses new net edge formula with pnl, entry_fee, entry_price, amount."""
-    trades = pd.DataFrame({
-        "entry_price": [100.0, 100.0],
-        "amount": [10.0, 10.0],
-        "pnl": [100.0, 100.0],
-        "entry_fee": [1.0, 1.0],
-    })
+    trades = pd.DataFrame(
+        {
+            "entry_price": [100.0, 100.0],
+            "amount": [10.0, 10.0],
+            "pnl": [100.0, 100.0],
+            "entry_fee": [1.0, 1.0],
+        }
+    )
     # net_trade_bps = (100.0 - 1.0) / 1000.0 * 10_000 = 990 bps
     result = _compute_realized_edge(trades)
     assert np.isclose(result, 990.0, rtol=1e-6)
@@ -373,8 +389,10 @@ def test_compute_realized_edge_returns_median_net_bps() -> None:
 def test_ablation_result_contains_real_edge_columns() -> None:
     """Phase 0: ablation DataFrame must expose real_edge_bps_p50 and edge_capture_ratio."""
     import dataclasses
+
     required = {"real_edge_bps_p50", "edge_capture_ratio"}
     from src.domain.futures.strategy.ablation import AblationRow
+
     row = AblationRow(
         variant="test",
         mean_log_growth=0.001,
@@ -400,15 +418,18 @@ def test_ablation_result_contains_real_edge_columns() -> None:
 
 # ── Phase 1 tests ──────────────────────────────────────────────────────────────
 
+
 def test_build_barrier_arrays_writes_stop_and_tp_at_entry() -> None:
     """Phase 1: barrier arrays are non-zero only at and after each event's entry_idx."""
-    events = pd.DataFrame({
-        "symbol": ["BTCUSDT"],
-        "entry_idx": [5],
-        "stop_atr_mult": [2.0],
-        "take_profit_atr_mult": [3.0],
-        "expected_holding_bars": [3],
-    })
+    events = pd.DataFrame(
+        {
+            "symbol": ["BTCUSDT"],
+            "entry_idx": [5],
+            "stop_atr_mult": [2.0],
+            "take_profit_atr_mult": [3.0],
+            "expected_holding_bars": [3],
+        }
+    )
     stop_2d, tp_2d = _build_barrier_arrays(
         selected_events=events,
         n_times=10,
@@ -428,13 +449,15 @@ def test_build_barrier_arrays_writes_stop_and_tp_at_entry() -> None:
 
 def test_build_barrier_arrays_respects_start_idx_offset() -> None:
     """Phase 1: global entry_idx is remapped correctly via start_idx."""
-    events = pd.DataFrame({
-        "symbol": ["BTCUSDT"],
-        "entry_idx": [100],  # global index
-        "stop_atr_mult": [1.5],
-        "take_profit_atr_mult": [2.5],
-        "expected_holding_bars": [2],
-    })
+    events = pd.DataFrame(
+        {
+            "symbol": ["BTCUSDT"],
+            "entry_idx": [100],  # global index
+            "stop_atr_mult": [1.5],
+            "take_profit_atr_mult": [2.5],
+            "expected_holding_bars": [2],
+        }
+    )
     stop_2d, _ = _build_barrier_arrays(
         selected_events=events,
         n_times=10,
@@ -597,13 +620,16 @@ def test_validate_candidate_signals_raw_and_promoted_are_distinct() -> None:
 # P4: Promotion Filter Advisory Mode (apply_variant_promotions)
 # ---------------------------------------------------------------------------
 
+
 def _make_promo_labeled(n: int = 10) -> pd.DataFrame:
-    return pd.DataFrame({
-        "family": ["trend_ma"] * (n // 2) + ["rsi_reversion"] * (n - n // 2),
-        "variant": ["ema_12_72"] * (n // 2) + ["rsi_14"] * (n - n // 2),
-        "side": [1] * n,
-        "entry_idx": list(range(n)),
-    })
+    return pd.DataFrame(
+        {
+            "family": ["trend_ma"] * (n // 2) + ["rsi_reversion"] * (n - n // 2),
+            "variant": ["ema_12_72"] * (n // 2) + ["rsi_14"] * (n - n // 2),
+            "side": [1] * n,
+            "entry_idx": list(range(n)),
+        }
+    )
 
 
 def test_promo_empty_allowed_advisory_pass_through() -> None:

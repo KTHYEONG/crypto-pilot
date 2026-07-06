@@ -22,7 +22,7 @@ def _calculate_warm_ready_numba(active: np.ndarray, warmup_bars_required: int) -
         else:
             current_run = 0.0
             run_lens[i] = 0.0
-    
+
     warm_ready = np.zeros(n, dtype=np.float64)
     for i in range(n):
         if run_lens[i] >= warmup_bars_required:
@@ -120,9 +120,7 @@ def build_membership_mask_bundle(
 
     entry_block_mask = np.where((active > 0.0) & (warm_ready > 0.0), 0.0, 1.0)
     raw_kill = (
-        np.zeros(n, dtype=np.float64)
-        if raw_kill_signal is None
-        else np.asarray(raw_kill_signal, dtype=np.float64)
+        np.zeros(n, dtype=np.float64) if raw_kill_signal is None else np.asarray(raw_kill_signal, dtype=np.float64)
     )
     effective_kill = np.maximum(raw_kill, membership_kill)
 
@@ -180,16 +178,10 @@ def inject_membership_masks_into_maps(
         for maps in (data_maps, oos_data_maps):
             sym_map = maps.get(sym, {})
             frame = sym_map.get(tf)
-            if (
-                not isinstance(frame, pd.DataFrame)
-                or frame.empty
-                or "datetime" not in frame.columns
-            ):
+            if not isinstance(frame, pd.DataFrame) or frame.empty or "datetime" not in frame.columns:
                 continue
             raw_kill = (
-                frame["kill_signal"].to_numpy(dtype=np.float64, copy=False)
-                if "kill_signal" in frame.columns
-                else None
+                frame["kill_signal"].to_numpy(dtype=np.float64, copy=False) if "kill_signal" in frame.columns else None
             )
             bundle = build_membership_mask_bundle(
                 datetimes=frame["datetime"],

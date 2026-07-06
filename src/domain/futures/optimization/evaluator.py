@@ -32,10 +32,9 @@ _logger: logging.Logger = logging.getLogger("opt_futures")
 
 # --- Alpha Evaluation (from alpha_evaluator.py) ---
 
+
 def compute_vol_adj_forward_returns(
-    df: pd.DataFrame, 
-    horizons: list[int] | None = None,
-    market_returns: dict[int, np.ndarray] | None = None
+    df: pd.DataFrame, horizons: list[int] | None = None, market_returns: dict[int, np.ndarray] | None = None
 ) -> dict[int, np.ndarray]:
     """여러 호흡(Horizons)에 대해 변동성으로 정규화된 미래 수익률을 계산함."""
     if horizons is None:
@@ -43,52 +42,52 @@ def compute_vol_adj_forward_returns(
     close = df["close"].to_numpy(dtype=np.float64)
     high = df["high"].to_numpy(dtype=np.float64)
     low = df["low"].to_numpy(dtype=np.float64)
-    
+
     n = len(close)
     if n < 20:
         return {h: np.full(n, np.nan) for h in horizons}
 
     # 14-period ATR for normalization
-    tr = np.maximum(high[1:] - low[1:], 
-                    np.maximum(np.abs(high[1:] - close[:-1]), 
-                               np.abs(low[1:] - close[:-1])))
+    tr = np.maximum(high[1:] - low[1:], np.maximum(np.abs(high[1:] - close[:-1]), np.abs(low[1:] - close[:-1])))
     tr = np.concatenate([[tr[0]], tr])
     atr = pd.Series(tr).rolling(window=14, min_periods=1).mean().to_numpy()
     atr = np.maximum(atr, 1e-9)
-    
+
     results = {}
     for h in horizons:
         fwd_ret = np.full(n, np.nan)
         if n > h:
             fwd_ret[:-h] = (close[h:] - close[:-h]) / close[:-h]
-        
+
         vol_adj_ret = fwd_ret / atr
-        
+
         if market_returns and h in market_returns:
             m_ret = market_returns[h]
             mask = ~np.isnan(vol_adj_ret) & ~np.isnan(m_ret)
             if np.sum(mask) > 50:
                 beta = np.cov(vol_adj_ret[mask], m_ret[mask])[0, 1] / (np.var(m_ret[mask]) + 1e-9)
                 vol_adj_ret = vol_adj_ret - beta * m_ret
-                
+
         results[h] = vol_adj_ret
-        
+
     return results
+
 
 def calculate_spearman_ic(signal_scores: np.ndarray, target_returns: np.ndarray) -> float:
     """Spearman Rank Correlation (IC) 계산."""
     if len(signal_scores) != len(target_returns):
         return 0.0
-        
+
     mask = ~np.isnan(signal_scores) & ~np.isnan(target_returns)
     if np.sum(mask) < 50:
         return 0.0
-    
+
     if np.unique(signal_scores[mask]).size < 2:
         return 0.0
-        
+
     ic, _ = spearmanr(signal_scores[mask], target_returns[mask])
     return float(ic) if not np.isnan(ic) else 0.0
+
 
 def calculate_residual_score(candidate_scores: np.ndarray, base_scores: np.ndarray) -> np.ndarray:
     """Candidate 시그널에서 Base 시그널의 잔차 점수 계산."""
@@ -104,24 +103,25 @@ def calculate_residual_score(candidate_scores: np.ndarray, base_scores: np.ndarr
     residual = candidate_scores - float(beta) * base_scores
     return np.asarray(residual, dtype=np.float64)
 
+
 def calculate_conditional_ic(
-    signal_scores: np.ndarray, 
-    target_returns: np.ndarray, 
-    regime_mask: np.ndarray
+    signal_scores: np.ndarray, target_returns: np.ndarray, regime_mask: np.ndarray
 ) -> tuple[float, float]:
     """특정 Regime 구간에서의 조건부 IC 및 커버리지 계산."""
     if len(signal_scores) != len(regime_mask):
         return 0.0, 0.0
-        
-    active_mask = (regime_mask > 0.5)
+
+    active_mask = regime_mask > 0.5
     active_scores = signal_scores[active_mask]
     active_returns = target_returns[active_mask]
-    
+
     ic = calculate_spearman_ic(active_scores, active_returns)
     coverage = float(np.mean(active_mask))
     return ic, coverage
 
+
 # --- Performance Metrics (from metrics.py) ---
+
 
 def calc_profit_factor_from_pnl(pnl_series: pd.Series | np.ndarray | Sequence[float]) -> float:
     """Calculate Profit Factor from a pre-computed net PNL series."""
@@ -134,6 +134,7 @@ def calc_profit_factor_from_pnl(pnl_series: pd.Series | np.ndarray | Sequence[fl
         return 5.0 if gross_profit > 0 else 1.0
     return gross_profit / gross_loss
 
+
 def calc_profit_factor(trades_df: pd.DataFrame) -> float:
     """Calculate Profit Factor from raw trades_df."""
     if trades_df.empty:
@@ -145,6 +146,7 @@ def calc_profit_factor(trades_df: pd.DataFrame) -> float:
     if gross_loss == 0.0:
         return 5.0 if gross_profit > 0 else 1.0
     return gross_profit / gross_loss
+
 
 def calc_mdd_from_equity(equity_curve: np.ndarray) -> float:
     """Calculate Maximum Drawdown from an aggregated equity curve."""
@@ -161,7 +163,7 @@ def calc_mdd_duration(equity_curve: np.ndarray) -> int:
         return 0
     running_max = np.maximum.accumulate(equity_curve)
     is_underwater = equity_curve < running_max
-    
+
     max_duration = 0
     current_duration = 0
     for underwater in is_underwater:
@@ -174,31 +176,28 @@ def calc_mdd_duration(equity_curve: np.ndarray) -> int:
     return max_duration
 
 
-def calc_sortino_ratio(
-    equity_curve: np.ndarray, 
-    ann_factor: float, 
-    risk_free_rate: float = 0.0
-) -> float:
+def calc_sortino_ratio(equity_curve: np.ndarray, ann_factor: float, risk_free_rate: float = 0.0) -> float:
     """Calculate Sortino Ratio (Downside-only risk) from equity curve."""
     if len(equity_curve) < 2:
         return 0.0
-    
+
     returns = np.diff(equity_curve) / np.maximum(equity_curve[:-1], 1e-9)
     if returns.size == 0:
         return 0.0
-    
+
     excess_returns = returns - (risk_free_rate / ann_factor)
     downside_returns = excess_returns[excess_returns < 0]
-    
+
     if downside_returns.size < 2:
         # If no downside, Sortino is technically infinite; cap at 10.0 for stability
         return 10.0 if np.mean(excess_returns) > 0 else 0.0
-        
+
     downside_std = float(np.std(downside_returns)) * math.sqrt(float(ann_factor))
     if downside_std < 1e-9:
         return 10.0 if np.mean(excess_returns) > 0 else 0.0
 
     return float(float(np.mean(excess_returns)) * float(ann_factor) / downside_std)
+
 
 def calc_sortino_from_equity(equity_curve: np.ndarray, span_days: float) -> float:
     """Compute annualized Sortino ratio from equity curve."""
@@ -220,6 +219,7 @@ def calc_sortino_from_equity(equity_curve: np.ndarray, span_days: float) -> floa
         return 999.0 if cagr_decimal > 0 else 0.0
     return float(cagr_decimal / annual_downside_dev)
 
+
 def calc_cvar5_loss_pct_from_equity(equity_curve: np.ndarray) -> float:
     """Portfolio CVaR(5%) as positive loss % - optimized with O(N) np.partition."""
     if equity_curve.size < 2:
@@ -234,16 +234,17 @@ def calc_cvar5_loss_pct_from_equity(equity_curve: np.ndarray) -> float:
     worst = r_partitioned[:k]
     return float(-np.mean(worst) * 100.0)
 
+
 def calc_max_underwater_days_from_equity(equity_curve: np.ndarray, hours_per_bar: float) -> float:
     """Longest stretch below running peak, computed with highly optimized 0-loop NumPy logic."""
     if equity_curve.size < 2:
         return 0.0
     peak = np.maximum.accumulate(equity_curve)
     underwater = (equity_curve < peak).astype(np.int8)
-    
+
     # 0(Peak를 갱신하거나 도달한 지점)의 인덱스 추출
     zero_indices = np.where(underwater == 0)[0]
-    
+
     if zero_indices.size == 0:
         # 단 한 번도 peak를 갱신하지 못하고 계속 underwater 상태였던 경우
         max_run = underwater.size
@@ -253,11 +254,12 @@ def calc_max_underwater_days_from_equity(equity_curve: np.ndarray, hours_per_bar
         padded_zeros[0] = -1
         padded_zeros[1:-1] = zero_indices
         padded_zeros[-1] = underwater.size
-        
+
         # 0 사이의 간격(연속된 1의 길이) 중 최댓값 산출 (np.diff - 1)
         max_run = np.max(np.diff(padded_zeros) - 1)
-        
+
     return float(max_run * hours_per_bar / 24.0)
+
 
 def calc_ulcer_index_from_equity(equity_curve: np.ndarray) -> float:
     """Ulcer Index: RMS of percentage drawdown."""
@@ -265,7 +267,8 @@ def calc_ulcer_index_from_equity(equity_curve: np.ndarray) -> float:
         return 0.0
     peak = np.maximum.accumulate(equity_curve)
     dd_pct = (equity_curve - peak) / np.clip(peak, 1e-9, None) * 100.0
-    return float(np.sqrt(np.mean(dd_pct ** 2.0)))
+    return float(np.sqrt(np.mean(dd_pct**2.0)))
+
 
 def calc_tail_ratio_from_equity(equity: np.ndarray) -> float:
     """95th percentile return / abs(5th percentile return)."""
@@ -280,11 +283,13 @@ def calc_tail_ratio_from_equity(equity: np.ndarray) -> float:
         return 5.0 if val95 > 0 else 1.0
     return float(val95 / abs(val5))
 
+
 def _log_tw_from_ret_pct(ret_pct: float) -> float:
     r = 1.0 + float(ret_pct) / 100.0
     if r <= 0.0 or not math.isfinite(r):
         return -10.0
     return float(math.log(max(r, 1e-9)))
+
 
 def calc_gate1_dsr_from_path_log_tw(
     path_arr: np.ndarray,
@@ -370,6 +375,7 @@ def calc_time_to_target_wealth(
     ci_upper_years = log_target / drift_ci_lower if drift_ci_lower > 1e-6 else 999.0
     return float(expected_years), float(ci_upper_years)
 
+
 def calc_net_alpha_with_friction(
     equity_curve: np.ndarray,
     benchmark_cagr: float,
@@ -392,6 +398,7 @@ def calc_net_alpha_with_friction(
     annual_slippage_cost = annual_turnover * (avg_slippage_bps / 10000.0)
     annual_funding_cost = bars_per_year * (avg_funding_rate_bps / 10000.0) * 0.5
     return float(cagr_decimal - annual_slippage_cost - annual_funding_cost - benchmark_cagr)
+
 
 def stationary_bootstrap_spa(
     leg_log_tw: np.ndarray,
@@ -423,7 +430,9 @@ def stationary_bootstrap_spa(
         bootstrap_means[b] = float(np.mean(sample))
     return float(np.mean(bootstrap_means >= obs_mean))
 
+
 # --- OOS Evaluation (from oos_evaluator.py) ---
+
 
 def run_oos_margin_shared_portfolio(
     symbols: list[str],
@@ -438,16 +447,30 @@ def run_oos_margin_shared_portfolio(
     import gc
 
     from .data_aligner import _segment_with_context, align_data_for_2d_engine
+
     full_signal_dfs: dict[str, pd.DataFrame] = {}
     seg_dfs: dict[str, pd.DataFrame] = {}
 
     required_backtest_cols = {
-        "open", "high", "low", "close", "volume", "atr",
-        "entry_upper", "entry_lower", "trend_direction", "strength_filter",
-        "garch_kelly_f", "funding_rate_sum", "kill_signal", "membership_kill_signal",
-        "entry_block_mask", "dyn_leverage",
-        "alpha_long", "alpha_short",
-        "datetime"
+        "open",
+        "high",
+        "low",
+        "close",
+        "volume",
+        "atr",
+        "entry_upper",
+        "entry_lower",
+        "trend_direction",
+        "strength_filter",
+        "garch_kelly_f",
+        "funding_rate_sum",
+        "kill_signal",
+        "membership_kill_signal",
+        "entry_block_mask",
+        "dyn_leverage",
+        "alpha_long",
+        "alpha_short",
+        "datetime",
     }
 
     for sym in symbols:
@@ -455,25 +478,25 @@ def run_oos_margin_shared_portfolio(
         oos_start = int(oos_data_maps[sym][f"oos_start_idx_{tf}"])
         if oos_start_idx is not None:
             oos_start = int(oos_start_idx)
-        
+
         end_cap = int(oos_end_idx) if oos_end_idx is not None else len(full_df)
-        
+
         # Warmup bars slicing optimization
         warmup_margin = int(params.get("WARMUP_BARS", 120))
         slice_start = max(0, oos_start - warmup_margin)
         sliced_df = full_df.iloc[slice_start:end_cap].copy(deep=False)
-        
+
         full_sig = sliced_df.copy()
-        
+
         # Drop heavy non-essential columns to free RAM immediately
         cols_to_drop = [c for c in full_sig.columns if c not in required_backtest_cols]
         if cols_to_drop:
             full_sig.drop(columns=cols_to_drop, inplace=True, errors="ignore")
-        
+
         adjusted_oos_start = oos_start - slice_start
         adjusted_end_cap = end_cap - slice_start
         seg, _ = _segment_with_context(full_sig, adjusted_oos_start, adjusted_end_cap)
-        
+
         if return_signal_dfs:
             full_signal_dfs[sym] = full_sig
         seg_dfs[sym] = seg
@@ -485,12 +508,21 @@ def run_oos_margin_shared_portfolio(
 
     if not aligned_data:
         return {
-            "cagr_pct": -100.0, "mdd_pct": 100.0, "profit_factor": 0.0,
-            "total_trades": 0, "moic": 0.0, "terminal_wealth_ratio": 0.0,
-            "cvar_pct": 100.0, "hw_recovery_days": 999.0, "win_rate_pct": 0.0,
-            "oos_long_short_minority_pct": 0.0, "long_trades": 0, "short_trades": 0,
+            "cagr_pct": -100.0,
+            "mdd_pct": 100.0,
+            "profit_factor": 0.0,
+            "total_trades": 0,
+            "moic": 0.0,
+            "terminal_wealth_ratio": 0.0,
+            "cvar_pct": 100.0,
+            "hw_recovery_days": 999.0,
+            "win_rate_pct": 0.0,
+            "oos_long_short_minority_pct": 0.0,
+            "long_trades": 0,
+            "short_trades": 0,
             "equity_curve": np.array([FUTURES_INITIAL_BALANCE]),
-            "bt_dust_skip_cnt": 0, "bt_margin_fail_cnt": 0,
+            "bt_dust_skip_cnt": 0,
+            "bt_margin_fail_cnt": 0,
         }
 
     engine = PortfolioBacktestEngineFast(
@@ -503,43 +535,49 @@ def run_oos_margin_shared_portfolio(
         slippage_rate=SLIPPAGE_RATE,
         smart_offset=SMART_ORDER_OFFSET,
     )
-    
+
     # === [DIAG-OOS-ENGINE] ===
-    _logger.info(" [DIAG-OOS-ENGINE-START] Params: %s", {k: v for k, v in params.items() if "HURDLE" in k or "BETA" in k or "MODE" in k or "LEVERAGE" in k})
+    _logger.info(
+        " [DIAG-OOS-ENGINE-START] Params: %s",
+        {k: v for k, v in params.items() if "HURDLE" in k or "BETA" in k or "MODE" in k or "LEVERAGE" in k},
+    )
     if "alpha_long" in aligned_data:
         al = np.asarray(aligned_data["alpha_long"])
         ash = np.asarray(aligned_data["alpha_short"])
         _logger.info(
             " [DIAG-OOS-ENGINE-ALPHA] raw alpha_long shape=%s, nz: %.4f%%, max: %.6f | alpha_short shape=%s, nz: %.4f%%, max: %.6f",
-            al.shape, np.mean(al != 0.0) * 100.0, np.max(np.abs(al)) if al.size > 0 else 0.0,
-            ash.shape, np.mean(ash != 0.0) * 100.0, np.max(np.abs(ash)) if ash.size > 0 else 0.0
+            al.shape,
+            np.mean(al != 0.0) * 100.0,
+            np.max(np.abs(al)) if al.size > 0 else 0.0,
+            ash.shape,
+            np.mean(ash != 0.0) * 100.0,
+            np.max(np.abs(ash)) if ash.size > 0 else 0.0,
         )
-    
+
     trades_df, equity_curve, final_balance, _bt_diag = engine.run()
-    
+
     # === [DIAG-OOS-ENGINE-END] ===
     if "target_weights" in aligned_data:
         tw = np.asarray(aligned_data["target_weights"])
         _logger.info(
             " [DIAG-OOS-ENGINE-TW] target_weights shape=%s, nz: %.4f%%, max_exposure: %.6f",
-            tw.shape, np.mean(tw != 0.0) * 100.0, np.max(np.abs(tw)) if tw.size > 0 else 0.0
+            tw.shape,
+            np.mean(tw != 0.0) * 100.0,
+            np.max(np.abs(tw)) if tw.size > 0 else 0.0,
         )
-    _logger.info(
-        " [DIAG-OOS-ENGINE-RESULT] Trades=%d, final_balance=%.2f",
-        len(trades_df), final_balance
-    )
+    _logger.info(" [DIAG-OOS-ENGINE-RESULT] Trades=%d, final_balance=%.2f", len(trades_df), final_balance)
 
     # Metrics calculation
     hours_per_bar = int(tf.replace("h", "")) if tf.endswith("h") else 4
     n_days = (len(equity_curve) * hours_per_bar) / 24.0
     moic = final_balance / max(FUTURES_INITIAL_BALANCE, 1e-9)
-    
+
     # Safe CAGR calculation using log space to prevent OverflowError
     try:
         exponent = 365.0 / max(n_days, 1e-3)
         log_moic = math.log(max(moic, 1e-9))
         log_cagr_plus_1 = exponent * log_moic
-        if log_cagr_plus_1 > 15.0: # Cap at extremely high value (exp(15) ~ 3.2M)
+        if log_cagr_plus_1 > 15.0:  # Cap at extremely high value (exp(15) ~ 3.2M)
             cagr = 1e8
         elif log_cagr_plus_1 < -15.0:
             cagr = -100.0
@@ -574,30 +612,35 @@ def run_oos_margin_shared_portfolio(
         long_losses = float(abs(long_df[long_df["pnl"] < 0]["pnl"].sum()))
         short_gains = float(short_df[short_df["pnl"] > 0]["pnl"].sum())
         short_losses = float(abs(short_df[short_df["pnl"] < 0]["pnl"].sum()))
-        long_pf = (
-            long_gains / max(long_losses, 1e-9) 
-            if long_losses > 0 else (1.5 if long_gains > 0 else 1.0)
-        )
-        short_pf = (
-            short_gains / max(short_losses, 1e-9) 
-            if short_losses > 0 else (1.5 if short_gains > 0 else 1.0)
-        )
+        long_pf = long_gains / max(long_losses, 1e-9) if long_losses > 0 else (1.5 if long_gains > 0 else 1.0)
+        short_pf = short_gains / max(short_losses, 1e-9) if short_losses > 0 else (1.5 if short_gains > 0 else 1.0)
     else:
         pf_val, wr, lt, st, minority_pct, ev_ratio = 1.0, 0.0, 0, 0, 0.0, 0.0
         long_pf, short_pf = 1.0, 1.0
 
     _n_trades = len(trades_df)
     out = {
-        "cagr_pct": cagr, "mdd_pct": mdd, "profit_factor": pf_val, "total_trades": _n_trades,
-        "trade_count": _n_trades, "n_trades": _n_trades, "oos_trade_count": _n_trades,
-        "moic": moic, "terminal_wealth_ratio": moic, "win_rate_pct": wr, "long_trades": lt,
-        "short_trades": st, "equity_curve": equity_curve, "cvar_pct": cvar,
-        "hw_recovery_days": hw_days, "oos_long_short_minority_pct": minority_pct,
+        "cagr_pct": cagr,
+        "mdd_pct": mdd,
+        "profit_factor": pf_val,
+        "total_trades": _n_trades,
+        "trade_count": _n_trades,
+        "n_trades": _n_trades,
+        "oos_trade_count": _n_trades,
+        "moic": moic,
+        "terminal_wealth_ratio": moic,
+        "win_rate_pct": wr,
+        "long_trades": lt,
+        "short_trades": st,
+        "equity_curve": equity_curve,
+        "cvar_pct": cvar,
+        "hw_recovery_days": hw_days,
+        "oos_long_short_minority_pct": minority_pct,
         "calmar_ratio": cagr / abs(mdd) if abs(mdd) > 1e-6 else 0.0,
-        "ulcer_index": ulcer, "ev_cost_ratio": ev_ratio,
+        "ulcer_index": ulcer,
+        "ev_cost_ratio": ev_ratio,
         "avg_trade_pnl_pct": (
-            float(trades_df["pnl"].mean() / max(FUTURES_INITIAL_BALANCE, 1.0) * 100.0)
-            if not trades_df.empty else 0.0
+            float(trades_df["pnl"].mean() / max(FUTURES_INITIAL_BALANCE, 1.0) * 100.0) if not trades_df.empty else 0.0
         ),
         "long_pf": float(long_pf),
         "short_pf": float(short_pf),
@@ -610,20 +653,18 @@ def run_oos_margin_shared_portfolio(
         out["aligned_master_index"] = master_index
     return out
 
+
 def perform_online_capital_allocation(
-    ensemble_curves: list[np.ndarray],
-    initial_balance: float,
-    window_size: int = 24,
-    eta: float = 0.1
+    ensemble_curves: list[np.ndarray], initial_balance: float, window_size: int = 24, eta: float = 0.1
 ) -> tuple[np.ndarray, np.ndarray]:
     """Simulate an online weighting process using Exponentiated Gradient (EG).
-    
+
     Args:
         ensemble_curves: List of equity curves (numpy arrays).
         initial_balance: Starting balance.
         window_size: Period (in bars) to update weights.
         eta: Learning rate for EG update.
-        
+
     Returns:
         meta_equity: The resulting meta-equity curve.
         weight_history: History of weights over time.
@@ -631,16 +672,16 @@ def perform_online_capital_allocation(
     """
     if not ensemble_curves:
         return np.array([initial_balance]), np.array([])
-        
+
     n_members = len(ensemble_curves)
     n_bars = len(ensemble_curves[0])
-    
+
     # Initialize equal weights (1/N)
     weights = np.ones(n_members) / n_members
     weight_history = np.zeros((n_bars, n_members))
     meta_equity = np.zeros(n_bars)
     meta_equity[0] = initial_balance
-    
+
     # Member returns (bar-by-bar)
     member_returns: list[np.ndarray] = []
     for curve in ensemble_curves:
@@ -650,13 +691,13 @@ def perform_online_capital_allocation(
         rets[1:] = (safe_curve[1:] - safe_curve[:-1]) / safe_curve[:-1]
         member_returns.append(rets)
     member_returns_arr = np.asarray(member_returns, dtype=np.float64)  # (N, T)
-    
+
     for t in range(1, n_bars):
         # Apply current weights to calculate meta-return for this bar
         meta_ret = float(np.dot(weights, member_returns_arr[:, t]))
-        meta_equity[t] = meta_equity[t-1] * (1.0 + meta_ret)
+        meta_equity[t] = meta_equity[t - 1] * (1.0 + meta_ret)
         weight_history[t] = weights
-        
+
         # Every window_size, update weights based on previous window performance
         if t % window_size == 0:
             # Calculate cumulative relative returns over the previous window
@@ -669,16 +710,16 @@ def perform_online_capital_allocation(
                 end_val = c[t]
                 win_ret = (end_val - start_val) / start_val
                 window_returns.append(win_ret)
-            
+
             window_returns_arr = np.asarray(window_returns, dtype=np.float64)
-            
+
             # EG update rule: w_{i, t+1} = w_{i, t} * exp(eta * R_{i, window})
             # Normalize to sum to 1
             new_weights = weights * np.exp(eta * window_returns_arr)
             # Clip for numerical stability if needed
             new_weights = np.clip(new_weights, 1e-10, 1e10)
             weights = new_weights / np.sum(new_weights)
-            
+
     return meta_equity, weight_history
 
 

@@ -46,6 +46,7 @@ class SymbolSyncProfile:
 
 # --- Persistence Helpers ---
 
+
 def _utc_now_iso() -> str:
     return datetime.now(UTC).isoformat()
 
@@ -75,9 +76,7 @@ def _symbol_meta_from_dict(payload: dict[str, Any]) -> SymbolMeta:
         cluster_id=int(payload["cluster_id"]),
         tradeable_rank=int(payload["tradeable_rank"]),
         basis_annualized_mean=(
-            float(payload["basis_annualized_mean"])
-            if payload["basis_annualized_mean"] is not None
-            else None
+            float(payload["basis_annualized_mean"]) if payload["basis_annualized_mean"] is not None else None
         ),
         basis_vol=float(payload["basis_vol"]) if payload["basis_vol"] is not None else None,
         capacity_clip_usdt_list=tuple(float(item) for item in payload["capacity_clip_usdt_list"]),
@@ -93,24 +92,12 @@ def _symbol_meta_from_dict(payload: dict[str, Any]) -> SymbolMeta:
 
 def _filter_report_to_dict(report: FilterReport) -> dict[str, Any]:
     payload = asdict(report)
-    payload["stage1_reason"] = (
-        report.stage1_reason.value if report.stage1_reason is not None else None
-    )
-    payload["stage2_reason"] = (
-        report.stage2_reason.value if report.stage2_reason is not None else None
-    )
-    payload["stage3_reason"] = (
-        report.stage3_reason.value if report.stage3_reason is not None else None
-    )
-    payload["stage4_reason"] = (
-        report.stage4_reason.value if report.stage4_reason is not None else None
-    )
-    payload["stage5_reason"] = (
-        report.stage5_reason.value if report.stage5_reason is not None else None
-    )
-    payload["stage6_reason"] = (
-        report.stage6_reason.value if report.stage6_reason is not None else None
-    )
+    payload["stage1_reason"] = report.stage1_reason.value if report.stage1_reason is not None else None
+    payload["stage2_reason"] = report.stage2_reason.value if report.stage2_reason is not None else None
+    payload["stage3_reason"] = report.stage3_reason.value if report.stage3_reason is not None else None
+    payload["stage4_reason"] = report.stage4_reason.value if report.stage4_reason is not None else None
+    payload["stage5_reason"] = report.stage5_reason.value if report.stage5_reason is not None else None
+    payload["stage6_reason"] = report.stage6_reason.value if report.stage6_reason is not None else None
     payload["audit_trail"] = list(report.audit_trail)
     return payload
 
@@ -138,11 +125,7 @@ def _filter_report_from_dict(payload: dict[str, Any]) -> FilterReport:
         stage6_reason=_reject_code_or_none(payload["stage6_reason"]),
         stage6_metrics={str(k): float(v) for k, v in dict(payload["stage6_metrics"]).items()},
         final_rank=int(payload["final_rank"]) if payload["final_rank"] is not None else None,
-        final_cluster_id=(
-            int(payload["final_cluster_id"])
-            if payload["final_cluster_id"] is not None
-            else None
-        ),
+        final_cluster_id=(int(payload["final_cluster_id"]) if payload["final_cluster_id"] is not None else None),
         audit_trail=tuple(str(item) for item in payload["audit_trail"]),
     )
 
@@ -158,10 +141,7 @@ def snapshot_to_payload(snapshot: UniverseSnapshot) -> dict[str, Any]:
         "basket_ref": list(snapshot.basket_ref),
         "basket_weights": list(snapshot.basket_weights),
         "selected": [_symbol_meta_to_dict(item) for item in snapshot.selected],
-        "rejected": {
-            symbol: _filter_report_to_dict(report)
-            for symbol, report in snapshot.rejected.items()
-        },
+        "rejected": {symbol: _filter_report_to_dict(report) for symbol, report in snapshot.rejected.items()},
         "generated_at_utc": snapshot.generated_at_utc,
         "ledger_confidence": snapshot.ledger_confidence,
         "n_stage0": snapshot.n_stage0,
@@ -187,10 +167,7 @@ def snapshot_from_payload(payload: dict[str, Any]) -> UniverseSnapshot:
         basket_ref=tuple(str(item) for item in payload["basket_ref"]),
         basket_weights=tuple(float(item) for item in payload["basket_weights"]),
         selected=tuple(_symbol_meta_from_dict(dict(item)) for item in payload["selected"]),
-        rejected={
-            symbol: _filter_report_from_dict(report)
-            for symbol, report in rejected_payload.items()
-        },
+        rejected={symbol: _filter_report_from_dict(report) for symbol, report in rejected_payload.items()},
         generated_at_utc=str(payload["generated_at_utc"]),
         ledger_confidence=str(payload["ledger_confidence"]),
         n_stage0=int(payload["n_stage0"]),
@@ -201,8 +178,7 @@ def snapshot_from_payload(payload: dict[str, Any]) -> UniverseSnapshot:
         n_stage5_pass=int(payload["n_stage5_pass"]),
         n_stage6_selected=int(payload["n_stage6_selected"]),
         state_transition_summary={
-            str(key): int(value)
-            for key, value in dict(payload.get("state_transition_summary", {})).items()
+            str(key): int(value) for key, value in dict(payload.get("state_transition_summary", {})).items()
         },
     )
 
@@ -284,6 +260,7 @@ def hash_manifest_rows(rows: list[ManifestRow] | tuple[ManifestRow, ...]) -> str
 
 # --- Sync Utilities ---
 
+
 def _build_sync_coverage_report_rows(
     *,
     mode: str,
@@ -298,9 +275,7 @@ def _build_sync_coverage_report_rows(
     run_ts = datetime.now().isoformat()
     synced_symbols = int(sum(1 for v in per_symbol_synced_days.values() if int(v) > 0))
     total_synced_days = int(sum(int(v) for v in per_symbol_synced_days.values()))
-    coverage_ratio = (
-        float(synced_symbols / max(1, sync_tasks_total)) if sync_tasks_total > 0 else 0.0
-    )
+    coverage_ratio = float(synced_symbols / max(1, sync_tasks_total)) if sync_tasks_total > 0 else 0.0
     for symbol, synced_days in sorted(per_symbol_synced_days.items()):
         report_rows.append(
             {
@@ -380,10 +355,10 @@ def _load_symbol_sync_profiles() -> dict[str, SymbolSyncProfile]:
     import json
     import time
     from pathlib import Path
-    
+
     cache_path = Path(FUTURES_DATA_DIR) / "symbol_sync_profiles.json"
     cache_valid_seconds = 24 * 3600
-    
+
     # 1. Try to load from valid cache
     if cache_path.exists():
         try:
@@ -406,7 +381,7 @@ def _load_symbol_sync_profiles() -> dict[str, SymbolSyncProfile]:
                 return profiles
         except Exception as e:
             logger.warning("Failed to load symbol sync profiles cache: %s", e)
-            
+
     # 2. Cache invalid or missing -> Fetch from Binance API
     profiles = {}
     api_failed = False
@@ -439,7 +414,7 @@ def _load_symbol_sync_profiles() -> dict[str, SymbolSyncProfile]:
                 delivery_date=delivery_date,
                 status=str(sym_info.get("status", "")),
             )
-            
+
         # Write back to cache
         cache_data = {}
         for symbol, p in profiles.items():
@@ -452,11 +427,11 @@ def _load_symbol_sync_profiles() -> dict[str, SymbolSyncProfile]:
         with open(cache_path, "w", encoding="utf-8") as f:
             json.dump(cache_data, f, indent=2)
         logger.info("Updated symbol sync profiles cache: %s", cache_path)
-        
+
     except Exception as e:
         logger.warning("Failed to fetch symbol profiles from API: %s", e)
         api_failed = True
-        
+
     # 3. API Fetch failed -> Fallback to expired cache if available
     if api_failed and cache_path.exists():
         try:
@@ -477,7 +452,7 @@ def _load_symbol_sync_profiles() -> dict[str, SymbolSyncProfile]:
             return profiles
         except Exception as e:
             logger.error("Critical: Fallback cache load failed: %s", e)
-            
+
     _profiles_cache = profiles
     return profiles
 
@@ -574,18 +549,13 @@ def compute_continuity_metrics(
     # ── NaN / inf checks ─────────────────────────────────────────────────
     has_nan: bool = bool(klines_tf[present_cols].isnull().any().any())
     has_inf: bool = bool(
-        klines_tf[present_cols]
-        .apply(lambda s: np.isinf(pd.to_numeric(s, errors="coerce")))
-        .any()
-        .any()
+        klines_tf[present_cols].apply(lambda s: np.isinf(pd.to_numeric(s, errors="coerce"))).any().any()
     )
 
     # ── Timestamp issues: duplicate or non-monotonic ──────────────────────
     dt_col = klines_tf["datetime"]
     dt_utc = pd.to_datetime(dt_col, utc=True, errors="coerce")
-    has_timestamp_issues: bool = bool(dt_utc.duplicated().any()) or not bool(
-        dt_utc.is_monotonic_increasing
-    )
+    has_timestamp_issues: bool = bool(dt_utc.duplicated().any()) or not bool(dt_utc.is_monotonic_increasing)
 
     # ── Build expected grid (PIT-safe: onboard_date → as_of_date) ────────
     offset_str = _tf_to_offset(tf)
@@ -608,14 +578,10 @@ def compute_continuity_metrics(
 
     # ── Clamp observed bars to PIT boundary ──────────────────────────────
     pit_upper = pd.Timestamp(as_of_date, tz="UTC") + pd.Timedelta(days=1)
-    observed_dt = dt_utc[
-        (dt_utc >= pd.Timestamp(onboard_date, tz="UTC")) & (dt_utc < pit_upper)
-    ].dropna()
+    observed_dt = dt_utc[(dt_utc >= pd.Timestamp(onboard_date, tz="UTC")) & (dt_utc < pit_upper)].dropna()
     observed_count: int = len(observed_dt)
 
-    coverage_ratio: float = (
-        float(observed_count) / float(expected_count) if expected_count > 0 else 0.0
-    )
+    coverage_ratio: float = float(observed_count) / float(expected_count) if expected_count > 0 else 0.0
     coverage_ratio = min(coverage_ratio, 1.0)  # cap at 100%
 
     # ── Gap analysis: missing bars from expected grid ─────────────────────
@@ -668,22 +634,16 @@ def compute_continuity_metrics(
     window_start_60d = pd.Timestamp(as_of_date, tz="UTC") - pd.Timedelta(days=60)
     recent_mask = (dt_utc >= window_start_60d) & (dt_utc < pit_upper)
     if "quote_vol" in klines_tf.columns:
-        qvol = pd.to_numeric(
-            klines_tf.loc[recent_mask.values, "quote_vol"], errors="coerce"
-        )
+        qvol = pd.to_numeric(klines_tf.loc[recent_mask.values, "quote_vol"], errors="coerce")
         # row 단위 NaN(컬럼은 존재하나 값 미제공, 예: live API 소스)은 확정 제로가 아니므로
         # volume으로 폴백 — 컬럼 전체 부재 시의 elif volume 분기와 별개의 방어.
         if "volume" in klines_tf.columns:
-            vol_fallback = pd.to_numeric(
-                klines_tf.loc[recent_mask.values, "volume"], errors="coerce"
-            )
+            vol_fallback = pd.to_numeric(klines_tf.loc[recent_mask.values, "volume"], errors="coerce")
             qvol = qvol.where(qvol.notna(), vol_fallback)
         qvol = qvol.fillna(0.0)
         n_zero_volume_bars_60d = int((qvol <= 1e-8).sum())
     elif "volume" in klines_tf.columns:
-        vol = pd.to_numeric(
-            klines_tf.loc[recent_mask.values, "volume"], errors="coerce"
-        ).fillna(0.0)
+        vol = pd.to_numeric(klines_tf.loc[recent_mask.values, "volume"], errors="coerce").fillna(0.0)
         n_zero_volume_bars_60d = int((vol <= 1e-8).sum())
 
     return {
@@ -745,10 +705,7 @@ def detect_continuity_metric_regression(
     for row in new_rows:
         new_val = row.n_zero_volume_bars_60d
         if prev_val > 0 and new_val > prev_val * jump_multiplier:
-            warnings.append(
-                f"{symbol}: n_zero_volume_bars_60d jumped {prev_val}->{new_val} "
-                f"on {row.date}"
-            )
+            warnings.append(f"{symbol}: n_zero_volume_bars_60d jumped {prev_val}->{new_val} on {row.date}")
         prev_val = new_val
     return warnings
 
@@ -778,7 +735,7 @@ def sync_single_symbol_data(
     symbol: str,
     start_date: date,
     end_date: date,
-    downloader: BinanceVisionDownloader, # kept for signature compatibility
+    downloader: BinanceVisionDownloader,  # kept for signature compatibility
     onboard_date: date | None = None,
     collector: Any = None,
     sync_1d: bool = True,
@@ -790,8 +747,9 @@ def sync_single_symbol_data(
     """개별 심볼을 동기화하고 ledger row를 생성한다."""
     if collector is None:
         from src.domain.futures.backtest.data_loader import DataCollector
+
         collector = DataCollector()
-    
+
     window = _resolve_effective_sync_window(
         profile=sync_profile,
         requested_start=start_date,
@@ -804,7 +762,7 @@ def sync_single_symbol_data(
 
     # 1h 데이터 확보 (로컬 캐시 우선 사용)
     collector.ensure_ohlcv_data(symbol, "1h", str(effective_start), str(effective_end))
-    
+
     # [Component 4] 백테스팅 필수 데이터 일괄 선 수집 (Pre-fetch)
     if sync_1d:
         collector.ensure_ohlcv_data(symbol, "1d", str(effective_start), str(effective_end))
@@ -818,42 +776,33 @@ def sync_single_symbol_data(
     klines_1h = collector._load_cache(symbol, "1h")
     if klines_1h.empty:
         return [], 0
-    
+
     # 요청 범위로 필터링
     req_start = pd.to_datetime(effective_start, utc=True)
     req_end = pd.to_datetime(effective_end, utc=True)
-    klines_1h = klines_1h[
-        (klines_1h["datetime"] >= req_start) & (klines_1h["datetime"] <= req_end)
-    ].copy()
+    klines_1h = klines_1h[(klines_1h["datetime"] >= req_start) & (klines_1h["datetime"] <= req_end)].copy()
     if klines_1h.empty:
         return [], 0
 
     # 4h 리샘플링 (Ledger용)
     agg_dict = {
-        'timestamp': 'first',
-        'open': 'first',
-        'high': 'max',
-        'low': 'min',
-        'close': 'last',
-        'volume': 'sum',
+        "timestamp": "first",
+        "open": "first",
+        "high": "max",
+        "low": "min",
+        "close": "last",
+        "volume": "sum",
     }
-    for col in ['quote_vol', 'taker_buy_base', 'taker_buy_quote']:
+    for col in ["quote_vol", "taker_buy_base", "taker_buy_quote"]:
         if col in klines_1h.columns:
-            agg_dict[col] = 'sum'
+            agg_dict[col] = "sum"
 
-    klines_4h = (
-        klines_1h.set_index("datetime")
-        .resample("4h")
-        .agg(agg_dict)
-        .reset_index()
-        .dropna(subset=["timestamp"])
-    )
+    klines_4h = klines_1h.set_index("datetime").resample("4h").agg(agg_dict).reset_index().dropna(subset=["timestamp"])
 
     # Ensure required columns exist for ledger computation
-    for col in ['quote_vol', 'taker_buy_base', 'taker_buy_quote']:
+    for col in ["quote_vol", "taker_buy_base", "taker_buy_quote"]:
         if col not in klines_4h.columns:
-            klines_4h[col] = klines_4h['volume']
-
+            klines_4h[col] = klines_4h["volume"]
 
     # 펀딩 데이터 확보
     collector.ensure_funding_data(symbol, str(effective_start), str(effective_end))
@@ -863,10 +812,8 @@ def sync_single_symbol_data(
     if funding_path.exists():
         try:
             funding = pd.read_parquet(funding_path)
-            funding['datetime'] = pd.to_datetime(funding['timestamp'], unit='ms', utc=True)
-            funding = funding[
-                (funding["datetime"] >= req_start) & (funding["datetime"] <= req_end)
-            ].copy()
+            funding["datetime"] = pd.to_datetime(funding["timestamp"], unit="ms", utc=True)
+            funding = funding[(funding["datetime"] >= req_start) & (funding["datetime"] <= req_end)].copy()
         except Exception as e:
             logger.warning(
                 "funding parquet read failed symbol=%s error=%s; continue without funding",
@@ -878,13 +825,13 @@ def sync_single_symbol_data(
     # LedgerRow 생성 (이하 기존 로직 동일)
     # vol_30d: 30일(4h*6*30=180바) 롤링 수익률 표준편차 연율화 (annualized)
     # funding_zscore: 30일 롤링 평균/std 기반 시계열 z-score
-    bars_per_day = 6        # 4h 바 기준
-    vol_window = 30 * bars_per_day      # 180바 = 30일
-    funding_rolling_window = 30         # 펀딩비 일별 집계 후 30일 롤링
+    bars_per_day = 6  # 4h 바 기준
+    vol_window = 30 * bars_per_day  # 180바 = 30일
+    funding_rolling_window = 30  # 펀딩비 일별 집계 후 30일 롤링
 
-    klines_4h['date'] = klines_4h['datetime'].dt.date
-    klines_4h = klines_4h.sort_values('datetime').reset_index(drop=True)
-    first_date = klines_4h['date'].min()
+    klines_4h["date"] = klines_4h["datetime"].dt.date
+    klines_4h = klines_4h.sort_values("datetime").reset_index(drop=True)
+    first_date = klines_4h["date"].min()
     # 상장일은 실제 첫 kline 날짜와 max 취득:
     # - 신규상장(데이터 윈도우 중간): onboard_date > first_date → onboard_date 사용 (생존편향 방지)
     # - 구심볼(BTC 등, 데이터 윈도우 이전 상장): onboard_date < first_date → first_date 사용
@@ -892,98 +839,84 @@ def sync_single_symbol_data(
     true_first_date: date = max(onboard_date, first_date) if onboard_date is not None else first_date
 
     # Fix 1: 일별 4h 봉 수 → 누적합 (PIT) — look-ahead 방지
-    _bars_per_day = klines_4h.groupby('date').size()
+    _bars_per_day = klines_4h.groupby("date").size()
     _cumulative_bars = _bars_per_day.cumsum()
 
     # 전체 시계열로 롤링 vol_30d 미리 계산 (벡터화)
-    close_series = klines_4h['close'].astype(float)
+    close_series = klines_4h["close"].astype(float)
     ret_series = close_series.pct_change()
     # min_periods=bars_per_day: 최소 하루치 데이터 있으면 추정값 제공
-    rolling_vol = (
-        ret_series.rolling(window=vol_window, min_periods=bars_per_day)
-        .std()
-        .mul(np.sqrt(bars_per_day * 365))
-    )
-    klines_4h['_vol_30d'] = rolling_vol.values
+    rolling_vol = ret_series.rolling(window=vol_window, min_periods=bars_per_day).std().mul(np.sqrt(bars_per_day * 365))
+    klines_4h["_vol_30d"] = rolling_vol.values
 
     # ADV: 일별 quote_vol 합산 (나중에 pandas groupby로 계산)
-    klines_4h['_adv'] = klines_4h['quote_vol'].astype(float)
-    klines_4h['_ret_abs'] = ret_series.abs()
+    klines_4h["_adv"] = klines_4h["quote_vol"].astype(float)
+    klines_4h["_ret_abs"] = ret_series.abs()
 
     # Fix 5: Rolling MAD-based robust z-score (breakdown point 50%)
     def _mad_zscore_series(series: pd.Series, window: int, min_periods: int = 3) -> pd.Series:
         """Compute rolling MAD-based robust z-score in fully vectorized form."""
         if len(series) < min_periods:
             return pd.Series(0.0, index=series.index)
-        
+
         # 1. Rolling Median
         rolling_median = series.rolling(window=window, min_periods=min_periods).median()
-        
+
         # 2. Rolling MAD (Median Absolute Deviation)
         abs_deviation = (series - rolling_median).abs()
         # Scale factor 1.4826 matches normal distribution scale
         # (equivalent to _mad(..., scale='normal'))
-        rolling_mad = (
-            abs_deviation.rolling(window=window, min_periods=min_periods)
-            .median()
-            .mul(1.4826)
-        )
-        
+        rolling_mad = abs_deviation.rolling(window=window, min_periods=min_periods).median().mul(1.4826)
+
         # 3. Robust Z-score
         safe_mad = rolling_mad.replace(0.0, np.nan)
         z = (series - rolling_median) / safe_mad
-        
+
         return z.fillna(0.0).clip(-50.0, 50.0)
 
     # 펀딩비 일별 마지막 값 집계 + 30일 롤링 MAD z-score
     funding_daily: pd.DataFrame = pd.DataFrame()
     if not funding.empty:
-        funding['_date'] = funding['datetime'].dt.date
+        funding["_date"] = funding["datetime"].dt.date
         funding_daily = (
-            funding.groupby('_date')['funding_rate']
+            funding.groupby("_date")["funding_rate"]
             .last()
             .reset_index()
-            .rename(columns={'_date': 'date', 'funding_rate': 'fr'})
-            .sort_values('date')
+            .rename(columns={"_date": "date", "funding_rate": "fr"})
+            .sort_values("date")
         )
-        funding_daily['fz'] = _mad_zscore_series(
-            funding_daily['fr'], window=funding_rolling_window, min_periods=3
-        )
-        funding_daily = funding_daily.set_index('date')
+        funding_daily["fz"] = _mad_zscore_series(funding_daily["fr"], window=funding_rolling_window, min_periods=3)
+        funding_daily = funding_daily.set_index("date")
 
     # 1. Vectorized Aggregation for daily metrics
-    daily_df = klines_4h.groupby('date').agg(
-        adv=('quote_vol', 'sum'),
-        ret_abs_mean=('_ret_abs', 'mean'),
-        last_price=('close', 'last'),
-        vol_30d_val=('_vol_30d', 'last')
+    daily_df = klines_4h.groupby("date").agg(
+        adv=("quote_vol", "sum"),
+        ret_abs_mean=("_ret_abs", "mean"),
+        last_price=("close", "last"),
+        vol_30d_val=("_vol_30d", "last"),
     )
 
     # 2. Vectorized Amihud and finite check conversions
-    daily_df['amihud'] = np.where(
-        daily_df['adv'] > 0, daily_df['ret_abs_mean'] / daily_df['adv'], 0.0
-    )
-    daily_df['vol_30d_val'] = np.where(
-        np.isfinite(daily_df['vol_30d_val']), daily_df['vol_30d_val'], 0.0
-    )
+    daily_df["amihud"] = np.where(daily_df["adv"] > 0, daily_df["ret_abs_mean"] / daily_df["adv"], 0.0)
+    daily_df["vol_30d_val"] = np.where(np.isfinite(daily_df["vol_30d_val"]), daily_df["vol_30d_val"], 0.0)
 
     # 3. Merge funding rate daily stats
     if not funding_daily.empty:
-        daily_df = daily_df.join(funding_daily[['fr', 'fz']], how='left')
+        daily_df = daily_df.join(funding_daily[["fr", "fz"]], how="left")
     else:
-        daily_df['fr'] = 0.0
-        daily_df['fz'] = 0.0
-    daily_df['fr'] = daily_df['fr'].fillna(0.0)
-    daily_df['fz'] = daily_df['fz'].fillna(0.0)
+        daily_df["fr"] = 0.0
+        daily_df["fz"] = 0.0
+    daily_df["fr"] = daily_df["fr"].fillna(0.0)
+    daily_df["fz"] = daily_df["fz"].fillna(0.0)
 
     # 4. Merge cumulative bars PIT metrics
-    daily_df = daily_df.join(_cumulative_bars.rename('pit_bars'), how='left')
-    daily_df['pit_bars'] = daily_df['pit_bars'].fillna(0).astype(int)
+    daily_df = daily_df.join(_cumulative_bars.rename("pit_bars"), how="left")
+    daily_df["pit_bars"] = daily_df["pit_bars"].fillna(0).astype(int)
 
     # 5. Filter date range and loop over low-overhead dictionary records
     daily_df = daily_df[(daily_df.index >= start_date) & (daily_df.index <= end_date)]
-    records = daily_df.reset_index().to_dict('records')
-    
+    records = daily_df.reset_index().to_dict("records")
+
     # ── Compute continuity metrics once per symbol (full window, O(T log T)) ──
     # klines_4h has a 'datetime' column; ensure it is UTC-aware for the grid.
     _continuity = compute_continuity_metrics(
@@ -1020,36 +953,53 @@ def sync_single_symbol_data(
 
     daily_rows = []
     for r in records:
-        day = r['date']
-        adv = float(r['adv'])
-        amihud = float(r['amihud'])
-        last_price = float(r['last_price'])
-        vol_30d_val = float(r['vol_30d_val'])
-        fr = float(r['fr'])
-        fz = float(r['fz'])
-        pit_bars = int(r['pit_bars'])
+        day = r["date"]
+        adv = float(r["adv"])
+        amihud = float(r["amihud"])
+        last_price = float(r["last_price"])
+        vol_30d_val = float(r["vol_30d_val"])
+        fr = float(r["fr"])
+        fz = float(r["fz"])
+        pit_bars = int(r["pit_bars"])
 
         knowledge_date = (day + timedelta(days=1)).isoformat()
         listing_age = max(0, (day - true_first_date).days)
 
-        daily_rows.append(LedgerRow(
-            symbol=symbol, date=day.isoformat(), knowledge_date=knowledge_date,
-            is_listed=True, is_trading=True, status="TRADING",
-            first_kline_date=true_first_date.isoformat(),
-            adv_usdt_median=adv, adv_usdt_mean=adv,
-            has_kline=True, has_funding=not funding.empty,
-            n_bar_gaps=_n_bar_gaps, max_gap_bars=_max_gap_bars,
-            frozen_bars=_frozen_bars, last_60d_coverage=_coverage_ratio,
-            n_zero_volume_bars_60d=_rolling_zero_vol.get(day, 0),
-            has_nan=_has_nan, has_inf=_has_inf,
-            has_timestamp_issues=_has_timestamp_issues,
-            funding_rate_8h=fr, listing_age_days=listing_age,
-            vol_30d=vol_30d_val, risk_event_override=None,
-            updated_at_utc=datetime.now().isoformat(),
-            is_coverage=_coverage_ratio >= 0.95,
-            n_is_bars=pit_bars, expected_is_bars=_expected_is_bars, tf="4h",
-            amihud_30d=amihud, mark_price=last_price, funding_zscore=fz,
-        ))
+        daily_rows.append(
+            LedgerRow(
+                symbol=symbol,
+                date=day.isoformat(),
+                knowledge_date=knowledge_date,
+                is_listed=True,
+                is_trading=True,
+                status="TRADING",
+                first_kline_date=true_first_date.isoformat(),
+                adv_usdt_median=adv,
+                adv_usdt_mean=adv,
+                has_kline=True,
+                has_funding=not funding.empty,
+                n_bar_gaps=_n_bar_gaps,
+                max_gap_bars=_max_gap_bars,
+                frozen_bars=_frozen_bars,
+                last_60d_coverage=_coverage_ratio,
+                n_zero_volume_bars_60d=_rolling_zero_vol.get(day, 0),
+                has_nan=_has_nan,
+                has_inf=_has_inf,
+                has_timestamp_issues=_has_timestamp_issues,
+                funding_rate_8h=fr,
+                listing_age_days=listing_age,
+                vol_30d=vol_30d_val,
+                risk_event_override=None,
+                updated_at_utc=datetime.now().isoformat(),
+                is_coverage=_coverage_ratio >= 0.95,
+                n_is_bars=pit_bars,
+                expected_is_bars=_expected_is_bars,
+                tf="4h",
+                amihud_30d=amihud,
+                mark_price=last_price,
+                funding_zscore=fz,
+            )
+        )
     return daily_rows, len(klines_4h)
 
 
@@ -1062,6 +1012,7 @@ def _init_worker() -> None:
     global _worker_collector, _worker_downloader
     from src.core.exchange.binance_vision import BinanceVisionDownloader
     from src.domain.futures.backtest.data_loader import DataCollector
+
     _worker_collector = DataCollector()
     _worker_downloader = BinanceVisionDownloader()
 
@@ -1116,7 +1067,7 @@ def _requested_sync_caches_missing(
         required_timeframes.append("4h")
     if sync_1m:
         required_timeframes.append("1m")
-    
+
     req_start_ts = pd.Timestamp(requested_start, tz="UTC")
     req_end_ts = pd.Timestamp(requested_end, tz="UTC")
 
@@ -1124,11 +1075,12 @@ def _requested_sync_caches_missing(
     if profile is not None and profile.delivery_date is not None:
         delivery_ts = pd.Timestamp(profile.delivery_date, tz="UTC")
         effective_end_ts = min(effective_end_ts, delivery_ts)
-    
+
     # Load metadata cache if not provided
     if metadata_cache is None:
         try:
             import json
+
             meta_path = FUTURES_DATA_DIR / "parquet_cache_meta.json"
             if meta_path.exists():
                 with open(meta_path, encoding="utf-8") as f:
@@ -1142,14 +1094,14 @@ def _requested_sync_caches_missing(
         path = _sync_cache_path(symbol, tf)
         if not path.exists():
             return True
-            
+
         # Fast path: check metadata cache first
         safe_sym = symbol.replace("/", "_")
         meta_key = f"{safe_sym}::{tf}"
         meta = metadata_cache.get(meta_key, {})
         ea = meta.get("earliest_available")
         la = meta.get("latest_available")
-        
+
         # Clip expected start to onboard date or actual cache earliest date if missing
         effective_start_ts = req_start_ts
         if profile is not None and profile.onboard_date is not None:
@@ -1172,14 +1124,11 @@ def _requested_sync_caches_missing(
                 if la_dt < req_end_ts - pd.Timedelta(days=180):
                     curr_eff_end = min(curr_eff_end, la_dt)
 
-                if (
-                    ea_dt <= effective_start_ts
-                    and la_dt >= curr_eff_end - pd.Timedelta(hours=8)
-                ):
+                if ea_dt <= effective_start_ts and la_dt >= curr_eff_end - pd.Timedelta(hours=8):
                     continue
             except Exception as exc:
                 logger.debug("Failed to check metadata cache for %s %s: %s", symbol, tf, exc)
-                
+
         # Slow path fallback (only if metadata is missing or stale)
         try:
             cache_df = pd.read_parquet(path, columns=["datetime"])
@@ -1190,7 +1139,7 @@ def _requested_sync_caches_missing(
         dt = pd.to_datetime(cache_df["datetime"], utc=True, errors="coerce").dropna()
         if dt.empty:
             return True
-            
+
         # Fallback clipping logic for slow path
         slow_start_ts = req_start_ts
         if profile is not None and profile.onboard_date is not None:
@@ -1256,6 +1205,7 @@ def run_historical_sync(
     if ledger_path.exists() and not force:
         try:
             import sqlite3
+
             logger.debug(f"[SQL-DB]   💾 Loaded start dates from {ledger_path.name}")
             conn = sqlite3.connect(str(ledger_path))
             try:
@@ -1281,6 +1231,7 @@ def run_historical_sync(
             IngestionFilterConfig,
             select_ingestion_symbols,
         )
+
         try:
             _client_ef = BinanceClient(BINANCE_API_KEY, BINANCE_SECRET)
             _ei = _client_ef.exchange.fapiPublicGetExchangeInfo()
@@ -1304,9 +1255,7 @@ def run_historical_sync(
                 len(symbols),
             )
         except Exception as _exc:
-            logger.warning(
-                "ingestion_filter failed (%s), falling back to _list_usdt_futures_symbols", _exc
-            )
+            logger.warning("ingestion_filter failed (%s), falling back to _list_usdt_futures_symbols", _exc)
             symbols = _list_usdt_futures_symbols()
             if limit:
                 symbols = symbols[:limit]
@@ -1330,6 +1279,7 @@ def run_historical_sync(
     metadata_cache = {}
     try:
         import json
+
         meta_path = FUTURES_DATA_DIR / "parquet_cache_meta.json"
         if meta_path.exists():
             with open(meta_path, encoding="utf-8") as f:
@@ -1368,6 +1318,7 @@ def run_historical_sync(
                     break
         if fully_updated:
             from src.domain.futures.optimization.observability.run_tracker import setup_optuna_storage
+
             try:
                 s_url, _ = setup_optuna_storage(Path(FUTURES_DATA_DIR).parent)
                 db_path_display = s_url.replace("sqlite:///", "")
@@ -1395,6 +1346,7 @@ def run_historical_sync(
     # ThreadPoolExecutor를 사용한 _requested_sync_caches_missing 병렬화
     # Time: O(N) with parallel disk I/O, Space: O(N)
     from concurrent.futures import ThreadPoolExecutor
+
     caches_missing_map: dict[str, bool] = {}
     with ThreadPoolExecutor(max_workers=16) as executor:
         futures = {
@@ -1453,8 +1405,7 @@ def run_historical_sync(
 
     skipped_count = len(symbols) - len(sync_tasks)
     logger.debug(
-        "🔄 SYNC: processing %d symbols (Parallel) | "
-        "%d symbols are already up-to-date (skipped)...",
+        "🔄 SYNC: processing %d symbols (Parallel) | %d symbols are already up-to-date (skipped)...",
         len(sync_tasks),
         skipped_count,
     )
@@ -1501,6 +1452,7 @@ def run_historical_sync(
         if ledger_path.exists():
             try:
                 import sqlite3
+
                 conn = sqlite3.connect(str(ledger_path))
                 try:
                     prev_ledger_frame = pd.read_sql_query("SELECT * FROM ledger", conn)

@@ -1,4 +1,5 @@
 """Futures runner runtime config with Alpha Foundry mode. [ADR_20260706_ALPHA_FOUNDRY_MAIN_WIRING]"""
+
 from __future__ import annotations
 
 from argparse import Namespace

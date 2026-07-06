@@ -1,5 +1,6 @@
 """Alpha Foundry L0 cheap gate and survivor filtering.
 
+[ADR_20260706_ALPHA_FOUNDRY_L0_L1_HANDOFF_GUARD]
 [ADR_20260706_ALPHA_FOUNDRY_SYNC][ADR_20260706_ALPHA_FOUNDRY_L0_DIVERSITY]
 [ADR_20260706_ALPHA_FOUNDRY_L0_SIGNAL_RIGOR]
 """
@@ -41,9 +42,7 @@ def _validate_shape(panel: CandidateSignalPanel, aligned: AlignedMarketData) -> 
     ]
     for name, arr in checks:
         if arr.shape != (t, n):
-            raise ValueError(
-                f"panel.{name} shape {arr.shape} != aligned close_2d shape ({t}, {n})"
-            )
+            raise ValueError(f"panel.{name} shape {arr.shape} != aligned close_2d shape ({t}, {n})")
 
 
 def _compute_block_means(values: NDArray[np.float64], block_bars: int) -> NDArray[np.float64]:
@@ -51,10 +50,7 @@ def _compute_block_means(values: NDArray[np.float64], block_bars: int) -> NDArra
     if n < 2 or block_bars < 1:
         return np.array([])
     n_blocks = max(1, n // block_bars)
-    return np.array([
-        values[i * block_bars : (i + 1) * block_bars].mean()
-        for i in range(n_blocks)
-    ])
+    return np.array([values[i * block_bars : (i + 1) * block_bars].mean() for i in range(n_blocks)])
 
 
 def _block_moments(block_means: NDArray[np.float64]) -> tuple[float, float]:
@@ -67,7 +63,9 @@ def _block_moments(block_means: NDArray[np.float64]) -> tuple[float, float]:
 
 
 def _bootstrap_block_ci(
-    block_means: NDArray[np.float64], n_resamples: int, rng: np.random.Generator,
+    block_means: NDArray[np.float64],
+    n_resamples: int,
+    rng: np.random.Generator,
 ) -> tuple[float, float]:
     if len(block_means) < 2:
         return (0.0, 0.5)
@@ -79,7 +77,8 @@ def _bootstrap_block_ci(
 
 
 def _sparse_entry_mask(
-    side: NDArray[np.int8], valid: NDArray[np.bool_],
+    side: NDArray[np.int8],
+    valid: NDArray[np.bool_],
 ) -> NDArray[np.bool_]:
     """Independent-trade entry mask: True where a bar starts a new position —
     either from flat (side==0) or a direct reversal (sign flip without going
@@ -90,18 +89,14 @@ def _sparse_entry_mask(
     return entry
 
 
-def _compute_turnover_per_year(
-    side: NDArray[np.int8], valid_mask: NDArray[np.bool_], bars_per_year: float
-) -> float:
+def _compute_turnover_per_year(side: NDArray[np.int8], valid_mask: NDArray[np.bool_], bars_per_year: float) -> float:
     diff = np.abs(np.diff(side.astype(np.float64), axis=0))
     valid_slice = valid_mask[1:, :] & valid_mask[:-1, :]
     denom = max(np.sum(valid_slice), 1)
     return float(np.sum(diff * valid_slice) / denom * bars_per_year / 2.0)
 
 
-def _compute_rank_ic(
-    fwd_ret: NDArray[np.float64], score: NDArray[np.float64], mask: NDArray[np.bool_]
-) -> float:
+def _compute_rank_ic(fwd_ret: NDArray[np.float64], score: NDArray[np.float64], mask: NDArray[np.bool_]) -> float:
     flat_ret = fwd_ret[mask]
     flat_score = score[mask]
     if len(flat_ret) < 3:
@@ -190,11 +185,7 @@ def evaluate_panel_cheap_gate(
 
     fwd_ret_bps = np.full((t, n), np.nan, dtype=np.float64)
     for i in range(t - holding_bars):
-        fwd_ret_bps[i, :] = (
-            side[i, :].astype(np.float64)
-            * np.log(close[i + holding_bars, :] / close[i, :])
-            * 10000.0
-        )
+        fwd_ret_bps[i, :] = side[i, :].astype(np.float64) * np.log(close[i + holding_bars, :] / close[i, :]) * 10000.0
 
     stress_cost = cost_model.stress_round_trip_bps()
     funding_cost = np.where(event_mask, funding * 10000.0 * holding_bars, 0.0)
@@ -299,6 +290,7 @@ def evaluate_alpha_cheap_gate_batch(
         results.append(evidence)
     return tuple(results)
 
+
 def resolve_family_timeframe_gate_policy(
     *,
     recipe: AlphaRecipe,
@@ -370,6 +362,7 @@ def build_l0_signal_candidate(
     policy: FamilyTimeframeGatePolicy,
     stress_cost_bps: float,
     tf_fusion: MultiTimeframeEvidence | None,
+    min_conviction_lcb_bps: float = 5.0,
     max_abs_corr_in_bucket: float = 0.0,
 ) -> L0SignalCandidate:
     hard_reject_reasons: list[L0HardRejectReason] = []
@@ -401,6 +394,9 @@ def build_l0_signal_candidate(
         soft_flags.append("weak_tstat")
     if not evidence.bootstrap_agree:
         soft_flags.append("bootstrap_disagree")
+
+    if 0.0 <= evidence.block_lcb_bps < min_conviction_lcb_bps:
+        soft_flags.append("below_conviction_floor")
 
     discovery_tier: DiscoveryTier
     if hard_reject_reasons:

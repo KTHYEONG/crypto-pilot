@@ -61,8 +61,8 @@ class Stage5Config:
     """
 
     min_listing_age_days: int = 180
-    min_vol_30d: float = 0.05   # 5% annualized — 거래 없는 죽은 코인 제거
-    max_vol_30d: float = 4.0    # 400% annualized — 극단적 meme/junk 제거
+    min_vol_30d: float = 0.05  # 5% annualized — 거래 없는 죽은 코인 제거
+    max_vol_30d: float = 4.0  # 400% annualized — 극단적 meme/junk 제거
     max_abs_funding_z: float = 2.5
     enable_funding_sign_flip: bool = True
     funding_sign_flip_min_abs: float = 0.001  # |funding| > threshold 양쪽 모두여야 flip 이상치
@@ -72,6 +72,7 @@ class Stage5Config:
         "funding_sign_change_1d",
     )
     funding_prev_rate_column: str = "funding_rate_8h_prev"
+
 
 HalfSpreadFallback = Callable[[pd.DataFrame, Stage4Config, date], pd.Series]
 _OI_SOURCE_COLUMNS: tuple[str, ...] = (
@@ -115,6 +116,7 @@ def _safe_div(numer: pd.Series, denom: pd.Series) -> pd.Series:
 
 # --- Stage 3: Liquidity ---
 
+
 def apply_liquidity_stage(
     frame: pd.DataFrame,
     config: Stage3Config | None = None,
@@ -130,14 +132,10 @@ def apply_liquidity_stage(
         vol = frame["vol_30d"].fillna(0.0)
         amihud = _safe_div(vol.abs(), adv).fillna(np.inf)
     default_clip = cfg.screening_clip_usdt_by_tier.get(cfg.screening_tier, 10_000.0)
-    clip_usdt = frame.get("screening_clip_usdt", pd.Series(default_clip, index=frame.index)).fillna(
-        default_clip
-    )
+    clip_usdt = frame.get("screening_clip_usdt", pd.Series(default_clip, index=frame.index)).fillna(default_clip)
     clip_to_adv = _safe_div(clip_usdt, adv).fillna(np.inf)
     oi_col = _first_available_column(frame, _OI_SOURCE_COLUMNS)
-    oi_series = (
-        _numeric_series(frame, oi_col) if oi_col is not None else pd.Series(np.nan, index=frame.index)
-    )
+    oi_series = _numeric_series(frame, oi_col) if oi_col is not None else pd.Series(np.nan, index=frame.index)
     oi_to_adv = _safe_div(oi_series, adv)
     oi_gate_enabled = bool(cfg.enable_oi_adv_crowding_gate) and oi_col is not None
     if oi_gate_enabled:
@@ -184,17 +182,14 @@ def apply_liquidity_stage(
 
 # --- Stage 4: Cost Model ---
 
+
 def _default_half_spread_fallback(
     frame: pd.DataFrame,
     config: Stage4Config,
     as_of_date: date,
 ) -> pd.Series:
     switch_date = _to_date(config.spread_source_switch_date)
-    fallback_bps = (
-        config.pre2020_half_spread_bps
-        if as_of_date < switch_date
-        else config.post2020_half_spread_bps
-    )
+    fallback_bps = config.pre2020_half_spread_bps if as_of_date < switch_date else config.post2020_half_spread_bps
     return pd.Series(fallback_bps, index=frame.index, dtype="float64")
 
 
@@ -213,10 +208,12 @@ def _corwin_schultz_half_spread_bps(frame: pd.DataFrame) -> pd.Series:
     low_prev = _numeric_series(frame, "low_prev")
     has_lag = high_prev.notna() & low_prev.notna() & (high_prev > 0.0) & (low_prev > 0.0)
     gamma = pd.Series(np.nan, index=frame.index, dtype="float64")
-    gamma.loc[has_lag] = np.log(
-        np.maximum(high.loc[has_lag], high_prev.loc[has_lag])
-        / np.minimum(low.loc[has_lag], low_prev.loc[has_lag])
-    ) ** 2
+    gamma.loc[has_lag] = (
+        np.log(
+            np.maximum(high.loc[has_lag], high_prev.loc[has_lag]) / np.minimum(low.loc[has_lag], low_prev.loc[has_lag])
+        )
+        ** 2
+    )
     gamma = gamma.where(gamma.notna(), hl_log.pow(2))
 
     beta = hl_log.pow(2).where(hl_log.notna(), np.nan)
@@ -266,37 +263,29 @@ def apply_cost_model_stage(
     cs_half_spread = _corwin_schultz_half_spread_bps(out)
 
     if is_post2020:
-        half_spread_bps = bookdepth_half_spread_input.where(
-            bookdepth_half_spread_input.notna(), half_spread_input
-        )
+        half_spread_bps = bookdepth_half_spread_input.where(bookdepth_half_spread_input.notna(), half_spread_input)
         half_spread_source = pd.Series("bookdepth_half_spread_bps", index=out.index, dtype="string")
-        half_spread_source = half_spread_source.where(
-            bookdepth_half_spread_input.notna(), "half_spread_bps"
+        half_spread_source = half_spread_source.where(bookdepth_half_spread_input.notna(), "half_spread_bps")
+        half_spread_bps = half_spread_bps.where(half_spread_bps.notna(), half_spread_fallback_values).fillna(
+            cfg.default_half_spread_bps
         )
-        half_spread_bps = half_spread_bps.where(
-            half_spread_bps.notna(), half_spread_fallback_values
-        ).fillna(cfg.default_half_spread_bps)
         half_spread_source = half_spread_source.where(
             (bookdepth_half_spread_input.notna() | half_spread_input.notna()),
             "fallback_default",
         )
     else:
-        half_spread_bps = cs_half_spread.where(
-            cs_half_spread.notna(), half_spread_fallback_values
-        ).fillna(cfg.default_half_spread_bps)
+        half_spread_bps = cs_half_spread.where(cs_half_spread.notna(), half_spread_fallback_values).fillna(
+            cfg.default_half_spread_bps
+        )
         half_spread_source = pd.Series("corwin_schultz", index=out.index, dtype="string")
         half_spread_source = half_spread_source.where(cs_half_spread.notna(), "fallback_default")
 
-    half_spread_bps = half_spread_bps.replace([np.inf, -np.inf], np.nan).fillna(
-        cfg.default_half_spread_bps
-    )
-    clip_usdt = out.get("screening_clip_usdt", pd.Series(10_000.0, index=out.index)).fillna(
-        10_000.0
-    )
+    half_spread_bps = half_spread_bps.replace([np.inf, -np.inf], np.nan).fillna(cfg.default_half_spread_bps)
+    clip_usdt = out.get("screening_clip_usdt", pd.Series(10_000.0, index=out.index)).fillna(10_000.0)
     adv = out.get("adv_usdt_median", pd.Series(np.nan, index=out.index)).replace(0.0, np.nan)
-    impact_coef_bps = out.get(
-        "impact_coef_bps", pd.Series(cfg.default_impact_coef_bps, index=out.index)
-    ).fillna(cfg.default_impact_coef_bps)
+    impact_coef_bps = out.get("impact_coef_bps", pd.Series(cfg.default_impact_coef_bps, index=out.index)).fillna(
+        cfg.default_impact_coef_bps
+    )
     impact_bps_raw = out.get("impact_bps", pd.Series(np.nan, index=out.index))
     # Use precomputed impact when provided; otherwise use sqrt-impact model.
     impact_bps = impact_bps_raw.where(
@@ -351,6 +340,7 @@ def apply_cost_model_stage(
 
 
 # --- Stage 5: Risk Events ---
+
 
 def _resolve_funding_sign_flip(
     frame: pd.DataFrame,
@@ -410,28 +400,18 @@ def apply_risk_events_stage(
     )
     funding_std = float(funding.std(ddof=0))
     funding_z_fallback = (
-        ((funding - float(funding.mean())) / funding_std)
-        if funding_std > 0.0
-        else pd.Series(0.0, index=frame.index)
+        ((funding - float(funding.mean())) / funding_std) if funding_std > 0.0 else pd.Series(0.0, index=frame.index)
     )
-    funding_z = (
-        funding_z_input.where(funding_z_input.notna(), funding_z_fallback)
-        .abs()
-        .fillna(0.0)
-    )
+    funding_z = funding_z_input.where(funding_z_input.notna(), funding_z_fallback).abs().fillna(0.0)
     funding_sign_flip = _resolve_funding_sign_flip(frame, config=cfg, funding_rate_8h=funding)
     funding_anomaly = (funding_z > cfg.max_abs_funding_z) | funding_sign_flip
     vol_30d = frame.get("vol_30d", pd.Series(0.0, index=frame.index)).fillna(0.0).abs()
-    risk_override = frame.get(
-        "risk_event_override", pd.Series("", index=frame.index)
-    ).fillna("").astype("string")
-    override_knowledge_date = frame.get(
-        "risk_event_knowledge_date", pd.Series(pd.NaT, index=frame.index)
-    )
+    risk_override = frame.get("risk_event_override", pd.Series("", index=frame.index)).fillna("").astype("string")
+    override_knowledge_date = frame.get("risk_event_knowledge_date", pd.Series(pd.NaT, index=frame.index))
     override_active = risk_override != ""
-    override_missing_knowledge = override_active & pd.to_datetime(
-        override_knowledge_date, utc=True, errors="coerce"
-    ).isna()
+    override_missing_knowledge = (
+        override_active & pd.to_datetime(override_knowledge_date, utc=True, errors="coerce").isna()
+    )
 
     pass_mask = (
         (age >= cfg.min_listing_age_days)

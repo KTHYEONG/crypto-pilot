@@ -205,8 +205,10 @@ def backtest_target_weights_numba(
                 desired_amt = abs(tgt_notional) / op if ts != 0 else 0.0
 
                 need_exit = False
-                if ts == 0 or ts != pos_side[s] or abs(amount[s] - desired_amt) * op > max(
-                    0.01, eq_snap * min_notional_floor_pct
+                if (
+                    ts == 0
+                    or ts != pos_side[s]
+                    or abs(amount[s] - desired_amt) * op > max(0.01, eq_snap * min_notional_floor_pct)
                 ):
                     need_exit = True
 
@@ -225,9 +227,7 @@ def backtest_target_weights_numba(
                     exit_price = op * (1.0 - eff_slip * pos_side[s])
                     pnl = (exit_price - entry_p[s]) * amount[s] * pos_side[s]
                     fee_x = amount[s] * exit_price * taker_fee
-                    balance += (
-                        (amount[s] * entry_p[s]) / entry_lev[s]
-                    ) + (pnl - fee_x - fund_fee_stored[s])
+                    balance += ((amount[s] * entry_p[s]) / entry_lev[s]) + (pnl - fee_x - fund_fee_stored[s])
                     if t_count < max_trades:
                         trades[t_count] = [
                             float(s),
@@ -384,10 +384,16 @@ def backtest_target_weights_numba(
                 fee_x = amount[s] * cur_p * taker_fee
                 if t_count < max_trades:
                     trades[t_count] = [
-                        float(s), float(entry_idx[s]), float(i),
-                        float(pos_side[s]), entry_p[s], cur_p,
+                        float(s),
+                        float(entry_idx[s]),
+                        float(i),
+                        float(pos_side[s]),
+                        entry_p[s],
+                        cur_p,
                         pnl_x - fee_x - fund_fee_stored[s],
-                        amount[s], entry_fee_stored[s], fund_fee_stored[s],
+                        amount[s],
+                        entry_fee_stored[s],
+                        fund_fee_stored[s],
                     ]
                     t_count += 1
                 in_pos[s] = False
@@ -487,9 +493,7 @@ def backtest_target_weights_numba(
             if exit_triggered:
                 pnl_x = (exit_price - entry_p[s]) * amount[s] * pos_side[s]
                 fee_x = amount[s] * exit_price * taker_fee
-                balance += (
-                    (amount[s] * entry_p[s]) / entry_lev[s]
-                ) + (pnl_x - fee_x - fund_fee_stored[s])
+                balance += ((amount[s] * entry_p[s]) / entry_lev[s]) + (pnl_x - fee_x - fund_fee_stored[s])
                 if t_count < max_trades:
                     trades[t_count] = [
                         float(s),
@@ -689,8 +693,10 @@ def backtest_target_weights_intrabar_numba(
                 desired_amt = abs(tgt_notional) / op if ts != 0 else 0.0
 
                 need_exit = False
-                if ts == 0 or ts != pos_side[s] or abs(amount[s] - desired_amt) * op > max(
-                    0.01, eq_snap * min_notional_floor_pct
+                if (
+                    ts == 0
+                    or ts != pos_side[s]
+                    or abs(amount[s] - desired_amt) * op > max(0.01, eq_snap * min_notional_floor_pct)
                 ):
                     need_exit = True
 

@@ -1,4 +1,5 @@
 """Unit tests for build_cpcv_folds (Combinatorial Purged CV fold builder)."""
+
 from __future__ import annotations
 
 import math
@@ -10,6 +11,7 @@ from src.domain.futures.strategy.walk_forward import CPCVFold, build_cpcv_folds
 # ---------------------------------------------------------------------------
 # TI1: Fold count and structural invariants
 # ---------------------------------------------------------------------------
+
 
 class TestCPCVFoldCountAndStructure:
     """C(6,2)=15 folds, disjoint fit/test groups, correct group cardinality."""
@@ -93,6 +95,7 @@ class TestCPCVFoldCountAndStructure:
 # TI2: Purge / embargo boundary values
 # ---------------------------------------------------------------------------
 
+
 class TestPurgeEmbargoBoundaries:
     """Verify trimmed fit_spans match expected purge/embargo arithmetic."""
 
@@ -117,9 +120,7 @@ class TestPurgeEmbargoBoundaries:
                 return fold
         raise AssertionError(f"No fold with test_group={test_group}")
 
-    def test_fit_group_before_test_has_purge_applied(
-        self, folds_4groups: tuple[CPCVFold, ...]
-    ) -> None:
+    def test_fit_group_before_test_has_purge_applied(self, folds_4groups: tuple[CPCVFold, ...]) -> None:
         """fit_group 0 (bars 0-100) precedes test_group 1 (bars 100-200).
         Purge trims ge: ge = group_spans[1][0] - purge = 100 - 10 = 90.
         """
@@ -133,9 +134,7 @@ class TestPurgeEmbargoBoundaries:
         assert len(spans_starting_at_zero) == 1
         assert spans_starting_at_zero[0][1] == 90  # 100 - purge(10)
 
-    def test_fit_group_after_test_has_embargo_applied(
-        self, folds_4groups: tuple[CPCVFold, ...]
-    ) -> None:
+    def test_fit_group_after_test_has_embargo_applied(self, folds_4groups: tuple[CPCVFold, ...]) -> None:
         """fit_group 2 (bars 200-300) follows test_group 1 (bars 100-200).
         Embargo trims gs: gs = group_spans[1][1] + embargo = 200 + 20 = 220.
         """
@@ -149,9 +148,7 @@ class TestPurgeEmbargoBoundaries:
         assert len(spans_ending_at_300) == 1
         assert spans_ending_at_300[0][0] == 220  # 200 + embargo(20)
 
-    def test_untouched_fit_group_keeps_original_span(
-        self, folds_4groups: tuple[CPCVFold, ...]
-    ) -> None:
+    def test_untouched_fit_group_keeps_original_span(self, folds_4groups: tuple[CPCVFold, ...]) -> None:
         """fit_group 3 (bars 300-400) is not adjacent to test_group 1.
         Its span must remain (300, 400) - no trimming.
         """
@@ -165,6 +162,7 @@ class TestPurgeEmbargoBoundaries:
 # ---------------------------------------------------------------------------
 # TI3: Degenerate — n_bars very small relative to n_groups
 # ---------------------------------------------------------------------------
+
 
 class TestDegenerateSmallNBars:
     """When purge+embargo consume all fit bars, fallback must be returned."""
@@ -200,20 +198,19 @@ class TestDegenerateSmallNBars:
 # TI4: n_test_groups >= n_groups → immediate fallback
 # ---------------------------------------------------------------------------
 
+
 class TestNTestGroupsExceedsNGroups:
     """n_test_groups >= n_groups must trigger single-fold fallback."""
 
     @pytest.mark.parametrize(
         ("n_groups", "n_test_groups"),
         [
-            (3, 3),   # equal
-            (3, 4),   # exceeds
-            (1, 2),   # edge: single group
+            (3, 3),  # equal
+            (3, 4),  # exceeds
+            (1, 2),  # edge: single group
         ],
     )
-    def test_exceeds_returns_fallback_fold(
-        self, n_groups: int, n_test_groups: int
-    ) -> None:
+    def test_exceeds_returns_fallback_fold(self, n_groups: int, n_test_groups: int) -> None:
         # Arrange / Act
         result = build_cpcv_folds(
             n_bars=300,

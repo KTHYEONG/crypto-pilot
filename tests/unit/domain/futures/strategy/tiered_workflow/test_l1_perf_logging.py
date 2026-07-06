@@ -1,4 +1,5 @@
 """L1 PERF 로그 구조 검증: [PERF] 접두사 일관성 + 새 타이밍 태그 존재 여부."""
+
 from __future__ import annotations
 
 import logging
@@ -101,8 +102,7 @@ def _run_l1_nested(aligned: Any, cfg: Any, empty_fold_out: Any) -> Any:
             return_value="outer",
         ),
         patch(
-            "src.domain.futures.strategy.tiered_workflow.pipeline"
-            ".format_layer1_deployment_registry_table",
+            "src.domain.futures.strategy.tiered_workflow.pipeline.format_layer1_deployment_registry_table",
             return_value="reg",
         ),
     ):
@@ -116,6 +116,7 @@ def _run_l1_nested(aligned: Any, cfg: Any, empty_fold_out: Any) -> Any:
 
 
 # ─── Scenario 1: L1-NESTED-PROFILE 로그 출력 확인 ─────────────────────────────
+
 
 def test_l1_nested_profile_log_emitted(
     minimal_aligned: Any, minimal_cfg: Any, empty_fold_out: Any, caplog: Any
@@ -137,6 +138,7 @@ def test_l1_nested_profile_log_emitted(
 
 # ─── Scenario 2: L1-FOLD 로그에 batch/sel/eval 세분화 확인 ────────────────────
 
+
 def test_l1_outer_fold_log_contains_substep_timing(
     minimal_aligned: Any, minimal_cfg: Any, empty_fold_out: Any, caplog: Any
 ) -> None:
@@ -155,6 +157,7 @@ def test_l1_outer_fold_log_contains_substep_timing(
 
 # ─── Scenario 3: 타이밍 PERF 로그는 모두 [PERF] 접두사 ───────────────────────
 
+
 def test_all_timing_perf_logs_have_perf_prefix(
     minimal_aligned: Any, minimal_cfg: Any, empty_fold_out: Any, caplog: Any
 ) -> None:
@@ -166,12 +169,11 @@ def test_all_timing_perf_logs_have_perf_prefix(
     timing_logs = [r for r in perf_level_logs if "took=" in r.message or "took" in r.message.lower()]
 
     violations = [r.message for r in timing_logs if not r.message.startswith("[PERF]")]
-    assert not violations, (
-        "다음 타이밍 PERF 로그가 [PERF] 접두사 없음:\n" + "\n".join(violations)
-    )
+    assert not violations, "다음 타이밍 PERF 로그가 [PERF] 접두사 없음:\n" + "\n".join(violations)
 
 
 # ─── Scenario 4: portfolio_constructor solve_constrained_weights PERF 로그 ────
+
 
 def test_solve_constrained_weights_emits_perf_log(caplog: Any) -> None:
     import numpy as np
@@ -183,7 +185,8 @@ def test_solve_constrained_weights_emits_perf_log(caplog: Any) -> None:
 
     with caplog.at_level(PERF, logger="src.domain.futures.portfolio.portfolio_constructor"):
         solve_constrained_weights(
-            mu, sigma,
+            mu,
+            sigma,
             kappa=0.3,
             f_kelly_max=0.5,
             sigma_target_ann=0.20,
@@ -201,6 +204,7 @@ def test_solve_constrained_weights_emits_perf_log(caplog: Any) -> None:
 
 
 # ─── Scenario 5: diagonal_kelly_weights PERF 로그 ─────────────────────────────
+
 
 def test_diagonal_kelly_weights_emits_perf_log(caplog: Any) -> None:
     from src.domain.futures.portfolio.portfolio_constructor import PortfolioCaps, diagonal_kelly_weights
@@ -232,6 +236,7 @@ def test_diagonal_kelly_weights_emits_perf_log(caplog: Any) -> None:
 
 # ─── Scenario 7: evaluate_layer1_readiness PERF 로그 (Gap 4) ──────────────────
 
+
 def test_evaluate_layer1_readiness_emits_perf_log(caplog: Any) -> None:
     from src.domain.futures.strategy.candidate_contracts import Layer1FoldReadiness
     from src.domain.futures.strategy.config import CandidateStrategyConfig
@@ -252,15 +257,24 @@ def test_evaluate_layer1_readiness_emits_perf_log(caplog: Any) -> None:
 
     fold_reports = (
         Layer1FoldReadiness(
-            fold_id=0, registry_source_end_idx=10,
-            outer_oos_start_idx=10, outer_oos_end_idx=20,
-            ready_symbols=("BTC", "ETH"), matched_event_count=5,
-            unmatched_event_count=1, realized_match_ratio=0.83,
-            unique_decision_count=3, prediction_unique_count=3,
-            opportunity_ic=0.05, opportunity_ic_tstat=1.2,
-            probe_bps=2.0, probe_lcb_bps=1.5,
+            fold_id=0,
+            registry_source_end_idx=10,
+            outer_oos_start_idx=10,
+            outer_oos_end_idx=20,
+            ready_symbols=("BTC", "ETH"),
+            matched_event_count=5,
+            unmatched_event_count=1,
+            realized_match_ratio=0.83,
+            unique_decision_count=3,
+            prediction_unique_count=3,
+            opportunity_ic=0.05,
+            opportunity_ic_tstat=1.2,
+            probe_bps=2.0,
+            probe_lcb_bps=1.5,
             probe_series_bps=(2.0, 1.5, 1.8),
-            effective_symbol_count=2.0, passed=True, blockers=(),
+            effective_symbol_count=2.0,
+            passed=True,
+            blockers=(),
         ),
     )
 
@@ -283,6 +297,7 @@ def test_evaluate_layer1_readiness_emits_perf_log(caplog: Any) -> None:
 
 # ─── Scenario 8: build_qualified_signal_registry PERF 로그 (Gap 5) ─────────────
 
+
 def test_build_qualified_signal_registry_emits_perf_log(caplog: Any) -> None:
     from src.domain.futures.strategy.candidate_contracts import SignalSourceKey, SymbolStrategyEvidence
     from src.domain.futures.strategy.tiered_workflow.signal_selection import build_qualified_signal_registry
@@ -290,12 +305,20 @@ def test_build_qualified_signal_registry_emits_perf_log(caplog: Any) -> None:
     evidence = (
         SymbolStrategyEvidence(
             key=SignalSourceKey(symbol="BTC", strategy_id="ma", activation_context="all"),
-            mean_gross_bps=10.0, mean_incremental_bps=8.0,
-            block_tstat_incremental=1.5, probability_positive=0.8,
-            p_value=0.05, q_value=0.05, positive_fold_ratio=0.8,
-            n_obs=100, effective_n=80.0, n_folds=5,
-            quality_weight=0.9, hard_eligible=True,
-            structural_reasons=(), diagnostic_flags=(),
+            mean_gross_bps=10.0,
+            mean_incremental_bps=8.0,
+            block_tstat_incremental=1.5,
+            probability_positive=0.8,
+            p_value=0.05,
+            q_value=0.05,
+            positive_fold_ratio=0.8,
+            n_obs=100,
+            effective_n=80.0,
+            n_folds=5,
+            quality_weight=0.9,
+            hard_eligible=True,
+            structural_reasons=(),
+            diagnostic_flags=(),
             lcb_net_bps=2.0,
         ),
     )
@@ -319,6 +342,7 @@ def test_build_qualified_signal_registry_emits_perf_log(caplog: Any) -> None:
 
 # ─── Scenario 9: l1_lifecycle PERF 로그 (Gap 6) ─────────────────────────────
 
+
 def test_l1_lifecycle_perf_log_emitted(
     minimal_aligned: Any, minimal_cfg: Any, empty_fold_out: Any, caplog: Any
 ) -> None:
@@ -336,9 +360,8 @@ def test_l1_lifecycle_perf_log_emitted(
 
 # ─── Scenario 10: [MEM] 로그 출력 확인 ────────────────────────────────────────
 
-def test_l1_nested_mem_log_emitted(
-    minimal_aligned: Any, minimal_cfg: Any, empty_fold_out: Any, caplog: Any
-) -> None:
+
+def test_l1_nested_mem_log_emitted(minimal_aligned: Any, minimal_cfg: Any, empty_fold_out: Any, caplog: Any) -> None:
     with caplog.at_level(logging.DEBUG, logger="src.domain.futures.strategy.tiered_workflow"):
         _run_l1_nested(minimal_aligned, minimal_cfg, empty_fold_out)
 
@@ -352,19 +375,16 @@ def test_l1_nested_mem_log_emitted(
     assert has_evidence or has_outer, "evidence_ipc or outer_ipc mem log missing"
 
 
-def test_no_legacy_perf_tiered_prefix(
-    minimal_aligned: Any, minimal_cfg: Any, empty_fold_out: Any, caplog: Any
-) -> None:
+def test_no_legacy_perf_tiered_prefix(minimal_aligned: Any, minimal_cfg: Any, empty_fold_out: Any, caplog: Any) -> None:
     with caplog.at_level(PERF, logger="src.domain.futures.strategy.tiered_workflow"):
         _run_l1_nested(minimal_aligned, minimal_cfg, empty_fold_out)
 
     legacy_logs = [r.message for r in caplog.records if "perf-tiered" in r.message]
-    assert not legacy_logs, (
-        "구 [perf-tiered] 접두사 로그가 아직 남아있음:\n" + "\n".join(legacy_logs)
-    )
+    assert not legacy_logs, "구 [perf-tiered] 접두사 로그가 아직 남아있음:\n" + "\n".join(legacy_logs)
 
 
 # ─── Scenario 11: Evidence phase runs before outer phase ─────────────────────
+
 
 def test_two_phase_evidence_before_outer(
     minimal_aligned: Any, minimal_cfg: Any, empty_fold_out: Any, caplog: Any
@@ -396,20 +416,27 @@ def test_two_phase_evidence_before_outer(
 
 # ─── Scenario 12: Thread env vars set before fork ────────────────────────────
 
+
 def test_l1_nested_thread_env_vars_set(
     minimal_aligned: Any, minimal_cfg: Any, empty_fold_out: Any, caplog: Any
 ) -> None:
     with caplog.at_level(logging.DEBUG, logger="src.domain.futures.strategy.tiered_workflow"):
         _run_l1_nested(minimal_aligned, minimal_cfg, empty_fold_out)
 
-    envs = {"NUMBA_NUM_THREADS", "OMP_NUM_THREADS", "MKL_NUM_THREADS",
-            "OPENBLAS_NUM_THREADS", "VECLIB_MAXIMUM_THREADS", "NUMEXPR_NUM_THREADS"}
+    envs = {
+        "NUMBA_NUM_THREADS",
+        "OMP_NUM_THREADS",
+        "MKL_NUM_THREADS",
+        "OPENBLAS_NUM_THREADS",
+        "VECLIB_MAXIMUM_THREADS",
+        "NUMEXPR_NUM_THREADS",
+    }
     for var in envs:
         assert os.environ.get(var) == "1", f"{var} must be '1' after L1 execution, got {os.environ.get(var)}"
 
     mem_logs = [r.message for r in caplog.records if "[MEM]" in r.message]
     pre_fork_idx = next((i for i, m in enumerate(mem_logs) if "stage=pre_fork" in m), -1)
     assert pre_fork_idx >= 0, "pre_fork log must be present"
-    assert any("stage=evidence_ipc" in m for m in mem_logs[pre_fork_idx:]) or \
-           any("stage=outer_ipc" in m for m in mem_logs[pre_fork_idx:]), \
-           "IPC log must appear after pre_fork log"
+    assert any("stage=evidence_ipc" in m for m in mem_logs[pre_fork_idx:]) or any(
+        "stage=outer_ipc" in m for m in mem_logs[pre_fork_idx:]
+    ), "IPC log must appear after pre_fork log"

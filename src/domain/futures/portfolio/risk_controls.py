@@ -15,8 +15,8 @@ class DualDecayConfig:
 
     """
 
-    percent_decay_floor: float = -0.15          # -15% (coarse_CAGR > 0일 때만)
-    absolute_decay_floor_bps: float = -500.0    # -500bps (항상 적용)
+    percent_decay_floor: float = -0.15  # -15% (coarse_CAGR > 0일 때만)
+    absolute_decay_floor_bps: float = -500.0  # -500bps (항상 적용)
 
 
 @dataclass
@@ -32,7 +32,7 @@ class DualDecayResult:
     """
 
     passed: bool
-    percent_decay: float | None                 # coarse_CAGR <= 0 이면 None
+    percent_decay: float | None  # coarse_CAGR <= 0 이면 None
     absolute_decay_bps: float
     failures: list[str]
 
@@ -51,19 +51,19 @@ def evaluate_dual_decay(
         cfg = DualDecayConfig()
 
     failures: list[str] = []
-    
+
     # 1. Percent Decay 계산 (coarse_cagr > 0 일 때만)
     percent_decay: float | None = None
     if coarse_cagr > 0.0:
         percent_decay = (intrabar_cagr - coarse_cagr) / coarse_cagr
         if percent_decay < cfg.percent_decay_floor:
             failures.append("DUAL_DECAY_PERCENT")
-            
+
     # 2. Absolute Decay 계산 (bps)
     absolute_decay_bps = (intrabar_cagr - coarse_cagr) * 10000.0
     if absolute_decay_bps < cfg.absolute_decay_floor_bps:
         failures.append("DUAL_DECAY_ABSOLUTE")
-        
+
     passed = len(failures) == 0
     return DualDecayResult(
         passed=passed,
@@ -74,9 +74,9 @@ def evaluate_dual_decay(
 
 
 # Drawdown Tiers & Scale
-DD_TIER_1_LOSS: float = -0.10     # rolling 30d loss > 10%
-DD_TIER_2_LOSS: float = -0.15     # rolling 30d loss > 15%
-DD_RECOVERY_LOSS: float = -0.05   # recovery threshold: rolling 30d loss < 5%
+DD_TIER_1_LOSS: float = -0.10  # rolling 30d loss > 10%
+DD_TIER_2_LOSS: float = -0.15  # rolling 30d loss > 15%
+DD_RECOVERY_LOSS: float = -0.05  # recovery threshold: rolling 30d loss < 5%
 DD_TIER_1_SCALE: float = 0.70
 DD_TIER_2_SCALE: float = 0.40
 
@@ -130,15 +130,15 @@ def apply_no_trade_buffer(
     tw = np.asarray(target_weights, dtype=np.float64).copy()
     cw = np.asarray(current_weights, dtype=np.float64)
     cost = np.asarray(cost_bps_per_symbol, dtype=np.float64)
-    
+
     # delta_w(i) in bps = abs(target - current) * 10000.0
     delta_w_bps = np.abs(tw - cw) * 10000.0
     threshold = threshold_multiplier * cost
-    
+
     # threshold_multiplier 가 0 이면 버퍼가 비활성화됨
     if threshold_multiplier <= 0.0:
         return tw
-        
+
     mask = delta_w_bps < threshold
     tw[mask] = cw[mask]
     return tw

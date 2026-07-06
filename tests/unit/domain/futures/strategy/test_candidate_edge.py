@@ -165,9 +165,7 @@ def test_predict_candidate_edges_flags_prediction_collapse() -> None:
         edge_prediction_min_positive_rate=0.999,
     )
 
-    models = fit_candidate_edge_models(
-        train=train, valid=valid, calibration_eval=cal_eval, cfg=cfg
-    )
+    models = fit_candidate_edge_models(train=train, valid=valid, calibration_eval=cal_eval, cfg=cfg)
     out = predict_candidate_edges(
         models=models,
         dataset=valid,
@@ -194,9 +192,7 @@ def test_edge_gate_reverts_to_direct_when_rank_ic_below_threshold() -> None:
     )
 
     # Act
-    models = fit_candidate_edge_models(
-        train=train, valid=valid, calibration_eval=cal_eval_small, cfg=cfg
-    )
+    models = fit_candidate_edge_models(train=train, valid=valid, calibration_eval=cal_eval_small, cfg=cfg)
 
     # Assert
     assert models.validation is not None

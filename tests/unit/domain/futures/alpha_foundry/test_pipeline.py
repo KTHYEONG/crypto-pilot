@@ -5,12 +5,18 @@ import pandas as pd
 import pytest
 
 from src.domain.futures.alpha_foundry.contracts import (
+    AlphaFoundryEvidenceRow,
     AlphaRecipe,
     CheapGateConfig,
+    CheapGateEvidence,
+    CrossBucketDiversityResult,
+    DiversitySelectionResult,
+    L0SignalCandidate,
     L2PosteriorPolicyConfig,
     PosteriorGateConfig,
 )
 from src.domain.futures.alpha_foundry.pipeline import (
+    build_l0_handoff_decisions,
     build_l2_sleeves_from_posterior,
     build_posterior_from_l1_fold_rows,
     run_alpha_foundry_l0_pipeline,
@@ -159,8 +165,18 @@ class TestBuildPosteriorFromL1FoldRows:
     def test_empty_raw_rows_returns_empty(self) -> None:
         config = PosteriorGateConfig()
         result = build_posterior_from_l1_fold_rows(
-            raw_rows=pd.DataFrame(columns=["symbol", "recipe_id", "family", "timeframe",
-                                           "activation_context", "net_bps", "fold_id", "effective_weight"]),
+            raw_rows=pd.DataFrame(
+                columns=[
+                    "symbol",
+                    "recipe_id",
+                    "family",
+                    "timeframe",
+                    "activation_context",
+                    "net_bps",
+                    "fold_id",
+                    "effective_weight",
+                ]
+            ),
             cost_model=ExecutionCostModel(),
             config=config,
         )
@@ -186,14 +202,30 @@ class TestBuildPosteriorFromL1FoldRows:
 
     def test_real_fold_rows_produces_posterior(self) -> None:
         config = PosteriorGateConfig()
-        raw_rows = pd.DataFrame([
-            {"symbol": "SYM0USDT", "recipe_id": "trend_ma__ema_12_72__4h",
-             "family": "trend_ma", "timeframe": "4h", "activation_context": "pooled",
-             "net_bps": 4.2, "fold_id": 0, "effective_weight": 1.0},
-            {"symbol": "SYM0USDT", "recipe_id": "trend_ma__ema_12_72__4h",
-             "family": "trend_ma", "timeframe": "4h", "activation_context": "pooled",
-             "net_bps": 3.6, "fold_id": 1, "effective_weight": 1.0},
-        ])
+        raw_rows = pd.DataFrame(
+            [
+                {
+                    "symbol": "SYM0USDT",
+                    "recipe_id": "trend_ma__ema_12_72__4h",
+                    "family": "trend_ma",
+                    "timeframe": "4h",
+                    "activation_context": "pooled",
+                    "net_bps": 4.2,
+                    "fold_id": 0,
+                    "effective_weight": 1.0,
+                },
+                {
+                    "symbol": "SYM0USDT",
+                    "recipe_id": "trend_ma__ema_12_72__4h",
+                    "family": "trend_ma",
+                    "timeframe": "4h",
+                    "activation_context": "pooled",
+                    "net_bps": 3.6,
+                    "fold_id": 1,
+                    "effective_weight": 1.0,
+                },
+            ]
+        )
         result = build_posterior_from_l1_fold_rows(
             raw_rows=raw_rows,
             cost_model=ExecutionCostModel(),
@@ -215,11 +247,20 @@ class TestL2SleevesFromPosterior:
 
     def test_real_posterior_produces_l2_sleeves(self) -> None:
         config = L2PosteriorPolicyConfig()
-        raw_rows = pd.DataFrame([
-            {"symbol": "SYM0USDT", "recipe_id": "trend_ma__ema_12_72__4h",
-             "family": "trend_ma", "timeframe": "4h", "activation_context": "pooled",
-             "net_bps": 4.2, "fold_id": 0, "effective_weight": 1.0},
-        ])
+        raw_rows = pd.DataFrame(
+            [
+                {
+                    "symbol": "SYM0USDT",
+                    "recipe_id": "trend_ma__ema_12_72__4h",
+                    "family": "trend_ma",
+                    "timeframe": "4h",
+                    "activation_context": "pooled",
+                    "net_bps": 4.2,
+                    "fold_id": 0,
+                    "effective_weight": 1.0,
+                },
+            ]
+        )
         posterior = build_posterior_from_l1_fold_rows(
             raw_rows=raw_rows,
             cost_model=ExecutionCostModel(),
@@ -236,22 +277,39 @@ class TestL2SleevesFromPosterior:
 class TestBuildL1VerificationUnits:
     def test_build_units(self) -> None:
         from src.domain.futures.alpha_foundry.budget import build_l1_verification_units
-        from src.domain.futures.alpha_foundry.contracts import CheapGateEvidence
 
         ev = CheapGateEvidence(
-            recipe_id="r1", timeframe="4h", symbol_scope="symbol",
-            n_events=100, effective_n=80.0, mean_net_bps=5.0, nw_tstat=2.0,
-            block_lcb_bps=2.0, rank_ic=0.05, cost_drag_ratio=0.3,
-            turnover_per_year=50.0, novelty_corr_max=0.0,
-            incremental_rank_ic=0.0, compute_cost_score=0.0,
-            gate_passed=True, reject_reasons=(),
-            bootstrap_lcb_bps=1.5, bootstrap_agree=True,
+            recipe_id="r1",
+            timeframe="4h",
+            symbol_scope="symbol",
+            n_events=100,
+            effective_n=80.0,
+            mean_net_bps=5.0,
+            nw_tstat=2.0,
+            block_lcb_bps=2.0,
+            rank_ic=0.05,
+            cost_drag_ratio=0.3,
+            turnover_per_year=50.0,
+            novelty_corr_max=0.0,
+            incremental_rank_ic=0.0,
+            compute_cost_score=0.0,
+            gate_passed=True,
+            reject_reasons=(),
+            bootstrap_lcb_bps=1.5,
+            bootstrap_agree=True,
         )
         recipe = AlphaRecipe(
-            recipe_id="r1", family="f", variant="v", timeframe="4h",
-            archetype="trend", indicator_params={}, side_rule_id="s",
-            exit_policy_id="e", required_fields=("close",),
-            causal_lag_bars=1, max_turnover_per_year=365.0,
+            recipe_id="r1",
+            family="f",
+            variant="v",
+            timeframe="4h",
+            archetype="trend",
+            indicator_params={},
+            side_rule_id="s",
+            exit_policy_id="e",
+            required_fields=("close",),
+            causal_lag_bars=1,
+            max_turnover_per_year=365.0,
         )
         units = build_l1_verification_units(
             evidences=[ev],
@@ -266,16 +324,26 @@ class TestBuildL1VerificationUnits:
 
     def test_build_units_skips_unknown_recipe(self) -> None:
         from src.domain.futures.alpha_foundry.budget import build_l1_verification_units
-        from src.domain.futures.alpha_foundry.contracts import CheapGateEvidence
 
         ev = CheapGateEvidence(
-            recipe_id="unknown", timeframe="4h", symbol_scope="symbol",
-            n_events=100, effective_n=80.0, mean_net_bps=5.0, nw_tstat=2.0,
-            block_lcb_bps=2.0, rank_ic=0.05, cost_drag_ratio=0.3,
-            turnover_per_year=50.0, novelty_corr_max=0.0,
-            incremental_rank_ic=0.0, compute_cost_score=0.0,
-            gate_passed=True, reject_reasons=(),
-            bootstrap_lcb_bps=1.5, bootstrap_agree=True,
+            recipe_id="unknown",
+            timeframe="4h",
+            symbol_scope="symbol",
+            n_events=100,
+            effective_n=80.0,
+            mean_net_bps=5.0,
+            nw_tstat=2.0,
+            block_lcb_bps=2.0,
+            rank_ic=0.05,
+            cost_drag_ratio=0.3,
+            turnover_per_year=50.0,
+            novelty_corr_max=0.0,
+            incremental_rank_ic=0.0,
+            compute_cost_score=0.0,
+            gate_passed=True,
+            reject_reasons=(),
+            bootstrap_lcb_bps=1.5,
+            bootstrap_agree=True,
         )
         units = build_l1_verification_units(
             evidences=[ev],
@@ -288,32 +356,60 @@ class TestBuildL1VerificationUnits:
 
     def test_build_units_raises_on_budget_violation(self) -> None:
         from src.domain.futures.alpha_foundry.budget import build_l1_verification_units
-        from src.domain.futures.alpha_foundry.contracts import CheapGateEvidence
 
         recipe = AlphaRecipe(
-            recipe_id="r1", family="f", variant="v", timeframe="4h",
-            archetype="trend", indicator_params={}, side_rule_id="s",
-            exit_policy_id="e", required_fields=("close",),
-            causal_lag_bars=1, max_turnover_per_year=365.0,
+            recipe_id="r1",
+            family="f",
+            variant="v",
+            timeframe="4h",
+            archetype="trend",
+            indicator_params={},
+            side_rule_id="s",
+            exit_policy_id="e",
+            required_fields=("close",),
+            causal_lag_bars=1,
+            max_turnover_per_year=365.0,
         )
         evs = [
             CheapGateEvidence(
-                recipe_id="r1", timeframe="4h", symbol_scope="symbol",
-                n_events=100, effective_n=80.0, mean_net_bps=5.0, nw_tstat=2.0,
-                block_lcb_bps=2.0, rank_ic=0.05, cost_drag_ratio=0.3,
-                turnover_per_year=50.0, novelty_corr_max=0.0,
-                incremental_rank_ic=0.0, compute_cost_score=0.0,
-                gate_passed=True, reject_reasons=(),
-                bootstrap_lcb_bps=1.5, bootstrap_agree=True,
+                recipe_id="r1",
+                timeframe="4h",
+                symbol_scope="symbol",
+                n_events=100,
+                effective_n=80.0,
+                mean_net_bps=5.0,
+                nw_tstat=2.0,
+                block_lcb_bps=2.0,
+                rank_ic=0.05,
+                cost_drag_ratio=0.3,
+                turnover_per_year=50.0,
+                novelty_corr_max=0.0,
+                incremental_rank_ic=0.0,
+                compute_cost_score=0.0,
+                gate_passed=True,
+                reject_reasons=(),
+                bootstrap_lcb_bps=1.5,
+                bootstrap_agree=True,
             ),
             CheapGateEvidence(
-                recipe_id="r1", timeframe="4h", symbol_scope="symbol",
-                n_events=100, effective_n=80.0, mean_net_bps=4.0, nw_tstat=2.0,
-                block_lcb_bps=1.0, rank_ic=0.05, cost_drag_ratio=0.3,
-                turnover_per_year=50.0, novelty_corr_max=0.0,
-                incremental_rank_ic=0.0, compute_cost_score=0.0,
-                gate_passed=True, reject_reasons=(),
-                bootstrap_lcb_bps=1.0, bootstrap_agree=True,
+                recipe_id="r1",
+                timeframe="4h",
+                symbol_scope="symbol",
+                n_events=100,
+                effective_n=80.0,
+                mean_net_bps=4.0,
+                nw_tstat=2.0,
+                block_lcb_bps=1.0,
+                rank_ic=0.05,
+                cost_drag_ratio=0.3,
+                turnover_per_year=50.0,
+                novelty_corr_max=0.0,
+                incremental_rank_ic=0.0,
+                compute_cost_score=0.0,
+                gate_passed=True,
+                reject_reasons=(),
+                bootstrap_lcb_bps=1.0,
+                bootstrap_agree=True,
             ),
         ]
         with pytest.raises(ValueError, match="budget violated"):
@@ -324,3 +420,414 @@ class TestBuildL1VerificationUnits:
                 top_k_per_family_tf=1,  # only 1 allowed, but 2 same-bucket
                 initial_fold_budget=3,
             )
+
+
+# ── Mock boilerplate for handoff tests ─────────────────────────────
+
+
+def _make_aligned_handoff(t: int = 128, n: int = 2) -> AlignedMarketData:
+    dt = np.arange(
+        np.datetime64("2026-01-01T00:00:00"),
+        np.datetime64("2026-01-01T00:00:00") + np.timedelta64(t, "h"),
+        np.timedelta64(1, "h"),
+        dtype="datetime64[ns]",
+    )
+    close = np.linspace(100.0, 120.0, t, dtype=np.float64).reshape(-1, 1)
+    close = np.repeat(close, n, axis=1)
+    mask = np.ones((t, n), dtype=np.bool_)
+    return AlignedMarketData(
+        datetimes=dt,
+        symbols=tuple(f"SYM{i}USDT" for i in range(n)),
+        open_2d=close.copy(),
+        high_2d=close * 1.001,
+        low_2d=close * 0.999,
+        close_2d=close,
+        volume_2d=np.full((t, n), 1000.0, dtype=np.float64),
+        funding_2d=np.full((t, n), 0.00005, dtype=np.float64),
+        active_mask=mask,
+        warm_mask=mask,
+        entry_block_mask=np.zeros((t, n), dtype=np.bool_),
+        kill_mask=np.zeros((t, n), dtype=np.bool_),
+    )
+
+
+def _make_panel_handoff(
+    recipe_id: str,
+    family: str = "trend_ma",
+    variant: str = "ema_12_72_4h",
+) -> CandidateSignalPanel:
+    aligned = _make_aligned_handoff(t=128, n=2)
+    t, n = aligned.close_2d.shape
+    side = np.zeros((t, n), dtype=np.int8)
+    for start in range(0, t, 16):
+        side[start : start + 8, :] = 1
+    return CandidateSignalPanel(
+        family=family,
+        variant=variant,
+        params={"fast": 12, "slow": 72},
+        datetimes=aligned.datetimes,
+        symbols=aligned.symbols,
+        signed_score_2d=side.astype(np.float64),
+        side_hint_2d=side,
+        expected_holding_bars=3,
+        min_holding_bars=1,
+        stop_atr_mult=2.0,
+        take_profit_atr_mult=4.0,
+        turnover_proxy_2d=np.zeros((t, n), dtype=np.float64),
+        valid_mask_2d=np.ones((t, n), dtype=np.bool_),
+        metadata={"recipe_id": recipe_id},
+        archetype="trend",
+    )
+
+
+def _make_recipe_handoff(recipe_id: str, family: str = "trend_ma", variant: str = "ema_12_72") -> AlphaRecipe:
+    return AlphaRecipe(
+        recipe_id=recipe_id,
+        family=family,
+        variant=variant,
+        timeframe="4h",
+        archetype="trend",
+        indicator_params={"fast": 12, "slow": 72},
+        side_rule_id="trend_follow",
+        exit_policy_id="atr_trail_2",
+        required_fields=("close",),
+        causal_lag_bars=1,
+        max_turnover_per_year=365.0,
+    )
+
+
+def _make_candidate_handoff(
+    recipe_id: str,
+    *,
+    priority: float,
+    tier: str = "candidate",
+    blocked: bool = False,
+    corroboration_tier: str = "insufficient_coverage",
+    timeframe: str = "4h",
+) -> L0SignalCandidate:
+    hard_reject_reasons = ("deep_negative_lcb",) if blocked else ()
+    return L0SignalCandidate(
+        run_id="test",
+        timeframe=timeframe,
+        family="trend_ma",
+        variant=recipe_id,
+        recipe_id=recipe_id,
+        archetype="trend",
+        source="catalog_exact",
+        n_events=100,
+        effective_n=100.0,
+        mean_net_bps=priority + 1.0,
+        block_lcb_bps=priority,
+        nw_tstat=2.0,
+        bootstrap_lcb_bps=priority,
+        bootstrap_agree=True,
+        cost_drag_ratio=0.3,
+        turnover_per_year=100.0,
+        max_abs_corr_in_bucket=0.0,
+        tf_coverage_count=1,
+        sign_agreement_ratio=1.0,
+        corroboration_tier=corroboration_tier,
+        discovery_tier="blocked" if blocked else tier,
+        l1_priority_score=priority,
+        l1_budget_units=0,
+        hard_reject_reasons=hard_reject_reasons,
+        soft_flags=(),
+    )
+
+
+def _make_bucket_handoff(bucket_key: tuple[str, str], recipe_ids: tuple[str, ...]) -> DiversitySelectionResult:
+    return DiversitySelectionResult(
+        bucket_key=bucket_key,
+        ranked_recipe_ids=recipe_ids,
+        selected_recipe_ids=recipe_ids,
+        redundant_recipe_ids=(),
+        redundant_reason_by_id={},
+        bucket_corr=np.eye(len(recipe_ids), dtype=np.float64),
+        bucket_eff_test_count=float(len(recipe_ids)),
+    )
+
+
+class TestBuildL0HandoffDecisions:
+    """Scenario S1-1, S2-2, S2-4, S2-5, S2-6, S3-2"""
+
+    def test_hands_off_only_top_n_by_priority_in_bucket(self) -> None:
+        recipes = {
+            "r_a": _make_recipe_handoff("r_a"),
+            "r_b": _make_recipe_handoff("r_b"),
+            "r_c": _make_recipe_handoff("r_c"),
+        }
+        candidates = [
+            _make_candidate_handoff("r_a", priority=30.0),
+            _make_candidate_handoff("r_b", priority=20.0),
+            _make_candidate_handoff("r_c", priority=10.0),
+        ]
+        bk = ("trend_ma", "4h")
+        bucket_result = _make_bucket_handoff(bk, ("r_a", "r_b", "r_c"))
+        cross_result = CrossBucketDiversityResult(
+            final_selected_recipe_ids=("r_a", "r_b", "r_c"),
+            demoted_recipe_ids=(),
+            demoted_reason_by_id={},
+            cross_bucket_corr=np.eye(3, dtype=np.float64),
+            global_eff_test_count=3.0,
+        )
+        panel_by_rid = {c.recipe_id: _make_panel_handoff(c.recipe_id) for c in candidates}
+        decisions = build_l0_handoff_decisions(
+            candidates=candidates,
+            recipes=recipes,
+            bucket_results=[bucket_result],
+            cross_result=cross_result,
+            allocated_slots_by_bucket={bk: 2},
+            panel_by_recipe_id=panel_by_rid,
+        )
+        selected = [d for d in decisions if d.selected_for_l1]
+        assert len(selected) == 2
+        assert selected[0].recipe_id == "r_a"
+        assert selected[1].recipe_id == "r_b"
+        r_c_decision = next(d for d in decisions if d.recipe_id == "r_c")
+        assert r_c_decision.exclusion_reason == "budget_exhausted"
+
+    def test_single_bucket_single_slot_does_not_promote_all(self) -> None:
+        recipes = {
+            "r_a": _make_recipe_handoff("r_a"),
+            "r_b": _make_recipe_handoff("r_b"),
+            "r_c": _make_recipe_handoff("r_c"),
+        }
+        candidates = [
+            _make_candidate_handoff("r_a", priority=30.0),
+            _make_candidate_handoff("r_b", priority=20.0),
+            _make_candidate_handoff("r_c", priority=10.0),
+        ]
+        bk = ("trend_ma", "4h")
+        bucket_result = _make_bucket_handoff(bk, ("r_a", "r_b", "r_c"))
+        cross_result = CrossBucketDiversityResult(
+            final_selected_recipe_ids=("r_a", "r_b", "r_c"),
+            demoted_recipe_ids=(),
+            demoted_reason_by_id={},
+            cross_bucket_corr=np.eye(3, dtype=np.float64),
+            global_eff_test_count=3.0,
+        )
+        panel_by_rid = {c.recipe_id: _make_panel_handoff(c.recipe_id) for c in candidates}
+        decisions = build_l0_handoff_decisions(
+            candidates=candidates,
+            recipes=recipes,
+            bucket_results=[bucket_result],
+            cross_result=cross_result,
+            allocated_slots_by_bucket={bk: 1},
+            panel_by_recipe_id=panel_by_rid,
+        )
+        selected = [d for d in decisions if d.selected_for_l1]
+        assert len(selected) == 1
+        assert selected[0].budget_units == 1
+
+    def test_insufficient_coverage_remains_viable(self) -> None:
+        recipes = {"r_a": _make_recipe_handoff("r_a")}
+        candidates = [
+            _make_candidate_handoff("r_a", priority=10.0, corroboration_tier="insufficient_coverage"),
+        ]
+        bk = ("trend_ma", "4h")
+        bucket_result = _make_bucket_handoff(bk, ("r_a",))
+        cross_result = CrossBucketDiversityResult(
+            final_selected_recipe_ids=("r_a",),
+            demoted_recipe_ids=(),
+            demoted_reason_by_id={},
+            cross_bucket_corr=np.eye(1, dtype=np.float64),
+            global_eff_test_count=1.0,
+        )
+        panel_by_rid = {c.recipe_id: _make_panel_handoff(c.recipe_id) for c in candidates}
+        decisions = build_l0_handoff_decisions(
+            candidates=candidates,
+            recipes=recipes,
+            bucket_results=[bucket_result],
+            cross_result=cross_result,
+            allocated_slots_by_bucket={bk: 1},
+            panel_by_recipe_id=panel_by_rid,
+        )
+        d = decisions[0]
+        assert d.eligible_for_diversity is True
+        assert d.eligible_for_budget is True
+        assert d.selected_for_l1 is True
+
+    def test_tf_contradicted_candidate_is_fail_closed(self) -> None:
+        recipes = {"r_a": _make_recipe_handoff("r_a")}
+        candidates = [
+            _make_candidate_handoff("r_a", priority=10.0, corroboration_tier="contradicted", blocked=True),
+        ]
+        bk = ("trend_ma", "4h")
+        bucket_result = _make_bucket_handoff(bk, ())
+        cross_result = CrossBucketDiversityResult(
+            final_selected_recipe_ids=(),
+            demoted_recipe_ids=(),
+            demoted_reason_by_id={},
+            cross_bucket_corr=np.empty((0, 0), dtype=np.float64),
+            global_eff_test_count=0.0,
+        )
+        panel_by_rid = {}
+        decisions = build_l0_handoff_decisions(
+            candidates=candidates,
+            recipes=recipes,
+            bucket_results=[bucket_result],
+            cross_result=cross_result,
+            allocated_slots_by_bucket={},
+            panel_by_recipe_id=panel_by_rid,
+        )
+        assert len(decisions) == 1
+        assert decisions[0].selected_for_l1 is False
+        assert decisions[0].exclusion_reason == "hard_reject"
+
+    def test_empty_viable_pool_gives_valid_empty_decisions(self) -> None:
+        decisions = build_l0_handoff_decisions(
+            candidates=[],
+            recipes={},
+            bucket_results=[],
+            cross_result=None,
+            allocated_slots_by_bucket={},
+            panel_by_recipe_id={},
+        )
+        assert len(decisions) == 0
+
+    def test_marks_missing_panel_as_excluded(self) -> None:
+        recipes = {"r_a": _make_recipe_handoff("r_a")}
+        candidates = [
+            _make_candidate_handoff("r_a", priority=10.0),
+        ]
+        bk = ("trend_ma", "4h")
+        bucket_result = _make_bucket_handoff(bk, ("r_a",))
+        cross_result = CrossBucketDiversityResult(
+            final_selected_recipe_ids=("r_a",),
+            demoted_recipe_ids=(),
+            demoted_reason_by_id={},
+            cross_bucket_corr=np.eye(1, dtype=np.float64),
+            global_eff_test_count=1.0,
+        )
+        decisions = build_l0_handoff_decisions(
+            candidates=candidates,
+            recipes=recipes,
+            bucket_results=[bucket_result],
+            cross_result=cross_result,
+            allocated_slots_by_bucket={bk: 1},
+            panel_by_recipe_id={},
+        )
+        d = decisions[0]
+        assert d.eligible_for_diversity is True
+        assert d.eligible_for_budget is False
+        assert d.selected_for_l1 is False
+        assert d.exclusion_reason == "missing_panel"
+
+
+class TestL0HandoffInvariants:
+    """Scenario S2-3: handoff invariants match across artifacts."""
+
+    def test_handoff_invariants_match_across_artifacts(self) -> None:
+        recipes = {
+            "r_a": _make_recipe_handoff("r_a"),
+            "r_b": _make_recipe_handoff("r_b"),
+        }
+        candidates = [
+            _make_candidate_handoff("r_a", priority=30.0),
+            _make_candidate_handoff("r_b", priority=20.0),
+        ]
+        bk = ("trend_ma", "4h")
+        bucket_result = _make_bucket_handoff(bk, ("r_a", "r_b"))
+        cross_result = CrossBucketDiversityResult(
+            final_selected_recipe_ids=("r_a", "r_b"),
+            demoted_recipe_ids=(),
+            demoted_reason_by_id={},
+            cross_bucket_corr=np.eye(2, dtype=np.float64),
+            global_eff_test_count=2.0,
+        )
+        panel_by_rid = {c.recipe_id: _make_panel_handoff(c.recipe_id) for c in candidates}
+        decisions = build_l0_handoff_decisions(
+            candidates=candidates,
+            recipes=recipes,
+            bucket_results=[bucket_result],
+            cross_result=cross_result,
+            allocated_slots_by_bucket={bk: 2},
+            panel_by_recipe_id=panel_by_rid,
+        )
+        passed_recipe_ids_set = {d.recipe_id for d in decisions if d.selected_for_l1}
+        budgeted_set = {d.recipe_id for d in decisions if d.budget_units > 0}
+        assert passed_recipe_ids_set == budgeted_set
+
+        evidence_rows = []
+        for c in candidates:
+            d = next(x for x in decisions if x.recipe_id == c.recipe_id)
+            evidence_rows.append(
+                AlphaFoundryEvidenceRow(
+                    run_id="test",
+                    timeframe="4h",
+                    family="trend_ma",
+                    variant=c.variant,
+                    recipe_id=c.recipe_id,
+                    archetype="trend",
+                    n_events=100,
+                    effective_n=100.0,
+                    mean_net_bps=31.0,
+                    nw_tstat=2.0,
+                    block_lcb_bps=30.0,
+                    rank_ic=0.05,
+                    incremental_rank_ic=0.0,
+                    cost_drag_ratio=0.3,
+                    turnover_per_year=100.0,
+                    compute_cost_score=0.0,
+                    bootstrap_lcb_bps=30.0,
+                    bootstrap_agree=True,
+                    gate_passed=True,
+                    reject_reasons="",
+                    bucket_key="trend_ma:4h",
+                    bucket_rank=0,
+                    selected_for_l1=d.selected_for_l1,
+                    redundant_with="",
+                    bucket_eff_test_count=2.0,
+                    global_eff_test_count=2.0,
+                    created_at_ms=1000,
+                )
+            )
+
+        evidence_selected_set = {r.recipe_id for r in evidence_rows if r.selected_for_l1}
+        assert passed_recipe_ids_set == evidence_selected_set
+
+
+class TestL0PipelineHandoff:
+    """End-to-end pipeline tests using the spec's mock boilerplate."""
+
+    def test_l0_pipeline_hands_off_only_budgeted_viable_candidates(self) -> None:
+        aligned = _make_aligned_handoff(t=128, n=2)
+        recipes = {
+            "r_a": _make_recipe_handoff("r_a"),
+            "r_b": _make_recipe_handoff("r_b"),
+            "r_c": _make_recipe_handoff("r_c"),
+        }
+        panels = [_make_panel_handoff(rid) for rid in ("r_a", "r_b", "r_c")]
+        artifacts = run_alpha_foundry_l0_pipeline(
+            panels=panels,
+            recipes=recipes,
+            aligned=aligned,
+            cost_model=ExecutionCostModel(),
+            cheap_gate_config=CheapGateConfig(min_events=10),
+            run_id="test",
+            top_k_per_family_tf=5,
+            min_conviction_lcb_bps=0.0,
+            total_l1_verification_budget=30,
+        )
+        assert len(artifacts.passed_recipe_ids) <= 30
+        for c in artifacts.candidates:
+            if c.recipe_id in artifacts.passed_recipe_ids:
+                assert c.l1_budget_units > 0
+            else:
+                if c.discovery_tier in {"seed", "candidate", "verified"}:
+                    pass  # excluded by budget/diversity — acceptable
+
+    def test_empty_panels_empty_handoff(self) -> None:
+        aligned = _make_aligned_handoff(t=128, n=2)
+        artifacts = run_alpha_foundry_l0_pipeline(
+            panels=[],
+            recipes={},
+            aligned=aligned,
+            cost_model=ExecutionCostModel(),
+            cheap_gate_config=CheapGateConfig(),
+            run_id="test",
+        )
+        assert artifacts.passed_recipe_ids == ()
+        assert len(artifacts.handoff_decisions) == 0
+        assert artifacts.stage_counts.viable_candidates == 0
+        assert artifacts.stage_counts.l1_queued == 0

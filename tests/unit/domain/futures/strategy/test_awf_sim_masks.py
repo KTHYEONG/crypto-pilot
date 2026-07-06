@@ -114,10 +114,7 @@ def test_entry_cooldown_masks_new_symbols_causally() -> None:
     )
     config = Layer2AllocationConfig(l2_entry_cooldown_bars=3)
 
-    rows = [
-        bool(_resolve_tradeable_mask(aligned=aligned, t=i, n_sym=1, config=config)[0])
-        for i in range(t)
-    ]
+    rows = [bool(_resolve_tradeable_mask(aligned=aligned, t=i, n_sym=1, config=config)[0]) for i in range(t)]
 
     assert rows[2] is False
     assert rows[3] is False

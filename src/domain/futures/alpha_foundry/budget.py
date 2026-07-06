@@ -1,5 +1,6 @@
 """Alpha Foundry L1 budget allocation helpers.
 
+[ADR_20260706_ALPHA_FOUNDRY_L0_L1_HANDOFF_GUARD]
 [ADR_20260706_ALPHA_FOUNDRY_SYNC][ADR_20260706_ALPHA_FOUNDRY_L0_DIVERSITY]
 [ADR_20260706_ALPHA_FOUNDRY_L0_SIGNAL_RIGOR]
 """
@@ -43,8 +44,7 @@ def build_l1_verification_units(
     for key, count in bucket_counts.items():
         if count > top_k_per_family_tf:
             raise ValueError(
-                f"L0 diversity budget violated for bucket {key[0]}:{key[1]}: "
-                f"{count} > {top_k_per_family_tf}"
+                f"L0 diversity budget violated for bucket {key[0]}:{key[1]}: {count} > {top_k_per_family_tf}"
             )
 
     units: list[L1VerificationUnit] = []
@@ -127,9 +127,7 @@ def allocate_global_l1_budget(
     min_seed_slots_per_timeframe: int = 1,
 ) -> tuple[dict[BucketKey, int], tuple[L0BucketBudget, ...]]:
     if total_l1_verification_budget <= 0:
-        raise ValueError(
-            f"total_l1_verification_budget must be positive, got {total_l1_verification_budget}"
-        )
+        raise ValueError(f"total_l1_verification_budget must be positive, got {total_l1_verification_budget}")
 
     # Compute bucket quality as max l1_priority_score in bucket
     quality: dict[BucketKey, float] = {}
@@ -215,16 +213,18 @@ def allocate_global_l1_budget(
     budgets: list[L0BucketBudget] = []
     for br in bucket_results:
         bk = br.bucket_key
-        budgets.append(L0BucketBudget(
-            bucket_key=bk,
-            archetype=archetype_by_bucket.get(bk, "trend"),
-            candidate_count=cand_count_by_bucket.get(bk, 0),
-            selected_count=len(br.selected_recipe_ids),
-            min_seed_slots=min_seed_slots_per_archetype,
-            max_slots=top_k_max,
-            allocated_slots=allocated.get(bk, 0),
-            bucket_quality=quality.get(bk, 0.0),
-            effective_test_count=br.bucket_eff_test_count,
-        ))
+        budgets.append(
+            L0BucketBudget(
+                bucket_key=bk,
+                archetype=archetype_by_bucket.get(bk, "trend"),
+                candidate_count=cand_count_by_bucket.get(bk, 0),
+                selected_count=len(br.selected_recipe_ids),
+                min_seed_slots=min_seed_slots_per_archetype,
+                max_slots=top_k_max,
+                allocated_slots=allocated.get(bk, 0),
+                bucket_quality=quality.get(bk, 0.0),
+                effective_test_count=br.bucket_eff_test_count,
+            )
+        )
 
     return allocated, tuple(budgets)

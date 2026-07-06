@@ -59,7 +59,7 @@ def test_ltf_mode_last_backward_compat() -> None:
     result = _project_panel_to_base_grid(panel, base_dt, "1h", "4h", ltf_mode="last")
 
     assert result.signed_score_2d[0, 0] == 0.8
-    assert result.valid_mask_2d[0, 0] == True
+    assert result.valid_mask_2d[0, 0]
     assert result.side_hint_2d[0, 0] == 1
     assert result.turnover_proxy_2d[0, 0] == pytest.approx(0.1, abs=1e-6)
 
@@ -90,7 +90,7 @@ def test_ltf_mode_mean_aggregates_all_bars() -> None:
 
     # Bars at indices [1,2,3]: scores [0.3, -0.2, 0.8] → mean 0.30
     assert result.signed_score_2d[0, 0] == pytest.approx(0.30, abs=1e-6)
-    assert result.valid_mask_2d[0, 0] == True
+    assert result.valid_mask_2d[0, 0]
     # side_hint mode of [1, -1, 1] = 1
     assert result.side_hint_2d[0, 0] == 1
     assert result.turnover_proxy_2d[0, 0] == pytest.approx(0.1, abs=1e-6)
@@ -104,9 +104,7 @@ def test_ltf_mode_mean_multiple_windows() -> None:
         ["2026-01-01T04", "2026-01-01T08", "2026-01-01T12", "2026-01-01T16"],
         dtype="datetime64[ns]",
     )
-    score = np.array(
-        [[0.0], [1.0], [2.0], [3.0], [4.0], [5.0], [6.0], [7.0]], dtype=np.float64
-    )
+    score = np.array([[0.0], [1.0], [2.0], [3.0], [4.0], [5.0], [6.0], [7.0]], dtype=np.float64)
 
     panel = _make_panel(
         score_2d=score,
@@ -147,7 +145,7 @@ def test_ltf_mode_mean_empty_window() -> None:
     result = _project_panel_to_base_grid(panel, base_dt, "1h", "4h", ltf_mode="mean")
 
     assert result.signed_score_2d[0, 0] == 0.0
-    assert result.valid_mask_2d[0, 0] == False
+    assert not result.valid_mask_2d[0, 0]
     assert result.side_hint_2d[0, 0] == 0
 
 
@@ -172,8 +170,7 @@ def test_ltf_mode_ignored_for_htf() -> None:
     """Scenario 6: HTF branch ignores ltf_mode."""
     panel_dt = np.array(["2026-01-01T12", "2026-01-02T00"], dtype="datetime64[ns]")
     base_dt = np.array(
-        ["2026-01-01T04", "2026-01-01T08", "2026-01-01T12",
-         "2026-01-01T16", "2026-01-01T20", "2026-01-02T00"],
+        ["2026-01-01T04", "2026-01-01T08", "2026-01-01T12", "2026-01-01T16", "2026-01-01T20", "2026-01-02T00"],
         dtype="datetime64[ns]",
     )
     score = np.array([[10.0], [20.0]], dtype=np.float64)

@@ -54,9 +54,7 @@ class TestConvertPosteriorToL2Sleeves:
     def test_disables_non_positive_posterior_sleeve(self) -> None:
         cost = ExecutionCostModel()
         config = L2PosteriorPolicyConfig()
-        sleeves = convert_posterior_to_l2_sleeves(
-            posterior=SAMPLE_POSTERIOR, cost_model=cost, config=config
-        )
+        sleeves = convert_posterior_to_l2_sleeves(posterior=SAMPLE_POSTERIOR, cost_model=cost, config=config)
         disabled = [s for s in sleeves if s.disabled_reason]
         active = [s for s in sleeves if not s.disabled_reason]
         for d in disabled:
@@ -67,9 +65,7 @@ class TestConvertPosteriorToL2Sleeves:
     def test_active_sleeve_has_positive_mu_eff(self) -> None:
         cost = ExecutionCostModel()
         config = L2PosteriorPolicyConfig()
-        sleeves = convert_posterior_to_l2_sleeves(
-            posterior=SAMPLE_POSTERIOR, cost_model=cost, config=config
-        )
+        sleeves = convert_posterior_to_l2_sleeves(posterior=SAMPLE_POSTERIOR, cost_model=cost, config=config)
         btc = [s for s in sleeves if s.symbol == "BTCUSDT"]
         if btc:
             assert btc[0].side != 0 or btc[0].disabled_reason != ""
@@ -77,9 +73,7 @@ class TestConvertPosteriorToL2Sleeves:
     def test_keeps_zero_weight_disabled_after_regime_policy(self) -> None:
         cost = ExecutionCostModel()
         config = L2PosteriorPolicyConfig()
-        sleeves = convert_posterior_to_l2_sleeves(
-            posterior=SAMPLE_POSTERIOR, cost_model=cost, config=config
-        )
+        sleeves = convert_posterior_to_l2_sleeves(posterior=SAMPLE_POSTERIOR, cost_model=cost, config=config)
         for sleeve in sleeves:
             if sleeve.disabled_reason:
                 assert sleeve.side == 0

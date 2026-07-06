@@ -58,12 +58,14 @@ def make_attr(snaps: tuple[DirectionalVetoSnapshot, ...]) -> Layer2FoldAttributi
     )
 
 
-BASE_CFG = Layer2AllocationConfig.from_mapping({
-    "l2_regime_directional_veto_enabled": True,
-    "l2_regime_directional_veto_symbols": ("BTCUSDT", "ETHUSDT"),
-    "l2_regime_directional_veto_adverse_codes": (1, 2),
-    "l2_regime_directional_veto_action": "drop_long",
-})
+BASE_CFG = Layer2AllocationConfig.from_mapping(
+    {
+        "l2_regime_directional_veto_enabled": True,
+        "l2_regime_directional_veto_symbols": ("BTCUSDT", "ETHUSDT"),
+        "l2_regime_directional_veto_adverse_codes": (1, 2),
+        "l2_regime_directional_veto_action": "drop_long",
+    }
+)
 
 TREATMENT_CFG = replace(
     BASE_CFG,
@@ -78,31 +80,53 @@ class TestSummarizeDirectionalVeto:
     def test_summary_aggregation(self) -> None:
         snaps = (
             DirectionalVetoSnapshot(
-                fold_idx=0, t=10, symbol="BTCUSDT", regime_code=1,
-                raw_mu_before=5.0, raw_mu_after=0.0,
-                counterfactual_weight=0.12, weight_after=0.0,
-                fired=True, was_missing=False,
-                bar_price_return_after=0.0, counterfactual_long_return=-0.03,
+                fold_idx=0,
+                t=10,
+                symbol="BTCUSDT",
+                regime_code=1,
+                raw_mu_before=5.0,
+                raw_mu_after=0.0,
+                counterfactual_weight=0.12,
+                weight_after=0.0,
+                fired=True,
+                was_missing=False,
+                bar_price_return_after=0.0,
+                counterfactual_long_return=-0.03,
             ),
             DirectionalVetoSnapshot(
-                fold_idx=1, t=20, symbol="BTCUSDT", regime_code=1,
-                raw_mu_before=3.0, raw_mu_after=0.0,
-                counterfactual_weight=0.10, weight_after=0.0,
-                fired=True, was_missing=False,
-                bar_price_return_after=0.0, counterfactual_long_return=0.02,
+                fold_idx=1,
+                t=20,
+                symbol="BTCUSDT",
+                regime_code=1,
+                raw_mu_before=3.0,
+                raw_mu_after=0.0,
+                counterfactual_weight=0.10,
+                weight_after=0.0,
+                fired=True,
+                was_missing=False,
+                bar_price_return_after=0.0,
+                counterfactual_long_return=0.02,
             ),
             DirectionalVetoSnapshot(
-                fold_idx=0, t=15, symbol="ETHUSDT", regime_code=0,
-                raw_mu_before=2.0, raw_mu_after=2.0,
-                counterfactual_weight=0.0, weight_after=0.05,
-                fired=False, was_missing=False,
-                bar_price_return_after=0.0, counterfactual_long_return=0.0,
+                fold_idx=0,
+                t=15,
+                symbol="ETHUSDT",
+                regime_code=0,
+                raw_mu_before=2.0,
+                raw_mu_after=2.0,
+                counterfactual_weight=0.0,
+                weight_after=0.05,
+                fired=False,
+                was_missing=False,
+                bar_price_return_after=0.0,
+                counterfactual_long_return=0.0,
             ),
         )
         attr_a = make_attr((snaps[0], snaps[2]))
         attr_b = make_attr((snaps[1],))
         summary = summarize_directional_veto(
-            (attr_a, attr_b), symbols=("BTCUSDT", "ETHUSDT"),
+            (attr_a, attr_b),
+            symbols=("BTCUSDT", "ETHUSDT"),
         )
         assert len(summary) == 2
         assert summary[0].symbol == "BTCUSDT"
@@ -121,22 +145,33 @@ class TestSummarizeDirectionalVeto:
 
     def test_empty_snaps(self) -> None:
         summary = summarize_directional_veto(
-            (make_attr(()),), symbols=("BTCUSDT", "ETHUSDT"),
+            (make_attr(()),),
+            symbols=("BTCUSDT", "ETHUSDT"),
         )
         assert len(summary) == 2
         assert summary[0].n_obs == 0
         assert summary[0].n_fired == 0
 
     def test_missing_symbol(self) -> None:
-        snaps = (DirectionalVetoSnapshot(
-            fold_idx=0, t=10, symbol="BTCUSDT", regime_code=1,
-            raw_mu_before=0.0, raw_mu_after=0.0,
-            counterfactual_weight=0.0, weight_after=0.0,
-            fired=False, was_missing=True,
-            bar_price_return_after=0.0, counterfactual_long_return=0.0,
-        ),)
+        snaps = (
+            DirectionalVetoSnapshot(
+                fold_idx=0,
+                t=10,
+                symbol="BTCUSDT",
+                regime_code=1,
+                raw_mu_before=0.0,
+                raw_mu_after=0.0,
+                counterfactual_weight=0.0,
+                weight_after=0.0,
+                fired=False,
+                was_missing=True,
+                bar_price_return_after=0.0,
+                counterfactual_long_return=0.0,
+            ),
+        )
         summary = summarize_directional_veto(
-            (make_attr(snaps),), symbols=("BTCUSDT", "ETHUSDT"),
+            (make_attr(snaps),),
+            symbols=("BTCUSDT", "ETHUSDT"),
         )
         assert summary[0].n_missing == 1
         assert summary[0].n_obs == 1
@@ -168,20 +203,34 @@ class TestDirectionalVetoEdgeCases:
         """S2-2: positive/negative counterfactual does not alter actual treatment weights."""
         snaps_pos = (
             DirectionalVetoSnapshot(
-                fold_idx=0, t=10, symbol="BTCUSDT", regime_code=1,
-                raw_mu_before=5.0, raw_mu_after=0.0,
-                counterfactual_weight=0.12, weight_after=0.0,
-                fired=True, was_missing=False,
-                bar_price_return_after=0.0, counterfactual_long_return=0.03,
+                fold_idx=0,
+                t=10,
+                symbol="BTCUSDT",
+                regime_code=1,
+                raw_mu_before=5.0,
+                raw_mu_after=0.0,
+                counterfactual_weight=0.12,
+                weight_after=0.0,
+                fired=True,
+                was_missing=False,
+                bar_price_return_after=0.0,
+                counterfactual_long_return=0.03,
             ),
         )
         snaps_neg = (
             DirectionalVetoSnapshot(
-                fold_idx=0, t=10, symbol="BTCUSDT", regime_code=1,
-                raw_mu_before=5.0, raw_mu_after=0.0,
-                counterfactual_weight=0.12, weight_after=0.0,
-                fired=True, was_missing=False,
-                bar_price_return_after=0.0, counterfactual_long_return=-0.03,
+                fold_idx=0,
+                t=10,
+                symbol="BTCUSDT",
+                regime_code=1,
+                raw_mu_before=5.0,
+                raw_mu_after=0.0,
+                counterfactual_weight=0.12,
+                weight_after=0.0,
+                fired=True,
+                was_missing=False,
+                bar_price_return_after=0.0,
+                counterfactual_long_return=-0.03,
             ),
         )
         s_pos = summarize_directional_veto((make_attr(snaps_pos),), symbols=("BTCUSDT",))
@@ -216,33 +265,43 @@ class TestDirectionalVetoValidation:
 
     def test_invalid_action_value(self) -> None:
         with pytest.raises(ValueError, match="l2_regime_directional_veto_action"):
-            Layer2AllocationConfig.from_mapping({
-                "l2_regime_directional_veto_action": "flip_short",
-            })
+            Layer2AllocationConfig.from_mapping(
+                {
+                    "l2_regime_directional_veto_action": "flip_short",
+                }
+            )
 
     def test_invalid_adverse_code_set(self) -> None:
         with pytest.raises(ValueError, match="adverse_codes"):
-            Layer2AllocationConfig.from_mapping({
-                "l2_regime_directional_veto_adverse_codes": (0, 1),
-            })
+            Layer2AllocationConfig.from_mapping(
+                {
+                    "l2_regime_directional_veto_adverse_codes": (0, 1),
+                }
+            )
 
     def test_invalid_false_positive_bound(self) -> None:
         with pytest.raises(ValueError, match="l2_regime_directional_veto_max_fit_false_positive_rate"):
-            Layer2AllocationConfig.from_mapping({
-                "l2_regime_directional_veto_max_fit_false_positive_rate": 1.5,
-            })
+            Layer2AllocationConfig.from_mapping(
+                {
+                    "l2_regime_directional_veto_max_fit_false_positive_rate": 1.5,
+                }
+            )
 
     def test_invalid_gross_ratio_bound(self) -> None:
         with pytest.raises(ValueError, match="l2_regime_directional_veto_min_gross_ratio"):
-            Layer2AllocationConfig.from_mapping({
-                "l2_regime_directional_veto_min_gross_ratio": -0.1,
-            })
+            Layer2AllocationConfig.from_mapping(
+                {
+                    "l2_regime_directional_veto_min_gross_ratio": -0.1,
+                }
+            )
 
     def test_invalid_turnover_delta(self) -> None:
         with pytest.raises(ValueError, match="l2_regime_directional_veto_max_turnover_delta"):
-            Layer2AllocationConfig.from_mapping({
-                "l2_regime_directional_veto_max_turnover_delta": -0.01,
-            })
+            Layer2AllocationConfig.from_mapping(
+                {
+                    "l2_regime_directional_veto_max_turnover_delta": -0.01,
+                }
+            )
 
 
 class TestDirectionalVetoCoverage:
@@ -250,11 +309,18 @@ class TestDirectionalVetoCoverage:
 
     def test_veto_snapshot_frozen(self) -> None:
         s = DirectionalVetoSnapshot(
-            fold_idx=0, t=0, symbol="BTCUSDT", regime_code=1,
-            raw_mu_before=5.0, raw_mu_after=0.0,
-            counterfactual_weight=0.12, weight_after=0.0,
-            fired=True, was_missing=False,
-            bar_price_return_after=0.0, counterfactual_long_return=0.0,
+            fold_idx=0,
+            t=0,
+            symbol="BTCUSDT",
+            regime_code=1,
+            raw_mu_before=5.0,
+            raw_mu_after=0.0,
+            counterfactual_weight=0.12,
+            weight_after=0.0,
+            fired=True,
+            was_missing=False,
+            bar_price_return_after=0.0,
+            counterfactual_long_return=0.0,
         )
         assert s.fold_idx == 0
         assert s.symbol == "BTCUSDT"
@@ -265,23 +331,43 @@ class TestDirectionalVetoCoverage:
         assert summary == ()
 
     def test_veto_summary_zero_n_fired_no_div_error(self) -> None:
-        snaps = (DirectionalVetoSnapshot(
-            fold_idx=0, t=0, symbol="BTCUSDT", regime_code=0,
-            raw_mu_before=2.0, raw_mu_after=2.0,
-            counterfactual_weight=0.0, weight_after=0.05,
-            fired=False, was_missing=False,
-            bar_price_return_after=0.0, counterfactual_long_return=0.0,
-        ),)
+        snaps = (
+            DirectionalVetoSnapshot(
+                fold_idx=0,
+                t=0,
+                symbol="BTCUSDT",
+                regime_code=0,
+                raw_mu_before=2.0,
+                raw_mu_after=2.0,
+                counterfactual_weight=0.0,
+                weight_after=0.05,
+                fired=False,
+                was_missing=False,
+                bar_price_return_after=0.0,
+                counterfactual_long_return=0.0,
+            ),
+        )
         attr = Layer2FoldAttribution(
-            fold_idx=0, oos_bars=12, n_rebal=4,
-            realized_total=0.0, realized_price=0.0, realized_funding=0.0,
-            realized_cost=0.0, expected_net=0.0, alpha_gap=0.0,
-            mean_gross_exp=0.5, mean_net_exp=0.0, sleeves_active_mean=2.0,
-            friction_pass_ratio=1.0, throttle_mult_mean=1.0,
-            dropped_below_cost=0, netting_events=0,
+            fold_idx=0,
+            oos_bars=12,
+            n_rebal=4,
+            realized_total=0.0,
+            realized_price=0.0,
+            realized_funding=0.0,
+            realized_cost=0.0,
+            expected_net=0.0,
+            alpha_gap=0.0,
+            mean_gross_exp=0.5,
+            mean_net_exp=0.0,
+            sleeves_active_mean=2.0,
+            friction_pass_ratio=1.0,
+            throttle_mult_mean=1.0,
+            dropped_below_cost=0,
+            netting_events=0,
             directional_veto_snapshots=snaps,
         )
         from src.domain.futures.strategy.tiered_workflow.awf_sim import summarize_directional_veto
+
         s = summarize_directional_veto((attr,), symbols=("BTCUSDT",))
         assert s[0].fire_rate == 0.0
         assert s[0].false_positive_rate == 0.0
@@ -290,7 +376,9 @@ class TestDirectionalVetoCoverage:
     @patch("src.domain.futures.strategy.market_regime.compress_regime_codes")
     @patch("src.domain.futures.strategy.market_regime.compute_market_regime_context")
     def test_awf_simulation_with_veto_enabled_drop_long(
-        self, mock_regime: MagicMock, mock_compress: MagicMock,
+        self,
+        mock_regime: MagicMock,
+        mock_compress: MagicMock,
     ) -> None:
         """Run AWF simulation with veto enabled, verify snapshots collected."""
         mock_regime.return_value = MagicMock(code_1d=np.zeros(50, dtype=np.int8))
@@ -321,31 +409,49 @@ class TestDirectionalVetoCoverage:
 
         events = [
             ValidatedSignalEvent(
-                decision_idx=5, decision_time=aligned.datetimes[5],
-                symbol="BTCUSDT", strategy_id="trend:fast",
-                activation_context="all", side=1,
-                expected_net_bps=10.0, expected_gross_bps=15.0,
-                q10_net_bps=5.0, q10_gross_bps=8.0,
-                q90_net_bps=0.0, q90_gross_bps=20.0,
-                expected_holding_bars=3, reliability=0.9,
-                registry_version="test", model_version="test",
+                decision_idx=5,
+                decision_time=aligned.datetimes[5],
+                symbol="BTCUSDT",
+                strategy_id="trend:fast",
+                activation_context="all",
+                side=1,
+                expected_net_bps=10.0,
+                expected_gross_bps=15.0,
+                q10_net_bps=5.0,
+                q10_gross_bps=8.0,
+                q90_net_bps=0.0,
+                q90_gross_bps=20.0,
+                expected_holding_bars=3,
+                reliability=0.9,
+                registry_version="test",
+                model_version="test",
             ),
             ValidatedSignalEvent(
-                decision_idx=5, decision_time=aligned.datetimes[5],
-                symbol="ETHUSDT", strategy_id="trend:fast",
-                activation_context="all", side=-1,
-                expected_net_bps=-5.0, expected_gross_bps=-8.0,
-                q10_net_bps=-2.0, q10_gross_bps=-4.0,
-                q90_net_bps=0.0, q90_gross_bps=-12.0,
-                expected_holding_bars=3, reliability=0.9,
-                registry_version="test", model_version="test",
+                decision_idx=5,
+                decision_time=aligned.datetimes[5],
+                symbol="ETHUSDT",
+                strategy_id="trend:fast",
+                activation_context="all",
+                side=-1,
+                expected_net_bps=-5.0,
+                expected_gross_bps=-8.0,
+                q10_net_bps=-2.0,
+                q10_gross_bps=-4.0,
+                q90_net_bps=0.0,
+                q90_gross_bps=-12.0,
+                expected_holding_bars=3,
+                reliability=0.9,
+                registry_version="test",
+                model_version="test",
             ),
         ]
         signal_batch = ValidatedSignalBatch(
             events=tuple(events),
-            start_idx=0, end_idx=50,
+            start_idx=0,
+            end_idx=50,
             symbols=aligned.symbols,
-            registry_version="test", model_version="test",
+            registry_version="test",
+            model_version="test",
         )
 
         from src.domain.futures.strategy.tiered_workflow.awf_sim import build_l2_simulation_cache
@@ -354,7 +460,8 @@ class TestDirectionalVetoCoverage:
         cache = build_l2_simulation_cache(aligned, signal_batch, "4h")
         awf_folds = (WFFold(fit_start=0, fit_end=5, cal_start=5, cal_end=8, oos_start=8, oos_end=30),)
         config = Layer2AllocationConfig(
-            k_rank=3, rebalance_bars=3,
+            k_rank=3,
+            rebalance_bars=3,
             l2_regime_directional_veto_enabled=True,
             l2_regime_directional_veto_symbols=("BTCUSDT", "ETHUSDT"),
             l2_regime_directional_veto_adverse_codes=(1, 2),
@@ -364,47 +471,65 @@ class TestDirectionalVetoCoverage:
         caps = PortfolioCaps(gross=3.0, per_symbol=0.15, net=0.5, beta=1.0, target_ann_vol=0.20)
 
         sim = _run_awf_simulation(
-            cache=cache, signal_batch=signal_batch, aligned=aligned,
-            awf_folds=awf_folds, config=config, caps=caps,
+            cache=cache,
+            signal_batch=signal_batch,
+            aligned=aligned,
+            awf_folds=awf_folds,
+            config=config,
+            caps=caps,
             sim_origin="test_veto",
         )
         veto_snaps = sim.fold_attributions[0].directional_veto_snapshots if sim.fold_attributions else ()
         assert len(veto_snaps) > 0
 
     def test_veto_config_zero_mu_action(self) -> None:
-        cfg = Layer2AllocationConfig.from_mapping({
-            "l2_regime_directional_veto_enabled": True,
-            "l2_regime_directional_veto_action": "zero_mu",
-        })
+        cfg = Layer2AllocationConfig.from_mapping(
+            {
+                "l2_regime_directional_veto_enabled": True,
+                "l2_regime_directional_veto_action": "zero_mu",
+            }
+        )
         assert cfg.l2_regime_directional_veto_action == "zero_mu"
 
     def test_veto_config_adverse_codes_dedup(self) -> None:
-        cfg = Layer2AllocationConfig.from_mapping({
-            "l2_regime_directional_veto_adverse_codes": (2, 1, 2),
-        })
+        cfg = Layer2AllocationConfig.from_mapping(
+            {
+                "l2_regime_directional_veto_adverse_codes": (2, 1, 2),
+            }
+        )
         assert cfg.l2_regime_directional_veto_adverse_codes == (1, 2)
 
     def test_veto_config_symbols_uppercased_dedup(self) -> None:
-        cfg = Layer2AllocationConfig.from_mapping({
-            "l2_regime_directional_veto_symbols": ("btcusdt", "ETHUSDT", "btcusdt"),
-        })
+        cfg = Layer2AllocationConfig.from_mapping(
+            {
+                "l2_regime_directional_veto_symbols": ("btcusdt", "ETHUSDT", "btcusdt"),
+            }
+        )
         assert cfg.l2_regime_directional_veto_symbols == ("BTCUSDT", "ETHUSDT")
 
     def test_layer2_result_directional_veto_summary_field(self) -> None:
         r = Layer2Result(
-            selected_last=frozenset(), weights_last={},
-            sharpe_hybrid=0.0, sharpe_baseline=0.0,
-            mdd_hybrid=0.0, mdd_baseline=0.0,
-            cagr_hybrid=0.0, cagr_baseline=0.0,
-            mar_hybrid=0.0, mar_baseline=0.0,
-            fold_pass_ratio=0.0, turnover=0.0,
-            friction_pass_pct=0.0, gate_passed=False,
+            selected_last=frozenset(),
+            weights_last={},
+            sharpe_hybrid=0.0,
+            sharpe_baseline=0.0,
+            mdd_hybrid=0.0,
+            mdd_baseline=0.0,
+            cagr_hybrid=0.0,
+            cagr_baseline=0.0,
+            mar_hybrid=0.0,
+            mar_baseline=0.0,
+            fold_pass_ratio=0.0,
+            turnover=0.0,
+            friction_pass_pct=0.0,
+            gate_passed=False,
             blocker_reason="",
         )
         assert r.directional_veto_summary == ()
 
     def test_format_directional_veto_line(self) -> None:
         from src.domain.futures.strategy.tiered_logging import _format_directional_veto_line
+
         summary = MagicMock()
         summary.symbol = "BTCUSDT"
         summary.fire_rate = 0.625
@@ -465,12 +590,7 @@ def build_contextual_veto_awf_fixture() -> tuple[Any, Any, Any, tuple[Any, ...],
     btc_close = np.linspace(100.0, 86.0, 50, dtype=np.float64)
     eth_close = np.full(50, 100.0, dtype=np.float64)
     aligned.close_2d = np.column_stack((btc_close, eth_close))
-    aligned.datetimes = np.array(
-        [
-            np.datetime64("2024-01-01", "ns") + np.timedelta64(i * 4, "h")
-            for i in range(50)
-        ]
-    )
+    aligned.datetimes = np.array([np.datetime64("2024-01-01", "ns") + np.timedelta64(i * 4, "h") for i in range(50)])
     aligned.beta_vs_market_1d = np.zeros(2, dtype=np.float64)
     aligned.execution_cost_bps_2d = np.full((50, 2), 3.8, dtype=np.float64)
     aligned.funding_2d = np.zeros((50, 2), dtype=np.float64)
@@ -484,24 +604,40 @@ def build_contextual_veto_awf_fixture() -> tuple[Any, Any, Any, tuple[Any, ...],
 
     events = [
         ValidatedSignalEvent(
-            decision_idx=25, decision_time=aligned.datetimes[25],
-            symbol="BTCUSDT", strategy_id="trend_4h",
-            activation_context="all", side=1,
-            expected_net_bps=120.0, expected_gross_bps=160.0,
-            q10_net_bps=60.0, q10_gross_bps=90.0,
-            q90_net_bps=0.0, q90_gross_bps=20.0,
-            expected_holding_bars=8, reliability=0.9,
-            registry_version="test", model_version="test",
+            decision_idx=25,
+            decision_time=aligned.datetimes[25],
+            symbol="BTCUSDT",
+            strategy_id="trend_4h",
+            activation_context="all",
+            side=1,
+            expected_net_bps=120.0,
+            expected_gross_bps=160.0,
+            q10_net_bps=60.0,
+            q10_gross_bps=90.0,
+            q90_net_bps=0.0,
+            q90_gross_bps=20.0,
+            expected_holding_bars=8,
+            reliability=0.9,
+            registry_version="test",
+            model_version="test",
         ),
         ValidatedSignalEvent(
-            decision_idx=25, decision_time=aligned.datetimes[25],
-            symbol="ETHUSDT", strategy_id="trend_4h",
-            activation_context="all", side=1,
-            expected_net_bps=0.0, expected_gross_bps=0.0,
-            q10_net_bps=0.0, q10_gross_bps=0.0,
-            q90_net_bps=0.0, q90_gross_bps=0.0,
-            expected_holding_bars=8, reliability=0.9,
-            registry_version="test", model_version="test",
+            decision_idx=25,
+            decision_time=aligned.datetimes[25],
+            symbol="ETHUSDT",
+            strategy_id="trend_4h",
+            activation_context="all",
+            side=1,
+            expected_net_bps=0.0,
+            expected_gross_bps=0.0,
+            q10_net_bps=0.0,
+            q10_gross_bps=0.0,
+            q90_net_bps=0.0,
+            q90_gross_bps=0.0,
+            expected_holding_bars=8,
+            reliability=0.9,
+            registry_version="test",
+            model_version="test",
         ),
     ]
     signal_batch = ValidatedSignalBatch(
@@ -531,15 +667,13 @@ class TestContextualVetoStateMachine:
         state = ContextualDirectionalVetoState(symbol="BTCUSDT")
         for step in range(3):
             rolling_ret = -0.015 if step >= 2 else -0.005
-            state, _fired, _mu_after, _reason, before, after = (
-                _compute_contextual_directional_veto_signal(
-                    symbol="BTCUSDT",
-                    raw_mu=5e-4,
-                    regime_code=1,
-                    rolling_symbol_return=rolling_ret,
-                    state=state,
-                    config=cfg,
-                )
+            state, _fired, _mu_after, _reason, before, after = _compute_contextual_directional_veto_signal(
+                symbol="BTCUSDT",
+                raw_mu=5e-4,
+                regime_code=1,
+                rolling_symbol_return=rolling_ret,
+                state=state,
+                config=cfg,
             )
             if step == 0:
                 assert before == "idle"
@@ -612,17 +746,17 @@ class TestContextualVetoRelease:
     def test_release_on_raw_mu_nonpos(self) -> None:
         cfg = make_contextual_cfg(l2_regime_directional_veto_cooldown_bars=2)
         state = ContextualDirectionalVetoState(
-            symbol="BTCUSDT", state="veto", adverse_long_streak=3,
+            symbol="BTCUSDT",
+            state="veto",
+            adverse_long_streak=3,
         )
-        _new_state, _fired, _mu_after, _reason, before, after = (
-            _compute_contextual_directional_veto_signal(
-                symbol="BTCUSDT",
-                raw_mu=-1e-4,
-                regime_code=1,
-                rolling_symbol_return=0.0,
-                state=state,
-                config=cfg,
-            )
+        _new_state, _fired, _mu_after, _reason, before, after = _compute_contextual_directional_veto_signal(
+            symbol="BTCUSDT",
+            raw_mu=-1e-4,
+            regime_code=1,
+            rolling_symbol_return=0.0,
+            state=state,
+            config=cfg,
         )
         assert before == "veto"
         assert after == "cooldown"
@@ -633,7 +767,9 @@ class TestContextualVetoRelease:
     def test_cooldown_to_idle(self) -> None:
         cfg = make_contextual_cfg(l2_regime_directional_veto_cooldown_bars=2)
         state = ContextualDirectionalVetoState(
-            symbol="BTCUSDT", state="cooldown", cooldown_left=0,
+            symbol="BTCUSDT",
+            state="cooldown",
+            cooldown_left=0,
         )
         state, fired, _, _, _, after = _compute_contextual_directional_veto_signal(
             symbol="BTCUSDT",
@@ -653,34 +789,59 @@ class TestContextualSummarizeVeto:
     def test_new_metrics_computed(self) -> None:
         snaps = (
             DirectionalVetoSnapshot(
-                fold_idx=0, t=10, symbol="BTCUSDT", regime_code=1,
-                raw_mu_before=5e-4, raw_mu_after=0.0,
-                counterfactual_weight=0.12, weight_after=0.0,
-                fired=True, was_missing=False,
-                bar_price_return_after=0.0, counterfactual_long_return=-0.03,
-                state_before="watch", state_after="veto",
+                fold_idx=0,
+                t=10,
+                symbol="BTCUSDT",
+                regime_code=1,
+                raw_mu_before=5e-4,
+                raw_mu_after=0.0,
+                counterfactual_weight=0.12,
+                weight_after=0.0,
+                fired=True,
+                was_missing=False,
+                bar_price_return_after=0.0,
+                counterfactual_long_return=-0.03,
+                state_before="watch",
+                state_after="veto",
                 rolling_symbol_return=-0.025,
             ),
             DirectionalVetoSnapshot(
-                fold_idx=0, t=15, symbol="BTCUSDT", regime_code=1,
-                raw_mu_before=4e-4, raw_mu_after=0.0,
-                counterfactual_weight=0.10, weight_after=0.0,
-                fired=True, was_missing=False,
-                bar_price_return_after=0.0, counterfactual_long_return=-0.01,
-                state_before="veto", state_after="veto",
+                fold_idx=0,
+                t=15,
+                symbol="BTCUSDT",
+                regime_code=1,
+                raw_mu_before=4e-4,
+                raw_mu_after=0.0,
+                counterfactual_weight=0.10,
+                weight_after=0.0,
+                fired=True,
+                was_missing=False,
+                bar_price_return_after=0.0,
+                counterfactual_long_return=-0.01,
+                state_before="veto",
+                state_after="veto",
                 rolling_symbol_return=-0.015,
             ),
             DirectionalVetoSnapshot(
-                fold_idx=0, t=20, symbol="BTCUSDT", regime_code=1,
-                raw_mu_before=3e-4, raw_mu_after=3e-4,
-                counterfactual_weight=0.0, weight_after=0.05,
-                fired=False, was_missing=False,
-                bar_price_return_after=0.0, counterfactual_long_return=0.0,
-                state_before="idle", state_after="watch",
+                fold_idx=0,
+                t=20,
+                symbol="BTCUSDT",
+                regime_code=1,
+                raw_mu_before=3e-4,
+                raw_mu_after=3e-4,
+                counterfactual_weight=0.0,
+                weight_after=0.05,
+                fired=False,
+                was_missing=False,
+                bar_price_return_after=0.0,
+                counterfactual_long_return=0.0,
+                state_before="idle",
+                state_after="watch",
             ),
         )
         summary = summarize_directional_veto(
-            (make_attr(snaps),), symbols=("BTCUSDT",),
+            (make_attr(snaps),),
+            symbols=("BTCUSDT",),
         )
         assert summary[0].n_watch == 3
         assert summary[0].n_fired == 2
@@ -690,7 +851,8 @@ class TestContextualSummarizeVeto:
 
     def test_empty_snaps_new_fields(self) -> None:
         summary = summarize_directional_veto(
-            (make_attr(()),), symbols=("BTCUSDT",),
+            (make_attr(()),),
+            symbols=("BTCUSDT",),
         )
         assert summary[0].n_watch == 0
         assert summary[0].mean_trigger_loss == 0.0
@@ -701,21 +863,41 @@ class TestContextualRollingReturn:
     """E1: look-ahead guard on rolling return window."""
 
     def test_causal_window(self) -> None:
-        close_2d = np.array([
-            [100.0], [101.0], [99.0], [98.0], [97.0],
-        ], dtype=np.float64)
+        close_2d = np.array(
+            [
+                [100.0],
+                [101.0],
+                [99.0],
+                [98.0],
+                [97.0],
+            ],
+            dtype=np.float64,
+        )
         ret = _compute_symbol_rolling_return(
-            close_2d=close_2d, t=3, symbol_idx=0, lookback_bars=3,
+            close_2d=close_2d,
+            t=3,
+            symbol_idx=0,
+            lookback_bars=3,
         )
         expected = (101.0 - 100.0) / 100.0 + (99.0 - 101.0) / 101.0
         assert ret == pytest.approx(expected, abs=1e-6)
 
     def test_no_lookahead(self) -> None:
-        close_2d = np.array([
-            [100.0], [100.0], [100.0], [100.0], [200.0],
-        ], dtype=np.float64)
+        close_2d = np.array(
+            [
+                [100.0],
+                [100.0],
+                [100.0],
+                [100.0],
+                [200.0],
+            ],
+            dtype=np.float64,
+        )
         ret = _compute_symbol_rolling_return(
-            close_2d=close_2d, t=3, symbol_idx=0, lookback_bars=3,
+            close_2d=close_2d,
+            t=3,
+            symbol_idx=0,
+            lookback_bars=3,
         )
         assert ret == 0.0
 
@@ -769,9 +951,10 @@ class TestContextualVetoSimulationCoverage:
             l2_regime_directional_veto_loss_trigger_bps=50.0,
         )
 
-        with patch("src.domain.futures.strategy.market_regime.compress_regime_codes") as mock_compress, patch(
-            "src.domain.futures.strategy.market_regime.compute_market_regime_context"
-        ) as mock_regime:
+        with (
+            patch("src.domain.futures.strategy.market_regime.compress_regime_codes") as mock_compress,
+            patch("src.domain.futures.strategy.market_regime.compute_market_regime_context") as mock_regime,
+        ):
             mock_regime.return_value = MagicMock(code_1d=regime_codes)
             mock_compress.side_effect = lambda x: x
 
@@ -811,9 +994,10 @@ class TestContextualVetoSimulationCoverage:
             l2_regime_directional_veto_cap_mu_bps=50.0,
         )
 
-        with patch("src.domain.futures.strategy.market_regime.compress_regime_codes") as mock_compress, patch(
-            "src.domain.futures.strategy.market_regime.compute_market_regime_context"
-        ) as mock_regime:
+        with (
+            patch("src.domain.futures.strategy.market_regime.compress_regime_codes") as mock_compress,
+            patch("src.domain.futures.strategy.market_regime.compute_market_regime_context") as mock_regime,
+        ):
             mock_regime.return_value = MagicMock(code_1d=regime_codes)
             mock_compress.side_effect = lambda x: x
 
@@ -863,13 +1047,17 @@ class TestContextualVetoExtraBranches:
     def test_veto_stays_veto_no_release(self) -> None:
         cfg = make_contextual_cfg(l2_regime_directional_veto_cooldown_bars=3)
         state = ContextualDirectionalVetoState(
-            symbol="BTCUSDT", state="veto", adverse_long_streak=4,
+            symbol="BTCUSDT",
+            state="veto",
+            adverse_long_streak=4,
         )
-        _new_state, _fired, _mu_after, _reason, before, after = (
-            _compute_contextual_directional_veto_signal(
-                symbol="BTCUSDT", raw_mu=5e-4, regime_code=1,
-                rolling_symbol_return=-0.02, state=state, config=cfg,
-            )
+        _new_state, _fired, _mu_after, _reason, before, after = _compute_contextual_directional_veto_signal(
+            symbol="BTCUSDT",
+            raw_mu=5e-4,
+            regime_code=1,
+            rolling_symbol_return=-0.02,
+            state=state,
+            config=cfg,
         )
         assert before == "veto"
         assert after == "veto"
@@ -882,21 +1070,27 @@ class TestContextualVetoExtraBranches:
             l2_regime_directional_veto_cooldown_bars=2,
         )
         state = ContextualDirectionalVetoState(
-            symbol="BTCUSDT", state="veto", adverse_long_streak=3,
+            symbol="BTCUSDT",
+            state="veto",
+            adverse_long_streak=3,
         )
-        state, _fired, _mu_after, _reason, before, after = (
-            _compute_contextual_directional_veto_signal(
-                symbol="BTCUSDT", raw_mu=5e-4, regime_code=0,
-                rolling_symbol_return=0.0, state=state, config=cfg,
-            )
+        state, _fired, _mu_after, _reason, before, after = _compute_contextual_directional_veto_signal(
+            symbol="BTCUSDT",
+            raw_mu=5e-4,
+            regime_code=0,
+            rolling_symbol_return=0.0,
+            state=state,
+            config=cfg,
         )
         assert before == "veto"
         assert after == "veto"
-        state, _fired, _mu_after, _reason, before, after = (
-            _compute_contextual_directional_veto_signal(
-                symbol="BTCUSDT", raw_mu=5e-4, regime_code=0,
-                rolling_symbol_return=0.0, state=state, config=cfg,
-            )
+        state, _fired, _mu_after, _reason, before, after = _compute_contextual_directional_veto_signal(
+            symbol="BTCUSDT",
+            raw_mu=5e-4,
+            regime_code=0,
+            rolling_symbol_return=0.0,
+            state=state,
+            config=cfg,
         )
         assert before == "veto"
         assert after == "cooldown"
@@ -910,8 +1104,12 @@ class TestContextualVetoExtraBranches:
         state = ContextualDirectionalVetoState(symbol="BTCUSDT")
         for _ in range(2):
             state, fired, _, _, _, after = _compute_contextual_directional_veto_signal(
-                symbol="BTCUSDT", raw_mu=5e-4, regime_code=1,
-                rolling_symbol_return=-0.01, state=state, config=cfg,
+                symbol="BTCUSDT",
+                raw_mu=5e-4,
+                regime_code=1,
+                rolling_symbol_return=-0.01,
+                state=state,
+                config=cfg,
             )
         assert after == "armed"
         assert not fired
@@ -919,11 +1117,17 @@ class TestContextualVetoExtraBranches:
     def test_cooldown_decrement(self) -> None:
         cfg = make_contextual_cfg(l2_regime_directional_veto_cooldown_bars=3)
         state = ContextualDirectionalVetoState(
-            symbol="BTCUSDT", state="cooldown", cooldown_left=2,
+            symbol="BTCUSDT",
+            state="cooldown",
+            cooldown_left=2,
         )
         state, fired, _, _, _, after = _compute_contextual_directional_veto_signal(
-            symbol="BTCUSDT", raw_mu=3e-4, regime_code=0,
-            rolling_symbol_return=0.0, state=state, config=cfg,
+            symbol="BTCUSDT",
+            raw_mu=3e-4,
+            regime_code=0,
+            rolling_symbol_return=0.0,
+            state=state,
+            config=cfg,
         )
         assert after == "cooldown"
         assert state.cooldown_left == 1
@@ -942,14 +1146,20 @@ class TestContextualVetoExtraBranches:
     def test_rolling_return_t0(self) -> None:
         close_2d = np.array([[100.0], [101.0]], dtype=np.float64)
         ret = _compute_symbol_rolling_return(
-            close_2d=close_2d, t=0, symbol_idx=0, lookback_bars=3,
+            close_2d=close_2d,
+            t=0,
+            symbol_idx=0,
+            lookback_bars=3,
         )
         assert ret == 0.0
 
     def test_rolling_return_insufficient_data(self) -> None:
         close_2d = np.array([[100.0]], dtype=np.float64)
         ret = _compute_symbol_rolling_return(
-            close_2d=close_2d, t=1, symbol_idx=0, lookback_bars=3,
+            close_2d=close_2d,
+            t=1,
+            symbol_idx=0,
+            lookback_bars=3,
         )
         assert ret == 0.0
 
@@ -959,6 +1169,7 @@ class TestComputeMeanEpisodeBars:
 
     def test_empty_snaps(self) -> None:
         from src.domain.futures.strategy.tiered_workflow.awf_sim import _compute_mean_episode_bars
+
         assert _compute_mean_episode_bars([]) == 0.0
 
     def test_single_episode(self) -> None:
@@ -966,30 +1177,55 @@ class TestComputeMeanEpisodeBars:
             DirectionalVetoSnapshot,
             _compute_mean_episode_bars,
         )
+
         snaps = [
             DirectionalVetoSnapshot(
-                fold_idx=0, t=0, symbol="BTCUSDT", regime_code=1,
-                raw_mu_before=5e-4, raw_mu_after=0.0,
-                counterfactual_weight=0.12, weight_after=0.0,
-                fired=True, was_missing=False,
-                bar_price_return_after=0.0, counterfactual_long_return=-0.01,
-                state_before="watch", state_after="veto",
+                fold_idx=0,
+                t=0,
+                symbol="BTCUSDT",
+                regime_code=1,
+                raw_mu_before=5e-4,
+                raw_mu_after=0.0,
+                counterfactual_weight=0.12,
+                weight_after=0.0,
+                fired=True,
+                was_missing=False,
+                bar_price_return_after=0.0,
+                counterfactual_long_return=-0.01,
+                state_before="watch",
+                state_after="veto",
             ),
             DirectionalVetoSnapshot(
-                fold_idx=0, t=1, symbol="BTCUSDT", regime_code=1,
-                raw_mu_before=4e-4, raw_mu_after=0.0,
-                counterfactual_weight=0.10, weight_after=0.0,
-                fired=True, was_missing=False,
-                bar_price_return_after=0.0, counterfactual_long_return=-0.01,
-                state_before="veto", state_after="veto",
+                fold_idx=0,
+                t=1,
+                symbol="BTCUSDT",
+                regime_code=1,
+                raw_mu_before=4e-4,
+                raw_mu_after=0.0,
+                counterfactual_weight=0.10,
+                weight_after=0.0,
+                fired=True,
+                was_missing=False,
+                bar_price_return_after=0.0,
+                counterfactual_long_return=-0.01,
+                state_before="veto",
+                state_after="veto",
             ),
             DirectionalVetoSnapshot(
-                fold_idx=0, t=2, symbol="BTCUSDT", regime_code=1,
-                raw_mu_before=3e-4, raw_mu_after=3e-4,
-                counterfactual_weight=0.0, weight_after=0.05,
-                fired=False, was_missing=False,
-                bar_price_return_after=0.0, counterfactual_long_return=0.0,
-                state_before="veto", state_after="watch",
+                fold_idx=0,
+                t=2,
+                symbol="BTCUSDT",
+                regime_code=1,
+                raw_mu_before=3e-4,
+                raw_mu_after=3e-4,
+                counterfactual_weight=0.0,
+                weight_after=0.05,
+                fired=False,
+                was_missing=False,
+                bar_price_return_after=0.0,
+                counterfactual_long_return=0.0,
+                state_before="veto",
+                state_after="watch",
             ),
         ]
         assert _compute_mean_episode_bars(snaps) == 2.0
@@ -999,14 +1235,23 @@ class TestComputeMeanEpisodeBars:
             DirectionalVetoSnapshot,
             _compute_mean_episode_bars,
         )
+
         snaps = [
             DirectionalVetoSnapshot(
-                fold_idx=0, t=0, symbol="BTCUSDT", regime_code=1,
-                raw_mu_before=5e-4, raw_mu_after=0.0,
-                counterfactual_weight=0.12, weight_after=0.0,
-                fired=True, was_missing=False,
-                bar_price_return_after=0.0, counterfactual_long_return=-0.01,
-                state_before="idle", state_after="veto",
+                fold_idx=0,
+                t=0,
+                symbol="BTCUSDT",
+                regime_code=1,
+                raw_mu_before=5e-4,
+                raw_mu_after=0.0,
+                counterfactual_weight=0.12,
+                weight_after=0.0,
+                fired=True,
+                was_missing=False,
+                bar_price_return_after=0.0,
+                counterfactual_long_return=-0.01,
+                state_before="idle",
+                state_after="veto",
             ),
         ]
         assert _compute_mean_episode_bars(snaps) == 1.0
@@ -1034,13 +1279,18 @@ class TestIntraSymbolDivergenceStateMachine:
             IntraSymbolDivergenceState,
             _compute_intra_symbol_divergence_signal,
         )
+
         cfg = self.make_cfg()
         state = IntraSymbolDivergenceState(symbol="BTCUSDT")
 
         # bar 1: idle → watch
         state, armed, before, after = _compute_intra_symbol_divergence_signal(
-            symbol="BTCUSDT", dominant_sign=1, dissent_diverges=True,
-            regime_code=1, state=state, config=cfg,
+            symbol="BTCUSDT",
+            dominant_sign=1,
+            dissent_diverges=True,
+            regime_code=1,
+            state=state,
+            config=cfg,
         )
         assert before == "idle"
         assert after == "watch"
@@ -1048,8 +1298,12 @@ class TestIntraSymbolDivergenceStateMachine:
 
         # bar 2: watch → watch
         state, armed, before, after = _compute_intra_symbol_divergence_signal(
-            symbol="BTCUSDT", dominant_sign=1, dissent_diverges=True,
-            regime_code=1, state=state, config=cfg,
+            symbol="BTCUSDT",
+            dominant_sign=1,
+            dissent_diverges=True,
+            regime_code=1,
+            state=state,
+            config=cfg,
         )
         assert before == "watch"
         assert after == "watch"
@@ -1057,8 +1311,12 @@ class TestIntraSymbolDivergenceStateMachine:
 
         # bar 3: watch → armed
         state, armed, before, after = _compute_intra_symbol_divergence_signal(
-            symbol="BTCUSDT", dominant_sign=1, dissent_diverges=True,
-            regime_code=1, state=state, config=cfg,
+            symbol="BTCUSDT",
+            dominant_sign=1,
+            dissent_diverges=True,
+            regime_code=1,
+            state=state,
+            config=cfg,
         )
         assert before == "watch"
         assert after == "armed"
@@ -1069,13 +1327,18 @@ class TestIntraSymbolDivergenceStateMachine:
             IntraSymbolDivergenceState,
             _compute_intra_symbol_divergence_signal,
         )
+
         cfg = self.make_cfg()
         state = IntraSymbolDivergenceState(symbol="BTCUSDT")
 
         # regime_code=0 (non-adverse) even with divergence → stays idle
         state, armed, before, after = _compute_intra_symbol_divergence_signal(
-            symbol="BTCUSDT", dominant_sign=1, dissent_diverges=True,
-            regime_code=0, state=state, config=cfg,
+            symbol="BTCUSDT",
+            dominant_sign=1,
+            dissent_diverges=True,
+            regime_code=0,
+            state=state,
+            config=cfg,
         )
         assert before == "idle"
         assert after == "idle"
@@ -1083,8 +1346,12 @@ class TestIntraSymbolDivergenceStateMachine:
 
         # adverse but no divergence → stays idle
         state, armed, before, after = _compute_intra_symbol_divergence_signal(
-            symbol="BTCUSDT", dominant_sign=1, dissent_diverges=False,
-            regime_code=1, state=state, config=cfg,
+            symbol="BTCUSDT",
+            dominant_sign=1,
+            dissent_diverges=False,
+            regime_code=1,
+            state=state,
+            config=cfg,
         )
         assert before == "idle"
         assert after == "idle"
@@ -1095,20 +1362,29 @@ class TestIntraSymbolDivergenceStateMachine:
             IntraSymbolDivergenceState,
             _compute_intra_symbol_divergence_signal,
         )
+
         cfg = self.make_cfg()
         state = IntraSymbolDivergenceState(symbol="BTCUSDT")
         # Advance to armed (3 persistent bars)
         for _ in range(3):
             state, armed, _, _ = _compute_intra_symbol_divergence_signal(
-                symbol="BTCUSDT", dominant_sign=1, dissent_diverges=True,
-                regime_code=1, state=state, config=cfg,
+                symbol="BTCUSDT",
+                dominant_sign=1,
+                dissent_diverges=True,
+                regime_code=1,
+                state=state,
+                config=cfg,
             )
         assert armed
 
         # Release bar 1: armed release_streak=1 (still armed)
         state, armed, before, after = _compute_intra_symbol_divergence_signal(
-            symbol="BTCUSDT", dominant_sign=1, dissent_diverges=False,
-            regime_code=1, state=state, config=cfg,
+            symbol="BTCUSDT",
+            dominant_sign=1,
+            dissent_diverges=False,
+            regime_code=1,
+            state=state,
+            config=cfg,
         )
         assert before == "armed"
         assert after == "armed"
@@ -1116,8 +1392,12 @@ class TestIntraSymbolDivergenceStateMachine:
 
         # Release bar 2: armed → cooldown
         state, armed, before, after = _compute_intra_symbol_divergence_signal(
-            symbol="BTCUSDT", dominant_sign=1, dissent_diverges=False,
-            regime_code=1, state=state, config=cfg,
+            symbol="BTCUSDT",
+            dominant_sign=1,
+            dissent_diverges=False,
+            regime_code=1,
+            state=state,
+            config=cfg,
         )
         assert before == "armed"
         assert after == "cooldown"
@@ -1125,8 +1405,12 @@ class TestIntraSymbolDivergenceStateMachine:
 
         # cooldown bar 1: cooldown_left=2
         state, armed, before, after = _compute_intra_symbol_divergence_signal(
-            symbol="BTCUSDT", dominant_sign=1, dissent_diverges=True,
-            regime_code=1, state=state, config=cfg,
+            symbol="BTCUSDT",
+            dominant_sign=1,
+            dissent_diverges=True,
+            regime_code=1,
+            state=state,
+            config=cfg,
         )
         assert before == "cooldown"
         assert after == "cooldown"
@@ -1134,24 +1418,36 @@ class TestIntraSymbolDivergenceStateMachine:
 
         # cooldown bar 2: cooldown_left=1
         state, armed, before, after = _compute_intra_symbol_divergence_signal(
-            symbol="BTCUSDT", dominant_sign=1, dissent_diverges=True,
-            regime_code=1, state=state, config=cfg,
+            symbol="BTCUSDT",
+            dominant_sign=1,
+            dissent_diverges=True,
+            regime_code=1,
+            state=state,
+            config=cfg,
         )
         assert before == "cooldown"
         assert after == "cooldown"
 
         # cooldown bar 3: cooldown_left=0 → still cooldown (next call transitions to idle)
         state, armed, before, after = _compute_intra_symbol_divergence_signal(
-            symbol="BTCUSDT", dominant_sign=1, dissent_diverges=True,
-            regime_code=1, state=state, config=cfg,
+            symbol="BTCUSDT",
+            dominant_sign=1,
+            dissent_diverges=True,
+            regime_code=1,
+            state=state,
+            config=cfg,
         )
         assert before == "cooldown"
         assert after == "cooldown"
 
         # cooldown expired → idle
         state, armed, before, after = _compute_intra_symbol_divergence_signal(
-            symbol="BTCUSDT", dominant_sign=1, dissent_diverges=True,
-            regime_code=1, state=state, config=cfg,
+            symbol="BTCUSDT",
+            dominant_sign=1,
+            dissent_diverges=True,
+            regime_code=1,
+            state=state,
+            config=cfg,
         )
         assert before == "cooldown"
         assert after == "idle"
@@ -1163,23 +1459,32 @@ class TestApplyIntraSymbolDivergenceAdjustment:
 
     def make_sig(self, raw_mu: float, qw: float = 1.0) -> SymbolSignal:
         return SymbolSignal(
-            raw_mu=raw_mu, volatility=0.01, n_obs=10, t_stat=0.0,
-            valid=True, beta_btc=None, quality_weight=qw,
+            raw_mu=raw_mu,
+            volatility=0.01,
+            n_obs=10,
+            t_stat=0.0,
+            valid=True,
+            beta_btc=None,
+            quality_weight=qw,
         )
 
     def test_apply_adjustment_damps_dominant_boosts_dissent(self) -> None:
         from src.domain.futures.strategy.tiered_workflow.awf_sim import (
             _apply_intra_symbol_divergence_adjustment,
         )
+
         sleeves = {
             ("BTCUSDT", "dual_momentum:v1_4h"): self.make_sig(raw_mu=3.678, qw=1.000),
             ("BTCUSDT", "ichimoku_trend:v1_4h"): self.make_sig(raw_mu=-0.222, qw=0.734),
             ("ETHUSDT", "dual_momentum:v1_4h"): self.make_sig(raw_mu=3.192, qw=0.869),
         }
         adjusted = _apply_intra_symbol_divergence_adjustment(
-            sleeves, symbol="BTCUSDT",
+            sleeves,
+            symbol="BTCUSDT",
             dominant_families=frozenset({"dual_momentum", "supertrend"}),
-            dominant_damp_mult=0.5, dissent_boost_mult=2.0, dissent_boost_cap_mult=3.0,
+            dominant_damp_mult=0.5,
+            dissent_boost_mult=2.0,
+            dissent_boost_cap_mult=3.0,
         )
         # dominant damp: 3.678 * 0.5 = 1.839
         assert adjusted[("BTCUSDT", "dual_momentum:v1_4h")].raw_mu == pytest.approx(1.839)
@@ -1192,14 +1497,18 @@ class TestApplyIntraSymbolDivergenceAdjustment:
         from src.domain.futures.strategy.tiered_workflow.awf_sim import (
             _apply_intra_symbol_divergence_adjustment,
         )
+
         sleeves = {
             ("BTCUSDT", "ichimoku_trend:v1_4h"): self.make_sig(raw_mu=1.0, qw=1.0),
         }
         # dissent_boost_mult=10.0 but cap at 3.0 → qw should be min(1.0*10, 1.0*3.0) = 3.0
         adjusted = _apply_intra_symbol_divergence_adjustment(
-            sleeves, symbol="BTCUSDT",
+            sleeves,
+            symbol="BTCUSDT",
             dominant_families=frozenset({"dual_momentum"}),
-            dominant_damp_mult=0.5, dissent_boost_mult=10.0, dissent_boost_cap_mult=3.0,
+            dominant_damp_mult=0.5,
+            dissent_boost_mult=10.0,
+            dissent_boost_cap_mult=3.0,
         )
         assert adjusted[("BTCUSDT", "ichimoku_trend:v1_4h")].quality_weight == pytest.approx(3.0)
 
@@ -1207,14 +1516,17 @@ class TestApplyIntraSymbolDivergenceAdjustment:
         from src.domain.futures.strategy.tiered_workflow.awf_sim import (
             _apply_intra_symbol_divergence_adjustment,
         )
+
         sleeves = {
             ("ETHUSDT", "dual_momentum:v1_4h"): self.make_sig(raw_mu=3.192, qw=0.869),
             ("BNBUSDT", "supertrend:v1_4h"): self.make_sig(raw_mu=1.5, qw=0.5),
         }
         adjusted = _apply_intra_symbol_divergence_adjustment(
-            sleeves, symbol="BTCUSDT",
+            sleeves,
+            symbol="BTCUSDT",
             dominant_families=frozenset({"dual_momentum"}),
-            dominant_damp_mult=0.5, dissent_boost_mult=2.0,
+            dominant_damp_mult=0.5,
+            dissent_boost_mult=2.0,
         )
         assert adjusted[("ETHUSDT", "dual_momentum:v1_4h")].raw_mu == pytest.approx(3.192)
         assert adjusted[("BNBUSDT", "supertrend:v1_4h")].quality_weight == pytest.approx(0.5)
@@ -1223,14 +1535,17 @@ class TestApplyIntraSymbolDivergenceAdjustment:
         from src.domain.futures.strategy.tiered_workflow.awf_sim import (
             _apply_intra_symbol_divergence_adjustment,
         )
+
         # target symbol present but only dominant (dissent absent) → no crash
         sleeves = {
             ("BTCUSDT", "dual_momentum:v1_4h"): self.make_sig(raw_mu=3.678, qw=1.0),
         }
         adjusted = _apply_intra_symbol_divergence_adjustment(
-            sleeves, symbol="BTCUSDT",
+            sleeves,
+            symbol="BTCUSDT",
             dominant_families=frozenset({"dual_momentum", "supertrend"}),
-            dominant_damp_mult=0.5, dissent_boost_mult=2.0,
+            dominant_damp_mult=0.5,
+            dissent_boost_mult=2.0,
         )
         assert ("BTCUSDT", "dual_momentum:v1_4h") in adjusted
         assert adjusted[("BTCUSDT", "dual_momentum:v1_4h")].raw_mu == pytest.approx(1.839)
@@ -1240,7 +1555,8 @@ class TestApplyIntraSymbolDivergenceAdjustment:
             {("ETHUSDT", "test:v1_4h"): self.make_sig(raw_mu=1.0, qw=1.0)},
             symbol="BTCUSDT",
             dominant_families=frozenset({"dual_momentum"}),
-            dominant_damp_mult=0.5, dissent_boost_mult=2.0,
+            dominant_damp_mult=0.5,
+            dissent_boost_mult=2.0,
         )
         assert ("ETHUSDT", "test:v1_4h") in adjusted2
         assert adjusted2[("ETHUSDT", "test:v1_4h")].raw_mu == pytest.approx(1.0)

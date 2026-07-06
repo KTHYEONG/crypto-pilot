@@ -1,4 +1,5 @@
 """Tests for L1 quality weight floor logic (l1_qw_floor)."""
+
 from __future__ import annotations
 
 from unittest.mock import MagicMock
@@ -97,11 +98,10 @@ def _make_evidence(
 
 # ─── Scenario 1: qw_floor prevents zero quality_weight ─────────────────────
 
+
 def test_qw_floor_raises_low_quality_weight() -> None:
     """Scenario 1: When calculated qw < l1_qw_floor, qw is raised to floor."""
-    evidence = (
-        _make_evidence(quality_weight=0.003, hard_eligible=True, lcb_net_bps=100.0),
-    )
+    evidence = (_make_evidence(quality_weight=0.003, hard_eligible=True, lcb_net_bps=100.0),)
     cfg = _make_cfg(l1_qw_floor=0.05)
     registry = build_qualified_signal_registry(
         evidence=evidence,
@@ -115,9 +115,7 @@ def test_qw_floor_raises_low_quality_weight() -> None:
 
 def test_qw_floor_below_threshold_does_not_raise_when_already_above() -> None:
     """If quality_weight is already above floor, floor has no effect."""
-    evidence = (
-        _make_evidence(quality_weight=0.5, hard_eligible=True, lcb_net_bps=100.0),
-    )
+    evidence = (_make_evidence(quality_weight=0.5, hard_eligible=True, lcb_net_bps=100.0),)
     cfg = _make_cfg(l1_qw_floor=0.05)
     registry = build_qualified_signal_registry(
         evidence=evidence,
@@ -131,11 +129,10 @@ def test_qw_floor_below_threshold_does_not_raise_when_already_above() -> None:
 
 # ─── Scenario 2: qw_floor=0.0 = backward compat ───────────────────────────
 
+
 def test_qw_floor_zero_backward_compat() -> None:
     """Scenario 2: l1_qw_floor=0.0 preserves old behavior (no floor)."""
-    evidence = (
-        _make_evidence(quality_weight=0.003, hard_eligible=True, lcb_net_bps=100.0),
-    )
+    evidence = (_make_evidence(quality_weight=0.003, hard_eligible=True, lcb_net_bps=100.0),)
     cfg = _make_cfg(l1_qw_floor=0.0)
     registry = build_qualified_signal_registry(
         evidence=evidence,
@@ -148,6 +145,7 @@ def test_qw_floor_zero_backward_compat() -> None:
 
 
 # ─── Scenario 7: FDR hard reject overrides qw_floor ───────────────────────
+
 
 def test_fdr_hard_reject_overrides_qw_floor() -> None:
     """Scenario 7: FDR hard reject (q > alpha) is ABSOLUTE — qw_floor does NOT rescue."""

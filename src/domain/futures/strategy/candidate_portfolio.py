@@ -270,16 +270,10 @@ def _evaluate_shadow_profile(
                 )
                 rank_ic_val = float(rank_val) if rank_val is not None else float("nan")
                 log_growth_proxy = float(
-                    np.mean(
-                        np.log1p(
-                            np.clip(realized_edge.to_numpy(dtype=np.float64, copy=False) * 1e-4, -0.99, None)
-                        )
-                    )
+                    np.mean(np.log1p(np.clip(realized_edge.to_numpy(dtype=np.float64, copy=False) * 1e-4, -0.99, None)))
                 )
     return {
-        "profile_id": (
-            f"{utility_mode}:{float(utility_floor_base):.1f}:{float(breakeven_fraction):.2f}"
-        ),
+        "profile_id": (f"{utility_mode}:{float(utility_floor_base):.1f}:{float(breakeven_fraction):.2f}"),
         "utility_mode": str(utility_mode),
         "utility_floor_bps": utility_floor,
         "breakeven_floor_fraction": float(breakeven_fraction),
@@ -687,9 +681,7 @@ def select_candidate_events_for_portfolio(
             zero_reason = "no_eligible_after_breakeven_floor"
         else:
             primary_sort_col = (
-                "expected_utility_bps"
-                if cfg.selection_utility_mode == "expected_edge_direct"
-                else "utility_score"
+                "expected_utility_bps" if cfg.selection_utility_mode == "expected_edge_direct" else "utility_score"
             )
             eligible_df = df.loc[eligible].copy()
             eligible_df["_merge_dt"] = pd.to_datetime(eligible_df["datetime"], utc=True).dt.tz_localize(None)
@@ -752,9 +744,7 @@ def select_candidate_events_for_portfolio(
             else 0
         )
         diagnostics["shadow_max_eligible"] = (
-            int(pd.to_numeric(shadow_profiles["eligible"], errors="coerce").max())
-            if not shadow_profiles.empty
-            else 0
+            int(pd.to_numeric(shadow_profiles["eligible"], errors="coerce").max()) if not shadow_profiles.empty else 0
         )
         filtered.attrs["candidate_selection_diagnostics"] = diagnostics
         _sel_logger.debug(
@@ -848,14 +838,10 @@ def select_candidate_events_for_portfolio(
     diagnostics.update({f"waterfall_{key}": value for key, value in waterfall.items()})
     diagnostics["shadow_profile_count"] = len(shadow_profiles)
     diagnostics["shadow_max_selected_total"] = (
-        int(pd.to_numeric(shadow_profiles["selected_total"], errors="coerce").max())
-        if not shadow_profiles.empty
-        else 0
+        int(pd.to_numeric(shadow_profiles["selected_total"], errors="coerce").max()) if not shadow_profiles.empty else 0
     )
     diagnostics["shadow_max_eligible"] = (
-        int(pd.to_numeric(shadow_profiles["eligible"], errors="coerce").max())
-        if not shadow_profiles.empty
-        else 0
+        int(pd.to_numeric(shadow_profiles["eligible"], errors="coerce").max()) if not shadow_profiles.empty else 0
     )
     selected.attrs["candidate_selection_diagnostics"] = diagnostics
     _sel_logger.debug(
@@ -908,9 +894,7 @@ def build_candidate_target_weights(
 
     use_port_kelly: bool = bool(getattr(cfg, "use_portfolio_kelly", False))
     # mu_2d stores signed r-unit expected returns for portfolio Kelly; allocated only when needed
-    mu_2d: NDArray[np.float64] | None = (
-        np.zeros((n_times, n_symbols), dtype=np.float64) if use_port_kelly else None
-    )
+    mu_2d: NDArray[np.float64] | None = np.zeros((n_times, n_symbols), dtype=np.float64) if use_port_kelly else None
 
     # ---------- Pass 1: entry_idx bar에 raw_weight 기록 ----------
     # 각 이벤트의 (entry_idx, symbol) → raw_weight 를 먼저 매핑한다.
@@ -989,9 +973,7 @@ def build_candidate_target_weights(
     _cov_window: int = int(getattr(cfg, "cov_window", 180))
     _cov_min_obs: int = int(getattr(cfg, "cov_min_obs", 60))
     _cov_shrinkage_raw = getattr(cfg, "cov_shrinkage", "auto")
-    _cov_shrinkage: float | None = (
-        None if _cov_shrinkage_raw == "auto" else float(_cov_shrinkage_raw)
-    )
+    _cov_shrinkage: float | None = None if _cov_shrinkage_raw == "auto" else float(_cov_shrinkage_raw)
     _cov_ridge_eps: float = float(getattr(cfg, "cov_ridge_eps", 1e-3))
 
     for t in range(n_times):
@@ -1001,20 +983,16 @@ def build_candidate_target_weights(
         if use_port_kelly and logret_2d is not None and mu_2d is not None:
             active_idx_arr = np.nonzero(w_pre)[0].astype(np.int64)
             if len(active_idx_arr) >= 2:
-                cov_s = active_covariance(
-                    logret_2d, t, active_idx_arr, _cov_window, _cov_shrinkage, _cov_min_obs
-                )
+                cov_s = active_covariance(logret_2d, t, active_idx_arr, _cov_window, _cov_shrinkage, _cov_min_obs)
                 if cov_s is not None:
                     mu_s = mu_2d[t, active_idx_arr]
-                    w_s = solve_portfolio_kelly(
-                        mu_s, cov_s, cfg.kelly_fraction, _cov_ridge_eps, cfg.max_symbol_weight
-                    )
+                    w_s = solve_portfolio_kelly(mu_s, cov_s, cfg.kelly_fraction, _cov_ridge_eps, cfg.max_symbol_weight)
                     w_pre_new = np.zeros(n_symbols, dtype=np.float64)
                     w_pre_new[active_idx_arr] = w_s
                     w_pre = w_pre_new
 
         beta_t = beta_2d[t] if beta_2d is not None else np.zeros(n_symbols)
-        
+
         # Portfolio standard deviation calculation
         sigma_port_t = 1e-3
         if sigma_3d is not None:
@@ -1120,19 +1098,19 @@ def build_candidate_alpha_panel(
 
     # -- Pre-allocate output arrays (n_times x n_symbols rows total) ----------
     total_rows = n_times * n_symbols
-    _dt_arr     = np.empty(total_rows, dtype="datetime64[ns]")
-    _sym_arr    = np.empty(total_rows, dtype=object)
-    _al_arr     = np.zeros(total_rows, dtype=np.float64)
-    _as_arr     = np.zeros(total_rows, dtype=np.float64)
-    _tw_arr     = np.zeros(total_rows, dtype=np.float64)
-    _fam_arr    = np.empty(total_rows, dtype=object)
-    _var_arr    = np.empty(total_rows, dtype=object)
-    _pp_arr     = np.zeros(total_rows, dtype=np.float64)
-    _mu_arr     = np.zeros(total_rows, dtype=np.float64)
-    _q10_arr    = np.zeros(total_rows, dtype=np.float64)
-    _ut_arr     = np.zeros(total_rows, dtype=np.float64)
-    _satr_arr   = np.zeros(total_rows, dtype=np.float64)
-    _tpatr_arr  = np.zeros(total_rows, dtype=np.float64)
+    _dt_arr = np.empty(total_rows, dtype="datetime64[ns]")
+    _sym_arr = np.empty(total_rows, dtype=object)
+    _al_arr = np.zeros(total_rows, dtype=np.float64)
+    _as_arr = np.zeros(total_rows, dtype=np.float64)
+    _tw_arr = np.zeros(total_rows, dtype=np.float64)
+    _fam_arr = np.empty(total_rows, dtype=object)
+    _var_arr = np.empty(total_rows, dtype=object)
+    _pp_arr = np.zeros(total_rows, dtype=np.float64)
+    _mu_arr = np.zeros(total_rows, dtype=np.float64)
+    _q10_arr = np.zeros(total_rows, dtype=np.float64)
+    _ut_arr = np.zeros(total_rows, dtype=np.float64)
+    _satr_arr = np.zeros(total_rows, dtype=np.float64)
+    _tpatr_arr = np.zeros(total_rows, dtype=np.float64)
 
     # Initialise string columns with empty string
     _fam_arr[:] = ""
@@ -1143,16 +1121,16 @@ def build_candidate_alpha_panel(
 
     for t in range(n_times):
         base = t * n_symbols
-        end  = base + n_symbols
+        end = base + n_symbols
         target_w = target_weights_2d[t]
 
-        _dt_arr[base:end]  = dt_arr_typed[t]
+        _dt_arr[base:end] = dt_arr_typed[t]
         _sym_arr[base:end] = sym_list
-        _tw_arr[base:end]  = target_w
+        _tw_arr[base:end] = target_w
 
-        long_mask  = target_w > 0.0
+        long_mask = target_w > 0.0
         short_mask = target_w < 0.0
-        _al_arr[base:end][long_mask]  = target_w[long_mask]
+        _al_arr[base:end][long_mask] = target_w[long_mask]
         _as_arr[base:end][short_mask] = -target_w[short_mask]
 
         if t in grouped:
@@ -1162,43 +1140,54 @@ def build_candidate_alpha_panel(
                 if sym in sym_to_idx:
                     s_idx = sym_to_idx[sym]
                     i = base + s_idx
-                    _fam_arr[i]  = str(row.family)
-                    _var_arr[i]  = str(row.variant)
-                    _pp_arr[i]   = float(row.p_pass)
-                    _mu_arr[i]   = float(row.mu_net_decision_bps)
-                    _q10_arr[i]  = float(row.q10_net_bps)
-                    _ut_arr[i]   = float(row.utility_score)
+                    _fam_arr[i] = str(row.family)
+                    _var_arr[i] = str(row.variant)
+                    _pp_arr[i] = float(row.p_pass)
+                    _mu_arr[i] = float(row.mu_net_decision_bps)
+                    _q10_arr[i] = float(row.q10_net_bps)
+                    _ut_arr[i] = float(row.utility_score)
                     _satr_arr[i] = float(getattr(row, "stop_atr_mult", 0.0))
-                    _tpatr_arr[i]= float(getattr(row, "take_profit_atr_mult", 0.0))
+                    _tpatr_arr[i] = float(getattr(row, "take_profit_atr_mult", 0.0))
 
     if total_rows == 0:
-        empty_df = pd.DataFrame(columns=[
-            "alpha_long", "alpha_short", "target_weight", "candidate_family",
-            "candidate_variant", "p_pass", "mu_net_decision_bps", "q10_net_bps", "utility_score",
-            "candidate_stop_atr_mult", "candidate_take_profit_atr_mult",
-        ])
+        empty_df = pd.DataFrame(
+            columns=[
+                "alpha_long",
+                "alpha_short",
+                "target_weight",
+                "candidate_family",
+                "candidate_variant",
+                "p_pass",
+                "mu_net_decision_bps",
+                "q10_net_bps",
+                "utility_score",
+                "candidate_stop_atr_mult",
+                "candidate_take_profit_atr_mult",
+            ]
+        )
         empty_df.index = pd.MultiIndex.from_arrays(
-            [pd.Index([], dtype="datetime64[ns]"), pd.Index([], dtype="object")],
-            names=["datetime", "symbol"]
+            [pd.Index([], dtype="datetime64[ns]"), pd.Index([], dtype="object")], names=["datetime", "symbol"]
         )
         return empty_df
 
     panel = (
-        pd.DataFrame({
-            "datetime":                      pd.to_datetime(_dt_arr),
-            "symbol":                        _sym_arr,
-            "alpha_long":                    _al_arr,
-            "alpha_short":                   _as_arr,
-            "target_weight":                 _tw_arr,
-            "candidate_family":              _fam_arr,
-            "candidate_variant":             _var_arr,
-            "p_pass":                        _pp_arr,
-            "mu_net_decision_bps":           _mu_arr,
-            "q10_net_bps":                   _q10_arr,
-            "utility_score":                 _ut_arr,
-            "candidate_stop_atr_mult":       _satr_arr,
-            "candidate_take_profit_atr_mult":_tpatr_arr,
-        })
+        pd.DataFrame(
+            {
+                "datetime": pd.to_datetime(_dt_arr),
+                "symbol": _sym_arr,
+                "alpha_long": _al_arr,
+                "alpha_short": _as_arr,
+                "target_weight": _tw_arr,
+                "candidate_family": _fam_arr,
+                "candidate_variant": _var_arr,
+                "p_pass": _pp_arr,
+                "mu_net_decision_bps": _mu_arr,
+                "q10_net_bps": _q10_arr,
+                "utility_score": _ut_arr,
+                "candidate_stop_atr_mult": _satr_arr,
+                "candidate_take_profit_atr_mult": _tpatr_arr,
+            }
+        )
         .set_index(["datetime", "symbol"])
         .sort_index()
     )

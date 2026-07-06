@@ -1,4 +1,5 @@
 """Tests for discover_universe_timeline new parameters: l2_start, min_history_bars."""
+
 from __future__ import annotations
 
 import inspect

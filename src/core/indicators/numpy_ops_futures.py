@@ -13,9 +13,7 @@ def compute_ema_numpy(close: np.ndarray, period: int) -> np.ndarray:
     return np.asarray(ema, dtype=np.float64)
 
 
-def compute_atr_numpy(
-    high: np.ndarray, low: np.ndarray, close: np.ndarray, period: int
-) -> np.ndarray:
+def compute_atr_numpy(high: np.ndarray, low: np.ndarray, close: np.ndarray, period: int) -> np.ndarray:
     if len(close) == 0:
         return np.array([], dtype=np.float64)
     p = max(2, int(period))
@@ -29,9 +27,7 @@ def compute_atr_numpy(
     return np.asarray(atr, dtype=np.float64)
 
 
-def compute_adx_numpy(
-    high: np.ndarray, low: np.ndarray, close: np.ndarray, period: int
-) -> np.ndarray:
+def compute_adx_numpy(high: np.ndarray, low: np.ndarray, close: np.ndarray, period: int) -> np.ndarray:
     if len(close) == 0:
         return np.array([], dtype=np.float64)
     p = max(2, int(period))

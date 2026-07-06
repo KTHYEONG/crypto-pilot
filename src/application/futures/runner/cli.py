@@ -1,4 +1,5 @@
 """Futures runner CLI with --alpha-foundry argument. [ADR_20260706_ALPHA_FOUNDRY_MAIN_WIRING]"""
+
 from __future__ import annotations
 
 import argparse
@@ -50,6 +51,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="Enable fast discovery timeframes (1h/2h)",
     )
     from src.application.futures.runner.config import _REMOVED_ARG_KEYS
+
     for key in _REMOVED_ARG_KEYS:
         parser.add_argument(f"--{key.replace('_', '-')}", action="store_true", help=argparse.SUPPRESS)
     return parser

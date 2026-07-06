@@ -48,9 +48,7 @@ def test_get_or_create_study_resume_false_deletes_existing_trials(
     assert len(old_study.trials) == 3
 
     # Act
-    new_study = get_or_create_study(
-        study_name=name, storage=storage, sampler=TPESampler(seed=0), resume=False
-    )
+    new_study = get_or_create_study(study_name=name, storage=storage, sampler=TPESampler(seed=0), resume=False)
 
     # Assert
     assert len(new_study.trials) == 0
@@ -66,9 +64,7 @@ def test_get_or_create_study_resume_true_keeps_existing_trials(
     old_study.optimize(lambda t: t.suggest_float("x", 0.0, 1.0), n_trials=2)
 
     # Act
-    resumed = get_or_create_study(
-        study_name=name, storage=storage, sampler=TPESampler(seed=0), resume=True
-    )
+    resumed = get_or_create_study(study_name=name, storage=storage, sampler=TPESampler(seed=0), resume=True)
 
     # Assert
     assert len(resumed.trials) == 2
@@ -103,9 +99,7 @@ def test_load_champion_params_returns_none_when_ledger_is_empty(
     storage: optuna.storages.BaseStorage,
 ) -> None:
     """레저 study는 있으나 trial이 없으면 None을 반환한다."""
-    optuna.create_study(
-        study_name=champion_store_study_name("4h"), storage=storage, direction="maximize"
-    )
+    optuna.create_study(study_name=champion_store_study_name("4h"), storage=storage, direction="maximize")
 
     result = load_champion_params(tag="4h", storage=storage)
 
@@ -246,16 +240,19 @@ def test_setup_optuna_storage_is_idempotent(tmp_path: Path) -> None:
 def test_resolve_redis_storage_url_is_removed() -> None:
     """_resolve_redis_storage_url 함수가 모듈에서 제거되었는지 테스트."""
     import src.domain.futures.optimization.observability.run_tracker as mod
+
     assert not hasattr(mod, "_resolve_redis_storage_url")
 
 
 def test_preflight_redis_endpoint_is_removed() -> None:
     """_preflight_redis_endpoint 함수가 모듈에서 제거되었는지 테스트."""
     import src.domain.futures.optimization.observability.run_tracker as mod
+
     assert not hasattr(mod, "_preflight_redis_endpoint")
 
 
 # ─── isolated_optuna_storage ──────────────────────────────────────────
+
 
 def test_isolated_optuna_storage_returns_in_memory_storage() -> None:
     """3.3 isolated_optuna_storage가 반환하는 storage의 url이 ':memory:'임을 assert."""
@@ -272,4 +269,3 @@ def test_isolated_optuna_storage_isolated_from_champion_store() -> None:
             direction="maximize",
         )
         assert study.study_name == champion_store_study_name("4h")
-

@@ -128,12 +128,14 @@ def test_merge_summary_log_emitted(caplog: pytest.LogCaptureFixture, monkeypatch
     )
     data_maps = {
         "BTCUSDT": {
-            "4h": pd.DataFrame({
-                "datetime": pd.date_range("2026-01-01", periods=3, freq="D"),
-                "alpha_long": [0.0, 0.0, 0.0],
-                "alpha_short": [0.0, 0.0, 0.0],
-                "target_weight": [0.0, 0.0, 0.0],
-            }),
+            "4h": pd.DataFrame(
+                {
+                    "datetime": pd.date_range("2026-01-01", periods=3, freq="D"),
+                    "alpha_long": [0.0, 0.0, 0.0],
+                    "alpha_short": [0.0, 0.0, 0.0],
+                    "target_weight": [0.0, 0.0, 0.0],
+                }
+            ),
         },
     }
 
@@ -198,8 +200,10 @@ def test_htf_active_when_signal_only_false(monkeypatch: pytest.MonkeyPatch) -> N
     monkeypatch.setattr(
         "src.domain.futures.strategy.rule_diagnostics.compute_rule_diagnostics",
         lambda *_, **__: SimpleNamespace(
-            by_family=pd.DataFrame(), by_variant=pd.DataFrame(),
-            by_family_side=pd.DataFrame(), side_flip=pd.DataFrame(),
+            by_family=pd.DataFrame(),
+            by_variant=pd.DataFrame(),
+            by_family_side=pd.DataFrame(),
+            side_flip=pd.DataFrame(),
             decision={},
             recommended_keep_variants=(),
             recommended_flip_variants=(),

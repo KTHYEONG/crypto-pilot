@@ -37,6 +37,7 @@ warnings.filterwarnings("ignore", category=optuna.exceptions.ExperimentalWarning
 
 # --- Phase Metrics ---
 
+
 def _as_finite_array(values: Iterable[float]) -> NDArray[np.float64]:
     arr: NDArray[np.float64] = cast(NDArray[np.float64], np.asarray(list(values), dtype=np.float64))
     if arr.size == 0:
@@ -64,6 +65,7 @@ def ucb(values: Iterable[float], k: float = 1.0) -> float:
 def summarize(values: Iterable[float]) -> tuple[list[float], float, float]:
     arr = _as_finite_array(values)
     return arr.tolist(), float(np.mean(arr)), float(np.std(arr))
+
 
 # --- Phase Param Space ---
 
@@ -167,7 +169,9 @@ def suggest_joint_params(
     risk = suggest_risk_params(trial, ranges=ranges, fixed=fixed)
     return {**signal, **risk}
 
+
 # --- Phase Samplers ---
+
 
 def build_phase_study_name(base_study_name: str, phase: str) -> str:
     phase_suffix = phase.strip().lower()
@@ -453,8 +457,8 @@ def build_phase_a1_pruner() -> optuna.pruners.BasePruner:
         )
 
 
-
 # --- Phase Objectives ---
+
 
 def _metric(trial: Trial, *keys: str, default: float = 0.0) -> float:
     ua = trial.user_attrs
@@ -743,6 +747,7 @@ def build_phase_objective_specs() -> dict[str, PhaseObjectiveSpec]:
         ),
     }
 
+
 # --- Phase Importance ---
 
 _NON_FIXABLE_PARAMS = {
@@ -800,9 +805,7 @@ def _target_from_user_attr(metric_key: str) -> Callable[[FrozenTrial], float]:
     return _target
 
 
-def _importances_for(
-    study: optuna.Study, target: Callable[[FrozenTrial], float] | None = None
-) -> dict[str, float]:
+def _importances_for(study: optuna.Study, target: Callable[[FrozenTrial], float] | None = None) -> dict[str, float]:
     try:
         vals = optuna.importance.get_param_importances(
             study,
@@ -937,7 +940,9 @@ def build_phase_b_plan(
         importance_report=report,
     )
 
+
 # --- Phase C Robustness ---
+
 
 def _safe_float(v: Any, default: float = 0.0) -> float:
     try:
@@ -997,9 +1002,7 @@ def _build_trial_matrix_stats(study_b: optuna.Study) -> dict[str, float]:
             "pbo_proxy": 1.0,
         }
     mean_v = float(sum(calmar_vals) / len(calmar_vals))
-    std_v = float(
-        math.sqrt(sum((x - mean_v) ** 2 for x in calmar_vals) / max(len(calmar_vals), 1))
-    )
+    std_v = float(math.sqrt(sum((x - mean_v) ** 2 for x in calmar_vals) / max(len(calmar_vals), 1)))
     n = float(len(calmar_vals))
     sharpe_like = mean_v / max(std_v, 1e-9)
     dsr_arg = -(sharpe_like * math.sqrt(max(n - 1.0, 1.0))) / 3.0
@@ -1073,6 +1076,7 @@ def evaluate_phase_c_robustness(
     salib_available = False
     try:
         import SALib  # noqa: F401
+
         salib_available = True
     except Exception:
         salib_available = False
@@ -1088,17 +1092,13 @@ def evaluate_phase_c_robustness(
         trial_scores = []
         for i in range(seed_count):
             seed_val = seeds[i] if i < len(seeds) else (i + 1) * 7919
-            trial_scores.append(
-                _deterministic_perturb_score(tr.params, salt=f"{tr.number}:{seed_val}")
-            )
+            trial_scores.append(_deterministic_perturb_score(tr.params, salt=f"{tr.number}:{seed_val}"))
         candidate_scores.append(sum(trial_scores) / float(len(trial_scores)))
 
     if candidate_scores:
         robustness_score = float(sum(candidate_scores) / len(candidate_scores))
         mean_abs = max(abs(robustness_score), 1e-9)
-        std = math.sqrt(
-            sum((x - robustness_score) ** 2 for x in candidate_scores) / len(candidate_scores)
-        )
+        std = math.sqrt(sum((x - robustness_score) ** 2 for x in candidate_scores) / len(candidate_scores))
         stability_cv = float(std / mean_abs)
     else:
         robustness_score = 0.0
@@ -1133,6 +1133,7 @@ def evaluate_phase_c_robustness(
         "dsr_proxy": float(matrix_stats["dsr_proxy"]),
         "stress_diagnostics": stress_diagnostics,
     }
+
 
 # --- Phase Runner ---
 
@@ -1355,19 +1356,13 @@ def run_phased_optimization_skeleton(
     phase_a2_workers = int(n_workers_a2) if n_workers_a2 is not None else int(n_workers)
     phase_b_workers = int(n_workers_b) if n_workers_b is not None else int(n_workers)
     phase_a1_trials = int(
-        n_trials_a1
-        if n_trials_a1 is not None
-        else OPT_FUTURES_CONFIG.get("FUTURES_PHASE_A1_TRIALS", 150)
+        n_trials_a1 if n_trials_a1 is not None else OPT_FUTURES_CONFIG.get("FUTURES_PHASE_A1_TRIALS", 150)
     )
     phase_a2_trials = int(
-        n_trials_a2
-        if n_trials_a2 is not None
-        else OPT_FUTURES_CONFIG.get("FUTURES_PHASE_A2_TRIALS", 100)
+        n_trials_a2 if n_trials_a2 is not None else OPT_FUTURES_CONFIG.get("FUTURES_PHASE_A2_TRIALS", 100)
     )
     phase_b_trials = int(
-        n_trials_b
-        if n_trials_b is not None
-        else OPT_FUTURES_CONFIG.get("FUTURES_PHASE_B_TRIALS", 300)
+        n_trials_b if n_trials_b is not None else OPT_FUTURES_CONFIG.get("FUTURES_PHASE_B_TRIALS", 300)
     )
     if n_trials > 0 and n_trials_a1 is None and n_trials_a2 is None and n_trials_b is None:
         phase_a1_trials = max(40, int(n_trials * 0.50))
@@ -1375,6 +1370,7 @@ def run_phased_optimization_skeleton(
         phase_b_trials = max(40, int(n_trials * 0.30))
 
     import time
+
     t_phase_a1 = time.perf_counter()
     study_a1 = run_phase_a1(
         base_ctx=base_ctx,
@@ -1480,21 +1476,23 @@ def run_phased_optimization_skeleton(
         phase_c_diagnostics=phase_c_diag,
     )
 
+
 # ---------------------------------------------------------------------------
 # Tiered Pipeline: Decoupled Optuna Study Support
 # ---------------------------------------------------------------------------
+
 
 @dataclass(frozen=True)
 class TieredContext:
     """Optuna study context for the Tiered hybrid pipeline."""
 
     labeled_events: Any
-    aligned: Any          # AlignedMarketData
-    cfg: Any              # CandidateStrategyConfig
-    window: Any           # LayeredWindow
-    caps: Any             # PortfolioCaps
+    aligned: Any  # AlignedMarketData
+    cfg: Any  # CandidateStrategyConfig
+    window: Any  # LayeredWindow
+    caps: Any  # PortfolioCaps
     tf: str
-    fixed_l1_params: dict[str, Any] | None = None   # L2 study 시 L1 best params 고정
+    fixed_l1_params: dict[str, Any] | None = None  # L2 study 시 L1 best params 고정
     l2_sim_cache: L2SimulationCache | None = None
     awf_folds: tuple[Any, ...] | None = None
 
@@ -1643,9 +1641,7 @@ def _resolve_l2_signal_batch_and_folds(ctx: TieredContext) -> tuple[Any, tuple[A
     )
 
     bounded_folds = tuple(
-        fold
-        for fold in awf_folds
-        if fold.oos_start >= l1_end_bars and fold.oos_end <= ho_start_idx_l2
+        fold for fold in awf_folds if fold.oos_start >= l1_end_bars and fold.oos_end <= ho_start_idx_l2
     )
     if bounded_folds:
         return signal_batch, bounded_folds
@@ -1713,13 +1709,8 @@ def _shape_efficiency_l2_objective(
     """
     if not np.isfinite(sortino_hac_unit):
         return -1e6
-    worst_fold_penalty = (
-        max(0.0, float(worst_fold_threshold) - float(worst_fold_sortino))
-        * float(worst_fold_weight)
-    )
-    risk_util_penalty = float(risk_util_weight) * max(
-        0.0, float(risk_util_target) - float(risk_util_realized)
-    )
+    worst_fold_penalty = max(0.0, float(worst_fold_threshold) - float(worst_fold_sortino)) * float(worst_fold_weight)
+    risk_util_penalty = float(risk_util_weight) * max(0.0, float(risk_util_target) - float(risk_util_realized))
     trade_penalty = float(trade_weight) * max(
         0.0, (float(trade_target) - float(trade_count)) / max(float(trade_target), 1.0)
     )
@@ -1755,10 +1746,7 @@ def _deployment_shaped_l2_objective(
     downside_lpm = float(np.mean(np.maximum(0.0, -arr)))
     median = float(np.median(arr))
     mad = float(np.mean(np.abs(arr - median)))
-    worst_fold_penalty = (
-        max(0.0, float(worst_fold_threshold) - float(worst_fold_sharpe))
-        * float(worst_fold_weight)
-    )
+    worst_fold_penalty = max(0.0, float(worst_fold_threshold) - float(worst_fold_sharpe)) * float(worst_fold_weight)
     return float(growth_lcb - 0.10 * downside_lpm - 0.05 * mad - worst_fold_penalty)
 
 
@@ -1855,18 +1843,23 @@ def evaluate_l2_trial(
             )
             _logger.debug(
                 "[L2-EVAL] L*=%.3f (binding=%s, src=%s)",
-                _l_star, _l_binding, _calib_src,
+                _l_star,
+                _l_binding,
+                _calib_src,
             )
             if _l_cross_mdd > 0.0:
                 _oos_risk = _l_cross_mdd / max(float(config.l2_max_mdd_abs), 1e-9)
                 _logger.debug(
                     "[L2-OOS-CAP] OOS_RiskUtil=%.3f cap=%.2f (L*=%.3f)",
-                    _oos_risk, config.l2_max_mdd_abs, _l_star,
+                    _oos_risk,
+                    config.l2_max_mdd_abs,
+                    _l_star,
                 )
                 if _oos_risk > 1.0:
                     _logger.debug(
                         "[L2-OOS-CAP] L* over-deployed: OOS_RiskUtil=%.3f > 1.0 (L*=%.3f)",
-                        _oos_risk, _l_star,
+                        _oos_risk,
+                        _l_star,
                     )
 
     _dep = apply_deployment(
@@ -1886,13 +1879,9 @@ def evaluate_l2_trial(
         )
 
         _fp_rets = np.asarray(rets_hybrid, dtype=np.float64)
-        _fp_oos_cagr_unit = (
-            _cagr(list(rets_hybrid), bars_per_year=bars_per_year) if _fp_rets.size >= 2 else 0.0
-        )
+        _fp_oos_cagr_unit = _cagr(list(rets_hybrid), bars_per_year=bars_per_year) if _fp_rets.size >= 2 else 0.0
         _fp_sum_log1p = (
-            float(np.sum(np.log1p(np.clip(_l_star * _fp_rets, -1.0 + 1e-9, None))))
-            if _fp_rets.size >= 1
-            else 0.0
+            float(np.sum(np.log1p(np.clip(_l_star * _fp_rets, -1.0 + 1e-9, None)))) if _fp_rets.size >= 1 else 0.0
         )
         _fp_cfg_ch = _fp_content_hash(config)
         _logger.debug(
@@ -1923,9 +1912,14 @@ def evaluate_l2_trial(
                 "[L2-TRIAL-DIAG] fit_CAGR_vol1=%.4f fit_MDD_vol1=%.4f | "
                 "OOS_CAGR_vol1=%.4f OOS_MDD_vol1=%.4f | "
                 "L*=%.3f(%s) | deployed_CAGR=%.4f deployed_MDD=%.4f",
-                _diag_fit_cagr, _diag_fit_mdd,
-                _diag_oos_cagr, _diag_oos_mdd,
-                _l_star, _l_binding, cagr_hybrid, mdd_hybrid,
+                _diag_fit_cagr,
+                _diag_fit_mdd,
+                _diag_oos_cagr,
+                _diag_oos_mdd,
+                _l_star,
+                _l_binding,
+                cagr_hybrid,
+                mdd_hybrid,
             )
 
     block_growth_hybrid = _contiguous_block_log_growth(
@@ -1953,20 +1947,16 @@ def evaluate_l2_trial(
     for block_idx in range(n_blocks):
         start_idx = block_idx * block_size
         end_idx = min((block_idx + 1) * block_size, len(rets_hybrid))
-        turnover_slice = sim.all_turnovers[block_idx:block_idx + 1]
+        turnover_slice = sim.all_turnovers[block_idx : block_idx + 1]
         block_metrics.append(
             Layer2BlockMetric(
                 start_idx=start_idx,
                 end_idx=end_idx,
                 log_growth_hybrid=(
-                    float(block_growth_hybrid[block_idx])
-                    if block_idx < len(block_growth_hybrid)
-                    else 0.0
+                    float(block_growth_hybrid[block_idx]) if block_idx < len(block_growth_hybrid) else 0.0
                 ),
                 log_growth_baseline=(
-                    float(block_growth_baseline[block_idx])
-                    if block_idx < len(block_growth_baseline)
-                    else 0.0
+                    float(block_growth_baseline[block_idx]) if block_idx < len(block_growth_baseline) else 0.0
                 ),
                 mdd_hybrid=_mdd(rets_hybrid[start_idx:end_idx]),
                 turnover_hybrid=float(np.mean(turnover_slice)) if turnover_slice else 0.0,
@@ -1982,19 +1972,11 @@ def evaluate_l2_trial(
     )
     fold_pass_ratio = float(fold_diag.fold_pass_ratio)
     finite_fold_cagrs = [
-        float(value)
-        for value in fold_diag.fold_deployed_cagrs
-        if value is not None and np.isfinite(float(value))
+        float(value) for value in fold_diag.fold_deployed_cagrs if value is not None and np.isfinite(float(value))
     ]
     worst_fold_cagr = min(finite_fold_cagrs) if finite_fold_cagrs else 0.0
-    break_even_pass_pct = (
-        float(sim.friction_pass_total) / float(sim.signal_total)
-        if sim.signal_total > 0
-        else 0.0
-    )
-    average_gross_exposure = (
-        float(np.mean(sim.all_gross_exposures)) if sim.all_gross_exposures else 0.0
-    )
+    break_even_pass_pct = float(sim.friction_pass_total) / float(sim.signal_total) if sim.signal_total > 0 else 0.0
+    average_gross_exposure = float(np.mean(sim.all_gross_exposures)) if sim.all_gross_exposures else 0.0
     total_cost_bps = float(sim.total_cost_hybrid * 1e4)
     # FIX-1: active_block_count 정의 통일 — 최종 게이트(pipeline.py)와 동일한 AWF fold 기반.
     # contiguous-block 기반(이전)과 달리 pipeline 게이트가 보는 len(block_metrics)와 일치.
@@ -2002,18 +1984,10 @@ def evaluate_l2_trial(
     # FIX-2/4: 순수 1/N EW baseline Sharpe (uplift 제약 전용)
     sharpe_hac_baseline_ew = _sharpe_hac(list(sim.rets_baseline_ew), bars_per_year=bars_per_year)
     cap_saturation_ratio = (
-        float(sim.cap_saturation_count) / float(sim.rebalance_count)
-        if sim.rebalance_count > 0
-        else 0.0
+        float(sim.cap_saturation_count) / float(sim.rebalance_count) if sim.rebalance_count > 0 else 0.0
     )
     positive_block_delta_ratio = (
-        float(
-            sum(
-                1
-                for metric in block_metrics
-                if float(metric.log_growth_hybrid) > float(metric.log_growth_baseline)
-            )
-        )
+        float(sum(1 for metric in block_metrics if float(metric.log_growth_hybrid) > float(metric.log_growth_baseline)))
         / float(len(block_metrics))
         if block_metrics
         else 0.0
@@ -2032,9 +2006,7 @@ def evaluate_l2_trial(
         end_idx=int(signal_batch.end_idx),
     )
     entry_spike_penalty = (
-        float(config.l2_entry_spike_penalty_weight)
-        if "entry_block_spike" in entry_audit.warnings
-        else 0.0
+        float(config.l2_entry_spike_penalty_weight) if "entry_block_spike" in entry_audit.warnings else 0.0
     )
 
     finite_score = float(growth_lcb_hybrid) if np.isfinite(growth_lcb_hybrid) else -1e6
@@ -2044,12 +2016,10 @@ def evaluate_l2_trial(
     # fold_rets_hybrid: list of per-fold OOS return sequences.
     # Time Complexity: O(F·T) where F=n_folds, T=fold OOS bars.
     _fold_sortinos: list[float] = [
-        float(_sortino(list(fr), bars_per_year=bars_per_year)) if fr else 0.0
-        for fr in sim.fold_rets_hybrid
+        float(_sortino(list(fr), bars_per_year=bars_per_year)) if fr else 0.0 for fr in sim.fold_rets_hybrid
     ]
     _fold_sharpes: list[float] = [
-        float(_sharpe_hac(list(fr), bars_per_year=bars_per_year)) if fr else 0.0
-        for fr in sim.fold_rets_hybrid
+        float(_sharpe_hac(list(fr), bars_per_year=bars_per_year)) if fr else 0.0 for fr in sim.fold_rets_hybrid
     ]
     worst_fold_sortino: float = min(_fold_sortinos) if _fold_sortinos else 0.0
     worst_fold_sharpe: float = min(_fold_sharpes) if _fold_sharpes else 0.0
@@ -2127,12 +2097,11 @@ def evaluate_l2_trial(
         config=config,
     )
     # deployment extras raw data (SSOT 위임용)
-    _last_selected: frozenset[str] = getattr(sim, 'last_selected', frozenset())
-    _symbols = getattr(aligned, 'symbols', ())
+    _last_selected: frozenset[str] = getattr(sim, "last_selected", frozenset())
+    _symbols = getattr(aligned, "symbols", ())
     _sym_to_idx = {s: i for i, s in enumerate(_symbols)}
     _last_weights = tuple(
-        float(getattr(sim, 'last_w', np.array([]))[_sym_to_idx[s]])
-        for s in _last_selected if s in _sym_to_idx
+        float(getattr(sim, "last_w", np.array([]))[_sym_to_idx[s]]) for s in _last_selected if s in _sym_to_idx
     )
     _last_selected_tuple = tuple(sorted(_last_selected))
 
@@ -2174,7 +2143,7 @@ def evaluate_l2_trial(
         recent_fold_mdd=float(fold_diag.recent_fold_mdd),
         latest_to_median_cagr=float(fold_diag.latest_to_median_cagr),
         fold_deployed_cagrs=tuple(fold_diag.fold_deployed_cagrs),
-        fold_deployed_mdds=tuple(getattr(fold_diag, 'fold_deployed_mdds', ())),
+        fold_deployed_mdds=tuple(getattr(fold_diag, "fold_deployed_mdds", ())),
         fold_deployed_sharpes=tuple(fold_diag.fold_unit_sharpes),
         fold_selected_symbols=tuple(fold_diag.fold_selected_symbols),
         worst_fold_cagr=float(worst_fold_cagr),
@@ -2188,7 +2157,7 @@ def evaluate_l2_trial(
         rebalance_count=int(sim.rebalance_count),
         all_net_exposures=tuple(sim.all_net_exposures),
         rets_baseline_ew=tuple(sim.rets_baseline_ew),
-        fold_attributions=tuple(getattr(sim, 'fold_attributions', ())),
+        fold_attributions=tuple(getattr(sim, "fold_attributions", ())),
         deployable_score=deployable_score,
     )
 
@@ -2291,6 +2260,7 @@ def _evaluate_l2_params(
     # Ensure cache is built if not already present
     if getattr(ctx, "l2_sim_cache", None) is None:
         from src.domain.futures.strategy.tiered_workflow.awf_sim import build_l2_simulation_cache
+
         object.__setattr__(ctx, "l2_sim_cache", build_l2_simulation_cache(ctx.aligned, signal_batch, ctx.tf))
 
     cache = ctx.l2_sim_cache

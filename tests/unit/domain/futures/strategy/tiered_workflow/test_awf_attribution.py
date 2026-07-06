@@ -9,6 +9,7 @@ Scenarios:
   S6 - _count_netting_symbols netting 정확성 (Logic)
   S7 - diag on/off 무로깅 (Integration, optional)
 """
+
 from __future__ import annotations
 
 import numpy as np
@@ -176,18 +177,33 @@ class TestCountNettingSymbols:
         """S6: sym A에 +10, -10 sleeve → pooled≈0 → netting=1."""
         sleeve_sigs: dict[tuple[str, str], SymbolSignal] = {
             ("A", "s1"): SymbolSignal(
-                raw_mu=10.0, volatility=0.02, n_obs=1, t_stat=0.0,
-                valid=True, beta_btc=None, quality_weight=1.0,
+                raw_mu=10.0,
+                volatility=0.02,
+                n_obs=1,
+                t_stat=0.0,
+                valid=True,
+                beta_btc=None,
+                quality_weight=1.0,
             ),
             ("A", "s2"): SymbolSignal(
-                raw_mu=-10.0, volatility=0.02, n_obs=1, t_stat=0.0,
-                valid=True, beta_btc=None, quality_weight=1.0,
+                raw_mu=-10.0,
+                volatility=0.02,
+                n_obs=1,
+                t_stat=0.0,
+                valid=True,
+                beta_btc=None,
+                quality_weight=1.0,
             ),
         }
         pooled: dict[str, SymbolSignal] = {
             "A": SymbolSignal(
-                raw_mu=0.0, volatility=0.02, n_obs=2, t_stat=0.0,
-                valid=True, beta_btc=None, quality_weight=2.0,
+                raw_mu=0.0,
+                volatility=0.02,
+                n_obs=2,
+                t_stat=0.0,
+                valid=True,
+                beta_btc=None,
+                quality_weight=2.0,
             ),
         }
         assert _count_netting_symbols(sleeve_sigs, pooled) == 1
@@ -196,18 +212,33 @@ class TestCountNettingSymbols:
         """S6: 동일 부호 두 sleeve → netting=0."""
         sleeve_sigs: dict[tuple[str, str], SymbolSignal] = {
             ("A", "s1"): SymbolSignal(
-                raw_mu=5.0, volatility=0.02, n_obs=1, t_stat=0.0,
-                valid=True, beta_btc=None, quality_weight=1.0,
+                raw_mu=5.0,
+                volatility=0.02,
+                n_obs=1,
+                t_stat=0.0,
+                valid=True,
+                beta_btc=None,
+                quality_weight=1.0,
             ),
             ("A", "s2"): SymbolSignal(
-                raw_mu=3.0, volatility=0.02, n_obs=1, t_stat=0.0,
-                valid=True, beta_btc=None, quality_weight=1.0,
+                raw_mu=3.0,
+                volatility=0.02,
+                n_obs=1,
+                t_stat=0.0,
+                valid=True,
+                beta_btc=None,
+                quality_weight=1.0,
             ),
         }
         pooled: dict[str, SymbolSignal] = {
             "A": SymbolSignal(
-                raw_mu=4.0, volatility=0.02, n_obs=2, t_stat=0.0,
-                valid=True, beta_btc=None, quality_weight=2.0,
+                raw_mu=4.0,
+                volatility=0.02,
+                n_obs=2,
+                t_stat=0.0,
+                valid=True,
+                beta_btc=None,
+                quality_weight=2.0,
             ),
         }
         assert _count_netting_symbols(sleeve_sigs, pooled) == 0
@@ -217,17 +248,26 @@ class TestCountNettingSymbols:
 # S7: diag on/off 로깅 검증 (Integration) — caplog 사용
 # ---------------------------------------------------------------------------
 
+
 class TestLayer2FoldAttributionDataclass:
     def test_frozen_and_slots(self) -> None:
         """Layer2FoldAttribution is frozen and has __slots__."""
         attr = Layer2FoldAttribution(
-            fold_idx=0, oos_bars=100, n_rebal=10,
-            realized_total=0.02, realized_price=0.05,
-            realized_funding=-0.01, realized_cost=0.02,
-            expected_net=0.03, alpha_gap=-0.01,
-            mean_gross_exp=1.55, mean_net_exp=0.25,
-            sleeves_active_mean=6.0, friction_pass_ratio=0.8,
-            throttle_mult_mean=0.9, dropped_below_cost=2,
+            fold_idx=0,
+            oos_bars=100,
+            n_rebal=10,
+            realized_total=0.02,
+            realized_price=0.05,
+            realized_funding=-0.01,
+            realized_cost=0.02,
+            expected_net=0.03,
+            alpha_gap=-0.01,
+            mean_gross_exp=1.55,
+            mean_net_exp=0.25,
+            sleeves_active_mean=6.0,
+            friction_pass_ratio=0.8,
+            throttle_mult_mean=0.9,
+            dropped_below_cost=2,
             netting_events=1,
         )
         assert attr.realized_total == pytest.approx(0.02)
@@ -293,4 +333,3 @@ def test_combine_sleeve_signals_optimized_logical_equivalence() -> None:
 
     assert "ETH" in combined
     assert combined["ETH"].raw_mu == pytest.approx(-2.0)
-

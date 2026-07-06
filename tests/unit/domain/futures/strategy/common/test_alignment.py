@@ -8,6 +8,7 @@ Scenarios:
   → all masks retain initial values (active=1, entry_block=0).
 - S3 (Edge): Some symbols not in cube_sym_idx → those columns unchanged.
 """
+
 from __future__ import annotations
 
 import numpy as np
@@ -23,8 +24,8 @@ from src.domain.futures.universe.contracts import UniverseStateCube
 _TF: str = "4h"
 # compute_multi_alignment_info requires eff_ref_len >= 200
 _N_BARS: int = 250
-_CUBE_T: int = 10   # T_cube
-_CUBE_N: int = 3    # N_cube
+_CUBE_T: int = 10  # T_cube
+_CUBE_N: int = 3  # N_cube
 
 
 # ---------------------------------------------------------------------------
@@ -98,12 +99,8 @@ def _make_state_cube(
     calendar = pd.date_range(calendar_base, periods=t_cube, freq="4h", tz="UTC")
 
     eligible = eligible_arr if eligible_arr is not None else np.ones((t_cube, n), dtype=np.bool_)
-    entry_block = (
-        entry_block_arr if entry_block_arr is not None else np.zeros((t_cube, n), dtype=np.bool_)
-    )
-    capacity_usdt = (
-        capacity_arr if capacity_arr is not None else np.full((t_cube, n), 10_000.0, dtype=np.float64)
-    )
+    entry_block = entry_block_arr if entry_block_arr is not None else np.zeros((t_cube, n), dtype=np.bool_)
+    capacity_usdt = capacity_arr if capacity_arr is not None else np.full((t_cube, n), 10_000.0, dtype=np.float64)
     cost_bps = cost_arr if cost_arr is not None else np.full((t_cube, n), 5.0, dtype=np.float64)
 
     return UniverseStateCube(
@@ -240,9 +237,7 @@ class TestOpt1AllTimestampsBeforeCube:
         aligned = align_data_maps(data_maps, symbols, _TF, state_cube=cube)
 
         # Assert — initial values: active=True (all ones), entry_block=False (all zeros)
-        assert aligned.active_mask.all(), (
-            "active_mask must remain True when no cube bars cover aligned range"
-        )
+        assert aligned.active_mask.all(), "active_mask must remain True when no cube bars cover aligned range"
         assert not aligned.entry_block_mask.any(), (
             "entry_block_mask must remain False when no cube bars cover aligned range"
         )
@@ -284,9 +279,7 @@ class TestOpt1PartialCubeSymbolCoverage:
         aaa_col = list(aligned.symbols).index("AAA")
 
         # BBB column: active_mask must still be all True (initial), entry_block all False
-        assert aligned.active_mask[:, bbb_col].all(), (
-            "BBB active_mask must remain initial True (not in cube)"
-        )
+        assert aligned.active_mask[:, bbb_col].all(), "BBB active_mask must remain initial True (not in cube)"
         assert not aligned.entry_block_mask[:, bbb_col].any(), (
             "BBB entry_block_mask must remain initial False (not in cube)"
         )
@@ -300,9 +293,7 @@ class TestOpt1PartialCubeSymbolCoverage:
 
         if t_v.size > 0:
             # AAA (col-0 in cube) has eligible=False → active_mask should be False at t_v
-            assert not aligned.active_mask[t_v, aaa_col].any(), (
-                "AAA bars covered by cube must have active_mask=False"
-            )
+            assert not aligned.active_mask[t_v, aaa_col].any(), "AAA bars covered by cube must have active_mask=False"
 
 
 def test_align_data_maps_reads_sum_open_interest_and_long_short_ratio() -> None:

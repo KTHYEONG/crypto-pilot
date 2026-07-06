@@ -1,4 +1,5 @@
 """Tests for apply_tf_gate_overrides helper."""
+
 from __future__ import annotations
 
 from src.domain.futures.strategy.config import (
@@ -17,6 +18,7 @@ def _base_cfg() -> CandidateStrategyConfig:
 
 
 # ─── Scenario 5: Per-TF gate override ──────────────────────────────────────
+
 
 def test_gate_override_applies_for_matching_tf() -> None:
     """Scenario 5: apply_tf_gate_overrides(cfg, '1h') returns cfg with 1h overrides."""
@@ -43,6 +45,7 @@ def test_gate_override_applies_for_matching_tf() -> None:
 
 
 # ─── Scenario 6: Gate override for non-overridden TF ───────────────────────
+
 
 def test_gate_override_non_overridden_tf_returns_original() -> None:
     """Scenario 6: apply_tf_gate_overrides(cfg, '4h') returns same cfg when no 4h override."""
