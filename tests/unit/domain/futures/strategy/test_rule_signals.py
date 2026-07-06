@@ -111,6 +111,10 @@ def test_build_rule_signal_panels_returns_expected_tuple() -> None:
         "funding_term_structure_carry",
         "flow_trend_continuation",
         "lsr_oi_regime_filter",
+        "macd_4h",
+        "supertrend",
+        "ichimoku_trend",
+        "positioning_unwind",
     }
 
     for p in panels:
