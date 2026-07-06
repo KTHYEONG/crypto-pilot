@@ -42,8 +42,6 @@ PASS_EVIDENCE = CheapGateEvidence(
     nw_tstat=2.5,
     block_lcb_bps=2.0,
     rank_ic=0.05,
-    monotonic_bucket_score=0.0,
-    regime_edges_bps={},
     cost_drag_ratio=0.3,
     turnover_per_year=100.0,
     novelty_corr_max=0.0,
@@ -63,8 +61,6 @@ FAIL_EVIDENCE = CheapGateEvidence(
     nw_tstat=0.0,
     block_lcb_bps=-1.0,
     rank_ic=0.0,
-    monotonic_bucket_score=0.0,
-    regime_edges_bps={},
     cost_drag_ratio=0.0,
     turnover_per_year=0.0,
     novelty_corr_max=0.0,
@@ -109,6 +105,55 @@ class TestBuildL1VerificationUnits:
         )
         with pytest.raises(AttributeError):
             units[0].allocated_fold_budget = 99  # type: ignore[misc]
+
+    # Scenario 2.6: top_k 초과
+    def test_raises_when_top_k_exceeded(self) -> None:
+        # 동일 (family, timeframe)에 6건
+        evs = [
+            CheapGateEvidence(
+                recipe_id=f"r{i}",
+                timeframe="4h",
+                symbol_scope="symbol",
+                n_events=100,
+                effective_n=50.0,
+                mean_net_bps=5.0,
+                nw_tstat=2.5,
+                block_lcb_bps=2.0,
+                rank_ic=0.05,
+                cost_drag_ratio=0.3,
+                turnover_per_year=100.0,
+                novelty_corr_max=0.0,
+                incremental_rank_ic=0.02,
+                compute_cost_score=0.0,
+                gate_passed=True,
+                reject_reasons=(),
+            )
+            for i in range(6)
+        ]
+        big_recipes = {
+            f"r{i}": AlphaRecipe(
+                recipe_id=f"r{i}",
+                family="trend_ma",
+                variant=f"v{i}",
+                timeframe="4h",
+                archetype="trend",
+                indicator_params={},
+                side_rule_id="trend_follow",
+                exit_policy_id="atr_trail_2",
+                required_fields=("close",),
+                causal_lag_bars=1,
+                max_turnover_per_year=365.0,
+            )
+            for i in range(6)
+        }
+        with pytest.raises(ValueError, match="L0 diversity budget violated"):
+            build_l1_verification_units(
+                evidences=evs,
+                recipes=big_recipes,
+                symbols=("BTCUSDT",),
+                top_k_per_family_tf=5,
+                initial_fold_budget=3,
+            )
 
 
 class TestUpdateSuccessiveHalvingState:

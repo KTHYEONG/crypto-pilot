@@ -162,7 +162,8 @@ class TestAlphaFoundryWiring:
 
     def test_diversity_and_search_spaces_wired(self) -> None:
         panels = [_panel("r1"), _panel("r2")]
-        corr = compute_panel_correlation_matrix(panels)
+        active_mask = np.ones_like(panels[0].valid_mask_2d, dtype=np.bool_)
+        corr = compute_panel_correlation_matrix(panels, active_mask)
         assert corr.shape == (2, 2)
         budgets = resolve_staged_search_budget(
             n_dimensions={"signal": 5, "risk": 3, "regime": 4, "deployment": 2},

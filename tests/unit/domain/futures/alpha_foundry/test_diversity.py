@@ -5,6 +5,7 @@ import pytest
 
 from src.domain.futures.alpha_foundry.contracts import CheapGateEvidence
 from src.domain.futures.alpha_foundry.diversity import (
+    _paired_score_corr,
     cluster_correlated_recipes,
     compute_panel_correlation_matrix,
     estimate_effective_test_count,
@@ -12,7 +13,7 @@ from src.domain.futures.alpha_foundry.diversity import (
 from src.domain.futures.signals.contracts import CandidateSignalPanel
 
 
-def _make_panel(score: np.ndarray) -> CandidateSignalPanel:
+def _make_panel(score: np.ndarray, *, valid: np.ndarray | None = None) -> CandidateSignalPanel:
     t, n = score.shape
     datetimes = np.arange(
         np.datetime64("2026-01-01"),
@@ -33,56 +34,93 @@ def _make_panel(score: np.ndarray) -> CandidateSignalPanel:
         stop_atr_mult=2.0,
         take_profit_atr_mult=4.0,
         turnover_proxy_2d=np.zeros((t, n), dtype=np.float64),
-        valid_mask_2d=np.ones((t, n), dtype=np.bool_),
+        valid_mask_2d=valid if valid is not None else np.ones((t, n), dtype=np.bool_),
     )
+
+
+def _make_active_mask(shape: tuple[int, int]) -> np.ndarray:
+    return np.ones(shape, dtype=np.bool_)
+
+
+class TestPairedScoreCorr:
+    # Scenario 2.1: 교집합 없음 → 0.0 폴백
+    def test_replaces_non_finite_with_zero(self) -> None:
+        t, n = 100, 5
+        score_a = np.random.randn(t, n)
+        score_b = np.random.randn(t, n)
+        valid_a = np.zeros((t, n), dtype=np.bool_)
+        valid_a[0::2, :] = True  # 짝수 인덱스
+        valid_b = np.zeros((t, n), dtype=np.bool_)
+        valid_b[1::2, :] = True  # 홀수 인덱스
+        panel_a = _make_panel(score_a, valid=valid_a)
+        panel_b = _make_panel(score_b, valid=valid_b)
+        active = _make_active_mask((t, n))
+        corr = _paired_score_corr(panel_a, panel_b, active)
+        assert corr == 0.0  # 교집합 없음
+
+    def test_identical_scores_give_one(self) -> None:
+        t, n = 50, 3
+        rng = np.random.default_rng(42)
+        score = rng.normal(0, 1, (t, n))
+        panel_a = _make_panel(score)
+        panel_b = _make_panel(score.copy())
+        active = _make_active_mask((t, n))
+        corr = _paired_score_corr(panel_a, panel_b, active)
+        assert abs(corr - 1.0) < 1e-10
 
 
 class TestComputePanelCorrelationMatrix:
     def test_returns_square_matrix(self) -> None:
-        panels = [_make_panel(np.random.randn(100, 5)) for _ in range(4)]
-        corr = compute_panel_correlation_matrix(panels)
+        t, n = 100, 5
+        panels = [_make_panel(np.random.randn(t, n)) for _ in range(4)]
+        active = _make_active_mask((t, n))
+        corr = compute_panel_correlation_matrix(panels, active)
         assert corr.shape == (4, 4)
 
     def test_diagonal_is_one(self) -> None:
-        panels = [_make_panel(np.random.randn(100, 5)) for _ in range(3)]
-        corr = compute_panel_correlation_matrix(panels)
+        t, n = 100, 5
+        panels = [_make_panel(np.random.randn(t, n)) for _ in range(3)]
+        active = _make_active_mask((t, n))
+        corr = compute_panel_correlation_matrix(panels, active)
         np.testing.assert_allclose(np.diag(corr), 1.0, atol=1e-10)
 
     def test_raises_on_empty_panels(self) -> None:
+        active = _make_active_mask((10, 3))
         with pytest.raises(ValueError, match="empty"):
-            compute_panel_correlation_matrix([])
+            compute_panel_correlation_matrix([], active)
 
-    def test_replaces_non_finite_with_zero(self) -> None:
-        panels = [_make_panel(np.full((100, 5), np.nan)) for _ in range(2)]
-        corr = compute_panel_correlation_matrix(panels)
-        assert np.all(np.isfinite(corr))
+    # Scenario 3.2: active_mask shape mismatch
+    def test_raises_on_shape_mismatch(self) -> None:
+        t, n = 100, 5
+        panels = [_make_panel(np.random.randn(t, n))]
+        bad_active = np.ones((50, 3), dtype=np.bool_)
+        with pytest.raises(ValueError, match="shape"):
+            compute_panel_correlation_matrix(panels, bad_active)
 
 
 class TestClusterCorrelatedRecipes:
-    def test_groups_highly_correlated(self) -> None:
-        evs = tuple(
-            CheapGateEvidence(
-                recipe_id=f"r{i}",
-                timeframe="4h",
-                symbol_scope="symbol",
-                n_events=100,
-                effective_n=50.0,
-                mean_net_bps=1.0,
-                nw_tstat=2.0,
-                block_lcb_bps=0.5,
-                rank_ic=0.05,
-                monotonic_bucket_score=0.0,
-                regime_edges_bps={},
-                cost_drag_ratio=0.3,
-                turnover_per_year=100.0,
-                novelty_corr_max=0.0,
-                incremental_rank_ic=0.02,
-                compute_cost_score=0.0,
-                gate_passed=True,
-                reject_reasons=(),
-            )
-            for i in range(4)
+    def _make_evidence(self, recipe_id: str) -> CheapGateEvidence:
+        return CheapGateEvidence(
+            recipe_id=recipe_id,
+            timeframe="4h",
+            symbol_scope="symbol",
+            n_events=100,
+            effective_n=50.0,
+            mean_net_bps=1.0,
+            nw_tstat=2.0,
+            block_lcb_bps=0.5,
+            rank_ic=0.05,
+            cost_drag_ratio=0.3,
+            turnover_per_year=100.0,
+            novelty_corr_max=0.0,
+            incremental_rank_ic=0.02,
+            compute_cost_score=0.0,
+            gate_passed=True,
+            reject_reasons=(),
         )
+
+    def test_groups_highly_correlated(self) -> None:
+        evs = tuple(self._make_evidence(f"r{i}") for i in range(4))
         corr = np.array([
             [1.0, 0.9, 0.3, 0.2],
             [0.9, 1.0, 0.3, 0.2],
@@ -95,29 +133,7 @@ class TestClusterCorrelatedRecipes:
         assert len(clusters) > 0
 
     def test_raises_on_shape_mismatch(self) -> None:
-        evs = tuple(
-            CheapGateEvidence(
-                recipe_id=f"r{i}",
-                timeframe="4h",
-                symbol_scope="symbol",
-                n_events=100,
-                effective_n=50.0,
-                mean_net_bps=1.0,
-                nw_tstat=2.0,
-                block_lcb_bps=0.5,
-                rank_ic=0.05,
-                monotonic_bucket_score=0.0,
-                regime_edges_bps={},
-                cost_drag_ratio=0.3,
-                turnover_per_year=100.0,
-                novelty_corr_max=0.0,
-                incremental_rank_ic=0.02,
-                compute_cost_score=0.0,
-                gate_passed=True,
-                reject_reasons=(),
-            )
-            for i in range(3)
-        )
+        evs = tuple(self._make_evidence(f"r{i}") for i in range(3))
         corr = np.eye(4)
         with pytest.raises(ValueError, match="shape"):
             cluster_correlated_recipes(evidences=evs, corr=corr, max_corr=0.8)
