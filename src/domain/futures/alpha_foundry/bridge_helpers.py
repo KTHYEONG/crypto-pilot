@@ -16,12 +16,14 @@ from typing import TYPE_CHECKING, Any, Literal, cast
 if TYPE_CHECKING:
     pass
 
+from src.domain.futures.alpha_foundry.contracts import AlphaRecipe
 from src.domain.futures.alpha_foundry.contracts import (
     AlphaRecipe as _AlphaRecipe,
 )
 from src.domain.futures.alpha_foundry.contracts import (
     PanelRecipeBinding as _PanelRecipeBinding,
 )
+from src.domain.futures.signals.contracts import CandidateSignalPanel
 
 
 @dataclass(slots=True, frozen=True)
@@ -130,6 +132,55 @@ def bind_panels_to_alpha_recipes(
         ))
 
     return tuple(bindings)
+
+
+
+def synthesize_recipe_from_panel(
+    *,
+    panel: CandidateSignalPanel,
+    timeframe: str,
+    catalog_recipes: Mapping[str, AlphaRecipe],
+) -> AlphaRecipe:
+    family = panel.family if hasattr(panel, "family") else ""
+    variant = panel.variant if hasattr(panel, "variant") else ""
+    panel_archetype = str(getattr(panel, "archetype", ""))
+
+    from src.domain.futures.alpha_foundry.recipes import (
+        FAMILY_ARCHETYPE,
+        FAMILY_EXIT_POLICY,
+        FAMILY_MAX_TURNOVER,
+        FAMILY_SIDE_RULE,
+        _make_recipe_id,
+        map_signal_archetype_to_alpha_archetype,
+    )
+
+    params = dict(getattr(panel, "params", {})) or {}
+    recipe_id = _make_recipe_id(family, variant, timeframe, params)
+
+    if recipe_id in catalog_recipes:
+        return catalog_recipes[recipe_id]
+
+    # Synthesize from family template or archetype defaults
+    alpha_arch = FAMILY_ARCHETYPE.get(family, map_signal_archetype_to_alpha_archetype(panel_archetype))
+    side_rule = FAMILY_SIDE_RULE.get(family, f"synthetic:{family}")
+    exit_policy = FAMILY_EXIT_POLICY.get(family, f"synthetic:{family}")
+    max_turnover = FAMILY_MAX_TURNOVER.get(family, 365.0)
+    required = ("close",)
+    causal_lag = 1
+
+    return AlphaRecipe(
+        recipe_id=recipe_id,
+        family=family,
+        variant=variant,
+        timeframe=timeframe,
+        archetype=alpha_arch,
+        indicator_params=params,
+        side_rule_id=side_rule,
+        exit_policy_id=exit_policy,
+        required_fields=required,
+        causal_lag_bars=causal_lag,
+        max_turnover_per_year=max_turnover,
+    )
 
 
 def _write_alpha_foundry_report(
@@ -242,12 +293,16 @@ def run_alpha_foundry_l0_gate(
     cheap_config = runtime_config.cheap_gate if hasattr(runtime_config, "cheap_gate") else None
     l0_start = _time_module.perf_counter()
 
+    candidates: tuple[Any, ...] = ()
+    evidence_rows: tuple[Any, ...] = ()
+    l0_artifacts: Any = None
+
     if cheap_config is not None and bound_panels:
         from src.domain.futures.alpha_foundry.pipeline import (
             run_alpha_foundry_l0_pipeline,
         )
 
-        l0_result = run_alpha_foundry_l0_pipeline(
+        l0_artifacts = run_alpha_foundry_l0_pipeline(
             panels=bound_panels,
             recipes=recipes,
             aligned=aligned,
@@ -270,36 +325,42 @@ def run_alpha_foundry_l0_gate(
                 else 30
             ),
         )
-        evidences = l0_result.evidences
-        evidence_rows = l0_result.evidence_rows
+        evidences = l0_artifacts.evidences
+        evidence_rows = l0_artifacts.evidence_rows
+        candidates = l0_artifacts.candidates
     else:
         evidences = ()
         evidence_rows = ()
 
-    passed_ids = {ev.recipe_id for ev in evidences if ev.gate_passed}
-    reject_reason_counts: dict[str, int] = {}
-    for ev in evidences:
-        for reason in ev.reject_reasons:
-            reject_reason_counts[reason] = reject_reason_counts.get(reason, 0) + 1
-
-    if mode == "gate":
-        selected_for_l1_ids = {
-            er.recipe_id for er in evidence_rows if er.selected_for_l1
+    # Gate mode: forward only panels with l1_budget_units > 0
+    if mode == "gate" and candidates:
+        candidate_by_rid = {c.recipe_id: c for c in candidates}
+        l1_queued_ids = {
+            rid for rid, c in candidate_by_rid.items()
+            if c.l1_budget_units > 0
         }
-        final_selected_ids = {
-            ev.recipe_id for ev in evidences
-            if ev.recipe_id in selected_for_l1_ids
-        }
-        if not final_selected_ids:
-            final_selected_ids = passed_ids
         passed_panel_indices = {
             b.panel_index
             for b in bindings
-            if b.recipe_id in final_selected_ids
+            if b.recipe_id in l1_queued_ids
         }
+        if not passed_panel_indices and len(candidates) > 0:
+            # Fallback: at least seed candidates
+            seed_ids = {
+                rid for rid, c in candidate_by_rid.items()
+                if c.discovery_tier in ("seed", "candidate")
+            }
+            passed_panel_indices = {
+                b.panel_index
+                for b in bindings
+                if b.recipe_id in seed_ids
+            } if seed_ids else set()
+
         panels_for_l1 = tuple(
             p for i, p in enumerate(panels) if i in passed_panel_indices
         )
+    elif mode == "audit":
+        panels_for_l1 = tuple(panels)
     else:
         panels_for_l1 = tuple(panels)
 
@@ -308,11 +369,15 @@ def run_alpha_foundry_l0_gate(
     n_panels_in = len(panels)
     n_bound = len(bindings)
     n_evidence = len(evidences)
-    n_passed = len(passed_ids)
+    n_passed = len([c for c in candidates if c.discovery_tier != "blocked"]) if candidates else 0
     n_rejected = n_evidence - n_passed
 
     symbols = aligned.symbols if hasattr(aligned, "symbols") else ()
     n_bars = aligned.close_2d.shape[0] if hasattr(aligned, "close_2d") else 0
+
+    reject_reason_counts: dict[str, int] = {}
+    if l0_artifacts is not None:
+        reject_reason_counts = l0_artifacts.reject_reason_counts
 
     report = AlphaFoundryBridgeReport(
         run_id=run_id,

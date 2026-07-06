@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
+from typing import Literal
 
 import numpy as np
 from numpy.typing import NDArray
@@ -17,6 +18,13 @@ from src.domain.futures.alpha_foundry.contracts import (
     CheapGateConfig,
     CheapGateEvidence,
     CheapGateRejectReason,
+    DiscoveryTier,
+    FamilyTimeframeGatePolicy,
+    L0HardRejectReason,
+    L0PriorityWeights,
+    L0SignalCandidate,
+    L0SoftFlag,
+    MultiTimeframeEvidence,
 )
 from src.domain.futures.signals.contracts import CandidateSignalPanel
 from src.domain.futures.strategy.common.alignment import AlignedMarketData
@@ -290,3 +298,159 @@ def evaluate_alpha_cheap_gate_batch(
         )
         results.append(evidence)
     return tuple(results)
+
+def resolve_family_timeframe_gate_policy(
+    *,
+    recipe: AlphaRecipe,
+    config: CheapGateConfig,
+) -> FamilyTimeframeGatePolicy:
+    archetype = recipe.archetype
+    family = recipe.family
+
+    min_events = config.archetype_event_floors.get(archetype, config.min_events)
+    if family in config.family_event_floors:
+        min_events = config.family_event_floors[family]
+
+    min_effective_n = config.min_effective_n
+    target_effective_n = float(min_events)
+    max_cost_drag_ratio = config.max_cost_drag_ratio
+    max_turnover_per_year = min(config.max_turnover_per_year, recipe.max_turnover_per_year)
+
+    deep_negative_lcb_bps = config.min_lcb_net_bps
+
+    return FamilyTimeframeGatePolicy(
+        archetype=archetype,
+        min_events=min_events,
+        min_effective_n=min_effective_n,
+        target_effective_n=target_effective_n,
+        max_cost_drag_ratio=max_cost_drag_ratio,
+        max_turnover_per_year=max_turnover_per_year,
+        deep_negative_lcb_bps=deep_negative_lcb_bps,
+    )
+
+
+def _compute_l1_priority_score(
+    *,
+    evidence: CheapGateEvidence,
+    tf_fusion: MultiTimeframeEvidence | None,
+    max_abs_corr_in_bucket: float,
+    priority_weights: L0PriorityWeights,
+) -> float:
+    pw = priority_weights
+
+    base = evidence.mean_net_bps * pw.edge_mean_weight + evidence.block_lcb_bps * (1.0 - pw.edge_mean_weight)
+
+    if tf_fusion is not None:
+        tier = tf_fusion.corroboration_tier
+        if tier == "corroborated":
+            mult = pw.corroborated_multiplier
+        elif tier == "contradicted":
+            mult = pw.contradicted_multiplier
+        elif tier == "single_tf_strict":
+            mult = pw.single_tf_multiplier
+        else:
+            mult = pw.insufficient_coverage_multiplier
+    else:
+        mult = 1.0
+
+    priority = base * mult
+
+    if max_abs_corr_in_bucket > pw.corr_soft_floor:
+        priority *= pw.insufficient_coverage_multiplier
+
+    return priority
+
+
+def build_l0_signal_candidate(
+    *,
+    run_id: str,
+    evidence: CheapGateEvidence,
+    recipe: AlphaRecipe,
+    source: Literal["catalog_exact", "catalog_family_variant", "synthetic_recipe"],
+    policy: FamilyTimeframeGatePolicy,
+    stress_cost_bps: float,
+    tf_fusion: MultiTimeframeEvidence | None,
+    max_abs_corr_in_bucket: float = 0.0,
+) -> L0SignalCandidate:
+    hard_reject_reasons: list[L0HardRejectReason] = []
+    soft_flags: list[L0SoftFlag] = []
+
+    if evidence.n_events < policy.min_events:
+        hard_reject_reasons.append("insufficient_events")
+    if evidence.effective_n < policy.min_effective_n:
+        hard_reject_reasons.append("insufficient_effective_n")
+    if evidence.cost_drag_ratio > policy.max_cost_drag_ratio:
+        hard_reject_reasons.append("excess_cost_drag")
+    if evidence.turnover_per_year > policy.max_turnover_per_year:
+        hard_reject_reasons.append("excess_turnover")
+
+    if "invalid_shape" in evidence.reject_reasons:
+        hard_reject_reasons.append("invalid_shape")
+    if "lookahead_risk" in evidence.reject_reasons:
+        hard_reject_reasons.append("lookahead_risk")
+    if "missing_required_field" in evidence.reject_reasons:
+        hard_reject_reasons.append("missing_required_field")
+
+    if evidence.block_lcb_bps < policy.deep_negative_lcb_bps:
+        hard_reject_reasons.append("deep_negative_lcb")
+
+    if tf_fusion is not None and tf_fusion.corroboration_tier == "contradicted":
+        hard_reject_reasons.append("tf_contradicted")
+
+    if "weak_tstat" in evidence.reject_reasons:
+        soft_flags.append("weak_tstat")
+    if not evidence.bootstrap_agree:
+        soft_flags.append("bootstrap_disagree")
+
+    discovery_tier: DiscoveryTier
+    if hard_reject_reasons:
+        discovery_tier = "blocked"
+    elif soft_flags:
+        discovery_tier = "seed"
+    else:
+        discovery_tier = "candidate"
+
+    l1_priority_score = _compute_l1_priority_score(
+        evidence=evidence,
+        tf_fusion=tf_fusion,
+        max_abs_corr_in_bucket=max_abs_corr_in_bucket,
+        priority_weights=L0PriorityWeights(),
+    )
+
+    corroboration_tier: Literal["corroborated", "single_tf_strict", "contradicted", "insufficient_coverage"]
+    tf_coverage_count = 0
+    sign_agreement_ratio = 0.0
+    if tf_fusion is not None:
+        corroboration_tier = tf_fusion.corroboration_tier
+        tf_coverage_count = tf_fusion.tf_coverage_count
+        sign_agreement_ratio = tf_fusion.sign_agreement_ratio
+    else:
+        corroboration_tier = "insufficient_coverage"
+
+    return L0SignalCandidate(
+        run_id=run_id,
+        timeframe=recipe.timeframe,
+        family=recipe.family,
+        variant=recipe.variant,
+        recipe_id=recipe.recipe_id,
+        archetype=recipe.archetype,
+        source=source,
+        n_events=evidence.n_events,
+        effective_n=evidence.effective_n,
+        mean_net_bps=evidence.mean_net_bps,
+        block_lcb_bps=evidence.block_lcb_bps,
+        nw_tstat=evidence.nw_tstat,
+        bootstrap_lcb_bps=evidence.bootstrap_lcb_bps,
+        bootstrap_agree=evidence.bootstrap_agree,
+        cost_drag_ratio=evidence.cost_drag_ratio,
+        turnover_per_year=evidence.turnover_per_year,
+        max_abs_corr_in_bucket=max_abs_corr_in_bucket,
+        tf_coverage_count=tf_coverage_count,
+        sign_agreement_ratio=sign_agreement_ratio,
+        corroboration_tier=corroboration_tier,
+        discovery_tier=discovery_tier,
+        l1_priority_score=l1_priority_score,
+        l1_budget_units=0,
+        hard_reject_reasons=tuple(hard_reject_reasons),
+        soft_flags=tuple(soft_flags),
+    )

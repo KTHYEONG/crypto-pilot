@@ -14,6 +14,120 @@ from typing import Literal, TypeAlias
 import numpy as np
 from numpy.typing import NDArray
 
+from src.domain.futures.signals.contracts import CandidateSignalPanel
+
+# ── L0/L1 Signal Discovery types ──────────────────────────────────────
+DiscoveryTier: TypeAlias = Literal["seed", "candidate", "verified", "blocked"]
+
+L0HardRejectReason: TypeAlias = Literal[
+    "insufficient_events",
+    "insufficient_effective_n",
+    "excess_cost_drag",
+    "excess_turnover",
+    "invalid_shape",
+    "lookahead_risk",
+    "missing_required_field",
+    "deep_negative_lcb",
+    "tf_contradicted",
+]
+
+L0SoftFlag: TypeAlias = Literal[
+    "weak_tstat",
+    "fdr_rejected",
+    "bootstrap_disagree",
+    "below_conviction_floor",
+    "insufficient_tf_coverage",
+    "high_bucket_corr",
+]
+
+
+@dataclass(slots=True, frozen=True)
+class FamilyTimeframeGatePolicy:
+    archetype: AlphaArchetype
+    min_events: int
+    min_effective_n: float
+    target_effective_n: float
+    max_cost_drag_ratio: float
+    max_turnover_per_year: float
+    deep_negative_lcb_bps: float
+    min_seed_slots: int = 1
+
+
+@dataclass(slots=True, frozen=True)
+class L0PriorityWeights:
+    edge_mean_weight: float = 0.25
+    corroborated_multiplier: float = 1.15
+    single_tf_multiplier: float = 1.00
+    insufficient_coverage_multiplier: float = 0.70
+    contradicted_multiplier: float = 0.00
+    corr_soft_floor: float = 0.85
+
+
+@dataclass(slots=True, frozen=True)
+class L0SignalCandidate:
+    run_id: str
+    timeframe: str
+    family: str
+    variant: str
+    recipe_id: str
+    archetype: AlphaArchetype
+    source: Literal["catalog_exact", "catalog_family_variant", "synthetic_recipe"]
+    n_events: int
+    effective_n: float
+    mean_net_bps: float
+    block_lcb_bps: float
+    nw_tstat: float
+    bootstrap_lcb_bps: float
+    bootstrap_agree: bool
+    cost_drag_ratio: float
+    turnover_per_year: float
+    max_abs_corr_in_bucket: float
+    tf_coverage_count: int
+    sign_agreement_ratio: float
+    corroboration_tier: Literal[
+        "corroborated",
+        "single_tf_strict",
+        "contradicted",
+        "insufficient_coverage",
+    ]
+    discovery_tier: DiscoveryTier
+    l1_priority_score: float
+    l1_budget_units: int
+    hard_reject_reasons: tuple[L0HardRejectReason, ...]
+    soft_flags: tuple[L0SoftFlag, ...]
+
+
+@dataclass(slots=True, frozen=True)
+class L0BucketBudget:
+    bucket_key: BucketKey
+    archetype: AlphaArchetype
+    candidate_count: int
+    selected_count: int
+    min_seed_slots: int
+    max_slots: int
+    allocated_slots: int
+    bucket_quality: float
+    effective_test_count: float
+
+
+@dataclass(slots=True, frozen=True)
+class L0ReportStageCounts:
+    hard_reject: int
+    soft_reject: int
+    seeded: int
+    budget_exhausted: int
+    tf_contradicted: int
+    l1_queued: int
+
+
+@dataclass(slots=True, frozen=True)
+class L0L1Handoff:
+    panels_for_l1: tuple[CandidateSignalPanel, ...]
+    candidates: tuple[L0SignalCandidate, ...]
+    budget_by_bucket: dict[BucketKey, int]
+    audit_rows_path: str
+    mode: Literal["audit", "gate"]
+
 AlphaArchetype: TypeAlias = Literal[
     "trend",
     "mean_reversion",
@@ -88,6 +202,21 @@ class CheapGateConfig:
     bootstrap_samples: int = 200
     bootstrap_seed: int = 42
     fdr_alpha: float = 0.10
+    archetype_event_floors: Mapping[AlphaArchetype, int] = field(
+        default_factory=lambda: {
+            "trend": 30,
+            "mean_reversion": 40,
+            "carry": 20,
+            "flow": 12,
+            "cross_sectional": 30,
+            "hedge": 10,
+        }
+    )
+    family_event_floors: Mapping[str, int] = field(default_factory=dict)
+    min_seed_slots_per_archetype: int = 1
+    min_seed_slots_per_timeframe: int = 1
+    allow_soft_seed_when_only_soft_failures: bool = True
+    priority_weights: L0PriorityWeights = field(default_factory=L0PriorityWeights)
 
 
 @dataclass(slots=True, frozen=True)
@@ -161,6 +290,16 @@ class AlphaFoundryEvidenceRow:
     bucket_eff_test_count: float
     global_eff_test_count: float
     created_at_ms: int
+    source: str = ""
+    discovery_tier: str = ""
+    hard_reject_reasons: str = ""
+    soft_flags: str = ""
+    l1_priority_score: float = 0.0
+    l1_budget_units: int = 0
+    tf_coverage_count: int = 0
+    sign_agreement_ratio: float = 0.0
+    corroboration_tier: str = ""
+    stage_label: str = ""
 
 
 @dataclass(slots=True, frozen=True)
@@ -275,6 +414,8 @@ class AlphaFoundryRuntimeConfig:
     cheap_gate: CheapGateConfig = field(default_factory=CheapGateConfig)
     posterior_gate: PosteriorGateConfig = field(default_factory=PosteriorGateConfig)
     l2_policy: L2PosteriorPolicyConfig = field(default_factory=L2PosteriorPolicyConfig)
+    enable_fast_discovery_timeframes: bool = False
+    fast_discovery_timeframes: tuple[str, ...] = ("1h", "2h")
 
     def __post_init__(self) -> None:
         if self.mode not in {"off", "audit", "gate"}:
@@ -295,6 +436,7 @@ class AlphaFoundryRuntimeConfig:
             raise ValueError(f"min_conviction_lcb_bps must be >= 0.0, got {self.min_conviction_lcb_bps}")
         if self.total_l1_verification_budget < 1:
             raise ValueError(f"total_l1_verification_budget must be >= 1, got {self.total_l1_verification_budget}")
+
 
 
 @dataclass(slots=True, frozen=True)
