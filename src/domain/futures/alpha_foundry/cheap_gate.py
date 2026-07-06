@@ -1,4 +1,4 @@
-"""Alpha Foundry L0 cheap gate and survivor filtering. [ADR_20260706_ALPHA_FOUNDRY_SYNC]"""
+"""Alpha Foundry L0 cheap gate and survivor filtering. [ADR_20260706_ALPHA_FOUNDRY_SYNC][ADR_20260706_ALPHA_FOUNDRY_L0_DIVERSITY]"""
 
 from __future__ import annotations
 
@@ -77,9 +77,10 @@ def evaluate_panel_cheap_gate(
     recipe: AlphaRecipe,
     cost_model: ExecutionCostModel,
     config: CheapGateConfig,
-    prior_panels: Sequence[CandidateSignalPanel] = (),
-    regime_code_1d: NDArray[np.int8] | None = None,
+    bars_per_year: float,
 ) -> CheapGateEvidence:
+    if bars_per_year <= 0.0:
+        raise ValueError("bars_per_year must be positive")
     _validate_shape(panel, aligned)
 
     t, n = aligned.close_2d.shape
@@ -104,8 +105,6 @@ def evaluate_panel_cheap_gate(
             nw_tstat=0.0,
             block_lcb_bps=0.0,
             rank_ic=0.0,
-            monotonic_bucket_score=0.0,
-            regime_edges_bps={},
             cost_drag_ratio=0.0,
             turnover_per_year=0.0,
             novelty_corr_max=0.0,
@@ -137,8 +136,6 @@ def evaluate_panel_cheap_gate(
             nw_tstat=0.0,
             block_lcb_bps=0.0,
             rank_ic=0.0,
-            monotonic_bucket_score=0.0,
-            regime_edges_bps={},
             cost_drag_ratio=0.0,
             turnover_per_year=0.0,
             novelty_corr_max=0.0,
@@ -195,24 +192,10 @@ def evaluate_panel_cheap_gate(
         reject_reasons_list.append("excess_cost_drag")
 
     # turnover
-    bars_per_year = 365.0 * 24.0 / 4.0
     turnover = _compute_turnover_per_year(side, valid, bars_per_year)
     max_turn = min(config.max_turnover_per_year, recipe.max_turnover_per_year)
     if turnover > max_turn:
         reject_reasons_list.append("excess_turnover")
-
-    # novelty
-    novelty_corr_max = 0.0
-    incremental_rank_ic = 0.0
-    for prior in prior_panels:
-        prior_flat = prior.signed_score_2d[event_mask]
-        curr_flat = panel.signed_score_2d[event_mask]
-        if len(prior_flat) > 2:
-            corr = float(np.corrcoef(prior_flat, curr_flat)[0, 1]) if np.std(prior_flat) > 0 else 0.0
-            if np.isfinite(corr):
-                novelty_corr_max = max(novelty_corr_max, abs(corr))
-    if novelty_corr_max > config.max_novelty_corr:
-        reject_reasons_list.append("duplicate_signal")
 
     gate_passed = len(reject_reasons_list) == 0
 
@@ -226,12 +209,10 @@ def evaluate_panel_cheap_gate(
         nw_tstat=nw_tstat,
         block_lcb_bps=block_lcb_bps,
         rank_ic=rank_ic,
-        monotonic_bucket_score=0.0,
-        regime_edges_bps={},
         cost_drag_ratio=cost_drag_ratio,
         turnover_per_year=turnover,
-        novelty_corr_max=novelty_corr_max,
-        incremental_rank_ic=incremental_rank_ic,
+        novelty_corr_max=0.0,
+        incremental_rank_ic=0.0,
         compute_cost_score=0.0,
         gate_passed=gate_passed,
         reject_reasons=tuple(reject_reasons_list),
@@ -245,24 +226,26 @@ def evaluate_alpha_cheap_gate_batch(
     aligned: AlignedMarketData,
     cost_model: ExecutionCostModel,
     config: CheapGateConfig,
-    regime_code_1d: NDArray[np.int8] | None = None,
 ) -> tuple[CheapGateEvidence, ...]:
+    from src.domain.futures.optimization.metrics import _bars_per_year_for_tf
+
+    bpy_cache: dict[str, float] = {}
     results: list[CheapGateEvidence] = []
-    processed_panels: list[CandidateSignalPanel] = []
     for panel in panels:
         recipe_id = panel.metadata.get("recipe_id", "")
         recipe = recipes.get(recipe_id)
         if recipe is None:
             continue
+        tf = recipe.timeframe
+        if tf not in bpy_cache:
+            bpy_cache[tf] = _bars_per_year_for_tf(tf)
         evidence = evaluate_panel_cheap_gate(
             panel=panel,
             aligned=aligned,
             recipe=recipe,
             cost_model=cost_model,
             config=config,
-            prior_panels=tuple(processed_panels),
-            regime_code_1d=regime_code_1d,
+            bars_per_year=bpy_cache[tf],
         )
         results.append(evidence)
-        processed_panels.append(panel)
     return tuple(results)
