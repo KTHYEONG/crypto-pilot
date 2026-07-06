@@ -1,0 +1,130 @@
+from __future__ import annotations
+
+import pytest
+
+from src.domain.futures.alpha_foundry.contracts import AlphaRecipe
+from src.domain.futures.alpha_foundry.recipes import build_alpha_recipe_catalog
+
+ALL_FAMILIES = (
+    "ema_trend",
+    "hma_trend",
+    "kama_trend",
+    "macd_trend",
+    "rsi_mean_reversion",
+    "stoch_rsi_mean_reversion",
+    "bollinger_mean_reversion",
+    "keltner_mean_reversion",
+    "ichimoku_trend",
+    "funding_carry",
+    "funding_slope_carry",
+    "oi_buildup_flow",
+    "lsr_skew_flow",
+    "taker_flow_imbalance",
+    "xs_momentum",
+    "xs_carry",
+)
+
+FAMILY_ARCHETYPE_MAP: dict[str, str] = {
+    "ema_trend": "trend",
+    "hma_trend": "trend",
+    "kama_trend": "trend",
+    "macd_trend": "trend",
+    "rsi_mean_reversion": "mean_reversion",
+    "stoch_rsi_mean_reversion": "mean_reversion",
+    "bollinger_mean_reversion": "mean_reversion",
+    "keltner_mean_reversion": "mean_reversion",
+    "ichimoku_trend": "trend",
+    "funding_carry": "carry",
+    "funding_slope_carry": "carry",
+    "oi_buildup_flow": "flow",
+    "lsr_skew_flow": "flow",
+    "taker_flow_imbalance": "flow",
+    "xs_momentum": "cross_sectional",
+    "xs_carry": "cross_sectional",
+}
+
+
+class TestBuildAlphaRecipeCatalog:
+    def test_contains_diverse_crypto_families(self) -> None:
+        recipes = build_alpha_recipe_catalog(timeframe="4h")
+        families = {r.family for r in recipes}
+        archetypes = {r.archetype for r in recipes}
+
+        assert "funding_carry" in families or "funding_slope_carry" in families
+        assert "trend" in archetypes
+        assert "mean_reversion" in archetypes
+        assert "carry" in archetypes
+        assert "flow" in archetypes
+        assert "cross_sectional" in archetypes
+        assert len(recipes) > 0
+
+    def test_no_duplicate_recipe_ids(self) -> None:
+        recipes = build_alpha_recipe_catalog(timeframe="4h")
+        ids = [r.recipe_id for r in recipes]
+        assert len(ids) == len(set(ids)), "duplicate recipe_id found"
+
+    def test_all_recipes_have_causal_lag_at_least_one(self) -> None:
+        recipes = build_alpha_recipe_catalog(timeframe="4h")
+        for r in recipes:
+            assert r.causal_lag_bars >= 1, f"{r.recipe_id} has causal_lag_bars={r.causal_lag_bars}"
+
+    def test_carry_recipes_require_funding_field(self) -> None:
+        recipes = build_alpha_recipe_catalog(timeframe="4h")
+        for r in recipes:
+            if r.archetype == "carry":
+                assert "funding" in r.required_fields, f"{r.recipe_id} missing 'funding' in required_fields"
+
+    def test_flow_recipes_require_oi_or_lsr(self) -> None:
+        recipes = build_alpha_recipe_catalog(timeframe="4h")
+        for r in recipes:
+            if r.archetype == "flow":
+                has_oi = "oi" in r.required_fields
+                has_lsr = "lsr" in r.required_fields
+                if r.family in ("oi_buildup_flow", "lsr_skew_flow"):
+                    assert has_oi or has_lsr, f"{r.recipe_id} missing 'oi' or 'lsr' in required_fields"
+
+    @pytest.mark.parametrize("family", ALL_FAMILIES)
+    def test_include_families_filters_correctly(self, family: str) -> None:
+        recipes = build_alpha_recipe_catalog(timeframe="4h", include_families=(family,))
+        assert all(r.family == family for r in recipes), f"include_families=({family},) failed"
+
+    @pytest.mark.parametrize("family", ALL_FAMILIES)
+    def test_exclude_families_excludes_correctly(self, family: str) -> None:
+        recipes = build_alpha_recipe_catalog(timeframe="4h", exclude_families=(family,))
+        assert all(r.family != family for r in recipes), f"exclude_families=({family},) failed"
+
+    def test_max_recipes_per_family_respected(self) -> None:
+        recipes = build_alpha_recipe_catalog(timeframe="4h", max_recipes_per_family=2)
+        from collections import Counter
+
+        family_counts = Counter(r.family for r in recipes)
+        assert all(c <= 2 for c in family_counts.values()), "max_recipes_per_family=2 violated"
+
+    def test_empty_result_when_all_families_excluded(self) -> None:
+        recipes = build_alpha_recipe_catalog(
+            timeframe="4h", include_families=("nonexistent_family",)
+        )
+        assert len(recipes) == 0
+
+
+class TestBuildAlphaRecipeCatalogErrors:
+    def test_rejects_negative_causal_lag(self) -> None:
+        with pytest.raises(ValueError, match="causal_lag_bars must be >= 1"):
+            AlphaRecipe(
+                recipe_id="bad",
+                family="f",
+                variant="v",
+                timeframe="4h",
+                archetype="trend",
+                indicator_params={},
+                side_rule_id="s",
+                exit_policy_id="e",
+                required_fields=("close",),
+                causal_lag_bars=0,
+                max_turnover_per_year=100.0,
+            )
+
+    def test_duplicate_recipe_id_raises_error(self) -> None:
+        recipes = build_alpha_recipe_catalog(timeframe="4h")
+        ids = [r.recipe_id for r in recipes]
+        assert len(ids) == len(set(ids))
