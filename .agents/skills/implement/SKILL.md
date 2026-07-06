@@ -24,6 +24,7 @@ Translate the logical Blueprint (`docs/specs/*.md`) into working Python code usi
 - **Step 2: Write Failing Tests (Red Phase)**
   - Open or create the test file (`tests/...`).
   - Write test cases matching **Scenario 1, 2, and 3** from the spec blueprint (using the mock templates provided in spec).
+  - **Coverage Gap Exception**: If the spec's scenarios do not cover newly introduced functions/classes, you MAY write supplementary test cases. This is NOT unsolicited expansion (per AGENTS.md §8).
   - Run the test command: `uv run pytest -k "test_name"` to confirm the tests **FAIL** (showing `NotImplementedError` or AssertionError).
 - **Step 3: Implement Logic (Green Phase)**
   - Write the minimum code required in the source file (`src/...`) to make the failing tests pass.
@@ -31,16 +32,10 @@ Translate the logical Blueprint (`docs/specs/*.md`) into working Python code usi
   - **Loop Limit:** Limit this trial-and-error cycle to **max 3 iterations**. If pytest continues to fail after 3 attempts, **STOP** and return to the `spec` phase to refine the design.
 - **Step 4: Refactor (Refactor Phase)**
   - Clean up code duplication, optimize local variables, and ensure docstrings match standards while maintaining a green test suite.
-  - **Refactor Limits (CRITICAL)**: Do NOT modify any public signatures, interfaces, or module dependencies during this phase. Focus strictly on internal clean-up and resolving Ruff/Mypy compliance.
+  - **Refactor Limits (CRITICAL)**: Do NOT modify any public signatures, interfaces, or module dependencies during this phase. Focus strictly on internal clean-up.
 
-### 3. Local L1 Validation
-- For modified files (both src and test), run:
-  - `uv run ruff check --fix [file]`
-  - `uv run mypy [file]`
-- Maximize compiler/linter compliance before concluding.
-
-### 4. Single Responsibility (DO NOT OVERSTEP)
-- Stop immediately after L1 validation and test-first passing. Do not perform regression analysis across the entire project. Submit results to the `check` phase for dynamic regression and coverage verification.
+### 3. Single Responsibility (DO NOT OVERSTEP)
+- Stop immediately after tests pass and refactoring is clean. Do NOT run ruff/mypy or perform regression analysis — those are the `check` phase's responsibility. Submit results to the `check` phase for full validation.
 
 ## Output Format
 ```md
@@ -50,7 +45,5 @@ Translate the logical Blueprint (`docs/specs/*.md`) into working Python code usi
   - [ ] Created interface stub & verified signature (Self-Gate)
   - [ ] Wrote failing tests based on scenarios (Red)
   - [ ] Implemented minimal code & passed tests (Green)
-- **L1 Validation (Ruff & Mypy):** [Pass/Fail]
 - **Next Phase:** Proceed to `check` (Regression & Coverage Review)
 ```
-
