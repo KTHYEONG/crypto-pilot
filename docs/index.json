@@ -9,7 +9,10 @@
   },
   "src/domain/futures/alpha_foundry/recipes.py": {
     "architecture": "docs/architecture/layer1.md",
-    "testing": "tests/unit/domain/futures/alpha_foundry/test_recipes.py"
+    "testing": [
+      "tests/unit/domain/futures/alpha_foundry/test_recipes.py",
+      "tests/unit/domain/futures/alpha_foundry/test_synthetic_recipe_binding.py"
+    ]
   },
   "src/domain/futures/alpha_foundry/cheap_gate.py": {
     "architecture": "docs/architecture/layer1.md",
@@ -24,7 +27,14 @@
   },
   "src/domain/futures/alpha_foundry/budget.py": {
     "architecture": "docs/architecture/layer1.md",
-    "testing": "tests/unit/domain/futures/alpha_foundry/test_budget.py"
+    "testing": [
+      "tests/unit/domain/futures/alpha_foundry/test_budget.py",
+      "tests/unit/domain/futures/alpha_foundry/test_l1_budget_allocation.py"
+    ]
+  },
+  "src/domain/futures/alpha_foundry/multi_tf_fusion.py": {
+    "architecture": "docs/architecture/layer1.md",
+    "testing": "tests/unit/domain/futures/alpha_foundry/test_multi_tf_fusion.py"
   },
   "src/domain/futures/alpha_foundry/posterior.py": {
     "architecture": "docs/architecture/layer1.md",
@@ -43,6 +53,7 @@
     "testing": [
       "tests/unit/domain/futures/alpha_foundry/test_panel_binding.py",
       "tests/unit/domain/futures/alpha_foundry/test_evidence_rows.py",
+      "tests/unit/domain/futures/alpha_foundry/test_synthetic_recipe_binding.py",
       "tests/unit/domain/futures/strategy_runtime/test_bridge_alpha_foundry.py"
     ]
   },
