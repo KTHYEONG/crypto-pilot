@@ -480,7 +480,7 @@ def get_search_space_futures(tf: str, stage: int = 0) -> dict[str, dict[str, Any
 def build_full_discovery_space_futures() -> dict[str, Any]:
     return dict(ENGINE_PARAM_SPACE_FUTURES)
 
-def get_quarterly_window(reference_date: Any = None) -> tuple[str, str, str, str]:
+def get_quarterly_window(reference_date: Any = None, *, tf: str = "4h") -> tuple[str, str, str, str]:
     import datetime
 
     from dateutil.relativedelta import relativedelta
@@ -495,7 +495,9 @@ def get_quarterly_window(reference_date: Any = None) -> tuple[str, str, str, str
     oos_end: datetime.date = current_quarter_start - datetime.timedelta(days=1)
     oos_start: datetime.date = current_quarter_start - relativedelta(months=6)
     is_start: datetime.date = oos_start - relativedelta(months=24)
-    fetch_start: datetime.date = is_start - relativedelta(days=365)
+    from src.domain.futures.optimization.opt_data_utils import resolve_warmup_days_for_tf
+    warmup_days = resolve_warmup_days_for_tf(tf)
+    fetch_start: datetime.date = is_start - relativedelta(days=warmup_days)
     return (
         fetch_start.strftime("%Y-%m-%d"),
         is_start.strftime("%Y-%m-%d"),
@@ -558,31 +560,18 @@ def get_layered_window(
     l2_months: int = 12,
     holdout_months: int = 6,
     regime_floor: _dt.date = REGIME_FLOOR,
-    warmup_days: int = 365,
+    warmup_days: int | None = None,
+    tf: str = "4h",
 ) -> LayeredWindow:
-    """3-way sliding window 계산.
-
-    reference_date 기준 직전 분기 끝을 holdout_end로,
-    역방향으로 holdout(6mo) → L2(12mo) → L1(18mo) 순으로 계산.
-    l1_start < regime_floor이면 regime_floor로 클램프.
-    fetch_start = l1_start - warmup_days.
-
-    Args:
-        reference_date: 기준일 (None이면 오늘).
-        l1_months: Layer1 CPCV 기간 (월).
-        l2_months: Layer2 AWF 기간 (월).
-        holdout_months: Hold-out 기간 (월).
-        regime_floor: L1 시작 최소 허용일.
-        warmup_days: fetch_start 추가 버퍼 (일).
-
-    Returns:
-        LayeredWindow 인스턴스.
-
-    Time Complexity: O(1).
-    Space Complexity: O(1).
+    """3-way sliding window. warmup_days=None이면 resolve_warmup_days_for_tf(tf)로 계산.
+    [ADR_20260706_DATA_WINDOW_FLOOR_CONSISTENCY]
     """
     if reference_date is None:
         reference_date = _dt.date.today()
+
+    if warmup_days is None:
+        from src.domain.futures.optimization.opt_data_utils import resolve_warmup_days_for_tf
+        warmup_days = resolve_warmup_days_for_tf(tf)
 
     # holdout_end = 현재 분기 시작 - 1일
     current_q_month: int = ((reference_date.month - 1) // 3) * 3 + 1
@@ -638,14 +627,9 @@ def build_validation_episode_panel(
     l1_months: int = 9,
     l2_months: int = 6,
     holdout_months: int = 3,
-    warmup_days: int = 365,
+    warmup_days: int | None = None,
+    tf: str = "4h",
 ) -> tuple[ValidationEpisode, ...]:
-    """promotion(REGIME_FLOOR 준수) + stress_only(REGIME_FLOOR 예외) episode 패널 구성.
-
-    stress episode는 regime_floor=date.min으로 get_layered_window를 호출해
-    REGIME_FLOOR 클램프를 우회한다(fit에는 여전히 미사용 — 오케스트레이션 레벨에서
-    stress episode 결과를 승격 게이트 입력에서 제외하는 책임은 호출자에게 있음).
-    """
     episodes: list[ValidationEpisode] = []
 
     for d_str in promotion_reference_dates:
@@ -657,6 +641,7 @@ def build_validation_episode_panel(
             holdout_months=holdout_months,
             regime_floor=REGIME_FLOOR,
             warmup_days=warmup_days,
+            tf=tf,
         )
         episodes.append(
             ValidationEpisode(
@@ -676,6 +661,7 @@ def build_validation_episode_panel(
             holdout_months=holdout_months,
             regime_floor=_dt.date.min,
             warmup_days=warmup_days,
+            tf=tf,
         )
         episodes.append(
             ValidationEpisode(
