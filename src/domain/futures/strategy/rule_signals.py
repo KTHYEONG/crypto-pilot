@@ -20,6 +20,18 @@ _logger = logging.getLogger(__name__)
 _ROBUST_Z_EPS = 1e-9
 _ROBUST_Z_CLIP = 3.0
 
+# [ADR_20260706_L0_SIGNAL_FAMILY_DIVERSITY] Must stay identical to signals/rules.py's copy.
+ALL_SIGNAL_FAMILIES: tuple[str, ...] = (
+    "trend_ma", "trend_donchian", "vol_breakout", "funding_carry",
+    "btc_regime_pullback", "trend_pullback_continuation", "dual_momentum",
+    "residual_reversion", "xs_momentum", "xs_carry", "xs_flow", "xs_oi_skew",
+    "mtf_trend_pullback", "mtf_breakout_retest", "taker_imbalance_momentum",
+    "funding_flow_carry", "funding_extreme_reversal", "funding_flow_unwind",
+    "flow_exhaustion_reversal", "positioning_unwind", "funding_term_structure_carry",
+    "flow_trend_continuation", "lsr_oi_regime_filter", "vol_term_structure_gate",
+    "macd_4h", "supertrend", "ichimoku_trend",
+)
+
 
 def candidate_variant_key(family: str, variant: str) -> str:
     """Return a stable candidate variant key."""
@@ -1814,37 +1826,7 @@ def build_rule_signal_panels(
 
         return fam_panels
 
-    all_families = [
-        "trend_ma",
-        "trend_donchian",
-        "vol_breakout",
-        "funding_carry",
-        "btc_regime_pullback",
-        "trend_pullback_continuation",
-        "dual_momentum",
-        "residual_reversion",
-        "xs_momentum",
-        "xs_carry",
-        "xs_flow",
-        "xs_oi_skew",
-        "mtf_trend_pullback",
-        "mtf_breakout_retest",
-        "taker_imbalance_momentum",
-        "funding_flow_carry",
-        "funding_extreme_reversal",
-        "funding_flow_unwind",
-        "flow_exhaustion_reversal",
-        "positioning_unwind",
-        "funding_term_structure_carry",
-        "flow_trend_continuation",
-        "lsr_oi_regime_filter",
-        "vol_term_structure_gate",
-        "macd_4h",
-        "supertrend",
-        "ichimoku_trend",
-    ]
-
-    active_families = all_families
+    active_families = list(ALL_SIGNAL_FAMILIES)
     if family_filter is not None:
         active_families = [f for f in active_families if f in family_filter]
 
