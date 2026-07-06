@@ -90,6 +90,11 @@ Optuna 최적화로 최종 선별된 챔피언 전략에 대해 $N$개의 서로
 - **Data-Readiness 진단**: `_run_data_stage`(`active_pipeline.py`)의 `_build_data_not_ready_reasons()`가 `kept_symbols=()`일 때 `reason` 분포를 `RuntimeError` 메시지에 포함(`[ADR_20260706_PRODUCTION_PIPELINE_CONSOLIDATION]`). 실측 확인된 reason 값: `fetch_window_short`, `warmup_insufficient` — `QuarterlyWindow`의 `fetch_start`가 `--date`에 따라 이동하며 발생.
 - **Warmup Buffer 실측 정합** `[ADR_20260706_DATA_WINDOW_FLOOR_CONSISTENCY]`: `get_layered_window`/`get_quarterly_window`의 `fetch_start` 버퍼(`warmup_days`)는 하드코딩 365일 대신 `resolve_warmup_days_for_tf(tf)`(`opt_data_utils.py`, 기존 `_resolve_warmup_bars` 재사용)로 계산 — 4h 기준 62일. `warmup_days`를 명시적으로 넘기면 그 값이 우선(하위 호환). 근거: 48개월(요구) vs ~51개월(실제 데이터 가용, 2022-04-01~) 예산에서 365일 버퍼가 여유 3개월을 전부 소진해 `--date` 이동 시 전 심볼 탈락을 유발했음을 실측 확인.
 
+### Alpha Foundry Report Logging [ADR_20260706_ALPHA_FOUNDRY_MAIN_WIRING]
+- `_run_strategy_stage()`(`active_pipeline.py`) captures `CandidatePipelineOutput.alpha_foundry_report` from the bridge stage and logs it at INFO level — present in both audit and gate modes.
+- `CandidatePipelineOutput.alpha_foundry_report: AlphaFoundryBridgeReport | None` — `None` when mode=off.
+- Report fields (`panels_in`, `bound`, `survivors`, `reject_breakdown`) are available for downstream diagnostics and JSON artifact at `logs/futures/alpha_foundry/`.
+
 ### Validation Parity Report Flow [ADR_20260705_TF_VALIDATION_ROOT_CAUSE_CAPTURE]
 - `build_validation_parity_capture()`는 pre-clear probe/main/census evidence를 묶고, `finalize_validation_parity_capture()`는 이후 L2/L3 sleeve evidence로 major-gap 클래스를 확정한다.
 - `validation_parity_report`는 `Layer1Result`, `Layer2Result`, `Layer3Result`를 통해 downstream으로 유지된다.
@@ -141,5 +146,5 @@ L3 Holdout 검증 완료를 위해 포트폴리오는 아래 순차적 조건문
 | `strategy/tiered_workflow/major_symbol_registry_replay.py` | major-symbol registry replay, adoption gate, CSV artifact |
 | `strategy/tiered_workflow/tf_validation_repair.py` | pre-clear TF parity capture, major-gap classification, report logging |
 | `runner/tf_probe_scoped.py` | majors-only TF probe wrapper, scoped gate audit, pre-clear execution |
-| `application/futures/runner/cli.py` | CLI seed 전달 및 replay entrypoint |
-| `application/futures/runner/config.py` | `FuturesRunConfig.seed` SSOT |
+| `application/futures/runner/cli.py` | CLI seed 전달, replay entrypoint, `--alpha-foundry` (off/audit/gate) |
+| `application/futures/runner/config.py` | `FuturesRunConfig.seed` SSOT, `FuturesRunConfig.alpha_foundry` 필드, `build_alpha_foundry_runtime_config()`, `validate_alpha_foundry_runtime_config()` |

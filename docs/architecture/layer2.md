@@ -66,6 +66,12 @@ L1에서 검증된 Candidate Events를 입력받아 Cross-sectional Ranking, Reg
 - **Bucket-Conditional Weight** (`apply_bucket_conditional_weight`, `l2_regime_conditional_weight_enabled`): `filter_sleeves_by_bucket`의 binary 통과 대신 $g(e)=\text{clip}((e-\text{floor})/\text{ref}, 0.5, 1.5)$로 `quality_weight`를 재가중.
   - **알려진 한계** [ADR_20260705_L1L2_REGIME_CONDITIONAL_WEIGHT]: (1) `l2_regime_policy_mode="filter"` 분기 전용 — 기본값 `"soft"`에서는 호출되지 않음(실측: BTCUSDT/ETHUSDT/BNBUSDT 4h A/B 결과 baseline과 완전 동일). (2) 곱셈 재가중이라 L1 `quality_weight=0`(전체-구간 평균 음수)인 sleeve는 복구 불가.
 
+### Alpha Foundry L0→L2 Pipeline Split [ADR_20260706_ALPHA_FOUNDRY_MAIN_WIRING]
+- `run_alpha_foundry_l0_pipeline(alpha_market_data, runtime_config)` — standalone L0 entry point: panel generation → binding → cheap gate → evidence rows. Returns `(list[FoldRow], list[PosteriorEvidence], list[L2Sleeve])` with `None` placeholder rows for downstream stages when mode=off.
+- `build_posterior_from_l1_fold_rows(fold_rows, sigma, expiry)` — maps L0 evidence to `L1PosteriorEvidence` template (prior=evidence).
+- `build_l2_sleeves_from_posterior(posteriors)` — wraps posterior into `L2PosteriorSleeve` with side/weight initialization.
+- Legacy `run_alpha_foundry_pipeline()` is a thin wrapper calling the above three sub-functions.
+
 ### Alpha Foundry L2 Bridge [ADR_20260706_ALPHA_FOUNDRY_SYNC]
 - `L2PosteriorPolicyConfig`: `kelly_fraction`, `posterior_z`, `risk_budget_target`, `gross_cap_by_regime`, `cost_safety_mult`, `turnover_penalty`.
 - `L2PosteriorSleeve`: `mu_eff_bps`, `sigma_bps`, `quality_weight`, `side`, `disabled_reason`.
