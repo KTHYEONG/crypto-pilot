@@ -74,9 +74,10 @@ def test_gate_override_non_overridden_tf_identity() -> None:
     assert result is cfg
 
 
-def test_gate_override_none_overrides_returns_original() -> None:
-    """per_tf_gate_overrides=None → returns original cfg unchanged."""
+def test_gate_override_none_overrides_fallsback_to_default() -> None:
+    """per_tf_gate_overrides=None → falls back to _DEFAULT_PER_TF_GATE_OVERRIDES."""
     cfg = CandidateStrategyConfig(l1_pair_min_effective_obs=5.0)
     assert cfg.per_tf_gate_overrides is None
     result = apply_tf_gate_overrides(cfg, "1h")
-    assert result is cfg
+    assert result is not cfg
+    assert result.l1_pair_min_effective_obs == 3.0  # from default "1h" overrides
