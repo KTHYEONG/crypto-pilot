@@ -69,7 +69,9 @@ class TestBuildValidationEpisodePanel:
     def test_episode_id_format(self) -> None:
         result = build_validation_episode_panel(
             promotion_reference_dates=["2025-06-15"],
-            l1_months=9, l2_months=6, holdout_months=3,
+            l1_months=9,
+            l2_months=6,
+            holdout_months=3,
         )
         assert result[0].episode_id == "promotion_2025-06-15"
 
@@ -78,7 +80,9 @@ class TestBuildValidationEpisodePanel:
         result = build_validation_episode_panel(
             promotion_reference_dates=[],
             stress_reference_dates=["2022-10-01"],
-            l1_months=9, l2_months=6, holdout_months=3,
+            l1_months=9,
+            l2_months=6,
+            holdout_months=3,
         )
         assert len(result) == 1
         assert result[0].role == "stress_only"
@@ -116,7 +120,8 @@ class TestAdrSharpePool:
     """1.3 record_adr_evaluation + compute_adr_level_deflated_sharpe."""
 
     def test_record_adr_evaluation_keeps_losing_attempts(
-        self, in_memory_storage: optuna.storages.BaseStorage,
+        self,
+        in_memory_storage: optuna.storages.BaseStorage,
     ) -> None:
         record_adr_evaluation("4h", in_memory_storage, sharpe=0.5, adr_id="adr_0")
         record_adr_evaluation("4h", in_memory_storage, sharpe=-0.3, adr_id="adr_1")
@@ -127,13 +132,17 @@ class TestAdrSharpePool:
         assert set(pool.tolist()) == {0.5, -0.3, 0.2}
 
     def test_compute_adr_level_deflated_sharpe_with_pool(
-        self, in_memory_storage: optuna.storages.BaseStorage,
+        self,
+        in_memory_storage: optuna.storages.BaseStorage,
     ) -> None:
         record_adr_evaluation("1h", in_memory_storage, sharpe=0.3, adr_id="adr_0")
         record_adr_evaluation("1h", in_memory_storage, sharpe=1.2, adr_id="adr_1")
         candidate = np.array([0.001, 0.002, 0.0015], dtype=np.float64)
         result = compute_adr_level_deflated_sharpe(
-            candidate, tag="1h", storage=in_memory_storage, tf="4h",
+            candidate,
+            tag="1h",
+            storage=in_memory_storage,
+            tf="4h",
         )
         assert isinstance(result, float)
         assert 0.0 <= result <= 1.0
@@ -151,7 +160,9 @@ class TestEdgeCases:
         result = build_validation_episode_panel(
             promotion_reference_dates=["2026-01-01"],
             stress_reference_dates=["2023-01-01"],
-            l1_months=9, l2_months=6, holdout_months=3,
+            l1_months=9,
+            l2_months=6,
+            holdout_months=3,
         )
         promo_fetch = result[0].window.fetch_start
         stress_fetch = result[1].window.fetch_start
@@ -209,7 +220,9 @@ class TestEdgeCases:
         result = build_validation_episode_panel(
             promotion_reference_dates=[],
             stress_reference_dates=["2022-06-01"],
-            l1_months=9, l2_months=6, holdout_months=3,
+            l1_months=9,
+            l2_months=6,
+            holdout_months=3,
         )
         # window 존재만 확인 (호출자가 fit 파이프라인에 넘기지 않는 책임)
         assert isinstance(result[0].window, LayeredWindow)
@@ -246,7 +259,8 @@ class TestErrorHandling:
         assert verdict.stress_generalization_pass is None
 
     def test_get_adr_sharpe_pool_unknown_tag_returns_empty(
-        self, in_memory_storage: optuna.storages.BaseStorage,
+        self,
+        in_memory_storage: optuna.storages.BaseStorage,
     ) -> None:
         """3.2 존재하지 않는 tag → 빈 배열, 예외 없음."""
         pool = get_adr_sharpe_pool("nonexistent_tag", in_memory_storage)
@@ -254,12 +268,16 @@ class TestErrorHandling:
         assert len(pool) == 0
 
     def test_compute_adr_level_deflated_sharpe_empty_pool(
-        self, in_memory_storage: optuna.storages.BaseStorage,
+        self,
+        in_memory_storage: optuna.storages.BaseStorage,
     ) -> None:
         """3.3 pool 비어있음 (첫 ADR 시도) → fallback 경로."""
         candidate = np.array([0.001, 0.002, 0.0015, 0.0018], dtype=np.float64)
         result = compute_adr_level_deflated_sharpe(
-            candidate, tag="fresh", storage=in_memory_storage, tf="4h",
+            candidate,
+            tag="fresh",
+            storage=in_memory_storage,
+            tf="4h",
         )
         assert isinstance(result, float)
         assert 0.0 <= result <= 1.0
@@ -269,7 +287,9 @@ class TestErrorHandling:
         result = build_validation_episode_panel(
             promotion_reference_dates=[],
             stress_reference_dates=["2023-01-01"],
-            l1_months=9, l2_months=6, holdout_months=3,
+            l1_months=9,
+            l2_months=6,
+            holdout_months=3,
         )
         promo = [e for e in result if e.role == "promotion"]
         stress = [e for e in result if e.role == "stress_only"]

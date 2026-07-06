@@ -97,10 +97,24 @@ class TestComputeBucketRealizedEdges:
         regime = np.array([0] * n_bars, dtype=np.int8)
 
         raw_result = compute_bucket_realized_edges(
-            cache, aligned, 0, n_bars, regime, cost_bps=1.0, min_n=1, shrinkage=0.0,
+            cache,
+            aligned,
+            0,
+            n_bars,
+            regime,
+            cost_bps=1.0,
+            min_n=1,
+            shrinkage=0.0,
         )
         shrunk_result = compute_bucket_realized_edges(
-            cache, aligned, 0, n_bars, regime, cost_bps=1.0, min_n=10, shrinkage=0.3,
+            cache,
+            aligned,
+            0,
+            n_bars,
+            regime,
+            cost_bps=1.0,
+            min_n=10,
+            shrinkage=0.3,
         )
 
         key = next(iter(raw_result))
@@ -133,7 +147,10 @@ class TestFilterSleevesByBucket:
         }
 
         result = filter_sleeves_by_bucket(
-            sleeve_sigs, bucket_edges, regime_now=1, edge_floor_bps=100.0,
+            sleeve_sigs,
+            bucket_edges,
+            regime_now=1,
+            edge_floor_bps=100.0,
         )
 
         assert ("BTC", "donchian_72_4h") in result
@@ -144,14 +161,20 @@ class TestFilterSleevesByBucket:
         sleeve_sigs = {("BTC", "donchian_72_4h"): MagicMock()}
 
         result = filter_sleeves_by_bucket(
-            sleeve_sigs, bucket_edges, regime_now=1, edge_floor_bps=100.0,
+            sleeve_sigs,
+            bucket_edges,
+            regime_now=1,
+            edge_floor_bps=100.0,
         )
 
         assert len(result) == 0
 
     def test_empty_input(self) -> None:
         result = filter_sleeves_by_bucket(
-            {}, {(1, "x", "4h"): 500.0}, regime_now=1, edge_floor_bps=100.0,
+            {},
+            {(1, "x", "4h"): 500.0},
+            regime_now=1,
+            edge_floor_bps=100.0,
         )
         assert result == {}
 
@@ -180,7 +203,8 @@ class TestBuildRegimeRoutingPlan:
 
     def test_build_regime_routing_plan_when_compression_enabled_uses_three_states(self) -> None:
         assert hasattr(
-            l2_meta_module, "build_regime_routing_plan",
+            l2_meta_module,
+            "build_regime_routing_plan",
         ), "build_regime_routing_plan contract missing from l2_meta"
 
         cache = _make_cache(n_bars=12, n_sleeve=2)
@@ -188,8 +212,18 @@ class TestBuildRegimeRoutingPlan:
         aligned = _make_aligned(n_bars=12, n_sym=1)
         aligned.close_2d = np.array(
             [
-                [100.0], [101.0], [102.0], [103.0], [104.0], [105.0],
-                [106.0], [107.0], [108.0], [109.0], [110.0], [111.0],
+                [100.0],
+                [101.0],
+                [102.0],
+                [103.0],
+                [104.0],
+                [105.0],
+                [106.0],
+                [107.0],
+                [108.0],
+                [109.0],
+                [110.0],
+                [111.0],
             ],
             dtype=np.float64,
         )
@@ -210,7 +244,8 @@ class TestBuildRegimeRoutingPlan:
 
     def test_build_regime_routing_plan_when_proof_fails_replicates_pooled_edges(self) -> None:
         assert hasattr(
-            l2_meta_module, "build_regime_routing_plan",
+            l2_meta_module,
+            "build_regime_routing_plan",
         ), "build_regime_routing_plan contract missing from l2_meta"
 
         cache = _make_cache(n_bars=12, n_sleeve=2)
@@ -219,8 +254,18 @@ class TestBuildRegimeRoutingPlan:
         aligned = _make_aligned(n_bars=12, n_sym=1)
         aligned.close_2d = np.array(
             [
-                [100.0], [100.3], [100.2], [100.4], [100.5], [100.4],
-                [100.6], [100.7], [100.6], [100.8], [100.7], [100.9],
+                [100.0],
+                [100.3],
+                [100.2],
+                [100.4],
+                [100.5],
+                [100.4],
+                [100.6],
+                [100.7],
+                [100.6],
+                [100.8],
+                [100.7],
+                [100.9],
             ],
             dtype=np.float64,
         )
@@ -258,7 +303,8 @@ class TestBuildRegimeRoutingPlan:
 
     def test_build_regime_routing_plan_when_lift_is_consistent_uses_conditioned_edges(self) -> None:
         assert hasattr(
-            l2_meta_module, "build_regime_routing_plan",
+            l2_meta_module,
+            "build_regime_routing_plan",
         ), "build_regime_routing_plan contract missing from l2_meta"
 
         n_bars = 40

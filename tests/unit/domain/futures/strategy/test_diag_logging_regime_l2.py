@@ -11,6 +11,7 @@ Scenarios:
     3. filter_sleeves_by_bucket(empty_sleeves) → 빈 dict 반환
     4. filter_sleeves_by_bucket(known_edge) → edge>floor인 sleeve만 통과
 """
+
 from __future__ import annotations
 
 import logging
@@ -37,6 +38,7 @@ from tests.unit.domain.futures.strategy.test_market_regime import _make_aligned
 # ---------------------------------------------------------------------------
 # Scenario 3: Regime Occupancy — compute_market_regime_context DEBUG log
 # ---------------------------------------------------------------------------
+
 
 def test_compute_market_regime_context_emits_regime_dist_debug_log(caplog: pytest.LogCaptureFixture) -> None:
     """compute_market_regime_context가 [REGIME-DIST] DEBUG 로그를 방출하는지 검증."""
@@ -82,11 +84,17 @@ def test_compute_market_regime_context_regime_code_range() -> None:
 # Scenario 2: Bucket Filter Zero-Pass — empty bucket_edges
 # ---------------------------------------------------------------------------
 
+
 def _dummy_sleeve_sigs() -> dict[tuple[str, str], SymbolSignal]:
     """Minimal sleeve sigs dict for filter tests."""
     sig = SymbolSignal(
-        raw_mu=0.5, volatility=0.2, n_obs=1, t_stat=0.0,
-        valid=True, beta_btc=None, quality_weight=1.0,
+        raw_mu=0.5,
+        volatility=0.2,
+        n_obs=1,
+        t_stat=0.0,
+        valid=True,
+        beta_btc=None,
+        quality_weight=1.0,
     )
     return {
         ("BTCUSDT", "familyA_tf_4h"): sig,
@@ -111,8 +119,8 @@ def test_filter_sleeves_by_bucket_with_known_edges_passes_only_above_floor() -> 
     """
     sigs = _dummy_sleeve_sigs()
     bucket_edges = {
-        (0, "familyA_tf", "4h"): 150.0,   # above floor
-        (0, "familyB_tf", "1h"): 50.0,    # below floor
+        (0, "familyA_tf", "4h"): 150.0,  # above floor
+        (0, "familyB_tf", "1h"): 50.0,  # below floor
     }
 
     result = filter_sleeves_by_bucket(sigs, bucket_edges, regime_now=0, edge_floor_bps=100.0)
@@ -137,6 +145,7 @@ def test_filter_sleeves_by_bucket_edge_matches_floor_boundary() -> None:
 # Scenario 4: Edge Case — Empty Sleeve Pool
 # ---------------------------------------------------------------------------
 
+
 def test_filter_sleeves_by_bucket_empty_sleeves_returns_empty() -> None:
     """sleeve_sigs가 비어있으면 즉시 빈 dict를 반환해야 한다."""
     result = filter_sleeves_by_bucket({}, {}, regime_now=0, edge_floor_bps=100.0)
@@ -157,6 +166,7 @@ def test_filter_sleeves_by_bucket_empty_sleeves_nonempty_edges_returns_empty() -
 # ---------------------------------------------------------------------------
 # Step G: Bucket hit ratio tracking
 # ---------------------------------------------------------------------------
+
 
 def test_bucket_hit_ratio_active_same_as_hit() -> None:
     """n_active=10, n_hit=10 → hit_pct=100%"""
@@ -182,6 +192,7 @@ def test_bucket_hit_ratio_zero_active() -> None:
 # ---------------------------------------------------------------------------
 # Step H: Regime shift JS divergence
 # ---------------------------------------------------------------------------
+
 
 def test_js_divergence_identical_distributions() -> None:
     """동일 분포 → JS divergence ≈ 0.0"""
@@ -218,12 +229,13 @@ def test_js_divergence_shifted_distribution() -> None:
 # Step J: OOS vs Fit bucket edge comparison
 # ---------------------------------------------------------------------------
 
+
 def test_bucket_oos_compute_rmse_mae_bias() -> None:
     """fit=(50,20,-10) oos=(55,5,-8) → RMSE/MAE/bias/corr"""
     _fit_vals = np.array([50.0, 20.0, -10.0], dtype=np.float64)
     _oos_vals = np.array([55.0, 5.0, -8.0], dtype=np.float64)
     _errors = _oos_vals - _fit_vals
-    _rmse = float(np.sqrt(np.mean(_errors ** 2)))
+    _rmse = float(np.sqrt(np.mean(_errors**2)))
     _mae = float(np.mean(np.abs(_errors)))
     _bias = float(np.mean(_errors))
     _corr = float(np.corrcoef(_fit_vals, _oos_vals)[0, 1])
@@ -262,7 +274,7 @@ def test_bucket_oos_identifies_underover_fit() -> None:
     # underfit = oos >> fit (positive surplus)
     assert _underfit[0] == (0, "famA", "4h")  # surplus = +5
     # overfit = fit >> oos (negative surplus)
-    assert _overfit[0] == (0, "famB", "4h")   # deficit = -15
+    assert _overfit[0] == (0, "famB", "4h")  # deficit = -15
 
 
 def test_bucket_oos_edge_case_under3() -> None:
@@ -270,7 +282,7 @@ def test_bucket_oos_edge_case_under3() -> None:
     _fit_vals = np.array([50.0, 20.0], dtype=np.float64)
     _oos_vals = np.array([55.0, 5.0], dtype=np.float64)
     _errors = _oos_vals - _fit_vals
-    _rmse = float(np.sqrt(np.mean(_errors ** 2)))
+    _rmse = float(np.sqrt(np.mean(_errors**2)))
     _mae = float(np.mean(np.abs(_errors)))
     _bias = float(np.mean(_errors))
     _corr = 0.0  # < 3 buckets
@@ -392,7 +404,7 @@ def test_filter_sleeves_by_bucket_when_current_regime_bucket_missing_returns_emp
     """현재 regime이 bucket_edges에 없으면 edge=0 → 모든 sleeve 제거."""
     sigs = _dummy_sleeve_sigs()
     bucket_edges = {
-        (0, "familyA_tf", "4h"): 200.0,   # regime=0만 있음
+        (0, "familyA_tf", "4h"): 200.0,  # regime=0만 있음
         (0, "familyB_tf", "1h"): 150.0,
     }
 

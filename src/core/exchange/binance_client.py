@@ -172,9 +172,7 @@ class BinanceClient:
 
         # Order Rate Limiter: 주입된 공유 Limiter 사용 또는 자체 생성
         self.rate_limiter = (
-            shared_rate_limiter
-            if shared_rate_limiter is not None
-            else OrderRateLimiter(max_orders_per_10s=80)
+            shared_rate_limiter if shared_rate_limiter is not None else OrderRateLimiter(max_orders_per_10s=80)
         )
 
         # Order Book Cache (0.3초 TTL - API 호출 60% 감소)
@@ -307,9 +305,7 @@ class BinanceClient:
             current_limit = limit
             while retry_count < 3:
                 try:
-                    ohlcv = self.exchange.fetch_ohlcv(
-                        resolved_symbol, timeframe, since, current_limit
-                    )
+                    ohlcv = self.exchange.fetch_ohlcv(resolved_symbol, timeframe, since, current_limit)
 
                     if not ohlcv:
                         since = end_timestamp
@@ -329,9 +325,7 @@ class BinanceClient:
                         break
                     since = new_since
 
-                    current_date = datetime.fromtimestamp(last_timestamp / 1000).strftime(
-                        "%Y-%m-%d"
-                    )
+                    current_date = datetime.fromtimestamp(last_timestamp / 1000).strftime("%Y-%m-%d")
                     self.logger.info(f"Measured up to {current_date} ({len(all_ohlcv)} candles)")
 
                     time.sleep(0.2)
@@ -348,15 +342,17 @@ class BinanceClient:
                     wait_sec = 2 * retry_count
                     self.logger.error(
                         "Error fetching data (%d/3) for %s (limit=%d): %s. Waiting %ds...",
-                        retry_count, symbol, current_limit, e, wait_sec
+                        retry_count,
+                        symbol,
+                        current_limit,
+                        e,
+                        wait_sec,
                     )
                     time.sleep(wait_sec)
                     if retry_count >= 3:
                         raise RuntimeError(f"Data fetch failed persistently for {symbol}") from e
 
-        df = pd.DataFrame(
-            all_ohlcv, columns=["timestamp", "open", "high", "low", "close", "volume"]
-        )
+        df = pd.DataFrame(all_ohlcv, columns=["timestamp", "open", "high", "low", "close", "volume"])
         df["datetime"] = pd.to_datetime(df["timestamp"], unit="ms")
 
         # 중복 제거 및 기간 필터링
@@ -411,9 +407,21 @@ class BinanceClient:
             binance_symbol = str(symbol).replace("/", "")
 
         interval_map = {
-            "1m": "1m", "3m": "3m", "5m": "5m", "15m": "15m", "30m": "30m",
-            "1h": "1h", "2h": "2h", "4h": "4h", "6h": "6h", "8h": "8h",
-            "12h": "12h", "1d": "1d", "3d": "3d", "1w": "1w", "1M": "1M",
+            "1m": "1m",
+            "3m": "3m",
+            "5m": "5m",
+            "15m": "15m",
+            "30m": "30m",
+            "1h": "1h",
+            "2h": "2h",
+            "4h": "4h",
+            "6h": "6h",
+            "8h": "8h",
+            "12h": "12h",
+            "1d": "1d",
+            "3d": "3d",
+            "1w": "1w",
+            "1M": "1M",
         }
         interval = interval_map.get(str(timeframe).strip().lower(), str(timeframe).strip().lower())
 
@@ -424,8 +432,11 @@ class BinanceClient:
             data = None
             while retry_count < 5:
                 params = {
-                    "symbol": binance_symbol, "interval": interval,
-                    "startTime": since, "endTime": end_timestamp, "limit": limit,
+                    "symbol": binance_symbol,
+                    "interval": interval,
+                    "startTime": since,
+                    "endTime": end_timestamp,
+                    "limit": limit,
                 }
                 qs = urllib.parse.urlencode(params)
                 url = f"{base_url}?{qs}"
@@ -444,9 +455,9 @@ class BinanceClient:
                         raw = resp.read().decode("utf-8")
                         used_weight_str = resp.headers.get("x-mbx-used-weight-1m", "0")
                         used_weight = int(used_weight_str) if used_weight_str.isdigit() else 0
-                        
+
                     data = json.loads(raw)
-                    retry_count = 0 # Success
+                    retry_count = 0  # Success
                 except urllib.error.HTTPError as e:
                     if e.code == 429 or 500 <= int(e.code) <= 599:
                         retry_count += 1
@@ -491,7 +502,7 @@ class BinanceClient:
                         self.logger.warning(f"Retry ({retry_count}/5) for {symbol}")
                     else:
                         self.logger.error(f"Error ({retry_count}/5) for {symbol}: {e}")
-                    
+
                     if retry_count >= 5:
                         self.logger.error(f"Persistent exception for {symbol}. Skipping.")
                         break
@@ -506,13 +517,19 @@ class BinanceClient:
                     if not isinstance(row, (list, tuple)) or len(row) < 11:
                         continue
                     ts = int(row[0])
-                    all_rows.append([
-                        ts, float(row[1]), float(row[2]), float(row[3]), float(row[4]),
-                        float(row[5]),
-                        float(row[7]) if row[7] not in (None, "") else 0.0,
-                        float(row[9]) if row[9] not in (None, "") else 0.0,
-                        float(row[10]) if row[10] not in (None, "") else 0.0,
-                    ])
+                    all_rows.append(
+                        [
+                            ts,
+                            float(row[1]),
+                            float(row[2]),
+                            float(row[3]),
+                            float(row[4]),
+                            float(row[5]),
+                            float(row[7]) if row[7] not in (None, "") else 0.0,
+                            float(row[9]) if row[9] not in (None, "") else 0.0,
+                            float(row[10]) if row[10] not in (None, "") else 0.0,
+                        ]
+                    )
                 break
 
             if not data:
@@ -523,12 +540,10 @@ class BinanceClient:
             self.logger.info("Klines with taker up to %s (%d candles)", cur_d, len(all_rows))
             if last_ts >= end_timestamp:
                 break
-            
+
             # Smart Throttling based on Binance 1m used weight (Max: 2400)
             if used_weight > 2000:
-                self.logger.warning(
-                    f"⚠️ High API weight ({used_weight}/2400) for {symbol}. Sleeping 10s..."
-                )
+                self.logger.warning(f"⚠️ High API weight ({used_weight}/2400) for {symbol}. Sleeping 10s...")
                 time.sleep(10)
             elif used_weight > 1500:
                 time.sleep(2.0)
@@ -538,15 +553,35 @@ class BinanceClient:
                 time.sleep(0.1)
 
         if not all_rows:
-            return pd.DataFrame(columns=[
-                "timestamp", "open", "high", "low", "close", "volume", "quote_vol",
-                "taker_buy_base_volume", "taker_buy_quote_volume", "datetime"
-            ])
+            return pd.DataFrame(
+                columns=[
+                    "timestamp",
+                    "open",
+                    "high",
+                    "low",
+                    "close",
+                    "volume",
+                    "quote_vol",
+                    "taker_buy_base_volume",
+                    "taker_buy_quote_volume",
+                    "datetime",
+                ]
+            )
 
-        df = pd.DataFrame(all_rows, columns=[
-            "timestamp", "open", "high", "low", "close", "volume", "quote_vol",
-            "taker_buy_base_volume", "taker_buy_quote_volume",
-        ])
+        df = pd.DataFrame(
+            all_rows,
+            columns=[
+                "timestamp",
+                "open",
+                "high",
+                "low",
+                "close",
+                "volume",
+                "quote_vol",
+                "taker_buy_base_volume",
+                "taker_buy_quote_volume",
+            ],
+        )
         df["datetime"] = pd.to_datetime(df["timestamp"], unit="ms")
         df = df.drop_duplicates(subset=["timestamp"])
         df = df[df["timestamp"] <= end_timestamp].copy()
@@ -557,9 +592,7 @@ class BinanceClient:
         try:
             rows = self.exchange.fetch_ohlcv(symbol, timeframe, limit=limit)
             if not rows:
-                return pd.DataFrame(
-                    columns=["timestamp", "open", "high", "low", "close", "volume", "datetime"]
-                )
+                return pd.DataFrame(columns=["timestamp", "open", "high", "low", "close", "volume", "datetime"])
             df = pd.DataFrame(rows, columns=["timestamp", "open", "high", "low", "close", "volume"])
             df["datetime"] = pd.to_datetime(df["timestamp"], unit="ms")
             return df
@@ -652,7 +685,9 @@ class BinanceClient:
 
         while since < end_ts:
             params = {
-                "symbol": binance_symbol, "startTime": since, "endTime": end_ts,
+                "symbol": binance_symbol,
+                "startTime": since,
+                "endTime": end_ts,
                 "limit": limit,
             }
             qs = urllib.parse.urlencode(params)
@@ -702,9 +737,7 @@ class BinanceClient:
             return pd.DataFrame(columns=["timestamp", "funding_rate"])
 
         df = pd.DataFrame(all_rows, columns=["timestamp", "funding_rate"])
-        df = (
-            df.drop_duplicates(subset=["timestamp"]).sort_values("timestamp").reset_index(drop=True)
-        )
+        df = df.drop_duplicates(subset=["timestamp"]).sort_values("timestamp").reset_index(drop=True)
         return df
 
     def fetch_balance(self) -> tuple[float, float]:
@@ -796,7 +829,9 @@ class BinanceClient:
                     lev = int(pos.get("leverage") or 1)
                     result = {
                         "amount": contracts * (1 if pos["side"] == "long" else -1),
-                        "entryPrice": entry_p, "unrealizedPnL": upnl, "leverage": lev,
+                        "entryPrice": entry_p,
+                        "unrealizedPnL": upnl,
+                        "leverage": lev,
                     }
                     msg = (
                         f"[{symbol}] Pos: {result['amount']} contracts @ "
@@ -821,19 +856,18 @@ class BinanceClient:
                 for ao in algo_res:
                     if ao.get("symbol") == raw_symbol:
                         algo_order = {
-                            "id": ao.get("algoId"), "symbol": symbol,
+                            "id": ao.get("algoId"),
+                            "symbol": symbol,
                             "type": ao.get("orderType", "").lower(),
                             "side": ao.get("side", "").lower(),
                             "amount": float(ao.get("quantity") or 0),
                             "price": float(ao.get("price") or 0),
                             "stopPrice": float(ao.get("triggerPrice") or 0),
-                            "status": (
-                                "open" if ao.get("algoStatus") == "NEW"
-                                else ao.get("algoStatus").lower()
-                            ),
+                            "status": ("open" if ao.get("algoStatus") == "NEW" else ao.get("algoStatus").lower()),
                             "timestamp": int(ao.get("createTime", 0)),
                             "datetime": self.exchange.iso8601(ao.get("createTime", 0)),
-                            "info": ao, "clientOrderId": ao.get("clientAlgoId"),
+                            "info": ao,
+                            "clientOrderId": ao.get("clientAlgoId"),
                         }
                         if not any(o["id"] == algo_order["id"] for o in orders):
                             orders.append(algo_order)
@@ -1015,8 +1049,12 @@ class BinanceClient:
         """기본 주문 실행."""
         try:
             order: dict[str, Any] = self.exchange.create_order(
-                symbol=symbol, type=order_type, side=side,
-                amount=amount, price=price, params=(params or {}),
+                symbol=symbol,
+                type=order_type,
+                side=side,
+                amount=amount,
+                price=price,
+                params=(params or {}),
             )
             msg = f"⚡ {order_type} {side} {amount} {symbol} @ {price if price else 'Market'}"
             self.logger.info(msg)
@@ -1040,8 +1078,7 @@ class BinanceClient:
             if client_order_id:
                 params["clientOrderId"] = client_order_id
             order: dict[str, Any] = self.exchange.create_order(
-                symbol=symbol, type="STOP_MARKET", side=side,
-                amount=amount, params=params
+                symbol=symbol, type="STOP_MARKET", side=side, amount=amount, params=params
             )
             msg = f"🛡️ Server SL Placed: {symbol} {side} {amount} @ Stop {stop_price}"
             self.logger.info(msg)
@@ -1067,8 +1104,7 @@ class BinanceClient:
             if client_order_id:
                 params["clientOrderId"] = client_order_id
             order: dict[str, Any] = self.exchange.create_order(
-                symbol=symbol, type="TAKE_PROFIT_MARKET", side=side,
-                amount=amount, params=params
+                symbol=symbol, type="TAKE_PROFIT_MARKET", side=side, amount=amount, params=params
             )
             msg = f"🎯 Server TP Placed: {symbol} {side} {amount} @ TP {tp_price}"
             self.logger.info(msg)
@@ -1097,6 +1133,7 @@ class BinanceClient:
     ) -> dict[str, Any] | None:
         """Production waterfall order executor."""
         from src.core.settings import SMART_ORDER_OFFSET
+
         tick_size = self.get_price_tick_size(symbol, fallback=(0.1 if "BTC" in symbol else 0.01))
 
         def round_to_tick(price: float, tick: float) -> float:
@@ -1108,16 +1145,8 @@ class BinanceClient:
                 return float(cached_ob[0]), float(cached_ob[1])
             try:
                 orderbook = self.exchange.fetch_order_book(symbol, limit=1)
-                best_bid = (
-                    float(orderbook["bids"][0][0])
-                    if orderbook["bids"]
-                    else float(current_price or 0)
-                )
-                best_ask = (
-                    float(orderbook["asks"][0][0])
-                    if orderbook["asks"]
-                    else float(current_price or 0)
-                )
+                best_bid = float(orderbook["bids"][0][0]) if orderbook["bids"] else float(current_price or 0)
+                best_ask = float(orderbook["asks"][0][0]) if orderbook["asks"] else float(current_price or 0)
                 self.orderbook_cache.set(f"{symbol}_ob", (best_bid, best_ask))
                 return best_bid, best_ask
             except Exception:
@@ -1220,9 +1249,13 @@ class BinanceClient:
 
         def build_partial_res(status: str = "partial") -> dict[str, Any]:
             res = {
-                "symbol": symbol, "side": side, "type": "multi_tier",
-                "status": status, "requested": requested_total,
-                "filled": total_filled, "remaining": max(0.0, requested_total - total_filled),
+                "symbol": symbol,
+                "side": side,
+                "type": "multi_tier",
+                "status": status,
+                "requested": requested_total,
+                "filled": total_filled,
+                "remaining": max(0.0, requested_total - total_filled),
                 "reduceOnly": bool(reduce_only),
             }
             if isinstance(last_order, dict):
@@ -1245,20 +1278,18 @@ class BinanceClient:
                 try:
                     self.rate_limiter.wait_if_needed()
                     b_bid, b_ask = get_best_fresh()
-                    target_p = round_to_tick(
-                        b_bid + tick_size if side == "buy" else b_ask - tick_size, tick_size
-                    )
-                    msg_t1 = (
-                        f"📦 Tier 1: Post-Only {side} @ {target_p} "
-                        f"({req_idx + 1}/{max_req + 1})"
-                    )
+                    target_p = round_to_tick(b_bid + tick_size if side == "buy" else b_ask - tick_size, tick_size)
+                    msg_t1 = f"📦 Tier 1: Post-Only {side} @ {target_p} ({req_idx + 1}/{max_req + 1})"
                     self.logger.info(msg_t1)
                     req_amt = remaining_amount
                     f_before = total_filled
                     order_limit = self.exchange.create_order(
-                        symbol=symbol, type="limit", side=side, amount=req_amt,
+                        symbol=symbol,
+                        type="limit",
+                        side=side,
+                        amount=req_amt,
                         price=target_p,
-                        params=build_params({"postOnly": True}, order_tag=f"T1{req_idx}")
+                        params=build_params({"postOnly": True}, order_tag=f"T1{req_idx}"),
                     )
                     register_fill(order_limit, req_amt)
                     order_limit = wait_post_only(order_limit, req_amt)
@@ -1304,14 +1335,16 @@ class BinanceClient:
                 self.rate_limiter.wait_if_needed()
                 b_bid, b_ask = get_best_fresh()
                 off = 0.001 if high_vol else SMART_ORDER_OFFSET
-                limit_p = round_to_tick(
-                    b_ask * (1 + off) if side == "buy" else b_bid * (1 - off), tick_size
-                )
+                limit_p = round_to_tick(b_ask * (1 + off) if side == "buy" else b_bid * (1 - off), tick_size)
                 self.logger.info(f"📦 Tier 2: Aggressive IOC {side} @ {limit_p}")
                 req_amt_t2 = remaining_amount
                 order_t2 = self.exchange.create_order(
-                    symbol=symbol, type="limit", side=side, amount=req_amt_t2,
-                    price=limit_p, params=build_params({"timeInForce": "IOC"}, order_tag="T2")
+                    symbol=symbol,
+                    type="limit",
+                    side=side,
+                    amount=req_amt_t2,
+                    price=limit_p,
+                    params=build_params({"timeInForce": "IOC"}, order_tag="T2"),
                 )
                 filled = register_fill(order_t2, req_amt_t2)
                 if filled > 0 and (remaining_amount <= 0 or (filled / req_amt_t2) >= 0.999):
@@ -1338,20 +1371,25 @@ class BinanceClient:
                 if current_price and atr:
                     slip = min(0.01, (float(atr) * 0.2) / float(current_price))
                     h_limit_p = round_to_tick(
-                        current_price * (1 + slip) if side == "buy" else current_price * (1 - slip),
-                        tick_size
+                        current_price * (1 + slip) if side == "buy" else current_price * (1 - slip), tick_size
                     )
                     self.logger.warning(f"🚨 Tier 3: Capped Market {side} @ {h_limit_p}")
                     order_t3 = self.exchange.create_order(
-                        symbol=symbol, type="limit", side=side, amount=remaining_amount,
+                        symbol=symbol,
+                        type="limit",
+                        side=side,
+                        amount=remaining_amount,
                         price=h_limit_p,
-                        params=build_params({"timeInForce": "IOC"}, order_tag="T3L")
+                        params=build_params({"timeInForce": "IOC"}, order_tag="T3L"),
                     )
                 else:
                     self.logger.warning(f"🚨 Tier 3: Market Order {side}")
                     order_t3 = self.exchange.create_order(
-                        symbol=symbol, type="market", side=side, amount=remaining_amount,
-                        params=build_params(order_tag="T3M")
+                        symbol=symbol,
+                        type="market",
+                        side=side,
+                        amount=remaining_amount,
+                        params=build_params(order_tag="T3M"),
                     )
                 register_fill(order_t3, remaining_amount)
                 return cast("dict[str, Any] | None", order_t3)

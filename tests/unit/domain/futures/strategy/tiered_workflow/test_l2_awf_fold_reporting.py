@@ -17,9 +17,7 @@ def test_awf_fold_diags_reports_real_mdd_not_zero() -> None:
     aligned = MagicMock()
     aligned.symbols = ("BTC",)
     aligned.close_2d = np.ones((10, 1), dtype=float)
-    aligned.datetimes = np.array(
-        [f"2024-01-{i:02d}" for i in range(1, 11)], dtype="datetime64[ns]"
-    )
+    aligned.datetimes = np.array([f"2024-01-{i:02d}" for i in range(1, 11)], dtype="datetime64[ns]")
 
     from src.domain.futures.strategy.walk_forward import WFFold
 

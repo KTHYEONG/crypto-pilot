@@ -261,14 +261,17 @@ class TestEvaluatePanelCheapGate:
         alternating[1::2, :] = -1
         valid = np.ones((t, n), dtype=np.bool_)
         panel = CandidateSignalPanel(
-            family="trend_ma", variant="ema_12_72",
+            family="trend_ma",
+            variant="ema_12_72",
             params={"fast": 12, "slow": 72},
             datetimes=aligned.datetimes,
             symbols=aligned.symbols,
             signed_score_2d=np.ones((t, n), dtype=np.float64),
             side_hint_2d=alternating,
-            expected_holding_bars=3, min_holding_bars=1,
-            stop_atr_mult=2.0, take_profit_atr_mult=4.0,
+            expected_holding_bars=3,
+            min_holding_bars=1,
+            stop_atr_mult=2.0,
+            take_profit_atr_mult=4.0,
             turnover_proxy_2d=np.zeros((t, n), dtype=np.float64),
             valid_mask_2d=valid,
             metadata={"recipe_id": "turnover_test"},
@@ -276,8 +279,12 @@ class TestEvaluatePanelCheapGate:
         cost = ExecutionCostModel()
         cfg = CheapGateConfig()
         evidence = evaluate_panel_cheap_gate(
-            panel=panel, aligned=aligned, recipe=SAMPLE_RECIPE,
-            cost_model=cost, config=cfg, bars_per_year=2190.0,
+            panel=panel,
+            aligned=aligned,
+            recipe=SAMPLE_RECIPE,
+            cost_model=cost,
+            config=cfg,
+            bars_per_year=2190.0,
         )
         assert evidence.turnover_per_year > 0.0
 
@@ -289,14 +296,17 @@ class TestEvaluatePanelCheapGate:
         alternating[1::2, :] = -1
         valid = np.ones((t, n), dtype=np.bool_)
         panel = CandidateSignalPanel(
-            family="trend_ma", variant="ema_12_72",
+            family="trend_ma",
+            variant="ema_12_72",
             params={"fast": 12, "slow": 72},
             datetimes=aligned.datetimes,
             symbols=aligned.symbols,
             signed_score_2d=np.ones((t, n), dtype=np.float64),
             side_hint_2d=alternating,
-            expected_holding_bars=3, min_holding_bars=1,
-            stop_atr_mult=2.0, take_profit_atr_mult=4.0,
+            expected_holding_bars=3,
+            min_holding_bars=1,
+            stop_atr_mult=2.0,
+            take_profit_atr_mult=4.0,
             turnover_proxy_2d=np.zeros((t, n), dtype=np.float64),
             valid_mask_2d=valid,
             metadata={"recipe_id": "turnover_test"},
@@ -304,12 +314,20 @@ class TestEvaluatePanelCheapGate:
         cost = ExecutionCostModel()
         cfg = CheapGateConfig()
         ev_4h = evaluate_panel_cheap_gate(
-            panel=panel, aligned=aligned, recipe=SAMPLE_RECIPE,
-            cost_model=cost, config=cfg, bars_per_year=2190.0,
+            panel=panel,
+            aligned=aligned,
+            recipe=SAMPLE_RECIPE,
+            cost_model=cost,
+            config=cfg,
+            bars_per_year=2190.0,
         )
         ev_12h = evaluate_panel_cheap_gate(
-            panel=panel, aligned=aligned, recipe=SAMPLE_RECIPE,
-            cost_model=cost, config=cfg, bars_per_year=730.0,
+            panel=panel,
+            aligned=aligned,
+            recipe=SAMPLE_RECIPE,
+            cost_model=cost,
+            config=cfg,
+            bars_per_year=730.0,
         )
         assert abs(ev_12h.turnover_per_year - ev_4h.turnover_per_year / 3.0) < 1e-9
 
@@ -372,10 +390,17 @@ class TestResolveFamilyTimeframeGatePolicy:
         from src.domain.futures.alpha_foundry.cheap_gate import resolve_family_timeframe_gate_policy
 
         recipe = AlphaRecipe(
-            recipe_id="r1", family="test_fam", variant="v1", timeframe="4h",
-            archetype="trend", indicator_params={}, side_rule_id="s",
-            exit_policy_id="e", required_fields=("close",),
-            causal_lag_bars=1, max_turnover_per_year=365.0,
+            recipe_id="r1",
+            family="test_fam",
+            variant="v1",
+            timeframe="4h",
+            archetype="trend",
+            indicator_params={},
+            side_rule_id="s",
+            exit_policy_id="e",
+            required_fields=("close",),
+            causal_lag_bars=1,
+            max_turnover_per_year=365.0,
         )
         cfg = CheapGateConfig(
             family_event_floors={"test_fam": 5},
@@ -388,10 +413,17 @@ class TestResolveFamilyTimeframeGatePolicy:
         from src.domain.futures.alpha_foundry.cheap_gate import resolve_family_timeframe_gate_policy
 
         recipe = AlphaRecipe(
-            recipe_id="r1", family="unknown_fam", variant="v1", timeframe="4h",
-            archetype="flow", indicator_params={}, side_rule_id="s",
-            exit_policy_id="e", required_fields=("close",),
-            causal_lag_bars=1, max_turnover_per_year=365.0,
+            recipe_id="r1",
+            family="unknown_fam",
+            variant="v1",
+            timeframe="4h",
+            archetype="flow",
+            indicator_params={},
+            side_rule_id="s",
+            exit_policy_id="e",
+            required_fields=("close",),
+            causal_lag_bars=1,
+            max_turnover_per_year=365.0,
         )
         cfg = CheapGateConfig()
         policy = resolve_family_timeframe_gate_policy(recipe=recipe, config=cfg)
@@ -404,28 +436,54 @@ class TestBuildL0SignalCandidate:
         from src.domain.futures.alpha_foundry.contracts import FamilyTimeframeGatePolicy
 
         evidence = CheapGateEvidence(
-            recipe_id="r1", timeframe="4h", symbol_scope="symbol",
-            n_events=5, effective_n=30.0, mean_net_bps=2.0, nw_tstat=1.5,
-            block_lcb_bps=1.0, rank_ic=0.0, cost_drag_ratio=0.3,
-            turnover_per_year=100.0, novelty_corr_max=0.0,
-            incremental_rank_ic=0.0, compute_cost_score=0.0,
-            gate_passed=True, reject_reasons=(),
-            bootstrap_lcb_bps=1.0, bootstrap_agree=True,
+            recipe_id="r1",
+            timeframe="4h",
+            symbol_scope="symbol",
+            n_events=5,
+            effective_n=30.0,
+            mean_net_bps=2.0,
+            nw_tstat=1.5,
+            block_lcb_bps=1.0,
+            rank_ic=0.0,
+            cost_drag_ratio=0.3,
+            turnover_per_year=100.0,
+            novelty_corr_max=0.0,
+            incremental_rank_ic=0.0,
+            compute_cost_score=0.0,
+            gate_passed=True,
+            reject_reasons=(),
+            bootstrap_lcb_bps=1.0,
+            bootstrap_agree=True,
         )
         recipe = AlphaRecipe(
-            recipe_id="r1", family="f", variant="v", timeframe="4h",
-            archetype="trend", indicator_params={}, side_rule_id="s",
-            exit_policy_id="e", required_fields=("close",),
-            causal_lag_bars=1, max_turnover_per_year=365.0,
+            recipe_id="r1",
+            family="f",
+            variant="v",
+            timeframe="4h",
+            archetype="trend",
+            indicator_params={},
+            side_rule_id="s",
+            exit_policy_id="e",
+            required_fields=("close",),
+            causal_lag_bars=1,
+            max_turnover_per_year=365.0,
         )
         policy = FamilyTimeframeGatePolicy(
-            archetype="trend", min_events=10, min_effective_n=5.0,
-            target_effective_n=10.0, max_cost_drag_ratio=0.6,
-            max_turnover_per_year=365.0, deep_negative_lcb_bps=0.0,
+            archetype="trend",
+            min_events=10,
+            min_effective_n=5.0,
+            target_effective_n=10.0,
+            max_cost_drag_ratio=0.6,
+            max_turnover_per_year=365.0,
+            deep_negative_lcb_bps=0.0,
         )
         cand = build_l0_signal_candidate(
-            run_id="test", evidence=evidence, recipe=recipe,
-            source="catalog_exact", policy=policy, stress_cost_bps=0.0,
+            run_id="test",
+            evidence=evidence,
+            recipe=recipe,
+            source="catalog_exact",
+            policy=policy,
+            stress_cost_bps=0.0,
             tf_fusion=None,
         )
         assert "insufficient_events" in cand.hard_reject_reasons
@@ -436,28 +494,54 @@ class TestBuildL0SignalCandidate:
         from src.domain.futures.alpha_foundry.contracts import FamilyTimeframeGatePolicy
 
         evidence = CheapGateEvidence(
-            recipe_id="r1", timeframe="4h", symbol_scope="symbol",
-            n_events=50, effective_n=30.0, mean_net_bps=2.0, nw_tstat=0.5,
-            block_lcb_bps=1.0, rank_ic=0.0, cost_drag_ratio=0.3,
-            turnover_per_year=100.0, novelty_corr_max=0.0,
-            incremental_rank_ic=0.0, compute_cost_score=0.0,
-            gate_passed=True, reject_reasons=("weak_tstat",),
-            bootstrap_lcb_bps=-1.0, bootstrap_agree=False,
+            recipe_id="r1",
+            timeframe="4h",
+            symbol_scope="symbol",
+            n_events=50,
+            effective_n=30.0,
+            mean_net_bps=2.0,
+            nw_tstat=0.5,
+            block_lcb_bps=1.0,
+            rank_ic=0.0,
+            cost_drag_ratio=0.3,
+            turnover_per_year=100.0,
+            novelty_corr_max=0.0,
+            incremental_rank_ic=0.0,
+            compute_cost_score=0.0,
+            gate_passed=True,
+            reject_reasons=("weak_tstat",),
+            bootstrap_lcb_bps=-1.0,
+            bootstrap_agree=False,
         )
         recipe = AlphaRecipe(
-            recipe_id="r1", family="f", variant="v", timeframe="4h",
-            archetype="trend", indicator_params={}, side_rule_id="s",
-            exit_policy_id="e", required_fields=("close",),
-            causal_lag_bars=1, max_turnover_per_year=365.0,
+            recipe_id="r1",
+            family="f",
+            variant="v",
+            timeframe="4h",
+            archetype="trend",
+            indicator_params={},
+            side_rule_id="s",
+            exit_policy_id="e",
+            required_fields=("close",),
+            causal_lag_bars=1,
+            max_turnover_per_year=365.0,
         )
         policy = FamilyTimeframeGatePolicy(
-            archetype="trend", min_events=10, min_effective_n=5.0,
-            target_effective_n=10.0, max_cost_drag_ratio=0.6,
-            max_turnover_per_year=365.0, deep_negative_lcb_bps=-5.0,
+            archetype="trend",
+            min_events=10,
+            min_effective_n=5.0,
+            target_effective_n=10.0,
+            max_cost_drag_ratio=0.6,
+            max_turnover_per_year=365.0,
+            deep_negative_lcb_bps=-5.0,
         )
         cand = build_l0_signal_candidate(
-            run_id="test", evidence=evidence, recipe=recipe,
-            source="catalog_exact", policy=policy, stress_cost_bps=0.0,
+            run_id="test",
+            evidence=evidence,
+            recipe=recipe,
+            source="catalog_exact",
+            policy=policy,
+            stress_cost_bps=0.0,
             tf_fusion=None,
         )
         assert "weak_tstat" in cand.soft_flags
@@ -469,28 +553,54 @@ class TestBuildL0SignalCandidate:
         from src.domain.futures.alpha_foundry.contracts import FamilyTimeframeGatePolicy
 
         evidence = CheapGateEvidence(
-            recipe_id="r1", timeframe="4h", symbol_scope="symbol",
-            n_events=100, effective_n=50.0, mean_net_bps=2.0, nw_tstat=1.5,
-            block_lcb_bps=1.0, rank_ic=0.0, cost_drag_ratio=0.8,
-            turnover_per_year=500.0, novelty_corr_max=0.0,
-            incremental_rank_ic=0.0, compute_cost_score=0.0,
-            gate_passed=False, reject_reasons=("invalid_shape", "lookahead_risk", "missing_required_field"),
-            bootstrap_lcb_bps=1.0, bootstrap_agree=True,
+            recipe_id="r1",
+            timeframe="4h",
+            symbol_scope="symbol",
+            n_events=100,
+            effective_n=50.0,
+            mean_net_bps=2.0,
+            nw_tstat=1.5,
+            block_lcb_bps=1.0,
+            rank_ic=0.0,
+            cost_drag_ratio=0.8,
+            turnover_per_year=500.0,
+            novelty_corr_max=0.0,
+            incremental_rank_ic=0.0,
+            compute_cost_score=0.0,
+            gate_passed=False,
+            reject_reasons=("invalid_shape", "lookahead_risk", "missing_required_field"),
+            bootstrap_lcb_bps=1.0,
+            bootstrap_agree=True,
         )
         recipe = AlphaRecipe(
-            recipe_id="r1", family="f", variant="v", timeframe="4h",
-            archetype="trend", indicator_params={}, side_rule_id="s",
-            exit_policy_id="e", required_fields=("close",),
-            causal_lag_bars=1, max_turnover_per_year=100.0,
+            recipe_id="r1",
+            family="f",
+            variant="v",
+            timeframe="4h",
+            archetype="trend",
+            indicator_params={},
+            side_rule_id="s",
+            exit_policy_id="e",
+            required_fields=("close",),
+            causal_lag_bars=1,
+            max_turnover_per_year=100.0,
         )
         policy = FamilyTimeframeGatePolicy(
-            archetype="trend", min_events=10, min_effective_n=5.0,
-            target_effective_n=10.0, max_cost_drag_ratio=0.5,
-            max_turnover_per_year=200.0, deep_negative_lcb_bps=-5.0,
+            archetype="trend",
+            min_events=10,
+            min_effective_n=5.0,
+            target_effective_n=10.0,
+            max_cost_drag_ratio=0.5,
+            max_turnover_per_year=200.0,
+            deep_negative_lcb_bps=-5.0,
         )
         cand = build_l0_signal_candidate(
-            run_id="test", evidence=evidence, recipe=recipe,
-            source="catalog_exact", policy=policy, stress_cost_bps=0.0,
+            run_id="test",
+            evidence=evidence,
+            recipe=recipe,
+            source="catalog_exact",
+            policy=policy,
+            stress_cost_bps=0.0,
             tf_fusion=None,
         )
         assert "excess_cost_drag" in cand.hard_reject_reasons
@@ -507,48 +617,87 @@ class TestBuildL0SignalCandidate:
         )
 
         evidence = CheapGateEvidence(
-            recipe_id="r1", timeframe="4h", symbol_scope="symbol",
-            n_events=100, effective_n=50.0, mean_net_bps=5.0, nw_tstat=2.0,
-            block_lcb_bps=3.0, rank_ic=0.0, cost_drag_ratio=0.3,
-            turnover_per_year=50.0, novelty_corr_max=0.0,
-            incremental_rank_ic=0.0, compute_cost_score=0.0,
-            gate_passed=True, reject_reasons=(),
-            bootstrap_lcb_bps=3.0, bootstrap_agree=True,
+            recipe_id="r1",
+            timeframe="4h",
+            symbol_scope="symbol",
+            n_events=100,
+            effective_n=50.0,
+            mean_net_bps=5.0,
+            nw_tstat=2.0,
+            block_lcb_bps=3.0,
+            rank_ic=0.0,
+            cost_drag_ratio=0.3,
+            turnover_per_year=50.0,
+            novelty_corr_max=0.0,
+            incremental_rank_ic=0.0,
+            compute_cost_score=0.0,
+            gate_passed=True,
+            reject_reasons=(),
+            bootstrap_lcb_bps=3.0,
+            bootstrap_agree=True,
         )
         recipe = AlphaRecipe(
-            recipe_id="r1", family="f", variant="v", timeframe="4h",
-            archetype="trend", indicator_params={}, side_rule_id="s",
-            exit_policy_id="e", required_fields=("close",),
-            causal_lag_bars=1, max_turnover_per_year=365.0,
+            recipe_id="r1",
+            family="f",
+            variant="v",
+            timeframe="4h",
+            archetype="trend",
+            indicator_params={},
+            side_rule_id="s",
+            exit_policy_id="e",
+            required_fields=("close",),
+            causal_lag_bars=1,
+            max_turnover_per_year=365.0,
         )
         policy = FamilyTimeframeGatePolicy(
-            archetype="trend", min_events=10, min_effective_n=5.0,
-            target_effective_n=10.0, max_cost_drag_ratio=0.6,
-            max_turnover_per_year=365.0, deep_negative_lcb_bps=0.0,
+            archetype="trend",
+            min_events=10,
+            min_effective_n=5.0,
+            target_effective_n=10.0,
+            max_cost_drag_ratio=0.6,
+            max_turnover_per_year=365.0,
+            deep_negative_lcb_bps=0.0,
         )
 
         tf_corroborated = MultiTimeframeEvidence(
-            family="f", variant="v", native_timeframe="4h",
-            native_recipe_id="r1", tf_coverage_count=2,
-            sign_agreement_ratio=0.8, corroboration_tier="corroborated",
+            family="f",
+            variant="v",
+            native_timeframe="4h",
+            native_recipe_id="r1",
+            tf_coverage_count=2,
+            sign_agreement_ratio=0.8,
+            corroboration_tier="corroborated",
             fused_conviction_score=5.0,
         )
         cand = build_l0_signal_candidate(
-            run_id="test", evidence=evidence, recipe=recipe,
-            source="catalog_exact", policy=policy, stress_cost_bps=0.0,
-            tf_fusion=tf_corroborated, max_abs_corr_in_bucket=0.9,
+            run_id="test",
+            evidence=evidence,
+            recipe=recipe,
+            source="catalog_exact",
+            policy=policy,
+            stress_cost_bps=0.0,
+            tf_fusion=tf_corroborated,
+            max_abs_corr_in_bucket=0.9,
         )
         assert cand.corroboration_tier == "corroborated"
 
         tf_contradicted = MultiTimeframeEvidence(
-            family="f", variant="v", native_timeframe="4h",
-            native_recipe_id="r1", tf_coverage_count=2,
-            sign_agreement_ratio=0.3, corroboration_tier="contradicted",
+            family="f",
+            variant="v",
+            native_timeframe="4h",
+            native_recipe_id="r1",
+            tf_coverage_count=2,
+            sign_agreement_ratio=0.3,
+            corroboration_tier="contradicted",
             fused_conviction_score=-3.0,
         )
         cand2 = build_l0_signal_candidate(
-            run_id="test", evidence=evidence, recipe=recipe,
-            source="catalog_exact", policy=policy, stress_cost_bps=0.0,
+            run_id="test",
+            evidence=evidence,
+            recipe=recipe,
+            source="catalog_exact",
+            policy=policy,
+            stress_cost_bps=0.0,
             tf_fusion=tf_contradicted,
         )
         assert "tf_contradicted" in cand2.hard_reject_reasons
@@ -559,29 +708,56 @@ class TestBuildL0SignalCandidate:
         from src.domain.futures.alpha_foundry.contracts import FamilyTimeframeGatePolicy
 
         evidence = CheapGateEvidence(
-            recipe_id="r1", timeframe="4h", symbol_scope="symbol",
-            n_events=100, effective_n=50.0, mean_net_bps=5.0, nw_tstat=2.0,
-            block_lcb_bps=3.0, rank_ic=0.0, cost_drag_ratio=0.3,
-            turnover_per_year=50.0, novelty_corr_max=0.0,
-            incremental_rank_ic=0.0, compute_cost_score=0.0,
-            gate_passed=True, reject_reasons=(),
-            bootstrap_lcb_bps=3.0, bootstrap_agree=True,
+            recipe_id="r1",
+            timeframe="4h",
+            symbol_scope="symbol",
+            n_events=100,
+            effective_n=50.0,
+            mean_net_bps=5.0,
+            nw_tstat=2.0,
+            block_lcb_bps=3.0,
+            rank_ic=0.0,
+            cost_drag_ratio=0.3,
+            turnover_per_year=50.0,
+            novelty_corr_max=0.0,
+            incremental_rank_ic=0.0,
+            compute_cost_score=0.0,
+            gate_passed=True,
+            reject_reasons=(),
+            bootstrap_lcb_bps=3.0,
+            bootstrap_agree=True,
         )
         recipe = AlphaRecipe(
-            recipe_id="r1", family="f", variant="v", timeframe="4h",
-            archetype="trend", indicator_params={}, side_rule_id="s",
-            exit_policy_id="e", required_fields=("close",),
-            causal_lag_bars=1, max_turnover_per_year=365.0,
+            recipe_id="r1",
+            family="f",
+            variant="v",
+            timeframe="4h",
+            archetype="trend",
+            indicator_params={},
+            side_rule_id="s",
+            exit_policy_id="e",
+            required_fields=("close",),
+            causal_lag_bars=1,
+            max_turnover_per_year=365.0,
         )
         policy = FamilyTimeframeGatePolicy(
-            archetype="trend", min_events=10, min_effective_n=5.0,
-            target_effective_n=10.0, max_cost_drag_ratio=0.6,
-            max_turnover_per_year=365.0, deep_negative_lcb_bps=-5.0,
+            archetype="trend",
+            min_events=10,
+            min_effective_n=5.0,
+            target_effective_n=10.0,
+            max_cost_drag_ratio=0.6,
+            max_turnover_per_year=365.0,
+            deep_negative_lcb_bps=-5.0,
         )
         cand = build_l0_signal_candidate(
-            run_id="test", evidence=evidence, recipe=recipe,
-            source="catalog_exact", policy=policy, stress_cost_bps=0.0,
+            run_id="test",
+            evidence=evidence,
+            recipe=recipe,
+            source="catalog_exact",
+            policy=policy,
+            stress_cost_bps=0.0,
             tf_fusion=None,
+            min_conviction_lcb_bps=0.0,
         )
         assert cand.discovery_tier == "candidate"
         assert cand.hard_reject_reasons == ()

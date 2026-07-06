@@ -129,7 +129,9 @@ def filter_rule_signal_panels(
     )
     return tuple(filtered)
 
+
 # --- Vectorized Technical Indicator Helpers ---
+
 
 @numba.njit(cache=True, fastmath=True)  # type: ignore
 def _ema_2d_jit(arr: np.ndarray, span: int) -> np.ndarray:
@@ -137,10 +139,10 @@ def _ema_2d_jit(arr: np.ndarray, span: int) -> np.ndarray:
     out = np.empty((t_len, n_sym), dtype=np.float64)
     out.fill(np.nan)
     alpha = 2.0 / (float(span) + 1.0)
-    
+
     last = np.zeros(n_sym, dtype=np.float64)
     initialized = np.zeros(n_sym, dtype=np.bool_)
-    
+
     for t in range(t_len):
         for c in range(n_sym):
             val = arr[t, c]
@@ -258,9 +260,7 @@ def _entry_rising_edge_2d(condition: NDArray[np.bool_]) -> NDArray[np.bool_]:
     Time: O(T*N)  Space: O(T*N) — one vstack + elementwise AND/NOT
     """
     # prev[t] = condition[t-1]; prev[0] = False (no prior bar)
-    prev: NDArray[np.bool_] = np.vstack(
-        [np.zeros((1, condition.shape[1]), dtype=bool), condition[:-1]]
-    )
+    prev: NDArray[np.bool_] = np.vstack([np.zeros((1, condition.shape[1]), dtype=bool), condition[:-1]])
     result: NDArray[np.bool_] = condition & ~prev
     # Row 0 has no prior state — suppress any apparent transition
     result[0, :] = False
@@ -296,14 +296,14 @@ def project_higher_tf_to_grid(
     dt_grid: NDArray[np.datetime64],
 ) -> NDArray[np.float64]:
     """Release-timestamp based backward-asof projection.
-    
+
     Prevents look-ahead leak by only allowing grid[t] to see higher TF values
     that were closed/released on or before grid[t].
     """
     indices = np.searchsorted(dt_higher.astype(np.int64), dt_grid.astype(np.int64), side="right") - 1
     valid_mask = indices >= 0
     clipped_indices = np.clip(indices, 0, len(dt_higher) - 1)
-    
+
     out = feature_higher[clipped_indices]
     # Set pre-warmup/before earliest release bars to NaN
     out[~valid_mask] = np.nan
@@ -321,7 +321,7 @@ def _resample_to_htf_and_project(
     """Resamples 4h series to HTF, computes feature, and projects back causally."""
     _, n_cols = values_4h.shape
     df_4h = pd.DataFrame(values_4h, index=pd.to_datetime(datetimes_4h))
-    
+
     resampler = df_4h.resample(htf, closed="left", label="left")
     if agg_method == "last":
         df_htf = resampler.last()
@@ -335,22 +335,20 @@ def _resample_to_htf_and_project(
         df_htf = resampler.sum()
     else:
         raise ValueError(f"unknown agg_method: {agg_method}")
-        
+
     df_feature_htf = compute_feature_fn(df_htf)
     if isinstance(df_feature_htf, np.ndarray):
         df_feature_htf = pd.DataFrame(df_feature_htf, index=df_htf.index)
-        
+
     # Release timestamp: start of HTF bar + duration
     delta = pd.Timedelta(htf)
     dt_higher = (df_feature_htf.index + delta).to_numpy()
-    
+
     feature_higher = df_feature_htf.to_numpy(dtype=np.float64)
     out_4h = np.zeros_like(values_4h)
     for col in range(n_cols):
         out_4h[:, col] = project_higher_tf_to_grid(
-            feature_higher=feature_higher[:, col],
-            dt_higher=dt_higher,
-            dt_grid=datetimes_4h
+            feature_higher=feature_higher[:, col], dt_higher=dt_higher, dt_grid=datetimes_4h
         )
     return out_4h
 
@@ -437,10 +435,10 @@ def _attach_signal_context(
         archetype = _resolve_panel_archetype(panel)
         allowed_regimes = _allowed_regimes_for_archetype(archetype)
         side_hint_2d = np.asarray(panel.side_hint_2d, dtype=np.int8).copy()
-        if cfg.regime_signal_gating_enabled or (
-            cfg.mean_rev_gating_enabled and archetype == "mean_rev"
-        ) or (
-            cfg.beta_neut_gating_enabled and archetype == "beta_neut"
+        if (
+            cfg.regime_signal_gating_enabled
+            or (cfg.mean_rev_gating_enabled and archetype == "mean_rev")
+            or (cfg.beta_neut_gating_enabled and archetype == "beta_neut")
         ):
             allowed_mask = np.isin(regime_names[regime_ctx.code_1d], np.asarray(allowed_regimes, dtype=object))
             side_hint_2d[~allowed_mask, :] = 0
@@ -482,9 +480,6 @@ def _attach_signal_context(
 # --- 8 Vectorized Rule Families ---
 
 
-
-
-
 def _cross_sectional_rank_signed_2d(
     raw_2d: NDArray[np.float64],
     valid_2d: NDArray[np.bool_],
@@ -512,16 +507,12 @@ def _beta_residual_return_2d(
     lookback: int,
 ) -> NDArray[np.float64]:
     r = np.diff(np.log(np.maximum(close, 1e-12)), axis=0, prepend=0.0)
-    rb = r[:, btc_idx:btc_idx + 1]
-    beta = _rolling_mean_2d(r * rb, lookback) / np.maximum(
-        _rolling_mean_2d(rb * rb, lookback), 1e-12
-    )
+    rb = r[:, btc_idx : btc_idx + 1]
+    beta = _rolling_mean_2d(r * rb, lookback) / np.maximum(_rolling_mean_2d(rb * rb, lookback), 1e-12)
     resid = r - beta * rb
     warm = np.ones_like(r, dtype=np.bool_)
     warm[:lookback] = False
-    _out = pd.DataFrame(np.where(warm, resid, 0.0)).rolling(
-        lookback, min_periods=1
-    ).sum().to_numpy(np.float64).copy()
+    _out = pd.DataFrame(np.where(warm, resid, 0.0)).rolling(lookback, min_periods=1).sum().to_numpy(np.float64).copy()
     out = np.asarray(_out, dtype=np.float64)
     out[:lookback] = 0.0
     return out
@@ -546,11 +537,13 @@ def _supertrend_2d(
         prev = trend[t - 1]
         upper[t] = np.where(
             (upper[t] < upper[t - 1]) | (close[t - 1] > upper[t - 1]),
-            upper[t], upper[t - 1],
+            upper[t],
+            upper[t - 1],
         )
         lower[t] = np.where(
             (lower[t] > lower[t - 1]) | (close[t - 1] < lower[t - 1]),
-            lower[t], lower[t - 1],
+            lower[t],
+            lower[t - 1],
         )
         trend[t] = np.where(
             prev <= 0,
@@ -569,6 +562,7 @@ def build_rule_signal_panels(
     family_filter: tuple[str, ...] | None = None,
 ) -> tuple[CandidateSignalPanel, ...]:
     """Build trailing-only rule candidates for all symbols."""
+
     def scale_window(base_bars: int, minimum: int = 1) -> int:
         if not normalize_time_horizon:
             return max(minimum, base_bars)
@@ -586,14 +580,10 @@ def build_rule_signal_panels(
     vol = aligned.volume_2d
     funding = aligned.funding_2d
     signal_active_mask = (
-        aligned.inference_active_mask
-        if aligned.inference_active_mask is not None
-        else aligned.active_mask
+        aligned.inference_active_mask if aligned.inference_active_mask is not None else aligned.active_mask
     )
     entry_warm_mask = (
-        aligned.inference_entry_warm_mask
-        if aligned.inference_entry_warm_mask is not None
-        else aligned.warm_mask
+        aligned.inference_entry_warm_mask if aligned.inference_entry_warm_mask is not None else aligned.warm_mask
     )
     execution_eligibility_mask = (
         aligned.execution_eligibility_mask
@@ -652,16 +642,8 @@ def build_rule_signal_panels(
     ret_z_48 = _zscore_2d(ret_12, window=ret_z_48_window)
     shared_valid = valid_mask & flow_valid & np.isfinite(funding)
     fxr_valid = valid_mask & flow_valid
-    oi = (
-        aligned.oi_2d
-        if aligned.oi_2d is not None
-        else np.full_like(close, np.nan, dtype=np.float64)
-    )
-    lsr = (
-        aligned.lsr_2d
-        if aligned.lsr_2d is not None
-        else np.full_like(close, np.nan, dtype=np.float64)
-    )
+    oi = aligned.oi_2d if aligned.oi_2d is not None else np.full_like(close, np.nan, dtype=np.float64)
+    lsr = aligned.lsr_2d if aligned.lsr_2d is not None else np.full_like(close, np.nan, dtype=np.float64)
     oi_valid = np.isfinite(oi) & (oi > 0.0)
     lsr_valid = np.isfinite(lsr) & (lsr > 0.0)
     oi_log = np.where(oi_valid, np.log(oi), np.nan)
@@ -673,8 +655,7 @@ def build_rule_signal_panels(
     # UNW warm-up: require 168 bars of continuous valid data for z-score stability
     positioning_warm = np.ones_like(valid_mask, dtype=np.bool_)
     positioning_warm[:positioning_warm_bars] = False
-    positioning_valid = (valid_mask & flow_valid & np.isfinite(funding) & oi_valid & lsr_valid
-                         & positioning_warm)
+    positioning_valid = valid_mask & flow_valid & np.isfinite(funding) & oi_valid & lsr_valid & positioning_warm
     # Shared derived features for new panels
     funding_ts_slope = funding_z_96 - funding_z_168  # positive = short-term more extreme
 
@@ -707,8 +688,7 @@ def build_rule_signal_panels(
                     valid_mask_2d=valid_mask,
                 )
             )
-            
-            
+
             # 1c. Trend MA Cross — ema_18_108
             ema_fast_18 = _ema_2d(close, span=scale_window(18))
             ema_slow_108 = _ema_2d(close, span=scale_window(108))
@@ -734,7 +714,6 @@ def build_rule_signal_panels(
                     valid_mask_2d=valid_mask,
                 )
             )
-            
 
         elif fam == "trend_donchian":
             # 2. Trend Donchian — donchian_72 only (donchian_18/36 removed: p>0.34, possym<0.50)
@@ -765,7 +744,6 @@ def build_rule_signal_panels(
                     valid_mask_2d=valid_mask,
                 )
             )
-            
 
         elif fam == "vol_breakout":
             # 3. Vol Breakout
@@ -797,7 +775,6 @@ def build_rule_signal_panels(
                     valid_mask_2d=valid_mask,
                 )
             )
-            
 
         elif fam == "funding_carry":
             # 6. Funding Carry
@@ -826,7 +803,6 @@ def build_rule_signal_panels(
                     metadata={"archetype": "carry_rev"},
                 )
             )
-            
 
         elif fam == "btc_regime_pullback":
             # 8. BTC Regime Pullback
@@ -834,11 +810,11 @@ def build_rule_signal_panels(
             btc_ema_fast = _ema_2d(btc_close, span=btc_fast_window)
             btc_ema_slow = _ema_2d(btc_close, span=btc_slow_window)
             btc_trend_up = btc_ema_fast > btc_ema_slow
-            
+
             alt_mean = _rolling_mean_2d(close, window=alt_mean_window)
             alt_std = _rolling_std_2d(close, window=alt_mean_window)
             alt_pullback_z = (close - alt_mean) / np.maximum(alt_std, 1e-12)
-            
+
             btc_side = np.zeros_like(close, dtype=np.int8)
             btc_side[btc_trend_up & (alt_pullback_z < -1.5)] = 1
             btc_side[~btc_trend_up & (alt_pullback_z > 1.5)] = -1
@@ -860,8 +836,6 @@ def build_rule_signal_panels(
                     valid_mask_2d=valid_mask,
                 )
             )
-            
-            
 
         elif fam == "trend_pullback_continuation":
             # 16. Trend Pullback Continuation
@@ -876,8 +850,12 @@ def build_rule_signal_panels(
                 _rsi_trend = _rsi_2d(close, period=rsi_14_window)
                 _trend_up = _ema_fast > _ema_slow
                 _trend_dn = _ema_fast < _ema_slow
-                _long = _trend_up & (_close_prev <= _ema_fast_prev) & (close > _ema_fast) & (_rsi_trend >= _rsi_lo) & (
-                    _rsi_trend <= _rsi_hi
+                _long = (
+                    _trend_up
+                    & (_close_prev <= _ema_fast_prev)
+                    & (close > _ema_fast)
+                    & (_rsi_trend >= _rsi_lo)
+                    & (_rsi_trend <= _rsi_hi)
                 )
                 _short = (
                     _trend_dn
@@ -916,13 +894,11 @@ def build_rule_signal_panels(
                             "archetype": "trend",
                             "regime": "established_trend_pullback",
                             "edge_hypothesis": (
-                                "pullback recovery inside an established trend improves continuation "
-                                "entry quality"
+                                "pullback recovery inside an established trend improves continuation entry quality"
                             ),
                         },
                     )
                 )
-            
 
         elif fam == "dual_momentum":
             # 17. Dual Momentum
@@ -965,16 +941,13 @@ def build_rule_signal_panels(
                         },
                     )
                 )
-            
-            
-            
 
         elif fam == "residual_reversion":
             # 20. Residual Reversion
             _log_ret_rr = np.diff(np.log(np.maximum(close, 1e-12)), axis=0, prepend=0.0)
             _btc_ret_rr = _log_ret_rr[:, btc_idx : btc_idx + 1]
             for _rr_win in [scale_window(24), scale_window(48)]:
-                _btc_var_rr = _rolling_mean_2d(_btc_ret_rr ** 2, window=_rr_win)
+                _btc_var_rr = _rolling_mean_2d(_btc_ret_rr**2, window=_rr_win)
                 _cov_alt_btc_rr = _rolling_mean_2d(_log_ret_rr * _btc_ret_rr, window=_rr_win)
                 _beta_hat_rr = _cov_alt_btc_rr / np.maximum(_btc_var_rr, 1e-12)
                 _resid_ret_rr = _log_ret_rr - _beta_hat_rr * _btc_ret_rr
@@ -1012,7 +985,7 @@ def build_rule_signal_panels(
                         },
                     )
                 )
-            
+
             # =========================================================================
             # XS ALPHA FAMILIES (cross-sectional, beta-neutral)
             # =========================================================================
@@ -1022,7 +995,9 @@ def build_rule_signal_panels(
             for _lb in [scale_window(12), scale_window(48)]:
                 _raw = _beta_residual_return_2d(close, btc_idx, _lb)
                 _sc, _sd = _cross_sectional_rank_signed_2d(
-                    _raw, valid_mask, min_cross_section=_min_xs,
+                    _raw,
+                    valid_mask,
+                    min_cross_section=_min_xs,
                 )
                 fam_panels.append(
                     CandidateSignalPanel(
@@ -1041,9 +1016,7 @@ def build_rule_signal_panels(
                         valid_mask_2d=valid_mask,
                         metadata={
                             "archetype": "xs_alpha",
-                            "edge_hypothesis": (
-                                "cross-sectional relative momentum, beta-neutral by construction"
-                            ),
+                            "edge_hypothesis": ("cross-sectional relative momentum, beta-neutral by construction"),
                         },
                     )
                 )
@@ -1053,7 +1026,9 @@ def build_rule_signal_panels(
             for _fz, _label in [(funding_z_96, "96"), (funding_z_168, "168")]:
                 _raw = -_fz
                 _sc, _sd = _cross_sectional_rank_signed_2d(
-                    _raw, shared_valid, min_cross_section=_min_xs,
+                    _raw,
+                    shared_valid,
+                    min_cross_section=_min_xs,
                 )
                 fam_panels.append(
                     CandidateSignalPanel(
@@ -1080,7 +1055,9 @@ def build_rule_signal_panels(
         elif fam == "xs_flow":
             _min_xs = cfg.l1_min_cross_section
             _sc, _sd = _cross_sectional_rank_signed_2d(
-                flow_z_24, fxr_valid, min_cross_section=_min_xs,
+                flow_z_24,
+                fxr_valid,
+                min_cross_section=_min_xs,
             )
             fam_panels.append(
                 CandidateSignalPanel(
@@ -1099,9 +1076,7 @@ def build_rule_signal_panels(
                     valid_mask_2d=fxr_valid,
                     metadata={
                         "archetype": "xs_alpha",
-                        "edge_hypothesis": (
-                            "cross-sectional taker flow: long relative buying, short selling"
-                        ),
+                        "edge_hypothesis": ("cross-sectional taker flow: long relative buying, short selling"),
                     },
                 )
             )
@@ -1110,7 +1085,9 @@ def build_rule_signal_panels(
             _min_xs = cfg.l1_min_cross_section
             _raw = -(oi_build_z_42 * np.sign(lsr_log_z_42))
             _sc, _sd = _cross_sectional_rank_signed_2d(
-                _raw, positioning_valid, min_cross_section=_min_xs,
+                _raw,
+                positioning_valid,
+                min_cross_section=_min_xs,
             )
             fam_panels.append(
                 CandidateSignalPanel(
@@ -1129,9 +1106,7 @@ def build_rule_signal_panels(
                     valid_mask_2d=positioning_valid,
                     metadata={
                         "archetype": "xs_alpha",
-                        "edge_hypothesis": (
-                            "cross-sectional OI build with LSR skew: short crowded longs"
-                        ),
+                        "edge_hypothesis": ("cross-sectional OI build with LSR skew: short crowded longs"),
                     },
                 )
             )
@@ -1139,11 +1114,11 @@ def build_rule_signal_panels(
             # =========================================================================
             # NEW G1 ~ G10 FAMILIES
             # =========================================================================
-            
 
         elif fam == "mtf_trend_pullback":
             # G1. mtf_trend_pullback
             for _n_htf in [20, 50]:
+
                 def _compute_g1_htf(
                     df_htf: pd.DataFrame,
                     span: int = _n_htf,
@@ -1151,27 +1126,27 @@ def build_rule_signal_panels(
                     ema = df_htf.ewm(span=span, adjust=False).mean()
                     slope = ema.diff()
                     return np.sign(slope).fillna(0.0)
-                    
+
                 _proj_htf_slope = _resample_to_htf_and_project(
                     datetimes_4h=aligned.datetimes,
                     values_4h=close,
                     htf="1D",
                     agg_method="last",
-                    compute_feature_fn=_compute_g1_htf
+                    compute_feature_fn=_compute_g1_htf,
                 )
-                
+
                 _rsi_4h = _rsi_2d(close, rsi_14_window)
                 _rsi_prev = np.vstack([_rsi_4h[:1], _rsi_4h[:-1]])
                 _rsi_lo, _rsi_hi = 30.0, 70.0
-                
+
                 _long_trig = (_rsi_prev < _rsi_lo) & (_rsi_4h >= _rsi_lo)
                 _short_trig = (_rsi_prev > _rsi_hi) & (_rsi_4h <= _rsi_hi)
-                
+
                 _g1_side = np.zeros_like(close, dtype=np.int8)
                 _g1_side[(_proj_htf_slope > 0) & _long_trig] = 1
                 _g1_side[(_proj_htf_slope < 0) & _short_trig] = -1
                 _g1_score = np.tanh((_rsi_4h - 50.0) / 10.0)
-                
+
                 fam_panels.append(
                     CandidateSignalPanel(
                         family="mtf_trend_pullback",
@@ -1191,29 +1166,28 @@ def build_rule_signal_panels(
                             "archetype": "trend",
                             "regime": "top_down_trend_pullback",
                             "edge_hypothesis": (
-                                "1d trend direction filters 4h rsi oversold/overbought "
-                                "pullback trigger entries"
+                                "1d trend direction filters 4h rsi oversold/overbought pullback trigger entries"
                             ),
                         },
                     )
                 )
-            
 
         elif fam == "mtf_breakout_retest":
             # G2. mtf_breakout_retest
             for _n_htf in [20, 40]:
+
                 def _compute_g2_high_htf(
                     df_htf: pd.DataFrame,
                     window: int = _n_htf,
                 ) -> pd.DataFrame:
                     return df_htf.rolling(window=window).max().shift(1)
-            
+
                 def _compute_g2_low_htf(
                     df_htf: pd.DataFrame,
                     window: int = _n_htf,
                 ) -> pd.DataFrame:
                     return df_htf.rolling(window=window).min().shift(1)
-                    
+
                 _proj_don_high = _resample_to_htf_and_project(
                     datetimes_4h=aligned.datetimes,
                     values_4h=high,
@@ -1228,11 +1202,11 @@ def build_rule_signal_panels(
                     agg_method="min",
                     compute_feature_fn=_compute_g2_low_htf,
                 )
-                
+
                 _prev_close = np.vstack([close[:1], close[:-1]])
                 _long_trig = (_prev_close < _proj_don_high) & (close >= _proj_don_high)
                 _short_trig = (_prev_close > _proj_don_low) & (close <= _proj_don_low)
-                
+
                 _g2_side = np.zeros_like(close, dtype=np.int8)
                 _g2_side[_long_trig] = 1
                 _g2_side[_short_trig] = -1
@@ -1241,7 +1215,7 @@ def build_rule_signal_panels(
                     np.where(_g2_side > 0, (close - _proj_don_high) / atr, (close - _proj_don_low) / atr),
                     0.0,
                 )
-                
+
                 fam_panels.append(
                     CandidateSignalPanel(
                         family="mtf_breakout_retest",
@@ -1261,24 +1235,22 @@ def build_rule_signal_panels(
                             "archetype": "trend",
                             "regime": "retest_breakout",
                             "edge_hypothesis": (
-                                "1d breakout channel level retested on 4h grid with "
-                                "subsequent continuation bounce"
+                                "1d breakout channel level retested on 4h grid with subsequent continuation bounce"
                             ),
                         },
                     )
                 )
-            
 
         elif fam == "taker_imbalance_momentum":
             # G7. taker_imbalance_momentum
             for _tim_win in [scale_window(12), flow_z_24_window]:
                 _cvd_z = flow_z_24 if _tim_win == flow_z_24_window else _zscore_2d(flow_imbalance, window=_tim_win)
-                
+
                 _g7_side = np.zeros_like(close, dtype=np.int8)
                 _g7_side[_cvd_z >= 1.5] = 1
                 _g7_side[_cvd_z <= -1.5] = -1
                 _g7_score = np.tanh(_cvd_z / 1.5)
-                
+
                 fam_panels.append(
                     CandidateSignalPanel(
                         family="taker_imbalance_momentum",
@@ -1302,7 +1274,6 @@ def build_rule_signal_panels(
                         },
                     )
                 )
-            
 
         elif fam == "funding_flow_carry":
             # G8. funding_flow_carry
@@ -1348,18 +1319,17 @@ def build_rule_signal_panels(
                     },
                 )
             )
-            
 
         elif fam == "funding_extreme_reversal":
             # G9. funding_extreme_reversal
             for _fer_win in [funding_z_168_window]:
                 _f_z = funding_z_168 if _fer_win == 168 else _zscore_2d(funding, window=_fer_win, eps=1e-6)
-                
+
                 _g9_side = np.zeros_like(close, dtype=np.int8)
                 _g9_side[_f_z >= 1.645] = -1
                 _g9_side[_f_z <= -1.645] = 1
                 _g9_score = np.clip(-_f_z / 1.645, -1.0, 1.0)
-                
+
                 fam_panels.append(
                     CandidateSignalPanel(
                         family="funding_extreme_reversal",
@@ -1385,7 +1355,6 @@ def build_rule_signal_panels(
                         },
                     )
                 )
-            
 
         elif fam == "funding_flow_unwind":
             # G9b. funding_flow_unwind
@@ -1425,8 +1394,7 @@ def build_rule_signal_panels(
                         "archetype": "unwind",
                         "regime": "funding_flow_reversal",
                         "edge_hypothesis": (
-                            "crowded funding regimes unwind when order flow and one-bar "
-                            "returns flip together"
+                            "crowded funding regimes unwind when order flow and one-bar returns flip together"
                         ),
                         "causal_inputs": (
                             "trailing 168-bar funding z-score, 24-bar flow z-score, "
@@ -1435,7 +1403,6 @@ def build_rule_signal_panels(
                     },
                 )
             )
-            
 
         elif fam == "flow_exhaustion_reversal":
             # G9c. flow_exhaustion_reversal
@@ -1473,14 +1440,10 @@ def build_rule_signal_panels(
                             "price shocks with simultaneous order-flow extremes tend "
                             "to snap back on immediate reversal bars"
                         ),
-                        "causal_inputs": (
-                            "trailing 12-bar return z-score, 24-bar flow z-score, "
-                            "and 1-bar return"
-                        ),
+                        "causal_inputs": ("trailing 12-bar return z-score, 24-bar flow z-score, and 1-bar return"),
                     },
                 )
             )
-            
 
         elif fam == "positioning_unwind":
             # G9d. positioning_unwind
@@ -1490,9 +1453,8 @@ def build_rule_signal_panels(
                 & ((_pu_crowded_side.astype(np.float64) * lsr_log_z_42) >= 0.75)
                 & (oi_build_z_42 >= 0.75)
             )
-            _pu_reversal = (
-                (_pu_crowded_side.astype(np.float64) * flow_z_24 <= -1.0)
-                & (_pu_crowded_side.astype(np.float64) * ret_1 < 0.0)
+            _pu_reversal = (_pu_crowded_side.astype(np.float64) * flow_z_24 <= -1.0) & (
+                _pu_crowded_side.astype(np.float64) * ret_1 < 0.0
             )
             _pu_condition = _pu_crowding & _pu_reversal & positioning_valid
             _pu_entry = _entry_rising_edge_2d(_pu_condition)
@@ -1501,9 +1463,7 @@ def build_rule_signal_panels(
             _pu_lsr_excess = np.clip(np.abs(lsr_log_z_42) - 0.75, 0.0, 1.0)
             _pu_oi_excess = np.clip(oi_build_z_42 - 0.75, 0.0, 1.0)
             _pu_flow_excess = np.clip((-_pu_crowded_side.astype(np.float64) * flow_z_24) - 1.0, 0.0, 1.0)
-            _pu_score_mag = 0.25 * (
-                _pu_funding_excess + _pu_lsr_excess + _pu_oi_excess + _pu_flow_excess
-            )
+            _pu_score_mag = 0.25 * (_pu_funding_excess + _pu_lsr_excess + _pu_oi_excess + _pu_flow_excess)
             _pu_score = _pu_side.astype(np.float64) * _pu_score_mag
             _pu_side[:funding_z_168_window] = 0
             _pu_score[:funding_z_168_window] = 0.0
@@ -1536,7 +1496,6 @@ def build_rule_signal_panels(
                     },
                 )
             )
-            
 
         elif fam == "funding_term_structure_carry":
             # G9e. funding_term_structure_carry
@@ -1547,10 +1506,8 @@ def build_rule_signal_panels(
             _fts_entry_cond = _fts_crowded & _fts_accel & _fts_same_dir & shared_valid
             _fts_entry = _entry_rising_edge_2d(_fts_entry_cond)
             _fts_side = np.where(_fts_entry, np.sign(funding_z_168).astype(np.int8), 0)
-            _fts_score = _fts_side.astype(np.float64) * np.clip(
-                np.abs(funding_ts_slope) - 0.75, 0.0, 1.0
-            )
-            
+            _fts_score = _fts_side.astype(np.float64) * np.clip(np.abs(funding_ts_slope) - 0.75, 0.0, 1.0)
+
             fam_panels.append(
                 CandidateSignalPanel(
                     family="funding_term_structure_carry",
@@ -1576,16 +1533,14 @@ def build_rule_signal_panels(
                     },
                 )
             )
-            
 
         elif fam == "flow_trend_continuation":
             # G9f. flow_trend_continuation
             # Entry when flow supports ongoing trend (not reversal but continuation)
-            _flo_cont_flow_ok = flow_z_24 >= 1.0    # strong flow
-            _flo_cont_ret_trend = ret_12 > 0.0       # positive 12-bar trend
-            _flo_cont_ret_inertia = ret_1 > 0.0      # same-bar continuation
-            _flo_cont_cond = (_flo_cont_flow_ok & _flo_cont_ret_trend & _flo_cont_ret_inertia
-                              & shared_valid)
+            _flo_cont_flow_ok = flow_z_24 >= 1.0  # strong flow
+            _flo_cont_ret_trend = ret_12 > 0.0  # positive 12-bar trend
+            _flo_cont_ret_inertia = ret_1 > 0.0  # same-bar continuation
+            _flo_cont_cond = _flo_cont_flow_ok & _flo_cont_ret_trend & _flo_cont_ret_inertia & shared_valid
             _flo_cont_entry = _entry_rising_edge_2d(_flo_cont_cond)
             _flo_cont_side = np.where(_flo_cont_entry, 1, 0).astype(np.int8)  # long-only continuation
             _flo_cont_score = np.where(
@@ -1593,7 +1548,7 @@ def build_rule_signal_panels(
                 np.clip(flow_z_24 / 3.0, 0.0, 1.0) * np.clip(ret_12, 0.0, 0.03) / 0.03,
                 0.0,
             )
-            
+
             fam_panels.append(
                 CandidateSignalPanel(
                     family="flow_trend_continuation",
@@ -1613,13 +1568,11 @@ def build_rule_signal_panels(
                         "archetype": "ts_mom",
                         "regime": "flow_momentum_continuation",
                         "edge_hypothesis": (
-                            "strong flow supporting ongoing price trend signals "
-                            "continuation before exhaustion"
+                            "strong flow supporting ongoing price trend signals continuation before exhaustion"
                         ),
                     },
                 )
             )
-            
 
         elif fam == "lsr_oi_regime_filter":
             # G9g. lsr_oi_regime_filter (BTN conditioning gate)
@@ -1632,11 +1585,12 @@ def build_rule_signal_panels(
                 _loi_regime_entry,
                 np.clip(
                     (np.abs(lsr_log_z_42) - 1.0) / 2.0 + (oi_build_z_42 - 0.5) / 2.0,
-                    0.0, 1.0,
+                    0.0,
+                    1.0,
                 ),
                 0.0,
             )
-            
+
             fam_panels.append(
                 CandidateSignalPanel(
                     family="lsr_oi_regime_filter",
@@ -1666,18 +1620,18 @@ def build_rule_signal_panels(
                     },
                 )
             )
-            
 
         elif fam == "vol_term_structure_gate":
             # G10. vol_term_structure_gate
             for _vts_win in [scale_window(20)]:
+
                 def _compute_g10_htf(
                     df_htf: pd.DataFrame,
                     window: int = _vts_win,
                 ) -> pd.DataFrame:
                     ret = np.log(df_htf / df_htf.shift(1)).fillna(0.0)
                     return ret.rolling(window=window).std()
-                    
+
                 _proj_htf_vol = _resample_to_htf_and_project(
                     datetimes_4h=aligned.datetimes,
                     values_4h=close,
@@ -1685,23 +1639,23 @@ def build_rule_signal_panels(
                     agg_method="last",
                     compute_feature_fn=_compute_g10_htf,
                 )
-                
+
                 _ret_4h = np.diff(np.log(np.maximum(close, 1e-12)), axis=0, prepend=0.0)
                 _ltf_vol = _rolling_std_2d(_ret_4h, window=_vts_win)
-                
+
                 _vol_ratio = _proj_htf_vol / np.maximum(_ltf_vol, 1e-12)
                 _gate_active = _vol_ratio >= 1.2
-                
+
                 _don_high = _rolling_max_2d(high, window=_vts_win)
                 _don_low = _rolling_min_2d(low, window=_vts_win)
                 _trig_up = close > _don_high
                 _trig_dn = close < _don_low
-                
+
                 _g10_side = np.zeros_like(close, dtype=np.int8)
                 _g10_side[_gate_active & _trig_up] = 1
                 _g10_side[_gate_active & _trig_dn] = -1
                 _g10_score = np.where(_trig_up, 1.0, np.where(_trig_dn, -1.0, 0.0))
-                
+
                 fam_panels.append(
                     CandidateSignalPanel(
                         family="vol_term_structure_gate",
@@ -1727,9 +1681,8 @@ def build_rule_signal_panels(
                         },
                     )
                 )
-            
+
             # ── NEW: 6 signal families ───────────────────────────────────────────────
-            
 
         elif fam == "macd_4h":
             # D. macd_4h
@@ -1749,9 +1702,16 @@ def build_rule_signal_panels(
                 CandidateSignalPanel(
                     family="macd_4h",
                     variant="macd_12_26_9",
-                    params=apply_per_family_params(cfg, "macd_4h", "macd_12_26_9", {
-                        "fast": 12, "slow": 26, "signal": 9,
-                    }),
+                    params=apply_per_family_params(
+                        cfg,
+                        "macd_4h",
+                        "macd_12_26_9",
+                        {
+                            "fast": 12,
+                            "slow": 26,
+                            "signal": 9,
+                        },
+                    ),
                     datetimes=aligned.datetimes,
                     symbols=aligned.symbols,
                     signed_score_2d=np.clip(_macd_score, -1.0, 1.0),
@@ -1769,7 +1729,6 @@ def build_rule_signal_panels(
                     },
                 )
             )
-            
 
         elif fam == "supertrend":
             # E. supertrend
@@ -1780,9 +1739,15 @@ def build_rule_signal_panels(
                 CandidateSignalPanel(
                     family="supertrend",
                     variant=f"st_{_st_period}",
-                    params=apply_per_family_params(cfg, "supertrend", f"st_{_st_period}", {
-                        "period": _st_period, "multiplier": 2.5,
-                    }),
+                    params=apply_per_family_params(
+                        cfg,
+                        "supertrend",
+                        f"st_{_st_period}",
+                        {
+                            "period": _st_period,
+                            "multiplier": 2.5,
+                        },
+                    ),
                     datetimes=aligned.datetimes,
                     symbols=aligned.symbols,
                     signed_score_2d=_st_score,
@@ -1802,7 +1767,6 @@ def build_rule_signal_panels(
                     },
                 )
             )
-            
 
         elif fam == "ichimoku_trend":
             # F. ichimoku_trend
@@ -1819,9 +1783,15 @@ def build_rule_signal_panels(
                 CandidateSignalPanel(
                     family="ichimoku_trend",
                     variant="ichi_9_26",
-                    params=apply_per_family_params(cfg, "ichimoku_trend", "ichi_9_26", {
-                        "tenkan": 9, "kijun": 26,
-                    }),
+                    params=apply_per_family_params(
+                        cfg,
+                        "ichimoku_trend",
+                        "ichi_9_26",
+                        {
+                            "tenkan": 9,
+                            "kijun": 26,
+                        },
+                    ),
                     datetimes=aligned.datetimes,
                     symbols=aligned.symbols,
                     signed_score_2d=np.clip(np.tanh(_ichi_score), -1.0, 1.0),
@@ -1841,7 +1811,6 @@ def build_rule_signal_panels(
                     },
                 )
             )
-            
 
         return fam_panels
 
@@ -1894,10 +1863,8 @@ def build_rule_signal_panels(
     # ── per_family_params: apply param overrides ──
     if cfg.per_family_params is not None:
         from dataclasses import replace
-        panels = [
-            replace(p, params=apply_per_family_params(cfg, p.family, p.variant, p.params))
-            for p in panels
-        ]
+
+        panels = [replace(p, params=apply_per_family_params(cfg, p.family, p.variant, p.params)) for p in panels]
 
     panels_with_context = _attach_signal_context(tuple(panels), cfg=cfg, regime_ctx=regime_ctx)
     return filter_rule_signal_panels(panels_with_context, cfg=cfg)
@@ -1914,12 +1881,30 @@ def candidate_panels_to_events(
 ) -> pd.DataFrame:
     """Convert dense [T,N] panels into sparse candidate event rows."""
     if not panels:
-        return pd.DataFrame(columns=[
-            "datetime", "symbol", "family", "variant", "side",
-            "raw_score", "score_z", "expected_holding_bars", "min_holding_bars",
-            "stop_atr_mult", "take_profit_atr_mult", "turnover_proxy", "cost_floor_bps", "entry_idx",
-            "side_flipped", "exit_policy_id", "signal_cell", "archetype", "entry_regime", "entry_regime_code",
-        ])
+        return pd.DataFrame(
+            columns=[
+                "datetime",
+                "symbol",
+                "family",
+                "variant",
+                "side",
+                "raw_score",
+                "score_z",
+                "expected_holding_bars",
+                "min_holding_bars",
+                "stop_atr_mult",
+                "take_profit_atr_mult",
+                "turnover_proxy",
+                "cost_floor_bps",
+                "entry_idx",
+                "side_flipped",
+                "exit_policy_id",
+                "signal_cell",
+                "archetype",
+                "entry_regime",
+                "entry_regime_code",
+            ]
+        )
 
     def _convert_single_panel(panel: CandidateSignalPanel) -> list[pd.DataFrame]:
         panel_events: list[pd.DataFrame] = []
@@ -1980,36 +1965,35 @@ def candidate_panels_to_events(
             )
             for policy in regime_policies:
                 signal_cells = np.asarray(
-                    [
-                        f"{panel.family}:{panel.variant}:{policy.policy_id}:{name}"
-                        for name in r_entry_regime
-                    ],
+                    [f"{panel.family}:{panel.variant}:{policy.policy_id}:{name}" for name in r_entry_regime],
                     dtype=object,
                 )
                 if side_flipped:
                     signal_cells = np.asarray([f"{cell}:flip" for cell in signal_cells], dtype=object)
-                df = pd.DataFrame({
-                    "datetime": r_datetimes,
-                    "symbol": r_symbols,
-                    "family": panel.family,
-                    "variant": panel.variant,
-                    "side": r_sides,
-                    "raw_score": r_raw_scores,
-                    "score_z": r_score_z,
-                    "expected_holding_bars": int(policy.expected_holding_bars),
-                    "min_holding_bars": int(policy.min_holding_bars),
-                    "stop_atr_mult": float(policy.stop_atr_mult),
-                    "take_profit_atr_mult": float(policy.take_profit_atr_mult),
-                    "turnover_proxy": r_turnover,
-                    "cost_floor_bps": r_cost,
-                    "entry_idx": r_entry_idx,
-                    "side_flipped": side_flipped,
-                    "exit_policy_id": policy.policy_id,
-                    "signal_cell": signal_cells,
-                    "archetype": panel.archetype,
-                    "entry_regime": r_entry_regime,
-                    "entry_regime_code": r_entry_code,
-                })
+                df = pd.DataFrame(
+                    {
+                        "datetime": r_datetimes,
+                        "symbol": r_symbols,
+                        "family": panel.family,
+                        "variant": panel.variant,
+                        "side": r_sides,
+                        "raw_score": r_raw_scores,
+                        "score_z": r_score_z,
+                        "expected_holding_bars": int(policy.expected_holding_bars),
+                        "min_holding_bars": int(policy.min_holding_bars),
+                        "stop_atr_mult": float(policy.stop_atr_mult),
+                        "take_profit_atr_mult": float(policy.take_profit_atr_mult),
+                        "turnover_proxy": r_turnover,
+                        "cost_floor_bps": r_cost,
+                        "entry_idx": r_entry_idx,
+                        "side_flipped": side_flipped,
+                        "exit_policy_id": policy.policy_id,
+                        "signal_cell": signal_cells,
+                        "archetype": panel.archetype,
+                        "entry_regime": r_entry_regime,
+                        "entry_regime_code": r_entry_code,
+                    }
+                )
                 panel_events.append(df)
         return panel_events
 
@@ -2020,11 +2004,29 @@ def candidate_panels_to_events(
             all_events.extend(fut.result())
 
     if not all_events:
-        return pd.DataFrame(columns=[
-            "datetime", "symbol", "family", "variant", "side",
-            "raw_score", "score_z", "expected_holding_bars", "min_holding_bars",
-            "stop_atr_mult", "take_profit_atr_mult", "turnover_proxy", "cost_floor_bps", "entry_idx",
-            "side_flipped", "exit_policy_id", "signal_cell", "archetype", "entry_regime", "entry_regime_code",
-        ])
+        return pd.DataFrame(
+            columns=[
+                "datetime",
+                "symbol",
+                "family",
+                "variant",
+                "side",
+                "raw_score",
+                "score_z",
+                "expected_holding_bars",
+                "min_holding_bars",
+                "stop_atr_mult",
+                "take_profit_atr_mult",
+                "turnover_proxy",
+                "cost_floor_bps",
+                "entry_idx",
+                "side_flipped",
+                "exit_policy_id",
+                "signal_cell",
+                "archetype",
+                "entry_regime",
+                "entry_regime_code",
+            ]
+        )
 
     return pd.concat(all_events, axis=0, ignore_index=True)

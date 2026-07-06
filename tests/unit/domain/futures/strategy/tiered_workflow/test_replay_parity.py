@@ -37,12 +37,26 @@ def test_assert_selection_replay_parity_returns_false_on_mismatch() -> None:
 # ── RC-1: gate=True parity divergence ──
 def test_parity_gate_returns_false_with_gate_flag() -> None:
     """gate=True 시 mismatch면 False 반환."""
-    replay = SimpleNamespace(cagr_hybrid=0.18, mdd_hybrid=0.09, fold_pass_ratio=0.67, trade_count=80,
-                             deploy_leverage=3.0, sharpe_hac_hybrid=1.5, sortino_hybrid=2.0,
-                             constraint_values=(0.0,))
-    final = SimpleNamespace(cagr_hybrid=0.07, mdd_hybrid=0.09, fold_pass_ratio=0.67, trade_count=80,
-                            deploy_leverage=1.0, sharpe_hac_hybrid=1.5, sortino_hybrid=2.0,
-                            constraint_values=(0.0,))
+    replay = SimpleNamespace(
+        cagr_hybrid=0.18,
+        mdd_hybrid=0.09,
+        fold_pass_ratio=0.67,
+        trade_count=80,
+        deploy_leverage=3.0,
+        sharpe_hac_hybrid=1.5,
+        sortino_hybrid=2.0,
+        constraint_values=(0.0,),
+    )
+    final = SimpleNamespace(
+        cagr_hybrid=0.07,
+        mdd_hybrid=0.09,
+        fold_pass_ratio=0.67,
+        trade_count=80,
+        deploy_leverage=1.0,
+        sharpe_hac_hybrid=1.5,
+        sortino_hybrid=2.0,
+        constraint_values=(0.0,),
+    )
 
     result = assert_selection_replay_parity(
         replay_evaluation=replay,
@@ -76,6 +90,7 @@ def test_self_check_uses_master_tf_for_bars_per_year() -> None:
     from src.domain.futures.strategy.tiered_workflow.risk_deployment import (
         apply_deployment,
     )
+
     dep = apply_deployment(rets=rets_array, leverage=l_star, bars_per_year=bpy_8h)
 
     eval_8h = SimpleNamespace(
@@ -257,4 +272,3 @@ def test_parity_selfcheck_missing_metric_on_one_side() -> None:
         gate=False,
     )
     assert result is True
-

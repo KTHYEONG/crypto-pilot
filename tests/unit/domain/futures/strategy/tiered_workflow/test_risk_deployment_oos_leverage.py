@@ -1,5 +1,6 @@
 # tests/unit/domain/futures/strategy/tiered_workflow/test_risk_deployment_oos_leverage.py
 """RC-2: OOS-aware leverage calibrate_deployment_leverage 테스트 (S1~S4)."""
+
 from __future__ import annotations
 
 import numpy as np
@@ -35,9 +36,7 @@ class TestOosBlendWhenInverted:
         assert lev > 2.0, f"L*={lev:.4f} should exceed magic cap 2.0"
         oos_mdd_at_l = _mdd_at_leverage(oos_rets, lev)
         invariant = 0.30 * (1.0 - 0.30 * 0.5)
-        assert oos_mdd_at_l <= invariant + 1e-4, (
-            f"OOS MDD at L*={oos_mdd_at_l:.6f} > invariant={invariant:.6f}"
-        )
+        assert oos_mdd_at_l <= invariant + 1e-4, f"OOS MDD at L*={oos_mdd_at_l:.6f} > invariant={invariant:.6f}"
         assert binding == "oos_blend", f"binding={binding} != oos_blend"
 
 
@@ -174,9 +173,7 @@ class TestFitMddCrisisGate:
             l_hard_cap=20.0,
             oos_floor_cap=4.0,
         )
-        assert _bind_no_gate == "oos_blend", (
-            f"pre-check: without gate binding={_bind_no_gate} (expected oos_blend)"
-        )
+        assert _bind_no_gate == "oos_blend", f"pre-check: without gate binding={_bind_no_gate} (expected oos_blend)"
 
         # 게이트 적용
         lev, binding, _ = calibrate_deployment_leverage(

@@ -1,4 +1,5 @@
 """Tests for L1 probe prior boost in build_qualified_signal_registry."""
+
 from __future__ import annotations
 
 from unittest.mock import MagicMock
@@ -52,6 +53,7 @@ def _make_evidence(
 
 # ─── Scenario 3: Probe prior boost raises quality_weight ───────────────────
 
+
 def test_probe_prior_boost_raises_qw() -> None:
     """Scenario 3: probe-winning signal gets qw boosted to probe_prior_map floor."""
     evidence = (
@@ -99,6 +101,7 @@ def test_probe_prior_boost_signal_survives_gate() -> None:
 
 
 # ─── Scenario 4: Probe non-winner gets no boost ────────────────────────────
+
 
 def test_probe_non_winner_no_false_boost() -> None:
     """Scenario 4: non-probe-winner signal is NOT boosted."""

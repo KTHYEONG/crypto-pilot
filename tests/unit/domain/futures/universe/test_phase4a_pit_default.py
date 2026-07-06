@@ -40,6 +40,7 @@ def test_universe_config_k_in_zero_means_capacity_coverage_path() -> None:
 # Scenario 4 — capacity-coverage prefix logic (unit-level, pure arithmetic)
 # ---------------------------------------------------------------------------
 
+
 def _apply_coverage_prefix(
     caps: list[float],
     target: float,

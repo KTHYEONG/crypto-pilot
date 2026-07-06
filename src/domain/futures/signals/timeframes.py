@@ -150,9 +150,7 @@ def _resample_ohlcv(df: pd.DataFrame, alias: str) -> pd.DataFrame:
         if col in prepared.columns:
             agg[col] = "mean"
     resampled = (
-        prepared.set_index("datetime").resample(alias, label="right", closed="right")
-        .agg(agg)
-        .dropna(subset=["close"])
+        prepared.set_index("datetime").resample(alias, label="right", closed="right").agg(agg).dropna(subset=["close"])
     )
     if not resampled.empty:
         resampled = resampled.iloc[:-1]
@@ -169,9 +167,7 @@ def _bars_per_year(tf: str) -> float:
     return (24.0 * 365.0) / _hpb(tf)
 
 
-def _compute_forward_returns(
-    close: NDArray[np.float64], holding_bars: int
-) -> NDArray[np.float64]:
+def _compute_forward_returns(close: NDArray[np.float64], holding_bars: int) -> NDArray[np.float64]:
     """Compute forward returns with entry at t+1 (look-ahead bias prevention).
 
     fwd[t] = close[t+1+H] / close[t+1] - 1 for t in 0..T-2-H
@@ -191,9 +187,7 @@ def _compute_forward_returns(
     return fwd
 
 
-def _fold_sign_consistency(
-    ic_vals: NDArray[np.float64], overall_ic: float
-) -> float:
+def _fold_sign_consistency(ic_vals: NDArray[np.float64], overall_ic: float) -> float:
     """Fraction of folds whose IC sign matches overall_ic sign."""
     if len(ic_vals) == 0:
         return 0.0
@@ -394,9 +388,7 @@ def _probe_tf_worker(args: tuple[Any, ...]) -> list[dict[str, Any]]:
     cfg = CandidateStrategyConfig(**{**base_cfg_kwargs, "timeframe": tf})
 
     # Build data_maps wrapper {symbol: {tf: df}}
-    data_maps_tf: dict[str, dict[str, Any]] = {
-        sym: {tf: df} for sym, df in resampled_maps_for_tf.items()
-    }
+    data_maps_tf: dict[str, dict[str, Any]] = {sym: {tf: df} for sym, df in resampled_maps_for_tf.items()}
 
     # Align
     try:
@@ -496,12 +488,16 @@ def _probe_tf_worker(args: tuple[Any, ...]) -> list[dict[str, Any]]:
             )
             fold_consistency = _fold_sign_consistency(fold_ics, ic_mean)
 
-            half_life = _alpha_half_life(
-                signal_col, close_col, valid_col, h_hold, hpb_val, min_obs=min_obs_dynamic
-            )
+            half_life = _alpha_half_life(signal_col, close_col, valid_col, h_hold, hpb_val, min_obs=min_obs_dynamic)
 
             net_bps, turnover_yr = _compute_net_edge_bps(
-                signal_col, fwd, valid_col, to_col, round_trip_cost_bps, tf, min_obs=min_obs_dynamic,
+                signal_col,
+                fwd,
+                valid_col,
+                to_col,
+                round_trip_cost_bps,
+                tf,
+                min_obs=min_obs_dynamic,
                 holding_bars=h_hold,
             )
 
@@ -574,9 +570,7 @@ def probe_timeframe_alpha(
 
     try:
         base_cfg_kwargs: dict[str, Any] = {
-            k: v
-            for k, v in dataclasses.asdict(base_cfg).items()
-            if not k.startswith("_")
+            k: v for k, v in dataclasses.asdict(base_cfg).items() if not k.startswith("_")
         }
         # Remove non-init fields if any
         base_cfg_kwargs.pop("_purge_bars_input", None)
@@ -648,9 +642,7 @@ def probe_timeframe_alpha(
 
     _logger.info("Launching tf probe: %d tf tasks, %d workers", len(worker_args), n_workers)
     with ProcessPoolExecutor(max_workers=n_workers) as executor:
-        future_map = {
-            executor.submit(_probe_tf_worker, args): args[2] for args in worker_args
-        }
+        future_map = {executor.submit(_probe_tf_worker, args): args[2] for args in worker_args}
         for future in as_completed(future_map):
             tf_label = future_map[future]
             try:
@@ -676,9 +668,7 @@ def probe_timeframe_alpha(
             if not tested:
                 continue
 
-            tstats = np.array(
-                [float(c["ic_tstat_hac"]) for c in tested], dtype=np.float64
-            )
+            tstats = np.array([float(c["ic_tstat_hac"]) for c in tested], dtype=np.float64)
             pvals = 2.0 * norm.sf(np.abs(tstats))
             discoveries = _bh_fdr(pvals, fdr_q)
             for idx, c in enumerate(tested):
@@ -689,15 +679,11 @@ def probe_timeframe_alpha(
     # ---------------------------------------------------------------------------
     diversity_corr: dict[str, float] = {}
     try:
-        diversity_corr = _compute_diversity_corr(
-            all_cell_dicts, data_maps, syms_list, tf_grid
-        )
+        diversity_corr = _compute_diversity_corr(all_cell_dicts, data_maps, syms_list, tf_grid)
     except Exception as exc:
         _logger.warning("Diversity corr computation failed: %s", exc)
 
-    built_cells: tuple[TfCellEvidence, ...] = tuple(
-        TfCellEvidence(**d) for d in all_cell_dicts
-    )
+    built_cells: tuple[TfCellEvidence, ...] = tuple(TfCellEvidence(**d) for d in all_cell_dicts)
     return TfProbeManifest(
         cells=built_cells,
         tf_grid=tuple(tf_grid),
@@ -839,14 +825,23 @@ def select_tf_family_cells(
             if _logger.isEnabledFor(logging.DEBUG):
                 _logger.debug(
                     "[TF-PROBE CELL-REJECT] %s:%s:%s:%s -> reasons=%s",
-                    cell.tf, cell.symbol, cell.family, cell.variant, ", ".join(reasons)
+                    cell.tf,
+                    cell.symbol,
+                    cell.family,
+                    cell.variant,
+                    ", ".join(reasons),
                 )
         else:
             if _logger.isEnabledFor(logging.DEBUG):
                 _logger.debug(
                     "[TF-PROBE CELL-ADMIT] %s:%s:%s:%s -> tstat=%.4f net_edge=%.4f fold_cons=%.4f",
-                    cell.tf, cell.symbol, cell.family, cell.variant,
-                    cell.ic_tstat_hac, cell.net_edge_bps, cell.ic_fold_sign_consistency
+                    cell.tf,
+                    cell.symbol,
+                    cell.family,
+                    cell.variant,
+                    cell.ic_tstat_hac,
+                    cell.net_edge_bps,
+                    cell.ic_fold_sign_consistency,
                 )
             selected.append(cell)
 

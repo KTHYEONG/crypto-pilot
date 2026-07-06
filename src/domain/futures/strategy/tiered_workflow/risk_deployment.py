@@ -6,6 +6,7 @@ DSR/Sharpe는 L 스케일에 불변(mean·std 동일 비율 변화)이므로 CAG
 look-ahead 방지: L은 champion의 히스토리컬 OOS 수익률에서 산출하며, 미래 시점
 정보에 의존하지 않는다.
 """
+
 from __future__ import annotations
 
 import logging
@@ -241,10 +242,17 @@ def calibrate_deployment_leverage(
                 "[L2-CALIB-CV] L*=%.4f(%s) | fit_MDD_vol1=%.6f OOS_MDD_vol1=%.6f "
                 "MDD_ratio=%.2f | OOS_deployed_MDD=%.6f (cap=%.4f) | "
                 "fit_CAGR_v1=%.4f fit_sharpe_v1=%.4f OOS_CAGR_v1=%.4f OOS_sharpe_v1=%.4f",
-                l_final, binding,
-                _fit_mdd_v1, _oos_mdd_v1, _mdd_ratio,
-                cross_valid_mdd, mdd_cap,
-                _fit_cagr_v1, _fit_sharpe_v1, _oos_cagr_v1, _oos_sharpe_v1,
+                l_final,
+                binding,
+                _fit_mdd_v1,
+                _oos_mdd_v1,
+                _mdd_ratio,
+                cross_valid_mdd,
+                mdd_cap,
+                _fit_cagr_v1,
+                _fit_sharpe_v1,
+                _oos_cagr_v1,
+                _oos_sharpe_v1,
             )
             # Crisis gate: fit-leg 자체가 재앙적 MDD(>=threshold)면 OOS가 "안전해 보인다"는
             # 이유만으로 레버리지를 올리지 않음 — fit-leg의 보수적 경고를 무시하지 않도록 조기 차단.
@@ -252,7 +260,10 @@ def calibrate_deployment_leverage(
                 _logger.debug(
                     "[L2-OOS-BLEND-SUPPRESSED] fit_MDD_vol1=%.4f >= crisis_gate=%.4f "
                     "-> oos_blend skipped, L* stays %.4f (%s)",
-                    _fit_mdd_v1, fit_mdd_crisis_gate, l_final, binding,
+                    _fit_mdd_v1,
+                    fit_mdd_crisis_gate,
+                    l_final,
+                    binding,
                 )
             # RC-2: fit/OOS 역전 시 blended budget (기존 매직캡 min(2.0, ...) 대체)
             elif _mdd_ratio < 1.0:
@@ -271,17 +282,23 @@ def calibrate_deployment_leverage(
                         l_final = _prev_final
                         binding = "oos_blend"
                         _logger.debug(
-                            "[L2-OOS-BLEND] L_candidate=%.4f exceeds OOS invariant %.4f "
-                            "→ reverted to L*=%.4f",
-                            _l_candidate, _oos_invariant, l_final,
+                            "[L2-OOS-BLEND] L_candidate=%.4f exceeds OOS invariant %.4f → reverted to L*=%.4f",
+                            _l_candidate,
+                            _oos_invariant,
+                            l_final,
                         )
                     else:
                         cross_valid_mdd = _deployed_mdd
                         _logger.debug(
                             "[L2-OOS-BLEND] Raised L* from %.4f to %.4f (blend=%.2f, "
                             "oos_mdd_v1=%.4f, L_oos=%.4f, OOS_deployed_MDD=%.4f ≤ %.4f)",
-                            _prev_final, l_final, oos_budget_blend,
-                            _oos_mdd_v1, l_oos, cross_valid_mdd, _oos_invariant,
+                            _prev_final,
+                            l_final,
+                            oos_budget_blend,
+                            _oos_mdd_v1,
+                            l_oos,
+                            cross_valid_mdd,
+                            _oos_invariant,
                         )
         else:
             _logger.debug("[L2-CALIB-CV] oos_rets size<2, skipping cross-validation")
@@ -289,19 +306,14 @@ def calibrate_deployment_leverage(
     # Concentration gate: 독립적인 DR 기반 제약 (OOS 결과와 무관)
     if diversification_gate_enabled:
         if concentration_floor is None:
-            raise ValueError(
-                "concentration_floor must be explicitly set "
-                "when diversification_gate_enabled=True"
-            )
+            raise ValueError("concentration_floor must be explicitly set when diversification_gate_enabled=True")
         if diversification_ratio_fit is not None:
             dr_arr = np.asarray(diversification_ratio_fit, dtype=np.float64)
             if dr_arr.size >= concentration_recent_window_bars:
                 dr_fit_median = float(np.median(dr_arr))
                 dr_recent = float(np.median(dr_arr[-concentration_recent_window_bars:]))
                 if dr_fit_median > 1e-9:
-                    concentration_ratio = float(
-                        np.clip(dr_recent / dr_fit_median, concentration_floor, 1.0)
-                    )
+                    concentration_ratio = float(np.clip(dr_recent / dr_fit_median, concentration_floor, 1.0))
                     if concentration_ratio < 1.0:
                         l_final = l_final * concentration_ratio
                         binding = "concentration_gate"
@@ -405,11 +417,7 @@ def compute_layer2_fold_diagnostics(
         recent_fold_mdd = float(deployed.mdd)
 
     nonempty_pass = [value for value in fold_compound_pass if value is not None]
-    fold_pass_ratio = (
-        sum(1 for value in nonempty_pass if value) / len(nonempty_pass)
-        if nonempty_pass
-        else 0.0
-    )
+    fold_pass_ratio = sum(1 for value in nonempty_pass if value) / len(nonempty_pass) if nonempty_pass else 0.0
     latest_to_median_cagr = 0.0
     if deployed_cagrs_nonempty:
         median_cagr = float(np.median(np.asarray(deployed_cagrs_nonempty, dtype=np.float64)))

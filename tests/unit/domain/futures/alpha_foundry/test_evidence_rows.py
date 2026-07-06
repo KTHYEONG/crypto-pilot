@@ -66,10 +66,18 @@ class TestWriteAlphaFoundryReport:
     # Scenario 1.5: evidence_rows 3건 → parquet 기록 확인
     def test_writes_evidence_rows_to_parquet(self, tmp_path: Path) -> None:
         report = FakeReport(
-            run_id="test_run", mode="gate", timeframe="4h",
-            symbols=("BTCUSDT",), n_bars=100, n_panels_in=10,
-            n_bound_panels=8, n_evidence=5, n_passed=3, n_rejected=2,
-            reject_reason_counts={}, elapsed_sec=0.1,
+            run_id="test_run",
+            mode="gate",
+            timeframe="4h",
+            symbols=("BTCUSDT",),
+            n_bars=100,
+            n_panels_in=10,
+            n_bound_panels=8,
+            n_evidence=5,
+            n_passed=3,
+            n_rejected=2,
+            reject_reason_counts={},
+            elapsed_sec=0.1,
         )
         rows = self._make_evidence_rows(3)
         _json_path, parquet_path = _write_alpha_foundry_report(
@@ -88,10 +96,18 @@ class TestWriteAlphaFoundryReport:
     # Scenario 2.8: 빈 evidence → 빈 DataFrame + 스키마 존재
     def test_empty_evidence_rows_writes_schema_only(self, tmp_path: Path) -> None:
         report = FakeReport(
-            run_id="empty_run", mode="audit", timeframe="4h",
-            symbols=(), n_bars=0, n_panels_in=0,
-            n_bound_panels=0, n_evidence=0, n_passed=0, n_rejected=0,
-            reject_reason_counts={}, elapsed_sec=0.0,
+            run_id="empty_run",
+            mode="audit",
+            timeframe="4h",
+            symbols=(),
+            n_bars=0,
+            n_panels_in=0,
+            n_bound_panels=0,
+            n_evidence=0,
+            n_passed=0,
+            n_rejected=0,
+            reject_reason_counts={},
+            elapsed_sec=0.0,
         )
         _json_path, parquet_path = _write_alpha_foundry_report(
             report=report,
@@ -109,10 +125,18 @@ class TestWriteAlphaFoundryReport:
     # Scenario 3.5: OSError 전파
     def test_raises_on_write_error(self, tmp_path: Path) -> None:
         report = FakeReport(
-            run_id="fail_run", mode="gate", timeframe="4h",
-            symbols=(), n_bars=0, n_panels_in=0,
-            n_bound_panels=0, n_evidence=0, n_passed=0, n_rejected=0,
-            reject_reason_counts={}, elapsed_sec=0.0,
+            run_id="fail_run",
+            mode="gate",
+            timeframe="4h",
+            symbols=(),
+            n_bars=0,
+            n_panels_in=0,
+            n_bound_panels=0,
+            n_evidence=0,
+            n_passed=0,
+            n_rejected=0,
+            reject_reason_counts={},
+            elapsed_sec=0.0,
         )
         rows = self._make_evidence_rows(1)
         read_only_dir = tmp_path / "readonly"

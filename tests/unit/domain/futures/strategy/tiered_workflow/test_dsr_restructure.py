@@ -18,6 +18,7 @@ Scenarios covered:
         S4: DSR 값 field에 잔존 (diagnostic 보존)
         S5: DSR 벤치마크 +mean 제거로 벤치마크 하락 검증
 """
+
 from __future__ import annotations
 
 import math
@@ -126,12 +127,8 @@ def test_shape_efficiency_objective_prefers_high_sortino_over_high_growth() -> N
     }
 
     # Act
-    obj_high = _shape_efficiency_l2_objective(
-        sortino_hac_unit=high_sortino, **common_kwargs
-    )
-    obj_low = _shape_efficiency_l2_objective(
-        sortino_hac_unit=low_sortino, **common_kwargs
-    )
+    obj_high = _shape_efficiency_l2_objective(sortino_hac_unit=high_sortino, **common_kwargs)
+    obj_low = _shape_efficiency_l2_objective(sortino_hac_unit=low_sortino, **common_kwargs)
 
     # Assert: 고Sortino trial이 더 높은 objective 값
     assert obj_high > obj_low
@@ -347,9 +344,7 @@ def test_layer2_trial_evaluation_fit_returns_hybrid_default_empty() -> None:
 def test_gate_dsr_no_longer_blocks_promotion() -> None:
     """DSR=0.5(평탄 표면)이어도 promotion_blocker에 dsr_floor가 없어야 한다."""
     # Arrange: 모든 지표 pass, DSR=0.5
-    kwargs = _make_gate_kwargs(
-        sortino=2.0, sharpe=1.0, calmar=2.0, psr=0.95, dsr=0.5
-    )
+    kwargs = _make_gate_kwargs(sortino=2.0, sharpe=1.0, calmar=2.0, psr=0.95, dsr=0.5)
 
     # Act
     result = evaluate_layer2_gate(**kwargs)
@@ -367,9 +362,7 @@ def test_gate_dsr_no_longer_blocks_promotion() -> None:
 def test_gate_psr_floor_blocks_when_psr_below_threshold() -> None:
     """psr_hybrid=0.80 < l2_min_psr=0.90 -> psr_floor BLOCKER."""
     # Arrange
-    kwargs = _make_gate_kwargs(
-        sortino=2.0, sharpe=1.0, calmar=2.0, psr=0.80, dsr=0.9
-    )
+    kwargs = _make_gate_kwargs(sortino=2.0, sharpe=1.0, calmar=2.0, psr=0.80, dsr=0.9)
 
     # Act
     result = evaluate_layer2_gate(**kwargs)
@@ -387,9 +380,7 @@ def test_gate_psr_floor_blocks_when_psr_below_threshold() -> None:
 def test_gate_psr_floor_passes_when_psr_above_threshold() -> None:
     """psr_hybrid=0.95 >= l2_min_psr=0.90 -> psr_floor BLOCKER 없음."""
     # Arrange
-    kwargs = _make_gate_kwargs(
-        sortino=2.0, sharpe=1.0, calmar=2.0, psr=0.95, dsr=0.5
-    )
+    kwargs = _make_gate_kwargs(sortino=2.0, sharpe=1.0, calmar=2.0, psr=0.95, dsr=0.5)
 
     # Act
     result = evaluate_layer2_gate(**kwargs)
@@ -411,9 +402,7 @@ def test_gate_dsr_diagnostic_field_preserved() -> None:
     """
     # Arrange
     dsr_value = 0.502
-    kwargs = _make_gate_kwargs(
-        sortino=2.0, sharpe=1.0, calmar=2.0, psr=0.95, dsr=dsr_value
-    )
+    kwargs = _make_gate_kwargs(sortino=2.0, sharpe=1.0, calmar=2.0, psr=0.95, dsr=dsr_value)
 
     # Act
     result = evaluate_layer2_gate(**kwargs)

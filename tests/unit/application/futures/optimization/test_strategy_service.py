@@ -57,9 +57,7 @@ def test_pick_strategy_data_maps_merges_is_and_oos_frames_s11() -> None:
 def test_pick_strategy_data_maps_missing_oos_symbol_keeps_is_frame_s12() -> None:
     """S12: OOS 누락 심볼 — IS 프레임이 에러 없이 그대로 반환된다."""
     # Arrange
-    is_df = pd.DataFrame(
-        {"datetime": pd.to_datetime(["2022-04-01", "2022-04-02"]), "close": [1.0, 2.0]}
-    )
+    is_df = pd.DataFrame({"datetime": pd.to_datetime(["2022-04-01", "2022-04-02"]), "close": [1.0, 2.0]})
     is_data_maps = {"A": {"4h": is_df}}
     oos_data_maps: dict[str, dict[str, pd.DataFrame]] = {}
 
@@ -152,9 +150,7 @@ def test_run_active_strategy_output_bridge_uses_stage6_trading_scope(
         _fake_run_candidate_strategy_for_universe,
     )
 
-    run_config = build_run_config_from_args(
-        {"phase": "l3", "timeframe": "4h", "trials": 1, "sync": "auto"}
-    )
+    run_config = build_run_config_from_args({"phase": "l3", "timeframe": "4h", "trials": 1, "sync": "auto"})
     out = run_active_strategy_output_bridge(
         run_config=run_config,
         symbols=["BTCUSDT", "ETHUSDT", "SOLUSDT"],
@@ -171,9 +167,7 @@ def test_run_active_strategy_output_bridge_uses_stage6_trading_scope(
 
 
 def test_run_active_strategy_output_bridge_when_scope_is_empty_raises_value_error() -> None:
-    run_config = build_run_config_from_args(
-        {"phase": "l3", "timeframe": "4h", "trials": 1, "sync": "auto"}
-    )
+    run_config = build_run_config_from_args({"phase": "l3", "timeframe": "4h", "trials": 1, "sync": "auto"})
 
     with pytest.raises(ValueError, match="candidate ML scope is empty"):
         run_active_strategy_output_bridge(

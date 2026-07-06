@@ -34,6 +34,7 @@ def test_categorized_logger_methods(caplog: pytest.LogCaptureFixture) -> None:
     assert any("[STRAT] gate checks passed" in rec.message for rec in records)
     assert any("[SYS] generic debug log message" in rec.message for rec in records)
 
+
 def test_categorized_logger_fallback_to_sys(caplog: pytest.LogCaptureFixture) -> None:
     """Verify that any debug logs without a valid tag automatically fall back to [SYS]."""
     logger = setup_logger("TestLogger_Fallback", write_file=False)
@@ -53,6 +54,7 @@ def test_categorized_logger_fallback_to_sys(caplog: pytest.LogCaptureFixture) ->
     assert any("[SYS] [PROFILE] database operation completed in 0.5s" in rec.message for rec in records)
     assert any("[SYS] [DATASET] loaded 100 entries" in rec.message for rec in records)
     assert any("[SYS] study run started" in rec.message for rec in records)
+
 
 def test_categorized_logger_no_double_prefixing(caplog: pytest.LogCaptureFixture) -> None:
     """Verify logger does not prepend category prefix if it already starts with it."""

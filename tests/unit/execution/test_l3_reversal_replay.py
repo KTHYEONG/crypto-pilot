@@ -1,4 +1,5 @@
 """Spec: l3-holdout-reversal-kill-attribution-replay, Scenario P2-S5~S6."""
+
 from __future__ import annotations
 
 import os
@@ -21,12 +22,14 @@ def test_run_l3_reversal_economic_replay_scopes_env_per_variant() -> None:
     captured_envs: list[dict[str, str | None]] = []
 
     def _side_effect(**kwargs: Any) -> SimpleNamespace:
-        captured_envs.append({
-            "L2_REVERSAL_KILL": os.environ.get("L2_REVERSAL_KILL"),
-            "L2_REVERSAL_DD_THRESHOLD": os.environ.get("L2_REVERSAL_DD_THRESHOLD"),
-            "L2_REVERSAL_PERSISTENCE_BARS": os.environ.get("L2_REVERSAL_PERSISTENCE_BARS"),
-            "L2_REVERSAL_RECOVERY_COOLDOWN": os.environ.get("L2_REVERSAL_RECOVERY_COOLDOWN"),
-        })
+        captured_envs.append(
+            {
+                "L2_REVERSAL_KILL": os.environ.get("L2_REVERSAL_KILL"),
+                "L2_REVERSAL_DD_THRESHOLD": os.environ.get("L2_REVERSAL_DD_THRESHOLD"),
+                "L2_REVERSAL_PERSISTENCE_BARS": os.environ.get("L2_REVERSAL_PERSISTENCE_BARS"),
+                "L2_REVERSAL_RECOVERY_COOLDOWN": os.environ.get("L2_REVERSAL_RECOVERY_COOLDOWN"),
+            }
+        )
         return SimpleNamespace(
             cagr=0.02,
             mdd=0.15,
@@ -102,14 +105,34 @@ def test_run_l3_reversal_economic_replay_restores_env_after_completion() -> None
     with patch(
         "src.domain.futures.strategy.tiered_workflow.pipeline.run_l3_holdout",
         return_value=SimpleNamespace(
-            cagr=0.02, mdd=0.15, sharpe=0.5, mar=0.02 / 0.15,
-            cagr_baseline=0.01, mdd_baseline=0.12, sharpe_baseline=0.3, mar_baseline=0.01 / 0.12,
-            gate_passed=True, blocker_reason="",
-            total_return=0.02, equity_multiple=1.02, sortino=0.6, sortino_baseline=0.4,
-            n_trades=20, cvar95=0.03, avg_gross_exposure=0.5, deploy_leverage=1.0,
-            min_trades=10, max_mdd_abs=0.35, min_sharpe=0.0, min_sortino=0.0, max_cvar95=0.06,
-            risk_off_bars=0, risk_off_realized_price=0.0, risk_on_realized_price=0.0,
-            reversal_kill_active=False, risk_off_episodes=(),
+            cagr=0.02,
+            mdd=0.15,
+            sharpe=0.5,
+            mar=0.02 / 0.15,
+            cagr_baseline=0.01,
+            mdd_baseline=0.12,
+            sharpe_baseline=0.3,
+            mar_baseline=0.01 / 0.12,
+            gate_passed=True,
+            blocker_reason="",
+            total_return=0.02,
+            equity_multiple=1.02,
+            sortino=0.6,
+            sortino_baseline=0.4,
+            n_trades=20,
+            cvar95=0.03,
+            avg_gross_exposure=0.5,
+            deploy_leverage=1.0,
+            min_trades=10,
+            max_mdd_abs=0.35,
+            min_sharpe=0.0,
+            min_sortino=0.0,
+            max_cvar95=0.06,
+            risk_off_bars=0,
+            risk_off_realized_price=0.0,
+            risk_on_realized_price=0.0,
+            reversal_kill_active=False,
+            risk_off_episodes=(),
         ),
     ):
         run_l3_reversal_economic_replay(

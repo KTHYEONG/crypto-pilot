@@ -478,7 +478,8 @@ def test_flow_families_become_empty_when_taker_data_is_missing() -> None:
         flow_panels = [
             panel
             for panel in panels
-            if panel.family in {
+            if panel.family
+            in {
                 "funding_flow_carry",
                 "funding_flow_unwind",
                 "flow_exhaustion_reversal",
@@ -625,15 +626,11 @@ def test_new_signal_families_shapes_and_side_hints() -> None:
         assert p.valid_mask_2d.shape == (200, 2)
         # side_hint must be in {-1, 0, 1}
         unique_sides = {int(v) for v in np.unique(p.side_hint_2d)}
-        assert unique_sides.issubset({-1, 0, 1}), (
-            f"{p.family}:{p.variant} invalid side_hint values: {unique_sides}"
-        )
+        assert unique_sides.issubset({-1, 0, 1}), f"{p.family}:{p.variant} invalid side_hint values: {unique_sides}"
         # signed_score must be in [-1, 1]
         finite_scores = p.signed_score_2d[np.isfinite(p.signed_score_2d)]
         if finite_scores.size > 0:
-            assert float(np.max(np.abs(finite_scores))) <= 1.0 + 1e-6, (
-                f"{p.family}:{p.variant} score out of [-1,1]"
-            )
+            assert float(np.max(np.abs(finite_scores))) <= 1.0 + 1e-6, f"{p.family}:{p.variant} score out of [-1,1]"
 
 
 def test_new_flow_signal_families_include_metadata_contract() -> None:
@@ -644,7 +641,8 @@ def test_new_flow_signal_families_include_metadata_contract() -> None:
     flow_panels = [
         panel
         for panel in panels
-        if panel.family in {
+        if panel.family
+        in {
             "funding_flow_carry",
             "funding_flow_unwind",
             "flow_exhaustion_reversal",
@@ -660,8 +658,6 @@ def test_new_flow_signal_families_include_metadata_contract() -> None:
         assert panel.exit_policies
         assert panel.allowed_regimes
         assert panel.regime_code_1d is not None
-
-
 
 
 def test_dual_momentum_no_lookahead() -> None:
@@ -839,9 +835,7 @@ def test_dual_momentum_no_refire_during_persistent_agreement() -> None:
             col_entries = long_entries[:, col]
             if col_entries.any():
                 adjacent_fires = bool(np.any(col_entries[:-1] & col_entries[1:]))
-                assert not adjacent_fires, (
-                    f"dual_momentum col={col} re-fires on adjacent bars in persistent agreement"
-                )
+                assert not adjacent_fires, f"dual_momentum col={col} re-fires on adjacent bars in persistent agreement"
 
 
 # ---------------------------------------------------------------------------
@@ -903,13 +897,17 @@ def test_mean_rev_gated_out_of_trending_regime() -> None:
 
 def _beta_neut_panel() -> CandidateSignalPanel:
     return CandidateSignalPanel(
-        family="residual_reversion", variant="unit", params={},
+        family="residual_reversion",
+        variant="unit",
+        params={},
         datetimes=np.array([np.datetime64("2025-01-01T00"), np.datetime64("2025-01-01T04")]),
         symbols=("BTCUSDT",),
         signed_score_2d=np.ones((2, 1), dtype=np.float64),
         side_hint_2d=np.ones((2, 1), dtype=np.int8),
-        expected_holding_bars=4, min_holding_bars=1,
-        stop_atr_mult=1.0, take_profit_atr_mult=1.0,
+        expected_holding_bars=4,
+        min_holding_bars=1,
+        stop_atr_mult=1.0,
+        take_profit_atr_mult=1.0,
         turnover_proxy_2d=np.zeros((2, 1), dtype=np.float64),
         valid_mask_2d=np.ones((2, 1), dtype=bool),
         metadata={"archetype": "beta_neut"},
@@ -983,9 +981,9 @@ def test_funding_term_structure_carry_entry_detection() -> None:
     t, n = 400, 1
     close = np.full((t, n), 100.0, dtype=np.float64)
     funding = np.full((t, n), 0.0, dtype=np.float64)
-    funding[:168, 0] = 10.0                            # high plateau
-    funding[168:200, 0] = np.linspace(10.0, 0.0, 32)   # sharp decline
-    funding[200:, 0] = 0.0                              # low plateau
+    funding[:168, 0] = 10.0  # high plateau
+    funding[168:200, 0] = np.linspace(10.0, 0.0, 32)  # sharp decline
+    funding[200:, 0] = 0.0  # low plateau
     taker_buy = np.full((t, n), 500.0, dtype=np.float64)
 
     aligned = _make_flow_aligned(close=close, funding=funding, taker_buy=taker_buy)
@@ -1043,8 +1041,7 @@ def test_flow_trend_continuation_entry_detection() -> None:
     )
     panel = panels[0]
     assert panel.family == "flow_trend_continuation"
-    assert panel.metadata["archetype"] == "ts_mom", \
-        "flow_trend_continuation must route to ts_mom not flow_rev"
+    assert panel.metadata["archetype"] == "ts_mom", "flow_trend_continuation must route to ts_mom not flow_rev"
     fired = np.flatnonzero(panel.side_hint_2d[:, 0] != 0)
     assert len(fired) >= 1, "expected continuation entries with strong flow + uptrend"
     assert panel.side_hint_2d[fired[0], 0] == 1  # long-only
@@ -1105,8 +1102,7 @@ def test_lsr_oi_regime_filter_activation() -> None:
     assert len(fired) >= 1, "expected regime activation with extreme LSR + OI building"
     # Regime filter must produce directional side (fade the crowded LSR side)
     side_fired = np.flatnonzero(panel.side_hint_2d[:, 0] != 0)
-    assert len(side_fired) >= 1, \
-        "lsr_oi_regime_filter must produce side_hint trades after activation"
+    assert len(side_fired) >= 1, "lsr_oi_regime_filter must produce side_hint trades after activation"
     # LSR is extreme positive (crowded long) -> side = -1 (fade)
     assert panel.side_hint_2d[fired[0], 0] == -1
 
@@ -1183,12 +1179,12 @@ def test_positioning_unwind_warm_up_barrier() -> None:
     )[0]
 
     # All bars < 168 must have valid_mask_2d=False
-    assert not panel.valid_mask_2d[:168, :].any(), \
-        "bars before warm-up (index < 168) must be masked out"
+    assert not panel.valid_mask_2d[:168, :].any(), "bars before warm-up (index < 168) must be masked out"
 
     # Bars >= 168 may have valid_mask_2d=True depending on feature availability
-    assert panel.valid_mask_2d[168:, 0].any() or panel.valid_mask_2d[168:, :].any(), \
+    assert panel.valid_mask_2d[168:, 0].any() or panel.valid_mask_2d[168:, :].any(), (
         "bars after warm-up should be eligible when all features are valid"
+    )
 
 
 # =============================================================================
@@ -1273,9 +1269,7 @@ def test_build_rule_signal_panels_full_per_tf_pool() -> None:
 
     aligned = _make_aligned(t=300, n=2)
     # Include all pool families so filter_rule_signal_panels doesn't strip them
-    all_pool_families = tuple(sorted(set(
-        f for pool in _DEFAULT_PER_TF_FAMILIES.values() for f in pool
-    )))
+    all_pool_families = tuple(sorted({f for pool in _DEFAULT_PER_TF_FAMILIES.values() for f in pool}))
     cfg = CandidateStrategyConfig(candidate_families=all_pool_families)
     pool_1h = _DEFAULT_PER_TF_FAMILIES["1h"]
     panels = build_rule_signal_panels(
@@ -1352,14 +1346,28 @@ def test_candidate_panels_to_events_output_columns_unchanged() -> None:
     panels = build_rule_signal_panels(aligned=aligned, cfg=cfg)
     events = candidate_panels_to_events(panels, min_abs_score=0.0)
     expected_cols = {
-        "datetime", "symbol", "family", "variant", "side",
-        "raw_score", "score_z", "expected_holding_bars", "min_holding_bars",
-        "stop_atr_mult", "take_profit_atr_mult", "turnover_proxy", "cost_floor_bps", "entry_idx",
-        "side_flipped", "exit_policy_id", "signal_cell", "archetype", "entry_regime", "entry_regime_code",
+        "datetime",
+        "symbol",
+        "family",
+        "variant",
+        "side",
+        "raw_score",
+        "score_z",
+        "expected_holding_bars",
+        "min_holding_bars",
+        "stop_atr_mult",
+        "take_profit_atr_mult",
+        "turnover_proxy",
+        "cost_floor_bps",
+        "entry_idx",
+        "side_flipped",
+        "exit_policy_id",
+        "signal_cell",
+        "archetype",
+        "entry_regime",
+        "entry_regime_code",
     }
-    assert expected_cols.issubset(events.columns), (
-        f"missing columns: {expected_cols - set(events.columns)}"
-    )
+    assert expected_cols.issubset(events.columns), f"missing columns: {expected_cols - set(events.columns)}"
 
 
 def test_candidate_panels_to_events_no_sort() -> None:
@@ -1394,7 +1402,11 @@ def test_cross_sectional_rank_signed_monotonic_and_tercile() -> None:
     raw_2d = np.array([[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]], dtype=np.float64)
     valid_2d = np.ones_like(raw_2d, dtype=np.bool_)
     signed, side = _cross_sectional_rank_signed_2d(
-        raw_2d, valid_2d, min_cross_section=5, top_q=0.70, bot_q=0.30,
+        raw_2d,
+        valid_2d,
+        min_cross_section=5,
+        top_q=0.70,
+        bot_q=0.30,
     )
     assert signed.shape == (1, 6)
     assert side.shape == (1, 6)
@@ -1408,17 +1420,19 @@ def test_cross_sectional_rank_signed_monotonic_and_tercile() -> None:
 def test_cross_sectional_rank_below_min_cross_section_zeroed() -> None:
     """Scenario 2: min_cross_section guard zeroes rows with insufficient valid symbols."""
     raw_2d = np.array(
-        [[1.0, 2.0, 3.0, 4.0, np.nan, np.nan],
-         [6.0, 7.0, 8.0, 9.0, 10.0, 11.0]],
+        [[1.0, 2.0, 3.0, 4.0, np.nan, np.nan], [6.0, 7.0, 8.0, 9.0, 10.0, 11.0]],
         dtype=np.float64,
     )
     valid_2d = np.array(
-        [[True, True, True, True, False, False],
-         [True, True, True, True, True, True]],
+        [[True, True, True, True, False, False], [True, True, True, True, True, True]],
         dtype=np.bool_,
     )
     signed, side = _cross_sectional_rank_signed_2d(
-        raw_2d, valid_2d, min_cross_section=5, top_q=0.70, bot_q=0.30,
+        raw_2d,
+        valid_2d,
+        min_cross_section=5,
+        top_q=0.70,
+        bot_q=0.30,
     )
     np.testing.assert_array_equal(signed[0], np.zeros(6, dtype=np.float64))
     np.testing.assert_array_equal(side[0], np.zeros(6, dtype=np.int8))

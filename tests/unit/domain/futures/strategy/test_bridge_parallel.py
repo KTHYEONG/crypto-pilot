@@ -52,7 +52,7 @@ def test_bridge_parallel_happy_path(dummy_aligned: AlignedMarketData, default_cf
     """Scenario 1: Happy Path - parallel signal calculation succeeds and sorting is correct."""
     panels = build_rule_signal_panels(aligned=dummy_aligned, cfg=default_cfg)
     assert len(panels) > 0
-    
+
     # Ensure sorted by family, variant
     for i in range(len(panels) - 1):
         p1 = panels[i]
@@ -64,7 +64,7 @@ def test_bridge_parallel_family_filter(dummy_aligned: AlignedMarketData, default
     """Scenario 2: Edge Case - family filter only calculates targeted families."""
     family_filter = ("trend_ma",)
     panels = build_rule_signal_panels(aligned=dummy_aligned, cfg=default_cfg, family_filter=family_filter)
-    
+
     assert len(panels) > 0
     for p in panels:
         assert p.family == "trend_ma"
@@ -92,7 +92,7 @@ def test_bridge_parallel_empty_path(default_cfg: CandidateStrategyConfig) -> Non
         kill_mask=np.zeros((t, n), dtype=bool),
         execution_cost_bps_2d=np.full((t, n), 5.0, dtype=np.float64),
     )
-    
+
     # Just verify that it doesn't crash and returns output
     panels = build_rule_signal_panels(aligned=empty_aligned, cfg=default_cfg)
     assert len(panels) > 0
@@ -102,7 +102,7 @@ def test_bridge_parallel_determinism(dummy_aligned: AlignedMarketData, default_c
     """Scenario 5: Determinism - repeated runs yield identical results."""
     panels_1 = build_rule_signal_panels(aligned=dummy_aligned, cfg=default_cfg)
     panels_2 = build_rule_signal_panels(aligned=dummy_aligned, cfg=default_cfg)
-    
+
     assert len(panels_1) == len(panels_2)
     for p1, p2 in zip(panels_1, panels_2, strict=True):
         assert p1.family == p2.family
@@ -116,9 +116,9 @@ def test_candidate_panels_to_events_parallel(
 ) -> None:
     """Validate that candidate_panels_to_events parallelization matches correctly."""
     panels = build_rule_signal_panels(aligned=dummy_aligned, cfg=default_cfg)
-    
+
     events_1 = candidate_panels_to_events(panels, min_abs_score=0.1, n_workers=1)
     events_4 = candidate_panels_to_events(panels, min_abs_score=0.1, n_workers=4)
-    
+
     assert len(events_1) == len(events_4)
     pd.testing.assert_frame_equal(events_1, events_4)
