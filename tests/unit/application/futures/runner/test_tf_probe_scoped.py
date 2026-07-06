@@ -720,8 +720,10 @@ class TestValidationParityLogging:
 
         from src.domain.futures.strategy.tiered_workflow.tf_validation_repair import (
             ValidationParityReport,
-            logger as vp_logger,
             log_validation_parity_report,
+        )
+        from src.domain.futures.strategy.tiered_workflow.tf_validation_repair import (
+            logger as vp_logger,
         )
 
         report = ValidationParityReport(
