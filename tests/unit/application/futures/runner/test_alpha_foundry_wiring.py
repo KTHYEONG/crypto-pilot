@@ -147,7 +147,7 @@ class TestAlphaFoundryWiring:
     def test_full_pipeline_end_to_end(self) -> None:
         a = _aligned_4h()
         panel = _panel()
-        *_, sleeves = run_alpha_foundry_pipeline(
+        cheap_ev, l1_units, *_ = run_alpha_foundry_pipeline(
             panels=[panel],
             recipes={"r1": R1},
             aligned=a,
@@ -157,7 +157,8 @@ class TestAlphaFoundryWiring:
             l2_config=L2PosteriorPolicyConfig(),
             symbols=("BTCUSDT",),
         )
-        assert len(sleeves) > 0
+        assert len(cheap_ev) > 0
+        assert len(l1_units) > 0
 
     def test_diversity_and_search_spaces_wired(self) -> None:
         panels = [_panel("r1"), _panel("r2")]

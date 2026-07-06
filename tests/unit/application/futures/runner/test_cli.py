@@ -4,7 +4,10 @@ import pytest
 from pytest_mock import MockerFixture
 
 from src.application.futures.runner.cli import run_from_cli
-from src.application.futures.runner.config import FuturesRunConfig
+from src.application.futures.runner.config import (
+    FuturesRunConfig,
+    build_alpha_foundry_runtime_config,
+)
 from src.application.futures.runner.models import MarketDataBundle, RunnerResult, RunWindow
 
 
@@ -64,3 +67,85 @@ class TestRunFromCli:
 
         assert result == 2
         mock_pipeline.assert_not_called()
+
+    def test_alpha_foundry_audit_mode_passed_to_config(self, mocker: MockerFixture) -> None:
+        mock_pipeline = mocker.patch("src.application.futures.runner.cli.run_pipeline")
+        mock_pipeline.return_value = RunnerResult(0, "ok")
+
+        result = run_from_cli([
+            "--phase", "l3", "--timeframe", "4h", "--trials", "3",
+            "--sync", "skip", "--alpha-foundry", "audit",
+        ])
+
+        assert result == 0
+        mock_pipeline.assert_called_once()
+        config = mock_pipeline.call_args[0][0]
+        assert config.alpha_foundry.mode == "audit"
+
+    def test_alpha_foundry_gate_mode_passed_to_config(self, mocker: MockerFixture) -> None:
+        mock_pipeline = mocker.patch("src.application.futures.runner.cli.run_pipeline")
+        mock_pipeline.return_value = RunnerResult(0, "ok")
+
+        result = run_from_cli([
+            "--phase", "l3", "--timeframe", "4h", "--trials", "3",
+            "--sync", "skip", "--alpha-foundry", "gate",
+        ])
+
+        assert result == 0
+        mock_pipeline.assert_called_once()
+        config = mock_pipeline.call_args[0][0]
+        assert config.alpha_foundry.mode == "gate"
+
+    def test_alpha_foundry_default_is_off(self, mocker: MockerFixture) -> None:
+        mock_pipeline = mocker.patch("src.application.futures.runner.cli.run_pipeline")
+        mock_pipeline.return_value = RunnerResult(0, "ok")
+
+        result = run_from_cli(["--phase", "l3", "--timeframe", "4h", "--trials", "3", "--sync", "skip"])
+
+        assert result == 0
+        config = mock_pipeline.call_args[0][0]
+        assert config.alpha_foundry.mode == "off"
+
+    def test_legacy_args_preserved_with_alpha_foundry(self, mocker: MockerFixture) -> None:
+        mock_pipeline = mocker.patch("src.application.futures.runner.cli.run_pipeline")
+        mock_pipeline.return_value = RunnerResult(0, "ok")
+
+        result = run_from_cli([
+            "--phase", "l1", "--timeframe", "1h", "--trials", "10",
+            "--sync", "auto", "--alpha-foundry", "audit", "--seed", "99",
+        ])
+
+        assert result == 0
+        config = mock_pipeline.call_args[0][0]
+        assert config.phase == "l1"
+        assert config.timeframe == "1h"
+        assert config.trials == 10
+        assert config.sync == "auto"
+        assert config.seed == 99
+        assert config.alpha_foundry.mode == "audit"
+
+
+class TestBuildAlphaFoundryRuntimeConfig:
+    def test_invalid_mode_raises_value_error(self) -> None:
+        from argparse import Namespace
+
+        args = Namespace(
+            alpha_foundry="invalid",
+            timeframe="4h", phase="l3", trials=42, sync="auto",
+            refresh_universe=False, sync_metrics=False, seed=42,
+            date=None,
+        )
+        with pytest.raises(ValueError, match="invalid alpha_foundry mode"):
+            build_alpha_foundry_runtime_config(args)
+
+    def test_valid_mode_returns_alpha_foundry_runtime_config(self) -> None:
+        from argparse import Namespace
+
+        args = Namespace(
+            alpha_foundry="audit",
+            timeframe="4h", phase="l3", trials=42, sync="auto",
+            refresh_universe=False, sync_metrics=False, seed=42,
+            date=None,
+        )
+        config = build_alpha_foundry_runtime_config(args)
+        assert config.mode == "audit"

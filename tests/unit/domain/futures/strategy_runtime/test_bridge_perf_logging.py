@@ -177,6 +177,7 @@ def test_htf_active_when_signal_only_false(monkeypatch: pytest.MonkeyPatch) -> N
             "turnover_proxy": [0.1],
             "cost_floor_bps": [0.0],
             "hurdle_bps": [0.0],
+            "edge_after_hurdle_bps": [0.5],
         }
     )
 
@@ -194,6 +195,22 @@ def test_htf_active_when_signal_only_false(monkeypatch: pytest.MonkeyPatch) -> N
         lambda *_, **__: raw_events.copy(),
     )
     monkeypatch.setattr("src.domain.futures.strategy_runtime.bridge.build_multi_tf_panels", track_multi_tf)
+    monkeypatch.setattr(
+        "src.domain.futures.strategy.rule_diagnostics.compute_rule_diagnostics",
+        lambda *_, **__: SimpleNamespace(
+            by_family=pd.DataFrame(), by_variant=pd.DataFrame(),
+            by_family_side=pd.DataFrame(), side_flip=pd.DataFrame(),
+            decision={},
+            recommended_keep_variants=(),
+            recommended_flip_variants=(),
+            recommended_keep_signal_cells=(),
+            recommended_flip_signal_cells=(),
+            recommendation_basis="skipped_signal_only",
+            recommendation_split=(0, 0),
+            report_split=(0, 0),
+            recommendation_failure_report=None,
+        ),
+    )
 
     strategy_cfg = StrategyConfig()
     object.__setattr__(
