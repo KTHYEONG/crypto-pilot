@@ -1,4 +1,8 @@
-"""Alpha Foundry L1 budget allocation helpers. [ADR_20260706_ALPHA_FOUNDRY_SYNC][ADR_20260706_ALPHA_FOUNDRY_L0_DIVERSITY]"""
+"""Alpha Foundry L1 budget allocation helpers.
+
+[ADR_20260706_ALPHA_FOUNDRY_SYNC][ADR_20260706_ALPHA_FOUNDRY_L0_DIVERSITY]
+[ADR_20260706_ALPHA_FOUNDRY_L0_SIGNAL_RIGOR]
+"""
 
 from __future__ import annotations
 
@@ -7,7 +11,9 @@ from typing import Literal
 
 from src.domain.futures.alpha_foundry.contracts import (
     AlphaRecipe,
+    BucketKey,
     CheapGateEvidence,
+    DiversitySelectionResult,
     L1PosteriorEvidence,
     L1VerificationUnit,
     PosteriorGateConfig,
@@ -106,3 +112,48 @@ def update_successive_halving_state(
             )
         updated.append(unit)
     return tuple(updated)
+
+
+def allocate_global_l1_budget(
+    *,
+    bucket_results: Sequence[DiversitySelectionResult],
+    evidence_by_recipe_id: Mapping[str, CheapGateEvidence],
+    total_l1_verification_budget: int,
+    top_k_max: int,
+) -> dict[BucketKey, int]:
+    if total_l1_verification_budget <= 0:
+        raise ValueError(
+            f"total_l1_verification_budget must be positive, got {total_l1_verification_budget}"
+        )
+    quality: dict[BucketKey, float] = {}
+    for br in bucket_results:
+        best = 0.0
+        for rid in br.selected_recipe_ids:
+            ev = evidence_by_recipe_id.get(rid)
+            if ev is not None:
+                best = max(best, ev.block_lcb_bps)
+        quality[br.bucket_key] = best
+
+    positive = {b: q for b, q in quality.items() if q > 0.0}
+    if not positive:
+        return dict.fromkeys(quality, 0)
+
+    total_quality = sum(positive.values())
+    raw = {b: total_l1_verification_budget * q / total_quality for b, q in positive.items()}
+    floor_alloc = {b: min(top_k_max, int(v)) for b, v in raw.items()}
+
+    remainder = total_l1_verification_budget - sum(floor_alloc.values())
+    fractional = {b: raw[b] - floor_alloc[b] for b in positive}
+
+    sorted_buckets = sorted(fractional.keys(), key=lambda b: (-fractional[b], b))
+    for b in sorted_buckets:
+        if remainder <= 0:
+            break
+        if floor_alloc[b] < top_k_max:
+            floor_alloc[b] += 1
+            remainder -= 1
+
+    result: dict[BucketKey, int] = {}
+    for b in quality:
+        result[b] = floor_alloc.get(b, 0)
+    return result
