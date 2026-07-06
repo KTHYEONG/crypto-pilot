@@ -1,4 +1,4 @@
-"""Alpha Foundry L0 gate bridge helpers for the strategy runtime bridge. [ADR_20260706_ALPHA_FOUNDRY_MAIN_WIRING]"""
+"""Alpha Foundry L0 gate bridge helpers for the strategy runtime bridge. [ADR_20260706_ALPHA_FOUNDRY_MAIN_WIRING][ADR_20260706_ALPHA_FOUNDRY_L0_DIVERSITY]"""
 
 from __future__ import annotations
 
@@ -97,9 +97,12 @@ def bind_panels_to_alpha_recipes(
 
 def _write_alpha_foundry_report(
     report: Any,
+    evidence_rows: Sequence[Any],
     report_dir: Path,
     run_id: str,
 ) -> tuple[str, str]:
+    import pandas as pd
+
     report_dir.mkdir(parents=True, exist_ok=True)
     json_path = str(report_dir / f"{run_id}_report.json")
     parquet_path = str(report_dir / f"{run_id}_evidence.parquet")
@@ -121,6 +124,39 @@ def _write_alpha_foundry_report(
     with open(json_path, "w") as f:
         json.dump(report_dict, f, indent=2)
 
+    if evidence_rows:
+        from dataclasses import asdict
+        df = pd.DataFrame([asdict(r) for r in evidence_rows])
+    else:
+        df = pd.DataFrame({
+            "run_id": pd.Series(dtype="str"),
+            "timeframe": pd.Series(dtype="str"),
+            "family": pd.Series(dtype="str"),
+            "variant": pd.Series(dtype="str"),
+            "recipe_id": pd.Series(dtype="str"),
+            "archetype": pd.Series(dtype="str"),
+            "n_events": pd.Series(dtype="int64"),
+            "effective_n": pd.Series(dtype="float64"),
+            "mean_net_bps": pd.Series(dtype="float64"),
+            "nw_tstat": pd.Series(dtype="float64"),
+            "block_lcb_bps": pd.Series(dtype="float64"),
+            "rank_ic": pd.Series(dtype="float64"),
+            "incremental_rank_ic": pd.Series(dtype="float64"),
+            "cost_drag_ratio": pd.Series(dtype="float64"),
+            "turnover_per_year": pd.Series(dtype="float64"),
+            "compute_cost_score": pd.Series(dtype="float64"),
+            "gate_passed": pd.Series(dtype="bool"),
+            "reject_reasons": pd.Series(dtype="str"),
+            "bucket_key": pd.Series(dtype="str"),
+            "bucket_rank": pd.Series(dtype="int64"),
+            "selected_for_l1": pd.Series(dtype="bool"),
+            "redundant_with": pd.Series(dtype="str"),
+            "bucket_eff_test_count": pd.Series(dtype="float64"),
+            "global_eff_test_count": pd.Series(dtype="float64"),
+            "created_at_ms": pd.Series(dtype="int64"),
+        })
+    df.to_parquet(parquet_path, index=False)
+
     return json_path, parquet_path
 
 
@@ -135,9 +171,6 @@ def run_alpha_foundry_l0_gate(
     run_id: str,
     timeframe: str,
 ) -> AlphaFoundryL0Result:
-    from src.domain.futures.alpha_foundry.cheap_gate import (
-        evaluate_alpha_cheap_gate_batch,
-    )
     from src.domain.futures.alpha_foundry.contracts import (
         AlphaFoundryBridgeReport,
     )
@@ -171,15 +204,28 @@ def run_alpha_foundry_l0_gate(
     l0_start = _time_module.perf_counter()
 
     if cheap_config is not None and bound_panels:
-        evidences = evaluate_alpha_cheap_gate_batch(
+        from src.domain.futures.alpha_foundry.pipeline import (
+            run_alpha_foundry_l0_pipeline,
+        )
+
+        l0_result = run_alpha_foundry_l0_pipeline(
             panels=bound_panels,
             recipes=recipes,
             aligned=aligned,
             cost_model=cost_model,
-            config=cheap_config,
+            cheap_gate_config=cheap_config,
+            run_id=run_id,
+            top_k_per_family_tf=(
+                runtime_config.top_k_per_family_tf
+                if hasattr(runtime_config, "top_k_per_family_tf")
+                else 5
+            ),
         )
+        evidences = l0_result.evidences
+        evidence_rows = l0_result.evidence_rows
     else:
         evidences = ()
+        evidence_rows = ()
 
     passed_ids = {ev.recipe_id for ev in evidences if ev.gate_passed}
     reject_reason_counts: dict[str, int] = {}
@@ -188,10 +234,19 @@ def run_alpha_foundry_l0_gate(
             reject_reason_counts[reason] = reject_reason_counts.get(reason, 0) + 1
 
     if mode == "gate":
+        selected_for_l1_ids = {
+            er.recipe_id for er in evidence_rows if er.selected_for_l1
+        }
+        final_selected_ids = {
+            ev.recipe_id for ev in evidences
+            if ev.recipe_id in selected_for_l1_ids
+        }
+        if not final_selected_ids:
+            final_selected_ids = passed_ids
         passed_panel_indices = {
             b.panel_index
             for b in bindings
-            if b.recipe_id in passed_ids
+            if b.recipe_id in final_selected_ids
         }
         panels_for_l1 = tuple(
             p for i, p in enumerate(panels) if i in passed_panel_indices
@@ -234,7 +289,7 @@ def run_alpha_foundry_l0_gate(
             else Path("logs/futures/alpha_foundry")
         )
         json_path, parquet_path = _write_alpha_foundry_report(
-            report, report_dir, run_id,
+            report, evidence_rows, report_dir, run_id,
         )
         report = AlphaFoundryBridgeReport(
             run_id=run_id,
