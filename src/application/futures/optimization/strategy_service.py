@@ -363,6 +363,7 @@ def run_active_strategy_output_bridge(
         tf=tf,
         strategy_cfg=strategy_cfg,
         preloaded_data_maps=preloaded_data_maps,
+        alpha_foundry_config=getattr(run_config, "alpha_foundry", None),
         silent=silent,
     )
     _logger.log(
