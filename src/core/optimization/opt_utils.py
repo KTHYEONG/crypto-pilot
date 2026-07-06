@@ -130,9 +130,7 @@ def reclaim_mysql_space(storage_url: str) -> None:
                     conn.execute(text(f"OPTIMIZE TABLE `{table}`"))
                     _logger.info("reclaim_mysql_space: OPTIMIZE TABLE `%s` OK", table)
                 except Exception as tbl_exc:
-                    _logger.debug(
-                        "reclaim_mysql_space: OPTIMIZE TABLE `%s` skipped: %s", table, tbl_exc
-                    )
+                    _logger.debug("reclaim_mysql_space: OPTIMIZE TABLE `%s` skipped: %s", table, tbl_exc)
     except Exception as exc:
         _logger.warning("reclaim_mysql_space: connection failed: %s", exc)
 
@@ -196,9 +194,7 @@ _SCORE_COEF_FUT_TAIL: float = _env_float("FUT_TAIL_DRAG_COEF", 12.0)
 _SCORE_COEF_SPOT_GROWTH: float = _env_float("SPOT_GROWTH_BONUS_COEF", 18.0)
 _SCORE_COEF_SPOT_RISK: float = _env_float("SPOT_RISK_DRAG_COEF", 10.0)
 _SCORE_COEF_SPOT_TAIL: float = _env_float("SPOT_TAIL_DRAG_COEF", 10.0)
-_SCORE_COEF_SPOT_EXCESS_RETURN_BONUS_WEIGHT: float = _env_float(
-    "SPOT_EXCESS_RETURN_BONUS_WEIGHT", 12.0
-)
+_SCORE_COEF_SPOT_EXCESS_RETURN_BONUS_WEIGHT: float = _env_float("SPOT_EXCESS_RETURN_BONUS_WEIGHT", 12.0)
 _TF_TRADE_DENSITY: dict[str, float] = {
     "30m": 1.00,
     "4h": 0.40,
@@ -245,9 +241,7 @@ class ObjectiveConfig:
     negative_expectancy_penalty_mult: float = 120.0
     bonus_ret_weight: float = 28.0
     bonus_pf_weight: float = 8.0
-    bonus_ret_scale: float = (
-        10.0  # Reduced from 25.0 for better resolution in small return differences
-    )
+    bonus_ret_scale: float = 10.0  # Reduced from 25.0 for better resolution in small return differences
     bonus_pf_scale: float = 0.6
     bonus_pf_center: float = 1.2
 
@@ -485,13 +479,10 @@ def suggest_params(trial: _TrialSuggester, search_space: SearchSpace) -> ParamMa
 
     elif entry_type == "KELTNER":
         if "KELTNER_ATR_MULT" in search_space:
-            params["KELTNER_ATR_MULT"] = _suggest_value(
-                "KELTNER_ATR_MULT", search_space["KELTNER_ATR_MULT"]
-            )
+            params["KELTNER_ATR_MULT"] = _suggest_value("KELTNER_ATR_MULT", search_space["KELTNER_ATR_MULT"])
 
-    elif entry_type == "CCI":
-        if "CCI_THRESHOLD" in search_space:
-            params["CCI_THRESHOLD"] = _suggest_value("CCI_THRESHOLD", search_space["CCI_THRESHOLD"])
+    elif entry_type == "CCI" and "CCI_THRESHOLD" in search_space:
+        params["CCI_THRESHOLD"] = _suggest_value("CCI_THRESHOLD", search_space["CCI_THRESHOLD"])
 
     # === Phase 3: Trend-Filter Dependent Parameters ===
     trend_filter = params.get("TREND_FILTER_TYPE", "EMA")
@@ -517,27 +508,29 @@ def suggest_params(trial: _TrialSuggester, search_space: SearchSpace) -> ParamMa
     elif trend_filter == "DMI":
         if "DMI_PERIOD" in search_space:
             params["DMI_PERIOD"] = _suggest_value("DMI_PERIOD", search_space["DMI_PERIOD"])
-    elif trend_filter == "AROON":
-        if "AROON_PERIOD" in search_space:
-            params["AROON_PERIOD"] = _suggest_value("AROON_PERIOD", search_space["AROON_PERIOD"])
+    elif trend_filter == "AROON" and "AROON_PERIOD" in search_space:
+        params["AROON_PERIOD"] = _suggest_value("AROON_PERIOD", search_space["AROON_PERIOD"])
 
     # === Phase 4: Strength-Filter Dependent Parameters ===
     strength_filter = params.get("STRENGTH_FILTER_TYPE", "NONE")
 
-    if strength_filter in [
-        "ADX",
-        "VHF",
-        "MFI",
-        "RSI",
-        "STOCHASTIC",
-        "STOCH_RSI",
-        "ER",
-        "WILLIAMS_R",
-    ]:
-        if "STRENGTH_FILTER_PERIOD" in search_space:
-            params["STRENGTH_FILTER_PERIOD"] = _suggest_value(
-                "STRENGTH_FILTER_PERIOD", search_space["STRENGTH_FILTER_PERIOD"]
-            )
+    if (
+        strength_filter
+        in [
+            "ADX",
+            "VHF",
+            "MFI",
+            "RSI",
+            "STOCHASTIC",
+            "STOCH_RSI",
+            "ER",
+            "WILLIAMS_R",
+        ]
+        and "STRENGTH_FILTER_PERIOD" in search_space
+    ):
+        params["STRENGTH_FILTER_PERIOD"] = _suggest_value(
+            "STRENGTH_FILTER_PERIOD", search_space["STRENGTH_FILTER_PERIOD"]
+        )
 
     if strength_filter == "VHF":
         if "VHF_THRESHOLD" in search_space:
@@ -590,9 +583,7 @@ def suggest_params(trial: _TrialSuggester, search_space: SearchSpace) -> ParamMa
             step = spec.get("step")
             if safe_low < spec["high"]:
                 if step is None:
-                    params["HURST_TREND_THRESHOLD"] = float(
-                        max(safe_low, min(spec["high"], raw_trend))
-                    )
+                    params["HURST_TREND_THRESHOLD"] = float(max(safe_low, min(spec["high"], raw_trend)))
                 else:
                     low, high = _sanitize_float_step_bounds(safe_low, spec["high"], step)
                     if high <= low:
@@ -609,9 +600,7 @@ def suggest_params(trial: _TrialSuggester, search_space: SearchSpace) -> ParamMa
 
     elif strength_filter == "NATR":
         if "NATR_THRESHOLD" in search_space:
-            params["NATR_THRESHOLD"] = _suggest_value(
-                "NATR_THRESHOLD", search_space["NATR_THRESHOLD"]
-            )
+            params["NATR_THRESHOLD"] = _suggest_value("NATR_THRESHOLD", search_space["NATR_THRESHOLD"])
     elif strength_filter == "GARMAN_KLASS":
         for key in ["GK_PERIOD", "GK_THRESHOLD"]:
             if key in search_space:
@@ -624,16 +613,14 @@ def suggest_params(trial: _TrialSuggester, search_space: SearchSpace) -> ParamMa
         for key in ["WILLR_OVERBOUGHT", "WILLR_OVERSOLD"]:
             if key in search_space:
                 params[key] = _suggest_value(key, search_space[key])
-    elif strength_filter == "OBV":
-        if "OBV_MA_PERIOD" in search_space:
-            params["OBV_MA_PERIOD"] = _suggest_value("OBV_MA_PERIOD", search_space["OBV_MA_PERIOD"])
+    elif strength_filter == "OBV" and "OBV_MA_PERIOD" in search_space:
+        params["OBV_MA_PERIOD"] = _suggest_value("OBV_MA_PERIOD", search_space["OBV_MA_PERIOD"])
 
     # === Phase 5: Exit-Type Dependent Parameters ===
     exit_type = params.get("EXIT_TYPE", "ATR")
 
-    if exit_type == "PARABOLIC_SAR":
-        if "SAR_STEP" in search_space:
-            params["SAR_STEP"] = _suggest_value("SAR_STEP", search_space["SAR_STEP"])
+    if exit_type == "PARABOLIC_SAR" and "SAR_STEP" in search_space:
+        params["SAR_STEP"] = _suggest_value("SAR_STEP", search_space["SAR_STEP"])
 
     # === Phase 6: Common Parameters (Always Used) ===
     # [CRITICAL] Handle STOP_LOSS_TYPE logical conflict first
@@ -649,9 +636,7 @@ def suggest_params(trial: _TrialSuggester, search_space: SearchSpace) -> ParamMa
 
     elif stop_loss_type == "ATR":
         if "ATR_STOP_LOSS_MULT" in search_space:
-            params["ATR_STOP_LOSS_MULT"] = _suggest_value(
-                "ATR_STOP_LOSS_MULT", search_space["ATR_STOP_LOSS_MULT"]
-            )
+            params["ATR_STOP_LOSS_MULT"] = _suggest_value("ATR_STOP_LOSS_MULT", search_space["ATR_STOP_LOSS_MULT"])
         params.pop("STOP_LOSS_PCT", None)
         params.pop("SL_PCT", None)
 
@@ -802,10 +787,7 @@ def _blend_gates_with_floor(gates: list[float], weights: list[float], gate_floor
     g = np.array(gates, dtype=np.float64)
     w = np.array(weights, dtype=np.float64)
     w_sum = float(np.sum(w))
-    if w_sum <= 0:
-        weighted = float(np.mean(g)) if len(g) > 0 else 0.0
-    else:
-        weighted = float(np.sum(g * w) / w_sum)
+    weighted = (float(np.mean(g)) if len(g) > 0 else 0.0) if w_sum <= 0 else float(np.sum(g * w) / w_sum)
     floor = float(np.clip(gate_floor, 0.0, 0.95))
     return floor + (1.0 - floor) * weighted
 
@@ -952,9 +934,7 @@ def calculate_score(
     d_mdd = _asinh_score(abs_mdd, max(target_mdd * cfg.asinh_mdd_scale_ratio, 1e-6), cfg.asinh_clip)
     d_cvar = _asinh_score(cvar_abs, cfg.asinh_cvar_scale, cfg.asinh_clip)
     d_ulcer = _asinh_score(ulcer_proxy, cfg.asinh_ulcer_scale, cfg.asinh_clip)
-    risk_signal = (
-        (cfg.w_risk_mdd * d_mdd) + (cfg.w_risk_cvar * d_cvar) + (cfg.w_risk_ulcer * d_ulcer)
-    )
+    risk_signal = (cfg.w_risk_mdd * d_mdd) + (cfg.w_risk_cvar * d_cvar) + (cfg.w_risk_ulcer * d_ulcer)
 
     tail_excess = max(abs_mdd - target_mdd, 0.0)
     tail_signal = _asinh_score(
@@ -1036,11 +1016,7 @@ def calculate_score(
     score = cfg.base_score_multiplier * confidence * combined_gate * base_signal
 
     # Risk Penalty (Leverage & MDD exposure)
-    leverage = (
-        float(trades_df["leverage"].iloc[0])
-        if "leverage" in trades_df.columns and len(trades_df) > 0
-        else 1.0
-    )
+    leverage = float(trades_df["leverage"].iloc[0]) if "leverage" in trades_df.columns and len(trades_df) > 0 else 1.0
     risk_penalty = 0.0
     if leverage > 5.0 and abs_mdd > 15.0:
         risk_penalty = (leverage * abs_mdd) / 100.0
@@ -1067,8 +1043,7 @@ def calculate_score(
     # Base bonus for return and profit factor
     score += confidence * (
         cfg.bonus_ret_weight * _asinh_score(float(ret), cfg.bonus_ret_scale, cfg.asinh_clip)
-        + cfg.bonus_pf_weight
-        * _asinh_score((pf - cfg.bonus_pf_center), cfg.bonus_pf_scale, cfg.asinh_clip)
+        + cfg.bonus_pf_weight * _asinh_score((pf - cfg.bonus_pf_center), cfg.bonus_pf_scale, cfg.asinh_clip)
     )
 
     # Spot-specific: per-trade return quality bonus (replaces calmar/abs_mdd proxy)

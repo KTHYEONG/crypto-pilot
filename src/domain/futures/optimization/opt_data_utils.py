@@ -58,6 +58,7 @@ def _resolve_warmup_bars(tf: str) -> int:
     min_membership_warm = min_membership_warm_days * bars_per_day
     return max(lookback, cov, sigma, atr, embargo, platt, min_membership_warm)
 
+
 def resolve_warmup_days_for_tf(tf: str, *, safety_margin_days: int = 20) -> int:
     """지표 워밍업 요구치(bar)를 캘린더 일수로 환산. [ADR_20260706_DATA_WINDOW_FLOOR_CONSISTENCY]"""
     bars_per_day = {"1h": 24, "4h": 6, "1d": 1}.get(str(tf).lower(), 6)
@@ -107,15 +108,13 @@ def evaluate_symbol_data_sufficiency(
     # max_gap == threshold (24h @4h) is admitted by universe, so it must pass here too.
     _max_gap_threshold = int(OPT_FUTURES_CONFIG.get("FUTURES_BACKTEST_MAX_GAP_BARS", 6))
     gap_ok = max_gap_bars <= _max_gap_threshold
-    
+
     effective_fetch_start = pd.Timestamp(fetch_start, tz="UTC")
     if onboard_date is not None:
         onboard_ts = pd.Timestamp(onboard_date, tz="UTC")
         effective_fetch_start = max(effective_fetch_start, onboard_ts)
 
-    fetch_ok = first_dt <= effective_fetch_start and last_dt >= pd.Timestamp(
-        oos_end, tz="UTC"
-    )
+    fetch_ok = first_dt <= effective_fetch_start and last_dt >= pd.Timestamp(oos_end, tz="UTC")
 
     is_start_ts = pd.Timestamp(is_start, tz="UTC")
     oos_start_ts = pd.Timestamp(oos_start, tz="UTC")
@@ -133,11 +132,7 @@ def evaluate_symbol_data_sufficiency(
     exec_1m_cov = 1.0
     if require_exec_1m:
         exec_1m = symbol_map.get("exec_1m")
-        if (
-            not isinstance(exec_1m, pd.DataFrame)
-            or exec_1m.empty
-            or "datetime" not in exec_1m.columns
-        ):
+        if not isinstance(exec_1m, pd.DataFrame) or exec_1m.empty or "datetime" not in exec_1m.columns:
             exec_1m_ok = False
             exec_1m_cov = 0.0
         else:
@@ -146,9 +141,7 @@ def evaluate_symbol_data_sufficiency(
                 exec_dt = pd.to_datetime(exec_dt_col, utc=True, errors="coerce").dropna()
             else:
                 exec_dt = exec_dt_col.dropna()
-            actual_1m = int(
-                ((exec_dt >= pd.Timestamp(fetch_start, tz="UTC")) & (exec_dt <= oos_end_ts)).sum()
-            )
+            actual_1m = int(((exec_dt >= pd.Timestamp(fetch_start, tz="UTC")) & (exec_dt <= oos_end_ts)).sum())
             required_1m = max(1, _bars_between(fetch_start, oos_end, "1m"))
             exec_1m_cov = float(actual_1m / required_1m)
             exec_1m_ok = exec_1m_cov >= 0.95
@@ -167,13 +160,7 @@ def evaluate_symbol_data_sufficiency(
     if is_historical_stage5:
         # C1 학습 패널은 delisted 포함 historical union이므로
         # 전체 fetch/OOS 종단 커버리지를 강제하지 않는다.
-        pass_flag = bool(
-            warmup_ok
-            and actual_is_bars >= min_is_bars
-            and exec_1m_ok
-            and panel_history_ok
-            and gap_ok
-        )
+        pass_flag = bool(warmup_ok and actual_is_bars >= min_is_bars and exec_1m_ok and panel_history_ok and gap_ok)
     else:
         pass_flag = bool(
             fetch_ok
@@ -299,19 +286,21 @@ def filter_symbols_by_data_sufficiency(
     scope_name: str = "unknown",
 ) -> tuple[list[str], dict[str, dict[str, Any]], dict[str, dict[str, Any]], pd.DataFrame, int]:
     warmup_bars = _resolve_warmup_bars(tf)
-    
+
     # Load symbol sync profiles to get onboard_date
     onboard_dates: dict[str, str] = {}
     try:
         import json
+
         profiles_path = Path(FUTURES_DATA_DIR) / "symbol_sync_profiles.json"
         if not profiles_path.exists():
             try:
                 from src.domain.futures.universe.storage import _load_symbol_sync_profiles
+
                 _load_symbol_sync_profiles()
             except Exception as e:
                 _logger.debug("Failed to populate symbol sync profiles: %s", e)
-            
+
         if profiles_path.exists():
             with open(profiles_path, encoding="utf-8") as f:
                 p_data = json.load(f)
@@ -439,9 +428,7 @@ def _build_funding_event_arrays_1m(
     event_ms = _to_unix_ms(pd.to_datetime(funding_df["timestamp"], unit="ms", utc=True)).to_numpy(
         dtype=np.int64, copy=False
     )
-    event_rate = pd.to_numeric(funding_df["funding_rate"], errors="coerce").to_numpy(
-        dtype=np.float64, copy=False
-    )
+    event_rate = pd.to_numeric(funding_df["funding_rate"], errors="coerce").to_numpy(dtype=np.float64, copy=False)
 
     n = exec_ms.size
     if n == 0 or event_ms.size == 0:
@@ -618,9 +605,7 @@ def _prepare_funding_metrics(
     if funding_df is not None and not funding_df.empty:
         exclude_fr = ["datetime", "symbol"]
         cols_fr = [c for c in funding_df.columns if c not in exclude_fr]
-        funding_df_prepared = (
-            funding_df[cols_fr].sort_values("timestamp").reset_index(drop=True)
-        )
+        funding_df_prepared = funding_df[cols_fr].sort_values("timestamp").reset_index(drop=True)
 
     m_path = Path(FUTURES_DATA_DIR) / f"{sym.replace('/', '_')}_metrics.parquet"
     if m_path.exists():
@@ -634,9 +619,7 @@ def _prepare_funding_metrics(
                 m_df["metrics_release_ts"] = _to_unix_ms(m_df[release_col])
                 exclude_m = ["datetime", "create_time", "symbol", "available_at"]
                 cols_m = [c for c in m_df.columns if c not in exclude_m]
-                metrics_df_prepared = (
-                    m_df[cols_m].sort_values("metrics_release_ts").reset_index(drop=True)
-                )
+                metrics_df_prepared = m_df[cols_m].sort_values("metrics_release_ts").reset_index(drop=True)
         except Exception:
             _logger.warning("Failed to load metrics data for %s", sym)
 
@@ -709,9 +692,7 @@ def load_single_symbol_data(
                             ],
                         )
                         # Row-group boundary precision: trim any residual rows outside window.
-                        boundary_mask = (df["datetime"] >= req_start_dt) & (
-                            df["datetime"] <= req_end_dt
-                        )
+                        boundary_mask = (df["datetime"] >= req_start_dt) & (df["datetime"] <= req_end_dt)
                         df = df.loc[boundary_mask]
                     except Exception as _e:
                         _logger.debug(
@@ -721,9 +702,7 @@ def load_single_symbol_data(
                             _e,
                         )
                         df_full = pd.read_parquet(enriched_path)
-                        fallback_mask = (df_full["datetime"] >= req_start_dt) & (
-                            df_full["datetime"] <= req_end_dt
-                        )
+                        fallback_mask = (df_full["datetime"] >= req_start_dt) & (df_full["datetime"] <= req_end_dt)
                         df = df_full.loc[fallback_mask].copy()
                     if df.empty:
                         insufficient = True
@@ -735,9 +714,7 @@ def load_single_symbol_data(
             if not from_cache:
                 # cache-miss: funding/metrics needed for merge → load now (lazy)
                 _ensure_fm_loaded()
-                raw_df = collector.collect_and_save(
-                    sym, tf_l, fetch_start, end, fetch_network=False
-                )
+                raw_df = collector.collect_and_save(sym, tf_l, fetch_start, end, fetch_network=False)
                 if raw_df is None or raw_df.empty:
                     insufficient = True
                     break
@@ -767,9 +744,15 @@ def load_single_symbol_data(
                         if needs_funding:
                             df = pd.merge_asof(df, funding_df_prepared, on="timestamp", direction="backward")
                         if needs_metrics:
-                            df = pd.merge_asof(df, metrics_df_prepared, left_on="timestamp",
-                                              right_on="metrics_release_ts", direction="backward",
-                                              tolerance=6 * 60 * 60 * 1000, allow_exact_matches=True)
+                            df = pd.merge_asof(
+                                df,
+                                metrics_df_prepared,
+                                left_on="timestamp",
+                                right_on="metrics_release_ts",
+                                direction="backward",
+                                tolerance=6 * 60 * 60 * 1000,
+                                allow_exact_matches=True,
+                            )
                     _append_stage_integrity(integrity_audit, symbol=sym, timeframe=tf_l, stage="merged", df=df)
                 except Exception as e:
                     _logger.error("[%s] Merge/Enrich failed: %s", sym, e)
@@ -783,20 +766,26 @@ def load_single_symbol_data(
                 if not pd.api.types.is_datetime64_any_dtype(df["datetime"]):
                     df["datetime"] = pd.to_datetime(df["datetime"], utc=True)
 
-                for _mc in ("coverage_60d", "last_60d_coverage", "vol_30d", "friction_score",
-                            "alpha_capacity_score", "diversification_score", "tradeable_score",
-                            "cluster_id", "beta_vs_market", "cluster_size", "anchor_cluster_member"):
+                for _mc in (
+                    "coverage_60d",
+                    "last_60d_coverage",
+                    "vol_30d",
+                    "friction_score",
+                    "alpha_capacity_score",
+                    "diversification_score",
+                    "tradeable_score",
+                    "cluster_id",
+                    "beta_vs_market",
+                    "cluster_size",
+                    "anchor_cluster_member",
+                ):
                     if _mc in df.columns:
                         df[_mc] = pd.to_numeric(df[_mc], errors="coerce")
 
                 # Save enriched cache (full date range) for future runs
                 raw_parquet_path = FUTURES_DATA_DIR / f"{safe_sym}_{tf_l}.parquet"
-                enriched_stale = (
-                    not enriched_path.exists()
-                    or (
-                        raw_parquet_path.exists()
-                        and enriched_path.stat().st_mtime < raw_parquet_path.stat().st_mtime
-                    )
+                enriched_stale = not enriched_path.exists() or (
+                    raw_parquet_path.exists() and enriched_path.stat().st_mtime < raw_parquet_path.stat().st_mtime
                 )
                 if enriched_stale:
                     try:
@@ -808,16 +797,35 @@ def load_single_symbol_data(
                                 wide_df["datetime"] = pd.to_datetime(wide_df["datetime"], utc=True)
                             wide_df["timestamp"] = _to_unix_ms(wide_df["datetime"])
                             if needs_funding:
-                                wide_df = pd.merge_asof(wide_df.sort_values("timestamp"), funding_df_prepared,
-                                                        on="timestamp", direction="backward")
+                                wide_df = pd.merge_asof(
+                                    wide_df.sort_values("timestamp"),
+                                    funding_df_prepared,
+                                    on="timestamp",
+                                    direction="backward",
+                                )
                             if needs_metrics:
-                                wide_df = pd.merge_asof(wide_df.sort_values("timestamp"), metrics_df_prepared,
-                                                        left_on="timestamp", right_on="metrics_release_ts",
-                                                        direction="backward", tolerance=6*60*60*1000,
-                                                        allow_exact_matches=True)
-                            for _mc in ("coverage_60d", "last_60d_coverage", "vol_30d", "friction_score",
-                                        "alpha_capacity_score", "diversification_score", "tradeable_score",
-                                        "cluster_id", "beta_vs_market", "cluster_size", "anchor_cluster_member"):
+                                wide_df = pd.merge_asof(
+                                    wide_df.sort_values("timestamp"),
+                                    metrics_df_prepared,
+                                    left_on="timestamp",
+                                    right_on="metrics_release_ts",
+                                    direction="backward",
+                                    tolerance=6 * 60 * 60 * 1000,
+                                    allow_exact_matches=True,
+                                )
+                            for _mc in (
+                                "coverage_60d",
+                                "last_60d_coverage",
+                                "vol_30d",
+                                "friction_score",
+                                "alpha_capacity_score",
+                                "diversification_score",
+                                "tradeable_score",
+                                "cluster_id",
+                                "beta_vs_market",
+                                "cluster_size",
+                                "anchor_cluster_member",
+                            ):
                                 if _mc in wide_df.columns:
                                     wide_df[_mc] = pd.to_numeric(wide_df[_mc], errors="coerce")
                             wide_df.to_parquet(enriched_path, index=False)
@@ -855,9 +863,7 @@ def load_single_symbol_data(
 
         if use_exec_1m:
             try:
-                exec_1m = collector.collect_1m_ohlcv(
-                    sym, fetch_start, end, fetch_network=False
-                )
+                exec_1m = collector.collect_1m_ohlcv(sym, fetch_start, end, fetch_network=False)
             except Exception as e:
                 _logger.warning("[%s] collect_1m_ohlcv failed: %s", sym, e)
                 exec_1m = pd.DataFrame()
@@ -879,15 +885,11 @@ def load_single_symbol_data(
                             exec_1m.reset_index(drop=True, inplace=True)
                     temp_is["exec_1m"] = exec_1m[exec_1m["datetime"] < is_end_dt].copy()
                     mask_exec_is = temp_is["exec_1m"]["datetime"] >= is_start_dt
-                    temp_is["is_start_idx_exec_1m"] = (
-                        int(mask_exec_is.to_numpy().argmax()) if mask_exec_is.any() else 0
-                    )
+                    temp_is["is_start_idx_exec_1m"] = int(mask_exec_is.to_numpy().argmax()) if mask_exec_is.any() else 0
                     temp_oos["exec_1m"] = exec_1m
                     mask_exec_oos = exec_1m["datetime"] >= is_end_dt
                     temp_oos["oos_start_idx_exec_1m"] = (
-                        int(mask_exec_oos.to_numpy().argmax())
-                        if mask_exec_oos.any()
-                        else len(exec_1m)
+                        int(mask_exec_oos.to_numpy().argmax()) if mask_exec_oos.any() else len(exec_1m)
                     )
 
                     # exec_1m funding arrays need funding_df → lazy load if not yet loaded
@@ -955,7 +957,7 @@ def load_futures_data_maps_for_symbols(
 
     # ── Pass-1: classify cache-valid vs. cache-miss ──────────────────────────
     # valid_enriched: (sym, tf_l) → enriched_path (all TFs must be valid for sym)
-    valid_enriched: dict[str, dict[str, Path]] = {}   # sym → {tf_l: path}
+    valid_enriched: dict[str, dict[str, Path]] = {}  # sym → {tf_l: path}
     cache_miss_syms: list[str] = []
 
     for sym in symbols:
@@ -995,11 +997,7 @@ def load_futures_data_maps_for_symbols(
     # dict key: "{safe_sym}_{tf_l}" (matches _scan_enriched_dataset convention)
     arrow_frames: dict[str, pd.DataFrame] = {}
     if valid_enriched:
-        all_paths = [
-            path
-            for sym_paths in valid_enriched.values()
-            for path in sym_paths.values()
-        ]
+        all_paths = [path for sym_paths in valid_enriched.values() for path in sym_paths.values()]
         arrow_frames = _scan_enriched_dataset(all_paths, start_ms, end_ms)
 
     # ── Pass-2: per-symbol post-processing (Python-bound) ────────────────────
@@ -1044,9 +1042,7 @@ def load_futures_data_maps_for_symbols(
                 is_end_idx = int(np.searchsorted(dt_ns, is_end_dt_ns, side="left"))
                 min_bars_threshold = min_bars_map.get(tf_l, 300)
                 if is_end_idx < min_bars_threshold:
-                    _logger.debug(
-                        "[%s] %s history too short (%d < %d)", sym, tf_l, is_end_idx, min_bars_threshold
-                    )
+                    _logger.debug("[%s] %s history too short (%d < %d)", sym, tf_l, is_end_idx, min_bars_threshold)
                     insufficient = True
                     break
 
@@ -1087,9 +1083,7 @@ def load_futures_data_maps_for_symbols(
     # ── cache-miss fallback: original ThreadPool path ─────────────────────────
     if cache_miss_syms:
         _logger.debug("cache-miss fallback: %d symbols", len(cache_miss_syms))
-        with concurrent.futures.ThreadPoolExecutor(
-            max_workers=min(32, (os.cpu_count() or 4) * 2)
-        ) as executor:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=min(32, (os.cpu_count() or 4) * 2)) as executor:
             futures_map = [
                 executor.submit(
                     load_single_symbol_data,
@@ -1127,8 +1121,8 @@ def load_futures_data_maps_for_symbols(
         audit_df = pd.DataFrame(audit_rows)
         # OPT-3: merged stage stores {rows, cols} only; integrity cols may be absent
         _audit_agg_cols = [
-            c for c in ("nan_pct", "inf_count", "gap_count", "duplicate_dt",
-                        "nonpositive_price_count")
+            c
+            for c in ("nan_pct", "inf_count", "gap_count", "duplicate_dt", "nonpositive_price_count")
             if c in audit_df.columns
         ]
         if _audit_agg_cols:
@@ -1150,19 +1144,20 @@ def load_futures_data_maps_for_symbols(
                 nonpos = float(row.get("nonpositive_price_count", 0.0))
                 if nan > 10.0 or gaps > 0 or dups > 0 or nonpos > 0:
                     failed_tfs.append(f"{row['timeframe']}({row['stage']}: nan={nan:.1f}%)")
-        
+
         coverage_val = float(loaded_count / max(requested_count, 1))
-        audit_msg = (
-            f".. AUDIT: req={requested_count} load={loaded_count} "
-            f"coverage={coverage_val:.2f}"
-        )
+        audit_msg = f".. AUDIT: req={requested_count} load={loaded_count} coverage={coverage_val:.2f}"
         if failed_tfs:
             audit_msg += f" | !! FAIL: {', '.join(failed_tfs[:3])}"
         else:
             audit_msg += " | ok"
         _logger.debug(audit_msg)
     else:
-        _logger.debug(".. AUDIT: req=%d load=%d coverage=%.2f | ok (0 rows)", 
-                     requested_count, loaded_count, float(loaded_count / max(requested_count, 1)))
+        _logger.debug(
+            ".. AUDIT: req=%d load=%d coverage=%.2f | ok (0 rows)",
+            requested_count,
+            loaded_count,
+            float(loaded_count / max(requested_count, 1)),
+        )
 
     return data_maps, oos_data_maps, valid_symbols

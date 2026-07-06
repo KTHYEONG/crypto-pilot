@@ -340,9 +340,7 @@ def _fold_bucket_means(
         key = f"regime={r}/family={fam}/TF={tf}"
         bucket_map.setdefault(key, []).append(float(y[ii]))
 
-    train_means: dict[str, float] = {
-        k: float(np.mean(vs)) if vs else 0.0 for k, vs in bucket_map.items()
-    }
+    train_means: dict[str, float] = {k: float(np.mean(vs)) if vs else 0.0 for k, vs in bucket_map.items()}
 
     val_edges: dict[str, list[float]] = {}
     for idx in val_idx:
@@ -400,7 +398,10 @@ def evaluate_meta_feasibility(
             continue
 
         train_idx, val_idx = _purged_train_val_split(
-            t_sorted, val_start, val_end, embargo_bars,
+            t_sorted,
+            val_start,
+            val_end,
+            embargo_bars,
         )
 
         if len(train_idx) < 10 or len(val_idx) < 4:
@@ -455,9 +456,13 @@ def evaluate_meta_feasibility(
             auc_val = float("nan")
 
         logger.info(
-            "[L2-META-FEAS] fold=%d meta_ic=%.3f tstat=%.2f "
-            "net_lift_bps=%.2f auc=%.3f n=%d",
-            fold, ic_val, tstat_val, lift_val, auc_val if np.isfinite(auc_val) else 0.0, len(val_idx),
+            "[L2-META-FEAS] fold=%d meta_ic=%.3f tstat=%.2f net_lift_bps=%.2f auc=%.3f n=%d",
+            fold,
+            ic_val,
+            tstat_val,
+            lift_val,
+            auc_val if np.isfinite(auc_val) else 0.0,
+            len(val_idx),
         )
 
         fold_ics.append(ic_val)
@@ -469,7 +474,11 @@ def evaluate_meta_feasibility(
         regime_col = 0
         if x_sorted.shape[1] > 0:
             bt = _fold_bucket_means(
-                x_sorted, y_sorted, t_sorted, tf_sorted, fam_sorted,
+                x_sorted,
+                y_sorted,
+                t_sorted,
+                tf_sorted,
+                fam_sorted,
                 regime_col=regime_col,
                 train_idx=train_idx,
                 val_idx=val_idx,
@@ -572,9 +581,7 @@ def compute_bucket_realized_edge_stats(
         count = bucket_cnt[(regime, family, tf)]
         family_raw_edges.setdefault(family, []).append(total / count)
 
-    family_prior = {
-        family: float(np.mean(edges)) for family, edges in family_raw_edges.items()
-    }
+    family_prior = {family: float(np.mean(edges)) for family, edges in family_raw_edges.items()}
     result: dict[tuple[int, str, str], _RegimeEdgeStat] = {}
     for key, total in bucket_sum.items():
         count = bucket_cnt[key]
@@ -1044,18 +1051,13 @@ def build_regime_policy_by_fold(
         # RC-3: fold-level regime confidence override. If mean_cal_lift < 0 AND
         # sign_consistency_ratio < 0.6, force ALL cells to pooled passthrough.
         # regime is demoted to exposure governor (no alpha selection).
-        _fold_mean_cal = float(np.mean(
-            [cell.cal_lift_bps for cell in fold_policy.values()]
-        )) if fold_policy else 0.0
+        _fold_mean_cal = float(np.mean([cell.cal_lift_bps for cell in fold_policy.values()])) if fold_policy else 0.0
         _fold_sign_cons = (
-            float(sign_consistent_total) / float(sign_comparable_total)
-            if sign_comparable_total > 0 else 0.0
+            float(sign_consistent_total) / float(sign_comparable_total) if sign_comparable_total > 0 else 0.0
         )
         if _fold_mean_cal < 0.0 and _fold_sign_cons < 0.6:
             fold_policy = {
-                key: replace(policy, action="allow",
-                             edge_multiplier=1.0,
-                             reason="pooled_passthrough")
+                key: replace(policy, action="allow", edge_multiplier=1.0, reason="pooled_passthrough")
                 for key, policy in fold_policy.items()
             }
 
@@ -1133,9 +1135,7 @@ def apply_regime_cell_policy(
     ) -> SymbolSignal:
         clipped = float(np.clip(multiplier, 0.0, 1.0))
         quality_weight = (
-            max(float(sig.quality_weight), 0.0) * clipped
-            if scale_quality_weight_inner
-            else sig.quality_weight
+            max(float(sig.quality_weight), 0.0) * clipped if scale_quality_weight_inner else sig.quality_weight
         )
         return replace(
             sig,
@@ -1420,9 +1420,9 @@ def _collect_regime_cell_accumulators(
                     close_2d=close_2d,
                     t=t,
                     sleeve_idx=int(j),
-                        window_end=oos_end,
-                        cost_bps=cost_bps,
-                    )
+                    window_end=oos_end,
+                    cost_bps=cost_bps,
+                )
                 fit_edge = float(fit_edges.get((state, family, tf), 0.0))
                 acc.n_oos += 1
                 acc.oos_realized_sum_bps += realized_edge
@@ -1464,7 +1464,7 @@ def _finalize_cell_stats(
                 sign_hit_rate=acc.sign_hit_count / max(acc.n_oos, 1),
                 selected_hit_pct=acc.selected_hit_count / max(acc.n_oos, 1),
             )
-    )
+        )
     return tuple(stats)
 
 
@@ -1572,7 +1572,7 @@ def _granularity_row(
         ic = 0.0
     if fit_vals.size > 0:
         errors = oos_vals - fit_vals
-        rmse = float(np.sqrt(np.mean(errors ** 2)))
+        rmse = float(np.sqrt(np.mean(errors**2)))
         bias = float(np.mean(errors))
     else:
         rmse = 0.0
@@ -1766,10 +1766,13 @@ def evaluate_regime_granularity_debug(
         ),
     )
 
-    effective_state_count = max(
-        (state for fold_map in effective_bucket_edges_by_fold for state, _, _ in fold_map),
-        default=-1,
-    ) + 1
+    effective_state_count = (
+        max(
+            (state for fold_map in effective_bucket_edges_by_fold for state, _, _ in fold_map),
+            default=-1,
+        )
+        + 1
+    )
     if effective_state_count <= 0 and effective_regime_code_1d.size > 0:
         effective_state_count = int(np.max(effective_regime_code_1d)) + 1
 
@@ -1889,8 +1892,10 @@ def build_regime_routing_plan(
         )
 
     effective_codes = compress_regime_codes(regime_code_arr) if compression_enabled else regime_code_arr.copy()
-    state_names = ("bull", "bear", "crisis") if compression_enabled else (
-        "bull_quiet", "bull_volatile", "bear_quiet", "bear_volatile", "transition", "crash"
+    state_names = (
+        ("bull", "bear", "crisis")
+        if compression_enabled
+        else ("bull_quiet", "bull_volatile", "bear_quiet", "bear_volatile", "transition", "crash")
     )
     state_count = len(state_names)
 

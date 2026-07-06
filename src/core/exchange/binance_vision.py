@@ -251,9 +251,7 @@ class BinanceVisionDownloader:
             self.logger.warning(msg)
             return pd.DataFrame(columns=list(_METRICS_CANONICAL_COLUMNS))
 
-    def fetch_range_metrics(
-        self, symbol: str, start_date: datetime, end_date: datetime
-    ) -> pd.DataFrame:
+    def fetch_range_metrics(self, symbol: str, start_date: datetime, end_date: datetime) -> pd.DataFrame:
         """지정된 기간 전체의 metrics 수집 및 병합합니다."""
         all_dfs = []
         current = start_date
@@ -335,7 +333,7 @@ class BinanceVisionDownloader:
                 prefix = (node.text or "").strip()
                 if not prefix.startswith(dataset_prefix):
                     continue
-                remain = prefix[len(dataset_prefix):].strip("/")
+                remain = prefix[len(dataset_prefix) :].strip("/")
                 if remain:
                     symbols.append(remain.split("/")[0])
             return sorted(set(symbols))
@@ -407,8 +405,7 @@ class BinanceVisionDownloader:
             if len(df.columns) >= len(expected_cols):
                 df = df.rename(
                     columns={
-                        src_col: expected_cols[idx]
-                        for idx, src_col in enumerate(df.columns[: len(expected_cols)])
+                        src_col: expected_cols[idx] for idx, src_col in enumerate(df.columns[: len(expected_cols)])
                     }
                 )
 
@@ -548,9 +545,7 @@ def fetch_metrics_bulk(
                     df.to_parquet(cache_file, index=False)
                 dfs.append(df)
         except Exception as _e:
-            downloader.logger.warning(
-                "fetch_metrics_daily failed symbol=%s date=%s: %s", symbol, date_str, _e
-            )
+            downloader.logger.warning("fetch_metrics_daily failed symbol=%s date=%s: %s", symbol, date_str, _e)
 
         curr += _timedelta(days=1)
 

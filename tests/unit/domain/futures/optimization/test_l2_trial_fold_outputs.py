@@ -1,4 +1,5 @@
 """Spec: futures-l2-reversal-economic-replay, Scenario 3."""
+
 from __future__ import annotations
 
 from types import SimpleNamespace
@@ -118,8 +119,14 @@ class TestEvaluateL2TrialFoldOutputs:
         )
         mock_calibrate.return_value = (1.0, "none", 0.0)
         mock_build_score.return_value = SimpleNamespace(
-            cagr=0.0, sortino=0.0, sharpe=0.0, calmar=0.0, mdd=0.0,
-            fold_pass_ratio=0.0, score=0.0, worst_fold_cagr=0.0,
+            cagr=0.0,
+            sortino=0.0,
+            sharpe=0.0,
+            calmar=0.0,
+            mdd=0.0,
+            fold_pass_ratio=0.0,
+            score=0.0,
+            worst_fold_cagr=0.0,
         )
 
         config = SimpleNamespace(

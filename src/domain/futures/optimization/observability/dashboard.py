@@ -13,6 +13,8 @@ _logger: logging.Logger = logging.getLogger("opt_futures")
 C_GRN, C_RED, C_RST, C_BLD, C_YEL = "\033[92m", "\033[91m", "\033[0m", "\033[1m", "\033[93m"
 SEP_85 = " " + "─" * 84
 DBL_SEP_85 = "═" * 85
+
+
 def safe_float(v: Any, default: float = 0.0, limit: float = 1e9) -> float:
     """Safe conversion to float with optional clamping."""
     try:
@@ -49,11 +51,7 @@ def log_alpha_component_summary(alpha_panel: pd.DataFrame, is_end_date: str | No
     if not has_comp_level:
         # Prefer gate-status keys to avoid duplicate alias rows.
         filt_meta_probe = getattr(alpha_panel, "attrs", {}).get("alpha_component_filter", {})
-        gate_probe = (
-            filt_meta_probe.get("gate_status_by_col", {})
-            if isinstance(filt_meta_probe, dict)
-            else {}
-        )
+        gate_probe = filt_meta_probe.get("gate_status_by_col", {}) if isinstance(filt_meta_probe, dict) else {}
         if isinstance(gate_probe, dict) and gate_probe:
             components = sorted(str(k) for k in gate_probe)
     if has_comp_level:
@@ -120,12 +118,8 @@ def log_alpha_component_summary(alpha_panel: pd.DataFrame, is_end_date: str | No
     def _get_sort_key(c: str) -> tuple[int, int, float]:
         side_priority = 0 if "long" in c else 1
         stat = gate_status_by_col.get(c, {})
-        is_ok = (
-            0 if bool(stat.get("final_selection_ok", False)) else 1
-        )  # 0 is higher priority in ascending sort
-        oos_val = safe_float(
-            filt_meta.get("ic_oos_by_slot", {}).get(c, oos_ic_fallback.get(c, 0.0))
-        )
+        is_ok = 0 if bool(stat.get("final_selection_ok", False)) else 1  # 0 is higher priority in ascending sort
+        oos_val = safe_float(filt_meta.get("ic_oos_by_slot", {}).get(c, oos_ic_fallback.get(c, 0.0)))
         return (side_priority, is_ok, -oos_val)  # -oos_val for descending IC
 
     sorted_components = sorted(components, key=_get_sort_key)
@@ -141,9 +135,7 @@ def log_alpha_component_summary(alpha_panel: pd.DataFrame, is_end_date: str | No
             primary_col = (
                 "alpha_long_signal"
                 if "alpha_long_signal" in sub_full.columns
-                else (
-                    "alpha_long" if "alpha_long" in sub_full.columns else None
-                )
+                else ("alpha_long" if "alpha_long" in sub_full.columns else None)
             )
         else:
             sub_full = alpha_panel
@@ -154,9 +146,7 @@ def log_alpha_component_summary(alpha_panel: pd.DataFrame, is_end_date: str | No
 
         # Get metrics
         is_ic = safe_float(ic_by_slot.get(comp, is_ic_fallback.get(comp, 0.0)))
-        oos_ic = safe_float(
-            filt_meta.get("ic_oos_by_slot", {}).get(comp, oos_ic_fallback.get(comp, 0.0))
-        )
+        oos_ic = safe_float(filt_meta.get("ic_oos_by_slot", {}).get(comp, oos_ic_fallback.get(comp, 0.0)))
 
         slot_stat = gate_status_by_col.get(comp, {})
         ic_oos_slot_map = filt_meta.get("ic_oos_by_slot", {})  # Fix 3B: OOS CS-IC per slot
@@ -184,9 +174,7 @@ def log_alpha_component_summary(alpha_panel: pd.DataFrame, is_end_date: str | No
         reason_str = f" ({','.join(reasons)})" if not is_passed and reasons else ""
 
         disp_comp = (
-            "long_signal"
-            if comp == "alpha_long_signal"
-            else ("short_signal" if comp == "alpha_short_signal" else comp)
+            "long_signal" if comp == "alpha_long_signal" else ("short_signal" if comp == "alpha_short_signal" else comp)
         )
         _logger.info(
             "  %s │ %6.3f │ %6.3f │  %6.3f  │   %4.1fb    │ %s%s",
@@ -201,18 +189,10 @@ def log_alpha_component_summary(alpha_panel: pd.DataFrame, is_end_date: str | No
 
     # Summary of hidden failing components
     total_long_fail = len(
-        [
-            c
-            for c in sorted_components
-            if "long" in c and not gate_status_by_col.get(c, {}).get("final_selection_ok")
-        ]
+        [c for c in sorted_components if "long" in c and not gate_status_by_col.get(c, {}).get("final_selection_ok")]
     )
     total_short_fail = len(
-        [
-            c
-            for c in sorted_components
-            if "short" in c and not gate_status_by_col.get(c, {}).get("final_selection_ok")
-        ]
+        [c for c in sorted_components if "short" in c and not gate_status_by_col.get(c, {}).get("final_selection_ok")]
     )
 
     if total_long_fail > failing_limit_per_side:
@@ -249,15 +229,12 @@ def log_alpha_component_summary(alpha_panel: pd.DataFrame, is_end_date: str | No
         )
         if component_oos:
             formatted = ", ".join(
-                f"{key!s}={safe_float(value, default=0.0):+.4f}"
-                for key, value in sorted(component_oos.items())
+                f"{key!s}={safe_float(value, default=0.0):+.4f}" for key, value in sorted(component_oos.items())
             )
             _logger.info("  component_oos: %s", formatted)
         _logger.info(f"  sign_ok={sign_ok}")
 
-    alpha_goal_eval_meta = _build_alpha_goal_eval_meta(
-        alpha_panel=alpha_panel, is_end_date=is_end_date
-    )
+    alpha_goal_eval_meta = _build_alpha_goal_eval_meta(alpha_panel=alpha_panel, is_end_date=is_end_date)
     alpha_panel.attrs["alpha_goal_eval_meta"] = alpha_goal_eval_meta
 
     # Fix 3A: IC Retention — IS CS-IC (ic_by_slot) vs OOS CS-IC (ic_oos_by_slot)
@@ -274,30 +251,18 @@ def log_alpha_component_summary(alpha_panel: pd.DataFrame, is_end_date: str | No
     # Fix 3C: Verdict with OOS CS-IC quality gate
     surviving_cs = [k for k, v in gate_status_by_col.items() if v.get("final_selection_ok")]
     mean_survivor_oos_cs = (
-        float(
-            np.mean(
-                [
-                    safe_float(ic_oos_by_slot.get(c, oos_ic_fallback.get(c, 0.0)))
-                    for c in surviving_cs
-                ]
-            )
-        )
+        float(np.mean([safe_float(ic_oos_by_slot.get(c, oos_ic_fallback.get(c, 0.0))) for c in surviving_cs]))
         if surviving_cs
         else 0.0
     )
-    is_ready = (
-        n_surv > 0
-        and mean_survivor_oos_cs >= 0.02
-        and (retention >= 50.0 or len(surviving_ic_pairs) == 0)
-    )
+    is_ready = n_surv > 0 and mean_survivor_oos_cs >= 0.02 and (retention >= 50.0 or len(surviving_ic_pairs) == 0)
     verdict_str = (
         f"{C_GRN}[READY]{C_RST}"
         if is_ready
         else (f"{C_YEL}[MARGINAL]{C_RST}" if n_surv > 0 else f"{C_RED}[FAIL]{C_RST}")
     )
     _logger.info(
-        "  🚀 G-ALPHA Verdict: %s - %d elite slots surviving. "
-        "(IC Retention: %.1f%% | OOS-CS-IC: %.4f)",
+        "  🚀 G-ALPHA Verdict: %s - %d elite slots surviving. (IC Retention: %.1f%% | OOS-CS-IC: %.4f)",
         verdict_str,
         n_surv,
         retention,
@@ -341,9 +306,7 @@ def _build_alpha_goal_eval_meta(
     if not required["fdr"] or not required["dsr"]:
         reasons.append("missing_gate_status")
 
-    verdict = (
-        "pass" if not reasons else ("warn" if "no_elite_components" not in reasons else "fail")
-    )
+    verdict = "pass" if not reasons else ("warn" if "no_elite_components" not in reasons else "fail")
     return {
         "framework": "g-alpha.v8",
         "verdict": verdict,
@@ -412,11 +375,7 @@ def print_mechanical_dashboard(
         passed = (val >= target) if op == ">" else (val <= target)
         status = f"{C_GRN}[PASS]{C_RST}" if passed else f"{C_RED}[FAIL]{C_RST}"
 
-        val_fmt = (
-            f"{val:>8.2f}%"
-            if key in ["cagr_pct", "mdd_pct", "pbo", "funding_drag_ratio"]
-            else f"{val:>8.2f} "
-        )
+        val_fmt = f"{val:>8.2f}%" if key in ["cagr_pct", "mdd_pct", "pbo", "funding_drag_ratio"] else f"{val:>8.2f} "
         tgt_fmt = f"{'≥' if op == '>' else '≤'} {target:>4.1f}" + ("%" if "%" in val_fmt else "")
 
         _logger.info(f"  {label:<21} : {val_fmt} | {tgt_fmt:<8} | {status:<8} | {meaning}")
@@ -448,9 +407,7 @@ def log_ml_merge_feature_stats(oos_data_maps: Any, valid_symbols: Any, tf: Any) 
             continue
         total_rows += len(df)
         total_cols += len(df.columns)
-        has_alpha_cols = (
-            "alpha_long" in df.columns or "alpha_short" in df.columns
-        )
+        has_alpha_cols = "alpha_long" in df.columns or "alpha_short" in df.columns
         if has_alpha_cols:
             alpha_present += 1
 
@@ -488,9 +445,7 @@ def log_oos_alpha_attribution(report: dict[str, Any]) -> None:
     )
 
 
-def print_dual_audit_dashboard(
-    new_m: dict[str, Any], champ_m: dict[str, Any], verdict: str
-) -> None:
+def print_dual_audit_dashboard(new_m: dict[str, Any], champ_m: dict[str, Any], verdict: str) -> None:
     """Compare candidate and champion core metrics in one panel (Visual Audit)."""
     new_m = new_m or {}
     champ_m = champ_m or {}

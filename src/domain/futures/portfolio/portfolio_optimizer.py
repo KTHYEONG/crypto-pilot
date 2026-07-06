@@ -72,9 +72,7 @@ def apply_policy_constraints(
 ) -> dict[str, Any]:
     out = dict(params)
     out["K_LONG"] = int(max(1, min(int(out.get("K_LONG", policy.top_k_long)), policy.top_k_long)))
-    out["K_SHORT"] = int(
-        max(1, min(int(out.get("K_SHORT", policy.top_k_short)), policy.top_k_short))
-    )
+    out["K_SHORT"] = int(max(1, min(int(out.get("K_SHORT", policy.top_k_short)), policy.top_k_short)))
     out["REBALANCE_BARS"] = int(max(1, out.get("REBALANCE_BARS", policy.rebalance_bars)))
     out["MAX_EXPOSURE_PER_COIN"] = float(
         min(

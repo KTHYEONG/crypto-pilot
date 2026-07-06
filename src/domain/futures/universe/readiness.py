@@ -56,14 +56,14 @@ def _rolling_finite_count(arr: NDArray[np.float64], lookback: int) -> NDArray[np
         Time: O(T*N), Space: O(T*N)
     """
     n_t = arr.shape[0]
-    finite_mask: NDArray[np.float64] = np.isfinite(arr).astype(np.float64)   # [T, N]
-    cum: NDArray[np.float64] = np.cumsum(finite_mask, axis=0)                 # [T, N]
+    finite_mask: NDArray[np.float64] = np.isfinite(arr).astype(np.float64)  # [T, N]
+    cum: NDArray[np.float64] = np.cumsum(finite_mask, axis=0)  # [T, N]
     # Prepend zero row → cum_padded[t+1] == cum[t]
     pad = np.zeros((1, arr.shape[1]), dtype=np.float64)
-    cum_padded: NDArray[np.float64] = np.concatenate([pad, cum], axis=0)      # [T+1, N]
+    cum_padded: NDArray[np.float64] = np.concatenate([pad, cum], axis=0)  # [T+1, N]
     # rolling[t] = cum_padded[t+1] - cum_padded[max(0, t+1-lookback)]
-    rows_end = np.arange(1, n_t + 1)                           # [T,]  values 1..T
-    rows_start = np.maximum(0, rows_end - lookback)            # [T,]  clipped at 0
+    rows_end = np.arange(1, n_t + 1)  # [T,]  values 1..T
+    rows_start = np.maximum(0, rows_end - lookback)  # [T,]  clipped at 0
     rolling: NDArray[np.float64] = cum_padded[rows_end] - cum_padded[rows_start]  # [T, N]
     return rolling
 
@@ -101,17 +101,12 @@ def evaluate_strategy_readiness(
     n_cal: int = len(eligibility.calendar)
     n_inst: int = len(eligibility.instrument_ids)
 
-    close_arr: NDArray[np.float64] = getattr(
-        aligned, "close", np.full((n_cal, n_inst), np.nan)
-    )
+    close_arr: NDArray[np.float64] = getattr(aligned, "close", np.full((n_cal, n_inst), np.nan))
 
     n_t, n_n = close_arr.shape
 
     if n_t != n_cal or n_n != n_inst:
-        raise ValueError(
-            f"aligned.close shape {(n_t, n_n)} inconsistent with eligibility cube "
-            f"({n_cal}, {n_inst})"
-        )
+        raise ValueError(f"aligned.close shape {(n_t, n_n)} inconsistent with eligibility cube ({n_cal}, {n_inst})")
 
     # Optional arrays — None if the attribute is absent
     funding_arr: NDArray[np.float64] | None = getattr(aligned, "funding_rate", None)
@@ -161,12 +156,8 @@ def evaluate_strategy_readiness(
                 reason_cube[s_idx, candidate] = _REASON_MISSING_FUNDING
                 candidate[:] = False
             else:
-                funding_rolling: NDArray[np.float64] = _rolling_finite_count(
-                    funding_arr, lookback
-                )
-                insufficient_funding: NDArray[np.bool_] = candidate & (
-                    funding_rolling < lookback
-                )
+                funding_rolling: NDArray[np.float64] = _rolling_finite_count(funding_arr, lookback)
+                insufficient_funding: NDArray[np.bool_] = candidate & (funding_rolling < lookback)
                 reason_cube[s_idx, insufficient_funding] = _REASON_INSUFFICIENT_FUNDING
                 candidate &= ~insufficient_funding
 

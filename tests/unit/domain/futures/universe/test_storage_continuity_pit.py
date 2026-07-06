@@ -30,11 +30,13 @@ def _make_klines_4h(n_days: int, start_date: date, zero_vol_start_day: int | Non
         zero_start_bar = zero_vol_start_day * bars_per_day
         quote_vol[zero_start_bar:] = 0.0
 
-    df = pd.DataFrame({
-        "datetime": idx,
-        "quote_vol": quote_vol,
-        "volume": quote_vol,
-    })
+    df = pd.DataFrame(
+        {
+            "datetime": idx,
+            "quote_vol": quote_vol,
+            "volume": quote_vol,
+        }
+    )
     return df
 
 
@@ -107,11 +109,13 @@ def test_compute_rolling_zero_volume_bars_falls_back_to_volume_when_quote_vol_is
 
     # quote_vol entirely NaN (simulates fetch_ohlcv_with_taker bug window),
     # volume fully populated with real nonzero trading data.
-    klines = pd.DataFrame({
-        "datetime": idx,
-        "quote_vol": np.full(n_bars, np.nan),
-        "volume": np.full(n_bars, 500.0),
-    })
+    klines = pd.DataFrame(
+        {
+            "datetime": idx,
+            "quote_vol": np.full(n_bars, np.nan),
+            "volume": np.full(n_bars, 500.0),
+        }
+    )
 
     as_of = date(2026, 6, 30)
     result = compute_rolling_zero_volume_bars(klines_tf=klines, dates=[as_of], window_days=60)
@@ -161,10 +165,12 @@ def _make_ledger_row(symbol: str, day: date, n_zero_vol: int) -> LedgerRow:
 
 def test_detect_continuity_metric_regression_flags_anomalous_jump() -> None:
     """Jump from 1 to 180 (180x) should trigger warning."""
-    prev_frame = pd.DataFrame({
-        "symbol": ["BTCUSDT"],
-        "n_zero_volume_bars_60d": [1],
-    })
+    prev_frame = pd.DataFrame(
+        {
+            "symbol": ["BTCUSDT"],
+            "n_zero_volume_bars_60d": [1],
+        }
+    )
 
     new_rows = [_make_ledger_row("BTCUSDT", date(2026, 3, 1), 180)]
 
@@ -196,10 +202,12 @@ def test_detect_continuity_metric_regression_skips_first_ever_ledger_write() -> 
 
 def test_detect_continuity_metric_regression_no_warning_for_gradual_change() -> None:
     """Gradual increase (1 -> 3) should not trigger warning."""
-    prev_frame = pd.DataFrame({
-        "symbol": ["BTCUSDT"],
-        "n_zero_volume_bars_60d": [1],
-    })
+    prev_frame = pd.DataFrame(
+        {
+            "symbol": ["BTCUSDT"],
+            "n_zero_volume_bars_60d": [1],
+        }
+    )
 
     new_rows = [_make_ledger_row("BTCUSDT", date(2026, 3, 1), 3)]
 

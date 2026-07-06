@@ -1,4 +1,5 @@
 """Spec: futures-l2-reversal-economic-replay, Scenario 4-8."""
+
 from __future__ import annotations
 
 import os
@@ -57,10 +58,15 @@ class TestFoldMetricsFromL2Evaluation:
 
     def test_fold_metrics_from_l2_evaluation_handles_missing_fold_fields(self) -> None:
         evaluation = _eval(
-            cagr=0.1, mdd=0.2, fold_cagrs=(0.1, None), fold_mdds=(0.05,), risk_off=(3,),
+            cagr=0.1,
+            mdd=0.2,
+            fold_cagrs=(0.1, None),
+            fold_mdds=(0.05,),
+            risk_off=(3,),
         )
         metrics = opt_main_futures._fold_metrics_from_l2_evaluation(
-            variant_name="test", evaluation=evaluation,
+            variant_name="test",
+            evaluation=evaluation,
         )
         assert len(metrics) == 2
         assert metrics[0].cagr == 0.1
@@ -115,7 +121,8 @@ class TestAdoptionVerdict:
 
     def test_reversal_replay_adoption_verdict_accepts_balanced_candidate(self) -> None:
         baseline = _make_result(
-            variant="baseline_off", cagr=0.015,
+            variant="baseline_off",
+            cagr=0.015,
             fold_metrics=(
                 _fold_metric("baseline_off", 0, -0.274),
                 _fold_metric("baseline_off", 1, 0.05),
@@ -123,7 +130,8 @@ class TestAdoptionVerdict:
             ),
         )
         legacy = _make_result(
-            variant="legacy_006_p1", cagr=0.018,
+            variant="legacy_006_p1",
+            cagr=0.018,
             fold_metrics=(
                 _fold_metric("legacy_006_p1", 0, -0.216),
                 _fold_metric("legacy_006_p1", 1, -0.005),
@@ -131,7 +139,8 @@ class TestAdoptionVerdict:
             ),
         )
         candidate = _make_result(
-            variant="balanced_010_p2", cagr=0.025,
+            variant="balanced_010_p2",
+            cagr=0.025,
             fold_metrics=(
                 _fold_metric("balanced_010_p2", 0, -0.230),
                 _fold_metric("balanced_010_p2", 1, 0.045),
@@ -148,7 +157,8 @@ class TestAdoptionVerdict:
 
     def test_reversal_replay_adoption_verdict_blocks_non_stress_damage(self) -> None:
         baseline = _make_result(
-            variant="baseline_off", cagr=0.015,
+            variant="baseline_off",
+            cagr=0.015,
             fold_metrics=(
                 _fold_metric("baseline_off", 0, -0.274),
                 _fold_metric("baseline_off", 1, 0.05),
@@ -156,7 +166,8 @@ class TestAdoptionVerdict:
             ),
         )
         legacy = _make_result(
-            variant="legacy_006_p1", cagr=0.018,
+            variant="legacy_006_p1",
+            cagr=0.018,
             fold_metrics=(
                 _fold_metric("legacy_006_p1", 0, -0.216),
                 _fold_metric("legacy_006_p1", 1, -0.005),
@@ -164,7 +175,8 @@ class TestAdoptionVerdict:
             ),
         )
         candidate = _make_result(
-            variant="balanced_010_p2", cagr=0.025,
+            variant="balanced_010_p2",
+            cagr=0.025,
             fold_metrics=(
                 _fold_metric("balanced_010_p2", 0, -0.230),
                 _fold_metric("balanced_010_p2", 1, 0.03),
@@ -189,7 +201,11 @@ class TestTemporaryReversalEnv:
         os.environ["L2_REVERSAL_PERSISTENCE_BARS"] = "5"
         os.environ["L2_REVERSAL_RECOVERY_COOLDOWN"] = "99"
         variant = opt_main_futures.L2ReversalReplayVariant(
-            name="test", enabled=True, dd_threshold=0.10, persistence_bars=2, recovery_cooldown_bars=4,
+            name="test",
+            enabled=True,
+            dd_threshold=0.10,
+            persistence_bars=2,
+            recovery_cooldown_bars=4,
         )
         with opt_main_futures._temporary_reversal_env(variant):
             assert os.environ.get("L2_REVERSAL_KILL") == "1"
@@ -219,12 +235,14 @@ class TestRunL2ReversalEconomicReplay:
         captured_envs: list[dict[str, str | None]] = []
 
         def _side_effect(**kwargs: Any) -> SimpleNamespace:
-            captured_envs.append({
-                "L2_REVERSAL_KILL": os.environ.get("L2_REVERSAL_KILL"),
-                "L2_REVERSAL_DD_THRESHOLD": os.environ.get("L2_REVERSAL_DD_THRESHOLD"),
-                "L2_REVERSAL_PERSISTENCE_BARS": os.environ.get("L2_REVERSAL_PERSISTENCE_BARS"),
-                "L2_REVERSAL_RECOVERY_COOLDOWN": os.environ.get("L2_REVERSAL_RECOVERY_COOLDOWN"),
-            })
+            captured_envs.append(
+                {
+                    "L2_REVERSAL_KILL": os.environ.get("L2_REVERSAL_KILL"),
+                    "L2_REVERSAL_DD_THRESHOLD": os.environ.get("L2_REVERSAL_DD_THRESHOLD"),
+                    "L2_REVERSAL_PERSISTENCE_BARS": os.environ.get("L2_REVERSAL_PERSISTENCE_BARS"),
+                    "L2_REVERSAL_RECOVERY_COOLDOWN": os.environ.get("L2_REVERSAL_RECOVERY_COOLDOWN"),
+                }
+            )
             return SimpleNamespace(
                 cagr_hybrid=0.02,
                 mdd_hybrid=0.15,
@@ -292,53 +310,101 @@ class TestReversalCooldownScenarios:
     ) -> None:
         """Scenario 9: no-stress window automatically skips stress checks."""
         baseline = _make_result(
-            variant="baseline_off", cagr=0.015,
+            variant="baseline_off",
+            cagr=0.015,
             fold_metrics=(
                 opt_main_futures.L2ReversalReplayFoldMetric(
-                    variant="baseline_off", fold_idx=0, cagr=0.01, mdd=0.1152,
-                    risk_off_bars=0, risk_off_realized_price=0.0, risk_on_realized_price=0.0,
+                    variant="baseline_off",
+                    fold_idx=0,
+                    cagr=0.01,
+                    mdd=0.1152,
+                    risk_off_bars=0,
+                    risk_off_realized_price=0.0,
+                    risk_on_realized_price=0.0,
                 ),
                 opt_main_futures.L2ReversalReplayFoldMetric(
-                    variant="baseline_off", fold_idx=1, cagr=0.02, mdd=0.1748,
-                    risk_off_bars=0, risk_off_realized_price=0.0, risk_on_realized_price=0.0,
+                    variant="baseline_off",
+                    fold_idx=1,
+                    cagr=0.02,
+                    mdd=0.1748,
+                    risk_off_bars=0,
+                    risk_off_realized_price=0.0,
+                    risk_on_realized_price=0.0,
                 ),
                 opt_main_futures.L2ReversalReplayFoldMetric(
-                    variant="baseline_off", fold_idx=2, cagr=0.025, mdd=0.1336,
-                    risk_off_bars=0, risk_off_realized_price=0.0, risk_on_realized_price=0.0,
+                    variant="baseline_off",
+                    fold_idx=2,
+                    cagr=0.025,
+                    mdd=0.1336,
+                    risk_off_bars=0,
+                    risk_off_realized_price=0.0,
+                    risk_on_realized_price=0.0,
                 ),
             ),
         )
         legacy = _make_result(
-            variant="legacy_006_p1", cagr=0.018,
+            variant="legacy_006_p1",
+            cagr=0.018,
             fold_metrics=(
                 opt_main_futures.L2ReversalReplayFoldMetric(
-                    variant="legacy_006_p1", fold_idx=0, cagr=0.005, mdd=0.1152,
-                    risk_off_bars=10, risk_off_realized_price=0.0, risk_on_realized_price=0.0,
+                    variant="legacy_006_p1",
+                    fold_idx=0,
+                    cagr=0.005,
+                    mdd=0.1152,
+                    risk_off_bars=10,
+                    risk_off_realized_price=0.0,
+                    risk_on_realized_price=0.0,
                 ),
                 opt_main_futures.L2ReversalReplayFoldMetric(
-                    variant="legacy_006_p1", fold_idx=1, cagr=0.025, mdd=0.1748,
-                    risk_off_bars=5, risk_off_realized_price=0.0, risk_on_realized_price=0.0,
+                    variant="legacy_006_p1",
+                    fold_idx=1,
+                    cagr=0.025,
+                    mdd=0.1748,
+                    risk_off_bars=5,
+                    risk_off_realized_price=0.0,
+                    risk_on_realized_price=0.0,
                 ),
                 opt_main_futures.L2ReversalReplayFoldMetric(
-                    variant="legacy_006_p1", fold_idx=2, cagr=0.03, mdd=0.1336,
-                    risk_off_bars=0, risk_off_realized_price=0.0, risk_on_realized_price=0.0,
+                    variant="legacy_006_p1",
+                    fold_idx=2,
+                    cagr=0.03,
+                    mdd=0.1336,
+                    risk_off_bars=0,
+                    risk_off_realized_price=0.0,
+                    risk_on_realized_price=0.0,
                 ),
             ),
         )
         candidate = _make_result(
-            variant="balanced_010_p2", cagr=0.022,
+            variant="balanced_010_p2",
+            cagr=0.022,
             fold_metrics=(
                 opt_main_futures.L2ReversalReplayFoldMetric(
-                    variant="balanced_010_p2", fold_idx=0, cagr=0.008, mdd=0.1152,
-                    risk_off_bars=12, risk_off_realized_price=0.0, risk_on_realized_price=0.0,
+                    variant="balanced_010_p2",
+                    fold_idx=0,
+                    cagr=0.008,
+                    mdd=0.1152,
+                    risk_off_bars=12,
+                    risk_off_realized_price=0.0,
+                    risk_on_realized_price=0.0,
                 ),
                 opt_main_futures.L2ReversalReplayFoldMetric(
-                    variant="balanced_010_p2", fold_idx=1, cagr=0.028, mdd=0.1748,
-                    risk_off_bars=8, risk_off_realized_price=0.0, risk_on_realized_price=0.0,
+                    variant="balanced_010_p2",
+                    fold_idx=1,
+                    cagr=0.028,
+                    mdd=0.1748,
+                    risk_off_bars=8,
+                    risk_off_realized_price=0.0,
+                    risk_on_realized_price=0.0,
                 ),
                 opt_main_futures.L2ReversalReplayFoldMetric(
-                    variant="balanced_010_p2", fold_idx=2, cagr=0.032, mdd=0.1336,
-                    risk_off_bars=0, risk_off_realized_price=0.0, risk_on_realized_price=0.0,
+                    variant="balanced_010_p2",
+                    fold_idx=2,
+                    cagr=0.032,
+                    mdd=0.1336,
+                    risk_off_bars=0,
+                    risk_off_realized_price=0.0,
+                    risk_on_realized_price=0.0,
                 ),
             ),
         )
@@ -358,21 +424,27 @@ class TestChampionPromotionGate:
 
     def test_allow_when_all_gates_pass(self) -> None:
         allowed, reason = opt_main_futures._champion_promotion_allowed(
-            blocker_reason="", has_evaluation=True, crash_fires=True,
+            blocker_reason="",
+            has_evaluation=True,
+            crash_fires=True,
         )
         assert allowed is True
         assert reason == ""
 
     def test_blocked_when_synthetic_crash_gate_fails(self) -> None:
         allowed, reason = opt_main_futures._champion_promotion_allowed(
-            blocker_reason="", has_evaluation=True, crash_fires=False,
+            blocker_reason="",
+            has_evaluation=True,
+            crash_fires=False,
         )
         assert allowed is False
         assert reason == "crash_defense_not_firing"
 
     def test_study_blocked_regardless_of_crash_gates(self) -> None:
         allowed, reason = opt_main_futures._champion_promotion_allowed(
-            blocker_reason="no_complete_trials", has_evaluation=False, crash_fires=True,
+            blocker_reason="no_complete_trials",
+            has_evaluation=False,
+            crash_fires=True,
         )
         assert allowed is False
         assert reason == "study_blocked"

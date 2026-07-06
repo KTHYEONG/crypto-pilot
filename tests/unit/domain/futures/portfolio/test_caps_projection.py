@@ -40,9 +40,7 @@ class TestCapsProjection:
             sigma_port=sigma_port,
             bars_per_year=bars_per_year,
         )
-        assert float(np.sum(np.abs(w_proj))) <= 3.0 + 1e-6, (
-            f"gross cap 초과: {np.sum(np.abs(w_proj)):.4f}"
-        )
+        assert float(np.sum(np.abs(w_proj))) <= 3.0 + 1e-6, f"gross cap 초과: {np.sum(np.abs(w_proj)):.4f}"
 
     def test_net_cap_enforced(self) -> None:
         """Net = 1.6 >> 0.30 → 투영 후 |net| ≤ 0.30."""
@@ -117,9 +115,7 @@ class TestCapsProjection:
             sigma_port=sigma_port,
             bars_per_year=bars_per_year,
         )
-        assert float(np.max(np.abs(w_proj))) <= 0.10 + 1e-6, (
-            f"per_symbol cap 초과: {np.max(np.abs(w_proj)):.4f}"
-        )
+        assert float(np.max(np.abs(w_proj))) <= 0.10 + 1e-6, f"per_symbol cap 초과: {np.max(np.abs(w_proj)):.4f}"
 
     def test_zero_weights_remain_zero(self) -> None:
         """모든 weight=0이면 투영 후에도 0."""
@@ -228,37 +224,35 @@ class TestCapsProjection:
     def test_dynamic_regime_caps_and_double_scaling_guard(self) -> None:
         """Scenario 1, 2, 3: 국면별 dynamic cap 및 double scaling guard 동작 검증."""
         symbols = ("BTCUSDT", "ETHUSDT")
-        close_2d = np.array([
-            [100.0, 100.0],
-            [100.0, 100.0],
-            [100.0, 100.0]
-        ], dtype=np.float64)
+        close_2d = np.array([[100.0, 100.0], [100.0, 100.0], [100.0, 100.0]], dtype=np.float64)
 
         # 2개 이벤트 생성 (t=0에 BTC 롱, t=1에 ETH 롱)
-        selected_events = pd.DataFrame([
-            {
-                "symbol": "BTCUSDT",
-                "entry_idx": 0,
-                "side": 1.0,
-                "risk_unit_bps": 25.0,
-                "expected_holding_bars": 1,
-                "p_pass": 20.0,  # 매우 높은 p_pass로 비중을 증폭시켜 Cap에 걸리도록 유도
-                "mu_net_decision_bps": 50.0,
-                "q10_net_bps": -25.0,
-                "q90_net_bps": 75.0
-            },
-            {
-                "symbol": "ETHUSDT",
-                "entry_idx": 1,
-                "side": 1.0,
-                "risk_unit_bps": 25.0,
-                "expected_holding_bars": 1,
-                "p_pass": 20.0,  # 매우 높은 p_pass로 비중을 증폭시켜 Cap에 걸리도록 유도
-                "mu_net_decision_bps": 50.0,
-                "q10_net_bps": -25.0,
-                "q90_net_bps": 75.0
-            }
-        ])
+        selected_events = pd.DataFrame(
+            [
+                {
+                    "symbol": "BTCUSDT",
+                    "entry_idx": 0,
+                    "side": 1.0,
+                    "risk_unit_bps": 25.0,
+                    "expected_holding_bars": 1,
+                    "p_pass": 20.0,  # 매우 높은 p_pass로 비중을 증폭시켜 Cap에 걸리도록 유도
+                    "mu_net_decision_bps": 50.0,
+                    "q10_net_bps": -25.0,
+                    "q90_net_bps": 75.0,
+                },
+                {
+                    "symbol": "ETHUSDT",
+                    "entry_idx": 1,
+                    "side": 1.0,
+                    "risk_unit_bps": 25.0,
+                    "expected_holding_bars": 1,
+                    "p_pass": 20.0,  # 매우 높은 p_pass로 비중을 증폭시켜 Cap에 걸리도록 유도
+                    "mu_net_decision_bps": 50.0,
+                    "q10_net_bps": -25.0,
+                    "q90_net_bps": 75.0,
+                },
+            ]
+        )
 
         # 타임스텝별 국면 코드: t=0: bull_q (0), t=1: crash (5), t=2: bull_vol (1)
         regime_code_1d = np.array([0, 5, 1], dtype=np.int32)
@@ -269,7 +263,7 @@ class TestCapsProjection:
             max_symbol_weight=0.9,
             sizing_mode="calibrated_event_kelly",
             double_scaling_guard=True,
-            overlay_sizing_enabled=False
+            overlay_sizing_enabled=False,
         )
 
         weights = build_candidate_target_weights(
@@ -279,7 +273,7 @@ class TestCapsProjection:
             beta_2d=None,
             sigma_3d=None,
             cfg=cfg,
-            regime_code_1d=regime_code_1d
+            regime_code_1d=regime_code_1d,
         )
 
         # t=0: bull_q (multiplier gross=1.5, net=2.5) -> gross_cap = 1.8, net_cap = 0.75

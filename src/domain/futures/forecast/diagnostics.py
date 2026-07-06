@@ -1,4 +1,5 @@
 """Diagnostic containers and reporting for cost and risk forecasts."""
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -66,8 +67,6 @@ def risk_diagnostics(rf: RiskForecast) -> dict[str, float]:
         b = np.asarray(rf.beta_2d, dtype=np.float64).ravel()
         diag["beta_nonzero_ratio"] = float(np.count_nonzero(np.abs(b) > 1e-9) / max(b.size, 1))
     cov = np.asarray(rf.covariance_3d, dtype=np.float64)
-    psd_fails = sum(
-        1 for i in range(cov.shape[0]) if np.any(np.linalg.eigvalsh(cov[i]) < -1e-9)
-    )
+    psd_fails = sum(1 for i in range(cov.shape[0]) if np.any(np.linalg.eigvalsh(cov[i]) < -1e-9))
     diag["cov_psd_fail_count"] = float(psd_fails)
     return diag

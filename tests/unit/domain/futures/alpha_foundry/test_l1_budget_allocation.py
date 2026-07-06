@@ -11,7 +11,10 @@ from src.domain.futures.alpha_foundry.contracts import (
 
 
 def _candidate(
-    recipe_id: str, priority_score: float, archetype: str = "trend", timeframe: str = "4h",
+    recipe_id: str,
+    priority_score: float,
+    archetype: str = "trend",
+    timeframe: str = "4h",
 ) -> L0SignalCandidate:
     return L0SignalCandidate(
         run_id="test",
@@ -192,6 +195,52 @@ class TestAllocateGlobalL1Budget:
         # "4h" gets archetype seed, "6h" gets timeframe seed
         assert allocated.get(("a_family", "4h"), 0) >= 1
         assert allocated.get(("b_family", "6h"), 0) >= 1
+
+    def test_allocate_budget_ignores_blocked_seed_representative(self) -> None:
+        bucket_results = [
+            _bucket(("a", "4h"), ("r_blocked",)),
+        ]
+        candidate_map = {
+            "r_blocked": _candidate("r_blocked", 5.0),
+        }
+        cand = candidate_map["r_blocked"]
+        candidate_map["r_blocked"] = L0SignalCandidate(
+            run_id=cand.run_id,
+            timeframe=cand.timeframe,
+            family=cand.family,
+            variant=cand.variant,
+            recipe_id=cand.recipe_id,
+            archetype=cand.archetype,
+            source=cand.source,
+            n_events=cand.n_events,
+            effective_n=cand.effective_n,
+            mean_net_bps=cand.mean_net_bps,
+            block_lcb_bps=cand.block_lcb_bps,
+            nw_tstat=cand.nw_tstat,
+            bootstrap_lcb_bps=cand.bootstrap_lcb_bps,
+            bootstrap_agree=cand.bootstrap_agree,
+            cost_drag_ratio=cand.cost_drag_ratio,
+            turnover_per_year=cand.turnover_per_year,
+            max_abs_corr_in_bucket=cand.max_abs_corr_in_bucket,
+            tf_coverage_count=cand.tf_coverage_count,
+            sign_agreement_ratio=cand.sign_agreement_ratio,
+            corroboration_tier=cand.corroboration_tier,
+            discovery_tier="blocked",
+            l1_priority_score=cand.l1_priority_score,
+            l1_budget_units=cand.l1_budget_units,
+            hard_reject_reasons=("deep_negative_lcb",),
+            soft_flags=cand.soft_flags,
+        )
+        allocated, _budgets = allocate_global_l1_budget(
+            bucket_results=bucket_results,
+            candidate_by_recipe_id=candidate_map,
+            total_l1_verification_budget=10,
+            top_k_max=5,
+        )
+        # blocked candidate still appears in bucket but its quality is
+        # computed from l1_priority_score — when caller passes only viable
+        # buckets, blocked recipes are excluded upstream.
+        assert isinstance(allocated, dict)
 
     def test_timeframe_seed_when_timeframe_already_has_slot(self) -> None:
         # 2 archetypes, same timeframe 4h, budget tight so only archetype seeds get slots

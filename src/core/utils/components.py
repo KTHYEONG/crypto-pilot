@@ -123,10 +123,7 @@ class TradeHistoryDB:
                 if "locked" in str(e).lower() or "busy" in str(e).lower():
                     if attempt < max_retries - 1:
                         wait_time = 0.5 * (2**attempt)  # Exponential backoff
-                        logger.warning(
-                            f"⚠️ DB locked, retrying in {wait_time}s... "
-                            f"({attempt + 1}/{max_retries})"
-                        )
+                        logger.warning(f"⚠️ DB locked, retrying in {wait_time}s... ({attempt + 1}/{max_retries})")
                         time.sleep(wait_time)
                     else:
                         logger.error(f"❌ Failed to record trade after {max_retries} attempts: {e}")
@@ -137,9 +134,7 @@ class TradeHistoryDB:
                 logger.error(f"❌ Failed to record trade: {e}")
                 break
 
-    def get_recent_trades(
-        self, symbol: str | None = None, limit: int = 100
-    ) -> list[dict[str, Any]]:
+    def get_recent_trades(self, symbol: str | None = None, limit: int = 100) -> list[dict[str, Any]]:
         """최근 거래 조회."""
         with self._lock:
             conn = self._get_conn()
@@ -150,9 +145,7 @@ class TradeHistoryDB:
                     (symbol, limit),
                 ).fetchall()
             else:
-                rows = conn.execute(
-                    "SELECT * FROM trades ORDER BY id DESC LIMIT ?", (limit,)
-                ).fetchall()
+                rows = conn.execute("SELECT * FROM trades ORDER BY id DESC LIMIT ?", (limit,)).fetchall()
             return [dict(row) for row in rows]
 
 
@@ -215,21 +208,17 @@ def parse_balance(ret: Any) -> float:
     if isinstance(ret, dict):
         if "USDT" in ret:
             val = ret["USDT"]
-            if isinstance(val, dict):
-                usdt_free = val.get("free", 0.0)
-            else:
-                usdt_free = float(val)
+            usdt_free = val.get("free", 0.0) if isinstance(val, dict) else float(val)
         elif "free" in ret and isinstance(ret["free"], dict):
             usdt_free = ret["free"].get("USDT", 0.0)
 
     # Case B: Tuple based (Custom implementation)
-    elif isinstance(ret, tuple):
-        if len(ret) >= 2:
-            free_part = ret[1]
-            if isinstance(free_part, dict):
-                usdt_free = free_part.get("USDT", 0.0)
-            elif isinstance(free_part, (int, float)):
-                usdt_free = float(free_part)
+    elif isinstance(ret, tuple) and len(ret) >= 2:
+        free_part = ret[1]
+        if isinstance(free_part, dict):
+            usdt_free = free_part.get("USDT", 0.0)
+        elif isinstance(free_part, (int, float)):
+            usdt_free = float(free_part)
 
     return float(usdt_free)
 

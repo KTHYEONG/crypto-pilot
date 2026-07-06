@@ -22,6 +22,7 @@ from src.domain.futures.strategy.cs_rank import (
 # Helpers
 # ---------------------------------------------------------------------------
 
+
 def _make_signal(
     raw_mu: float,
     volatility: float = 0.01,
@@ -41,6 +42,7 @@ def _make_signal(
 # ---------------------------------------------------------------------------
 # T1 — CS Neutralization (beta_btc=None, demean)
 # ---------------------------------------------------------------------------
+
 
 def test_neutralize_cross_section_demean_preserves_rank() -> None:
     """CS demean: 결과 평균≈0, 입력 순위 보존."""
@@ -70,6 +72,7 @@ def test_neutralize_cross_section_demean_output_shape() -> None:
 # ---------------------------------------------------------------------------
 # T1b — CS Neutralization (beta_btc 사용)
 # ---------------------------------------------------------------------------
+
 
 def test_neutralize_cross_section_beta_neutize() -> None:
     """beta_btc=[1,1,1]: 결과 평균≈0 (μ_mkt 전량 차감)."""
@@ -102,6 +105,7 @@ def test_neutralize_cross_section_beta_neutize_zero_beta() -> None:
 # T1c — edge: N<2이면 그대로
 # ---------------------------------------------------------------------------
 
+
 def test_neutralize_cross_section_single_symbol() -> None:
     """N=1이면 입력값 그대로 반환."""
     # Arrange
@@ -130,6 +134,7 @@ def test_neutralize_cross_section_empty_array() -> None:
 # T2 — Top-K Hysteresis
 # ---------------------------------------------------------------------------
 
+
 def test_rank_and_select_hysteresis_keeps_within_buffer() -> None:
     """prev에 있고 rank ≤ k_rank+rank_buffer이면 유지."""
     # Arrange: 5개 심볼, A의 z-score가 4위 (k_rank=3, rank_buffer=1 → 버퍼 내)
@@ -138,7 +143,7 @@ def test_rank_and_select_hysteresis_keeps_within_buffer() -> None:
         "E": _make_signal(4.0),
         "D": _make_signal(3.0),
         "C": _make_signal(2.0),
-        "A": _make_signal(0.5),   # 4위 → rank_buffer=1이면 유지
+        "A": _make_signal(0.5),  # 4위 → rank_buffer=1이면 유지
         "B": _make_signal(-1.0),  # 5위
     }
     prev = frozenset({"A"})
@@ -164,8 +169,8 @@ def test_rank_and_select_hysteresis_evicts_outside_buffer() -> None:
         "E": _make_signal(5.0),
         "D": _make_signal(4.0),
         "C": _make_signal(3.0),
-        "F": _make_signal(2.0),   # 4위 (버퍼 내지만 prev에 없음)
-        "A": _make_signal(0.0),   # 5위 → evict
+        "F": _make_signal(2.0),  # 4위 (버퍼 내지만 prev에 없음)
+        "A": _make_signal(0.0),  # 5위 → evict
     }
     prev = frozenset({"A"})
 
@@ -210,6 +215,7 @@ def test_rank_and_select_no_hysteresis_when_empty_prev() -> None:
 # ---------------------------------------------------------------------------
 # T2c — valid=False 제외
 # ---------------------------------------------------------------------------
+
 
 def test_rank_and_select_excludes_invalid_signals() -> None:
     """valid=False 심볼은 선택 불가."""
@@ -277,6 +283,7 @@ def test_rank_and_select_empty_signals_returns_empty() -> None:
 # T3 — SymbolSignal dataclass
 # ---------------------------------------------------------------------------
 
+
 def test_symbol_signal_frozen() -> None:
     """frozen=True: attribute 수정 시 FrozenInstanceError."""
     # Arrange
@@ -317,6 +324,7 @@ def test_symbol_signal_equality() -> None:
 # T4 — BTC-beta neutralize via rank_and_select
 # ---------------------------------------------------------------------------
 
+
 class TestNeutralizeWithBtcBeta:
     """T4: BTC-beta single-factor neutralize rank_and_select 통합 검증."""
 
@@ -331,8 +339,11 @@ class TestNeutralizeWithBtcBeta:
 
         # Act
         selected, z_scores = rank_and_select(
-            sigs, k_rank=2, sector_cap=10,
-            prev_selection=frozenset(), rank_buffer=0,
+            sigs,
+            k_rank=2,
+            sector_cap=10,
+            prev_selection=frozenset(),
+            rank_buffer=0,
         )
 
         # Assert: BTC, ETH 선택 (neutral 기준 상위 2개)
@@ -352,8 +363,11 @@ class TestNeutralizeWithBtcBeta:
 
         # Act
         selected, z_scores = rank_and_select(
-            sigs, k_rank=1, sector_cap=10,
-            prev_selection=frozenset(), rank_buffer=0,
+            sigs,
+            k_rank=1,
+            sector_cap=10,
+            prev_selection=frozenset(),
+            rank_buffer=0,
         )
 
         # Assert: A 선택 (mu 높음)

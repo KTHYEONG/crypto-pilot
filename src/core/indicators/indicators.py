@@ -125,10 +125,7 @@ class IndicatorEngine:
     ) -> tuple[Any, ...] | None:
         if self.cache_mode == "disabled":
             return None
-        if self.cache_mode == "id":
-            data_key = id(data_obj)
-        else:
-            data_key = _data_signature(data_obj)
+        data_key = id(data_obj) if self.cache_mode == "id" else _data_signature(data_obj)
         return (func_name, data_key, params, tuple(sorted(kwargs.items())))
 
     def _cached_call(
@@ -155,9 +152,7 @@ class IndicatorEngine:
             series,
             (int(window),),
             {},
-            lambda: pd.Series(
-                talib.SMA(series.values.astype(np.float64), timeperiod=window), index=series.index
-            ),
+            lambda: pd.Series(talib.SMA(series.values.astype(np.float64), timeperiod=window), index=series.index),
         )
 
     def calculate_ema(self, series: pd.Series, window: int) -> pd.Series:
@@ -166,9 +161,7 @@ class IndicatorEngine:
             series,
             (int(window),),
             {},
-            lambda: pd.Series(
-                talib.EMA(series.values.astype(np.float64), timeperiod=window), index=series.index
-            ),
+            lambda: pd.Series(talib.EMA(series.values.astype(np.float64), timeperiod=window), index=series.index),
         )
 
     def calculate_wma(self, series: pd.Series, window: int) -> pd.Series:
@@ -177,9 +170,7 @@ class IndicatorEngine:
             series,
             (int(window),),
             {},
-            lambda: pd.Series(
-                talib.WMA(series.values.astype(np.float64), timeperiod=window), index=series.index
-            ),
+            lambda: pd.Series(talib.WMA(series.values.astype(np.float64), timeperiod=window), index=series.index),
         )
 
     def calculate_hma(self, series: pd.Series, window: int) -> pd.Series:
@@ -200,9 +191,7 @@ class IndicatorEngine:
             series,
             (int(window),),
             {},
-            lambda: pd.Series(
-                talib.DEMA(series.values.astype(np.float64), timeperiod=window), index=series.index
-            ),
+            lambda: pd.Series(talib.DEMA(series.values.astype(np.float64), timeperiod=window), index=series.index),
         )
 
     def calculate_tema(self, series: pd.Series, window: int) -> pd.Series:
@@ -211,9 +200,7 @@ class IndicatorEngine:
             series,
             (int(window),),
             {},
-            lambda: pd.Series(
-                talib.TEMA(series.values.astype(np.float64), timeperiod=window), index=series.index
-            ),
+            lambda: pd.Series(talib.TEMA(series.values.astype(np.float64), timeperiod=window), index=series.index),
         )
 
     def calculate_atr(self, df: pd.DataFrame, window: int = 14) -> pd.Series:
@@ -294,10 +281,8 @@ class IndicatorEngine:
             (int(window), float(atr_mult)),
             {},
             lambda: (
-                self.calculate_ema(df["close"], window)
-                + (self.calculate_atr(df, window=window) * atr_mult),
-                self.calculate_ema(df["close"], window)
-                - (self.calculate_atr(df, window=window) * atr_mult),
+                self.calculate_ema(df["close"], window) + (self.calculate_atr(df, window=window) * atr_mult),
+                self.calculate_ema(df["close"], window) - (self.calculate_atr(df, window=window) * atr_mult),
             ),
         )
 
@@ -334,10 +319,7 @@ class IndicatorEngine:
                     upper = bu[i]
                 if bl[i] > lower or c_prev < lower:
                     lower = bl[i]
-                if curr_trend == 1:
-                    curr_trend = -1 if c < lower else 1
-                else:
-                    curr_trend = 1 if c > upper else -1
+                curr_trend = (-1 if c < lower else 1) if curr_trend == 1 else 1 if c > upper else -1
                 final_upper[i] = upper
                 final_lower[i] = lower
                 trend[i] = curr_trend
@@ -426,9 +408,7 @@ class IndicatorEngine:
             series,
             (int(window),),
             {},
-            lambda: pd.Series(
-                talib.RSI(series.values.astype(np.float64), timeperiod=window), index=series.index
-            ),
+            lambda: pd.Series(talib.RSI(series.values.astype(np.float64), timeperiod=window), index=series.index),
         )
 
     def calculate_stochastic(
@@ -522,12 +502,8 @@ class IndicatorEngine:
         def _compute() -> tuple[pd.Series, pd.Series, pd.Series, pd.Series]:
             high = df["high"].values.astype(np.float64)
             low = df["low"].values.astype(np.float64)
-            tenkan_sen = (
-                talib.MAX(high, timeperiod=tenkan_window) + talib.MIN(low, timeperiod=tenkan_window)
-            ) / 2
-            kijun_sen = (
-                talib.MAX(high, timeperiod=kijun_window) + talib.MIN(low, timeperiod=kijun_window)
-            ) / 2
+            tenkan_sen = (talib.MAX(high, timeperiod=tenkan_window) + talib.MIN(low, timeperiod=tenkan_window)) / 2
+            kijun_sen = (talib.MAX(high, timeperiod=kijun_window) + talib.MIN(low, timeperiod=kijun_window)) / 2
             senkou_span_a = (tenkan_sen + kijun_sen) / 2
             sb_high = talib.MAX(high, timeperiod=senkou_span_b_window)
             sb_low = talib.MIN(low, timeperiod=senkou_span_b_window)
@@ -620,10 +596,7 @@ class IndicatorEngine:
                 vwap = tp_volume.cumsum() / df["volume"].cumsum()
                 vwap_std = typical_price.expanding().std()
             else:
-                vwap = (
-                    tp_volume.rolling(window=window).sum()
-                    / df["volume"].rolling(window=window).sum()
-                )
+                vwap = tp_volume.rolling(window=window).sum() / df["volume"].rolling(window=window).sum()
                 vwap_std = typical_price.rolling(window=window).std()
             vwap_upper = vwap + (vwap_std * std_mult)
             vwap_lower = vwap - (vwap_std * std_mult)
@@ -639,14 +612,10 @@ class IndicatorEngine:
 
     def calculate_cmf(self, df: pd.DataFrame, window: int = 20) -> pd.Series:
         def _compute() -> pd.Series:
-            mf_multiplier = ((df["close"] - df["low"]) - (df["high"] - df["close"])) / (
-                df["high"] - df["low"]
-            )
+            mf_multiplier = ((df["close"] - df["low"]) - (df["high"] - df["close"])) / (df["high"] - df["low"])
             mf_multiplier = mf_multiplier.replace([np.inf, -np.inf], 0).fillna(0)
             mf_volume = mf_multiplier * df["volume"]
-            return (
-                mf_volume.rolling(window=window).sum() / df["volume"].rolling(window=window).sum()
-            )
+            return mf_volume.rolling(window=window).sum() / df["volume"].rolling(window=window).sum()
 
         return self._cached_call(
             "calculate_cmf",
@@ -662,9 +631,7 @@ class IndicatorEngine:
             series,
             (int(window),),
             {},
-            lambda: pd.Series(
-                _hurst_numba_logic(series.values.astype(np.float64), window), index=series.index
-            ),
+            lambda: pd.Series(_hurst_numba_logic(series.values.astype(np.float64), window), index=series.index),
         )
 
     def calculate_efficiency_ratio(self, series: pd.Series, window: int = 10) -> pd.Series:
@@ -752,9 +719,7 @@ class IndicatorEngine:
             series,
             (int(window),),
             {},
-            lambda: pd.Series(
-                talib.ROC(series.values.astype(np.float64), timeperiod=window), index=series.index
-            ),
+            lambda: pd.Series(talib.ROC(series.values.astype(np.float64), timeperiod=window), index=series.index),
         )
 
     def calculate_vwma(self, df: pd.DataFrame, window: int = 20) -> pd.Series:
@@ -768,12 +733,9 @@ class IndicatorEngine:
 
 
 def get_indicator_engine(domain: str = "generic") -> IndicatorEngine:
-    """도메인별 환경 변수를 참조하여 IndicatorEngine 인스턴스를 생성하는 팩토리 함수.
-    """
+    """도메인별 환경 변수를 참조하여 IndicatorEngine 인스턴스를 생성하는 팩토리 함수."""
     env_suffix = domain.upper()
-    cache_mode = os.getenv(
-        f"{env_suffix}_INDICATOR_CACHE_MODE", os.getenv("INDICATOR_CACHE_MODE", "signature")
-    )
+    cache_mode = os.getenv(f"{env_suffix}_INDICATOR_CACHE_MODE", os.getenv("INDICATOR_CACHE_MODE", "signature"))
     return IndicatorEngine(cache_mode=cache_mode)
 
 

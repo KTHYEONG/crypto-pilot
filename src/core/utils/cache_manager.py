@@ -35,7 +35,7 @@ class CacheManager:
 
         """
         dna = dependencies.copy()
-        
+
         # Add source code hashes if provided
         if source_files:
             dna["_source_hashes"] = {}
@@ -44,7 +44,7 @@ class CacheManager:
                     with open(f_path, "rb") as f:
                         f_hash = hashlib.sha256(f.read()).hexdigest()[:8]
                         dna["_source_hashes"][f_path.name] = f_hash
-        
+
         dna_json = json.dumps(dna, sort_keys=True, default=str)
         full_hash = hashlib.sha256(dna_json.encode()).hexdigest()
         return full_hash[:8]

@@ -8,12 +8,33 @@ from src.domain.futures.alpha_foundry.multi_tf_fusion import (
 )
 
 _COLS = [
-    "run_id", "timeframe", "family", "variant", "recipe_id", "archetype",
-    "n_events", "effective_n", "mean_net_bps", "nw_tstat", "block_lcb_bps",
-    "rank_ic", "incremental_rank_ic", "cost_drag_ratio", "turnover_per_year",
-    "compute_cost_score", "gate_passed", "reject_reasons", "bucket_key",
-    "bucket_rank", "selected_for_l1", "redundant_with", "bucket_eff_test_count",
-    "global_eff_test_count", "bootstrap_lcb_bps", "bootstrap_agree", "created_at_ms",
+    "run_id",
+    "timeframe",
+    "family",
+    "variant",
+    "recipe_id",
+    "archetype",
+    "n_events",
+    "effective_n",
+    "mean_net_bps",
+    "nw_tstat",
+    "block_lcb_bps",
+    "rank_ic",
+    "incremental_rank_ic",
+    "cost_drag_ratio",
+    "turnover_per_year",
+    "compute_cost_score",
+    "gate_passed",
+    "reject_reasons",
+    "bucket_key",
+    "bucket_rank",
+    "selected_for_l1",
+    "redundant_with",
+    "bucket_eff_test_count",
+    "global_eff_test_count",
+    "bootstrap_lcb_bps",
+    "bootstrap_agree",
+    "created_at_ms",
 ]
 
 
@@ -27,19 +48,21 @@ def _row(
     reject_reasons: str = "",
 ) -> dict[str, object]:
     base: dict[str, object] = dict.fromkeys(_COLS, 0)
-    base.update({
-        "run_id": "r1",
-        "timeframe": tf,
-        "family": family,
-        "variant": variant,
-        "recipe_id": f"{family}:{variant}:{tf}",
-        "archetype": "trend",
-        "mean_net_bps": mean_net_bps,
-        "block_lcb_bps": mean_net_bps,
-        "gate_passed": gate_passed,
-        "reject_reasons": reject_reasons,
-        "bootstrap_agree": True,
-    })
+    base.update(
+        {
+            "run_id": "r1",
+            "timeframe": tf,
+            "family": family,
+            "variant": variant,
+            "recipe_id": f"{family}:{variant}:{tf}",
+            "archetype": "trend",
+            "mean_net_bps": mean_net_bps,
+            "block_lcb_bps": mean_net_bps,
+            "gate_passed": gate_passed,
+            "reject_reasons": reject_reasons,
+            "bootstrap_agree": True,
+        }
+    )
     return base
 
 
@@ -88,9 +111,16 @@ class TestFuseMultiTimeframeEvidence:
     def test_excludes_insufficient_events_rows_from_coverage(self) -> None:
         evidence_by_tf = {
             "4h": pd.DataFrame([_row("4h", 18.8)]),
-            "6h": pd.DataFrame([_row(
-                "6h", 0.0, gate_passed=False, reject_reasons="insufficient_events",
-            )]),
+            "6h": pd.DataFrame(
+                [
+                    _row(
+                        "6h",
+                        0.0,
+                        gate_passed=False,
+                        reject_reasons="insufficient_events",
+                    )
+                ]
+            ),
         }
         results = fuse_multi_timeframe_evidence(evidence_by_tf=evidence_by_tf)
         native_4h = next(r for r in results if r.native_timeframe == "4h")
@@ -110,13 +140,17 @@ class TestFuseMultiTimeframeEvidence:
 
     def test_multiple_family_variant_groups_independent(self) -> None:
         evidence_by_tf = {
-            "4h": pd.DataFrame([
-                _row("4h", 18.8, family="trend_ma", variant="ema_18_108"),
-                _row("4h", 5.0, family="xs_carry", variant="xs_carry_96"),
-            ]),
-            "6h": pd.DataFrame([
-                _row("6h", 12.1, family="trend_ma", variant="ema_18_108"),
-            ]),
+            "4h": pd.DataFrame(
+                [
+                    _row("4h", 18.8, family="trend_ma", variant="ema_18_108"),
+                    _row("4h", 5.0, family="xs_carry", variant="xs_carry_96"),
+                ]
+            ),
+            "6h": pd.DataFrame(
+                [
+                    _row("6h", 12.1, family="trend_ma", variant="ema_18_108"),
+                ]
+            ),
         }
         results = fuse_multi_timeframe_evidence(evidence_by_tf=evidence_by_tf)
         assert len(results) == 3

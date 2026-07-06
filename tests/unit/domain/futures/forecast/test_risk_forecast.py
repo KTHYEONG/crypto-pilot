@@ -1,4 +1,5 @@
 """Tests for forecast/risk.py — build_risk_forecast."""
+
 from __future__ import annotations
 
 import numpy as np
@@ -27,8 +28,10 @@ class TestBuildRiskForecastOutputContract:
         rf = build_risk_forecast(_close(), _SYMBOLS, "4h", {}, btc_index=_BTC_IDX, lookback=20)
 
         assert rf.covariance_3d.shape == (_T, _N, _N)
-        assert rf.beta_2d is not None and rf.beta_2d.shape == (_T, _N)
-        assert rf.residual_var_2d is not None and rf.residual_var_2d.shape == (_T, _N)
+        assert rf.beta_2d is not None
+        assert rf.beta_2d.shape == (_T, _N)
+        assert rf.residual_var_2d is not None
+        assert rf.residual_var_2d.shape == (_T, _N)
         assert rf.forecast_vol_2d.shape == (_T, _N)
 
     def test_covariance_is_finite(self) -> None:
@@ -50,9 +53,7 @@ class TestBuildRiskForecastOutputContract:
 
     def test_beta_source_unavailable_when_no_btc(self) -> None:
         symbols_no_btc = ["ETHUSDT", "SOLUSDT", "XRPUSDT", "BNBUSDT"]
-        rf = build_risk_forecast(
-            _close(), symbols_no_btc, "4h", {}, btc_index=None, lookback=20
-        )
+        rf = build_risk_forecast(_close(), symbols_no_btc, "4h", {}, btc_index=None, lookback=20)
         assert rf.beta_source == "unavailable"
         assert rf.beta_2d is not None
         # beta should be all zeros when unavailable

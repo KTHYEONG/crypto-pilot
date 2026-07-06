@@ -46,11 +46,7 @@ def _rolling_mean_2d(values: np.ndarray, window: int) -> np.ndarray:
 
 def _rolling_var_2d(values: np.ndarray, window: int) -> np.ndarray:
     return np.asarray(
-        pd.DataFrame(values)
-        .rolling(window=window, min_periods=2)
-        .var(ddof=0)
-        .fillna(0.0)
-        .to_numpy(),
+        pd.DataFrame(values).rolling(window=window, min_periods=2).var(ddof=0).fillna(0.0).to_numpy(),
         dtype=np.float64,
     )
 
@@ -332,10 +328,21 @@ def _label_events_kernel(
         out_same_bar[i] = same_bar_i
 
     return (
-        out_gross, out_cost, out_funding, out_edge,
-        out_raw_barrier, out_barrier_first, out_profitable,
-        out_tte, out_mae, out_mfe, out_rv, out_sl_thr_bps,
-        out_exit_code, out_exit_idx, out_same_bar,
+        out_gross,
+        out_cost,
+        out_funding,
+        out_edge,
+        out_raw_barrier,
+        out_barrier_first,
+        out_profitable,
+        out_tte,
+        out_mae,
+        out_mfe,
+        out_rv,
+        out_sl_thr_bps,
+        out_exit_code,
+        out_exit_idx,
+        out_same_bar,
     )
 
 
@@ -430,25 +437,46 @@ def label_candidate_events(
     )
 
     (
-        gross_arr, cost_arr, funding_arr, edge_arr,
-        raw_barrier_arr, barrier_first_arr, profitable_arr,
-        tte_arr, mae_arr, mfe_arr, rv_arr, sl_thr_bps_arr,
-        exit_code_arr, exit_idx_arr, same_bar_arr,
+        gross_arr,
+        cost_arr,
+        funding_arr,
+        edge_arr,
+        raw_barrier_arr,
+        barrier_first_arr,
+        profitable_arr,
+        tte_arr,
+        mae_arr,
+        mfe_arr,
+        rv_arr,
+        sl_thr_bps_arr,
+        exit_code_arr,
+        exit_idx_arr,
+        same_bar_arr,
     ) = _label_events_kernel(
         n,
-        entry_idx_arr, side_arr, horizon_arr,
-        stop_mult_arr, tp_mult_arr, min_hold_arr,
-        cost_floor_arr, hurdle_arr, sym_idx_arr,
-        open_2d_c, high_2d_c, low_2d_c, close_2d_c, funding_2d_c,
-        atr_2d_c, cost_2d_c, has_cost_2d,
+        entry_idx_arr,
+        side_arr,
+        horizon_arr,
+        stop_mult_arr,
+        tp_mult_arr,
+        min_hold_arr,
+        cost_floor_arr,
+        hurdle_arr,
+        sym_idx_arr,
+        open_2d_c,
+        high_2d_c,
+        low_2d_c,
+        close_2d_c,
+        funding_2d_c,
+        atr_2d_c,
+        cost_2d_c,
+        has_cost_2d,
         taker_round_trip_bps,
         float(_ATR_FALLBACK_FRACTION),
         float(_BPS_SCALE),
     )
 
-    exit_reason_arr = np.array(
-        [_BARRIER_EXIT_REASON_MAP[int(c)] for c in exit_code_arr], dtype=object
-    )
+    exit_reason_arr = np.array([_BARRIER_EXIT_REASON_MAP[int(c)] for c in exit_code_arr], dtype=object)
 
     # Column assignments — same schema as the original itertuples version
     out["barrier_first_label"] = barrier_first_arr.astype(np.int8)

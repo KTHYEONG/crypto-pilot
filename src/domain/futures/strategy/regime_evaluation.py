@@ -186,6 +186,7 @@ def _compute_c2(code_1d: NDArray[np.int8]) -> tuple[float, float, float, float, 
 # C3 — Distinctness
 # ---------------------------------------------------------------------------
 
+
 def _compute_c3(
     event_codes: NDArray[np.int8],
     event_edges_bps: NDArray[np.float64],
@@ -228,9 +229,7 @@ def _compute_c3(
         kw_pvalue = 1.0
 
     has_sign_flip = any(
-        group_means[i] * group_means[j] < 0.0
-        for i in range(len(group_means))
-        for j in range(i + 1, len(group_means))
+        group_means[i] * group_means[j] < 0.0 for i in range(len(group_means)) for j in range(i + 1, len(group_means))
     )
 
     # magnitude separation: max(|group_mean|) / pooled_std
@@ -275,6 +274,7 @@ def _compute_c3(
 # ---------------------------------------------------------------------------
 # C4 — OOS Stability
 # ---------------------------------------------------------------------------
+
 
 def _sharpe_by_regime(
     codes: NDArray[np.int8],
@@ -333,6 +333,7 @@ def _compute_c4(
 # C5 — Coverage
 # ---------------------------------------------------------------------------
 
+
 def _compute_c5(code_1d: NDArray[np.int8]) -> tuple[float, float, float, float]:
     """Return (min_occupancy, max_occupancy, n_effective_regimes, score/10)."""
     n_bars = code_1d.shape[0]
@@ -366,6 +367,7 @@ def _compute_c5(code_1d: NDArray[np.int8]) -> tuple[float, float, float, float]:
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
+
 
 def evaluate_regime_classifier(
     *,
@@ -418,11 +420,7 @@ def evaluate_regime_classifier(
                 from scipy.stats import spearmanr as _spearmanr
 
                 rho_res = _spearmanr(ov[valid], ev_e[valid])
-                c_overlay_ic = (
-                    float(rho_res.statistic)
-                    if np.isfinite(rho_res.statistic)
-                    else float("nan")
-                )
+                c_overlay_ic = float(rho_res.statistic) if np.isfinite(rho_res.statistic) else float("nan")
             except Exception:
                 _logger.debug("overlay IC spearmanr failed", exc_info=True)
 
@@ -436,12 +434,7 @@ def evaluate_regime_classifier(
     occ = counts / max(float(n_bars), 1.0)
 
     # Partial weighted score: C2(0.15) + C3(0.25) + C4(0.20) + C5(0.10) = 0.70 of total
-    weighted = (
-        0.15 * (c2_score / 10.0)
-        + 0.25 * (c3_score / 10.0)
-        + 0.20 * (c4_score / 10.0)
-        + 0.10 * (c5_score / 10.0)
-    )
+    weighted = 0.15 * (c2_score / 10.0) + 0.25 * (c3_score / 10.0) + 0.20 * (c4_score / 10.0) + 0.10 * (c5_score / 10.0)
 
     return RegimeScoreCard(
         c2_dwell_median=c2_dwell,
@@ -618,11 +611,7 @@ def deflated_sharpe_ratio(
     #   var(SR) = (1 - g3*SR + (g4-1)/4*SR^2) / (n-1),  g4 = non-excess kurtosis.
     # scipy.stats.kurtosis returns EXCESS kurtosis (k_ex = g4 - 3), so
     #   (g4 - 1)/4 = (k_ex + 2)/4.
-    sr_var = (
-        1.0
-        - skewness * sr
-        + 0.25 * (kurtosis + 2.0) * sr**2
-    ) / (n_safe - 1.0)
+    sr_var = (1.0 - skewness * sr + 0.25 * (kurtosis + 2.0) * sr**2) / (n_safe - 1.0)
     sr_std = math.sqrt(max(sr_var, _EPS))
 
     dsr = (sr - e_max) / max(math.sqrt(v_max + sr_std**2), _EPS)
@@ -695,14 +684,10 @@ def evaluate_regime_lift_proof(
     std_lift = float(np.std(lift_finite, ddof=1)) if lift_finite.size > 1 else _EPS
     sr_lift = mean_lift / max(std_lift, _EPS)
     skew_lift = float(scipy_stats.skew(lift_finite)) if lift_finite.size >= 3 else 0.0
-    kurt_lift = (
-        float(scipy_stats.kurtosis(lift_finite)) if lift_finite.size >= 4 else 0.0
-    )
+    kurt_lift = float(scipy_stats.kurtosis(lift_finite)) if lift_finite.size >= 4 else 0.0
 
     nw_tstat_val, _nw_se, n_eff = newey_west_tstat(lift_finite, max_holding_bars)
-    dsr = deflated_sharpe_ratio(
-        sr_lift, int(max(n_eff, 4)), n_regime_cells, skew_lift, kurt_lift
-    )
+    dsr = deflated_sharpe_ratio(sr_lift, int(max(n_eff, 4)), n_regime_cells, skew_lift, kurt_lift)
 
     # Per-fold NW tstat pass count
     unique_folds = np.unique(fi[finite_mask])
@@ -718,15 +703,11 @@ def evaluate_regime_lift_proof(
         if fold_t >= nw_tstat_threshold:
             fold_pass_count += 1
 
-    fold_pass_ratio = (
-        fold_pass_count / n_folds_evaluated if n_folds_evaluated > 0 else 0.0
-    )
+    fold_pass_ratio = fold_pass_count / n_folds_evaluated if n_folds_evaluated > 0 else 0.0
 
     if proof_enabled:
         proof_passed = (
-            nw_tstat_val >= nw_tstat_threshold
-            and dsr >= 0.0
-            and fold_pass_ratio >= fold_pass_ratio_threshold
+            nw_tstat_val >= nw_tstat_threshold and dsr >= 0.0 and fold_pass_ratio >= fold_pass_ratio_threshold
         )
     else:
         proof_passed = True

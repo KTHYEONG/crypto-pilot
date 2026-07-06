@@ -15,6 +15,7 @@ from src.domain.futures.universe.storage import compute_continuity_metrics
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
 
+
 def _make_grid(
     start: date,
     end: date,
@@ -51,6 +52,7 @@ def _grid_to_df(
 
 # ── S1: Happy path — perfect grid ────────────────────────────────────────────
 
+
 def test_compute_continuity_metrics_s1_perfect_grid_no_gaps() -> None:
     # Arrange: 30-day perfect 4h grid with varying close to avoid frozen-bar false positive
     start = date(2024, 1, 1)
@@ -74,6 +76,7 @@ def test_compute_continuity_metrics_s1_perfect_grid_no_gaps() -> None:
 
 
 # ── S2: 7-bar continuous gap in middle ───────────────────────────────────────
+
 
 def test_compute_continuity_metrics_s2_single_7bar_gap() -> None:
     # Arrange: 30-day grid with 7 consecutive bars removed from the middle
@@ -99,6 +102,7 @@ def test_compute_continuity_metrics_s2_single_7bar_gap() -> None:
 
 # ── S3: PIT denominator — mid-window onboarding ──────────────────────────────
 
+
 def test_compute_continuity_metrics_s3_pit_denominator_mid_window_onboard() -> None:
     """Symbol onboarded mid-window must not be penalised for pre-onboard absence.
 
@@ -106,7 +110,7 @@ def test_compute_continuity_metrics_s3_pit_denominator_mid_window_onboard() -> N
     Coverage must be ≈1.0 if all post-onboard bars are present (no survival bias).
     """
     # Arrange: ledger window is 60 days but symbol onboarded after 30 days
-    onboard = date(2024, 2, 1)   # mid-window (day 31 from 2024-01-01)
+    onboard = date(2024, 2, 1)  # mid-window (day 31 from 2024-01-01)
     end = date(2024, 3, 1)
 
     # Observe only post-onboard bars (perfect coverage from onboard onward)
@@ -114,9 +118,7 @@ def test_compute_continuity_metrics_s3_pit_denominator_mid_window_onboard() -> N
     klines = _grid_to_df(post_onboard_grid)
 
     # Act — pass onboard_date (not full_start) as PIT anchor
-    result = compute_continuity_metrics(
-        klines, onboard_date=onboard, as_of_date=end, tf="4h"
-    )
+    result = compute_continuity_metrics(klines, onboard_date=onboard, as_of_date=end, tf="4h")
 
     # Assert: coverage must be ≈1.0 (no pre-onboard penalty)
     assert result["coverage_ratio"] == pytest.approx(1.0, rel=1e-2), (
@@ -127,6 +129,7 @@ def test_compute_continuity_metrics_s3_pit_denominator_mid_window_onboard() -> N
 
 
 # ── S4: Frozen bars — 8 consecutive identical close ──────────────────────────
+
 
 def test_compute_continuity_metrics_s4_frozen_close_run_detected() -> None:
     # Arrange: 60-bar grid; bars 30-37 (8 bars) have identical close
@@ -143,12 +146,11 @@ def test_compute_continuity_metrics_s4_frozen_close_run_detected() -> None:
     result = compute_continuity_metrics(klines, onboard_date=start, as_of_date=end, tf="4h")
 
     # Assert
-    assert result["frozen_bars"] >= 8, (
-        f"Expected frozen_bars >= 8, got {result['frozen_bars']}"
-    )
+    assert result["frozen_bars"] >= 8, f"Expected frozen_bars >= 8, got {result['frozen_bars']}"
 
 
 # ── S5: NaN in OHLCV → has_nan=True ─────────────────────────────────────────
+
 
 def test_compute_continuity_metrics_s5_nan_in_ohlcv_detected() -> None:
     # Arrange: perfect grid with one NaN in 'high' column
@@ -170,6 +172,7 @@ def test_compute_continuity_metrics_s5_nan_in_ohlcv_detected() -> None:
 
 # ── S6: Duplicate timestamp → has_timestamp_issues=True ──────────────────────
 
+
 def test_compute_continuity_metrics_s6_duplicate_timestamp_detected() -> None:
     # Arrange: 10-day grid with one duplicated timestamp
     start = date(2024, 1, 1)
@@ -190,11 +193,10 @@ def test_compute_continuity_metrics_s6_duplicate_timestamp_detected() -> None:
 
 # ── Edge: empty DataFrame returns safe defaults ───────────────────────────────
 
+
 def test_compute_continuity_metrics_empty_dataframe_returns_safe_defaults() -> None:
     # Arrange
-    klines = pd.DataFrame(
-        columns=["datetime", "open", "high", "low", "close", "volume", "quote_vol"]
-    )
+    klines = pd.DataFrame(columns=["datetime", "open", "high", "low", "close", "volume", "quote_vol"])
     start = date(2024, 1, 1)
     end = date(2024, 1, 10)
 
@@ -213,6 +215,7 @@ def test_compute_continuity_metrics_empty_dataframe_returns_safe_defaults() -> N
 
 # ── Edge: has_inf detection ────────────────────────────────────────────────────
 
+
 def test_compute_continuity_metrics_inf_in_close_detected() -> None:
     # Arrange
     start = date(2024, 1, 1)
@@ -230,6 +233,7 @@ def test_compute_continuity_metrics_inf_in_close_detected() -> None:
 
 
 # ── Edge: zero-volume bars in 60d window ──────────────────────────────────────
+
 
 def test_compute_continuity_metrics_zero_volume_bars_60d_counted() -> None:
     # Arrange: 70-day grid; last 30 days have 3 zero-volume bars

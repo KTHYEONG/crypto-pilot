@@ -41,6 +41,7 @@ _N: int = 3
 # Helpers / fixtures
 # ---------------------------------------------------------------------------
 
+
 def _make_eligibility_cube(n_bars: int, n_instr: int, *, eligible: bool = True) -> UniverseStateCube:
     """Build a minimal UniverseStateCube with uniform eligibility.
 
@@ -112,6 +113,7 @@ def _make_funding_requirement(
 # Tests
 # ---------------------------------------------------------------------------
 
+
 class TestReadinessCubeShape:
     """Verify output shape contract [S, T, N]."""
 
@@ -164,13 +166,9 @@ class TestPriceOnlyStrategyReadiness:
         )
 
         # Assert: first LOOKBACK bars have insufficient finite count
-        assert not cube.ready[0, :LOOKBACK - 1, :].any(), (
-            "Bars before lookback-1 must not be ready"
-        )
+        assert not cube.ready[0, : LOOKBACK - 1, :].any(), "Bars before lookback-1 must not be ready"
         # From bar LOOKBACK-1 onwards, all instruments must be ready
-        assert cube.ready[0, LOOKBACK - 1:, :].all(), (
-            "All bars at or after lookback must be ready"
-        )
+        assert cube.ready[0, LOOKBACK - 1 :, :].all(), "All bars at or after lookback must be ready"
 
     def test_global_history_gate_does_not_block_price_only_strategy(self) -> None:
         """Price strategy with short lookback is unaffected by large T window."""
@@ -190,10 +188,8 @@ class TestPriceOnlyStrategyReadiness:
         )
 
         # Assert: no global gate blocks bars in [LOOKBACK-1 : T]
-        ready_from = cube.ready[0, LOOKBACK - 1:, :]
-        assert ready_from.all(), (
-            "Global history (T=100) must not impose additional gate beyond lookback=10"
-        )
+        ready_from = cube.ready[0, LOOKBACK - 1 :, :]
+        assert ready_from.all(), "Global history (T=100) must not impose additional gate beyond lookback=10"
 
 
 class TestInsufficientLookback:
@@ -219,11 +215,10 @@ class TestInsufficientLookback:
         # Assert: bars [0, LOOKBACK-2] have insufficient_lookback
         pre_ready_reasons = cube.reason_code[0, : LOOKBACK - 1, 0]
         assert (pre_ready_reasons == _REASON_INSUFFICIENT_LOOKBACK).all(), (
-            f"Expected '{_REASON_INSUFFICIENT_LOOKBACK}' for pre-lookback bars, "
-            f"got: {np.unique(pre_ready_reasons)}"
+            f"Expected '{_REASON_INSUFFICIENT_LOOKBACK}' for pre-lookback bars, got: {np.unique(pre_ready_reasons)}"
         )
         # Bar LOOKBACK-1 and beyond must be ready
-        post_reasons = cube.reason_code[0, LOOKBACK - 1:, 0]
+        post_reasons = cube.reason_code[0, LOOKBACK - 1 :, 0]
         assert (post_reasons == _REASON_READY).all()
 
 
@@ -255,7 +250,7 @@ class TestFundingRequirement:
         lookback = _LOOKBACK_BARS
         eligible_mask = eligibility.eligible  # [T, N]
         post_lookback_mask = np.zeros((T, N), dtype=np.bool_)
-        post_lookback_mask[lookback - 1:, :] = True
+        post_lookback_mask[lookback - 1 :, :] = True
         check_mask = eligible_mask & post_lookback_mask
         if check_mask.any():
             checked_reasons = cube.reason_code[0][check_mask]
@@ -282,7 +277,7 @@ class TestFundingRequirement:
         )
 
         # Assert: from LOOKBACK-1 onward, all instruments ready
-        assert cube.ready[0, LOOKBACK - 1:, :].all()
+        assert cube.ready[0, LOOKBACK - 1 :, :].all()
 
     def test_strategy_requiring_funding_insufficient_funding_reason_code(self) -> None:
         """Funding strategy with NaN-filled funding array returns insufficient_funding."""
@@ -307,7 +302,7 @@ class TestFundingRequirement:
         # (bars before lookback carry insufficient_lookback which is expected)
         eligible_mask = eligibility.eligible  # [T, N]
         post_lookback_mask = np.zeros((T, N), dtype=np.bool_)
-        post_lookback_mask[LOOKBACK - 1:, :] = True
+        post_lookback_mask[LOOKBACK - 1 :, :] = True
         check_mask = eligible_mask & post_lookback_mask
         if check_mask.any():
             checked_reasons = cube.reason_code[0][check_mask]
@@ -374,7 +369,7 @@ class TestNotEligibleInstruments:
         )
 
         # Assert SYM0 (col 0) ready from bar LOOKBACK-1 onward
-        assert cube.ready[0, LOOKBACK - 1:, 0].all()
+        assert cube.ready[0, LOOKBACK - 1 :, 0].all()
         # Assert SYM1 (col 1) never ready
         assert not cube.ready[0, :, 1].any()
         # Assert SYM1 reason is not_eligible everywhere
@@ -404,9 +399,7 @@ class TestNaNCloseHandling:
         )
 
         # Assert: bar index 4 (window [0:5]) has only 4 finite values → not ready
-        assert not cube.ready[0, 4, 0], (
-            "Bar 4 window contains 1 NaN so finite count < LOOKBACK=5; must not be ready"
-        )
+        assert not cube.ready[0, 4, 0], "Bar 4 window contains 1 NaN so finite count < LOOKBACK=5; must not be ready"
         # Bar 5 (window [1:6]) — includes 5 full finite bars [1,3,4,5] + ... check
         # bar 9 must definitely be ready (NaN at bar 2 is no longer in window [5:10])
         assert cube.ready[0, 9, 0], "Bar 9 must be ready (NaN bar is outside trailing window)"

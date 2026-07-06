@@ -139,9 +139,7 @@ class RegimeConfig:
         if self.breadth_mom_window < 2:
             raise ValueError("breadth_mom_window must be >= 2")
         if not (0.0 < self.breadth_neg_frac_exit < self.breadth_neg_frac_enter <= 1.0):
-            raise ValueError(
-                "breadth thresholds must satisfy 0 < exit < enter <= 1.0 (hysteresis asymmetry)"
-            )
+            raise ValueError("breadth thresholds must satisfy 0 < exit < enter <= 1.0 (hysteresis asymmetry)")
         if self.reversal_recovery_cooldown_bars < 0:
             raise ValueError("reversal_recovery_cooldown_bars must be >= 0")
 
@@ -291,9 +289,9 @@ class CandidateStrategyConfig:
     min_regime_cell_edge_bps: float = 8.0  # δ: minimum profitable edge (breakeven proxy)
     max_admitted_cells_per_variant: int = 2
     # Bayesian posterior probability admission (replaces flat obs/tstat thresholds)
-    min_admission_posterior_prob: float = 0.70   # P(μ > δ | data) gate; Bounds: [0.5, 1.0)
-    admission_use_newey_west: bool = True         # True=NW autocorr-corrected; False=IID legacy
-    admission_tau_prior_bps: float = 15.0        # fallback cross-cell std when < 2 cells; Bounds: (0, ∞)
+    min_admission_posterior_prob: float = 0.70  # P(μ > δ | data) gate; Bounds: [0.5, 1.0)
+    admission_use_newey_west: bool = True  # True=NW autocorr-corrected; False=IID legacy
+    admission_tau_prior_bps: float = 15.0  # fallback cross-cell std when < 2 cells; Bounds: (0, ∞)
     allocation_backend: Literal["ensemble_b0", "ml_edge"] = "ensemble_b0"
     ensemble_shrinkage_k: float = 50.0
     # EB adaptive shrinkage: k_eff = within_var / between_var (James-Stein principle).
@@ -311,8 +309,8 @@ class CandidateStrategyConfig:
     # toward its archetype-regime cell anchor (mode cell).
     # vmean_v = w_v*raw_v + (1-w_v)*anchor; w_v = n_eff/(n_eff+k_v)
     ensemble_variant_prior_enabled: bool = True
-    ensemble_variant_shrinkage_k: float = 30.0   # anchor pull for variant James-Stein; Bounds: (0, ∞)
-    ensemble_variant_min_obs: int = 40            # below → w_v≈0, fallback to cell anchor
+    ensemble_variant_shrinkage_k: float = 30.0  # anchor pull for variant James-Stein; Bounds: (0, ∞)
+    ensemble_variant_min_obs: int = 40  # below → w_v≈0, fallback to cell anchor
     ensemble_variant_prior_families: tuple[str, ...] = (
         "trend_pullback_continuation",
         "dual_momentum",
@@ -464,8 +462,8 @@ class CandidateStrategyConfig:
     l1_pair_fdr_alpha: float = 0.15
     l1_breakeven_floor_bps: float = _DEFAULT_RT_BPS  # = ExecutionCostModel.round_trip_bps() ≈ 7.5bps
     l1_xs_alpha_admission_enabled: bool = False  # factor-level XS alpha admission gate
-    l1_xs_admission_min_sharpe: float = 0.15    # min spread_sharpe for XS admission
-    l1_fdr_hard_reject: bool = True           # q>alpha → hard reject (binding FDR)
+    l1_xs_admission_min_sharpe: float = 0.15  # min spread_sharpe for XS admission
+    l1_fdr_hard_reject: bool = True  # q>alpha → hard reject (binding FDR)
     l1_conviction_metric: str = "prob_positive"  # "prob_positive" or "lcb_net_bps"
     l1_pair_alpha: float = 0.05
     l1_pair_power: float = 0.80
@@ -481,8 +479,8 @@ class CandidateStrategyConfig:
     l1_min_fold_ratio: float = 0.50
     l1_min_opportunity_timestamps: int = 3
     l1_min_cross_section: int = 2
-    l1_qualify_by_regime: bool = False         # False=전략단위 풀링, True=regime-cell 검증
-    l1_activation_match_regime: bool = False   # OOS 발화 시 regime 일치 요구 여부
+    l1_qualify_by_regime: bool = False  # False=전략단위 풀링, True=regime-cell 검증
+    l1_activation_match_regime: bool = False  # OOS 발화 시 regime 일치 요구 여부
     # peer_exclusive=leave-self-out baseline; absolute=incremental==gross (D1)
     l1_baseline_mode: Literal["peer_exclusive", "absolute"] = "peer_exclusive"
     l1_opp_ic_mode: Literal["cross_section", "time_series"] = "time_series"
@@ -519,13 +517,13 @@ class CandidateStrategyConfig:
     l1_snapshot_streaming_enabled: bool = True
     l1_nested_result_soft_cap_mb: int = 512
     l1_ens_prior_effective_n: float = 0.0  # P1: Bayesian prior sample size; >0 shrinks small-n arch edge toward 0
-    l1_ens_min_display_events: int = 0     # P2: Min events per archetype to show edge sign; 0=disabled
-    l1_evidence_early_snapshots: int = 0   # P3: First N snapshots use relaxed evidence gates; 0=disabled
+    l1_ens_min_display_events: int = 0  # P2: Min events per archetype to show edge sign; 0=disabled
+    l1_evidence_early_snapshots: int = 0  # P3: First N snapshots use relaxed evidence gates; 0=disabled
     l1_pair_min_effective_obs_early: float = 2.0  # P3: Relaxed effective_obs threshold for early snapshots
-    l1_pair_min_folds_early: int = 1             # P3: Relaxed min_folds threshold for early snapshots
-    fold_survival_metric: Literal[
-        "predicted_mu_tstat", "realized_selected_edge", "realized_log_growth"
-    ] = "realized_selected_edge"
+    l1_pair_min_folds_early: int = 1  # P3: Relaxed min_folds threshold for early snapshots
+    fold_survival_metric: Literal["predicted_mu_tstat", "realized_selected_edge", "realized_log_growth"] = (
+        "realized_selected_edge"
+    )
     min_fold_selected_events: int = 20
     min_fold_realized_edge_bps: float = 8.0  # >= 1.07x RT cost (7.5bps); 0.0은 +0.001bps도 통과
     min_fold_log_growth: float = 0.0
@@ -553,8 +551,8 @@ class CandidateStrategyConfig:
     # Ablation evaluation alignment (RC1 fix)
     eval_apply_candidate_barriers: bool = True
     # Promotion gate — RC2 fix: prevent degenerate near-zero-deployment passes
-    mar_min_drawdown_floor: float = 0.01      # MAR = 0 when max_dd < this (ratio of two noise values)
-    min_cagr_for_promotion: float = 0.15      # crypto 위험 대비 최소 15% (0.02는 예금 이하)
+    mar_min_drawdown_floor: float = 0.01  # MAR = 0 when max_dd < this (ratio of two noise values)
+    min_cagr_for_promotion: float = 0.15  # crypto 위험 대비 최소 15% (0.02는 예금 이하)
     enforce_deployment_in_compound_gate: bool = True
     # Downside target — RC3 fix: clip paper-MAE to realizable stop loss
     q10_bound_to_stop: bool = True
@@ -571,22 +569,12 @@ class CandidateStrategyConfig:
     cov_min_obs: int = 60
     cov_shrinkage: float | Literal["auto"] = "auto"
     cov_ridge_eps: float = 1e-3
-    regime_gross_multipliers: dict[int, float] = field(default_factory=lambda: {
-        0: 1.5,
-        1: 1.0,
-        2: 1.5,
-        3: 1.0,
-        4: 0.4,
-        5: 0.3
-    })
-    regime_net_multipliers: dict[int, float] = field(default_factory=lambda: {
-        0: 2.5,
-        1: 1.5,
-        2: 2.5,
-        3: 1.5,
-        4: 0.3,
-        5: 0.1
-    })
+    regime_gross_multipliers: dict[int, float] = field(
+        default_factory=lambda: {0: 1.5, 1: 1.0, 2: 1.5, 3: 1.0, 4: 0.4, 5: 0.3}
+    )
+    regime_net_multipliers: dict[int, float] = field(
+        default_factory=lambda: {0: 2.5, 1: 1.5, 2: 2.5, 3: 1.5, 4: 0.3, 5: 0.1}
+    )
     bl_shrinkage_var_mult: float = 0.20
     bl_shrinkage_omega_mult: float = 0.10
     # Direction A: score-conditioned ensemble (regime-conditional score calibration)
@@ -745,10 +733,7 @@ class CandidateStrategyConfig:
             raise ValueError("selection_q10_grid_bps values must be non-negative")
         if any(not math.isfinite(floor) for floor in self.selection_shadow_utility_floors_bps):
             raise ValueError("selection_shadow_utility_floors_bps must be finite")
-        if any(
-            (not math.isfinite(frac) or frac < 0.0)
-            for frac in self.selection_shadow_breakeven_floor_fractions
-        ):
+        if any((not math.isfinite(frac) or frac < 0.0) for frac in self.selection_shadow_breakeven_floor_fractions):
             raise ValueError("selection_shadow_breakeven_floor_fractions must be finite and non-negative")
         if not (0.0 < self.selection_shadow_top_quantile <= 1.0):
             raise ValueError("selection_shadow_top_quantile must be in (0.0, 1.0]")
@@ -947,7 +932,8 @@ def with_max_holding_bars(
     )
     if (
         resolved_holding_bars == int(cfg.max_holding_bars)
-        and cfg.purge_bars == (
+        and cfg.purge_bars
+        == (
             int(cfg._purge_bars_input)
             if cfg._purge_bars_input is not None
             else max(0, math.ceil(resolved_holding_bars * cfg.purge_safety_mult))
@@ -1126,10 +1112,9 @@ def apply_tf_gate_overrides(
     If no overrides exist for the given TF, returns the original config.
     """
     import dataclasses
+
     overrides_map = (
-        cfg.per_tf_gate_overrides
-        if cfg.per_tf_gate_overrides is not None
-        else _DEFAULT_PER_TF_GATE_OVERRIDES
+        cfg.per_tf_gate_overrides if cfg.per_tf_gate_overrides is not None else _DEFAULT_PER_TF_GATE_OVERRIDES
     )
     if tf not in overrides_map:
         return cfg
@@ -1140,9 +1125,7 @@ def apply_tf_gate_overrides(
     return dataclasses.replace(cfg, **valid_overrides)  # type: ignore[arg-type]
 
 
-def resolve_tf_signal_pool(
-    cfg: CandidateStrategyConfig, tf: str
-) -> tuple[str, ...]:
+def resolve_tf_signal_pool(cfg: CandidateStrategyConfig, tf: str) -> tuple[str, ...]:
     """Resolve the signal pool for a given TF.
 
     Returns per_tf_candidate_families[tf] when available, otherwise
@@ -1155,9 +1138,7 @@ def resolve_tf_signal_pool(
     return cfg.candidate_families
 
 
-def resolve_tf_gate_overrides(
-    cfg: CandidateStrategyConfig, tf: str
-) -> dict[str, float]:
+def resolve_tf_gate_overrides(cfg: CandidateStrategyConfig, tf: str) -> dict[str, float]:
     """Resolve gate threshold overrides for a given TF.
 
     Returns the raw override dict from per_tf_gate_overrides[tf],

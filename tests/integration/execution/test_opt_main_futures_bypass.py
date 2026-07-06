@@ -90,6 +90,7 @@ def mocked_pipeline_stages(monkeypatch: pytest.MonkeyPatch) -> dict[str, list[An
         "_ensure_cached_symbol_data_for_targets",
         lambda *a, **kw: None,
     )
+
     def _mock_universe(*a: Any, **kw: Any) -> tuple[Any, ...]:
         calls["universe"].append(a)
         calls["universe"].append(tuple(sorted(kw)))
@@ -200,27 +201,21 @@ def test_run_config_has_no_symbols_field(minimal_run_config: FuturesRunConfig) -
 
 def test_cli_rejects_symbols_flag(monkeypatch: pytest.MonkeyPatch) -> None:
     """--symbols CLI 인자는 argparse 오류(exit 2)를 반환해야 한다."""
-    monkeypatch.setattr(
-        sys, "argv", ["opt_main_futures.py", "--phase", "l3", "--symbols", "BTCUSDT"]
-    )
+    monkeypatch.setattr(sys, "argv", ["opt_main_futures.py", "--phase", "l3", "--symbols", "BTCUSDT"])
     exit_code = opt_main_futures.main()
     assert exit_code == 2
 
 
 def test_cli_rejects_skip_universe_flag(monkeypatch: pytest.MonkeyPatch) -> None:
     """--skip-universe CLI 인자는 argparse 오류(exit 2)를 반환해야 한다."""
-    monkeypatch.setattr(
-        sys, "argv", ["opt_main_futures.py", "--phase", "l3", "--skip-universe"]
-    )
+    monkeypatch.setattr(sys, "argv", ["opt_main_futures.py", "--phase", "l3", "--skip-universe"])
     exit_code = opt_main_futures.main()
     assert exit_code == 2
 
 
 def test_cli_rejects_skip_data_sync_flag(monkeypatch: pytest.MonkeyPatch) -> None:
     """--skip-data-sync CLI 인자는 argparse 오류(exit 2)를 반환해야 한다."""
-    monkeypatch.setattr(
-        sys, "argv", ["opt_main_futures.py", "--phase", "l3", "--skip-data-sync"]
-    )
+    monkeypatch.setattr(sys, "argv", ["opt_main_futures.py", "--phase", "l3", "--skip-data-sync"])
     exit_code = opt_main_futures.main()
     assert exit_code == 2
 
@@ -238,18 +233,14 @@ def test_cli_rejects_bypass_champion_guard_flag(monkeypatch: pytest.MonkeyPatch)
 
 def test_cli_rejects_alpha_only_flag(monkeypatch: pytest.MonkeyPatch) -> None:
     """--alpha-only CLI 인자는 argparse 오류(exit 2)를 반환해야 한다."""
-    monkeypatch.setattr(
-        sys, "argv", ["opt_main_futures.py", "--phase", "l3", "--alpha-only"]
-    )
+    monkeypatch.setattr(sys, "argv", ["opt_main_futures.py", "--phase", "l3", "--alpha-only"])
     exit_code = opt_main_futures.main()
     assert exit_code == 2
 
 
 def test_cli_rejects_quick_backtest_alias_flag(monkeypatch: pytest.MonkeyPatch) -> None:
     """--quick-backtest alias 플래그는 argparse 오류(exit 2)를 반환해야 한다."""
-    monkeypatch.setattr(
-        sys, "argv", ["opt_main_futures.py", "--quick-backtest"]
-    )
+    monkeypatch.setattr(sys, "argv", ["opt_main_futures.py", "--quick-backtest"])
     exit_code = opt_main_futures.main()
     assert exit_code == 2
 

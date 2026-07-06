@@ -609,9 +609,12 @@ def test_signal_prequalify_excludes_negative_edge_variants() -> None:
     labeled = pd.DataFrame(
         {
             "datetime": [
-                aligned.datetimes[25], aligned.datetimes[26],
-                aligned.datetimes[27], aligned.datetimes[28],
-                aligned.datetimes[29], aligned.datetimes[30],
+                aligned.datetimes[25],
+                aligned.datetimes[26],
+                aligned.datetimes[27],
+                aligned.datetimes[28],
+                aligned.datetimes[29],
+                aligned.datetimes[30],
             ],
             "symbol": ["BTCUSDT"] * 6,
             "family": ["trend_ma"] * 3 + ["trend_ma"] * 3,
@@ -631,9 +634,7 @@ def test_signal_prequalify_excludes_negative_edge_variants() -> None:
         }
     )
     cfg = CandidateStrategyConfig(signal_prequalify_min_obs=2)
-    schema = fit_candidate_feature_schema(
-        labeled_events=labeled, cfg=cfg, split_start=20, split_end=40
-    )
+    schema = fit_candidate_feature_schema(labeled_events=labeled, cfg=cfg, split_start=20, split_end=40)
 
     # Arrange: is_fit_split=True should zero out bad_v
     ds = build_candidate_dataset(
@@ -678,9 +679,7 @@ def test_signal_prequalify_not_applied_when_is_fit_split_false() -> None:
         }
     )
     cfg = CandidateStrategyConfig(signal_prequalify_min_obs=2)
-    schema = fit_candidate_feature_schema(
-        labeled_events=labeled, cfg=cfg, split_start=20, split_end=40
-    )
+    schema = fit_candidate_feature_schema(labeled_events=labeled, cfg=cfg, split_start=20, split_end=40)
 
     # Act: is_fit_split=False (default) — bad_v should retain its weight
     ds = build_candidate_dataset(
@@ -877,9 +876,7 @@ def test_signal_context_features_present_in_schema() -> None:
     aligned = _make_aligned()
     labeled = _make_labeled_with_variants(aligned)
     cfg = CandidateStrategyConfig(signal_context_features_enabled=True)
-    schema = fit_candidate_feature_schema(
-        labeled_events=labeled, cfg=cfg, split_start=20, split_end=40
-    )
+    schema = fit_candidate_feature_schema(labeled_events=labeled, cfg=cfg, split_start=20, split_end=40)
     ctx_features = {
         "overlay_mult_entry",
         "crisis_active_entry",
@@ -895,9 +892,7 @@ def test_signal_context_features_absent_when_disabled() -> None:
     aligned = _make_aligned()
     labeled = _make_labeled_with_variants(aligned)
     cfg = CandidateStrategyConfig(signal_context_features_enabled=False)
-    schema = fit_candidate_feature_schema(
-        labeled_events=labeled, cfg=cfg, split_start=20, split_end=40
-    )
+    schema = fit_candidate_feature_schema(labeled_events=labeled, cfg=cfg, split_start=20, split_end=40)
     ctx_features = {
         "overlay_mult_entry",
         "crisis_active_entry",
@@ -978,9 +973,7 @@ def test_funding_side_alignment_direction() -> None:
         execution_cost_bps_2d=np.full((t, n), 4.0, dtype=np.float64),
     )
     cfg = CandidateStrategyConfig(signal_context_features_enabled=True)
-    schema = fit_candidate_feature_schema(
-        labeled_events=labeled, cfg=cfg, split_start=20, split_end=40
-    )
+    schema = fit_candidate_feature_schema(labeled_events=labeled, cfg=cfg, split_start=20, split_end=40)
     ds = build_candidate_dataset(
         labeled_events=labeled,
         aligned=aligned_pos_funding,
@@ -1031,9 +1024,7 @@ def test_n_same_dir_variants_log_confluence() -> None:
         }
     )
     cfg = CandidateStrategyConfig(signal_context_features_enabled=True)
-    schema = fit_candidate_feature_schema(
-        labeled_events=labeled, cfg=cfg, split_start=20, split_end=40
-    )
+    schema = fit_candidate_feature_schema(labeled_events=labeled, cfg=cfg, split_start=20, split_end=40)
     ds = build_candidate_dataset(
         labeled_events=labeled,
         aligned=aligned,
@@ -1051,6 +1042,7 @@ def test_n_same_dir_variants_log_confluence() -> None:
 
 def test_build_candidate_dataset_features_cached() -> None:
     from src.domain.futures.strategy.candidate_dataset import _ALIGNED_FEATURE_CACHE
+
     aligned = _make_aligned()
     labeled = pd.DataFrame(
         {
@@ -1078,9 +1070,7 @@ def test_build_candidate_dataset_features_cached() -> None:
         signal_context_features_enabled=True,
         exclude_immediate_return_features=False,
     )
-    schema = fit_candidate_feature_schema(
-        labeled_events=labeled, cfg=cfg, split_start=20, split_end=40
-    )
+    schema = fit_candidate_feature_schema(labeled_events=labeled, cfg=cfg, split_start=20, split_end=40)
 
     # 캐시 비우기
     aligned_id = id(aligned)
@@ -1122,15 +1112,19 @@ def test_build_candidate_dataset_features_cached() -> None:
 
 def test_compute_bootstrap_means_numba() -> None:
     from src.domain.futures.strategy.candidate_dataset import _compute_bootstrap_means_numba
+
     x = np.array([1.0, 2.0, 3.0, 4.0, 5.0], dtype=np.float64)
     w = np.array([1.0, 1.0, 1.0, 1.0, 1.0], dtype=np.float64)
 
     # 2개의 bootstrap 샘플, 각 샘플당 3개의 블록 시작 인덱스
     # block=2 로 테스트
-    start_idxs = np.array([
-        [0, 2, 4],  # 블록들: [1,2], [3,4], [5] -> 복사 후 sx=[1,2,3,4,5]
-        [1, 3, 0]   # 블록들: [2,3], [4,5], [1,2] -> 복사 후 sx=[2,3,4,5,1]
-    ], dtype=np.int64)
+    start_idxs = np.array(
+        [
+            [0, 2, 4],  # 블록들: [1,2], [3,4], [5] -> 복사 후 sx=[1,2,3,4,5]
+            [1, 3, 0],  # 블록들: [2,3], [4,5], [1,2] -> 복사 후 sx=[2,3,4,5,1]
+        ],
+        dtype=np.int64,
+    )
 
     means = _compute_bootstrap_means_numba(x, w, start_idxs, block=2)
     assert means.shape == (2,)
@@ -1140,6 +1134,7 @@ def test_compute_bootstrap_means_numba() -> None:
 
 def test_compute_uniqueness_weights_numba() -> None:
     from src.domain.futures.strategy.candidate_dataset import _compute_uniqueness_weights_numba
+
     starts = np.array([0, 1, 2], dtype=np.int64)
     ends = np.array([1, 2, 3], dtype=np.int64)
     inv_active = np.array([1.0, 0.5, 0.333, 0.25], dtype=np.float64)
@@ -1197,30 +1192,31 @@ def test_build_candidate_dataset_skip_features() -> None:
 
 def _make_basic_frame(t: int = 60) -> pd.DataFrame:
     rng = np.random.default_rng(42)
-    rows: list[dict[str, Any]] = []
-    for entry_idx in range(25, t - 1):
-        for sym_idx, sym in enumerate(["BTCUSDT", "ETHUSDT"]):
-            for v in ("ema_12", "rsi_14"):
-                rows.append({
-                    "entry_idx": entry_idx,
-                    "exit_idx": entry_idx + 2,
-                    "symbol": sym,
-                    "side": 1 if (entry_idx + sym_idx) % 2 == 0 else -1,
-                    "family": "trend_ma" if "ema" in v else "rsi",
-                    "variant": v,
-                    "archetype": "trend" if "ema" in v else "mean_rev",
-                    "raw_score": float(rng.normal(0.0, 0.5)),
-                    "score": float(rng.normal(0.0, 0.5)),
-                    "score_z": float(rng.normal(0.0, 1.0)),
-                    "turnover_proxy": 0.1,
-                    "triple_barrier_label": 1,
-                    "profitable_after_hurdle_label": 1,
-                    "edge_after_hurdle_bps": 10.0,
-                    "sl_thr_bps": 25.0,
-                    "mae_bps": -6.0,
-                    "mfe_bps": 18.0,
-                    "ex_ante_cost_bps": 4.0,
-                })
+    rows: list[dict[str, Any]] = [
+        {
+            "entry_idx": entry_idx,
+            "exit_idx": entry_idx + 2,
+            "symbol": sym,
+            "side": 1 if (entry_idx + sym_idx) % 2 == 0 else -1,
+            "family": "trend_ma" if "ema" in v else "rsi",
+            "variant": v,
+            "archetype": "trend" if "ema" in v else "mean_rev",
+            "raw_score": float(rng.normal(0.0, 0.5)),
+            "score": float(rng.normal(0.0, 0.5)),
+            "score_z": float(rng.normal(0.0, 1.0)),
+            "turnover_proxy": 0.1,
+            "triple_barrier_label": 1,
+            "profitable_after_hurdle_label": 1,
+            "edge_after_hurdle_bps": 10.0,
+            "sl_thr_bps": 25.0,
+            "mae_bps": -6.0,
+            "mfe_bps": 18.0,
+            "ex_ante_cost_bps": 4.0,
+        }
+        for entry_idx in range(25, t - 1)
+        for sym_idx, sym in enumerate(["BTCUSDT", "ETHUSDT"])
+        for v in ("ema_12", "rsi_14")
+    ]
     return pd.DataFrame(rows)
 
 
@@ -1233,6 +1229,7 @@ def test_precompute_enrich_shapes_and_types() -> None:
         _precompute_enrich,
         prepare_labeled_events,
     )
+
     prepared = prepare_labeled_events(
         labeled_events=frame,
         aligned=aligned,
@@ -1244,13 +1241,17 @@ def test_precompute_enrich_shapes_and_types() -> None:
         compute_market_regime_context,
         compute_risk_overlay,
     )
+
     overlay_ctx = compute_risk_overlay(aligned=aligned)
     regime_ctx = compute_market_regime_context(aligned=aligned)
 
     result = _precompute_enrich(frame, prepared, regime_ctx, overlay_ctx)
     expected_keys = {
-        "entry_regime", "arm",
-        "overlay_mult", "crisis_active", "entry_regime_code",
+        "entry_regime",
+        "arm",
+        "overlay_mult",
+        "crisis_active",
+        "entry_regime_code",
     }
     assert set(result.keys()) == expected_keys, f"missing: {expected_keys - set(result.keys())}"
 
@@ -1266,6 +1267,7 @@ def test_precompute_enrich_shapes_and_types() -> None:
     assert result["entry_regime_code"].shape == (n,)
     assert result["entry_regime_code"].dtype == np.int32
 
+
 def test_enrich_cache_populated_on_first_build_call() -> None:
     """Scenario 2: enrich_cache None at init, populated after first build_candidate_dataset call."""
     aligned = _make_aligned()
@@ -1276,6 +1278,7 @@ def test_enrich_cache_populated_on_first_build_call() -> None:
         fit_candidate_feature_schema,
         prepare_labeled_events,
     )
+
     prepared = prepare_labeled_events(
         labeled_events=frame,
         aligned=aligned,
@@ -1328,6 +1331,7 @@ def test_enrich_cache_entry_regime_listcomp_equivalence() -> None:
         prepare_labeled_events,
     )
     from src.domain.futures.strategy.market_regime import compute_market_regime_context
+
     regime_ctx = compute_market_regime_context(aligned=aligned)
     prepared = prepare_labeled_events(
         labeled_events=frame,

@@ -3,6 +3,7 @@
 Covers: compute_log_returns_2d, ledoit_wolf_shrink, active_covariance, solve_portfolio_kelly.
 Scenarios: S1-S8 (unit), S9-S10 (integration via build_candidate_target_weights).
 """
+
 from __future__ import annotations
 
 import numpy as np
@@ -21,6 +22,7 @@ from src.domain.futures.strategy.config import CandidateStrategyConfig
 # Helpers
 # ---------------------------------------------------------------------------
 
+
 def _make_corr_cov(sigmas: list[float], rho: float) -> np.ndarray:
     """Build 2x2 covariance matrix with given std-devs and correlation."""
     s = np.array(sigmas)
@@ -32,6 +34,7 @@ def _make_corr_cov(sigmas: list[float], rho: float) -> np.ndarray:
 # ---------------------------------------------------------------------------
 # S1 — Happy: positive correlation → concentration penalty reduces total exposure
 # ---------------------------------------------------------------------------
+
 
 def test_solve_portfolio_kelly_positive_correlation_reduces_exposure() -> None:
     # Arrange
@@ -53,6 +56,7 @@ def test_solve_portfolio_kelly_positive_correlation_reduces_exposure() -> None:
 # S2 — Diagonal equivalence (backward-compatible)
 # ---------------------------------------------------------------------------
 
+
 def test_solve_portfolio_kelly_diagonal_covariance_matches_scalar_formula() -> None:
     # Arrange
     var1, var2 = 0.0004, 0.0009  # sigma = 2%, 3%
@@ -71,6 +75,7 @@ def test_solve_portfolio_kelly_diagonal_covariance_matches_scalar_formula() -> N
 # ---------------------------------------------------------------------------
 # S3 — Negative correlation → more aggressive (lower portfolio variance)
 # ---------------------------------------------------------------------------
+
 
 def test_solve_portfolio_kelly_negative_correlation_increases_exposure() -> None:
     # Arrange
@@ -93,6 +98,7 @@ def test_solve_portfolio_kelly_negative_correlation_increases_exposure() -> None
 # S4 — Insufficient observations → None
 # ---------------------------------------------------------------------------
 
+
 def test_active_covariance_returns_none_when_insufficient_obs() -> None:
     # Arrange
     T, N = 100, 3
@@ -109,6 +115,7 @@ def test_active_covariance_returns_none_when_insufficient_obs() -> None:
 # ---------------------------------------------------------------------------
 # S5 — Single active symbol: portfolio path not entered (integration via build)
 # ---------------------------------------------------------------------------
+
 
 def test_solve_portfolio_kelly_single_asset_still_returns_valid() -> None:
     # Arrange — k=1 edge case
@@ -127,6 +134,7 @@ def test_solve_portfolio_kelly_single_asset_still_returns_valid() -> None:
 # S6 — Near-singular covariance: ridge prevents LinAlgError
 # ---------------------------------------------------------------------------
 
+
 def test_solve_portfolio_kelly_near_singular_no_exception() -> None:
     # Arrange: perfect correlation → singular matrix
     sigma = 0.02
@@ -143,6 +151,7 @@ def test_solve_portfolio_kelly_near_singular_no_exception() -> None:
 # ---------------------------------------------------------------------------
 # S7 — Ledoit-Wolf boundary conditions
 # ---------------------------------------------------------------------------
+
 
 @pytest.mark.parametrize(
     ("intensity", "desc"),
@@ -198,6 +207,7 @@ def test_ledoit_wolf_shrink_auto_intensity_in_unit_interval() -> None:
 # S8 — Look-ahead defense: future close spike must not affect result at t
 # ---------------------------------------------------------------------------
 
+
 def test_active_covariance_no_lookahead() -> None:
     # Arrange
     T, N = 300, 3
@@ -248,6 +258,7 @@ def test_active_covariance_past_change_affects_result() -> None:
 # ---------------------------------------------------------------------------
 # S9/S10 — Integration tests via build_candidate_target_weights
 # ---------------------------------------------------------------------------
+
 
 def _make_minimal_cfg(use_portfolio_kelly: bool = False, cov_window: int = 30) -> CandidateStrategyConfig:
     """Build a minimal CandidateStrategyConfig for integration tests."""
@@ -333,12 +344,20 @@ def test_build_candidate_target_weights_portfolio_kelly_toggle_finite() -> None:
 
     # Act
     w_diag = build_candidate_target_weights(
-        selected_events=selected, close_2d=close_2d, symbols=symbols,
-        beta_2d=None, sigma_3d=None, cfg=cfg_diag,
+        selected_events=selected,
+        close_2d=close_2d,
+        symbols=symbols,
+        beta_2d=None,
+        sigma_3d=None,
+        cfg=cfg_diag,
     )
     w_port = build_candidate_target_weights(
-        selected_events=selected, close_2d=close_2d, symbols=symbols,
-        beta_2d=None, sigma_3d=None, cfg=cfg_port,
+        selected_events=selected,
+        close_2d=close_2d,
+        symbols=symbols,
+        beta_2d=None,
+        sigma_3d=None,
+        cfg=cfg_port,
     )
 
     # Assert: both produce finite, non-negative (same side) weights
@@ -352,6 +371,7 @@ def test_build_candidate_target_weights_portfolio_kelly_toggle_finite() -> None:
 # ---------------------------------------------------------------------------
 # compute_log_returns_2d basic sanity
 # ---------------------------------------------------------------------------
+
 
 def test_compute_log_returns_2d_first_row_zero() -> None:
     close = np.array([[100.0, 200.0], [110.0, 210.0], [105.0, 215.0]])
@@ -369,6 +389,7 @@ def test_compute_log_returns_2d_correct_values() -> None:
 # ---------------------------------------------------------------------------
 # Extra coverage: OAS fallback, scalar ndim=0, LinAlgError fallback
 # ---------------------------------------------------------------------------
+
 
 def test_ledoit_wolf_shrink_oas_near_zero_denominator_fallback() -> None:
     # Force near-zero denominator in OAS: perfectly homogeneous matrix → tr(S²) ≈ tr(S)²/k

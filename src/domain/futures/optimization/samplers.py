@@ -31,9 +31,7 @@ def _fixed_ml_phase_d_params() -> dict[str, Any]:
     }
 
 
-def infer_kelly_shrinkage_bayesian_c_for_enqueue(
-    fk_target: float, *, shield: bool
-) -> tuple[float, float]:
+def infer_kelly_shrinkage_bayesian_c_for_enqueue(fk_target: float, *, shield: bool) -> tuple[float, float]:
     """Grid BAYESIAN_C so fk from _base_engine_params matches deploy KELLY_FRACTION."""
     fk_t = float(np.clip(float(fk_target), 0.05, 0.6))
     ks_lo, ks_hi = (0.52, 1.02) if shield else (0.45, 1.20)
@@ -68,6 +66,7 @@ def build_phase_d_enqueue_params_from_deploy_json(
 ) -> dict[str, Any] | None:
     """Map deploy JSON to Optuna enqueue_trial param dict (single-objective Phase-D)."""
     from src.domain.futures.portfolio.portfolio_optimizer import finalize_strategy_portfolio_params
+
     shield = bool(OPT_FUTURES_CONFIG.get("FUTURES_TIER1_SHIELD_MODE", False))
     policy = load_portfolio_policy_config(OPT_FUTURES_CONFIG)
     fk_raw = deploy.get("KELLY_FRACTION", deploy.get("FK_FRACTION"))
@@ -97,9 +96,7 @@ def build_phase_d_enqueue_params_from_deploy_json(
             float(deploy.get("ATR_MULT", deploy.get("LONG_ATR_MULT", atr_stop))),
             atr_m_choices,
         )
-        trail_m = _snap_float_list(
-            float(deploy.get("TRAIL_MULT", deploy.get("LONG_TRAIL_MULT", 3.0))), trail_choices
-        )
+        trail_m = _snap_float_list(float(deploy.get("TRAIL_MULT", deploy.get("LONG_TRAIL_MULT", 3.0))), trail_choices)
 
         s_tp = _snap_float_list(float(deploy["SHORT_TP_MULT"]), stp_choices)
         l_scale = _snap_float_list(float(deploy["LONG_SCALE_ATR_MULT"]), lsc_choices)
@@ -193,9 +190,7 @@ def _baseline_ml_out_dict_for_coordinate(policy: Any) -> dict[str, Any]:
         "DYNAMIC_RA_BEAR_COEF": 1.5,
         "NORM_VAR_CONSTANT": 0.5,
         "CRISIS_LONG_Z_BOOST": 0.0,
-        "CRISIS_LONG_MAG_SUPPRESS": float(
-            OPT_FUTURES_CONFIG.get("FUTURES_CRISIS_LONG_MAG_SUPPRESS", 1.0)
-        ),
+        "CRISIS_LONG_MAG_SUPPRESS": float(OPT_FUTURES_CONFIG.get("FUTURES_CRISIS_LONG_MAG_SUPPRESS", 1.0)),
         "BETA_ALPHA": float(fc.get("FUTURES_DEFAULT_BETA_ALPHA", 1.0)),
         "EV_HURDLE_BPS": float(default_ev_hurdle_bps(fc)),
         "SLIPPAGE_BPS_BUFFER_MULT": float(fc.get("SLIPPAGE_BPS_BUFFER_MULT", 1.0)),
@@ -206,6 +201,7 @@ def _baseline_ml_out_dict_for_coordinate(policy: Any) -> dict[str, Any]:
 def _suggest_ml_joint_nsga2(trial: optuna.Trial, ctx: MLPhaseDContext) -> dict[str, Any]:
     """Joint parameter space for main objective path (V4.3 core + fixed defaults)."""
     from src.domain.futures.portfolio.portfolio_optimizer import finalize_strategy_portfolio_params
+
     policy = load_portfolio_policy_config(OPT_FUTURES_CONFIG)
     default_ranges = {"MAX_EXPOSURE": (0.50, min(float(policy.gross_exposure_cap), 3.00))}
     phase = str(getattr(ctx, "coordinate_phase", "") or "").lower()
@@ -221,9 +217,7 @@ def _suggest_ml_joint_nsga2(trial: optuna.Trial, ctx: MLPhaseDContext) -> dict[s
         "K_LONG": int(baseline.get("K_LONG", 2)),
         "K_SHORT": int(baseline.get("K_SHORT", 2)),
         "REBALANCE_BARS": int(baseline.get("REBALANCE_BARS", 6)),
-        "EV_HURDLE_BPS": float(
-            baseline.get("EV_HURDLE_BPS", default_ev_hurdle_bps(OPT_FUTURES_CONFIG))
-        ),
+        "EV_HURDLE_BPS": float(baseline.get("EV_HURDLE_BPS", default_ev_hurdle_bps(OPT_FUTURES_CONFIG))),
         "PORTFOLIO_KAPPA": float(baseline.get("PORTFOLIO_KAPPA", 0.35)),
         "TARGET_ANN_VOL": float(baseline.get("TARGET_ANN_VOL", 0.25)),
         "MAX_EXPOSURE": float(baseline.get("MAX_EXPOSURE", 1.2)),
@@ -255,6 +249,7 @@ def _suggest_ml_joint_nsga2(trial: optuna.Trial, ctx: MLPhaseDContext) -> dict[s
 
 def build_ml_phase_d_params(trial_params: dict[str, Any], tf: str) -> dict[str, Any]:
     from src.domain.futures.optimization.objectives import _base_engine_params
+
     merged = dict(_fixed_ml_phase_d_params())
     merged.update(trial_params)
     return _base_engine_params(merged, tf)

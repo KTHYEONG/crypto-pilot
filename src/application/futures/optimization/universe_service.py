@@ -111,37 +111,21 @@ def _discover_symbols_via_universe(
         )
 
     discovered_symbols: list[str] = []
-    if (
-        selected_frame is not None
-        and not selected_frame.empty
-        and "symbol" in selected_frame.columns
-    ):
+    if selected_frame is not None and not selected_frame.empty and "symbol" in selected_frame.columns:
         discovered_symbols = [
-            str(symbol).strip()
-            for symbol in selected_frame["symbol"].astype(str).tolist()
-            if str(symbol).strip()
+            str(symbol).strip() for symbol in selected_frame["symbol"].astype(str).tolist() if str(symbol).strip()
         ]
     if not discovered_symbols:
-        discovered_symbols = [
-            str(meta.symbol).strip() for meta in snapshot.selected if str(meta.symbol).strip()
-        ]
+        discovered_symbols = [str(meta.symbol).strip() for meta in snapshot.selected if str(meta.symbol).strip()]
     return tuple(dict.fromkeys(discovered_symbols)), snapshot, report
 
 
 def _snapshot_selected_meta_map(snapshot: UniverseSnapshot) -> dict[str, SymbolMeta]:
-    return {
-        str(meta.symbol).strip(): meta
-        for meta in snapshot.selected
-        if str(meta.symbol).strip()
-    }
+    return {str(meta.symbol).strip(): meta for meta in snapshot.selected if str(meta.symbol).strip()}
 
 
 def _snapshot_quality_symbols(snapshot: UniverseSnapshot) -> tuple[str, ...]:
-    selected = tuple(
-        str(meta.symbol).strip()
-        for meta in snapshot.selected
-        if str(meta.symbol).strip()
-    )
+    selected = tuple(str(meta.symbol).strip() for meta in snapshot.selected if str(meta.symbol).strip())
     return tuple(dict.fromkeys(selected))
 
 
@@ -202,9 +186,7 @@ def _discover_universe_timeline_pit(
             time.perf_counter() - t_quarter,
         )
         # PIT mode: quarterly union — k_in cap applied per quarter via selected_frame
-        current_set: frozenset[str] = frozenset(
-            str(s).strip() for s in symbols if str(s).strip()
-        )
+        current_set: frozenset[str] = frozenset(str(s).strip() for s in symbols if str(s).strip())
         all_symbols.update(current_set)
         previous_selection = tuple(sorted(current_set))
 
@@ -227,9 +209,7 @@ def _discover_universe_timeline_pit(
         current_dt += relativedelta(months=3)
 
     if oos_snapshot is None:
-        raise ValueError(
-            f"Universe PIT timeline did not include oos_start={oos_start.isoformat()} snapshot."
-        )
+        raise ValueError(f"Universe PIT timeline did not include oos_start={oos_start.isoformat()} snapshot.")
 
     # ── Build merged state cube ───────────────────────────────────────────────
     # Shape: eligible[T, N], instrument_ids sorted for deterministic axis
@@ -259,16 +239,10 @@ def _discover_universe_timeline_pit(
     for pit_idx, (q_date, pit_cube) in enumerate(pit_cubes_by_quarter):
         q_ts = pd.Timestamp(q_date, tz="UTC")
         next_q_ts: pd.Timestamp | None = (
-            pd.Timestamp(pit_cubes_by_quarter[pit_idx + 1][0], tz="UTC")
-            if pit_idx + 1 < n_pit_cubes
-            else None
+            pd.Timestamp(pit_cubes_by_quarter[pit_idx + 1][0], tz="UTC") if pit_idx + 1 < n_pit_cubes else None
         )
         start_pos = int(calendar.searchsorted(q_ts, side="left"))
-        end_pos = (
-            int(calendar.searchsorted(next_q_ts, side="left"))
-            if next_q_ts is not None
-            else n_bars
-        )
+        end_pos = int(calendar.searchsorted(next_q_ts, side="left")) if next_q_ts is not None else n_bars
         if end_pos <= start_pos:
             continue
 
@@ -311,16 +285,12 @@ def _discover_universe_timeline_pit(
     n_snapshots = len(snapshots_by_quarter)
     for idx, (quarter_start, snapshot, _) in enumerate(snapshots_by_quarter):
         next_q_ts_w: pd.Timestamp | None = (
-            pd.Timestamp(snapshots_by_quarter[idx + 1][0], tz="UTC")
-            if idx + 1 < n_snapshots
-            else None
+            pd.Timestamp(snapshots_by_quarter[idx + 1][0], tz="UTC") if idx + 1 < n_snapshots else None
         )
         q_ts_w = pd.Timestamp(quarter_start, tz="UTC")
         # Derive active symbols from snapshot.selected (SymbolMeta objects)
         q_sym: frozenset[str] = frozenset(
-            str(meta.symbol).strip()
-            for meta in snapshot.selected
-            if str(meta.symbol).strip()
+            str(meta.symbol).strip() for meta in snapshot.selected if str(meta.symbol).strip()
         )
         windows.append(
             UniverseMembershipWindow(
@@ -342,9 +312,7 @@ def _discover_universe_timeline_pit(
                 "entry": sym in q_sym - previous_symbols,
                 "exit": sym in previous_symbols - q_sym,
                 "cost_bps": (
-                    float(cost_bps[start_pos_a, inst_idx[sym]])
-                    if start_pos_a < n_bars and sym in inst_idx
-                    else 0.0
+                    float(cost_bps[start_pos_a, inst_idx[sym]]) if start_pos_a < n_bars and sym in inst_idx else 0.0
                 ),
                 "capacity_usdt": (
                     float(capacity_usdt[start_pos_a, inst_idx[sym]])
@@ -356,29 +324,33 @@ def _discover_universe_timeline_pit(
         )
         previous_symbols = q_sym
 
-    audit = pd.DataFrame(
-        audit_rows,
-        columns=[
-            "quarter_start",
-            "symbol",
-            "eligible",
-            "snapshot_as_of",
-            "entry",
-            "exit",
-            "cost_bps",
-            "capacity_usdt",
-        ],
-    ) if audit_rows else pd.DataFrame(
-        columns=[
-            "quarter_start",
-            "symbol",
-            "eligible",
-            "snapshot_as_of",
-            "entry",
-            "exit",
-            "cost_bps",
-            "capacity_usdt",
-        ],
+    audit = (
+        pd.DataFrame(
+            audit_rows,
+            columns=[
+                "quarter_start",
+                "symbol",
+                "eligible",
+                "snapshot_as_of",
+                "entry",
+                "exit",
+                "cost_bps",
+                "capacity_usdt",
+            ],
+        )
+        if audit_rows
+        else pd.DataFrame(
+            columns=[
+                "quarter_start",
+                "symbol",
+                "eligible",
+                "snapshot_as_of",
+                "entry",
+                "exit",
+                "cost_bps",
+                "capacity_usdt",
+            ],
+        )
     )
 
     _write_universe_audit_parquet(
@@ -397,8 +369,7 @@ def _discover_universe_timeline_pit(
         inference_symbols=instrument_ids,
         inference_timeline=UniverseMembershipTimeline(tf=tf, windows=tuple(windows)),
         inference_panel_quarter_membership={
-            quarter: frozenset(sorted(all_symbols))
-            for quarter, _, _ in snapshots_by_quarter
+            quarter: frozenset(sorted(all_symbols)) for quarter, _, _ in snapshots_by_quarter
         },
     )
 
@@ -416,12 +387,12 @@ def discover_universe_timeline(
 ) -> UniverseTimelineResult:
     import datetime
     from typing import Any, cast
-    
+
     def _to_date(d: Any) -> date:
         if isinstance(d, str):
             return datetime.datetime.strptime(d, "%Y-%m-%d").date()
         return cast(date, d)
-        
+
     is_start = _to_date(is_start)
     oos_start = _to_date(oos_start)
     end_date = _to_date(end_date)
@@ -439,7 +410,7 @@ def discover_universe_timeline(
             is_start = l2_start
         else:
             # L2 시작점이 IS 기간 내부에 있는 경우(is_start <= l2_start < oos_start)
-            # 유니버스 타임라인이 이미 L2 시작 시점을 완벽히 커버하므로 안전하게 허용하며, 
+            # 유니버스 타임라인이 이미 L2 시작 시점을 완벽히 커버하므로 안전하게 허용하며,
             # 데이터 정합성 보장을 위해 is_start를 l2_start로 조정하거나 그대로 유지합니다.
             pass
 
@@ -508,9 +479,7 @@ def _write_universe_audit_parquet(
                     "quarter_start": quarter_start.isoformat(),
                     "symbol": symbol,
                     "is_selected": symbol in selected_symbols,
-                    "selection_reason": (
-                        "SELECTED" if meta is not None else str(stage_reason or "REJECTED")
-                    ),
+                    "selection_reason": ("SELECTED" if meta is not None else str(stage_reason or "REJECTED")),
                     "rank": (
                         meta.tradeable_rank
                         if meta is not None
@@ -542,11 +511,7 @@ def validate_universe_quality(
         return False
 
     selected_meta_map = _snapshot_selected_meta_map(snapshot)
-    quality_meta = [
-        selected_meta_map[symbol]
-        for symbol in quality_symbols
-        if symbol in selected_meta_map
-    ]
+    quality_meta = [selected_meta_map[symbol] for symbol in quality_symbols if symbol in selected_meta_map]
     if not quality_meta:
         _logger.error("[UNIVERSE-QUALITY] no_quality_metadata pass=false")
         return False
