@@ -77,22 +77,28 @@ last_verified: 2026-07-06
 - `xs_flow`: Order flow imbalance z-score (`flow_z_24`)
 - `xs_oi_skew`: Open Interest 빌드업과 LSR 스큐 결합 (`-(oi_build_z_42 * sign(lsr_log_z_42))`)
 
-### Alpha Foundry Core [ADR_20260706_ALPHA_FOUNDRY_SYNC]
+### Alpha Foundry Core [ADR_20260706_ALPHA_FOUNDRY_SYNC][ADR_20260706_ALPHA_FOUNDRY_L0_DIVERSITY]
 - `AlphaRecipe`: `recipe_id`, `family`, `variant`, `timeframe`, `archetype`, `indicator_params`, `side_rule_id`, `exit_policy_id`, `required_fields`, `causal_lag_bars`, `max_turnover_per_year`.
-- `CheapGateEvidence`: cost-adjusted event summary with `gate_passed`, `reject_reasons`, `block_lcb_bps`, `rank_ic`, `turnover_per_year`.
+- `BucketKey`: `tuple[str, str]` alias for `(family, timeframe)` — diversity selection grouping key.
+- `CheapGateEvidence`: 경제성 지표 전용(`gate_passed`, `reject_reasons`, `block_lcb_bps`, `rank_ic`, `turnover_per_year`, `cost_drag_ratio`, `incremental_rank_ic`, `compute_cost_score`, `novelty_corr_max`). `monotonic_bucket_score`/`regime_edges_bps`는 미사용 필드로 제거됨.
+- `DiversitySelectionResult`: 버킷 단위 산출물(`bucket_key`, `ranked_recipe_ids`, `selected_recipe_ids`, `redundant_recipe_ids`, `redundant_reason_by_id`, `bucket_corr`, `bucket_eff_test_count`).
+- `CrossBucketDiversityResult`: 교차버킷 최종 산출물(`final_selected_recipe_ids`, `demoted_recipe_ids`, `demoted_reason_by_id`, `cross_bucket_corr`, `global_eff_test_count`).
+- `AlphaFoundryEvidenceRow`: parquet 영속화 스키마 — family/variant별 `mean_net_bps`/`block_lcb_bps`/`cost_drag_ratio`/`turnover_per_year`/`selected_for_l1`/`bucket_eff_test_count`/`global_eff_test_count` 비교 단위.
 - `L1VerificationUnit`: fold-bounded verification unit with `prior_mu_bps`, `prior_sigma_bps`, `allocated_fold_budget`, `early_stop_state`.
 - `L1PosteriorEvidence`: `posterior_mu_bps`, `posterior_sigma_bps`, `prob_mu_gt_cost`, `lcb_net_bps`, `quality_weight`, `activation_contract`.
-- `evaluate_panel_cheap_gate()` and `evaluate_alpha_cheap_gate_batch()` consume aligned `[T, N]` arrays, causal lag, funding cost, and stressed round-trip cost.
+- `evaluate_panel_cheap_gate(bars_per_year=...)` / `evaluate_alpha_cheap_gate_batch()` — `bars_per_year`는 `_bars_per_year_for_tf(recipe.timeframe)`(`optimization/metrics.py` SSOT) 주입, 4h 하드코딩 제거. 다양성/novelty 계산은 이 단계에서 수행하지 않음(단일 책임).
+- `select_bucket_diverse_recipes()` — 버킷(`family`, `timeframe`) 내 `block_lcb_bps` 내림차순 그리디 선택, `top_k_per_family_tf` 예산과 `max_novelty_corr` 상관 임계 동시 적용, 조기종료로 O(top_k·K_b) 상관 비교.
+- `resolve_cross_bucket_diversity()` — 버킷별 selected 합집합(S, 상수 상한)에 한해 `compute_panel_correlation_matrix()`/`cluster_correlated_recipes()`로 교차 중복 제거, `estimate_effective_test_count()`로 `global_eff_test_count` 산출.
 - `shrink_l1_evidence_hierarchical()` applies family/timeframe shrinkage with `w = n_eff / (n_eff + prior_effective_n)`.
 
-### Alpha Foundry Bridge Wiring [ADR_20260706_ALPHA_FOUNDRY_MAIN_WIRING]
-- `PanelRecipeBinding`: binding record with `panel_tag`, `recipe_id`, `source` (alpha_foundry/main/panels), `timestamp`.
-- `AlphaFoundryBridgeReport`: per-TF report with `mode` (off/audit/gate), `panels_in`, `bound`, `survivors`, `reject_breakdown`, `warnings`.
-- `AlphaFoundryL0Result`: typed result from L0 gate with `evidence_rows`, `passed`, `rejected`, `report`, `binding`.
-- `run_alpha_foundry_l0_gate(panel_dfs, recipes, config)` — panel→recipe matching, cheap gate evaluation, audit/gate filtering, report generation with JSON artifact.
-- `bind_panels_to_alpha_recipes(panel_dfs, recipes, max_per_family)` — variant normalization (`_normalize_variant()`, strip suffix/prefix), family filter, max-per-family budget.
-- `_write_alpha_foundry_report(mode, rows, passed, tf)` — writes `logs/futures/alpha_foundry/{tf}_{timestamp}_report.json`.
-- Mode behavior: `"audit"` preserves all bound panels with `gate_passed` flag; `"gate"` only forwards survivors (zero-survivor closes tiered L1 entry).
+### Alpha Foundry Bridge Wiring [ADR_20260706_ALPHA_FOUNDRY_MAIN_WIRING][ADR_20260706_ALPHA_FOUNDRY_L0_DIVERSITY]
+- `PanelRecipeBinding`: binding record with `panel_index`, `recipe_id`, `family`, `variant`, `source` (`catalog_exact`/`catalog_family_variant`/`synthetic_recipe`).
+- `AlphaFoundryBridgeReport`: per-TF report with `mode` (off/audit/gate), `n_panels_in`, `n_bound_panels`, `n_evidence`, `n_passed`, `n_rejected`, `reject_reason_counts`, `json_path`, `parquet_path`.
+- `AlphaFoundryL0Result`: typed result from L0 gate with `panels_for_l1`, `report`, `evidences`, `bindings`.
+- `run_alpha_foundry_l0_gate(panels, bindings, recipes, aligned, cost_model, runtime_config, run_id, timeframe)` — panel→recipe matching, cheap gate → 버킷 다양성 선택 → 교차버킷 중복제거 3단 실행, audit/gate 필터링, `AlphaFoundryEvidenceRow` parquet 실기록 + JSON 집계.
+- `bind_panels_to_alpha_recipes(panels, recipes, timeframe, max_recipes_per_family, include_families, exclude_families)` — variant normalization (`_normalize_variant()`), family filter, max-per-family budget.
+- `_write_alpha_foundry_report(report, evidence_rows, report_dir, run_id)` — JSON(`{tf}_{timestamp}_report.json`, 집계)과 parquet(`{tf}_{timestamp}_evidence.parquet`, `AlphaFoundryEvidenceRow` 전건) 동시 기록.
+- Mode behavior: `"audit"` preserves all bound panels with `gate_passed`/`selected_for_l1` flags; `"gate"` forwards only `final_selected_recipe_ids`(Stage3 산출물) — zero-survivor closes tiered L1 entry.
 
 # 3. Core I/O Interfaces
 
