@@ -22,31 +22,28 @@ if TYPE_CHECKING:
     )
     from src.domain.futures.strategy.cs_rank import SymbolSignal
     from src.domain.futures.strategy.tiered_workflow.awf_sim import (
-    DirectionalVetoSummary,
-    Layer2FoldAttribution,
-    MajorSymbolIncoherenceSummary,
-    MajorSymbolSignalSizingSummary,
-    MajorSymbolSleeveContributionSummary,
-    ReversalEpisode,
-)
+        DirectionalVetoSummary,
+        Layer2FoldAttribution,
+        MajorSymbolIncoherenceSummary,
+        MajorSymbolSignalSizingSummary,
+        MajorSymbolSleeveContributionSummary,
+        ReversalEpisode,
+    )
     from src.domain.futures.strategy.tiered_workflow.tf_validation_repair import (
         ValidationParityCapture,
         ValidationParityReport,
     )
 
+
 def _validate_directional_veto_action(value: str) -> Literal["drop_long", "zero_mu", "cap_mu"]:
     if value not in {"drop_long", "zero_mu", "cap_mu"}:
-        raise ValueError(
-            f"l2_regime_directional_veto_action must be one of drop_long/zero_mu/cap_mu, got {value!r}"
-        )
+        raise ValueError(f"l2_regime_directional_veto_action must be one of drop_long/zero_mu/cap_mu, got {value!r}")
     return value  # type: ignore[return-value]
 
 
 def _validate_directional_veto_mode(value: str) -> Literal["adverse_only", "contextual"]:
     if value not in {"adverse_only", "contextual"}:
-        raise ValueError(
-            f"l2_regime_directional_veto_mode must be one of adverse_only/contextual, got {value!r}"
-        )
+        raise ValueError(f"l2_regime_directional_veto_mode must be one of adverse_only/contextual, got {value!r}")
     return value  # type: ignore[return-value]
 
 
@@ -72,9 +69,7 @@ def _validate_directional_veto_adverse_codes(value: object) -> tuple[int, ...]:
     for c in value:
         code = int(c)
         if code not in {1, 2}:
-            raise ValueError(
-                f"l2_regime_directional_veto_adverse_codes must contain only 1 or 2, got {code}"
-            )
+            raise ValueError(f"l2_regime_directional_veto_adverse_codes must contain only 1 or 2, got {code}")
         result.append(code)
     return tuple(sorted(set(result)))
 
@@ -398,7 +393,6 @@ class Layer2StudyResult:
     sim_cache: object | None = None
     awf_folds: Any = None
     eval_memo: dict[Any, Any] | None = None
-
 
 
 @dataclass(slots=True, frozen=True)
@@ -834,13 +828,11 @@ class Layer2AllocationConfig:
             0.0,
         )
         combine_method = str(
-            os.environ.get("L2_SLEEVE_COMBINE")
-            or params.get("l2_sleeve_combine_method", "precision_weighted")
+            os.environ.get("L2_SLEEVE_COMBINE") or params.get("l2_sleeve_combine_method", "precision_weighted")
         )
         if combine_method not in {"precision_weighted", "equal", "max_edge"}:
             raise ValueError(
-                f"l2_sleeve_combine_method must be one of precision_weighted/equal/max_edge, "
-                f"got {combine_method!r}"
+                f"l2_sleeve_combine_method must be one of precision_weighted/equal/max_edge, got {combine_method!r}"
             )
         conviction_cap_mult = cls._validate_range(
             "l2_sleeve_conviction_cap_mult",
@@ -882,9 +874,7 @@ class Layer2AllocationConfig:
             1.0,
         )
         if l2_regime_soft_downweight_min > l2_regime_soft_downweight_max:
-            raise ValueError(
-                "l2_regime_soft_downweight_min must be <= l2_regime_soft_downweight_max"
-            )
+            raise ValueError("l2_regime_soft_downweight_min must be <= l2_regime_soft_downweight_max")
         l2_regime_block_min_confidence = cls._validate_range(
             "l2_regime_block_min_confidence",
             cls._as_float(
@@ -931,9 +921,7 @@ class Layer2AllocationConfig:
         l2_regime_reliability_enabled = (
             _reliability_env not in ("", "0", "false", "False")
             if _reliability_env != ""
-            else bool(
-                params.get("l2_regime_reliability_enabled", _dc.l2_regime_reliability_enabled)
-            )
+            else bool(params.get("l2_regime_reliability_enabled", _dc.l2_regime_reliability_enabled))
         )
         l2_regime_reliability_window = max(
             1,
@@ -945,7 +933,8 @@ class Layer2AllocationConfig:
             ),
         )
         l2_regime_reliability_floor = cls._as_float(
-            params.get("l2_regime_reliability_floor", _dc.l2_regime_reliability_floor), _dc.l2_regime_reliability_floor,
+            params.get("l2_regime_reliability_floor", _dc.l2_regime_reliability_floor),
+            _dc.l2_regime_reliability_floor,
         )
         if l2_regime_reliability_floor <= 0.0 or l2_regime_reliability_floor > 1.0:
             raise ValueError("l2_regime_reliability_floor must be in range (0.0, 1.0]")
@@ -964,35 +953,43 @@ class Layer2AllocationConfig:
                 _dc.l2_min_sortino,
             ),
             l2_min_sharpe_abs=cls._as_float(
-                params.get("l2_min_sharpe_abs", _dc.l2_min_sharpe_abs), _dc.l2_min_sharpe_abs,
+                params.get("l2_min_sharpe_abs", _dc.l2_min_sharpe_abs),
+                _dc.l2_min_sharpe_abs,
             ),
             l2_min_calmar=cls._as_float(params.get("l2_min_calmar", _dc.l2_min_calmar), _dc.l2_min_calmar),
             l2_max_mdd_abs=cls._as_float(params.get("l2_max_mdd_abs", _dc.l2_max_mdd_abs), _dc.l2_max_mdd_abs),
             l2_mdd_material_floor=cls._as_float(
-                params.get("l2_mdd_material_floor", _dc.l2_mdd_material_floor), _dc.l2_mdd_material_floor,
+                params.get("l2_mdd_material_floor", _dc.l2_mdd_material_floor),
+                _dc.l2_mdd_material_floor,
             ),
             l2_mdd_rel_tol=cls._as_float(params.get("l2_mdd_rel_tol", _dc.l2_mdd_rel_tol), _dc.l2_mdd_rel_tol),
             l2_min_fold_pass_ratio=cls._as_float(
-                params.get("l2_min_fold_pass_ratio", _dc.l2_min_fold_pass_ratio), _dc.l2_min_fold_pass_ratio,
+                params.get("l2_min_fold_pass_ratio", _dc.l2_min_fold_pass_ratio),
+                _dc.l2_min_fold_pass_ratio,
             ),
             l2_min_sharpe_uplift=cls._as_float(
-                params.get("l2_min_sharpe_uplift", _dc.l2_min_sharpe_uplift), _dc.l2_min_sharpe_uplift,
+                params.get("l2_min_sharpe_uplift", _dc.l2_min_sharpe_uplift),
+                _dc.l2_min_sharpe_uplift,
             ),
             l2_min_growth_uplift=cls._as_float(
-                params.get("l2_min_growth_uplift", _dc.l2_min_growth_uplift), _dc.l2_min_growth_uplift,
+                params.get("l2_min_growth_uplift", _dc.l2_min_growth_uplift),
+                _dc.l2_min_growth_uplift,
             ),
             l2_min_psr=cls._as_float(params.get("l2_min_psr", _dc.l2_min_psr), _dc.l2_min_psr),
             l2_min_friction_pass=cls._as_float(
-                params.get("l2_min_friction_pass", _dc.l2_min_friction_pass), _dc.l2_min_friction_pass,
+                params.get("l2_min_friction_pass", _dc.l2_min_friction_pass),
+                _dc.l2_min_friction_pass,
             ),
             fixed_cost_safety_mult=fixed_cost_safety_mult,
             l2_min_dsr=cls._as_float(params.get("l2_min_dsr", _dc.l2_min_dsr), _dc.l2_min_dsr),
             l2_max_cvar_95=cls._as_float(params.get("l2_max_cvar_95", _dc.l2_max_cvar_95), _dc.l2_max_cvar_95),
             l2_min_active_blocks=cls._as_int(
-                params.get("l2_min_active_blocks", _dc.l2_min_active_blocks), _dc.l2_min_active_blocks,
+                params.get("l2_min_active_blocks", _dc.l2_min_active_blocks),
+                _dc.l2_min_active_blocks,
             ),
             l2_min_sortino_abs=cls._as_float(
-                params.get("l2_min_sortino_abs", _dc.l2_min_sortino_abs), _dc.l2_min_sortino_abs,
+                params.get("l2_min_sortino_abs", _dc.l2_min_sortino_abs),
+                _dc.l2_min_sortino_abs,
             ),
             l2_min_trades=cls._as_int(params.get("l2_min_trades", _dc.l2_min_trades), _dc.l2_min_trades),
             l2_growth_lcb_z=cls._as_float(params.get("l2_growth_lcb_z", _dc.l2_growth_lcb_z), _dc.l2_growth_lcb_z),
@@ -1016,12 +1013,8 @@ class Layer2AllocationConfig:
             l2_min_positive_block_delta_ratio=l2_min_positive_block_delta_ratio,
             l2_worst_fold_cagr_penalty_weight=l2_worst_fold_cagr_penalty_weight,
             l2_block_delta_penalty_weight=l2_block_delta_penalty_weight,
-            l2_worst_fold_penalty_threshold=cls._as_float(
-                params.get("l2_worst_fold_penalty_threshold", -0.30), -0.30
-            ),
-            l2_worst_fold_penalty_weight=cls._as_float(
-                params.get("l2_worst_fold_penalty_weight", 0.005), 0.005
-            ),
+            l2_worst_fold_penalty_threshold=cls._as_float(params.get("l2_worst_fold_penalty_threshold", -0.30), -0.30),
+            l2_worst_fold_penalty_weight=cls._as_float(params.get("l2_worst_fold_penalty_weight", 0.005), 0.005),
             l2_deploy_enabled=bool(params.get("l2_deploy_enabled", True)),
             l2_deploy_mdd_margin=cls._as_float(params.get("l2_deploy_mdd_margin", 0.30), 0.30),
             l2_deploy_cvar_margin=cls._as_float(params.get("l2_deploy_cvar_margin", 0.20), 0.20),
@@ -1051,9 +1044,7 @@ class Layer2AllocationConfig:
                 0.0,
             ),
             l2_tf_inclusion_enabled=bool(params.get("l2_tf_inclusion_enabled", True)),
-            l2_tf_inclusion_min_edge=cls._as_float(
-                params.get("l2_tf_inclusion_min_edge", 0.0), 0.0
-            ),
+            l2_tf_inclusion_min_edge=cls._as_float(params.get("l2_tf_inclusion_min_edge", 0.0), 0.0),
             l2_routing_mode=(
                 "bucket"
                 if str(
@@ -1085,16 +1076,20 @@ class Layer2AllocationConfig:
             l2_portfolio_cov_mode=(
                 "correlated"
                 if str(
-                    os.environ.get("L2_PORTFOLIO_COV_MODE")
-                    or params.get("l2_portfolio_cov_mode", "diagonal"),
-                ).strip().lower() == "correlated"
+                    os.environ.get("L2_PORTFOLIO_COV_MODE") or params.get("l2_portfolio_cov_mode", "diagonal"),
+                )
+                .strip()
+                .lower()
+                == "correlated"
                 else "diagonal"
             ),
             l2_portfolio_cov_lookback_bars=cls._as_int(
-                params.get("l2_portfolio_cov_lookback_bars", 180), 180,
+                params.get("l2_portfolio_cov_lookback_bars", 180),
+                180,
             ),
             l2_portfolio_cov_min_obs=cls._as_int(
-                params.get("l2_portfolio_cov_min_obs", 20), 20,
+                params.get("l2_portfolio_cov_min_obs", 20),
+                20,
             ),
             l2_regime_compression_enabled=bool(params.get("l2_regime_compression_enabled", True)),
             l2_regime_proof_enabled=bool(params.get("l2_regime_proof_enabled", True)),
@@ -1113,10 +1108,12 @@ class Layer2AllocationConfig:
             l2_regime_policy_mode=policy_mode,
             l2_regime_cal_min_n=l2_regime_cal_min_n,
             l2_regime_min_cal_lift_bps=cls._as_float(
-                params.get("l2_regime_min_cal_lift_bps", 8.0), 8.0,
+                params.get("l2_regime_min_cal_lift_bps", 8.0),
+                8.0,
             ),
             l2_regime_block_lift_bps=cls._as_float(
-                params.get("l2_regime_block_lift_bps", -12.0), -12.0,
+                params.get("l2_regime_block_lift_bps", -12.0),
+                -12.0,
             ),
             l2_regime_soft_downweight_min=l2_regime_soft_downweight_min,
             l2_regime_soft_downweight_max=l2_regime_soft_downweight_max,
@@ -1133,9 +1130,7 @@ class Layer2AllocationConfig:
             l2_regime_require_sign_consistency=bool(
                 params.get("l2_regime_require_sign_consistency", _dc.l2_regime_require_sign_consistency)
             ),
-            l2_regime_scale_signal_mu=bool(
-                params.get("l2_regime_scale_signal_mu", _dc.l2_regime_scale_signal_mu)
-            ),
+            l2_regime_scale_signal_mu=bool(params.get("l2_regime_scale_signal_mu", _dc.l2_regime_scale_signal_mu)),
             l2_regime_scale_quality_weight=bool(
                 params.get("l2_regime_scale_quality_weight", _dc.l2_regime_scale_quality_weight)
             ),
@@ -1156,9 +1151,7 @@ class Layer2AllocationConfig:
                 cls._as_float(params.get("l2_regime_min_mu_abs_change", 0.03), 0.03),
                 0.0,
             ),
-            l2_regime_risk_cap_enabled=bool(
-                params.get("l2_regime_risk_cap_enabled", _dc.l2_regime_risk_cap_enabled)
-            ),
+            l2_regime_risk_cap_enabled=bool(params.get("l2_regime_risk_cap_enabled", _dc.l2_regime_risk_cap_enabled)),
             l2_regime_bull_gross_cap=l2_regime_bull_gross_cap,
             l2_regime_bear_gross_cap=l2_regime_bear_gross_cap,
             l2_regime_crisis_gross_cap=l2_regime_crisis_gross_cap,
@@ -1204,7 +1197,8 @@ class Layer2AllocationConfig:
             l2_crowding_floor_mult=cls._as_float(
                 params.get("l2_crowding_floor_mult", _dc.l2_crowding_floor_mult),
                 _dc.l2_crowding_floor_mult if _dc.l2_crowding_floor_mult is not None else 0.0,
-            ) or None,
+            )
+            or None,
             # L2 regime directional veto
             l2_regime_directional_veto_enabled=bool(
                 params.get("l2_regime_directional_veto_enabled", _dc.l2_regime_directional_veto_enabled)
@@ -1215,76 +1209,109 @@ class Layer2AllocationConfig:
             l2_regime_directional_veto_persistence_bars=int(
                 cls._validate_range(
                     "l2_regime_directional_veto_persistence_bars",
-                    cls._as_int(params.get("l2_regime_directional_veto_persistence_bars",
-                                           _dc.l2_regime_directional_veto_persistence_bars),
-                                _dc.l2_regime_directional_veto_persistence_bars),
+                    cls._as_int(
+                        params.get(
+                            "l2_regime_directional_veto_persistence_bars",
+                            _dc.l2_regime_directional_veto_persistence_bars,
+                        ),
+                        _dc.l2_regime_directional_veto_persistence_bars,
+                    ),
                     1,
                 )
             ),
             l2_regime_directional_veto_loss_lookback_bars=int(
                 cls._validate_range(
                     "l2_regime_directional_veto_loss_lookback_bars",
-                    cls._as_int(params.get("l2_regime_directional_veto_loss_lookback_bars",
-                                           _dc.l2_regime_directional_veto_loss_lookback_bars),
-                                _dc.l2_regime_directional_veto_loss_lookback_bars),
+                    cls._as_int(
+                        params.get(
+                            "l2_regime_directional_veto_loss_lookback_bars",
+                            _dc.l2_regime_directional_veto_loss_lookback_bars,
+                        ),
+                        _dc.l2_regime_directional_veto_loss_lookback_bars,
+                    ),
                     1,
                 )
             ),
             l2_regime_directional_veto_loss_trigger_bps=cls._validate_range(
                 "l2_regime_directional_veto_loss_trigger_bps",
-                cls._as_float(params.get("l2_regime_directional_veto_loss_trigger_bps",
-                                         _dc.l2_regime_directional_veto_loss_trigger_bps),
-                              _dc.l2_regime_directional_veto_loss_trigger_bps),
+                cls._as_float(
+                    params.get(
+                        "l2_regime_directional_veto_loss_trigger_bps", _dc.l2_regime_directional_veto_loss_trigger_bps
+                    ),
+                    _dc.l2_regime_directional_veto_loss_trigger_bps,
+                ),
                 0.0,
             ),
             l2_regime_directional_veto_cap_mu_bps=cls._validate_range(
                 "l2_regime_directional_veto_cap_mu_bps",
-                cls._as_float(params.get("l2_regime_directional_veto_cap_mu_bps",
-                                         _dc.l2_regime_directional_veto_cap_mu_bps),
-                              _dc.l2_regime_directional_veto_cap_mu_bps),
+                cls._as_float(
+                    params.get("l2_regime_directional_veto_cap_mu_bps", _dc.l2_regime_directional_veto_cap_mu_bps),
+                    _dc.l2_regime_directional_veto_cap_mu_bps,
+                ),
                 0.0,
             ),
             l2_regime_directional_veto_release_raw_mu_nonpos=bool(
-                params.get("l2_regime_directional_veto_release_raw_mu_nonpos",
-                           _dc.l2_regime_directional_veto_release_raw_mu_nonpos)
+                params.get(
+                    "l2_regime_directional_veto_release_raw_mu_nonpos",
+                    _dc.l2_regime_directional_veto_release_raw_mu_nonpos,
+                )
             ),
             l2_regime_directional_veto_release_regime_bull_bars=int(
                 cls._validate_range(
                     "l2_regime_directional_veto_release_regime_bull_bars",
-                    cls._as_int(params.get("l2_regime_directional_veto_release_regime_bull_bars",
-                                           _dc.l2_regime_directional_veto_release_regime_bull_bars),
-                                _dc.l2_regime_directional_veto_release_regime_bull_bars),
+                    cls._as_int(
+                        params.get(
+                            "l2_regime_directional_veto_release_regime_bull_bars",
+                            _dc.l2_regime_directional_veto_release_regime_bull_bars,
+                        ),
+                        _dc.l2_regime_directional_veto_release_regime_bull_bars,
+                    ),
                     1,
                 )
             ),
             l2_regime_directional_veto_cooldown_bars=int(
                 cls._validate_range(
                     "l2_regime_directional_veto_cooldown_bars",
-                    cls._as_int(params.get("l2_regime_directional_veto_cooldown_bars",
-                                           _dc.l2_regime_directional_veto_cooldown_bars),
-                                _dc.l2_regime_directional_veto_cooldown_bars),
+                    cls._as_int(
+                        params.get(
+                            "l2_regime_directional_veto_cooldown_bars", _dc.l2_regime_directional_veto_cooldown_bars
+                        ),
+                        _dc.l2_regime_directional_veto_cooldown_bars,
+                    ),
                     0,
                 )
             ),
             l2_regime_directional_veto_max_fit_net_value_loss=cls._validate_range(
                 "l2_regime_directional_veto_max_fit_net_value_loss",
-                cls._as_float(params.get("l2_regime_directional_veto_max_fit_net_value_loss",
-                                         _dc.l2_regime_directional_veto_max_fit_net_value_loss),
-                              _dc.l2_regime_directional_veto_max_fit_net_value_loss),
+                cls._as_float(
+                    params.get(
+                        "l2_regime_directional_veto_max_fit_net_value_loss",
+                        _dc.l2_regime_directional_veto_max_fit_net_value_loss,
+                    ),
+                    _dc.l2_regime_directional_veto_max_fit_net_value_loss,
+                ),
                 0.0,
             ),
             l2_regime_directional_veto_min_l3_total_return_delta=cls._validate_range(
                 "l2_regime_directional_veto_min_l3_total_return_delta",
-                cls._as_float(params.get("l2_regime_directional_veto_min_l3_total_return_delta",
-                                         _dc.l2_regime_directional_veto_min_l3_total_return_delta),
-                              _dc.l2_regime_directional_veto_min_l3_total_return_delta),
+                cls._as_float(
+                    params.get(
+                        "l2_regime_directional_veto_min_l3_total_return_delta",
+                        _dc.l2_regime_directional_veto_min_l3_total_return_delta,
+                    ),
+                    _dc.l2_regime_directional_veto_min_l3_total_return_delta,
+                ),
                 0.0,
             ),
             l2_regime_directional_veto_max_l2_cagr_delta_loss=cls._validate_range(
                 "l2_regime_directional_veto_max_l2_cagr_delta_loss",
-                cls._as_float(params.get("l2_regime_directional_veto_max_l2_cagr_delta_loss",
-                                         _dc.l2_regime_directional_veto_max_l2_cagr_delta_loss),
-                              _dc.l2_regime_directional_veto_max_l2_cagr_delta_loss),
+                cls._as_float(
+                    params.get(
+                        "l2_regime_directional_veto_max_l2_cagr_delta_loss",
+                        _dc.l2_regime_directional_veto_max_l2_cagr_delta_loss,
+                    ),
+                    _dc.l2_regime_directional_veto_max_l2_cagr_delta_loss,
+                ),
                 0.0,
             ),
             l2_regime_directional_veto_symbols=_validate_directional_veto_symbols(
@@ -1344,7 +1371,8 @@ class Layer2AllocationConfig:
                 params.get("l2_intra_symbol_divergence_enabled", _dc.l2_intra_symbol_divergence_enabled)
             ),
             l2_intra_symbol_divergence_symbols=tuple(
-                str(s) for s in cast(
+                str(s)
+                for s in cast(
                     "tuple[str, ...]",
                     params.get(
                         "l2_intra_symbol_divergence_symbols",
@@ -1353,7 +1381,8 @@ class Layer2AllocationConfig:
                 )
             ),
             l2_intra_symbol_divergence_dominant_families=tuple(
-                str(f) for f in cast(
+                str(f)
+                for f in cast(
                     "tuple[str, ...]",
                     params.get(
                         "l2_intra_symbol_divergence_dominant_families",
@@ -1364,42 +1393,60 @@ class Layer2AllocationConfig:
             l2_intra_symbol_divergence_persistence_bars=int(
                 cls._validate_range(
                     "l2_intra_symbol_divergence_persistence_bars",
-                    cls._as_int(params.get("l2_intra_symbol_divergence_persistence_bars",
-                                           _dc.l2_intra_symbol_divergence_persistence_bars),
-                               _dc.l2_intra_symbol_divergence_persistence_bars),
+                    cls._as_int(
+                        params.get(
+                            "l2_intra_symbol_divergence_persistence_bars",
+                            _dc.l2_intra_symbol_divergence_persistence_bars,
+                        ),
+                        _dc.l2_intra_symbol_divergence_persistence_bars,
+                    ),
                     1,
                 )
             ),
             l2_intra_symbol_divergence_release_bars=int(
                 cls._validate_range(
                     "l2_intra_symbol_divergence_release_bars",
-                    cls._as_int(params.get("l2_intra_symbol_divergence_release_bars",
-                                           _dc.l2_intra_symbol_divergence_release_bars),
-                               _dc.l2_intra_symbol_divergence_release_bars),
+                    cls._as_int(
+                        params.get(
+                            "l2_intra_symbol_divergence_release_bars", _dc.l2_intra_symbol_divergence_release_bars
+                        ),
+                        _dc.l2_intra_symbol_divergence_release_bars,
+                    ),
                     1,
                 )
             ),
             l2_intra_symbol_divergence_cooldown_bars=int(
                 cls._validate_range(
                     "l2_intra_symbol_divergence_cooldown_bars",
-                    cls._as_int(params.get("l2_intra_symbol_divergence_cooldown_bars",
-                                           _dc.l2_intra_symbol_divergence_cooldown_bars),
-                               _dc.l2_intra_symbol_divergence_cooldown_bars),
+                    cls._as_int(
+                        params.get(
+                            "l2_intra_symbol_divergence_cooldown_bars", _dc.l2_intra_symbol_divergence_cooldown_bars
+                        ),
+                        _dc.l2_intra_symbol_divergence_cooldown_bars,
+                    ),
                     0,
                 )
             ),
             l2_intra_symbol_divergence_dominant_damp_mult=cls._validate_range(
                 "l2_intra_symbol_divergence_dominant_damp_mult",
-                cls._as_float(params.get("l2_intra_symbol_divergence_dominant_damp_mult",
-                                         _dc.l2_intra_symbol_divergence_dominant_damp_mult),
-                             _dc.l2_intra_symbol_divergence_dominant_damp_mult),
+                cls._as_float(
+                    params.get(
+                        "l2_intra_symbol_divergence_dominant_damp_mult",
+                        _dc.l2_intra_symbol_divergence_dominant_damp_mult,
+                    ),
+                    _dc.l2_intra_symbol_divergence_dominant_damp_mult,
+                ),
                 0.0,
             ),
             l2_intra_symbol_divergence_dissent_boost_mult=cls._validate_range(
                 "l2_intra_symbol_divergence_dissent_boost_mult",
-                cls._as_float(params.get("l2_intra_symbol_divergence_dissent_boost_mult",
-                                         _dc.l2_intra_symbol_divergence_dissent_boost_mult),
-                             _dc.l2_intra_symbol_divergence_dissent_boost_mult),
+                cls._as_float(
+                    params.get(
+                        "l2_intra_symbol_divergence_dissent_boost_mult",
+                        _dc.l2_intra_symbol_divergence_dissent_boost_mult,
+                    ),
+                    _dc.l2_intra_symbol_divergence_dissent_boost_mult,
+                ),
                 0.0,
             ),
         )

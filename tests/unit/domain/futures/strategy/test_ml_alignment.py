@@ -147,30 +147,31 @@ def test_align_data_maps_taker_buy_and_trades(
 
 def test_align_data_maps_caching(monkeypatch: pytest.MonkeyPatch) -> None:
     from typing import Any
+
     frame = _frame()
     data_maps = {"BTCUSDT": {"4h": frame}}
-    
+
     call_count = 0
-    
+
     def fake_compute(*args: Any, **kwargs: Any) -> Any:
         nonlocal call_count
         call_count += 1
         return {"eff_ref_len": len(frame), "alignment_offsets": {"BTCUSDT": 0}}
-        
+
     monkeypatch.setattr(alignment, "compute_multi_alignment_info", fake_compute)
-    
+
     # 캐시 비우기
     alignment._ALIGNED_DATA_MAPS_CACHE.clear()
-    
+
     # 1. 첫 실행 -> 캐시 미스
     out1 = alignment.align_data_maps(data_maps, ["BTCUSDT"], "4h")
     assert call_count == 1
-    
+
     # 2. 두 번째 실행 -> 캐시 히트
     out2 = alignment.align_data_maps(data_maps, ["BTCUSDT"], "4h")
     assert call_count == 1
     assert out1 is out2
-    
+
     # 3. 다른 인자 -> 캐시 미스
     _ = alignment.align_data_maps(data_maps, ["BTCUSDT", "ETHUSDT"], "4h")
     assert call_count == 2
@@ -207,9 +208,7 @@ def test_selection_utility_mode_direct_excludes_downside_drag() -> None:
     events = _candidate_frame()
 
     # Act
-    frame = _selection_component_frame(
-        events=events, cfg=cfg
-    )
+    frame = _selection_component_frame(events=events, cfg=cfg)
 
     # Assert — expected_utility_bps must equal mu_net_decision_bps exactly
     expected = pd.to_numeric(events["mu_net_decision_bps"], errors="coerce")
@@ -223,9 +222,7 @@ def test_selection_utility_mode_additive_preserves_legacy() -> None:
     events = _candidate_frame()
 
     # Act
-    frame = _selection_component_frame(
-        events=events, cfg=cfg
-    )
+    frame = _selection_component_frame(events=events, cfg=cfg)
 
     # Assert — additive_drag formula: mu - downside_penalty * |q10| - turnover_penalty
     mu = events["mu_net_decision_bps"].to_numpy(dtype=np.float64)
@@ -271,12 +268,8 @@ def test_expected_edge_direct_selects_when_additive_blocks() -> None:
     events["q10_net_bps"] = -500.0
 
     # Act
-    frame_add = _selection_component_frame(
-        events=events, cfg=cfg_additive
-    )
-    frame_dir = _selection_component_frame(
-        events=events, cfg=cfg_direct
-    )
+    frame_add = _selection_component_frame(events=events, cfg=cfg_additive)
+    frame_dir = _selection_component_frame(events=events, cfg=cfg_direct)
     eligible_additive = int((frame_add["expected_utility_bps"] >= 0.0).sum())
     eligible_direct = int((frame_dir["expected_utility_bps"] >= 0.0).sum())
 
@@ -301,8 +294,8 @@ def test_production_topk_sorts_by_mu_in_direct_mode() -> None:
             "variant": ["v", "v"],
             "side": [1, 1],
             "p_pass": [0.60, 0.60],
-            "mu_net_decision_bps": [30.0, 5.0],   # A >> B
-            "q10_net_bps": [-500.0, -20.0],        # A much worse than B
+            "mu_net_decision_bps": [30.0, 5.0],  # A >> B
+            "q10_net_bps": [-500.0, -20.0],  # A much worse than B
             "q90_net_bps": [60.0, 10.0],
             "turnover_proxy": [1.0, 1.0],
             "cost_floor_bps": [7.5, 7.5],
@@ -320,7 +313,7 @@ def test_production_topk_sorts_by_mu_in_direct_mode() -> None:
     )
     # utility_score reflects additive formula (as produced by edge model)
     additive_a = 0.60 * 30.0 - (1 - 0.60) * 500.0 - 0.5  # ≈ -182
-    additive_b = 0.60 * 5.0 - (1 - 0.60) * 20.0 - 0.5    # ≈ -5.5
+    additive_b = 0.60 * 5.0 - (1 - 0.60) * 20.0 - 0.5  # ≈ -5.5
     model_output = CandidateModelOutput(
         events=events,
         p_pass=np.array([0.60, 0.60]),
@@ -335,8 +328,8 @@ def test_production_topk_sorts_by_mu_in_direct_mode() -> None:
         selection_utility_mode="expected_edge_direct",
         selection_min_expected_utility_bps=-1000.0,  # open floor
         min_net_floor_cost_fraction=0.0,
-        catastrophic_shortfall_bps=1000.0,           # don't veto on q10
-        selection_top_quantile=0.50,                 # keep 1 of 2
+        catastrophic_shortfall_bps=1000.0,  # don't veto on q10
+        selection_top_quantile=0.50,  # keep 1 of 2
     )
 
     # Act

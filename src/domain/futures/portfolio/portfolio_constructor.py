@@ -61,9 +61,7 @@ def compute_diversification_ratio(
     return weighted_vol_sum / math.sqrt(sigma_port_sq)
 
 
-def mu_from_cross_section_signals(
-    xs_long_prev: np.ndarray, xs_short_prev: np.ndarray
-) -> np.ndarray:
+def mu_from_cross_section_signals(xs_long_prev: np.ndarray, xs_short_prev: np.ndarray) -> np.ndarray:
     """Legacy CS z-score of (long - short); prefer :func:`mu_net_from_composer_channels`."""
     xl = np.asarray(xs_long_prev, dtype=np.float64).ravel()
     xs_ = np.asarray(xs_short_prev, dtype=np.float64).ravel()
@@ -76,9 +74,7 @@ def mu_from_cross_section_signals(
     return z * 5e-4
 
 
-def mu_net_from_composer_channels(
-    mu_long_prev: np.ndarray, mu_short_prev: np.ndarray
-) -> np.ndarray:
+def mu_net_from_composer_channels(mu_long_prev: np.ndarray, mu_short_prev: np.ndarray) -> np.ndarray:
     """Per-symbol net μ from signal-composer outputs (simple return per bar scale)."""
     sl = np.asarray(mu_long_prev, dtype=np.float64).ravel()
     ss = np.asarray(mu_short_prev, dtype=np.float64).ravel()
@@ -92,9 +88,7 @@ def _vol_ann_from_per_bar_sigma(sigma_port_bar: float, bars_per_year: float) -> 
 KELLY_FRACTION: float = 0.25  # Fractional Kelly — 변경 금지
 
 
-def _kelly_raw(
-    mu: np.ndarray, sigma_diag: np.ndarray, *, f_kelly_max: float, eps: float = 1e-12
-) -> np.ndarray:
+def _kelly_raw(mu: np.ndarray, sigma_diag: np.ndarray, *, f_kelly_max: float, eps: float = 1e-12) -> np.ndarray:
     var = np.maximum(sigma_diag**2, eps)
     f = mu / var
     return np.asarray(np.clip(f, -abs(f_kelly_max), abs(f_kelly_max)), dtype=np.float64)
@@ -137,9 +131,7 @@ def _apply_ls_balance(w: np.ndarray, *, lo: float = 0.5, hi: float = 2.0) -> np.
 
 
 @numba.njit(cache=True)  # type: ignore[untyped-decorator]
-def _project_l1_linf_numba(
-    w_pre: np.ndarray, gross_cap: float, per_symbol_cap: float
-) -> np.ndarray:
+def _project_l1_linf_numba(w_pre: np.ndarray, gross_cap: float, per_symbol_cap: float) -> np.ndarray:
     """Fast L1 gross + per-symbol caps via iterative scaling and clipping (Numba)."""
     out = w_pre.copy()
     n = out.size
@@ -216,7 +208,7 @@ def solve_constrained_weights(
 
     # Black-Litterman 사후 기대수익률 산출
     tau = 1.0
-    omega_diag = np.maximum(sig ** 2, 1e-12)
+    omega_diag = np.maximum(sig**2, 1e-12)
     try:
         # Adaptive Diagonal Shrinkage (20% mean variance)
         mean_var = float(np.mean(np.diag(sigma_mat))) * bl_shrinkage_var_mult
@@ -242,9 +234,7 @@ def solve_constrained_weights(
     return w_c
 
 
-def precompute_rolling_covariances(
-    close_2d: np.ndarray, lookback: int, min_obs: int = 20
-) -> np.ndarray:
+def precompute_rolling_covariances(close_2d: np.ndarray, lookback: int, min_obs: int = 20) -> np.ndarray:
     """Precompute rolling Ledoit-Wolf covariance matrices for all bars.
 
     Called once during optimization precompute phase to eliminate 1M+ redundant
@@ -273,9 +263,7 @@ def precompute_rolling_covariances(
 
     # Scikit-learn algorithms run GIL-free inside C routines;
     # we leverage threading backend to bypass serialization costs
-    results = Parallel(n_jobs=-1, backend="threading")(
-        delayed(_compute_single_cov)(i) for i in range(1, n_bars)
-    )
+    results = Parallel(n_jobs=-1, backend="threading")(delayed(_compute_single_cov)(i) for i in range(1, n_bars))
 
     for i, cov in results:
         out[i] = cov
@@ -283,7 +271,10 @@ def precompute_rolling_covariances(
     _logger.log(
         PERF,
         "[PERF] precompute_rolling_covariances n_bars=%d n_syms=%d lookback=%d took=%.4fs",
-        n_bars, n_syms, lb, time.perf_counter() - _t_cov,
+        n_bars,
+        n_syms,
+        lb,
+        time.perf_counter() - _t_cov,
     )
     return out
 
@@ -494,19 +485,11 @@ def precompute_rebalance_weights(
     residual_var_2d: np.ndarray | None = None
     if policy_inputs is not None and policy_inputs.risk_residual_var_2d is not None:
         residual_var_2d = np.asarray(policy_inputs.risk_residual_var_2d, dtype=np.float64)
-    if (
-        residual_var_2d is None
-        and risk_snapshot is not None
-        and risk_snapshot.residual_var_2d is not None
-    ):
+    if residual_var_2d is None and risk_snapshot is not None and risk_snapshot.residual_var_2d is not None:
         residual_var_2d = np.asarray(risk_snapshot.residual_var_2d, dtype=np.float64)
 
     ks_diag_2d: np.ndarray | None = None
-    if (
-        use_residual_var_for_kelly
-        and residual_var_2d is not None
-        and residual_var_2d.shape == mu_2d.shape
-    ):
+    if use_residual_var_for_kelly and residual_var_2d is not None and residual_var_2d.shape == mu_2d.shape:
         ks_diag_2d = np.sqrt(np.maximum(residual_var_2d, 1e-12))
     elif composer_sigma_2d is not None:
         ks_diag_2d = np.asarray(composer_sigma_2d, dtype=np.float64)
@@ -619,9 +602,7 @@ def precompute_rebalance_weights(
     return np.asarray(out, dtype=np.float64)
 
 
-def portfolio_weight_params_from_optuna(
-    params: dict[str, Any], opt_cfg: dict[str, Any]
-) -> dict[str, Any]:
+def portfolio_weight_params_from_optuna(params: dict[str, Any], opt_cfg: dict[str, Any]) -> dict[str, Any]:
     pol = opt_cfg.get("FUTURES_PORTFOLIO_POLICY", {})
     tf = str(params.get("TIMEFRAME", "4h"))
     return {
@@ -640,9 +621,7 @@ def portfolio_weight_params_from_optuna(
             )
         ),
         "gross_cap": float(params.get("MAX_EXPOSURE", pol.get("gross_exposure_cap", 1.2))),
-        "per_symbol_cap": float(
-            params.get("MAX_EXPOSURE_PER_COIN", pol.get("per_symbol_cap", 0.25))
-        ),
+        "per_symbol_cap": float(params.get("MAX_EXPOSURE_PER_COIN", pol.get("per_symbol_cap", 0.25))),
     }
 
 
@@ -705,11 +684,7 @@ def project_all_caps(
     n = int(out.size)
     if n == 0:
         return out
-    support = (
-        np.abs(out) > 1e-12
-        if support_mask is None
-        else np.asarray(support_mask, dtype=bool).ravel()
-    )
+    support = np.abs(out) > 1e-12 if support_mask is None else np.asarray(support_mask, dtype=bool).ravel()
     if support.size != n:
         support = np.abs(out) > 1e-12
     out = np.where(support, out, 0.0)
@@ -882,16 +857,8 @@ def diagonal_kelly_weights(
     mu = np.asarray(mu_bps, dtype=np.float64).ravel()
     sig = np.asarray(sigma, dtype=np.float64).ravel()
     p_w = np.asarray(prev_w, dtype=np.float64).ravel()
-    beta = (
-        np.zeros(n, dtype=np.float64)
-        if btc_beta is None
-        else np.asarray(btc_beta, dtype=np.float64).ravel()
-    )
-    support = (
-        np.abs(mu) > 1e-12
-        if support_mask is None
-        else np.asarray(support_mask, dtype=bool).ravel()
-    )
+    beta = np.zeros(n, dtype=np.float64) if btc_beta is None else np.asarray(btc_beta, dtype=np.float64).ravel()
+    support = np.abs(mu) > 1e-12 if support_mask is None else np.asarray(support_mask, dtype=bool).ravel()
     if support.size != n:
         support = np.abs(mu) > 1e-12
 
@@ -915,7 +882,11 @@ def diagonal_kelly_weights(
             _amp_max = float(np.max(amp_factor)) if n > 0 else 1.0
             _logger.debug(
                 "[L2-AMP] n=%d n_amplified=%d amp_max=%.2f z_med=%.2f mode=%s",
-                n, _n_amp, _amp_max, z_med, cs_amp_mode,
+                n,
+                _n_amp,
+                _amp_max,
+                z_med,
+                cs_amp_mode,
             )
 
     # Step 1 (friction filter) removed: mu_bps is already net-of-cost per caller contract.
@@ -932,11 +903,7 @@ def diagonal_kelly_weights(
     # 3. vol_target 스케일링: caps.target_ann_vol override (project_all_caps에 위임)
     import dataclasses
 
-    effective_caps = (
-        dataclasses.replace(caps, target_ann_vol=vol_target)
-        if vol_target is not None
-        else caps
-    )
+    effective_caps = dataclasses.replace(caps, target_ann_vol=vol_target) if vol_target is not None else caps
 
     # 포트폴리오 실현 vol 추정: per_symbol 클립 후 계산
     # (pre-cap w_raw는 극단값이므로 vol_target scaling을 왜곡함)
@@ -952,9 +919,13 @@ def diagonal_kelly_weights(
         sigma_port = float(np.sqrt(float(np.dot(w_clipped_est**2, var))))
 
     w_capped: NDArray[np.float64] = project_all_caps(
-        w_raw, beta, sigma_port, bars_per_year, effective_caps,
+        w_raw,
+        beta,
+        sigma_port,
+        bars_per_year,
+        effective_caps,
         support_mask=support,
-        allow_vol_upscale=True,   # L2 unit-vol 정규화 양방향
+        allow_vol_upscale=True,  # L2 unit-vol 정규화 양방향
     )
 
     # 4. No-trade band: |Δw_i| < no_trade_band → 이전 비중 유지

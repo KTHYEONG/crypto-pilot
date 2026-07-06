@@ -120,6 +120,7 @@ def test_run_strategy_stage_injects_probe_cells_before_bridge(
             selected_tfs=frozenset({"1h"}),
         ),
     )
+
     def _fake_bridge(**kwargs: Any) -> SimpleNamespace:
         captured["extra_probe_cells"] = kwargs["extra_probe_cells"]
         return SimpleNamespace()

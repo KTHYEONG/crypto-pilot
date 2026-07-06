@@ -218,10 +218,7 @@ class TestScenario2EdgeCases:
             symbols=("BTCUSDT",),
         )
         main_after = summarize_main_compatible_tf_evidence(ptf)
-        assert all(
-            b.candidate_decision == a.candidate_decision
-            for b, a in zip(main_before, main_after, strict=True)
-        )
+        assert all(b.candidate_decision == a.candidate_decision for b, a in zip(main_before, main_after, strict=True))
         assert any(g.gap_class == "outvoted" for g in gaps)
 
     def test_main_compatible_evidence_ignores_probe_manifest_for_edge_quality(self):
@@ -314,13 +311,17 @@ class TestScenario3ErrorHandling:
 
     def test_summarize_main_compatible_tf_evidence_handles_registry_contract_duplicates(self):
         reg = SimpleNamespace(
-            by_symbol={"BTCUSDT": (SimpleNamespace(
-                key=SimpleNamespace(symbol="BTCUSDT", strategy_id="dual_momentum", activation_context="all"),
-                mean_incremental_bps=10.0,
-                hard_eligible=True,
-                quality_weight=1.0,
-                lcb_net_bps=10.0,
-            ),)},
+            by_symbol={
+                "BTCUSDT": (
+                    SimpleNamespace(
+                        key=SimpleNamespace(symbol="BTCUSDT", strategy_id="dual_momentum", activation_context="all"),
+                        mean_incremental_bps=10.0,
+                        hard_eligible=True,
+                        quality_weight=1.0,
+                        lcb_net_bps=10.0,
+                    ),
+                )
+            },
             ready_symbols=("BTCUSDT",),
         )
         ptf = {"4h": per_tf("4h", registry=reg, edge=10.0)}
@@ -436,7 +437,6 @@ class TestScenario3ErrorHandling:
         assert report is not None
 
 
-
 # ---------------------------------------------------------------------------
 # Scenario 1: build_validation_parity_capture
 # ---------------------------------------------------------------------------
@@ -508,7 +508,10 @@ class TestBuildValidationParityCapture:
             per_tf_l1=ptf,
         )
         for field_val in (
-            capture.probe, capture.main_tf, capture.registry_census, capture.blockers,
+            capture.probe,
+            capture.main_tf,
+            capture.registry_census,
+            capture.blockers,
         ):
             vals: tuple = field_val if isinstance(field_val, tuple) else (field_val,)
             assert not any(isinstance(v, PerTfL1Result) for v in vals)
@@ -522,13 +525,24 @@ class TestBuildValidationParityCapture:
         )
 
         manifest = SimpleNamespace(
-            cells=(SimpleNamespace(
-                symbol="BTCUSDT", family="dual_momentum", tf="4h",
-                ic_tstat_hac=2.5, net_edge_bps=10.0, ic_fold_sign_consistency=1.0,
-                n_cells=1, n_pass_tstat=1, n_pass_fdr=1, n_pass_net_edge=1,
-                n_pass_fold_consistency=1, n_winning=1, top_fail_reason="",
-                passed_fdr=True,
-            ),),
+            cells=(
+                SimpleNamespace(
+                    symbol="BTCUSDT",
+                    family="dual_momentum",
+                    tf="4h",
+                    ic_tstat_hac=2.5,
+                    net_edge_bps=10.0,
+                    ic_fold_sign_consistency=1.0,
+                    n_cells=1,
+                    n_pass_tstat=1,
+                    n_pass_fdr=1,
+                    n_pass_net_edge=1,
+                    n_pass_fold_consistency=1,
+                    n_winning=1,
+                    top_fail_reason="",
+                    passed_fdr=True,
+                ),
+            ),
             tf_grid=("4h",),
             coverage_by_tf={},
             diversity_corr={},
@@ -684,8 +698,10 @@ class TestBuildMajorSymbolGapEvidenceFromCensus:
         )
 
         good_entry = MajorSymbolRegistryCensusEntry(
-            symbol="BTCUSDT", family="dual_momentum",
-            registry_mean_incremental_bps=10.0, hard_eligible=True,
+            symbol="BTCUSDT",
+            family="dual_momentum",
+            registry_mean_incremental_bps=10.0,
+            hard_eligible=True,
             observed_active_in_holdout=True,
         )
         census = [

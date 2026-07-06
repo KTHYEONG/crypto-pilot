@@ -268,10 +268,13 @@ def test_precompute_rebalance_weights_ignores_residual_var_when_flag_off() -> No
 def test_solve_constrained_weights_respects_bl_shrinkage_mults() -> None:
     """solve_constrained_weights에서 bl_shrinkage_var_mult 및 bl_shrinkage_omega_mult가 유동적으로 동작하는지 검증."""
     mu = np.array([0.005, -0.005], dtype=np.float64)
-    sigma = np.array([
-        [1e-4, 5e-5],
-        [5e-5, 9e-4]  # 비대칭 분산 적용
-    ], dtype=np.float64)
+    sigma = np.array(
+        [
+            [1e-4, 5e-5],
+            [5e-5, 9e-4],  # 비대칭 분산 적용
+        ],
+        dtype=np.float64,
+    )
 
     # 기본값 (0.20, 0.10)
     w_default = solve_constrained_weights(
@@ -285,7 +288,7 @@ def test_solve_constrained_weights_respects_bl_shrinkage_mults() -> None:
         per_symbol_cap=0.5,
         current_dd=0.0,
         bl_shrinkage_var_mult=0.20,
-        bl_shrinkage_omega_mult=0.10
+        bl_shrinkage_omega_mult=0.10,
     )
 
     # 다른 정규화 강도 (0.01, 0.01)
@@ -300,7 +303,7 @@ def test_solve_constrained_weights_respects_bl_shrinkage_mults() -> None:
         per_symbol_cap=0.5,
         current_dd=0.0,
         bl_shrinkage_var_mult=0.01,
-        bl_shrinkage_omega_mult=0.01
+        bl_shrinkage_omega_mult=0.01,
     )
 
     # 두 가중치가 정확히 같지 않음을 검증 (정규화 계수 변화로 mu_bl이 달라짐)
@@ -320,7 +323,7 @@ def test_project_all_caps_early_stopping_equivalence() -> None:
         beta=0.5,
         target_ann_vol=0.2,
     )
-    
+
     # 2. early stopping이 적용된 최적화 연산 수행
     out_opt = project_all_caps(
         w=w,

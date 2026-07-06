@@ -6,6 +6,7 @@ portfolio Kelly w = f_k · (Σ̂ + εI)⁻¹ μ for active sub-universes.
 Memory design: no dense [T,N,N] allocation — active sub-matrix computed on-demand per bar.
 Look-ahead safety: window is always [t-window, t), never includes bar t.
 """
+
 from __future__ import annotations
 
 import logging

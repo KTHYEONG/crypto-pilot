@@ -16,9 +16,7 @@ def resolve_worst_fold_cagr(evaluation: Any) -> float:
         return worst_fold_cagr
     fold_deployed_cagrs = tuple(getattr(evaluation, "fold_deployed_cagrs", ()))
     finite_fold_cagrs = [
-        float(value)
-        for value in fold_deployed_cagrs
-        if value is not None and np.isfinite(float(value))
+        float(value) for value in fold_deployed_cagrs if value is not None and np.isfinite(float(value))
     ]
     return min(finite_fold_cagrs) if finite_fold_cagrs else 0.0
 
@@ -29,13 +27,7 @@ def resolve_positive_block_delta_ratio(evaluation: Any) -> float:
         return positive_block_delta_ratio
     block_metrics = tuple(getattr(evaluation, "block_metrics", ()))
     return (
-        float(
-            sum(
-                1
-                for metric in block_metrics
-                if float(metric.log_growth_hybrid) > float(metric.log_growth_baseline)
-            )
-        )
+        float(sum(1 for metric in block_metrics if float(metric.log_growth_hybrid) > float(metric.log_growth_baseline)))
         / float(len(block_metrics))
         if block_metrics
         else 0.0

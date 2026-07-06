@@ -124,9 +124,7 @@ def compose_symbol_signals(
     result: dict[str, SymbolSignal] = {}
 
     for sym in df["symbol"].unique():
-        grp_bps: NDArray[np.float64] = df[df["symbol"] == sym]["net_bps"].to_numpy(
-            dtype=np.float64
-        )
+        grp_bps: NDArray[np.float64] = df[df["symbol"] == sym]["net_bps"].to_numpy(dtype=np.float64)
         n_obs: int = len(grp_bps)
         raw_mu: float = float(grp_bps.mean())
 
@@ -172,19 +170,12 @@ def compose_symbol_signals(
 
         # --- BTC 베타 ---
         beta_btc: float | None = None
-        if (
-            beta_vs_market_1d is not None
-            and sym_idx is not None
-            and sym_idx < len(beta_vs_market_1d)
-        ):
+        if beta_vs_market_1d is not None and sym_idx is not None and sym_idx < len(beta_vs_market_1d):
             beta_btc = float(beta_vs_market_1d[sym_idx])
 
         # --- valid QC 게이트 ---
         valid: bool = (
-            n_obs >= min_obs
-            and abs(t_stat) >= t_stat_floor
-            and bool(np.isfinite(raw_mu))
-            and bool(np.isfinite(vol))
+            n_obs >= min_obs and abs(t_stat) >= t_stat_floor and bool(np.isfinite(raw_mu)) and bool(np.isfinite(vol))
         )
 
         result[sym] = SymbolSignal(

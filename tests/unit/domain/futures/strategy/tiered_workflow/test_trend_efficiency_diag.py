@@ -1,4 +1,5 @@
 """Unit tests for compute_mean_trend_efficiency (L2 fit/cal ER aggregation)."""
+
 from __future__ import annotations
 
 import numpy as np
@@ -130,25 +131,41 @@ class TestComputeLongShortPriceBySymbol:
         """Scenario 1: overlapping symbols are summed, non-overlapping preserved."""
         attrs = (
             Layer2FoldAttribution(
-                fold_idx=0, oos_bars=100, n_rebal=10,
-                realized_total=0.0, realized_price=0.0,
-                realized_funding=0.0, realized_cost=0.0,
-                expected_net=0.0, alpha_gap=0.0,
-                mean_gross_exp=0.5, mean_net_exp=0.1,
-                sleeves_active_mean=10.0, friction_pass_ratio=0.8,
-                throttle_mult_mean=1.0, dropped_below_cost=0,
+                fold_idx=0,
+                oos_bars=100,
+                n_rebal=10,
+                realized_total=0.0,
+                realized_price=0.0,
+                realized_funding=0.0,
+                realized_cost=0.0,
+                expected_net=0.0,
+                alpha_gap=0.0,
+                mean_gross_exp=0.5,
+                mean_net_exp=0.1,
+                sleeves_active_mean=10.0,
+                friction_pass_ratio=0.8,
+                throttle_mult_mean=1.0,
+                dropped_below_cost=0,
                 netting_events=0,
                 realized_price_long_by_symbol=(("BTCUSDT", -0.02), ("ETHUSDT", -0.01)),
                 realized_price_short_by_symbol=(),
             ),
             Layer2FoldAttribution(
-                fold_idx=1, oos_bars=100, n_rebal=10,
-                realized_total=0.0, realized_price=0.0,
-                realized_funding=0.0, realized_cost=0.0,
-                expected_net=0.0, alpha_gap=0.0,
-                mean_gross_exp=0.5, mean_net_exp=0.1,
-                sleeves_active_mean=10.0, friction_pass_ratio=0.8,
-                throttle_mult_mean=1.0, dropped_below_cost=0,
+                fold_idx=1,
+                oos_bars=100,
+                n_rebal=10,
+                realized_total=0.0,
+                realized_price=0.0,
+                realized_funding=0.0,
+                realized_cost=0.0,
+                expected_net=0.0,
+                alpha_gap=0.0,
+                mean_gross_exp=0.5,
+                mean_net_exp=0.1,
+                sleeves_active_mean=10.0,
+                friction_pass_ratio=0.8,
+                throttle_mult_mean=1.0,
+                dropped_below_cost=0,
                 netting_events=0,
                 realized_price_long_by_symbol=(("BTCUSDT", -0.01), ("SOLUSDT", 0.005)),
                 realized_price_short_by_symbol=(),
@@ -175,12 +192,20 @@ class TestAssembleFoldAttributionPerSymbol:
         price_long_by_sym = np.array([-0.02, 0.0, 1e-13])
         price_short_by_sym = np.array([0.0, 0.015, 0.0])
         result = _assemble_fold_attribution(
-            fold_idx=0, oos_bars=100, n_rebal=10,
-            realized_price=0.0, realized_funding=0.0,
-            realized_cost=0.0, expected_net=0.0,
-            gross_exps=[], net_exps=[], throttle_mults=[],
-            sleeves_active=[], friction_pass_total=0,
-            signal_total=0, dropped_below_cost=0,
+            fold_idx=0,
+            oos_bars=100,
+            n_rebal=10,
+            realized_price=0.0,
+            realized_funding=0.0,
+            realized_cost=0.0,
+            expected_net=0.0,
+            gross_exps=[],
+            net_exps=[],
+            throttle_mults=[],
+            sleeves_active=[],
+            friction_pass_total=0,
+            signal_total=0,
+            dropped_below_cost=0,
             netting_events=0,
             symbols=symbols,
             price_long_by_sym=price_long_by_sym,
@@ -192,12 +217,20 @@ class TestAssembleFoldAttributionPerSymbol:
     def test_assemble_fold_attribution_defaults_per_symbol_to_empty_when_arrays_omitted(self) -> None:
         """Scenario 4: no symbols/price_long_by_sym → empty tuples."""
         result = _assemble_fold_attribution(
-            fold_idx=0, oos_bars=100, n_rebal=10,
-            realized_price=0.0, realized_funding=0.0,
-            realized_cost=0.0, expected_net=0.0,
-            gross_exps=[], net_exps=[], throttle_mults=[],
-            sleeves_active=[], friction_pass_total=0,
-            signal_total=0, dropped_below_cost=0,
+            fold_idx=0,
+            oos_bars=100,
+            n_rebal=10,
+            realized_price=0.0,
+            realized_funding=0.0,
+            realized_cost=0.0,
+            expected_net=0.0,
+            gross_exps=[],
+            net_exps=[],
+            throttle_mults=[],
+            sleeves_active=[],
+            friction_pass_total=0,
+            signal_total=0,
+            dropped_below_cost=0,
             netting_events=0,
         )
         assert result.realized_price_long_by_symbol == ()
@@ -214,6 +247,7 @@ class TestSummarizeMajorSymbolSignalSizing:
             MajorSymbolSignalSizingSummary,
             summarize_major_symbol_signal_sizing,
         )
+
         S = MajorSymbolRebalanceSnapshot
         snapshots = (
             S(t=0, symbol="BTCUSDT", raw_mu=5.0, weight=0.10, regime_code=0, regime_risk_mult=1.0),
@@ -223,17 +257,30 @@ class TestSummarizeMajorSymbolSignalSizing:
         )
         fold_attributions = (
             Layer2FoldAttribution(
-                fold_idx=0, oos_bars=4, n_rebal=4, realized_total=0.0, realized_price=0.0,
-                realized_funding=0.0, realized_cost=0.0, expected_net=0.0, alpha_gap=0.0,
-                mean_gross_exp=0.0, mean_net_exp=0.0, sleeves_active_mean=0.0,
-                friction_pass_ratio=0.0, throttle_mult_mean=1.0, dropped_below_cost=0,
-                netting_events=0, major_symbol_snapshots=snapshots,
+                fold_idx=0,
+                oos_bars=4,
+                n_rebal=4,
+                realized_total=0.0,
+                realized_price=0.0,
+                realized_funding=0.0,
+                realized_cost=0.0,
+                expected_net=0.0,
+                alpha_gap=0.0,
+                mean_gross_exp=0.0,
+                mean_net_exp=0.0,
+                sleeves_active_mean=0.0,
+                friction_pass_ratio=0.0,
+                throttle_mult_mean=1.0,
+                dropped_below_cost=0,
+                netting_events=0,
+                major_symbol_snapshots=snapshots,
             ),
         )
         result = summarize_major_symbol_signal_sizing(fold_attributions)
         assert result == (
             MajorSymbolSignalSizingSummary(
-                symbol="BTCUSDT", n_obs=4,
+                symbol="BTCUSDT",
+                n_obs=4,
                 mu_bullish_pct=pytest.approx(0.5),
                 weight_long_pct=pytest.approx(0.75),
                 stale_long_pct=pytest.approx(0.25),
@@ -248,12 +295,24 @@ class TestSummarizeMajorSymbolSignalSizing:
             MajorSymbolRebalanceSnapshot,
             summarize_major_symbol_signal_sizing,
         )
+
         S = MajorSymbolRebalanceSnapshot
         fold_a = Layer2FoldAttribution(
-            fold_idx=0, oos_bars=2, n_rebal=2, realized_total=0.0, realized_price=0.0,
-            realized_funding=0.0, realized_cost=0.0, expected_net=0.0, alpha_gap=0.0,
-            mean_gross_exp=0.0, mean_net_exp=0.0, sleeves_active_mean=0.0,
-            friction_pass_ratio=0.0, throttle_mult_mean=1.0, dropped_below_cost=0,
+            fold_idx=0,
+            oos_bars=2,
+            n_rebal=2,
+            realized_total=0.0,
+            realized_price=0.0,
+            realized_funding=0.0,
+            realized_cost=0.0,
+            expected_net=0.0,
+            alpha_gap=0.0,
+            mean_gross_exp=0.0,
+            mean_net_exp=0.0,
+            sleeves_active_mean=0.0,
+            friction_pass_ratio=0.0,
+            throttle_mult_mean=1.0,
+            dropped_below_cost=0,
             netting_events=0,
             major_symbol_snapshots=(
                 S(t=0, symbol="BTCUSDT", raw_mu=1.0, weight=0.0, regime_code=0, regime_risk_mult=1.0),
@@ -261,10 +320,21 @@ class TestSummarizeMajorSymbolSignalSizing:
             ),
         )
         fold_b = Layer2FoldAttribution(
-            fold_idx=1, oos_bars=2, n_rebal=2, realized_total=0.0, realized_price=0.0,
-            realized_funding=0.0, realized_cost=0.0, expected_net=0.0, alpha_gap=0.0,
-            mean_gross_exp=0.0, mean_net_exp=0.0, sleeves_active_mean=0.0,
-            friction_pass_ratio=0.0, throttle_mult_mean=1.0, dropped_below_cost=0,
+            fold_idx=1,
+            oos_bars=2,
+            n_rebal=2,
+            realized_total=0.0,
+            realized_price=0.0,
+            realized_funding=0.0,
+            realized_cost=0.0,
+            expected_net=0.0,
+            alpha_gap=0.0,
+            mean_gross_exp=0.0,
+            mean_net_exp=0.0,
+            sleeves_active_mean=0.0,
+            friction_pass_ratio=0.0,
+            throttle_mult_mean=1.0,
+            dropped_below_cost=0,
             netting_events=0,
             major_symbol_snapshots=(
                 S(t=0, symbol="BTCUSDT", raw_mu=3.0, weight=0.10, regime_code=0, regime_risk_mult=1.0),
@@ -287,6 +357,7 @@ class TestSummarizeMajorSymbolSignalSizing:
         from src.domain.futures.strategy.tiered_workflow.awf_sim import (
             summarize_major_symbol_signal_sizing,
         )
+
         result = summarize_major_symbol_signal_sizing(())
         assert result == ()
 
@@ -300,24 +371,65 @@ class TestSummarizeMajorSymbolSleeveContribution:
             MajorSymbolSleeveContributionSnapshot,
             summarize_major_symbol_sleeve_contribution,
         )
+
         SS = MajorSymbolSleeveContributionSnapshot
         snapshots = (
-            SS(t=0, symbol="BTCUSDT", strategy_id="trend_ma:ema_12_72_4h",
-               raw_mu_sleeve=5.0, quality_weight_sleeve=0.4, pooled_mu_symbol=3.0, regime_code=0),
-            SS(t=1, symbol="BTCUSDT", strategy_id="trend_ma:ema_12_72_4h",
-               raw_mu_sleeve=-2.0, quality_weight_sleeve=0.3, pooled_mu_symbol=1.0, regime_code=1),
-            SS(t=2, symbol="BTCUSDT", strategy_id="trend_ma:ema_12_72_4h",
-               raw_mu_sleeve=-1.0, quality_weight_sleeve=0.5, pooled_mu_symbol=0.5, regime_code=1),
-            SS(t=3, symbol="BTCUSDT", strategy_id="trend_ma:ema_12_72_4h",
-               raw_mu_sleeve=4.0, quality_weight_sleeve=0.2, pooled_mu_symbol=-1.0, regime_code=2),
+            SS(
+                t=0,
+                symbol="BTCUSDT",
+                strategy_id="trend_ma:ema_12_72_4h",
+                raw_mu_sleeve=5.0,
+                quality_weight_sleeve=0.4,
+                pooled_mu_symbol=3.0,
+                regime_code=0,
+            ),
+            SS(
+                t=1,
+                symbol="BTCUSDT",
+                strategy_id="trend_ma:ema_12_72_4h",
+                raw_mu_sleeve=-2.0,
+                quality_weight_sleeve=0.3,
+                pooled_mu_symbol=1.0,
+                regime_code=1,
+            ),
+            SS(
+                t=2,
+                symbol="BTCUSDT",
+                strategy_id="trend_ma:ema_12_72_4h",
+                raw_mu_sleeve=-1.0,
+                quality_weight_sleeve=0.5,
+                pooled_mu_symbol=0.5,
+                regime_code=1,
+            ),
+            SS(
+                t=3,
+                symbol="BTCUSDT",
+                strategy_id="trend_ma:ema_12_72_4h",
+                raw_mu_sleeve=4.0,
+                quality_weight_sleeve=0.2,
+                pooled_mu_symbol=-1.0,
+                regime_code=2,
+            ),
         )
         fold_attributions = (
             Layer2FoldAttribution(
-                fold_idx=0, oos_bars=4, n_rebal=4, realized_total=0.0, realized_price=0.0,
-                realized_funding=0.0, realized_cost=0.0, expected_net=0.0, alpha_gap=0.0,
-                mean_gross_exp=0.0, mean_net_exp=0.0, sleeves_active_mean=0.0,
-                friction_pass_ratio=0.0, throttle_mult_mean=1.0, dropped_below_cost=0,
-                netting_events=0, major_symbol_sleeve_snapshots=snapshots,
+                fold_idx=0,
+                oos_bars=4,
+                n_rebal=4,
+                realized_total=0.0,
+                realized_price=0.0,
+                realized_funding=0.0,
+                realized_cost=0.0,
+                expected_net=0.0,
+                alpha_gap=0.0,
+                mean_gross_exp=0.0,
+                mean_net_exp=0.0,
+                sleeves_active_mean=0.0,
+                friction_pass_ratio=0.0,
+                throttle_mult_mean=1.0,
+                dropped_below_cost=0,
+                netting_events=0,
+                major_symbol_sleeve_snapshots=snapshots,
             ),
         )
         result = summarize_major_symbol_sleeve_contribution(fold_attributions)
@@ -376,41 +488,70 @@ class TestSummarizeMajorSymbolSleeveContribution:
                 ValidatedSignalBatch,
                 ValidatedSignalEvent,
             )
+
             events = [
                 ValidatedSignalEvent(
-                    decision_idx=5, decision_time=aligned.datetimes[5],
-                    symbol="BTCUSDT", strategy_id="trend_ma:ema_12_72_4h",
-                    activation_context="all", side=1,
-                    expected_net_bps=10.0, expected_gross_bps=15.0,
-                    q10_net_bps=5.0, q10_gross_bps=8.0,
-                    q90_net_bps=0.0, q90_gross_bps=20.0,
-                    expected_holding_bars=3, reliability=0.9,
-                    registry_version="test", model_version="test",
+                    decision_idx=5,
+                    decision_time=aligned.datetimes[5],
+                    symbol="BTCUSDT",
+                    strategy_id="trend_ma:ema_12_72_4h",
+                    activation_context="all",
+                    side=1,
+                    expected_net_bps=10.0,
+                    expected_gross_bps=15.0,
+                    q10_net_bps=5.0,
+                    q10_gross_bps=8.0,
+                    q90_net_bps=0.0,
+                    q90_gross_bps=20.0,
+                    expected_holding_bars=3,
+                    reliability=0.9,
+                    registry_version="test",
+                    model_version="test",
                 ),
                 ValidatedSignalEvent(
-                    decision_idx=5, decision_time=aligned.datetimes[5],
-                    symbol="BTCUSDT", strategy_id="mtf_breakout_retest:mtf_bor_20_4h",
-                    activation_context="all", side=1,
-                    expected_net_bps=8.0, expected_gross_bps=12.0,
-                    q10_net_bps=4.0, q10_gross_bps=6.0,
-                    q90_net_bps=0.0, q90_gross_bps=16.0,
-                    expected_holding_bars=3, reliability=0.9,
-                    registry_version="test", model_version="test",
+                    decision_idx=5,
+                    decision_time=aligned.datetimes[5],
+                    symbol="BTCUSDT",
+                    strategy_id="mtf_breakout_retest:mtf_bor_20_4h",
+                    activation_context="all",
+                    side=1,
+                    expected_net_bps=8.0,
+                    expected_gross_bps=12.0,
+                    q10_net_bps=4.0,
+                    q10_gross_bps=6.0,
+                    q90_net_bps=0.0,
+                    q90_gross_bps=16.0,
+                    expected_holding_bars=3,
+                    reliability=0.9,
+                    registry_version="test",
+                    model_version="test",
                 ),
                 ValidatedSignalEvent(
-                    decision_idx=5, decision_time=aligned.datetimes[5],
-                    symbol="XRPUSDT", strategy_id="trend_ma:ema_12_72_4h",
-                    activation_context="all", side=1,
-                    expected_net_bps=8.0, expected_gross_bps=12.0,
-                    q10_net_bps=4.0, q10_gross_bps=6.0,
-                    q90_net_bps=0.0, q90_gross_bps=16.0,
-                    expected_holding_bars=3, reliability=0.9,
-                    registry_version="test", model_version="test",
+                    decision_idx=5,
+                    decision_time=aligned.datetimes[5],
+                    symbol="XRPUSDT",
+                    strategy_id="trend_ma:ema_12_72_4h",
+                    activation_context="all",
+                    side=1,
+                    expected_net_bps=8.0,
+                    expected_gross_bps=12.0,
+                    q10_net_bps=4.0,
+                    q10_gross_bps=6.0,
+                    q90_net_bps=0.0,
+                    q90_gross_bps=16.0,
+                    expected_holding_bars=3,
+                    reliability=0.9,
+                    registry_version="test",
+                    model_version="test",
                 ),
             ]
             signal_batch = ValidatedSignalBatch(
-                events=tuple(events), start_idx=0, end_idx=50,
-                symbols=aligned.symbols, registry_version="test", model_version="test",
+                events=tuple(events),
+                start_idx=0,
+                end_idx=50,
+                symbols=aligned.symbols,
+                registry_version="test",
+                model_version="test",
             )
             from src.domain.futures.portfolio.portfolio_constructor import PortfolioCaps
             from src.domain.futures.strategy.tiered_workflow.awf_sim import (
@@ -426,8 +567,13 @@ class TestSummarizeMajorSymbolSleeveContribution:
             caps = PortfolioCaps(gross=3.0, per_symbol=0.15, net=0.5, beta=1.0, target_ann_vol=0.20)
 
             sim = _run_awf_simulation(
-                cache=cache, signal_batch=signal_batch, aligned=aligned,
-                awf_folds=awf_folds, config=config, caps=caps, sim_origin="test_sleeve_diag",
+                cache=cache,
+                signal_batch=signal_batch,
+                aligned=aligned,
+                awf_folds=awf_folds,
+                config=config,
+                caps=caps,
+                sim_origin="test_sleeve_diag",
             )
             snaps = sim.fold_attributions[0].major_symbol_sleeve_snapshots
             assert len(snaps) > 0
@@ -439,20 +585,47 @@ class TestSummarizeMajorSymbolSleeveContribution:
             MajorSymbolSleeveContributionSnapshot,
             summarize_major_symbol_sleeve_contribution,
         )
+
         SS = MajorSymbolSleeveContributionSnapshot
         snapshots = (
-            SS(t=0, symbol="BTCUSDT", strategy_id="trend_ma:ema_12_72_4h",
-               raw_mu_sleeve=1e-13, quality_weight_sleeve=0.5, pooled_mu_symbol=3.0, regime_code=0),
-            SS(t=1, symbol="BTCUSDT", strategy_id="trend_ma:ema_12_72_4h",
-               raw_mu_sleeve=2.0, quality_weight_sleeve=0.3, pooled_mu_symbol=-1.0, regime_code=0),
+            SS(
+                t=0,
+                symbol="BTCUSDT",
+                strategy_id="trend_ma:ema_12_72_4h",
+                raw_mu_sleeve=1e-13,
+                quality_weight_sleeve=0.5,
+                pooled_mu_symbol=3.0,
+                regime_code=0,
+            ),
+            SS(
+                t=1,
+                symbol="BTCUSDT",
+                strategy_id="trend_ma:ema_12_72_4h",
+                raw_mu_sleeve=2.0,
+                quality_weight_sleeve=0.3,
+                pooled_mu_symbol=-1.0,
+                regime_code=0,
+            ),
         )
         fold_attributions = (
             Layer2FoldAttribution(
-                fold_idx=0, oos_bars=2, n_rebal=2, realized_total=0.0, realized_price=0.0,
-                realized_funding=0.0, realized_cost=0.0, expected_net=0.0, alpha_gap=0.0,
-                mean_gross_exp=0.0, mean_net_exp=0.0, sleeves_active_mean=0.0,
-                friction_pass_ratio=0.0, throttle_mult_mean=1.0, dropped_below_cost=0,
-                netting_events=0, major_symbol_sleeve_snapshots=snapshots,
+                fold_idx=0,
+                oos_bars=2,
+                n_rebal=2,
+                realized_total=0.0,
+                realized_price=0.0,
+                realized_funding=0.0,
+                realized_cost=0.0,
+                expected_net=0.0,
+                alpha_gap=0.0,
+                mean_gross_exp=0.0,
+                mean_net_exp=0.0,
+                sleeves_active_mean=0.0,
+                friction_pass_ratio=0.0,
+                throttle_mult_mean=1.0,
+                dropped_below_cost=0,
+                netting_events=0,
+                major_symbol_sleeve_snapshots=snapshots,
             ),
         )
         result = summarize_major_symbol_sleeve_contribution(fold_attributions)
@@ -470,27 +643,64 @@ class TestSummarizeMajorSymbolSleeveContribution:
             MajorSymbolSleeveContributionSnapshot,
             summarize_major_symbol_sleeve_contribution,
         )
+
         SS = MajorSymbolSleeveContributionSnapshot
         fold_a = Layer2FoldAttribution(
-            fold_idx=0, oos_bars=2, n_rebal=2, realized_total=0.0, realized_price=0.0,
-            realized_funding=0.0, realized_cost=0.0, expected_net=0.0, alpha_gap=0.0,
-            mean_gross_exp=0.0, mean_net_exp=0.0, sleeves_active_mean=0.0,
-            friction_pass_ratio=0.0, throttle_mult_mean=1.0, dropped_below_cost=0,
+            fold_idx=0,
+            oos_bars=2,
+            n_rebal=2,
+            realized_total=0.0,
+            realized_price=0.0,
+            realized_funding=0.0,
+            realized_cost=0.0,
+            expected_net=0.0,
+            alpha_gap=0.0,
+            mean_gross_exp=0.0,
+            mean_net_exp=0.0,
+            sleeves_active_mean=0.0,
+            friction_pass_ratio=0.0,
+            throttle_mult_mean=1.0,
+            dropped_below_cost=0,
             netting_events=0,
             major_symbol_sleeve_snapshots=(
-                SS(t=0, symbol="BTCUSDT", strategy_id="trend_ma:ema_12_72_4h",
-                   raw_mu_sleeve=1.0, quality_weight_sleeve=0.5, pooled_mu_symbol=0.5, regime_code=0),
+                SS(
+                    t=0,
+                    symbol="BTCUSDT",
+                    strategy_id="trend_ma:ema_12_72_4h",
+                    raw_mu_sleeve=1.0,
+                    quality_weight_sleeve=0.5,
+                    pooled_mu_symbol=0.5,
+                    regime_code=0,
+                ),
             ),
         )
         fold_b = Layer2FoldAttribution(
-            fold_idx=1, oos_bars=2, n_rebal=2, realized_total=0.0, realized_price=0.0,
-            realized_funding=0.0, realized_cost=0.0, expected_net=0.0, alpha_gap=0.0,
-            mean_gross_exp=0.0, mean_net_exp=0.0, sleeves_active_mean=0.0,
-            friction_pass_ratio=0.0, throttle_mult_mean=1.0, dropped_below_cost=0,
+            fold_idx=1,
+            oos_bars=2,
+            n_rebal=2,
+            realized_total=0.0,
+            realized_price=0.0,
+            realized_funding=0.0,
+            realized_cost=0.0,
+            expected_net=0.0,
+            alpha_gap=0.0,
+            mean_gross_exp=0.0,
+            mean_net_exp=0.0,
+            sleeves_active_mean=0.0,
+            friction_pass_ratio=0.0,
+            throttle_mult_mean=1.0,
+            dropped_below_cost=0,
             netting_events=0,
             major_symbol_sleeve_snapshots=(
-                SS(t=0, symbol="BTCUSDT", strategy_id="trend_ma:ema_12_72_4h",
-                   raw_mu_sleeve=2.0, quality_weight_sleeve=0.3, pooled_mu_symbol=-1.0, regime_code=1),
+                SS(
+                    t=0,
+                    symbol="BTCUSDT",
+                    strategy_id="trend_ma:ema_12_72_4h",
+                    raw_mu_sleeve=2.0,
+                    quality_weight_sleeve=0.3,
+                    pooled_mu_symbol=-1.0,
+                    regime_code=1,
+                ),
             ),
         )
         result = summarize_major_symbol_sleeve_contribution((fold_a, fold_b))
@@ -503,6 +713,7 @@ class TestSummarizeMajorSymbolSleeveContribution:
         from src.domain.futures.strategy.tiered_workflow.awf_sim import (
             summarize_major_symbol_sleeve_contribution,
         )
+
         result = summarize_major_symbol_sleeve_contribution(())
         assert result == ()
 
@@ -512,18 +723,38 @@ class TestSummarizeMajorSymbolSleeveContribution:
             MajorSymbolSleeveContributionSnapshot,
             summarize_major_symbol_sleeve_contribution,
         )
+
         SS = MajorSymbolSleeveContributionSnapshot
         snapshots = (
-            SS(t=0, symbol="XRPUSDT", strategy_id="trend_ma:ema_12_72_4h",
-               raw_mu_sleeve=1.0, quality_weight_sleeve=0.5, pooled_mu_symbol=0.5, regime_code=0),
+            SS(
+                t=0,
+                symbol="XRPUSDT",
+                strategy_id="trend_ma:ema_12_72_4h",
+                raw_mu_sleeve=1.0,
+                quality_weight_sleeve=0.5,
+                pooled_mu_symbol=0.5,
+                regime_code=0,
+            ),
         )
         fold_attributions = (
             Layer2FoldAttribution(
-                fold_idx=0, oos_bars=1, n_rebal=1, realized_total=0.0, realized_price=0.0,
-                realized_funding=0.0, realized_cost=0.0, expected_net=0.0, alpha_gap=0.0,
-                mean_gross_exp=0.0, mean_net_exp=0.0, sleeves_active_mean=0.0,
-                friction_pass_ratio=0.0, throttle_mult_mean=1.0, dropped_below_cost=0,
-                netting_events=0, major_symbol_sleeve_snapshots=snapshots,
+                fold_idx=0,
+                oos_bars=1,
+                n_rebal=1,
+                realized_total=0.0,
+                realized_price=0.0,
+                realized_funding=0.0,
+                realized_cost=0.0,
+                expected_net=0.0,
+                alpha_gap=0.0,
+                mean_gross_exp=0.0,
+                mean_net_exp=0.0,
+                sleeves_active_mean=0.0,
+                friction_pass_ratio=0.0,
+                throttle_mult_mean=1.0,
+                dropped_below_cost=0,
+                netting_events=0,
+                major_symbol_sleeve_snapshots=snapshots,
             ),
         )
         result = summarize_major_symbol_sleeve_contribution(fold_attributions)
@@ -535,18 +766,38 @@ class TestSummarizeMajorSymbolSleeveContribution:
             MajorSymbolSleeveContributionSnapshot,
             summarize_major_symbol_sleeve_contribution,
         )
+
         SS = MajorSymbolSleeveContributionSnapshot
         snapshots = (
-            SS(t=0, symbol="BTCUSDT", strategy_id="trend_ma:ema_12_72_4h",
-               raw_mu_sleeve=1.0, quality_weight_sleeve=0.5, pooled_mu_symbol=0.0, regime_code=0),
+            SS(
+                t=0,
+                symbol="BTCUSDT",
+                strategy_id="trend_ma:ema_12_72_4h",
+                raw_mu_sleeve=1.0,
+                quality_weight_sleeve=0.5,
+                pooled_mu_symbol=0.0,
+                regime_code=0,
+            ),
         )
         fold_attributions = (
             Layer2FoldAttribution(
-                fold_idx=0, oos_bars=1, n_rebal=1, realized_total=0.0, realized_price=0.0,
-                realized_funding=0.0, realized_cost=0.0, expected_net=0.0, alpha_gap=0.0,
-                mean_gross_exp=0.0, mean_net_exp=0.0, sleeves_active_mean=0.0,
-                friction_pass_ratio=0.0, throttle_mult_mean=1.0, dropped_below_cost=0,
-                netting_events=0, major_symbol_sleeve_snapshots=snapshots,
+                fold_idx=0,
+                oos_bars=1,
+                n_rebal=1,
+                realized_total=0.0,
+                realized_price=0.0,
+                realized_funding=0.0,
+                realized_cost=0.0,
+                expected_net=0.0,
+                alpha_gap=0.0,
+                mean_gross_exp=0.0,
+                mean_net_exp=0.0,
+                sleeves_active_mean=0.0,
+                friction_pass_ratio=0.0,
+                throttle_mult_mean=1.0,
+                dropped_below_cost=0,
+                netting_events=0,
+                major_symbol_sleeve_snapshots=snapshots,
             ),
         )
         result = summarize_major_symbol_sleeve_contribution(fold_attributions)
@@ -560,13 +811,25 @@ class TestSummarizeMajorSymbolSleeveContribution:
         from src.domain.futures.strategy.tiered_workflow.awf_sim import (
             summarize_major_symbol_sleeve_contribution,
         )
+
         result = summarize_major_symbol_sleeve_contribution(
             (
                 Layer2FoldAttribution(
-                    fold_idx=0, oos_bars=1, n_rebal=1, realized_total=0.0, realized_price=0.0,
-                    realized_funding=0.0, realized_cost=0.0, expected_net=0.0, alpha_gap=0.0,
-                    mean_gross_exp=0.0, mean_net_exp=0.0, sleeves_active_mean=0.0,
-                    friction_pass_ratio=0.0, throttle_mult_mean=1.0, dropped_below_cost=0,
+                    fold_idx=0,
+                    oos_bars=1,
+                    n_rebal=1,
+                    realized_total=0.0,
+                    realized_price=0.0,
+                    realized_funding=0.0,
+                    realized_cost=0.0,
+                    expected_net=0.0,
+                    alpha_gap=0.0,
+                    mean_gross_exp=0.0,
+                    mean_net_exp=0.0,
+                    sleeves_active_mean=0.0,
+                    friction_pass_ratio=0.0,
+                    throttle_mult_mean=1.0,
+                    dropped_below_cost=0,
                     netting_events=0,
                     major_symbol_sleeve_snapshots=(),
                     major_symbol_snapshots=(),
@@ -589,25 +852,28 @@ class TestComputeMajorSymbolRegistryCensus:
             SignalSourceKey,
             SymbolStrategyEvidence,
         )
+
         registry_data: dict[str, tuple[SymbolStrategyEvidence, ...]] = {}
         for sym, entries in by_symbol.items():
             evs: list[SymbolStrategyEvidence] = []
             for strat, mean_bps, hard_eligible in entries:
-                evs.append(SymbolStrategyEvidence(
-                    key=SignalSourceKey(symbol=sym, strategy_id=strat, activation_context="all"),
-                    mean_gross_bps=0.0,
-                    mean_incremental_bps=mean_bps,
-                    block_tstat_incremental=0.0,
-                    probability_positive=0.0,
-                    p_value=1.0,
-                    q_value=1.0,
-                    positive_fold_ratio=0.0,
-                    n_obs=0,
-                    effective_n=0.0,
-                    n_folds=0,
-                    quality_weight=1.0,
-                    hard_eligible=hard_eligible,
-                ))
+                evs.append(
+                    SymbolStrategyEvidence(
+                        key=SignalSourceKey(symbol=sym, strategy_id=strat, activation_context="all"),
+                        mean_gross_bps=0.0,
+                        mean_incremental_bps=mean_bps,
+                        block_tstat_incremental=0.0,
+                        probability_positive=0.0,
+                        p_value=1.0,
+                        q_value=1.0,
+                        positive_fold_ratio=0.0,
+                        n_obs=0,
+                        effective_n=0.0,
+                        n_folds=0,
+                        quality_weight=1.0,
+                        hard_eligible=hard_eligible,
+                    )
+                )
             registry_data[sym] = tuple(evs)
         return QualifiedSignalRegistry(
             by_symbol=registry_data,
@@ -620,24 +886,30 @@ class TestComputeMajorSymbolRegistryCensus:
         from src.domain.futures.strategy.tiered_workflow.awf_sim import (
             MajorSymbolSleeveContributionSummary,
         )
+
         return MajorSymbolSleeveContributionSummary(
-            symbol=symbol, family=family,
-            n_obs=10, mean_raw_mu_sleeve=0.5, mean_quality_weight_sleeve=1.0,
-            sign_mismatch_pct=0.0, regime_adverse_sign_mismatch_pct=0.0,
+            symbol=symbol,
+            family=family,
+            n_obs=10,
+            mean_raw_mu_sleeve=0.5,
+            mean_quality_weight_sleeve=1.0,
+            sign_mismatch_pct=0.0,
+            regime_adverse_sign_mismatch_pct=0.0,
         )
 
     def test_registry_census_flags_activation_gap_for_eth(self) -> None:
         from src.domain.futures.strategy.tiered_workflow.awf_sim import (
             compute_major_symbol_registry_census,
         )
-        registry = self._make_registry({
-            "ETHUSDT": [("dual_momentum", -2.0, True), ("trend_ma", 3.0, True)],
-        })
+
+        registry = self._make_registry(
+            {
+                "ETHUSDT": [("dual_momentum", -2.0, True), ("trend_ma", 3.0, True)],
+            }
+        )
         # dual_momentum has negative mean_incremental_bps but IS observed in holdout
         # trend_ma has positive mean_incremental_bps but NOT observed
-        summaries = (
-            self._make_summary("ETHUSDT", "dual_momentum", active=True),
-        )
+        summaries = (self._make_summary("ETHUSDT", "dual_momentum", active=True),)
         result = compute_major_symbol_registry_census(
             registry=registry,
             observed_sleeve_summaries=summaries,
@@ -655,9 +927,12 @@ class TestComputeMajorSymbolRegistryCensus:
         from src.domain.futures.strategy.tiered_workflow.awf_sim import (
             compute_major_symbol_registry_census,
         )
-        registry = self._make_registry({
-            "ETHUSDT": [("trend_ma", 3.0, True)],
-        })
+
+        registry = self._make_registry(
+            {
+                "ETHUSDT": [("trend_ma", 3.0, True)],
+            }
+        )
         result = compute_major_symbol_registry_census(
             registry=registry,
             observed_sleeve_summaries=(),
@@ -672,6 +947,7 @@ class TestComputeMajorSymbolRegistryCensus:
         from src.domain.futures.strategy.tiered_workflow.awf_sim import (
             compute_major_symbol_registry_census,
         )
+
         registry = QualifiedSignalRegistry(by_symbol={}, ready_symbols=(), trade_scope_count=0, registry_version="test")
         result = compute_major_symbol_registry_census(
             registry=registry,

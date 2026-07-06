@@ -1,4 +1,5 @@
 """V2: L2 스케일 파이프라인 계측 — 수정 후 vol_target 정규화 검증."""
+
 import numpy as np
 import pytest
 
@@ -53,6 +54,7 @@ def test_throttle_score_no_double_deduct() -> None:
     import inspect
 
     from src.domain.futures.strategy.tiered_workflow.awf_sim import _book_edge_score
+
     # 인자 수 확인: 2개여야 함 (w, mu_bps)
     sig = inspect.signature(_book_edge_score)
     params = list(sig.parameters.keys())
@@ -78,9 +80,7 @@ def test_friction_event_level_gross_basis() -> None:
         fixed_cost_safety_mult=1.25,
     )
     assert edge.signed_gross_bps_per_bar == pytest.approx(100.0 / 72.0, rel=1e-6)
-    assert edge.signed_net_bps_per_bar == pytest.approx(
-        100.0 / 72.0 - 3.8 * 1.25 / 72.0, rel=1e-6
-    )
+    assert edge.signed_net_bps_per_bar == pytest.approx(100.0 / 72.0 - 3.8 * 1.25 / 72.0, rel=1e-6)
     event_gross = 100.0
     total_cost = 3.8 * 1.25
     assert abs(event_gross) >= total_cost, "gross-basis event edge must cover total round-trip cost"

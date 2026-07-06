@@ -123,15 +123,15 @@ class TestClusterCorrelatedRecipes:
 
     def test_groups_highly_correlated(self) -> None:
         evs = tuple(self._make_evidence(f"r{i}") for i in range(4))
-        corr = np.array([
-            [1.0, 0.9, 0.3, 0.2],
-            [0.9, 1.0, 0.3, 0.2],
-            [0.3, 0.3, 1.0, 0.1],
-            [0.2, 0.2, 0.1, 1.0],
-        ])
-        clusters = cluster_correlated_recipes(
-            evidences=evs, corr=corr, max_corr=0.8
+        corr = np.array(
+            [
+                [1.0, 0.9, 0.3, 0.2],
+                [0.9, 1.0, 0.3, 0.2],
+                [0.3, 0.3, 1.0, 0.1],
+                [0.2, 0.2, 0.1, 1.0],
+            ]
         )
+        clusters = cluster_correlated_recipes(evidences=evs, corr=corr, max_corr=0.8)
         assert len(clusters) > 0
 
     def test_raises_on_shape_mismatch(self) -> None:

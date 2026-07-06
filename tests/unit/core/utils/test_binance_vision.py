@@ -269,9 +269,14 @@ def test_normalize_metrics_frame_empty_input() -> None:
     out = downloader._normalize_metrics_frame("BTCUSDT", empty)
     assert out.empty
     assert list(out.columns) == [
-        "timestamp", "datetime", "available_at", "symbol",
-        "sum_open_interest", "sum_open_interest_value",
-        "long_short_ratio", "top_trader_long_short_ratio",
+        "timestamp",
+        "datetime",
+        "available_at",
+        "symbol",
+        "sum_open_interest",
+        "sum_open_interest_value",
+        "long_short_ratio",
+        "top_trader_long_short_ratio",
         "sum_taker_long_short_vol_ratio",
     ]
 
@@ -283,9 +288,14 @@ def test_normalize_metrics_frame_no_timestamp_column() -> None:
     out = downloader._normalize_metrics_frame("BTCUSDT", df)
     assert out.empty
     assert list(out.columns) == [
-        "timestamp", "datetime", "available_at", "symbol",
-        "sum_open_interest", "sum_open_interest_value",
-        "long_short_ratio", "top_trader_long_short_ratio",
+        "timestamp",
+        "datetime",
+        "available_at",
+        "symbol",
+        "sum_open_interest",
+        "sum_open_interest_value",
+        "long_short_ratio",
+        "top_trader_long_short_ratio",
         "sum_taker_long_short_vol_ratio",
     ]
 

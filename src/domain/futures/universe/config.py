@@ -30,7 +30,6 @@ def _sha256_json(payload: dict[str, Any]) -> str:
     return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 
 
-
 @dataclass(frozen=True, slots=True)
 class PITUniverseConfig:
     """PIT-compliant universe configuration replacing Stage2-6 gates.
@@ -76,10 +75,10 @@ class PITUniverseConfig:
     # data integrity thresholds (Phase 3 G6 gate — spec C3)
     min_coverage_ratio: float = 0.95
     max_gap_count: int = 3
-    max_gap_bars: int = 6          # 4h * 6 = 24h continuous gap threshold
+    max_gap_bars: int = 6  # 4h * 6 = 24h continuous gap threshold
     max_frozen_bars: int = 6
     max_zero_volume_bars: int = 3
-    max_staleness_bars: int = 2    # bars since last fresh bar (=8h at 4h resolution)
+    max_staleness_bars: int = 2  # bars since last fresh bar (=8h at 4h resolution)
     reject_on_nan_inf: bool = True
     reject_on_timestamp_issues: bool = True
     # ADV executability floor (absolute floor only, NOT a ranking cut per spec C3)
@@ -88,9 +87,7 @@ class PITUniverseConfig:
     def __post_init__(self) -> None:
         """Validate field constraints."""
         if not (0 < self.capacity_coverage_target <= 1.0):
-            raise ValueError(
-                f"capacity_coverage_target must be in (0, 1]; got {self.capacity_coverage_target}"
-            )
+            raise ValueError(f"capacity_coverage_target must be in (0, 1]; got {self.capacity_coverage_target}")
         if self.k_max < 1:
             raise ValueError(f"k_max must be >= 1; got {self.k_max}")
 

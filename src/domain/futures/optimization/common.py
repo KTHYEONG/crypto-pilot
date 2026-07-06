@@ -97,9 +97,7 @@ def inject_cs_momentum_ranks(
                 target_df = data_maps[sym][tf]
                 ranks_ser = ranks_df[sym]
                 # Reindex to match target_df datetime and convert to numpy for fast assignment
-                data_maps[sym][tf][col_name] = (
-                    ranks_ser.reindex(target_df["datetime"]).to_numpy(dtype=np.float64)
-                )
+                data_maps[sym][tf][col_name] = ranks_ser.reindex(target_df["datetime"]).to_numpy(dtype=np.float64)
 
 
 def _array_stats(name: str, arr: Any) -> str:
@@ -205,9 +203,7 @@ def _safe_float_or_none(value: Any) -> float | None:
     return out if np.isfinite(out) else None
 
 
-def resolve_embargo_bars_for_tf(
-    cfg: dict[str, Any], tf: str, longest_indicator_period: int = 150
-) -> int:
+def resolve_embargo_bars_for_tf(cfg: dict[str, Any], tf: str, longest_indicator_period: int = 150) -> int:
     """Prefer EMBARGO_BARS_BY_TF; fallback to horizon ratio heuristic."""
     by_tf = cfg.get("EMBARGO_BARS_BY_TF")
     if isinstance(by_tf, dict) and tf in by_tf:
@@ -218,6 +214,4 @@ def resolve_embargo_bars_for_tf(
     return max(fixed_min.get(tf, 12), int(longest_indicator_period * ratio))
 
 
-EMBARGO_BARS: dict[str, int] = {
-    tf: resolve_embargo_bars_for_tf(OPT_FUTURES_CONFIG, tf) for tf in ("1h", "4h", "1d")
-}
+EMBARGO_BARS: dict[str, int] = {tf: resolve_embargo_bars_for_tf(OPT_FUTURES_CONFIG, tf) for tf in ("1h", "4h", "1d")}

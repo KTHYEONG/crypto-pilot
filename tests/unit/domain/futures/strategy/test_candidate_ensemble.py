@@ -24,6 +24,7 @@ from src.domain.futures.strategy.config import CandidateStrategyConfig
 # Helpers
 # ---------------------------------------------------------------------------
 
+
 def _make_cfg(**kwargs: object) -> CandidateStrategyConfig:
     defaults: dict[str, object] = {"ensemble_shrinkage_k": 50.0}
     defaults.update(kwargs)
@@ -45,6 +46,7 @@ def _train_df(n: int = 30) -> pd.DataFrame:
 # ---------------------------------------------------------------------------
 # archetype_regime conditioning (explicit) — original behaviour
 # ---------------------------------------------------------------------------
+
 
 def test_regime_conditional_ensemble_shrinks_small_cells_to_global(
     monkeypatch: pytest.MonkeyPatch,
@@ -189,9 +191,7 @@ def test_ensemble_prefers_gross_targets_over_legacy_net_targets() -> None:
     model = fit_regime_conditional_ensemble(train_events=train_events, cfg=cfg)
     out = predict_regime_conditional_ensemble(
         model=model,
-        oos_events=pd.DataFrame(
-            {"archetype": ["trend"], "entry_regime_code": [0]}
-        ),
+        oos_events=pd.DataFrame({"archetype": ["trend"], "entry_regime_code": [0]}),
         cfg=cfg,
     )
 
@@ -203,6 +203,7 @@ def test_ensemble_prefers_gross_targets_over_legacy_net_targets() -> None:
 # ---------------------------------------------------------------------------
 # archetype_only conditioning — regime_code stripped from alpha
 # ---------------------------------------------------------------------------
+
 
 def test_archetype_only_ignores_regime_code() -> None:
     train_events = pd.DataFrame(
@@ -235,6 +236,7 @@ def test_archetype_only_ignores_regime_code() -> None:
 # ---------------------------------------------------------------------------
 # auto conditioning — selects archetype_only when gain is marginal
 # ---------------------------------------------------------------------------
+
 
 def test_auto_conditioning_selects_archetype_only_without_entry_idx() -> None:
     """Without entry_idx, internal IC=0 for both axes → auto picks archetype_only."""
@@ -270,6 +272,7 @@ def test_auto_conditioning_exposes_diagnostics() -> None:
 # ---------------------------------------------------------------------------
 # Empty inputs
 # ---------------------------------------------------------------------------
+
 
 def test_fit_returns_zero_model_on_empty_input() -> None:
     cfg = _make_cfg()
@@ -638,21 +641,26 @@ def test_s7_rho_diagnostic_stored_not_gating(monkeypatch: pytest.MonkeyPatch) ->
 # Phase 1: EB Adaptive Shrinkage — S1 ~ S4
 # ---------------------------------------------------------------------------
 
+
 def _make_high_low_edge_frame() -> pd.DataFrame:
     """2개 archetype: A=고edge(n=50,mean=70bps) / B=noise(n=500,mean=2bps)."""
     rng = np.random.default_rng(0)
-    df_a = pd.DataFrame({
-        "archetype": ["high_edge"] * 50,
-        "entry_regime_code": [0] * 50,
-        "net_return_bps": rng.normal(70.0, 5.0, 50),
-        "entry_idx": np.arange(50),
-    })
-    df_b = pd.DataFrame({
-        "archetype": ["noise"] * 500,
-        "entry_regime_code": [0] * 500,
-        "net_return_bps": rng.normal(2.0, 5.0, 500),
-        "entry_idx": np.arange(500, 1000),
-    })
+    df_a = pd.DataFrame(
+        {
+            "archetype": ["high_edge"] * 50,
+            "entry_regime_code": [0] * 50,
+            "net_return_bps": rng.normal(70.0, 5.0, 50),
+            "entry_idx": np.arange(50),
+        }
+    )
+    df_b = pd.DataFrame(
+        {
+            "archetype": ["noise"] * 500,
+            "entry_regime_code": [0] * 500,
+            "net_return_bps": rng.normal(2.0, 5.0, 500),
+            "entry_idx": np.arange(500, 1000),
+        }
+    )
     return pd.concat([df_a, df_b], ignore_index=True)
 
 
@@ -681,20 +689,20 @@ def test_eb_shrinkage_preserves_high_edge_archetype_vs_fixed_k() -> None:
     mu_A_eb = arch_mu_eb["high_edge"]
 
     # EB shrinkage은 cell 간 분산이 크면 k_eff를 줄여 고edge cell을 보존
-    assert mu_A_eb > mu_A_fixed, (
-        f"EB mu_A={mu_A_eb:.3f} should exceed fixed k=50 mu_A={mu_A_fixed:.3f}"
-    )
+    assert mu_A_eb > mu_A_fixed, f"EB mu_A={mu_A_eb:.3f} should exceed fixed k=50 mu_A={mu_A_fixed:.3f}"
 
 
 def test_eb_shrinkage_homogeneous_cells_collapses_to_k_max() -> None:
     """S2 Edge: 동질 cell → between_var≈0 → k_eff=k_max → 고정 k와 동일."""
     rng = np.random.default_rng(1)
-    frame = pd.DataFrame({
-        "archetype": ["typeA"] * 100 + ["typeB"] * 100,
-        "entry_regime_code": [0] * 200,
-        "net_return_bps": rng.normal(10.0, 5.0, 200),  # 동일 분포
-        "entry_idx": np.arange(200),
-    })
+    frame = pd.DataFrame(
+        {
+            "archetype": ["typeA"] * 100 + ["typeB"] * 100,
+            "entry_regime_code": [0] * 200,
+            "net_return_bps": rng.normal(10.0, 5.0, 200),  # 동일 분포
+            "entry_idx": np.arange(200),
+        }
+    )
 
     _, _, arch_mu_fixed, _, _, _, *_ = _fit_cell_means(
         frame, shrinkage_k=50.0, axis="archetype_only", adaptive_shrinkage=False
@@ -746,11 +754,13 @@ def test_eb_k_estimation_is_is_only_no_oos_data_used(monkeypatch: pytest.MonkeyP
 def test_diagnostic_log_emits_negative_ic_flag(caplog: pytest.LogCaptureFixture) -> None:
     """S4 부호 진단: IC 제거 후 로그에 archetype 테이블은 포함되나 IC: 세그먼트는 없다."""
     rng = np.random.default_rng(42)
-    frame = pd.DataFrame({
-        "archetype": ["anti_predictive"] * 50 + ["normal"] * 50,
-        "entry_regime_code": [0] * 100,
-        "net_return_bps": np.concatenate([rng.normal(-5.0, 3.0, 50), rng.normal(15.0, 3.0, 50)]),
-    })
+    frame = pd.DataFrame(
+        {
+            "archetype": ["anti_predictive"] * 50 + ["normal"] * 50,
+            "entry_regime_code": [0] * 100,
+            "net_return_bps": np.concatenate([rng.normal(-5.0, 3.0, 50), rng.normal(15.0, 3.0, 50)]),
+        }
+    )
     arch_mu = {"anti_predictive": -3.0, "normal": 12.0}
 
     with caplog.at_level(logging.INFO, logger="src.domain.futures.strategy.candidate_ensemble"):
@@ -799,13 +809,15 @@ def test_scenario5_ic_not_in_log_and_rank_ic_not_called(
     # Arrange: minimal archetype_only frame (no IC path triggered)
     rng = np.random.default_rng(0)
     n = 40
-    train_events = pd.DataFrame({
-        "archetype": rng.choice(["trend", "mean_rev"], size=n),
-        "entry_regime_code": rng.integers(0, 3, size=n),
-        "net_return_bps": rng.normal(10.0, 5.0, size=n),
-        "entry_idx": np.arange(n),
-        "symbol": rng.choice(["BTC", "ETH", "SOL"], size=n),
-    })
+    train_events = pd.DataFrame(
+        {
+            "archetype": rng.choice(["trend", "mean_rev"], size=n),
+            "entry_regime_code": rng.integers(0, 3, size=n),
+            "net_return_bps": rng.normal(10.0, 5.0, size=n),
+            "entry_idx": np.arange(n),
+            "symbol": rng.choice(["BTC", "ETH", "SOL"], size=n),
+        }
+    )
     cfg = _make_cfg(ensemble_conditioning="archetype_only")
 
     # Act
@@ -819,9 +831,7 @@ def test_scenario5_ic_not_in_log_and_rank_ic_not_called(
     assert "IC:" not in log_msg, f"IC: still present in log: {log_msg!r}"
 
     # Assert — _internal_validation_rank_ic not called from hot path
-    assert call_count[0] == 0, (
-        f"_internal_validation_rank_ic was called {call_count[0]} time(s); expected 0"
-    )
+    assert call_count[0] == 0, f"_internal_validation_rank_ic was called {call_count[0]} time(s); expected 0"
 
     # Assert — structural tokens still present
     assert "Arch-Only" in log_msg
@@ -832,6 +842,7 @@ def test_scenario5_ic_not_in_log_and_rank_ic_not_called(
 # ---------------------------------------------------------------------------
 # Variant-Edge Hierarchical Prior — S1 ~ S6
 # ---------------------------------------------------------------------------
+
 
 def _make_variant_frame(
     *,
@@ -845,22 +856,26 @@ def _make_variant_frame(
 ) -> pd.DataFrame:
     """2 variants in same archetype x regime cell: 'fam:high' (high edge) vs 'fam:noise'."""
     rng = np.random.default_rng(seed)
-    df_high = pd.DataFrame({
-        "family": ["fam"] * high_edge_n,
-        "variant": ["high"] * high_edge_n,
-        "archetype": [archetype] * high_edge_n,
-        "entry_regime_code": [regime] * high_edge_n,
-        "net_return_bps": rng.normal(high_edge_mean, 5.0, high_edge_n),
-        "entry_idx": np.arange(high_edge_n, dtype=np.int64),
-    })
-    df_noise = pd.DataFrame({
-        "family": ["fam"] * noise_n,
-        "variant": ["noise"] * noise_n,
-        "archetype": [archetype] * noise_n,
-        "entry_regime_code": [regime] * noise_n,
-        "net_return_bps": rng.normal(noise_mean, 5.0, noise_n),
-        "entry_idx": np.arange(noise_n, dtype=np.int64) + high_edge_n,
-    })
+    df_high = pd.DataFrame(
+        {
+            "family": ["fam"] * high_edge_n,
+            "variant": ["high"] * high_edge_n,
+            "archetype": [archetype] * high_edge_n,
+            "entry_regime_code": [regime] * high_edge_n,
+            "net_return_bps": rng.normal(high_edge_mean, 5.0, high_edge_n),
+            "entry_idx": np.arange(high_edge_n, dtype=np.int64),
+        }
+    )
+    df_noise = pd.DataFrame(
+        {
+            "family": ["fam"] * noise_n,
+            "variant": ["noise"] * noise_n,
+            "archetype": [archetype] * noise_n,
+            "entry_regime_code": [regime] * noise_n,
+            "net_return_bps": rng.normal(noise_mean, 5.0, noise_n),
+            "entry_idx": np.arange(noise_n, dtype=np.int64) + high_edge_n,
+        }
+    )
     return pd.concat([df_high, df_noise], ignore_index=True)
 
 
@@ -868,9 +883,7 @@ def test_s1_variant_prior_discriminates_within_cell() -> None:
     """S1: 동일 셀 내 고엣지 변이 vs noise 변이에 서로 다른 score 부여."""
     # Arrange
     frame = _make_variant_frame()
-    cell_mu, _, arch_mu, _, global_mu, _, *_ = _fit_cell_means(
-        frame, shrinkage_k=50.0, axis="archetype_regime"
-    )
+    cell_mu, _, arch_mu, _, global_mu, _, *_ = _fit_cell_means(frame, shrinkage_k=50.0, axis="archetype_regime")
     # cell_mu: (archetype, regime) → single value (둘 다 혼합 평균)
     cell_anchor = cell_mu[("ts_mom", 0)]
 
@@ -910,14 +923,16 @@ def test_s2_variant_prior_improves_rank_ic_sign() -> None:
         else:
             net_returns.append(returns_B[idx_B])
             idx_B += 1
-    df = pd.DataFrame({
-        "family": ["fam"] * n,
-        "variant": variants,
-        "archetype": ["momentum"] * n,
-        "entry_regime_code": [0] * n,
-        "net_return_bps": net_returns,
-        "entry_idx": np.arange(n, dtype=np.int64),
-    })
+    df = pd.DataFrame(
+        {
+            "family": ["fam"] * n,
+            "variant": variants,
+            "archetype": ["momentum"] * n,
+            "entry_regime_code": [0] * n,
+            "net_return_bps": net_returns,
+            "entry_idx": np.arange(n, dtype=np.int64),
+        }
+    )
 
     # Act: IC with and without variant prior
     ic_no_prior = _internal_validation_rank_ic(
@@ -949,14 +964,16 @@ def test_s3_variant_prior_is_only_no_oos_leakage() -> None:
     # Arrange: 시계열 분할 가능한 frame with entry_idx
     rng = np.random.default_rng(11)
     n = 200
-    df = pd.DataFrame({
-        "family": ["fam"] * n,
-        "variant": ["v1"] * n,
-        "archetype": ["momentum"] * n,
-        "entry_regime_code": [0] * n,
-        "net_return_bps": rng.normal(20.0, 5.0, n),
-        "entry_idx": np.arange(n, dtype=np.int64),
-    })
+    df = pd.DataFrame(
+        {
+            "family": ["fam"] * n,
+            "variant": ["v1"] * n,
+            "archetype": ["momentum"] * n,
+            "entry_regime_code": [0] * n,
+            "net_return_bps": rng.normal(20.0, 5.0, n),
+            "entry_idx": np.arange(n, dtype=np.int64),
+        }
+    )
 
     val_start = int(n * 0.75)
     val_idx_cutoff = int(df.iloc[val_start]["entry_idx"])
@@ -967,9 +984,7 @@ def test_s3_variant_prior_is_only_no_oos_leakage() -> None:
     assert sub_fit["entry_idx"].max() < val_set["entry_idx"].min()
 
     # Act: fit variant_mu on sub_fit only
-    cell_mu, _, arch_mu, _, global_mu, _, *_ = _fit_cell_means(
-        sub_fit, shrinkage_k=50.0, axis="archetype_regime"
-    )
+    cell_mu, _, arch_mu, _, global_mu, _, *_ = _fit_cell_means(sub_fit, shrinkage_k=50.0, axis="archetype_regime")
     variant_mu, _ = _fit_variant_means(
         sub_fit,  # IS-only
         cell_mu=cell_mu,
@@ -992,28 +1007,30 @@ def test_s4_variant_prior_small_sample_falls_back_to_anchor() -> None:
     # Arrange
     rng = np.random.default_rng(99)
     # lucky:rare: n=5 (<<40), raw mean=300bps (spurious)
-    df_rare = pd.DataFrame({
-        "family": ["lucky"] * 5,
-        "variant": ["rare"] * 5,
-        "archetype": ["momentum"] * 5,
-        "entry_regime_code": [0] * 5,
-        "net_return_bps": rng.normal(300.0, 5.0, 5),
-        "entry_idx": np.arange(5, dtype=np.int64),
-    })
+    df_rare = pd.DataFrame(
+        {
+            "family": ["lucky"] * 5,
+            "variant": ["rare"] * 5,
+            "archetype": ["momentum"] * 5,
+            "entry_regime_code": [0] * 5,
+            "net_return_bps": rng.normal(300.0, 5.0, 5),
+            "entry_idx": np.arange(5, dtype=np.int64),
+        }
+    )
     # bulk: large anchor cell
-    df_bulk = pd.DataFrame({
-        "family": ["bulk"] * 200,
-        "variant": ["normal"] * 200,
-        "archetype": ["momentum"] * 200,
-        "entry_regime_code": [0] * 200,
-        "net_return_bps": rng.normal(20.0, 5.0, 200),
-        "entry_idx": np.arange(200, dtype=np.int64) + 5,
-    })
+    df_bulk = pd.DataFrame(
+        {
+            "family": ["bulk"] * 200,
+            "variant": ["normal"] * 200,
+            "archetype": ["momentum"] * 200,
+            "entry_regime_code": [0] * 200,
+            "net_return_bps": rng.normal(20.0, 5.0, 200),
+            "entry_idx": np.arange(200, dtype=np.int64) + 5,
+        }
+    )
     frame = pd.concat([df_rare, df_bulk], ignore_index=True)
 
-    cell_mu, _, arch_mu, _, global_mu, _, *_ = _fit_cell_means(
-        frame, shrinkage_k=50.0, axis="archetype_regime"
-    )
+    cell_mu, _, arch_mu, _, global_mu, _, *_ = _fit_cell_means(frame, shrinkage_k=50.0, axis="archetype_regime")
     anchor = cell_mu.get(("momentum", 0), arch_mu.get("momentum", global_mu))
 
     # Act
@@ -1037,12 +1054,14 @@ def test_s5_variant_prior_backward_compat_no_family_variant_cols() -> None:
     # Arrange: 기존 스키마 (family/variant 미존재)
     rng = np.random.default_rng(21)
     n = 200
-    df = pd.DataFrame({
-        "archetype": ["momentum"] * n,
-        "entry_regime_code": [0] * n,
-        "net_return_bps": rng.normal(20.0, 5.0, n),
-        "entry_idx": np.arange(n, dtype=np.int64),
-    })
+    df = pd.DataFrame(
+        {
+            "archetype": ["momentum"] * n,
+            "entry_regime_code": [0] * n,
+            "net_return_bps": rng.normal(20.0, 5.0, n),
+            "entry_idx": np.arange(n, dtype=np.int64),
+        }
+    )
     cfg = _make_cfg(
         ensemble_variant_prior_enabled=True,
         ensemble_variant_shrinkage_k=30.0,
@@ -1069,37 +1088,37 @@ def test_s6_variant_prior_freq_n_cap_limits_weight() -> None:
     rng = np.random.default_rng(55)
     n_hf = 1000  # high-frequency noise variant
     n_ref = 200
-    df_hf = pd.DataFrame({
-        "family": ["hf"] * n_hf,
-        "variant": ["noise"] * n_hf,
-        "archetype": ["momentum"] * n_hf,
-        "entry_regime_code": [0] * n_hf,
-        "net_return_bps": rng.normal(8.0, 3.0, n_hf),
-        "entry_idx": np.arange(n_hf, dtype=np.int64),
-    })
-    df_ref = pd.DataFrame({
-        "family": ["ref"] * n_ref,
-        "variant": ["normal"] * n_ref,
-        "archetype": ["momentum"] * n_ref,
-        "entry_regime_code": [0] * n_ref,
-        "net_return_bps": rng.normal(20.0, 3.0, n_ref),
-        "entry_idx": np.arange(n_ref, dtype=np.int64) + n_hf,
-    })
-    frame = pd.concat([df_hf, df_ref], ignore_index=True)
-    cell_mu, _, arch_mu, _, global_mu, _, *_ = _fit_cell_means(
-        frame, shrinkage_k=50.0, axis="archetype_regime"
+    df_hf = pd.DataFrame(
+        {
+            "family": ["hf"] * n_hf,
+            "variant": ["noise"] * n_hf,
+            "archetype": ["momentum"] * n_hf,
+            "entry_regime_code": [0] * n_hf,
+            "net_return_bps": rng.normal(8.0, 3.0, n_hf),
+            "entry_idx": np.arange(n_hf, dtype=np.int64),
+        }
     )
+    df_ref = pd.DataFrame(
+        {
+            "family": ["ref"] * n_ref,
+            "variant": ["normal"] * n_ref,
+            "archetype": ["momentum"] * n_ref,
+            "entry_regime_code": [0] * n_ref,
+            "net_return_bps": rng.normal(20.0, 3.0, n_ref),
+            "entry_idx": np.arange(n_ref, dtype=np.int64) + n_hf,
+        }
+    )
+    frame = pd.concat([df_hf, df_ref], ignore_index=True)
+    cell_mu, _, arch_mu, _, global_mu, _, *_ = _fit_cell_means(frame, shrinkage_k=50.0, axis="archetype_regime")
     anchor = cell_mu.get(("momentum", 0), arch_mu.get("momentum", global_mu))
 
     # Act: with freq_n_cap=200
     v_mu_capped, _ = _fit_variant_means(
-        frame, cell_mu=cell_mu, arch_mu=arch_mu, global_mu=global_mu,
-        k_variant=30.0, min_obs=10, freq_n_cap=200
+        frame, cell_mu=cell_mu, arch_mu=arch_mu, global_mu=global_mu, k_variant=30.0, min_obs=10, freq_n_cap=200
     )
     # Act: without freq_n_cap
     v_mu_uncapped, _ = _fit_variant_means(
-        frame, cell_mu=cell_mu, arch_mu=arch_mu, global_mu=global_mu,
-        k_variant=30.0, min_obs=10, freq_n_cap=0
+        frame, cell_mu=cell_mu, arch_mu=arch_mu, global_mu=global_mu, k_variant=30.0, min_obs=10, freq_n_cap=0
     )
 
     # Assert: capped w_v = 200/(200+30) < uncapped w_v = 1000/(1000+30)
@@ -1236,15 +1255,17 @@ def test_validation_rank_ic_uses_dynamic_offset_prediction() -> None:
         else:
             variants.append("v2")
             net_returns.append(rng.normal(-30.0, 5.0))
-    
-    df = pd.DataFrame({
-        "family": ["fam"] * n,
-        "variant": variants,
-        "archetype": ["momentum"] * n,
-        "entry_regime_code": rng.choice([0, 1], size=n),
-        "net_return_bps": net_returns,
-        "entry_idx": np.arange(n, dtype=np.int64),
-    })
+
+    df = pd.DataFrame(
+        {
+            "family": ["fam"] * n,
+            "variant": variants,
+            "archetype": ["momentum"] * n,
+            "entry_regime_code": rng.choice([0, 1], size=n),
+            "net_return_bps": net_returns,
+            "entry_idx": np.arange(n, dtype=np.int64),
+        }
+    )
 
     # Act
     ic_val = _internal_validation_rank_ic(
@@ -1256,7 +1277,7 @@ def test_validation_rank_ic_uses_dynamic_offset_prediction() -> None:
         variant_shrinkage_k=5.0,
         variant_min_obs=10,
     )
-    
+
     # Assert: We expect a high positive rank IC because our prediction (which distinguishes v1 vs v2 dynamically)
     # matches the actual returns (v1 positive, v2 negative).
     assert ic_val > 0.5, f"Expected strong positive Rank IC, got {ic_val:.4f}"
@@ -1266,14 +1287,16 @@ def test_validation_rank_ic_empty_offset_fallback() -> None:
     """Verify fallback behavior in _internal_validation_rank_ic when no variants meet min_obs."""
     rng = np.random.default_rng(12345)
     n = 50
-    df = pd.DataFrame({
-        "family": ["fam"] * n,
-        "variant": [f"v_{i}" for i in range(n)],  # All unique variants (obs = 1 each)
-        "archetype": ["momentum"] * n,
-        "entry_regime_code": [0] * n,
-        "net_return_bps": rng.normal(10.0, 5.0, n),
-        "entry_idx": np.arange(n, dtype=np.int64),
-    })
+    df = pd.DataFrame(
+        {
+            "family": ["fam"] * n,
+            "variant": [f"v_{i}" for i in range(n)],  # All unique variants (obs = 1 each)
+            "archetype": ["momentum"] * n,
+            "entry_regime_code": [0] * n,
+            "net_return_bps": rng.normal(10.0, 5.0, n),
+            "entry_idx": np.arange(n, dtype=np.int64),
+        }
+    )
 
     # Act
     ic_val = _internal_validation_rank_ic(
@@ -1294,6 +1317,7 @@ def test_validation_rank_ic_empty_offset_fallback() -> None:
 # ---------------------------------------------------------------------------
 # Direction A + B: score calibration & q90 산출 (S1~S6)
 # ---------------------------------------------------------------------------
+
 
 def _make_score_train_df(
     n: int,
@@ -1332,6 +1356,7 @@ def _make_oos_event(*, regime: int, score_z: float, archetype: str = "trend") ->
 
 # S1 — score calibration 적합: 양의 상관 데이터
 
+
 def test_score_calibration_positive_correlation_fits_valid_slope() -> None:
     """Regime 1에서 score_z ↑ → net_bps ↑ 양의 상관 시 slope > 0, calibration_valid=True.
 
@@ -1359,16 +1384,13 @@ def test_score_calibration_positive_correlation_fits_valid_slope() -> None:
     assert model.regime_score_slope.get(1, 0.0) > 0.0
 
     # Assert: 높은 score_z → 낮은 score_z보다 μ 높음
-    out_high = predict_regime_conditional_ensemble(
-        model=model, oos_events=_make_oos_event(regime=1, score_z=2.0)
-    )
-    out_low = predict_regime_conditional_ensemble(
-        model=model, oos_events=_make_oos_event(regime=1, score_z=-2.0)
-    )
+    out_high = predict_regime_conditional_ensemble(model=model, oos_events=_make_oos_event(regime=1, score_z=2.0))
+    out_low = predict_regime_conditional_ensemble(model=model, oos_events=_make_oos_event(regime=1, score_z=-2.0))
     assert out_high.expected_net_bps[0] > out_low.expected_net_bps[0]
 
 
 # S2 — OOS 부호 불안정: score_calibration_valid=False → fallback
+
 
 def test_score_calibration_negative_correlation_marks_invalid() -> None:
     """score_z와 net_bps가 음의 상관일 때 beta < 0 → calibration_valid=False.
@@ -1394,16 +1416,13 @@ def test_score_calibration_negative_correlation_marks_invalid() -> None:
     assert model.score_calibration_valid.get(2) is False
 
     # Assert: predict는 score_z에 무관하게 동일한 cell 기반 값 반환
-    out_high = predict_regime_conditional_ensemble(
-        model=model, oos_events=_make_oos_event(regime=2, score_z=2.0)
-    )
-    out_low = predict_regime_conditional_ensemble(
-        model=model, oos_events=_make_oos_event(regime=2, score_z=-2.0)
-    )
+    out_high = predict_regime_conditional_ensemble(model=model, oos_events=_make_oos_event(regime=2, score_z=2.0))
+    out_low = predict_regime_conditional_ensemble(model=model, oos_events=_make_oos_event(regime=2, score_z=-2.0))
     assert out_high.expected_net_bps[0] == pytest.approx(out_low.expected_net_bps[0])
 
 
 # S3 — 희소 데이터: min_obs 미달 → calibration 미수행
+
 
 def test_score_calibration_insufficient_obs_skips_regime() -> None:
     """n=20 < min_obs=60 → score_calibration_valid[regime] = False, slope 미산출.
@@ -1425,9 +1444,7 @@ def test_score_calibration_insufficient_obs_skips_regime() -> None:
     model = fit_regime_conditional_ensemble(train_events=train_events, cfg=cfg)
 
     # Assert: obs 부족 → valid=False 또는 slope 미존재
-    is_invalid = (
-        not model.score_calibration_valid.get(3, False)
-    )
+    is_invalid = not model.score_calibration_valid.get(3, False)
     assert is_invalid, (
         f"Expected calibration skipped for regime 3 (n={n} < min_obs=60), "
         f"got valid={model.score_calibration_valid.get(3)}"
@@ -1435,6 +1452,7 @@ def test_score_calibration_insufficient_obs_skips_regime() -> None:
 
 
 # S4 — Direction B: q90 실제 산출 확인
+
 
 def test_q90_bps_differs_from_mu() -> None:
     """비대칭 수익 분포(오른꼬리)에서 q90 > μ이고 q90_net_bps > q10_net_bps 성립.
@@ -1470,6 +1488,7 @@ def test_q90_bps_differs_from_mu() -> None:
 
 # S5 — 회귀: score_calibration_enabled=False (default) 시 기존 동작 불변
 
+
 def test_score_calibration_disabled_keeps_existing_behavior() -> None:
     """ensemble_score_calibration_enabled=False (default) 시 score_z 무시.
 
@@ -1491,16 +1510,13 @@ def test_score_calibration_disabled_keeps_existing_behavior() -> None:
     assert model.regime_score_slope == {}
 
     # Assert: predict μ가 score_z와 무관 (high_z ≈ low_z)
-    out_high = predict_regime_conditional_ensemble(
-        model=model, oos_events=_make_oos_event(regime=1, score_z=2.0)
-    )
-    out_low = predict_regime_conditional_ensemble(
-        model=model, oos_events=_make_oos_event(regime=1, score_z=-2.0)
-    )
+    out_high = predict_regime_conditional_ensemble(model=model, oos_events=_make_oos_event(regime=1, score_z=2.0))
+    out_low = predict_regime_conditional_ensemble(model=model, oos_events=_make_oos_event(regime=1, score_z=-2.0))
     assert out_high.expected_net_bps[0] == pytest.approx(out_low.expected_net_bps[0])
 
 
 # S6 — Leakage 검증: _internal_validation_rank_ic에서 val_set 데이터 누출 방지
+
 
 def test_score_calibration_no_leakage_from_val_set() -> None:
     """score calibration fit은 sub_fit(학습 영역)만 사용하며 val_set entry_idx 범위 밖.
@@ -1563,7 +1579,7 @@ def test_vectorized_rank_ic_matches_legacy_logic() -> None:
             "entry_idx": np.arange(n),
         }
     )
-    
+
     # 직접 호출하여 예외 없이 동작하는지 확인
     ic_val = _internal_validation_rank_ic(
         df,
@@ -1580,7 +1596,7 @@ def test_vectorized_rank_ic_matches_legacy_logic() -> None:
         allowed_families=(),
         score_calibration_enabled=True,
         score_z_clip=3.0,
-        score_calibration_min_obs=10, # 관측 개수 낮춰서 Calibration 타도록 유도
+        score_calibration_min_obs=10,  # 관측 개수 낮춰서 Calibration 타도록 유도
         score_slope_k=100.0,
     )
     assert isinstance(ic_val, float)
@@ -1616,11 +1632,11 @@ def test_vectorized_rank_ic_edge_cases_unknown_classes() -> None:
         }
     )
     df_combined = pd.concat([df_train, df_val], ignore_index=True)
-    
+
     ic_val = _internal_validation_rank_ic(
         df_combined,
         shrinkage_k=50.0,
-        val_fraction=0.2, # df_val이 val_set으로 잡힘
+        val_fraction=0.2,  # df_val이 val_set으로 잡힘
         axis="archetype_regime",
         variant_prior_enabled=True,
         score_calibration_enabled=True,
@@ -1636,12 +1652,14 @@ def test_vectorized_rank_ic_edge_cases_unknown_classes() -> None:
 
 def test_archetype_label_semantic_accuracy(caplog: pytest.LogCaptureFixture) -> None:
     """Scenario 1: mean_rev→MRV, ts_mom→TMO (swap 수정 검증)."""
-    frame = pd.DataFrame({
-        "symbol": ["BTC"] * 10,
-        "archetype": ["mean_rev"] * 5 + ["ts_mom"] * 5,
-        "entry_regime_code": [0] * 10,
-        "net_return_bps": [10.0] * 10,
-    })
+    frame = pd.DataFrame(
+        {
+            "symbol": ["BTC"] * 10,
+            "archetype": ["mean_rev"] * 5 + ["ts_mom"] * 5,
+            "entry_regime_code": [0] * 10,
+            "net_return_bps": [10.0] * 10,
+        }
+    )
     arch_mu = {"mean_rev": 13.0, "ts_mom": 31.7}
 
     with caplog.at_level(logging.INFO, logger="src.domain.futures.strategy.candidate_ensemble"):
@@ -1665,12 +1683,14 @@ def test_archetype_label_semantic_accuracy(caplog: pytest.LogCaptureFixture) -> 
 
 def test_archetype_label_flow_rev_present_and_absent(caplog: pytest.LogCaptureFixture) -> None:
     """Scenario 2A/B: flow_rev 이벤트 존재 → FLO 출력, 부재 → FLO 미출력."""
-    base_frame = pd.DataFrame({
-        "symbol": ["ETH"] * 5,
-        "archetype": ["trend"] * 5,
-        "entry_regime_code": [0] * 5,
-        "net_return_bps": [5.0] * 5,
-    })
+    base_frame = pd.DataFrame(
+        {
+            "symbol": ["ETH"] * 5,
+            "archetype": ["trend"] * 5,
+            "entry_regime_code": [0] * 5,
+            "net_return_bps": [5.0] * 5,
+        }
+    )
 
     # 2A: flow_rev 있음 → FLO 포함
     caplog.clear()
@@ -1703,12 +1723,14 @@ def test_archetype_label_flow_rev_present_and_absent(caplog: pytest.LogCaptureFi
 
 def test_archetype_label_negative_sign_unwind(caplog: pytest.LogCaptureFixture) -> None:
     """Scenario 3: unwind 음수 → UNW:-5.0❌ 검증."""
-    frame = pd.DataFrame({
-        "symbol": ["SOL"] * 5,
-        "archetype": ["unwind"] * 5,
-        "entry_regime_code": [0] * 5,
-        "net_return_bps": [-5.0] * 5,
-    })
+    frame = pd.DataFrame(
+        {
+            "symbol": ["SOL"] * 5,
+            "archetype": ["unwind"] * 5,
+            "entry_regime_code": [0] * 5,
+            "net_return_bps": [-5.0] * 5,
+        }
+    )
 
     with caplog.at_level(logging.INFO, logger="src.domain.futures.strategy.candidate_ensemble"):
         _log_ensemble_diagnostics(
@@ -1727,15 +1749,22 @@ def test_archetype_label_negative_sign_unwind(caplog: pytest.LogCaptureFixture) 
 
 def test_archetype_label_all_seven_labels(caplog: pytest.LogCaptureFixture) -> None:
     """Scenario 4 (회귀): 7종 전체 라벨이 의미 정합 코드로 출력."""
-    frame = pd.DataFrame({
-        "symbol": ["BTC"] * 7,
-        "archetype": ["trend", "ts_mom", "mean_rev", "carry_rev", "flow_rev", "unwind", "beta_neut"],
-        "entry_regime_code": [0] * 7,
-        "net_return_bps": [1.0] * 7,
-    })
+    frame = pd.DataFrame(
+        {
+            "symbol": ["BTC"] * 7,
+            "archetype": ["trend", "ts_mom", "mean_rev", "carry_rev", "flow_rev", "unwind", "beta_neut"],
+            "entry_regime_code": [0] * 7,
+            "net_return_bps": [1.0] * 7,
+        }
+    )
     arch_mu = {
-        "trend": 5.0, "ts_mom": 10.0, "mean_rev": 8.0,
-        "carry_rev": 3.0, "flow_rev": 7.0, "unwind": -2.0, "beta_neut": 4.0,
+        "trend": 5.0,
+        "ts_mom": 10.0,
+        "mean_rev": 8.0,
+        "carry_rev": 3.0,
+        "flow_rev": 7.0,
+        "unwind": -2.0,
+        "beta_neut": 4.0,
     }
 
     with caplog.at_level(logging.INFO, logger="src.domain.futures.strategy.candidate_ensemble"):
@@ -1760,6 +1789,7 @@ def test_archetype_label_all_seven_labels(caplog: pytest.LogCaptureFixture) -> N
 # _log_signal_symbol_diagnostics — Scenario 1~5 (spec: l1-signal-symbol-diagnostics.md)
 # ---------------------------------------------------------------------------
 
+
 def _make_diag_frame(
     *,
     arch_fam_vals: list[tuple[str, str, str, float]],  # (archetype, family, symbol, bps)
@@ -1767,13 +1797,15 @@ def _make_diag_frame(
     """Build a minimal frame for _log_signal_symbol_diagnostics tests."""
     rows: list[dict[str, object]] = []
     for arch, fam, sym, bps in arch_fam_vals:
-        rows.append({
-            "archetype": arch,
-            "family": fam,
-            "symbol": sym,
-            "net_return_bps": bps,
-            "entry_regime_code": 0,
-        })
+        rows.append(
+            {
+                "archetype": arch,
+                "family": fam,
+                "symbol": sym,
+                "net_return_bps": bps,
+                "entry_regime_code": 0,
+            }
+        )
     return pd.DataFrame(rows)
 
 
@@ -1783,10 +1815,9 @@ def test_signal_symbol_diag_worst_first_and_review_flag(
     """Scenario 1: bad_fam worst-first + REVIEW flag + per-symbol detail."""
     n_good = 60
     n_bad = 60
-    data: list[tuple[str, str, str, float]] = (
-        [("trend", "bad_fam", f"SYM{i:02d}", -8.0) for i in range(n_bad)] +
-        [("trend", "good_fam", f"SYM{i:02d}", 30.0) for i in range(n_good)]
-    )
+    data: list[tuple[str, str, str, float]] = [("trend", "bad_fam", f"SYM{i:02d}", -8.0) for i in range(n_bad)] + [
+        ("trend", "good_fam", f"SYM{i:02d}", 30.0) for i in range(n_good)
+    ]
     frame = _make_diag_frame(arch_fam_vals=data)
 
     with caplog.at_level(logging.DEBUG, logger="src.domain.futures.strategy.candidate_ensemble"):
@@ -1811,11 +1842,7 @@ def test_signal_symbol_diag_absent_archetype_warning(
 ) -> None:
     """Scenario 2: absent archetype (carry_rev) triggers WARNING with name."""
     all_except_carry = [k for k in ARCHETYPE_LABELS if k != "carry_rev"]
-    data = [
-        (arch, "some_fam", "BTC", 10.0)
-        for arch in all_except_carry
-        for _ in range(5)
-    ]
+    data = [(arch, "some_fam", "BTC", 10.0) for arch in all_except_carry for _ in range(5)]
     frame = _make_diag_frame(arch_fam_vals=data)
 
     with caplog.at_level(logging.DEBUG, logger="src.domain.futures.strategy.candidate_ensemble"):
@@ -1837,23 +1864,23 @@ def test_signal_symbol_diag_fold_tag_guard(
     """Scenario 3: call-site guard -- tag='ENS' must NOT emit [ENS-DIAG] via fit_regime_conditional_ensemble."""
     rng = np.random.default_rng(99)
     n = 60
-    train_events = pd.DataFrame({
-        "archetype": rng.choice(["trend", "mean_rev"], size=n),
-        "entry_regime_code": rng.integers(0, 2, size=n),
-        "net_return_bps": rng.normal(10.0, 5.0, size=n),
-        "family": ["trend_ma"] * n,
-        "variant": ["ema_12_72"] * n,
-        "symbol": rng.choice(["BTC", "ETH"], size=n),
-        "entry_idx": np.arange(n),
-    })
+    train_events = pd.DataFrame(
+        {
+            "archetype": rng.choice(["trend", "mean_rev"], size=n),
+            "entry_regime_code": rng.integers(0, 2, size=n),
+            "net_return_bps": rng.normal(10.0, 5.0, size=n),
+            "family": ["trend_ma"] * n,
+            "variant": ["ema_12_72"] * n,
+            "symbol": rng.choice(["BTC", "ETH"], size=n),
+            "entry_idx": np.arange(n),
+        }
+    )
     cfg = _make_cfg(ensemble_conditioning="archetype_only")
 
     with caplog.at_level(logging.DEBUG, logger="src.domain.futures.strategy.candidate_ensemble"):
         _ = fit_regime_conditional_ensemble(train_events=train_events, cfg=cfg, tag="ENS")
 
-    assert not any("[ENS-DIAG]" in m for m in caplog.messages), (
-        "[ENS-DIAG] must not appear when tag='ENS' (fold guard)"
-    )
+    assert not any("[ENS-DIAG]" in m for m in caplog.messages), "[ENS-DIAG] must not appear when tag='ENS' (fold guard)"
 
 
 def test_signal_symbol_diag_debug_off_noop(
@@ -1870,21 +1897,21 @@ def test_signal_symbol_diag_debug_off_noop(
             tag="ENS-FINAL",
         )
 
-    assert not any("[ENS-DIAG]" in m for m in caplog.messages), (
-        "[ENS-DIAG] must not appear when DEBUG is disabled"
-    )
+    assert not any("[ENS-DIAG]" in m for m in caplog.messages), "[ENS-DIAG] must not appear when DEBUG is disabled"
 
 
 def test_signal_symbol_diag_no_symbol_column(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     """Scenario 5: frame without 'symbol' column -> family rollup only, no exception."""
-    frame = pd.DataFrame({
-        "archetype": ["trend"] * 50 + ["mean_rev"] * 50,
-        "family": ["trend_ma"] * 50 + ["rsi_reversion"] * 50,
-        "net_return_bps": [-5.0] * 50 + [2.0] * 50,
-        "entry_regime_code": [0] * 100,
-    })
+    frame = pd.DataFrame(
+        {
+            "archetype": ["trend"] * 50 + ["mean_rev"] * 50,
+            "family": ["trend_ma"] * 50 + ["rsi_reversion"] * 50,
+            "net_return_bps": [-5.0] * 50 + [2.0] * 50,
+            "entry_regime_code": [0] * 100,
+        }
+    )
 
     with caplog.at_level(logging.DEBUG, logger="src.domain.futures.strategy.candidate_ensemble"):
         _log_signal_symbol_diagnostics(
@@ -1905,14 +1932,17 @@ def test_signal_symbol_diag_no_symbol_column(
 # P1: Bayesian Prior for ENS Edge (_fit_cell_means)
 # ---------------------------------------------------------------------------
 
+
 def test_prior_shrinks_small_sample_edge_to_zero() -> None:
     """P1.1: prior_effective_n=100 shrinks 5-event raw_mean of +50 toward 0."""
-    frame = pd.DataFrame({
-        "archetype": ["trend"] * 5,
-        "entry_regime_code": [0] * 5,
-        "net_return_bps": [50.0] * 5,
-        "entry_idx": np.arange(5),
-    })
+    frame = pd.DataFrame(
+        {
+            "archetype": ["trend"] * 5,
+            "entry_regime_code": [0] * 5,
+            "net_return_bps": [50.0] * 5,
+            "entry_idx": np.arange(5),
+        }
+    )
     _, _, arch_mu, _, _, _, _, _, _ = _fit_cell_means(
         frame,
         shrinkage_k=0.0,  # disable JS shrinkage to isolate prior effect
@@ -1928,12 +1958,14 @@ def test_prior_shrinks_small_sample_edge_to_zero() -> None:
 def test_prior_large_sample_unaffected() -> None:
     """P1.2: 10000 events with prior_n=100 → prior effect < 1%."""
     rng = np.random.default_rng(42)
-    frame = pd.DataFrame({
-        "archetype": ["trend"] * 10000,
-        "entry_regime_code": [0] * 10000,
-        "net_return_bps": rng.normal(50.0, 30.0, 10000),
-        "entry_idx": np.arange(10000),
-    })
+    frame = pd.DataFrame(
+        {
+            "archetype": ["trend"] * 10000,
+            "entry_regime_code": [0] * 10000,
+            "net_return_bps": rng.normal(50.0, 30.0, 10000),
+            "entry_idx": np.arange(10000),
+        }
+    )
     _, _, arch_mu, _, _, _, _, _, _ = _fit_cell_means(
         frame,
         shrinkage_k=0.0,
@@ -1950,21 +1982,29 @@ def test_prior_zero_is_backward_compatible() -> None:
     """P1.3: prior_effective_n=0.0 (default) → same as no prior."""
     rng = np.random.default_rng(42)
     vals = rng.normal(30.0, 20.0, 50)
-    frame = pd.DataFrame({
-        "archetype": ["trend"] * 50,
-        "entry_regime_code": [0] * 50,
-        "net_return_bps": vals,
-        "entry_idx": np.arange(50),
-    })
+    frame = pd.DataFrame(
+        {
+            "archetype": ["trend"] * 50,
+            "entry_regime_code": [0] * 50,
+            "net_return_bps": vals,
+            "entry_idx": np.arange(50),
+        }
+    )
     # without prior
     _, _, arch_mu_no_prior, _, _, _, _, _, _ = _fit_cell_means(
-        frame, shrinkage_k=0.0, axis="archetype_only",
-        adaptive_shrinkage=False, prior_effective_n=0.0,
+        frame,
+        shrinkage_k=0.0,
+        axis="archetype_only",
+        adaptive_shrinkage=False,
+        prior_effective_n=0.0,
     )
     # with prior=0 (should be identical)
     _, _, arch_mu_prior_zero, _, _, _, _, _, _ = _fit_cell_means(
-        frame, shrinkage_k=0.0, axis="archetype_only",
-        adaptive_shrinkage=False, prior_effective_n=0.0,
+        frame,
+        shrinkage_k=0.0,
+        axis="archetype_only",
+        adaptive_shrinkage=False,
+        prior_effective_n=0.0,
     )
     assert arch_mu_no_prior["trend"] == pytest.approx(arch_mu_prior_zero["trend"])
 
@@ -1972,12 +2012,14 @@ def test_prior_zero_is_backward_compatible() -> None:
 def test_prior_plus_js_shrinkage_interaction() -> None:
     """P1.4: Prior + JS: two-step shrinkage applied sequentially."""
     # 5 events with mean +50, prior_n=100, JS k=10, global_mu=compute([50]*5 + [-50]*5)
-    frame = pd.DataFrame({
-        "archetype": ["trend"] * 5 + ["mean_rev"] * 5,
-        "entry_regime_code": [0] * 10,
-        "net_return_bps": [50.0] * 5 + [-50.0] * 5,
-        "entry_idx": np.arange(10),
-    })
+    frame = pd.DataFrame(
+        {
+            "archetype": ["trend"] * 5 + ["mean_rev"] * 5,
+            "entry_regime_code": [0] * 10,
+            "net_return_bps": [50.0] * 5 + [-50.0] * 5,
+            "entry_idx": np.arange(10),
+        }
+    )
     _, _, arch_mu, _, global_mu, _, _, _, _ = _fit_cell_means(
         frame,
         shrinkage_k=10.0,
@@ -2000,13 +2042,16 @@ def test_prior_plus_js_shrinkage_interaction() -> None:
 # P2: ENS Minimum Event Display Threshold
 # ---------------------------------------------------------------------------
 
+
 def test_log_ensemble_shows_insuf_for_low_event_archetype(caplog: pytest.LogCaptureFixture) -> None:
     """P2.1: Archetype with < min_display_events shows 'insuf'."""
-    frame = pd.DataFrame({
-        "archetype": ["trend"] * 50 + ["mean_rev"] * 500,
-        "entry_regime_code": [0] * 550,
-        "net_return_bps": [10.0] * 550,
-    })
+    frame = pd.DataFrame(
+        {
+            "archetype": ["trend"] * 50 + ["mean_rev"] * 500,
+            "entry_regime_code": [0] * 550,
+            "net_return_bps": [10.0] * 550,
+        }
+    )
     arch_mu = {"trend": 10.0, "mean_rev": 10.0}
 
     with caplog.at_level(logging.INFO, logger="src.domain.futures.strategy.candidate_ensemble"):
@@ -2031,12 +2076,14 @@ def test_log_ensemble_shows_insuf_for_low_event_archetype(caplog: pytest.LogCapt
 
 def test_log_ensemble_disabled_threshold_shows_all(caplog: pytest.LogCaptureFixture) -> None:
     """P2.2: min_display_events=0 (default) shows numeric for all."""
-    frame = pd.DataFrame({
-        "archetype": ["trend"] * 5,
-        "entry_regime_code": [0] * 5,
-        "net_return_bps": [10.0] * 5,
-        "symbol": ["BTCUSDT"] * 5,
-    })
+    frame = pd.DataFrame(
+        {
+            "archetype": ["trend"] * 5,
+            "entry_regime_code": [0] * 5,
+            "net_return_bps": [10.0] * 5,
+            "symbol": ["BTCUSDT"] * 5,
+        }
+    )
     arch_mu = {"trend": 10.0}
 
     with caplog.at_level(logging.INFO, logger="src.domain.futures.strategy.candidate_ensemble"):
@@ -2058,12 +2105,14 @@ def test_log_ensemble_disabled_threshold_shows_all(caplog: pytest.LogCaptureFixt
 
 def test_log_ensemble_mixed_insuf_and_displayed(caplog: pytest.LogCaptureFixture) -> None:
     """P2.3: Mix of insuf and displayed archetypes in same log."""
-    frame = pd.DataFrame({
-        "archetype": ["trend"] * 200 + ["mean_rev"] * 800,
-        "entry_regime_code": [0] * 1000,
-        "net_return_bps": [-5.0] * 200 + [15.0] * 800,
-        "symbol": ["BTCUSDT"] * 1000,
-    })
+    frame = pd.DataFrame(
+        {
+            "archetype": ["trend"] * 200 + ["mean_rev"] * 800,
+            "entry_regime_code": [0] * 1000,
+            "net_return_bps": [-5.0] * 200 + [15.0] * 800,
+            "symbol": ["BTCUSDT"] * 1000,
+        }
+    )
     arch_mu = {"trend": -5.0, "mean_rev": 15.0}
 
     with caplog.at_level(logging.INFO, logger="src.domain.futures.strategy.candidate_ensemble"):

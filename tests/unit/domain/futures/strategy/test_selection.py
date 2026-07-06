@@ -741,7 +741,7 @@ class TestLayer2Selection(unittest.TestCase):
     def test_select_layer2_champion_parallel_determinism(self, mock_eval: MagicMock) -> None:
         """ThreadPoolExecutor 병렬 실행 중에도 순서가 유지되고 올바른 챔피언이 선택된다."""
         study = MagicMock()
-        
+
         # 3개의 완성된 trial 생성
         trials = []
         for idx, obj in [(1, 0.3), (2, 0.5), (3, 0.4)]:
@@ -760,7 +760,7 @@ class TestLayer2Selection(unittest.TestCase):
             # K_RANK를 각각 2, 3, 4로 다르게 매핑하여 식별 (uppercase: Layer2AllocationConfig.from_mapping 규약)
             t.params = {"K_RANK": idx + 1}
             trials.append(t)
-            
+
         study.trials = trials
 
         # k_rank에 매핑되는 평가 결과 생성
@@ -961,9 +961,7 @@ class TestLayer2Selection(unittest.TestCase):
 
     @patch("src.domain.futures.strategy.tiered_workflow.selection.layer2_constraints_from_trial")
     @patch("src.domain.futures.strategy.tiered_workflow.selection.evaluate_l2_trial")
-    def test_select_layer2_champion_max_limit_slice(
-        self, mock_eval: MagicMock, mock_constraints: MagicMock
-    ) -> None:
+    def test_select_layer2_champion_max_limit_slice(self, mock_eval: MagicMock, mock_constraints: MagicMock) -> None:
         """통과 후보가 8개보다 많을 때 최대 8개로 엄격하게 대상을 잘라내어 연산하는지 검증."""
         mock_constraints.return_value = (0.0,) * 9
         study = MagicMock()
@@ -1028,7 +1026,6 @@ class TestLayer2Selection(unittest.TestCase):
 
         # 최대 한도 8개로 엄격히 잘라야 함
         assert mock_eval.call_count == 8
-
 
     @patch("src.domain.futures.strategy.tiered_workflow.selection.layer2_constraints_from_trial")
     @patch("src.domain.futures.strategy.tiered_workflow.selection.evaluate_layer2_gate")
@@ -1142,13 +1139,7 @@ class TestLayer2Selection(unittest.TestCase):
         )
 
         expected = (
-            0.20
-            + 0.10 * 1.2
-            + 0.05 * min(0.20 / 0.10, 3.0)
-            - 0.50 * 0.20
-            - 0.25 * (0.45 - 0.25)
-            - 0.20 * 0.30
-            - 0.15
+            0.20 + 0.10 * 1.2 + 0.05 * min(0.20 / 0.10, 3.0) - 0.50 * 0.20 - 0.25 * (0.45 - 0.25) - 0.20 * 0.30 - 0.15
         )
         assert score.worst_fold_cagr == pytest.approx(-0.20)
         assert score.positive_block_delta_ratio == pytest.approx(0.25)

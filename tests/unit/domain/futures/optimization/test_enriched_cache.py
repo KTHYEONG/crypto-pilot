@@ -2,6 +2,7 @@
 
 Time: O(1) per test.
 """
+
 from __future__ import annotations
 
 import time
@@ -21,13 +22,7 @@ def make_stale_enriched(tmp_path: Path) -> tuple[Path, Path]:
 def test_enriched_cache_invalidated_when_raw_is_newer(tmp_path: Path) -> None:
     """enriched가 raw보다 오래된 경우 enriched_stale == True."""
     raw, enriched = make_stale_enriched(tmp_path)
-    enriched_stale = (
-        not enriched.exists()
-        or (
-            raw.exists()
-            and enriched.stat().st_mtime < raw.stat().st_mtime
-        )
-    )
+    enriched_stale = not enriched.exists() or (raw.exists() and enriched.stat().st_mtime < raw.stat().st_mtime)
     assert enriched_stale is True
 
 
@@ -38,13 +33,7 @@ def test_enriched_cache_not_rebuilt_when_already_fresh(tmp_path: Path) -> None:
     raw.write_bytes(b"raw_data")
     time.sleep(0.05)
     enriched.write_bytes(b"enriched_data")  # enriched가 더 새로움
-    enriched_stale = (
-        not enriched.exists()
-        or (
-            raw.exists()
-            and enriched.stat().st_mtime < raw.stat().st_mtime
-        )
-    )
+    enriched_stale = not enriched.exists() or (raw.exists() and enriched.stat().st_mtime < raw.stat().st_mtime)
     assert enriched_stale is False
 
 
@@ -54,11 +43,5 @@ def test_enriched_stale_when_enriched_missing(tmp_path: Path) -> None:
     enriched = tmp_path / "BTCUSDT_4h_enriched.parquet"
     raw.write_bytes(b"raw_data")
     # enriched 파일 없음
-    enriched_stale = (
-        not enriched.exists()
-        or (
-            raw.exists()
-            and enriched.stat().st_mtime < raw.stat().st_mtime
-        )
-    )
+    enriched_stale = not enriched.exists() or (raw.exists() and enriched.stat().st_mtime < raw.stat().st_mtime)
     assert enriched_stale is True

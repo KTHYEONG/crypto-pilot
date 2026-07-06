@@ -1,5 +1,6 @@
 """Alpha Foundry diversity and effective test count helpers.
 
+[ADR_20260706_ALPHA_FOUNDRY_L0_L1_HANDOFF_GUARD]
 [ADR_20260706_ALPHA_FOUNDRY_SYNC][ADR_20260706_ALPHA_FOUNDRY_L0_DIVERSITY]
 [ADR_20260706_ALPHA_FOUNDRY_L0_SIGNAL_RIGOR]
 """
@@ -45,9 +46,7 @@ def compute_panel_correlation_matrix(
         raise ValueError("panels must not be empty")
     for p in panels:
         if p.signed_score_2d.shape != active_mask.shape:
-            raise ValueError(
-                f"panel shape {p.signed_score_2d.shape} != active_mask shape {active_mask.shape}"
-            )
+            raise ValueError(f"panel shape {p.signed_score_2d.shape} != active_mask shape {active_mask.shape}")
     m = len(panels)
     corr = np.full((m, m), np.nan, dtype=np.float64)
     for i in range(m):
@@ -66,9 +65,7 @@ def cluster_correlated_recipes(
 ) -> tuple[tuple[str, ...], ...]:
     n = len(evidences)
     if corr.shape != (n, n):
-        raise ValueError(
-            f"corr shape {corr.shape} != (n_evidences={n}, {n})"
-        )
+        raise ValueError(f"corr shape {corr.shape} != (n_evidences={n}, {n})")
     recipe_ids = [e.recipe_id for e in evidences]
     assigned: set[int] = set()
     clusters: list[tuple[str, ...]] = []
@@ -106,7 +103,6 @@ def estimate_effective_test_count(
     return float(max(1.0, min(m_eff, float(n))))
 
 
-
 def apply_bucket_bh_correction(
     candidates: Sequence[CheapGateEvidence],
     fdr_alpha: float,
@@ -121,7 +117,7 @@ def apply_bucket_bh_correction(
         p = 2.0 * (1.0 - scipy_stats.norm.cdf(abs(c.nw_tstat)))
         if p <= ((i + 1) / m) * fdr_alpha:
             max_i = i
-    for c in sorted_candidates[:max_i + 1]:
+    for c in sorted_candidates[: max_i + 1]:
         selected.add(c.recipe_id)
     return frozenset(selected)
 
@@ -191,9 +187,7 @@ def select_bucket_diverse_candidates(
 
     n_sel = len(selected)
     if n_sel > 1:
-        selected_panels = [
-            panel_by_recipe_id[rid] for rid in selected_ids if rid in panel_by_recipe_id
-        ]
+        selected_panels = [panel_by_recipe_id[rid] for rid in selected_ids if rid in panel_by_recipe_id]
         if len(selected_panels) == n_sel:
             bucket_corr = compute_panel_correlation_matrix(selected_panels, active_mask)
             bucket_eff = estimate_effective_test_count(bucket_corr)
@@ -260,15 +254,31 @@ def resolve_cross_bucket_diversity(
     if len(all_candidates) != len(all_selected):
         all_candidates = [
             L0SignalCandidate(
-                run_id="", timeframe="", family="", variant="", recipe_id=rid,
-                archetype="trend", source="synthetic_recipe",
-                n_events=0, effective_n=0.0, mean_net_bps=0.0, block_lcb_bps=0.0,
-                nw_tstat=0.0, bootstrap_lcb_bps=0.0, bootstrap_agree=True,
-                cost_drag_ratio=0.0, turnover_per_year=0.0, max_abs_corr_in_bucket=0.0,
-                tf_coverage_count=0, sign_agreement_ratio=0.0,
+                run_id="",
+                timeframe="",
+                family="",
+                variant="",
+                recipe_id=rid,
+                archetype="trend",
+                source="synthetic_recipe",
+                n_events=0,
+                effective_n=0.0,
+                mean_net_bps=0.0,
+                block_lcb_bps=0.0,
+                nw_tstat=0.0,
+                bootstrap_lcb_bps=0.0,
+                bootstrap_agree=True,
+                cost_drag_ratio=0.0,
+                turnover_per_year=0.0,
+                max_abs_corr_in_bucket=0.0,
+                tf_coverage_count=0,
+                sign_agreement_ratio=0.0,
                 corroboration_tier="insufficient_coverage",
-                discovery_tier="candidate", l1_priority_score=0.0, l1_budget_units=0,
-                hard_reject_reasons=(), soft_flags=(),
+                discovery_tier="candidate",
+                l1_priority_score=0.0,
+                l1_budget_units=0,
+                hard_reject_reasons=(),
+                soft_flags=(),
             )
             for rid in all_selected
         ]
@@ -287,12 +297,14 @@ def resolve_cross_bucket_diversity(
         if len(cluster) == 1:
             final_selected.append(cluster[0])
         else:
+
             def _best_key(rid: str) -> float:
                 cand = candidate_by_recipe_id.get(rid)
                 if cand is None:
                     idx = all_selected.index(rid)
                     cand = all_candidates[idx]
                 return cand.l1_priority_score
+
             best_rid = max(cluster, key=_best_key)
             for rid in cluster:
                 if rid == best_rid:
@@ -310,7 +322,6 @@ def resolve_cross_bucket_diversity(
         cross_bucket_corr=cross_corr,
         global_eff_test_count=global_eff,
     )
-
 
 
 # Backward-compat alias

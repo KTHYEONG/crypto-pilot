@@ -16,17 +16,30 @@ from src.application.futures.runner.models import MarketDataBundle, RunWindow
 
 def make_run_config(phase: str = "l3") -> FuturesRunConfig:
     return FuturesRunConfig(
-        timeframe="4h", date="2026-05-01", trials=3,
-        phase=phase, sync="skip", refresh_universe=False, sync_metrics=False,  # type: ignore[arg-type]
+        timeframe="4h",
+        date="2026-05-01",
+        trials=3,
+        phase=phase,
+        sync="skip",
+        refresh_universe=False,
+        sync_metrics=False,  # type: ignore[arg-type]
     )
+
 
 def make_window() -> RunWindow:
     from datetime import date
+
     return RunWindow(
-        fetch_start="2024-01-01", is_start="2024-04-01", oos_start="2025-01-01",
-        end_date="2026-05-01", fetch_start_date=date(2024,1,1), is_start_date=date(2024,4,1),
-        oos_start_date=date(2025,1,1), end_date_value=date(2026,5,1),
+        fetch_start="2024-01-01",
+        is_start="2024-04-01",
+        oos_start="2025-01-01",
+        end_date="2026-05-01",
+        fetch_start_date=date(2024, 1, 1),
+        is_start_date=date(2024, 4, 1),
+        oos_start_date=date(2025, 1, 1),
+        end_date_value=date(2026, 5, 1),
     )
+
 
 def make_data_bundle() -> MarketDataBundle:
     return MarketDataBundle(
@@ -34,8 +47,6 @@ def make_data_bundle() -> MarketDataBundle:
         oos_data_maps={"BTCUSDT": {"4h": object()}},
         valid_symbols=("BTCUSDT",),
     )
-
-
 
 
 class TestBuildRunConfig:
@@ -47,7 +58,9 @@ class TestBuildRunConfig:
         ],
     )
     def test_build_run_config_rejects_invalid_or_removed_inputs(
-        self, args_dict: dict[str, Any], expected_match: str,
+        self,
+        args_dict: dict[str, Any],
+        expected_match: str,
     ) -> None:
         with pytest.raises(ValueError, match=expected_match):
             build_run_config_from_args(args_dict)
@@ -84,9 +97,14 @@ class TestBuildRunConfig:
 
     def test_validate_run_config_trials_zero_raises(self) -> None:
         config = FuturesRunConfig(
-            timeframe="4h", date=None, trials=0,
-            phase="l3", sync="skip", refresh_universe=False,
-            sync_metrics=False, seed=42,
+            timeframe="4h",
+            date=None,
+            trials=0,
+            phase="l3",
+            sync="skip",
+            refresh_universe=False,
+            sync_metrics=False,
+            seed=42,
         )
         with pytest.raises(ValueError, match="trials must be >= 1"):
             validate_run_config(config)
@@ -104,22 +122,37 @@ class TestBuildRunConfig:
             build_run_config_from_args({"phase": "l4", "trials": 1, "sync": "skip"})
 
     def test_alpha_foundry_audit_mode_accepted(self) -> None:
-        config = build_run_config_from_args({
-            "phase": "l3", "timeframe": "4h", "trials": 1, "sync": "skip",
-            "alpha_foundry": "audit",
-        })
+        config = build_run_config_from_args(
+            {
+                "phase": "l3",
+                "timeframe": "4h",
+                "trials": 1,
+                "sync": "skip",
+                "alpha_foundry": "audit",
+            }
+        )
         assert config.alpha_foundry.mode == "audit"
 
     def test_alpha_foundry_gate_mode_accepted(self) -> None:
-        config = build_run_config_from_args({
-            "phase": "l3", "timeframe": "4h", "trials": 1, "sync": "skip",
-            "alpha_foundry": "gate",
-        })
+        config = build_run_config_from_args(
+            {
+                "phase": "l3",
+                "timeframe": "4h",
+                "trials": 1,
+                "sync": "skip",
+                "alpha_foundry": "gate",
+            }
+        )
         assert config.alpha_foundry.mode == "gate"
 
     def test_removed_arg_rejected(self) -> None:
         with pytest.raises(ValueError, match="removed argument"):
-            build_run_config_from_args({
-                "phase": "l3", "timeframe": "4h", "trials": 1, "sync": "skip",
-                "alpha_only": True,
-            })
+            build_run_config_from_args(
+                {
+                    "phase": "l3",
+                    "timeframe": "4h",
+                    "trials": 1,
+                    "sync": "skip",
+                    "alpha_only": True,
+                }
+            )

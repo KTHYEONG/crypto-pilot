@@ -1,4 +1,5 @@
 """Tests for forecast/cost.py — build_cost_forecast."""
+
 from __future__ import annotations
 
 import numpy as np
@@ -24,8 +25,15 @@ class TestBuildCostForecastFallback:
     def test_fallback_when_no_universe_cost(self) -> None:
         # universe_cost_bps_2d=None → fallback_global
         cf = build_cost_forecast(
-            _close(), None, None, _volume(), None, None, None,
-            CostModelConfig(), shape=_SHAPE,
+            _close(),
+            None,
+            None,
+            _volume(),
+            None,
+            None,
+            None,
+            CostModelConfig(),
+            shape=_SHAPE,
         )
         expected_bps = round_trip_cost_bps()
         np.testing.assert_allclose(cf.execution_cost_bps_2d, expected_bps, rtol=1e-9)
@@ -34,8 +42,15 @@ class TestBuildCostForecastFallback:
     def test_fallback_on_wrong_shape(self) -> None:
         wrong = np.full((_T + 5, _N), 20.0)
         cf = build_cost_forecast(
-            _close(), None, None, _volume(), None, None, wrong,
-            CostModelConfig(), shape=_SHAPE,
+            _close(),
+            None,
+            None,
+            _volume(),
+            None,
+            None,
+            wrong,
+            CostModelConfig(),
+            shape=_SHAPE,
         )
         assert cf.source == "fallback_global"
 
@@ -43,8 +58,15 @@ class TestBuildCostForecastFallback:
         # valid shape이지만 전부 NaN → 셀별로 fallback_bps 채움, source는 universe_static
         nan_cost = np.full(_SHAPE, np.nan)
         cf = build_cost_forecast(
-            _close(), None, None, _volume(), None, None, nan_cost,
-            CostModelConfig(), shape=_SHAPE,
+            _close(),
+            None,
+            None,
+            _volume(),
+            None,
+            None,
+            nan_cost,
+            CostModelConfig(),
+            shape=_SHAPE,
         )
         fallback = round_trip_cost_bps()
         # 모든 셀이 fallback 값으로 채워져야 한다
@@ -56,8 +78,15 @@ class TestBuildCostForecastUniverseStatic:
     def test_universe_static_used_when_valid(self) -> None:
         per_sym = np.full(_SHAPE, 25.0)
         cf = build_cost_forecast(
-            _close(), None, None, _volume(), None, None, per_sym,
-            CostModelConfig(), shape=_SHAPE,
+            _close(),
+            None,
+            None,
+            _volume(),
+            None,
+            None,
+            per_sym,
+            CostModelConfig(),
+            shape=_SHAPE,
         )
         np.testing.assert_allclose(cf.execution_cost_bps_2d, 25.0, rtol=1e-9)
         assert cf.source == "universe_static"
@@ -67,8 +96,15 @@ class TestBuildCostForecastUniverseStatic:
         per_sym = np.full(_SHAPE, 20.0)
         per_sym[5, :] = 0.0  # invalid row
         cf = build_cost_forecast(
-            _close(), None, None, _volume(), None, None, per_sym,
-            CostModelConfig(), shape=_SHAPE,
+            _close(),
+            None,
+            None,
+            _volume(),
+            None,
+            None,
+            per_sym,
+            CostModelConfig(),
+            shape=_SHAPE,
         )
         fallback = round_trip_cost_bps()
         assert float(cf.execution_cost_bps_2d[5, 0]) == pytest.approx(fallback, rel=1e-6)
@@ -78,8 +114,15 @@ class TestBuildCostForecastUniverseStatic:
         static_bps = 18.0
         per_sym = np.full(_SHAPE, static_bps)
         cf = build_cost_forecast(
-            _close(), None, None, _volume(), None, None, per_sym,
-            CostModelConfig(), shape=_SHAPE,
+            _close(),
+            None,
+            None,
+            _volume(),
+            None,
+            None,
+            per_sym,
+            CostModelConfig(),
+            shape=_SHAPE,
         )
         np.testing.assert_allclose(cf.execution_cost_bps_2d, static_bps, rtol=1e-9)
 
@@ -88,24 +131,43 @@ class TestBuildCostForecastOutputContract:
     def test_fraction_equals_bps_over_10000(self) -> None:
         per_sym = np.full(_SHAPE, 20.0)
         cf = build_cost_forecast(
-            _close(), None, None, _volume(), None, None, per_sym,
-            CostModelConfig(), shape=_SHAPE,
+            _close(),
+            None,
+            None,
+            _volume(),
+            None,
+            None,
+            per_sym,
+            CostModelConfig(),
+            shape=_SHAPE,
         )
-        np.testing.assert_allclose(
-            cf.execution_cost_fraction_2d, cf.execution_cost_bps_2d / 10000.0, rtol=1e-9
-        )
+        np.testing.assert_allclose(cf.execution_cost_fraction_2d, cf.execution_cost_bps_2d / 10000.0, rtol=1e-9)
 
     def test_uncertainty_nonnegative(self) -> None:
         cf = build_cost_forecast(
-            _close(), None, None, _volume(), None, None, None,
-            CostModelConfig(), shape=_SHAPE,
+            _close(),
+            None,
+            None,
+            _volume(),
+            None,
+            None,
+            None,
+            CostModelConfig(),
+            shape=_SHAPE,
         )
         assert np.all(cf.uncertainty_bps_2d >= 0.0)
 
     def test_output_shape_matches(self) -> None:
         cf = build_cost_forecast(
-            _close(), None, None, _volume(), None, None, None,
-            CostModelConfig(), shape=_SHAPE,
+            _close(),
+            None,
+            None,
+            _volume(),
+            None,
+            None,
+            None,
+            CostModelConfig(),
+            shape=_SHAPE,
         )
         assert cf.execution_cost_bps_2d.shape == _SHAPE
         assert cf.execution_cost_fraction_2d.shape == _SHAPE
@@ -113,8 +175,15 @@ class TestBuildCostForecastOutputContract:
 
     def test_all_finite(self) -> None:
         cf = build_cost_forecast(
-            _close(), None, None, _volume(), None, None, None,
-            CostModelConfig(), shape=_SHAPE,
+            _close(),
+            None,
+            None,
+            _volume(),
+            None,
+            None,
+            None,
+            CostModelConfig(),
+            shape=_SHAPE,
         )
         assert np.all(np.isfinite(cf.execution_cost_bps_2d))
         assert np.all(np.isfinite(cf.execution_cost_fraction_2d))
@@ -134,9 +203,7 @@ class TestBuildCostForecastDynamic:
             estimated_order_notional=50_000.0,
             enable_dynamic_components=True,
         )
-        cf = build_cost_forecast(
-            _close(), high, low, _volume(), funding, None, per_sym, cfg, shape=_SHAPE
-        )
+        cf = build_cost_forecast(_close(), high, low, _volume(), funding, None, per_sym, cfg, shape=_SHAPE)
         assert cf.source == "parametric_dynamic"
         assert np.all(cf.execution_cost_bps_2d >= 15.0)
         # floor semantics: dynamic candidate may be below floor on some cells,

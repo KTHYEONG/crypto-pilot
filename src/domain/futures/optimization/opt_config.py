@@ -128,8 +128,6 @@ OPT_FUTURES_CONFIG: dict[str, Any] = {
     "FUTURES_PRUNER_TYPE": "wilcoxon",  # "wilcoxon", "successive_halving", "median"
     "FUTURES_PRUNER_WILCOXON_P": 0.10,
     "FUTURES_OPTUNA_DB_PATH": "",
-
-
     # S2: Auxiliary volatility-based CRISIS gate.
     # DISABLED: vol gate fires during profitable high-vol IS periods (CRISIS G=+0.193% in IS),
     # collapsing IS CAGR from ~30% to 2.6%. IS-OOS mismatch requires a smarter approach
@@ -254,10 +252,10 @@ OPT_FUTURES_CONFIG: dict[str, Any] = {
     "FUTURES_PHASE_D_W_PF_LONG": 1.5,
     "FUTURES_PHASE_D_W_PF_SHORT": 1.5,
     "FUTURES_PHASE_D_PRUNE_MIN_POS_RATIO": 0.25,
-    "FUTURES_AWF_NET_EDGE_MIN": 1.5,   # min EV/cost ratio (avg PnL / round-trip cost)
+    "FUTURES_AWF_NET_EDGE_MIN": 1.5,  # min EV/cost ratio (avg PnL / round-trip cost)
     # SPA bootstrap for post-run diagnostics (not used per-trial).
     "FUTURES_SPA_N_BOOTSTRAP": 2000,
-    "FUTURES_SPA_P_VALUE_MAX": 0.10,   # SPA p-value ≤ 0.10 → reject H0: zero alpha
+    "FUTURES_SPA_P_VALUE_MAX": 0.10,  # SPA p-value ≤ 0.10 → reject H0: zero alpha
     # Worst AWF leg log-TW floor (10th percentile / min-leg semantics in objective).
     "FUTURES_AWF_P10_LOG_TW_MIN": -0.10,
     # Increased from 3: 5 WF OOS legs provide regime-diverse robustness verification.
@@ -294,8 +292,8 @@ OPT_FUTURES_CONFIG: dict[str, Any] = {
     # gate1_dsr ∈ [0,1]: AWF positive-leg fraction proxy under MC-adjusted floor.
     # 0.40 → at least 2/5 legs positive (floor). MC adjustment raises to 0.48 at 400 trials.
     "FUTURES_ML_GATE1_DSR_MIN": 0.40,
-    "FUTURES_AWF_POS_FRAC_MIN": 0.60,   # AWF 게이트: 최소 60% leg 수익 (≥3/5)
-    "FUTURES_AWF_MU_LOG_MIN": 0.0,       # AWF 게이트: 평균 leg log-TW > 0
+    "FUTURES_AWF_POS_FRAC_MIN": 0.60,  # AWF 게이트: 최소 60% leg 수익 (≥3/5)
+    "FUTURES_AWF_MU_LOG_MIN": 0.0,  # AWF 게이트: 평균 leg log-TW > 0
     "FUTURES_STEP2_CHOP_LOSS_SHARE_MAX": 0.60,
     "FUTURES_STEP2_CHOP_TRADE_SHARE_MAX": 0.70,
     "FUTURES_STEP2_FLIP_RATE_PROXY_MAX": 0.75,
@@ -473,29 +471,32 @@ def default_ev_hurdle_bps(cfg: dict[str, Any] | None = None) -> float:
     source = OPT_FUTURES_CONFIG if cfg is None else cfg
     return float(source.get("FUTURES_DEFAULT_EV_HURDLE_BPS", 10.0))
 
+
 def get_search_space_futures(tf: str, stage: int = 0) -> dict[str, dict[str, Any]]:
     _ = tf
     return build_full_discovery_space_futures()
 
+
 def build_full_discovery_space_futures() -> dict[str, Any]:
     return dict(ENGINE_PARAM_SPACE_FUTURES)
+
 
 def get_quarterly_window(reference_date: Any = None, *, tf: str = "4h") -> tuple[str, str, str, str]:
     import datetime
 
     from dateutil.relativedelta import relativedelta
+
     if reference_date is None:
         reference_date = datetime.date.today()
     elif isinstance(reference_date, str):
         reference_date = datetime.datetime.strptime(reference_date, "%Y-%m-%d").date()
     current_quarter_start_month: int = ((reference_date.month - 1) // 3) * 3 + 1
-    current_quarter_start: datetime.date = datetime.date(
-        reference_date.year, current_quarter_start_month, 1
-    )
+    current_quarter_start: datetime.date = datetime.date(reference_date.year, current_quarter_start_month, 1)
     oos_end: datetime.date = current_quarter_start - datetime.timedelta(days=1)
     oos_start: datetime.date = current_quarter_start - relativedelta(months=6)
     is_start: datetime.date = oos_start - relativedelta(months=24)
     from src.domain.futures.optimization.opt_data_utils import resolve_warmup_days_for_tf
+
     warmup_days = resolve_warmup_days_for_tf(tf)
     fetch_start: datetime.date = is_start - relativedelta(days=warmup_days)
     return (
@@ -571,6 +572,7 @@ def get_layered_window(
 
     if warmup_days is None:
         from src.domain.futures.optimization.opt_data_utils import resolve_warmup_days_for_tf
+
         warmup_days = resolve_warmup_days_for_tf(tf)
 
     # holdout_end = 현재 분기 시작 - 1일
@@ -579,9 +581,7 @@ def get_layered_window(
     holdout_end: _dt.date = current_q_start - _dt.timedelta(days=1)
 
     # 역산: holdout → L2 → L1
-    holdout_start: _dt.date = (
-        holdout_end - _relativedelta(months=holdout_months) + _dt.timedelta(days=1)
-    )
+    holdout_start: _dt.date = holdout_end - _relativedelta(months=holdout_months) + _dt.timedelta(days=1)
     l2_start: _dt.date = holdout_start - _relativedelta(months=l2_months)
     l1_start_raw: _dt.date = l2_start - _relativedelta(months=l1_months)
 
@@ -589,6 +589,7 @@ def get_layered_window(
     l1_start: _dt.date = max(l1_start_raw, regime_floor)
     if l1_start > l2_start:
         import logging as _logging
+
         _logging.getLogger(__name__).warning(
             "REGIME_FLOOR clamp exceeded l2_start: l1_start=%s > l2_start=%s. "
             "L1 window is zero-length — check reference_date or regime_floor.",
@@ -607,7 +608,6 @@ def get_layered_window(
         holdout_end=holdout_end,
         regime_floor=regime_floor,
     )
-
 
 
 @_dataclass(slots=True, frozen=True)

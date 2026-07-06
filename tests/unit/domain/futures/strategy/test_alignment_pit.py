@@ -1,4 +1,5 @@
 """Tests for PIT state_cube integration in align_data_maps (Phase 3-1)."""
+
 from __future__ import annotations
 
 import numpy as np
@@ -109,6 +110,7 @@ class TestAlignDataMapsWithStateCube:
 
         # Act
         from src.domain.futures.strategy.common.alignment import align_data_maps
+
         aligned = align_data_maps(data_maps, symbols, tf, state_cube=cube)
 
         # Assert
@@ -126,6 +128,7 @@ class TestAlignDataMapsWithStateCube:
 
         # Act
         from src.domain.futures.strategy.common.alignment import align_data_maps
+
         aligned = align_data_maps(data_maps, symbols, tf)
 
         # Assert — no state_cube means all-pass active mask
@@ -146,6 +149,7 @@ class TestAlignDataMapsWithStateCube:
 
         # Act
         from src.domain.futures.strategy.common.alignment import align_data_maps
+
         aligned = align_data_maps(data_maps, symbols, tf, state_cube=cube)
 
         # Assert
@@ -170,6 +174,7 @@ class TestAlignDataMapsWithStateCube:
 
         # Act
         from src.domain.futures.strategy.common.alignment import align_data_maps
+
         aligned = align_data_maps(data_maps, symbols, tf, state_cube=cube)
 
         # Assert — SYM0 not in cube → active_mask defaults to all True
@@ -205,9 +210,7 @@ class TestAlignDataMapsWithStateCube:
         tf = "4h"
         n_bars = _MIN_BARS
         data_maps = _make_data_maps(symbols, tf, n_bars)
-        data_maps["SYM0"][tf] = data_maps["SYM0"][tf].assign(
-            adv_usdt=np.full(n_bars, 123.0, dtype=np.float64)
-        )
+        data_maps["SYM0"][tf] = data_maps["SYM0"][tf].assign(adv_usdt=np.full(n_bars, 123.0, dtype=np.float64))
         cube = _make_state_cube(symbols, n_bars, eligible_flags={"SYM0": True})
         cube.capacity_usdt[:, 0] = 999.0
 

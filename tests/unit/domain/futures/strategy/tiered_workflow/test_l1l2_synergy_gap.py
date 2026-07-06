@@ -1,4 +1,5 @@
 """V3: L1+L2 시너지 갭 -- 수정 후 하이브리드 CAGR >= EW CAGR x 0.8."""
+
 import numpy as np
 
 from src.domain.futures.strategy.tiered_workflow.risk_deployment import (
@@ -54,6 +55,7 @@ def test_synergy_hybrid_preserves_alpha_vs_ew():
 
     # EW CAGR (no leverage scaling)
     from src.domain.futures.strategy.tiered_workflow.risk_deployment import _annualized_cagr_from_returns
+
     ew_cagr = _annualized_cagr_from_returns(ew_rets, bars_per_year=bars_per_year)
 
     ratio = deployed.cagr / max(abs(ew_cagr), 1e-6)

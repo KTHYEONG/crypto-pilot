@@ -284,13 +284,24 @@ class TestCSAmplification:
         z_scores = np.array([3.0], dtype=np.float64)
 
         w_null = diagonal_kelly_weights(
-            mu_bps=mu_bps, sigma=sigma, kelly_fraction=0.25,
-            vol_target=None, caps=_DEFAULT_CAPS, prev_w=prev_w, no_trade_band=0.0,
+            mu_bps=mu_bps,
+            sigma=sigma,
+            kelly_fraction=0.25,
+            vol_target=None,
+            caps=_DEFAULT_CAPS,
+            prev_w=prev_w,
+            no_trade_band=0.0,
         )
         w_amp = diagonal_kelly_weights(
-            mu_bps=mu_bps, sigma=sigma, kelly_fraction=0.25,
-            vol_target=None, caps=_DEFAULT_CAPS, prev_w=prev_w, no_trade_band=0.0,
-            z_scores=z_scores, cs_amp_alpha=2.0,
+            mu_bps=mu_bps,
+            sigma=sigma,
+            kelly_fraction=0.25,
+            vol_target=None,
+            caps=_DEFAULT_CAPS,
+            prev_w=prev_w,
+            no_trade_band=0.0,
+            z_scores=z_scores,
+            cs_amp_alpha=2.0,
         )
 
         np.testing.assert_allclose(w_amp, w_null, atol=1e-12)
@@ -302,13 +313,24 @@ class TestCSAmplification:
         prev_w = np.zeros(n, dtype=np.float64)
 
         w_base = diagonal_kelly_weights(
-            mu_bps=mu_bps, sigma=sigma, kelly_fraction=0.25,
-            vol_target=None, caps=_DEFAULT_CAPS, prev_w=prev_w, no_trade_band=0.0,
+            mu_bps=mu_bps,
+            sigma=sigma,
+            kelly_fraction=0.25,
+            vol_target=None,
+            caps=_DEFAULT_CAPS,
+            prev_w=prev_w,
+            no_trade_band=0.0,
         )
         w_compat = diagonal_kelly_weights(
-            mu_bps=mu_bps, sigma=sigma, kelly_fraction=0.25,
-            vol_target=None, caps=_DEFAULT_CAPS, prev_w=prev_w, no_trade_band=0.0,
-            z_scores=None, cs_amp_alpha=2.0,
+            mu_bps=mu_bps,
+            sigma=sigma,
+            kelly_fraction=0.25,
+            vol_target=None,
+            caps=_DEFAULT_CAPS,
+            prev_w=prev_w,
+            no_trade_band=0.0,
+            z_scores=None,
+            cs_amp_alpha=2.0,
         )
 
         np.testing.assert_allclose(w_compat, w_base, atol=1e-12)
@@ -326,14 +348,28 @@ class TestPowerAmplificationMode:
         z_scores = np.array([2.0, 1.0, 0.5], dtype=np.float64)
 
         w_med = diagonal_kelly_weights(
-            mu_bps=mu_bps, sigma=sigma, kelly_fraction=0.25,
-            vol_target=None, caps=caps, prev_w=prev_w, no_trade_band=0.0,
-            z_scores=z_scores, cs_amp_alpha=2.0, cs_amp_mode="median_excess",
+            mu_bps=mu_bps,
+            sigma=sigma,
+            kelly_fraction=0.25,
+            vol_target=None,
+            caps=caps,
+            prev_w=prev_w,
+            no_trade_band=0.0,
+            z_scores=z_scores,
+            cs_amp_alpha=2.0,
+            cs_amp_mode="median_excess",
         )
         w_pow = diagonal_kelly_weights(
-            mu_bps=mu_bps, sigma=sigma, kelly_fraction=0.25,
-            vol_target=None, caps=caps, prev_w=prev_w, no_trade_band=0.0,
-            z_scores=z_scores, cs_amp_alpha=2.0, cs_amp_mode="power",
+            mu_bps=mu_bps,
+            sigma=sigma,
+            kelly_fraction=0.25,
+            vol_target=None,
+            caps=caps,
+            prev_w=prev_w,
+            no_trade_band=0.0,
+            z_scores=z_scores,
+            cs_amp_alpha=2.0,
+            cs_amp_mode="power",
         )
 
         assert w_pow[0] > w_med[0], f"power {w_pow[0]:.4f} should exceed median_excess {w_med[0]:.4f}"
@@ -347,13 +383,25 @@ class TestPowerAmplificationMode:
         z_scores = np.array([-1.0, 0.0, -0.5], dtype=np.float64)
 
         w_null = diagonal_kelly_weights(
-            mu_bps=mu_bps, sigma=sigma, kelly_fraction=0.25,
-            vol_target=None, caps=caps, prev_w=prev_w, no_trade_band=0.0,
+            mu_bps=mu_bps,
+            sigma=sigma,
+            kelly_fraction=0.25,
+            vol_target=None,
+            caps=caps,
+            prev_w=prev_w,
+            no_trade_band=0.0,
         )
         w_amp = diagonal_kelly_weights(
-            mu_bps=mu_bps, sigma=sigma, kelly_fraction=0.25,
-            vol_target=None, caps=caps, prev_w=prev_w, no_trade_band=0.0,
-            z_scores=z_scores, cs_amp_alpha=2.0, cs_amp_mode="power",
+            mu_bps=mu_bps,
+            sigma=sigma,
+            kelly_fraction=0.25,
+            vol_target=None,
+            caps=caps,
+            prev_w=prev_w,
+            no_trade_band=0.0,
+            z_scores=z_scores,
+            cs_amp_alpha=2.0,
+            cs_amp_mode="power",
         )
 
         np.testing.assert_allclose(w_amp, w_null, atol=1e-12)
@@ -367,9 +415,16 @@ class TestPowerAmplificationMode:
         z_scores = np.array([2.0, 1.0, 0.5], dtype=np.float64)
 
         w = diagonal_kelly_weights(
-            mu_bps=mu_bps, sigma=sigma, kelly_fraction=0.25,
-            vol_target=None, caps=caps, prev_w=prev_w, no_trade_band=0.0,
-            z_scores=z_scores, cs_amp_alpha=2.0, cs_amp_mode="tanh",
+            mu_bps=mu_bps,
+            sigma=sigma,
+            kelly_fraction=0.25,
+            vol_target=None,
+            caps=caps,
+            prev_w=prev_w,
+            no_trade_band=0.0,
+            z_scores=z_scores,
+            cs_amp_alpha=2.0,
+            cs_amp_mode="tanh",
         )
 
         assert np.all(np.isfinite(w)), "tanh mode should produce finite weights"
@@ -382,6 +437,7 @@ class TestConfigSSOT:
         from src.domain.futures.strategy.tiered_workflow.dataclasses import (
             Layer2AllocationConfig,
         )
+
         cfg = Layer2AllocationConfig.from_mapping({})
         defaults = Layer2AllocationConfig()
         assert cfg.l2_min_sharpe_uplift == defaults.l2_min_sharpe_uplift
@@ -394,6 +450,7 @@ class TestConfigSSOT:
         from src.domain.futures.strategy.tiered_workflow.dataclasses import (
             Layer2AllocationConfig,
         )
+
         cfg = Layer2AllocationConfig.from_mapping({"l2_min_sharpe_uplift": 0.15})
         assert cfg.l2_min_sharpe_uplift == 0.15
 
@@ -401,6 +458,7 @@ class TestConfigSSOT:
         from src.domain.futures.strategy.tiered_workflow.dataclasses import (
             Layer2AllocationConfig,
         )
+
         defaults = Layer2AllocationConfig()
         assert defaults.l2_cs_amp_enabled is False
         assert defaults.l2_regime_compression_enabled is True
@@ -409,6 +467,7 @@ class TestConfigSSOT:
         from src.domain.futures.strategy.tiered_workflow.dataclasses import (
             Layer2AllocationConfig,
         )
+
         cfg = Layer2AllocationConfig()
         assert cfg.l2_portfolio_cov_mode == "diagonal"
         assert cfg.l2_portfolio_cov_lookback_bars == 180
@@ -418,11 +477,14 @@ class TestConfigSSOT:
         from src.domain.futures.strategy.tiered_workflow.dataclasses import (
             Layer2AllocationConfig,
         )
-        cfg = Layer2AllocationConfig.from_mapping({
-            "l2_portfolio_cov_mode": "correlated",
-            "l2_portfolio_cov_lookback_bars": 90,
-            "l2_portfolio_cov_min_obs": 10,
-        })
+
+        cfg = Layer2AllocationConfig.from_mapping(
+            {
+                "l2_portfolio_cov_mode": "correlated",
+                "l2_portfolio_cov_lookback_bars": 90,
+                "l2_portfolio_cov_min_obs": 10,
+            }
+        )
         assert cfg.l2_portfolio_cov_mode == "correlated"
         assert cfg.l2_portfolio_cov_lookback_bars == 90
         assert cfg.l2_portfolio_cov_min_obs == 10
@@ -455,15 +517,23 @@ class TestCorrelatedCovMode:
         prev_w = np.zeros(n, dtype=np.float64)
 
         w_diag = diagonal_kelly_weights(
-            mu_bps=mu_bps, sigma=sigma,
-            kelly_fraction=0.25, vol_target=0.20, caps=caps,
-            prev_w=prev_w, no_trade_band=0.0,
+            mu_bps=mu_bps,
+            sigma=sigma,
+            kelly_fraction=0.25,
+            vol_target=0.20,
+            caps=caps,
+            prev_w=prev_w,
+            no_trade_band=0.0,
             cov_mode="diagonal",
         )
         w_corr = diagonal_kelly_weights(
-            mu_bps=mu_bps, sigma=sigma,
-            kelly_fraction=0.25, vol_target=0.20, caps=caps,
-            prev_w=prev_w, no_trade_band=0.0,
+            mu_bps=mu_bps,
+            sigma=sigma,
+            kelly_fraction=0.25,
+            vol_target=0.20,
+            caps=caps,
+            prev_w=prev_w,
+            no_trade_band=0.0,
             returns_hist=returns_hist,
             cov_mode="correlated",
         )
@@ -482,14 +552,22 @@ class TestCorrelatedCovMode:
         prev_w = np.zeros(n, dtype=np.float64)
 
         w_default = diagonal_kelly_weights(
-            mu_bps=mu_bps, sigma=sigma,
-            kelly_fraction=0.25, vol_target=None, caps=caps,
-            prev_w=prev_w, no_trade_band=0.0,
+            mu_bps=mu_bps,
+            sigma=sigma,
+            kelly_fraction=0.25,
+            vol_target=None,
+            caps=caps,
+            prev_w=prev_w,
+            no_trade_band=0.0,
         )
         w_explicit_diag = diagonal_kelly_weights(
-            mu_bps=mu_bps, sigma=sigma,
-            kelly_fraction=0.25, vol_target=None, caps=caps,
-            prev_w=prev_w, no_trade_band=0.0,
+            mu_bps=mu_bps,
+            sigma=sigma,
+            kelly_fraction=0.25,
+            vol_target=None,
+            caps=caps,
+            prev_w=prev_w,
+            no_trade_band=0.0,
             cov_mode="diagonal",
         )
         np.testing.assert_array_equal(w_default, w_explicit_diag)
@@ -502,11 +580,16 @@ class TestCorrelatedCovMode:
         prev_w = np.zeros(n, dtype=np.float64)
 
         import pytest
+
         with pytest.raises(ValueError, match="returns_hist required"):
             diagonal_kelly_weights(
-                mu_bps=mu_bps, sigma=sigma,
-                kelly_fraction=0.25, vol_target=0.20, caps=caps,
-                prev_w=prev_w, no_trade_band=0.0,
+                mu_bps=mu_bps,
+                sigma=sigma,
+                kelly_fraction=0.25,
+                vol_target=0.20,
+                caps=caps,
+                prev_w=prev_w,
+                no_trade_band=0.0,
                 cov_mode="correlated",
                 returns_hist=None,
             )
@@ -520,11 +603,16 @@ class TestCorrelatedCovMode:
         returns_hist = np.random.default_rng(42).normal(0, 0.02, (60, 3))
 
         import pytest
+
         with pytest.raises(ValueError, match="dimension mismatch"):
             diagonal_kelly_weights(
-                mu_bps=mu_bps, sigma=sigma,
-                kelly_fraction=0.25, vol_target=0.20, caps=caps,
-                prev_w=prev_w, no_trade_band=0.0,
+                mu_bps=mu_bps,
+                sigma=sigma,
+                kelly_fraction=0.25,
+                vol_target=0.20,
+                caps=caps,
+                prev_w=prev_w,
+                no_trade_band=0.0,
                 returns_hist=returns_hist,
                 cov_mode="correlated",
             )
@@ -538,9 +626,13 @@ class TestCorrelatedCovMode:
         returns_hist = np.random.default_rng(99).normal(0, 0.02, (5, 8))
 
         w = diagonal_kelly_weights(
-            mu_bps=mu_bps, sigma=sigma,
-            kelly_fraction=0.25, vol_target=0.20, caps=caps,
-            prev_w=prev_w, no_trade_band=0.0,
+            mu_bps=mu_bps,
+            sigma=sigma,
+            kelly_fraction=0.25,
+            vol_target=0.20,
+            caps=caps,
+            prev_w=prev_w,
+            no_trade_band=0.0,
             returns_hist=returns_hist,
             cov_mode="correlated",
             cov_min_obs=20,

@@ -64,17 +64,14 @@ def _build_strategy_compose_diag(
     from src.domain.futures.optimization.diag_utils import preservation_ratio
 
     n_bars = alpha_long.shape[0]
-    beta_a = float(
-        params.get("BETA_ALPHA", OPT_FUTURES_CONFIG.get("FUTURES_DEFAULT_BETA_ALPHA", 1.0))
-    )
-    ev_h = float(
-        params.get("EV_HURDLE_BPS", default_ev_hurdle_bps(OPT_FUTURES_CONFIG))
-    )
+    beta_a = float(params.get("BETA_ALPHA", OPT_FUTURES_CONFIG.get("FUTURES_DEFAULT_BETA_ALPHA", 1.0)))
+    ev_h = float(params.get("EV_HURDLE_BPS", default_ev_hurdle_bps(OPT_FUTURES_CONFIG)))
     friction_2d = np.asarray(cost_snapshot.execution_cost_fraction_2d, dtype=np.float64)
     friction_bps_2d = np.asarray(cost_snapshot.execution_cost_bps_2d, dtype=np.float64)
 
     # Delegate cost blend to ExecutionCostModel (SSOT)
     from src.domain.futures.strategy.execution_cost import ExecutionCostModel
+
     _cost_model = ExecutionCostModel(
         maker_fee_bps=float(params.get("MAKER_FEE_BPS", 2.0)),
         taker_fee_bps=float(params.get("TAKER_FEE_BPS", 5.0)),
@@ -100,8 +97,7 @@ def _build_strategy_compose_diag(
         _safe_pct(alpha_short, 95) * 10000.0,
     )
     _logger.info(
-        "[ML-COST-WALL] alpha_p95=%.2fbps friction=%.1fbps "
-        "hurdle_bps=%.1fbps floor=%.1fbps signal_clears_floor=%s",
+        "[ML-COST-WALL] alpha_p95=%.2fbps friction=%.1fbps hurdle_bps=%.1fbps floor=%.1fbps signal_clears_floor=%s",
         alpha_p95_bps,
         float(np.nanmean(effective_friction_bps_2d)),
         ev_h,
@@ -129,22 +125,12 @@ def _build_strategy_compose_diag(
         "ev_hurdle_bps": float(ev_h),
         "effective_threshold_bps": float(np.nanmean(threshold_bps)),
         "cost_gate_amortized": float(
-            1.0
-            if params.get("COST_GATE_AMORTIZE", False)
-            and holding_bars
-            and int(holding_bars) > 1
-            else 0.0
+            1.0 if params.get("COST_GATE_AMORTIZE", False) and holding_bars and int(holding_bars) > 1 else 0.0
         ),
         "holding_bars": float(int(holding_bars) if holding_bars is not None else 1),
-        "execution_cost_source_universe_static": (
-            1.0 if cost_source == "universe_static" else 0.0
-        ),
-        "execution_cost_source_parametric_dynamic": (
-            1.0 if cost_source == "parametric_dynamic" else 0.0
-        ),
-        "execution_cost_source_fallback_global": (
-            1.0 if cost_source == "fallback_global" else 0.0
-        ),
+        "execution_cost_source_universe_static": (1.0 if cost_source == "universe_static" else 0.0),
+        "execution_cost_source_parametric_dynamic": (1.0 if cost_source == "parametric_dynamic" else 0.0),
+        "execution_cost_source_fallback_global": (1.0 if cost_source == "fallback_global" else 0.0),
         "mu_pre_hurdle_p95_long": _safe_pct(mu_l_pre, 95),
         "mu_pre_hurdle_p95_short": _safe_pct(mu_s_pre, 95),
         "xs_long_nz_ratio": _nonzero_ratio(xs_long),
@@ -156,11 +142,13 @@ def _build_strategy_compose_diag(
         "threshold_bps": float(np.nanmean(threshold_bps)),
     }
 
+
 def _safe_pct(arr: np.ndarray, q: float) -> float:
     finite = arr[np.isfinite(arr)]
     if finite.size == 0:
         return 0.0
     return float(np.nanpercentile(finite, q))
+
 
 def _nonzero_ratio(arr: np.ndarray, eps: float = 1e-12) -> float:
     if arr.size == 0:
@@ -177,9 +165,7 @@ def _pf_and_ev_cost_from_trades(all_trades: np.ndarray) -> tuple[float, float]:
     gross_loss = float(np.sum(np.abs(pnl[pnl < 0.0])))
     avg_pf = gross_win / max(abs(gross_loss), 1e-9) if gross_loss != 0.0 else 1.0
     net_pnl = float(np.sum(pnl))
-    fees = all_trades[:, 8].astype(np.float64, copy=False) + all_trades[:, 9].astype(
-        np.float64, copy=False
-    )
+    fees = all_trades[:, 8].astype(np.float64, copy=False) + all_trades[:, 9].astype(np.float64, copy=False)
     total_fee = float(np.sum(fees))
     ev_cost_ratio = abs(net_pnl) / max(total_fee, 1e-9)
     return avg_pf, ev_cost_ratio
@@ -245,62 +231,35 @@ def _base_engine_params(ml: dict[str, Any], tf: str) -> dict[str, Any]:
         "USE_COMPOUNDING": True,
         "LEVERAGE": int(lev),
         "BETA_ALPHA": float(ml.get("BETA_ALPHA", cfg.get("FUTURES_DEFAULT_BETA_ALPHA", 1.0))),
-        "EV_HURDLE_BPS": float(
-            ml.get("EV_HURDLE_BPS", default_ev_hurdle_bps(cfg))
-        ),
-        "COST_GATE_AMORTIZE": bool(
-            ml.get("COST_GATE_AMORTIZE", cfg.get("COST_GATE_AMORTIZE", False))
-        ),
-        "KELLY_USE_RESIDUAL_VAR": bool(
-            ml.get("KELLY_USE_RESIDUAL_VAR", cfg.get("KELLY_USE_RESIDUAL_VAR", False))
-        ),
-        "COST_FORECAST_DYNAMIC": bool(
-            ml.get("COST_FORECAST_DYNAMIC", cfg.get("COST_FORECAST_DYNAMIC", False))
-        ),
-        "SLIPPAGE_BPS_BUFFER_MULT": float(
-            ml.get("SLIPPAGE_BPS_BUFFER_MULT", cfg.get("SLIPPAGE_BPS_BUFFER_MULT", 1.0))
-        ),
-        "TIME_BARRIER_H": float(
-            ml.get("TIME_BARRIER_H", cfg.get("FUTURES_DEFAULT_TIME_BARRIER_H", 0.0))
-        ),
-        "PORTFOLIO_KAPPA": float(
-            ml.get("PORTFOLIO_KAPPA", cfg.get("FUTURES_PORTFOLIO_KAPPA", 0.35))
-        ),
+        "EV_HURDLE_BPS": float(ml.get("EV_HURDLE_BPS", default_ev_hurdle_bps(cfg))),
+        "COST_GATE_AMORTIZE": bool(ml.get("COST_GATE_AMORTIZE", cfg.get("COST_GATE_AMORTIZE", False))),
+        "KELLY_USE_RESIDUAL_VAR": bool(ml.get("KELLY_USE_RESIDUAL_VAR", cfg.get("KELLY_USE_RESIDUAL_VAR", False))),
+        "COST_FORECAST_DYNAMIC": bool(ml.get("COST_FORECAST_DYNAMIC", cfg.get("COST_FORECAST_DYNAMIC", False))),
+        "SLIPPAGE_BPS_BUFFER_MULT": float(ml.get("SLIPPAGE_BPS_BUFFER_MULT", cfg.get("SLIPPAGE_BPS_BUFFER_MULT", 1.0))),
+        "TIME_BARRIER_H": float(ml.get("TIME_BARRIER_H", cfg.get("FUTURES_DEFAULT_TIME_BARRIER_H", 0.0))),
+        "PORTFOLIO_KAPPA": float(ml.get("PORTFOLIO_KAPPA", cfg.get("FUTURES_PORTFOLIO_KAPPA", 0.35))),
         "FUTURES_EXECUTION_MODE": str(
-            ml.get("FUTURES_EXECUTION_MODE")
-            or OPT_FUTURES_CONFIG.get("FUTURES_EXECUTION_MODE", "coarse")
+            ml.get("FUTURES_EXECUTION_MODE") or OPT_FUTURES_CONFIG.get("FUTURES_EXECUTION_MODE", "coarse")
         ),
         "STRATEGY_MODE": bool(ml.get("STRATEGY_MODE", False)),
         "POST_COST_ADMISSION_MODE": str(
             ml.get("POST_COST_ADMISSION_MODE", ml.get("post_cost_admission_mode", "ev_gate"))
         ),
-        "RANK_PORTFOLIO_TOP_K": int(
-            ml.get("RANK_PORTFOLIO_TOP_K", ml.get("rank_portfolio_top_k", 4))
-        ),
+        "RANK_PORTFOLIO_TOP_K": int(ml.get("RANK_PORTFOLIO_TOP_K", ml.get("rank_portfolio_top_k", 4))),
         "RANK_PORTFOLIO_MIN_SCORE_SPREAD_BPS": float(
             ml.get(
                 "RANK_PORTFOLIO_MIN_SCORE_SPREAD_BPS",
                 ml.get("rank_portfolio_min_score_spread_bps", 0.0),
             )
         ),
-        "MAKER_RATIO": float(
-            ml.get("MAKER_RATIO", ml.get("maker_ratio", 0.20))
-        ),
-        "MAKER_FEE_BPS": float(
-            ml.get("MAKER_FEE_BPS", ml.get("maker_fee_bps", 2.0))
-        ),
-        "TAKER_FEE_BPS": float(
-            ml.get("TAKER_FEE_BPS", ml.get("taker_fee_bps", 5.0))
-        ),
-        "SLIPPAGE_BPS": float(
-            ml.get("SLIPPAGE_BPS", ml.get("slippage_bps", 2.0))
-        ),
+        "MAKER_RATIO": float(ml.get("MAKER_RATIO", ml.get("maker_ratio", 0.20))),
+        "MAKER_FEE_BPS": float(ml.get("MAKER_FEE_BPS", ml.get("maker_fee_bps", 2.0))),
+        "TAKER_FEE_BPS": float(ml.get("TAKER_FEE_BPS", ml.get("taker_fee_bps", 5.0))),
+        "SLIPPAGE_BPS": float(ml.get("SLIPPAGE_BPS", ml.get("slippage_bps", 2.0))),
     }
 
 
-def _cached_kill_fund_lev(
-    aligned: dict[str, Any], params: dict[str, Any]
-) -> tuple[Any, Any, Any]:
+def _cached_kill_fund_lev(aligned: dict[str, Any], params: dict[str, Any]) -> tuple[Any, Any, Any]:
     if "kill_signal_cached" not in aligned:
         zkill = aligned.get("effective_kill_signal")
         if zkill is None:
@@ -351,9 +310,7 @@ def _run_portfolio_numba_block(
     t0_compose = time.perf_counter()
     tw_from_strategy = aligned.get("target_weights")
     if tw_from_strategy is None or np.asarray(tw_from_strategy).shape != np.asarray(aligned["close"]).shape:
-        raise RuntimeError(
-            "target_weights required: pre-merge candidate output before calling objectives"
-        )
+        raise RuntimeError("target_weights required: pre-merge candidate output before calling objectives")
     t_compose = time.perf_counter() - t0_compose
 
     t0_const = time.perf_counter()
@@ -401,13 +358,9 @@ def _run_portfolio_numba_block(
     aligned["target_weights"] = tw_blk
     _path_diag = aligned.get("_strategy_signal_path_diag")
     if isinstance(_path_diag, dict):
-        _path_diag["merge_nz"] = float(
-            np.count_nonzero(np.abs(tw_blk) > 1e-12) / max(tw_blk.size, 1)
-        )
+        _path_diag["merge_nz"] = float(np.count_nonzero(np.abs(tw_blk) > 1e-12) / max(tw_blk.size, 1))
     if bool(params.get("STRATEGY_MODE", False)):
-        should_log_weight = (trial_number is not None and int(trial_number) < 5) or (
-            trial_number is None
-        )
+        should_log_weight = (trial_number is not None and int(trial_number) < 5) or (trial_number is None)
         if should_log_weight:
             _logger.debug(
                 " [WEIGHT-STAGE-DIAG] trial=%s %s",
@@ -417,9 +370,7 @@ def _run_portfolio_numba_block(
                     per_symbol_cap=_safe_float_or_none(params.get("MAX_EXPOSURE_PER_COIN")),
                 ),
             )
-    use_simple_atr_i = (
-        1 if bool(cfg_block.get("FUTURES_SIMPLE_ATR_STOP", True)) else 0
-    )
+    use_simple_atr_i = 1 if bool(cfg_block.get("FUTURES_SIMPLE_ATR_STOP", True)) else 0
     mx_hold = max_hold_bars_from_time_barrier(params)
     sborr = float(cfg_block.get("FUTURES_SHORT_BORROW_DAILY", 0.0))
     buf_mult = float(
@@ -449,68 +400,68 @@ def _run_portfolio_numba_block(
         out_tw = cast(
             tuple[NDArray[np.float64], float, NDArray[np.float64], NDArray[np.float64]],
             backtest_target_weights_intrabar_numba(
-            aligned["close"],
-            aligned["high"],
-            aligned["low"],
-            aligned["open"],
-            tw_blk,
-            lev_blk,
-            aligned["atr"],
-            zkill,
-            np.asarray(aligned["exec_open_1m"], dtype=np.float64),
-            np.asarray(aligned["exec_high_1m"], dtype=np.float64),
-            np.asarray(aligned["exec_low_1m"], dtype=np.float64),
-            np.asarray(aligned["exec_close_1m"], dtype=np.float64),
-            exec_start,
-            exec_end,
-            float(FUTURES_INITIAL_BALANCE),
-            MAKER_FEE_RATE,
-            TAKER_FEE_RATE,
-            slip_eff,
-            reb_b,
-            mx_hold,
-            sborr,
-            atr_m,
-            trail_m,
-            use_simple_atr_i,
-            int(params.get("MAX_CONCURRENT_POSITIONS", 2)),
-            float(params.get("MAX_EXPOSURE", 0.8)),
-            float(params["MAX_EXPOSURE_PER_COIN"]),
-            float(params["DD_SCALING_THRESHOLD"]),
-            funding_event_mask_1m=aligned.get("funding_event_mask_1m"),
-            funding_rate_1m=aligned.get("funding_rate_event_1m"),
-            volume_1m_2d=aligned.get("exec_volume_1m"),
+                aligned["close"],
+                aligned["high"],
+                aligned["low"],
+                aligned["open"],
+                tw_blk,
+                lev_blk,
+                aligned["atr"],
+                zkill,
+                np.asarray(aligned["exec_open_1m"], dtype=np.float64),
+                np.asarray(aligned["exec_high_1m"], dtype=np.float64),
+                np.asarray(aligned["exec_low_1m"], dtype=np.float64),
+                np.asarray(aligned["exec_close_1m"], dtype=np.float64),
+                exec_start,
+                exec_end,
+                float(FUTURES_INITIAL_BALANCE),
+                MAKER_FEE_RATE,
+                TAKER_FEE_RATE,
+                slip_eff,
+                reb_b,
+                mx_hold,
+                sborr,
+                atr_m,
+                trail_m,
+                use_simple_atr_i,
+                int(params.get("MAX_CONCURRENT_POSITIONS", 2)),
+                float(params.get("MAX_EXPOSURE", 0.8)),
+                float(params["MAX_EXPOSURE_PER_COIN"]),
+                float(params["DD_SCALING_THRESHOLD"]),
+                funding_event_mask_1m=aligned.get("funding_event_mask_1m"),
+                funding_rate_1m=aligned.get("funding_rate_event_1m"),
+                volume_1m_2d=aligned.get("exec_volume_1m"),
             ),
         )
     else:
         out_tw = cast(
             tuple[NDArray[np.float64], float, NDArray[np.float64], NDArray[np.float64]],
             backtest_target_weights_numba(
-            aligned["close"],
-            aligned["high"],
-            aligned["low"],
-            aligned["open"],
-            zfund,
-            zkill,
-            tw_blk,
-            float(FUTURES_INITIAL_BALANCE),
-            lev_blk,
-            MAKER_FEE_RATE,
-            TAKER_FEE_RATE,
-            slip_eff,
-            reb_b,
-            mx_hold,
-            sborr,
-            hpb,
-            aligned["atr"],
-            atr_m,
-            trail_m,
-            use_simple_atr_i,
-            int(params.get("MAX_CONCURRENT_POSITIONS", 2)),
-            float(params.get("MAX_EXPOSURE", 0.8)),
-            float(params["MAX_EXPOSURE_PER_COIN"]),
-            float(params["DD_SCALING_THRESHOLD"]),
-            volume_2d=aligned.get("volume"),
+                aligned["close"],
+                aligned["high"],
+                aligned["low"],
+                aligned["open"],
+                zfund,
+                zkill,
+                tw_blk,
+                float(FUTURES_INITIAL_BALANCE),
+                lev_blk,
+                MAKER_FEE_RATE,
+                TAKER_FEE_RATE,
+                slip_eff,
+                reb_b,
+                mx_hold,
+                sborr,
+                hpb,
+                aligned["atr"],
+                atr_m,
+                trail_m,
+                use_simple_atr_i,
+                int(params.get("MAX_CONCURRENT_POSITIONS", 2)),
+                float(params.get("MAX_EXPOSURE", 0.8)),
+                float(params["MAX_EXPOSURE_PER_COIN"]),
+                float(params["DD_SCALING_THRESHOLD"]),
+                volume_2d=aligned.get("volume"),
             ),
         )
     t_exec = time.perf_counter() - t0
@@ -534,6 +485,7 @@ def replay_robust_awf_for_trial_params(
 ) -> tuple[float | tuple[float, float], dict[str, Any]]:
     """Replay AWF legs with fixed tuned Optuna param dict."""
     from src.domain.futures.optimization.samplers import build_ml_phase_d_params
+
     if ctx.awf_leg_slices is None:
         rerun_precompute_for_ctx(ctx)
     merged_full = build_ml_phase_d_params(raw_optuna_params, ctx.tf)
@@ -564,11 +516,7 @@ def _evaluate_awf_phase_d_aggregate(
         ns = bool(cfg.get("FUTURES_ML_ALPHA_NSGA2_ENABLED", False))
         return ((fail, fail) if ns else fail), diag
 
-    params = (
-        dict(ml_bundle)
-        if ml_bundle.get("TIMEFRAME")
-        else _base_engine_params(ml_bundle, ctx.tf)
-    )
+    params = dict(ml_bundle) if ml_bundle.get("TIMEFRAME") else _base_engine_params(ml_bundle, ctx.tf)
     params["STRATEGY_MODE"] = True
     params["ESTIMATED_B"] = ctx.estimated_b
 
@@ -634,16 +582,8 @@ def _evaluate_awf_phase_d_aggregate(
             _n_long_leg = int(np.sum(b_trades_raw[:, 3] == 1.0)) if n_tr > 0 else 0
             _n_short_leg = int(np.sum(b_trades_raw[:, 3] == -1.0)) if n_tr > 0 else 0
             _path_diag_leg = aligned.get("_strategy_signal_path_diag")
-            _alpha_nz = (
-                float(_path_diag_leg.get("alpha_nz", 0.0))
-                if isinstance(_path_diag_leg, dict)
-                else 0.0
-            )
-            _merge_nz = (
-                float(_path_diag_leg.get("merge_nz", 0.0))
-                if isinstance(_path_diag_leg, dict)
-                else 0.0
-            )
+            _alpha_nz = float(_path_diag_leg.get("alpha_nz", 0.0)) if isinstance(_path_diag_leg, dict) else 0.0
+            _merge_nz = float(_path_diag_leg.get("merge_nz", 0.0)) if isinstance(_path_diag_leg, dict) else 0.0
             _logger.debug(
                 "[STRAT-PATH] trial=%d leg=%d range=(%d,%d) bars=%d"
                 " alpha_nz=%.4f merge_nz=%.4f trades=%d long=%d short=%d",
@@ -677,19 +617,11 @@ def _evaluate_awf_phase_d_aggregate(
 
         mdd = float(calc_mdd_from_equity(b_equity)) if b_equity.size > 0 else 100.0
         mdd_duration_days = (
-            float(
-                calc_max_underwater_days_from_equity(
-                    b_equity, hours_per_bar_from_timeframe(ctx.tf)
-                )
-            )
+            float(calc_max_underwater_days_from_equity(b_equity, hours_per_bar_from_timeframe(ctx.tf)))
             if b_equity.size > 1
             else 0.0
         )
-        cvar_pct = (
-            float(calc_cvar5_loss_pct_from_equity(b_equity))
-            if b_equity.size > 1
-            else 0.0
-        )
+        cvar_pct = float(calc_cvar5_loss_pct_from_equity(b_equity)) if b_equity.size > 1 else 0.0
         log_ret = _log_tw_from_ret_pct(float((b_bal / FUTURES_INITIAL_BALANCE - 1.0) * 100.0))
 
         if _trial_num_leg is not None and _trial_num_leg < 5:
@@ -777,7 +709,7 @@ def _evaluate_awf_phase_d_aggregate(
 
         # Metrics Pure Calculation 시간 누적
         t_met_calc_done = time.perf_counter()
-        t_metrics_pure_tot += (t_met_calc_done - t0_met)
+        t_metrics_pure_tot += t_met_calc_done - t0_met
 
         if leg_idx >= 2 and trial is not None:
             t0_gate = time.perf_counter()
@@ -788,7 +720,7 @@ def _evaluate_awf_phase_d_aggregate(
             if abs(cum_log_tw) > 100.0:
                 raise optuna.TrialPruned()
             if cum_log_tw < -0.25 or max_leg_mdd > liq_mdd_thr:
-                t_metrics_pure_tot += (time.perf_counter() - t0_gate)
+                t_metrics_pure_tot += time.perf_counter() - t0_gate
                 t_metrics_tot = t_metrics_pure_tot + t_metrics_db_io_tot
                 set_trial_event_attrs(
                     trial,
@@ -808,7 +740,7 @@ def _evaluate_awf_phase_d_aggregate(
                     trial.set_user_attr("prof_metrics_pure", float(t_metrics_pure_tot))
                     trial.set_user_attr("prof_metrics_db_io", float(t_metrics_db_io_tot))
                 raise optuna.TrialPruned()
-            t_metrics_pure_tot += (time.perf_counter() - t0_gate)
+            t_metrics_pure_tot += time.perf_counter() - t0_gate
 
             if (
                 trial is not None
@@ -821,14 +753,14 @@ def _evaluate_awf_phase_d_aggregate(
                 n_slices = len(awf_slices)
                 should_check = True
                 if n_slices > 3:
-                    is_last_leg = (leg_idx == n_slices - 1)
+                    is_last_leg = leg_idx == n_slices - 1
                     should_check = (leg_idx % 2 == 0) or is_last_leg
 
                 if should_check:
                     t0_db = time.perf_counter()
                     trial.report(float(np.mean(leg_log_tw)), step=leg_idx)
                     is_pruned = trial.should_prune()
-                    t_metrics_db_io_tot += (time.perf_counter() - t0_db)
+                    t_metrics_db_io_tot += time.perf_counter() - t0_db
 
                     if is_pruned:
                         t_metrics_tot = t_metrics_pure_tot + t_metrics_db_io_tot
@@ -855,16 +787,13 @@ def _evaluate_awf_phase_d_aggregate(
                         raise optuna.TrialPruned()
         else:
             if trial is not None:
-                t_metrics_pure_tot += (time.perf_counter() - t0_met)
+                t_metrics_pure_tot += time.perf_counter() - t0_met
 
         t_metrics_tot = t_metrics_pure_tot + t_metrics_db_io_tot
 
     leg_arr = np.asarray(leg_log_tw, dtype=np.float64)
     n_legs_done = leg_arr.size
-    all_trades = (
-        np.vstack(all_trades_chunks) if all_trades_chunks
-        else np.zeros((0, 10), dtype=np.float64)
-    )
+    all_trades = np.vstack(all_trades_chunks) if all_trades_chunks else np.zeros((0, 10), dtype=np.float64)
 
     avg_trades_agg = float(np.mean(leg_trade_counts)) if leg_trade_counts else 0.0
     worst_mdd_legs = float(max(leg_mdds, default=100.0))
@@ -926,9 +855,7 @@ def _evaluate_awf_phase_d_aggregate(
         _tw_legs = np.exp(leg_arr)
         _tw_mean = float(np.mean(_tw_legs))
         _erg_dev_pct = (
-            float(np.max(np.abs(_tw_legs - _tw_mean)) / max(_tw_mean, 1e-9) * 100.0)
-            if _tw_mean > 1e-9
-            else 0.0
+            float(np.max(np.abs(_tw_legs - _tw_mean)) / max(_tw_mean, 1e-9) * 100.0) if _tw_mean > 1e-9 else 0.0
         )
         _erg_dev_floor = float(cfg.get("FUTURES_AWF_ERG_DEV_FLOOR", 1.5))
         _erg_dev_w = float(cfg.get("FUTURES_AWF_ERG_DEV_W", 0.001))
@@ -1020,11 +947,7 @@ def _evaluate_awf_phase_d_aggregate(
         obj1 = -float(robust_val)
         tail_mdd_w = float(cfg.get("FUTURES_AWF_OBJ_PSI_DD", 0.5))
         chop_trade_w = float(cfg.get("FUTURES_STEP2_OBJ_CHOP_LOSS_W", 0.25))
-        obj2 = (
-            -float(worst_leg)
-            + tail_mdd_w * float(worst_mdd_legs)
-            + chop_trade_w * chop_loss_share
-        )
+        obj2 = -float(worst_leg) + tail_mdd_w * float(worst_mdd_legs) + chop_trade_w * chop_loss_share
         return (obj1, obj2), diag_res
     return float(obj), diag_res
 
@@ -1046,9 +969,7 @@ def _evaluate_is_phase_d(
     params = ml_bundle if ml_bundle.get("TIMEFRAME") else _base_engine_params(ml_bundle, ctx.tf)
     params["ESTIMATED_B"] = ctx.estimated_b
 
-    b_trades_raw, b_bal, b_equity, _b_diag = _run_portfolio_numba_block(
-        params, aligned, ctx.estimated_b
-    )
+    b_trades_raw, b_bal, b_equity, _b_diag = _run_portfolio_numba_block(params, aligned, ctx.estimated_b)
 
     n_tr = int(b_trades_raw.shape[0])
     if n_tr == 0:
@@ -1070,7 +991,7 @@ def _evaluate_is_phase_d(
         s = i * chunk_size
         e = (i + 1) * chunk_size if i < k_chunks - 1 else n_bars
         if e > s + 1:
-            chunk_ret = (b_equity[e-1] / b_equity[s] - 1.0) * 100.0
+            chunk_ret = (b_equity[e - 1] / b_equity[s] - 1.0) * 100.0
             leg_log_tw.append(_log_tw_from_ret_pct(chunk_ret))
 
     leg_arr = np.asarray(leg_log_tw, dtype=np.float64)
@@ -1088,9 +1009,7 @@ def _evaluate_is_phase_d(
     if ctx.effective_total_trials is not None:
         n_trials_eff = max(int(ctx.effective_total_trials), 1)
 
-    is_dsr = calc_gate1_dsr_from_path_log_tw(
-        leg_arr, ctx.tf, float(n_bars), float(n_trials_eff)
-    )
+    is_dsr = calc_gate1_dsr_from_path_log_tw(leg_arr, ctx.tf, float(n_bars), float(n_trials_eff))
 
     obj1 = -float(robust_val)
     obj2 = -float(np.min(leg_arr)) if leg_arr.size > 0 else 1e9
@@ -1116,6 +1035,7 @@ def _evaluate_is_phase_d(
 def objective_ml_phase_d(trial: optuna.Trial, ctx: MLPhaseDContext) -> tuple[float, float] | float:
     """Joint NSGA-II Portfolio Optimization \u2014 AWF-based objectives (T2)."""
     from src.domain.futures.optimization.samplers import _suggest_ml_joint_nsga2
+
     if hasattr(ctx, "registry") and ctx.registry is not None:
         ctx.registry.validate()
     if ctx.awf_leg_slices is None:
@@ -1140,41 +1060,29 @@ def objective_ml_phase_d(trial: optuna.Trial, ctx: MLPhaseDContext) -> tuple[flo
         raise
 
 
-def select_best_trial_by_holdout_log_ret(
-    trials: list[optuna.trial.FrozenTrial]
-) -> optuna.trial.FrozenTrial:
+def select_best_trial_by_holdout_log_ret(trials: list[optuna.trial.FrozenTrial]) -> optuna.trial.FrozenTrial:
     """Select the best trial from a list based on a multi-metric scoring system."""
     if not trials:
         raise ValueError("empty trials")
 
-    def _score(
-        t: optuna.trial.FrozenTrial
-    ) -> tuple[float, float, float, float, float, float, float]:
+    def _score(t: optuna.trial.FrozenTrial) -> tuple[float, float, float, float, float, float, float]:
         holdout = float(np.clip(t.user_attrs.get("ml_holdout_log_ret", 0.0), -2.0, 2.0))
-        robust = float(
-            t.user_attrs.get("awf_robust_score", t.user_attrs.get("awf_contract_reward", -1e9))
-        )
+        robust = float(t.user_attrs.get("awf_robust_score", t.user_attrs.get("awf_contract_reward", -1e9)))
         is_cpcv = float(
             np.clip(
-                t.user_attrs.get(
-                    "awf_mean_log_tw", t.user_attrs.get("ml_mean_log_growth_cpcv", -2.0)
-                ),
+                t.user_attrs.get("awf_mean_log_tw", t.user_attrs.get("ml_mean_log_growth_cpcv", -2.0)),
                 -2.0,
                 2.0,
             )
         )
         p10_cpcv = float(
             np.clip(
-                t.user_attrs.get(
-                    "awf_worst_leg_log_tw", t.user_attrs.get("ml_p10_log_growth_cpcv", -2.0)
-                ),
+                t.user_attrs.get("awf_worst_leg_log_tw", t.user_attrs.get("ml_p10_log_growth_cpcv", -2.0)),
                 -2.0,
                 2.0,
             )
         )
-        worst_mdd = float(
-            t.user_attrs.get("awf_worst_mdd_pct", t.user_attrs.get("ml_worst_mdd_cpcv", 999.0))
-        )
+        worst_mdd = float(t.user_attrs.get("awf_worst_mdd_pct", t.user_attrs.get("ml_worst_mdd_cpcv", 999.0)))
         dsr = float(t.user_attrs.get("gate1_dsr", 0.0))
         path_std = float(np.clip(t.user_attrs.get("ml_std_log_growth_cpcv", 1.0), 0.0, 2.0))
         if is_cpcv < 0:
@@ -1190,6 +1098,7 @@ def topsis_select_best(pareto_trials: list[optuna.trial.FrozenTrial]) -> optuna.
         raise ValueError("empty pareto_trials")
     if len(pareto_trials) == 1:
         return pareto_trials[0]
+
     def _safe_float(v: Any, default: float) -> float:
         try:
             x = float(v)
@@ -1200,18 +1109,13 @@ def topsis_select_best(pareto_trials: list[optuna.trial.FrozenTrial]) -> optuna.
     feats: list[list[float]] = []
     for t in pareto_trials:
         ua = t.user_attrs
-        robust = _safe_float(
-            ua.get("awf_robust_score", ua.get("awf_contract_reward", np.nan)), np.nan
-        )
+        robust = _safe_float(ua.get("awf_robust_score", ua.get("awf_contract_reward", np.nan)), np.nan)
         if not np.isfinite(robust):
             v0 = float(t.values[0]) if t.values else np.nan
             robust = -v0 if np.isfinite(v0) else -1e9
 
         mu_log = _safe_float(
-            ua.get(
-                "awf_mu_log",
-                ua.get("awf_mean_log_tw", ua.get("ml_mean_log_growth_cpcv", np.nan))
-            ),
+            ua.get("awf_mu_log", ua.get("awf_mean_log_tw", ua.get("ml_mean_log_growth_cpcv", np.nan))),
             -2.0,
         )
         worst_leg = _safe_float(

@@ -47,11 +47,20 @@ def test_assemble_edge_waterfall_tracks_stage_losses() -> None:
     assert wf.loss_friction == 15.0
     assert wf.n_sleeves_admitted_mean == 5.0
     assert wf.cap_binding_ratio == 0.3
-    assert all(math.isfinite(v) for v in (
-        wf.admitted_contrib, wf.weighted_contrib, wf.capped_contrib,
-        wf.realized_contrib, wf.loss_weighting, wf.loss_capping,
-        wf.loss_friction, wf.n_sleeves_admitted_mean, wf.cap_binding_ratio,
-    ))
+    assert all(
+        math.isfinite(v)
+        for v in (
+            wf.admitted_contrib,
+            wf.weighted_contrib,
+            wf.capped_contrib,
+            wf.realized_contrib,
+            wf.loss_weighting,
+            wf.loss_capping,
+            wf.loss_friction,
+            wf.n_sleeves_admitted_mean,
+            wf.cap_binding_ratio,
+        )
+    )
 
 
 def test_assemble_edge_waterfall_preserves_negative_edge_sign() -> None:
@@ -72,9 +81,14 @@ def test_assemble_edge_waterfall_preserves_negative_edge_sign() -> None:
     assert wf.weighted_contrib == -20.0
     assert wf.capped_contrib == -15.0
     assert wf.realized_contrib == -10.0
-    assert all(math.isfinite(v) for v in (
-        wf.loss_weighting, wf.loss_capping, wf.loss_friction,
-    ))
+    assert all(
+        math.isfinite(v)
+        for v in (
+            wf.loss_weighting,
+            wf.loss_capping,
+            wf.loss_friction,
+        )
+    )
 
 
 def test_assemble_edge_waterfall_zero_rebal_no_zerodiv() -> None:
