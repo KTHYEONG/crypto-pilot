@@ -1,4 +1,8 @@
-"""Alpha Foundry contracts and stage state machines. [ADR_20260706_ALPHA_FOUNDRY_SYNC][ADR_20260706_ALPHA_FOUNDRY_L0_DIVERSITY]"""
+"""Alpha Foundry contracts and stage state machines.
+
+[ADR_20260706_ALPHA_FOUNDRY_SYNC][ADR_20260706_ALPHA_FOUNDRY_L0_DIVERSITY]
+[ADR_20260706_ALPHA_FOUNDRY_L0_SIGNAL_RIGOR]
+"""
 
 from __future__ import annotations
 
@@ -82,6 +86,7 @@ class CheapGateConfig:
     min_incremental_rank_ic: float = 0.01
     block_bars: int = 6
     bootstrap_samples: int = 200
+    bootstrap_seed: int = 42
     fdr_alpha: float = 0.10
 
 
@@ -101,6 +106,8 @@ class CheapGateEvidence:
     novelty_corr_max: float
     incremental_rank_ic: float
     compute_cost_score: float
+    bootstrap_lcb_bps: float
+    bootstrap_agree: bool
     gate_passed: bool
     reject_reasons: tuple[CheapGateRejectReason, ...]
 
@@ -143,6 +150,8 @@ class AlphaFoundryEvidenceRow:
     cost_drag_ratio: float
     turnover_per_year: float
     compute_cost_score: float
+    bootstrap_lcb_bps: float
+    bootstrap_agree: bool
     gate_passed: bool
     reject_reasons: str  # "|".join(reject_reasons)
     bucket_key: str  # f"{family}:{timeframe}"
@@ -260,6 +269,9 @@ class AlphaFoundryRuntimeConfig:
     exclude_families: tuple[str, ...] = ()
     top_k_per_family_tf: int = 5
     initial_fold_budget: int = 3
+    enable_synthetic_recipes: bool = True
+    min_conviction_lcb_bps: float = 5.0
+    total_l1_verification_budget: int = 30
     cheap_gate: CheapGateConfig = field(default_factory=CheapGateConfig)
     posterior_gate: PosteriorGateConfig = field(default_factory=PosteriorGateConfig)
     l2_policy: L2PosteriorPolicyConfig = field(default_factory=L2PosteriorPolicyConfig)
@@ -279,6 +291,10 @@ class AlphaFoundryRuntimeConfig:
         for f in self.exclude_families:
             if not f.strip():
                 raise ValueError("exclude_families contains empty string after trim")
+        if self.min_conviction_lcb_bps < 0.0:
+            raise ValueError(f"min_conviction_lcb_bps must be >= 0.0, got {self.min_conviction_lcb_bps}")
+        if self.total_l1_verification_budget < 1:
+            raise ValueError(f"total_l1_verification_budget must be >= 1, got {self.total_l1_verification_budget}")
 
 
 @dataclass(slots=True, frozen=True)
@@ -318,3 +334,23 @@ class AlphaFoundryFoldRow:
     net_bps: float
     fold_id: int
     effective_weight: float
+
+
+CorroborationTier: TypeAlias = Literal[
+    "corroborated",
+    "single_tf_strict",
+    "contradicted",
+    "insufficient_coverage",
+]
+
+
+@dataclass(slots=True, frozen=True)
+class MultiTimeframeEvidence:
+    family: str
+    variant: str
+    native_timeframe: str
+    native_recipe_id: str
+    tf_coverage_count: int
+    sign_agreement_ratio: float
+    corroboration_tier: CorroborationTier
+    fused_conviction_score: float

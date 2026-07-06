@@ -1,4 +1,8 @@
-"""Alpha Foundry diversity and effective test count helpers. [ADR_20260706_ALPHA_FOUNDRY_SYNC][ADR_20260706_ALPHA_FOUNDRY_L0_DIVERSITY]"""
+"""Alpha Foundry diversity and effective test count helpers.
+
+[ADR_20260706_ALPHA_FOUNDRY_SYNC][ADR_20260706_ALPHA_FOUNDRY_L0_DIVERSITY]
+[ADR_20260706_ALPHA_FOUNDRY_L0_SIGNAL_RIGOR]
+"""
 
 from __future__ import annotations
 
@@ -6,6 +10,7 @@ from collections.abc import Mapping, Sequence
 
 import numpy as np
 from numpy.typing import NDArray
+from scipy import stats as scipy_stats
 
 from src.domain.futures.alpha_foundry.contracts import (
     BucketKey,
@@ -99,6 +104,26 @@ def estimate_effective_test_count(
     return float(max(1.0, min(m_eff, float(n))))
 
 
+
+def apply_bucket_bh_correction(
+    candidates: Sequence[CheapGateEvidence],
+    fdr_alpha: float,
+) -> frozenset[str]:
+    if not candidates:
+        return frozenset()
+    sorted_candidates = sorted(candidates, key=lambda c: abs(c.nw_tstat), reverse=True)
+    m = len(sorted_candidates)
+    selected: set[str] = set()
+    max_i = -1
+    for i, c in enumerate(sorted_candidates):
+        p = 2.0 * (1.0 - scipy_stats.norm.cdf(abs(c.nw_tstat)))
+        if p <= ((i + 1) / m) * fdr_alpha:
+            max_i = i
+    for c in sorted_candidates[:max_i + 1]:
+        selected.add(c.recipe_id)
+    return frozenset(selected)
+
+
 def select_bucket_diverse_recipes(
     *,
     bucket_key: BucketKey,
@@ -108,7 +133,23 @@ def select_bucket_diverse_recipes(
     active_mask: NDArray[np.bool_],
     top_k_per_family_tf: int,
     max_novelty_corr: float,
+    fdr_alpha: float,
+    min_conviction_lcb_bps: float,
 ) -> DiversitySelectionResult:
+    redundant_reason_map: dict[str, str] = {}
+
+    bh_ok = apply_bucket_bh_correction(candidates, fdr_alpha)
+    filtered: list[CheapGateEvidence] = []
+    for c in candidates:
+        if c.recipe_id not in bh_ok:
+            redundant_reason_map[c.recipe_id] = "bh_rejected"
+        elif c.block_lcb_bps < min_conviction_lcb_bps:
+            redundant_reason_map[c.recipe_id] = "below_conviction_floor"
+        else:
+            filtered.append(c)
+
+    candidates = filtered
+
     ranked = sorted(candidates, key=lambda e: (-e.block_lcb_bps, e.recipe_id))
     ranked_ids = tuple(e.recipe_id for e in ranked)
 
@@ -117,8 +158,8 @@ def select_bucket_diverse_recipes(
             bucket_key=bucket_key,
             ranked_recipe_ids=(),
             selected_recipe_ids=(),
-            redundant_recipe_ids=(),
-            redundant_reason_by_id={},
+            redundant_recipe_ids=tuple(redundant_reason_map.keys()),
+            redundant_reason_by_id=redundant_reason_map,
             bucket_corr=np.empty((0, 0), dtype=np.float64),
             bucket_eff_test_count=0.0,
         )
@@ -128,15 +169,14 @@ def select_bucket_diverse_recipes(
             bucket_key=bucket_key,
             ranked_recipe_ids=ranked_ids,
             selected_recipe_ids=ranked_ids,
-            redundant_recipe_ids=(),
-            redundant_reason_by_id={},
+            redundant_recipe_ids=tuple(redundant_reason_map.keys()),
+            redundant_reason_by_id=redundant_reason_map,
             bucket_corr=np.array([[1.0]], dtype=np.float64),
             bucket_eff_test_count=1.0,
         )
 
     selected: list[CheapGateEvidence] = [ranked[0]]
     redundant: list[CheapGateEvidence] = []
-    redundant_reason_map: dict[str, str] = {}
 
     for candidate in ranked[1:]:
         if len(selected) >= top_k_per_family_tf:
@@ -149,9 +189,9 @@ def select_bucket_diverse_recipes(
             pb = panel_by_recipe_id.get(sel.recipe_id)
             if pa is None or pb is None:
                 continue
-            c = _paired_score_corr(pa, pb, active_mask)
-            if c > max_corr:
-                max_corr = c
+            corr_val = _paired_score_corr(pa, pb, active_mask)
+            if corr_val > max_corr:
+                max_corr = corr_val
                 max_corr_id = sel.recipe_id
         if max_corr > max_novelty_corr:
             redundant.append(candidate)
@@ -181,7 +221,7 @@ def select_bucket_diverse_recipes(
         bucket_key=bucket_key,
         ranked_recipe_ids=ranked_ids,
         selected_recipe_ids=selected_ids,
-        redundant_recipe_ids=redundant_ids,
+        redundant_recipe_ids=tuple(set(redundant_ids) | set(redundant_reason_map.keys())),
         redundant_reason_by_id=redundant_reason_map,
         bucket_corr=bucket_corr,
         bucket_eff_test_count=bucket_eff,
@@ -238,6 +278,7 @@ def resolve_cross_bucket_diversity(
                 block_lcb_bps=0.0, rank_ic=0.0, cost_drag_ratio=0.0,
                 turnover_per_year=0.0, novelty_corr_max=0.0,
                 incremental_rank_ic=0.0, compute_cost_score=0.0,
+                bootstrap_lcb_bps=0.0, bootstrap_agree=True,
                 gate_passed=True, reject_reasons=(),
             )
             for rid in all_selected

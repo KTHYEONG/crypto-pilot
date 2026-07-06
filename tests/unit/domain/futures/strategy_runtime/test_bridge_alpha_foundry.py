@@ -120,6 +120,8 @@ def make_passing_evidence(recipe_id: str = "trend_ma__ema_12_72__4h") -> CheapGa
         compute_cost_score=0.1,
         gate_passed=True,
         reject_reasons=(),
+        bootstrap_lcb_bps=1.5,
+        bootstrap_agree=True,
     )
 
 
@@ -141,6 +143,8 @@ def make_rejected_evidence(recipe_id: str = "bad_recipe") -> CheapGateEvidence:
         compute_cost_score=0.5,
         gate_passed=False,
         reject_reasons=("insufficient_events", "weak_tstat"),
+        bootstrap_lcb_bps=-2.0,
+        bootstrap_agree=True,
     )
 
 
@@ -169,6 +173,7 @@ def _make_l0_artifacts(evidences: list[CheapGateEvidence]) -> object:
             bucket_key=f":{ev.timeframe}", bucket_rank=0,
             selected_for_l1=ev.gate_passed, redundant_with="",
             bucket_eff_test_count=1.0, global_eff_test_count=1.0,
+            bootstrap_lcb_bps=ev.bootstrap_lcb_bps, bootstrap_agree=ev.bootstrap_agree,
             created_at_ms=1000,
         )
         for ev in evidences
