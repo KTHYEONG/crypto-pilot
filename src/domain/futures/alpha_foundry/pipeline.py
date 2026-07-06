@@ -1,4 +1,8 @@
-"""Alpha Foundry L0-to-L2 orchestration bridge. [ADR_20260706_ALPHA_FOUNDRY_SYNC][ADR_20260706_ALPHA_FOUNDRY_L0_DIVERSITY]"""
+"""Alpha Foundry L0-to-L2 orchestration bridge.
+
+[ADR_20260706_ALPHA_FOUNDRY_SYNC][ADR_20260706_ALPHA_FOUNDRY_L0_DIVERSITY]
+[ADR_20260706_ALPHA_FOUNDRY_L0_SIGNAL_RIGOR]
+"""
 
 from __future__ import annotations
 
@@ -8,7 +12,10 @@ from dataclasses import dataclass
 
 import pandas as pd
 
-from src.domain.futures.alpha_foundry.budget import build_l1_verification_units
+from src.domain.futures.alpha_foundry.budget import (
+    allocate_global_l1_budget,
+    build_l1_verification_units,
+)
 from src.domain.futures.alpha_foundry.cheap_gate import (
     evaluate_alpha_cheap_gate_batch,
 )
@@ -58,6 +65,8 @@ def run_alpha_foundry_l0_pipeline(
     cheap_gate_config: CheapGateConfig,
     run_id: str = "",
     top_k_per_family_tf: int = 5,
+    min_conviction_lcb_bps: float = 5.0,
+    total_l1_verification_budget: int = 30,
 ) -> AlphaFoundryL0Artifacts:
     cheap_evidences = evaluate_alpha_cheap_gate_batch(
         panels=panels,
@@ -102,6 +111,8 @@ def run_alpha_foundry_l0_pipeline(
             active_mask=active,
             top_k_per_family_tf=top_k_per_family_tf,
             max_novelty_corr=cheap_gate_config.max_novelty_corr,
+            fdr_alpha=cheap_gate_config.fdr_alpha,
+            min_conviction_lcb_bps=min_conviction_lcb_bps,
         )
         bucket_results.append(br)
 
@@ -114,7 +125,30 @@ def run_alpha_foundry_l0_pipeline(
         max_novelty_corr=cheap_gate_config.max_novelty_corr,
     )
 
+    # Stage 3.5: Global L1 budget allocation
+    evidence_by_rid = {ev.recipe_id: ev for ev in cheap_evidences}
+    allocated = allocate_global_l1_budget(
+        bucket_results=bucket_results,
+        evidence_by_recipe_id=evidence_by_rid,
+        total_l1_verification_budget=total_l1_verification_budget,
+        top_k_max=top_k_per_family_tf,
+    )
+
     final_selected = set(cross_result.final_selected_recipe_ids)
+    budget_redundant: dict[str, str] = {}
+    for br in bucket_results:
+        bk = br.bucket_key
+        slot_limit = allocated.get(bk, 0)
+        bucket_selected = [rid for rid in br.selected_recipe_ids if rid in final_selected]
+        bucket_selected.sort(
+            key=lambda rid: evidence_by_rid[rid].block_lcb_bps if rid in evidence_by_rid else 0.0,
+            reverse=True,
+        )
+        keep = set(bucket_selected[:slot_limit])
+        for rid in bucket_selected:
+            if rid not in keep:
+                final_selected.discard(rid)
+                budget_redundant[rid] = "budget_exhausted"
 
     # Build evidence_rows
     selected_in_bucket: dict[str, int] = {
@@ -127,6 +161,7 @@ def run_alpha_foundry_l0_pipeline(
     for br in bucket_results:
         redundant_map.update(br.redundant_reason_by_id)
     redundant_map.update(cross_result.demoted_reason_by_id)
+    redundant_map.update(budget_redundant)
 
     created_at_ms = int(_time_module.time() * 1000)
     evidence_rows: list[AlphaFoundryEvidenceRow] = []
@@ -164,6 +199,8 @@ def run_alpha_foundry_l0_pipeline(
             cost_drag_ratio=ev.cost_drag_ratio,
             turnover_per_year=ev.turnover_per_year,
             compute_cost_score=ev.compute_cost_score,
+            bootstrap_lcb_bps=ev.bootstrap_lcb_bps,
+            bootstrap_agree=ev.bootstrap_agree,
             gate_passed=ev.gate_passed,
             reject_reasons="|".join(ev.reject_reasons),
             bucket_key=f"{family}:{ev.timeframe}",

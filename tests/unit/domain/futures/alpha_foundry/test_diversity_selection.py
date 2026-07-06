@@ -59,6 +59,8 @@ def _make_evidence(recipe_id: str, *, block_lcb_bps: float) -> CheapGateEvidence
         compute_cost_score=0.0,
         gate_passed=True,
         reject_reasons=(),
+        bootstrap_lcb_bps=block_lcb_bps,
+        bootstrap_agree=True,
     )
 
 
@@ -89,6 +91,8 @@ class TestSelectBucketDiverseRecipes:
             active_mask=active,
             top_k_per_family_tf=2,
             max_novelty_corr=0.85,
+            fdr_alpha=0.10,
+            min_conviction_lcb_bps=0.0,
         )
         assert len(result.selected_recipe_ids) == 2
         assert result.selected_recipe_ids[0] == "r2"  # block_lcb_bps=5.0
@@ -109,6 +113,8 @@ class TestSelectBucketDiverseRecipes:
             active_mask=active,
             top_k_per_family_tf=5,
             max_novelty_corr=0.85,
+            fdr_alpha=0.10,
+            min_conviction_lcb_bps=0.0,
         )
         assert result.selected_recipe_ids == ("r1",)
         assert result.bucket_eff_test_count == 1.0
@@ -128,6 +134,8 @@ class TestSelectBucketDiverseRecipes:
             active_mask=active,
             top_k_per_family_tf=2,
             max_novelty_corr=0.85,
+            fdr_alpha=0.10,
+            min_conviction_lcb_bps=0.0,
         )
         assert len(result.selected_recipe_ids) == 2
         assert len(result.redundant_recipe_ids) == 3
@@ -153,6 +161,8 @@ class TestSelectBucketDiverseRecipes:
             active_mask=active,
             top_k_per_family_tf=2,
             max_novelty_corr=0.85,
+            fdr_alpha=0.10,
+            min_conviction_lcb_bps=0.0,
         )
         # 동일 block_lcb_bps → recipe_id asc: "a" 먼저
         assert result.ranked_recipe_ids[0] == "a"
@@ -169,6 +179,8 @@ class TestSelectBucketDiverseRecipes:
             active_mask=active,
             top_k_per_family_tf=5,
             max_novelty_corr=0.85,
+            fdr_alpha=0.10,
+            min_conviction_lcb_bps=0.0,
         )
         assert result.selected_recipe_ids == ()
         assert result.bucket_eff_test_count == 0.0

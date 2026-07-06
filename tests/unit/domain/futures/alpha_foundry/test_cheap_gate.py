@@ -17,15 +17,21 @@ from src.domain.futures.strategy.execution_cost import ExecutionCostModel
 
 
 def make_mock_aligned() -> AlignedMarketData:
+    # 100 days of 4h bars (600 bars) — long enough to clear min_events=40 with a
+    # realistic hold/flat cycle while keeping annualized turnover under the cap
+    # (see make_mock_panel's 8-on/8-off pattern).
     datetimes = np.arange(
         np.datetime64("2026-01-01T00:00:00"),
-        np.datetime64("2026-01-11T00:00:00"),
+        np.datetime64("2026-04-11T00:00:00"),
         np.timedelta64(4, "h"),
         dtype="datetime64[ns]",
     )
     t = datetimes.shape[0]
     symbols = ("BTCUSDT", "ETHUSDT")
-    base = np.linspace(100.0, 112.0, t, dtype=np.float64)
+    # Constant per-bar log-drift (not a fixed-endpoint linspace) so the mean
+    # 3-bar gross return stays comfortably above the ~11.25bps stress
+    # round-trip cost regardless of window length (t).
+    base = 100.0 * np.exp(0.002 * np.arange(t, dtype=np.float64))
     close = np.column_stack([base, base * 0.8])
     high = close * 1.01
     low = close * 0.99
@@ -50,8 +56,16 @@ def make_mock_aligned() -> AlignedMarketData:
 def make_mock_panel(*, recipe_id: str = "trend_ma:ema_12_72:4h") -> CandidateSignalPanel:
     aligned = make_mock_aligned()
     t, n = aligned.close_2d.shape
-    score = np.ones((t, n), dtype=np.float64)
-    side = np.ones((t, n), dtype=np.int8)
+    # Sparse-entry fixture: 8 bars held / 8 bars flat, repeating. A constant
+    # side=1 array produces zero rising-edge entries under sparse-entry
+    # semantics (no bar ever transitions from flat/reversal) — this pattern
+    # gives ~n_events=37/symbol while keeping annualized turnover well under
+    # the default 365/yr cap (flip_fraction=2/16 -> ~137/yr at bars_per_year=2190).
+    side = np.zeros((t, n), dtype=np.int8)
+    cycle = 16
+    for start in range(0, t, cycle):
+        side[start : start + 8, :] = 1
+    score = side.astype(np.float64)
     valid = np.ones((t, n), dtype=np.bool_)
     return CandidateSignalPanel(
         family="trend_ma",
