@@ -1,14 +1,18 @@
 from __future__ import annotations
 
 import re
+from pathlib import Path
 
 import pytest
 
 from src.domain.futures.alpha_foundry.contracts import (
+    AlphaFoundryRuntimeConfig,
     AlphaRecipe,
+    CheapGateConfig,
     L1VerificationUnit,
     L2PosteriorPolicyConfig,
     L2PosteriorSleeve,
+    PosteriorGateConfig,
     StagedSearchBudget,
 )
 
@@ -183,3 +187,59 @@ class TestStagedSearchBudget:
                 patience=-1,
                 seed_count=1,
             )
+
+
+class TestAlphaFoundryRuntimeConfig:
+    def test_default_config_creates_successfully(self) -> None:
+        cfg = AlphaFoundryRuntimeConfig()
+        assert cfg.mode == "off"
+        assert cfg.max_recipes_per_family == 64
+        assert cfg.top_k_per_family_tf == 5
+        assert cfg.initial_fold_budget == 3
+
+    def test_valid_audit_mode(self) -> None:
+        cfg = AlphaFoundryRuntimeConfig(mode="audit")
+        assert cfg.mode == "audit"
+
+    def test_valid_gate_mode(self) -> None:
+        cfg = AlphaFoundryRuntimeConfig(mode="gate")
+        assert cfg.mode == "gate"
+
+    def test_rejects_invalid_mode(self) -> None:
+        with pytest.raises(ValueError, match="invalid alpha_foundry mode"):
+            AlphaFoundryRuntimeConfig(mode="invalid")
+
+    @pytest.mark.parametrize(
+        ("field", "value"),
+        [
+            ("max_recipes_per_family", 0),
+            ("top_k_per_family_tf", 0),
+            ("initial_fold_budget", 0),
+        ],
+    )
+    def test_rejects_zero_budget_values(self, field: str, value: int) -> None:
+        kwargs: dict[str, object] = {
+            "mode": "audit",
+            "report_dir": Path("/tmp/af_test"),  # noqa: S108
+            "max_recipes_per_family": 64,
+            "top_k_per_family_tf": 5,
+            "initial_fold_budget": 3,
+            "cheap_gate": CheapGateConfig(),
+            "posterior_gate": PosteriorGateConfig(),
+            "l2_policy": L2PosteriorPolicyConfig(),
+        }
+        kwargs[field] = value
+        with pytest.raises(ValueError, match=f"{field} must be >= 1"):
+            AlphaFoundryRuntimeConfig(**kwargs)  # type: ignore[arg-type]
+
+    def test_rejects_negative_budget_values(self) -> None:
+        with pytest.raises(ValueError, match="max_recipes_per_family must be >= 1"):
+            AlphaFoundryRuntimeConfig(max_recipes_per_family=-1)
+
+    def test_rejects_empty_include_families_after_trim(self) -> None:
+        with pytest.raises(ValueError, match="include_families contains empty string after trim"):
+            AlphaFoundryRuntimeConfig(include_families=("", "trend_ma"))
+
+    def test_rejects_empty_exclude_families_after_trim(self) -> None:
+        with pytest.raises(ValueError, match="exclude_families contains empty string after trim"):
+            AlphaFoundryRuntimeConfig(exclude_families=(" ",))

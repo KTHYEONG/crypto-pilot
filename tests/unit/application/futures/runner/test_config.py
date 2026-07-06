@@ -4,7 +4,13 @@ from typing import Any
 
 import pytest
 
-from src.application.futures.runner.config import FuturesRunConfig
+from src.application.futures.runner.config import (
+    FuturesRunConfig,
+    build_alpha_foundry_runtime_config,
+    build_run_config_from_args,
+    parse_active_phase,
+    validate_run_config,
+)
 from src.application.futures.runner.models import MarketDataBundle, RunWindow
 
 
@@ -30,7 +36,6 @@ def make_data_bundle() -> MarketDataBundle:
     )
 
 
-from src.application.futures.runner.config import build_run_config_from_args
 
 
 class TestBuildRunConfig:
@@ -59,3 +64,62 @@ class TestBuildRunConfig:
     def test_sync_skip_is_accepted(self) -> None:
         config = build_run_config_from_args({"phase": "l3", "trials": 1, "sync": "skip"})
         assert config.sync == "skip"
+
+    def test_parse_active_phase_direct(self) -> None:
+        result = parse_active_phase("l1")
+        assert result == "l1"
+
+    def test_parse_active_phase_removed_raises(self) -> None:
+        with pytest.raises(ValueError, match="removed phase"):
+            parse_active_phase("strategy-smoke")
+
+    def test_parse_active_phase_unknown_raises(self) -> None:
+        with pytest.raises(ValueError, match="unknown phase"):
+            parse_active_phase("l4")
+
+    def test_validate_run_config_direct(self) -> None:
+        config = make_run_config()
+        result = validate_run_config(config)
+        assert result.trials == 3
+
+    def test_validate_run_config_trials_zero_raises(self) -> None:
+        config = FuturesRunConfig(
+            timeframe="4h", date=None, trials=0,
+            phase="l3", sync="skip", refresh_universe=False,
+            sync_metrics=False, seed=42,
+        )
+        with pytest.raises(ValueError, match="trials must be >= 1"):
+            validate_run_config(config)
+
+    def test_build_alpha_foundry_runtime_config_direct(self) -> None:
+        config = build_alpha_foundry_runtime_config({"alpha_foundry": "audit"})
+        assert config.mode == "audit"
+
+    def test_build_alpha_foundry_runtime_config_default(self) -> None:
+        config = build_alpha_foundry_runtime_config({})
+        assert config.mode == "off"
+
+    def test_unknown_phase_via_build(self) -> None:
+        with pytest.raises(ValueError, match="unknown phase"):
+            build_run_config_from_args({"phase": "l4", "trials": 1, "sync": "skip"})
+
+    def test_alpha_foundry_audit_mode_accepted(self) -> None:
+        config = build_run_config_from_args({
+            "phase": "l3", "timeframe": "4h", "trials": 1, "sync": "skip",
+            "alpha_foundry": "audit",
+        })
+        assert config.alpha_foundry.mode == "audit"
+
+    def test_alpha_foundry_gate_mode_accepted(self) -> None:
+        config = build_run_config_from_args({
+            "phase": "l3", "timeframe": "4h", "trials": 1, "sync": "skip",
+            "alpha_foundry": "gate",
+        })
+        assert config.alpha_foundry.mode == "gate"
+
+    def test_removed_arg_rejected(self) -> None:
+        with pytest.raises(ValueError, match="removed argument"):
+            build_run_config_from_args({
+                "phase": "l3", "timeframe": "4h", "trials": 1, "sync": "skip",
+                "alpha_only": True,
+            })
