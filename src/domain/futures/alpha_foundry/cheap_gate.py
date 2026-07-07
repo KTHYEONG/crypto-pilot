@@ -9,13 +9,14 @@ from __future__ import annotations
 
 import math
 from collections.abc import Mapping, Sequence
-from typing import Literal
+from typing import Literal, cast
 
 import numpy as np
 from numpy.typing import NDArray
 from scipy import stats as scipy_stats
 
 from src.domain.futures.alpha_foundry.contracts import (
+    AlphaGateEvidenceV2,
     AlphaRecipe,
     CheapGateConfig,
     CheapGateEvidence,
@@ -472,4 +473,362 @@ def build_l0_signal_candidate(
         l1_budget_units=0,
         hard_reject_reasons=tuple(hard_reject_reasons),
         soft_flags=tuple(soft_flags),
+    )
+
+
+# ── V2 Gate Metrics ────────────────────────────────────────────────────
+
+
+def compute_cost_drag_ratio_v2(*, mean_cost_bps: float, mean_gross_bps: float, eps: float = 1e-10) -> float:
+    return mean_cost_bps / max(abs(mean_gross_bps), eps)
+
+
+def compute_rank_ic_with_tstat(
+    *,
+    fwd_ret_bps: NDArray[np.float64],
+    score: NDArray[np.float64],
+    mask: NDArray[np.bool_],
+) -> tuple[float, float]:
+    flat_ret = fwd_ret_bps[mask]
+    flat_score = score[mask]
+    if len(flat_ret) < 3:
+        return (0.0, 0.0)
+    if np.std(flat_ret) < 1e-12 or np.std(flat_score) < 1e-12:
+        return (0.0, 0.0)
+    ic = float(scipy_stats.spearmanr(flat_ret, flat_score)[0])
+    n = len(flat_ret)
+    z = float(np.arctanh(ic))
+    se = 1.0 / np.sqrt(max(n - 3, 1))
+    tstat = z / max(se, 1e-10)
+    return (ic, tstat)
+
+
+def compute_payoff_stats(values_bps: NDArray[np.float64]) -> tuple[float, float]:
+    finite = values_bps[np.isfinite(values_bps)]
+    if len(finite) == 0:
+        return (0.0, 0.0)
+    hit_rate = float(np.mean(finite > 0.0))
+    pos = finite[finite > 0.0]
+    neg = finite[finite < 0.0]
+    mean_pos = float(np.mean(pos)) if len(pos) > 0 else 0.0
+    mean_neg = float(np.mean(neg)) if len(neg) > 0 else 0.0
+    payoff_skew = mean_pos / max(abs(mean_neg), 1e-10)
+    return (hit_rate, payoff_skew)
+
+
+def compute_xs_spread_lcb_bps(
+    *,
+    net_bps: NDArray[np.float64],
+    score: NDArray[np.float64],
+    event_mask: NDArray[np.bool_],
+    min_symbols_per_bar: int,
+    quantile: float = 0.20,
+) -> float | None:
+    t = min(net_bps.shape[0], score.shape[0])
+    if t == 0:
+        return None
+    spreads: list[float] = []
+    for bar in range(t):
+        bar_mask = event_mask[bar, :].astype(bool)
+        n_active = int(bar_mask.sum())
+        if n_active < min_symbols_per_bar:
+            continue
+        bar_net = net_bps[bar, bar_mask]
+        bar_score = score[bar, bar_mask]
+        order = np.argsort(bar_score)
+        top_idx = order[-max(1, int(n_active * quantile)):]
+        bot_idx = order[: max(1, int(n_active * quantile))]
+        top_mean = float(np.mean(bar_net[top_idx])) if len(top_idx) > 0 else 0.0
+        bot_mean = float(np.mean(bar_net[bot_idx])) if len(bot_idx) > 0 else 0.0
+        spreads.append(top_mean - bot_mean)
+    if len(spreads) < 2:
+        return None
+    arr = np.array(spreads, dtype=np.float64)
+    return float(np.percentile(arr, 5))
+
+
+def compute_liquidity_cost_stress_bps(
+    *,
+    aligned: AlignedMarketData,
+    event_mask: NDArray[np.bool_],
+    stress_mult: float,
+) -> float:
+    if aligned.execution_cost_bps_2d is None:
+        return 0.0
+    cost_at_events = aligned.execution_cost_bps_2d[event_mask]
+    if len(cost_at_events) == 0:
+        return 0.0
+    return float(np.nanmean(cost_at_events)) * stress_mult
+
+
+def evaluate_panel_gate_v2(
+    *,
+    panel: CandidateSignalPanel,
+    aligned: AlignedMarketData,
+    recipe: AlphaRecipe,
+    cost_model: ExecutionCostModel,
+    config: CheapGateConfig,
+    bars_per_year: float,
+) -> AlphaGateEvidenceV2:
+    if bars_per_year <= 0.0:
+        raise ValueError("bars_per_year must be positive")
+    _validate_shape(panel, aligned)
+
+    t, n = aligned.close_2d.shape
+    close = aligned.close_2d
+    funding = aligned.funding_2d
+    active = aligned.active_mask & aligned.warm_mask & ~aligned.entry_block_mask & ~aligned.kill_mask
+
+    side = panel.side_hint_2d
+    valid = panel.valid_mask_2d & active & np.isfinite(close)
+
+    causal_lag = recipe.causal_lag_bars
+    holding_bars = panel.expected_holding_bars
+
+    reject_reasons_list: list[str] = []
+    soft_flags_list: list[str] = []
+
+    if causal_lag >= t or holding_bars >= t:
+        n_events = 0
+        effective_n = 0.0
+        return AlphaGateEvidenceV2(
+            recipe_id=recipe.recipe_id,
+            timeframe=recipe.timeframe,
+            symbol_scope="symbol",
+            n_events=0,
+            effective_n=0.0,
+            mean_gross_bps=0.0,
+            mean_cost_bps=0.0,
+            mean_net_bps=0.0,
+            gross_lcb_bps=0.0,
+            net_lcb_bps=0.0,
+            nw_tstat=0.0,
+            rank_ic=0.0,
+            rank_ic_tstat=0.0,
+            cost_drag_ratio=0.0,
+            turnover_per_year=0.0,
+            event_hit_rate=0.0,
+            payoff_skew=0.0,
+            regime_edge_bps={},
+            xs_spread_lcb_bps=None,
+            liquidity_cost_stress_bps=0.0,
+            bootstrap_lcb_bps=0.0,
+            bootstrap_agree=True,
+            gate_passed=False,
+            reject_reasons=("insufficient_events",),
+        )
+
+    idx_start = causal_lag
+    idx_end = t - holding_bars
+
+    entry_full = _sparse_entry_mask(side, valid)
+    event_mask = np.zeros_like(entry_full)
+    if idx_start < idx_end:
+        event_mask[idx_start:idx_end, :] = entry_full[idx_start:idx_end, :]
+
+    n_events = int(np.sum(event_mask))
+    min_events = config.archetype_event_floors.get(recipe.archetype, config.min_events)
+    if n_events < min_events:
+        return AlphaGateEvidenceV2(
+            recipe_id=recipe.recipe_id,
+            timeframe=recipe.timeframe,
+            symbol_scope="symbol",
+            n_events=n_events,
+            effective_n=0.0,
+            mean_gross_bps=0.0,
+            mean_cost_bps=0.0,
+            mean_net_bps=0.0,
+            gross_lcb_bps=0.0,
+            net_lcb_bps=0.0,
+            nw_tstat=0.0,
+            rank_ic=0.0,
+            rank_ic_tstat=0.0,
+            cost_drag_ratio=0.0,
+            turnover_per_year=0.0,
+            event_hit_rate=0.0,
+            payoff_skew=0.0,
+            regime_edge_bps={},
+            xs_spread_lcb_bps=None,
+            liquidity_cost_stress_bps=0.0,
+            bootstrap_lcb_bps=0.0,
+            bootstrap_agree=True,
+            gate_passed=False,
+            reject_reasons=("insufficient_events",),
+        )
+
+    # Forward gross return: close[t+holding]/close[t+lag] * side
+    fwd_ret_bps = np.full((t, n), np.nan, dtype=np.float64)
+    idx_end_fwd = t - holding_bars
+    for i in range(idx_end_fwd):
+        fwd_ret_bps[i, :] = (
+            side[i, :].astype(np.float64)
+            * (close[i + holding_bars, :] / close[i + causal_lag, :] - 1.0)
+            * 10000.0
+        )
+
+    # Stress cost
+    stress_cost = cost_model.stress_round_trip_bps()
+
+    # Funding over holding period
+    funding_cost = np.where(event_mask, funding * 10000.0 * holding_bars, 0.0)
+
+    # Liquidity stress
+    liquidity_stress_bps = compute_liquidity_cost_stress_bps(
+        aligned=aligned,
+        event_mask=event_mask,
+        stress_mult=config.liquidity_cost_stress_mult,
+    )
+
+    total_cost_bps = stress_cost + liquidity_stress_bps
+    total_cost_2d = total_cost_bps + funding_cost
+
+    net_bps = fwd_ret_bps - total_cost_2d
+
+    net_vals = net_bps[event_mask]
+    gross_vals = fwd_ret_bps[event_mask]
+
+    effective_n = float(n_events)
+    if effective_n < config.min_effective_n:
+        reject_reasons_list.append("insufficient_effective_n")
+
+    mean_gross_bps = float(np.nanmean(gross_vals)) if n_events > 0 else 0.0
+    mean_cost_bps = float(np.nanmean(total_cost_2d[event_mask])) if n_events > 0 else 0.0
+    mean_net_bps = float(np.nanmean(net_vals)) if n_events > 0 else 0.0
+
+    # Block-based LCB
+    block_bars_eff = max(config.block_bars, 2 * holding_bars)
+    block_means = _compute_block_means(net_vals, block_bars_eff)
+    mu_block, se_block = _block_moments(block_means)
+    nw_tstat = mu_block / max(se_block, 1e-10)
+    net_lcb_bps = mu_block - 1.0 * se_block
+
+    # Gross block LCB
+    gross_block_means = _compute_block_means(gross_vals, block_bars_eff)
+    mu_gross, se_gross = _block_moments(gross_block_means)
+    gross_lcb_bps = mu_gross - 1.0 * se_gross
+
+    if mean_gross_bps <= 0.0:
+        reject_reasons_list.append("non_positive_gross")
+    if net_lcb_bps <= config.min_lcb_net_bps:
+        reject_reasons_list.append("non_positive_lcb")
+    if abs(nw_tstat) < config.min_nw_tstat:
+        reject_reasons_list.append("weak_tstat")
+
+    # Cost drag ratio (V2: event means)
+    cost_drag = compute_cost_drag_ratio_v2(mean_cost_bps=mean_cost_bps, mean_gross_bps=mean_gross_bps)
+    if cost_drag > config.max_cost_drag_ratio:
+        reject_reasons_list.append("excess_cost_drag")
+
+    # Turnover
+    turnover = _compute_turnover_per_year(side, valid, bars_per_year)
+    max_turn = min(config.max_turnover_per_year, recipe.max_turnover_per_year)
+    if turnover > max_turn:
+        reject_reasons_list.append("excess_turnover")
+
+    # High turnover: gross_lcb_below_cost check
+    if turnover >= config.high_turnover_per_year and gross_lcb_bps <= mean_cost_bps + liquidity_stress_bps:
+        reject_reasons_list.append("gross_lcb_below_cost")
+
+    # Rank IC with t-stat
+    rank_ic, rank_ic_tstat = compute_rank_ic_with_tstat(
+        fwd_ret_bps=fwd_ret_bps,
+        score=panel.signed_score_2d,
+        mask=event_mask,
+    )
+    rank_ic_floor = 1.0 / math.sqrt(max(n_events - 3, 1))
+    if abs(rank_ic) < rank_ic_floor:
+        soft_flags_list.append("weak_rank_ic")
+    if abs(rank_ic_tstat) < config.min_candidate_rank_ic_tstat:
+        soft_flags_list.append("weak_rank_ic_tstat")
+
+    # Bootstrap
+    rng = np.random.default_rng(config.bootstrap_seed)
+    bootstrap_lcb_bps, _ = _bootstrap_block_ci(block_means, config.bootstrap_samples, rng)
+    bootstrap_agree = (bootstrap_lcb_bps > 0) == (net_lcb_bps > 0)
+    if not bootstrap_agree:
+        soft_flags_list.append("bootstrap_disagree")
+
+    # Payoff stats
+    hit_rate, payoff_skew = compute_payoff_stats(net_vals)
+
+    # Cross-sectional spread LCB
+    xs_spread_lcb: float | None = None
+    if recipe.archetype == "cross_sectional":
+        xs_spread_lcb = compute_xs_spread_lcb_bps(
+            net_bps=net_bps,
+            score=panel.signed_score_2d,
+            event_mask=event_mask,
+            min_symbols_per_bar=config.min_xs_symbols_per_bar,
+        )
+        if xs_spread_lcb is None or xs_spread_lcb <= 0.0:
+            reject_reasons_list.append("xs_spread_fail")
+
+    gate_passed = len(reject_reasons_list) == 0
+
+    return AlphaGateEvidenceV2(
+        recipe_id=recipe.recipe_id,
+        timeframe=recipe.timeframe,
+        symbol_scope="symbol",
+        n_events=n_events,
+        effective_n=effective_n,
+        mean_gross_bps=mean_gross_bps,
+        mean_cost_bps=mean_cost_bps,
+        mean_net_bps=mean_net_bps,
+        gross_lcb_bps=gross_lcb_bps,
+        net_lcb_bps=net_lcb_bps,
+        nw_tstat=nw_tstat,
+        rank_ic=rank_ic,
+        rank_ic_tstat=rank_ic_tstat,
+        cost_drag_ratio=cost_drag,
+        turnover_per_year=turnover,
+        event_hit_rate=hit_rate,
+        payoff_skew=payoff_skew,
+        regime_edge_bps={},
+        xs_spread_lcb_bps=xs_spread_lcb,
+        liquidity_cost_stress_bps=liquidity_stress_bps,
+        bootstrap_lcb_bps=bootstrap_lcb_bps,
+        bootstrap_agree=bootstrap_agree,
+        gate_passed=gate_passed,
+        reject_reasons=tuple(reject_reasons_list),
+        soft_flags=tuple(soft_flags_list),
+    )
+
+
+def downgrade_gate_v2_to_cheap_evidence(evidence: AlphaGateEvidenceV2) -> CheapGateEvidence:
+    _valid_reject: set[str] = {
+        "insufficient_events",
+        "insufficient_effective_n",
+        "non_positive_lcb",
+        "weak_tstat",
+        "excess_cost_drag",
+        "excess_turnover",
+        "invalid_shape",
+        "lookahead_risk",
+        "missing_required_field",
+    }
+    v1_reasons = cast(
+        "tuple[CheapGateRejectReason, ...]",
+        tuple(r for r in evidence.reject_reasons if r in _valid_reject),
+    )
+    return CheapGateEvidence(
+        recipe_id=evidence.recipe_id,
+        timeframe=evidence.timeframe,
+        symbol_scope=evidence.symbol_scope,
+        n_events=evidence.n_events,
+        effective_n=evidence.effective_n,
+        mean_net_bps=evidence.mean_net_bps,
+        nw_tstat=evidence.nw_tstat,
+        block_lcb_bps=evidence.net_lcb_bps,
+        rank_ic=evidence.rank_ic,
+        cost_drag_ratio=evidence.cost_drag_ratio,
+        turnover_per_year=evidence.turnover_per_year,
+        novelty_corr_max=0.0,
+        incremental_rank_ic=0.0,
+        compute_cost_score=0.0,
+        bootstrap_lcb_bps=evidence.bootstrap_lcb_bps,
+        bootstrap_agree=evidence.bootstrap_agree,
+        gate_passed=evidence.gate_passed,
+        reject_reasons=v1_reasons,
+        mean_gross_bps=evidence.mean_gross_bps,
+        mean_cost_bps=evidence.mean_cost_bps,
     )
