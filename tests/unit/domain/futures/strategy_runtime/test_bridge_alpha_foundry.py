@@ -134,6 +134,8 @@ def make_passing_evidence(recipe_id: str = "trend_ma__ema_12_72__4h") -> CheapGa
         reject_reasons=(),
         bootstrap_lcb_bps=1.5,
         bootstrap_agree=True,
+        mean_gross_bps=0.0,
+        total_cost_bps=0.0,
     )
 
 
@@ -157,6 +159,8 @@ def make_rejected_evidence(recipe_id: str = "bad_recipe") -> CheapGateEvidence:
         reject_reasons=("insufficient_events", "weak_tstat"),
         bootstrap_lcb_bps=-2.0,
         bootstrap_agree=True,
+        mean_gross_bps=0.0,
+        total_cost_bps=0.0,
     )
 
 
