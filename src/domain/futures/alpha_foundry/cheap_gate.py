@@ -2,11 +2,13 @@
 
 [ADR_20260706_ALPHA_FOUNDRY_L0_L1_HANDOFF_GUARD]
 [ADR_20260706_ALPHA_FOUNDRY_SYNC][ADR_20260706_ALPHA_FOUNDRY_L0_DIVERSITY]
+[ADR_20260707_ALPHA_FOUNDRY_RESULT_SYNC]
 [ADR_20260706_ALPHA_FOUNDRY_L0_SIGNAL_RIGOR]
 """
 
 from __future__ import annotations
 
+import logging
 import math
 from collections.abc import Mapping, Sequence
 from typing import Literal, cast
@@ -16,7 +18,9 @@ from numpy.typing import NDArray
 from scipy import stats as scipy_stats
 
 from src.domain.futures.alpha_foundry.contracts import (
-    AlphaGateEvidenceV2,
+    AlphaGateConfig,
+    AlphaGateEvidence,
+    AlphaGateHandoffTier,
     AlphaRecipe,
     CheapGateConfig,
     CheapGateEvidence,
@@ -569,7 +573,7 @@ def evaluate_panel_gate_v2(
     cost_model: ExecutionCostModel,
     config: CheapGateConfig,
     bars_per_year: float,
-) -> AlphaGateEvidenceV2:
+) -> AlphaGateEvidence:
     if bars_per_year <= 0.0:
         raise ValueError("bars_per_year must be positive")
     _validate_shape(panel, aligned)
@@ -591,9 +595,14 @@ def evaluate_panel_gate_v2(
     if causal_lag >= t or holding_bars >= t:
         n_events = 0
         effective_n = 0.0
-        return AlphaGateEvidenceV2(
-            recipe_id=recipe.recipe_id,
+        return AlphaGateEvidence(
+            schema_version="unified",
+            run_id="",
             timeframe=recipe.timeframe,
+            family=recipe.family,
+            variant=recipe.variant,
+            recipe_id=recipe.recipe_id,
+            archetype=recipe.archetype,
             symbol_scope="symbol",
             n_events=0,
             effective_n=0.0,
@@ -607,15 +616,20 @@ def evaluate_panel_gate_v2(
             rank_ic_tstat=0.0,
             cost_drag_ratio=0.0,
             turnover_per_year=0.0,
+            novelty_corr_max=0.0,
+            incremental_rank_ic=0.0,
+            compute_cost_score=0.0,
             event_hit_rate=0.0,
             payoff_skew=0.0,
-            regime_edge_bps={},
             xs_spread_lcb_bps=None,
             liquidity_cost_stress_bps=0.0,
             bootstrap_lcb_bps=0.0,
             bootstrap_agree=True,
             gate_passed=False,
+            handoff_tier="blocked",
+            selected_for_l1=False,
             reject_reasons=("insufficient_events",),
+            soft_flags=(),
         )
 
     idx_start = causal_lag
@@ -629,9 +643,14 @@ def evaluate_panel_gate_v2(
     n_events = int(np.sum(event_mask))
     min_events = config.archetype_event_floors.get(recipe.archetype, config.min_events)
     if n_events < min_events:
-        return AlphaGateEvidenceV2(
-            recipe_id=recipe.recipe_id,
+        return AlphaGateEvidence(
+            schema_version="unified",
+            run_id="",
             timeframe=recipe.timeframe,
+            family=recipe.family,
+            variant=recipe.variant,
+            recipe_id=recipe.recipe_id,
+            archetype=recipe.archetype,
             symbol_scope="symbol",
             n_events=n_events,
             effective_n=0.0,
@@ -645,15 +664,20 @@ def evaluate_panel_gate_v2(
             rank_ic_tstat=0.0,
             cost_drag_ratio=0.0,
             turnover_per_year=0.0,
+            novelty_corr_max=0.0,
+            incremental_rank_ic=0.0,
+            compute_cost_score=0.0,
             event_hit_rate=0.0,
             payoff_skew=0.0,
-            regime_edge_bps={},
             xs_spread_lcb_bps=None,
             liquidity_cost_stress_bps=0.0,
             bootstrap_lcb_bps=0.0,
             bootstrap_agree=True,
             gate_passed=False,
+            handoff_tier="blocked",
+            selected_for_l1=False,
             reject_reasons=("insufficient_events",),
+            soft_flags=(),
         )
 
     # Forward gross return: close[t+holding]/close[t+lag] * side
@@ -765,9 +789,14 @@ def evaluate_panel_gate_v2(
 
     gate_passed = len(reject_reasons_list) == 0
 
-    return AlphaGateEvidenceV2(
-        recipe_id=recipe.recipe_id,
+    return AlphaGateEvidence(
+        schema_version="unified",
+        run_id="",
         timeframe=recipe.timeframe,
+        family=recipe.family,
+        variant=recipe.variant,
+        recipe_id=recipe.recipe_id,
+        archetype=recipe.archetype,
         symbol_scope="symbol",
         n_events=n_events,
         effective_n=effective_n,
@@ -781,20 +810,24 @@ def evaluate_panel_gate_v2(
         rank_ic_tstat=rank_ic_tstat,
         cost_drag_ratio=cost_drag,
         turnover_per_year=turnover,
+        novelty_corr_max=0.0,
+        incremental_rank_ic=0.0,
+        compute_cost_score=0.0,
         event_hit_rate=hit_rate,
         payoff_skew=payoff_skew,
-        regime_edge_bps={},
         xs_spread_lcb_bps=xs_spread_lcb,
         liquidity_cost_stress_bps=liquidity_stress_bps,
         bootstrap_lcb_bps=bootstrap_lcb_bps,
         bootstrap_agree=bootstrap_agree,
         gate_passed=gate_passed,
+        handoff_tier="candidate" if gate_passed else "blocked",
+        selected_for_l1=False,
         reject_reasons=tuple(reject_reasons_list),
         soft_flags=tuple(soft_flags_list),
     )
 
 
-def downgrade_gate_v2_to_cheap_evidence(evidence: AlphaGateEvidenceV2) -> CheapGateEvidence:
+def downgrade_gate_v2_to_cheap_evidence(evidence: AlphaGateEvidence) -> CheapGateEvidence:
     _valid_reject: set[str] = {
         "insufficient_events",
         "insufficient_effective_n",
@@ -832,3 +865,323 @@ def downgrade_gate_v2_to_cheap_evidence(evidence: AlphaGateEvidenceV2) -> CheapG
         mean_gross_bps=evidence.mean_gross_bps,
         mean_cost_bps=evidence.mean_cost_bps,
     )
+
+
+# ── Unified gate evaluator ─────────────────────────────────────────────
+
+
+def _empty_gate_evidence(
+    *,
+    run_id: str,
+    recipe: AlphaRecipe,
+    reject_reasons: tuple[str, ...] = ("insufficient_events",),
+) -> AlphaGateEvidence:
+    return AlphaGateEvidence(
+        schema_version="unified",
+        run_id=run_id,
+        timeframe=recipe.timeframe,
+        family=recipe.family,
+        variant=recipe.variant,
+        recipe_id=recipe.recipe_id,
+        archetype=recipe.archetype,
+        symbol_scope="symbol",
+        n_events=0,
+        effective_n=0.0,
+        mean_gross_bps=0.0,
+        mean_cost_bps=0.0,
+        mean_net_bps=0.0,
+        gross_lcb_bps=0.0,
+        net_lcb_bps=0.0,
+        nw_tstat=0.0,
+        rank_ic=0.0,
+        rank_ic_tstat=0.0,
+        cost_drag_ratio=0.0,
+        turnover_per_year=0.0,
+        novelty_corr_max=0.0,
+        incremental_rank_ic=0.0,
+        compute_cost_score=0.0,
+        event_hit_rate=0.0,
+        payoff_skew=0.0,
+        xs_spread_lcb_bps=None,
+        liquidity_cost_stress_bps=0.0,
+        bootstrap_lcb_bps=0.0,
+        bootstrap_agree=True,
+        gate_passed=False,
+        handoff_tier="blocked",
+        selected_for_l1=False,
+        reject_reasons=reject_reasons,
+        soft_flags=(),
+    )
+
+
+def evaluate_panel_gate(
+    *,
+    panel: CandidateSignalPanel,
+    aligned: AlignedMarketData,
+    recipe: AlphaRecipe,
+    cost_model: ExecutionCostModel,
+    config: AlphaGateConfig,
+    bars_per_year: float,
+    run_id: str,
+) -> AlphaGateEvidence:
+    if bars_per_year <= 0.0:
+        raise ValueError("bars_per_year must be positive")
+    _validate_shape(panel, aligned)
+
+    t, n = aligned.close_2d.shape
+    close = aligned.close_2d
+    funding = aligned.funding_2d
+    active = aligned.active_mask & aligned.warm_mask & ~aligned.entry_block_mask & ~aligned.kill_mask
+
+    side = panel.side_hint_2d
+    valid = panel.valid_mask_2d & active & np.isfinite(close)
+
+    causal_lag = recipe.causal_lag_bars
+    holding_bars = panel.expected_holding_bars
+
+    reject_reasons: list[str] = []
+    soft_flags: list[str] = []
+
+    if causal_lag >= t or holding_bars >= t:
+        return _empty_gate_evidence(
+            run_id=run_id, recipe=recipe, reject_reasons=("insufficient_events",)
+        )
+
+    idx_start = causal_lag
+    idx_end = t - holding_bars
+
+    entry_full = _sparse_entry_mask(side, valid)
+    event_mask = np.zeros_like(entry_full)
+    if idx_start < idx_end:
+        event_mask[idx_start:idx_end, :] = entry_full[idx_start:idx_end, :]
+
+    n_events = int(np.sum(event_mask))
+    if n_events < config.min_events:
+        return _empty_gate_evidence(
+            run_id=run_id, recipe=recipe, reject_reasons=("insufficient_events",)
+        )
+
+    fwd_ret_bps = np.full((t, n), np.nan, dtype=np.float64)
+    idx_end_fwd = t - holding_bars
+    for i in range(idx_end_fwd):
+        fwd_ret_bps[i, :] = (
+            side[i, :].astype(np.float64)
+            * (close[i + holding_bars, :] / close[i + causal_lag, :] - 1.0)
+            * 10000.0
+        )
+
+    stress_cost = cost_model.stress_round_trip_bps()
+    funding_cost = np.where(event_mask, funding * 10000.0 * holding_bars, 0.0)
+
+    liquidity_stress_bps = compute_liquidity_cost_stress_bps(
+        aligned=aligned,
+        event_mask=event_mask,
+        stress_mult=config.liquidity_cost_stress_mult,
+    )
+
+    total_cost_bps = stress_cost + liquidity_stress_bps
+    total_cost_2d = total_cost_bps + funding_cost
+
+    net_bps = fwd_ret_bps - total_cost_2d
+
+    net_vals = net_bps[event_mask]
+    gross_vals = fwd_ret_bps[event_mask]
+
+    effective_n = float(n_events)
+    if effective_n < config.min_effective_n:
+        reject_reasons.append("insufficient_effective_n")
+
+    mean_gross_bps = float(np.nanmean(gross_vals)) if n_events > 0 else 0.0
+    mean_cost_bps = float(np.nanmean(total_cost_2d[event_mask])) if n_events > 0 else 0.0
+    mean_net_bps = float(np.nanmean(net_vals)) if n_events > 0 else 0.0
+
+    block_bars_eff = max(config.block_bars, 2 * holding_bars)
+    block_means = _compute_block_means(net_vals, block_bars_eff)
+    mu_block, se_block = _block_moments(block_means)
+    nw_tstat = mu_block / max(se_block, 1e-10)
+    net_lcb_bps = mu_block - 1.0 * se_block
+
+    gross_block_means = _compute_block_means(gross_vals, block_bars_eff)
+    mu_gross, se_gross = _block_moments(gross_block_means)
+    gross_lcb_bps = mu_gross - 1.0 * se_gross
+
+    if mean_gross_bps <= 0.0:
+        reject_reasons.append("non_positive_gross")
+    if net_lcb_bps <= config.min_lcb_net_bps:
+        reject_reasons.append("non_positive_lcb")
+    if abs(nw_tstat) < config.min_nw_tstat:
+        reject_reasons.append("weak_tstat")
+
+    cost_drag = compute_cost_drag_ratio_v2(mean_cost_bps=mean_cost_bps, mean_gross_bps=mean_gross_bps)
+    if cost_drag > config.max_cost_drag_ratio:
+        reject_reasons.append("excess_cost_drag")
+
+    turnover = _compute_turnover_per_year(side, valid, bars_per_year)
+    max_turn = min(config.max_turnover_per_year, recipe.max_turnover_per_year)
+    if turnover > max_turn:
+        reject_reasons.append("excess_turnover")
+
+    if turnover >= config.high_turnover_per_year and gross_lcb_bps <= mean_cost_bps + liquidity_stress_bps:
+        reject_reasons.append("gross_lcb_below_cost")
+
+    rank_ic, rank_ic_tstat = compute_rank_ic_with_tstat(
+        fwd_ret_bps=fwd_ret_bps,
+        score=panel.signed_score_2d,
+        mask=event_mask,
+    )
+    rank_ic_floor = 1.0 / math.sqrt(max(n_events - 3, 1))
+    if abs(rank_ic) < rank_ic_floor:
+        soft_flags.append("weak_rank_ic")
+    if abs(rank_ic_tstat) < config.min_candidate_rank_ic_tstat:
+        soft_flags.append("weak_rank_ic_tstat")
+
+    rng = np.random.default_rng(config.bootstrap_seed)
+    bootstrap_lcb_bps, _ = _bootstrap_block_ci(block_means, config.bootstrap_samples, rng)
+    bootstrap_agree = (bootstrap_lcb_bps > 0) == (net_lcb_bps > 0)
+    if not bootstrap_agree:
+        soft_flags.append("bootstrap_disagree")
+
+    hit_rate, payoff_skew = compute_payoff_stats(net_vals)
+
+    xs_spread_lcb: float | None = None
+    if recipe.archetype == "cross_sectional":
+        xs_spread_lcb = compute_xs_spread_lcb_bps(
+            net_bps=net_bps,
+            score=panel.signed_score_2d,
+            event_mask=event_mask,
+            min_symbols_per_bar=config.min_xs_symbols_per_bar,
+        )
+        if xs_spread_lcb is None or xs_spread_lcb <= 0.0:
+            reject_reasons.append("xs_spread_fail")
+
+    gate_passed = len(reject_reasons) == 0
+
+    handoff_tier: AlphaGateHandoffTier
+    if reject_reasons:
+        handoff_tier = "blocked"
+    elif soft_flags:
+        handoff_tier = "seed"
+    else:
+        handoff_tier = "candidate"
+
+    return AlphaGateEvidence(
+        schema_version="unified",
+        run_id=run_id,
+        timeframe=recipe.timeframe,
+        family=recipe.family,
+        variant=recipe.variant,
+        recipe_id=recipe.recipe_id,
+        archetype=recipe.archetype,
+        symbol_scope="symbol",
+        n_events=n_events,
+        effective_n=effective_n,
+        mean_gross_bps=mean_gross_bps,
+        mean_cost_bps=mean_cost_bps,
+        mean_net_bps=mean_net_bps,
+        gross_lcb_bps=gross_lcb_bps,
+        net_lcb_bps=net_lcb_bps,
+        nw_tstat=nw_tstat,
+        rank_ic=rank_ic,
+        rank_ic_tstat=rank_ic_tstat,
+        cost_drag_ratio=cost_drag,
+        turnover_per_year=turnover,
+        novelty_corr_max=0.0,
+        incremental_rank_ic=0.0,
+        compute_cost_score=0.0,
+        event_hit_rate=hit_rate,
+        payoff_skew=payoff_skew,
+        xs_spread_lcb_bps=xs_spread_lcb,
+        liquidity_cost_stress_bps=liquidity_stress_bps,
+        bootstrap_lcb_bps=bootstrap_lcb_bps,
+        bootstrap_agree=bootstrap_agree,
+        gate_passed=gate_passed,
+        handoff_tier=handoff_tier,
+        selected_for_l1=False,
+        reject_reasons=tuple(reject_reasons),
+        soft_flags=tuple(soft_flags),
+    )
+
+
+def evaluate_alpha_gate_batch(
+    *,
+    panels: Sequence[CandidateSignalPanel],
+    recipes: Mapping[str, AlphaRecipe],
+    aligned: AlignedMarketData,
+    cost_model: ExecutionCostModel,
+    config: AlphaGateConfig,
+    run_id: str,
+) -> tuple[AlphaGateEvidence, ...]:
+    from src.domain.futures.optimization.metrics import _bars_per_year_for_tf
+
+    bpy_cache: dict[str, float] = {}
+    results: list[AlphaGateEvidence] = []
+    for panel in panels:
+        recipe_id = panel.metadata.get("recipe_id", "")
+        recipe = recipes.get(recipe_id)
+        if recipe is None:
+            continue
+        tf = recipe.timeframe
+        if tf not in bpy_cache:
+            bpy_cache[tf] = _bars_per_year_for_tf(tf)
+        evidence = evaluate_panel_gate(
+            panel=panel,
+            aligned=aligned,
+            recipe=recipe,
+            cost_model=cost_model,
+            config=config,
+            bars_per_year=bpy_cache[tf],
+            run_id=run_id,
+        )
+        results.append(evidence)
+    return tuple(results)
+
+
+def emit_alpha_foundry_debug_summary(
+    *,
+    logger: logging.Logger,
+    run_id: str,
+    timeframe: str,
+    evidences: Sequence[AlphaGateEvidence],
+    selected_recipe_ids: Sequence[str],
+    debug_top_k_rows: int,
+) -> None:
+    passed = [e for e in evidences if e.gate_passed]
+    rejected = [e for e in evidences if not e.gate_passed]
+
+    logger.debug(
+        "[EVAL] stage=af_gate run_id=%s tf=%s total=%d passed=%d rejected=%d",
+        run_id, timeframe, len(evidences), len(passed), len(rejected),
+    )
+
+    sorted_ev = sorted(evidences, key=lambda e: e.mean_net_bps, reverse=True)
+    top_k = sorted_ev[:debug_top_k_rows]
+    bottom_k = sorted_ev[-debug_top_k_rows:] if debug_top_k_rows > 0 else []
+
+    if top_k:
+        for e in top_k:
+            logger.debug(
+                "[ALGO] TOP recipe=%s net=%.2f gross=%.2f cost=%.2f handoff=%s passed=%s",
+                e.recipe_id, e.mean_net_bps, e.mean_gross_bps,
+                e.mean_cost_bps, e.handoff_tier, e.gate_passed,
+            )
+    if bottom_k:
+        for e in bottom_k:
+            logger.debug(
+                "[ALGO] BOTTOM recipe=%s net=%.2f gross=%.2f cost=%.2f handoff=%s passed=%s",
+                e.recipe_id, e.mean_net_bps, e.mean_gross_bps,
+                e.mean_cost_bps, e.handoff_tier, e.gate_passed,
+            )
+
+    top_reject_reasons: dict[str, int] = {}
+    for e in rejected:
+        for r in e.reject_reasons:
+            top_reject_reasons[r] = top_reject_reasons.get(r, 0) + 1
+    if top_reject_reasons:
+        reasons_str = " | ".join(f"{k}={v}" for k, v in sorted(top_reject_reasons.items(), key=lambda x: -x[1]))
+        logger.debug("[DATA] reject_reasons: %s", reasons_str)
+
+    if selected_recipe_ids:
+        logger.debug(
+            "[DATA] selected=%d recipe_ids=%s",
+            len(selected_recipe_ids), list(selected_recipe_ids),
+        )

@@ -106,6 +106,224 @@ SAMPLE_RECIPE = AlphaRecipe(
 )
 
 
+from src.domain.futures.alpha_foundry.cheap_gate import (
+    evaluate_alpha_gate_batch,
+    evaluate_panel_gate,
+)
+from src.domain.futures.alpha_foundry.contracts import (
+    AlphaGateConfig,
+    AlphaGateEvidence,
+)
+
+
+class TestEvaluatePanelGate:
+    """S1-1: Unified gate basic calculation (Happy Path)."""
+
+    def test_passes_with_upward_close_and_sparse_entries(self) -> None:
+        """S1-1: Unified gate produces candidate with upward close, sparse longs."""
+        t = 96
+        dt = np.arange(np.datetime64("2026-01-01T00"), np.datetime64("2026-01-17T00"),
+                        np.timedelta64(4, "h"))[:t]
+        symbols = ("BTCUSDT", "ETHUSDT")
+        # Both symbols go up strongly — long entries are profitable.
+        close = np.column_stack([
+            np.linspace(100.0, 124.0, t, dtype=np.float64),
+            np.linspace(50.0, 61.0, t, dtype=np.float64),
+        ])
+        zeros = np.zeros((t, 2), dtype=np.float64)
+        valid = np.ones((t, 2), dtype=np.bool_)
+        side = np.zeros((t, 2), dtype=np.int8)
+        side[::2, :] = 1
+        # Cross-sectional variation: symbol 0 higher score than symbol 1
+        score = np.where(side == 1, np.array([0.8, 0.4]), 0.0).astype(np.float64)
+        aligned = AlignedMarketData(
+            datetimes=dt, symbols=symbols,
+            open_2d=close, high_2d=close, low_2d=close, close_2d=close,
+            volume_2d=np.full((t, 2), 1_000.0, dtype=np.float64),
+            funding_2d=zeros.copy(),
+            active_mask=valid.copy(), warm_mask=valid.copy(),
+            entry_block_mask=np.zeros((t, 2), dtype=np.bool_),
+            kill_mask=np.zeros((t, 2), dtype=np.bool_),
+            adv_usdt_2d=np.full((t, 2), 1_000_000.0, dtype=np.float64),
+            execution_cost_bps_2d=np.full((t, 2), 4.0, dtype=np.float64),
+        )
+        panel = CandidateSignalPanel(
+            family="sparse_breakout_retest_v2", variant="bor_v2_40_4h",
+            params={"lookback": 40},
+            datetimes=dt, symbols=symbols,
+            signed_score_2d=score, side_hint_2d=side,
+            expected_holding_bars=2, min_holding_bars=1,
+            stop_atr_mult=2.0, take_profit_atr_mult=3.0,
+            turnover_proxy_2d=zeros.copy(),
+            valid_mask_2d=valid,
+            metadata={"recipe_id": "bor_v2_40_4h"},
+        )
+        recipe = AlphaRecipe(
+            recipe_id="bor_v2_40_4h", family="sparse_breakout_retest_v2",
+            variant="bor_v2_40_4h", timeframe="4h", archetype="trend",
+            indicator_params={"lookback": 40},
+            side_rule_id="breakout", exit_policy_id="sparse",
+            required_fields=("close",), causal_lag_bars=1,
+            max_turnover_per_year=2000.0,
+        )
+        cfg = AlphaGateConfig(min_events=10, min_effective_n=5.0,
+                              min_candidate_rank_ic_tstat=0.0,
+                              min_nw_tstat=0.0,
+                              max_cost_drag_ratio=1.0,
+                              max_turnover_per_year=2000.0)
+        evidence = evaluate_panel_gate(
+            panel=panel, aligned=aligned, recipe=recipe,
+            cost_model=ExecutionCostModel(), config=cfg,
+            bars_per_year=365.0 * 6.0, run_id="test",
+        )
+        assert isinstance(evidence, AlphaGateEvidence)
+        assert evidence.mean_gross_bps > 0.0
+        assert evidence.mean_cost_bps > 0.0
+        assert evidence.mean_net_bps > 0.0
+        assert evidence.handoff_tier == "candidate"
+
+    def test_raises_on_invalid_panel_shape(self) -> None:
+        """S3-1: Invalid panel shape raises ValueError."""
+        aligned = make_mock_aligned()
+        t_bad, n_bad = 10, 3
+        bad_score = np.ones((t_bad, n_bad), dtype=np.float64)
+        bad_side = np.ones((t_bad, n_bad), dtype=np.int8)
+        panel = CandidateSignalPanel(
+            family="test", variant="v1", params={},
+            datetimes=aligned.datetimes, symbols=aligned.symbols,
+            signed_score_2d=bad_score, side_hint_2d=bad_side,
+            expected_holding_bars=2, min_holding_bars=1,
+            stop_atr_mult=2.0, take_profit_atr_mult=3.0,
+            turnover_proxy_2d=np.zeros((t_bad, n_bad), dtype=np.float64),
+            valid_mask_2d=np.ones((t_bad, n_bad), dtype=np.bool_),
+            metadata={"recipe_id": "bad"},
+        )
+        with pytest.raises(ValueError, match="shape"):
+            evaluate_panel_gate(
+                panel=panel, aligned=aligned, recipe=SAMPLE_RECIPE,
+                cost_model=ExecutionCostModel(), config=AlphaGateConfig(),
+                bars_per_year=2190.0, run_id="test",
+            )
+
+    def test_raises_on_non_positive_bars_per_year(self) -> None:
+        """S3-2: bars_per_year <= 0 raises ValueError."""
+        aligned = make_mock_aligned()
+        panel = make_mock_panel()
+        with pytest.raises(ValueError, match="bars_per_year must be positive"):
+            evaluate_panel_gate(
+                panel=panel, aligned=aligned, recipe=SAMPLE_RECIPE,
+                cost_model=ExecutionCostModel(), config=AlphaGateConfig(),
+                bars_per_year=0.0, run_id="test",
+            )
+
+    def test_min_events_floor(self) -> None:
+        """S2-1: insufficient_events hard reject."""
+        aligned = make_mock_aligned()
+        panel = make_mock_panel()
+        cfg = AlphaGateConfig(min_events=9999)
+        evidence = evaluate_panel_gate(
+            panel=panel, aligned=aligned, recipe=SAMPLE_RECIPE,
+            cost_model=ExecutionCostModel(), config=cfg,
+            bars_per_year=2190.0, run_id="test",
+        )
+        assert "insufficient_events" in evidence.reject_reasons
+        assert evidence.gate_passed is False
+
+    def test_insufficient_effective_n(self) -> None:
+        """S2-2: effective_n floor hard reject."""
+        aligned = make_mock_aligned()
+        panel = make_mock_panel()
+        cfg = AlphaGateConfig(min_events=10, min_effective_n=1e9)
+        evidence = evaluate_panel_gate(
+            panel=panel, aligned=aligned, recipe=SAMPLE_RECIPE,
+            cost_model=ExecutionCostModel(), config=cfg,
+            bars_per_year=2190.0, run_id="test",
+        )
+        assert "insufficient_effective_n" in evidence.reject_reasons
+
+    def test_non_positive_gross(self) -> None:
+        """S2-3: mean_gross_bps <= 0 → gate_passed is False."""
+        t = 96
+        close = np.linspace(100.0, 80.0, t, dtype=np.float64)  # downward
+        close = np.column_stack([close, close * 0.8])
+        aligned = AlignedMarketData(
+            datetimes=np.arange(np.datetime64("2026-01-01T00"), np.datetime64("2026-01-05T00"),
+                                np.timedelta64(1, "h"))[:t],
+            symbols=("A", "B"),
+            open_2d=close.copy(), high_2d=close * 1.01, low_2d=close * 0.99,
+            close_2d=close,
+            volume_2d=np.full_like(close, 1000.0),
+            funding_2d=np.zeros_like(close),
+            active_mask=np.ones_like(close, dtype=np.bool_),
+            warm_mask=np.ones_like(close, dtype=np.bool_),
+            entry_block_mask=np.zeros_like(close, dtype=np.bool_),
+            kill_mask=np.zeros_like(close, dtype=np.bool_),
+            adv_usdt_2d=np.full_like(close, 1_000_000.0),
+            execution_cost_bps_2d=np.full_like(close, 4.0),
+        )
+        side = np.ones((t, 2), dtype=np.int8)
+        side[1::2, :] = 0
+        panel = CandidateSignalPanel(
+            family="test", variant="v1", params={},
+            datetimes=aligned.datetimes, symbols=aligned.symbols,
+            signed_score_2d=side.astype(np.float64),
+            side_hint_2d=side,
+            expected_holding_bars=2, min_holding_bars=1,
+            stop_atr_mult=2.0, take_profit_atr_mult=3.0,
+            turnover_proxy_2d=np.zeros((t, 2), dtype=np.float64),
+            valid_mask_2d=np.ones((t, 2), dtype=np.bool_),
+            metadata={"recipe_id": "test_recipe"},
+        )
+        recipe = AlphaRecipe(
+            recipe_id="test_recipe", family="test", variant="v1",
+            timeframe="1h", archetype="trend", indicator_params={},
+            side_rule_id="test", exit_policy_id="test",
+            required_fields=("close",), causal_lag_bars=1,
+            max_turnover_per_year=365.0,
+        )
+        cfg = AlphaGateConfig(min_events=5, min_effective_n=3.0)
+        evidence = evaluate_panel_gate(
+            panel=panel, aligned=aligned, recipe=recipe,
+            cost_model=ExecutionCostModel(), config=cfg,
+            bars_per_year=365.0 * 24.0, run_id="test",
+        )
+        assert evidence.gate_passed is False
+        assert evidence.mean_gross_bps <= 0.0
+
+
+class TestEvaluateAlphaGateBatch:
+    """Coverage gap: evaluate_alpha_gate_batch (new unified batch wrapper)."""
+
+    def test_batch_returns_alpha_gate_evidence(self) -> None:
+        aligned = make_mock_aligned()
+        panel = make_mock_panel()
+        cfg = AlphaGateConfig(min_events=10, min_effective_n=5.0, min_candidate_rank_ic_tstat=0.0, min_nw_tstat=0.0)
+        results = evaluate_alpha_gate_batch(
+            panels=[panel],
+            recipes={SAMPLE_RECIPE.recipe_id: SAMPLE_RECIPE},
+            aligned=aligned,
+            cost_model=ExecutionCostModel(),
+            config=cfg,
+            run_id="test_batch",
+        )
+        assert len(results) == 1
+        assert isinstance(results[0], AlphaGateEvidence)
+        assert results[0].run_id == "test_batch"
+
+    def test_batch_skips_unknown_recipe(self) -> None:
+        aligned = make_mock_aligned()
+        panel = make_mock_panel(recipe_id="unknown")
+        results = evaluate_alpha_gate_batch(
+            panels=[panel],
+            recipes={SAMPLE_RECIPE.recipe_id: SAMPLE_RECIPE},
+            aligned=aligned,
+            cost_model=ExecutionCostModel(),
+            config=AlphaGateConfig(),
+            run_id="test_batch",
+        )
+        assert len(results) == 0
+
+
 class TestEvaluatePanelCheapGate:
     def test_passes_positive_cost_adjusted_alpha(self) -> None:
         aligned = make_mock_aligned()

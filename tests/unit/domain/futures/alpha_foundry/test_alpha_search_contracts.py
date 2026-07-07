@@ -315,6 +315,12 @@ class TestTimeframeGrid:
             timeframe_to_minutes("0h")
 
 
+    def test_rejects_unsupported_timeframe(self) -> None:
+        """S3-6: unsupported timeframe raises ValueError."""
+        with pytest.raises(ValueError, match="unsupported timeframe"):
+            timeframe_to_minutes("7x")
+
+
 class TestBuildL0SearchCells:
     def test_creates_deterministic_ids_and_pending(self) -> None:
         bps = [_make_blueprint()]
@@ -382,3 +388,51 @@ class TestMarkRetiredSearchCells:
         failed_keys = {("other", "4h", "other")}
         updated = mark_retired_search_cells(cells=cells, failed_keys=failed_keys)
         assert updated[0].status == "pending"
+
+
+class TestBuildL0SearchCellsGeneratorAware:
+    """S1-5: no-generator retirement. S3-8: missing family raises ValueError."""
+
+    def test_retires_cells_when_generator_absent(self) -> None:
+        bp = _make_blueprint(family="orphan_family")
+        cells = build_l0_search_cells(
+            blueprints=[bp],
+            family_prior_scores={"orphan_family": 0.0},
+            cost_floor_bps_by_tf={"4h": 5.0},
+            generator_exists_by_family={"orphan_family": False},
+        )
+        assert len(cells) == 1
+        assert cells[0].status == "retired"
+        assert cells[0].retire_reason == "no_generator"
+
+    def test_pending_when_generator_exists(self) -> None:
+        bp = _make_blueprint()
+        cells = build_l0_search_cells(
+            blueprints=[bp],
+            family_prior_scores={"sparse_breakout_retest_v2": 0.5},
+            cost_floor_bps_by_tf={"4h": 5.0},
+            generator_exists_by_family={"sparse_breakout_retest_v2": True},
+        )
+        assert cells[0].status == "pending"
+
+    def test_raises_on_missing_family_in_generator_map(self) -> None:
+        """S3-8: missing family raises ValueError."""
+        bp = _make_blueprint(family="unknown_fam")
+        with pytest.raises(ValueError, match="missing from generator_exists_by_family"):
+            build_l0_search_cells(
+                blueprints=[bp],
+                family_prior_scores={"unknown_fam": 0.0},
+                cost_floor_bps_by_tf={"4h": 5.0},
+                generator_exists_by_family={"other_fam": True},
+            )
+
+    def test_retired_cell_has_retire_reason(self) -> None:
+        """Verify retire_reason field is populated."""
+        bp = _make_blueprint(family="dead_family")
+        cells = build_l0_search_cells(
+            blueprints=[bp],
+            family_prior_scores={"dead_family": 0.0},
+            cost_floor_bps_by_tf={"4h": 5.0},
+            generator_exists_by_family={"dead_family": False},
+        )
+        assert cells[0].retire_reason == "no_generator"

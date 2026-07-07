@@ -40,24 +40,41 @@ class TestWriteAlphaFoundryReport:
                 archetype="trend",
                 n_events=100,
                 effective_n=50.0,
+                mean_gross_bps=10.0 + i,
+                mean_cost_bps=5.0,
                 mean_net_bps=5.0 + i,
+                gross_lcb_bps=2.0 + i * 0.5,
+                net_lcb_bps=2.0 + i * 0.5,
                 nw_tstat=2.0,
-                block_lcb_bps=2.0 + i * 0.5,
                 rank_ic=0.05,
-                incremental_rank_ic=0.02,
+                rank_ic_tstat=1.5,
                 cost_drag_ratio=0.3,
                 turnover_per_year=100.0,
+                novelty_corr_max=0.0,
+                incremental_rank_ic=0.02,
                 compute_cost_score=0.5,
+                event_hit_rate=0.6,
+                payoff_skew=1.5,
+                xs_spread_lcb_bps=None,
+                liquidity_cost_stress_bps=0.0,
+                bootstrap_lcb_bps=1.0 + i * 0.5,
+                bootstrap_agree=True,
                 gate_passed=True,
+                handoff_tier="candidate",
+                selected_for_l1=True,
                 reject_reasons="",
+                soft_flags="",
                 bucket_key="trend_ma:4h",
                 bucket_rank=i,
-                selected_for_l1=True,
                 redundant_with="",
                 bucket_eff_test_count=2.0,
                 global_eff_test_count=3.0,
-                bootstrap_lcb_bps=1.0 + i * 0.5,
-                bootstrap_agree=True,
+                l1_priority_score=0.0,
+                l1_budget_units=0,
+                tf_coverage_count=0,
+                sign_agreement_ratio=0.0,
+                corroboration_tier="",
+                stage_label="",
                 created_at_ms=1000,
             )
             for i in range(n)
@@ -90,7 +107,7 @@ class TestWriteAlphaFoundryReport:
         assert parquet_file.exists()
         df = pd.read_parquet(parquet_path)
         assert len(df) == 3
-        for col in ("mean_net_bps", "block_lcb_bps", "cost_drag_ratio", "turnover_per_year"):
+        for col in ("mean_net_bps", "net_lcb_bps", "cost_drag_ratio", "turnover_per_year"):
             assert col in df.columns
 
     # Scenario 2.8: 빈 evidence → 빈 DataFrame + 스키마 존재

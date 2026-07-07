@@ -241,3 +241,39 @@ class TestAlphaFoundryRuntimeConfig:
     def test_rejects_empty_exclude_families_after_trim(self) -> None:
         with pytest.raises(ValueError, match="exclude_families contains empty string after trim"):
             AlphaFoundryRuntimeConfig(exclude_families=(" ",))
+
+
+    def test_rejects_invalid_observability_mode(self) -> None:
+        """S3-3: invalid observability_mode raises ValueError."""
+        with pytest.raises(ValueError, match="invalid observability_mode"):
+            AlphaFoundryRuntimeConfig(observability_mode="file")  # type: ignore[arg-type]
+
+    def test_rejects_invalid_gate_schema(self) -> None:
+        """S3-4: gate_schema must be 'unified'."""
+        with pytest.raises(ValueError, match="gate_schema must be 'unified'"):
+            AlphaFoundryRuntimeConfig(gate_schema="v2")  # type: ignore[arg-type]
+
+    def test_rejects_zero_debug_top_k_rows(self) -> None:
+        """S3-5: debug_top_k_rows must be >= 1."""
+        with pytest.raises(ValueError, match="debug_top_k_rows must be >= 1"):
+            AlphaFoundryRuntimeConfig(debug_top_k_rows=0)
+
+    def test_new_fields_default_correctly(self) -> None:
+        cfg = AlphaFoundryRuntimeConfig()
+        assert cfg.observability_mode == "debug_log"
+        assert cfg.debug_top_k_rows == 10
+        assert cfg.artifact_write_enabled is False
+        assert cfg.gate_schema == "unified"
+
+
+class TestVersionSprawlControl:
+    """S2-17: V2 suffix contracts should not be exposed."""
+
+    def test_alpha_gate_evidence_v2_not_exposed(self) -> None:
+        import src.domain.futures.alpha_foundry.contracts as c
+        assert not hasattr(c, "AlphaGateEvidenceV2")
+
+    def test_evaluate_panel_gate_v2_not_exposed_via_public_import(self) -> None:
+        from src.domain.futures.alpha_foundry.cheap_gate import evaluate_panel_gate
+        assert evaluate_panel_gate is not None
+        assert not hasattr(evaluate_panel_gate, "__name__") or "v2" not in evaluate_panel_gate.__name__
