@@ -16,8 +16,8 @@
     - **Existing Files:** When modifying existing files, you MUST use `replace_file_content` or `multi_replace_file_content` to edit only the necessary parts. `write_to_file` is reserved for creating new files only.
     - **Markdown Output:** When explaining code to the user, omit unchanged parts using the `# ... existing code ...` comment.
 - **CONTEXT WINDOW MGMT:** When reading large files (300+ lines), specify line ranges in `view_file` to read only the necessary parts. Avoid reading the entire file.
-- **LANGUAGE:** Respond primarily in Korean. Use English ONLY for technical terminology. The use of **Hanja (Chinese characters)**, **Chinese**, or **Japanese** languages is strictly prohibited in all outputs and documentation.
 - **EXPLICIT UNCERTAINTY:** If requirements are unclear, explicitly state "Clarification Needed: [item]" and ask questions before writing code.
+- **FLAT VERDICT ONLY:** check 결과는 제목, 불릿, 진단/계획 분류, 다음 단계 명시 없이 `[결과] | [원인/상태]` 형식의 단 1줄 단선형 문자열로만 출력할 것.
 
 ## 3. Environment & Execution (Environment & Tool Execution)
 - **Environment Manager:** This project uses `uv` to manage dependencies and virtual environments.
