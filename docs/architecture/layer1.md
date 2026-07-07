@@ -25,6 +25,7 @@ related_paths:
    - src/domain/futures/alpha_foundry/pipeline.py
    - src/domain/futures/alpha_foundry/bridge_helpers.py
    - src/domain/futures/alpha_foundry/multi_tf_fusion.py
+   - src/domain/futures/alpha_foundry/entry_timing.py
 change_triggers:
   - src/domain/futures/signals/rules.py
   - src/domain/futures/signals/diagnostics.py
@@ -39,6 +40,7 @@ change_triggers:
    - src/domain/futures/alpha_foundry/pipeline.py
    - src/domain/futures/alpha_foundry/bridge_helpers.py
    - src/domain/futures/alpha_foundry/multi_tf_fusion.py
+   - src/domain/futures/alpha_foundry/entry_timing.py
 dependencies:
   documents:
     - docs/architecture/regime.md
@@ -124,6 +126,13 @@ last_verified: 2026-07-07
 - `allocate_global_l1_budget()` — 버킷 대표품질(`max(block_lcb_bps)` over selected) 기준 largest-remainder 비례배분, 품질 0인 버킷은 슬롯 0, 버킷별 `top_k_max` 상한(기존 `top_k_per_family_tf` 값 재해석). `top_k_per_family_tf` 고정 캡을 대체.
 - `fuse_multi_timeframe_evidence()` (`multi_tf_fusion.py`) — 동일 run epoch의 TF별 evidence DataFrame을 `(family, variant)`(TF 접미사 정규화 후) 기준으로 조인해, 다른 TF와의 부호일치도로 `corroboration_tier` 판정. `contradicted`는 `fused_conviction_score`를 강제 음수화(사실상 거부권), `corroborated`는 15% 컨빅션 부스트.
 - `shrink_l1_evidence_hierarchical()` applies family/timeframe shrinkage with `w = n_eff / (n_eff + prior_effective_n)`.
+
+### LTF Entry Timing Refinement [ADR_20260707_LTF_ENTRY_TIMING_LAYER]
+- **Status**: standalone module, **not wired into `strategy_runtime/bridge.py`** — no production call site yet. `EntryTimingGateConfig.enabled` defaults to `False`.
+- **Role**: refines the `entry_idx` of already-gated (`handoff_tier ∈ {seed, candidate}`) HTF directional events by searching a bounded LTF (1m-derived) window for order-flow/mean-reversion confluence. Does not generate new directional signals or touch L2/L3.
+- `EntryConfluenceSnapshot` / `HtfDirectionalEpisode` / `EntryTimingWindow` / `EntryTimingGateConfig` (`alpha_foundry/contracts.py`): typed contracts for the per-LTF-bar feature snapshot, the HTF episode link, the per-episode timing-window outcome, and the runtime config (`ltf_grid`, `max_wait_bars_ratio`, `min_net_timing_edge_lcb_bps`, `confluence_weights`, `enabled_combos`).
+- `entry_timing.py`: `compute_cvd_delta_z()` (windowed cumulative `safe_taker_imbalance_2d` z-score), `compute_anchored_vwap_dev_sigma()` (episode-anchored VWAP σ-deviation), `evaluate_trend_quality_gate()` (Kaufman ER + `hurst_dfa` + `variance_ratio` majority vote, `optimization/metrics.py` reuse), `refine_entry_indices()` (per-episode LTF confluence search → `entry_idx` rewrite, fail-closed fallback to the original `entry_idx` with `net_timing_edge_bps=0.0`), `aggregate_entry_timing_evidence()` (offline block-bootstrap LCB per `(family, variant, ltf)` for calibrating `enabled_combos`).
+- `safe_taker_imbalance_2d()` (`signals/rules.py`, public): bounded taker buy/sell imbalance from `AlignedMarketData.taker_buy_2d`, shared by both the native rule families and this layer.
 
 ### Alpha Foundry Bridge Wiring [ADR_20260706_ALPHA_FOUNDRY_MAIN_WIRING][ADR_20260706_ALPHA_FOUNDRY_L0_DIVERSITY][ADR_20260706_ALPHA_FOUNDRY_L0_SIGNAL_RIGOR][ADR_20260707_ALPHA_FOUNDRY_RESULT_SYNC]
 - `PanelRecipeBinding`: binding record with `panel_index`, `recipe_id`, `family`, `variant`, `source` (`catalog_exact`/`catalog_family_variant`/`synthetic_recipe`).

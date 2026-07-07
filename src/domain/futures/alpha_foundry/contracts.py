@@ -847,3 +847,76 @@ class MultiTimeframeEvidence:
     sign_agreement_ratio: float
     corroboration_tier: CorroborationTier
     fused_conviction_score: float
+
+
+@dataclass(slots=True, frozen=True)
+class EntryConfluenceSnapshot:
+    """Per (symbol, ltf_bar) entry-timing feature snapshot. Look-ahead safe (닫힌 봉만).
+
+    [ADR_20260707_LTF_ENTRY_TIMING_LAYER]
+    """
+
+    symbol: str
+    ltf: str
+    bar_ts: np.int64
+    cvd_delta_z: float
+    cvd_aligned_with_bias: bool
+    vwap_dev_sigma: float
+    trend_quality_pass: bool
+    confluence_score: float
+    confluence_direction: int
+
+
+@dataclass(slots=True, frozen=True)
+class HtfDirectionalEpisode:
+    """Existing L0-gated directional event 참조용 링크. 신규 저장소 아님 — raw_events 행에서 파생."""
+
+    episode_id: str
+    symbol: str
+    family: str
+    variant: str
+    timeframe: str
+    htf_bias: int
+    base_entry_idx: int
+    expected_holding_bars: int
+    handoff_tier: str
+
+    def __post_init__(self) -> None:
+        if self.handoff_tier not in {"seed", "candidate"}:
+            raise ValueError(f"handoff_tier must be 'seed' or 'candidate', got {self.handoff_tier!r}")
+
+
+@dataclass(slots=True, frozen=True)
+class EntryTimingWindow:
+    episode_id: str
+    ltf: str
+    max_wait_bars_base: int
+    triggered: bool
+    refined_entry_idx: int
+    price_improvement_bps: float
+    opportunity_cost_bps: float
+    net_timing_edge_bps: float
+
+    def __post_init__(self) -> None:
+        if not self.triggered and self.net_timing_edge_bps != 0.0:
+            raise ValueError("non-triggered window must have net_timing_edge_bps == 0.0 (fail-closed invariant)")
+
+
+@dataclass(slots=True, frozen=True)
+class EntryTimingGateConfig:
+    enabled: bool = False
+    ltf_grid: tuple[str, ...] = ("5m", "15m", "30m", "1h")
+    max_wait_bars_ratio: float = 0.25
+    min_net_timing_edge_lcb_bps: float = 1.0
+    cvd_lookback_bars: int = 96
+    vwap_anchor_max_bars: int = 288
+    confluence_weights: Mapping[str, float] = field(
+        default_factory=lambda: {"cvd": 0.5, "vwap": 0.5}
+    )
+    enabled_combos: frozenset[tuple[str, str, str]] = frozenset()
+
+    def __post_init__(self) -> None:
+        if not (0.0 < self.max_wait_bars_ratio <= 1.0):
+            raise ValueError(f"max_wait_bars_ratio must be in (0, 1], got {self.max_wait_bars_ratio}")
+        if self.min_net_timing_edge_lcb_bps < 0.0:
+            raise ValueError("min_net_timing_edge_lcb_bps must be >= 0")
