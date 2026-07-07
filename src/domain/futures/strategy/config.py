@@ -420,6 +420,16 @@ class CandidateStrategyConfig:
         "macd_4h",
         "supertrend",
         "ichimoku_trend",
+        "sparse_breakout_retest_v2",
+        "trend_pullback_quality_v2",
+        "residual_momentum_xs",
+        "funding_contra_carry_sparse",
+        "oi_price_divergence_unwind",
+        "taker_flow_exhaustion",
+        "liquidity_vacuum_breakout",
+        "volatility_contraction_expansion",
+        "btc_regime_relative_strength",
+        "mean_reversion_after_liquidation_proxy",
     )
     # TF-Specific Signal Pools
     per_tf_candidate_families: dict[str, tuple[str, ...]] | None = None

@@ -29,6 +29,10 @@ ALL_SIGNAL_FAMILIES: tuple[str, ...] = (
     "funding_flow_carry", "funding_extreme_reversal",
     "lsr_oi_regime_filter", "vol_term_structure_gate",
     "macd_4h", "supertrend", "ichimoku_trend",
+    "sparse_breakout_retest_v2", "trend_pullback_quality_v2", "residual_momentum_xs",
+    "funding_contra_carry_sparse", "oi_price_divergence_unwind", "taker_flow_exhaustion",
+    "liquidity_vacuum_breakout", "volatility_contraction_expansion",
+    "btc_regime_relative_strength", "mean_reversion_after_liquidation_proxy",
 )
 
 
@@ -384,11 +388,13 @@ def _resolve_panel_archetype(panel: CandidateSignalPanel) -> str:
         "btc_regime_pullback",
     }:
         return "trend"
+    if family in {"sparse_breakout_retest_v2", "trend_pullback_quality_v2"}:
+        return "trend"
     if family in {"dual_momentum", "taker_imbalance_momentum"}:
         return "ts_mom"
     if family in {"funding_zscore_carry", "funding_flow_carry"}:
         return "carry_rev"
-    if family in {"residual_reversion"}:
+    if family in {"residual_reversion", "residual_momentum_xs"}:
         return "beta_neut"
     if family in {"funding_extreme_reversal"}:
         return "unwind"
@@ -1539,6 +1545,142 @@ def build_rule_signal_panels(
                     },
                 )
             )
+
+        elif fam == "sparse_breakout_retest_v2":
+            for _sbr_channel in [scale_window(20), scale_window(40)]:
+                _sbr_high = _rolling_max_2d(high, window=_sbr_channel)
+                _sbr_low = _rolling_min_2d(low, window=_sbr_channel)
+                _sbr_prev_close = np.vstack([close[:1], close[:-1]])
+                _sbr_breakout_up = (_sbr_prev_close <= _sbr_high) & (close > _sbr_high)
+                _sbr_breakout_dn = (_sbr_prev_close >= _sbr_low) & (close < _sbr_low)
+                _sbr_prev_high = np.vstack([_sbr_high[:1], _sbr_high[:-1]])
+                _sbr_prev_low = np.vstack([_sbr_low[:1], _sbr_low[:-1]])
+                _sbr_retest_up = _sbr_breakout_up & (close <= _sbr_prev_high * 1.01)
+                _sbr_retest_dn = _sbr_breakout_dn & (close >= _sbr_prev_low * 0.99)
+                _sbr_side = np.zeros_like(close, dtype=np.int8)
+                _sbr_side[_sbr_retest_up] = 1
+                _sbr_side[_sbr_retest_dn] = -1
+                _sbr_score = np.where(
+                    _sbr_side > 0,
+                    (close - _sbr_high) / atr,
+                    np.where(_sbr_side < 0, (close - _sbr_low) / atr, 0.0),
+                )
+                fam_panels.append(
+                    CandidateSignalPanel(
+                        family="sparse_breakout_retest_v2",
+                        variant=f"bor_v2_{_sbr_channel}",
+                        params={"channel": _sbr_channel, "retest": 3},
+                        datetimes=aligned.datetimes,
+                        symbols=aligned.symbols,
+                        signed_score_2d=np.clip(_sbr_score, -1.0, 1.0),
+                        side_hint_2d=_sbr_side,
+                        expected_holding_bars=max(scale_window(8), _sbr_channel // 4),
+                        min_holding_bars=scale_window(3),
+                        stop_atr_mult=2.0,
+                        take_profit_atr_mult=4.0,
+                        turnover_proxy_2d=np.abs(np.diff(_sbr_score, axis=0, prepend=0.0)),
+                        valid_mask_2d=valid_mask,
+                        metadata={
+                            "archetype": "trend",
+                            "regime": "sparse_breakout_retest",
+                            "edge_hypothesis": (
+                                "channel breakout confirmed by retest within 1% "
+                                "produces higher quality sparse entries"
+                            ),
+                        },
+                    )
+                )
+
+        elif fam == "trend_pullback_quality_v2":
+            for _tpq_fast, _tpq_slow, _tpq_rsi_lo, _tpq_rsi_hi in [
+                (scale_window(20), scale_window(100), 40.0, 65.0),
+                (scale_window(50), scale_window(200), 35.0, 70.0),
+            ]:
+                _tpq_ema_fast = _ema_2d(close, span=_tpq_fast)
+                _tpq_ema_slow = _ema_2d(close, span=_tpq_slow)
+                _tpq_trend_up = _tpq_ema_fast > _tpq_ema_slow
+                _tpq_trend_dn = _tpq_ema_fast < _tpq_ema_slow
+                _tpq_rsi = _rsi_2d(close, period=rsi_14_window)
+                _tpq_rsi_prev = np.vstack([_tpq_rsi[:1], _tpq_rsi[:-1]])
+                _tpq_pullback_up = _tpq_trend_up & (close < _tpq_ema_fast) & (close >= _tpq_ema_fast * 0.97)
+                _tpq_pullback_dn = _tpq_trend_dn & (close > _tpq_ema_fast) & (close <= _tpq_ema_fast * 1.03)
+                _tpq_rsi_ok = (_tpq_rsi_prev < _tpq_rsi_lo) & (_tpq_rsi >= _tpq_rsi_lo)
+                _tpq_rsi_ok |= (_tpq_rsi_prev > _tpq_rsi_hi) & (_tpq_rsi <= _tpq_rsi_hi)
+                _tpq_side = np.zeros_like(close, dtype=np.int8)
+                _tpq_side[_tpq_pullback_up & _tpq_rsi_ok] = 1
+                _tpq_side[_tpq_pullback_dn & _tpq_rsi_ok] = -1
+                _tpq_score = np.where(
+                    _tpq_side > 0,
+                    np.clip((_tpq_ema_fast - close) / atr, 0.0, 2.0),
+                    np.where(_tpq_side < 0, np.clip((close - _tpq_ema_fast) / atr, -2.0, 0.0), 0.0),
+                )
+                fam_panels.append(
+                    CandidateSignalPanel(
+                        family="trend_pullback_quality_v2",
+                        variant=f"tpq_v2_{_tpq_fast}_{_tpq_slow}",
+                        params={
+                            "fast": _tpq_fast,
+                            "slow": _tpq_slow,
+                            "rsi_lo": int(_tpq_rsi_lo),
+                            "rsi_hi": int(_tpq_rsi_hi),
+                        },
+                        datetimes=aligned.datetimes,
+                        symbols=aligned.symbols,
+                        signed_score_2d=_normalize_linear_score(_tpq_score, scale=2.0),
+                        side_hint_2d=_tpq_side,
+                        expected_holding_bars=max(scale_window(8), _tpq_fast // 2),
+                        min_holding_bars=max(scale_window(3), _tpq_fast // 8),
+                        stop_atr_mult=1.5,
+                        take_profit_atr_mult=3.0,
+                        turnover_proxy_2d=np.abs(
+                            np.diff(_normalize_linear_score(_tpq_score, scale=2.0), axis=0, prepend=0.0)
+                        ),
+                        valid_mask_2d=valid_mask,
+                        metadata={
+                            "archetype": "trend",
+                            "regime": "quality_trend_pullback",
+                            "edge_hypothesis": (
+                                "pullback entries filtered by RSI regime shift "
+                                "and EMA proximity produce higher quality trend entries"
+                            ),
+                        },
+                    )
+                )
+
+        elif fam == "residual_momentum_xs":
+            _min_xs = cfg.l1_min_cross_section
+            for _rm_lb in [scale_window(12), scale_window(24)]:
+                _raw = _beta_residual_return_2d(close, btc_idx, _rm_lb)
+                _sc, _sd = _cross_sectional_rank_signed_2d(
+                    _raw,
+                    valid_mask,
+                    min_cross_section=_min_xs,
+                )
+                fam_panels.append(
+                    CandidateSignalPanel(
+                        family="residual_momentum_xs",
+                        variant=f"rm_xs_{_rm_lb}",
+                        params={"lookback": _rm_lb, "btc_beta_cap": 0.80},
+                        datetimes=aligned.datetimes,
+                        symbols=aligned.symbols,
+                        signed_score_2d=_sc,
+                        side_hint_2d=_sd,
+                        expected_holding_bars=scale_window(18) if _rm_lb <= 12 else scale_window(24),
+                        min_holding_bars=scale_window(6),
+                        stop_atr_mult=1.5,
+                        take_profit_atr_mult=2.5,
+                        turnover_proxy_2d=np.abs(np.diff(_sc, axis=0, prepend=0.0)),
+                        valid_mask_2d=valid_mask,
+                        metadata={
+                            "archetype": "xs_alpha",
+                            "edge_hypothesis": (
+                                "cross-sectional residual momentum captures "
+                                "relative strength after removing BTC beta"
+                            ),
+                            "max_abs_btc_beta": 0.80,
+                        },
+                    )
+                )
 
         return fam_panels
 
