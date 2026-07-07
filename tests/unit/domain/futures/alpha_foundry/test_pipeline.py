@@ -160,6 +160,101 @@ class TestRunAlphaFoundryL0Pipeline:
         assert len(artifacts.evidences) == 0
         assert len(artifacts.passed_recipe_ids) == 0
 
+    def test_l0_pipeline_with_runtime_config_creates_search_cells(self) -> None:
+        panel = _make_panel()
+        aligned = _make_aligned()
+        from src.domain.futures.alpha_foundry.contracts import AlphaFoundryRuntimeConfig
+
+        config = AlphaFoundryRuntimeConfig(
+            mode="gate",
+            observability_mode="debug_log",
+        )
+        artifacts = run_alpha_foundry_l0_pipeline(
+            panels=[panel],
+            recipes={"r1": SAMPLE_RECIPE},
+            aligned=aligned,
+            cost_model=ExecutionCostModel(),
+            cheap_gate_config=CheapGateConfig(),
+            runtime_config=config,
+        )
+        assert isinstance(artifacts.search_cells, tuple)
+
+    def test_l0_pipeline_produces_evidence_with_canonical_fields(self) -> None:
+        """Gap 1 regression: evidence row must have capacity_score/regime_stability from canonical gate."""
+        panel = _make_panel()
+        aligned = _make_aligned()
+
+        aligned_with_liq = AlignedMarketData(
+            datetimes=aligned.datetimes,
+            symbols=aligned.symbols,
+            open_2d=aligned.open_2d,
+            high_2d=aligned.high_2d,
+            low_2d=aligned.low_2d,
+            close_2d=aligned.close_2d,
+            volume_2d=aligned.volume_2d,
+            funding_2d=aligned.funding_2d,
+            active_mask=aligned.active_mask,
+            warm_mask=aligned.warm_mask,
+            entry_block_mask=aligned.entry_block_mask,
+            kill_mask=aligned.kill_mask,
+            execution_cost_bps_2d=np.full(aligned.close_2d.shape, 0.5, dtype=np.float64),
+            adv_usdt_2d=np.full(aligned.close_2d.shape, 1_000_000_000.0, dtype=np.float64),
+        )
+        artifacts = run_alpha_foundry_l0_pipeline(
+            panels=[panel],
+            recipes={"r1": SAMPLE_RECIPE},
+            aligned=aligned_with_liq,
+            cost_model=ExecutionCostModel(),
+            cheap_gate_config=CheapGateConfig(min_events=10, min_effective_n=5.0,
+                                              min_candidate_rank_ic_tstat=0.0, min_nw_tstat=0.0,
+                                              max_cost_drag_ratio=1.0, max_turnover_per_year=2000.0),
+        )
+        found_canonical = False
+        for row in artifacts.evidence_rows:
+            if row.gate_passed:
+                assert row.regime_stability > 0.0, f"{row.recipe_id} regime_stability=0.0 but gate_passed"
+                assert row.handoff_tier in {"seed", "candidate", "blocked"}
+                found_canonical = True
+        assert found_canonical, "no gate_passed rows with canonical fields"
+
+    def test_evidence_handoff_tier_from_canonical_gate(self) -> None:
+        """Gap 1 regression: handoff_tier must come from canonical gate, not cheap binary."""
+        panel = _make_panel()
+        aligned = _make_aligned()
+        aligned_with_liq = AlignedMarketData(
+            datetimes=aligned.datetimes,
+            symbols=aligned.symbols,
+            open_2d=aligned.open_2d,
+            high_2d=aligned.high_2d,
+            low_2d=aligned.low_2d,
+            close_2d=aligned.close_2d,
+            volume_2d=aligned.volume_2d,
+            funding_2d=aligned.funding_2d,
+            active_mask=aligned.active_mask,
+            warm_mask=aligned.warm_mask,
+            entry_block_mask=aligned.entry_block_mask,
+            kill_mask=aligned.kill_mask,
+            execution_cost_bps_2d=np.full(aligned.close_2d.shape, 4.0, dtype=np.float64),
+            adv_usdt_2d=np.full(aligned.close_2d.shape, 1_000_000.0, dtype=np.float64),
+        )
+        cfg = CheapGateConfig(min_events=10, min_effective_n=5.0,
+                              min_candidate_rank_ic_tstat=0.0, min_nw_tstat=0.0,
+                              max_cost_drag_ratio=1.0, max_turnover_per_year=2000.0)
+        artifacts = run_alpha_foundry_l0_pipeline(
+            panels=[panel],
+            recipes={"r1": SAMPLE_RECIPE},
+            aligned=aligned_with_liq,
+            cost_model=ExecutionCostModel(),
+            cheap_gate_config=cfg,
+        )
+        found_seed = False
+        for row in artifacts.evidence_rows:
+            assert row.handoff_tier in {"seed", "candidate", "blocked"}, f"got {row.handoff_tier}"
+            if row.handoff_tier == "seed":
+                found_seed = True
+        # At least some should be seed (weak rank IC etc.)
+        assert found_seed, "no 'seed' handoff_tier found — canonical gate tier logic not wired"
+
 
 class TestBuildPosteriorFromL1FoldRows:
     def test_empty_raw_rows_returns_empty(self) -> None:
@@ -856,3 +951,21 @@ class TestL0PipelineHandoff:
         assert len(artifacts.handoff_decisions) == 0
         assert artifacts.stage_counts.viable_candidates == 0
         assert artifacts.stage_counts.l1_queued == 0
+
+    def test_blocked_handoff_tier_not_selected_for_l1(self) -> None:
+        """Gap 3: blocked handoff_tier must not leak to selected_for_l1."""
+        aligned = _make_aligned_handoff(t=128, n=2)
+        recipes = {"r_blocked": _make_recipe_handoff("r_blocked")}
+        panels = [_make_panel_handoff("r_blocked")]
+        cfg = CheapGateConfig(min_events=9999)
+        artifacts = run_alpha_foundry_l0_pipeline(
+            panels=panels,
+            recipes=recipes,
+            aligned=aligned,
+            cost_model=ExecutionCostModel(),
+            cheap_gate_config=cfg,
+            run_id="test",
+        )
+        for row in artifacts.evidence_rows:
+            if row.handoff_tier == "blocked":
+                assert not row.selected_for_l1, f"{row.recipe_id} blocked but selected_for_l1"

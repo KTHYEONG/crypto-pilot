@@ -5,6 +5,7 @@ import numpy as np
 from src.domain.futures.alpha_foundry.budget import build_l1_verification_units
 from src.domain.futures.alpha_foundry.cheap_gate import evaluate_alpha_cheap_gate_batch
 from src.domain.futures.alpha_foundry.contracts import (
+    AlphaFoundryRuntimeConfig,
     AlphaRecipe,
     CheapGateConfig,
     L2PosteriorPolicyConfig,
@@ -189,7 +190,9 @@ class TestDebugSummary:
         import logging
 
         from src.domain.futures.alpha_foundry.cheap_gate import (
-            emit_alpha_foundry_debug_summary,
+            emit_alpha_generation_debug_summary as emit_alpha_foundry_debug_summary,
+        )
+        from src.domain.futures.alpha_foundry.cheap_gate import (
             evaluate_panel_gate,
         )
         from src.domain.futures.alpha_foundry.contracts import (
@@ -254,13 +257,234 @@ class TestDebugSummary:
         )
         caplog.set_level(logging.DEBUG)
         emit_alpha_foundry_debug_summary(
-            logger=logging.getLogger("test"),
             run_id="test_debug",
             timeframe="1h",
             evidences=(evidence,),
-            selected_recipe_ids=(evidence.recipe_id,),
             debug_top_k_rows=3,
+            debug_reject_bucket_rows=3,
         )
         assert "[EVAL]" in caplog.text
-        assert "stage=af_gate" in caplog.text
+        assert "stage=af_generation" in caplog.text
         assert evidence.recipe_id in caplog.text
+
+
+class TestMaybeWriteAlphaFoundryReport:
+    """S1-6: DEBUG mode returns (None, None), artifact disabled returns (None, None)."""
+
+    def test_debug_mode_no_file_write(self) -> None:
+        from src.domain.futures.alpha_foundry.bridge_helpers import (
+            maybe_write_alpha_foundry_report,
+        )
+        from src.domain.futures.alpha_foundry.contracts import (
+            AlphaFoundryBridgeReport,
+            AlphaFoundryRuntimeConfig,
+        )
+
+        report = AlphaFoundryBridgeReport(
+            run_id="test",
+            mode="gate",
+            timeframe="4h",
+            symbols=("BTCUSDT",),
+            n_bars=100,
+            n_panels_in=10,
+            n_bound_panels=5,
+            n_evidence=5,
+            n_passed=3,
+            n_rejected=2,
+            reject_reason_counts={},
+            elapsed_sec=0.0,
+            json_path="",
+            parquet_path="",
+        )
+        config = AlphaFoundryRuntimeConfig(
+            mode="gate",
+            artifact_write_enabled=False,
+            observability_mode="debug_log",
+        )
+        jp, pp = maybe_write_alpha_foundry_report(
+            report=report,
+            evidence_rows=(),
+            runtime_config=config,
+        )
+        assert jp is None
+        assert pp is None
+
+    def test_artifact_write_disabled_returns_none(self) -> None:
+        from src.domain.futures.alpha_foundry.bridge_helpers import (
+            maybe_write_alpha_foundry_report,
+        )
+        from src.domain.futures.alpha_foundry.contracts import (
+            AlphaFoundryBridgeReport,
+            AlphaFoundryRuntimeConfig,
+        )
+
+        report = AlphaFoundryBridgeReport(
+            run_id="test",
+            mode="gate",
+            timeframe="4h",
+            symbols=("BTCUSDT",),
+            n_bars=100,
+            n_panels_in=10,
+            n_bound_panels=5,
+            n_evidence=5,
+            n_passed=3,
+            n_rejected=2,
+            reject_reason_counts={},
+            elapsed_sec=0.0,
+            json_path="",
+            parquet_path="",
+        )
+        config = AlphaFoundryRuntimeConfig(
+            mode="gate",
+            artifact_write_enabled=False,
+            observability_mode="off",
+        )
+        jp, pp = maybe_write_alpha_foundry_report(
+            report=report,
+            evidence_rows=(),
+            runtime_config=config,
+        )
+        assert jp is None
+        assert pp is None
+
+
+class TestRunAlphaFoundryL0Gate:
+
+    def test_mode_off_returns_empty_evidences(self) -> None:
+        from src.domain.futures.alpha_foundry.bridge_helpers import (
+            run_alpha_foundry_l0_gate,
+        )
+
+        config = AlphaFoundryRuntimeConfig(mode="off")
+        result = run_alpha_foundry_l0_gate(
+            panels=[],
+            bindings=[],
+            recipes={},
+            aligned=None,
+            cost_model=None,
+            runtime_config=config,
+            run_id="test",
+            timeframe="4h",
+        )
+        assert len(result.evidences) == 0
+        assert len(result.panels_for_l1) == 0
+
+    def test_mode_audit_produces_result(self) -> None:
+        from src.domain.futures.alpha_foundry.bridge_helpers import (
+            AlphaFoundryL0Result,
+            run_alpha_foundry_l0_gate,
+        )
+        from src.domain.futures.alpha_foundry.contracts import (
+            PanelRecipeBinding,
+        )
+
+        t = 96
+        dt = np.arange(np.datetime64("2026-01-01T00"), np.datetime64("2026-01-17T00"),
+                        np.timedelta64(4, "h"))[:t]
+        close = np.column_stack([
+            np.linspace(100.0, 124.0, t, dtype=np.float64),
+            np.linspace(50.0, 61.0, t, dtype=np.float64),
+        ])
+        zeros = np.zeros((t, 2), dtype=np.float64)
+        valid = np.ones((t, 2), dtype=np.bool_)
+        side = np.zeros((t, 2), dtype=np.int8)
+        side[::2, :] = 1
+        score = np.where(side == 1, np.array([0.8, 0.4]), 0.0).astype(np.float64)
+        aligned = AlignedMarketData(
+            datetimes=dt, symbols=("BTCUSDT", "ETHUSDT"),
+            open_2d=close, high_2d=close, low_2d=close, close_2d=close,
+            volume_2d=np.full((t, 2), 1000.0, dtype=np.float64),
+            funding_2d=zeros.copy(),
+            active_mask=valid.copy(), warm_mask=valid.copy(),
+            entry_block_mask=np.zeros((t, 2), dtype=np.bool_),
+            kill_mask=np.zeros((t, 2), dtype=np.bool_),
+        )
+        panel = CandidateSignalPanel(
+            family="trend_ma", variant="ema_12_72",
+            params={"fast": 12, "slow": 72},
+            datetimes=dt, symbols=("BTCUSDT", "ETHUSDT"),
+            signed_score_2d=score, side_hint_2d=side,
+            expected_holding_bars=2, min_holding_bars=1,
+            stop_atr_mult=2.0, take_profit_atr_mult=3.0,
+            turnover_proxy_2d=zeros.copy(), valid_mask_2d=valid,
+            metadata={"recipe_id": "", "archetype": "trend"},
+        )
+        binding = PanelRecipeBinding(
+            panel_index=0, recipe_id="synth_1", family="trend_ma",
+            variant="ema_12_72", source="synthetic_recipe",
+        )
+        config = AlphaFoundryRuntimeConfig(
+            mode="audit", artifact_write_enabled=False,
+            observability_mode="off",
+        )
+        result = run_alpha_foundry_l0_gate(
+            panels=[panel],
+            bindings=[binding],
+            recipes={},
+            aligned=aligned,
+            cost_model=ExecutionCostModel(),
+            runtime_config=config,
+            run_id="test_audit",
+            timeframe="4h",
+        )
+        assert isinstance(result, AlphaFoundryL0Result)
+
+    def test_l0_gate_passes_runtime_config_to_pipeline(self) -> None:
+        """Gap 2 regression: bridge_helpers must pass runtime_config to pipeline."""
+        from src.domain.futures.alpha_foundry.bridge_helpers import (
+            run_alpha_foundry_l0_gate,
+        )
+        from src.domain.futures.alpha_foundry.contracts import (
+            PanelRecipeBinding,
+        )
+
+        t = 96
+        dt = np.arange(np.datetime64("2026-01-01T00"), np.datetime64("2026-01-17T00"),
+                        np.timedelta64(4, "h"))[:t]
+        close = np.column_stack([
+            np.linspace(100.0, 124.0, t, dtype=np.float64),
+            np.linspace(50.0, 61.0, t, dtype=np.float64),
+        ])
+        zeros = np.zeros((t, 2), dtype=np.float64)
+        valid = np.ones((t, 2), dtype=np.bool_)
+        side = np.zeros((t, 2), dtype=np.int8)
+        side[::2, :] = 1
+        score = np.where(side == 1, np.array([0.8, 0.4]), 0.0).astype(np.float64)
+        aligned = AlignedMarketData(
+            datetimes=dt, symbols=("BTCUSDT", "ETHUSDT"),
+            open_2d=close, high_2d=close, low_2d=close, close_2d=close,
+            volume_2d=np.full((t, 2), 1000.0, dtype=np.float64),
+            funding_2d=zeros.copy(),
+            active_mask=valid.copy(), warm_mask=valid.copy(),
+            entry_block_mask=np.zeros((t, 2), dtype=np.bool_),
+            kill_mask=np.zeros((t, 2), dtype=np.bool_),
+        )
+        panel = CandidateSignalPanel(
+            family="trend_ma", variant="ema_12_72",
+            params={"fast": 12, "slow": 72},
+            datetimes=dt, symbols=("BTCUSDT", "ETHUSDT"),
+            signed_score_2d=score, side_hint_2d=side,
+            expected_holding_bars=2, min_holding_bars=1,
+            stop_atr_mult=2.0, take_profit_atr_mult=3.0,
+            turnover_proxy_2d=zeros.copy(), valid_mask_2d=valid,
+            metadata={"recipe_id": "", "archetype": "trend"},
+        )
+        binding = PanelRecipeBinding(
+            panel_index=0, recipe_id="synth_1", family="trend_ma",
+            variant="ema_12_72", source="synthetic_recipe",
+        )
+        config = AlphaFoundryRuntimeConfig(
+            mode="audit", artifact_write_enabled=False,
+            observability_mode="debug_log",
+        )
+        result = run_alpha_foundry_l0_gate(
+            panels=[panel],
+            bindings=[binding],
+            recipes={},
+            aligned=aligned,
+            cost_model=ExecutionCostModel(),
+            runtime_config=config,
+            run_id="test_gap2",
+            timeframe="4h",
+        )
+        assert hasattr(result, "report")
