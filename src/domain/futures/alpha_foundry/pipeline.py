@@ -3,6 +3,7 @@
 [ADR_20260706_ALPHA_FOUNDRY_L0_L1_HANDOFF_GUARD]
 [ADR_20260706_ALPHA_FOUNDRY_SYNC][ADR_20260706_ALPHA_FOUNDRY_L0_DIVERSITY]
 [ADR_20260707_ALPHA_FOUNDRY_RESULT_SYNC]
+[ADR_20260707_ALPHA_FOUNDRY_CANONICAL_GATE_WIRING]
 [ADR_20260706_ALPHA_FOUNDRY_L0_SIGNAL_RIGOR]
 """
 
@@ -21,12 +22,17 @@ from src.domain.futures.alpha_foundry.budget import (
 )
 from src.domain.futures.alpha_foundry.cheap_gate import (
     build_l0_signal_candidate,
+    emit_alpha_generation_debug_summary,
     evaluate_alpha_cheap_gate_batch,
+    evaluate_alpha_gate_batch,
     resolve_family_timeframe_gate_policy,
 )
 from src.domain.futures.alpha_foundry.contracts import (
     AlphaFoundryEvidenceRow,
+    AlphaFoundryRuntimeConfig,
+    AlphaGateEvidence,
     AlphaRecipe,
+    AlphaSignalBlueprint,
     BucketKey,
     CheapGateConfig,
     CheapGateEvidence,
@@ -36,6 +42,7 @@ from src.domain.futures.alpha_foundry.contracts import (
     L0HandoffDecision,
     L0HandoffExclusionReason,
     L0ReportStageCounts,
+    L0SearchCell,
     L0SignalCandidate,
     L1PosteriorEvidence,
     L1VerificationUnit,
@@ -56,6 +63,11 @@ from src.domain.futures.alpha_foundry.multi_tf_fusion import (
     index_multi_timeframe_evidence,
 )
 from src.domain.futures.alpha_foundry.posterior import shrink_l1_evidence_hierarchical
+from src.domain.futures.alpha_foundry.search_space import (
+    apply_cost_prior_screen,
+    build_l0_search_cells,
+    update_search_policy_state,
+)
 from src.domain.futures.signals.contracts import CandidateSignalPanel
 from src.domain.futures.strategy.common.alignment import AlignedMarketData
 from src.domain.futures.strategy.execution_cost import ExecutionCostModel
@@ -74,6 +86,7 @@ class AlphaFoundryL0Artifacts:
     cross_bucket_result: CrossBucketDiversityResult | None = None
     tf_fusion: tuple[MultiTimeframeEvidence, ...] = ()
     handoff_decisions: tuple[L0HandoffDecision, ...] = ()
+    search_cells: tuple[L0SearchCell, ...] = ()
 
 
 def build_l0_handoff_decisions(
@@ -223,7 +236,55 @@ def run_alpha_foundry_l0_pipeline(
     min_conviction_lcb_bps: float = 5.0,
     total_l1_verification_budget: int = 30,
     evidence_by_tf: Mapping[str, pd.DataFrame] | None = None,
+    runtime_config: AlphaFoundryRuntimeConfig | None = None,
 ) -> AlphaFoundryL0Artifacts:
+    # 1. Search cell creation (if runtime_config provided)
+    search_cells: tuple[L0SearchCell, ...] = ()
+    if runtime_config is not None:
+        blueprints: list[AlphaSignalBlueprint] = []
+        for rid, recipe in recipes.items():
+            for panel in panels:
+                p_rid = panel.metadata.get("recipe_id", "")
+                if p_rid == rid:
+                    entry_mode = panel.metadata.get("entry_mode", "sparse")
+                    blueprints.append(
+                        AlphaSignalBlueprint(
+                            family=recipe.family,
+                            variant=recipe.variant,
+                            archetype=recipe.archetype,
+                            timeframe=recipe.timeframe,
+                            required_fields=recipe.required_fields,
+                            causal_lag_bars=recipe.causal_lag_bars,
+                            lookback_bars=(max(recipe.causal_lag_bars, 1),),
+                            holding_bars=panel.expected_holding_bars,
+                            max_turnover_per_year=recipe.max_turnover_per_year,
+                            entry_mode=entry_mode,
+                            side_rule_id=recipe.side_rule_id,
+                            exit_policy_id=recipe.exit_policy_id,
+                        )
+                    )
+                    break
+
+        if blueprints:
+            family_prior_scores: dict[str, float] = {}
+            cost_floor_bps_by_tf: dict[str, float] = {}
+            for bp in blueprints:
+                family_prior_scores.setdefault(bp.family, 0.0)
+                cost_floor_bps_by_tf.setdefault(bp.timeframe, 0.0)
+
+            search_cells = build_l0_search_cells(
+                blueprints=tuple(blueprints),
+                family_prior_scores=family_prior_scores,
+                cost_floor_bps_by_tf=cost_floor_bps_by_tf,
+            )
+
+            # 2. Cost prior screen
+            search_cells = apply_cost_prior_screen(
+                cells=search_cells,
+                runtime_config=runtime_config,
+            )
+
+    # 3. Cheap gate (first-pass filter)
     cheap_evidences = evaluate_alpha_cheap_gate_batch(
         panels=panels,
         recipes=recipes,
@@ -254,12 +315,27 @@ def run_alpha_foundry_l0_pipeline(
         tf_fusion = ()
         tf_fusion_index = {}
 
-    # Convert evidences to L0SignalCandidate
+    # 3b. Canonical gate evaluation (capacity/regime/tf corroboration)
+    canonical_evidences = evaluate_alpha_gate_batch(
+        panels=panels,
+        recipes=recipes,
+        aligned=aligned,
+        cost_model=cost_model,
+        config=cheap_gate_config,
+        run_id=run_id,
+        tf_fusion_index=tf_fusion_index if evidence_by_tf else None,  # type: ignore[arg-type]
+    )
+    canonical_by_rid: dict[str, AlphaGateEvidence] = {
+        e.recipe_id: e for e in canonical_evidences if e.recipe_id
+    }
+
+    # 4. Convert evidences to candidates (with capacity/regime/tf fields)
     all_candidates: list[L0SignalCandidate] = []
     for ev in cheap_evidences:
-        recipe = recipes.get(ev.recipe_id)
-        if recipe is None:
+        r_ = recipes.get(ev.recipe_id)
+        if r_ is None:
             continue
+        recipe = r_
         ev_panel = panel_by_rid.get(ev.recipe_id)
         source: Literal["catalog_exact", "catalog_family_variant", "synthetic_recipe"] = "synthetic_recipe"
 
@@ -272,8 +348,8 @@ def run_alpha_foundry_l0_pipeline(
             config=cheap_gate_config,
         )
 
-        tf_key = (recipe.family, recipe.variant, recipe.timeframe)
-        tf_ev = tf_fusion_index.get(tf_key)
+        tf_key = (recipe.family, recipe.variant)
+        tf_ev = tf_fusion_index.get(tf_key)  # type: ignore[arg-type]
 
         candidate = build_l0_signal_candidate(
             run_id=run_id,
@@ -289,26 +365,28 @@ def run_alpha_foundry_l0_pipeline(
 
     candidate_by_rid: dict[str, L0SignalCandidate] = {c.recipe_id: c for c in all_candidates}
 
-    # Build viable candidates: non-blocked, non-contradicted, with bound panel
+    # Build viable candidates (use canonical handoff_tier, not discovery_tier)
     viable_candidates = [
         c
         for c in all_candidates
-        if c.discovery_tier in {"seed", "candidate", "verified"}
+        if (
+            (canonical_by_rid[c.recipe_id].handoff_tier if c.recipe_id in canonical_by_rid else c.discovery_tier)
+            in {"seed", "candidate", "verified"}
+        )
         and not c.hard_reject_reasons
         and c.corroboration_tier != "contradicted"
         and c.recipe_id in panel_by_rid
     ]
     viable_rids = {c.recipe_id for c in viable_candidates}
 
-    # Bucket diversity — run only on viable candidates
     buckets_viable: MutableMapping[BucketKey, list[CheapGateEvidence]] = {}
     for ev in cheap_evidences:
         if ev.recipe_id not in viable_rids:
             continue
-        recipe = recipes.get(ev.recipe_id)
-        if recipe is None:
+        recipe2 = recipes.get(ev.recipe_id)
+        if recipe2 is None:
             continue
-        key = (recipe.family, recipe.timeframe)
+        key = (recipe2.family, recipe2.timeframe)
         if key not in buckets_viable:
             buckets_viable[key] = []
         buckets_viable[key].append(ev)
@@ -326,7 +404,6 @@ def run_alpha_foundry_l0_pipeline(
         )
         bucket_results.append(br)
 
-    # Cross-bucket diversity — only on viable bucket survivors
     cross_result = resolve_cross_bucket_diversity(
         bucket_results=bucket_results,
         panel_by_recipe_id=panel_by_rid,
@@ -335,7 +412,6 @@ def run_alpha_foundry_l0_pipeline(
         max_novelty_corr=cheap_gate_config.max_novelty_corr,
     )
 
-    # Global L1 budget allocation — only on viable post-diversity buckets
     allocated, bucket_budgets = allocate_global_l1_budget(
         bucket_results=bucket_results,
         candidate_by_recipe_id=candidate_by_rid,
@@ -345,7 +421,6 @@ def run_alpha_foundry_l0_pipeline(
         min_seed_slots_per_timeframe=cheap_gate_config.min_seed_slots_per_timeframe,
     )
 
-    # Build handoff decisions
     handoff_decisions = build_l0_handoff_decisions(
         candidates=tuple(viable_candidates),
         recipes=recipes,
@@ -356,7 +431,6 @@ def run_alpha_foundry_l0_pipeline(
     )
     decision_map: dict[str, L0HandoffDecision] = {d.recipe_id: d for d in handoff_decisions}
 
-    # Update candidates with budget units from decisions
     for rid in candidate_by_rid:
         cand = candidate_by_rid[rid]
         decision = decision_map.get(rid)
@@ -364,6 +438,14 @@ def run_alpha_foundry_l0_pipeline(
             candidate_by_rid[rid] = replace(cand, l1_budget_units=decision.budget_units)
 
     passed_recipe_ids = tuple(d.recipe_id for d in handoff_decisions if d.selected_for_l1)
+
+    # 6. Update search cell states with candidate results
+    if runtime_config is not None and search_cells:
+        search_cells = update_search_policy_state(
+            cells=search_cells,
+            candidates=tuple(all_candidates),
+            min_trials=3,
+        )
 
     # Build evidence_rows
     selected_in_bucket: dict[str, int] = {
@@ -376,7 +458,6 @@ def run_alpha_foundry_l0_pipeline(
     if cross_result is not None:
         redundant_map.update(cross_result.demoted_reason_by_id)
 
-    # Stage counts
     hard_reject_count = 0
     soft_reject_count = 0
     seeded_count = 0
@@ -415,10 +496,10 @@ def run_alpha_foundry_l0_pipeline(
     created_at_ms = int(_time_module.time() * 1000)
     evidence_rows: list[AlphaFoundryEvidenceRow] = []
     for ev in cheap_evidences:
-        recipe = recipes.get(ev.recipe_id)
-        family = recipe.family if recipe else ""
-        variant = recipe.variant if recipe else ""
-        archetype = recipe.archetype if recipe else ""
+        _recipe = recipes.get(ev.recipe_id)
+        family = _recipe.family if _recipe else ""
+        variant = _recipe.variant if _recipe else ""
+        archetype = _recipe.archetype if _recipe else ""
 
         ev_cand = candidate_by_rid.get(ev.recipe_id)
         decision = decision_map.get(ev.recipe_id)
@@ -440,6 +521,21 @@ def run_alpha_foundry_l0_pipeline(
         corr_tier = ev_cand.corroboration_tier if ev_cand else ""
         l1_ps = ev_cand.l1_priority_score if ev_cand else 0.0
         sf_flags = "|".join(ev_cand.soft_flags) if ev_cand else ""
+
+        # Pull canonical gate fields if available
+        canon = canonical_by_rid.get(ev.recipe_id)
+        if canon is not None:
+            handoff_tier = canon.handoff_tier
+            capacity_score = canon.capacity_score
+            regime_stability = canon.regime_stability
+            tf_corroboration = canon.tf_corroboration
+            entry_mode = canon.entry_mode
+        else:
+            handoff_tier = "candidate" if ev.gate_passed else "blocked"
+            capacity_score = 0.0
+            regime_stability = 0.0
+            tf_corroboration = 0.0
+            entry_mode = "sparse"
 
         evidence_rows.append(
             AlphaFoundryEvidenceRow(
@@ -471,7 +567,7 @@ def run_alpha_foundry_l0_pipeline(
                 bootstrap_lcb_bps=ev.bootstrap_lcb_bps,
                 bootstrap_agree=ev.bootstrap_agree,
                 gate_passed=ev.gate_passed,
-                handoff_tier="candidate" if ev.gate_passed else "blocked",
+                handoff_tier=handoff_tier,
                 selected_for_l1=sel_for_l1,
                 reject_reasons="|".join(ev.reject_reasons),
                 soft_flags=sf_flags,
@@ -488,7 +584,21 @@ def run_alpha_foundry_l0_pipeline(
                 stage_label=stage_label,
                 created_at_ms=created_at_ms,
                 source=source_str,
+                capacity_score=capacity_score,
+                regime_stability=regime_stability,
+                tf_corroboration=tf_corroboration,
+                entry_mode=entry_mode,
             )
+        )
+
+    # 7. DEBUG summary if observability_mode == "debug_log"
+    if runtime_config is not None and runtime_config.observability_mode == "debug_log":
+        emit_alpha_generation_debug_summary(
+            run_id=run_id,
+            timeframe="",
+            evidences=cheap_evidences,  # type: ignore[arg-type]
+            debug_top_k_rows=runtime_config.debug_top_k_rows,
+            debug_reject_bucket_rows=runtime_config.debug_reject_bucket_rows,
         )
 
     return AlphaFoundryL0Artifacts(
@@ -503,6 +613,7 @@ def run_alpha_foundry_l0_pipeline(
         cross_bucket_result=cross_result,
         tf_fusion=tf_fusion,
         handoff_decisions=handoff_decisions,
+        search_cells=search_cells,
     )
 
 

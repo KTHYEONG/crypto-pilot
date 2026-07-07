@@ -3,12 +3,12 @@
 [ADR_20260706_ALPHA_FOUNDRY_L0_L1_HANDOFF_GUARD]
 [ADR_20260706_ALPHA_FOUNDRY_SYNC][ADR_20260706_ALPHA_FOUNDRY_L0_DIVERSITY]
 [ADR_20260707_ALPHA_FOUNDRY_RESULT_SYNC]
+[ADR_20260707_ALPHA_FOUNDRY_CANONICAL_GATE_WIRING]
 [ADR_20260706_ALPHA_FOUNDRY_L0_SIGNAL_RIGOR]
 """
 
 from __future__ import annotations
 
-import logging
 import math
 from collections.abc import Mapping, Sequence
 from typing import Literal, cast
@@ -52,6 +52,7 @@ def _validate_shape(panel: CandidateSignalPanel, aligned: AlignedMarketData) -> 
 
 
 def _compute_block_means(values: NDArray[np.float64], block_bars: int) -> NDArray[np.float64]:
+    values = values[np.isfinite(values)]
     n = len(values)
     if n < 2 or block_bars < 1:
         return np.array([])
@@ -480,6 +481,65 @@ def build_l0_signal_candidate(
     )
 
 
+
+# ── Cost-aware / Regime / TF Corroboration helpers ─────────────────────
+
+
+def compute_capacity_score(
+    *,
+    aligned: AlignedMarketData,
+    event_mask: NDArray[np.bool_],
+    liquidity_cost_stress_bps: float,
+) -> float:
+    if aligned.execution_cost_bps_2d is None or aligned.adv_usdt_2d is None:
+        return min(liquidity_cost_stress_bps / max(25.0, 1e-10), 0.25)
+    cost_at_events = aligned.execution_cost_bps_2d[event_mask]
+    adv_at_events = aligned.adv_usdt_2d[event_mask]
+    if (
+        len(cost_at_events) == 0
+        or len(adv_at_events) == 0
+        or not np.any(np.isfinite(cost_at_events))
+        or not np.any(np.isfinite(adv_at_events))
+    ):
+        return 0.0
+    mean_cost = float(np.nanmean(cost_at_events))
+    mean_adv = float(np.nanmean(adv_at_events))
+    capacity = 1.0 - (mean_cost / max(mean_adv * 1e-6 + 1e-10, 1e-10))
+    return float(np.clip(capacity, 0.0, 1.0))
+
+
+def compute_regime_stability(
+    *,
+    panel: CandidateSignalPanel,
+    net_bps: NDArray[np.float64],
+    event_mask: NDArray[np.bool_],
+) -> float:
+    net_at_events = net_bps[event_mask]
+    net_at_events = net_at_events[np.isfinite(net_at_events)]
+    if len(net_at_events) < 4:
+        return 0.0
+    splits = np.array_split(net_at_events, max(4, len(net_at_events) // 4))
+    split_means = np.array([float(np.mean(s)) for s in splits if len(s) > 0])
+    if len(split_means) < 2:
+        return 0.0
+    cv = float(np.std(split_means)) / max(abs(float(np.mean(split_means))), 1e-10)
+    stability = 1.0 / (1.0 + cv)
+    return float(np.clip(stability, 0.0, 1.0))
+
+
+def compute_tf_corroboration(
+    *,
+    recipe: AlphaRecipe,
+    tf_fusion: MultiTimeframeEvidence | None,
+) -> float:
+    if tf_fusion is None:
+        return 0.0
+    if tf_fusion.corroboration_tier == "contradicted":
+        return 0.0
+    base = 0.5 if tf_fusion.corroboration_tier == "single_tf_strict" else 1.0
+    return float(np.clip(base * tf_fusion.sign_agreement_ratio, 0.0, 1.0))
+
+
 # ── V2 Gate Metrics ────────────────────────────────────────────────────
 
 
@@ -560,7 +620,7 @@ def compute_liquidity_cost_stress_bps(
     if aligned.execution_cost_bps_2d is None:
         return 0.0
     cost_at_events = aligned.execution_cost_bps_2d[event_mask]
-    if len(cost_at_events) == 0:
+    if len(cost_at_events) == 0 or not np.any(np.isfinite(cost_at_events)):
         return 0.0
     return float(np.nanmean(cost_at_events)) * stress_mult
 
@@ -923,6 +983,7 @@ def evaluate_panel_gate(
     config: AlphaGateConfig,
     bars_per_year: float,
     run_id: str,
+    tf_fusion: MultiTimeframeEvidence | None = None,
 ) -> AlphaGateEvidence:
     if bars_per_year <= 0.0:
         raise ValueError("bars_per_year must be positive")
@@ -987,13 +1048,54 @@ def evaluate_panel_gate(
     net_vals = net_bps[event_mask]
     gross_vals = fwd_ret_bps[event_mask]
 
+    # Capacity score (liquidity-aware)
+    capacity_score = compute_capacity_score(
+        aligned=aligned,
+        event_mask=event_mask,
+        liquidity_cost_stress_bps=liquidity_stress_bps,
+    )
+
+    # Regime stability
+    regime_stability = compute_regime_stability(
+        panel=panel,
+        net_bps=net_bps,
+        event_mask=event_mask,
+    )
+
+    # TF corroboration
+    tf_corroboration = compute_tf_corroboration(
+        recipe=recipe,
+        tf_fusion=tf_fusion,
+    )
+
+    # TF contradicted -> hard reject
+    if tf_fusion is not None and tf_fusion.corroboration_tier == "contradicted":
+        reject_reasons.append("tf_contradicted")
+
+    # capacity_score <= 0.25 when no liquidity data
+    if aligned.execution_cost_bps_2d is None or aligned.adv_usdt_2d is None:
+        capacity_score = min(capacity_score, 0.25)
+
+    # regime_stability < 0.5 -> max seed, no candidate
+    if regime_stability < 0.5:
+        soft_flags.append("low_regime_stability")
+
     effective_n = float(n_events)
     if effective_n < config.min_effective_n:
         reject_reasons.append("insufficient_effective_n")
 
-    mean_gross_bps = float(np.nanmean(gross_vals)) if n_events > 0 else 0.0
-    mean_cost_bps = float(np.nanmean(total_cost_2d[event_mask])) if n_events > 0 else 0.0
-    mean_net_bps = float(np.nanmean(net_vals)) if n_events > 0 else 0.0
+    mean_gross_bps = (
+        float(np.nanmean(gross_vals)) if n_events > 0 and np.any(np.isfinite(gross_vals)) else 0.0
+    )
+    cost_at_events = total_cost_2d[event_mask]
+    mean_cost_bps = (
+        float(np.nanmean(cost_at_events))
+        if n_events > 0 and np.any(np.isfinite(cost_at_events))
+        else 0.0
+    )
+    mean_net_bps = (
+        float(np.nanmean(net_vals)) if n_events > 0 and np.any(np.isfinite(net_vals)) else 0.0
+    )
 
     block_bars_eff = max(config.block_bars, 2 * holding_bars)
     block_means = _compute_block_means(net_vals, block_bars_eff)
@@ -1013,11 +1115,17 @@ def evaluate_panel_gate(
         reject_reasons.append("weak_tstat")
 
     cost_drag = compute_cost_drag_ratio_v2(mean_cost_bps=mean_cost_bps, mean_gross_bps=mean_gross_bps)
-    if cost_drag > config.max_cost_drag_ratio:
+
+    # Fast TF stricter cost threshold (30m, 1h, 2h)
+    fast_tf = recipe.timeframe in ("30m", "1h", "2h")
+    effective_max_cost_drag = config.max_cost_drag_ratio * 0.75 if fast_tf else config.max_cost_drag_ratio
+    if cost_drag > effective_max_cost_drag:
         reject_reasons.append("excess_cost_drag")
 
     turnover = _compute_turnover_per_year(side, valid, bars_per_year)
     max_turn = min(config.max_turnover_per_year, recipe.max_turnover_per_year)
+
+    entry_mode = panel.metadata.get("entry_mode", "sparse")
     if turnover > max_turn:
         reject_reasons.append("excess_turnover")
 
@@ -1030,7 +1138,8 @@ def evaluate_panel_gate(
         mask=event_mask,
     )
     rank_ic_floor = 1.0 / math.sqrt(max(n_events - 3, 1))
-    if abs(rank_ic) < rank_ic_floor:
+    weak_rank_ic = abs(rank_ic) < rank_ic_floor
+    if weak_rank_ic:
         soft_flags.append("weak_rank_ic")
     if abs(rank_ic_tstat) < config.min_candidate_rank_ic_tstat:
         soft_flags.append("weak_rank_ic_tstat")
@@ -1056,10 +1165,11 @@ def evaluate_panel_gate(
 
     gate_passed = len(reject_reasons) == 0
 
+    # handoff_tier: weak_rank_ic alone does NOT downgrade to blocked (only priority affected)
     handoff_tier: AlphaGateHandoffTier
     if reject_reasons:
         handoff_tier = "blocked"
-    elif soft_flags:
+    elif regime_stability < 0.5 or tf_corroboration < 0.5 or soft_flags:
         handoff_tier = "seed"
     else:
         handoff_tier = "candidate"
@@ -1099,6 +1209,10 @@ def evaluate_panel_gate(
         selected_for_l1=False,
         reject_reasons=tuple(reject_reasons),
         soft_flags=tuple(soft_flags),
+        capacity_score=capacity_score,
+        regime_stability=regime_stability,
+        tf_corroboration=tf_corroboration,
+        entry_mode=entry_mode,
     )
 
 
@@ -1110,6 +1224,7 @@ def evaluate_alpha_gate_batch(
     cost_model: ExecutionCostModel,
     config: AlphaGateConfig,
     run_id: str,
+    tf_fusion_index: Mapping[tuple[str, str], MultiTimeframeEvidence] | None = None,
 ) -> tuple[AlphaGateEvidence, ...]:
     from src.domain.futures.optimization.metrics import _bars_per_year_for_tf
 
@@ -1123,6 +1238,10 @@ def evaluate_alpha_gate_batch(
         tf = recipe.timeframe
         if tf not in bpy_cache:
             bpy_cache[tf] = _bars_per_year_for_tf(tf)
+
+        tf_key = (recipe.family, recipe.variant)
+        tf_ev = tf_fusion_index.get(tf_key) if tf_fusion_index is not None else None
+
         evidence = evaluate_panel_gate(
             panel=panel,
             aligned=aligned,
@@ -1131,57 +1250,55 @@ def evaluate_alpha_gate_batch(
             config=config,
             bars_per_year=bpy_cache[tf],
             run_id=run_id,
+            tf_fusion=tf_ev,
         )
         results.append(evidence)
     return tuple(results)
 
 
-def emit_alpha_foundry_debug_summary(
+def emit_alpha_generation_debug_summary(
     *,
-    logger: logging.Logger,
     run_id: str,
     timeframe: str,
     evidences: Sequence[AlphaGateEvidence],
-    selected_recipe_ids: Sequence[str],
     debug_top_k_rows: int,
+    debug_reject_bucket_rows: int,
 ) -> None:
+    import logging
+
+    logger = logging.getLogger(__name__)
     passed = [e for e in evidences if e.gate_passed]
     rejected = [e for e in evidences if not e.gate_passed]
 
     logger.debug(
-        "[EVAL] stage=af_gate run_id=%s tf=%s total=%d passed=%d rejected=%d",
+        "[EVAL] stage=af_generation run_id=%s tf=%s total=%d passed=%d rejected=%d",
         run_id, timeframe, len(evidences), len(passed), len(rejected),
     )
 
+    # Top candidates by mean_net_bps
     sorted_ev = sorted(evidences, key=lambda e: e.mean_net_bps, reverse=True)
     top_k = sorted_ev[:debug_top_k_rows]
-    bottom_k = sorted_ev[-debug_top_k_rows:] if debug_top_k_rows > 0 else []
+    for e in top_k:
+        logger.debug(
+            "[ALGO] TOP recipe=%s net=%.2f gross=%.2f cost=%.2f handoff=%s cap=%.2f regime=%.2f tf_corr=%.2f",
+            e.recipe_id, e.mean_net_bps, e.mean_gross_bps,
+            e.mean_cost_bps, getattr(e, "handoff_tier", "n/a"), getattr(e, "capacity_score", 0.0),
+            getattr(e, "regime_stability", 0.0), getattr(e, "tf_corroboration", 0.0),
+        )
 
-    if top_k:
-        for e in top_k:
-            logger.debug(
-                "[ALGO] TOP recipe=%s net=%.2f gross=%.2f cost=%.2f handoff=%s passed=%s",
-                e.recipe_id, e.mean_net_bps, e.mean_gross_bps,
-                e.mean_cost_bps, e.handoff_tier, e.gate_passed,
-            )
-    if bottom_k:
-        for e in bottom_k:
-            logger.debug(
-                "[ALGO] BOTTOM recipe=%s net=%.2f gross=%.2f cost=%.2f handoff=%s passed=%s",
-                e.recipe_id, e.mean_net_bps, e.mean_gross_bps,
-                e.mean_cost_bps, e.handoff_tier, e.gate_passed,
-            )
-
-    top_reject_reasons: dict[str, int] = {}
+    # Reject bucket rows
+    top_reject: dict[str, int] = {}
     for e in rejected:
         for r in e.reject_reasons:
-            top_reject_reasons[r] = top_reject_reasons.get(r, 0) + 1
-    if top_reject_reasons:
-        reasons_str = " | ".join(f"{k}={v}" for k, v in sorted(top_reject_reasons.items(), key=lambda x: -x[1]))
+            top_reject[r] = top_reject.get(r, 0) + 1
+    if top_reject:
+        reasons_str = " | ".join(f"{k}={v}" for k, v in sorted(top_reject.items(), key=lambda x: -x[1]))
         logger.debug("[DATA] reject_reasons: %s", reasons_str)
 
-    if selected_recipe_ids:
+    # Cost drag bucket (rejected by excess_cost_drag or high cost_drag_ratio)
+    cost_drag_bucket = [e for e in rejected if "excess_cost_drag" in e.reject_reasons]
+    for e in cost_drag_bucket[:debug_reject_bucket_rows]:
         logger.debug(
-            "[DATA] selected=%d recipe_ids=%s",
-            len(selected_recipe_ids), list(selected_recipe_ids),
+            "[DATA] COST_DRAG recipe=%s cost_drag=%.2f cap=%.2f regime=%.2f",
+            e.recipe_id, e.cost_drag_ratio, getattr(e, "capacity_score", 0.0), getattr(e, "regime_stability", 0.0),
         )
