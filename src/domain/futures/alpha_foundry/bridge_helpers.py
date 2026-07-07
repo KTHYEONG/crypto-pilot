@@ -4,6 +4,7 @@
 [ADR_20260706_ALPHA_FOUNDRY_MAIN_WIRING][ADR_20260706_ALPHA_FOUNDRY_L0_DIVERSITY]
 [ADR_20260707_ALPHA_FOUNDRY_RESULT_SYNC]
 [ADR_20260707_ALPHA_FOUNDRY_CANONICAL_GATE_WIRING]
+[ADR_20260707_L0_MULTI_TF_GATE_REDESIGN]
 [ADR_20260706_ALPHA_FOUNDRY_L0_SIGNAL_RIGOR]
 """
 
@@ -35,6 +36,7 @@ class AlphaFoundryL0Result:
     report: Any | None
     evidences: tuple[Any, ...]
     bindings: tuple[Any, ...]
+    evidence_rows: tuple[Any, ...] = ()
 
 
 def _normalize_variant(variant: str, timeframe: str) -> str:
@@ -269,6 +271,7 @@ def run_alpha_foundry_l0_gate(
     runtime_config: Any,
     run_id: str,
     timeframe: str,
+    evidence_by_tf: Mapping[str, Any] | None = None,
 ) -> AlphaFoundryL0Result:
     from src.domain.futures.alpha_foundry.contracts import (
         AlphaFoundryBridgeReport,
@@ -329,6 +332,7 @@ def run_alpha_foundry_l0_gate(
                 else 30
             ),
             runtime_config=runtime_config,
+            evidence_by_tf=evidence_by_tf,
         )
         evidences = l0_artifacts.evidences
         evidence_rows = l0_artifacts.evidence_rows
@@ -408,6 +412,7 @@ def run_alpha_foundry_l0_gate(
         report=report,
         evidences=evidences,
         bindings=tuple(bindings),
+        evidence_rows=evidence_rows,
     )
 
 
@@ -443,3 +448,119 @@ def maybe_write_alpha_foundry_report(
         report_dir=report_dir,
         run_id=run_id,
     )
+
+
+def build_cheap_gate_evidence_frame(
+    *,
+    panels: Sequence[Any],
+    recipes: Mapping[str, Any],
+    aligned: Any,
+    cost_model: Any,
+    cheap_gate_config: Any,
+    timeframe: str,
+) -> Any:
+    import pandas as pd
+
+    from src.domain.futures.alpha_foundry.cheap_gate import evaluate_alpha_cheap_gate_batch
+
+    cheap_evidences = evaluate_alpha_cheap_gate_batch(
+        panels=panels,
+        recipes=recipes,
+        aligned=aligned,
+        cost_model=cost_model,
+        config=cheap_gate_config,
+    )
+    rows: list[dict[str, Any]] = []
+    for ev in cheap_evidences:
+        recipe = recipes.get(ev.recipe_id)
+        if recipe is None:
+            continue
+        rows.append(
+            {
+                "family": recipe.family,
+                "variant": recipe.variant,
+                "timeframe": recipe.timeframe,
+                "recipe_id": ev.recipe_id,
+                "reject_reasons": "|".join(ev.reject_reasons),
+                "mean_net_bps": ev.mean_net_bps,
+                "block_lcb_bps": ev.block_lcb_bps,
+            }
+        )
+    if not rows:
+        return pd.DataFrame(
+            {
+                "family": pd.Series(dtype=str),
+                "variant": pd.Series(dtype=str),
+                "timeframe": pd.Series(dtype=str),
+                "recipe_id": pd.Series(dtype=str),
+                "reject_reasons": pd.Series(dtype=str),
+                "mean_net_bps": pd.Series(dtype=float),
+                "block_lcb_bps": pd.Series(dtype=float),
+            }
+        )
+    return pd.DataFrame(rows)
+
+
+def run_alpha_foundry_l0_gate_multi_tf(
+    *,
+    panels_by_tf: Mapping[str, Sequence[Any]],
+    bindings_by_tf: Mapping[str, Sequence[Any]],
+    recipes_by_tf: Mapping[str, MutableMapping[str, Any]],
+    aligned_by_tf: Mapping[str, Any],
+    cost_model: Any,
+    runtime_config: Any,
+    run_id_prefix: str,
+) -> dict[str, AlphaFoundryL0Result]:
+    missing = set(panels_by_tf) - set(aligned_by_tf)
+    if missing:
+        raise ValueError(f"aligned_by_tf missing timeframe: {next(iter(missing))}")
+
+    import pandas as pd
+
+    # Phase 1: cheap-gate per TF -> evidence_by_tf
+    evidence_by_tf: dict[str, Any] = {}
+    for tf, tf_panels in panels_by_tf.items():
+        tf_recipes = recipes_by_tf.get(tf, {})
+        if not tf_panels or not tf_recipes:
+            evidence_by_tf[tf] = pd.DataFrame(
+                {
+                    "family": pd.Series(dtype=str),
+                    "variant": pd.Series(dtype=str),
+                    "timeframe": pd.Series(dtype=str),
+                    "recipe_id": pd.Series(dtype=str),
+                    "reject_reasons": pd.Series(dtype=str),
+                    "mean_net_bps": pd.Series(dtype=float),
+                    "block_lcb_bps": pd.Series(dtype=float),
+                }
+            )
+            continue
+        evidence_by_tf[tf] = build_cheap_gate_evidence_frame(
+            panels=tf_panels,
+            recipes=tf_recipes,
+            aligned=aligned_by_tf[tf],
+            cost_model=cost_model,
+            cheap_gate_config=runtime_config.cheap_gate,
+            timeframe=tf,
+        )
+
+    # Phase 2: fuse_multi_timeframe_evidence is called inside pipeline
+    # Phase 3: canonical gate per TF
+    results: dict[str, AlphaFoundryL0Result] = {}
+    for tf in panels_by_tf:
+        tf_panels = panels_by_tf[tf]
+        tf_bindings = bindings_by_tf.get(tf, [])
+        tf_recipes = recipes_by_tf.get(tf, {})
+        tf_aligned = aligned_by_tf[tf]
+        _run_id = f"{run_id_prefix}_{tf}"
+        results[tf] = run_alpha_foundry_l0_gate(
+            panels=tf_panels,
+            bindings=tf_bindings,
+            recipes=tf_recipes,
+            aligned=tf_aligned,
+            cost_model=cost_model,
+            runtime_config=runtime_config,
+            run_id=_run_id,
+            timeframe=tf,
+            evidence_by_tf=evidence_by_tf,
+        )
+    return results
