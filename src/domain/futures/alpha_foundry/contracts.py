@@ -2,6 +2,7 @@
 
 [ADR_20260706_ALPHA_FOUNDRY_L0_L1_HANDOFF_GUARD]
 [ADR_20260706_ALPHA_FOUNDRY_SYNC][ADR_20260706_ALPHA_FOUNDRY_L0_DIVERSITY]
+[ADR_20260707_ALPHA_FOUNDRY_RESULT_SYNC]
 [ADR_20260706_ALPHA_FOUNDRY_L0_SIGNAL_RIGOR]
 """
 
@@ -17,7 +18,11 @@ from numpy.typing import NDArray
 
 from src.domain.futures.signals.contracts import CandidateSignalPanel
 
-# ── Alpha Foundry V2 type aliases ─────────────────────────────────────
+# ── Alpha Gate type aliases ────────────────────────────────────────────
+AlphaGateSchema: TypeAlias = Literal["unified"]
+AlphaGateObservabilityMode: TypeAlias = Literal["debug_log", "artifact", "off"]
+AlphaGateHandoffTier: TypeAlias = Literal["blocked", "seed", "candidate"]
+
 AlphaEntryMode: TypeAlias = Literal["sparse", "continuous", "cross_sectional_rank"]
 AlphaSearchStatus: TypeAlias = Literal["pending", "screened", "gated", "l1_queued", "retired"]
 AlphaTimeframe: TypeAlias = Literal["30m", "1h", "2h", "3h", "4h", "6h", "8h", "12h", "1d"]
@@ -271,6 +276,7 @@ class L0SearchCell:
     expected_event_rate: float
     family_prior_score: float
     status: AlphaSearchStatus = "pending"
+    retire_reason: str | None = None
 
     def __post_init__(self) -> None:
         if not self.blueprint_id:
@@ -292,9 +298,14 @@ class L0SearchCell:
 
 
 @dataclass(slots=True, frozen=True)
-class AlphaGateEvidenceV2:
-    recipe_id: str
+class AlphaGateEvidence:
+    schema_version: AlphaGateSchema
+    run_id: str
     timeframe: str
+    family: str
+    variant: str
+    recipe_id: str
+    archetype: AlphaArchetype
     symbol_scope: SymbolScope
     n_events: int
     effective_n: float
@@ -308,16 +319,20 @@ class AlphaGateEvidenceV2:
     rank_ic_tstat: float
     cost_drag_ratio: float
     turnover_per_year: float
+    novelty_corr_max: float
+    incremental_rank_ic: float
+    compute_cost_score: float
     event_hit_rate: float
     payoff_skew: float
-    regime_edge_bps: Mapping[str, float]
     xs_spread_lcb_bps: float | None
     liquidity_cost_stress_bps: float
     bootstrap_lcb_bps: float
     bootstrap_agree: bool
     gate_passed: bool
+    handoff_tier: AlphaGateHandoffTier
+    selected_for_l1: bool
     reject_reasons: tuple[str, ...]
-    soft_flags: tuple[str, ...] = ()
+    soft_flags: tuple[str, ...]
 
     def __post_init__(self) -> None:
         if self.n_events < 0:
@@ -343,7 +358,7 @@ class AlphaGateEvidenceV2:
 
 
 @dataclass(slots=True, frozen=True)
-class CheapGateConfig:
+class AlphaGateConfig:
     min_events: int = 40
     min_effective_n: float = 20.0
     min_lcb_net_bps: float = 0.0
@@ -376,7 +391,6 @@ class CheapGateConfig:
     max_abs_btc_beta: float = 0.80
     high_turnover_per_year: float = 180.0
     liquidity_cost_stress_mult: float = 1.0
-    enable_v2_gate_metrics: bool = False
 
     def __post_init__(self) -> None:
         if self.min_candidate_rank_ic_tstat < 0.0:
@@ -389,6 +403,10 @@ class CheapGateConfig:
             raise ValueError("high_turnover_per_year must be >= 0.0")
         if self.liquidity_cost_stress_mult < 0.0:
             raise ValueError("liquidity_cost_stress_mult must be >= 0.0")
+
+
+# Backward-compat alias
+CheapGateConfig = AlphaGateConfig
 
 
 @dataclass(slots=True, frozen=True)
@@ -445,37 +463,43 @@ class AlphaFoundryEvidenceRow:
     archetype: str
     n_events: int
     effective_n: float
+    mean_gross_bps: float
+    mean_cost_bps: float
     mean_net_bps: float
+    gross_lcb_bps: float
+    net_lcb_bps: float
     nw_tstat: float
-    block_lcb_bps: float
     rank_ic: float
-    incremental_rank_ic: float
+    rank_ic_tstat: float
     cost_drag_ratio: float
     turnover_per_year: float
+    novelty_corr_max: float
+    incremental_rank_ic: float
     compute_cost_score: float
+    event_hit_rate: float
+    payoff_skew: float
+    xs_spread_lcb_bps: float | None
+    liquidity_cost_stress_bps: float
     bootstrap_lcb_bps: float
     bootstrap_agree: bool
     gate_passed: bool
-    reject_reasons: str  # "|".join(reject_reasons)
-    bucket_key: str  # f"{family}:{timeframe}"
-    bucket_rank: int
+    handoff_tier: str
     selected_for_l1: bool
-    redundant_with: str  # "" if none
+    reject_reasons: str
+    soft_flags: str
+    bucket_key: str
+    bucket_rank: int
+    redundant_with: str
     bucket_eff_test_count: float
     global_eff_test_count: float
+    l1_priority_score: float
+    l1_budget_units: int
+    tf_coverage_count: int
+    sign_agreement_ratio: float
+    corroboration_tier: str
+    stage_label: str
     created_at_ms: int
     source: str = ""
-    discovery_tier: str = ""
-    hard_reject_reasons: str = ""
-    soft_flags: str = ""
-    l1_priority_score: float = 0.0
-    l1_budget_units: int = 0
-    tf_coverage_count: int = 0
-    sign_agreement_ratio: float = 0.0
-    corroboration_tier: str = ""
-    stage_label: str = ""
-    mean_gross_bps: float = 0.0
-    mean_cost_bps: float = 0.0
 
 
 @dataclass(slots=True, frozen=True)
@@ -587,12 +611,16 @@ class AlphaFoundryRuntimeConfig:
     enable_synthetic_recipes: bool = True
     min_conviction_lcb_bps: float = 5.0
     total_l1_verification_budget: int = 30
-    cheap_gate: CheapGateConfig = field(default_factory=CheapGateConfig)
+    cheap_gate: AlphaGateConfig = field(default_factory=AlphaGateConfig)
     posterior_gate: PosteriorGateConfig = field(default_factory=PosteriorGateConfig)
     l2_policy: L2PosteriorPolicyConfig = field(default_factory=L2PosteriorPolicyConfig)
     enable_fast_discovery_timeframes: bool = False
     fast_discovery_timeframes: tuple[str, ...] = ("1h", "2h")
     enable_correlation_audit: bool = False
+    observability_mode: AlphaGateObservabilityMode = "debug_log"
+    debug_top_k_rows: int = 10
+    artifact_write_enabled: bool = False
+    gate_schema: AlphaGateSchema = "unified"
 
     def __post_init__(self) -> None:
         if self.mode not in {"off", "audit", "gate"}:
@@ -613,6 +641,12 @@ class AlphaFoundryRuntimeConfig:
             raise ValueError(f"min_conviction_lcb_bps must be >= 0.0, got {self.min_conviction_lcb_bps}")
         if self.total_l1_verification_budget < 1:
             raise ValueError(f"total_l1_verification_budget must be >= 1, got {self.total_l1_verification_budget}")
+        if self.observability_mode not in ("debug_log", "artifact", "off"):
+            raise ValueError(f"invalid observability_mode: {self.observability_mode!r}")
+        if self.gate_schema != "unified":
+            raise ValueError(f"gate_schema must be 'unified', got {self.gate_schema!r}")
+        if self.debug_top_k_rows < 1:
+            raise ValueError(f"debug_top_k_rows must be >= 1, got {self.debug_top_k_rows}")
 
 
 @dataclass(slots=True, frozen=True)
