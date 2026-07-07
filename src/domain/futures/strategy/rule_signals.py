@@ -366,6 +366,10 @@ def _resample_to_htf_and_project(
 
 
 def _resolve_panel_archetype(panel: CandidateSignalPanel) -> str:
+    """Resolve fallback archetype from family when panel.metadata lacks one.
+
+    [ADR_20260707_L1_BACKTEST_FIDELITY_FIXES]
+    """
     archetype = str(panel.metadata.get("archetype", panel.archetype or "")).strip()
     family = panel.family
     if archetype:
@@ -378,6 +382,7 @@ def _resolve_panel_archetype(panel: CandidateSignalPanel) -> str:
         "mtf_trend_pullback",
         "mtf_breakout_retest",
         "vol_term_structure_gate",
+        "btc_regime_pullback",
     }:
         return "trend"
     if family in {"dual_momentum", "taker_imbalance_momentum"}:

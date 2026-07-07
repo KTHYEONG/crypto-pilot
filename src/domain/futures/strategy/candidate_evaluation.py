@@ -8,6 +8,7 @@ import pandas as pd
 from numpy.typing import NDArray
 from scipy.stats import norm
 
+from src.domain.futures.optimization.metrics import _bars_per_year_for_tf
 from src.domain.futures.strategy.config import CandidateStrategyConfig
 
 
@@ -132,11 +133,8 @@ def evaluate_compound_backtest(
     mean_log_growth = float(np.mean(log_returns))
 
     # 2. CAGR Calculation
-    bars_per_year = 2190.0  # Default 4h timeframe (365 * 6)
-    if cfg.timeframe == "1h":
-        bars_per_year = 8760.0
-    elif cfg.timeframe == "1d":
-        bars_per_year = 365.0
+    # [ADR_20260707_L1_BACKTEST_FIDELITY_FIXES] TF-generic annualization (was 4h/1h/1d-only elif chain)
+    bars_per_year = _bars_per_year_for_tf(cfg.timeframe)
 
     years = max(n_bars / bars_per_year, 1e-9)
     initial_eq = max(float(equity_curve[0]), 1e-12)
