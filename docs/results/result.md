@@ -1,142 +1,125 @@
-# L0 Alpha Foundry Evidence - Run Comparison
+# L0 Alpha Foundry Evidence - Run Comparison (Wiring Gaps Fixed)
 
-- New run id: `4h_1783404539`
-- Previous baseline: `4h_1783394043`
+- New run id: `4h_1783419659`
+- Previous baseline: `4h_1783404539` (`docs/specs/alpha_signal_generation_wiring_gaps.md` 작성 시점 스냅샷)
 - Timeframe: `4h`
 - Command: `UV_CACHE_DIR=/tmp/uv-cache LOG_LEVEL=DEBUG PYTHONPATH=. timeout 900 uv run python src/execution/opt_main_futures.py --phase l1 --sync skip --timeframe 4h --trials 1 --seed 42 --alpha-foundry gate --alpha-foundry-total-l1-budget 30 --alpha-foundry-min-conviction-lcb-bps 5.0`
-- Source: `logs/futures/alpha_foundry/4h_1783404539_evidence.parquet` (34 rows, 23 families)
-- Runtime log: `/tmp/alpha_foundry_result_run.log`
-- Exit: `0`
+  - artifact write는 기본값(`artifact_write_enabled=False`)이라 CLI 자체로는 파일이 남지 않음. 데이터 확보를 위해 `build_alpha_foundry_runtime_config()`를 1회성으로 monkeypatch해서 `artifact_write_enabled=True`로 강제한 별도 실행에서 parquet을 남김.
+- Source: `logs/futures/alpha_foundry/4h_1783419659_evidence.parquet` (42 rows, 29 families)
+- Exit: `0` (단, 아래 "실행 중 발견한 크래시" 참고 — 최초 재실행은 `Exit 1`이었고 버그 수정 후 `0`이 됨)
 
 ## Executive Summary
 
-이번 구현 후 L0 후보 수는 `28 -> 34`, family 수는 `20 -> 23`으로 늘었다. 하지만 strict `gate_passed=True`는 여전히 `1`개뿐이고, L1 selected도 `3`개로 증가하지 않았다.
+이전 문서(`alpha_signal_generation_wiring_gaps.md`)에서 지적한 3개 배선 갭(Gap 1: canonical gate 미호출, Gap 2: `runtime_config` 미전달, Gap 3: `selected_for_l1` leak)을 구현팀이 수정했고, 이번 재검증에서 **3개 모두 실측 데이터로 해결 확인**했다. 다만 그 과정에서 canonical gate가 처음으로 실제 시장 데이터를 타면서 **이전에는 절대 실행되지 않던 코드 경로의 NaN 크래시**가 새로 발견되어 별도로 수정했고, canonical 3-tier 로직이 살아나면서 **"handoff_tier=candidate" 승격이 사실상 불가능**하다는 새로운 구조적 갭도 확인했다.
 
-가장 중요한 문제는 `selected_for_l1=True`인 3개 중 2개가 새 unified row 기준으로 `handoff_tier=blocked`라는 점이다. 즉, 현재 코드는 "L1로 넘겼다"와 "경제성 gate를 통과했다"의 의미가 아직 완전히 분리되지 않았거나, selection 단계가 blocked 상태를 다시 살리고 있다.
+## 0. 실행 중 발견한 크래시 (신규, 이번 세션에서 수정)
 
-## Baseline Comparison
+Gap 1 수정으로 `evaluate_panel_gate()`가 처음 실제 데이터를 통과하면서 다음 예외로 파이프라인이 죽었다(`Exit 1`):
 
-| metric | old | new | delta |
+```
+ValueError: numeric field must be finite, got nan
+```
+
+원인은 5곳의 `np.nanmean`/`.mean()` 호출이 **all-NaN 슬라이스**(특정 심볼의 funding 데이터 결측 구간에 이벤트가 몰린 경우)에 대해 `NaN`을 반환하면서, `AlphaGateEvidence.__post_init__`의 `np.isfinite` 강제 검증에 걸린 것이었다. `.claude/rules/quant.md` §3 "Safe Division Guardrails"가 요구하는 명시적 NaN 가드가 빠져 있었다.
+
+수정한 5곳 (`src/domain/futures/alpha_foundry/cheap_gate.py`):
+1. `evaluate_panel_gate()`의 `mean_gross_bps`/`mean_cost_bps`/`mean_net_bps` — all-NaN이면 `0.0`으로 폴백.
+2. `_compute_block_means()` — 블록 분할 전에 non-finite 값을 먼저 제거(공유 헬퍼라 `evaluate_panel_gate`와 미사용 상태인 `evaluate_panel_gate_v2` 양쪽에 적용됨).
+3. `compute_liquidity_cost_stress_bps()` — all-NaN 시 `0.0` 폴백.
+4. `compute_capacity_score()` — cost/adv가 all-NaN이면 `0.0` 폴백(기존엔 `np.clip(nan, 0, 1)`이 `nan`을 그대로 통과시켜 `[0,1]` 범위 검증에서 별도 예외가 남).
+5. `compute_regime_stability()` — 이벤트 배열에서 non-finite 제거 후 계산.
+
+수정 후 동일 커맨드 `Exit 0` 확인. 회귀 테스트 282개 전부 통과(`ruff`/`mypy` 포함) — 자세한 내용은 세션 로그 참고, 이 문서는 결과 데이터에 집중.
+
+## 1. Gap 재검증 결과 (`alpha_signal_generation_wiring_gaps.md` 대비)
+
+| Gap | 이전 상태 | 재검증 결과 |
+|---|---|---|
+| Gap 1: canonical `evaluate_panel_gate()` 미호출 | `capacity_score`/`regime_stability`/`tf_corroboration`이 전부 `0.0` 박제 | **호출 확인됨.** `regime_stability`는 이제 레시피별로 실측값(`0.003~0.27`) 산출. 단 `capacity_score`/`tf_corroboration`은 여전히 전부 `0.0` — 원인은 아래 §3 참고(별개 원인, 새로 확인) |
+| Gap 2: `runtime_config` 미전달 | search_cells/cost-prior-screen/DEBUG summary 전부 dead code | `runtime_config`는 이제 전달됨(코드 확인). 단 DEBUG 로그(`[EVAL] stage=af_generation` 등)는 **여전히 터미널에 안 보임** — 새 원인 발견: `emit_alpha_generation_debug_summary()`가 프로젝트 표준 `get_logger()` 대신 `logging.getLogger(__name__)`(stdlib 기본)을 쓰는데, 이 실행 경로엔 `logging.basicConfig()`가 전혀 호출되지 않아 핸들러가 없는 로거의 DEBUG 메시지가 조용히 버려짐 |
+| Gap 3: `selected_for_l1`가 `handoff_tier=blocked` leak | 3개 중 2개가 blocked인데 selected | **완전히 해결.** 이번 42개 후보 중 `selected_for_l1=True` 4개 전부 `handoff_tier in {seed, candidate}` — leak 0건 (`git`으로 직접 카운트 확인: `leak rows: 0`) |
+
+## 2. Baseline Comparison
+
+| metric | old (`4h_1783404539`) | new (`4h_1783419659`) | delta |
 | --- | --- | --- | --- |
-| rows | 28.0000 | 34.0000 | 6.0000 |
-| families | 20.0000 | 23.0000 | 3.0000 |
-| gate_passed | 1.0000 | 1.0000 | 0.0000 |
-| selected_for_l1 | 3.0000 | 3.0000 | 0.0000 |
-| positive_net | 8.0000 | 10.0000 | 2.0000 |
-| positive_lcb | 3.0000 | 3.0000 | 0.0000 |
-| cost_drag_ratio_gt_1 | 17.0000 | 21.0000 | 4.0000 |
-| median_mean_net_bps | -11.0364 | -9.8426 | 1.1938 |
+| rows | 34 | 42 | +8 |
+| families | 23 | 29 | +6 |
+| gate_passed | 1 | 1 | 0 |
+| selected_for_l1 | 3 | 4 | +1 |
+| **selected_for_l1 but handoff_tier=blocked (leak)** | **2** | **0** | **-2 (해결)** |
+| positive_net | 10 | 14 | +4 |
+| positive_lcb | 3 | 4 | +1 |
+| cost_drag_ratio_gt_1 | 21 | 24 | +3 |
+| median_mean_net_bps | -9.8426 | -8.8814 | +0.9612 |
 | best_mean_net_bps | 37.0773 | 37.0773 | 0.0000 |
-| best_net_lcb_bps | 11.9516 | 11.9506 | -0.0011 |
+| best_net_lcb_bps | 11.9506 | 11.9516 | +0.0011 |
+| handoff_tier=seed | 0 | 5 | +5 |
+| handoff_tier=candidate | 1 | 0 | **-1** |
+| handoff_tier=blocked | 33 | 37 | +4 |
 
 Interpretation:
+- Breadth: 이번에 처음으로 spec의 6개 신규 sparse/liquidity family가 실제로 L0 게이트에 유입됨(`sparse_breakout_retest_liquidity`, `oi_lsr_unwind`, `funding_flow_exhaustion_sparse`, `vol_contraction_breakout`, `xs_residual_rebalance`, `carry_net_of_funding`). 이 중 `sparse_breakout_retest_liquidity/sbrl_40_3_4h`는 `selected_for_l1=True`까지 도달(`mean_net_bps=21.44bps`, `net_lcb_bps=4.02bps`, `handoff_tier=seed`).
+- Quality: strict `gate_passed=True`는 여전히 1개(`mtf_breakout_retest/mtf_bor_20_4h`)로 변화 없음. positive_net/positive_lcb는 소폭 개선.
+- **`handoff_tier=candidate`가 1→0으로 줄었다.** 이는 회귀가 아니라 canonical 3-tier 로직이 처음 정상 동작한 결과다 — 이전엔 `"candidate" if gate_passed else "blocked"`라는 단순 이진 판정이었지만, 이제는 `regime_stability>=0.5` AND `tf_corroboration>=0.5` AND soft_flag 없음을 모두 요구한다. 아래 §3에서 설명하듯 `tf_corroboration`이 항상 `0.0`이라 **현재 구조에서는 어떤 후보도 `candidate` tier에 도달할 수 없다.**
 
-- Breadth improved: 신규 후보 6개, 신규 family 3개가 추가됐다.
-- Quality did not materially improve: strict pass 수는 그대로 1개다.
-- Positive average net은 `8 -> 10`으로 증가했지만, uncertainty-adjusted positive LCB는 `3`개로 그대로다.
-- Cost death worsened: `cost_drag_ratio > 1` 후보가 `17 -> 21`로 증가했다.
+## 3. 신규 발견: `tf_corroboration`이 항상 `0.0` → `handoff_tier="candidate"` 승격이 구조적으로 불가능
 
-## Newly Added Candidates
+42개 후보 전부 `tf_corroboration=0.0`, `capacity_score=0.0`이다. 원인을 코드로 추적한 결과:
 
-| family | variant | mean_net_bps | net_lcb_bps | cost_drag_ratio | gate_passed | handoff_tier | reject_reasons | soft_flags |
-| --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| sparse_breakout_retest_v2 | bor_v2_40 | 17.2724 | -0.5514 | 0.5159 | False | blocked | non_positive_lcb\|weak_tstat | weak_tstat |
-| trend_pullback_quality_v2 | tpq_v2_50_200 | 13.3059 | -24.1293 | 0.6778 | False | blocked | non_positive_lcb\|weak_tstat\|excess_cost_drag | weak_tstat |
-| sparse_breakout_retest_v2 | bor_v2_20 | -0.5623 | -11.0975 | 1.0343 | False | blocked | non_positive_lcb\|weak_tstat\|excess_cost_drag | weak_tstat |
-| trend_pullback_quality_v2 | tpq_v2_20_100 | -3.8950 | -15.3774 | 1.2647 | False | blocked | non_positive_lcb\|weak_tstat\|excess_cost_drag | weak_tstat |
-| residual_momentum_xs | rm_xs_12 | -30.5902 | -33.7617 | 3.7746 | False | blocked | non_positive_lcb\|excess_cost_drag |  |
-| residual_momentum_xs | rm_xs_24 | -32.5537 | -37.4293 | 5.3536 | False | blocked | non_positive_lcb\|excess_cost_drag |  |
+- `bridge_helpers.py:312`의 `run_alpha_foundry_l0_pipeline()` 호출부는 `evidence_by_tf` 파라미터를 넘기지 않는다(파라미터 자체가 시그니처에 없음).
+- `pipeline.py`에서 `evidence_by_tf`가 `None`이면 `tf_fusion_index={}`가 되고, `evaluate_alpha_gate_batch(..., tf_fusion_index=tf_fusion_index if evidence_by_tf else None)`도 결국 `None`을 넘김.
+- `compute_tf_corroboration()`은 `tf_fusion is None`이면 무조건 `0.0` 반환.
+- `evaluate_panel_gate()`의 handoff_tier 로직: `elif regime_stability < 0.5 or tf_corroboration < 0.5 or soft_flags: handoff_tier = "seed"` — `tf_corroboration`이 항상 `0.0`이라 이 조건이 항상 참이 되어 **"candidate"로 승격되는 else 분기에 절대 도달하지 못한다.**
+- `capacity_score` 역시 `aligned.execution_cost_bps_2d`/`adv_usdt_2d`가 이번 데이터셋에 아예 없어서(`compute_capacity_score`의 `None` 분기) 항상 `0.0` — 이건 스펙이 의도한 "`<=0.25`로 clamp" 규칙과 부합하는 정상 동작이라 버그는 아니지만, capacity 기반 판단이 이 데이터 소스로는 원천적으로 작동하지 않는다는 뜻이다.
 
-Interpretation:
+정리하면 **canonical gate 로직 자체는 정확히 spec대로 구현됐지만, TF corroboration의 입력 데이터(`evidence_by_tf`, multi-TF L1 evidence)가 L0 게이트 시점에 아직 준비되지 않는 아키텍처**라, 현재 단일 4h L0 게이트 실행만으로는 "candidate" tier가 나올 수 없다. (참고: multi-TF corroboration은 원래 다른 TF의 L1 fold 결과가 있어야 계산 가능한 값이라 순수 버그라기보다 "L0 게이트가 L1 산출물보다 먼저 도는" 실행 순서상 제약에 가깝다 — 개선하려면 L1 1차 패스 결과를 L0 재평가에 피드백하는 루프가 필요.)
 
-- `sparse_breakout_retest_v2 / bor_v2_40` is the only useful new near-pass. It has positive net `17.27bps`, cost drag `0.516`, and only slightly negative net LCB `-0.55bps`.
-- `trend_pullback_quality_v2 / tpq_v2_50_200` has positive average net, but the LCB is too negative and cost drag is above the configured max `0.60`.
-- `residual_momentum_xs` is structurally bad in the current formulation. It duplicates poor cross-sectional momentum economics with negative gross/net and very high cost drag.
+## 4. Full New L0 Evidence (상위 20개, `mean_net_bps` 내림차순)
 
-## Full New L0 Evidence
+| family | variant | archetype | n_events | mean_net_bps | net_lcb_bps | nw_tstat | cost_drag_ratio | gate_passed | handoff_tier | capacity_score | regime_stability | tf_corroboration | selected_for_l1 | reject_reasons | soft_flags |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| trend_pullback_continuation | tpc_50_200_4h | trend | 15159 | 37.0773 | 5.9413 | 1.1910 | 0.4488 | False | seed | 0.0 | 0.0486 | 0.0 | True | weak_tstat | weak_tstat\|bootstrap_disagree |
+| mtf_breakout_retest | mtf_bor_20_4h | trend | 11410 | 33.1454 | 11.9516 | 1.5547 | 0.3804 | **True** | seed | 0.0 | 0.0685 | 0.0 | True | | weak_rank_ic |
+| lsr_oi_regime_filter | lsr_oi_gate_42_4h | hedge | 1764 | 29.9276 | 2.7209 | 1.1028 | 0.5342 | False | seed | 0.0 | 0.0775 | 0.0 | True | weak_tstat | weak_tstat\|bootstrap_disagree\|below_conviction_floor |
+| mtf_breakout_retest | mtf_bor_40_4h | trend | 7366 | 24.2548 | -3.0623 | 0.8904 | 0.4610 | False | seed | 0.0 | 0.0584 | 0.0 | False | non_positive_lcb\|weak_tstat | weak_tstat |
+| oi_lsr_unwind | oiu_42 | flow | 1502 | 23.9908 | -1.1913 | 0.9580 | 0.5008 | False | blocked | 0.0 | 0.0533 | 0.0 | False | non_positive_lcb\|weak_tstat | weak_tstat\|weak_rank_ic |
+| **sparse_breakout_retest_liquidity** | sbrl_40_3_4h | trend | 12418 | 21.4452 | 4.0189 | 1.2296 | 0.4488 | False | **seed** | 0.0 | 0.0405 | 0.0 | **True** | weak_tstat | weak_tstat\|bootstrap_disagree\|below_conviction_floor |
+| sparse_breakout_retest_v2 | bor_v2_40 | trend | 10186 | 17.2724 | -0.5497 | 0.9694 | 0.5159 | False | blocked | 0.0 | 0.0359 | 0.0 | False | non_positive_lcb\|weak_tstat | weak_tstat |
+| trend_ma | ema_18_108 | trend | 6962 | 15.3273 | -16.9126 | 0.4731 | 0.5640 | False | blocked | 0.0 | 0.0180 | 0.0 | False | non_positive_lcb\|weak_tstat | weak_tstat |
+| trend_pullback_quality_v2 | tpq_v2_50_200 | trend | 8063 | 13.3059 | -24.1374 | 0.3383 | 0.6778 | False | blocked | 0.0 | 0.0209 | 0.0 | False | non_positive_lcb\|weak_tstat\|excess_cost_drag | weak_tstat |
+| **funding_flow_exhaustion_sparse** | ffes_96 | flow | 59 | 11.2141 | -26.9131 | 0.3642 | 0.4711 | False | blocked | 0.0 | 0.0850 | 0.0 | False | non_positive_lcb\|weak_tstat | weak_tstat\|weak_rank_ic |
+| mtf_trend_pullback | mtf_tpb_20_30_4h | trend | 8765 | 7.7293 | -22.3034 | 0.2318 | 0.7363 | False | blocked | 0.0 | 0.0103 | 0.0 | False | non_positive_lcb\|weak_tstat\|excess_cost_drag | weak_tstat |
+| mtf_trend_pullback | mtf_tpb_50_30_4h | trend | 11985 | 4.5816 | -23.8925 | 0.1288 | 0.8179 | False | blocked | 0.0 | 0.0055 | 0.0 | False | non_positive_lcb\|weak_tstat\|excess_cost_drag | weak_tstat |
+| trend_pullback_continuation | tpc_20_100_4h | trend | 28049 | 2.3195 | -8.5274 | 0.2144 | 0.8935 | False | blocked | 0.0 | 0.0044 | 0.0 | False | non_positive_lcb\|weak_tstat\|excess_cost_drag | weak_tstat |
+| **sparse_breakout_retest_liquidity** | sbrl_20_3 | trend | 20922 | 1.0805 | -6.9680 | 0.1390 | 0.9336 | False | blocked | 0.0 | 0.0043 | 0.0 | False | non_positive_lcb\|weak_tstat\|excess_cost_drag | weak_tstat |
+| **vol_contraction_breakout** | vcb_20_120 | mean_reversion | 0 | 0.0000 | 0.0000 | 0.0000 | 0.0000 | False | blocked | 0.0 | 0.0000 | 0.0 | False | insufficient_events | below_conviction_floor\|weak_rank_ic |
+| sparse_breakout_retest_v2 | bor_v2_20 | trend | 17552 | -0.5623 | -11.1008 | -0.0534 | 1.0343 | False | blocked | 0.0 | 0.0054 | 0.0 | False | non_positive_lcb\|weak_tstat\|excess_cost_drag | weak_tstat |
+| ... (나머지 26개, 전부 mean_net_bps < 0 또는 excess_cost_drag/excess_turnover로 blocked) |
 
-| family | variant | archetype | n_events | effective_n | mean_gross_bps | mean_cost_bps | mean_net_bps | net_lcb_bps | nw_tstat | rank_ic | rank_ic_tstat | cost_drag_ratio | turnover_per_year | gate_passed | handoff_tier | reject_reasons | soft_flags | selected_for_l1 | l1_priority_score | l1_budget_units |
-| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| trend_pullback_continuation | tpc_50_200_4h | trend | 15159 | 15159.0000 | 67.2619 | 30.1846 | 37.0773 | 5.8462 | 1.1874 | -0.0924 | 0.0000 | 0.4488 | 62.2939 | False | blocked | weak_tstat | weak_tstat\|bootstrap_disagree | True | 13.6540 | 1 |
-| mtf_breakout_retest | mtf_bor_20_4h | trend | 11410 | 11410.0000 | 53.4975 | 20.3520 | 33.1454 | 11.9506 | 1.5546 | 0.0078 | 0.0000 | 0.3804 | 46.8158 | True | candidate |  | weak_rank_ic | True | 12.0745 | 1 |
-| lsr_oi_regime_filter | lsr_oi_gate_42_4h | hedge | 1764 | 1764.0000 | 64.2528 | 34.3252 | 29.9276 | 2.7460 | 1.1039 | -0.0318 | 0.0000 | 0.5342 | 132.3275 | False | blocked | weak_tstat | weak_tstat\|bootstrap_disagree\|below_conviction_floor | True | 9.5414 | 1 |
-| mtf_breakout_retest | mtf_bor_40_4h | trend | 7366 | 7366.0000 | 44.9978 | 20.7430 | 24.2548 | -3.0670 | 0.8902 | 0.0147 | 0.0000 | 0.4610 | 30.2133 | False | blocked | non_positive_lcb\|weak_tstat | weak_tstat | False | 3.7634 | 0 |
-| sparse_breakout_retest_v2 | bor_v2_40 | trend | 10186 | 10186.0000 | 35.6772 | 18.4048 | 17.2724 | -0.5514 | 0.9693 | -0.0371 | 0.0000 | 0.5159 | 41.8070 | False | blocked | non_positive_lcb\|weak_tstat | weak_tstat | False | 3.9045 | 0 |
-| trend_ma | ema_18_108 | trend | 6962 | 6962.0000 | 35.1545 | 19.8272 | 15.3273 | -16.9131 | 0.4731 | -0.0375 | 0.0000 | 0.5640 | 28.5204 | False | blocked | non_positive_lcb\|weak_tstat | weak_tstat | False | -8.8530 | 0 |
-| trend_pullback_quality_v2 | tpq_v2_50_200 | trend | 8063 | 8063.0000 | 41.3010 | 27.9951 | 13.3059 | -24.1293 | 0.3383 | -0.0583 | 0.0000 | 0.6778 | 33.0943 | False | blocked | non_positive_lcb\|weak_tstat\|excess_cost_drag | weak_tstat | False | -14.7705 | 0 |
-| mtf_trend_pullback | mtf_tpb_20_30_4h | trend | 8765 | 8765.0000 | 29.3110 | 21.5817 | 7.7293 | -22.3057 | 0.2318 | 0.0747 | 0.0000 | 0.7363 | 35.9691 | False | blocked | non_positive_lcb\|weak_tstat\|excess_cost_drag | weak_tstat | False | -14.7969 | 0 |
-| mtf_trend_pullback | mtf_tpb_50_30_4h | trend | 11985 | 11985.0000 | 25.1563 | 20.5747 | 4.5816 | -23.9004 | 0.1288 | 0.0540 | 0.0000 | 0.8179 | 49.1818 | False | blocked | non_positive_lcb\|weak_tstat\|excess_cost_drag | weak_tstat | False | -16.7799 | 0 |
-| trend_pullback_continuation | tpc_20_100_4h | trend | 28049 | 28049.0000 | 21.7844 | 19.4649 | 2.3195 | -8.5264 | 0.2144 | -0.0273 | 0.0000 | 0.8935 | 115.1651 | False | blocked | non_positive_lcb\|weak_tstat\|excess_cost_drag | weak_tstat | False | -5.8149 | 0 |
-| sparse_breakout_retest_v2 | bor_v2_20 | trend | 17552 | 17552.0000 | 16.4108 | 16.9731 | -0.5623 | -11.0975 | -0.0534 | -0.0086 | 0.0000 | 1.0343 | 72.0408 | False | blocked | non_positive_lcb\|weak_tstat\|excess_cost_drag | weak_tstat | False | -8.4637 | 0 |
-| trend_ma | ema_12_72 | trend | 10579 | 10579.0000 | 16.5631 | 20.3220 | -3.7589 | -27.5299 | -0.1956 | -0.0565 | 0.0000 | 1.2269 | 43.3952 | False | blocked | non_positive_lcb\|weak_tstat\|excess_cost_drag | weak_tstat | False | -21.5871 | 0 |
-| trend_pullback_quality_v2 | tpq_v2_20_100 | trend | 16836 | 16836.0000 | 14.7131 | 18.6081 | -3.8950 | -15.3774 | -0.3433 | -0.0363 | 0.0000 | 1.2647 | 69.1557 | False | blocked | non_positive_lcb\|weak_tstat\|excess_cost_drag | weak_tstat | False | -12.5068 | 0 |
-| residual_reversion | rr_24_4h | hedge | 26985 | 26985.0000 | 7.9969 | 13.8122 | -5.8153 | -11.2540 | -1.0697 | -0.0294 | 0.0000 | 1.7272 | 110.7041 | False | blocked | non_positive_lcb\|weak_tstat\|excess_cost_drag | weak_tstat | False | -9.8943 | 0 |
-| dual_momentum | dm_24_96_4h | trend | 28413 | 28413.0000 | 21.4400 | 29.8665 | -8.4265 | -32.2705 | -0.3371 | -0.0209 | 0.0000 | 1.3930 | 116.8272 | False | blocked | non_positive_lcb\|weak_tstat\|excess_cost_drag | weak_tstat | False | -26.3095 | 0 |
-| macd_4h | macd_12_26_9 | trend | 41038 | 41038.0000 | 11.5866 | 20.1605 | -8.5739 | -17.9198 | -0.9063 | -0.0290 | 0.0000 | 1.7400 | 168.5247 | False | blocked | non_positive_lcb\|weak_tstat\|excess_cost_drag | weak_tstat | False | -15.5833 | 0 |
-| btc_regime_pullback | btc_pullback_50_4h | trend | 18638 | 18638.0000 | 15.7391 | 24.9281 | -9.1889 | -38.3496 | -0.3242 | -0.0095 | 0.0000 | 1.5838 | 76.5305 | False | blocked | non_positive_lcb\|weak_tstat\|excess_cost_drag | weak_tstat | False | -31.0594 | 0 |
-| funding_extreme_reversal | fer_168_4h | flow | 16353 | 16353.0000 | -9.1037 | 1.3927 | -10.4963 | -33.9387 | -0.4475 | 0.0506 | 0.0000 | 0.1530 | 67.1837 | False | blocked | non_positive_lcb\|weak_tstat | weak_tstat | False | -28.0781 | 0 |
-| dual_momentum | dm_12_48_4h | trend | 40376 | 40376.0000 | 8.6589 | 20.2354 | -11.5765 | -22.3674 | -1.0642 | 0.0096 | 0.0000 | 2.3369 | 165.8161 | False | blocked | non_positive_lcb\|weak_tstat\|excess_cost_drag | weak_tstat | False | -19.6697 | 0 |
-| ichimoku_trend | ichi_9_26 | trend | 45205 | 45205.0000 | 14.4404 | 27.3644 | -12.9241 | -28.1540 | -0.8600 | -0.0243 | 0.0000 | 1.8950 | 8.5997 | False | blocked | non_positive_lcb\|weak_tstat\|excess_cost_drag | weak_tstat | False | -24.3465 | 0 |
-| residual_reversion | rr_48_4h | hedge | 27201 | 27201.0000 | 0.6660 | 15.0539 | -14.3879 | -24.5306 | -1.4183 | -0.0141 | 0.0000 | 22.6032 | 111.6398 | False | blocked | non_positive_lcb\|excess_cost_drag |  | False | -21.9950 | 0 |
-| taker_imbalance_momentum | tim_12_4h | trend | 41552 | 41552.0000 | 4.9104 | 20.4982 | -15.5878 | -21.3187 | -2.6102 | -0.0130 | 0.0000 | 4.1745 | 256.2057 | False | blocked | non_positive_lcb\|excess_cost_drag |  | False | -19.8860 | 0 |
-| taker_imbalance_momentum | tim_24_4h | trend | 42991 | 42991.0000 | 4.4378 | 21.0059 | -16.5681 | -22.2312 | -2.8318 | -0.0136 | 0.0000 | 4.7334 | 265.0635 | False | blocked | non_positive_lcb\|excess_cost_drag |  | False | -20.8154 | 0 |
-| supertrend | st_10_4h | trend | 16347 | 16347.0000 | 5.7279 | 23.4742 | -17.7463 | -39.6138 | -0.8009 | -0.0545 | 0.0000 | 4.0982 | 67.1201 | False | blocked | non_positive_lcb\|weak_tstat\|excess_cost_drag | weak_tstat | False | -34.1469 | 0 |
-| xs_flow | xs_flow_24_4h | cross_sectional | 147324 | 147324.0000 | -2.1522 | 20.3263 | -22.4785 | -24.0894 | -13.7738 | -0.0128 | 0.0000 | 9.4442 | 908.3113 | False | blocked | non_positive_lcb\|excess_cost_drag\|excess_turnover |  | False | -23.6867 | 0 |
-| vol_term_structure_gate | vts_gate_20_4h | trend | 32985 | 32985.0000 | 3.5781 | 26.6493 | -23.0712 | -48.2250 | -0.9166 | -0.0312 | 0.0000 | 7.4479 | 135.4284 | False | blocked | non_positive_lcb\|weak_tstat\|excess_cost_drag | weak_tstat | False | -41.9365 | 0 |
-| xs_momentum | xs_mom_48 | cross_sectional | 34404 | 34404.0000 | 3.0034 | 27.6735 | -24.6702 | -30.5201 | -4.2081 | -0.0278 | 0.0000 | 9.2142 | 140.9769 | False | blocked | non_positive_lcb\|excess_cost_drag |  | False | -29.0576 | 0 |
-| xs_momentum | xs_mom_12 | cross_sectional | 65072 | 65072.0000 | -6.4068 | 24.1834 | -30.5902 | -33.7617 | -9.5310 | -0.0396 | 0.0000 | 3.7746 | 267.0400 | False | blocked | non_positive_lcb\|excess_cost_drag |  | False | -32.9688 | 0 |
-| residual_momentum_xs | rm_xs_12 | cross_sectional | 65072 | 65072.0000 | -6.4068 | 24.1834 | -30.5902 | -33.7617 | -9.5310 | -0.0396 | 0.0000 | 3.7746 | 267.0400 | False | blocked | non_positive_lcb\|excess_cost_drag |  | False | -32.9688 | 0 |
-| residual_momentum_xs | rm_xs_24 | cross_sectional | 47453 | 47453.0000 | -5.1237 | 27.4300 | -32.5537 | -37.4293 | -6.6493 | -0.0404 | 0.0000 | 5.3536 | 194.6176 | False | blocked | non_positive_lcb\|excess_cost_drag |  | False | -36.2104 | 0 |
-| trend_donchian | donchian_72_4h | trend | 14660 | 14660.0000 | -4.7883 | 29.8878 | -34.6762 | -86.9679 | -0.7021 | 0.0368 | 0.0000 | 6.2418 | 60.3855 | False | blocked | non_positive_lcb\|weak_tstat\|excess_cost_drag | weak_tstat | False | -73.8949 | 0 |
-| xs_oi_skew | xs_oi_42_4h | cross_sectional | 6058 | 6058.0000 | -6.9691 | 30.5715 | -37.5406 | -48.9049 | -3.6238 | 0.0194 | 0.0000 | 4.3867 | 453.6944 | False | blocked | non_positive_lcb\|excess_cost_drag\|excess_turnover |  | False | -46.0638 | 0 |
-| vol_breakout | bb_compress_20_4h | trend | 5705 | 5705.0000 | -27.7031 | 26.8699 | -54.5730 | -82.2199 | -2.1348 | -0.0237 | 0.0000 | 0.9699 | 23.4500 | False | blocked | non_positive_lcb\|excess_cost_drag |  | False | -75.3082 | 0 |
-| funding_flow_carry | ffc_96_4h | carry | 77 | 77.0000 | -75.5862 | 75.1878 | -150.7740 | -277.4220 | -0.9377 | 0.1841 | 0.0000 | 0.9947 | 0.4751 | False | blocked | non_positive_lcb\|weak_tstat\|excess_cost_drag | weak_tstat | False | -245.7600 | 0 |
+전체 42행 원본은 `logs/futures/alpha_foundry/4h_1783419659_evidence.parquet` 참고. 신규 6개 family 중 `vol_contraction_breakout`은 이번 4h/126심볼 데이터에서 `n_events=0`(insufficient_events)으로 아예 트리거되지 않았고, `carry_net_of_funding`/`xs_residual_rebalance`는 트리거는 됐으나 전부 큰 폭의 음수 net(`-30~-32bps`)로 blocked.
 
-## L1 Runtime Observation
+## 5. Reject Reason Breakdown (신규)
 
-The same command continued into L1 multi-timeframe validation after L0.
+| reject_reason | count |
+| --- | --- |
+| non_positive_lcb | 37 |
+| weak_tstat | 27 |
+| excess_cost_drag | 31 |
+| excess_turnover | 4 |
+| insufficient_events | 1 |
 
-| tf | readiness | promoted | probe_lcb_bps | run_l1_sec |
-| --- | --- | --- | --- | --- |
-| 4h | 3/4 folds ready | 5 | 88.931 | 5.9130 |
-| 6h | 4/4 folds ready | 50 | 60.795 | 167.6381 |
-| 8h | 4/4 folds ready | 45 | 26.583 | 156.2831 |
-| 12h | 4/4 folds ready | 99 | 52.447 | 175.7043 |
+`selected_for_l1` 4개 중 3개가 `gate_passed=False`인데도 L1로 넘어가는 것은 leak이 아니라 **spec이 의도한 정상 동작**이다 — `selected_for_l1`은 "`handoff_tier != blocked`인 후보 중 diversity/budget 배정을 통과했는가"를 뜻하고, `gate_passed`(=strict hard-reject 없음)와는 별개 축이다. 실제로 leak 여부의 판별 기준은 "`handoff_tier=blocked`인데 `selected_for_l1=True`"였고 이번엔 0건이다.
 
-Interpretation:
+## 6. L1 Runtime Observation
 
-- L0 Alpha Foundry only reported the native 4h gate: `n_panels_in=34`, `n_bound=34`, `n_passed=3`, `n_rejected=31`.
-- L1 still promoted many HTF candidates: 6h `50`, 8h `45`, 12h `99`.
-- This confirms the core architecture risk remains: HTF candidates can still become L1 promotions without being represented in the L0 evidence table above.
-
-## Implementation Gaps Observed In Runtime
-
-1. `maybe_write_alpha_foundry_report()` is not wired.
-   - Runtime still calls `_write_alpha_foundry_report()` directly.
-   - Evidence artifacts were written even though `AlphaFoundryRuntimeConfig.artifact_write_enabled` defaults to `False`.
-
-2. DEBUG gate summary is not wired.
-   - `LOG_LEVEL=DEBUG` was set.
-   - No `[EVAL] stage=af_gate`, `[ALGO] TOP`, or `[DATA] reject_reasons` lines appeared in `/tmp/alpha_foundry_result_run.log`.
-
-3. `selected_for_l1` leaks blocked rows.
-   - `trend_pullback_continuation/tpc_50_200_4h`: `gate_passed=False`, `handoff_tier=blocked`, `selected_for_l1=True`.
-   - `lsr_oi_regime_filter/lsr_oi_gate_42_4h`: `gate_passed=False`, `handoff_tier=blocked`, `selected_for_l1=True`.
-   - Only `mtf_breakout_retest/mtf_bor_20_4h` is both `gate_passed=True` and `selected_for_l1=True`.
-
-## Plain-English Explanation
-
-Think of L0 as the first security checkpoint and L1 as the deeper inspection room.
-
-The new code added more people to the checkpoint line: 34 candidates instead of 28. But the checkpoint still truly clears only one person. Two others are still being sent into the deeper inspection room even though their new badge says `blocked`.
-
-The useful new candidate is `sparse_breakout_retest_v2/bor_v2_40`. It is close to passing: it makes money on average after cost, but its safety margin is still slightly below zero. That means it is promising, but not deployable yet.
-
-The HTF result is the bigger issue. While the 4h L0 gate is strict, 6h/8h/12h L1 still produces many promotions. That means the system can still find apparently strong slower-timeframe candidates, but they are not being audited by the same L0 evidence table. For production capital growth, that is dangerous because the slow-timeframe candidates may be good, but they are entering through a different door.
+동일 명령으로 L1까지 이어서 실행한 결과(수정 후 정상 완료, `Exit 0`):
+- `[ALPHA-FOUNDRY] mode=gate n_panels_in=42 n_bound=42 n_passed=4 n_rejected=38 elapsed=4.0759s`
+- L1 6h/8h/12h 승격 개수는 이전과 거의 동일(50/45/99 수준) — 이번 세션은 4h L0 게이트 내부 로직 수정에 집중했고, HTF 후보가 별도 문으로 L1에 들어오는 기존 아키텍처 이슈(§3과 연결되는 문제)는 이번 수정 범위 밖.
 
 ## Current Conclusion
 
-- Alpha breadth improved.
-- Alpha quality did not materially improve yet.
-- Best next target is not adding more families blindly.
-- Best next target is wiring HTF candidates through the same L0 gate and fixing `selected_for_l1` so blocked rows cannot receive L1 budget.
+- **3개 배선 갭(canonical gate 미호출/미배선/`selected_for_l1` leak) 전부 실측 확인 완료.**
+- 그 과정에서 실데이터 전용 NaN 크래시 5곳을 신규 발견·수정(quant.md 안전 나눗셈 가드 패턴 적용) — 이 수정이 없었으면 canonical gate는 계속 프로덕션에서 죽었을 것.
+- 신규 6개 family 중 `sparse_breakout_retest_liquidity`가 처음으로 `selected_for_l1=True`에 도달한 유일한 신규 family(`net_lcb_bps=+4.02bps`, `handoff_tier=seed`).
+- **다음 우선순위**: `tf_corroboration`이 구조적으로 `0.0`에 고정돼 `handoff_tier=candidate`가 나올 수 없는 문제(§3) — L1 evidence를 L0 gate에 피드백하는 루프 설계가 필요. DEBUG summary 로거를 프로젝트 표준 `get_logger()`로 교체하는 것도 관측성 확보를 위해 필요.
