@@ -11,6 +11,7 @@ from collections.abc import Mapping, Sequence
 from typing import Any
 
 import numpy as np
+import pandas as pd
 from numpy.typing import NDArray
 from scipy import stats as scipy_stats
 
@@ -322,6 +323,72 @@ def resolve_cross_bucket_diversity(
         cross_bucket_corr=cross_corr,
         global_eff_test_count=global_eff,
     )
+
+
+def audit_full_family_correlation(
+    *,
+    panels: Sequence[CandidateSignalPanel],
+    active_mask: NDArray[np.bool_],
+    run_id: str,
+    timeframe: str,
+    max_corr: float = 0.85,
+) -> pd.DataFrame:
+    """Pre-gate correlation audit across the FULL un-gated panel set (opt-in diagnostic).
+
+    [ADR_20260707_L0_ALPHA_EFFECTIVENESS_REDESIGN]
+    """
+    if not panels:
+        raise ValueError("panels must not be empty")
+
+    m = len(panels)
+    corr = compute_panel_correlation_matrix(panels, active_mask)
+
+    assigned: set[int] = set()
+    cluster_ids: list[int] = [-1] * m
+    next_id = 0
+    for i in range(m):
+        if i in assigned:
+            continue
+        cluster_ids[i] = next_id
+        assigned.add(i)
+        for j in range(i + 1, m):
+            if j in assigned:
+                continue
+            if corr[i, j] > max_corr:
+                cluster_ids[j] = next_id
+                assigned.add(j)
+        next_id += 1
+
+    eff_test_count = estimate_effective_test_count(corr)
+
+    rows = [
+        {
+            "family_a": panels[i].family,
+            "variant_a": panels[i].variant,
+            "family_b": panels[j].family,
+            "variant_b": panels[j].variant,
+            "timeframe": timeframe,
+            "pairwise_corr": corr[i, j],
+            "cluster_id": cluster_ids[i],
+            "run_id": run_id,
+        }
+        for i in range(m)
+        for j in range(m)
+    ]
+
+    df = pd.DataFrame(rows)
+    summary = pd.DataFrame([{
+        "family_a": "__SUMMARY__",
+        "variant_a": "",
+        "family_b": "",
+        "variant_b": "",
+        "timeframe": timeframe,
+        "pairwise_corr": eff_test_count,
+        "cluster_id": -1,
+        "run_id": run_id,
+    }])
+
+    return pd.concat([df, summary], ignore_index=True)
 
 
 # Backward-compat alias

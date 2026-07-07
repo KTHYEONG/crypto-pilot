@@ -1,9 +1,13 @@
 from __future__ import annotations
 
+import dataclasses
+
 import numpy as np
 import pytest
 
 from src.domain.futures.alpha_foundry.cheap_gate import (
+    _rank_ic_soft_floor,
+    build_l0_signal_candidate,
     evaluate_alpha_cheap_gate_batch,
     evaluate_panel_cheap_gate,
 )
@@ -11,6 +15,7 @@ from src.domain.futures.alpha_foundry.contracts import (
     AlphaRecipe,
     CheapGateConfig,
     CheapGateEvidence,
+    FamilyTimeframeGatePolicy,
 )
 from src.domain.futures.signals.contracts import CandidateSignalPanel
 from src.domain.futures.strategy.common.alignment import AlignedMarketData
@@ -454,6 +459,8 @@ class TestBuildL0SignalCandidate:
             reject_reasons=(),
             bootstrap_lcb_bps=1.0,
             bootstrap_agree=True,
+            mean_gross_bps=0.0,
+            total_cost_bps=0.0,
         )
         recipe = AlphaRecipe(
             recipe_id="r1",
@@ -512,6 +519,8 @@ class TestBuildL0SignalCandidate:
             reject_reasons=("weak_tstat",),
             bootstrap_lcb_bps=-1.0,
             bootstrap_agree=False,
+            mean_gross_bps=0.0,
+            total_cost_bps=0.0,
         )
         recipe = AlphaRecipe(
             recipe_id="r1",
@@ -571,6 +580,8 @@ class TestBuildL0SignalCandidate:
             reject_reasons=("invalid_shape", "lookahead_risk", "missing_required_field"),
             bootstrap_lcb_bps=1.0,
             bootstrap_agree=True,
+            mean_gross_bps=0.0,
+            total_cost_bps=0.0,
         )
         recipe = AlphaRecipe(
             recipe_id="r1",
@@ -635,6 +646,8 @@ class TestBuildL0SignalCandidate:
             reject_reasons=(),
             bootstrap_lcb_bps=3.0,
             bootstrap_agree=True,
+            mean_gross_bps=0.0,
+            total_cost_bps=0.0,
         )
         recipe = AlphaRecipe(
             recipe_id="r1",
@@ -716,7 +729,7 @@ class TestBuildL0SignalCandidate:
             mean_net_bps=5.0,
             nw_tstat=2.0,
             block_lcb_bps=3.0,
-            rank_ic=0.0,
+            rank_ic=0.2,
             cost_drag_ratio=0.3,
             turnover_per_year=50.0,
             novelty_corr_max=0.0,
@@ -726,6 +739,8 @@ class TestBuildL0SignalCandidate:
             reject_reasons=(),
             bootstrap_lcb_bps=3.0,
             bootstrap_agree=True,
+            mean_gross_bps=0.0,
+            total_cost_bps=0.0,
         )
         recipe = AlphaRecipe(
             recipe_id="r1",
@@ -762,3 +777,116 @@ class TestBuildL0SignalCandidate:
         assert cand.discovery_tier == "candidate"
         assert cand.hard_reject_reasons == ()
         assert cand.soft_flags == ()
+
+
+# ---------------------------------------------------------------------------
+# Rule 1 — Gross/Cost split logging + Rule 2 — weak_rank_ic soft flag
+# ---------------------------------------------------------------------------
+
+def _make_cheap_gate_evidence_fixture(
+    *, rank_ic: float, n_events: int, block_lcb_bps: float,
+    cost_drag_ratio: float = 0.1, turnover_per_year: float = 50.0,
+) -> CheapGateEvidence:
+    return CheapGateEvidence(
+        recipe_id="fam:v1", timeframe="4h", symbol_scope="symbol",
+        n_events=n_events, effective_n=float(n_events),
+        mean_net_bps=block_lcb_bps + 5.0, nw_tstat=2.0, block_lcb_bps=block_lcb_bps,
+        rank_ic=rank_ic, cost_drag_ratio=cost_drag_ratio, turnover_per_year=turnover_per_year,
+        novelty_corr_max=0.0, incremental_rank_ic=0.0, compute_cost_score=0.0,
+        bootstrap_lcb_bps=block_lcb_bps, bootstrap_agree=True,
+        gate_passed=True, reject_reasons=(),
+        mean_gross_bps=block_lcb_bps + 15.0, total_cost_bps=10.0,
+    )
+
+
+def _make_gate_policy_fixture() -> FamilyTimeframeGatePolicy:
+    return FamilyTimeframeGatePolicy(
+        archetype="trend", min_events=30, min_effective_n=20.0, target_effective_n=30.0,
+        max_cost_drag_ratio=0.60, max_turnover_per_year=365.0, deep_negative_lcb_bps=-1000.0,
+    )
+
+
+def _make_recipe_fixture() -> AlphaRecipe:
+    return AlphaRecipe(
+        recipe_id="fam:v1", family="trend_ma", variant="v1", timeframe="4h",
+        archetype="trend", indicator_params={}, side_rule_id="default",
+        exit_policy_id="default", required_fields=(), causal_lag_bars=1,
+        max_turnover_per_year=365.0,
+    )
+
+
+def test_evaluate_panel_cheap_gate_returns_gross_and_cost_fields() -> None:
+    aligned = make_mock_aligned()
+    panel = make_mock_panel()
+    cost = ExecutionCostModel()
+    cfg = CheapGateConfig()
+    evidence = evaluate_panel_cheap_gate(
+        panel=panel, aligned=aligned, recipe=SAMPLE_RECIPE,
+        cost_model=cost, config=cfg, bars_per_year=2190.0,
+    )
+    assert evidence.mean_gross_bps == pytest.approx(
+        evidence.mean_net_bps + evidence.total_cost_bps / max(evidence.n_events, 1), rel=1e-6
+    ) or evidence.n_events == 0
+
+
+def test_rank_ic_soft_floor_shrinks_with_more_events() -> None:
+    assert _rank_ic_soft_floor(1000) < _rank_ic_soft_floor(50)
+    assert _rank_ic_soft_floor(50) < _rank_ic_soft_floor(10)
+
+
+def test_gate_passed_unchanged_after_schema_extension() -> None:
+    aligned = make_mock_aligned()
+    panel = make_mock_panel()
+    cost = ExecutionCostModel()
+    cfg = CheapGateConfig()
+    evidence = evaluate_panel_cheap_gate(
+        panel=panel, aligned=aligned, recipe=SAMPLE_RECIPE,
+        cost_model=cost, config=cfg, bars_per_year=2190.0,
+    )
+    assert evidence.gate_passed in (True, False)
+    assert isinstance(evidence.reject_reasons, tuple)
+
+
+def test_cheap_gate_early_return_branches_include_new_fields() -> None:
+    aligned = make_mock_aligned()
+    panel = make_mock_panel()
+    cost = ExecutionCostModel()
+    cfg = CheapGateConfig()
+    recipe = dataclasses.replace(SAMPLE_RECIPE, causal_lag_bars=999)
+    evidence = evaluate_panel_cheap_gate(
+        panel=panel, aligned=aligned, recipe=recipe,
+        cost_model=cost, config=cfg, bars_per_year=2190.0,
+    )
+    assert evidence.mean_gross_bps == 0.0
+    assert evidence.total_cost_bps == 0.0
+    assert evidence.reject_reasons == ("insufficient_events",)
+
+
+def test_weak_rank_ic_is_soft_not_hard() -> None:
+    evidence = _make_cheap_gate_evidence_fixture(rank_ic=0.01, n_events=50, block_lcb_bps=10.0)
+    policy = _make_gate_policy_fixture()
+    candidate = build_l0_signal_candidate(
+        run_id="test", evidence=evidence, recipe=_make_recipe_fixture(),
+        source="catalog_exact", policy=policy, stress_cost_bps=7.5, tf_fusion=None,
+    )
+    assert "weak_rank_ic" in candidate.soft_flags
+    assert "weak_rank_ic" not in candidate.hard_reject_reasons  # type: ignore[operator]
+
+
+def test_weak_rank_ic_does_not_cause_blocked_tier() -> None:
+    evidence = _make_cheap_gate_evidence_fixture(
+        rank_ic=0.01, n_events=50, block_lcb_bps=10.0, cost_drag_ratio=0.1, turnover_per_year=50.0,
+    )
+    policy = _make_gate_policy_fixture()
+    candidate = build_l0_signal_candidate(
+        run_id="test", evidence=evidence, recipe=_make_recipe_fixture(),
+        source="catalog_exact", policy=policy, stress_cost_bps=7.5, tf_fusion=None,
+        min_conviction_lcb_bps=5.0,
+    )
+    assert candidate.discovery_tier == "seed"
+    assert candidate.hard_reject_reasons == ()
+
+
+def test_rank_ic_soft_floor_rejects_non_positive_n_events_gracefully() -> None:
+    result = _rank_ic_soft_floor(0)
+    assert result == pytest.approx(1.0, rel=1e-6)

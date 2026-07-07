@@ -51,6 +51,8 @@ PASS_EVIDENCE = CheapGateEvidence(
     reject_reasons=(),
     bootstrap_lcb_bps=1.5,
     bootstrap_agree=True,
+    mean_gross_bps=0.0,
+    total_cost_bps=0.0,
 )
 
 FAIL_EVIDENCE = CheapGateEvidence(
@@ -72,6 +74,8 @@ FAIL_EVIDENCE = CheapGateEvidence(
     reject_reasons=("insufficient_events",),
     bootstrap_lcb_bps=0.0,
     bootstrap_agree=True,
+    mean_gross_bps=0.0,
+    total_cost_bps=0.0,
 )
 
 
@@ -133,7 +137,9 @@ class TestBuildL1VerificationUnits:
                 reject_reasons=(),
                 bootstrap_lcb_bps=1.5,
                 bootstrap_agree=True,
-            )
+            mean_gross_bps=0.0,
+            total_cost_bps=0.0,
+        )
             for i in range(6)
         ]
         big_recipes = {

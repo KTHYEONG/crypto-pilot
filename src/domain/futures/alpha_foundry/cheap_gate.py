@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import math
 from collections.abc import Mapping, Sequence
 from typing import Literal
 
@@ -150,6 +151,8 @@ def evaluate_panel_cheap_gate(
             bootstrap_agree=True,
             gate_passed=False,
             reject_reasons=("insufficient_events",),
+            mean_gross_bps=0.0,
+            total_cost_bps=0.0,
         )
 
     idx_start = causal_lag
@@ -181,6 +184,8 @@ def evaluate_panel_cheap_gate(
             bootstrap_agree=True,
             gate_passed=False,
             reject_reasons=("insufficient_events",),
+            mean_gross_bps=0.0,
+            total_cost_bps=0.0,
         )
 
     fwd_ret_bps = np.full((t, n), np.nan, dtype=np.float64)
@@ -235,6 +240,7 @@ def evaluate_panel_cheap_gate(
     bootstrap_lcb_bps, _ = _bootstrap_block_ci(block_means, config.bootstrap_samples, rng)
     bootstrap_agree = (bootstrap_lcb_bps > 0) == (block_lcb_bps > 0)
 
+    mean_gross_bps = total_gross / n_events if n_events > 0 else 0.0
     gate_passed = len(reject_reasons_list) == 0
 
     return CheapGateEvidence(
@@ -256,6 +262,8 @@ def evaluate_panel_cheap_gate(
         bootstrap_agree=bootstrap_agree,
         gate_passed=gate_passed,
         reject_reasons=tuple(reject_reasons_list),
+        mean_gross_bps=mean_gross_bps,
+        total_cost_bps=total_cost,
     )
 
 
@@ -289,6 +297,13 @@ def evaluate_alpha_cheap_gate_batch(
         )
         results.append(evidence)
     return tuple(results)
+
+def _rank_ic_soft_floor(n_events: int) -> float:
+    """Approx. standard error of a Spearman rank correlation (Fisher-z style).
+
+    [ADR_20260707_L0_ALPHA_EFFECTIVENESS_REDESIGN]
+    """
+    return 1.0 / math.sqrt(max(int(n_events) - 3, 1))
 
 
 def resolve_family_timeframe_gate_policy(
@@ -326,6 +341,7 @@ def _compute_l1_priority_score(
     evidence: CheapGateEvidence,
     tf_fusion: MultiTimeframeEvidence | None,
     max_abs_corr_in_bucket: float,
+    weak_rank_ic: bool,
     priority_weights: L0PriorityWeights,
 ) -> float:
     pw = priority_weights
@@ -349,6 +365,8 @@ def _compute_l1_priority_score(
 
     if max_abs_corr_in_bucket > pw.corr_soft_floor:
         priority *= pw.insufficient_coverage_multiplier
+    if weak_rank_ic:
+        priority *= pw.weak_rank_ic_multiplier
 
     return priority
 
@@ -398,6 +416,9 @@ def build_l0_signal_candidate(
     if 0.0 <= evidence.block_lcb_bps < min_conviction_lcb_bps:
         soft_flags.append("below_conviction_floor")
 
+    if abs(evidence.rank_ic) < _rank_ic_soft_floor(evidence.n_events):
+        soft_flags.append("weak_rank_ic")
+
     discovery_tier: DiscoveryTier
     if hard_reject_reasons:
         discovery_tier = "blocked"
@@ -410,6 +431,7 @@ def build_l0_signal_candidate(
         evidence=evidence,
         tf_fusion=tf_fusion,
         max_abs_corr_in_bucket=max_abs_corr_in_bucket,
+        weak_rank_ic=("weak_rank_ic" in soft_flags),
         priority_weights=L0PriorityWeights(),
     )
 
