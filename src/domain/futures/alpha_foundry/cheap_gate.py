@@ -152,7 +152,7 @@ def evaluate_panel_cheap_gate(
             gate_passed=False,
             reject_reasons=("insufficient_events",),
             mean_gross_bps=0.0,
-            total_cost_bps=0.0,
+            mean_cost_bps=0.0,
         )
 
     idx_start = causal_lag
@@ -185,7 +185,7 @@ def evaluate_panel_cheap_gate(
             gate_passed=False,
             reject_reasons=("insufficient_events",),
             mean_gross_bps=0.0,
-            total_cost_bps=0.0,
+            mean_cost_bps=0.0,
         )
 
     fwd_ret_bps = np.full((t, n), np.nan, dtype=np.float64)
@@ -241,6 +241,7 @@ def evaluate_panel_cheap_gate(
     bootstrap_agree = (bootstrap_lcb_bps > 0) == (block_lcb_bps > 0)
 
     mean_gross_bps = total_gross / n_events if n_events > 0 else 0.0
+    mean_cost_bps = total_cost / n_events if n_events > 0 else 0.0
     gate_passed = len(reject_reasons_list) == 0
 
     return CheapGateEvidence(
@@ -263,7 +264,7 @@ def evaluate_panel_cheap_gate(
         gate_passed=gate_passed,
         reject_reasons=tuple(reject_reasons_list),
         mean_gross_bps=mean_gross_bps,
-        total_cost_bps=total_cost,
+        mean_cost_bps=mean_cost_bps,
     )
 
 

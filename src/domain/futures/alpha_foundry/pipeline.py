@@ -481,7 +481,7 @@ def run_alpha_foundry_l0_pipeline(
                 corroboration_tier=corr_tier,
                 stage_label=stage_label,
                 mean_gross_bps=ev.mean_gross_bps,
-                total_cost_bps=ev.total_cost_bps,
+                mean_cost_bps=ev.mean_cost_bps,
             )
         )
 
