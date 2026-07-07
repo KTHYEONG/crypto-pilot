@@ -4,6 +4,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from src.domain.futures.signals.rules import ALL_SIGNAL_FAMILIES
 from src.domain.futures.strategy.candidate_contracts import CandidateSignalPanel, SignalExitPolicy
 from src.domain.futures.strategy.common.alignment import AlignedMarketData
 from src.domain.futures.strategy.config import CandidateStrategyConfig
@@ -1461,3 +1462,62 @@ def test_xs_momentum_common_beta_move_produces_no_signal() -> None:
     nonzero_cols = resid_sum[lookback:, 1:]
     max_abs = np.max(np.abs(nonzero_cols))
     assert max_abs < 1e-10, f"Expected near-zero residual returns, got max_abs={max_abs}"
+
+
+# =============================================================================
+# Fix 1: _resolve_panel_archetype btc_regime_pullback → trend
+# =============================================================================
+
+
+def _make_panel_fixture(
+    *, family: str, variant: str, metadata: dict[str, object]
+) -> CandidateSignalPanel:
+    n_bars, n_sym = 10, 2
+    zeros_f = np.zeros((n_bars, n_sym), dtype=np.float64)
+    zeros_i8 = np.zeros((n_bars, n_sym), dtype=np.int8)
+    return CandidateSignalPanel(
+        family=family,
+        variant=variant,
+        params={},
+        datetimes=np.arange(n_bars).astype("datetime64[h]"),
+        symbols=("BTCUSDT", "ETHUSDT"),
+        signed_score_2d=zeros_f,
+        side_hint_2d=zeros_i8,
+        expected_holding_bars=18,
+        min_holding_bars=6,
+        stop_atr_mult=2.0,
+        take_profit_atr_mult=3.0,
+        turnover_proxy_2d=zeros_f,
+        valid_mask_2d=np.ones((n_bars, n_sym), dtype=bool),
+        metadata=metadata,
+    )
+
+
+def test_resolve_panel_archetype_btc_regime_pullback_returns_trend() -> None:
+    from src.domain.futures.strategy.rule_signals import _resolve_panel_archetype
+
+    panel = _make_panel_fixture(family="btc_regime_pullback", variant="btc_pullback_50", metadata={})
+
+    archetype = _resolve_panel_archetype(panel)
+
+    assert archetype == "trend"
+
+
+def test_resolve_panel_archetype_identical_across_dual_modules() -> None:
+    from src.domain.futures.signals.rules import _resolve_panel_archetype as resolve_a
+    from src.domain.futures.strategy.rule_signals import _resolve_panel_archetype as resolve_b
+
+    for family in ALL_SIGNAL_FAMILIES:
+        panel_a = _make_panel_fixture(family=family, variant="v", metadata={})
+        panel_b = _make_panel_fixture(family=family, variant="v", metadata={})
+        assert resolve_a(panel_a) == resolve_b(panel_b), f"archetype drift for family={family}"
+
+
+def test_resolve_panel_archetype_explicit_metadata_overrides_family_inference() -> None:
+    from src.domain.futures.strategy.rule_signals import _resolve_panel_archetype
+
+    panel = _make_panel_fixture(
+        family="btc_regime_pullback", variant="v", metadata={"archetype": "carry_rev"}
+    )
+
+    assert _resolve_panel_archetype(panel) == "carry_rev"
