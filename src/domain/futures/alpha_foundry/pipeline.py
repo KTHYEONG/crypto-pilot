@@ -2,6 +2,7 @@
 
 [ADR_20260706_ALPHA_FOUNDRY_L0_L1_HANDOFF_GUARD]
 [ADR_20260706_ALPHA_FOUNDRY_SYNC][ADR_20260706_ALPHA_FOUNDRY_L0_DIVERSITY]
+[ADR_20260707_ALPHA_FOUNDRY_RESULT_SYNC]
 [ADR_20260706_ALPHA_FOUNDRY_L0_SIGNAL_RIGOR]
 """
 
@@ -438,7 +439,6 @@ def run_alpha_foundry_l0_pipeline(
         sign_ar = ev_cand.sign_agreement_ratio if ev_cand else 0.0
         corr_tier = ev_cand.corroboration_tier if ev_cand else ""
         l1_ps = ev_cand.l1_priority_score if ev_cand else 0.0
-        hr_reasons = "|".join(ev_cand.hard_reject_reasons) if ev_cand else ""
         sf_flags = "|".join(ev_cand.soft_flags) if ev_cand else ""
 
         evidence_rows.append(
@@ -451,37 +451,43 @@ def run_alpha_foundry_l0_pipeline(
                 archetype=archetype,
                 n_events=ev.n_events,
                 effective_n=ev.effective_n,
+                mean_gross_bps=ev.mean_gross_bps,
+                mean_cost_bps=ev.mean_cost_bps,
                 mean_net_bps=ev.mean_net_bps,
+                gross_lcb_bps=0.0,
+                net_lcb_bps=ev.block_lcb_bps,
                 nw_tstat=ev.nw_tstat,
-                block_lcb_bps=ev.block_lcb_bps,
                 rank_ic=ev.rank_ic,
-                incremental_rank_ic=ev.incremental_rank_ic,
+                rank_ic_tstat=0.0,
                 cost_drag_ratio=ev.cost_drag_ratio,
                 turnover_per_year=ev.turnover_per_year,
+                novelty_corr_max=ev.novelty_corr_max,
+                incremental_rank_ic=ev.incremental_rank_ic,
                 compute_cost_score=ev.compute_cost_score,
+                event_hit_rate=0.0,
+                payoff_skew=0.0,
+                xs_spread_lcb_bps=None,
+                liquidity_cost_stress_bps=0.0,
                 bootstrap_lcb_bps=ev.bootstrap_lcb_bps,
                 bootstrap_agree=ev.bootstrap_agree,
                 gate_passed=ev.gate_passed,
+                handoff_tier="candidate" if ev.gate_passed else "blocked",
+                selected_for_l1=sel_for_l1,
                 reject_reasons="|".join(ev.reject_reasons),
+                soft_flags=sf_flags,
                 bucket_key=f"{family}:{ev.timeframe}",
                 bucket_rank=bucket_rank,
-                selected_for_l1=sel_for_l1,
                 redundant_with=redundant_with,
                 bucket_eff_test_count=bucket_eff,
                 global_eff_test_count=cross_result.global_eff_test_count if cross_result else 0.0,
-                created_at_ms=created_at_ms,
-                source=source_str,
-                discovery_tier=stage_label,
-                hard_reject_reasons=hr_reasons,
-                soft_flags=sf_flags,
                 l1_priority_score=l1_ps,
                 l1_budget_units=l1_bu,
                 tf_coverage_count=tf_cc,
                 sign_agreement_ratio=sign_ar,
                 corroboration_tier=corr_tier,
                 stage_label=stage_label,
-                mean_gross_bps=ev.mean_gross_bps,
-                mean_cost_bps=ev.mean_cost_bps,
+                created_at_ms=created_at_ms,
+                source=source_str,
             )
         )
 
