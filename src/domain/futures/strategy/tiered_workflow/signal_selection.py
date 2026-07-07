@@ -1172,7 +1172,6 @@ def compute_xs_factor_spread_diagnostics(
     xs_archetype: str = "xs_alpha",
     xs_family_fallback: tuple[str, ...] = (
         "xs_momentum",
-        "xs_carry",
         "xs_flow",
         "xs_oi_skew",
     ),
