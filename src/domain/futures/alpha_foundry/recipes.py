@@ -130,6 +130,25 @@ RECIPE_DEFINITIONS: dict[str, tuple[dict[str, object], ...]] = {
     "mean_reversion_after_liquidation_proxy": (
         _rd("mralp_24", {"window": 24, "z_entry": 2.0}, 1, ("close", "high", "low")),
     ),
+    "sparse_breakout_retest_liquidity": (
+        _rd("sbrl_20_3", {"channel": 20, "retest": 3, "spread_window": 120}, 1, ("close", "high", "low")),
+        _rd("sbrl_40_5", {"channel": 40, "retest": 5, "spread_window": 120}, 2, ("close", "high", "low")),
+    ),
+    "funding_flow_exhaustion_sparse": (
+        _rd("ffes_96", {"funding_window": 96, "funding_z": 1.5, "imbalance_window": 12}, 2, ("close", "funding")),
+    ),
+    "oi_lsr_unwind": (
+        _rd("oiu_42", {"oi_window": 42, "lsr_window": 21, "z_exit": 0.5}, 3, ("close", "oi", "lsr")),
+    ),
+    "vol_contraction_breakout": (
+        _rd("vcb_20_120", {"bb_window": 20, "vol_window": 120, "expansion_ratio": 1.5}, 1, ("close", "high", "low")),
+    ),
+    "xs_residual_rebalance": (
+        _rd("xsrr_12", {"rank_window": 12, "bucket_threshold": 0.20}, 1, ("close",)),
+    ),
+    "carry_net_of_funding": (
+        _rd("cnf_96", {"funding_window": 96, "z_threshold": 0.5, "carry_window": 24}, 2, ("close", "funding")),
+    ),
 }
 
 FAMILY_ARCHETYPE: dict[str, AlphaArchetype] = {
@@ -159,6 +178,12 @@ FAMILY_ARCHETYPE: dict[str, AlphaArchetype] = {
     "volatility_contraction_expansion": "mean_reversion",
     "btc_regime_relative_strength": "trend",
     "mean_reversion_after_liquidation_proxy": "mean_reversion",
+    "sparse_breakout_retest_liquidity": "trend",
+    "funding_flow_exhaustion_sparse": "flow",
+    "oi_lsr_unwind": "flow",
+    "vol_contraction_breakout": "mean_reversion",
+    "xs_residual_rebalance": "cross_sectional",
+    "carry_net_of_funding": "carry",
 }
 
 FAMILY_SIDE_RULE: dict[str, str] = {
@@ -188,6 +213,12 @@ FAMILY_SIDE_RULE: dict[str, str] = {
     "volatility_contraction_expansion": "tp_sl_1.5_3",
     "btc_regime_relative_strength": "trend_follow",
     "mean_reversion_after_liquidation_proxy": "tp_sl_1.5_3",
+    "sparse_breakout_retest_liquidity": "breakout_retest",
+    "funding_flow_exhaustion_sparse": "flow_exhaustion",
+    "oi_lsr_unwind": "flow_reversal",
+    "vol_contraction_breakout": "vol_breakout",
+    "xs_residual_rebalance": "xs_residual_momentum",
+    "carry_net_of_funding": "carry_mean_rev",
 }
 
 FAMILY_EXIT_POLICY: dict[str, str] = {
@@ -217,6 +248,12 @@ FAMILY_EXIT_POLICY: dict[str, str] = {
     "volatility_contraction_expansion": "tp_sl_1.5_3",
     "btc_regime_relative_strength": "atr_trail_2",
     "mean_reversion_after_liquidation_proxy": "tp_sl_1.5_3",
+    "sparse_breakout_retest_liquidity": "atr_trail_2",
+    "funding_flow_exhaustion_sparse": "tp_sl_1_2",
+    "oi_lsr_unwind": "tp_sl_1_2",
+    "vol_contraction_breakout": "tp_sl_1.5_3",
+    "xs_residual_rebalance": "atr_trail_2",
+    "carry_net_of_funding": "tp_sl_1_2",
 }
 
 FAMILY_MAX_TURNOVER: dict[str, float] = {
@@ -246,6 +283,12 @@ FAMILY_MAX_TURNOVER: dict[str, float] = {
     "volatility_contraction_expansion": 730.0,
     "btc_regime_relative_strength": 365.0,
     "mean_reversion_after_liquidation_proxy": 730.0,
+    "sparse_breakout_retest_liquidity": 180.0,
+    "funding_flow_exhaustion_sparse": 120.0,
+    "oi_lsr_unwind": 120.0,
+    "vol_contraction_breakout": 180.0,
+    "xs_residual_rebalance": 240.0,
+    "carry_net_of_funding": 180.0,
 }
 
 

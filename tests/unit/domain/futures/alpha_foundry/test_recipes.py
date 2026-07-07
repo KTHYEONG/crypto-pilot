@@ -20,6 +20,12 @@ ALL_FAMILIES = (
     "lsr_skew_flow",
     "taker_flow_imbalance",
     "xs_momentum",
+    "sparse_breakout_retest_liquidity",
+    "funding_flow_exhaustion_sparse",
+    "oi_lsr_unwind",
+    "vol_contraction_breakout",
+    "xs_residual_rebalance",
+    "carry_net_of_funding",
 )
 
 FAMILY_ARCHETYPE_MAP: dict[str, str] = {
@@ -99,6 +105,29 @@ class TestBuildAlphaRecipeCatalog:
     def test_empty_result_when_all_families_excluded(self) -> None:
         recipes = build_alpha_recipe_catalog(timeframe="4h", include_families=("nonexistent_family",))
         assert len(recipes) == 0
+
+    def test_sparse_liquidity_recipes_in_catalog(self) -> None:
+        recipes = build_alpha_recipe_catalog(timeframe="4h")
+        families = {r.family for r in recipes}
+        assert "sparse_breakout_retest_liquidity" in families
+        assert "funding_flow_exhaustion_sparse" in families
+        assert "oi_lsr_unwind" in families
+        assert "vol_contraction_breakout" in families
+        assert "xs_residual_rebalance" in families
+        assert "carry_net_of_funding" in families
+
+    def test_sparse_recipe_turnover_more_conservative_than_continuous(self) -> None:
+        recipes = build_alpha_recipe_catalog(timeframe="4h")
+        sparse_families = {
+            "sparse_breakout_retest_liquidity",
+            "funding_flow_exhaustion_sparse",
+            "oi_lsr_unwind",
+            "vol_contraction_breakout",
+        }
+        trend_turnovers = [r.max_turnover_per_year for r in recipes if r.family == "trend_ma"]
+        sparse_turnovers = [r.max_turnover_per_year for r in recipes if r.family in sparse_families]
+        if trend_turnovers and sparse_turnovers:
+            assert max(sparse_turnovers) <= max(trend_turnovers), "sparse turnover should be <= continuous trend"
 
 
 class TestBuildAlphaRecipeCatalogErrors:
