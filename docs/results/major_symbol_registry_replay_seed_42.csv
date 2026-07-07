@@ -1,3 +1,0 @@
-variant,seed,baseline_parity,l2_cagr,l3_total_return,l3_cagr,l3_mdd,l3_sharpe,l3_sortino,l3_trade_count,btc_mu_bullish_pct,eth_mu_bullish_pct,registry_census_count,adoption_passed,blocker_reason
-baseline,42,True,0.03985523457224199,-0.0683375306911369,-0.06888389614003877,0.14478612099177451,-0.4735384793912219,-0.7408341157821893,45,0.0,0.3683241252302026,0,False,
-btc_divergence_dampener,42,True,0.011817134662889943,-0.0683375306911369,-0.06888389614003877,0.14478612099177451,-0.4735384793912219,-0.7408341157821893,45,0.0,0.3683241252302026,0,False,below_median_total_return_delta
