@@ -251,10 +251,6 @@ def test_candidate_strategy_config_defaults_include_new_flow_families() -> None:
 
     expected_families = {
         "funding_flow_carry",
-        "funding_flow_unwind",
-        "flow_exhaustion_reversal",
-        "funding_term_structure_carry",
-        "flow_trend_continuation",
         "lsr_oi_regime_filter",
     }
     assert expected_families.issubset(set(cfg.candidate_families))
@@ -337,136 +333,6 @@ def test_funding_flow_carry_rejects_opposite_flow_confirmation() -> None:
     assert candidate_panels_to_events((carry_panels[0],), min_abs_score=0.0).empty
 
 
-def test_funding_flow_unwind_emits_short_entry_only_on_reversal_bar() -> None:
-    t, n = 260, 1
-    close = np.full((t, n), 100.0, dtype=np.float64)
-    close[150:170, :] = np.linspace(100.0, 140.0, 20, dtype=np.float64).reshape(20, 1)
-    close[170, 0] = close[169, 0] - 0.5
-    close[171:, 0] = close[170, 0]
-    funding = np.zeros((t, n), dtype=np.float64)
-    funding[130:, :] = 4.0
-    taker_buy = np.full((t, n), 500.0, dtype=np.float64)
-    taker_buy[150:170, :] = 1000.0
-    taker_buy[170, :] = 0.0
-    aligned = _make_flow_aligned(close=close, funding=funding, taker_buy=taker_buy)
-
-    panels = build_rule_signal_panels(aligned=aligned, cfg=CandidateStrategyConfig())
-    unwind_panels = [panel for panel in panels if panel.family == "funding_flow_unwind"]
-
-    assert len(unwind_panels) == 1
-    panel = unwind_panels[0]
-    fired = np.flatnonzero(panel.side_hint_2d[:, 0] != 0)
-    assert fired.tolist() == [170]
-    assert panel.side_hint_2d[170, 0] == -1
-
-    events = candidate_panels_to_events((panel,), min_abs_score=0.0)
-    assert events["entry_idx"].tolist() == [171]
-    assert events["side"].tolist() == [-1]
-
-
-def test_flow_exhaustion_reversal_emits_short_entry_on_same_bar_exhaustion_reversal() -> None:
-    t, n = 240, 1
-    close = np.full((t, n), 100.0, dtype=np.float64)
-    close[150:170, :] = np.linspace(100.0, 140.0, 20, dtype=np.float64).reshape(20, 1)
-    close[170, 0] = close[169, 0] - 0.5
-    close[171:, 0] = close[170, 0]
-    funding = np.zeros((t, n), dtype=np.float64)
-    taker_buy = np.full((t, n), 500.0, dtype=np.float64)
-    taker_buy[150:169, 0] = 500.0
-    taker_buy[170, 0] = 1000.0
-    aligned = _make_flow_aligned(close=close, funding=funding, taker_buy=taker_buy)
-
-    panels = build_rule_signal_panels(aligned=aligned, cfg=CandidateStrategyConfig())
-    exhaustion_panels = [panel for panel in panels if panel.family == "flow_exhaustion_reversal"]
-
-    assert len(exhaustion_panels) == 1
-    panel = exhaustion_panels[0]
-    assert panel.side_hint_2d[0, 0] == 0
-    fired = np.flatnonzero(panel.side_hint_2d[:, 0] != 0)
-    assert fired.tolist() == [170]
-    assert panel.side_hint_2d[170, 0] == -1
-
-    events = candidate_panels_to_events((panel,), min_abs_score=0.0)
-    assert events["entry_idx"].tolist() == [171]
-    assert events["side"].tolist() == [-1]
-
-
-def test_flow_exhaustion_reversal_rejects_opposite_direction_flow_and_missing_funding() -> None:
-    t, n = 240, 1
-    close = np.full((t, n), 100.0, dtype=np.float64)
-    close[150:170, :] = np.linspace(100.0, 140.0, 20, dtype=np.float64).reshape(20, 1)
-    close[170, 0] = close[169, 0] - 0.5
-    close[171:, 0] = close[170, 0]
-    funding = np.full((t, n), np.nan, dtype=np.float64)
-    taker_buy = np.full((t, n), 500.0, dtype=np.float64)
-    taker_buy[150:170, 0] = 1000.0
-    taker_buy[170, 0] = 500.0
-
-    aligned = _make_flow_aligned(close=close, funding=funding, taker_buy=taker_buy)
-    panels = build_rule_signal_panels(
-        aligned=aligned,
-        cfg=CandidateStrategyConfig(candidate_families=("flow_exhaustion_reversal",)),
-    )
-
-    assert len(panels) == 1
-    assert not panels[0].side_hint_2d.any()
-
-
-def test_flow_exhaustion_reversal_score_preserves_magnitude_ordering() -> None:
-    t, n = 260, 1
-    close = np.full((t, n), 100.0, dtype=np.float64)
-    close[150:170, :] = np.linspace(100.0, 140.0, 20, dtype=np.float64).reshape(20, 1)
-    close[170, 0] = close[169, 0] - 0.5
-    close[200:220, :] = np.linspace(100.0, 125.0, 20, dtype=np.float64).reshape(20, 1)
-    close[220, 0] = close[219, 0] - 0.25
-    close[221:, 0] = close[220, 0]
-    funding = np.zeros((t, n), dtype=np.float64)
-    taker_buy = np.full((t, n), 500.0, dtype=np.float64)
-    taker_buy[150:170, 0] = 500.0
-    taker_buy[170, 0] = 1000.0
-    taker_buy[200:220, 0] = 500.0
-    taker_buy[220, 0] = 1000.0
-
-    aligned = _make_flow_aligned(close=close, funding=funding, taker_buy=taker_buy)
-    panel = build_rule_signal_panels(
-        aligned=aligned,
-        cfg=CandidateStrategyConfig(candidate_families=("flow_exhaustion_reversal",)),
-    )[0]
-    fired = np.flatnonzero(panel.side_hint_2d[:, 0] != 0)
-
-    assert fired.tolist() == [170]
-    assert 0.0 < abs(panel.signed_score_2d[170, 0]) < 1.0
-
-
-def test_positioning_unwind_requires_joint_positioning_inputs() -> None:
-    t, n = 260, 1
-    close = np.full((t, n), 100.0, dtype=np.float64)
-    close[150:170, :] = np.linspace(100.0, 140.0, 20, dtype=np.float64).reshape(20, 1)
-    close[170, 0] = close[169, 0] - 0.5
-    close[171:, 0] = close[170, 0]
-    funding = np.zeros((t, n), dtype=np.float64)
-    funding[130:, :] = 20.0
-    taker_buy = np.full((t, n), 500.0, dtype=np.float64)
-    taker_buy[150:170, :] = 1000.0
-    taker_buy[170, :] = 0.0
-    oi = np.full((t, n), 100.0, dtype=np.float64)
-    oi[160:170, :] = np.linspace(100.0, 5000.0, 10, dtype=np.float64).reshape(10, 1)
-    oi[170, :] = 40000.0
-    lsr = np.full((t, n), 1.0, dtype=np.float64)
-    lsr[160:170, :] = np.linspace(1.0, 15.0, 10, dtype=np.float64).reshape(10, 1)
-    lsr[170, :] = 20.0
-
-    panel = build_rule_signal_panels(
-        aligned=_make_flow_aligned(close=close, funding=funding, taker_buy=taker_buy, oi=oi, lsr=lsr),
-        cfg=CandidateStrategyConfig(candidate_families=("positioning_unwind",)),
-    )[0]
-    fired = np.flatnonzero(panel.side_hint_2d[:, 0] != 0)
-
-    assert panel.family == "positioning_unwind"
-    assert fired.tolist() == [170]
-    assert panel.side_hint_2d[170, 0] == -1
-
-
 def test_flow_families_become_empty_when_taker_data_is_missing() -> None:
     t, n = 220, 1
     close = np.linspace(100.0, 124.0, t, dtype=np.float64).reshape(t, n)
@@ -480,17 +346,8 @@ def test_flow_families_become_empty_when_taker_data_is_missing() -> None:
 
     for aligned in (aligned_none, aligned_nan):
         panels = build_rule_signal_panels(aligned=aligned, cfg=CandidateStrategyConfig())
-        flow_panels = [
-            panel
-            for panel in panels
-            if panel.family
-            in {
-                "funding_flow_carry",
-                "funding_flow_unwind",
-                "flow_exhaustion_reversal",
-            }
-        ]
-        assert len(flow_panels) == 3
+        flow_panels = [panel for panel in panels if panel.family == "funding_flow_carry"]
+        assert len(flow_panels) == 1
         for panel in flow_panels:
             assert not panel.side_hint_2d.any()
             assert candidate_panels_to_events((panel,), min_abs_score=0.0).empty
@@ -616,12 +473,9 @@ def test_new_signal_families_shapes_and_side_hints() -> None:
     # Assert: 각 신규 family 패널의 shape 및 side_hint 범위 검증
     new_families = {
         "xs_momentum",
-        "xs_carry",
         "xs_flow",
         "xs_oi_skew",
         "funding_flow_carry",
-        "funding_flow_unwind",
-        "flow_exhaustion_reversal",
     }
     new_panels = [p for p in panels if p.family in new_families]
 
@@ -643,17 +497,8 @@ def test_new_flow_signal_families_include_metadata_contract() -> None:
     cfg = CandidateStrategyConfig()
     panels = build_rule_signal_panels(aligned=aligned, cfg=cfg)
 
-    flow_panels = [
-        panel
-        for panel in panels
-        if panel.family
-        in {
-            "funding_flow_carry",
-            "funding_flow_unwind",
-            "flow_exhaustion_reversal",
-        }
-    ]
-    assert len(flow_panels) == 3
+    flow_panels = [panel for panel in panels if panel.family == "funding_flow_carry"]
+    assert len(flow_panels) == 1
 
     for panel in flow_panels:
         assert panel.metadata["archetype"] in {"carry_rev", "unwind", "flow_rev"}
@@ -976,105 +821,6 @@ def test_beta_neut_masked_by_global_regime_signal_gating_override() -> None:
 # ── G9e. funding_term_structure_carry ─────────────────────────────────────
 
 
-def test_funding_term_structure_carry_entry_detection() -> None:
-    """Scenario 1: funding_z_96 > funding_z_168, same sign, above threshold -> entry.
-
-    Funding drops from 10.0 to 0.0 at bar 168-200, creating:
-    - z_96 (short-term) less negative than z_168 (long-term has higher mean)
-    - slope = z_96 - z_168 > 0 (positive acceleration in bearish direction)
-    """
-    t, n = 400, 1
-    close = np.full((t, n), 100.0, dtype=np.float64)
-    funding = np.full((t, n), 0.0, dtype=np.float64)
-    funding[:168, 0] = 10.0  # high plateau
-    funding[168:200, 0] = np.linspace(10.0, 0.0, 32)  # sharp decline
-    funding[200:, 0] = 0.0  # low plateau
-    taker_buy = np.full((t, n), 500.0, dtype=np.float64)
-
-    aligned = _make_flow_aligned(close=close, funding=funding, taker_buy=taker_buy)
-    panels = build_rule_signal_panels(
-        aligned=aligned,
-        cfg=CandidateStrategyConfig(candidate_families=("funding_term_structure_carry",)),
-    )
-    panel = panels[0]
-    assert panel.family == "funding_term_structure_carry"
-    fired = np.flatnonzero(panel.side_hint_2d[:, 0] != 0)
-    assert len(fired) >= 1, "expected at least one entry under funding acceleration"
-    # After sharp drop, long-term z is negative -> side = -1
-    assert panel.side_hint_2d[fired[0], 0] == -1  # short entry (bearish acceleration)
-    # Score magnitude negative because side=-1 (short); check abs > 0
-    assert np.abs(panel.signed_score_2d[fired[0], 0]) > 0.0
-
-
-def test_funding_term_structure_carry_opposite_direction() -> None:
-    """Scenario 2: funding_z_96 and funding_z_168 have opposite signs -> no entry."""
-    t, n = 260, 1
-    close = np.full((t, n), 100.0, dtype=np.float64)
-    funding = np.full((t, n), 0.0, dtype=np.float64)
-    funding[50:100, 0] = np.linspace(0.0, -0.8, 50, dtype=np.float64)  # long-term negative
-    funding[100:150, 0] = np.linspace(-0.8, 2.0, 50, dtype=np.float64)  # short-term positive flip
-    funding[150:, 0] = 2.0
-    taker_buy = np.full((t, n), 500.0, dtype=np.float64)
-
-    aligned = _make_flow_aligned(close=close, funding=funding, taker_buy=taker_buy)
-    panels = build_rule_signal_panels(
-        aligned=aligned,
-        cfg=CandidateStrategyConfig(candidate_families=("funding_term_structure_carry",)),
-    )
-    panel = panels[0]
-    assert panel.family == "funding_term_structure_carry"
-    assert not panel.side_hint_2d[:, 0].any(), "opposite signs should block all entries"
-
-
-# ── G9f. flow_trend_continuation ─────────────────────────────────────────
-
-
-def test_flow_trend_continuation_entry_detection() -> None:
-    """Scenario 3: flow_z >= 1.0, ret_12 > 0, ret_1 > 0 -> long-only entry."""
-    t, n = 250, 1
-    close = np.full((t, n), 100.0, dtype=np.float64)
-    close[120:, 0] = np.linspace(100.0, 130.0, t - 120, dtype=np.float64)  # rising
-    funding = np.zeros((t, n), dtype=np.float64)
-    taker_buy = np.full((t, n), 500.0, dtype=np.float64)
-    taker_buy[100:130, 0] = np.linspace(500.0, 950.0, 30, dtype=np.float64)
-    taker_buy[130:150, 0] = 950.0  # sustained high flow
-
-    aligned = _make_flow_aligned(close=close, funding=funding, taker_buy=taker_buy)
-    panels = build_rule_signal_panels(
-        aligned=aligned,
-        cfg=CandidateStrategyConfig(candidate_families=("flow_trend_continuation",)),
-    )
-    panel = panels[0]
-    assert panel.family == "flow_trend_continuation"
-    assert panel.metadata["archetype"] == "ts_mom", "flow_trend_continuation must route to ts_mom not flow_rev"
-    fired = np.flatnonzero(panel.side_hint_2d[:, 0] != 0)
-    assert len(fired) >= 1, "expected continuation entries with strong flow + uptrend"
-    assert panel.side_hint_2d[fired[0], 0] == 1  # long-only
-    assert panel.signed_score_2d[fired[0], 0] > 0.0
-
-
-def test_flow_trend_continuation_rejects_negative_trend() -> None:
-    """Scenario 4: ret_12 < 0 (downtrend) -> no entry despite strong flow."""
-    t, n = 250, 1
-    close = np.full((t, n), 100.0, dtype=np.float64)
-    close[120:, 0] = np.linspace(100.0, 70.0, t - 120, dtype=np.float64)  # falling
-    funding = np.zeros((t, n), dtype=np.float64)
-    taker_buy = np.full((t, n), 500.0, dtype=np.float64)
-    taker_buy[100:150, 0] = np.linspace(500.0, 950.0, 50, dtype=np.float64)
-
-    aligned = _make_flow_aligned(close=close, funding=funding, taker_buy=taker_buy)
-    panels = build_rule_signal_panels(
-        aligned=aligned,
-        cfg=CandidateStrategyConfig(candidate_families=("flow_trend_continuation",)),
-    )
-    panel = panels[0]
-    assert panel.family == "flow_trend_continuation"
-    assert not panel.side_hint_2d[:, 0].any(), "downtrend must block all continuations"
-
-
-# ── G9g. lsr_oi_regime_filter ────────────────────────────────────────────
-
-
 def test_lsr_oi_regime_filter_activation() -> None:
     """Scenario 5: lsr_log_z_42 extreme + oi_build_z_42 rising -> regime active.
 
@@ -1158,40 +904,6 @@ def test_lsr_oi_regime_filter_generates_live_events() -> None:
 # ── positioning_unwind warm-up barrier ────────────────────────────────────
 
 
-def test_positioning_unwind_warm_up_barrier() -> None:
-    """Scenario 4: bar_index < 168 blocked even when all features valid."""
-    t, n = 280, 1
-    close = np.full((t, n), 100.0, dtype=np.float64)
-    close[60:80, :] = np.linspace(100.0, 140.0, 20, dtype=np.float64).reshape(20, 1)
-    close[80, 0] = close[79, 0] - 0.5
-    close[81:, 0] = close[80, 0]
-    funding = np.full((t, n), 0.0, dtype=np.float64)
-    funding[40:, :] = 20.0
-    taker_buy = np.full((t, n), 500.0, dtype=np.float64)
-    taker_buy[60:80, :] = 1000.0
-    taker_buy[80, :] = 0.0
-    oi = np.full((t, n), 100.0, dtype=np.float64)
-    oi[50:80, :] = np.linspace(100.0, 5000.0, 30, dtype=np.float64).reshape(30, 1)
-    oi[80, :] = 40000.0
-    lsr = np.full((t, n), 1.0, dtype=np.float64)
-    lsr[50:80, :] = np.linspace(1.0, 15.0, 30, dtype=np.float64).reshape(30, 1)
-    lsr[80, :] = 20.0
-
-    aligned = _make_flow_aligned(close=close, funding=funding, taker_buy=taker_buy, oi=oi, lsr=lsr)
-    panel = build_rule_signal_panels(
-        aligned=aligned,
-        cfg=CandidateStrategyConfig(candidate_families=("positioning_unwind",)),
-    )[0]
-
-    # All bars < 168 must have valid_mask_2d=False
-    assert not panel.valid_mask_2d[:168, :].any(), "bars before warm-up (index < 168) must be masked out"
-
-    # Bars >= 168 may have valid_mask_2d=True depending on feature availability
-    assert panel.valid_mask_2d[168:, 0].any() or panel.valid_mask_2d[168:, :].any(), (
-        "bars after warm-up should be eligible when all features are valid"
-    )
-
-
 # =============================================================================
 # TF-Specific Signal Pool tests (Spec: tf-signal-pools-v2.md)
 # =============================================================================
@@ -1200,16 +912,16 @@ def test_positioning_unwind_warm_up_barrier() -> None:
 def test_build_rule_signal_panels_family_filter() -> None:
     aligned = _make_aligned(t=100, n=2)
     cfg = CandidateStrategyConfig(
-        candidate_families=("trend_ma", "funding_carry", "macd_4h", "supertrend"),
+        candidate_families=("trend_ma", "residual_reversion", "macd_4h", "supertrend"),
     )
     panels = build_rule_signal_panels(
         aligned=aligned,
         cfg=cfg,
-        family_filter=("trend_ma", "funding_carry"),
+        family_filter=("trend_ma", "residual_reversion"),
     )
     families = {p.family for p in panels}
     assert "trend_ma" in families
-    assert "funding_carry" in families
+    assert "residual_reversion" in families
     assert "macd_4h" not in families
     assert "supertrend" not in families
 
@@ -1228,7 +940,7 @@ def test_build_rule_signal_panels_family_filter_none_backward_compat() -> None:
 def test_build_rule_signal_panels_per_family_params() -> None:
     aligned = _make_aligned(t=100, n=2)
     overrides = {
-        "funding_carry:funding_24": {"window": 8, "entry_z": 0.5},
+        "residual_reversion:rr_24": {"window": 8},
     }
     cfg_with = CandidateStrategyConfig(per_family_params=overrides)
     cfg_without = CandidateStrategyConfig()
@@ -1236,21 +948,20 @@ def test_build_rule_signal_panels_per_family_params() -> None:
     panels_with = build_rule_signal_panels(
         aligned=aligned,
         cfg=cfg_with,
-        family_filter=("funding_carry",),
+        family_filter=("residual_reversion",),
     )
     panels_without = build_rule_signal_panels(
         aligned=aligned,
         cfg=cfg_without,
-        family_filter=("funding_carry",),
+        family_filter=("residual_reversion",),
     )
 
-    p_with = next(p for p in panels_with if p.variant == "funding_24")
-    p_without = next(p for p in panels_without if p.variant == "funding_24")
+    p_with = next(p for p in panels_with if p.variant == "rr_24")
+    p_without = next(p for p in panels_without if p.variant == "rr_24")
 
     assert p_with.params["window"] == 8
-    assert p_with.params["entry_z"] == 0.5
     # default values differ
-    assert p_without.params["window"] != 8 or p_without.params["entry_z"] != 0.5
+    assert p_without.params["window"] != 8
 
 
 def test_build_rule_signal_panels_supertrend_direction() -> None:
@@ -1283,10 +994,8 @@ def test_build_rule_signal_panels_full_per_tf_pool() -> None:
         family_filter=pool_1h,
     )
     families = {p.family for p in panels}
-    # 1h pool: residual_reversion + funding_carry + flow_exhaustion_reversal
+    # 1h pool: residual_reversion only
     assert "residual_reversion" in families
-    assert "funding_carry" in families
-    assert "flow_exhaustion_reversal" in families
     # Trend families should NOT be in 1h pool
     assert "trend_ma" not in families
     assert "trend_donchian" not in families
