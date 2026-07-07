@@ -710,11 +710,11 @@ class TestBuildAlphaRecipeCatalog:
 
         catalog = build_alpha_recipe_catalog(
             timeframe="4h",
-            include_families=("trend_ma", "funding_carry"),
+            include_families=("trend_ma", "xs_momentum"),
         )
         families = {r.family for r in catalog}
         assert "trend_ma" in families
-        assert "funding_carry" in families
+        assert "xs_momentum" in families
 
     def test_build_catalog_exclude_and_max(self) -> None:
         from src.domain.futures.alpha_foundry.recipes import build_alpha_recipe_catalog
