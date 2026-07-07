@@ -15,13 +15,11 @@ ALL_FAMILIES = (
     "bollinger_mean_reversion",
     "keltner_mean_reversion",
     "ichimoku_trend",
-    "funding_carry",
     "funding_slope_carry",
     "oi_buildup_flow",
     "lsr_skew_flow",
     "taker_flow_imbalance",
     "xs_momentum",
-    "xs_carry",
 )
 
 FAMILY_ARCHETYPE_MAP: dict[str, str] = {
@@ -34,13 +32,11 @@ FAMILY_ARCHETYPE_MAP: dict[str, str] = {
     "bollinger_mean_reversion": "mean_reversion",
     "keltner_mean_reversion": "mean_reversion",
     "ichimoku_trend": "trend",
-    "funding_carry": "carry",
     "funding_slope_carry": "carry",
     "oi_buildup_flow": "flow",
     "lsr_skew_flow": "flow",
     "taker_flow_imbalance": "flow",
     "xs_momentum": "cross_sectional",
-    "xs_carry": "cross_sectional",
 }
 
 

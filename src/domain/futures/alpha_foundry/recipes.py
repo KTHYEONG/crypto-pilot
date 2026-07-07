@@ -74,12 +74,6 @@ RECIPE_DEFINITIONS: dict[str, tuple[dict[str, object], ...]] = {
         _rd("bb_40_2.5", {"period": 40, "std": 2.5}, 2, ("close",)),
     ),
     "keltner_mean_reversion": (_rd("kc_20_1.5", {"period": 20, "atr_mult": 1.5}, 1, ("close", "high", "low")),),
-    "funding_carry": (
-        _rd("funding_24", {"window": 24}, 1, ("close", "funding")),
-        _rd("funding_zscore_4", {"z_window": 4}, 1, ("close", "funding")),
-        _rd("funding_zscore_8", {"z_window": 8}, 2, ("close", "funding")),
-        _rd("funding_zscore_24", {"z_window": 24}, 3, ("close", "funding")),
-    ),
     "funding_slope_carry": (
         _rd("funding_slope_12", {"slope_window": 12}, 2, ("close", "funding")),
         _rd("funding_slope_24", {"slope_window": 24}, 3, ("close", "funding")),
@@ -102,12 +96,6 @@ RECIPE_DEFINITIONS: dict[str, tuple[dict[str, object], ...]] = {
         _rd("xs_mom_rank_12", {"rank_window": 12}, 2, ("close",)),
         _rd("xs_mom_rank_24", {"rank_window": 24}, 3, ("close",)),
     ),
-    "xs_carry": (
-        _rd("xs_carry_96", {"funding_z_window": 96}, 2, ("close", "funding")),
-        _rd("xs_carry_168", {"funding_z_window": 168}, 3, ("close", "funding")),
-        _rd("xs_carry_rank_12", {"rank_window": 12}, 2, ("close", "funding")),
-        _rd("xs_carry_rank_24", {"rank_window": 24}, 3, ("close", "funding")),
-    ),
     "macd_4h": (_rd("macd_12_26_9", {"fast": 12, "slow": 26, "signal": 9}, 1, ("close",)),),
 }
 
@@ -122,13 +110,11 @@ FAMILY_ARCHETYPE: dict[str, AlphaArchetype] = {
     "stoch_rsi_mean_reversion": "mean_reversion",
     "bollinger_mean_reversion": "mean_reversion",
     "keltner_mean_reversion": "mean_reversion",
-    "funding_carry": "carry",
     "funding_slope_carry": "carry",
     "oi_buildup_flow": "flow",
     "lsr_skew_flow": "flow",
     "taker_flow_imbalance": "flow",
     "xs_momentum": "cross_sectional",
-    "xs_carry": "cross_sectional",
     "macd_4h": "trend",
 }
 
@@ -143,13 +129,11 @@ FAMILY_SIDE_RULE: dict[str, str] = {
     "stoch_rsi_mean_reversion": "mean_reversion",
     "bollinger_mean_reversion": "mean_reversion",
     "keltner_mean_reversion": "mean_reversion",
-    "funding_carry": "carry_mean_rev",
     "funding_slope_carry": "carry_mean_rev",
     "oi_buildup_flow": "flow_reversal",
     "lsr_skew_flow": "flow_reversal",
     "taker_flow_imbalance": "flow_reversal",
     "xs_momentum": "xs_momentum",
-    "xs_carry": "xs_carry",
     "macd_4h": "trend_follow",
 }
 
@@ -164,13 +148,11 @@ FAMILY_EXIT_POLICY: dict[str, str] = {
     "stoch_rsi_mean_reversion": "tp_sl_1.5_3",
     "bollinger_mean_reversion": "tp_sl_1.5_3",
     "keltner_mean_reversion": "tp_sl_1.5_3",
-    "funding_carry": "tp_sl_1_2",
     "funding_slope_carry": "tp_sl_1_2",
     "oi_buildup_flow": "tp_sl_1_2",
     "lsr_skew_flow": "tp_sl_1_2",
     "taker_flow_imbalance": "tp_sl_1_2",
     "xs_momentum": "atr_trail_2",
-    "xs_carry": "atr_trail_2",
     "macd_4h": "atr_trail_2",
 }
 
@@ -185,13 +167,11 @@ FAMILY_MAX_TURNOVER: dict[str, float] = {
     "stoch_rsi_mean_reversion": 730.0,
     "bollinger_mean_reversion": 365.0,
     "keltner_mean_reversion": 365.0,
-    "funding_carry": 365.0,
     "funding_slope_carry": 365.0,
     "oi_buildup_flow": 365.0,
     "lsr_skew_flow": 365.0,
     "taker_flow_imbalance": 730.0,
     "xs_momentum": 365.0,
-    "xs_carry": 365.0,
     "macd_4h": 365.0,
 }
 

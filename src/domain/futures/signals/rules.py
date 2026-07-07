@@ -22,13 +22,12 @@ _ROBUST_Z_CLIP = 3.0
 
 # [ADR_20260706_L0_SIGNAL_FAMILY_DIVERSITY] Must stay identical to strategy/rule_signals.py's copy.
 ALL_SIGNAL_FAMILIES: tuple[str, ...] = (
-    "trend_ma", "trend_donchian", "vol_breakout", "funding_carry",
+    "trend_ma", "trend_donchian", "vol_breakout",
     "btc_regime_pullback", "trend_pullback_continuation", "dual_momentum",
-    "residual_reversion", "xs_momentum", "xs_carry", "xs_flow", "xs_oi_skew",
+    "residual_reversion", "xs_momentum", "xs_flow", "xs_oi_skew",
     "mtf_trend_pullback", "mtf_breakout_retest", "taker_imbalance_momentum",
-    "funding_flow_carry", "funding_extreme_reversal", "funding_flow_unwind",
-    "flow_exhaustion_reversal", "positioning_unwind", "funding_term_structure_carry",
-    "flow_trend_continuation", "lsr_oi_regime_filter", "vol_term_structure_gate",
+    "funding_flow_carry", "funding_extreme_reversal",
+    "lsr_oi_regime_filter", "vol_term_structure_gate",
     "macd_4h", "supertrend", "ichimoku_trend",
 )
 
@@ -387,14 +386,12 @@ def _resolve_panel_archetype(panel: CandidateSignalPanel) -> str:
         return "trend"
     if family in {"dual_momentum", "taker_imbalance_momentum"}:
         return "ts_mom"
-    if family in {"funding_carry", "funding_zscore_carry", "funding_flow_carry"}:
+    if family in {"funding_zscore_carry", "funding_flow_carry"}:
         return "carry_rev"
     if family in {"residual_reversion"}:
         return "beta_neut"
-    if family in {"funding_extreme_reversal", "funding_flow_unwind"}:
+    if family in {"funding_extreme_reversal"}:
         return "unwind"
-    if family in {"flow_exhaustion_reversal"}:
-        return "flow_rev"
     return "mean_rev"
 
 
@@ -635,14 +632,10 @@ def build_rule_signal_panels(
     atr_period = scale_window(14)
     funding_z_96_window = scale_window(96)
     funding_z_168_window = scale_window(168)
-    ret_1_window = scale_window(1)
-    ret_12_window = scale_window(12)
-    ret_z_48_window = scale_window(48)
     oi_build_z_42_window = scale_window(42)
     lsr_log_z_42_window = scale_window(42)
     positioning_warm_bars = scale_window(168)
     rsi_14_window = scale_window(14)
-    funding_mean_window = scale_window(24)
     btc_fast_window = scale_window(20)
     btc_slow_window = scale_window(100)
     alt_mean_window = scale_window(50)
@@ -654,9 +647,6 @@ def build_rule_signal_panels(
     flow_z_24 = _zscore_2d(flow_imbalance, window=flow_z_24_window)
     funding_z_96 = _zscore_2d(funding, window=funding_z_96_window, eps=1e-6)
     funding_z_168 = _zscore_2d(funding, window=funding_z_168_window, eps=1e-6)
-    ret_1 = _log_return_2d(close, lag=ret_1_window)
-    ret_12 = _log_return_2d(close, lag=ret_12_window)
-    ret_z_48 = _zscore_2d(ret_12, window=ret_z_48_window)
     shared_valid = valid_mask & flow_valid & np.isfinite(funding)
     fxr_valid = valid_mask & flow_valid
     oi = aligned.oi_2d if aligned.oi_2d is not None else np.full_like(close, np.nan, dtype=np.float64)
@@ -673,8 +663,6 @@ def build_rule_signal_panels(
     positioning_warm = np.ones_like(valid_mask, dtype=np.bool_)
     positioning_warm[:positioning_warm_bars] = False
     positioning_valid = valid_mask & flow_valid & np.isfinite(funding) & oi_valid & lsr_valid & positioning_warm
-    # Shared derived features for new panels
-    funding_ts_slope = funding_z_96 - funding_z_168  # positive = short-term more extreme
 
     def _build_single_family(fam: str) -> list[CandidateSignalPanel]:
         fam_panels: list[CandidateSignalPanel] = []
@@ -790,34 +778,6 @@ def build_rule_signal_panels(
                     take_profit_atr_mult=3.0,
                     turnover_proxy_2d=np.abs(np.diff(vol_score, axis=0, prepend=0.0)),
                     valid_mask_2d=valid_mask,
-                )
-            )
-
-        elif fam == "funding_carry":
-            # 6. Funding Carry
-            funding_mean = _rolling_mean_2d(funding, window=funding_mean_window)
-            funding_std = _rolling_std_2d(funding, window=funding_mean_window)
-            funding_z = (funding - funding_mean) / np.maximum(funding_std, 1e-6)
-            carry_side = np.zeros_like(close, dtype=np.int8)
-            carry_side[funding_z < -1.5] = 1
-            carry_side[funding_z > 1.5] = -1
-            carry_score = -funding_z / 2.0
-            fam_panels.append(
-                CandidateSignalPanel(
-                    family="funding_carry",
-                    variant="funding_24",
-                    params={"window": funding_mean_window, "entry_z": 1.5},
-                    datetimes=aligned.datetimes,
-                    symbols=aligned.symbols,
-                    signed_score_2d=np.clip(carry_score, -1.0, 1.0),
-                    side_hint_2d=carry_side,
-                    expected_holding_bars=scale_window(24),
-                    min_holding_bars=scale_window(8),
-                    stop_atr_mult=2.0,
-                    take_profit_atr_mult=3.0,
-                    turnover_proxy_2d=np.abs(np.diff(carry_score, axis=0, prepend=0.0)),
-                    valid_mask_2d=valid_mask,
-                    metadata={"archetype": "carry_rev"},
                 )
             )
 
@@ -1034,37 +994,6 @@ def build_rule_signal_panels(
                         metadata={
                             "archetype": "xs_alpha",
                             "edge_hypothesis": ("cross-sectional relative momentum, beta-neutral by construction"),
-                        },
-                    )
-                )
-
-        elif fam == "xs_carry":
-            _min_xs = cfg.l1_min_cross_section
-            for _fz, _label in [(funding_z_96, "96"), (funding_z_168, "168")]:
-                _raw = -_fz
-                _sc, _sd = _cross_sectional_rank_signed_2d(
-                    _raw,
-                    shared_valid,
-                    min_cross_section=_min_xs,
-                )
-                fam_panels.append(
-                    CandidateSignalPanel(
-                        family="xs_carry",
-                        variant=f"xs_carry_{_label}",
-                        params={"funding_z_window": int(_label)},
-                        datetimes=aligned.datetimes,
-                        symbols=aligned.symbols,
-                        signed_score_2d=_sc,
-                        side_hint_2d=_sd,
-                        expected_holding_bars=scale_window(24),
-                        min_holding_bars=scale_window(8),
-                        stop_atr_mult=1.5,
-                        take_profit_atr_mult=2.5,
-                        turnover_proxy_2d=np.abs(np.diff(_sc, axis=0, prepend=0.0)),
-                        valid_mask_2d=shared_valid,
-                        metadata={
-                            "archetype": "xs_alpha",
-                            "edge_hypothesis": "cross-sectional funding carry: short richest funding, long cheapest",
                         },
                     )
                 )
@@ -1372,224 +1301,6 @@ def build_rule_signal_panels(
                         },
                     )
                 )
-
-        elif fam == "funding_flow_unwind":
-            # G9b. funding_flow_unwind
-            _ffu_crowded_side = np.sign(funding_z_168).astype(np.int8)
-            _ffu_crowded = (np.abs(funding_z_168) >= 1.645) & ((_ffu_crowded_side.astype(np.float64) * ret_z_48) >= 1.0)
-            _ffu_reversal = ((_ffu_crowded_side.astype(np.float64) * flow_z_24) <= -1.0) & (
-                (_ffu_crowded_side.astype(np.float64) * ret_1) < 0.0
-            )
-            _ffu_condition = _ffu_crowded & _ffu_reversal & shared_valid
-            _ffu_entry = _entry_rising_edge_2d(_ffu_condition)
-            _ffu_side = np.where(_ffu_entry, -_ffu_crowded_side, 0).astype(np.int8, copy=False)
-            _ffu_score_mag = np.clip((np.abs(funding_z_168) - 1.645) / 1.645 + np.abs(flow_z_24) / 2.0, 0.0, 1.0)
-            _ffu_score = _ffu_side.astype(np.float64) * _ffu_score_mag
-            _ffu_side[:funding_z_168_window] = 0
-            _ffu_score[:funding_z_168_window] = 0.0
-            fam_panels.append(
-                CandidateSignalPanel(
-                    family="funding_flow_unwind",
-                    variant="ffu_168",
-                    params={
-                        "funding_window": funding_z_168_window,
-                        "funding_z_threshold": 1.645,
-                        "flow_window": flow_z_24_window,
-                        "ret_window": ret_z_48_window,
-                    },
-                    datetimes=aligned.datetimes,
-                    symbols=aligned.symbols,
-                    signed_score_2d=_ffu_score,
-                    side_hint_2d=_ffu_side,
-                    expected_holding_bars=scale_window(10),
-                    min_holding_bars=scale_window(3),
-                    stop_atr_mult=1.5,
-                    take_profit_atr_mult=2.5,
-                    turnover_proxy_2d=np.abs(np.diff(_ffu_score, axis=0, prepend=0.0)),
-                    valid_mask_2d=shared_valid,
-                    metadata={
-                        "archetype": "unwind",
-                        "regime": "funding_flow_reversal",
-                        "edge_hypothesis": (
-                            "crowded funding regimes unwind when order flow and one-bar returns flip together"
-                        ),
-                        "causal_inputs": (
-                            "trailing 168-bar funding z-score, 24-bar flow z-score, "
-                            "12-bar return z-score, and 1-bar return"
-                        ),
-                    },
-                )
-            )
-
-        elif fam == "flow_exhaustion_reversal":
-            # G9c. flow_exhaustion_reversal
-            _fxr_shock_side = np.sign(ret_z_48).astype(np.int8)
-            _fxr_exhausted = (np.abs(ret_z_48) >= 1.0) & ((_fxr_shock_side.astype(np.float64) * flow_z_24) >= 2.0)
-            _fxr_price_reversal = (_fxr_shock_side.astype(np.float64) * ret_1) < 0.0
-            _fxr_condition = _fxr_exhausted & _fxr_price_reversal & fxr_valid
-            _fxr_entry = _entry_rising_edge_2d(_fxr_condition)
-            _fxr_side = np.where(_fxr_entry, -_fxr_shock_side, 0).astype(np.int8, copy=False)
-            _fxr_ret_excess = np.clip(np.abs(ret_z_48) - 1.0, 0.0, 1.0)
-            _fxr_flow_excess = np.clip((np.abs(flow_z_24) - 2.0) / 2.0, 0.0, 1.0)
-            _fxr_score_mag = 0.5 * _fxr_ret_excess + 0.5 * _fxr_flow_excess
-            _fxr_score = _fxr_side.astype(np.float64) * _fxr_score_mag
-            _fxr_side[:ret_z_48_window] = 0
-            _fxr_score[:ret_z_48_window] = 0.0
-            fam_panels.append(
-                CandidateSignalPanel(
-                    family="flow_exhaustion_reversal",
-                    variant="fxr_24",
-                    params={"flow_window": flow_z_24_window, "shock_window": ret_z_48_window, "shock_z_threshold": 1.0},
-                    datetimes=aligned.datetimes,
-                    symbols=aligned.symbols,
-                    signed_score_2d=_fxr_score,
-                    side_hint_2d=_fxr_side,
-                    expected_holding_bars=scale_window(8),
-                    min_holding_bars=scale_window(2),
-                    stop_atr_mult=1.25,
-                    take_profit_atr_mult=2.0,
-                    turnover_proxy_2d=np.abs(np.diff(_fxr_score, axis=0, prepend=0.0)),
-                    valid_mask_2d=fxr_valid,
-                    metadata={
-                        "archetype": "flow_rev",
-                        "regime": "flow_exhaustion_reversal",
-                        "edge_hypothesis": (
-                            "price shocks with simultaneous order-flow extremes tend "
-                            "to snap back on immediate reversal bars"
-                        ),
-                        "causal_inputs": ("trailing 12-bar return z-score, 24-bar flow z-score, and 1-bar return"),
-                    },
-                )
-            )
-
-        elif fam == "positioning_unwind":
-            # G9d. positioning_unwind
-            _pu_crowded_side = np.sign(funding_z_168).astype(np.int8)
-            _pu_crowding = (
-                (np.abs(funding_z_168) >= 1.0)
-                & ((_pu_crowded_side.astype(np.float64) * lsr_log_z_42) >= 0.75)
-                & (oi_build_z_42 >= 0.75)
-            )
-            _pu_reversal = (_pu_crowded_side.astype(np.float64) * flow_z_24 <= -1.0) & (
-                _pu_crowded_side.astype(np.float64) * ret_1 < 0.0
-            )
-            _pu_condition = _pu_crowding & _pu_reversal & positioning_valid
-            _pu_entry = _entry_rising_edge_2d(_pu_condition)
-            _pu_side = np.where(_pu_entry, -_pu_crowded_side, 0).astype(np.int8, copy=False)
-            _pu_funding_excess = np.clip(np.abs(funding_z_168) - 1.0, 0.0, 1.0)
-            _pu_lsr_excess = np.clip(np.abs(lsr_log_z_42) - 0.75, 0.0, 1.0)
-            _pu_oi_excess = np.clip(oi_build_z_42 - 0.75, 0.0, 1.0)
-            _pu_flow_excess = np.clip((-_pu_crowded_side.astype(np.float64) * flow_z_24) - 1.0, 0.0, 1.0)
-            _pu_score_mag = 0.25 * (_pu_funding_excess + _pu_lsr_excess + _pu_oi_excess + _pu_flow_excess)
-            _pu_score = _pu_side.astype(np.float64) * _pu_score_mag
-            _pu_side[:funding_z_168_window] = 0
-            _pu_score[:funding_z_168_window] = 0.0
-            fam_panels.append(
-                CandidateSignalPanel(
-                    family="positioning_unwind",
-                    variant="pu_42",
-                    params={
-                        "funding_window": funding_z_168_window,
-                        "positioning_window": oi_build_z_42_window,
-                        "oi_lag": 6,
-                    },
-                    datetimes=aligned.datetimes,
-                    symbols=aligned.symbols,
-                    signed_score_2d=_pu_score,
-                    side_hint_2d=_pu_side,
-                    expected_holding_bars=scale_window(10),
-                    min_holding_bars=scale_window(3),
-                    stop_atr_mult=1.5,
-                    take_profit_atr_mult=2.5,
-                    turnover_proxy_2d=np.abs(np.diff(_pu_score, axis=0, prepend=0.0)),
-                    valid_mask_2d=positioning_valid,
-                    metadata={
-                        "archetype": "unwind",
-                        "regime": "positioning_unwind",
-                        "edge_hypothesis": (
-                            "crowded positioning with rising open interest and long-short skew "
-                            "unwinds when flow and price reverse together"
-                        ),
-                    },
-                )
-            )
-
-        elif fam == "funding_term_structure_carry":
-            # G9e. funding_term_structure_carry
-            # Entry when funding acceleration is same-direction (short-term z more extreme than long-term)
-            _fts_crowded = np.abs(funding_z_168) >= 0.5  # meaningful funding level
-            _fts_accel = np.abs(funding_ts_slope) >= 0.75  # acceleration above noise
-            _fts_same_dir = (funding_z_96 * funding_z_168) > 0.0  # same direction
-            _fts_entry_cond = _fts_crowded & _fts_accel & _fts_same_dir & shared_valid
-            _fts_entry = _entry_rising_edge_2d(_fts_entry_cond)
-            _fts_side = np.where(_fts_entry, np.sign(funding_z_168).astype(np.int8), 0)
-            _fts_score = _fts_side.astype(np.float64) * np.clip(np.abs(funding_ts_slope) - 0.75, 0.0, 1.0)
-
-            fam_panels.append(
-                CandidateSignalPanel(
-                    family="funding_term_structure_carry",
-                    variant="fts_carry_96168",
-                    params={"short_window": funding_z_96_window, "long_window": funding_z_168_window},
-                    datetimes=aligned.datetimes,
-                    symbols=aligned.symbols,
-                    signed_score_2d=_fts_score,
-                    side_hint_2d=_fts_side,
-                    expected_holding_bars=scale_window(12),
-                    min_holding_bars=scale_window(4),
-                    stop_atr_mult=1.5,
-                    take_profit_atr_mult=2.0,
-                    turnover_proxy_2d=np.abs(np.diff(_fts_score, axis=0, prepend=0.0)),
-                    valid_mask_2d=shared_valid,
-                    metadata={
-                        "archetype": "carry_rev",
-                        "regime": "funding_ts_carry",
-                        "edge_hypothesis": (
-                            "funding acceleration (short-term z > long-term z) "
-                            "signals inflow continuing before mean-reversion"
-                        ),
-                    },
-                )
-            )
-
-        elif fam == "flow_trend_continuation":
-            # G9f. flow_trend_continuation
-            # Entry when flow supports ongoing trend (not reversal but continuation)
-            _flo_cont_flow_ok = flow_z_24 >= 1.0  # strong flow
-            _flo_cont_ret_trend = ret_12 > 0.0  # positive 12-bar trend
-            _flo_cont_ret_inertia = ret_1 > 0.0  # same-bar continuation
-            _flo_cont_cond = _flo_cont_flow_ok & _flo_cont_ret_trend & _flo_cont_ret_inertia & shared_valid
-            _flo_cont_entry = _entry_rising_edge_2d(_flo_cont_cond)
-            _flo_cont_side = np.where(_flo_cont_entry, 1, 0).astype(np.int8)  # long-only continuation
-            _flo_cont_score = np.where(
-                _flo_cont_entry,
-                np.clip(flow_z_24 / 3.0, 0.0, 1.0) * np.clip(ret_12, 0.0, 0.03) / 0.03,
-                0.0,
-            )
-
-            fam_panels.append(
-                CandidateSignalPanel(
-                    family="flow_trend_continuation",
-                    variant="flo_cont_24",
-                    params={"flow_window": flow_z_24_window, "ret_window": ret_12_window},
-                    datetimes=aligned.datetimes,
-                    symbols=aligned.symbols,
-                    signed_score_2d=_flo_cont_score,
-                    side_hint_2d=_flo_cont_side,
-                    expected_holding_bars=scale_window(8),
-                    min_holding_bars=scale_window(3),
-                    stop_atr_mult=1.5,
-                    take_profit_atr_mult=2.0,
-                    turnover_proxy_2d=np.abs(np.diff(_flo_cont_score, axis=0, prepend=0.0)),
-                    valid_mask_2d=shared_valid,
-                    metadata={
-                        "archetype": "ts_mom",
-                        "regime": "flow_momentum_continuation",
-                        "edge_hypothesis": (
-                            "strong flow supporting ongoing price trend signals continuation before exhaustion"
-                        ),
-                    },
-                )
-            )
 
         elif fam == "lsr_oi_regime_filter":
             # G9g. lsr_oi_regime_filter (BTN conditioning gate)
