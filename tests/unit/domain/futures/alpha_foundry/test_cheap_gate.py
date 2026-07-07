@@ -460,7 +460,7 @@ class TestBuildL0SignalCandidate:
             bootstrap_lcb_bps=1.0,
             bootstrap_agree=True,
             mean_gross_bps=0.0,
-            total_cost_bps=0.0,
+            mean_cost_bps=0.0,
         )
         recipe = AlphaRecipe(
             recipe_id="r1",
@@ -520,7 +520,7 @@ class TestBuildL0SignalCandidate:
             bootstrap_lcb_bps=-1.0,
             bootstrap_agree=False,
             mean_gross_bps=0.0,
-            total_cost_bps=0.0,
+            mean_cost_bps=0.0,
         )
         recipe = AlphaRecipe(
             recipe_id="r1",
@@ -581,7 +581,7 @@ class TestBuildL0SignalCandidate:
             bootstrap_lcb_bps=1.0,
             bootstrap_agree=True,
             mean_gross_bps=0.0,
-            total_cost_bps=0.0,
+            mean_cost_bps=0.0,
         )
         recipe = AlphaRecipe(
             recipe_id="r1",
@@ -647,7 +647,7 @@ class TestBuildL0SignalCandidate:
             bootstrap_lcb_bps=3.0,
             bootstrap_agree=True,
             mean_gross_bps=0.0,
-            total_cost_bps=0.0,
+            mean_cost_bps=0.0,
         )
         recipe = AlphaRecipe(
             recipe_id="r1",
@@ -740,7 +740,7 @@ class TestBuildL0SignalCandidate:
             bootstrap_lcb_bps=3.0,
             bootstrap_agree=True,
             mean_gross_bps=0.0,
-            total_cost_bps=0.0,
+            mean_cost_bps=0.0,
         )
         recipe = AlphaRecipe(
             recipe_id="r1",
@@ -795,7 +795,7 @@ def _make_cheap_gate_evidence_fixture(
         novelty_corr_max=0.0, incremental_rank_ic=0.0, compute_cost_score=0.0,
         bootstrap_lcb_bps=block_lcb_bps, bootstrap_agree=True,
         gate_passed=True, reject_reasons=(),
-        mean_gross_bps=block_lcb_bps + 15.0, total_cost_bps=10.0,
+        mean_gross_bps=block_lcb_bps + 15.0, mean_cost_bps=10.0,
     )
 
 
@@ -825,7 +825,7 @@ def test_evaluate_panel_cheap_gate_returns_gross_and_cost_fields() -> None:
         cost_model=cost, config=cfg, bars_per_year=2190.0,
     )
     assert evidence.mean_gross_bps == pytest.approx(
-        evidence.mean_net_bps + evidence.total_cost_bps / max(evidence.n_events, 1), rel=1e-6
+        evidence.mean_net_bps + evidence.mean_cost_bps, rel=1e-6
     ) or evidence.n_events == 0
 
 
@@ -858,7 +858,7 @@ def test_cheap_gate_early_return_branches_include_new_fields() -> None:
         cost_model=cost, config=cfg, bars_per_year=2190.0,
     )
     assert evidence.mean_gross_bps == 0.0
-    assert evidence.total_cost_bps == 0.0
+    assert evidence.mean_cost_bps == 0.0
     assert evidence.reject_reasons == ("insufficient_events",)
 
 
