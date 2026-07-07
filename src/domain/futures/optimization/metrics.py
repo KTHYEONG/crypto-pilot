@@ -522,6 +522,21 @@ def variance_ratio(rets: NDArray[np.float64], q: int) -> tuple[float, float]:
     return (float(vr), float(m2))
 
 
+
+def kaufman_efficiency_ratio(rets: NDArray[np.float64]) -> float:
+    """Kaufman ER = |sum(rets)| / sum(|rets|). Returns 0.0 for n<4 or all-zero denom.
+
+    [ADR_20260707_LTF_ENTRY_TIMING_LAYER]
+    """
+    if rets is None or rets.size < 4:
+        return 0.0
+    if not np.all(np.isfinite(rets)):
+        return 0.0
+    denom = float(np.sum(np.abs(rets)))
+    if denom < 1e-20:
+        return 0.0
+    return float(np.abs(np.sum(rets))) / denom
+
 def hurst_dfa(rets: NDArray[np.float64], *, min_scale: int = 8, max_scale: int | None = None) -> float:
     """Detrended Fluctuation Analysis Hurst exponent.
 
