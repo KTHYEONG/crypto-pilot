@@ -97,6 +97,39 @@ RECIPE_DEFINITIONS: dict[str, tuple[dict[str, object], ...]] = {
         _rd("xs_mom_rank_24", {"rank_window": 24}, 3, ("close",)),
     ),
     "macd_4h": (_rd("macd_12_26_9", {"fast": 12, "slow": 26, "signal": 9}, 1, ("close",)),),
+    "sparse_breakout_retest_v2": (
+        _rd("bor_v2_20", {"channel": 20, "retest": 3}, 1, ("close", "high", "low")),
+        _rd("bor_v2_40", {"channel": 40, "retest": 5}, 2, ("close", "high", "low")),
+    ),
+    "trend_pullback_quality_v2": (
+        _rd("tpq_v2_20_100", {"fast": 20, "slow": 100, "rsi_lo": 40, "rsi_hi": 65}, 1, ("close", "high", "low")),
+        _rd("tpq_v2_50_200", {"fast": 50, "slow": 200, "rsi_lo": 35, "rsi_hi": 70}, 2, ("close", "high", "low")),
+    ),
+    "residual_momentum_xs": (
+        _rd("rm_xs_12", {"lookback": 12, "btc_beta_cap": 0.80}, 1, ("close",)),
+        _rd("rm_xs_24", {"lookback": 24, "btc_beta_cap": 0.80}, 2, ("close",)),
+    ),
+    "funding_contra_carry_sparse": (
+        _rd("fccs_96", {"funding_window": 96, "funding_z_threshold": 1.5}, 2, ("close", "funding")),
+    ),
+    "oi_price_divergence_unwind": (
+        _rd("opdu_42", {"oi_window": 42, "price_window": 24}, 2, ("close", "oi")),
+    ),
+    "taker_flow_exhaustion": (
+        _rd("tfe_12", {"imbalance_window": 12, "threshold": 0.8}, 1, ("close", "taker_buy")),
+    ),
+    "liquidity_vacuum_breakout": (
+        _rd("lvb_20", {"bb_window": 20, "vol_window": 120}, 1, ("close", "high", "low")),
+    ),
+    "volatility_contraction_expansion": (
+        _rd("vce_20", {"window": 20, "expansion_ratio": 1.5}, 1, ("close", "high", "low")),
+    ),
+    "btc_regime_relative_strength": (
+        _rd("brrs_50", {"window": 50}, 2, ("close",)),
+    ),
+    "mean_reversion_after_liquidation_proxy": (
+        _rd("mralp_24", {"window": 24, "z_entry": 2.0}, 1, ("close", "high", "low")),
+    ),
 }
 
 FAMILY_ARCHETYPE: dict[str, AlphaArchetype] = {
@@ -116,6 +149,16 @@ FAMILY_ARCHETYPE: dict[str, AlphaArchetype] = {
     "taker_flow_imbalance": "flow",
     "xs_momentum": "cross_sectional",
     "macd_4h": "trend",
+    "sparse_breakout_retest_v2": "trend",
+    "trend_pullback_quality_v2": "trend",
+    "residual_momentum_xs": "cross_sectional",
+    "funding_contra_carry_sparse": "carry",
+    "oi_price_divergence_unwind": "flow",
+    "taker_flow_exhaustion": "flow",
+    "liquidity_vacuum_breakout": "trend",
+    "volatility_contraction_expansion": "mean_reversion",
+    "btc_regime_relative_strength": "trend",
+    "mean_reversion_after_liquidation_proxy": "mean_reversion",
 }
 
 FAMILY_SIDE_RULE: dict[str, str] = {
@@ -135,6 +178,16 @@ FAMILY_SIDE_RULE: dict[str, str] = {
     "taker_flow_imbalance": "flow_reversal",
     "xs_momentum": "xs_momentum",
     "macd_4h": "trend_follow",
+    "sparse_breakout_retest_v2": "breakout_retest_sparse",
+    "trend_pullback_quality_v2": "trend_pullback_quality",
+    "residual_momentum_xs": "xs_residual_momentum",
+    "funding_contra_carry_sparse": "carry_mean_rev",
+    "oi_price_divergence_unwind": "flow_reversal",
+    "taker_flow_exhaustion": "flow_exhaustion",
+    "liquidity_vacuum_breakout": "atr_trail_2",
+    "volatility_contraction_expansion": "tp_sl_1.5_3",
+    "btc_regime_relative_strength": "trend_follow",
+    "mean_reversion_after_liquidation_proxy": "tp_sl_1.5_3",
 }
 
 FAMILY_EXIT_POLICY: dict[str, str] = {
@@ -154,6 +207,16 @@ FAMILY_EXIT_POLICY: dict[str, str] = {
     "taker_flow_imbalance": "tp_sl_1_2",
     "xs_momentum": "atr_trail_2",
     "macd_4h": "atr_trail_2",
+    "sparse_breakout_retest_v2": "atr_trail_2",
+    "trend_pullback_quality_v2": "atr_trail_2",
+    "residual_momentum_xs": "atr_trail_2",
+    "funding_contra_carry_sparse": "tp_sl_1_2",
+    "oi_price_divergence_unwind": "tp_sl_1_2",
+    "taker_flow_exhaustion": "tp_sl_1_2",
+    "liquidity_vacuum_breakout": "atr_trail_2",
+    "volatility_contraction_expansion": "tp_sl_1.5_3",
+    "btc_regime_relative_strength": "atr_trail_2",
+    "mean_reversion_after_liquidation_proxy": "tp_sl_1.5_3",
 }
 
 FAMILY_MAX_TURNOVER: dict[str, float] = {
@@ -173,6 +236,16 @@ FAMILY_MAX_TURNOVER: dict[str, float] = {
     "taker_flow_imbalance": 730.0,
     "xs_momentum": 365.0,
     "macd_4h": 365.0,
+    "sparse_breakout_retest_v2": 180.0,
+    "trend_pullback_quality_v2": 180.0,
+    "residual_momentum_xs": 365.0,
+    "funding_contra_carry_sparse": 365.0,
+    "oi_price_divergence_unwind": 365.0,
+    "taker_flow_exhaustion": 730.0,
+    "liquidity_vacuum_breakout": 180.0,
+    "volatility_contraction_expansion": 730.0,
+    "btc_regime_relative_strength": 365.0,
+    "mean_reversion_after_liquidation_proxy": 730.0,
 }
 
 
