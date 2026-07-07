@@ -153,6 +153,142 @@ def test_bridge_passes_no_leak_recommendation_window(monkeypatch: Any) -> None:
     assert result.rule_report["recommended_flip_variants"] == ()
 
 
+def test_bridge_writes_family_correlation_audit_when_enabled(
+    monkeypatch: Any, tmp_path: Any
+) -> None:
+    """enable_correlation_audit=True 시 {run_id}_family_correlation.parquet가 실제로 생성돼야 한다."""
+    from src.domain.futures.alpha_foundry.contracts import AlphaFoundryRuntimeConfig
+
+    datetimes = np.asarray(
+        [np.datetime64("2026-01-01T00:00:00") + np.timedelta64(i, "h") for i in range(20)],
+        dtype="datetime64[ns]",
+    )
+    aligned = SimpleNamespace(
+        datetimes=datetimes,
+        symbols=("BTCUSDT",),
+        close_2d=np.linspace(100.0, 110.0, 20, dtype=np.float64).reshape(20, 1),
+        open_2d=np.linspace(100.0, 110.0, 20, dtype=np.float64).reshape(20, 1),
+        high_2d=np.linspace(101.0, 111.0, 20, dtype=np.float64).reshape(20, 1),
+        low_2d=np.linspace(99.0, 109.0, 20, dtype=np.float64).reshape(20, 1),
+        volume_2d=np.full((20, 1), 1000.0, dtype=np.float64),
+        funding_2d=np.zeros((20, 1), dtype=np.float64),
+        active_mask=np.ones((20, 1), dtype=bool),
+        warm_mask=np.ones((20, 1), dtype=bool),
+        entry_block_mask=np.zeros((20, 1), dtype=bool),
+        kill_mask=np.zeros((20, 1), dtype=bool),
+        execution_cost_bps_2d=np.zeros((20, 1), dtype=np.float64),
+        execution_eligibility_mask=np.ones((20, 1), dtype=bool),
+    )
+    panel = CandidateSignalPanel(
+        family="trend_ma",
+        variant="ema_12_72",
+        params={},
+        datetimes=datetimes,
+        symbols=("BTCUSDT",),
+        signed_score_2d=np.zeros((20, 1), dtype=np.float64),
+        side_hint_2d=np.ones((20, 1), dtype=np.int8),
+        expected_holding_bars=1,
+        min_holding_bars=1,
+        stop_atr_mult=50.0,
+        take_profit_atr_mult=50.0,
+        turnover_proxy_2d=np.zeros((20, 1), dtype=np.float64),
+        valid_mask_2d=np.ones((20, 1), dtype=bool),
+        metadata={"native_tf": "4h"},
+        archetype="trend",
+    )
+    raw_events = pd.DataFrame(
+        {
+            "datetime": [aligned.datetimes[0]],
+            "symbol": ["BTCUSDT"],
+            "family": ["trend_ma"],
+            "variant": ["ema_12_72"],
+            "side": [1],
+            "raw_score": [0.9],
+            "score_z": [0.9],
+            "entry_idx": [0],
+            "exit_idx": [1],
+            "expected_holding_bars": [1],
+            "min_holding_bars": [1],
+            "stop_atr_mult": [50.0],
+            "take_profit_atr_mult": [50.0],
+            "turnover_proxy": [0.1],
+            "cost_floor_bps": [0.0],
+            "hurdle_bps": [0.0],
+        }
+    )
+
+    monkeypatch.setattr(
+        "src.domain.futures.strategy.common.alignment.align_data_maps",
+        lambda *_a, **_k: aligned,
+    )
+    monkeypatch.setattr(
+        "src.domain.futures.strategy.rule_signals.build_rule_signal_panels",
+        lambda *_a, **_k: (panel,),
+    )
+    monkeypatch.setattr(
+        "src.domain.futures.strategy.rule_signals.candidate_panels_to_events",
+        lambda *_a, **_k: raw_events.copy(),
+    )
+    monkeypatch.setattr(
+        "src.domain.futures.strategy.candidate_labels.label_candidate_events",
+        lambda *_a, **_k: raw_events.copy(),
+    )
+    monkeypatch.setattr(
+        "src.domain.futures.alpha_foundry.recipes.build_alpha_recipe_catalog",
+        lambda *_a, **_k: (),
+    )
+    monkeypatch.setattr(
+        "src.domain.futures.alpha_foundry.bridge_helpers.bind_panels_to_alpha_recipes",
+        lambda *_a, **_k: {},
+    )
+    monkeypatch.setattr(
+        "src.domain.futures.alpha_foundry.bridge_helpers.run_alpha_foundry_l0_gate",
+        lambda *_a, **_k: SimpleNamespace(panels_for_l1=(panel,), report=SimpleNamespace()),
+    )
+    monkeypatch.setattr(
+        "src.domain.futures.strategy.rule_diagnostics.compute_rule_diagnostics",
+        lambda *_a, **_k: SimpleNamespace(
+            recommended_keep_variants=(),
+            recommended_flip_variants=(),
+            recommended_keep_signal_cells=(),
+            recommended_flip_signal_cells=(),
+            recommendation_basis="fit_calibration",
+            recommendation_split=(0, 0),
+            report_split=(0, 0),
+            recommendation_failure_report=None,
+        ),
+    )
+
+    strategy_cfg = StrategyConfig()
+    object.__setattr__(
+        strategy_cfg,
+        "candidate",
+        replace(
+            strategy_cfg.candidate,
+            ml_fit_fraction=0.5,
+            ml_calibration_fraction=0.2,
+            purge_bars=0,
+            embargo_bars=0,
+        ),
+    )
+    alpha_foundry_config = AlphaFoundryRuntimeConfig(
+        mode="gate",
+        report_dir=tmp_path,
+        enable_correlation_audit=True,
+    )
+
+    run_candidate_strategy_for_universe(
+        ["BTCUSDT"],
+        "4h",
+        strategy_cfg=strategy_cfg,
+        preloaded_data_maps={"BTCUSDT": {"4h": pd.DataFrame()}},
+        alpha_foundry_config=alpha_foundry_config,
+    )
+
+    written = list(tmp_path.glob("*_family_correlation.parquet"))
+    assert len(written) == 1
+
+
 def test_bridge_wf_fold_pass_ratio_blocks_when_all_folds_fail(monkeypatch: Any) -> None:
     """min_wf_fold_pass_ratio gate: 모든 폴드 cost survival 실패 시 zero weights 반환."""
     from types import SimpleNamespace

@@ -3,9 +3,13 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from src.domain.futures.alpha_foundry.contracts import CheapGateEvidence
+from src.domain.futures.alpha_foundry.contracts import (
+    AlphaFoundryRuntimeConfig,
+    CheapGateEvidence,
+)
 from src.domain.futures.alpha_foundry.diversity import (
     _paired_score_corr,
+    audit_full_family_correlation,
     cluster_correlated_recipes,
     compute_panel_correlation_matrix,
     estimate_effective_test_count,
@@ -119,6 +123,8 @@ class TestClusterCorrelatedRecipes:
             reject_reasons=(),
             bootstrap_lcb_bps=0.4,
             bootstrap_agree=True,
+            mean_gross_bps=0.0,
+            total_cost_bps=0.0,
         )
 
     def test_groups_highly_correlated(self) -> None:
@@ -150,3 +156,102 @@ class TestEstimateEffectiveTestCount:
     def test_raises_on_non_square(self) -> None:
         with pytest.raises(ValueError, match="square"):
             estimate_effective_test_count(np.ones((3, 4)))
+
+
+# ---------------------------------------------------------------------------
+# Rule 3 — Family correlation audit
+# ---------------------------------------------------------------------------
+
+def _make_multi_family_panel_fixtures(n_families: int = 4) -> list[CandidateSignalPanel]:
+    t, n = 50, 2
+    datetimes = np.arange(
+        np.datetime64("2026-01-01"),
+        np.datetime64("2026-01-01") + np.timedelta64(t, "h"),
+        np.timedelta64(1, "h"),
+        dtype="datetime64[ns]",
+    )
+    panels: list[CandidateSignalPanel] = []
+    for i in range(n_families):
+        rng = np.random.default_rng(42 + i)
+        score = rng.normal(0, 1, (t, n))
+        side = np.where(score > 0, np.int8(1), np.int8(-1))
+        panels.append(CandidateSignalPanel(
+            family=f"family_{i}",
+            variant=f"v{i}",
+            params={},
+            datetimes=datetimes,
+            symbols=tuple(f"s{j}" for j in range(n)),
+            signed_score_2d=score,
+            side_hint_2d=side,
+            expected_holding_bars=3,
+            min_holding_bars=1,
+            stop_atr_mult=2.0,
+            take_profit_atr_mult=4.0,
+            turnover_proxy_2d=np.zeros((t, n), dtype=np.float64),
+            valid_mask_2d=np.ones((t, n), dtype=bool),
+            metadata={},
+        ))
+    return panels
+
+
+def test_family_correlation_audit_disabled_by_default() -> None:
+    cfg = AlphaFoundryRuntimeConfig()
+    assert cfg.enable_correlation_audit is False
+
+
+def test_audit_full_family_correlation_matrix_symmetric() -> None:
+    panels = _make_multi_family_panel_fixtures(n_families=4)
+    active_mask = np.ones(panels[0].signed_score_2d.shape, dtype=bool)
+    result = audit_full_family_correlation(
+        panels=panels, active_mask=active_mask, run_id="test", timeframe="4h",
+    )
+    assert set(result.columns) == {
+        "family_a", "variant_a", "family_b", "variant_b",
+        "timeframe", "pairwise_corr", "cluster_id", "run_id",
+    }
+    summary_rows = result[result["family_a"] == "__SUMMARY__"]
+    assert len(summary_rows) == 1
+
+
+def test_audit_full_family_correlation_raises_on_empty_panels() -> None:
+    with pytest.raises(ValueError, match="panels must not be empty"):
+        audit_full_family_correlation(
+            panels=(), active_mask=np.ones((10, 2), dtype=bool),
+            run_id="test", timeframe="4h",
+        )
+
+
+def test_audit_full_family_correlation_clustering_branch() -> None:
+    """패널이 높은 상관관계를 가질 때 clustering branch가 실행됨을 검증."""
+    t, n = 50, 3
+    datetimes = np.arange(
+        np.datetime64("2026-01-01"),
+        np.datetime64("2026-01-01") + np.timedelta64(t, "h"),
+        np.timedelta64(1, "h"),
+        dtype="datetime64[ns]",
+    )
+    rng = np.random.default_rng(99)
+    base_score = rng.normal(0, 1, (t, n))
+    panels: list = []
+    for i in range(3):
+        score = base_score + rng.normal(0, 0.01, (t, n))
+        side = np.where(score > 0, np.int8(1), np.int8(-1))
+        panels.append(CandidateSignalPanel(
+            family=f"fam_{i}", variant=f"v{i}", params={},
+            datetimes=datetimes, symbols=tuple(f"s{j}" for j in range(n)),
+            signed_score_2d=score, side_hint_2d=side,
+            expected_holding_bars=3, min_holding_bars=1,
+            stop_atr_mult=2.0, take_profit_atr_mult=4.0,
+            turnover_proxy_2d=np.zeros((t, n), dtype=np.float64),
+            valid_mask_2d=np.ones((t, n), dtype=bool),
+            metadata={},
+        ))
+    active_mask = np.ones((t, n), dtype=bool)
+    result = audit_full_family_correlation(
+        panels=panels, active_mask=active_mask, run_id="test", timeframe="4h",
+        max_corr=0.5,
+    )
+    assert set(result.columns) == {
+        "family_a", "variant_a", "family_b", "variant_b",
+        "timeframe", "pairwise_corr", "cluster_id", "run_id",
+    }
