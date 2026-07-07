@@ -267,7 +267,7 @@ class CheapGateEvidence:
     gate_passed: bool
     reject_reasons: tuple[CheapGateRejectReason, ...]
     mean_gross_bps: float
-    total_cost_bps: float
+    mean_cost_bps: float
 
 
 @dataclass(slots=True, frozen=True)
@@ -330,7 +330,7 @@ class AlphaFoundryEvidenceRow:
     corroboration_tier: str = ""
     stage_label: str = ""
     mean_gross_bps: float = 0.0
-    total_cost_bps: float = 0.0
+    mean_cost_bps: float = 0.0
 
 
 @dataclass(slots=True, frozen=True)
