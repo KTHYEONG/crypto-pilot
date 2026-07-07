@@ -39,6 +39,7 @@ L0SoftFlag: TypeAlias = Literal[
     "below_conviction_floor",
     "insufficient_tf_coverage",
     "high_bucket_corr",
+    "weak_rank_ic",
 ]
 
 L0HandoffExclusionReason: TypeAlias = Literal[
@@ -84,6 +85,7 @@ class L0PriorityWeights:
     insufficient_coverage_multiplier: float = 0.70
     contradicted_multiplier: float = 0.00
     corr_soft_floor: float = 0.85
+    weak_rank_ic_multiplier: float = 0.70
 
 
 @dataclass(slots=True, frozen=True)
@@ -264,6 +266,8 @@ class CheapGateEvidence:
     bootstrap_agree: bool
     gate_passed: bool
     reject_reasons: tuple[CheapGateRejectReason, ...]
+    mean_gross_bps: float
+    total_cost_bps: float
 
 
 @dataclass(slots=True, frozen=True)
@@ -325,6 +329,8 @@ class AlphaFoundryEvidenceRow:
     sign_agreement_ratio: float = 0.0
     corroboration_tier: str = ""
     stage_label: str = ""
+    mean_gross_bps: float = 0.0
+    total_cost_bps: float = 0.0
 
 
 @dataclass(slots=True, frozen=True)
@@ -441,6 +447,7 @@ class AlphaFoundryRuntimeConfig:
     l2_policy: L2PosteriorPolicyConfig = field(default_factory=L2PosteriorPolicyConfig)
     enable_fast_discovery_timeframes: bool = False
     fast_discovery_timeframes: tuple[str, ...] = ("1h", "2h")
+    enable_correlation_audit: bool = False
 
     def __post_init__(self) -> None:
         if self.mode not in {"off", "audit", "gate"}:
