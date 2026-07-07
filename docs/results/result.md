@@ -1,290 +1,51 @@
-🔍 [TF-PROBE AUDIT] SOURCE READINESS Dashboard
-  ├── 4h   : Ready 296/296 | Median Bars: 5260   | Mix: 4h:296
-  ├── 6h   : Ready 296/296 | Median Bars: 21040  | Mix: 1h:296
-  ├── 8h   : Ready 296/296 | Median Bars: 21040  | Mix: 1h:296
-  ├── 12h  : Ready 296/296 | Median Bars: 21040  | Mix: 1h:296
-================================================================================
-SYSTEM CONTEXT | DATA PIPELINE PREPARATION
-================================================================================
+# L0 Alpha Foundry Evidence — Raw Data
 
-TIME PROFILE
-  Test Horizon  : 2023-01-01 ~ 2026-06-30
-  IS / OOS Split: 2026-01-01 (In-Sample Cutoff)
+- Run id: `4h_1783394043`
+- Timeframe: 4h
+- Command: `UV_CACHE_DIR=/tmp/uv-cache PYTHONPATH=. timeout 900 uv run python src/execution/opt_main_futures.py --phase l1 --sync skip --timeframe 4h --trials 1 --seed 42 --alpha-foundry gate --alpha-foundry-total-l1-budget 30 --alpha-foundry-min-conviction-lcb-bps 5.0`
+- Source: `logs/futures/alpha_foundry/4h_1783394043_evidence.parquet` (28 rows, 20 families)
+- 정렬: `mean_net_bps` 내림차순
 
-UNIVERSE FUNNEL
-  [1] Market Pool     : 414 symbols discovered (Binance USDT-M)
-  [2] Capacity Limit  : 150 symbols selected (Top-N Liquidity)
-  [3] Integrity Pass  : 65 symbols loaded (Passed Gaps & Frozen checks)
+| family | variant | archetype | n_events | effective_n | mean_gross_bps | mean_cost_bps | mean_net_bps | nw_tstat | block_lcb_bps | rank_ic | cost_drag_ratio | turnover_per_year | bootstrap_lcb_bps | bootstrap_agree | gate_passed | discovery_tier | reject_reasons | hard_reject_reasons | soft_flags | selected_for_l1 | l1_priority_score | l1_budget_units |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| trend_pullback_continuation | tpc_50_200_4h | trend | 15159 | 15159.0 | 67.2619 | 30.1846 | 37.0773 | 1.1873 | 5.8457 | -0.0924 | 0.4488 | 62.2939 | -14.0956 | False | False | seed | weak_tstat | | weak_tstat\|bootstrap_disagree | True | 13.6536 | 1 |
+| mtf_breakout_retest | mtf_bor_20_4h | trend | 11410 | 11410.0 | 53.4975 | 20.3520 | 33.1454 | 1.5547 | 11.9516 | 0.0078 | 0.3804 | 46.8158 | 0.6837 | True | True | seed | | | weak_rank_ic | True | 12.0751 | 1 |
+| lsr_oi_regime_filter | lsr_oi_gate_42_4h | hedge | 1764 | 1764.0 | 64.2528 | 34.3252 | 29.9276 | 1.0994 | 2.6383 | -0.0318 | 0.5342 | 132.3275 | -12.6602 | False | False | seed | weak_tstat | | weak_tstat\|bootstrap_disagree\|below_conviction_floor | True | 9.4606 | 1 |
+| mtf_breakout_retest | mtf_bor_40_4h | trend | 7366 | 7366.0 | 44.9978 | 20.7430 | 24.2548 | 0.8900 | -3.0733 | 0.0147 | 0.4610 | 30.2133 | -15.2238 | True | False | blocked | non_positive_lcb\|weak_tstat | deep_negative_lcb | weak_tstat | False | 3.7587 | 0 |
+| trend_ma | ema_18_108 | trend | 6962 | 6962.0 | 35.1545 | 19.8272 | 15.3273 | 0.4731 | -16.9131 | -0.0375 | 0.5640 | 28.5204 | -29.2790 | True | False | blocked | non_positive_lcb\|weak_tstat | deep_negative_lcb | weak_tstat | False | -8.8530 | 0 |
+| mtf_trend_pullback | mtf_tpb_20_30_4h | trend | 8765 | 8765.0 | 29.3110 | 21.5817 | 7.7293 | 0.2318 | -22.3027 | 0.0747 | 0.7363 | 35.9691 | -42.4465 | True | False | blocked | non_positive_lcb\|weak_tstat\|excess_cost_drag | excess_cost_drag\|deep_negative_lcb | weak_tstat | False | -14.7947 | 0 |
+| mtf_trend_pullback | mtf_tpb_50_30_4h | trend | 11985 | 11985.0 | 25.1563 | 20.5747 | 4.5816 | 0.1288 | -23.9016 | 0.0540 | 0.8179 | 49.1818 | -41.0724 | True | False | blocked | non_positive_lcb\|weak_tstat\|excess_cost_drag | excess_cost_drag\|deep_negative_lcb | weak_tstat | False | -16.7808 | 0 |
+| trend_pullback_continuation | tpc_20_100_4h | trend | 28049 | 28049.0 | 21.7844 | 19.4649 | 2.3195 | 0.2144 | -8.5264 | -0.0273 | 0.8935 | 115.1651 | -13.3861 | True | False | blocked | non_positive_lcb\|weak_tstat\|excess_cost_drag | excess_cost_drag\|deep_negative_lcb | weak_tstat | False | -5.8149 | 0 |
+| trend_ma | ema_12_72 | trend | 10579 | 10579.0 | 16.5631 | 20.3220 | -3.7589 | -0.1956 | -27.5299 | -0.0565 | 1.2269 | 43.3952 | -40.5609 | True | False | blocked | non_positive_lcb\|weak_tstat\|excess_cost_drag | excess_cost_drag\|deep_negative_lcb | weak_tstat | False | -21.5872 | 0 |
+| residual_reversion | rr_24_4h | hedge | 26985 | 26985.0 | 7.9969 | 13.8122 | -5.8153 | -1.0689 | -11.2581 | -0.0294 | 1.7272 | 110.7041 | -14.6424 | True | False | blocked | non_positive_lcb\|weak_tstat\|excess_cost_drag | excess_cost_drag\|deep_negative_lcb | weak_tstat | False | -9.8974 | 0 |
+| dual_momentum | dm_24_96_4h | trend | 28413 | 28413.0 | 21.4400 | 29.8665 | -8.4265 | -0.3370 | -32.2753 | -0.0209 | 1.3930 | 116.8272 | -46.8194 | True | False | blocked | non_positive_lcb\|weak_tstat\|excess_cost_drag | excess_cost_drag\|deep_negative_lcb | weak_tstat | False | -26.3131 | 0 |
+| macd_4h | macd_12_26_9 | trend | 41038 | 41038.0 | 11.5866 | 20.1605 | -8.5739 | -0.9065 | -17.9175 | -0.0290 | 1.7400 | 168.5247 | -24.4701 | True | False | blocked | non_positive_lcb\|weak_tstat\|excess_cost_drag | excess_cost_drag\|deep_negative_lcb | weak_tstat | False | -15.5816 | 0 |
+| btc_regime_pullback | btc_pullback_50_4h | trend | 18638 | 18638.0 | 15.7391 | 24.9281 | -9.1889 | -0.3242 | -38.3472 | -0.0095 | 1.5838 | 76.5305 | -50.6201 | True | False | blocked | non_positive_lcb\|weak_tstat\|excess_cost_drag | excess_cost_drag\|deep_negative_lcb | weak_tstat | False | -31.0576 | 0 |
+| funding_extreme_reversal | fer_168_4h | flow | 16353 | 16353.0 | -9.1037 | 1.3927 | -10.4963 | -0.4475 | -33.9385 | 0.0506 | 0.1530 | 67.1837 | -45.6004 | True | False | blocked | non_positive_lcb\|weak_tstat | deep_negative_lcb | weak_tstat | False | -28.0779 | 0 |
+| dual_momentum | dm_12_48_4h | trend | 40376 | 40376.0 | 8.6589 | 20.2354 | -11.5765 | -1.0644 | -22.3660 | 0.0096 | 2.3369 | 165.8161 | -30.8665 | True | False | blocked | non_positive_lcb\|weak_tstat\|excess_cost_drag | excess_cost_drag\|deep_negative_lcb | weak_tstat | False | -19.6686 | 0 |
+| ichimoku_trend | ichi_9_26 | trend | 45205 | 45205.0 | 14.4404 | 27.3644 | -12.9241 | -0.8601 | -28.1508 | -0.0243 | 1.8950 | 8.5997 | -36.2168 | True | False | blocked | non_positive_lcb\|weak_tstat\|excess_cost_drag | excess_cost_drag\|deep_negative_lcb | weak_tstat | False | -24.3441 | 0 |
+| residual_reversion | rr_48_4h | hedge | 27201 | 27201.0 | 0.6660 | 15.0539 | -14.3879 | -1.4177 | -24.5346 | -0.0141 | 22.6032 | 111.6398 | -28.5426 | True | False | blocked | non_positive_lcb\|excess_cost_drag | excess_cost_drag\|deep_negative_lcb | | False | -21.9979 | 0 |
+| taker_imbalance_momentum | tim_12_4h | trend | 41552 | 41552.0 | 4.9104 | 20.4982 | -15.5878 | -2.6099 | -21.3194 | -0.0130 | 4.1745 | 256.2057 | -25.7045 | True | False | blocked | non_positive_lcb\|excess_cost_drag | excess_cost_drag\|deep_negative_lcb | | False | -19.8865 | 0 |
+| taker_imbalance_momentum | tim_24_4h | trend | 42991 | 42991.0 | 4.4378 | 21.0059 | -16.5681 | -2.8317 | -22.2313 | -0.0136 | 4.7334 | 265.0635 | -25.5626 | True | False | blocked | non_positive_lcb\|excess_cost_drag | excess_cost_drag\|deep_negative_lcb | | False | -20.8155 | 0 |
+| supertrend | st_10_4h | trend | 16347 | 16347.0 | 5.7279 | 23.4742 | -17.7463 | -0.8012 | -39.6051 | -0.0545 | 4.0982 | 67.1201 | -52.5325 | True | False | blocked | non_positive_lcb\|weak_tstat\|excess_cost_drag | excess_cost_drag\|deep_negative_lcb | weak_tstat | False | -34.1404 | 0 |
+| xs_flow | xs_flow_24_4h | cross_sectional | 147324 | 147324.0 | -2.1522 | 20.3263 | -22.4785 | -13.7439 | -24.0930 | -0.0128 | 9.4442 | 908.3113 | -25.5327 | True | False | blocked | non_positive_lcb\|excess_cost_drag\|excess_turnover | excess_cost_drag\|excess_turnover\|deep_negative_lcb | | False | -23.6894 | 0 |
+| vol_term_structure_gate | vts_gate_20_4h | trend | 32985 | 32985.0 | 3.5781 | 26.6493 | -23.0712 | -0.9164 | -48.2283 | -0.0312 | 7.4479 | 135.4284 | -57.4346 | True | False | blocked | non_positive_lcb\|weak_tstat\|excess_cost_drag | excess_cost_drag\|deep_negative_lcb | weak_tstat | False | -41.9390 | 0 |
+| xs_momentum | xs_mom_48 | cross_sectional | 34404 | 34404.0 | 3.0034 | 27.6735 | -24.6702 | -4.2099 | -30.5177 | -0.0278 | 9.2142 | 140.9769 | -34.4864 | True | False | blocked | non_positive_lcb\|excess_cost_drag | excess_cost_drag\|deep_negative_lcb | | False | -29.0558 | 0 |
+| xs_momentum | xs_mom_12 | cross_sectional | 65072 | 65072.0 | -6.4068 | 24.1834 | -30.5902 | -9.5272 | -33.7630 | -0.0396 | 3.7746 | 267.0400 | -35.5569 | True | False | blocked | non_positive_lcb\|excess_cost_drag | excess_cost_drag\|deep_negative_lcb | | False | -32.9698 | 0 |
+| trend_donchian | donchian_72_4h | trend | 14660 | 14660.0 | -4.7883 | 29.8878 | -34.6762 | -0.7022 | -86.9637 | 0.0368 | 6.2418 | 60.3855 | -111.2376 | True | False | blocked | non_positive_lcb\|weak_tstat\|excess_cost_drag | excess_cost_drag\|deep_negative_lcb | weak_tstat | False | -73.8918 | 0 |
+| xs_oi_skew | xs_oi_42_4h | cross_sectional | 6058 | 6058.0 | -6.9691 | 30.5715 | -37.5406 | -3.6041 | -48.9626 | 0.0194 | 4.3867 | 453.6944 | -54.9892 | True | False | blocked | non_positive_lcb\|excess_cost_drag\|excess_turnover | excess_cost_drag\|excess_turnover\|deep_negative_lcb | | False | -46.1071 | 0 |
+| vol_breakout | bb_compress_20_4h | trend | 5705 | 5705.0 | -27.7031 | 26.8699 | -54.5730 | -2.1311 | -82.2660 | -0.0237 | 0.9699 | 23.4500 | -100.3154 | True | False | blocked | non_positive_lcb\|excess_cost_drag | excess_cost_drag\|deep_negative_lcb | | False | -75.3428 | 0 |
+| funding_flow_carry | ffc_96_4h | carry | 77 | 77.0 | -75.5862 | 75.1878 | -150.7740 | -0.9377 | -277.4220 | 0.1841 | 0.9947 | 0.4751 | -277.4220 | True | False | blocked | non_positive_lcb\|weak_tstat\|excess_cost_drag | excess_cost_drag\|deep_negative_lcb | weak_tstat | False | -245.7600 | 0 |
 
-STRATEGY ENGINE
-  Active Engine : Alpha-Ensemble Engine
-  Target Scope  : 65 symbols ready for Layer 1 execution
+## 필드 정의
 
---------------------------------------------------------------------------------
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-● [LAYER 1: SIGNAL ROBUSTNESS & ENSEMBLE VERIFICATION]
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-📊 [L1: SWF SCOPE & ADMISSION]
-  ├─ Symbols : 54/65 Admitted
-  └─ Details : Base 65 | Dropped 11 (late_start: 11)
-🧬 [L1: MULTI-TF PANEL INJECTION]
-  └─ Active : [12h] Proj=16 Syms=54 | [8h] Proj=14 Syms=54 | [6h] Proj=14 Syms=54
-
-● [LAYER 1 OUTER FOLD READINESS]
-──────────────────────────────────────────────────────────────────────────────
-  STATUS  : ✅ READY (4/4 Folds Ready)
-
-  [✅] Fold #0 (FitEnd: 2023-12-30 -> OOS: 2023-12-30 ~ 2024-03-30)
-       ├─ Symbols : 23 symbols loaded [ADAUSDT, ANKRUSDT, API3USDT, ARPAUSDT, ARUSDT, ATOMUSDT, AVAXUSDT, BCHUSDT, +15 more]
-       ├─ Events  : 9654 unique events
-       └─ Quality : Edge: 120.92 bps
-
-  [✅] Fold #1 (FitEnd: 2024-03-30 -> OOS: 2024-03-31 ~ 2024-06-30)
-       ├─ Symbols : 24 symbols loaded [1000XECUSDT, ADAUSDT, ANKRUSDT, API3USDT, ARPAUSDT, ATOMUSDT, AXSUSDT, CRVUSDT, +16 more]
-       ├─ Events  : 10011 unique events
-       └─ Quality : Edge: 75.27 bps
-
-  [✅] Fold #2 (FitEnd: 2024-06-30 -> OOS: 2024-06-30 ~ 2024-09-30)
-       ├─ Symbols : 26 symbols loaded [1000XECUSDT, ADAUSDT, API3USDT, ARPAUSDT, ARUSDT, ATOMUSDT, AVAXUSDT, BNBUSDT, +18 more]
-       ├─ Events  : 10571 unique events
-       └─ Quality : Edge: 89.29 bps
-
-  [✅] Fold #3 (FitEnd: 2024-09-30 -> OOS: 2024-09-30 ~ 2024-12-30)
-       ├─ Symbols : 26 symbols loaded [1000SHIBUSDT, 1000XECUSDT, AAVEUSDT, API3USDT, ARUSDT, AXSUSDT, BCHUSDT, BNBUSDT, +18 more]
-       ├─ Events  : 10590 unique events
-       └─ Quality : Edge: 76.33 bps
-
-──────────────────────────────────────────────────────────────────────────────
-🏁 STATUS : ✅ PASSED (5/5 Passed)
-  👉 Cov:1.000(>=0.80) | Qual:1.000(>=0.90) | Brd:35.129(>=3.00) | Fld:1.000(>=0.50) | Prf:74.060(>0.00)
-
-🏆 [L1 FINAL PROMOTION SUMMARY] 🚀 (Top 5 / 36 Promoted)
-  RANK  SYMBOL       STRATEGY (Family)                EDGE(bps)  LCB(bps)    CONV    FOLDS   t(blk)
-  ────  ──────────   ───────────────────────────────  ─────────  ────────  ──────  ───────  ───────
-  #1    KAVAUSDT     trend_pullback_continuation ...     +236.3    +162.7    1.00      3/4     3.60
-  #2    SANDUSDT     trend_pullback_continuation ...     +325.4    +144.5    1.00      4/4     2.55
-  #3    1000SHIBUSDT residual_reversion (rr_48_4h)       +191.0    +140.8    1.00      4/4     5.85
-  #4    RUNEUSDT     trend_donchian (donchian_72_4h)     +238.8    +129.1    1.00      3/4     2.42
-  #5    ZILUSDT      trend_pullback_continuation ...     +231.8    +127.9    1.00      4/4     3.74
-  └─ 🚀 And 31 more pairs promoted (e.g. ZECUSDT, GALAUSDT, THETAUSDT, ANKRUSDT, XLMUSDT, AXSUSDT, +25 more)
-  ────  ──────────   ───────────────────────────────  ─────────  ────────  ──────  ───────  ───────
-  [NOT PROMOTED] 1406 pairs | top: no_incremental_edgex702, quality_weight_zerox690, negative_gross_edgex186
-
-
-● [LAYER 1 OUTER FOLD READINESS]
-──────────────────────────────────────────────────────────────────────────────
-  STATUS  : ✅ READY (4/4 Folds Ready)
-
-  [✅] Fold #0 (FitEnd: 2023-12-30 -> OOS: 2023-12-30 ~ 2024-03-30)
-       ├─ Symbols : 14 symbols loaded [AAVEUSDT, ADAUSDT, ARUSDT, ATOMUSDT, BCHUSDT, DOTUSDT, GALAUSDT, KAVAUSDT, +6 more]
-       ├─ Events  : 6001 unique events
-       └─ Quality : Edge: 141.54 bps
-
-  [✅] Fold #1 (FitEnd: 2024-03-30 -> OOS: 2024-03-31 ~ 2024-06-30)
-       ├─ Symbols : 15 symbols loaded [AAVEUSDT, ADAUSDT, ANKRUSDT, ATOMUSDT, BNBUSDT, CRVUSDT, DOTUSDT, ETCUSDT, +7 more]
-       ├─ Events  : 5379 unique events
-       └─ Quality : Edge: 19.55 bps
-
-  [✅] Fold #2 (FitEnd: 2024-06-30 -> OOS: 2024-06-30 ~ 2024-09-30)
-       ├─ Symbols : 23 symbols loaded [AAVEUSDT, ADAUSDT, ATOMUSDT, AXSUSDT, BNBUSDT, CRVUSDT, DOTUSDT, ETCUSDT, +15 more]
-       ├─ Events  : 8852 unique events
-       └─ Quality : Edge: 66.93 bps
-
-  [✅] Fold #3 (FitEnd: 2024-09-30 -> OOS: 2024-09-30 ~ 2024-12-30)
-       ├─ Symbols : 20 symbols loaded [AAVEUSDT, ADAUSDT, ARPAUSDT, ATOMUSDT, AXSUSDT, BNBUSDT, ETCUSDT, ETHUSDT, +12 more]
-       ├─ Events  : 5317 unique events
-       └─ Quality : Edge: 91.80 bps
-
-──────────────────────────────────────────────────────────────────────────────
-🏁 STATUS : ✅ PASSED (5/5 Passed)
-  👉 Cov:1.000(>=0.80) | Qual:1.000(>=0.90) | Brd:25.165(>=3.00) | Fld:1.000(>=0.50) | Prf:42.665(>0.00)
-
-🏆 [L1 FINAL PROMOTION SUMMARY] 🚀 (Top 5 / 31 Promoted)
-  RANK  SYMBOL       STRATEGY (Family)                EDGE(bps)  LCB(bps)    CONV    FOLDS   t(blk)
-  ────  ──────────   ───────────────────────────────  ─────────  ────────  ──────  ───────  ───────
-  #1    STORJUSDT    trend_pullback_continuation ...     +287.2    +183.2    1.00      3/3     3.08
-  #2    ZRXUSDT      trend_donchian (donchian_72_6h)     +325.7    +147.5    1.00      3/3     2.69
-  #3    ANKRUSDT     trend_donchian (donchian_72_6h)     +248.0    +146.8    1.00      3/3     4.14
-  #4    GALAUSDT     trend_donchian (donchian_72_6h)     +277.7    +120.7    1.00      4/4     3.79
-  #5    ARUSDT       trend_donchian (donchian_72_6h)     +250.0    +108.7    1.00      4/4     2.82
-  └─ 🚀 And 26 more pairs promoted (e.g. LTCUSDT, XLMUSDT, DYDXUSDT, BNBUSDT, THETAUSDT, 1000SHIBUSDT, +20 more)
-  ────  ──────────   ───────────────────────────────  ─────────  ────────  ──────  ───────  ───────
-  [NOT PROMOTED] 617 pairs | top: quality_weight_zerox342, no_incremental_edgex275, negative_gross_edgex65
-
-
-● [LAYER 1 OUTER FOLD READINESS]
-──────────────────────────────────────────────────────────────────────────────
-  STATUS  : ✅ READY (4/4 Folds Ready)
-
-  [✅] Fold #0 (FitEnd: 2023-12-30 -> OOS: 2023-12-30 ~ 2024-03-30)
-       ├─ Symbols : 11 symbols loaded [ARUSDT, ATOMUSDT, BCHUSDT, DOTUSDT, GALAUSDT, MANAUSDT, NEARUSDT, SANDUSDT, +3 more]
-       ├─ Events  : 4371 unique events
-       └─ Quality : Edge: 116.89 bps
-
-  [✅] Fold #1 (FitEnd: 2024-03-30 -> OOS: 2024-03-31 ~ 2024-06-30)
-       ├─ Symbols : 14 symbols loaded [AAVEUSDT, ADAUSDT, ATOMUSDT, BNBUSDT, ETCUSDT, GALAUSDT, IOTAUSDT, KAVAUSDT, +6 more]
-       ├─ Events  : 5258 unique events
-       └─ Quality : Edge: 97.17 bps
-
-  [✅] Fold #2 (FitEnd: 2024-06-30 -> OOS: 2024-06-30 ~ 2024-09-30)
-       ├─ Symbols : 18 symbols loaded [AAVEUSDT, ADAUSDT, ATOMUSDT, BNBUSDT, DOTUSDT, GALAUSDT, JASMYUSDT, KAVAUSDT, +10 more]
-       ├─ Events  : 5817 unique events
-       └─ Quality : Edge: 87.53 bps
-
-  [✅] Fold #3 (FitEnd: 2024-09-30 -> OOS: 2024-09-30 ~ 2024-12-30)
-       ├─ Symbols : 10 symbols loaded [AAVEUSDT, BNBUSDT, GALAUSDT, JASMYUSDT, NEARUSDT, RUNEUSDT, THETAUSDT, TRBUSDT, +2 more]
-       ├─ Events  : 2253 unique events
-       └─ Quality : Edge: 114.08 bps
-
-──────────────────────────────────────────────────────────────────────────────
-🏁 STATUS : ✅ PASSED (5/5 Passed)
-  👉 Cov:1.000(>=0.80) | Qual:1.000(>=0.90) | Brd:19.922(>=3.00) | Fld:1.000(>=0.50) | Prf:78.628(>0.00)
-
-🏆 [L1 FINAL PROMOTION SUMMARY] 🚀 (Top 5 / 34 Promoted)
-  RANK  SYMBOL       STRATEGY (Family)                EDGE(bps)  LCB(bps)    CONV    FOLDS   t(blk)
-  ────  ──────────   ───────────────────────────────  ─────────  ────────  ──────  ───────  ───────
-  #1    1000SHIBUSDT dual_momentum (dm_6_24_8h)          +194.2    +136.2    1.00      4/4     4.24
-  #2    GALAUSDT     trend_donchian (donchian_72_8h)     +277.2    +122.7    1.00      4/4     3.54
-  #3    XLMUSDT      trend_donchian (donchian_72_8h)     +350.5    +104.8    0.99      3/4     1.80
-  #4    JASMYUSDT    dual_momentum (dm_12_48_8h)         +221.9     +91.1    1.00      4/4     2.69
-  #5    RUNEUSDT     trend_donchian (donchian_72_8h)     +210.8     +88.8    0.99      3/4     2.08
-  └─ 🚀 And 29 more pairs promoted (e.g. SNXUSDT, NEARUSDT, UNIUSDT, ARPAUSDT, ZECUSDT, DOTUSDT, +23 more)
-  ────  ──────────   ───────────────────────────────  ─────────  ────────  ──────  ───────  ───────
-  [NOT PROMOTED] 614 pairs | top: quality_weight_zerox311, no_incremental_edgex303, negative_gross_edgex78
-
-
-● [LAYER 1 OUTER FOLD READINESS]
-──────────────────────────────────────────────────────────────────────────────
-  STATUS  : ✅ READY (4/4 Folds Ready)
-
-  [✅] Fold #0 (FitEnd: 2023-12-30 -> OOS: 2023-12-30 ~ 2024-03-30)
-       ├─ Symbols : 22 symbols loaded [1000XECUSDT, ARUSDT, ATOMUSDT, AVAXUSDT, AXSUSDT, BCHUSDT, ETCUSDT, FILUSDT, +14 more]
-       ├─ Events  : 6180 unique events
-       └─ Quality : Edge: 95.67 bps
-
-  [✅] Fold #1 (FitEnd: 2024-03-30 -> OOS: 2024-03-31 ~ 2024-06-30)
-       ├─ Symbols : 18 symbols loaded [1000XECUSDT, ANKRUSDT, ATOMUSDT, AVAXUSDT, BNBUSDT, ETCUSDT, ETHUSDT, FILUSDT, +10 more]
-       ├─ Events  : 5054 unique events
-       └─ Quality : Edge: 80.00 bps
-
-  [✅] Fold #2 (FitEnd: 2024-06-30 -> OOS: 2024-06-30 ~ 2024-09-30)
-       ├─ Symbols : 26 symbols loaded [1000XECUSDT, ANKRUSDT, ARPAUSDT, ATOMUSDT, AVAXUSDT, BNBUSDT, CRVUSDT, DOTUSDT, +18 more]
-       ├─ Events  : 7144 unique events
-       └─ Quality : Edge: 71.07 bps
-
-  [✅] Fold #3 (FitEnd: 2024-09-30 -> OOS: 2024-09-30 ~ 2024-12-30)
-       ├─ Symbols : 26 symbols loaded [1000SHIBUSDT, 1000XECUSDT, AAVEUSDT, ARPAUSDT, ATOMUSDT, AXSUSDT, BCHUSDT, BNBUSDT, +18 more]
-       ├─ Events  : 9138 unique events
-       └─ Quality : Edge: 77.03 bps
-
-──────────────────────────────────────────────────────────────────────────────
-🏁 STATUS : ✅ PASSED (5/5 Passed)
-  👉 Cov:1.000(>=0.80) | Qual:1.000(>=0.90) | Brd:32.061(>=3.00) | Fld:1.000(>=0.55) | Prf:61.523(>0.00)
-
-🏆 [L1 FINAL PROMOTION SUMMARY] 🚀 (Top 5 / 50 Promoted)
-  RANK  SYMBOL       STRATEGY (Family)                EDGE(bps)  LCB(bps)    CONV    FOLDS   t(blk)
-  ────  ──────────   ───────────────────────────────  ─────────  ────────  ──────  ───────  ───────
-  #1    ZRXUSDT      trend_donchian (donchian_72_...     +280.8    +127.9    1.00      3/3     2.51
-  #2    1000SHIBUSDT dual_momentum (dm_4_16_12h)         +201.2    +124.5    1.00      4/4     4.00
-  #3    ANKRUSDT     trend_donchian (donchian_72_...     +225.6     +99.3    1.00      3/3     3.21
-  #4    AXSUSDT      dual_momentum (dm_8_32_12h)         +188.9     +79.6    1.00      4/4     3.42
-  #5    JASMYUSDT    dual_momentum (dm_4_16_12h)         +179.5     +78.1    0.99      4/4     3.02
-  └─ 🚀 And 45 more pairs promoted (e.g. GALAUSDT, AXSUSDT, MTLUSDT, RUNEUSDT, XLMUSDT, ZECUSDT, +39 more)
-  ────  ──────────   ───────────────────────────────  ─────────  ────────  ──────  ───────  ───────
-  [NOT PROMOTED] 652 pairs | top: no_incremental_edgex329, quality_weight_zerox323, negative_gross_edgex78
-
-
-● [LAYER UNIVERSE AUDIT]
-──────────────────────────────────────────────────────────────────────────────
-  LAYER  WINDOW RANGE                    SYMS   ACTIVE (min/med/max)       ENTRY    KILL  WARNINGS
-  ─────  ──────────────────────────────  ────   ────────────────────  ──────────  ──────  ────────
-  L1     2023-06-30 ~ 2024-12-30           54     0 /  51.0 / 54               0      13  —
-──────────────────────────────────────────────────────────────────────────────
-
-
->> LAYER 1: PASS -> Proceeding to Layer 2.
-● [MARKET REGIME STATUS]
-──────────────────────────────────────────────────────────────────────────────
-  Compression  : on                 | Policy Mode : soft
-  States       : 3                  | Status      : 🟢 stable
-  Hard Block   : off                | Risk Cap    : on
-  Source       : fit/cal            | OOS Debug   : evaluation only
-  Distribution : bull=36.1% bear=25.9% crisis=38.0%
-  Note         : L2 verdict is reported separately in [REGIME-L2]
-──────────────────────────────────────────────────────────────────────────────
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-● [LAYER 2: OPTUNA TUNING]
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-  ● [STUDY] l2_study_8h_8fd9d58f88b8
-  ────────────────────────────────────────────────────────────────────────────
-    Optuna DB : SQLite (/home/kth/my_coin_traider/logs/futures/optimization/optuna.db)
-    Trials    : 200             | Events  : 80347          
-    Symbols   : 40             
-  ────────────────────────────────────────────────────────────────────────────
-[L2-OPT]: 100%|██████████████████████████████████████████████████| 200/200 [02:09<00:00,  1.55it/s, Best CAGR: 231.23% | Current: 214.74%]
-  ● [FINAL SIMULATION]
-  ● [FINAL SIMULATION RESULT]
-  ────────────────────────────────────────────────────────────────────────────
-    Leverage (L*) : 2.0646 (binding: champion)
-    CAGR / MDD    : +50.6% / 17.4%
-    CVaR95 / Util : 1.7% / 58.1%
-  ────────────────────────────────────────────────────────────────────────────
-● [LAYER 2 PORTFOLIO SCORECARD] (2025-03-23 ~ 2025-12-30)
-──────────────────────────────────────────────────────────────────────────────
-  STATUS  : ✅ PASS
-
-  ✅ [Growth    ] CAGR: +50.6% (>=30.0%) | PnL: +38.2% | Equity x1.38
-  ✅ [Efficiency] Sharpe: 1.483 (>=1.000) | Sortino: 2.822 (>=1.500) | Calmar: 2.903 (>=1.000)
-  ✅ [Risk      ] MDD: 17.4% (<=30.0%) | CVaR95: 1.7% (<=6.0%) | RiskUtil: 58.1%
-  ✅ [Robust    ] Fold: 100.0% (>=60.0%) | Trades: 830 (>=30) | Friction: 97.7%
-  ✅ [Uplift    ] Sharpe Uplift: +1.13 (>=+0.20)
-  ✅ [Integrity ] DSR: 0.720 (>=0.60) | PSR: 0.983 (diag)
-  [Diag     ] RelMDD: 1.74x | Turnover: 0.125
-──────────────────────────────────────────────────────────────────────────────
-
-  [ FOLD DETAIL BREAKDOWN ]
-  ──────────────────────────────────────────────────────────────────────────
-  ├─ Fold #1 : ✅ Sharpe:  2.019 | CAGR:   +81.5% | MDD:  11.7% | Status: PASS | Period: 2025-03-23 ~ 2025-06-25
-       Symbols: 19 [1000SHIBUSDT, AAVEUSDT, AXSUSDT, BCHUSDT, BNBUSDT, BTCUSDT, DOGEUSDT, FILUSDT, +11 more]
-  ├─ Fold #2 : ✅ Sharpe:  1.277 | CAGR:   +36.9% | MDD:  17.4% | Status: PASS | Period: 2025-06-25 ~ 2025-09-27
-       Symbols: 29 [1000SHIBUSDT, AAVEUSDT, ADAUSDT, ATOMUSDT, AVAXUSDT, AXSUSDT, BCHUSDT, BNBUSDT, +21 more]
-  └─ Fold #3 : ✅ Sharpe:  1.137 | CAGR:   +37.6% | MDD:  13.2% | Status: PASS | Period: 2025-09-27 ~ 2025-12-30
-       Symbols: 28 [1000SHIBUSDT, AAVEUSDT, ADAUSDT, ARUSDT, ATOMUSDT, AVAXUSDT, AXSUSDT, BCHUSDT, +20 more]
-
-  ⚠️  [WINDOW] NO-CRISIS-WINDOW — 이 평가 윈도우는 병목-caliber fold(MDD>=15% & CAGR<=0)를 포함하지 않음. 승격 근거로 인용 금지 (docs/results/next.md P0).
-
-● [LAYER UNIVERSE AUDIT]
-──────────────────────────────────────────────────────────────────────────────
-  LAYER  WINDOW RANGE                    SYMS   ACTIVE (min/med/max)       ENTRY    KILL  WARNINGS
-  ─────  ──────────────────────────────  ────   ────────────────────  ──────────  ──────  ────────
-  L2     2024-12-31 ~ 2025-12-30           54    31 /  38.0 / 45           1,098      21  —
-──────────────────────────────────────────────────────────────────────────────
-
->> LAYER 2: PASS -> Proceeding to Final Holdout.
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-● [LAYER 3: FINAL HOLDOUT & DEPLOYMENT READINESS]
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-● [LAYER UNIVERSE AUDIT]
-──────────────────────────────────────────────────────────────────────────────
-  LAYER  WINDOW RANGE                    SYMS   ACTIVE (min/med/max)       ENTRY    KILL  WARNINGS
-  ─────  ──────────────────────────────  ────   ────────────────────  ──────────  ──────  ────────
-  L3     2025-12-31 ~ 2026-06-30           54    27 /  31.0 / 34           4,331      10  —
-──────────────────────────────────────────────────────────────────────────────
-
-● [LAYER 3: HOLDOUT VALIDATION SCORECARD] (2025-12-31 ~ 2026-06-30)
-──────────────────────────────────────────────────────────────────────────────
-  STATUS  : ❌ BLOCKED (Reason: negative_return)
-
-  ❌ [GROWTH    ] CAGR: -13.3% | Total Return: -13.2% (> 0.0%) | Equity x0.87
-  ❌ [EFFICIENCY] Sharpe: -0.933 (>=0.000) | Sortino: -1.242 (>=0.000) | Baseline Sharpe: -0.768
-  ✅ [RISK      ] MDD: 24.7% (<= 35.0%) | CVaR95: 1.1% (<= 6.0%) | Exposure: 1.0x
-  ✅ [DEPLOY-READY] Trades: 241 (>= 10)
-──────────────────────────────────────────────────────────────────────────────
-
-  >> FINAL RESULT : ❌ BLOCKED (Reason: negative_return)
-
-================================================================================
+- `mean_gross_bps`: 비용 차감 전 건당 평균 수익(bps)
+- `mean_cost_bps`: 건당 평균 비용(bps, round-trip+funding)
+- `mean_net_bps` = `mean_gross_bps` - `mean_cost_bps`
+- `nw_tstat`: block-bootstrap 기반 Newey-West t-stat
+- `block_lcb_bps`: block mean의 lower confidence bound(1-sigma)
+- `rank_ic`: 신호 점수와 forward return의 Spearman 순위상관(비용 무관, 부호와 크기 모두 중요)
+- `cost_drag_ratio`: 비용/|gross|. **1.0 초과 시 부호를 바꿔도 net이 음수가 될 수밖에 없음(수학적으로 증명됨)**
+- `turnover_per_year`: 연간 거래 횟수
+- `l1_priority_score`: L1 예산 배분 우선순위(음수 가능, 상대값)
+- 제거된 family 7종(flow_exhaustion_reversal, funding_carry, funding_flow_unwind, funding_term_structure_carry, positioning_unwind, xs_carry, flow_trend_continuation)은 이 표에 없음 — 코드에서 완전 삭제됨(`docs/decisions/decisions.md` 참조)
