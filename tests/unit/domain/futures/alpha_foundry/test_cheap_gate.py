@@ -422,6 +422,63 @@ class TestEvaluateAlphaGateBatch:
         assert len(results) == 0
 
 
+    def test_tf_fusion_3tuple_key_matches_corroboration(self) -> None:
+        """S1-1: 3-tuple (family, variant, timeframe) key matches tf_fusion_index."""
+        from src.domain.futures.alpha_foundry.contracts import MultiTimeframeEvidence
+
+        aligned = make_mock_aligned()
+        panel = make_mock_panel()
+        recipe = dataclasses.replace(SAMPLE_RECIPE, family="fam", variant="var")
+        cfg = AlphaGateConfig(min_events=10, min_effective_n=5.0, min_candidate_rank_ic_tstat=0.0, min_nw_tstat=0.0)
+        tf_fusion_index = {
+            ("fam", "var", "4h"): MultiTimeframeEvidence(
+                family="fam", variant="var", native_timeframe="4h",
+                native_recipe_id=recipe.recipe_id,
+                tf_coverage_count=2, sign_agreement_ratio=1.0,
+                corroboration_tier="corroborated", fused_conviction_score=1.5,
+            ),
+        }
+        results = evaluate_alpha_gate_batch(
+            panels=[panel],
+            recipes={recipe.recipe_id: recipe},
+            aligned=aligned,
+            cost_model=ExecutionCostModel(),
+            config=cfg,
+            run_id="test_s1_1",
+            tf_fusion_index=tf_fusion_index,
+        )
+        assert len(results) == 1
+        assert results[0].tf_corroboration > 0.0
+
+    def test_tf_fusion_synthetic_recipe_variant_normalized(self) -> None:
+        """S1-2: recipe.variant with TF suffix is normalized before index lookup."""
+        from src.domain.futures.alpha_foundry.contracts import MultiTimeframeEvidence
+
+        aligned = make_mock_aligned()
+        recipe = dataclasses.replace(SAMPLE_RECIPE, family="fam", variant="ema_18_108_4h")
+        panel = make_mock_panel(recipe_id=recipe.recipe_id)
+        cfg = AlphaGateConfig(min_events=10, min_effective_n=5.0, min_candidate_rank_ic_tstat=0.0, min_nw_tstat=0.0)
+        tf_fusion_index = {
+            ("fam", "ema_18_108", "4h"): MultiTimeframeEvidence(
+                family="fam", variant="ema_18_108", native_timeframe="4h",
+                native_recipe_id=recipe.recipe_id,
+                tf_coverage_count=2, sign_agreement_ratio=1.0,
+                corroboration_tier="corroborated", fused_conviction_score=1.5,
+            ),
+        }
+        results = evaluate_alpha_gate_batch(
+            panels=[panel],
+            recipes={recipe.recipe_id: recipe},
+            aligned=aligned,
+            cost_model=ExecutionCostModel(),
+            config=cfg,
+            run_id="test_s1_2",
+            tf_fusion_index=tf_fusion_index,
+        )
+        assert len(results) == 1
+        assert results[0].tf_corroboration > 0.0
+
+
 class TestEvaluatePanelCheapGate:
     def test_passes_positive_cost_adjusted_alpha(self) -> None:
         aligned = make_mock_aligned()
@@ -1473,3 +1530,285 @@ def test_evaluate_panel_gate_clean_candidate_handoff_tier() -> None:
     )
     assert evidence.gate_passed, f"reject={evidence.reject_reasons}"
     assert evidence.handoff_tier == "candidate", f"got {evidence.handoff_tier}, soft_flags={evidence.soft_flags}"
+
+
+
+# ── Supplementary coverage: evaluate_panel_gate_v2 ──────────────────────
+
+def test_evaluate_panel_gate_v2_main_path() -> None:
+    """Cover evaluate_panel_gate_v2 main computation path (biggest coverage gap)."""
+    from src.domain.futures.alpha_foundry.cheap_gate import evaluate_panel_gate_v2
+
+    t = 96
+    dt = np.arange(np.datetime64("2026-01-01T00"), np.datetime64("2026-01-05T00"),
+                    np.timedelta64(1, "h"))[:t]
+    symbols = ("BTCUSDT", "ETHUSDT")
+    close = 100.0 * np.exp(0.002 * np.arange(t, dtype=np.float64))[:, None] * np.ones((1, 2))
+    zeros = np.zeros((t, 2), dtype=np.float64)
+    valid = np.ones((t, 2), dtype=np.bool_)
+    side = np.zeros((t, 2), dtype=np.int8)
+    for start in range(4, t, 8):
+        side[start:start + 4, :] = 1
+    score = side.astype(np.float64) * 0.8
+    aligned = AlignedMarketData(
+        datetimes=dt, symbols=symbols,
+        open_2d=close.copy(), high_2d=close * 1.01, low_2d=close * 0.99, close_2d=close.copy(),
+        volume_2d=np.full((t, 2), 1000.0, dtype=np.float64),
+        funding_2d=zeros.copy(),
+        active_mask=valid.copy(), warm_mask=valid.copy(),
+        entry_block_mask=np.zeros((t, 2), dtype=np.bool_),
+        kill_mask=np.zeros((t, 2), dtype=np.bool_),
+        execution_cost_bps_2d=np.full((t, 2), 2.0, dtype=np.float64),
+    )
+    panel = CandidateSignalPanel(
+        family="trend_ma", variant="ema_12_72", params={},
+        datetimes=dt, symbols=symbols,
+        signed_score_2d=score, side_hint_2d=side,
+        expected_holding_bars=3, min_holding_bars=1,
+        stop_atr_mult=2.0, take_profit_atr_mult=4.0,
+        turnover_proxy_2d=np.abs(np.diff(score, axis=0, prepend=0.0)),
+        valid_mask_2d=valid,
+        metadata={"recipe_id": "r1"},
+    )
+    recipe = AlphaRecipe(
+        recipe_id="r1", family="trend_ma", variant="ema_12_72",
+        timeframe="4h", archetype="trend",
+        indicator_params={}, side_rule_id="trend_follow",
+        exit_policy_id="atr_trail_2",
+        required_fields=("close",), causal_lag_bars=1,
+        max_turnover_per_year=2000.0,
+    )
+    cfg = CheapGateConfig(
+        min_events=1, min_effective_n=1.0, min_lcb_net_bps=-1000.0, min_nw_tstat=0.0,
+        max_cost_drag_ratio=100.0, max_turnover_per_year=10000.0, bootstrap_seed=42,
+        min_candidate_rank_ic_tstat=0.0,
+        archetype_event_floors={"trend": 1},
+    )
+    ev = evaluate_panel_gate_v2(
+        panel=panel, aligned=aligned, recipe=recipe,
+        cost_model=ExecutionCostModel(), config=cfg, bars_per_year=8760.0,
+    )
+    assert isinstance(ev, AlphaGateEvidence)
+    assert ev.recipe_id == "r1"
+    assert ev.timeframe == "4h"
+
+
+def test_evaluate_panel_gate_v2_insufficient_events() -> None:
+    """Cover evaluate_panel_gate_v2 edge case: n_events < min_events."""
+    from src.domain.futures.alpha_foundry.cheap_gate import evaluate_panel_gate_v2
+
+    t = 20
+    dt = np.arange(np.datetime64("2026-01-01T00"), np.datetime64("2026-01-01T20"),
+                    np.timedelta64(1, "h"))[:t]
+    symbols = ("BTCUSDT",)
+    close = 100.0 * np.exp(0.001 * np.arange(t, dtype=np.float64))[:, None]
+    aligned = AlignedMarketData(
+        datetimes=dt, symbols=symbols,
+        open_2d=close.copy(), high_2d=close * 1.01, low_2d=close * 0.99, close_2d=close.copy(),
+        volume_2d=np.full((t, 1), 1000.0, dtype=np.float64),
+        funding_2d=np.zeros((t, 1), dtype=np.float64),
+        active_mask=np.ones((t, 1), dtype=np.bool_),
+        warm_mask=np.ones((t, 1), dtype=np.bool_),
+        entry_block_mask=np.zeros((t, 1), dtype=np.bool_),
+        kill_mask=np.zeros((t, 1), dtype=np.bool_),
+    )
+    panel = CandidateSignalPanel(
+        family="fam", variant="var", params={},
+        datetimes=dt, symbols=symbols,
+        signed_score_2d=np.zeros((t, 1), dtype=np.float64),
+        side_hint_2d=np.zeros((t, 1), dtype=np.int8),
+        expected_holding_bars=3, min_holding_bars=1,
+        stop_atr_mult=2.0, take_profit_atr_mult=4.0,
+        turnover_proxy_2d=np.zeros((t, 1), dtype=np.float64),
+        valid_mask_2d=np.ones((t, 1), dtype=np.bool_),
+        metadata={"recipe_id": "r1"},
+    )
+    recipe = AlphaRecipe(
+        recipe_id="r1", family="fam", variant="var",
+        timeframe="4h", archetype="trend",
+        indicator_params={}, side_rule_id="trend_follow",
+        exit_policy_id="atr_trail_2",
+        required_fields=("close",), causal_lag_bars=1,
+        max_turnover_per_year=365.0,
+    )
+    cfg = CheapGateConfig(min_events=99, min_effective_n=1.0)
+    ev = evaluate_panel_gate_v2(
+        panel=panel, aligned=aligned, recipe=recipe,
+        cost_model=ExecutionCostModel(), config=cfg, bars_per_year=8760.0,
+    )
+    assert not ev.gate_passed
+    assert "insufficient_events" in ev.reject_reasons
+
+
+def test_evaluate_panel_gate_v2_causal_lag_ge_t() -> None:
+    """Cover evaluate_panel_gate_v2 edge case: causal_lag >= t."""
+    from src.domain.futures.alpha_foundry.cheap_gate import evaluate_panel_gate_v2
+
+    t = 5
+    dt = np.arange(np.datetime64("2026-01-01T00"), np.datetime64("2026-01-01T05"),
+                    np.timedelta64(1, "h"))[:t]
+    symbols = ("BTCUSDT",)
+    close = 100.0 * np.ones((t, 1), dtype=np.float64)
+    aligned = AlignedMarketData(
+        datetimes=dt, symbols=symbols,
+        open_2d=close.copy(), high_2d=close * 1.01, low_2d=close * 0.99, close_2d=close.copy(),
+        volume_2d=np.full((t, 1), 1000.0, dtype=np.float64),
+        funding_2d=np.zeros((t, 1), dtype=np.float64),
+        active_mask=np.ones((t, 1), dtype=np.bool_),
+        warm_mask=np.ones((t, 1), dtype=np.bool_),
+        entry_block_mask=np.zeros((t, 1), dtype=np.bool_),
+        kill_mask=np.zeros((t, 1), dtype=np.bool_),
+    )
+    panel = CandidateSignalPanel(
+        family="fam", variant="var", params={},
+        datetimes=dt, symbols=symbols,
+        signed_score_2d=np.ones((t, 1), dtype=np.float64),
+        side_hint_2d=np.ones((t, 1), dtype=np.int8),
+        expected_holding_bars=6, min_holding_bars=1,
+        stop_atr_mult=2.0, take_profit_atr_mult=4.0,
+        turnover_proxy_2d=np.zeros((t, 1), dtype=np.float64),
+        valid_mask_2d=np.ones((t, 1), dtype=np.bool_),
+        metadata={"recipe_id": "r1"},
+    )
+    recipe = AlphaRecipe(
+        recipe_id="r1", family="fam", variant="var",
+        timeframe="4h", archetype="trend",
+        indicator_params={}, side_rule_id="trend_follow",
+        exit_policy_id="atr_trail_2",
+        required_fields=("close",), causal_lag_bars=3,
+        max_turnover_per_year=365.0,
+    )
+    cfg = CheapGateConfig(min_events=1, min_effective_n=1.0)
+    ev = evaluate_panel_gate_v2(
+        panel=panel, aligned=aligned, recipe=recipe,
+        cost_model=ExecutionCostModel(), config=cfg, bars_per_year=8760.0,
+    )
+    assert not ev.gate_passed
+    assert "insufficient_events" in ev.reject_reasons
+
+
+# ── Supplementary coverage: small helper edge cases ─────────────────────
+
+def test_compute_block_means_edge_cases() -> None:
+    from src.domain.futures.alpha_foundry.cheap_gate import _compute_block_means
+
+    result = _compute_block_means(np.array([]), 10)
+    assert result.shape == (0,)
+    result = _compute_block_means(np.array([1.0, 2.0, 3.0]), 10)
+    assert result.shape == (1,)
+
+
+def test_block_moments_edge_cases() -> None:
+    from src.domain.futures.alpha_foundry.cheap_gate import _block_moments
+
+    result = _block_moments(np.array([]))
+    assert result == (0.0, 0.0)
+    result = _block_moments(np.array([1.0, 2.0, 3.0]))
+    assert result[0] == 2.0
+
+
+def test_compute_rank_ic_edge_cases() -> None:
+    from src.domain.futures.alpha_foundry.cheap_gate import _compute_rank_ic
+
+    result = _compute_rank_ic(
+        np.array([]), np.array([]), np.array([], dtype=np.bool_),
+    )
+    assert result == 0.0
+    result = _compute_rank_ic(
+        np.array([1.0, 1.0, 1.0]), np.array([2.0, 2.0, 2.0]),
+        np.ones(3, dtype=np.bool_),
+    )
+    assert result == 0.0
+
+
+def test_compute_rank_ic_with_tstat_edge() -> None:
+    from src.domain.futures.alpha_foundry.cheap_gate import compute_rank_ic_with_tstat
+
+    result = compute_rank_ic_with_tstat(
+        fwd_ret_bps=np.zeros((10, 2)), score=np.zeros((10, 2)),
+        mask=np.zeros((10, 2), dtype=np.bool_),
+    )
+    assert result == (0.0, 0.0)
+
+
+def test_compute_tf_corroboration_switch() -> None:
+    from src.domain.futures.alpha_foundry.cheap_gate import compute_tf_corroboration
+    from src.domain.futures.alpha_foundry.contracts import MultiTimeframeEvidence
+
+    recipe = AlphaRecipe(
+        recipe_id="r1", family="fam", variant="var",
+        timeframe="4h", archetype="trend",
+        indicator_params={}, side_rule_id="trend_follow",
+        exit_policy_id="atr_trail_2",
+        required_fields=("close",), causal_lag_bars=1,
+        max_turnover_per_year=365.0,
+    )
+    tf_none = MultiTimeframeEvidence(
+        family="fam", variant="var", native_timeframe="4h",
+        native_recipe_id="r1", tf_coverage_count=2,
+        sign_agreement_ratio=0.5, corroboration_tier="single_tf_strict",
+        fused_conviction_score=0.5,
+    )
+    result = compute_tf_corroboration(recipe=recipe, tf_fusion=tf_none)
+    assert result > 0.0
+
+    tf_contra = MultiTimeframeEvidence(
+        family="fam", variant="var", native_timeframe="4h",
+        native_recipe_id="r1", tf_coverage_count=2,
+        sign_agreement_ratio=0.3, corroboration_tier="contradicted",
+        fused_conviction_score=-1.0,
+    )
+    result = compute_tf_corroboration(recipe=recipe, tf_fusion=tf_contra)
+    assert result == 0.0
+
+    result = compute_tf_corroboration(recipe=recipe, tf_fusion=None)
+    assert result == 0.0
+
+
+def test_evaluate_panel_gate_non_positive_gross() -> None:
+    """Cover evaluate_panel_gate edge: mean_gross_bps <= 0.0, excess_cost_drag."""
+    t = 96
+    dt = np.arange(np.datetime64("2026-01-01T00"), np.datetime64("2026-01-05T00"),
+                    np.timedelta64(1, "h"))[:t]
+    symbols = ("BTCUSDT",)
+    close = 100.0 * np.exp(-0.001 * np.arange(t, dtype=np.float64))[:, None]
+    aligned = AlignedMarketData(
+        datetimes=dt, symbols=symbols,
+        open_2d=close.copy(), high_2d=close * 1.01, low_2d=close * 0.99, close_2d=close.copy(),
+        volume_2d=np.full((t, 1), 1000.0, dtype=np.float64),
+        funding_2d=np.zeros((t, 1), dtype=np.float64),
+        active_mask=np.ones((t, 1), dtype=np.bool_),
+        warm_mask=np.ones((t, 1), dtype=np.bool_),
+        entry_block_mask=np.zeros((t, 1), dtype=np.bool_),
+        kill_mask=np.zeros((t, 1), dtype=np.bool_),
+    )
+    panel = CandidateSignalPanel(
+        family="fam", variant="var", params={},
+        datetimes=dt, symbols=symbols,
+        signed_score_2d=np.ones((t, 1), dtype=np.float64),
+        side_hint_2d=np.ones((t, 1), dtype=np.int8),
+        expected_holding_bars=3, min_holding_bars=1,
+        stop_atr_mult=2.0, take_profit_atr_mult=4.0,
+        turnover_proxy_2d=np.zeros((t, 1), dtype=np.float64),
+        valid_mask_2d=np.ones((t, 1), dtype=np.bool_),
+        metadata={"recipe_id": "r1"},
+    )
+    recipe = AlphaRecipe(
+        recipe_id="r1", family="fam", variant="var",
+        timeframe="4h", archetype="trend",
+        indicator_params={}, side_rule_id="trend_follow",
+        exit_policy_id="atr_trail_2",
+        required_fields=("close",), causal_lag_bars=1,
+        max_turnover_per_year=2000.0,
+    )
+    cfg = AlphaGateConfig(
+        min_events=1, min_effective_n=1.0, min_lcb_net_bps=-1000.0, min_nw_tstat=0.0,
+        max_cost_drag_ratio=0.01, max_turnover_per_year=10000.0, bootstrap_seed=42,
+        min_candidate_rank_ic_tstat=0.0,
+    )
+    ev = evaluate_panel_gate(
+        panel=panel, aligned=aligned, recipe=recipe,
+        cost_model=ExecutionCostModel(), config=cfg,
+        bars_per_year=8760.0, run_id="test",
+    )
+    assert not ev.gate_passed

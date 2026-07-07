@@ -1,6 +1,7 @@
 """Strategy runtime bridge with Alpha Foundry L0 gate wiring.
 
 [ADR_20260706_ALPHA_FOUNDRY_MAIN_WIRING][ADR_20260706_ALPHA_FOUNDRY_L0_SIGNAL_RIGOR]
+[ADR_20260707_L0_MULTI_TF_GATE_REDESIGN]
 """
 
 from __future__ import annotations
@@ -8,8 +9,7 @@ from __future__ import annotations
 import dataclasses
 import gc
 import logging
-from collections import Counter
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Mapping, MutableMapping, Sequence
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -342,22 +342,26 @@ def _build_virtual_probe_tf_maps(
 
 
 def _base_probe_guard_mask(aligned_base: AlignedMarketData) -> NDArray[np.bool_]:
-    """Reuse base-grid eligibility masks for projected probe panels."""
-    execution_eligibility = (
-        aligned_base.execution_eligibility_mask
-        if aligned_base.execution_eligibility_mask is not None
-        else np.ones_like(aligned_base.active_mask, dtype=bool)
+    """Reuse base-grid eligibility masks for projected probe panels.
+    Falls back to ones for any missing mask attribute (test compat)."""
+    execution_eligibility = getattr(
+        aligned_base, "execution_eligibility_mask",
+        np.ones_like(aligned_base.active_mask, dtype=bool),
     )
-    strategy_readiness = (
-        aligned_base.strategy_readiness_mask
-        if aligned_base.strategy_readiness_mask is not None
-        else np.ones_like(aligned_base.active_mask, dtype=bool)
+    if execution_eligibility is None:
+        execution_eligibility = np.ones_like(aligned_base.active_mask, dtype=bool)
+    strategy_readiness = getattr(
+        aligned_base, "strategy_readiness_mask",
+        np.ones_like(aligned_base.active_mask, dtype=bool),
     )
-    promotion_active = (
-        aligned_base.promotion_active_mask
-        if aligned_base.promotion_active_mask is not None
-        else np.ones_like(aligned_base.active_mask, dtype=bool)
+    if strategy_readiness is None:
+        strategy_readiness = np.ones_like(aligned_base.active_mask, dtype=bool)
+    promotion_active = getattr(
+        aligned_base, "promotion_active_mask",
+        np.ones_like(aligned_base.active_mask, dtype=bool),
     )
+    if promotion_active is None:
+        promotion_active = np.ones_like(aligned_base.active_mask, dtype=bool)
     guard = (
         aligned_base.active_mask
         & aligned_base.warm_mask
@@ -370,7 +374,7 @@ def _base_probe_guard_mask(aligned_base: AlignedMarketData) -> NDArray[np.bool_]
     return np.asarray(guard, dtype=bool)
 
 
-def build_multi_tf_panels(
+def build_native_htf_panels(
     *,
     data_maps: dict[str, Any],
     symbols: list[str],
@@ -380,18 +384,15 @@ def build_multi_tf_panels(
     tfs: tuple[str, ...],
     family_pool: Callable[[str], tuple[str, ...]],
     htf_only: bool = True,
-) -> tuple[CandidateSignalPanel, ...]:
+) -> dict[str, tuple[AlignedMarketData, tuple[CandidateSignalPanel, ...]]]:
     from src.domain.futures.strategy.common.alignment import align_data_maps
     from src.domain.futures.strategy.rule_signals import build_rule_signal_panels
 
     non_base_tfs = {tf for tf in tfs if tf != base_tf}
     if not non_base_tfs:
-        return ()
+        return {}
 
-    extra: list[CandidateSignalPanel] = []
-    audit_rows: list[list[str]] = []
-    base_datetimes = aligned_base.datetimes
-    base_guard = _base_probe_guard_mask(aligned_base)
+    result: dict[str, tuple[AlignedMarketData, tuple[CandidateSignalPanel, ...]]] = {}
 
     # Phase 1: collect eligible TFs (HTF filter)
     eligible_tfs: list[str] = []
@@ -402,22 +403,17 @@ def build_multi_tf_panels(
             continue
         eligible_tfs.append(tf_i)
 
-    def _process_single_tf(
+    def _native_single_tf(
         tf_i: str,
-    ) -> tuple[str, list[CandidateSignalPanel], list[str] | None]:
-        source_mix: Counter[str] = Counter()
-        for symbol in symbols:
-            source_tf = _select_probe_source_tf(data_maps.get(symbol, {}), tf_i)
-            if source_tf is not None:
-                source_mix[source_tf] += 1
+    ) -> tuple[str, AlignedMarketData | None, tuple[CandidateSignalPanel, ...]]:
         tf_maps = _build_virtual_probe_tf_maps(data_maps, symbols, tf_i)
         if not tf_maps:
-            return (tf_i, [], None)
+            return (tf_i, None, ())
         try:
             aligned_i = align_data_maps(tf_maps, symbols, tf_i)
         except Exception as exc:
             _logger.warning("[MULTI-TF] align_data_maps failed tf=%s: %s", tf_i, exc)
-            return (tf_i, [], None)
+            return (tf_i, None, ())
         try:
             cfg_i = dataclasses.replace(base_cfg, timeframe=tf_i)
             panels_i = build_rule_signal_panels(
@@ -429,9 +425,44 @@ def build_multi_tf_panels(
             )
         except Exception as exc:
             _logger.warning("[MULTI-TF] build_rule_signal_panels failed tf=%s: %s", tf_i, exc)
-            return (tf_i, [], None)
+            return (tf_i, None, ())
+        return (tf_i, aligned_i, tuple(panels_i))
+
+    # Phase 2: process eligible TFs (parallel for 2+, sequential for 0-1)
+    if len(eligible_tfs) <= 1:
+        for tf_i in eligible_tfs:
+            _, aligned_i, native_panels = _native_single_tf(tf_i)
+            if aligned_i is not None and native_panels:
+                result[tf_i] = (aligned_i, native_panels)
+    else:
+        n_workers = min(len(eligible_tfs), 2)
+        with ThreadPoolExecutor(max_workers=n_workers) as executor:
+            futures = {executor.submit(_native_single_tf, tf_i): tf_i for tf_i in eligible_tfs}
+            for future in as_completed(futures):
+                try:
+                    tf_i, aligned_i, native_panels = future.result()
+                    if aligned_i is not None and native_panels:
+                        result[tf_i] = (aligned_i, native_panels)
+                except Exception as exc:
+                    _logger.warning("[MULTI-TF] tf=%s unhandled: %s", futures[future], exc)
+
+    return result
+
+
+def project_htf_panels_to_base(
+    *,
+    native_by_tf: Mapping[str, tuple[AlignedMarketData, tuple[CandidateSignalPanel, ...]]],
+    aligned_base: AlignedMarketData,
+    base_tf: str,
+) -> tuple[CandidateSignalPanel, ...]:
+    base_datetimes = aligned_base.datetimes
+    base_guard = _base_probe_guard_mask(aligned_base)
+    extra: list[CandidateSignalPanel] = []
+    audit_rows: list[list[str]] = []
+
+    for tf_i, (aligned_i, native_panels) in native_by_tf.items():
         tf_panels: list[CandidateSignalPanel] = []
-        for panel in panels_i:
+        for panel in native_panels:
             try:
                 projected = _project_panel_to_base_grid(panel, base_datetimes, tf_i, base_tf)
                 tagged_metadata: dict[str, Any] = dict(projected.metadata or {})
@@ -451,45 +482,54 @@ def build_multi_tf_panels(
                     tf_i,
                     exc,
                 )
-        projected_count = len(tf_panels)
-        audit_row = [
-            tf_i,
-            str(len(tf_maps)),
-            str(source_mix.total()),
-            str(projected_count),
-            ", ".join(f"{name}:{count}" for name, count in source_mix.most_common(2)) or "-",
-        ]
-        return (tf_i, tf_panels, audit_row)
-
-    # Phase 2: process eligible TFs (parallel for 2+, sequential for 0-1)
-    if len(eligible_tfs) <= 1:
-        for tf_i in eligible_tfs:
-            _, tf_panels, audit_row = _process_single_tf(tf_i)
-            if audit_row is not None:
-                extra.extend(tf_panels)
-                audit_rows.append(audit_row)
-    else:
-        n_workers = min(len(eligible_tfs), 2)
-        with ThreadPoolExecutor(max_workers=n_workers) as executor:
-            futures = {executor.submit(_process_single_tf, tf_i): tf_i for tf_i in eligible_tfs}
-            for future in as_completed(futures):
-                try:
-                    _, tf_panels, audit_row = future.result()
-                    if audit_row is not None:
-                        extra.extend(tf_panels)
-                        audit_rows.append(audit_row)
-                except Exception as exc:
-                    _logger.warning("[MULTI-TF] tf=%s unhandled: %s", futures[future], exc)
+        extra.extend(tf_panels)
+        audit_rows.append(
+            [
+                tf_i,
+                str(len(aligned_i.symbols) if hasattr(aligned_i, "symbols") else 0),
+                "0",
+                str(len(tf_panels)),
+                "-",
+            ]
+        )
 
     if audit_rows:
         import logging
 
         logger = logging.getLogger("opt_main_futures")
         tf_summaries = [f"[{row[0]}] Proj={row[3]} Syms={row[1]}" for row in audit_rows]
+        logger.info(f"\U0001f9ec [L1: MULTI-TF PANEL INJECTION]\n  \u2514\u2500 Active : {' | '.join(tf_summaries)}")
 
-        # Format as Minimal Tree Style
-        logger.info(f"🧬 [L1: MULTI-TF PANEL INJECTION]\n  └─ Active : {' | '.join(tf_summaries)}")
     return tuple(extra)
+
+
+def build_multi_tf_panels(
+    *,
+    data_maps: dict[str, Any],
+    symbols: list[str],
+    aligned_base: AlignedMarketData,
+    base_cfg: CandidateStrategyConfig,
+    base_tf: str,
+    tfs: tuple[str, ...],
+    family_pool: Callable[[str], tuple[str, ...]],
+    htf_only: bool = True,
+) -> tuple[CandidateSignalPanel, ...]:
+    """Thin wrapper: build_native_htf_panels -> project_htf_panels_to_base."""
+    native_by_tf = build_native_htf_panels(
+        data_maps=data_maps,
+        symbols=symbols,
+        aligned_base=aligned_base,
+        base_cfg=base_cfg,
+        base_tf=base_tf,
+        tfs=tfs,
+        family_pool=family_pool,
+        htf_only=htf_only,
+    )
+    return project_htf_panels_to_base(
+        native_by_tf=native_by_tf,
+        aligned_base=aligned_base,
+        base_tf=base_tf,
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -804,6 +844,7 @@ def run_candidate_strategy_for_universe(
     from src.domain.futures.alpha_foundry.bridge_helpers import (
         bind_panels_to_alpha_recipes,
         run_alpha_foundry_l0_gate,
+        run_alpha_foundry_l0_gate_multi_tf,
     )
     from src.domain.futures.alpha_foundry.recipes import build_alpha_recipe_catalog
     from src.domain.futures.strategy.ablation import apply_variant_promotions
@@ -936,6 +977,7 @@ def run_candidate_strategy_for_universe(
     panels = tuple(dataclasses.replace(p, variant=f"{p.variant}_{tf}") for p in panels)
     bridge_prof["rules"] = time.perf_counter() - t_step
     _sample_rss("rules")
+    _multi_tf_htf_panels: tuple[Any, ...] | None = None
     if alpha_foundry_config is not None and getattr(alpha_foundry_config, "mode", "off") != "off":
         t_step = time.perf_counter()
         recipes_seq = build_alpha_recipe_catalog(
@@ -954,39 +996,143 @@ def run_candidate_strategy_for_universe(
             exclude_families=alpha_foundry_config.exclude_families,
             enable_synthetic_recipes=alpha_foundry_config.enable_synthetic_recipes,
         )
-        _af_run_id = f"{tf}_{int(time.time())}"
-        af_result = run_alpha_foundry_l0_gate(
-            panels=panels,
-            bindings=bindings,
-            recipes=recipes,
-            aligned=aligned,
-            cost_model=ExecutionCostModel(),
-            runtime_config=alpha_foundry_config,
-            run_id=_af_run_id,
-            timeframe=tf,
+
+        htf_tfs = tuple(t for t in getattr(strategy_cfg.candidate, "l1_tfs", ()) if t != tf)
+        _use_multi_tf = (
+            getattr(alpha_foundry_config, "use_all_timeframes_in_l0", True)
+            and htf_tfs
         )
-        panels_before_gate = panels
-        panels = af_result.panels_for_l1
-        alpha_foundry_report = af_result.report
 
-        # [ADR_20260707_L0_ALPHA_EFFECTIVENESS_REDESIGN] opt-in pre-gate family correlation audit
-        if getattr(alpha_foundry_config, "enable_correlation_audit", False):
-            from src.domain.futures.alpha_foundry.diversity import audit_full_family_correlation
+        if _use_multi_tf:
+            # ── Multi-TF L0 gate path (fan-out/fuse/fan-in) ──────────────────
+            from src.domain.futures.strategy.config import resolve_tf_signal_pool
 
-            active = aligned.active_mask & aligned.warm_mask & ~aligned.entry_block_mask & ~aligned.kill_mask
-            corr_df = audit_full_family_correlation(
-                panels=panels_before_gate,  # type: ignore[arg-type]
-                active_mask=active,
+            native_by_tf = build_native_htf_panels(
+                data_maps=preloaded_data_maps,
+                symbols=symbols,
+                aligned_base=aligned,
+                base_cfg=strategy_cfg.candidate,
+                base_tf=tf,
+                tfs=htf_tfs,
+                family_pool=lambda t: resolve_tf_signal_pool(strategy_cfg.candidate, t),
+                htf_only=True,
+            )
+
+            panels_by_tf: dict[str, Sequence[Any]] = {tf: panels}
+            recipes_by_tf: dict[str, MutableMapping[str, Any]] = {tf: recipes}
+            bindings_by_tf: dict[str, Sequence[Any]] = {tf: bindings}
+            aligned_by_tf: dict[str, Any] = {tf: aligned}
+
+            for htf in htf_tfs:
+                if htf not in native_by_tf:
+                    panels_by_tf[htf] = []
+                    recipes_by_tf[htf] = {}
+                    bindings_by_tf[htf] = []
+                    aligned_by_tf[htf] = aligned
+                    continue
+                htf_aligned, htf_native_panels = native_by_tf[htf]
+                htf_recipes_seq = build_alpha_recipe_catalog(
+                    timeframe=htf,
+                    include_families=alpha_foundry_config.include_families,
+                    exclude_families=alpha_foundry_config.exclude_families,
+                    max_recipes_per_family=alpha_foundry_config.max_recipes_per_family,
+                )
+                htf_recipes = {r.recipe_id: r for r in htf_recipes_seq}
+                htf_bindings = bind_panels_to_alpha_recipes(
+                    panels=htf_native_panels,
+                    recipes=htf_recipes,
+                    timeframe=htf,
+                    max_recipes_per_family=alpha_foundry_config.max_recipes_per_family,
+                    include_families=alpha_foundry_config.include_families,
+                    exclude_families=alpha_foundry_config.exclude_families,
+                    enable_synthetic_recipes=alpha_foundry_config.enable_synthetic_recipes,
+                )
+                panels_by_tf[htf] = htf_native_panels
+                recipes_by_tf[htf] = htf_recipes
+                bindings_by_tf[htf] = htf_bindings
+                aligned_by_tf[htf] = htf_aligned
+
+            _af_run_id = f"{tf}_{int(time.time())}"
+            multi_results = run_alpha_foundry_l0_gate_multi_tf(
+                panels_by_tf=panels_by_tf,
+                bindings_by_tf=bindings_by_tf,
+                recipes_by_tf=recipes_by_tf,
+                aligned_by_tf=aligned_by_tf,
+                cost_model=ExecutionCostModel(),
+                runtime_config=alpha_foundry_config,
+                run_id_prefix=_af_run_id,
+            )
+
+            base_result = multi_results[tf]
+            panels_before_gate = panels
+            panels = base_result.panels_for_l1
+            alpha_foundry_report = base_result.report
+
+            # Project gated HTF panels to base grid
+            gated_htf: dict[str, tuple[Any, tuple[Any, ...]]] = {}
+            for htf in htf_tfs:
+                if htf in multi_results and htf in aligned_by_tf:
+                    htf_aligned = aligned_by_tf[htf]
+                    if htf_aligned is not None:
+                        gated_htf[htf] = (htf_aligned, multi_results[htf].panels_for_l1)
+            _multi_tf_htf_panels = project_htf_panels_to_base(
+                native_by_tf=gated_htf,
+                aligned_base=aligned,
+                base_tf=tf,
+            ) if gated_htf else ()
+
+            if getattr(alpha_foundry_config, "enable_correlation_audit", False):
+                from src.domain.futures.alpha_foundry.diversity import audit_full_family_correlation
+
+                active = aligned.active_mask & aligned.warm_mask & ~aligned.entry_block_mask & ~aligned.kill_mask
+                corr_df = audit_full_family_correlation(
+                    panels=panels_before_gate,  # type: ignore[arg-type]
+                    active_mask=active,
+                    run_id=_af_run_id,
+                    timeframe=tf,
+                )
+                report_dir = getattr(alpha_foundry_config, "report_dir", Path("logs/futures/alpha_foundry"))
+                report_dir = Path(report_dir) if isinstance(report_dir, str) else report_dir
+                report_dir.mkdir(parents=True, exist_ok=True)
+                corr_df.to_parquet(str(report_dir / f"{_af_run_id}_family_correlation.parquet"))
+
+            bridge_prof["alpha_foundry"] = time.perf_counter() - t_step
+            _sample_rss("alpha_foundry")
+        else:
+            # ── Single-TF L0 gate path (original) ────────────────────────────
+            _af_run_id = f"{tf}_{int(time.time())}"
+            af_result = run_alpha_foundry_l0_gate(
+                panels=panels,
+                bindings=bindings,
+                recipes=recipes,
+                aligned=aligned,
+                cost_model=ExecutionCostModel(),
+                runtime_config=alpha_foundry_config,
                 run_id=_af_run_id,
                 timeframe=tf,
             )
-            report_dir = getattr(alpha_foundry_config, "report_dir", Path("logs/futures/alpha_foundry"))
-            report_dir = Path(report_dir) if isinstance(report_dir, str) else report_dir
-            report_dir.mkdir(parents=True, exist_ok=True)
-            corr_df.to_parquet(str(report_dir / f"{_af_run_id}_family_correlation.parquet"))
+            panels_before_gate = panels
+            panels = af_result.panels_for_l1
+            alpha_foundry_report = af_result.report
 
-        bridge_prof["alpha_foundry"] = time.perf_counter() - t_step
-        _sample_rss("alpha_foundry")
+            # [ADR_20260707_L0_ALPHA_EFFECTIVENESS_REDESIGN] opt-in pre-gate family correlation audit
+            if getattr(alpha_foundry_config, "enable_correlation_audit", False):
+                from src.domain.futures.alpha_foundry.diversity import audit_full_family_correlation
+
+                active = aligned.active_mask & aligned.warm_mask & ~aligned.entry_block_mask & ~aligned.kill_mask
+                corr_df = audit_full_family_correlation(
+                    panels=panels_before_gate,  # type: ignore[arg-type]
+                    active_mask=active,
+                    run_id=_af_run_id,
+                    timeframe=tf,
+                )
+                report_dir = getattr(alpha_foundry_config, "report_dir", Path("logs/futures/alpha_foundry"))
+                report_dir = Path(report_dir) if isinstance(report_dir, str) else report_dir
+                report_dir.mkdir(parents=True, exist_ok=True)
+                corr_df.to_parquet(str(report_dir / f"{_af_run_id}_family_correlation.parquet"))
+
+            bridge_prof["alpha_foundry"] = time.perf_counter() - t_step
+            _sample_rss("alpha_foundry")
     t_step = time.perf_counter()
     raw_events = candidate_panels_to_events(
         panels,
@@ -1068,16 +1214,19 @@ def run_candidate_strategy_for_universe(
         try:
             from src.domain.futures.strategy.config import resolve_tf_signal_pool
 
-            htf_panels = build_multi_tf_panels(
-                data_maps=preloaded_data_maps,
-                symbols=symbols,
-                aligned_base=aligned,
-                base_cfg=candidate_cfg,
-                base_tf=tf,
-                tfs=candidate_cfg.l1_tfs,
-                family_pool=lambda t: resolve_tf_signal_pool(candidate_cfg, t),
-                htf_only=True,
-            )
+            if _multi_tf_htf_panels is not None:
+                htf_panels = _multi_tf_htf_panels
+            else:
+                htf_panels = build_multi_tf_panels(
+                    data_maps=preloaded_data_maps,
+                    symbols=symbols,
+                    aligned_base=aligned,
+                    base_cfg=candidate_cfg,
+                    base_tf=tf,
+                    tfs=candidate_cfg.l1_tfs,
+                    family_pool=lambda t: resolve_tf_signal_pool(candidate_cfg, t),
+                    htf_only=True,
+                )
             bridge_prof["htf_panels"] = time.perf_counter() - t_htf
             _sample_rss("htf_panels")
             if htf_panels:
