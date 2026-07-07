@@ -297,6 +297,8 @@ class TestBuildL1VerificationUnits:
             reject_reasons=(),
             bootstrap_lcb_bps=1.5,
             bootstrap_agree=True,
+            mean_gross_bps=0.0,
+            total_cost_bps=0.0,
         )
         recipe = AlphaRecipe(
             recipe_id="r1",
@@ -344,6 +346,8 @@ class TestBuildL1VerificationUnits:
             reject_reasons=(),
             bootstrap_lcb_bps=1.5,
             bootstrap_agree=True,
+            mean_gross_bps=0.0,
+            total_cost_bps=0.0,
         )
         units = build_l1_verification_units(
             evidences=[ev],
@@ -390,6 +394,8 @@ class TestBuildL1VerificationUnits:
                 reject_reasons=(),
                 bootstrap_lcb_bps=1.5,
                 bootstrap_agree=True,
+                mean_gross_bps=0.0,
+                total_cost_bps=0.0,
             ),
             CheapGateEvidence(
                 recipe_id="r1",
@@ -410,6 +416,8 @@ class TestBuildL1VerificationUnits:
                 reject_reasons=(),
                 bootstrap_lcb_bps=1.0,
                 bootstrap_agree=True,
+                mean_gross_bps=0.0,
+                total_cost_bps=0.0,
             ),
         ]
         with pytest.raises(ValueError, match="budget violated"):

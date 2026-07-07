@@ -12,6 +12,7 @@ from collections import Counter
 from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
+from pathlib import Path
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
 
@@ -953,6 +954,7 @@ def run_candidate_strategy_for_universe(
             exclude_families=alpha_foundry_config.exclude_families,
             enable_synthetic_recipes=alpha_foundry_config.enable_synthetic_recipes,
         )
+        _af_run_id = f"{tf}_{int(time.time())}"
         af_result = run_alpha_foundry_l0_gate(
             panels=panels,
             bindings=bindings,
@@ -960,11 +962,29 @@ def run_candidate_strategy_for_universe(
             aligned=aligned,
             cost_model=ExecutionCostModel(),
             runtime_config=alpha_foundry_config,
-            run_id=f"{tf}_{int(time.time())}",
+            run_id=_af_run_id,
             timeframe=tf,
         )
+        panels_before_gate = panels
         panels = af_result.panels_for_l1
         alpha_foundry_report = af_result.report
+
+        # [ADR_20260707_L0_ALPHA_EFFECTIVENESS_REDESIGN] opt-in pre-gate family correlation audit
+        if getattr(alpha_foundry_config, "enable_correlation_audit", False):
+            from src.domain.futures.alpha_foundry.diversity import audit_full_family_correlation
+
+            active = aligned.active_mask & aligned.warm_mask & ~aligned.entry_block_mask & ~aligned.kill_mask
+            corr_df = audit_full_family_correlation(
+                panels=panels_before_gate,  # type: ignore[arg-type]
+                active_mask=active,
+                run_id=_af_run_id,
+                timeframe=tf,
+            )
+            report_dir = getattr(alpha_foundry_config, "report_dir", Path("logs/futures/alpha_foundry"))
+            report_dir = Path(report_dir) if isinstance(report_dir, str) else report_dir
+            report_dir.mkdir(parents=True, exist_ok=True)
+            corr_df.to_parquet(str(report_dir / f"{_af_run_id}_family_correlation.parquet"))
+
         bridge_prof["alpha_foundry"] = time.perf_counter() - t_step
         _sample_rss("alpha_foundry")
     t_step = time.perf_counter()
