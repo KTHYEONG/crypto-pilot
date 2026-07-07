@@ -119,6 +119,12 @@ def test_build_rule_signal_panels_returns_expected_tuple() -> None:
         "sparse_breakout_retest_v2",
         "trend_pullback_quality_v2",
         "residual_momentum_xs",
+        "sparse_breakout_retest_liquidity",
+        "funding_flow_exhaustion_sparse",
+        "oi_lsr_unwind",
+        "vol_contraction_breakout",
+        "xs_residual_rebalance",
+        "carry_net_of_funding",
     }
 
     for p in panels:
