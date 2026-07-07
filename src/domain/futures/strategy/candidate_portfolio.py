@@ -10,6 +10,7 @@ import pandas as pd
 from numba import njit
 from numpy.typing import NDArray
 
+from src.domain.futures.optimization.metrics import _bars_per_year_for_tf
 from src.domain.futures.portfolio.covariance import (
     active_covariance,
     compute_log_returns_2d,
@@ -963,11 +964,8 @@ def build_candidate_target_weights(
         logret_2d = compute_log_returns_2d(close_2d)
 
     target_weights = np.zeros_like(raw_weights)
-    bars_per_year = 2190.0  # Default 4h bars per year (365 * 6)
-    if cfg.timeframe == "1h":
-        bars_per_year = 8760.0
-    elif cfg.timeframe == "1d":
-        bars_per_year = 365.0
+    # [ADR_20260707_L1_BACKTEST_FIDELITY_FIXES] TF-generic annualization (was 4h/1h/1d-only elif chain)
+    bars_per_year = _bars_per_year_for_tf(cfg.timeframe)
 
     # Extract portfolio Kelly config params once (avoid repeated getattr in inner loop)
     _cov_window: int = int(getattr(cfg, "cov_window", 180))

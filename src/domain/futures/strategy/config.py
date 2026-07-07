@@ -445,7 +445,6 @@ class CandidateStrategyConfig:
     impact_coeff_bps: float = 0.5
     impact_adv_proxy_field: str = "turnover_proxy"
     cost_stress_multiplier: float = 1.5
-    cost_amortize_by_holding: bool = True
     # Signal-only validation mode (--mode signal; skips ML training)
     signal_only: bool = False
     # Walk-forward

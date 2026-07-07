@@ -86,6 +86,8 @@ last_verified: 2026-07-06
 - `resolve_family_registration_gap(all_families, candidate_families)`: `all_families` 중 `candidate_families`에 없는 항목을 반환하는 순수 함수(orphan 탐지).
 - `src/domain/futures/strategy/family_lifecycle.py`: `FAMILY_TF_RETIREMENT`(economic replay 기각 이력의 `(family, tf)` 집합) + `is_family_tf_retired()` — 동일 조합 재검증 방지 가드.
 - **L0 게이트 스코프**: `run_alpha_foundry_l0_gate()`는 native TF panel에만 적용된다(`strategy_runtime/bridge.py`, native panel 생성 직후 호출). HTF 파생 패널(`build_multi_tf_panels`)은 그 이후 별도 생성되어 L0 경제성 게이트(LCB/tstat/cost-drag)를 거치지 않고 `resolve_tf_signal_pool` family 필터만 적용된 채 L1 fold 평가로 직행한다.
+- `_resolve_panel_archetype(panel)` [ADR_20260707_L1_BACKTEST_FIDELITY_FIXES]: `panel.metadata.archetype`가 없을 때 family 문자열로 archetype을 역산하는 fallback. trend 집합 = `{trend_ma, trend_donchian, vol_breakout, trend_pullback_continuation, mtf_trend_pullback, mtf_breakout_retest, vol_term_structure_gate, btc_regime_pullback}`. 미매칭 family는 전부 `mean_rev`로 폴백 — 신규 family 추가 시 이 함수 갱신 필수(누락 시 `exit_policies.build_exit_policies_for_panel()`이 엉뚱한 archetype 버킷의 손절/익절을 적용).
+- `evaluate_compound_backtest()`(`candidate_evaluation.py`)/`build_candidate_target_weights()`(`candidate_portfolio.py`)의 연율화(`bars_per_year`)는 `optimization/metrics._bars_per_year_for_tf(tf)` SSOT로 통일(4h/1h/1d 하드코딩 elif 체인 제거, 그 외 TF는 4h로 암묵 폴백하던 결함 해소).
 
 ### Alpha Foundry Core [ADR_20260706_ALPHA_FOUNDRY_SYNC][ADR_20260706_ALPHA_FOUNDRY_L0_DIVERSITY][ADR_20260706_ALPHA_FOUNDRY_L0_SIGNAL_RIGOR]
 - `AlphaRecipe`: `recipe_id`, `family`, `variant`, `timeframe`, `archetype`, `indicator_params`, `side_rule_id`, `exit_policy_id`, `required_fields`, `causal_lag_bars`, `max_turnover_per_year`.
