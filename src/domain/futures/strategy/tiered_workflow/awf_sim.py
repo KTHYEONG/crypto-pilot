@@ -2567,7 +2567,6 @@ def _run_awf_simulation(
             "ichimoku_trend",
             "dual_momentum",
             "taker_imbalance_momentum",
-            "flow_trend_continuation",
         }
     )
 
