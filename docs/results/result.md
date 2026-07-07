@@ -1,125 +1,57 @@
-# L0 Alpha Foundry Evidence - Run Comparison (Wiring Gaps Fixed)
+# L0 Multi-TF Gate Redesign - Run Comparison (HTF Bypass Closed)
 
-- New run id: `4h_1783419659`
-- Previous baseline: `4h_1783404539` (`docs/specs/alpha_signal_generation_wiring_gaps.md` 작성 시점 스냅샷)
-- Timeframe: `4h`
+- New run id: `4h_1783427649` (per-TF suffix: `4h_1783427649_{4h,6h,8h,12h}`)
+- Previous baseline: `4h_1783419659` (`docs/specs/l0_multi_tf_gate_redesign*.md` 작성 이전 스냅샷 — canonical gate는 고쳤지만 base TF 하나만 게이트에 태우던 상태)
+- Timeframe: `4h` (base), `6h`/`8h`/`12h`는 이번에 처음으로 동일 L0 게이트에 편입됨
 - Command: `UV_CACHE_DIR=/tmp/uv-cache LOG_LEVEL=DEBUG PYTHONPATH=. timeout 900 uv run python src/execution/opt_main_futures.py --phase l1 --sync skip --timeframe 4h --trials 1 --seed 42 --alpha-foundry gate --alpha-foundry-total-l1-budget 30 --alpha-foundry-min-conviction-lcb-bps 5.0`
-  - artifact write는 기본값(`artifact_write_enabled=False`)이라 CLI 자체로는 파일이 남지 않음. 데이터 확보를 위해 `build_alpha_foundry_runtime_config()`를 1회성으로 monkeypatch해서 `artifact_write_enabled=True`로 강제한 별도 실행에서 parquet을 남김.
-- Source: `logs/futures/alpha_foundry/4h_1783419659_evidence.parquet` (42 rows, 29 families)
-- Exit: `0` (단, 아래 "실행 중 발견한 크래시" 참고 — 최초 재실행은 `Exit 1`이었고 버그 수정 후 `0`이 됨)
+  - artifact write는 기본값(`artifact_write_enabled=False`)이라 CLI 자체로는 파일이 남지 않음. 데이터 확보를 위해 `build_alpha_foundry_runtime_config()`를 1회성으로 monkeypatch해서 `artifact_write_enabled=True`로 강제한 별도 실행에서 TF별 parquet 4개를 남김.
+- Source: `logs/futures/alpha_foundry/4h_1783427649_{tf}_evidence.parquet` (4h: 42 rows/29 families, 6h/8h/12h: 각 16 rows/11 families)
+- Exit: `0`
 
 ## Executive Summary
 
-이전 문서(`alpha_signal_generation_wiring_gaps.md`)에서 지적한 3개 배선 갭(Gap 1: canonical gate 미호출, Gap 2: `runtime_config` 미전달, Gap 3: `selected_for_l1` leak)을 구현팀이 수정했고, 이번 재검증에서 **3개 모두 실측 데이터로 해결 확인**했다. 다만 그 과정에서 canonical gate가 처음으로 실제 시장 데이터를 타면서 **이전에는 절대 실행되지 않던 코드 경로의 NaN 크래시**가 새로 발견되어 별도로 수정했고, canonical 3-tier 로직이 살아나면서 **"handoff_tier=candidate" 승격이 사실상 불가능**하다는 새로운 구조적 갭도 확인했다.
+`docs/specs/l0_multi_tf_gate_redesign.md`의 fan-out(Phase1 cheap-gate) → fuse(Phase2 cross-TF corroboration) → fan-in(Phase3 canonical gate) 오케스트레이션이 `run_candidate_strategy_for_universe()`에 실제로 배선됐다. 이전 세션에서 새 함수들(`run_alpha_foundry_l0_gate_multi_tf` 등)은 정확히 동작함을 unit test로 확인했지만 **실제 호출 경로에 연결되지 않아 프로덕션 데이터에는 전혀 영향이 없었다** — 이번에 그 배선을 완료하고 실행한 결과, 그동안 L0 경제성 게이트를 완전히 우회해온 HTF(6h/8h/12h) 후보들이 처음으로 동일 기준에 걸러지면서 **최종 L1 승격 수가 (5+50+45+99=199) → 43으로 급감**했다.
 
-## 0. 실행 중 발견한 크래시 (신규, 이번 세션에서 수정)
+## 1. TF별 Readiness 변화 (배선 전 → 후)
 
-Gap 1 수정으로 `evaluate_panel_gate()`가 처음 실제 데이터를 통과하면서 다음 예외로 파이프라인이 죽었다(`Exit 1`):
-
-```
-ValueError: numeric field must be finite, got nan
-```
-
-원인은 5곳의 `np.nanmean`/`.mean()` 호출이 **all-NaN 슬라이스**(특정 심볼의 funding 데이터 결측 구간에 이벤트가 몰린 경우)에 대해 `NaN`을 반환하면서, `AlphaGateEvidence.__post_init__`의 `np.isfinite` 강제 검증에 걸린 것이었다. `.claude/rules/quant.md` §3 "Safe Division Guardrails"가 요구하는 명시적 NaN 가드가 빠져 있었다.
-
-수정한 5곳 (`src/domain/futures/alpha_foundry/cheap_gate.py`):
-1. `evaluate_panel_gate()`의 `mean_gross_bps`/`mean_cost_bps`/`mean_net_bps` — all-NaN이면 `0.0`으로 폴백.
-2. `_compute_block_means()` — 블록 분할 전에 non-finite 값을 먼저 제거(공유 헬퍼라 `evaluate_panel_gate`와 미사용 상태인 `evaluate_panel_gate_v2` 양쪽에 적용됨).
-3. `compute_liquidity_cost_stress_bps()` — all-NaN 시 `0.0` 폴백.
-4. `compute_capacity_score()` — cost/adv가 all-NaN이면 `0.0` 폴백(기존엔 `np.clip(nan, 0, 1)`이 `nan`을 그대로 통과시켜 `[0,1]` 범위 검증에서 별도 예외가 남).
-5. `compute_regime_stability()` — 이벤트 배열에서 non-finite 제거 후 계산.
-
-수정 후 동일 커맨드 `Exit 0` 확인. 회귀 테스트 282개 전부 통과(`ruff`/`mypy` 포함) — 자세한 내용은 세션 로그 참고, 이 문서는 결과 데이터에 집중.
-
-## 1. Gap 재검증 결과 (`alpha_signal_generation_wiring_gaps.md` 대비)
-
-| Gap | 이전 상태 | 재검증 결과 |
-|---|---|---|
-| Gap 1: canonical `evaluate_panel_gate()` 미호출 | `capacity_score`/`regime_stability`/`tf_corroboration`이 전부 `0.0` 박제 | **호출 확인됨.** `regime_stability`는 이제 레시피별로 실측값(`0.003~0.27`) 산출. 단 `capacity_score`/`tf_corroboration`은 여전히 전부 `0.0` — 원인은 아래 §3 참고(별개 원인, 새로 확인) |
-| Gap 2: `runtime_config` 미전달 | search_cells/cost-prior-screen/DEBUG summary 전부 dead code | `runtime_config`는 이제 전달됨(코드 확인). 단 DEBUG 로그(`[EVAL] stage=af_generation` 등)는 **여전히 터미널에 안 보임** — 새 원인 발견: `emit_alpha_generation_debug_summary()`가 프로젝트 표준 `get_logger()` 대신 `logging.getLogger(__name__)`(stdlib 기본)을 쓰는데, 이 실행 경로엔 `logging.basicConfig()`가 전혀 호출되지 않아 핸들러가 없는 로거의 DEBUG 메시지가 조용히 버려짐 |
-| Gap 3: `selected_for_l1`가 `handoff_tier=blocked` leak | 3개 중 2개가 blocked인데 selected | **완전히 해결.** 이번 42개 후보 중 `selected_for_l1=True` 4개 전부 `handoff_tier in {seed, candidate}` — leak 0건 (`git`으로 직접 카운트 확인: `leak rows: 0`) |
-
-## 2. Baseline Comparison
-
-| metric | old (`4h_1783404539`) | new (`4h_1783419659`) | delta |
+| TF | 배선 전 (게이트 우회) | 배선 후 (L0 게이트 적용) | HTF native panel 투영 수 |
 | --- | --- | --- | --- |
-| rows | 34 | 42 | +8 |
-| families | 23 | 29 | +6 |
-| gate_passed | 1 | 1 | 0 |
-| selected_for_l1 | 3 | 4 | +1 |
-| **selected_for_l1 but handoff_tier=blocked (leak)** | **2** | **0** | **-2 (해결)** |
-| positive_net | 10 | 14 | +4 |
-| positive_lcb | 3 | 4 | +1 |
-| cost_drag_ratio_gt_1 | 21 | 24 | +3 |
-| median_mean_net_bps | -9.8426 | -8.8814 | +0.9612 |
-| best_mean_net_bps | 37.0773 | 37.0773 | 0.0000 |
-| best_net_lcb_bps | 11.9506 | 11.9516 | +0.0011 |
-| handoff_tier=seed | 0 | 5 | +5 |
-| handoff_tier=candidate | 1 | 0 | **-1** |
-| handoff_tier=blocked | 33 | 37 | +4 |
+| 4h | BLOCKED, probe_lcb_bps 88.9 | BLOCKED (4/5 Passed), probe_lcb_bps 87.6 — 거의 불변(원래도 게이트 적용) | - |
+| 6h | **✅ READY, 50 promoted** | **❌ BLOCKED (0/5 Passed), probe_lcb_bps=-inf, 0 promoted** | `Proj=0` |
+| 8h | ✅ READY, 45 promoted | ❌ BLOCKED (4/5 Passed), probe_lcb_bps 24.2 | `Proj=1` |
+| 12h | ✅ READY, 99 promoted | ✅ PASSED (5/5 Passed), probe_lcb_bps 27.8 | `Proj=2` |
+| **최종 L1 Promoted 합계** | **~199** (5+50+45+99, TF별 개별 집계) | **43** (통합 "Top 5 / 43 Promoted") | - |
 
-Interpretation:
-- Breadth: 이번에 처음으로 spec의 6개 신규 sparse/liquidity family가 실제로 L0 게이트에 유입됨(`sparse_breakout_retest_liquidity`, `oi_lsr_unwind`, `funding_flow_exhaustion_sparse`, `vol_contraction_breakout`, `xs_residual_rebalance`, `carry_net_of_funding`). 이 중 `sparse_breakout_retest_liquidity/sbrl_40_3_4h`는 `selected_for_l1=True`까지 도달(`mean_net_bps=21.44bps`, `net_lcb_bps=4.02bps`, `handoff_tier=seed`).
-- Quality: strict `gate_passed=True`는 여전히 1개(`mtf_breakout_retest/mtf_bor_20_4h`)로 변화 없음. positive_net/positive_lcb는 소폭 개선.
-- **`handoff_tier=candidate`가 1→0으로 줄었다.** 이는 회귀가 아니라 canonical 3-tier 로직이 처음 정상 동작한 결과다 — 이전엔 `"candidate" if gate_passed else "blocked"`라는 단순 이진 판정이었지만, 이제는 `regime_stability>=0.5` AND `tf_corroboration>=0.5` AND soft_flag 없음을 모두 요구한다. 아래 §3에서 설명하듯 `tf_corroboration`이 항상 `0.0`이라 **현재 구조에서는 어떤 후보도 `candidate` tier에 도달할 수 없다.**
+```
+🧬 [L1: MULTI-TF PANEL INJECTION]
+  └─ Active : [6h] Proj=0 Syms=126 | [8h] Proj=1 Syms=126 | [12h] Proj=2 Syms=126
+[ALPHA-FOUNDRY] mode=gate n_panels_in=42 n_bound=42 n_passed=4 n_rejected=38 elapsed=4.2505s
+```
 
-## 3. 신규 발견: `tf_corroboration`이 항상 `0.0` → `handoff_tier="candidate"` 승격이 구조적으로 불가능
+Interpretation: 6h는 게이트를 통과하는 신호가 하나도 없어(`Proj=0`) L1 후보 자체가 사라졌다. 이전까지 "6h에서 50개 승격"으로 보고됐던 것은 L0 경제성 검증(cost_drag/tstat/insufficient_events 등)을 전혀 거치지 않은 착시였다는 뜻이다. 8h/12h도 투영되는 패널 수가 각각 1개, 2개로 격감(HTF native panel 다수가 자체 recipe 바인딩·cheap-gate 단계에서 이미 탈락).
 
-42개 후보 전부 `tf_corroboration=0.0`, `capacity_score=0.0`이다. 원인을 코드로 추적한 결과:
+## 2. TF별 L0 Evidence 요약
 
-- `bridge_helpers.py:312`의 `run_alpha_foundry_l0_pipeline()` 호출부는 `evidence_by_tf` 파라미터를 넘기지 않는다(파라미터 자체가 시그니처에 없음).
-- `pipeline.py`에서 `evidence_by_tf`가 `None`이면 `tf_fusion_index={}`가 되고, `evaluate_alpha_gate_batch(..., tf_fusion_index=tf_fusion_index if evidence_by_tf else None)`도 결국 `None`을 넘김.
-- `compute_tf_corroboration()`은 `tf_fusion is None`이면 무조건 `0.0` 반환.
-- `evaluate_panel_gate()`의 handoff_tier 로직: `elif regime_stability < 0.5 or tf_corroboration < 0.5 or soft_flags: handoff_tier = "seed"` — `tf_corroboration`이 항상 `0.0`이라 이 조건이 항상 참이 되어 **"candidate"로 승격되는 else 분기에 절대 도달하지 못한다.**
-- `capacity_score` 역시 `aligned.execution_cost_bps_2d`/`adv_usdt_2d`가 이번 데이터셋에 아예 없어서(`compute_capacity_score`의 `None` 분기) 항상 `0.0` — 이건 스펙이 의도한 "`<=0.25`로 clamp" 규칙과 부합하는 정상 동작이라 버그는 아니지만, capacity 기반 판단이 이 데이터 소스로는 원천적으로 작동하지 않는다는 뜻이다.
+| TF | rows | families | gate_passed | selected_for_l1 | handoff_tier 분포 | selected_for_l1∧blocked (leak) |
+| --- | --- | --- | --- | --- | --- | --- |
+| 4h | 42 | 29 | 1 | 4 | blocked=37, seed=5 | 0 |
+| 6h | 16 | 11 | 1 | 0 | blocked=16 | 0 |
+| 8h | 16 | 11 | 1 | 1 | blocked=15, seed=1 | 0 |
+| 12h | 16 | 11 | 2 | 2 | blocked=14, seed=2 | 0 |
 
-정리하면 **canonical gate 로직 자체는 정확히 spec대로 구현됐지만, TF corroboration의 입력 데이터(`evidence_by_tf`, multi-TF L1 evidence)가 L0 게이트 시점에 아직 준비되지 않는 아키텍처**라, 현재 단일 4h L0 게이트 실행만으로는 "candidate" tier가 나올 수 없다. (참고: multi-TF corroboration은 원래 다른 TF의 L1 fold 결과가 있어야 계산 가능한 값이라 순수 버그라기보다 "L0 게이트가 L1 산출물보다 먼저 도는" 실행 순서상 제약에 가깝다 — 개선하려면 L1 1차 패스 결과를 L0 재평가에 피드백하는 루프가 필요.)
+- 4개 TF 전부 `selected_for_l1=True`인 행이 `handoff_tier=blocked`인 leak 0건 — 지난 세션에서 고친 Gap 3(`selected_for_l1` leak)가 멀티-TF 확장 이후에도 유지됨을 재확인.
+- HTF(6h/8h/12h)의 family pool은 `resolve_tf_signal_pool()`에 의해 11종으로 제한되어 4h(29종)보다 훨씬 좁다 — 이는 기존 설계(HTF 전용 signal pool)이며 이번 변경과 무관.
 
-## 4. Full New L0 Evidence (상위 20개, `mean_net_bps` 내림차순)
+## 3. 잔여 관찰: `tf_corroboration`이 이번 실행에서도 0.0 — 단, 원인이 다르다
 
-| family | variant | archetype | n_events | mean_net_bps | net_lcb_bps | nw_tstat | cost_drag_ratio | gate_passed | handoff_tier | capacity_score | regime_stability | tf_corroboration | selected_for_l1 | reject_reasons | soft_flags |
-| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| trend_pullback_continuation | tpc_50_200_4h | trend | 15159 | 37.0773 | 5.9413 | 1.1910 | 0.4488 | False | seed | 0.0 | 0.0486 | 0.0 | True | weak_tstat | weak_tstat\|bootstrap_disagree |
-| mtf_breakout_retest | mtf_bor_20_4h | trend | 11410 | 33.1454 | 11.9516 | 1.5547 | 0.3804 | **True** | seed | 0.0 | 0.0685 | 0.0 | True | | weak_rank_ic |
-| lsr_oi_regime_filter | lsr_oi_gate_42_4h | hedge | 1764 | 29.9276 | 2.7209 | 1.1028 | 0.5342 | False | seed | 0.0 | 0.0775 | 0.0 | True | weak_tstat | weak_tstat\|bootstrap_disagree\|below_conviction_floor |
-| mtf_breakout_retest | mtf_bor_40_4h | trend | 7366 | 24.2548 | -3.0623 | 0.8904 | 0.4610 | False | seed | 0.0 | 0.0584 | 0.0 | False | non_positive_lcb\|weak_tstat | weak_tstat |
-| oi_lsr_unwind | oiu_42 | flow | 1502 | 23.9908 | -1.1913 | 0.9580 | 0.5008 | False | blocked | 0.0 | 0.0533 | 0.0 | False | non_positive_lcb\|weak_tstat | weak_tstat\|weak_rank_ic |
-| **sparse_breakout_retest_liquidity** | sbrl_40_3_4h | trend | 12418 | 21.4452 | 4.0189 | 1.2296 | 0.4488 | False | **seed** | 0.0 | 0.0405 | 0.0 | **True** | weak_tstat | weak_tstat\|bootstrap_disagree\|below_conviction_floor |
-| sparse_breakout_retest_v2 | bor_v2_40 | trend | 10186 | 17.2724 | -0.5497 | 0.9694 | 0.5159 | False | blocked | 0.0 | 0.0359 | 0.0 | False | non_positive_lcb\|weak_tstat | weak_tstat |
-| trend_ma | ema_18_108 | trend | 6962 | 15.3273 | -16.9126 | 0.4731 | 0.5640 | False | blocked | 0.0 | 0.0180 | 0.0 | False | non_positive_lcb\|weak_tstat | weak_tstat |
-| trend_pullback_quality_v2 | tpq_v2_50_200 | trend | 8063 | 13.3059 | -24.1374 | 0.3383 | 0.6778 | False | blocked | 0.0 | 0.0209 | 0.0 | False | non_positive_lcb\|weak_tstat\|excess_cost_drag | weak_tstat |
-| **funding_flow_exhaustion_sparse** | ffes_96 | flow | 59 | 11.2141 | -26.9131 | 0.3642 | 0.4711 | False | blocked | 0.0 | 0.0850 | 0.0 | False | non_positive_lcb\|weak_tstat | weak_tstat\|weak_rank_ic |
-| mtf_trend_pullback | mtf_tpb_20_30_4h | trend | 8765 | 7.7293 | -22.3034 | 0.2318 | 0.7363 | False | blocked | 0.0 | 0.0103 | 0.0 | False | non_positive_lcb\|weak_tstat\|excess_cost_drag | weak_tstat |
-| mtf_trend_pullback | mtf_tpb_50_30_4h | trend | 11985 | 4.5816 | -23.8925 | 0.1288 | 0.8179 | False | blocked | 0.0 | 0.0055 | 0.0 | False | non_positive_lcb\|weak_tstat\|excess_cost_drag | weak_tstat |
-| trend_pullback_continuation | tpc_20_100_4h | trend | 28049 | 2.3195 | -8.5274 | 0.2144 | 0.8935 | False | blocked | 0.0 | 0.0044 | 0.0 | False | non_positive_lcb\|weak_tstat\|excess_cost_drag | weak_tstat |
-| **sparse_breakout_retest_liquidity** | sbrl_20_3 | trend | 20922 | 1.0805 | -6.9680 | 0.1390 | 0.9336 | False | blocked | 0.0 | 0.0043 | 0.0 | False | non_positive_lcb\|weak_tstat\|excess_cost_drag | weak_tstat |
-| **vol_contraction_breakout** | vcb_20_120 | mean_reversion | 0 | 0.0000 | 0.0000 | 0.0000 | 0.0000 | False | blocked | 0.0 | 0.0000 | 0.0 | False | insufficient_events | below_conviction_floor\|weak_rank_ic |
-| sparse_breakout_retest_v2 | bor_v2_20 | trend | 17552 | -0.5623 | -11.1008 | -0.0534 | 1.0343 | False | blocked | 0.0 | 0.0054 | 0.0 | False | non_positive_lcb\|weak_tstat\|excess_cost_drag | weak_tstat |
-| ... (나머지 26개, 전부 mean_net_bps < 0 또는 excess_cost_drag/excess_turnover로 blocked) |
+이전 세션에서 발견한 버그(2-tuple vs 3-tuple key 불일치)는 unit test로 수정 확인됐지만, 이번 실데이터 실행에서도 4개 TF 전부 `tf_corroboration=0.0`, `corroboration_tier="insufficient_coverage"`로 나온다. 원인을 추적한 결과 **버그가 아니라 실측 데이터 특성**임을 확인했다:
 
-전체 42행 원본은 `logs/futures/alpha_foundry/4h_1783419659_evidence.parquet` 참고. 신규 6개 family 중 `vol_contraction_breakout`은 이번 4h/126심볼 데이터에서 `n_events=0`(insufficient_events)으로 아예 트리거되지 않았고, `carry_net_of_funding`/`xs_residual_rebalance`는 트리거는 됐으나 전부 큰 폭의 음수 net(`-30~-32bps`)로 blocked.
-
-## 5. Reject Reason Breakdown (신규)
-
-| reject_reason | count |
-| --- | --- |
-| non_positive_lcb | 37 |
-| weak_tstat | 27 |
-| excess_cost_drag | 31 |
-| excess_turnover | 4 |
-| insufficient_events | 1 |
-
-`selected_for_l1` 4개 중 3개가 `gate_passed=False`인데도 L1로 넘어가는 것은 leak이 아니라 **spec이 의도한 정상 동작**이다 — `selected_for_l1`은 "`handoff_tier != blocked`인 후보 중 diversity/budget 배정을 통과했는가"를 뜻하고, `gate_passed`(=strict hard-reject 없음)와는 별개 축이다. 실제로 leak 여부의 판별 기준은 "`handoff_tier=blocked`인데 `selected_for_l1=True`"였고 이번엔 0건이다.
-
-## 6. L1 Runtime Observation
-
-동일 명령으로 L1까지 이어서 실행한 결과(수정 후 정상 완료, `Exit 0`):
-- `[ALPHA-FOUNDRY] mode=gate n_panels_in=42 n_bound=42 n_passed=4 n_rejected=38 elapsed=4.0759s`
-- L1 6h/8h/12h 승격 개수는 이전과 거의 동일(50/45/99 수준) — 이번 세션은 4h L0 게이트 내부 로직 수정에 집중했고, HTF 후보가 별도 문으로 L1에 들어오는 기존 아키텍처 이슈(§3과 연결되는 문제)는 이번 수정 범위 밖.
+- 4h와 6h/8h/12h 사이에 실제로 겹치는 `(family, variant)` 조합이 존재한다(예: `trend_ma/ema_12_72`, `mtf_breakout_retest/mtf_bor_20` 등 9개 페어 확인).
+- 하지만 `fuse_multi_timeframe_evidence()`는 다른 TF의 해당 페어가 `reject_reasons`에 `insufficient_events`/`insufficient_effective_n`을 포함하면 그 TF를 `tf_coverage_count`에서 제외한다. HTF는 bar 수가 적어(예: 12h는 4h 대비 bar 수가 1/3) 동일 캘린더 구간 내 이벤트 수가 구조적으로 적고, 실제 `AlphaGateConfig`(운영 임계치, unit test의 완화된 설정이 아님) 기준으로는 겹치는 페어들도 다수가 `insufficient_events`로 걸러진다.
+- 결과적으로 "겹치는 페어는 있으나 유효 커버리지가 0"이 되어 `insufficient_coverage`로 판정 — 이는 키 불일치 버그가 아니라 **HTF 데이터 볼륨 자체의 한계**다. 코드는 정확히 설계대로 동작 중이다.
 
 ## Current Conclusion
 
-- **3개 배선 갭(canonical gate 미호출/미배선/`selected_for_l1` leak) 전부 실측 확인 완료.**
-- 그 과정에서 실데이터 전용 NaN 크래시 5곳을 신규 발견·수정(quant.md 안전 나눗셈 가드 패턴 적용) — 이 수정이 없었으면 canonical gate는 계속 프로덕션에서 죽었을 것.
-- 신규 6개 family 중 `sparse_breakout_retest_liquidity`가 처음으로 `selected_for_l1=True`에 도달한 유일한 신규 family(`net_lcb_bps=+4.02bps`, `handoff_tier=seed`).
-- **다음 우선순위**: `tf_corroboration`이 구조적으로 `0.0`에 고정돼 `handoff_tier=candidate`가 나올 수 없는 문제(§3) — L1 evidence를 L0 gate에 피드백하는 루프 설계가 필요. DEBUG summary 로거를 프로젝트 표준 `get_logger()`로 교체하는 것도 관측성 확보를 위해 필요.
+- **핵심 아키텍처 리스크(HTF가 L0 경제성 게이트를 우회해 L1로 직행) 해소 확인.** 6h는 이제 완전히 차단되고, 8h/12h도 큰 폭으로 후보가 줄었다.
+- 3개 배선 갭(canonical gate 미호출/미배선/`selected_for_l1` leak) + 이번 멀티-TF 오케스트레이션 배선까지, `alpha_signal_generation.md` → `l0_multi_tf_gate_redesign.md` 스펙 체인 전체가 실측으로 종결됐다.
+- `tf_corroboration`이 여전히 0인 것은 남은 개선 여지이지만, 그 원인이 "배선 안 됨"에서 "HTF 이벤트 수 부족"으로 바뀌었다 — 다음 단계가 있다면 HTF cheap-gate의 `min_events`/`min_effective_n` 임계치를 TF별로 완화하거나, `bars_per_year` 정규화된 이벤트 밀도 기준으로 바꾸는 것이 후보가 된다(이번 스코프 밖).
