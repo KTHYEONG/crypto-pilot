@@ -52,7 +52,7 @@ PASS_EVIDENCE = CheapGateEvidence(
     bootstrap_lcb_bps=1.5,
     bootstrap_agree=True,
     mean_gross_bps=0.0,
-    total_cost_bps=0.0,
+    mean_cost_bps=0.0,
 )
 
 FAIL_EVIDENCE = CheapGateEvidence(
@@ -75,7 +75,7 @@ FAIL_EVIDENCE = CheapGateEvidence(
     bootstrap_lcb_bps=0.0,
     bootstrap_agree=True,
     mean_gross_bps=0.0,
-    total_cost_bps=0.0,
+    mean_cost_bps=0.0,
 )
 
 
@@ -138,7 +138,7 @@ class TestBuildL1VerificationUnits:
                 bootstrap_lcb_bps=1.5,
                 bootstrap_agree=True,
             mean_gross_bps=0.0,
-            total_cost_bps=0.0,
+            mean_cost_bps=0.0,
         )
             for i in range(6)
         ]
