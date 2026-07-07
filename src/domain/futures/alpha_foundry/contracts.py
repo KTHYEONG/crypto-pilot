@@ -17,6 +17,11 @@ from numpy.typing import NDArray
 
 from src.domain.futures.signals.contracts import CandidateSignalPanel
 
+# ── Alpha Foundry V2 type aliases ─────────────────────────────────────
+AlphaEntryMode: TypeAlias = Literal["sparse", "continuous", "cross_sectional_rank"]
+AlphaSearchStatus: TypeAlias = Literal["pending", "screened", "gated", "l1_queued", "retired"]
+AlphaTimeframe: TypeAlias = Literal["30m", "1h", "2h", "3h", "4h", "6h", "8h", "12h", "1d"]
+
 # ── L0/L1 Signal Discovery types ──────────────────────────────────────
 DiscoveryTier: TypeAlias = Literal["seed", "candidate", "verified", "blocked"]
 
@@ -216,6 +221,128 @@ class AlphaRecipe:
 
 
 @dataclass(slots=True, frozen=True)
+class AlphaSignalBlueprint:
+    family: str
+    variant: str
+    archetype: AlphaArchetype
+    timeframe: str
+    required_fields: tuple[str, ...]
+    causal_lag_bars: int
+    lookback_bars: tuple[int, ...]
+    holding_bars: int
+    max_turnover_per_year: float
+    entry_mode: AlphaEntryMode
+    side_rule_id: str
+    exit_policy_id: str
+
+    def __post_init__(self) -> None:
+        if not self.family:
+            raise ValueError("family must not be empty")
+        if not self.variant:
+            raise ValueError("variant must not be empty")
+        if not self.timeframe:
+            raise ValueError("timeframe must not be empty")
+        if not self.side_rule_id:
+            raise ValueError("side_rule_id must not be empty")
+        if not self.exit_policy_id:
+            raise ValueError("exit_policy_id must not be empty")
+        if self.causal_lag_bars < 1:
+            raise ValueError("causal_lag_bars must be >= 1")
+        if self.holding_bars < 1:
+            raise ValueError("holding_bars must be >= 1")
+        for lb in self.lookback_bars:
+            if lb < 1:
+                raise ValueError("lookback_bars must be >= 1")
+        if self.max_turnover_per_year < 0.0:
+            raise ValueError("max_turnover_per_year must be >= 0.0")
+        if self.entry_mode == "continuous" and self.max_turnover_per_year > 365.0:
+            raise ValueError("continuous mode requires max_turnover_per_year <= 365.0")
+
+
+@dataclass(slots=True, frozen=True)
+class L0SearchCell:
+    blueprint_id: str
+    family: str
+    variant: str
+    timeframe: str
+    tf_minutes: int
+    symbol_scope: SymbolScope
+    cost_floor_bps: float
+    expected_event_rate: float
+    family_prior_score: float
+    status: AlphaSearchStatus = "pending"
+
+    def __post_init__(self) -> None:
+        if not self.blueprint_id:
+            raise ValueError("blueprint_id must not be empty")
+        if not self.family:
+            raise ValueError("family must not be empty")
+        if not self.variant:
+            raise ValueError("variant must not be empty")
+        if not self.timeframe:
+            raise ValueError("timeframe must not be empty")
+        if self.tf_minutes <= 0:
+            raise ValueError("tf_minutes must be positive")
+        if self.cost_floor_bps < 0.0:
+            raise ValueError("cost_floor_bps must be >= 0.0")
+        if self.expected_event_rate < 0.0:
+            raise ValueError("expected_event_rate must be >= 0.0")
+        if not np.isfinite(self.family_prior_score):
+            raise ValueError("family_prior_score must be finite")
+
+
+@dataclass(slots=True, frozen=True)
+class AlphaGateEvidenceV2:
+    recipe_id: str
+    timeframe: str
+    symbol_scope: SymbolScope
+    n_events: int
+    effective_n: float
+    mean_gross_bps: float
+    mean_cost_bps: float
+    mean_net_bps: float
+    gross_lcb_bps: float
+    net_lcb_bps: float
+    nw_tstat: float
+    rank_ic: float
+    rank_ic_tstat: float
+    cost_drag_ratio: float
+    turnover_per_year: float
+    event_hit_rate: float
+    payoff_skew: float
+    regime_edge_bps: Mapping[str, float]
+    xs_spread_lcb_bps: float | None
+    liquidity_cost_stress_bps: float
+    bootstrap_lcb_bps: float
+    bootstrap_agree: bool
+    gate_passed: bool
+    reject_reasons: tuple[str, ...]
+    soft_flags: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        if self.n_events < 0:
+            raise ValueError("n_events must be >= 0")
+        if self.effective_n < 0.0:
+            raise ValueError("effective_n must be >= 0.0")
+        if self.cost_drag_ratio < 0.0:
+            raise ValueError("cost_drag_ratio must be >= 0.0")
+        if not (0.0 <= self.event_hit_rate <= 1.0):
+            raise ValueError("event_hit_rate must be in [0.0, 1.0]")
+        numeric_fields = [
+            self.mean_gross_bps, self.mean_cost_bps, self.mean_net_bps,
+            self.gross_lcb_bps, self.net_lcb_bps, self.nw_tstat,
+            self.rank_ic, self.rank_ic_tstat, self.cost_drag_ratio,
+            self.turnover_per_year, self.event_hit_rate, self.payoff_skew,
+            self.liquidity_cost_stress_bps, self.bootstrap_lcb_bps,
+        ]
+        for v in numeric_fields:
+            if not np.isfinite(v):
+                raise ValueError(f"numeric field must be finite, got {v}")
+        if self.xs_spread_lcb_bps is not None and not np.isfinite(self.xs_spread_lcb_bps):
+            raise ValueError("xs_spread_lcb_bps must be finite if not None")
+
+
+@dataclass(slots=True, frozen=True)
 class CheapGateConfig:
     min_events: int = 40
     min_effective_n: float = 20.0
@@ -244,6 +371,24 @@ class CheapGateConfig:
     min_seed_slots_per_timeframe: int = 1
     allow_soft_seed_when_only_soft_failures: bool = True
     priority_weights: L0PriorityWeights = field(default_factory=L0PriorityWeights)
+    min_candidate_rank_ic_tstat: float = 2.0
+    min_xs_symbols_per_bar: int = 5
+    max_abs_btc_beta: float = 0.80
+    high_turnover_per_year: float = 180.0
+    liquidity_cost_stress_mult: float = 1.0
+    enable_v2_gate_metrics: bool = False
+
+    def __post_init__(self) -> None:
+        if self.min_candidate_rank_ic_tstat < 0.0:
+            raise ValueError("min_candidate_rank_ic_tstat must be >= 0.0")
+        if self.min_xs_symbols_per_bar < 2:
+            raise ValueError("min_xs_symbols_per_bar must be >= 2")
+        if self.max_abs_btc_beta < 0.0:
+            raise ValueError("max_abs_btc_beta must be >= 0.0")
+        if self.high_turnover_per_year < 0.0:
+            raise ValueError("high_turnover_per_year must be >= 0.0")
+        if self.liquidity_cost_stress_mult < 0.0:
+            raise ValueError("liquidity_cost_stress_mult must be >= 0.0")
 
 
 @dataclass(slots=True, frozen=True)
