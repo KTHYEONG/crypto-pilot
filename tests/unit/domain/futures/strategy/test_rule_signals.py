@@ -116,6 +116,9 @@ def test_build_rule_signal_panels_returns_expected_tuple() -> None:
         "supertrend",
         "ichimoku_trend",
         "positioning_unwind",
+        "sparse_breakout_retest_v2",
+        "trend_pullback_quality_v2",
+        "residual_momentum_xs",
     }
 
     for p in panels:
@@ -1230,3 +1233,50 @@ def test_resolve_panel_archetype_explicit_metadata_overrides_family_inference() 
     )
 
     assert _resolve_panel_archetype(panel) == "carry_rev"
+
+
+def test_candidate_panels_to_events_with_new_families() -> None:
+    aligned = _make_aligned(t=200, n=2)
+    cfg = CandidateStrategyConfig()
+    panels = build_rule_signal_panels(
+        aligned=aligned,
+        cfg=cfg,
+    )
+    assert len(panels) > 0, "need at least one panel for events test"
+    events = candidate_panels_to_events(
+        panels,
+        min_abs_score=0.0,
+        cost_floor_bps=24.0,
+    )
+    assert isinstance(events, pd.DataFrame)
+    assert "family" in events.columns
+    assert "variant" in events.columns
+
+
+def test_candidate_panels_to_events_empty() -> None:
+    events = candidate_panels_to_events(
+        (),
+        min_abs_score=0.5,
+    )
+    assert isinstance(events, pd.DataFrame)
+    assert len(events) == 0
+
+
+def test_resample_to_htf_and_project_basic() -> None:
+    from src.domain.futures.strategy.rule_signals import _resample_to_htf_and_project
+
+    t = 200
+    datetimes = np.datetime64("2026-01-01T04", "h") + np.arange(t).astype("timedelta64[4h]")
+    values = np.random.default_rng(42).normal(0, 1, (t, 3)).astype(np.float64)
+
+    def _identity_fn(df: pd.DataFrame) -> pd.DataFrame:
+        return df
+
+    result = _resample_to_htf_and_project(
+        datetimes_4h=datetimes,
+        values_4h=values,
+        htf="1D",
+        agg_method="last",
+        compute_feature_fn=_identity_fn,
+    )
+    assert result.shape == (t, 3)
