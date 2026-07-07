@@ -1,6 +1,7 @@
 """Alpha Foundry search space construction and lifecycle.
 
 [ADR_20260706_ALPHA_FOUNDRY_L0_L1_HANDOFF_GUARD]
+[ADR_20260707_ALPHA_FOUNDRY_RESULT_SYNC]
 """
 
 from __future__ import annotations
@@ -67,6 +68,7 @@ def build_l0_search_cells(
     blueprints: Sequence[AlphaSignalBlueprint],
     family_prior_scores: Mapping[str, float],
     cost_floor_bps_by_tf: Mapping[str, float],
+    generator_exists_by_family: Mapping[str, bool] | None = None,
 ) -> tuple[L0SearchCell, ...]:
     cells: list[L0SearchCell] = []
     seen: set[str] = set()
@@ -86,6 +88,31 @@ def build_l0_search_cells(
         tf_minutes = max(timeframe_to_minutes(bp.timeframe), 1)
         cost_floor = cost_floor_bps_by_tf.get(bp.timeframe, 0.0)
         prior = family_prior_scores.get(bp.family, 0.0)
+
+        if generator_exists_by_family is not None:
+            if bp.family not in generator_exists_by_family:
+                raise ValueError(
+                    f"family {bp.family!r} missing from generator_exists_by_family"
+                )
+            has_generator = generator_exists_by_family[bp.family]
+            if not has_generator:
+                cells.append(
+                    L0SearchCell(
+                        blueprint_id=cell_id,
+                        family=bp.family,
+                        variant=bp.variant,
+                        timeframe=bp.timeframe,
+                        tf_minutes=tf_minutes,
+                        symbol_scope="global",
+                        cost_floor_bps=cost_floor,
+                        expected_event_rate=1.0 / max(bp.holding_bars, 1),
+                        family_prior_score=prior,
+                        status="retired",
+                        retire_reason="no_generator",
+                    )
+                )
+                continue
+
         cells.append(
             L0SearchCell(
                 blueprint_id=cell_id,

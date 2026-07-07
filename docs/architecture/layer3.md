@@ -95,6 +95,10 @@ Optuna 최적화로 최종 선별된 챔피언 전략에 대해 $N$개의 서로
 - `CandidatePipelineOutput.alpha_foundry_report: AlphaFoundryBridgeReport | None` — `None` when mode=off.
 - Report fields (`panels_in`, `bound`, `survivors`, `reject_breakdown`) are available for downstream diagnostics and JSON artifact at `logs/futures/alpha_foundry/`.
 
+### Alpha Foundry Runtime Config [ADR_20260707_ALPHA_FOUNDRY_RESULT_SYNC]
+- `application/futures/runner/config.py` builds and validates `AlphaFoundryRuntimeConfig` with `observability_mode`, `debug_top_k_rows`, `artifact_write_enabled`, and `gate_schema` in addition to the existing gate and L2 policy fields.
+- `validate_alpha_foundry_runtime_config()` rejects invalid observability mode, non-unified gate schema, and `debug_top_k_rows < 1`.
+
 ### Validation Parity Report Flow [ADR_20260705_TF_VALIDATION_ROOT_CAUSE_CAPTURE]
 - `build_validation_parity_capture()`는 pre-clear probe/main/census evidence를 묶고, `finalize_validation_parity_capture()`는 이후 L2/L3 sleeve evidence로 major-gap 클래스를 확정한다.
 - `validation_parity_report`는 `Layer1Result`, `Layer2Result`, `Layer3Result`를 통해 downstream으로 유지된다.

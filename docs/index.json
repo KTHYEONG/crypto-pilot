@@ -7,6 +7,7 @@
     "architecture": "docs/architecture/layer1.md",
     "testing": [
       "tests/unit/domain/futures/alpha_foundry/test_contracts.py",
+      "tests/unit/domain/futures/alpha_foundry/test_evidence_rows.py",
       "tests/unit/domain/futures/alpha_foundry/test_alpha_search_contracts.py",
       "tests/unit/domain/futures/alpha_foundry/test_gate_v2.py",
       "tests/unit/domain/futures/alpha_foundry/test_alpha_family_registration.py"
@@ -67,6 +68,7 @@
       "tests/unit/domain/futures/alpha_foundry/test_panel_binding.py",
       "tests/unit/domain/futures/alpha_foundry/test_evidence_rows.py",
       "tests/unit/domain/futures/alpha_foundry/test_synthetic_recipe_binding.py",
+      "tests/unit/application/futures/runner/test_alpha_foundry_wiring.py",
       "tests/unit/domain/futures/strategy_runtime/test_bridge_alpha_foundry.py"
     ]
   },
