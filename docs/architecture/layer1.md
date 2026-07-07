@@ -18,6 +18,7 @@ related_paths:
   - src/domain/futures/alpha_foundry/contracts.py
   - src/domain/futures/alpha_foundry/recipes.py
   - src/domain/futures/alpha_foundry/cheap_gate.py
+  - src/domain/futures/alpha_foundry/search_space.py
   - src/domain/futures/alpha_foundry/diversity.py
   - src/domain/futures/alpha_foundry/budget.py
   - src/domain/futures/alpha_foundry/posterior.py
@@ -31,6 +32,7 @@ change_triggers:
   - src/domain/futures/alpha_foundry/contracts.py
   - src/domain/futures/alpha_foundry/recipes.py
   - src/domain/futures/alpha_foundry/cheap_gate.py
+  - src/domain/futures/alpha_foundry/search_space.py
   - src/domain/futures/alpha_foundry/diversity.py
   - src/domain/futures/alpha_foundry/budget.py
   - src/domain/futures/alpha_foundry/posterior.py
@@ -80,8 +82,8 @@ last_verified: 2026-07-06
 - `xs_oi_skew`: Open Interest 빌드업과 LSR 스큐 결합 (`-(oi_build_z_42 * sign(lsr_log_z_42))`)
 
 ### Signal Family Registry [ADR_20260706_L0_SIGNAL_FAMILY_DIVERSITY]
-- `ALL_SIGNAL_FAMILIES` (`signals/rules.py`, `strategy/rule_signals.py`, 두 모듈 각자 동일 값 유지): 27개 rule family 모듈 상수. 두 모듈은 family 연산 로직을 병행 유지하므로 값 동기화가 계약.
-- `CandidateStrategyConfig.candidate_families`: native TF 빌드 시 `filter_rule_signal_panels()`가 적용하는 전역 allowlist(27종 전량 포함).
+- `ALL_SIGNAL_FAMILIES` (`signals/rules.py`, `strategy/rule_signals.py`, 두 모듈 각자 동일 값 유지): 30개 rule family 모듈 상수. 두 모듈은 family 연산 로직을 병행 유지하므로 값 동기화가 계약.
+- `CandidateStrategyConfig.candidate_families`: native TF 빌드 시 `filter_rule_signal_panels()`가 적용하는 전역 allowlist(30종 전량 포함).
 - `resolve_tf_signal_pool(cfg, tf)` / `_DEFAULT_PER_TF_FAMILIES`: HTF(6h/8h/12h) 파생 패널 전용 family allowlist. `build_multi_tf_panels()`가 `family_filter`로 직접 주입 — native TF의 `candidate_families`와는 별개 축.
 - `resolve_family_registration_gap(all_families, candidate_families)`: `all_families` 중 `candidate_families`에 없는 항목을 반환하는 순수 함수(orphan 탐지).
 - `src/domain/futures/strategy/family_lifecycle.py`: `FAMILY_TF_RETIREMENT`(economic replay 기각 이력의 `(family, tf)` 집합) + `is_family_tf_retired()` — 동일 조합 재검증 방지 가드.
@@ -91,10 +93,16 @@ last_verified: 2026-07-06
 
 ### Alpha Foundry Core [ADR_20260706_ALPHA_FOUNDRY_SYNC][ADR_20260706_ALPHA_FOUNDRY_L0_DIVERSITY][ADR_20260706_ALPHA_FOUNDRY_L0_SIGNAL_RIGOR]
 - `AlphaRecipe`: `recipe_id`, `family`, `variant`, `timeframe`, `archetype`, `indicator_params`, `side_rule_id`, `exit_policy_id`, `required_fields`, `causal_lag_bars`, `max_turnover_per_year`.
+- `AlphaSignalBlueprint`: `family`, `variant`, `archetype`, `timeframe`, `required_fields`, `causal_lag_bars`, `lookback_bars`, `holding_bars`, `max_turnover_per_year`, `entry_mode`, `side_rule_id`, `exit_policy_id`.
+- `L0SearchCell`: `blueprint_id`, `family`, `variant`, `timeframe`, `tf_minutes`, `symbol_scope`, `cost_floor_bps`, `expected_event_rate`, `family_prior_score`, `status`.
+- `AlphaGateEvidenceV2`: `recipe_id`, `timeframe`, `symbol_scope`, `n_events`, `effective_n`, `mean_gross_bps`, `mean_cost_bps`, `mean_net_bps`, `gross_lcb_bps`, `net_lcb_bps`, `nw_tstat`, `rank_ic`, `rank_ic_tstat`, `cost_drag_ratio`, `turnover_per_year`, `event_hit_rate`, `payoff_skew`, `regime_edge_bps`, `xs_spread_lcb_bps`, `liquidity_cost_stress_bps`, `bootstrap_lcb_bps`, `bootstrap_agree`, `gate_passed`, `reject_reasons`, `soft_flags`.
+- `AlphaFoundryRuntimeConfig`: `enable_fast_discovery_timeframes` / `fast_discovery_timeframes` switch the discovery grid before native L0 gate execution.
 - `BucketKey`: `tuple[str, str]` alias for `(family, timeframe)` — diversity selection grouping key.
 - `CorroborationTier`: `Literal["corroborated", "single_tf_strict", "contradicted", "insufficient_coverage"]`.
+- `search_space.py`: `timeframe_to_minutes()`, `resolve_alpha_timeframe_grid()`, `build_l0_search_cells()`, `mark_retired_search_cells()` — L0 blueprint grid and retirement state helpers.
 - `CheapGateEvidence`: 경제성 지표 전용(`gate_passed`, `reject_reasons`, `n_events`(sparse entry count), `effective_n`, `block_lcb_bps`, `nw_tstat`(block moments 기반), `rank_ic`, `turnover_per_year`, `cost_drag_ratio`, `incremental_rank_ic`, `compute_cost_score`, `novelty_corr_max`, `bootstrap_lcb_bps`, `bootstrap_agree`, `mean_gross_bps`(건당 평균, `total_gross/n_events`), `total_cost_bps`(⚠️ 건당 평균이 아닌 전체 합계 — `mean_gross_bps`/`mean_net_bps`와 단위 불일치, 비교 시 `n_events`로 직접 나눠야 함)). `monotonic_bucket_score`/`regime_edges_bps`는 미사용 필드로 제거됨.
 - `L0SoftFlag`에 `"weak_rank_ic"` 추가: `_rank_ic_soft_floor(n_events) = 1/√(n_events-3)`보다 `abs(rank_ic)`가 작으면 부여(표본크기 적응형, 고정 임계치 아님). `discovery_tier`의 `blocked` 판정에는 무관하고 `L0PriorityWeights.weak_rank_ic_multiplier`(기본 0.70)로 `l1_priority_score`만 감쇠.
+- `evaluate_panel_gate_v2()` / `downgrade_gate_v2_to_cheap_evidence()`: V1 cheap gate와 병행하는 cost- and IC-aware V2 gate path, native downstream 호환용 downgrade adapter.
 - `audit_full_family_correlation()`(`diversity.py`): `AlphaFoundryRuntimeConfig.enable_correlation_audit`(기본 `False`) 활성 시에만 native panel 빌드 직후(게이트 이전) 전체 family 상관행렬 + `estimate_effective_test_count()`(entropy 기반 실효 독립개수)를 `{run_id}_family_correlation.parquet`로 기록하는 opt-in 진단 경로.
 - `DiversitySelectionResult`: 버킷 단위 산출물(`bucket_key`, `ranked_recipe_ids`, `selected_recipe_ids`, `redundant_recipe_ids`, `redundant_reason_by_id`, `bucket_corr`, `bucket_eff_test_count`). `redundant_reason_by_id` 값은 상관 상대 recipe_id 외에 `"bh_rejected"`/`"below_conviction_floor"` sentinel도 가짐.
 - `CrossBucketDiversityResult`: 교차버킷 최종 산출물(`final_selected_recipe_ids`, `demoted_recipe_ids`, `demoted_reason_by_id`, `cross_bucket_corr`, `global_eff_test_count`).
@@ -151,7 +159,7 @@ last_verified: 2026-07-06
 ```mermaid
 graph TD
     A[Market Data] --> B[Vectorized Indicators]
-    B --> C[CandidateSignalPanel 28 Families]
+    B --> C[CandidateSignalPanel 30 Families]
     C --> C1[Multi-TF Panel Injection]
     C1 --> D[Archetype & Regime Context]
     D --> E[L1 Breakeven & Profit Floor Gate]
