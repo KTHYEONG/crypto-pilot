@@ -430,6 +430,12 @@ class CandidateStrategyConfig:
         "volatility_contraction_expansion",
         "btc_regime_relative_strength",
         "mean_reversion_after_liquidation_proxy",
+        "sparse_breakout_retest_liquidity",
+        "funding_flow_exhaustion_sparse",
+        "oi_lsr_unwind",
+        "vol_contraction_breakout",
+        "xs_residual_rebalance",
+        "carry_net_of_funding",
     )
     # TF-Specific Signal Pools
     per_tf_candidate_families: dict[str, tuple[str, ...]] | None = None
