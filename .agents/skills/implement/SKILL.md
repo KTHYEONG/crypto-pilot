@@ -20,7 +20,7 @@ Translate the logical Blueprint (`docs/specs/*.md`) into working Python code usi
 - **Step 1: Stub/Interface Registration & Self-Gate (Compilation Pass)**
   - Open the target source file (`src/...`) and create only the stub of the function/class matching the signature.
   - Return dummy values or raise `NotImplementedError` (to bypass unused-argument lint warnings).
-  - **[Self-Gate]**: Immediately run `ruff check` on the stub file to ensure API signatures and parameter type hints match the `spec` blueprint 100% before coding tests or logic.
+  - **[Self-Gate]**: Run `ruff check` and `uv run mypy [stub_file]` to guarantee API signatures and type hints match the `spec` contract 100% before coding tests.
 - **Step 2: Write Failing Tests (Red Phase)**
   - Open or create the test file (`tests/...`).
   - Write test cases matching **Scenario 1, 2, and 3** from the spec blueprint (using the mock templates provided in spec).
