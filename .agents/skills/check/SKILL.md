@@ -16,6 +16,7 @@ Run ALL of the following in a **single batch command**:
 2. **Type check (`uv run mypy`)** — only source files modified by the current spec.
 3. **Regression (`uv run pytest [regression_target] -v --tb=short`)** — spec-mapped test files.
 4. **Coverage (`uv run pytest --cov=[module_path] [regression_target] --cov-report=term-missing`)**.
+5. **Contract Review** — Verify that all TDD scenarios (Happy Path, Edge, Error) written in `docs/specs/[feature].md` are actually implemented as assertions. Check if any side-effects occur in adjacent modules.
 
 ### 2. Dynamic Verification
 
@@ -45,16 +46,13 @@ If any step in the validation pipeline fails:
 - **FAIL**: Any discrepancy found. ➔ **Transition to `implement` (or `spec`)** with clear Gap Analysis.
 
 ## Output Format
-```md
-### 🏁 Verification Result: [PASS / FAIL]
+결과 보고는 마크다운 서식 및 다음 단계 지정을 배제하고 단 한 줄(Single-line)로 요약합니다.
 
-#### 📊 Regression & Coverage Summary
-- **Regression Status:** [Passed / Failed count]
-- **Target Coverage %:** [e.g., 92%]
+포맷:
+[결과] | [원인/상태]
 
-#### 🔍 Gap Analysis & Diagnosis (Required ONLY if FAIL)
-*Systematic analysis of error logs. Max 3 bullet points.*
-- **Error Line:** `[file:line]`
-- **Diagnosis:** [Design discrepancy | Implementation Bug]
-- **Action Plan:** [Return to implement | Return to spec | Human Intervention]
-```
+예시 (FAIL):
+FAIL | metrics.py:529,531 (Cov 82% < 90%)
+
+예시 (PASS):
+PASS | All checks passed (Cov 94%)
