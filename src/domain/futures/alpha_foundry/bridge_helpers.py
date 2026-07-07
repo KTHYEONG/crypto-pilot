@@ -3,6 +3,7 @@
 [ADR_20260706_ALPHA_FOUNDRY_L0_L1_HANDOFF_GUARD]
 [ADR_20260706_ALPHA_FOUNDRY_MAIN_WIRING][ADR_20260706_ALPHA_FOUNDRY_L0_DIVERSITY]
 [ADR_20260707_ALPHA_FOUNDRY_RESULT_SYNC]
+[ADR_20260707_ALPHA_FOUNDRY_CANONICAL_GATE_WIRING]
 [ADR_20260706_ALPHA_FOUNDRY_L0_SIGNAL_RIGOR]
 """
 
@@ -18,7 +19,7 @@ from typing import TYPE_CHECKING, Any, Literal, cast
 if TYPE_CHECKING:
     pass
 
-from src.domain.futures.alpha_foundry.contracts import AlphaRecipe
+from src.domain.futures.alpha_foundry.contracts import AlphaRecipe, CandidateFeatureFamily
 from src.domain.futures.alpha_foundry.contracts import (
     AlphaRecipe as _AlphaRecipe,
 )
@@ -52,6 +53,7 @@ def bind_panels_to_alpha_recipes(
     include_families: tuple[str, ...],
     exclude_families: tuple[str, ...],
     enable_synthetic_recipes: bool = True,
+    feature_family_by_family: Mapping[str, CandidateFeatureFamily] | None = None,
 ) -> tuple[Any, ...]:
 
     include_set = set(include_families) if include_families else None
@@ -326,6 +328,7 @@ def run_alpha_foundry_l0_gate(
                 if hasattr(runtime_config, "total_l1_verification_budget")
                 else 30
             ),
+            runtime_config=runtime_config,
         )
         evidences = l0_artifacts.evidences
         evidence_rows = l0_artifacts.evidence_rows
@@ -375,16 +378,14 @@ def run_alpha_foundry_l0_gate(
         parquet_path="",
     )
 
-    try:
-        report_dir = (
-            runtime_config.report_dir if hasattr(runtime_config, "report_dir") else Path("logs/futures/alpha_foundry")
-        )
-        json_path, parquet_path = _write_alpha_foundry_report(
-            report,
-            evidence_rows,
-            report_dir,
-            run_id,
-        )
+    jp, pp = maybe_write_alpha_foundry_report(
+        report=report,
+        evidence_rows=evidence_rows,
+        runtime_config=runtime_config,
+    )
+    json_path = jp if jp is not None else ""
+    parquet_path = pp if pp is not None else ""
+    if json_path or parquet_path:
         report = AlphaFoundryBridgeReport(
             run_id=run_id,
             mode=mode,
@@ -401,8 +402,6 @@ def run_alpha_foundry_l0_gate(
             json_path=json_path,
             parquet_path=parquet_path,
         )
-    except OSError:
-        raise
 
     return AlphaFoundryL0Result(
         panels_for_l1=panels_for_l1,
@@ -418,4 +417,29 @@ def maybe_write_alpha_foundry_report(
     evidence_rows: Sequence[Any],
     runtime_config: Any,
 ) -> tuple[str | None, str | None]:
-    raise NotImplementedError
+    artifact_enabled = getattr(runtime_config, "artifact_write_enabled", False)
+    observability = getattr(runtime_config, "observability_mode", "debug_log")
+
+    if not artifact_enabled:
+        # DEBUG mode: log only, no file write
+        if observability == "debug_log":
+            import logging
+
+            logger = logging.getLogger(__name__)
+            logger.debug(
+                "[REPORT] stage=alpha_foundry run_id=%s mode=%s n_evidence=%d n_passed=%d",
+                getattr(report, "run_id", ""),
+                getattr(report, "mode", ""),
+                getattr(report, "n_evidence", 0),
+                getattr(report, "n_passed", 0),
+            )
+        return (None, None)
+
+    report_dir = getattr(runtime_config, "report_dir", Path("logs/futures/alpha_foundry"))
+    run_id = getattr(report, "run_id", "unknown")
+    return _write_alpha_foundry_report(
+        report=report,
+        evidence_rows=evidence_rows,
+        report_dir=report_dir,
+        run_id=run_id,
+    )

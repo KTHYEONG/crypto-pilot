@@ -3,6 +3,7 @@
 [ADR_20260706_ALPHA_FOUNDRY_L0_L1_HANDOFF_GUARD]
 [ADR_20260706_ALPHA_FOUNDRY_SYNC][ADR_20260706_ALPHA_FOUNDRY_L0_DIVERSITY]
 [ADR_20260707_ALPHA_FOUNDRY_RESULT_SYNC]
+[ADR_20260707_ALPHA_FOUNDRY_CANONICAL_GATE_WIRING]
 [ADR_20260706_ALPHA_FOUNDRY_L0_SIGNAL_RIGOR]
 """
 
@@ -19,6 +20,31 @@ from numpy.typing import NDArray
 from src.domain.futures.signals.contracts import CandidateSignalPanel
 
 # ── Alpha Gate type aliases ────────────────────────────────────────────
+CandidateFeatureFamily: TypeAlias = Literal[
+    "price_structure",
+    "positioning",
+    "flow",
+    "liquidity",
+    "relative_value",
+    "regime",
+]
+
+FeatureDirectionRule: TypeAlias = Literal[
+    "trend_follow",
+    "fade_crowding",
+    "breakout_retest",
+    "xs_neutral",
+    "carry_filter",
+]
+
+SearchRetireReason: TypeAlias = Literal[
+    "no_generator",
+    "missing_required_field",
+    "cost_prior_failed",
+    "repeated_hard_reject",
+    "budget_exhausted",
+]
+
 AlphaGateSchema: TypeAlias = Literal["unified"]
 AlphaGateObservabilityMode: TypeAlias = Literal["debug_log", "artifact", "off"]
 AlphaGateHandoffTier: TypeAlias = Literal["blocked", "seed", "candidate"]
@@ -73,6 +99,81 @@ class L0HandoffDecision:
     selected_for_l1: bool
     budget_units: int
     exclusion_reason: L0HandoffExclusionReason
+
+
+@dataclass(slots=True, frozen=True)
+class AlphaHypothesis:
+    hypothesis_id: str
+    family: str
+    variant: str
+    archetype: AlphaArchetype
+    timeframe: AlphaTimeframe
+    data_scope: tuple[str, ...]
+    entry_mode: AlphaEntryMode
+    causal_lag_bars: int
+    holding_bars: int
+    turnover_budget_per_year: float
+    prior_score: float
+    status: AlphaSearchStatus = "pending"
+
+    def __post_init__(self) -> None:
+        if self.causal_lag_bars < 1:
+            raise ValueError("causal_lag_bars must be >= 1")
+        if self.holding_bars < 1:
+            raise ValueError("holding_bars must be >= 1")
+        if self.turnover_budget_per_year < 0.0:
+            raise ValueError("turnover_budget_per_year must be >= 0.0")
+        if not np.isfinite(self.prior_score):
+            raise ValueError("prior_score must be finite")
+
+
+@dataclass(slots=True, frozen=True)
+class AlphaFeatureBlueprint:
+    blueprint_id: str
+    hypothesis_id: str
+    feature_family: CandidateFeatureFamily
+    lookback_bars: tuple[int, ...]
+    thresholds: Mapping[str, float]
+    direction_rule: FeatureDirectionRule
+    required_fields: tuple[str, ...]
+    validity_mask_name: str
+    max_compute_cost_score: float
+
+    def __post_init__(self) -> None:
+        if not self.blueprint_id:
+            raise ValueError("blueprint_id must not be empty")
+        if not self.hypothesis_id:
+            raise ValueError("hypothesis_id must not be empty")
+        for lb in self.lookback_bars:
+            if lb < 1:
+                raise ValueError("lookback_bars must be >= 1")
+        if self.max_compute_cost_score <= 0.0:
+            raise ValueError("max_compute_cost_score must be > 0.0")
+
+
+@dataclass(slots=True, frozen=True)
+class AlphaSearchPolicyState:
+    family: str
+    timeframe: str
+    tested_count: int = 0
+    survivor_count: int = 0
+    retired_count: int = 0
+    posterior_pass_rate: float = 0.0
+    posterior_edge_bps: float = 0.0
+    next_budget: int = 1
+    retire_reason: SearchRetireReason | None = None
+
+    def __post_init__(self) -> None:
+        if self.tested_count < 0:
+            raise ValueError("tested_count must be >= 0")
+        if self.survivor_count < 0:
+            raise ValueError("survivor_count must be >= 0")
+        if self.retired_count < 0:
+            raise ValueError("retired_count must be >= 0")
+        if self.next_budget < 1:
+            raise ValueError("next_budget must be >= 1")
+        if not (0.0 <= self.posterior_pass_rate <= 1.0):
+            raise ValueError("posterior_pass_rate must be in [0.0, 1.0]")
 
 
 @dataclass(slots=True, frozen=True)
@@ -277,6 +378,13 @@ class L0SearchCell:
     family_prior_score: float
     status: AlphaSearchStatus = "pending"
     retire_reason: str | None = None
+    feature_family: CandidateFeatureFamily = "price_structure"
+    turnover_budget_per_year: float = 365.0
+    max_compute_cost_score: float = 1.0
+    tested_count: int = 0
+    survivor_count: int = 0
+    posterior_pass_rate: float = 0.0
+    posterior_edge_bps: float = 0.0
 
     def __post_init__(self) -> None:
         if not self.blueprint_id:
@@ -295,6 +403,14 @@ class L0SearchCell:
             raise ValueError("expected_event_rate must be >= 0.0")
         if not np.isfinite(self.family_prior_score):
             raise ValueError("family_prior_score must be finite")
+        if self.tested_count < 0:
+            raise ValueError("tested_count must be >= 0")
+        if self.survivor_count < 0:
+            raise ValueError("survivor_count must be >= 0")
+        if self.posterior_pass_rate < 0.0 or self.posterior_pass_rate > 1.0:
+            raise ValueError("posterior_pass_rate must be in [0.0, 1.0]")
+        if not np.isfinite(self.posterior_edge_bps):
+            raise ValueError("posterior_edge_bps must be finite")
 
 
 @dataclass(slots=True, frozen=True)
@@ -333,6 +449,10 @@ class AlphaGateEvidence:
     selected_for_l1: bool
     reject_reasons: tuple[str, ...]
     soft_flags: tuple[str, ...]
+    capacity_score: float = 0.0
+    regime_stability: float = 0.0
+    tf_corroboration: float = 0.0
+    entry_mode: AlphaEntryMode = "sparse"
 
     def __post_init__(self) -> None:
         if self.n_events < 0:
@@ -355,6 +475,12 @@ class AlphaGateEvidence:
                 raise ValueError(f"numeric field must be finite, got {v}")
         if self.xs_spread_lcb_bps is not None and not np.isfinite(self.xs_spread_lcb_bps):
             raise ValueError("xs_spread_lcb_bps must be finite if not None")
+        if not (0.0 <= self.capacity_score <= 1.0):
+            raise ValueError("capacity_score must be in [0.0, 1.0]")
+        if not (0.0 <= self.regime_stability <= 1.0):
+            raise ValueError("regime_stability must be in [0.0, 1.0]")
+        if not (0.0 <= self.tf_corroboration <= 1.0):
+            raise ValueError("tf_corroboration must be in [0.0, 1.0]")
 
 
 @dataclass(slots=True, frozen=True)
@@ -500,6 +626,10 @@ class AlphaFoundryEvidenceRow:
     stage_label: str
     created_at_ms: int
     source: str = ""
+    capacity_score: float = 0.0
+    regime_stability: float = 0.0
+    tf_corroboration: float = 0.0
+    entry_mode: str = "sparse"
 
 
 @dataclass(slots=True, frozen=True)
@@ -621,6 +751,11 @@ class AlphaFoundryRuntimeConfig:
     debug_top_k_rows: int = 10
     artifact_write_enabled: bool = False
     gate_schema: AlphaGateSchema = "unified"
+    enable_cost_aware_generation: bool = True
+    exploration_budget_fraction: float = 0.15
+    cost_prior_floor_by_tf: Mapping[str, float] = field(default_factory=dict)
+    use_all_timeframes_in_l0: bool = True
+    debug_reject_bucket_rows: int = 5
 
     def __post_init__(self) -> None:
         if self.mode not in {"off", "audit", "gate"}:
@@ -647,6 +782,12 @@ class AlphaFoundryRuntimeConfig:
             raise ValueError(f"gate_schema must be 'unified', got {self.gate_schema!r}")
         if self.debug_top_k_rows < 1:
             raise ValueError(f"debug_top_k_rows must be >= 1, got {self.debug_top_k_rows}")
+        if not (0.0 < self.exploration_budget_fraction < 1.0):
+            raise ValueError(
+                f"exploration_budget_fraction must be in (0.0, 1.0), got {self.exploration_budget_fraction}"
+            )
+        if self.debug_reject_bucket_rows < 1:
+            raise ValueError(f"debug_reject_bucket_rows must be >= 1, got {self.debug_reject_bucket_rows}")
 
 
 @dataclass(slots=True, frozen=True)
