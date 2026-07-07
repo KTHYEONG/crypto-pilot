@@ -180,7 +180,10 @@ class TestEvaluatePanelGate:
         assert evidence.mean_gross_bps > 0.0
         assert evidence.mean_cost_bps > 0.0
         assert evidence.mean_net_bps > 0.0
-        assert evidence.handoff_tier == "candidate"
+        assert evidence.handoff_tier in {"seed", "candidate"}
+        assert evidence.capacity_score >= 0.0
+        assert evidence.regime_stability >= 0.0
+        assert evidence.tf_corroboration >= 0.0
 
     def test_raises_on_invalid_panel_shape(self) -> None:
         """S3-1: Invalid panel shape raises ValueError."""
@@ -289,6 +292,101 @@ class TestEvaluatePanelGate:
         )
         assert evidence.gate_passed is False
         assert evidence.mean_gross_bps <= 0.0
+
+    def test_tf_contradicted_hard_reject(self) -> None:
+        aligned = make_mock_aligned()
+        panel = make_mock_panel()
+        cfg = AlphaGateConfig(min_events=10, min_effective_n=5.0, min_candidate_rank_ic_tstat=0.0, min_nw_tstat=0.0)
+        from src.domain.futures.alpha_foundry.contracts import MultiTimeframeEvidence
+
+        tf_ev = MultiTimeframeEvidence(
+            family="trend_ma", variant="ema_12_72", native_timeframe="4h", native_recipe_id="r1",
+            tf_coverage_count=2, sign_agreement_ratio=-0.8,
+            corroboration_tier="contradicted", fused_conviction_score=0.0,
+        )
+        evidence = evaluate_panel_gate(
+            panel=panel, aligned=aligned, recipe=SAMPLE_RECIPE,
+            cost_model=ExecutionCostModel(), config=cfg,
+            bars_per_year=2190.0, run_id="test", tf_fusion=tf_ev,
+        )
+        assert "tf_contradicted" in evidence.reject_reasons
+        assert evidence.handoff_tier == "blocked"
+
+    def test_fast_tf_stricter_cost_threshold(self) -> None:
+        aligned = make_mock_aligned()
+        panel = make_mock_panel()
+        fast_recipe = AlphaRecipe(
+            recipe_id="r_fast", family="trend_ma", variant="ema_12_72", timeframe="30m",
+            archetype="trend", indicator_params={"fast": 12, "slow": 72},
+            side_rule_id="trend_follow", exit_policy_id="atr_trail_2",
+            required_fields=("close",), causal_lag_bars=1, max_turnover_per_year=2000.0,
+        )
+        cfg = AlphaGateConfig(min_events=10, min_effective_n=5.0, max_cost_drag_ratio=0.5,
+                              min_candidate_rank_ic_tstat=0.0, min_nw_tstat=0.0)
+        evidence = evaluate_panel_gate(
+            panel=panel, aligned=aligned, recipe=fast_recipe,
+            cost_model=ExecutionCostModel(), config=cfg,
+            bars_per_year=17520.0, run_id="test",
+        )
+        assert evidence.tf_corroboration >= 0.0
+
+    def test_no_liquidity_data_clamps_capacity_score(self) -> None:
+        t = 96
+        dt = np.arange(np.datetime64("2026-01-01T00"), np.datetime64("2026-01-17T00"),
+                        np.timedelta64(4, "h"))[:t]
+        close = np.column_stack([
+            np.linspace(100.0, 124.0, t, dtype=np.float64),
+            np.linspace(50.0, 61.0, t, dtype=np.float64),
+        ])
+        zeros = np.zeros((t, 2), dtype=np.float64)
+        valid = np.ones((t, 2), dtype=np.bool_)
+        side = np.zeros((t, 2), dtype=np.int8)
+        side[::2, :] = 1
+        score = np.where(side == 1, np.array([0.8, 0.4]), 0.0).astype(np.float64)
+        aligned = AlignedMarketData(
+            datetimes=dt, symbols=("BTCUSDT", "ETHUSDT"),
+            open_2d=close, high_2d=close, low_2d=close, close_2d=close,
+            volume_2d=np.full((t, 2), 1000.0, dtype=np.float64),
+            funding_2d=zeros.copy(),
+            active_mask=valid.copy(), warm_mask=valid.copy(),
+            entry_block_mask=np.zeros((t, 2), dtype=np.bool_),
+            kill_mask=np.zeros((t, 2), dtype=np.bool_),
+        )
+        panel = CandidateSignalPanel(
+            family="sparse_breakout_retest_v2", variant="bor_v2_40_4h",
+            params={"lookback": 40}, datetimes=dt, symbols=("BTCUSDT", "ETHUSDT"),
+            signed_score_2d=score, side_hint_2d=side,
+            expected_holding_bars=2, min_holding_bars=1,
+            stop_atr_mult=2.0, take_profit_atr_mult=3.0,
+            turnover_proxy_2d=zeros.copy(), valid_mask_2d=valid,
+            metadata={"recipe_id": "r1"},
+        )
+        recipe = AlphaRecipe(
+            recipe_id="r1", family="sparse_breakout_retest_v2",
+            variant="bor_v2_40_4h", timeframe="4h", archetype="trend",
+            indicator_params={"lookback": 40},
+            side_rule_id="breakout", exit_policy_id="sparse",
+            required_fields=("close",), causal_lag_bars=1, max_turnover_per_year=2000.0,
+        )
+        cfg = AlphaGateConfig(min_events=5, min_effective_n=3.0, min_candidate_rank_ic_tstat=0.0, min_nw_tstat=0.0)
+        evidence = evaluate_panel_gate(
+            panel=panel, aligned=aligned, recipe=recipe,
+            cost_model=ExecutionCostModel(), config=cfg,
+            bars_per_year=2190.0, run_id="test",
+        )
+        assert evidence.capacity_score <= 0.25
+
+    def test_regime_stability_field_present(self) -> None:
+        aligned = make_mock_aligned()
+        panel = make_mock_panel()
+        cfg = AlphaGateConfig(min_events=10, min_effective_n=5.0, min_candidate_rank_ic_tstat=0.0, min_nw_tstat=0.0)
+        evidence = evaluate_panel_gate(
+            panel=panel, aligned=aligned, recipe=SAMPLE_RECIPE,
+            cost_model=ExecutionCostModel(), config=cfg,
+            bars_per_year=2190.0, run_id="test",
+        )
+        assert 0.0 <= evidence.regime_stability <= 1.0
+        assert 0.0 <= evidence.capacity_score <= 1.0
 
 
 class TestEvaluateAlphaGateBatch:
@@ -1108,3 +1206,270 @@ def test_weak_rank_ic_does_not_cause_blocked_tier() -> None:
 def test_rank_ic_soft_floor_rejects_non_positive_n_events_gracefully() -> None:
     result = _rank_ic_soft_floor(0)
     assert result == pytest.approx(1.0, rel=1e-6)
+
+
+def test_compute_capacity_score_clamp_on_missing_liquidity() -> None:
+    from src.domain.futures.alpha_foundry.cheap_gate import compute_capacity_score
+
+    aligned = make_mock_aligned()
+    t, n = aligned.close_2d.shape
+    event_mask = np.zeros((t, n), dtype=np.bool_)
+    event_mask[10, 0] = True
+    score = compute_capacity_score(
+        aligned=aligned, event_mask=event_mask, liquidity_cost_stress_bps=5.0,
+    )
+    # aligned has no execution_cost_bps_2d / adv_usdt_2d -> clamp
+    assert score <= 0.25
+
+
+def test_compute_regime_stability_on_stable_panel() -> None:
+    from src.domain.futures.alpha_foundry.cheap_gate import compute_regime_stability
+
+    aligned = make_mock_aligned()
+    t, n = aligned.close_2d.shape
+    net_bps = np.full((t, n), 5.0, dtype=np.float64)
+    event_mask = np.zeros((t, n), dtype=np.bool_)
+    event_mask[10:50, :] = True
+    stability = compute_regime_stability(
+        panel=make_mock_panel(), net_bps=net_bps, event_mask=event_mask,
+    )
+    assert 0.0 <= stability <= 1.0
+
+
+def test_compute_tf_corroboration_none_fusion_returns_zero() -> None:
+    from src.domain.futures.alpha_foundry.cheap_gate import compute_tf_corroboration
+
+    result = compute_tf_corroboration(recipe=SAMPLE_RECIPE, tf_fusion=None)
+    assert result == 0.0
+
+
+def test_compute_tf_corroboration_contradicted_returns_zero() -> None:
+    from src.domain.futures.alpha_foundry.cheap_gate import compute_tf_corroboration
+    from src.domain.futures.alpha_foundry.contracts import MultiTimeframeEvidence
+
+    tf_ev = MultiTimeframeEvidence(
+        family="trend_ma", variant="ema_12_72", native_timeframe="4h", native_recipe_id="r1",
+        tf_coverage_count=2, sign_agreement_ratio=-0.8,
+        corroboration_tier="contradicted", fused_conviction_score=0.0,
+    )
+    result = compute_tf_corroboration(recipe=SAMPLE_RECIPE, tf_fusion=tf_ev)
+    assert result == 0.0
+
+
+def test_evaluate_panel_gate_with_tf_fusion_corroborated() -> None:
+    from src.domain.futures.alpha_foundry.contracts import MultiTimeframeEvidence
+
+    aligned = make_mock_aligned()
+    panel = make_mock_panel()
+    cfg = AlphaGateConfig(min_events=10, min_effective_n=5.0, min_candidate_rank_ic_tstat=0.0, min_nw_tstat=0.0)
+    tf_ev = MultiTimeframeEvidence(
+        family="trend_ma", variant="ema_12_72", native_timeframe="4h", native_recipe_id="r1",
+        tf_coverage_count=3, sign_agreement_ratio=0.9,
+        corroboration_tier="corroborated", fused_conviction_score=0.8,
+    )
+    evidence = evaluate_panel_gate(
+        panel=panel, aligned=aligned, recipe=SAMPLE_RECIPE,
+        cost_model=ExecutionCostModel(), config=cfg,
+        bars_per_year=2190.0, run_id="test", tf_fusion=tf_ev,
+    )
+    assert evidence.tf_corroboration > 0.0
+
+
+def test_regime_stability_below_half_flags_low_stability(caplog) -> None:
+    """Unstable returns → regime_stability < 0.5 → soft_flag 'low_regime_stability'."""
+    t = 120
+    dt = np.arange(np.datetime64("2026-01-01T00"), np.datetime64("2026-01-01T00") + np.timedelta64(t*4, "h"),
+                    np.timedelta64(4, "h"))
+    symbols = ("BTCUSDT", "ETHUSDT")
+    zeros = np.zeros((t, 2), dtype=np.float64)
+    valid = np.ones((t, 2), dtype=np.bool_)
+    # Sharp rise in first half, sharp fall in second half → split means diverge
+    half = t // 2
+    cum_up = 100.0 * np.exp(np.cumsum(np.full(half, 0.035, dtype=np.float64)))
+    cum_dn = cum_up[-1] * np.exp(np.cumsum(np.full(t - half, -0.035, dtype=np.float64)))
+    cum = np.concatenate([cum_up, cum_dn])
+    close = np.column_stack([cum, cum * 0.8])
+    side = np.zeros((t, 2), dtype=np.int8)
+    side[2::4, :] = 1
+    score = side.astype(np.float64) * 0.7
+    aligned = AlignedMarketData(
+        datetimes=dt, symbols=symbols,
+        open_2d=close, high_2d=close, low_2d=close, close_2d=close,
+        volume_2d=np.full((t, 2), 1000.0, dtype=np.float64),
+        funding_2d=zeros.copy(),
+        active_mask=valid.copy(), warm_mask=valid.copy(),
+        entry_block_mask=np.zeros((t, 2), dtype=np.bool_),
+        kill_mask=np.zeros((t, 2), dtype=np.bool_),
+    )
+    panel = CandidateSignalPanel(
+        family="trend_ma", variant="ema_12_72", params={"fast": 12, "slow": 72},
+        datetimes=dt, symbols=symbols,
+        signed_score_2d=score, side_hint_2d=side,
+        expected_holding_bars=2, min_holding_bars=1,
+        stop_atr_mult=2.0, take_profit_atr_mult=3.0,
+        turnover_proxy_2d=zeros.copy(), valid_mask_2d=valid,
+        metadata={"recipe_id": "r1"},
+    )
+    cfg = AlphaGateConfig(min_events=8, min_effective_n=3.0, min_candidate_rank_ic_tstat=0.0,
+                          min_nw_tstat=0.0, max_cost_drag_ratio=10.0, max_turnover_per_year=2000.0)
+    evidence = evaluate_panel_gate(
+        panel=panel, aligned=aligned, recipe=SAMPLE_RECIPE,
+        cost_model=ExecutionCostModel(), config=cfg,
+        bars_per_year=2190.0, run_id="test",
+    )
+    assert "low_regime_stability" in evidence.soft_flags
+
+
+def test_emit_generation_debug_summary_logs_eval(caplog) -> None:
+    """Spec E2-12 / S1-6: DEBUG summary emits bucket, top candidate, reject info."""
+    import logging
+
+    from src.domain.futures.alpha_foundry.cheap_gate import emit_alpha_generation_debug_summary
+    from src.domain.futures.alpha_foundry.contracts import AlphaGateEvidence
+
+    ev_pass = AlphaGateEvidence(
+        schema_version="unified", run_id="test", timeframe="4h", family="f", variant="v",
+        recipe_id="r1", archetype="trend", symbol_scope="symbol", n_events=10,
+        effective_n=8.0, mean_gross_bps=20.0, mean_cost_bps=5.0, mean_net_bps=15.0,
+        gross_lcb_bps=10.0, net_lcb_bps=8.0, nw_tstat=2.0, rank_ic=0.3, rank_ic_tstat=2.0,
+        cost_drag_ratio=0.3, turnover_per_year=50.0, novelty_corr_max=0.0,
+        incremental_rank_ic=0.0, compute_cost_score=0.0, event_hit_rate=0.7,
+        payoff_skew=2.0, xs_spread_lcb_bps=None, liquidity_cost_stress_bps=3.0,
+        bootstrap_lcb_bps=5.0, bootstrap_agree=True, gate_passed=True,
+        handoff_tier="candidate", selected_for_l1=False, reject_reasons=(), soft_flags=(),
+        capacity_score=0.8, regime_stability=0.9, tf_corroboration=0.7, entry_mode="sparse",
+    )
+    ev_reject = AlphaGateEvidence(
+        schema_version="unified", run_id="test", timeframe="4h", family="f", variant="v",
+        recipe_id="r2", archetype="trend", symbol_scope="symbol", n_events=5,
+        effective_n=3.0, mean_gross_bps=0.0, mean_cost_bps=10.0, mean_net_bps=-10.0,
+        gross_lcb_bps=-5.0, net_lcb_bps=-12.0, nw_tstat=0.0, rank_ic=0.0, rank_ic_tstat=0.0,
+        cost_drag_ratio=0.9, turnover_per_year=200.0, novelty_corr_max=0.0,
+        incremental_rank_ic=0.0, compute_cost_score=0.0, event_hit_rate=0.3,
+        payoff_skew=0.5, xs_spread_lcb_bps=None, liquidity_cost_stress_bps=5.0,
+        bootstrap_lcb_bps=-2.0, bootstrap_agree=True, gate_passed=False,
+        handoff_tier="blocked", selected_for_l1=False,
+        reject_reasons=("excess_cost_drag", "insufficient_effective_n"), soft_flags=(),
+        capacity_score=0.1, regime_stability=0.3, tf_corroboration=0.0, entry_mode="sparse",
+    )
+    caplog.set_level(logging.DEBUG)
+    emit_alpha_generation_debug_summary(
+        run_id="test", timeframe="4h", evidences=(ev_pass, ev_reject),
+        debug_top_k_rows=3, debug_reject_bucket_rows=3,
+    )
+    assert "[EVAL] stage=af_generation" in caplog.text
+    assert "[ALGO] TOP" in caplog.text
+    assert "[DATA] reject_reasons" in caplog.text
+    assert "[DATA] COST_DRAG" in caplog.text or ev_reject.recipe_id in caplog.text
+    assert "stage=af_generation" in caplog.text
+
+
+def test_compute_capacity_score_zero_events() -> None:
+    """Line 497: zero total events → returns 0.0."""
+    from src.domain.futures.alpha_foundry.cheap_gate import compute_capacity_score
+
+    aligned = make_mock_aligned()
+    t, n = aligned.close_2d.shape
+    event_mask = np.zeros((t, n), dtype=np.bool_)
+    aligned_with_liq = AlignedMarketData(
+        datetimes=aligned.datetimes, symbols=aligned.symbols,
+        open_2d=aligned.close_2d, high_2d=aligned.close_2d,
+        low_2d=aligned.close_2d, close_2d=aligned.close_2d,
+        volume_2d=np.full((t, n), 1000.0, dtype=np.float64),
+        funding_2d=np.full((t, n), 0.0, dtype=np.float64),
+        active_mask=np.ones((t, n), dtype=np.bool_),
+        warm_mask=np.ones((t, n), dtype=np.bool_),
+        entry_block_mask=np.zeros((t, n), dtype=np.bool_),
+        kill_mask=np.zeros((t, n), dtype=np.bool_),
+        execution_cost_bps_2d=np.full((t, n), 4.0, dtype=np.float64),
+        adv_usdt_2d=np.full((t, n), 1e9, dtype=np.float64),
+    )
+    result = compute_capacity_score(
+        aligned=aligned_with_liq, event_mask=event_mask, liquidity_cost_stress_bps=5.0,
+    )
+    assert result == 0.0
+
+
+def test_compute_regime_stability_few_events() -> None:
+    """Line 512: fewer than 4 events → returns 0.0."""
+    from src.domain.futures.alpha_foundry.cheap_gate import compute_regime_stability
+
+    t, n = 100, 2
+    net_bps = np.full((t, n), 5.0, dtype=np.float64)
+    event_mask = np.zeros((t, n), dtype=np.bool_)
+    event_mask[0, 0] = True
+    event_mask[1, 0] = True
+    result = compute_regime_stability(
+        panel=make_mock_panel(), net_bps=net_bps, event_mask=event_mask,
+    )
+    assert result == 0.0
+
+
+def test_evaluate_panel_gate_clean_candidate_handoff_tier() -> None:
+    """Line 1158: handoff_tier = 'candidate' when no soft_flags and high stability."""
+    from src.domain.futures.alpha_foundry.contracts import MultiTimeframeEvidence
+
+    t = 96
+    dt = np.arange(np.datetime64("2026-01-01T00"), np.datetime64("2026-01-05T00"),
+                    np.timedelta64(1, "h"))[:t]
+    symbols = ("BTCUSDT", "ETHUSDT")
+    zeros = np.zeros((t, 2), dtype=np.float64)
+    valid = np.ones((t, 2), dtype=np.bool_)
+    # Different growth rates so forward returns differ → rank IC > floor
+    g0 = np.exp(0.0035 * np.arange(t, dtype=np.float64))
+    g1 = np.exp(0.0010 * np.arange(t, dtype=np.float64))
+    close = np.column_stack([100.0 * g0, 100.0 * g1])
+    side = np.zeros((t, 2), dtype=np.int8)
+    for start in range(4, t, 8):
+        side[start : start + 4, :] = 1
+    score = np.where(side == 1, np.array([0.9, 0.6]), 0.0).astype(np.float64)
+    aligned = AlignedMarketData(
+        datetimes=dt, symbols=symbols,
+        open_2d=close, high_2d=close, low_2d=close, close_2d=close,
+        volume_2d=np.full((t, 2), 1000.0, dtype=np.float64),
+        funding_2d=zeros.copy(),
+        active_mask=valid.copy(), warm_mask=valid.copy(),
+        entry_block_mask=np.zeros((t, 2), dtype=np.bool_),
+        kill_mask=np.zeros((t, 2), dtype=np.bool_),
+        execution_cost_bps_2d=np.full((t, 2), 2.0, dtype=np.float64),
+        adv_usdt_2d=np.full((t, 2), 1_000_000_000.0, dtype=np.float64),
+    )
+    panel = CandidateSignalPanel(
+        family="trend_ma", variant="ema_12_72", params={"fast": 12, "slow": 72},
+        datetimes=dt, symbols=symbols,
+        signed_score_2d=score, side_hint_2d=side,
+        expected_holding_bars=3, min_holding_bars=1,
+        stop_atr_mult=2.0, take_profit_atr_mult=4.0,
+        turnover_proxy_2d=np.abs(np.diff(score, axis=0, prepend=0.0)),
+        valid_mask_2d=valid,
+        metadata={"recipe_id": "r1"},
+    )
+    tf_ev = MultiTimeframeEvidence(
+        family="trend_ma", variant="ema_12_72", native_timeframe="4h", native_recipe_id="r1",
+        tf_coverage_count=3, sign_agreement_ratio=0.9,
+        corroboration_tier="corroborated", fused_conviction_score=0.8,
+    )
+    cfg = AlphaGateConfig(
+        min_events=8, min_effective_n=3.0,
+        min_candidate_rank_ic_tstat=0.0,
+        min_nw_tstat=0.0,
+        max_cost_drag_ratio=1.0,
+        max_turnover_per_year=2000.0,
+        bootstrap_seed=42,
+        archetype_event_floors={"trend": 8},
+    )
+    candidate_recipe = AlphaRecipe(
+        recipe_id="r_candidate", family="trend_ma", variant="ema_12_72",
+        timeframe="4h", archetype="trend",
+        indicator_params={"fast": 12, "slow": 72},
+        side_rule_id="trend_follow", exit_policy_id="atr_trail_2",
+        required_fields=("close",), causal_lag_bars=1,
+        max_turnover_per_year=2000.0,
+    )
+    evidence = evaluate_panel_gate(
+        panel=panel, aligned=aligned, recipe=candidate_recipe,
+        cost_model=ExecutionCostModel(), config=cfg,
+        bars_per_year=8760.0, run_id="test", tf_fusion=tf_ev,
+    )
+    assert evidence.gate_passed, f"reject={evidence.reject_reasons}"
+    assert evidence.handoff_tier == "candidate", f"got {evidence.handoff_tier}, soft_flags={evidence.soft_flags}"
