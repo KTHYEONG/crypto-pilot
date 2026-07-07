@@ -2,6 +2,7 @@
 
 [ADR_20260706_ALPHA_FOUNDRY_L0_L1_HANDOFF_GUARD]
 [ADR_20260706_ALPHA_FOUNDRY_MAIN_WIRING][ADR_20260706_ALPHA_FOUNDRY_L0_DIVERSITY]
+[ADR_20260707_ALPHA_FOUNDRY_RESULT_SYNC]
 [ADR_20260706_ALPHA_FOUNDRY_L0_SIGNAL_RIGOR]
 """
 
@@ -409,3 +410,12 @@ def run_alpha_foundry_l0_gate(
         evidences=evidences,
         bindings=tuple(bindings),
     )
+
+
+def maybe_write_alpha_foundry_report(
+    *,
+    report: Any,
+    evidence_rows: Sequence[Any],
+    runtime_config: Any,
+) -> tuple[str | None, str | None]:
+    raise NotImplementedError
