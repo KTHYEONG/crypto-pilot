@@ -4,6 +4,7 @@
 [ADR_20260706_ALPHA_FOUNDRY_SYNC][ADR_20260706_ALPHA_FOUNDRY_L0_DIVERSITY]
 [ADR_20260707_ALPHA_FOUNDRY_RESULT_SYNC]
 [ADR_20260707_ALPHA_FOUNDRY_CANONICAL_GATE_WIRING]
+[ADR_20260707_L0_MULTI_TF_GATE_REDESIGN]
 [ADR_20260706_ALPHA_FOUNDRY_L0_SIGNAL_RIGOR]
 """
 
@@ -59,6 +60,7 @@ from src.domain.futures.alpha_foundry.l2_policy import (
     convert_posterior_to_l2_sleeves,
 )
 from src.domain.futures.alpha_foundry.multi_tf_fusion import (
+    _strip_tf_suffix,
     fuse_multi_timeframe_evidence,
     index_multi_timeframe_evidence,
 )
@@ -323,7 +325,7 @@ def run_alpha_foundry_l0_pipeline(
         cost_model=cost_model,
         config=cheap_gate_config,
         run_id=run_id,
-        tf_fusion_index=tf_fusion_index if evidence_by_tf else None,  # type: ignore[arg-type]
+        tf_fusion_index=tf_fusion_index if evidence_by_tf else None,
     )
     canonical_by_rid: dict[str, AlphaGateEvidence] = {
         e.recipe_id: e for e in canonical_evidences if e.recipe_id
@@ -348,8 +350,9 @@ def run_alpha_foundry_l0_pipeline(
             config=cheap_gate_config,
         )
 
-        tf_key = (recipe.family, recipe.variant)
-        tf_ev = tf_fusion_index.get(tf_key)  # type: ignore[arg-type]
+        normalized_variant = _strip_tf_suffix(recipe.variant, recipe.timeframe)
+        tf_key = (recipe.family, normalized_variant, recipe.timeframe)
+        tf_ev = tf_fusion_index.get(tf_key)
 
         candidate = build_l0_signal_candidate(
             run_id=run_id,

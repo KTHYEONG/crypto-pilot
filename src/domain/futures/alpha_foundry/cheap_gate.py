@@ -4,6 +4,7 @@
 [ADR_20260706_ALPHA_FOUNDRY_SYNC][ADR_20260706_ALPHA_FOUNDRY_L0_DIVERSITY]
 [ADR_20260707_ALPHA_FOUNDRY_RESULT_SYNC]
 [ADR_20260707_ALPHA_FOUNDRY_CANONICAL_GATE_WIRING]
+[ADR_20260707_L0_MULTI_TF_GATE_REDESIGN]
 [ADR_20260706_ALPHA_FOUNDRY_L0_SIGNAL_RIGOR]
 """
 
@@ -1224,7 +1225,7 @@ def evaluate_alpha_gate_batch(
     cost_model: ExecutionCostModel,
     config: AlphaGateConfig,
     run_id: str,
-    tf_fusion_index: Mapping[tuple[str, str], MultiTimeframeEvidence] | None = None,
+    tf_fusion_index: Mapping[tuple[str, str, str], MultiTimeframeEvidence] | None = None,
 ) -> tuple[AlphaGateEvidence, ...]:
     from src.domain.futures.optimization.metrics import _bars_per_year_for_tf
 
@@ -1239,7 +1240,10 @@ def evaluate_alpha_gate_batch(
         if tf not in bpy_cache:
             bpy_cache[tf] = _bars_per_year_for_tf(tf)
 
-        tf_key = (recipe.family, recipe.variant)
+        from src.domain.futures.alpha_foundry.multi_tf_fusion import _strip_tf_suffix
+
+        normalized_variant = _strip_tf_suffix(recipe.variant, recipe.timeframe)
+        tf_key = (recipe.family, normalized_variant, recipe.timeframe)
         tf_ev = tf_fusion_index.get(tf_key) if tf_fusion_index is not None else None
 
         evidence = evaluate_panel_gate(
