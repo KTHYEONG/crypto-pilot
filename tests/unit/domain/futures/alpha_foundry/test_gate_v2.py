@@ -13,7 +13,7 @@ from src.domain.futures.alpha_foundry.cheap_gate import (
     evaluate_panel_gate_v2,
 )
 from src.domain.futures.alpha_foundry.contracts import (
-    AlphaGateEvidenceV2,
+    AlphaGateEvidence,
     AlphaRecipe,
     CheapGateConfig,
 )
@@ -229,7 +229,7 @@ class TestEvaluatePanelGateV2:
     def test_passes_sparse_positive_cost_adjusted_panel(self) -> None:
         aligned = make_gate_v2_aligned(n_symbols=6)
         panel = make_sparse_panel(aligned, recipe_id=SAMPLE_V2_RECIPE.recipe_id)
-        config = CheapGateConfig(enable_v2_gate_metrics=True)
+        config = CheapGateConfig(min_candidate_rank_ic_tstat=0.0)
         cost_model = ExecutionCostModel()
         evidence = evaluate_panel_gate_v2(
             panel=panel,
@@ -239,7 +239,7 @@ class TestEvaluatePanelGateV2:
             config=config,
             bars_per_year=2190.0,
         )
-        assert isinstance(evidence, AlphaGateEvidenceV2)
+        assert isinstance(evidence, AlphaGateEvidence)
         assert np.isfinite(evidence.rank_ic_tstat)
 
     def test_rejects_invalid_bars_per_year(self) -> None:
@@ -261,7 +261,7 @@ class TestEvaluatePanelGateV2:
         aligned = make_gate_v2_aligned(n_symbols=3)
         panel = make_sparse_panel(aligned, recipe_id=SAMPLE_V2_RECIPE.recipe_id)
         config = CheapGateConfig(
-            enable_v2_gate_metrics=True,
+            min_candidate_rank_ic_tstat=0.0,
             high_turnover_per_year=10.0,
         )
         cost_model = ExecutionCostModel()
@@ -273,7 +273,7 @@ class TestEvaluatePanelGateV2:
             config=config,
             bars_per_year=2190.0,
         )
-        assert isinstance(evidence, AlphaGateEvidenceV2)
+        assert isinstance(evidence, AlphaGateEvidence)
 
     def test_handles_constant_score_ic(self) -> None:
         aligned = make_gate_v2_aligned(n_symbols=5)
@@ -299,7 +299,7 @@ class TestEvaluatePanelGateV2:
             metadata={"recipe_id": "test:r", "source": "test"},
             archetype="trend",
         )
-        config = CheapGateConfig(enable_v2_gate_metrics=True)
+        config = CheapGateConfig(min_candidate_rank_ic_tstat=0.0)
         cost_model = ExecutionCostModel()
         evidence = evaluate_panel_gate_v2(
             panel=panel,
@@ -317,7 +317,7 @@ class TestEvaluatePanelGateV2:
         panel = make_sparse_panel(aligned, recipe_id=SAMPLE_V2_RECIPE.recipe_id)
         config = CheapGateConfig(
             max_cost_drag_ratio=0.01,
-            enable_v2_gate_metrics=True,
+            min_candidate_rank_ic_tstat=0.0,
         )
         cost_model = ExecutionCostModel()
         evidence = evaluate_panel_gate_v2(
@@ -392,7 +392,7 @@ class TestEvaluatePanelGateV2:
             metadata={"recipe_id": "test:r", "source": "test"},
             archetype="trend",
         )
-        config = CheapGateConfig(enable_v2_gate_metrics=True)
+        config = CheapGateConfig(min_candidate_rank_ic_tstat=0.0)
         cost_model = ExecutionCostModel()
         evidence = evaluate_panel_gate_v2(
             panel=panel,
@@ -407,10 +407,15 @@ class TestEvaluatePanelGateV2:
 
 
 class TestDowngradeGateV2ToCheapEvidence:
-    def test_downgrade_preserves_existing_fields(self) -> None:
-        v2 = AlphaGateEvidenceV2(
-            recipe_id="r1",
+    def _make_v2_evidence(self, gate_passed: bool = True, reject_reasons: tuple[str, ...] = ()) -> AlphaGateEvidence:
+        return AlphaGateEvidence(
+            schema_version="unified",
+            run_id="test",
             timeframe="4h",
+            family="test",
+            variant="v1",
+            recipe_id="r1",
+            archetype="trend",
             symbol_scope="global",
             n_events=50,
             effective_n=40.0,
@@ -424,16 +429,24 @@ class TestDowngradeGateV2ToCheapEvidence:
             rank_ic_tstat=2.1,
             cost_drag_ratio=0.25,
             turnover_per_year=100.0,
+            novelty_corr_max=0.0,
+            incremental_rank_ic=0.0,
+            compute_cost_score=0.0,
             event_hit_rate=0.6,
             payoff_skew=1.5,
-            regime_edge_bps={},
             xs_spread_lcb_bps=None,
             liquidity_cost_stress_bps=2.0,
             bootstrap_lcb_bps=15.0,
             bootstrap_agree=True,
-            gate_passed=True,
-            reject_reasons=(),
+            gate_passed=gate_passed,
+            handoff_tier="candidate" if gate_passed else "blocked",
+            selected_for_l1=False,
+            reject_reasons=reject_reasons,
+            soft_flags=(),
         )
+
+    def test_downgrade_preserves_existing_fields(self) -> None:
+        v2 = self._make_v2_evidence(gate_passed=True)
         cheap = downgrade_gate_v2_to_cheap_evidence(v2)
         assert cheap.recipe_id == "r1"
         assert cheap.timeframe == "4h"
@@ -444,151 +457,66 @@ class TestDowngradeGateV2ToCheapEvidence:
         assert cheap.mean_net_bps == 75.0
 
     def test_filters_unknown_reject_reasons(self) -> None:
-        v2 = AlphaGateEvidenceV2(
-            recipe_id="r1",
-            timeframe="4h",
-            symbol_scope="global",
-            n_events=50,
-            effective_n=40.0,
-            mean_gross_bps=100.0,
-            mean_cost_bps=25.0,
-            mean_net_bps=75.0,
-            gross_lcb_bps=30.0,
-            net_lcb_bps=20.0,
-            nw_tstat=2.5,
-            rank_ic=0.05,
-            rank_ic_tstat=2.1,
-            cost_drag_ratio=0.25,
-            turnover_per_year=100.0,
-            event_hit_rate=0.6,
-            payoff_skew=1.5,
-            regime_edge_bps={},
-            xs_spread_lcb_bps=None,
-            liquidity_cost_stress_bps=2.0,
-            bootstrap_lcb_bps=15.0,
-            bootstrap_agree=True,
-            gate_passed=False,
-            reject_reasons=("insufficient_events", "non_positive_gross"),
-        )
+        v2 = self._make_v2_evidence(gate_passed=False, reject_reasons=("insufficient_events", "non_positive_gross"))
         cheap = downgrade_gate_v2_to_cheap_evidence(v2)
         assert cheap.gate_passed is False
         assert "insufficient_events" in cheap.reject_reasons
         assert "non_positive_gross" not in cheap.reject_reasons
 
 
-class TestAlphaGateEvidenceV2Validation:
+class TestAlphaGateEvidenceValidation:
+    def _make_valid_kwargs(self, **overrides: object) -> dict[str, object]:
+        kwargs = {
+            "schema_version": "unified",
+            "run_id": "test",
+            "timeframe": "4h",
+            "family": "test",
+            "variant": "v1",
+            "recipe_id": "r",
+            "archetype": "trend",
+            "symbol_scope": "global",
+            "n_events": 50,
+            "effective_n": 40.0,
+            "mean_gross_bps": 100.0,
+            "mean_cost_bps": 25.0,
+            "mean_net_bps": 75.0,
+            "gross_lcb_bps": 30.0,
+            "net_lcb_bps": 20.0,
+            "nw_tstat": 2.5,
+            "rank_ic": 0.05,
+            "rank_ic_tstat": 2.1,
+            "cost_drag_ratio": 0.25,
+            "turnover_per_year": 100.0,
+            "novelty_corr_max": 0.0,
+            "incremental_rank_ic": 0.0,
+            "compute_cost_score": 0.0,
+            "event_hit_rate": 0.6,
+            "payoff_skew": 1.5,
+            "xs_spread_lcb_bps": None,
+            "liquidity_cost_stress_bps": 2.0,
+            "bootstrap_lcb_bps": 15.0,
+            "bootstrap_agree": True,
+            "gate_passed": True,
+            "handoff_tier": "candidate",
+            "selected_for_l1": False,
+            "reject_reasons": (),
+            "soft_flags": (),
+        }
+        kwargs.update(overrides)
+        return kwargs
+
     def test_rejects_negative_n_events(self) -> None:
         with pytest.raises(ValueError, match="n_events must be >= 0"):
-            AlphaGateEvidenceV2(
-                recipe_id="r",
-                timeframe="4h",
-                symbol_scope="global",
-                n_events=-1,
-                effective_n=40.0,
-                mean_gross_bps=100.0,
-                mean_cost_bps=25.0,
-                mean_net_bps=75.0,
-                gross_lcb_bps=30.0,
-                net_lcb_bps=20.0,
-                nw_tstat=2.5,
-                rank_ic=0.05,
-                rank_ic_tstat=2.1,
-                cost_drag_ratio=0.25,
-                turnover_per_year=100.0,
-                event_hit_rate=0.6,
-                payoff_skew=1.5,
-                regime_edge_bps={},
-                xs_spread_lcb_bps=None,
-                liquidity_cost_stress_bps=2.0,
-                bootstrap_lcb_bps=15.0,
-                bootstrap_agree=True,
-                gate_passed=True,
-                reject_reasons=(),
-            )
+            AlphaGateEvidence(**self._make_valid_kwargs(n_events=-1))
 
     def test_rejects_negative_effective_n(self) -> None:
         with pytest.raises(ValueError, match=r"effective_n must be >= 0.0"):
-            AlphaGateEvidenceV2(
-                recipe_id="r",
-                timeframe="4h",
-                symbol_scope="global",
-                n_events=50,
-                effective_n=-1.0,
-                mean_gross_bps=100.0,
-                mean_cost_bps=25.0,
-                mean_net_bps=75.0,
-                gross_lcb_bps=30.0,
-                net_lcb_bps=20.0,
-                nw_tstat=2.5,
-                rank_ic=0.05,
-                rank_ic_tstat=2.1,
-                cost_drag_ratio=0.25,
-                turnover_per_year=100.0,
-                event_hit_rate=0.6,
-                payoff_skew=1.5,
-                regime_edge_bps={},
-                xs_spread_lcb_bps=None,
-                liquidity_cost_stress_bps=2.0,
-                bootstrap_lcb_bps=15.0,
-                bootstrap_agree=True,
-                gate_passed=True,
-                reject_reasons=(),
-            )
+            AlphaGateEvidence(**self._make_valid_kwargs(effective_n=-1.0))
 
     def test_rejects_negative_cost_drag(self) -> None:
         with pytest.raises(ValueError, match=r"cost_drag_ratio must be >= 0.0"):
-            AlphaGateEvidenceV2(
-                recipe_id="r",
-                timeframe="4h",
-                symbol_scope="global",
-                n_events=50,
-                effective_n=40.0,
-                mean_gross_bps=100.0,
-                mean_cost_bps=25.0,
-                mean_net_bps=75.0,
-                gross_lcb_bps=30.0,
-                net_lcb_bps=20.0,
-                nw_tstat=2.5,
-                rank_ic=0.05,
-                rank_ic_tstat=2.1,
-                cost_drag_ratio=-0.1,
-                turnover_per_year=100.0,
-                event_hit_rate=0.6,
-                payoff_skew=1.5,
-                regime_edge_bps={},
-                xs_spread_lcb_bps=None,
-                liquidity_cost_stress_bps=2.0,
-                bootstrap_lcb_bps=15.0,
-                bootstrap_agree=True,
-                gate_passed=True,
-                reject_reasons=(),
-            )
+            AlphaGateEvidence(**self._make_valid_kwargs(cost_drag_ratio=-0.1))
 
     def test_rejects_event_hit_rate_out_of_bounds(self) -> None:
         with pytest.raises(ValueError, match="event_hit_rate must be in"):
-            AlphaGateEvidenceV2(
-                recipe_id="r",
-                timeframe="4h",
-                symbol_scope="global",
-                n_events=50,
-                effective_n=40.0,
-                mean_gross_bps=100.0,
-                mean_cost_bps=25.0,
-                mean_net_bps=75.0,
-                gross_lcb_bps=30.0,
-                net_lcb_bps=20.0,
-                nw_tstat=2.5,
-                rank_ic=0.05,
-                rank_ic_tstat=2.1,
-                cost_drag_ratio=0.25,
-                turnover_per_year=100.0,
-                event_hit_rate=1.5,
-                payoff_skew=1.5,
-                regime_edge_bps={},
-                xs_spread_lcb_bps=None,
-                liquidity_cost_stress_bps=2.0,
-                bootstrap_lcb_bps=15.0,
-                bootstrap_agree=True,
-                gate_passed=True,
-                reject_reasons=(),
-            )
+            AlphaGateEvidence(**self._make_valid_kwargs(event_hit_rate=1.5))
