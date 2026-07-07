@@ -213,11 +213,15 @@ def _zscore_2d(arr: NDArray[np.float64], window: int, eps: float = 1e-12) -> NDA
     return (arr - mean) / np.maximum(std, eps)
 
 
-def _safe_taker_imbalance_2d(
+def safe_taker_imbalance_2d(
     taker_buy: NDArray[np.float64] | None,
     volume: NDArray[np.float64],
 ) -> tuple[NDArray[np.float64], NDArray[np.bool_]]:
-    """Return bounded taker imbalance and a validity mask."""
+    """Return bounded taker imbalance and a validity mask.
+
+    Public (was `_safe_taker_imbalance_2d`) — reused by `alpha_foundry/entry_timing.py`.
+    [ADR_20260707_LTF_ENTRY_TIMING_LAYER]
+    """
     if taker_buy is None:
         return np.zeros_like(volume, dtype=np.float64), np.zeros_like(volume, dtype=np.bool_)
     if taker_buy.shape != volume.shape:
@@ -659,7 +663,7 @@ def build_rule_signal_panels(
     funding_flow_window = scale_window(96)
     atr = _atr_2d(high, low, close, period=atr_period)
     atr = np.maximum(atr, 1e-12)
-    flow_imbalance, flow_valid = _safe_taker_imbalance_2d(aligned.taker_buy_2d, vol)
+    flow_imbalance, flow_valid = safe_taker_imbalance_2d(aligned.taker_buy_2d, vol)
     flow_mean_6 = _rolling_mean_2d(flow_imbalance, window=flow_mean_6_window)
     flow_z_24 = _zscore_2d(flow_imbalance, window=flow_z_24_window)
     funding_z_96 = _zscore_2d(funding, window=funding_z_96_window, eps=1e-6)
@@ -1741,7 +1745,7 @@ def build_rule_signal_panels(
 
         elif fam == "funding_flow_exhaustion_sparse":
             _ffes_funding_z = _zscore_2d(funding, window=scale_window(96), eps=1e-6)
-            _ffes_imbalance, _ffes_valid = _safe_taker_imbalance_2d(aligned.taker_buy_2d, vol)
+            _ffes_imbalance, _ffes_valid = safe_taker_imbalance_2d(aligned.taker_buy_2d, vol)
             _ffes_imbalance_mean = _rolling_mean_2d(_ffes_imbalance, window=scale_window(12))
             _ffes_extreme = np.abs(_ffes_funding_z) >= 1.5
             _ffes_crowded = (_ffes_imbalance_mean > 0.10) | (_ffes_imbalance_mean < -0.10)
