@@ -89,6 +89,26 @@ def test_is_family_tf_retired_unknown_family_returns_false_not_raise() -> None:
     assert is_family_tf_retired("nonexistent_family", "4h") is False
 
 
+# ─── l0_signal_yield_improvement: Track B retirement ─────────────────────────
+
+
+def test_family_tf_retirement_includes_ichimoku_12h() -> None:
+    from src.domain.futures.strategy.family_lifecycle import FAMILY_TF_RETIREMENT
+
+    assert ("ichimoku_trend", "12h") in FAMILY_TF_RETIREMENT
+
+
+def test_family_tf_retirement_does_not_retire_carry_net_of_funding() -> None:
+    assert is_family_tf_retired("carry_net_of_funding", "4h") is False
+
+
+def test_family_tf_retirement_frozenset_immutable() -> None:
+    from src.domain.futures.strategy.family_lifecycle import FAMILY_TF_RETIREMENT
+
+    with pytest.raises(AttributeError):
+        FAMILY_TF_RETIREMENT.add(("test", "4h"))  # type: ignore[attr-defined]
+
+
 def test_apply_tf_gate_overrides_1d_does_not_mutate_original_cfg() -> None:
     base_cfg = CandidateStrategyConfig()
 

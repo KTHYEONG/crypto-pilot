@@ -507,7 +507,9 @@ class AlphaGateConfig:
             "hedge": 10,
         }
     )
-    family_event_floors: Mapping[str, int] = field(default_factory=dict)
+    family_event_floors: Mapping[str, int] = field(
+        default_factory=lambda: {"funding_flow_carry": 200}
+    )
     min_seed_slots_per_archetype: int = 1
     min_seed_slots_per_timeframe: int = 1
     allow_soft_seed_when_only_soft_failures: bool = True
