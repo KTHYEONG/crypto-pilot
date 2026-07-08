@@ -3,6 +3,8 @@ from __future__ import annotations
 import pytest
 
 from src.domain.futures.strategy.config import (
+    _DEFAULT_PER_TF_FAMILIES,
+    DEPRIORITIZED_FAMILY_PRIOR,
     CandidateStrategyConfig,
     resolve_purge_and_embargo_bars,
     with_max_holding_bars,
@@ -90,3 +92,15 @@ def test_l1_pair_min_folds_early_default() -> None:
 def test_l1_pair_min_effective_obs_early_rejects_low() -> None:
     with pytest.raises(ValueError, match="l1_pair_min_effective_obs_early"):
         CandidateStrategyConfig(l1_pair_min_effective_obs_early=0.5)
+
+
+# ─── l0_signal_yield_improvement ─────────────────────────────────────────────
+
+
+def test_default_per_tf_families_1h_2h_includes_trend_pullback_continuation() -> None:
+    assert "trend_pullback_continuation" in _DEFAULT_PER_TF_FAMILIES["1h"]
+    assert "trend_pullback_continuation" in _DEFAULT_PER_TF_FAMILIES["2h"]
+
+
+def test_family_prior_score_deprioritized_families_all_negative() -> None:
+    assert all(v < 0 for v in DEPRIORITIZED_FAMILY_PRIOR.values())

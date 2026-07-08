@@ -277,3 +277,13 @@ class TestVersionSprawlControl:
         from src.domain.futures.alpha_foundry.cheap_gate import evaluate_panel_gate
         assert evaluate_panel_gate is not None
         assert not hasattr(evaluate_panel_gate, "__name__") or "v2" not in evaluate_panel_gate.__name__
+
+
+class TestAlphaGateConfig:
+    """l0_signal_yield_improvement: Track B gate config changes."""
+
+    def test_funding_flow_carry_family_event_floor_raised(self) -> None:
+        from src.domain.futures.alpha_foundry.contracts import AlphaGateConfig
+
+        cfg = AlphaGateConfig()
+        assert cfg.family_event_floors.get("funding_flow_carry", 0) >= 200
