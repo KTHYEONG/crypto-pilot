@@ -94,7 +94,7 @@ Skills define phase-specific workflows only. **Auto-transition between skills is
 - **Roadmap vs Pipeline**: The workflow below is a "roadmap" for user reference, NOT an AI automatic execution pipeline.
 
 [Manual Development Roadmap (User-led)]
-1. `arc` -> 2. `spec` -> 3. `implement` -> 4. `check` -> 5. `sync`
+1. spec -> 2. implement -> 3. check -> 4. sync
 
 Commit tasks:
 - Do not route through the default skill workflow.
