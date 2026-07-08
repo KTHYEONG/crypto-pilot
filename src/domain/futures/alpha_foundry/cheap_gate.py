@@ -123,6 +123,8 @@ def evaluate_panel_cheap_gate(
     config: CheapGateConfig,
     bars_per_year: float,
 ) -> CheapGateEvidence:
+    """[ADR_20260708_L0_SIGNAL_YIELD_IMPROVEMENT] n_events floor resolved via
+    resolve_family_timeframe_gate_policy (family/archetype-aware), not flat config.min_events."""
     if bars_per_year <= 0.0:
         raise ValueError("bars_per_year must be positive")
     _validate_shape(panel, aligned)
@@ -171,7 +173,8 @@ def evaluate_panel_cheap_gate(
         event_mask[idx_start:idx_end, :] = entry_full[idx_start:idx_end, :]
 
     n_events = int(np.sum(event_mask))
-    if n_events < config.min_events:
+    resolved_min_events = resolve_family_timeframe_gate_policy(recipe=recipe, config=config).min_events
+    if n_events < resolved_min_events:
         return CheapGateEvidence(
             recipe_id=recipe.recipe_id,
             timeframe=recipe.timeframe,
@@ -986,6 +989,8 @@ def evaluate_panel_gate(
     run_id: str,
     tf_fusion: MultiTimeframeEvidence | None = None,
 ) -> AlphaGateEvidence:
+    """[ADR_20260708_L0_SIGNAL_YIELD_IMPROVEMENT] n_events floor resolved via
+    resolve_family_timeframe_gate_policy (family/archetype-aware), not flat config.min_events."""
     if bars_per_year <= 0.0:
         raise ValueError("bars_per_year must be positive")
     _validate_shape(panel, aligned)
@@ -1018,7 +1023,8 @@ def evaluate_panel_gate(
         event_mask[idx_start:idx_end, :] = entry_full[idx_start:idx_end, :]
 
     n_events = int(np.sum(event_mask))
-    if n_events < config.min_events:
+    resolved_min_events = resolve_family_timeframe_gate_policy(recipe=recipe, config=config).min_events
+    if n_events < resolved_min_events:
         return _empty_gate_evidence(
             run_id=run_id, recipe=recipe, reject_reasons=("insufficient_events",)
         )
