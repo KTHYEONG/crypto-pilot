@@ -6,6 +6,7 @@
 [ADR_20260707_ALPHA_FOUNDRY_CANONICAL_GATE_WIRING]
 [ADR_20260707_L0_MULTI_TF_GATE_REDESIGN]
 [ADR_20260706_ALPHA_FOUNDRY_L0_SIGNAL_RIGOR]
+[ADR_20260708_L0_EDGE_FAILURE_ATTRIBUTION]
 """
 
 from __future__ import annotations
@@ -533,12 +534,14 @@ def run_alpha_foundry_l0_pipeline(
             regime_stability = canon.regime_stability
             tf_corroboration = canon.tf_corroboration
             entry_mode = canon.entry_mode
+            gross_lcb_bps = canon.gross_lcb_bps
         else:
             handoff_tier = "candidate" if ev.gate_passed else "blocked"
             capacity_score = 0.0
             regime_stability = 0.0
             tf_corroboration = 0.0
             entry_mode = "sparse"
+            gross_lcb_bps = 0.0
 
         evidence_rows.append(
             AlphaFoundryEvidenceRow(
@@ -553,7 +556,7 @@ def run_alpha_foundry_l0_pipeline(
                 mean_gross_bps=ev.mean_gross_bps,
                 mean_cost_bps=ev.mean_cost_bps,
                 mean_net_bps=ev.mean_net_bps,
-                gross_lcb_bps=0.0,
+                gross_lcb_bps=gross_lcb_bps,
                 net_lcb_bps=ev.block_lcb_bps,
                 nw_tstat=ev.nw_tstat,
                 rank_ic=ev.rank_ic,
