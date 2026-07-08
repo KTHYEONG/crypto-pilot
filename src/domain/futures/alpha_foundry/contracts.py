@@ -583,6 +583,8 @@ class CrossBucketDiversityResult:
 
 @dataclass(slots=True, frozen=True)
 class AlphaFoundryEvidenceRow:
+    """[ADR_20260708_L0_EDGE_FAILURE_ATTRIBUTION]"""
+
     run_id: str
     timeframe: str
     family: str
@@ -632,6 +634,18 @@ class AlphaFoundryEvidenceRow:
     regime_stability: float = 0.0
     tf_corroboration: float = 0.0
     entry_mode: str = "sparse"
+
+    # new backward-compatible optional fields
+    cell_id: str = ""
+    cell_axes: str = ""
+    cell_values: str = ""
+    execution_style: str = "taker_now"
+    fill_probability: float = 1.0
+    adverse_selection_bps: float = 0.0
+    tested_horizons: str = ""
+    selected_horizon: int = 0
+    failure_axis: str = ""
+    failure_axes: str = ""
 
 
 @dataclass(slots=True, frozen=True)
@@ -730,6 +744,80 @@ class StagedSearchBudget:
 
 AlphaFoundryMode: TypeAlias = Literal["off", "audit", "gate"]
 
+ConditionalAxis = Literal[
+    "symbol_liquidity",
+    "symbol_cluster",
+    "market_regime",
+    "volatility_regime",
+    "funding_polarity",
+    "score_quantile",
+    "event_hour_utc",
+    "source_tf",
+]
+
+ExecutionStyle = Literal["taker_now", "maker_retest", "maker_or_cancel", "hybrid"]
+
+
+@dataclass(slots=True, frozen=True)
+class ConditionalCellGateConfig:
+    """Controls conditional L0 cell search. [ADR_20260708_L0_EDGE_FAILURE_ATTRIBUTION]"""
+
+    enabled: bool = False
+    axes: tuple[ConditionalAxis, ...] = ("score_quantile", "symbol_liquidity", "volatility_regime")
+    min_cell_events: int = 80
+    min_cell_effective_n: float = 40.0
+    max_cells_per_recipe: int = 24
+    max_axes_per_cell: int = 2
+    min_symbols_per_cell: int = 5
+    quantile_bins: tuple[float, ...] = (0.70, 0.85, 0.95)
+    allow_single_symbol_cells: bool = False
+    selection_lcb_penalty_bps: float = 2.0
+    dedupe_selected_events: bool = True
+
+    def __post_init__(self) -> None:
+        if self.min_cell_events < 1:
+            raise ValueError("min_cell_events must be >= 1")
+        if self.min_cell_effective_n < 1.0:
+            raise ValueError("min_cell_effective_n must be >= 1.0")
+        if self.max_cells_per_recipe < 1:
+            raise ValueError("max_cells_per_recipe must be >= 1")
+        if self.max_axes_per_cell < 1:
+            raise ValueError("max_axes_per_cell must be >= 1")
+        if self.min_symbols_per_cell < 1:
+            raise ValueError("min_symbols_per_cell must be >= 1")
+        for q in self.quantile_bins:
+            if not (0.0 < q < 1.0):
+                raise ValueError(f"quantile_bins values must be in (0.0, 1.0), got {q}")
+        if self.selection_lcb_penalty_bps < 0.0:
+            raise ValueError("selection_lcb_penalty_bps must be >= 0.0")
+
+
+@dataclass(slots=True, frozen=True)
+class ExecutionArmConfig:
+    """Controls execution arm exploration. [ADR_20260708_L0_EDGE_FAILURE_ATTRIBUTION]"""
+
+    enabled: bool = False
+    styles: tuple[ExecutionStyle, ...] = ("taker_now",)
+    min_fill_probability: float = 0.35
+    maker_retest_window_bars: int = 1
+    min_adverse_selection_bps: float = 1.0
+    max_arm_count_per_cell: int = 3
+
+    _VALID_STYLES: frozenset[str] = frozenset({
+        "taker_now", "maker_retest", "maker_or_cancel", "hybrid",
+    })
+
+    def __post_init__(self) -> None:
+        for s in self.styles:
+            if s not in self._VALID_STYLES:
+                raise ValueError(f"unsupported execution style: {s!r}")
+        if not (0.0 <= self.min_fill_probability <= 1.0):
+            raise ValueError("min_fill_probability must be in [0.0, 1.0]")
+        if self.maker_retest_window_bars < 1:
+            raise ValueError("maker_retest_window_bars must be >= 1")
+        if self.max_arm_count_per_cell < 1:
+            raise ValueError("max_arm_count_per_cell must be >= 1")
+
 
 @dataclass(slots=True, frozen=True)
 class AlphaFoundryRuntimeConfig:
@@ -758,6 +846,15 @@ class AlphaFoundryRuntimeConfig:
     cost_prior_floor_by_tf: Mapping[str, float] = field(default_factory=dict)
     use_all_timeframes_in_l0: bool = True
     debug_reject_bucket_rows: int = 5
+
+    # new feature flags default off
+    enable_failure_attribution: bool = False
+    enable_conditional_l0_cells: bool = False
+    enable_execution_arms: bool = False
+    enable_horizon_sweep: bool = False
+    conditional_cell: ConditionalCellGateConfig = field(default_factory=ConditionalCellGateConfig)
+    execution_arm: ExecutionArmConfig = field(default_factory=ExecutionArmConfig)
+    horizon_sweep_bars: tuple[int, ...] = (1, 2, 3, 6)
 
     def __post_init__(self) -> None:
         if self.mode not in {"off", "audit", "gate"}:
