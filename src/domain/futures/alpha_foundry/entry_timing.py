@@ -6,15 +6,23 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
+from datetime import date
+from pathlib import Path
+from typing import Literal
 
 import numpy as np
 import pandas as pd
 from numpy.typing import NDArray
 
-from src.domain.futures.alpha_foundry.contracts import EntryTimingGateConfig, EntryTimingWindow
+from src.domain.futures.alpha_foundry.contracts import (
+    EntryTimingGateConfig,
+    EntryTimingWindow,
+    Universe1mCoverageTier,
+)
 from src.domain.futures.optimization.metrics import hurst_dfa, kaufman_efficiency_ratio, variance_ratio
 from src.domain.futures.signals.rules import safe_taker_imbalance_2d
 from src.domain.futures.strategy.timeframe_contracts import resample_alias
+from src.domain.futures.universe.storage import run_historical_sync
 
 
 def compute_cvd_delta_z(
@@ -87,6 +95,7 @@ def refine_entry_indices(
     base_datetimes: NDArray[np.datetime64],
     ltf_1m_frames_by_symbol: Mapping[str, pd.DataFrame],
     config: EntryTimingGateConfig,
+    coverage_tier: Universe1mCoverageTier | None = None,
 ) -> tuple[pd.DataFrame, tuple[EntryTimingWindow, ...]]:
     required = {"entry_idx", "side", "family", "symbol", "variant", "expected_holding_bars", "handoff_tier"}
     missing = required - set(events.columns)
@@ -104,6 +113,11 @@ def refine_entry_indices(
         expected_holding_bars = int(row["expected_holding_bars"])
         max_wait_bars_base = max(1, round(expected_holding_bars * config.max_wait_bars_ratio))
         if symbol not in ltf_1m_frames_by_symbol:
+            cov_status: Literal["covered", "uncovered_fallback"] = (
+                "uncovered_fallback"
+                if coverage_tier is not None and not coverage_tier.is_covered(symbol)
+                else "covered"
+            )
             windows.append(
                 EntryTimingWindow(
                     episode_id=f"{row['family']}_{row['variant']}_{idx}",
@@ -114,6 +128,7 @@ def refine_entry_indices(
                     price_improvement_bps=0.0,
                     opportunity_cost_bps=0.0,
                     net_timing_edge_bps=0.0,
+                    coverage_status=cov_status,
                 )
             )
             continue
@@ -163,9 +178,12 @@ def refine_entry_indices(
             cvd_agree = (current_cvd_z > 0 and side > 0) or (current_cvd_z < 0 and side < 0)
             w_cvd = config.confluence_weights.get("cvd", 0.5)
             w_vwap = config.confluence_weights.get("vwap", 0.5)
-            score = w_cvd * (1.0 if cvd_agree else -1.0) + w_vwap * float(np.tanh(current_vwap_dev))
+            # score is a signed "alignment with side" confidence in [-1, 1] (positive = confirms side),
+            # not a raw directional score — both terms must be normalized against `side` before summing.
+            vwap_alignment = float(np.tanh(current_vwap_dev)) * side
+            score = w_cvd * (1.0 if cvd_agree else -1.0) + w_vwap * vwap_alignment
             score = float(np.clip(score, -1.0, 1.0))
-            if trend_pass and ((score > 0 and side > 0) or (score < 0 and side < 0)):
+            if trend_pass and score > 0:
                 ltf_bar_end = ltf_bar_start + pd.Timedelta(ltf_alias)
                 ltf_end_ns = np.datetime64(ltf_bar_end.to_pydatetime().replace(tzinfo=None), "ns")
                 refined_entry_idx = int(np.searchsorted(base_datetimes, ltf_end_ns, side="right"))
@@ -245,3 +263,58 @@ def aggregate_entry_timing_evidence(
         lcb = float(np.percentile(boot_means, 5))
         result[key] = lcb
     return result
+
+
+def resolve_1m_backfill_targets(
+    universe_symbols: tuple[str, ...],
+    data_root: Path = Path("data/futures"),
+) -> tuple[str, ...]:
+    """Return symbols from universe_symbols missing a {symbol}_1m.parquet file.
+
+    [ADR_20260708_LTF_NATIVE_DIRECTIONAL_SEARCH]
+    """
+    missing: list[str] = []
+    for symbol in universe_symbols:
+        path = data_root / f"{symbol}_1m.parquet"
+        if not path.exists():
+            missing.append(symbol)
+    return tuple(missing)
+
+
+def run_1m_backfill(
+    missing_symbols: tuple[str, ...],
+    *,
+    start_date: date = date(2019, 1, 1),
+    end_date: date,
+) -> None:
+    """Backfill 1m data for missing symbols via run_historical_sync. No-op if empty.
+
+    [ADR_20260708_LTF_NATIVE_DIRECTIONAL_SEARCH]
+    """
+    if not missing_symbols:
+        return
+    run_historical_sync(
+        start_date=start_date,
+        end_date=end_date,
+        symbols=list(missing_symbols),
+        sync_1m=True,
+        sync_1d=False,
+        sync_4h=False,
+    )
+
+
+def resolve_1m_coverage_tier(
+    universe_symbols: tuple[str, ...],
+    *,
+    data_root: Path = Path("data/futures"),
+) -> Universe1mCoverageTier:
+    """Build Universe1mCoverageTier by checking file existence for each symbol."""
+    covered: set[str] = set()
+    for symbol in universe_symbols:
+        path = data_root / f"{symbol}_1m.parquet"
+        if path.exists():
+            covered.add(symbol)
+    return Universe1mCoverageTier(
+        covered_symbols=frozenset(covered),
+        universe_symbols=frozenset(universe_symbols),
+    )

@@ -896,6 +896,7 @@ class EntryTimingWindow:
     price_improvement_bps: float
     opportunity_cost_bps: float
     net_timing_edge_bps: float
+    coverage_status: Literal["covered", "uncovered_fallback"] = "covered"
 
     def __post_init__(self) -> None:
         if not self.triggered and self.net_timing_edge_bps != 0.0:
@@ -920,3 +921,29 @@ class EntryTimingGateConfig:
             raise ValueError(f"max_wait_bars_ratio must be in (0, 1], got {self.max_wait_bars_ratio}")
         if self.min_net_timing_edge_lcb_bps < 0.0:
             raise ValueError("min_net_timing_edge_lcb_bps must be >= 0")
+
+
+@dataclass(slots=True, frozen=True)
+class Universe1mCoverageTier:
+    """Tier classifying which universe symbols have 1m data available.
+
+    Attributes:
+        covered_symbols: Symbols with {symbol}_1m.parquet present.
+        universe_symbols: Full active universe set.
+
+    [ADR_20260708_LTF_NATIVE_DIRECTIONAL_SEARCH]
+    """
+
+    covered_symbols: frozenset[str]
+    universe_symbols: frozenset[str]
+
+    @property
+    def coverage_ratio(self) -> float:
+        """Fraction of universe_symbols that are covered."""
+        if not self.universe_symbols:
+            return 0.0
+        return len(self.covered_symbols) / len(self.universe_symbols)
+
+    def is_covered(self, symbol: str) -> bool:
+        """True if symbol is among covered_symbols."""
+        return symbol in self.covered_symbols
