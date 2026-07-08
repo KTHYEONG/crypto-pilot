@@ -12,6 +12,7 @@ related_paths:
   - src/domain/futures/validation/walk_forward.py
   - src/domain/futures/optimization/candidate_selector.py
   - src/domain/futures/optimization/final_evaluator.py
+  - src/application/futures/optimization/optimization_service.py
   - src/domain/futures/strategy/tiered_workflow/major_symbol_registry_replay.py
   - src/domain/futures/strategy/tiered_workflow/tf_validation_repair.py
   - src/application/futures/runner/active_pipeline.py
@@ -26,6 +27,7 @@ change_triggers:
   - src/domain/futures/validation/champion_registry.py
   - src/domain/futures/validation/gates.py
   - src/domain/futures/optimization/final_evaluator.py
+  - src/application/futures/optimization/optimization_service.py
   - src/domain/futures/optimization/opt_config.py
   - src/domain/futures/optimization/opt_data_utils.py
   - src/domain/futures/optimization/observability/run_tracker.py
@@ -94,6 +96,7 @@ Optuna 최적화로 최종 선별된 챔피언 전략에 대해 $N$개의 서로
 - `_run_strategy_stage()`(`active_pipeline.py`) captures `CandidatePipelineOutput.alpha_foundry_report` from the bridge stage and logs it at INFO level — present in both audit and gate modes.
 - `CandidatePipelineOutput.alpha_foundry_report: AlphaFoundryBridgeReport | None` — `None` when mode=off.
 - Report fields (`panels_in`, `bound`, `survivors`, `reject_breakdown`) are available for downstream diagnostics and JSON artifact at `logs/futures/alpha_foundry/`.
+- `FinalEvaluationRequest.alpha_foundry_config` (`optimization_service.py`) and `build_strategy_alpha(..., alpha_foundry_config=...)` (`strategy/builder.py`) forward the active runner Alpha Foundry runtime config into the bridge so `--alpha-foundry audit|gate` can load `exec_1m` and emit LTF-native panels without a separate probe path.
 
 ### Alpha Foundry Runtime Config [ADR_20260707_ALPHA_FOUNDRY_RESULT_SYNC]
 - `application/futures/runner/config.py` builds and validates `AlphaFoundryRuntimeConfig` with `observability_mode`, `debug_top_k_rows`, `artifact_write_enabled`, and `gate_schema` in addition to the existing gate and L2 policy fields.
