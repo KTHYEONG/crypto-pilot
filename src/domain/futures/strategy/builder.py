@@ -12,8 +12,9 @@ def build_strategy_alpha(
     symbols: list[str],
     tf: str,
     cfg: StrategyConfig,
+    alpha_foundry_config: Any | None = None,
 ) -> pd.DataFrame:
-    """Build long-format alpha panel from aligned expected return signals.
+    """[ADR_20260708_LTF_NATIVE_SIGNAL_EXPANSION] Build long-format alpha panel.
 
     Args:
         data_maps: Dictionary containing historical data per symbol.
@@ -33,6 +34,7 @@ def build_strategy_alpha(
             tf=tf,
             strategy_cfg=cfg,
             preloaded_data_maps=data_maps,
+            alpha_foundry_config=alpha_foundry_config,
         )
         return res.alpha_panel
 

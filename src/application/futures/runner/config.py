@@ -70,6 +70,7 @@ def build_alpha_foundry_runtime_config(
         total_l1_verification_budget=max(1, total_l1_budget),
         min_conviction_lcb_bps=min_conviction,
         enable_fast_discovery_timeframes=enable_fast_tf,
+        artifact_write_enabled=alpha_foundry_mode != "off",
     )
     return validate_alpha_foundry_runtime_config(config)
 
