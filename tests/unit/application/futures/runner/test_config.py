@@ -112,10 +112,12 @@ class TestBuildRunConfig:
     def test_build_alpha_foundry_runtime_config_direct(self) -> None:
         config = build_alpha_foundry_runtime_config({"alpha_foundry": "audit"})
         assert config.mode == "audit"
+        assert config.artifact_write_enabled is True
 
     def test_build_alpha_foundry_runtime_config_default(self) -> None:
         config = build_alpha_foundry_runtime_config({})
         assert config.mode == "off"
+        assert config.artifact_write_enabled is False
 
     def test_unknown_phase_via_build(self) -> None:
         with pytest.raises(ValueError, match="unknown phase"):
