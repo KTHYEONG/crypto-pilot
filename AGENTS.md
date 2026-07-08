@@ -17,7 +17,7 @@
     - **Markdown Output:** When explaining code to the user, omit unchanged parts using the `# ... existing code ...` comment.
 - **CONTEXT WINDOW MGMT:** When reading large files (300+ lines), specify line ranges in `view_file` to read only the necessary parts. Avoid reading the entire file.
 - **EXPLICIT UNCERTAINTY:** If requirements are unclear, explicitly state "Clarification Needed: [item]" and ask questions before writing code.
-- **FLAT VERDICT ONLY:** check 결과는 제목, 불릿, 진단/계획 분류, 다음 단계 명시 없이 `[결과] | [원인/상태]` 형식의 단 1줄 단선형 문자열로만 출력할 것.
+- **VERDICT FORMAT:** check 결과는 🟢 PASS인 경우 1줄로 출력하되, 🔴 FAIL인 경우 [간략 실패 요약]과 함께 🔍 Cause 및 🛠️ Fix(AI가 파싱 가능한 구조적 수정 지시)가 포함된 3줄 이내의 마크다운 블록으로 출력할 것.
 
 ## 3. Environment & Execution (Environment & Tool Execution)
 - **Environment Manager:** This project uses `uv` to manage dependencies and virtual environments.
