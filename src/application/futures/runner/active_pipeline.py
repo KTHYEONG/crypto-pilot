@@ -337,9 +337,9 @@ def _forward_log_return_on_index(
 
 
 def _requires_exec_1m(run_config: FuturesRunConfig) -> bool:
-    """Return whether the active phases require execution-grade 1m data."""
-    del run_config
-    return False
+    """[ADR_20260708_LTF_NATIVE_SIGNAL_EXPANSION] Gate 1m loading on Alpha Foundry mode."""
+    alpha_foundry = getattr(run_config, "alpha_foundry", None)
+    return bool(alpha_foundry is not None and getattr(alpha_foundry, "mode", "off") != "off")
 
 
 def _ensure_universe_ledger_sync(run_config: FuturesRunConfig, window: QuarterlyWindow) -> None:
@@ -948,9 +948,12 @@ def _run_data_stage(
     if require_exec_1m:
         missing_1m = [s for s in valid_symbols if "exec_1m" not in (data_maps.get(s) or {})]
         if missing_1m:
-            raise RuntimeError(
-                f"exec_mode=intrarar_1m but {len(missing_1m)} symbol(s) missing 1m data: "
-                f"{missing_1m[:5]}{'...' if len(missing_1m) > 5 else ''}"
+            _logger.warning(
+                "[LTF_ALPHA] exec_1m missing for %d/%d symbol(s); LTF panels will use available symbols only: %s%s",
+                len(missing_1m),
+                len(valid_symbols),
+                missing_1m[:5],
+                "..." if len(missing_1m) > 5 else "",
             )
     if timeline and valid_symbols:
         t_inject = time.perf_counter()
@@ -3408,6 +3411,7 @@ def _run_optimization_stage(
         ai_telemetry_payloads=[],
         selection_summary={},
         run_summary_extras={"optuna_contract": contract_meta},
+        alpha_foundry_config=getattr(run_config, "alpha_foundry", None),
     )
     t_final_eval = time.perf_counter()
     run_final_evaluation(final_req)

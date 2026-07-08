@@ -26,6 +26,13 @@ ALL_FAMILIES = (
     "vol_contraction_breakout",
     "xs_residual_rebalance",
     "carry_net_of_funding",
+    "funding_session_orb_flow",
+    "liquidity_sweep_reclaim",
+    "cvd_vwap_absorption",
+    "funding_basis_dislocation",
+    "oi_flow_squeeze",
+    "xs_residual_flow_rotation",
+    "volume_participation_breakout",
 )
 
 FAMILY_ARCHETYPE_MAP: dict[str, str] = {
@@ -115,6 +122,17 @@ class TestBuildAlphaRecipeCatalog:
         assert "vol_contraction_breakout" in families
         assert "xs_residual_rebalance" in families
         assert "carry_net_of_funding" in families
+
+    def test_ltf_native_families_in_catalog(self) -> None:
+        recipes = build_alpha_recipe_catalog(timeframe="4h")
+        families = {r.family for r in recipes}
+        assert "funding_session_orb_flow" in families
+        assert "liquidity_sweep_reclaim" in families
+        assert "cvd_vwap_absorption" in families
+        assert "funding_basis_dislocation" in families
+        assert "oi_flow_squeeze" in families
+        assert "xs_residual_flow_rotation" in families
+        assert "volume_participation_breakout" in families
 
     def test_sparse_recipe_turnover_more_conservative_than_continuous(self) -> None:
         recipes = build_alpha_recipe_catalog(timeframe="4h")

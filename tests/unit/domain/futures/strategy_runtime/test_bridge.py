@@ -9,8 +9,12 @@ import numpy as np
 import pandas as pd
 
 from src.domain.futures.strategy.candidate_contracts import CandidateSignalPanel
+from src.domain.futures.strategy.common.alignment import AlignedMarketData
 from src.domain.futures.strategy.config import StrategyConfig
-from src.domain.futures.strategy_runtime.bridge import run_candidate_strategy_for_universe
+from src.domain.futures.strategy_runtime.bridge import (
+    _build_ltf_native_panels_for_l0,
+    run_candidate_strategy_for_universe,
+)
 
 
 def _make_panel() -> CandidateSignalPanel:
@@ -31,6 +35,59 @@ def _make_panel() -> CandidateSignalPanel:
         metadata={"native_tf": "4h"},
         archetype="trend",
     )
+
+
+def test_build_ltf_native_panels_for_l0_uses_exec_1m_payload() -> None:
+    dt_1m = pd.date_range("2026-01-01 00:00:00", periods=24 * 60, freq="1min", tz="UTC")
+    close = np.full(24 * 60, 104.0, dtype=np.float64)
+    close[16 * 60 + 45 : 17 * 60 + 15] = 112.0
+    volume = np.full(24 * 60, 10.0, dtype=np.float64)
+    volume[16 * 60 + 45 : 17 * 60 + 15] = 120.0
+    taker_buy = volume * 0.5
+    taker_buy[16 * 60 + 45 : 17 * 60 + 15] = volume[16 * 60 + 45 : 17 * 60 + 15] * 0.9
+    exec_1m = pd.DataFrame(
+        {
+            "datetime": dt_1m,
+            "open": close,
+            "high": close + 0.1,
+            "low": close - 0.5,
+            "close": close,
+            "volume": volume,
+            "quote_vol": volume * close,
+            "taker_buy_base_volume": taker_buy,
+            "taker_buy_quote_volume": taker_buy * close,
+            "trades": volume * 2.0,
+        }
+    )
+    base_dt = pd.date_range("2026-01-01 00:00:00", periods=24, freq="1h", tz="UTC").to_numpy(dtype="datetime64[ns]")
+    ones = np.ones((24, 1), dtype=np.float64)
+    mask = np.ones((24, 1), dtype=bool)
+    aligned = AlignedMarketData(
+        datetimes=base_dt,
+        symbols=("BTCUSDT",),
+        open_2d=ones * 100.0,
+        high_2d=ones * 105.0,
+        low_2d=ones * 95.0,
+        close_2d=ones * 104.0,
+        volume_2d=ones * 1000.0,
+        funding_2d=np.zeros((24, 1), dtype=np.float64),
+        active_mask=mask,
+        warm_mask=mask,
+        entry_block_mask=np.zeros((24, 1), dtype=bool),
+        kill_mask=np.zeros((24, 1), dtype=bool),
+    )
+
+    panels = _build_ltf_native_panels_for_l0(
+        data_maps={"BTCUSDT": {"exec_1m": exec_1m}},
+        symbols=("BTCUSDT",),
+        aligned=aligned,
+        cfg=StrategyConfig().candidate,
+        family_filter=("funding_session_orb_flow",),
+    )
+
+    assert len(panels) == 2
+    assert panels[0].metadata["source_tf"] == "15m"
+    assert any(panel.side_hint_2d.any() for panel in panels)
 
 
 def test_bridge_passes_no_leak_recommendation_window(monkeypatch: Any) -> None:
