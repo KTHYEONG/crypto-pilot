@@ -306,7 +306,7 @@ def run_final_oos_evaluation(
     cv_max: float,
     phase_c_diagnostics: dict[str, Any] | None = None,
 ) -> None:
-    """Execute Step 4: Final OOS evaluation, research gates, and persistence."""
+    """[ADR_20260708_LTF_NATIVE_SIGNAL_EXPANSION] Execute final OOS evaluation and persistence."""
     policy_cfg = load_portfolio_policy_config(OPT_FUTURES_CONFIG)
     params = dict(params)
     params["STRATEGY_MODE"] = True
@@ -420,6 +420,7 @@ def run_final_oos_evaluation(
             symbols=valid_symbols,
             tf=args.tf,
             cfg=m_strat_cfg,
+            alpha_foundry_config=getattr(args, "alpha_foundry_config", None),
         )
         build_alpha_sec = time.perf_counter() - t_build_alpha
         alpha_build_count += 1
@@ -605,6 +606,7 @@ def run_final_oos_evaluation(
             symbols=valid_symbols,
             tf=args.tf,
             cfg=split_strategy_cfg,
+            alpha_foundry_config=getattr(args, "alpha_foundry_config", None),
         )
         merge_candidate_output_into_data_maps(
             CandidatePipelineOutput(alpha_panel=alpha_panel),

@@ -149,6 +149,32 @@ RECIPE_DEFINITIONS: dict[str, tuple[dict[str, object], ...]] = {
     "carry_net_of_funding": (
         _rd("cnf_96", {"funding_window": 96, "z_threshold": 0.5, "carry_window": 24}, 2, ("close", "funding")),
     ),
+    "funding_session_orb_flow": (
+        _rd("fs_orb_15m", {"ltf": "15m", "opening_minutes": 15, "volume_z": 1.5, "cvd_min": 0.15},
+            1, ("close", "taker_buy")),
+        _rd("fs_orb_30m", {"ltf": "30m", "opening_minutes": 30, "volume_z": 1.5, "cvd_min": 0.15},
+            1, ("close", "taker_buy")),
+    ),
+    "liquidity_sweep_reclaim": (
+        _rd("lsr_5m_36", {"ltf": "5m", "sweep_window": 36, "atr_mult": 0.25}, 1, ("close", "high", "low", "taker_buy")),
+    ),
+    "cvd_vwap_absorption": (
+        _rd("cva_15m_24", {"ltf": "15m", "div_window": 24, "vwap_window": 24},
+            1, ("close", "high", "low", "taker_buy")),
+    ),
+    "funding_basis_dislocation": (
+        _rd("fbd_8h_84", {"funding_window": 84, "basis_window": 84, "z_entry": 1.5}, 2, ("close", "funding")),
+    ),
+    "oi_flow_squeeze": (
+        _rd("ofs_15m_48", {"ltf": "15m", "oi_window": 48, "atr_pct": 0.35}, 1, ("close", "oi", "taker_buy")),
+    ),
+    "xs_residual_flow_rotation": (
+        _rd("xsrf_15m_48", {"ltf": "15m", "rank_window": 48, "min_cross_section": 30}, 1, ("close", "taker_buy")),
+    ),
+    "volume_participation_breakout": (
+        _rd("vpb_15m_48", {"ltf": "15m", "channel": 48, "volume_z": 2.0}, 1, ("close", "high", "low", "taker_buy")),
+        _rd("vpb_30m_48", {"ltf": "30m", "channel": 48, "volume_z": 2.0}, 1, ("close", "high", "low", "taker_buy")),
+    ),
 }
 
 FAMILY_ARCHETYPE: dict[str, AlphaArchetype] = {
@@ -184,6 +210,13 @@ FAMILY_ARCHETYPE: dict[str, AlphaArchetype] = {
     "vol_contraction_breakout": "mean_reversion",
     "xs_residual_rebalance": "cross_sectional",
     "carry_net_of_funding": "carry",
+    "funding_session_orb_flow": "trend",
+    "liquidity_sweep_reclaim": "mean_reversion",
+    "cvd_vwap_absorption": "flow",
+    "funding_basis_dislocation": "carry",
+    "oi_flow_squeeze": "flow",
+    "xs_residual_flow_rotation": "cross_sectional",
+    "volume_participation_breakout": "trend",
 }
 
 FAMILY_SIDE_RULE: dict[str, str] = {
@@ -219,6 +252,13 @@ FAMILY_SIDE_RULE: dict[str, str] = {
     "vol_contraction_breakout": "vol_breakout",
     "xs_residual_rebalance": "xs_residual_momentum",
     "carry_net_of_funding": "carry_mean_rev",
+    "funding_session_orb_flow": "breakout_retest",
+    "liquidity_sweep_reclaim": "flow_reversal",
+    "cvd_vwap_absorption": "flow_reversal",
+    "funding_basis_dislocation": "carry_mean_rev",
+    "oi_flow_squeeze": "flow_reversal",
+    "xs_residual_flow_rotation": "xs_residual_momentum",
+    "volume_participation_breakout": "breakout_retest",
 }
 
 FAMILY_EXIT_POLICY: dict[str, str] = {
@@ -254,6 +294,13 @@ FAMILY_EXIT_POLICY: dict[str, str] = {
     "vol_contraction_breakout": "tp_sl_1.5_3",
     "xs_residual_rebalance": "atr_trail_2",
     "carry_net_of_funding": "tp_sl_1_2",
+    "funding_session_orb_flow": "atr_trail_2",
+    "liquidity_sweep_reclaim": "tp_sl_1_2",
+    "cvd_vwap_absorption": "tp_sl_1_2",
+    "funding_basis_dislocation": "tp_sl_1_2",
+    "oi_flow_squeeze": "tp_sl_1_2",
+    "xs_residual_flow_rotation": "atr_trail_2",
+    "volume_participation_breakout": "atr_trail_2",
 }
 
 FAMILY_MAX_TURNOVER: dict[str, float] = {
@@ -289,6 +336,13 @@ FAMILY_MAX_TURNOVER: dict[str, float] = {
     "vol_contraction_breakout": 180.0,
     "xs_residual_rebalance": 240.0,
     "carry_net_of_funding": 180.0,
+    "funding_session_orb_flow": 240.0,
+    "liquidity_sweep_reclaim": 365.0,
+    "cvd_vwap_absorption": 365.0,
+    "funding_basis_dislocation": 120.0,
+    "oi_flow_squeeze": 180.0,
+    "xs_residual_flow_rotation": 240.0,
+    "volume_participation_breakout": 240.0,
 }
 
 
