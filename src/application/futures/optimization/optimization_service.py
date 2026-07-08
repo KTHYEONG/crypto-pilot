@@ -98,6 +98,7 @@ class FinalEvaluationRequest:
     ai_telemetry_payloads: list[dict[str, Any]] = field(default_factory=list)
     selection_summary: dict[str, Any] = field(default_factory=dict)
     run_summary_extras: dict[str, Any] = field(default_factory=dict)
+    alpha_foundry_config: Any | None = None
 
 
 def prepare_optimization_context(request: OptimizationRequest) -> MLPhaseDContext:
@@ -214,7 +215,7 @@ def run_optimization(request: OptimizationRequest) -> OptimizationResult:
 
 
 def run_final_evaluation(request: FinalEvaluationRequest) -> None:
-    """Thin wrapper around final evaluator with active runner contract."""
+    """[ADR_20260708_LTF_NATIVE_SIGNAL_EXPANSION] Forward the active-runner final evaluation contract."""
     params = (
         dict(request.params)
         if request.params is not None
@@ -226,7 +227,7 @@ def run_final_evaluation(request: FinalEvaluationRequest) -> None:
         data_maps=request.data_maps,
         valid_symbols=request.valid_symbols,
         champion_awf_diag=request.champion_awf_diag,
-        args=argparse.Namespace(tf=request.tf),
+        args=argparse.Namespace(tf=request.tf, alpha_foundry_config=request.alpha_foundry_config),
         project_root=request.project_root,
         study_ml=request.study_ml,
         run_id=request.run_id,

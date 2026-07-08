@@ -15,6 +15,8 @@ from src.application.futures.optimization.data_readiness import (
     DataReadinessResult,
     DataWindowContract,
 )
+from src.application.futures.runner.active_pipeline import _requires_exec_1m
+from src.application.futures.runner.config import build_run_config_from_args as build_runner_run_config_from_args
 from src.domain.futures.strategy_runtime.bridge import CandidatePipelineOutput
 from src.domain.futures.universe import SymbolMeta, UniverseSnapshot
 from src.domain.futures.universe.contracts import UniverseStateCube
@@ -24,7 +26,7 @@ from src.execution import opt_main_futures
 def test_strategy_mode_pipeline_orchestration_order(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    run_config = build_run_config_from_args(
+    run_config = build_runner_run_config_from_args(
         {
             "phase": "l3",
             "timeframe": "4h",
@@ -257,7 +259,7 @@ def test_l2_mode_skips_optimization_stage(
 ) -> None:
     """l2 모드는 strategy bridge 후 optimization 없이 종료해야 한다."""
     caplog.set_level(logging.INFO)
-    run_config = build_run_config_from_args(
+    run_config = build_runner_run_config_from_args(
         {
             "phase": "l2",
             "timeframe": "4h",
@@ -339,7 +341,7 @@ def test_strategy_stage_injects_universe_metadata_before_bridge(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     caplog.set_level(logging.DEBUG)
-    run_config = build_run_config_from_args(
+    run_config = build_runner_run_config_from_args(
         {
             "phase": "l2",
             "timeframe": "4h",
@@ -566,7 +568,7 @@ def test_run_from_cli_when_pipeline_raises_runtime_error_returns_one(
 
 
 def test_requires_exec_1m_returns_false_for_l2_mode() -> None:
-    run_config = build_run_config_from_args(
+    run_config = build_runner_run_config_from_args(
         {
             "phase": "l2",
             "timeframe": "4h",
@@ -574,11 +576,11 @@ def test_requires_exec_1m_returns_false_for_l2_mode() -> None:
             "sync": "auto",
         }
     )
-    assert opt_main_futures._requires_exec_1m(run_config) is False
+    assert _requires_exec_1m(run_config) is False
 
 
-def test_requires_exec_1m_returns_false_for_l1_mode() -> None:
-    run_config = build_run_config_from_args(
+def test_requires_exec_1m_returns_false_for_l1_mode_without_alpha_foundry() -> None:
+    run_config = build_runner_run_config_from_args(
         {
             "phase": "l1",
             "timeframe": "4h",
@@ -586,7 +588,20 @@ def test_requires_exec_1m_returns_false_for_l1_mode() -> None:
             "sync": "auto",
         }
     )
-    assert opt_main_futures._requires_exec_1m(run_config) is False
+    assert _requires_exec_1m(run_config) is False
+
+
+def test_requires_exec_1m_returns_true_when_alpha_foundry_enabled() -> None:
+    run_config = build_runner_run_config_from_args(
+        {
+            "phase": "l1",
+            "timeframe": "4h",
+            "trials": 1,
+            "sync": "auto",
+            "alpha_foundry": "audit",
+        }
+    )
+    assert _requires_exec_1m(run_config) is True
 
 
 def test_resolve_data_collection_symbols_uses_inference_panel() -> None:
