@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+from datetime import date
+from pathlib import Path
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -10,6 +13,7 @@ from src.domain.futures.alpha_foundry.contracts import (
     EntryTimingGateConfig,
     EntryTimingWindow,
     HtfDirectionalEpisode,
+    Universe1mCoverageTier,
 )
 from src.domain.futures.alpha_foundry.entry_timing import (
     aggregate_entry_timing_evidence,
@@ -18,7 +22,12 @@ from src.domain.futures.alpha_foundry.entry_timing import (
     evaluate_trend_quality_gate,
     kaufman_efficiency_ratio,
     refine_entry_indices,
+    resolve_1m_backfill_targets,
+    resolve_1m_coverage_tier,
+    run_1m_backfill,
 )
+from src.domain.futures.strategy.config import CandidateStrategyConfig
+from src.domain.futures.strategy.rule_signals import ALL_SIGNAL_FAMILIES
 
 # ── Fixtures ──────────────────────────────────────────────────────────────
 
@@ -587,3 +596,261 @@ class TestSupplementaryCoverage:
         assert len(windows) == 1
         assert isinstance(result_events, pd.DataFrame)
         assert windows[0].triggered is True
+
+    def test_refine_entry_indices_trigger_fires_on_strong_bearish_confluence(
+        self,
+    ) -> None:
+        n_bars = 2500
+        idx = pd.date_range("2026-01-01", periods=n_bars, freq="1min", tz="UTC")
+        rng = np.random.default_rng(7)
+        rets_ar = np.zeros(n_bars, dtype=np.float64)
+        for i in range(1, n_bars):
+            rets_ar[i] = 0.3 * rets_ar[i - 1] - 0.0005 + rng.normal(0, 0.002)
+        close = 100.0 * np.exp(np.cumsum(rets_ar))
+        frame = pd.DataFrame(
+            {
+                "datetime": idx,
+                "open": close,
+                "high": close + 0.05,
+                "low": close - 0.05,
+                "close": close,
+                "volume": np.full(n_bars, 10.0, dtype=np.float64),
+                "taker_buy_volume": np.full(n_bars, 2.0, dtype=np.float64),
+            }
+        )
+        base_dt = np.datetime64("2026-01-01T00:00", "ns")
+        base_datetimes = np.array(
+            [base_dt + np.timedelta64(i * 4, "h") for i in range(50)],
+            dtype=np.datetime64,
+        )
+        events = pd.DataFrame(
+            {
+                "symbol": ["BTCUSDT"],
+                "family": ["trend_ma"],
+                "variant": ["ema_12_72"],
+                "side": [-1],
+                "entry_idx": [0],
+                "expected_holding_bars": [24],
+                "handoff_tier": ["candidate"],
+            }
+        )
+        ltf_frames = {"BTCUSDT": frame}
+        config = EntryTimingGateConfig(
+            enabled=True, ltf_grid=("1h",), max_wait_bars_ratio=0.25,
+            cvd_lookback_bars=30,
+        )
+
+        result_events, windows = refine_entry_indices(
+            events,
+            base_datetimes=base_datetimes,
+            ltf_1m_frames_by_symbol=ltf_frames,
+            config=config,
+        )
+
+        assert len(windows) == 1
+        assert isinstance(result_events, pd.DataFrame)
+        assert windows[0].triggered is True
+        assert windows[0].opportunity_cost_bps >= 0.0
+
+
+# ── LTF Native Directional Search: Scenario 1 (Happy Path) ──────────────
+
+
+class TestLtfBackfillCoverageScenario1HappyPath:
+
+    @pytest.fixture
+    def fake_data_root(self, tmp_path: Path) -> Path:
+        (tmp_path / "BTCUSDT_1m.parquet").touch()
+        (tmp_path / "BTCUSDT_4h.parquet").touch()
+        (tmp_path / "NEWCOINUSDT_4h.parquet").touch()
+        return tmp_path
+
+    def test_resolve_1m_backfill_targets_returns_symbols_missing_1m_file(
+        self, fake_data_root: Path
+    ) -> None:
+        result = resolve_1m_backfill_targets(
+            ("BTCUSDT", "NEWCOINUSDT"), data_root=fake_data_root
+        )
+        assert result == ("NEWCOINUSDT",)
+
+    def test_resolve_1m_coverage_tier_computes_ratio(
+        self, fake_data_root: Path
+    ) -> None:
+        tier = resolve_1m_coverage_tier(
+            ("BTCUSDT", "NEWCOINUSDT", "OTHER1", "OTHER2"),
+            data_root=fake_data_root,
+        )
+        assert tier.coverage_ratio == 0.25
+        assert tier.is_covered("BTCUSDT") is True
+
+    def test_universe_1m_coverage_tier_empty_universe_returns_zero_ratio(self) -> None:
+        tier = Universe1mCoverageTier(covered_symbols=frozenset(), universe_symbols=frozenset())
+        assert tier.coverage_ratio == 0.0
+
+    def test_default_l1_tfs_includes_1h_and_2h(self) -> None:
+        cfg = CandidateStrategyConfig()
+        assert "1h" in cfg.l1_tfs
+        assert "2h" in cfg.l1_tfs
+
+    def test_resolve_tf_signal_pool_1h_returns_expanded_family_set(
+        self,
+    ) -> None:
+        from src.domain.futures.strategy.config import (
+            _DEFAULT_PER_TF_FAMILIES,
+            resolve_tf_signal_pool,
+        )
+
+        cfg = CandidateStrategyConfig(per_tf_signal_pool_enabled=True)
+        pool = resolve_tf_signal_pool(cfg, "1h")
+        expected = _DEFAULT_PER_TF_FAMILIES["1h"]
+        assert set(pool) == set(expected)
+        assert "residual_reversion" in pool
+        assert "trend_ma" in pool
+        assert "funding_flow_carry" in pool
+
+
+# ── LTF Native Directional Search: Scenario 2 (Edge Cases) ──────────────
+
+
+class TestLtfBackfillCoverageScenario2EdgeCases:
+
+    def test_resolve_1m_backfill_targets_empty_universe_returns_empty(
+        self,
+    ) -> None:
+        result = resolve_1m_backfill_targets(())
+        assert result == ()
+
+    def test_resolve_1m_backfill_targets_all_covered_returns_empty(
+        self, tmp_path: Path
+    ) -> None:
+        (tmp_path / "BTCUSDT_1m.parquet").touch()
+        (tmp_path / "ETHUSDT_1m.parquet").touch()
+        result = resolve_1m_backfill_targets(
+            ("BTCUSDT", "ETHUSDT"), data_root=tmp_path
+        )
+        assert result == ()
+
+    def test_refine_entry_indices_uncovered_symbol_sets_coverage_status_uncovered_fallback(
+        self,
+        synthetic_1m_frame: pd.DataFrame,
+        default_entry_timing_config: EntryTimingGateConfig,
+    ) -> None:
+        events = pd.DataFrame(
+            {
+                "symbol": ["UNKNOWNSYMBOL"],
+                "family": ["trend_ma"],
+                "variant": ["ema_12_72"],
+                "side": [1],
+                "entry_idx": [0],
+                "expected_holding_bars": [24],
+                "handoff_tier": ["candidate"],
+            }
+        )
+        base_dt = np.datetime64("2026-01-01T00:00", "ns")
+        base_datetimes = np.array(
+            [base_dt + np.timedelta64(i * 4, "h") for i in range(10)],
+            dtype=np.datetime64,
+        )
+        ltf_frames: dict[str, pd.DataFrame] = {}
+        tier = Universe1mCoverageTier(
+            covered_symbols=frozenset(),
+            universe_symbols=frozenset({"UNKNOWNSYMBOL"}),
+        )
+
+        _result_events, windows = refine_entry_indices(
+            events,
+            base_datetimes=base_datetimes,
+            ltf_1m_frames_by_symbol=ltf_frames,
+            config=default_entry_timing_config,
+            coverage_tier=tier,
+        )
+
+        assert len(windows) == 1
+        assert windows[0].coverage_status == "uncovered_fallback"
+        assert windows[0].triggered is False
+
+    def test_refine_entry_indices_covered_symbol_no_trigger_sets_coverage_status_covered(
+        self,
+        synthetic_1m_frame: pd.DataFrame,
+        default_entry_timing_config: EntryTimingGateConfig,
+    ) -> None:
+        events = pd.DataFrame(
+            {
+                "symbol": ["BTCUSDT"],
+                "family": ["trend_ma"],
+                "variant": ["ema_12_72"],
+                "side": [1],
+                "entry_idx": [0],
+                "expected_holding_bars": [24],
+                "handoff_tier": ["candidate"],
+            }
+        )
+        base_dt = np.datetime64("2026-01-01T00:00", "ns")
+        base_datetimes = np.array(
+            [base_dt + np.timedelta64(i * 4, "h") for i in range(10)],
+            dtype=np.datetime64,
+        )
+        ltf_frames = {"BTCUSDT": synthetic_1m_frame}
+        tier = Universe1mCoverageTier(
+            covered_symbols=frozenset({"BTCUSDT"}),
+            universe_symbols=frozenset({"BTCUSDT"}),
+        )
+
+        _result_events, windows = refine_entry_indices(
+            events,
+            base_datetimes=base_datetimes,
+            ltf_1m_frames_by_symbol=ltf_frames,
+            config=default_entry_timing_config,
+            coverage_tier=tier,
+        )
+
+        assert len(windows) == 1
+        assert windows[0].coverage_status == "covered"
+
+    def test_default_per_tf_families_1h_2h_nonempty_and_subset_of_all_signal_families(
+        self,
+    ) -> None:
+        from src.domain.futures.strategy.config import _DEFAULT_PER_TF_FAMILIES
+
+        for tf in ("1h", "2h"):
+            families = _DEFAULT_PER_TF_FAMILIES.get(tf, ())
+            assert len(families) >= 2, f"{tf} has fewer than 2 families"
+            assert set(families) <= set(ALL_SIGNAL_FAMILIES), (
+                f"{tf} families not subset of ALL_SIGNAL_FAMILIES"
+            )
+
+
+# ── LTF Native Directional Search: Scenario 3 (Error Handling) ──────────
+
+
+class TestLtfBackfillCoverageScenario3ErrorHandling:
+
+    def test_run_1m_backfill_rejects_empty_missing_symbols(self, mocker) -> None:
+        mock_sync = mocker.patch(
+            "src.domain.futures.alpha_foundry.entry_timing.run_historical_sync",
+            autospec=True,
+        )
+        run_1m_backfill((), end_date=date(2026, 7, 8))
+        mock_sync.assert_not_called()
+
+    def test_run_1m_backfill_invokes_historical_sync_with_correct_flags(self, mocker) -> None:
+        mock_sync = mocker.patch(
+            "src.domain.futures.alpha_foundry.entry_timing.run_historical_sync",
+            autospec=True,
+        )
+        run_1m_backfill(("NEWCOINUSDT",), end_date=date(2026, 7, 8))
+        mock_sync.assert_called_once()
+        _, kwargs = mock_sync.call_args
+        assert kwargs["sync_1m"] is True
+        assert kwargs["sync_1d"] is False
+        assert kwargs["sync_4h"] is False
+        assert kwargs["symbols"] == ["NEWCOINUSDT"]
+        assert kwargs["end_date"] == date(2026, 7, 8)
+
+    def test_resolve_1m_coverage_tier_missing_data_root_raises_or_returns_empty_tier(
+        self,
+    ) -> None:
+        tier = resolve_1m_coverage_tier(
+            ("BTCUSDT",), data_root=Path("/nonexistent/path/xyz")
+        )
+        assert tier.coverage_ratio == 0.0

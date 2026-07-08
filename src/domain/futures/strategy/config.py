@@ -13,6 +13,8 @@ _DEFAULT_COST_MODEL = ExecutionCostModel()
 _DEFAULT_RT_BPS: float = _DEFAULT_COST_MODEL.round_trip_bps()  # ≈ 7.5
 _DEFAULT_MAX_EXPECTED_HOLDING_BARS = 36
 
+DEFAULT_L1_TFS: tuple[str, ...] = ("4h", "6h", "8h", "12h", "1h", "2h")  # [ADR_20260708_LTF_NATIVE_DIRECTIONAL_SEARCH]
+
 
 @dataclass(slots=True, frozen=True)
 class BlendConfig:
@@ -513,7 +515,7 @@ class CandidateStrategyConfig:
     per_tf_gate_overrides: dict[str, dict[str, float]] | None = None
     per_tf_gate_enabled: bool = False
     l2_master_tf: str | None = None
-    l1_tfs: tuple[str, ...] = ("4h", "6h", "8h", "12h")
+    l1_tfs: tuple[str, ...] = DEFAULT_L1_TFS
     l1_evidence_lookback_bars: int | None = None
     l1_evidence_grid_multiplier: int = 3
     l1_evidence_max_folds: int = 32
@@ -996,10 +998,13 @@ class PerTfL1Result:
 _DEFAULT_PER_TF_FAMILIES: dict[str, tuple[str, ...]] = {
     "1h": (
         "residual_reversion",
+        "trend_ma",
+        "funding_flow_carry",
     ),
     "2h": (
         "residual_reversion",
         "btc_regime_pullback",
+        "trend_ma",
     ),
     "4h": (
         "trend_ma",
