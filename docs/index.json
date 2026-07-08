@@ -101,7 +101,10 @@
   },
   "src/application/futures/runner/active_pipeline.py": {
     "architecture": "docs/architecture/layer3.md",
-    "testing": "tests/unit/application/futures/runner/test_pipeline.py"
+    "testing": [
+      "tests/unit/application/futures/runner/test_pipeline.py",
+      "tests/unit/execution/test_opt_main_futures_strategy_mode.py"
+    ]
   },
   "src/application/futures/runner/tf_probe_scoped.py": {
     "architecture": "docs/architecture/layer3.md",
@@ -117,7 +120,10 @@
   },
   "src/application/futures/runner/config.py": {
     "architecture": "docs/architecture/layer3.md",
-    "testing": "tests/unit/application/futures/runner/test_config.py"
+    "testing": [
+      "tests/unit/application/futures/runner/test_config.py",
+      "tests/unit/execution/test_opt_main_futures_strategy_mode.py"
+    ]
   },
   "src/domain/futures/strategy/tiered_workflow/signal_selection.py": {
     "architecture": "docs/architecture/layer1.md",
@@ -177,6 +183,14 @@
     "architecture": "docs/architecture/layer3.md",
     "testing": "tests/unit/domain/futures/optimization/test_data_window_floor_consistency.py"
   },
+  "src/domain/futures/optimization/final_evaluator.py": {
+    "architecture": "docs/architecture/layer3.md",
+    "testing": "tests/unit/execution/test_opt_main_futures_strategy_mode.py"
+  },
+  "src/application/futures/optimization/optimization_service.py": {
+    "architecture": "docs/architecture/layer3.md",
+    "testing": "tests/unit/execution/test_opt_main_futures_strategy_mode.py"
+  },
   "src/domain/futures/signals/rules.py": {
     "architecture": "docs/architecture/layer1.md",
     "testing": [
@@ -203,12 +217,21 @@
     "architecture": "docs/architecture/layer1.md",
     "testing": "tests/unit/domain/futures/strategy/test_candidate_portfolio.py"
   },
+  "src/domain/futures/signals/ltf_alpha.py": {
+    "architecture": "docs/architecture/layer1.md",
+    "testing": "tests/unit/domain/futures/signals/test_ltf_alpha.py"
+  },
+  "src/domain/futures/strategy/builder.py": {
+    "architecture": "docs/architecture/layer1.md",
+    "testing": "tests/unit/domain/futures/strategy_runtime/test_bridge.py"
+  },
   "src/domain/futures/strategy_runtime/bridge.py": {
     "architecture": "docs/architecture/layer1.md",
     "testing": [
       "tests/unit/domain/futures/strategy_runtime/test_bridge.py",
       "tests/unit/domain/futures/strategy_runtime/test_bridge_alpha_foundry.py",
       "tests/unit/domain/futures/strategy_runtime/test_bridge_multi_tf_gate.py",
+      "tests/unit/domain/futures/signals/test_ltf_alpha.py",
       "tests/unit/domain/futures/strategy/tiered_workflow/test_per_tf_architecture.py"
     ]
   }
