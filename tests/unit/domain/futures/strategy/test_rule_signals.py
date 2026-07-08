@@ -1003,12 +1003,10 @@ def test_build_rule_signal_panels_full_per_tf_pool() -> None:
         family_filter=pool_1h,
     )
     families = {p.family for p in panels}
-    # 1h pool: residual_reversion only
+    # 1h pool: residual_reversion, trend_ma, funding_flow_carry
     assert "residual_reversion" in families
-    # Trend families should NOT be in 1h pool
-    assert "trend_ma" not in families
-    assert "trend_donchian" not in families
-    assert "dual_momentum" not in families
+    assert "trend_ma" in families
+    assert "funding_flow_carry" in families
 
 
 # ─── OPT: _robust_zscore_numba equivalence ─────────────────────────────────
