@@ -3059,7 +3059,7 @@ def run_tiered_pipeline(
     override_dsr: float | None = None,
     probe_diversity_corr: dict[str, float] | None = None,
     probe_prior_map: dict[tuple[str, str, str], float] | None = None,
-    l1_tfs: tuple[str, ...] = ("4h", "6h", "8h", "12h"),
+    l1_tfs: tuple[str, ...] = ("4h", "6h", "8h", "12h", "1h", "2h"),
     per_tf_data_maps: dict[str, AlignedMarketData] | None = None,
     probe_manifest: list[dict[str, Any]] | None = None,
     l2_sim_cache: L2SimulationCache | None = None,
