@@ -8,6 +8,7 @@ ai_read_policy: when_related
 related_paths:
   - src/domain/futures/signals/rules.py
   - src/domain/futures/signals/diagnostics.py
+  - src/domain/futures/signals/ltf_alpha.py
   - src/domain/futures/signals/contracts.py
   - src/domain/futures/signals/workflow.py
   - src/domain/futures/signals/timeframes.py
@@ -15,6 +16,7 @@ related_paths:
   - src/domain/futures/strategy/tiered_workflow/pipeline.py
   - src/domain/futures/optimization/metrics.py
   - src/domain/futures/strategy_runtime/bridge.py
+  - src/domain/futures/strategy/builder.py
   - src/domain/futures/alpha_foundry/contracts.py
   - src/domain/futures/alpha_foundry/recipes.py
   - src/domain/futures/alpha_foundry/cheap_gate.py
@@ -29,7 +31,9 @@ related_paths:
 change_triggers:
   - src/domain/futures/signals/rules.py
   - src/domain/futures/signals/diagnostics.py
+  - src/domain/futures/signals/ltf_alpha.py
   - src/domain/futures/strategy_runtime/bridge.py
+  - src/domain/futures/strategy/builder.py
   - src/domain/futures/alpha_foundry/contracts.py
   - src/domain/futures/alpha_foundry/recipes.py
   - src/domain/futures/alpha_foundry/cheap_gate.py
@@ -105,8 +109,9 @@ last_verified: 2026-07-07
 - `AlphaFoundryRuntimeConfig`: `enable_fast_discovery_timeframes` / `fast_discovery_timeframes` switch the discovery grid before native L0 gate execution; `observability_mode`, `debug_top_k_rows`, `debug_reject_bucket_rows`, `artifact_write_enabled`, `gate_schema` control runtime observability and schema validation; `enable_cost_aware_generation`, `exploration_budget_fraction`, `cost_prior_floor_by_tf`, `use_all_timeframes_in_l0` gate the search-space cost-prior screen in `run_alpha_foundry_l0_pipeline()`.
 - `run_alpha_foundry_l0_pipeline()`: `runtime_config`가 주어지면 (1) blueprint→`L0SearchCell` 생성 후 `apply_cost_prior_screen()`, (2) `evaluate_alpha_cheap_gate_batch()`(1차 저비용 스크리닝) → (3) canonical `evaluate_alpha_gate_batch()`(`capacity_score`/`regime_stability`/`tf_corroboration`/`entry_mode`/3단계 `handoff_tier` 산출, cheap-gate 통과분 재평가) → (4) diversity/budget는 canonical `handoff_tier`(cheap-gate 자체 `discovery_tier` 아님) 기준으로 `selected_for_l1` 결정 → (5) `update_search_policy_state()`로 search cell 상태 갱신 → (6) `observability_mode=="debug_log"`면 `emit_alpha_generation_debug_summary()` 호출. `tf_corroboration`은 `evidence_by_tf`가 주입돼야 `compute_tf_corroboration()`에서 0이 아닌 값을 가지며, `evaluate_alpha_gate_batch()`/`build_l0_signal_candidate()`(`pipeline.py`) 양쪽 다 `tf_fusion_index` 조회 키를 `(family, _strip_tf_suffix(variant, timeframe), timeframe)` 3-tuple로 정규화해야 `index_multi_timeframe_evidence()`의 색인과 일치한다.
 - `build_cheap_gate_evidence_frame()`(`bridge_helpers.py`): 단일 TF의 `evaluate_alpha_cheap_gate_batch()` 결과에 `recipes` 매핑으로 `family`/`variant`를 조인해 `fuse_multi_timeframe_evidence()`가 요구하는 스키마(`family`/`variant`/`timeframe`/`recipe_id`/`reject_reasons`/`mean_net_bps`/`block_lcb_bps`)의 DataFrame으로 변환.
-- `run_alpha_foundry_l0_gate_multi_tf()`(`bridge_helpers.py`): TF별 `panels_by_tf`/`bindings_by_tf`/`recipes_by_tf`/`aligned_by_tf`를 받아 (1) 전 TF `build_cheap_gate_evidence_frame()`으로 `evidence_by_tf` 조립 → (2) 전 TF `run_alpha_foundry_l0_gate(evidence_by_tf=...)` 호출(내부에서 fuse+canonical) → `dict[tf, AlphaFoundryL0Result]` 반환. `AlphaFoundryL0Result`는 `evidence_rows`(canonical `AlphaFoundryEvidenceRow` 튜플) 필드를 노출한다.
+- `run_alpha_foundry_l0_gate_multi_tf()`(`bridge_helpers.py`): TF별 `panels_by_tf`/`bindings_by_tf`/`recipes_by_tf`/`aligned_by_tf`를 받아 (1) 전 TF `build_cheap_gate_evidence_frame()`으로 `evidence_by_tf` 조립 → (2) 전 TF `run_alpha_foundry_l0_gate(evidence_by_tf=...)` 호출(내부에서 fuse+canonical) → `dict[tf, AlphaFoundryL0Result]` 반환. `AlphaFoundryL0Result`는 `evidence_rows`(canonical `AlphaFoundryEvidenceRow` 튜플) 필드를 노출한다. `run_candidate_strategy_for_universe()`는 `alpha_foundry_config.mode != "off"`일 때 `exec_1m` payload를 모아 `_build_ltf_native_panels_for_l0()`를 통해 LTF panels를 추가하고, L0 binding 전에 `build_alpha_recipe_catalog()`/`bind_panels_to_alpha_recipes()`에 합친다.
 - `bind_panels_to_alpha_recipes()`(`bridge_helpers.py`)는 `feature_family_by_family` 매핑을 optional로 받아 recipe 바인딩에 반영.
+- `ltf_alpha.py` (`build_ltf_alpha_feature_grid()` / `build_ltf_native_alpha_panels()` / `project_ltf_panel_to_base_grid()`): 1m cache 또는 runner-supplied `exec_1m`를 5m/15m/30m closed-bar grid로 변환하고, `funding_session_orb_flow` / `liquidity_sweep_reclaim` / `volume_participation_breakout` 3개 sparse LTF family만 rising-edge 패널로 생성해 base grid로 투영한다. `data/futures/{symbol}_1m.parquet`가 runner slice보다 짧으면 local cache로 보강하고, projection은 `np.searchsorted(base_datetimes, tau_end, side="left")`로 release timestamp를 기준으로 한다.
 - `BucketKey`: `tuple[str, str]` alias for `(family, timeframe)` — diversity selection grouping key.
 - `CorroborationTier`: `Literal["corroborated", "single_tf_strict", "contradicted", "insufficient_coverage"]`.
 - `search_space.py`: `timeframe_to_minutes()`, `resolve_alpha_timeframe_grid()`, `build_l0_search_cells()`, `mark_retired_search_cells()` — L0 blueprint grid and retirement state helpers.
