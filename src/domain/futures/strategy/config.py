@@ -993,6 +993,20 @@ class PerTfL1Result:
     n_winning_signals: int
 
 
+# ── Family Prior Score Deprioritization ────────────────────────────────
+# Families with consistently negative economics; reduce search budget via
+# prior score rather than hard retirement (see l0_signal_yield_improvement).
+
+DEPRIORITIZED_FAMILY_PRIOR: dict[str, float] = {
+    "carry_net_of_funding": -0.5,
+    "taker_imbalance_momentum": -0.5,
+    "supertrend": -0.5,
+    "vol_term_structure_gate": -0.5,
+    "trend_donchian": -0.5,
+    "funding_flow_carry": -0.3,
+}
+
+
 # ── TF-Specific Signal Pool Defaults ──
 
 _DEFAULT_PER_TF_FAMILIES: dict[str, tuple[str, ...]] = {
@@ -1000,11 +1014,13 @@ _DEFAULT_PER_TF_FAMILIES: dict[str, tuple[str, ...]] = {
         "residual_reversion",
         "trend_ma",
         "funding_flow_carry",
+        "trend_pullback_continuation",
     ),
     "2h": (
         "residual_reversion",
         "btc_regime_pullback",
         "trend_ma",
+        "trend_pullback_continuation",
     ),
     "4h": (
         "trend_ma",
