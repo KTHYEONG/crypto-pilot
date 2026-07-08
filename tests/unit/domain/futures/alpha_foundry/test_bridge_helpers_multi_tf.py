@@ -83,6 +83,10 @@ def make_gate_config() -> AlphaGateConfig:
     return AlphaGateConfig(
         min_events=1, min_effective_n=1.0, min_lcb_net_bps=-1000.0, min_nw_tstat=0.0,
         max_cost_drag_ratio=100.0, max_turnover_per_year=10000.0, min_candidate_rank_ic_tstat=0.0,
+        # archetype_event_floors now takes precedence over min_events
+        # (resolve_family_timeframe_gate_policy wired into the real gate) — clear it
+        # so this fixture's permissive min_events=1 actually applies.
+        archetype_event_floors={},
     )
 
 

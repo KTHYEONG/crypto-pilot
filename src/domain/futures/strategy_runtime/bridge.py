@@ -866,6 +866,7 @@ def run_candidate_strategy_for_universe(
     from src.domain.futures.strategy.common.alignment import align_data_maps
     from src.domain.futures.strategy.config import resolve_purge_and_embargo_bars, with_max_holding_bars
     from src.domain.futures.strategy.execution_cost import ExecutionCostModel
+    from src.domain.futures.strategy.family_lifecycle import resolve_retired_families_for_tf
     from src.domain.futures.strategy.rule_diagnostics import compute_rule_diagnostics
     from src.domain.futures.strategy.rule_signals import (
         build_rule_signal_panels,
@@ -983,7 +984,9 @@ def run_candidate_strategy_for_universe(
         recipes_seq = build_alpha_recipe_catalog(
             timeframe=tf,
             include_families=alpha_foundry_config.include_families,
-            exclude_families=alpha_foundry_config.exclude_families,
+            exclude_families=tuple(
+                set(alpha_foundry_config.exclude_families) | set(resolve_retired_families_for_tf(tf))
+            ),
             max_recipes_per_family=alpha_foundry_config.max_recipes_per_family,
         )
         recipes = {recipe.recipe_id: recipe for recipe in recipes_seq}
@@ -993,7 +996,9 @@ def run_candidate_strategy_for_universe(
             timeframe=tf,
             max_recipes_per_family=alpha_foundry_config.max_recipes_per_family,
             include_families=alpha_foundry_config.include_families,
-            exclude_families=alpha_foundry_config.exclude_families,
+            exclude_families=tuple(
+                set(alpha_foundry_config.exclude_families) | set(resolve_retired_families_for_tf(tf))
+            ),
             enable_synthetic_recipes=alpha_foundry_config.enable_synthetic_recipes,
         )
 
@@ -1015,7 +1020,9 @@ def run_candidate_strategy_for_universe(
                 base_tf=tf,
                 tfs=htf_tfs,
                 family_pool=lambda t: resolve_tf_signal_pool(strategy_cfg.candidate, t),
-                htf_only=True,
+                # [ADR_20260708_L0_SIGNAL_YIELD_IMPROVEMENT] was hardcoded True, silently
+                # excluding any tf faster than base (1h/2h) from ever being evaluated.
+                htf_only=False,
             )
 
             panels_by_tf: dict[str, Sequence[Any]] = {tf: panels}
@@ -1034,7 +1041,9 @@ def run_candidate_strategy_for_universe(
                 htf_recipes_seq = build_alpha_recipe_catalog(
                     timeframe=htf,
                     include_families=alpha_foundry_config.include_families,
-                    exclude_families=alpha_foundry_config.exclude_families,
+                    exclude_families=tuple(
+                        set(alpha_foundry_config.exclude_families) | set(resolve_retired_families_for_tf(htf))
+                    ),
                     max_recipes_per_family=alpha_foundry_config.max_recipes_per_family,
                 )
                 htf_recipes = {r.recipe_id: r for r in htf_recipes_seq}
@@ -1044,7 +1053,9 @@ def run_candidate_strategy_for_universe(
                     timeframe=htf,
                     max_recipes_per_family=alpha_foundry_config.max_recipes_per_family,
                     include_families=alpha_foundry_config.include_families,
-                    exclude_families=alpha_foundry_config.exclude_families,
+                    exclude_families=tuple(
+                        set(alpha_foundry_config.exclude_families) | set(resolve_retired_families_for_tf(htf))
+                    ),
                     enable_synthetic_recipes=alpha_foundry_config.enable_synthetic_recipes,
                 )
                 panels_by_tf[htf] = htf_native_panels
@@ -1225,7 +1236,7 @@ def run_candidate_strategy_for_universe(
                     base_tf=tf,
                     tfs=candidate_cfg.l1_tfs,
                     family_pool=lambda t: resolve_tf_signal_pool(candidate_cfg, t),
-                    htf_only=True,
+                    htf_only=False,
                 )
             bridge_prof["htf_panels"] = time.perf_counter() - t_htf
             _sample_rss("htf_panels")

@@ -220,10 +220,15 @@ class TestEvaluatePanelGate:
             )
 
     def test_min_events_floor(self) -> None:
-        """S2-1: insufficient_events hard reject."""
+        """S2-1: insufficient_events hard reject.
+
+        family_event_floors takes precedence over the flat min_events default
+        (resolve_family_timeframe_gate_policy), so the override must go there
+        for SAMPLE_RECIPE.family="trend_ma" to actually raise the effective floor.
+        """
         aligned = make_mock_aligned()
         panel = make_mock_panel()
-        cfg = AlphaGateConfig(min_events=9999)
+        cfg = AlphaGateConfig(min_events=9999, family_event_floors={"trend_ma": 9999})
         evidence = evaluate_panel_gate(
             panel=panel, aligned=aligned, recipe=SAMPLE_RECIPE,
             cost_model=ExecutionCostModel(), config=cfg,
