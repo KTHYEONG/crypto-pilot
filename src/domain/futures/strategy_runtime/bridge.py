@@ -36,6 +36,7 @@ if TYPE_CHECKING:
 
 
 _logger = logging.getLogger(__name__)
+_run_logger = logging.getLogger("opt_main_futures")
 
 
 def _get_rss_mb() -> float:
@@ -447,6 +448,66 @@ def build_native_htf_panels(
                     _logger.warning("[MULTI-TF] tf=%s unhandled: %s", futures[future], exc)
 
     return result
+
+
+def _build_ltf_native_panels_for_l0(
+    *,
+    data_maps: Mapping[str, Mapping[str, Any]],
+    symbols: Sequence[str],
+    aligned: AlignedMarketData,
+    cfg: CandidateStrategyConfig,
+    family_filter: tuple[str, ...] | None = None,
+) -> tuple[CandidateSignalPanel, ...]:
+    """[ADR_20260708_LTF_NATIVE_SIGNAL_EXPANSION] Build LTF panels for L0 binding."""
+    from src.domain.futures.signals.ltf_alpha import build_ltf_native_alpha_panels
+
+    exec_1m_by_symbol: dict[str, pd.DataFrame] = {}
+    aligned_end = pd.Timestamp(aligned.datetimes[-1]).tz_localize("UTC") if len(aligned.datetimes) else None
+    for symbol in symbols:
+        frame = data_maps.get(symbol, {}).get("exec_1m")
+        if isinstance(frame, pd.DataFrame) and not frame.empty:
+            if aligned_end is not None and "datetime" in frame.columns:
+                frame_end = pd.Timestamp(frame["datetime"].iloc[-1])
+                if frame_end.tzinfo is None:
+                    frame_end = frame_end.tz_localize("UTC")
+                if frame_end < aligned_end:
+                    cache_path = Path("data/futures") / f"{symbol}_1m.parquet"
+                    if cache_path.exists():
+                        try:
+                            cached = pd.read_parquet(cache_path)
+                        except Exception as exc:
+                            _logger.warning("[LTF_ALPHA] local 1m cache fallback failed symbol=%s: %s", symbol, exc)
+                        else:
+                            if isinstance(cached, pd.DataFrame) and not cached.empty and "datetime" in cached.columns:
+                                frame = cached
+            exec_1m_by_symbol[symbol] = frame
+    _run_logger.info("[LTF_ALPHA] exec_1m payload symbols=%d/%d", len(exec_1m_by_symbol), len(symbols))
+    if not exec_1m_by_symbol:
+        return ()
+    first_symbol, first_frame = next(iter(exec_1m_by_symbol.items()))
+    _run_logger.info(
+        "[LTF_ALPHA] aligned_range dtype=%s start=%s end=%s sample_exec=%s exec_start=%s exec_end=%s",
+        getattr(aligned.datetimes, "dtype", type(aligned.datetimes)),
+        aligned.datetimes[0] if len(aligned.datetimes) else None,
+        aligned.datetimes[-1] if len(aligned.datetimes) else None,
+        first_symbol,
+        first_frame["datetime"].iloc[0] if "datetime" in first_frame.columns and not first_frame.empty else None,
+        first_frame["datetime"].iloc[-1] if "datetime" in first_frame.columns and not first_frame.empty else None,
+    )
+
+    try:
+        panels = build_ltf_native_alpha_panels(
+            aligned=aligned,
+            exec_1m_by_symbol=exec_1m_by_symbol,
+            cfg=cfg,
+            family_filter=family_filter,
+        )
+    except Exception as exc:
+        _logger.warning("[LTF_ALPHA] build_ltf_native_alpha_panels failed: %s", exc)
+        return ()
+    if not panels:
+        _run_logger.info("[LTF_ALPHA] no LTF panels generated for current L0 window")
+    return tuple(panels)
 
 
 def project_htf_panels_to_base(
@@ -976,6 +1037,20 @@ def run_candidate_strategy_for_universe(
     t_step = time.perf_counter()
     panels = build_rule_signal_panels(aligned=aligned, cfg=strategy_cfg.candidate)
     panels = tuple(dataclasses.replace(p, variant=f"{p.variant}_{tf}") for p in panels)
+    if alpha_foundry_config is not None and getattr(alpha_foundry_config, "mode", "off") != "off":
+        ltf_family_filter = alpha_foundry_config.include_families or None
+        ltf_panels = _build_ltf_native_panels_for_l0(
+            data_maps=preloaded_data_maps,
+            symbols=symbols,
+            aligned=aligned,
+            cfg=strategy_cfg.candidate,
+            family_filter=ltf_family_filter,
+        )
+        if ltf_panels:
+            panels = (*panels, *ltf_panels)
+            _run_logger.info("[LTF_ALPHA] appended panels=%d base_tf=%s", len(ltf_panels), tf)
+        else:
+            _run_logger.info("[LTF_ALPHA] appended panels=0 base_tf=%s", tf)
     bridge_prof["rules"] = time.perf_counter() - t_step
     _sample_rss("rules")
     _multi_tf_htf_panels: tuple[Any, ...] | None = None
