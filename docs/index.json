@@ -54,7 +54,14 @@
   },
   "src/domain/futures/alpha_foundry/multi_tf_fusion.py": {
     "architecture": "docs/architecture/layer1.md",
-    "testing": "tests/unit/domain/futures/alpha_foundry/test_multi_tf_fusion.py"
+    "testing": [
+      "tests/unit/domain/futures/alpha_foundry/test_multi_tf_fusion.py",
+      "tests/unit/domain/futures/alpha_foundry/test_multi_tf_fusion_weighted.py"
+    ]
+  },
+  "src/domain/futures/alpha_foundry/discovery_units.py": {
+    "architecture": "docs/architecture/layer1.md",
+    "testing": "tests/unit/domain/futures/alpha_foundry/test_discovery_units.py"
   },
   "src/domain/futures/alpha_foundry/entry_timing.py": {
     "architecture": "docs/architecture/layer1.md",
