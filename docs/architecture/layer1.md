@@ -20,6 +20,7 @@ related_paths:
   - src/domain/futures/alpha_foundry/contracts.py
   - src/domain/futures/alpha_foundry/recipes.py
   - src/domain/futures/alpha_foundry/cheap_gate.py
+  - src/domain/futures/alpha_foundry/forward_returns.py
   - src/domain/futures/alpha_foundry/search_space.py
   - src/domain/futures/alpha_foundry/diversity.py
   - src/domain/futures/alpha_foundry/budget.py
@@ -103,6 +104,7 @@ last_verified: 2026-07-09
 - `resolve_family_registration_gap(all_families, candidate_families)`: `all_families` 중 `candidate_families`에 없는 항목을 반환하는 순수 함수(orphan 탐지).
 - `src/domain/futures/strategy/family_lifecycle.py`: `FAMILY_TF_RETIREMENT`(economic replay 기각 이력의 `(family, tf)` 집합) + `is_family_tf_retired()` — 동일 조합 재검증 방지 가드. `resolve_retired_families_for_tf(tf)`[ADR_20260708_L0_SIGNAL_YIELD_IMPROVEMENT]가 `strategy_runtime/bridge.py`의 `build_alpha_recipe_catalog()`/`bind_panels_to_alpha_recipes()` 4개 호출부(base+HTF × catalog+binding)에서 `exclude_families`로 실제 소비됨 — 이전에는 레지스트리만 존재하고 어디서도 호출되지 않아 은퇴 처리가 무효했음.
 - `resolve_family_timeframe_gate_policy(recipe, config)`(`cheap_gate.py`)가 산출하는 family/archetype 인지 이벤트 하한(`min_events`)은 `evaluate_panel_cheap_gate()`/`evaluate_panel_gate()`의 `n_events` 하드 리젝트 체크에서 직접 소비된다[ADR_20260708_L0_SIGNAL_YIELD_IMPROVEMENT] — 우선순위: `config.family_event_floors[family]` > `config.archetype_event_floors[archetype]` > flat `config.min_events`.
+- `compute_causal_forward_returns_bps()`(`alpha_foundry/forward_returns.py`): `close[i + causal_lag_bars]` entry, `close[i + causal_lag_bars + holding_bars]` exit을 쓰는 causal forward-return SSOT. `evaluate_panel_cheap_gate()`와 canonical `evaluate_alpha_gate_batch()`가 공통 사용한다.
 - **L0 게이트 스코프 [ADR_20260707_L0_MULTI_TF_GATE_REDESIGN]**: `AlphaFoundryRuntimeConfig.use_all_timeframes_in_l0=True`(기본값)이고 `CandidateStrategyConfig.l1_tfs`에 base TF 외 TF가 있으면, `run_candidate_strategy_for_universe()`가 `build_native_htf_panels()`로 HTF(6h/8h/12h) native panel+aligned를 만들고, TF별로 `build_alpha_recipe_catalog()`/`bind_panels_to_alpha_recipes()`를 거쳐 `run_alpha_foundry_l0_gate_multi_tf()` 1회 호출로 **base TF와 HTF 전부를 동일 L0 경제성 게이트(fan-out cheap-gate → cross-TF fuse → fan-in canonical gate)에 태운다**. 게이트를 통과한 HTF panel만 `project_htf_panels_to_base()`로 base grid에 투영되어 L1로 전달된다. `use_all_timeframes_in_l0=False`이거나 `l1_tfs`가 base TF 하나뿐이면 레거시 단일-TF 경로(`run_alpha_foundry_l0_gate()` 단독 호출 + 무게이트 `build_multi_tf_panels()`)로 폴백한다.
 - `_resolve_panel_archetype(panel)` [ADR_20260707_L1_BACKTEST_FIDELITY_FIXES]: `panel.metadata.archetype`가 없을 때 family 문자열로 archetype을 역산하는 fallback. trend 집합 = `{trend_ma, trend_donchian, vol_breakout, trend_pullback_continuation, mtf_trend_pullback, mtf_breakout_retest, vol_term_structure_gate, btc_regime_pullback}`. 미매칭 family는 전부 `mean_rev`로 폴백 — 신규 family 추가 시 이 함수 갱신 필수(누락 시 `exit_policies.build_exit_policies_for_panel()`이 엉뚱한 archetype 버킷의 손절/익절을 적용).
 - `evaluate_compound_backtest()`(`candidate_evaluation.py`)/`build_candidate_target_weights()`(`candidate_portfolio.py`)의 연율화(`bars_per_year`)는 `optimization/metrics._bars_per_year_for_tf(tf)` SSOT로 통일(4h/1h/1d 하드코딩 elif 체인 제거, 그 외 TF는 4h로 암묵 폴백하던 결함 해소).
