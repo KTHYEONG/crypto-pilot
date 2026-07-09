@@ -9,6 +9,9 @@ from src.domain.futures.alpha_foundry.contracts import (
     AlphaFoundryRuntimeConfig,
     AlphaRecipe,
     CheapGateConfig,
+    ConditionalCellGateConfig,
+    ExecutionArmConfig,
+    L0DiagnosticConfig,
     L1VerificationUnit,
     L2PosteriorPolicyConfig,
     L2PosteriorSleeve,
@@ -264,6 +267,76 @@ class TestAlphaFoundryRuntimeConfig:
         assert cfg.debug_top_k_rows == 10
         assert cfg.artifact_write_enabled is False
         assert cfg.gate_schema == "unified"
+
+    @pytest.mark.parametrize(
+        ("field", "value", "match"),
+        [
+            ("min_conviction_lcb_bps", -0.1, "min_conviction_lcb_bps must be >= 0.0"),
+            ("total_l1_verification_budget", 0, "total_l1_verification_budget must be >= 1"),
+            ("exploration_budget_fraction", 0.0, "exploration_budget_fraction must be in (0.0, 1.0)"),
+            ("exploration_budget_fraction", 1.0, "exploration_budget_fraction must be in (0.0, 1.0)"),
+            ("debug_reject_bucket_rows", 0, "debug_reject_bucket_rows must be >= 1"),
+            ("max_discovery_units_for_l1", 0, "max_discovery_units_for_l1 must be >= 1"),
+            ("max_discovery_event_jaccard", -0.1, "max_discovery_event_jaccard must be in [0.0, 1.0]"),
+            ("max_discovery_event_jaccard", 1.1, "max_discovery_event_jaccard must be in [0.0, 1.0]"),
+            ("min_discovery_unit_lcb_bps", -0.1, "min_discovery_unit_lcb_bps must be >= 0.0"),
+        ],
+    )
+    def test_rejects_invalid_numeric_fields(self, field: str, value: float | int, match: str) -> None:
+        kwargs: dict[str, object] = {
+            "mode": "audit",
+            "report_dir": Path("/tmp/af_test"),  # noqa: S108
+            "max_recipes_per_family": 64,
+            "include_families": (),
+            "exclude_families": (),
+            "top_k_per_family_tf": 5,
+            "initial_fold_budget": 3,
+            "enable_synthetic_recipes": True,
+            "min_conviction_lcb_bps": 5.0,
+            "total_l1_verification_budget": 30,
+            "cheap_gate": CheapGateConfig(),
+            "posterior_gate": PosteriorGateConfig(),
+            "l2_policy": L2PosteriorPolicyConfig(),
+            "enable_fast_discovery_timeframes": False,
+            "fast_discovery_timeframes": ("1h", "2h"),
+            "enable_correlation_audit": False,
+            "observability_mode": "debug_log",
+            "debug_top_k_rows": 10,
+            "artifact_write_enabled": False,
+            "gate_schema": "unified",
+            "enable_cost_aware_generation": True,
+            "exploration_budget_fraction": 0.15,
+            "cost_prior_floor_by_tf": {},
+            "use_all_timeframes_in_l0": True,
+            "debug_reject_bucket_rows": 5,
+            "enable_failure_attribution": False,
+            "enable_conditional_l0_cells": False,
+            "enable_execution_arms": False,
+            "enable_horizon_sweep": False,
+            "conditional_cell": ConditionalCellGateConfig(),
+            "execution_arm": ExecutionArmConfig(),
+            "horizon_sweep_bars": (1, 2, 3, 6),
+            "diagnostic": L0DiagnosticConfig(),
+            "enable_discovery_unit_handoff": False,
+            "max_discovery_units_for_l1": 12,
+            "max_discovery_event_jaccard": 0.80,
+            "min_discovery_unit_lcb_bps": 0.0,
+        }
+        kwargs[field] = value
+        with pytest.raises(ValueError, match=re.escape(match)):
+            AlphaFoundryRuntimeConfig(**kwargs)  # type: ignore[arg-type]
+
+    def test_rejects_bad_conditional_cell_config(self) -> None:
+        with pytest.raises(ValueError, match="min_cell_events must be >= 1"):
+            ConditionalCellGateConfig(min_cell_events=0)
+
+    def test_rejects_bad_execution_arm_config(self) -> None:
+        with pytest.raises(ValueError, match="unsupported execution style"):
+            ExecutionArmConfig(styles=("bogus_style",))  # type: ignore[arg-type]
+
+    def test_rejects_bad_diagnostic_config(self) -> None:
+        with pytest.raises(ValueError, match="calibration_fraction must be in \\(0,1\\)"):
+            L0DiagnosticConfig(calibration_fraction=1.0)
 
 
 class TestVersionSprawlControl:

@@ -1810,6 +1810,252 @@ def test_evaluate_panel_gate_v2_causal_lag_ge_t() -> None:
     assert "insufficient_events" in ev.reject_reasons
 
 
+def test_evaluate_panel_gate_v2_positive_liquidity_and_xs_spread_path() -> None:
+    from src.domain.futures.alpha_foundry.cheap_gate import evaluate_panel_gate_v2
+
+    t = 48
+    dt = np.arange(
+        np.datetime64("2026-01-01T00"),
+        np.datetime64("2026-01-03T00"),
+        np.timedelta64(1, "h"),
+    )[:t]
+    symbols = ("BTCUSDT", "ETHUSDT", "XRPUSDT", "SOLUSDT")
+    close = np.column_stack(
+        [
+            100.0 * np.exp(0.0020 * np.arange(t, dtype=np.float64)),
+            120.0 * np.exp(0.0010 * np.arange(t, dtype=np.float64)),
+            80.0 * np.exp(0.0015 * np.arange(t, dtype=np.float64)),
+            90.0 * np.exp(0.0012 * np.arange(t, dtype=np.float64)),
+        ]
+    )
+    zeros = np.zeros_like(close)
+    side = np.zeros_like(close, dtype=np.int8)
+    side[::4, :] = 1
+    side[1::4, :] = -1
+    score = side.astype(np.float64) * np.array([1.0, 0.8, 0.6, 0.4], dtype=np.float64)
+    aligned = AlignedMarketData(
+        datetimes=dt,
+        symbols=symbols,
+        open_2d=close.copy(),
+        high_2d=close * 1.01,
+        low_2d=close * 0.99,
+        close_2d=close.copy(),
+        volume_2d=np.full_like(close, 1000.0),
+        funding_2d=zeros.copy(),
+        active_mask=np.ones_like(close, dtype=np.bool_),
+        warm_mask=np.ones_like(close, dtype=np.bool_),
+        entry_block_mask=np.zeros_like(close, dtype=np.bool_),
+        kill_mask=np.zeros_like(close, dtype=np.bool_),
+        execution_cost_bps_2d=np.full_like(close, 1.0),
+        adv_usdt_2d=np.full_like(close, 10_000_000.0),
+    )
+    panel = CandidateSignalPanel(
+        family="xs_probe",
+        variant="probe",
+        params={},
+        datetimes=dt,
+        symbols=symbols,
+        signed_score_2d=score,
+        side_hint_2d=side,
+        expected_holding_bars=2,
+        min_holding_bars=1,
+        stop_atr_mult=2.0,
+        take_profit_atr_mult=4.0,
+        turnover_proxy_2d=np.zeros_like(close),
+        valid_mask_2d=np.ones_like(close, dtype=np.bool_),
+        metadata={"recipe_id": "xs_probe"},
+    )
+    recipe = AlphaRecipe(
+        recipe_id="xs_probe",
+        family="xs_probe",
+        variant="probe",
+        timeframe="4h",
+        archetype="cross_sectional",
+        indicator_params={},
+        side_rule_id="trend_follow",
+        exit_policy_id="atr_trail_2",
+        required_fields=("close",),
+        causal_lag_bars=1,
+        max_turnover_per_year=5000.0,
+    )
+    cfg = CheapGateConfig(
+        min_events=1,
+        min_effective_n=1.0,
+        min_lcb_net_bps=-10_000.0,
+        min_nw_tstat=0.0,
+        max_cost_drag_ratio=100.0,
+        max_turnover_per_year=10_000.0,
+        bootstrap_seed=42,
+        min_candidate_rank_ic_tstat=0.0,
+        min_xs_symbols_per_bar=2,
+        archetype_event_floors={"cross_sectional": 1},
+        liquidity_cost_stress_mult=0.5,
+    )
+    evidence = evaluate_panel_gate_v2(
+        panel=panel,
+        aligned=aligned,
+        recipe=recipe,
+        cost_model=ExecutionCostModel(),
+        config=cfg,
+        bars_per_year=8760.0,
+    )
+    assert evidence.xs_spread_lcb_bps is not None
+    assert evidence.liquidity_cost_stress_bps >= 0.0
+    assert evidence.gate_passed in (True, False)
+
+
+def test_evaluate_panel_gate_v2_holding_window_too_large_returns_empty_evidence() -> None:
+    from src.domain.futures.alpha_foundry.cheap_gate import evaluate_panel_gate_v2
+
+    aligned = make_mock_aligned()
+    panel = make_mock_panel()
+    recipe = dataclasses.replace(SAMPLE_RECIPE, causal_lag_bars=1)
+    too_large_panel = dataclasses.replace(panel, expected_holding_bars=aligned.close_2d.shape[0])
+
+    evidence = evaluate_panel_gate_v2(
+        panel=too_large_panel,
+        aligned=aligned,
+        recipe=recipe,
+        cost_model=ExecutionCostModel(),
+        config=CheapGateConfig(),
+        bars_per_year=8760.0,
+    )
+    assert evidence.n_events == 0
+    assert evidence.handoff_tier == "blocked"
+
+
+def test_evaluate_panel_gate_v2_high_turnover_and_cost_branch() -> None:
+    from src.domain.futures.alpha_foundry.cheap_gate import evaluate_panel_gate_v2
+
+    t = 24
+    dt = np.arange(
+        np.datetime64("2026-01-01T00"),
+        np.datetime64("2026-01-02T00"),
+        np.timedelta64(1, "h"),
+    )[:t]
+    symbols = ("BTCUSDT",)
+    close = np.column_stack([100.0 * np.exp(-0.001 * np.arange(t, dtype=np.float64))])
+    side = np.zeros((t, 1), dtype=np.int8)
+    side[::2, :] = 1
+    side[1::2, :] = -1
+    panel = CandidateSignalPanel(
+        family="turnover_probe",
+        variant="probe",
+        params={},
+        datetimes=dt,
+        symbols=symbols,
+        signed_score_2d=np.ones((t, 1), dtype=np.float64),
+        side_hint_2d=side,
+        expected_holding_bars=1,
+        min_holding_bars=1,
+        stop_atr_mult=2.0,
+        take_profit_atr_mult=4.0,
+        turnover_proxy_2d=np.zeros((t, 1), dtype=np.float64),
+        valid_mask_2d=np.ones((t, 1), dtype=np.bool_),
+        metadata={"recipe_id": "turnover_probe"},
+    )
+    recipe = AlphaRecipe(
+        recipe_id="turnover_probe",
+        family="turnover_probe",
+        variant="probe",
+        timeframe="30m",
+        archetype="trend",
+        indicator_params={},
+        side_rule_id="trend_follow",
+        exit_policy_id="atr_trail_2",
+        required_fields=("close",),
+        causal_lag_bars=1,
+        max_turnover_per_year=2.0,
+    )
+    aligned = AlignedMarketData(
+        datetimes=dt,
+        symbols=symbols,
+        open_2d=close.copy(),
+        high_2d=close * 1.01,
+        low_2d=close * 0.99,
+        close_2d=close,
+        volume_2d=np.full((t, 1), 1000.0, dtype=np.float64),
+        funding_2d=np.zeros((t, 1), dtype=np.float64),
+        active_mask=np.ones((t, 1), dtype=np.bool_),
+        warm_mask=np.ones((t, 1), dtype=np.bool_),
+        entry_block_mask=np.zeros((t, 1), dtype=np.bool_),
+        kill_mask=np.zeros((t, 1), dtype=np.bool_),
+        execution_cost_bps_2d=np.full((t, 1), 25.0, dtype=np.float64),
+        adv_usdt_2d=np.full((t, 1), 1_000_000.0, dtype=np.float64),
+    )
+    cfg = CheapGateConfig(
+        min_events=1,
+        min_effective_n=1.0,
+        min_lcb_net_bps=-10_000.0,
+        min_nw_tstat=0.0,
+        max_cost_drag_ratio=0.1,
+        max_turnover_per_year=1.0,
+        high_turnover_per_year=1.0,
+        bootstrap_seed=42,
+        min_candidate_rank_ic_tstat=0.0,
+        archetype_event_floors={"trend": 1},
+    )
+    evidence = evaluate_panel_gate_v2(
+        panel=panel,
+        aligned=aligned,
+        recipe=recipe,
+        cost_model=ExecutionCostModel(),
+        config=cfg,
+        bars_per_year=8760.0,
+    )
+    assert "excess_turnover" in evidence.reject_reasons or "gross_lcb_below_cost" in evidence.reject_reasons
+
+
+def test_compute_cost_drag_ratio_v2_and_payoff_stats() -> None:
+    from src.domain.futures.alpha_foundry.cheap_gate import compute_cost_drag_ratio_v2, compute_payoff_stats
+
+    drag = compute_cost_drag_ratio_v2(mean_cost_bps=5.0, mean_gross_bps=10.0)
+    hit_rate, payoff_skew = compute_payoff_stats(np.array([4.0, -2.0, 6.0, -3.0], dtype=np.float64))
+
+    assert drag == pytest.approx(0.5)
+    assert hit_rate == pytest.approx(0.5)
+    assert payoff_skew > 1.0
+
+
+def test_compute_liquidity_and_xs_helper_branches() -> None:
+    from src.domain.futures.alpha_foundry.cheap_gate import compute_liquidity_cost_stress_bps, compute_xs_spread_lcb_bps
+
+    aligned = make_mock_aligned()
+    t, n = aligned.close_2d.shape
+    event_mask = np.zeros((t, n), dtype=np.bool_)
+    event_mask[10:20, :] = True
+    stress = compute_liquidity_cost_stress_bps(aligned=aligned, event_mask=event_mask, stress_mult=2.0)
+    xs_none = compute_xs_spread_lcb_bps(
+        net_bps=np.zeros((t, n), dtype=np.float64),
+        score=np.zeros((t, n), dtype=np.float64),
+        event_mask=np.zeros((t, n), dtype=np.bool_),
+        min_symbols_per_bar=2,
+    )
+
+    assert stress >= 0.0
+    assert xs_none is None
+
+
+def test_compute_capacity_score_with_liquidity_data() -> None:
+    from src.domain.futures.alpha_foundry.cheap_gate import compute_capacity_score
+
+    aligned = make_mock_aligned()
+    t, n = aligned.close_2d.shape
+    event_mask = np.zeros((t, n), dtype=np.bool_)
+    event_mask[10:20, :] = True
+    aligned_with_liq = dataclasses.replace(
+        aligned,
+        execution_cost_bps_2d=np.full((t, n), 4.0, dtype=np.float64),
+        adv_usdt_2d=np.full((t, n), 1_000_000.0, dtype=np.float64),
+    )
+    result = compute_capacity_score(
+        aligned=aligned_with_liq,
+        event_mask=event_mask,
+        liquidity_cost_stress_bps=5.0,
+    )
+    assert 0.0 <= result <= 1.0
+
+
 # ── Supplementary coverage: small helper edge cases ─────────────────────
 
 def test_compute_block_means_edge_cases() -> None:
