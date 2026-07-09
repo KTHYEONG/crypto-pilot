@@ -34,6 +34,7 @@ from src.domain.futures.alpha_foundry.contracts import (
     L0SoftFlag,
     MultiTimeframeEvidence,
 )
+from src.domain.futures.alpha_foundry.forward_returns import compute_causal_forward_returns_bps
 from src.domain.futures.signals.contracts import CandidateSignalPanel
 from src.domain.futures.strategy.common.alignment import AlignedMarketData
 from src.domain.futures.strategy.execution_cost import ExecutionCostModel
@@ -129,7 +130,7 @@ def evaluate_panel_cheap_gate(
         raise ValueError("bars_per_year must be positive")
     _validate_shape(panel, aligned)
 
-    t, n = aligned.close_2d.shape
+    t, _n = aligned.close_2d.shape
     close = aligned.close_2d
     funding = aligned.funding_2d
     active = aligned.active_mask & aligned.warm_mask & ~aligned.entry_block_mask & ~aligned.kill_mask
@@ -198,9 +199,9 @@ def evaluate_panel_cheap_gate(
             mean_cost_bps=0.0,
         )
 
-    fwd_ret_bps = np.full((t, n), np.nan, dtype=np.float64)
-    for i in range(t - holding_bars):
-        fwd_ret_bps[i, :] = side[i, :].astype(np.float64) * np.log(close[i + holding_bars, :] / close[i, :]) * 10000.0
+    fwd_ret_bps = compute_causal_forward_returns_bps(
+        close=close, side=side, causal_lag_bars=0, holding_bars=holding_bars,
+    )
 
     stress_cost = cost_model.stress_round_trip_bps()
     funding_cost = np.where(event_mask, funding * 10000.0 * holding_bars, 0.0)
@@ -995,7 +996,7 @@ def evaluate_panel_gate(
         raise ValueError("bars_per_year must be positive")
     _validate_shape(panel, aligned)
 
-    t, n = aligned.close_2d.shape
+    t, _n = aligned.close_2d.shape
     close = aligned.close_2d
     funding = aligned.funding_2d
     active = aligned.active_mask & aligned.warm_mask & ~aligned.entry_block_mask & ~aligned.kill_mask
@@ -1009,13 +1010,13 @@ def evaluate_panel_gate(
     reject_reasons: list[str] = []
     soft_flags: list[str] = []
 
-    if causal_lag >= t or holding_bars >= t:
+    if causal_lag >= t or holding_bars >= t or causal_lag + holding_bars >= t:
         return _empty_gate_evidence(
             run_id=run_id, recipe=recipe, reject_reasons=("insufficient_events",)
         )
 
     idx_start = causal_lag
-    idx_end = t - holding_bars
+    idx_end = t - causal_lag - holding_bars
 
     entry_full = _sparse_entry_mask(side, valid)
     event_mask = np.zeros_like(entry_full)
@@ -1029,14 +1030,9 @@ def evaluate_panel_gate(
             run_id=run_id, recipe=recipe, reject_reasons=("insufficient_events",)
         )
 
-    fwd_ret_bps = np.full((t, n), np.nan, dtype=np.float64)
-    idx_end_fwd = t - holding_bars
-    for i in range(idx_end_fwd):
-        fwd_ret_bps[i, :] = (
-            side[i, :].astype(np.float64)
-            * (close[i + holding_bars, :] / close[i + causal_lag, :] - 1.0)
-            * 10000.0
-        )
+    fwd_ret_bps = compute_causal_forward_returns_bps(
+        close=close, side=side, causal_lag_bars=causal_lag, holding_bars=holding_bars,
+    )
 
     stress_cost = cost_model.stress_round_trip_bps()
     funding_cost = np.where(event_mask, funding * 10000.0 * holding_bars, 0.0)
