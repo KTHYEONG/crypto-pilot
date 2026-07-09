@@ -28,6 +28,10 @@ related_paths:
    - src/domain/futures/alpha_foundry/bridge_helpers.py
    - src/domain/futures/alpha_foundry/multi_tf_fusion.py
    - src/domain/futures/alpha_foundry/entry_timing.py
+  - src/domain/futures/alpha_foundry/conditional_cells.py
+  - src/domain/futures/alpha_foundry/execution_arms.py
+  - src/domain/futures/alpha_foundry/edge_failure.py
+  - src/domain/futures/alpha_foundry/l0_diagnostics.py
 change_triggers:
   - src/domain/futures/signals/rules.py
   - src/domain/futures/signals/diagnostics.py
@@ -45,10 +49,14 @@ change_triggers:
    - src/domain/futures/alpha_foundry/bridge_helpers.py
    - src/domain/futures/alpha_foundry/multi_tf_fusion.py
    - src/domain/futures/alpha_foundry/entry_timing.py
+  - src/domain/futures/alpha_foundry/conditional_cells.py
+  - src/domain/futures/alpha_foundry/execution_arms.py
+  - src/domain/futures/alpha_foundry/edge_failure.py
+  - src/domain/futures/alpha_foundry/l0_diagnostics.py
 dependencies:
   documents:
     - docs/architecture/regime.md
-last_verified: 2026-07-07
+last_verified: 2026-07-09
 ---
 
 # 1. Purpose
@@ -134,11 +142,13 @@ last_verified: 2026-07-07
 - `fuse_multi_timeframe_evidence()` (`multi_tf_fusion.py`) — 동일 run epoch의 TF별 evidence DataFrame을 `(family, variant)`(TF 접미사 정규화 후) 기준으로 조인해, 다른 TF와의 부호일치도로 `corroboration_tier` 판정. `contradicted`는 `fused_conviction_score`를 강제 음수화(사실상 거부권), `corroborated`는 15% 컨빅션 부스트.
 - `shrink_l1_evidence_hierarchical()` applies family/timeframe shrinkage with `w = n_eff / (n_eff + prior_effective_n)`.
 
-### Edge Failure Attribution & Conditional Alpha [ADR_20260708_L0_EDGE_FAILURE_ATTRIBUTION]
-- **Status**: standalone modules, **not wired into `run_alpha_foundry_l0_pipeline()`/`bridge.py`** — no production call site yet. All three `AlphaFoundryRuntimeConfig` flags (`enable_failure_attribution`/`enable_conditional_l0_cells`/`enable_execution_arms`) default `False`.
-- `edge_failure.py`: `classify_edge_failure_rows(evidence, ...)` — pure post-hoc classifier over an `AlphaFoundryEvidenceRow` DataFrame (or any DataFrame with the same columns). Appends `failure_axis`(primary)/`failure_axes`(comma-joined all)/`failure_diagnostic`. Axis precedence: `cost_dominated`(if `cost_drag_ratio > cost_drag_ratio_floor`) → `weak_gross_edge`(if `gross_lcb_bps < min_gross_lcb_bps`, requires the `gross_lcb_bps` wiring fix above to be non-degenerate) → `statistically_unstable`(`abs(nw_tstat) < weak_tstat_abs`) → `turnover_dominated` → `insufficient_sample`(`effective_n < 20`); no axis fired → `"unknown"` (also the expected label for passing rows). Real-evidence validation (2026-07-08, 100-row `4h_1783519562_*` run): `cost_dominated`=42, `weak_gross_edge`=28, `statistically_unstable`=23, `unknown`=7(all `gate_passed=True`).
-- `conditional_cells.py`: `ConditionalCellSpec`/`ConditionalCellEvidence`/`generate_default_cell_specs()`/`build_conditional_cell_masks()`/`evaluate_conditional_l0_cells()` — slices a parent panel's events into PIT-only condition cells (`symbol_liquidity`/`symbol_cluster`/`market_regime`/`volatility_regime`/`funding_polarity`/`score_quantile`/`event_hour_utc`/`source_tf`) and re-runs the same statistical gate per cell so a cell can pass (`gate_passed=True`) even when the parent aggregate fails. Parent failure never auto-blocks a passing cell (`[LIMIT-02]`); parent itself remains blocked unless it independently passes.
-- `execution_arms.py`: `ExecutionCostArm`/`ExecutionArmConfig`/`resolve_execution_cost_arms()`/`estimate_execution_arm_cost_bps()` — alternate execution-cost assumptions (`taker_now`/`maker_retest`/`maker_or_cancel`/`hybrid`) with explicit fill-probability and adverse-selection penalties (no cost discount without fill-probability modeling, `[LIMIT-03]`).
+### Edge Failure Attribution & Conditional Alpha [ADR_20260708_L0_EDGE_FAILURE_ATTRIBUTION][ADR_20260709_L0_CONDITIONAL_DIAGNOSTIC_WIRING]
+- **Status**: wired into `run_alpha_foundry_l0_pipeline()` as an opt-in, diagnostic-only pass (`l0_diagnostics.run_l0_diagnostic_pass()`) gated by `AlphaFoundryRuntimeConfig.enable_failure_attribution`/`enable_conditional_l0_cells`/`enable_execution_arms` (all default `False`). Diagnostic rows are appended to `evidence_rows` strictly *after* `passed_recipe_ids`/`handoff_decisions`/`stage_counts`/`bucket_results`/`cross_bucket_result` are finalized — the flags cannot change L1/L2 handoff (`[LIMIT-06]`, regression-tested).
+- `edge_failure.py`: `classify_edge_failure_rows(evidence, ...)` — pure post-hoc classifier over an `AlphaFoundryEvidenceRow`/`AlphaGateEvidence` DataFrame. Appends `failure_axis`(primary)/`failure_axes`(comma-joined all)/`failure_diagnostic`. Axis precedence: `cost_dominated`(if `cost_drag_ratio > cost_drag_ratio_floor`) → `weak_gross_edge`(if `gross_lcb_bps < min_gross_lcb_bps`) → `statistically_unstable`(`abs(nw_tstat) < weak_tstat_abs`) → `turnover_dominated` → `insufficient_sample`(`effective_n < 20`); no axis fired → `"unknown"`. Real-evidence validation (2026-07-08, 100-row `4h_1783519562_*` run): `cost_dominated`=42, `weak_gross_edge`=28, `statistically_unstable`=23, `unknown`=7(all `gate_passed=True`).
+- `conditional_cells.py`: `ConditionalCellSpec`/`ConditionalCellEvidence`/`generate_default_cell_specs()`/`build_conditional_cell_masks()`/`build_calibrated_cell_masks()`(calibration/evaluation chronological split, prevents look-ahead in quantile/liquidity thresholds, `[LIMIT-01]`)/`evaluate_event_mask_gate()`(public, generalized from the former `_evaluate_cell_gate` — takes `round_trip_cost_bps: float` instead of a `cost_model`, shared by conditional-cell and execution-arm evaluation)/`build_parent_event_mask()`/`evaluate_conditional_l0_cells()` — slices a parent panel's events into PIT-only condition cells (`symbol_liquidity`/`symbol_cluster`/`market_regime`/`volatility_regime`/`funding_polarity`/`score_quantile`/`event_hour_utc`/`source_tf`). Parent failure never auto-blocks a passing cell (`[LIMIT-02]`, but see BH-FDR below).
+- `execution_arms.py`: `ExecutionCostArm`/`ExecutionArmConfig`/`resolve_execution_cost_arms()`/`estimate_execution_arm_cost_bps()`/`evaluate_recipe_under_arm()` — alternate execution-cost assumptions (`taker_now`/`maker_retest`/`maker_or_cancel`/`hybrid`) with explicit fill-probability and adverse-selection penalties (`[LIMIT-03]`).
+- `l0_diagnostics.py`: `L0DiagnosticConfig`(`contracts.py`: `failure_axes_for_cell_search`/`failure_axes_for_arm_search`/`calibration_fraction`/`max_diagnostic_recipes`)/`run_l0_diagnostic_pass()` — orchestrates the above: classifies failure axes, scopes conditional-cell search to `handoff_tier="blocked"` recipes matching the configured failure axes (ranked by `abs(net_lcb_bps)` ascending, capped at `max_diagnostic_recipes`), applies one BH-FDR correction across all cell tests in the run before materializing any cell row (`[LIMIT-02]`), and scopes execution-arm re-costing to `cost_dominated` recipes. Diagnostic rows use `recipe_id = f"{parent}::cell={cell_id}"` / `f"{parent}::arm={style}"` and always `selected_for_l1=False`. `bars_per_year` is resolved per-recipe via `optimization/metrics._bars_per_year_for_tf(recipe.timeframe)` (not hardcoded to 4h).
+- **Real-data finding** (2026-07-09, run `4h_1783560242`, 25 syms, 1h/2h/4h/6h/8h/12h): both diagnostic hypotheses disproven — 105 BH-surviving conditional-cell rows (13 blocked recipes) and 112 execution-arm rows (56 blocked recipes) had **zero** `gate_passed=True`; closest near-misses were -13.5bps (cell) and -6.3bps (arm). Confirms the L0 rejection rate reflects genuine absence of gross alpha in the current family/TF set, not a pooled-averaging or worst-case-cost artifact.
 
 ### LTF Entry Timing Refinement [ADR_20260707_LTF_ENTRY_TIMING_LAYER]
 - **Status**: standalone module, **not wired into `strategy_runtime/bridge.py`** — no production call site yet. `EntryTimingGateConfig.enabled` defaults to `False`.
