@@ -1,3 +1,8 @@
+"""Signal family registry for Alpha Foundry and tiered workflow.
+
+[ADR_20260709_L0_TREND_PULLBACK_HARDENING_SYNC]
+"""
+
 from __future__ import annotations
 
 import logging
@@ -803,43 +808,80 @@ def build_rule_signal_panels(
             )
 
         elif fam == "btc_regime_pullback":
-            # 8. BTC Regime Pullback
-            btc_close = close[:, btc_idx : btc_idx + 1]
-            btc_ema_fast = _ema_2d(btc_close, span=btc_fast_window)
-            btc_ema_slow = _ema_2d(btc_close, span=btc_slow_window)
-            btc_trend_up = btc_ema_fast > btc_ema_slow
+            # 8. BTC Regime Pullback (+ slow-lookback control + RSI-oscillator variant)
+            for _variant, _btc_fast, _btc_slow, _alt_window, _oscillator in [
+                ("btc_pullback_50", btc_fast_window, btc_slow_window, alt_mean_window, "zscore"),
+                ("btc_pullback_100_slow", scale_window(50), scale_window(200), scale_window(100), "zscore"),
+                ("btc_pullback_50_rsi", btc_fast_window, btc_slow_window, alt_mean_window, "rsi"),
+            ]:
+                btc_close = close[:, btc_idx : btc_idx + 1]
+                btc_ema_fast = _ema_2d(btc_close, span=_btc_fast)
+                btc_ema_slow = _ema_2d(btc_close, span=_btc_slow)
+                btc_trend_up = btc_ema_fast > btc_ema_slow
 
-            alt_mean = _rolling_mean_2d(close, window=alt_mean_window)
-            alt_std = _rolling_std_2d(close, window=alt_mean_window)
-            alt_pullback_z = (close - alt_mean) / np.maximum(alt_std, 1e-12)
+                if _oscillator == "rsi":
+                    _alt_rsi = _rsi_2d(close, period=rsi_14_window)
+                    _osc_long = _alt_rsi < 30.0
+                    _osc_short = _alt_rsi > 70.0
+                    _osc_score = (50.0 - _alt_rsi) / 20.0
+                elif _oscillator == "zscore":
+                    _alt_mean = _rolling_mean_2d(close, window=_alt_window)
+                    _alt_std = _rolling_std_2d(close, window=_alt_window)
+                    _alt_pullback_z = (close - _alt_mean) / np.maximum(_alt_std, 1e-12)
+                    _osc_long = _alt_pullback_z < -1.5
+                    _osc_short = _alt_pullback_z > 1.5
+                    _osc_score = -_alt_pullback_z / 2.0
+                else:
+                    raise ValueError(f"unsupported oscillator type: {_oscillator}")
 
-            btc_side = np.zeros_like(close, dtype=np.int8)
-            btc_side[btc_trend_up & (alt_pullback_z < -1.5)] = 1
-            btc_side[~btc_trend_up & (alt_pullback_z > 1.5)] = -1
-            btc_score = -alt_pullback_z / 2.0
-            fam_panels.append(
-                CandidateSignalPanel(
-                    family="btc_regime_pullback",
-                    variant="btc_pullback_50",
-                    params={"window": alt_mean_window, "btc_fast": btc_fast_window, "btc_slow": btc_slow_window},
-                    datetimes=aligned.datetimes,
-                    symbols=aligned.symbols,
-                    signed_score_2d=np.clip(btc_score, -1.0, 1.0),
-                    side_hint_2d=btc_side,
-                    expected_holding_bars=scale_window(18),
-                    min_holding_bars=scale_window(6),
-                    stop_atr_mult=2.0,
-                    take_profit_atr_mult=3.0,
-                    turnover_proxy_2d=np.abs(np.diff(btc_score, axis=0, prepend=0.0)),
-                    valid_mask_2d=valid_mask,
+                btc_side = np.zeros_like(close, dtype=np.int8)
+                btc_side[btc_trend_up & _osc_long] = 1
+                btc_side[~btc_trend_up & _osc_short] = -1
+                btc_score = np.clip(_osc_score, -1.0, 1.0)
+                _holding = scale_window(36) if _variant == "btc_pullback_100_slow" else scale_window(18)
+                _min_holding = scale_window(12) if _variant == "btc_pullback_100_slow" else scale_window(6)
+                fam_panels.append(
+                    CandidateSignalPanel(
+                        family="btc_regime_pullback",
+                        variant=_variant,
+                        params={
+                            "window": _alt_window, "btc_fast": _btc_fast, "btc_slow": _btc_slow,
+                            "oscillator": _oscillator,
+                        },
+                        datetimes=aligned.datetimes,
+                        symbols=aligned.symbols,
+                        signed_score_2d=btc_score,
+                        side_hint_2d=btc_side,
+                        expected_holding_bars=_holding,
+                        min_holding_bars=_min_holding,
+                        stop_atr_mult=2.0,
+                        take_profit_atr_mult=3.0,
+                        turnover_proxy_2d=np.abs(np.diff(btc_score, axis=0, prepend=0.0)),
+                        valid_mask_2d=valid_mask,
+                        metadata={
+                            "archetype": "trend",
+                            "regime": "btc_regime_pullback",
+                            "edge_hypothesis": {
+                                "btc_pullback_50": "baseline: BTC trend regime gates alt-coin z-score pullback entries",
+                                "btc_pullback_100_slow": (
+                                    "[LIMIT-03] slow-lookback control: turnover_per_year should drop "
+                                    "materially vs baseline if the archetype's survival is turnover-driven"
+                                ),
+                                "btc_pullback_50_rsi": (
+                                    "[LIMIT-04] oscillator substitution: tests whether edge is tied to the "
+                                    "regime-filter structure or specifically to the z-score trigger formulation"
+                                ),
+                            }[_variant],
+                        },
+                    )
                 )
-            )
 
         elif fam == "trend_pullback_continuation":
             # 16. Trend Pullback Continuation
             for _fast, _slow, _rsi_lo, _rsi_hi in [
                 (scale_window(20), scale_window(100), 40.0, 65.0),
                 (scale_window(50), scale_window(200), 40.0, 65.0),
+                (scale_window(100), scale_window(400), 40.0, 65.0),
             ]:
                 _ema_fast = _ema_2d(close, span=_fast)
                 _ema_slow = _ema_2d(close, span=_slow)
@@ -892,7 +934,12 @@ def build_rule_signal_panels(
                             "archetype": "trend",
                             "regime": "established_trend_pullback",
                             "edge_hypothesis": (
-                                "pullback recovery inside an established trend improves continuation entry quality"
+                                "[LIMIT-03] slow-lookback control: turnover_per_year should drop "
+                                "materially vs baseline if the archetype's survival is turnover-driven"
+                                if (_fast, _slow) == (scale_window(100), scale_window(400))
+                                else (
+                                    "pullback recovery inside an established trend improves continuation entry quality"
+                                )
                             ),
                         },
                     )
@@ -1084,7 +1131,7 @@ def build_rule_signal_panels(
 
         elif fam == "mtf_trend_pullback":
             # G1. mtf_trend_pullback
-            for _n_htf in [20, 50]:
+            for _n_htf in [20, 50, 100]:
 
                 def _compute_g1_htf(
                     df_htf: pd.DataFrame,
@@ -1133,7 +1180,12 @@ def build_rule_signal_panels(
                             "archetype": "trend",
                             "regime": "top_down_trend_pullback",
                             "edge_hypothesis": (
-                                "1d trend direction filters 4h rsi oversold/overbought pullback trigger entries"
+                                "[LIMIT-03] slow-lookback control: turnover_per_year should drop "
+                                "materially vs baseline if the archetype's survival is turnover-driven"
+                                if _n_htf == 100
+                                else (
+                                    "1d trend direction filters 4h rsi oversold/overbought pullback trigger entries"
+                                )
                             ),
                         },
                     )
@@ -1610,6 +1662,7 @@ def build_rule_signal_panels(
             for _tpq_fast, _tpq_slow, _tpq_rsi_lo, _tpq_rsi_hi in [
                 (scale_window(20), scale_window(100), 40.0, 65.0),
                 (scale_window(50), scale_window(200), 35.0, 70.0),
+                (scale_window(100), scale_window(400), 35.0, 70.0),
             ]:
                 _tpq_ema_fast = _ema_2d(close, span=_tpq_fast)
                 _tpq_ema_slow = _ema_2d(close, span=_tpq_slow)
@@ -1655,8 +1708,13 @@ def build_rule_signal_panels(
                             "archetype": "trend",
                             "regime": "quality_trend_pullback",
                             "edge_hypothesis": (
-                                "pullback entries filtered by RSI regime shift "
-                                "and EMA proximity produce higher quality trend entries"
+                                "[LIMIT-03] slow-lookback control: turnover_per_year should drop "
+                                "materially vs baseline if the archetype's survival is turnover-driven"
+                                if (_tpq_fast, _tpq_slow) == (scale_window(100), scale_window(400))
+                                else (
+                                    "pullback entries filtered by RSI regime shift "
+                                    "and EMA proximity produce higher quality trend entries"
+                                )
                             ),
                         },
                     )
