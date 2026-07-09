@@ -15,7 +15,7 @@ from __future__ import annotations
 import time as _time_module
 from collections.abc import Mapping, MutableMapping, Sequence
 from dataclasses import dataclass, field, replace
-from typing import Literal
+from typing import Any, Literal
 
 import pandas as pd
 
@@ -91,6 +91,8 @@ class AlphaFoundryL0Artifacts:
     tf_fusion: tuple[MultiTimeframeEvidence, ...] = ()
     handoff_decisions: tuple[L0HandoffDecision, ...] = ()
     search_cells: tuple[L0SearchCell, ...] = ()
+    discovery_units: tuple[Any, ...] = ()
+    selected_discovery_units: tuple[Any, ...] = ()
 
 
 def build_l0_handoff_decisions(
