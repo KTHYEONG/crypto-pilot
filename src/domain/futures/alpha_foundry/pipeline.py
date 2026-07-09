@@ -7,6 +7,7 @@
 [ADR_20260707_L0_MULTI_TF_GATE_REDESIGN]
 [ADR_20260706_ALPHA_FOUNDRY_L0_SIGNAL_RIGOR]
 [ADR_20260708_L0_EDGE_FAILURE_ATTRIBUTION]
+[ADR_20260709_L0_CONDITIONAL_DIAGNOSTIC_WIRING]
 """
 
 from __future__ import annotations
@@ -597,7 +598,24 @@ def run_alpha_foundry_l0_pipeline(
             )
         )
 
-    # 7. DEBUG summary if observability_mode == "debug_log"
+    # 7a. L0 diagnostic pass (opt-in, appends extra evidence rows only)
+    diagnostic_rows: tuple[AlphaFoundryEvidenceRow, ...] = ()
+    if runtime_config is not None and runtime_config.enable_failure_attribution:
+        from src.domain.futures.alpha_foundry.l0_diagnostics import run_l0_diagnostic_pass
+
+        diagnostic_rows = run_l0_diagnostic_pass(
+            canonical_evidences=canonical_evidences,
+            panel_by_rid=panel_by_rid,
+            aligned=aligned,
+            recipes=recipes,
+            cost_model=cost_model,
+            gate_config=cheap_gate_config,
+            runtime_config=runtime_config,
+            run_id=run_id,
+        )
+    evidence_rows = evidence_rows + list(diagnostic_rows)
+
+    # 7b. DEBUG summary if observability_mode == "debug_log"
     if runtime_config is not None and runtime_config.observability_mode == "debug_log":
         emit_alpha_generation_debug_summary(
             run_id=run_id,
