@@ -550,7 +550,7 @@ def test_new_signal_families_include_metadata_contract() -> None:
         "vol_term_structure_gate",
     }
     matched = [panel for panel in panels if panel.family in expected_new_families]
-    assert len(matched) == 14
+    assert len(matched) == 16
     for panel in matched:
         assert panel.metadata["archetype"]
         assert panel.metadata["regime"]
@@ -1264,6 +1264,102 @@ def test_candidate_panels_to_events_empty() -> None:
     )
     assert isinstance(events, pd.DataFrame)
     assert len(events) == 0
+
+
+# ── Archetype variant count and sync guard tests ──────────────────
+
+_BTC_VARIANTS = frozenset({"btc_pullback_50", "btc_pullback_100_slow", "btc_pullback_50_rsi"})
+_TPC_VARIANTS = frozenset({"tpc_20_100", "tpc_50_200", "tpc_100_400"})
+_MTF_VARIANTS = frozenset({"mtf_tpb_20_30", "mtf_tpb_50_30", "mtf_tpb_100_30"})
+_TPQ_VARIANTS = frozenset({"tpq_v2_20_100", "tpq_v2_50_200", "tpq_v2_100_400"})
+
+
+def test_build_rule_signal_panels_btc_regime_pullback_returns_3_variants() -> None:
+    """[SCENARIO-1.3] btc_regime_pullback produces exactly 3 panels with metadata."""
+    aligned = _make_aligned(t=300, n=3)
+    cfg = CandidateStrategyConfig()
+    panels = build_rule_signal_panels(aligned=aligned, cfg=cfg)
+    btc_panels = [p for p in panels if p.family == "btc_regime_pullback"]
+    assert len(btc_panels) == 3
+    got_variants = frozenset(p.variant for p in btc_panels)
+    assert got_variants == _BTC_VARIANTS
+    for p in btc_panels:
+        assert p.side_hint_2d.shape == (300, 3)
+        assert p.signed_score_2d.shape == (300, 3)
+        assert "edge_hypothesis" in p.metadata
+        assert isinstance(p.metadata["edge_hypothesis"], str)
+        assert len(p.metadata["edge_hypothesis"]) > 0
+
+
+def test_build_rule_signal_panels_btc_regime_pullback_rsi_variant_flat_rsi() -> None:
+    """[SCENARIO-2.3] RSI variant with flat RSI=50 produces all-zero side_hint_2d
+    (not a crash) because neither oversold nor overbought is triggered."""
+    t, n = 200, 2
+    base = np.linspace(100.0, 130.0, t * n, dtype=np.float64).reshape(t, n)
+    base[:, 1] = base[:, 0] * 0.98
+    aligned = _make_aligned(t=t, n=n)
+    cfg = CandidateStrategyConfig()
+    panels = build_rule_signal_panels(aligned=aligned, cfg=cfg)
+    rsi_panels = [p for p in panels if p.variant == "btc_pullback_50_rsi"]
+    assert len(rsi_panels) == 1
+    rsi_panel = rsi_panels[0]
+    assert rsi_panel.side_hint_2d.shape == (t, n)
+    assert np.all(rsi_panel.side_hint_2d == 0)
+
+
+def test_build_rule_signal_panels_trend_pullback_continuation_3_variants() -> None:
+    """[LIMIT-03] trend_pullback_continuation produces 3 panels (slow control added)."""
+    aligned = _make_aligned(t=300, n=2)
+    cfg = CandidateStrategyConfig()
+    panels = build_rule_signal_panels(aligned=aligned, cfg=cfg)
+    tpc_panels = [p for p in panels if p.family == "trend_pullback_continuation"]
+    assert len(tpc_panels) == 3
+    got = frozenset(p.variant for p in tpc_panels)
+    assert got == _TPC_VARIANTS
+
+
+def test_build_rule_signal_panels_mtf_trend_pullback_3_variants() -> None:
+    """[LIMIT-03] mtf_trend_pullback produces 3 panels (slow control added)."""
+    aligned = _make_aligned(t=400, n=2)
+    cfg = CandidateStrategyConfig()
+    panels = build_rule_signal_panels(aligned=aligned, cfg=cfg)
+    mtf_panels = [p for p in panels if p.family == "mtf_trend_pullback"]
+    assert len(mtf_panels) == 3
+    got = frozenset(p.variant for p in mtf_panels)
+    assert got == _MTF_VARIANTS
+
+
+def test_build_rule_signal_panels_trend_pullback_quality_v2_3_variants() -> None:
+    """[LIMIT-03] trend_pullback_quality_v2 produces 3 panels (slow control added)."""
+    aligned = _make_aligned(t=300, n=2)
+    cfg = CandidateStrategyConfig()
+    panels = build_rule_signal_panels(aligned=aligned, cfg=cfg)
+    tpq_panels = [p for p in panels if p.family == "trend_pullback_quality_v2"]
+    assert len(tpq_panels) == 3
+    got = frozenset(p.variant for p in tpq_panels)
+    assert got == _TPQ_VARIANTS
+
+
+def test_rule_variant_names_match_rule_signals_sync_guard() -> None:
+    """[LIMIT-07] rules.py and rule_signals.py produce identical variant name sets
+    for all 4 archetype families in this spec."""
+    from src.domain.futures.signals import rules as rules_mod
+    from src.domain.futures.strategy import rule_signals as rsignals_mod
+
+    aligned = _make_aligned(t=300, n=2)
+    cfg = CandidateStrategyConfig()
+
+    panels_rules = rules_mod.build_rule_signal_panels(aligned=aligned, cfg=cfg)
+    panels_sigs = rsignals_mod.build_rule_signal_panels(aligned=aligned, cfg=cfg)
+
+    _sync_families = (
+        "btc_regime_pullback", "trend_pullback_continuation",
+        "mtf_trend_pullback", "trend_pullback_quality_v2",
+    )
+    for fam in _sync_families:
+        v_rules = frozenset(p.variant for p in panels_rules if p.family == fam)
+        v_sigs = frozenset(p.variant for p in panels_sigs if p.family == fam)
+        assert v_rules == v_sigs, f"variant mismatch for {fam}: rules={v_rules} sigs={v_sigs}"
 
 
 def test_resample_to_htf_and_project_basic() -> None:
