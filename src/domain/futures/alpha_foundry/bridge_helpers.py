@@ -37,6 +37,7 @@ class AlphaFoundryL0Result:
     evidences: tuple[Any, ...]
     bindings: tuple[Any, ...]
     evidence_rows: tuple[Any, ...] = ()
+    discovery_units_for_l1: tuple[Any, ...] = ()
 
 
 def _normalize_variant(variant: str, timeframe: str) -> str:
