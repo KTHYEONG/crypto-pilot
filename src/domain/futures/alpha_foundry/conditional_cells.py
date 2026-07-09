@@ -1,4 +1,5 @@
-"""L0 point-in-time conditional cell slicing/gating. [ADR_20260708_L0_EDGE_FAILURE_ATTRIBUTION]"""
+"""L0 point-in-time conditional cell slicing/gating.
+[ADR_20260708_L0_EDGE_FAILURE_ATTRIBUTION][ADR_20260709_L0_CONDITIONAL_DIAGNOSTIC_WIRING]"""
 
 from __future__ import annotations
 
@@ -105,16 +106,28 @@ def _compute_turnover_per_year(side: NDArray[np.int8], valid_mask: NDArray[np.bo
     return float(np.sum(diff * valid_slice) / denom * bars_per_year / 2.0)
 
 
-def _evaluate_cell_gate(
+def evaluate_event_mask_gate(
+    *,
     event_mask: NDArray[np.bool_],
     panel: CandidateSignalPanel,
     aligned: AlignedMarketData,
     recipe: AlphaRecipe,
-    cost_model: ExecutionCostModel,
+    round_trip_cost_bps: float,
     gate_config: AlphaGateConfig,
     bars_per_year: float,
     run_id: str,
 ) -> AlphaGateEvidence:
+    """Evaluates the economic gate over an arbitrary boolean event mask.
+
+    Generalizes the former `_evaluate_cell_gate` (cell-slicing only) so execution-arm
+    re-costing can reuse identical statistical machinery (block moments, NW t-stat,
+    cost-drag, turnover) instead of duplicating it. `round_trip_cost_bps` replaces the
+    prior `cost_model.stress_round_trip_bps()` call site — callers resolve their own
+    cost figure (stress cost for cells, arm cost for execution-arm re-evaluation).
+    """
+    if bars_per_year <= 0.0:
+        raise ValueError("bars_per_year must be positive")
+
     t, n = aligned.close_2d.shape
     close = aligned.close_2d
     side = panel.side_hint_2d
@@ -152,7 +165,7 @@ def _evaluate_cell_gate(
             * 10000.0
         )
 
-    stress_cost = cost_model.stress_round_trip_bps()
+    stress_cost = round_trip_cost_bps
     funding = aligned.funding_2d
     funding_cost = np.where(event_mask, funding * 10000.0 * holding_bars, 0.0)
     total_cost_2d = stress_cost + funding_cost
@@ -219,6 +232,96 @@ def _evaluate_cell_gate(
         selected_for_l1=False,
         reject_reasons=tuple(reject_reasons), soft_flags=(),
     )
+
+
+def build_parent_event_mask(*, panel: CandidateSignalPanel, aligned: AlignedMarketData) -> NDArray[np.bool_]:
+    """Sparse entry mask over the full recipe timeline, respecting warm-up (idx_start=1)
+    and forward-return lookback (idx_end = t - holding_bars). Shared by cell slicing
+    and execution-arm re-costing."""
+    t, _ = aligned.close_2d.shape
+    side = panel.side_hint_2d
+    valid = panel.valid_mask_2d
+    holding_bars = panel.expected_holding_bars
+    idx_start = 1
+    idx_end = t - holding_bars
+    entry_full = _sparse_entry_mask(side, valid)
+    event_mask = np.zeros_like(entry_full)
+    if idx_start < idx_end:
+        event_mask[idx_start:idx_end, :] = entry_full[idx_start:idx_end, :]
+    return event_mask
+
+
+def build_calibrated_cell_masks(
+    *,
+    panel: CandidateSignalPanel,
+    aligned: AlignedMarketData,
+    specs: Sequence[ConditionalCellSpec],
+    calibration_fraction: float,
+) -> Mapping[str, tuple[NDArray[np.bool_], int, int]]:
+    """Like build_conditional_cell_masks, but score_quantile/symbol_liquidity thresholds
+    are computed only from the chronologically-first `calibration_fraction` of parent
+    events, then applied to the full timeline. Returns {cell_id: (mask, calibration_n, evaluation_n)}.
+    [LIMIT-01]
+    """
+    t, _ = aligned.close_2d.shape
+    side = panel.side_hint_2d
+    valid = panel.valid_mask_2d
+    holding_bars = panel.expected_holding_bars
+
+    idx_start = 1
+    idx_end = t - holding_bars
+    entry_full = _sparse_entry_mask(side, valid)
+    parent_mask = np.zeros_like(entry_full)
+    if idx_start < idx_end:
+        parent_mask[idx_start:idx_end, :] = entry_full[idx_start:idx_end, :]
+
+    event_indices = np.where(parent_mask)
+    if len(event_indices[0]) == 0:
+        return {}
+
+    # Chronological sort is guaranteed by np.where order (row-major)
+    calib_count = max(1, int(len(event_indices[0]) * calibration_fraction))
+    calib_rows = event_indices[0][:calib_count]
+    calib_cols = event_indices[1][:calib_count]
+
+    calib_mask = np.zeros_like(parent_mask)
+    calib_mask[calib_rows, calib_cols] = True
+    calib_n = int(np.sum(calib_mask))
+    evaluation_n = int(np.sum(parent_mask)) - calib_n
+
+    results: dict[str, tuple[NDArray[np.bool_], int, int]] = {}
+    for spec in specs:
+        mask = parent_mask.copy()
+        for axis in spec.axes:
+            val = spec.values.get(axis, "")
+            if axis == "score_quantile":
+                abs_score = np.abs(panel.signed_score_2d)
+                calib_scores = abs_score[calib_mask]
+                if len(calib_scores) < 5:
+                    mask = np.zeros_like(mask)
+                    break
+                if val == "high":
+                    threshold = float(np.quantile(calib_scores, 0.85))
+                elif val == "very_high":
+                    threshold = float(np.quantile(calib_scores, 0.95))
+                else:
+                    threshold = float(np.quantile(calib_scores, 0.70))
+                mask = (abs_score >= threshold) & mask
+            elif axis == "symbol_liquidity":
+                if aligned.adv_usdt_2d is None:
+                    continue
+                adv = aligned.adv_usdt_2d
+                calib_adv = adv[calib_mask]
+                if len(calib_adv) < 2:
+                    continue
+                median_adv = float(np.nanmedian(calib_adv))
+                mask = (adv >= median_adv) & mask if val == "high" else (adv < median_adv) & mask
+            elif axis in _KNOWN_AXES:
+                pass
+            else:
+                raise ValueError(f"unsupported conditional axis: {axis!r}")
+        results[spec.cell_id] = (mask, calib_n, evaluation_n)
+    return results
 
 
 def _build_score_quantile_mask(
@@ -448,9 +551,10 @@ def evaluate_conditional_l0_cells(
             continue
 
         if cell_n < spec.min_events:
-            gate_ev = _evaluate_cell_gate(
+            gate_ev = evaluate_event_mask_gate(
                 event_mask=cell_mask, panel=panel, aligned=aligned,
-                recipe=recipe, cost_model=cost_model,
+                recipe=recipe,
+                round_trip_cost_bps=cost_model.stress_round_trip_bps(),
                 gate_config=gate_config, bars_per_year=bars_per_year,
                 run_id=run_id,
             )
@@ -466,9 +570,10 @@ def evaluate_conditional_l0_cells(
 
         n_symbols = int(np.sum(np.any(cell_mask, axis=0)))
         if n_symbols < cell_config.min_symbols_per_cell and not cell_config.allow_single_symbol_cells:
-            gate_ev = _evaluate_cell_gate(
+            gate_ev = evaluate_event_mask_gate(
                 event_mask=cell_mask, panel=panel, aligned=aligned,
-                recipe=recipe, cost_model=cost_model,
+                recipe=recipe,
+                round_trip_cost_bps=cost_model.stress_round_trip_bps(),
                 gate_config=gate_config, bars_per_year=bars_per_year,
                 run_id=run_id,
             )
@@ -482,9 +587,10 @@ def evaluate_conditional_l0_cells(
             ))
             continue
 
-        gate_ev = _evaluate_cell_gate(
+        gate_ev = evaluate_event_mask_gate(
             event_mask=cell_mask, panel=panel, aligned=aligned,
-            recipe=recipe, cost_model=cost_model,
+            recipe=recipe,
+            round_trip_cost_bps=cost_model.stress_round_trip_bps(),
             gate_config=gate_config, bars_per_year=bars_per_year,
             run_id=run_id,
         )
