@@ -9,9 +9,13 @@ from src.domain.futures.alpha_foundry.cheap_gate import (
     _rank_ic_soft_floor,
     build_l0_signal_candidate,
     evaluate_alpha_cheap_gate_batch,
+    evaluate_alpha_gate_batch,
     evaluate_panel_cheap_gate,
+    evaluate_panel_gate,
 )
 from src.domain.futures.alpha_foundry.contracts import (
+    AlphaGateConfig,
+    AlphaGateEvidence,
     AlphaRecipe,
     CheapGateConfig,
     CheapGateEvidence,
@@ -103,16 +107,6 @@ SAMPLE_RECIPE = AlphaRecipe(
     required_fields=("close",),
     causal_lag_bars=1,
     max_turnover_per_year=365.0,
-)
-
-
-from src.domain.futures.alpha_foundry.cheap_gate import (
-    evaluate_alpha_gate_batch,
-    evaluate_panel_gate,
-)
-from src.domain.futures.alpha_foundry.contracts import (
-    AlphaGateConfig,
-    AlphaGateEvidence,
 )
 
 
@@ -482,6 +476,130 @@ class TestEvaluateAlphaGateBatch:
         )
         assert len(results) == 1
         assert results[0].tf_corroboration > 0.0
+
+    def test_batch_main_path_executes_forward_return_projection(self) -> None:
+        aligned = make_mock_aligned()
+        panel = make_mock_panel()
+        cost = ExecutionCostModel()
+        cfg = CheapGateConfig(
+            min_events=1,
+            min_effective_n=1.0,
+            min_lcb_net_bps=-1000.0,
+            min_nw_tstat=0.0,
+            max_cost_drag_ratio=100.0,
+            max_turnover_per_year=10000.0,
+            bootstrap_seed=42,
+        )
+
+        cheap_results = evaluate_alpha_cheap_gate_batch(
+            panels=[panel],
+            recipes={SAMPLE_RECIPE.recipe_id: SAMPLE_RECIPE},
+            aligned=aligned,
+            cost_model=cost,
+            config=cfg,
+        )
+        alpha_results = evaluate_alpha_gate_batch(
+            panels=[panel],
+            recipes={SAMPLE_RECIPE.recipe_id: SAMPLE_RECIPE},
+            aligned=aligned,
+            cost_model=cost,
+            config=AlphaGateConfig(
+                min_events=1,
+                min_effective_n=1.0,
+                min_lcb_net_bps=-1000.0,
+                min_nw_tstat=0.0,
+                max_cost_drag_ratio=100.0,
+                max_turnover_per_year=10000.0,
+                bootstrap_seed=42,
+                min_candidate_rank_ic_tstat=0.0,
+            ),
+            run_id="test_batch",
+        )
+
+        assert len(cheap_results) == 1
+        assert len(alpha_results) == 1
+        assert cheap_results[0].n_events > 0
+        assert alpha_results[0].n_events > 0
+
+    def test_panel_gate_cross_sectional_low_sample_triggers_risk_branches(self) -> None:
+        t = 16
+        dt = np.arange(np.datetime64("2026-01-01T00"), np.datetime64("2026-01-03T16"),
+                       np.timedelta64(4, "h"))[:t]
+        symbols = ("BTCUSDT",)
+        close = np.linspace(100.0, 102.0, t, dtype=np.float64)[:, None]
+        side = np.zeros((t, 1), dtype=np.int8)
+        side[1, 0] = 1
+        side[9, 0] = 1
+        aligned = AlignedMarketData(
+            datetimes=dt,
+            symbols=symbols,
+            open_2d=close.copy(),
+            high_2d=close * 1.01,
+            low_2d=close * 0.99,
+            close_2d=close,
+            volume_2d=np.full((t, 1), 1_000.0),
+            funding_2d=np.zeros((t, 1), dtype=np.float64),
+            active_mask=np.ones((t, 1), dtype=np.bool_),
+            warm_mask=np.ones((t, 1), dtype=np.bool_),
+            entry_block_mask=np.zeros((t, 1), dtype=np.bool_),
+            kill_mask=np.zeros((t, 1), dtype=np.bool_),
+        )
+        panel = CandidateSignalPanel(
+            family="cross_sectional_probe",
+            variant="probe",
+            params={},
+            datetimes=dt,
+            symbols=symbols,
+            signed_score_2d=np.ones((t, 1), dtype=np.float64),
+            side_hint_2d=side,
+            expected_holding_bars=1,
+            min_holding_bars=1,
+            stop_atr_mult=2.0,
+            take_profit_atr_mult=4.0,
+            turnover_proxy_2d=np.zeros((t, 1), dtype=np.float64),
+            valid_mask_2d=np.ones((t, 1), dtype=np.bool_),
+            metadata={"recipe_id": "r1"},
+        )
+        recipe = AlphaRecipe(
+            recipe_id="r1",
+            family="cross_sectional_probe",
+            variant="probe",
+            timeframe="4h",
+            archetype="cross_sectional",
+            indicator_params={},
+            side_rule_id="trend_follow",
+            exit_policy_id="atr_trail_2",
+            required_fields=("close",),
+            causal_lag_bars=1,
+            max_turnover_per_year=1_000.0,
+        )
+        cfg = AlphaGateConfig(
+            min_events=1,
+            min_effective_n=1.0,
+            min_lcb_net_bps=-1_000.0,
+            min_nw_tstat=1.0,
+            max_cost_drag_ratio=0.0,
+            max_turnover_per_year=10_000.0,
+            bootstrap_seed=42,
+            min_candidate_rank_ic_tstat=0.0,
+            min_xs_symbols_per_bar=2,
+            archetype_event_floors={"cross_sectional": 1},
+        )
+
+        evidence = evaluate_panel_gate(
+            panel=panel,
+            aligned=aligned,
+            recipe=recipe,
+            cost_model=ExecutionCostModel(),
+            config=cfg,
+            bars_per_year=2190.0,
+            run_id="test",
+        )
+
+        assert not evidence.gate_passed
+        assert "weak_tstat" in evidence.reject_reasons
+        assert "excess_cost_drag" in evidence.reject_reasons
+        assert "xs_spread_fail" in evidence.reject_reasons
 
 
 class TestEvaluatePanelCheapGate:
@@ -1817,3 +1935,35 @@ def test_evaluate_panel_gate_non_positive_gross() -> None:
         bars_per_year=8760.0, run_id="test",
     )
     assert not ev.gate_passed
+
+
+# ── Gate parity tests (Scenario 1.2) ──────────────────────────────
+
+
+def test_cheap_gate_and_canonical_gate_identical_forward_returns() -> None:
+    """Same panel/recipe/aligned => both gates now produce identical mean_gross_bps
+    and mean_net_bps (within float tolerance). [SCENARIO-1.2]"""
+    aligned = make_mock_aligned()
+    panel = make_mock_panel(recipe_id="trend_ma:ema_12_72:4h")
+    recipe = dataclasses.replace(SAMPLE_RECIPE, causal_lag_bars=1)
+    cfg = CheapGateConfig(
+        min_events=1, min_effective_n=1.0, min_lcb_net_bps=-1000.0,
+        min_nw_tstat=0.0, max_cost_drag_ratio=100.0, max_turnover_per_year=10000.0,
+        bootstrap_seed=42,
+    )
+    alpha_cfg = AlphaGateConfig(
+        min_events=1, min_effective_n=1.0, min_lcb_net_bps=-1000.0,
+        min_nw_tstat=0.0, max_cost_drag_ratio=100.0, max_turnover_per_year=10000.0,
+        bootstrap_seed=42, min_candidate_rank_ic_tstat=0.0,
+    )
+    cheap_ev = evaluate_panel_cheap_gate(
+        panel=panel, aligned=aligned, recipe=recipe,
+        cost_model=ExecutionCostModel(), config=cfg, bars_per_year=8760.0,
+    )
+    canon_ev = evaluate_panel_gate(
+        panel=panel, aligned=aligned, recipe=recipe,
+        cost_model=ExecutionCostModel(), config=alpha_cfg,
+        bars_per_year=8760.0, run_id="test",
+    )
+    assert cheap_ev.mean_gross_bps == pytest.approx(canon_ev.mean_gross_bps, rel=1e-4)
+    assert cheap_ev.mean_net_bps == pytest.approx(canon_ev.mean_net_bps, rel=1e-4)
