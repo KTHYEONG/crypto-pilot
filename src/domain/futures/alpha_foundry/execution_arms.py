@@ -1,4 +1,5 @@
-"""L0 execution-arm cost/fill-probability modeling. [ADR_20260708_L0_EDGE_FAILURE_ATTRIBUTION]"""
+"""L0 execution-arm cost/fill-probability modeling.
+[ADR_20260708_L0_EDGE_FAILURE_ATTRIBUTION][ADR_20260709_L0_CONDITIONAL_DIAGNOSTIC_WIRING]"""
 
 from __future__ import annotations
 
@@ -7,7 +8,14 @@ from dataclasses import dataclass
 import numpy as np
 from numpy.typing import NDArray
 
-from src.domain.futures.alpha_foundry.contracts import AlphaRecipe, ExecutionArmConfig, ExecutionStyle
+from src.domain.futures.alpha_foundry.conditional_cells import build_parent_event_mask, evaluate_event_mask_gate
+from src.domain.futures.alpha_foundry.contracts import (
+    AlphaGateConfig,
+    AlphaGateEvidence,
+    AlphaRecipe,
+    ExecutionArmConfig,
+    ExecutionStyle,
+)
 from src.domain.futures.signals.contracts import CandidateSignalPanel
 from src.domain.futures.strategy.common.alignment import AlignedMarketData
 from src.domain.futures.strategy.execution_cost import ExecutionCostModel
@@ -143,3 +151,45 @@ def estimate_execution_arm_cost_bps(
     cost = base + unfilled
     out[event_mask_2d] = cost
     return out
+
+
+def evaluate_recipe_under_arm(
+    *,
+    panel: CandidateSignalPanel,
+    aligned: AlignedMarketData,
+    recipe: AlphaRecipe,
+    arm: ExecutionCostArm,
+    gate_config: AlphaGateConfig,
+    bars_per_year: float,
+    run_id: str,
+) -> AlphaGateEvidence:
+    """Re-evaluates the recipe's full (unsliced) event set under an alternate execution
+    cost assumption. Reuses `estimate_execution_arm_cost_bps()` for the cost figure
+    (extracted as a scalar — the function is constant across all True mask cells in the
+    current implementation) and delegates statistical evaluation to
+    `conditional_cells.evaluate_event_mask_gate()`. [LIMIT-03]
+    """
+    event_mask = build_parent_event_mask(panel=panel, aligned=aligned)
+
+    if not np.any(event_mask):
+        raise ValueError("recipe has no valid events for arm evaluation")
+
+    cost_arr = estimate_execution_arm_cost_bps(
+        event_mask_2d=event_mask,
+        arm=arm,
+        aligned=aligned,
+        holding_bars=panel.expected_holding_bars,
+    )
+
+    cost_scalar = float(cost_arr[event_mask][0])
+
+    return evaluate_event_mask_gate(
+        event_mask=event_mask,
+        panel=panel,
+        aligned=aligned,
+        recipe=recipe,
+        round_trip_cost_bps=cost_scalar,
+        gate_config=gate_config,
+        bars_per_year=bars_per_year,
+        run_id=run_id,
+    )
