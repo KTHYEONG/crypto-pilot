@@ -26,6 +26,7 @@ from src.domain.futures.alpha_foundry.contracts import (
     CheapGateConfig,
     CheapGateEvidence,
     CheapGateRejectReason,
+    CorroborationTier,
     DiscoveryTier,
     FamilyTimeframeGatePolicy,
     L0HardRejectReason,
@@ -447,7 +448,7 @@ def build_l0_signal_candidate(
         priority_weights=L0PriorityWeights(),
     )
 
-    corroboration_tier: Literal["corroborated", "single_tf_strict", "contradicted", "insufficient_coverage"]
+    corroboration_tier: CorroborationTier
     tf_coverage_count = 0
     sign_agreement_ratio = 0.0
     if tf_fusion is not None:
