@@ -8,6 +8,7 @@ from __future__ import annotations
 import logging
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from typing import Any
 
 import numba
 import numpy as np
@@ -2034,39 +2035,59 @@ def candidate_panels_to_events(
     execution_cost_bps_2d: NDArray[np.float64] | None = None,
     n_workers: int = 4,
 ) -> pd.DataFrame:
-    """Convert dense [T,N] panels into sparse candidate event rows."""
+    """Convert dense [T,N] panels into sparse candidate event rows.
+
+    If panel.metadata["l0_event_mask_2d"] exists, it must be a bool array with the
+    same shape as panel.signed_score_2d and is ANDed into the event mask.
+    """
+    _l0_cols = [
+        "l0_discovery_unit_id",
+        "l0_parent_recipe_id",
+        "l0_execution_style",
+        "l0_horizon_bars",
+    ]
+    _base_cols = [
+        "datetime",
+        "symbol",
+        "family",
+        "variant",
+        "side",
+        "raw_score",
+        "score_z",
+        "expected_holding_bars",
+        "min_holding_bars",
+        "stop_atr_mult",
+        "take_profit_atr_mult",
+        "turnover_proxy",
+        "cost_floor_bps",
+        "entry_idx",
+        "side_flipped",
+        "exit_policy_id",
+        "signal_cell",
+        "archetype",
+        "entry_regime",
+        "entry_regime_code",
+    ]
+    _all_cols = _base_cols + _l0_cols
     if not panels:
-        return pd.DataFrame(
-            columns=[
-                "datetime",
-                "symbol",
-                "family",
-                "variant",
-                "side",
-                "raw_score",
-                "score_z",
-                "expected_holding_bars",
-                "min_holding_bars",
-                "stop_atr_mult",
-                "take_profit_atr_mult",
-                "turnover_proxy",
-                "cost_floor_bps",
-                "entry_idx",
-                "side_flipped",
-                "exit_policy_id",
-                "signal_cell",
-                "archetype",
-                "entry_regime",
-                "entry_regime_code",
-            ]
-        )
+        return pd.DataFrame(columns=_all_cols)
 
     def _convert_single_panel(panel: CandidateSignalPanel) -> list[pd.DataFrame]:
         panel_events: list[pd.DataFrame] = []
         side_flip_allowlist = _candidate_variant_set(side_flip_variants)
         scores = panel.signed_score_2d
         sides = panel.side_hint_2d
+        l0_mask = panel.metadata.get("l0_event_mask_2d")
+        if l0_mask is not None:
+            if l0_mask.shape != scores.shape:
+                raise ValueError(
+                    f"l0_event_mask_2d shape {l0_mask.shape} != signed_score_2d shape {scores.shape}"
+                )
+            if l0_mask.dtype != np.bool_:
+                raise ValueError("event_mask_2d must be bool")
         mask = panel.valid_mask_2d & (np.abs(scores) >= min_abs_score) & (sides != 0)
+        if l0_mask is not None:
+            mask = mask & l0_mask
         if not np.any(mask):
             return panel_events
 
@@ -2125,30 +2146,34 @@ def candidate_panels_to_events(
                 )
                 if side_flipped:
                     signal_cells = np.asarray([f"{cell}:flip" for cell in signal_cells], dtype=object)
-                df = pd.DataFrame(
-                    {
-                        "datetime": r_datetimes,
-                        "symbol": r_symbols,
-                        "family": panel.family,
-                        "variant": panel.variant,
-                        "side": r_sides,
-                        "raw_score": r_raw_scores,
-                        "score_z": r_score_z,
-                        "expected_holding_bars": int(policy.expected_holding_bars),
-                        "min_holding_bars": int(policy.min_holding_bars),
-                        "stop_atr_mult": float(policy.stop_atr_mult),
-                        "take_profit_atr_mult": float(policy.take_profit_atr_mult),
-                        "turnover_proxy": r_turnover,
-                        "cost_floor_bps": r_cost,
-                        "entry_idx": r_entry_idx,
-                        "side_flipped": side_flipped,
-                        "exit_policy_id": policy.policy_id,
-                        "signal_cell": signal_cells,
-                        "archetype": panel.archetype,
-                        "entry_regime": r_entry_regime,
-                        "entry_regime_code": r_entry_code,
-                    }
-                )
+                df_dict: dict[str, Any] = {
+                    "datetime": r_datetimes,
+                    "symbol": r_symbols,
+                    "family": panel.family,
+                    "variant": panel.variant,
+                    "side": r_sides,
+                    "raw_score": r_raw_scores,
+                    "score_z": r_score_z,
+                    "expected_holding_bars": int(policy.expected_holding_bars),
+                    "min_holding_bars": int(policy.min_holding_bars),
+                    "stop_atr_mult": float(policy.stop_atr_mult),
+                    "take_profit_atr_mult": float(policy.take_profit_atr_mult),
+                    "turnover_proxy": r_turnover,
+                    "cost_floor_bps": r_cost,
+                    "entry_idx": r_entry_idx,
+                    "side_flipped": side_flipped,
+                    "exit_policy_id": policy.policy_id,
+                    "signal_cell": signal_cells,
+                    "archetype": panel.archetype,
+                    "entry_regime": r_entry_regime,
+                    "entry_regime_code": r_entry_code,
+                }
+                if l0_mask is not None:
+                    df_dict["l0_discovery_unit_id"] = panel.metadata.get("l0_discovery_unit_id", "")
+                    df_dict["l0_parent_recipe_id"] = panel.metadata.get("l0_parent_recipe_id", "")
+                    df_dict["l0_execution_style"] = panel.metadata.get("l0_execution_style", "")
+                    df_dict["l0_horizon_bars"] = panel.metadata.get("l0_horizon_bars", 0)
+                df = pd.DataFrame(df_dict)
                 panel_events.append(df)
         return panel_events
 
@@ -2159,29 +2184,6 @@ def candidate_panels_to_events(
             all_events.extend(fut.result())
 
     if not all_events:
-        return pd.DataFrame(
-            columns=[
-                "datetime",
-                "symbol",
-                "family",
-                "variant",
-                "side",
-                "raw_score",
-                "score_z",
-                "expected_holding_bars",
-                "min_holding_bars",
-                "stop_atr_mult",
-                "take_profit_atr_mult",
-                "turnover_proxy",
-                "cost_floor_bps",
-                "entry_idx",
-                "side_flipped",
-                "exit_policy_id",
-                "signal_cell",
-                "archetype",
-                "entry_regime",
-                "entry_regime_code",
-            ]
-        )
+        return pd.DataFrame(columns=_all_cols)
 
     return pd.concat(all_events, axis=0, ignore_index=True)
