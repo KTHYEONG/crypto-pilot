@@ -221,12 +221,7 @@ class L0SignalCandidate:
     max_abs_corr_in_bucket: float
     tf_coverage_count: int
     sign_agreement_ratio: float
-    corroboration_tier: Literal[
-        "corroborated",
-        "single_tf_strict",
-        "contradicted",
-        "insufficient_coverage",
-    ]
+    corroboration_tier: CorroborationTier
     discovery_tier: DiscoveryTier
     l1_priority_score: float
     l1_budget_units: int
@@ -876,6 +871,10 @@ class AlphaFoundryRuntimeConfig:
     execution_arm: ExecutionArmConfig = field(default_factory=ExecutionArmConfig)
     horizon_sweep_bars: tuple[int, ...] = (1, 2, 3, 6)
     diagnostic: L0DiagnosticConfig = field(default_factory=L0DiagnosticConfig)
+    enable_discovery_unit_handoff: bool = False
+    max_discovery_units_for_l1: int = 12
+    max_discovery_event_jaccard: float = 0.80
+    min_discovery_unit_lcb_bps: float = 0.0
 
     def __post_init__(self) -> None:
         if self.mode not in {"off", "audit", "gate"}:
@@ -908,6 +907,16 @@ class AlphaFoundryRuntimeConfig:
             )
         if self.debug_reject_bucket_rows < 1:
             raise ValueError(f"debug_reject_bucket_rows must be >= 1, got {self.debug_reject_bucket_rows}")
+        if self.max_discovery_units_for_l1 < 1:
+            raise ValueError(f"max_discovery_units_for_l1 must be >= 1, got {self.max_discovery_units_for_l1}")
+        if not (0.0 <= self.max_discovery_event_jaccard <= 1.0):
+            raise ValueError(
+                f"max_discovery_event_jaccard must be in [0.0, 1.0], got {self.max_discovery_event_jaccard}"
+            )
+        if self.min_discovery_unit_lcb_bps < 0.0:
+            raise ValueError(
+                f"min_discovery_unit_lcb_bps must be >= 0.0, got {self.min_discovery_unit_lcb_bps}"
+            )
 
 
 @dataclass(slots=True, frozen=True)
@@ -954,6 +963,7 @@ CorroborationTier: TypeAlias = Literal[
     "single_tf_strict",
     "contradicted",
     "insufficient_coverage",
+    "partial_support",
 ]
 
 
