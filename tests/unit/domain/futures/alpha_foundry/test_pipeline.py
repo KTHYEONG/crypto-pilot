@@ -255,6 +255,53 @@ class TestRunAlphaFoundryL0Pipeline:
         # At least some should be seed (weak rank IC etc.)
         assert found_seed, "no 'seed' handoff_tier found — canonical gate tier logic not wired"
 
+    def test_diagnostic_flag_does_not_affect_l1_handoff(self) -> None:
+        """[LIMIT-06] enable_failure_attribution must only append evidence_rows —
+        passed_recipe_ids/handoff_decisions/stage_counts/bucket_results/
+        cross_bucket_result must be byte-identical regardless of the flag."""
+        from src.domain.futures.alpha_foundry.contracts import (
+            AlphaFoundryRuntimeConfig,
+            ConditionalCellGateConfig,
+            ExecutionArmConfig,
+        )
+
+        panel = _make_panel()
+        aligned = _make_aligned()
+        cfg = CheapGateConfig(min_events=10, min_effective_n=5.0,
+                              min_candidate_rank_ic_tstat=0.0, min_nw_tstat=0.0,
+                              max_cost_drag_ratio=1.0, max_turnover_per_year=2000.0)
+
+        kwargs = {
+            "panels": [panel],
+            "recipes": {"r1": SAMPLE_RECIPE},
+            "aligned": aligned,
+            "cost_model": ExecutionCostModel(),
+            "cheap_gate_config": cfg,
+            "run_id": "isolation-test",
+        }
+
+        result_off = run_alpha_foundry_l0_pipeline(
+            **kwargs,
+            runtime_config=AlphaFoundryRuntimeConfig(enable_failure_attribution=False),
+        )
+        result_on = run_alpha_foundry_l0_pipeline(
+            **kwargs,
+            runtime_config=AlphaFoundryRuntimeConfig(
+                enable_failure_attribution=True,
+                enable_conditional_l0_cells=True,
+                enable_execution_arms=True,
+                conditional_cell=ConditionalCellGateConfig(enabled=True),
+                execution_arm=ExecutionArmConfig(enabled=True, styles=("taker_now", "hybrid")),
+            ),
+        )
+
+        assert result_off.passed_recipe_ids == result_on.passed_recipe_ids
+        assert result_off.stage_counts == result_on.stage_counts
+        assert result_off.handoff_decisions == result_on.handoff_decisions
+        assert result_off.bucket_results == result_on.bucket_results
+        assert result_off.cross_bucket_result == result_on.cross_bucket_result
+        assert len(result_on.evidence_rows) >= len(result_off.evidence_rows)
+
 
 class TestBuildPosteriorFromL1FoldRows:
     def test_empty_raw_rows_returns_empty(self) -> None:
