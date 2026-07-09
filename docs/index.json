@@ -30,6 +30,10 @@
       "tests/unit/domain/futures/alpha_foundry/test_bridge_helpers_multi_tf.py"
     ]
   },
+  "src/domain/futures/alpha_foundry/forward_returns.py": {
+    "architecture": "docs/architecture/layer1.md",
+    "testing": "tests/unit/domain/futures/alpha_foundry/test_forward_returns.py"
+  },
   "src/domain/futures/alpha_foundry/search_space.py": {
     "architecture": "docs/architecture/layer1.md",
     "testing": "tests/unit/domain/futures/alpha_foundry/test_alpha_search_contracts.py"
@@ -195,14 +199,16 @@
     "architecture": "docs/architecture/layer1.md",
     "testing": [
       "tests/unit/domain/futures/strategy/test_rule_signals.py",
-      "tests/unit/domain/futures/alpha_foundry/test_alpha_family_registration.py"
+      "tests/unit/domain/futures/alpha_foundry/test_alpha_family_registration.py",
+      "tests/unit/domain/futures/signals/test_rules.py"
     ]
   },
   "src/domain/futures/strategy/rule_signals.py": {
     "architecture": "docs/architecture/layer1.md",
     "testing": [
       "tests/unit/domain/futures/strategy/test_rule_signals.py",
-      "tests/unit/domain/futures/alpha_foundry/test_alpha_family_registration.py"
+      "tests/unit/domain/futures/alpha_foundry/test_alpha_family_registration.py",
+      "tests/unit/domain/futures/signals/test_rules.py"
     ]
   },
   "src/domain/futures/strategy/family_lifecycle.py": {
