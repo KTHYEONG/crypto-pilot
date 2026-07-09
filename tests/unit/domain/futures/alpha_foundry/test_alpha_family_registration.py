@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+from concurrent.futures import Future
+
 import numpy as np
+import pytest
 
 from src.domain.futures.alpha_foundry.recipes import (
     FAMILY_ARCHETYPE,
@@ -189,3 +192,79 @@ class TestNewFamilySignalPanelsRun:
             if p.family == "residual_momentum_xs":
                 assert p.metadata.get("archetype") == "xs_alpha"
                 assert p.metadata.get("max_abs_btc_beta") == 0.80
+
+
+class TestSignalFamilyBranchCoverage:
+    def test_btc_regime_pullback_and_pullback_families_build_three_variants_in_both_modules(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        aligned = _make_signal_aligned()
+        cfg = CandidateStrategyConfig()
+        families = (
+            "btc_regime_pullback",
+            "trend_pullback_continuation",
+            "mtf_trend_pullback",
+            "trend_pullback_quality_v2",
+        )
+
+        class _InlineExecutor:
+            def __init__(self, *_: object, **__: object) -> None:
+                self._closed = False
+
+            def __enter__(self) -> _InlineExecutor:
+                return self
+
+            def __exit__(self, *_: object) -> None:
+                self._closed = True
+
+            def submit(self, fn: object, /, *args: object, **kwargs: object) -> Future:
+                fut: Future = Future()
+                fut.set_result(fn(*args, **kwargs))  # type: ignore[misc]
+                return fut
+
+        monkeypatch.setattr("src.domain.futures.signals.rules.ThreadPoolExecutor", _InlineExecutor)
+        monkeypatch.setattr("src.domain.futures.strategy.rule_signals.ThreadPoolExecutor", _InlineExecutor)
+
+        rules_panels = signals_build_panels(aligned=aligned, cfg=cfg, family_filter=families)
+        strategy_panels = strategy_build_panels(aligned=aligned, cfg=cfg, family_filter=families)
+
+        for panels in (rules_panels, strategy_panels):
+            by_family = {family: [panel for panel in panels if panel.family == family] for family in families}
+
+            btc_variants = {panel.variant for panel in by_family["btc_regime_pullback"]}
+            assert btc_variants == {"btc_pullback_50", "btc_pullback_100_slow", "btc_pullback_50_rsi"}
+            assert any(
+                panel.variant == "btc_pullback_100_slow"
+                and "[LIMIT-03]" in str(panel.metadata.get("edge_hypothesis", ""))
+                for panel in by_family["btc_regime_pullback"]
+            )
+            assert any(
+                panel.variant == "btc_pullback_50_rsi"
+                and "[LIMIT-04]" in str(panel.metadata.get("edge_hypothesis", ""))
+                for panel in by_family["btc_regime_pullback"]
+            )
+
+            tpc_variants = {panel.variant for panel in by_family["trend_pullback_continuation"]}
+            assert "tpc_100_400" in tpc_variants
+            assert any(
+                panel.variant == "tpc_100_400"
+                and "[LIMIT-03]" in str(panel.metadata.get("edge_hypothesis", ""))
+                for panel in by_family["trend_pullback_continuation"]
+            )
+
+            mtf_variants = {panel.variant for panel in by_family["mtf_trend_pullback"]}
+            assert "mtf_tpb_100_30" in mtf_variants
+            assert any(
+                panel.variant == "mtf_tpb_100_30"
+                and "[LIMIT-03]" in str(panel.metadata.get("edge_hypothesis", ""))
+                for panel in by_family["mtf_trend_pullback"]
+            )
+
+            tpq_variants = {panel.variant for panel in by_family["trend_pullback_quality_v2"]}
+            assert "tpq_v2_100_400" in tpq_variants
+            assert any(
+                panel.variant == "tpq_v2_100_400"
+                and "[LIMIT-03]" in str(panel.metadata.get("edge_hypothesis", ""))
+                for panel in by_family["trend_pullback_quality_v2"]
+            )
