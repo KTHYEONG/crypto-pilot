@@ -17,6 +17,7 @@ from typing import Literal, TypeAlias
 import numpy as np
 from numpy.typing import NDArray
 
+from src.domain.futures.alpha_foundry.edge_failure import EdgeFailureAxis
 from src.domain.futures.signals.contracts import CandidateSignalPanel
 
 # ── Alpha Gate type aliases ────────────────────────────────────────────
@@ -820,6 +821,25 @@ class ExecutionArmConfig:
 
 
 @dataclass(slots=True, frozen=True)
+class L0DiagnosticConfig:
+    """Controls diagnostic-only conditional-cell / execution-arm pass.
+
+    [ADR_20260709_L0_CONDITIONAL_DIAGNOSTIC_WIRING]
+    """
+
+    failure_axes_for_cell_search: tuple[EdgeFailureAxis, ...] = ("weak_gross_edge", "cost_dominated")
+    failure_axes_for_arm_search: tuple[EdgeFailureAxis, ...] = ("cost_dominated",)
+    calibration_fraction: float = 0.70
+    max_diagnostic_recipes: int = 50
+
+    def __post_init__(self) -> None:
+        if not (0.0 < self.calibration_fraction < 1.0):
+            raise ValueError(f"calibration_fraction must be in (0,1), got {self.calibration_fraction}")
+        if self.max_diagnostic_recipes < 1:
+            raise ValueError(f"max_diagnostic_recipes must be >= 1, got {self.max_diagnostic_recipes}")
+
+
+@dataclass(slots=True, frozen=True)
 class AlphaFoundryRuntimeConfig:
     mode: AlphaFoundryMode = "off"
     report_dir: Path = Path("logs/futures/alpha_foundry")
@@ -855,6 +875,7 @@ class AlphaFoundryRuntimeConfig:
     conditional_cell: ConditionalCellGateConfig = field(default_factory=ConditionalCellGateConfig)
     execution_arm: ExecutionArmConfig = field(default_factory=ExecutionArmConfig)
     horizon_sweep_bars: tuple[int, ...] = (1, 2, 3, 6)
+    diagnostic: L0DiagnosticConfig = field(default_factory=L0DiagnosticConfig)
 
     def __post_init__(self) -> None:
         if self.mode not in {"off", "audit", "gate"}:
