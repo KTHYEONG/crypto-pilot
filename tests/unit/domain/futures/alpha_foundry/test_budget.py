@@ -1,14 +1,18 @@
 from __future__ import annotations
 
+import numpy as np
 import pytest
 
 from src.domain.futures.alpha_foundry.budget import (
+    allocate_global_l1_budget,
     build_l1_verification_units,
     update_successive_halving_state,
 )
 from src.domain.futures.alpha_foundry.contracts import (
     AlphaRecipe,
     CheapGateEvidence,
+    DiversitySelectionResult,
+    L0SignalCandidate,
     L1PosteriorEvidence,
     L1VerificationUnit,
     PosteriorGateConfig,
@@ -352,3 +356,92 @@ class TestUpdateSuccessiveHalvingState:
             config=PosteriorGateConfig(),
         )
         assert updated[0].early_stop_state == "continue"
+
+
+# ── Budget confirmatory tests (Scenario 1.4, 2.4) ────────────────
+
+
+def _real_bucket_result() -> DiversitySelectionResult:
+    return DiversitySelectionResult(
+        bucket_key=("btc_regime_pullback", "4h"),
+        ranked_recipe_ids=("r1",),
+        selected_recipe_ids=("r1",),
+        redundant_recipe_ids=(),
+        redundant_reason_by_id={},
+        bucket_corr=np.eye(1, dtype=np.float64),
+        bucket_eff_test_count=10.0,
+    )
+
+
+def _zero_bucket_result(family: str, tf: str) -> DiversitySelectionResult:
+    return DiversitySelectionResult(
+        bucket_key=(family, tf),
+        ranked_recipe_ids=(),
+        selected_recipe_ids=(),
+        redundant_recipe_ids=(),
+        redundant_reason_by_id={},
+        bucket_corr=np.eye(1, dtype=np.float64),
+        bucket_eff_test_count=10.0,
+    )
+
+
+def _real_candidate() -> L0SignalCandidate:
+    return L0SignalCandidate(
+        run_id="test",
+        timeframe="4h",
+        family="btc_regime_pullback",
+        variant="btc_pullback_50",
+        recipe_id="r1",
+        archetype="trend",
+        source="synthetic_recipe",
+        n_events=200,
+        effective_n=100.0,
+        mean_net_bps=100.9,
+        block_lcb_bps=50.0,
+        nw_tstat=3.11,
+        bootstrap_lcb_bps=30.0,
+        bootstrap_agree=True,
+        cost_drag_ratio=0.3,
+        turnover_per_year=50.0,
+        max_abs_corr_in_bucket=0.3,
+        tf_coverage_count=2,
+        sign_agreement_ratio=0.8,
+        corroboration_tier="corroborated",
+        discovery_tier="seed",
+        l1_priority_score=100.9 * 3.11,
+        l1_budget_units=0,
+        hard_reject_reasons=(),
+        soft_flags=(),
+    )
+
+
+class TestAllocateGlobalL1Budget:
+    def test_real_bucket_gets_positive_slots_with_20_zero_quality_buckets(self) -> None:
+        buckets = [_real_bucket_result()]
+        buckets.extend(_zero_bucket_result(f"dead_family_{i}", "4h") for i in range(20))
+        candidates = {"r1": _real_candidate()}
+        allocated, budgets = allocate_global_l1_budget(
+            bucket_results=buckets,
+            candidate_by_recipe_id=candidates,
+            total_l1_verification_budget=30,
+            top_k_max=10,
+        )
+        real_key = ("btc_regime_pullback", "4h")
+        assert allocated[real_key] > 0
+        for b in budgets:
+            if b.bucket_key == real_key:
+                assert b.allocated_slots > 0
+            elif b.bucket_quality == 0.0:
+                assert b.allocated_slots == 0
+
+    def test_real_bucket_still_gets_slots_with_100_zero_quality_buckets(self) -> None:
+        buckets = [_real_bucket_result()]
+        buckets.extend(_zero_bucket_result(f"dead_family_{i}", "4h") for i in range(100))
+        candidates = {"r1": _real_candidate()}
+        allocated, _ = allocate_global_l1_budget(
+            bucket_results=buckets,
+            candidate_by_recipe_id=candidates,
+            total_l1_verification_budget=30,
+            top_k_max=10,
+        )
+        assert allocated[("btc_regime_pullback", "4h")] > 0
