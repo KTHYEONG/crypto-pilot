@@ -246,5 +246,9 @@
   "src/domain/futures/alpha_foundry/execution_arms.py": {
     "architecture": "docs/architecture/layer1.md",
     "testing": "tests/unit/domain/futures/alpha_foundry/test_execution_arms.py"
+  },
+  "src/domain/futures/alpha_foundry/l0_diagnostics.py": {
+    "architecture": "docs/architecture/layer1.md",
+    "testing": "tests/unit/domain/futures/alpha_foundry/test_l0_diagnostics.py"
   }
 }
