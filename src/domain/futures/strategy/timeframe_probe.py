@@ -49,7 +49,7 @@ _BARS_PER_YEAR_4H: float = 2190.0
 # Public dataclasses
 # ---------------------------------------------------------------------------
 @dataclass(slots=True, frozen=True)
-class TfCellEvidence:
+class TimeframeScanCell:
     """Per-(symbol, family, variant, tf) diagnostic evidence cell."""
 
     symbol: str
@@ -70,18 +70,24 @@ class TfCellEvidence:
     passed_fdr: bool
 
 
-@dataclass(slots=True, frozen=True)
-class TfProbeManifest:
-    """Full probe output: all (symbol x family x tf) diagnostic cells."""
+TfCellEvidence = TimeframeScanCell
 
-    cells: tuple[TfCellEvidence, ...]
+
+@dataclass(slots=True, frozen=True)
+class TimeframeScanManifest:
+    """Full scan output: all (symbol x family x tf) diagnostic cells."""
+
+    cells: tuple[TimeframeScanCell, ...]
     tf_grid: tuple[str, ...]
     coverage_by_tf: dict[str, int]
     diversity_corr: dict[str, float]
 
 
+TfProbeManifest = TimeframeScanManifest
+
+
 @dataclass(slots=True, frozen=True)
-class TfProbeGateAuditRow:
+class TimeframeScanAuditRow:
     """Per-timeframe gate audit summary row."""
 
     tf: str
@@ -92,6 +98,9 @@ class TfProbeGateAuditRow:
     pass_fold_consistency: int
     winning: int
     top_fail_reason: str
+
+
+TfProbeGateAuditRow = TimeframeScanAuditRow
 
 
 # ---------------------------------------------------------------------------
@@ -531,7 +540,7 @@ def _probe_tf_worker(args: tuple[Any, ...]) -> list[dict[str, Any]]:
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
-def probe_timeframe_alpha(
+def scan_timeframe_alpha(
     *,
     data_maps: dict[str, dict[str, pd.DataFrame]],
     symbols: Sequence[str],
@@ -789,7 +798,7 @@ def _compute_diversity_corr(
     return diversity
 
 
-def select_tf_family_cells(
+def select_timeframe_scan_cells(
     manifest: TfProbeManifest,
     *,
     min_ic_tstat: float = 2.0,
@@ -824,7 +833,7 @@ def select_tf_family_cells(
         if reasons:
             if _logger.isEnabledFor(logging.DEBUG):
                 _logger.debug(
-                    "[TF-PROBE CELL-REJECT] %s:%s:%s:%s -> reasons=%s",
+                    "[ALGO] [TF-PROBE CELL-REJECT] %s:%s:%s:%s -> reasons=%s",
                     cell.tf,
                     cell.symbol,
                     cell.family,
@@ -834,7 +843,7 @@ def select_tf_family_cells(
         else:
             if _logger.isEnabledFor(logging.DEBUG):
                 _logger.debug(
-                    "[TF-PROBE CELL-ADMIT] %s:%s:%s:%s -> tstat=%.4f net_edge=%.4f fold_cons=%.4f",
+                    "[ALGO] [TF-PROBE CELL-ADMIT] %s:%s:%s:%s -> tstat=%.4f net_edge=%.4f fold_cons=%.4f",
                     cell.tf,
                     cell.symbol,
                     cell.family,
@@ -849,7 +858,7 @@ def select_tf_family_cells(
     return tuple(selected)
 
 
-def summarize_tf_probe_gate_audit(
+def summarize_timeframe_scan_gate_audit(
     manifest: TfProbeManifest,
     *,
     min_ic_tstat: float = 2.0,
@@ -913,3 +922,9 @@ def summarize_tf_probe_gate_audit(
         )
 
     return tuple(rows)
+
+
+# Backward-compatible aliases
+probe_timeframe_alpha = scan_timeframe_alpha
+select_tf_family_cells = select_timeframe_scan_cells
+summarize_tf_probe_gate_audit = summarize_timeframe_scan_gate_audit
