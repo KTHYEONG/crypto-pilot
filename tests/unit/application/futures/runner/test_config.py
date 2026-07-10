@@ -119,33 +119,41 @@ class TestBuildRunConfig:
         assert config.mode == "off"
         assert config.artifact_write_enabled is False
 
+    def test_build_l0_runtime_config_uses_debug_log_without_artifact_write(self) -> None:
+        from src.application.futures.runner.config import build_l0_runtime_config
+
+        config = build_l0_runtime_config(phase="l0", settings={})
+        assert config.mode == "gate"
+        assert config.artifact_write_enabled is False
+        assert config.observability_mode == "debug_log"
+
     def test_unknown_phase_via_build(self) -> None:
         with pytest.raises(ValueError, match="unknown phase"):
             build_run_config_from_args({"phase": "l4", "trials": 1, "sync": "skip"})
 
-    def test_alpha_foundry_audit_mode_accepted(self) -> None:
-        config = build_run_config_from_args(
-            {
-                "phase": "l3",
-                "timeframe": "4h",
-                "trials": 1,
-                "sync": "skip",
-                "alpha_foundry": "audit",
-            }
-        )
-        assert config.alpha_foundry.mode == "audit"
+    def test_alpha_foundry_audit_mode_rejected(self) -> None:
+        with pytest.raises(ValueError, match="removed argument: --alpha-foundry"):
+            build_run_config_from_args(
+                {
+                    "phase": "l3",
+                    "timeframe": "4h",
+                    "trials": 1,
+                    "sync": "skip",
+                    "alpha_foundry": "audit",
+                }
+            )
 
-    def test_alpha_foundry_gate_mode_accepted(self) -> None:
-        config = build_run_config_from_args(
-            {
-                "phase": "l3",
-                "timeframe": "4h",
-                "trials": 1,
-                "sync": "skip",
-                "alpha_foundry": "gate",
-            }
-        )
-        assert config.alpha_foundry.mode == "gate"
+    def test_alpha_foundry_gate_mode_rejected(self) -> None:
+        with pytest.raises(ValueError, match="removed argument: --alpha-foundry"):
+            build_run_config_from_args(
+                {
+                    "phase": "l3",
+                    "timeframe": "4h",
+                    "trials": 1,
+                    "sync": "skip",
+                    "alpha_foundry": "gate",
+                }
+            )
 
     def test_removed_arg_rejected(self) -> None:
         with pytest.raises(ValueError, match="removed argument"):
