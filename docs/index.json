@@ -171,6 +171,14 @@
     "architecture": "docs/architecture/layer2.md",
     "testing": "tests/unit/domain/futures/optimization/observability/test_run_tracker.py"
   },
+  "src/domain/futures/observability/artifact_logging.py": {
+    "architecture": "docs/architecture/layer3.md",
+    "testing": "tests/unit/domain/futures/test_l0_naming_and_debug_observability.py"
+  },
+  "src/domain/futures/observability/__init__.py": {
+    "architecture": "docs/architecture/layer3.md",
+    "testing": "tests/unit/domain/futures/test_l0_naming_and_debug_observability.py"
+  },
   "src/domain/futures/optimization/opt_config.py": {
     "architecture": "docs/architecture/layer3.md",
     "testing": "tests/unit/domain/futures/optimization/test_data_window_floor_consistency.py"
@@ -198,9 +206,24 @@
     "architecture": "docs/architecture/layer3.md",
     "testing": "tests/unit/execution/test_opt_main_futures_strategy_mode.py"
   },
+  "src/application/futures/optimization/config.py": {
+    "architecture": "docs/architecture/layer3.md",
+    "testing": [
+      "tests/unit/application/futures/runner/test_config.py",
+      "tests/unit/execution/test_opt_main_futures_strategy_mode.py"
+    ]
+  },
+  "src/application/futures/optimization/strategy_service.py": {
+    "architecture": "docs/architecture/layer3.md",
+    "testing": "tests/unit/application/futures/optimization/test_strategy_service.py"
+  },
   "src/application/futures/optimization/optimization_service.py": {
     "architecture": "docs/architecture/layer3.md",
     "testing": "tests/unit/execution/test_opt_main_futures_strategy_mode.py"
+  },
+  "src/execution/probe_timeframes.py": {
+    "architecture": "docs/architecture/layer3.md",
+    "testing": "tests/unit/execution/test_opt_main_futures_probe_wiring.py"
   },
   "src/domain/futures/signals/rules.py": {
     "architecture": "docs/architecture/layer1.md",
@@ -217,6 +240,10 @@
       "tests/unit/domain/futures/alpha_foundry/test_alpha_family_registration.py",
       "tests/unit/domain/futures/signals/test_rules.py"
     ]
+  },
+  "src/domain/futures/strategy/timeframe_probe.py": {
+    "architecture": "docs/architecture/layer1.md",
+    "testing": "tests/unit/domain/futures/strategy/test_timeframe_probe.py"
   },
   "src/domain/futures/strategy/family_lifecycle.py": {
     "architecture": "docs/architecture/layer1.md",

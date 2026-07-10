@@ -12,6 +12,8 @@ related_paths:
   - src/domain/futures/validation/walk_forward.py
   - src/domain/futures/optimization/candidate_selector.py
   - src/domain/futures/optimization/final_evaluator.py
+  - src/application/futures/optimization/config.py
+  - src/application/futures/optimization/strategy_service.py
   - src/application/futures/optimization/optimization_service.py
   - src/domain/futures/strategy/tiered_workflow/major_symbol_registry_replay.py
   - src/domain/futures/strategy/tiered_workflow/tf_validation_repair.py
@@ -22,11 +24,14 @@ related_paths:
   - src/domain/futures/optimization/opt_config.py
   - src/domain/futures/optimization/opt_data_utils.py
   - src/domain/futures/optimization/observability/run_tracker.py
+  - src/domain/futures/observability/artifact_logging.py
 change_triggers:
   - src/domain/futures/strategy/tiered_workflow/pipeline.py
   - src/domain/futures/validation/champion_registry.py
   - src/domain/futures/validation/gates.py
   - src/domain/futures/optimization/final_evaluator.py
+  - src/application/futures/optimization/config.py
+  - src/application/futures/optimization/strategy_service.py
   - src/application/futures/optimization/optimization_service.py
   - src/domain/futures/optimization/opt_config.py
   - src/domain/futures/optimization/opt_data_utils.py
@@ -37,11 +42,12 @@ change_triggers:
   - src/application/futures/runner/tf_probe_scoped.py
   - src/application/futures/runner/cli.py
   - src/application/futures/runner/config.py
+  - src/domain/futures/observability/artifact_logging.py
 dependencies:
   documents:
     - docs/architecture/layer1.md
     - docs/architecture/layer2.md
-last_verified: 2026-07-06
+last_verified: 2026-07-10
 ---
 
 # 1. Purpose
@@ -92,15 +98,17 @@ Optuna 최적화로 최종 선별된 챔피언 전략에 대해 $N$개의 서로
 - **Data-Readiness 진단**: `_run_data_stage`(`active_pipeline.py`)의 `_build_data_not_ready_reasons()`가 `kept_symbols=()`일 때 `reason` 분포를 `RuntimeError` 메시지에 포함(`[ADR_20260706_PRODUCTION_PIPELINE_CONSOLIDATION]`). 실측 확인된 reason 값: `fetch_window_short`, `warmup_insufficient` — `QuarterlyWindow`의 `fetch_start`가 `--date`에 따라 이동하며 발생.
 - **Warmup Buffer 실측 정합** `[ADR_20260706_DATA_WINDOW_FLOOR_CONSISTENCY]`: `get_layered_window`/`get_quarterly_window`의 `fetch_start` 버퍼(`warmup_days`)는 하드코딩 365일 대신 `resolve_warmup_days_for_tf(tf)`(`opt_data_utils.py`, 기존 `_resolve_warmup_bars` 재사용)로 계산 — 4h 기준 62일. `warmup_days`를 명시적으로 넘기면 그 값이 우선(하위 호환). 근거: 48개월(요구) vs ~51개월(실제 데이터 가용, 2022-04-01~) 예산에서 365일 버퍼가 여유 3개월을 전부 소진해 `--date` 이동 시 전 심볼 탈락을 유발했음을 실측 확인.
 
-### Alpha Foundry Report Logging [ADR_20260706_ALPHA_FOUNDRY_MAIN_WIRING]
+### Alpha Foundry Report Logging [ADR_20260706_ALPHA_FOUNDRY_MAIN_WIRING][ADR_20260710_L0_TERMINAL_DEBUG_OBSERVABILITY]
 - `_run_strategy_stage()`(`active_pipeline.py`) captures `CandidatePipelineOutput.alpha_foundry_report` from the bridge stage and logs it at INFO level — present in both audit and gate modes.
 - `CandidatePipelineOutput.alpha_foundry_report: AlphaFoundryBridgeReport | None` — `None` when mode=off.
-- Report fields (`panels_in`, `bound`, `survivors`, `reject_breakdown`) are available for downstream diagnostics and JSON artifact at `logs/futures/alpha_foundry/`.
-- `FinalEvaluationRequest.alpha_foundry_config` (`optimization_service.py`) and `build_strategy_alpha(..., alpha_foundry_config=...)` (`strategy/builder.py`) forward the active runner Alpha Foundry runtime config into the bridge so `--alpha-foundry audit|gate` can load `exec_1m` and emit LTF-native panels without a separate probe path.
+- Report fields (`panels_in`, `bound`, `survivors`, `reject_breakdown`) are available for downstream diagnostics; when `artifact_write_enabled=False` and `observability_mode="debug_log"`, the bridge emits terminal JSON/CSV blocks through `src/domain/futures/observability/artifact_logging.py` instead of writing files.
+- `FinalEvaluationRequest.alpha_foundry_config` (`optimization_service.py`) and `build_strategy_alpha(..., alpha_foundry_config=...)` (`strategy/builder.py`) forward the active runner Alpha Foundry runtime config into the bridge so `phase=l0` can load `exec_1m` and emit LTF-native panels without a separate probe path.
 
-### Alpha Foundry Runtime Config [ADR_20260707_ALPHA_FOUNDRY_RESULT_SYNC]
-- `application/futures/runner/config.py` builds and validates `AlphaFoundryRuntimeConfig` with `observability_mode`, `debug_top_k_rows`, `artifact_write_enabled`, and `gate_schema` in addition to the existing gate and L2 policy fields.
-- `validate_alpha_foundry_runtime_config()` rejects invalid observability mode, non-unified gate schema, and `debug_top_k_rows < 1`.
+### Alpha Foundry Runtime Config [ADR_20260707_ALPHA_FOUNDRY_RESULT_SYNC][ADR_20260710_L0_TERMINAL_DEBUG_OBSERVABILITY]
+- `application/futures/optimization/config.py` is the active runner config source for `phase`, `sync`, `seed`, and the L0 runtime bridge; `application/futures/runner/config.py` keeps compatibility aliases for legacy tests and doc consumers.
+- `phase="l0"` maps to internal gate execution with `artifact_write_enabled=False` and `observability_mode="debug_log"`, so the report is emitted as DEBUG JSON/CSV blocks rather than files.
+- `phase in {"l1", "l2", "l3"}` still performs the same L0 pre-stage; only the post-L0 continuation differs.
+- `src/domain/futures/observability/artifact_logging.py` defines the terminal artifact emitters consumed by the bridge helper.
 
 ### Validation Parity Report Flow [ADR_20260705_TF_VALIDATION_ROOT_CAUSE_CAPTURE]
 - `build_validation_parity_capture()`는 pre-clear probe/main/census evidence를 묶고, `finalize_validation_parity_capture()`는 이후 L2/L3 sleeve evidence로 major-gap 클래스를 확정한다.
@@ -153,5 +161,7 @@ L3 Holdout 검증 완료를 위해 포트폴리오는 아래 순차적 조건문
 | `strategy/tiered_workflow/major_symbol_registry_replay.py` | major-symbol registry replay, adoption gate, CSV artifact |
 | `strategy/tiered_workflow/tf_validation_repair.py` | pre-clear TF parity capture, major-gap classification, report logging |
 | `runner/tf_probe_scoped.py` | majors-only TF probe wrapper, scoped gate audit, pre-clear execution |
-| `application/futures/runner/cli.py` | CLI seed 전달, replay entrypoint, `--alpha-foundry` (off/audit/gate) |
-| `application/futures/runner/config.py` | `FuturesRunConfig.seed` SSOT, `FuturesRunConfig.alpha_foundry` 필드, `build_alpha_foundry_runtime_config()`, `validate_alpha_foundry_runtime_config()` |
+| `application/futures/runner/cli.py` | CLI seed 전달, replay entrypoint, `--phase l0/l1/l2/l3` |
+| `application/futures/optimization/config.py` | `FuturesRunConfig.phase` SSOT, `build_run_config_from_args()`, `parse_active_phase()` |
+| `application/futures/optimization/strategy_service.py` | candidate bridge config, `phase`-aware active strategy dispatch |
+| `application/futures/runner/config.py` | legacy compatibility `FuturesRunConfig.alpha_foundry` alias, `build_alpha_foundry_runtime_config()` |
