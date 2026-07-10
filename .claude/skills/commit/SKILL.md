@@ -20,9 +20,9 @@ Analyze unstaged modifications, automatically partition them into clean logical 
 All generated commit messages MUST strictly adhere to the following layout to prevent vague, single-word, or unreadable logs:
 1. **Subject:** Use standard conventional commit types (e.g., `feat`, `fix`, `refactor`, `chore`, `docs`) followed by a concise, 50-character Korean summary. No trailing period.
 2. **Double-Bulleted Body (Mandatory):** The body MUST contain exactly two bullet points formatted with bold headers:
-   - `- **Why:** <Explain the root cause or quantitative hypothesis in a complete Korean sentence ending with "~함.">`
-   - `- **What:** <Explain the exact logic or structural changes applied in a complete Korean sentence ending with "~함.">`
-3. **No Vague Words:** Sentence must end with "~함.". Vague terms like "버그 수정", "코드 개선" are strictly prohibited.
+   - `- **Why:** <Explain the root cause or quantitative hypothesis in a complete Korean sentence ending with the Korean verb suffix "~함." (noun-form termination).>`
+   - `- **What:** <Explain the exact logic or structural changes applied in a complete Korean sentence ending with the Korean verb suffix "~함." (noun-form termination).>`
+3. **No Vague Words:** Sentence must end with "~함.". Vague terms like "버그 수정" (bug fix) or "코드 개선" (code improvement) are strictly prohibited.
 
 ## 🧠 Internal Logic (Grouping & Structuring)
 1. **Logical Grouping:**
