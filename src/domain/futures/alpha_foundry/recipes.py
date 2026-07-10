@@ -175,6 +175,14 @@ RECIPE_DEFINITIONS: dict[str, tuple[dict[str, object], ...]] = {
         _rd("vpb_15m_48", {"ltf": "15m", "channel": 48, "volume_z": 2.0}, 1, ("close", "high", "low", "taker_buy")),
         _rd("vpb_30m_48", {"ltf": "30m", "channel": 48, "volume_z": 2.0}, 1, ("close", "high", "low", "taker_buy")),
     ),
+    "liquidity_participation_breakout": (
+        _rd("lpb_40", {"channel": 40}, 1, ("close", "high", "low", "volume")),
+        _rd("lpb_60", {"channel": 60}, 1, ("close", "high", "low", "volume")),
+    ),
+    "btc_neutral_residual_reversal": (
+        _rd("bnrr_24", {"lookback": 24, "tail_fraction": 0.20}, 1, ("close",)),
+        _rd("bnrr_48", {"lookback": 48, "tail_fraction": 0.20}, 1, ("close",)),
+    ),
 }
 
 FAMILY_ARCHETYPE: dict[str, AlphaArchetype] = {
@@ -217,6 +225,8 @@ FAMILY_ARCHETYPE: dict[str, AlphaArchetype] = {
     "oi_flow_squeeze": "flow",
     "xs_residual_flow_rotation": "cross_sectional",
     "volume_participation_breakout": "trend",
+    "liquidity_participation_breakout": "trend",
+    "btc_neutral_residual_reversal": "cross_sectional",
 }
 
 FAMILY_SIDE_RULE: dict[str, str] = {
@@ -259,6 +269,8 @@ FAMILY_SIDE_RULE: dict[str, str] = {
     "oi_flow_squeeze": "flow_reversal",
     "xs_residual_flow_rotation": "xs_residual_momentum",
     "volume_participation_breakout": "breakout_retest",
+    "liquidity_participation_breakout": "breakout_retest",
+    "btc_neutral_residual_reversal": "xs_neutral",
 }
 
 FAMILY_EXIT_POLICY: dict[str, str] = {
@@ -301,6 +313,8 @@ FAMILY_EXIT_POLICY: dict[str, str] = {
     "oi_flow_squeeze": "tp_sl_1_2",
     "xs_residual_flow_rotation": "atr_trail_2",
     "volume_participation_breakout": "atr_trail_2",
+    "liquidity_participation_breakout": "atr_trail_2",
+    "btc_neutral_residual_reversal": "atr_trail_2",
 }
 
 FAMILY_MAX_TURNOVER: dict[str, float] = {
@@ -343,6 +357,8 @@ FAMILY_MAX_TURNOVER: dict[str, float] = {
     "oi_flow_squeeze": 180.0,
     "xs_residual_flow_rotation": 240.0,
     "volume_participation_breakout": 240.0,
+    "liquidity_participation_breakout": 180.0,
+    "btc_neutral_residual_reversal": 365.0,
 }
 
 
@@ -375,11 +391,16 @@ def build_alpha_recipe_catalog(
     exclude_families: tuple[str, ...] = (),
     max_recipes_per_family: int = 64,
 ) -> tuple[AlphaRecipe, ...]:
+    from src.domain.futures.strategy.family_lifecycle import resolve_retired_families_for_tf
+
     families = tuple(RECIPE_DEFINITIONS.keys())
     if include_families:
         families = tuple(f for f in families if f in include_families)
     if exclude_families:
         families = tuple(f for f in families if f not in exclude_families)
+    # Apply FAMILY_TF_RETIREMENT — retired (family, tf) pairs are excluded
+    retired = frozenset(resolve_retired_families_for_tf(timeframe))
+    families = tuple(f for f in families if f not in retired)
 
     result: list[AlphaRecipe] = []
     seen_ids: set[str] = set()
