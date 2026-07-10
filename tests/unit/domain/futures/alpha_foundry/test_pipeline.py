@@ -181,6 +181,60 @@ class TestRunAlphaFoundryL0Pipeline:
         )
         assert isinstance(artifacts.search_cells, tuple)
 
+    def test_l0_pipeline_logs_tf_fusion_stage_and_leaves_evidence_unchanged(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """S2-05: [ALGO] tf_fusion log line fires with correct counts; evidence rows unaffected by logging."""
+        import logging
+
+        panel = _make_panel()
+        aligned = _make_aligned()
+        evidence_by_tf = {
+            "4h": pd.DataFrame(
+                {
+                    "family": ["trend_ma"],
+                    "variant": ["ema_12_72"],
+                    "timeframe": ["4h"],
+                    "recipe_id": ["r1"],
+                    "reject_reasons": [""],
+                    "mean_net_bps": [10.0],
+                    "block_lcb_bps": [5.0],
+                }
+            ),
+        }
+
+        def _run() -> tuple[AlphaFoundryEvidenceRow, ...]:
+            artifacts = run_alpha_foundry_l0_pipeline(
+                panels=[panel],
+                recipes={"r1": SAMPLE_RECIPE},
+                aligned=aligned,
+                cost_model=ExecutionCostModel(),
+                cheap_gate_config=CheapGateConfig(),
+                evidence_by_tf=evidence_by_tf,
+            )
+            return artifacts.evidence_rows
+
+        with caplog.at_level(logging.DEBUG):
+            evidence_rows = _run()
+
+        assert "[ALGO] stage=tf_fusion" in caplog.text
+        assert "n_evidence_rows_total=1" in caplog.text
+        assert "n_fusion_groups=" in caplog.text
+        assert "n_recipes_indexed=" in caplog.text
+
+        # [LIMIT-08]: logging is pure observability — same call must produce
+        # decision-field-identical evidence rows (created_at_ms is a wall-clock
+        # timestamp, expected to differ between calls and irrelevant here).
+        import dataclasses
+
+        def _strip_timestamp(
+            rows: tuple[AlphaFoundryEvidenceRow, ...],
+        ) -> tuple[AlphaFoundryEvidenceRow, ...]:
+            return tuple(dataclasses.replace(r, created_at_ms=0) for r in rows)
+
+        baseline_rows = _run()
+        assert _strip_timestamp(evidence_rows) == _strip_timestamp(baseline_rows)
+
     def test_l0_pipeline_produces_evidence_with_canonical_fields(self) -> None:
         """Gap 1 regression: evidence row must have capacity_score/regime_stability from canonical gate."""
         panel = _make_panel()
