@@ -74,8 +74,8 @@ def main() -> None:
         )
         from src.domain.futures.strategy.config import CandidateStrategyConfig
         from src.domain.futures.strategy.timeframe_probe import (
-            probe_timeframe_alpha,
-            select_tf_family_cells,
+            scan_timeframe_alpha,
+            select_timeframe_scan_cells,
         )
     except ImportError as exc:
         _logger.error("Import failed: %s", exc)
@@ -124,7 +124,7 @@ def main() -> None:
     # ---------------------------------------------------------------------------
     _logger.info("Starting timeframe probe over tf_grid=%s", args.tf_grid)
     try:
-        manifest = probe_timeframe_alpha(
+        manifest = scan_timeframe_alpha(
             data_maps=data_maps,
             symbols=valid_symbols,
             base_cfg=base_cfg,
@@ -160,7 +160,7 @@ def main() -> None:
         _logger.info("Manifest saved: %s (%d rows)", output_path, len(df_out))
 
         # Summary log
-        promoted = select_tf_family_cells(manifest)
+        promoted = select_timeframe_scan_cells(manifest)
         _logger.info(
             "Promotable cells (tstat>=2, FDR, net_edge>=0, fold_consistency>=0.75): %d",
             len(promoted),

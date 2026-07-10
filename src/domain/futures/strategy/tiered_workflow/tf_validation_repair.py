@@ -70,9 +70,9 @@ class MajorSymbolGapEvidence:
     repair_action: RepairAction
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True, slots=True, init=False)
 class ValidationParityReport:
-    """Final TF validation parity report with probe, main, and major-gap evidence.
+    """Final TF validation parity report with scan-diagnostics, main, and major-gap evidence.
 
     [ADR_20260705_TF_VALIDATION_ROOT_CAUSE_CAPTURE]
     """
@@ -83,11 +83,41 @@ class ValidationParityReport:
     decision: Literal["diagnostic_only", "candidate_review_required"]
     blockers: tuple[str, ...]
 
+    def __init__(
+        self,
+        probe: tuple[TfProbeDiagnosticVerdict, ...] | None = None,
+        main_tf: tuple[MainCompatibleTfEvidence, ...] | None = None,
+        major_gaps: tuple[MajorSymbolGapEvidence, ...] | None = None,
+        decision: Literal["diagnostic_only", "candidate_review_required"] = "diagnostic_only",
+        blockers: tuple[str, ...] = (),
+        **kwargs: Any,
+    ) -> None:
+        scan_diagnostics = kwargs.pop("scan_diagnostics", None)
+        if kwargs:
+            unexpected = ", ".join(sorted(kwargs))
+            raise TypeError(f"unexpected keyword arguments: {unexpected}")
+        final_probe = scan_diagnostics if scan_diagnostics is not None else probe
+        if final_probe is None:
+            final_probe = ()
+        if main_tf is None:
+            main_tf = ()
+        if major_gaps is None:
+            major_gaps = ()
+        object.__setattr__(self, "probe", final_probe)
+        object.__setattr__(self, "main_tf", main_tf)
+        object.__setattr__(self, "major_gaps", major_gaps)
+        object.__setattr__(self, "decision", decision)
+        object.__setattr__(self, "blockers", blockers)
+
+    @property
+    def scan_diagnostics(self) -> tuple[TfProbeDiagnosticVerdict, ...]:
+        return self.probe
+
 
 ValidationPhase = Literal["l1", "l2", "l3"]
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True, slots=True, init=False)
 class ValidationParityCapture:
     """Pre-clear TF validation parity capture used to finalize parity reports.
 
@@ -101,6 +131,40 @@ class ValidationParityCapture:
     decision: Literal["diagnostic_only", "candidate_review_required"]
     candidate_tfs: tuple[str, ...]
     symbols: tuple[str, ...] = MAJOR_DIAG_SYMBOLS
+
+    def __init__(
+        self,
+        probe: tuple[TfProbeDiagnosticVerdict, ...] | None = None,
+        main_tf: tuple[MainCompatibleTfEvidence, ...] | None = None,
+        registry_census: tuple[tuple[str, MajorSymbolRegistryCensusEntry], ...] | None = None,
+        blockers: tuple[str, ...] = (),
+        decision: Literal["diagnostic_only", "candidate_review_required"] = "diagnostic_only",
+        candidate_tfs: tuple[str, ...] = (),
+        symbols: tuple[str, ...] = MAJOR_DIAG_SYMBOLS,
+        **kwargs: Any,
+    ) -> None:
+        scan_diagnostics = kwargs.pop("scan_diagnostics", None)
+        if kwargs:
+            unexpected = ", ".join(sorted(kwargs))
+            raise TypeError(f"unexpected keyword arguments: {unexpected}")
+        final_probe = scan_diagnostics if scan_diagnostics is not None else probe
+        if final_probe is None:
+            final_probe = ()
+        if main_tf is None:
+            main_tf = ()
+        if registry_census is None:
+            registry_census = ()
+        object.__setattr__(self, "probe", final_probe)
+        object.__setattr__(self, "main_tf", main_tf)
+        object.__setattr__(self, "registry_census", registry_census)
+        object.__setattr__(self, "blockers", blockers)
+        object.__setattr__(self, "decision", decision)
+        object.__setattr__(self, "candidate_tfs", candidate_tfs)
+        object.__setattr__(self, "symbols", symbols)
+
+    @property
+    def scan_diagnostics(self) -> tuple[TfProbeDiagnosticVerdict, ...]:
+        return self.probe
 
 
 def _edge_quality_bps(r: PerTfL1Result) -> float:
@@ -530,7 +594,7 @@ def build_validation_parity_report(
     )
 
     return ValidationParityReport(
-        probe=probe,
+        scan_diagnostics=probe,
         main_tf=main_tf,
         major_gaps=major_gaps,
         decision=decision,
@@ -610,7 +674,7 @@ def build_validation_parity_capture(
         "candidate_review_required" if needs_review else "diagnostic_only"
     )
     return ValidationParityCapture(
-        probe=probe,
+        scan_diagnostics=probe,
         main_tf=main_tf,
         registry_census=registry_census,
         blockers=tuple(blockers),
@@ -677,7 +741,7 @@ def finalize_validation_parity_capture(
         adverse_sign_mismatch_threshold=adverse_sign_mismatch_threshold,
     )
     return ValidationParityReport(
-        probe=capture.probe,
+        scan_diagnostics=capture.scan_diagnostics,
         main_tf=capture.main_tf,
         major_gaps=major_gaps,
         decision=capture.decision,

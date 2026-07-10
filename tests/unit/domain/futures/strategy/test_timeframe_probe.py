@@ -22,8 +22,8 @@ from src.domain.futures.strategy.timeframe_probe import (
     _probe_tf_worker,
     _scale_bar_param,
     _vr_label_majority,
-    select_tf_family_cells,
-    summarize_tf_probe_gate_audit,
+    select_timeframe_scan_cells,
+    summarize_timeframe_scan_gate_audit,
 )
 
 RNG = np.random.default_rng(42)
@@ -388,7 +388,7 @@ class TestSelectTfFamilyCellsBva:
         cell = _make_cell(ic_tstat_hac=2.0, passed_fdr=True)
         manifest = self._make_manifest([cell])
         # Act
-        result = select_tf_family_cells(manifest, min_ic_tstat=2.0, require_fdr=True)
+        result = select_timeframe_scan_cells(manifest, min_ic_tstat=2.0, require_fdr=True)
         # Assert
         assert len(result) == 1
         assert result[0].ic_tstat_hac == pytest.approx(2.0)
@@ -399,7 +399,7 @@ class TestSelectTfFamilyCellsBva:
         cell = _make_cell(ic_tstat_hac=1.999, passed_fdr=True)
         manifest = self._make_manifest([cell])
         # Act
-        result = select_tf_family_cells(manifest, min_ic_tstat=2.0, require_fdr=True)
+        result = select_timeframe_scan_cells(manifest, min_ic_tstat=2.0, require_fdr=True)
         # Assert
         assert len(result) == 0
 
@@ -409,7 +409,7 @@ class TestSelectTfFamilyCellsBva:
         cell = _make_cell(ic_tstat_hac=3.0, passed_fdr=False)
         manifest = self._make_manifest([cell])
         # Act
-        result = select_tf_family_cells(manifest, min_ic_tstat=2.0, require_fdr=True)
+        result = select_timeframe_scan_cells(manifest, min_ic_tstat=2.0, require_fdr=True)
         # Assert
         assert len(result) == 0
 
@@ -419,7 +419,7 @@ class TestSelectTfFamilyCellsBva:
         cell = _make_cell(ic_tstat_hac=3.0, passed_fdr=False)
         manifest = self._make_manifest([cell])
         # Act
-        result = select_tf_family_cells(manifest, min_ic_tstat=2.0, require_fdr=False)
+        result = select_timeframe_scan_cells(manifest, min_ic_tstat=2.0, require_fdr=False)
         # Assert
         assert len(result) == 1
 
@@ -429,7 +429,9 @@ class TestSelectTfFamilyCellsBva:
         cell = _make_cell(ic_tstat_hac=3.0, passed_fdr=True, ic_fold_sign_consistency=0.74)
         manifest = self._make_manifest([cell])
         # Act
-        result = select_tf_family_cells(manifest, min_ic_tstat=2.0, require_fdr=True, min_fold_sign_consistency=0.75)
+        result = select_timeframe_scan_cells(
+            manifest, min_ic_tstat=2.0, require_fdr=True, min_fold_sign_consistency=0.75
+        )
         # Assert
         assert len(result) == 0
 
@@ -439,7 +441,7 @@ class TestSelectTfFamilyCellsBva:
         cell = _make_cell(ic_tstat_hac=3.0, passed_fdr=True, net_edge_bps=-0.1)
         manifest = self._make_manifest([cell])
         # Act
-        result = select_tf_family_cells(manifest, min_ic_tstat=2.0, require_fdr=True, min_net_edge_bps=0.0)
+        result = select_timeframe_scan_cells(manifest, min_ic_tstat=2.0, require_fdr=True, min_net_edge_bps=0.0)
         # Assert
         assert len(result) == 0
 
@@ -451,7 +453,7 @@ class TestSelectTfFamilyCellsBva:
         cell_c = _make_cell(ic_tstat_hac=5.0, net_edge_bps=15.0, symbol="C")
         manifest = self._make_manifest([cell_b, cell_a, cell_c])
         # Act
-        result = select_tf_family_cells(manifest, min_ic_tstat=2.0, require_fdr=True)
+        result = select_timeframe_scan_cells(manifest, min_ic_tstat=2.0, require_fdr=True)
         # Assert: A and C both have tstat=5 but C has higher edge => C first
         assert result[0].symbol == "C"
         assert result[1].symbol == "A"
@@ -462,7 +464,7 @@ class TestSelectTfFamilyCellsBva:
         # Arrange
         manifest = self._make_manifest([])
         # Act
-        result = select_tf_family_cells(manifest)
+        result = select_timeframe_scan_cells(manifest)
         # Assert
         assert result == ()
 
@@ -791,7 +793,7 @@ class TestTfProbeGateAudit:
             diversity_corr={},
         )
 
-        rows = summarize_tf_probe_gate_audit(manifest)
+        rows = summarize_timeframe_scan_gate_audit(manifest)
 
         assert rows == (
             TfProbeGateAuditRow(
@@ -946,7 +948,7 @@ class TestProbeTimeframeAlphaIntegration:
         import unittest.mock as _mock
         from concurrent.futures import ThreadPoolExecutor
 
-        from src.domain.futures.strategy.timeframe_probe import probe_timeframe_alpha
+        from src.domain.futures.strategy.timeframe_probe import scan_timeframe_alpha
 
         fake_worker = self._worker_patch(self._TF_GRID, self._SYMBOLS)
 
@@ -962,7 +964,7 @@ class TestProbeTimeframeAlphaIntegration:
             ),
         ):
             # Act
-            manifest = probe_timeframe_alpha(
+            manifest = scan_timeframe_alpha(
                 data_maps=data_maps,
                 symbols=self._SYMBOLS,
                 base_cfg=base_cfg,
@@ -986,7 +988,7 @@ class TestProbeTimeframeAlphaIntegration:
         import unittest.mock as _mock
         from concurrent.futures import ThreadPoolExecutor
 
-        from src.domain.futures.strategy.timeframe_probe import probe_timeframe_alpha
+        from src.domain.futures.strategy.timeframe_probe import scan_timeframe_alpha
 
         data_maps = {"BTCUSDT": {"4h": _make_ohlcv_range_df(120, freq="4h", seed=7)}}
         fake_worker = self._worker_patch(("4h",), self._SYMBOLS[:1])
@@ -1001,7 +1003,7 @@ class TestProbeTimeframeAlphaIntegration:
                 new=fake_worker,
             ),
         ):
-            manifest = probe_timeframe_alpha(
+            manifest = scan_timeframe_alpha(
                 data_maps=data_maps,
                 symbols=("BTCUSDT",),
                 base_cfg=base_cfg,
@@ -1017,7 +1019,7 @@ class TestProbeTimeframeAlphaIntegration:
         import unittest.mock as _mock
         from concurrent.futures import ThreadPoolExecutor
 
-        from src.domain.futures.strategy.timeframe_probe import probe_timeframe_alpha
+        from src.domain.futures.strategy.timeframe_probe import scan_timeframe_alpha
 
         data_maps = {"BTCUSDT": {"1h": _make_ohlcv_range_df(240, freq="1h", seed=11)}}
         fake_worker = self._worker_patch(("4h",), self._SYMBOLS[:1])
@@ -1032,7 +1034,7 @@ class TestProbeTimeframeAlphaIntegration:
                 new=fake_worker,
             ),
         ):
-            manifest = probe_timeframe_alpha(
+            manifest = scan_timeframe_alpha(
                 data_maps=data_maps,
                 symbols=("BTCUSDT",),
                 base_cfg=base_cfg,
@@ -1087,7 +1089,7 @@ class TestProbeTimeframeAlphaIntegration:
 
         from src.domain.futures.strategy.timeframe_probe import (
             _MIN_IC_OBS,
-            probe_timeframe_alpha,
+            scan_timeframe_alpha,
         )
 
         # Arrange: short OHLCV — fewer than _MIN_IC_OBS + h_hold bars
@@ -1115,7 +1117,7 @@ class TestProbeTimeframeAlphaIntegration:
             ),
         ):
             # Act — must not raise
-            manifest = probe_timeframe_alpha(
+            manifest = scan_timeframe_alpha(
                 data_maps=short_data_maps,
                 symbols=self._SYMBOLS,
                 base_cfg=base_cfg,
@@ -1136,8 +1138,8 @@ class TestProbeTimeframeAlphaIntegration:
         from concurrent.futures import ThreadPoolExecutor
 
         from src.domain.futures.strategy.timeframe_probe import (
-            probe_timeframe_alpha,
-            select_tf_family_cells,
+            scan_timeframe_alpha,
+            select_timeframe_scan_cells,
         )
 
         # Arrange: high-tstat cells so some may pass FDR and selector
@@ -1157,7 +1159,7 @@ class TestProbeTimeframeAlphaIntegration:
                 side_effect=_strong_worker,
             ),
         ):
-            manifest = probe_timeframe_alpha(
+            manifest = scan_timeframe_alpha(
                 data_maps=data_maps,
                 symbols=self._SYMBOLS,
                 base_cfg=base_cfg,
@@ -1166,7 +1168,7 @@ class TestProbeTimeframeAlphaIntegration:
             )
 
         # Act
-        selected = select_tf_family_cells(
+        selected = select_timeframe_scan_cells(
             manifest,
             min_ic_tstat=2.0,
             require_fdr=False,  # avoid FDR dependency on small synthetic cell count
@@ -1196,7 +1198,7 @@ class TestTimeframeProbeFixes:
         from concurrent.futures import ThreadPoolExecutor
 
         from src.domain.futures.strategy.config import CandidateStrategyConfig
-        from src.domain.futures.strategy.timeframe_probe import probe_timeframe_alpha
+        from src.domain.futures.strategy.timeframe_probe import scan_timeframe_alpha
 
         base_cfg = CandidateStrategyConfig(timeframe="4h")
 
@@ -1231,7 +1233,7 @@ class TestTimeframeProbeFixes:
                 side_effect=_mock_worker,
             ),
         ):
-            manifest = probe_timeframe_alpha(
+            manifest = scan_timeframe_alpha(
                 data_maps=data_maps,
                 symbols=[f"SYM{i}" for i in range(10)],
                 base_cfg=base_cfg,
@@ -1360,7 +1362,7 @@ class TestTimeframeProbeFixes:
         from concurrent.futures import ThreadPoolExecutor
 
         from src.domain.futures.strategy.config import CandidateStrategyConfig
-        from src.domain.futures.strategy.timeframe_probe import probe_timeframe_alpha
+        from src.domain.futures.strategy.timeframe_probe import scan_timeframe_alpha
 
         base_cfg = CandidateStrategyConfig(timeframe="4h")
 
@@ -1384,7 +1386,7 @@ class TestTimeframeProbeFixes:
                 side_effect=_mock_worker,
             ),
         ):
-            manifest = probe_timeframe_alpha(
+            manifest = scan_timeframe_alpha(
                 data_maps=data_maps,
                 symbols=[f"SYM{i}" for i in range(105)],
                 base_cfg=base_cfg,
@@ -1418,7 +1420,7 @@ class TestTimeframeProbeFixes:
         from concurrent.futures import ThreadPoolExecutor
 
         from src.domain.futures.strategy.config import CandidateStrategyConfig
-        from src.domain.futures.strategy.timeframe_probe import probe_timeframe_alpha
+        from src.domain.futures.strategy.timeframe_probe import scan_timeframe_alpha
 
         base_cfg = CandidateStrategyConfig(timeframe="4h")
 
@@ -1454,7 +1456,7 @@ class TestTimeframeProbeFixes:
                 side_effect=_mock_worker,
             ),
         ):
-            manifest = probe_timeframe_alpha(
+            manifest = scan_timeframe_alpha(
                 data_maps=data_maps,
                 symbols=["SYM0", "SYM1"],
                 base_cfg=base_cfg,
@@ -1659,7 +1661,7 @@ def test_net_edge_bps_below_min_obs() -> None:
 def test_select_tf_family_cells_debug_logging(caplog: pytest.LogCaptureFixture) -> None:
     import logging
 
-    from src.domain.futures.strategy.timeframe_probe import TfCellEvidence, TfProbeManifest, select_tf_family_cells
+    from src.domain.futures.strategy.timeframe_probe import TfCellEvidence, TfProbeManifest, select_timeframe_scan_cells
 
     cell_fail = TfCellEvidence(
         symbol="SYM1",
@@ -1703,7 +1705,7 @@ def test_select_tf_family_cells_debug_logging(caplog: pytest.LogCaptureFixture) 
     )
 
     with caplog.at_level(logging.DEBUG):
-        selected = select_tf_family_cells(
+        selected = select_timeframe_scan_cells(
             manifest, min_ic_tstat=2.0, require_fdr=True, min_net_edge_bps=0.0, min_fold_sign_consistency=0.75
         )
 
