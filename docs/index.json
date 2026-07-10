@@ -200,7 +200,10 @@
   },
   "src/domain/futures/optimization/opt_data_utils.py": {
     "architecture": "docs/architecture/layer3.md",
-    "testing": "tests/unit/domain/futures/optimization/test_data_window_floor_consistency.py"
+    "testing": [
+      "tests/unit/domain/futures/optimization/test_data_window_floor_consistency.py",
+      "tests/unit/domain/futures/optimization/test_opt_data_utils.py"
+    ]
   },
   "src/domain/futures/optimization/final_evaluator.py": {
     "architecture": "docs/architecture/layer3.md",
@@ -260,6 +263,10 @@
   "src/domain/futures/signals/ltf_alpha.py": {
     "architecture": "docs/architecture/layer1.md",
     "testing": "tests/unit/domain/futures/signals/test_ltf_alpha.py"
+  },
+  "src/domain/futures/signals/causal_diversified_candidates.py": {
+    "architecture": "docs/architecture/layer1.md",
+    "testing": "tests/unit/domain/futures/signals/test_causal_diversified_candidates.py"
   },
   "src/domain/futures/strategy/builder.py": {
     "architecture": "docs/architecture/layer1.md",

@@ -90,6 +90,66 @@ def test_build_ltf_native_panels_for_l0_uses_exec_1m_payload() -> None:
     assert any(panel.side_hint_2d.any() for panel in panels)
 
 
+def test_build_ltf_native_panels_for_l0_skips_symbols_missing_exec_1m(caplog: Any) -> None:
+    # Arrange: two symbols, only BTCUSDT carries an exec_1m frame (ETHUSDT lacks one
+    # entirely, e.g. because its 1m coverage failed the LTF-capability check).
+    dt_1m = pd.date_range("2026-01-01 00:00:00", periods=24 * 60, freq="1min", tz="UTC")
+    close = np.full(24 * 60, 104.0, dtype=np.float64)
+    close[16 * 60 + 45 : 17 * 60 + 15] = 112.0
+    volume = np.full(24 * 60, 10.0, dtype=np.float64)
+    volume[16 * 60 + 45 : 17 * 60 + 15] = 120.0
+    taker_buy = volume * 0.5
+    taker_buy[16 * 60 + 45 : 17 * 60 + 15] = volume[16 * 60 + 45 : 17 * 60 + 15] * 0.9
+    exec_1m = pd.DataFrame(
+        {
+            "datetime": dt_1m,
+            "open": close,
+            "high": close + 0.1,
+            "low": close - 0.5,
+            "close": close,
+            "volume": volume,
+            "quote_vol": volume * close,
+            "taker_buy_base_volume": taker_buy,
+            "taker_buy_quote_volume": taker_buy * close,
+            "trades": volume * 2.0,
+        }
+    )
+    base_dt = pd.date_range("2026-01-01 00:00:00", periods=24, freq="1h", tz="UTC").to_numpy(dtype="datetime64[ns]")
+    ones = np.ones((24, 2), dtype=np.float64)
+    mask = np.ones((24, 2), dtype=bool)
+    aligned = AlignedMarketData(
+        datetimes=base_dt,
+        symbols=("BTCUSDT", "ETHUSDT"),
+        open_2d=ones * 100.0,
+        high_2d=ones * 105.0,
+        low_2d=ones * 95.0,
+        close_2d=ones * 104.0,
+        volume_2d=ones * 1000.0,
+        funding_2d=np.zeros((24, 2), dtype=np.float64),
+        active_mask=mask,
+        warm_mask=mask,
+        entry_block_mask=np.zeros((24, 2), dtype=bool),
+        kill_mask=np.zeros((24, 2), dtype=bool),
+    )
+
+    # Act
+    with caplog.at_level(logging.INFO):
+        panels = _build_ltf_native_panels_for_l0(
+            data_maps={"BTCUSDT": {"exec_1m": exec_1m}, "ETHUSDT": {}},
+            symbols=("BTCUSDT", "ETHUSDT"),
+            aligned=aligned,
+            cfg=StrategyConfig().candidate,
+            family_filter=("funding_session_orb_flow",),
+        )
+
+    # Assert: no exception, panels built from the exec_1m-capable subset only
+    assert len(panels) == 2
+    assert all(panel.symbols == ("BTCUSDT", "ETHUSDT") for panel in panels)
+    assert any(panel.side_hint_2d[:, 0].any() for panel in panels)  # BTCUSDT column active
+    assert all(not panel.side_hint_2d[:, 1].any() for panel in panels)  # ETHUSDT column untouched
+    assert any("exec_1m payload symbols=1/2" in record.message for record in caplog.records)
+
+
 def test_bridge_passes_no_leak_recommendation_window(monkeypatch: Any) -> None:
     datetimes = np.asarray(
         [np.datetime64("2026-01-01T00:00:00") + np.timedelta64(i, "h") for i in range(20)],

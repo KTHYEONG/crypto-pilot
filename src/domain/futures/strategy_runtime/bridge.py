@@ -894,6 +894,7 @@ def run_candidate_strategy_for_universe(
     preloaded_data_maps: dict[str, dict[str, Any]] | None = None,
     alpha_foundry_config: Any | None = None,
     silent: bool = False,
+    state_cube: Any | None = None,
 ) -> CandidatePipelineOutput:
     """Run candidate strategy pipeline and return candidate output."""
     if strategy_cfg is None or preloaded_data_maps is None:
@@ -1023,7 +1024,7 @@ def run_candidate_strategy_for_universe(
         _logger.debug("\n".join(lines))
 
     t_step = time.perf_counter()
-    aligned = align_data_maps(preloaded_data_maps, symbols, tf)
+    aligned = align_data_maps(preloaded_data_maps, symbols, tf, state_cube=state_cube)
     bridge_prof["align"] = time.perf_counter() - t_step
     _sample_rss("align")
     n_bars = aligned.close_2d.shape[0]

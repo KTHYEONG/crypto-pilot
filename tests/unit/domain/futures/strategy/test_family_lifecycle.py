@@ -109,6 +109,21 @@ def test_family_tf_retirement_frozenset_immutable() -> None:
         FAMILY_TF_RETIREMENT.add(("test", "4h"))  # type: ignore[attr-defined]
 
 
+def test_liquidity_vacuum_breakout_retired_for_all_tfs() -> None:
+    from src.domain.futures.strategy.family_lifecycle import FAMILY_TF_RETIREMENT
+
+    for tf in ("1h", "2h", "4h", "6h", "8h", "12h"):
+        assert ("liquidity_vacuum_breakout", tf) in FAMILY_TF_RETIREMENT, (
+            f"liquidity_vacuum_breakout not retired for {tf}"
+        )
+
+
+def test_vol_contraction_breakout_not_retired() -> None:
+    from src.domain.futures.strategy.family_lifecycle import is_family_tf_retired
+
+    assert is_family_tf_retired("vol_contraction_breakout", "4h") is False
+
+
 def test_apply_tf_gate_overrides_1d_does_not_mutate_original_cfg() -> None:
     base_cfg = CandidateStrategyConfig()
 

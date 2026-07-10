@@ -653,6 +653,107 @@ class TestSupplementaryCoverage:
         assert windows[0].opportunity_cost_bps >= 0.0
 
 
+# ── Fix 4: Date-range-based 1m coverage detection ───────────────────────
+
+
+class TestCompute1mCoverageRatio:
+    def test_s1_06_thin_file_below_threshold(self, tmp_path: Path) -> None:
+        from src.domain.futures.alpha_foundry.entry_timing import _compute_1m_coverage_ratio
+
+        thin_idx = pd.date_range("2026-06-01", "2026-07-08", freq="1min", tz="UTC")
+        thin_frame = pd.DataFrame({"datetime": thin_idx, "close": 1.0})
+        thin_frame.to_parquet(tmp_path / "THINUSDT_1m.parquet", index=False)
+
+        ratio = _compute_1m_coverage_ratio(
+            tmp_path / "THINUSDT_1m.parquet",
+            start_date=date(2019, 1, 1),
+            end_date=date(2026, 7, 8),
+        )
+        assert 0.0 < ratio < 0.95
+
+    def test_s1_07_full_coverage_above_threshold(self, tmp_path: Path) -> None:
+        from src.domain.futures.alpha_foundry.entry_timing import _compute_1m_coverage_ratio
+
+        full_idx = pd.date_range("2019-01-01", "2026-07-08", freq="1min", tz="UTC")
+        full_frame = pd.DataFrame({"datetime": full_idx, "close": 1.0})
+        full_frame.to_parquet(tmp_path / "FULLUSDT_1m.parquet", index=False)
+
+        ratio = _compute_1m_coverage_ratio(
+            tmp_path / "FULLUSDT_1m.parquet",
+            start_date=date(2019, 1, 1),
+            end_date=date(2026, 7, 8),
+        )
+        assert ratio >= 0.95
+
+    def test_s3_03_nonexistent_file_returns_zero(self, tmp_path: Path) -> None:
+        from src.domain.futures.alpha_foundry.entry_timing import _compute_1m_coverage_ratio
+
+        ratio = _compute_1m_coverage_ratio(
+            tmp_path / "NONEXISTENT_1m.parquet",
+            start_date=date(2019, 1, 1),
+            end_date=date(2026, 7, 8),
+        )
+        assert ratio == 0.0
+
+
+class TestResolve1mBackfillTargetsDateRange:
+    def test_s1_06_thin_file_flagged_as_target(self, tmp_path: Path) -> None:
+        thin_idx = pd.date_range("2026-06-01", "2026-07-08", freq="1min", tz="UTC")
+        thin_frame = pd.DataFrame({"datetime": thin_idx, "close": 1.0})
+        thin_frame.to_parquet(tmp_path / "THINUSDT_1m.parquet", index=False)
+
+        targets = resolve_1m_backfill_targets(
+            ("THINUSDT", "NEVERSUSDT"),
+            data_root=tmp_path,
+            start_date=date(2019, 1, 1),
+            end_date=date(2026, 7, 8),
+        )
+        assert "THINUSDT" in targets
+        assert "NEVERSUSDT" in targets
+
+    def test_s1_07_full_coverage_excluded(self, tmp_path: Path) -> None:
+        full_idx = pd.date_range("2019-01-01", "2026-07-08", freq="1min", tz="UTC")
+        full_frame = pd.DataFrame({"datetime": full_idx, "close": 1.0})
+        full_frame.to_parquet(tmp_path / "FULLUSDT_1m.parquet", index=False)
+
+        targets = resolve_1m_backfill_targets(
+            ("FULLUSDT",),
+            data_root=tmp_path,
+            start_date=date(2019, 1, 1),
+            end_date=date(2026, 7, 8),
+        )
+        assert "FULLUSDT" not in targets
+
+    def test_s2_10_no_file_flagged(self, tmp_path: Path) -> None:
+        targets = resolve_1m_backfill_targets(
+            ("NOSUCHSYMBOL",),
+            data_root=tmp_path,
+            start_date=date(2019, 1, 1),
+            end_date=date(2026, 7, 8),
+        )
+        assert "NOSUCHSYMBOL" in targets
+
+    def test_s2_12_consistency_with_coverage_tier(self, tmp_path: Path) -> None:
+        thin_idx = pd.date_range("2026-06-01", "2026-07-08", freq="1min", tz="UTC")
+        thin_frame = pd.DataFrame({"datetime": thin_idx, "close": 1.0})
+        thin_frame.to_parquet(tmp_path / "THINUSDT_1m.parquet", index=False)
+
+        targets = resolve_1m_backfill_targets(
+            ("THINUSDT",),
+            data_root=tmp_path,
+            start_date=date(2019, 1, 1),
+            end_date=date(2026, 7, 8),
+        )
+        tier = resolve_1m_coverage_tier(
+            ("THINUSDT",),
+            data_root=tmp_path,
+            start_date=date(2019, 1, 1),
+            end_date=date(2026, 7, 8),
+        )
+        # In targets ⟺ absent from covered_symbols
+        assert ("THINUSDT" in targets) == ("THINUSDT" not in tier.covered_symbols)
+
+
 # ── LTF Native Directional Search: Scenario 1 (Happy Path) ──────────────
 
 
@@ -660,7 +761,10 @@ class TestLtfBackfillCoverageScenario1HappyPath:
 
     @pytest.fixture
     def fake_data_root(self, tmp_path: Path) -> Path:
-        (tmp_path / "BTCUSDT_1m.parquet").touch()
+        # Write valid 1m parquet with full coverage for BTCUSDT
+        full_idx = pd.date_range("2019-01-01", "2026-07-08", freq="1min", tz="UTC")
+        full_frame = pd.DataFrame({"datetime": full_idx, "close": 1.0})
+        full_frame.to_parquet(tmp_path / "BTCUSDT_1m.parquet", index=False)
         (tmp_path / "BTCUSDT_4h.parquet").touch()
         (tmp_path / "NEWCOINUSDT_4h.parquet").touch()
         return tmp_path
@@ -669,7 +773,8 @@ class TestLtfBackfillCoverageScenario1HappyPath:
         self, fake_data_root: Path
     ) -> None:
         result = resolve_1m_backfill_targets(
-            ("BTCUSDT", "NEWCOINUSDT"), data_root=fake_data_root
+            ("BTCUSDT", "NEWCOINUSDT"), data_root=fake_data_root,
+            start_date=date(2019, 1, 1), end_date=date(2026, 7, 8),
         )
         assert result == ("NEWCOINUSDT",)
 
@@ -679,6 +784,7 @@ class TestLtfBackfillCoverageScenario1HappyPath:
         tier = resolve_1m_coverage_tier(
             ("BTCUSDT", "NEWCOINUSDT", "OTHER1", "OTHER2"),
             data_root=fake_data_root,
+            start_date=date(2019, 1, 1), end_date=date(2026, 7, 8),
         )
         assert tier.coverage_ratio == 0.25
         assert tier.is_covered("BTCUSDT") is True
@@ -717,16 +823,22 @@ class TestLtfBackfillCoverageScenario2EdgeCases:
     def test_resolve_1m_backfill_targets_empty_universe_returns_empty(
         self,
     ) -> None:
-        result = resolve_1m_backfill_targets(())
+        result = resolve_1m_backfill_targets(
+            (),
+            start_date=date(2019, 1, 1), end_date=date(2026, 7, 8),
+        )
         assert result == ()
 
     def test_resolve_1m_backfill_targets_all_covered_returns_empty(
         self, tmp_path: Path
     ) -> None:
-        (tmp_path / "BTCUSDT_1m.parquet").touch()
-        (tmp_path / "ETHUSDT_1m.parquet").touch()
+        full_idx = pd.date_range("2019-01-01", "2026-07-08", freq="1min", tz="UTC")
+        full_frame = pd.DataFrame({"datetime": full_idx, "close": 1.0})
+        full_frame.to_parquet(tmp_path / "BTCUSDT_1m.parquet", index=False)
+        full_frame.to_parquet(tmp_path / "ETHUSDT_1m.parquet", index=False)
         result = resolve_1m_backfill_targets(
-            ("BTCUSDT", "ETHUSDT"), data_root=tmp_path
+            ("BTCUSDT", "ETHUSDT"), data_root=tmp_path,
+            start_date=date(2019, 1, 1), end_date=date(2026, 7, 8),
         )
         assert result == ()
 
@@ -851,6 +963,7 @@ class TestLtfBackfillCoverageScenario3ErrorHandling:
         self,
     ) -> None:
         tier = resolve_1m_coverage_tier(
-            ("BTCUSDT",), data_root=Path("/nonexistent/path/xyz")
+            ("BTCUSDT",), data_root=Path("/nonexistent/path/xyz"),
+            start_date=date(2019, 1, 1), end_date=date(2026, 7, 8),
         )
         assert tier.coverage_ratio == 0.0
