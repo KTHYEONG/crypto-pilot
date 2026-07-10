@@ -125,9 +125,9 @@ def _run_tf_probe_stage_scoped(
         from src.application.futures.runner.active_pipeline import TfProbeStageResult
 
         return TfProbeStageResult(
-            manifest=manifest,
-            winning_cells=winning,
-            selected_tfs=selected_tfs,
+            scan_manifest=manifest,
+            qualified_cells=winning,
+            selected_timeframes=selected_tfs,
         )
     except Exception as exc:
         _logger.warning("[TF-PROBE-SCOPED] probe stage failed (fallback to None): %s", exc)

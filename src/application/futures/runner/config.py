@@ -1,4 +1,4 @@
-"""Futures runner runtime config with Alpha Foundry mode. [ADR_20260706_ALPHA_FOUNDRY_MAIN_WIRING]"""
+"""Futures runner runtime config with Alpha Foundry mode. [ADR_20260706_ALPHA_FOUNDRY_MAIN_WIRING][ADR_20260710_L0_TERMINAL_DEBUG_OBSERVABILITY]"""
 
 from __future__ import annotations
 
@@ -9,11 +9,17 @@ from typing import Any, Literal
 
 from src.domain.futures.alpha_foundry.contracts import AlphaFoundryRuntimeConfig
 
-ActivePhase = Literal["l1", "l2", "l3"]
+ActivePhase = Literal["l0", "l1", "l2", "l3"]
 SyncMode = Literal["auto", "skip"]
 
-_ACTIVE_PHASES: frozenset[str] = frozenset({"l1", "l2", "l3"})
+_ACTIVE_PHASES: frozenset[str] = frozenset({"l0", "l1", "l2", "l3"})
 _REMOVED_PHASES: frozenset[str] = frozenset({"strategy-smoke", "quick-backtest"})
+_REMOVED_ALPHA_FOUNDRY_ARG_KEYS: tuple[str, ...] = (
+    "alpha_foundry",
+    "alpha_foundry_total_l1_budget",
+    "alpha_foundry_min_conviction_lcb_bps",
+    "alpha_foundry_enable_fast_tf",
+)
 _REMOVED_ARG_KEYS: tuple[str, ...] = (
     "alpha_only",
     "skip_universe",
@@ -39,7 +45,11 @@ class FuturesRunConfig:
     refresh_universe: bool
     sync_metrics: bool
     seed: int = 42
-    alpha_foundry: AlphaFoundryRuntimeConfig = field(default_factory=AlphaFoundryRuntimeConfig)
+    l0_runtime: AlphaFoundryRuntimeConfig = field(default_factory=AlphaFoundryRuntimeConfig)
+
+    @property
+    def alpha_foundry(self) -> AlphaFoundryRuntimeConfig:
+        return self.l0_runtime
 
 
 def parse_active_phase(phase: str) -> ActivePhase:
@@ -109,11 +119,39 @@ def validate_alpha_foundry_runtime_config(
     return config
 
 
+def build_l0_runtime_config(
+    *,
+    phase: ActivePhase,
+    settings: Mapping[str, Any],
+) -> AlphaFoundryRuntimeConfig:
+    """Build internal L0 runtime config from phase + static settings, not CLI flags."""
+    raw_budget = settings.get("alpha_foundry_total_l1_budget")
+    total_l1_budget = int(raw_budget) if raw_budget is not None else 30
+    raw_conviction = settings.get("alpha_foundry_min_conviction_lcb_bps")
+    min_conviction = float(raw_conviction) if raw_conviction is not None else 5.0
+    raw_fast_tf = settings.get("alpha_foundry_enable_fast_tf")
+    enable_fast_tf = bool(raw_fast_tf) if raw_fast_tf is not None else False
+    mode: Literal["audit", "gate"] = "gate"
+    config = AlphaFoundryRuntimeConfig(
+        mode=mode,
+        total_l1_verification_budget=max(1, total_l1_budget),
+        min_conviction_lcb_bps=min_conviction,
+        enable_fast_discovery_timeframes=enable_fast_tf,
+        artifact_write_enabled=False,
+        observability_mode="debug_log",
+    )
+    return validate_alpha_foundry_runtime_config(config)
+
+
 def build_run_config_from_args(args: Namespace | Mapping[str, Any]) -> FuturesRunConfig:
     """[ADR_20260705_MAJOR_SYMBOL_REGISTRY_REPLAY_SYNC] Build runner config from CLI args or mapping."""
     if isinstance(args, Namespace):
         args = vars(args)
     phase = parse_active_phase(args.get("phase", "l3"))
+    for key in _REMOVED_ALPHA_FOUNDRY_ARG_KEYS:
+        value = args.get(key)
+        if value is not None and value is not False:
+            raise ValueError(f"removed argument: --{key.replace('_', '-')}")
     for key in _REMOVED_ARG_KEYS:
         value = args.get(key)
         if value is not None and value is not False:
@@ -121,7 +159,10 @@ def build_run_config_from_args(args: Namespace | Mapping[str, Any]) -> FuturesRu
     sync = str(args.get("sync", "auto"))
     if sync not in {"auto", "skip"}:
         raise ValueError(f"invalid sync mode: {sync!r}, expected 'auto' or 'skip'")
-    alpha_foundry_cfg = build_alpha_foundry_runtime_config(args)
+    l0_runtime_cfg = build_l0_runtime_config(
+        phase=phase,
+        settings=args,
+    )
     config = FuturesRunConfig(
         timeframe=str(args.get("timeframe", "4h")),
         date=args.get("date"),
@@ -131,6 +172,6 @@ def build_run_config_from_args(args: Namespace | Mapping[str, Any]) -> FuturesRu
         refresh_universe=bool(args.get("refresh_universe", False)),
         sync_metrics=bool(args.get("sync_metrics", False)),
         seed=int(args.get("seed", 42)),
-        alpha_foundry=alpha_foundry_cfg,
+        l0_runtime=l0_runtime_cfg,
     )
     return validate_run_config(config)

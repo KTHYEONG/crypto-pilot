@@ -1,13 +1,15 @@
+"""Active futures runner phase config with L0 runtime mapping. [ADR_20260710_L0_TERMINAL_DEBUG_OBSERVABILITY]"""
+
 from __future__ import annotations
 
 from argparse import Namespace
 from dataclasses import dataclass
 from typing import Any, Literal
 
-ActivePhase = Literal["l1", "l2", "l3"]
+ActivePhase = Literal["l0", "l1", "l2", "l3"]
 SyncMode = Literal["auto", "skip"]
 
-_ACTIVE_PHASES: frozenset[str] = frozenset({"l1", "l2", "l3"})
+_ACTIVE_PHASES: frozenset[str] = frozenset({"l0", "l1", "l2", "l3"})
 _LEGACY_PHASES: frozenset[str] = frozenset({"strategy-smoke", "quick-backtest"})
 _LEGACY_FLAGS: tuple[str, ...] = (
     "alpha_only",
