@@ -377,6 +377,14 @@ def run_alpha_foundry_l0_gate(
     n_passed = sum(1 for row in evidence_rows if bool(getattr(row, "gate_passed", False)))
     n_rejected = n_evidence - n_passed
 
+    from src.domain.futures.alpha_foundry.diversity import estimate_distinct_thesis_count
+    passed_families = [
+        str(getattr(row, "family", ""))
+        for row in evidence_rows
+        if bool(getattr(row, "gate_passed", False))
+    ]
+    n_distinct_thesis_ids_passed = estimate_distinct_thesis_count(passed_families)
+
     symbols = aligned.symbols if hasattr(aligned, "symbols") else ()
     n_bars = aligned.close_2d.shape[0] if hasattr(aligned, "close_2d") else 0
 
@@ -397,6 +405,7 @@ def run_alpha_foundry_l0_gate(
         n_rejected=n_rejected,
         reject_reason_counts=reject_reason_counts,
         elapsed_sec=elapsed_sec,
+        n_distinct_thesis_ids_passed=n_distinct_thesis_ids_passed,
         json_path="",
         parquet_path="",
     )
@@ -422,6 +431,7 @@ def run_alpha_foundry_l0_gate(
             n_rejected=n_rejected,
             reject_reason_counts=reject_reason_counts,
             elapsed_sec=elapsed_sec,
+            n_distinct_thesis_ids_passed=n_distinct_thesis_ids_passed,
             json_path=json_path,
             parquet_path=parquet_path,
         )

@@ -942,8 +942,9 @@ class AlphaFoundryBridgeReport:
     n_rejected: int
     reject_reason_counts: dict[str, int]
     elapsed_sec: float
-    json_path: str
-    parquet_path: str
+    n_distinct_thesis_ids_passed: int = 0  # additive, default preserves old fixtures [LIMIT-10]
+    json_path: str = ""
+    parquet_path: str = ""
 
 
 @dataclass(slots=True, frozen=True)
