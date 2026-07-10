@@ -21,11 +21,11 @@ Enforce the Single Source of Truth (SSOT). Finalize the task by promoting epheme
 - **In-Code ADR Referencing**:
   - Insert a brief absolute tag `[ADR_YYYYMMDD_TaskID]` directly into the Docstrings of modified source classes/functions. This links the code directly to its architectural history without polluting the logic.
 - **Dependency Indexing (docs/index.json)**:
-  - Update `docs/index.json` to map any modified or newly created source files directly to their corresponding architecture documents and tests. Avoid recording individual ADR mappings here.
+  - **Never** modify `docs/index.json` manually. Instead, run `python scripts/update_index.py --source <source_file> [--test <test_file>] [--doc <doc_file>]` to automatically update mappings.
 - **Two-File Decisions Log & Sliding Window**:
-  - **decisions.md (Active Window)**: Append new ADR entries to the **top** of `docs/decisions/decisions.md`. Maintain a maximum of **15 active entries**.
+  - **decisions.md (Active Window)**: Append new ADR entries directly to the **top** of `docs/decisions/decisions.md`.
   - **Max 5 Lines Rule**: Keep every entry highly condensed: `[Date] [Task ID] [Title] - Context/Why (2 lines) - Resolution/What (2 lines) - Impact (1 line)`. Maximum 5 lines overall.
-  - **decisions_archive.md (Permanent Archive)**: When `decisions.md` exceeds 15 entries, relocate the oldest excess entries to the **top** of `docs/decisions/decisions_archive.md`. Do not create multiple date-based archive files.
+  - **decisions_archive.md (Permanent Archive)**: **Never** read or modify `decisions_archive.md` manually. Instead, immediately run `python scripts/archive_decisions.py --max-entries 15` after editing `decisions.md` to automatically slide and archive the older window.
 
 ### 2. Zero-Residue Cleanup (CRITICAL)
 - **Purge Specs**: Proactively delete all `.md` files in `docs/specs/` related to the current task ID or feature. **Keep the `docs/specs/` directory itself; do not remove the folder.**
