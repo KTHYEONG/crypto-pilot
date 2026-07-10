@@ -180,3 +180,40 @@ def test_run_active_strategy_output_bridge_when_scope_is_empty_raises_value_erro
             preloaded_data_maps={"ETHUSDT": {}},
             trading_symbols=("BTCUSDT",),
         )
+
+
+def test_run_active_strategy_output_bridge_accepts_l0_phase(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, object] = {}
+
+    def _fake_build_strategy_config(**_kwargs: object) -> object:
+        return object()
+
+    def _fake_run_candidate_strategy_for_universe(**kwargs: object) -> CandidatePipelineOutput:
+        captured.update(kwargs)
+        return CandidatePipelineOutput()
+
+    monkeypatch.setattr(
+        "src.application.futures.optimization.strategy_service.build_candidate_strategy_config",
+        _fake_build_strategy_config,
+    )
+    monkeypatch.setattr(
+        "src.application.futures.optimization.strategy_service.run_candidate_strategy_for_universe",
+        _fake_run_candidate_strategy_for_universe,
+    )
+
+    run_config = build_run_config_from_args({"phase": "l0", "timeframe": "4h", "trials": 1, "sync": "auto"})
+    out = run_active_strategy_output_bridge(
+        run_config=run_config,
+        symbols=["BTCUSDT"],
+        tf="4h",
+        fetch_start="2025-01-01",
+        end_date="2025-04-01",
+        opt_config={"FUTURES_STRATEGY_NAME": "candidate_ml"},
+        preloaded_data_maps={"BTCUSDT": {}},
+        trading_symbols=("BTCUSDT",),
+    )
+
+    assert isinstance(out, CandidatePipelineOutput)
+    assert captured["symbols"] == ["BTCUSDT"]
