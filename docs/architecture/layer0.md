@@ -50,10 +50,12 @@ last_verified: 2026-07-10
 4. **Global L1 Budget Allocation**: 버킷 대표 품질(selected 중 최대 `block_lcb_bps`)에 비례하여 L1 시뮬레이션 슬롯을 Largest-Remainder 방식으로 배분.
 
 ### Cross-Timeframe Fusion
+- **패널-레시피 바인딩 선행**: 각 TF의 패널은 `_bind_panels_to_recipe_ids()`로 `recipe_id`가 부여된 뒤에만 `build_cheap_gate_evidence_frame()`에 전달된다. 이 바인딩 없이는 해당 TF의 evidence 프레임이 0행이 되어 이후 퓨전 입력에서 제외된다.
 - **Timeframe 정규화**: `(family, variant, timeframe)` 키를 매칭하여 동일 variant의 타 Timeframe 성과 비교.
 - **Corroboration Tier**:
   - `corroborated`: 타 TF 성과와 부호가 일치하며 강한 예측력을 보임. 컨빅션 스코어 15% 부스트 적용.
   - `contradicted`: 타 TF 성과와 부호가 불일치함. 컨빅션 스코어를 음수화하여 사실상 거부 처리.
+  - `single_tf_strict` / `insufficient_coverage`: 매칭되는 타 TF 커버리지가 1개 이하이거나 전무한 경우.
 
 # 3. Principal Data Structures
 
