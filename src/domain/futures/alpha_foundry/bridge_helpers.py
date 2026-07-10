@@ -6,20 +6,23 @@
 [ADR_20260707_ALPHA_FOUNDRY_CANONICAL_GATE_WIRING]
 [ADR_20260707_L0_MULTI_TF_GATE_REDESIGN]
 [ADR_20260706_ALPHA_FOUNDRY_L0_SIGNAL_RIGOR]
+[ADR_20260710_L0_TERMINAL_DEBUG_OBSERVABILITY]
 """
 
 from __future__ import annotations
 
 import json
+import logging
 import time as _time_module
 from collections.abc import Mapping, MutableMapping, Sequence
-from dataclasses import dataclass, replace
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, cast
 
 if TYPE_CHECKING:
     pass
 
+from src.core.utils.utils import setup_logger
 from src.domain.futures.alpha_foundry.contracts import AlphaRecipe, CandidateFeatureFamily
 from src.domain.futures.alpha_foundry.contracts import (
     AlphaRecipe as _AlphaRecipe,
@@ -27,17 +30,34 @@ from src.domain.futures.alpha_foundry.contracts import (
 from src.domain.futures.alpha_foundry.contracts import (
     PanelRecipeBinding as _PanelRecipeBinding,
 )
+from src.domain.futures.observability import emit_csv_artifact_debug, emit_json_artifact_debug
 from src.domain.futures.signals.contracts import CandidateSignalPanel
 
 
 @dataclass(slots=True, frozen=True)
 class AlphaFoundryL0Result:
     panels_for_l1: tuple[Any, ...]
-    report: Any | None
-    evidences: tuple[Any, ...]
-    bindings: tuple[Any, ...]
-    evidence_rows: tuple[Any, ...] = ()
+    summary_report: Any | None
+    gate_results: tuple[Any, ...]
+    panel_bindings: tuple[Any, ...]
+    artifact_rows: tuple[Any, ...] = ()
     discovery_units_for_l1: tuple[Any, ...] = ()
+
+    @property
+    def report(self) -> Any | None:
+        return self.summary_report
+
+    @property
+    def evidences(self) -> tuple[Any, ...]:
+        return self.gate_results
+
+    @property
+    def bindings(self) -> tuple[Any, ...]:
+        return self.panel_bindings
+
+    @property
+    def evidence_rows(self) -> tuple[Any, ...]:
+        return self.artifact_rows
 
 
 def _normalize_variant(variant: str, timeframe: str) -> str:
@@ -222,8 +242,6 @@ def _write_alpha_foundry_report(
         json.dump(report_dict, f, indent=2)
 
     if evidence_rows:
-        from dataclasses import asdict
-
         df = pd.DataFrame([asdict(r) for r in evidence_rows])
     else:
         df = pd.DataFrame(
@@ -282,9 +300,9 @@ def run_alpha_foundry_l0_gate(
     if raw_mode == "off":
         return AlphaFoundryL0Result(
             panels_for_l1=tuple(panels),
-            report=None,
-            evidences=(),
-            bindings=tuple(bindings),
+            summary_report=None,
+            gate_results=(),
+            panel_bindings=tuple(bindings),
         )
 
     mode: Literal["audit", "gate"] = cast(Literal["audit", "gate"], raw_mode)
@@ -356,7 +374,7 @@ def run_alpha_foundry_l0_gate(
     n_panels_in = len(panels)
     n_bound = len(bindings)
     n_evidence = len(evidences)
-    n_passed = len(l0_artifacts.passed_recipe_ids) if l0_artifacts is not None else 0
+    n_passed = sum(1 for row in evidence_rows if bool(getattr(row, "gate_passed", False)))
     n_rejected = n_evidence - n_passed
 
     symbols = aligned.symbols if hasattr(aligned, "symbols") else ()
@@ -410,10 +428,10 @@ def run_alpha_foundry_l0_gate(
 
     return AlphaFoundryL0Result(
         panels_for_l1=panels_for_l1,
-        report=report,
-        evidences=evidences,
-        bindings=tuple(bindings),
-        evidence_rows=evidence_rows,
+        summary_report=report,
+        gate_results=evidences,
+        panel_bindings=tuple(bindings),
+        artifact_rows=evidence_rows,
     )
 
 
@@ -427,18 +445,37 @@ def maybe_write_alpha_foundry_report(
     observability = getattr(runtime_config, "observability_mode", "debug_log")
 
     if not artifact_enabled:
-        # DEBUG mode: log only, no file write
         if observability == "debug_log":
-            import logging
-
-            logger = logging.getLogger(__name__)
-            logger.debug(
-                "[REPORT] stage=alpha_foundry run_id=%s mode=%s n_evidence=%d n_passed=%d",
-                getattr(report, "run_id", ""),
-                getattr(report, "mode", ""),
-                getattr(report, "n_evidence", 0),
-                getattr(report, "n_passed", 0),
-            )
+            logger = setup_logger("opt_main_futures", write_file=False)
+            capture_logger = logging.getLogger(__name__)
+            report_payload = {
+                "run_id": getattr(report, "run_id", ""),
+                "mode": getattr(report, "mode", ""),
+                "timeframe": getattr(report, "timeframe", ""),
+                "symbols": list(getattr(report, "symbols", ()) or ()),
+                "n_bars": getattr(report, "n_bars", 0),
+                "n_panels_in": getattr(report, "n_panels_in", 0),
+                "n_bound_panels": getattr(report, "n_bound_panels", 0),
+                "n_evidence": getattr(report, "n_evidence", 0),
+                "n_passed": getattr(report, "n_passed", 0),
+                "n_rejected": getattr(report, "n_rejected", 0),
+                "reject_reason_counts": dict(getattr(report, "reject_reason_counts", {}) or {}),
+                "elapsed_sec": getattr(report, "elapsed_sec", 0.0),
+            }
+            evidence_payload = [asdict(row) for row in evidence_rows]
+            for debug_logger in (logger, capture_logger):
+                emit_json_artifact_debug(
+                    logger=debug_logger,
+                    artifact_name="alpha_foundry_report",
+                    run_id=report_payload["run_id"],
+                    payload=report_payload,
+                )
+                emit_csv_artifact_debug(
+                    logger=debug_logger,
+                    artifact_name="alpha_foundry_evidence",
+                    run_id=report_payload["run_id"],
+                    rows=evidence_payload,
+                )
         return (None, None)
 
     report_dir = getattr(runtime_config, "report_dir", Path("logs/futures/alpha_foundry"))
