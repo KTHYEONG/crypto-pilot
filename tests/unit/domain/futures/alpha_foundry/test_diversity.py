@@ -213,6 +213,43 @@ def test_audit_full_family_correlation_matrix_symmetric() -> None:
     assert len(summary_rows) == 1
 
 
+# ── Fix 3: Economic Thesis Grouping ─────────────────────────────────────
+
+
+class TestResolveEconomicThesisId:
+    def test_s1_05_known_families_map_to_group(self) -> None:
+        from src.domain.futures.alpha_foundry.diversity import resolve_economic_thesis_id
+
+        # trend_ma and ema_trend both map to "trend_ma_cross"
+        assert resolve_economic_thesis_id("trend_ma") == "trend_ma_cross"
+        assert resolve_economic_thesis_id("ema_trend") == "trend_ma_cross"
+        # funding_slope_carry maps to "funding_carry"
+        assert resolve_economic_thesis_id("funding_slope_carry") == "funding_carry"
+
+    def test_s2_07_unknown_family_defaults_to_singleton(self) -> None:
+        from src.domain.futures.alpha_foundry.diversity import resolve_economic_thesis_id
+
+        assert resolve_economic_thesis_id("brand_new_family_not_in_map") == "brand_new_family_not_in_map"
+
+
+class TestEstimateDistinctThesisCount:
+    def test_s1_05_counts_distinct_groups(self) -> None:
+        from src.domain.futures.alpha_foundry.diversity import estimate_distinct_thesis_count
+
+        result = estimate_distinct_thesis_count(["trend_ma", "ema_trend", "funding_slope_carry"])
+        assert result == 2  # trend_ma_cross, funding_carry
+
+    def test_s3_02_empty_list_returns_zero(self) -> None:
+        from src.domain.futures.alpha_foundry.diversity import estimate_distinct_thesis_count
+
+        assert estimate_distinct_thesis_count([]) == 0
+
+    def test_all_same_family_returns_one(self) -> None:
+        from src.domain.futures.alpha_foundry.diversity import estimate_distinct_thesis_count
+
+        assert estimate_distinct_thesis_count(["trend_ma", "trend_ma", "trend_ma"]) == 1
+
+
 def test_audit_full_family_correlation_raises_on_empty_panels() -> None:
     with pytest.raises(ValueError, match="panels must not be empty"):
         audit_full_family_correlation(

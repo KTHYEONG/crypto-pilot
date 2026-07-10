@@ -455,16 +455,6 @@ def run_alpha_foundry_l0_pipeline(
         )
 
     # Build evidence_rows
-    selected_in_bucket: dict[str, int] = {
-        rid: rank for br in bucket_results for rank, rid in enumerate(br.selected_recipe_ids)
-    }
-
-    redundant_map: dict[str, str] = {}
-    for br in bucket_results:
-        redundant_map.update(br.redundant_reason_by_id)
-    if cross_result is not None:
-        redundant_map.update(cross_result.demoted_reason_by_id)
-
     hard_reject_count = 0
     soft_reject_count = 0
     seeded_count = 0
@@ -503,100 +493,26 @@ def run_alpha_foundry_l0_pipeline(
     created_at_ms = int(_time_module.time() * 1000)
     evidence_rows: list[AlphaFoundryEvidenceRow] = []
     for ev in cheap_evidences:
-        _recipe = recipes.get(ev.recipe_id)
-        family = _recipe.family if _recipe else ""
-        variant = _recipe.variant if _recipe else ""
-        archetype = _recipe.archetype if _recipe else ""
-
         ev_cand = candidate_by_rid.get(ev.recipe_id)
         decision = decision_map.get(ev.recipe_id)
-        bucket_rank = selected_in_bucket.get(ev.recipe_id, -1)
-        sel_for_l1 = decision.selected_for_l1 if decision is not None else False
-        l1_bu = decision.budget_units if decision is not None else (ev_cand.l1_budget_units if ev_cand else 0)
-        redundant_with = redundant_map.get(ev.recipe_id, "")
-
-        stage_label = ev_cand.discovery_tier if ev_cand else ""
-        source_str = ev_cand.source if ev_cand else ""
-
-        bucket_eff = 0.0
-        for br in bucket_results:
-            if ev.recipe_id in br.selected_recipe_ids or ev.recipe_id in br.redundant_recipe_ids:
-                bucket_eff = br.bucket_eff_test_count
-
-        tf_cc = ev_cand.tf_coverage_count if ev_cand else 0
-        sign_ar = ev_cand.sign_agreement_ratio if ev_cand else 0.0
-        corr_tier = ev_cand.corroboration_tier if ev_cand else ""
-        l1_ps = ev_cand.l1_priority_score if ev_cand else 0.0
-        sf_flags = "|".join(ev_cand.soft_flags) if ev_cand else ""
-
-        # Pull canonical gate fields if available
-        canon = canonical_by_rid.get(ev.recipe_id)
-        if canon is not None:
-            handoff_tier = canon.handoff_tier
-            capacity_score = canon.capacity_score
-            regime_stability = canon.regime_stability
-            tf_corroboration = canon.tf_corroboration
-            entry_mode = canon.entry_mode
-            gross_lcb_bps = canon.gross_lcb_bps
-        else:
-            handoff_tier = "candidate" if ev.gate_passed else "blocked"
-            capacity_score = 0.0
-            regime_stability = 0.0
-            tf_corroboration = 0.0
-            entry_mode = "sparse"
-            gross_lcb_bps = 0.0
-
+        bucket_result = next(
+            (
+                br
+                for br in bucket_results
+                if ev.recipe_id in br.ranked_recipe_ids
+            ),
+            None,
+        )
         evidence_rows.append(
-            AlphaFoundryEvidenceRow(
-                run_id=run_id,
-                timeframe=ev.timeframe,
-                family=family,
-                variant=variant,
-                recipe_id=ev.recipe_id,
-                archetype=archetype,
-                n_events=ev.n_events,
-                effective_n=ev.effective_n,
-                mean_gross_bps=ev.mean_gross_bps,
-                mean_cost_bps=ev.mean_cost_bps,
-                mean_net_bps=ev.mean_net_bps,
-                gross_lcb_bps=gross_lcb_bps,
-                net_lcb_bps=ev.block_lcb_bps,
-                nw_tstat=ev.nw_tstat,
-                rank_ic=ev.rank_ic,
-                rank_ic_tstat=0.0,
-                cost_drag_ratio=ev.cost_drag_ratio,
-                turnover_per_year=ev.turnover_per_year,
-                novelty_corr_max=ev.novelty_corr_max,
-                incremental_rank_ic=ev.incremental_rank_ic,
-                compute_cost_score=ev.compute_cost_score,
-                event_hit_rate=0.0,
-                payoff_skew=0.0,
-                xs_spread_lcb_bps=None,
-                liquidity_cost_stress_bps=0.0,
-                bootstrap_lcb_bps=ev.bootstrap_lcb_bps,
-                bootstrap_agree=ev.bootstrap_agree,
-                gate_passed=ev.gate_passed,
-                handoff_tier=handoff_tier,
-                selected_for_l1=sel_for_l1,
-                reject_reasons="|".join(ev.reject_reasons),
-                soft_flags=sf_flags,
-                bucket_key=f"{family}:{ev.timeframe}",
-                bucket_rank=bucket_rank,
-                redundant_with=redundant_with,
-                bucket_eff_test_count=bucket_eff,
-                global_eff_test_count=cross_result.global_eff_test_count if cross_result else 0.0,
-                l1_priority_score=l1_ps,
-                l1_budget_units=l1_bu,
-                tf_coverage_count=tf_cc,
-                sign_agreement_ratio=sign_ar,
-                corroboration_tier=corr_tier,
-                stage_label=stage_label,
+            build_alpha_foundry_evidence_row(
+                cheap_evidence=ev,
+                canonical_evidence=canonical_by_rid.get(ev.recipe_id),
+                candidate=ev_cand,
+                handoff_decision=decision,
+                bucket_result=bucket_result,
+                cross_bucket_result=cross_result,
                 created_at_ms=created_at_ms,
-                source=source_str,
-                capacity_score=capacity_score,
-                regime_stability=regime_stability,
-                tf_corroboration=tf_corroboration,
-                entry_mode=entry_mode,
+                source=ev_cand.source if ev_cand else "",
             )
         )
 
@@ -716,3 +632,99 @@ def run_alpha_foundry_pipeline(
     l2_sleeves: tuple[L2PosteriorSleeve, ...] = ()
 
     return l0.evidences, l1_units, l1_posterior, l2_sleeves
+
+
+def build_alpha_foundry_evidence_row(
+    *,
+    cheap_evidence: CheapGateEvidence,
+    canonical_evidence: AlphaGateEvidence | None,
+    candidate: L0SignalCandidate | None,
+    handoff_decision: L0HandoffDecision | None,
+    bucket_result: DiversitySelectionResult | None,
+    cross_bucket_result: CrossBucketDiversityResult | None,
+    created_at_ms: int,
+    source: str,
+) -> AlphaFoundryEvidenceRow:
+    """Build terminal evidence using canonical gate metrics when available."""
+    if canonical_evidence is None:
+        raise RuntimeError("missing canonical evidence for bound recipe")
+
+    c = canonical_evidence
+    ev = cheap_evidence
+    cand = candidate
+    decision = handoff_decision
+
+    recipe_id = c.recipe_id if c.recipe_id else ev.recipe_id
+    family = c.family
+    variant = c.variant
+    timeframe = c.timeframe if c.timeframe else ev.timeframe
+
+    sel_for_l1 = decision.selected_for_l1 if decision is not None else False
+    l1_bu = decision.budget_units if decision is not None else (cand.l1_budget_units if cand else 0)
+
+    bucket_rank = 0
+    bucket_eff = 0.0
+    redundant_with = ""
+    if bucket_result is not None:
+        ranked = bucket_result.ranked_recipe_ids
+        if recipe_id in ranked:
+            bucket_rank = ranked.index(recipe_id)
+        if recipe_id in bucket_result.selected_recipe_ids or recipe_id in bucket_result.redundant_recipe_ids:
+            bucket_eff = bucket_result.bucket_eff_test_count
+        redundant_with = bucket_result.redundant_reason_by_id.get(recipe_id, "")
+
+    stage_label = cand.discovery_tier if cand else ""
+    source_str = source if source else (cand.source if cand else "")
+    sf_flags = "|".join(c.soft_flags) if c.soft_flags else "|".join(cand.soft_flags) if cand else ""
+
+    return AlphaFoundryEvidenceRow(
+        run_id=c.run_id,
+        timeframe=timeframe,
+        family=family,
+        variant=variant,
+        recipe_id=recipe_id,
+        archetype=c.archetype,
+        n_events=c.n_events,
+        effective_n=c.effective_n,
+        mean_gross_bps=c.mean_gross_bps,
+        mean_cost_bps=c.mean_cost_bps,
+        mean_net_bps=c.mean_net_bps,
+        gross_lcb_bps=c.gross_lcb_bps,
+        net_lcb_bps=c.net_lcb_bps,
+        nw_tstat=c.nw_tstat,
+        rank_ic=c.rank_ic,
+        rank_ic_tstat=c.rank_ic_tstat,
+        cost_drag_ratio=c.cost_drag_ratio,
+        turnover_per_year=c.turnover_per_year,
+        novelty_corr_max=c.novelty_corr_max,
+        incremental_rank_ic=c.incremental_rank_ic,
+        compute_cost_score=c.compute_cost_score,
+        event_hit_rate=c.event_hit_rate,
+        payoff_skew=c.payoff_skew,
+        xs_spread_lcb_bps=c.xs_spread_lcb_bps,
+        liquidity_cost_stress_bps=c.liquidity_cost_stress_bps,
+        bootstrap_lcb_bps=c.bootstrap_lcb_bps,
+        bootstrap_agree=c.bootstrap_agree,
+        gate_passed=c.gate_passed,
+        handoff_tier=c.handoff_tier,
+        selected_for_l1=sel_for_l1,
+        reject_reasons="|".join(c.reject_reasons),
+        soft_flags=sf_flags,
+        bucket_key=f"{family}:{timeframe}",
+        bucket_rank=bucket_rank,
+        redundant_with=redundant_with,
+        bucket_eff_test_count=bucket_eff,
+        global_eff_test_count=cross_bucket_result.global_eff_test_count if cross_bucket_result else 0.0,
+        l1_priority_score=cand.l1_priority_score if cand else 0.0,
+        l1_budget_units=l1_bu,
+        tf_coverage_count=cand.tf_coverage_count if cand else 0,
+        sign_agreement_ratio=cand.sign_agreement_ratio if cand else 0.0,
+        corroboration_tier=cand.corroboration_tier if cand else "",
+        stage_label=stage_label,
+        created_at_ms=created_at_ms,
+        source=source_str,
+        capacity_score=c.capacity_score,
+        regime_stability=c.regime_stability,
+        tf_corroboration=c.tf_corroboration,
+        entry_mode=c.entry_mode,
+    )

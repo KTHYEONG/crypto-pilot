@@ -165,6 +165,54 @@ class StrategyConfig:
 
 
 @dataclass(slots=True, frozen=True)
+class LiquidityParticipationBreakoutConfig:
+    """[ADR_20260710_L0_SIGNAL_BREADTH_DIVERSITY_REDESIGN] No local cost/ADV threshold; see active_mask."""
+
+    channel_bars: tuple[int, ...] = (40, 60)
+    min_breakout_impulse_atr: float = 0.25
+    score_impulse_atr: float = 1.00
+    min_volume_zscore: float = 0.50
+    # max_event_cost_bps / min_adv_usdt removed [LIMIT-05]: liquidity eligibility
+    # comes solely from AlignedMarketData.active_mask (canonical
+    # UniverseStateCube.eligible via ExecutionEligibilityConfig).
+
+    def __post_init__(self) -> None:
+        if not self.channel_bars:
+            raise ValueError("channel_bars must be non-empty")
+        if any(w < 2 for w in self.channel_bars):
+            raise ValueError("all channel_bars must be >= 2")
+        if self.min_breakout_impulse_atr < 0.0:
+            raise ValueError("min_breakout_impulse_atr must be >= 0")
+        if self.score_impulse_atr <= 0.0:
+            raise ValueError("score_impulse_atr must be > 0")
+        if self.min_volume_zscore < 0.0:
+            raise ValueError("min_volume_zscore must be >= 0")
+
+
+@dataclass(slots=True, frozen=True)
+class BtcNeutralResidualReversalConfig:
+    """[ADR_20260710_L0_SIGNAL_BREADTH_DIVERSITY_REDESIGN] No local cost/ADV threshold; see active_mask."""
+
+    lookback_bars: tuple[int, ...] = (24, 48)
+    tail_fraction: float = 0.20
+    min_cross_section: int = 30  # unchanged [LIMIT-08]
+    max_abs_btc_beta: float = 0.80
+    # max_event_cost_bps / min_adv_usdt removed [LIMIT-05]: same reason as above.
+
+    def __post_init__(self) -> None:
+        if not self.lookback_bars:
+            raise ValueError("lookback_bars must be non-empty")
+        if any(w < 2 for w in self.lookback_bars):
+            raise ValueError("all lookback_bars must be >= 2")
+        if not (0.0 < self.tail_fraction < 0.5):
+            raise ValueError("tail_fraction must be in (0, 0.5)")
+        if self.min_cross_section < 2:
+            raise ValueError("min_cross_section must be >= 2")
+        if self.max_abs_btc_beta < 0.0:
+            raise ValueError("max_abs_btc_beta must be >= 0")
+
+
+@dataclass(slots=True, frozen=True)
 class CandidateStrategyConfig:
     """Candidate strategy routing config."""
 
@@ -438,6 +486,14 @@ class CandidateStrategyConfig:
         "vol_contraction_breakout",
         "xs_residual_rebalance",
         "carry_net_of_funding",
+        "liquidity_participation_breakout",
+        "btc_neutral_residual_reversal",
+    )
+    liquidity_participation_breakout: LiquidityParticipationBreakoutConfig = field(
+        default_factory=LiquidityParticipationBreakoutConfig
+    )
+    btc_neutral_residual_reversal: BtcNeutralResidualReversalConfig = field(
+        default_factory=BtcNeutralResidualReversalConfig
     )
     # TF-Specific Signal Pools
     per_tf_candidate_families: dict[str, tuple[str, ...]] | None = None
@@ -927,6 +983,32 @@ class CandidateStrategyConfig:
             raise ValueError("ensemble_score_calibration_min_obs must be >= 1")
         if self.ensemble_score_slope_k <= 0.0:
             raise ValueError("ensemble_score_slope_k must be positive")
+        if self.liquidity_participation_breakout is not None:
+            lpb = self.liquidity_participation_breakout
+            if not lpb.channel_bars:
+                raise ValueError("liquidity_participation_breakout.channel_bars must be non-empty")
+            if any(w < 2 for w in lpb.channel_bars):
+                raise ValueError("all liquidity_participation_breakout.channel_bars must be >= 2")
+            if lpb.min_breakout_impulse_atr < 0.0:
+                raise ValueError("liquidity_participation_breakout.min_breakout_impulse_atr must be >= 0")
+            if lpb.score_impulse_atr <= 0.0:
+                raise ValueError("liquidity_participation_breakout.score_impulse_atr must be > 0")
+            if lpb.min_volume_zscore < 0.0:
+                raise ValueError("liquidity_participation_breakout.min_volume_zscore must be >= 0")
+            # max_event_cost_bps / min_adv_usdt validation removed [LIMIT-05]
+        if self.btc_neutral_residual_reversal is not None:
+            bnrr = self.btc_neutral_residual_reversal
+            if not bnrr.lookback_bars:
+                raise ValueError("btc_neutral_residual_reversal.lookback_bars must be non-empty")
+            if any(w < 2 for w in bnrr.lookback_bars):
+                raise ValueError("all btc_neutral_residual_reversal.lookback_bars must be >= 2")
+            if not (0.0 < bnrr.tail_fraction < 0.5):
+                raise ValueError("btc_neutral_residual_reversal.tail_fraction must be in (0, 0.5)")
+            # max_event_cost_bps / min_adv_usdt validation removed [LIMIT-05]
+            if bnrr.min_cross_section < 2:
+                raise ValueError("btc_neutral_residual_reversal.min_cross_section must be >= 2")
+            if bnrr.max_abs_btc_beta < 0.0:
+                raise ValueError("btc_neutral_residual_reversal.max_abs_btc_beta must be >= 0")
 
 
 def with_max_holding_bars(

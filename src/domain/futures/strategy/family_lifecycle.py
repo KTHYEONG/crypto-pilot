@@ -1,4 +1,7 @@
-"""Signal family x timeframe retirement registry. [ADR_20260706_L0_SIGNAL_FAMILY_DIVERSITY]"""
+"""Signal family x timeframe retirement registry.
+
+[ADR_20260706_L0_SIGNAL_FAMILY_DIVERSITY][ADR_20260710_L0_SIGNAL_BREADTH_DIVERSITY_REDESIGN]
+"""
 
 from __future__ import annotations
 
@@ -20,6 +23,13 @@ FAMILY_TF_RETIREMENT: frozenset[tuple[str, str]] = frozenset({
     ("vol_breakout", "4h"),             # gross=-27.70bps — 비용 이전에 gross 자체가 확정적으로 음수
     ("residual_momentum_xs", "4h"),     # cost_drag=3.77, nw_tstat=-9.58 — 강한 확신의 음의 엣지
     ("xs_residual_rebalance", "4h"),    # cost_drag=5.14, nw_tstat=-6.40 — 상동
+    # --- l0_signal_breadth_diversity_redesign (Fix 3 — LIMIT-11) ---
+    ("liquidity_vacuum_breakout", "1h"),
+    ("liquidity_vacuum_breakout", "2h"),
+    ("liquidity_vacuum_breakout", "4h"),
+    ("liquidity_vacuum_breakout", "6h"),
+    ("liquidity_vacuum_breakout", "8h"),
+    ("liquidity_vacuum_breakout", "12h"),
 })
 
 
