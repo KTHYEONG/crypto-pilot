@@ -265,18 +265,54 @@ def aggregate_entry_timing_evidence(
     return result
 
 
+def _compute_1m_coverage_ratio(
+    path: Path,
+    *,
+    start_date: date,
+    end_date: date,
+) -> float:
+    """[ADR_20260710_L0_SIGNAL_BREADTH_DIVERSITY_REDESIGN] Return the fraction of expected 1-minute bars present in ``path`` over the window.
+
+    Returns 0.0 if the file is absent, empty, zero-byte, or lacks a ``datetime`` column —
+    mirrors ``evaluate_symbol_data_sufficiency()``'s ``exec_1m_coverage`` arithmetic
+    (``opt_data_utils.py:144-146``) so the two coverage definitions cannot drift apart.
+    [LIMIT-12]
+    """
+    if not path.exists() or path.stat().st_size == 0:
+        return 0.0
+    try:
+        frame = pd.read_parquet(path, columns=["datetime"])
+    except Exception:
+        return 0.0
+    if frame.empty or "datetime" not in frame.columns:
+        return 0.0
+    dt = pd.to_datetime(frame["datetime"], utc=True, errors="coerce").dropna()
+    start_ts = pd.Timestamp(start_date, tz="UTC")
+    end_ts = pd.Timestamp(end_date, tz="UTC")
+    actual = int(((dt >= start_ts) & (dt <= end_ts)).sum())
+    required = max(1, int((end_ts - start_ts).total_seconds() // 60))
+    return float(actual) / float(required)
+
+
 def resolve_1m_backfill_targets(
     universe_symbols: tuple[str, ...],
     data_root: Path = Path("data/futures"),
+    *,
+    start_date: date = date(2019, 1, 1),
+    end_date: date,
+    min_coverage_ratio: float = 0.95,
 ) -> tuple[str, ...]:
-    """Return symbols from universe_symbols missing a {symbol}_1m.parquet file.
+    """Return symbols whose 1m coverage ratio over (start_date, end_date) is below the floor.
 
-    [ADR_20260708_LTF_NATIVE_DIRECTIONAL_SEARCH]
+    Replaces the prior ``path.exists()``-only check: a file that exists but only
+    covers a recent slice is still reported as a backfill target for the full
+    requested window. [LIMIT-12][LIMIT-14]
     """
     missing: list[str] = []
     for symbol in universe_symbols:
         path = data_root / f"{symbol}_1m.parquet"
-        if not path.exists():
+        ratio = _compute_1m_coverage_ratio(path, start_date=start_date, end_date=end_date)
+        if ratio < min_coverage_ratio:
             missing.append(symbol)
     return tuple(missing)
 
@@ -307,12 +343,18 @@ def resolve_1m_coverage_tier(
     universe_symbols: tuple[str, ...],
     *,
     data_root: Path = Path("data/futures"),
+    start_date: date = date(2019, 1, 1),
+    end_date: date,
+    min_coverage_ratio: float = 0.95,
 ) -> Universe1mCoverageTier:
-    """Build Universe1mCoverageTier by checking file existence for each symbol."""
+    """Build Universe1mCoverageTier using the same date-range coverage ratio as
+    resolve_1m_backfill_targets() — [LIMIT-14] keeps the two functions consistent.
+    """
     covered: set[str] = set()
     for symbol in universe_symbols:
         path = data_root / f"{symbol}_1m.parquet"
-        if path.exists():
+        ratio = _compute_1m_coverage_ratio(path, start_date=start_date, end_date=end_date)
+        if ratio >= min_coverage_ratio:
             covered.add(symbol)
     return Universe1mCoverageTier(
         covered_symbols=frozenset(covered),
