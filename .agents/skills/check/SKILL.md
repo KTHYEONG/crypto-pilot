@@ -46,12 +46,12 @@ If any step in the validation pipeline fails:
 - **FAIL**: Any discrepancy found. ➔ **Transition to `implement` (or `spec`)** with clear Gap Analysis.
 
 ## Output Format
-검증 결과는 아래의 가독성 및 기계적 파싱이 용이한 포맷으로만 작성합니다. 특히 FAIL 시의 `Fix` 항목은 다음 단계를 수행할 AI가 즉각적으로 작업에 반영할 수 있도록 구체적인 대상 파일, 함수/클래스명, 수정 명령어로 구조화하여 작성해야 합니다.
+Write check results strictly in the format below to ensure readability and easy mechanical parsing. In particular, the 'Fix' item in case of FAIL must be structured with the target file, function/class name, and specific modification action so that the next AI agent can apply it immediately.
 
-### 🟢 PASS 시 포맷:
-🟢 PASS | All checks passed (Cov [수치]%)
+### 🟢 PASS Format:
+🟢 PASS | All checks passed (Cov [value]%)
 
-### 🔴 FAIL 시 포맷:
-🔴 FAIL | [간략한 실패 요약]
-- 🔍 Cause: [파일 경로:라인 번호] - [에러 유형 또는 구체적 수치 미달 사유]
-- 🛠️ Fix: Apply [수정 동작] to [함수/클래스명] in [대상 파일 경로] (예: Apply adding 2 boundary tests (`n<4`, `non-finite`) to `kaufman_efficiency_ratio` in `tests/unit/domain/futures/optimization/test_metrics.py`)
+### 🔴 FAIL Format:
+🔴 FAIL | [brief failure summary]
+- 🔍 Cause: [file path:line number] - [error type or specific reason for failing to meet criteria]
+- 🛠️ Fix: Apply [modification action] to [function/class name] in [target file path] (e.g., Apply adding 2 boundary tests (`n<4`, `non-finite`) to `kaufman_efficiency_ratio` in `tests/unit/domain/futures/optimization/test_metrics.py`)
