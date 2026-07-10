@@ -205,19 +205,55 @@ class RuntimeBreakdown:
         return max(float(self.total) - self.accounted, 0.0)
 
 
-@dataclass(frozen=True, slots=True)
-class TfProbeStageResult:
-    """Result container for the TF Probe stage.
-
-    Attributes:
-        manifest: Full probe diagnostic output (all symbol x family x tf cells).
-        winning_cells: Tuple of cells that passed all gate criteria.
-        selected_tfs: Unique timeframes present in winning cells.
-    """
+@dataclass(frozen=True, slots=True, init=False)
+class TimeframeScanStageResult:
+    """Canonical TF scan result container with backward-compatible aliases."""
 
     manifest: TfProbeManifest
     winning_cells: tuple[TfCellEvidence, ...]
     selected_tfs: frozenset[str]
+
+    def __init__(
+        self,
+        manifest: TfProbeManifest | None = None,
+        winning_cells: tuple[TfCellEvidence, ...] | None = None,
+        selected_tfs: frozenset[str] | None = None,
+        **kwargs: Any,
+    ) -> None:
+        scan_manifest = kwargs.pop("scan_manifest", None)
+        qualified_cells = kwargs.pop("qualified_cells", None)
+        selected_timeframes = kwargs.pop("selected_timeframes", None)
+        if kwargs:
+            unexpected = ", ".join(sorted(kwargs))
+            raise TypeError(f"unexpected keyword arguments: {unexpected}")
+
+        final_manifest = scan_manifest if scan_manifest is not None else manifest
+        final_cells = qualified_cells if qualified_cells is not None else winning_cells
+        final_selected = selected_timeframes if selected_timeframes is not None else selected_tfs
+        if final_manifest is None:
+            raise TypeError("missing required argument: manifest")
+        if final_cells is None:
+            final_cells = ()
+        if final_selected is None:
+            final_selected = frozenset()
+        object.__setattr__(self, "manifest", final_manifest)
+        object.__setattr__(self, "winning_cells", final_cells)
+        object.__setattr__(self, "selected_tfs", final_selected)
+
+    @property
+    def scan_manifest(self) -> TfProbeManifest:
+        return self.manifest
+
+    @property
+    def qualified_cells(self) -> tuple[TfCellEvidence, ...]:
+        return self.winning_cells
+
+    @property
+    def selected_timeframes(self) -> frozenset[str]:
+        return self.selected_tfs
+
+
+TfProbeStageResult = TimeframeScanStageResult
 
 
 def _select_probe_source_tf(sym_maps: Mapping[str, Any], target_tf: str) -> str | None:
@@ -1118,9 +1154,9 @@ def _run_tf_probe_stage(
             (8, 8, 8, 10, 10, 10, 8, 16),
         )
         return TfProbeStageResult(
-            manifest=manifest,
-            winning_cells=winning,
-            selected_tfs=selected_tfs,
+            scan_manifest=manifest,
+            qualified_cells=winning,
+            selected_timeframes=selected_tfs,
         )
     except Exception as exc:
         _logger.warning("[TF-PROBE] probe stage failed (fallback to base-only): %s", exc)
@@ -2154,7 +2190,7 @@ def _run_strategy_stage(
     *,
     probe_result: TfProbeStageResult | None = None,
 ) -> CandidatePipelineOutput | RunnerResult | Layer1Result | None:
-    """[ADR_20260705_TF_PROBE_SCOPED_SYNC] Build the strategy maps, run scoped TF probe
+    """[ADR_20260705_TF_PROBE_SCOPED_SYNC][ADR_20260710_L0_TERMINAL_DEBUG_OBSERVABILITY] Build the strategy maps, run scoped TF probe
     before early data release, then continue the existing tiered pipeline flow.
     """
     # ─── 기존 Phase D 진입 (공통 설정 → bridge → 선택적 Tiered 분기) ──────────
@@ -2338,6 +2374,9 @@ def _run_strategy_stage(
         if af_report.mode == "gate" and af_report.n_passed <= 0:
             _logger.info("[ALPHA-FOUNDRY] gate produced zero survivors; stopping before tiered L1")
             return None
+    if run_config.phase == "l0":
+        _logger.info("[L0] alpha gate completed; stopping before L1 routing")
+        return RunnerResult(exit_code=0, reason="l0_mode_done")
     _rss_pre_gc = _get_rss_mb()
     _logger.debug("[MEM] stage=pre_gc rss=%.0fMB", _rss_pre_gc)
     gc.collect()

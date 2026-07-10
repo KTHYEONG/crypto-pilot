@@ -83,9 +83,8 @@ class TestRunFromCli:
         assert result == 2
         mock_pipeline.assert_not_called()
 
-    def test_alpha_foundry_audit_mode_passed_to_config(self, mocker: MockerFixture) -> None:
+    def test_alpha_foundry_audit_mode_rejected_in_cli(self, mocker: MockerFixture) -> None:
         mock_pipeline = mocker.patch("src.application.futures.runner.cli.run_pipeline")
-        mock_pipeline.return_value = RunnerResult(0, "ok")
 
         result = run_from_cli(
             [
@@ -102,14 +101,11 @@ class TestRunFromCli:
             ]
         )
 
-        assert result == 0
-        mock_pipeline.assert_called_once()
-        config = mock_pipeline.call_args[0][0]
-        assert config.alpha_foundry.mode == "audit"
+        assert result == 2
+        mock_pipeline.assert_not_called()
 
-    def test_alpha_foundry_gate_mode_passed_to_config(self, mocker: MockerFixture) -> None:
+    def test_alpha_foundry_gate_mode_rejected_in_cli(self, mocker: MockerFixture) -> None:
         mock_pipeline = mocker.patch("src.application.futures.runner.cli.run_pipeline")
-        mock_pipeline.return_value = RunnerResult(0, "ok")
 
         result = run_from_cli(
             [
@@ -126,12 +122,10 @@ class TestRunFromCli:
             ]
         )
 
-        assert result == 0
-        mock_pipeline.assert_called_once()
-        config = mock_pipeline.call_args[0][0]
-        assert config.alpha_foundry.mode == "gate"
+        assert result == 2
+        mock_pipeline.assert_not_called()
 
-    def test_alpha_foundry_default_is_off(self, mocker: MockerFixture) -> None:
+    def test_l0_runtime_default_is_gate(self, mocker: MockerFixture) -> None:
         mock_pipeline = mocker.patch("src.application.futures.runner.cli.run_pipeline")
         mock_pipeline.return_value = RunnerResult(0, "ok")
 
@@ -139,9 +133,9 @@ class TestRunFromCli:
 
         assert result == 0
         config = mock_pipeline.call_args[0][0]
-        assert config.alpha_foundry.mode == "off"
+        assert config.alpha_foundry.mode == "gate"
 
-    def test_legacy_args_preserved_with_alpha_foundry(self, mocker: MockerFixture) -> None:
+    def test_seed_preserved_without_alpha_foundry_args(self, mocker: MockerFixture) -> None:
         mock_pipeline = mocker.patch("src.application.futures.runner.cli.run_pipeline")
         mock_pipeline.return_value = RunnerResult(0, "ok")
 
@@ -155,8 +149,6 @@ class TestRunFromCli:
                 "10",
                 "--sync",
                 "auto",
-                "--alpha-foundry",
-                "audit",
                 "--seed",
                 "99",
             ]
@@ -169,7 +161,7 @@ class TestRunFromCli:
         assert config.trials == 10
         assert config.sync == "auto"
         assert config.seed == 99
-        assert config.alpha_foundry.mode == "audit"
+        assert config.alpha_foundry.mode == "gate"
 
 
 class TestBuildAlphaFoundryRuntimeConfig:

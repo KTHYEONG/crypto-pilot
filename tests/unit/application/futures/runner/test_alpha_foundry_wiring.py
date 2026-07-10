@@ -271,7 +271,9 @@ class TestDebugSummary:
 class TestMaybeWriteAlphaFoundryReport:
     """S1-6: DEBUG mode returns (None, None), artifact disabled returns (None, None)."""
 
-    def test_debug_mode_no_file_write(self) -> None:
+    def test_debug_mode_no_file_write(self, caplog) -> None:
+        import logging
+
         from src.domain.futures.alpha_foundry.bridge_helpers import (
             maybe_write_alpha_foundry_report,
         )
@@ -280,6 +282,7 @@ class TestMaybeWriteAlphaFoundryReport:
             AlphaFoundryRuntimeConfig,
         )
 
+        caplog.set_level(logging.DEBUG)
         report = AlphaFoundryBridgeReport(
             run_id="test",
             mode="gate",
@@ -308,6 +311,99 @@ class TestMaybeWriteAlphaFoundryReport:
         )
         assert jp is None
         assert pp is None
+        assert "ARTIFACT_JSON_BEGIN name=alpha_foundry_report run_id=test" in caplog.text
+        assert "ARTIFACT_CSV_BEGIN name=alpha_foundry_evidence run_id=test" in caplog.text
+
+    def test_debug_mode_logs_evidence_rows_without_file_write(self, caplog) -> None:
+        import logging
+
+        from src.domain.futures.alpha_foundry.bridge_helpers import maybe_write_alpha_foundry_report
+        from src.domain.futures.alpha_foundry.contracts import (
+            AlphaFoundryBridgeReport,
+            AlphaFoundryEvidenceRow,
+            AlphaFoundryRuntimeConfig,
+        )
+
+        caplog.set_level(logging.DEBUG)
+        report = AlphaFoundryBridgeReport(
+            run_id="test_rows",
+            mode="gate",
+            timeframe="4h",
+            symbols=("BTCUSDT",),
+            n_bars=100,
+            n_panels_in=10,
+            n_bound_panels=5,
+            n_evidence=1,
+            n_passed=1,
+            n_rejected=0,
+            reject_reason_counts={"weak_tstat": 1},
+            elapsed_sec=0.0,
+            json_path="",
+            parquet_path="",
+        )
+        row = AlphaFoundryEvidenceRow(
+            run_id="test_rows",
+            timeframe="4h",
+            family="trend_pullback_continuation",
+            variant="tpc_fast",
+            recipe_id="r1",
+            archetype="trend",
+            n_events=12,
+            mean_gross_bps=5.0,
+            mean_cost_bps=1.0,
+            effective_n=8.0,
+            mean_net_bps=4.0,
+            gross_lcb_bps=1.2,
+            net_lcb_bps=1.1,
+            nw_tstat=1.5,
+            rank_ic=0.02,
+            rank_ic_tstat=0.5,
+            incremental_rank_ic=0.01,
+            cost_drag_ratio=0.2,
+            turnover_per_year=12.0,
+            novelty_corr_max=0.1,
+            compute_cost_score=0.1,
+            event_hit_rate=0.5,
+            payoff_skew=0.0,
+            xs_spread_lcb_bps=None,
+            liquidity_cost_stress_bps=0.1,
+            bootstrap_lcb_bps=0.8,
+            bootstrap_agree=True,
+            gate_passed=True,
+            handoff_tier="candidate",
+            selected_for_l1=True,
+            reject_reasons="",
+            soft_flags="",
+            bucket_key="trend::4h",
+            bucket_rank=1,
+            redundant_with="",
+            bucket_eff_test_count=1.0,
+            global_eff_test_count=1.0,
+            l1_priority_score=1.0,
+            l1_budget_units=1,
+            tf_coverage_count=1,
+            sign_agreement_ratio=1.0,
+            corroboration_tier="confirmed",
+            stage_label="candidate",
+            created_at_ms=1,
+        )
+        config = AlphaFoundryRuntimeConfig(
+            mode="gate",
+            artifact_write_enabled=False,
+            observability_mode="debug_log",
+        )
+
+        jp, pp = maybe_write_alpha_foundry_report(
+            report=report,
+            evidence_rows=(row,),
+            runtime_config=config,
+        )
+
+        assert jp is None
+        assert pp is None
+        assert "test_rows" in caplog.text
+        assert "trend_pullback_continuation" in caplog.text
+        assert "selected_for_l1" in caplog.text
 
     def test_artifact_write_disabled_returns_none(self) -> None:
         from src.domain.futures.alpha_foundry.bridge_helpers import (

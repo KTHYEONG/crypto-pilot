@@ -1,3 +1,5 @@
+"""Candidate strategy bridge and phase-aware L0 dispatch. [ADR_20260710_L0_TERMINAL_DEBUG_OBSERVABILITY]"""
+
 from __future__ import annotations
 
 import logging
@@ -332,7 +334,7 @@ def run_active_strategy_output_bridge(
         fetch_start,
         end_date,
     )
-    if run_config.phase not in {"l1", "l2", "l3"}:
+    if run_config.phase not in {"l0", "l1", "l2", "l3"}:
         raise ValueError(f"unsupported phase for active strategy bridge: {run_config.phase}")
     if preloaded_data_maps is None:
         raise ValueError("active strategy bridge requires preloaded_data_maps")
