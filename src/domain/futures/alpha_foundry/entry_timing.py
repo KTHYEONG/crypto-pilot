@@ -271,7 +271,7 @@ def _compute_1m_coverage_ratio(
     start_date: date,
     end_date: date,
 ) -> float:
-    """[ADR_20260710_L0_SIGNAL_BREADTH_DIVERSITY_REDESIGN] Return the fraction of expected 1-minute bars present in ``path`` over the window.
+    """[ADR_20260710_L0_SIGNAL_BREADTH_DIVERSITY_REDESIGN] Fraction of expected 1-minute bars present in ``path``.
 
     Returns 0.0 if the file is absent, empty, zero-byte, or lacks a ``datetime`` column —
     mirrors ``evaluate_symbol_data_sufficiency()``'s ``exec_1m_coverage`` arithmetic
