@@ -11,7 +11,6 @@ related_paths:
   - src/domain/futures/signals/ltf_alpha.py
   - src/domain/futures/signals/contracts.py
   - src/domain/futures/signals/workflow.py
-  - src/domain/futures/signals/timeframes.py
   - src/domain/futures/signals/ensemble.py
   - src/domain/futures/strategy/tiered_workflow/pipeline.py
   - src/domain/futures/optimization/metrics.py
