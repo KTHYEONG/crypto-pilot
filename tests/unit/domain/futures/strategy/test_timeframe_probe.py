@@ -681,12 +681,14 @@ class TestProbeWorkerNormalization:
             _fake_build_rule_signal_panels,
         )
 
+        from src.domain.futures.strategy.config import CandidateStrategyConfig
+
         result = _probe_tf_worker(
             (
                 {"BTCUSDT": _make_ohlcv_df(n=16, freq="4h", seed=1)},
                 ("BTCUSDT",),
                 "1h",
-                {"timeframe": "4h"},
+                CandidateStrategyConfig(timeframe="4h"),
                 None,
                 6.0,
             )
@@ -1279,8 +1281,10 @@ class TestTimeframeProbeFixes:
             }
         )
 
+        from src.domain.futures.strategy.config import CandidateStrategyConfig
+
         resampled_maps = {"BTCUSDT": df}
-        base_cfg_kwargs = {"timeframe": "12h"}
+        base_cfg = CandidateStrategyConfig(timeframe="12h")
 
         # Construct a mock CandidateSignalPanel
         # valid_mask_2d has exactly 12 True entries
@@ -1340,7 +1344,7 @@ class TestTimeframeProbeFixes:
                     resampled_maps,
                     symbols,
                     tf,
-                    base_cfg_kwargs,
+                    base_cfg,
                     None,
                     6.0,
                 )

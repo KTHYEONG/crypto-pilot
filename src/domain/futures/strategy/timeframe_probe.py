@@ -1,4 +1,7 @@
-"""Timeframe alpha probe: (symbol x family x tf) cell-level signal diagnostics."""
+"""Timeframe alpha probe: (symbol x family x tf) cell-level signal diagnostics.
+
+[ADR_20260710_L0_TF_CORROBORATION_WIRING_FIX]
+"""
 
 from __future__ import annotations
 
@@ -380,21 +383,21 @@ def _probe_tf_worker(args: tuple[Any, ...]) -> list[dict[str, Any]]:
         resampled_maps_for_tf,  # dict[symbol, pd.DataFrame] for this tf
         symbols,
         tf,
-        base_cfg_kwargs,  # serializable cfg fields as dict
+        base_cfg,  # CandidateStrategyConfig instance [LIMIT-05]
         fold_boundary_strs,  # list[str] ISO timestamps or None
         round_trip_cost_bps,
     ) = args
 
+    import dataclasses
     import logging as _logging
 
     from src.domain.futures.strategy.common.alignment import align_data_maps
-    from src.domain.futures.strategy.config import CandidateStrategyConfig
     from src.domain.futures.strategy.rule_signals import build_rule_signal_panels
 
     _wlog = _logging.getLogger(__name__)
 
-    # Reconstruct cfg with tf substitution and scaled bar params
-    cfg = CandidateStrategyConfig(**{**base_cfg_kwargs, "timeframe": tf})
+    # Derive per-TF config via dataclasses.replace (survives init=False fields) [LIMIT-06]
+    cfg = dataclasses.replace(base_cfg, timeframe=tf)
 
     # Build data_maps wrapper {symbol: {tf: df}}
     data_maps_tf: dict[str, dict[str, Any]] = {sym: {tf: df} for sym, df in resampled_maps_for_tf.items()}
@@ -574,19 +577,8 @@ def scan_timeframe_alpha(
     if fold_boundaries is not None:
         fold_boundary_strs = [str(ts) for ts in fold_boundaries]
 
-    # Extract serializable cfg fields
-    import dataclasses
-
-    try:
-        base_cfg_kwargs: dict[str, Any] = {
-            k: v for k, v in dataclasses.asdict(base_cfg).items() if not k.startswith("_")
-        }
-        # Remove non-init fields if any
-        base_cfg_kwargs.pop("_purge_bars_input", None)
-        base_cfg_kwargs.pop("_embargo_bars_input", None)
-    except Exception as exc:
-        _logger.warning("Failed to serialize base_cfg: %s", exc)
-        base_cfg_kwargs = {}
+    # base_cfg is passed directly (picklable via ProcessPoolExecutor);
+    # per-TF derivation via dataclasses.replace() happens inside the worker. [LIMIT-05][LIMIT-06]
 
     # Resample data for each tf and gather coverage
     all_cell_dicts: list[dict[str, Any]] = []
@@ -633,7 +625,7 @@ def scan_timeframe_alpha(
                 resampled_maps,
                 tuple(available_syms),
                 tf,
-                base_cfg_kwargs,
+                base_cfg,
                 fold_boundary_strs,
                 round_trip_cost_bps,
             )
