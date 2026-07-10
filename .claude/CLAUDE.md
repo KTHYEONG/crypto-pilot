@@ -32,8 +32,8 @@
     - **Trigger:** Execute when a `.py` file is created or modified.
     - **Action:** 
         - **Implementation Phase (L1):** Run stub signature checks first.
-        - **Check Phase (L2):** Execute unified regression test and coverage under the `check` skill batch plan.
-    - **Test Scope:** Use `uv run pytest` to run tests and measure coverage, strictly following the directives in [.agents/rules/testing.md](file:///.agents/rules/testing.md). Use `uv run pytest -k "keyword"` with the `--tb=short` option for fast feedback during iterations.
+        - **Check Phase (L2):** Execute targeted regression test and coverage under the `check` skill batch plan.
+    - **Test Scope:** Do **not** run raw `uv run pytest` for the entire project. Run `uv run pytest` targeting **only** the modified test files (Targeted Verification) matching the 1:1 Co-modification Mapping, using `--tb=short` for fast feedback.
 
 ## 5. Tech Stack & Standards (Python 3.11)
 - **Version:** Based on Python 3.11+. Actively utilize modern syntax (TaskGroup, `|` operator, `Self`, etc.).
@@ -113,5 +113,5 @@ To maintain a clean and navigable codebase, documentation must follow a strict s
   - Constraint: NO history, NO conversational prose. Must be immediately understandable as the structural SSOT.
 - **Decisions (`docs/decisions/`):** "Two-File Decisions Log Architecture" (ADR).
   - decisions.md (Active Window): Cumulative log, strictly maximum of 5 lines per task (Max 5 Lines Rule) appended to the top. Max 15 active entries.
-  - decisions_archive.md (Permanent Archive): Relocate pruned entries from decisions.md to this single archive file.
-  - Workflow: The `sync` skill MUST condense implementation decisions into decisions.md and handle the sliding window pruning to decisions_archive.md.
+  - decisions_archive.md (Permanent Archive): Relocate pruned entries from decisions.md to this single archive file. **Never** modify this file manually.
+  - Workflow: The `sync` skill MUST append implementation decisions to decisions.md and execute `python scripts/archive_decisions.py --max-entries 15` to automatically slide and archive the older window, preventing manual editing overhead.
