@@ -15,7 +15,7 @@ trigger:
   - on_file_path_regex: "src/.*(client|broker|exchange|websocket|rest|order_manager).*"
   
   # 3. Manual label activation
-  - on_label: ["trading_bot", "매매봇"]
+  - on_label: ["trading_bot"]
 ---
 
 # Trading Bot & Execution Directives (Subagent Mode)
