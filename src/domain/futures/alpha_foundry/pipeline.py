@@ -8,10 +8,12 @@
 [ADR_20260706_ALPHA_FOUNDRY_L0_SIGNAL_RIGOR]
 [ADR_20260708_L0_EDGE_FAILURE_ATTRIBUTION]
 [ADR_20260709_L0_CONDITIONAL_DIAGNOSTIC_WIRING]
+[ADR_20260710_L0_TF_CORROBORATION_WIRING_FIX]
 """
 
 from __future__ import annotations
 
+import logging
 import time as _time_module
 from collections.abc import Mapping, MutableMapping, Sequence
 from dataclasses import dataclass, field, replace
@@ -75,6 +77,8 @@ from src.domain.futures.alpha_foundry.search_space import (
 from src.domain.futures.signals.contracts import CandidateSignalPanel
 from src.domain.futures.strategy.common.alignment import AlignedMarketData
 from src.domain.futures.strategy.execution_cost import ExecutionCostModel
+
+_logger = logging.getLogger(__name__)
 
 
 @dataclass(slots=True, frozen=True)
@@ -317,6 +321,11 @@ def run_alpha_foundry_l0_pipeline(
     if evidence_by_tf:
         tf_fusion = fuse_multi_timeframe_evidence(evidence_by_tf=evidence_by_tf)
         tf_fusion_index = index_multi_timeframe_evidence(tf_fusion)
+        _n_evidence_rows_total = sum(len(df) for df in evidence_by_tf.values())
+        _logger.debug(
+            "[ALGO] stage=tf_fusion n_evidence_rows_total=%d n_fusion_groups=%d n_recipes_indexed=%d",
+            _n_evidence_rows_total, len(tf_fusion), len(tf_fusion_index),
+        )  # [LIMIT-08]
     else:
         tf_fusion = ()
         tf_fusion_index = {}

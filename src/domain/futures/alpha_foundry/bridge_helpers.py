@@ -7,6 +7,7 @@
 [ADR_20260707_L0_MULTI_TF_GATE_REDESIGN]
 [ADR_20260706_ALPHA_FOUNDRY_L0_SIGNAL_RIGOR]
 [ADR_20260710_L0_TERMINAL_DEBUG_OBSERVABILITY]
+[ADR_20260710_L0_TF_CORROBORATION_WIRING_FIX]
 """
 
 from __future__ import annotations
@@ -21,7 +22,6 @@ from typing import TYPE_CHECKING, Any, Literal, cast
 
 if TYPE_CHECKING:
     pass
-
 from src.core.utils.utils import setup_logger
 from src.domain.futures.alpha_foundry.contracts import AlphaRecipe, CandidateFeatureFamily
 from src.domain.futures.alpha_foundry.contracts import (
@@ -32,6 +32,8 @@ from src.domain.futures.alpha_foundry.contracts import (
 )
 from src.domain.futures.observability import emit_csv_artifact_debug, emit_json_artifact_debug
 from src.domain.futures.signals.contracts import CandidateSignalPanel
+
+_logger = logging.getLogger(__name__)
 
 
 @dataclass(slots=True, frozen=True)
@@ -58,6 +60,31 @@ class AlphaFoundryL0Result:
     @property
     def evidence_rows(self) -> tuple[Any, ...]:
         return self.artifact_rows
+
+
+def _bind_panels_to_recipe_ids(
+    panels: Sequence[Any],
+    bindings: Sequence[Any],
+) -> tuple[Any, ...]:
+    """Attach metadata['recipe_id'] to each panel per its binding record.
+
+    Pure transform shared by the multi-TF cheap-evidence fan-out (Phase 1)
+    and the canonical per-TF gate (`run_alpha_foundry_l0_gate`) — previously
+    duplicated inline only in the latter, leaving Phase 1's panels unbound
+    and `evidence_by_tf` structurally empty. [LIMIT-01][LIMIT-02]
+    """
+    binding_by_index = {b.panel_index: b for b in bindings}
+    return tuple(
+        replace(
+            panel,
+            metadata={
+                **dict(getattr(panel, "metadata", {}) or {}),
+                "recipe_id": binding_by_index[i].recipe_id,
+            },
+        )
+        for i, panel in enumerate(panels)
+        if i in binding_by_index
+    )
 
 
 def _normalize_variant(variant: str, timeframe: str) -> str:
@@ -307,19 +334,7 @@ def run_alpha_foundry_l0_gate(
 
     mode: Literal["audit", "gate"] = cast(Literal["audit", "gate"], raw_mode)
 
-    binding_by_index = {b.panel_index: b for b in bindings}
-    bound_panel_indices = set(binding_by_index)
-    bound_panels = [
-        replace(
-            panel,
-            metadata={
-                **dict(getattr(panel, "metadata", {}) or {}),
-                "recipe_id": binding_by_index[i].recipe_id,
-            },
-        )
-        for i, panel in enumerate(panels)
-        if i in bound_panel_indices
-    ]
+    bound_panels = list(_bind_panels_to_recipe_ids(panels, bindings))
 
     cheap_config = runtime_config.cheap_gate if hasattr(runtime_config, "cheap_gate") else None
     l0_start = _time_module.perf_counter()
@@ -565,10 +580,11 @@ def run_alpha_foundry_l0_gate_multi_tf(
 
     import pandas as pd
 
-    # Phase 1: cheap-gate per TF -> evidence_by_tf
+    # Phase 1: bind panels to recipe_id, then cheap-gate per TF -> evidence_by_tf [LIMIT-01][LIMIT-03]
     evidence_by_tf: dict[str, Any] = {}
     for tf, tf_panels in panels_by_tf.items():
         tf_recipes = recipes_by_tf.get(tf, {})
+        tf_bindings = bindings_by_tf.get(tf, [])
         if not tf_panels or not tf_recipes:
             evidence_by_tf[tf] = pd.DataFrame(
                 {
@@ -582,14 +598,21 @@ def run_alpha_foundry_l0_gate_multi_tf(
                 }
             )
             continue
+        bound_tf_panels = _bind_panels_to_recipe_ids(tf_panels, tf_bindings)
         evidence_by_tf[tf] = build_cheap_gate_evidence_frame(
-            panels=tf_panels,
+            panels=bound_tf_panels,
             recipes=tf_recipes,
             aligned=aligned_by_tf[tf],
             cost_model=cost_model,
             cheap_gate_config=runtime_config.cheap_gate,
             timeframe=tf,
         )
+        n_evidence_rows = len(evidence_by_tf[tf])
+        _log_fn = _logger.warning if (tf_bindings and n_evidence_rows == 0) else _logger.debug
+        _log_fn(
+            "[SYS] stage=multi_tf_cheap_evidence tf=%s n_panels_in=%d n_bindings=%d n_evidence_rows=%d",
+            tf, len(tf_panels), len(tf_bindings), n_evidence_rows,
+        )  # [LIMIT-08][LIMIT-09]
 
     # Phase 2: fuse_multi_timeframe_evidence is called inside pipeline
     # Phase 3: canonical gate per TF
@@ -610,5 +633,26 @@ def run_alpha_foundry_l0_gate_multi_tf(
             run_id=_run_id,
             timeframe=tf,
             evidence_by_tf=evidence_by_tf,
+        )
+
+    # [EVAL] tf_corroboration distribution summary — once per run [LIMIT-08]
+    _all_rows: list[Any] = []
+    for r in results.values():
+        _all_rows.extend(r.evidence_rows)
+    if _all_rows:
+        _n_total = len(_all_rows)
+        _n_gt0 = 0
+        _cov_vals: list[int] = []
+        for row in _all_rows:
+            cov: int = int(getattr(row, "tf_coverage_count", 0) or 0)
+            if cov > 0:
+                _n_gt0 += 1
+                _cov_vals.append(cov)
+        _cov_vals.sort()
+        _median_cov = _cov_vals[len(_cov_vals) // 2] if _cov_vals else 0
+        _logger.debug(
+            "[EVAL] stage=tf_corroboration_summary"
+            " n_rows_total=%d n_rows_tf_coverage_gt0=%d median_tf_coverage_count=%d",
+            _n_total, _n_gt0, _median_cov,
         )
     return results
