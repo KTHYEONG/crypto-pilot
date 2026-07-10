@@ -125,6 +125,8 @@ def test_build_rule_signal_panels_returns_expected_tuple() -> None:
         "vol_contraction_breakout",
         "xs_residual_rebalance",
         "carry_net_of_funding",
+        "liquidity_participation_breakout",
+        "btc_neutral_residual_reversal",
     }
 
     for p in panels:

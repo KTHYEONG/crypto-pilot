@@ -2346,6 +2346,7 @@ def _run_strategy_stage(
             timeframe=run_config.timeframe,
         ).candidate
         tiered_cfg = replace(tiered_cfg, seed=int(getattr(run_config, "seed", 42)))
+    _pit_state_cube = _resolve_universe_state_cube(universe_result)
     t_bridge_start = time.perf_counter()
     ml_out = run_active_strategy_output_bridge(
         run_config=run_config,
@@ -2357,6 +2358,7 @@ def _run_strategy_stage(
         preloaded_data_maps=full_strategy_maps,
         trading_symbols=bridge_symbol_scope,
         silent=False,
+        state_cube=_pit_state_cube,
     )
     bridge_elapsed = time.perf_counter() - t_bridge_start
     strategy_steps["bridge"] = bridge_elapsed
@@ -2394,7 +2396,6 @@ def _run_strategy_stage(
             from src.domain.futures.portfolio.portfolio_constructor import PortfolioCaps
             from src.domain.futures.strategy.common.alignment import align_data_maps
 
-            _pit_state_cube = _resolve_universe_state_cube(universe_result)
             _mem_align = _get_rss_mb()
             t_align = time.perf_counter()
             aligned_tiered = align_data_maps(

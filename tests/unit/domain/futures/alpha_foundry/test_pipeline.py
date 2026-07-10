@@ -6,6 +6,7 @@ import pytest
 
 from src.domain.futures.alpha_foundry.contracts import (
     AlphaFoundryEvidenceRow,
+    AlphaGateEvidence,
     AlphaRecipe,
     CheapGateConfig,
     CheapGateEvidence,
@@ -16,6 +17,7 @@ from src.domain.futures.alpha_foundry.contracts import (
     PosteriorGateConfig,
 )
 from src.domain.futures.alpha_foundry.pipeline import (
+    build_alpha_foundry_evidence_row,
     build_l0_handoff_decisions,
     build_l2_sleeves_from_posterior,
     build_posterior_from_l1_fold_rows,
@@ -1016,3 +1018,172 @@ class TestL0PipelineHandoff:
         for row in artifacts.evidence_rows:
             if row.handoff_tier == "blocked":
                 assert not row.selected_for_l1, f"{row.recipe_id} blocked but selected_for_l1"
+
+
+# ─── build_alpha_foundry_evidence_row tests ────────────────────────────
+
+
+def _make_cheap_evidence(
+    recipe_id: str = "test:r1:4h:abc",
+    gate_passed: bool = True,
+) -> CheapGateEvidence:
+    return CheapGateEvidence(
+        recipe_id=recipe_id,
+        timeframe="4h",
+        symbol_scope="symbol",
+        n_events=64,
+        effective_n=64.0,
+        mean_net_bps=19.0,
+        nw_tstat=1.40,
+        block_lcb_bps=2.0,
+        rank_ic=0.05,
+        cost_drag_ratio=0.32,
+        turnover_per_year=48.0,
+        novelty_corr_max=0.10,
+        incremental_rank_ic=0.02,
+        compute_cost_score=0.0,
+        bootstrap_lcb_bps=1.0,
+        bootstrap_agree=True,
+        gate_passed=gate_passed,
+        reject_reasons=(),
+        mean_gross_bps=28.0,
+        mean_cost_bps=9.0,
+    )
+
+
+def _make_canonical_evidence() -> AlphaGateEvidence:
+    return AlphaGateEvidence(
+        schema_version="unified",
+        run_id="run-1",
+        timeframe="4h",
+        family="liquidity_participation_breakout",
+        variant="lpb_40",
+        recipe_id="test:r1:4h:abc",
+        archetype="trend",
+        symbol_scope="symbol",
+        n_events=64,
+        effective_n=64.0,
+        mean_gross_bps=28.0,
+        mean_cost_bps=9.0,
+        mean_net_bps=19.0,
+        gross_lcb_bps=11.0,
+        net_lcb_bps=2.0,
+        nw_tstat=1.40,
+        rank_ic=0.05,
+        rank_ic_tstat=2.10,
+        cost_drag_ratio=0.32,
+        turnover_per_year=48.0,
+        novelty_corr_max=0.10,
+        incremental_rank_ic=0.02,
+        compute_cost_score=0.0,
+        event_hit_rate=0.56,
+        payoff_skew=0.30,
+        xs_spread_lcb_bps=None,
+        liquidity_cost_stress_bps=1.5,
+        bootstrap_lcb_bps=1.0,
+        bootstrap_agree=True,
+        gate_passed=True,
+        handoff_tier="candidate",
+        selected_for_l1=False,
+        reject_reasons=(),
+        soft_flags=(),
+        capacity_score=0.90,
+        regime_stability=0.72,
+        tf_corroboration=0.50,
+        entry_mode="sparse",
+    )
+
+
+class TestBuildAlphaFoundryEvidenceRow:
+    """S1-03: Terminal row uses canonical values when available."""
+
+    def test_s1_03_terminal_evidence_uses_canonical_gate_values(self) -> None:
+        cheap = _make_cheap_evidence()
+        canonical = _make_canonical_evidence()
+        row = build_alpha_foundry_evidence_row(
+            cheap_evidence=cheap,
+            canonical_evidence=canonical,
+            candidate=None,
+            handoff_decision=None,
+            bucket_result=None,
+            cross_bucket_result=None,
+            created_at_ms=1000,
+            source="test",
+        )
+        assert row.net_lcb_bps == canonical.net_lcb_bps
+        assert row.gate_passed == canonical.gate_passed
+        assert row.handoff_tier == canonical.handoff_tier
+        assert row.mean_net_bps == canonical.mean_net_bps
+        assert np.isfinite(row.mean_net_bps)
+
+    def test_s3_03_missing_canonical_evidence_raises(self) -> None:
+        cheap = _make_cheap_evidence()
+        with pytest.raises(RuntimeError, match="missing canonical evidence"):
+            build_alpha_foundry_evidence_row(
+                cheap_evidence=cheap,
+                canonical_evidence=None,
+                candidate=None,
+                handoff_decision=None,
+                bucket_result=None,
+                cross_bucket_result=None,
+                created_at_ms=1000,
+                source="test",
+            )
+
+    def test_s2_07_cheap_pass_canonical_block_reports_blocked(self) -> None:
+        cheap = _make_cheap_evidence(gate_passed=True)
+        canonical = _make_canonical_evidence()
+        canonical = canonical.__class__(
+            schema_version=canonical.schema_version,
+            run_id=canonical.run_id,
+            timeframe=canonical.timeframe,
+            family=canonical.family,
+            variant=canonical.variant,
+            recipe_id=canonical.recipe_id,
+            archetype=canonical.archetype,
+            symbol_scope=canonical.symbol_scope,
+            n_events=canonical.n_events,
+            effective_n=canonical.effective_n,
+            mean_gross_bps=canonical.mean_gross_bps,
+            mean_cost_bps=canonical.mean_cost_bps,
+            mean_net_bps=canonical.mean_net_bps,
+            gross_lcb_bps=canonical.gross_lcb_bps,
+            net_lcb_bps=canonical.net_lcb_bps,
+            nw_tstat=canonical.nw_tstat,
+            rank_ic=canonical.rank_ic,
+            rank_ic_tstat=canonical.rank_ic_tstat,
+            cost_drag_ratio=canonical.cost_drag_ratio,
+            turnover_per_year=canonical.turnover_per_year,
+            novelty_corr_max=canonical.novelty_corr_max,
+            incremental_rank_ic=canonical.incremental_rank_ic,
+            compute_cost_score=canonical.compute_cost_score,
+            event_hit_rate=canonical.event_hit_rate,
+            payoff_skew=canonical.payoff_skew,
+            xs_spread_lcb_bps=canonical.xs_spread_lcb_bps,
+            liquidity_cost_stress_bps=canonical.liquidity_cost_stress_bps,
+            bootstrap_lcb_bps=canonical.bootstrap_lcb_bps,
+            bootstrap_agree=False,
+            gate_passed=False,
+            handoff_tier="blocked",
+            selected_for_l1=canonical.selected_for_l1,
+            reject_reasons=("bootstrap_disagree",),
+            soft_flags=canonical.soft_flags,
+            capacity_score=canonical.capacity_score,
+            regime_stability=canonical.regime_stability,
+            tf_corroboration=canonical.tf_corroboration,
+            entry_mode=canonical.entry_mode,
+        )
+        row = build_alpha_foundry_evidence_row(
+            cheap_evidence=cheap,
+            canonical_evidence=canonical,
+            candidate=None,
+            handoff_decision=None,
+            bucket_result=None,
+            cross_bucket_result=None,
+            created_at_ms=1000,
+            source="test",
+        )
+        assert row.gate_passed is False
+        assert row.handoff_tier == "blocked"
+        assert row.bootstrap_agree is False
+        assert "bootstrap_disagree" in row.reject_reasons

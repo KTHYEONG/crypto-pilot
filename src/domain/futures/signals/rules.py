@@ -41,6 +41,7 @@ ALL_SIGNAL_FAMILIES: tuple[str, ...] = (
     "sparse_breakout_retest_liquidity", "funding_flow_exhaustion_sparse",
     "oi_lsr_unwind", "vol_contraction_breakout",
     "xs_residual_rebalance", "carry_net_of_funding",
+    "liquidity_participation_breakout", "btc_neutral_residual_reversal",
 )
 
 
@@ -2011,6 +2012,24 @@ def build_rule_signal_panels(
         futures = {pool.submit(_build_single_family, fam): fam for fam in active_families}
         for fut in as_completed(futures):
             panels.extend(fut.result())
+
+    from src.domain.futures.signals.causal_diversified_candidates import (
+        build_causal_diversified_signal_panels,
+    )
+
+    if family_filter is None or {
+        "liquidity_participation_breakout",
+        "btc_neutral_residual_reversal",
+    }.intersection(family_filter):
+        panels.extend(
+            build_causal_diversified_signal_panels(
+                aligned=aligned,
+                cfg=cfg,
+                valid_mask_2d=valid_mask,
+                atr_2d=atr,
+                btc_index=btc_idx,
+            )
+        )
 
     panels.sort(key=lambda p: (p.family, p.variant))
 

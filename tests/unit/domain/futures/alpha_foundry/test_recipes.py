@@ -33,6 +33,8 @@ ALL_FAMILIES = (
     "oi_flow_squeeze",
     "xs_residual_flow_rotation",
     "volume_participation_breakout",
+    "liquidity_participation_breakout",
+    "btc_neutral_residual_reversal",
 )
 
 FAMILY_ARCHETYPE_MAP: dict[str, str] = {
@@ -120,7 +122,7 @@ class TestBuildAlphaRecipeCatalog:
         assert "funding_flow_exhaustion_sparse" in families
         assert "oi_lsr_unwind" in families
         assert "vol_contraction_breakout" in families
-        assert "xs_residual_rebalance" in families
+        # xs_residual_rebalance retired at 4h via FAMILY_TF_RETIREMENT
         assert "carry_net_of_funding" in families
 
     def test_ltf_native_families_in_catalog(self) -> None:
@@ -133,6 +135,13 @@ class TestBuildAlphaRecipeCatalog:
         assert "oi_flow_squeeze" in families
         assert "xs_residual_flow_rotation" in families
         assert "volume_participation_breakout" in families
+
+    def test_liquidity_vacuum_breakout_retired_from_catalog(self) -> None:
+        """S2-09: After retirement, no liquidity_vacuum_breakout recipe in catalog."""
+        recipes = build_alpha_recipe_catalog(timeframe="4h")
+        families = {r.family for r in recipes}
+        assert "liquidity_vacuum_breakout" not in families
+        assert "vol_contraction_breakout" in families  # unaffected
 
     def test_sparse_recipe_turnover_more_conservative_than_continuous(self) -> None:
         recipes = build_alpha_recipe_catalog(timeframe="4h")
@@ -169,3 +178,54 @@ class TestBuildAlphaRecipeCatalogErrors:
         recipes = build_alpha_recipe_catalog(timeframe="4h")
         ids = [r.recipe_id for r in recipes]
         assert len(ids) == len(set(ids))
+
+
+# ─── S1-04: New panel recipes bound to catalog ──────────────────────────
+
+
+class TestNewRecipeRegistrations:
+    def test_lpb_recipes_have_causal_lag_one(self) -> None:
+        recipes = build_alpha_recipe_catalog(
+            timeframe="4h", include_families=("liquidity_participation_breakout",)
+        )
+        assert len(recipes) == 2
+        for r in recipes:
+            assert r.causal_lag_bars == 1
+
+    def test_bnrr_recipes_have_causal_lag_one(self) -> None:
+        recipes = build_alpha_recipe_catalog(
+            timeframe="4h", include_families=("btc_neutral_residual_reversal",)
+        )
+        assert len(recipes) == 2
+        for r in recipes:
+            assert r.causal_lag_bars == 1
+
+    def test_lpb_recipes_use_catalog_exact_ids(self) -> None:
+        recipes = build_alpha_recipe_catalog(
+            timeframe="4h", include_families=("liquidity_participation_breakout",)
+        )
+        variants = {r.variant for r in recipes}
+        assert "lpb_40" in variants
+        assert "lpb_60" in variants
+
+    def test_bnrr_recipes_use_catalog_exact_ids(self) -> None:
+        recipes = build_alpha_recipe_catalog(
+            timeframe="4h", include_families=("btc_neutral_residual_reversal",)
+        )
+        variants = {r.variant for r in recipes}
+        assert "bnrr_24" in variants
+        assert "bnrr_48" in variants
+
+    def test_lpb_archetype_is_trend(self) -> None:
+        recipes = build_alpha_recipe_catalog(
+            timeframe="4h", include_families=("liquidity_participation_breakout",)
+        )
+        for r in recipes:
+            assert r.archetype == "trend"
+
+    def test_bnrr_archetype_is_cross_sectional(self) -> None:
+        recipes = build_alpha_recipe_catalog(
+            timeframe="4h", include_families=("btc_neutral_residual_reversal",)
+        )
+        for r in recipes:
+            assert r.archetype == "cross_sectional"

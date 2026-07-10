@@ -5,7 +5,9 @@ import pytest
 from src.domain.futures.strategy.config import (
     _DEFAULT_PER_TF_FAMILIES,
     DEPRIORITIZED_FAMILY_PRIOR,
+    BtcNeutralResidualReversalConfig,
     CandidateStrategyConfig,
+    LiquidityParticipationBreakoutConfig,
     resolve_purge_and_embargo_bars,
     with_max_holding_bars,
 )
@@ -104,3 +106,89 @@ def test_default_per_tf_families_1h_2h_includes_trend_pullback_continuation() ->
 
 def test_family_prior_score_deprioritized_families_all_negative() -> None:
     assert all(v < 0 for v in DEPRIORITIZED_FAMILY_PRIOR.values())
+
+
+# ─── LiquidityParticipationBreakoutConfig ──────────────────────────────
+
+
+def test_lpb_config_defaults() -> None:
+    cfg = LiquidityParticipationBreakoutConfig()
+    assert cfg.channel_bars == (40, 60)
+    assert cfg.min_breakout_impulse_atr == 0.25
+    assert cfg.score_impulse_atr == 1.00
+    assert cfg.min_volume_zscore == 0.50
+    # max_event_cost_bps / min_adv_usdt removed [LIMIT-05]
+    assert not hasattr(cfg, "max_event_cost_bps")
+    assert not hasattr(cfg, "min_adv_usdt")
+
+
+def test_lpb_config_s3_01_invalid_channel_bars_single_element() -> None:
+    with pytest.raises(ValueError, match="channel_bars"):
+        LiquidityParticipationBreakoutConfig(channel_bars=(1,))
+
+
+def test_lpb_config_s3_01_invalid_zero_score_scale() -> None:
+    with pytest.raises(ValueError, match="score_impulse_atr"):
+        LiquidityParticipationBreakoutConfig(score_impulse_atr=0.0)
+
+
+def test_lpb_config_empty_channel_bars() -> None:
+    with pytest.raises(ValueError, match="channel_bars"):
+        LiquidityParticipationBreakoutConfig(channel_bars=())
+
+
+# ─── BtcNeutralResidualReversalConfig ──────────────────────────────────
+
+
+def test_bnrr_config_defaults() -> None:
+    cfg = BtcNeutralResidualReversalConfig()
+    assert cfg.lookback_bars == (24, 48)
+    assert cfg.tail_fraction == 0.20
+    # max_event_cost_bps / min_adv_usdt removed [LIMIT-05]
+    assert not hasattr(cfg, "max_event_cost_bps")
+    assert not hasattr(cfg, "min_adv_usdt")
+    assert cfg.min_cross_section == 30
+    assert cfg.max_abs_btc_beta == 0.80
+
+
+def test_bnrr_config_s3_02_invalid_tail_fraction_ge_05() -> None:
+    with pytest.raises(ValueError, match="tail_fraction"):
+        BtcNeutralResidualReversalConfig(tail_fraction=0.5)
+
+
+def test_bnrr_config_s3_02_invalid_tail_fraction_above_05() -> None:
+    with pytest.raises(ValueError, match="tail_fraction"):
+        BtcNeutralResidualReversalConfig(tail_fraction=0.7)
+
+
+def test_bnrr_config_s3_02_invalid_min_cross_section_below_2() -> None:
+    with pytest.raises(ValueError, match="min_cross_section"):
+        BtcNeutralResidualReversalConfig(min_cross_section=1)
+
+
+def test_bnrr_config_empty_lookback_bars() -> None:
+    with pytest.raises(ValueError, match="lookback_bars"):
+        BtcNeutralResidualReversalConfig(lookback_bars=())
+
+
+# ─── CandidateStrategyConfig new fields ────────────────────────────────
+
+
+def test_candidate_config_includes_new_families() -> None:
+    cfg = CandidateStrategyConfig()
+    assert "liquidity_participation_breakout" in cfg.candidate_families
+    assert "btc_neutral_residual_reversal" in cfg.candidate_families
+
+
+def test_candidate_config_lpb_defaults_injected() -> None:
+    cfg = CandidateStrategyConfig()
+    lpb = cfg.liquidity_participation_breakout
+    assert lpb.channel_bars == (40, 60)
+    assert lpb.min_breakout_impulse_atr == 0.25
+
+
+def test_candidate_config_bnrr_defaults_injected() -> None:
+    cfg = CandidateStrategyConfig()
+    bnrr = cfg.btc_neutral_residual_reversal
+    assert bnrr.lookback_bars == (24, 48)
+    assert bnrr.tail_fraction == 0.20

@@ -329,6 +329,7 @@ def run_active_strategy_output_bridge(
     preloaded_data_maps: dict[str, dict[str, Any]] | None = None,
     trading_symbols: tuple[str, ...] | None = None,
     silent: bool = False,
+    state_cube: Any | None = None,
 ) -> CandidatePipelineOutput:
     del (
         fetch_start,
@@ -360,6 +361,7 @@ def run_active_strategy_output_bridge(
         preloaded_data_maps=preloaded_data_maps,
         alpha_foundry_config=getattr(run_config, "alpha_foundry", None),
         silent=silent,
+        state_cube=state_cube,
     )
     _logger.log(
         PERF,

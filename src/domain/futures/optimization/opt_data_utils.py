@@ -79,6 +79,7 @@ def evaluate_symbol_data_sufficiency(
     scope_name: str = "unknown",
     onboard_date: str | None = None,
 ) -> dict[str, Any]:
+    """[ADR_20260710_L0_SIGNAL_BREADTH_DIVERSITY_REDESIGN] exec_1m no longer gates admission `pass`/`reason`."""
     frame = symbol_map.get(tf)
     if not isinstance(frame, pd.DataFrame) or frame.empty or "datetime" not in frame.columns:
         return {"symbol": symbol, "tf": tf, "pass": False, "reason": "missing_tf_frame"}
@@ -158,16 +159,13 @@ def evaluate_symbol_data_sufficiency(
         panel_history_ok = first_dt <= _panel_cutoff
 
     if is_historical_stage5:
-        # C1 학습 패널은 delisted 포함 historical union이므로
-        # 전체 fetch/OOS 종단 커버리지를 강제하지 않는다.
-        pass_flag = bool(warmup_ok and actual_is_bars >= min_is_bars and exec_1m_ok and panel_history_ok and gap_ok)
+        pass_flag = bool(warmup_ok and actual_is_bars >= min_is_bars and panel_history_ok and gap_ok)
     else:
         pass_flag = bool(
             fetch_ok
             and warmup_ok
             and actual_is_bars >= min_is_bars
             and actual_oos_bars >= min_oos_bars
-            and exec_1m_ok
             and gap_ok
         )
     reason = "ok"
@@ -181,10 +179,9 @@ def evaluate_symbol_data_sufficiency(
         reason = "panel_history_insufficient"
     elif actual_oos_bars < min_oos_bars and not is_historical_stage5:
         reason = "oos_coverage_short"
-    elif not exec_1m_ok:
-        reason = "missing_exec_1m"
     elif not gap_ok:
         reason = "gap_too_large"
+    # exec_1m_ok intentionally excluded from pass_flag/reason [LIMIT-01].
 
     return {
         "symbol": symbol,
@@ -198,6 +195,7 @@ def evaluate_symbol_data_sufficiency(
         "actual_is_bars": actual_is_bars,
         "required_oos_bars": required_oos_bars,
         "actual_oos_bars": actual_oos_bars,
+        "exec_1m_ok": exec_1m_ok,
         "exec_1m_coverage": exec_1m_cov,
         "max_gap_bars": max_gap_bars,
         "first_dt": first_dt.isoformat(),

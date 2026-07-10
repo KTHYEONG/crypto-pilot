@@ -341,6 +341,70 @@ def test_scan_enriched_dataset_clips_to_window_and_maps_keys(
         assert df["datetime"].max() <= req_end, f"{key} max out of window"
 
 
+# ── Fix 1: exec_1m removed from admission gate (breadth fix) ──────────────────
+
+
+def _make_ohlcv_frame(start: str, end: str, freq: str = "4h") -> pd.DataFrame:
+    idx = pd.date_range(start, end, freq=freq, tz="UTC")
+    return pd.DataFrame(
+        {
+            "datetime": idx,
+            "open": 1.0,
+            "high": 1.0,
+            "low": 1.0,
+            "close": 1.0,
+            "volume": 100.0,
+        }
+    )
+
+
+def test_evaluate_symbol_data_sufficiency_passes_with_low_exec_1m_coverage() -> None:
+    # S1-01: symbol with full 4h coverage but low exec_1m → pass=True
+    frame_4h = _make_ohlcv_frame("2023-08-01", "2026-06-30", freq="4h")
+    exec_1m = _make_ohlcv_frame("2026-06-01", "2026-06-30", freq="1min")
+    symbol_map = {"4h": frame_4h, "exec_1m": exec_1m}
+
+    result = opt_data_utils.evaluate_symbol_data_sufficiency(
+        symbol="MIDCAPUSDT",
+        tf="4h",
+        symbol_map=symbol_map,
+        fetch_start="2023-08-30",
+        is_start="2023-10-31",
+        oos_start="2026-01-01",
+        oos_end="2026-06-30",
+        require_exec_1m=True,
+        warmup_bars_required=60,
+    )
+
+    assert result["pass"] is True
+    assert result["reason"] == "ok"
+    assert result["exec_1m_ok"] is False
+    assert result["exec_1m_coverage"] < 0.95
+
+
+def test_evaluate_symbol_data_sufficiency_still_rejects_short_warmup_regardless_of_exec_1m() -> None:
+    # S2-01: warmup fail → pass=False regardless of exec_1m status
+    # Frame starts close to is_start so bars_before_is < warmup_bars_required,
+    # but still before fetch_start so fetch_ok=True (warmup takes priority).
+    frame_4h = _make_ohlcv_frame("2023-08-28", "2026-06-30", freq="4h")
+    symbol_map = {"4h": frame_4h}
+
+    result = opt_data_utils.evaluate_symbol_data_sufficiency(
+        symbol="NEWLISTUSDT",
+        tf="4h",
+        symbol_map=symbol_map,
+        fetch_start="2023-08-30",
+        is_start="2023-08-31",
+        oos_start="2026-01-01",
+        oos_end="2026-06-30",
+        require_exec_1m=False,
+        warmup_bars_required=60,
+    )
+
+    assert result["pass"] is False
+    assert result["reason"] == "warmup_insufficient"
+
+
 # ── Scenario 5b: _scan_enriched_dataset — missing timestamp col → graceful skip ─
 
 
