@@ -14,10 +14,12 @@ related_paths:
   - src/domain/futures/alpha_foundry/multi_tf_fusion.py
   - src/domain/futures/alpha_foundry/bridge_helpers.py
   - src/domain/futures/signals/causal_diversified_candidates.py
+  - src/domain/futures/strategy/timeframe_contracts.py
 change_triggers:
   - src/domain/futures/alpha_foundry/cheap_gate.py
   - src/domain/futures/alpha_foundry/diversity.py
   - src/domain/futures/alpha_foundry/pipeline.py
+  - src/domain/futures/strategy/timeframe_contracts.py
 dependencies:
   documents:
     - docs/architecture/universe.md
@@ -57,6 +59,11 @@ last_verified: 2026-07-11
   - `corroborated`: 타 TF 성과와 부호가 일치하며 강한 예측력을 보임. 컨빅션 스코어 15% 부스트 적용.
   - `contradicted`: 타 TF 성과와 부호가 불일치함. 컨빅션 스코어를 음수화하여 사실상 거부 처리.
   - `single_tf_strict` / `insufficient_coverage`: 매칭되는 타 TF 커버리지가 1개 이하이거나 전무한 경우.
+
+### Non-Native Timeframe Synthesis (Virtual Probe)
+- 2h/6h/8h/12h는 네이티브 exchange 캔들이 저장되지 않으며(`data/futures/`에 1h/4h/1d만 존재), `select_probe_source_tf()`(`timeframe_contracts.py`)가 캐시된 1h(우선) 또는 4h 중 리샘플 호환 가능한 가장 미세한 소스를 선택해 합성한다.
+- **Open-time 컨벤션(고정)**: 리샘플은 반드시 `closed="left", label="left"`를 사용한다 — 네이티브 거래소 캔들이 open-time 라벨링이기 때문이며, 라이브 Binance 6h fetch와의 byte-identical 대조로 검증됨. `rules.py`/`rule_signals.py`의 HTF 프로젝션, `storage.py`의 1h→4h 네이티브 4h 생성 경로와 동일 컨벤션.
+- **완결성 판정**: 마지막 bin의 완결 여부는 위치(`iloc[:-1]`)가 아닌 표본 개수 기준(`bin_count >= round(target_hours / source_hours)`)으로 판정한다. 소스 cadence는 `infer_source_bar_hours()`(연속 델타의 mode, gap에 강건)로 추론.
 
 # 3. Principal Data Structures
 

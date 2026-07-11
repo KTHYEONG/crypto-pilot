@@ -22,6 +22,8 @@ import pandas as pd
 from src.domain.futures.strategy.timeframe_contracts import (
     RESAMPLE_METADATA_BOOL_COLS,
     RESAMPLE_METADATA_FLOAT_COLS,
+    hours_per_bar,
+    infer_source_bar_hours,
 )
 from src.domain.futures.strategy.timeframe_contracts import (
     select_probe_source_tf as _shared_select_probe_source_tf,
@@ -272,7 +274,14 @@ def _select_probe_source_tf(sym_maps: Mapping[str, Any], target_tf: str) -> str 
 
 
 def _resample_probe_source_frame(frame: pd.DataFrame, *, target_tf: str) -> pd.DataFrame:
-    """Resample a cached source frame into a virtual probe timeframe."""
+    """Resample a cached source frame into a virtual probe timeframe.
+
+    [ADR_20260711_L0_HTF_RESAMPLE_ALIGNMENT_FIX]
+    Uses open-time labeling (closed="left", label="left") to match native
+    exchange candle semantics — verified byte-identical against a live
+    Binance 6h kline fetch for BTCUSDT. Completeness of the trailing bin is
+    determined by source-row count, not position (see [LIMIT-01]).
+    """
     prepared = frame.copy()
     if "datetime" not in prepared.columns:
         prepared = prepared.reset_index()
@@ -300,9 +309,14 @@ def _resample_probe_source_frame(frame: pd.DataFrame, *, target_tf: str) -> pd.D
     for col in RESAMPLE_METADATA_FLOAT_COLS:
         if col in prepared.columns:
             agg[col] = "mean"
-    resampled = prepared.resample(target_tf, label="right", closed="right").agg(agg).dropna(subset=["close"])
-    if not resampled.empty:
-        resampled = resampled.iloc[:-1]
+    resampler = prepared.resample(target_tf, label="left", closed="left")
+    resampled = resampler.agg(agg).dropna(subset=["close"])
+    if resampled.empty:
+        return resampled.reset_index()
+    bin_counts = resampler.size().reindex(resampled.index).fillna(0)
+    source_hours = infer_source_bar_hours(prepared.index)
+    expected_ratio = max(1, round(hours_per_bar(target_tf) / source_hours))
+    resampled = resampled.loc[bin_counts >= expected_ratio]
     return resampled.reset_index()
 
 
