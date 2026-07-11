@@ -33,6 +33,30 @@ _TBR_KEYS: tuple[str, ...] = (
 _logger = logging.getLogger(__name__)
 
 
+def _ensure_debug_visible(logger: logging.Logger) -> None:
+    """Force-enable DEBUG output for opt-in diagnostic logging, independent of
+    ambient root/handler configuration.
+    [ADR_20260711_L0_NAN_COST_HTF_BLIND_REJECTION]
+    """
+    if logger.getEffectiveLevel() > logging.DEBUG:
+        logger.setLevel(logging.DEBUG)
+    if not logger.handlers:
+        handler = logging.StreamHandler()
+        handler.setFormatter(logging.Formatter("%(message)s"))
+        logger.addHandler(handler)
+
+
+def _is_usable_cost_array(arr: NDArray[np.float64] | None) -> bool:
+    """True when arr carries at least one finite value (not None, not all-NaN).
+
+    [ADR_20260711_L0_NAN_COST_HTF_BLIND_REJECTION]
+    Guards against the "not None but entirely NaN" default-array case
+    (AlignedMarketData.execution_cost_bps_2d/adv_usdt_2d init to np.nan,
+    not None) being silently treated as valid cost data.
+    """
+    return arr is not None and bool(np.any(np.isfinite(arr)))
+
+
 def _aligned_field_or_close(aligned: AlignedMarketData, field_name: str) -> NDArray[np.float64]:
     arr = getattr(aligned, field_name, None)
     if isinstance(arr, np.ndarray) and arr.ndim == 2 and arr.size > 0:
@@ -368,6 +392,7 @@ def compute_triple_barrier_returns(
     precomputed_atr_2d: NDArray[np.float64] | None = None,
     cost_floor_arr: NDArray[np.float64] | None = None,
     hurdle_arr: NDArray[np.float64] | None = None,
+    cost_diagnostics_enabled: bool = False,
 ) -> dict[str, NDArray[np.float64] | NDArray[np.int64] | NDArray[np.int8]]:
     """Cfg-free, DataFrame-free triple-barrier evaluation — extracted core of
     label_candidate_events() for reuse by L0 gate evaluation. [LIMIT-01][LIMIT-02][LIMIT-05][LIMIT-06]
@@ -424,12 +449,22 @@ def compute_triple_barrier_returns(
     funding_2d_c = np.ascontiguousarray(aligned.funding_2d, dtype=np.float64)
     atr_2d_c = np.ascontiguousarray(atr_2d, dtype=np.float64)
 
-    has_cost_2d = aligned.execution_cost_bps_2d is not None
+    has_cost_2d = _is_usable_cost_array(aligned.execution_cost_bps_2d)
     cost_2d_c = (
         np.ascontiguousarray(aligned.execution_cost_bps_2d, dtype=np.float64)
         if has_cost_2d
         else np.zeros_like(close_2d_c)
     )
+
+    if cost_diagnostics_enabled:
+        _ensure_debug_visible(_logger)
+        _cost_nan_frac = float(np.isnan(cost_2d_c).mean())
+        _floor_nan_frac = float(np.isnan(cost_floor_arr).mean())
+        _logger.debug(
+            "[DATA] stage=tbr_cost_check has_cost_2d=%s cost_2d_nan_frac=%.3f "
+            "cost_floor_nan_frac=%.3f n_events=%d",
+            has_cost_2d, _cost_nan_frac, _floor_nan_frac, n,
+        )
 
     (
         gross_arr,
@@ -471,6 +506,16 @@ def compute_triple_barrier_returns(
         float(_BPS_SCALE),
     )
 
+    if cost_diagnostics_enabled:
+        _ensure_debug_visible(_logger)
+        _gross_finite = float(np.isfinite(gross_arr).mean()) if gross_arr.size else 0.0
+        _cost_finite = float(np.isfinite(cost_arr).mean()) if cost_arr.size else 0.0
+        _edge_finite = float(np.isfinite(edge_arr).mean()) if edge_arr.size else 0.0
+        _logger.debug(
+            "[DATA] stage=tbr_output_finiteness gross_finite=%.3f cost_finite=%.3f edge_finite=%.3f",
+            _gross_finite, _cost_finite, _edge_finite,
+        )
+
     return {
         "gross_bps": gross_arr,
         "cost_bps": cost_arr,
@@ -491,6 +536,7 @@ def label_candidate_events(
     aligned: AlignedMarketData,
     cfg: CandidateStrategyConfig,
     precomputed_atr_2d: np.ndarray | None = None,
+    cost_diagnostics_enabled: bool = False,
 ) -> pd.DataFrame:
     """Attach leak-free forward outcomes to candidate events.
 
@@ -570,7 +616,7 @@ def label_candidate_events(
     funding_2d_c = np.ascontiguousarray(aligned.funding_2d, dtype=np.float64)
     atr_2d_c = np.ascontiguousarray(atr_2d, dtype=np.float64)
 
-    has_cost_2d = aligned.execution_cost_bps_2d is not None
+    has_cost_2d = _is_usable_cost_array(aligned.execution_cost_bps_2d)
     cost_2d_c = (
         np.ascontiguousarray(aligned.execution_cost_bps_2d, dtype=np.float64)
         if has_cost_2d
