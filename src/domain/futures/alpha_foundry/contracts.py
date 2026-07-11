@@ -515,6 +515,7 @@ class AlphaGateConfig:
     max_abs_btc_beta: float = 0.80
     high_turnover_per_year: float = 180.0
     liquidity_cost_stress_mult: float = 1.0
+    l0_cost_diagnostics_enabled: bool = False  # opt-in, log-only [ADR_20260711_L0_NAN_COST_HTF_BLIND_REJECTION]
 
     def __post_init__(self) -> None:
         if self.min_candidate_rank_ic_tstat < 0.0:
