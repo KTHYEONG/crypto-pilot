@@ -12,11 +12,12 @@ This document defines the strict requirements for writing highly readable, maint
 ---
 
 ## 1. Adherence to F.I.R.S.T. Principles
-- **Fast:** Tests must execute within seconds to allow frequent runs. Avoid unnecessary `time.sleep()`. Use `pytest-asyncio` for precise control over asynchronous code.
-- **Independent:** Each test must be completely isolated. Avoid shared state. Shared contexts, singletons, or global variables must be reset or isolated at the start of each test.
+- **Fast:** Tests must execute within seconds. Use `pytest-asyncio` for precise control over asynchronous code; avoid sleep-based waiting.
+- **Independent:** Ensure each test is independent by resetting shared state, singletons, or global variables.
 - **Repeatable:** Tests must produce the same result in any environment (local, CI, staging) regardless of network status, external exchange APIs, or system time.
-- **Self-Validating:** Manual log checks using `print()` are strictly prohibited. Tests must declare success or failure exclusively through precise `assert` statements.
+- **Self-Validating:** Verify test outcomes exclusively through precise `assert` statements; avoid print().
 - **Thorough:** Cover not only the happy paths but also negative paths, boundary values, empty values (`None`, empty collections), and intentional exception scenarios.
+
 
 ---
 
@@ -47,12 +48,13 @@ Test functions must be named descriptively using the **`test_[target]_[condition
 - **Explicit Dependency Injection:** Separate shared setups into Pytest fixtures and inject them explicitly as test function parameters.
 - **Resource Cleanup (`yield`):** Fixtures managing databases, files, or network resources must use the `yield` keyword to ensure teardown occurs after the test completes.
 - **Scope Minimization:** Restrict stateful or mutable fixtures to `scope="function"` to avoid cross-test contamination.
-- **Leverage Standard Fixtures:** Avoid manually creating temp directories/files; instead, leverage Pytest's built-in `tmp_path` fixture.
-- **Limit `autouse=True`:** Restrict `autouse=True` strictly to global initialization (e.g., global mocking hooks). All other dependencies must be explicitly injected.
-- **Immutability of Higher-Scoped Fixtures:** `session` or `module` scoped fixtures must be treated as read-only. Modifying their internal state inside a test function is strictly prohibited.
+- **Leverage Standard Fixtures:** Always leverage Pytest's built-in `tmp_path` fixture for temporary file/directory operations.
+- **Limit `autouse=True`:** Inject dependencies explicitly; restrict `autouse=True` strictly to global initialization (e.g., global mocking hooks).
+- **Immutability of Higher-Scoped Fixtures:** Treat `session` or `module` scoped fixtures as read-only; avoid modifying their internal state inside a test function.
 - **Asynchronous Testing Standards:** Every asynchronous fixture must be decorated with `@pytest_asyncio.fixture`. Every asynchronous test function (`async def`) must be explicitly marked with `@pytest.mark.asyncio`. 
-- **Async Fixture Scope Trap:** Be highly cautious of Event Loop scope mismatches. Do not mix `scope="session"` standard fixtures with `scope="function"` async tests without explicit loop management.
-- **`caplog` Best Practice:** Always use pytest's built-in `caplog` fixture for log capture. Do NOT manually manipulate handler levels or `logger.propagate` flags across test bodies — this is a token-heavy anti-pattern that risks state leakage. Use `caplog.set_level(logging.DEBUG)` at the test level instead.
+- **Async Fixture Scope Trap:** Manage Event Loop scopes explicitly if mixing `session` scoped fixtures with `function` scoped async tests.
+- **`caplog` Best Practice:** Use pytest's built-in `caplog` fixture for log capture and call `caplog.set_level(logging.DEBUG)` at the test level; avoid manual manipulation of handler levels or `logger.propagate` flags to prevent state leakage.
+
 
 ### 2.4 Co-modification Mapping
 Source files and test files must maintain a strict 1:1 mapping in folder structure and file naming to simplify discovery and maintainability.
@@ -93,26 +95,27 @@ The AI MUST design test cases based on rigorous testing theory BEFORE looking at
 
 ## 4. Isolation & Mocking Guidelines
 
-### 4.1 Mocking Boundaries (Avoid Over-Mocking)
+### 4.1 Mocking Boundaries (Focused Mocking)
 - **Mock Only Boundaries:** Restrict mocking strictly to system boundaries: external Web APIs (e.g., Upbit, Binance), database queries, sockets, filesystems, and clock times.
-- **No Hallucinated API Schemas:** When mocking external exchange APIs (Binance, Upbit), the AI MUST NOT guess or hallucinate JSON response structures. The AI MUST use pre-recorded JSON responses located in the `tests/fixtures/` directory, or ask the user to provide the exact API response payload if missing.
-- **Do Not Mock Pure Logic:** Never mock internal domain models, utility functions, or pure mathematical modules. Doing so results in fragile tests that pass even when the actual implementation is broken.
-- **Use `autospec=True` (RECOMMENDED, not mandatory):** When mocking classes or modules, specifying `autospec=True` prevents hallucinated mock calls. However, skip it for private functions (e.g., `_build_*`, `_get_*`) whose signatures may change or be deleted; use simple `MagicMock` instead to avoid collection failures.
+- **Verified API Schemas:** Use pre-recorded JSON responses located in the `tests/fixtures/` directory, or request the exact API response payload from the user when mocking external exchange APIs (Binance, Upbit); avoid guessing response schemas.
+- **Test Pure Logic Directly:** Test internal domain models, utility functions, and mathematical modules with real implementations to ensure test robustness; avoid mocking internal logic.
+- **Use `autospec=True` (RECOMMENDED, not mandatory):** When mocking classes or modules, specifying `autospec=True` prevents mock mismatches. Skip it for private functions (e.g., `_build_*`, `_get_*`) whose signatures may change; use `MagicMock` instead to avoid collection failures.
   ```python
   # Boundary class mock: use autospec
   mock_client = mocker.patch("src.services.order.BinanceClient", autospec=True)
-  # Internal helper mock: skip autospec
+  # Private/Internal helper mock: skip autospec
   mocker.patch("src.domain.module._helper_fn", return_value=None)
   ```
 - **Where to Patch Rule:** Always patch the target where it is *imported and used*, not where it is *defined*.
-  - **Bad:** `mocker.patch("src.clients.BinanceClient")` (ineffective if `src.services.order` has already imported it).
-  - **Good:** `mocker.patch("src.services.order.BinanceClient", autospec=True)`.
-- **Async Mocking:** When mocking asynchronous methods (`async def`), always specify `new_callable=mocker.AsyncMock` to ensure the mock properly returns a awaitable coroutine object.
-- **Time Mocking Constraints:** Since Python's built-in `datetime` module is implemented in C, it cannot be patched directly using standard `mocker.patch`. When time isolation is required, use the `freezegun` library or patch the project's internal time abstraction layer (e.g., `src.utils.time.get_now`) instead.
+  - **Preferred:** `mocker.patch("src.services.order.BinanceClient", autospec=True)`.
+  - **Avoid:** `mocker.patch("src.clients.BinanceClient")` (ineffective if `src.services.order` has already imported it).
+- **Async Mocking:** When mocking asynchronous methods (`async def`), specify `new_callable=mocker.AsyncMock` to ensure the mock returns an awaitable coroutine object.
+- **Time Mocking Constraints:** Since Python's built-in `datetime` module is implemented in C and cannot be patched directly, use the `freezegun` library or patch the project's internal time abstraction layer (e.g., `src.utils.time.get_now`) for time isolation.
 - **Boundary Isolation by Test Category:**
-  - **Unit Tests (`unit/`):** All system boundaries, including database access, external APIs, and network I/O, MUST be strictly mocked.
-  - **Exception for DB Layer:** For Repository or Database access layers, using an in-memory database (e.g., `sqlite:///:memory:`) is PREFERRED over mocking ORM sessions/queries to prevent "False Positives" and ensure query correctness.
-  - **Integration Tests (`integration/`):** Real database instances or test containers must be utilized. Ensure state isolation and resource cleanup are strictly managed via DB fixtures using the `yield` keyword (e.g., transaction rollbacks).
+  - **Unit Tests (`unit/`):** Mock all system boundaries, including database access, external APIs, and network I/O.
+  - **Exception for DB Layer:** For Repository or Database access layers, use an in-memory database (e.g., `sqlite:///:memory:`) to verify query correctness and avoid false positives; this is preferred over mocking ORM sessions.
+  - **Integration Tests (`integration/`):** Utilize real database instances or test containers. Ensure state isolation and resource cleanup are managed via DB fixtures using the `yield` keyword (e.g., transaction rollbacks).
+
 ---
 
 ## 5. AI Coverage-Driven Self-Correction Loop
@@ -135,13 +138,13 @@ graph TD
    If the coverage output identifies missing/unexecuted lines (indicated under the `Missing` column), the AI must immediately write targeted edge cases (e.g., negative parameters, exceptions, fallback branches) to cover those lines.
 3. **Risk-Adjusted Coverage Targets (TIERED — apply strictly by layer):**
    - **Core Logic (Domain, Signal, Sizing, Portfolio):** Aim for **>= 90%**. Run the self-correction loop here.
-   - **Adapters/Runners/DTOs/Boilerplate:** Aim for **>= 70%**. Do NOT run self-correction loop beyond 1 iteration for these layers. Running 3 full coverage iterations on adapter files is a token waste anti-pattern.
+   - **Adapters/Runners/DTOs/Boilerplate:** Aim for **>= 70%**. Restrict the self-correction loop to 1 iteration for these layers to prevent token waste.
    - **Entrypoints / CLI / `__init__.py`:** Skip coverage requirement entirely. Use `# pragma: no cover` where applicable.
 4. **Modified-Files-Only Coverage Scope:**
-   - Coverage MUST be measured ONLY on files created or modified by the current spec (determinable via `git diff --name-only` against the base branch). Unchanged files in the same module directory are excluded from the coverage report to avoid false-negative penalties (e.g., `recipes.py` unchanged but dragging down the module average).
-5. **[CRITICAL LIMIT] AI Loop Termination:**
-   The AI MUST NOT execute the coverage self-correction loop more than **3 times**. If targets are not achieved within 3 iterations, the AI MUST stop, commit the current progress, and report the specific bottleneck to the user.
-6. **No Empty Assertions:**
-   Tests written solely to execute lines without performing meaningful assertions are strictly prohibited. The AI must always validate the final return value or verify expected state side effects.
-7. **No Abuse of `# pragma: no cover`:**
-   Abusing `# pragma: no cover` to artificially inflate coverage percentages is strictly prohibited. It should only be used for genuinely untestable code paths (e.g., `if __name__ == "__main__":`).
+   - Measure coverage ONLY on files created or modified by the current spec (determinable via `git diff --name-only` against the base branch). Exclude unchanged files in the same module directory from the coverage report to prevent false-negative penalties.
+5. **Coverage Loop Limit:**
+   - Limit the coverage self-correction loop to a maximum of 3 iterations. If targets are not met within 3 iterations, stop, commit the current progress, and report the specific bottleneck to the user.
+6. **Meaningful Assertions:**
+   - Ensure every test includes meaningful assertions that validate the return value or verify expected state side effects; avoid writing tests solely to execute lines without validation.
+7. **Precise Pragma Usage:**
+   - Limit the use of `# pragma: no cover` strictly to genuinely untestable code paths (e.g., `if __name__ == "__main__":`).
