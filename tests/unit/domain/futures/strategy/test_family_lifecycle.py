@@ -124,6 +124,24 @@ def test_vol_contraction_breakout_not_retired() -> None:
     assert is_family_tf_retired("vol_contraction_breakout", "4h") is False
 
 
+def test_sparse_breakout_retest_v2_retired_for_all_tfs() -> None:
+    from src.domain.futures.strategy.family_lifecycle import FAMILY_TF_RETIREMENT
+
+    for tf in ("1h", "2h", "4h", "6h", "8h", "12h"):
+        assert ("sparse_breakout_retest_v2", tf) in FAMILY_TF_RETIREMENT, (
+            f"sparse_breakout_retest_v2 not retired for {tf}"
+        )
+
+
+def test_sparse_breakout_retest_liquidity_retired_for_all_tfs() -> None:
+    from src.domain.futures.strategy.family_lifecycle import FAMILY_TF_RETIREMENT
+
+    for tf in ("1h", "2h", "4h", "6h", "8h", "12h"):
+        assert ("sparse_breakout_retest_liquidity", tf) in FAMILY_TF_RETIREMENT, (
+            f"sparse_breakout_retest_liquidity not retired for {tf}"
+        )
+
+
 def test_apply_tf_gate_overrides_1d_does_not_mutate_original_cfg() -> None:
     base_cfg = CandidateStrategyConfig()
 

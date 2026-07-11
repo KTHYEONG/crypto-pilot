@@ -6,21 +6,8 @@ from src.domain.futures.alpha_foundry.contracts import AlphaRecipe
 from src.domain.futures.alpha_foundry.recipes import build_alpha_recipe_catalog
 
 ALL_FAMILIES = (
-    "ema_trend",
-    "hma_trend",
-    "kama_trend",
-    "macd_trend",
-    "rsi_mean_reversion",
-    "stoch_rsi_mean_reversion",
-    "bollinger_mean_reversion",
-    "keltner_mean_reversion",
     "ichimoku_trend",
-    "funding_slope_carry",
-    "oi_buildup_flow",
-    "lsr_skew_flow",
-    "taker_flow_imbalance",
     "xs_momentum",
-    "sparse_breakout_retest_liquidity",
     "funding_flow_exhaustion_sparse",
     "oi_lsr_unwind",
     "vol_contraction_breakout",
@@ -28,29 +15,14 @@ ALL_FAMILIES = (
     "carry_net_of_funding",
     "funding_session_orb_flow",
     "liquidity_sweep_reclaim",
-    "cvd_vwap_absorption",
-    "funding_basis_dislocation",
-    "oi_flow_squeeze",
-    "xs_residual_flow_rotation",
     "volume_participation_breakout",
     "liquidity_participation_breakout",
     "btc_neutral_residual_reversal",
+    "price_band_reversion",
 )
 
 FAMILY_ARCHETYPE_MAP: dict[str, str] = {
-    "ema_trend": "trend",
-    "hma_trend": "trend",
-    "kama_trend": "trend",
-    "macd_trend": "trend",
-    "rsi_mean_reversion": "mean_reversion",
-    "stoch_rsi_mean_reversion": "mean_reversion",
-    "bollinger_mean_reversion": "mean_reversion",
-    "keltner_mean_reversion": "mean_reversion",
     "ichimoku_trend": "trend",
-    "funding_slope_carry": "carry",
-    "oi_buildup_flow": "flow",
-    "lsr_skew_flow": "flow",
-    "taker_flow_imbalance": "flow",
     "xs_momentum": "cross_sectional",
 }
 
@@ -61,7 +33,7 @@ class TestBuildAlphaRecipeCatalog:
         families = {r.family for r in recipes}
         archetypes = {r.archetype for r in recipes}
 
-        assert "funding_carry" in families or "funding_slope_carry" in families
+        assert "carry_net_of_funding" in families
         assert "trend" in archetypes
         assert "mean_reversion" in archetypes
         assert "carry" in archetypes
@@ -91,7 +63,7 @@ class TestBuildAlphaRecipeCatalog:
             if r.archetype == "flow":
                 has_oi = "oi" in r.required_fields
                 has_lsr = "lsr" in r.required_fields
-                if r.family in ("oi_buildup_flow", "lsr_skew_flow"):
+                if r.family in ("oi_lsr_unwind",):
                     assert has_oi or has_lsr, f"{r.recipe_id} missing 'oi' or 'lsr' in required_fields"
 
     @pytest.mark.parametrize("family", ALL_FAMILIES)
@@ -118,11 +90,9 @@ class TestBuildAlphaRecipeCatalog:
     def test_sparse_liquidity_recipes_in_catalog(self) -> None:
         recipes = build_alpha_recipe_catalog(timeframe="4h")
         families = {r.family for r in recipes}
-        assert "sparse_breakout_retest_liquidity" in families
         assert "funding_flow_exhaustion_sparse" in families
         assert "oi_lsr_unwind" in families
         assert "vol_contraction_breakout" in families
-        # xs_residual_rebalance retired at 4h via FAMILY_TF_RETIREMENT
         assert "carry_net_of_funding" in families
 
     def test_ltf_native_families_in_catalog(self) -> None:
@@ -130,10 +100,6 @@ class TestBuildAlphaRecipeCatalog:
         families = {r.family for r in recipes}
         assert "funding_session_orb_flow" in families
         assert "liquidity_sweep_reclaim" in families
-        assert "cvd_vwap_absorption" in families
-        assert "funding_basis_dislocation" in families
-        assert "oi_flow_squeeze" in families
-        assert "xs_residual_flow_rotation" in families
         assert "volume_participation_breakout" in families
 
     def test_liquidity_vacuum_breakout_retired_from_catalog(self) -> None:
@@ -146,7 +112,6 @@ class TestBuildAlphaRecipeCatalog:
     def test_sparse_recipe_turnover_more_conservative_than_continuous(self) -> None:
         recipes = build_alpha_recipe_catalog(timeframe="4h")
         sparse_families = {
-            "sparse_breakout_retest_liquidity",
             "funding_flow_exhaustion_sparse",
             "oi_lsr_unwind",
             "vol_contraction_breakout",
