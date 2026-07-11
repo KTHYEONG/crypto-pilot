@@ -14,18 +14,19 @@ Enforce the Single Source of Truth (SSOT). Finalize the task by promoting epheme
 - **Conceptual Distinction & Surgical Boundaries (Crucial)**:
   - **Architecture (docs/architecture/)**: **"The What/Current Static State"** (SSOT).
     - Only include class/function signatures (I/O), core state machines, domain formulas, and data structure definitions.
-    - **Prohibited Items (CRITICAL)**: Do not add implementation details, work history, bug fix logs, or behind-the-scenes development stories. **Never insert `[ADR_...]` tags, date mentions (e.g., "added in 2026-07"), or change history descriptions inside architecture documents.** These must be isolated only in `decisions.md`.
+    - **Focus strictly on static specifications**: Focus strictly on class/function signatures, core state machines, domain formulas, and data structure definitions; omit implementation details, work history, change history, and `[ADR_...]` tags from architecture files (keep them in `decisions.md`).
     - **Modification Criteria**: Apply minimal static updates only when the static structure of the system (formulas, public I/O contracts) is actually changed.
   - **Decisions (docs/decisions/)**: **"The Why/How/History"** (ADR).
     - Isolate and record technical options, implementation context, work progress, and compromises at specific points in time.
 - **In-Code ADR Referencing**:
   - Insert a brief absolute tag `[ADR_YYYYMMDD_TaskID]` directly into the Docstrings of modified source classes/functions. This links the code directly to its architectural history without polluting the logic.
 - **Dependency Indexing (docs/index.json)**:
-  - **Never** modify `docs/index.json` manually. Instead, run `python scripts/update_index.py --source <source_file> [--test <test_file>] [--doc <doc_file>]` to automatically update mappings.
+  - **Automated Dependency Indexing**: Update `docs/index.json` using `python scripts/update_index.py --source <source_file> [--test <test_file>] [--doc <doc_file>]` rather than manual edits.
 - **Two-File Decisions Log & Sliding Window**:
   - **decisions.md (Active Window)**: Append new ADR entries directly to the **top** of `docs/decisions/decisions.md`.
   - **Max 5 Lines Rule**: Keep every entry highly condensed: `[Date] [Task ID] [Title] - Context/Why (2 lines) - Resolution/What (2 lines) - Impact (1 line)`. Maximum 5 lines overall.
-  - **decisions_archive.md (Permanent Archive)**: **Never** read or modify `decisions_archive.md` manually. Instead, immediately run `python scripts/archive_decisions.py --max-entries 15` after editing `decisions.md` to automatically slide and archive the older window.
+  - **decisions_archive.md (Permanent Archive)**: Run `python scripts/archive_decisions.py --max-entries 15` after editing `decisions.md` to automatically manage the active window; avoid manual edits to the archive.
+
 
 ### 2. Zero-Residue Cleanup (CRITICAL)
 - **Purge Specs**: Proactively delete all `.md` files in `docs/specs/` related to the current task ID or feature. **Keep the `docs/specs/` directory itself; do not remove the folder.**
