@@ -13,9 +13,9 @@ Enforce the Single Source of Truth (SSOT). Finalize the task by promoting epheme
 ### 1. Truth Promotion & Knowledge Anchoring
 - **Conceptual Distinction & Surgical Boundaries (Crucial)**:
   - **Architecture (docs/architecture/)**: **"The What/Current Static State"** (SSOT).
-    - Only include class/function signatures (I/O), core state machines, domain formulas, and data structure definitions.
-    - **Focus strictly on static specifications**: Focus strictly on class/function signatures, core state machines, domain formulas, and data structure definitions; omit implementation details, work history, change history, and `[ADR_...]` tags from architecture files (keep them in `decisions.md`).
-    - **Modification Criteria**: Apply minimal static updates only when the static structure of the system (formulas, public I/O contracts) is actually changed.
+    - **Surgical Update Only**: Never append raw text or specs directly to the end of architecture files. You must surgically edit existing tables, schemas, or Mermaid nodes to match the file's current layout.
+    - **Strict Content Restriction**: Only include public API signatures (I/O contracts), core state transitions, domain formulas, and data structures.
+    - **No Implementation/History**: Do not include implementation guides, step-by-step logic, temporal examples, change history, or `[ADR_...]` tags in architecture files (these belong only in `decisions.md`).
   - **Decisions (docs/decisions/)**: **"The Why/How/History"** (ADR).
     - Isolate and record technical options, implementation context, work progress, and compromises at specific points in time.
 - **In-Code ADR Referencing**:
