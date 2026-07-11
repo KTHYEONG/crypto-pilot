@@ -4,7 +4,7 @@
     "testing": "tests/unit/optimization/test_portfolio_constructor.py"
   },
   "src/domain/futures/alpha_foundry/contracts.py": {
-    "architecture": "docs/architecture/layer1.md",
+    "architecture": "docs/architecture/layer0.md",
     "testing": [
       "tests/unit/domain/futures/alpha_foundry/test_contracts.py",
       "tests/unit/domain/futures/alpha_foundry/test_evidence_rows.py",
@@ -53,7 +53,7 @@
     ]
   },
   "src/domain/futures/alpha_foundry/multi_tf_fusion.py": {
-    "architecture": "docs/architecture/layer1.md",
+    "architecture": "docs/architecture/layer0.md",
     "testing": [
       "tests/unit/domain/futures/alpha_foundry/test_multi_tf_fusion.py",
       "tests/unit/domain/futures/alpha_foundry/test_multi_tf_fusion_weighted.py"
@@ -131,7 +131,7 @@
     "testing": "tests/e2e/test_cli_modes.py"
   },
   "src/application/futures/runner/config.py": {
-    "architecture": "docs/architecture/layer3.md",
+    "architecture": "docs/architecture/layer0.md",
     "testing": [
       "tests/unit/application/futures/runner/test_config.py",
       "tests/unit/execution/test_opt_main_futures_strategy_mode.py"
@@ -139,17 +139,21 @@
   },
   "src/domain/futures/strategy/tiered_workflow/signal_selection.py": {
     "architecture": "docs/architecture/layer1.md",
-    "testing": "tests/unit/domain/futures/strategy/tiered_workflow/test_l1_xs_alpha_admission.py"
+    "testing": [
+      "tests/unit/domain/futures/strategy/tiered_workflow/test_l1_xs_alpha_admission.py",
+      "tests/unit/domain/futures/strategy/test_layer1_nested_followup.py"
+    ]
   },
   "src/domain/futures/strategy/tiered_workflow/pipeline.py": {
     "architecture": "docs/architecture/layer1.md",
     "testing": "tests/unit/domain/futures/strategy/test_tiered_workflow.py"
   },
   "src/domain/futures/strategy/config.py": {
-    "architecture": "docs/architecture/layer1.md",
+    "architecture": "docs/architecture/layer0.md",
     "testing": [
       "tests/unit/domain/futures/strategy/test_config.py",
-      "tests/unit/domain/futures/strategy/test_family_lifecycle.py"
+      "tests/unit/domain/futures/strategy/test_family_lifecycle.py",
+      "tests/unit/domain/futures/strategy/tiered_workflow/test_per_tf_architecture.py"
     ]
   },
   "src/domain/futures/strategy/tiered_workflow/l2_meta.py": {
@@ -274,7 +278,7 @@
     "testing": "tests/unit/domain/futures/strategy_runtime/test_bridge.py"
   },
   "src/domain/futures/strategy_runtime/bridge.py": {
-    "architecture": "docs/architecture/layer1.md",
+    "architecture": "docs/architecture/layer0.md",
     "testing": [
       "tests/unit/domain/futures/strategy_runtime/test_bridge.py",
       "tests/unit/domain/futures/strategy_runtime/test_bridge_alpha_foundry.py",
