@@ -142,11 +142,11 @@
     "testing": "tests/unit/domain/futures/strategy/tiered_workflow/test_l1_xs_alpha_admission.py"
   },
   "src/domain/futures/strategy/tiered_workflow/pipeline.py": {
-    "architecture": "docs/architecture/layer3.md",
+    "architecture": "docs/architecture/layer1.md",
     "testing": "tests/unit/domain/futures/strategy/test_tiered_workflow.py"
   },
   "src/domain/futures/strategy/config.py": {
-    "architecture": "docs/architecture/layer0.md",
+    "architecture": "docs/architecture/layer1.md",
     "testing": [
       "tests/unit/domain/futures/strategy/test_config.py",
       "tests/unit/domain/futures/strategy/test_family_lifecycle.py"
@@ -307,5 +307,9 @@
   },
   "src/domain/futures/strategy/candidate_labels.py": {
     "architecture": "docs/architecture/layer1.md"
+  },
+  "src/domain/futures/strategy/tiered_workflow/atomization_diagnostics.py": {
+    "architecture": "docs/architecture/layer1.md",
+    "testing": "tests/unit/domain/futures/strategy/tiered_workflow/test_atomization_diagnostics.py"
   }
 }
