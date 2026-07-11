@@ -2,12 +2,18 @@
 
 from __future__ import annotations
 
+import os
 from argparse import Namespace
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
 from src.domain.futures.alpha_foundry.contracts import AlphaFoundryRuntimeConfig
+
+
+def _l0_cross_tf_diversity_audit_enabled() -> bool:
+    """[ADR_20260711_L0_STRATEGY_DELIVERY_HARDENING] measurement-run opt-in env gate."""
+    return os.environ.get("L0_CROSS_TF_DIVERSITY_AUDIT", "") not in ("", "0", "false", "False")
 
 ActivePhase = Literal["l0", "l1", "l2", "l3"]
 SyncMode = Literal["auto", "skip"]
@@ -139,6 +145,7 @@ def build_l0_runtime_config(
         enable_fast_discovery_timeframes=enable_fast_tf,
         artifact_write_enabled=False,
         observability_mode="debug_log",
+        enable_cross_tf_diversity_audit=_l0_cross_tf_diversity_audit_enabled(),
     )
     return validate_alpha_foundry_runtime_config(config)
 

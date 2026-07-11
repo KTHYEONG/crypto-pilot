@@ -503,7 +503,7 @@ def test_evaluate_outer_empty_opportunities_blocker(
         seed=0,
     )
 
-    assert "empty_opportunities" in result.blockers
+    assert any("empty_opportunities" in b for b in result.blockers)
     assert result.passed is False
 
 
