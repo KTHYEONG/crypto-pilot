@@ -15,11 +15,14 @@ related_paths:
   - src/domain/futures/alpha_foundry/bridge_helpers.py
   - src/domain/futures/signals/causal_diversified_candidates.py
   - src/domain/futures/strategy/timeframe_contracts.py
+  - src/domain/futures/strategy/candidate_labels.py
+  - src/domain/futures/strategy/common/alignment.py
 change_triggers:
   - src/domain/futures/alpha_foundry/cheap_gate.py
   - src/domain/futures/alpha_foundry/diversity.py
   - src/domain/futures/alpha_foundry/pipeline.py
   - src/domain/futures/strategy/timeframe_contracts.py
+  - src/domain/futures/strategy/candidate_labels.py
 dependencies:
   documents:
     - docs/architecture/universe.md
@@ -38,6 +41,10 @@ last_verified: 2026-07-11
   - $NW_{tstat} = \frac{\mu_{block}}{SE_{block}}$
   - $block\_bars\_eff = \max(config.block\_bars, 2 \times holding\_bars)$ (블록 크기를 보유기간에 비동적으로 연동)
 - **Bootstrap Significance (Informational only)**: block-mean 복원추출을 통한 `bootstrap_lcb_bps` 및 `bootstrap_agree` 산출.
+
+### Cost Array Usability Guard
+- `compute_triple_barrier_returns()`/`label_candidate_events()`(`candidate_labels.py`)의 `has_cost_2d` 판정은 `_is_usable_cost_array()`(단순 `is not None`이 아니라 `np.any(np.isfinite(...))`)로 결정한다. `AlignedMarketData.execution_cost_bps_2d`/`adv_usdt_2d`는 소스 컬럼이 없을 때 `None`이 아니라 전량 NaN 배열로 기본 초기화되므로(`alignment.py`), 이 가드가 없으면 유동성 비용 데이터가 없는 패널(합성 HTF 패널 포함)의 net edge가 전부 NaN으로 오염된다. `has_cost_2d=False`일 때 Numba 커널은 `cost_model.taker_round_trip_bps()`(flat round-trip 비용)로 안전하게 폴백한다.
+- **진단 로깅(opt-in)**: `AlphaGateConfig.l0_cost_diagnostics_enabled`(기본 `False`)로 `[DATA] stage=tbr_cost_check`/`stage=tbr_output_finiteness`/`[EVAL] stage=gate_evidence` 로그를 활성화. `_ensure_debug_visible()`이 주변 로깅 설정과 무관하게 opt-in 시 항상 출력을 보장한다.
 
 ### Canonical Gate & Priority Score
 - **Soft Flagging**: 
