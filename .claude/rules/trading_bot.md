@@ -43,9 +43,9 @@ These rules prioritize system integrity and asset protection. They are applied w
 
 ## 3. Order Execution & State Management (Orders & State)
 - **Startup State Sync (Essential):**
-    - Upon bot start or restart, do not rely on memory state. You must **sync by querying current open orders and position status via REST API**.
+    - Always synchronize position status and open orders by querying the REST API during bot startup or restart.
 - **Precision & Decimal:**
-    - Use `decimal.Decimal` for all quantity and price calculations. Prohibit the use of `float`.
+    - Use `decimal.Decimal` for all quantity and price calculations; avoid raw floats.
     - Parse exchange-specific `Tick Size` and `Step Size` and truncate values accordingly before placing orders.
 - **Partial Fill Handling:**
     - Clearly recognize `Partially Filled` states and explicitly include follow-up logic (e.g., maintaining remaining quantity or canceling and re-entering at market price) based on the strategy.
@@ -60,7 +60,8 @@ These rules prioritize system integrity and asset protection. They are applied w
 - **Sanity Checks:**
     - Set hard limits such as `MaxOrderValue` and `MaxOrderQty` to fundamentally block 'Fat Finger' errors.
     - For Binance Futures, explicitly set or verify Leverage and Margin Mode (Cross/Isolated) before ordering.
-- **Secrets Management:** Load API Key/Secret from environment variables (`.env`) and filter them to ensure they are not leaked in logs.
+- **Secrets Management:** Securely load API Key/Secret from environment variables (`.env`) and verify that they are filtered to prevent leaks in logs.
+
 
 ## 5. Logging & Traceability
 - All order requests/responses must be logged with a `trace_id` or `ClientOrderId` for post-mortem tracking.

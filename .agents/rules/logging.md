@@ -13,11 +13,11 @@ This document defines the strict logging rules and tag-based format requirements
 
 ## 1. Core Principles: AI-Reading Optimization
 
-- **No Verbose Prose**: Log messages must omit conversational sentences (e.g., "Successfully started calculation for symbol"). Instead, output key-value structures.
-- **Strictly Flat & Parsable**: Every `DEBUG`/`TRACE` level log must be optimized for direct programmatic extraction or regex parsing.
+- **Structured Formats**: Output log messages in key-value structures; avoid verbose or conversational sentences (e.g., prefer structured logs over "Successfully started...").
+- **Strictly Flat & Parsable**: Optimize every `DEBUG`/`TRACE` level log for direct programmatic extraction or regex parsing.
 - **Categorized Isolation (Preferred over Unified Log)**:
-  - High-frequency data (e.g., raw signal outputs, optimization trials) MUST be routed to dedicated, isolated files (e.g., `logs/optuna.jsonl`, `logs/memory.log`) instead of clogging the main system log.
-  - This allows the AI to target precise file paths, saving context window space and token usage.
+  - Route high-frequency data (e.g., raw signal outputs, optimization trials) to dedicated, isolated files (e.g., `logs/optuna.jsonl`, `logs/memory.log`) to prevent clogging the main system log.
+  - This allows targeting precise file paths, saving context window space and token usage.
 
 ---
 
@@ -27,12 +27,11 @@ This document defines the strict logging rules and tag-based format requirements
 - **Purpose**: Minimal progress reporting for humans.
 - **Constraints**: 
   - Keep logs under 1 line per major phase transition.
-  - Avoid outputting massive collections, lists, or matrix arrays.
+  - Omit massive collections, lists, or matrix arrays from the log body.
 
 ### 2.2 DEBUG & TRACE (AI-Data Harvesting Output)
 - **Purpose**: Targeted data capture for AI diagnostics and automated audits.
-- **Constraint**: Must NEVER contain conversational descriptions.
-- **Format**: `[TAG] key1=value1 key2=value2 ...`
+- **Format**: Use `[TAG] key1=value1 key2=value2 ...` to capture structured data cleanly without conversational descriptions.
 
 ---
 
@@ -51,8 +50,9 @@ To prevent tag proliferation, the AI MUST strictly categorize all debug/trace lo
 
 ## 4. Token & Parsability Optimizations
 
-- **Avoid Redundant Prefixing**: Do not duplicate timestamps or filenames in the message body if the logger formatter already prepends them.
+- **Formatter-Driven Prefixing**: Rely on the logger formatter for timestamps and filenames; omit them from the message body.
 - **Float Formatting**: Limit float numbers to a maximum of 3 decimal places (e.g., use `%.3f` or `:.3f`) to save tokens.
 - **Conditional Array Truncation**: When logging symbol lists or arrays, truncate after 5 items and suffix with `_truncated={count}`.
-  - **Bad**: `[ALGO] symbols=['BTCUSDT', 'ETHUSDT', 'BNBUSDT', 'XRPUSDT', ... 50 more symbols]`
-  - **Good**: `[ALGO] symbols=['BTCUSDT', 'ETHUSDT', 'BNBUSDT', 'XRPUSDT', 'SOLUSDT'] truncated=45`
+  - **Preferred**: `[ALGO] symbols=['BTCUSDT', 'ETHUSDT', 'BNBUSDT', 'XRPUSDT', 'SOLUSDT'] truncated=45`
+  - **Avoid**: `[ALGO] symbols=['BTCUSDT', 'ETHUSDT', 'BNBUSDT', 'XRPUSDT', ... 50 more symbols]`
+
