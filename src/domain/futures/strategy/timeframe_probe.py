@@ -27,6 +27,7 @@ from src.domain.futures.strategy.timeframe_contracts import (
     RESAMPLE_METADATA_BOOL_COLS,
     RESAMPLE_METADATA_FLOAT_COLS,
     hours_per_bar,
+    infer_source_bar_hours,
     resample_alias,
     scale_bar_count,
     select_probe_source_tf,
@@ -134,7 +135,11 @@ def _prepare_probe_frame(frame: pd.DataFrame) -> pd.DataFrame:
 
 
 def _resample_ohlcv(df: pd.DataFrame, alias: str) -> pd.DataFrame:
-    """Resample OHLCV to target timeframe. Drop last incomplete bar."""
+    """Resample OHLCV to target timeframe. Drop genuinely incomplete trailing bin.
+
+    [ADR_20260711_L0_HTF_RESAMPLE_ALIGNMENT_FIX]
+    See bridge.py::_resample_probe_source_frame docstring for rationale.
+    """
     prepared = df.copy()
     if "datetime" not in prepared.columns:
         prepared = prepared.reset_index()
@@ -161,11 +166,15 @@ def _resample_ohlcv(df: pd.DataFrame, alias: str) -> pd.DataFrame:
     for col in RESAMPLE_METADATA_FLOAT_COLS:
         if col in prepared.columns:
             agg[col] = "mean"
-    resampled = (
-        prepared.set_index("datetime").resample(alias, label="right", closed="right").agg(agg).dropna(subset=["close"])
-    )
-    if not resampled.empty:
-        resampled = resampled.iloc[:-1]
+    indexed = prepared.set_index("datetime")
+    resampler = indexed.resample(alias, label="left", closed="left")
+    resampled = resampler.agg(agg).dropna(subset=["close"])
+    if resampled.empty:
+        return resampled.reset_index()
+    bin_counts = resampler.size().reindex(resampled.index).fillna(0)
+    source_hours = infer_source_bar_hours(indexed.index)
+    expected_ratio = max(1, round(hours_per_bar(alias) / source_hours))
+    resampled = resampled.loc[bin_counts >= expected_ratio]
     return resampled.reset_index()
 
 
