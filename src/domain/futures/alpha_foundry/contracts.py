@@ -877,6 +877,10 @@ class AlphaFoundryRuntimeConfig:
     max_discovery_event_jaccard: float = 0.80
     min_discovery_unit_lcb_bps: float = 0.0
 
+    # Cross-TF diversity audit [LIMIT-04][LIMIT-09]
+    enable_cross_tf_diversity_audit: bool = False
+    cross_tf_diversity_canonical_tf: str = "1h"
+
     def __post_init__(self) -> None:
         if self.mode not in {"off", "audit", "gate"}:
             raise ValueError(f"invalid alpha_foundry mode: {self.mode!r}")
@@ -1079,3 +1083,24 @@ class Universe1mCoverageTier:
     def is_covered(self, symbol: str) -> bool:
         """True if symbol is among covered_symbols."""
         return symbol in self.covered_symbols
+
+
+@dataclass(slots=True, frozen=True)
+class L0IndependenceAudit:
+    n_selected_total: int
+    n_distinct_thesis_ids: int
+    n_independent_clusters: int
+    cluster_members: dict[int, tuple[str, ...]]
+    demoted_recipe_ids: tuple[str, ...]
+    demoted_reason_by_id: dict[str, str]
+    canonical_tf: str
+    max_corr_threshold: float
+
+
+@dataclass(slots=True, frozen=True)
+class L0StrategyDeliveryManifest:
+    run_id_prefix: str
+    reports_by_tf: dict[str, AlphaFoundryBridgeReport]
+    independence_audit: L0IndependenceAudit | None
+    final_selected_recipe_ids: tuple[str, ...]
+    total_l1_verification_budget: int

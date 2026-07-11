@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import numpy as np
 import pandas as pd
 import pytest
 
 from src.domain.futures.alpha_foundry.multi_tf_fusion import (
     fuse_multi_timeframe_evidence,
+    project_signal_to_canonical_grid,
 )
+from src.domain.futures.signals.contracts import CandidateSignalPanel
 
 _COLS = [
     "run_id",
@@ -172,3 +175,72 @@ class TestFuseMultiTimeframeEvidence:
         assert native_4h.variant == "dm_24_96"
         assert native_4h.tf_coverage_count == 2
         assert native_4h.corroboration_tier == "corroborated"
+
+
+# ── project_signal_to_canonical_grid ──────────────────────────────────────
+
+
+def _make_panel(datetimes_ns: list[int], scores: list[float]) -> CandidateSignalPanel:
+    n_bars = len(datetimes_ns)
+    return CandidateSignalPanel(
+        family="trend_ma",
+        variant="ema_12_72_4h",
+        params={},
+        datetimes=np.array(datetimes_ns, dtype=np.int64),
+        symbols=("BTCUSDT",),
+        signed_score_2d=np.array(scores, dtype=np.float64).reshape(n_bars, 1),
+        side_hint_2d=np.zeros((n_bars, 1), dtype=np.int8),
+        expected_holding_bars=4,
+        min_holding_bars=1,
+        stop_atr_mult=2.0,
+        take_profit_atr_mult=4.0,
+        turnover_proxy_2d=np.zeros((n_bars, 1), dtype=np.float64),
+        valid_mask_2d=np.ones((n_bars, 1), dtype=np.bool_),
+        metadata={"recipe_id": "trend_ma:ema_12_72_4h:4h:abc123"},
+    )
+
+
+def test_project_signal_to_canonical_grid_forward_fills_with_causal_lag() -> None:
+    panel = _make_panel(datetimes_ns=[0], scores=[1.5])
+    canonical_dt = np.array([0, 1, 2, 3, 4, 5, 6, 7], dtype=np.int64) * 3_600_000_000_000
+
+    projected_scores, projected_valid = project_signal_to_canonical_grid(
+        panel=panel,
+        canonical_datetimes=canonical_dt,
+        causal_lag_bars=1,
+    )
+
+    assert projected_valid[0, 0] == False  # noqa: E712
+    assert projected_valid[1, 0] == True  # noqa: E712
+    assert projected_scores[1, 0] == pytest.approx(1.5)
+    assert projected_scores[7, 0] == pytest.approx(1.5)
+
+
+def test_project_signal_to_canonical_grid_causal_lag_large_makes_all_nan() -> None:
+    panel = _make_panel(datetimes_ns=[0], scores=[1.5])
+    canonical_dt = np.array([0, 1, 2, 3, 4, 5, 6, 7], dtype=np.int64) * 3_600_000_000_000
+
+    projected_scores, projected_valid = project_signal_to_canonical_grid(
+        panel=panel,
+        canonical_datetimes=canonical_dt,
+        causal_lag_bars=100,
+    )
+
+    assert np.all(np.isnan(projected_scores))
+    assert not np.any(projected_valid)
+
+
+def test_project_signal_to_canonical_grid_raises_on_non_monotonic_datetimes() -> None:
+    panel = _make_panel(datetimes_ns=[3600, 0], scores=[1.0, 2.0])
+    canonical_dt = np.array([0, 3600], dtype=np.int64)
+
+    with pytest.raises(ValueError, match="monotonic"):
+        project_signal_to_canonical_grid(panel=panel, canonical_datetimes=canonical_dt, causal_lag_bars=1)
+
+
+def test_project_signal_to_canonical_grid_raises_on_out_of_range_datetimes() -> None:
+    panel = _make_panel(datetimes_ns=[-1], scores=[1.0])
+    canonical_dt = np.array([0, 3600], dtype=np.int64)
+
+    with pytest.raises(ValueError, match=r"outside|range"):
+        project_signal_to_canonical_grid(panel=panel, canonical_datetimes=canonical_dt, causal_lag_bars=1)

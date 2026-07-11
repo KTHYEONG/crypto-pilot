@@ -2,15 +2,19 @@ from __future__ import annotations
 
 import numpy as np
 import pytest
+from numpy.typing import NDArray
 
 from src.domain.futures.alpha_foundry.contracts import (
     AlphaFoundryRuntimeConfig,
     CheapGateEvidence,
+    L0SignalCandidate,
 )
 from src.domain.futures.alpha_foundry.diversity import (
     _paired_score_corr,
     audit_full_family_correlation,
+    audit_l0_selected_recipe_independence,
     cluster_correlated_recipes,
+    compute_cross_tf_redundancy,
     compute_panel_correlation_matrix,
     estimate_effective_test_count,
 )
@@ -292,3 +296,200 @@ def test_audit_full_family_correlation_clustering_branch() -> None:
         "family_a", "variant_a", "family_b", "variant_b",
         "timeframe", "pairwise_corr", "cluster_id", "run_id",
     }
+
+
+# ── compute_cross_tf_redundancy ─────────────────────────────────────────────
+
+
+def _candidate(
+    recipe_id: str,
+    family: str = "trend_ma",
+    variant: str = "ema",
+    timeframe: str = "4h",
+    score: float = 0.0,
+) -> L0SignalCandidate:
+    return L0SignalCandidate(
+        run_id="test",
+        timeframe=timeframe,
+        family=family,
+        variant=variant,
+        recipe_id=recipe_id,
+        archetype="trend",
+        source="synthetic_recipe",
+        n_events=100,
+        effective_n=50.0,
+        mean_net_bps=score,
+        block_lcb_bps=score * 0.5,
+        nw_tstat=1.5,
+        bootstrap_lcb_bps=0.0,
+        bootstrap_agree=True,
+        cost_drag_ratio=0.3,
+        turnover_per_year=50.0,
+        max_abs_corr_in_bucket=0.0,
+        tf_coverage_count=0,
+        sign_agreement_ratio=0.0,
+        corroboration_tier="single_tf_strict",
+        discovery_tier="candidate",
+        l1_priority_score=score,
+        l1_budget_units=1,
+        hard_reject_reasons=(),
+        soft_flags=(),
+    )
+
+
+def _make_canonical_panel(
+    score_vals: list[float],
+    dt_start: int = 0,
+    bar_step_ns: int = 3_600_000_000_000,
+) -> CandidateSignalPanel:
+    n = len(score_vals)
+    dts = [dt_start + i * bar_step_ns for i in range(n)]
+    return CandidateSignalPanel(
+        family="test", variant="tv", params={},
+        datetimes=np.array(dts, dtype=np.int64),
+        symbols=("BTCUSDT",),
+        signed_score_2d=np.array(score_vals, dtype=np.float64).reshape(n, 1),
+        side_hint_2d=np.zeros((n, 1), dtype=np.int8),
+        expected_holding_bars=4, min_holding_bars=1,
+        stop_atr_mult=2.0, take_profit_atr_mult=4.0,
+        turnover_proxy_2d=np.zeros((n, 1), dtype=np.float64),
+        valid_mask_2d=np.ones((n, 1), dtype=np.bool_),
+        metadata={"recipe_id": "test:tv:4h:abc"},
+    )
+
+
+def _make_canonical_panel_from_2d(
+    score_2d: NDArray[np.float64],
+    dt_start: int = 0,
+    bar_step_ns: int = 3_600_000_000_000,
+) -> CandidateSignalPanel:
+    n = score_2d.shape[0]
+    dts = [dt_start + i * bar_step_ns for i in range(n)]
+    return CandidateSignalPanel(
+        family="test", variant="tv", params={},
+        datetimes=np.array(dts, dtype=np.int64),
+        symbols=tuple(f"s{j}" for j in range(score_2d.shape[1])),
+        signed_score_2d=score_2d,
+        side_hint_2d=np.zeros(score_2d.shape, dtype=np.int8),
+        expected_holding_bars=4, min_holding_bars=1,
+        stop_atr_mult=2.0, take_profit_atr_mult=4.0,
+        turnover_proxy_2d=np.zeros(score_2d.shape, dtype=np.float64),
+        valid_mask_2d=np.ones(score_2d.shape, dtype=np.bool_),
+        metadata={},
+    )
+
+
+def test_compute_cross_tf_redundancy_empty_raises_value_error() -> None:
+    with pytest.raises(ValueError, match="empty"):
+        compute_cross_tf_redundancy(
+            selected_by_tf={},
+            panel_by_recipe_id={},
+            canonical_tf="1h",
+            canonical_datetimes=np.array([0], dtype=np.int64),
+            active_mask_canonical=np.ones((1, 1), dtype=bool),
+            max_novelty_corr=0.70,
+        )
+
+
+def test_compute_cross_tf_redundancy_two_candidates_one_demoted() -> None:
+    c4h = _candidate("r1", timeframe="4h", score=2.0)
+    c12h = _candidate("r2", timeframe="12h", score=1.0)
+    n_bars = 16
+    canonical_dt = np.arange(0, n_bars, dtype=np.int64) * 3_600_000_000_000
+    active = np.ones((n_bars, 1), dtype=bool)
+
+    rng = np.random.default_rng(42)
+    scores_4h = rng.normal(0, 1, (n_bars, 1))
+    scores_12h = scores_4h * 0.95 + rng.normal(0, 0.01, (n_bars, 1))
+    panel_4h = _make_canonical_panel_from_2d(scores_4h, dt_start=0)
+    panel_12h = _make_canonical_panel_from_2d(scores_12h, dt_start=0)
+    panel_12h.metadata["recipe_id"] = "r2"
+
+    result = compute_cross_tf_redundancy(
+        selected_by_tf={"4h": [c4h], "12h": [c12h]},
+        panel_by_recipe_id={"r1": panel_4h, "r2": panel_12h},
+        canonical_tf="1h",
+        canonical_datetimes=canonical_dt,
+        active_mask_canonical=active,
+        max_novelty_corr=0.70,
+    )
+    assert len(result.demoted_recipe_ids) == 1
+    assert result.demoted_reason_by_id
+
+
+def test_compute_cross_tf_redundancy_canonical_tf_coarser_than_input_raises() -> None:
+    c4h = _candidate("r1", timeframe="4h")
+    c1h = _candidate("r2", timeframe="1h")
+    with pytest.raises(ValueError, match="coarser"):
+        compute_cross_tf_redundancy(
+            selected_by_tf={"4h": [c4h], "1h": [c1h]},
+            panel_by_recipe_id={},
+            canonical_tf="4h",
+            canonical_datetimes=np.array([0], dtype=np.int64),
+            active_mask_canonical=np.ones((1, 1), dtype=bool),
+            max_novelty_corr=0.70,
+        )
+
+
+# ── audit_l0_selected_recipe_independence ───────────────────────────────────
+
+
+def test_audit_l0_selected_recipe_independence_basic_counts() -> None:
+    n_bars = 32
+    rng = np.random.default_rng(99)
+    base = rng.normal(0, 1, (n_bars, 1))
+    c1 = _candidate("r1", family="trend_ma", score=2.0, timeframe="4h")
+    c2 = _candidate("r2", family="trend_ma", score=1.5, timeframe="6h")
+    c3 = _candidate("r3", family="carry_net_of_funding", score=1.0, timeframe="8h")
+    c4 = _candidate("r4", family="volume_participation_breakout", score=0.5, timeframe="4h")
+    c5 = _candidate("r5", family="xs_momentum", score=1.2, timeframe="12h")
+    canonical_dt = np.arange(0, n_bars, dtype=np.int64) * 3_600_000_000_000
+    active = np.ones((n_bars, 1), dtype=bool)
+
+    def _p(rid: str, offset: float) -> CandidateSignalPanel:
+        return _make_canonical_panel_from_2d(base + offset, dt_start=0)
+
+    panels = {"r1": _p("r1", 0.0), "r2": _p("r2", 0.01), "r3": _p("r3", 0.5),
+              "r4": _p("r4", -0.3), "r5": _p("r5", 0.2)}
+
+    audit = audit_l0_selected_recipe_independence(
+        selected_by_tf={"4h": [c1, c4], "6h": [c2], "8h": [c3], "12h": [c5]},
+        panel_by_recipe_id=panels,
+        canonical_tf="1h",
+        canonical_datetimes=canonical_dt,
+        active_mask_canonical=active,
+        max_corr=0.70,
+    )
+    assert audit.n_selected_total == 5
+    assert audit.n_distinct_thesis_ids > 0
+    assert audit.n_independent_clusters > 0
+
+
+def test_audit_l0_selected_recipe_independence_heterogeneous_native_tf_shapes() -> None:
+    """4h panel (40 native bars) and 12h panel (~13 native bars) must be
+    projected onto the 1h canonical grid before correlating — regression for
+    a bug where compute_panel_correlation_matrix was called directly on raw
+    panels of differing native shapes and raised ValueError."""
+    n_bars_canonical = 40
+    canonical_dt = np.arange(0, n_bars_canonical, dtype=np.int64) * 3_600_000_000_000
+    active = np.ones((n_bars_canonical, 1), dtype=bool)
+
+    c4h = _candidate("r1", family="trend_ma", score=2.0, timeframe="4h")
+    c12h = _candidate("r2", family="carry_net_of_funding", score=1.0, timeframe="12h")
+
+    panel_4h = _make_canonical_panel_from_2d(
+        np.random.default_rng(1).normal(0, 1, (n_bars_canonical, 1)), dt_start=0, bar_step_ns=3_600_000_000_000
+    )
+    panel_12h = _make_canonical_panel_from_2d(
+        np.random.default_rng(2).normal(0, 1, (3, 1)), dt_start=0, bar_step_ns=12 * 3_600_000_000_000
+    )
+
+    audit = audit_l0_selected_recipe_independence(
+        selected_by_tf={"4h": [c4h], "12h": [c12h]},
+        panel_by_recipe_id={"r1": panel_4h, "r2": panel_12h},
+        canonical_tf="1h",
+        canonical_datetimes=canonical_dt,
+        active_mask_canonical=active,
+        max_corr=0.70,
+    )
+    assert audit.n_selected_total == 2
