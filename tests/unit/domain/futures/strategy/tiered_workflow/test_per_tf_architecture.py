@@ -104,6 +104,42 @@ def test_resolve_tf_signal_pool_falls_back_to_candidate_families() -> None:
     assert families == cfg.candidate_families
 
 
+# ── Scenario 3: Widened pool (LIMIT-05) ─────────────────────────────────────
+
+
+def test_resolve_tf_signal_pool_widened_1h_returns_widened_families() -> None:
+    cfg = CandidateStrategyConfig(
+        per_tf_candidate_families=None,
+        per_tf_signal_pool_enabled=True,
+        l1_ltf_family_pool_widened=True,
+    )
+    families = resolve_tf_signal_pool(cfg, "1h")
+    assert len(families) > 4
+    assert "xs_momentum" in families
+
+
+def test_resolve_tf_signal_pool_widened_6h_falls_back_to_default() -> None:
+    cfg = CandidateStrategyConfig(
+        per_tf_candidate_families=None,
+        per_tf_signal_pool_enabled=True,
+        l1_ltf_family_pool_widened=True,
+    )
+    families = resolve_tf_signal_pool(cfg, "6h")
+    from src.domain.futures.strategy.config import _DEFAULT_PER_TF_FAMILIES
+    assert families == _DEFAULT_PER_TF_FAMILIES["6h"]
+
+
+def test_resolve_tf_signal_pool_widened_false_returns_narrow() -> None:
+    cfg = CandidateStrategyConfig(
+        per_tf_candidate_families=None,
+        per_tf_signal_pool_enabled=True,
+        l1_ltf_family_pool_widened=False,
+    )
+    families = resolve_tf_signal_pool(cfg, "1h")
+    assert len(families) == 4  # narrow pool
+    assert "xs_momentum" not in families
+
+
 def test_run_per_tf_l1_passes_all_families_when_no_tf_config() -> None:
     """Scenario 2: No per-TF config → all families pass through to nested SWF."""
     cfg = CandidateStrategyConfig(per_tf_candidate_families=None, per_tf_signal_pool_enabled=False)
