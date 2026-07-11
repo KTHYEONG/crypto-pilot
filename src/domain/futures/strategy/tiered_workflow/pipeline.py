@@ -50,6 +50,11 @@ from src.domain.futures.strategy.tiered_logging import (
     format_layer_header,
     format_layer_universe_audit_table,
 )
+
+# 내부 모듈 임포트
+from src.domain.futures.strategy.tiered_workflow.atomization_diagnostics import (
+    diagnose_strategy_atomization,
+)
 from src.domain.futures.strategy.tiered_workflow.awf_sim import (
     _run_awf_simulation,
     _stack_oos_signals,
@@ -62,8 +67,6 @@ from src.domain.futures.strategy.tiered_workflow.awf_sim import (
     summarize_major_symbol_signal_sizing,
     summarize_major_symbol_sleeve_contribution,
 )
-
-# 내부 모듈 임포트
 from src.domain.futures.strategy.tiered_workflow.dataclasses import (
     FoldDiagnostic,
     L2SimulationCache,
@@ -1564,6 +1567,7 @@ def run_l1_nested_swf(
             cfg=cfg,
             fold_id=-1,
             seed=seed,
+            xs_archetypes=tuple(getattr(cfg, "l1_pooled_admission_archetypes", ("xs_alpha",))),
         )
         _deploy_xs_admission = resolve_xs_alpha_admission(_deploy_xs_diag, cfg)
     deployment_evidence = compute_symbol_strategy_evidence(
@@ -1574,6 +1578,25 @@ def run_l1_nested_swf(
         probe_diversity_corr=probe_diversity_corr,
         xs_admission=_deploy_xs_admission,
     )
+    # [ADR_20260711_L1_POOLED_ALPHA_ADMISSION_GENERALIZATION]
+    if bool(getattr(cfg, "l1_atomization_diagnostics_enabled", False)):
+        for _rep in diagnose_strategy_atomization(
+            deployment_evidence,
+            min_effective_obs=float(getattr(cfg, "l1_pair_min_effective_obs", 5.0)),
+        ):
+            logger.debug(
+                "[EVAL] stage=l1_atomization strategy_id=%s n_cells=%d pooled_gross=%.3f "
+                "atomized_median=%.3f sign_flip=%.3f sign_flip_w=%.3f n_below_min_obs=%d "
+                "dominant_reject=%s",
+                _rep.strategy_id,
+                _rep.n_cells,
+                _rep.pooled_mean_gross_bps,
+                _rep.atomized_mean_gross_bps_median,
+                _rep.sign_flip_ratio,
+                _rep.sign_flip_ratio_weighted,
+                _rep.n_cells_below_min_effective_obs,
+                _rep.dominant_reject_reason,
+            )
     logger.log(
         PERF,
         "[PERF] l1_deployment_evidence took=%.4fs",
