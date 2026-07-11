@@ -15,7 +15,7 @@
     ]
   },
   "src/domain/futures/alpha_foundry/recipes.py": {
-    "architecture": "docs/architecture/layer1.md",
+    "architecture": "docs/architecture/layer0.md",
     "testing": [
       "tests/unit/domain/futures/alpha_foundry/test_recipes.py",
       "tests/unit/domain/futures/alpha_foundry/test_synthetic_recipe_binding.py",
@@ -23,7 +23,7 @@
     ]
   },
   "src/domain/futures/alpha_foundry/cheap_gate.py": {
-    "architecture": "docs/architecture/layer1.md",
+    "architecture": "docs/architecture/layer0.md",
     "testing": [
       "tests/unit/domain/futures/alpha_foundry/test_cheap_gate.py",
       "tests/unit/domain/futures/alpha_foundry/test_gate_v2.py",
@@ -39,7 +39,7 @@
     "testing": "tests/unit/domain/futures/alpha_foundry/test_alpha_search_contracts.py"
   },
   "src/domain/futures/alpha_foundry/diversity.py": {
-    "architecture": "docs/architecture/layer1.md",
+    "architecture": "docs/architecture/layer0.md",
     "testing": [
       "tests/unit/domain/futures/alpha_foundry/test_diversity.py",
       "tests/unit/domain/futures/alpha_foundry/test_diversity_selection.py"
@@ -146,7 +146,7 @@
     "testing": "tests/unit/domain/futures/strategy/test_tiered_workflow.py"
   },
   "src/domain/futures/strategy/config.py": {
-    "architecture": "docs/architecture/layer1.md",
+    "architecture": "docs/architecture/layer0.md",
     "testing": [
       "tests/unit/domain/futures/strategy/test_config.py",
       "tests/unit/domain/futures/strategy/test_family_lifecycle.py"
@@ -230,7 +230,7 @@
     "testing": "tests/unit/execution/test_opt_main_futures_probe_wiring.py"
   },
   "src/domain/futures/signals/rules.py": {
-    "architecture": "docs/architecture/layer1.md",
+    "architecture": "docs/architecture/layer0.md",
     "testing": [
       "tests/unit/domain/futures/strategy/test_rule_signals.py",
       "tests/unit/domain/futures/alpha_foundry/test_alpha_family_registration.py",
@@ -238,7 +238,7 @@
     ]
   },
   "src/domain/futures/strategy/rule_signals.py": {
-    "architecture": "docs/architecture/layer1.md",
+    "architecture": "docs/architecture/layer0.md",
     "testing": [
       "tests/unit/domain/futures/strategy/test_rule_signals.py",
       "tests/unit/domain/futures/alpha_foundry/test_alpha_family_registration.py",
@@ -250,7 +250,7 @@
     "testing": "tests/unit/domain/futures/strategy/test_timeframe_probe.py"
   },
   "src/domain/futures/strategy/family_lifecycle.py": {
-    "architecture": "docs/architecture/layer1.md",
+    "architecture": "docs/architecture/layer0.md",
     "testing": "tests/unit/domain/futures/strategy/test_family_lifecycle.py"
   },
   "src/domain/futures/strategy/candidate_evaluation.py": {
@@ -262,7 +262,7 @@
     "testing": "tests/unit/domain/futures/strategy/test_candidate_portfolio.py"
   },
   "src/domain/futures/signals/ltf_alpha.py": {
-    "architecture": "docs/architecture/layer1.md",
+    "architecture": "docs/architecture/layer0.md",
     "testing": "tests/unit/domain/futures/signals/test_ltf_alpha.py"
   },
   "src/domain/futures/signals/causal_diversified_candidates.py": {
@@ -304,5 +304,8 @@
   },
   "scripts/update_index.py": {
     "testing": "tests/unit/scripts/test_update_index.py"
+  },
+  "src/domain/futures/strategy/candidate_labels.py": {
+    "architecture": "docs/architecture/layer1.md"
   }
 }
