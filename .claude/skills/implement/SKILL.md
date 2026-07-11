@@ -32,10 +32,11 @@ Translate the logical Blueprint (`docs/specs/*.md`) into working Python code usi
   - **Loop Limit:** Limit this trial-and-error cycle to **max 3 iterations**. If pytest continues to fail after 3 attempts, **STOP** and return to the `spec` phase to refine the design.
 - **Step 4: Refactor (Refactor Phase)**
   - Clean up code duplication, optimize local variables, and ensure docstrings match standards while maintaining a green test suite.
-  - **Refactor Limits (CRITICAL)**: Do NOT modify any public signatures, interfaces, or module dependencies during this phase. Focus strictly on internal clean-up.
+  - **Refactor Limits:** Focus strictly on internal clean-up and code quality; maintain public signatures, interfaces, and module dependencies as defined.
 
-### 3. Single Responsibility (DO NOT OVERSTEP)
-- Stop immediately after tests pass and refactoring is clean. Do NOT run ruff/mypy or perform regression analysis — those are the `check` phase's responsibility. Submit results to the `check` phase for full validation.
+### 3. Single Responsibility
+- Stop immediately after tests pass and refactoring is clean; submit results to the `check` phase for full static/dynamic validation.
+
 
 ## Output Format
 ```md
