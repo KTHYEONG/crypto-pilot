@@ -35,49 +35,44 @@ last_verified: 2026-07-11
 # 2. Core Logic & Math
 
 ### Low-Cost Screening (Cheap Gate)
-- **Sparse Event Counts ($n_{events}$)**: 연속 보유바 중복 계산을 방지하기 위해 sparse entry mask(flat $\rightarrow$ active 또는 direct 부호반전 Rising Edge)의 개수로 산출. $effective\_n = n_{events}$.
-- **Barrier-Aware Return Evaluation**: `mean_gross_bps`/`mean_net_bps`는 고정 호라이즌 mark-to-close가 아닌 L1의 Triple-Barrier 커널(`compute_triple_barrier_returns`)을 재사용해 산출한다. 이벤트는 `candidate_panels_to_events()`로 변환된 뒤 원본 sparse `event_mask`와 `(entry_idx-1, symbol)` 기준으로 정합 필터링되며, 정합되지 않은 `event_mask` 셀(예: 계열 종료 부근 호라이즌 초과로 라벨링 불가한 이벤트)은 dense 배열에 NaN으로 남는다. `compute_xs_spread_lcb_bps`/`compute_rank_ic_with_tstat`는 이 NaN을 반드시 finite 마스킹 후 집계해야 하며(`compute_regime_stability`와 동일 관례), 그렇지 않으면 `AlphaGateEvidence.xs_spread_lcb_bps` 유효성 검증에서 크래시한다.
-- **Block-variance adjusted Newey-West $t$-stat**:
-  - $NW_{tstat} = \frac{\mu_{block}}{SE_{block}}$
-  - $block\_bars\_eff = \max(config.block\_bars, 2 \times holding\_bars)$ (블록 크기를 보유기간에 비동적으로 연동)
-- **Bootstrap Significance (Informational only)**: block-mean 복원추출을 통한 `bootstrap_lcb_bps` 및 `bootstrap_agree` 산출.
+- **Sparse Event Counts (n_events)**: 연속 보유바 중복 계산을 방지하기 위해 sparse entry mask (flat -> active 또는 direct 부호반전 Rising Edge)의 개수로 산출. effective_n = n_events.
+- **Barrier-Aware Return Evaluation**: mean_gross_bps/mean_net_bps는 고정 호라이즌 mark-to-close가 아닌 L1의 Triple-Barrier 커널(compute_triple_barrier_returns)을 재사용해 산출한다. 이벤트는 candidate_panels_to_events()로 변환된 뒤 원본 sparse event_mask와 (entry_idx-1, symbol) 기준으로 정합 필터링되며, 정합되지 않은 event_mask 셀은 dense 배열에 NaN으로 남는다. compute_xs_spread_lcb_bps/compute_rank_ic_with_tstat는 이 NaN을 반드시 finite 마스킹 후 집계해야 하며, 그렇지 않으면 AlphaGateEvidence.xs_spread_lcb_bps 유효성 검증에서 예외가 발생한다.
 
 ### Cost Array Usability Guard
-- `compute_triple_barrier_returns()`/`label_candidate_events()`(`candidate_labels.py`)의 `has_cost_2d` 판정은 `_is_usable_cost_array()`(단순 `is not None`이 아니라 `np.any(np.isfinite(...))`)로 결정한다. `AlignedMarketData.execution_cost_bps_2d`/`adv_usdt_2d`는 소스 컬럼이 없을 때 `None`이 아니라 전량 NaN 배열로 기본 초기화되므로(`alignment.py`), 이 가드가 없으면 유동성 비용 데이터가 없는 패널(합성 HTF 패널 포함)의 net edge가 전부 NaN으로 오염된다. `has_cost_2d=False`일 때 Numba 커널은 `cost_model.taker_round_trip_bps()`(flat round-trip 비용)로 안전하게 폴백한다.
-- **진단 로깅(opt-in)**: `AlphaGateConfig.l0_cost_diagnostics_enabled`(기본 `False`)로 `[DATA] stage=tbr_cost_check`/`stage=tbr_output_finiteness`/`[EVAL] stage=gate_evidence` 로그를 활성화. `_ensure_debug_visible()`이 주변 로깅 설정과 무관하게 opt-in 시 항상 출력을 보장한다.
+- **Validity Check**: Cost status is resolved via _is_usable_cost_array() (verifying np.any(np.isfinite(...))). 
+- **Fallback Policy**: If invalid, the system falls back to flat taker round-trip cost models.
 
 ### Canonical Gate & Priority Score
 - **Soft Flagging**: 
-  - $L0SoftFlag.weak\_rank\_ic$ : $|rank\_ic| < 1/\sqrt{n_{events} - 3}$ (표본크기 적응형 임계치)
-  - soft flag 검출 시 `l1_priority_score`에 감쇠 승수(예: `weak_rank_ic_multiplier` = 0.70)를 적용하여 랭킹 페널티를 부과하되, 하드 리젝트는 하지 않음.
+  - L0SoftFlag.weak_rank_ic: |rank_ic| < 1 / sqrt(n_events - 3) (sample-size adaptive threshold)
+  - Applies a decay multiplier (e.g., weak_rank_ic_multiplier = 0.70) to l1_priority_score without hard rejection.
 
 ### Diversity & Budget Selection
-1. **BH-FDR Correction**: 버킷 내 후보들의 $NW_{tstat}$ 기반 양측 p-value에 Benjamini-Hochberg step-up 절차를 적용하여 유의하지 않은 후보 조기 배제.
+1. **BH-FDR Correction**: Step-up FDR correction applied to NW_tstat two-sided p-values to eliminate insignificant candidates.
 2. **Greedy Diverse Selection**: 
-  * 버킷(`(family, timeframe)`) 내 `block_lcb_bps` 내림차순 정렬.
-  * 상위 $K$개 후보에 대해 상호 상관계수($\rho \le max\_novelty\_corr$) 필터링을 적용해 최종 버킷 selected recipe 확정.
-3. **Cross-Bucket Diversity**: 버킷별 selected 합집합에 대해 계층적 클러스터링을 적용하여 교차 중복을 제거하고 최종 L1 후보군을 확정.
-4. **Global L1 Budget Allocation**: 버킷 대표 품질(selected 중 최대 `block_lcb_bps`)에 비례하여 L1 시뮬레이션 슬롯을 Largest-Remainder 방식으로 배분.
+  * Sorts bucket ((family, timeframe)) candidates by block_lcb_bps descending.
+  * Filters out candidates exceeding mutual correlation threshold (max_novelty_corr).
+3. **Cross-Bucket Diversity**: Hierarchical clustering applied across selected bucket representatives to demote cross-TF duplicates.
+4. **Global L1 Budget Allocation**: Simulated slots are distributed across buckets using Largest-Remainder method based on maximum bucket block_lcb_bps.
 
-### Cross-Timeframe Fusion
-- **패널-레시피 바인딩 선행**: 각 TF의 패널은 `_bind_panels_to_recipe_ids()`로 `recipe_id`가 부여된 뒤에만 `build_cheap_gate_evidence_frame()`에 전달된다. 이 바인딩 없이는 해당 TF의 evidence 프레임이 0행이 되어 이후 퓨전 입력에서 제외된다.
-- **Timeframe 정규화**: `(family, variant, timeframe)` 키를 매칭하여 동일 variant의 타 Timeframe 성과 비교.
-- **Corroboration Tier**:
-  - `corroborated`: 타 TF 성과와 부호가 일치하며 강한 예측력을 보임. 컨빅션 스코어 15% 부스트 적용.
-  - `contradicted`: 타 TF 성과와 부호가 불일치함. 컨빅션 스코어를 음수화하여 사실상 거부 처리.
-  - `single_tf_strict` / `insufficient_coverage`: 매칭되는 타 TF 커버리지가 1개 이하이거나 전무한 경우.
+### Cross-Timeframe Diversity Audit
+- **Canonical Grid Projection**: Align signals via causal forward-fill onto base timeframe grids, offset by causal_lag_bars to prevent look-ahead bias.
+- **Independence Metrics**: Post-gate selection outputs:
+  - n_distinct_thesis_ids: thesis id count.
+  - n_independent_clusters: unique clusters determined by correlation hierarchical clustering.
 
 ### Non-Native Timeframe Synthesis (Virtual Probe)
-- 2h/6h/8h/12h는 네이티브 exchange 캔들이 저장되지 않으며(`data/futures/`에 1h/4h/1d만 존재), `select_probe_source_tf()`(`timeframe_contracts.py`)가 캐시된 1h(우선) 또는 4h 중 리샘플 호환 가능한 가장 미세한 소스를 선택해 합성한다.
-- **Open-time 컨벤션(고정)**: 리샘플은 반드시 `closed="left", label="left"`를 사용한다 — 네이티브 거래소 캔들이 open-time 라벨링이기 때문이며, 라이브 Binance 6h fetch와의 byte-identical 대조로 검증됨. `rules.py`/`rule_signals.py`의 HTF 프로젝션, `storage.py`의 1h→4h 네이티브 4h 생성 경로와 동일 컨벤션.
-- **완결성 판정**: 마지막 bin의 완결 여부는 위치(`iloc[:-1]`)가 아닌 표본 개수 기준(`bin_count >= round(target_hours / source_hours)`)으로 판정한다. 소스 cadence는 `infer_source_bar_hours()`(연속 델타의 mode, gap에 강건)로 추론.
+- **Cadence Rules**: Synthesizes 2h/6h/8h/12h bars from nearest native timeframe (1h/4h) using left-closed, left-labeled resampling.
+- **Completeness Rule**: Final bin acceptance requires bin_count >= target_hours / source_hours.
 
 # 3. Principal Data Structures
 
-- `AlphaRecipe`: `recipe_id`, `family`, `variant`, `timeframe`, `archetype`, `indicator_params`, `side_rule_id`, `exit_policy_id`.
-- `L0SearchCell`: `blueprint_id`, `family`, `variant`, `timeframe`, `expected_event_rate`, `status`, `retire_reason`.
-- `AlphaGateEvidence`: `n_events`, `effective_n`, `mean_net_bps`, `gross_lcb_bps`, `net_lcb_bps`, `nw_tstat`, `rank_ic`, `rank_ic_tstat`, `cost_drag_ratio`, `turnover_per_year`, `gate_passed`, `handoff_tier`, `selected_for_l1`, `reject_reasons`.
-- `MultiTimeframeEvidence`: `family`, `variant`, `native_timeframe`, `corroboration_tier`, `fused_conviction_score`.
+- `AlphaRecipe`: recipe_id, family, variant, timeframe, archetype, indicator_params, side_rule_id, exit_policy_id.
+- `L0SearchCell`: blueprint_id, family, variant, timeframe, expected_event_rate, status, retire_reason.
+- `AlphaGateEvidence`: n_events, effective_n, mean_net_bps, gross_lcb_bps, net_lcb_bps, nw_tstat, rank_ic, rank_ic_tstat, cost_drag_ratio, turnover_per_year, gate_passed, handoff_tier, selected_for_l1, reject_reasons.
+- `MultiTimeframeEvidence`: family, variant, native_timeframe, corroboration_tier, fused_conviction_score.
+- `L0IndependenceAudit`: n_selected_total, n_distinct_thesis_ids, n_independent_clusters, cluster_members, demoted_recipe_ids, demoted_reason_by_id, canonical_tf, max_corr_threshold.
+- `L0StrategyDeliveryManifest`: run_id_prefix, reports_by_tf (dict[str, AlphaFoundryBridgeReport]), independence_audit (L0IndependenceAudit | None), final_selected_recipe_ids, total_l1_verification_budget.
 
 # 4. Architecture Flow
 
@@ -97,9 +92,10 @@ graph TD
 
 | Parameter | Default | Purpose |
 |---|---|---|
-| `min_events` | 30 | 유효 검정을 위한 최소 이벤트 개수 |
-| `min_nw_tstat` | 1.96 | Cheap Gate 통과용 최소 Newey-West t-통계량 |
-| `max_cost_drag_ratio` | 0.60 | 기대 거래비용 대비 순수익의 임계 한계선 |
-| `max_novelty_corr` | 0.70 | 동일 버킷 내 후보군 간 허용 최대 상관계수 |
-| `fdr_alpha` | 0.10 | Benjamini-Hochberg FDR 유의성 수준 |
-| `enable_discovery_unit_handoff` | False | 외부 조건부 Discovery Unit 이관 활성화 여부 |
+| `min_events` | 30 | Minimum events for statistical significance |
+| `min_nw_tstat` | 1.96 | Minimum Newey-West t-stat for L0 cheap gate |
+| `max_cost_drag_ratio` | 0.60 | Maximum drag ratio representing transaction cost limits |
+| `max_novelty_corr` | 0.70 | Maximum correlation allowed within the same bucket |
+| `fdr_alpha` | 0.10 | FDR alpha level for Benjamini-Hochberg correction |
+| `enable_cross_tf_diversity_audit` | False | Toggle for post-gate Cross-TF independence audit |
+| `cross_tf_diversity_canonical_tf` | "1h" | Target canonical grid TF for audit projection |
