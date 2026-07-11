@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import math
+from typing import Any
 
 import numpy as np
 import pandas as pd
@@ -22,6 +23,13 @@ _BARRIER_EXIT_REASON_MAP: dict[int, str] = {
     2: "take_profit",
     3: "time_exit",
 }
+
+# Result keys for compute_triple_barrier_returns
+_TBR_KEYS: tuple[str, ...] = (
+    "gross_bps", "cost_bps", "funding_bps", "edge_bps",
+    "raw_barrier", "exit_code", "exit_idx", "mae_bps", "mfe_bps",
+    "same_bar_collision",
+)
 _logger = logging.getLogger(__name__)
 
 
@@ -346,6 +354,137 @@ def _label_events_kernel(
     )
 
 
+def compute_triple_barrier_returns(
+    *,
+    entry_idx_arr: NDArray[np.int64],
+    side_arr: NDArray[np.int64],
+    horizon_arr: NDArray[np.int64],
+    stop_mult_arr: NDArray[np.float64],
+    tp_mult_arr: NDArray[np.float64],
+    min_hold_arr: NDArray[np.int64],
+    sym_idx_arr: NDArray[np.int64],
+    aligned: AlignedMarketData,
+    cost_model: ExecutionCostModel,
+    precomputed_atr_2d: NDArray[np.float64] | None = None,
+    cost_floor_arr: NDArray[np.float64] | None = None,
+    hurdle_arr: NDArray[np.float64] | None = None,
+) -> dict[str, NDArray[np.float64] | NDArray[np.int64] | NDArray[np.int8]]:
+    """Cfg-free, DataFrame-free triple-barrier evaluation — extracted core of
+    label_candidate_events() for reuse by L0 gate evaluation. [LIMIT-01][LIMIT-02][LIMIT-05][LIMIT-06]
+
+    Returns a dict with keys: gross_bps, cost_bps, funding_bps, edge_bps,
+    raw_barrier, exit_code, exit_idx, mae_bps, mfe_bps, same_bar_collision.
+    """
+    n = len(entry_idx_arr)
+    if n == 0:
+        float_keys = {"gross_bps", "cost_bps", "funding_bps", "edge_bps", "mae_bps", "mfe_bps"}
+        result_dict: dict[str, Any] = {}
+        for k in _TBR_KEYS:
+            if k in float_keys:
+                result_dict[k] = np.array([], dtype=np.float64)
+            elif k == "exit_idx":
+                result_dict[k] = np.array([], dtype=np.int64)
+            else:
+                result_dict[k] = np.array([], dtype=np.int8)
+        return result_dict
+
+    # Validate array length consistency
+    arrays: dict[str, NDArray[Any]] = {
+        "entry_idx_arr": entry_idx_arr, "side_arr": side_arr, "horizon_arr": horizon_arr,
+        "stop_mult_arr": stop_mult_arr, "tp_mult_arr": tp_mult_arr, "min_hold_arr": min_hold_arr,
+        "sym_idx_arr": sym_idx_arr,
+    }
+    for name, arr in arrays.items():
+        if len(arr) != n:
+            raise ValueError(
+                f"mismatched array length: {name} has {len(arr)} elements, expected {n}"
+            )
+
+    if cost_floor_arr is None:
+        cost_floor_arr = np.full(n, np.nan, dtype=np.float64)
+    if hurdle_arr is None:
+        hurdle_arr = np.zeros(n, dtype=np.float64)
+
+    if precomputed_atr_2d is not None:
+        if precomputed_atr_2d.shape != aligned.close_2d.shape:
+            raise ValueError(
+                f"precomputed_atr_2d shape {precomputed_atr_2d.shape} != "
+                f"aligned.close_2d shape {aligned.close_2d.shape}"
+            )
+        atr_2d = precomputed_atr_2d
+    else:
+        atr_2d = _compute_yang_zhang_vol_2d(aligned)
+
+    taker_round_trip_bps = cost_model.taker_round_trip_bps()
+
+    open_2d_c = np.ascontiguousarray(aligned.open_2d, dtype=np.float64)
+    high_2d_c = np.ascontiguousarray(aligned.high_2d, dtype=np.float64)
+    low_2d_c = np.ascontiguousarray(aligned.low_2d, dtype=np.float64)
+    close_2d_c = np.ascontiguousarray(aligned.close_2d, dtype=np.float64)
+    funding_2d_c = np.ascontiguousarray(aligned.funding_2d, dtype=np.float64)
+    atr_2d_c = np.ascontiguousarray(atr_2d, dtype=np.float64)
+
+    has_cost_2d = aligned.execution_cost_bps_2d is not None
+    cost_2d_c = (
+        np.ascontiguousarray(aligned.execution_cost_bps_2d, dtype=np.float64)
+        if has_cost_2d
+        else np.zeros_like(close_2d_c)
+    )
+
+    (
+        gross_arr,
+        cost_arr,
+        funding_arr,
+        edge_arr,
+        raw_barrier_arr,
+        _barrier_first_arr,
+        _profitable_arr,
+        _tte_arr,
+        mae_arr,
+        mfe_arr,
+        _rv_arr,
+        _sl_thr_bps_arr,
+        exit_code_arr,
+        exit_idx_arr,
+        same_bar_arr,
+    ) = _label_events_kernel(
+        n,
+        entry_idx_arr,
+        side_arr,
+        horizon_arr,
+        stop_mult_arr,
+        tp_mult_arr,
+        min_hold_arr,
+        cost_floor_arr,
+        hurdle_arr,
+        sym_idx_arr,
+        open_2d_c,
+        high_2d_c,
+        low_2d_c,
+        close_2d_c,
+        funding_2d_c,
+        atr_2d_c,
+        cost_2d_c,
+        has_cost_2d,
+        taker_round_trip_bps,
+        float(_ATR_FALLBACK_FRACTION),
+        float(_BPS_SCALE),
+    )
+
+    return {
+        "gross_bps": gross_arr,
+        "cost_bps": cost_arr,
+        "funding_bps": funding_arr,
+        "edge_bps": edge_arr,
+        "raw_barrier": raw_barrier_arr.astype(np.int8),
+        "exit_code": exit_code_arr.astype(np.int8),
+        "exit_idx": exit_idx_arr.astype(np.int32),
+        "mae_bps": mae_arr,
+        "mfe_bps": mfe_arr,
+        "same_bar_collision": same_bar_arr.astype(np.int8),
+    }
+
+
 def label_candidate_events(
     *,
     events: pd.DataFrame,
@@ -354,6 +493,10 @@ def label_candidate_events(
     precomputed_atr_2d: np.ndarray | None = None,
 ) -> pd.DataFrame:
     """Attach leak-free forward outcomes to candidate events.
+
+    Thin wrapper: builds ExecutionCostModel/exit_policy_mode/min_risk_unit_bps
+    from cfg, delegates to compute_triple_barrier_returns(), reassembles the
+    existing DataFrame schema. [LIMIT-03] Output unchanged for all existing callers.
 
     Time Complexity: O(E * H), where E is number of events and H is holding horizon.
     Space Complexity: O(T * N) for ATR cache.
@@ -376,7 +519,6 @@ def label_candidate_events(
     else:
         atr_2d = _compute_yang_zhang_vol_2d(aligned)
     out = events.copy()
-    # O(1) symbol lookup: build once before the per-event pre-extraction
     _sym_to_idx: dict[str, int] = {sym: idx for idx, sym in enumerate(aligned.symbols)}
     cost_model = ExecutionCostModel(
         maker_fee_bps=float(getattr(cfg, "maker_fee_bps", 2.0)),
@@ -390,7 +532,6 @@ def label_candidate_events(
 
     n = len(out)
 
-    # Pre-extract event arrays for numba kernel
     sym_idx_arr = np.array([_sym_to_idx.get(str(s), -1) for s in out["symbol"]], dtype=np.int64)
     unknown_pos = np.where(sym_idx_arr == -1)[0]
     if unknown_pos.size > 0:
@@ -479,8 +620,8 @@ def label_candidate_events(
     exit_reason_arr = np.array([_BARRIER_EXIT_REASON_MAP[int(c)] for c in exit_code_arr], dtype=object)
 
     # Column assignments — same schema as the original itertuples version
-    out["barrier_first_label"] = barrier_first_arr.astype(np.int8)
-    out["profitable_after_hurdle_label"] = profitable_arr.astype(np.int8)
+    out["barrier_first_label"] = barrier_first_arr
+    out["profitable_after_hurdle_label"] = profitable_arr
     out["event_id"] = np.arange(len(out), dtype=np.int64)
     out["gross_event_bps"] = gross_arr
     out["gross_return_bps"] = gross_arr.copy()
