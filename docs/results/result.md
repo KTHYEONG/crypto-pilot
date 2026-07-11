@@ -1,86 +1,82 @@
 # L0/L1 Discovery Snapshot
 
 - Date: `2026-07-11`
-- Run id: `4h_1783736185`
+- Run id: `4h_1783753822` (post-fix measurement run, `l0_cost_diagnostics_enabled=True`)
 - Command:
   `UV_CACHE_DIR=/tmp/uv-cache MPLCONFIGDIR=/tmp/mpl PYTHONPATH=. LOG_LEVEL=DEBUG timeout 1500 uv run python src/execution/opt_main_futures.py --phase l1 --sync skip --timeframe 4h --date 2026-07-11 --trials 1 --seed 42`
-- Context: acceptance run for `[ADR_20260711_L0_ENTRY_EXIT_SIGNAL_EFFECTIVENESS_REDESIGN]` (barrier-aware evaluation, rising-edge sparse triggers, rolling-stat/entry-logic bug fixes, catalog cleanup). Supersedes the `2026-07-09` snapshot below in scope (this run additionally fixed a real-data crash the prior snapshot never hit).
+- Context: This snapshot **supersedes all prior L0/L1 snapshots** in this file's history. Three root-cause fixes landed this session, in dependency order:
+  1. `[ADR_20260711_L0_HTF_RESAMPLE_ALIGNMENT_FIX]` — 2h/6h/8h/12h synthetic candles used the wrong resample convention (`closed="right"` instead of open-time `closed="left"`), verified against a live Binance 6h fetch (byte-identical after fix).
+  2. `[ADR_20260711_L1_POOLED_ALPHA_ADMISSION_GENERALIZATION]` — L1's peer-exclusive incremental-edge test structurally zeroed out correlated systematic (trend/ts_mom) signals; generalized the existing `xs_alpha`-only pooled-admission bypass to cover these archetypes.
+  3. **`[ADR_20260711_L0_NAN_COST_HTF_BLIND_REJECTION]` — the decisive fix.** `AlignedMarketData.execution_cost_bps_2d` defaults to an all-NaN array (not `None`) when a symbol/TF lacks liquidity-cost columns. `has_cost_2d = ... is not None` treated this NaN array as valid data, poisoning `edge_bps` (net) to NaN for every event on non-4h (and some 4h) panels, while `gross_bps` stayed clean. The gate then read `net_lcb_bps=0.0`/`nw_tstat=0.0` (the NaN→0.0 fallback) and **auto-rejected every candidate on every affected TF regardless of true underlying alpha** — a mathematical certainty (`0.0 <= min_lcb_net_bps(0.0)`, `0.0 < min_nw_tstat(1.25)`), not a statistical judgment.
 
-## Scope
+## Why This Snapshot Invalidates Prior Conclusions
 
-- Test horizon: `2023-10-31 ~ 2026-06-30`
-- IS / OOS split: `2026-01-01`
-- Universe funnel:
-  - discovered `414`
-  - liquidity-selected (capacity limit, Top-N) `150`
-  - loaded after integrity checks `137`
-  - admitted into L1 (post late-start drop) `126` (dropped `11`: `late_start`)
-- 4h panel funnel (only TF with a logged panels_in/bound breakdown): `n_panels_in=54 → n_bound=46 → n_passed(cheap gate)=16 → n_rejected=30`
+Every previous entry in this file's history concluded some variant of "1h/2h/6h/8h/12h show `gross alpha 부재`" (genuine alpha absence). **That conclusion was a false negative.** Those timeframes were never actually evaluated on real net-of-cost economics — they were structurally auto-rejected by the NaN-cost bug before any real signal could be observed. This was proven at the raw evidence-row level (742 diagnostic log lines, `edge_finite=1.000` for 100% of recipes post-fix), not inferred.
 
-## L0 Gate Summary (real per-TF evidence, post barrier-aware fix)
+## L0 Gate Summary (real per-TF evidence, all three fixes applied)
 
-| TF | Evidence Rows | Distinct Families | Gate Passed | Selected for L1 |
-| --- | ---: | ---: | ---: | ---: |
-| 1h | 8 | 4 | 0 | 0 |
-| 2h | 10 | 4 | 0 | 0 |
-| 4h | 46 | 28 | 16 | 13 |
-| 6h | 19 | 11 | 0 | 0 |
-| 8h | 19 | 11 | 0 | 0 |
-| 12h | 18 | 10 | 0 | 0 |
-| Total | 120 | - | 16 | 13 |
+| TF | Families Evaluated | Families Passed | Evidence Rows | Gate Passed | Selected for L1 |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| 1h | 3 | 2 | 8 | 5 | 5 |
+| 2h | 4 | 4 | 10 | 10 | 10 |
+| 4h | 25 | 12 | 46 | 24 | 18 |
+| 6h | 7 | 6 | 19 | 13 | 13 |
+| 8h | 7 | 6 | 19 | 13 | 13 |
+| 12h | 8 | 7 | 18 | 13 | 13 |
+| **Total** | - | - | **120** | **78** | **72** |
 
-## Selected L1 Candidates (all from 4h; sorted by net_lcb_bps)
+**L1 final gate: `PASSED` for the first time in this project's documented history** (8h `n_ready=53`, 12h `n_ready=98`, 2h `n_ready=19`; 4h/6h/1h remain blocked at the L1-nested stage — separate, unresolved mechanism, see below).
 
-| Family | Variant | net_lcb_bps | nw_tstat | cost_drag_ratio | n_events |
-| --- | --- | ---: | ---: | ---: | ---: |
-| `trend_pullback_continuation` | `tpc_100_400_4h` | 96.78 | 6.19 | 0.091 | 7,287 |
-| `trend_pullback_continuation` | `tpc_50_200_4h` | 77.18 | 7.43 | 0.119 | 12,188 |
-| `trend_pullback_quality_v2` | `tpq_v2_100_400_4h` | 67.50 | 4.35 | 0.118 | 3,915 |
-| `mtf_trend_pullback` | `mtf_tpb_100_30_4h` | 52.68 | 5.22 | 0.157 | 13,727 |
-| `trend_pullback_quality_v2` | `tpq_v2_50_200` | 51.81 | 4.70 | 0.154 | 6,304 |
-| `dual_momentum` | `dm_24_96_4h` | 51.78 | 6.62 | 0.167 | 28,510 |
-| `vol_term_structure_gate` | `vts_gate_20_4h` | 42.30 | 5.33 | 0.190 | 33,675 |
-| `macd_4h` | `macd_12_26_9` | 39.07 | 7.97 | 0.219 | 41,036 |
-| `dual_momentum` | `dm_12_48_4h` | 37.12 | 7.47 | 0.225 | 40,642 |
-| `trend_pullback_continuation` | `tpc_20_100_4h` | 36.97 | 6.52 | 0.214 | 22,949 |
-| `taker_imbalance_momentum` | `tim_12_4h` | 33.41 | 11.41 | 0.258 | 57,304 |
-| `trend_pullback_quality_v2` | `tpq_v2_20_100` | 23.05 | 3.37 | 0.268 | 9,204 |
-| `oi_lsr_unwind` | `oiu_42` | 15.16 | 2.37 | 0.332 | 1,527 |
+## Selected L1 Candidates by Family (net_lcb_bps range per TF)
 
-## Failure Pattern
+| TF | Passed families | Representative net_lcb_bps range |
+| --- | --- | --- |
+| 1h | `trend_ma`, `trend_pullback_continuation` | 36.5 ~ 62.9 |
+| 2h | `btc_regime_pullback`, `trend_pullback_continuation`, `trend_ma`, `residual_reversion` | 13.8 ~ 98.9 |
+| 4h | 12 distinct families (fullest breadth: momentum, breakout, xs, carry, unwind archetypes) | -18.3 ~ 107.6 |
+| 6h | `trend_pullback_continuation`, `btc_regime_pullback`, `trend_ma`, `trend_donchian`, `dual_momentum`, `mtf_breakout_retest` | 7.0 ~ 125.7 |
+| 8h | same 6 families as 6h | 17.9 ~ 132.2 |
+| 12h | 6h/8h set + `vol_term_structure_gate` | 4.7 ~ 144.3 |
 
-- Main reject reasons (all TFs combined):
-  - `non_positive_lcb`: 64
-  - `weak_tstat`: 54
-  - `tf_contradicted`: 39
-  - `excess_cost_drag`: 10
-  - `insufficient_events`: 14
-  - `xs_spread_fail`: 10
-  - `excess_turnover`: 8
-  - `gross_lcb_below_cost`: 3
-  - `non_positive_gross`: 2
-  - `insufficient_effective_n`: 1
-- 6h/8h/12h collapse pattern: identical reject-reason counts across all three TFs (`tf_contradicted=8, non_positive_lcb=15, weak_tstat=15, insufficient_events=4, xs_spread_fail=2`) — evidence rows are near-duplicated across these TFs, consistent with the same underlying 1h-sourced candles being resampled (per TF-PROBE readiness dashboard: `6h/8h/12h Mix: 1h:296`), not independent signal evaluation.
-- L1 nested pairwise stage (downstream of L0, separate mechanism): even the 4h-selected set collapses to `0 qualified` pairs per as-of snapshot (`no_incremental_edge`, `negative_gross_edge` dominant), and final `L1_NESTED` fold readiness is `BLOCKED (fold_ratio 0.25<0.50)`. This is not part of the L0 entry/exit fix scope.
+## My Assessment: The Mechanism Works, The Diversity Goal Is Only Half-Met
 
-## Critical Observations
+The L0→L1 funnel *architecture* is sound and now verifiably functional: L0 spends ~285s (of a ~735s total run) reducing the combinatorial search space to 78 candidates before L1's more expensive walk-forward simulation runs. This is the intended "cheap pre-filter, expensive verification only on survivors" design, and it now works end-to-end without crashing or silently zeroing out real signal.
 
-1. Barrier-aware evaluation (Fix 1) materially changed the 4h outcome shape.
-   Compared to the `2026-07-09` snapshot (8 total selections, `net_lcb_bps` capped at ~112), this run produced **13 selections at 4h alone**, spanning **8 distinct families** (trend-pullback variants, `mtf_trend_pullback`, `dual_momentum`, `vol_term_structure_gate`, `macd_4h`, `taker_imbalance_momentum`, `oi_lsr_unwind`) instead of 5/8 concentrated in `btc_regime_pullback`. This is real breadth improvement at 4h, not just a numerical-stability fix.
+But three structural gaps prevent the *stated goal* — genuinely diverse signals discovered independently across multiple timeframes — from being fully realized:
 
-2. The real-data crash found and fixed this session (`xs_spread_lcb_bps must be finite`) is confirmed resolved.
-   All 6 TFs now produce complete, finite evidence CSVs end-to-end; no exception across the full run (628.94s wall clock).
+1. **1h/2h have a structurally narrow search space, not a narrow result.** `_DEFAULT_PER_TF_FAMILIES` gives 1h only 3 families and 2h only 4, versus 25 at 4h. Families that pass strongly at 4h (`taker_imbalance_momentum`, `macd_4h`, `mtf_trend_pullback`) are never even attempted at 1h/2h. This is a config choice, not a gate failure — but it means "L0 found little diversity at 1h/2h" is not yet a fair test of whether diversity exists there.
 
-3. Breadth improvement does not transfer past 4h.
-   1h/2h/6h/8h/12h all show `gate_passed=0`. The 6h/8h/12h evidence is suspiciously identical in reject-reason shape, pointing to an HTF-resample data-sourcing artifact (all three built from the same `1h:296` source mix) rather than three independently-evaluated timeframes — a candidate follow-up investigation, separate from this spec's scope.
+2. **6h/8h/12h converge on the same 6 trend-following families every time.** This is the same underlying concern already validated empirically in the L1 pooled-admission investigation: these archetypes are highly correlated across time-aggregation levels. 78 "candidates" likely represent far fewer *independent* alpha discoveries than the count suggests — much of it may be one or two trend-following theses re-measured at different bar granularities.
 
-4. L0 breadth gain does not survive L1's nested pairwise-matching gate.
-   Even the 13 4h-selected, gate-passed L0 candidates reduce to 0 qualified pairs in L1's own prequential evidence stage (`no_incremental_edge`/`negative_gross_edge`). This is a distinct downstream mechanism from the L0 entry/exit redesign and remains unresolved.
+3. **Diversity deduplication (BH-FDR + cross-bucket correlation clustering) only visibly acted on 4h** (`selected_for_l1(18) < gate_passed(24)`). Every other TF shows `selected_for_l1 == gate_passed` exactly — zero redundancy removed. Root cause not yet confirmed: could be legitimately small per-bucket candidate counts falling under the `top_k` threshold, or a wiring gap where HTF virtual-panel evidence bypasses the dedup stage that native-4h evidence goes through. Unresolved.
 
-## Current Conclusion
+## Known Remaining Issues (unresolved, explicitly out of scope for the fixes above)
 
-- This session's fix (barrier-aware NaN/finite-masking bug) is verified by direct execution: no crash, and a genuine increase in 4h L0 gate-passed breadth/diversity versus the pre-fix baseline.
-- The original diagnosis (`gross alpha 부재`, not implementation bug) still holds for 1h/2h/6h/8h/12h — those TFs remain fully blocked on `non_positive_lcb`/`weak_tstat` regardless of the entry-logic corrections.
-- Next priority candidates (not yet started):
-  1. Investigate why 6h/8h/12h evidence rows are near-identical (HTF resample sourcing artifact vs. genuine independent evaluation).
-  2. Root-cause L1's nested pairwise `no_incremental_edge`/`negative_gross_edge` collapse — the mechanism that currently discards all L0 4h breadth gains before deployment.
+- **L1-nested pairwise stage still blocks 4h/6h/1h** at the outer-fold level (`empty_opportunities`, Symbols=0/Events=0 in most outer folds) — a separate, upstream-of-L1-admission mechanism discovered during the pooled-admission investigation, never root-caused. `[ADR_L0_STRATEGY_DELIVERY_HARDENING]` added locus-tagged blockers (`empty_opportunities:registry_empty` vs `empty_opportunities:prediction_unmatched`, `signal_selection.py`) so the next run can distinguish the two failure loci from logs alone — not yet re-measured.
+- **`align_data_maps()`'s cost-diagnostics logging parameter is unwired** in the real pipeline call chain (only `evaluate_panel_gate`'s is wired) — a minor observability gap, not a correctness issue (the underlying fix is unconditional).
+- Whether the 72 selected_for_l1 candidates survive realistic walk-forward OOS / cost-stress testing in L1 is **not yet verified** — gate-passed is a necessary, not sufficient, condition for deployability.
+- 1h/2h family-pool widening ([LIMIT-05] `l1_ltf_family_pool_widened` config knob) is implemented and unit-tested but **not yet A/B-measured** against the narrow default — still an open experiment, not a decision.
+
+## Cross-TF Independence Audit (2026-07-11, run `4h_1783775628`) — resolves Next-Priority item #3 below
+
+- Command: same as above, with `L0_CROSS_TF_DIVERSITY_AUDIT=1` env flag (new opt-in gate, `enable_cross_tf_diversity_audit` on `AlphaFoundryRuntimeConfig`, wired into `bridge.py`'s multi-TF L0 path).
+- Result (`[EVAL] stage=l0_cross_tf_independence_audit`):
+
+  | Metric | Value |
+  | --- | ---: |
+  | `n_selected_total` | 72 (matches `Selected for L1` total above exactly — wiring integrity confirmed) |
+  | `n_distinct_thesis_ids` | 13 (cheap proxy: family→thesis-group mapping) |
+  | `n_independent_clusters` | **38** (measured proxy: cross-TF pairwise correlation clustering on the union of all 72 candidates, projected onto the 4h canonical grid) |
+  | `n_demoted` | 34 |
+
+- **Answer to the long-standing open question: of the 72 `selected_for_l1` candidates, only 38 (53%) are genuinely independent bets.** The other 34 (47%) are re-measurements of the same underlying thesis at a different bar granularity. This is a **measured confirmation**, not inference, of "My Assessment" point #2 above.
+- The demoted set is dominated by `btc_regime_pullback` variants recurring across 2h/4h/6h/8h/12h (e.g. `btc_pullback_50`, `btc_pullback_100_slow`, `btc_pullback_50_rsi` each collapse into a single cross-TF cluster) — the "one or two trend-following theses re-measured at different bar granularities" hypothesis in point #2 is now the confirmed dominant driver, not a hypothesis.
+- Implication for L2: portfolio risk-budget diversification assumptions should use 38 as the effective independent-strategy count, not 72.
+- This required 4 debugging iterations to get a clean measurement (see decisions log): a logger-visibility gap (module logger not propagating DEBUG in this pipeline), a pre-existing gap where `panels_for_l1` never carried `metadata["recipe_id"]`, and a wrong canonical-TF choice ("finest TF present" instead of the run's actual anchor TF). All three were genuine bugs independent of this measurement's intent, now fixed and regression-tested.
+
+## Next Priority Candidates
+
+1. Root-cause why *intra-TF* diversity dedup only fires for 4h (`selected_for_l1(18) < gate_passed(24)` at 4h, `==` everywhere else) — this is a **different, still-open question** from the cross-TF audit above (intra-TF dedup operates per-`(family, timeframe)` bucket within a single TF's own gate call; it never saw other TFs' candidates in the first place, which the new cross-TF audit now also covers going forward). `[LIMIT-04]` diagnostic (`audit_full_family_correlation`, already wired via `enable_correlation_audit`) is the designated next step — determine whether HTF synthetic panels have depressed `valid_mask_2d` overlap vs. native 4h panels before assuming a fix is needed.
+2. Decide (not yet A/B-measured) whether to widen 1h/2h's family search pool — `l1_ltf_family_pool_widened=True` vs `False`, same date/seed, compare `docs/results/result.md` deltas.
+3. ~~Cross-TF correlation audit on the 78 selected_for_l1 candidates~~ — **done above**, 2026-07-11.
+4. Resolve the L1-nested `empty_opportunities` outer-fold blocker (4h/6h/1h) — locus-tagged blockers are now wired (see Known Remaining Issues); next run should reveal whether `registry_empty` (upstream nested-pairwise gate) or `prediction_unmatched` (downstream matching) dominates.
