@@ -8,6 +8,7 @@ from __future__ import annotations
 import logging
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from typing import Any
 
 import numba
 import numpy as np
@@ -34,14 +35,12 @@ ALL_SIGNAL_FAMILIES: tuple[str, ...] = (
     "funding_flow_carry", "funding_extreme_reversal",
     "lsr_oi_regime_filter", "vol_term_structure_gate",
     "macd_4h", "supertrend", "ichimoku_trend",
-    "sparse_breakout_retest_v2", "trend_pullback_quality_v2", "residual_momentum_xs",
-    "funding_contra_carry_sparse", "oi_price_divergence_unwind", "taker_flow_exhaustion",
-    "liquidity_vacuum_breakout", "volatility_contraction_expansion",
-    "btc_regime_relative_strength", "mean_reversion_after_liquidation_proxy",
-    "sparse_breakout_retest_liquidity", "funding_flow_exhaustion_sparse",
+    "trend_pullback_quality_v2", "residual_momentum_xs",
+    "funding_flow_exhaustion_sparse",
     "oi_lsr_unwind", "vol_contraction_breakout",
     "xs_residual_rebalance", "carry_net_of_funding",
     "liquidity_participation_breakout", "btc_neutral_residual_reversal",
+    "price_band_reversion",
 )
 
 
@@ -192,7 +191,7 @@ def _rolling_mean_2d(arr: NDArray[np.float64], window: int) -> NDArray[np.float6
     if window <= 1:
         return arr.copy()
     df = pd.DataFrame(arr)
-    result: NDArray[np.float64] = df.rolling(window=window, min_periods=1).mean().to_numpy(dtype=np.float64)
+    result: NDArray[np.float64] = df.rolling(window=window, min_periods=1).mean().shift(1).to_numpy(dtype=np.float64)
     return result
 
 
@@ -201,7 +200,7 @@ def _rolling_std_2d(arr: NDArray[np.float64], window: int) -> NDArray[np.float64
     if window <= 1:
         return np.zeros_like(arr, dtype=np.float64)
     df = pd.DataFrame(arr)
-    raw: NDArray[np.float64] = df.rolling(window=window, min_periods=2).std().to_numpy(dtype=np.float64)
+    raw: NDArray[np.float64] = df.rolling(window=window, min_periods=2).std().shift(1).to_numpy(dtype=np.float64)
     result: NDArray[np.float64] = np.where(np.isfinite(raw), raw, 1e-12)
     return result
 
@@ -701,8 +700,8 @@ def build_rule_signal_panels(
             ma_diff = (ema_fast - ema_slow) / atr
             signed_score_ma = np.tanh(ma_diff)
             side_hint_ma = np.zeros_like(signed_score_ma, dtype=np.int8)
-            side_hint_ma[ma_diff > 0.5] = 1
-            side_hint_ma[ma_diff < -0.5] = -1
+            side_hint_ma[_entry_rising_edge_2d(ma_diff > 0.5)] = 1
+            side_hint_ma[_entry_rising_edge_2d(ma_diff < -0.5)] = -1
             fam_panels.append(
                 CandidateSignalPanel(
                     family="trend_ma",
@@ -727,8 +726,8 @@ def build_rule_signal_panels(
             ma_diff_18_108 = (ema_fast_18 - ema_slow_108) / atr
             signed_score_ma_18_108 = np.tanh(ma_diff_18_108)
             side_hint_ma_18_108 = np.zeros_like(signed_score_ma_18_108, dtype=np.int8)
-            side_hint_ma_18_108[ma_diff_18_108 > 0.5] = 1
-            side_hint_ma_18_108[ma_diff_18_108 < -0.5] = -1
+            side_hint_ma_18_108[_entry_rising_edge_2d(ma_diff_18_108 > 0.5)] = 1
+            side_hint_ma_18_108[_entry_rising_edge_2d(ma_diff_18_108 < -0.5)] = -1
             fam_panels.append(
                 CandidateSignalPanel(
                     family="trend_ma",
@@ -752,8 +751,8 @@ def build_rule_signal_panels(
             d72_high = _rolling_max_2d(high, window=scale_window(72))
             d72_low = _rolling_min_2d(low, window=scale_window(72))
             d72_side = np.zeros_like(close, dtype=np.int8)
-            d72_side[close > d72_high] = 1
-            d72_side[close < d72_low] = -1
+            d72_side[_entry_rising_edge_2d(close > d72_high)] = 1
+            d72_side[_entry_rising_edge_2d(close < d72_low)] = -1
             d72_score = np.zeros_like(close)
             above_72 = close > d72_high
             below_72 = close < d72_low
@@ -787,8 +786,8 @@ def build_rule_signal_panels(
             bw_z = (bandwidth - bw_mean_120) / np.maximum(bw_std_120, 1e-12)
             compressed = bw_z < -1.0
             vol_side = np.zeros_like(close, dtype=np.int8)
-            vol_side[compressed & (close > bb_mean + bb_std * 2.0)] = 1
-            vol_side[compressed & (close < bb_mean - bb_std * 2.0)] = -1
+            vol_side[_entry_rising_edge_2d(compressed & (close > bb_mean + bb_std * 2.0))] = 1
+            vol_side[_entry_rising_edge_2d(compressed & (close < bb_mean - bb_std * 2.0))] = -1
             vol_score = np.where(vol_side != 0, (close - bb_mean) / atr, 0.0)
             fam_panels.append(
                 CandidateSignalPanel(
@@ -836,8 +835,8 @@ def build_rule_signal_panels(
                     raise ValueError(f"unsupported oscillator type: {_oscillator}")
 
                 btc_side = np.zeros_like(close, dtype=np.int8)
-                btc_side[btc_trend_up & _osc_long] = 1
-                btc_side[~btc_trend_up & _osc_short] = -1
+                btc_side[_entry_rising_edge_2d(btc_trend_up & _osc_long)] = 1
+                btc_side[_entry_rising_edge_2d(~btc_trend_up & _osc_short)] = -1
                 btc_score = np.clip(_osc_score, -1.0, 1.0)
                 _holding = scale_window(36) if _variant == "btc_pullback_100_slow" else scale_window(18)
                 _min_holding = scale_window(12) if _variant == "btc_pullback_100_slow" else scale_window(6)
@@ -1001,8 +1000,8 @@ def build_rule_signal_panels(
                 _resid_std_rr = _rolling_std_2d(_resid_ret_rr, window=_rr_win)
                 _resid_z_rr = (_resid_ret_rr - _resid_mean_rr) / np.maximum(_resid_std_rr, 1e-12)
                 _rr_side = np.zeros_like(close, dtype=np.int8)
-                _rr_side[_resid_z_rr <= -2.0] = 1
-                _rr_side[_resid_z_rr >= 2.0] = -1
+                _rr_side[_entry_rising_edge_2d(_resid_z_rr <= -2.0)] = 1
+                _rr_side[_entry_rising_edge_2d(_resid_z_rr >= 2.0)] = -1
                 _rr_score = np.where(_rr_side != 0, -_normalize_linear_score(_resid_z_rr, scale=3.0), 0.0)
                 fam_panels.append(
                     CandidateSignalPanel(
@@ -1267,8 +1266,8 @@ def build_rule_signal_panels(
                 _cvd_z = flow_z_24 if _tim_win == flow_z_24_window else _zscore_2d(flow_imbalance, window=_tim_win)
 
                 _g7_side = np.zeros_like(close, dtype=np.int8)
-                _g7_side[_cvd_z >= 1.5] = 1
-                _g7_side[_cvd_z <= -1.5] = -1
+                _g7_side[_entry_rising_edge_2d(_cvd_z >= 1.5)] = 1
+                _g7_side[_entry_rising_edge_2d(_cvd_z <= -1.5)] = -1
                 _g7_score = np.tanh(_cvd_z / 1.5)
 
                 fam_panels.append(
@@ -1346,8 +1345,8 @@ def build_rule_signal_panels(
                 _f_z = funding_z_168 if _fer_win == 168 else _zscore_2d(funding, window=_fer_win, eps=1e-6)
 
                 _g9_side = np.zeros_like(close, dtype=np.int8)
-                _g9_side[_f_z >= 1.645] = -1
-                _g9_side[_f_z <= -1.645] = 1
+                _g9_side[_entry_rising_edge_2d(_f_z >= 1.645)] = -1
+                _g9_side[_entry_rising_edge_2d(_f_z <= -1.645)] = 1
                 _g9_score = np.clip(-_f_z / 1.645, -1.0, 1.0)
 
                 fam_panels.append(
@@ -1454,8 +1453,8 @@ def build_rule_signal_panels(
                 _trig_dn = close < _don_low
 
                 _g10_side = np.zeros_like(close, dtype=np.int8)
-                _g10_side[_gate_active & _trig_up] = 1
-                _g10_side[_gate_active & _trig_dn] = -1
+                _g10_side[_entry_rising_edge_2d(_gate_active & _trig_up)] = 1
+                _g10_side[_entry_rising_edge_2d(_gate_active & _trig_dn)] = -1
                 _g10_score = np.where(_trig_up, 1.0, np.where(_trig_dn, -1.0, 0.0))
 
                 fam_panels.append(
@@ -1536,7 +1535,10 @@ def build_rule_signal_panels(
             # E. supertrend
             _st_period = scale_window(10)
             _st_trend = _supertrend_2d(high, low, close, period=_st_period, multiplier=2.5)
-            _st_score = _st_trend.astype(np.float64)
+            _st_prev = np.vstack([np.zeros((1, _st_trend.shape[1]), dtype=_st_trend.dtype), _st_trend[:-1]])
+            _st_flip = (_st_trend != _st_prev) & (_st_prev != 0)
+            _st_side = np.where(_st_flip, _st_trend, 0).astype(np.int8)
+            _st_score = _st_side.astype(np.float64)
             fam_panels.append(
                 CandidateSignalPanel(
                     family="supertrend",
@@ -1553,7 +1555,7 @@ def build_rule_signal_panels(
                     datetimes=aligned.datetimes,
                     symbols=aligned.symbols,
                     signed_score_2d=_st_score,
-                    side_hint_2d=_st_trend,
+                    side_hint_2d=_st_side,
                     expected_holding_bars=scale_window(18),
                     min_holding_bars=scale_window(6),
                     stop_atr_mult=2.5,
@@ -1578,8 +1580,8 @@ def build_rule_signal_panels(
             _ichi_bull = (_tenkan > _kijun) & (close > _cloud_top)
             _ichi_bear = (_tenkan < _kijun) & (close < _cloud_top)
             _ichi_side = np.zeros_like(close, dtype=np.int8)
-            _ichi_side[_ichi_bull] = 1
-            _ichi_side[_ichi_bear] = -1
+            _ichi_side[_entry_rising_edge_2d(_ichi_bull)] = 1
+            _ichi_side[_entry_rising_edge_2d(_ichi_bear)] = -1
             _ichi_score = (_tenkan - _kijun) / np.maximum(atr, 1e-12)
             fam_panels.append(
                 CandidateSignalPanel(
@@ -1673,11 +1675,11 @@ def build_rule_signal_panels(
                 _tpq_rsi_prev = np.vstack([_tpq_rsi[:1], _tpq_rsi[:-1]])
                 _tpq_pullback_up = _tpq_trend_up & (close < _tpq_ema_fast) & (close >= _tpq_ema_fast * 0.97)
                 _tpq_pullback_dn = _tpq_trend_dn & (close > _tpq_ema_fast) & (close <= _tpq_ema_fast * 1.03)
-                _tpq_rsi_ok = (_tpq_rsi_prev < _tpq_rsi_lo) & (_tpq_rsi >= _tpq_rsi_lo)
-                _tpq_rsi_ok |= (_tpq_rsi_prev > _tpq_rsi_hi) & (_tpq_rsi <= _tpq_rsi_hi)
+                _tpq_rsi_ok_long = (_tpq_rsi_prev < _tpq_rsi_lo) & (_tpq_rsi >= _tpq_rsi_lo)
+                _tpq_rsi_ok_short = (_tpq_rsi_prev > _tpq_rsi_hi) & (_tpq_rsi <= _tpq_rsi_hi)
                 _tpq_side = np.zeros_like(close, dtype=np.int8)
-                _tpq_side[_tpq_pullback_up & _tpq_rsi_ok] = 1
-                _tpq_side[_tpq_pullback_dn & _tpq_rsi_ok] = -1
+                _tpq_side[_tpq_pullback_up & _tpq_rsi_ok_long] = 1
+                _tpq_side[_tpq_pullback_dn & _tpq_rsi_ok_short] = -1
                 _tpq_score = np.where(
                     _tpq_side > 0,
                     np.clip((_tpq_ema_fast - close) / atr, 0.0, 2.0),
@@ -1807,7 +1809,8 @@ def build_rule_signal_panels(
             _ffes_imbalance, _ffes_valid = safe_taker_imbalance_2d(aligned.taker_buy_2d, vol)
             _ffes_imbalance_mean = _rolling_mean_2d(_ffes_imbalance, window=scale_window(12))
             _ffes_extreme = np.abs(_ffes_funding_z) >= 1.5
-            _ffes_crowded = (_ffes_imbalance_mean > 0.10) | (_ffes_imbalance_mean < -0.10)
+            _ffes_side_raw = -np.sign(_ffes_funding_z).astype(np.int8)
+            _ffes_crowded = (_ffes_side_raw.astype(np.float64) * _ffes_imbalance_mean) >= 0.10
             _ffes_condition = _ffes_extreme & _ffes_crowded & valid_mask & _ffes_valid & np.isfinite(funding)
             _ffes_entry = _entry_rising_edge_2d(_ffes_condition)
             _ffes_side = np.where(_ffes_entry, -np.sign(_ffes_funding_z).astype(np.int8), 0).astype(np.int8, copy=False)
@@ -1904,7 +1907,7 @@ def build_rule_signal_panels(
                     turnover_proxy_2d=np.abs(np.diff(_vcb_score, axis=0, prepend=0.0)),
                     valid_mask_2d=valid_mask,
                     metadata={
-                        "archetype": "mean_reversion",
+                        "archetype": "trend",
                         "regime": "vol_contraction_breakout",
                         "edge_hypothesis": "low vol squeeze + expansion breakout -> mean-reverting reversals",
                     },
@@ -1924,8 +1927,11 @@ def build_rule_signal_panels(
                 _bucket_cross = _bucket != _bucket_prev
                 _sign = np.sign(_raw)
                 _sign_prev = np.vstack([_sign[:1], _sign[:-1]])
-                _sign_flip = (_sign != 0) & (_sign_prev != 0) & (_sign != _sign_prev)
-                _xsrr_entry = _bucket_cross | _sign_flip
+                _sign_flip = (
+                    np.isfinite(_sign) & np.isfinite(_sign_prev)
+                    & (_sign != 0) & (_sign_prev != 0) & (_sign != _sign_prev)
+                )
+                _xsrr_entry = (_bucket_cross | _sign_flip) & np.isfinite(_raw)
                 _count = valid_mask.sum(axis=1)
                 _row_block = _count < _min_xs
                 _xsrr_entry[_row_block, :] = False
@@ -2001,6 +2007,83 @@ def build_rule_signal_panels(
                 )
             )
 
+        elif fam == "price_band_reversion":
+            _pbr_mean = _rolling_mean_2d(close, window=scale_window(20))
+            _pbr_std = _rolling_std_2d(close, window=scale_window(20))
+            _pbr_upper = _pbr_mean + _pbr_std * 2.0
+            _pbr_lower = _pbr_mean - _pbr_std * 2.0
+            _prev_close = np.vstack([close[:1], close[:-1]])
+            _pbr_reclaim_long = (_prev_close <= _pbr_lower) & (close > _pbr_lower)
+            _pbr_reclaim_short = (_prev_close >= _pbr_upper) & (close < _pbr_upper)
+            _pbr_side_std = np.zeros_like(close, dtype=np.int8)
+            _pbr_side_std[_entry_rising_edge_2d(_pbr_reclaim_long)] = 1
+            _pbr_side_std[_entry_rising_edge_2d(_pbr_reclaim_short)] = -1
+            _pbr_score_std = np.where(
+                _pbr_side_std != 0,
+                np.clip((close - _pbr_mean) / np.maximum(_pbr_std, 1e-12), -2.0, 2.0) / 2.0,
+                0.0,
+            )
+            fam_panels.append(
+                CandidateSignalPanel(
+                    family="price_band_reversion",
+                    variant="pbr_std_20",
+                    params={"band_period": 20, "band_std": 2.0},
+                    datetimes=aligned.datetimes,
+                    symbols=aligned.symbols,
+                    signed_score_2d=_pbr_score_std.astype(np.float64, copy=False),
+                    side_hint_2d=_pbr_side_std,
+                    expected_holding_bars=scale_window(8),
+                    min_holding_bars=scale_window(3),
+                    stop_atr_mult=0.90,
+                    take_profit_atr_mult=1.60,
+                    turnover_proxy_2d=np.abs(np.diff(_pbr_score_std, axis=0, prepend=0.0)),
+                    valid_mask_2d=valid_mask,
+                    metadata={
+                        "archetype": "mean_rev",
+                        "regime": "price_band_reversion",
+                        "edge_hypothesis": (
+                            "price reclaim of trailing-exclusive std band signals faded mean-reversion entry"
+                        ),
+                    },
+                )
+            )
+            _pbr_atr_lower = _pbr_mean - atr * 2.0
+            _pbr_atr_upper = _pbr_mean + atr * 2.0
+            _pbr_atr_reclaim_long = (_prev_close <= _pbr_atr_lower) & (close > _pbr_atr_lower)
+            _pbr_atr_reclaim_short = (_prev_close >= _pbr_atr_upper) & (close < _pbr_atr_upper)
+            _pbr_side_atr = np.zeros_like(close, dtype=np.int8)
+            _pbr_side_atr[_entry_rising_edge_2d(_pbr_atr_reclaim_long)] = 1
+            _pbr_side_atr[_entry_rising_edge_2d(_pbr_atr_reclaim_short)] = -1
+            _pbr_score_atr = np.where(
+                _pbr_side_atr != 0,
+                np.clip((_pbr_atr_upper - close) / np.maximum(atr, 1e-12), -2.0, 2.0) / 2.0,
+                0.0,
+            )
+            fam_panels.append(
+                CandidateSignalPanel(
+                    family="price_band_reversion",
+                    variant="pbr_atr_20",
+                    params={"band_period": 20, "atr_mult": 2.0},
+                    datetimes=aligned.datetimes,
+                    symbols=aligned.symbols,
+                    signed_score_2d=_pbr_score_atr.astype(np.float64, copy=False),
+                    side_hint_2d=_pbr_side_atr,
+                    expected_holding_bars=scale_window(8),
+                    min_holding_bars=scale_window(3),
+                    stop_atr_mult=0.90,
+                    take_profit_atr_mult=1.60,
+                    turnover_proxy_2d=np.abs(np.diff(_pbr_score_atr, axis=0, prepend=0.0)),
+                    valid_mask_2d=valid_mask,
+                    metadata={
+                        "archetype": "mean_rev",
+                        "regime": "price_band_reversion",
+                        "edge_hypothesis": (
+                            "price reclaim of ATR band signals faded mean-reversion entry"
+                        ),
+                    },
+                )
+            )
+
         return fam_panels
 
     active_families = list(ALL_SIGNAL_FAMILIES)
@@ -2056,39 +2139,60 @@ def candidate_panels_to_events(
     execution_cost_bps_2d: NDArray[np.float64] | None = None,
     n_workers: int = 4,
 ) -> pd.DataFrame:
-    """Convert dense [T,N] panels into sparse candidate event rows."""
+    """Convert dense [T,N] panels into sparse candidate event rows.
+
+    If panel.metadata["l0_event_mask_2d"] exists, it must be a bool array with the
+    same shape as panel.signed_score_2d and is ANDed into the event mask.
+    [ADR_20260710_L0_ENTRY_EXIT_SIGNAL_EFFECTIVENESS_REDESIGN] Twin-module reconciliation.
+    """
+    _l0_cols = [
+        "l0_discovery_unit_id",
+        "l0_parent_recipe_id",
+        "l0_execution_style",
+        "l0_horizon_bars",
+    ]
+    _base_cols = [
+        "datetime",
+        "symbol",
+        "family",
+        "variant",
+        "side",
+        "raw_score",
+        "score_z",
+        "expected_holding_bars",
+        "min_holding_bars",
+        "stop_atr_mult",
+        "take_profit_atr_mult",
+        "turnover_proxy",
+        "cost_floor_bps",
+        "entry_idx",
+        "side_flipped",
+        "exit_policy_id",
+        "signal_cell",
+        "archetype",
+        "entry_regime",
+        "entry_regime_code",
+    ]
+    _all_cols = _base_cols + _l0_cols
     if not panels:
-        return pd.DataFrame(
-            columns=[
-                "datetime",
-                "symbol",
-                "family",
-                "variant",
-                "side",
-                "raw_score",
-                "score_z",
-                "expected_holding_bars",
-                "min_holding_bars",
-                "stop_atr_mult",
-                "take_profit_atr_mult",
-                "turnover_proxy",
-                "cost_floor_bps",
-                "entry_idx",
-                "side_flipped",
-                "exit_policy_id",
-                "signal_cell",
-                "archetype",
-                "entry_regime",
-                "entry_regime_code",
-            ]
-        )
+        return pd.DataFrame(columns=_all_cols)
 
     def _convert_single_panel(panel: CandidateSignalPanel) -> list[pd.DataFrame]:
         panel_events: list[pd.DataFrame] = []
         side_flip_allowlist = _candidate_variant_set(side_flip_variants)
         scores = panel.signed_score_2d
         sides = panel.side_hint_2d
+        l0_mask = panel.metadata.get("l0_event_mask_2d")
+        if l0_mask is not None:
+            if l0_mask.shape != scores.shape:
+                raise ValueError(
+                    f"l0_event_mask_2d shape {l0_mask.shape} != signed_score_2d shape {scores.shape}"
+                )
+            if l0_mask.dtype != np.bool_:
+                raise ValueError("event_mask_2d must be bool")
         mask = panel.valid_mask_2d & (np.abs(scores) >= min_abs_score) & (sides != 0)
+        if l0_mask is not None:
+            mask = mask & l0_mask
         if not np.any(mask):
             return panel_events
 
@@ -2147,30 +2251,34 @@ def candidate_panels_to_events(
                 )
                 if side_flipped:
                     signal_cells = np.asarray([f"{cell}:flip" for cell in signal_cells], dtype=object)
-                df = pd.DataFrame(
-                    {
-                        "datetime": r_datetimes,
-                        "symbol": r_symbols,
-                        "family": panel.family,
-                        "variant": panel.variant,
-                        "side": r_sides,
-                        "raw_score": r_raw_scores,
-                        "score_z": r_score_z,
-                        "expected_holding_bars": int(policy.expected_holding_bars),
-                        "min_holding_bars": int(policy.min_holding_bars),
-                        "stop_atr_mult": float(policy.stop_atr_mult),
-                        "take_profit_atr_mult": float(policy.take_profit_atr_mult),
-                        "turnover_proxy": r_turnover,
-                        "cost_floor_bps": r_cost,
-                        "entry_idx": r_entry_idx,
-                        "side_flipped": side_flipped,
-                        "exit_policy_id": policy.policy_id,
-                        "signal_cell": signal_cells,
-                        "archetype": panel.archetype,
-                        "entry_regime": r_entry_regime,
-                        "entry_regime_code": r_entry_code,
-                    }
-                )
+                df_dict: dict[str, Any] = {
+                    "datetime": r_datetimes,
+                    "symbol": r_symbols,
+                    "family": panel.family,
+                    "variant": panel.variant,
+                    "side": r_sides,
+                    "raw_score": r_raw_scores,
+                    "score_z": r_score_z,
+                    "expected_holding_bars": int(policy.expected_holding_bars),
+                    "min_holding_bars": int(policy.min_holding_bars),
+                    "stop_atr_mult": float(policy.stop_atr_mult),
+                    "take_profit_atr_mult": float(policy.take_profit_atr_mult),
+                    "turnover_proxy": r_turnover,
+                    "cost_floor_bps": r_cost,
+                    "entry_idx": r_entry_idx,
+                    "side_flipped": side_flipped,
+                    "exit_policy_id": policy.policy_id,
+                    "signal_cell": signal_cells,
+                    "archetype": panel.archetype,
+                    "entry_regime": r_entry_regime,
+                    "entry_regime_code": r_entry_code,
+                }
+                if l0_mask is not None:
+                    df_dict["l0_discovery_unit_id"] = panel.metadata.get("l0_discovery_unit_id", "")
+                    df_dict["l0_parent_recipe_id"] = panel.metadata.get("l0_parent_recipe_id", "")
+                    df_dict["l0_execution_style"] = panel.metadata.get("l0_execution_style", "")
+                    df_dict["l0_horizon_bars"] = panel.metadata.get("l0_horizon_bars", 0)
+                df = pd.DataFrame(df_dict)
                 panel_events.append(df)
         return panel_events
 
@@ -2181,29 +2289,6 @@ def candidate_panels_to_events(
             all_events.extend(fut.result())
 
     if not all_events:
-        return pd.DataFrame(
-            columns=[
-                "datetime",
-                "symbol",
-                "family",
-                "variant",
-                "side",
-                "raw_score",
-                "score_z",
-                "expected_holding_bars",
-                "min_holding_bars",
-                "stop_atr_mult",
-                "take_profit_atr_mult",
-                "turnover_proxy",
-                "cost_floor_bps",
-                "entry_idx",
-                "side_flipped",
-                "exit_policy_id",
-                "signal_cell",
-                "archetype",
-                "entry_regime",
-                "entry_regime_code",
-            ]
-        )
+        return pd.DataFrame(columns=_all_cols)
 
     return pd.concat(all_events, axis=0, ignore_index=True)

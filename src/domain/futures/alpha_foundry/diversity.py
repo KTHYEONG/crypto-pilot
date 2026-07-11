@@ -394,28 +394,16 @@ def audit_full_family_correlation(
 # ── Economic Thesis Grouping (Fix 3 — additive/observability only) ────────
 
 FAMILY_THESIS_GROUP: Mapping[str, str] = {
-    "trend_ma": "trend_ma_cross", "ema_trend": "trend_ma_cross", "hma_trend": "trend_ma_cross",
-    "kama_trend": "trend_ma_cross", "macd_trend": "trend_ma_cross", "ichimoku_trend": "trend_ma_cross",
-    "sparse_breakout_retest_v2": "breakout_retest_liquidity",
-    "sparse_breakout_retest_liquidity": "breakout_retest_liquidity",
-    "liquidity_vacuum_breakout": "breakout_retest_liquidity",
+    "trend_ma": "trend_ma_cross", "ichimoku_trend": "trend_ma_cross",
     "volume_participation_breakout": "breakout_retest_liquidity",
     "liquidity_participation_breakout": "breakout_retest_liquidity",
     "vol_contraction_breakout": "breakout_retest_liquidity",
-    "rsi_mean_reversion": "oscillator_mean_reversion",
-    "stoch_rsi_mean_reversion": "oscillator_mean_reversion",
-    "bollinger_mean_reversion": "oscillator_mean_reversion",
-    "keltner_mean_reversion": "oscillator_mean_reversion",
-    "funding_slope_carry": "funding_carry", "funding_contra_carry_sparse": "funding_carry",
-    "carry_net_of_funding": "funding_carry", "funding_basis_dislocation": "funding_carry",
-    "oi_buildup_flow": "oi_unwind", "oi_price_divergence_unwind": "oi_unwind",
-    "oi_lsr_unwind": "oi_unwind", "oi_flow_squeeze": "oi_unwind",
-    "taker_flow_imbalance": "taker_flow_exhaustion", "taker_flow_exhaustion": "taker_flow_exhaustion",
-    "cvd_vwap_absorption": "taker_flow_exhaustion",
+    "carry_net_of_funding": "funding_carry",
+    "oi_lsr_unwind": "oi_unwind",
     "xs_momentum": "xs_momentum_continuation", "residual_momentum_xs": "xs_momentum_continuation",
     "xs_residual_rebalance": "xs_momentum_continuation",
-    "xs_residual_flow_rotation": "xs_momentum_continuation",
     "btc_neutral_residual_reversal": "xs_residual_reversal",
+    "price_band_reversion": "price_band_reversion",
 }  # [ADR_20260710_L0_SIGNAL_BREADTH_DIVERSITY_REDESIGN] economic-thesis grouping for diversity reporting
 
 
