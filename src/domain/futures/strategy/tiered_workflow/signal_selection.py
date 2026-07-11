@@ -1692,6 +1692,11 @@ def evaluate_outer_signal_opportunities(
 ) -> Layer1FoldReadiness:
     opp_frame = _batch_to_frame(opportunities)
     if opp_frame.empty:
+        logger.debug(
+            "[DATA] stage=l1_nested_opportunity_diag fold=%d locus=registry_empty"
+            " registry_ready=0 n_predictions=0 n_realized=0",
+            fold_id,
+        )
         return Layer1FoldReadiness(
             fold_id=fold_id,
             registry_source_end_idx=fold.fit_end,
@@ -1710,7 +1715,7 @@ def evaluate_outer_signal_opportunities(
             probe_series_bps=(),
             effective_symbol_count=0.0,
             passed=False,
-            blockers=("empty_opportunities",),
+            blockers=("empty_opportunities:registry_empty",),
         )
     merged, unmatched_count = align_outer_opportunities_with_realized(
         opportunities=opportunities,
@@ -1725,6 +1730,13 @@ def evaluate_outer_signal_opportunities(
         ].copy()
         dropped_by_maturity = before_maturity - len(merged)
     if merged.empty:
+        n_predictions = len(opportunities.events) if opportunities.events else 0
+        n_realized = len(realized_event_results) if realized_event_results is not None else 0
+        logger.debug(
+            "[DATA] stage=l1_nested_opportunity_diag fold=%d locus=prediction_unmatched"
+            " registry_ready=%d n_predictions=%d n_realized=%d",
+            fold_id, len(opportunities.symbols), n_predictions, n_realized,
+        )
         return Layer1FoldReadiness(
             fold_id=fold_id,
             registry_source_end_idx=fold.fit_end,
@@ -1743,7 +1755,7 @@ def evaluate_outer_signal_opportunities(
             probe_series_bps=(),
             effective_symbol_count=0.0,
             passed=False,
-            blockers=("empty_realized_merge",),
+            blockers=("empty_opportunities:prediction_unmatched",),
             dropped_by_maturity_count=dropped_by_maturity,
         )
     symbol_to_idx = {symbol: idx for idx, symbol in enumerate(aligned_symbols)}

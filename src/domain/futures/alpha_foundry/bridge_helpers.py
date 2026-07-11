@@ -8,6 +8,7 @@
 [ADR_20260706_ALPHA_FOUNDRY_L0_SIGNAL_RIGOR]
 [ADR_20260710_L0_TERMINAL_DEBUG_OBSERVABILITY]
 [ADR_20260710_L0_TF_CORROBORATION_WIRING_FIX]
+[ADR_20260711_L0_STRATEGY_DELIVERY_HARDENING]
 """
 
 from __future__ import annotations
@@ -44,6 +45,7 @@ class AlphaFoundryL0Result:
     panel_bindings: tuple[Any, ...]
     artifact_rows: tuple[Any, ...] = ()
     discovery_units_for_l1: tuple[Any, ...] = ()
+    candidates_for_l1: tuple[Any, ...] = ()
 
     @property
     def report(self) -> Any | None:
@@ -375,10 +377,26 @@ def run_alpha_foundry_l0_gate(
         evidence_rows = ()
 
     # Gate mode: forward only panels matching passed_recipe_ids
+    candidates_for_l1: tuple[Any, ...] = ()
     if mode == "gate" and l0_artifacts is not None:
         passed_ids = set(l0_artifacts.passed_recipe_ids)
-        passed_panel_indices = {b.panel_index for b in bindings if b.recipe_id in passed_ids}
-        panels_for_l1 = tuple(p for i, p in enumerate(panels) if i in passed_panel_indices)
+        binding_by_panel_index = {b.panel_index: b for b in bindings}
+        # Stamp metadata["recipe_id"] onto forwarded panels (mirrors
+        # _bind_panels_to_recipe_ids) so downstream consumers — e.g. the
+        # cross-TF independence audit — can key panels by recipe_id without
+        # needing the discarded `bound_panels` local. [ADR_20260711_L0_STRATEGY_DELIVERY_HARDENING]
+        panels_for_l1 = tuple(
+            replace(
+                p,
+                metadata={
+                    **dict(getattr(p, "metadata", {}) or {}),
+                    "recipe_id": binding_by_panel_index[i].recipe_id,
+                },
+            )
+            for i, p in enumerate(panels)
+            if i in binding_by_panel_index and binding_by_panel_index[i].recipe_id in passed_ids
+        )
+        candidates_for_l1 = tuple(c for c in l0_artifacts.candidates if c.recipe_id in passed_ids)
     elif mode == "audit":
         panels_for_l1 = tuple(panels)
     else:
@@ -457,6 +475,7 @@ def run_alpha_foundry_l0_gate(
         gate_results=evidences,
         panel_bindings=tuple(bindings),
         artifact_rows=evidence_rows,
+        candidates_for_l1=candidates_for_l1,
     )
 
 

@@ -3,6 +3,7 @@
 [ADR_20260706_ALPHA_FOUNDRY_L0_L1_HANDOFF_GUARD]
 [ADR_20260706_ALPHA_FOUNDRY_SYNC][ADR_20260706_ALPHA_FOUNDRY_L0_DIVERSITY]
 [ADR_20260706_ALPHA_FOUNDRY_L0_SIGNAL_RIGOR]
+[ADR_20260711_L0_STRATEGY_DELIVERY_HARDENING]
 """
 
 from __future__ import annotations
@@ -20,9 +21,39 @@ from src.domain.futures.alpha_foundry.contracts import (
     CheapGateEvidence,
     CrossBucketDiversityResult,
     DiversitySelectionResult,
+    L0IndependenceAudit,
     L0SignalCandidate,
 )
+from src.domain.futures.alpha_foundry.multi_tf_fusion import project_signal_to_canonical_grid
 from src.domain.futures.signals.contracts import CandidateSignalPanel
+
+_TF_TO_MINUTES_MAP: dict[str, int] = {
+    "30m": 30,
+    "1h": 60,
+    "2h": 120,
+    "3h": 180,
+    "4h": 240,
+    "6h": 360,
+    "8h": 480,
+    "12h": 720,
+    "1d": 1440,
+}
+
+
+def _tf_to_minutes(tf: str) -> int:
+    return _TF_TO_MINUTES_MAP.get(tf, 9999)
+
+
+def _find_priority(
+    recipe_id: str,
+    candidates: Sequence[L0SignalCandidate],
+    all_recipe_ids: Sequence[str],
+) -> float:
+    for c in candidates:
+        if c.recipe_id == recipe_id:
+            return c.l1_priority_score
+    idx = all_recipe_ids.index(recipe_id) if recipe_id in all_recipe_ids else -1
+    return float(idx)
 
 
 def _paired_score_corr(
@@ -427,6 +458,203 @@ def estimate_distinct_thesis_count(
     if not evidence_families:
         return 0
     return len({resolve_economic_thesis_id(f) for f in evidence_families})
+
+
+def compute_cross_tf_redundancy(
+    *,
+    selected_by_tf: Mapping[str, Sequence[L0SignalCandidate]],
+    panel_by_recipe_id: Mapping[str, CandidateSignalPanel],
+    canonical_tf: str,
+    canonical_datetimes: NDArray[np.int64],
+    active_mask_canonical: NDArray[np.bool_],
+    max_novelty_corr: float,
+) -> CrossBucketDiversityResult:
+    if not selected_by_tf:
+        raise ValueError("selected_by_tf must not be empty")
+    tf_keys = list(selected_by_tf)
+    tf_numeric = _tf_to_minutes(canonical_tf)
+    for k in tf_keys:
+        if _tf_to_minutes(k) < tf_numeric:
+            raise ValueError(
+                f"canonical_tf={canonical_tf} is coarser than input tf={k}"
+            )
+
+    all_selected: list[L0SignalCandidate] = []
+    for candidates in selected_by_tf.values():
+        all_selected.extend(candidates)
+    all_recipe_ids = [c.recipe_id for c in all_selected]
+
+    if len(all_selected) <= 1:
+        return CrossBucketDiversityResult(
+            final_selected_recipe_ids=tuple(all_recipe_ids),
+            demoted_recipe_ids=(),
+            demoted_reason_by_id={},
+            cross_bucket_corr=(
+                np.eye(len(all_selected), dtype=np.float64)
+                if all_selected else np.empty((0, 0), dtype=np.float64)
+            ),
+            global_eff_test_count=float(len(all_selected)),
+        )
+
+    panels = [panel_by_recipe_id[rid] for rid in all_recipe_ids if rid in panel_by_recipe_id]
+    if len(panels) < 2:
+        return CrossBucketDiversityResult(
+            final_selected_recipe_ids=tuple(all_recipe_ids),
+            demoted_recipe_ids=(),
+            demoted_reason_by_id={},
+            cross_bucket_corr=np.eye(len(all_recipe_ids), dtype=np.float64),
+            global_eff_test_count=float(len(all_recipe_ids)),
+        )
+
+    proj_scores: list[NDArray[np.float64]] = []
+    proj_valid: list[NDArray[np.bool_]] = []
+    for p in panels:
+        ps, pv = project_signal_to_canonical_grid(
+            panel=p,
+            canonical_datetimes=canonical_datetimes,
+            causal_lag_bars=1,
+        )
+        proj_scores.append(ps)
+        proj_valid.append(pv)
+
+    n = len(panels)
+    corr = np.full((n, n), np.nan, dtype=np.float64)
+    for i in range(n):
+        for j in range(n):
+            mask = proj_valid[i] & proj_valid[j] & active_mask_canonical
+            a = proj_scores[i][mask]
+            b = proj_scores[j][mask]
+            c = 0.0 if len(a) < 2 else float(np.corrcoef(a, b)[0, 1])
+            corr[i, j] = c if np.isfinite(c) else 0.0
+        corr[i, i] = 1.0
+
+    clusters = cluster_correlated_recipes(
+        evidences=all_selected,
+        corr=corr,
+        max_corr=max_novelty_corr,
+    )
+
+    final_selected: list[str] = []
+    demoted: list[str] = []
+    demoted_reason_map: dict[str, str] = {}
+    for cluster in clusters:
+        if len(cluster) == 1:
+            final_selected.append(cluster[0])
+        else:
+            best_rid = max(cluster, key=lambda rid: _find_priority(rid, all_selected, all_recipe_ids))
+            for rid in cluster:
+                if rid == best_rid:
+                    final_selected.append(rid)
+                else:
+                    demoted.append(rid)
+                    demoted_reason_map[rid] = best_rid
+
+    global_eff = estimate_effective_test_count(corr)
+
+    return CrossBucketDiversityResult(
+        final_selected_recipe_ids=tuple(final_selected),
+        demoted_recipe_ids=tuple(demoted),
+        demoted_reason_by_id=demoted_reason_map,
+        cross_bucket_corr=corr,
+        global_eff_test_count=global_eff,
+    )
+
+
+def audit_l0_selected_recipe_independence(
+    *,
+    selected_by_tf: Mapping[str, Sequence[L0SignalCandidate]],
+    panel_by_recipe_id: Mapping[str, CandidateSignalPanel],
+    canonical_tf: str,
+    canonical_datetimes: NDArray[np.int64],
+    active_mask_canonical: NDArray[np.bool_],
+    max_corr: float = 0.70,
+) -> L0IndependenceAudit:
+    all_selected: list[L0SignalCandidate] = []
+    for candidates in selected_by_tf.values():
+        all_selected.extend(candidates)
+
+    n_selected = len(all_selected)
+    families = [c.family for c in all_selected]
+    n_thesis = len({resolve_economic_thesis_id(f) for f in families})
+
+    if n_selected <= 1:
+        return L0IndependenceAudit(
+            n_selected_total=n_selected,
+            n_distinct_thesis_ids=n_thesis,
+            n_independent_clusters=n_selected,
+            cluster_members={i: (c.recipe_id,) for i, c in enumerate(all_selected)} if all_selected else {},
+            demoted_recipe_ids=(),
+            demoted_reason_by_id={},
+            canonical_tf=canonical_tf,
+            max_corr_threshold=max_corr,
+        )
+
+    all_recipe_ids = [c.recipe_id for c in all_selected]
+    panels = [panel_by_recipe_id[rid] for rid in all_recipe_ids if rid in panel_by_recipe_id]
+    if len(panels) < 2:
+        return L0IndependenceAudit(
+            n_selected_total=n_selected,
+            n_distinct_thesis_ids=n_thesis,
+            n_independent_clusters=n_selected,
+            cluster_members={i: (c.recipe_id,) for i, c in enumerate(all_selected)},
+            demoted_recipe_ids=(),
+            demoted_reason_by_id={},
+            canonical_tf=canonical_tf,
+            max_corr_threshold=max_corr,
+        )
+
+    proj_scores: list[NDArray[np.float64]] = []
+    proj_valid: list[NDArray[np.bool_]] = []
+    for p in panels:
+        ps, pv = project_signal_to_canonical_grid(
+            panel=p,
+            canonical_datetimes=canonical_datetimes,
+            causal_lag_bars=1,
+        )
+        proj_scores.append(ps)
+        proj_valid.append(pv)
+
+    n = len(panels)
+    corr = np.full((n, n), np.nan, dtype=np.float64)
+    for i in range(n):
+        for j in range(n):
+            mask = proj_valid[i] & proj_valid[j] & active_mask_canonical
+            a = proj_scores[i][mask]
+            b = proj_scores[j][mask]
+            c = 0.0 if len(a) < 2 else float(np.corrcoef(a, b)[0, 1])
+            corr[i, j] = c if np.isfinite(c) else 0.0
+        corr[i, i] = 1.0
+
+    clusters = cluster_correlated_recipes(
+        evidences=all_selected,
+        corr=corr,
+        max_corr=max_corr,
+    )
+
+    cluster_members: dict[int, tuple[str, ...]] = {}
+    demoted: list[str] = []
+    demoted_reason: dict[str, str] = {}
+    for cluster in clusters:
+        if len(cluster) == 1:
+            cluster_members[len(cluster_members)] = cluster
+        else:
+            best_rid = max(cluster, key=lambda rid: _find_priority(rid, all_selected, all_recipe_ids))
+            cluster_members[len(cluster_members)] = cluster
+            for rid in cluster:
+                if rid != best_rid:
+                    demoted.append(rid)
+                    demoted_reason[rid] = best_rid
+
+    return L0IndependenceAudit(
+        n_selected_total=n_selected,
+        n_distinct_thesis_ids=n_thesis,
+        n_independent_clusters=len(clusters),
+        cluster_members=cluster_members,
+        demoted_recipe_ids=tuple(demoted),
+        demoted_reason_by_id=demoted_reason,
+        canonical_tf=canonical_tf,
+        max_corr_threshold=max_corr,
+    )
 
 
 # Backward-compat alias
