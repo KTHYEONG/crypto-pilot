@@ -1169,7 +1169,7 @@ def compute_xs_factor_spread_diagnostics(
     cfg: CandidateStrategyConfig,
     fold_id: int,
     seed: int = 0,
-    xs_archetype: str = "xs_alpha",
+    xs_archetypes: tuple[str, ...] = ("xs_alpha",),
     xs_family_fallback: tuple[str, ...] = (
         "xs_momentum",
         "xs_flow",
@@ -1177,11 +1177,18 @@ def compute_xs_factor_spread_diagnostics(
     ),
     min_bars: int = 8,
 ) -> XsFactorSpreadDiagnostics | None:
+    """Pooled factor-level spread diagnostics, scoped by archetype.
+
+    [ADR_20260703_L1_XS][ADR_20260711_L1_POOLED_ALPHA_ADMISSION_GENERALIZATION]
+    xs_archetypes generalizes the original xs_alpha-only scope to any
+    archetype set (e.g. trend/ts_mom) that L0 already validated via
+    universe-pooled evidence.
+    """
     if realized_event_results.empty:
         return None
     df = realized_event_results
     if "archetype" in df.columns:
-        xs = df[df["archetype"].astype(str) == xs_archetype]
+        xs = df[df["archetype"].astype(str).isin(xs_archetypes)]
     else:
         xs = df[df["family"].astype(str).isin(xs_family_fallback)]
     if xs.empty:
