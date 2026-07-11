@@ -1530,10 +1530,10 @@ def test_resample_ohlcv_preserves_float_metadata() -> None:
     result = _resample_ohlcv(df, "2h")
 
     assert "cluster_id" in result.columns
-    # label="right", closed="right", then iloc[:-1] drops last group.
-    # Label 00:00: (22:00, 00:00] → bar 00:00 only → cluster_id=1.0
-    # Label 02:00: (00:00, 02:00] → bars 01:00, 02:00 → cluster_id=2.5
-    assert result["cluster_id"].tolist() == [1.0, 2.5]
+    # label="left", closed="left", count-based completeness filter.
+    # Bin 00:00: [00:00, 02:00) → bars 00:00, 01:00 → cluster_id=1.5
+    # Bin 02:00: [02:00, 04:00) → bars 02:00, 03:00 → cluster_id=3.5
+    assert result["cluster_id"].tolist() == pytest.approx([1.5, 3.5])
 
 
 def test_resample_ohlcv_no_metadata_unchanged() -> None:
@@ -1576,10 +1576,177 @@ def test_resample_probe_source_frame_preserves_metadata() -> None:
 
     assert "universe_entry_warm_mask" in result.columns
     assert "cluster_id" in result.columns
-    # First bin label 00:00: bar 00:00 only → mask=True, cluster_id=1.0
-    # Second bin label 02:00: bars 01:00, 02:00 → mask=max(False,True)=True, cluster_id=2.5
+    # Bin 00:00: [00:00, 02:00) → bars 00:00, 01:00 → mask=True, cluster_id=1.5
+    # Bin 02:00: [02:00, 04:00) → bars 02:00, 03:00 → mask=True, cluster_id=3.5
     assert result["universe_entry_warm_mask"].tolist() == [True, True]
-    assert result["cluster_id"].tolist() == [1.0, 2.5]
+    assert result["cluster_id"].tolist() == pytest.approx([1.5, 3.5])
+
+
+# -------------------------------------------------------------------------------
+# L0 HTF Resample Alignment Fix (ADR_20260711)
+# -------------------------------------------------------------------------------
+
+
+def _four_hourly_bars() -> pd.DataFrame:
+    return pd.DataFrame(
+        {
+            "datetime": pd.date_range("2026-01-01", periods=4, freq="1h", tz="UTC"),
+            "open": [100.0, 101.0, 102.0, 103.0],
+            "high": [101.0, 102.0, 103.0, 104.0],
+            "low": [99.0, 100.0, 101.0, 102.0],
+            "close": [101.0, 102.0, 103.0, 104.0],
+            "volume": [1000.0, 1100.0, 1200.0, 1300.0],
+            "cluster_id": [1.0, 2.0, 3.0, 4.0],
+        }
+    )
+
+
+def test_infer_source_bar_hours_returns_one_for_hourly_index() -> None:
+    from src.domain.futures.strategy.timeframe_contracts import infer_source_bar_hours
+
+    index = pd.date_range("2026-01-01", periods=10, freq="1h", tz="UTC")
+    result = infer_source_bar_hours(index)
+    assert result == pytest.approx(1.0)
+
+
+def test_infer_source_bar_hours_handles_gap_without_distortion() -> None:
+    """[LIMIT-03]: mode-based inference survives a 3h gap in the middle."""
+    from src.domain.futures.strategy.timeframe_contracts import infer_source_bar_hours
+
+    idx = list(pd.date_range("2026-01-01", periods=10, freq="1h", tz="UTC"))
+    idx.extend(pd.date_range("2026-01-01T13:00:00Z", periods=10, freq="1h", tz="UTC"))
+    index = pd.DatetimeIndex(sorted(idx))
+    result = infer_source_bar_hours(index)
+    assert result == pytest.approx(1.0)
+
+
+def test_infer_source_bar_hours_single_row_returns_default() -> None:
+    """[LIMIT-03]: single-row input falls back to default."""
+    from src.domain.futures.strategy.timeframe_contracts import infer_source_bar_hours
+
+    index = pd.DatetimeIndex(["2026-01-01T00:00:00Z"])
+    result = infer_source_bar_hours(index)
+    assert result == pytest.approx(1.0)
+
+
+def test_infer_source_bar_hours_empty_index_returns_default() -> None:
+    from src.domain.futures.strategy.timeframe_contracts import infer_source_bar_hours
+
+    result = infer_source_bar_hours(pd.DatetimeIndex([]))
+    assert result == pytest.approx(1.0)
+
+
+def test_resample_ohlcv_exact_multiple_keeps_all_complete_bins() -> None:
+    """[LIMIT-01]: 4 x 1h bars -> 2h target, both bins complete (ratio=2, count=2=2)."""
+    from src.domain.futures.strategy.timeframe_probe import _resample_ohlcv
+
+    df = _four_hourly_bars()
+    result = _resample_ohlcv(df, "2h")
+    assert len(result) == 2
+    assert result["cluster_id"].tolist() == pytest.approx([1.5, 3.5])
+
+
+def test_resample_ohlcv_drops_genuinely_incomplete_trailing_bin() -> None:
+    """5 x 1h bars -> 2h: last bin [04:00, 06:00) has only 1 bar (<2) -> dropped."""
+    from src.domain.futures.strategy.timeframe_probe import _resample_ohlcv
+
+    df = pd.DataFrame(
+        {
+            "datetime": pd.date_range("2026-01-01", periods=5, freq="1h", tz="UTC"),
+            "open": [100.0, 101.0, 102.0, 103.0, 104.0],
+            "high": [101.0, 102.0, 103.0, 104.0, 105.0],
+            "low": [99.0, 100.0, 101.0, 102.0, 103.0],
+            "close": [101.0, 102.0, 103.0, 104.0, 105.0],
+            "volume": [1000.0, 1100.0, 1200.0, 1300.0, 1400.0],
+        }
+    )
+    result = _resample_ohlcv(df, "2h")
+    assert len(result) == 2
+    assert pd.Timestamp(result["datetime"].iloc[-1]) == pd.Timestamp("2026-01-01T02:00:00Z")
+
+
+def test_resample_ohlcv_empty_input_returns_empty() -> None:
+    """[LIMIT-02]: empty input → empty result, no crash."""
+    from src.domain.futures.strategy.timeframe_probe import _resample_ohlcv
+
+    df = pd.DataFrame(columns=["datetime", "open", "high", "low", "close", "volume"])
+    result = _resample_ohlcv(df, "2h")
+    assert len(result) == 0
+
+
+def test_resample_ohlcv_single_row_input_returns_empty() -> None:
+    """[LIMIT-03]: single source bar cannot form a complete target bin."""
+    from src.domain.futures.strategy.timeframe_probe import _resample_ohlcv
+
+    df = pd.DataFrame(
+        {
+            "datetime": pd.DatetimeIndex(["2026-01-01T00:00:00Z"]),
+            "open": [100.0],
+            "high": [101.0],
+            "low": [99.0],
+            "close": [101.0],
+            "volume": [1000.0],
+        }
+    )
+    result = _resample_ohlcv(df, "2h")
+    assert len(result) == 0
+
+
+def test_resample_ohlcv_missing_datetime_is_safeguarded() -> None:
+    """[Scenario 3a]: absent datetime column → code recovers via index rename (defensive)."""
+    from src.domain.futures.strategy.timeframe_probe import _resample_ohlcv
+
+    df = pd.DataFrame(
+        {"open": [100.0], "high": [101.0], "low": [99.0], "close": [101.0], "volume": [1000.0]},
+        index=pd.DatetimeIndex(["2026-01-01T00:00:00Z"], name="datetime_idx"),
+    )
+    result = _resample_ohlcv(df, "2h")
+    assert "datetime" in result.columns
+
+
+def test_resample_probe_source_frame_empty_input_returns_empty() -> None:
+    """[LIMIT-02]: empty input → empty result, no crash (bridge.py counterpart)."""
+    from src.domain.futures.strategy_runtime.bridge import _resample_probe_source_frame
+
+    df = pd.DataFrame(columns=["datetime", "open", "high", "low", "close", "volume"])
+    result = _resample_probe_source_frame(df, target_tf="2h")
+    assert len(result) == 0
+
+
+def test_resample_probe_source_frame_matches_live_binance_6h_snapshot() -> None:
+    """Regression pin: reproduces a live BTCUSDT 6h kline fetched during spec
+    investigation (2026-07-07T18:00Z bar). If this ever fails, the resample
+    convention has regressed away from native exchange semantics."""
+    from src.domain.futures.strategy_runtime.bridge import _resample_probe_source_frame
+
+    df = pd.DataFrame(
+        {
+            "datetime": pd.date_range("2026-07-07T18:00:00Z", periods=6, freq="1h"),
+            "open": [64164.6, 64100.0, 63900.0, 63700.0, 63500.0, 63400.0],
+            "high": [64168.8, 64150.0, 63950.0, 63750.0, 63550.0, 63450.0],
+            "low": [63900.0, 63700.0, 63500.0, 63300.0, 63200.0, 63177.0],
+            "close": [64100.0, 63900.0, 63700.0, 63500.0, 63400.0, 63335.4],
+            "volume": [10.0, 10.0, 10.0, 10.0, 10.0, 10.0],
+        }
+    )
+    result = _resample_probe_source_frame(df, target_tf="6h")
+    assert len(result) == 1
+    row = result.iloc[0]
+    assert row["open"] == pytest.approx(64164.6)
+    assert row["high"] == pytest.approx(64168.8)
+    assert row["low"] == pytest.approx(63177.0)
+    assert row["close"] == pytest.approx(63335.4)
+
+
+def test_resample_probe_source_frame_missing_datetime_is_safeguarded() -> None:
+    from src.domain.futures.strategy_runtime.bridge import _resample_probe_source_frame
+
+    df = pd.DataFrame(
+        {"open": [100.0], "high": [101.0], "low": [99.0], "close": [101.0], "volume": [1000.0]},
+        index=pd.DatetimeIndex(["2026-01-01T00:00:00Z"], name="datetime_idx"),
+    )
+    result = _resample_probe_source_frame(df, target_tf="2h")
+    assert "datetime" in result.columns
 
 
 # -------------------------------------------------------------------------------
@@ -1734,3 +1901,65 @@ def test_apply_tf_gate_overrides_default_fallback() -> None:
     assert cfg_1h.l1_min_sym_count == 4
     assert cfg_1h.l1_min_fold_ratio == 0.40
     assert cfg_1h.l1_min_realized_match_ratio == 0.80
+
+
+# -------------------------------------------------------------------------------
+# supplementary: funding_rate / funding_rate_sum resample aggregation coverage
+# -------------------------------------------------------------------------------
+
+
+def test_resample_ohlcv_with_funding_rate_sum() -> None:
+    from src.domain.futures.strategy.timeframe_probe import _resample_ohlcv
+
+    df = pd.DataFrame(
+        {
+            "datetime": pd.date_range("2026-01-01", periods=4, freq="1h", tz="UTC"),
+            "open": [100.0, 101.0, 102.0, 103.0],
+            "high": [101.0, 102.0, 103.0, 104.0],
+            "low": [99.0, 100.0, 101.0, 102.0],
+            "close": [101.0, 102.0, 103.0, 104.0],
+            "volume": [1000.0, 1100.0, 1200.0, 1300.0],
+            "funding_rate_sum": [0.01, 0.02, 0.03, 0.04],
+        }
+    )
+    result = _resample_ohlcv(df, "2h")
+    assert "funding_rate_sum" in result.columns
+    assert len(result) == 2
+
+
+def test_resample_ohlcv_with_funding_rate() -> None:
+    from src.domain.futures.strategy.timeframe_probe import _resample_ohlcv
+
+    df = pd.DataFrame(
+        {
+            "datetime": pd.date_range("2026-01-01", periods=4, freq="1h", tz="UTC"),
+            "open": [100.0, 101.0, 102.0, 103.0],
+            "high": [101.0, 102.0, 103.0, 104.0],
+            "low": [99.0, 100.0, 101.0, 102.0],
+            "close": [101.0, 102.0, 103.0, 104.0],
+            "volume": [1000.0, 1100.0, 1200.0, 1300.0],
+            "funding_rate": [0.01, 0.02, 0.03, 0.04],
+        }
+    )
+    result = _resample_ohlcv(df, "2h")
+    assert "funding_rate" in result.columns
+    assert len(result) == 2
+
+
+def test_resample_probe_source_frame_with_funding_rate_sum() -> None:
+    from src.domain.futures.strategy_runtime.bridge import _resample_probe_source_frame
+
+    df = pd.DataFrame(
+        {
+            "datetime": pd.date_range("2026-01-01", periods=4, freq="1h", tz="UTC"),
+            "open": [100.0, 101.0, 102.0, 103.0],
+            "high": [101.0, 102.0, 103.0, 104.0],
+            "low": [99.0, 100.0, 101.0, 102.0],
+            "close": [101.0, 102.0, 103.0, 104.0],
+            "volume": [1000.0, 1100.0, 1200.0, 1300.0],
+            "funding_rate_sum": [0.01, 0.02, 0.03, 0.04],
+        }
+    )
+    result = _resample_probe_source_frame(df, target_tf="2h")
+    assert "funding_rate_sum" in result.columns
+    assert len(result) == 2

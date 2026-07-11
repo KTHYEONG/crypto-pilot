@@ -5,6 +5,8 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Any
 
+import pandas as pd
+
 HOURS_PER_BAR: dict[str, float] = {
     "1m": 1.0 / 60.0,
     "5m": 5.0 / 60.0,
@@ -98,3 +100,29 @@ def select_probe_source_tf(sym_maps: Mapping[str, Any], target_tf: str) -> str |
     if not compatible:
         return None
     return min(compatible, key=hours_per_bar)
+
+
+def infer_source_bar_hours(index: pd.DatetimeIndex, *, default: float = 1.0) -> float:
+    """Infer the modal source-bar cadence (hours) from a sorted datetime index.
+
+    [ADR_20260711_L0_HTF_RESAMPLE_ALIGNMENT_FIX]
+    Uses the mode of consecutive deltas rather than a single first-pair diff,
+    so occasional gaps in the source series (missing bars) do not distort the
+    inferred cadence.
+
+    Args:
+        index: Sorted, tz-aware or naive DatetimeIndex of the source frame.
+        default: Fallback hours-per-bar when fewer than 2 points are available.
+
+    Returns:
+        Modal bar spacing in hours (> 0).
+    """
+    if len(index) < 2:
+        return default
+    deltas = index.to_series().diff().dropna()
+    if deltas.empty:
+        return default
+    mode_deltas = deltas.mode()
+    delta = mode_deltas.iloc[0] if not mode_deltas.empty else deltas.median()
+    hours = delta.total_seconds() / 3600.0
+    return hours if hours > 0 else default
