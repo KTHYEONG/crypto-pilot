@@ -13,15 +13,18 @@ related_paths:
   - src/domain/futures/signals/workflow.py
   - src/domain/futures/signals/ensemble.py
   - src/domain/futures/strategy/tiered_workflow/pipeline.py
+  - src/domain/futures/strategy/tiered_workflow/signal_selection.py
+  - src/domain/futures/strategy/tiered_workflow/atomization_diagnostics.py
   - src/domain/futures/optimization/metrics.py
 change_triggers:
   - src/domain/futures/signals/rules.py
   - src/domain/futures/signals/ensemble.py
+  - src/domain/futures/strategy/tiered_workflow/signal_selection.py
 dependencies:
   documents:
     - docs/architecture/layer0.md
     - docs/architecture/regime.md
-last_verified: 2026-07-10
+last_verified: 2026-07-11
 ---
 
 # 1. Purpose
@@ -56,6 +59,12 @@ Layer 0에서 추천된 Alpha Recipes 또는 vectorized Rule Panels에 대해, W
 - 4대 Family: `xs_momentum`, `xs_carry`, `xs_flow`, `xs_oi_skew`
 - Per-bar rank score 변환을 통한 beta-neutral 구성 (Regime Gating 면제).
 
+### Pooled Alpha Admission (Generalized Factor-Level Substitution)
+- Per-`(symbol, strategy_id, activation_context)` 원자화된 evidence는 상관된 systematic family(동일 트렌드에 동시발화)들이 서로의 peer가 되어 `mean_incremental_bps`가 0으로 수렴하는 구조적 한계를 가짐(`l1_baseline_mode="peer_exclusive"`).
+- `compute_xs_factor_spread_diagnostics(xs_archetypes)`가 `archetype` 컬럼 기준으로 pooled factor-level(bar-level cross-sectional) `mean`/`lcb`/`sharpe`를 산출하고, `resolve_xs_alpha_admission()`이 `lcb > l1_breakeven_floor_bps ∧ sharpe ≥ l1_xs_admission_min_sharpe`를 만족하는 `strategy_id`에 한해 `mean_gross_bps`/`mean_incremental_bps`를 factor-level 값으로 치환한다.
+- 스코프는 `cfg.l1_pooled_admission_archetypes`(기본 `("xs_alpha",)`)로 제어 — `xs_alpha` 외 임의 archetype(예: `trend`, `ts_mom`)으로 확장 가능. `insufficient_effective_obs`/`insufficient_folds` 등 표본 적정성 구조 게이트는 치환 대상에서 제외되어 항상 per-symbol로 평가됨(무분별한 일괄 승인 방지).
+- `diagnose_strategy_atomization()`(log-only, `l1_atomization_diagnostics_enabled`)은 이미 원자화된 evidence를 `strategy_id` 단위로 재집계해 pooled-vs-atomized 괴리·sign-flip 비율·reject-reason 분포를 진단한다. 게이트 판정에는 관여하지 않음.
+
 # 3. Core I/O Interfaces
 
 ### Input Data
@@ -79,6 +88,10 @@ Layer 0에서 추천된 Alpha Recipes 또는 vectorized Rule Panels에 대해, W
 - `QualifiedSignalRegistry`:
   - `by_symbol`: dict[str, tuple[SymbolStrategyEvidence, ...]]
   - `ready_symbols`: tuple[str, ...]
+
+### Principal Data Structures (src/domain/futures/strategy/tiered_workflow/*.py)
+- `XsAdmissionBasis` (signal_selection.py): `mean_bps`, `lcb_bps`, `sharpe`, `probability_positive`, `n_bars` — factor-level substitution basis, keyed by `strategy_id` (`"family:variant"`).
+- `AtomizationDiagnosticReport` (atomization_diagnostics.py): `strategy_id`, `n_cells`, `n_cells_below_min_effective_obs`, `pooled_mean_gross_bps`, `atomized_mean_gross_bps_median`, `sign_flip_ratio`, `sign_flip_ratio_weighted`, `reject_reason_counts`, `dominant_reject_reason`.
 
 # 4. Architecture Flow
 
