@@ -520,6 +520,13 @@ class CandidateStrategyConfig:
     l1_breakeven_floor_bps: float = _DEFAULT_RT_BPS  # = ExecutionCostModel.round_trip_bps() ≈ 7.5bps
     l1_xs_alpha_admission_enabled: bool = False  # factor-level XS alpha admission gate
     l1_xs_admission_min_sharpe: float = 0.15  # min spread_sharpe for XS admission
+    # [ADR_20260711_L1_POOLED_ALPHA_ADMISSION_GENERALIZATION]
+    # Phase 0: measure-first atomization diagnostic (log-only, no gating change)
+    l1_atomization_diagnostics_enabled: bool = False
+    # Phase 1: archetype scope for compute_xs_factor_spread_diagnostics pooling.
+    # Default preserves current xs_alpha-only behavior; extend to ("xs_alpha","trend","ts_mom")
+    # only after Phase 0 measurement supports the dilution hypothesis.
+    l1_pooled_admission_archetypes: tuple[str, ...] = ("xs_alpha",)
     l1_fdr_hard_reject: bool = True  # q>alpha → hard reject (binding FDR)
     l1_conviction_metric: str = "prob_positive"  # "prob_positive" or "lcb_net_bps"
     l1_pair_alpha: float = 0.05
