@@ -9,7 +9,7 @@ description: Analyze modifications and execute git commits directly.
 Analyze unstaged modifications, automatically partition them into clean logical units, and execute git commits directly using a standardized, highly readable message format optimized for low-reasoning models.
 
 ## 🛠 Operational Mandate
-- **Direct Execution:** DO NOT output markdown drafts waiting for user approval. Immediately run `git add` and `git commit` commands to persist changes.
+- **Direct Execution:** Immediately run `git add` and `git commit` commands to persist changes, rather than outputting markdown drafts for user approval.
 - **Auto-Splitting Criteria:**
   - **Single Commit:** Triggered if modifications are within 10 files, 300 lines of change, and belong to the same logical layer.
   - **Multi-Commit:** Triggered if modifications exceed 10 files, 300 lines, or cross layer boundaries (e.g. config vs src). Automatically split file groups and execute consecutive commits.
@@ -17,12 +17,13 @@ Analyze unstaged modifications, automatically partition them into clean logical 
 - **Language & Standards:** Subject/Body must be in Korean. Maximum 50 characters for Subject. No AI attribution.
 
 ## 🧠 Message Formatting Standards (Strict Why/What Separation)
-All generated commit messages MUST strictly adhere to the following layout to prevent vague, single-word, or unreadable logs:
+All generated commit messages MUST strictly adhere to the following layout to ensure detailed, structured logs:
 1. **Subject:** Use standard conventional commit types (e.g., `feat`, `fix`, `refactor`, `chore`, `docs`) followed by a concise, 50-character Korean summary. No trailing period.
 2. **Double-Bulleted Body (Mandatory):** The body MUST contain exactly two bullet points formatted with bold headers:
    - `- **Why:** <Explain the root cause or quantitative hypothesis in a complete Korean sentence ending with the Korean verb suffix "~함." (noun-form termination).>`
    - `- **What:** <Explain the exact logic or structural changes applied in a complete Korean sentence ending with the Korean verb suffix "~함." (noun-form termination).>`
-3. **No Vague Words:** Sentence must end with "~함.". Vague terms like "버그 수정" (bug fix) or "코드 개선" (code improvement) are strictly prohibited.
+3. **Precise Language:** End sentences with the Korean verb suffix "~함." and describe specific actions; avoid vague terms like "버그 수정" or "코드 개선".
+
 
 ## 🧠 Internal Logic (Grouping & Structuring)
 1. **Logical Grouping:**

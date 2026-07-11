@@ -30,15 +30,14 @@ The system should be built for maximum execution speed without sacrificing numer
 
 - **Balanced Vectorization & Memory Safety:** Prioritize NumPy/Polars vectorization, but avoid forcing complex "one-liner" vectorized operations that compromise readability or cause OOM due to massive intermediate arrays. Balance readability and memory efficiency.
 - **Strict Numba JIT Isolation & Array Contiguity:**
-    - **Never** pass DataFrames or complex Python objects into a Numba-jitted function.
-    - Always unpack dataframes into raw NumPy arrays. Ensure arrays are contiguous using `np.ascontiguousarray()` before passing them to Numba to avoid copy overhead and performance degradation.
+    - Unpack DataFrames and complex Python objects into raw NumPy arrays before passing them to Numba-jitted functions.
+    - Ensure arrays are contiguous using `np.ascontiguousarray()` before passing them to Numba to avoid copy overhead and performance degradation.
 - **Optimized Parallelism:** Use `ProcessPoolExecutor` or `parallel=True` only for heavy, independent operations (e.g., Grid Search). Skip for lightweight operations where IPC overhead exceeds computational gain.
 - **Precision-Aware Data Types:** Use `float64` for all compounding returns, covariance matrices, and inversions. `float32` is strictly for storage-heavy raw feature arrays.
 
 ## 3. Numerical Stability, Precision & Reproducibility
 - **Safe Division Guardrails:** 
-    - **Avoid** `np.divide(..., where=...)` as it leaves uninitialized values in the result where the condition is False.
-    - **MANDATE** explicit zero handling:
+    - Ensure explicit zero handling using `np.where` or epsilon; avoid `np.divide(..., where=...)` due to uninitialized value risks.
       ```python
       # Option A: Masking (Recommended for readability)
       result = np.where(denominator != 0, numerator / denominator, 0.0)
@@ -48,8 +47,9 @@ The system should be built for maximum execution speed without sacrificing numer
       ```
 - **Log-space Operations:** Use `np.log1p()` and `np.expm1()` for compounding or extremely small returns to avoid underflow.
 - **High-Performance Timezone Architecture:** 
-    - Keep timezone-aware objects **strictly isolated to I/O and parsing boundaries**. 
-    - Internally, use primitive types (`int64` nanosecond epoch or `datetime64[ns]`). Avoid object arrays containing timezone-aware timestamps to prevent catastrophic performance hits in vectorized operations.
+    - Keep timezone-aware objects strictly isolated to I/O and parsing boundaries. 
+    - Internally, use primitive types (`int64` nanosecond epoch or `datetime64[ns]`) to maintain vectorization performance; avoid timezone-aware object arrays.
+
 
 ## 4. Financial Integrity & Bias Defense
 - **Rigorous Look-ahead Bias Prevention:** Information at $t+1$ is never accessible at time $t$. Ensure `.shift(1)` logic is documented for any signal-to-execution pipeline.
