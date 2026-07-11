@@ -24,8 +24,8 @@ Run ALL of the following in a **single batch command**:
 - `[regression_target]` MUST be the explicit test file paths mapped 1:1 from `docs/specs/[feature].md`.
   - **Example:** `tests/unit/domain/futures/signals/test_my_feature.py`
 - If supplementary test files exist (added by `implement` for coverage gap), **include them too**.
-- **Out-of-scope Error Ban**: If collection errors occur from files OUTSIDE `[regression_target]`, do NOT fix them. Use `--ignore=<path>` to skip them and report separately.
-- NEVER use bare `tests/` or `tests/unit/` without precise paths.
+- **Out-of-scope Error Isolation**: Skip collection errors from files outside `[regression_target]` using `--ignore=<path>` and report them separately.
+- **Precise Paths**: Always target specific test file paths; avoid using bare directories like `tests/` or `tests/unit/` without precise filenames.
 
 #### 2b. Coverage Scope & Thresholds
 - `[module_path]` = the **module(s) containing modified files** (e.g., `src/domain/futures/alpha_foundry`).
@@ -33,13 +33,14 @@ Run ALL of the following in a **single batch command**:
   - **Core Logic (Domain, Signal, Sizing, Portfolio):** >= 90%
   - **Adapters/Runners/DTOs/Boilerplate:** >= 70%
   - **Entrypoints / CLI / `__init__.py`:** skip
-- **Unchanged files in the module do NOT count toward the threshold calculation.** Only measure coverage on files that were created or modified by the current spec.
+- **Modified Files Focus:** Measure coverage exclusively on files created or modified by the current spec; exclude unchanged files from the threshold calculation.
 
 ### 3. Failure Triage & Loop Circuit Breaker
 If any step in the validation pipeline fails:
 - **Triage**: Read only the compiled error logs and failure lines from the execution runner.
 - **Diagnostics**: Determine whether the failure is a design error (requires `spec` rollback) or code bug (requires `implement` rollback).
 - **Circuit Breaker**: If regression fails for **3 consecutive cycles**, STOP and request human intervention.
+
 
 ## Verdicts & Routing
 - **PASS**: All static/dynamic criteria met AND all tiered coverage thresholds satisfied. ➔ **Transition to `sync`**

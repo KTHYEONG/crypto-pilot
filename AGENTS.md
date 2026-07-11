@@ -7,17 +7,18 @@
 - **Core Philosophy:** "Do not guess what you do not know; ask questions. Prove code through logic rather than explanation."
 
 ## 2. Global Constraints (Hallucination & Token Control)
-- **NO FLUFF:** Greetings and filler phrases (e.g., "Yes, I understand") are strictly prohibited. Output technical analysis or code immediately.
-- **ZERO REDUNDANCY:** Do not summarize or repeat information already present in tool outputs (terminal logs, grep results, etc.).
-- **BULLET-FIRST:** Use concise bullet points and technical keywords instead of full sentences. Avoid grammatical fluff.
-- **SKIP CONFIRMATION:** If a tool execution is successful, skip redundant success messages like "I have finished the task."
-- **FACT-BASED ONLY:** Do not create non-existent libraries or methods. Use only confirmed APIs based on official documentation.
+- **NO FLUFF:** Provide technical analysis or code immediately; omit greetings and conversational filler phrases.
+- **ZERO REDUNDANCY:** Focus on new insights and direct actions; avoid repeating or summarizing information already present in tool outputs.
+- **BULLET-FIRST:** Use concise bullet points and technical keywords; avoid conversational grammar and full-sentence explanations.
+- **SKIP CONFIRMATION:** Proceed directly to the next step upon successful tool execution; omit success confirmation messages.
+- **FACT-BASED ONLY:** Use only verified APIs and libraries from official documentation; prevent hallucination of methods or libraries.
 - **SELECTIVE OMISSION & TOOLING:**
-    - **Existing Files:** When modifying existing files, you MUST use `replace_file_content` or `multi_replace_file_content` to edit only the necessary parts. `write_to_file` is reserved for creating new files only.
-    - **Markdown Output:** When explaining code to the user, omit unchanged parts using the `# ... existing code ...` comment.
-- **CONTEXT WINDOW MGMT:** When reading large files (300+ lines), specify line ranges in `view_file` to read only the necessary parts. Avoid reading the entire file.
-- **EXPLICIT UNCERTAINTY:** If requirements are unclear, explicitly state "Clarification Needed: [item]" and ask questions before writing code.
-- **VERDICT FORMAT:** check 결과는 🟢 PASS인 경우 1줄로 출력하되, 🔴 FAIL인 경우 [간략 실패 요약]과 함께 🔍 Cause 및 🛠️ Fix(AI가 파싱 가능한 구조적 수정 지시)가 포함된 3줄 이내의 마크다운 블록으로 출력할 것.
+    - **Existing Files:** Modify existing files using `replace_file_content` or `multi_replace_file_content`. Use `write_to_file` only when creating new files.
+    - **Markdown Output:** Omit unchanged parts in explanations using the `# ... existing code ...` comment to save tokens.
+- **CONTEXT WINDOW MGMT:** Specify line ranges in `view_file` to read only relevant parts for files over 300 lines.
+- **EXPLICIT UNCERTAINTY:** State "Clarification Needed: [item]" and ask clarifying questions when requirements are unclear before writing code.
+- **VERDICT FORMAT:** check 결과는 🟢 PASS인 경우 1줄로 출력하되, 🔴 FAIL인 경우 [간략 실패 요약]과 함께 🔍 Cause 및 🛠️ Fix(조치 지시 사항)가 포함된 3줄 이내의 마크다운 블록으로 출력할 것.
+
 
 ## 3. Environment & Execution (Environment & Tool Execution)
 - **Environment Manager:** This project uses `uv` to manage dependencies and virtual environments.
@@ -59,40 +60,39 @@ When a skill is explicitly invoked, the skill controls the phase-specific workfl
 This protocol applies only inside code-writing phases such as `implement`.
 
 ## 7. File Structure & Architecture
-- **Separation of Concerns:** Strictly separate logic, data, and router layers.
+- **Separation of Concerns:** Maintain clear separation between logic, data, and router layers.
 - **Modularity:** Design new files to be within 500 lines. (Defer refactoring of existing files if unit tests are not secured).
 - **Configuration:** Manage all settings via environment variables (`.env`) and `pydantic-settings`.
 
-## 8. Anti-Patterns (Strictly Prohibited)
-- **Blind Copy-Paste:** Prohibit copying legacy code unrelated to requirements.
-- **Magic Numbers:** Always separate into constants.
-- **Unverified Refactoring:** Prohibit large-scale structural changes without test code or guaranteed behavior.
-- **Ignoring Return Values:** Prohibit neglecting return values or error handling.
-- **No Unsolicited Task Expansion**: Do not perform additional tasks that were not requested. Specifically, overstepping the currently assigned phase in the skill workflow (e.g., executing `check` automatically after `implement` finishes) is considered a waste of tokens and a violation of user control.
-  - **Coverage Gap Exception**: During the `implement` phase, if the spec's test scenarios do not cover newly introduced functions/classes, the AI MAY write supplementary test cases that target the uncovered lines. This is NOT considered unsolicited expansion. The supplementary tests must be minimal, directly related to the new code, and committed as part of the implementation task.
-- **No Unsolicited Context:** Do not provide technical background or "just-in-case" explanations unless explicitly asked.
+## 8. Anti-Patterns & Alternatives
+- **Focused Changes:** Implement the smallest necessary change; avoid copying unrelated legacy code.
+- **Constants:** Separate magic numbers into descriptive constants.
+- **Verified Refactoring:** Ensure structural changes are covered by test code and have guaranteed behavior.
+- **Error Handling:** Always verify and handle return values and exceptions.
+- **Controlled Task Scope:** Limit execution strictly to the current task or active phase; avoid unsolicited task expansion.
+  - **Coverage Gap Exception:** During the `implement` phase, if the spec's test scenarios do not cover newly introduced functions/classes, write supplementary test cases targeting those lines as part of the implementation task.
+- **Context-First Delivery:** Omit technical background or "just-in-case" explanations unless explicitly requested by the user.
 
 ## 9. Rule Isolation & Priority: Commit Skill
 
-- **Manual Activation Only**: The `commit` skill is applied only when the user explicitly invokes it via `activate_skill` or directly requests a commit task.
-- **No Auto Activation**: Do not infer or auto-activate the commit skill from file changes, labels, branch names, or nearby context unless the user explicitly asks for a commit operation.
-- **Precedence**: When the commit skill is manually activated, it temporarily suspends the general check loop and multi-step development workflow defined in this document.
-- **Scope**: The commit skill is limited to version-control tasks such as commit message creation, staging guidance, commit splitting, or commit audit.
+- **Manual Activation Only:** The `commit` skill is applied only when the user explicitly invokes it via `activate_skill` or directly requests a commit task.
+- **Precedence:** When the commit skill is manually activated, it temporarily suspends the general check loop and multi-step development workflow defined in this document.
+- **Scope:** The commit skill is limited to version-control tasks such as commit message creation, staging guidance, commit splitting, or commit audit.
 
 ## 10. Quant & Financial Engineering (Automatic Augmentation)
 
-- **Automatic Activation Trigger**: Automatically activated when working on paths defined in `.agents/rules/quant.md` (e.g., signals, portfolio, backtest) or when the `quant` label is present.
-- **Application Model (Augmentation)**: Quant rules **DO NOT** replace the skill workflow. Instead, they **augment** the active skill by injecting domain-specific constraints into `<plan>`, `<risk>`, and `check` phases.
-- **Precedence**: For any task involving mathematical modeling, time-series integrity, or financial logic, the instructions in `.agents/rules/quant.md` take absolute precedence over general guidelines.
-- **Core Mandate**: You MUST evaluate every change against "Anti-Bias (Look-ahead)", "Statistical Robustness", and "Trading Realism" as defined in the Quant framework.
+- **Automatic Activation Trigger:** Automatically activated when working on paths defined in `.agents/rules/quant.md` (e.g., signals, portfolio, backtest) or when the `quant` label is present.
+- **Application Model (Augmentation):** Quant rules augment the active skill by injecting domain-specific constraints into `<plan>`, `<risk>`, and `check` phases rather than replacing the skill workflow.
+- **Precedence:** For any task involving mathematical modeling, time-series integrity, or financial logic, the instructions in `.agents/rules/quant.md` take absolute precedence over general guidelines.
+- **Core Mandate:** Evaluate every change against "Anti-Bias (Look-ahead)", "Statistical Robustness", and "Trading Realism" as defined in the Quant framework.
 
 ## 11. Skill Orchestration Boundary
 
-Skills define phase-specific workflows only. **Auto-transition between skills is strictly prohibited.**
+Skills define phase-specific workflows only. Execute skills individually; transition to the next skill only when explicitly requested.
 
-- **Single Skill Scope**: Stop immediately (STOP) and wait for user feedback once the active skill's objective is met.
-- **No Auto-Chaining**: Do not automatically invoke or proceed to the next skill after completing the current one unless the user explicitly requested multi-step execution.
-- **Roadmap vs Pipeline**: The workflow below is a "roadmap" for user reference, NOT an AI automatic execution pipeline.
+- **Single Skill Scope:** Stop immediately (STOP) and wait for user feedback once the active skill's objective is met.
+- **Controlled Chaining:** Wait for user feedback or explicit requests before invoking subsequent skills.
+- **Roadmap vs Pipeline:** The workflow below is a "roadmap" for user reference, not an automated execution pipeline.
 
 [Manual Development Roadmap (User-led)]
 1. spec -> 2. implement -> 3. check -> 4. sync
@@ -111,8 +111,9 @@ To maintain a clean and navigable codebase, documentation must follow a strict s
 
 - **Architecture (`docs/architecture/`):** Focuses on "What" the module is and its "Core Logic".
   - Contents: Module purpose, mathematical formulas, core I/O interfaces, state machines, and primary constants.
-  - Constraint: NO implementation history, NO "how it was fixed", NO long prose. Keep it surgical and formula-centric.
+  - Guidelines: Focus strictly on static specifications (public contracts, formulas, Mermaid diagrams); omit historical change logs and conversational prose.
 - **Decisions (`docs/decisions/`):** "Two-File Decisions Log Architecture" (ADR).
   - decisions.md (Active Window): Cumulative log, strictly maximum of 5 lines per task (Max 5 Lines Rule) appended to the top. Max 15 active entries.
   - decisions_archive.md (Permanent Archive): Relocate pruned entries from decisions.md to this single archive file.
   - Workflow: The `sync` skill MUST condense implementation decisions into decisions.md and handle the sliding window pruning to decisions_archive.md.
+
