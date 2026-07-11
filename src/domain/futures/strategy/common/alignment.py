@@ -14,6 +14,19 @@ from src.domain.futures.universe.contracts import UniverseStateCube
 _logger = logging.getLogger(__name__)
 
 
+def _ensure_debug_visible(logger: logging.Logger) -> None:
+    """Force-enable DEBUG output for opt-in diagnostic logging, independent of
+    ambient root/handler configuration.
+    [ADR_20260711_L0_NAN_COST_HTF_BLIND_REJECTION]
+    """
+    if logger.getEffectiveLevel() > logging.DEBUG:
+        logger.setLevel(logging.DEBUG)
+    if not logger.handlers:
+        handler = logging.StreamHandler()
+        handler.setFormatter(logging.Formatter("%(message)s"))
+        logger.addHandler(handler)
+
+
 @dataclass(slots=True, frozen=True)
 class AlignedMarketData:
     """Aligned market arrays on common time grid."""
@@ -70,6 +83,7 @@ def align_data_maps(
     state_cube: UniverseStateCube | None = None,
     readiness_strategy: str | None = None,
     readiness_cube: Any | None = None,
+    cost_diagnostics_enabled: bool = False,
 ) -> AlignedMarketData:
     """Align symbol frames into dense [T, N] arrays.
 
@@ -382,6 +396,16 @@ def align_data_maps(
         anchor_cluster_1d=None if symbol_meta is None else symbol_meta.get("anchor_cluster_member"),
         symbol_meta=symbol_meta,
     )
+    if cost_diagnostics_enabled:
+        _ensure_debug_visible(_logger)
+        _cost_nan_frac = float(np.isnan(execution_cost_bps_2d).mean())
+        _adv_nan_frac = float(np.isnan(adv_usdt_2d).mean())
+        _logger.debug(
+            "[DATA] stage=align_cost_liquidity tf=%s n_symbols=%d "
+            "execution_cost_nan_frac=%.3f adv_usdt_nan_frac=%.3f",
+            tf, len(valid_symbols), _cost_nan_frac, _adv_nan_frac,
+        )
+
     if state_cube is None:
         shapes: dict[str, tuple[int, int]] = {}
         for sym in symbols:

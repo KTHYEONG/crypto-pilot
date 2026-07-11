@@ -10,6 +10,7 @@
 
 from __future__ import annotations
 
+import logging
 import math
 from collections.abc import Mapping, Sequence
 from typing import Literal, cast
@@ -38,6 +39,22 @@ from src.domain.futures.alpha_foundry.contracts import (
 from src.domain.futures.signals.contracts import CandidateSignalPanel
 from src.domain.futures.strategy.common.alignment import AlignedMarketData
 from src.domain.futures.strategy.execution_cost import ExecutionCostModel
+
+_logger = logging.getLogger(__name__)
+
+
+def _ensure_debug_visible(logger: logging.Logger) -> None:
+    """Force-enable DEBUG output for opt-in diagnostic logging, independent of
+    ambient root/handler configuration (e.g. subprocess workers that don't
+    inherit the CLI entrypoint's logging.basicConfig state).
+    [ADR_20260711_L0_NAN_COST_HTF_BLIND_REJECTION]
+    """
+    if logger.getEffectiveLevel() > logging.DEBUG:
+        logger.setLevel(logging.DEBUG)
+    if not logger.handlers:
+        handler = logging.StreamHandler()
+        handler.setFormatter(logging.Formatter("%(message)s"))
+        logger.addHandler(handler)
 
 
 def _validate_shape(panel: CandidateSignalPanel, aligned: AlignedMarketData) -> None:
@@ -261,6 +278,7 @@ def evaluate_panel_cheap_gate(
         aligned=aligned,
         cost_model=cost_model,
         precomputed_atr_2d=precomputed_atr_2d,
+        cost_diagnostics_enabled=bool(getattr(config, "l0_cost_diagnostics_enabled", False)),
     )
     net_vals = np.asarray(result["edge_bps"], dtype=np.float64)
     gross_vals = np.asarray(result["gross_bps"], dtype=np.float64)
@@ -1146,6 +1164,7 @@ def evaluate_panel_gate(
         aligned=aligned,
         cost_model=cost_model,
         precomputed_atr_2d=precomputed_atr_2d,
+        cost_diagnostics_enabled=bool(getattr(config, "l0_cost_diagnostics_enabled", False)),
     )
     net_vals = np.asarray(result["edge_bps"], dtype=np.float64)
     gross_vals = np.asarray(result["gross_bps"], dtype=np.float64)
@@ -1290,6 +1309,17 @@ def evaluate_panel_gate(
         handoff_tier = "seed"
     else:
         handoff_tier = "candidate"
+
+    if bool(getattr(config, "l0_cost_diagnostics_enabled", False)):
+        _ensure_debug_visible(_logger)
+        _logger.debug(
+            "[EVAL] stage=gate_evidence tf=%s family=%s variant=%s n_events=%d "
+            "mean_gross_bps=%.3f mean_net_bps=%.3f net_lcb_bps=%.3f nw_tstat=%.3f "
+            "gate_passed=%s reject_reasons=%s",
+            recipe.timeframe, recipe.family, recipe.variant, n_events,
+            mean_gross_bps, mean_net_bps, net_lcb_bps, nw_tstat,
+            gate_passed, "|".join(reject_reasons) if reject_reasons else "none",
+        )
 
     return AlphaGateEvidence(
         schema_version="unified",
