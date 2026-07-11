@@ -306,7 +306,8 @@
     "testing": "tests/unit/scripts/test_update_index.py"
   },
   "src/domain/futures/strategy/candidate_labels.py": {
-    "architecture": "docs/architecture/layer1.md"
+    "architecture": "docs/architecture/layer0.md",
+    "testing": "tests/unit/domain/futures/strategy/test_candidate_labels.py"
   },
   "src/domain/futures/strategy/tiered_workflow/atomization_diagnostics.py": {
     "architecture": "docs/architecture/layer1.md",
@@ -315,5 +316,9 @@
   "src/domain/futures/strategy/timeframe_contracts.py": {
     "architecture": "docs/architecture/layer0.md",
     "testing": "tests/unit/domain/futures/strategy/test_timeframe_probe.py"
+  },
+  "src/domain/futures/strategy/common/alignment.py": {
+    "architecture": "docs/architecture/layer0.md",
+    "testing": "tests/unit/domain/futures/strategy/common/test_alignment.py"
   }
 }
