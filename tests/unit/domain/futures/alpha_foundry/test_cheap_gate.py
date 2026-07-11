@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import dataclasses
+import logging
 
 import numpy as np
 import pytest
@@ -182,6 +183,66 @@ class TestEvaluatePanelGate:
         assert evidence.capacity_score >= 0.0
         assert evidence.regime_stability >= 0.0
         assert evidence.tf_corroboration >= 0.0
+
+    def test_cost_diagnostics_logs_when_enabled(self, caplog: pytest.LogCaptureFixture) -> None:
+        """[LIMIT-04]: l0_cost_diagnostics_enabled=True emits [EVAL] gate_evidence log."""
+        caplog.set_level(logging.DEBUG, logger="src.domain.futures.alpha_foundry.cheap_gate")
+        t = 96
+        dt = np.arange(np.datetime64("2026-01-01T00"), np.datetime64("2026-01-17T00"),
+                        np.timedelta64(4, "h"))[:t]
+        symbols = ("AAA", "BBB")
+        zeros = np.zeros((t, 2), dtype=np.float64)
+        valid = np.ones((t, 2), dtype=np.bool_)
+        close = np.column_stack([
+            np.linspace(100.0, 124.0, t, dtype=np.float64),
+            np.linspace(50.0, 61.0, t, dtype=np.float64),
+        ])
+        side = np.zeros((t, 2), dtype=np.int8)
+        side[::2, :] = 1
+        score = np.where(side == 1, np.array([0.8, 0.4]), 0.0).astype(np.float64)
+        aligned = AlignedMarketData(
+            datetimes=dt, symbols=symbols,
+            open_2d=close, high_2d=close, low_2d=close, close_2d=close,
+            volume_2d=np.full((t, 2), 1_000.0, dtype=np.float64),
+            funding_2d=zeros.copy(),
+            active_mask=valid.copy(), warm_mask=valid.copy(),
+            entry_block_mask=np.zeros((t, 2), dtype=np.bool_),
+            kill_mask=np.zeros((t, 2), dtype=np.bool_),
+            adv_usdt_2d=np.full((t, 2), 1_000_000.0, dtype=np.float64),
+            execution_cost_bps_2d=np.full((t, 2), 4.0, dtype=np.float64),
+        )
+        panel = CandidateSignalPanel(
+            family="sparse_breakout_retest_v2", variant="bor_v2_40_4h",
+            params={"lookback": 40},
+            datetimes=dt, symbols=symbols,
+            signed_score_2d=score, side_hint_2d=side,
+            expected_holding_bars=2, min_holding_bars=1,
+            stop_atr_mult=2.0, take_profit_atr_mult=3.0,
+            turnover_proxy_2d=zeros.copy(),
+            valid_mask_2d=valid,
+            metadata={"recipe_id": "bor_v2_40_4h"},
+        )
+        recipe = AlphaRecipe(
+            recipe_id="bor_v2_40_4h", family="sparse_breakout_retest_v2",
+            variant="bor_v2_40_4h", timeframe="4h", archetype="trend",
+            indicator_params={"lookback": 40},
+            side_rule_id="breakout", exit_policy_id="sparse",
+            required_fields=("close",), causal_lag_bars=1,
+            max_turnover_per_year=2000.0,
+        )
+        cfg = AlphaGateConfig(min_events=10, min_effective_n=5.0,
+                              min_candidate_rank_ic_tstat=0.0,
+                              min_nw_tstat=0.0,
+                              max_cost_drag_ratio=1.0,
+                              max_turnover_per_year=2000.0,
+                              l0_cost_diagnostics_enabled=True)
+        evaluate_panel_gate(
+            panel=panel, aligned=aligned, recipe=recipe,
+            cost_model=ExecutionCostModel(), config=cfg,
+            bars_per_year=365.0 * 6.0, run_id="test",
+        )
+        messages = [r.message for r in caplog.records]
+        assert any("stage=gate_evidence" in m for m in messages)
 
     def test_raises_on_invalid_panel_shape(self) -> None:
         """S3-1: Invalid panel shape raises ValueError."""
