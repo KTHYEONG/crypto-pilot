@@ -403,3 +403,104 @@ def test_build_qualified_signal_registry_admits_xs_pair_via_substituted_lcb() ->
         cfg=cfg_reg,
     )
     assert "BTCUSDT" not in registry_fail.by_symbol
+
+
+# ─── Scenario 1b: Phase 1 — xs_archetypes tuple generalization ──────────
+
+
+def test_compute_xs_factor_spread_diagnostics_with_trend_archetype() -> None:
+    """xs_archetypes=('trend',) matches trend rows; default ('xs_alpha',)
+    does not. Regression: default still matches xs_alpha only.
+    """
+    trend_rows = _positive_factor_rows(12, "trend_pullback", "tpc_v1", archetype="trend")
+    xs_rows = _positive_factor_rows(12, "xs_momentum", "xsm_v1", archetype="xs_alpha")
+    frame = _xs_frame(trend_rows + xs_rows)
+
+    # With explicit ('trend',) — should match trend rows
+    result_trend = compute_xs_factor_spread_diagnostics(
+        realized_event_results=frame,
+        cfg=_make_cfg(),
+        fold_id=0,
+        seed=0,
+        xs_archetypes=("trend",),
+    )
+    assert result_trend is not None
+    assert "trend_pullback:tpc_v1" in result_trend.by_factor
+    assert "xs_momentum:xsm_v1" not in result_trend.by_factor
+
+    # With default (xs_alpha only) — should match xs_alpha rows only
+    result_default = compute_xs_factor_spread_diagnostics(
+        realized_event_results=frame,
+        cfg=_make_cfg(),
+        fold_id=0,
+        seed=0,
+    )
+    assert result_default is not None
+    assert "xs_momentum:xsm_v1" in result_default.by_factor
+    assert "trend_pullback:tpc_v1" not in result_default.by_factor
+
+
+# ─── Scenario 2c: [LIMIT-03] Sparse vs dense bar pattern — no crash ────
+
+
+def test_compute_xs_factor_spread_diagnostics_sparse_pattern_no_crash() -> None:
+    """Sparse pattern (8 bars with 1 symbol, 2 bars with 40 symbols) should
+    not crash; n_bars=10, n_events visible."""
+    rows: list[dict] = [
+        {
+            "decision_idx": b,
+            "symbol": "A",
+            "family": "trend_pullback",
+            "variant": "tpc_v1",
+            "archetype": "trend",
+            "side": 1,
+            "score_z": 1.0,
+            "realized_side_adjusted_gross_bps": 30.0,
+        }
+        for b in range(8)
+    ]
+    rows.extend(
+        {
+            "decision_idx": b,
+            "symbol": f"SYM{sym_idx}",
+            "family": "trend_pullback",
+            "variant": "tpc_v1",
+            "archetype": "trend",
+            "side": 1,
+            "score_z": 1.0,
+            "realized_side_adjusted_gross_bps": 30.0,
+        }
+        for b in range(8, 10)
+        for sym_idx in range(40)
+    )
+    frame = _xs_frame(rows)
+    result = compute_xs_factor_spread_diagnostics(
+        realized_event_results=frame,
+        cfg=_make_cfg(l1_bootstrap_block_bars=1, l1_bootstrap_samples=10),
+        fold_id=0,
+        seed=0,
+        xs_archetypes=("trend",),
+        min_bars=5,
+    )
+    assert result is not None
+    vals = result.by_factor.get("trend_pullback:tpc_v1")
+    assert vals is not None
+    n_bars, n_events = vals[0], vals[1]
+    assert n_bars == 10
+    assert n_events >= n_bars
+
+
+# ─── Scenario 2e: Empty xs_archetypes tuple → None ──────────────────────
+
+
+def test_compute_xs_factor_spread_diagnostics_empty_archetypes_returns_none() -> None:
+    rows = _positive_factor_rows(12, "xs_momentum", "xsm_v1")
+    frame = _xs_frame(rows)
+    result = compute_xs_factor_spread_diagnostics(
+        realized_event_results=frame,
+        cfg=_make_cfg(),
+        fold_id=0,
+        seed=0,
+        xs_archetypes=(),
+    )
+    assert result is None
