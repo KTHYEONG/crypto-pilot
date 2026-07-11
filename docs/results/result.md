@@ -1,12 +1,10 @@
 # L0/L1 Discovery Snapshot
 
-- Date: `2026-07-09`
-- Run id: `4h_1783585799`
+- Date: `2026-07-11`
+- Run id: `4h_1783736185`
 - Command:
-  `UV_CACHE_DIR=/tmp/uv-cache MPLCONFIGDIR=/tmp/mpl PYTHONPATH=. LOG_LEVEL=INFO timeout 1500 uv run python src/execution/opt_main_futures.py --phase l1 --sync skip --timeframe 4h --date 2026-07-09 --trials 1 --seed 42 --alpha-foundry gate --alpha-foundry-total-l1-budget 30 --alpha-foundry-min-conviction-lcb-bps 5.0`
-- Artifacts:
-  - `logs/futures/alpha_foundry/4h_1783585799_{1h,2h,4h,6h,8h,12h}_report.json`
-  - `logs/futures/alpha_foundry/4h_1783585799_{1h,2h,4h,6h,8h,12h}_evidence.parquet`
+  `UV_CACHE_DIR=/tmp/uv-cache MPLCONFIGDIR=/tmp/mpl PYTHONPATH=. LOG_LEVEL=DEBUG timeout 1500 uv run python src/execution/opt_main_futures.py --phase l1 --sync skip --timeframe 4h --date 2026-07-11 --trials 1 --seed 42`
+- Context: acceptance run for `[ADR_20260711_L0_ENTRY_EXIT_SIGNAL_EFFECTIVENESS_REDESIGN]` (barrier-aware evaluation, rising-edge sparse triggers, rolling-stat/entry-logic bug fixes, catalog cleanup). Supersedes the `2026-07-09` snapshot below in scope (this run additionally fixed a real-data crash the prior snapshot never hit).
 
 ## Scope
 
@@ -14,71 +12,75 @@
 - IS / OOS split: `2026-01-01`
 - Universe funnel:
   - discovered `414`
-  - liquidity-selected `150`
-  - loaded after integrity checks `25`
+  - liquidity-selected (capacity limit, Top-N) `150`
+  - loaded after integrity checks `137`
+  - admitted into L1 (post late-start drop) `126` (dropped `11`: `late_start`)
+- 4h panel funnel (only TF with a logged panels_in/bound breakdown): `n_panels_in=54 → n_bound=46 → n_passed(cheap gate)=16 → n_rejected=30`
 
-## L0 Gate Summary
+## L0 Gate Summary (real per-TF evidence, post barrier-aware fix)
 
-| TF | Panels In | Bound | Evidence Rows | Gate Passed | Selected for L1 |
-| --- | ---: | ---: | ---: | ---: | ---: |
-| 1h | 8 | 8 | 8 | 0 | 0 |
-| 2h | 10 | 10 | 10 | 0 | 1 |
-| 4h | 52 | 44 | 44 | 4 | 3 |
-| 6h | 19 | 19 | 19 | 1 | 1 |
-| 8h | 19 | 19 | 19 | 1 | 1 |
-| 12h | 19 | 18 | 18 | 2 | 2 |
-| Total | 127 | 118 | 118 | 8 | 8 |
+| TF | Evidence Rows | Distinct Families | Gate Passed | Selected for L1 |
+| --- | ---: | ---: | ---: | ---: |
+| 1h | 8 | 4 | 0 | 0 |
+| 2h | 10 | 4 | 0 | 0 |
+| 4h | 46 | 28 | 16 | 13 |
+| 6h | 19 | 11 | 0 | 0 |
+| 8h | 19 | 11 | 0 | 0 |
+| 12h | 18 | 10 | 0 | 0 |
+| Total | 120 | - | 16 | 13 |
 
-## Selected L1 Candidates
+## Selected L1 Candidates (all from 4h; sorted by net_lcb_bps)
 
-| TF | Family | Variant | Gate Passed | net_lcb_bps | nw_tstat | cost_drag_ratio |
-| --- | --- | --- | --- | ---: | ---: | ---: |
-| 2h | `btc_regime_pullback` | `btc_pullback_50` | False | 8.97 | 1.16 | 0.222 |
-| 4h | `btc_regime_pullback` | `btc_pullback_50_4h` | True | 100.88 | 3.11 | 0.106 |
-| 4h | `lsr_oi_regime_filter` | `lsr_oi_gate_42_4h` | True | 55.65 | 1.61 | 0.186 |
-| 4h | `btc_regime_pullback` | `btc_pullback_50_rsi_4h` | True | 25.20 | 1.60 | 0.219 |
-| 6h | `btc_regime_pullback` | `btc_pullback_50` | True | 16.73 | 1.32 | 0.173 |
-| 8h | `trend_pullback_continuation` | `tpc_25_100` | True | 27.16 | 1.50 | 0.176 |
-| 12h | `trend_pullback_continuation` | `tpc_33_133` | True | 112.21 | 1.80 | 0.070 |
-| 12h | `btc_regime_pullback` | `btc_pullback_100_slow` | False | 4.27 | 1.04 | 0.112 |
+| Family | Variant | net_lcb_bps | nw_tstat | cost_drag_ratio | n_events |
+| --- | --- | ---: | ---: | ---: | ---: |
+| `trend_pullback_continuation` | `tpc_100_400_4h` | 96.78 | 6.19 | 0.091 | 7,287 |
+| `trend_pullback_continuation` | `tpc_50_200_4h` | 77.18 | 7.43 | 0.119 | 12,188 |
+| `trend_pullback_quality_v2` | `tpq_v2_100_400_4h` | 67.50 | 4.35 | 0.118 | 3,915 |
+| `mtf_trend_pullback` | `mtf_tpb_100_30_4h` | 52.68 | 5.22 | 0.157 | 13,727 |
+| `trend_pullback_quality_v2` | `tpq_v2_50_200` | 51.81 | 4.70 | 0.154 | 6,304 |
+| `dual_momentum` | `dm_24_96_4h` | 51.78 | 6.62 | 0.167 | 28,510 |
+| `vol_term_structure_gate` | `vts_gate_20_4h` | 42.30 | 5.33 | 0.190 | 33,675 |
+| `macd_4h` | `macd_12_26_9` | 39.07 | 7.97 | 0.219 | 41,036 |
+| `dual_momentum` | `dm_12_48_4h` | 37.12 | 7.47 | 0.225 | 40,642 |
+| `trend_pullback_continuation` | `tpc_20_100_4h` | 36.97 | 6.52 | 0.214 | 22,949 |
+| `taker_imbalance_momentum` | `tim_12_4h` | 33.41 | 11.41 | 0.258 | 57,304 |
+| `trend_pullback_quality_v2` | `tpq_v2_20_100` | 23.05 | 3.37 | 0.268 | 9,204 |
+| `oi_lsr_unwind` | `oiu_42` | 15.16 | 2.37 | 0.332 | 1,527 |
 
 ## Failure Pattern
 
-- Main reject reasons:
-  - `non_positive_lcb`
-  - `weak_tstat`
-  - `excess_cost_drag`
-- `tf_corroboration`:
-  - all rows `0.0`
-  - all selected rows `0.0`
-- Family concentration among selected candidates:
-  - `btc_regime_pullback`: `5`
-  - `trend_pullback_continuation`: `2`
-  - `lsr_oi_regime_filter`: `1`
+- Main reject reasons (all TFs combined):
+  - `non_positive_lcb`: 64
+  - `weak_tstat`: 54
+  - `tf_contradicted`: 39
+  - `excess_cost_drag`: 10
+  - `insufficient_events`: 14
+  - `xs_spread_fail`: 10
+  - `excess_turnover`: 8
+  - `gross_lcb_below_cost`: 3
+  - `non_positive_gross`: 2
+  - `insufficient_effective_n`: 1
+- 6h/8h/12h collapse pattern: identical reject-reason counts across all three TFs (`tf_contradicted=8, non_positive_lcb=15, weak_tstat=15, insufficient_events=4, xs_spread_fail=2`) — evidence rows are near-duplicated across these TFs, consistent with the same underlying 1h-sourced candles being resampled (per TF-PROBE readiness dashboard: `6h/8h/12h Mix: 1h:296`), not independent signal evaluation.
+- L1 nested pairwise stage (downstream of L0, separate mechanism): even the 4h-selected set collapses to `0 qualified` pairs per as-of snapshot (`no_incremental_edge`, `negative_gross_edge` dominant), and final `L1_NESTED` fold readiness is `BLOCKED (fold_ratio 0.25<0.50)`. This is not part of the L0 entry/exit fix scope.
 
 ## Critical Observations
 
-1. Selection diversity is still weak.
-   Current L1 handoff is concentrated in three families, and five of eight selections come from one family: `btc_regime_pullback`.
+1. Barrier-aware evaluation (Fix 1) materially changed the 4h outcome shape.
+   Compared to the `2026-07-09` snapshot (8 total selections, `net_lcb_bps` capped at ~112), this run produced **13 selections at 4h alone**, spanning **8 distinct families** (trend-pullback variants, `mtf_trend_pullback`, `dual_momentum`, `vol_term_structure_gate`, `macd_4h`, `taker_imbalance_momentum`, `oi_lsr_unwind`) instead of 5/8 concentrated in `btc_regime_pullback`. This is real breadth improvement at 4h, not just a numerical-stability fix.
 
-2. Two seed promotions are still not canonical gate passes.
-   `2h btc_pullback_50` and `12h btc_pullback_100_slow` reached `selected_for_l1=True` while `gate_passed=False`. They are soft-admitted seed cases, not hard L0 winners.
+2. The real-data crash found and fixed this session (`xs_spread_lcb_bps must be finite`) is confirmed resolved.
+   All 6 TFs now produce complete, finite evidence CSVs end-to-end; no exception across the full run (628.94s wall clock).
 
-3. Cross-timeframe corroboration is not functioning as an effective discriminator.
-   The code path runs, but this execution produced `tf_corroboration=0.0` everywhere. In practice, the multi-timeframe layer is not adding useful separation yet.
+3. Breadth improvement does not transfer past 4h.
+   1h/2h/6h/8h/12h all show `gate_passed=0`. The 6h/8h/12h evidence is suspiciously identical in reject-reason shape, pointing to an HTF-resample data-sourcing artifact (all three built from the same `1h:296` source mix) rather than three independently-evaluated timeframes — a candidate follow-up investigation, separate from this spec's scope.
 
-4. `tf_probe` and Alpha Foundry readiness disagree.
-   The runtime log reported `No data available for tf=4h/6h/8h/12h` in the TF probe path, but Alpha Foundry generated full per-TF JSON/parquet artifacts in the same run. This is a wiring or readiness-contract mismatch, not a true data absence event.
+4. L0 breadth gain does not survive L1's nested pairwise-matching gate.
+   Even the 13 4h-selected, gate-passed L0 candidates reduce to 0 qualified pairs in L1's own prequential evidence stage (`no_incremental_edge`/`negative_gross_edge`). This is a distinct downstream mechanism from the L0 entry/exit redesign and remains unresolved.
 
 ## Current Conclusion
 
-- The current bottleneck is not lack of raw candidate generation.
-  The bottleneck is that most candidates die on the same three axes: weak statistical significance, non-positive lower confidence bound, and cost drag.
-
-- The current naming and observability surface makes diagnosis harder than it should be.
-  Terms like `tf_probe`, `evidence`, `report`, and `manifest` are overloaded across unrelated layers, and file writes are separated from terminal diagnostics.
-
-- Next implementation priority should be:
-  1. unify naming for TF scan / gate result / persisted artifact concepts,
-  2. align TF probe readiness with Alpha Foundry readiness,
-  3. make JSON/CSV/parquet-producing paths DEBUG-loggable in a consistent terminal-friendly format.
+- This session's fix (barrier-aware NaN/finite-masking bug) is verified by direct execution: no crash, and a genuine increase in 4h L0 gate-passed breadth/diversity versus the pre-fix baseline.
+- The original diagnosis (`gross alpha 부재`, not implementation bug) still holds for 1h/2h/6h/8h/12h — those TFs remain fully blocked on `non_positive_lcb`/`weak_tstat` regardless of the entry-logic corrections.
+- Next priority candidates (not yet started):
+  1. Investigate why 6h/8h/12h evidence rows are near-identical (HTF resample sourcing artifact vs. genuine independent evaluation).
+  2. Root-cause L1's nested pairwise `no_incremental_edge`/`negative_gross_edge` collapse — the mechanism that currently discards all L0 4h breadth gains before deployment.
