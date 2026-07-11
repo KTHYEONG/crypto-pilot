@@ -491,6 +491,7 @@ class CandidateStrategyConfig:
     per_tf_candidate_families: dict[str, tuple[str, ...]] | None = None
     per_family_params: dict[str, dict[str, Any]] | None = None
     per_tf_signal_pool_enabled: bool = True
+    l1_ltf_family_pool_widened: bool = False  # [LIMIT-05] widen 1h/2h family pool
     # Execution cost model (SSOT; replaces flat 24bps)
     maker_fee_bps: float = 2.0
     taker_fee_bps: float = 5.0
@@ -1158,6 +1159,17 @@ _DEFAULT_PER_TF_FAMILIES: dict[str, tuple[str, ...]] = {
     ),
 }
 
+_WIDENED_PER_TF_FAMILIES: dict[str, tuple[str, ...]] = {
+    "1h": (
+        "residual_reversion", "trend_ma", "funding_flow_carry", "trend_pullback_continuation",
+        "xs_momentum", "xs_flow", "dual_momentum",
+    ),
+    "2h": (
+        "residual_reversion", "btc_regime_pullback", "trend_ma", "trend_pullback_continuation",
+        "xs_momentum", "dual_momentum", "trend_donchian",
+    ),
+}
+
 _DEFAULT_PER_TF_GATE_OVERRIDES: dict[str, dict[str, float]] = {
     "1h": {
         "l1_pair_min_effective_obs": 3.0,
@@ -1238,9 +1250,16 @@ def resolve_tf_signal_pool(cfg: CandidateStrategyConfig, tf: str) -> tuple[str, 
 
     Returns per_tf_candidate_families[tf] when available, otherwise
     falls back to cfg.candidate_families (backward compat).
+
+    When cfg.l1_ltf_family_pool_widened is True, returns
+    _WIDENED_PER_TF_FAMILIES[tf] for 1h/2h (widened pool), falling back
+    to _DEFAULT_PER_TF_FAMILIES.get(tf, cfg.candidate_families) for other TFs.
+    [LIMIT-05]
     """
     if cfg.per_tf_candidate_families and tf in cfg.per_tf_candidate_families:
         return cfg.per_tf_candidate_families[tf]
+    if getattr(cfg, "l1_ltf_family_pool_widened", False) and tf in _WIDENED_PER_TF_FAMILIES:
+        return _WIDENED_PER_TF_FAMILIES[tf]
     if getattr(cfg, "per_tf_signal_pool_enabled", False):
         return _DEFAULT_PER_TF_FAMILIES.get(tf, cfg.candidate_families)
     return cfg.candidate_families
