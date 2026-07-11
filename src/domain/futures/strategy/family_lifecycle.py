@@ -30,6 +30,19 @@ FAMILY_TF_RETIREMENT: frozenset[tuple[str, str]] = frozenset({
     ("liquidity_vacuum_breakout", "6h"),
     ("liquidity_vacuum_breakout", "8h"),
     ("liquidity_vacuum_breakout", "12h"),
+    # [ADR_20260710_L0_ENTRY_EXIT_SIGNAL_EFFECTIVENESS_REDESIGN] Fix 4 [LIMIT-14]
+    ("sparse_breakout_retest_v2", "1h"),
+    ("sparse_breakout_retest_v2", "2h"),
+    ("sparse_breakout_retest_v2", "4h"),
+    ("sparse_breakout_retest_v2", "6h"),
+    ("sparse_breakout_retest_v2", "8h"),
+    ("sparse_breakout_retest_v2", "12h"),
+    ("sparse_breakout_retest_liquidity", "1h"),
+    ("sparse_breakout_retest_liquidity", "2h"),
+    ("sparse_breakout_retest_liquidity", "4h"),
+    ("sparse_breakout_retest_liquidity", "6h"),
+    ("sparse_breakout_retest_liquidity", "8h"),
+    ("sparse_breakout_retest_liquidity", "12h"),
 })
 
 

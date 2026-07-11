@@ -45,30 +45,18 @@ _FAMILY_VARIANT_BY_LTF: dict[tuple[str, str], str] = {
 _FAMILY_REQUIRED_FIELDS: dict[str, tuple[str, ...]] = {
     "funding_session_orb_flow": (),
     "liquidity_sweep_reclaim": (),
-    "cvd_vwap_absorption": (),
-    "funding_basis_dislocation": (),
-    "oi_flow_squeeze": ("oi_2d",),
-    "xs_residual_flow_rotation": (),
     "volume_participation_breakout": (),
 }
 
 _FAMILY_ARCHETYPE: dict[str, str] = {
     "funding_session_orb_flow": "trend",
     "liquidity_sweep_reclaim": "mean_reversion",
-    "cvd_vwap_absorption": "flow",
-    "funding_basis_dislocation": "carry",
-    "oi_flow_squeeze": "flow",
-    "xs_residual_flow_rotation": "cross_sectional",
     "volume_participation_breakout": "trend",
 }
 
 _FAMILY_MAX_TURNOVER: dict[str, float] = {
     "funding_session_orb_flow": 240.0,
     "liquidity_sweep_reclaim": 365.0,
-    "cvd_vwap_absorption": 365.0,
-    "funding_basis_dislocation": 120.0,
-    "oi_flow_squeeze": 180.0,
-    "xs_residual_flow_rotation": 240.0,
     "volume_participation_breakout": 240.0,
 }
 

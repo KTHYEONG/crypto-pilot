@@ -35,7 +35,6 @@ from src.domain.futures.alpha_foundry.contracts import (
     L0SoftFlag,
     MultiTimeframeEvidence,
 )
-from src.domain.futures.alpha_foundry.forward_returns import compute_causal_forward_returns_bps
 from src.domain.futures.signals.contracts import CandidateSignalPanel
 from src.domain.futures.strategy.common.alignment import AlignedMarketData
 from src.domain.futures.strategy.execution_cost import ExecutionCostModel
@@ -124,16 +123,20 @@ def evaluate_panel_cheap_gate(
     cost_model: ExecutionCostModel,
     config: CheapGateConfig,
     bars_per_year: float,
+    precomputed_atr_2d: NDArray[np.float64] | None = None,
 ) -> CheapGateEvidence:
     """[ADR_20260708_L0_SIGNAL_YIELD_IMPROVEMENT] n_events floor resolved via
-    resolve_family_timeframe_gate_policy (family/archetype-aware), not flat config.min_events."""
+    resolve_family_timeframe_gate_policy (family/archetype-aware), not flat config.min_events.
+    
+    [ADR_20260710_L0_ENTRY_EXIT_SIGNAL_EFFECTIVENESS_REDESIGN] Barrier-aware evaluation
+    replaces fixed-horizon mark-to-close. precomputed_atr_2d is resolved once per batch
+    by the caller (evaluate_alpha_cheap_gate_batch)."""
     if bars_per_year <= 0.0:
         raise ValueError("bars_per_year must be positive")
     _validate_shape(panel, aligned)
 
     t, _n = aligned.close_2d.shape
     close = aligned.close_2d
-    funding = aligned.funding_2d
     active = aligned.active_mask & aligned.warm_mask & ~aligned.entry_block_mask & ~aligned.kill_mask
 
     side = panel.side_hint_2d
@@ -166,15 +169,15 @@ def evaluate_panel_cheap_gate(
             mean_cost_bps=0.0,
         )
 
+    # Build event_mask the same way as before (sparse entry, causal-lag+holding-window safe)
     idx_start = causal_lag
     idx_end = t - holding_bars
-
     entry_full = _sparse_entry_mask(side, valid)
     event_mask = np.zeros_like(entry_full)
     if idx_start < idx_end:
         event_mask[idx_start:idx_end, :] = entry_full[idx_start:idx_end, :]
-
     n_events = int(np.sum(event_mask))
+
     resolved_min_events = resolve_family_timeframe_gate_policy(recipe=recipe, config=config).min_events
     if n_events < resolved_min_events:
         return CheapGateEvidence(
@@ -200,16 +203,67 @@ def evaluate_panel_cheap_gate(
             mean_cost_bps=0.0,
         )
 
-    fwd_ret_bps = compute_causal_forward_returns_bps(
-        close=close, side=side, causal_lag_bars=0, holding_bars=holding_bars,
+    # ── Barrier-aware evaluation: reuse L1's triple-barrier kernel ─────
+    from src.domain.futures.strategy.candidate_labels import compute_triple_barrier_returns
+    from src.domain.futures.strategy.rule_signals import candidate_panels_to_events
+
+    all_events = candidate_panels_to_events(
+        (panel,), min_abs_score=0.0, cost_floor_bps=float("nan"),
     )
+    # Align events to sparse event_mask: keep only those where (entry_idx, symbol)
+    # matches event_mask. Dedup per (entry_idx, symbol).
+    # candidate_panels_to_events sets entry=t+1; signal bar is t.
+    _event_key = all_events["entry_idx"].astype(str) + ":" + all_events["symbol"].astype(str)
+    all_events = all_events.loc[~_event_key.duplicated()].reset_index(drop=True)
+    _aligned_rows = []
+    for _row_i in range(len(all_events)):
+        _ei = int(all_events["entry_idx"].iloc[_row_i])
+        _sym = all_events["symbol"].iloc[_row_i]
+        _si = aligned.symbols.index(_sym) if _sym in aligned.symbols else -1
+        _decision = _ei - 1
+        if _si >= 0 and 0 <= _decision < t and event_mask[_decision, _si]:
+            _aligned_rows.append(_row_i)
+    if not _aligned_rows:
+        return CheapGateEvidence(
+            recipe_id=recipe.recipe_id,
+            timeframe=recipe.timeframe,
+            symbol_scope="symbol",
+            n_events=0,
+            effective_n=0.0,
+            mean_net_bps=0.0,
+            nw_tstat=0.0,
+            block_lcb_bps=0.0,
+            rank_ic=0.0,
+            cost_drag_ratio=0.0,
+            turnover_per_year=0.0,
+            novelty_corr_max=0.0,
+            incremental_rank_ic=0.0,
+            compute_cost_score=0.0,
+            bootstrap_lcb_bps=0.0,
+            bootstrap_agree=True,
+            gate_passed=False,
+            reject_reasons=("insufficient_events",),
+            mean_gross_bps=0.0,
+            mean_cost_bps=0.0,
+        )
+    aligned_events = all_events.iloc[_aligned_rows].reset_index(drop=True)
 
-    stress_cost = cost_model.stress_round_trip_bps()
-    funding_cost = np.where(event_mask, funding * 10000.0 * holding_bars, 0.0)
-    net_bps = fwd_ret_bps - stress_cost - funding_cost
-
-    net_vals = net_bps[event_mask]
-    gross_vals = fwd_ret_bps[event_mask]
+    result = compute_triple_barrier_returns(
+        entry_idx_arr=aligned_events["entry_idx"].to_numpy(dtype=np.int64),
+        side_arr=aligned_events["side"].to_numpy(dtype=np.int64),
+        horizon_arr=aligned_events["expected_holding_bars"].to_numpy(dtype=np.int64),
+        stop_mult_arr=aligned_events["stop_atr_mult"].to_numpy(dtype=np.float64),
+        tp_mult_arr=aligned_events["take_profit_atr_mult"].to_numpy(dtype=np.float64),
+        min_hold_arr=aligned_events["min_holding_bars"].to_numpy(dtype=np.int64),
+        sym_idx_arr=np.array(
+            [aligned.symbols.index(s) for s in aligned_events["symbol"]], dtype=np.int64
+        ),
+        aligned=aligned,
+        cost_model=cost_model,
+        precomputed_atr_2d=precomputed_atr_2d,
+    )
+    net_vals = np.asarray(result["edge_bps"], dtype=np.float64)
+    gross_vals = np.asarray(result["gross_bps"], dtype=np.float64)
 
     reject_reasons_list: list[CheapGateRejectReason] = []
 
@@ -230,7 +284,13 @@ def evaluate_panel_cheap_gate(
     if abs(nw_tstat) < config.min_nw_tstat:
         reject_reasons_list.append("weak_tstat")
 
-    rank_ic = _compute_rank_ic(fwd_ret_bps, panel.signed_score_2d, event_mask)
+    # Build dense forward-returns from aligned_events for rank_ic
+    _fwd_ret_dense = np.full(aligned.close_2d.shape, np.nan, dtype=np.float64)
+    for _i, (_ei, _sym) in enumerate(zip(aligned_events["entry_idx"], aligned_events["symbol"], strict=False)):
+        _si = aligned.symbols.index(_sym) if _sym in aligned.symbols else -1
+        if _si >= 0 and _ei >= 1:
+            _fwd_ret_dense[_ei - 1, _si] = gross_vals[_i]
+    rank_ic = _compute_rank_ic(_fwd_ret_dense, panel.signed_score_2d, event_mask)
 
     # cost drag
     total_gross = float(np.nansum(gross_vals)) if n_events > 0 else 0.0
@@ -289,6 +349,9 @@ def evaluate_alpha_cheap_gate_batch(
     config: CheapGateConfig,
 ) -> tuple[CheapGateEvidence, ...]:
     from src.domain.futures.optimization.metrics import _bars_per_year_for_tf
+    from src.domain.futures.strategy.candidate_labels import _compute_yang_zhang_vol_2d
+
+    precomputed_atr_2d = _compute_yang_zhang_vol_2d(aligned)
 
     bpy_cache: dict[str, float] = {}
     results: list[CheapGateEvidence] = []
@@ -307,6 +370,7 @@ def evaluate_alpha_cheap_gate_batch(
             cost_model=cost_model,
             config=config,
             bars_per_year=bpy_cache[tf],
+            precomputed_atr_2d=precomputed_atr_2d,
         )
         results.append(evidence)
     return tuple(results)
@@ -561,6 +625,9 @@ def compute_rank_ic_with_tstat(
 ) -> tuple[float, float]:
     flat_ret = fwd_ret_bps[mask]
     flat_score = score[mask]
+    finite = np.isfinite(flat_ret) & np.isfinite(flat_score)
+    flat_ret = flat_ret[finite]
+    flat_score = flat_score[finite]
     if len(flat_ret) < 3:
         return (0.0, 0.0)
     if np.std(flat_ret) < 1e-12 or np.std(flat_score) < 1e-12:
@@ -599,7 +666,9 @@ def compute_xs_spread_lcb_bps(
         return None
     spreads: list[float] = []
     for bar in range(t):
-        bar_mask = event_mask[bar, :].astype(bool)
+        bar_mask = event_mask[bar, :].astype(bool) & np.isfinite(net_bps[bar, :]) & np.isfinite(
+            score[bar, :]
+        )
         n_active = int(bar_mask.sum())
         if n_active < min_symbols_per_bar:
             continue
@@ -990,35 +1059,38 @@ def evaluate_panel_gate(
     bars_per_year: float,
     run_id: str,
     tf_fusion: MultiTimeframeEvidence | None = None,
+    precomputed_atr_2d: NDArray[np.float64] | None = None,
 ) -> AlphaGateEvidence:
     """[ADR_20260708_L0_SIGNAL_YIELD_IMPROVEMENT] n_events floor resolved via
-    resolve_family_timeframe_gate_policy (family/archetype-aware), not flat config.min_events."""
+    resolve_family_timeframe_gate_policy (family/archetype-aware), not flat config.min_events.
+    
+    [ADR_20260710_L0_ENTRY_EXIT_SIGNAL_EFFECTIVENESS_REDESIGN] Barrier-aware evaluation
+    replaces fixed-horizon mark-to-close. precomputed_atr_2d is resolved once per batch."""
     if bars_per_year <= 0.0:
         raise ValueError("bars_per_year must be positive")
     _validate_shape(panel, aligned)
 
     t, _n = aligned.close_2d.shape
     close = aligned.close_2d
-    funding = aligned.funding_2d
     active = aligned.active_mask & aligned.warm_mask & ~aligned.entry_block_mask & ~aligned.kill_mask
 
     side = panel.side_hint_2d
     valid = panel.valid_mask_2d & active & np.isfinite(close)
 
-    causal_lag = recipe.causal_lag_bars
-    holding_bars = panel.expected_holding_bars
-
     reject_reasons: list[str] = []
     soft_flags: list[str] = []
+
+    causal_lag = recipe.causal_lag_bars
+    holding_bars = panel.expected_holding_bars
 
     if causal_lag >= t or holding_bars >= t or causal_lag + holding_bars >= t:
         return _empty_gate_evidence(
             run_id=run_id, recipe=recipe, reject_reasons=("insufficient_events",)
         )
 
+    # Build event_mask using sparse_entry_mask (preserved from old code path)
     idx_start = causal_lag
     idx_end = t - causal_lag - holding_bars
-
     entry_full = _sparse_entry_mask(side, valid)
     event_mask = np.zeros_like(entry_full)
     if idx_start < idx_end:
@@ -1031,26 +1103,67 @@ def evaluate_panel_gate(
             run_id=run_id, recipe=recipe, reject_reasons=("insufficient_events",)
         )
 
-    fwd_ret_bps = compute_causal_forward_returns_bps(
-        close=close, side=side, causal_lag_bars=causal_lag, holding_bars=holding_bars,
-    )
+    # ── Barrier-aware evaluation: reuse L1's triple-barrier kernel ─────
+    from src.domain.futures.strategy.candidate_labels import compute_triple_barrier_returns
+    from src.domain.futures.strategy.rule_signals import candidate_panels_to_events
 
-    stress_cost = cost_model.stress_round_trip_bps()
-    funding_cost = np.where(event_mask, funding * 10000.0 * holding_bars, 0.0)
+    all_events = candidate_panels_to_events(
+        (panel,), min_abs_score=0.0, cost_floor_bps=float("nan"),
+    )
+    if all_events.empty:
+        return _empty_gate_evidence(
+            run_id=run_id, recipe=recipe, reject_reasons=("insufficient_events",)
+        )
+
+    # Align events to sparse event_mask: dedup per (entry_idx, symbol), then filter.
+    # candidate_panels_to_events sets entry=t+1; signal bar is t.
+    _event_key = all_events["entry_idx"].astype(str) + ":" + all_events["symbol"].astype(str)
+    all_events = all_events.loc[~_event_key.duplicated()].reset_index(drop=True)
+    _aligned_rows = []
+    for _row_i in range(len(all_events)):
+        _ei = int(all_events["entry_idx"].iloc[_row_i])
+        _sym = all_events["symbol"].iloc[_row_i]
+        _si = aligned.symbols.index(_sym) if _sym in aligned.symbols else -1
+        _decision = _ei - 1
+        if _si >= 0 and 0 <= _decision < t and event_mask[_decision, _si]:
+            _aligned_rows.append(_row_i)
+    if not _aligned_rows:
+        return _empty_gate_evidence(
+            run_id=run_id, recipe=recipe, reject_reasons=("insufficient_events",)
+        )
+    aligned_events = all_events.iloc[_aligned_rows].reset_index(drop=True)
+
+    result = compute_triple_barrier_returns(
+        entry_idx_arr=aligned_events["entry_idx"].to_numpy(dtype=np.int64),
+        side_arr=aligned_events["side"].to_numpy(dtype=np.int64),
+        horizon_arr=aligned_events["expected_holding_bars"].to_numpy(dtype=np.int64),
+        stop_mult_arr=aligned_events["stop_atr_mult"].to_numpy(dtype=np.float64),
+        tp_mult_arr=aligned_events["take_profit_atr_mult"].to_numpy(dtype=np.float64),
+        min_hold_arr=aligned_events["min_holding_bars"].to_numpy(dtype=np.int64),
+        sym_idx_arr=np.array(
+            [aligned.symbols.index(s) for s in aligned_events["symbol"]], dtype=np.int64
+        ),
+        aligned=aligned,
+        cost_model=cost_model,
+        precomputed_atr_2d=precomputed_atr_2d,
+    )
+    net_vals = np.asarray(result["edge_bps"], dtype=np.float64)
+    gross_vals = np.asarray(result["gross_bps"], dtype=np.float64)
+
+    # Build dense fwd_ret from aligned_events for downstream consumption
+    _fwd_ret_dense = np.full((t, _n), np.nan, dtype=np.float64)
+    _net_dense = np.full((t, _n), np.nan, dtype=np.float64)
+    for _i, (_ei, _sym) in enumerate(zip(aligned_events["entry_idx"], aligned_events["symbol"], strict=False)):
+        _si = aligned.symbols.index(_sym) if _sym in aligned.symbols else -1
+        if _si >= 0 and _ei >= 1:
+            _fwd_ret_dense[_ei - 1, _si] = gross_vals[_i]
+            _net_dense[_ei - 1, _si] = net_vals[_i]
 
     liquidity_stress_bps = compute_liquidity_cost_stress_bps(
         aligned=aligned,
         event_mask=event_mask,
         stress_mult=config.liquidity_cost_stress_mult,
     )
-
-    total_cost_bps = stress_cost + liquidity_stress_bps
-    total_cost_2d = total_cost_bps + funding_cost
-
-    net_bps = fwd_ret_bps - total_cost_2d
-
-    net_vals = net_bps[event_mask]
-    gross_vals = fwd_ret_bps[event_mask]
 
     # Capacity score (liquidity-aware)
     capacity_score = compute_capacity_score(
@@ -1062,7 +1175,7 @@ def evaluate_panel_gate(
     # Regime stability
     regime_stability = compute_regime_stability(
         panel=panel,
-        net_bps=net_bps,
+        net_bps=_net_dense,
         event_mask=event_mask,
     )
 
@@ -1091,7 +1204,7 @@ def evaluate_panel_gate(
     mean_gross_bps = (
         float(np.nanmean(gross_vals)) if n_events > 0 and np.any(np.isfinite(gross_vals)) else 0.0
     )
-    cost_at_events = total_cost_2d[event_mask]
+    cost_at_events = result["cost_bps"]
     mean_cost_bps = (
         float(np.nanmean(cost_at_events))
         if n_events > 0 and np.any(np.isfinite(cost_at_events))
@@ -1101,7 +1214,7 @@ def evaluate_panel_gate(
         float(np.nanmean(net_vals)) if n_events > 0 and np.any(np.isfinite(net_vals)) else 0.0
     )
 
-    block_bars_eff = max(config.block_bars, 2 * holding_bars)
+    block_bars_eff = max(config.block_bars, 2 * int(holding_bars))
     block_means = _compute_block_means(net_vals, block_bars_eff)
     mu_block, se_block = _block_moments(block_means)
     nw_tstat = mu_block / max(se_block, 1e-10)
@@ -1137,7 +1250,7 @@ def evaluate_panel_gate(
         reject_reasons.append("gross_lcb_below_cost")
 
     rank_ic, rank_ic_tstat = compute_rank_ic_with_tstat(
-        fwd_ret_bps=fwd_ret_bps,
+        fwd_ret_bps=_fwd_ret_dense,
         score=panel.signed_score_2d,
         mask=event_mask,
     )
@@ -1159,7 +1272,7 @@ def evaluate_panel_gate(
     xs_spread_lcb: float | None = None
     if recipe.archetype == "cross_sectional":
         xs_spread_lcb = compute_xs_spread_lcb_bps(
-            net_bps=net_bps,
+            net_bps=_net_dense,
             score=panel.signed_score_2d,
             event_mask=event_mask,
             min_symbols_per_bar=config.min_xs_symbols_per_bar,
@@ -1231,6 +1344,9 @@ def evaluate_alpha_gate_batch(
     tf_fusion_index: Mapping[tuple[str, str, str], MultiTimeframeEvidence] | None = None,
 ) -> tuple[AlphaGateEvidence, ...]:
     from src.domain.futures.optimization.metrics import _bars_per_year_for_tf
+    from src.domain.futures.strategy.candidate_labels import _compute_yang_zhang_vol_2d
+
+    precomputed_atr_2d = _compute_yang_zhang_vol_2d(aligned)
 
     bpy_cache: dict[str, float] = {}
     results: list[AlphaGateEvidence] = []
@@ -1258,6 +1374,7 @@ def evaluate_alpha_gate_batch(
             bars_per_year=bpy_cache[tf],
             run_id=run_id,
             tf_fusion=tf_ev,
+            precomputed_atr_2d=precomputed_atr_2d,
         )
         results.append(evidence)
     return tuple(results)
