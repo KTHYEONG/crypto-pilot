@@ -21,7 +21,7 @@ change_triggers:
 dependencies:
   documents:
     - docs/architecture/universe.md
-last_verified: 2026-07-10
+last_verified: 2026-07-11
 ---
 
 # 1. Purpose
@@ -31,6 +31,7 @@ last_verified: 2026-07-10
 
 ### Low-Cost Screening (Cheap Gate)
 - **Sparse Event Counts ($n_{events}$)**: 연속 보유바 중복 계산을 방지하기 위해 sparse entry mask(flat $\rightarrow$ active 또는 direct 부호반전 Rising Edge)의 개수로 산출. $effective\_n = n_{events}$.
+- **Barrier-Aware Return Evaluation**: `mean_gross_bps`/`mean_net_bps`는 고정 호라이즌 mark-to-close가 아닌 L1의 Triple-Barrier 커널(`compute_triple_barrier_returns`)을 재사용해 산출한다. 이벤트는 `candidate_panels_to_events()`로 변환된 뒤 원본 sparse `event_mask`와 `(entry_idx-1, symbol)` 기준으로 정합 필터링되며, 정합되지 않은 `event_mask` 셀(예: 계열 종료 부근 호라이즌 초과로 라벨링 불가한 이벤트)은 dense 배열에 NaN으로 남는다. `compute_xs_spread_lcb_bps`/`compute_rank_ic_with_tstat`는 이 NaN을 반드시 finite 마스킹 후 집계해야 하며(`compute_regime_stability`와 동일 관례), 그렇지 않으면 `AlphaGateEvidence.xs_spread_lcb_bps` 유효성 검증에서 크래시한다.
 - **Block-variance adjusted Newey-West $t$-stat**:
   - $NW_{tstat} = \frac{\mu_{block}}{SE_{block}}$
   - $block\_bars\_eff = \max(config.block\_bars, 2 \times holding\_bars)$ (블록 크기를 보유기간에 비동적으로 연동)
