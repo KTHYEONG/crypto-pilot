@@ -11,6 +11,8 @@ Scenarios:
 
 from __future__ import annotations
 
+import logging
+
 import numpy as np
 import pandas as pd
 
@@ -308,3 +310,25 @@ def test_align_data_maps_reads_sum_open_interest_and_long_short_ratio() -> None:
     assert aligned.lsr_2d is not None
     np.testing.assert_allclose(aligned.oi_2d[:, 0], frame["sum_open_interest"].to_numpy())
     np.testing.assert_allclose(aligned.lsr_2d[:, 0], frame["long_short_ratio"].to_numpy())
+
+
+def test_align_data_maps_cost_diagnostics_logs_when_enabled(caplog: object) -> None:
+    """[LIMIT-04]: cost_diagnostics_enabled=True emits [DATA] align_cost_liquidity log."""
+    caplog.set_level(logging.DEBUG, logger="src.domain.futures.strategy.common.alignment")  # type: ignore[attr-defined]
+    data_maps = _make_data_maps(["AAA"], n_bars=220)
+
+    align_data_maps(data_maps, ["AAA"], _TF, cost_diagnostics_enabled=True)
+
+    messages = [r.message for r in caplog.records]  # type: ignore[attr-defined]
+    assert any("stage=align_cost_liquidity" in m for m in messages)
+
+
+def test_align_data_maps_cost_diagnostics_silent_when_disabled(caplog: object) -> None:
+    """[LIMIT-04]: cost_diagnostics_enabled=False (default) emits no diagnostic log."""
+    caplog.set_level(logging.DEBUG, logger="src.domain.futures.strategy.common.alignment")  # type: ignore[attr-defined]
+    data_maps = _make_data_maps(["AAA"], n_bars=220)
+
+    align_data_maps(data_maps, ["AAA"], _TF)
+
+    messages = [r.message for r in caplog.records]  # type: ignore[attr-defined]
+    assert not any("stage=align_cost_liquidity" in m for m in messages)
