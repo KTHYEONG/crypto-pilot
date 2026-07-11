@@ -2,20 +2,26 @@
 
 [ADR_20260706_ALPHA_FOUNDRY_L0_L1_HANDOFF_GUARD]
 [ADR_20260706_ALPHA_FOUNDRY_L0_SIGNAL_RIGOR]
+[ADR_20260711_L0_STRATEGY_DELIVERY_HARDENING]
 """
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Mapping, Sequence
 from typing import cast
 
 import numpy as np
 import pandas as pd
+from numpy.typing import NDArray
 
 from src.domain.futures.alpha_foundry.contracts import (
     CorroborationTier,
     MultiTimeframeEvidence,
 )
+from src.domain.futures.signals.contracts import CandidateSignalPanel
+
+_logger = logging.getLogger(__name__)
 
 _CORROBORATION_BOOST = 1.15
 _REJECT_REASON_INSUFFICIENT = ("insufficient_events", "insufficient_effective_n")
@@ -191,3 +197,34 @@ def index_multi_timeframe_evidence(
         key = (row.family, row.variant, row.native_timeframe)
         result[key] = row
     return result
+
+def project_signal_to_canonical_grid(
+    *,
+    panel: CandidateSignalPanel,
+    canonical_datetimes: NDArray[np.int64],
+    causal_lag_bars: int,
+) -> tuple[NDArray[np.float64], NDArray[np.bool_]]:
+    dt = panel.datetimes.astype(np.int64, copy=False)
+    if not np.all(dt[:-1] <= dt[1:]):
+        raise ValueError("panel.datetimes must be monotonic non-decreasing")
+    if dt[0] < canonical_datetimes[0] or dt[-1] > canonical_datetimes[-1]:
+        raise ValueError("panel.datetimes must fall within canonical_datetimes range")
+    n_canonical = len(canonical_datetimes)
+    n_symbols = panel.signed_score_2d.shape[1]
+    projected = np.full((n_canonical, n_symbols), np.nan, dtype=np.float64)
+    proj_valid = np.zeros((n_canonical, n_symbols), dtype=np.bool_)
+
+    starts = np.searchsorted(canonical_datetimes, dt, side="left") + causal_lag_bars
+    next_bounds = np.searchsorted(canonical_datetimes, dt, side="right") + causal_lag_bars
+
+    for i in range(len(dt)):
+        s = int(starts[i])
+        if s >= n_canonical:
+            continue
+        e = int(next_bounds[i + 1]) if i + 1 < len(dt) else n_canonical
+        e = min(e, n_canonical)
+        if s < e:
+            projected[s:e] = panel.signed_score_2d[i]
+            proj_valid[s:e] = panel.valid_mask_2d[i]
+
+    return projected, proj_valid

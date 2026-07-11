@@ -1197,6 +1197,77 @@ def run_candidate_strategy_for_universe(
                 report_dir.mkdir(parents=True, exist_ok=True)
                 corr_df.to_parquet(str(report_dir / f"{_af_run_id}_family_correlation.parquet"))
 
+            # [ADR_20260711_L0_STRATEGY_DELIVERY_HARDENING] Cross-TF independence audit
+            # (opt-in, additive) — measures how many of the union of
+            # selected_for_l1 candidates across ALL TFs are actually
+            # distinct, vs. re-measured duplicates of the same thesis at
+            # different bar granularities. docs/specs/l0_strategy_delivery_hardening.md
+            if getattr(alpha_foundry_config, "enable_cross_tf_diversity_audit", False):
+                from src.domain.futures.alpha_foundry.diversity import (
+                    audit_l0_selected_recipe_independence,
+                )
+
+                selected_by_tf: dict[str, tuple[Any, ...]] = {
+                    _tf_k: _res.candidates_for_l1
+                    for _tf_k, _res in multi_results.items()
+                    if getattr(_res, "candidates_for_l1", ())
+                }
+                panel_by_recipe_id: dict[str, Any] = {}
+                for _res in multi_results.values():
+                    for _p in _res.panels_for_l1:
+                        _rid = getattr(_p, "metadata", {}).get("recipe_id", "")
+                        if _rid:
+                            panel_by_recipe_id[_rid] = _p
+
+                if selected_by_tf and panel_by_recipe_id:
+                    # [LIMIT-02] Canonical grid must be a TF every panel was
+                    # actually anchored to. HTF native panels are built via
+                    # build_native_htf_panels/project_htf_panels_to_base
+                    # against `aligned` (this run's base tf), each with its
+                    # own PIT-admitted calendar window — picking an
+                    # unrelated "finest TF present" grid (e.g. 1h) can fall
+                    # outside that window and raise. The base tf is always
+                    # self-consistent since the whole L1 pipeline anchors to it.
+                    _canonical_tf = tf
+                    _canonical_aligned = aligned_by_tf[_canonical_tf]
+                    _canonical_dt = _canonical_aligned.datetimes.astype("datetime64[ns]").astype("int64")
+                    _canonical_active = (
+                        _canonical_aligned.active_mask
+                        & _canonical_aligned.warm_mask
+                        & ~_canonical_aligned.entry_block_mask
+                        & ~_canonical_aligned.kill_mask
+                    )
+                    try:
+                        _independence_audit = audit_l0_selected_recipe_independence(
+                            selected_by_tf=selected_by_tf,
+                            panel_by_recipe_id=panel_by_recipe_id,
+                            canonical_tf=_canonical_tf,
+                            canonical_datetimes=_canonical_dt,
+                            active_mask_canonical=_canonical_active,
+                        )
+                        _run_logger.info(
+                            "[EVAL] stage=l0_cross_tf_independence_audit run_id=%s canonical_tf=%s"
+                            " n_selected_total=%d n_distinct_thesis_ids=%d n_independent_clusters=%d"
+                            " n_demoted=%d demoted_recipe_ids=%s",
+                            _af_run_id, _canonical_tf,
+                            _independence_audit.n_selected_total,
+                            _independence_audit.n_distinct_thesis_ids,
+                            _independence_audit.n_independent_clusters,
+                            len(_independence_audit.demoted_recipe_ids),
+                            list(_independence_audit.demoted_recipe_ids)[:10],
+                        )
+                    except ValueError as exc:
+                        _run_logger.warning(
+                            "[EVAL] stage=l0_cross_tf_independence_audit run_id=%s failed: %s",
+                            _af_run_id, exc,
+                        )
+                else:
+                    _run_logger.info(
+                        "[EVAL] stage=l0_cross_tf_independence_audit run_id=%s skipped:"
+                        " n_tfs_with_candidates=%d n_panels_with_recipe_id=%d",
+                        _af_run_id, len(selected_by_tf), len(panel_by_recipe_id),
+                    )
+
             bridge_prof["alpha_foundry"] = time.perf_counter() - t_step
             _sample_rss("alpha_foundry")
         else:
