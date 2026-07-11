@@ -1,9 +1,15 @@
 from __future__ import annotations
 
+import logging
+
 import numpy as np
 import pandas as pd
 
-from src.domain.futures.strategy.candidate_labels import label_candidate_events
+from src.domain.futures.strategy.candidate_labels import (
+    _is_usable_cost_array,
+    compute_triple_barrier_returns,
+    label_candidate_events,
+)
 from src.domain.futures.strategy.common.alignment import AlignedMarketData
 from src.domain.futures.strategy.config import CandidateStrategyConfig
 from src.domain.futures.strategy.execution_cost import ExecutionCostModel
@@ -683,3 +689,198 @@ class TestOptANumbaKernelEquivalence:
         cfg = CandidateStrategyConfig()
         with pytest.raises(KeyError, match="UNKNOWN"):
             label_candidate_events(events=events, aligned=aligned, cfg=cfg)
+
+
+# ── L0 NaN-cost HTF blind rejection tests ─────────────────────────────────
+
+
+def test_is_usable_cost_array_none_returns_false() -> None:
+    assert _is_usable_cost_array(None) is False
+
+
+def test_is_usable_cost_array_all_nan_returns_false() -> None:
+    arr = np.full((10, 3), np.nan, dtype=np.float64)
+    assert _is_usable_cost_array(arr) is False
+
+
+def test_is_usable_cost_array_partial_nan_returns_true() -> None:
+    arr = np.array([[np.nan, 3.0], [np.nan, np.nan]], dtype=np.float64)
+    assert _is_usable_cost_array(arr) is True
+
+
+def test_is_usable_cost_array_empty_returns_false() -> None:
+    assert _is_usable_cost_array(np.array([], dtype=np.float64)) is False
+
+
+def test_is_usable_cost_array_finite_values_returns_true() -> None:
+    arr = np.array([[10.0, np.nan, 5.0]], dtype=np.float64)
+    assert _is_usable_cost_array(arr) is True
+
+
+def test_compute_triple_barrier_returns_nan_cost_produces_finite_edge() -> None:
+    """Scenario 1b: all-NaN cost_2d → edge_bps finite, matches taker_round_trip fallback."""
+    t = 30
+    n = 1
+    base = np.linspace(100.0, 130.0, t, dtype=np.float64).reshape(t, n)
+    datetimes = np.datetime64("2025-01-01T00", "h") + np.arange(t).astype("timedelta64[h]")
+    aligned = AlignedMarketData(
+        datetimes=datetimes,
+        symbols=("BTCUSDT",),
+        open_2d=base.copy(),
+        high_2d=base * 1.01,
+        low_2d=base * 0.99,
+        close_2d=base.copy(),
+        volume_2d=np.full((t, n), 1000.0, dtype=np.float64),
+        funding_2d=np.zeros((t, n), dtype=np.float64),
+        active_mask=np.ones((t, n), dtype=bool),
+        warm_mask=np.ones((t, n), dtype=bool),
+        entry_block_mask=np.zeros((t, n), dtype=bool),
+        kill_mask=np.zeros((t, n), dtype=bool),
+        execution_cost_bps_2d=np.full((t, n), np.nan, dtype=np.float64),
+    )
+    cost_model = ExecutionCostModel()
+
+    result = compute_triple_barrier_returns(
+        entry_idx_arr=np.array([11], dtype=np.int64),
+        side_arr=np.array([1], dtype=np.int64),
+        horizon_arr=np.array([5], dtype=np.int64),
+        stop_mult_arr=np.array([2.0], dtype=np.float64),
+        tp_mult_arr=np.array([4.0], dtype=np.float64),
+        min_hold_arr=np.array([0], dtype=np.int64),
+        sym_idx_arr=np.array([0], dtype=np.int64),
+        aligned=aligned,
+        cost_model=cost_model,
+    )
+
+    edge = np.asarray(result["edge_bps"], dtype=np.float64)
+    assert np.all(np.isfinite(edge)), f"edge_bps contains NaN: {edge}"
+    cost = np.asarray(result["cost_bps"], dtype=np.float64)
+    assert np.all(np.isfinite(cost)), f"cost_bps contains NaN: {cost}"
+    taker_cost = cost_model.taker_round_trip_bps()
+    # cost_bps should be >= taker_round_trip_bps (floor)
+    assert np.all(cost >= taker_cost - 1e-6), f"cost_bps {cost} below taker_round_trip_bps {taker_cost}"
+
+
+def test_label_candidate_events_nan_cost_produces_finite_edge() -> None:
+    """Scenario 2c: label_candidate_events with NaN cost → finite edge (regression guard)."""
+    t = 30
+    n = 1
+    base = np.linspace(100.0, 130.0, t, dtype=np.float64).reshape(t, n)
+    datetimes = np.datetime64("2025-01-01T00", "h") + np.arange(t).astype("timedelta64[h]")
+    aligned = AlignedMarketData(
+        datetimes=datetimes,
+        symbols=("BTCUSDT",),
+        open_2d=base.copy(),
+        high_2d=base * 1.01,
+        low_2d=base * 0.99,
+        close_2d=base.copy(),
+        volume_2d=np.full((t, n), 1000.0, dtype=np.float64),
+        funding_2d=np.zeros((t, n), dtype=np.float64),
+        active_mask=np.ones((t, n), dtype=bool),
+        warm_mask=np.ones((t, n), dtype=bool),
+        entry_block_mask=np.zeros((t, n), dtype=bool),
+        kill_mask=np.zeros((t, n), dtype=bool),
+        execution_cost_bps_2d=np.full((t, n), np.nan, dtype=np.float64),
+    )
+    events = pd.DataFrame({
+        "symbol": ["BTCUSDT"],
+        "side": [1],
+        "entry_idx": [11],
+        "expected_holding_bars": [5],
+        "min_holding_bars": [1],
+        "stop_atr_mult": [2.0],
+        "take_profit_atr_mult": [4.0],
+    })
+    out = label_candidate_events(events=events, aligned=aligned, cfg=CandidateStrategyConfig())
+    assert np.isfinite(float(out.loc[0, "net_event_bps"])), "net_event_bps is NaN"
+    assert np.isfinite(float(out.loc[0, "execution_cost_bps"])), "execution_cost_bps is NaN"
+
+
+def test_compute_triple_barrier_returns_cost_diagnostics_logs_when_enabled(
+    caplog: object,
+) -> None:
+    """[LIMIT-04]: cost_diagnostics_enabled=True emits [DATA] tbr_cost_check /
+    tbr_output_finiteness debug logs."""
+    caplog.set_level(logging.DEBUG, logger="src.domain.futures.strategy.candidate_labels")  # type: ignore[attr-defined]
+
+    t = 30
+    n = 1
+    base = np.linspace(100.0, 130.0, t, dtype=np.float64).reshape(t, n)
+    datetimes = np.datetime64("2025-01-01T00", "h") + np.arange(t).astype("timedelta64[h]")
+    aligned = AlignedMarketData(
+        datetimes=datetimes,
+        symbols=("BTCUSDT",),
+        open_2d=base.copy(),
+        high_2d=base * 1.01,
+        low_2d=base * 0.99,
+        close_2d=base.copy(),
+        volume_2d=np.full((t, n), 1000.0, dtype=np.float64),
+        funding_2d=np.zeros((t, n), dtype=np.float64),
+        active_mask=np.ones((t, n), dtype=bool),
+        warm_mask=np.ones((t, n), dtype=bool),
+        entry_block_mask=np.zeros((t, n), dtype=bool),
+        kill_mask=np.zeros((t, n), dtype=bool),
+        execution_cost_bps_2d=np.full((t, n), np.nan, dtype=np.float64),
+    )
+    cost_model = ExecutionCostModel()
+
+    compute_triple_barrier_returns(
+        entry_idx_arr=np.array([11], dtype=np.int64),
+        side_arr=np.array([1], dtype=np.int64),
+        horizon_arr=np.array([5], dtype=np.int64),
+        stop_mult_arr=np.array([2.0], dtype=np.float64),
+        tp_mult_arr=np.array([4.0], dtype=np.float64),
+        min_hold_arr=np.array([0], dtype=np.int64),
+        sym_idx_arr=np.array([0], dtype=np.int64),
+        aligned=aligned,
+        cost_model=cost_model,
+        cost_diagnostics_enabled=True,
+    )
+
+    messages = [r.message for r in caplog.records]  # type: ignore[attr-defined]
+    assert any("stage=tbr_cost_check" in m for m in messages)
+    assert any("stage=tbr_output_finiteness" in m for m in messages)
+
+
+def test_compute_triple_barrier_returns_cost_diagnostics_silent_when_disabled(
+    caplog: object,
+) -> None:
+    """[LIMIT-04]: cost_diagnostics_enabled=False (default) emits no diagnostic logs."""
+    caplog.set_level(logging.DEBUG, logger="src.domain.futures.strategy.candidate_labels")  # type: ignore[attr-defined]
+
+    t = 30
+    n = 1
+    base = np.linspace(100.0, 130.0, t, dtype=np.float64).reshape(t, n)
+    datetimes = np.datetime64("2025-01-01T00", "h") + np.arange(t).astype("timedelta64[h]")
+    aligned = AlignedMarketData(
+        datetimes=datetimes,
+        symbols=("BTCUSDT",),
+        open_2d=base.copy(),
+        high_2d=base * 1.01,
+        low_2d=base * 0.99,
+        close_2d=base.copy(),
+        volume_2d=np.full((t, n), 1000.0, dtype=np.float64),
+        funding_2d=np.zeros((t, n), dtype=np.float64),
+        active_mask=np.ones((t, n), dtype=bool),
+        warm_mask=np.ones((t, n), dtype=bool),
+        entry_block_mask=np.zeros((t, n), dtype=bool),
+        kill_mask=np.zeros((t, n), dtype=bool),
+        execution_cost_bps_2d=np.full((t, n), np.nan, dtype=np.float64),
+    )
+    cost_model = ExecutionCostModel()
+
+    compute_triple_barrier_returns(
+        entry_idx_arr=np.array([11], dtype=np.int64),
+        side_arr=np.array([1], dtype=np.int64),
+        horizon_arr=np.array([5], dtype=np.int64),
+        stop_mult_arr=np.array([2.0], dtype=np.float64),
+        tp_mult_arr=np.array([4.0], dtype=np.float64),
+        min_hold_arr=np.array([0], dtype=np.int64),
+        sym_idx_arr=np.array([0], dtype=np.int64),
+        aligned=aligned,
+        cost_model=cost_model,
+    )
+
+    messages = [r.message for r in caplog.records]  # type: ignore[attr-defined]
+    assert not any("stage=tbr_cost_check" in m for m in messages)
+    assert not any("stage=tbr_output_finiteness" in m for m in messages)
