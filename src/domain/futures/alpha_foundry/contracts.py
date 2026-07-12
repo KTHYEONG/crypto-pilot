@@ -109,8 +109,8 @@ class CrossTFSharedContext:
     side_entry_cache: dict[str, tuple[NDArray[np.int8], NDArray[np.bool_]]]
     corr: NDArray[np.float64]
     recipe_order: tuple[str, ...]
-    entry_pos_flat: dict[str, "NDArray[np.int8]"] = field(default_factory=dict)
-    entry_neg_flat: dict[str, "NDArray[np.int8]"] = field(default_factory=dict)
+    entry_pos_flat: dict[str, "NDArray[np.int8]"] = field(default_factory=dict)  # noqa: UP037
+    entry_neg_flat: dict[str, "NDArray[np.int8]"] = field(default_factory=dict)  # noqa: UP037
     n_entries: dict[str, int] = field(default_factory=dict)
 
 
