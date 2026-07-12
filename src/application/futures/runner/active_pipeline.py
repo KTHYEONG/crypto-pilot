@@ -373,9 +373,13 @@ def _forward_log_return_on_index(
 
 
 def _requires_exec_1m(run_config: FuturesRunConfig) -> bool:
-    """[ADR_20260708_LTF_NATIVE_SIGNAL_EXPANSION] Gate 1m loading on Alpha Foundry mode."""
-    alpha_foundry = getattr(run_config, "alpha_foundry", None)
-    return bool(alpha_foundry is not None and getattr(alpha_foundry, "mode", "off") != "off")
+    """[ADR_20260712_L0_MEMORY_BOUND_DATAFLOW] Core loader never loads exec_1m.
+
+    LTF exec_1m is loaded on-demand by the LTF streaming path, not the core
+    data loader. Always return False for the base load; LTF plan handles its
+    own bounded loading. [LIMIT-01]
+    """
+    return False
 
 
 def _ensure_universe_ledger_sync(run_config: FuturesRunConfig, window: QuarterlyWindow) -> None:
