@@ -24,10 +24,12 @@ from src.domain.futures.alpha_foundry.contracts import (
     CrossBucketDiversityResult,
     CrossTFCanonicalContext,
     CrossTFPairEvidence,
+    CrossTFSharedContext,
     DiversitySelectionResult,
     L0IndependenceAudit,
     L0SignalCandidate,
 )
+from src.domain.futures.alpha_foundry.memory import admit_memory_stage, resolve_effective_memory_budget
 from src.domain.futures.alpha_foundry.multi_tf_fusion import project_signal_to_canonical_grid
 from src.domain.futures.signals.contracts import CandidateSignalPanel
 from src.domain.futures.strategy.common.alignment import AlignedMarketData
@@ -538,8 +540,99 @@ def resolve_cross_tf_canonical_context(
     )
 
 
+def resolve_cross_tf_shared_context(
+    *,
+    selected_by_tf: Mapping[str, Sequence[L0SignalCandidate]],
+    panel_by_recipe_id: Mapping[str, CandidateSignalPanel],
+    aligned_by_tf: Mapping[str, AlignedMarketData],
+    min_common_active_bars: int,
+) -> CrossTFSharedContext:
+    """Pure. Builds canonical context + proj_cache + side_entry_cache + upper-
+    triangle-mirrored corr matrix ONCE. Raises ValueError (propagated, unchanged
+    semantics) if resolve_cross_tf_canonical_context()'s min_common_active_bars
+    guard fails or if memory budget is exceeded."""
+    budget = resolve_effective_memory_budget()
+    all_recipe_ids_list: list[str] = []
+    for candidates in selected_by_tf.values():
+        all_recipe_ids_list.extend(c.recipe_id for c in candidates)
+    n_selected = len(all_recipe_ids_list)
+
+    context = resolve_cross_tf_canonical_context(
+        selected_by_tf=selected_by_tf,
+        panel_by_recipe_id=panel_by_recipe_id,
+        aligned_by_tf=aligned_by_tf,
+        min_common_active_bars=min_common_active_bars,
+    )
+
+    n_canonical_bars = len(context.canonical_datetimes_ns)
+    n_symbols_sample = 0
+    for rid in all_recipe_ids_list:
+        p = panel_by_recipe_id.get(rid)
+        if p is not None:
+            n_symbols_sample = p.signed_score_2d.shape[1]
+            break
+
+    estimated_increment_mb = (
+        n_selected * n_canonical_bars * n_symbols_sample * 4 // 1_000_000
+        + n_selected * n_canonical_bars * n_symbols_sample * 1 // 1_000_000
+    )
+    if not admit_memory_stage(
+        budget=budget,
+        stage="l0_cross_tf_shared_context",
+        estimated_increment_mb=max(estimated_increment_mb, 1),
+    ):
+        raise ValueError(
+            f"memory_budget_exceeded: estimated_increment_mb={estimated_increment_mb}"
+            f" > budget_mb={budget.limit_mb}"
+        )
+
+    proj_cache: dict[str, tuple[NDArray[np.float32], NDArray[np.bool_]]] = {}
+    side_entry_cache: dict[str, tuple[NDArray[np.int8], NDArray[np.bool_]]] = {}
+    for rid in all_recipe_ids_list:
+        p = panel_by_recipe_id.get(rid)
+        if p is not None:
+            proj = project_signal_to_canonical_grid(
+                panel=p,
+                canonical_datetimes=context.canonical_datetimes_ns,
+                causal_lag_bars=1,
+            )
+            proj_cache[rid] = proj
+            side_entry_cache[rid] = _causal_projected_side_and_entry(
+                proj[0], proj[1], context.active_mask_2d,
+            )
+
+    n = len(all_recipe_ids_list)
+    corr = np.full((n, n), np.nan, dtype=np.float64)
+    active = context.active_mask_2d
+    for i in range(n):
+        for j in range(i + 1, n):
+            ri, rj = all_recipe_ids_list[i], all_recipe_ids_list[j]
+            pi = proj_cache.get(ri)
+            pj = proj_cache.get(rj)
+            if pi is None or pj is None:
+                corr[i, j] = 0.0
+                corr[j, i] = 0.0
+                continue
+            mask = pi[1] & pj[1] & active
+            a = pi[0][mask]
+            b = pj[0][mask]
+            c_val = 0.0 if len(a) < 2 else float(np.corrcoef(a, b)[0, 1])
+            cv = c_val if np.isfinite(c_val) else 0.0
+            corr[i, j] = cv
+            corr[j, i] = cv
+        corr[i, i] = 1.0
+
+    return CrossTFSharedContext(
+        canonical_context=context,
+        proj_cache=proj_cache,
+        side_entry_cache=side_entry_cache,
+        corr=corr,
+        recipe_order=tuple(all_recipe_ids_list),
+    )
+
+
 def _causal_projected_side_and_entry(
-    score: NDArray[np.float64],
+    score: NDArray[np.float32 | np.float64],
     valid: NDArray[np.bool_],
     active: NDArray[np.bool_],
 ) -> tuple[NDArray[np.int8], NDArray[np.bool_]]:
@@ -560,18 +653,54 @@ def compute_cross_tf_pair_evidence(
     min_score_corr: float,
     min_directional_entry_jaccard: float,
     min_shared_directional_entries: int,
+    # [NEW, additive, keyword-only, all default None => existing self-compute behavior]
+    precomputed_proj_a: tuple[NDArray[np.float32], NDArray[np.bool_]] | None = None,
+    precomputed_proj_b: tuple[NDArray[np.float32], NDArray[np.bool_]] | None = None,
+    precomputed_side_entry_a: tuple[NDArray[np.int8], NDArray[np.bool_]] | None = None,
+    precomputed_side_entry_b: tuple[NDArray[np.int8], NDArray[np.bool_]] | None = None,
+    precomputed_score_corr: float | None = None,
 ) -> CrossTFPairEvidence:
-    """Compute direct redundancy evidence between two candidates on the canonical grid.
+    """[LIMIT-01][LIMIT-02][LIMIT-03] When precomputed_* is provided, skips the
+    corresponding self-computation entirely. Signature/return type otherwise
+    unchanged; all existing call sites (tests, single-pair callers) continue to
+    work identically with default None."""
+    if precomputed_score_corr is not None:
+        score_corr = precomputed_score_corr
+        shared_count: int = 0
+        j_dir: float = 0.0
+        if precomputed_side_entry_a is not None and precomputed_side_entry_b is not None:
+            side_a, entry_a = precomputed_side_entry_a
+            side_b, entry_b = precomputed_side_entry_b
+            shared = entry_a & entry_b & (side_a == side_b)
+            union = entry_a | entry_b
+            shared_count = int(np.sum(shared))
+            union_count = int(np.sum(union))
+            j_dir = shared_count / max(union_count, 1)
+        return CrossTFPairEvidence(
+            recipe_id_a=recipe_id_a, recipe_id_b=recipe_id_b,
+            score_corr=score_corr,
+            shared_directional_entries=shared_count,
+            directional_entry_jaccard=j_dir,
+            is_redundant=(
+                score_corr >= min_score_corr
+                and shared_count >= min_shared_directional_entries
+                and j_dir >= min_directional_entry_jaccard
+            ),
+        )
 
-    [ADR_20260712_L0_EVIDENCE_CONDITIONED_CROSS_TF_ADMISSION]
-    """
     canonical_dt = context.canonical_datetimes_ns
-    proj_a_s, proj_a_v = project_signal_to_canonical_grid(
-        panel=panel_a, canonical_datetimes=canonical_dt, causal_lag_bars=1,
-    )
-    proj_b_s, proj_b_v = project_signal_to_canonical_grid(
-        panel=panel_b, canonical_datetimes=canonical_dt, causal_lag_bars=1,
-    )
+    if precomputed_proj_a is not None:
+        proj_a_s, proj_a_v = precomputed_proj_a
+    else:
+        proj_a_s, proj_a_v = project_signal_to_canonical_grid(
+            panel=panel_a, canonical_datetimes=canonical_dt, causal_lag_bars=1,
+        )
+    if precomputed_proj_b is not None:
+        proj_b_s, proj_b_v = precomputed_proj_b
+    else:
+        proj_b_s, proj_b_v = project_signal_to_canonical_grid(
+            panel=panel_b, canonical_datetimes=canonical_dt, causal_lag_bars=1,
+        )
 
     active = context.active_mask_2d
     valid_ab = proj_a_v & proj_b_v & active
@@ -587,8 +716,15 @@ def compute_cross_tf_pair_evidence(
     c = float(np.corrcoef(flat_a, flat_b)[0, 1])
     score_corr = c if np.isfinite(c) else 0.0
 
-    side_a, entry_a = _causal_projected_side_and_entry(proj_a_s, proj_a_v, active)
-    side_b, entry_b = _causal_projected_side_and_entry(proj_b_s, proj_b_v, active)
+    if precomputed_side_entry_a is not None:
+        side_a, entry_a = precomputed_side_entry_a
+    else:
+        side_a, entry_a = _causal_projected_side_and_entry(proj_a_s, proj_a_v, active)
+
+    if precomputed_side_entry_b is not None:
+        side_b, entry_b = precomputed_side_entry_b
+    else:
+        side_b, entry_b = _causal_projected_side_and_entry(proj_b_s, proj_b_v, active)
 
     shared = entry_a & entry_b & (side_a == side_b)
     union = entry_a | entry_b
@@ -620,82 +756,102 @@ def compute_cross_tf_redundancy(
     max_novelty_corr: float,
     min_directional_entry_jaccard: float,
     min_shared_directional_entries: int,
+    precomputed_shared_context: CrossTFSharedContext | None = None,  # [NEW, additive]
 ) -> CrossBucketDiversityResult:
     if not selected_by_tf:
         raise ValueError("selected_by_tf must not be empty")
 
-    context = resolve_cross_tf_canonical_context(
-        selected_by_tf=selected_by_tf,
-        panel_by_recipe_id=panel_by_recipe_id,
-        aligned_by_tf=aligned_by_tf,
-        min_common_active_bars=min_common_active_bars,
-    )
+    if precomputed_shared_context is not None:
+        context = precomputed_shared_context.canonical_context
+        proj_cache = precomputed_shared_context.proj_cache
+        corr = precomputed_shared_context.corr
+        all_recipe_ids = list(precomputed_shared_context.recipe_order)
+        side_entry_cache = precomputed_shared_context.side_entry_cache
+    else:
+        context = resolve_cross_tf_canonical_context(
+            selected_by_tf=selected_by_tf,
+            panel_by_recipe_id=panel_by_recipe_id,
+            aligned_by_tf=aligned_by_tf,
+            min_common_active_bars=min_common_active_bars,
+        )
+        all_selected_local: list[L0SignalCandidate] = []
+        for candidates in selected_by_tf.values():
+            all_selected_local.extend(candidates)
+        all_recipe_ids = [c.recipe_id for c in all_selected_local]
+
+        if len(all_selected_local) <= 1:
+            return CrossBucketDiversityResult(
+                final_selected_recipe_ids=tuple(all_recipe_ids),
+                demoted_recipe_ids=(),
+                demoted_reason_by_id={},
+                cross_bucket_corr=(
+                    np.eye(len(all_selected_local), dtype=np.float64)
+                    if all_selected_local else np.empty((0, 0), dtype=np.float64)
+                ),
+                global_eff_test_count=float(len(all_selected_local)),
+                canonical_tf=context.canonical_tf,
+                common_start_ns=context.common_start_ns,
+                common_end_ns=context.common_end_ns,
+                n_common_active_bars=context.n_common_active_bars,
+            )
+
+        panels = [panel_by_recipe_id[rid] for rid in all_recipe_ids if rid in panel_by_recipe_id]
+        if len(panels) < 2:
+            return CrossBucketDiversityResult(
+                final_selected_recipe_ids=tuple(all_recipe_ids),
+                demoted_recipe_ids=(),
+                demoted_reason_by_id={},
+                cross_bucket_corr=np.eye(len(all_recipe_ids), dtype=np.float64),
+                global_eff_test_count=float(len(all_recipe_ids)),
+                canonical_tf=context.canonical_tf,
+                common_start_ns=context.common_start_ns,
+                common_end_ns=context.common_end_ns,
+                n_common_active_bars=context.n_common_active_bars,
+            )
+
+        # Cache projections by recipe_id (reuse across pair evaluation)
+        proj_cache = {}
+        side_entry_cache = {}
+        for rid in all_recipe_ids:
+            p = panel_by_recipe_id.get(rid)
+            if p is not None:
+                proj = project_signal_to_canonical_grid(
+                    panel=p,
+                    canonical_datetimes=context.canonical_datetimes_ns,
+                    causal_lag_bars=1,
+                )
+                proj_cache[rid] = proj
+                side_entry_cache[rid] = _causal_projected_side_and_entry(
+                    proj[0], proj[1], context.active_mask_2d,
+                )
+
+        # Score correlation matrix for report consumers — i<j only, mirror to j,i
+        n = len(all_recipe_ids)
+        corr = np.full((n, n), np.nan, dtype=np.float64)
+        for i in range(n):
+            for j in range(i + 1, n):
+                ri, rj = all_recipe_ids[i], all_recipe_ids[j]
+                pi = proj_cache.get(ri)
+                pj = proj_cache.get(rj)
+                if pi is None or pj is None:
+                    corr[i, j] = 0.0
+                    corr[j, i] = 0.0
+                    continue
+                mask = pi[1] & pj[1] & context.active_mask_2d
+                a = pi[0][mask]
+                b = pj[0][mask]
+                c_val = 0.0 if len(a) < 2 else float(np.corrcoef(a, b)[0, 1])
+                cv = c_val if np.isfinite(c_val) else 0.0
+                corr[i, j] = cv
+                corr[j, i] = cv
+            corr[i, i] = 1.0
 
     all_selected: list[L0SignalCandidate] = []
     for candidates in selected_by_tf.values():
         all_selected.extend(candidates)
-    all_recipe_ids = [c.recipe_id for c in all_selected]
-
-    if len(all_selected) <= 1:
-        return CrossBucketDiversityResult(
-            final_selected_recipe_ids=tuple(all_recipe_ids),
-            demoted_recipe_ids=(),
-            demoted_reason_by_id={},
-            cross_bucket_corr=(
-                np.eye(len(all_selected), dtype=np.float64)
-                if all_selected else np.empty((0, 0), dtype=np.float64)
-            ),
-            global_eff_test_count=float(len(all_selected)),
-            canonical_tf=context.canonical_tf,
-            common_start_ns=context.common_start_ns,
-            common_end_ns=context.common_end_ns,
-            n_common_active_bars=context.n_common_active_bars,
-        )
-
-    panels = [panel_by_recipe_id[rid] for rid in all_recipe_ids if rid in panel_by_recipe_id]
-    if len(panels) < 2:
-        return CrossBucketDiversityResult(
-            final_selected_recipe_ids=tuple(all_recipe_ids),
-            demoted_recipe_ids=(),
-            demoted_reason_by_id={},
-            cross_bucket_corr=np.eye(len(all_recipe_ids), dtype=np.float64),
-            global_eff_test_count=float(len(all_recipe_ids)),
-            canonical_tf=context.canonical_tf,
-            common_start_ns=context.common_start_ns,
-            common_end_ns=context.common_end_ns,
-            n_common_active_bars=context.n_common_active_bars,
-        )
-
-    # Cache projections by recipe_id (reuse across pair evaluation)
-    proj_cache: dict[str, tuple[NDArray[np.float64], NDArray[np.bool_]]] = {}
-    for rid in all_recipe_ids:
-        p = panel_by_recipe_id.get(rid)
-        if p is not None:
-            proj_cache[rid] = project_signal_to_canonical_grid(
-                panel=p,
-                canonical_datetimes=context.canonical_datetimes_ns,
-                causal_lag_bars=1,
-            )
-
-    # Score correlation matrix for report consumers
-    n = len(all_recipe_ids)
-    corr = np.full((n, n), np.nan, dtype=np.float64)
-    for i in range(n):
-        for j in range(n):
-            ri, rj = all_recipe_ids[i], all_recipe_ids[j]
-            pi = proj_cache.get(ri)
-            pj = proj_cache.get(rj)
-            if pi is None or pj is None:
-                corr[i, j] = 0.0
-                continue
-            mask = pi[1] & pj[1] & context.active_mask_2d
-            a = pi[0][mask]
-            b = pj[0][mask]
-            c_val = 0.0 if len(a) < 2 else float(np.corrcoef(a, b)[0, 1])
-            corr[i, j] = c_val if np.isfinite(c_val) else 0.0
-        corr[i, i] = 1.0
 
     # Build pair evidence for i<j only
+    n = len(all_recipe_ids)
     pair_evidence_list: list[CrossTFPairEvidence] = []
     for i in range(n):
         for j in range(i + 1, n):
@@ -711,6 +867,11 @@ def compute_cross_tf_redundancy(
                 min_score_corr=max_novelty_corr,
                 min_directional_entry_jaccard=min_directional_entry_jaccard,
                 min_shared_directional_entries=min_shared_directional_entries,
+                precomputed_proj_a=proj_cache.get(ri),
+                precomputed_proj_b=proj_cache.get(rj),
+                precomputed_side_entry_a=side_entry_cache.get(ri),
+                precomputed_side_entry_b=side_entry_cache.get(rj),
+                precomputed_score_corr=float(corr[i, j]) if np.isfinite(corr[i, j]) else None,
             )
             pair_evidence_list.append(pair_ev)
 
@@ -766,6 +927,7 @@ def audit_l0_selected_recipe_independence(
     aligned_by_tf: Mapping[str, AlignedMarketData],
     min_common_active_bars: int,
     max_corr: float = 0.70,
+    precomputed_shared_context: CrossTFSharedContext | None = None,  # [NEW, additive]
 ) -> L0IndependenceAudit:
     all_selected: list[L0SignalCandidate] = []
     for candidates in selected_by_tf.values():
@@ -787,49 +949,57 @@ def audit_l0_selected_recipe_independence(
             max_corr_threshold=max_corr,
         )
 
-    context = resolve_cross_tf_canonical_context(
-        selected_by_tf=selected_by_tf,
-        panel_by_recipe_id=panel_by_recipe_id,
-        aligned_by_tf=aligned_by_tf,
-        min_common_active_bars=min_common_active_bars,
-    )
-
     all_recipe_ids = [c.recipe_id for c in all_selected]
-    panels = [panel_by_recipe_id[rid] for rid in all_recipe_ids if rid in panel_by_recipe_id]
-    if len(panels) < 2:
-        return L0IndependenceAudit(
-            n_selected_total=n_selected,
-            n_distinct_thesis_ids=n_thesis,
-            n_independent_clusters=n_selected,
-            cluster_members={i: (c.recipe_id,) for i, c in enumerate(all_selected)},
-            demoted_recipe_ids=(),
-            demoted_reason_by_id={},
-            canonical_tf=context.canonical_tf,
-            max_corr_threshold=max_corr,
+
+    if precomputed_shared_context is not None:
+        context = precomputed_shared_context.canonical_context
+        corr = precomputed_shared_context.corr
+        panels = [panel_by_recipe_id[rid] for rid in all_recipe_ids if rid in panel_by_recipe_id]
+    else:
+        context = resolve_cross_tf_canonical_context(
+            selected_by_tf=selected_by_tf,
+            panel_by_recipe_id=panel_by_recipe_id,
+            aligned_by_tf=aligned_by_tf,
+            min_common_active_bars=min_common_active_bars,
         )
 
-    proj_scores: list[NDArray[np.float64]] = []
-    proj_valid: list[NDArray[np.bool_]] = []
-    for p in panels:
-        ps, pv = project_signal_to_canonical_grid(
-            panel=p,
-            canonical_datetimes=context.canonical_datetimes_ns,
-            causal_lag_bars=1,
-        )
-        proj_scores.append(ps)
-        proj_valid.append(pv)
+        panels = [panel_by_recipe_id[rid] for rid in all_recipe_ids if rid in panel_by_recipe_id]
+        if len(panels) < 2:
+            return L0IndependenceAudit(
+                n_selected_total=n_selected,
+                n_distinct_thesis_ids=n_thesis,
+                n_independent_clusters=n_selected,
+                cluster_members={i: (c.recipe_id,) for i, c in enumerate(all_selected)},
+                demoted_recipe_ids=(),
+                demoted_reason_by_id={},
+                canonical_tf=context.canonical_tf,
+                max_corr_threshold=max_corr,
+            )
 
-    n = len(panels)
-    corr = np.full((n, n), np.nan, dtype=np.float64)
-    active = context.active_mask_2d
-    for i in range(n):
-        for j in range(n):
-            mask = proj_valid[i] & proj_valid[j] & active
-            a = proj_scores[i][mask]
-            b = proj_scores[j][mask]
-            c_val = 0.0 if len(a) < 2 else float(np.corrcoef(a, b)[0, 1])
-            corr[i, j] = c_val if np.isfinite(c_val) else 0.0
-        corr[i, i] = 1.0
+        proj_scores: list[NDArray[np.float32]] = []
+        proj_valid: list[NDArray[np.bool_]] = []
+        for p in panels:
+            ps, pv = project_signal_to_canonical_grid(
+                panel=p,
+                canonical_datetimes=context.canonical_datetimes_ns,
+                causal_lag_bars=1,
+            )
+            proj_scores.append(ps)
+            proj_valid.append(pv)
+
+        n = len(panels)
+        corr = np.full((n, n), np.nan, dtype=np.float64)
+        active = context.active_mask_2d
+        for i in range(n):
+            for j in range(i + 1, n):
+                mask = proj_valid[i] & proj_valid[j] & active
+                a = proj_scores[i][mask]
+                b = proj_scores[j][mask]
+                c_val = 0.0 if len(a) < 2 else float(np.corrcoef(a, b)[0, 1])
+                cv = c_val if np.isfinite(c_val) else 0.0
+                corr[i, j] = cv
+                corr[j, i] = cv
+            corr[i, i] = 1.0
 
     clusters = cluster_correlated_recipes(
         evidences=all_selected,
