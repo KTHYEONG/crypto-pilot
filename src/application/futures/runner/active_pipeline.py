@@ -2190,7 +2190,8 @@ def _run_strategy_stage(
     *,
     probe_result: TfProbeStageResult | None = None,
 ) -> CandidatePipelineOutput | RunnerResult | Layer1Result | None:
-    """[ADR_20260705_TF_PROBE_SCOPED_SYNC][ADR_20260710_L0_TERMINAL_DEBUG_OBSERVABILITY] Build the strategy maps, run scoped TF probe
+    """[ADR_20260705_TF_PROBE_SCOPED_SYNC][ADR_20260710_L0_TERMINAL_DEBUG_OBSERVABILITY]
+    Build the strategy maps, run scoped TF probe
     before early data release, then continue the existing tiered pipeline flow.
     """
     # ─── 기존 Phase D 진입 (공통 설정 → bridge → 선택적 Tiered 분기) ──────────
@@ -2244,11 +2245,22 @@ def _run_strategy_stage(
         opt_config=OPT_FUTURES_CONFIG,
         timeframe=run_config.timeframe,
     ).candidate
-    _probe_result_local = _run_tf_probe_stage_scoped(
-        run_config=run_config,
-        full_strategy_maps=full_strategy_maps,
-        probe_cfg=_probe_cfg,
-        scope_symbols=OPT_FUTURES_CONFIG.get("TF_PROBE_SCOPE_SYMBOLS", _TF_PROBE_FALLBACK_SYMBOLS),
+    _t_probe = time.perf_counter()
+    _af_cfg = getattr(run_config, "alpha_foundry", None)
+    _run_probe = getattr(_af_cfg, "enable_tf_probe_scoped", True) if _af_cfg is not None else True
+    _probe_result_local = (
+        _run_tf_probe_stage_scoped(
+            run_config=run_config,
+            full_strategy_maps=full_strategy_maps,
+            probe_cfg=_probe_cfg,
+            scope_symbols=OPT_FUTURES_CONFIG.get("TF_PROBE_SCOPE_SYMBOLS", _TF_PROBE_FALLBACK_SYMBOLS),
+        )
+        if _run_probe
+        else None
+    )
+    _logger.debug(
+        "[SYS] stage=tf_probe_scoped took=%.4fs rss=%.0fMB skipped=%s",
+        time.perf_counter() - _t_probe, _get_rss_mb(), not _run_probe,
     )
 
     _effective_probe_result = probe_result or _probe_result_local

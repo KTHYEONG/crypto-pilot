@@ -1101,8 +1101,11 @@ def run_candidate_strategy_for_universe(
 
         if _use_multi_tf:
             # ── Multi-TF L0 gate path (fan-out/fuse/fan-in) ──────────────────
+            import time as _time_panel
+
             from src.domain.futures.strategy.config import resolve_tf_signal_pool
 
+            _t_panel_construct = _time_panel.perf_counter()
             native_by_tf = build_native_htf_panels(
                 data_maps=preloaded_data_maps,
                 symbols=symbols,
@@ -1154,7 +1157,12 @@ def run_candidate_strategy_for_universe(
                 bindings_by_tf[htf] = htf_bindings
                 aligned_by_tf[htf] = htf_aligned
 
-            _af_run_id = f"{tf}_{int(time.time())}"
+            _run_logger.debug(
+                "[SYS] stage=panel_construction took=%.4fs rss=%.0fMB n_tfs=%d",
+                _time_panel.perf_counter() - _t_panel_construct, _get_rss_mb(), len(panels_by_tf),
+            )
+            _af_run_id = f"{tf}_{int(_time_panel.time())}"
+            _t_l0_gate = _time_panel.perf_counter()
             multi_results = run_alpha_foundry_l0_gate_multi_tf(
                 panels_by_tf=panels_by_tf,
                 bindings_by_tf=bindings_by_tf,
@@ -1163,6 +1171,12 @@ def run_candidate_strategy_for_universe(
                 cost_model=ExecutionCostModel(),
                 runtime_config=alpha_foundry_config,
                 run_id_prefix=_af_run_id,
+                parallel_max_workers=getattr(alpha_foundry_config, "l0_parallel_max_workers", 1),
+            )
+            _run_logger.debug(
+                "[SYS] stage=l0_gate_multi_tf_wall took=%.4fs rss=%.0fMB parallel_max_workers=%d",
+                _time_panel.perf_counter() - _t_l0_gate, _get_rss_mb(),
+                getattr(alpha_foundry_config, "l0_parallel_max_workers", 1),
             )
 
             # [ADR_20260711_L0_CROSS_TF_PRUNING_ADMISSION] Cross-TF independence
