@@ -36,7 +36,7 @@ last_verified: 2026-07-12
 
 ### Low-Cost Screening (Cheap Gate)
 - **Sparse Event Counts (n_events)**: 연속 보유바 중복 계산을 방지하기 위해 sparse entry mask (flat -> active 또는 direct 부호반전 Rising Edge)의 개수로 산출. effective_n = n_events.
-- **Barrier-Aware Return Evaluation**: mean_gross_bps/mean_net_bps는 고정 호라이즌 mark-to-close가 아닌 L1의 Triple-Barrier 커널(compute_triple_barrier_returns)을 재사용해 산출한다. 이벤트는 candidate_panels_to_events()로 변환된 뒤 원본 sparse event_mask와 (entry_idx-1, symbol) 기준으로 정합 필터링되며, 정합되지 않은 event_mask 셀은 dense 배열에 NaN으로 남는다. compute_xs_spread_lcb_bps/compute_rank_ic_with_tstat는 이 NaN을 반드시 finite 마스킹 후 집계해야 하며, 그렇지 않으면 AlphaGateEvidence.xs_spread_lcb_bps 유효성 검증에서 예외가 발생한다.
+- **Barrier-Aware Return Evaluation**: mean_gross_bps/mean_net_bps는 고정 호라이즌 mark-to-close가 아닌 L1의 Triple-Barrier 커널(compute_triple_barrier_returns)을 재사용해 산출한다. 이벤트는 `candidate_panels_to_events()`로 변환된 뒤 원본 sparse `event_mask`와 `(entry_idx-1, symbol)` 기준으로 정합 필터링되며, 정합되지 않은 `event_mask` 셀은 dense 배열에 NaN으로 남는다. 성능 최적화 및 OOM 방지를 위해, `candidate_panels_to_events()` 호출 전에 상류의 `event_mask`를 `panel.metadata["l0_event_mask_2d"]`에 임시 주입하여 필요한 이벤트들만 NumPy 레벨에서 필터링하여 DataFrame을 빌드하고 호출 즉시 제거(`pop`)한다. `compute_xs_spread_lcb_bps`/`compute_rank_ic_with_tstat`는 이 NaN을 반드시 finite 마스킹 후 집계해야 하며, 그렇지 않으면 `AlphaGateEvidence.xs_spread_lcb_bps` 유효성 검증에서 예외가 발생한다.
 
 ### Cost Array Usability Guard
 - **Validity Check**: Cost status is resolved via _is_usable_cost_array() (verifying np.any(np.isfinite(...))). 

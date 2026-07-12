@@ -147,7 +147,10 @@ def evaluate_panel_cheap_gate(
     
     [ADR_20260710_L0_ENTRY_EXIT_SIGNAL_EFFECTIVENESS_REDESIGN] Barrier-aware evaluation
     replaces fixed-horizon mark-to-close. precomputed_atr_2d is resolved once per batch
-    by the caller (evaluate_alpha_cheap_gate_batch)."""
+    by the caller (evaluate_alpha_cheap_gate_batch).
+    
+    [ADR_20260712_L0_GATE_EVENT_FILTERING_OPTIMIZATION] Event mask is temporarily injected
+    into metadata for optimized numpy-level filtering inside candidate_panels_to_events."""
     if bars_per_year <= 0.0:
         raise ValueError("bars_per_year must be positive")
     _validate_shape(panel, aligned)
@@ -224,9 +227,13 @@ def evaluate_panel_cheap_gate(
     from src.domain.futures.strategy.candidate_labels import compute_triple_barrier_returns
     from src.domain.futures.strategy.rule_signals import candidate_panels_to_events
 
-    all_events = candidate_panels_to_events(
-        (panel,), min_abs_score=0.0, cost_floor_bps=float("nan"),
-    )
+    panel.metadata["l0_event_mask_2d"] = event_mask
+    try:
+        all_events = candidate_panels_to_events(
+            (panel,), min_abs_score=0.0, cost_floor_bps=float("nan"),
+        )
+    finally:
+        panel.metadata.pop("l0_event_mask_2d", None)
     # Align events to sparse event_mask: keep only those where (entry_idx, symbol)
     # matches event_mask. Dedup per (entry_idx, symbol).
     # candidate_panels_to_events sets entry=t+1; signal bar is t.
@@ -1083,7 +1090,10 @@ def evaluate_panel_gate(
     resolve_family_timeframe_gate_policy (family/archetype-aware), not flat config.min_events.
     
     [ADR_20260710_L0_ENTRY_EXIT_SIGNAL_EFFECTIVENESS_REDESIGN] Barrier-aware evaluation
-    replaces fixed-horizon mark-to-close. precomputed_atr_2d is resolved once per batch."""
+    replaces fixed-horizon mark-to-close. precomputed_atr_2d is resolved once per batch.
+    
+    [ADR_20260712_L0_GATE_EVENT_FILTERING_OPTIMIZATION] Event mask is temporarily injected
+    into metadata for optimized numpy-level filtering inside candidate_panels_to_events."""
     if bars_per_year <= 0.0:
         raise ValueError("bars_per_year must be positive")
     _validate_shape(panel, aligned)
@@ -1125,9 +1135,13 @@ def evaluate_panel_gate(
     from src.domain.futures.strategy.candidate_labels import compute_triple_barrier_returns
     from src.domain.futures.strategy.rule_signals import candidate_panels_to_events
 
-    all_events = candidate_panels_to_events(
-        (panel,), min_abs_score=0.0, cost_floor_bps=float("nan"),
-    )
+    panel.metadata["l0_event_mask_2d"] = event_mask
+    try:
+        all_events = candidate_panels_to_events(
+            (panel,), min_abs_score=0.0, cost_floor_bps=float("nan"),
+        )
+    finally:
+        panel.metadata.pop("l0_event_mask_2d", None)
     if all_events.empty:
         return _empty_gate_evidence(
             run_id=run_id, recipe=recipe, reject_reasons=("insufficient_events",)
