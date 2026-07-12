@@ -960,3 +960,39 @@ def test_apply_cross_tf_survival_floor_counts_actual_survivors_not_distinct_labe
 
     assert "r3" not in result.final_selected_recipe_ids
     assert result.final_selected_recipe_ids == ("r1", "r2")
+
+
+def test_compute_cross_tf_redundancy_handles_non_nested_tf_calendar_ranges() -> None:
+    """[ADR_20260712_L0_CROSS_TF_CANONICAL_CALENDAR_CONTAINMENT_FIX] Regression:
+    previously raised when a non-canonical TF's panel calendar range extended
+    beyond the (dynamically finest-selected) canonical TF's own range."""
+    bar_4h_ns = 4 * 3_600_000_000_000
+    bar_1h_ns = 3_600_000_000_000
+    dt_a = np.arange(0, 100, dtype=np.int64) * bar_4h_ns       # hours [0, 396] step 4, 100 bars
+    dt_b = np.arange(30, 70, dtype=np.int64) * bar_1h_ns       # hours [30, 69] step 1, 40 bars
+
+    aligned_by_tf = {
+        "4h": _make_aligned(dt_a, n_syms=1),
+        "1h": _make_aligned(dt_b, n_syms=1),
+    }
+    candidate_a = _candidate("a", timeframe="4h", score=1.0)
+    candidate_b = _candidate("b", timeframe="1h", score=1.0)
+
+    panel_a = _make_canonical_panel_from_2d(
+        np.ones((len(dt_a), 1), dtype=np.float64), dt_start=0, bar_step_ns=bar_4h_ns,
+    )
+    panel_b = _make_canonical_panel_from_2d(
+        np.ones((len(dt_b), 1), dtype=np.float64), dt_start=int(dt_b[0]), bar_step_ns=bar_1h_ns,
+    )
+
+    result = compute_cross_tf_redundancy(
+        selected_by_tf={"4h": (candidate_a,), "1h": (candidate_b,)},
+        panel_by_recipe_id={"a": panel_a, "b": panel_b},
+        aligned_by_tf=aligned_by_tf,
+        min_common_active_bars=10,
+        max_novelty_corr=0.70,
+        min_directional_entry_jaccard=0.50,
+        min_shared_directional_entries=1,
+    )
+
+    assert set(result.final_selected_recipe_ids) | set(result.demoted_recipe_ids) == {"a", "b"}
