@@ -70,7 +70,7 @@ def make_panel_for_tf(
     return CandidateSignalPanel(
         family=family, variant=f"{variant}_{tf}",
         params={"lookback": 20}, datetimes=np.arange(bars, dtype=np.int64),
-        symbols=tuple(f"S{i}" for i in range(n_symbols)),
+        symbols=("BTCUSDT", "ETHUSDT")[:n_symbols],
         signed_score_2d=score, side_hint_2d=side,
         expected_holding_bars=3, min_holding_bars=1,
         stop_atr_mult=2.0, take_profit_atr_mult=4.0,
@@ -329,7 +329,7 @@ class SafeThreadPoolExecutor(concurrent.futures.ThreadPoolExecutor):
     (no fork). Accepts and ignores `mp_context` to match ProcessPoolExecutor API."""
 
     def __init__(self, max_workers: int | None = None, mp_context: object = None, **kwargs: object) -> None:
-        super().__init__(max_workers=max_workers, **kwargs)
+        super().__init__(max_workers=max_workers, **kwargs)  # type: ignore[call-overload]
 
 
 class TestParallelMaxWorkersValidation:
@@ -373,8 +373,12 @@ class TestSequentialAndParallelIdentical:
             run_id_prefix="test_seq_explicit", parallel_max_workers=1,
         )
         for tf in tfs:
-            assert base[tf].report.n_passed == explicit[tf].report.n_passed
-            assert base[tf].report.reject_reason_counts == explicit[tf].report.reject_reason_counts
+            base_report = base[tf].report
+            explicit_report = explicit[tf].report
+            assert base_report is not None
+            assert explicit_report is not None
+            assert base_report.n_passed == explicit_report.n_passed
+            assert base_report.reject_reason_counts == explicit_report.reject_reason_counts
             assert len(base[tf].panels_for_l1) == len(explicit[tf].panels_for_l1)
 
     def test_parallel_matches_sequential_exact(self) -> None:
@@ -401,8 +405,12 @@ class TestSequentialAndParallelIdentical:
 
         assert set(seq.keys()) == set(par.keys())
         for tf in tfs:
-            assert seq[tf].report.n_passed == par[tf].report.n_passed, f"tf={tf} n_passed mismatch"
-            assert seq[tf].report.reject_reason_counts == par[tf].report.reject_reason_counts, (
+            seq_report = seq[tf].report
+            par_report = par[tf].report
+            assert seq_report is not None
+            assert par_report is not None
+            assert seq_report.n_passed == par_report.n_passed, f"tf={tf} n_passed mismatch"
+            assert seq_report.reject_reason_counts == par_report.reject_reason_counts, (
                 f"tf={tf} reject_reason_counts mismatch"
             )
             assert len(seq[tf].panels_for_l1) == len(par[tf].panels_for_l1), f"tf={tf} panels_for_l1 len mismatch"
@@ -452,6 +460,8 @@ class TestPrimeCacheAndWorker:
             run_id="test_direct",
             timeframe=tf_key,
         )
+        assert worker_result.report is not None
+        assert direct_result.report is not None
         assert worker_result.report.n_passed == direct_result.report.n_passed
         assert worker_result.report.reject_reason_counts == direct_result.report.reject_reason_counts
 
@@ -638,6 +648,8 @@ class TestRunAlphaFoundryL0GateDedup:
             precomputed_cheap_evidences=cheap_evidences,
         )
 
+        assert fresh_result.report is not None
+        assert dedup_result.report is not None
         assert fresh_result.report.n_passed == dedup_result.report.n_passed
         assert fresh_result.report.reject_reason_counts == dedup_result.report.reject_reason_counts
         assert len(fresh_result.panels_for_l1) == len(dedup_result.panels_for_l1)
@@ -667,6 +679,8 @@ class TestRunAlphaFoundryL0GateDedup:
             cost_model=ExecutionCostModel(), runtime_config=RUNTIME_CONFIG,
             run_id="test_default", timeframe=tf,
         )
+        assert explicit_none.report is not None
+        assert default.report is not None
         assert explicit_none.report.n_passed == default.report.n_passed
         assert explicit_none.report.reject_reason_counts == default.report.reject_reason_counts
 

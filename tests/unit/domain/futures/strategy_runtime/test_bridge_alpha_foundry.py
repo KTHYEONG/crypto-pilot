@@ -456,7 +456,10 @@ class TestAlphaFoundryReportFailure:
             _b(0),
         ]
         aligned = make_aligned_market_data(t=12, n=2)
-        config = make_runtime_config(Path("/no-perm"), mode="audit")
+        config = dataclasses.replace(
+            make_runtime_config(Path("/no-perm"), mode="audit"),
+            artifact_write_enabled=True,
+        )
 
         with pytest.raises(OSError, match="permission denied"):
             run_alpha_foundry_l0_gate(
