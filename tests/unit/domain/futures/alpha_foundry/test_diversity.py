@@ -1466,3 +1466,114 @@ class TestProjectSignalToCanonicalGridFloat32:
 
         assert projected.dtype == np.float32
         assert valid.dtype == np.bool_
+
+
+class TestBatchPairwiseCorr:
+    """OPT-4 [ADR_20260712_L0_CROSS_TF_BATCH_CORRELATION]: batch correlation tests."""
+
+    @staticmethod
+    def _make_stack(
+        n: int, n_bars: int, n_syms: int, seed: int = 42,
+    ) -> tuple[NDArray[np.float32], NDArray[np.bool_], NDArray[np.bool_]]:
+        rng = np.random.default_rng(seed)
+        P = rng.normal(0, 1, (n, n_bars, n_syms)).astype(np.float32)
+        M = rng.random((n, n_bars, n_syms)) > 0.2
+        A = np.ones((n_bars, n_syms), dtype=np.bool_)
+        return P, M, A
+
+    @staticmethod
+    def _per_pair_corrcoef(
+        projected_stack: NDArray[np.float32],
+        mask_stack: NDArray[np.bool_],
+        active_mask: NDArray[np.bool_],
+    ) -> NDArray[np.float64]:
+        n = projected_stack.shape[0]
+        corr = np.full((n, n), np.nan, dtype=np.float64)
+        for i in range(n):
+            for j in range(i + 1, n):
+                mask = mask_stack[i] & mask_stack[j] & active_mask
+                a = projected_stack[i][mask]
+                b = projected_stack[j][mask]
+                if len(a) < 2:
+                    corr[i, j] = 0.0
+                    corr[j, i] = 0.0
+                else:
+                    cv = float(np.corrcoef(a, b)[0, 1])
+                    corr[i, j] = cv if np.isfinite(cv) else 0.0
+                    corr[j, i] = cv if np.isfinite(cv) else 0.0
+            corr[i, i] = 1.0
+        return corr
+
+    def test_batch_agrees_with_per_pair_corrcoef(self) -> None:
+        from src.domain.futures.alpha_foundry.diversity import _batch_pairwise_corr
+
+        P, M, A = self._make_stack(4, 13, 1, seed=42)
+        batch = _batch_pairwise_corr(projected_stack=P, mask_stack=M, active_mask=A)
+        per_pair = self._per_pair_corrcoef(P, M, A)
+        np.testing.assert_allclose(batch, per_pair, atol=1e-12)
+        assert batch.dtype == np.float64
+        assert batch.shape == (4, 4)
+
+    def test_n1_returns_identity(self) -> None:
+        from src.domain.futures.alpha_foundry.diversity import _batch_pairwise_corr
+
+        P, M, A = self._make_stack(1, 40, 1, seed=42)
+        corr = _batch_pairwise_corr(projected_stack=P, mask_stack=M, active_mask=A)
+        assert corr.shape == (1, 1)
+        assert corr[0, 0] == 1.0
+
+    def test_disjoint_masks_yield_zero_corr(self) -> None:
+        from src.domain.futures.alpha_foundry.diversity import _batch_pairwise_corr
+
+        P = np.random.default_rng(1).normal(0, 1, (2, 10, 1)).astype(np.float32)
+        M = np.zeros((2, 10, 1), dtype=np.bool_)
+        M[0, :5, 0] = True
+        M[1, 5:, 0] = True
+        A = np.ones((10, 1), dtype=np.bool_)
+        corr = _batch_pairwise_corr(projected_stack=P, mask_stack=M, active_mask=A)
+        assert corr[0, 1] == 0.0
+        assert corr[1, 0] == 0.0
+
+    def test_output_dtype_is_float64(self) -> None:
+        from src.domain.futures.alpha_foundry.diversity import _batch_pairwise_corr
+
+        P, M, A = self._make_stack(3, 5, 2)
+        corr = _batch_pairwise_corr(projected_stack=P, mask_stack=M, active_mask=A)
+        assert corr.dtype == np.float64
+
+    def test_symmetry_and_diagonal(self) -> None:
+        from src.domain.futures.alpha_foundry.diversity import _batch_pairwise_corr
+
+        P, M, A = self._make_stack(4, 13, 1, seed=99)
+        corr = _batch_pairwise_corr(projected_stack=P, mask_stack=M, active_mask=A)
+        np.testing.assert_allclose(corr, corr.T, atol=1e-12)
+        np.testing.assert_allclose(np.diag(corr), np.ones(4), atol=1e-12)
+
+    def test_empty_input_returns_empty_matrix(self) -> None:
+        from src.domain.futures.alpha_foundry.diversity import _batch_pairwise_corr
+
+        P = np.empty((0, 0), dtype=np.float32)
+        M = np.empty((0, 0), dtype=np.bool_)
+        A = np.ones((0,), dtype=np.bool_)
+        corr = _batch_pairwise_corr(projected_stack=P, mask_stack=M, active_mask=A)
+        assert corr.shape == (0, 0)
+        assert corr.dtype == np.float64
+
+    def test_raises_on_1d_input(self) -> None:
+        from src.domain.futures.alpha_foundry.diversity import _batch_pairwise_corr
+
+        with pytest.raises(ValueError, match="must be at least 2D"):
+            _batch_pairwise_corr(
+                projected_stack=np.array([1.0, 2.0], dtype=np.float32),
+                mask_stack=np.array([True, False]),
+                active_mask=np.ones(2, dtype=np.bool_),
+            )
+
+    def test_raises_on_shape_mismatch(self) -> None:
+        from src.domain.futures.alpha_foundry.diversity import _batch_pairwise_corr
+
+        P = np.zeros((2, 10, 3), dtype=np.float32)
+        M = np.zeros((2, 10, 4), dtype=np.bool_)
+        A = np.ones((10, 3), dtype=np.bool_)
+        with pytest.raises(ValueError, match="shape mismatch"):
+            _batch_pairwise_corr(projected_stack=P, mask_stack=M, active_mask=A)
