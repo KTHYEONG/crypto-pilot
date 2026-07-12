@@ -21,6 +21,12 @@ def _l0_cross_tf_pruning_enabled() -> bool:
     return os.environ.get("L0_CROSS_TF_PRUNING", "") not in ("", "0", "false", "False")
 
 
+def _l0_parallel_max_workers() -> int:
+    """[ADR_20260711_L0_L1_PIPELINE_LATENCY_PROFILING] measurement-run opt-in env gate."""
+    raw = os.environ.get("L0_PARALLEL_MAX_WORKERS", "")
+    return int(raw) if raw.strip() else 1
+
+
 ActivePhase = Literal["l0", "l1", "l2", "l3"]
 SyncMode = Literal["auto", "skip"]
 
@@ -153,6 +159,7 @@ def build_l0_runtime_config(
         observability_mode="debug_log",
         enable_cross_tf_diversity_audit=_l0_cross_tf_diversity_audit_enabled(),
         enable_cross_tf_pruning=_l0_cross_tf_pruning_enabled(),
+        l0_parallel_max_workers=_l0_parallel_max_workers(),
     )
     return validate_alpha_foundry_runtime_config(config)
 
