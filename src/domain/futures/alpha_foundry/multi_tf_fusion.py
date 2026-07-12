@@ -208,11 +208,23 @@ def project_signal_to_canonical_grid(
     canonical_datetimes: NDArray[np.int64],
     causal_lag_bars: int,
 ) -> tuple[NDArray[np.float64], NDArray[np.bool_]]:
+    """Causally forward-fill a panel's signal onto a canonical timestamp grid.
+
+    [ADR_20260712_L0_CROSS_TF_CANONICAL_CALENDAR_CONTAINMENT_FIX] Panel samples
+    outside ``canonical_datetimes``' span are no longer a hard error: samples
+    before the grid start causally forward-fill into later canonical bars
+    (np.searchsorted clamps to index 0); samples after the grid end contribute
+    nothing (the existing ``s >= n_canonical`` guard already skips them).
+    Callers needing a minimum-overlap guarantee must check it themselves
+    (see resolve_cross_tf_canonical_context's min_common_active_bars guard).
+
+    Raises:
+        ValueError: if panel.datetimes is not monotonic non-decreasing
+            (data corruption, unrelated to calendar-range containment).
+    """
     dt = panel.datetimes.astype(np.int64, copy=False)
     if not np.all(dt[:-1] <= dt[1:]):
         raise ValueError("panel.datetimes must be monotonic non-decreasing")
-    if dt[0] < canonical_datetimes[0] or dt[-1] > canonical_datetimes[-1]:
-        raise ValueError("panel.datetimes must fall within canonical_datetimes range")
     n_canonical = len(canonical_datetimes)
     n_symbols = panel.signed_score_2d.shape[1]
     projected = np.full((n_canonical, n_symbols), np.nan, dtype=np.float64)

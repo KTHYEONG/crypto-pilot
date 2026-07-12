@@ -238,9 +238,57 @@ def test_project_signal_to_canonical_grid_raises_on_non_monotonic_datetimes() ->
         project_signal_to_canonical_grid(panel=panel, canonical_datetimes=canonical_dt, causal_lag_bars=1)
 
 
-def test_project_signal_to_canonical_grid_raises_on_out_of_range_datetimes() -> None:
+def test_project_signal_to_canonical_grid_clips_out_of_range_datetimes_instead_of_raising() -> None:
+    """[ADR_20260712_L0_CROSS_TF_CANONICAL_CALENDAR_CONTAINMENT_FIX]
+    Out-of-range datetimes are clipped, not raised."""
     panel = _make_panel(datetimes_ns=[-1], scores=[1.0])
     canonical_dt = np.array([0, 3600], dtype=np.int64)
 
-    with pytest.raises(ValueError, match=r"outside|range"):
-        project_signal_to_canonical_grid(panel=panel, canonical_datetimes=canonical_dt, causal_lag_bars=1)
+    projected_scores, projected_valid = project_signal_to_canonical_grid(
+        panel=panel, canonical_datetimes=canonical_dt, causal_lag_bars=1,
+    )
+
+    assert projected_valid[0, 0] == False  # noqa: E712
+    assert projected_valid[1, 0] == True  # noqa: E712
+    assert projected_scores[1, 0] == pytest.approx(1.0)
+
+
+def test_project_signal_to_canonical_grid_forward_fills_when_dt_precedes_canonical_start() -> None:
+    """[LIMIT-01] dt before canonical start: causally forward-fills after lag."""
+    panel = _make_panel(datetimes_ns=[-2 * 3_600_000_000_000], scores=[2.5])
+    canonical_dt = np.array([0, 1, 2, 3], dtype=np.int64) * 3_600_000_000_000
+
+    projected_scores, projected_valid = project_signal_to_canonical_grid(
+        panel=panel, canonical_datetimes=canonical_dt, causal_lag_bars=1,
+    )
+
+    assert projected_valid[0, 0] == False  # noqa: E712
+    assert np.all(projected_valid[1:4, 0] == True)  # noqa: E712
+    assert projected_scores[1, 0] == pytest.approx(2.5)
+    assert projected_scores[3, 0] == pytest.approx(2.5)
+
+
+def test_project_signal_to_canonical_grid_ignores_dt_after_canonical_end() -> None:
+    """[LIMIT-02] dt after canonical end: skipped, no exception."""
+    panel = _make_panel(datetimes_ns=[999_999 * 3_600_000_000_000], scores=[1.0])
+    canonical_dt = np.array([0, 1, 2, 3], dtype=np.int64) * 3_600_000_000_000
+
+    projected_scores, projected_valid = project_signal_to_canonical_grid(
+        panel=panel, canonical_datetimes=canonical_dt, causal_lag_bars=1,
+    )
+
+    assert np.all(np.isnan(projected_scores))
+    assert not np.any(projected_valid)
+
+
+def test_project_signal_to_canonical_grid_no_overlap_returns_all_invalid_no_raise() -> None:
+    """[LIMIT-03] dt far before canonical start with large causal_lag pushes s past end: all-NaN, no raise."""
+    panel = _make_panel(datetimes_ns=[-7_200_000_000_000], scores=[1.0])
+    canonical_dt = np.array([0, 1, 2, 3], dtype=np.int64) * 3_600_000_000_000
+
+    projected_scores, projected_valid = project_signal_to_canonical_grid(
+        panel=panel, canonical_datetimes=canonical_dt, causal_lag_bars=100,
+    )
+
+    assert np.all(np.isnan(projected_scores))
+    assert not np.any(projected_valid)
