@@ -550,7 +550,11 @@ def resolve_cross_tf_shared_context(
     """Pure. Builds canonical context + proj_cache + side_entry_cache + upper-
     triangle-mirrored corr matrix ONCE. Raises ValueError (propagated, unchanged
     semantics) if resolve_cross_tf_canonical_context()'s min_common_active_bars
-    guard fails or if memory budget is exceeded."""
+    guard fails or if memory budget is exceeded.
+
+    [ADR_20260712_L0_CROSS_TF_BATCH_ACCELERATION] Also precomputes
+    entry_pos_flat/entry_neg_flat/n_entries for batch jaccard (OPT-2) and
+    valid_stack for corr-loop mask broadcast (OPT-1-a)."""
     budget = resolve_effective_memory_budget()
     all_recipe_ids_list: list[str] = []
     for candidates in selected_by_tf.values():
@@ -601,7 +605,34 @@ def resolve_cross_tf_shared_context(
                 proj[0], proj[1], context.active_mask_2d,
             )
 
+    entry_pos_flat: dict[str, "NDArray[np.int8]"] = {}
+    entry_neg_flat: dict[str, "NDArray[np.int8]"] = {}
+    n_entries: dict[str, int] = {}
+    for rid in all_recipe_ids_list:
+        if rid in side_entry_cache:
+            side, entry = side_entry_cache[rid]
+            pos = (entry & (side == 1)).ravel().astype(np.int8)
+            neg = (entry & (side == -1)).ravel().astype(np.int8)
+            entry_pos_flat[rid] = pos
+            entry_neg_flat[rid] = neg
+            n_entries[rid] = int(entry.sum())
+        else:
+            entry_pos_flat[rid] = np.array([], dtype=np.int8)
+            entry_neg_flat[rid] = np.array([], dtype=np.int8)
+            n_entries[rid] = 0
+
     n = len(all_recipe_ids_list)
+    n_canonical_bars_v = len(context.canonical_datetimes_ns)
+    n_symbols_v = (
+        proj_cache[all_recipe_ids_list[0]][0].shape[1]
+        if n > 0 and all_recipe_ids_list[0] in proj_cache
+        else 0
+    )
+    valid_stack = np.zeros((n, n_canonical_bars_v, n_symbols_v), dtype=np.bool_)
+    for i_idx, rid in enumerate(all_recipe_ids_list):
+        if rid in proj_cache:
+            valid_stack[i_idx] = proj_cache[rid][1]
+
     corr = np.full((n, n), np.nan, dtype=np.float64)
     active = context.active_mask_2d
     for i in range(n):
@@ -613,7 +644,7 @@ def resolve_cross_tf_shared_context(
                 corr[i, j] = 0.0
                 corr[j, i] = 0.0
                 continue
-            mask = pi[1] & pj[1] & active
+            mask = valid_stack[i] & valid_stack[j] & active
             a = pi[0][mask]
             b = pj[0][mask]
             c_val = 0.0 if len(a) < 2 else float(np.corrcoef(a, b)[0, 1])
@@ -628,6 +659,9 @@ def resolve_cross_tf_shared_context(
         side_entry_cache=side_entry_cache,
         corr=corr,
         recipe_order=tuple(all_recipe_ids_list),
+        entry_pos_flat=entry_pos_flat,
+        entry_neg_flat=entry_neg_flat,
+        n_entries=n_entries,
     )
 
 
@@ -756,8 +790,13 @@ def compute_cross_tf_redundancy(
     max_novelty_corr: float,
     min_directional_entry_jaccard: float,
     min_shared_directional_entries: int,
-    precomputed_shared_context: CrossTFSharedContext | None = None,  # [NEW, additive]
+    precomputed_shared_context: CrossTFSharedContext | None = None,
 ) -> CrossBucketDiversityResult:
+    """Leader-based greedy demotion of cross-TF redundant candidates.
+
+    [ADR_20260712_L0_CROSS_TF_BATCH_ACCELERATION] When precomputed_shared_context
+    has entry_pos_flat populated, uses batch matmul jaccard (OPT-2) and dict-
+    lookup leader greedy (OPT-3) instead of per-pair scan."""
     if not selected_by_tf:
         raise ValueError("selected_by_tf must not be empty")
 
@@ -853,29 +892,82 @@ def compute_cross_tf_redundancy(
     # Build pair evidence for i<j only
     n = len(all_recipe_ids)
     pair_evidence_list: list[CrossTFPairEvidence] = []
-    for i in range(n):
-        for j in range(i + 1, n):
-            ri, rj = all_recipe_ids[i], all_recipe_ids[j]
-            panel_i = panel_by_recipe_id.get(ri)
-            panel_j = panel_by_recipe_id.get(rj)
-            if panel_i is None or panel_j is None:
-                continue
-            pair_ev = compute_cross_tf_pair_evidence(
-                recipe_id_a=ri, recipe_id_b=rj,
-                panel_a=panel_i, panel_b=panel_j,
-                context=context,
-                min_score_corr=max_novelty_corr,
-                min_directional_entry_jaccard=min_directional_entry_jaccard,
-                min_shared_directional_entries=min_shared_directional_entries,
-                precomputed_proj_a=proj_cache.get(ri),
-                precomputed_proj_b=proj_cache.get(rj),
-                precomputed_side_entry_a=side_entry_cache.get(ri),
-                precomputed_side_entry_b=side_entry_cache.get(rj),
-                precomputed_score_corr=float(corr[i, j]) if np.isfinite(corr[i, j]) else None,
-            )
-            pair_evidence_list.append(pair_ev)
 
-    # Direct leader-based demotion (not transitive clustering)
+    if precomputed_shared_context is not None and precomputed_shared_context.entry_pos_flat:
+        # [OPT-2] Batch jaccard via matmul
+        pos_flat_stack = np.array(
+            [precomputed_shared_context.entry_pos_flat.get(rid, np.array([], dtype=np.int8))
+             for rid in all_recipe_ids],
+            dtype=np.int16,
+        )
+        neg_flat_stack = np.array(
+            [precomputed_shared_context.entry_neg_flat.get(rid, np.array([], dtype=np.int8))
+             for rid in all_recipe_ids],
+            dtype=np.int16,
+        )
+        entry_flat = pos_flat_stack | neg_flat_stack
+        dir_shared = pos_flat_stack @ pos_flat_stack.T + neg_flat_stack @ neg_flat_stack.T
+        non_dir_shared = entry_flat @ entry_flat.T
+        ent_vec = np.array(
+            [precomputed_shared_context.n_entries.get(rid, 0) for rid in all_recipe_ids],
+            dtype=np.int64,
+        )
+        for i in range(n):
+            panel_i = panel_by_recipe_id.get(all_recipe_ids[i])
+            if panel_i is None:
+                continue
+            for j in range(i + 1, n):
+                panel_j = panel_by_recipe_id.get(all_recipe_ids[j])
+                if panel_j is None:
+                    continue
+                shared_count = int(dir_shared[i, j])
+                total_shared_non_dir = int(non_dir_shared[i, j])
+                union_count = int(ent_vec[i]) + int(ent_vec[j]) - total_shared_non_dir
+                j_dir = shared_count / max(union_count, 1)
+                score_corr_val = float(corr[i, j]) if np.isfinite(corr[i, j]) else 0.0
+                is_red = (
+                    score_corr_val >= max_novelty_corr
+                    and shared_count >= min_shared_directional_entries
+                    and j_dir >= min_directional_entry_jaccard
+                )
+                pair_ev = CrossTFPairEvidence(
+                    recipe_id_a=all_recipe_ids[i], recipe_id_b=all_recipe_ids[j],
+                    score_corr=score_corr_val,
+                    shared_directional_entries=shared_count,
+                    directional_entry_jaccard=float(j_dir),
+                    is_redundant=is_red,
+                )
+                pair_evidence_list.append(pair_ev)
+    else:
+        # Fallback per-pair path (precomputed_shared_context unavailable)
+        for i in range(n):
+            for j in range(i + 1, n):
+                ri, rj = all_recipe_ids[i], all_recipe_ids[j]
+                panel_i = panel_by_recipe_id.get(ri)
+                panel_j = panel_by_recipe_id.get(rj)
+                if panel_i is None or panel_j is None:
+                    continue
+                pair_ev = compute_cross_tf_pair_evidence(
+                    recipe_id_a=ri, recipe_id_b=rj,
+                    panel_a=panel_i, panel_b=panel_j,
+                    context=context,
+                    min_score_corr=max_novelty_corr,
+                    min_directional_entry_jaccard=min_directional_entry_jaccard,
+                    min_shared_directional_entries=min_shared_directional_entries,
+                    precomputed_proj_a=proj_cache.get(ri),
+                    precomputed_proj_b=proj_cache.get(rj),
+                    precomputed_side_entry_a=side_entry_cache.get(ri),
+                    precomputed_side_entry_b=side_entry_cache.get(rj),
+                    precomputed_score_corr=float(corr[i, j]) if np.isfinite(corr[i, j]) else None,
+                )
+                pair_evidence_list.append(pair_ev)
+
+    # [OPT-3] Leader-based demotion via dict O(1) lookup
+    pair_map: dict[tuple[str, str], CrossTFPairEvidence] = {}
+    for p_ev in pair_evidence_list:
+        pair_map[(p_ev.recipe_id_a, p_ev.recipe_id_b)] = p_ev
+        pair_map[(p_ev.recipe_id_b, p_ev.recipe_id_a)] = p_ev
+
     ranked = sorted(
         enumerate(all_selected),
         key=lambda x: (-x[1].l1_priority_score, x[1].recipe_id),
@@ -888,13 +980,7 @@ def compute_cross_tf_redundancy(
         rid = candidate.recipe_id
         is_demoted = False
         for leader_rid in retained:
-            # Find the pair evidence (a,b) or (b,a)
-            found_ev: CrossTFPairEvidence | None = None
-            for p_ev in pair_evidence_list:
-                if (p_ev.recipe_id_a == leader_rid and p_ev.recipe_id_b == rid) or \
-                   (p_ev.recipe_id_a == rid and p_ev.recipe_id_b == leader_rid):
-                    found_ev = p_ev
-                    break
+            found_ev = pair_map.get((leader_rid, rid))
             if found_ev is not None and found_ev.is_redundant:
                 demoted.append(rid)
                 demoted_reason_map[rid] = leader_rid
