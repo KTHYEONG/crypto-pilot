@@ -886,6 +886,11 @@ class AlphaFoundryRuntimeConfig:
     cross_tf_pruning_min_survivors_per_archetype: int = 1
     cross_tf_pruning_min_survivors_per_tf: int = 1
 
+    # L0 parallel gate execution [LIMIT-03] 1=sequential (current behavior), 2-4=parallel
+    l0_parallel_max_workers: int = 1
+    # TF-probe skip capability [LIMIT-07] default unchanged (still runs)
+    enable_tf_probe_scoped: bool = True
+
     def __post_init__(self) -> None:
         if self.mode not in {"off", "audit", "gate"}:
             raise ValueError(f"invalid alpha_foundry mode: {self.mode!r}")
@@ -936,6 +941,10 @@ class AlphaFoundryRuntimeConfig:
             raise ValueError(
                 f"cross_tf_pruning_min_survivors_per_tf must be >= 1, "
                 f"got {self.cross_tf_pruning_min_survivors_per_tf}"
+            )
+        if not (1 <= self.l0_parallel_max_workers <= 4):
+            raise ValueError(
+                f"l0_parallel_max_workers must be in [1,4], got {self.l0_parallel_max_workers}"
             )
 
 
