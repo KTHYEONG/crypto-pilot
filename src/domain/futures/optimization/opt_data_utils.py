@@ -1159,3 +1159,53 @@ def load_futures_data_maps_for_symbols(
         )
 
     return data_maps, oos_data_maps, valid_symbols
+
+
+def load_ltf_exec_1m_frame(
+    *,
+    symbol: str,
+    data_root: Path,
+    start_datetime: pd.Timestamp,
+    end_datetime: pd.Timestamp,
+    required_columns: tuple[str, ...] = (
+        "datetime", "high", "low", "close", "volume",
+        "taker_buy_base_volume", "quote_vol", "trades",
+    ),
+) -> pd.DataFrame | None:
+    """Load one symbol's bounded 1m source frame for streaming LTF signals.
+
+    Reads only required columns within [start_datetime, end_datetime].
+    Returns None on any error (logged) — never raises.
+    """
+    path = data_root / "futures" / f"{symbol}_1m.parquet"
+    if not path.exists():
+        _logger.debug("[LTF_1M] file not found symbol=%s path=%s", symbol, path)
+        return None
+    try:
+        import pyarrow.compute as pc
+        import pyarrow.dataset as ds
+
+        dataset = ds.dataset(str(path), format="parquet")  # type: ignore[no-untyped-call]
+        available_columns = set(dataset.schema.names)
+        required_source_columns = {
+            "datetime", "high", "low", "close", "volume", "taker_buy_base_volume",
+        }
+        if not required_source_columns.issubset(available_columns):
+            _logger.warning("[LTF_1M] required columns missing symbol=%s", symbol)
+            return None
+        selected_columns = [column for column in required_columns if column in available_columns]
+        table = dataset.to_table(
+            columns=selected_columns,
+            filter=(
+                (pc.field("datetime") >= start_datetime)  # type: ignore[no-untyped-call]
+                & (pc.field("datetime") <= end_datetime)  # type: ignore[no-untyped-call]
+            ),
+        )
+        if table.num_rows == 0:
+            return None
+        df = table.to_pandas()
+        df["datetime"] = pd.to_datetime(df["datetime"], utc=True)
+        return df
+    except Exception as exc:
+        _logger.warning("[LTF_1M] load failed symbol=%s: %s", symbol, exc)
+        return None

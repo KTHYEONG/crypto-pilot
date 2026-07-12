@@ -1,4 +1,7 @@
-"""Futures runner runtime config with Alpha Foundry mode. [ADR_20260706_ALPHA_FOUNDRY_MAIN_WIRING][ADR_20260710_L0_TERMINAL_DEBUG_OBSERVABILITY]"""
+"""Futures runner runtime config with Alpha Foundry mode.
+
+[ADR_20260706_ALPHA_FOUNDRY_MAIN_WIRING][ADR_20260710_L0_TERMINAL_DEBUG_OBSERVABILITY]
+"""
 
 from __future__ import annotations
 
@@ -25,6 +28,11 @@ def _l0_parallel_max_workers() -> int:
     """[ADR_20260711_L0_L1_PIPELINE_LATENCY_PROFILING] measurement-run opt-in env gate."""
     raw = os.environ.get("L0_PARALLEL_MAX_WORKERS", "")
     return int(raw) if raw.strip() else 1
+
+
+def _l0_ltf_pool_widened() -> bool:
+    """[ADR_20260712_L0_EVIDENCE_CONDITIONED_CROSS_TF_ADMISSION] opt-in env gate."""
+    return os.environ.get("L0_LTF_POOL_WIDENED", "") not in ("", "0", "false", "False")
 
 
 ActivePhase = Literal["l0", "l1", "l2", "l3"]
@@ -160,6 +168,7 @@ def build_l0_runtime_config(
         enable_cross_tf_diversity_audit=_l0_cross_tf_diversity_audit_enabled(),
         enable_cross_tf_pruning=_l0_cross_tf_pruning_enabled(),
         l0_parallel_max_workers=_l0_parallel_max_workers(),
+        enable_ltf_family_pool_experiment=_l0_ltf_pool_widened(),
     )
     return validate_alpha_foundry_runtime_config(config)
 

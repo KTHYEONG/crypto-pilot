@@ -75,11 +75,20 @@ _ALIGNED_DATA_MAPS_CACHE: dict[
 ] = {}
 
 
+def clear_aligned_data_maps_cache() -> None:
+    """Release run-scoped aligned-data cache entries.
+
+    [ADR_20260712_L0_MEMORY_BOUND_DATAFLOW] [LIMIT-05]
+    """
+    _ALIGNED_DATA_MAPS_CACHE.clear()
+
+
 def align_data_maps(
     data_maps: dict[str, dict[str, Any]],
     symbols: list[str] | tuple[str, ...],
     tf: str,
     *,
+    cache_result: bool = True,
     state_cube: UniverseStateCube | None = None,
     readiness_strategy: str | None = None,
     readiness_cube: Any | None = None,
@@ -91,6 +100,8 @@ def align_data_maps(
         data_maps: Per-symbol per-timeframe DataFrames.
         symbols: Symbol list to align.
         tf: Timeframe key (e.g. "4h").
+        cache_result: When False, skip global cache and always rebuild.
+            Use for ephemeral/virtual panels that should not pollute cache.
         state_cube: Optional PIT universe state cube. When provided, overwrites
             ``active_mask``, ``entry_block_mask``, ``adv_usdt_2d``, and
             ``execution_cost_bps_2d`` via vectorized forward-asof join.
@@ -103,8 +114,8 @@ def align_data_maps(
     Returns:
         AlignedMarketData with [T, N] arrays on the common time grid.
     """
-    # Skip cache when state_cube is provided — result depends on external mutable cube.
-    if state_cube is None:
+    # Skip cache when state_cube is provided or cache_result is False
+    if state_cube is None and cache_result:
         cache_key = (id(data_maps), tuple(sorted(symbols)), tf)
         if cache_key in _ALIGNED_DATA_MAPS_CACHE:
             cached_val, expected_shapes = _ALIGNED_DATA_MAPS_CACHE[cache_key]

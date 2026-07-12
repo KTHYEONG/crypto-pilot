@@ -5,6 +5,7 @@
 [ADR_20260707_ALPHA_FOUNDRY_RESULT_SYNC]
 [ADR_20260707_ALPHA_FOUNDRY_CANONICAL_GATE_WIRING]
 [ADR_20260706_ALPHA_FOUNDRY_L0_SIGNAL_RIGOR]
+[ADR_20260712_L0_EVIDENCE_CONDITIONED_CROSS_TF_ADMISSION]
 """
 
 from __future__ import annotations
@@ -88,6 +89,32 @@ L0HandoffExclusionReason: TypeAlias = Literal[
     "non_positive_priority",
     "missing_panel",
 ]
+
+
+CrossTFPruningStatus: TypeAlias = Literal["disabled", "applied", "audit_only", "fail_open"]
+
+
+@dataclass(slots=True, frozen=True)
+class CrossTFCanonicalContext:
+    canonical_tf: str
+    canonical_datetimes_ns: NDArray[np.int64]
+    active_mask_2d: NDArray[np.bool_]
+    common_start_ns: int
+    common_end_ns: int
+    n_common_active_bars: int
+
+
+@dataclass(slots=True, frozen=True)
+class CrossTFPairEvidence:
+    recipe_id_a: str
+    recipe_id_b: str
+    score_corr: float
+    shared_directional_entries: int
+    directional_entry_jaccard: float
+    is_redundant: bool
+
+
+DataSupportTier: TypeAlias = Literal["full_support", "partial_support"]
 
 
 @dataclass(slots=True, frozen=True)
@@ -227,6 +254,7 @@ class L0SignalCandidate:
     l1_budget_units: int
     hard_reject_reasons: tuple[L0HardRejectReason, ...]
     soft_flags: tuple[L0SoftFlag, ...]
+    data_support_tier: DataSupportTier = "full_support"
 
 
 @dataclass(slots=True, frozen=True)
@@ -556,6 +584,7 @@ class CheapGateEvidence:
     reject_reasons: tuple[CheapGateRejectReason, ...]
     mean_gross_bps: float
     mean_cost_bps: float
+    data_support_tier: DataSupportTier = "full_support"
 
 
 @dataclass(slots=True, frozen=True)
@@ -576,6 +605,11 @@ class CrossBucketDiversityResult:
     demoted_reason_by_id: Mapping[str, str]
     cross_bucket_corr: NDArray[np.float64]
     global_eff_test_count: float
+    pair_evidence: tuple[CrossTFPairEvidence, ...] = ()
+    canonical_tf: str = ""
+    common_start_ns: int = 0
+    common_end_ns: int = 0
+    n_common_active_bars: int = 0
 
 
 @dataclass(slots=True, frozen=True)
@@ -884,7 +918,23 @@ class AlphaFoundryRuntimeConfig:
     # Cross-TF pruning enforcement [ADR_20260711_L0_CROSS_TF_PRUNING_ADMISSION]
     enable_cross_tf_pruning: bool = False
     cross_tf_pruning_min_survivors_per_archetype: int = 1
-    cross_tf_pruning_min_survivors_per_tf: int = 1
+    cross_tf_pruning_min_survivors_per_tf: int = 0
+
+    # Cross-TF evidence-conditioned admission [ADR_20260712_L0_EVIDENCE_CONDITIONED_CROSS_TF_ADMISSION]
+    cross_tf_min_common_active_bars: int = 480
+    cross_tf_min_directional_entry_jaccard: float = 0.50
+    cross_tf_min_shared_directional_entries: int = 12
+    ltf_exec_1m_min_coverage: float = 0.80
+    enable_ltf_family_pool_experiment: bool = False
+
+    # L0 memory-bound dataflow [ADR_20260712_L0_MEMORY_BOUND_DATAFLOW]
+    l0_max_rss_mb: int = 10_240
+    l0_memory_fraction_cap: float = 0.60
+    l0_memory_safety_margin_mb: int = 512
+    ltf_exec_1m_max_symbols: int = 64
+    ltf_exec_1m_max_workers: int = 1
+    ltf_streaming_enabled: bool = True
+    l0_native_tf_max_workers: int = 1
 
     # L0 parallel gate execution [LIMIT-03] 1=sequential (current behavior), 2-4=parallel
     l0_parallel_max_workers: int = 1
@@ -937,10 +987,52 @@ class AlphaFoundryRuntimeConfig:
                 f"cross_tf_pruning_min_survivors_per_archetype must be >= 1, "
                 f"got {self.cross_tf_pruning_min_survivors_per_archetype}"
             )
-        if self.cross_tf_pruning_min_survivors_per_tf < 1:
+        if self.cross_tf_pruning_min_survivors_per_tf < 0:
             raise ValueError(
-                f"cross_tf_pruning_min_survivors_per_tf must be >= 1, "
+                f"cross_tf_pruning_min_survivors_per_tf must be >= 0, "
                 f"got {self.cross_tf_pruning_min_survivors_per_tf}"
+            )
+        if self.cross_tf_min_common_active_bars < 1:
+            raise ValueError(
+                f"cross_tf_min_common_active_bars must be >= 1, "
+                f"got {self.cross_tf_min_common_active_bars}"
+            )
+        if not (0.0 <= self.cross_tf_min_directional_entry_jaccard <= 1.0):
+            raise ValueError(
+                f"cross_tf_min_directional_entry_jaccard must be in [0.0, 1.0], "
+                f"got {self.cross_tf_min_directional_entry_jaccard}"
+            )
+        if self.cross_tf_min_shared_directional_entries < 1:
+            raise ValueError(
+                f"cross_tf_min_shared_directional_entries must be >= 1, "
+                f"got {self.cross_tf_min_shared_directional_entries}"
+            )
+        if not (0.0 <= self.ltf_exec_1m_min_coverage <= 1.0):
+            raise ValueError(
+                f"ltf_exec_1m_min_coverage must be in [0.0, 1.0], "
+                f"got {self.ltf_exec_1m_min_coverage}"
+            )
+        if self.l0_max_rss_mb < 1:
+            raise ValueError(f"l0_max_rss_mb must be >= 1, got {self.l0_max_rss_mb}")
+        if not (0.0 < self.l0_memory_fraction_cap <= 1.0):
+            raise ValueError(
+                f"l0_memory_fraction_cap must be in (0.0, 1.0], got {self.l0_memory_fraction_cap}"
+            )
+        if self.l0_memory_safety_margin_mb < 0:
+            raise ValueError(
+                f"l0_memory_safety_margin_mb must be >= 0, got {self.l0_memory_safety_margin_mb}"
+            )
+        if self.ltf_exec_1m_max_symbols < 1:
+            raise ValueError(
+                f"ltf_exec_1m_max_symbols must be >= 1, got {self.ltf_exec_1m_max_symbols}"
+            )
+        if not (1 <= self.ltf_exec_1m_max_workers <= 2):
+            raise ValueError(
+                f"ltf_exec_1m_max_workers must be in [1,2], got {self.ltf_exec_1m_max_workers}"
+            )
+        if not (1 <= self.l0_native_tf_max_workers <= 2):
+            raise ValueError(
+                f"l0_native_tf_max_workers must be in [1,2], got {self.l0_native_tf_max_workers}"
             )
         if not (1 <= self.l0_parallel_max_workers <= 4):
             raise ValueError(
@@ -1128,3 +1220,5 @@ class L0StrategyDeliveryManifest:
     independence_audit: L0IndependenceAudit | None
     final_selected_recipe_ids: tuple[str, ...]
     total_l1_verification_budget: int
+    pruning_status: CrossTFPruningStatus = "disabled"
+    pruning_reason: str = ""
