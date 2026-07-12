@@ -24,6 +24,8 @@ from typing import TYPE_CHECKING, Any, Literal, cast
 
 if TYPE_CHECKING:
     pass
+from concurrent.futures import ProcessPoolExecutor
+
 from src.core.utils.utils import setup_logger
 from src.domain.futures.alpha_foundry.contracts import (
     AlphaRecipe,
@@ -40,6 +42,15 @@ from src.domain.futures.observability import emit_csv_artifact_debug, emit_json_
 from src.domain.futures.signals.contracts import CandidateSignalPanel
 
 _logger = logging.getLogger(__name__)
+
+_L0_TF_INPUT_CACHE: dict[str, tuple[Any, ...]] = {}
+"""Module-level prefork cache: tf -> (panels, bindings, recipes, aligned, cost_model, runtime_config,
+evidence_by_tf, cheap_evidences_for_tf).
+Populated in the parent process before ProcessPoolExecutor creation; child
+workers (fork mp_context) inherit this via copy-on-write and look up their
+own slice by `tf` key, avoiding per-task pickling of large AlignedMarketData
+arrays. [LIMIT-02]
+"""
 
 
 @dataclass(slots=True, frozen=True)
@@ -325,6 +336,7 @@ def run_alpha_foundry_l0_gate(
     run_id: str,
     timeframe: str,
     evidence_by_tf: Mapping[str, Any] | None = None,
+    precomputed_cheap_evidences: tuple[Any, ...] | None = None,
 ) -> AlphaFoundryL0Result:
     from src.domain.futures.alpha_foundry.contracts import (
         AlphaFoundryBridgeReport,
@@ -374,6 +386,7 @@ def run_alpha_foundry_l0_gate(
             ),
             runtime_config=runtime_config,
             evidence_by_tf=evidence_by_tf,
+            precomputed_cheap_evidences=precomputed_cheap_evidences,
         )
         evidences = l0_artifacts.evidences
         evidence_rows = l0_artifacts.evidence_rows
@@ -448,10 +461,15 @@ def run_alpha_foundry_l0_gate(
         parquet_path="",
     )
 
+    _t_report_write = _time_module.perf_counter()
     jp, pp = maybe_write_alpha_foundry_report(
         report=report,
         evidence_rows=evidence_rows,
         runtime_config=runtime_config,
+    )
+    setup_logger("opt_main_futures", write_file=False).debug(
+        "[SYS] stage=report_write tf=%s n_rows=%d took=%.4fs",
+        timeframe, len(evidence_rows), _time_module.perf_counter() - _t_report_write,
     )
     json_path = jp if jp is not None else ""
     parquet_path = pp if pp is not None else ""
@@ -537,26 +555,17 @@ def maybe_write_alpha_foundry_report(
     )
 
 
-def build_cheap_gate_evidence_frame(
+def build_cheap_gate_evidence_frame_from_evidences(
     *,
-    panels: Sequence[Any],
+    cheap_evidences: Sequence[Any],
     recipes: Mapping[str, Any],
-    aligned: Any,
-    cost_model: Any,
-    cheap_gate_config: Any,
-    timeframe: str,
 ) -> Any:
+    """Pure DataFrame-projection extracted from build_cheap_gate_evidence_frame.
+    [LIMIT-05] Identical row-building logic; callable directly when evidences
+    are already computed, avoiding a second evaluate_alpha_cheap_gate_batch call.
+    """
     import pandas as pd
 
-    from src.domain.futures.alpha_foundry.cheap_gate import evaluate_alpha_cheap_gate_batch
-
-    cheap_evidences = evaluate_alpha_cheap_gate_batch(
-        panels=panels,
-        recipes=recipes,
-        aligned=aligned,
-        cost_model=cost_model,
-        config=cheap_gate_config,
-    )
     rows: list[dict[str, Any]] = []
     for ev in cheap_evidences:
         recipe = recipes.get(ev.recipe_id)
@@ -588,7 +597,86 @@ def build_cheap_gate_evidence_frame(
     return pd.DataFrame(rows)
 
 
-def run_alpha_foundry_l0_gate_multi_tf(
+def build_cheap_gate_evidence_frame(
+    *,
+    panels: Sequence[Any],
+    recipes: Mapping[str, Any],
+    aligned: Any,
+    cost_model: Any,
+    cheap_gate_config: Any,
+    timeframe: str,
+) -> Any:
+    """[LIMIT-05] UNCHANGED signature/behavior -- now a thin wrapper:
+    evaluate_alpha_cheap_gate_batch(...) then
+    build_cheap_gate_evidence_frame_from_evidences(...).
+    """
+    from src.domain.futures.alpha_foundry.cheap_gate import evaluate_alpha_cheap_gate_batch
+
+    cheap_evidences = evaluate_alpha_cheap_gate_batch(
+        panels=panels,
+        recipes=recipes,
+        aligned=aligned,
+        cost_model=cost_model,
+        config=cheap_gate_config,
+    )
+    return build_cheap_gate_evidence_frame_from_evidences(
+        cheap_evidences=cheap_evidences, recipes=recipes,
+    )
+
+
+def _prime_l0_tf_input_cache(
+    *,
+    panels_by_tf: Mapping[str, Sequence[Any]],
+    bindings_by_tf: Mapping[str, Sequence[Any]],
+    recipes_by_tf: Mapping[str, MutableMapping[str, Any]],
+    aligned_by_tf: Mapping[str, Any],
+    cost_model: Any,
+    runtime_config: Any,
+    evidence_by_tf: Mapping[str, Any],
+    cheap_evidences_by_tf: Mapping[str, tuple[Any, ...]],
+) -> None:
+    """Populate _L0_TF_INPUT_CACHE. Must be called in the parent process
+    strictly before the ProcessPoolExecutor is created. [LIMIT-02]
+    """
+    _L0_TF_INPUT_CACHE.clear()
+    for tf in panels_by_tf:
+        _L0_TF_INPUT_CACHE[tf] = (
+            panels_by_tf[tf],
+            bindings_by_tf.get(tf, []),
+            recipes_by_tf.get(tf, {}),
+            aligned_by_tf[tf],
+            cost_model,
+            runtime_config,
+            evidence_by_tf,
+            cheap_evidences_by_tf.get(tf, ()),
+        )
+
+
+def _run_l0_gate_worker(tf: str, run_id: str) -> tuple[str, AlphaFoundryL0Result]:
+    """Worker entrypoint: looks up its inputs from _L0_TF_INPUT_CACHE[tf]
+    (inherited via fork COW, never passed as a submit() argument) and calls
+    run_alpha_foundry_l0_gate(...) exactly as the sequential path does.
+    Picklable return: (tf, AlphaFoundryL0Result) -- small, no raw market data.
+    """
+    panels, bindings, recipes, aligned, cost_model, runtime_config, evidence_by_tf, cheap_evidences = (
+        _L0_TF_INPUT_CACHE[tf]
+    )
+    result = run_alpha_foundry_l0_gate(
+        panels=panels,
+        bindings=bindings,
+        recipes=recipes,
+        aligned=aligned,
+        cost_model=cost_model,
+        runtime_config=runtime_config,
+        run_id=run_id,
+        timeframe=tf,
+        evidence_by_tf=evidence_by_tf,
+        precomputed_cheap_evidences=cheap_evidences,
+    )
+    return tf, result
+
+
+def _run_phase3_sequential(
     *,
     panels_by_tf: Mapping[str, Sequence[Any]],
     bindings_by_tf: Mapping[str, Sequence[Any]],
@@ -597,49 +685,10 @@ def run_alpha_foundry_l0_gate_multi_tf(
     cost_model: Any,
     runtime_config: Any,
     run_id_prefix: str,
+    evidence_by_tf: Mapping[str, Any],
+    cheap_evidences_by_tf: Mapping[str, tuple[Any, ...]],
 ) -> dict[str, AlphaFoundryL0Result]:
-    missing = set(panels_by_tf) - set(aligned_by_tf)
-    if missing:
-        raise ValueError(f"aligned_by_tf missing timeframe: {next(iter(missing))}")
-
-    import pandas as pd
-
-    # Phase 1: bind panels to recipe_id, then cheap-gate per TF -> evidence_by_tf [LIMIT-01][LIMIT-03]
-    evidence_by_tf: dict[str, Any] = {}
-    for tf, tf_panels in panels_by_tf.items():
-        tf_recipes = recipes_by_tf.get(tf, {})
-        tf_bindings = bindings_by_tf.get(tf, [])
-        if not tf_panels or not tf_recipes:
-            evidence_by_tf[tf] = pd.DataFrame(
-                {
-                    "family": pd.Series(dtype=str),
-                    "variant": pd.Series(dtype=str),
-                    "timeframe": pd.Series(dtype=str),
-                    "recipe_id": pd.Series(dtype=str),
-                    "reject_reasons": pd.Series(dtype=str),
-                    "mean_net_bps": pd.Series(dtype=float),
-                    "block_lcb_bps": pd.Series(dtype=float),
-                }
-            )
-            continue
-        bound_tf_panels = _bind_panels_to_recipe_ids(tf_panels, tf_bindings)
-        evidence_by_tf[tf] = build_cheap_gate_evidence_frame(
-            panels=bound_tf_panels,
-            recipes=tf_recipes,
-            aligned=aligned_by_tf[tf],
-            cost_model=cost_model,
-            cheap_gate_config=runtime_config.cheap_gate,
-            timeframe=tf,
-        )
-        n_evidence_rows = len(evidence_by_tf[tf])
-        _log_fn = _logger.warning if (tf_bindings and n_evidence_rows == 0) else _logger.debug
-        _log_fn(
-            "[SYS] stage=multi_tf_cheap_evidence tf=%s n_panels_in=%d n_bindings=%d n_evidence_rows=%d",
-            tf, len(tf_panels), len(tf_bindings), n_evidence_rows,
-        )  # [LIMIT-08][LIMIT-09]
-
-    # Phase 2: fuse_multi_timeframe_evidence is called inside pipeline
-    # Phase 3: canonical gate per TF
+    """Run Phase 3 canonical gate sequentially (the original behavior)."""
     results: dict[str, AlphaFoundryL0Result] = {}
     for tf in panels_by_tf:
         tf_panels = panels_by_tf[tf]
@@ -657,7 +706,164 @@ def run_alpha_foundry_l0_gate_multi_tf(
             run_id=_run_id,
             timeframe=tf,
             evidence_by_tf=evidence_by_tf,
+            precomputed_cheap_evidences=cheap_evidences_by_tf.get(tf),
         )
+    return results
+
+
+def _run_phase3_parallel(
+    *,
+    panels_by_tf: Mapping[str, Sequence[Any]],
+    bindings_by_tf: Mapping[str, Sequence[Any]],
+    recipes_by_tf: Mapping[str, MutableMapping[str, Any]],
+    aligned_by_tf: Mapping[str, Any],
+    cost_model: Any,
+    runtime_config: Any,
+    run_id_prefix: str,
+    evidence_by_tf: Mapping[str, Any],
+    cheap_evidences_by_tf: Mapping[str, tuple[Any, ...]],
+    max_workers: int,
+) -> dict[str, AlphaFoundryL0Result]:
+    """Run Phase 3 canonical gate in parallel via fork-based ProcessPoolExecutor
+    with prefork COW cache. [LIMIT-02][LIMIT-03]
+    """
+    _prime_l0_tf_input_cache(
+        panels_by_tf=panels_by_tf,
+        bindings_by_tf=bindings_by_tf,
+        recipes_by_tf=recipes_by_tf,
+        aligned_by_tf=aligned_by_tf,
+        cost_model=cost_model,
+        runtime_config=runtime_config,
+        evidence_by_tf=evidence_by_tf,
+        cheap_evidences_by_tf=cheap_evidences_by_tf,
+    )
+    import multiprocessing as _mp
+
+    tfs = list(panels_by_tf)
+    with ProcessPoolExecutor(max_workers=max_workers, mp_context=_mp.get_context("fork")) as executor:
+        futures = {
+            executor.submit(_run_l0_gate_worker, tf, f"{run_id_prefix}_{tf}"): tf
+            for tf in tfs
+        }
+        results: dict[str, AlphaFoundryL0Result] = {}
+        for future in futures:
+            tf_key = futures[future]
+            _tf, result = future.result()
+            results[tf_key] = result
+    return results
+
+
+def run_alpha_foundry_l0_gate_multi_tf(
+    *,
+    panels_by_tf: Mapping[str, Sequence[Any]],
+    bindings_by_tf: Mapping[str, Sequence[Any]],
+    recipes_by_tf: Mapping[str, MutableMapping[str, Any]],
+    aligned_by_tf: Mapping[str, Any],
+    cost_model: Any,
+    runtime_config: Any,
+    run_id_prefix: str,
+    parallel_max_workers: int = 1,
+) -> dict[str, AlphaFoundryL0Result]:
+    """[LIMIT-05] Signature/return type UNCHANGED except the additive
+    keyword-only `parallel_max_workers` (default 1 = today's exact
+    sequential behavior, zero call-site changes required).
+
+    Raises:
+        ValueError: if `parallel_max_workers` not in [1, 4]. [LIMIT-03]
+        ValueError: (unchanged) if aligned_by_tf missing a timeframe present
+            in panels_by_tf.
+    """
+    if not (1 <= parallel_max_workers <= 4):
+        raise ValueError(
+            f"parallel_max_workers must be in [1,4], got {parallel_max_workers}"
+        )
+
+    missing = set(panels_by_tf) - set(aligned_by_tf)
+    if missing:
+        raise ValueError(f"aligned_by_tf missing timeframe: {next(iter(missing))}")
+
+    import pandas as pd
+
+    # Phase 1: bind panels to recipe_id, then cheap-gate per TF -> evidence_by_tf [LIMIT-01][LIMIT-03]
+    # Stash raw CheapGateEvidence tuples for Phase 3 reuse (avoids redundant recomputation)
+    _t_phase1 = _time_module.perf_counter()
+    evidence_by_tf: dict[str, Any] = {}
+    cheap_evidences_by_tf: dict[str, tuple[Any, ...]] = {}
+    for tf, tf_panels in panels_by_tf.items():
+        tf_recipes = recipes_by_tf.get(tf, {})
+        tf_bindings = bindings_by_tf.get(tf, [])
+        if not tf_panels or not tf_recipes:
+            evidence_by_tf[tf] = pd.DataFrame(
+                {
+                    "family": pd.Series(dtype=str),
+                    "variant": pd.Series(dtype=str),
+                    "timeframe": pd.Series(dtype=str),
+                    "recipe_id": pd.Series(dtype=str),
+                    "reject_reasons": pd.Series(dtype=str),
+                    "mean_net_bps": pd.Series(dtype=float),
+                    "block_lcb_bps": pd.Series(dtype=float),
+                }
+            )
+            cheap_evidences_by_tf[tf] = ()
+            continue
+        bound_tf_panels = _bind_panels_to_recipe_ids(tf_panels, tf_bindings)
+        from src.domain.futures.alpha_foundry.cheap_gate import evaluate_alpha_cheap_gate_batch
+
+        cheap_evidences = evaluate_alpha_cheap_gate_batch(
+            panels=bound_tf_panels,
+            recipes=tf_recipes,
+            aligned=aligned_by_tf[tf],
+            cost_model=cost_model,
+            config=runtime_config.cheap_gate,
+        )
+        cheap_evidences_by_tf[tf] = cheap_evidences
+        evidence_by_tf[tf] = build_cheap_gate_evidence_frame_from_evidences(
+            cheap_evidences=cheap_evidences, recipes=tf_recipes,
+        )
+        n_evidence_rows = len(evidence_by_tf[tf])
+        _log_fn = _logger.warning if (tf_bindings and n_evidence_rows == 0) else _logger.debug
+        _log_fn(
+            "[SYS] stage=multi_tf_cheap_evidence tf=%s n_panels_in=%d n_bindings=%d n_evidence_rows=%d",
+            tf, len(tf_panels), len(tf_bindings), n_evidence_rows,
+        )  # [LIMIT-08][LIMIT-09]
+
+    setup_logger("opt_main_futures", write_file=False).debug(
+        "[SYS] stage=l0_phase1_cheap_evidence took=%.4fs n_tfs=%d",
+        _time_module.perf_counter() - _t_phase1, len(panels_by_tf),
+    )
+
+    # Phase 2: fuse_multi_timeframe_evidence is called inside pipeline
+    # Phase 3: canonical gate per TF
+    _t_phase3 = _time_module.perf_counter()
+    if parallel_max_workers <= 1:
+        results = _run_phase3_sequential(
+            panels_by_tf=panels_by_tf,
+            bindings_by_tf=bindings_by_tf,
+            recipes_by_tf=recipes_by_tf,
+            aligned_by_tf=aligned_by_tf,
+            cost_model=cost_model,
+            runtime_config=runtime_config,
+            run_id_prefix=run_id_prefix,
+            evidence_by_tf=evidence_by_tf,
+            cheap_evidences_by_tf=cheap_evidences_by_tf,
+        )
+    else:
+        results = _run_phase3_parallel(
+            panels_by_tf=panels_by_tf,
+            bindings_by_tf=bindings_by_tf,
+            recipes_by_tf=recipes_by_tf,
+            aligned_by_tf=aligned_by_tf,
+            cost_model=cost_model,
+            runtime_config=runtime_config,
+            run_id_prefix=run_id_prefix,
+            evidence_by_tf=evidence_by_tf,
+            cheap_evidences_by_tf=cheap_evidences_by_tf,
+            max_workers=parallel_max_workers,
+        )
+    setup_logger("opt_main_futures", write_file=False).debug(
+        "[SYS] stage=l0_phase3_canonical_gate took=%.4fs parallel_max_workers=%d",
+        _time_module.perf_counter() - _t_phase3, parallel_max_workers,
+    )
 
     # [EVAL] tf_corroboration distribution summary — once per run [LIMIT-08]
     _all_rows: list[Any] = []

@@ -60,6 +60,16 @@ last_verified: 2026-07-12
 - **Independence Metrics** (read-only, `enable_cross_tf_diversity_audit`): Post-gate selection outputs `n_distinct_thesis_ids` (thesis id count) and `n_independent_clusters` (unique clusters via correlation hierarchical clustering).
 - **Pruning Admission** (`enable_cross_tf_pruning`): `assemble_l0_strategy_delivery_manifest()` runs after `run_alpha_foundry_l0_gate_multi_tf()` completes, computing `compute_cross_tf_redundancy()` + `apply_cross_tf_survival_floor()` (per-archetype and per-TF minimum-survivor guarantee, `cross_tf_pruning_min_survivors_per_archetype`/`cross_tf_pruning_min_survivors_per_tf`) to narrow the per-TF `panels_for_l1`/`candidates_for_l1` sets before they reach L1. Fails open: any `ValueError` from the redundancy computation falls back to the unpruned set.
 
+### Phase-3 Cross-TF Parallel Execution (`l0_parallel_max_workers`)
+- `run_alpha_foundry_l0_gate_multi_tf()`'s Phase 3 (per-TF canonical gate) runs sequentially by default (`parallel_max_workers=1`). When `parallel_max_workers>1`, `_run_phase3_parallel()` uses a fork-context `ProcessPoolExecutor` with a prefork copy-on-write cache (`_L0_TF_INPUT_CACHE`, module-level, primed via `_prime_l0_tf_input_cache()` before pool creation) — workers pass only a `tf: str` key through `submit()`, never the large `AlignedMarketData`/panel arrays, avoiding per-task pickling.
+- Bootstrap resampling seeds from `config.bootstrap_seed` per call (not global RNG state), so sequential and parallel execution produce value-identical results regardless of worker/order.
+- Bounded to `1 <= l0_parallel_max_workers <= 4` (half of an 8-core reference machine) — deliberately excludes L1's per-TF nested walk-forward loop, which already saturates cores via its own internal `ProcessPoolExecutor` pools; cross-TF parallelism there would oversubscribe, not speed up.
+
+### Phase-1/Phase-3 Cheap-Gate Deduplication
+- Phase 1 (per-TF `evaluate_alpha_cheap_gate_batch()`, sequential, builds `evidence_by_tf` for cross-TF corroboration fusion) and Phase 3 (per-TF canonical gate, via `run_alpha_foundry_l0_pipeline`) previously called `evaluate_alpha_cheap_gate_batch()` twice per TF with byte-identical inputs (`bound_panels`/`recipes`/`aligned`/`cost_model`/`cheap_gate_config`). Phase 1 now stashes its raw `tuple[CheapGateEvidence, ...]` per TF and passes it into Phase 3 via `precomputed_cheap_evidences` (threaded through `run_alpha_foundry_l0_gate_multi_tf` → `run_alpha_foundry_l0_gate` → `run_alpha_foundry_l0_pipeline`, all additive/`None`-default keyword-only parameters), which skips its own recomputation when provided.
+- `build_cheap_gate_evidence_frame_from_evidences(cheap_evidences, recipes)` extracts the DataFrame-projection logic from `build_cheap_gate_evidence_frame()` (now a thin wrapper) so Phase 1 can build `evidence_by_tf` without discarding the raw evidences it already computed.
+- Correspondence is by `recipe_id`, not list order (downstream matches evidences to panels via `ev.recipe_id`).
+
 ### Non-Native Timeframe Synthesis (Virtual Probe)
 - **Cadence Rules**: Synthesizes 2h/6h/8h/12h bars from nearest native timeframe (1h/4h) using left-closed, left-labeled resampling.
 - **Completeness Rule**: Final bin acceptance requires bin_count >= target_hours / source_hours.
@@ -103,3 +113,5 @@ graph TD
 | `enable_cross_tf_pruning` | False | Toggle for enforcing cross-TF redundancy pruning before L1 handoff |
 | `cross_tf_pruning_min_survivors_per_archetype` | 1 | Minimum surviving candidates per archetype after cross-TF pruning |
 | `cross_tf_pruning_min_survivors_per_tf` | 1 | Minimum surviving candidates per timeframe after cross-TF pruning |
+| `l0_parallel_max_workers` | 1 | Phase-3 cross-TF gate concurrency; 1=sequential, 2-4=fork-based parallel |
+| `enable_tf_probe_scoped` | True | Capability to skip the scoped TF-probe diagnostic stage (decision deferred, see `docs/results/result.md`) |
