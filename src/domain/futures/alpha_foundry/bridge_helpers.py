@@ -521,6 +521,25 @@ def maybe_write_alpha_foundry_report(
     evidence_rows: Sequence[Any],
     runtime_config: Any,
 ) -> tuple[str | None, str | None]:
+    # [ADR_20260712_L0_EVIDENCE_CONDITIONED_CROSS_TF_ADMISSION] Log L0 Gate survivors summary
+    if getattr(report, "mode", "") == "gate":
+        passed_rows = [r for r in evidence_rows if bool(getattr(r, "gate_passed", False))]
+        if passed_rows:
+            _logger.info("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+            _logger.info("🟢 [L0 GATE SURVIVORS SUMMARY]")
+            _logger.info("--------------------------------------------------------------")
+            _logger.info("  %-32s | %-5s | %-12s | %-8s", "Recipe ID", "TF", "Net LCB (bps)", "t-stat")
+            _logger.info("--------------------------------------------------------------")
+            for r in passed_rows[:20]:
+                recipe_id = getattr(r, "recipe_id", "")
+                tf = getattr(r, "timeframe", "")
+                net_lcb = getattr(r, "net_lcb_bps", 0.0)
+                t_stat = getattr(r, "nw_tstat", 0.0)
+                _logger.info("  %-32s | %-5s | %12.2f | %8.2f", recipe_id[:32], tf, net_lcb, t_stat)
+            if len(passed_rows) > 20:
+                _logger.info("  ... and %d more recipes.", len(passed_rows) - 20)
+            _logger.info("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+
     artifact_enabled = getattr(runtime_config, "artifact_write_enabled", False)
     observability = getattr(runtime_config, "observability_mode", "debug_log")
 

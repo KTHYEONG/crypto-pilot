@@ -2251,7 +2251,9 @@ def _run_strategy_stage(
     ).candidate
     _t_probe = time.perf_counter()
     _af_cfg = getattr(run_config, "alpha_foundry", None)
-    _run_probe = getattr(_af_cfg, "enable_tf_probe_scoped", True) if _af_cfg is not None else True
+    _run_probe = run_config.phase != "l0" and (
+        getattr(_af_cfg, "enable_tf_probe_scoped", True) if _af_cfg is not None else True
+    )
     _probe_result_local = (
         _run_tf_probe_stage_scoped(
             run_config=run_config,
