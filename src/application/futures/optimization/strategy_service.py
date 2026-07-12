@@ -171,6 +171,10 @@ def pick_strategy_data_maps(
         if isinstance(is_df, pd.DataFrame) and isinstance(oos_df, pd.DataFrame) and not oos_df.empty:
             if is_df.empty:
                 merged_sym[tf] = oos_df
+            elif _oos_covers_is_range(is_df, oos_df):
+                # [ADR_20260712_L0_MEMORY_BOUND_DATAFLOW] [LIMIT-02] OOS reference
+                # reuse avoids full-frame concat copy.
+                merged_sym[tf] = oos_df
             else:
                 merged_sym[tf] = (
                     pd.concat([is_df, oos_df], ignore_index=True)
@@ -370,3 +374,15 @@ def run_active_strategy_output_bridge(
         time.perf_counter() - t_bridge_inner,
     )
     return result
+
+
+def _oos_covers_is_range(is_df: pd.DataFrame, oos_df: pd.DataFrame) -> bool:
+    """Return whether cumulative OOS DataFrame already contains every IS timestamp range.
+
+    [ADR_20260712_L0_MEMORY_BOUND_DATAFLOW] [LIMIT-02]
+    """
+    if is_df.empty or oos_df.empty:
+        return False
+    is_dt = pd.to_datetime(is_df["datetime"], utc=True)
+    oos_dt = pd.to_datetime(oos_df["datetime"], utc=True)
+    return bool(oos_dt.min() <= is_dt.min() and oos_dt.max() >= is_dt.max())

@@ -2102,7 +2102,7 @@ def build_rule_signal_panels(
         "btc_neutral_residual_reversal",
     }.intersection(family_filter):
         panels.extend(
-            build_causal_diversified_signal_panels(
+            build_causal_diversified_signal_panels(  # type: ignore[arg-type]
                 aligned=aligned,
                 cfg=cfg,
                 valid_mask_2d=valid_mask,
