@@ -13,7 +13,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Literal, TypeAlias
+from typing import Any, Literal, TypeAlias
 
 import numpy as np
 from numpy.typing import NDArray
@@ -584,6 +584,11 @@ CheapGateConfig = AlphaGateConfig
 
 @dataclass(slots=True, frozen=True)
 class CheapGateEvidence:
+    """[ADR_20260712_L0_GATE_PIPELINE_OPT] 3 optional cache fields added:
+    cheap_event_arrays (event_mask for canonical), cheap_block_stats (gross_block_means),
+    cheap_meta_stats (rank_ic) — populated by evaluate_panel_cheap_gate, consumed by
+    evaluate_panel_gate cache path to skip redundant Phase 3 computation."""
+
     recipe_id: str
     timeframe: str
     symbol_scope: SymbolScope
@@ -605,6 +610,9 @@ class CheapGateEvidence:
     mean_gross_bps: float
     mean_cost_bps: float
     data_support_tier: DataSupportTier = "full_support"
+    cheap_event_arrays: dict[str, NDArray[np.float64]] | None = field(default=None)
+    cheap_block_stats: dict[str, Any] | None = field(default=None)
+    cheap_meta_stats: dict[str, Any] | None = field(default=None)
 
 
 @dataclass(slots=True, frozen=True)
