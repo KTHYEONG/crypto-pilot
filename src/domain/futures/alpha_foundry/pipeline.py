@@ -247,6 +247,7 @@ def run_alpha_foundry_l0_pipeline(
     total_l1_verification_budget: int = 30,
     evidence_by_tf: Mapping[str, pd.DataFrame] | None = None,
     runtime_config: AlphaFoundryRuntimeConfig | None = None,
+    precomputed_cheap_evidences: tuple[CheapGateEvidence, ...] | None = None,
 ) -> AlphaFoundryL0Artifacts:
     # 1. Search cell creation (if runtime_config provided)
     search_cells: tuple[L0SearchCell, ...] = ()
@@ -294,14 +295,17 @@ def run_alpha_foundry_l0_pipeline(
                 runtime_config=runtime_config,
             )
 
-    # 3. Cheap gate (first-pass filter)
-    cheap_evidences = evaluate_alpha_cheap_gate_batch(
-        panels=panels,
-        recipes=recipes,
-        aligned=aligned,
-        cost_model=cost_model,
-        config=cheap_gate_config,
-    )
+    # 3. Cheap gate (first-pass filter) -- skip if precomputed evidences provided [LIMIT-01]
+    if precomputed_cheap_evidences is not None:
+        cheap_evidences = precomputed_cheap_evidences
+    else:
+        cheap_evidences = evaluate_alpha_cheap_gate_batch(
+            panels=panels,
+            recipes=recipes,
+            aligned=aligned,
+            cost_model=cost_model,
+            config=cheap_gate_config,
+        )
 
     reject_reason_counts: dict[str, int] = {}
     for ev in cheap_evidences:
