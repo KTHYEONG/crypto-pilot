@@ -2425,3 +2425,107 @@ def test_l0_gate_early_exit_optimization_fallback() -> None:
         mock_eval.assert_called_once()
 
 
+class TestCheapGateCache:
+    """OPT-1 [ADR_20260712_L0_GATE_CACHE]: Cheap→Canonical gate cache tests."""
+
+    def test_cheap_cache_populated_on_pass(self) -> None:
+        """CheapGateEvidence carries cache arrays when gate passes."""
+        aligned = make_mock_aligned()
+        panel = make_mock_panel()
+        recipe = SAMPLE_RECIPE
+        cfg = CheapGateConfig(min_events=10, min_effective_n=5.0, bootstrap_samples=200)
+        cost = ExecutionCostModel()
+
+        cheap = evaluate_panel_cheap_gate(
+            panel=panel, aligned=aligned, recipe=recipe,
+            cost_model=cost, config=cfg, bars_per_year=2190.0,
+        )
+        if cheap.gate_passed:
+            assert cheap.cheap_event_arrays is not None
+            assert "net_vals" in cheap.cheap_event_arrays
+            assert "gross_vals" in cheap.cheap_event_arrays
+            assert cheap.cheap_block_stats is not None
+            assert "net_block_means" in cheap.cheap_block_stats
+            assert cheap.cheap_meta_stats is not None
+            assert "rank_ic" in cheap.cheap_meta_stats
+
+    def test_cache_path_matches_no_cache_path(self) -> None:
+        """evaluate_panel_gate with cache produces identical results as full recompute."""
+        aligned = make_mock_aligned()
+        panel = make_mock_panel()
+        recipe = SAMPLE_RECIPE
+        gate_cfg = AlphaGateConfig(min_events=10, min_effective_n=5.0,
+                                    min_candidate_rank_ic_tstat=0.0,
+                                    min_nw_tstat=0.0,
+                                    max_cost_drag_ratio=1.0,
+                                    max_turnover_per_year=2000.0)
+        cost = ExecutionCostModel()
+        cheap_cfg = CheapGateConfig(min_events=10, min_effective_n=5.0, bootstrap_samples=200)
+
+        cheap = evaluate_panel_cheap_gate(
+            panel=panel, aligned=aligned, recipe=recipe,
+            cost_model=cost, config=cheap_cfg, bars_per_year=2190.0,
+        )
+
+        gate_with_cache = evaluate_panel_gate(
+            panel=panel, aligned=aligned, recipe=recipe,
+            cost_model=cost, config=gate_cfg,
+            bars_per_year=2190.0, run_id="test",
+            cheap_event_arrays=cheap.cheap_event_arrays,
+            cheap_block_stats=cheap.cheap_block_stats,
+            cheap_meta_stats=cheap.cheap_meta_stats,
+        )
+        gate_without = evaluate_panel_gate(
+            panel=panel, aligned=aligned, recipe=recipe,
+            cost_model=cost, config=gate_cfg,
+            bars_per_year=2190.0, run_id="test",
+        )
+        assert gate_with_cache.effective_n == gate_without.effective_n
+        assert gate_with_cache.rank_ic == gate_without.rank_ic
+        assert gate_with_cache.bootstrap_lcb_bps == gate_without.bootstrap_lcb_bps
+        assert gate_with_cache.handoff_tier == gate_without.handoff_tier
+        assert gate_with_cache.reject_reasons == gate_without.reject_reasons
+
+    def test_cache_none_fallthrough(self) -> None:
+        """None cache -> full recompute (backward compatible)."""
+        aligned = make_mock_aligned()
+        panel = make_mock_panel()
+        recipe = SAMPLE_RECIPE
+        gate_cfg = AlphaGateConfig(min_events=10, min_effective_n=5.0,
+                                    min_candidate_rank_ic_tstat=0.0,
+                                    min_nw_tstat=0.0,
+                                    max_cost_drag_ratio=1.0,
+                                    max_turnover_per_year=2000.0)
+        gate = evaluate_panel_gate(
+            panel=panel, aligned=aligned, recipe=recipe,
+            cost_model=ExecutionCostModel(), config=gate_cfg,
+            bars_per_year=2190.0, run_id="test",
+            cheap_event_arrays=None, cheap_block_stats=None, cheap_meta_stats=None,
+        )
+        assert isinstance(gate, AlphaGateEvidence)
+        assert gate.effective_n > 0
+
+    def test_precomputed_atr_consistency(self) -> None:
+        """Cheap gate with precomputed ATR produces same result."""
+        aligned = make_mock_aligned()
+        panels = [make_mock_panel()]
+        recipes = {"trend_ma:ema_12_72:4h": SAMPLE_RECIPE}
+        cfg = CheapGateConfig(min_events=10, min_effective_n=5.0, bootstrap_samples=200)
+
+        from src.domain.futures.strategy.candidate_labels import _compute_yang_zhang_vol_2d
+        atr = _compute_yang_zhang_vol_2d(aligned)
+
+        evs_with = evaluate_alpha_cheap_gate_batch(
+            panels=panels, recipes=recipes, aligned=aligned,
+            cost_model=ExecutionCostModel(), config=cfg,
+            precomputed_atr_2d=atr,
+        )
+        evs_without = evaluate_alpha_cheap_gate_batch(
+            panels=panels, recipes=recipes, aligned=aligned,
+            cost_model=ExecutionCostModel(), config=cfg,
+            precomputed_atr_2d=None,
+        )
+        for a, b in zip(evs_with, evs_without, strict=False):
+            assert a.gate_passed == b.gate_passed
+            assert a.mean_net_bps == b.mean_net_bps
+
