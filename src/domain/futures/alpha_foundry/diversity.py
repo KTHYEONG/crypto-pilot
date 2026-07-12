@@ -22,12 +22,15 @@ from src.domain.futures.alpha_foundry.contracts import (
     BucketKey,
     CheapGateEvidence,
     CrossBucketDiversityResult,
+    CrossTFCanonicalContext,
+    CrossTFPairEvidence,
     DiversitySelectionResult,
     L0IndependenceAudit,
     L0SignalCandidate,
 )
 from src.domain.futures.alpha_foundry.multi_tf_fusion import project_signal_to_canonical_grid
 from src.domain.futures.signals.contracts import CandidateSignalPanel
+from src.domain.futures.strategy.common.alignment import AlignedMarketData
 
 _TF_TO_MINUTES_MAP: dict[str, int] = {
     "30m": 30,
@@ -427,11 +430,11 @@ def audit_full_family_correlation(
 # ── Economic Thesis Grouping (Fix 3 — additive/observability only) ────────
 
 FAMILY_THESIS_GROUP: Mapping[str, str] = {
-    "trend_ma": "trend_ma_cross", "ichimoku_trend": "trend_ma_cross",
+    "trend_ma": "trend_ma_cross", "ema_trend": "trend_ma_cross", "ichimoku_trend": "trend_ma_cross",
     "volume_participation_breakout": "breakout_retest_liquidity",
     "liquidity_participation_breakout": "breakout_retest_liquidity",
     "vol_contraction_breakout": "breakout_retest_liquidity",
-    "carry_net_of_funding": "funding_carry",
+    "carry_net_of_funding": "funding_carry", "funding_slope_carry": "funding_carry",
     "oi_lsr_unwind": "oi_unwind",
     "xs_momentum": "xs_momentum_continuation", "residual_momentum_xs": "xs_momentum_continuation",
     "xs_residual_rebalance": "xs_momentum_continuation",
@@ -462,24 +465,171 @@ def estimate_distinct_thesis_count(
     return len({resolve_economic_thesis_id(f) for f in evidence_families})
 
 
+def resolve_cross_tf_canonical_context(
+    *,
+    selected_by_tf: Mapping[str, Sequence[L0SignalCandidate]],
+    panel_by_recipe_id: Mapping[str, CandidateSignalPanel],
+    aligned_by_tf: Mapping[str, AlignedMarketData],
+    min_common_active_bars: int,
+) -> CrossTFCanonicalContext:
+    """Resolve a common canonical context from all selected candidates.
+
+    [ADR_20260712_L0_EVIDENCE_CONDITIONED_CROSS_TF_ADMISSION]
+
+    Raises:
+        ValueError: if no common history exists or min_common_active_bars unmet.
+    """
+    if not selected_by_tf:
+        raise ValueError("selected_by_tf must not be empty")
+
+    selected_tfs = list(selected_by_tf)
+    canonical_tf = min(selected_tfs, key=lambda tf: _tf_to_minutes(tf))
+
+    aligned = aligned_by_tf[canonical_tf]
+    canonical_datetimes_ns = aligned.datetimes.astype("datetime64[ns]").astype(np.int64)
+
+    active_mask_2d = (
+        aligned.active_mask
+        & aligned.warm_mask
+        & ~aligned.entry_block_mask
+        & ~aligned.kill_mask
+    )
+
+    # Compute common start/end from all bound panels
+    common_start_ns: int = 0
+    common_end_ns: int = 0
+    first = True
+    all_recipe_ids: list[str] = []
+    for candidates in selected_by_tf.values():
+        all_recipe_ids.extend(c.recipe_id for c in candidates)
+    for rid in all_recipe_ids:
+        panel = panel_by_recipe_id.get(rid)
+        if panel is None:
+            continue
+        panel_dt = np.asarray(panel.datetimes, dtype="datetime64[ns]").astype(np.int64)
+        if first:
+            common_start_ns = int(np.min(panel_dt))
+            common_end_ns = int(np.max(panel_dt))
+            first = False
+        else:
+            common_start_ns = max(common_start_ns, int(np.min(panel_dt)))
+            common_end_ns = min(common_end_ns, int(np.max(panel_dt)))
+
+    if first:
+        raise ValueError("no panel with datetimes found in selected candidates")
+
+    # Clip canonical grid to common interval
+    grid_mask = (canonical_datetimes_ns >= common_start_ns) & (canonical_datetimes_ns <= common_end_ns)
+    clipped_active = active_mask_2d[grid_mask]
+    n_common_active_bars = int(np.sum(np.any(clipped_active, axis=1)))
+
+    if n_common_active_bars < min_common_active_bars:
+        raise ValueError(
+            f"n_common_active_bars={n_common_active_bars} < min_common_active_bars={min_common_active_bars}"
+        )
+
+    return CrossTFCanonicalContext(
+        canonical_tf=canonical_tf,
+        canonical_datetimes_ns=canonical_datetimes_ns,
+        active_mask_2d=active_mask_2d,
+        common_start_ns=common_start_ns,
+        common_end_ns=common_end_ns,
+        n_common_active_bars=n_common_active_bars,
+    )
+
+
+def _causal_projected_side_and_entry(
+    score: NDArray[np.float64],
+    valid: NDArray[np.bool_],
+    active: NDArray[np.bool_],
+) -> tuple[NDArray[np.int8], NDArray[np.bool_]]:
+    side = np.zeros(score.shape, dtype=np.int8)
+    side[valid] = np.sign(score[valid]).astype(np.int8)
+    side_prev = np.vstack([np.zeros_like(side[:1]), side[:-1, :]])
+    entry: NDArray[np.bool_] = (side != 0) & (side != side_prev) & valid & active
+    return side, entry
+
+
+def compute_cross_tf_pair_evidence(
+    *,
+    recipe_id_a: str,
+    recipe_id_b: str,
+    panel_a: CandidateSignalPanel,
+    panel_b: CandidateSignalPanel,
+    context: CrossTFCanonicalContext,
+    min_score_corr: float,
+    min_directional_entry_jaccard: float,
+    min_shared_directional_entries: int,
+) -> CrossTFPairEvidence:
+    """Compute direct redundancy evidence between two candidates on the canonical grid.
+
+    [ADR_20260712_L0_EVIDENCE_CONDITIONED_CROSS_TF_ADMISSION]
+    """
+    canonical_dt = context.canonical_datetimes_ns
+    proj_a_s, proj_a_v = project_signal_to_canonical_grid(
+        panel=panel_a, canonical_datetimes=canonical_dt, causal_lag_bars=1,
+    )
+    proj_b_s, proj_b_v = project_signal_to_canonical_grid(
+        panel=panel_b, canonical_datetimes=canonical_dt, causal_lag_bars=1,
+    )
+
+    active = context.active_mask_2d
+    valid_ab = proj_a_v & proj_b_v & active
+    flat_a = proj_a_s[valid_ab]
+    flat_b = proj_b_s[valid_ab]
+    if len(flat_a) < 2:
+        return CrossTFPairEvidence(
+            recipe_id_a=recipe_id_a, recipe_id_b=recipe_id_b,
+            score_corr=0.0, shared_directional_entries=0,
+            directional_entry_jaccard=0.0, is_redundant=False,
+        )
+
+    c = float(np.corrcoef(flat_a, flat_b)[0, 1])
+    score_corr = c if np.isfinite(c) else 0.0
+
+    side_a, entry_a = _causal_projected_side_and_entry(proj_a_s, proj_a_v, active)
+    side_b, entry_b = _causal_projected_side_and_entry(proj_b_s, proj_b_v, active)
+
+    shared = entry_a & entry_b & (side_a == side_b)
+    union = entry_a | entry_b
+    shared_count = int(np.sum(shared))
+    union_count = int(np.sum(union))
+    j_dir = shared_count / max(union_count, 1)
+
+    is_redundant = (
+        score_corr >= min_score_corr
+        and shared_count >= min_shared_directional_entries
+        and j_dir >= min_directional_entry_jaccard
+    )
+
+    return CrossTFPairEvidence(
+        recipe_id_a=recipe_id_a, recipe_id_b=recipe_id_b,
+        score_corr=score_corr,
+        shared_directional_entries=shared_count,
+        directional_entry_jaccard=float(j_dir),
+        is_redundant=is_redundant,
+    )
+
+
 def compute_cross_tf_redundancy(
     *,
     selected_by_tf: Mapping[str, Sequence[L0SignalCandidate]],
     panel_by_recipe_id: Mapping[str, CandidateSignalPanel],
-    canonical_tf: str,
-    canonical_datetimes: NDArray[np.int64],
-    active_mask_canonical: NDArray[np.bool_],
+    aligned_by_tf: Mapping[str, AlignedMarketData],
+    min_common_active_bars: int,
     max_novelty_corr: float,
+    min_directional_entry_jaccard: float,
+    min_shared_directional_entries: int,
 ) -> CrossBucketDiversityResult:
     if not selected_by_tf:
         raise ValueError("selected_by_tf must not be empty")
-    tf_keys = list(selected_by_tf)
-    tf_numeric = _tf_to_minutes(canonical_tf)
-    for k in tf_keys:
-        if _tf_to_minutes(k) < tf_numeric:
-            raise ValueError(
-                f"canonical_tf={canonical_tf} is coarser than input tf={k}"
-            )
+
+    context = resolve_cross_tf_canonical_context(
+        selected_by_tf=selected_by_tf,
+        panel_by_recipe_id=panel_by_recipe_id,
+        aligned_by_tf=aligned_by_tf,
+        min_common_active_bars=min_common_active_bars,
+    )
 
     all_selected: list[L0SignalCandidate] = []
     for candidates in selected_by_tf.values():
@@ -496,6 +646,10 @@ def compute_cross_tf_redundancy(
                 if all_selected else np.empty((0, 0), dtype=np.float64)
             ),
             global_eff_test_count=float(len(all_selected)),
+            canonical_tf=context.canonical_tf,
+            common_start_ns=context.common_start_ns,
+            common_end_ns=context.common_end_ns,
+            n_common_active_bars=context.n_common_active_bars,
         )
 
     panels = [panel_by_recipe_id[rid] for rid in all_recipe_ids if rid in panel_by_recipe_id]
@@ -506,59 +660,102 @@ def compute_cross_tf_redundancy(
             demoted_reason_by_id={},
             cross_bucket_corr=np.eye(len(all_recipe_ids), dtype=np.float64),
             global_eff_test_count=float(len(all_recipe_ids)),
+            canonical_tf=context.canonical_tf,
+            common_start_ns=context.common_start_ns,
+            common_end_ns=context.common_end_ns,
+            n_common_active_bars=context.n_common_active_bars,
         )
 
-    proj_scores: list[NDArray[np.float64]] = []
-    proj_valid: list[NDArray[np.bool_]] = []
-    for p in panels:
-        ps, pv = project_signal_to_canonical_grid(
-            panel=p,
-            canonical_datetimes=canonical_datetimes,
-            causal_lag_bars=1,
-        )
-        proj_scores.append(ps)
-        proj_valid.append(pv)
+    # Cache projections by recipe_id (reuse across pair evaluation)
+    proj_cache: dict[str, tuple[NDArray[np.float64], NDArray[np.bool_]]] = {}
+    for rid in all_recipe_ids:
+        p = panel_by_recipe_id.get(rid)
+        if p is not None:
+            proj_cache[rid] = project_signal_to_canonical_grid(
+                panel=p,
+                canonical_datetimes=context.canonical_datetimes_ns,
+                causal_lag_bars=1,
+            )
 
-    n = len(panels)
+    # Score correlation matrix for report consumers
+    n = len(all_recipe_ids)
     corr = np.full((n, n), np.nan, dtype=np.float64)
     for i in range(n):
         for j in range(n):
-            mask = proj_valid[i] & proj_valid[j] & active_mask_canonical
-            a = proj_scores[i][mask]
-            b = proj_scores[j][mask]
-            c = 0.0 if len(a) < 2 else float(np.corrcoef(a, b)[0, 1])
-            corr[i, j] = c if np.isfinite(c) else 0.0
+            ri, rj = all_recipe_ids[i], all_recipe_ids[j]
+            pi = proj_cache.get(ri)
+            pj = proj_cache.get(rj)
+            if pi is None or pj is None:
+                corr[i, j] = 0.0
+                continue
+            mask = pi[1] & pj[1] & context.active_mask_2d
+            a = pi[0][mask]
+            b = pj[0][mask]
+            c_val = 0.0 if len(a) < 2 else float(np.corrcoef(a, b)[0, 1])
+            corr[i, j] = c_val if np.isfinite(c_val) else 0.0
         corr[i, i] = 1.0
 
-    clusters = cluster_correlated_recipes(
-        evidences=all_selected,
-        corr=corr,
-        max_corr=max_novelty_corr,
-    )
+    # Build pair evidence for i<j only
+    pair_evidence_list: list[CrossTFPairEvidence] = []
+    for i in range(n):
+        for j in range(i + 1, n):
+            ri, rj = all_recipe_ids[i], all_recipe_ids[j]
+            panel_i = panel_by_recipe_id.get(ri)
+            panel_j = panel_by_recipe_id.get(rj)
+            if panel_i is None or panel_j is None:
+                continue
+            pair_ev = compute_cross_tf_pair_evidence(
+                recipe_id_a=ri, recipe_id_b=rj,
+                panel_a=panel_i, panel_b=panel_j,
+                context=context,
+                min_score_corr=max_novelty_corr,
+                min_directional_entry_jaccard=min_directional_entry_jaccard,
+                min_shared_directional_entries=min_shared_directional_entries,
+            )
+            pair_evidence_list.append(pair_ev)
 
-    final_selected: list[str] = []
+    # Direct leader-based demotion (not transitive clustering)
+    ranked = sorted(
+        enumerate(all_selected),
+        key=lambda x: (-x[1].l1_priority_score, x[1].recipe_id),
+    )
+    retained: list[str] = []
     demoted: list[str] = []
     demoted_reason_map: dict[str, str] = {}
-    for cluster in clusters:
-        if len(cluster) == 1:
-            final_selected.append(cluster[0])
-        else:
-            best_rid = max(cluster, key=lambda rid: _find_priority(rid, all_selected, all_recipe_ids))
-            for rid in cluster:
-                if rid == best_rid:
-                    final_selected.append(rid)
-                else:
-                    demoted.append(rid)
-                    demoted_reason_map[rid] = best_rid
 
+    for _, candidate in ranked:
+        rid = candidate.recipe_id
+        is_demoted = False
+        for leader_rid in retained:
+            # Find the pair evidence (a,b) or (b,a)
+            found_ev: CrossTFPairEvidence | None = None
+            for p_ev in pair_evidence_list:
+                if (p_ev.recipe_id_a == leader_rid and p_ev.recipe_id_b == rid) or \
+                   (p_ev.recipe_id_a == rid and p_ev.recipe_id_b == leader_rid):
+                    found_ev = p_ev
+                    break
+            if found_ev is not None and found_ev.is_redundant:
+                demoted.append(rid)
+                demoted_reason_map[rid] = leader_rid
+                is_demoted = True
+                break
+        if not is_demoted:
+            retained.append(rid)
+
+    final_selected = tuple(retained)
     global_eff = estimate_effective_test_count(corr)
 
     return CrossBucketDiversityResult(
-        final_selected_recipe_ids=tuple(final_selected),
+        final_selected_recipe_ids=final_selected,
         demoted_recipe_ids=tuple(demoted),
         demoted_reason_by_id=demoted_reason_map,
         cross_bucket_corr=corr,
         global_eff_test_count=global_eff,
+        pair_evidence=tuple(pair_evidence_list),
+        canonical_tf=context.canonical_tf,
+        common_start_ns=context.common_start_ns,
+        common_end_ns=context.common_end_ns,
+        n_common_active_bars=context.n_common_active_bars,
     )
 
 
@@ -566,9 +763,8 @@ def audit_l0_selected_recipe_independence(
     *,
     selected_by_tf: Mapping[str, Sequence[L0SignalCandidate]],
     panel_by_recipe_id: Mapping[str, CandidateSignalPanel],
-    canonical_tf: str,
-    canonical_datetimes: NDArray[np.int64],
-    active_mask_canonical: NDArray[np.bool_],
+    aligned_by_tf: Mapping[str, AlignedMarketData],
+    min_common_active_bars: int,
     max_corr: float = 0.70,
 ) -> L0IndependenceAudit:
     all_selected: list[L0SignalCandidate] = []
@@ -587,9 +783,16 @@ def audit_l0_selected_recipe_independence(
             cluster_members={i: (c.recipe_id,) for i, c in enumerate(all_selected)} if all_selected else {},
             demoted_recipe_ids=(),
             demoted_reason_by_id={},
-            canonical_tf=canonical_tf,
+            canonical_tf="",
             max_corr_threshold=max_corr,
         )
+
+    context = resolve_cross_tf_canonical_context(
+        selected_by_tf=selected_by_tf,
+        panel_by_recipe_id=panel_by_recipe_id,
+        aligned_by_tf=aligned_by_tf,
+        min_common_active_bars=min_common_active_bars,
+    )
 
     all_recipe_ids = [c.recipe_id for c in all_selected]
     panels = [panel_by_recipe_id[rid] for rid in all_recipe_ids if rid in panel_by_recipe_id]
@@ -601,7 +804,7 @@ def audit_l0_selected_recipe_independence(
             cluster_members={i: (c.recipe_id,) for i, c in enumerate(all_selected)},
             demoted_recipe_ids=(),
             demoted_reason_by_id={},
-            canonical_tf=canonical_tf,
+            canonical_tf=context.canonical_tf,
             max_corr_threshold=max_corr,
         )
 
@@ -610,7 +813,7 @@ def audit_l0_selected_recipe_independence(
     for p in panels:
         ps, pv = project_signal_to_canonical_grid(
             panel=p,
-            canonical_datetimes=canonical_datetimes,
+            canonical_datetimes=context.canonical_datetimes_ns,
             causal_lag_bars=1,
         )
         proj_scores.append(ps)
@@ -618,13 +821,14 @@ def audit_l0_selected_recipe_independence(
 
     n = len(panels)
     corr = np.full((n, n), np.nan, dtype=np.float64)
+    active = context.active_mask_2d
     for i in range(n):
         for j in range(n):
-            mask = proj_valid[i] & proj_valid[j] & active_mask_canonical
+            mask = proj_valid[i] & proj_valid[j] & active
             a = proj_scores[i][mask]
             b = proj_scores[j][mask]
-            c = 0.0 if len(a) < 2 else float(np.corrcoef(a, b)[0, 1])
-            corr[i, j] = c if np.isfinite(c) else 0.0
+            c_val = 0.0 if len(a) < 2 else float(np.corrcoef(a, b)[0, 1])
+            corr[i, j] = c_val if np.isfinite(c_val) else 0.0
         corr[i, i] = 1.0
 
     clusters = cluster_correlated_recipes(
@@ -654,7 +858,7 @@ def audit_l0_selected_recipe_independence(
         cluster_members=cluster_members,
         demoted_recipe_ids=tuple(demoted),
         demoted_reason_by_id=demoted_reason,
-        canonical_tf=canonical_tf,
+        canonical_tf=context.canonical_tf,
         max_corr_threshold=max_corr,
     )
 

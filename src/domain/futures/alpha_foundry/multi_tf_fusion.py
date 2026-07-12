@@ -62,6 +62,10 @@ def fuse_multi_timeframe_evidence(
             reject_mask = others["reject_reasons"].str.contains(
                 "|".join(_REJECT_REASON_INSUFFICIENT), na=False, regex=True
             )
+            # [ADR_20260712_L0_EVIDENCE_CONDITIONED_CROSS_TF_ADMISSION] Exclude
+            # partial-support rows from corroboration mass.
+            if "data_support_tier" in others.columns:
+                reject_mask = reject_mask | (others["data_support_tier"] == "partial_support")
             covered = others[~reject_mask]
             tf_coverage_count = len(covered)
 
