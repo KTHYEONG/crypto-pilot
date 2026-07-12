@@ -70,6 +70,10 @@ last_verified: 2026-07-12
 - `build_cheap_gate_evidence_frame_from_evidences(cheap_evidences, recipes)` extracts the DataFrame-projection logic from `build_cheap_gate_evidence_frame()` (now a thin wrapper) so Phase 1 can build `evidence_by_tf` without discarding the raw evidences it already computed.
 - Correspondence is by `recipe_id`, not list order (downstream matches evidences to panels via `ev.recipe_id`).
 
+### Phase-3 Canonical Gate Early-Exit
+- L0 Cheap Gate(Phase 1) 평가에서 이미 기각(`gate_passed == False`)이 확정된 후보 레시피들은 Canonical Gate(Phase 3)의 무거운 평가 과정(Bootstrap LCB, Triple Barrier return, Capacity score 등)을 전면 스킵하고 즉시 `_empty_gate_evidence`를 반환하도록 조기 탈락(Early-Exit) 처리하여 L0 연산 성능을 단축한다.
+- `evaluate_alpha_gate_batch` 시그니처에 `cheap_evidences` 인자가 추가되어, `pipeline.py` 호출부로부터 결과를 매핑받아 스킵 조건(gate_passed)을 판정한다. `cheap_evidences`가 제공되지 않는 경우(`None`)에는 기존의 전체 평가 동작으로 자동 폴백된다.
+
 ### Non-Native Timeframe Synthesis (Virtual Probe)
 - **Cadence Rules**: Synthesizes 2h/6h/8h/12h bars from nearest native timeframe (1h/4h) using left-closed, left-labeled resampling.
 - **Completeness Rule**: Final bin acceptance requires bin_count >= target_hours / source_hours.

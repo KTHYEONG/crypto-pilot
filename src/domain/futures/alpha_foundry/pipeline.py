@@ -343,6 +343,7 @@ def run_alpha_foundry_l0_pipeline(
         config=cheap_gate_config,
         run_id=run_id,
         tf_fusion_index=tf_fusion_index if evidence_by_tf else None,
+        cheap_evidences=cheap_evidences,
     )
     canonical_by_rid: dict[str, AlphaGateEvidence] = {
         e.recipe_id: e for e in canonical_evidences if e.recipe_id
