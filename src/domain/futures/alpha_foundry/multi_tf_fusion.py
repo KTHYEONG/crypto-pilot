@@ -207,8 +207,14 @@ def project_signal_to_canonical_grid(
     panel: CandidateSignalPanel,
     canonical_datetimes: NDArray[np.int64],
     causal_lag_bars: int,
-) -> tuple[NDArray[np.float64], NDArray[np.bool_]]:
-    """Causally forward-fill a panel's signal onto a canonical timestamp grid.
+) -> tuple[NDArray[np.float32], NDArray[np.bool_]]:
+    """[LIMIT-05] projected is now float32 — this is an intermediate,
+    storage-heavy correlation/jaccard-comparison array (max_novelty_corr=0.70,
+    min_directional_entry_jaccard=0.50 thresholds), not a compounding-return
+    or covariance-inversion quantity, so float32 precision is sufficient
+    per project quant guidelines. panel.signed_score_2d itself is untouched.
+
+    Causally forward-fill a panel's signal onto a canonical timestamp grid.
 
     [ADR_20260712_L0_CROSS_TF_CANONICAL_CALENDAR_CONTAINMENT_FIX] Panel samples
     outside ``canonical_datetimes``' span are no longer a hard error: samples
@@ -227,7 +233,7 @@ def project_signal_to_canonical_grid(
         raise ValueError("panel.datetimes must be monotonic non-decreasing")
     n_canonical = len(canonical_datetimes)
     n_symbols = panel.signed_score_2d.shape[1]
-    projected = np.full((n_canonical, n_symbols), np.nan, dtype=np.float64)
+    projected = np.full((n_canonical, n_symbols), np.nan, dtype=np.float32)
     proj_valid = np.zeros((n_canonical, n_symbols), dtype=np.bool_)
 
     starts = np.searchsorted(canonical_datetimes, dt, side="left") + causal_lag_bars
