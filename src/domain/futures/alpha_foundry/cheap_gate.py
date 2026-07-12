@@ -1386,11 +1386,16 @@ def evaluate_alpha_gate_batch(
     config: AlphaGateConfig,
     run_id: str,
     tf_fusion_index: Mapping[tuple[str, str, str], MultiTimeframeEvidence] | None = None,
+    cheap_evidences: tuple[CheapGateEvidence, ...] | None = None,
 ) -> tuple[AlphaGateEvidence, ...]:
+    """[ADR_20260712_L0_GATE_EARLY_EXIT_OPTIMIZATION] Skip heavy canonical gate evaluations
+    for candidates that already failed cheap-gate screening."""
     from src.domain.futures.optimization.metrics import _bars_per_year_for_tf
     from src.domain.futures.strategy.candidate_labels import _compute_yang_zhang_vol_2d
 
     precomputed_atr_2d = _compute_yang_zhang_vol_2d(aligned)
+
+    cheap_ev_by_rid = {ev.recipe_id: ev for ev in cheap_evidences} if cheap_evidences is not None else {}
 
     bpy_cache: dict[str, float] = {}
     results: list[AlphaGateEvidence] = []
@@ -1399,6 +1404,18 @@ def evaluate_alpha_gate_batch(
         recipe = recipes.get(recipe_id)
         if recipe is None:
             continue
+
+        # Early-Exit for failed cheap gate candidates [ADR_20260712_L0_GATE_EARLY_EXIT_OPTIMIZATION]
+        cheap_ev = cheap_ev_by_rid.get(recipe_id)
+        if cheap_ev is not None and not cheap_ev.gate_passed:
+            evidence = _empty_gate_evidence(
+                run_id=run_id,
+                recipe=recipe,
+                reject_reasons=cheap_ev.reject_reasons,
+            )
+            results.append(evidence)
+            continue
+
         tf = recipe.timeframe
         if tf not in bpy_cache:
             bpy_cache[tf] = _bars_per_year_for_tf(tf)

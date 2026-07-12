@@ -2339,3 +2339,89 @@ def test_l0_gate_event_filtering_optimization_exception_safety() -> None:
             
     assert "l0_event_mask_2d" not in panel.metadata
 
+
+def test_l0_gate_early_exit_optimization_happy_path() -> None:
+    """Verify that evaluate_alpha_gate_batch skips evaluation for cheap-gate failed candidates."""
+    from unittest.mock import MagicMock
+
+    import numpy as np
+
+    from src.domain.futures.alpha_foundry.cheap_gate import evaluate_alpha_gate_batch
+    from src.domain.futures.alpha_foundry.contracts import AlphaRecipe, CheapGateEvidence
+    from src.domain.futures.strategy.common.alignment import AlignedMarketData
+
+    panels = [MagicMock()]
+    panels[0].metadata = {"recipe_id": "r1"}
+    recipes = {"r1": MagicMock(spec=AlphaRecipe)}
+    recipes["r1"].timeframe = "4h"
+    recipes["r1"].recipe_id = "r1"
+    recipes["r1"].family = "f1"
+    recipes["r1"].variant = "v1"
+    recipes["r1"].archetype = "trend"
+    
+    # Failed cheap gate evidence
+    cheap_ev = CheapGateEvidence(
+        recipe_id="r1", timeframe="4h", symbol_scope="symbol", n_events=10,
+        effective_n=10.0, mean_net_bps=0.0, nw_tstat=0.0, block_lcb_bps=0.0,
+        rank_ic=0.0, cost_drag_ratio=0.0, turnover_per_year=0.0, novelty_corr_max=0.0,
+        incremental_rank_ic=0.0, compute_cost_score=0.0, bootstrap_lcb_bps=0.0,
+        bootstrap_agree=True, gate_passed=False, reject_reasons=("weak_tstat",),
+        mean_gross_bps=0.0, mean_cost_bps=0.0
+    )
+    
+    aligned = MagicMock(spec=AlignedMarketData)
+    aligned.close_2d = np.ones((100, 2))
+    
+    results = evaluate_alpha_gate_batch(
+        panels=panels,
+        recipes=recipes,
+        aligned=aligned,
+        cost_model=MagicMock(),
+        config=MagicMock(),
+        run_id="test_run",
+        cheap_evidences=(cheap_ev,)
+    )
+    
+    assert len(results) == 1
+    assert not results[0].gate_passed
+    assert results[0].reject_reasons == ("weak_tstat",)
+    assert results[0].handoff_tier == "blocked"
+
+
+def test_l0_gate_early_exit_optimization_fallback() -> None:
+    """Verify fallback when cheap_evidences is None or not matched."""
+    # When cheap_evidences is None, it should proceed to normal evaluation.
+    # We will test this by ensuring normal evaluation runs (which might fail in mock environments,
+    # but we can verify it doesn't do early-exit bypass to an empty evidence directly).
+    from unittest.mock import MagicMock, patch
+
+    from src.domain.futures.alpha_foundry.cheap_gate import evaluate_alpha_gate_batch
+    from src.domain.futures.alpha_foundry.contracts import AlphaRecipe
+    from src.domain.futures.strategy.common.alignment import AlignedMarketData
+
+    panels = [MagicMock()]
+    panels[0].metadata = {"recipe_id": "r1"}
+    recipes = {"r1": MagicMock(spec=AlphaRecipe)}
+    recipes["r1"].timeframe = "4h"
+    recipes["r1"].recipe_id = "r1"
+    recipes["r1"].family = "f1"
+    recipes["r1"].variant = "v1"
+    recipes["r1"].archetype = "trend"
+
+    aligned = MagicMock(spec=AlignedMarketData)
+    aligned.close_2d = np.ones((100, 2))
+
+    with patch("src.domain.futures.alpha_foundry.cheap_gate.evaluate_panel_gate") as mock_eval:
+        mock_eval.return_value = MagicMock()
+        evaluate_alpha_gate_batch(
+            panels=panels,
+            recipes=recipes,
+            aligned=aligned,
+            cost_model=MagicMock(),
+            config=MagicMock(),
+            run_id="test_run",
+            cheap_evidences=None
+        )
+        mock_eval.assert_called_once()
+
+
