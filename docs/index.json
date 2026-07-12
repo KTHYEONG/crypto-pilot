@@ -39,7 +39,7 @@
     "testing": "tests/unit/domain/futures/alpha_foundry/test_alpha_search_contracts.py"
   },
   "src/domain/futures/alpha_foundry/diversity.py": {
-    "architecture": "docs/architecture/layer0.md",
+    "architecture": "docs/specs/l0_cross_tf_batch_acceleration.md",
     "testing": [
       "tests/unit/domain/futures/alpha_foundry/test_diversity.py",
       "tests/unit/domain/futures/alpha_foundry/test_diversity_selection.py"

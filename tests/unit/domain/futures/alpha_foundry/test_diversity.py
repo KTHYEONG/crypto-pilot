@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 import numpy as np
@@ -12,6 +13,7 @@ from src.domain.futures.alpha_foundry.contracts import (
     CheapGateEvidence,
     CrossBucketDiversityResult,
     CrossTFCanonicalContext,
+    CrossTFSharedContext,
     L0SignalCandidate,
 )
 from src.domain.futures.alpha_foundry.diversity import (
@@ -26,6 +28,22 @@ from src.domain.futures.alpha_foundry.diversity import (
     resolve_cross_tf_shared_context,
 )
 from src.domain.futures.signals.contracts import CandidateSignalPanel
+
+
+@pytest.fixture(autouse=True)
+def _restore_logger_classes() -> None:
+    """Prevent CategorizedLogger mutation from leaking to downstream tests."""
+    from src.core.utils.utils import CategorizedLogger
+
+    for name in ("opt_main_futures", "src.domain.futures.strategy_runtime.bridge"):
+        lg = logging.getLogger(name)
+        if isinstance(lg, CategorizedLogger):
+            lg.__class__ = logging.Logger
+    yield
+    for name in ("opt_main_futures", "src.domain.futures.strategy_runtime.bridge"):
+        lg = logging.getLogger(name)
+        if isinstance(lg, CategorizedLogger):
+            lg.__class__ = logging.Logger
 
 
 def _make_panel(score: np.ndarray, *, valid: np.ndarray | None = None) -> CandidateSignalPanel:
@@ -1313,6 +1331,123 @@ class TestCrossTFRedundancyDedup:
         assert audit_self.n_selected_total == audit_shared.n_selected_total
         assert audit_self.n_independent_clusters == audit_shared.n_independent_clusters
         assert len(audit_self.cluster_members) == len(audit_shared.cluster_members)
+
+
+class TestCrossTFBatchAcceleration:
+
+    def test_batch_jaccard_matches_per_pair_on_synthetic(self) -> None:
+        """OPT-2 batch jaccard path yields byte-identical results to per-pair fallback path."""
+        selected_by_tf, panel_by_recipe_id, aligned_by_tf = _build_four_recipe_fixture()
+
+        shared_with_batch = resolve_cross_tf_shared_context(
+            selected_by_tf=selected_by_tf,
+            panel_by_recipe_id=panel_by_recipe_id,
+            aligned_by_tf=aligned_by_tf,
+            min_common_active_bars=1,
+        )
+        # shared_with_batch has entry_pos_flat populated → triggers batch path
+        result_batch = compute_cross_tf_redundancy(
+            selected_by_tf=selected_by_tf,
+            panel_by_recipe_id=panel_by_recipe_id,
+            aligned_by_tf=aligned_by_tf,
+            min_common_active_bars=1,
+            max_novelty_corr=0.70,
+            min_directional_entry_jaccard=0.50,
+            min_shared_directional_entries=1,
+            precomputed_shared_context=shared_with_batch,
+        )
+
+        # Build a shared context WITHOUT entry_pos_flat → triggers per-pair fallback
+        shared_no_batch = CrossTFSharedContext(
+            canonical_context=shared_with_batch.canonical_context,
+            proj_cache=shared_with_batch.proj_cache,
+            side_entry_cache=shared_with_batch.side_entry_cache,
+            corr=shared_with_batch.corr,
+            recipe_order=shared_with_batch.recipe_order,
+        )
+        result_per_pair = compute_cross_tf_redundancy(
+            selected_by_tf=selected_by_tf,
+            panel_by_recipe_id=panel_by_recipe_id,
+            aligned_by_tf=aligned_by_tf,
+            min_common_active_bars=1,
+            max_novelty_corr=0.70,
+            min_directional_entry_jaccard=0.50,
+            min_shared_directional_entries=1,
+            precomputed_shared_context=shared_no_batch,
+        )
+
+        assert result_batch.final_selected_recipe_ids == result_per_pair.final_selected_recipe_ids
+        assert result_batch.demoted_recipe_ids == result_per_pair.demoted_recipe_ids
+        assert result_batch.global_eff_test_count == result_per_pair.global_eff_test_count
+        np.testing.assert_allclose(result_batch.cross_bucket_corr, result_per_pair.cross_bucket_corr, atol=1e-12)
+
+    def test_batch_corr_upper_triangle_symmetric(self) -> None:
+        """OPT-1-a: corr matrix built with valid_stack precompute is symmetric."""
+        selected_by_tf, panel_by_recipe_id, aligned_by_tf = _build_four_recipe_fixture()
+        shared = resolve_cross_tf_shared_context(
+            selected_by_tf=selected_by_tf,
+            panel_by_recipe_id=panel_by_recipe_id,
+            aligned_by_tf=aligned_by_tf,
+            min_common_active_bars=1,
+        )
+        np.testing.assert_allclose(shared.corr, shared.corr.T, atol=1e-12)
+        np.testing.assert_allclose(np.diag(shared.corr), np.ones(shared.corr.shape[0]), atol=1e-12)
+
+    def test_valid_stack_precompute_n1_no_error(self) -> None:
+        """N=1 when valid_stack precompute should not raise."""
+        rng = np.random.default_rng(42)
+        dt = np.arange(0, 40, dtype=np.int64) * (4 * 3_600_000_000_000)
+        panel = _make_canonical_panel_from_2d(rng.normal(0, 1, (40, 1)), dt_start=0)
+        candidate = _candidate("single", timeframe="4h", score=1.0)
+        aligned = _make_aligned(dt, n_syms=1)
+
+        ctx = resolve_cross_tf_shared_context(
+            selected_by_tf={"4h": [candidate]},
+            panel_by_recipe_id={"single": panel},
+            aligned_by_tf={"4h": aligned},
+            min_common_active_bars=1,
+        )
+        assert ctx.corr.shape == (1, 1)
+        assert ctx.corr[0, 0] == 1.0
+        assert ctx.entry_pos_flat
+        assert ctx.n_entries["single"] >= 0
+
+    def test_corr_dtype_is_float64_after_optimization(self) -> None:
+        """corr dtype float64 preserved (quant rule §2)."""
+        selected_by_tf, panel_by_recipe_id, aligned_by_tf = _build_four_recipe_fixture()
+        ctx = resolve_cross_tf_shared_context(
+            selected_by_tf=selected_by_tf,
+            panel_by_recipe_id=panel_by_recipe_id,
+            aligned_by_tf=aligned_by_tf,
+            min_common_active_bars=1,
+        )
+        assert ctx.corr.dtype == np.float64
+
+    def test_batch_jaccard_self_consistency(self) -> None:
+        """dir_shared[i,i] == n_entries[i]."""
+        selected_by_tf, panel_by_recipe_id, aligned_by_tf = _build_four_recipe_fixture()
+        ctx = resolve_cross_tf_shared_context(
+            selected_by_tf=selected_by_tf,
+            panel_by_recipe_id=panel_by_recipe_id,
+            aligned_by_tf=aligned_by_tf,
+            min_common_active_bars=1,
+        )
+        recipe_ids = list(ctx.recipe_order)
+        n = len(recipe_ids)
+        pos_flat = np.array(
+            [ctx.entry_pos_flat.get(rid, np.array([], dtype=np.int8)) for rid in recipe_ids],
+            dtype=np.int16,
+        )
+        neg_flat = np.array(
+            [ctx.entry_neg_flat.get(rid, np.array([], dtype=np.int8)) for rid in recipe_ids],
+            dtype=np.int16,
+        )
+        dir_shared = pos_flat @ pos_flat.T + neg_flat @ neg_flat.T
+        for i in range(n):
+            rid = recipe_ids[i]
+            expected = ctx.n_entries[rid]
+            msg = f"dir_shared[{i},{i}]={dir_shared[i,i]} != n_entries[{rid}]={expected}"
+            assert int(dir_shared[i, i]) == expected, msg
 
 
 class TestProjectSignalToCanonicalGridFloat32:
