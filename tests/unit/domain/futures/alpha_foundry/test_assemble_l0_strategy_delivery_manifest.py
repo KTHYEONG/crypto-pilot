@@ -4,20 +4,21 @@ from typing import Any
 from unittest.mock import patch
 
 import numpy as np
-import pytest
 
 from src.domain.futures.alpha_foundry.bridge_helpers import (
     AlphaFoundryL0Result,
     assemble_l0_strategy_delivery_manifest,
 )
 from src.domain.futures.alpha_foundry.contracts import (
+    AlphaArchetype,
     CrossBucketDiversityResult,
+    CrossTFPairEvidence,
     L0IndependenceAudit,
     L0SignalCandidate,
 )
 
 
-def _candidate(recipe_id: str, archetype: str, timeframe: str, priority: float) -> L0SignalCandidate:
+def _candidate(recipe_id: str, archetype: AlphaArchetype, timeframe: str, priority: float) -> L0SignalCandidate:
     return L0SignalCandidate(
         run_id="test", timeframe=timeframe, family="btc_regime_pullback", variant="v",
         recipe_id=recipe_id, archetype=archetype, source="synthetic_recipe",
@@ -52,7 +53,7 @@ FIXED_AUDIT = L0IndependenceAudit(
     n_selected_total=2, n_distinct_thesis_ids=1, n_independent_clusters=1,
     cluster_members={0: ("r1",), 1: ("r2",)},
     demoted_recipe_ids=(), demoted_reason_by_id={},
-    canonical_tf="4h", max_corr_threshold=0.70,
+    canonical_tf="1h", max_corr_threshold=0.70,
 )
 
 FIXED_CROSS_RESULT = CrossBucketDiversityResult(
@@ -61,6 +62,17 @@ FIXED_CROSS_RESULT = CrossBucketDiversityResult(
     demoted_reason_by_id={"r2": "r1"},
     cross_bucket_corr=np.array([[1.0, 0.9], [0.9, 1.0]]),
     global_eff_test_count=1.2,
+    pair_evidence=(
+        CrossTFPairEvidence(
+            recipe_id_a="r1", recipe_id_b="r2",
+            score_corr=0.9, shared_directional_entries=15,
+            directional_entry_jaccard=0.6, is_redundant=True,
+        ),
+    ),
+    canonical_tf="1h",
+    common_start_ns=1,
+    common_end_ns=100,
+    n_common_active_bars=480,
 )
 
 
@@ -90,7 +102,6 @@ class TestAssembleL0StrategyDeliveryManifest:
         pruned, manifest = assemble_l0_strategy_delivery_manifest(
             multi_results=multi_results,
             aligned_by_tf=aligned_by_tf,
-            canonical_tf="4h",
             run_id_prefix="test",
             enable_audit=False,
             enable_pruning=False,
@@ -109,7 +120,6 @@ class TestAssembleL0StrategyDeliveryManifest:
             pruned, manifest = assemble_l0_strategy_delivery_manifest(
                 multi_results=multi_results,
                 aligned_by_tf=aligned_by_tf,
-                canonical_tf="4h",
                 run_id_prefix="test",
                 enable_audit=True,
                 enable_pruning=False,
@@ -135,7 +145,6 @@ class TestAssembleL0StrategyDeliveryManifest:
             pruned, manifest = assemble_l0_strategy_delivery_manifest(
                 multi_results=multi_results,
                 aligned_by_tf=aligned_by_tf,
-                canonical_tf="4h",
                 run_id_prefix="test",
                 enable_audit=True,
                 enable_pruning=True,
@@ -143,6 +152,7 @@ class TestAssembleL0StrategyDeliveryManifest:
             )
 
         assert manifest.independence_audit is FIXED_AUDIT
+        assert manifest.pruning_status == "applied"
         assert "r1" in manifest.final_selected_recipe_ids
         assert len(pruned["4h"].candidates_for_l1) == 1
         assert pruned["4h"].candidates_for_l1[0].recipe_id == "r1"
@@ -157,33 +167,15 @@ class TestAssembleL0StrategyDeliveryManifest:
             _, manifest = assemble_l0_strategy_delivery_manifest(
                 multi_results=multi_results,
                 aligned_by_tf=aligned_by_tf,
-                canonical_tf="4h",
                 run_id_prefix="test",
                 enable_audit=False,
                 enable_pruning=True,
             )
 
         assert manifest.independence_audit is None
+        assert manifest.pruning_status == "applied"
         assert "r1" in manifest.final_selected_recipe_ids
         assert "r2" not in manifest.final_selected_recipe_ids
-
-    def test_key_error_when_canonical_tf_missing(self) -> None:
-        mock_result = AlphaFoundryL0Result(
-            panels_for_l1=(),
-            summary_report=None, gate_results=(), panel_bindings=(),
-        )
-        multi_results = {"4h": mock_result}
-        aligned_by_tf: dict[str, Any] = {"12h": _real_aligned()}
-
-        with pytest.raises(KeyError):
-            assemble_l0_strategy_delivery_manifest(
-                multi_results=multi_results,
-                aligned_by_tf=aligned_by_tf,
-                canonical_tf="4h",
-                run_id_prefix="test",
-                enable_audit=False,
-                enable_pruning=False,
-            )
 
     def test_value_error_fallback_returns_unpruned(self) -> None:
         multi_results = _base_multi_results()
@@ -196,13 +188,50 @@ class TestAssembleL0StrategyDeliveryManifest:
             mock_audit.return_value = FIXED_AUDIT
             mock_compute.side_effect = ValueError("simulated-calendar-mismatch")
 
-            pruned, _manifest = assemble_l0_strategy_delivery_manifest(
+            pruned, manifest = assemble_l0_strategy_delivery_manifest(
                 multi_results=multi_results,
                 aligned_by_tf=aligned_by_tf,
-                canonical_tf="4h",
                 run_id_prefix="test",
                 enable_audit=True,
                 enable_pruning=True,
             )
 
         assert dict(pruned) == multi_results
+        assert manifest.pruning_status == "fail_open"
+
+    def test_audit_only_when_no_demotions(self) -> None:
+        """When pruning runs but finds no redundant pairs, status is audit_only."""
+        multi_results = _base_multi_results()
+        aligned_by_tf = _base_aligned()
+
+        no_demotion_result = CrossBucketDiversityResult(
+            final_selected_recipe_ids=("r1", "r2"),
+            demoted_recipe_ids=(),
+            demoted_reason_by_id={},
+            cross_bucket_corr=np.array([[1.0, 0.3], [0.3, 1.0]]),
+            global_eff_test_count=2.0,
+            pair_evidence=(
+                CrossTFPairEvidence(
+                    recipe_id_a="r1", recipe_id_b="r2",
+                    score_corr=0.3, shared_directional_entries=3,
+                    directional_entry_jaccard=0.1, is_redundant=False,
+                ),
+            ),
+            canonical_tf="1h",
+            common_start_ns=1,
+            common_end_ns=100,
+            n_common_active_bars=480,
+        )
+
+        with patch("src.domain.futures.alpha_foundry.diversity.compute_cross_tf_redundancy") as mock_compute:
+            mock_compute.return_value = no_demotion_result
+
+            _, manifest = assemble_l0_strategy_delivery_manifest(
+                multi_results=multi_results,
+                aligned_by_tf=aligned_by_tf,
+                run_id_prefix="test",
+                enable_audit=False,
+                enable_pruning=True,
+            )
+
+        assert manifest.pruning_status == "audit_only"

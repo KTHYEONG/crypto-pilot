@@ -28,6 +28,7 @@ from src.domain.futures.alpha_foundry.contracts import (
     CheapGateEvidence,
     CheapGateRejectReason,
     CorroborationTier,
+    DataSupportTier,
     DiscoveryTier,
     FamilyTimeframeGatePolicy,
     L0HardRejectReason,
@@ -41,6 +42,34 @@ from src.domain.futures.strategy.common.alignment import AlignedMarketData
 from src.domain.futures.strategy.execution_cost import ExecutionCostModel
 
 _logger = logging.getLogger(__name__)
+
+
+def resolve_panel_data_support_tier(
+    *,
+    panel: CandidateSignalPanel,
+    symbols: tuple[str, ...],
+    min_exec_1m_coverage: float,
+) -> tuple[DataSupportTier, NDArray[np.bool_]]:
+    """Determine data support tier and symbol-level coverage mask.
+
+    A panel whose metadata declares ``requires_exec_1m=True`` obtains support
+    only from symbols with exec_1m_coverage >= min_exec_1m_coverage.
+    Non-1m-dependent panels always return full_support with an all-True mask.
+
+    Returns:
+        Tuple of (tier, symbol_mask) where symbol_mask is True for supported symbols.
+    """
+    requires_exec_1m = bool(panel.metadata.get("requires_exec_1m", False))
+    if not requires_exec_1m:
+        return ("full_support", np.ones(len(symbols), dtype=np.bool_))
+
+    coverage_by_symbol: dict[str, float] = panel.metadata.get("exec_1m_coverage_by_symbol", {})
+    symbol_mask = np.array(
+        [coverage_by_symbol.get(sym, 0.0) >= min_exec_1m_coverage for sym in symbols],
+        dtype=np.bool_,
+    )
+    tier: DataSupportTier = "partial_support" if not np.all(symbol_mask) else "full_support"
+    return (tier, symbol_mask)
 
 
 def _ensure_debug_visible(logger: logging.Logger) -> None:
@@ -159,8 +188,18 @@ def evaluate_panel_cheap_gate(
     close = aligned.close_2d
     active = aligned.active_mask & aligned.warm_mask & ~aligned.entry_block_mask & ~aligned.kill_mask
 
+    # [ADR_20260712_L0_EVIDENCE_CONDITIONED_CROSS_TF_ADMISSION] Data support tier
+    symbols = tuple(aligned.symbols) if hasattr(aligned, "symbols") else ()
+    min_exec_1m_cov = float(getattr(config, "ltf_exec_1m_min_coverage", 0.80))
+    data_support_tier, symbol_mask = resolve_panel_data_support_tier(
+        panel=panel, symbols=symbols, min_exec_1m_coverage=min_exec_1m_cov,
+    )
+
     side = panel.side_hint_2d
     valid = panel.valid_mask_2d & active & np.isfinite(close)
+    # Apply symbol-level mask for 1m-dependent panels
+    if not np.all(symbol_mask):
+        valid = valid & symbol_mask[np.newaxis, :]
 
     causal_lag = recipe.causal_lag_bars
     holding_bars = panel.expected_holding_bars
@@ -187,6 +226,7 @@ def evaluate_panel_cheap_gate(
             reject_reasons=("insufficient_events",),
             mean_gross_bps=0.0,
             mean_cost_bps=0.0,
+            data_support_tier=data_support_tier,
         )
 
     # Build event_mask the same way as before (sparse entry, causal-lag+holding-window safe)
@@ -221,6 +261,7 @@ def evaluate_panel_cheap_gate(
             reject_reasons=("insufficient_events",),
             mean_gross_bps=0.0,
             mean_cost_bps=0.0,
+            data_support_tier=data_support_tier,
         )
 
     # ── Barrier-aware evaluation: reuse L1's triple-barrier kernel ─────
@@ -269,6 +310,7 @@ def evaluate_panel_cheap_gate(
             reject_reasons=("insufficient_events",),
             mean_gross_bps=0.0,
             mean_cost_bps=0.0,
+            data_support_tier=data_support_tier,
         )
     aligned_events = all_events.iloc[_aligned_rows].reset_index(drop=True)
 
@@ -362,6 +404,7 @@ def evaluate_panel_cheap_gate(
         reject_reasons=tuple(reject_reasons_list),
         mean_gross_bps=mean_gross_bps,
         mean_cost_bps=mean_cost_bps,
+        data_support_tier=data_support_tier,
     )
 
 
