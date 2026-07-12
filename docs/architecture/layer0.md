@@ -75,6 +75,25 @@ last_verified: 2026-07-12
 - L0 Cheap Gate(Phase 1) 평가에서 이미 기각(`gate_passed == False`)이 확정된 후보 레시피들은 Canonical Gate(Phase 3)의 무거운 평가 과정(Bootstrap LCB, Triple Barrier return, Capacity score 등)을 전면 스킵하고 즉시 `_empty_gate_evidence`를 반환하도록 조기 탈락(Early-Exit) 처리하여 L0 연산 성능을 단축한다.
 - `evaluate_alpha_gate_batch` 시그니처에 `cheap_evidences` 인자가 추가되어, `pipeline.py` 호출부로부터 결과를 매핑받아 스킵 조건(gate_passed)을 판정한다. `cheap_evidences`가 제공되지 않는 경우(`None`)에는 기존의 전체 평가 동작으로 자동 폴백된다.
 
+### Phase-3 Cheap→Canonical Gate Cache (Pipeline Optimization O-1)
+- `evaluate_panel_cheap_gate()` populates 3 optional dicts on `CheapGateEvidence` when present (None by default):
+  - `cheap_event_arrays`: `{"event_mask": <2D bool array>}` — the event mask used by cheap gate, reused by canonical gate's `_fwd_ret_dense` and `compute_payoff_stats`/`_compute_bootstrap_lcb` without recomputing `candidate_panels_to_events()`.
+  - `cheap_block_stats`: `{"gross_block_means": <1D array>}` — pre-computed per-event gross return means for turnover/LCB projections.
+  - `cheap_meta_stats`: `{"rank_ic": <float>}` — pre-computed rank IC (superseded at runtime by NaN-safe `compute_rank_ic_with_tstat()` which ignores non-finite values).
+- `evaluate_panel_gate()` accepts these via `cheap_event_arrays/cheap_block_stats/cheap_meta_stats` params. When provided (i.e., cache hit), it skips 6 redundant computations: triple-barrier return evaluation, `_compute_panel_block_means`, bootstrap LCB, rank IC, cost drag ratio, and turnover — all already computed in the cheap gate.
+- `_compute_rank_ic()` (cheap gate) does not filter non-finite inputs, so its `rank_ic` can be NaN; the cache path therefore uses `compute_rank_ic_with_tstat()` instead of the cached `rank_ic` value.
+- `evaluate_alpha_gate_batch()` provides these cache dicts matching by `recipe_id` from the cheap-evidence tuple, ensuring O(1) per-recipe cache lookup.
+
+### Symbol Index Map (Pipeline Optimization O-2)
+- Each `evaluate_panel_gate()` call builds a `_symbol_map: dict[str, int] = {s: i for i, s in enumerate(aligned.symbols)}` once at entry.
+- Replaces 4 call sites that used `aligned.symbols.index(sym)` (O(S) linear scan) with `_symbol_map.get(sym, -1)` (O(1) dict lookup) for entry_idx/symbol resolution in `_fwd_ret_dense` construction and block means mapping.
+- Validated by catch-all clause: `_idx = _symbol_map.get(_sym, -1); assert _idx != -1` catches untracked symbols.
+
+### ATR Precompute (Pipeline Optimization O-3)
+- `evaluate_alpha_cheap_gate_batch()` and `evaluate_alpha_gate_batch()` accept a `precomputed_atr_2d: NDArray[np.float64] | None` parameter.
+- When None (default), both compute `_compute_yang_zhang_vol_2d(aligned)` internally (backward-compatible).
+- The orchestrator computes ATR once and passes it to both batch functions, avoiding a duplicate `Yang-Zhang vol` computation (typically the cost is one `np.percentile` pass + one full OHLC scan, ~2-4ms per panel batch but done per TF, so total ~2-4s saved across 6 TFs).
+
 ### Non-Native Timeframe Synthesis (Virtual Probe)
 - **Cadence Rules**: Synthesizes 2h/6h/8h/12h bars from nearest native timeframe (1h/4h) using left-closed, left-labeled resampling.
 - **Completeness Rule**: Final bin acceptance requires bin_count >= target_hours / source_hours.
@@ -84,6 +103,7 @@ last_verified: 2026-07-12
 - `AlphaRecipe`: recipe_id, family, variant, timeframe, archetype, indicator_params, side_rule_id, exit_policy_id.
 - `L0SearchCell`: blueprint_id, family, variant, timeframe, expected_event_rate, status, retire_reason.
 - `AlphaGateEvidence`: n_events, effective_n, mean_net_bps, gross_lcb_bps, net_lcb_bps, nw_tstat, rank_ic, rank_ic_tstat, cost_drag_ratio, turnover_per_year, gate_passed, handoff_tier, selected_for_l1, reject_reasons.
+- `CheapGateEvidence`: recipe_id, timeframe, symbol_scope, n_events, effective_n, mean_net_bps, nw_tstat, block_lcb_bps, rank_ic, cost_drag_ratio, turnover_per_year, **cheap_event_arrays** (optional dict, populated by cheap gate for phase-3 cache), **cheap_block_stats** (optional dict), **cheap_meta_stats** (optional dict).
 - `MultiTimeframeEvidence`: family, variant, native_timeframe, corroboration_tier, fused_conviction_score.
 - `L0IndependenceAudit`: n_selected_total, n_distinct_thesis_ids, n_independent_clusters, cluster_members, demoted_recipe_ids, demoted_reason_by_id, canonical_tf, max_corr_threshold.
 - `L0StrategyDeliveryManifest`: run_id_prefix, reports_by_tf (dict[str, AlphaFoundryBridgeReport]), independence_audit (L0IndependenceAudit | None), final_selected_recipe_ids, total_l1_verification_budget.
