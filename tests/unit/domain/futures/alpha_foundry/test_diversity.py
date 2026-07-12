@@ -7,6 +7,7 @@ from numpy.typing import NDArray
 from src.domain.futures.alpha_foundry.contracts import (
     AlphaFoundryRuntimeConfig,
     CheapGateEvidence,
+    CrossBucketDiversityResult,
     L0SignalCandidate,
 )
 from src.domain.futures.alpha_foundry.diversity import (
@@ -493,3 +494,207 @@ def test_audit_l0_selected_recipe_independence_heterogeneous_native_tf_shapes() 
         max_corr=0.70,
     )
     assert audit.n_selected_total == 2
+
+
+# ── apply_cross_tf_survival_floor ─────────────────────────────────────────────
+
+
+def _floor_candidate(
+    recipe_id: str, archetype: str, timeframe: str, priority: float
+) -> L0SignalCandidate:
+    return L0SignalCandidate(
+        run_id="test", timeframe=timeframe, family="btc_regime_pullback", variant="v",
+        recipe_id=recipe_id, archetype=archetype, source="synthetic_recipe",
+        n_events=100, effective_n=50.0, mean_net_bps=priority, block_lcb_bps=priority * 0.5,
+        nw_tstat=1.5, bootstrap_lcb_bps=0.0, bootstrap_agree=True, cost_drag_ratio=0.3,
+        turnover_per_year=50.0, max_abs_corr_in_bucket=0.0, tf_coverage_count=0,
+        sign_agreement_ratio=0.0, corroboration_tier="single_tf_strict", discovery_tier="candidate",
+        l1_priority_score=priority, l1_budget_units=1, hard_reject_reasons=(), soft_flags=(),
+    )
+
+
+def test_apply_cross_tf_survival_floor_readmits_fully_demoted_archetype() -> None:
+    """[LIMIT-03] "hedge" archetype's only candidate lost its cross-TF cluster
+    comparison to a higher-priority "trend" candidate and was demoted — floor
+    re-admits it."""
+    from src.domain.futures.alpha_foundry.diversity import apply_cross_tf_survival_floor
+
+    trend_winner = _floor_candidate("r1", "trend", "4h", priority=10.0)
+    hedge_loser = _floor_candidate("r2", "hedge", "12h", priority=3.0)
+    cross_tf_result = CrossBucketDiversityResult(
+        final_selected_recipe_ids=("r1",),
+        demoted_recipe_ids=("r2",),
+        demoted_reason_by_id={"r2": "r1"},
+        cross_bucket_corr=np.array([[1.0, 0.9], [0.9, 1.0]]),
+        global_eff_test_count=1.2,
+    )
+
+    result = apply_cross_tf_survival_floor(
+        cross_tf_result=cross_tf_result,
+        candidate_by_recipe_id={"r1": trend_winner, "r2": hedge_loser},
+        min_survivors_per_archetype=1,
+        min_survivors_per_tf=1,
+    )
+
+    assert "r2" in result.final_selected_recipe_ids
+    assert "r2" not in result.demoted_recipe_ids
+
+
+def test_apply_cross_tf_survival_floor_noop_when_already_satisfied() -> None:
+    """Floor is a no-op when every archetype/TF already has >=1 survivor."""
+    from src.domain.futures.alpha_foundry.diversity import apply_cross_tf_survival_floor
+
+    cross_tf_result = CrossBucketDiversityResult(
+        final_selected_recipe_ids=("r1", "r2"),
+        demoted_recipe_ids=(),
+        demoted_reason_by_id={},
+        cross_bucket_corr=np.eye(2),
+        global_eff_test_count=2.0,
+    )
+    candidates = {
+        "r1": _floor_candidate("r1", "trend", "4h", priority=10.0),
+        "r2": _floor_candidate("r2", "hedge", "12h", priority=3.0),
+    }
+
+    result = apply_cross_tf_survival_floor(
+        cross_tf_result=cross_tf_result,
+        candidate_by_recipe_id=candidates,
+        min_survivors_per_archetype=1,
+        min_survivors_per_tf=1,
+    )
+
+    assert result is cross_tf_result
+
+
+def test_apply_cross_tf_survival_floor_tf_floor_readmits_demoted_tf() -> None:
+    """[LIMIT-03] TF floor: all of "12h" candidates demoted, re-admit highest priority."""
+    from src.domain.futures.alpha_foundry.diversity import apply_cross_tf_survival_floor
+
+    winner_4h = _floor_candidate("r1", "trend", "4h", priority=10.0)
+    demoted_12h_low = _floor_candidate("r2", "trend", "12h", priority=3.0)
+    demoted_12h_high = _floor_candidate("r3", "trend", "12h", priority=5.0)
+    cross_tf_result = CrossBucketDiversityResult(
+        final_selected_recipe_ids=("r1",),
+        demoted_recipe_ids=("r2", "r3"),
+        demoted_reason_by_id={"r2": "r1", "r3": "r1"},
+        cross_bucket_corr=np.eye(3),
+        global_eff_test_count=1.2,
+    )
+
+    result = apply_cross_tf_survival_floor(
+        cross_tf_result=cross_tf_result,
+        candidate_by_recipe_id={"r1": winner_4h, "r2": demoted_12h_low, "r3": demoted_12h_high},
+        min_survivors_per_archetype=1,
+        min_survivors_per_tf=1,
+    )
+
+    assert "r3" in result.final_selected_recipe_ids
+    assert "r2" not in result.final_selected_recipe_ids
+    assert "r3" not in result.demoted_recipe_ids
+
+
+def test_apply_cross_tf_survival_floor_idempotent_re_admission() -> None:
+    """A candidate that satisfies both archetype and TF floor is re-admitted once."""
+    from src.domain.futures.alpha_foundry.diversity import apply_cross_tf_survival_floor
+
+    only_candidate = _floor_candidate("r1", "hedge", "12h", priority=3.0)
+    cross_tf_result = CrossBucketDiversityResult(
+        final_selected_recipe_ids=(),
+        demoted_recipe_ids=("r1",),
+        demoted_reason_by_id={"r1": "other"},
+        cross_bucket_corr=np.array([[1.0]]),
+        global_eff_test_count=0.0,
+    )
+
+    result = apply_cross_tf_survival_floor(
+        cross_tf_result=cross_tf_result,
+        candidate_by_recipe_id={"r1": only_candidate},
+        min_survivors_per_archetype=1,
+        min_survivors_per_tf=1,
+    )
+
+    assert "r1" in result.final_selected_recipe_ids
+    assert result.final_selected_recipe_ids == ("r1",)
+    assert "r1" not in result.demoted_recipe_ids
+
+
+def test_apply_cross_tf_survival_floor_skips_unknown_candidate() -> None:
+    """[LIMIT-03] defensive-floor: demoted candidate absent from
+    candidate_by_recipe_id is skipped silently."""
+    from src.domain.futures.alpha_foundry.diversity import apply_cross_tf_survival_floor
+
+    cross_tf_result = CrossBucketDiversityResult(
+        final_selected_recipe_ids=("r1",),
+        demoted_recipe_ids=("r2",),
+        demoted_reason_by_id={"r2": "r1"},
+        cross_bucket_corr=np.array([[1.0]]),
+        global_eff_test_count=1.0,
+    )
+
+    result = apply_cross_tf_survival_floor(
+        cross_tf_result=cross_tf_result,
+        candidate_by_recipe_id={"r1": _floor_candidate("r1", "trend", "4h", priority=10.0)},
+        min_survivors_per_archetype=1,
+        min_survivors_per_tf=1,
+    )
+
+    assert result is cross_tf_result
+
+
+def test_apply_cross_tf_survival_floor_never_exceeds_pre_pruning_union() -> None:
+    """[LIMIT-04] re-admission never exceeds pre-pruning selected_for_l1 set."""
+    from src.domain.futures.alpha_foundry.diversity import apply_cross_tf_survival_floor
+
+    pre_pruning_union = {"r1", "r2", "r3"}
+    cross_tf_result = CrossBucketDiversityResult(
+        final_selected_recipe_ids=("r1",),
+        demoted_recipe_ids=("r2", "r3"),
+        demoted_reason_by_id={"r2": "r1", "r3": "r1"},
+        cross_bucket_corr=np.eye(3),
+        global_eff_test_count=1.0,
+    )
+    candidates = {
+        "r1": _floor_candidate("r1", "trend", "4h", priority=10.0),
+        "r2": _floor_candidate("r2", "hedge", "12h", priority=3.0),
+        "r3": _floor_candidate("r3", "carry", "8h", priority=2.0),
+    }
+
+    result = apply_cross_tf_survival_floor(
+        cross_tf_result=cross_tf_result,
+        candidate_by_recipe_id=candidates,
+        min_survivors_per_archetype=1,
+        min_survivors_per_tf=1,
+    )
+
+    assert set(result.final_selected_recipe_ids) <= pre_pruning_union
+
+
+def test_apply_cross_tf_survival_floor_counts_actual_survivors_not_distinct_labels() -> None:
+    """Regression: survivor counting must count actual surviving candidates
+    per archetype/TF (not just distinct-label presence). With
+    min_survivors_per_archetype=2 and 2 "trend" candidates already
+    surviving on the SAME TF (so the TF floor is independently satisfied
+    too), the archetype floor must NOT fire — a set-membership check would
+    incorrectly treat any single survivor as satisfying any threshold."""
+    from src.domain.futures.alpha_foundry.diversity import apply_cross_tf_survival_floor
+
+    trend_1 = _floor_candidate("r1", "trend", "4h", priority=10.0)
+    trend_2 = _floor_candidate("r2", "trend", "4h", priority=8.0)
+    demoted_trend = _floor_candidate("r3", "trend", "4h", priority=1.0)
+    cross_tf_result = CrossBucketDiversityResult(
+        final_selected_recipe_ids=("r1", "r2"),
+        demoted_recipe_ids=("r3",),
+        demoted_reason_by_id={"r3": "r1"},
+        cross_bucket_corr=np.eye(3),
+        global_eff_test_count=2.0,
+    )
+
+    result = apply_cross_tf_survival_floor(
+        cross_tf_result=cross_tf_result,
+        candidate_by_recipe_id={"r1": trend_1, "r2": trend_2, "r3": demoted_trend},
+        min_survivors_per_archetype=2,
+        min_survivors_per_tf=1,
+    )
+
+    assert "r3" not in result.final_selected_recipe_ids
+    assert result.final_selected_recipe_ids == ("r1", "r2")

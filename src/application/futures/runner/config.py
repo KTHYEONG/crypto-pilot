@@ -15,6 +15,12 @@ def _l0_cross_tf_diversity_audit_enabled() -> bool:
     """[ADR_20260711_L0_STRATEGY_DELIVERY_HARDENING] measurement-run opt-in env gate."""
     return os.environ.get("L0_CROSS_TF_DIVERSITY_AUDIT", "") not in ("", "0", "false", "False")
 
+
+def _l0_cross_tf_pruning_enabled() -> bool:
+    """[ADR_20260711_L0_CROSS_TF_PRUNING_ADMISSION] measurement-run opt-in env gate."""
+    return os.environ.get("L0_CROSS_TF_PRUNING", "") not in ("", "0", "false", "False")
+
+
 ActivePhase = Literal["l0", "l1", "l2", "l3"]
 SyncMode = Literal["auto", "skip"]
 
@@ -146,6 +152,7 @@ def build_l0_runtime_config(
         artifact_write_enabled=False,
         observability_mode="debug_log",
         enable_cross_tf_diversity_audit=_l0_cross_tf_diversity_audit_enabled(),
+        enable_cross_tf_pruning=_l0_cross_tf_pruning_enabled(),
     )
     return validate_alpha_foundry_runtime_config(config)
 

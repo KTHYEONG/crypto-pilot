@@ -4,11 +4,13 @@
 [ADR_20260706_ALPHA_FOUNDRY_SYNC][ADR_20260706_ALPHA_FOUNDRY_L0_DIVERSITY]
 [ADR_20260706_ALPHA_FOUNDRY_L0_SIGNAL_RIGOR]
 [ADR_20260711_L0_STRATEGY_DELIVERY_HARDENING]
+[ADR_20260711_L0_CROSS_TF_PRUNING_ADMISSION]
 """
 
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
+from dataclasses import replace
 from typing import Any
 
 import numpy as np
@@ -654,6 +656,89 @@ def audit_l0_selected_recipe_independence(
         demoted_reason_by_id=demoted_reason,
         canonical_tf=canonical_tf,
         max_corr_threshold=max_corr,
+    )
+
+
+def apply_cross_tf_survival_floor(
+    *,
+    cross_tf_result: CrossBucketDiversityResult,
+    candidate_by_recipe_id: Mapping[str, L0SignalCandidate],
+    min_survivors_per_archetype: int = 1,
+    min_survivors_per_tf: int = 1,
+) -> CrossBucketDiversityResult:
+    """Post-process compute_cross_tf_redundancy's output so no archetype or
+    TF is reduced to zero survivors purely by cross-TF demotion. [LIMIT-03]
+
+    For each archetype (via L0SignalCandidate.archetype) / timeframe (via
+    L0SignalCandidate.timeframe) with zero representatives in
+    final_selected_recipe_ids, re-admits the single highest
+    l1_priority_score candidate from demoted_recipe_ids belonging to that
+    archetype/timeframe, removing it from demoted_recipe_ids and
+    demoted_reason_by_id. Re-admissions from both rules are unioned and
+    applied once (idempotent — a candidate is re-admitted at most once
+    even if it satisfies both an archetype and a TF floor). [LIMIT-04]
+    candidates absent from candidate_by_recipe_id are skipped (never
+    re-admitted, never counted toward a floor) rather than raising, since
+    this is a defensive floor, not a primary correctness gate.
+    """
+    final_set = set(cross_tf_result.final_selected_recipe_ids)
+    demoted_set = set(cross_tf_result.demoted_recipe_ids)
+
+    if not demoted_set:
+        return cross_tf_result
+
+    from collections import Counter
+
+    selected_archetype_counts: Counter[str] = Counter()
+    selected_tf_counts: Counter[str] = Counter()
+    for rid in final_set:
+        c = candidate_by_recipe_id.get(rid)
+        if c is not None:
+            selected_archetype_counts[c.archetype] += 1
+            selected_tf_counts[c.timeframe] += 1
+
+    demoted_by_archetype: dict[str, list[tuple[str, float]]] = {}
+    demoted_by_tf: dict[str, list[tuple[str, float]]] = {}
+    for rid in demoted_set:
+        c = candidate_by_recipe_id.get(rid)
+        if c is None:
+            continue
+        demoted_by_archetype.setdefault(c.archetype, []).append((rid, c.l1_priority_score))
+        demoted_by_tf.setdefault(c.timeframe, []).append((rid, c.l1_priority_score))
+
+    to_readmit: set[str] = set()
+
+    for archetype, candidates in demoted_by_archetype.items():
+        survivors = selected_archetype_counts.get(archetype, 0)
+        if survivors < min_survivors_per_archetype and candidates:
+            best = max(candidates, key=lambda x: x[1])
+            to_readmit.add(best[0])
+
+    for tf, candidates in demoted_by_tf.items():
+        survivors = selected_tf_counts.get(tf, 0)
+        if survivors < min_survivors_per_tf and candidates:
+            best = max(candidates, key=lambda x: x[1])
+            to_readmit.add(best[0])
+
+    if not to_readmit:
+        return cross_tf_result
+
+    new_selected = list(cross_tf_result.final_selected_recipe_ids)
+    new_demoted: list[str] = []
+    new_demoted_reason: dict[str, str] = {}
+    for rid in cross_tf_result.demoted_recipe_ids:
+        if rid in to_readmit:
+            new_selected.append(rid)
+        else:
+            new_demoted.append(rid)
+            if rid in cross_tf_result.demoted_reason_by_id:
+                new_demoted_reason[rid] = cross_tf_result.demoted_reason_by_id[rid]
+
+    return replace(
+        cross_tf_result,
+        final_selected_recipe_ids=tuple(new_selected),
+        demoted_recipe_ids=tuple(new_demoted),
+        demoted_reason_by_id=new_demoted_reason,
     )
 
 
