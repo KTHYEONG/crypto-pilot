@@ -15,6 +15,7 @@ from src.domain.futures.alpha_foundry.bridge_helpers import (
     _bind_panels_to_recipe_ids,
     _prime_l0_tf_input_cache,
     _run_l0_gate_worker,
+    assemble_l0_strategy_delivery_manifest,
     bind_panels_to_alpha_recipes,
     build_cheap_gate_evidence_frame,
     build_cheap_gate_evidence_frame_from_evidences,
@@ -778,3 +779,153 @@ class TestRunAlphaFoundryL0GateMultiTfDedup:
             f"expected {len(tfs)} calls (Phase 1 only, dedup active), got {call_count['n']} "
             f"(2x{len(tfs)} would mean Phase 3 is still recomputing)"
         )
+
+
+# ── CrossTFSharedContext integration ──────────────────────────────────────────
+
+
+def _make_l0_candidate(
+    recipe_id: str, family: str = "fam", variant: str = "var",
+    timeframe: str = "4h", score: float = 1.0,
+) -> Any:
+    from src.domain.futures.alpha_foundry.contracts import L0SignalCandidate
+
+    return L0SignalCandidate(
+        run_id="test", timeframe=timeframe, family=family, variant=variant,
+        recipe_id=recipe_id, archetype="trend", source="synthetic_recipe",
+        n_events=100, effective_n=50.0, mean_net_bps=score, block_lcb_bps=score * 0.5,
+        nw_tstat=1.5, bootstrap_lcb_bps=0.0, bootstrap_agree=True,
+        cost_drag_ratio=0.3, turnover_per_year=50.0, max_abs_corr_in_bucket=0.0,
+        tf_coverage_count=0, sign_agreement_ratio=0.0,
+        corroboration_tier="single_tf_strict", discovery_tier="candidate",
+        l1_priority_score=score, l1_budget_units=1,
+        hard_reject_reasons=(), soft_flags=(),
+    )
+
+
+def _build_manifest_multi_results_fixture(
+    tfs: tuple[str, ...] = ("4h", "12h"),
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Build a minimal AlphaFoundryL0Result fixture with candidates_for_l1 and panels_for_l1."""
+    from src.domain.futures.alpha_foundry.bridge_helpers import AlphaFoundryL0Result
+
+    multi_results: dict[str, Any] = {}
+    aligned_by_tf: dict[str, Any] = {}
+    for i, tf in enumerate(tfs):
+        tf_hours = int(tf.replace("h", ""))
+        bars = 200
+        aligned = make_aligned_for_tf(tf_hours=tf_hours, bars=bars)
+        aligned_by_tf[tf] = aligned
+
+        score = np.full((bars, 2), 0.0)
+        for start in range(10, bars, 20):
+            score[start, :] = 1.0 * (1.0 if i % 2 == 0 else -1.0)
+        panel = CandidateSignalPanel(
+            family="fam", variant=f"var_{tf}",
+            params={"lookback": 20}, datetimes=np.arange(bars, dtype=np.int64),
+            symbols=("BTCUSDT", "ETHUSDT"),
+            signed_score_2d=score, side_hint_2d=np.where(score > 0, np.int8(1), np.int8(-1)),
+            expected_holding_bars=3, min_holding_bars=1,
+            stop_atr_mult=2.0, take_profit_atr_mult=4.0,
+            turnover_proxy_2d=np.zeros((bars, 2), dtype=np.float64),
+            valid_mask_2d=np.ones((bars, 2), dtype=np.bool_),
+            metadata={"recipe_id": f"r{i}"},
+        )
+        cand = _make_l0_candidate(f"r{i}", timeframe=tf, score=2.0 - i)
+        multi_results[tf] = AlphaFoundryL0Result(
+            panels_for_l1=(panel,),
+            summary_report=None,
+            gate_results=(),
+            panel_bindings=(),
+            candidates_for_l1=(cand,),
+        )
+    return multi_results, aligned_by_tf
+
+
+class TestAssembleL0ManifestSharedContext:
+    """Scenario 4: Integration verification for shared context dedup."""
+
+    def test_assemble_l0_strategy_delivery_manifest_builds_shared_context_once_when_both_enabled(
+        self, mocker: Any,
+    ) -> None:
+        """[LIMIT-04] With enable_audit=True and enable_pruning=True,
+        resolve_cross_tf_shared_context called exactly once (not twice)."""
+        from src.domain.futures.alpha_foundry import diversity as _div_mod
+
+        spy_shared_ctx = mocker.spy(_div_mod, "resolve_cross_tf_shared_context")
+
+        multi_results, aligned_by_tf = _build_manifest_multi_results_fixture()
+        _pruned, _manifest = assemble_l0_strategy_delivery_manifest(
+            multi_results=multi_results,
+            aligned_by_tf=aligned_by_tf,
+            run_id_prefix="test",
+            enable_audit=True,
+            enable_pruning=True,
+            total_l1_verification_budget=30,
+            min_common_active_bars=10,
+            min_directional_entry_jaccard=0.10,
+            min_shared_directional_entries=1,
+        )
+
+        assert spy_shared_ctx.call_count == 1
+
+    def test_assemble_l0_manifest_disabled_does_not_build_shared_context(
+        self, mocker: Any,
+    ) -> None:
+        """When both disabled, resolve_cross_tf_shared_context is never called."""
+        from src.domain.futures.alpha_foundry import diversity as _div_mod
+
+        spy_shared_ctx = mocker.spy(_div_mod, "resolve_cross_tf_shared_context")
+
+        multi_results, aligned_by_tf = _build_manifest_multi_results_fixture()
+        _pruned, _manifest = assemble_l0_strategy_delivery_manifest(
+            multi_results=multi_results,
+            aligned_by_tf=aligned_by_tf,
+            run_id_prefix="test",
+            enable_audit=False,
+            enable_pruning=False,
+            total_l1_verification_budget=30,
+        )
+
+        assert spy_shared_ctx.call_count == 0
+
+    def test_assemble_l0_manifest_logs_audit_timing_on_failure(
+        self, mocker: Any,
+    ) -> None:
+        """[ADR_20260712_L0_CROSS_TF_PRUNING_PERFORMANCE] stage=l0_cross_tf_audit
+        timing must be logged even when audit raises (not success-only).
+
+        Spies on setup_logger() rather than capturing stdout/caplog: the real
+        logger returned by setup_logger("opt_main_futures", write_file=False)
+        is a session-cached singleton (returns early once logger.handlers is
+        set) with propagate=False by design (terminal-clean output,
+        logging.md) — its output is not reliably observable through caplog
+        (propagate=False) or capsys/capfd (its StreamHandler binds sys.stdout
+        at first-setup time, which may predate this test's capture fixture).
+        Spying the call site directly is the robust boundary to assert on.
+        """
+        mock_logger = mocker.MagicMock()
+        mocker.patch(
+            "src.domain.futures.alpha_foundry.bridge_helpers.setup_logger",
+            return_value=mock_logger,
+        )
+        multi_results, aligned_by_tf = _build_manifest_multi_results_fixture()
+
+        assemble_l0_strategy_delivery_manifest(
+            multi_results=multi_results,
+            aligned_by_tf=aligned_by_tf,
+            run_id_prefix="test",
+            enable_audit=True,
+            enable_pruning=False,
+            total_l1_verification_budget=30,
+            min_common_active_bars=10_000,  # impossible -> forces ValueError
+        )
+
+        timing_calls = [
+            call for call in mock_logger.info.call_args_list
+            if "stage=l0_cross_tf_audit took=" in call.args[0]
+        ]
+        assert len(timing_calls) == 1
+        formatted = timing_calls[0].args[0] % timing_calls[0].args[1:]
+        assert "status=failed" in formatted
+

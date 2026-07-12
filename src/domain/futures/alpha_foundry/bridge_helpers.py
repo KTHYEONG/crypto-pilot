@@ -973,9 +973,53 @@ def assemble_l0_strategy_delivery_manifest(
 
     all_tfs_with_candidates = bool(selected_by_tf and panel_by_recipe_id)
 
+    shared_context: Any = None
+    if enable_audit and enable_pruning and all_tfs_with_candidates:
+        from src.domain.futures.alpha_foundry.diversity import resolve_cross_tf_shared_context
+
+        try:
+            shared_context = resolve_cross_tf_shared_context(
+                selected_by_tf=selected_by_tf,
+                panel_by_recipe_id=panel_by_recipe_id,
+                aligned_by_tf=aligned_by_tf,
+                min_common_active_bars=min_common_active_bars,
+            )
+        except ValueError as exc:
+            manifest_status = "fail_open"
+            manifest_reason = str(exc)
+            _fallback_logger = setup_logger("opt_main_futures", write_file=False)
+            for _l in (_fallback_logger, _logger):
+                _l.warning(
+                    "[EVAL] stage=l0_cross_tf_shared_context run_id=%s failed: %s,"
+                    " falling back to unpruned multi_results",
+                    run_id_prefix, exc,
+                )
+            pruned_multi_results = dict(multi_results)
+            manifest_final_ids = tuple(
+                c.recipe_id
+                for res in multi_results.values()
+                for c in res.candidates_for_l1
+            )
+            _early_reports: dict[str, Any] = {}
+            for _tf_k, _res in multi_results.items():
+                _r = getattr(_res, "summary_report", None)
+                if _r is not None:
+                    _early_reports[_tf_k] = _r
+            return pruned_multi_results, L0StrategyDeliveryManifest(
+                run_id_prefix=run_id_prefix,
+                reports_by_tf=_early_reports,
+                independence_audit=None,
+                final_selected_recipe_ids=manifest_final_ids,
+                total_l1_verification_budget=total_l1_verification_budget,
+                pruning_status="fail_open",
+                pruning_reason=manifest_reason,
+            )
+
     if enable_audit and all_tfs_with_candidates:
         from src.domain.futures.alpha_foundry.diversity import audit_l0_selected_recipe_independence
 
+        _t_audit_start = _time_module.perf_counter()
+        _audit_status = "success"
         try:
             manifest_audit = audit_l0_selected_recipe_independence(
                 selected_by_tf=selected_by_tf,
@@ -983,14 +1027,21 @@ def assemble_l0_strategy_delivery_manifest(
                 aligned_by_tf=aligned_by_tf,
                 min_common_active_bars=min_common_active_bars,
                 max_corr=max_novelty_corr,
+                precomputed_shared_context=shared_context,
             )
         except ValueError as exc:
+            _audit_status = "failed"
             _fallback_logger = setup_logger("opt_main_futures", write_file=False)
             for _l in (_fallback_logger, _logger):
                 _l.warning(
                     "[EVAL] stage=l0_cross_tf_audit run_id=%s failed: %s",
                     run_id_prefix, exc,
                 )
+        finally:
+            setup_logger("opt_main_futures", write_file=False).info(
+                "[SYS] stage=l0_cross_tf_audit took=%.4fs enabled=True status=%s",
+                _time_module.perf_counter() - _t_audit_start, _audit_status,
+            )
 
     if enable_pruning and all_tfs_with_candidates:
         from src.domain.futures.alpha_foundry.diversity import (
@@ -998,6 +1049,7 @@ def assemble_l0_strategy_delivery_manifest(
             compute_cross_tf_redundancy,
         )
 
+        _t_prune_start = _time_module.perf_counter()
         try:
             cross_tf_result = compute_cross_tf_redundancy(
                 selected_by_tf=selected_by_tf,
@@ -1007,6 +1059,7 @@ def assemble_l0_strategy_delivery_manifest(
                 max_novelty_corr=max_novelty_corr,
                 min_directional_entry_jaccard=min_directional_entry_jaccard,
                 min_shared_directional_entries=min_shared_directional_entries,
+                precomputed_shared_context=shared_context,
             )
 
             floor_result = apply_cross_tf_survival_floor(
@@ -1033,6 +1086,10 @@ def assemble_l0_strategy_delivery_manifest(
             else:
                 manifest_status = "audit_only"
                 manifest_reason = "no redundant pairs found"
+            setup_logger("opt_main_futures", write_file=False).info(
+                "[SYS] stage=l0_cross_tf_pruning took=%.4fs enabled=True status=%s",
+                _time_module.perf_counter() - _t_prune_start, manifest_status,
+            )
 
             final_set = set(manifest_final_ids)
             pruned_multi_results = {}
@@ -1059,6 +1116,10 @@ def assemble_l0_strategy_delivery_manifest(
             manifest_reason = str(exc)
             _fallback_logger = setup_logger("opt_main_futures", write_file=False)
             for _l in (_fallback_logger, _logger):
+                _l.warning(
+                    "[SYS] stage=l0_cross_tf_pruning took=%.4fs enabled=True status=fail_open",
+                    _time_module.perf_counter() - _t_prune_start,
+                )
                 _l.warning(
                     "[EVAL] stage=l0_cross_tf_pruning run_id=%s failed: %s,"
                     " falling back to unpruned multi_results",
