@@ -23,6 +23,7 @@ from src.domain.futures.alpha_foundry.diversity import (
     compute_cross_tf_redundancy,
     compute_panel_correlation_matrix,
     estimate_effective_test_count,
+    resolve_cross_tf_shared_context,
 )
 from src.domain.futures.signals.contracts import CandidateSignalPanel
 
@@ -996,3 +997,337 @@ def test_compute_cross_tf_redundancy_handles_non_nested_tf_calendar_ranges() -> 
     )
 
     assert set(result.final_selected_recipe_ids) | set(result.demoted_recipe_ids) == {"a", "b"}
+
+
+# ── CrossTFSharedContext / resolve_cross_tf_shared_context ─────────────────
+
+
+def _build_four_recipe_fixture() -> tuple[
+    dict[str, list[L0SignalCandidate]],
+    dict[str, CandidateSignalPanel],
+    dict[str, Any],
+]:
+    """4 recipes across 2 TFs (4h, 12h), 2 each, with valid panels."""
+    bar_4h_ns = 4 * 3_600_000_000_000
+    dt_4h = np.arange(0, 40, dtype=np.int64) * bar_4h_ns
+    dt_12h = np.arange(0, 13, dtype=np.int64) * (12 * 3_600_000_000_000)
+
+    rng = np.random.default_rng(42)
+    p1 = _make_canonical_panel_from_2d(rng.normal(0, 1, (40, 1)), dt_start=0)
+    p2 = _make_canonical_panel_from_2d(rng.normal(0, 1, (40, 1)), dt_start=0)
+    p3 = _make_canonical_panel_from_2d(rng.normal(0, 1, (13, 1)), dt_start=0)
+    p4 = _make_canonical_panel_from_2d(rng.normal(0, 1, (13, 1)), dt_start=0)
+
+    c1 = _candidate("r1", timeframe="4h", score=2.0)
+    c2 = _candidate("r2", timeframe="4h", score=1.5)
+    c3 = _candidate("r3", timeframe="12h", score=1.0)
+    c4 = _candidate("r4", timeframe="12h", score=0.5)
+
+    aligned_4h = _make_aligned(dt_4h, n_syms=1)
+    aligned_12h = _make_aligned(dt_12h, n_syms=1)
+
+    return (
+        {"4h": [c1, c2], "12h": [c3, c4]},
+        {"r1": p1, "r2": p2, "r3": p3, "r4": p4},
+        {"4h": aligned_4h, "12h": aligned_12h},
+    )
+
+
+class TestCrossTFSharedContext:
+
+    def test_resolve_cross_tf_shared_context_matches_inline_computation(self) -> None:
+        """Scenario 1: shared_context.corr matches inline corr from compute_cross_tf_redundancy."""
+        selected_by_tf, panel_by_recipe_id, aligned_by_tf = _build_four_recipe_fixture()
+
+        shared = resolve_cross_tf_shared_context(
+            selected_by_tf=selected_by_tf,
+            panel_by_recipe_id=panel_by_recipe_id,
+            aligned_by_tf=aligned_by_tf,
+            min_common_active_bars=1,
+        )
+        result = compute_cross_tf_redundancy(
+            selected_by_tf=selected_by_tf,
+            panel_by_recipe_id=panel_by_recipe_id,
+            aligned_by_tf=aligned_by_tf,
+            min_common_active_bars=1,
+            max_novelty_corr=0.70,
+            min_directional_entry_jaccard=0.50,
+            min_shared_directional_entries=1,
+        )
+
+        assert shared.corr.shape == result.cross_bucket_corr.shape
+        np.testing.assert_allclose(shared.corr, result.cross_bucket_corr, atol=1e-10)
+
+    def test_resolve_cross_tf_shared_context_raises_when_memory_budget_exceeded(
+        self, mocker: Any,
+    ) -> None:
+        """Scenario 2 [LIMIT-05]: memory budget exceeded raises ValueError."""
+        mocker.patch(
+            "src.domain.futures.alpha_foundry.diversity.admit_memory_stage",
+            return_value=False,
+        )
+        selected_by_tf, panel_by_recipe_id, aligned_by_tf = _build_four_recipe_fixture()
+
+        with pytest.raises(ValueError, match="memory_budget"):
+            resolve_cross_tf_shared_context(
+                selected_by_tf=selected_by_tf,
+                panel_by_recipe_id=panel_by_recipe_id,
+                aligned_by_tf=aligned_by_tf,
+                min_common_active_bars=1,
+            )
+
+    def test_resolve_cross_tf_shared_context_propagates_min_common_active_bars_valueerror(
+        self,
+    ) -> None:
+        """Scenario 3: ValueError propagation from resolve_cross_tf_canonical_context."""
+        selected_by_tf, panel_by_recipe_id, aligned_by_tf = _build_four_recipe_fixture()
+
+        with pytest.raises(ValueError, match="n_common_active_bars"):
+            resolve_cross_tf_shared_context(
+                selected_by_tf=selected_by_tf,
+                panel_by_recipe_id=panel_by_recipe_id,
+                aligned_by_tf=aligned_by_tf,
+                min_common_active_bars=10_000,  # impossible
+            )
+
+
+class TestCrossTFPairEvidencePrecomputed:
+
+    def test_compute_cross_tf_pair_evidence_with_precomputed_inputs_matches_self_computed(
+        self,
+    ) -> None:
+        """Scenario 1: precomputed path yields byte-identical results to self-computed."""
+        n_bars = 100
+        canonical_dt = np.arange(0, n_bars, dtype=np.int64) * 3_600_000_000_000
+        active = np.ones((n_bars, 1), dtype=bool)
+        rng = np.random.default_rng(42)
+        score_a = rng.normal(0, 1, (n_bars, 1))
+        score_b = score_a * 0.9 + rng.normal(0, 0.1, (n_bars, 1))
+
+        p_a = _make_canonical_panel_from_2d(score_a, dt_start=0)
+        p_b = _make_canonical_panel_from_2d(score_b, dt_start=0)
+
+        context = CrossTFCanonicalContext(
+            canonical_tf="1h",
+            canonical_datetimes_ns=canonical_dt,
+            active_mask_2d=active,
+            common_start_ns=int(canonical_dt[0]),
+            common_end_ns=int(canonical_dt[-1]),
+            n_common_active_bars=n_bars,
+        )
+
+        # Self-computed
+        ev_self = compute_cross_tf_pair_evidence(
+            recipe_id_a="a", recipe_id_b="b",
+            panel_a=p_a, panel_b=p_b,
+            context=context,
+            min_score_corr=0.70,
+            min_directional_entry_jaccard=0.50,
+            min_shared_directional_entries=1,
+        )
+
+        # Precomputed: build projections and side/entry manually
+        from src.domain.futures.alpha_foundry.multi_tf_fusion import project_signal_to_canonical_grid
+
+        proj_a = project_signal_to_canonical_grid(panel=p_a, canonical_datetimes=canonical_dt, causal_lag_bars=1)
+        proj_b = project_signal_to_canonical_grid(panel=p_b, canonical_datetimes=canonical_dt, causal_lag_bars=1)
+        from src.domain.futures.alpha_foundry.diversity import _causal_projected_side_and_entry
+
+        se_a = _causal_projected_side_and_entry(proj_a[0], proj_a[1], active)
+        se_b = _causal_projected_side_and_entry(proj_b[0], proj_b[1], active)
+
+        valid_ab = proj_a[1] & proj_b[1] & active
+        flat_a = proj_a[0][valid_ab]
+        flat_b = proj_b[0][valid_ab]
+        c = float(np.corrcoef(flat_a, flat_b)[0, 1])
+        precomputed_corr = c if np.isfinite(c) else 0.0
+
+        ev_pre = compute_cross_tf_pair_evidence(
+            recipe_id_a="a", recipe_id_b="b",
+            panel_a=p_a, panel_b=p_b,
+            context=context,
+            min_score_corr=0.70,
+            min_directional_entry_jaccard=0.50,
+            min_shared_directional_entries=1,
+            precomputed_proj_a=proj_a,
+            precomputed_proj_b=proj_b,
+            precomputed_side_entry_a=se_a,
+            precomputed_side_entry_b=se_b,
+            precomputed_score_corr=precomputed_corr,
+        )
+
+        assert ev_self.score_corr == pytest.approx(ev_pre.score_corr, rel=1e-5)
+        assert ev_self.shared_directional_entries == ev_pre.shared_directional_entries
+        assert ev_self.directional_entry_jaccard == pytest.approx(ev_pre.directional_entry_jaccard, rel=1e-5)
+        assert ev_self.is_redundant == ev_pre.is_redundant
+
+
+class TestCrossTFRedundancyDedup:
+
+    def test_compute_cross_tf_redundancy_corr_matrix_is_symmetric_computed_once(
+        self, mocker: Any,
+    ) -> None:
+        """Scenario 2 [LIMIT-03]: corr matrix uses i<j only, mirror to j,i.
+        np.corrcoef calls should be N*(N-1)/2 = 6 for 4 recipes."""
+
+        spy = mocker.spy(np, "corrcoef")
+        selected_by_tf, panel_by_recipe_id, aligned_by_tf = _build_four_recipe_fixture()
+
+        compute_cross_tf_redundancy(
+            selected_by_tf=selected_by_tf,
+            panel_by_recipe_id=panel_by_recipe_id,
+            aligned_by_tf=aligned_by_tf,
+            min_common_active_bars=1,
+            max_novelty_corr=0.70,
+            min_directional_entry_jaccard=0.50,
+            min_shared_directional_entries=1,
+        )
+
+        # 4*3/2 = 6 unique pairs + 4*3/2 = 6 from pair_evidence (jaccard uses
+        # precomputed_score_corr, so no extra corrcoef calls) = 6 corrcoef calls total
+        n_pairs = 4 * 3 // 2
+        assert spy.call_count == n_pairs
+
+    def test_compute_cross_tf_redundancy_projects_each_recipe_exactly_once(
+        self, mocker: Any,
+    ) -> None:
+        """Scenario 2 [LIMIT-01][LIMIT-02]: proj + side/entry each called N times, not N + 2*C(N,2)."""
+        from src.domain.futures.alpha_foundry import multi_tf_fusion as _fusion_mod
+        from src.domain.futures.alpha_foundry.diversity import (
+            _causal_projected_side_and_entry as _real_side_entry,
+        )
+
+        call_count = {"project": 0, "side_entry": 0}
+
+        def _counting_project(
+            *,
+            panel: Any,
+            canonical_datetimes: Any,
+            causal_lag_bars: int,
+        ) -> Any:
+            call_count["project"] += 1
+            return _fusion_mod.project_signal_to_canonical_grid(
+                panel=panel, canonical_datetimes=canonical_datetimes,
+                causal_lag_bars=causal_lag_bars,
+            )
+
+        def _counting_side_entry(
+            score: Any, valid: Any, active: Any,
+        ) -> Any:
+            call_count["side_entry"] += 1
+            return _real_side_entry(score, valid, active)
+
+        mocker.patch(
+            "src.domain.futures.alpha_foundry.diversity.project_signal_to_canonical_grid",
+            side_effect=_counting_project,
+        )
+        mocker.patch(
+            "src.domain.futures.alpha_foundry.diversity._causal_projected_side_and_entry",
+            side_effect=_counting_side_entry,
+        )
+
+        selected_by_tf, panel_by_recipe_id, aligned_by_tf = _build_four_recipe_fixture()
+
+        compute_cross_tf_redundancy(
+            selected_by_tf=selected_by_tf,
+            panel_by_recipe_id=panel_by_recipe_id,
+            aligned_by_tf=aligned_by_tf,
+            min_common_active_bars=1,
+            max_novelty_corr=0.70,
+            min_directional_entry_jaccard=0.50,
+            min_shared_directional_entries=1,
+        )
+
+        assert call_count["project"] == 4
+        assert call_count["side_entry"] == 4
+
+    def test_compute_cross_tf_redundancy_uses_precomputed_shared_context(
+        self,
+    ) -> None:
+        """Providing precomputed_shared_context should produce identical results."""
+        selected_by_tf, panel_by_recipe_id, aligned_by_tf = _build_four_recipe_fixture()
+
+        shared = resolve_cross_tf_shared_context(
+            selected_by_tf=selected_by_tf,
+            panel_by_recipe_id=panel_by_recipe_id,
+            aligned_by_tf=aligned_by_tf,
+            min_common_active_bars=1,
+        )
+
+        result_self = compute_cross_tf_redundancy(
+            selected_by_tf=selected_by_tf,
+            panel_by_recipe_id=panel_by_recipe_id,
+            aligned_by_tf=aligned_by_tf,
+            min_common_active_bars=1,
+            max_novelty_corr=0.70,
+            min_directional_entry_jaccard=0.50,
+            min_shared_directional_entries=1,
+        )
+
+        result_shared = compute_cross_tf_redundancy(
+            selected_by_tf=selected_by_tf,
+            panel_by_recipe_id=panel_by_recipe_id,
+            aligned_by_tf=aligned_by_tf,
+            min_common_active_bars=1,
+            max_novelty_corr=0.70,
+            min_directional_entry_jaccard=0.50,
+            min_shared_directional_entries=1,
+            precomputed_shared_context=shared,
+        )
+
+        assert result_self.final_selected_recipe_ids == result_shared.final_selected_recipe_ids
+        assert result_self.demoted_recipe_ids == result_shared.demoted_recipe_ids
+        assert result_self.demoted_reason_by_id == result_shared.demoted_reason_by_id
+        np.testing.assert_allclose(result_self.cross_bucket_corr, result_shared.cross_bucket_corr, atol=1e-10)
+
+    def test_compute_cross_tf_redundancy_audit_uses_precomputed_shared_context(
+        self,
+    ) -> None:
+        """audit_l0_selected_recipe_independence with precomputed_shared_context produces identical results."""
+        selected_by_tf, panel_by_recipe_id, aligned_by_tf = _build_four_recipe_fixture()
+
+        shared = resolve_cross_tf_shared_context(
+            selected_by_tf=selected_by_tf,
+            panel_by_recipe_id=panel_by_recipe_id,
+            aligned_by_tf=aligned_by_tf,
+            min_common_active_bars=1,
+        )
+
+        audit_self = audit_l0_selected_recipe_independence(
+            selected_by_tf=selected_by_tf,
+            panel_by_recipe_id=panel_by_recipe_id,
+            aligned_by_tf=aligned_by_tf,
+            min_common_active_bars=1,
+            max_corr=0.70,
+        )
+
+        audit_shared = audit_l0_selected_recipe_independence(
+            selected_by_tf=selected_by_tf,
+            panel_by_recipe_id=panel_by_recipe_id,
+            aligned_by_tf=aligned_by_tf,
+            min_common_active_bars=1,
+            max_corr=0.70,
+            precomputed_shared_context=shared,
+        )
+
+        assert audit_self.n_selected_total == audit_shared.n_selected_total
+        assert audit_self.n_independent_clusters == audit_shared.n_independent_clusters
+        assert len(audit_self.cluster_members) == len(audit_shared.cluster_members)
+
+
+class TestProjectSignalToCanonicalGridFloat32:
+
+    def test_project_signal_to_canonical_grid_returns_float32_dtype(self) -> None:
+        """Scenario 2 [LIMIT-05]: projected array dtype is float32."""
+        from src.domain.futures.alpha_foundry.multi_tf_fusion import project_signal_to_canonical_grid
+
+        n_bars = 50
+        canonical_dt = np.arange(0, n_bars, dtype=np.int64) * 3_600_000_000_000
+        panel = _make_canonical_panel_from_2d(np.random.default_rng(0).normal(0, 1, (n_bars, 1)), dt_start=0)
+
+        projected, valid = project_signal_to_canonical_grid(
+            panel=panel, canonical_datetimes=canonical_dt, causal_lag_bars=1,
+        )
+
+        assert projected.dtype == np.float32
+        assert valid.dtype == np.bool_

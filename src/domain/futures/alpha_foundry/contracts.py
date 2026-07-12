@@ -95,6 +95,19 @@ CrossTFPruningStatus: TypeAlias = Literal["disabled", "applied", "audit_only", "
 
 
 @dataclass(slots=True, frozen=True)
+class CrossTFSharedContext:
+    """[ADR_20260712_L0_CROSS_TF_PRUNING_PERFORMANCE] Precomputed inputs shared
+    between audit_l0_selected_recipe_independence() and compute_cross_tf_redundancy()
+    to eliminate duplicate canonical-context/projection/correlation work when both
+    are invoked in the same manifest call."""
+    canonical_context: CrossTFCanonicalContext
+    proj_cache: dict[str, tuple[NDArray[np.float32], NDArray[np.bool_]]]
+    side_entry_cache: dict[str, tuple[NDArray[np.int8], NDArray[np.bool_]]]
+    corr: NDArray[np.float64]
+    recipe_order: tuple[str, ...]
+
+
+@dataclass(slots=True, frozen=True)
 class CrossTFCanonicalContext:
     canonical_tf: str
     canonical_datetimes_ns: NDArray[np.int64]
