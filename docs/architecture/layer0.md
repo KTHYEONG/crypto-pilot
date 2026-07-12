@@ -26,7 +26,7 @@ change_triggers:
 dependencies:
   documents:
     - docs/architecture/universe.md
-last_verified: 2026-07-11
+last_verified: 2026-07-12
 ---
 
 # 1. Purpose
@@ -55,11 +55,10 @@ last_verified: 2026-07-11
 3. **Cross-Bucket Diversity**: Hierarchical clustering applied across selected bucket representatives to demote cross-TF duplicates.
 4. **Global L1 Budget Allocation**: Simulated slots are distributed across buckets using Largest-Remainder method based on maximum bucket block_lcb_bps.
 
-### Cross-Timeframe Diversity Audit
-- **Canonical Grid Projection**: Align signals via causal forward-fill onto base timeframe grids, offset by causal_lag_bars to prevent look-ahead bias.
-- **Independence Metrics**: Post-gate selection outputs:
-  - n_distinct_thesis_ids: thesis id count.
-  - n_independent_clusters: unique clusters determined by correlation hierarchical clustering.
+### Cross-Timeframe Diversity Audit & Pruning Admission
+- **Canonical Grid Projection**: Align signals via causal forward-fill onto base timeframe grids, offset by causal_lag_bars to prevent look-ahead bias. `compute_cross_tf_redundancy()` requires the canonical TF to be at least as fine as every TF present in the pruning input set (raises if not — coarse-to-fine downsampling is not supported by the forward-fill projection); `audit_l0_selected_recipe_independence()` (read-only) has no such requirement.
+- **Independence Metrics** (read-only, `enable_cross_tf_diversity_audit`): Post-gate selection outputs `n_distinct_thesis_ids` (thesis id count) and `n_independent_clusters` (unique clusters via correlation hierarchical clustering).
+- **Pruning Admission** (`enable_cross_tf_pruning`): `assemble_l0_strategy_delivery_manifest()` runs after `run_alpha_foundry_l0_gate_multi_tf()` completes, computing `compute_cross_tf_redundancy()` + `apply_cross_tf_survival_floor()` (per-archetype and per-TF minimum-survivor guarantee, `cross_tf_pruning_min_survivors_per_archetype`/`cross_tf_pruning_min_survivors_per_tf`) to narrow the per-TF `panels_for_l1`/`candidates_for_l1` sets before they reach L1. Fails open: any `ValueError` from the redundancy computation falls back to the unpruned set.
 
 ### Non-Native Timeframe Synthesis (Virtual Probe)
 - **Cadence Rules**: Synthesizes 2h/6h/8h/12h bars from nearest native timeframe (1h/4h) using left-closed, left-labeled resampling.
@@ -73,6 +72,8 @@ last_verified: 2026-07-11
 - `MultiTimeframeEvidence`: family, variant, native_timeframe, corroboration_tier, fused_conviction_score.
 - `L0IndependenceAudit`: n_selected_total, n_distinct_thesis_ids, n_independent_clusters, cluster_members, demoted_recipe_ids, demoted_reason_by_id, canonical_tf, max_corr_threshold.
 - `L0StrategyDeliveryManifest`: run_id_prefix, reports_by_tf (dict[str, AlphaFoundryBridgeReport]), independence_audit (L0IndependenceAudit | None), final_selected_recipe_ids, total_l1_verification_budget.
+- `assemble_l0_strategy_delivery_manifest(multi_results, aligned_by_tf, canonical_tf, run_id_prefix, enable_audit, enable_pruning, total_l1_verification_budget, max_novelty_corr, min_survivors_per_archetype, min_survivors_per_tf) -> tuple[dict[str, AlphaFoundryL0Result], L0StrategyDeliveryManifest]`: pure function, `src/domain/futures/alpha_foundry/bridge_helpers.py`.
+- `apply_cross_tf_survival_floor(cross_tf_result, candidate_by_recipe_id, min_survivors_per_archetype, min_survivors_per_tf) -> CrossBucketDiversityResult`: pure function, `src/domain/futures/alpha_foundry/diversity.py`.
 
 # 4. Architecture Flow
 
@@ -97,5 +98,8 @@ graph TD
 | `max_cost_drag_ratio` | 0.60 | Maximum drag ratio representing transaction cost limits |
 | `max_novelty_corr` | 0.70 | Maximum correlation allowed within the same bucket |
 | `fdr_alpha` | 0.10 | FDR alpha level for Benjamini-Hochberg correction |
-| `enable_cross_tf_diversity_audit` | False | Toggle for post-gate Cross-TF independence audit |
+| `enable_cross_tf_diversity_audit` | False | Toggle for post-gate Cross-TF independence audit (read-only) |
 | `cross_tf_diversity_canonical_tf` | "1h" | Target canonical grid TF for audit projection |
+| `enable_cross_tf_pruning` | False | Toggle for enforcing cross-TF redundancy pruning before L1 handoff |
+| `cross_tf_pruning_min_survivors_per_archetype` | 1 | Minimum surviving candidates per archetype after cross-TF pruning |
+| `cross_tf_pruning_min_survivors_per_tf` | 1 | Minimum surviving candidates per timeframe after cross-TF pruning |
