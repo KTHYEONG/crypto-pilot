@@ -881,6 +881,11 @@ class AlphaFoundryRuntimeConfig:
     enable_cross_tf_diversity_audit: bool = False
     cross_tf_diversity_canonical_tf: str = "1h"
 
+    # Cross-TF pruning enforcement [ADR_20260711_L0_CROSS_TF_PRUNING_ADMISSION]
+    enable_cross_tf_pruning: bool = False
+    cross_tf_pruning_min_survivors_per_archetype: int = 1
+    cross_tf_pruning_min_survivors_per_tf: int = 1
+
     def __post_init__(self) -> None:
         if self.mode not in {"off", "audit", "gate"}:
             raise ValueError(f"invalid alpha_foundry mode: {self.mode!r}")
@@ -921,6 +926,16 @@ class AlphaFoundryRuntimeConfig:
         if self.min_discovery_unit_lcb_bps < 0.0:
             raise ValueError(
                 f"min_discovery_unit_lcb_bps must be >= 0.0, got {self.min_discovery_unit_lcb_bps}"
+            )
+        if self.cross_tf_pruning_min_survivors_per_archetype < 1:
+            raise ValueError(
+                f"cross_tf_pruning_min_survivors_per_archetype must be >= 1, "
+                f"got {self.cross_tf_pruning_min_survivors_per_archetype}"
+            )
+        if self.cross_tf_pruning_min_survivors_per_tf < 1:
+            raise ValueError(
+                f"cross_tf_pruning_min_survivors_per_tf must be >= 1, "
+                f"got {self.cross_tf_pruning_min_survivors_per_tf}"
             )
 
 
