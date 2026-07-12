@@ -96,15 +96,22 @@ CrossTFPruningStatus: TypeAlias = Literal["disabled", "applied", "audit_only", "
 
 @dataclass(slots=True, frozen=True)
 class CrossTFSharedContext:
-    """[ADR_20260712_L0_CROSS_TF_PRUNING_PERFORMANCE] Precomputed inputs shared
+    """    [ADR_20260712_L0_CROSS_TF_PRUNING_PERFORMANCE] Precomputed inputs shared
     between audit_l0_selected_recipe_independence() and compute_cross_tf_redundancy()
     to eliminate duplicate canonical-context/projection/correlation work when both
-    are invoked in the same manifest call."""
+    are invoked in the same manifest call.
+
+    [ADR_20260712_L0_CROSS_TF_BATCH_ACCELERATION] entry_pos_flat/entry_neg_flat/
+    n_entries added for batch jaccard matmul. dict[str, "NDArray[np.int8]"] string
+    annotation avoids numpy-eager resolution in slots=True runtime."""
     canonical_context: CrossTFCanonicalContext
     proj_cache: dict[str, tuple[NDArray[np.float32], NDArray[np.bool_]]]
     side_entry_cache: dict[str, tuple[NDArray[np.int8], NDArray[np.bool_]]]
     corr: NDArray[np.float64]
     recipe_order: tuple[str, ...]
+    entry_pos_flat: dict[str, "NDArray[np.int8]"] = field(default_factory=dict)
+    entry_neg_flat: dict[str, "NDArray[np.int8]"] = field(default_factory=dict)
+    n_entries: dict[str, int] = field(default_factory=dict)
 
 
 @dataclass(slots=True, frozen=True)
