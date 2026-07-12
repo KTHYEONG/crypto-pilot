@@ -1431,7 +1431,7 @@ def test_weak_rank_ic_is_soft_not_hard() -> None:
         source="catalog_exact", policy=policy, stress_cost_bps=7.5, tf_fusion=None,
     )
     assert "weak_rank_ic" in candidate.soft_flags
-    assert "weak_rank_ic" not in candidate.hard_reject_reasons  # type: ignore[operator]
+    assert "weak_rank_ic" not in candidate.hard_reject_reasons
 
 
 def test_weak_rank_ic_does_not_cause_blocked_tier() -> None:
@@ -1520,7 +1520,7 @@ def test_evaluate_panel_gate_with_tf_fusion_corroborated() -> None:
     assert evidence.tf_corroboration > 0.0
 
 
-def test_regime_stability_below_half_flags_low_stability(caplog) -> None:
+def test_regime_stability_below_half_flags_low_stability(caplog: pytest.LogCaptureFixture) -> None:
     """Unstable returns → regime_stability < 0.5 → soft_flag 'low_regime_stability'."""
     t = 120
     dt = np.arange(np.datetime64("2026-01-01T00"), np.datetime64("2026-01-01T00") + np.timedelta64(t*4, "h"),
@@ -1565,7 +1565,7 @@ def test_regime_stability_below_half_flags_low_stability(caplog) -> None:
     assert "low_regime_stability" in evidence.soft_flags
 
 
-def test_emit_generation_debug_summary_logs_eval(caplog) -> None:
+def test_emit_generation_debug_summary_logs_eval(caplog: pytest.LogCaptureFixture) -> None:
     """Spec E2-12 / S1-6: DEBUG summary emits bucket, top candidate, reject info."""
     import logging
 
@@ -2284,3 +2284,58 @@ def test_cheap_gate_and_canonical_gate_identical_forward_returns() -> None:
     )
     assert cheap_ev.mean_gross_bps == pytest.approx(canon_ev.mean_gross_bps, rel=1e-4)
     assert cheap_ev.mean_net_bps == pytest.approx(canon_ev.mean_net_bps, rel=1e-4)
+
+
+def test_l0_gate_event_filtering_optimization_integrity() -> None:
+    """Verify that event filtering optimization results in a cleaned metadata dictionary
+
+    and identical logical outcomes under normal execution.
+    """
+    aligned = make_mock_aligned()
+    panel = make_mock_panel(recipe_id="trend_ma:ema_12_72:4h")
+    recipe = dataclasses.replace(SAMPLE_RECIPE, causal_lag_bars=1)
+    cfg = CheapGateConfig(
+        min_events=1, min_effective_n=1.0, min_lcb_net_bps=-1000.0,
+        min_nw_tstat=0.0, max_cost_drag_ratio=100.0, max_turnover_per_year=10000.0,
+        bootstrap_seed=42,
+    )
+    
+    # Save original metadata keys
+    original_keys = list(panel.metadata.keys())
+    
+    evidence = evaluate_panel_cheap_gate(
+        panel=panel, aligned=aligned, recipe=recipe,
+        cost_model=ExecutionCostModel(), config=cfg, bars_per_year=8760.0,
+    )
+    
+    # Verify metadata is perfectly restored
+    assert list(panel.metadata.keys()) == original_keys
+    assert "l0_event_mask_2d" not in panel.metadata
+    assert evidence.gate_passed in (True, False)
+
+
+def test_l0_gate_event_filtering_optimization_exception_safety() -> None:
+    """Verify that metadata is cleaned up even if candidate_panels_to_events raises an error."""
+    from unittest.mock import patch
+    
+    aligned = make_mock_aligned()
+    panel = make_mock_panel(recipe_id="trend_ma:ema_12_72:4h")
+    recipe = dataclasses.replace(SAMPLE_RECIPE, causal_lag_bars=1)
+    cfg = CheapGateConfig(
+        min_events=1, min_effective_n=1.0, min_lcb_net_bps=-1000.0,
+        min_nw_tstat=0.0, max_cost_drag_ratio=100.0, max_turnover_per_year=10000.0,
+        bootstrap_seed=42,
+    )
+    
+    patch_path = "src.domain.futures.strategy.rule_signals.candidate_panels_to_events"
+    with (
+        patch(patch_path, side_effect=RuntimeError("Mock error")),
+        pytest.raises(RuntimeError, match="Mock error"),
+    ):
+        evaluate_panel_cheap_gate(
+            panel=panel, aligned=aligned, recipe=recipe,
+            cost_model=ExecutionCostModel(), config=cfg, bars_per_year=8760.0,
+        )
+            
+    assert "l0_event_mask_2d" not in panel.metadata
+
