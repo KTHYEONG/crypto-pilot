@@ -425,7 +425,20 @@ def run_alpha_foundry_l0_gate(
     n_panels_in = len(panels)
     n_bound = len(bindings)
     n_evidence = len(evidences)
-    n_passed = sum(1 for row in evidence_rows if bool(getattr(row, "gate_passed", False)))
+    passed_ids_for_report = (
+        set(l0_artifacts.passed_recipe_ids)
+        if mode == "gate" and l0_artifacts is not None
+        else None
+    )
+    n_passed = sum(
+        1
+        for row in evidence_rows
+        if bool(getattr(row, "gate_passed", False))
+        and (
+            passed_ids_for_report is None
+            or str(getattr(row, "recipe_id", "")) in passed_ids_for_report
+        )
+    )
     n_rejected = n_evidence - n_passed
 
     from src.domain.futures.alpha_foundry.diversity import estimate_distinct_thesis_count
@@ -534,13 +547,13 @@ def maybe_write_alpha_foundry_report(
                 emit_json_artifact_debug(
                     logger=debug_logger,
                     artifact_name="alpha_foundry_report",
-                    run_id=report_payload["run_id"],
+                    run_id=str(report_payload["run_id"]),
                     payload=report_payload,
                 )
                 emit_csv_artifact_debug(
                     logger=debug_logger,
                     artifact_name="alpha_foundry_evidence",
-                    run_id=report_payload["run_id"],
+                    run_id=str(report_payload["run_id"]),
                     rows=evidence_payload,
                 )
         return (None, None)
@@ -571,6 +584,7 @@ def build_cheap_gate_evidence_frame_from_evidences(
         recipe = recipes.get(ev.recipe_id)
         if recipe is None:
             continue
+        data_support_tier = str(getattr(ev, "data_support_tier", "full_support"))
         rows.append(
             {
                 "family": recipe.family,
@@ -580,6 +594,7 @@ def build_cheap_gate_evidence_frame_from_evidences(
                 "reject_reasons": "|".join(ev.reject_reasons),
                 "mean_net_bps": ev.mean_net_bps,
                 "block_lcb_bps": ev.block_lcb_bps,
+                "data_support_tier": data_support_tier,
             }
         )
     if not rows:
@@ -592,6 +607,7 @@ def build_cheap_gate_evidence_frame_from_evidences(
                 "reject_reasons": pd.Series(dtype=str),
                 "mean_net_bps": pd.Series(dtype=float),
                 "block_lcb_bps": pd.Series(dtype=float),
+                "data_support_tier": pd.Series(dtype=str),
             }
         )
     return pd.DataFrame(rows)
@@ -802,6 +818,7 @@ def run_alpha_foundry_l0_gate_multi_tf(
                     "reject_reasons": pd.Series(dtype=str),
                     "mean_net_bps": pd.Series(dtype=float),
                     "block_lcb_bps": pd.Series(dtype=float),
+                    "data_support_tier": pd.Series(dtype=str),
                 }
             )
             cheap_evidences_by_tf[tf] = ()
@@ -892,32 +909,32 @@ def assemble_l0_strategy_delivery_manifest(
     *,
     multi_results: Mapping[str, AlphaFoundryL0Result],
     aligned_by_tf: Mapping[str, Any],
-    canonical_tf: str,
     run_id_prefix: str,
     enable_audit: bool,
     enable_pruning: bool,
     total_l1_verification_budget: int = 30,
     max_novelty_corr: float = 0.70,
     min_survivors_per_archetype: int = 1,
-    min_survivors_per_tf: int = 1,
+    min_survivors_per_tf: int = 0,
+    min_common_active_bars: int = 480,
+    min_directional_entry_jaccard: float = 0.50,
+    min_shared_directional_entries: int = 12,
 ) -> tuple[dict[str, AlphaFoundryL0Result], L0StrategyDeliveryManifest]:
     """Cross-TF post-processing over an already-completed multi-TF L0 gate
-    run. [LIMIT-01][LIMIT-05][LIMIT-06][LIMIT-07]
+    run. [ADR_20260712_L0_EVIDENCE_CONDITIONED_CROSS_TF_ADMISSION]
 
-    Pure function: multi_results and aligned_by_tf are never mutated.
+    Resolves its own canonical context from candidates, removing the
+    caller-provided `canonical_tf`. Pure function: multi_results and
+    aligned_by_tf are never mutated.
+
     Returns (possibly-pruned multi_results, manifest). When both
     enable_audit and enable_pruning are False, returns
-    (dict(multi_results), manifest-with-Nones) — a cheap passthrough,
-    matching current (pre-this-spec) production behavior exactly.
-
-    Raises:
-        KeyError: if canonical_tf is not a key in aligned_by_tf.
+    (dict(multi_results), manifest-with-Nones) — a cheap passthrough.
     """
-    if canonical_tf not in aligned_by_tf:
-        raise KeyError(f"canonical_tf={canonical_tf!r} not in aligned_by_tf keys={set(aligned_by_tf)}")
-
     manifest_audit: Any = None
     manifest_final_ids: tuple[str, ...] = ()
+    manifest_status: str = "disabled"
+    manifest_reason: str = ""
     pruned_multi_results: dict[str, AlphaFoundryL0Result] = dict(multi_results)
 
     selected_by_tf: dict[str, Any] = {}
@@ -940,23 +957,21 @@ def assemble_l0_strategy_delivery_manifest(
     if enable_audit and all_tfs_with_candidates:
         from src.domain.futures.alpha_foundry.diversity import audit_l0_selected_recipe_independence
 
-        canonical_aligned = aligned_by_tf[canonical_tf]
-        canonical_dt = canonical_aligned.datetimes.astype("datetime64[ns]").astype("int64")
-        canonical_active = (
-            canonical_aligned.active_mask
-            & canonical_aligned.warm_mask
-            & ~canonical_aligned.entry_block_mask
-            & ~canonical_aligned.kill_mask
-        )
-
-        manifest_audit = audit_l0_selected_recipe_independence(
-            selected_by_tf=selected_by_tf,
-            panel_by_recipe_id=panel_by_recipe_id,
-            canonical_tf=canonical_tf,
-            canonical_datetimes=canonical_dt,
-            active_mask_canonical=canonical_active,
-            max_corr=max_novelty_corr,
-        )
+        try:
+            manifest_audit = audit_l0_selected_recipe_independence(
+                selected_by_tf=selected_by_tf,
+                panel_by_recipe_id=panel_by_recipe_id,
+                aligned_by_tf=aligned_by_tf,
+                min_common_active_bars=min_common_active_bars,
+                max_corr=max_novelty_corr,
+            )
+        except ValueError as exc:
+            _fallback_logger = setup_logger("opt_main_futures", write_file=False)
+            for _l in (_fallback_logger, _logger):
+                _l.warning(
+                    "[EVAL] stage=l0_cross_tf_audit run_id=%s failed: %s",
+                    run_id_prefix, exc,
+                )
 
     if enable_pruning and all_tfs_with_candidates:
         from src.domain.futures.alpha_foundry.diversity import (
@@ -964,23 +979,15 @@ def assemble_l0_strategy_delivery_manifest(
             compute_cross_tf_redundancy,
         )
 
-        canonical_aligned = aligned_by_tf[canonical_tf]
-        canonical_dt = canonical_aligned.datetimes.astype("datetime64[ns]").astype("int64")
-        canonical_active = (
-            canonical_aligned.active_mask
-            & canonical_aligned.warm_mask
-            & ~canonical_aligned.entry_block_mask
-            & ~canonical_aligned.kill_mask
-        )
-
         try:
             cross_tf_result = compute_cross_tf_redundancy(
                 selected_by_tf=selected_by_tf,
                 panel_by_recipe_id=panel_by_recipe_id,
-                canonical_tf=canonical_tf,
-                canonical_datetimes=canonical_dt,
-                active_mask_canonical=canonical_active,
+                aligned_by_tf=aligned_by_tf,
+                min_common_active_bars=min_common_active_bars,
                 max_novelty_corr=max_novelty_corr,
+                min_directional_entry_jaccard=min_directional_entry_jaccard,
+                min_shared_directional_entries=min_shared_directional_entries,
             )
 
             floor_result = apply_cross_tf_survival_floor(
@@ -996,6 +1003,17 @@ def assemble_l0_strategy_delivery_manifest(
             )
 
             manifest_final_ids = floor_result.final_selected_recipe_ids
+
+            n_demoted = len(cross_tf_result.demoted_recipe_ids)
+            if n_demoted > 0:
+                manifest_status = "applied"
+                manifest_reason = (
+                    f"demoted={n_demoted} canonical_tf={cross_tf_result.canonical_tf}"
+                    f" n_common_active_bars={cross_tf_result.n_common_active_bars}"
+                )
+            else:
+                manifest_status = "audit_only"
+                manifest_reason = "no redundant pairs found"
 
             final_set = set(manifest_final_ids)
             pruned_multi_results = {}
@@ -1018,17 +1036,14 @@ def assemble_l0_strategy_delivery_manifest(
                     )
 
         except ValueError as exc:
-            # [ADR_20260711_L0_STRATEGY_DELIVERY_HARDENING] `_logger` (module
-            # logger) does not propagate output in this pipeline's real
-            # execution path — use the same "opt_main_futures" logger
-            # maybe_write_alpha_foundry_report() relies on, or the warning
-            # silently vanishes in production.
+            manifest_status = "fail_open"
+            manifest_reason = str(exc)
             _fallback_logger = setup_logger("opt_main_futures", write_file=False)
             for _l in (_fallback_logger, _logger):
                 _l.warning(
-                    "[EVAL] stage=l0_cross_tf_pruning run_id=%s canonical_tf=%s failed: %s,"
+                    "[EVAL] stage=l0_cross_tf_pruning run_id=%s failed: %s,"
                     " falling back to unpruned multi_results",
-                    run_id_prefix, canonical_tf, exc,
+                    run_id_prefix, exc,
                 )
             pruned_multi_results = dict(multi_results)
             manifest_final_ids = ()
@@ -1052,6 +1067,8 @@ def assemble_l0_strategy_delivery_manifest(
         independence_audit=manifest_audit,
         final_selected_recipe_ids=manifest_final_ids,
         total_l1_verification_budget=total_l1_verification_budget,
+        pruning_status=manifest_status,  # type: ignore[arg-type]
+        pruning_reason=manifest_reason,
     )
 
     return pruned_multi_results, manifest

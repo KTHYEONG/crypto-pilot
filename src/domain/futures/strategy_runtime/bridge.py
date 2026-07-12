@@ -470,58 +470,93 @@ def _build_ltf_native_panels_for_l0(
     symbols: Sequence[str],
     aligned: AlignedMarketData,
     cfg: CandidateStrategyConfig,
+    runtime_config: Any,
     family_filter: tuple[str, ...] | None = None,
 ) -> tuple[CandidateSignalPanel, ...]:
-    """[ADR_20260708_LTF_NATIVE_SIGNAL_EXPANSION] Build LTF panels for L0 binding."""
-    from src.domain.futures.signals.ltf_alpha import build_ltf_native_alpha_panels
-
-    exec_1m_by_symbol: dict[str, pd.DataFrame] = {}
-    aligned_end = pd.Timestamp(aligned.datetimes[-1]).tz_localize("UTC") if len(aligned.datetimes) else None
-    for symbol in symbols:
-        frame = data_maps.get(symbol, {}).get("exec_1m")
-        if isinstance(frame, pd.DataFrame) and not frame.empty:
-            if aligned_end is not None and "datetime" in frame.columns:
-                frame_end = pd.Timestamp(frame["datetime"].iloc[-1])
-                if frame_end.tzinfo is None:
-                    frame_end = frame_end.tz_localize("UTC")
-                if frame_end < aligned_end:
-                    cache_path = Path("data/futures") / f"{symbol}_1m.parquet"
-                    if cache_path.exists():
-                        try:
-                            cached = pd.read_parquet(cache_path)
-                        except Exception as exc:
-                            _logger.warning("[LTF_ALPHA] local 1m cache fallback failed symbol=%s: %s", symbol, exc)
-                        else:
-                            if isinstance(cached, pd.DataFrame) and not cached.empty and "datetime" in cached.columns:
-                                frame = cached
-            exec_1m_by_symbol[symbol] = frame
-    _run_logger.info("[LTF_ALPHA] exec_1m payload symbols=%d/%d", len(exec_1m_by_symbol), len(symbols))
-    if not exec_1m_by_symbol:
-        return ()
-    first_symbol, first_frame = next(iter(exec_1m_by_symbol.items()))
-    _run_logger.info(
-        "[LTF_ALPHA] aligned_range dtype=%s start=%s end=%s sample_exec=%s exec_start=%s exec_end=%s",
-        getattr(aligned.datetimes, "dtype", type(aligned.datetimes)),
-        aligned.datetimes[0] if len(aligned.datetimes) else None,
-        aligned.datetimes[-1] if len(aligned.datetimes) else None,
-        first_symbol,
-        first_frame["datetime"].iloc[0] if "datetime" in first_frame.columns and not first_frame.empty else None,
-        first_frame["datetime"].iloc[-1] if "datetime" in first_frame.columns and not first_frame.empty else None,
+    """Build bounded LTF panels without retaining universe-wide 1m frames."""
+    del data_maps, cfg
+    from src.domain.futures.alpha_foundry.entry_timing import resolve_1m_coverage_tier
+    from src.domain.futures.alpha_foundry.memory import (
+        resolve_effective_memory_budget,
+        resolve_ltf_exec_1m_plan,
     )
+    from src.domain.futures.optimization.opt_data_utils import load_ltf_exec_1m_frame
+    from src.domain.futures.signals.ltf_alpha import build_ltf_native_alpha_panels_streaming
+
+    if not getattr(runtime_config, "ltf_streaming_enabled", True) or not len(aligned.datetimes):
+        return ()
+
+    start = pd.Timestamp(aligned.datetimes[0]).tz_localize("UTC")
+    end = pd.Timestamp(aligned.datetimes[-1]).tz_localize("UTC")
+    data_root = Path("data")
+    coverage = resolve_1m_coverage_tier(
+        tuple(symbols),
+        data_root=data_root / "futures",
+        start_date=start.date(),
+        end_date=end.date(),
+        min_coverage_ratio=float(getattr(runtime_config, "ltf_exec_1m_min_coverage", 0.80)),
+    )
+    budget = resolve_effective_memory_budget(
+        hard_limit_mb=int(getattr(runtime_config, "l0_max_rss_mb", 10_240)),
+        fraction_cap=float(getattr(runtime_config, "l0_memory_fraction_cap", 0.60)),
+    )
+    plan = resolve_ltf_exec_1m_plan(
+        covered_symbols=coverage.covered_symbols,
+        valid_symbols=frozenset(symbols),
+        max_symbols=int(getattr(runtime_config, "ltf_exec_1m_max_symbols", 64)),
+        max_workers=int(getattr(runtime_config, "ltf_exec_1m_max_workers", 1)),
+        budget=budget,
+    )
+    _run_logger.info(
+        "[LTF_ALPHA] stage=l0_ltf_stream rss_mb=%.0f budget_mb=%d symbols_planned=%d "
+        "symbols_covered=%d workers=%d skip_reason=%s",
+        _get_rss_mb(), budget.limit_mb, len(plan.symbols), len(coverage.covered_symbols),
+        plan.max_workers, plan.skip_reason,
+    )
+    if plan.skip_reason is not None:
+        return ()
+
+    def _load_frame(symbol: str) -> pd.DataFrame | None:
+        return load_ltf_exec_1m_frame(
+            symbol=symbol,
+            data_root=data_root,
+            start_datetime=start,
+            end_datetime=end,
+        )
 
     try:
-        panels = build_ltf_native_alpha_panels(
+        panels = build_ltf_native_alpha_panels_streaming(
             aligned=aligned,
-            exec_1m_by_symbol=exec_1m_by_symbol,
-            cfg=cfg,
-            family_filter=family_filter,
+            plan=plan,
+            load_frame=_load_frame,
+            budget=budget,
         )
     except Exception as exc:
-        _logger.warning("[LTF_ALPHA] build_ltf_native_alpha_panels failed: %s", exc)
+        _logger.warning("[LTF_ALPHA] streaming build failed: %s", exc)
         return ()
+    if family_filter is not None:
+        panels = tuple(panel for panel in panels if panel.family in family_filter)
     if not panels:
-        _run_logger.info("[LTF_ALPHA] no LTF panels generated for current L0 window")
-    return tuple(panels)
+        _run_logger.info("[LTF_ALPHA] no streaming panels generated for current L0 window")
+        return ()
+
+    # [ADR_20260712_L0_EVIDENCE_CONDITIONED_CROSS_TF_ADMISSION] Stamp data-support
+    # metadata on LTF panels requiring 1m execution/taker inputs.
+    exec_1m_coverage_by_symbol = {
+        symbol: 1.0 if symbol in coverage.covered_symbols else 0.0
+        for symbol in symbols
+    }
+
+    stamped_panels: list[CandidateSignalPanel] = []
+    for p in panels:
+        new_meta = dict(p.metadata)
+        new_meta["requires_exec_1m"] = True
+        new_meta["exec_1m_coverage_by_symbol"] = dict(exec_1m_coverage_by_symbol)
+        stamped_panels.append(
+            dataclasses.replace(p, metadata=new_meta)
+        )
+
+    return tuple(stamped_panels)
 
 
 def project_htf_panels_to_base(
@@ -1060,6 +1095,7 @@ def run_candidate_strategy_for_universe(
             symbols=symbols,
             aligned=aligned,
             cfg=strategy_cfg.candidate,
+            runtime_config=alpha_foundry_config,
             family_filter=ltf_family_filter,
         )
         if ltf_panels:
@@ -1106,6 +1142,14 @@ def run_candidate_strategy_for_universe(
             from src.domain.futures.strategy.config import resolve_tf_signal_pool
 
             _t_panel_construct = _time_panel.perf_counter()
+            # [ADR_20260712_L0_EVIDENCE_CONDITIONED_CROSS_TF_ADMISSION] Wire LTF
+            # pool experiment into the family_pool callable.
+            _pool_cfg = dataclasses.replace(
+                strategy_cfg.candidate,
+                l1_ltf_family_pool_widened=bool(
+                    getattr(alpha_foundry_config, "enable_ltf_family_pool_experiment", False)
+                ),
+            )
             native_by_tf = build_native_htf_panels(
                 data_maps=preloaded_data_maps,
                 symbols=symbols,
@@ -1113,7 +1157,7 @@ def run_candidate_strategy_for_universe(
                 base_cfg=strategy_cfg.candidate,
                 base_tf=tf,
                 tfs=htf_tfs,
-                family_pool=lambda t: resolve_tf_signal_pool(strategy_cfg.candidate, t),
+                family_pool=lambda t: resolve_tf_signal_pool(_pool_cfg, t),
                 # [ADR_20260708_L0_SIGNAL_YIELD_IMPROVEMENT] was hardcoded True, silently
                 # excluding any tf faster than base (1h/2h) from ever being evaluated.
                 htf_only=False,
@@ -1179,15 +1223,12 @@ def run_candidate_strategy_for_universe(
                 getattr(alpha_foundry_config, "l0_parallel_max_workers", 1),
             )
 
-            # [ADR_20260711_L0_CROSS_TF_PRUNING_ADMISSION] Cross-TF independence
-            # audit / pruning MUST run before multi_results is consumed by
-            # base_result/project_htf_panels_to_base below — otherwise the
-            # pruned dict never reaches the panels that actually flow to L1.
-            # docs/specs/l0_cross_tf_pruning_admission.md
+            # [ADR_20260712_L0_EVIDENCE_CONDITIONED_CROSS_TF_ADMISSION] Cross-TF
+            # evidence-conditioned pruning. canonical_tf is resolved internally
+            # from candidates; removed from the call. Added new evidence thresholds.
             pruned_multi_results, _l0_manifest = assemble_l0_strategy_delivery_manifest(
                 multi_results=multi_results,
                 aligned_by_tf=aligned_by_tf,
-                canonical_tf=tf,
                 run_id_prefix=_af_run_id,
                 enable_audit=getattr(alpha_foundry_config, "enable_cross_tf_diversity_audit", False),
                 enable_pruning=getattr(alpha_foundry_config, "enable_cross_tf_pruning", False),
@@ -1195,7 +1236,14 @@ def run_candidate_strategy_for_universe(
                 min_survivors_per_archetype=getattr(
                     alpha_foundry_config, "cross_tf_pruning_min_survivors_per_archetype", 1
                 ),
-                min_survivors_per_tf=getattr(alpha_foundry_config, "cross_tf_pruning_min_survivors_per_tf", 1),
+                min_survivors_per_tf=getattr(alpha_foundry_config, "cross_tf_pruning_min_survivors_per_tf", 0),
+                min_common_active_bars=getattr(alpha_foundry_config, "cross_tf_min_common_active_bars", 480),
+                min_directional_entry_jaccard=getattr(
+                    alpha_foundry_config, "cross_tf_min_directional_entry_jaccard", 0.50
+                ),
+                min_shared_directional_entries=getattr(
+                    alpha_foundry_config, "cross_tf_min_shared_directional_entries", 12
+                ),
             )
             if getattr(alpha_foundry_config, "enable_cross_tf_pruning", False):
                 multi_results = pruned_multi_results

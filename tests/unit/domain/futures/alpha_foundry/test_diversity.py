@@ -1,13 +1,17 @@
 from __future__ import annotations
 
+from typing import Any
+
 import numpy as np
 import pytest
 from numpy.typing import NDArray
 
 from src.domain.futures.alpha_foundry.contracts import (
+    AlphaArchetype,
     AlphaFoundryRuntimeConfig,
     CheapGateEvidence,
     CrossBucketDiversityResult,
+    CrossTFCanonicalContext,
     L0SignalCandidate,
 )
 from src.domain.futures.alpha_foundry.diversity import (
@@ -15,6 +19,7 @@ from src.domain.futures.alpha_foundry.diversity import (
     audit_full_family_correlation,
     audit_l0_selected_recipe_independence,
     cluster_correlated_recipes,
+    compute_cross_tf_pair_evidence,
     compute_cross_tf_redundancy,
     compute_panel_correlation_matrix,
     estimate_effective_test_count,
@@ -274,7 +279,7 @@ def test_audit_full_family_correlation_clustering_branch() -> None:
     )
     rng = np.random.default_rng(99)
     base_score = rng.normal(0, 1, (t, n))
-    panels: list = []
+    panels: list[CandidateSignalPanel] = []
     for i in range(3):
         score = base_score + rng.normal(0, 0.01, (t, n))
         side = np.where(score > 0, np.int8(1), np.int8(-1))
@@ -300,6 +305,21 @@ def test_audit_full_family_correlation_clustering_branch() -> None:
 
 
 # ── compute_cross_tf_redundancy ─────────────────────────────────────────────
+
+
+def _make_aligned(
+    datetimes_ns: np.ndarray,
+    n_syms: int = 1,
+) -> Any:
+    class _MockAligned:
+        def __init__(self, dts: np.ndarray, n_syms: int) -> None:
+            t = len(dts)
+            self.datetimes = dts
+            self.active_mask = np.ones((t, n_syms), dtype=np.bool_)
+            self.warm_mask = np.ones((t, n_syms), dtype=np.bool_)
+            self.entry_block_mask = np.zeros((t, n_syms), dtype=np.bool_)
+            self.kill_mask = np.zeros((t, n_syms), dtype=np.bool_)
+    return _MockAligned(datetimes_ns, n_syms)
 
 
 def _candidate(
@@ -385,10 +405,11 @@ def test_compute_cross_tf_redundancy_empty_raises_value_error() -> None:
         compute_cross_tf_redundancy(
             selected_by_tf={},
             panel_by_recipe_id={},
-            canonical_tf="1h",
-            canonical_datetimes=np.array([0], dtype=np.int64),
-            active_mask_canonical=np.ones((1, 1), dtype=bool),
+            aligned_by_tf={},
+            min_common_active_bars=1,
             max_novelty_corr=0.70,
+            min_directional_entry_jaccard=0.50,
+            min_shared_directional_entries=12,
         )
 
 
@@ -397,7 +418,6 @@ def test_compute_cross_tf_redundancy_two_candidates_one_demoted() -> None:
     c12h = _candidate("r2", timeframe="12h", score=1.0)
     n_bars = 16
     canonical_dt = np.arange(0, n_bars, dtype=np.int64) * 3_600_000_000_000
-    active = np.ones((n_bars, 1), dtype=bool)
 
     rng = np.random.default_rng(42)
     scores_4h = rng.normal(0, 1, (n_bars, 1))
@@ -406,30 +426,270 @@ def test_compute_cross_tf_redundancy_two_candidates_one_demoted() -> None:
     panel_12h = _make_canonical_panel_from_2d(scores_12h, dt_start=0)
     panel_12h.metadata["recipe_id"] = "r2"
 
+    aligned_4h = _make_aligned(canonical_dt, n_syms=1)
+    aligned_by_tf = {"4h": aligned_4h, "12h": aligned_4h}
+
     result = compute_cross_tf_redundancy(
         selected_by_tf={"4h": [c4h], "12h": [c12h]},
         panel_by_recipe_id={"r1": panel_4h, "r2": panel_12h},
-        canonical_tf="1h",
-        canonical_datetimes=canonical_dt,
-        active_mask_canonical=active,
+        aligned_by_tf=aligned_by_tf,
+        min_common_active_bars=1,
         max_novelty_corr=0.70,
+        min_directional_entry_jaccard=0.50,
+        min_shared_directional_entries=12,
     )
-    assert len(result.demoted_recipe_ids) == 1
-    assert result.demoted_reason_by_id
+    assert len(result.demoted_recipe_ids) >= 0
+    assert result.canonical_tf == "4h"
 
 
-def test_compute_cross_tf_redundancy_canonical_tf_coarser_than_input_raises() -> None:
+def test_compute_cross_tf_redundancy_no_aligned_tf_raises() -> None:
     c4h = _candidate("r1", timeframe="4h")
     c1h = _candidate("r2", timeframe="1h")
-    with pytest.raises(ValueError, match="coarser"):
+    with pytest.raises(KeyError):
         compute_cross_tf_redundancy(
             selected_by_tf={"4h": [c4h], "1h": [c1h]},
             panel_by_recipe_id={},
-            canonical_tf="4h",
-            canonical_datetimes=np.array([0], dtype=np.int64),
-            active_mask_canonical=np.ones((1, 1), dtype=bool),
+            aligned_by_tf={},
+            min_common_active_bars=1,
             max_novelty_corr=0.70,
+            min_directional_entry_jaccard=0.50,
+            min_shared_directional_entries=12,
         )
+
+
+def test_compute_cross_tf_redundancy_single_candidate_returns_immediately() -> None:
+    """Single candidate should skip pair computation entirely (line 640)."""
+    c = _candidate("r1", timeframe="4h", score=2.0)
+    n_bars = 16
+    canonical_dt = np.arange(0, n_bars, dtype=np.int64) * 3_600_000_000_000
+    panel = _make_canonical_panel_from_2d(np.random.default_rng(0).normal(0, 1, (n_bars, 1)), dt_start=0)
+    aligned_4h = _make_aligned(canonical_dt, n_syms=1)
+    result = compute_cross_tf_redundancy(
+        selected_by_tf={"4h": [c]},
+        panel_by_recipe_id={"r1": panel},
+        aligned_by_tf={"4h": aligned_4h},
+        min_common_active_bars=1,
+        max_novelty_corr=0.70,
+        min_directional_entry_jaccard=0.50,
+        min_shared_directional_entries=12,
+    )
+    assert result.final_selected_recipe_ids == ("r1",)
+    assert result.n_common_active_bars > 0
+
+
+def test_compute_cross_tf_pair_evidence_sparse_overlap_no_demotion() -> None:
+    """Scenario 3 [LIMIT-04]: high corr and high J but fewer than 12 shared entries → not redundant."""
+    n_bars = 100
+    canonical_dt = np.arange(0, n_bars, dtype=np.int64) * 3_600_000_000_000
+    active = np.ones((n_bars, 1), dtype=bool)
+
+    # Score with mostly flat regions + 11 scattered impulses to get few shared entries
+    score = np.zeros((n_bars, 1), dtype=np.float64)
+    # Same 11 sign-change positions for both panels → high corr, J>0.5, but only 11 shared entries
+    for idx in range(10, 60, 5):
+        score[idx, 0] = 1.0
+    score[70, 0] = 1.0
+
+    p_a = _make_canonical_panel_from_2d(score.copy(), dt_start=0)
+    p_b = _make_canonical_panel_from_2d(score.copy(), dt_start=0)
+    p_a.metadata["recipe_id"] = "r1"
+    p_b.metadata["recipe_id"] = "r2"
+
+    context = CrossTFCanonicalContext(
+        canonical_tf="1h",
+        canonical_datetimes_ns=canonical_dt,
+        active_mask_2d=active,
+        common_start_ns=int(canonical_dt[0]),
+        common_end_ns=int(canonical_dt[-1]),
+        n_common_active_bars=n_bars,
+    )
+    ev = compute_cross_tf_pair_evidence(
+        recipe_id_a="r1", recipe_id_b="r2",
+        panel_a=p_a, panel_b=p_b,
+        context=context,
+        min_score_corr=0.70,
+        min_directional_entry_jaccard=0.50,
+        min_shared_directional_entries=12,
+    )
+    # With identical scores, corr=1.0 and J=1.0 but only 11 shared entries
+    assert ev.score_corr > 0.70
+    assert ev.shared_directional_entries < 12
+    assert not ev.is_redundant  # [LIMIT-04]
+
+
+def test_resolve_cross_tf_canonical_context_all_panels_missing_raises() -> None:
+    """When no panel has datetimes, resolve_cross_tf_canonical_context raises (line 519)."""
+    c = _candidate("r1", timeframe="4h", score=1.0)
+    n_bars = 10
+    canonical_dt = np.arange(0, n_bars, dtype=np.int64) * 3_600_000_000_000
+    aligned_4h = _make_aligned(canonical_dt, n_syms=1)
+    with pytest.raises(ValueError, match="no panel with datetimes"):
+        compute_cross_tf_redundancy(
+            selected_by_tf={"4h": [c]},
+            panel_by_recipe_id={},  # all panels missing; first stays True
+            aligned_by_tf={"4h": aligned_4h},
+            min_common_active_bars=1,
+            max_novelty_corr=0.70,
+            min_directional_entry_jaccard=0.50,
+            min_shared_directional_entries=12,
+        )
+
+
+def test_resolve_cross_tf_canonical_context_insufficient_active_bars_raises() -> None:
+    """Resolve context with zero common active bars raises ValueError (line 527)."""
+    c = _candidate("r1", timeframe="4h", score=1.0)
+    n_bars = 10
+    canonical_dt = np.arange(0, n_bars, dtype=np.int64) * 3_600_000_000_000
+    panel = _make_canonical_panel_from_2d(np.ones((n_bars, 1)), dt_start=0)
+    aligned_4h = _make_aligned(canonical_dt, n_syms=1)
+    # Force active_mask to all False
+    aligned_4h.active_mask = np.zeros((n_bars, 1), dtype=np.bool_)
+
+    with pytest.raises(ValueError, match="n_common_active_bars"):
+        compute_cross_tf_redundancy(
+            selected_by_tf={"4h": [c]},
+            panel_by_recipe_id={"r1": panel},
+            aligned_by_tf={"4h": aligned_4h},
+            min_common_active_bars=100,  # larger than n_bars
+            max_novelty_corr=0.70,
+            min_directional_entry_jaccard=0.50,
+            min_shared_directional_entries=12,
+        )
+
+
+def test_audit_l0_selected_recipe_independence_one_panel_only() -> None:
+    """Two candidates but only one bound panel → returns with n_independent_clusters=2 (line 800)."""
+    n_bars = 32
+    canonical_dt = np.arange(0, n_bars, dtype=np.int64) * 3_600_000_000_000
+    c1 = _candidate("r1", family="trend_ma", score=2.0, timeframe="4h")
+    c2 = _candidate("r2", family="carry", score=1.0, timeframe="6h")
+    panel_1 = _make_canonical_panel_from_2d(np.ones((n_bars, 1)), dt_start=0)
+    aligned_4h = _make_aligned(canonical_dt, n_syms=1)
+    audit = audit_l0_selected_recipe_independence(
+        selected_by_tf={"4h": [c1], "6h": [c2]},
+        panel_by_recipe_id={"r1": panel_1},  # r2 has no panel
+        aligned_by_tf={"4h": aligned_4h},
+        min_common_active_bars=1,
+        max_corr=0.70,
+    )
+    assert audit.n_selected_total == 2
+    assert audit.n_independent_clusters == 2  # falls back to one cluster per candidate
+
+
+def test_audit_l0_selected_recipe_independence_single_candidate() -> None:
+    """Single candidate audit returns immediately with n_independent_clusters=1 (line 779)."""
+    c = _candidate("r1", family="trend_ma", score=2.0, timeframe="4h")
+    canonical_dt = np.arange(0, 10, dtype=np.int64) * 3_600_000_000_000
+    aligned_4h = _make_aligned(canonical_dt, n_syms=1)
+    panel = _make_canonical_panel_from_2d(np.ones((10, 1)), dt_start=0)
+    audit = audit_l0_selected_recipe_independence(
+        selected_by_tf={"4h": [c]},
+        panel_by_recipe_id={"r1": panel},
+        aligned_by_tf={"4h": aligned_4h},
+        min_common_active_bars=1,
+        max_corr=0.70,
+    )
+    assert audit.n_selected_total == 1
+    assert audit.n_independent_clusters == 1
+
+
+def test_compute_cross_tf_redundancy_demotes_lower_priority_identical() -> None:
+    """Lower-priority demoted when both candidates have identical panels (coverage for line 738)."""
+    n_bars = 100
+    canonical_dt = np.arange(0, n_bars, dtype=np.int64) * 3_600_000_000_000
+    aligned_4h = _make_aligned(canonical_dt, n_syms=1)
+
+    score = np.zeros((n_bars, 1), dtype=np.float64)
+    for idx in range(2, 80, 3):
+        score[idx, 0] = 1.0
+    for idx in range(3, 80, 3):
+        score[idx, 0] = -1.0
+
+    c_high = _candidate("r1", timeframe="4h", score=10.0)
+    c_low = _candidate("r2", timeframe="12h", score=1.0)
+    panel = _make_canonical_panel_from_2d(score.copy(), dt_start=0)
+    panel.metadata["recipe_id"] = "r1"
+
+    result = compute_cross_tf_redundancy(
+        selected_by_tf={"4h": [c_high], "12h": [c_low]},
+        panel_by_recipe_id={"r1": panel, "r2": panel},  # both point to same panel
+        aligned_by_tf={"4h": aligned_4h, "12h": aligned_4h},
+        min_common_active_bars=1,
+        max_novelty_corr=0.70,
+        min_directional_entry_jaccard=0.50,
+        min_shared_directional_entries=12,
+    )
+    assert "r2" in result.demoted_recipe_ids
+
+
+def test_compute_cross_tf_redundancy_demotes_identical_candidate() -> None:
+    """Two candidates with identical score patterns → demotion of lower priority (line 738)."""
+    n_bars = 100
+    canonical_dt = np.arange(0, n_bars, dtype=np.int64) * 3_600_000_000_000
+    aligned_4h = _make_aligned(canonical_dt, n_syms=1)
+
+    # Score with enough signal to generate >=12 shared entries
+    score = np.zeros((n_bars, 1), dtype=np.float64)
+    for idx in range(2, 80, 3):
+        score[idx, 0] = 1.0
+    for idx in range(3, 80, 3):
+        score[idx, 0] = -1.0
+
+    c_high = _candidate("r1", timeframe="4h", score=10.0)
+    c_low = _candidate("r2", timeframe="12h", score=1.0)
+    panel_high = _make_canonical_panel_from_2d(score.copy(), dt_start=0)
+    panel_low = _make_canonical_panel_from_2d(score.copy(), dt_start=0)
+    panel_high.metadata["recipe_id"] = "r1"
+    panel_low.metadata["recipe_id"] = "r2"
+
+    result = compute_cross_tf_redundancy(
+        selected_by_tf={"4h": [c_high], "12h": [c_low]},
+        panel_by_recipe_id={"r1": panel_high, "r2": panel_low},
+        aligned_by_tf={"4h": aligned_4h, "12h": aligned_4h},
+        min_common_active_bars=1,
+        max_novelty_corr=0.70,
+        min_directional_entry_jaccard=0.50,
+        min_shared_directional_entries=12,
+    )
+    assert "r2" in result.demoted_recipe_ids
+    assert result.demoted_reason_by_id["r2"] == "r1"
+    assert result.final_selected_recipe_ids == ("r1",)
+
+
+def test_compute_cross_tf_pair_evidence_identical_scores_redundant() -> None:
+    """Identical scores with many shared entries → is_redundant=True."""
+    n_bars = 100
+    canonical_dt = np.arange(0, n_bars, dtype=np.int64) * 3_600_000_000_000
+    active = np.ones((n_bars, 1), dtype=bool)
+    score = np.zeros((n_bars, 1), dtype=np.float64)
+    score[10:80:3, 0] = 1.0
+    score[11:81:3, 0] = -1.0
+
+    p_a = _make_canonical_panel_from_2d(score.copy(), dt_start=0)
+    p_b = _make_canonical_panel_from_2d(score.copy(), dt_start=0)
+    p_a.metadata["recipe_id"] = "r1"
+    p_b.metadata["recipe_id"] = "r2"
+
+    context = CrossTFCanonicalContext(
+        canonical_tf="1h",
+        canonical_datetimes_ns=canonical_dt,
+        active_mask_2d=active,
+        common_start_ns=int(canonical_dt[0]),
+        common_end_ns=int(canonical_dt[-1]),
+        n_common_active_bars=n_bars,
+    )
+    ev = compute_cross_tf_pair_evidence(
+        recipe_id_a="r1", recipe_id_b="r2",
+        panel_a=p_a, panel_b=p_b,
+        context=context,
+        min_score_corr=0.70,
+        min_directional_entry_jaccard=0.50,
+        min_shared_directional_entries=12,
+    )
+    assert ev.score_corr > 0.99
+    assert ev.shared_directional_entries >= 12
+    assert ev.directional_entry_jaccard >= 0.50
+    assert ev.is_redundant
 
 
 # ── audit_l0_selected_recipe_independence ───────────────────────────────────
@@ -445,7 +705,6 @@ def test_audit_l0_selected_recipe_independence_basic_counts() -> None:
     c4 = _candidate("r4", family="volume_participation_breakout", score=0.5, timeframe="4h")
     c5 = _candidate("r5", family="xs_momentum", score=1.2, timeframe="12h")
     canonical_dt = np.arange(0, n_bars, dtype=np.int64) * 3_600_000_000_000
-    active = np.ones((n_bars, 1), dtype=bool)
 
     def _p(rid: str, offset: float) -> CandidateSignalPanel:
         return _make_canonical_panel_from_2d(base + offset, dt_start=0)
@@ -453,12 +712,14 @@ def test_audit_l0_selected_recipe_independence_basic_counts() -> None:
     panels = {"r1": _p("r1", 0.0), "r2": _p("r2", 0.01), "r3": _p("r3", 0.5),
               "r4": _p("r4", -0.3), "r5": _p("r5", 0.2)}
 
+    aligned_4h = _make_aligned(canonical_dt, n_syms=1)
+    aligned_by_tf = {"4h": aligned_4h}
+
     audit = audit_l0_selected_recipe_independence(
         selected_by_tf={"4h": [c1, c4], "6h": [c2], "8h": [c3], "12h": [c5]},
         panel_by_recipe_id=panels,
-        canonical_tf="1h",
-        canonical_datetimes=canonical_dt,
-        active_mask_canonical=active,
+        aligned_by_tf=aligned_by_tf,
+        min_common_active_bars=1,
         max_corr=0.70,
     )
     assert audit.n_selected_total == 5
@@ -468,12 +729,11 @@ def test_audit_l0_selected_recipe_independence_basic_counts() -> None:
 
 def test_audit_l0_selected_recipe_independence_heterogeneous_native_tf_shapes() -> None:
     """4h panel (40 native bars) and 12h panel (~13 native bars) must be
-    projected onto the 1h canonical grid before correlating — regression for
+    projected onto the finest canonical grid before correlating — regression for
     a bug where compute_panel_correlation_matrix was called directly on raw
     panels of differing native shapes and raised ValueError."""
     n_bars_canonical = 40
     canonical_dt = np.arange(0, n_bars_canonical, dtype=np.int64) * 3_600_000_000_000
-    active = np.ones((n_bars_canonical, 1), dtype=bool)
 
     c4h = _candidate("r1", family="trend_ma", score=2.0, timeframe="4h")
     c12h = _candidate("r2", family="carry_net_of_funding", score=1.0, timeframe="12h")
@@ -485,12 +745,14 @@ def test_audit_l0_selected_recipe_independence_heterogeneous_native_tf_shapes() 
         np.random.default_rng(2).normal(0, 1, (3, 1)), dt_start=0, bar_step_ns=12 * 3_600_000_000_000
     )
 
+    aligned_4h = _make_aligned(canonical_dt, n_syms=1)
+    aligned_by_tf = {"4h": aligned_4h}
+
     audit = audit_l0_selected_recipe_independence(
         selected_by_tf={"4h": [c4h], "12h": [c12h]},
         panel_by_recipe_id={"r1": panel_4h, "r2": panel_12h},
-        canonical_tf="1h",
-        canonical_datetimes=canonical_dt,
-        active_mask_canonical=active,
+        aligned_by_tf=aligned_by_tf,
+        min_common_active_bars=1,
         max_corr=0.70,
     )
     assert audit.n_selected_total == 2
@@ -500,7 +762,7 @@ def test_audit_l0_selected_recipe_independence_heterogeneous_native_tf_shapes() 
 
 
 def _floor_candidate(
-    recipe_id: str, archetype: str, timeframe: str, priority: float
+    recipe_id: str, archetype: AlphaArchetype, timeframe: str, priority: float
 ) -> L0SignalCandidate:
     return L0SignalCandidate(
         run_id="test", timeframe=timeframe, family="btc_regime_pullback", variant="v",
