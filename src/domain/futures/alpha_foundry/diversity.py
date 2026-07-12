@@ -554,7 +554,10 @@ def resolve_cross_tf_shared_context(
 
     [ADR_20260712_L0_CROSS_TF_BATCH_ACCELERATION] Also precomputes
     entry_pos_flat/entry_neg_flat/n_entries for batch jaccard (OPT-2) and
-    valid_stack for corr-loop mask broadcast (OPT-1-a)."""
+    valid_stack for corr-loop mask broadcast (OPT-1-a).
+
+    [ADR_20260712_L0_CROSS_TF_BATCH_CORRELATION] Uses _batch_pairwise_corr
+    (4 BLAS matmuls) instead of per-pair np.corrcoef (OPT-4)."""
     budget = resolve_effective_memory_budget()
     all_recipe_ids_list: list[str] = []
     for candidates in selected_by_tf.values():
@@ -605,8 +608,8 @@ def resolve_cross_tf_shared_context(
                 proj[0], proj[1], context.active_mask_2d,
             )
 
-    entry_pos_flat: dict[str, "NDArray[np.int8]"] = {}
-    entry_neg_flat: dict[str, "NDArray[np.int8]"] = {}
+    entry_pos_flat: dict[str, "NDArray[np.int8]"] = {}  # noqa: UP037
+    entry_neg_flat: dict[str, "NDArray[np.int8]"] = {}  # noqa: UP037
     n_entries: dict[str, int] = {}
     for rid in all_recipe_ids_list:
         if rid in side_entry_cache:
@@ -633,25 +636,26 @@ def resolve_cross_tf_shared_context(
         if rid in proj_cache:
             valid_stack[i_idx] = proj_cache[rid][1]
 
-    corr = np.full((n, n), np.nan, dtype=np.float64)
-    active = context.active_mask_2d
-    for i in range(n):
-        for j in range(i + 1, n):
-            ri, rj = all_recipe_ids_list[i], all_recipe_ids_list[j]
-            pi = proj_cache.get(ri)
-            pj = proj_cache.get(rj)
-            if pi is None or pj is None:
-                corr[i, j] = 0.0
-                corr[j, i] = 0.0
-                continue
-            mask = valid_stack[i] & valid_stack[j] & active
-            a = pi[0][mask]
-            b = pj[0][mask]
-            c_val = 0.0 if len(a) < 2 else float(np.corrcoef(a, b)[0, 1])
-            cv = c_val if np.isfinite(c_val) else 0.0
-            corr[i, j] = cv
-            corr[j, i] = cv
-        corr[i, i] = 1.0
+    if n == 0:
+        corr = np.zeros((0, 0), dtype=np.float64)
+    else:
+        projected_stack = np.empty((n, n_canonical_bars_v, n_symbols_v), dtype=np.float32)
+        for idx, rid in enumerate(all_recipe_ids_list):
+            if rid in proj_cache:
+                projected_stack[idx] = proj_cache[rid][0]
+            else:
+                projected_stack[idx] = 0.0
+
+        corr = _batch_pairwise_corr(
+            projected_stack=projected_stack,
+            mask_stack=valid_stack,
+            active_mask=context.active_mask_2d,
+        )
+        missing_mask = np.array([rid not in proj_cache for rid in all_recipe_ids_list])
+        if missing_mask.any():
+            corr[missing_mask] = 0.0
+            corr[:, missing_mask] = 0.0
+            np.fill_diagonal(corr, 1.0)
 
     return CrossTFSharedContext(
         canonical_context=context,
@@ -663,6 +667,53 @@ def resolve_cross_tf_shared_context(
         entry_neg_flat=entry_neg_flat,
         n_entries=n_entries,
     )
+
+
+def _batch_pairwise_corr(
+    *,
+    projected_stack: NDArray[np.float32],
+    mask_stack: NDArray[np.bool_],
+    active_mask: NDArray[np.bool_],
+) -> NDArray[np.float64]:
+    """Pure. Batch Pearson via 4 BLAS matmuls.
+
+    [ADR_20260712_L0_CROSS_TF_BATCH_CORRELATION] Replaces O(N²) per-pair
+    np.corrcoef Python loop with batch matmul. NaN-safe via np.where."""
+    ndim = projected_stack.ndim
+    if ndim < 2:
+        raise ValueError("projected_stack must be at least 2D")
+    if projected_stack.shape != mask_stack.shape:
+        raise ValueError(
+            f"shape mismatch projected={projected_stack.shape} mask={mask_stack.shape}"
+        )
+
+    n = projected_stack.shape[0]
+    if n == 0:
+        return np.zeros((0, 0), dtype=np.float64)
+
+    flat_len = np.prod(projected_stack.shape[1:], dtype=np.intp)
+    proj_f64 = projected_stack.reshape(n, flat_len).astype(np.float64, copy=False)
+    comb_bool = mask_stack.reshape(n, flat_len) & active_mask.ravel()
+    comb_f64 = comb_bool.astype(np.float64)
+
+    x_vm = np.where(comb_f64 > 0, proj_f64, 0.0)
+    x2_vm = x_vm * x_vm
+    mask_f64 = comb_f64
+
+    cross_sum = x_vm @ x_vm.T
+    cross_count = mask_f64 @ mask_f64.T
+    row_sum = x_vm @ mask_f64.T
+    row_sq = x2_vm @ mask_f64.T
+
+    n_obs = cross_count
+    num = n_obs * cross_sum - row_sum * row_sum.T
+    d1 = n_obs * row_sq - row_sum * row_sum
+    d2 = n_obs * row_sq.T - row_sum.T * row_sum.T
+    denom = np.sqrt(np.maximum(d1 * d2, 0.0)) + 1e-12
+    corr: NDArray[np.float64] = np.clip(num / denom, -1.0, 1.0)
+    corr[n_obs < 2] = 0.0
+    np.fill_diagonal(corr, 1.0)
+    return (corr + corr.T) * 0.5
 
 
 def _causal_projected_side_and_entry(
