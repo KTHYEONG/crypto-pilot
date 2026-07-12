@@ -9,6 +9,7 @@ import pytest
 from src.domain.futures.signals.ltf_alpha import (
     build_ltf_alpha_feature_grid,
     build_ltf_native_alpha_panels,
+    build_ltf_native_alpha_panels_streaming,
     project_ltf_panel_to_base_grid,
 )
 from src.domain.futures.strategy.candidate_contracts import CandidateSignalPanel
@@ -71,6 +72,33 @@ def _aligned_3h_2sym() -> AlignedMarketData:
 # ===================================================================
 
 class TestLtfFeatureGridHappyPath:
+    def test_streaming_panels_accumulate_one_symbol_at_a_time(self) -> None:
+        aligned = _aligned_3h_2sym()
+        plan = dataclasses.make_dataclass("Plan", [("symbols", tuple), ("skip_reason", object)])(
+            ("BTCUSDT", "ETHUSDT"), None
+        )
+        frames = {"BTCUSDT": _exec_1m_frame(), "ETHUSDT": _exec_1m_frame()}
+
+        panels = build_ltf_native_alpha_panels_streaming(
+            aligned=aligned,
+            plan=plan,
+            load_frame=frames.__getitem__,
+            budget=None,
+        )
+
+        assert panels
+        assert all(panel.signed_score_2d.shape == aligned.close_2d.shape for panel in panels)
+        assert any(panel.valid_mask_2d[:, 0].any() for panel in panels)
+
+    def test_streaming_skip_plan_returns_empty(self) -> None:
+        aligned = _aligned_3h_2sym()
+        plan = dataclasses.make_dataclass("Plan", [("symbols", tuple), ("skip_reason", object)])(
+            ("BTCUSDT",), "budget"
+        )
+        assert build_ltf_native_alpha_panels_streaming(
+            aligned=aligned, plan=plan, load_frame=lambda _symbol: None, budget=None
+        ) == ()
+
     def test_literal_15m_grid_aggregation(self) -> None:
         frame = _exec_1m_frame()
         grid = build_ltf_alpha_feature_grid(
