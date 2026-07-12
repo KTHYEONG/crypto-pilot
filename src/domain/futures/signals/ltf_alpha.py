@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+import dataclasses
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from typing import Literal, cast
+from typing import Any, Literal, cast
 
 import numpy as np
 import pandas as pd
@@ -108,7 +109,6 @@ def _resample_1m_to_ltf(
     indexed = df.set_index("datetime")
     pandas_rule = _LTF_TO_PANDAS.get(rule, rule)
     resampled = indexed.resample(pandas_rule, label="right").agg({
-        "open": "first",
         "high": "max",
         "low": "min",
         "close": "last",
@@ -123,7 +123,7 @@ def _resample_1m_to_ltf(
 
 
 def _normalize_exec_1m_columns(df: pd.DataFrame) -> pd.DataFrame:
-    required = {"datetime", "open", "high", "low", "close", "volume", "taker_buy_base_volume"}
+    required = {"datetime", "high", "low", "close", "volume", "taker_buy_base_volume"}
     missing = required - set(df.columns)
     if missing:
         raise ValueError(f"missing required column: {sorted(missing)[0]}")
@@ -231,7 +231,6 @@ def build_ltf_alpha_feature_grid(
         idx = np.searchsorted(grid_dt, resampled_dt, side="left")
         mask = idx < n_grid
         idx_valid = idx[mask]
-        open_2d[idx_valid, i] = resampled["open"].values[mask]
         high_2d[idx_valid, i] = resampled["high"].values[mask]
         low_2d[idx_valid, i] = resampled["low"].values[mask]
         close_2d[idx_valid, i] = resampled["close"].values[mask]
@@ -577,3 +576,124 @@ def project_ltf_panel_to_base_grid(
         archetype=panel.archetype,
         exit_policies=panel.exit_policies or (),
     )
+
+
+def build_ltf_native_alpha_panels_streaming(
+    *,
+    aligned: AlignedMarketData,
+    plan: Any,
+    load_frame: Any,
+    budget: Any,
+) -> tuple[CandidateSignalPanel, ...]:
+    """Build causally projected LTF panels without a universe-wide dense grid.
+
+    [ADR_20260712_L0_MEMORY_BOUND_DATAFLOW]
+    One symbol is loaded and reduced at a time.  Only base-grid accumulators
+    survive between symbols, so peak source memory is independent of universe
+    width.  ``load_frame`` must return a bounded 1m frame for the symbol.
+    """
+    if getattr(plan, "skip_reason", None) is not None:
+        return ()
+    symbols = tuple(getattr(plan, "symbols", ()))
+    if not symbols:
+        return ()
+
+    families = tuple(_LTF_NATIVE_FAMILIES)
+    base_dt = np.asarray(aligned.datetimes, dtype="datetime64[ns]")
+    t_base, n_base = aligned.close_2d.shape
+    accumulators: dict[tuple[str, str], dict[str, NDArray[Any]]] = {}
+    metadata_by_key: dict[tuple[str, str], dict[str, object]] = {}
+
+    for family in families:
+        for ltf_raw in _FAMILY_LTF_GRID.get(family, _VALID_LTFS):
+            ltf = ltf_raw
+            key = (family, ltf)
+            accumulators[key] = {
+                "score": np.zeros((t_base, n_base), dtype=np.float64),
+                "side": np.zeros((t_base, n_base), dtype=np.int8),
+                "turnover": np.zeros((t_base, n_base), dtype=np.float64),
+                "valid": np.zeros((t_base, n_base), dtype=np.bool_),
+            }
+
+    symbol_to_col = {symbol: index for index, symbol in enumerate(aligned.symbols)}
+    for symbol in symbols:
+        col = symbol_to_col.get(symbol)
+        if col is None:
+            continue
+        frame = load_frame(symbol)
+        if frame is None or frame.empty:
+            continue
+        symbol_grid: dict[str, LtfAlphaFeatureGrid] = {}
+        symbol_aligned = dataclasses.replace(aligned, symbols=(symbol,))
+        try:
+            for family in families:
+                for ltf_raw in _FAMILY_LTF_GRID.get(family, _VALID_LTFS):
+                    ltf = ltf_raw
+                    grid = symbol_grid.get(ltf)
+                    if grid is None:
+                        grid = build_ltf_alpha_feature_grid(
+                            exec_1m_by_symbol={symbol: frame},
+                            symbols=(symbol,),
+                            ltf=ltf,
+                            start=base_dt[0],
+                            end=base_dt[-1],
+                        )
+                        symbol_grid[ltf] = grid
+                    if grid.datetimes.size == 0:
+                        continue
+                    sparse = _build_sparse_signal(
+                        grid=grid,
+                        aligned=symbol_aligned,
+                        family=family,
+                    )
+                    projected = project_ltf_panel_to_base_grid(
+                        panel=sparse,
+                        base_datetimes=base_dt,
+                        base_valid_mask_2d=aligned.active_mask[:, col : col + 1],
+                    )
+                    key = (family, ltf)
+                    acc = accumulators[key]
+                    acc["score"][:, col] = projected.signed_score_2d[:, 0]
+                    acc["side"][:, col] = projected.side_hint_2d[:, 0]
+                    acc["turnover"][:, col] = projected.turnover_proxy_2d[:, 0]
+                    acc["valid"][:, col] = projected.valid_mask_2d[:, 0]
+                    metadata_by_key[key] = dict(projected.metadata)
+        finally:
+            del symbol_grid, symbol_aligned, frame
+
+    result: list[CandidateSignalPanel] = []
+    for (family, ltf_name), acc in accumulators.items():
+        valid = acc["valid"]
+        if not valid.any():
+            continue
+        metadata = metadata_by_key.get(
+            (family, ltf_name),
+            {
+                "source_tf": ltf_name,
+                "release_lag_bars": 1,
+                "archetype": _FAMILY_ARCHETYPE.get(family, "trend"),
+            },
+        )
+        result.append(
+            CandidateSignalPanel(
+                family=family,
+                variant=_FAMILY_VARIANT_BY_LTF.get(
+                    (family, ltf_name), f"{family}_{ltf_name}"
+                ),
+                params={"ltf": ltf_name},
+                datetimes=base_dt,
+                symbols=aligned.symbols,
+                signed_score_2d=acc["score"],
+                side_hint_2d=acc["side"],
+                expected_holding_bars=1,
+                min_holding_bars=1,
+                stop_atr_mult=2.0,
+                take_profit_atr_mult=4.0,
+                turnover_proxy_2d=acc["turnover"],
+                valid_mask_2d=valid,
+                metadata=metadata,
+                archetype=_FAMILY_ARCHETYPE.get(family, "trend"),
+                exit_policies=(),
+            )
+        )
+    return tuple(result)
