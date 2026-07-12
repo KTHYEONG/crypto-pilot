@@ -9,6 +9,7 @@
 [ADR_20260710_L0_TERMINAL_DEBUG_OBSERVABILITY]
 [ADR_20260710_L0_TF_CORROBORATION_WIRING_FIX]
 [ADR_20260711_L0_STRATEGY_DELIVERY_HARDENING]
+[ADR_20260711_L0_CROSS_TF_PRUNING_ADMISSION]
 """
 
 from __future__ import annotations
@@ -24,7 +25,11 @@ from typing import TYPE_CHECKING, Any, Literal, cast
 if TYPE_CHECKING:
     pass
 from src.core.utils.utils import setup_logger
-from src.domain.futures.alpha_foundry.contracts import AlphaRecipe, CandidateFeatureFamily
+from src.domain.futures.alpha_foundry.contracts import (
+    AlphaRecipe,
+    CandidateFeatureFamily,
+    L0StrategyDeliveryManifest,
+)
 from src.domain.futures.alpha_foundry.contracts import (
     AlphaRecipe as _AlphaRecipe,
 )
@@ -675,3 +680,172 @@ def run_alpha_foundry_l0_gate_multi_tf(
             _n_total, _n_gt0, _median_cov,
         )
     return results
+
+
+def assemble_l0_strategy_delivery_manifest(
+    *,
+    multi_results: Mapping[str, AlphaFoundryL0Result],
+    aligned_by_tf: Mapping[str, Any],
+    canonical_tf: str,
+    run_id_prefix: str,
+    enable_audit: bool,
+    enable_pruning: bool,
+    total_l1_verification_budget: int = 30,
+    max_novelty_corr: float = 0.70,
+    min_survivors_per_archetype: int = 1,
+    min_survivors_per_tf: int = 1,
+) -> tuple[dict[str, AlphaFoundryL0Result], L0StrategyDeliveryManifest]:
+    """Cross-TF post-processing over an already-completed multi-TF L0 gate
+    run. [LIMIT-01][LIMIT-05][LIMIT-06][LIMIT-07]
+
+    Pure function: multi_results and aligned_by_tf are never mutated.
+    Returns (possibly-pruned multi_results, manifest). When both
+    enable_audit and enable_pruning are False, returns
+    (dict(multi_results), manifest-with-Nones) — a cheap passthrough,
+    matching current (pre-this-spec) production behavior exactly.
+
+    Raises:
+        KeyError: if canonical_tf is not a key in aligned_by_tf.
+    """
+    if canonical_tf not in aligned_by_tf:
+        raise KeyError(f"canonical_tf={canonical_tf!r} not in aligned_by_tf keys={set(aligned_by_tf)}")
+
+    manifest_audit: Any = None
+    manifest_final_ids: tuple[str, ...] = ()
+    pruned_multi_results: dict[str, AlphaFoundryL0Result] = dict(multi_results)
+
+    selected_by_tf: dict[str, Any] = {}
+    panel_by_recipe_id: dict[str, Any] = {}
+    all_tfs_with_candidates = False
+
+    for tf_k, res in multi_results.items():
+        cands = getattr(res, "candidates_for_l1", ())
+        if cands:
+            selected_by_tf[tf_k] = cands
+
+    for res in multi_results.values():
+        for p in res.panels_for_l1:
+            rid = getattr(p, "metadata", {}).get("recipe_id", "")
+            if rid:
+                panel_by_recipe_id[rid] = p
+
+    all_tfs_with_candidates = bool(selected_by_tf and panel_by_recipe_id)
+
+    if enable_audit and all_tfs_with_candidates:
+        from src.domain.futures.alpha_foundry.diversity import audit_l0_selected_recipe_independence
+
+        canonical_aligned = aligned_by_tf[canonical_tf]
+        canonical_dt = canonical_aligned.datetimes.astype("datetime64[ns]").astype("int64")
+        canonical_active = (
+            canonical_aligned.active_mask
+            & canonical_aligned.warm_mask
+            & ~canonical_aligned.entry_block_mask
+            & ~canonical_aligned.kill_mask
+        )
+
+        manifest_audit = audit_l0_selected_recipe_independence(
+            selected_by_tf=selected_by_tf,
+            panel_by_recipe_id=panel_by_recipe_id,
+            canonical_tf=canonical_tf,
+            canonical_datetimes=canonical_dt,
+            active_mask_canonical=canonical_active,
+            max_corr=max_novelty_corr,
+        )
+
+    if enable_pruning and all_tfs_with_candidates:
+        from src.domain.futures.alpha_foundry.diversity import (
+            apply_cross_tf_survival_floor,
+            compute_cross_tf_redundancy,
+        )
+
+        canonical_aligned = aligned_by_tf[canonical_tf]
+        canonical_dt = canonical_aligned.datetimes.astype("datetime64[ns]").astype("int64")
+        canonical_active = (
+            canonical_aligned.active_mask
+            & canonical_aligned.warm_mask
+            & ~canonical_aligned.entry_block_mask
+            & ~canonical_aligned.kill_mask
+        )
+
+        try:
+            cross_tf_result = compute_cross_tf_redundancy(
+                selected_by_tf=selected_by_tf,
+                panel_by_recipe_id=panel_by_recipe_id,
+                canonical_tf=canonical_tf,
+                canonical_datetimes=canonical_dt,
+                active_mask_canonical=canonical_active,
+                max_novelty_corr=max_novelty_corr,
+            )
+
+            floor_result = apply_cross_tf_survival_floor(
+                cross_tf_result=cross_tf_result,
+                candidate_by_recipe_id={
+                    c.recipe_id: c
+                    for cands in selected_by_tf.values()
+                    for c in cands
+                    if hasattr(c, "recipe_id")
+                },
+                min_survivors_per_archetype=min_survivors_per_archetype,
+                min_survivors_per_tf=min_survivors_per_tf,
+            )
+
+            manifest_final_ids = floor_result.final_selected_recipe_ids
+
+            final_set = set(manifest_final_ids)
+            pruned_multi_results = {}
+            for tf_k, res in multi_results.items():
+                kept_candidates = tuple(
+                    c for c in res.candidates_for_l1
+                    if c.recipe_id in final_set
+                )
+                kept_panels = tuple(
+                    p for p in res.panels_for_l1
+                    if getattr(p, "metadata", {}).get("recipe_id", "") in final_set
+                )
+                if len(kept_candidates) == len(res.candidates_for_l1) and len(kept_panels) == len(res.panels_for_l1):
+                    pruned_multi_results[tf_k] = res
+                else:
+                    pruned_multi_results[tf_k] = replace(
+                        res,
+                        candidates_for_l1=kept_candidates,
+                        panels_for_l1=kept_panels,
+                    )
+
+        except ValueError as exc:
+            # [ADR_20260711_L0_STRATEGY_DELIVERY_HARDENING] `_logger` (module
+            # logger) does not propagate output in this pipeline's real
+            # execution path — use the same "opt_main_futures" logger
+            # maybe_write_alpha_foundry_report() relies on, or the warning
+            # silently vanishes in production.
+            _fallback_logger = setup_logger("opt_main_futures", write_file=False)
+            for _l in (_fallback_logger, _logger):
+                _l.warning(
+                    "[EVAL] stage=l0_cross_tf_pruning run_id=%s canonical_tf=%s failed: %s,"
+                    " falling back to unpruned multi_results",
+                    run_id_prefix, canonical_tf, exc,
+                )
+            pruned_multi_results = dict(multi_results)
+            manifest_final_ids = ()
+
+    if not manifest_final_ids:
+        manifest_final_ids = tuple(
+            c.recipe_id
+            for res in multi_results.values()
+            for c in res.candidates_for_l1
+        )
+
+    reports_by_tf: dict[str, Any] = {}
+    for tf_k, res in multi_results.items():
+        r = getattr(res, "summary_report", None)
+        if r is not None:
+            reports_by_tf[tf_k] = r
+
+    manifest = L0StrategyDeliveryManifest(
+        run_id_prefix=run_id_prefix,
+        reports_by_tf=reports_by_tf,
+        independence_audit=manifest_audit,
+        final_selected_recipe_ids=manifest_final_ids,
+        total_l1_verification_budget=total_l1_verification_budget,
+    )
+
+    return pruned_multi_results, manifest
