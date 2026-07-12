@@ -88,7 +88,8 @@
       "tests/unit/application/futures/runner/test_alpha_foundry_wiring.py",
       "tests/unit/domain/futures/strategy_runtime/test_bridge_alpha_foundry.py",
       "tests/unit/domain/futures/alpha_foundry/test_bridge_helpers_multi_tf.py",
-      "tests/unit/domain/futures/alpha_foundry/test_bridge_helpers.py"
+      "tests/unit/domain/futures/alpha_foundry/test_bridge_helpers.py",
+      "tests/unit/domain/futures/alpha_foundry/test_assemble_l0_strategy_delivery_manifest.py"
     ]
   },
   "src/domain/futures/optimization/risk_deployment.py": {
