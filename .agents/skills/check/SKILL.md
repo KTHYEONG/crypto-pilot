@@ -13,7 +13,9 @@ Unify static contract compliance, dynamic regression test execution, and structu
 ### 1. Minimal Output Validation Pipeline (Token Saving)
 Run the integrated check script targeting the modified files to avoid multiple command runs and massive terminal logs:
 - **Command:** `uv run python scripts/lean_check.py --files [modified_files]`
-- **Diagnostic Exception:** If the coverage target is missed or tests fail, inspect the minimal summary printed by the script. Avoid running raw pytest or cov commands independently on large paths.
+- **Strict Constraint (1:1 Mapping)**: You **MUST** include both the source file and its corresponding test file (e.g. `src/x.py` and `tests/unit/test_x.py`) in `--files` to prevent test bypass.
+- **Strict Constraint (No print)**: Raw `print()` is strictly prohibited. Ensure all outputs use `logging` following the tag schema in `logging.md`.
+- **Diagnostic Exception**: If the coverage target is missed or tests fail, inspect the minimal summary printed. You are exceptionally allowed to run a targeted pytest with `--tb=short` once to view detailed traceback if the cause is not clear from the summary.
 
 ### 2. Verification Scope
 
