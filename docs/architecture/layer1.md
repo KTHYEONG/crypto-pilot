@@ -122,6 +122,7 @@ graph TD
 - **Match Ratio**: >= 0.90 — pooled `(matched, true_unmatched)` counts across folds, Wilson score-interval lower bound (`_wilson_lower_bound`). `true_unmatched` excludes label-drift mismatches (same `decision_idx`/`symbol`/`strategy_id` but differing `activation_context`), tracked separately as `Layer1FoldReadiness.label_drift_unmatched_count`.
 - **Fold Ratio**: >= 0.50 — fraction of outer folds individually passed; diagnostic-only given `wf_n_folds` (default 4) yields only 5 discrete values.
 - `Layer1GateReport.passed` = `structural_passed AND all(advisory_checks passed)` (legacy strict semantics, unchanged). `CandidateStrategyConfig.l1_structural_gate_only` (default `True`) gates whether `build_qualified_signal_registry()` requires `structural_passed` only (`True`) or the legacy `passed` (`False`); when advisory checks fail under the relaxed mode, `build_qualified_signal_registry(advisory_penalty=...)` dampens `quality_weight` per-strategy instead of blocking the whole TF.
+- `Layer1Result.gate_passed` is the deployment handoff result: the selected policy gate must pass and the deployment registry must contain at least one ready symbol. In multi-TF execution, the aggregate gate and registry MUST come from the same selected master timeframe; a missing or empty registry is blocking.
 
 ### Promotion Gate (4 Conditions)
 - **Hard Eligible**: L1 structural gates 통과 여부
