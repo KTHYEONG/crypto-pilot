@@ -1854,6 +1854,19 @@ def evaluate_outer_signal_opportunities(
     l1_min_fold_probe = float(getattr(cfg, "l1_min_fold_probe_bps", 0.0))
     if probe_gross_edge <= l1_min_fold_probe:
         blockers.append("non_positive_gross_edge")
+    if logger.isEnabledFor(logging.DEBUG):
+        logger.debug(
+            "[SYS] stage=l1_per_fold_diag fold=%d blockers=%s matched=%d true_unmatched=%d"
+            " label_drift=%d ready_symbols=%d match_ratio=%.3f probe_gross_edge=%.3f",
+            fold_id,
+            ",".join(blockers) if blockers else "none",
+            matched_event_count,
+            unmatched_count,
+            label_drift,
+            len(ready_symbols),
+            realized_match_ratio,
+            probe_gross_edge,
+        )
     rank_ic_all_val = 0.0
     rank_ic_tstat_val = 0.0
     if _l1_probe_diag_enabled() and logger.isEnabledFor(logging.DEBUG):
