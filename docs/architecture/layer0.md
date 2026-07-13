@@ -136,7 +136,7 @@ graph TD
 | `fdr_alpha` | 0.10 | FDR alpha level for Benjamini-Hochberg correction |
 | `enable_cross_tf_diversity_audit` | False | Toggle for post-gate Cross-TF independence audit (read-only) |
 | `cross_tf_diversity_canonical_tf` | "1h" | Target canonical grid TF for audit projection |
-| `enable_cross_tf_pruning` | False | Toggle for enforcing cross-TF redundancy pruning before L1 handoff |
+| `enable_cross_tf_pruning` | True (opt-out via `L0_CROSS_TF_PRUNING=0`) | Toggle for enforcing cross-TF redundancy pruning before L1 handoff |
 | `cross_tf_pruning_min_survivors_per_archetype` | 1 | Minimum surviving candidates per archetype after cross-TF pruning |
 | `cross_tf_pruning_min_survivors_per_tf` | 1 | Minimum surviving candidates per timeframe after cross-TF pruning |
 | `l0_parallel_max_workers` | 1 | Phase-3 cross-TF gate concurrency; 1=sequential, 2-4=fork-based parallel |
