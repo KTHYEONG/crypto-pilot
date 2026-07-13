@@ -13,7 +13,7 @@ import pyarrow.compute as pc
 import pyarrow.dataset as ds
 
 from src.core.optimization.opt_utils import compute_segment_merge_index
-from src.core.settings import LOG_DIR
+from src.core.settings import LOG_DIR, FuturesStorageLayout
 from src.domain.futures.backtest.data_loader import (
     DataCollector,
     summarize_dataframe_integrity,
@@ -1191,12 +1191,16 @@ def load_ltf_exec_1m_frame(
         "taker_buy_base_volume", "quote_vol", "trades",
     ),
 ) -> pd.DataFrame | None:
-    """Load one symbol's bounded 1m source frame for streaming LTF signals.
+    """[ADR_20260713_TASK_L1_HYBRID_MEMORY_AUDIT] Load bounded 1m LTF data.
 
     Reads only required columns within [start_datetime, end_datetime].
     Returns None on any error (logged) — never raises.
     """
-    path = data_root / "futures" / f"{symbol}_1m.parquet"
+    path = FuturesStorageLayout.get_ohlcv_path(
+        symbol,
+        "1m",
+        base_dir=data_root / "futures",
+    )
     if not path.exists():
         _logger.debug("[LTF_1M] file not found symbol=%s path=%s", symbol, path)
         return None
@@ -1206,24 +1210,41 @@ def load_ltf_exec_1m_frame(
 
         dataset = ds.dataset(str(path), format="parquet")  # type: ignore[no-untyped-call]
         available_columns = set(dataset.schema.names)
+        datetime_column = "datetime" if "datetime" in available_columns else "timestamp"
         required_source_columns = {
-            "datetime", "high", "low", "close", "volume", "taker_buy_base_volume",
+            datetime_column,
+            "high",
+            "low",
+            "close",
+            "volume",
+            "taker_buy_base_volume",
         }
         if not required_source_columns.issubset(available_columns):
             _logger.warning("[LTF_1M] required columns missing symbol=%s", symbol)
             return None
         selected_columns = [column for column in required_columns if column in available_columns]
+        if datetime_column not in selected_columns:
+            selected_columns.append(datetime_column)
+        if datetime_column == "timestamp":
+            start_value = int(start_datetime.value // 1_000_000)
+            end_value = int(end_datetime.value // 1_000_000)
+        else:
+            start_value = start_datetime
+            end_value = end_datetime
         table = dataset.to_table(
             columns=selected_columns,
             filter=(
-                (pc.field("datetime") >= start_datetime)  # type: ignore[no-untyped-call]
-                & (pc.field("datetime") <= end_datetime)  # type: ignore[no-untyped-call]
+                (pc.field(datetime_column) >= start_value)  # type: ignore[no-untyped-call]
+                & (pc.field(datetime_column) <= end_value)  # type: ignore[no-untyped-call]
             ),
         )
         if table.num_rows == 0:
             return None
         df = table.to_pandas()
-        df["datetime"] = pd.to_datetime(df["datetime"], utc=True)
+        if datetime_column == "timestamp":
+            df["datetime"] = pd.to_datetime(df["timestamp"], unit="ms", utc=True)
+        else:
+            df["datetime"] = pd.to_datetime(df["datetime"], utc=True)
         return df
     except Exception as exc:
         _logger.warning("[LTF_1M] load failed symbol=%s: %s", symbol, exc)
