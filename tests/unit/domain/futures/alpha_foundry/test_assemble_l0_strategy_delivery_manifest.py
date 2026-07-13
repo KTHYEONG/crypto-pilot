@@ -304,3 +304,34 @@ class TestSharedContextGateRelaxation:
             min_survivors_per_tf=1,
         )
         spy.assert_called_once()
+
+    def test_manifest_contains_route_fields(self) -> None:
+        _, manifest = assemble_l0_strategy_delivery_manifest(
+            multi_results=_base_multi_results(),
+            aligned_by_tf=_base_aligned(),
+            run_id_prefix="test",
+            enable_audit=False,
+            enable_pruning=False,
+            total_l1_verification_budget=30,
+            evidence_end_ns=1000000,
+        )
+        assert hasattr(manifest, "routes")
+        assert manifest.routes is not None
+        for route in manifest.routes:
+            assert hasattr(route, "timeframe")
+            assert hasattr(route, "selected_recipe_ids")
+            assert hasattr(route, "allocated_budget_units")
+            assert hasattr(route, "evidence_end_ns")
+
+    def test_manifest_route_budget_within_global_budget(self) -> None:
+        _, manifest = assemble_l0_strategy_delivery_manifest(
+            multi_results=_base_multi_results(),
+            aligned_by_tf=_base_aligned(),
+            run_id_prefix="test",
+            enable_audit=False,
+            enable_pruning=False,
+            total_l1_verification_budget=30,
+            evidence_end_ns=1000000,
+        )
+        total_allocated = sum(r.allocated_budget_units for r in manifest.routes)
+        assert total_allocated <= manifest.total_l1_verification_budget
