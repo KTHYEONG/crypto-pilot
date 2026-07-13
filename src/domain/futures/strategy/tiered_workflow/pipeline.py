@@ -1482,6 +1482,17 @@ def run_l1_nested_swf(
     for outer_idx, outer_fold in enumerate(outer_folds):
         t_fold = time.perf_counter()
         logger.debug("[MEM] stage=outer_fold fold=%d/%d rss=%.0fMB", outer_idx + 1, len(outer_folds), _get_rss_mb())
+        if logger.isEnabledFor(logging.DEBUG):
+            _fit_end = min(int(outer_fold.fit_end), len(aligned.datetimes) - 1)
+            _oos_start = min(int(outer_fold.oos_start), len(aligned.datetimes) - 1)
+            _oos_end = min(int(outer_fold.oos_end) - 1, len(aligned.datetimes) - 1)
+            logger.debug(
+                "[SYS] stage=l1_fold_calendar_diag fold=%d fit_end_date=%s oos_start_date=%s oos_end_date=%s",
+                outer_idx,
+                str(aligned.datetimes[_fit_end])[:10],
+                str(aligned.datetimes[_oos_start])[:10],
+                str(aligned.datetimes[_oos_end])[:10],
+            )
         snapshot = snapshots_by_idx.get(outer_fold.oos_start)
         evidence = snapshot.evidence if snapshot is not None else ()
         registry = (

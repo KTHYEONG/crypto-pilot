@@ -753,7 +753,37 @@ def compute_symbol_strategy_evidence(
             dict(reasons),
             qw_zero,
         )
+    if logger.isEnabledFor(logging.DEBUG):
+        _log_family_admission_diag(tuple(final_evidence))
     return tuple(final_evidence)
+
+
+def _log_family_admission_diag(evidence: tuple[SymbolStrategyEvidence, ...]) -> None:
+    """진단: family별 admission 통계를 DEBUG 레벨로 로깅.
+
+    Args:
+        evidence: 최종 evidence 튜플.
+    """
+    _family_stats: dict[str, dict[str, float]] = {}
+    _family_reason_counts: dict[str, Counter[str]] = {}
+    for ev in evidence:
+        _fam = ev.key.strategy_id.split(":")[0] if ":" in ev.key.strategy_id else ev.key.strategy_id
+        _stats = _family_stats.setdefault(_fam, {"n_obs_sum": 0.0, "effective_n_sum": 0.0, "n_pairs": 0.0})
+        _stats["n_obs_sum"] += ev.n_obs
+        _stats["effective_n_sum"] += ev.effective_n
+        _stats["n_pairs"] += 1
+        _reasons = _family_reason_counts.setdefault(_fam, Counter())
+        for r in ev.structural_reasons:
+            _reasons[r] += 1
+    for _fam, _stats in sorted(_family_stats.items(), key=lambda kv: -kv[1]["n_obs_sum"])[:10]:
+        _ratio = _stats["effective_n_sum"] / _stats["n_obs_sum"] if _stats["n_obs_sum"] > 0 else 0.0
+        _reasons_str = ",".join(f"{k}={v}" for k, v in _family_reason_counts[_fam].most_common(3))
+        logger.debug(
+            "[SYS] stage=l1_family_admission_diag family=%s n_pairs=%d n_obs_sum=%.0f"
+            " effective_n_sum=%.2f eff_n_over_n_obs=%.4f top_reasons=%s",
+            _fam, int(_stats["n_pairs"]), _stats["n_obs_sum"], _stats["effective_n_sum"], _ratio,
+            _reasons_str if _reasons_str else "none(all_hard_eligible)",
+        )
 
 
 def build_qualified_signal_registry(
@@ -940,6 +970,26 @@ def _candidate_output_to_signal_batch(
         _keyset = {f"{s}|{st}" for (s, st) in source_keys_relaxed}
     mask_reg = _composite.isin(_keyset).to_numpy()
     n_registry_pass = int(mask_reg.sum())
+    if logger.isEnabledFor(logging.DEBUG):
+        _raw_strategy_v = np.array([s.split(":")[0] if ":" in s else s for s in strat_v], dtype=object)
+        _raw_families, _raw_counts = np.unique(_raw_strategy_v, return_counts=True)
+        _raw_family_freq = dict(zip(_raw_families.tolist(), _raw_counts.tolist(), strict=False))
+        _reg_families = {
+            (item.key.strategy_id.split(":")[0] if ":" in item.key.strategy_id else item.key.strategy_id)
+            for items in registry.by_symbol.values()
+            for item in items
+        }
+        _raw_family_set = set(_raw_family_freq.keys())
+        _missing_families = sorted(_raw_family_set - _reg_families, key=lambda f: -_raw_family_freq[f])[:8]
+        logger.debug(
+            "[SYS] stage=l1_registry_overlap_diag n_raw_symbols=%d n_raw_families=%d n_registry_symbols=%d"
+            " n_registry_families=%d families_never_in_registry=%s",
+            len(set(sym_v.tolist())),
+            len(_raw_family_set),
+            len(registry.by_symbol),
+            len(_reg_families),
+            ",".join(f"{f}({_raw_family_freq[f]})" for f in _missing_families) if _missing_families else "none",
+        )
 
     # ── prediction arrays padded to n_raw with cascaded fallback ─────────────
     def _pad(arr: NDArray[np.float64], fb: NDArray[np.float64]) -> NDArray[np.float64]:
