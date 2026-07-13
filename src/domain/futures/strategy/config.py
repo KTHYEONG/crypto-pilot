@@ -480,6 +480,7 @@ class CandidateStrategyConfig:
         "liquidity_participation_breakout",
         "btc_neutral_residual_reversal",
         "price_band_reversion",
+        "mtf_fusion",
     )
     liquidity_participation_breakout: LiquidityParticipationBreakoutConfig = field(
         default_factory=LiquidityParticipationBreakoutConfig
@@ -1117,6 +1118,7 @@ _DEFAULT_PER_TF_FAMILIES: dict[str, tuple[str, ...]] = {
         "taker_imbalance_momentum",
         "funding_flow_carry",
         "macd_4h",
+        "mtf_fusion",
     ),
     "6h": (
         "trend_ma",
@@ -1130,6 +1132,7 @@ _DEFAULT_PER_TF_FAMILIES: dict[str, tuple[str, ...]] = {
         "mtf_breakout_retest",
         "lsr_oi_regime_filter",
         "supertrend",
+        "mtf_fusion",
     ),
     "8h": (
         "trend_ma",
@@ -1143,6 +1146,7 @@ _DEFAULT_PER_TF_FAMILIES: dict[str, tuple[str, ...]] = {
         "mtf_breakout_retest",
         "lsr_oi_regime_filter",
         "supertrend",
+        "mtf_fusion",
     ),
     "12h": (
         "trend_ma",
@@ -1156,6 +1160,7 @@ _DEFAULT_PER_TF_FAMILIES: dict[str, tuple[str, ...]] = {
         "vol_term_structure_gate",
         "ichimoku_trend",
         "supertrend",
+        "mtf_fusion",
     ),
 }
 

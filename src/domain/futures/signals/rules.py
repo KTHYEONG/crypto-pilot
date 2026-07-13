@@ -41,6 +41,7 @@ ALL_SIGNAL_FAMILIES: tuple[str, ...] = (
     "xs_residual_rebalance", "carry_net_of_funding",
     "liquidity_participation_breakout", "btc_neutral_residual_reversal",
     "price_band_reversion",
+    "mtf_fusion",
 )
 
 
@@ -396,6 +397,7 @@ def _resolve_panel_archetype(panel: CandidateSignalPanel) -> str:
         "trend_pullback_continuation",
         "mtf_trend_pullback",
         "mtf_breakout_retest",
+        "mtf_fusion",
         "vol_term_structure_gate",
         "btc_regime_pullback",
     }:
