@@ -138,7 +138,8 @@
     "architecture": "docs/architecture/layer0.md",
     "testing": [
       "tests/unit/application/futures/runner/test_config.py",
-      "tests/unit/execution/test_opt_main_futures_strategy_mode.py"
+      "tests/unit/execution/test_opt_main_futures_strategy_mode.py",
+      "tests/unit/domain/futures/strategy/tiered_workflow/test_l0_readiness_hardening.py"
     ]
   },
   "src/domain/futures/strategy/tiered_workflow/signal_selection.py": {
@@ -149,8 +150,11 @@
     ]
   },
   "src/domain/futures/strategy/tiered_workflow/pipeline.py": {
-    "architecture": "docs/architecture/layer1.md",
-    "testing": "tests/unit/domain/futures/strategy/test_tiered_workflow.py"
+    "architecture": "docs/architecture/layer0.md",
+    "testing": [
+      "tests/unit/domain/futures/strategy/test_tiered_workflow.py",
+      "tests/unit/domain/futures/strategy/tiered_workflow/test_l0_readiness_hardening.py"
+    ]
   },
   "src/domain/futures/strategy/config.py": {
     "architecture": "docs/architecture/layer0.md",
@@ -158,7 +162,8 @@
       "tests/unit/domain/futures/strategy/test_config.py",
       "tests/unit/domain/futures/strategy/test_family_lifecycle.py",
       "tests/unit/domain/futures/strategy/tiered_workflow/test_per_tf_architecture.py",
-      "tests/unit/domain/futures/strategy/test_rule_signals.py"
+      "tests/unit/domain/futures/strategy/test_rule_signals.py",
+      "tests/unit/domain/futures/strategy/tiered_workflow/test_l0_readiness_hardening.py"
     ]
   },
   "src/domain/futures/strategy/tiered_workflow/l2_meta.py": {
