@@ -1207,6 +1207,10 @@ def run_candidate_strategy_for_universe(
             )
             _af_run_id = f"{tf}_{int(_time_panel.time())}"
             _t_l0_gate = _time_panel.perf_counter()
+            import os
+            _workers = getattr(alpha_foundry_config, "l0_parallel_max_workers", None)
+            if _workers is None:
+                _workers = max(1, min(4, (os.cpu_count() or 2) - 1))
             multi_results = run_alpha_foundry_l0_gate_multi_tf(
                 panels_by_tf=panels_by_tf,
                 bindings_by_tf=bindings_by_tf,
@@ -1215,12 +1219,12 @@ def run_candidate_strategy_for_universe(
                 cost_model=ExecutionCostModel(),
                 runtime_config=alpha_foundry_config,
                 run_id_prefix=_af_run_id,
-                parallel_max_workers=getattr(alpha_foundry_config, "l0_parallel_max_workers", 1),
+                parallel_max_workers=_workers,
             )
             _run_logger.debug(
                 "[SYS] stage=l0_gate_multi_tf_wall took=%.4fs rss=%.0fMB parallel_max_workers=%d",
                 _time_panel.perf_counter() - _t_l0_gate, _get_rss_mb(),
-                getattr(alpha_foundry_config, "l0_parallel_max_workers", 1),
+                _workers,
             )
 
             # [ADR_20260712_L0_EVIDENCE_CONDITIONED_CROSS_TF_ADMISSION] Cross-TF

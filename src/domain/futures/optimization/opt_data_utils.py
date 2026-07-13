@@ -695,6 +695,8 @@ def load_single_symbol_data(
                                 ("timestamp", "<=", end_ms),
                             ],
                         )
+                        if not df.empty and "datetime" not in df.columns and "timestamp" in df.columns:
+                            df["datetime"] = pd.to_datetime(df["timestamp"], unit="ms", utc=True)
                         # Row-group boundary precision: trim any residual rows outside window.
                         boundary_mask = (df["datetime"] >= req_start_dt) & (df["datetime"] <= req_end_dt)
                         df = df.loc[boundary_mask]
@@ -706,6 +708,8 @@ def load_single_symbol_data(
                             _e,
                         )
                         df_full = pd.read_parquet(enriched_path)
+                        if not df_full.empty and "datetime" not in df_full.columns and "timestamp" in df_full.columns:
+                            df_full["datetime"] = pd.to_datetime(df_full["timestamp"], unit="ms", utc=True)
                         fallback_mask = (df_full["datetime"] >= req_start_dt) & (df_full["datetime"] <= req_end_dt)
                         df = df_full.loc[fallback_mask].copy()
                     if df.empty:
