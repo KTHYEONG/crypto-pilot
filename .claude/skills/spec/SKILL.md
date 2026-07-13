@@ -13,6 +13,7 @@ Leverage **high-reasoning models** for creative architectural design, while outp
 
 ### 1. Pre-process (Context Discovery)
 - **Decisions Context**: Load `docs/decisions/decisions.md` (align history).
+- **Rule Constraints**: Read and strictly adhere to `performance.md` (WSL resource limits, GPU limits) and `quant.md` (look-ahead bias, timezone isolation).
 - **Dependency Topology Scan**: 
   - Inspect the codebase to identify the target calling module and dependency flow.
   - Ensure the new imports do not violate layering rules or create circular dependencies.
@@ -20,7 +21,9 @@ Leverage **high-reasoning models** for creative architectural design, while outp
 ### 2. High-Reasoning Architectural Thought (High Autonomy)
 - **Algorithmic & Logical Modeling**: Define mathematical models, data structures, state machines, and state transition rules.
 - **System Flow Visualization**: Draw text-based Mermaid sequence/data flow diagrams showing module interactions.
-- **Constraints & Boundaries**: Exhaustively identify edge cases, performance bottlenecks, and algorithmic limitations, tagging each with a unique label (`[LIMIT-01]`, etc.).
+- **Constraints & Boundaries**: 
+  - Identify edge cases, performance bottlenecks, and algorithmic limitations, tagging each with a unique label (`[LIMIT-01]`, etc.).
+  - **Performance & Resource Budgeting**: Explicitly design the hardware budget using `[PERF-xx]` tags. Define target memory (RSS) caps, GPU VRAM limits, and parallel core configurations conforming to the WSL constraints in `performance.md`.
 
 ### 3. Low-Reasoning Implementation Specifications (Deterministic Constraints)
 To ensure low-reasoning models can build and integrate the code without guessing:
@@ -30,7 +33,7 @@ To ensure low-reasoning models can build and integrate the code without guessing
   - **State Mutability & Side Effects**: Specify whether the invocation modifies existing state (`Mutable`) or behaves as a pure function (`Immutable`).
   - **Data Diff**: Express payload modifications using a compact representation: `{"+new_field": "Type", "-deprecated_field": "Type"}`.
 - **TDD Scenario Matrix**:
-  - Map each LIMIT tag directly to a concrete test scenario.
+  - Map each LIMIT and PERF tag directly to a concrete test scenario.
   - Scenarios:
     - **Scenario 1 (Happy Path)**: Unit input/output.
     - **Scenario 2 (Edge Cases)**: `[LIMIT-xx]` boundary conditions.
@@ -46,6 +49,12 @@ Create a markdown file at `docs/specs/[feature].md`:
 - **Goal**: 1-sentence capability.
 - **Mermaid Diagram**: Text-based sequence showing system integration context.
 
+# ⚡ Performance & Resource Budget
+- **Complexity**: Time & Space Complexity (Big-O) for core logic.
+- **Limits**: `[PERF-01] RSS Limit (e.g. RSS < 4GB)`
+- **Concurrency**: `[PERF-02] Concurrency Limit (e.g. max_workers <= 4)`
+- **Hardware Acceleration**: `[PERF-03] GPU/VRAM Limit (e.g. VRAM < 2GB or CPU-only)`
+
 # ⚙️ Logical Rules & State Machine
 - Logical rules, state transition tables, and tagged constraints (`[LIMIT-01]`, etc.).
 
@@ -60,8 +69,10 @@ Create a markdown file at `docs/specs/[feature].md`:
 
 # 🧪 TDD Test Scenario Matrix
 - **Scenario 1 (Happy Path)**: Input -> Expected Output.
-- **Scenario 2 (Edge Cases)**: [LIMIT-xx] boundary.
+- **Scenario 2 (Edge Cases)**: [LIMIT-xx] boundary / [PERF-xx] resource verification.
 - **Scenario 3 (Error Handling)**: Expected Exceptions.
 - **Scenario 4 (Integration)**: Assertion verifying the connection inside the parent module.
 - **Mock & Integration Boilerplate**: Copy-pasteable test snippet with literal mocks.
 ```
+
+

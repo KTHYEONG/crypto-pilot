@@ -39,6 +39,7 @@ This document defines the physical hardware constraints and performance guidelin
 - **Numba JIT & Array Contiguity**:
   - Always unpack DataFrames or complex Python objects into raw NumPy ndarrays before passing them to Numba-jitted functions.
   - Ensure all arrays passed to `@njit` are memory contiguous. Call `np.ascontiguousarray(arr)` on sliced or resampled views to avoid memory copying overhead and L1/L2 cache misses.
+  - **Enable Compilation Caching**: Always specify `@njit(cache=True)` for Numba-jitted functions to prevent startup overhead and compilation redundancy on every execution.
 - **Optimized Parallelism**:
   - Restrict the use of `ProcessPoolExecutor` or `parallel=True` only to heavy, independent tasks (e.g., large parameter grid sweeps). Prohibit multiprocessing for lightweight operations where IPC (Inter-Process Communication) overhead exceeds math execution gains.
 - **Early-Exit Architecture**:
