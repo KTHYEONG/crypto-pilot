@@ -793,9 +793,14 @@ class TestLtfBackfillCoverageScenario1HappyPath:
         tier = Universe1mCoverageTier(covered_symbols=frozenset(), universe_symbols=frozenset())
         assert tier.coverage_ratio == 0.0
 
-    def test_default_l1_tfs_includes_1h_and_2h(self) -> None:
+    def test_default_l1_tfs_excludes_1h_includes_2h(self) -> None:
+        # [ADR_20260713_L0_L1_ASSET_GROWTH_RESTRUCTURE] "1h" removed from L1
+        # deployment (structural gate failure: sym_count/fold_ratio/probe_lcb_bps
+        # all collapsed, no realistic threshold-tuning recovery). "1h" signal-pool
+        # definition (_DEFAULT_PER_TF_FAMILIES["1h"]) is kept for the LTF
+        # widened-pool subsystem this test class covers.
         cfg = CandidateStrategyConfig()
-        assert "1h" in cfg.l1_tfs
+        assert "1h" not in cfg.l1_tfs
         assert "2h" in cfg.l1_tfs
 
     def test_resolve_tf_signal_pool_1h_returns_expanded_family_set(

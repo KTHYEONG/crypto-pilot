@@ -13,7 +13,7 @@ _DEFAULT_COST_MODEL = ExecutionCostModel()
 _DEFAULT_RT_BPS: float = _DEFAULT_COST_MODEL.round_trip_bps()  # ≈ 7.5
 _DEFAULT_MAX_EXPECTED_HOLDING_BARS = 36
 
-DEFAULT_L1_TFS: tuple[str, ...] = ("4h", "6h", "8h", "12h", "1h", "2h")  # [ADR_20260708_LTF_NATIVE_DIRECTIONAL_SEARCH]
+DEFAULT_L1_TFS: tuple[str, ...] = ("2h", "4h", "6h", "8h", "12h", "1d")  # [ADR_20260713_L0_L1_ASSET_GROWTH_RESTRUCTURE]
 
 
 @dataclass(slots=True, frozen=True)
@@ -457,29 +457,15 @@ class CandidateStrategyConfig:
         "trend_pullback_continuation",
         "dual_momentum",
         "residual_reversion",
-        "xs_momentum",
-        "xs_flow",
-        "xs_oi_skew",
         "mtf_trend_pullback",
         "mtf_breakout_retest",
         "taker_imbalance_momentum",
-        "funding_flow_carry",
         "funding_extreme_reversal",
         "vol_term_structure_gate",
-        "lsr_oi_regime_filter",
         "macd_4h",
-        "supertrend",
-        "ichimoku_trend",
         "trend_pullback_quality_v2",
         "residual_momentum_xs",
-        "funding_flow_exhaustion_sparse",
-        "oi_lsr_unwind",
-        "vol_contraction_breakout",
         "xs_residual_rebalance",
-        "carry_net_of_funding",
-        "liquidity_participation_breakout",
-        "btc_neutral_residual_reversal",
-        "price_band_reversion",
         "mtf_fusion",
     )
     liquidity_participation_breakout: LiquidityParticipationBreakoutConfig = field(
@@ -1083,10 +1069,8 @@ class PerTfL1Result:
 DEPRIORITIZED_FAMILY_PRIOR: dict[str, float] = {
     "carry_net_of_funding": -0.5,
     "taker_imbalance_momentum": -0.5,
-    "supertrend": -0.5,
     # "vol_term_structure_gate": -0.5,   # [REMOVED 2026-07-13] 실측 모순: 4h/12h gate_passed=True 확인
     # "trend_donchian": -0.5,            # [REMOVED 2026-07-13] 실측 모순: 4개 TF gate_passed=True 확인
-    "funding_flow_carry": -0.3,
 }
 
 
@@ -1094,6 +1078,10 @@ DEPRIORITIZED_FAMILY_PRIOR: dict[str, float] = {
 
 _DEFAULT_PER_TF_FAMILIES: dict[str, tuple[str, ...]] = {
     "1h": (
+        # [ADR_20260713_L0_L1_ASSET_GROWTH_RESTRUCTURE] "1h"은 DEFAULT_L1_TFS에서
+        # 제외돼 L1 배포 경로에는 도달하지 않지만, LTF 백필/widened-pool 서브시스템
+        # (_WIDENED_PER_TF_FAMILIES, resolve_tf_signal_pool narrow-pool fallback)이
+        # 여전히 이 키를 신호풀 정의로 참조하므로 유지한다.
         "residual_reversion",
         "trend_ma",
         "funding_flow_carry",
@@ -1112,11 +1100,7 @@ _DEFAULT_PER_TF_FAMILIES: dict[str, tuple[str, ...]] = {
         "dual_momentum",
         "btc_regime_pullback",
         "residual_reversion",
-        "xs_momentum",
-        "xs_flow",
-        "xs_oi_skew",
         "taker_imbalance_momentum",
-        "funding_flow_carry",
         "macd_4h",
         "mtf_fusion",
     ),
@@ -1126,14 +1110,9 @@ _DEFAULT_PER_TF_FAMILIES: dict[str, tuple[str, ...]] = {
         "trend_pullback_continuation",
         "dual_momentum",
         "btc_regime_pullback",
-        "xs_momentum",
-        "xs_flow",
-        "xs_oi_skew",
         "mtf_breakout_retest",
-        "lsr_oi_regime_filter",
-        "supertrend",
         "mtf_fusion",
-        "vol_breakout",  # [ADDED 2026-07-13] 제로코스트 재검증
+        "vol_breakout",
     ),
     "8h": (
         "trend_ma",
@@ -1141,14 +1120,9 @@ _DEFAULT_PER_TF_FAMILIES: dict[str, tuple[str, ...]] = {
         "trend_pullback_continuation",
         "dual_momentum",
         "btc_regime_pullback",
-        "xs_momentum",
-        "xs_flow",
-        "xs_oi_skew",
         "mtf_breakout_retest",
-        "lsr_oi_regime_filter",
-        "supertrend",
         "mtf_fusion",
-        "vol_breakout",  # [ADDED 2026-07-13]
+        "vol_breakout",
     ),
     "12h": (
         "trend_ma",
@@ -1156,14 +1130,18 @@ _DEFAULT_PER_TF_FAMILIES: dict[str, tuple[str, ...]] = {
         "trend_pullback_continuation",
         "dual_momentum",
         "btc_regime_pullback",
-        "xs_momentum",
-        "xs_oi_skew",
         "mtf_breakout_retest",
         "vol_term_structure_gate",
-        "ichimoku_trend",
-        "supertrend",
         "mtf_fusion",
-        "vol_breakout",  # [ADDED 2026-07-13]
+        "vol_breakout",
+    ),
+    "1d": (
+        "trend_ma",
+        "trend_donchian",
+        "trend_pullback_continuation",
+        "dual_momentum",
+        "btc_regime_pullback",
+        "vol_breakout",
     ),
 }
 

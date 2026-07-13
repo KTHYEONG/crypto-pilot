@@ -978,7 +978,7 @@ def run_candidate_strategy_for_universe(
     from src.domain.futures.strategy.common.alignment import align_data_maps
     from src.domain.futures.strategy.config import resolve_purge_and_embargo_bars, with_max_holding_bars
     from src.domain.futures.strategy.execution_cost import ExecutionCostModel
-    from src.domain.futures.strategy.family_lifecycle import resolve_retired_families_for_tf
+    from src.domain.futures.strategy.family_lifecycle import RETIRED_FAMILIES, resolve_retired_families_for_tf
     from src.domain.futures.strategy.rule_diagnostics import compute_rule_diagnostics
     from src.domain.futures.strategy.rule_signals import (
         build_rule_signal_panels,
@@ -1112,7 +1112,7 @@ def run_candidate_strategy_for_universe(
             timeframe=tf,
             include_families=alpha_foundry_config.include_families,
             exclude_families=tuple(
-                set(alpha_foundry_config.exclude_families) | set(resolve_retired_families_for_tf(tf))
+                set(alpha_foundry_config.exclude_families) | set(resolve_retired_families_for_tf(tf)) | RETIRED_FAMILIES
             ),
             max_recipes_per_family=alpha_foundry_config.max_recipes_per_family,
         )
@@ -1124,7 +1124,7 @@ def run_candidate_strategy_for_universe(
             max_recipes_per_family=alpha_foundry_config.max_recipes_per_family,
             include_families=alpha_foundry_config.include_families,
             exclude_families=tuple(
-                set(alpha_foundry_config.exclude_families) | set(resolve_retired_families_for_tf(tf))
+                set(alpha_foundry_config.exclude_families) | set(resolve_retired_families_for_tf(tf)) | RETIRED_FAMILIES
             ),
             enable_synthetic_recipes=alpha_foundry_config.enable_synthetic_recipes,
         )
@@ -1180,7 +1180,9 @@ def run_candidate_strategy_for_universe(
                     timeframe=htf,
                     include_families=alpha_foundry_config.include_families,
                     exclude_families=tuple(
-                        set(alpha_foundry_config.exclude_families) | set(resolve_retired_families_for_tf(htf))
+                        set(alpha_foundry_config.exclude_families)
+                        | set(resolve_retired_families_for_tf(htf))
+                        | RETIRED_FAMILIES
                     ),
                     max_recipes_per_family=alpha_foundry_config.max_recipes_per_family,
                 )
@@ -1192,7 +1194,9 @@ def run_candidate_strategy_for_universe(
                     max_recipes_per_family=alpha_foundry_config.max_recipes_per_family,
                     include_families=alpha_foundry_config.include_families,
                     exclude_families=tuple(
-                        set(alpha_foundry_config.exclude_families) | set(resolve_retired_families_for_tf(htf))
+                        set(alpha_foundry_config.exclude_families)
+                        | set(resolve_retired_families_for_tf(htf))
+                        | RETIRED_FAMILIES
                     ),
                     enable_synthetic_recipes=alpha_foundry_config.enable_synthetic_recipes,
                 )
