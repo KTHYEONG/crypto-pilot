@@ -4,6 +4,7 @@ activation floor boundary checks in signal selection.
 
 from __future__ import annotations
 
+import logging
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import MagicMock
@@ -21,6 +22,7 @@ from src.domain.futures.strategy.candidate_contracts import (
 )
 from src.domain.futures.strategy.tiered_workflow.signal_selection import (
     _candidate_output_to_signal_batch,
+    _log_family_admission_diag,
     build_qualified_signal_registry,
     compute_symbol_strategy_evidence,
 )
@@ -370,3 +372,68 @@ def test_adaptive_gate_disabled_always_strict() -> None:
         snapshot_index=1,
     )
     assert not evidence_late[0].hard_eligible
+
+
+def _make_evidence(
+    family: str,
+    n_obs: int,
+    effective_n: float,
+    structural_reasons: tuple[str, ...],
+    variant: str = "v1",
+    symbol: str = "BTCUSDT",
+) -> SymbolStrategyEvidence:
+    return SymbolStrategyEvidence(
+        key=SignalSourceKey(symbol=symbol, strategy_id=f"{family}:{variant}", activation_context="all"),
+        mean_gross_bps=10.0,
+        mean_incremental_bps=5.0,
+        block_tstat_incremental=2.0,
+        probability_positive=0.6,
+        p_value=0.03,
+        q_value=0.05,
+        positive_fold_ratio=0.8,
+        n_obs=n_obs,
+        effective_n=effective_n,
+        n_folds=3,
+        quality_weight=0.5,
+        hard_eligible=not structural_reasons,
+        structural_reasons=structural_reasons,
+    )
+
+
+# ─── Family Admission Diagnostic Logging ─────────────────────────────
+
+
+def test_family_admission_diag_groups_by_family(caplog: pytest.LogCaptureFixture) -> None:
+    """Scenario 1 (Happy Path) & Scenario 2 (Edge Cases): families aggregate correctly."""
+    caplog.set_level(logging.DEBUG)
+    evidence = (
+        _make_evidence(
+            family="dual_momentum", n_obs=8000, effective_n=2.1,
+            structural_reasons=("insufficient_effective_obs",),
+        ),
+        _make_evidence(
+            family="dual_momentum", n_obs=6000, effective_n=1.8,
+            structural_reasons=("insufficient_effective_obs",),
+        ),
+        _make_evidence(
+            family="trend_ma", n_obs=500, effective_n=6.2,
+            structural_reasons=(),
+        ),
+    )
+
+    _log_family_admission_diag(evidence)
+
+    assert "family=dual_momentum" in caplog.text
+    assert "n_pairs=2" in caplog.text
+    assert "top_reasons=insufficient_effective_obs=2" in caplog.text
+    assert "family=trend_ma" in caplog.text
+    assert "none(all_hard_eligible)" in caplog.text
+
+
+def test_family_admission_diag_empty_evidence_skips_logging(caplog: pytest.LogCaptureFixture) -> None:
+    """Scenario 3 (Error Handling): empty evidence → no exception, no log output."""
+    caplog.set_level(logging.DEBUG)
+
+    _log_family_admission_diag(())
+
+    assert caplog.text == ""
