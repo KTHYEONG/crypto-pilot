@@ -36,8 +36,10 @@ priority: 10
   - Pandas DataFrame의 로우 단위 순회(loop)는 절대 금지합니다.
   - 모든 수치 계산은 NumPy vectorized operation 또는 Polars expression을 통해 C-level 벡터 연산으로 수행합니다.
 - **Numba JIT 및 Array Contiguity 확보**
-  - Numba JIT 함수(`@njit`)로 넘기는 모든 NumPy 배열은 메모리 연속성(`C_CONTIGUOUS`)을 확보해야 합니다.
-  - 슬라이싱이나 Resample 등으로 쪼개진 배열은 반드시 **`np.ascontiguousarray(arr)`**를 거쳐 Numba에 전달하여, 메모리 복사 오버헤드와 캐시 미스(Cache Miss)를 예방합니다.
+  - DataFrame 또는 복잡한 파이썬 객체는 Numba 함수에 전달하기 전 원시 NumPy 배열(`ndarray`)로 완전히 언패킹하여 전달해야 합니다.
+  - Numba JIT 함수(`@njit`)로 넘기는 모든 NumPy 배열은 메모리 연속성(`C_CONTIGUOUS`)을 확보해야 합니다. 슬라이싱이나 Resample 등으로 쪼개진 배열은 반드시 **`np.ascontiguousarray(arr)`**를 거쳐 Numba에 전달하여, 메모리 복사 오버헤드와 캐시 미스(Cache Miss)를 예방합니다.
+- **병렬화 의사결정 수칙 (Optimized Parallelism)**
+  - 대용량 Grid Search 등 연산량이 매우 크고 상호 독립적인 무거운 루프에만 `ProcessPoolExecutor`나 `parallel=True`를 사용합니다. 프로세스 생성 및 데이터 직렬화/역직렬화(IPC) 오버헤드가 연산 속도보다 큰 경량 연산에는 멀티프로세싱을 금지합니다. (WSL 코어 가드 준수)
 - **조기 탈락 (Early-Exit) 아키텍처**
   - L0 Cheap Gate 등 저비용 필터링 단계에서 탈락한 가설은 무거운 후속 연산(Bootstrap, Triple-barrier 등)에 집입하기 전 즉시 제외(`early-exit`)시킵니다.
 
