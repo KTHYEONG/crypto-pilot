@@ -1508,27 +1508,10 @@ class TestMtfFusionFactory:
 
         assert _tf_hours("1w") == hours_per_bar("1w")
 
-    def test_htf_ichimoku_cloud_filter_ndarray_return_is_handled(self) -> None:
-        # [LIMIT] covers the isinstance(_result, pd.DataFrame) else-branch in build_rule_signal_panels'
-        # mtf_fusion dispatch: a filter_fn returning a raw ndarray (not pd.DataFrame) must still work.
+    def test_htf_ichimoku_cloud_filter_multi_column_dispatch(self) -> None:
         aligned = _make_aligned(t=300, n=2)
         cfg = CandidateStrategyConfig()
-
-        def _ndarray_returning_filter(df: object, **_: object) -> np.ndarray:
-            import pandas as pd
-
-            assert isinstance(df, pd.DataFrame)
-            return np.ones(len(df), dtype=np.float64)
-
-        import src.domain.futures.strategy.rule_signals as rs
-
-        original = rs._htf_ichimoku_cloud_filter
-        rs._htf_ichimoku_cloud_filter = _ndarray_returning_filter  # type: ignore[assignment]
-        try:
-            panels = build_rule_signal_panels(aligned=aligned, cfg=cfg, family_filter=("mtf_fusion",))
-        finally:
-            rs._htf_ichimoku_cloud_filter = original  # type: ignore[assignment]
-
+        panels = build_rule_signal_panels(aligned=aligned, cfg=cfg, family_filter=("mtf_fusion",))
         assert any("ichimoku_cloud" in p.variant for p in panels)
 
     def test_build_rule_signal_panels_mtf_fusion_generates_60_variants_at_4h(self) -> None:
@@ -1666,3 +1649,170 @@ class TestMtfFusionFactory:
                         f"{p.variant}: pre-warmup region must be NaN, had finite values at "
                         f"{np.flatnonzero(np.isfinite(score[:first_finite]))}"
                     )
+
+
+class TestMtfFusionPerfOptimization:
+
+    def test_htf_hma_slope_filter_matches_apply_along_axis_reference(self) -> None:
+        from src.domain.futures.strategy.rule_signals import _weighted_moving_average_2d
+
+        rng = np.random.default_rng(42)
+        t, n = 500, 10
+        df_htf = pd.DataFrame(100.0 + np.cumsum(rng.normal(0, 0.5, size=(t, n)), axis=0))
+        window = 20
+
+        def _reference_htf_hma_slope_filter(df_htf: pd.DataFrame, window: int) -> pd.DataFrame:
+            half = max(1, window // 2)
+            root = max(1, round(np.sqrt(window)))
+            values = df_htf.to_numpy(dtype=np.float64)
+            wma_half = np.apply_along_axis(_weighted_moving_average_2d, 0, values, half)
+            wma_full = np.apply_along_axis(_weighted_moving_average_2d, 0, values, window)
+            raw_hma = 2.0 * wma_half - wma_full
+            hma = np.apply_along_axis(_weighted_moving_average_2d, 0, raw_hma, root)
+            slope = np.diff(hma, axis=0, prepend=hma[:1])
+            return pd.DataFrame(np.sign(np.nan_to_num(slope, nan=0.0)), index=df_htf.index)
+
+        from src.domain.futures.strategy.rule_signals import _htf_hma_slope_filter
+        result = _htf_hma_slope_filter(df_htf, window=window)
+        expected = _reference_htf_hma_slope_filter(df_htf, window=window)
+
+        assert np.array_equal(result.to_numpy(), expected.to_numpy())
+
+    def test_htf_adx_dmi_filter_multicolumn_matches_per_symbol_loop_reference(self) -> None:
+        rng = np.random.default_rng(42)
+        t, n = 300, 5
+        close = pd.DataFrame(100.0 + np.cumsum(rng.normal(0, 0.5, size=(t, n)), axis=0))
+        high, low = close * 1.01, close * 0.99
+
+        def _reference_per_symbol(
+            high_df: pd.DataFrame, low_df: pd.DataFrame, close_df: pd.DataFrame,
+            period: int, threshold: float,
+        ) -> np.ndarray:
+            out = np.zeros_like(close_df.values)
+            for s in range(close_df.shape[1]):
+                df_sym = pd.DataFrame({
+                    "high": high_df.values[:, s], "low": low_df.values[:, s],
+                    "close": close_df.values[:, s],
+                })
+                prev_close = df_sym["close"].shift(1)
+                up_move, down_move = df_sym["high"].diff(), -df_sym["low"].diff()
+                plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
+                minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
+                tr = pd.concat(
+                    [df_sym["high"] - df_sym["low"], (df_sym["high"] - prev_close).abs(),
+                     (df_sym["low"] - prev_close).abs()], axis=1,
+                ).max(axis=1)
+                alpha = 1.0 / period
+                smoothed_tr = tr.ewm(alpha=alpha, adjust=False).mean()
+                smoothed_plus = pd.Series(plus_dm).ewm(alpha=alpha, adjust=False).mean()
+                smoothed_minus = pd.Series(minus_dm).ewm(alpha=alpha, adjust=False).mean()
+                plus_di = 100.0 * smoothed_plus / smoothed_tr.replace(0.0, np.nan)
+                minus_di = 100.0 * smoothed_minus / smoothed_tr.replace(0.0, np.nan)
+                dx = 100.0 * (plus_di - minus_di).abs() / (plus_di + minus_di).replace(0.0, np.nan)
+                adx = dx.ewm(alpha=alpha, adjust=False).mean().fillna(0.0)
+                raw = np.sign((plus_di - minus_di).fillna(0.0))
+                out[:, s] = np.where(adx >= threshold, raw, 0.0)
+            return out  # type: ignore[no-any-return]
+
+        from src.domain.futures.strategy.rule_signals import _htf_adx_dmi_filter
+        result = _htf_adx_dmi_filter(high, low, close, period=14, threshold=25.0)
+        expected = _reference_per_symbol(high, low, close, period=14, threshold=25.0)
+
+        assert np.allclose(result.to_numpy(), expected, atol=1e-6, equal_nan=True)
+
+    def test_mtf_fusion_panels_variant_count_preserved_after_refactor(self) -> None:
+        aligned = _make_aligned(t=300, n=2)
+        cfg = CandidateStrategyConfig()
+        panels = build_rule_signal_panels(
+            aligned=aligned, cfg=cfg, family_filter=("mtf_fusion",),
+        )
+        assert len(panels) == 60
+
+    def test_htf_hma_slope_filter_window_one_does_not_crash(self) -> None:
+        """[LIMIT-01] window=1 must not divide-by-zero or index out of bounds."""
+        from src.domain.futures.strategy.rule_signals import _htf_hma_slope_filter
+
+        rng = np.random.default_rng(42)
+        df_htf = pd.DataFrame(100.0 + np.cumsum(rng.normal(0, 0.5, size=(100, 5)), axis=0))
+        result = _htf_hma_slope_filter(df_htf, window=1)
+        assert result.shape == (100, 5)
+        assert result.isna().sum().sum() == 0
+
+    def test_htf_hma_slope_filter_shorter_than_window_returns_neutral(self) -> None:
+        """[LIMIT-01] A fixture shorter than window produces neutral (0.0) output after nan_to_num."""
+        from src.domain.futures.strategy.rule_signals import _htf_hma_slope_filter
+
+        rng = np.random.default_rng(42)
+        df_htf = pd.DataFrame(100.0 + rng.normal(0, 0.5, size=(5, 3)))
+        result = _htf_hma_slope_filter(df_htf, window=20)
+        assert np.all(result.to_numpy() == 0.0)
+
+    def test_htf_adx_dmi_filter_short_history_does_not_crash(self) -> None:
+        rng = np.random.default_rng(42)
+        t, n = 5, 3
+        close = pd.DataFrame(100.0 + rng.normal(0, 0.5, size=(t, n)))
+        high, low = close * 1.01, close * 0.99
+
+        from src.domain.futures.strategy.rule_signals import _htf_adx_dmi_filter
+        result = _htf_adx_dmi_filter(high, low, close, period=14, threshold=25.0)
+        assert result.shape == (5, 3)
+        assert not np.any(np.isnan(result.to_numpy()))
+
+    def test_htf_ichimoku_cloud_filter_multicolumn_matches_per_symbol_reference(self) -> None:
+        # Reference reproduces the PRE-vectorization per-symbol implementation exactly, including
+        # pandas .max(axis=1)/.min(axis=1)'s skipna=True semantics (NOT np.maximum/np.minimum,
+        # which propagate NaN instead of skipping it -- see the fmax/fmin regression test below
+        # for why that distinction matters).
+        rng = np.random.default_rng(42)
+        t, n = 300, 5
+        close = pd.DataFrame(100.0 + np.cumsum(rng.normal(0, 0.5, size=(t, n)), axis=0))
+        high, low = close * 1.01, close * 0.99
+
+        def _reference_per_symbol(
+            high_df: pd.DataFrame, low_df: pd.DataFrame, close_df: pd.DataFrame,
+            tenkan: int, kijun: int, senkou_b: int,
+        ) -> np.ndarray:
+            out = np.zeros_like(close_df.values)
+            for s in range(close_df.shape[1]):
+                h, l, c = high_df.values[:, s], low_df.values[:, s], close_df.values[:, s]
+                hl_max = pd.Series(h).rolling(tenkan).max()
+                ll_min = pd.Series(l).rolling(tenkan).min()
+                tenkan_line = (hl_max + ll_min) / 2.0
+                hl_max_k = pd.Series(h).rolling(kijun).max()
+                ll_min_k = pd.Series(l).rolling(kijun).min()
+                kijun_line = (hl_max_k + ll_min_k) / 2.0
+                senkou_a = (tenkan_line + kijun_line) / 2.0
+                hl_max_sb = pd.Series(h).rolling(senkou_b).max()
+                ll_min_sb = pd.Series(l).rolling(senkou_b).min()
+                senkou_b_line = (hl_max_sb + ll_min_sb) / 2.0
+                cloud_top = pd.concat([senkou_a, senkou_b_line], axis=1).max(axis=1)
+                cloud_bottom = pd.concat([senkou_a, senkou_b_line], axis=1).min(axis=1)
+                direction = np.where(c > cloud_top, 1.0, np.where(c < cloud_bottom, -1.0, 0.0))
+                out[:, s] = direction
+            return out
+
+        from src.domain.futures.strategy.rule_signals import _htf_ichimoku_cloud_filter
+        result = _htf_ichimoku_cloud_filter(high, low, close, tenkan=9, kijun=26, senkou_b=52)
+        expected = _reference_per_symbol(high, low, close, tenkan=9, kijun=26, senkou_b=52)
+        assert np.array_equal(result.to_numpy(), expected)
+
+    def test_htf_ichimoku_cloud_filter_partial_warmup_falls_back_to_senkou_a_not_nan(self) -> None:
+        # [ADR_TBD_L0_MTF_FUSION_PERF] Regression guard: during the window where senkou_b_line
+        # (needs `senkou_b` bars) is still NaN but senkou_a (needs only max(tenkan, kijun) bars)
+        # is already valid, the cloud boundary must equal senkou_a (skipna fallback), not NaN.
+        # np.maximum/np.minimum would propagate NaN here instead of skipping it -- this is exactly
+        # the bug found via real-pipeline verification (net_lcb_bps diffs up to 5.8bps).
+        tenkan, kijun, senkou_b = 2, 4, 8
+        t, n = 20, 1
+        # Monotonic uptrend so tenkan/kijun/senkou lines are well-defined and close is always
+        # above the cloud once valid (direction == 1.0 unambiguously).
+        close = pd.DataFrame(np.arange(100.0, 100.0 + t).reshape(t, n))
+        high, low = close + 1.0, close - 1.0
+
+        from src.domain.futures.strategy.rule_signals import _htf_ichimoku_cloud_filter
+        result = _htf_ichimoku_cloud_filter(high, low, close, tenkan=tenkan, kijun=kijun, senkou_b=senkou_b)
+
+        # senkou_a valid from bar index kijun-1=3; senkou_b_line valid from bar index senkou_b-1=7.
+        # Bars 3..6 (partial-warmup window): direction must be a real signal (1.0, uptrend), not 0.0.
+        partial_warmup = result.to_numpy()[3:7, 0]
+        assert np.all(partial_warmup == 1.0), f"expected all 1.0 (senkou_a fallback), got {partial_warmup}"
