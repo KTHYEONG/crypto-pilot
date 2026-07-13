@@ -33,6 +33,7 @@ from src.domain.futures.strategy.candidate_contracts import (
     CandidateFoldOutput,
     Layer1EvidenceSnapshot,
     Layer1FoldReadiness,
+    Layer1GateReport,
     Layer1InferenceArtifact,
     QualifiedSignalRegistry,
     ValidatedSignalBatch,
@@ -1074,7 +1075,7 @@ def run_l1_nested_swf(
     tf: str = "4h",
     defer_artifact: bool = False,
 ) -> Layer1Result:
-    """Run nested Layer1 validation using inner selection and outer evaluation."""
+    """[ADR_20260713_L1_DEPLOYMENT_PASS_CONTRACT] Run nested Layer1 validation."""
     import dataclasses
     from copy import copy
 
@@ -1684,6 +1685,11 @@ def run_l1_nested_swf(
             logger.debug("[MEM] stage=inference_artifact rss=%.0fMB artifact_size=%s", _get_rss_mb(), _art_size)
         if verbose:
             logger.info(format_layer1_deployment_registry_table(deployment_registry, all_evidence=deployment_evidence))
+    deployment_passed = _resolve_layer1_deployment_passed(
+        gate_report=gate_report,
+        deployment_registry=deployment_registry,
+        structural_gate_only=l1_structural_gate_only,
+    )
     _l1_result = Layer1Result(
         signals_per_fold=tuple(signals_per_fold),
         oos_stacked=oos_stacked,
@@ -1692,7 +1698,7 @@ def run_l1_nested_swf(
         breadth=0.0,
         valid_coverage=0.0,
         fold_pass_ratio=0.0,
-        gate_passed=gate_report.passed,
+        gate_passed=deployment_passed,
         n_valid=len(deployment_registry.ready_symbols) if deployment_registry is not None else 0,
         n_total=len(aligned.symbols),
         n_trade_scope=len(aligned.symbols),
@@ -2921,27 +2927,84 @@ def _tf_hours(tf: str) -> float:
     return val * 24.0  # "d"
 
 
+def _resolve_layer1_deployment_passed(
+    *,
+    gate_report: Layer1GateReport,
+    deployment_registry: QualifiedSignalRegistry | None,
+    structural_gate_only: bool,
+) -> bool:
+    """[ADR_20260713_L1_DEPLOYMENT_PASS_CONTRACT] Return L1 handoff eligibility."""
+    selected_gate = (
+        gate_report.structural_passed
+        if structural_gate_only
+        else gate_report.passed
+    )
+    return bool(
+        selected_gate
+        and deployment_registry is not None
+        and deployment_registry.ready_symbols
+    )
+
+
+def _is_deployable_per_tf_result(result: PerTfL1Result) -> bool:
+    """[ADR_20260713_L1_DEPLOYMENT_PASS_CONTRACT] Check per-TF handoff eligibility."""
+    registry = result.l1_result.deployment_registry
+    return bool(
+        result.l1_result.gate_passed
+        and registry is not None
+        and registry.ready_symbols
+    )
+
+
+def _resolve_selected_l1_tf(
+    per_tf_l1: dict[str, PerTfL1Result],
+    preferred_tf: str | None,
+) -> str | None:
+    """[ADR_20260713_L1_DEPLOYMENT_PASS_CONTRACT] Resolve one TF for gate and registry."""
+    if preferred_tf is not None:
+        return preferred_tf if preferred_tf in per_tf_l1 else None
+    eligible_tfs = tuple(
+        tf
+        for tf, result in per_tf_l1.items()
+        if _is_deployable_per_tf_result(result)
+    )
+    return min(eligible_tfs, key=_tf_hours) if eligible_tfs else None
+
+
 def _log_pertf_registry_diag(
     per_tf_l1: dict[str, PerTfL1Result],
     l2_tf_resolved: str,
 ) -> None:
-    """Emit [L1-PERTF-REGISTRY-DIAG] log with blockers for each TF.
+    """[ADR_20260713_L1_DEPLOYMENT_PASS_CONTRACT] Emit per-TF gate diagnostics.
 
     Extracted for testability. Called only when logger.isEnabledFor(logging.DEBUG).
     """
     for _tf, _r in per_tf_l1.items():
         _reg = _r.l1_result.deployment_registry
-        _blockers = _r.l1_result.gate_report.blockers if _r.l1_result.gate_report is not None else ()
+        _gr = _r.l1_result.gate_report
+        _blockers = _gr.blockers if _gr is not None else ()
+        _advisory_failures = (
+            ",".join(c.key for c in _gr.advisory_checks if not c.passed) or "none"
+            if _gr is not None
+            else "none"
+        )
+        _strict_gate = _gr.passed if _gr is not None else False
+        _structural = _gr.structural_passed if _gr is not None else False
         logger.debug(
-            "[L1-PERTF-REGISTRY-DIAG] tf=%s gate_passed=%s registry_present=%s "
-            "n_ready=%d edge_quality=%.2f would_resolve_master_tf=%s blockers=%s",
+            "[L1-PERTF-REGISTRY-DIAG] tf=%s gate_passed=%s strict_gate_passed=%s "
+            "structural_passed=%s registry_present=%s "
+            "n_ready=%d edge_quality=%.2f would_resolve_master_tf=%s "
+            "blockers=%s advisory_failures=%s",
             _tf,
             _r.l1_result.gate_passed,
+            _strict_gate,
+            _structural,
             _reg is not None,
             len(_reg.ready_symbols) if _reg is not None else 0,
             _tf_edge_quality(_r),
             l2_tf_resolved,
             ",".join(_blockers) if _blockers else "none",
+            _advisory_failures,
         )
 
 
@@ -2972,7 +3035,7 @@ def _resolve_l2_master_tf(
     per_tf_l1: dict[str, PerTfL1Result],
     probe_manifest: list[dict[str, Any]] | None = None,
 ) -> str:
-    """Resolve the master timeframe for Layer 2 execution.
+    """[ADR_20260713_L1_DEPLOYMENT_PASS_CONTRACT] Resolve the L2 master timeframe.
 
     Selection criterion: Σ oos_edge_bps (valid strategies) — edge quality, not signal count.
     This prevents 4h-balanced TF from winning on count while carrying weak edge.
@@ -2988,9 +3051,14 @@ def _resolve_l2_master_tf(
     if cfg.l2_master_tf:
         return cfg.l2_master_tf
 
-    if per_tf_l1:
-        best_tf = max(per_tf_l1, key=lambda t: _tf_edge_quality(per_tf_l1[t]))
-        if _tf_edge_quality(per_tf_l1[best_tf]) > 0.0:
+    eligible = {
+        tf: result
+        for tf, result in per_tf_l1.items()
+        if _is_deployable_per_tf_result(result)
+    }
+    if eligible:
+        best_tf = max(eligible, key=lambda t: _tf_edge_quality(eligible[t]))
+        if _tf_edge_quality(eligible[best_tf]) > 0.0:
             return best_tf
 
     if probe_manifest:
@@ -3011,7 +3079,7 @@ def _select_representative_l1_registry(
     per_tf_l1: dict[str, PerTfL1Result],
     preferred_tf: str | None = None,
 ) -> QualifiedSignalRegistry | None:
-    """[ADR_20260705_MAJOR_SYMBOL_REGISTRY_REPLAY_SYNC]
+    """[ADR_20260713_L1_DEPLOYMENT_PASS_CONTRACT][ADR_20260705_MAJOR_SYMBOL_REGISTRY_REPLAY_SYNC]
     Select a single representative L1 deployment registry from per-TF results.
 
     Args:
@@ -3021,27 +3089,11 @@ def _select_representative_l1_registry(
     Returns:
         A single QualifiedSignalRegistry or None.
     """
-    if not per_tf_l1:
+    selected_tf = _resolve_selected_l1_tf(per_tf_l1, preferred_tf)
+    selected = per_tf_l1.get(selected_tf) if selected_tf is not None else None
+    if selected is None or not _is_deployable_per_tf_result(selected):
         return None
-
-    if preferred_tf is not None and preferred_tf in per_tf_l1:
-        chosen = preferred_tf
-    else:
-        chosen = min(per_tf_l1.keys(), key=_tf_hours)
-
-    # Priority 1: top-level deployment_registry
-    reg = per_tf_l1[chosen].l1_result.deployment_registry
-    if reg is not None:
-        return reg
-
-    # Priority 2: inference_artifact.deployment_registry
-    artifact = per_tf_l1[chosen].l1_result.inference_artifact
-    if artifact is not None:
-        artifact_reg: QualifiedSignalRegistry | None = getattr(artifact, "deployment_registry", None)
-        if artifact_reg is not None:
-            return artifact_reg
-
-    return None
+    return selected.l1_result.deployment_registry
 
 
 def _aggregate_per_tf_l1(
@@ -3049,7 +3101,7 @@ def _aggregate_per_tf_l1(
     *,
     preferred_tf: str | None = None,
 ) -> Layer1Result:
-    """[ADR_20260705_MAJOR_SYMBOL_REGISTRY_REPLAY_SYNC] Merge per-TF L1 results into a unified Layer1Result.
+    """[ADR_20260713_L1_DEPLOYMENT_PASS_CONTRACT][ADR_20260705_MAJOR_SYMBOL_REGISTRY_REPLAY_SYNC] Merge per-TF L1 results.
 
     Args:
         per_tf_l1: Per-TF L1 results.
@@ -3078,7 +3130,17 @@ def _aggregate_per_tf_l1(
             new_key = f"{tf}::{k}"
             oos_stacked[new_key] = v
 
-    gate_passed = any(r.l1_result.gate_passed for r in per_tf_l1.values())
+    selected_tf = _resolve_selected_l1_tf(per_tf_l1, preferred_tf)
+    selected = per_tf_l1.get(selected_tf) if selected_tf is not None else None
+    deployment_registry = _select_representative_l1_registry(
+        per_tf_l1=per_tf_l1,
+        preferred_tf=preferred_tf,
+    )
+    gate_passed = bool(
+        selected is not None
+        and _is_deployable_per_tf_result(selected)
+        and deployment_registry is not None
+    )
 
     # artifacts_by_tf: 모든 TF artifact 보존 (multi-TF signal 예측 핵심).
     # inference_artifact: 가장 fine TF(정렬 기준 첫번째) → annualization 기준 유지.
@@ -3090,11 +3152,6 @@ def _aggregate_per_tf_l1(
 
     lifecycles = [r.l1_result.symbol_lifecycle for r in per_tf_l1.values() if r.l1_result.symbol_lifecycle]
     merged_lifecycle = lifecycles[0] if lifecycles else ()
-
-    deployment_registry = _select_representative_l1_registry(
-        per_tf_l1=per_tf_l1,
-        preferred_tf=preferred_tf,
-    )
 
     first = next(iter(per_tf_l1.values())).l1_result
     return Layer1Result(
