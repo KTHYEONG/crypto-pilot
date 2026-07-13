@@ -167,6 +167,15 @@ def _get_rss_mb() -> float:
     return -1.0
 
 
+def _compute_advisory_penalty(advisory_checks: tuple[Any, ...]) -> float:
+    if not advisory_checks:
+        return 1.0
+    failed = sum(1 for c in advisory_checks if not c.passed)
+    if failed == 0:
+        return 1.0
+    return max(0.5, 1.0 - failed * 0.25)
+
+
 logger = logging.getLogger("opt_main_futures")
 if os.environ.get("LOG_LEVEL") == "PERF":
     logger.setLevel(15)
@@ -1623,7 +1632,10 @@ def run_l1_nested_swf(
     deployment_registry: QualifiedSignalRegistry | None = None
     inference_artifact: Layer1InferenceArtifact | None = None
     oos_stacked: dict[str, SymbolSignal] = {}
-    if gate_report.passed:
+    l1_structural_gate_only = bool(getattr(cfg, "l1_structural_gate_only", False))
+    gate_ok = gate_report.structural_passed if l1_structural_gate_only else gate_report.passed
+    if gate_ok:
+        advisory_penalty = _compute_advisory_penalty(gate_report.advisory_checks)
         deployment_registry = build_qualified_signal_registry(
             evidence=deployment_evidence,
             symbols=aligned.symbols,
@@ -1631,6 +1643,7 @@ def run_l1_nested_swf(
             registry_version="deployment",
             cfg=_cfg_effective,
             probe_prior_map=probe_prior_map,
+            advisory_penalty=advisory_penalty,
         )
         _n_ready = len(deployment_registry.ready_symbols) if deployment_registry else 0
         logger.debug("[MEM] stage=deployment_registry rss=%.0fMB n_ready=%d", _get_rss_mb(), _n_ready)

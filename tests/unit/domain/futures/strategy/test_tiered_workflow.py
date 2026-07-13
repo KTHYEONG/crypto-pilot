@@ -3136,7 +3136,13 @@ def test_evaluate_layer1_readiness_uses_stable_symbol_counts_and_outer_series() 
         cfg=cfg,
     )
 
-    assert report.passed is True
+    # [ADR_20260713_L1_READINESS_GATE_REDESIGN] structural_passed (fold_cov/sym_count/
+    # probe_lcb_bps) is what this test's fixture actually exercises. match_ratio is now
+    # advisory and pooled via a Wilson LCB — with only 6 pooled legacy-compat events the
+    # LCB is legitimately < 0.90 even at a perfect 6/6 point estimate (small-sample
+    # conservatism), so `report.passed` (which still ANDs in advisory checks) is not
+    # the right assertion here.
+    assert report.structural_passed is True
     ready_symbol_check = next(check for check in report.checks if check.key == "sym_count")
     assert ready_symbol_check.value == pytest.approx(2.0)
 
