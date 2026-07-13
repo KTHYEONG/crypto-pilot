@@ -4,8 +4,19 @@ import subprocess
 import sys
 
 
-def run_cmd(cmd: list[str]) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(cmd, capture_output=True, text=True, shell=False)  # noqa: S603
+def run_cmd(cmd: list[str], timeout: int = 60) -> subprocess.CompletedProcess[str]:
+    try:
+        return subprocess.run(  # noqa: S603
+            cmd, capture_output=True, text=True, shell=False, timeout=timeout
+        )
+    except subprocess.TimeoutExpired:
+        return subprocess.CompletedProcess(
+            args=cmd,
+            returncode=124,
+            stdout="",
+            stderr=f"Error: Process timed out after {timeout} seconds.",
+        )
+
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Lean Check Helper to save tokens.")
@@ -56,33 +67,39 @@ def main() -> None:
             print("- 🛠️ Fix: Fix failing assertions or errors in tests.")
             sys.exit(1)
 
-        # Run coverage
-        cov_module = "src"
+        # Run coverage with multi-module target mapping
+        cov_args: list[str] = []
         if source_files:
-            cov_module = source_files[0].replace(".py", "").replace("/", ".")
-        
+            for sf in source_files:
+                cov_mod = sf.replace(".py", "").replace("/", ".")
+                cov_args.append(f"--cov={cov_mod}")
+        else:
+            cov_args.append("--cov=src")
+
         cov_res = run_cmd([
-            "uv", "run", "pytest", f"--cov={cov_module}",
+            "uv", "run", "pytest", *cov_args,
             *test_files, "--cov-report=term-missing"
         ])
         cov_val = "N/A"
-        missing_val = ""
-        module_path_key = cov_module.replace(".", "/")
+        missing_infos: list[str] = []
         for line in cov_res.stdout.splitlines():
             if "TOTAL" in line:
                 match = re.search(r"(\d+)%", line)
                 if match:
                     cov_val = match.group(1)
-            elif module_path_key in line:
-                parts = line.split()
-                # If there are missing lines, they appear as the last element after percentage
-                if len(parts) >= 5 and "%" in parts[-2]:
-                    missing_val = parts[-1]
-        
-        missing_suffix = f", Missing: {missing_val}" if missing_val else ""
+            else:
+                for sf in source_files:
+                    mod_path_key = sf.replace(".py", "")
+                    if mod_path_key in line or sf in line:
+                        parts = line.split()
+                        if len(parts) >= 5 and "%" in parts[-2]:
+                            missing_infos.append(f"{sf.split('/')[-1]}:{parts[-1]}")
+
+        missing_suffix = f", Missing: [{', '.join(missing_infos)}]" if missing_infos else ""
         print(f"🟢 PASS | All checks passed (Cov {cov_val}%{missing_suffix})")
     else:
         print("🟢 PASS | Lint & Type check passed. (No tests to run)")
+
 
 if __name__ == "__main__":
     main()
