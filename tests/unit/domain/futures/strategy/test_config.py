@@ -4,12 +4,21 @@ import pytest
 
 from src.domain.futures.strategy.config import (
     _DEFAULT_PER_TF_FAMILIES,
+    DEFAULT_L1_TFS,
     DEPRIORITIZED_FAMILY_PRIOR,
     BtcNeutralResidualReversalConfig,
     CandidateStrategyConfig,
     LiquidityParticipationBreakoutConfig,
     resolve_purge_and_embargo_bars,
     with_max_holding_bars,
+)
+
+_REMOVED_FAMILIES = (
+    "xs_momentum", "xs_flow", "xs_oi_skew", "funding_flow_carry",
+    "lsr_oi_regime_filter", "supertrend", "ichimoku_trend",
+    "carry_net_of_funding", "liquidity_participation_breakout",
+    "btc_neutral_residual_reversal", "price_band_reversion",
+    "funding_flow_exhaustion_sparse", "oi_lsr_unwind", "vol_contraction_breakout",
 )
 
 
@@ -99,8 +108,7 @@ def test_l1_pair_min_effective_obs_early_rejects_low() -> None:
 # ─── l0_signal_yield_improvement ─────────────────────────────────────────────
 
 
-def test_default_per_tf_families_1h_2h_includes_trend_pullback_continuation() -> None:
-    assert "trend_pullback_continuation" in _DEFAULT_PER_TF_FAMILIES["1h"]
+def test_default_per_tf_families_2h_includes_trend_pullback_continuation() -> None:
     assert "trend_pullback_continuation" in _DEFAULT_PER_TF_FAMILIES["2h"]
 
 
@@ -174,10 +182,10 @@ def test_bnrr_config_empty_lookback_bars() -> None:
 # ─── CandidateStrategyConfig new fields ────────────────────────────────
 
 
-def test_candidate_config_includes_new_families() -> None:
+def test_candidate_config_includes_core_families() -> None:
     cfg = CandidateStrategyConfig()
-    assert "liquidity_participation_breakout" in cfg.candidate_families
-    assert "btc_neutral_residual_reversal" in cfg.candidate_families
+    assert "trend_ma" in cfg.candidate_families
+    assert "mtf_fusion" in cfg.candidate_families
 
 
 def test_candidate_config_lpb_defaults_injected() -> None:
@@ -192,3 +200,44 @@ def test_candidate_config_bnrr_defaults_injected() -> None:
     bnrr = cfg.btc_neutral_residual_reversal
     assert bnrr.lookback_bars == (24, 48)
     assert bnrr.tail_fraction == 0.20
+
+
+# ─── Fix A: TF Portfolio Restructure ──────────────────────────────────
+
+
+def test_default_l1_tfs_excludes_1h_includes_1d() -> None:
+    assert "1h" not in DEFAULT_L1_TFS
+    assert "1d" in DEFAULT_L1_TFS
+    assert set(DEFAULT_L1_TFS) == {"2h", "4h", "6h", "8h", "12h", "1d"}
+
+
+def test_1d_family_pool_excludes_mtf_fusion() -> None:
+    assert "1d" in _DEFAULT_PER_TF_FAMILIES
+    assert "mtf_fusion" not in _DEFAULT_PER_TF_FAMILIES["1d"]
+    assert "trend_ma" in _DEFAULT_PER_TF_FAMILIES["1d"]
+
+
+# ─── Fix B: Durable-Zero Family Pruning ───────────────────────────────
+
+
+def test_durable_zero_families_removed_from_candidate_families() -> None:
+    cfg = CandidateStrategyConfig()
+    for fam in _REMOVED_FAMILIES:
+        assert fam not in cfg.candidate_families
+
+
+def test_residual_reversion_survives_pruning() -> None:
+    cfg = CandidateStrategyConfig()
+    assert "residual_reversion" in cfg.candidate_families
+
+
+@pytest.mark.parametrize("tf", ["2h", "4h", "6h", "8h", "12h", "1d"])
+def test_no_removed_family_in_any_tf_pool(tf: str) -> None:
+    pool = _DEFAULT_PER_TF_FAMILIES[tf]
+    for fam in _REMOVED_FAMILIES:
+        assert fam not in pool, f"{fam} still present in {tf}"
+
+
+def test_deprioritized_family_prior_no_longer_lists_removed_families() -> None:
+    assert "supertrend" not in DEPRIORITIZED_FAMILY_PRIOR
+    assert "funding_flow_carry" not in DEPRIORITIZED_FAMILY_PRIOR

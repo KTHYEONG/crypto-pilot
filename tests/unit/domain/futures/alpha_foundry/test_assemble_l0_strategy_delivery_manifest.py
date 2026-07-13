@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from typing import Any
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import numpy as np
 
@@ -43,9 +43,14 @@ def _real_aligned() -> Any:
 def _mock_panel(recipe_id: str) -> Any:
     class _Panel:
         metadata: dict[str, str]
+        signed_score_2d: np.ndarray
+        valid_mask_2d: np.ndarray
 
         def __init__(self) -> None:
             self.metadata = {"recipe_id": recipe_id}
+            self.datetimes = np.array(["2026-01-01T00:00:00", "2026-01-02T00:00:00"], dtype="datetime64[ns]")
+            self.signed_score_2d = np.zeros((2, 1), dtype=np.float64)
+            self.valid_mask_2d = np.ones((2, 1), dtype=bool)
     return _Panel()
 
 
@@ -114,8 +119,12 @@ class TestAssembleL0StrategyDeliveryManifest:
         multi_results = _base_multi_results()
         aligned_by_tf = _base_aligned()
 
-        with patch("src.domain.futures.alpha_foundry.diversity.audit_l0_selected_recipe_independence") as mock_audit:
+        with (
+            patch("src.domain.futures.alpha_foundry.diversity.audit_l0_selected_recipe_independence") as mock_audit,
+            patch("src.domain.futures.alpha_foundry.diversity.resolve_cross_tf_shared_context") as mock_ctx,
+        ):
             mock_audit.return_value = FIXED_AUDIT
+            mock_ctx.return_value = MagicMock()
 
             pruned, manifest = assemble_l0_strategy_delivery_manifest(
                 multi_results=multi_results,
@@ -127,6 +136,7 @@ class TestAssembleL0StrategyDeliveryManifest:
 
             assert manifest.independence_audit is FIXED_AUDIT
             mock_audit.assert_called_once()
+            mock_ctx.assert_called_once()
         assert dict(pruned) == multi_results
 
     def test_pruning_enabled_returns_pruned_results(self) -> None:
@@ -138,9 +148,11 @@ class TestAssembleL0StrategyDeliveryManifest:
         with (
             patch("src.domain.futures.alpha_foundry.diversity.audit_l0_selected_recipe_independence") as mock_audit,
             patch("src.domain.futures.alpha_foundry.diversity.compute_cross_tf_redundancy") as mock_compute,
+            patch("src.domain.futures.alpha_foundry.diversity.resolve_cross_tf_shared_context") as mock_ctx,
         ):
             mock_audit.return_value = FIXED_AUDIT
             mock_compute.return_value = FIXED_CROSS_RESULT
+            mock_ctx.return_value = MagicMock()
 
             pruned, manifest = assemble_l0_strategy_delivery_manifest(
                 multi_results=multi_results,
@@ -161,8 +173,12 @@ class TestAssembleL0StrategyDeliveryManifest:
         multi_results = _base_multi_results()
         aligned_by_tf = _base_aligned()
 
-        with patch("src.domain.futures.alpha_foundry.diversity.compute_cross_tf_redundancy") as mock_compute:
+        with (
+            patch("src.domain.futures.alpha_foundry.diversity.compute_cross_tf_redundancy") as mock_compute,
+            patch("src.domain.futures.alpha_foundry.diversity.resolve_cross_tf_shared_context") as mock_ctx,
+        ):
             mock_compute.return_value = FIXED_CROSS_RESULT
+            mock_ctx.return_value = MagicMock()
 
             _, manifest = assemble_l0_strategy_delivery_manifest(
                 multi_results=multi_results,
@@ -184,9 +200,11 @@ class TestAssembleL0StrategyDeliveryManifest:
         with (
             patch("src.domain.futures.alpha_foundry.diversity.audit_l0_selected_recipe_independence") as mock_audit,
             patch("src.domain.futures.alpha_foundry.diversity.compute_cross_tf_redundancy") as mock_compute,
+            patch("src.domain.futures.alpha_foundry.diversity.resolve_cross_tf_shared_context") as mock_ctx,
         ):
             mock_audit.return_value = FIXED_AUDIT
             mock_compute.side_effect = ValueError("simulated-calendar-mismatch")
+            mock_ctx.return_value = MagicMock()
 
             pruned, manifest = assemble_l0_strategy_delivery_manifest(
                 multi_results=multi_results,
@@ -223,8 +241,12 @@ class TestAssembleL0StrategyDeliveryManifest:
             n_common_active_bars=480,
         )
 
-        with patch("src.domain.futures.alpha_foundry.diversity.compute_cross_tf_redundancy") as mock_compute:
+        with (
+            patch("src.domain.futures.alpha_foundry.diversity.compute_cross_tf_redundancy") as mock_compute,
+            patch("src.domain.futures.alpha_foundry.diversity.resolve_cross_tf_shared_context") as mock_ctx,
+        ):
             mock_compute.return_value = no_demotion_result
+            mock_ctx.return_value = MagicMock()
 
             _, manifest = assemble_l0_strategy_delivery_manifest(
                 multi_results=multi_results,
@@ -235,3 +257,50 @@ class TestAssembleL0StrategyDeliveryManifest:
             )
 
         assert manifest.pruning_status == "audit_only"
+
+
+# ─── Fix C: Shared Context Gate Relaxation ────────────────────────────
+
+
+class TestSharedContextGateRelaxation:
+    """Verify that resolve_cross_tf_shared_context is called when
+    either audit or pruning is enabled (not only when both are enabled).
+
+    [ADR_20260713_L0_L1_ASSET_GROWTH_RESTRUCTURE] Fix C
+    """
+
+    def test_shared_context_built_when_only_pruning_enabled(self, mocker: Any) -> None:
+        spy = mocker.patch(
+            "src.domain.futures.alpha_foundry.diversity.resolve_cross_tf_shared_context",
+            return_value=mocker.MagicMock(),
+        )
+        assemble_l0_strategy_delivery_manifest(
+            multi_results=_base_multi_results(),
+            aligned_by_tf=_base_aligned(),
+            run_id_prefix="test",
+            enable_audit=False,
+            enable_pruning=True,
+            total_l1_verification_budget=30,
+            max_novelty_corr=0.70,
+            min_survivors_per_archetype=1,
+            min_survivors_per_tf=1,
+        )
+        spy.assert_called_once()
+
+    def test_shared_context_built_when_only_audit_enabled(self, mocker: Any) -> None:
+        spy = mocker.patch(
+            "src.domain.futures.alpha_foundry.diversity.resolve_cross_tf_shared_context",
+            return_value=mocker.MagicMock(),
+        )
+        assemble_l0_strategy_delivery_manifest(
+            multi_results=_base_multi_results(),
+            aligned_by_tf=_base_aligned(),
+            run_id_prefix="test",
+            enable_audit=True,
+            enable_pruning=False,
+            total_l1_verification_budget=30,
+            max_novelty_corr=0.70,
+            min_survivors_per_archetype=1,
+            min_survivors_per_tf=1,
+        )
+        spy.assert_called_once()

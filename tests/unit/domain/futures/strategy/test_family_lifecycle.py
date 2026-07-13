@@ -45,12 +45,16 @@ def test_all_signal_families_identical_across_dual_modules() -> None:
 
 def test_resolve_family_registration_gap_is_empty_after_config_update() -> None:
     from src.domain.futures.signals.rules import ALL_SIGNAL_FAMILIES
+    from src.domain.futures.strategy.family_lifecycle import RETIRED_FAMILIES
 
     cfg = CandidateStrategyConfig()
 
     gap = resolve_family_registration_gap(ALL_SIGNAL_FAMILIES, cfg.candidate_families)
 
-    assert gap == ()
+    # RETIRED_FAMILIES are intentionally absent from candidate_families
+    # ([ADR_20260713_L0_L1_ASSET_GROWTH_RESTRUCTURE], durable-zero gate pass rate)
+    # while their signal-generation code is kept for direct unit-test coverage.
+    assert set(gap) == set(RETIRED_FAMILIES)
 
 
 def test_resolve_tf_gate_overrides_1d_returns_nonempty_dict() -> None:
