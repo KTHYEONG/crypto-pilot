@@ -2441,7 +2441,10 @@ def candidate_panels_to_events(
         "entry_regime",
         "entry_regime_code",
     ]
-    _all_cols = _base_cols + _l0_cols
+    _identity_cols = [
+        "l0_recipe_id",
+    ]
+    _all_cols = _base_cols + _l0_cols + _identity_cols
     if not panels:
         return pd.DataFrame(columns=_all_cols)
 
@@ -2541,6 +2544,7 @@ def candidate_panels_to_events(
                     "entry_regime": r_entry_regime,
                     "entry_regime_code": r_entry_code,
                 }
+                df_dict["l0_recipe_id"] = str(panel.metadata.get("recipe_id", ""))
                 if l0_mask is not None:
                     df_dict["l0_discovery_unit_id"] = panel.metadata.get("l0_discovery_unit_id", "")
                     df_dict["l0_parent_recipe_id"] = panel.metadata.get("l0_parent_recipe_id", "")
