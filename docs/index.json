@@ -332,5 +332,12 @@
   },
   "src/domain/futures/alpha_foundry/memory.py": {
     "testing": "tests/unit/domain/futures/alpha_foundry/test_memory.py"
-  }
+  },
+  "src/domain/futures/backtest/data_loader.py": {
+    "testing": "tests/unit/domain/futures/backtest/test_data_loader.py"
+  },
+  "src/core/settings.py": {
+    "testing": "tests/unit/core/test_settings.py"
+  },
+  "src/domain/futures/universe/storage.py": {}
 }
