@@ -473,7 +473,11 @@ def _build_ltf_native_panels_for_l0(
     runtime_config: Any,
     family_filter: tuple[str, ...] | None = None,
 ) -> tuple[CandidateSignalPanel, ...]:
-    """Build bounded LTF panels without retaining universe-wide 1m frames."""
+    """Build bounded LTF panels without retaining universe-wide 1m frames.
+
+    [ADR_20260713_L1_1M_COVERAGE_WARMUP] Coverage is evaluated only for the
+    admitted symbol scope and the configured warmup-to-holdout interval.
+    """
     del data_maps, cfg
     from src.domain.futures.alpha_foundry.entry_timing import resolve_1m_coverage_tier
     from src.domain.futures.alpha_foundry.memory import (
@@ -933,6 +937,7 @@ class CandidatePipelineOutput:
     oos_end: int | None = None
     fold_oos_boundaries: tuple[tuple[int, int], ...] | None = None
     alpha_foundry_report: Any | None = None
+    l0_delivery_manifest: Any | None = None
 
 
 def run_candidate_strategy_for_universe(
@@ -944,6 +949,7 @@ def run_candidate_strategy_for_universe(
     alpha_foundry_config: Any | None = None,
     silent: bool = False,
     state_cube: Any | None = None,
+    l0_evidence_end: Any | None = None,
 ) -> CandidatePipelineOutput:
     """Run candidate strategy pipeline and return candidate output."""
     if strategy_cfg is None or preloaded_data_maps is None:
@@ -955,6 +961,7 @@ def run_candidate_strategy_for_universe(
     from src.domain.futures.alpha_foundry.bridge_helpers import (
         assemble_l0_strategy_delivery_manifest,
         bind_panels_to_alpha_recipes,
+        build_causal_l0_panel_views,
         run_alpha_foundry_l0_gate,
         run_alpha_foundry_l0_gate_multi_tf,
     )
@@ -988,6 +995,12 @@ def run_candidate_strategy_for_universe(
 
     bridge_t0 = time.perf_counter()
     alpha_foundry_report: Any | None = None
+    l0_delivery_manifest: Any | None = None
+    l0_evidence_end_ns: int | None = None
+    if l0_evidence_end is not None:
+        _cutoff = pd.Timestamp(l0_evidence_end)
+        _cutoff = _cutoff.tz_localize("UTC") if _cutoff.tzinfo is None else _cutoff.tz_convert("UTC")
+        l0_evidence_end_ns = int(_cutoff.value)
     bridge_prof: dict[str, float] = {
         "align": 0.0,
         "rules": 0.0,
@@ -1209,6 +1222,18 @@ def run_candidate_strategy_for_universe(
                 "[SYS] stage=panel_construction took=%.4fs rss=%.0fMB n_tfs=%d",
                 _time_panel.perf_counter() - _t_panel_construct, _get_rss_mb(), len(panels_by_tf),
             )
+            full_panels_by_tf = dict(panels_by_tf)
+            l0_panels_by_tf = (
+                {
+                    _tf: build_causal_l0_panel_views(
+                        panels=_tf_panels,
+                        evidence_end_ns=l0_evidence_end_ns,
+                    )
+                    for _tf, _tf_panels in panels_by_tf.items()
+                }
+                if l0_evidence_end_ns is not None
+                else panels_by_tf
+            )
             _af_run_id = f"{tf}_{int(_time_panel.time())}"
             _t_l0_gate = _time_panel.perf_counter()
             import os
@@ -1216,7 +1241,7 @@ def run_candidate_strategy_for_universe(
             if _workers is None:
                 _workers = max(1, min(4, (os.cpu_count() or 2) - 1))
             multi_results = run_alpha_foundry_l0_gate_multi_tf(
-                panels_by_tf=panels_by_tf,
+                panels_by_tf=l0_panels_by_tf,
                 bindings_by_tf=bindings_by_tf,
                 recipes_by_tf=recipes_by_tf,
                 aligned_by_tf=aligned_by_tf,
@@ -1240,6 +1265,7 @@ def run_candidate_strategy_for_universe(
                 run_id_prefix=_af_run_id,
                 enable_audit=getattr(alpha_foundry_config, "enable_cross_tf_diversity_audit", False),
                 enable_pruning=getattr(alpha_foundry_config, "enable_cross_tf_pruning", False),
+                evidence_end_ns=l0_evidence_end_ns or 0,
                 total_l1_verification_budget=getattr(alpha_foundry_config, "total_l1_verification_budget", 30),
                 min_survivors_per_archetype=getattr(
                     alpha_foundry_config, "cross_tf_pruning_min_survivors_per_archetype", 1
@@ -1253,6 +1279,31 @@ def run_candidate_strategy_for_universe(
                     alpha_foundry_config, "cross_tf_min_shared_directional_entries", 12
                 ),
             )
+            for _tf_k, _res in pruned_multi_results.items():
+                _full_by_recipe = {
+                    str(getattr(_binding, "recipe_id", "")): replace(
+                        full_panels_by_tf[_tf_k][_binding.panel_index],
+                        metadata={
+                            **dict(getattr(full_panels_by_tf[_tf_k][_binding.panel_index], "metadata", {}) or {}),
+                            "recipe_id": str(getattr(_binding, "recipe_id", "")),
+                        },
+                    )
+                    for _binding in bindings_by_tf.get(_tf_k, ())
+                    if 0 <= int(getattr(_binding, "panel_index", -1)) < len(full_panels_by_tf[_tf_k])
+                }
+                _selected_ids = tuple(
+                    str(getattr(_candidate, "recipe_id", ""))
+                    for _candidate in getattr(_res, "candidates_for_l1", ())
+                )
+                pruned_multi_results[_tf_k] = replace(
+                    _res,
+                    panels_for_l1=tuple(
+                        _full_by_recipe[_recipe_id]
+                        for _recipe_id in _selected_ids
+                        if _recipe_id in _full_by_recipe
+                    ),
+                )
+            l0_delivery_manifest = _l0_manifest
             if getattr(alpha_foundry_config, "enable_cross_tf_pruning", False):
                 multi_results = pruned_multi_results
             if _l0_manifest.independence_audit is not None:
@@ -1304,8 +1355,16 @@ def run_candidate_strategy_for_universe(
         else:
             # ── Single-TF L0 gate path (original) ────────────────────────────
             _af_run_id = f"{tf}_{int(time.time())}"
+            _single_l0_panels = (
+                build_causal_l0_panel_views(
+                    panels=panels,
+                    evidence_end_ns=l0_evidence_end_ns,
+                )
+                if l0_evidence_end_ns is not None
+                else panels
+            )
             af_result = run_alpha_foundry_l0_gate(
-                panels=panels,
+                panels=_single_l0_panels,
                 bindings=bindings,
                 recipes=recipes,
                 aligned=aligned,
@@ -1315,8 +1374,36 @@ def run_candidate_strategy_for_universe(
                 timeframe=tf,
             )
             panels_before_gate = panels
-            panels = af_result.panels_for_l1
+            _full_by_recipe = {
+                str(getattr(_binding, "recipe_id", "")): replace(
+                    panels[_binding.panel_index],
+                    metadata={
+                        **dict(getattr(panels[_binding.panel_index], "metadata", {}) or {}),
+                        "recipe_id": str(getattr(_binding, "recipe_id", "")),
+                    },
+                )
+                for _binding in bindings
+                if 0 <= int(getattr(_binding, "panel_index", -1)) < len(panels)
+            }
+            _selected_ids = tuple(
+                str(getattr(_candidate, "recipe_id", ""))
+                for _candidate in getattr(af_result, "candidates_for_l1", ())
+            )
+            panels = tuple(
+                _full_by_recipe[_recipe_id]
+                for _recipe_id in _selected_ids
+                if _recipe_id in _full_by_recipe
+            )
             alpha_foundry_report = af_result.report
+            _, l0_delivery_manifest = assemble_l0_strategy_delivery_manifest(
+                multi_results={tf: af_result},
+                aligned_by_tf={tf: aligned},
+                run_id_prefix=_af_run_id,
+                enable_audit=False,
+                enable_pruning=False,
+                evidence_end_ns=l0_evidence_end_ns or 0,
+                total_l1_verification_budget=getattr(alpha_foundry_config, "total_l1_verification_budget", 30),
+            )
 
             # [ADR_20260707_L0_ALPHA_EFFECTIVENESS_REDESIGN] opt-in pre-gate family correlation audit
             if getattr(alpha_foundry_config, "enable_correlation_audit", False):
@@ -1395,6 +1482,7 @@ def run_candidate_strategy_for_universe(
                 "recommended_flip_signal_cells": (),
             },
             alpha_foundry_report=alpha_foundry_report,
+            l0_delivery_manifest=l0_delivery_manifest,
         )
 
     atr_2d_cache = _compute_yang_zhang_vol_2d(aligned)
@@ -1551,6 +1639,7 @@ def run_candidate_strategy_for_universe(
                     "recommended_flip_signal_cells": diag.recommended_flip_signal_cells,
                 },
                 alpha_foundry_report=alpha_foundry_report,
+                l0_delivery_manifest=l0_delivery_manifest,
             )
     promoted_total = len(labeled)
 
@@ -1624,6 +1713,7 @@ def run_candidate_strategy_for_universe(
                 "signal_validation_pass": any_passes,
             },
             alpha_foundry_report=alpha_foundry_report,
+            l0_delivery_manifest=l0_delivery_manifest,
         )
 
     # Build WF folds (multi-fold or single)
@@ -2135,6 +2225,7 @@ def run_candidate_strategy_for_universe(
             oos_end=wf_folds[-1].oos_end,
             fold_oos_boundaries=_fold_oos_boundaries,
             alpha_foundry_report=alpha_foundry_report,
+            l0_delivery_manifest=l0_delivery_manifest,
         )
         _emit_bridge_profile()
         return out
@@ -2343,6 +2434,7 @@ def run_candidate_strategy_for_universe(
         oos_end=wf_folds[-1].oos_end,
         fold_oos_boundaries=_fold_oos_boundaries,
         alpha_foundry_report=alpha_foundry_report,
+        l0_delivery_manifest=l0_delivery_manifest,
     )
 
 
