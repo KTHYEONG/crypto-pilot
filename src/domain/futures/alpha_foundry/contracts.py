@@ -1241,6 +1241,28 @@ class L0IndependenceAudit:
     max_corr_threshold: float
 
 
+class L0DeliveryContractError(ValueError):
+    """Raised when a gate-mode L0 delivery cannot be consumed exactly by L1."""
+
+
+@dataclass(slots=True, frozen=True)
+class L0TfDeliveryRoute:
+    timeframe: str
+    selected_recipe_ids: tuple[str, ...]
+    allocated_budget_units: int
+    evidence_end_ns: int
+
+    def __post_init__(self) -> None:
+        if not self.timeframe:
+            raise L0DeliveryContractError("delivery route timeframe must not be empty")
+        if self.allocated_budget_units < 0:
+            raise L0DeliveryContractError("allocated_budget_units must be non-negative")
+        if len(set(self.selected_recipe_ids)) != len(self.selected_recipe_ids):
+            raise L0DeliveryContractError("delivery route contains duplicate recipe_id")
+        if self.evidence_end_ns <= 0:
+            raise L0DeliveryContractError("evidence_end_ns must be positive")
+
+
 @dataclass(slots=True, frozen=True)
 class L0StrategyDeliveryManifest:
     run_id_prefix: str
@@ -1250,3 +1272,4 @@ class L0StrategyDeliveryManifest:
     total_l1_verification_budget: int
     pruning_status: CrossTFPruningStatus = "disabled"
     pruning_reason: str = ""
+    routes: tuple[L0TfDeliveryRoute, ...] = field(default_factory=tuple)
