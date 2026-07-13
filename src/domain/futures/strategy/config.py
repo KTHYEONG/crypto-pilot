@@ -1084,8 +1084,8 @@ DEPRIORITIZED_FAMILY_PRIOR: dict[str, float] = {
     "carry_net_of_funding": -0.5,
     "taker_imbalance_momentum": -0.5,
     "supertrend": -0.5,
-    "vol_term_structure_gate": -0.5,
-    "trend_donchian": -0.5,
+    # "vol_term_structure_gate": -0.5,   # [REMOVED 2026-07-13] 실측 모순: 4h/12h gate_passed=True 확인
+    # "trend_donchian": -0.5,            # [REMOVED 2026-07-13] 실측 모순: 4개 TF gate_passed=True 확인
     "funding_flow_carry": -0.3,
 }
 
@@ -1133,6 +1133,7 @@ _DEFAULT_PER_TF_FAMILIES: dict[str, tuple[str, ...]] = {
         "lsr_oi_regime_filter",
         "supertrend",
         "mtf_fusion",
+        "vol_breakout",  # [ADDED 2026-07-13] 제로코스트 재검증
     ),
     "8h": (
         "trend_ma",
@@ -1147,6 +1148,7 @@ _DEFAULT_PER_TF_FAMILIES: dict[str, tuple[str, ...]] = {
         "lsr_oi_regime_filter",
         "supertrend",
         "mtf_fusion",
+        "vol_breakout",  # [ADDED 2026-07-13]
     ),
     "12h": (
         "trend_ma",
@@ -1161,6 +1163,7 @@ _DEFAULT_PER_TF_FAMILIES: dict[str, tuple[str, ...]] = {
         "ichimoku_trend",
         "supertrend",
         "mtf_fusion",
+        "vol_breakout",  # [ADDED 2026-07-13]
     ),
 }
 
