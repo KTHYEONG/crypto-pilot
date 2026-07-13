@@ -231,10 +231,10 @@ def align_outer_opportunities_with_realized(
     opportunities: ValidatedSignalBatch,
     realized_event_results: pd.DataFrame,
     activation_match_regime: bool,
-) -> tuple[pd.DataFrame, int]:
+) -> tuple[pd.DataFrame, int, int]:
     opp_frame = _batch_to_frame(opportunities)
     if opp_frame.empty:
-        return opp_frame, 0
+        return opp_frame, 0, 0
     realized = realized_event_results.copy()
     if "strategy_id" not in realized.columns:
         realized["strategy_id"] = (
@@ -261,24 +261,35 @@ def align_outer_opportunities_with_realized(
             realized.get("gross_event_bps", pd.Series(np.nan, index=realized.index)),
             errors="coerce",
         )
-    merge_keys = ["decision_idx", "symbol", "strategy_id"]
+    merge_keys_full = ["decision_idx", "symbol", "strategy_id"]
     if activation_match_regime:
-        merge_keys.append("activation_context")
-    duplicate_mask = realized.duplicated(subset=merge_keys, keep=False)
+        merge_keys_full.append("activation_context")
+    duplicate_mask = realized.duplicated(subset=merge_keys_full, keep=False)
     if bool(duplicate_mask.any()):
         raise ValueError("duplicate realized opportunity key")
-    merge_cols = [*merge_keys, "realized_side_adjusted_gross_bps"]
+    merge_cols = [*merge_keys_full, "realized_side_adjusted_gross_bps"]
     if "exit_idx" in realized.columns:
         merge_cols.append("exit_idx")
-    merged = opp_frame.merge(
+    merged_full = opp_frame.merge(
         realized[merge_cols],
-        on=merge_keys,
+        on=merge_keys_full,
         how="left",
         indicator=True,
     )
-    unmatched_count = int((merged["_merge"] != "both").sum())
-    merged = merged.loc[merged["_merge"] == "both"].drop(columns="_merge").copy()
-    return merged, unmatched_count
+    unmatched_full = merged_full.loc[merged_full["_merge"] != "both"]
+    # [LIMIT-01] 3-key(activation_context 제외) 재병합으로 label-drift 여부 판별
+    label_drift_unmatched_count = 0
+    if activation_match_regime and not unmatched_full.empty:
+        merge_keys_3 = ["decision_idx", "symbol", "strategy_id"]
+        rematch = unmatched_full[merge_keys_3].merge(
+            realized[[*merge_keys_3, "realized_side_adjusted_gross_bps"]],
+            on=merge_keys_3,
+            how="inner",
+        )
+        label_drift_unmatched_count = len(rematch)
+    true_unmatched_count = int((merged_full["_merge"] != "both").sum() - label_drift_unmatched_count)
+    merged = merged_full.loc[merged_full["_merge"] == "both"].drop(columns="_merge").copy()
+    return merged, true_unmatched_count, label_drift_unmatched_count
 
 
 def _by_q_values(
@@ -753,6 +764,7 @@ def build_qualified_signal_registry(
     registry_version: str,
     cfg: CandidateStrategyConfig | None = None,
     probe_prior_map: dict[tuple[str, str, str], float] | None = None,
+    advisory_penalty: float = 1.0,
 ) -> QualifiedSignalRegistry:
     t_reg = time.perf_counter()
     grouped: dict[str, list[SymbolStrategyEvidence]] = defaultdict(list)
@@ -760,7 +772,7 @@ def build_qualified_signal_registry(
     breakeven: float | None = float(getattr(cfg, "l1_breakeven_floor_bps", 0.0)) if cfg is not None else None
     for item in evidence:
         hard_eligible = bool(getattr(item, "hard_eligible", getattr(item, "qualified", False)))
-        quality_weight = float(getattr(item, "quality_weight", getattr(item, "reliability", 0.0)))
+        quality_weight = float(getattr(item, "quality_weight", getattr(item, "reliability", 0.0))) * advisory_penalty
         lcb_net_bps = float(getattr(item, "lcb_net_bps", 0.0))
         lcb_pass = breakeven is None or lcb_net_bps > breakeven
         if probe_prior_map is not None:
@@ -1717,11 +1729,12 @@ def evaluate_outer_signal_opportunities(
             passed=False,
             blockers=("empty_opportunities:registry_empty",),
         )
-    merged, unmatched_count = align_outer_opportunities_with_realized(
+    merged, true_unmatched, label_drift = align_outer_opportunities_with_realized(
         opportunities=opportunities,
         realized_event_results=realized_event_results,
         activation_match_regime=bool(getattr(cfg, "l1_activation_match_regime", True)),
     )
+    unmatched_count = true_unmatched
     dropped_by_maturity = 0
     if "exit_idx" in merged.columns:
         before_maturity = len(merged)
@@ -1757,6 +1770,7 @@ def evaluate_outer_signal_opportunities(
             passed=False,
             blockers=("empty_opportunities:prediction_unmatched",),
             dropped_by_maturity_count=dropped_by_maturity,
+            label_drift_unmatched_count=label_drift,
         )
     symbol_to_idx = {symbol: idx for idx, symbol in enumerate(aligned_symbols)}
     probe_series: list[float] = []
@@ -1900,6 +1914,7 @@ def evaluate_outer_signal_opportunities(
         dropped_by_maturity_count=dropped_by_maturity,
         rank_ic_all=rank_ic_all_val,
         rank_ic_tstat=rank_ic_tstat_val,
+        label_drift_unmatched_count=label_drift,
     )
 
 
@@ -1951,6 +1966,17 @@ def _compute_pooled_probe_lcb(
     return float(np.quantile(boot, 0.05)) if boot.size > 0 else float(np.mean(series))
 
 
+def _wilson_lower_bound(successes: int, n: int, confidence: float = 0.90) -> float:
+    if n <= 0:
+        return 0.0
+    z = float(stats.norm.ppf(1.0 - (1.0 - confidence) / 2.0))
+    p_hat = successes / n
+    denom = 1.0 + z**2 / n
+    center = p_hat + z**2 / (2 * n)
+    margin = z * ((p_hat * (1 - p_hat) / n + z**2 / (4 * n**2)) ** 0.5)
+    return max(0.0, (center - margin) / denom)  # type: ignore[no-any-return]
+
+
 def evaluate_layer1_readiness(
     *,
     fold_reports: tuple[Layer1FoldReadiness, ...],
@@ -1962,19 +1988,23 @@ def evaluate_layer1_readiness(
     t_gate = time.perf_counter()
     effective_symbol_count = 0.0
     probe_series: list[float] = []
-    match_ratios: list[float] = []
     probe_lcbs: list[float] = []
     ready_fold_count = 0
+    total_matched = 0
+    total_true_unmatched = 0
     for report in fold_reports:
         if report.passed:
             ready_fold_count += 1
         effective_symbol_count = max(effective_symbol_count, report.effective_symbol_count)
-        match_ratios.append(report.realized_match_ratio)
+        total_matched += report.matched_event_count
+        total_true_unmatched += report.unmatched_event_count
         probe_series.extend([value for value in report.probe_series_bps if np.isfinite(value)])
         probe_lcbs.append(report.probe_lcb_bps)
     fold_ratio = float(ready_fold_count / len(fold_reports)) if fold_reports else 0.0
-    match_ratio = float(np.mean(match_ratios)) if match_ratios else 0.0
     probe_bps = float(np.mean(probe_series)) if probe_series else 0.0
+
+    # [LIMIT-02] Pooled Wilson LCB for match_ratio
+    match_ratio = _wilson_lower_bound(total_matched, total_matched + total_true_unmatched, confidence=0.90)
 
     if bool(getattr(cfg, "l1_probe_lcb_pooled", True)):
         probe_lcb = _compute_pooled_probe_lcb(fold_reports, cfg, seed=seed)
@@ -2007,48 +2037,62 @@ def evaluate_layer1_readiness(
             len(fold_reports),
         )
 
-    check_specs = (
-        (
-            "fold_cov",
-            fold_cov,
-            float(getattr(cfg, "l1_min_fold_cov", 0.8)),
-            "ge",
-        ),
-        ("match_ratio", match_ratio, float(getattr(cfg, "l1_min_realized_match_ratio", 0.90)), "ge"),
+    # [LIMIT-02, LIMIT-03] Structural checks (blocking) vs advisory checks (non-blocking)
+    structural_specs = (
+        ("fold_cov", fold_cov, float(getattr(cfg, "l1_min_fold_cov", 0.8)), "ge"),
         ("sym_count", effective_sym_metric, sym_threshold, "ge"),
-        ("fold_ratio", fold_ratio, float(cfg.l1_min_fold_ratio), "ge"),
         ("probe_lcb_bps", probe_lcb, float(cfg.l1_min_probe_bps), "gt"),
     )
-    checks: list[Layer1GateCheck] = []
-    blockers: list[str] = []
-    for key, value, threshold, comparator in check_specs:
+    advisory_specs = (
+        ("match_ratio", match_ratio, float(getattr(cfg, "l1_min_realized_match_ratio", 0.90)), "ge"),
+        ("fold_ratio", fold_ratio, float(cfg.l1_min_fold_ratio), "ge"),
+    )
+
+    def _build_check(key: str, value: float, threshold: float, comparator: str, *, blocking: bool) -> Layer1GateCheck:
         finite_value = np.isfinite(value)
         passed = finite_value and (value >= threshold if comparator == "ge" else value > threshold)
-        blocker = None if passed else f"{value:.3f}"
-        comparator_literal = cast(Literal["ge", "gt"], comparator)
-        if blocker is not None:
-            blockers.append(f"{key}:{blocker}")
-        checks.append(
-            Layer1GateCheck(
-                key=key,
-                value=float(value),
-                threshold=float(threshold),
-                comparator=comparator_literal,
-                passed=passed,
-                blocker=blocker,
-            )
+        blocker_: str | None = None if passed else f"{value:.3f}"
+        comparator_lit = cast(Literal["ge", "gt"], comparator)
+        return Layer1GateCheck(
+            key=key, value=float(value), threshold=float(threshold),
+            comparator=comparator_lit, passed=passed, blocker=blocker_,
+            blocking=blocking,
         )
+
+    checks: list[Layer1GateCheck] = []
+    blockers: list[str] = []
+    advisory_checks: list[Layer1GateCheck] = []
+
+    for key, value, threshold, comparator in structural_specs:
+        ck = _build_check(key, value, threshold, comparator, blocking=True)
+        checks.append(ck)
+        if ck.blocker is not None:
+            blockers.append(f"{key}:{ck.blocker}")
+
+    for key, value, threshold, comparator in advisory_specs:
+        ck = _build_check(key, value, threshold, comparator, blocking=False)
+        advisory_checks.append(ck)
+        if ck.blocker is not None:
+            blockers.append(f"{key}:{ck.blocker}")
+
+    structural_passed = all(ck.passed for ck in checks)
+    advisory_passed = all(ck.passed for ck in advisory_checks)
+
     logger.log(
         PERF,
-        "[PERF] l1_gate_eval n_folds=%d n_passed=%d took=%.4fs",
+        "[PERF] l1_gate_eval n_folds=%d n_passed=%d structural=%s advisory=%s took=%.4fs",
         len(fold_reports),
         ready_fold_count,
+        structural_passed,
+        advisory_passed,
         time.perf_counter() - t_gate,
     )
     return Layer1GateReport(
         checks=tuple(checks),
-        passed=all(check.passed for check in checks),
+        passed=structural_passed and advisory_passed,
         blockers=tuple(blockers),
+        structural_passed=structural_passed,
+        advisory_checks=tuple(advisory_checks),
     )
 
 
