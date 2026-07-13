@@ -418,22 +418,31 @@ class DataCollector:
         return symbol.replace("/", "_")
 
     def _cache_path(self, symbol: str, timeframe: str) -> Path:
-        safe_symbol = self._safe_symbol(symbol)
-        return FUTURES_DATA_DIR / f"{safe_symbol}_{timeframe}.parquet"
+        from src.core.settings import FuturesStorageLayout
+        return FuturesStorageLayout.get_ohlcv_path(symbol, timeframe, base_dir=FUTURES_DATA_DIR)
 
     def list_cached_parquet_symbols(self, timeframe: str) -> list[str]:
-        suf = f"_{timeframe}.parquet"
         out: list[str] = []
+        # Search new partitioned directory
+        new_dir = FUTURES_DATA_DIR / "ohlcv" / timeframe
+        if new_dir.exists():
+            for p in new_dir.glob("*.parquet"):
+                stem = p.stem
+                if "_" in stem:
+                    base, quote = stem.rsplit("_", 1)
+                    out.append(f"{base}/{quote}")
+        # Search old flat directory
+        suf = f"_{timeframe}.parquet"
         for p in FUTURES_DATA_DIR.glob(f"*{suf}"):
             stem = p.name[: -len(suf)]
-            if "_" not in stem:
-                continue
-            base, quote = stem.rsplit("_", 1)
-            out.append(f"{base}/{quote}")
+            if "_" in stem:
+                base, quote = stem.rsplit("_", 1)
+                out.append(f"{base}/{quote}")
         return sorted(set(out))
 
     def _meta_path(self) -> Path:
-        return FUTURES_DATA_DIR / "parquet_cache_meta.json"
+        from src.core.settings import FuturesStorageLayout
+        return FuturesStorageLayout.get_metadata_path("parquet_cache_meta.json", base_dir=FUTURES_DATA_DIR)
 
     def _meta_key(self, symbol: str, timeframe: str) -> str:
         return f"{self._safe_symbol(symbol)}::{timeframe}"
@@ -561,7 +570,18 @@ class DataCollector:
         df = self._normalize_df(df)
         path = self._cache_path(symbol, timeframe)
         temp_path = path.with_suffix(".tmp.parquet")
-        df.to_parquet(temp_path, index=False)
+        
+        # Optimize storage: drop redundant datetime and cast OHLC to float32
+        df_to_save = df.copy()
+        if "datetime" in df_to_save.columns:
+            df_to_save = df_to_save.drop(columns=["datetime"])
+        
+        price_cols = ["open", "high", "low", "close"]
+        for col in price_cols:
+            if col in df_to_save.columns:
+                df_to_save[col] = df_to_save[col].astype("float32")
+                
+        df_to_save.to_parquet(temp_path, index=False, compression="zstd")
         temp_path.replace(path)
 
     def _normalize_df(self, df: pd.DataFrame) -> pd.DataFrame:
@@ -1167,8 +1187,8 @@ class DataCollector:
             DataFrame containing the requested metrics.
 
         """
-        safe_symbol = self._safe_symbol(symbol)
-        path = FUTURES_DATA_DIR / f"{safe_symbol}_metrics.parquet"
+        from src.core.settings import FuturesStorageLayout
+        path = FuturesStorageLayout.get_metrics_path(symbol, base_dir=FUTURES_DATA_DIR)
         req_start = pd.to_datetime(start_date, utc=True)
         req_end = pd.to_datetime(end_date, utc=True)
         cache_df = _empty_metrics_frame()
@@ -1218,7 +1238,7 @@ class DataCollector:
         combined = _coalesce_metrics_frames([cache_df, *new_parts], symbol=symbol)
         if not combined.empty:
             temp_path = path.with_suffix(".tmp.parquet")
-            combined.to_parquet(temp_path, index=False)
+            combined.to_parquet(temp_path, index=False, compression="zstd")
             temp_path.replace(path)
             coverage = {f"{col}_coverage": float(combined[col].notna().mean()) for col in _METRICS_NUMERIC_COLUMNS}
             self._save_meta(
@@ -1246,8 +1266,8 @@ class DataCollector:
 
         Uses Vision for bulk history and API for recent data.
         """
-        safe_symbol = self._safe_symbol(symbol)
-        path = FUTURES_DATA_DIR / f"{safe_symbol}_funding.parquet"
+        from src.core.settings import FuturesStorageLayout
+        path = FuturesStorageLayout.get_funding_path(symbol, base_dir=FUTURES_DATA_DIR)
         req_start = pd.to_datetime(start_date, utc=True)
         req_end = pd.to_datetime(end_date, utc=True)
 
@@ -1356,7 +1376,7 @@ class DataCollector:
                 .drop_duplicates(subset=["timestamp"])
                 .sort_values("timestamp")
             )
-            _normalize_funding_frame(combined).to_parquet(path, index=False)
+            _normalize_funding_frame(combined).to_parquet(path, index=False, compression="zstd")
             self._save_meta(
                 {
                     self._meta_key(symbol, "funding"): {
@@ -1379,7 +1399,11 @@ def merge_funding_into_ohlcv(symbol: str, df: pd.DataFrame, data_dir: Path) -> p
         if col not in out.columns:
             out[col] = 0.0
 
-    path = Path(data_dir) / f"{symbol.replace('/', '_')}_funding.parquet"
+    if Path(data_dir).resolve() == FUTURES_DATA_DIR.resolve():
+        from src.core.settings import FuturesStorageLayout
+        path = FuturesStorageLayout.get_funding_path(symbol, base_dir=FUTURES_DATA_DIR)
+    else:
+        path = Path(data_dir) / f"{symbol.replace('/', '_')}_funding.parquet"
     if not path.exists():
         return out
 
@@ -1419,7 +1443,11 @@ def merge_metrics_into_ohlcv(
     """Merge metrics (OI, LSR) into OHLCV."""
     if df is None or df.empty:
         return df.copy() if df is not None else pd.DataFrame()
-    path = Path(data_dir) / f"{symbol.replace('/', '_')}_metrics.parquet"
+    if Path(data_dir).resolve() == FUTURES_DATA_DIR.resolve():
+        from src.core.settings import FuturesStorageLayout
+        path = FuturesStorageLayout.get_metrics_path(symbol, base_dir=FUTURES_DATA_DIR)
+    else:
+        path = Path(data_dir) / f"{symbol.replace('/', '_')}_metrics.parquet"
     if not path.exists():
         return df.copy()
 
