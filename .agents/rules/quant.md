@@ -26,14 +26,8 @@ Before implementing any quantitative algorithm, the AI is encouraged to outline 
 - **Vectorized Shape Tracking:** Track expected array shapes (e.g., `returns: [T, N]`) to prevent broadcasting errors.
 
 ## 2. High-Performance Computing (HPC) & Efficiency
-The system should be built for maximum execution speed without sacrificing numerical stability.
+성능, 메모리 및 HPC 최적화에 관한 모든 지침은 단일 진실 공급원(SSOT)인 [performance.md](file:///.agents/rules/performance.md)를 상시 참조하고 적용합니다.
 
-- **Balanced Vectorization & Memory Safety:** Prioritize NumPy/Polars vectorization, but avoid forcing complex "one-liner" vectorized operations that compromise readability or cause OOM due to massive intermediate arrays. Balance readability and memory efficiency.
-- **Strict Numba JIT Isolation & Array Contiguity:**
-    - Unpack DataFrames and complex Python objects into raw NumPy arrays before passing them to Numba-jitted functions.
-    - Ensure arrays are contiguous using `np.ascontiguousarray()` before passing them to Numba to avoid copy overhead and performance degradation.
-- **Optimized Parallelism:** Use `ProcessPoolExecutor` or `parallel=True` only for heavy, independent operations (e.g., Grid Search). Skip for lightweight operations where IPC overhead exceeds computational gain.
-- **Precision-Aware Data Types:** Use `float64` for all compounding returns, covariance matrices, and inversions. `float32` is strictly for storage-heavy raw feature arrays.
 
 ## 3. Numerical Stability, Precision & Reproducibility
 - **Safe Division Guardrails:** 
