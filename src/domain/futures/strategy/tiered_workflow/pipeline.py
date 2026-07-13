@@ -2897,6 +2897,30 @@ def _tf_hours(tf: str) -> float:
     return val * 24.0  # "d"
 
 
+def _log_pertf_registry_diag(
+    per_tf_l1: dict[str, PerTfL1Result],
+    l2_tf_resolved: str,
+) -> None:
+    """Emit [L1-PERTF-REGISTRY-DIAG] log with blockers for each TF.
+
+    Extracted for testability. Called only when logger.isEnabledFor(logging.DEBUG).
+    """
+    for _tf, _r in per_tf_l1.items():
+        _reg = _r.l1_result.deployment_registry
+        _blockers = _r.l1_result.gate_report.blockers if _r.l1_result.gate_report is not None else ()
+        logger.debug(
+            "[L1-PERTF-REGISTRY-DIAG] tf=%s gate_passed=%s registry_present=%s "
+            "n_ready=%d edge_quality=%.2f would_resolve_master_tf=%s blockers=%s",
+            _tf,
+            _r.l1_result.gate_passed,
+            _reg is not None,
+            len(_reg.ready_symbols) if _reg is not None else 0,
+            _tf_edge_quality(_r),
+            l2_tf_resolved,
+            ",".join(_blockers) if _blockers else "none",
+        )
+
+
 def _tf_edge_quality(r: PerTfL1Result) -> float:
     """Edge quality score for TF selection: Σ quality_weight*oos_edge_bps over valid strategies.
 
@@ -3226,18 +3250,7 @@ def run_tiered_pipeline(
 
         _l2_tf_resolved = _resolve_l2_master_tf(cfg, per_tf_l1, probe_manifest)
         if logger.isEnabledFor(logging.DEBUG):
-            for _tf_diag, _r_diag in per_tf_l1.items():
-                _reg_diag = _r_diag.l1_result.deployment_registry
-                logger.debug(
-                    "[L1-PERTF-REGISTRY-DIAG] tf=%s gate_passed=%s registry_present=%s "
-                    "n_ready=%d edge_quality=%.2f would_resolve_master_tf=%s",
-                    _tf_diag,
-                    _r_diag.l1_result.gate_passed,
-                    _reg_diag is not None,
-                    len(_reg_diag.ready_symbols) if _reg_diag is not None else 0,
-                    _tf_edge_quality(_r_diag),
-                    _l2_tf_resolved,
-                )
+            _log_pertf_registry_diag(per_tf_l1, _l2_tf_resolved)
         _capture = build_validation_parity_capture(
             probe_manifest=_raw_probe_to_manifest(probe_manifest),
             per_tf_l1=per_tf_l1,
