@@ -2871,7 +2871,7 @@ def select_l1_delivery_events(
     tf: str,
     manifest: object | None,
 ) -> pd.DataFrame:
-    """Select the exact TF/recipe event intersection or fail closed."""
+    """[ADR_20260713_TASK_L1_HYBRID_MEMORY_AUDIT] Select exact TF/recipe events."""
     if manifest is None:
         if "native_tf" in labeled_events.columns:
             return labeled_events[labeled_events["native_tf"] == tf]
@@ -2881,8 +2881,12 @@ def select_l1_delivery_events(
         if "native_tf" in labeled_events.columns:
             return labeled_events[labeled_events["native_tf"] == tf]
         return labeled_events
+    if labeled_events.empty:
+        return labeled_events.iloc[:0]
     if "l0_recipe_id" not in labeled_events.columns:
         raise L0DeliveryContractError("gate manifest requires l0_recipe_id column in labeled_events")
+    if "native_tf" not in labeled_events.columns:
+        raise L0DeliveryContractError("gate manifest requires native_tf column in labeled_events")
     total_allocated = sum(r.allocated_budget_units for r in manifest.routes)
     if total_allocated > manifest.total_l1_verification_budget:
         raise L0DeliveryContractError(
@@ -2914,12 +2918,27 @@ def run_per_tf_l1(
     defer_artifact: bool = False,
     l0_delivery_manifest: object | None = None,
 ) -> PerTfL1Result:
-    """Run L1 validation for a single TF using its native signal pool."""
+    """[ADR_20260713_TASK_L1_HYBRID_MEMORY_AUDIT] Run one-TF L1 validation."""
 
     _tf_cfg = strategy_config.apply_tf_gate_overrides(cfg, tf)
     _tf_labeled = select_l1_delivery_events(
         labeled_events=labeled_events, tf=tf, manifest=l0_delivery_manifest,
     )
+    if _tf_labeled.empty:
+        logger.info("[L1] tf=%s delivery route has no labeled events; blocking TF", tf)
+        l1 = Layer1Result(
+            signals_per_fold=(),
+            oos_stacked={},
+            pooled_ic=0.0,
+            pooled_tstat=0.0,
+            breadth=0.0,
+            valid_coverage=0.0,
+            fold_pass_ratio=0.0,
+            gate_passed=False,
+            n_valid=0,
+            n_total=0,
+        )
+        return PerTfL1Result(tf=tf, l1_result=l1, n_winning_signals=0)
     from src.domain.futures.strategy import tiered_workflow as _tiered_workflow
 
     run_l1_nested = cast(Any, _tiered_workflow.run_l1_nested_swf)
