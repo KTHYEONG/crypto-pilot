@@ -20,6 +20,7 @@ from src.domain.futures.strategy.rule_signals import (
     _safe_taker_imbalance_2d,
     build_rule_signal_panels,
     candidate_panels_to_events,
+    resolve_valid_htf_choices,
 )
 
 
@@ -119,6 +120,7 @@ def test_build_rule_signal_panels_returns_expected_tuple() -> None:
         "liquidity_participation_breakout",
         "btc_neutral_residual_reversal",
         "price_band_reversion",
+        "mtf_fusion",
     }
 
     for p in panels:
@@ -1479,3 +1481,188 @@ def test_resample_to_htf_and_project_basic() -> None:
         compute_feature_fn=_identity_fn,
     )
     assert result.shape == (t, 3)
+
+
+class TestMtfFusionFactory:
+    """L0-MTF Recipe Factory — Scenario 1 (Happy Path), 2 (Edge Cases), 3 (Look-ahead), 4 (Integration)."""
+
+    def test_resolve_valid_htf_choices_at_4h_returns_three_coarser_tfs(self) -> None:
+        choices = resolve_valid_htf_choices("4h")
+        assert choices == ("1D", "12h", "8h")
+
+    def test_resolve_valid_htf_choices_at_12h_returns_only_1d(self) -> None:
+        choices = resolve_valid_htf_choices("12h")
+        assert choices == ("1D",)
+
+    def test_resolve_valid_htf_choices_at_1d_returns_empty(self) -> None:
+        choices = resolve_valid_htf_choices("1D")
+        assert choices == ()
+
+    def test_resolve_valid_htf_choices_at_1h_returns_all_three(self) -> None:
+        choices = resolve_valid_htf_choices("1h")
+        assert choices == ("1D", "12h", "8h")
+
+    def test_tf_hours_fallback_delegates_to_hours_per_bar_for_non_h_d_suffix(self) -> None:
+        from src.domain.futures.strategy.rule_signals import _tf_hours
+        from src.domain.futures.strategy.timeframe_contracts import hours_per_bar
+
+        assert _tf_hours("1w") == hours_per_bar("1w")
+
+    def test_htf_ichimoku_cloud_filter_ndarray_return_is_handled(self) -> None:
+        # [LIMIT] covers the isinstance(_result, pd.DataFrame) else-branch in build_rule_signal_panels'
+        # mtf_fusion dispatch: a filter_fn returning a raw ndarray (not pd.DataFrame) must still work.
+        aligned = _make_aligned(t=300, n=2)
+        cfg = CandidateStrategyConfig()
+
+        def _ndarray_returning_filter(df: object, **_: object) -> np.ndarray:
+            import pandas as pd
+
+            assert isinstance(df, pd.DataFrame)
+            return np.ones(len(df), dtype=np.float64)
+
+        import src.domain.futures.strategy.rule_signals as rs
+
+        original = rs._htf_ichimoku_cloud_filter
+        rs._htf_ichimoku_cloud_filter = _ndarray_returning_filter  # type: ignore[assignment]
+        try:
+            panels = build_rule_signal_panels(aligned=aligned, cfg=cfg, family_filter=("mtf_fusion",))
+        finally:
+            rs._htf_ichimoku_cloud_filter = original  # type: ignore[assignment]
+
+        assert any("ichimoku_cloud" in p.variant for p in panels)
+
+    def test_build_rule_signal_panels_mtf_fusion_generates_60_variants_at_4h(self) -> None:
+        aligned = _make_aligned(t=300, n=2)
+        cfg = CandidateStrategyConfig()
+        panels = build_rule_signal_panels(
+            aligned=aligned, cfg=cfg, family_filter=("mtf_fusion",),
+        )
+        assert len(panels) == 60
+        assert all(p.family == "mtf_fusion" for p in panels)
+        assert len({p.variant for p in panels}) == 60
+
+    def test_mtf_fusion_variant_count_stays_within_max_recipes_per_family_cap(self) -> None:
+        from src.domain.futures.alpha_foundry.contracts import AlphaFoundryRuntimeConfig
+        cfg = AlphaFoundryRuntimeConfig()
+        max_variants_at_4h = 3 * 5 * 4
+        assert max_variants_at_4h <= cfg.max_recipes_per_family
+
+    def test_mtf_fusion_at_12h_generates_20_variants(self) -> None:
+        aligned = _make_aligned(t=300, n=2)
+        cfg = CandidateStrategyConfig(timeframe="12h")
+        panels = build_rule_signal_panels(
+            aligned=aligned, cfg=cfg, family_filter=("mtf_fusion",),
+        )
+        assert len(panels) == 20
+
+    def test_mtf_fusion_at_1d_returns_zero_panels(self) -> None:
+        aligned = _make_aligned(t=300, n=2)
+        cfg = CandidateStrategyConfig(timeframe="1D")
+        panels = build_rule_signal_panels(
+            aligned=aligned, cfg=cfg, family_filter=("mtf_fusion",),
+        )
+        assert len(panels) == 0
+
+    def test_mtf_fusion_insufficient_history_does_not_crash(self) -> None:
+        aligned = _make_aligned(t=20, n=2)
+        cfg = CandidateStrategyConfig()
+        panels = build_rule_signal_panels(
+            aligned=aligned, cfg=cfg, family_filter=("mtf_fusion",),
+        )
+        for p in panels:
+            assert p.valid_mask_2d.dtype == bool
+
+    def test_adx_dmi_filter_stays_neutral_in_choppy_regime(self) -> None:
+        t, n = 200, 1
+        rng = np.random.default_rng(42)
+        base = 100.0 + np.cumsum(rng.normal(0, 0.1, t))
+        noise = rng.normal(0, 0.05, t)
+        close = (base + noise).reshape(t, n).astype(np.float64)
+        funding = np.zeros((t, n), dtype=np.float64)
+        taker_buy = np.full((t, n), 500.0, dtype=np.float64)
+        aligned = _make_flow_aligned(close=close, funding=funding, taker_buy=taker_buy)
+        panels = build_rule_signal_panels(
+            aligned=aligned, cfg=CandidateStrategyConfig(), family_filter=("mtf_fusion",),
+        )
+        adx_panel = next(p for p in panels if "adx_dmi" in p.variant and "1D" in p.variant)
+        neutral_ratio = float(np.mean(adx_panel.side_hint_2d == 0))
+        assert neutral_ratio > 0.8
+
+    def test_mtf_fusion_registered_in_all_signal_families(self) -> None:
+        from src.domain.futures.signals.rules import ALL_SIGNAL_FAMILIES as rules_families  # noqa: N811
+        assert "mtf_fusion" in rules_families
+        assert rules_families == ALL_SIGNAL_FAMILIES
+
+    def test_mtf_fusion_in_per_tf_pool_correct_tfs(self) -> None:
+        from src.domain.futures.strategy.config import _DEFAULT_PER_TF_FAMILIES
+        for tf in ("4h", "6h", "8h", "12h"):
+            assert "mtf_fusion" in _DEFAULT_PER_TF_FAMILIES[tf], f"missing in {tf}"
+        for tf in ("1h", "2h"):
+            assert "mtf_fusion" not in _DEFAULT_PER_TF_FAMILIES.get(tf, ()), f"unexpectedly present in {tf}"
+
+    def test_mtf_fusion_panels_have_correct_metadata(self) -> None:
+        aligned = _make_aligned(t=300, n=2)
+        cfg = CandidateStrategyConfig()
+        panels = build_rule_signal_panels(
+            aligned=aligned, cfg=cfg, family_filter=("mtf_fusion",),
+        )
+        for p in panels:
+            assert p.metadata["archetype"] == "trend"
+            assert p.metadata["regime"] == "mtf_fusion_factory"
+            assert "filter" in p.metadata["edge_hypothesis"]
+            assert "trigger" in p.metadata["edge_hypothesis"]
+
+    def test_mtf_fusion_ichimoku_cloud_has_no_forward_shift(self) -> None:
+        import inspect
+
+        from src.domain.futures.strategy.rule_signals import _htf_ichimoku_cloud_filter
+        source = inspect.getsource(_htf_ichimoku_cloud_filter)
+        assert ".shift(26)" not in source, "Ichimoku filter must NOT use forward charting shift"
+        assert ".shift(26," not in source, "Ichimoku filter must not shift senkou forward"
+
+    def test_mtf_fusion_adx_dmi_no_lookahead_in_wilder_smoothing(self) -> None:
+        import inspect
+
+        from src.domain.futures.strategy.rule_signals import _htf_adx_dmi_filter
+        source = inspect.getsource(_htf_adx_dmi_filter)
+        assert "ewm" in source, "ADX must use ewm for Wilder smoothing"
+        assert ".shift(" not in source.replace("shift(1)", ""), "ADX filter must not introduce forward-looking shifts"
+
+    def test_mtf_fusion_causal_projection_no_anomaly_leak(
+        self,
+    ) -> None:
+        t, n = 300, 1
+        close = np.linspace(100.0, 130.0, t, dtype=np.float64).reshape(t, n)
+        high = close * 1.01
+        low = close * 0.99
+        datetimes = np.datetime64("2025-01-01T00", "h") + np.arange(t).astype("timedelta64[h]")
+        aligned = AlignedMarketData(
+            datetimes=datetimes,
+            symbols=("BTCUSDT",),
+            open_2d=close.copy(),
+            high_2d=high.copy(),
+            low_2d=low.copy(),
+            close_2d=close.copy(),
+            volume_2d=np.full((t, n), 1000.0, dtype=np.float64),
+            funding_2d=np.zeros((t, n), dtype=np.float64),
+            taker_buy_2d=np.full((t, n), 500.0, dtype=np.float64),
+            trades_2d=np.full((t, n), 100.0, dtype=np.float64),
+            active_mask=np.ones((t, n), dtype=bool),
+            warm_mask=np.ones((t, n), dtype=bool),
+            entry_block_mask=np.zeros((t, n), dtype=bool),
+            kill_mask=np.zeros((t, n), dtype=bool),
+            execution_cost_bps_2d=np.full((t, n), 5.0, dtype=np.float64),
+        )
+        cfg = CandidateStrategyConfig(candidate_families=("mtf_fusion",))
+        panels = build_rule_signal_panels(aligned=aligned, cfg=cfg, family_filter=("mtf_fusion",))
+        assert len(panels) > 0
+        for p in panels:
+            if "hma_slope" in p.variant or "ichimoku_cloud" in p.variant or "adx_dmi" in p.variant:
+                score = p.signed_score_2d[:, 0]
+                finite_idx = np.flatnonzero(np.isfinite(score))
+                if len(finite_idx) > 0:
+                    first_finite = finite_idx[0]
+                    assert not np.any(np.isfinite(score[:first_finite])), (
+                        f"{p.variant}: pre-warmup region must be NaN, had finite values at "
+                        f"{np.flatnonzero(np.isfinite(score[:first_finite]))}"
+                    )
