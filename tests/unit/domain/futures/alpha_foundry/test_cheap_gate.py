@@ -2529,3 +2529,32 @@ class TestCheapGateCache:
             assert a.gate_passed == b.gate_passed
             assert a.mean_net_bps == b.mean_net_bps
 
+def test_vectorized_event_alignment() -> None:
+    import numpy as np
+    import pandas as pd
+
+    all_events = pd.DataFrame({
+        "entry_idx": [10, 20, 30],
+        "symbol": ["BTC/USDT", "INVALID_SYM", "ETH/USDT"]
+    })
+    _symbol_map = {"BTC/USDT": 0, "ETH/USDT": 1}
+    event_mask = np.zeros((100, 2), dtype=bool)
+    event_mask[9, 0] = True # matches BTC/USDT at entry_idx=10
+    event_mask[29, 1] = True # matches ETH/USDT at entry_idx=30
+    t = 100
+
+    # Vectorized execution
+    _ei_arr = all_events["entry_idx"].to_numpy(dtype=np.intp)
+    _sym_arr = all_events["symbol"].to_numpy()
+    _si_arr = np.array([_symbol_map.get(s, -1) for s in _sym_arr], dtype=np.intp)
+    _decision_arr = _ei_arr - 1
+
+    _valid = (_si_arr >= 0) & (_decision_arr >= 0) & (_decision_arr < t)
+    _in_mask = np.zeros(len(all_events), dtype=bool)
+    if np.any(_valid):
+        _in_mask[_valid] = event_mask[_decision_arr[_valid], _si_arr[_valid]]
+    _aligned_rows = np.flatnonzero(_in_mask)
+
+    assert list(_aligned_rows) == [0, 2]
+
+

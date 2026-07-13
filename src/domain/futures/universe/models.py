@@ -14,11 +14,11 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
-from src.core.settings import FUTURES_DATA_DIR
+from src.core.settings import FuturesStorageLayout
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_LEDGER_PATH = FUTURES_DATA_DIR / "universe_ledger.db"
+DEFAULT_LEDGER_PATH = FuturesStorageLayout.get_metadata_path("universe_ledger.db")
 LEVERAGED_TOKEN_PATTERNS = ("UP", "DOWN", "BULL", "BEAR")
 _SQLITE_LEDGER_SUFFIXES = (".db", ".sqlite", ".sqlite3", "")
 _PARQUET_LEDGER_SUFFIXES = (".parquet", ".pq")

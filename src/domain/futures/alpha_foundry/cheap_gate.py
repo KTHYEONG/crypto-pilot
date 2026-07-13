@@ -285,15 +285,18 @@ def evaluate_panel_cheap_gate(
     # candidate_panels_to_events sets entry=t+1; signal bar is t.
     _event_key = all_events["entry_idx"].astype(str) + ":" + all_events["symbol"].astype(str)
     all_events = all_events.loc[~_event_key.duplicated()].reset_index(drop=True)
-    _aligned_rows = []
-    for _row_i in range(len(all_events)):
-        _ei = int(all_events["entry_idx"].iloc[_row_i])
-        _sym = all_events["symbol"].iloc[_row_i]
-        _si = _symbol_map.get(_sym, -1)
-        _decision = _ei - 1
-        if _si >= 0 and 0 <= _decision < t and event_mask[_decision, _si]:
-            _aligned_rows.append(_row_i)
-    if not _aligned_rows:
+    _ei_arr = all_events["entry_idx"].to_numpy(dtype=np.intp)
+    _sym_arr = all_events["symbol"].to_numpy()
+    _si_arr = np.array([_symbol_map.get(s, -1) for s in _sym_arr], dtype=np.intp)
+    _decision_arr = _ei_arr - 1
+
+    _valid = (_si_arr >= 0) & (_decision_arr >= 0) & (_decision_arr < t)
+    _in_mask = np.zeros(len(all_events), dtype=bool)
+    if np.any(_valid):
+        _in_mask[_valid] = event_mask[_decision_arr[_valid], _si_arr[_valid]]
+    _aligned_rows = np.flatnonzero(_in_mask)
+
+    if len(_aligned_rows) == 0:
         return CheapGateEvidence(
             recipe_id=recipe.recipe_id,
             timeframe=recipe.timeframe,
@@ -1239,15 +1242,18 @@ def evaluate_panel_gate(
         # Align events to sparse event_mask: dedup per (entry_idx, symbol), then filter.
         _event_key = all_events["entry_idx"].astype(str) + ":" + all_events["symbol"].astype(str)
         all_events = all_events.loc[~_event_key.duplicated()].reset_index(drop=True)
-        _aligned_rows = []
-        for _row_i in range(len(all_events)):
-            _ei = int(all_events["entry_idx"].iloc[_row_i])
-            _sym = all_events["symbol"].iloc[_row_i]
-            _si = _symbol_map.get(_sym, -1)
-            _decision = _ei - 1
-            if _si >= 0 and 0 <= _decision < t and event_mask[_decision, _si]:
-                _aligned_rows.append(_row_i)
-        if not _aligned_rows:
+        _ei_arr = all_events["entry_idx"].to_numpy(dtype=np.intp)
+        _sym_arr = all_events["symbol"].to_numpy()
+        _si_arr = np.array([_symbol_map.get(s, -1) for s in _sym_arr], dtype=np.intp)
+        _decision_arr = _ei_arr - 1
+
+        _valid = (_si_arr >= 0) & (_decision_arr >= 0) & (_decision_arr < t)
+        _in_mask = np.zeros(len(all_events), dtype=bool)
+        if np.any(_valid):
+            _in_mask[_valid] = event_mask[_decision_arr[_valid], _si_arr[_valid]]
+        _aligned_rows = np.flatnonzero(_in_mask)
+
+        if len(_aligned_rows) == 0:
             return _empty_gate_evidence(
                 run_id=run_id, recipe=recipe, reject_reasons=("insufficient_events",)
             )
