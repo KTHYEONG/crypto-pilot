@@ -23,7 +23,7 @@
     ]
   },
   "src/domain/futures/alpha_foundry/cheap_gate.py": {
-    "architecture": "docs/architecture/layer0.md",
+    "architecture": "docs/specs/l0_l1_pipeline_speed_optimization.md",
     "testing": [
       "tests/unit/domain/futures/alpha_foundry/test_cheap_gate.py",
       "tests/unit/domain/futures/alpha_foundry/test_gate_v2.py",
@@ -339,5 +339,6 @@
   "src/core/settings.py": {
     "testing": "tests/unit/core/test_settings.py"
   },
-  "src/domain/futures/universe/storage.py": {}
+  "src/domain/futures/universe/storage.py": {},
+  "src/domain/futures/universe/models.py": {}
 }
