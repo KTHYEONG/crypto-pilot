@@ -62,6 +62,16 @@ def test_gate_manifest_missing_recipe_identity_fails_closed() -> None:
         )
 
 
+def test_gate_manifest_empty_events_without_identity_returns_empty() -> None:
+    selected = select_l1_delivery_events(
+        labeled_events=pd.DataFrame(),
+        tf="4h",
+        manifest=_manifest("r1"),
+    )
+
+    assert selected.empty
+
+
 def test_none_manifest_preserves_legacy_native_tf_filter() -> None:
     events = pd.DataFrame(
         {"native_tf": ["4h", "12h"], "entry_idx": [1, 2]}

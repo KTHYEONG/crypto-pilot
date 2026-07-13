@@ -70,6 +70,15 @@ def _make_l1_result(
     )
 
 
+def _ready_registry() -> QualifiedSignalRegistry:
+    return QualifiedSignalRegistry(
+        by_symbol={},
+        ready_symbols=("BTCUSDT",),
+        trade_scope_count=1,
+        registry_version="test",
+    )
+
+
 def _make_aligned(n_bars: int = 100, n_syms: int = 5) -> MagicMock:
     aligned = MagicMock(spec=AlignedMarketData)
     start = np.datetime64("2024-01-01")
@@ -301,7 +310,10 @@ def test_aggregate_per_tf_l1_merges_oos_stacked() -> None:
     per_tf_l1 = {
         "1h": PerTfL1Result(
             tf="1h",
-            l1_result=_make_l1_result(gate_passed=True, n_winning=3, prefix="1h_"),
+            l1_result=dataclasses.replace(
+                _make_l1_result(gate_passed=True, n_winning=3, prefix="1h_"),
+                deployment_registry=_ready_registry(),
+            ),
             n_winning_signals=3,
         ),
         "4h": PerTfL1Result(
@@ -325,7 +337,10 @@ def test_aggregate_per_tf_l1_gate_passed_any() -> None:
         ),
         "4h": PerTfL1Result(
             tf="4h",
-            l1_result=_make_l1_result(gate_passed=True, n_winning=5),
+            l1_result=dataclasses.replace(
+                _make_l1_result(gate_passed=True, n_winning=5),
+                deployment_registry=_ready_registry(),
+            ),
             n_winning_signals=5,
         ),
     }
@@ -385,8 +400,8 @@ def test_aggregate_per_tf_l1_preserves_preferred_tf_registry() -> None:
     assert result.deployment_registry is reg_4h
 
 
-def test_aggregate_per_tf_l1_falls_back_to_artifact_registry() -> None:
-    """S2: top-level deployment_registry=None, artifact registry exists → use artifact registry."""
+def test_aggregate_per_tf_l1_does_not_promote_artifact_only_registry() -> None:
+    """S2: direct L1 registry is required for deployment eligibility."""
     from types import SimpleNamespace
 
     ev = SimpleNamespace(
@@ -409,7 +424,7 @@ def test_aggregate_per_tf_l1_falls_back_to_artifact_registry() -> None:
         "4h": PerTfL1Result(tf="4h", l1_result=l1, n_winning_signals=len(l1.oos_stacked)),
     }
     result = _aggregate_per_tf_l1(per_tf_l1, preferred_tf="4h")
-    assert result.deployment_registry is reg_art
+    assert result.deployment_registry is None
 
 
 def test_aggregate_per_tf_l1_does_not_concat_multiple_registries() -> None:
@@ -987,6 +1002,27 @@ def test_run_per_tf_l1_filters_by_native_tf() -> None:
         filtered = kwargs["labeled_events"]
         assert list(filtered["native_tf"].unique()) == ["6h"]
         assert len(filtered) == 2
+
+
+def test_run_per_tf_l1_blocks_empty_delivery_without_running_nested_swf() -> None:
+    """A routed TF with no events must block cleanly instead of entering SWF."""
+    cfg = CandidateStrategyConfig()
+
+    with patch("src.domain.futures.strategy.tiered_workflow.run_l1_nested_swf") as mock_swf:
+        result = run_per_tf_l1(
+            tf="6h",
+            labeled_events=pd.DataFrame(),
+            aligned=_make_aligned(),
+            outer_folds=(),
+            cfg=cfg,
+            seed=42,
+            verbose=False,
+        )
+
+    mock_swf.assert_not_called()
+    assert not result.l1_result.gate_passed
+    assert result.n_winning_signals == 0
+    assert result.l1_result.n_total == 0
 
 
 # ── S5: Regression — base-only 동치 ────────────────────────────────────────

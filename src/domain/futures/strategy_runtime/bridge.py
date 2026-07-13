@@ -478,7 +478,7 @@ def _build_ltf_native_panels_for_l0(
     [ADR_20260713_L1_1M_COVERAGE_WARMUP] Coverage is evaluated only for the
     admitted symbol scope and the configured warmup-to-holdout interval.
     """
-    del data_maps, cfg
+    del cfg
     from src.domain.futures.alpha_foundry.entry_timing import resolve_1m_coverage_tier
     from src.domain.futures.alpha_foundry.memory import (
         resolve_effective_memory_budget,
@@ -504,8 +504,20 @@ def _build_ltf_native_panels_for_l0(
         hard_limit_mb=int(getattr(runtime_config, "l0_max_rss_mb", 10_240)),
         fraction_cap=float(getattr(runtime_config, "l0_memory_fraction_cap", 0.60)),
     )
+    payload_symbols = frozenset(
+        symbol
+        for symbol in symbols
+        if isinstance(data_maps.get(symbol, {}).get("exec_1m"), pd.DataFrame)
+        and not data_maps[symbol]["exec_1m"].empty
+    )
+    covered_for_plan = payload_symbols or coverage.covered_symbols
+    _run_logger.info(
+        "[LTF_ALPHA] exec_1m payload symbols=%d/%d",
+        len(payload_symbols),
+        len(symbols),
+    )
     plan = resolve_ltf_exec_1m_plan(
-        covered_symbols=coverage.covered_symbols,
+        covered_symbols=covered_for_plan,
         valid_symbols=frozenset(symbols),
         max_symbols=int(getattr(runtime_config, "ltf_exec_1m_max_symbols", 64)),
         max_workers=int(getattr(runtime_config, "ltf_exec_1m_max_workers", 1)),
@@ -521,6 +533,9 @@ def _build_ltf_native_panels_for_l0(
         return ()
 
     def _load_frame(symbol: str) -> pd.DataFrame | None:
+        payload = data_maps.get(symbol, {}).get("exec_1m")
+        if isinstance(payload, pd.DataFrame) and not payload.empty:
+            return payload
         return load_ltf_exec_1m_frame(
             symbol=symbol,
             data_root=data_root,
@@ -547,7 +562,7 @@ def _build_ltf_native_panels_for_l0(
     # [ADR_20260712_L0_EVIDENCE_CONDITIONED_CROSS_TF_ADMISSION] Stamp data-support
     # metadata on LTF panels requiring 1m execution/taker inputs.
     exec_1m_coverage_by_symbol = {
-        symbol: 1.0 if symbol in coverage.covered_symbols else 0.0
+        symbol: 1.0 if symbol in covered_for_plan else 0.0
         for symbol in symbols
     }
 
@@ -950,6 +965,8 @@ def run_candidate_strategy_for_universe(
     silent: bool = False,
     state_cube: Any | None = None,
     l0_evidence_end: Any | None = None,
+    ltf_sync_selection: Any | None = None,
+    derived_store: Any | None = None,
 ) -> CandidatePipelineOutput:
     """Run candidate strategy pipeline and return candidate output."""
     if strategy_cfg is None or preloaded_data_maps is None:
