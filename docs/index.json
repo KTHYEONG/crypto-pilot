@@ -116,10 +116,11 @@
     "testing": "tests/unit/domain/futures/strategy/test_tiered_logging.py"
   },
   "src/application/futures/runner/active_pipeline.py": {
-    "architecture": "docs/architecture/layer0.md",
+    "architecture": "docs/results/result.md",
     "testing": [
       "tests/unit/application/futures/runner/test_pipeline.py",
-      "tests/unit/execution/test_opt_main_futures_strategy_mode.py"
+      "tests/unit/execution/test_opt_main_futures_strategy_mode.py",
+      "tests/unit/application/futures/runner/test_active_pipeline.py"
     ]
   },
   "src/application/futures/runner/tf_probe_scoped.py": {
@@ -152,13 +153,15 @@
     ]
   },
   "src/domain/futures/strategy/tiered_workflow/pipeline.py": {
-    "architecture": "docs/architecture/layer1.md",
+    "architecture": "docs/results/result.md",
     "testing": [
       "tests/unit/domain/futures/strategy/test_tiered_workflow.py",
       "tests/unit/domain/futures/strategy/tiered_workflow/test_l0_readiness_hardening.py",
       "tests/unit/domain/futures/strategy/tiered_workflow/test_l1_readiness_gate_redesign.py",
       "tests/unit/domain/futures/strategy/test_signal_selection_evidence.py",
-      "tests/unit/domain/futures/strategy/tiered_workflow/test_pipeline.py"
+      "tests/unit/domain/futures/strategy/tiered_workflow/test_pipeline.py",
+      "tests/unit/domain/futures/strategy/tiered_workflow/test_l0_delivery_routing.py",
+      "tests/unit/domain/futures/strategy/tiered_workflow/test_per_tf_architecture.py"
     ]
   },
   "src/domain/futures/strategy/config.py": {
@@ -223,10 +226,11 @@
     "testing": "tests/unit/domain/futures/optimization/test_param_spaces.py"
   },
   "src/domain/futures/optimization/opt_data_utils.py": {
-    "architecture": "docs/architecture/layer3.md",
+    "architecture": "docs/results/result.md",
     "testing": [
       "tests/unit/domain/futures/optimization/test_data_window_floor_consistency.py",
-      "tests/unit/domain/futures/optimization/test_opt_data_utils.py"
+      "tests/unit/domain/futures/optimization/test_opt_data_utils.py",
+      "tests/unit/domain/futures/alpha_foundry/test_memory_dataflow.py"
     ]
   },
   "src/domain/futures/optimization/final_evaluator.py": {
