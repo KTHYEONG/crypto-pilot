@@ -1,3 +1,4 @@
+import contextlib
 import os
 import sys
 from pathlib import Path
@@ -32,6 +33,71 @@ FUTURES_DATA_DIR.mkdir(parents=True, exist_ok=True)
 FUTURES_CACHE_DIR.mkdir(parents=True, exist_ok=True)
 RESULTS_DIR.mkdir(parents=True, exist_ok=True)
 LOG_DIR.mkdir(parents=True, exist_ok=True)
+
+class FuturesStorageLayout:
+    """Manages the partitioned layout of futures data files with automatic migration from flat legacy paths."""
+
+    @staticmethod
+    def get_ohlcv_path(symbol: str, timeframe: str, base_dir: Path | None = None) -> Path:
+        base = base_dir if base_dir is not None else FUTURES_DATA_DIR
+        safe_symbol = symbol.replace("/", "_")
+        new_path = base / "ohlcv" / timeframe / f"{safe_symbol}.parquet"
+        old_path = base / f"{safe_symbol}_{timeframe}.parquet"
+        new_path.parent.mkdir(parents=True, exist_ok=True)
+        if not new_path.exists() and old_path.exists():
+            with contextlib.suppress(FileNotFoundError):
+                old_path.rename(new_path)
+        return new_path
+
+    @staticmethod
+    def get_enriched_path(symbol: str, timeframe: str, base_dir: Path | None = None) -> Path:
+        base = base_dir if base_dir is not None else FUTURES_DATA_DIR
+        safe_symbol = symbol.replace("/", "_")
+        new_path = base / "enriched" / timeframe / f"{safe_symbol}.parquet"
+        old_path = base / f"{safe_symbol}_{timeframe}_enriched.parquet"
+        new_path.parent.mkdir(parents=True, exist_ok=True)
+        if not new_path.exists() and old_path.exists():
+            with contextlib.suppress(FileNotFoundError):
+                old_path.rename(new_path)
+        return new_path
+
+    @staticmethod
+    def get_funding_path(symbol: str, base_dir: Path | None = None) -> Path:
+        base = base_dir if base_dir is not None else FUTURES_DATA_DIR
+        safe_symbol = symbol.replace("/", "_")
+        new_path = base / "funding" / f"{safe_symbol}.parquet"
+        old_path = base / f"{safe_symbol}_funding.parquet"
+        new_path.parent.mkdir(parents=True, exist_ok=True)
+        if not new_path.exists() and old_path.exists():
+            with contextlib.suppress(FileNotFoundError):
+                old_path.rename(new_path)
+        return new_path
+
+    @staticmethod
+    def get_metrics_path(symbol: str, base_dir: Path | None = None) -> Path:
+        base = base_dir if base_dir is not None else FUTURES_DATA_DIR
+        safe_symbol = symbol.replace("/", "_")
+        new_path = base / "metrics" / f"{safe_symbol}.parquet"
+        old_path = base / f"{safe_symbol}_metrics.parquet"
+        new_path.parent.mkdir(parents=True, exist_ok=True)
+        if not new_path.exists() and old_path.exists():
+            with contextlib.suppress(FileNotFoundError):
+                old_path.rename(new_path)
+        return new_path
+
+    @staticmethod
+    def get_metadata_path(filename: str, base_dir: Path | None = None) -> Path:
+        base = base_dir if base_dir is not None else FUTURES_DATA_DIR
+        new_path = base / "metadata" / filename
+        old_path = base / filename
+        new_path.parent.mkdir(parents=True, exist_ok=True)
+        if not new_path.exists() and old_path.exists():
+            with contextlib.suppress(FileNotFoundError):
+                old_path.rename(new_path)
+        return new_path
+
+
+
 
 # 매매 기록 데이터베이스 파일 (SQLite)
 TRADE_HISTORY_DB = DATA_DIR / "trade_history.db"

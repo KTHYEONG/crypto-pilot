@@ -354,9 +354,9 @@ def _load_symbol_sync_profiles() -> dict[str, SymbolSyncProfile]:
 
     import json
     import time
-    from pathlib import Path
 
-    cache_path = Path(FUTURES_DATA_DIR) / "symbol_sync_profiles.json"
+    from src.core.settings import FuturesStorageLayout
+    cache_path = FuturesStorageLayout.get_metadata_path("symbol_sync_profiles.json")
     cache_valid_seconds = 24 * 3600
 
     # 1. Try to load from valid cache
@@ -807,8 +807,8 @@ def sync_single_symbol_data(
     # 펀딩 데이터 확보
     collector.ensure_funding_data(symbol, str(effective_start), str(effective_end))
     funding = pd.DataFrame()
-    safe_symbol = symbol.replace("/", "_")
-    funding_path = Path(FUTURES_DATA_DIR) / f"{safe_symbol}_funding.parquet"
+    from src.core.settings import FuturesStorageLayout
+    funding_path = FuturesStorageLayout.get_funding_path(symbol)
     if funding_path.exists():
         try:
             funding = pd.read_parquet(funding_path)
@@ -1045,7 +1045,8 @@ def _worker(
 
 
 def _sync_cache_path(symbol: str, timeframe: str) -> Path:
-    return FUTURES_DATA_DIR / f"{symbol.replace('/', '_')}_{timeframe}.parquet"
+    from src.core.settings import FuturesStorageLayout
+    return FuturesStorageLayout.get_ohlcv_path(symbol, timeframe)
 
 
 def _requested_sync_caches_missing(
@@ -1081,7 +1082,8 @@ def _requested_sync_caches_missing(
         try:
             import json
 
-            meta_path = FUTURES_DATA_DIR / "parquet_cache_meta.json"
+            from src.core.settings import FuturesStorageLayout
+            meta_path = FuturesStorageLayout.get_metadata_path("parquet_cache_meta.json")
             if meta_path.exists():
                 with open(meta_path, encoding="utf-8") as f:
                     metadata_cache = json.load(f)
@@ -1131,7 +1133,11 @@ def _requested_sync_caches_missing(
 
         # Slow path fallback (only if metadata is missing or stale)
         try:
-            cache_df = pd.read_parquet(path, columns=["datetime"])
+            try:
+                cache_df = pd.read_parquet(path, columns=["timestamp"])
+                cache_df["datetime"] = pd.to_datetime(cache_df["timestamp"], unit="ms", utc=True)
+            except Exception:
+                cache_df = pd.read_parquet(path, columns=["datetime"])
         except Exception:
             return True
         if cache_df.empty:
@@ -1156,7 +1162,8 @@ def _requested_sync_caches_missing(
     if not sync_metrics:
         return False
 
-    metrics_path = FUTURES_DATA_DIR / f"{symbol.replace('/', '_')}_metrics.parquet"
+    from src.core.settings import FuturesStorageLayout
+    metrics_path = FuturesStorageLayout.get_metrics_path(symbol)
     if not metrics_path.exists():
         return True
     metrics_meta = (metadata_cache or {}).get(f"{symbol.replace('/', '_')}::metrics", {})
@@ -1280,7 +1287,8 @@ def run_historical_sync(
     try:
         import json
 
-        meta_path = FUTURES_DATA_DIR / "parquet_cache_meta.json"
+        from src.core.settings import FuturesStorageLayout
+        meta_path = FuturesStorageLayout.get_metadata_path("parquet_cache_meta.json")
         if meta_path.exists():
             with open(meta_path, encoding="utf-8") as f:
                 metadata_cache = json.load(f)
