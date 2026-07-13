@@ -20,8 +20,11 @@ def _l0_cross_tf_diversity_audit_enabled() -> bool:
 
 
 def _l0_cross_tf_pruning_enabled() -> bool:
-    """[ADR_20260711_L0_CROSS_TF_PRUNING_ADMISSION] measurement-run opt-in env gate."""
-    return os.environ.get("L0_CROSS_TF_PRUNING", "") not in ("", "0", "false", "False")
+    """[ADR_20260711_L0_CROSS_TF_PRUNING_ADMISSION] 기본 활성화(opt-out).
+
+    fail-open 안전성이 3개 ADR에서 반복 검증됨. L0_CROSS_TF_PRUNING=0 으로 명시적 비활성 가능.
+    """
+    return os.environ.get("L0_CROSS_TF_PRUNING", "") not in ("0", "false", "False")
 
 
 def _l0_parallel_max_workers() -> int:
