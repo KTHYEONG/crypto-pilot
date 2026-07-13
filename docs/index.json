@@ -157,7 +157,8 @@
     "testing": [
       "tests/unit/domain/futures/strategy/test_config.py",
       "tests/unit/domain/futures/strategy/test_family_lifecycle.py",
-      "tests/unit/domain/futures/strategy/tiered_workflow/test_per_tf_architecture.py"
+      "tests/unit/domain/futures/strategy/tiered_workflow/test_per_tf_architecture.py",
+      "tests/unit/domain/futures/strategy/test_rule_signals.py"
     ]
   },
   "src/domain/futures/strategy/tiered_workflow/l2_meta.py": {
