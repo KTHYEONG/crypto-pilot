@@ -373,7 +373,7 @@ def evaluate_panel_cheap_gate(
     total_net = float(np.nansum(net_vals)) if n_events > 0 else 0.0
     total_cost = total_gross - total_net
     eps = 1e-10
-    cost_drag_ratio = total_cost / max(abs(total_gross), eps)
+    cost_drag_ratio = max(0.0, float(total_cost / max(abs(total_gross), eps)))
     if cost_drag_ratio > config.max_cost_drag_ratio:
         reject_reasons_list.append("excess_cost_drag")
 
@@ -715,7 +715,15 @@ def compute_tf_corroboration(
 
 
 def compute_cost_drag_ratio_v2(*, mean_cost_bps: float, mean_gross_bps: float, eps: float = 1e-10) -> float:
-    return mean_cost_bps / max(abs(mean_gross_bps), eps)
+    """Return a finite, non-negative cost drag ratio for gate evidence.
+
+    Empty/degenerate causal panels can yield signed numerical noise in the
+    estimated cost series.  Cost drag is a magnitude metric, so negative
+    values are invalid and must not leak into the evidence contract.
+    """
+    if not np.isfinite(mean_cost_bps) or not np.isfinite(mean_gross_bps):
+        return 0.0
+    return max(0.0, float(mean_cost_bps / max(abs(mean_gross_bps), eps)))
 
 
 def compute_rank_ic_with_tstat(
@@ -1421,7 +1429,7 @@ def evaluate_panel_gate(
         mu_gross = float(np.nanmean(gross_block_means))
         se_gross = float(np.nanstd(gross_block_means, ddof=1) / np.sqrt(max(len(gross_block_means), 1)))
         gross_lcb_bps = mu_gross - 1.0 * se_gross
-        cost_drag = cheap_meta_stats["cost_drag_ratio"]
+        cost_drag = max(0.0, float(cheap_meta_stats["cost_drag_ratio"]))
         turnover = cheap_meta_stats["turnover"]
         rank_ic, rank_ic_tstat = compute_rank_ic_with_tstat(  # NaN-safe (filters non-finite)
             fwd_ret_bps=_fwd_ret_dense,
