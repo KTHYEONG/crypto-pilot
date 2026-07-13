@@ -20,7 +20,7 @@ from src.domain.futures.strategy.common.alignment import AlignedMarketData
 from src.domain.futures.strategy.config import CandidateStrategyConfig, apply_per_family_params
 from src.domain.futures.strategy.exit_policies import build_exit_policies_for_panel
 from src.domain.futures.strategy.market_regime import MarketRegimeContext, compute_market_regime_context
-from src.domain.futures.strategy.timeframe_contracts import scale_bar_count
+from src.domain.futures.strategy.timeframe_contracts import hours_per_bar, scale_bar_count
 
 _logger = logging.getLogger(__name__)
 _ROBUST_Z_EPS = 1e-9
@@ -41,6 +41,7 @@ ALL_SIGNAL_FAMILIES: tuple[str, ...] = (
     "xs_residual_rebalance", "carry_net_of_funding",
     "liquidity_participation_breakout", "btc_neutral_residual_reversal",
     "price_band_reversion",
+    "mtf_fusion",
 )
 
 
@@ -376,6 +377,149 @@ def _resample_to_htf_and_project(
     return out_4h
 
 
+_MTF_FUSION_HTF_CANDIDATES: tuple[str, ...] = ("1D", "12h", "8h")
+
+def _tf_hours(tf: str) -> float:
+    if tf.endswith("h"):
+        return float(tf[:-1])
+    if tf.endswith("D") or tf.endswith("d"):
+        return float(tf[:-1]) * 24
+    return hours_per_bar(tf)
+
+def resolve_valid_htf_choices(native_tf: str) -> tuple[str, ...]:
+    """Return HTF candidates strictly coarser than native_tf. [ADR_20260713_L0_MTF_FUSION_FACTORY]"""
+    native_hours = _tf_hours(native_tf)
+    return tuple(htf for htf in _MTF_FUSION_HTF_CANDIDATES if _tf_hours(htf) > native_hours)
+
+
+def _weighted_moving_average_2d(values: NDArray[np.float64], window: int) -> NDArray[np.float64]:
+    weights = np.arange(1, window + 1, dtype=np.float64)
+    weights_sum = weights.sum()
+    out = np.full_like(values, np.nan)
+    for t in range(window - 1, values.shape[0]):
+        window_slice = values[t - window + 1 : t + 1]
+        out[t] = np.tensordot(weights, window_slice, axes=(0, 0)) / weights_sum
+    return out
+
+
+def _htf_ema_slope_filter(df_htf: pd.DataFrame, span: int) -> pd.DataFrame:
+    ema = df_htf.ewm(span=span, adjust=False).mean()
+    return np.sign(ema.diff()).fillna(0.0)
+
+
+def _htf_macd_cross_filter(df_htf: pd.DataFrame, fast: int, slow: int, signal: int) -> pd.DataFrame:
+    ema_fast = df_htf.ewm(span=fast, adjust=False).mean()
+    ema_slow = df_htf.ewm(span=slow, adjust=False).mean()
+    macd_line = ema_fast - ema_slow
+    macd_signal = macd_line.ewm(span=signal, adjust=False).mean()
+    return np.sign(macd_line - macd_signal).fillna(0.0)
+
+
+def _htf_hma_slope_filter(df_htf: pd.DataFrame, window: int) -> pd.DataFrame:
+    half = max(1, window // 2)
+    root = max(1, round(np.sqrt(window)))
+    values = df_htf.to_numpy(dtype=np.float64)
+    wma_half = np.apply_along_axis(_weighted_moving_average_2d, 0, values, half)
+    wma_full = np.apply_along_axis(_weighted_moving_average_2d, 0, values, window)
+    raw_hma = 2.0 * wma_half - wma_full
+    hma = np.apply_along_axis(_weighted_moving_average_2d, 0, raw_hma, root)
+    slope = np.diff(hma, axis=0, prepend=hma[:1])
+    return pd.DataFrame(np.sign(np.nan_to_num(slope, nan=0.0)), index=df_htf.index)
+
+
+def _htf_ichimoku_cloud_filter(df_htf: pd.DataFrame, tenkan: int, kijun: int, senkou_b: int) -> pd.DataFrame:
+    high, low, close = df_htf["high"], df_htf["low"], df_htf["close"]
+    tenkan_line = (high.rolling(tenkan).max() + low.rolling(tenkan).min()) / 2.0
+    kijun_line = (high.rolling(kijun).max() + low.rolling(kijun).min()) / 2.0
+    senkou_a = (tenkan_line + kijun_line) / 2.0
+    senkou_b_line = (high.rolling(senkou_b).max() + low.rolling(senkou_b).min()) / 2.0
+    cloud_top = pd.concat([senkou_a, senkou_b_line], axis=1).max(axis=1)
+    cloud_bottom = pd.concat([senkou_a, senkou_b_line], axis=1).min(axis=1)
+    direction = np.where(close > cloud_top, 1.0, np.where(close < cloud_bottom, -1.0, 0.0))
+    return pd.DataFrame(direction, index=df_htf.index)
+
+
+def _htf_adx_dmi_filter(df_htf: pd.DataFrame, period: int, threshold: float) -> pd.DataFrame:
+    high, low, close = df_htf["high"], df_htf["low"], df_htf["close"]
+    prev_close = close.shift(1)
+    up_move = high.diff()
+    down_move = -low.diff()
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
+    tr = pd.concat(
+        [high - low, (high - prev_close).abs(), (low - prev_close).abs()], axis=1
+    ).max(axis=1)
+    alpha = 1.0 / period
+    smoothed_tr = tr.ewm(alpha=alpha, adjust=False).mean()
+    smoothed_plus_dm = pd.Series(plus_dm, index=df_htf.index).ewm(alpha=alpha, adjust=False).mean()
+    smoothed_minus_dm = pd.Series(minus_dm, index=df_htf.index).ewm(alpha=alpha, adjust=False).mean()
+    plus_di = 100.0 * smoothed_plus_dm / smoothed_tr.replace(0.0, np.nan)
+    minus_di = 100.0 * smoothed_minus_dm / smoothed_tr.replace(0.0, np.nan)
+    dx = 100.0 * (plus_di - minus_di).abs() / (plus_di + minus_di).replace(0.0, np.nan)
+    adx = dx.ewm(alpha=alpha, adjust=False).mean().fillna(0.0)
+    raw_direction = np.sign((plus_di - minus_di).fillna(0.0))
+    gated_direction = np.where(adx >= threshold, raw_direction, 0.0)
+    return pd.DataFrame(gated_direction, index=df_htf.index)
+
+
+def _ltf_rsi_band_trigger(
+    *, close: NDArray[np.float64], period: int, lo: float, hi: float,
+) -> tuple[NDArray[np.bool_], NDArray[np.bool_], NDArray[np.float64]]:
+    rsi = _rsi_2d(close, period)
+    rsi_prev = np.vstack([rsi[:1], rsi[:-1]])
+    long_mask = (rsi_prev < lo) & (rsi >= lo)
+    short_mask = (rsi_prev > hi) & (rsi <= hi)
+    score = np.tanh((rsi - 50.0) / 10.0)
+    return long_mask, short_mask, score
+
+
+def _ltf_macd_cross_trigger(
+    *, close: NDArray[np.float64], atr: NDArray[np.float64], fast: int, slow: int, signal: int,
+) -> tuple[NDArray[np.bool_], NDArray[np.bool_], NDArray[np.float64]]:
+    ema_fast = _ema_2d(close, span=fast)
+    ema_slow = _ema_2d(close, span=slow)
+    macd_line = ema_fast - ema_slow
+    macd_signal = _ema_2d(macd_line, span=signal)
+    hist = macd_line - macd_signal
+    hist_prev = np.vstack([hist[:1], hist[:-1]])
+    long_mask = (hist > 0) & (hist_prev <= 0)
+    short_mask = (hist < 0) & (hist_prev >= 0)
+    score = np.tanh(hist / atr)
+    return long_mask, short_mask, score
+
+
+def _ltf_donchian_retest_trigger(
+    *, close: NDArray[np.float64], high: NDArray[np.float64], low: NDArray[np.float64],
+    atr: NDArray[np.float64], lookback: int,
+) -> tuple[NDArray[np.bool_], NDArray[np.bool_], NDArray[np.float64]]:
+    upper = _rolling_max_2d(high, window=lookback)
+    lower = _rolling_min_2d(low, window=lookback)
+    prev_close = np.vstack([close[:1], close[:-1]])
+    long_mask = (prev_close < upper) & (close >= upper)
+    short_mask = (prev_close > lower) & (close <= lower)
+    score = np.where(long_mask, (close - upper) / atr, np.where(short_mask, (close - lower) / atr, 0.0))
+    return long_mask, short_mask, score
+
+
+def _ltf_stochastic_cross_trigger(
+    *, close: NDArray[np.float64], high: NDArray[np.float64], low: NDArray[np.float64],
+    k_period: int, d_period: int, lo: float, hi: float,
+) -> tuple[NDArray[np.bool_], NDArray[np.bool_], NDArray[np.float64]]:
+    lowest_low = _rolling_min_2d(low, window=k_period)
+    highest_high = _rolling_max_2d(high, window=k_period)
+    denom = np.maximum(highest_high - lowest_low, 1e-12)
+    pct_k = 100.0 * (close - lowest_low) / denom
+    pct_d = _rolling_mean_2d(pct_k, window=d_period)
+    k_prev = np.vstack([pct_k[:1], pct_k[:-1]])
+    d_prev = np.vstack([pct_d[:1], pct_d[:-1]])
+    cross_up = (k_prev <= d_prev) & (pct_k > pct_d)
+    cross_down = (k_prev >= d_prev) & (pct_k < pct_d)
+    long_mask = cross_up & (pct_d < lo)
+    short_mask = cross_down & (pct_d > hi)
+    score = np.tanh((pct_k - 50.0) / 25.0)
+    return long_mask, short_mask, score
+
+
 def _resolve_panel_archetype(panel: CandidateSignalPanel) -> str:
     """Resolve fallback archetype from family when panel.metadata lacks one.
 
@@ -392,6 +536,7 @@ def _resolve_panel_archetype(panel: CandidateSignalPanel) -> str:
         "trend_pullback_continuation",
         "mtf_trend_pullback",
         "mtf_breakout_retest",
+        "mtf_fusion",
         "vol_term_structure_gate",
         "btc_regime_pullback",
         "sparse_breakout_retest_v2",
@@ -1256,6 +1401,111 @@ def build_rule_signal_panels(
                         },
                     )
                 )
+
+        elif fam == "mtf_fusion":
+            # [ADR_20260713_L0_MTF_FUSION_FACTORY] HTF filter x LTF trigger recipe factory.
+            _htf_filters: tuple[tuple[str, Callable[..., pd.DataFrame], dict[str, Any]], ...] = (
+                ("ema_slope", _htf_ema_slope_filter, {"span": 50}),
+                ("macd_cross", _htf_macd_cross_filter, {"fast": 12, "slow": 26, "signal": 9}),
+                ("hma_slope", _htf_hma_slope_filter, {"window": 20}),
+                ("ichimoku_cloud", _htf_ichimoku_cloud_filter, {"tenkan": 9, "kijun": 26, "senkou_b": 52}),
+                ("adx_dmi", _htf_adx_dmi_filter, {"period": 14, "threshold": 25.0}),
+            )
+            _ltf_trig_fn = Callable[..., tuple[NDArray[np.bool_], NDArray[np.bool_], NDArray[np.float64]]]
+            _ltf_triggers: tuple[tuple[str, _ltf_trig_fn, dict[str, Any]], ...] = (
+                ("rsi_band", _ltf_rsi_band_trigger, {"period": rsi_14_window, "lo": 30.0, "hi": 70.0}),
+                ("macd_cross", _ltf_macd_cross_trigger, {"atr": atr, "fast": 12, "slow": 26, "signal": 9}),
+                ("donchian_retest", _ltf_donchian_retest_trigger, {
+                    "high": high, "low": low, "atr": atr, "lookback": scale_window(20),
+                }),
+                ("stochastic_cross", _ltf_stochastic_cross_trigger, {
+                    "high": high, "low": low, "k_period": scale_window(14), "d_period": 3, "lo": 20.0, "hi": 80.0,
+                }),
+            )
+            _n_sym = close.shape[1]
+            for _htf in resolve_valid_htf_choices(cfg.timeframe):
+                _delta_htf = pd.Timedelta(_htf)
+                for _filter_name, _filter_fn, _filter_params in _htf_filters:
+                    if _filter_name in ("ichimoku_cloud", "adx_dmi"):
+                        _idx_4h = pd.to_datetime(aligned.datetimes)
+                        _res_close = (
+                            pd.DataFrame(close, index=_idx_4h).resample(_htf, closed="left", label="left").last()
+                        )
+                        _res_high = (
+                            pd.DataFrame(high, index=_idx_4h).resample(_htf, closed="left", label="left").max()
+                        )
+                        _res_low = (
+                            pd.DataFrame(low, index=_idx_4h).resample(_htf, closed="left", label="left").min()
+                        )
+                        _dt_higher = (_res_close.index + _delta_htf).to_numpy()
+                        _ohlc_feature = np.zeros_like(_res_close.values, dtype=np.float64)
+                        for s in range(_n_sym):
+                            _df_sym = pd.DataFrame(
+                                {
+                                    "high": _res_high.values[:, s],
+                                    "low": _res_low.values[:, s],
+                                    "close": _res_close.values[:, s],
+                                },
+                                index=_res_close.index,
+                            )
+                            _result = _filter_fn(_df_sym, **_filter_params)
+                            if isinstance(_result, pd.DataFrame):
+                                _arr = _result.to_numpy(dtype=np.float64).ravel()
+                            else:
+                                _arr = np.asarray(_result).ravel()
+                            _ohlc_feature[:, s] = _arr
+                        _proj_htf_dir = np.zeros_like(close, dtype=np.float64)
+                        for s in range(_n_sym):
+                            _proj_htf_dir[:, s] = project_higher_tf_to_grid(
+                                feature_higher=_ohlc_feature[:, s], dt_higher=_dt_higher, dt_grid=aligned.datetimes,
+                            )
+                    else:
+                        def _mtf_fusion_close_fn(
+                            df: pd.DataFrame, _fn: Callable[..., Any] = _filter_fn, _p: dict[str, Any] = _filter_params,
+                        ) -> pd.DataFrame:
+                            return _fn(df, **_p)
+
+                        _proj_htf_dir = _resample_to_htf_and_project(
+                            datetimes_4h=aligned.datetimes,
+                            values_4h=close,
+                            htf=_htf,
+                            agg_method="last",
+                            compute_feature_fn=_mtf_fusion_close_fn,
+                        )
+                    for _trigger_name, _trigger_fn, _trigger_params in _ltf_triggers:
+                        _long_trig, _short_trig, _mf_score = _trigger_fn(close=close, **_trigger_params)
+                        _mf_side = np.zeros_like(close, dtype=np.int8)
+                        _mf_side[(_proj_htf_dir > 0) & _long_trig] = 1
+                        _mf_side[(_proj_htf_dir < 0) & _short_trig] = -1
+                        _variant = f"mtf_fusion_{_htf}_{_filter_name}_{_trigger_name}"
+                        fam_panels.append(
+                            CandidateSignalPanel(
+                                family="mtf_fusion",
+                                variant=_variant,
+                                params=apply_per_family_params(
+                                    cfg, "mtf_fusion", _variant,
+                                    {"htf": _htf, "filter": _filter_name, "trigger": _trigger_name},
+                                ),
+                                datetimes=aligned.datetimes,
+                                symbols=aligned.symbols,
+                                signed_score_2d=np.clip(_mf_score, -1.0, 1.0),
+                                side_hint_2d=_mf_side,
+                                expected_holding_bars=scale_window(16),
+                                min_holding_bars=scale_window(5),
+                                stop_atr_mult=2.0,
+                                take_profit_atr_mult=3.0,
+                                turnover_proxy_2d=np.abs(np.diff(np.clip(_mf_score, -1.0, 1.0), axis=0, prepend=0.0)),
+                                valid_mask_2d=valid_mask,
+                                metadata={
+                                    "archetype": "trend",
+                                    "regime": "mtf_fusion_factory",
+                                    "edge_hypothesis": (
+                                        f"{_htf} {_filter_name} regime filter gates native-TF "
+                                        f"{_trigger_name} trigger entries"
+                                    ),
+                                },
+                            )
+                        )
 
         elif fam == "taker_imbalance_momentum":
             # G7. taker_imbalance_momentum
