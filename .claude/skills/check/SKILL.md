@@ -11,12 +11,9 @@ Unify static contract compliance, dynamic regression test execution, and structu
 ## Execution Rules
 
 ### 1. Minimal Output Validation Pipeline (Token Saving)
-Run ALL of the following commands targeting **only the modified files and target modules**. Ensure quiet/summary flags are used to avoid stdout bloat:
-1. **Lint (`uv run ruff check [modified_files] --quiet`)**: Only check currently modified source and test files.
-2. **Type Check (`uv run mypy [modified_files] --ignore-missing-imports --summary-only`)**: Restrict to changed files with summarized output.
-3. **Regression (`uv run pytest [regression_target] -q --tb=line`)**: Run only spec-mapped test files. `-q` (quiet) hides passing test names, and `--tb=line` limits traceback to a single line per error.
-4. **Coverage (`uv run pytest --cov=[module_path] [regression_target] --cov-report=term`)**: Output summary-level coverage percentages only.
-   - **Diagnostic Exception:** If the coverage target is missed on the first run, the AI is allowed to run `--cov-report=term-missing` targeting **ONLY** the single modified module/file (e.g. `uv run pytest --cov-report=term-missing --cov=[module_path] [target_test_file]`) to identify the unexecuted lines, avoiding blind guessing and saving tokens.
+Run the integrated check script targeting the modified files to avoid multiple command runs and massive terminal logs:
+- **Command:** `uv run python scripts/lean_check.py --files [modified_files]`
+- **Diagnostic Exception:** If the coverage target is missed or tests fail, inspect the minimal summary printed by the script. Avoid running raw pytest or cov commands independently on large paths.
 
 ### 2. Verification Scope
 
