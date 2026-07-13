@@ -113,12 +113,15 @@ graph TD
 
 # 5. Core Readiness & Promotion Gates
 
-### Readiness Gate (5 Conditions)
+### Readiness Gate — Structural (blocking, `Layer1GateReport.structural_passed`)
 - **Fold Coverage**: >= 0.80
-- **Match Ratio**: >= 0.90
 - **Effective N (N_eff)**: >= 3.0
-- **Fold Ratio**: >= 0.50
-- **Pooled LCB**: > 0
+- **Pooled LCB**: > 0 (moving-block bootstrap, pooled across passed folds — `_compute_pooled_probe_lcb`)
+
+### Readiness Gate — Advisory (`Layer1GateReport.advisory_checks`, non-blocking on `structural_passed`)
+- **Match Ratio**: >= 0.90 — pooled `(matched, true_unmatched)` counts across folds, Wilson score-interval lower bound (`_wilson_lower_bound`). `true_unmatched` excludes label-drift mismatches (same `decision_idx`/`symbol`/`strategy_id` but differing `activation_context`), tracked separately as `Layer1FoldReadiness.label_drift_unmatched_count`.
+- **Fold Ratio**: >= 0.50 — fraction of outer folds individually passed; diagnostic-only given `wf_n_folds` (default 4) yields only 5 discrete values.
+- `Layer1GateReport.passed` = `structural_passed AND all(advisory_checks passed)` (legacy strict semantics, unchanged). `CandidateStrategyConfig.l1_structural_gate_only` (default `False`) gates whether `build_qualified_signal_registry()` requires `structural_passed` only (`True`) or the legacy `passed` (`False`); when advisory checks fail under the relaxed mode, `build_qualified_signal_registry(advisory_penalty=...)` dampens `quality_weight` per-strategy instead of blocking the whole TF.
 
 ### Promotion Gate (4 Conditions)
 - **Hard Eligible**: L1 structural gates 통과 여부
