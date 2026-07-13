@@ -17,6 +17,7 @@ related_paths:
   - src/domain/futures/strategy/timeframe_contracts.py
   - src/domain/futures/strategy/candidate_labels.py
   - src/domain/futures/strategy/common/alignment.py
+  - src/domain/futures/strategy/rule_signals.py
 change_triggers:
   - src/domain/futures/alpha_foundry/cheap_gate.py
   - src/domain/futures/alpha_foundry/diversity.py
@@ -26,7 +27,7 @@ change_triggers:
 dependencies:
   documents:
     - docs/architecture/universe.md
-last_verified: 2026-07-12
+last_verified: 2026-07-13
 ---
 
 # 1. Purpose
