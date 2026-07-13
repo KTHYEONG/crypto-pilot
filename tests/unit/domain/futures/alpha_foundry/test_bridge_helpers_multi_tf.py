@@ -909,6 +909,10 @@ class TestAssembleL0ManifestSharedContext:
             "src.domain.futures.alpha_foundry.bridge_helpers.setup_logger",
             return_value=mock_logger,
         )
+        mocker.patch(
+            "src.domain.futures.alpha_foundry.diversity.resolve_cross_tf_shared_context",
+            return_value=mocker.MagicMock(),
+        )
         multi_results, aligned_by_tf = _build_manifest_multi_results_fixture()
 
         assemble_l0_strategy_delivery_manifest(
