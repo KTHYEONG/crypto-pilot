@@ -742,6 +742,18 @@ class RunnerResult:
     reason: str
 
 
+def _has_l1_delivery_candidates(strategy_output: Any) -> bool:
+    """[ADR_20260713_TASK_L1_HYBRID_MEMORY_AUDIT] Return whether L0 admitted L1.
+
+    Multi-timeframe L0 can admit only higher-timeframe recipes while the base
+    timeframe report has zero passed rows.  The manifest is the canonical
+    cross-timeframe handoff, so runner routing must not use the base report as
+    a proxy for the entire L0 result.
+    """
+    manifest = getattr(strategy_output, "l0_delivery_manifest", None)
+    return bool(getattr(manifest, "final_selected_recipe_ids", ()))
+
+
 @dataclass(slots=True, frozen=True)
 class QuarterlyWindow:
     """Resolved quarterly time window for optimization."""
@@ -1231,12 +1243,19 @@ def _run_regime_evaluation_stage(
 
 
 def _tiered_labeled_events(output: CandidatePipelineOutput | None) -> pd.DataFrame:
-    """Return the unfiltered labeled events required by the tiered workflow."""
+    """[ADR_20260713_TASK_L1_HYBRID_MEMORY_AUDIT] Return tiered labeled events."""
     if output is None or getattr(output, "labeled_unfiltered", None) is None:
         raise ValueError("tiered requires unfiltered labeled events")
     labeled = output.labeled_unfiltered
     if not isinstance(labeled, pd.DataFrame):
         raise ValueError("tiered requires unfiltered labeled events")
+    if "l0_recipe_id" not in labeled.columns:
+        _logger.warning(
+            "[L0-DELIVERY] labeled events missing l0_recipe_id; marking %d unrouted event(s)",
+            len(labeled),
+        )
+        labeled = labeled.copy()
+        labeled["l0_recipe_id"] = ""
     return labeled
 
 
@@ -2392,9 +2411,14 @@ def _run_strategy_stage(
             af_report.n_rejected,
             af_report.elapsed_sec,
         )
-        if af_report.mode == "gate" and af_report.n_passed <= 0:
+        has_l1_delivery = _has_l1_delivery_candidates(ml_out)
+        if af_report.mode == "gate" and af_report.n_passed <= 0 and not has_l1_delivery:
             _logger.info("[ALPHA-FOUNDRY] gate produced zero survivors; stopping before tiered L1")
             return None
+        if af_report.mode == "gate" and af_report.n_passed <= 0:
+            _logger.info(
+                "[ALPHA-FOUNDRY] base_tf_survivors=0; continuing with cross_tf L1 delivery candidates"
+            )
     if run_config.phase == "l0":
         _logger.info("[L0] alpha gate completed; stopping before L1 routing")
         return RunnerResult(exit_code=0, reason="l0_mode_done")
