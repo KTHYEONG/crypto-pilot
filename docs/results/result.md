@@ -49,3 +49,12 @@
 
 1. 없음(4h는 현재 상태 — 부분배포 + 구조/자문 분리 — 가 정직한 최종선으로 판단, `l1_structural_gate_only=True` 유지).
 2. 참고: `1000LUNCUSDT`/`BNBUSDT` 등 일부 심볼에서 `[L1-MAJOR-GAP] gap=activation_gap` 경고 반복 관측 — 이번 세션 범위 밖, 별도 확인 필요 시 후속 조사 대상.
+
+## 6. Hybrid 데이터 경로 메모리 검증 (2026-07-13)
+
+- 1m hybrid 적용으로 core loader의 1m 전수 적재는 제거되었지만, 전체 L1 RSS 절감 목표는 달성하지 못했다.
+- 실측 단계별 RSS: data `2.19~2.33GB` → 6개 TF panel construction `5.0~5.35GB` → L1 nested 실행 peak `11.10GB`.
+- `data_stage_early_release` 후 RSS 감소는 거의 없었다. L1에 필요한 `full_strategy_maps`와 multi-TF native panels가 계속 유지되기 때문이다.
+- 병목은 1m 저장/스트리밍이 아니라 `2h,4h,6h,8h,12h,1d` 패널 동시 보유와 nested L1 worker fork이다.
+- 21:07 실행에서는 6개 TF L1이 `gate_passed=True`로 정상 완료되었으므로 코드상 L1 불능은 아니다. 다만 실행 환경이 peak 약 11GB를 안정적으로 수용하지 못하면 전체 실행이 중단될 수 있다.
+- 후속 개선 대상: TF별 panel 수명 단축, L1 TF 순차 처리 후 즉시 해제, nested worker 수/IPC 메모리 상한 조정. 1m hybrid 자체를 되돌리는 것은 해결책이 아니다.
