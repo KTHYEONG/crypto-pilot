@@ -536,6 +536,7 @@ class Layer1FoldReadiness:
     _compat_ic_series: tuple[float, ...]
     rank_ic_all: float = 0.0
     rank_ic_tstat: float = 0.0
+    label_drift_unmatched_count: int = 0
 
     def __init__(
         self,
@@ -564,6 +565,7 @@ class Layer1FoldReadiness:
         probe_gross_edge_series_bps: tuple[float, ...] | None = None,
         rank_ic_all: float = 0.0,
         rank_ic_tstat: float = 0.0,
+        label_drift_unmatched_count: int = 0,
     ) -> None:
         compat_ic_series = tuple(opportunity_ic_series or ())
         compat_probe_series = tuple(probe_series_bps or probe_gross_edge_series_bps or ())
@@ -611,6 +613,7 @@ class Layer1FoldReadiness:
         object.__setattr__(self, "dropped_by_maturity_count", int(dropped_by_maturity_count))
         object.__setattr__(self, "rank_ic_all", float(rank_ic_all))
         object.__setattr__(self, "rank_ic_tstat", float(rank_ic_tstat))
+        object.__setattr__(self, "label_drift_unmatched_count", int(label_drift_unmatched_count))
         object.__setattr__(self, "_compat_ic_series", compat_ic_series)
 
     @property
@@ -634,6 +637,7 @@ class Layer1GateCheck:
     comparator: GateComparator
     passed: bool
     blocker: str | None = None
+    blocking: bool = True
 
 
 @dataclass(slots=True, frozen=True)
@@ -641,6 +645,8 @@ class Layer1GateReport:
     checks: tuple[Layer1GateCheck, ...]
     passed: bool
     blockers: tuple[str, ...]
+    structural_passed: bool = True
+    advisory_checks: tuple[Layer1GateCheck, ...] = ()
 
 
 @dataclass(slots=True, frozen=True)
