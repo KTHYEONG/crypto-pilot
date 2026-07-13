@@ -551,6 +551,7 @@ class CandidateStrategyConfig:
     l1_min_effective_sym_n: float = 3.0
     l1_min_fold_probe_bps: float = 0.0
     l1_probe_lcb_pooled: bool = True
+    l1_structural_gate_only: bool = False
     l1_quality_weight_enabled: bool = True
     # ── L1 Gate Fairness ──
     l1_qw_floor: float = 0.05
