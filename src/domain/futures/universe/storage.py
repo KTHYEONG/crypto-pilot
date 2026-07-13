@@ -20,6 +20,7 @@ from src.core.exchange.binance_client import BinanceClient
 from src.core.exchange.binance_vision import BinanceVisionDownloader
 from src.core.settings import BINANCE_API_KEY, BINANCE_SECRET, FUTURES_DATA_DIR, LOG_DIR
 
+from .data_readiness import SyncTarget
 from .models import (
     DEFAULT_LEDGER_PATH,
     FilterReport,
@@ -1046,7 +1047,10 @@ def _worker(
 
 def _sync_cache_path(symbol: str, timeframe: str) -> Path:
     from src.core.settings import FuturesStorageLayout
-    return FuturesStorageLayout.get_ohlcv_path(symbol, timeframe)
+    # Pass the storage module's root explicitly so tests and alternate data
+    # roots remain isolated from the settings singleton; the layout helper also
+    # performs the legacy flat-path migration.
+    return FuturesStorageLayout.get_ohlcv_path(symbol, timeframe, base_dir=FUTURES_DATA_DIR)
 
 
 def _requested_sync_caches_missing(
@@ -1163,7 +1167,7 @@ def _requested_sync_caches_missing(
         return False
 
     from src.core.settings import FuturesStorageLayout
-    metrics_path = FuturesStorageLayout.get_metrics_path(symbol)
+    metrics_path = FuturesStorageLayout.get_metrics_path(symbol, base_dir=FUTURES_DATA_DIR)
     if not metrics_path.exists():
         return True
     metrics_meta = (metadata_cache or {}).get(f"{symbol.replace('/', '_')}::metrics", {})
@@ -1205,6 +1209,8 @@ def run_historical_sync(
     sync_4h: bool = True,
     sync_1m: bool = False,
     sync_metrics: bool = False,
+    max_workers: int = 4,
+    sync_targets: Sequence[SyncTarget] | None = None,
 ) -> None:
     """메인 동기화 오케스트레이터."""
     ledger_path = DEFAULT_LEDGER_PATH

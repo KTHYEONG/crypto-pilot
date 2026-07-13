@@ -8,6 +8,7 @@ from typing import Any, ClassVar
 import numpy as np
 import pandas as pd
 
+from src.domain.futures.alpha_foundry.bridge_helpers import AlphaFoundryL0Result
 from src.domain.futures.strategy.candidate_contracts import CandidateSignalPanel
 from src.domain.futures.strategy.common.alignment import AlignedMarketData
 from src.domain.futures.strategy.config import StrategyConfig
@@ -34,6 +35,17 @@ def _make_panel() -> CandidateSignalPanel:
         valid_mask_2d=np.ones((1, 1), dtype=bool),
         metadata={"native_tf": "4h"},
         archetype="trend",
+    )
+
+
+def _ltf_runtime_config() -> SimpleNamespace:
+    return SimpleNamespace(
+        ltf_streaming_enabled=True,
+        ltf_exec_1m_min_coverage=0.80,
+        ltf_exec_1m_max_symbols=64,
+        ltf_exec_1m_max_workers=1,
+        l0_max_rss_mb=10_240,
+        l0_memory_fraction_cap=0.60,
     )
 
 
@@ -82,6 +94,7 @@ def test_build_ltf_native_panels_for_l0_uses_exec_1m_payload() -> None:
         symbols=("BTCUSDT",),
         aligned=aligned,
         cfg=StrategyConfig().candidate,
+        runtime_config=_ltf_runtime_config(),
         family_filter=("funding_session_orb_flow",),
     )
 
@@ -139,6 +152,7 @@ def test_build_ltf_native_panels_for_l0_skips_symbols_missing_exec_1m(caplog: An
             symbols=("BTCUSDT", "ETHUSDT"),
             aligned=aligned,
             cfg=StrategyConfig().candidate,
+            runtime_config=_ltf_runtime_config(),
             family_filter=("funding_session_orb_flow",),
         )
 
@@ -360,7 +374,12 @@ def test_bridge_writes_family_correlation_audit_when_enabled(
     )
     monkeypatch.setattr(
         "src.domain.futures.alpha_foundry.bridge_helpers.run_alpha_foundry_l0_gate",
-        lambda *_a, **_k: SimpleNamespace(panels_for_l1=(panel,), report=SimpleNamespace()),
+        lambda *_a, **_k: AlphaFoundryL0Result(
+            panels_for_l1=(panel,),
+            summary_report=SimpleNamespace(),
+            gate_results=(),
+            panel_bindings=(),
+        ),
     )
     monkeypatch.setattr(
         "src.domain.futures.strategy.rule_diagnostics.compute_rule_diagnostics",

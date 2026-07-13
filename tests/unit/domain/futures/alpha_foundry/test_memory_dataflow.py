@@ -76,6 +76,35 @@ def test_load_ltf_exec_1m_frame_missing_optional_trades_loads_required_columns(t
     assert "trades" not in result.columns
 
 
+def test_load_ltf_exec_1m_frame_reads_partitioned_ohlcv_layout(tmp_path: Path) -> None:
+    """[M03] Streaming loader reads the canonical partitioned 1m cache."""
+    cache_path = tmp_path / "futures" / "ohlcv" / "1m" / "BTCUSDT.parquet"
+    cache_path.parent.mkdir(parents=True)
+    timestamps = pd.date_range("2026-01-01", periods=2, freq="1min", tz="UTC")
+    frame = pd.DataFrame(
+        {
+            "timestamp": [int(timestamp.value // 1_000_000) for timestamp in timestamps],
+            "high": [2.0, 2.0],
+            "low": [1.0, 1.0],
+            "close": [1.5, 1.5],
+            "volume": [10.0, 10.0],
+            "taker_buy_base_volume": [5.0, 5.0],
+            "quote_vol": [15.0, 15.0],
+        }
+    )
+    frame.to_parquet(cache_path, index=False)
+
+    result = load_ltf_exec_1m_frame(
+        symbol="BTCUSDT",
+        data_root=tmp_path,
+        start_datetime=pd.Timestamp("2026-01-01", tz="UTC"),
+        end_datetime=pd.Timestamp("2026-01-02", tz="UTC"),
+    )
+
+    assert result is not None
+    assert len(result) == 2
+
+
 # ── M02: OOS covers IS range ───────────────────────────────────────────
 
 
