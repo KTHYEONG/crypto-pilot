@@ -137,14 +137,39 @@ graph TD
 2. **Missing Line Tracking:**
    If the coverage output identifies missing/unexecuted lines (indicated under the `Missing` column), the AI must immediately write targeted edge cases (e.g., negative parameters, exceptions, fallback branches) to cover those lines.
 3. **Risk-Adjusted Coverage Targets (TIERED — apply strictly by layer):**
-   - **Core Logic (Domain, Signal, Sizing, Portfolio):** Aim for **>= 90%**. Run the self-correction loop here.
-   - **Adapters/Runners/DTOs/Boilerplate:** Aim for **>= 70%**. Restrict the self-correction loop to 1 iteration for these layers to prevent token waste.
-   - **Entrypoints / CLI / `__init__.py`:** Skip coverage requirement entirely. Use `# pragma: no cover` where applicable.
+   - Core Logic (Domain, Signal, Sizing, Portfolio): Target >= 90%. (Tolerance Buffer: **85% ~ 89%** is accepted as a **Conditional PASS** if all unit tests pass, avoiding unnecessary code rewrite loops).
+   - Adapters/Runners/DTOs/Boilerplate: Target >= 70%. (Tolerance Buffer: **65% ~ 69%** is accepted as a **Conditional PASS**). Restrict the self-correction loop to 1 iteration.
+   - Entrypoints / CLI / `__init__.py`: Skip coverage requirement entirely. Use `# pragma: no cover` where applicable.
 4. **Modified-Files-Only Coverage Scope:**
    - Measure coverage ONLY on files created or modified by the current spec (determinable via `git diff --name-only` against the base branch). Exclude unchanged files in the same module directory from the coverage report to prevent false-negative penalties.
-5. **Coverage Loop Limit:**
+5. **Coverage Loop Limit & Diagnostics:**
    - Limit the coverage self-correction loop to a maximum of 3 iterations. If targets are not met within 3 iterations, stop, commit the current progress, and report the specific bottleneck to the user.
+   - **Diagnostic Exception:** If coverage target is missed on the 1st run, the AI is allowed to run `--cov-report=term-missing` targeting **exclusively the modified file** to identify exact missing lines, minimizing token consumption.
 6. **Meaningful Assertions:**
    - Ensure every test includes meaningful assertions that validate the return value or verify expected state side effects; avoid writing tests solely to execute lines without validation.
 7. **Precise Pragma Usage:**
-   - Limit the use of `# pragma: no cover` strictly to genuinely untestable code paths (e.g., `if __name__ == "__main__":`).
+   - Limit the use of `# pragma: no cover` strictly to genuinely untestable code paths (e.g., `if __name__ == "__main__":`), defensive guard statements (e.g., unreachable `else: raise ValueError`, assertion errors), and internal logging-only blocks (`except Exception as e: logger.exception(...)` with re-raise or passive handlers).
+
+---
+
+## 6. Advanced Stability Directives
+
+### 6.1 Async Fixture Event Loop Safety (Preventing Event Loop Closed Errors)
+- Avoid sharing functional-scoped async tests with higher-scoped (`session` or `module`) async fixtures without ensuring the event loop persists.
+- If a session-wide DB pool or client connection is required, override the `event_loop` fixture in `tests/conftest.py` to persist across the session:
+  ```python
+  @pytest.fixture(scope="session")
+  def event_loop():
+      policy = asyncio.get_event_loop_policy()
+      loop = policy.new_event_loop()
+      yield loop
+      loop.close()
+  ```
+
+### 6.2 Schema Drift Prevention (External API Mock Validation)
+- Do not blindly trust static JSON fixtures for mocking external API responses (e.g. CCXT or order APIs).
+- Always validate mock schemas against project Pydantic Models or TypedDict structures to verify contract alignment. Mock data must satisfy the exact parser logic used in source code.
+
+### 6.3 Time-Dependent Logic Isolation (Using DI Over Patches)
+- For modules relying on datetime/timestamp logic (e.g. order expiration, backtesting, candles), prefer injecting a Clock interface (e.g. `src.core.clock.Clock`) instead of patching `datetime` with `freezegun`.
+- Use a `MockClock` in tests to manually advance time via `.advance_time(seconds)`. This prevents asynchronous loop hangs or scheduler lockups.

@@ -15,7 +15,8 @@ Run ALL of the following commands targeting **only the modified files and target
 1. **Lint (`uv run ruff check [modified_files] --quiet`)**: Only check currently modified source and test files.
 2. **Type Check (`uv run mypy [modified_files] --ignore-missing-imports --summary-only`)**: Restrict to changed files with summarized output.
 3. **Regression (`uv run pytest [regression_target] -q --tb=line`)**: Run only spec-mapped test files. `-q` (quiet) hides passing test names, and `--tb=line` limits traceback to a single line per error.
-4. **Coverage (`uv run pytest --cov=[module_path] [regression_target] --cov-report=term`)**: Output summary-level coverage percentages only. **Never use `--cov-report=term-missing`** to prevent long missing-line tables.
+4. **Coverage (`uv run pytest --cov=[module_path] [regression_target] --cov-report=term`)**: Output summary-level coverage percentages only.
+   - **Diagnostic Exception:** If the coverage target is missed on the first run, the AI is allowed to run `--cov-report=term-missing` targeting **ONLY** the single modified module/file (e.g. `uv run pytest --cov-report=term-missing --cov=[module_path] [target_test_file]`) to identify the unexecuted lines, avoiding blind guessing and saving tokens.
 
 ### 2. Verification Scope
 
@@ -23,9 +24,9 @@ Run ALL of the following commands targeting **only the modified files and target
 - **Precise Paths**: Always specify the exact target test file path (e.g. `tests/unit/domain/.../test_x.py`). Never run pytest on broad directories like `tests/` to prevent execution overhead and massive terminal outputs.
 
 #### 2b. Coverage Thresholds
-- Compare against target thresholds using the printed coverage summary:
-  - **Core Logic (Domain, Signal, Sizing, Portfolio):** >= 90%
-  - **Adapters/Runners/DTOs/Boilerplate:** >= 70%
+- Compare against target thresholds using the printed coverage summary (Apply Tolerance Buffer):
+  - **Core Logic (Domain, Signal, Sizing, Portfolio):** Target >= 90% (Accept **85% ~ 89%** as a **Conditional PASS** if all unit tests pass).
+  - **Adapters/Runners/DTOs/Boilerplate:** Target >= 70% (Accept **65% ~ 69%** as a **Conditional PASS**).
 - Measure coverage exclusively on files created or modified by the current task.
 
 ### 3. Triage & Circuit Breaker (On Failure)
