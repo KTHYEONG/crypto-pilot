@@ -2865,6 +2865,40 @@ def _resolve_aligned_for_tf(
     return aligned
 
 
+def select_l1_delivery_events(
+    *,
+    labeled_events: pd.DataFrame,
+    tf: str,
+    manifest: object | None,
+) -> pd.DataFrame:
+    """Select the exact TF/recipe event intersection or fail closed."""
+    if manifest is None:
+        if "native_tf" in labeled_events.columns:
+            return labeled_events[labeled_events["native_tf"] == tf]
+        return labeled_events
+    from src.domain.futures.alpha_foundry.contracts import L0DeliveryContractError, L0StrategyDeliveryManifest
+    if not isinstance(manifest, L0StrategyDeliveryManifest):
+        if "native_tf" in labeled_events.columns:
+            return labeled_events[labeled_events["native_tf"] == tf]
+        return labeled_events
+    if "l0_recipe_id" not in labeled_events.columns:
+        raise L0DeliveryContractError("gate manifest requires l0_recipe_id column in labeled_events")
+    total_allocated = sum(r.allocated_budget_units for r in manifest.routes)
+    if total_allocated > manifest.total_l1_verification_budget:
+        raise L0DeliveryContractError(
+            f"manifest budget overflow: allocated={total_allocated} > budget={manifest.total_l1_verification_budget}"
+        )
+    route_ids: set[str] = set()
+    for route in manifest.routes:
+        if route.timeframe == tf:
+            route_ids.update(route.selected_recipe_ids)
+    if not route_ids:
+        return labeled_events.iloc[:0]
+    return labeled_events[
+        (labeled_events["native_tf"] == tf) & (labeled_events["l0_recipe_id"].isin(route_ids))
+    ]
+
+
 def run_per_tf_l1(
     *,
     tf: str,
@@ -2878,12 +2912,13 @@ def run_per_tf_l1(
     probe_diversity_corr: dict[str, float] | None = None,
     probe_prior_map: dict[tuple[str, str, str], float] | None = None,
     defer_artifact: bool = False,
+    l0_delivery_manifest: object | None = None,
 ) -> PerTfL1Result:
     """Run L1 validation for a single TF using its native signal pool."""
 
     _tf_cfg = strategy_config.apply_tf_gate_overrides(cfg, tf)
-    _tf_labeled = (
-        labeled_events[labeled_events["native_tf"] == tf] if "native_tf" in labeled_events.columns else labeled_events
+    _tf_labeled = select_l1_delivery_events(
+        labeled_events=labeled_events, tf=tf, manifest=l0_delivery_manifest,
     )
     from src.domain.futures.strategy import tiered_workflow as _tiered_workflow
 
@@ -3101,7 +3136,10 @@ def _aggregate_per_tf_l1(
     *,
     preferred_tf: str | None = None,
 ) -> Layer1Result:
-    """[ADR_20260713_L1_DEPLOYMENT_PASS_CONTRACT][ADR_20260705_MAJOR_SYMBOL_REGISTRY_REPLAY_SYNC] Merge per-TF L1 results.
+    """Merge per-TF L1 results.
+
+    [ADR_20260713_L1_DEPLOYMENT_PASS_CONTRACT]
+    [ADR_20260705_MAJOR_SYMBOL_REGISTRY_REPLAY_SYNC]
 
     Args:
         per_tf_l1: Per-TF L1 results.
@@ -3195,6 +3233,7 @@ def run_tiered_pipeline(
     l2_awf_folds: tuple[WFFold, ...] | None = None,
     l2_eval_memo: dict[Any, Any] | None = None,
     regime_code_1d: NDArray[np.int8] | None = None,
+    l0_delivery_manifest: object | None = None,
 ) -> tuple[Layer1Result, Layer2Result | None, Layer3Result | None]:
     """[ADR_20260705_MAJOR_SYMBOL_REGISTRY_REPLAY_SYNC][ADR_20260705_CHAMPION_REPRODUCIBILITY_AND_REGISTRY_CENSUS]
     3-Layer 티어드 파이프라인 실행.
@@ -3315,6 +3354,7 @@ def run_tiered_pipeline(
                 probe_diversity_corr=probe_diversity_corr,
                 probe_prior_map=probe_prior_map,
                 defer_artifact=defer_artifact_tf,
+                l0_delivery_manifest=l0_delivery_manifest,
             )
             logger.log(
                 PERF,
