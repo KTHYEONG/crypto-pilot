@@ -2377,6 +2377,7 @@ def _run_strategy_stage(
         trading_symbols=bridge_symbol_scope,
         silent=False,
         state_cube=_pit_state_cube,
+        l0_evidence_end=getattr(tiered_window, "l1_start", None) if use_tiered else None,
     )
     bridge_elapsed = time.perf_counter() - t_bridge_start
     strategy_steps["bridge"] = bridge_elapsed
@@ -2513,6 +2514,7 @@ def _run_strategy_stage(
                 target_phase="l1",
                 verbose=True,
                 probe_manifest=_probe_manifest_raw,
+                l0_delivery_manifest=ml_out.l0_delivery_manifest,
             )
             _log_mem("tiered_pipeline", _mem_tiered_before, extra=f"phase={run_config.phase}")
             if not l1_res.gate_passed:

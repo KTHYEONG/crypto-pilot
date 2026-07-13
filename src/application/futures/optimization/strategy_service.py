@@ -334,6 +334,7 @@ def run_active_strategy_output_bridge(
     trading_symbols: tuple[str, ...] | None = None,
     silent: bool = False,
     state_cube: Any | None = None,
+    l0_evidence_end: Any | None = None,
 ) -> CandidatePipelineOutput:
     del (
         fetch_start,
@@ -366,6 +367,7 @@ def run_active_strategy_output_bridge(
         alpha_foundry_config=getattr(run_config, "alpha_foundry", None),
         silent=silent,
         state_cube=state_cube,
+        l0_evidence_end=l0_evidence_end,
     )
     _logger.log(
         PERF,
