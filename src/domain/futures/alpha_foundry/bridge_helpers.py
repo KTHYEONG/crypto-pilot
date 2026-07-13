@@ -18,14 +18,12 @@ import json
 import logging
 import time as _time_module
 from collections.abc import Mapping, MutableMapping, Sequence
+from concurrent.futures import ProcessPoolExecutor
 from dataclasses import asdict, dataclass, replace
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Literal, cast
+from typing import Any, Literal, cast
 
-if TYPE_CHECKING:
-    pass
-from concurrent.futures import ProcessPoolExecutor
-
+import numpy as np
 import pandas as pd
 
 from src.core.utils.utils import setup_logger
@@ -33,6 +31,7 @@ from src.domain.futures.alpha_foundry.contracts import (
     AlphaRecipe,
     CandidateFeatureFamily,
     L0StrategyDeliveryManifest,
+    L0TfDeliveryRoute,
 )
 from src.domain.futures.alpha_foundry.contracts import (
     AlphaRecipe as _AlphaRecipe,
@@ -1014,6 +1013,31 @@ def run_alpha_foundry_l0_gate_multi_tf(
     return results
 
 
+def build_causal_l0_panel_views(
+    *,
+    panels: Sequence[Any],
+    evidence_end_ns: int,
+) -> tuple[Any, ...]:
+    """Return immutable panel views whose eligible exits precede the cutoff.
+
+    A signal at index t is L0-evidence eligible only when:
+        t + 1 + h_p <= c_tf
+    where c_tf is the first bar index whose timestamp >= evidence_end_ns
+    (exclusive boundary) and h_p is the panel's expected holding horizon.
+    """
+    cutoff_dt = np.datetime64(evidence_end_ns, "ns")
+    result: list[Any] = []
+    for panel in panels:
+        c_tf = int(np.searchsorted(panel.datetimes, cutoff_dt, side="left"))
+        h_p = int(panel.expected_holding_bars)
+        n_bars = len(panel.datetimes)
+        causal_mask = (np.arange(n_bars, dtype=np.int64) + 1 + h_p) <= c_tf
+        new_valid = panel.valid_mask_2d.copy()
+        new_valid &= causal_mask[:, None]
+        result.append(replace(panel, valid_mask_2d=new_valid))
+    return tuple(result)
+
+
 def assemble_l0_strategy_delivery_manifest(
     *,
     multi_results: Mapping[str, AlphaFoundryL0Result],
@@ -1021,6 +1045,7 @@ def assemble_l0_strategy_delivery_manifest(
     run_id_prefix: str,
     enable_audit: bool,
     enable_pruning: bool,
+    evidence_end_ns: int = 0,
     total_l1_verification_budget: int = 30,
     max_novelty_corr: float = 0.70,
     min_survivors_per_archetype: int = 1,
@@ -1231,6 +1256,28 @@ def assemble_l0_strategy_delivery_manifest(
         if r is not None:
             reports_by_tf[tf_k] = r
 
+    routes: list[L0TfDeliveryRoute] = []
+    for tf_k, res in pruned_multi_results.items():
+        recipe_ids = tuple(c.recipe_id for c in res.candidates_for_l1)
+        if not recipe_ids:
+            continue
+        budget_units = sum(c.l1_budget_units for c in res.candidates_for_l1)
+        _end_ns = evidence_end_ns
+        if _end_ns <= 0:
+            _aligned = aligned_by_tf.get(tf_k)
+            if _aligned is not None and hasattr(_aligned, "datetimes") and len(_aligned.datetimes) > 0:
+                _end_ns = int(np.datetime64(_aligned.datetimes[-1], "ns").astype(np.int64))
+        if _end_ns <= 0:
+            _end_ns = 1
+        routes.append(
+            L0TfDeliveryRoute(
+                timeframe=tf_k,
+                selected_recipe_ids=recipe_ids,
+                allocated_budget_units=budget_units,
+                evidence_end_ns=_end_ns,
+            )
+        )
+
     manifest = L0StrategyDeliveryManifest(
         run_id_prefix=run_id_prefix,
         reports_by_tf=reports_by_tf,
@@ -1239,6 +1286,7 @@ def assemble_l0_strategy_delivery_manifest(
         total_l1_verification_budget=total_l1_verification_budget,
         pruning_status=manifest_status,  # type: ignore[arg-type]
         pruning_reason=manifest_reason,
+        routes=tuple(routes),
     )
 
     return pruned_multi_results, manifest
