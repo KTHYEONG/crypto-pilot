@@ -26,7 +26,7 @@ Before implementing any quantitative algorithm, the AI is encouraged to outline 
 - **Vectorized Shape Tracking:** Track expected array shapes (e.g., `returns: [T, N]`) to prevent broadcasting errors.
 
 ## 2. High-Performance Computing (HPC) & Efficiency
-성능, 메모리 및 HPC 최적화에 관한 모든 지침은 단일 진실 공급원(SSOT)인 [performance.md](file:///.agents/rules/performance.md)를 상시 참조하고 적용합니다.
+All directives regarding performance, memory, and HPC optimization are delegated to [performance.md](file:///.agents/rules/performance.md), which serves as the Single Source of Truth (SSOT).
 
 
 ## 3. Numerical Stability, Precision & Reproducibility
