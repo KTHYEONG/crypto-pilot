@@ -141,3 +141,5 @@ graph TD
 | `cross_tf_pruning_min_survivors_per_tf` | 1 | Minimum surviving candidates per timeframe after cross-TF pruning |
 | `l0_parallel_max_workers` | 1 | Phase-3 cross-TF gate concurrency; 1=sequential, 2-4=fork-based parallel |
 | `enable_tf_probe_scoped` | True | Capability to skip the scoped TF-probe diagnostic stage (decision deferred, see `docs/results/result.md`) |
+| `DEFAULT_L1_TFS` | `("2h","4h","6h","8h","12h","1d")` | L1-evaluated timeframe portfolio (`src/domain/futures/strategy/config.py`); native granularities are `1m/1h/4h/1d` only, 2h/6h/8h/12h are synthetic resamples |
+| `RETIRED_FAMILIES` | 14 families (frozenset, `src/domain/futures/strategy/family_lifecycle.py`) | Whole-family exclusion applied at both recipe-catalog construction (`build_alpha_recipe_catalog`) and TF signal-pool resolution (`resolve_tf_signal_pool`) — distinct from `FAMILY_TF_RETIREMENT` (per-(family,tf) retirement) |
