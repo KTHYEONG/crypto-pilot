@@ -24,6 +24,15 @@ from src.domain.futures.strategy.rule_signals import (
 )
 
 
+def _cfg_with_funding_flow_carry() -> CandidateStrategyConfig:
+    """funding_flow_carry is retired from the production pool
+    ([ADR_20260713_L0_L1_ASSET_GROWTH_RESTRUCTURE], durable-zero gate pass rate) but
+    its signal-generation logic in rule_signals.py is still directly unit-tested here.
+    """
+    base = CandidateStrategyConfig()
+    return CandidateStrategyConfig(candidate_families=(*base.candidate_families, "funding_flow_carry"))
+
+
 def _make_aligned(t: int = 150, n: int = 2) -> AlignedMarketData:
     base = np.linspace(100.0, 130.0, t * n, dtype=np.float64).reshape(t, n)
     datetimes = np.datetime64("2025-01-01T00", "h") + np.arange(t).astype("timedelta64[h]")
@@ -274,7 +283,10 @@ def test_candidate_strategy_config_defaults_include_new_flow_families() -> None:
         "funding_flow_carry",
         "lsr_oi_regime_filter",
     }
-    assert expected_families.issubset(set(cfg.candidate_families))
+    # [ADR_20260713_L0_L1_ASSET_GROWTH_RESTRUCTURE] durable-zero gate pass rate —
+    # removed from candidate_families (production pool) but kept in
+    # ensemble_variant_prior_families (unrelated L2 ensemble-layer list, out of scope).
+    assert expected_families.isdisjoint(set(cfg.candidate_families))
     assert expected_families.issubset(set(cfg.ensemble_variant_prior_families))
 
 
@@ -322,7 +334,7 @@ def test_funding_flow_carry_emits_short_entry_with_shifted_event_offset() -> Non
     taker_buy[130:170, :] = 400.0
     aligned = _make_flow_aligned(close=close, funding=funding, taker_buy=taker_buy)
 
-    panels = build_rule_signal_panels(aligned=aligned, cfg=CandidateStrategyConfig())
+    panels = build_rule_signal_panels(aligned=aligned, cfg=_cfg_with_funding_flow_carry())
     carry_panels = [panel for panel in panels if panel.family == "funding_flow_carry"]
 
     assert len(carry_panels) == 1
@@ -346,7 +358,7 @@ def test_funding_flow_carry_rejects_opposite_flow_confirmation() -> None:
     taker_buy[130:170, :] = 600.0
     aligned = _make_flow_aligned(close=close, funding=funding, taker_buy=taker_buy)
 
-    panels = build_rule_signal_panels(aligned=aligned, cfg=CandidateStrategyConfig())
+    panels = build_rule_signal_panels(aligned=aligned, cfg=_cfg_with_funding_flow_carry())
     carry_panels = [panel for panel in panels if panel.family == "funding_flow_carry"]
 
     assert len(carry_panels) == 1
@@ -366,7 +378,7 @@ def test_flow_families_become_empty_when_taker_data_is_missing() -> None:
     )
 
     for aligned in (aligned_none, aligned_nan):
-        panels = build_rule_signal_panels(aligned=aligned, cfg=CandidateStrategyConfig())
+        panels = build_rule_signal_panels(aligned=aligned, cfg=_cfg_with_funding_flow_carry())
         flow_panels = [panel for panel in panels if panel.family == "funding_flow_carry"]
         assert len(flow_panels) == 1
         for panel in flow_panels:
@@ -515,7 +527,7 @@ def test_new_signal_families_shapes_and_side_hints() -> None:
 
 def test_new_flow_signal_families_include_metadata_contract() -> None:
     aligned = _make_aligned(t=220)
-    cfg = CandidateStrategyConfig()
+    cfg = _cfg_with_funding_flow_carry()
     panels = build_rule_signal_panels(aligned=aligned, cfg=cfg)
 
     flow_panels = [panel for panel in panels if panel.family == "funding_flow_carry"]
@@ -717,7 +729,7 @@ def test_dual_momentum_no_refire_during_persistent_agreement() -> None:
 def test_touched_panels_expose_required_metadata() -> None:
     # Arrange
     aligned = _make_aligned(t=200)
-    cfg = CandidateStrategyConfig()
+    cfg = _cfg_with_funding_flow_carry()
 
     # Act
     panels = build_rule_signal_panels(aligned=aligned, cfg=cfg)

@@ -1064,7 +1064,7 @@ def assemble_l0_strategy_delivery_manifest(
     all_tfs_with_candidates = bool(selected_by_tf and panel_by_recipe_id)
 
     shared_context: Any = None
-    if enable_audit and enable_pruning and all_tfs_with_candidates:
+    if (enable_audit or enable_pruning) and all_tfs_with_candidates:
         from src.domain.futures.alpha_foundry.diversity import resolve_cross_tf_shared_context
 
         try:
