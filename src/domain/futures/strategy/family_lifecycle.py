@@ -46,6 +46,29 @@ FAMILY_TF_RETIREMENT: frozenset[tuple[str, str]] = frozenset({
 })
 
 
+RETIRED_FAMILIES: frozenset[str] = frozenset({
+    # [ADR_20260713_L0_L1_ASSET_GROWTH_RESTRUCTURE] durable-zero: 0% gate pass rate
+    # across all evaluated TFs (run 4h_1783923826, pooled n=298), consistent with prior
+    # economic-replay rejection cycles. Removed from candidate_families/_DEFAULT_PER_TF_FAMILIES
+    # (all TFs) but signal-generation code in signals/rules.py / strategy/rule_signals.py is kept
+    # intentionally for direct unit-test coverage of the underlying indicator logic.
+    "xs_momentum",
+    "xs_flow",
+    "xs_oi_skew",
+    "funding_flow_carry",
+    "lsr_oi_regime_filter",
+    "supertrend",
+    "ichimoku_trend",
+    "carry_net_of_funding",
+    "liquidity_participation_breakout",
+    "btc_neutral_residual_reversal",
+    "price_band_reversion",
+    "funding_flow_exhaustion_sparse",
+    "oi_lsr_unwind",
+    "vol_contraction_breakout",
+})
+
+
 def is_family_tf_retired(family: str, tf: str) -> bool:
     """Return True when (family, tf) already failed a full EconomicReplay cycle.
 
