@@ -13,7 +13,7 @@ import pyarrow.compute as pc
 import pyarrow.dataset as ds
 
 from src.core.optimization.opt_utils import compute_segment_merge_index
-from src.core.settings import FUTURES_DATA_DIR, LOG_DIR
+from src.core.settings import LOG_DIR
 from src.domain.futures.backtest.data_loader import (
     DataCollector,
     summarize_dataframe_integrity,
@@ -290,7 +290,8 @@ def filter_symbols_by_data_sufficiency(
     try:
         import json
 
-        profiles_path = Path(FUTURES_DATA_DIR) / "symbol_sync_profiles.json"
+        from src.core.settings import FuturesStorageLayout
+        profiles_path = FuturesStorageLayout.get_metadata_path("symbol_sync_profiles.json")
         if not profiles_path.exists():
             try:
                 from src.domain.futures.universe.storage import _load_symbol_sync_profiles
@@ -374,7 +375,8 @@ def _should_load_exec_1m(load_exec_1m: bool | None) -> bool:
 
 def _safe_read_funding_parquet(symbol: str) -> pd.DataFrame | None:
     """Read funding parquet for symbol with defensive fallback."""
-    f_path = Path(FUTURES_DATA_DIR) / f"{symbol.replace('/', '_')}_funding.parquet"
+    from src.core.settings import FuturesStorageLayout
+    f_path = FuturesStorageLayout.get_funding_path(symbol)
     if not f_path.exists():
         return None
     try:
@@ -568,6 +570,9 @@ def _scan_enriched_dataset(
             proj = [c for c in proj if c in schema_names]
             table = dataset.to_table(filter=filt, columns=proj, use_threads=True)
             df = table.to_pandas()
+            # Dynamically reconstruct datetime from timestamp if missing
+            if "timestamp" in df.columns and "datetime" not in df.columns:
+                df["datetime"] = pd.to_datetime(df["timestamp"], unit="ms", utc=True)
             # Ensure datetime column is tz-aware UTC (Arrow may return tz-naive)
             if "datetime" in df.columns:
                 if not pd.api.types.is_datetime64_any_dtype(df["datetime"]):
@@ -605,7 +610,8 @@ def _prepare_funding_metrics(
         cols_fr = [c for c in funding_df.columns if c not in exclude_fr]
         funding_df_prepared = funding_df[cols_fr].sort_values("timestamp").reset_index(drop=True)
 
-    m_path = Path(FUTURES_DATA_DIR) / f"{sym.replace('/', '_')}_metrics.parquet"
+    from src.core.settings import FuturesStorageLayout
+    m_path = FuturesStorageLayout.get_metrics_path(sym)
     if m_path.exists():
         try:
             m_df = pd.read_parquet(m_path)
@@ -662,16 +668,16 @@ def load_single_symbol_data(
             _fm_loaded = True
 
         for tf_l in tfs_to_load:
-            safe_sym = sym.replace("/", "_")
             req_start_dt = pd.Timestamp(fetch_start, tz="UTC")
             req_end_dt = pd.Timestamp(end, tz="UTC")
             from_cache = False
-            enriched_path = FUTURES_DATA_DIR / f"{safe_sym}_{tf_l}_enriched.parquet"
+            from src.core.settings import FuturesStorageLayout
+            enriched_path = FuturesStorageLayout.get_enriched_path(sym, tf_l)
             if enriched_path.exists():
                 deps = [
-                    FUTURES_DATA_DIR / f"{safe_sym}_{tf_l}.parquet",
-                    FUTURES_DATA_DIR / f"{safe_sym}_funding.parquet",
-                    FUTURES_DATA_DIR / f"{safe_sym}_metrics.parquet",
+                    FuturesStorageLayout.get_ohlcv_path(sym, tf_l),
+                    FuturesStorageLayout.get_funding_path(sym),
+                    FuturesStorageLayout.get_metrics_path(sym),
                 ]
                 enriched_mtime = enriched_path.stat().st_mtime
                 if all(not dep.exists() or dep.stat().st_mtime <= enriched_mtime for dep in deps):
@@ -781,7 +787,8 @@ def load_single_symbol_data(
                         df[_mc] = pd.to_numeric(df[_mc], errors="coerce")
 
                 # Save enriched cache (full date range) for future runs
-                raw_parquet_path = FUTURES_DATA_DIR / f"{safe_sym}_{tf_l}.parquet"
+                from src.core.settings import FuturesStorageLayout
+                raw_parquet_path = FuturesStorageLayout.get_ohlcv_path(sym, tf_l)
                 enriched_stale = not enriched_path.exists() or (
                     raw_parquet_path.exists() and enriched_path.stat().st_mtime < raw_parquet_path.stat().st_mtime
                 )
@@ -826,7 +833,14 @@ def load_single_symbol_data(
                             ):
                                 if _mc in wide_df.columns:
                                     wide_df[_mc] = pd.to_numeric(wide_df[_mc], errors="coerce")
-                            wide_df.to_parquet(enriched_path, index=False)
+                            # Optimize storage: drop datetime and cast price columns to float32
+                            wide_df_to_save = wide_df.copy()
+                            if "datetime" in wide_df_to_save.columns:
+                                wide_df_to_save = wide_df_to_save.drop(columns=["datetime"])
+                            for col in ["open", "high", "low", "close"]:
+                                if col in wide_df_to_save.columns:
+                                    wide_df_to_save[col] = wide_df_to_save[col].astype("float32")
+                            wide_df_to_save.to_parquet(enriched_path, index=False, compression="zstd")
                     except Exception as _ec:
                         _logger.debug("[%s] Failed to save enriched cache: %s", sym, _ec)
 
@@ -963,12 +977,13 @@ def load_futures_data_maps_for_symbols(
         sym_paths: dict[str, Path] = {}
         all_cache_hit = True
         for tf_l in tfs_to_load:
-            enriched_path = FUTURES_DATA_DIR / f"{safe_sym}_{tf_l}_enriched.parquet"
+            from src.core.settings import FuturesStorageLayout
+            enriched_path = FuturesStorageLayout.get_enriched_path(sym, tf_l)
             if enriched_path.exists():
                 deps = [
-                    FUTURES_DATA_DIR / f"{safe_sym}_{tf_l}.parquet",
-                    FUTURES_DATA_DIR / f"{safe_sym}_funding.parquet",
-                    FUTURES_DATA_DIR / f"{safe_sym}_metrics.parquet",
+                    FuturesStorageLayout.get_ohlcv_path(sym, tf_l),
+                    FuturesStorageLayout.get_funding_path(sym),
+                    FuturesStorageLayout.get_metrics_path(sym),
                 ]
                 enriched_mtime = enriched_path.stat().st_mtime
                 if all(not d.exists() or d.stat().st_mtime <= enriched_mtime for d in deps):

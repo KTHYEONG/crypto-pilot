@@ -281,7 +281,11 @@ def _compute_1m_coverage_ratio(
     if not path.exists() or path.stat().st_size == 0:
         return 0.0
     try:
-        frame = pd.read_parquet(path, columns=["datetime"])
+        try:
+            frame = pd.read_parquet(path, columns=["timestamp"])
+            frame["datetime"] = pd.to_datetime(frame["timestamp"], unit="ms", utc=True)
+        except Exception:
+            frame = pd.read_parquet(path, columns=["datetime"])
     except Exception:
         return 0.0
     if frame.empty or "datetime" not in frame.columns:
@@ -310,7 +314,11 @@ def resolve_1m_backfill_targets(
     """
     missing: list[str] = []
     for symbol in universe_symbols:
-        path = data_root / f"{symbol}_1m.parquet"
+        from src.core.settings import FUTURES_DATA_DIR, FuturesStorageLayout
+        if Path(data_root).resolve() == FUTURES_DATA_DIR.resolve():
+            path = FuturesStorageLayout.get_ohlcv_path(symbol, "1m")
+        else:
+            path = Path(data_root) / f"{symbol.replace('/', '_')}_1m.parquet"
         ratio = _compute_1m_coverage_ratio(path, start_date=start_date, end_date=end_date)
         if ratio < min_coverage_ratio:
             missing.append(symbol)
@@ -352,7 +360,11 @@ def resolve_1m_coverage_tier(
     """
     covered: set[str] = set()
     for symbol in universe_symbols:
-        path = data_root / f"{symbol}_1m.parquet"
+        from src.core.settings import FUTURES_DATA_DIR, FuturesStorageLayout
+        if Path(data_root).resolve() == FUTURES_DATA_DIR.resolve():
+            path = FuturesStorageLayout.get_ohlcv_path(symbol, "1m")
+        else:
+            path = Path(data_root) / f"{symbol.replace('/', '_')}_1m.parquet"
         ratio = _compute_1m_coverage_ratio(path, start_date=start_date, end_date=end_date)
         if ratio >= min_coverage_ratio:
             covered.add(symbol)
