@@ -2084,6 +2084,7 @@ def test_compute_cost_drag_ratio_v2_and_payoff_stats() -> None:
     hit_rate, payoff_skew = compute_payoff_stats(np.array([4.0, -2.0, 6.0, -3.0], dtype=np.float64))
 
     assert drag == pytest.approx(0.5)
+    assert compute_cost_drag_ratio_v2(mean_cost_bps=-1.0, mean_gross_bps=10.0) == 0.0
     assert hit_rate == pytest.approx(0.5)
     assert payoff_skew > 1.0
 
@@ -2556,5 +2557,4 @@ def test_vectorized_event_alignment() -> None:
     _aligned_rows = np.flatnonzero(_in_mask)
 
     assert list(_aligned_rows) == [0, 2]
-
 
