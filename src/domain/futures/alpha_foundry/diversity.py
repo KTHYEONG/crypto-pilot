@@ -131,7 +131,17 @@ def estimate_effective_test_count(
     n = corr.shape[0]
     if n <= 1:
         return float(n)
-    eigenvalues = np.linalg.eigvalsh(corr)
+    # Pairwise missing observations can produce a non-finite or slightly
+    # asymmetric matrix even after pairwise sanitisation.  Canonicalise it
+    # before eigendecomposition; a numerical failure must not trigger a
+    # broad unpruned L1 fallback.
+    corr_safe = np.nan_to_num(np.asarray(corr, dtype=np.float64), nan=0.0, posinf=1.0, neginf=-1.0)
+    corr_safe = np.clip((corr_safe + corr_safe.T) * 0.5, -1.0, 1.0)
+    np.fill_diagonal(corr_safe, 1.0)
+    try:
+        eigenvalues = np.linalg.eigvalsh(corr_safe)
+    except np.linalg.LinAlgError:
+        return float(n)
     eigenvalues = np.maximum(eigenvalues, 0.0)
     total = np.sum(eigenvalues)
     if total <= 0.0:
