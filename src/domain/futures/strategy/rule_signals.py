@@ -321,15 +321,18 @@ def project_higher_tf_to_grid(
 ) -> NDArray[np.float64]:
     """Release-timestamp based backward-asof projection.
 
+    Accepts 1D (T_i,) or 2D (T_i, N) feature arrays.
+    Returns same dimensionality along grid dimension: (T_base,) or (T_base, N).
     Prevents look-ahead leak by only allowing grid[t] to see higher TF values
     that were closed/released on or before grid[t].
     """
-    indices = np.searchsorted(dt_higher.astype(np.int64), dt_grid.astype(np.int64), side="right") - 1
+    dt_higher_int = dt_higher.astype(np.int64)
+    dt_grid_int = dt_grid.astype(np.int64)
+    indices = np.searchsorted(dt_higher_int, dt_grid_int, side="right") - 1
     valid_mask = indices >= 0
     clipped_indices = np.clip(indices, 0, len(dt_higher) - 1)
 
     out = feature_higher[clipped_indices]
-    # Set pre-warmup/before earliest release bars to NaN
     out[~valid_mask] = np.nan
     return out
 
