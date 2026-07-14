@@ -8,6 +8,7 @@ from __future__ import annotations
 import logging
 from collections.abc import Callable, Sequence
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass
 from typing import Any
 
 import numba
@@ -781,6 +782,89 @@ def _supertrend_2d(
     return trend
 
 
+@dataclass(slots=True, frozen=True)
+class _SignalIndicatorCache:
+    """Precomputed shared indicators reused within a single TF build to avoid recomputation.
+
+    The content covers all indicators computed before the per-family loop in
+    ``build_rule_signal_panels``.  When passed as ``precomputed`` to that function,
+    the long indicator-preparation block is skipped and these cached arrays are
+    used directly.
+    """
+    atr: NDArray[np.float64]
+    flow_imbalance: NDArray[np.float64]
+    flow_mean_6: NDArray[np.float64]
+    flow_z_24: NDArray[np.float64]
+    funding_z_96: NDArray[np.float64]
+    funding_z_168: NDArray[np.float64]
+    oi_build_z_42: NDArray[np.float64]
+    lsr_log_z_42: NDArray[np.float64]
+
+
+def _precompute_shared_indicators(
+    *,
+    aligned: AlignedMarketData,
+    cfg: CandidateStrategyConfig,
+    normalize_time_horizon: bool = False,
+    horizon_base_tf: str = "4h",
+) -> _SignalIndicatorCache:
+    """Compute the set of shared rolling indicators once for reuse by all families.
+
+    This is the exact same computation that ``build_rule_signal_panels`` runs in
+    its indicator-preparation block.  Extracted so callers that
+    build panels for multiple TFs can share the work.
+    """
+    close = aligned.close_2d
+    high = aligned.high_2d
+    low = aligned.low_2d
+    vol = aligned.volume_2d
+    funding = aligned.funding_2d
+
+    def scale_window(base_bars: int, minimum: int = 1) -> int:
+        if not normalize_time_horizon:
+            return max(minimum, base_bars)
+        from src.domain.futures.strategy.timeframe_contracts import scale_bar_count
+        return scale_bar_count(base_bars, cfg.timeframe, horizon_base_tf, minimum=minimum)
+
+    atr_period = scale_window(14)
+    flow_mean_6_window = scale_window(6)
+    flow_z_24_window = scale_window(24)
+    funding_z_96_window = scale_window(96)
+    funding_z_168_window = scale_window(168)
+    oi_build_z_42_window = scale_window(42)
+    lsr_log_z_42_window = scale_window(42)
+
+    atr = _atr_2d(high, low, close, period=atr_period)
+    atr = np.maximum(atr, 1e-12)
+    flow_imbalance, _ = _safe_taker_imbalance_2d(aligned.taker_buy_2d, vol)
+    flow_mean_6 = _rolling_mean_2d(flow_imbalance, window=flow_mean_6_window)
+    flow_z_24 = _zscore_2d(flow_imbalance, window=flow_z_24_window)
+    funding_z_96 = _zscore_2d(funding, window=funding_z_96_window, eps=1e-6)
+    funding_z_168 = _zscore_2d(funding, window=funding_z_168_window, eps=1e-6)
+
+    oi = aligned.oi_2d if aligned.oi_2d is not None else np.full_like(close, np.nan, dtype=np.float64)
+    lsr = aligned.lsr_2d if aligned.lsr_2d is not None else np.full_like(close, np.nan, dtype=np.float64)
+    oi_valid = np.isfinite(oi) & (oi > 0.0)
+    lsr_valid = np.isfinite(lsr) & (lsr > 0.0)
+    oi_log = np.where(oi_valid, np.log(oi), np.nan)
+    lsr_log = np.where(lsr_valid, np.log(lsr), np.nan)
+    oi_log_change_6 = oi_log - np.roll(oi_log, flow_mean_6_window, axis=0)
+    oi_log_change_6[:flow_mean_6_window] = np.nan
+    oi_build_z_42 = _zscore_2d(oi_log_change_6, window=oi_build_z_42_window)
+    lsr_log_z_42 = _zscore_2d(lsr_log, window=lsr_log_z_42_window)
+
+    return _SignalIndicatorCache(
+        atr=atr,
+        flow_imbalance=flow_imbalance,
+        flow_mean_6=flow_mean_6,
+        flow_z_24=flow_z_24,
+        funding_z_96=funding_z_96,
+        funding_z_168=funding_z_168,
+        oi_build_z_42=oi_build_z_42,
+        lsr_log_z_42=lsr_log_z_42,
+    )
+
+
 def build_rule_signal_panels(
     *,
     aligned: AlignedMarketData,
@@ -788,8 +872,13 @@ def build_rule_signal_panels(
     normalize_time_horizon: bool = False,
     horizon_base_tf: str = "4h",
     family_filter: tuple[str, ...] | None = None,
+    precomputed: _SignalIndicatorCache | None = None,
 ) -> tuple[CandidateSignalPanel, ...]:
     """Build trailing-only rule candidates for all symbols.
+
+    When *precomputed* is provided the costly rolling-indicator
+    preparation block is skipped — the caller is responsible for computing
+    ``_precompute_shared_indicators`` on the **same** aligned object.
 
     [ADR_20260714_L1_MEMORY_EXECUTION]
     """
@@ -857,25 +946,39 @@ def build_rule_signal_panels(
     btc_slow_window = scale_window(100)
     alt_mean_window = scale_window(50)
     funding_flow_window = scale_window(96)
-    atr = _atr_2d(high, low, close, period=atr_period)
-    atr = np.maximum(atr, 1e-12)
-    flow_imbalance, flow_valid = _safe_taker_imbalance_2d(aligned.taker_buy_2d, vol)
-    flow_mean_6 = _rolling_mean_2d(flow_imbalance, window=flow_mean_6_window)
-    flow_z_24 = _zscore_2d(flow_imbalance, window=flow_z_24_window)
-    funding_z_96 = _zscore_2d(funding, window=funding_z_96_window, eps=1e-6)
-    funding_z_168 = _zscore_2d(funding, window=funding_z_168_window, eps=1e-6)
-    shared_valid = valid_mask & flow_valid & np.isfinite(funding)
-    fxr_valid = valid_mask & flow_valid
+
     oi = aligned.oi_2d if aligned.oi_2d is not None else np.full_like(close, np.nan, dtype=np.float64)
     lsr = aligned.lsr_2d if aligned.lsr_2d is not None else np.full_like(close, np.nan, dtype=np.float64)
     oi_valid = np.isfinite(oi) & (oi > 0.0)
     lsr_valid = np.isfinite(lsr) & (lsr > 0.0)
     oi_log = np.where(oi_valid, np.log(oi), np.nan)
     lsr_log = np.where(lsr_valid, np.log(lsr), np.nan)
-    oi_log_change_6 = oi_log - np.roll(oi_log, flow_mean_6_window, axis=0)
-    oi_log_change_6[:flow_mean_6_window] = np.nan
-    oi_build_z_42 = _zscore_2d(oi_log_change_6, window=oi_build_z_42_window)
-    lsr_log_z_42 = _zscore_2d(lsr_log, window=lsr_log_z_42_window)
+
+    if precomputed is not None:
+        atr = precomputed.atr
+        flow_imbalance = precomputed.flow_imbalance
+        flow_mean_6 = precomputed.flow_mean_6
+        flow_z_24 = precomputed.flow_z_24
+        funding_z_96 = precomputed.funding_z_96
+        funding_z_168 = precomputed.funding_z_168
+        oi_build_z_42 = precomputed.oi_build_z_42
+        lsr_log_z_42 = precomputed.lsr_log_z_42
+        flow_valid = np.isfinite(flow_imbalance) & np.isfinite(aligned.taker_buy_2d if aligned.taker_buy_2d is not None else flow_imbalance)  # noqa: E501
+    else:
+        atr = _atr_2d(high, low, close, period=atr_period)
+        atr = np.maximum(atr, 1e-12)
+        flow_imbalance, flow_valid = _safe_taker_imbalance_2d(aligned.taker_buy_2d, vol)
+        flow_mean_6 = _rolling_mean_2d(flow_imbalance, window=flow_mean_6_window)
+        flow_z_24 = _zscore_2d(flow_imbalance, window=flow_z_24_window)
+        funding_z_96 = _zscore_2d(funding, window=funding_z_96_window, eps=1e-6)
+        funding_z_168 = _zscore_2d(funding, window=funding_z_168_window, eps=1e-6)
+        oi_log_change_6 = oi_log - np.roll(oi_log, flow_mean_6_window, axis=0)
+        oi_log_change_6[:flow_mean_6_window] = np.nan
+        oi_build_z_42 = _zscore_2d(oi_log_change_6, window=oi_build_z_42_window)
+        lsr_log_z_42 = _zscore_2d(lsr_log, window=lsr_log_z_42_window)
+
+    shared_valid = valid_mask & flow_valid & np.isfinite(funding)
+    fxr_valid = valid_mask & flow_valid
     # UNW warm-up: require 168 bars of continuous valid data for z-score stability
     positioning_warm = np.ones_like(valid_mask, dtype=np.bool_)
     positioning_warm[:positioning_warm_bars] = False
