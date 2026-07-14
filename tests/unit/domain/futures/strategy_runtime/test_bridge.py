@@ -1172,3 +1172,20 @@ def test_verify_data_integrity_edge_cases() -> None:
     assert "stuck_price" in report["SOL"]["reasons"]
 
     assert "hi_lo_violation" in report["ADA"]["reasons"]
+
+
+# ===================================================================
+# Change 4: labeled.assign(native_tf=tf) preserves original
+# ===================================================================
+
+def test_labeled_assign_preserves_original() -> None:
+    """.assign(native_tf=tf) returns new DataFrame without mutating original."""
+    labeled = pd.DataFrame({"score": [1.0, 2.0], "side": [1, -1]})
+    original_id = id(labeled)
+    original_score = labeled["score"].iloc[0]
+    labeled_all = labeled.assign(native_tf="4h")
+    assert "native_tf" in labeled_all.columns
+    assert labeled_all["native_tf"].iloc[0] == "4h"
+    assert "native_tf" not in labeled.columns
+    assert id(labeled) == original_id
+    assert labeled["score"].iloc[0] == original_score

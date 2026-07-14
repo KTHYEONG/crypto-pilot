@@ -396,6 +396,108 @@ def test_ltf_feature_grid_literal_mock() -> None:
     assert float(grid.volume_2d[-1, 0]) == 750.0
 
 
+# ===================================================================
+# Scenario 4: Parallel Streaming (Change 2)
+# ===================================================================
+
+class TestLtfStreamingParallel:
+    """ThreadPoolExecutor path: max_workers=1 vs max_workers=2 identity."""
+
+    def test_serial_vs_parallel_output_identical(self) -> None:
+        aligned = _aligned_3h_2sym()
+        symbols = ("BTCUSDT", "ETHUSDT")
+        frame = _exec_1m_frame()
+        PlanCls = dataclasses.make_dataclass(
+            "Plan", [("symbols", tuple), ("max_workers", int), ("skip_reason", object)]
+        )
+
+        panels_1 = build_ltf_native_alpha_panels_streaming(
+            aligned=aligned, plan=PlanCls(symbols, 1, None),
+            load_frame=dict.fromkeys(symbols, frame).get, budget=None,
+        )
+        panels_2 = build_ltf_native_alpha_panels_streaming(
+            aligned=aligned, plan=PlanCls(symbols, 2, None),
+            load_frame=dict.fromkeys(symbols, frame).get, budget=None,
+        )
+        assert len(panels_1) == len(panels_2)
+        for p1, p2 in zip(panels_1, panels_2, strict=False):
+            assert p1.variant == p2.variant
+            np.testing.assert_array_equal(p1.signed_score_2d, p2.signed_score_2d)
+            np.testing.assert_array_equal(p1.side_hint_2d, p2.side_hint_2d)
+            np.testing.assert_array_equal(p1.valid_mask_2d, p2.valid_mask_2d)
+
+    def test_parallel_with_missing_symbol(self) -> None:
+        aligned = _aligned_3h_2sym()
+        symbols = ("BTCUSDT", "ETHUSDT")
+        frame = _exec_1m_frame()
+        frames = {"BTCUSDT": frame}
+        PlanCls = dataclasses.make_dataclass(
+            "Plan", [("symbols", tuple), ("max_workers", int), ("skip_reason", object)]
+        )
+        panels = build_ltf_native_alpha_panels_streaming(
+            aligned=aligned, plan=PlanCls(symbols, 2, None),
+            load_frame=frames.get, budget=None,
+        )
+        assert isinstance(panels, tuple)
+        # ETHUSDT column should remain all zeros (no data)
+        if panels:
+            assert not panels[0].valid_mask_2d[:, 1].any()
+
+    def test_parallel_with_empty_frame(self) -> None:
+        aligned = _aligned_3h_2sym()
+        symbols = ("BTCUSDT", "ETHUSDT")
+        empty = _exec_1m_frame().iloc[:0]
+        PlanCls = dataclasses.make_dataclass(
+            "Plan", [("symbols", tuple), ("max_workers", int), ("skip_reason", object)]
+        )
+        panels = build_ltf_native_alpha_panels_streaming(
+            aligned=aligned, plan=PlanCls(symbols, 2, None),
+            load_frame=lambda _s: empty, budget=None,
+        )
+        assert isinstance(panels, tuple)
+        assert all(not p.valid_mask_2d.any() for p in panels)
+
+    def test_plan_without_max_workers_defaults_serial(self) -> None:
+        """Plan without max_workers attr falls back to serial path."""
+        aligned = _aligned_3h_2sym()
+        PlanCls = dataclasses.make_dataclass(
+            "Plan", [("symbols", tuple), ("skip_reason", object)]
+        )
+        plan = PlanCls(("BTCUSDT", "ETHUSDT"), None)
+        frames = {"BTCUSDT": _exec_1m_frame(), "ETHUSDT": _exec_1m_frame()}
+        panels = build_ltf_native_alpha_panels_streaming(
+            aligned=aligned, plan=plan,
+            load_frame=frames.get, budget=None,
+        )
+        assert panels
+        assert all(panel.signed_score_2d.shape == aligned.close_2d.shape for panel in panels)
+
+    def test_parallel_worker_exception_caught(self, caplog) -> None:
+        """Worker exception in ThreadPoolExecutor is caught and logged."""
+        import logging
+        caplog.set_level(logging.WARNING)
+        aligned = _aligned_3h_2sym()
+        symbols = ("BTCUSDT", "ETHUSDT")
+        frame = _exec_1m_frame()
+        PlanCls = dataclasses.make_dataclass(
+            "Plan", [("symbols", tuple), ("max_workers", int), ("skip_reason", object)]
+        )
+        call_count = 0
+        def _raise_for_first(sym: str):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                raise RuntimeError("simulated worker failure")
+            return frame
+
+        panels = build_ltf_native_alpha_panels_streaming(
+            aligned=aligned, plan=PlanCls(symbols, 2, None),
+            load_frame=_raise_for_first, budget=None,
+        )
+        assert isinstance(panels, tuple)
+        assert any("simulated worker failure" in r.message for r in caplog.records)
+
+
 def test_ltf_panels_project_sparse_event_literal_mock() -> None:
     base_dt = pd.date_range("2026-01-01 00:00:00", periods=24, freq="1h", tz="UTC").to_numpy(dtype="datetime64[ns]")
     ones = np.ones((24, 2), dtype=np.float64)
