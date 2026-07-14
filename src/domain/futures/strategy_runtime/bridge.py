@@ -516,7 +516,7 @@ def _build_ltf_native_panels_for_l0(
         max_workers=int(getattr(runtime_config, "ltf_exec_1m_max_workers", 1)),
         budget=budget,
     )
-    _run_logger.info(
+    _run_logger.debug(
         "[LTF_ALPHA] stage=l0_ltf_stream rss_mb=%.0f budget_mb=%d symbols_planned=%d "
         "symbols_covered=%d workers=%d skip_reason=%s",
         _get_rss_mb(), budget.limit_mb, len(plan.symbols), len(coverage.covered_symbols),
@@ -1097,7 +1097,7 @@ def run_candidate_strategy_for_universe(
         _logger.debug("\n".join(lines))
 
     t_step = time.perf_counter()
-    _run_logger.info(
+    _run_logger.debug(
         "[MEM] stage=bridge_pre_align rss=%.0fMB n_symbols=%d tf=%s",
         _get_rss_mb(),
         len(symbols),
@@ -1106,7 +1106,7 @@ def run_candidate_strategy_for_universe(
     aligned = align_data_maps(preloaded_data_maps, symbols, tf, state_cube=state_cube)
     bridge_prof["align"] = time.perf_counter() - t_step
     _sample_rss("align")
-    _run_logger.info(
+    _run_logger.debug(
         "[MEM] stage=bridge_post_align rss=%.0fMB took=%.4fs",
         _get_rss_mb(),
         bridge_prof["align"],
@@ -1134,12 +1134,12 @@ def run_candidate_strategy_for_universe(
         )
         if ltf_panels:
             panels = (*panels, *ltf_panels)
-            _run_logger.info("[LTF_ALPHA] appended panels=%d base_tf=%s", len(ltf_panels), tf)
+            _run_logger.debug("[LTF_ALPHA] appended panels=%d base_tf=%s", len(ltf_panels), tf)
         else:
-            _run_logger.info("[LTF_ALPHA] appended panels=0 base_tf=%s", tf)
+            _run_logger.debug("[LTF_ALPHA] appended panels=0 base_tf=%s", tf)
     bridge_prof["rules"] = time.perf_counter() - t_step
     _sample_rss("rules")
-    _run_logger.info(
+    _run_logger.debug(
         "[MEM] stage=bridge_post_rules rss=%.0fMB took=%.4fs n_panels=%d",
         _get_rss_mb(),
         bridge_prof["rules"],
@@ -1270,7 +1270,7 @@ def run_candidate_strategy_for_universe(
             # builder owns/release panels one TF at a time.
             _requested_l0_workers = getattr(alpha_foundry_config, "l0_parallel_max_workers", None)
             _workers = 1
-            _run_logger.info(
+            _run_logger.debug(
                 "[SYS] stage=l0_gate_worker_plan requested=%s workers=%d reason=all_tf_panels_resident",
                 _requested_l0_workers,
                 _workers,
@@ -1490,16 +1490,49 @@ def run_candidate_strategy_for_universe(
         )
         bridge_prof["alpha_panel"] = time.perf_counter() - t_step
         _sample_rss("alpha_panel")
+
+        # [ADR_20260714_L1_ZERO_SIGNAL_REGRESSION] base TF raw_events being
+        # empty must not discard already-computed cross-TF HTF panels.
+        htf_labeled_all = pd.DataFrame()
+        if _multi_tf_htf_panels:
+            try:
+                htf_raw_events = candidate_panels_to_events(
+                    _multi_tf_htf_panels,
+                    min_abs_score=candidate_cfg.min_rule_net_bps * 1e-4,
+                    side_flip_variants=candidate_cfg.side_flip_candidate_variants,
+                    cost_floor_bps=candidate_cfg.cost_floor_bps,
+                    execution_cost_bps_2d=aligned.execution_cost_bps_2d,
+                )
+                if not htf_raw_events.empty:
+                    atr_2d_cache = _compute_yang_zhang_vol_2d(aligned)
+                    htf_labeled = label_candidate_events(
+                        events=htf_raw_events,
+                        aligned=aligned,
+                        cfg=candidate_cfg,
+                        precomputed_atr_2d=atr_2d_cache,
+                    )
+                    _htf_variant_to_tf = {
+                        panel.variant: panel.metadata.get("native_tf", tf)
+                        for panel in _multi_tf_htf_panels
+                    }
+                    htf_labeled["native_tf"] = htf_labeled["variant"].map(_htf_variant_to_tf)
+                    htf_labeled_all = htf_labeled
+            except Exception as exc:
+                _logger.warning(
+                    "[MULTI-TF] HTF-only labeling failed on empty-base-events path: %s", exc
+                )
+                htf_labeled_all = pd.DataFrame()
+
         _emit_bridge_profile()
         return CandidatePipelineOutput(
             alpha_panel=alpha_panel,
             target_weights=np.zeros_like(aligned.close_2d),
             aligned=aligned,
             labeled=pd.DataFrame(),
-            labeled_unfiltered=pd.DataFrame(),
+            labeled_unfiltered=htf_labeled_all,
             rule_report={
                 "events_total": 0,
-                "labeled_total": 0,
+                "labeled_total": len(htf_labeled_all),
                 "promoted_total": 0,
                 "fit_total": 0,
                 "calibration_total": 0,
@@ -1509,7 +1542,7 @@ def run_candidate_strategy_for_universe(
                 "eligible": 0,
                 "n_keep": 0,
                 "policy": candidate_cfg.selection_policy,
-                "zero_reason": "no_events",
+                "zero_reason": "no_events" if htf_labeled_all.empty else "base_tf_only_cross_tf_delivered",
                 "gate_calibration_used": False,
                 "gate_calibration_reason": "no_events",
                 "recommended_keep_variants": (),

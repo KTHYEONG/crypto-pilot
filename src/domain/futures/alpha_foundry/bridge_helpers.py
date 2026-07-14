@@ -1056,6 +1056,7 @@ def assemble_l0_strategy_delivery_manifest(
 ) -> tuple[dict[str, AlphaFoundryL0Result], L0StrategyDeliveryManifest]:
     """Cross-TF post-processing over an already-completed multi-TF L0 gate
     run. [ADR_20260712_L0_EVIDENCE_CONDITIONED_CROSS_TF_ADMISSION]
+    [ADR_20260714_L1_ZERO_SIGNAL_REGRESSION]
 
     Resolves its own canonical context from candidates, removing the
     caller-provided `canonical_tf`. Pure function: multi_results and
@@ -1191,40 +1192,63 @@ def assemble_l0_strategy_delivery_manifest(
 
             manifest_final_ids = floor_result.final_selected_recipe_ids
 
-            n_demoted = len(cross_tf_result.demoted_recipe_ids)
-            if n_demoted > 0:
-                manifest_status = "applied"
+            if not manifest_final_ids:
+                manifest_status = "fail_open"
                 manifest_reason = (
-                    f"demoted={n_demoted} canonical_tf={cross_tf_result.canonical_tf}"
-                    f" n_common_active_bars={cross_tf_result.n_common_active_bars}"
+                    "cross_tf_survival_floor collapsed to zero survivors; "
+                    "falling back to unpruned multi_results"
                 )
-            else:
-                manifest_status = "audit_only"
-                manifest_reason = "no redundant pairs found"
-            setup_logger("opt_main_futures", write_file=False).info(
-                "[SYS] stage=l0_cross_tf_pruning took=%.4fs enabled=True status=%s",
-                _time_module.perf_counter() - _t_prune_start, manifest_status,
-            )
-
-            final_set = set(manifest_final_ids)
-            pruned_multi_results = {}
-            for tf_k, res in multi_results.items():
-                kept_candidates = tuple(
-                    c for c in res.candidates_for_l1
-                    if c.recipe_id in final_set
-                )
-                kept_panels = tuple(
-                    p for p in res.panels_for_l1
-                    if getattr(p, "metadata", {}).get("recipe_id", "") in final_set
-                )
-                if len(kept_candidates) == len(res.candidates_for_l1) and len(kept_panels) == len(res.panels_for_l1):
-                    pruned_multi_results[tf_k] = res
-                else:
-                    pruned_multi_results[tf_k] = replace(
-                        res,
-                        candidates_for_l1=kept_candidates,
-                        panels_for_l1=kept_panels,
+                _fallback_logger = setup_logger("opt_main_futures", write_file=False)
+                for _l in (_fallback_logger, _logger):
+                    _l.warning(
+                        "[SYS] stage=l0_cross_tf_pruning took=%.4fs enabled=True status=fail_open",
+                        _time_module.perf_counter() - _t_prune_start,
                     )
+                    _l.warning(
+                        "[EVAL] stage=l0_cross_tf_pruning run_id=%s failed: %s,"
+                        " falling back to unpruned multi_results",
+                        run_id_prefix, manifest_reason,
+                    )
+                pruned_multi_results = dict(multi_results)
+                manifest_final_ids = ()
+            else:
+                n_demoted = len(cross_tf_result.demoted_recipe_ids)
+                if n_demoted > 0:
+                    manifest_status = "applied"
+                    manifest_reason = (
+                        f"demoted={n_demoted} canonical_tf={cross_tf_result.canonical_tf}"
+                        f" n_common_active_bars={cross_tf_result.n_common_active_bars}"
+                    )
+                else:
+                    manifest_status = "audit_only"
+                    manifest_reason = "no redundant pairs found"
+                setup_logger("opt_main_futures", write_file=False).debug(
+                    "[SYS] stage=l0_cross_tf_pruning took=%.4fs enabled=True status=%s",
+                    _time_module.perf_counter() - _t_prune_start, manifest_status,
+                )
+
+                final_set = set(manifest_final_ids)
+                pruned_multi_results = {}
+                for tf_k, res in multi_results.items():
+                    kept_candidates = tuple(
+                        c for c in res.candidates_for_l1
+                        if c.recipe_id in final_set
+                    )
+                    kept_panels = tuple(
+                        p for p in res.panels_for_l1
+                        if getattr(p, "metadata", {}).get("recipe_id", "") in final_set
+                    )
+                    if (
+                    len(kept_candidates) == len(res.candidates_for_l1)
+                    and len(kept_panels) == len(res.panels_for_l1)
+                ):
+                        pruned_multi_results[tf_k] = res
+                    else:
+                        pruned_multi_results[tf_k] = replace(
+                            res,
+                            candidates_for_l1=kept_candidates,
+                            panels_for_l1=kept_panels,
+                        )
 
         except ValueError as exc:
             manifest_status = "fail_open"
