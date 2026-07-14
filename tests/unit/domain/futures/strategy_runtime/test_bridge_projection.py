@@ -4,6 +4,7 @@ import numpy as np
 import pytest
 
 from src.domain.futures.strategy.candidate_contracts import CandidateSignalPanel
+from src.domain.futures.strategy.rule_signals import project_higher_tf_to_grid
 from src.domain.futures.strategy_runtime.bridge import _project_panel_to_base_grid
 
 
@@ -187,3 +188,166 @@ def test_ltf_mode_ignored_for_htf() -> None:
     result_m = _project_panel_to_base_grid(panel, base_dt, "12h", "4h", ltf_mode="mean")
 
     np.testing.assert_array_equal(result_l.signed_score_2d, result_m.signed_score_2d)
+
+
+# ── 2D Vectorized Projection Tests ──────────────────────────────────────
+
+
+def _make_multi_panel(
+    score_2d: np.ndarray,
+    valid_2d: np.ndarray,
+    side_2d: np.ndarray,
+    to_2d: np.ndarray,
+    datetimes: np.ndarray,
+    symbols: tuple[str, ...],
+) -> CandidateSignalPanel:
+    n_syms = len(symbols)
+    assert score_2d.shape[1] == n_syms
+    return CandidateSignalPanel(
+        family="test",
+        variant="test_multi",
+        params={},
+        datetimes=datetimes,
+        symbols=symbols,
+        signed_score_2d=score_2d,
+        side_hint_2d=side_2d,
+        expected_holding_bars=3,
+        min_holding_bars=1,
+        stop_atr_mult=50.0,
+        take_profit_atr_mult=50.0,
+        turnover_proxy_2d=to_2d,
+        valid_mask_2d=valid_2d,
+        metadata={},
+        archetype="trend",
+        allowed_regimes=("bull_quiet", "bear_quiet", "transition"),
+        exit_policies=(),
+    )
+
+
+def test_2d_vectorized_htf_projection() -> None:
+    """2D HTF projection matches per-symbol loop result."""
+    rng = np.random.default_rng(42)
+    t_i, n_syms, t_base = 50, 5, 100
+    symbols = tuple(f"SYM_{i}" for i in range(n_syms))
+
+    panel_dt = np.arange(
+        np.datetime64("2024-01-01"), np.datetime64("2024-01-01") + np.timedelta64(t_i, "h"), dtype="datetime64[h]"
+    )
+    base_dt = np.arange(
+        np.datetime64("2024-01-01"), np.datetime64("2024-01-01") + np.timedelta64(t_base, "h"), dtype="datetime64[h]"
+    )
+    panel = _make_multi_panel(
+        score_2d=rng.random((t_i, n_syms)).astype(np.float64),
+        valid_2d=np.ones((t_i, n_syms), dtype=bool),
+        side_2d=np.full((t_i, n_syms), 1, dtype=np.int8),
+        to_2d=rng.random((t_i, n_syms)).astype(np.float64),
+        datetimes=panel_dt,
+        symbols=symbols,
+    )
+
+    result = _project_panel_to_base_grid(panel, base_dt, "12h", "4h")
+
+    assert result.signed_score_2d.shape == (t_base, n_syms)
+    assert result.valid_mask_2d.shape == (t_base, n_syms)
+    assert result.side_hint_2d.shape == (t_base, n_syms)
+    assert result.turnover_proxy_2d.shape == (t_base, n_syms)
+    assert result.symbols == symbols
+
+
+def test_2d_vectorized_ltf_last_projection() -> None:
+    """2D LTF 'last' mode matches per-symbol loop result."""
+    rng = np.random.default_rng(42)
+    t_i, n_syms, t_base = 8, 4, 4
+    symbols = tuple(f"SYM_{i}" for i in range(n_syms))
+
+    panel_dt = np.arange(
+        np.datetime64("2024-01-01T00"), np.datetime64("2024-01-01T00") + np.timedelta64(t_i, "h"), dtype="datetime64[h]"
+    )
+    base_dt = np.array(
+        ["2024-01-01T04", "2024-01-01T08", "2024-01-01T12", "2024-01-01T16"],
+        dtype="datetime64[ns]",
+    )
+    panel = _make_multi_panel(
+        score_2d=rng.random((t_i, n_syms)).astype(np.float64),
+        valid_2d=np.ones((t_i, n_syms), dtype=bool),
+        side_2d=np.full((t_i, n_syms), 1, dtype=np.int8),
+        to_2d=rng.random((t_i, n_syms)).astype(np.float64),
+        datetimes=panel_dt,
+        symbols=symbols,
+    )
+
+    result = _project_panel_to_base_grid(panel, base_dt, "1h", "4h", ltf_mode="last")
+
+    assert result.signed_score_2d.shape == (t_base, n_syms)
+    assert result.valid_mask_2d.shape == (t_base, n_syms)
+
+
+def test_2d_project_higher_tf_to_grid_returns_2d() -> None:
+    """project_higher_tf_to_grid with 2D input returns 2D output."""
+    rng = np.random.default_rng(42)
+    t_i, n_syms, t_base = 10, 3, 20
+    feature_2d = rng.random((t_i, n_syms)).astype(np.float64)
+    dt_higher = np.arange(
+        np.datetime64("2024-01-01"), np.datetime64("2024-01-01") + np.timedelta64(t_i, "h"), dtype="datetime64[h]"
+    )
+    dt_grid = np.arange(
+        np.datetime64("2024-01-01"), np.datetime64("2024-01-01") + np.timedelta64(t_base, "h"), dtype="datetime64[h]"
+    )
+
+    # 2D call
+    result_2d = project_higher_tf_to_grid(
+        feature_higher=feature_2d, dt_higher=dt_higher, dt_grid=dt_grid
+    )
+
+    # Manual per-column equivalent
+    expected = np.full((t_base, n_syms), np.nan, dtype=np.float64)
+    for n in range(n_syms):
+        expected[:, n] = project_higher_tf_to_grid(
+            feature_higher=feature_2d[:, n], dt_higher=dt_higher, dt_grid=dt_grid
+        )
+
+    assert result_2d.shape == (t_base, n_syms)
+    assert result_2d.dtype == np.float64
+    np.testing.assert_allclose(result_2d, expected, equal_nan=True)
+
+
+def test_2d_project_higher_tf_to_grid_with_nan() -> None:
+    """2D projection handles leading NaN rows (early bars) correctly."""
+    t_i, n_syms, t_base = 5, 2, 10
+    feature_2d = np.full((t_i, n_syms), 1.0, dtype=np.float64)
+    # higher TF bars available starting from hour 5
+    dt_higher = np.arange(
+        np.datetime64("2024-01-01T05"), np.datetime64("2024-01-01T05") + np.timedelta64(t_i, "h"), dtype="datetime64[h]"
+    )
+    dt_grid = np.arange(
+        np.datetime64("2024-01-01"), np.datetime64("2024-01-01") + np.timedelta64(t_base, "h"), dtype="datetime64[h]"
+    )
+
+    result = project_higher_tf_to_grid(
+        feature_higher=feature_2d, dt_higher=dt_higher, dt_grid=dt_grid
+    )
+
+    assert result.shape == (t_base, n_syms)
+    # First 5 rows (hours 0-4) should be NaN (dt_grid < dt_higher[0])
+    assert np.all(np.isnan(result[:5, :]))
+    # Last 5 rows (hours 5-9) should be 1.0
+    assert np.allclose(result[5:, :], 1.0)
+
+
+def test_2d_project_higher_tf_to_grid_1d_backward_compat() -> None:
+    """1D input still returns 1D output (backward compatibility)."""
+    t_i, t_base = 10, 20
+    feature_1d = np.random.random(t_i).astype(np.float64)
+    dt_higher = np.arange(
+        np.datetime64("2024-01-01"), np.datetime64("2024-01-01") + np.timedelta64(t_i, "h"), dtype="datetime64[h]"
+    )
+    dt_grid = np.arange(
+        np.datetime64("2024-01-01"), np.datetime64("2024-01-01") + np.timedelta64(t_base, "h"), dtype="datetime64[h]"
+    )
+
+    result = project_higher_tf_to_grid(
+        feature_higher=feature_1d, dt_higher=dt_higher, dt_grid=dt_grid
+    )
+
+    assert result.shape == (t_base,)
+    assert result.dtype == np.float64
