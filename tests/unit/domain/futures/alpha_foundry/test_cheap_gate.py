@@ -8,6 +8,7 @@ import pytest
 
 from src.domain.futures.alpha_foundry.cheap_gate import (
     _rank_ic_soft_floor,
+    audit_zero_event_timeframe,
     build_l0_signal_candidate,
     evaluate_alpha_cheap_gate_batch,
     evaluate_alpha_gate_batch,
@@ -2557,4 +2558,34 @@ def test_vectorized_event_alignment() -> None:
     _aligned_rows = np.flatnonzero(_in_mask)
 
     assert list(_aligned_rows) == [0, 2]
+
+
+def _make_zero_event_row(n_events: int, tf: str = "4h") -> CheapGateEvidence:
+    return CheapGateEvidence(
+        recipe_id=f"fam:var:{tf}:deadbeef", timeframe=tf, symbol_scope="symbol",
+        n_events=n_events, effective_n=float(n_events), mean_net_bps=0.0, nw_tstat=0.0,
+        block_lcb_bps=0.0, rank_ic=0.0, cost_drag_ratio=0.0, turnover_per_year=0.0,
+        novelty_corr_max=0.0, incremental_rank_ic=0.0, compute_cost_score=0.0,
+        bootstrap_lcb_bps=0.0, bootstrap_agree=True, gate_passed=n_events > 0,
+        reject_reasons=() if n_events > 0 else ("insufficient_events",),
+        mean_gross_bps=0.0, mean_cost_bps=0.0, data_support_tier="full_support",
+    )
+
+
+def test_audit_zero_event_timeframe_all_zero_logs_error(caplog: pytest.LogCaptureFixture) -> None:
+    rows = [_make_zero_event_row(0) for _ in range(88)]
+    caplog.set_level(logging.ERROR)
+    flagged = audit_zero_event_timeframe(tf="4h", rows=rows)
+    assert flagged is True
+    assert len(caplog.records) == 1
+    assert "tf=4h" in caplog.records[0].message
+    assert "total_events=0" in caplog.records[0].message
+
+
+def test_audit_zero_event_timeframe_mixed_events_no_log(caplog: pytest.LogCaptureFixture) -> None:
+    rows = [_make_zero_event_row(0), _make_zero_event_row(585), _make_zero_event_row(0)]
+    caplog.set_level(logging.ERROR)
+    flagged = audit_zero_event_timeframe(tf="6h", rows=rows)
+    assert flagged is False
+    assert len(caplog.records) == 0
 
