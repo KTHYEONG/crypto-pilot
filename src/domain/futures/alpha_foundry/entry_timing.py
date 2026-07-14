@@ -1,11 +1,12 @@
 """Entry-timing refinement layer: CVD impulse, anchored VWAP sigma-band, trend quality gate.
 
-[ADR_20260707_LTF_ENTRY_TIMING_LAYER]
+[ADR_20260707_LTF_ENTRY_TIMING_LAYER][ADR_20260714_L0_LTF_STREAM_PARALLEL]
 """
 
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date
 from pathlib import Path
 from typing import Literal
@@ -357,17 +358,27 @@ def resolve_1m_coverage_tier(
 ) -> Universe1mCoverageTier:
     """Build Universe1mCoverageTier using the same date-range coverage ratio as
     resolve_1m_backfill_targets() — [LIMIT-14] keeps the two functions consistent.
+
+    Coverage scan is parallelised across symbols via ThreadPoolExecutor.
     """
-    covered: set[str] = set()
-    for symbol in universe_symbols:
-        from src.core.settings import FUTURES_DATA_DIR, FuturesStorageLayout
+    from src.core.settings import FUTURES_DATA_DIR, FuturesStorageLayout
+
+    def _check_one(symbol: str) -> str | None:
         if Path(data_root).resolve() == FUTURES_DATA_DIR.resolve():
             path = FuturesStorageLayout.get_ohlcv_path(symbol, "1m")
         else:
             path = Path(data_root) / f"{symbol.replace('/', '_')}_1m.parquet"
         ratio = _compute_1m_coverage_ratio(path, start_date=start_date, end_date=end_date)
-        if ratio >= min_coverage_ratio:
-            covered.add(symbol)
+        return symbol if ratio >= min_coverage_ratio else None
+
+    covered: set[str] = set()
+    n_workers = max(1, min(8, len(universe_symbols)))
+    with ThreadPoolExecutor(max_workers=n_workers) as pool:
+        futures = [pool.submit(_check_one, sym) for sym in universe_symbols]
+        for future in as_completed(futures):
+            res = future.result()
+            if res is not None:
+                covered.add(res)
     return Universe1mCoverageTier(
         covered_symbols=frozenset(covered),
         universe_symbols=frozenset(universe_symbols),
