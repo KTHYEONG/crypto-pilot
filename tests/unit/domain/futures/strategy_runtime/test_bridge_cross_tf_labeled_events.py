@@ -17,6 +17,14 @@ from src.domain.futures.strategy.config import StrategyConfig
 from src.domain.futures.strategy_runtime.bridge import run_candidate_strategy_for_universe
 
 
+def _minimal_ohlc_bar() -> pd.DataFrame:
+    """Return a single-row OHLC DataFrame that passes _build_virtual_probe_tf_maps."""
+    return pd.DataFrame(
+        {"open": [100.0], "high": [101.0], "low": [99.0], "close": [100.5], "volume": [1000.0]},
+        index=pd.DatetimeIndex([pd.Timestamp("2026-01-01")], name="datetime"),
+    )
+
+
 def _make_panel(
     variant: str = "ema_12_72", native_tf: str = "8h",
 ) -> CandidateSignalPanel:
@@ -238,7 +246,7 @@ class TestBridgeCrossTFLabeledEvents:
             symbols=["BTCUSDT"],
             tf=base_tf,
             strategy_cfg=strat_cfg,
-            preloaded_data_maps={"BTCUSDT": {"4h": pd.DataFrame()}},
+            preloaded_data_maps={"BTCUSDT": {"4h": _minimal_ohlc_bar()}},
             alpha_foundry_config=af_config,
         )
 
@@ -280,7 +288,7 @@ class TestBridgeCrossTFLabeledEvents:
             symbols=["BTCUSDT"],
             tf="4h",
             strategy_cfg=StrategyConfig(),
-            preloaded_data_maps={"BTCUSDT": {"4h": pd.DataFrame()}},
+            preloaded_data_maps={"BTCUSDT": {"4h": _minimal_ohlc_bar()}},
         )
 
         assert result.labeled_unfiltered is not None
@@ -332,7 +340,7 @@ class TestBridgeCrossTFLabeledEvents:
             symbols=["BTCUSDT"],
             tf=base_tf,
             strategy_cfg=strat_cfg,
-            preloaded_data_maps={"BTCUSDT": {"4h": pd.DataFrame()}},
+            preloaded_data_maps={"BTCUSDT": {"4h": _minimal_ohlc_bar()}},
             alpha_foundry_config=af_config,
         )
 
