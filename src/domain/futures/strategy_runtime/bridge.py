@@ -152,37 +152,34 @@ def _project_panel_to_base_grid(
     panel_dt: NDArray[np.datetime64] = np.asarray(panel.datetimes, dtype="datetime64[ns]")
 
     if hpb_i >= hpb_base:
-        # Slower TF → backward-asof projection (project_higher_tf_to_grid per col)
-        for n in range(n_syms):
-            raw_score = project_higher_tf_to_grid(
-                feature_higher=panel.signed_score_2d[:, n],
-                dt_higher=panel_dt,
-                dt_grid=base_datetimes,
-            )
-            # NaN → 0.0 for score; NaN → False for valid mask
-            valid_n = ~np.isnan(raw_score)
-            proj_score[:, n] = np.where(valid_n, raw_score, 0.0)
+        # Slower TF → vectorized backward-asof projection (single call per field)
+        raw_score = project_higher_tf_to_grid(
+            feature_higher=panel.signed_score_2d,
+            dt_higher=panel_dt,
+            dt_grid=base_datetimes,
+        )
+        proj_score = np.where(np.isnan(raw_score), 0.0, raw_score)
 
-            raw_valid = project_higher_tf_to_grid(
-                feature_higher=panel.valid_mask_2d[:, n].astype(np.float64),
-                dt_higher=panel_dt,
-                dt_grid=base_datetimes,
-            )
-            proj_valid[:, n] = np.where(np.isnan(raw_valid), False, raw_valid > 0.5)
+        raw_valid = project_higher_tf_to_grid(
+            feature_higher=panel.valid_mask_2d.astype(np.float64),
+            dt_higher=panel_dt,
+            dt_grid=base_datetimes,
+        )
+        proj_valid = raw_valid > 0.5
 
-            raw_side = project_higher_tf_to_grid(
-                feature_higher=panel.side_hint_2d[:, n].astype(np.float64),
-                dt_higher=panel_dt,
-                dt_grid=base_datetimes,
-            )
-            proj_side[:, n] = np.where(np.isnan(raw_side), 0, raw_side).astype(np.int8)
+        raw_side = project_higher_tf_to_grid(
+            feature_higher=panel.side_hint_2d.astype(np.float64),
+            dt_higher=panel_dt,
+            dt_grid=base_datetimes,
+        )
+        proj_side = np.where(np.isnan(raw_side), 0, raw_side).astype(np.int8)
 
-            raw_to = project_higher_tf_to_grid(
-                feature_higher=panel.turnover_proxy_2d[:, n],
-                dt_higher=panel_dt,
-                dt_grid=base_datetimes,
-            )
-            proj_to[:, n] = np.where(np.isnan(raw_to), 0.0, raw_to)
+        raw_to = project_higher_tf_to_grid(
+            feature_higher=panel.turnover_proxy_2d,
+            dt_higher=panel_dt,
+            dt_grid=base_datetimes,
+        )
+        proj_to = np.where(np.isnan(raw_to), 0.0, raw_to)
     elif ltf_mode == "last":
         # Faster TF → pick last tf_i signal within each base bar window
         panel_dt_int = np.asarray(panel.datetimes, dtype="datetime64[ns]").view(np.int64)
@@ -191,11 +188,10 @@ def _project_panel_to_base_grid(
         valid_idx = idx >= 0
         clipped = np.clip(idx, 0, t_i - 1)
 
-        for n in range(n_syms):
-            proj_score[valid_idx, n] = panel.signed_score_2d[clipped[valid_idx], n]
-            proj_valid[valid_idx, n] = panel.valid_mask_2d[clipped[valid_idx], n]
-            proj_side[valid_idx, n] = panel.side_hint_2d[clipped[valid_idx], n]
-            proj_to[valid_idx, n] = panel.turnover_proxy_2d[clipped[valid_idx], n]
+        proj_score[valid_idx, :] = panel.signed_score_2d[clipped[valid_idx], :]
+        proj_valid[valid_idx, :] = panel.valid_mask_2d[clipped[valid_idx], :]
+        proj_side[valid_idx, :] = panel.side_hint_2d[clipped[valid_idx], :]
+        proj_to[valid_idx, :] = panel.turnover_proxy_2d[clipped[valid_idx], :]
     elif ltf_mode == "mean":
         # Windowed aggregation: mean(score), any(valid), mode(side), mean(to)
         panel_dt_int = np.asarray(panel.datetimes, dtype="datetime64[ns]").view(np.int64)
