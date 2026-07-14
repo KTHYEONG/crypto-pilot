@@ -569,6 +569,10 @@ class CandidateStrategyConfig:
     l1_prepared_dataset_enabled: bool = True
     l1_snapshot_streaming_enabled: bool = True
     l1_nested_result_soft_cap_mb: int = 512
+    l1_parent_rss_cap_mb: int = 8192
+    l1_tree_pss_cap_mb: int = 10240
+    l1_memory_reserve_mb: int = 1024
+    l1_restart_pool_between_phases: bool = True
     l1_ens_prior_effective_n: float = 0.0  # P1: Bayesian prior sample size; >0 shrinks small-n arch edge toward 0
     l1_ens_min_display_events: int = 0  # P2: Min events per archetype to show edge sign; 0=disabled
     l1_evidence_early_snapshots: int = 0  # P3: First N snapshots use relaxed evidence gates; 0=disabled
@@ -872,6 +876,12 @@ class CandidateStrategyConfig:
             raise ValueError("l1_nested_workers must be >= 1 when set")
         if self.l1_nested_result_soft_cap_mb < 128:
             raise ValueError("l1_nested_result_soft_cap_mb must be >= 128")
+        if self.l1_parent_rss_cap_mb < 1024:
+            raise ValueError("l1_parent_rss_cap_mb must be >= 1024")
+        if self.l1_tree_pss_cap_mb <= self.l1_parent_rss_cap_mb:
+            raise ValueError("l1_tree_pss_cap_mb must exceed l1_parent_rss_cap_mb")
+        if not 256 <= self.l1_memory_reserve_mb < self.l1_tree_pss_cap_mb:
+            raise ValueError("l1_memory_reserve_mb must be within [256, tree cap)")
         if self.l1_ens_prior_effective_n < 0.0:
             raise ValueError("l1_ens_prior_effective_n must be non-negative")
         if self.l1_ens_min_display_events < 0:

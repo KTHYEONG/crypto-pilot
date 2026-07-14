@@ -21,7 +21,7 @@ from collections.abc import Mapping, MutableMapping, Sequence
 from concurrent.futures import ProcessPoolExecutor
 from dataclasses import asdict, dataclass, replace
 from pathlib import Path
-from typing import Any, Literal, cast
+from typing import Any, Literal, Protocol, cast
 
 import numpy as np
 import pandas as pd
@@ -1290,3 +1290,124 @@ def assemble_l0_strategy_delivery_manifest(
     )
 
     return pruned_multi_results, manifest
+
+
+class L0StreamingContractError(RuntimeError):
+    """Raised when deterministic two-pass L0 reconstruction diverges."""
+
+
+@dataclass(slots=True)
+class TfPanelBundle:
+    timeframe: str
+    panels: tuple[Any, ...]
+    bindings: tuple[Any, ...]
+    recipes: MutableMapping[str, Any]
+    aligned: Any
+    fingerprint: str
+
+
+class TfPanelBundleFactory(Protocol):
+    def __call__(self, timeframe: str) -> TfPanelBundle: ...
+
+
+@dataclass(slots=True, frozen=True)
+class L0StreamingResult:
+    results_by_tf: dict[str, AlphaFoundryL0Result]
+    selected_panels_by_tf: dict[str, tuple[Any, ...]]
+    alignment_views_by_tf: dict[str, Any]
+    final_selected_recipe_ids: tuple[str, ...]
+
+
+def run_alpha_foundry_l0_gate_streaming(
+    *,
+    timeframes: tuple[str, ...],
+    build_bundle: TfPanelBundleFactory,
+    cost_model: Any,
+    runtime_config: Any,
+    run_id_prefix: str,
+    total_l1_verification_budget: int,
+) -> L0StreamingResult:
+    """Run deterministic two-pass, one-TF-at-a-time L0 gating."""
+    import gc
+
+    from src.domain.futures.alpha_foundry.cheap_gate import evaluate_alpha_cheap_gate_batch
+
+    fingerprints: dict[str, str] = {}
+    cheap_evidences_by_tf: dict[str, tuple[Any, ...]] = {}
+    cheap_gate_config = getattr(runtime_config, "cheap_gate", None)
+
+    try:
+        # Pass A: build each TF, compute cheap evidence, release bundle
+        for tf in timeframes:
+            bundle = build_bundle(tf)
+            fingerprints[tf] = bundle.fingerprint
+            cheap_evidences = evaluate_alpha_cheap_gate_batch(
+                panels=bundle.panels,
+                recipes=bundle.recipes,
+                aligned=bundle.aligned,
+                cost_model=cost_model,
+                config=cheap_gate_config,  # type: ignore[arg-type]
+            )
+            cheap_evidences_by_tf[tf] = cheap_evidences
+            del bundle
+            gc.collect()
+
+        # Fusion: freeze evidence map
+        evidence_by_tf = dict(cheap_evidences_by_tf)
+
+        # Pass B: rebuild each TF, verify fingerprint, run canonical gate, retain selected
+        results_by_tf: dict[str, AlphaFoundryL0Result] = {}
+        selected_panels_by_tf: dict[str, tuple[Any, ...]] = {}
+        alignment_views_by_tf: dict[str, Any] = {}
+        all_selected_ids: list[str] = []
+        accumulated_budget_units: int = 0
+
+        for tf in timeframes:
+            bundle = build_bundle(tf)
+            expected = fingerprints[tf]
+            if bundle.fingerprint != expected:
+                err_expected = expected
+                err_got = bundle.fingerprint
+                del bundle
+                raise L0StreamingContractError(
+                    f"fingerprint mismatch for {tf}: expected {err_expected}, got {err_got}"
+                )
+
+            result = run_alpha_foundry_l0_gate(
+                panels=bundle.panels,
+                bindings=bundle.bindings,
+                recipes=bundle.recipes,
+                aligned=bundle.aligned,
+                cost_model=cost_model,
+                runtime_config=runtime_config,
+                run_id=f"{run_id_prefix}:{tf}",
+                timeframe=tf,
+                evidence_by_tf=evidence_by_tf,
+                precomputed_cheap_evidences=cheap_evidences_by_tf.get(tf),
+            )
+            results_by_tf[tf] = result
+
+            selected: list[Any] = []
+            selected_ids: list[str] = []
+            for panel in result.panels_for_l1:
+                rid = getattr(panel, "recipe_id", None) or getattr(panel, "id", None)
+                if rid is not None and accumulated_budget_units < total_l1_verification_budget:
+                    selected.append(panel)
+                    selected_ids.append(rid)
+                    accumulated_budget_units += 1
+            selected_panels_by_tf[tf] = tuple(selected)
+            all_selected_ids.extend(selected_ids)
+
+            del bundle
+            gc.collect()
+
+        return L0StreamingResult(
+            results_by_tf=results_by_tf,
+            selected_panels_by_tf=selected_panels_by_tf,
+            alignment_views_by_tf=alignment_views_by_tf,
+            final_selected_recipe_ids=tuple(all_selected_ids),
+        )
+    finally:
+        _L0_PHASE1_INPUT_CACHE.clear()
+        _L0_TF_INPUT_CACHE.clear()
+        gc.collect()
