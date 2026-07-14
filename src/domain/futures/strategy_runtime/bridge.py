@@ -10,7 +10,6 @@ import dataclasses
 import gc
 import logging
 from collections.abc import Callable, Mapping, MutableMapping, Sequence
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from pathlib import Path
 from types import SimpleNamespace
@@ -400,6 +399,10 @@ def build_native_htf_panels(
     family_pool: Callable[[str], tuple[str, ...]],
     htf_only: bool = True,
 ) -> dict[str, tuple[AlignedMarketData, tuple[CandidateSignalPanel, ...]]]:
+    """Build native timeframe panels with bounded transient concurrency.
+
+    [ADR_20260714_L1_MEMORY_EXECUTION]
+    """
     from src.domain.futures.strategy.common.alignment import align_data_maps
     from src.domain.futures.strategy.rule_signals import build_rule_signal_panels
 
@@ -443,23 +446,13 @@ def build_native_htf_panels(
             return (tf_i, None, ())
         return (tf_i, aligned_i, tuple(panels_i))
 
-    # Phase 2: process eligible TFs (parallel for 2+, sequential for 0-1)
-    if len(eligible_tfs) <= 1:
-        for tf_i in eligible_tfs:
-            _, aligned_i, native_panels = _native_single_tf(tf_i)
-            if aligned_i is not None and native_panels:
-                result[tf_i] = (aligned_i, native_panels)
-    else:
-        n_workers = min(len(eligible_tfs), 2)
-        with ThreadPoolExecutor(max_workers=n_workers) as executor:
-            futures = {executor.submit(_native_single_tf, tf_i): tf_i for tf_i in eligible_tfs}
-            for future in as_completed(futures):
-                try:
-                    tf_i, aligned_i, native_panels = future.result()
-                    if aligned_i is not None and native_panels:
-                        result[tf_i] = (aligned_i, native_panels)
-                except Exception as exc:
-                    _logger.warning("[MULTI-TF] tf=%s unhandled: %s", futures[future], exc)
+    # Peak RSS guard: each native TF build allocates an aligned grid and its panel
+    # set.  Building two grids concurrently duplicates the largest transient
+    # allocation while the base data maps remain live for the bridge.
+    for tf_i in eligible_tfs:
+        _, aligned_i, native_panels = _native_single_tf(tf_i)
+        if aligned_i is not None and native_panels:
+            result[tf_i] = (aligned_i, native_panels)
 
     return result
 
@@ -511,7 +504,7 @@ def _build_ltf_native_panels_for_l0(
         and not data_maps[symbol]["exec_1m"].empty
     )
     covered_for_plan = payload_symbols or coverage.covered_symbols
-    _run_logger.info(
+    _logger.info(
         "[LTF_ALPHA] exec_1m payload symbols=%d/%d",
         len(payload_symbols),
         len(symbols),
@@ -1104,9 +1097,20 @@ def run_candidate_strategy_for_universe(
         _logger.debug("\n".join(lines))
 
     t_step = time.perf_counter()
+    _run_logger.info(
+        "[MEM] stage=bridge_pre_align rss=%.0fMB n_symbols=%d tf=%s",
+        _get_rss_mb(),
+        len(symbols),
+        tf,
+    )
     aligned = align_data_maps(preloaded_data_maps, symbols, tf, state_cube=state_cube)
     bridge_prof["align"] = time.perf_counter() - t_step
     _sample_rss("align")
+    _run_logger.info(
+        "[MEM] stage=bridge_post_align rss=%.0fMB took=%.4fs",
+        _get_rss_mb(),
+        bridge_prof["align"],
+    )
     n_bars = aligned.close_2d.shape[0]
     _logger.debug(
         "[BRIDGE][INPUT] n_symbols=%d n_bars=%d tf=%s",
@@ -1135,6 +1139,12 @@ def run_candidate_strategy_for_universe(
             _run_logger.info("[LTF_ALPHA] appended panels=0 base_tf=%s", tf)
     bridge_prof["rules"] = time.perf_counter() - t_step
     _sample_rss("rules")
+    _run_logger.info(
+        "[MEM] stage=bridge_post_rules rss=%.0fMB took=%.4fs n_panels=%d",
+        _get_rss_mb(),
+        bridge_prof["rules"],
+        len(panels),
+    )
     _multi_tf_htf_panels: tuple[Any, ...] | None = None
     if alpha_foundry_config is not None and getattr(alpha_foundry_config, "mode", "off") != "off":
         t_step = time.perf_counter()
@@ -1253,10 +1263,18 @@ def run_candidate_strategy_for_universe(
             )
             _af_run_id = f"{tf}_{int(_time_panel.time())}"
             _t_l0_gate = _time_panel.perf_counter()
-            import os
-            _workers = getattr(alpha_foundry_config, "l0_parallel_max_workers", None)
-            if _workers is None:
-                _workers = max(1, min(4, (os.cpu_count() or 2) - 1))
+            # The multi-TF panel map is still resident at this point. Forking
+            # the canonical L0 gate can dirty those inherited grids in every
+            # child and multiply the parent high-water mark beyond the 18 GiB
+            # host budget. Keep this gate serial until the two-pass streaming
+            # builder owns/release panels one TF at a time.
+            _requested_l0_workers = getattr(alpha_foundry_config, "l0_parallel_max_workers", None)
+            _workers = 1
+            _run_logger.info(
+                "[SYS] stage=l0_gate_worker_plan requested=%s workers=%d reason=all_tf_panels_resident",
+                _requested_l0_workers,
+                _workers,
+            )
             multi_results = run_alpha_foundry_l0_gate_multi_tf(
                 panels_by_tf=l0_panels_by_tf,
                 bindings_by_tf=bindings_by_tf,
@@ -1476,6 +1494,7 @@ def run_candidate_strategy_for_universe(
         return CandidatePipelineOutput(
             alpha_panel=alpha_panel,
             target_weights=np.zeros_like(aligned.close_2d),
+            aligned=aligned,
             labeled=pd.DataFrame(),
             labeled_unfiltered=pd.DataFrame(),
             rule_report={
@@ -1633,6 +1652,7 @@ def run_candidate_strategy_for_universe(
             return CandidatePipelineOutput(
                 alpha_panel=alpha_panel,
                 target_weights=np.zeros_like(aligned.close_2d),
+                aligned=aligned,
                 labeled=labeled,
                 labeled_unfiltered=labeled_all,
                 rule_report={
@@ -1694,6 +1714,7 @@ def run_candidate_strategy_for_universe(
         return CandidatePipelineOutput(
             alpha_panel=alpha_panel_sv,
             target_weights=np.zeros_like(aligned.close_2d),
+            aligned=aligned,
             labeled=labeled,
             labeled_unfiltered=labeled_all,
             oos_start=_oos_start_ref,

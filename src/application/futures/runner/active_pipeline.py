@@ -2430,6 +2430,7 @@ def _run_strategy_stage(
 
     # ─── Tiered Pipeline 분기 (bridge 완료 후 — labeled + aligned 사용 가능) ──
     if use_tiered:
+        from src.application.futures.runner.tiered_handoff import consume_candidate_output_for_tiered
         from src.domain.futures.strategy.tiered_workflow.pipeline import (
             TieredPipelineError,
             run_tiered_pipeline,
@@ -2437,39 +2438,44 @@ def _run_strategy_stage(
 
         try:
             from src.domain.futures.portfolio.portfolio_constructor import PortfolioCaps
-            from src.domain.futures.strategy.common.alignment import align_data_maps
 
-            _mem_align = _get_rss_mb()
-            t_align = time.perf_counter()
-            aligned_tiered = align_data_maps(
-                full_strategy_maps,
-                effective_trade_syms,
-                run_config.timeframe,
-                state_cube=_pit_state_cube,
+            labeled_tiered = _tiered_labeled_events(ml_out)
+            # The routing-normalized frame is the object transferred by the
+            # destructive handoff; this avoids retaining the pre-normalized
+            # frame beside its L1 input copy.
+            ml_out.labeled_unfiltered = labeled_tiered
+            t_handoff = time.perf_counter()
+            handoff = consume_candidate_output_for_tiered(
+                ml_out,
+                expected_symbols=tuple(effective_trade_syms),
             )
+            aligned_tiered = handoff.aligned
+            labeled_tiered = handoff.labeled_events
+            l0_delivery_manifest = handoff.l0_delivery_manifest
+            del ml_out
             _logger.log(
                 PERF,
-                "[PERF] tiered_align_data_maps n_syms=%d tf=%s took=%.4fs",
+                "[PERF] tiered_consume_candidate_output n_syms=%d tf=%s took=%.4fs",
                 len(effective_trade_syms),
                 run_config.timeframe,
-                time.perf_counter() - t_align,
+                time.perf_counter() - t_handoff,
             )
-            _rss_align = _get_rss_mb()
+            _rss_handoff = _get_rss_mb()
             _logger.debug(
-                "[MEM] stage=align rss=%.0fMB n_syms=%d n_bars=%d",
-                _rss_align,
+                "[MEM] stage=tiered_handoff rss=%.0fMB n_syms=%d n_bars=%d",
+                _rss_handoff,
                 len(effective_trade_syms),
                 len(aligned_tiered.datetimes),
             )
             _logger.debug(
-                "[MEM] stage=bridge rss=%.0fMB delta=%+.0fMB n_syms=%d",
+                "[MEM] stage=tiered_handoff rss=%.0fMB delta=%+.0fMB n_syms=%d",
                 _get_rss_mb(),
-                _rss_align - _mem_align,
+                _get_rss_mb() - _rss_handoff,
                 len(bridge_trading_symbols),
             )
             del full_strategy_maps
             gc.collect()
-            _logger.debug("[MEM] stage=post_align_free rss=%.0fMB", _get_rss_mb())
+            _logger.debug("[MEM] stage=post_handoff_free rss=%.0fMB", _get_rss_mb())
             if _pit_state_cube is not None:
                 _log_cube_coverage(
                     _pit_state_cube,
@@ -2511,7 +2517,6 @@ def _run_strategy_stage(
                         f"actual_end={aligned_end.isoformat()} "
                         "(intersection tail truncated — check delisted symbols in panel)"
                     )
-            labeled_tiered = _tiered_labeled_events(ml_out)
             assert tiered_cfg is not None
             _futures_policy_t: dict[str, Any] = dict(OPT_FUTURES_CONFIG.get("FUTURES_PORTFOLIO_POLICY") or {})
             tiered_caps = PortfolioCaps(
@@ -2538,7 +2543,7 @@ def _run_strategy_stage(
                 target_phase="l1",
                 verbose=True,
                 probe_manifest=_probe_manifest_raw,
-                l0_delivery_manifest=ml_out.l0_delivery_manifest,
+                l0_delivery_manifest=l0_delivery_manifest,
             )
             _log_mem("tiered_pipeline", _mem_tiered_before, extra=f"phase={run_config.phase}")
             if not l1_res.gate_passed:

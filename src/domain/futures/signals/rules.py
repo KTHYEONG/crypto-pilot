@@ -6,7 +6,7 @@
 from __future__ import annotations
 
 import logging
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any
 
@@ -381,7 +381,7 @@ def _resample_to_htf_and_project(
     return out_4h
 
 
-def _resolve_panel_archetype(panel: CandidateSignalPanel) -> str:
+def _resolve_panel_archetype(panel: Any) -> str:
     """Resolve fallback archetype from family when panel.metadata lacks one.
 
     [ADR_20260707_L1_BACKTEST_FIDELITY_FIXES]
@@ -2133,7 +2133,7 @@ def build_rule_signal_panels(
 
 
 def candidate_panels_to_events(
-    panels: tuple[CandidateSignalPanel, ...],
+    panels: Sequence[Any],
     *,
     min_abs_score: float,
     side_flip_variants: tuple[str, ...] = (),
@@ -2175,7 +2175,8 @@ def candidate_panels_to_events(
         "entry_regime",
         "entry_regime_code",
     ]
-    _all_cols = _base_cols + _l0_cols
+    _identity_cols = ["l0_recipe_id"]
+    _all_cols = _base_cols + _l0_cols + _identity_cols
     if not panels:
         return pd.DataFrame(columns=_all_cols)
 
@@ -2275,6 +2276,7 @@ def candidate_panels_to_events(
                     "entry_regime": r_entry_regime,
                     "entry_regime_code": r_entry_code,
                 }
+                df_dict["l0_recipe_id"] = str(panel.metadata.get("recipe_id", ""))
                 if l0_mask is not None:
                     df_dict["l0_discovery_unit_id"] = panel.metadata.get("l0_discovery_unit_id", "")
                     df_dict["l0_parent_recipe_id"] = panel.metadata.get("l0_parent_recipe_id", "")
