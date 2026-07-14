@@ -15,6 +15,7 @@ from src.domain.futures.strategy.rule_signals import (
     _cross_sectional_rank_signed_2d,
     _cross_sectional_robust_zscore,
     _entry_rising_edge_2d,
+    _precompute_shared_indicators,
     _rolling_max_2d,
     _rolling_min_2d,
     _safe_taker_imbalance_2d,
@@ -1828,3 +1829,71 @@ class TestMtfFusionPerfOptimization:
         # Bars 3..6 (partial-warmup window): direction must be a real signal (1.0, uptrend), not 0.0.
         partial_warmup = result.to_numpy()[3:7, 0]
         assert np.all(partial_warmup == 1.0), f"expected all 1.0 (senkou_a fallback), got {partial_warmup}"
+
+
+def test_precomputed_cache_produces_identical_panels() -> None:
+    """Cache + precomputed path returns the same panels as standard path."""
+    aligned = _make_aligned(t=200, n=3)
+    cfg = CandidateStrategyConfig()
+
+    panels_no_cache = build_rule_signal_panels(aligned=aligned, cfg=cfg)
+
+    cache = _precompute_shared_indicators(aligned=aligned, cfg=cfg)
+    panels_with_cache = build_rule_signal_panels(
+        aligned=aligned, cfg=cfg, precomputed=cache,
+    )
+
+    assert len(panels_no_cache) == len(panels_with_cache)
+    for p1, p2 in zip(panels_no_cache, panels_with_cache, strict=True):
+        assert p1.family == p2.family
+        assert p1.variant == p2.variant
+        np.testing.assert_allclose(p1.signed_score_2d, p2.signed_score_2d, atol=1e-10)
+        np.testing.assert_allclose(p1.side_hint_2d, p2.side_hint_2d, atol=1e-10)
+        np.testing.assert_array_equal(p1.valid_mask_2d, p2.valid_mask_2d)
+
+
+def test_precomputed_cache_with_family_filter() -> None:
+    """Cache works correctly with family_filter."""
+    aligned = _make_aligned(t=200, n=2)
+    cfg = CandidateStrategyConfig()
+    family_filter = ("trend_ma", "trend_donchian")
+
+    cache = _precompute_shared_indicators(aligned=aligned, cfg=cfg)
+    panels = build_rule_signal_panels(
+        aligned=aligned, cfg=cfg, family_filter=family_filter, precomputed=cache,
+    )
+
+    assert len(panels) > 0
+    assert all(p.family in family_filter for p in panels)
+
+
+def test_precomputed_cache_with_short_history() -> None:
+    """Cache handles shorter history (enough bars for all windows)."""
+    aligned = _make_aligned(t=200, n=2)
+    cfg = CandidateStrategyConfig()
+
+    cache = _precompute_shared_indicators(aligned=aligned, cfg=cfg)
+    panels = build_rule_signal_panels(
+        aligned=aligned, cfg=cfg, precomputed=cache,
+    )
+
+    assert isinstance(panels, tuple)
+    assert len(panels) > 0
+
+
+def test_precomputed_cache_with_normalize_time_horizon() -> None:
+    """Cache works with normalize_time_horizon=True (HTF build path)."""
+    aligned = _make_aligned(t=250, n=2)
+    cfg = CandidateStrategyConfig(timeframe="6h")
+
+    cache = _precompute_shared_indicators(
+        aligned=aligned, cfg=cfg,
+        normalize_time_horizon=True, horizon_base_tf="4h",
+    )
+    panels = build_rule_signal_panels(
+        aligned=aligned, cfg=cfg, precomputed=cache,
+        normalize_time_horizon=True, horizon_base_tf="4h",
+    )
+
+    assert isinstance(panels, tuple)
+    assert len(panels) > 0
