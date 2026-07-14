@@ -1801,7 +1801,7 @@ class TestMtfFusionPerfOptimization:
                 cloud_bottom = pd.concat([senkou_a, senkou_b_line], axis=1).min(axis=1)
                 direction = np.where(c > cloud_top, 1.0, np.where(c < cloud_bottom, -1.0, 0.0))
                 out[:, s] = direction
-            return out
+            return np.asarray(out)
 
         from src.domain.futures.strategy.rule_signals import _htf_ichimoku_cloud_filter
         result = _htf_ichimoku_cloud_filter(high, low, close, tenkan=9, kijun=26, senkou_b=52)
