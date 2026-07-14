@@ -746,7 +746,7 @@ def compute_symbol_strategy_evidence(
     if qualified_count == 0 and final_evidence:
         reasons: Counter[str] = Counter(r for ev in final_evidence for r in ev.structural_reasons)
         qw_zero = sum(1 for ev in final_evidence if ev.hard_eligible and ev.quality_weight <= 0.0)
-        logger.warning(
+        logger.debug(
             "[L1-EVIDENCE] as_of=%d: %d pairs, 0 qualified. structural_reasons=%s, hard_eligible_but_qw_zero=%d",
             registry_as_of_idx,
             len(final_evidence),
