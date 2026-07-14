@@ -208,8 +208,11 @@
     "testing": "tests/unit/domain/futures/test_l0_naming_and_debug_observability.py"
   },
   "src/domain/futures/optimization/opt_config.py": {
-    "architecture": "docs/architecture/layer3.md",
-    "testing": "tests/unit/domain/futures/optimization/test_data_window_floor_consistency.py"
+    "architecture": "docs/results/result.md",
+    "testing": [
+      "tests/unit/domain/futures/optimization/test_data_window_floor_consistency.py",
+      "tests/unit/domain/futures/optimization/test_opt_config.py"
+    ]
   },
   "src/domain/futures/validation/gates.py": {
     "architecture": "docs/architecture/layer3.md",
