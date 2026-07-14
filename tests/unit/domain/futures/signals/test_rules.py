@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib
 import sys
 from concurrent.futures import Future
+from typing import Any
 
 import numba
 import numpy as np
@@ -59,9 +60,9 @@ class _InlineExecutor:
     def __exit__(self, *_: object) -> None:
         self._closed = True
 
-    def submit(self, fn: object, /, *args: object, **kwargs: object) -> Future:
-        fut: Future = Future()
-        fut.set_result(fn(*args, **kwargs))  # type: ignore[misc]
+    def submit(self, fn: Any, /, *args: object, **kwargs: object) -> Future[Any]:
+        fut: Future[Any] = Future()
+        fut.set_result(fn(*args, **kwargs))
         return fut
 
 

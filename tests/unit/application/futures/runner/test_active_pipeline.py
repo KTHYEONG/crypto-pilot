@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import inspect
 from types import SimpleNamespace
+from typing import Any, cast
 
 import pandas as pd
 
@@ -16,7 +17,8 @@ def test_strategy_stage_wires_causal_cutoff_and_delivery_manifest() -> None:
     source = inspect.getsource(_run_strategy_stage)
 
     assert "l0_evidence_end=getattr(tiered_window, \"l1_start\", None)" in source
-    assert "l0_delivery_manifest=ml_out.l0_delivery_manifest" in source
+    assert "l0_delivery_manifest=l0_delivery_manifest" in source
+    assert "consume_candidate_output_for_tiered(" in source
 
 
 def test_has_l1_delivery_candidates_uses_multi_tf_manifest_not_base_report() -> None:
@@ -35,6 +37,6 @@ def test_tiered_labeled_events_marks_unrouted_events_with_empty_l0_recipe_id() -
 
     source = SimpleNamespace(labeled_unfiltered=pd.DataFrame({"native_tf": ["4h"]}))
 
-    labeled = _tiered_labeled_events(source)
+    labeled = _tiered_labeled_events(cast(Any, source))
 
     assert labeled["l0_recipe_id"].tolist() == [""]

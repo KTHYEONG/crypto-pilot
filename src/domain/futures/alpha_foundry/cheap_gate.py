@@ -1420,14 +1420,28 @@ def evaluate_panel_gate(
         assert cheap_block_stats is not None  # type narrowing for cache access
         assert cheap_meta_stats is not None
         block_bars_eff = cheap_block_stats["block_bars_eff"]
-        block_means = cheap_block_stats["net_block_means"]
-        gross_block_means = cheap_block_stats["gross_block_means"]
-        mu_block = float(np.nanmean(block_means))
-        se_block = float(np.nanstd(block_means, ddof=1) / np.sqrt(max(len(block_means), 1)))
-        nw_tstat = cheap_meta_stats["nw_tstat"]
-        net_lcb_bps = cheap_meta_stats["block_lcb_bps"]
-        mu_gross = float(np.nanmean(gross_block_means))
-        se_gross = float(np.nanstd(gross_block_means, ddof=1) / np.sqrt(max(len(gross_block_means), 1)))
+        block_means = np.asarray(cheap_block_stats["net_block_means"], dtype=np.float64)
+        gross_block_means = np.asarray(cheap_block_stats["gross_block_means"], dtype=np.float64)
+        finite_net = block_means[np.isfinite(block_means)]
+        finite_gross = gross_block_means[np.isfinite(gross_block_means)]
+        mu_block = float(np.mean(finite_net)) if finite_net.size else 0.0
+        se_block = (
+            float(np.std(finite_net, ddof=1) / np.sqrt(finite_net.size))
+            if finite_net.size > 1
+            else 0.0
+        )
+        nw_tstat = float(cheap_meta_stats["nw_tstat"])
+        if not np.isfinite(nw_tstat):
+            nw_tstat = 0.0
+        net_lcb_bps = float(cheap_meta_stats["block_lcb_bps"])
+        if not np.isfinite(net_lcb_bps):
+            net_lcb_bps = 0.0
+        mu_gross = float(np.mean(finite_gross)) if finite_gross.size else 0.0
+        se_gross = (
+            float(np.std(finite_gross, ddof=1) / np.sqrt(finite_gross.size))
+            if finite_gross.size > 1
+            else 0.0
+        )
         gross_lcb_bps = mu_gross - 1.0 * se_gross
         cost_drag = max(0.0, float(cheap_meta_stats["cost_drag_ratio"]))
         turnover = cheap_meta_stats["turnover"]

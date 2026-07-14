@@ -1,6 +1,6 @@
 # L0/L1 Discovery Snapshot
 
-- **최신 측정일**: `2026-07-13` (run `4h_...`, `--phase l1 --timeframe 4h --date 2026-07-13 --trials 1 --seed 42`, `LOG_LEVEL=DEBUG`)
+- **최신 측정일**: `2026-07-14` (run `--phase l1 --timeframe 4h --date 2026-07-13 --trials 1 --seed 42`, `LOG_LEVEL=DEBUG`)
 - 이 문서는 **현재 상태와 최신 관측 데이터만** 담는다. 과거 세션의 방대한 반복 로그는 `docs/decisions/decisions.md`/`decisions_archive.md`에 보존.
 
 ## 1. L0 → L1 TF별 배포 현황 (최종)
@@ -58,3 +58,11 @@
 - 병목은 1m 저장/스트리밍이 아니라 `2h,4h,6h,8h,12h,1d` 패널 동시 보유와 nested L1 worker fork이다.
 - 21:07 실행에서는 6개 TF L1이 `gate_passed=True`로 정상 완료되었으므로 코드상 L1 불능은 아니다. 다만 실행 환경이 peak 약 11GB를 안정적으로 수용하지 못하면 전체 실행이 중단될 수 있다.
 - 후속 개선 대상: TF별 panel 수명 단축, L1 TF 순차 처리 후 즉시 해제, nested worker 수/IPC 메모리 상한 조정. 1m hybrid 자체를 되돌리는 것은 해결책이 아니다.
+
+## 7. L1 메모리 실행 결과 (2026-07-14)
+
+- 데이터 `125/125` 로드, L1 admission `114/125`, 실행 종료 코드 `0`.
+- 총 소요 `3분 24초`; 최대 RSS `8,523,288KB`(약 `8.13GiB`), 계측 peak `8,324MB`.
+- family/TF 패널 순차 생성과 L0 gate 단일 worker 적용 후 bridge 및 6개 TF L1 루프까지 메모리 초과 없이 완료.
+- TF별 결과: `2h, 4h, 6h, 8h, 12h, 1d` 모두 `gate_passed=False`, `n_ready=0`; 공통 사유는 `labeled events 없음`.
+- TF probe 승자 `0개`; 최종 blocker는 `candidate_tf_missing_main_l1:1h`.

@@ -274,63 +274,41 @@ def resolve_safe_nested_workers(
         pinned: If set, request an upper bound for worker count.
         result_soft_cap_mb: Optional aggregate soft cap for nested result payload.
     """
-    import psutil
-
     physical_cores = os.cpu_count() or 4
     cpu_limit = max(1, int(physical_cores * 0.75))
     requested_workers = min(n_tasks, pinned) if isinstance(pinned, int) and pinned >= 1 else n_tasks
-
-    mem = psutil.virtual_memory()
-    available_gb = mem.available / (1024**3)
-    safe_mem_gb = available_gb * 0.70
-
-    frame_gb = frame_memory_bytes / (1024**3)
-    predicted_result_gb = 0.10 if compact_result else 0.40
-    estimated_proc_gb = max(0.8, 0.5 + frame_gb * 0.5 + predicted_result_gb)
-
-    mem_limit = max(1, int(safe_mem_gb // estimated_proc_gb))
     predicted_result_mb = 100 if compact_result else 400
-    result_mem_limit = None
-    if result_soft_cap_mb is not None:
-        result_mem_limit = max(1, int(result_soft_cap_mb // predicted_result_mb))
-
-    stage_worker_caps = {
-        "evidence": 4 if compact_result and available_gb >= 8.0 else 3,
-        "outer": 3,
-        "l2_optuna": 4,
-    }
+    stage_worker_caps = {"evidence": 3, "outer": 2, "l2_optuna": 3}
     stage_cap = stage_worker_caps.get(stage, 3)
+    soft_cap_mb = result_soft_cap_mb if result_soft_cap_mb is not None else predicted_result_mb
+    from src.domain.futures.strategy.tiered_workflow.memory import (
+        MIB,
+        resolve_l1_memory_plan,
+        snapshot_process_tree_memory,
+    )
 
-    max_workers = min(cpu_limit, stage_cap)
-    workers = max(1, min(requested_workers, max_workers, mem_limit))
-    if result_mem_limit is not None:
-        workers = min(workers, result_mem_limit)
-    # Over-subscription guard: each worker gets at least ~2 tasks
-    if workers > 1 and n_tasks // workers < 2:
-        workers = max(1, n_tasks // 2)
-    if available_gb < 5.0:
-        workers = min(workers, 2)
+    memory_plan = resolve_l1_memory_plan(
+        n_tasks=n_tasks,
+        shared_input_bytes=frame_memory_bytes,
+        result_soft_cap_bytes=soft_cap_mb * MIB,
+        snapshot=snapshot_process_tree_memory(os.getpid()),
+        stage_cap=stage_cap,
+        cpu_cap=cpu_limit,
+        pinned=pinned,
+    )
+    workers = memory_plan.workers
     logger.log(
         PERF,
-        "[PERF] worker_calc stage=%s n_tasks=%d requested_workers=%d physical_cores=%d cpu_limit=%d "
-        "max_workers=%d available_gb=%.2f frame_gb=%.2f estimated_proc_gb=%.2f compact=%s "
-        "result_soft_cap_mb=%s predicted_result_mb=%d result_mem_limit=%s pinned_applied=%s "
-        "mem_limit=%d workers=%d",
+        "[SYS] stage=l1_worker_plan name=%s n_tasks=%d requested_workers=%d cpu_limit=%d "
+        "shared_mb=%.0f worker_mb=%.0f projected_mb=%.0f reason=%s workers=%d",
         stage,
         n_tasks,
         requested_workers,
-        physical_cores,
         cpu_limit,
-        max_workers,
-        available_gb,
-        frame_gb,
-        estimated_proc_gb,
-        compact_result,
-        result_soft_cap_mb,
-        predicted_result_mb,
-        result_mem_limit,
-        isinstance(pinned, int) and pinned >= 1,
-        mem_limit,
+        frame_memory_bytes / (1024**2),
+        memory_plan.estimated_worker_private_bytes / (1024**2),
+        memory_plan.projected_tree_bytes / (1024**2),
+        memory_plan.reason,
         workers,
     )
     return workers
