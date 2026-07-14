@@ -11,7 +11,7 @@ import pyarrow.parquet as pq
 import pytest
 
 from src.domain.futures.optimization import opt_data_utils
-from src.domain.futures.optimization.opt_data_utils import _scan_enriched_dataset  # type: ignore[attr-defined]
+from src.domain.futures.optimization.opt_data_utils import _scan_enriched_dataset
 
 
 def test_safe_read_funding_parquet_normalizes_duplicate_columns(
@@ -485,11 +485,11 @@ def test_load_futures_data_maps_exec_1m_routes_all_to_threadpool(
     _setup_multi_tf_enriched(tmp_path, safe_sym)
 
     scan_call_count: list[int] = [0]
-    _orig_scan = opt_data_utils._scan_enriched_dataset  # type: ignore[attr-defined]
+    _orig_scan = opt_data_utils._scan_enriched_dataset
 
     def _counting_scan(*args: Any, **kwargs: Any) -> dict[str, pd.DataFrame]:
         scan_call_count[0] += 1
-        return _orig_scan(*args, **kwargs)  # type: ignore[no-any-return]
+        return _orig_scan(*args, **kwargs)
 
     monkeypatch.setattr(opt_data_utils, "_scan_enriched_dataset", _counting_scan)
 
@@ -551,7 +551,7 @@ def test_searchsorted_mask_equivalence(tmp_path: Any, monkeypatch: pytest.Monkey
                 "volume": 1000.0,
             }
         )
-        pq.write_table(pa.Table.from_pandas(df), tmp_path / f"{safe_sym}_{tf_l}_enriched.parquet")
+        pq.write_table(pa.Table.from_pandas(df), tmp_path / f"{safe_sym}_{tf_l}_enriched.parquet")  # type: ignore[no-untyped-call]
 
     monkeypatch.setattr(opt_data_utils, "compute_segment_merge_index", lambda *a, **kw: 0)
     monkeypatch.setattr(opt_data_utils, "_append_stage_integrity", lambda *a, **kw: None)
@@ -574,3 +574,13 @@ def test_searchsorted_mask_equivalence(tmp_path: Any, monkeypatch: pytest.Monkey
         skey = f"is_start_idx_{tf_l}"
         assert skey in is_map, f"Missing is_start_idx_{tf_l}"
         assert 0 <= is_map[skey] <= len(is_map.get(tf_l, []))
+
+
+def test_bars_per_day_matches_hours_per_bar_for_all_l1_tfs() -> None:
+    from src.domain.futures.optimization.opt_data_utils import _bars_per_day
+    from src.domain.futures.strategy.timeframe_contracts import HOURS_PER_BAR
+
+    for tf in ("2h", "4h", "6h", "8h", "12h", "1d"):
+        result = _bars_per_day(tf)
+
+        assert result == pytest.approx(24.0 / HOURS_PER_BAR[tf])

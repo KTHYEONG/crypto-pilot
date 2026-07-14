@@ -25,6 +25,13 @@ _logger: logging.Logger = logging.getLogger("opt_data_utils")
 _SUFFICIENCY_LOG_DIR = LOG_DIR / "futures/data"
 
 
+def _bars_per_day(tf: str) -> float:
+    """Replaces ad hoc {'1h':24,'4h':6,'1d':1}.get(tf,6) with canonical hours_per_bar(). [LIMIT-09]"""
+    from src.domain.futures.strategy.timeframe_contracts import hours_per_bar
+
+    return 24.0 / hours_per_bar(tf)
+
+
 def _tf_delta(tf: str) -> pd.Timedelta:
     tf_l = str(tf).lower()
     if tf_l == "1h":
@@ -47,7 +54,7 @@ def _bars_between(start: str, end: str, tf: str) -> int:
 
 
 def _resolve_warmup_bars(tf: str) -> int:
-    bars_per_day = {"1h": 24, "4h": 6, "1d": 1}.get(str(tf).lower(), 6)
+    bpd = _bars_per_day(tf)
     lookback = int(OPT_FUTURES_CONFIG.get("FUTURES_MOMENTUM_LOOKBACK", 252))
     cov = int(OPT_FUTURES_CONFIG.get("FUTURES_COV_LOOKBACK", 252))
     sigma = int(OPT_FUTURES_CONFIG.get("FUTURES_COMPOSER_SIGMA_LOOKBACK", 252))
@@ -55,14 +62,13 @@ def _resolve_warmup_bars(tf: str) -> int:
     embargo = int(OPT_FUTURES_CONFIG.get("FUTURES_EMBARGO_BARS", 0))
     platt = int(OPT_FUTURES_CONFIG.get("FUTURES_PLATT_MIN_TRAIN_BARS", 120))
     min_membership_warm_days = int(OPT_FUTURES_CONFIG.get("FUTURES_MEMBERSHIP_WARM_DAYS", 42))
-    min_membership_warm = min_membership_warm_days * bars_per_day
+    min_membership_warm = round(min_membership_warm_days * bpd)
     return max(lookback, cov, sigma, atr, embargo, platt, min_membership_warm)
 
 
 def resolve_warmup_days_for_tf(tf: str, *, safety_margin_days: int = 20) -> int:
     """지표 워밍업 요구치(bar)를 캘린더 일수로 환산. [ADR_20260706_DATA_WINDOW_FLOOR_CONSISTENCY]"""
-    bars_per_day = {"1h": 24, "4h": 6, "1d": 1}.get(str(tf).lower(), 6)
-    return math.ceil(_resolve_warmup_bars(tf) / bars_per_day) + safety_margin_days
+    return math.ceil(_resolve_warmup_bars(tf) / _bars_per_day(tf)) + safety_margin_days
 
 
 def evaluate_symbol_data_sufficiency(
