@@ -2601,6 +2601,7 @@ def _run_strategy_stage(
             l1_res, _, _ = run_tiered_pipeline(
                 labeled_events=labeled_tiered,
                 aligned=aligned_tiered,
+                per_tf_data_maps=handoff.aligned_by_tf,
                 cfg=tiered_cfg,
                 window=tiered_window,
                 l1_params={},
@@ -2842,6 +2843,7 @@ def _run_strategy_stage(
             _, l2_final, _ = run_tiered_pipeline(
                 labeled_events=labeled_tiered,
                 aligned=aligned_tiered,
+                per_tf_data_maps=handoff.aligned_by_tf,
                 cfg=tiered_cfg,
                 window=tiered_window,
                 l1_params={},
