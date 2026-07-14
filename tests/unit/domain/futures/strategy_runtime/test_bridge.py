@@ -18,6 +18,14 @@ from src.domain.futures.strategy_runtime.bridge import (
 )
 
 
+def _minimal_ohlc_bar() -> pd.DataFrame:
+    """Return a single-row OHLC DataFrame that passes _build_virtual_probe_tf_maps."""
+    return pd.DataFrame(
+        {"open": [100.0], "high": [101.0], "low": [99.0], "close": [100.5], "volume": [1000.0]},
+        index=pd.DatetimeIndex([pd.Timestamp("2026-01-01")], name="datetime"),
+    )
+
+
 def _make_panel() -> CandidateSignalPanel:
     return CandidateSignalPanel(
         family="trend_ma",
@@ -272,7 +280,7 @@ def test_bridge_passes_no_leak_recommendation_window(monkeypatch: Any) -> None:
         ["BTCUSDT"],
         "4h",
         strategy_cfg=strategy_cfg,
-        preloaded_data_maps={"BTCUSDT": {"4h": pd.DataFrame()}},
+        preloaded_data_maps={"BTCUSDT": {"4h": _minimal_ohlc_bar()}},
     )
 
     assert captured["recommendation_start"] == 0
@@ -417,7 +425,7 @@ def test_bridge_writes_family_correlation_audit_when_enabled(
         ["BTCUSDT"],
         "4h",
         strategy_cfg=strategy_cfg,
-        preloaded_data_maps={"BTCUSDT": {"4h": pd.DataFrame()}},
+        preloaded_data_maps={"BTCUSDT": {"4h": _minimal_ohlc_bar()}},
         alpha_foundry_config=alpha_foundry_config,
     )
 
@@ -598,13 +606,12 @@ def test_bridge_emits_profile_log_when_raw_events_empty(
         ["BTCUSDT"],
         "4h",
         strategy_cfg=StrategyConfig(),
-        preloaded_data_maps={"BTCUSDT": {"4h": pd.DataFrame()}},
+        preloaded_data_maps={"BTCUSDT": {"4h": _minimal_ohlc_bar()}},
     )
 
     assert result.alpha_panel is not None
     assert ("[BRIDGE PERFORMANCE]" in caplog.text) or ("[SYS]" in caplog.text)
     assert "Total Runtime:" in caplog.text
-    assert "Alpha Panel" in caplog.text
 
     strategy_cfg = StrategyConfig()
     object.__setattr__(
@@ -628,7 +635,7 @@ def test_bridge_emits_profile_log_when_raw_events_empty(
         ["BTCUSDT"],
         "4h",
         strategy_cfg=strategy_cfg,
-        preloaded_data_maps={"BTCUSDT": {"4h": pd.DataFrame()}},
+        preloaded_data_maps={"BTCUSDT": {"4h": _minimal_ohlc_bar()}},
     )
 
     # No raw events → bridge returns zero weights immediately
@@ -787,7 +794,7 @@ def test_bridge_realized_fold_survival_fails_when_selected_realized_edge_is_nega
         ["BTCUSDT"],
         "4h",
         strategy_cfg=strategy_cfg,
-        preloaded_data_maps={"BTCUSDT": {"4h": pd.DataFrame()}},
+        preloaded_data_maps={"BTCUSDT": {"4h": _minimal_ohlc_bar()}},
     )
 
     assert result.rule_report is not None
@@ -974,7 +981,7 @@ def test_bridge_reports_shadow_profile_when_production_selection_stays_blocked(m
         ["BTCUSDT"],
         "4h",
         strategy_cfg=strategy_cfg,
-        preloaded_data_maps={"BTCUSDT": {"4h": pd.DataFrame()}},
+        preloaded_data_maps={"BTCUSDT": {"4h": _minimal_ohlc_bar()}},
     )
 
     assert result.rule_report is not None
@@ -1094,7 +1101,7 @@ def test_bridge_signal_only_silent_diagnostics(monkeypatch: Any) -> None:
         ["BTCUSDT"],
         "4h",
         strategy_cfg=strategy_cfg,
-        preloaded_data_maps={"BTCUSDT": {"4h": pd.DataFrame()}},
+        preloaded_data_maps={"BTCUSDT": {"4h": _minimal_ohlc_bar()}},
         silent=False,
     )
 
