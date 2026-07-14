@@ -174,20 +174,20 @@ def evaluate_panel_cheap_gate(
 ) -> CheapGateEvidence:
     """[ADR_20260708_L0_SIGNAL_YIELD_IMPROVEMENT] n_events floor resolved via
     resolve_family_timeframe_gate_policy (family/archetype-aware), not flat config.min_events.
-    
+
     [ADR_20260710_L0_ENTRY_EXIT_SIGNAL_EFFECTIVENESS_REDESIGN] Barrier-aware evaluation
     replaces fixed-horizon mark-to-close. precomputed_atr_2d is resolved once per batch
     by the caller (evaluate_alpha_cheap_gate_batch).
-    
+
     [ADR_20260712_L0_GATE_EVENT_FILTERING_OPTIMIZATION] Event mask is temporarily injected
     into metadata for optimized numpy-level filtering inside candidate_panels_to_events.
-    
+
     [ADR_20260712_L0_GATE_PIPELINE_OPT] precomputed_atr_2d and _symbol_map (O(1) lookup)
     replace aligned.symbols.index() O(S) search. Cache 3 dicts populated for canonical gate."""
     if bars_per_year <= 0.0:
         raise ValueError("bars_per_year must be positive")
     _validate_shape(panel, aligned)
-    
+
     t, _n = aligned.close_2d.shape
     _symbol_map: dict[str, int] = {s: i for i, s in enumerate(aligned.symbols)}
     close = aligned.close_2d
@@ -197,7 +197,9 @@ def evaluate_panel_cheap_gate(
     symbols = tuple(aligned.symbols) if hasattr(aligned, "symbols") else ()
     min_exec_1m_cov = float(getattr(config, "ltf_exec_1m_min_coverage", 0.80))
     data_support_tier, symbol_mask = resolve_panel_data_support_tier(
-        panel=panel, symbols=symbols, min_exec_1m_coverage=min_exec_1m_cov,
+        panel=panel,
+        symbols=symbols,
+        min_exec_1m_coverage=min_exec_1m_cov,
     )
 
     side = panel.side_hint_2d
@@ -276,7 +278,9 @@ def evaluate_panel_cheap_gate(
     panel.metadata["l0_event_mask_2d"] = event_mask
     try:
         all_events = candidate_panels_to_events(
-            (panel,), min_abs_score=0.0, cost_floor_bps=float("nan"),
+            (panel,),
+            min_abs_score=0.0,
+            cost_floor_bps=float("nan"),
         )
     finally:
         panel.metadata.pop("l0_event_mask_2d", None)
@@ -329,9 +333,7 @@ def evaluate_panel_cheap_gate(
         stop_mult_arr=aligned_events["stop_atr_mult"].to_numpy(dtype=np.float64),
         tp_mult_arr=aligned_events["take_profit_atr_mult"].to_numpy(dtype=np.float64),
         min_hold_arr=aligned_events["min_holding_bars"].to_numpy(dtype=np.int64),
-        sym_idx_arr=np.array(
-            [_symbol_map.get(s, -1) for s in aligned_events["symbol"]], dtype=np.int64
-        ),
+        sym_idx_arr=np.array([_symbol_map.get(s, -1) for s in aligned_events["symbol"]], dtype=np.int64),
         aligned=aligned,
         cost_model=cost_model,
         precomputed_atr_2d=precomputed_atr_2d,
@@ -475,6 +477,7 @@ def evaluate_alpha_cheap_gate_batch(
         )
         results.append(evidence)
     return tuple(results)
+
 
 def _rank_ic_soft_floor(n_events: int) -> float:
     """Approx. standard error of a Spearman rank correlation (Fisher-z style).
@@ -652,7 +655,6 @@ def build_l0_signal_candidate(
     )
 
 
-
 # ── Cost-aware / Regime / TF Corroboration helpers ─────────────────────
 
 
@@ -775,16 +777,14 @@ def compute_xs_spread_lcb_bps(
         return None
     spreads: list[float] = []
     for bar in range(t):
-        bar_mask = event_mask[bar, :].astype(bool) & np.isfinite(net_bps[bar, :]) & np.isfinite(
-            score[bar, :]
-        )
+        bar_mask = event_mask[bar, :].astype(bool) & np.isfinite(net_bps[bar, :]) & np.isfinite(score[bar, :])
         n_active = int(bar_mask.sum())
         if n_active < min_symbols_per_bar:
             continue
         bar_net = net_bps[bar, bar_mask]
         bar_score = score[bar, bar_mask]
         order = np.argsort(bar_score)
-        top_idx = order[-max(1, int(n_active * quantile)):]
+        top_idx = order[-max(1, int(n_active * quantile)) :]
         bot_idx = order[: max(1, int(n_active * quantile))]
         top_mean = float(np.mean(bar_net[top_idx])) if len(top_idx) > 0 else 0.0
         bot_mean = float(np.mean(bar_net[bot_idx])) if len(bot_idx) > 0 else 0.0
@@ -929,9 +929,7 @@ def evaluate_panel_gate_v2(
     idx_end_fwd = t - holding_bars
     for i in range(idx_end_fwd):
         fwd_ret_bps[i, :] = (
-            side[i, :].astype(np.float64)
-            * (close[i + holding_bars, :] / close[i + causal_lag, :] - 1.0)
-            * 10000.0
+            side[i, :].astype(np.float64) * (close[i + holding_bars, :] / close[i + causal_lag, :] - 1.0) * 10000.0
         )
 
     # Stress cost
@@ -1175,13 +1173,13 @@ def evaluate_panel_gate(
 ) -> AlphaGateEvidence:
     """[ADR_20260708_L0_SIGNAL_YIELD_IMPROVEMENT] n_events floor resolved via
     resolve_family_timeframe_gate_policy (family/archetype-aware), not flat config.min_events.
-    
+
     [ADR_20260710_L0_ENTRY_EXIT_SIGNAL_EFFECTIVENESS_REDESIGN] Barrier-aware evaluation
     replaces fixed-horizon mark-to-close. precomputed_atr_2d is resolved once per batch.
-    
+
     [ADR_20260712_L0_GATE_EVENT_FILTERING_OPTIMIZATION] Event mask is temporarily injected
     into metadata for optimized numpy-level filtering inside candidate_panels_to_events.
-    
+
     [ADR_20260712_L0_GATE_PIPELINE_OPT] Cache path: when cheap_event_arrays/
     cheap_block_stats/cheap_meta_stats provided, skip triple-barrier/block_means/
     bootstrap/rank_IC/cost_drag/turnover. _symbol_map O(1) symbol->axis lookup.
@@ -1189,7 +1187,7 @@ def evaluate_panel_gate(
     if bars_per_year <= 0.0:
         raise ValueError("bars_per_year must be positive")
     _validate_shape(panel, aligned)
-    
+
     t, _n = aligned.close_2d.shape
     _symbol_map: dict[str, int] = {s: i for i, s in enumerate(aligned.symbols)}
     close = aligned.close_2d
@@ -1205,9 +1203,7 @@ def evaluate_panel_gate(
     holding_bars = panel.expected_holding_bars
 
     if causal_lag >= t or holding_bars >= t or causal_lag + holding_bars >= t:
-        return _empty_gate_evidence(
-            run_id=run_id, recipe=recipe, reject_reasons=("insufficient_events",)
-        )
+        return _empty_gate_evidence(run_id=run_id, recipe=recipe, reject_reasons=("insufficient_events",))
 
     # Build event_mask using sparse_entry_mask (preserved from old code path)
     idx_start = causal_lag
@@ -1220,15 +1216,11 @@ def evaluate_panel_gate(
     n_events = int(np.sum(event_mask))
     resolved_min_events = resolve_family_timeframe_gate_policy(recipe=recipe, config=config).min_events
     if n_events < resolved_min_events:
-        return _empty_gate_evidence(
-            run_id=run_id, recipe=recipe, reject_reasons=("insufficient_events",)
-        )
+        return _empty_gate_evidence(run_id=run_id, recipe=recipe, reject_reasons=("insufficient_events",))
 
     # ── Cache-aware: skip heavy recompute if cheap results available ──
     _use_cache = (
-        cheap_event_arrays is not None
-        and "net_vals" in cheap_event_arrays
-        and "gross_vals" in cheap_event_arrays
+        cheap_event_arrays is not None and "net_vals" in cheap_event_arrays and "gross_vals" in cheap_event_arrays
     )
     if not _use_cache:
         # ── Barrier-aware evaluation: reuse L1's triple-barrier kernel ─────
@@ -1238,14 +1230,14 @@ def evaluate_panel_gate(
         panel.metadata["l0_event_mask_2d"] = event_mask
         try:
             all_events = candidate_panels_to_events(
-                (panel,), min_abs_score=0.0, cost_floor_bps=float("nan"),
+                (panel,),
+                min_abs_score=0.0,
+                cost_floor_bps=float("nan"),
             )
         finally:
             panel.metadata.pop("l0_event_mask_2d", None)
         if all_events.empty:
-            return _empty_gate_evidence(
-                run_id=run_id, recipe=recipe, reject_reasons=("insufficient_events",)
-            )
+            return _empty_gate_evidence(run_id=run_id, recipe=recipe, reject_reasons=("insufficient_events",))
 
         # Align events to sparse event_mask: dedup per (entry_idx, symbol), then filter.
         _event_key = all_events["entry_idx"].astype(str) + ":" + all_events["symbol"].astype(str)
@@ -1262,9 +1254,7 @@ def evaluate_panel_gate(
         _aligned_rows = np.flatnonzero(_in_mask)
 
         if len(_aligned_rows) == 0:
-            return _empty_gate_evidence(
-                run_id=run_id, recipe=recipe, reject_reasons=("insufficient_events",)
-            )
+            return _empty_gate_evidence(run_id=run_id, recipe=recipe, reject_reasons=("insufficient_events",))
         aligned_events = all_events.iloc[_aligned_rows].reset_index(drop=True)
 
         result = compute_triple_barrier_returns(
@@ -1274,9 +1264,7 @@ def evaluate_panel_gate(
             stop_mult_arr=aligned_events["stop_atr_mult"].to_numpy(dtype=np.float64),
             tp_mult_arr=aligned_events["take_profit_atr_mult"].to_numpy(dtype=np.float64),
             min_hold_arr=aligned_events["min_holding_bars"].to_numpy(dtype=np.int64),
-            sym_idx_arr=np.array(
-                [_symbol_map.get(s, -1) for s in aligned_events["symbol"]], dtype=np.int64
-            ),
+            sym_idx_arr=np.array([_symbol_map.get(s, -1) for s in aligned_events["symbol"]], dtype=np.int64),
             aligned=aligned,
             cost_model=cost_model,
             precomputed_atr_2d=precomputed_atr_2d,
@@ -1350,18 +1338,10 @@ def evaluate_panel_gate(
     if effective_n < config.min_effective_n:
         reject_reasons.append("insufficient_effective_n")
 
-    mean_gross_bps = (
-        float(np.nanmean(gross_vals)) if n_events > 0 and np.any(np.isfinite(gross_vals)) else 0.0
-    )
+    mean_gross_bps = float(np.nanmean(gross_vals)) if n_events > 0 and np.any(np.isfinite(gross_vals)) else 0.0
     cost_at_events = result["cost_bps"]
-    mean_cost_bps = (
-        float(np.nanmean(cost_at_events))
-        if n_events > 0 and np.any(np.isfinite(cost_at_events))
-        else 0.0
-    )
-    mean_net_bps = (
-        float(np.nanmean(net_vals)) if n_events > 0 and np.any(np.isfinite(net_vals)) else 0.0
-    )
+    mean_cost_bps = float(np.nanmean(cost_at_events)) if n_events > 0 and np.any(np.isfinite(cost_at_events)) else 0.0
+    mean_net_bps = float(np.nanmean(net_vals)) if n_events > 0 and np.any(np.isfinite(net_vals)) else 0.0
 
     # ── Cache-aware block stats + meta-stats ─────────────────────────
     if not _use_cache:
@@ -1425,11 +1405,7 @@ def evaluate_panel_gate(
         finite_net = block_means[np.isfinite(block_means)]
         finite_gross = gross_block_means[np.isfinite(gross_block_means)]
         mu_block = float(np.mean(finite_net)) if finite_net.size else 0.0
-        se_block = (
-            float(np.std(finite_net, ddof=1) / np.sqrt(finite_net.size))
-            if finite_net.size > 1
-            else 0.0
-        )
+        se_block = float(np.std(finite_net, ddof=1) / np.sqrt(finite_net.size)) if finite_net.size > 1 else 0.0
         nw_tstat = float(cheap_meta_stats["nw_tstat"])
         if not np.isfinite(nw_tstat):
             nw_tstat = 0.0
@@ -1437,11 +1413,7 @@ def evaluate_panel_gate(
         if not np.isfinite(net_lcb_bps):
             net_lcb_bps = 0.0
         mu_gross = float(np.mean(finite_gross)) if finite_gross.size else 0.0
-        se_gross = (
-            float(np.std(finite_gross, ddof=1) / np.sqrt(finite_gross.size))
-            if finite_gross.size > 1
-            else 0.0
-        )
+        se_gross = float(np.std(finite_gross, ddof=1) / np.sqrt(finite_gross.size)) if finite_gross.size > 1 else 0.0
         gross_lcb_bps = mu_gross - 1.0 * se_gross
         cost_drag = max(0.0, float(cheap_meta_stats["cost_drag_ratio"]))
         turnover = cheap_meta_stats["turnover"]
@@ -1505,9 +1477,16 @@ def evaluate_panel_gate(
             "[EVAL] stage=gate_evidence tf=%s family=%s variant=%s n_events=%d "
             "mean_gross_bps=%.3f mean_net_bps=%.3f net_lcb_bps=%.3f nw_tstat=%.3f "
             "gate_passed=%s reject_reasons=%s",
-            recipe.timeframe, recipe.family, recipe.variant, n_events,
-            mean_gross_bps, mean_net_bps, net_lcb_bps, nw_tstat,
-            gate_passed, "|".join(reject_reasons) if reject_reasons else "none",
+            recipe.timeframe,
+            recipe.family,
+            recipe.variant,
+            n_events,
+            mean_gross_bps,
+            mean_net_bps,
+            net_lcb_bps,
+            nw_tstat,
+            gate_passed,
+            "|".join(reject_reasons) if reject_reasons else "none",
         )
 
     return AlphaGateEvidence(
@@ -1566,7 +1545,7 @@ def evaluate_alpha_gate_batch(
 ) -> tuple[AlphaGateEvidence, ...]:
     """[ADR_20260712_L0_GATE_EARLY_EXIT_OPTIMIZATION] Skip heavy canonical gate evaluations
     for candidates that already failed cheap-gate screening.
-    
+
     [ADR_20260712_L0_GATE_CACHE] precomputed_atr_2d accepts cached ATR from orchestrator."""
     from src.domain.futures.optimization.metrics import _bars_per_year_for_tf
     from src.domain.futures.strategy.candidate_labels import _compute_yang_zhang_vol_2d
@@ -1639,7 +1618,11 @@ def emit_alpha_generation_debug_summary(
 
     logger.debug(
         "[EVAL] stage=af_generation run_id=%s tf=%s total=%d passed=%d rejected=%d",
-        run_id, timeframe, len(evidences), len(passed), len(rejected),
+        run_id,
+        timeframe,
+        len(evidences),
+        len(passed),
+        len(rejected),
     )
 
     # Top candidates by mean_net_bps
@@ -1648,9 +1631,14 @@ def emit_alpha_generation_debug_summary(
     for e in top_k:
         logger.debug(
             "[ALGO] TOP recipe=%s net=%.2f gross=%.2f cost=%.2f handoff=%s cap=%.2f regime=%.2f tf_corr=%.2f",
-            e.recipe_id, e.mean_net_bps, e.mean_gross_bps,
-            e.mean_cost_bps, getattr(e, "handoff_tier", "n/a"), getattr(e, "capacity_score", 0.0),
-            getattr(e, "regime_stability", 0.0), getattr(e, "tf_corroboration", 0.0),
+            e.recipe_id,
+            e.mean_net_bps,
+            e.mean_gross_bps,
+            e.mean_cost_bps,
+            getattr(e, "handoff_tier", "n/a"),
+            getattr(e, "capacity_score", 0.0),
+            getattr(e, "regime_stability", 0.0),
+            getattr(e, "tf_corroboration", 0.0),
         )
 
     # Reject bucket rows
@@ -1667,5 +1655,34 @@ def emit_alpha_generation_debug_summary(
     for e in cost_drag_bucket[:debug_reject_bucket_rows]:
         logger.debug(
             "[DATA] COST_DRAG recipe=%s cost_drag=%.2f cap=%.2f regime=%.2f",
-            e.recipe_id, e.cost_drag_ratio, getattr(e, "capacity_score", 0.0), getattr(e, "regime_stability", 0.0),
+            e.recipe_id,
+            e.cost_drag_ratio,
+            getattr(e, "capacity_score", 0.0),
+            getattr(e, "regime_stability", 0.0),
         )
+
+
+def audit_zero_event_timeframe(
+    *,
+    tf: str,
+    rows: Sequence[CheapGateEvidence],
+) -> bool:
+    """[LIMIT-03] Return True and log ERROR if 100% of rows are structurally zero-event.
+
+    Distinguishes a mechanical zero (data/alignment defect) from a legitimate
+    economic rejection (no_incremental_edge/negative_gross_edge), which always
+    shows a mix of n_events across recipes, never a uniform 0.
+    """
+    if not rows:
+        return False
+    total_events = sum(int(getattr(r, "n_events", 0)) for r in rows)
+    if total_events == 0:
+        _logger.error(
+            "[DATA] tf=%s n_recipes=%d total_events=0 -- structural zero-event TF "
+            "(NOT an economic no_incremental_edge/negative_gross_edge outcome); "
+            "check TF construction path before treating as no-signal",
+            tf,
+            len(rows),
+        )
+        return True
+    return False

@@ -46,6 +46,13 @@ def run_from_cli(argv: Sequence[str] | None = None) -> int:
     """[ADR_20260705_MAJOR_SYMBOL_REGISTRY_REPLAY_SYNC] Parse CLI args and execute the runner."""
     parser = build_arg_parser()
     args, _ = parser.parse_known_args(argv)
+    if args.timeframe != "4h" and args.phase in ("l0", "l1"):
+        _logger.info(
+            "[SYS] --timeframe=%s ignored at phase=%s (L0/L1 always scans the full l1_tfs grid; "
+            "timeframe only affects L2 execution-grid selection)",
+            args.timeframe,
+            args.phase,
+        )
     try:
         run_config = build_run_config_from_args(args)
     except (ValueError, SystemExit) as exc:

@@ -16,6 +16,14 @@ from src.domain.futures.strategy_runtime.bridge import (
 )
 
 
+def _minimal_ohlc_bar() -> pd.DataFrame:
+    """Return a single-row OHLC DataFrame that passes _build_virtual_probe_tf_maps."""
+    return pd.DataFrame(
+        {"open": [100.0], "high": [101.0], "low": [99.0], "close": [100.5], "volume": [1000.0]},
+        index=pd.DatetimeIndex([pd.Timestamp("2026-01-01")], name="datetime"),
+    )
+
+
 def test_get_rss_mb_returns_positive_or_negative_one() -> None:
     rss = _get_rss_mb()
     assert rss >= -1.0
@@ -67,11 +75,11 @@ def test_bridge_emits_input_shape_log(caplog: pytest.LogCaptureFixture, monkeypa
         ["SYM0", "SYM1"],
         "4h",
         strategy_cfg=strategy_cfg,
-        preloaded_data_maps={"SYM0": {"4h": pd.DataFrame()}, "SYM1": {"4h": pd.DataFrame()}},
+        preloaded_data_maps={"SYM0": {"4h": _minimal_ohlc_bar()}, "SYM1": {"4h": _minimal_ohlc_bar()}},
     )
 
-    input_records = [r for r in caplog.records if "[BRIDGE][INPUT]" in r.getMessage()]
-    assert len(input_records) >= 1, "Expected [BRIDGE][INPUT] log"
+    input_records = [r for r in caplog.records if "[INPUT]" in r.getMessage() and "n_symbols" in r.getMessage()]
+    assert len(input_records) >= 1, "Expected [INPUT] shape log"
     msg = input_records[0].getMessage()
     assert "n_symbols=2" in msg
     assert "n_bars=20" in msg
@@ -96,13 +104,13 @@ def test_bridge_perf_log_contains_stages(caplog: pytest.LogCaptureFixture, monke
         ["SYM0"],
         "4h",
         strategy_cfg=strategy_cfg,
-        preloaded_data_maps={"SYM0": {"4h": pd.DataFrame()}},
+        preloaded_data_maps={"SYM0": {"4h": _minimal_ohlc_bar()}},
     )
 
-    perf_records = [r for r in caplog.records if "[BRIDGE PERFORMANCE]" in r.getMessage()]
+    perf_records = [r for r in caplog.records if "Total Runtime" in r.getMessage()]
     assert len(perf_records) >= 1
     perf_msg = perf_records[0].getMessage()
-    assert "Total Runtime" in perf_msg
+    assert "MEMORY" in perf_msg
     # Verify MEMORY section is present
     assert "MEMORY" in perf_msg
 
@@ -142,7 +150,7 @@ def test_merge_summary_log_emitted(caplog: pytest.LogCaptureFixture, monkeypatch
     candidate_out = CandidatePipelineOutput(alpha_panel=alpha_panel)
     merge_candidate_output_into_data_maps(candidate_out, data_maps, ["BTCUSDT"], "4h", log_tag="test")
 
-    summary_records = [r for r in caplog.records if "[PROFILE][MERGE][SUMMARY]" in r.getMessage()]
+    summary_records = [r for r in caplog.records if "[MERGE][SUMMARY]" in r.getMessage()]
     assert len(summary_records) >= 1
     msg = summary_records[0].getMessage()
     assert "n_syms=1" in msg
@@ -235,7 +243,7 @@ def test_htf_active_when_signal_only_false(monkeypatch: pytest.MonkeyPatch) -> N
         ["SYM0"],
         "4h",
         strategy_cfg=strategy_cfg,
-        preloaded_data_maps={"SYM0": {"4h": pd.DataFrame()}},
+        preloaded_data_maps={"SYM0": {"4h": _minimal_ohlc_bar()}},
     )
 
     assert len(called) >= 1, "build_multi_tf_panels should be called when signal_only=False"
