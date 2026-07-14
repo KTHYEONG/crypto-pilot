@@ -277,11 +277,13 @@ def _resample_probe_source_frame(frame: pd.DataFrame, *, target_tf: str) -> pd.D
     Binance 6h kline fetch for BTCUSDT. Completeness of the trailing bin is
     determined by source-row count, not position (see [LIMIT-01]).
     """
-    prepared = frame.copy()
-    if "datetime" not in prepared.columns:
-        prepared = prepared.reset_index()
+    # No copy — all subsequent pandas ops return new DataFrames, original frame unmodified
+    if "datetime" not in frame.columns:
+        prepared = frame.reset_index()
         if "datetime" not in prepared.columns and len(prepared.columns) > 0:
             prepared = prepared.rename(columns={str(prepared.columns[0]): "datetime"})
+    else:
+        prepared = frame
     if "datetime" not in prepared.columns:
         raise ValueError("datetime column missing in probe source frame")
     prepared["datetime"] = pd.to_datetime(prepared["datetime"], utc=True, errors="coerce")
@@ -420,6 +422,8 @@ def build_native_htf_panels(
     def _native_single_tf(
         tf_i: str,
     ) -> tuple[str, AlignedMarketData | None, tuple[CandidateSignalPanel, ...]]:
+        from src.domain.futures.strategy.rule_signals import _precompute_shared_indicators
+
         tf_maps = _build_virtual_probe_tf_maps(data_maps, symbols, tf_i)
         if not tf_maps:
             return (tf_i, None, ())
@@ -430,12 +434,20 @@ def build_native_htf_panels(
             return (tf_i, None, ())
         try:
             cfg_i = dataclasses.replace(base_cfg, timeframe=tf_i)
+            try:
+                htf_cache = _precompute_shared_indicators(
+                    aligned=aligned_i, cfg=cfg_i,
+                    normalize_time_horizon=True, horizon_base_tf=base_tf,
+                )
+            except (AttributeError, KeyError, ValueError):
+                htf_cache = None
             panels_i = build_rule_signal_panels(
                 aligned=aligned_i,
                 cfg=cfg_i,
                 family_filter=family_pool(tf_i),
                 normalize_time_horizon=True,
                 horizon_base_tf=base_tf,
+                precomputed=htf_cache,
             )
         except Exception as exc:
             _logger.warning("[MULTI-TF] build_rule_signal_panels failed tf=%s: %s", tf_i, exc)
@@ -994,6 +1006,7 @@ def run_candidate_strategy_for_universe(
     from src.domain.futures.strategy.family_lifecycle import RETIRED_FAMILIES, resolve_retired_families_for_tf
     from src.domain.futures.strategy.rule_diagnostics import compute_rule_diagnostics
     from src.domain.futures.strategy.rule_signals import (
+        _precompute_shared_indicators,
         build_rule_signal_panels,
         candidate_panels_to_events,
     )
@@ -1116,7 +1129,13 @@ def run_candidate_strategy_for_universe(
     )
 
     t_step = time.perf_counter()
-    panels = build_rule_signal_panels(aligned=aligned, cfg=strategy_cfg.candidate)
+    try:
+        _indicator_cache = _precompute_shared_indicators(aligned=aligned, cfg=strategy_cfg.candidate)
+    except (AttributeError, KeyError, ValueError):
+        _indicator_cache = None
+    panels = build_rule_signal_panels(
+        aligned=aligned, cfg=strategy_cfg.candidate, precomputed=_indicator_cache,
+    )
     panels = tuple(dataclasses.replace(p, variant=f"{p.variant}_{tf}") for p in panels)
     if alpha_foundry_config is not None and getattr(alpha_foundry_config, "mode", "off") != "off":
         ltf_family_filter = alpha_foundry_config.include_families or None
