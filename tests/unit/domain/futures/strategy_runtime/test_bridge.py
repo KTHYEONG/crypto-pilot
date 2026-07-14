@@ -1,18 +1,22 @@
 from __future__ import annotations
 
+import inspect
 import logging
 from dataclasses import replace
 from types import SimpleNamespace
 from typing import Any, ClassVar
+from unittest.mock import MagicMock
 
 import numpy as np
 import pandas as pd
+import pytest
 
 from src.domain.futures.alpha_foundry.bridge_helpers import AlphaFoundryL0Result
 from src.domain.futures.strategy.candidate_contracts import CandidateSignalPanel
 from src.domain.futures.strategy.common.alignment import AlignedMarketData
 from src.domain.futures.strategy.config import StrategyConfig
 from src.domain.futures.strategy_runtime.bridge import (
+    CandidatePipelineOutput,
     _build_ltf_native_panels_for_l0,
     run_candidate_strategy_for_universe,
 )
@@ -1196,3 +1200,106 @@ def test_labeled_assign_preserves_original() -> None:
     assert "native_tf" not in labeled.columns
     assert id(labeled) == original_id
     assert labeled["score"].iloc[0] == original_score
+
+
+# ===================================================================
+# CandidatePipelineOutput aligned_by_tf refactor tests
+# [LIMIT-01][LIMIT-03][LIMIT-04]
+# ===================================================================
+
+def test_candidate_pipeline_output_warns_when_aligned_by_tf_missing(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level(logging.WARNING)
+    mock_aligned = MagicMock()
+
+    CandidatePipelineOutput(aligned=mock_aligned)
+
+    assert len(caplog.records) == 1
+    assert "aligned_by_tf is missing/empty" in caplog.records[0].message
+
+
+def test_candidate_pipeline_output_no_warning_when_both_none(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level(logging.WARNING)
+
+    CandidatePipelineOutput()
+
+    assert len(caplog.records) == 0
+
+
+def test_candidate_pipeline_output_no_warning_when_aligned_by_tf_present(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level(logging.WARNING)
+    mock_aligned = MagicMock()
+
+    CandidatePipelineOutput(aligned=mock_aligned, aligned_by_tf={"4h": mock_aligned})
+
+    assert len(caplog.records) == 0
+
+
+def test_no_bare_candidate_pipeline_output_construction_below_builder_definition() -> None:
+    """[LIMIT-04] Regression guard: every return site after _build_output's definition
+    must go through it, not construct CandidatePipelineOutput directly."""
+    source = inspect.getsource(run_candidate_strategy_for_universe)
+    builder_def_idx = source.index("def _build_output(")
+    assert builder_def_idx > 0, "_build_output must be defined inside run_candidate_strategy_for_universe"
+    tail = source[builder_def_idx:]
+
+    bare_construction_count = tail.count("return CandidatePipelineOutput(")
+
+    assert bare_construction_count == 1, (
+        f"found {bare_construction_count} direct CandidatePipelineOutput(...) return(s) "
+        "below _build_output's definition -- route them through _build_output instead"
+    )
+
+
+def test_empty_base_events_early_exit_returns_aligned_by_tf(monkeypatch: Any) -> None:
+    """[LIMIT-01] The empty-base-events early-exit path (previously broken)
+    now correctly populates aligned_by_tf on the returned CandidatePipelineOutput."""
+    n_bars = 10
+    mock_aligned = MagicMock(spec=AlignedMarketData)
+    mock_aligned.symbols = ("BTCUSDT",)
+    mock_aligned.close_2d = np.zeros((n_bars, 1))
+    mock_aligned.datetimes = np.array([np.datetime64("2026-01-01")] * n_bars)
+    mock_aligned.execution_cost_bps_2d = None
+    mock_aligned.active_mask = np.ones((n_bars, 1), dtype=bool)
+    mock_aligned.warm_mask = np.ones((n_bars, 1), dtype=bool)
+    mock_aligned.entry_block_mask = np.zeros((n_bars, 1), dtype=bool)
+    mock_aligned.kill_mask = np.zeros((n_bars, 1), dtype=bool)
+
+    def _mock_build_single_tf_panels(
+        data_maps: Any = None,
+        symbols: Any = None,
+        cfg: Any = None,
+        tf_i: Any = None,
+        base_tf: Any = None,
+        family_pool: Any = None,
+    ) -> tuple[None, Any, tuple[()]]:
+        return None, mock_aligned, ()
+
+    monkeypatch.setattr(
+        "src.domain.futures.strategy_runtime.bridge._build_single_tf_panels",
+        _mock_build_single_tf_panels,
+    )
+    monkeypatch.setattr(
+        "src.domain.futures.strategy.rule_signals.candidate_panels_to_events",
+        lambda *_, **__: pd.DataFrame(),
+    )
+    monkeypatch.setattr(
+        "src.domain.futures.strategy.candidate_portfolio.build_candidate_alpha_panel",
+        lambda *_, **__: pd.DataFrame({"BTCUSDT": np.zeros(n_bars)}),
+    )
+
+    result = run_candidate_strategy_for_universe(
+        ["BTCUSDT"],
+        "4h",
+        strategy_cfg=StrategyConfig(),
+        preloaded_data_maps={"BTCUSDT": {"4h": _minimal_ohlc_bar()}},
+    )
+
+    assert result.aligned_by_tf is not None
+    assert "4h" in result.aligned_by_tf
+    assert result.aligned_by_tf["4h"] is mock_aligned
