@@ -971,6 +971,13 @@ class CandidatePipelineOutput:
     alpha_foundry_report: Any | None = None
     l0_delivery_manifest: Any | None = None
 
+    def __post_init__(self) -> None:
+        if self.aligned is not None and not self.aligned_by_tf:
+            _logger.warning(
+                "[DATA] CandidatePipelineOutput.aligned is set but aligned_by_tf is "
+                "missing/empty -- every TF's L1 walk-forward will silently share one grid"
+            )
+
 
 def run_candidate_strategy_for_universe(
     symbols: list[str],
@@ -1154,6 +1161,12 @@ def run_candidate_strategy_for_universe(
         _run_logger.error("[DATA] base_tf=%s could not be built via symmetric path", tf)
         return CandidatePipelineOutput()
     aligned = aligned_by_tf[tf]
+
+    def _build_output(**overrides: Any) -> CandidatePipelineOutput:
+        overrides.setdefault("aligned", aligned)
+        overrides.setdefault("aligned_by_tf", aligned_by_tf)
+        return CandidatePipelineOutput(**overrides)
+
     panels = tuple(panels_by_tf.get(tf, ()))
     panels = tuple(dataclasses.replace(p, variant=f"{p.variant}_{tf}") for p in panels)
     bridge_prof["align"] = time.perf_counter() - t_step
@@ -1552,10 +1565,9 @@ def run_candidate_strategy_for_universe(
                 htf_labeled_all = pd.DataFrame()
 
         _emit_bridge_profile()
-        return CandidatePipelineOutput(
+        return _build_output(
             alpha_panel=alpha_panel,
             target_weights=np.zeros_like(aligned.close_2d),
-            aligned=aligned,
             labeled=pd.DataFrame(),
             labeled_unfiltered=htf_labeled_all,
             rule_report={
@@ -1709,10 +1721,9 @@ def run_candidate_strategy_for_universe(
             bridge_prof["alpha_panel"] = time.perf_counter() - t_step
             _sample_rss("alpha_panel")
             _emit_bridge_profile()
-            return CandidatePipelineOutput(
+            return _build_output(
                 alpha_panel=alpha_panel,
                 target_weights=np.zeros_like(aligned.close_2d),
-                aligned=aligned,
                 labeled=labeled,
                 labeled_unfiltered=labeled_all,
                 rule_report={
@@ -1771,10 +1782,9 @@ def run_candidate_strategy_for_universe(
         bridge_prof["alpha_panel"] = time.perf_counter() - t_step
         _sample_rss("alpha_panel")
         _emit_bridge_profile()
-        return CandidatePipelineOutput(
+        return _build_output(
             alpha_panel=alpha_panel_sv,
             target_weights=np.zeros_like(aligned.close_2d),
-            aligned=aligned,
             labeled=labeled,
             labeled_unfiltered=labeled_all,
             oos_start=_oos_start_ref,
@@ -2440,7 +2450,7 @@ def run_candidate_strategy_for_universe(
 
     _emit_bridge_profile()
 
-    return CandidatePipelineOutput(
+    return _build_output(
         alpha_panel=alpha_panel,
         target_weights=target_weights,
         rule_report={
@@ -2516,8 +2526,6 @@ def run_candidate_strategy_for_universe(
             "report_start": int(diag.report_split[0]),
             "report_end": int(diag.report_split[1]),
         },
-        aligned=aligned,
-        aligned_by_tf=aligned_by_tf,
         labeled=labeled,
         labeled_unfiltered=labeled_all,
         fit_set=last_fold_out.fit_set if last_fold_out else None,
