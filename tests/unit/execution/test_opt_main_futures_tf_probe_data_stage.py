@@ -12,7 +12,7 @@ from src.application.futures.optimization.data_readiness import (
     DataReadinessResult,
     DataWindowContract,
 )
-from src.execution import opt_main_futures
+from src.application.futures.runner import active_pipeline as opt_main_futures
 
 
 def _window() -> opt_main_futures.QuarterlyWindow:
@@ -127,9 +127,9 @@ def test_log_probe_tf_source_coverage_emits_audit_table(
     )
     out = "\n".join(messages)
 
-    assert "[TF-PROBE AUDIT] SOURCE READINESS" in out
-    assert "| 1h" in out
-    assert "| 2h" in out
+    assert "[L0-PROBE] SOURCE READINESS" in out
+    assert "1h" in out
+    assert "2h" in out
 
 
 def test_log_probe_tf_source_coverage_marks_incompatible_6h_not_ready(
@@ -162,7 +162,7 @@ def test_log_probe_tf_source_coverage_marks_incompatible_6h_not_ready(
     )
     out = "\n".join(messages)
 
-    assert "| 6h" in out
+    assert "6h" in out
     assert "0/1" in out
-    assert "| 8h" in out
+    assert "8h" in out
     assert "4h:1" in out

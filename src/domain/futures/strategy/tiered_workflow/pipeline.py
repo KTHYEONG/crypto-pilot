@@ -1485,7 +1485,7 @@ def run_l1_nested_swf(
             )
         )
         if not registry.ready_symbols:
-            logger.warning(
+            logger.debug(
                 "[L1-NESTED] Outer fold %d: registry empty — "
                 "prequential evidence produced %d pairs, 0 qualified. "
                 "Check l1_pair_* thresholds.",
@@ -1615,6 +1615,7 @@ def run_l1_nested_swf(
             format_layer1_outer_fold_table(
                 tuple(outer_reports),
                 datetimes=aligned.datetimes,
+                tf=tf,
             )
         )
         logger.info(format_layer1_gate_table(gate_report))
@@ -2903,7 +2904,7 @@ def run_per_tf_l1(
         labeled_events=labeled_events, tf=tf, manifest=l0_delivery_manifest,
     )
     if _tf_labeled.empty:
-        logger.info("[L1] tf=%s delivery route has no labeled events; blocking TF", tf)
+        logger.debug("[L1] tf=%s delivery route has no labeled events; blocking TF", tf)
         l1 = Layer1Result(
             signals_per_fold=(),
             oos_stacked={},
