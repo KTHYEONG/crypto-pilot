@@ -1,7 +1,14 @@
+"""LTF native alpha panel construction with streaming I/O parallelization.
+
+[ADR_20260714_L0_LTF_STREAM_PARALLEL]
+"""
+
 from __future__ import annotations
 
 import dataclasses
-from collections.abc import Mapping, Sequence
+import logging
+from collections.abc import Callable, Mapping, Sequence
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from typing import Any, Literal, cast
 
@@ -12,6 +19,8 @@ from numpy.typing import NDArray
 from src.domain.futures.strategy.candidate_contracts import CandidateSignalPanel
 from src.domain.futures.strategy.common.alignment import AlignedMarketData
 from src.domain.futures.strategy.config import CandidateStrategyConfig
+
+_logger = logging.getLogger(__name__)
 
 LtfAlphaTimeframe = Literal["5m", "15m", "30m"]
 
@@ -578,6 +587,63 @@ def project_ltf_panel_to_base_grid(
     )
 
 
+def _process_streaming_symbol(
+    *,
+    symbol: str,
+    col: int,
+    aligned: AlignedMarketData,
+    families: tuple[str, ...],
+    base_dt: NDArray[np.datetime64],
+    load_frame: Callable[[str], pd.DataFrame | None],
+    accumulators: dict[tuple[str, str], dict[str, NDArray[Any]]],
+    metadata_by_key: dict[tuple[str, str], dict[str, object]],
+) -> None:
+    """Process one symbol: load → resample → build → project → accumulate.
+
+    Column-disjoint accumulator writes are thread-safe ([LIMIT-01]).
+    """
+    frame = load_frame(symbol)
+    if frame is None or frame.empty:
+        return
+    symbol_grid: dict[str, LtfAlphaFeatureGrid] = {}
+    symbol_aligned = dataclasses.replace(aligned, symbols=(symbol,))
+    try:
+        for family in families:
+            for ltf_raw in _FAMILY_LTF_GRID.get(family, _VALID_LTFS):
+                ltf = ltf_raw
+                grid = symbol_grid.get(ltf)
+                if grid is None:
+                    grid = build_ltf_alpha_feature_grid(
+                        exec_1m_by_symbol={symbol: frame},
+                        symbols=(symbol,),
+                        ltf=ltf,
+                        start=base_dt[0],
+                        end=base_dt[-1],
+                    )
+                    symbol_grid[ltf] = grid
+                if grid.datetimes.size == 0:
+                    continue
+                sparse = _build_sparse_signal(
+                    grid=grid,
+                    aligned=symbol_aligned,
+                    family=family,
+                )
+                projected = project_ltf_panel_to_base_grid(
+                    panel=sparse,
+                    base_datetimes=base_dt,
+                    base_valid_mask_2d=aligned.active_mask[:, col : col + 1],
+                )
+                key = (family, ltf)
+                acc = accumulators[key]
+                acc["score"][:, col] = projected.signed_score_2d[:, 0]
+                acc["side"][:, col] = projected.side_hint_2d[:, 0]
+                acc["turnover"][:, col] = projected.turnover_proxy_2d[:, 0]
+                acc["valid"][:, col] = projected.valid_mask_2d[:, 0]
+                metadata_by_key[key] = dict(projected.metadata)
+    finally:
+        del symbol_grid, symbol_aligned, frame
+
+
 def build_ltf_native_alpha_panels_streaming(
     *,
     aligned: AlignedMarketData,
@@ -616,50 +682,36 @@ def build_ltf_native_alpha_panels_streaming(
             }
 
     symbol_to_col = {symbol: index for index, symbol in enumerate(aligned.symbols)}
-    for symbol in symbols:
-        col = symbol_to_col.get(symbol)
-        if col is None:
-            continue
-        frame = load_frame(symbol)
-        if frame is None or frame.empty:
-            continue
-        symbol_grid: dict[str, LtfAlphaFeatureGrid] = {}
-        symbol_aligned = dataclasses.replace(aligned, symbols=(symbol,))
-        try:
-            for family in families:
-                for ltf_raw in _FAMILY_LTF_GRID.get(family, _VALID_LTFS):
-                    ltf = ltf_raw
-                    grid = symbol_grid.get(ltf)
-                    if grid is None:
-                        grid = build_ltf_alpha_feature_grid(
-                            exec_1m_by_symbol={symbol: frame},
-                            symbols=(symbol,),
-                            ltf=ltf,
-                            start=base_dt[0],
-                            end=base_dt[-1],
-                        )
-                        symbol_grid[ltf] = grid
-                    if grid.datetimes.size == 0:
-                        continue
-                    sparse = _build_sparse_signal(
-                        grid=grid,
-                        aligned=symbol_aligned,
-                        family=family,
-                    )
-                    projected = project_ltf_panel_to_base_grid(
-                        panel=sparse,
-                        base_datetimes=base_dt,
-                        base_valid_mask_2d=aligned.active_mask[:, col : col + 1],
-                    )
-                    key = (family, ltf)
-                    acc = accumulators[key]
-                    acc["score"][:, col] = projected.signed_score_2d[:, 0]
-                    acc["side"][:, col] = projected.side_hint_2d[:, 0]
-                    acc["turnover"][:, col] = projected.turnover_proxy_2d[:, 0]
-                    acc["valid"][:, col] = projected.valid_mask_2d[:, 0]
-                    metadata_by_key[key] = dict(projected.metadata)
-        finally:
-            del symbol_grid, symbol_aligned, frame
+    max_workers = max(1, min(getattr(plan, "max_workers", 1), len(symbols)))
+
+    if max_workers <= 1:
+        for symbol in symbols:
+            col = symbol_to_col.get(symbol)
+            if col is None:
+                continue
+            _process_streaming_symbol(
+                symbol=symbol, col=col, aligned=aligned, families=families,
+                base_dt=base_dt, load_frame=load_frame,
+                accumulators=accumulators, metadata_by_key=metadata_by_key,
+            )
+    else:
+        with ThreadPoolExecutor(max_workers=max_workers) as pool:
+            futs: dict[Any, str] = {}
+            for symbol in symbols:
+                col = symbol_to_col.get(symbol)
+                if col is None:
+                    continue
+                futs[pool.submit(
+                    _process_streaming_symbol,
+                    symbol=symbol, col=col, aligned=aligned, families=families,
+                    base_dt=base_dt, load_frame=load_frame,
+                    accumulators=accumulators, metadata_by_key=metadata_by_key,
+                )] = symbol
+            for future in as_completed(futs):
+                exc = future.exception()
+                if exc is not None:
+                    _logger.warning("[LTF_STREAM] worker symbol=%s failed: %s",
+                                    futs[future], exc)
 
     result: list[CandidateSignalPanel] = []
     for (family, ltf_name), acc in accumulators.items():
