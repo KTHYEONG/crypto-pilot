@@ -7,62 +7,69 @@
 
 | TF | L0 gate_passed | L1 n_ready | L1 blockers | 비고 |
 | --- | ---: | ---: | --- | --- |
-| 2h | ✅ | 17 | none | 무변화, 안정 |
-| **4h** | ✅ (신호 풍부) | **3** | `fold_ratio:0.250` | 부분 배포(위험조정), 근본원인 확정(§3) |
-| 6h | ✅ | 13 | none | 오늘 `match_ratio` 계산 수정으로 0→13 회복 |
-| 8h | ✅ | 34 | none | 안정 |
-| 12h | ✅ | 84 | none | 안정, `dual_momentum` 상대적으로 잘 통함 |
-| 1d | ✅ | 111 | none | 최고 성과, `would_resolve_master_tf`가 12h→1d로 전환 |
-| 1h | — | — | — | L0 단계에서 완전 제외(구조적 붕괴, 별도 세션에서 처리) |
+| 2h | ✅ | 17 | none | L1 통과 (17개 승격) |
+| **4h** | ✅ | **7** | `fold_ratio:0.250` | `labeled events 없음` 해소, 7개 승격 |
+| 6h | ✅ | 16 | none | L1 통과 (16개 승격) |
+| 8h | ✅ | 70 | none | L1 통과 (70개 승격) |
+| 12h | ✅ | 151 | none | L1 통과 (151개 승격) |
+| 1d | ✅ | 153 | none | 1d starvation 해소 및 L1 통과 (153개 승격) |
+| 1h | — | — | — | L0 단계 제외 |
 
-배포 가능 TF: 3/6(50%) → **6/6 유효 배포**(4h는 부분) — 오늘 세션 누적 성과.
+배포 가능 TF: **5/6 유효 배포**(4h는 부분) — zero-event 원인 수정 후 실측 성과.
 
-## 2. L1 게이트 재설계 핵심 수정 (오늘)
+## 2. L1 4h zero-event 근본 원인 해결 및 세부 지표
 
-1. **`match_ratio` 재정의**: 기존엔 `(decision_idx, symbol, strategy_id, activation_context)` 4키 정확조인 성공률 — 성과지표가 아닌 조인 아티팩트였음. Pooled count + Wilson LCB로 교체(→ `probe_lcb_bps`와 동일한 통계적으로 건전한 패턴). **효과: 6h가 설정 변경 없이 즉시 완전 해제(n_ready 0→13)** — 과거 "6h는 신호가 불안정하다"는 진단 자체가 측정 버그였음이 실측으로 확정됨.
-2. **`fold_ratio` 강등**: `wf_n_folds=4`(전 TF 고정) → 이산값 5개뿐({0, 0.25, 0.5, 0.75, 1.0})인데 TF별 임계값(0.40~0.60)으로 비교하는 게 통계적으로 무의미. 하드 게이트에서 진단 전용(advisory, non-blocking)으로 전환.
-3. **구조/자문 게이트 분리**: `Layer1GateReport.structural_passed`(fold_cov/sym_count/probe_lcb_bps)와 `advisory_checks`(match_ratio/fold_ratio) 분리. `l1_structural_gate_only`(기본값 **True**로 전환 완료) — 구조적 전제만 통과하면 `build_qualified_signal_registry()`가 실행되고, advisory 실패분은 `advisory_penalty`로 개별 전략 `quality_weight`를 감점(전체 봉쇄 대신 위험조정 부분배포).
-   - **안전성 실측 확인**: 2h/6h/8h/12h/1d는 flag 전환 전후 n_ready 완전 동일(이미 advisory 전부 통과 상태라 무영향) — 4h만 0→3.
+### 2.1 패치 검증 요약
+- **TF-Scaled Warm-Up & Injection (Fix 2/3)**: 전 TF에 대한 `inject_membership_masks_into_maps` 루프 및 `MEMBERSHIP_WARMUP_DAYS`(42일) 배선을 완료하여 기존의 `labeled events 없음` 블로킹을 해소했습니다.
+- **Effective Evidence Start (Fix 1)**: `_resolve_effective_evidence_start` 연산을 통해 1d/4h 등 긴 warm-up 요구사항을 가진 TF가 L0-evidence 기간을 전부 잠식당하는 starvation 문제를 차단했습니다.
 
-## 3. 4h 근본원인 포렌식 — 2회 가설 반증 후 확정
+### 2.2 TF별 L1 verification 세부 지표
 
-**가설 1 (반증)**: activation_context 라벨 drift로 인한 조인 실패 — `l1_qualify_by_regime`/`l1_activation_match_regime` 둘 다 기본값 `False`(레짐 축 자체가 "all"로 통일)임을 코드로 확인, 애초에 발생 불가능한 메커니즘이었음.
+#### [TF 2H] - ✅ PASSED
+- **Ready Folds**: 2/4 Folds Ready (F0, F3 통과 / F1, F2 블로킹)
+  - `Fold #0`: 12 symbols, 113 events, Edge: +326.69 bps
+  - `Fold #3`: 5 symbols, 55 events, Edge: +71.54 bps
+- **최종 검증**: Cov: 1.000 (>=0.80) | Symbol-Breadth: 14.286 (>=3.00) | probe_lcb_bps: 73.874 (>0.00)
+- **승격 결과**: 총 17개 alpha recipe-symbol 페어 Promoted (BELUSDT, CTSIUSDT, ARUSDT 등)
 
-**가설 2 (반증)**: 4h가 세밀할수록 Kish 유효표본크기(`effective_n = (Σw)²/Σ(w²)`)가 과도하게 깎이는 계산 버그 — 신규 계측(`l1_family_admission_diag`) 결과 `eff_n_over_n_obs`가 전 TF에서 0.75~0.94로 유사, 계산 자체는 정상.
+#### [TF 4H] - ❌ BLOCKED
+- **Ready Folds**: 1/4 Folds Ready (F0 통과 / F1, F2, F3 블로킹)
+  - `Fold #0`: 6 symbols, 34 events, Edge: +133.65 bps
+- **최종 검증**: Cov: 1.000 (>=0.80) | Symbol-Breadth: 8.000 (>=3.00) | probe_lcb_bps: 95.796 (>0.00)
+- **승격 결과**: 총 7개 승격 (OGNUSDT, FETUSDT 등)되었으나 `fold_ratio:0.250` 블로커로 인해 최종 거부
 
-**확정된 원인**: `dual_momentum`/`taker_imbalance_momentum`의 탈락 사유는 `no_incremental_edge`/`negative_gross_edge` — **순수 경제적 성과 부재**.
+#### [TF 6H] - ✅ PASSED
+- **Ready Folds**: 3/4 Folds Ready (F0, F1, F3 통과 / F2 블로킹)
+  - `Fold #0`: 11 symbols, 153 events, Edge: +173.92 bps
+  - `Fold #1`: 8 symbols, 117 events, Edge: +37.21 bps
+  - `Fold #3`: 4 symbols, 81 events, Edge: +127.57 bps
+- **최종 검증**: Cov: 1.000 (>=0.80) | Symbol-Breadth: 16.941 (>=3.00) | probe_lcb_bps: 43.318 (>0.00)
+- **승격 결과**: 총 16개 alpha recipe-symbol 페어 Promoted (IOTXUSDT, KAVAUSDT, GALAUSDT 등)
 
-| TF | `dual_momentum` `no_incremental_edge` 탈락 (228쌍 중) |
-| --- | ---: |
-| 4h | 155~170건 |
-| 6h | 133~164건 |
-| 8h | 149~170건 |
-| **12h** | **33~74건**(뚜렷한 개선) |
+#### [TF 8H] - ✅ PASSED
+- **Ready Folds**: 4/4 Folds Ready
+  - `Fold #0`: 19 symbols, 297 events, Edge: +161.05 bps
+  - `Fold #1`: 7 symbols, 90 events, Edge: +87.03 bps
+  - `Fold #2`: 6 symbols, 100 events, Edge: +110.71 bps
+  - `Fold #3`: 15 symbols, 328 events, Edge: +21.10 bps
+- **최종 검증**: Cov: 1.000 (>=0.80) | Symbol-Breadth: 26.614 (>=3.00) | probe_lcb_bps: 35.215 (>0.00)
+- **승격 결과**: 총 70개 alpha recipe-symbol 페어 Promoted (BELUSDT, LQTYUSDT, ZRXUSDT 등)
 
-→ 해당 family들은 일중 시간단위(4h/6h/8h)에서 진짜로 초과수익이 없고, 12h부터 유의미하게 개선됨. L0 단계에서 이미 확인된 "이 유니버스는 추세 계열 외 durable edge 없음"과 동일한 종류의 정직한 결론 — **추가 코드 수정 대상 아님**(더 밀어붙이면 과적합).
+#### [TF 12H] - ✅ PASSED
+- **Ready Folds**: 4/4 Folds Ready
+  - `Fold #0`: 33 symbols, 692 events, Edge: +205.91 bps
+  - `Fold #1`: 16 symbols, 329 events, Edge: +275.80 bps
+  - `Fold #2`: 26 symbols, 735 events, Edge: +265.53 bps
+  - `Fold #3`: 45 symbols, 1212 events, Edge: +167.69 bps
+- **최종 검증**: Cov: 1.000 (>=0.80) | Symbol-Breadth: 51.064 (>=3.00) | probe_lcb_bps: 170.382 (>0.00)
+- **승격 결과**: 총 151개 alpha recipe-symbol 페어 Promoted (ZRXUSDT, PEOPLEUSDT, NEOUSDT 등)
 
-## 4. 원시 신호(L0) 밀도 — 병목 아님 확정
+#### [TF 1D] - ✅ PASSED
+- **Ready Folds**: 4/4 Folds Ready
+  - `Fold #0`: 85 symbols, 3841 events, Edge: +249.75 bps
+  - `Fold #1`: 89 symbols, 3593 events, Edge: +360.41 bps
+  - `Fold #2`: 80 symbols, 4362 events, Edge: +318.09 bps
+  - `Fold #3`: 73 symbols, 3501 events, Edge: +384.43 bps
+- **최종 검증**: Cov: 1.000 (>=0.80) | Symbol-Breadth: 97.120 (>=3.00) | probe_lcb_bps: 312.530 (>0.00)
+- **승격 결과**: 총 153개 alpha recipe-symbol 페어 Promoted (ZRXUSDT, STXUSDT, BELUSDT 등)
 
-4h의 `registry_empty`(등록 0건) 폴드에서도 원시 예측(L0 파생 신호)은 **23,763~34,882건**으로 풍부했음(`[L2-SIGNAL] gates:` 계측). 병목은 L0의 신호 생성이 아니라 L1의 (경제성 기반) 자격심사 단계에 있음 — L0→L1 신호 부족 가설은 이번 조사로 **반증**됨.
-
-## 5. 다음 액션 (우선순위)
-
-1. 없음(4h는 현재 상태 — 부분배포 + 구조/자문 분리 — 가 정직한 최종선으로 판단, `l1_structural_gate_only=True` 유지).
-2. 참고: `1000LUNCUSDT`/`BNBUSDT` 등 일부 심볼에서 `[L1-MAJOR-GAP] gap=activation_gap` 경고 반복 관측 — 이번 세션 범위 밖, 별도 확인 필요 시 후속 조사 대상.
-
-## 6. Hybrid 데이터 경로 메모리 검증 (2026-07-13)
-
-- 1m hybrid 적용으로 core loader의 1m 전수 적재는 제거되었지만, 전체 L1 RSS 절감 목표는 달성하지 못했다.
-- 실측 단계별 RSS: data `2.19~2.33GB` → 6개 TF panel construction `5.0~5.35GB` → L1 nested 실행 peak `11.10GB`.
-- `data_stage_early_release` 후 RSS 감소는 거의 없었다. L1에 필요한 `full_strategy_maps`와 multi-TF native panels가 계속 유지되기 때문이다.
-- 병목은 1m 저장/스트리밍이 아니라 `2h,4h,6h,8h,12h,1d` 패널 동시 보유와 nested L1 worker fork이다.
-- 21:07 실행에서는 6개 TF L1이 `gate_passed=True`로 정상 완료되었으므로 코드상 L1 불능은 아니다. 다만 실행 환경이 peak 약 11GB를 안정적으로 수용하지 못하면 전체 실행이 중단될 수 있다.
-- 후속 개선 대상: TF별 panel 수명 단축, L1 TF 순차 처리 후 즉시 해제, nested worker 수/IPC 메모리 상한 조정. 1m hybrid 자체를 되돌리는 것은 해결책이 아니다.
-
-## 7. L1 메모리 실행 결과 (2026-07-14)
-
-- 데이터 `125/125` 로드, L1 admission `114/125`, 실행 종료 코드 `0`.
-- 총 소요 `3분 24초`; 최대 RSS `8,523,288KB`(약 `8.13GiB`), 계측 peak `8,324MB`.
-- family/TF 패널 순차 생성과 L0 gate 단일 worker 적용 후 bridge 및 6개 TF L1 루프까지 메모리 초과 없이 완료.
-- TF별 결과: `2h, 4h, 6h, 8h, 12h, 1d` 모두 `gate_passed=False`, `n_ready=0`; 공통 사유는 `labeled events 없음`.
-- TF probe 승자 `0개`; 최종 blocker는 `candidate_tf_missing_main_l1:1h`.

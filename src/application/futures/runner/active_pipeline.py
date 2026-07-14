@@ -777,6 +777,8 @@ class DataStageResult:
     data_maps: dict[str, dict[str, Any]]
     oos_data_maps: dict[str, dict[str, Any]]
     valid_symbols: list[str]
+    effective_l0_evidence_end: date | None = None
+
 
 
 def _wrap_segments(segments: list[str], width: int, sep: str = " | ") -> list[str]:
@@ -951,6 +953,45 @@ def _build_data_not_ready_reasons(report: pd.DataFrame) -> dict[str, int]:
     )
 
 
+def _resolve_effective_evidence_start(
+    *,
+    tf: str,
+    timeline_windows: Sequence[Any],
+    data_start: date,
+    regime_floor: date,
+    min_universe_size: int,
+    membership_warmup_days: float,
+) -> date:
+    sorted_windows = sorted(timeline_windows, key=lambda w: w.effective_from.date())
+    stable_start: date | None = None
+    for i in range(len(sorted_windows) - 1):
+        if (
+            len(sorted_windows[i].active_symbols) >= min_universe_size
+            and len(sorted_windows[i + 1].active_symbols) >= min_universe_size
+        ):
+            stable_start = sorted_windows[i].effective_from.date()
+            break
+    if stable_start is None:
+        raise ValueError(
+            f"universe timeline never reaches {min_universe_size} symbols "
+            f"for 2 consecutive quarters; cannot derive evidence window for tf={tf}"
+        )
+    from datetime import timedelta
+
+    warmup_bound = data_start + timedelta(days=membership_warmup_days)
+    result = max(regime_floor, stable_start, warmup_bound)
+    _logger.debug(
+        "[DATA] effective_evidence_start tf=%s regime_floor=%s stable_quarter=%s "
+        "warmup_bound=%s -> resolved=%s",
+        tf,
+        regime_floor,
+        stable_start,
+        warmup_bound,
+        result,
+    )
+    return result
+
+
 def _run_data_stage(
     run_config: FuturesRunConfig,
     window: QuarterlyWindow,
@@ -961,6 +1002,7 @@ def _run_data_stage(
     inference_timeline: dict[date, frozenset[str]] | None = None,
     *,
     layered_window: Any | None = None,
+    timeline_windows: Sequence[Any] | None = None,
 ) -> DataStageResult:
     load_symbols = _resolve_data_collection_symbols(
         run_config=run_config,
@@ -1009,18 +1051,45 @@ def _run_data_stage(
                 missing_1m[:5],
                 "..." if len(missing_1m) > 5 else "",
             )
+    effective_l0_evidence_end = None
     if timeline and valid_symbols:
         t_inject = time.perf_counter()
-        warmup_bars_required = int(OPT_FUTURES_CONFIG.get("FUTURES_UNIVERSE_WARMUP_BARS", 60))
-        inject_membership_masks_into_maps(
-            data_maps=data_maps,
-            oos_data_maps=oos_data_maps,
-            symbols=valid_symbols,
-            tf=run_config.timeframe,
-            timeline=timeline,
-            warmup_bars_required=warmup_bars_required,
-            inference_timeline=inference_timeline or None,
-        )
+        from src.domain.futures.optimization.opt_data_utils import _bars_per_day
+        from src.domain.futures.strategy.config import DEFAULT_L1_TFS
+
+        membership_warmup_days = float(OPT_FUTURES_CONFIG.get("MEMBERSHIP_WARMUP_DAYS", 42))
+
+        # Resolve effective_evidence_start per TF and log it [LIMIT-08]
+        if timeline_windows is not None and layered_window is not None:
+            effective_starts: dict[str, date] = {}
+            for _inject_tf in DEFAULT_L1_TFS:
+                try:
+                    effective_starts[_inject_tf] = _resolve_effective_evidence_start(
+                        tf=_inject_tf,
+                        timeline_windows=timeline_windows,
+                        data_start=window.fetch_start_date,
+                        regime_floor=layered_window.regime_floor,
+                        min_universe_size=int(OPT_FUTURES_CONFIG.get("MIN_UNIVERSE_SIZE_FOR_EVIDENCE", 50)),
+                        membership_warmup_days=membership_warmup_days,
+                    )
+                except Exception as exc:
+                    _logger.warning("Failed to resolve effective evidence start for tf=%s: %s", _inject_tf, exc)
+            
+            base_start = effective_starts.get(run_config.timeframe)
+            if base_start is not None:
+                effective_l0_evidence_end = max(layered_window.l1_start, base_start)
+
+        for _inject_tf in DEFAULT_L1_TFS:
+            _warmup_bars_for_tf = round(membership_warmup_days * _bars_per_day(_inject_tf))
+            inject_membership_masks_into_maps(
+                data_maps=data_maps,
+                oos_data_maps=oos_data_maps,
+                symbols=valid_symbols,
+                tf=_inject_tf,
+                timeline=timeline,
+                warmup_bars_required=_warmup_bars_for_tf,
+                inference_timeline=inference_timeline or None,
+            )
         _logger.debug(
             "[PERF] step=inject_membership_masks_into_maps elapsed=%.4fs",
             time.perf_counter() - t_inject,
@@ -1062,6 +1131,7 @@ def _run_data_stage(
         data_maps=readiness.filtered_is_maps,
         oos_data_maps=readiness.filtered_oos_maps,
         valid_symbols=valid_symbols,
+        effective_l0_evidence_end=effective_l0_evidence_end,
     )
 
 
@@ -2377,6 +2447,11 @@ def _run_strategy_stage(
         tiered_cfg = replace(tiered_cfg, seed=int(getattr(run_config, "seed", 42)))
     _pit_state_cube = _resolve_universe_state_cube(universe_result)
     t_bridge_start = time.perf_counter()
+    l0_evidence_end = (
+        data_stage.effective_l0_evidence_end
+        if data_stage.effective_l0_evidence_end is not None
+        else (getattr(tiered_window, "l1_start", None) if use_tiered else None)
+    )
     ml_out = run_active_strategy_output_bridge(
         run_config=run_config,
         symbols=bridge_trading_symbols,
@@ -2388,7 +2463,7 @@ def _run_strategy_stage(
         trading_symbols=bridge_symbol_scope,
         silent=False,
         state_cube=_pit_state_cube,
-        l0_evidence_end=getattr(tiered_window, "l1_start", None) if use_tiered else None,
+        l0_evidence_end=l0_evidence_end,
     )
     bridge_elapsed = time.perf_counter() - t_bridge_start
     strategy_steps["bridge"] = bridge_elapsed
@@ -3569,6 +3644,7 @@ def run_pipeline(
         live_inference_panel,
         inference_timeline,
         layered_window=layered_window,
+        timeline_windows=_universe_result.timeline.windows,
     )
     _logger.debug("[perf] data stage: %.4fs", time.perf_counter() - t_data_start)
     _log_mem("data", _mem_before, extra=f"n_valid={len(data_stage.valid_symbols)} n_loaded={len(data_stage.data_maps)}")
