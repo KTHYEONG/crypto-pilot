@@ -192,6 +192,10 @@ OPT_FUTURES_CONFIG: dict[str, Any] = {
     "FUTURES_PORTFOLIO_COV_LOOKBACK_BY_TF": {"1h": 720, "4h": 180, "1d": 30},
     "FUTURES_PORTFOLIO_KAPPA": 0.35,
     "FUTURES_PORTFOLIO_F_KELLY_MAX": 2.0,
+    # L1-4h zero-event fix: minimum universe size for stable evidence window [LIMIT-01].
+    "MIN_UNIVERSE_SIZE_FOR_EVIDENCE": 50,
+    # L1-4h zero-event fix: canonical membership warm-up in calendar days (replaces W1/W2) [LIMIT-09].
+    "MEMBERSHIP_WARMUP_DAYS": 42,
     # ATR stop multiplier (ATR_PERIOD lives in engine / Optuna params).
     "FUTURES_ATR_STOP_MULT": 2.5,
     "FUTURES_SIMPLE_ATR_STOP": True,
@@ -523,6 +527,18 @@ L1_ALPHA_SPACE: dict[str, dict[str, Any]] = {
 
 # L2 allocation search space moved to src.domain.futures.allocation.search_space
 # Active versionless constant: L2_SEARCH_SPACE
+
+
+def resolve_config_by_tf(*, anchor_4h: int, tf: str) -> int:
+    """Scale a 4h-anchored bar-count to *tf* via ``scale_bar_count``.
+
+    This is the canonical way to derive a TF-specific value from a 4h reference,
+    replacing the incomplete hand-maintained ``_BY_TF`` dict tables (W3/W4).
+    The function does **not** require the dict to already contain *tf*.
+    """
+    from src.domain.futures.strategy.timeframe_contracts import scale_bar_count
+
+    return scale_bar_count(anchor_4h, tf, base_tf="4h")
 
 
 # ==============================================================================
