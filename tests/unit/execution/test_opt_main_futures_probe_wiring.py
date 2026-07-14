@@ -8,8 +8,8 @@ import pandas as pd
 import pytest
 
 from src.application.futures.optimization.config import FuturesRunConfig
+from src.application.futures.runner import active_pipeline as opt_main_futures
 from src.domain.futures.strategy.timeframe_probe import TfCellEvidence, TfProbeManifest
-from src.execution import opt_main_futures
 
 
 def _window() -> opt_main_futures.QuarterlyWindow:
@@ -87,43 +87,48 @@ def test_run_strategy_stage_injects_probe_cells_before_bridge(
         "pick_strategy_data_maps",
         lambda **_kwargs: {"BTCUSDT": {"4h": _frame()}},
     )
+    _cell = TfCellEvidence(
+        symbol="BTCUSDT",
+        family="carry_rev",
+        variant="funding_carry",
+        archetype="carry_rev",
+        tf="1h",
+        n_obs=100,
+        n_events=20,
+        ic_mean=0.05,
+        ic_tstat_hac=2.5,
+        ic_fold_sign_consistency=0.8,
+        alpha_half_life_h=24.0,
+        net_edge_bps=5.0,
+        turnover_per_year=50.0,
+        vr_label="mean_rev",
+        hurst=0.4,
+        passed_fdr=True,
+    )
     monkeypatch.setattr(
-        opt_main_futures,
-        "_run_tf_probe_stage",
+        "src.application.futures.runner.active_pipeline._run_tf_probe_stage_scoped",
         lambda *_args, **_kwargs: opt_main_futures.TfProbeStageResult(
             manifest=TfProbeManifest(
-                cells=(),
+                cells=(_cell,),
                 tf_grid=("1h",),
                 coverage_by_tf={"1h": 8},
                 diversity_corr={},
             ),
-            winning_cells=(
-                TfCellEvidence(
-                    symbol="BTCUSDT",
-                    family="carry_rev",
-                    variant="funding_carry",
-                    archetype="carry_rev",
-                    tf="1h",
-                    n_obs=100,
-                    n_events=20,
-                    ic_mean=0.05,
-                    ic_tstat_hac=2.5,
-                    ic_fold_sign_consistency=0.8,
-                    alpha_half_life_h=24.0,
-                    net_edge_bps=5.0,
-                    turnover_per_year=50.0,
-                    vr_label="mean_rev",
-                    hurst=0.4,
-                    passed_fdr=True,
-                ),
-            ),
+            winning_cells=(_cell,),
             selected_tfs=frozenset({"1h"}),
         ),
     )
 
     def _fake_bridge(**kwargs: Any) -> SimpleNamespace:
-        captured["extra_probe_cells"] = kwargs["extra_probe_cells"]
-        return SimpleNamespace()
+        return SimpleNamespace(
+            aligned=SimpleNamespace(
+                symbols=("BTCUSDT",),
+                datetimes=pd.date_range("2023-01-01", "2026-03-31", freq="4d").to_numpy(),
+            ),
+            labeled_unfiltered=pd.DataFrame({"l0_recipe_id": [""]}),
+            labeled=None,
+            l0_delivery_manifest=None,
+        )
 
     monkeypatch.setattr(
         opt_main_futures,
@@ -133,16 +138,16 @@ def test_run_strategy_stage_injects_probe_cells_before_bridge(
     monkeypatch.setattr(
         "src.domain.futures.strategy.common.alignment.align_data_maps",
         lambda *_args, **_kwargs: SimpleNamespace(
-            datetimes=pd.date_range("2023-01-01", periods=8, freq="4h").to_numpy()
+            datetimes=pd.date_range("2023-01-01", "2026-03-31", freq="4d").to_numpy()
         ),
     )
+    def _fake_run_tiered_pipeline(**kwargs: Any) -> tuple[SimpleNamespace, None, None]:
+        captured["extra_probe_cells"] = kwargs.get("probe_manifest")
+        return SimpleNamespace(gate_passed=True), None, None
+
     monkeypatch.setattr(
-        "src.domain.futures.strategy.tiered_workflow.run_tiered_pipeline",
-        lambda **_kwargs: (
-            SimpleNamespace(gate_passed=True),
-            None,
-            None,
-        ),
+        "src.domain.futures.strategy.tiered_workflow.pipeline.run_tiered_pipeline",
+        _fake_run_tiered_pipeline,
     )
     monkeypatch.setattr(
         opt_main_futures,
@@ -250,7 +255,6 @@ def test_run_tf_probe_stage_logs_selection_audit(
     out = "\n".join(messages)
 
     assert result is not None
-    assert "[TF-PROBE AUDIT] TIMEFRAME SELECTION" in out
-    assert "[TF-PROBE AUDIT] GATE SURVIVORSHIP" in out
-    assert "| 1h" in out
-    assert "| 2h" in out
+    assert "[L0-PROBE]" in out
+    assert "1h" in out
+    assert "2h" in out

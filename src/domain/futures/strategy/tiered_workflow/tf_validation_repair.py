@@ -606,7 +606,7 @@ def log_validation_parity_report(
     report: ValidationParityReport,
     *,
     phase: ValidationPhase = "l1",
-    log_level: int = logging.INFO,
+    log_level: int = logging.DEBUG,
 ) -> None:
     """Emit the parity report as structured logger lines.
 
