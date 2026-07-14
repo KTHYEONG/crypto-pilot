@@ -16,6 +16,7 @@ class TieredHandoffError(RuntimeError):
 @dataclass(slots=True, frozen=True)
 class TieredL1Handoff:
     aligned: AlignedMarketData
+    aligned_by_tf: dict[str, AlignedMarketData] | None
     labeled_events: pd.DataFrame
     l0_delivery_manifest: object | None
 
@@ -40,10 +41,12 @@ def consume_candidate_output_for_tiered(
         )
 
     aligned = output.aligned
+    aligned_by_tf = output.aligned_by_tf
     labeled_events = output.labeled_unfiltered if output.labeled_unfiltered is not None else output.labeled
     manifest = output.l0_delivery_manifest
 
     output.aligned = None
+    output.aligned_by_tf = None
     output.labeled_unfiltered = None
     output.labeled = None
     output.alpha_panel = pd.DataFrame()
@@ -54,6 +57,7 @@ def consume_candidate_output_for_tiered(
 
     return TieredL1Handoff(
         aligned=aligned,
+        aligned_by_tf=aligned_by_tf,
         labeled_events=labeled_events,
         l0_delivery_manifest=manifest,
     )
