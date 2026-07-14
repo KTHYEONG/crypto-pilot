@@ -309,7 +309,8 @@
       "tests/unit/domain/futures/strategy_runtime/test_bridge_multi_tf_gate.py",
       "tests/unit/domain/futures/signals/test_ltf_alpha.py",
       "tests/unit/domain/futures/strategy/tiered_workflow/test_per_tf_architecture.py",
-      "tests/unit/domain/futures/strategy_runtime/test_bridge_cross_tf_labeled_events.py"
+      "tests/unit/domain/futures/strategy_runtime/test_bridge_cross_tf_labeled_events.py",
+      "tests/unit/domain/futures/strategy_runtime/test_bridge_projection.py"
     ]
   },
   "src/domain/futures/alpha_foundry/edge_failure.py": {

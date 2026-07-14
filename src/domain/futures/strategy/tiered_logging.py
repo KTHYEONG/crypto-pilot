@@ -152,25 +152,18 @@ def format_system_context_dashboard(
 
     engine_name = s.get("engine", "Alpha-Ensemble Engine")
 
+    border = "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
     lines = [
-        "================================================================================",
-        "SYSTEM CONTEXT | DATA PIPELINE PREPARATION",
-        "================================================================================",
-        "",
-        "TIME PROFILE",
-        f"  Test Horizon  : {w.fetch_start} ~ {w.end_date}",
-        f"  IS / OOS Split: {w.oos_start} (In-Sample Cutoff)",
-        "",
-        "UNIVERSE FUNNEL",
-        f"  [1] Market Pool     : {u.get('discovered', 0)} symbols discovered (Binance USDT-M)",
-        f"  [2] Capacity Limit  : {u.get('selected', 0)} symbols selected (Top-N Liquidity)",
-        f"  [3] Integrity Pass  : {dq.get('ready_count', 0)} symbols loaded (Passed Gaps & Frozen checks)",
-        "",
-        "STRATEGY ENGINE",
-        f"  Active Engine : {engine_name}",
-        f"  Target Scope  : {s.get('trade_scope', 0)} symbols ready for Layer 1 execution",
-        "",
-        "--------------------------------------------------------------------------------",
+        border,
+        "● [SYSTEM CONTEXT: DATA PIPELINE PREPARATION]",
+        border,
+        f"  ├── Horizon  : {w.fetch_start} ~ {w.end_date} | Split: {w.oos_start} (IS/OOS)",
+        (
+            f"  ├── Universe : Pool {u.get('discovered', 0)} "
+            f"➔ Selected {u.get('selected', 0)} "
+            f"➔ Loaded {dq.get('ready_count', 0)} (Passed Integrity)"
+        ),
+        f"  └── Engine   : {engine_name} | Scope: {s.get('trade_scope', 0)} Symbols ready for L1",
     ]
     return "\n".join(lines)
 
@@ -391,6 +384,7 @@ def format_layer1_outer_fold_table(
     *,
     datetimes: NDArray[np.datetime64] | None = None,
     max_symbols: int = 8,
+    tf: str | None = None,
 ) -> str:
     """폴드별 준비 상태 진단을 트리 뷰 구조로 변경."""
     n_folds = len(reports)
@@ -399,10 +393,11 @@ def format_layer1_outer_fold_table(
     status_icon = "✅" if n_passed > 0 else "❌"
     status_text = "READY" if n_passed > 0 else "BLOCKED"
 
+    tf_suffix = f": TF {tf.upper()}" if tf else ""
     sep = "──────────────────────────────────────────────────────────────────────────────"
     lines = [
         "",
-        "● [LAYER 1 OUTER FOLD READINESS]",
+        f"● [LAYER 1 OUTER FOLD READINESS{tf_suffix}]",
         sep,
         f"  STATUS  : {status_icon} {status_text} ({n_passed}/{n_folds} Folds Ready)",
         "",
