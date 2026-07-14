@@ -789,6 +789,18 @@ class TestLtfBackfillCoverageScenario1HappyPath:
         assert tier.coverage_ratio == 0.25
         assert tier.is_covered("BTCUSDT") is True
 
+    def test_resolve_1m_coverage_tier_parallel_path(
+        self, fake_data_root: Path
+    ) -> None:
+        """ThreadPoolExecutor coverage scan produces same result as serial."""
+        tier = resolve_1m_coverage_tier(
+            ("BTCUSDT", "NEWCOINUSDT", "OTHER1", "OTHER2"),
+            data_root=fake_data_root,
+            start_date=date(2019, 1, 1), end_date=date(2026, 7, 8),
+        )
+        assert tier.coverage_ratio == 0.25
+        assert tier.is_covered("BTCUSDT") is True
+
     def test_universe_1m_coverage_tier_empty_universe_returns_zero_ratio(self) -> None:
         tier = Universe1mCoverageTier(covered_symbols=frozenset(), universe_symbols=frozenset())
         assert tier.coverage_ratio == 0.0
@@ -972,3 +984,15 @@ class TestLtfBackfillCoverageScenario3ErrorHandling:
             start_date=date(2019, 1, 1), end_date=date(2026, 7, 8),
         )
         assert tier.coverage_ratio == 0.0
+
+
+class TestParallelCoverageScan:
+    """ThreadPoolExecutor coverage scan (Change 3)."""
+
+    def test_parallel_coverage_empty_universe_returns_empty(self) -> None:
+        tier = resolve_1m_coverage_tier(
+            (),
+            start_date=date(2019, 1, 1), end_date=date(2026, 7, 8),
+        )
+        assert tier.coverage_ratio == 0.0
+        assert len(tier.covered_symbols) == 0

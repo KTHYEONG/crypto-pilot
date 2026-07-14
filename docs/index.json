@@ -352,7 +352,8 @@
     "testing": "tests/unit/domain/futures/strategy/common/test_alignment.py"
   },
   "src/domain/futures/alpha_foundry/memory.py": {
-    "testing": "tests/unit/domain/futures/alpha_foundry/test_memory.py"
+    "testing": "tests/unit/domain/futures/alpha_foundry/test_memory.py",
+    "architecture": "docs/architecture/layer0.md"
   },
   "src/domain/futures/backtest/data_loader.py": {
     "testing": "tests/unit/domain/futures/backtest/test_data_loader.py"

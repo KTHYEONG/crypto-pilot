@@ -1,7 +1,7 @@
 """Strategy runtime bridge with Alpha Foundry L0 gate wiring.
 
 [ADR_20260706_ALPHA_FOUNDRY_MAIN_WIRING][ADR_20260706_ALPHA_FOUNDRY_L0_SIGNAL_RIGOR]
-[ADR_20260707_L0_MULTI_TF_GATE_REDESIGN]
+[ADR_20260707_L0_MULTI_TF_GATE_REDESIGN][ADR_20260714_L0_LTF_STREAM_PARALLEL]
 """
 
 from __future__ import annotations
@@ -1580,8 +1580,7 @@ def run_candidate_strategy_for_universe(
     )
     bridge_prof["label"] = time.perf_counter() - t_step
     _sample_rss("label")
-    labeled_all = labeled.copy()
-    labeled_all["native_tf"] = tf
+    labeled_all = labeled.assign(native_tf=tf)
     # ── Multi-TF HTF panel generation (Phase B) ──────────────────────────
     htf_tfs = tuple(t for t in getattr(candidate_cfg, "l1_tfs", ()) if t != tf)
     if htf_tfs:
