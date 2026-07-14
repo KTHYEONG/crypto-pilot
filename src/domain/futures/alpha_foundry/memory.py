@@ -1,6 +1,6 @@
 """L0 memory budget detection and stage admission.
 
-[ADR_20260712_L0_MEMORY_BOUND_DATAFLOW]
+[ADR_20260712_L0_MEMORY_BOUND_DATAFLOW][ADR_20260714_L0_LTF_STREAM_PARALLEL]
 """
 
 from __future__ import annotations
@@ -143,4 +143,4 @@ def resolve_ltf_exec_1m_plan(
     ):
         return LtfExec1mPlan(symbols=(), max_workers=max_workers, skip_reason="budget")
 
-    return LtfExec1mPlan(symbols=selected, max_workers=min(max_workers, 1), skip_reason=None)
+    return LtfExec1mPlan(symbols=selected, max_workers=min(max_workers, 2), skip_reason=None)
