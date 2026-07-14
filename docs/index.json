@@ -358,5 +358,11 @@
     "testing": "tests/unit/core/test_settings.py"
   },
   "src/domain/futures/universe/storage.py": {},
-  "src/domain/futures/universe/models.py": {}
+  "src/domain/futures/universe/models.py": {},
+  "src/application/futures/runner/tiered_handoff.py": {
+    "testing": "tests/unit/application/futures/runner/test_tiered_handoff.py"
+  },
+  "src/domain/futures/strategy/tiered_workflow/memory.py": {
+    "testing": "tests/unit/domain/futures/strategy/tiered_workflow/test_memory.py"
+  }
 }

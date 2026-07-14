@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable, Sequence
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
 import numba
@@ -563,7 +563,7 @@ def _ltf_stochastic_cross_trigger(
     return long_mask, short_mask, score
 
 
-def _resolve_panel_archetype(panel: CandidateSignalPanel) -> str:
+def _resolve_panel_archetype(panel: Any) -> str:
     """Resolve fallback archetype from family when panel.metadata lacks one.
 
     [ADR_20260707_L1_BACKTEST_FIDELITY_FIXES]
@@ -786,7 +786,10 @@ def build_rule_signal_panels(
     horizon_base_tf: str = "4h",
     family_filter: tuple[str, ...] | None = None,
 ) -> tuple[CandidateSignalPanel, ...]:
-    """Build trailing-only rule candidates for all symbols."""
+    """Build trailing-only rule candidates for all symbols.
+
+    [ADR_20260714_L1_MEMORY_EXECUTION]
+    """
 
     def scale_window(base_bars: int, minimum: int = 1) -> int:
         if not normalize_time_horizon:
@@ -2359,11 +2362,14 @@ def build_rule_signal_panels(
     if family_filter is not None:
         active_families = [f for f in active_families if f in family_filter]
 
+    # A family keeps several full [time, symbol] intermediates alive while it
+    # builds its panels. Four concurrent families multiply that transient peak
+    # before L0 can reject any candidate, exceeding the 18 GiB runtime budget
+    # on the production universe. Family ordering is deterministic and does not
+    # affect signal values, so build one family at a time.
     panels: list[CandidateSignalPanel] = []
-    with ThreadPoolExecutor(max_workers=min(len(active_families), 4)) as pool:
-        futures = {pool.submit(_build_single_family, fam): fam for fam in active_families}
-        for fut in as_completed(futures):
-            panels.extend(fut.result())
+    for family in active_families:
+        panels.extend(_build_single_family(family))
 
     from src.domain.futures.signals.causal_diversified_candidates import (
         build_causal_diversified_signal_panels,
