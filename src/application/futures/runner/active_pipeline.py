@@ -343,7 +343,9 @@ def _log_probe_tf_source_coverage(
             ]
         )
     if rows:
-        _logger.info("🔍 [TF-PROBE AUDIT] SOURCE READINESS Dashboard")
+        from src.domain.futures.strategy.tiered_logging import format_layer_header
+        _logger.info(format_layer_header(0, "Timeframe Probe & Source Readiness"))
+        _logger.info("🔍 [L0-PROBE] SOURCE READINESS Dashboard")
         for row in rows:
             _logger.info(f"  ├── {row[0]:<4} : Ready {row[1]:<7} | Median Bars: {row[2]:<6} | Mix: {row[3]}")
 
@@ -1114,61 +1116,51 @@ def _run_tf_probe_stage(
         winning_by_tf: dict[str, list[TfCellEvidence]] = {}
         for cell in winning:
             winning_by_tf.setdefault(cell.tf, []).append(cell)
+        from src.domain.futures.strategy.tiered_logging import format_layer_header
+        _logger.info(format_layer_header(0, "TF-Probe Gate Survivorship & Selection"))
         _logger.info(
-            "[TF-PROBE] %d winning cells across %d tf: %s",
+            "[L0-PROBE] %d winning cells across %d tf: %s",
             len(winning),
             len(selected_tfs),
             sorted(selected_tfs),
         )
-        rows: list[list[str]] = []
-        for tf_i in manifest.tf_grid:
-            tf_cells = winning_by_tf.get(tf_i, [])
-            top_families = _format_counter_items(Counter(c.family for c in tf_cells), limit=2)
-            top_variants = _format_counter_items(
-                Counter(f"{c.family}:{c.variant}" for c in tf_cells),
-                limit=2,
-            )
-            decision = "SELECT" if tf_cells else "REJECT"
-            rows.append(
-                [
-                    tf_i,
-                    str(len(tf_cells)),
-                    top_families,
-                    top_variants,
-                    decision,
-                ]
-            )
-        _log_ascii_table(
-            "[TF-PROBE AUDIT] TIMEFRAME SELECTION",
-            ("TF", "Winning", "Families", "Variants", "Decision"),
-            rows,
-            (8, 10, 24, 34, 10),
-        )
+        _logger.info("")
+
         gate_rows = summarize_tf_probe_gate_audit(
             manifest,
             min_ic_tstat=min_tstat,
             require_fdr=require_fdr,
             min_fold_sign_consistency=min_fold_cons,
         )
-        audit_table_rows: list[list[str]] = [
-            [
-                row.tf,
-                str(row.computed),
-                str(row.pass_tstat),
-                str(row.pass_fdr),
-                str(row.pass_net_edge),
-                str(row.pass_fold_consistency),
-                str(row.winning),
-                row.top_fail_reason,
-            ]
-            for row in gate_rows
-        ]
-        _log_ascii_table(
-            "[TF-PROBE AUDIT] GATE SURVIVORSHIP",
-            ("TF", "Cells", "Pass t", "Pass FDR", "Pass Edge", "Pass Fold", "Winning", "Top Fail"),
-            audit_table_rows,
-            (8, 8, 8, 10, 10, 10, 8, 16),
-        )
+        gate_by_tf = {row.tf: row for row in gate_rows}
+
+        for idx, tf_i in enumerate(manifest.tf_grid):
+            row = gate_by_tf.get(tf_i)
+            if row is None:
+                continue
+            status_emoji = "🟢 SELECT" if row.winning > 0 else "🔴 REJECT"
+            funnel_text = (
+                f"Funnel: Candidates {row.computed} ➔ t-stat {row.pass_tstat} "
+                f"➔ FDR {row.pass_fdr} ➔ Edge {row.pass_net_edge} ➔ Fold {row.pass_fold_consistency} "
+                f"(Win: {row.winning})"
+            )
+            if row.winning == 0:
+                _logger.info(
+                    f"  ├── {tf_i:<4} : {status_emoji} ({row.winning}/{row.computed} cells) "
+                    f"| Top Fail: {row.top_fail_reason}"
+                )
+                _logger.info(f"  │         └── {funnel_text}")
+            else:
+                tf_cells = winning_by_tf.get(tf_i, [])
+                top_variants = _format_counter_items(
+                    Counter(f"{c.family}:{c.variant}" for c in tf_cells),
+                    limit=2,
+                )
+                _logger.info(f"  ├── {tf_i:<4} : {status_emoji} ({row.winning}/{row.computed} cells)")
+                _logger.info(f"  │         ├── {funnel_text}")
+                _logger.info(f"  │         └── Top: {top_variants}")
+            if idx < len(manifest.tf_grid) - 1:
+                _logger.info("  │")
         return TfProbeStageResult(
             scan_manifest=manifest,
             qualified_cells=winning,
@@ -1250,7 +1242,7 @@ def _tiered_labeled_events(output: CandidatePipelineOutput | None) -> pd.DataFra
     if not isinstance(labeled, pd.DataFrame):
         raise ValueError("tiered requires unfiltered labeled events")
     if "l0_recipe_id" not in labeled.columns:
-        _logger.warning(
+        _logger.debug(
             "[L0-DELIVERY] labeled events missing l0_recipe_id; marking %d unrouted event(s)",
             len(labeled),
         )
@@ -2402,7 +2394,7 @@ def _run_strategy_stage(
     strategy_steps["bridge"] = bridge_elapsed
     af_report = getattr(ml_out, "alpha_foundry_report", None)
     if af_report is not None:
-        _logger.info(
+        _logger.debug(
             "[ALPHA-FOUNDRY] mode=%s n_panels_in=%d n_bound=%d n_passed=%d n_rejected=%d elapsed=%.4fs",
             af_report.mode,
             af_report.n_panels_in,
@@ -2413,10 +2405,10 @@ def _run_strategy_stage(
         )
         has_l1_delivery = _has_l1_delivery_candidates(ml_out)
         if af_report.mode == "gate" and af_report.n_passed <= 0 and not has_l1_delivery:
-            _logger.info("[ALPHA-FOUNDRY] gate produced zero survivors; stopping before tiered L1")
+            _logger.debug("[ALPHA-FOUNDRY] gate produced zero survivors; stopping before tiered L1")
             return None
         if af_report.mode == "gate" and af_report.n_passed <= 0:
-            _logger.info(
+            _logger.debug(
                 "[ALPHA-FOUNDRY] base_tf_survivors=0; continuing with cross_tf L1 delivery candidates"
             )
     if run_config.phase == "l0":
