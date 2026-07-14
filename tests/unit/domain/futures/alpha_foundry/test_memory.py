@@ -102,3 +102,26 @@ class TestLtfExec1mPlan:
             budget=budget,
         )
         assert plan.symbols == ()
+
+    def test_plan_respects_max_workers_2(self) -> None:
+        plan = resolve_ltf_exec_1m_plan(
+            covered_symbols=frozenset({"BTCUSDT", "ETHUSDT"}),
+            valid_symbols=frozenset({"BTCUSDT", "ETHUSDT"}),
+            max_workers=2,
+        )
+        assert plan.max_workers == 2
+
+    def test_plan_clamps_max_workers_above_2(self) -> None:
+        plan = resolve_ltf_exec_1m_plan(
+            covered_symbols=frozenset({"BTCUSDT"}),
+            valid_symbols=frozenset({"BTCUSDT"}),
+            max_workers=5,
+        )
+        assert plan.max_workers <= 2
+
+    def test_plan_default_max_workers_1(self) -> None:
+        plan = resolve_ltf_exec_1m_plan(
+            covered_symbols=frozenset({"BTCUSDT"}),
+            valid_symbols=frozenset({"BTCUSDT"}),
+        )
+        assert plan.max_workers == 1

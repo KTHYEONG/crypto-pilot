@@ -38,6 +38,15 @@ def _l0_ltf_pool_widened() -> bool:
     return os.environ.get("L0_LTF_POOL_WIDENED", "") not in ("", "0", "false", "False")
 
 
+def _l0_ltf_exec_1m_max_workers() -> int:
+    """[ADR_20260714_L0_LTF_STREAM_PARALLEL] opt-in LTF 1m parallel workers.
+
+    Default 1 (serial). Set L0_LTF_EXEC_1M_MAX_WORKERS=2 for 2-worker I/O parallel.
+    """
+    raw = os.environ.get("L0_LTF_EXEC_1M_MAX_WORKERS", "")
+    return int(raw) if raw.strip() else 1
+
+
 ActivePhase = Literal["l0", "l1", "l2", "l3"]
 SyncMode = Literal["auto", "skip"]
 
@@ -172,6 +181,7 @@ def build_l0_runtime_config(
         enable_cross_tf_pruning=_l0_cross_tf_pruning_enabled(),
         l0_parallel_max_workers=_l0_parallel_max_workers(),
         enable_ltf_family_pool_experiment=_l0_ltf_pool_widened(),
+        ltf_exec_1m_max_workers=_l0_ltf_exec_1m_max_workers(),
     )
     return validate_alpha_foundry_runtime_config(config)
 
