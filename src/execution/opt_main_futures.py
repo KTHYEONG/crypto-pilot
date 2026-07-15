@@ -1,3 +1,10 @@
+"""Futures Optimization Execution Engine.
+
+WARNING:
+    This script consumes extreme physical memory during execution.
+    To prevent Out-of-Memory (OOM) crashes under the resource-constrained WSL environment,
+    this execution engine MUST NEVER be run in parallel or concurrently (single process only).
+"""
 from __future__ import annotations
 
 import sys

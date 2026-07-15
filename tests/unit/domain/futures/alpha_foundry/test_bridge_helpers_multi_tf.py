@@ -261,6 +261,39 @@ class TestRunAlphaFoundryL0GateMultiTf:
         assert len(results["6h"].panels_for_l1) == 0
         assert len(results["4h"].evidence_rows) == 1, "TF unaffected by sibling TF's empty panels"
 
+    def test_fusion_ablation_excludes_1h_only_for_common_target(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # Arrange (Given)
+        tfs = ("1h", "6h")
+        panels_by_tf, recipes_by_tf, aligned_by_tf, bindings_by_tf = _build_panels_recipes_aligned(tfs)
+        observed_evidence_keys: dict[str, tuple[str, ...]] = {}
+
+        def _fake_gate(**kwargs: Any) -> AlphaFoundryL0Result:
+            timeframe = str(kwargs["timeframe"])
+            evidence_by_tf = kwargs["evidence_by_tf"]
+            observed_evidence_keys[timeframe] = tuple(evidence_by_tf) if evidence_by_tf is not None else ()
+            return AlphaFoundryL0Result((), None, (), ())
+
+        monkeypatch.setattr(
+            "src.domain.futures.alpha_foundry.bridge_helpers.run_alpha_foundry_l0_gate",
+            _fake_gate,
+        )
+
+        # Act (When)
+        run_alpha_foundry_l0_gate_multi_tf(
+            panels_by_tf=panels_by_tf,
+            bindings_by_tf=bindings_by_tf,
+            recipes_by_tf=recipes_by_tf,
+            aligned_by_tf=aligned_by_tf,
+            cost_model=ExecutionCostModel(),
+            runtime_config=RUNTIME_CONFIG,
+            run_id_prefix="test_fusion_ablation",
+            diagnostic_fusion_exclusions={"6h": frozenset({"1h"})},
+        )
+
+        # Assert (Then)
+        assert observed_evidence_keys["1h"] == ("1h", "6h")
+        assert observed_evidence_keys["6h"] == ("6h",)
+
     def test_cross_tf_corroborated_reaches_real_tf_corroboration(self) -> None:
         """S1-5: 4 TF all same sign positive -> corroboration -> tf_corroboration/corroboration_tier
         reflect real cross-TF agreement (previously always 0.0/"insufficient_coverage" due to the
@@ -932,4 +965,3 @@ class TestAssembleL0ManifestSharedContext:
         assert len(timing_calls) == 1
         formatted = timing_calls[0].args[0] % timing_calls[0].args[1:]
         assert "status=failed" in formatted
-
