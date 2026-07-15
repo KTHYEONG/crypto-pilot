@@ -525,11 +525,25 @@ def _compute_l1_priority_score(
     max_abs_corr_in_bucket: float,
     weak_rank_ic: bool,
     priority_weights: L0PriorityWeights,
+    capacity_observed: bool = False,
+    feedback_multiplier: float = 1.0,
+    regime_stability: float = 0.0,
+    capacity_score: float = 0.0,
 ) -> float:
     pw = priority_weights
 
+    # B_c: base economic score (unchanged)
     base = evidence.mean_net_bps * pw.edge_mean_weight + evidence.block_lcb_bps * (1.0 - pw.edge_mean_weight)
 
+    # Q_c: bounded quality from regime stability + capacity
+    s_regime = max(0.0, min(1.0, regime_stability))
+    s_capacity = max(0.0, min(1.0, capacity_score)) if capacity_observed else 0.5
+    quality = 0.50 + 0.25 * s_regime + 0.25 * s_capacity
+
+    # F_c: feedback multiplier
+    # feedback_multiplier is already resolved externally; pass through
+
+    # Existing TF corroboration multiplier
     if tf_fusion is not None:
         tier = tf_fusion.corroboration_tier
         if tier == "corroborated":
@@ -543,12 +557,14 @@ def _compute_l1_priority_score(
     else:
         mult = 1.0
 
-    priority = base * mult
-
+    # Compute B_c * existing_multipliers (spec: priority = max(B_c, 0) * Q_c * F_c)
+    existing_multipliers = mult
     if max_abs_corr_in_bucket > pw.corr_soft_floor:
-        priority *= pw.insufficient_coverage_multiplier
+        existing_multipliers *= pw.insufficient_coverage_multiplier
     if weak_rank_ic:
-        priority *= pw.weak_rank_ic_multiplier
+        existing_multipliers *= pw.weak_rank_ic_multiplier
+
+    priority = max(base * existing_multipliers, 0.0) * quality * feedback_multiplier
 
     return priority
 
@@ -564,6 +580,8 @@ def build_l0_signal_candidate(
     tf_fusion: MultiTimeframeEvidence | None,
     min_conviction_lcb_bps: float = 5.0,
     max_abs_corr_in_bucket: float = 0.0,
+    capacity_observed: bool = False,
+    feedback_multiplier: float = 1.0,
 ) -> L0SignalCandidate:
     hard_reject_reasons: list[L0HardRejectReason] = []
     soft_flags: list[L0SoftFlag] = []
@@ -628,6 +646,10 @@ def build_l0_signal_candidate(
         max_abs_corr_in_bucket=max_abs_corr_in_bucket,
         weak_rank_ic=("weak_rank_ic" in soft_flags),
         priority_weights=L0PriorityWeights(),
+        capacity_observed=capacity_observed,
+        feedback_multiplier=feedback_multiplier,
+        regime_stability=evidence.regime_stability,
+        capacity_score=evidence.capacity_score,
     )
 
     corroboration_tier: CorroborationTier
@@ -667,6 +689,8 @@ def build_l0_signal_candidate(
         hard_reject_reasons=tuple(hard_reject_reasons),
         soft_flags=tuple(soft_flags),
         support_state=support_state,
+        capacity_observed=capacity_observed,
+        feedback_multiplier=feedback_multiplier,
     )
 
 

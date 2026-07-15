@@ -9,6 +9,7 @@ from src.domain.futures.strategy.candidate_contracts import Layer1FoldReadiness
 from src.domain.futures.strategy.config import CandidateStrategyConfig, apply_tf_gate_overrides
 from src.domain.futures.strategy.tiered_workflow.metrics import _bars_per_year_for_tf
 from src.domain.futures.strategy.tiered_workflow.signal_selection import (
+    _compute_pooled_probe_lcb,
     _resolve_block_bars_eff,
     evaluate_layer1_readiness,
 )
@@ -32,6 +33,58 @@ def test_resolve_block_bars_eff_fallback_on_missing_holding_bars() -> None:
     mock_cfg = types.SimpleNamespace(l1_bootstrap_block_bars=6)
     block_bars_eff = _resolve_block_bars_eff(mock_cfg)  # type: ignore[arg-type]
     assert block_bars_eff == 6, "fallback to default max_holding_bars=1"
+
+
+def test_pooled_probe_lcb_includes_data_eligible_negative_fold() -> None:
+    """Economic pooling must not discard a fold only because gross edge is negative."""
+    fold_reports = (
+        Layer1FoldReadiness(
+            fold_id=0,
+            registry_source_end_idx=10,
+            outer_oos_start_idx=11,
+            outer_oos_end_idx=20,
+            ready_symbols=("BTC", "ETH", "SOL"),
+            matched_event_count=50,
+            unmatched_event_count=0,
+            realized_match_ratio=1.0,
+            unique_decision_count=10,
+            prediction_unique_count=5,
+            opportunity_ic=None,
+            opportunity_ic_tstat=0.0,
+            probe_bps=20.0,
+            probe_lcb_bps=20.0,
+            probe_series_bps=(20.0, 20.0, 20.0),
+            effective_symbol_count=3.0,
+            passed=True,
+            blockers=(),
+        ),
+        Layer1FoldReadiness(
+            fold_id=1,
+            registry_source_end_idx=20,
+            outer_oos_start_idx=21,
+            outer_oos_end_idx=30,
+            ready_symbols=("BTC", "ETH", "SOL"),
+            matched_event_count=50,
+            unmatched_event_count=0,
+            realized_match_ratio=1.0,
+            unique_decision_count=10,
+            prediction_unique_count=5,
+            opportunity_ic=None,
+            opportunity_ic_tstat=0.0,
+            probe_bps=10.0,
+            probe_lcb_bps=10.0,
+            probe_series_bps=(10.0, 10.0, 10.0),
+            effective_symbol_count=3.0,
+            passed=False,
+            blockers=("non_positive_gross_edge",),
+        ),
+    )
+    cfg = replace(CandidateStrategyConfig(), expected_cost_bps=7.5, l1_min_fold_ratio=0.5)
+
+    pooled_lcb = _compute_pooled_probe_lcb(fold_reports, cfg, seed=42)
+
+    assert pooled_lcb > 0.0
+    assert pooled_lcb < 12.5  # positive fold alone would be 20 - 7.5 = 12.5bps
 
 
 # ── Fix 3: probe_lcb_bps breakeven gate ─────────────────────────────────────
