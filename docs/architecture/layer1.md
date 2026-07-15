@@ -75,6 +75,11 @@ Layer 0에서 추천된 Alpha Recipes 또는 vectorized Rule Panels에 대해, W
 ### Input Data
 - `AlignedMarketData`: OHLCV, indicators, flow, funding rates
 - `MarketRegimeContext`: Compressed 3-state 및 6-state regime codes
+- `labeled_events_by_tf`: per-timeframe event frames on each timeframe's native datetime grid; pooled/base-grid event frames are not valid substitutes.
+
+### Native Event Grid Contract
+- Event identity is `(datetime, symbol, strategy_id, native_tf)` with `entry_idx` resolved against the matching timeframe grid.
+- Events whose forward label would mature after the native grid are terminal-maturity observations and are excluded from L1 input; non-terminal index mismatches are contract failures.
 
 ### Principal Data Structures (src/domain/futures/signals/contracts.py)
 - `CandidateSignalPanel`:
