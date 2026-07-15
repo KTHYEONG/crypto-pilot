@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import os
 from argparse import Namespace
 from typing import Any
 
 from src.application.futures.run_contracts import ActivePhase
 from src.application.futures.run_contracts import FuturesRunConfig as FuturesRunConfig
+from src.application.futures.run_policy import build_effective_run_config
 
 _ACTIVE_PHASES: frozenset[str] = frozenset({"l0", "l1", "l2", "l3"})
 _LEGACY_PHASES: frozenset[str] = frozenset({"strategy-smoke", "quick-backtest"})
@@ -44,7 +46,7 @@ def validate_run_config(config: FuturesRunConfig) -> FuturesRunConfig:
 
 
 def build_run_config_from_args(args: Namespace | dict[str, Any]) -> FuturesRunConfig:
-    """Build validated active run config from argparse namespace or mapping."""
+    """Build validated active run config via canonical RunPolicyFactory."""
     raw = vars(args) if isinstance(args, Namespace) else dict(args)
 
     for legacy_flag in _LEGACY_FLAGS:
@@ -54,19 +56,5 @@ def build_run_config_from_args(args: Namespace | dict[str, Any]) -> FuturesRunCo
         if legacy_key in raw:
             raise ValueError(f"legacy argument key is not allowed in active runner: {legacy_key}")
 
-    phase_raw = str(raw.get("phase", "l1"))
-    phase = parse_active_phase(phase_raw)
-    sync = str(raw.get("sync", "auto"))
-    if sync not in {"auto", "skip"}:
-        raise ValueError(f"invalid sync mode: {sync!r}, expected 'auto' or 'skip'")
-
-    config = FuturesRunConfig(
-        timeframe=str(raw.get("timeframe", "4h")),
-        date=raw.get("date"),
-        trials=int(raw.get("trials", 100)),
-        phase=phase,
-        sync=sync,  # type: ignore[arg-type]
-        refresh_universe=bool(raw.get("refresh_universe", False)),
-        sync_metrics=bool(raw.get("sync_metrics", False)),
-    )
+    config = build_effective_run_config(raw, environ=os.environ)
     return validate_run_config(config)
