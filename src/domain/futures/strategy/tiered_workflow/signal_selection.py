@@ -7,6 +7,7 @@ import os
 import re
 import time
 from collections import Counter, defaultdict
+from collections.abc import Callable
 from dataclasses import dataclass, field, replace
 from functools import lru_cache
 from hashlib import sha256
@@ -431,6 +432,9 @@ def _event_results_from_fold_output(
     return event_frame
 
 
+EffectiveNSink = Callable[[int, float], None]  # (snapshot_index, effective_n) -> None
+
+
 def compute_symbol_strategy_evidence(
     *,
     event_results: pd.DataFrame,
@@ -440,8 +444,14 @@ def compute_symbol_strategy_evidence(
     snapshot_index: int = -1,
     probe_diversity_corr: dict[str, float] | None = None,
     xs_admission: dict[str, XsAdmissionBasis] | None = None,
+    effective_n_sink: EffectiveNSink | None = None,
 ) -> tuple[SymbolStrategyEvidence, ...]:
-    """Compute per-source signal evidence from event-level OOS results."""
+    """Compute per-source signal evidence from event-level OOS results.
+
+    [ADR_20260715_L1_PAIR_GATE_TF_DENSITY_CALIBRATION] effective_n_sink is an
+    optional opt-in hook (default None, zero behavior change) used by
+    scripts/calibrate_l1_pair_gate.py to measure per-TF effective_n density.
+    """
     if event_results.empty:
         return ()
     frame = event_results.copy()
@@ -523,6 +533,8 @@ def compute_symbol_strategy_evidence(
             denom = float(np.sum(np.square(weights)))
             if denom > 0.0:
                 effective_n = (weight_sum * weight_sum) / denom
+        if effective_n_sink is not None:
+            effective_n_sink(snapshot_index, effective_n)
         mean_gross = float(np.average(gross, weights=weights)) if weight_sum > 0.0 else 0.0
         mean_incremental = float(np.average(incremental, weights=weights)) if weight_sum > 0.0 else 0.0
         fold_means = _pair_fold_means.get((str(symbol), str(strategy_id), str(activation_context)), [])
