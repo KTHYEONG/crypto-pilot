@@ -19,5 +19,4 @@ def run_pipeline(
     from src.application.futures.runner.active_pipeline import run_pipeline as run_active_pipeline
 
     _logger.info("Delegating to active futures pipeline: phase=%s timeframe=%s", run_config.phase, run_config.timeframe)
-    result = run_active_pipeline(cast(Any, run_config), seed=seed, resume=resume)
-    return RunnerResult(exit_code=result.exit_code, reason=result.reason)
+    return run_active_pipeline(cast(Any, run_config), seed=seed, resume=resume)

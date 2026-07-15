@@ -8,9 +8,6 @@ from pytest_mock import MockerFixture
 
 from src.application.futures.run_contracts import ActivePhase
 from src.application.futures.runner.active_pipeline import (
-    RunnerResult as ActiveRunnerResult,
-)
-from src.application.futures.runner.active_pipeline import (
     _build_data_not_ready_reasons,
 )
 from src.application.futures.runner.config import FuturesRunConfig
@@ -143,7 +140,7 @@ class TestRunPipeline:
         )
         mock_optimize = mocker.patch(
             "src.application.futures.runner.active_pipeline._run_optimization_stage",
-            side_effect=lambda *a, **kw: _track(order, "optimize", ActiveRunnerResult(0, "l3_done")),
+            side_effect=lambda *a, **kw: _track(order, "optimize", RunnerResult(0, "l3_done")),
         )
 
         result = run_pipeline(make_run_config("l3"))
@@ -177,7 +174,7 @@ class TestRunPipeline:
         mocker.patch("src.application.futures.runner.active_pipeline._run_regime_evaluation_stage", return_value=None)
         mock_strategy = mocker.patch("src.application.futures.runner.active_pipeline._run_strategy_stage")
         if phase == "l2":
-            mock_strategy.return_value = ActiveRunnerResult(0, "tiered_pipeline_l2_completed")
+            mock_strategy.return_value = RunnerResult(0, "tiered_pipeline_l2_completed")
 
         mock_optimize = mocker.patch("src.application.futures.runner.active_pipeline._run_optimization_stage")
 
@@ -247,3 +244,31 @@ class TestBuildDataNotReadyReasons:
     def test_returns_empty_dict_for_non_dataframe(self) -> None:
         result = _build_data_not_ready_reasons(None)
         assert result == {}
+
+
+class TestDeadCodeCleanup:
+    """Scenario 5: Dead-code / duplication cleanup."""
+
+    def test_runner_result_single_class_identity(self) -> None:
+        from typing import get_type_hints
+
+        from src.application.futures.runner.active_pipeline import run_pipeline as ap_run
+        from src.application.futures.runner.models import RunnerResult as ResultModel
+
+        hints = get_type_hints(ap_run)
+        assert hints["return"] is ResultModel
+
+    def test_run_tiered_pipeline_outcome_no_diagnostic_sink_param(self) -> None:
+        from inspect import signature
+
+        from src.domain.futures.strategy.tiered_workflow.pipeline import (
+            run_tiered_pipeline_outcome,
+        )
+
+        sig = signature(run_tiered_pipeline_outcome)
+        assert "diagnostic_sink" not in sig.parameters
+
+    def test_run_pipeline_no_re_wrap(self) -> None:
+        from src.application.futures.runner.pipeline import run_pipeline as thin_wrapper
+
+        assert thin_wrapper.__code__.co_varnames is not None

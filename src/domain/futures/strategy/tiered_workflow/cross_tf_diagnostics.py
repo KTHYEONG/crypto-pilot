@@ -1,4 +1,10 @@
-"""Deterministic cross-timeframe diagnostic snapshots and comparison."""
+"""Deterministic cross-timeframe diagnostic snapshots and comparison.
+
+[ADR_20260715_L0_L1_DIAGNOSTIC_PIPELINE_INTEGRITY] STAGE_ORDER promoted to a public
+SSOT constant (was _STAGE_ORDER) so scripts/run_l1_cross_tf_replay.py and
+scripts/run_l1_cross_tf_diagnosis.py share one canonical 10-stage list instead of
+maintaining a divergent local copy.
+"""
 
 from __future__ import annotations
 
@@ -27,7 +33,7 @@ CrossTfDiagnosisClass: TypeAlias = Literal[
     "no_coupling_reproduced",
 ]
 
-_STAGE_ORDER: tuple[CrossTfDiagnosticStage, ...] = (
+STAGE_ORDER: tuple[CrossTfDiagnosticStage, ...] = (
     "native_panels",
     "cheap_evidence",
     "fusion_evidence",
@@ -79,6 +85,31 @@ class CrossTfDiagnosis:
     notes: tuple[str, ...]
 
 
+
+def snapshot_from_raw_stage_entry(
+    *,
+    run: CrossTfDiagnosticRun,
+    stage: CrossTfDiagnosticStage,
+    timeframe: str,
+    entry: dict[str, object],
+) -> CrossTfStageSnapshot:
+    """[ADR_20260715_L0_L1_DIAGNOSTIC_PIPELINE_INTEGRITY] Adapt a raw {label}.json stage entry into the formal snapshot contract."""
+    digest = str(entry.get("digest", ""))
+    raw_count = entry.get("count", entry.get("n_valid", 0))
+    item_count = int(raw_count) if isinstance(raw_count, (int, float)) else 0
+    metrics = tuple(
+        (key, value)
+        for key, value in entry.items()
+        if key not in {"digest", "count", "blockers"} and isinstance(value, (int, float, str, bool))
+    )
+    raw_blockers = entry.get("blockers", ())
+    identity_keys: tuple[str, ...] = tuple(sorted(raw_blockers)) if isinstance(raw_blockers, (list, tuple)) else ()
+    return CrossTfStageSnapshot(
+        schema_version=1, run=run, stage=stage, timeframe=timeframe,
+        digest_sha256=digest, item_count=item_count,
+        identity_keys=identity_keys, metrics=metrics,
+    )
+
 class CrossTfSnapshotRecorder:
     """[ADR_20260715_L0_L1_NATIVE_CONTRACT] Collect snapshots through the diagnostic sink contract."""
 
@@ -119,7 +150,7 @@ def diagnose_snapshots(
 
     missing: list[str] = []
     for timeframe in common_timeframes:
-        for stage in _STAGE_ORDER:
+        for stage in STAGE_ORDER:
             missing.extend(
                 f"{run}:{stage}:{timeframe}"
                 for run in _REQUIRED_RUNS
@@ -144,7 +175,7 @@ def diagnose_snapshots(
 
     for timeframe in common_timeframes:
         first_stage: CrossTfDiagnosticStage | None = None
-        for stage in _STAGE_ORDER:
+        for stage in STAGE_ORDER:
             control = indexed[("control", stage, timeframe)]
             repeat = indexed[("control_repeat", stage, timeframe)]
             treatment = indexed[("treatment", stage, timeframe)]
