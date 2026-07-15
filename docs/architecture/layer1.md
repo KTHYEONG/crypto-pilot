@@ -115,8 +115,8 @@ graph TD
 
 ### Readiness Gate — Structural (blocking, `Layer1GateReport.structural_passed`)
 - **Fold Coverage**: >= 0.80
-- **Effective N (N_eff)**: >= 3.0
-- **Pooled LCB**: > 0 (moving-block bootstrap, pooled across passed folds — `_compute_pooled_probe_lcb`)
+- **Effective N (N_eff)**: >= `l1_min_effective_sym_n` (default 3.0; per-TF override via `_DEFAULT_PER_TF_GATE_OVERRIDES`, e.g. 1h/2h = 5.0)
+- **Pooled LCB**: > `max(l1_min_probe_bps, l1_breakeven_floor_bps)` (≈ round-trip cost floor, not a flat 0) — moving-block bootstrap, pooled across passed folds (`_compute_pooled_probe_lcb`). Block size is TF/holding-period-scaled (`_resolve_block_bars_eff` = `max(l1_bootstrap_block_bars, 2 * max_holding_bars)`), where `max_holding_bars` is resolved to the current TF's native bar count via `apply_tf_gate_overrides(cfg, tf)` (base-TF-calibrated fields carry `field(metadata={"tf_scale_base": ...})` — see `config.py::CandidateStrategyConfig`).
 
 ### Readiness Gate — Advisory (`Layer1GateReport.advisory_checks`, non-blocking on `structural_passed`)
 - **Match Ratio**: >= 0.90 — pooled `(matched, true_unmatched)` counts across folds, Wilson score-interval lower bound (`_wilson_lower_bound`). `true_unmatched` excludes label-drift mismatches (same `decision_idx`/`symbol`/`strategy_id` but differing `activation_context`), tracked separately as `Layer1FoldReadiness.label_drift_unmatched_count`.

@@ -22,7 +22,7 @@ class BlendConfig:
 
     clip_z: float = 3.0
     min_symbols: int = 5
-    ic_window_bars: int = 180
+    ic_window_bars: int = field(default=180, metadata={"tf_scale_base": "4h"})
     ic_shrinkage: float = 0.5
     min_mean_ic: float = 0.02
     min_t_stat: float = 2.0
@@ -50,10 +50,10 @@ class RegimeConfig:
     """Continuous risk overlay and regime quality settings."""
 
     overlay_target_vol_ann: float = 0.40
-    overlay_vol_ewma_span: int = 30
+    overlay_vol_ewma_span: int = field(default=30, metadata={"tf_scale_base": "4h"})
     overlay_vol_scale_clip: tuple[float, float] = (0.25, 1.5)
-    overlay_trend_snr_span: int = 60
-    crisis_target_arl_bars: int = 500
+    overlay_trend_snr_span: int = field(default=60, metadata={"tf_scale_base": "4h"})
+    crisis_target_arl_bars: int = field(default=500, metadata={"tf_scale_base": "4h"})
     crisis_gross_floor: float = 0.15
     regime_overlay_min_lift_tstat: float = 1.0
     regime_min_n_eff: int = 60
@@ -64,7 +64,7 @@ class RegimeConfig:
     regime_lift_proof_enabled: bool = True
     regime_lift_nw_tstat_threshold: float = 1.5
     regime_lift_fold_pass_ratio: float = 0.60
-    regime_lift_max_holding_bars: int = 6
+    regime_lift_max_holding_bars: int = field(default=6, metadata={"tf_scale_base": None})
 
     # P1 — Hysteresis + persistence-targeted band
     trend_hysteresis_enter: float = 0.35
@@ -72,22 +72,22 @@ class RegimeConfig:
     persistence_target_dwell: float = 6.0
 
     # Trend-efficiency gate (Kaufman ER)
-    trend_efficiency_window: int = 24
+    trend_efficiency_window: int = field(default=24, metadata={"tf_scale_base": "4h"})
     trend_efficiency_target: float = 0.35
     trend_efficiency_floor_mult: float = 0.30
 
     # Reversal kill-switch (C2)
-    reversal_dd_window: int = 90
+    reversal_dd_window: int = field(default=90, metadata={"tf_scale_base": "4h"})
     reversal_dd_threshold: float = 0.12
     reversal_mom_fast: int = 20
     reversal_mom_slow: int = 120
     reversal_risk_off_floor: float = 0.05
-    reversal_persistence_bars: int = 3
+    reversal_persistence_bars: int = field(default=3, metadata={"tf_scale_base": "4h"})
     reversal_mode: str = "btc"
-    breadth_mom_window: int = 24
+    breadth_mom_window: int = field(default=24, metadata={"tf_scale_base": "4h"})
     breadth_neg_frac_enter: float = 0.60
     breadth_neg_frac_exit: float = 0.45
-    reversal_recovery_cooldown_bars: int = 0
+    reversal_recovery_cooldown_bars: int = field(default=0, metadata={"tf_scale_base": "4h"})
 
     def __post_init__(self) -> None:
         """Validate regime parameters."""
@@ -168,7 +168,7 @@ class StrategyConfig:
 class LiquidityParticipationBreakoutConfig:
     """[ADR_20260710_L0_SIGNAL_BREADTH_DIVERSITY_REDESIGN] No local cost/ADV threshold; see active_mask."""
 
-    channel_bars: tuple[int, ...] = (40, 60)
+    channel_bars: tuple[int, ...] = field(default=(40, 60), metadata={"tf_scale_base": None})
     min_breakout_impulse_atr: float = 0.25
     score_impulse_atr: float = 1.00
     min_volume_zscore: float = 0.50
@@ -193,7 +193,7 @@ class LiquidityParticipationBreakoutConfig:
 class BtcNeutralResidualReversalConfig:
     """[ADR_20260710_L0_SIGNAL_BREADTH_DIVERSITY_REDESIGN] No local cost/ADV threshold; see active_mask."""
 
-    lookback_bars: tuple[int, ...] = (24, 48)
+    lookback_bars: tuple[int, ...] = field(default=(24, 48), metadata={"tf_scale_base": None})
     tail_fraction: float = 0.20
     min_cross_section: int = 30  # unchanged [LIMIT-08]
     max_abs_btc_beta: float = 0.80
@@ -223,18 +223,18 @@ class CandidateStrategyConfig:
     parallel_folds: bool = True  # Enable fold-level joblib parallelization
     parallel_fold_workers: int = -1  # -1 uses max(1, os.cpu_count() - 2)
     min_group_size: int = 8
-    label_horizon_bars: int = 12
+    label_horizon_bars: int = field(default=12, metadata={"tf_scale_base": "4h"})
     train_months: int = 24
     valid_months: int = 3
     test_months: int = 6
-    max_holding_bars: int = _DEFAULT_MAX_EXPECTED_HOLDING_BARS
-    purge_bars: int | None = None
-    embargo_bars: int | None = None
+    max_holding_bars: int = field(default=_DEFAULT_MAX_EXPECTED_HOLDING_BARS, metadata={"tf_scale_base": "4h"})
+    purge_bars: int | None = field(default=None, metadata={"tf_scale_base": "4h"})
+    embargo_bars: int | None = field(default=None, metadata={"tf_scale_base": "4h"})
     purge_safety_mult: float = 1.2
     l1_boundary_mode: Literal["exact_label_interval", "fixed_gap"] = "exact_label_interval"
-    l1_boundary_buffer_bars: int = 0
-    _purge_bars_input: int | None = field(init=False, repr=False, compare=False)
-    _embargo_bars_input: int | None = field(init=False, repr=False, compare=False)
+    l1_boundary_buffer_bars: int = field(default=0, metadata={"tf_scale_base": None})
+    _purge_bars_input: int | None = field(init=False, repr=False, compare=False, metadata={"tf_scale_base": None})
+    _embargo_bars_input: int | None = field(init=False, repr=False, compare=False, metadata={"tf_scale_base": None})
     # Deprecated: use ExecutionCostModel fields instead; kept for explicit override only
     cost_floor_bps: float = _DEFAULT_RT_BPS
     gate_label_column: Literal[
@@ -260,7 +260,7 @@ class CandidateStrategyConfig:
     promotion_decision_split: Literal["fit", "calibration", "fit_calibration"] = "fit_calibration"
     min_promotion_calibration_edge_bps: float = 1.0
     min_promotion_calibration_obs: int = 100
-    min_listing_age_days: int = 180
+    min_listing_age_days: int = field(default=180, metadata={"tf_scale_base": None})  # 달력 일수, bar-count 아님
     min_candidate_obs: int = 200
     min_symbol_oos_blocks: int = 3
     min_rule_net_bps: float = 0.0
@@ -421,7 +421,7 @@ class CandidateStrategyConfig:
     market_state_features_enabled: bool = True
     static_universe_features_enabled: bool = False
     signal_context_features_enabled: bool = True
-    score_pct_variant_hist_window_bars: int = 2160
+    score_pct_variant_hist_window_bars: int = field(default=2160, metadata={"tf_scale_base": "4h"})
     exclude_immediate_return_features: bool = True
     promotion_filter_enabled: bool = True
     selection_policy: Literal["hard", "validation_quantile", "utility_topk"] = "utility_topk"
@@ -447,7 +447,7 @@ class CandidateStrategyConfig:
     edge_uplift_bootstrap_samples: int = 500
     edge_uplift_confidence: float = 0.90
     min_risk_unit_bps: float = 25.0
-    candidate_rebalance_bars: Literal[1] = 1
+    candidate_rebalance_bars: Literal[1] = field(default=1, metadata={"tf_scale_base": None})
     exit_policy_mode: Literal["label_only", "engine_aligned"] = "engine_aligned"
     candidate_families: tuple[str, ...] = (
         "trend_ma",
@@ -520,7 +520,7 @@ class CandidateStrategyConfig:
     l1_pair_alpha: float = 0.05
     l1_pair_power: float = 0.80
     l1_pair_mdes_multiplier: float = 0.5
-    l1_bootstrap_block_bars: int = 6
+    l1_bootstrap_block_bars: int = field(default=6, metadata={"tf_scale_base": None})
     l1_bootstrap_samples: int = 200
     l1_signal_activation_floor_bps: float = 0.0
     l1_min_signals_per_symbol: int = 1
@@ -560,7 +560,7 @@ class CandidateStrategyConfig:
     per_tf_gate_enabled: bool = False
     l2_master_tf: str | None = None
     l1_tfs: tuple[str, ...] = DEFAULT_L1_TFS
-    l1_evidence_lookback_bars: int | None = None
+    l1_evidence_lookback_bars: int | None = field(default=None, metadata={"tf_scale_base": "4h"})
     l1_evidence_grid_multiplier: int = 3
     l1_evidence_max_folds: int = 32
     l1_outer_warmup_blocks: int = 2
@@ -622,7 +622,7 @@ class CandidateStrategyConfig:
     candidate_metadata_forward_fill: bool = True
     double_scaling_guard: bool = True
     use_portfolio_kelly: bool = False
-    cov_window: int = 180
+    cov_window: int = field(default=180, metadata={"tf_scale_base": None})
     cov_min_obs: int = 60
     cov_shrinkage: float | Literal["auto"] = "auto"
     cov_ridge_eps: float = 1e-3
@@ -1171,12 +1171,14 @@ _DEFAULT_PER_TF_GATE_OVERRIDES: dict[str, dict[str, float]] = {
     "1h": {
         "l1_pair_min_effective_obs": 3.0,
         "l1_min_sym_count": 4,
+        "l1_min_effective_sym_n": 5.0,
         "l1_min_fold_ratio": 0.40,
         "l1_min_realized_match_ratio": 0.80,
     },
     "2h": {
         "l1_pair_min_effective_obs": 4.0,
         "l1_min_sym_count": 5,
+        "l1_min_effective_sym_n": 5.0,
         "l1_min_fold_ratio": 0.45,
         "l1_min_realized_match_ratio": 0.85,
     },
@@ -1223,23 +1225,41 @@ def apply_tf_gate_overrides(
     cfg: CandidateStrategyConfig,
     tf: str,
 ) -> CandidateStrategyConfig:
-    """Return a config copy with per-TF gate thresholds merged in.
+    """Return a config copy with per-TF gate thresholds and bar-duration fields scaled.
 
-    Only keys that exist on CandidateStrategyConfig are applied.
-    If no overrides exist for the given TF, returns the original config.
+    Phase 1 — per-TF gate threshold overrides (existing logic).
+    Phase 2 — TF-scale bar-duration fields (metadata-driven via Fix B).
     """
     import dataclasses
 
+    from src.domain.futures.strategy.timeframe_contracts import scale_bar_count
+
+    # ── Phase 1: existing gate threshold overrides ──
     overrides_map = (
         cfg.per_tf_gate_overrides if cfg.per_tf_gate_overrides is not None else _DEFAULT_PER_TF_GATE_OVERRIDES
     )
-    if tf not in overrides_map:
-        return cfg
-    overrides = overrides_map[tf]
-    valid_overrides = {k: v for k, v in overrides.items() if hasattr(cfg, k)}
-    if not valid_overrides:
-        return cfg
-    return dataclasses.replace(cfg, **valid_overrides)  # type: ignore[arg-type]
+    if tf in overrides_map:
+        overrides = overrides_map[tf]
+        valid_overrides = {k: v for k, v in overrides.items() if hasattr(cfg, k)}
+        if valid_overrides:
+            cfg = dataclasses.replace(cfg, **valid_overrides)  # type: ignore[arg-type]
+
+    # ── Phase 2: TF-scale bar-duration fields ──
+    scaled_updates: dict[str, int] = {}
+    for f in dataclasses.fields(cfg):
+        base_tf = f.metadata.get("tf_scale_base")
+        if base_tf is None:
+            continue
+        value = getattr(cfg, f.name)
+        if value is None:
+            continue
+        scaled = scale_bar_count(int(value), tf, base_tf=base_tf)
+        if scaled != int(value):
+            scaled_updates[f.name] = scaled
+    if scaled_updates:
+        cfg = dataclasses.replace(cfg, **scaled_updates)  # type: ignore[arg-type]
+
+    return cfg
 
 
 def resolve_tf_signal_pool(cfg: CandidateStrategyConfig, tf: str) -> tuple[str, ...]:
