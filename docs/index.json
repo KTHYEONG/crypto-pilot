@@ -150,11 +150,12 @@
       "tests/unit/domain/futures/strategy/tiered_workflow/test_l1_xs_alpha_admission.py",
       "tests/unit/domain/futures/strategy/test_layer1_nested_followup.py",
       "tests/unit/domain/futures/strategy/tiered_workflow/test_l1_readiness_gate_redesign.py",
-      "tests/unit/domain/futures/strategy/test_signal_selection_evidence.py"
+      "tests/unit/domain/futures/strategy/test_signal_selection_evidence.py",
+      "tests/unit/domain/futures/strategy/tiered_workflow/test_signal_selection.py"
     ]
   },
   "src/domain/futures/strategy/tiered_workflow/pipeline.py": {
-    "architecture": "docs/results/result.md",
+    "architecture": "docs/architecture/layer1.md",
     "testing": [
       "tests/unit/domain/futures/strategy/test_tiered_workflow.py",
       "tests/unit/domain/futures/strategy/tiered_workflow/test_l0_readiness_hardening.py",
@@ -166,7 +167,7 @@
     ]
   },
   "src/domain/futures/strategy/config.py": {
-    "architecture": "docs/architecture/layer0.md",
+    "architecture": "docs/architecture/layer1.md",
     "testing": [
       "tests/unit/domain/futures/strategy/test_config.py",
       "tests/unit/domain/futures/strategy/test_family_lifecycle.py",
