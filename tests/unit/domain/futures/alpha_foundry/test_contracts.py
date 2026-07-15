@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -118,7 +119,7 @@ class TestL2PosteriorPolicyConfig:
         ],
     )
     def test_rejects_invalid_values(self, field: str, value: float, match: str) -> None:
-        kwargs = {
+        kwargs: dict[str, Any] = {
             "k_rank": 3,
             "rebalance_bars": 3,
             "kelly_fraction": 0.25,
@@ -129,7 +130,7 @@ class TestL2PosteriorPolicyConfig:
             "cost_safety_mult": 1.25,
             "turnover_penalty": 0.0,
         }
-        kwargs[field] = value  # type: ignore[literal-required]
+        kwargs[field] = value
         with pytest.raises(ValueError, match=re.escape(match)):
             L2PosteriorPolicyConfig(**kwargs)
 
@@ -208,7 +209,7 @@ class TestAlphaFoundryRuntimeConfig:
 
     def test_rejects_invalid_mode(self) -> None:
         with pytest.raises(ValueError, match="invalid alpha_foundry mode"):
-            AlphaFoundryRuntimeConfig(mode="invalid")
+            AlphaFoundryRuntimeConfig(mode="invalid")  # type: ignore[arg-type]
 
     @pytest.mark.parametrize(
         ("field", "value"),

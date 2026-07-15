@@ -35,6 +35,7 @@ _STAGE_ORDER: tuple[CrossTfDiagnosticStage, ...] = (
     "manifest_route",
     "native_labeled_events",
     "l1_delivery_events",
+    "terminal_event_audit",
     "outer_folds",
     "l1_result",
 )
