@@ -954,6 +954,7 @@ class CandidatePipelineOutput:
     rule_report: dict[str, Any] | None = None
     aligned: AlignedMarketData | None = None
     aligned_by_tf: dict[str, AlignedMarketData] | None = None
+    labeled_events_by_tf: dict[str, pd.DataFrame] | None = None
     labeled: pd.DataFrame | None = None
     labeled_unfiltered: pd.DataFrame | None = None
     fit_set: Any | None = None
@@ -1162,9 +1163,41 @@ def run_candidate_strategy_for_universe(
         return CandidatePipelineOutput()
     aligned = aligned_by_tf[tf]
 
+    # ── Per-TF native labeled events (L1 walk-forward) [LIMIT-01] ──
+    # Populated later, after L0 recipe-binding stamps metadata["recipe_id"] onto the
+    # admitted panels (pruned_multi_results[tf_k].panels_for_l1) -- using the raw,
+    # unstamped panels_by_tf here would produce l0_recipe_id="" for every event,
+    # matching no manifest route (confirmed via live re-run: every TF blocked).
+    labeled_events_by_tf: dict[str, pd.DataFrame] = {}
+
+    def _label_panels_for_tf_native(tf_i: str, panels_i: Sequence[Any]) -> None:
+        if not panels_i:
+            return
+        try:
+            aligned_i = aligned_by_tf[tf_i]
+            raw_events_i = candidate_panels_to_events(
+                panels_i,
+                min_abs_score=strategy_cfg.candidate.min_rule_net_bps * 1e-4,
+                side_flip_variants=strategy_cfg.candidate.side_flip_candidate_variants,
+                cost_floor_bps=strategy_cfg.candidate.cost_floor_bps,
+                execution_cost_bps_2d=aligned_i.execution_cost_bps_2d,
+            )
+            if raw_events_i.empty:
+                return
+            labeled_i = label_candidate_events(
+                events=raw_events_i,
+                aligned=aligned_i,
+                cfg=strategy_cfg.candidate,
+            )
+            labeled_i["native_tf"] = tf_i
+            labeled_events_by_tf[tf_i] = labeled_i
+        except Exception as exc:
+            _logger.warning("[DATA] per-tf native labeling failed tf=%s: %s", tf_i, exc)
+
     def _build_output(**overrides: Any) -> CandidatePipelineOutput:
         overrides.setdefault("aligned", aligned)
         overrides.setdefault("aligned_by_tf", aligned_by_tf)
+        overrides.setdefault("labeled_events_by_tf", labeled_events_by_tf)
         return CandidatePipelineOutput(**overrides)
 
     panels = tuple(panels_by_tf.get(tf, ()))
@@ -1379,6 +1412,10 @@ def run_candidate_strategy_for_universe(
                     ),
                 )
             l0_delivery_manifest = _l0_manifest
+            # [LIMIT-01] Build per-TF native labeled events from the recipe-stamped,
+            # L0-admitted panel set (panels_for_l1), now that binding has completed.
+            for _tf_k, _res in pruned_multi_results.items():
+                _label_panels_for_tf_native(_tf_k, getattr(_res, "panels_for_l1", ()))
             if getattr(alpha_foundry_config, "enable_cross_tf_pruning", False):
                 multi_results = pruned_multi_results
             if _l0_manifest.independence_audit is not None:
