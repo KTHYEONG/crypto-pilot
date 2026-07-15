@@ -1187,18 +1187,30 @@ _DEFAULT_PER_TF_GATE_OVERRIDES: dict[str, dict[str, float]] = {
         "l1_min_fold_ratio": 0.45,
         "l1_min_realized_match_ratio": 0.85,
     },
+    # [ADR_20260715_L1_PAIR_GATE_TF_DENSITY_CALIBRATION] l1_pair_min_effective_obs below
+    # is measured, not guessed: scripts/calibrate_l1_pair_gate.py control-replay p10 of
+    # per-pair effective_n at the final outer-fold snapshot, per TF (see
+    # logs/futures/diagnostics/l1_pair_gate_calibration.json for the raw measurement).
+    # Every TF's measured p10 (4.9~28.4) exceeded the 4.0 ceiling (2h's own proven value),
+    # so all clamp to the ceiling -- this removes the prior reversed-direction bug
+    # (6h/8h/12h/1d used to require MORE effective_n than 2h despite having fewer native
+    # bars per pair over the same calendar window) without granting any TF a laxer bar
+    # than 2h already clears.
+    "4h": {
+        "l1_pair_min_effective_obs": 4.0,
+    },
     "6h": {
-        "l1_pair_min_effective_obs": 5.0,
+        "l1_pair_min_effective_obs": 4.0,
     },
     "8h": {
-        "l1_pair_min_effective_obs": 5.0,
+        "l1_pair_min_effective_obs": 4.0,
     },
     "12h": {
-        "l1_pair_min_effective_obs": 6.0,
+        "l1_pair_min_effective_obs": 4.0,
         "l1_min_fold_ratio": 0.55,
     },
     "1d": {
-        "l1_pair_min_effective_obs": 7.0,
+        "l1_pair_min_effective_obs": 4.0,
         "l1_min_fold_ratio": 0.60,
         "l1_min_realized_match_ratio": 0.85,
     },
