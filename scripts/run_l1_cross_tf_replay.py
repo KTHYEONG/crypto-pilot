@@ -23,9 +23,11 @@ if str(_PROJECT_ROOT) not in sys.path:
 from src.application.futures.optimization import strategy_service
 from src.application.futures.run_policy import build_effective_run_config
 from src.application.futures.runner import active_pipeline
+from src.application.futures.runner.models import RunnerResult
 from src.domain.futures.alpha_foundry import bridge_helpers
 from src.domain.futures.alpha_foundry.multi_tf_fusion import fuse_multi_timeframe_evidence
 from src.domain.futures.strategy.tiered_workflow import pipeline as tiered_pipeline
+from src.domain.futures.strategy.tiered_workflow.cross_tf_diagnostics import STAGE_ORDER
 from src.domain.futures.strategy_runtime import bridge
 
 _LOGGER = logging.getLogger(__name__)
@@ -91,21 +93,14 @@ def _l1_snapshot(result: object) -> dict[str, object]:
     }
 
 
-def run_once(*, label: str, tfs: tuple[str, ...], ablate_1h_fusion: bool) -> dict[str, dict[str, dict[str, object]]]:
-    """[ADR_20260715_L0_L1_RUNTIME_TERMINAL_OBSERVABILITY] Run one process-local replay."""
-    trace: dict[str, dict[str, dict[str, object]]] = {
-        stage: {}
-        for stage in (
-            "native_panels",
-            "cheap_evidence",
-            "fusion_evidence",
-            "canonical_l0",
-            "manifest_route",
-            "native_labeled_events",
-            "l1_delivery_events",
-            "l1_result",
-        )
-    }
+def run_once(
+    *, label: str, tfs: tuple[str, ...], ablate_1h_fusion: bool,
+    trace: dict[str, dict[str, dict[str, object]]],
+) -> RunnerResult:
+    """[ADR_20260715_L0_L1_RUNTIME_TERMINAL_OBSERVABILITY][ADR_20260715_L0_L1_DIAGNOSTIC_PIPELINE_INTEGRITY]
+    Run one process-local replay. Caller owns `trace` (mutated in place, survives
+    partial failure) and receives the RunnerResult so exit status is never discarded.
+    """
     active_pipeline_module = cast(Any, active_pipeline)
     strategy_service_module = cast(Any, strategy_service)
     original_build = strategy_service.build_candidate_strategy_config
@@ -201,6 +196,16 @@ def run_once(*, label: str, tfs: tuple[str, ...], ablate_1h_fusion: bool) -> dic
     def per_tf_capture(**kwargs: Any) -> Any:
         result = original_per_tf(**kwargs)
         trace["l1_result"][str(kwargs["tf"])] = _l1_snapshot(result)
+        outer_folds = kwargs.get("outer_folds", ())
+        trace["outer_folds"][str(kwargs["tf"])] = {
+            "count": len(outer_folds),
+            "digest": _digest(tuple((f.fit_start, f.fit_end, f.oos_start, f.oos_end) for f in outer_folds)),
+        }
+        audit = getattr(result, "event_grid_audit", None)
+        trace["terminal_event_audit"][str(kwargs["tf"])] = (
+            {"count": 0, "digest": _digest(None)} if audit is None
+            else {"count": int(getattr(audit, "n_dropped", 0)), "digest": _digest(audit)}
+        )
         return result
 
     strategy_service.build_candidate_strategy_config = build_override
@@ -211,7 +216,7 @@ def run_once(*, label: str, tfs: tuple[str, ...], ablate_1h_fusion: bool) -> dic
     tiered_pipeline.select_l1_delivery_events = select_capture
     tiered_pipeline.run_per_tf_l1 = per_tf_capture
     try:
-        active_pipeline.run_pipeline(
+        result = active_pipeline.run_pipeline(
             build_effective_run_config(
                 {
                     "timeframe": "4h",
@@ -233,7 +238,8 @@ def run_once(*, label: str, tfs: tuple[str, ...], ablate_1h_fusion: bool) -> dic
         strategy_service_module.run_candidate_strategy_for_universe = original_bridge
         tiered_pipeline.select_l1_delivery_events = original_select
         tiered_pipeline.run_per_tf_l1 = original_per_tf
-    return trace
+    trace["runner_result"] = {"exit_code": result.exit_code, "reason": result.reason}  # type: ignore[dict-item]
+    return result
 
 
 def main() -> int:
@@ -244,13 +250,15 @@ def main() -> int:
     tfs, ablate_1h_fusion = _RUN_SPECS[label]
     output_path = Path("logs/futures/diagnostics/l1_cross_tf") / f"{label}.json"
     output_path.parent.mkdir(parents=True, exist_ok=True)
+    trace: dict[str, dict[str, dict[str, object]]] = {stage: {} for stage in STAGE_ORDER}
     try:
-        trace = run_once(label=label, tfs=tfs, ablate_1h_fusion=ablate_1h_fusion)
+        runner_result = run_once(label=label, tfs=tfs, ablate_1h_fusion=ablate_1h_fusion, trace=trace)
     except BaseException as exc:
-        output_path.write_text(json.dumps({"error": f"{type(exc).__name__}: {exc}"}), encoding="utf-8")
+        trace["error"] = {"_": {"type": type(exc).__name__, "message": str(exc)}}
+        output_path.write_text(json.dumps(trace, sort_keys=True, default=str), encoding="utf-8")
         raise
     output_path.write_text(json.dumps(trace, sort_keys=True), encoding="utf-8")
-    return 0
+    return runner_result.exit_code
 
 
 if __name__ == "__main__":

@@ -736,12 +736,7 @@ def _ensure_cached_symbol_data_for_targets(
         _logger.debug("[perf-data] backfill 1m data took %.4fs", time.perf_counter() - t_sync_1m)
 
 
-@dataclass(slots=True, frozen=True)
-class RunnerResult:
-    """Pipeline completion status."""
-
-    exit_code: int
-    reason: str
+from src.application.futures.runner.models import RunnerResult  # [ADR_20260715_L0_L1_DIAGNOSTIC_PIPELINE_INTEGRITY] single-source RunnerResult; local duplicate removed
 
 
 def _has_l1_delivery_candidates(strategy_output: Any) -> bool:

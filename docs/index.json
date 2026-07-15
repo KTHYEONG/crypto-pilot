@@ -391,7 +391,8 @@
     "testing": "tests/unit/domain/futures/strategy/tiered_workflow/test_l0_l1_outcome.py"
   },
   "scripts/run_l1_cross_tf_replay.py": {
-    "architecture": "docs/architecture/layer1.md"
+    "architecture": "docs/architecture/layer1.md",
+    "testing": "tests/unit/scripts/test_run_l1_cross_tf_replay.py"
   },
   "src/application/futures/run_policy.py": {
     "architecture": "docs/architecture/layer0.md",
@@ -400,5 +401,12 @@
   "src/domain/futures/strategy/tiered_workflow/outcomes.py": {
     "architecture": "docs/architecture/layer1.md",
     "testing": "tests/unit/domain/futures/strategy/tiered_workflow/test_outcomes.py"
+  },
+  "scripts/run_l1_cross_tf_diagnosis.py": {
+    "architecture": "docs/architecture/layer1.md",
+    "testing": "tests/unit/scripts/test_run_l1_cross_tf_diagnosis.py"
+  },
+  "src/application/futures/runner/pipeline.py": {
+    "testing": "tests/unit/application/futures/runner/test_pipeline.py"
   }
 }
