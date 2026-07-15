@@ -3905,10 +3905,15 @@ def run_tiered_pipeline_outcome(
     per_tf_data_maps: dict[str, AlignedMarketData] | None = None,
     labeled_events_by_tf: dict[str, pd.DataFrame] | None = None,
     l0_delivery_manifest: object | None = None,
-    diagnostic_sink: object | None = None,
     policy_fingerprint: str = "",
 ) -> TieredRunOutcome:
-    """Run tiered validation with explicit completed/failed result semantics."""
+    """Run tiered validation with explicit completed/failed result semantics.
+
+    [ADR_20260715_L0_L1_DIAGNOSTIC_PIPELINE_INTEGRITY] Unused diagnostic_sink
+    parameter removed (was never forwarded to run_tiered_pipeline()). This
+    function itself remains unwired from the live _run_strategy_stage path;
+    see decisions.md for the deferred full-wiring option.
+    """
     from src.domain.futures.strategy.event_grid_contracts import (
         EventGridContractError,
         MissingNativeTfEventsError,
