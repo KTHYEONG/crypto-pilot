@@ -29,6 +29,8 @@ This document defines the physical hardware constraints and performance guidelin
   - Do not use `.copy(deep=True)` on Pandas DataFrames or NumPy ndarrays unless absolutely necessary. Use inplace modification or view slices.
 - **Manual Garbage Collection (GC)**:
   - Delete large temporary panel instances (`del obj`) and manually invoke `gc.collect()` immediately after transition steps (e.g., TF transitions, fold completion) to return memory to the WSL kernel.
+- **Prohibit Concurrency on Heavy Optimization Engines**:
+  - The execution of [opt_main_futures.py](file:///home/kth/my_coin_traider/src/execution/opt_main_futures.py) itself consumes extreme memory. To prevent Out-Of-Memory (OOM) crashes, this script MUST NEVER be executed in parallel or concurrently (must run as a single process).
 
 ---
 
