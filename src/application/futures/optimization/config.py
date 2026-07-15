@@ -3,11 +3,10 @@
 from __future__ import annotations
 
 from argparse import Namespace
-from dataclasses import dataclass
-from typing import Any, Literal
+from typing import Any
 
-ActivePhase = Literal["l0", "l1", "l2", "l3"]
-SyncMode = Literal["auto", "skip"]
+from src.application.futures.run_contracts import ActivePhase
+from src.application.futures.run_contracts import FuturesRunConfig as FuturesRunConfig
 
 _ACTIVE_PHASES: frozenset[str] = frozenset({"l0", "l1", "l2", "l3"})
 _LEGACY_PHASES: frozenset[str] = frozenset({"strategy-smoke", "quick-backtest"})
@@ -26,19 +25,6 @@ _LEGACY_ARG_KEYS: tuple[str, ...] = (
     "force_universe_rebuild",
     "sync_mode",
 )
-
-
-@dataclass(slots=True, frozen=True)
-class FuturesRunConfig:
-    """Active futures optimization runner configuration."""
-
-    timeframe: str
-    date: str | None
-    trials: int
-    phase: ActivePhase
-    sync: SyncMode
-    refresh_universe: bool
-    sync_metrics: bool
 
 
 def parse_active_phase(phase: str) -> ActivePhase:

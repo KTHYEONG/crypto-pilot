@@ -13,7 +13,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Literal, TypeAlias
+from typing import Any, Literal, Protocol, TypeAlias
 
 import numpy as np
 from numpy.typing import NDArray
@@ -92,6 +92,53 @@ L0HandoffExclusionReason: TypeAlias = Literal[
 
 
 CrossTFPruningStatus: TypeAlias = Literal["disabled", "applied", "audit_only", "fail_open"]
+
+CrossTfDiagnosticRun: TypeAlias = Literal[
+    "control",
+    "control_repeat",
+    "treatment",
+    "fusion_ablation",
+]
+CrossTfDiagnosticStage: TypeAlias = Literal[
+    "native_panels",
+    "cheap_evidence",
+    "fusion_evidence",
+    "canonical_l0",
+    "manifest_route",
+    "native_labeled_events",
+    "l1_delivery_events",
+    "outer_folds",
+    "l1_result",
+]
+DiagnosticScalar: TypeAlias = int | float | str | bool
+
+
+@dataclass(slots=True, frozen=True)
+class CrossTfStageSnapshot:
+    """Compact immutable record of one cross-timeframe diagnostic stage."""
+
+    schema_version: int
+    run: CrossTfDiagnosticRun
+    stage: CrossTfDiagnosticStage
+    timeframe: str
+    digest_sha256: str
+    item_count: int
+    identity_keys: tuple[str, ...]
+    metrics: tuple[tuple[str, DiagnosticScalar], ...]
+
+
+class CrossTfDiagnosticSink(Protocol):
+    """Receive an opaque stage payload without creating reverse imports."""
+
+    def __call__(
+        self,
+        *,
+        run: CrossTfDiagnosticRun,
+        stage: CrossTfDiagnosticStage,
+        timeframe: str,
+        payload: object,
+    ) -> None:
+        """Record one diagnostic payload."""
 
 
 @dataclass(slots=True, frozen=True)
@@ -899,6 +946,7 @@ class L0DiagnosticConfig:
 
 @dataclass(slots=True, frozen=True)
 class AlphaFoundryRuntimeConfig:
+    """[ADR_20260715_L0_L1_NATIVE_CONTRACT] Runtime mode and L0 gate settings."""
     mode: AlphaFoundryMode = "off"
     report_dir: Path = Path("logs/futures/alpha_foundry")
     max_recipes_per_family: int = 64
@@ -968,6 +1016,16 @@ class AlphaFoundryRuntimeConfig:
     l0_parallel_max_workers: int = 1
     # TF-probe skip capability [LIMIT-07] default unchanged (still runs)
     enable_tf_probe_scoped: bool = True
+
+    # Cross-TF corroboration reference set [LIMIT-12]
+    corroboration_reference_tfs: tuple[str, ...] = (
+        "2h",
+        "4h",
+        "6h",
+        "8h",
+        "12h",
+        "1d",
+    )
 
     def __post_init__(self) -> None:
         if self.mode not in {"off", "audit", "gate"}:
@@ -1066,6 +1124,13 @@ class AlphaFoundryRuntimeConfig:
             raise ValueError(
                 f"l0_parallel_max_workers must be in [1,4], got {self.l0_parallel_max_workers}"
             )
+
+        # ── corroboration_reference_tfs contract [LIMIT-12] ──
+        _valid_tfs = frozenset({"1h", "2h", "4h", "6h", "8h", "12h", "1d"})
+        if len(set(self.corroboration_reference_tfs)) != len(self.corroboration_reference_tfs):
+            raise ValueError("corroboration_reference_tfs contains duplicates")
+        if any(tf not in _valid_tfs for tf in self.corroboration_reference_tfs):
+            raise ValueError("corroboration_reference_tfs contains unsupported timeframe")
 
 
 @dataclass(slots=True, frozen=True)
@@ -1273,3 +1338,19 @@ class L0StrategyDeliveryManifest:
     pruning_status: CrossTFPruningStatus = "disabled"
     pruning_reason: str = ""
     routes: tuple[L0TfDeliveryRoute, ...] = field(default_factory=tuple)
+
+
+_L0_VALID_TFS = frozenset({"1h", "2h", "4h", "6h", "8h", "12h", "1d"})
+
+
+def resolve_corroboration_evidence_for_target(
+    *,
+    target_tf: str,
+    evidence_by_tf: Mapping[str, Any],
+    reference_tfs: tuple[str, ...],
+) -> dict[str, Any]:
+    if target_tf not in evidence_by_tf:
+        raise L0DeliveryContractError(f"missing native evidence for target_tf={target_tf}")
+    allowed = set(reference_tfs)
+    allowed.add(target_tf)
+    return {tf: evidence_by_tf[tf] for tf in evidence_by_tf if tf in allowed}

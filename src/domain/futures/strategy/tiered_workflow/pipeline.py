@@ -2832,12 +2832,21 @@ def _resolve_labeled_events_for_tf(
     tf: str,
     labeled_events: pd.DataFrame,
     labeled_events_by_tf: dict[str, pd.DataFrame] | None = None,
+    *,
+    require_native: bool = True,
 ) -> pd.DataFrame:
-    """Resolve per-TF-native labeled events when available, else fall back to the
-    pooled (possibly cross-grid) frame -- same shape as _resolve_aligned_for_tf.
+    """[ADR_20260715_L0_L1_NATIVE_CONTRACT] Resolve per-TF-native labeled events.
+    
+    When require_native is True (default), a missing native key raises
+    MissingNativeTfEventsError instead of falling back to the pooled frame.
     """
     if labeled_events_by_tf is not None and tf in labeled_events_by_tf:
         return labeled_events_by_tf[tf]
+    if require_native:
+        from src.domain.futures.strategy.event_grid_contracts import MissingNativeTfEventsError
+        raise MissingNativeTfEventsError(f"missing native labeled events for tf={tf}")
+    if "native_tf" in labeled_events.columns:
+        return labeled_events[labeled_events["native_tf"] == tf]
     return labeled_events
 
 
@@ -2917,18 +2926,20 @@ def run_per_tf_l1(
     _tf_labeled = select_l1_delivery_events(
         labeled_events=labeled_events, tf=tf, manifest=l0_delivery_manifest,
     )
-    # ── [LIMIT-05] Defensive bounds-check: drop out-of-range entry_idx ──
+    # ── [LIMIT-09] OOB row drop 제거 — grid contract 위반은 fail-fast ──
     if not _tf_labeled.empty and "entry_idx" in _tf_labeled.columns:
         _n_bars_tf = len(aligned.datetimes)
         _oob_mask = (_tf_labeled["entry_idx"] < 0) | (_tf_labeled["entry_idx"] >= _n_bars_tf)
         _n_oob = int(_oob_mask.sum())
         if _n_oob > 0:
-            logger.warning(
-                "[DATA] tf=%s dropping %d/%d events with entry_idx out of bounds "
-                "for this TF's native grid (n_bars=%d) -- cross-grid index mismatch",
-                tf, _n_oob, len(_tf_labeled), _n_bars_tf,
+            from src.domain.futures.strategy.event_grid_contracts import EventGridContractError
+            _first_oob_id = int(
+                _tf_labeled["event_id"].to_numpy(dtype=np.int64)[np.flatnonzero(_oob_mask)[0]]
+            ) if "event_id" in _tf_labeled.columns else -1
+            raise EventGridContractError(
+                f"timeframe={tf} event_id={_first_oob_id} entry_idx OOB "
+                f"(total OOB={_n_oob}) — silent drop prohibited [LIMIT-09]"
             )
-            _tf_labeled = _tf_labeled.loc[~_oob_mask]
     if _tf_labeled.empty:
         logger.debug("[L1] tf=%s delivery route has no labeled events; blocking TF", tf)
         l1 = Layer1Result(
