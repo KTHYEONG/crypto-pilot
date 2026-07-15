@@ -41,6 +41,7 @@ from src.domain.futures.strategy.candidate_ensemble import (
 )
 from src.domain.futures.strategy.cs_rank import VOL_FLOOR, SymbolSignal
 from src.domain.futures.strategy.tiered_workflow.metrics import (
+    _bars_per_year_for_tf,
     _one_sided_p_value,
     _series_tstat,
     moving_block_bootstrap_mean,
@@ -1751,6 +1752,7 @@ def evaluate_outer_signal_opportunities(
     cfg: CandidateStrategyConfig,
     seed: int,
     regime_code_1d: NDArray[np.int8] | None = None,
+    timeframe: str = "",
 ) -> Layer1FoldReadiness:
     opp_frame = _batch_to_frame(opportunities)
     if opp_frame.empty:
@@ -1955,6 +1957,13 @@ def evaluate_outer_signal_opportunities(
             side_diag_str = _format_family_regime_side_diag(family_regime_diag)
             if side_diag_str:
                 logger.debug("[L1-FAMILY-SIDE-DIAG] %s", side_diag_str)
+    bars_per_fold_native_val = fold.oos_end - fold.oos_start
+    if timeframe and bars_per_fold_native_val > 0:
+        bpy = _bars_per_year_for_tf(timeframe)
+        n_years = bars_per_fold_native_val / bpy
+        decision_points_per_calendar_year_val = len(probe_series) / n_years if n_years > 0 else 0.0
+    else:
+        decision_points_per_calendar_year_val = 0.0
     return Layer1FoldReadiness(
         fold_id=fold_id,
         registry_source_end_idx=fold.fit_end,
@@ -1978,6 +1987,8 @@ def evaluate_outer_signal_opportunities(
         rank_ic_all=rank_ic_all_val,
         rank_ic_tstat=rank_ic_tstat_val,
         label_drift_unmatched_count=label_drift,
+        bars_per_fold_native=bars_per_fold_native_val,
+        decision_points_per_calendar_year=decision_points_per_calendar_year_val,
     )
 
 

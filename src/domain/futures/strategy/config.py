@@ -13,7 +13,9 @@ _DEFAULT_COST_MODEL = ExecutionCostModel()
 _DEFAULT_RT_BPS: float = _DEFAULT_COST_MODEL.round_trip_bps()  # ≈ 7.5
 _DEFAULT_MAX_EXPECTED_HOLDING_BARS = 36
 
-DEFAULT_L1_TFS: tuple[str, ...] = ("2h", "4h", "6h", "8h", "12h", "1d")  # [ADR_20260713_L0_L1_ASSET_GROWTH_RESTRUCTURE]
+DEFAULT_L1_TFS: tuple[str, ...] = (
+    "1h", "2h", "4h", "6h", "8h", "12h", "1d"
+)  # [ADR_20260713_L0_L1_ASSET_GROWTH_RESTRUCTURE]
 
 
 @dataclass(slots=True, frozen=True)
@@ -545,7 +547,7 @@ class CandidateStrategyConfig:
     l1_min_ic_sign_consistency: float = 0.6
     l1_probe_metric: Literal["topk", "breadth"] = "breadth"
     l1_min_realized_match_ratio: float = 0.90
-    l1_min_matched_events_per_fold: int = 20
+    l1_min_matched_events_per_fold: int = field(default=20, metadata={"tf_scale_base": "4h"})
     l1_min_prediction_unique_values: int = 3
     l1_sym_count_mode: Literal["count", "effective_n"] = "effective_n"
     l1_min_effective_sym_n: float = 3.0
@@ -1095,7 +1097,6 @@ _DEFAULT_PER_TF_FAMILIES: dict[str, tuple[str, ...]] = {
         # 여전히 이 키를 신호풀 정의로 참조하므로 유지한다.
         "residual_reversion",
         "trend_ma",
-        "funding_flow_carry",
         "trend_pullback_continuation",
     ),
     "2h": (

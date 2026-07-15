@@ -3,8 +3,11 @@ from __future__ import annotations
 import types
 from dataclasses import replace
 
+import pytest
+
 from src.domain.futures.strategy.candidate_contracts import Layer1FoldReadiness
 from src.domain.futures.strategy.config import CandidateStrategyConfig, apply_tf_gate_overrides
+from src.domain.futures.strategy.tiered_workflow.metrics import _bars_per_year_for_tf
 from src.domain.futures.strategy.tiered_workflow.signal_selection import (
     _resolve_block_bars_eff,
     evaluate_layer1_readiness,
@@ -139,3 +142,57 @@ def test_apply_tf_gate_overrides_effective_sym_n_6h_fallback() -> None:
     cfg = CandidateStrategyConfig()
     overridden = apply_tf_gate_overrides(cfg, "6h")
     assert overridden.l1_min_effective_sym_n == 3.0
+
+
+def test_layer1_fold_readiness_diagnostic_fields_defaults() -> None:
+    report = Layer1FoldReadiness(
+        fold_id=0,
+        registry_source_end_idx=10,
+        outer_oos_start_idx=0,
+        outer_oos_end_idx=100,
+        ready_symbols=("BTC", "ETH"),
+    )
+    assert report.bars_per_fold_native == 0
+    assert report.decision_points_per_calendar_year == 0.0
+
+
+def test_layer1_fold_readiness_diagnostic_fields_populated() -> None:
+    report = Layer1FoldReadiness(
+        fold_id=0,
+        registry_source_end_idx=10,
+        outer_oos_start_idx=0,
+        outer_oos_end_idx=100,
+        ready_symbols=("BTC", "ETH"),
+        bars_per_fold_native=100,
+        decision_points_per_calendar_year=50.0,
+    )
+    assert report.bars_per_fold_native == 100
+    assert report.decision_points_per_calendar_year == 50.0
+
+
+class TestBarsPerYearForTf:
+    """_bars_per_year_for_tf는 tiered_workflow.metrics의 SSOT를 재사용(중복 정의 금지)."""
+
+    def test_returns_8760_for_1h(self) -> None:
+        assert _bars_per_year_for_tf("1h") == pytest.approx(8760.0, rel=1e-9)
+
+    def test_returns_4380_for_2h(self) -> None:
+        assert _bars_per_year_for_tf("2h") == pytest.approx(4380.0, rel=1e-9)
+
+    def test_returns_2190_for_4h(self) -> None:
+        assert _bars_per_year_for_tf("4h") == pytest.approx(2190.0, rel=1e-9)
+
+    def test_ratio_1h_to_4h_is_4(self) -> None:
+        r1 = _bars_per_year_for_tf("1h")
+        r4 = _bars_per_year_for_tf("4h")
+        assert r1 / r4 == pytest.approx(4.0, rel=1e-9)
+
+    def test_ratio_1h_to_2h_is_2(self) -> None:
+        r1 = _bars_per_year_for_tf("1h")
+        r2 = _bars_per_year_for_tf("2h")
+        assert r1 / r2 == pytest.approx(2.0, rel=1e-9)
+
+    def test_ratio_2h_to_4h_is_2(self) -> None:
+        r2 = _bars_per_year_for_tf("2h")
+        r4 = _bars_per_year_for_tf("4h")
+        assert r2 / r4 == pytest.approx(2.0, rel=1e-9)

@@ -1,5 +1,10 @@
 # Active Decisions Log (Sliding Window)
 
+## [2026-07-15] [L1_TF_COVERAGE_1H_REINTRO] [ADR_20260715_L1_TF_COVERAGE_1H_REINTRO]
+- **Context/Why:** L0→L1 병목 재진단으로 l1_min_matched_events_per_fold=20 TF-불변 플랫 상수를 8h/12h 붕괴 용의자로 지목, 1h 재도입의 전제조건(LIMIT-05) 충족 확인 및 LIMIT-06 밀도 정규화 세이프가드 구현. **[check 단계 반증, 중요]**: 1h 추가 전/후 격리 재실행 결과 matched_events 스케일링은 **단독으로는 효과 없음**(1h 없이 재실행 시 6h/8h/12h 전부 스케일링 이전 원값과 완전 일치) — 12h sym_count 개선(1.0→3.0)과 6h 회귀(PASSED→BLOCKED)는 전부 **1h를 l1_tfs에 추가한 것 자체의 부작용**(정확한 인과 경로 미규명, seed는 tf_idx 무관 확인됨 — cross-TF 공유 연산 의심되나 미확정)이었음. "확정"이라는 원 서술은 부정확했음.
+- **Resolution/What:** DEFAULT_L1_TFS에 '1h' 추가, Layer1FoldReadiness에 bars_per_fold_native/decision_points_per_calendar_year 진단 필드 추가, _TF_SCALE_NAME_PATTERNS에 _per_fold/_events_per_fold 가드 패턴 확장, l1_min_matched_events_per_fold에 tf_scale_base 메타데이터 태깅(효과 미확인이나 회귀 리스크 없어 유지). _bars_per_year_for_tf 중복 정의(365.25일 기준) 발견해 기존 SSOT(tiered_workflow.metrics, 365일 기준)로 통합. candidate_contracts.py 1:1 테스트 파일 누락 보완.
+- **Impact:** 1h L0/L1 배선 기존 per-TF 설정 재사용(신규 설정 불필요). 1h 자체는 probe_lcb_bps=4.58bps(<7.5 breakeven)로 구조 게이트 최종 실패 — Symbol-Breadth(20.8)는 밀도 덕에 쉽게 통과하나 경제성 게이트가 독립적으로 걸러냄(LIMIT-06 세이프가드 설계 의도 검증됨). 진단 필드는 게이트 판정 무영향(순수 리포팅). **미해결 후속 과제**: 1h 추가가 6h/12h 결과를 바꾸는 정확한 cross-TF 인과 경로 규명 필요(별도 조사 필요, 이번 세션 범위 밖).
+
 ## [2026-07-15] [TF_SCALED_CONFIG_FIELD_GOVERNANCE] [ADR_20260715_TF_SCALED_CONFIG_FIELD_GOVERNANCE]
 - **Context/Why:** max_holding_bars(4h 기준 36bar 상수)를 _resolve_block_bars_eff에서 미스케일 재사용해 1d 부트스트랩 block이 6배(72bar) 폭증, n_ready 12→0 회귀 재현(3/3). 전수 감사 결과 config.py 전역에 동일 패턴(base-TF 캘리브레이션 상수 vs TF-네이티브 값 구분 컨벤션 부재)이 15개+ 필드에 퍼져있음 확인(RegimeConfig 클러스터, channel_bars/lookback_bars 등).
 - **Resolution/What:** dataclasses.field(metadata={"tf_scale_base": "4h"|None})로 5개 dataclass 전체 bar-duration 필드 명시 분류. apply_tf_gate_overrides(config.py)에 스케일링 로직 통합(기존 2개 호출부 자동 수혜, 하위 함수 시그니처 무변경). run_tiered_pipeline의 build_l1_nested_swf_folds 호출부(fold 경계/purge 계산)에 신규 apply_tf_gate_overrides 호출 추가. 신규 필드 미분류 시 실패하는 구조 테스트 추가. min_listing_age_days(달력일수, bar-count 아님)의 오분류도 리뷰 중 발견해 tf_scale_base=None으로 정정.
@@ -69,8 +74,3 @@
 - **Context/Why:** l1_structural_gate_only=True could build a non-empty deployment registry while Layer1Result.gate_passed still exposed legacy strict advisory failure; multi-TF aggregation also separated PASS selection from the registry delivered to L2.
 - **Resolution/What:** Define deployment PASS as configured policy gate plus a non-empty registry, restrict automatic master-TF candidates to deployable results, and make aggregate gate and registry originate from the same selected TF. Preserve strict Layer1GateReport.passed and all economic gates.
 - **Impact:** 4h conditional deployment can be represented truthfully without relaxing economics; empty or blocked registries fail closed; diagnostics expose strict, structural, and advisory status. Targeted contract tests and lean check pass.
-
-## [2026-07-13] [TASK_L1_FAMILY_ADMISSION_INVESTIGATION] [ADR_20260713_L1_FAMILY_ADMISSION_INVESTIGATION]
-- **Context/Why:** 직전 ADR에서 4h 실패를 '순수 비정상성'으로 결론지었으나, 신규 계측(l1_registry_overlap_diag)이 이를 반증 — 동일 family가 4개 폴드 전부에서 일관되게 배제되는 구조적 패턴 발견. eff_n 계산이 TF 세밀도에 반비례해 작동하는 버그 가설 수립.
-- **Resolution/What:** l1_family_admission_diag 신규 계측(family별 eff_n/n_obs 비율 + structural_reasons 분포) 추가·실행. 결과: eff_n/n_obs=0.83~0.94로 전 TF 유사(계산 버그 가설 반증). 실제 탈락 사유는 no_incremental_edge/negative_gross_edge(순수 경제성) — 4h/6h/8h는 228쌍 중 130~170건 탈락, 12h는 33~74건으로 실제 개선. 진짜 경제적 성과 차이 확정.
-- **Impact:** 가설 2회 연속 반증(activation_context 불일치 → eff_n 계산버그) 후 최종 확정: dual_momentum/taker_imbalance_momentum은 일중 시간단위(4h/6h/8h)에서 진짜로 초과수익 없음, 12h부터 개선. 추가 코드 수정 없음(과적합 방지) — 4h는 현재 상태(l1_structural_gate_only=True 부분배포)가 정직한 최종선. check 9/9 PASS, 회귀 없음. SSOT: docs/results/result.md.
