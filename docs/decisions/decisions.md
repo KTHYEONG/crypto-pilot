@@ -1,5 +1,10 @@
 # Active Decisions Log (Sliding Window)
 
+## [2026-07-15] [L0_TF_PROBE_DEFAULT_DISABLED] [ADR_20260715_L0_TF_PROBE_DEFAULT_DISABLED]
+- **Context/Why:** 정식 L0 multi-TF gate와 L1 검증이 tf-probe와 독립적으로 동작하지만, probe가 phase=l1에서 자동 실행되어 0 winning 결과와 L1 지표를 혼동시키고 불필요한 계산을 유발했다.
+- **Resolution/What:** OPT_FUTURES_CONFIG와 AlphaFoundryRuntimeConfig의 tf-probe 기본값을 False로 통일하고 active pipeline의 기본 실행 조건을 opt-in으로 변경했다. 명시적 활성화 없이는 telemetry probe를 실행하지 않으며 L0/L1 admission은 canonical multi-TF 결과만 사용한다.
+- **Impact:** 실측에서 tf-probe 0 winning과 무관하게 canonical L0 43개 recipe, L1 1h/2h PASS가 확인됐다. 기본 실행은 probe 없이 L0/L1 계산량과 결과 해석을 안정화하며, legacy probe 테스트는 명시적 opt-in 경로에서만 유효하다.
+
 ## [2026-07-15] [L1_PAIR_GATE_TF_DENSITY_CALIBRATION] [ADR_20260715_L1_PAIR_GATE_TF_DENSITY_CALIBRATION]
 - **Context/Why:** registry_empty(4h/6h/8h/12h/1d fold#1 이후 붕괴)의 진짜 원인을 실행 계측으로 추적한 결과, config.py _DEFAULT_PER_TF_GATE_OVERRIDES의 l1_pair_min_effective_obs가 TF 속도와 반대 방향(1h=3.0→2h=4.0→4h=5.0(누락폴백)→6h=5.0→8h=5.0→12h=6.0→1d=7.0)으로 설정되어 있었음. 실측(fold별 evidence/registry 프로브, bootstrap probability_positive 분포)으로 raw evidence row 수는 TF간 비슷한데 pair당 관측치(n_obs)는 느린 TF일수록 자연히 적음(2h fold3 중앙값 100 vs 12h 21)에도 불구하고 문턱값은 오히려 높게 요구되어 4h~1d가 구조적으로 거의 통과 불가능했음이 확인됨.
 - **Resolution/What:** scripts/calibrate_l1_pair_gate.py 신규 작성 — 측정(control replay + effective_n_sink 훅)과 채택(config.py 수동 반영)을 분리해 quant.md anti-overfitting 원칙 준수. signal_selection.py의 compute_symbol_strategy_evidence에 선택적 effective_n_sink 파라미터 추가(기본 None, 기존 동작 불변). 최초 구현에 크래시 2건 발견 및 수정: (1) run_once(trace={})가 STAGE_ORDER 미시딩으로 크래시 — trace 사전 시딩으로 수정. (2) pipeline.py가 compute_symbol_strategy_evidence를 자체 이름으로 재import하므로 signal_selection 모듈 패치는 무효였음(측정치 전부 빈 값) — pipeline 모듈 자신의 바인딩을 패치하도록 수정. 두 회귀 모두 재현 테스트로 고정. 실제 control replay 재실행으로 6-TF 전체 effective_n p10 실측 후 config.py의 4h/6h/8h/12h/1d l1_pair_min_effective_obs를 전부 4.0(2h 기존값=ceiling)으로 갱신.
@@ -69,8 +74,3 @@
 - **Context/Why:** `build_rule_signal_panels`가 base TF + HTF 4회 = 5회 중복 호출되며 동일 indicator를 매번 재계산. `_resample_probe_source_frame`에서 `.copy()`로 인한 불필요한 RSS peak 발생. L1 bridge 내 profile 미출력.
 - **Resolution/What:** (1) `_SignalIndicatorCache` dataclass + `_precompute_shared_indicators` 추출 → per-TF cache wiring. (2) bridge.py `.copy()` 제거로 RSS ~50MB 절감. (3) BRIDGE PERFORMANCE profile은 multi-TF early return으로 미출력 — SYS stage log만 확보. cache 정확성 104/104 PASS.
 - **Impact:** .copy() 제거로 peak RSS 6.93GB (12GB cap의 57.8%). Indicator cache는 wall-clock 개선 미미 (진짜 병목은 LTF streaming 170s). bridge_post_rules 169.3s 중 cache 영향 <2%. 실질 병목 LTF streaming 최적화가 다음 과제.
-
-## [2026-07-14] [TASK_L1_PROJECTION_VECTORIZATION] [ADR_20260714_L1_PROJECTION_VECTORIZATION]
-- **Context/Why:** L1 `run_candidate_strategy_for_universe()`에서 "SWF SCOPE & ADMISSION"→"MULTI-TF PANEL INJECTION" 로그 간 bridge gap의 55%는 `build_native_htf_panels` 4개 TF 순차처리, 8%는 `_project_panel_to_base_grid` per-symbol Python loop(`for n in range(n_syms)` 3,192회 `searchsorted`)가 차지. Bounded concurrency(`ThreadPoolExecutor`)로 HTF build를 2-wave로 단축 시도.
-- **Resolution/What:** (1) `project_higher_tf_to_grid` 2D 입력 지원 → `_project_panel_to_base_grid` HTF/LTF "last" mode per-symbol loop 제거, 4회 2D vectorized 호출로 대체. (2) `build_native_htf_panels`에 `L1_HTF_BUILD_MAX_WORKERS=2` env-gated ThreadPoolExecutor 추가. 벤치마크(114 syms × 4 TFs × 2000 bars) 결과: projection 10.6× speedup(766ms→73ms) 확인. 반면 concurrency는 GIL contention으로 0.70× regression → serial path 유지, **concurrency rollback**.
-- **Impact:** Projection 단독 10.6× (28 panels in 72ms). Peak RSS 1.7GB (12GB cap의 14.2%). Concurrency는 GIL에 의해 threading overhead가 실제 연산보다 커서 오히려 둔화 — pandas/numpy CPU-bound 작업은 serial이 최적. check 11/11 PASS.
