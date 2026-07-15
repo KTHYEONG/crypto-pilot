@@ -1,5 +1,10 @@
 # Active Decisions Log (Sliding Window)
 
+## [2026-07-15] [TASK_L0_L1_DYNAMIC_COST_CAUSAL_FEEDBACK] [ADR_20260715_L0_L1_DYNAMIC_COST_CAUSAL_FEEDBACK]
+- **Context/Why:** 느린 TF들의 L1 블로킹을 해소하기 위한 펀딩/슬리피지 동적 비용 모델과, look-ahead free causal feedback loop의 부재를 해결하기 위함.
+- **Resolution/What:** Layer1FoldReadiness 필드를 확장하여 dynamic_funding_cost_bps, dynamic_execution_cost_bps 등을 추가하고 signal_selection.py에서 이를 연동하여 fold LCB 경제성을 동적으로 계산하도록 구현함.
+- **Impact:** 실측 4-run Sequential Replay 완주 확인. Peak RSS 9.4GB로 안정화. 1h 및 2h PASS, 4h WARNING, 6h~1d는 registry_empty로 BLOCKED 상태 유지. 아블레이션 후 L1 최종 결과가 control과 100% 동일하게 수렴되어 인과성 검증 완료.
+
 ## [2026-07-15] [TASK_L0_L1_NET_EVIDENCE_REPLAY] [ADR_20260715_L0_L1_NET_EVIDENCE_REPLAY]
 - **Context/Why:** 최신 control replay에서 실제 데이터는 정상 로드되었지만 2h만 L1을 통과했고, 느린 TF는 registry 공백·fold coverage·음의 net edge로 차단되었다. gross-only pooled LCB는 데이터 부족과 경제성 실패를 혼동할 수 있었다.
 - **Resolution/What:** L1 pooled LCB에 execution cost를 반영하고 음의 경제 fold를 보존하며, support blocker만 제외하도록 evidence policy를 연결했다. L0에는 cutoff 검증을 포함한 L1 causal feedback multiplier 경로를 연결하고 동일 실행 결과 재사용은 금지했다.
@@ -69,8 +74,3 @@
 - **Context/Why:** 4h L1 게이트 n_ready=0(전 레시피 insufficient_events) 지속. v1 스펙 진단(base-tf만 멀티키 dict 입력)의 실증 검증 필요.
 - **Resolution/What:** l1_tfs 전체를 _build_single_tf_panels로 대칭 구성(base tf 특별취급 제거, bridge.py), CandidatePipelineOutput.aligned_by_tf 추가, audit_zero_event_timeframe 가드 함수 추가(cheap_gate.py).
 - **Impact:** 재검증 결과 버그 미해결(4h n_ready=0 그대로, 79/79 레시피 n_events=0). 실측으로 v1 진단 반증: active_mask(0.618)/panel valid_mask_2d(0.604)/causal window(~0.05, 전TF 동일) 전부 정상 — 결함은 run_alpha_foundry_l0_gate_multi_tf의 aligned_by_tf 배선 이후 미확정 지점. 가드 함수는 프로덕션 call site 미연결(dead code) 확인. 별도 발견: inject_membership_masks_into_maps가 run_config.timeframe 프레임에만 적용되어 나머지 5개 TF는 멤버십마스크 전부 허용 기본값(미검증) 상태.
-
-## [2026-07-14] [TASK_L0_LTF_STREAM_PARALLEL] [ADR_20260714_L0_LTF_STREAM_PARALLEL]
-- **Context/Why:** `bridge_post_rules` 169.3s bottleneck traced to LTF 1m parquet I/O load (52 symbols × 3 LTF panels). `labeled.copy()` added ~400MB peak RSS with no benefit.
-- **Resolution/What:** (1) ThreadPoolExecutor dual path in `build_ltf_native_alpha_panels_streaming` (max_workers=2 via `L0_LTF_EXEC_1M_MAX_WORKERS=2`). (2) `resolve_1m_coverage_tier` parallel scan. (3) `labeled.copy()`→`labeled.assign(native_tf=tf)`. (4) memory cap changed from `max(1, ...)` to `min(max_workers, 2)`.
-- **Impact:** bridge_post_rules 166.37s→105.41s (-36.6%), STRATEGY total 367.03s→286.75s (-21.9%), pre_gc RSS 7,001MB→6,908MB (-93MB). Promotion result byte-identical (14/45/94/104/107). Env var `L0_LTF_EXEC_1M_MAX_WORKERS=2` required for activation.
