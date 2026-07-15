@@ -327,6 +327,9 @@ class L0SignalCandidate:
     soft_flags: tuple[L0SoftFlag, ...]
     data_support_tier: DataSupportTier = "full_support"
     support_state: SupportState = "sufficient"
+    capacity_observed: bool = False
+    feedback_multiplier: float = 1.0
+    priority_components: tuple[tuple[str, float], ...] = ()
 
 
 @dataclass(slots=True, frozen=True)
@@ -665,6 +668,8 @@ class CheapGateEvidence:
     cheap_event_arrays: dict[str, NDArray[np.float64]] | None = field(default=None)
     cheap_block_stats: dict[str, Any] | None = field(default=None)
     cheap_meta_stats: dict[str, Any] | None = field(default=None)
+    regime_stability: float = 0.0
+    capacity_score: float = 0.0
 
 
 @dataclass(slots=True, frozen=True)
@@ -1343,6 +1348,64 @@ class L0StrategyDeliveryManifest:
     pruning_status: CrossTFPruningStatus = "disabled"
     pruning_reason: str = ""
     routes: tuple[L0TfDeliveryRoute, ...] = field(default_factory=tuple)
+
+
+# ── L1 Causal Feedback Contracts [P3] ────────────────────────────────
+
+L1FeedbackOutcome: TypeAlias = Literal[
+    "deployable",
+    "net_edge_negative",
+    "temporally_unstable",
+]
+
+
+@dataclass(frozen=True, slots=True)
+class SignalHypothesisKey:
+    family: str
+    normalized_variant: str
+    timeframe: str
+
+
+@dataclass(frozen=True, slots=True)
+class L1CausalFeedback:
+    key: SignalHypothesisKey
+    outcome: L1FeedbackOutcome
+    evidence_end_ns: int
+    effective_n: float
+    survival_successes: int
+    survival_trials: int
+    pooled_net_lcb_bps: float | None
+    positive_fold_ratio: float
+
+
+class CausalFeedbackError(ValueError):
+    """Raised when L1 feedback violates the chronological cutoff."""
+
+
+def resolve_l1_feedback_multiplier(
+    *,
+    feedback: L1CausalFeedback | None,
+    current_evidence_start_ns: int,
+    prior_effective_n: float = 20.0,
+) -> float:
+    """Compute F_c multiplier from prior completed-run feedback.
+
+    Returns 1.0 for missing feedback.
+    Raises CausalFeedbackError if feedback.evidence_end_ns >= current_evidence_start_ns.
+    """
+    if feedback is not None:
+        if feedback.evidence_end_ns >= current_evidence_start_ns:
+            raise CausalFeedbackError(
+                f"feedback.evidence_end_ns={feedback.evidence_end_ns} >= "
+                f"current_evidence_start_ns={current_evidence_start_ns}"
+            )
+        p_survive = (feedback.survival_successes + 1) / (feedback.survival_trials + 2)
+        n_eff = feedback.effective_n
+        if n_eff <= 0:
+            return 1.0
+        n_scale = np.sqrt(n_eff / (n_eff + prior_effective_n))
+        return float(np.clip(0.5 + p_survive * n_scale, 0.5, 1.5))
+    return 1.0
 
 
 _L0_VALID_TFS = frozenset({"1h", "2h", "4h", "6h", "8h", "12h", "1d"})
