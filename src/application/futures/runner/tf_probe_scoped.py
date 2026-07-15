@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 from collections import Counter
-from collections.abc import Sequence
+from collections.abc import Collection, Mapping, Sequence
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
@@ -14,6 +15,88 @@ if TYPE_CHECKING:
     )
 
 _TF_PROBE_FALLBACK_SYMBOLS: tuple[str, ...] = ("BTCUSDT", "ETHUSDT", "BNBUSDT")
+
+
+@dataclass(frozen=True, slots=True)
+class TfDiagnosticSamplingPolicy:
+    confidence_level: float
+    target_margin: float
+    max_symbols: int
+    seed: int
+
+
+@dataclass(frozen=True, slots=True)
+class TfDiagnosticSample:
+    population_size: int
+    required_size: int
+    selected_symbols: tuple[str, ...]
+    stratum_population: Mapping[str, int]
+    stratum_sample: Mapping[str, int]
+    representative: bool
+    achieved_margin: float
+
+
+@dataclass(slots=True, frozen=True)
+class SymbolMeta:
+    symbol: str
+    rank: int
+    cluster: int
+
+
+def resolve_tf_diagnostic_sample(
+    *,
+    symbol_metadata: Sequence[SymbolMeta],
+    available_symbols: Collection[str],
+    policy: TfDiagnosticSamplingPolicy,
+) -> TfDiagnosticSample:
+    import math
+
+    pop_size = len(symbol_metadata)
+    z = {0.90: 1.645, 0.95: 1.96, 0.99: 2.576}.get(policy.confidence_level, 1.96)
+    e = policy.target_margin
+    n_req = math.ceil((pop_size * z**2 * 0.25) / (e**2 * (pop_size - 1) + z**2 * 0.25)) if pop_size > 1 else pop_size
+    n_cap = min(n_req, policy.max_symbols, len(available_symbols))
+
+    rng = __import__("random").Random(policy.seed)
+    strata: dict[int, list[SymbolMeta]] = {}
+    for meta in symbol_metadata:
+        if meta.symbol in available_symbols:
+            strata.setdefault(meta.cluster, []).append(meta)
+
+    stratified: list[SymbolMeta] = []
+    stratum_pop: dict[str, int] = {}
+    stratum_samp: dict[str, int] = {}
+    remaining = n_cap
+    for cluster_id in sorted(strata):
+        group = strata[cluster_id]
+        rng.shuffle(group)
+        skey = str(cluster_id)
+        stratum_pop[skey] = len(group)
+        alloc = max(1, round(n_cap * len(group) / pop_size)) if pop_size > 0 else 0
+        alloc = min(alloc, len(group), remaining)
+        stratified.extend(group[:alloc])
+        stratum_samp[skey] = alloc
+        remaining -= alloc
+    if remaining > 0:
+        extra = [m for m in symbol_metadata if m.symbol in available_symbols and m not in stratified]
+        rng.shuffle(extra)
+        stratified.extend(extra[:remaining])
+        for m in extra[:remaining]:
+            skey = str(m.cluster)
+            stratum_samp[skey] = stratum_samp.get(skey, 0) + 1
+
+    selected = tuple(m.symbol for m in stratified)
+    achieved = e * math.sqrt(n_req / max(n_cap, 1)) if n_cap > 0 else 1.0
+    representative = n_cap >= n_req and len(strata) == len(stratum_samp)
+    return TfDiagnosticSample(
+        population_size=pop_size,
+        required_size=n_req,
+        selected_symbols=selected,
+        stratum_population=stratum_pop,
+        stratum_sample=stratum_samp,
+        representative=representative,
+        achieved_margin=achieved,
+    )
 
 
 def _run_tf_probe_stage_scoped(

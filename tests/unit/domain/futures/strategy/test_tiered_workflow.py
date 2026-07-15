@@ -3868,7 +3868,7 @@ def _run_pipeline_to_l2_and_capture_awf_call(
     """run_tiered_pipeline을 target_phase='l2'까지 실행하고 build_l2_simulation_folds 호출 인자를 캡처."""
 
     aligned, window = _build_part5_aligned_and_window(extend_to_holdout_end=extend_to_holdout_end)
-    cfg = replace(CandidateStrategyConfig(), wf_n_folds=2)
+    cfg = replace(CandidateStrategyConfig(), wf_n_folds=2, l2_master_tf="4h")
 
     awf_calls: list[dict[str, object]] = []
 
@@ -3988,6 +3988,7 @@ def test_run_tiered_pipeline_l1_nested_swf_folds_still_receive_full_n_bars(
     aligned, window = _build_part5_aligned_and_window(extend_to_holdout_end=True)
     cfg = MagicMock(spec=CandidateStrategyConfig)
     cfg.wf_n_folds = 2
+    cfg.l2_master_tf = "4h"
 
     nested_builder_calls: list[dict[str, object]] = []
     blocked_l1 = Layer1Result(

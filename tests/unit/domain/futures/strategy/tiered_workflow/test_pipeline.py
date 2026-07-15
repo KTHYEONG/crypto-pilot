@@ -14,6 +14,7 @@ from src.domain.futures.strategy.candidate_contracts import (
 from src.domain.futures.strategy.config import CandidateStrategyConfig, PerTfL1Result
 from src.domain.futures.strategy.tiered_workflow.dataclasses import Layer1Result
 from src.domain.futures.strategy.tiered_workflow.pipeline import (
+    TieredPipelineError,
     _aggregate_per_tf_l1,
     _is_deployable_per_tf_result,
     _log_pertf_registry_diag,
@@ -247,7 +248,7 @@ class TestResolveL2MasterTf:
 
         assert master == "8h"
 
-    def test_s8_explicit_override_returns_override_tf(self) -> None:
+    def test_s8_explicit_override_must_be_deployable(self) -> None:
         cfg = MagicMock(spec=CandidateStrategyConfig, l2_master_tf="4h")
         registry_8h = _registry(ready_symbols=("ETHUSDT",))
         per_tf = {
@@ -255,20 +256,18 @@ class TestResolveL2MasterTf:
             "8h": _mock_per_tf(tf="8h", gate_passed=True, registry=registry_8h, n_winning_signals=20),
         }
 
-        master = _resolve_l2_master_tf(cfg, per_tf)
+        with pytest.raises(TieredPipelineError, match="not deployable"):
+            _resolve_l2_master_tf(cfg, per_tf)
 
-        assert master == "4h"
-
-    def test_auto_falls_to_8h_when_no_eligible(self) -> None:
+    def test_auto_fails_closed_when_no_eligible(self) -> None:
         cfg = MagicMock(spec=CandidateStrategyConfig, l2_master_tf=None)
         per_tf = {
             "4h": _mock_per_tf(tf="4h", gate_passed=False, registry=None),
             "8h": _mock_per_tf(tf="8h", gate_passed=False, registry=None),
         }
 
-        master = _resolve_l2_master_tf(cfg, per_tf)
-
-        assert master == "8h"
+        with pytest.raises(TieredPipelineError, match=r"deployable.*timeframe"):
+            _resolve_l2_master_tf(cfg, per_tf)
 
 
 # ── _select_representative_l1_registry ─────────────────────────────
