@@ -1,5 +1,10 @@
 # Active Decisions Log (Sliding Window)
 
+## [2026-07-15] [L0_L1_CONTROL_REPLAY_RESULT_20260715] [ADR_20260715_L0_L1_CONTROL_REPLAY_RESULT_20260715]
+- **Context/Why:** 최신 control 단일 순차 실행은 2h만 L1 PASS이고 나머지 TF는 fold-level registry/경제성 게이트로 BLOCKED였다. 그러나 replay artifact에 terminal_event_audit와 outer_folds가 없고 RunnerResult가 process 성공으로 변환되어 결과 완전성과 종료 상태를 신뢰할 수 없었다.
+- **Resolution/What:** docs/results/result.md를 최신 control 측정값으로 전면 교체하고, 불완전 artifact는 cross-TF 인과 결론에 사용하지 않는다. 다음 실행 전 RunnerResult 전달, terminal/outer checkpoint, signal/RSS/last-stage 보존을 요구한다.
+- **Impact:** 2h 결과만 현재 유효 측정으로 기록한다. 1h가 6h/12h에 미친 영향, OOM 여부, cross-TF 최초 divergence는 미판정으로 유지하며 계측 보강 후 네 run을 순차 재실행한다.
+
 ## [2026-07-15] [L0_L1_RUNTIME_TERMINAL_OBSERVABILITY] [ADR_20260715_L0_L1_RUNTIME_TERMINAL_OBSERVABILITY]
 - **Context/Why:** After the policy refactor, the CLI passed alpha_foundry=None as the string 'None', the replay utility imported a removed builder, and a None strategy-stage return could be interpreted as successful L1 completion. A sequential rerun reached 106 loaded symbols and 241/241 TF readiness but terminated before L0/L1 artifacts were emitted.
 - **Resolution/What:** Normalize omitted runtime flags at the canonical policy boundary, migrate the replay utility to build_effective_run_config, and convert zero-delivery, blocked-tiered, contract, and missing strategy-stage paths into explicit RunnerResult failures. Preserve single-process execution and do not promote incomplete measurements.
@@ -69,8 +74,3 @@
 - **Context/Why:** 실제 18GB 환경에서 multi-TF 패널 family 동시 계산과 fork worker가 peak memory를 증폭했고, handoff 출력 계약도 aligned 누락으로 L1을 중단시켰다.
 - **Resolution/What:** rule family와 native TF 패널을 순차 생성하고 L0 gate를 단일 worker로 제한한다. parent-inclusive PSS planner와 destructive CandidatePipelineOutput handoff를 연결하며 signal-only 경로도 aligned를 반환한다. dual event schemas와 LTF logging 계약을 정합화한다.
 - **Impact:** 최종 실행은 125개 데이터 중 114개 admission, 6개 TF L1 루프까지 RSS peak 약 8.32GB로 완료되었으나 모든 TF는 labeled delivery 없음으로 gate 차단되었다. 실행 시간 3분24초, exit 0.
-
-## [2026-07-13] [TASK_L1_HYBRID_MEMORY_AUDIT] [ADR_20260713_L1_HYBRID_MEMORY_AUDIT]
-- **Context/Why:** 1m 데이터를 on-demand hybrid 방식으로 전환했지만 전체 L1 RSS 절감 목표가 달성되지 않았고, multi-TF 패널과 nested worker가 실제 병목인지 실측 결과를 SSOT에 기록할 필요가 있다.
-- **Resolution/What:** core loader의 1m 전수 적재 제거는 유지한다. 6개 TF 패널 동시 보유와 L1 worker fork를 전체 메모리 병목으로 확정하고, 후속 개선 대상으로 panel 수명 단축·TF 순차 해제·worker/IPC 상한 조정을 등록한다.
-- **Impact:** 1m 저장 효율 개선과 전체 L1 메모리 안정성은 별도 문제로 관리한다. 2026-07-13 기준 정상 L1 peak 약 11.10GB이며, 충분한 메모리 환경에서는 6개 TF gate 완료가 가능하다.
