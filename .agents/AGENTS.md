@@ -108,9 +108,9 @@ Quant tasks:
 
 To maintain a clean and navigable codebase, documentation must follow a strict separation of concerns:
 
-- **Architecture (`docs/architecture/`):** "High-Density, Comprehensive Readability".
-  - Contents: Complete system logic, Mermaid diagrams, mathematical formulas, and I/O tables.
-  - Guidelines: Focus strictly on static specifications (public contracts, formulas, Mermaid diagrams); omit historical change logs and conversational prose.
+- **Architecture (`docs/architecture/`):** "AI-First Structured Constraints".
+  - Contents: System boundary, mathematical formalisms & constraints (LaTeX), strict I/O tables, and topology/state transitions (Mermaid).
+  - Guidelines: Omit all procedural implementation details, code optimization tricks (e.g. parallel pooling, cache maps), logging/error policy descriptions, and conversational prose. Keep each document strictly under a 300 lines limit. Shift procedural optimization and private details to in-code docstrings.
 - **Decisions (`docs/decisions/`):** "Two-File Decisions Log Architecture" (ADR).
   - decisions.md (Active Window): Cumulative log, strictly maximum of 5 lines per task (Max 5 Lines Rule) appended to the top. Max 15 active entries.
   - decisions_archive.md (Permanent Archive): Use automated archiving (`python scripts/archive_decisions.py --max-entries 15`) to manage older ADR entries; avoid manual edits to this file.
