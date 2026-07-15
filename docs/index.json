@@ -408,5 +408,9 @@
   },
   "src/application/futures/runner/pipeline.py": {
     "testing": "tests/unit/application/futures/runner/test_pipeline.py"
+  },
+  "scripts/calibrate_l1_pair_gate.py": {
+    "architecture": "docs/architecture/layer1.md",
+    "testing": "tests/unit/domain/futures/strategy/test_calibrate_l1_pair_gate.py"
   }
 }

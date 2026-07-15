@@ -6,6 +6,7 @@ import pytest
 
 from src.domain.futures.strategy.config import (
     _DEFAULT_PER_TF_FAMILIES,
+    _DEFAULT_PER_TF_GATE_OVERRIDES,
     DEFAULT_L1_TFS,
     DEPRIORITIZED_FAMILY_PRIOR,
     BlendConfig,
@@ -308,3 +309,11 @@ def test_apply_tf_gate_overrides_roundtrip_same_tf() -> None:
     resolved = apply_tf_gate_overrides(cfg, "4h")
     assert resolved.max_holding_bars == 36
     assert resolved.label_horizon_bars == 12
+
+
+def test_default_per_tf_gate_overrides_covers_every_control_tf() -> None:
+    """[LIMIT-05] Every DEFAULT_L1_TF must have an explicit l1_pair_min_effective_obs override."""
+    for tf in ("1h", "2h", "4h", "6h", "8h", "12h", "1d"):
+        assert "l1_pair_min_effective_obs" in _DEFAULT_PER_TF_GATE_OVERRIDES.get(tf, {}), (
+            f"tf={tf} missing explicit l1_pair_min_effective_obs override -- falls back to global default"
+        )
