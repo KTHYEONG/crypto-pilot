@@ -23,9 +23,8 @@ Run the integrated check script targeting the modified files to avoid multiple c
 - **Precise Paths**: Always specify the exact target test file path (e.g. `tests/unit/domain/.../test_x.py`). Never run pytest on broad directories like `tests/` to prevent execution overhead and massive terminal outputs.
 
 #### 2b. Coverage Thresholds
-- Compare against target thresholds using the printed coverage summary (Apply Tolerance Buffer):
-  - **Core Logic (Domain, Signal, Sizing, Portfolio):** Target >= 90% (Accept **85% ~ 89%** as a **Conditional PASS** if all unit tests pass).
-  - **Adapters/Runners/DTOs/Boilerplate:** Target >= 70% (Accept **65% ~ 69%** as a **Conditional PASS**).
+- Compare against target thresholds using the printed coverage summary.
+- **SSOT Directive**: The exact coverage targets (e.g., Domain/Signal >= 90%, Adapter >= 70%) and their respective Tolerance Buffers (Conditional PASS ranges) are defined exclusively in [testing.md](file:///.agents/rules/testing.md). You MUST reference and adhere to those limits; do not hardcode or verify static numbers here.
 - Measure coverage exclusively on files created or modified by the current task.
 
 ### 3. Triage & Circuit Breaker (On Failure)
