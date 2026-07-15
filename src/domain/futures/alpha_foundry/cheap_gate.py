@@ -246,7 +246,18 @@ def evaluate_panel_cheap_gate(
         event_mask[idx_start:idx_end, :] = entry_full[idx_start:idx_end, :]
     n_events = int(np.sum(event_mask))
 
-    resolved_min_events = resolve_family_timeframe_gate_policy(recipe=recipe, config=config).min_events
+    oos_window_days = 90.0
+    if hasattr(aligned, "datetimes") and len(aligned.datetimes) > 0:
+        dt_diff = aligned.datetimes[-1] - aligned.datetimes[0]
+        if isinstance(dt_diff, np.timedelta64):
+            oos_window_days = float(dt_diff / np.timedelta64(1, "D"))
+        elif hasattr(dt_diff, "total_seconds"):
+            oos_window_days = float(dt_diff.total_seconds() / 86400.0)
+        oos_window_days = max(oos_window_days, 1.0)
+
+    resolved_min_events = resolve_family_timeframe_gate_policy(
+        recipe=recipe, config=config, oos_window_days=oos_window_days
+    ).min_events
     if n_events < resolved_min_events:
         return CheapGateEvidence(
             recipe_id=recipe.recipe_id,
@@ -492,25 +503,44 @@ def resolve_family_timeframe_gate_policy(
     *,
     recipe: AlphaRecipe,
     config: CheapGateConfig,
+    oos_window_days: float = 90.0,
 ) -> FamilyTimeframeGatePolicy:
+    if oos_window_days <= 0.0:
+        raise ValueError(f"oos_window_days must be positive, got {oos_window_days}")
+
     archetype = recipe.archetype
     family = recipe.family
 
-    min_events = config.archetype_event_floors.get(archetype, config.min_events)
-    if family in config.family_event_floors:
-        min_events = config.family_event_floors[family]
+    # 1. Base scaling
+    if config.min_events != 40:
+        min_events_scaled = config.min_events
+        min_effective_n_scaled = config.min_effective_n
+    else:
+        raw_min_events = oos_window_days * config.daily_event_density
+        min_events_scaled = max(int(raw_min_events), config.min_events_floor)
 
-    min_effective_n = config.min_effective_n
-    target_effective_n = float(min_events)
+        raw_min_effective_n = oos_window_days * config.daily_effective_n_density
+        min_effective_n_scaled = max(raw_min_effective_n, config.min_effective_n_floor)
+
+    # 2. Apply archetype and family floors as lower bounds (max filtering)
+    archetype_floor = config.archetype_event_floors.get(archetype)
+    if archetype_floor is not None:
+        min_events_scaled = max(min_events_scaled, archetype_floor)
+    if family in config.family_event_floors:
+        min_events_scaled = max(min_events_scaled, config.family_event_floors[family])
+
+    if specific_floor := (config.family_event_floors.get(family) or config.archetype_event_floors.get(archetype)):
+        min_effective_n_scaled = max(min_effective_n_scaled, min(config.min_effective_n, float(specific_floor)))
+
+    target_effective_n = float(min_events_scaled)
     max_cost_drag_ratio = config.max_cost_drag_ratio
     max_turnover_per_year = min(config.max_turnover_per_year, recipe.max_turnover_per_year)
-
     deep_negative_lcb_bps = config.min_lcb_net_bps
 
     return FamilyTimeframeGatePolicy(
         archetype=archetype,
-        min_events=min_events,
-        min_effective_n=min_effective_n,
+        min_events=min_events_scaled,
+        min_effective_n=min_effective_n_scaled,
         target_effective_n=target_effective_n,
         max_cost_drag_ratio=max_cost_drag_ratio,
         max_turnover_per_year=max_turnover_per_year,
@@ -1253,7 +1283,18 @@ def evaluate_panel_gate(
         event_mask[idx_start:idx_end, :] = entry_full[idx_start:idx_end, :]
 
     n_events = int(np.sum(event_mask))
-    resolved_min_events = resolve_family_timeframe_gate_policy(recipe=recipe, config=config).min_events
+    oos_window_days = 90.0
+    if hasattr(aligned, "datetimes") and len(aligned.datetimes) > 0:
+        dt_diff = aligned.datetimes[-1] - aligned.datetimes[0]
+        if isinstance(dt_diff, np.timedelta64):
+            oos_window_days = float(dt_diff / np.timedelta64(1, "D"))
+        elif hasattr(dt_diff, "total_seconds"):
+            oos_window_days = float(dt_diff.total_seconds() / 86400.0)
+        oos_window_days = max(oos_window_days, 1.0)
+
+    resolved_min_events = resolve_family_timeframe_gate_policy(
+        recipe=recipe, config=config, oos_window_days=oos_window_days
+    ).min_events
     if n_events < resolved_min_events:
         return _empty_gate_evidence(run_id=run_id, recipe=recipe, reject_reasons=("insufficient_events",))
 

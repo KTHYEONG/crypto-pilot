@@ -19,6 +19,7 @@ from collections.abc import Mapping, MutableMapping, Sequence
 from dataclasses import dataclass, field, replace
 from typing import Any, Literal
 
+import numpy as np
 import pandas as pd
 
 from src.domain.futures.alpha_foundry.budget import (
@@ -395,9 +396,19 @@ def run_alpha_foundry_l0_pipeline(
         if recipe_source in ("catalog_exact", "catalog_family_variant"):
             source = recipe_source  # type: ignore[assignment]
 
+        oos_window_days = 90.0
+        if hasattr(aligned, "datetimes") and len(aligned.datetimes) > 0:
+            dt_diff = aligned.datetimes[-1] - aligned.datetimes[0]
+            if isinstance(dt_diff, np.timedelta64):
+                oos_window_days = float(dt_diff / np.timedelta64(1, "D"))
+            elif hasattr(dt_diff, "total_seconds"):
+                oos_window_days = float(dt_diff.total_seconds() / 86400.0)
+            oos_window_days = max(oos_window_days, 1.0)
+
         policy = resolve_family_timeframe_gate_policy(
             recipe=recipe,
             config=cheap_gate_config,
+            oos_window_days=oos_window_days,
         )
 
         normalized_variant = _strip_tf_suffix(recipe.variant, recipe.timeframe)
