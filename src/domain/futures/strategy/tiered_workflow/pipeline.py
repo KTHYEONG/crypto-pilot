@@ -3114,23 +3114,30 @@ def _tf_edge_quality(r: PerTfL1Result) -> float:
 def _resolve_l2_master_tf(
     cfg: CandidateStrategyConfig,
     per_tf_l1: dict[str, PerTfL1Result],
-    probe_manifest: list[dict[str, Any]] | None = None,
 ) -> str:
     """[ADR_20260713_L1_DEPLOYMENT_PASS_CONTRACT] Resolve the L2 master timeframe.
 
     Selection criterion: Σ oos_edge_bps (valid strategies) — edge quality, not signal count.
     This prevents 4h-balanced TF from winning on count while carrying weak edge.
 
+    Probe fallback and default "8h" are removed — fail-closed when no deployable TF exists.
+
     Args:
         cfg: Strategy config (l2_master_tf override takes precedence).
         per_tf_l1: Per-TF L1 results.
-        probe_manifest: Probe cell manifest (fallback).
 
     Returns:
-        Master TF string (e.g. ``"8h"``).
+        Master TF string.
+
+    Raises:
+        TieredPipelineError: No deployable timeframe found and no override configured.
     """
     if cfg.l2_master_tf:
-        return cfg.l2_master_tf
+        if cfg.l2_master_tf in per_tf_l1 and _is_deployable_per_tf_result(per_tf_l1[cfg.l2_master_tf]):
+            return cfg.l2_master_tf
+        raise TieredPipelineError(
+            f"configured l2_master_tf={cfg.l2_master_tf} is not deployable"
+        )
 
     eligible = {
         tf: result
@@ -3142,17 +3149,7 @@ def _resolve_l2_master_tf(
         if _tf_edge_quality(eligible[best_tf]) > 0.0:
             return best_tf
 
-    if probe_manifest:
-        from collections import Counter
-
-        tf_counts: Counter[str] = Counter()
-        for c in probe_manifest:
-            if c.get("is_winner") and isinstance(tf_val := c.get("tf"), str):
-                tf_counts[tf_val] += 1
-        if tf_counts:
-            return tf_counts.most_common(1)[0][0]
-
-    return "8h"
+    raise TieredPipelineError("no deployable timeframe found for L2 master TF")
 
 
 def _select_representative_l1_registry(
@@ -3312,7 +3309,7 @@ def run_tiered_pipeline(
     _l2_tf_resolved: str = ""
     if l1_result_override is not None:
         l1 = l1_result_override
-        l2_tf = _resolve_l2_master_tf(cfg, {}, probe_manifest)
+        l2_tf = _resolve_l2_master_tf(cfg, {})
     else:
         _l2_date_resolved: date | None = (
             window.l2_start
@@ -3418,7 +3415,7 @@ def run_tiered_pipeline(
             if tf_idx < len(l1_tfs) - 1:
                 time.sleep(0.5)
 
-        _l2_tf_resolved = _resolve_l2_master_tf(cfg, per_tf_l1, probe_manifest)
+        _l2_tf_resolved = _resolve_l2_master_tf(cfg, per_tf_l1)
         if logger.isEnabledFor(logging.DEBUG):
             _log_pertf_registry_diag(per_tf_l1, _l2_tf_resolved)
         _capture = build_validation_parity_capture(
@@ -3439,7 +3436,7 @@ def run_tiered_pipeline(
         _rss_after_agg = _get_rss_mb()
         logger.debug("[MEM] stage=aggregate_l1 rss=%.0fMB", _rss_after_agg)
 
-    l2_tf = _l2_tf_resolved if l1_result_override is None else _resolve_l2_master_tf(cfg, {}, probe_manifest)
+    l2_tf = _l2_tf_resolved if l1_result_override is None else _resolve_l2_master_tf(cfg, {})
     logger.log(PERF, "[PERF] run_tiered_pipeline_l1_total took=%.4fs", time.perf_counter() - t_l1)
 
     if not l1.gate_passed:
