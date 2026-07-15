@@ -1531,6 +1531,7 @@ def run_l1_nested_swf(
                 cfg=cfg,
                 seed=seed + outer_idx,
                 regime_code_1d=_diag_regime_code,
+                timeframe=tf,
             )
         )
         _t_eval_took = time.perf_counter() - _t_eval
