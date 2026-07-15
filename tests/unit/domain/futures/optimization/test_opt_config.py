@@ -67,3 +67,7 @@ def test_membership_warmup_days_configured() -> None:
 
     # Assert
     assert value == 42
+
+
+def test_tf_probe_is_disabled_by_default() -> None:
+    assert OPT_FUTURES_CONFIG["ENABLE_TF_PROBE"] is False
