@@ -5,7 +5,7 @@ from collections.abc import Sequence
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
-    from src.application.futures.optimization.config import FuturesRunConfig
+    from src.application.futures.run_contracts import FuturesRunConfig
     from src.application.futures.runner.active_pipeline import TfProbeStageResult
     from src.domain.futures.strategy.config import CandidateStrategyConfig
     from src.domain.futures.strategy.timeframe_probe import (
