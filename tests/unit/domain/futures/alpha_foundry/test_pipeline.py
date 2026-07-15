@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Any
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -10,8 +12,11 @@ from src.domain.futures.alpha_foundry.contracts import (
     AlphaRecipe,
     CheapGateConfig,
     CheapGateEvidence,
+    CorroborationTier,
     CrossBucketDiversityResult,
+    DiscoveryTier,
     DiversitySelectionResult,
+    L0HardRejectReason,
     L0SignalCandidate,
     L2PosteriorPolicyConfig,
     PosteriorGateConfig,
@@ -327,7 +332,7 @@ class TestRunAlphaFoundryL0Pipeline:
                               min_candidate_rank_ic_tstat=0.0, min_nw_tstat=0.0,
                               max_cost_drag_ratio=1.0, max_turnover_per_year=2000.0)
 
-        kwargs = {
+        kwargs: dict[str, Any] = {
             "panels": [panel],
             "recipes": {"r1": SAMPLE_RECIPE},
             "aligned": aligned,
@@ -706,12 +711,14 @@ def _make_candidate_handoff(
     recipe_id: str,
     *,
     priority: float,
-    tier: str = "candidate",
+    tier: DiscoveryTier = "candidate",
     blocked: bool = False,
-    corroboration_tier: str = "insufficient_coverage",
+    corroboration_tier: CorroborationTier = "insufficient_coverage",
     timeframe: str = "4h",
 ) -> L0SignalCandidate:
-    hard_reject_reasons = ("deep_negative_lcb",) if blocked else ()
+    hard_reject_reasons: tuple[L0HardRejectReason, ...] = (
+        ("deep_negative_lcb",) if blocked else ()
+    )
     return L0SignalCandidate(
         run_id="test",
         timeframe=timeframe,
@@ -867,7 +874,7 @@ class TestBuildL0HandoffDecisions:
             cross_bucket_corr=np.empty((0, 0), dtype=np.float64),
             global_eff_test_count=0.0,
         )
-        panel_by_rid = {}
+        panel_by_rid: dict[str, CandidateSignalPanel] = {}
         decisions = build_l0_handoff_decisions(
             candidates=candidates,
             recipes=recipes,

@@ -2029,27 +2029,80 @@ def _compute_pooled_probe_lcb(
     cfg: CandidateStrategyConfig,
     seed: int,
 ) -> float:
-    """
-    passed fold의 probe_series_bps를 pool하여 단일 bootstrap LCB 계산.
+    """Compute a cost-adjusted pooled LCB from data-eligible folds.
+
+    [ADR_20260715_L0_L1_NET_EVIDENCE_REPLAY]
+
+    A fold that is economically negative remains in the pool.  Only folds
+    with explicit support/contract blockers are excluded; this prevents
+    registry or match attrition from turning the economic estimate into an
+    uninformative ``-inf`` sentinel.
 
     Returns:
         float: 5th percentile bootstrap mean (bps)
     """
-    pooled: list[float] = []
+    from src.domain.futures.strategy.tiered_workflow.evidence_policy import (
+        assess_fold_evidence,
+        pool_l1_evidence,
+    )
+
+    support_blockers = {
+        "insufficient_ready_symbols",
+        "insufficient_realized_match_ratio",
+        "insufficient_matched_events",
+    }
+    fold_evidence = []
     for r in fold_reports:
-        if r.passed:
-            pooled.extend(r.probe_series_bps)
-    if not pooled:
+        if not r.probe_series_bps or support_blockers.intersection(r.blockers):
+            continue
+        series = np.asarray(r.probe_series_bps, dtype=np.float64)
+        fold_evidence.append(
+            assess_fold_evidence(
+                fold_id=r.fold_id,
+                gross_series_bps=series,
+                execution_cost_bps=np.full(
+                    series.size,
+                    float(getattr(cfg, "expected_cost_bps", getattr(cfg, "l1_breakeven_floor_bps", 0.0))),
+                    dtype=np.float64,
+                ),
+                funding_cost_bps=np.zeros(series.size, dtype=np.float64),
+                matched_event_count=r.matched_event_count,
+                unmatched_event_count=r.unmatched_event_count,
+                decision_count=r.unique_decision_count,
+                effective_symbol_count=r.effective_symbol_count,
+                cost_observed=np.ones(series.size, dtype=np.bool_),
+                funding_observed=np.ones(series.size, dtype=np.bool_),
+                min_matched_events=1,
+                min_match_wilson_lcb=0.0,
+                min_decision_count=1,
+                max_cost_fallback_ratio=1.0,
+                min_funding_coverage_ratio=0.0,
+                block_bars=_resolve_block_bars_eff(cfg),
+                n_bootstrap=int(getattr(cfg, "l1_bootstrap_samples", 200)),
+                seed=seed + r.fold_id,
+            )
+        )
+
+    if not fold_evidence:
         return -float("inf")
-    series = np.asarray(pooled, dtype=np.float64)
-    boot = moving_block_bootstrap_mean(
-        series,
-        np.arange(len(series), dtype=np.int64),
+    pooled = pool_l1_evidence(
+        folds=tuple(fold_evidence),
+        # Structural coverage/symbol gates are evaluated by the caller.  This
+        # helper is only the economic estimator and must not reintroduce the
+        # old ``report.passed`` coupling.
+        fold_cov=1.0,
+        effective_symbol_n=_compute_effective_sym_n(fold_reports),
+        min_fold_cov=0.0,
+        min_data_eligible_folds=1,
+        min_effective_symbol_n=0.0,
+        min_positive_fold_ratio=float(getattr(cfg, "l1_min_fold_ratio", 0.5)),
         block_bars=_resolve_block_bars_eff(cfg),
         n_bootstrap=int(getattr(cfg, "l1_bootstrap_samples", 200)),
         seed=seed,
     )
-    return float(np.quantile(boot, 0.05)) if boot.size > 0 else float(np.mean(series))
+    if pooled.pooled_net_lcb_bps is None:
+        return -float("inf")
+    return float(pooled.pooled_net_lcb_bps)
 
 
 def _resolve_block_bars_eff(cfg: CandidateStrategyConfig) -> int:
@@ -2130,10 +2183,16 @@ def evaluate_layer1_readiness(
         )
 
     # [LIMIT-02, LIMIT-03] Structural checks (blocking) vs advisory checks (non-blocking)
+    pooled_probe = bool(getattr(cfg, "l1_probe_lcb_pooled", True))
+    probe_threshold = (
+        max(float(cfg.l1_min_probe_bps), 0.0)
+        if pooled_probe
+        else max(float(cfg.l1_min_probe_bps), float(cfg.l1_breakeven_floor_bps))
+    )
     structural_specs = (
         ("fold_cov", fold_cov, float(getattr(cfg, "l1_min_fold_cov", 0.8)), "ge"),
         ("sym_count", effective_sym_metric, sym_threshold, "ge"),
-        ("probe_lcb_bps", probe_lcb, max(float(cfg.l1_min_probe_bps), float(cfg.l1_breakeven_floor_bps)), "gt"),
+        ("probe_lcb_bps", probe_lcb, probe_threshold, "gt"),
     )
     advisory_specs = (
         ("match_ratio", match_ratio, float(getattr(cfg, "l1_min_realized_match_ratio", 0.90)), "ge"),
