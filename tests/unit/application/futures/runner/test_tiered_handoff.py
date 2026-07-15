@@ -167,6 +167,7 @@ def test_tiered_l1_handoff_dataclass() -> None:
     handoff = TieredL1Handoff(
         aligned=aligned,
         aligned_by_tf=None,
+        labeled_events_by_tf=None,
         labeled_events=labeled,
         l0_delivery_manifest=None,
     )

@@ -2,7 +2,10 @@ from __future__ import annotations
 
 import logging
 from typing import Any
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
+
+import pandas as pd
+import pytest
 
 from src.domain.futures.strategy.candidate_contracts import (
     Layer1GateReport,
@@ -15,9 +18,11 @@ from src.domain.futures.strategy.tiered_workflow.pipeline import (
     _is_deployable_per_tf_result,
     _log_pertf_registry_diag,
     _resolve_l2_master_tf,
+    _resolve_labeled_events_for_tf,
     _resolve_layer1_deployment_passed,
     _resolve_selected_l1_tf,
     _select_representative_l1_registry,
+    run_per_tf_l1,
 )
 
 
@@ -358,3 +363,83 @@ def test_s12_registry_diag_logs_strict_structural_and_advisory_status(caplog: An
     assert any("strict_gate_passed=False" in message for message in messages)
     assert any("structural_passed=True" in message for message in messages)
     assert any("advisory_failures=none" in message for message in messages)
+
+
+# ── _resolve_labeled_events_for_tf ──────────────────────────────────
+
+
+def test_resolve_labeled_events_for_tf_prefers_native_dict() -> None:
+    pooled = pd.DataFrame({"entry_idx": [100, 200]})
+    native_4h = pd.DataFrame({"entry_idx": [5, 10]})
+    by_tf = {"4h": native_4h}
+
+    result = _resolve_labeled_events_for_tf("4h", pooled, by_tf)
+
+    assert result is native_4h
+
+
+def test_resolve_labeled_events_for_tf_falls_back_when_tf_missing() -> None:
+    pooled = pd.DataFrame({"entry_idx": [100, 200]})
+    by_tf = {"4h": pd.DataFrame({"entry_idx": [5, 10]})}
+
+    result = _resolve_labeled_events_for_tf("8h", pooled, by_tf)
+
+    assert result is pooled
+
+
+def test_resolve_labeled_events_for_tf_falls_back_when_dict_is_none() -> None:
+    pooled = pd.DataFrame({"entry_idx": [100, 200]})
+
+    result = _resolve_labeled_events_for_tf("4h", pooled, None)
+
+    assert result is pooled
+
+
+
+
+def test_run_per_tf_l1_drops_out_of_bounds_entry_idx(caplog: pytest.LogCaptureFixture) -> None:
+    import logging
+
+    from src.domain.futures.strategy.tiered_workflow.dataclasses import Layer1Result
+
+    caplog.set_level(logging.WARNING)
+
+    aligned = MagicMock()
+    aligned.datetimes = list(range(3912))
+
+    cfg = CandidateStrategyConfig()
+    labeled = pd.DataFrame({
+        "entry_idx": [10, 3915],
+        "native_tf": ["6h", "6h"],
+    })
+    outer_folds: tuple[Any, ...] = ()
+
+    mock_l1_result = Layer1Result(
+        signals_per_fold=(),
+        oos_stacked={},
+        pooled_ic=0.0,
+        pooled_tstat=0.0,
+        breadth=0.0,
+        valid_coverage=0.0,
+        fold_pass_ratio=0.0,
+        gate_passed=True,
+        n_valid=0,
+        n_total=0,
+    )
+
+    with patch(
+        "src.domain.futures.strategy.tiered_workflow.run_l1_nested_swf",
+        return_value=mock_l1_result,
+    ):
+        result = run_per_tf_l1(
+            tf="6h",
+            labeled_events=labeled,
+            aligned=aligned,
+            outer_folds=outer_folds,
+            cfg=cfg,
+            seed=42,
+        )
+
+    assert result.tf == "6h"
+    assert "[DATA]" in caplog.text
+    assert "dropping 1/2 events" in caplog.text
