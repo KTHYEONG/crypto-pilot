@@ -32,9 +32,10 @@ Translate the logical Blueprint (`docs/specs/*.md`) into working Python code usi
   - **Loop Limit:** Limit this trial-and-error cycle to **max 3 iterations**. If pytest continues to fail after 3 attempts, **STOP** and return to the `spec` phase to refine the design.
 - **Step 4: Refactor & L1.5 Local Gate (Green & Clean Gate)**
   - Clean up code duplication, optimize local variables, and ensure docstrings match standards.
-  - **[L1.5 Local Gate]**: Run the unified sanity command for the modified source/test files:
-    `uv run ruff check [modified_files] && uv run mypy [modified_files] && uv run pytest -k [target_test_name]`
+  - **[L1.5 Local Gate]**: Run the lightweight sanity check command targeting exclusively the modified files to verify local correctness:
+    `uv run ruff check [modified_files] && uv run pytest -k [target_test_name] --tb=short`
     If any check fails, resolve it immediately. **Do not exit this phase until the L1.5 Gate is 100% Green.**
+    *(Deep type checking via mypy and coverage audit are deferred to the check phase to prevent duplicate test runs.)*
 
 ### 3. Single Responsibility
 - Stop immediately after the L1.5 Local Gate passes; submit results to the `check` phase for full regression and coverage auditing.
