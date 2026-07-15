@@ -3350,12 +3350,13 @@ def run_tiered_pipeline(
             from src.domain.futures.strategy import tiered_workflow as _tw_l1
 
             _build_l1_nested_folds: Any = _tw_l1.build_l1_nested_swf_folds
+            _tf_cfg_for_folds = strategy_config.apply_tf_gate_overrides(cfg, tf)
             outer_folds_tf = _build_l1_nested_folds(
                 n_bars=n_bars_tf,
                 l1_start_idx=l1_start_bars_tf,
                 l1_end_idx=l1_end_bars_tf,
-                max_label_horizon_bars=int(getattr(cfg, "max_holding_bars", 1)),
-                cfg=cfg,
+                max_label_horizon_bars=int(getattr(_tf_cfg_for_folds, "max_holding_bars", 1)),
+                cfg=_tf_cfg_for_folds,
             )
             t_folds = time.perf_counter()
 
