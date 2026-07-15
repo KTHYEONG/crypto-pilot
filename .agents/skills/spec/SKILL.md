@@ -17,13 +17,18 @@ Leverage **high-reasoning models** for creative architectural design, while outp
 - **Dependency Topology Scan**: 
   - Inspect the codebase to identify the target calling module and dependency flow.
   - Ensure the new imports do not violate layering rules or create circular dependencies.
+- **Data & API Discovery**: 
+  - To verify API payloads, database schemas, or external library behavior, you are **encouraged** to create and execute temporary exploration scripts in the `scratch/` folder. Use literal data collection rather than guessing.
 
 ### 2. High-Reasoning Architectural Thought (High Autonomy)
+- **Alternatives & Trade-offs**: Contrast multiple design options. Justify why the chosen design is selected and state its design trade-offs.
+- **Scale-to-Fit Specifying**: For simple helper functions or trivial scripts, scale down the detailing. Do NOT force strict `[PERF-xx]` budgeting unless the module involves signal calculations, concurrent routines, or heavy IO.
+- **Quant & System Resilience**: For trading signals, execution modules, or data collectors, explicitly plan for resilience: network time-outs, database state mismatch, and recovery flows.
 - **Algorithmic & Logical Modeling**: Define mathematical models, data structures, state machines, and state transition rules.
 - **System Flow Visualization**: Draw text-based Mermaid sequence/data flow diagrams showing module interactions.
 - **Constraints & Boundaries**: 
   - Identify edge cases, performance bottlenecks, and algorithmic limitations, tagging each with a unique label (`[LIMIT-01]`, etc.).
-  - **Performance & Resource Budgeting**: Explicitly design the hardware budget using `[PERF-xx]` tags. Define target memory (RSS) caps, GPU VRAM limits, and parallel core configurations conforming to the WSL constraints in `performance.md`.
+  - **Performance & Resource Budgeting**: For resource-intensive components, define hardware constraints using `[PERF-xx]` tags (RSS limit, GPU VRAM, CPU workers matching WSL constraints in `performance.md`).
 
 ### 3. Low-Reasoning Implementation Specifications (Deterministic Constraints)
 To ensure low-reasoning models can build and integrate the code without guessing:
@@ -39,11 +44,11 @@ To ensure low-reasoning models can build and integrate the code without guessing
     - **Scenario 2 (Edge Cases)**: `[LIMIT-xx]` boundary conditions.
     - **Scenario 3 (Error Handling)**: Expected Exceptions and Error logs.
     - **Scenario 4 (Integration Verification)**: Asserting the correct trigger and connection inside the parent module.
-- **Copy-Pasteable Mock Boilerplate**: Provide raw, ready-to-run Python test templates with literal mocks.
+- **Skeleton Mock Boilerplate**: Provide the structural test setup and mock boundary logic (focus on verification assertion points rather than verbose syntax completeness).
 
 ## Constraints (Strictly Prohibited)
-- **No Python Modifications**: Do NOT create, touch, or modify any `.py` source or test files during the `spec` phase.
-- **No Verification Execution**: Never execute `lean_check.py`, `pytest`, `ruff`, or `mypy` during this phase.
+- **No Production Code Modifications**: Do NOT create, touch, or modify any `.py` source (`src/`) or official test (`tests/`) files during the `spec` phase. (Exploratory scripts inside `scratch/` are fully allowed).
+- **No Quality Verification Execution**: Never execute quality-check loops such as `lean_check.py`, `pytest`, `ruff`, or `mypy` during this phase. (Simple `python scratch/temp.py` runs for data collection are fully allowed).
 - **Immediate Pause (STOP)**: Once the `docs/specs/[feature].md` file is generated, stop tool execution immediately and wait for user feedback. Do not proceed to `check` or run tests.
 
 ## Output Format
@@ -52,16 +57,18 @@ Create a markdown file at `docs/specs/[feature].md`:
 ```md
 # 🎯 Goal & Architecture
 - **Goal**: 1-sentence capability.
+- **Alternatives & Trade-offs**: Brief comparison of alternative design paths and reasons for the chosen design.
 - **Mermaid Diagram**: Text-based sequence showing system integration context.
 
 # ⚡ Performance & Resource Budget
+*(Note: Can be simplified/omitted for trivial helper modules)*
 - **Complexity**: Time & Space Complexity (Big-O) for core logic.
 - **Limits**: `[PERF-01] RSS Limit (e.g. RSS < 4GB)`
 - **Concurrency**: `[PERF-02] Concurrency Limit (e.g. max_workers <= 4)`
 - **Hardware Acceleration**: `[PERF-03] GPU/VRAM Limit (e.g. VRAM < 2GB or CPU-only)`
 
-# ⚙️ Logical Rules & State Machine
-- Logical rules, state transition tables, and tagged constraints (`[LIMIT-01]`, etc.).
+# ⚙️ Logical Rules, State Machine & Resilience
+- Logical rules, state transition tables, tagged constraints (`[LIMIT-01]`, etc.), and resilience/recovery flow.
 
 # 🔌 Integration & Connection Plan
 - **Target Location**: `path/to/file.py` > `ClassName.method_name` (anchor context, e.g., "before return")
@@ -77,7 +84,7 @@ Create a markdown file at `docs/specs/[feature].md`:
 - **Scenario 2 (Edge Cases)**: [LIMIT-xx] boundary / [PERF-xx] resource verification.
 - **Scenario 3 (Error Handling)**: Expected Exceptions.
 - **Scenario 4 (Integration)**: Assertion verifying the connection inside the parent module.
-- **Mock & Integration Boilerplate**: Copy-pasteable test snippet with literal mocks.
+- **Mock & Integration Boilerplate**: Structural test template demonstrating mock boundaries and assertions.
 ```
 
 
