@@ -2056,22 +2056,44 @@ def _compute_pooled_probe_lcb(
         if not r.probe_series_bps or support_blockers.intersection(r.blockers):
             continue
         series = np.asarray(r.probe_series_bps, dtype=np.float64)
+        
+        exec_cost = (
+            np.asarray(r.dynamic_execution_cost_bps, dtype=np.float64)
+            if getattr(r, "dynamic_execution_cost_bps", None)
+            else np.full(
+                series.size,
+                float(getattr(cfg, "expected_cost_bps", getattr(cfg, "l1_breakeven_floor_bps", 0.0))),
+                dtype=np.float64,
+            )
+        )
+        funding_cost = (
+            np.asarray(r.dynamic_funding_cost_bps, dtype=np.float64)
+            if getattr(r, "dynamic_funding_cost_bps", None)
+            else np.zeros(series.size, dtype=np.float64)
+        )
+        cost_obs = (
+            np.asarray(r.cost_observed, dtype=np.bool_)
+            if getattr(r, "cost_observed", None)
+            else np.ones(series.size, dtype=np.bool_)
+        )
+        funding_obs = (
+            np.asarray(r.funding_observed, dtype=np.bool_)
+            if getattr(r, "funding_observed", None)
+            else np.ones(series.size, dtype=np.bool_)
+        )
+
         fold_evidence.append(
             assess_fold_evidence(
                 fold_id=r.fold_id,
                 gross_series_bps=series,
-                execution_cost_bps=np.full(
-                    series.size,
-                    float(getattr(cfg, "expected_cost_bps", getattr(cfg, "l1_breakeven_floor_bps", 0.0))),
-                    dtype=np.float64,
-                ),
-                funding_cost_bps=np.zeros(series.size, dtype=np.float64),
+                execution_cost_bps=exec_cost,
+                funding_cost_bps=funding_cost,
                 matched_event_count=r.matched_event_count,
                 unmatched_event_count=r.unmatched_event_count,
                 decision_count=r.unique_decision_count,
                 effective_symbol_count=r.effective_symbol_count,
-                cost_observed=np.ones(series.size, dtype=np.bool_),
-                funding_observed=np.ones(series.size, dtype=np.bool_),
+                cost_observed=cost_obs,
+                funding_observed=funding_obs,
                 min_matched_events=1,
                 min_match_wilson_lcb=0.0,
                 min_decision_count=1,
