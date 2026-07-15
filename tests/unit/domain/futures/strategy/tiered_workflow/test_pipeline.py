@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Any
 from unittest.mock import MagicMock
 
+import numpy as np
 import pandas as pd
 import pytest
 
@@ -403,20 +404,27 @@ def test_resolve_labeled_events_for_tf_falls_back_when_require_native_false() ->
 
 
 
-def test_run_per_tf_l1_fails_on_out_of_bounds_entry_idx() -> None:
+def test_run_per_tf_l1_fails_on_oob_mismatch_entry_idx() -> None:
     from src.domain.futures.strategy.event_grid_contracts import EventGridContractError
 
     aligned = MagicMock()
-    aligned.datetimes = list(range(3912))
+    aligned.datetimes = np.array(
+        ["2024-01-01T00:00", "2024-01-01T06:00", "2024-01-01T12:00"],
+        dtype="datetime64[ns]",
+    )
 
     cfg = CandidateStrategyConfig()
     labeled = pd.DataFrame({
-        "entry_idx": [10, 3915],
+        "event_id": [1, 2],
+        "datetime": [pd.Timestamp("2024-01-01T00:00Z"), pd.Timestamp("2024-01-01T12:00Z")],
+        "entry_idx": [1, 5],
         "native_tf": ["6h", "6h"],
+        "symbol": ["BTCUSDT", "BTCUSDT"],
+        "strategy_id": ["r1", "r1"],
     })
     outer_folds: tuple[Any, ...] = ()
 
-    with pytest.raises(EventGridContractError, match="OOB"):
+    with pytest.raises(EventGridContractError, match="timeframe=6h event_id=2"):
         run_per_tf_l1(
             tf="6h",
             labeled_events=labeled,

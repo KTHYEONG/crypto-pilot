@@ -15,9 +15,15 @@ from src.application.futures.runner.active_pipeline import (
 from src.application.futures.runner.config import FuturesRunConfig
 from src.application.futures.runner.models import MarketDataBundle, RunnerResult, RunWindow
 from src.application.futures.runner.pipeline import run_pipeline
+from src.domain.futures.alpha_foundry.contracts import AlphaFoundryRuntimeConfig
 
 
 def make_run_config(phase: str = "l3") -> FuturesRunConfig:
+    l0_runtime = (
+        AlphaFoundryRuntimeConfig(mode="gate")
+        if phase in {"l0", "l1"}
+        else AlphaFoundryRuntimeConfig(mode="off")
+    )
     return FuturesRunConfig(
         timeframe="4h",
         date="2026-05-01",
@@ -25,7 +31,8 @@ def make_run_config(phase: str = "l3") -> FuturesRunConfig:
         phase=phase,
         sync="skip",
         refresh_universe=False,
-        sync_metrics=False,  # type: ignore[arg-type]
+        sync_metrics=False,
+        l0_runtime=l0_runtime,
     )
 
 
@@ -57,9 +64,47 @@ def _track(order: list[str], key: str, val: Any = None) -> Any:
     return val
 
 
+def _universe_result(mocker: MockerFixture) -> Any:
+    result = mocker.MagicMock()
+    result.timeline.windows = {}
+    return result
+
+
 class TestRunPipeline:
+    def test_run_pipeline_when_strategy_stage_returns_none_returns_explicit_failure(
+        self,
+        mocker: MockerFixture,
+    ) -> None:
+        mocker.patch(
+            "src.application.futures.runner.active_pipeline._resolve_quarterly_window",
+            return_value=make_window(),
+        )
+        mocker.patch("src.application.futures.runner.active_pipeline._resolve_layered_window", return_value=None)
+        mocker.patch(
+            "src.application.futures.runner.active_pipeline._selected_symbols_from_snapshot",
+            return_value=(),
+        )
+        universe_result = _universe_result(mocker)
+        mocker.patch(
+            "src.application.futures.runner.active_pipeline._run_universe_stage",
+            return_value=([], [], [], [], object(), [], universe_result),
+        )
+        mocker.patch("src.application.futures.runner.active_pipeline._ensure_universe_ledger_sync")
+        mocker.patch("src.application.futures.runner.active_pipeline._ensure_cached_symbol_data_for_targets")
+        mocker.patch(
+            "src.application.futures.runner.active_pipeline._run_data_stage",
+            return_value=make_data_bundle(),
+        )
+        mocker.patch("src.application.futures.runner.active_pipeline._run_regime_evaluation_stage", return_value=None)
+        mocker.patch("src.application.futures.runner.active_pipeline._run_strategy_stage", return_value=None)
+
+        result = run_pipeline(make_run_config("l3"))
+
+        assert result == RunnerResult(exit_code=1, reason="strategy_stage_no_result")
+
     def test_run_pipeline_l3_preserves_orchestration_order(self, mocker: MockerFixture) -> None:
         order: list[str] = []
+        universe_result = _universe_result(mocker)
 
         mocker.patch(
             "src.application.futures.runner.active_pipeline._resolve_quarterly_window", return_value=make_window()
@@ -76,7 +121,7 @@ class TestRunPipeline:
         mocker.patch(
             "src.application.futures.runner.active_pipeline._run_universe_stage",
             side_effect=lambda *args, **kwargs: _track(
-                order, "universe", (["BTCUSDT"], [], [], ["BTCUSDT"], object(), [], object())
+                order, "universe", (["BTCUSDT"], [], [], ["BTCUSDT"], object(), [], universe_result)
             ),
         )
         mocker.patch(
@@ -93,7 +138,7 @@ class TestRunPipeline:
         )
         mocker.patch(
             "src.application.futures.runner.active_pipeline._run_strategy_stage",
-            side_effect=lambda *args, **kwargs: _track(order, "strategy"),
+            side_effect=lambda *args, **kwargs: _track(order, "strategy", object()),
         )
         mock_optimize = mocker.patch(
             "src.application.futures.runner.active_pipeline._run_optimization_stage",
@@ -108,6 +153,7 @@ class TestRunPipeline:
 
     @pytest.mark.parametrize("phase", ["l1", "l2"])
     def test_run_pipeline_l1_l2_skip_optimization(self, mocker: MockerFixture, phase: str) -> None:
+        universe_result = _universe_result(mocker)
         mocker.patch(
             "src.application.futures.runner.active_pipeline._resolve_quarterly_window", return_value=make_window()
         )
@@ -118,7 +164,7 @@ class TestRunPipeline:
         mocker.patch("src.application.futures.runner.active_pipeline._ensure_universe_ledger_sync")
         mocker.patch(
             "src.application.futures.runner.active_pipeline._run_universe_stage",
-            return_value=(["BTCUSDT"], [], [], ["BTCUSDT"], object(), [], object()),
+            return_value=(["BTCUSDT"], [], [], ["BTCUSDT"], object(), [], universe_result),
         )
         mocker.patch("src.application.futures.runner.active_pipeline._ensure_cached_symbol_data_for_targets")
         mocker.patch(
