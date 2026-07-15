@@ -535,7 +535,7 @@ def compute_symbol_strategy_evidence(
             group.get("decision_idx", group.get("entry_idx", pd.Series(0, index=group.index))).to_numpy(
                 dtype=np.int64, copy=False
             ),
-            block_bars=int(getattr(cfg, "l1_bootstrap_block_bars", 6)),
+            block_bars=_resolve_block_bars_eff(cfg),
             n_bootstrap=int(getattr(cfg, "l1_bootstrap_samples", 200)),
             seed=seed
             + int.from_bytes(
@@ -1268,7 +1268,7 @@ def compute_xs_factor_spread_diagnostics(
         boot = moving_block_bootstrap_mean(
             spread,
             np.arange(n_bars, dtype=np.int64),
-            block_bars=int(getattr(cfg, "l1_bootstrap_block_bars", 6)),
+            block_bars=_resolve_block_bars_eff(cfg),
             n_bootstrap=int(getattr(cfg, "l1_bootstrap_samples", 200)),
             seed=seed + fold_id,
         )
@@ -1329,7 +1329,7 @@ def _family_regime_cell_stats(
     boot = moving_block_bootstrap_mean(
         spread,
         np.arange(n_bars, dtype=np.int64),
-        block_bars=int(getattr(cfg, "l1_bootstrap_block_bars", 6)),
+        block_bars=_resolve_block_bars_eff(cfg),
         n_bootstrap=int(getattr(cfg, "l1_bootstrap_samples", 200)),
         seed=seed + fold_id,
     )
@@ -1884,7 +1884,7 @@ def evaluate_outer_signal_opportunities(
     probe_boot = moving_block_bootstrap_mean(
         np.asarray(probe_series, dtype=np.float64),
         np.arange(len(probe_series), dtype=np.int64),
-        block_bars=int(getattr(cfg, "l1_bootstrap_block_bars", 6)),
+        block_bars=_resolve_block_bars_eff(cfg),
         n_bootstrap=int(getattr(cfg, "l1_bootstrap_samples", 200)),
         seed=seed + fold_id,
     )
@@ -2022,11 +2022,17 @@ def _compute_pooled_probe_lcb(
     boot = moving_block_bootstrap_mean(
         series,
         np.arange(len(series), dtype=np.int64),
-        block_bars=int(getattr(cfg, "l1_bootstrap_block_bars", 6)),
+        block_bars=_resolve_block_bars_eff(cfg),
         n_bootstrap=int(getattr(cfg, "l1_bootstrap_samples", 200)),
         seed=seed,
     )
     return float(np.quantile(boot, 0.05)) if boot.size > 0 else float(np.mean(series))
+
+
+def _resolve_block_bars_eff(cfg: CandidateStrategyConfig) -> int:
+    base = int(getattr(cfg, "l1_bootstrap_block_bars", 6))
+    holding_bars = int(getattr(cfg, "max_holding_bars", 1))
+    return max(base, 2 * holding_bars)
 
 
 def _wilson_lower_bound(successes: int, n: int, confidence: float = 0.90) -> float:
@@ -2104,7 +2110,7 @@ def evaluate_layer1_readiness(
     structural_specs = (
         ("fold_cov", fold_cov, float(getattr(cfg, "l1_min_fold_cov", 0.8)), "ge"),
         ("sym_count", effective_sym_metric, sym_threshold, "ge"),
-        ("probe_lcb_bps", probe_lcb, float(cfg.l1_min_probe_bps), "gt"),
+        ("probe_lcb_bps", probe_lcb, max(float(cfg.l1_min_probe_bps), float(cfg.l1_breakeven_floor_bps)), "gt"),
     )
     advisory_specs = (
         ("match_ratio", match_ratio, float(getattr(cfg, "l1_min_realized_match_ratio", 0.90)), "ge"),
