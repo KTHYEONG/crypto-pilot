@@ -1,5 +1,10 @@
 # Active Decisions Log (Sliding Window)
 
+## [2026-07-15] [L0_L1_NATIVE_CONTRACT] [ADR_20260715_L0_L1_NATIVE_CONTRACT]
+- **Context/Why:** The corrected sequential replay activated L0, while the control stopped on six terminal 2h boundary events; the earlier zero-L0 result came from an inactive runtime configuration. Native event identity and failure visibility must be recorded before treatment conclusions.
+- **Resolution/What:** Established a canonical FuturesRunConfig, enforced active L0 gate mode for L0/L1, added native event-grid validation and explicit cross-TF diagnostic artifacts, and retained single-process replay as the memory-safe default. The current control remains incomplete until terminal-maturity handling is wired into the L1 consumer.
+- **Impact:** Observed L0 candidate counts are now real and route-consistent; 2h L1 delivery reached 133740 native events before the terminal-boundary contract stopped the run. No treatment comparison, deployment threshold, or cross-TF causal conclusion is promoted.
+
 ## [2026-07-15] [L1_TF_COVERAGE_1H_REINTRO] [ADR_20260715_L1_TF_COVERAGE_1H_REINTRO]
 - **Context/Why:** L0→L1 병목 재진단으로 l1_min_matched_events_per_fold=20 TF-불변 플랫 상수를 8h/12h 붕괴 용의자로 지목, 1h 재도입의 전제조건(LIMIT-05) 충족 확인 및 LIMIT-06 밀도 정규화 세이프가드 구현. **[check 단계 반증, 중요]**: 1h 추가 전/후 격리 재실행 결과 matched_events 스케일링은 **단독으로는 효과 없음**(1h 없이 재실행 시 6h/8h/12h 전부 스케일링 이전 원값과 완전 일치) — 12h sym_count 개선(1.0→3.0)과 6h 회귀(PASSED→BLOCKED)는 전부 **1h를 l1_tfs에 추가한 것 자체의 부작용**(정확한 인과 경로 미규명, seed는 tf_idx 무관 확인됨 — cross-TF 공유 연산 의심되나 미확정)이었음. "확정"이라는 원 서술은 부정확했음.
 - **Resolution/What:** DEFAULT_L1_TFS에 '1h' 추가, Layer1FoldReadiness에 bars_per_fold_native/decision_points_per_calendar_year 진단 필드 추가, _TF_SCALE_NAME_PATTERNS에 _per_fold/_events_per_fold 가드 패턴 확장, l1_min_matched_events_per_fold에 tf_scale_base 메타데이터 태깅(효과 미확인이나 회귀 리스크 없어 유지). _bars_per_year_for_tf 중복 정의(365.25일 기준) 발견해 기존 SSOT(tiered_workflow.metrics, 365일 기준)로 통합. candidate_contracts.py 1:1 테스트 파일 누락 보완.
@@ -69,8 +74,3 @@
 - **Context/Why:** 1m files are intentionally sparse for storage efficiency, so execution readiness must be evaluated against the admitted L1 scope and the actual warmup-to-holdout interval rather than the full universe.
 - **Resolution/What:** Keep core loader 1m-free; LTF streaming receives only admitted symbols, computes coverage over the aligned interval, and plans only symbols meeting the configured 0.80 coverage floor and memory cap. For 2026-07-13, 52 of 114 admitted symbols are LTF-covered.
 - **Impact:** The current coarse L1 run is not blocked by 1m absence; intrabar/LTF breadth is limited to 52 symbols. Full 1m backfill is required only when broader LTF coverage is explicitly desired.
-
-## [2026-07-13] [TASK_L1_DEPLOYMENT_PASS_CONTRACT] [ADR_20260713_L1_DEPLOYMENT_PASS_CONTRACT]
-- **Context/Why:** l1_structural_gate_only=True could build a non-empty deployment registry while Layer1Result.gate_passed still exposed legacy strict advisory failure; multi-TF aggregation also separated PASS selection from the registry delivered to L2.
-- **Resolution/What:** Define deployment PASS as configured policy gate plus a non-empty registry, restrict automatic master-TF candidates to deployable results, and make aggregate gate and registry originate from the same selected TF. Preserve strict Layer1GateReport.passed and all economic gates.
-- **Impact:** 4h conditional deployment can be represented truthfully without relaxing economics; empty or blocked registries fail closed; diagnostics expose strict, structural, and advisory status. Targeted contract tests and lean check pass.
