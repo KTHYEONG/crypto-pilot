@@ -7,6 +7,9 @@ from typing import TYPE_CHECKING, Any, Literal
 from src.domain.futures.strategy.execution_cost import ExecutionCostModel
 
 if TYPE_CHECKING:
+    from src.domain.futures.strategy.event_grid_contracts import NativeEventGridAudit
+
+if TYPE_CHECKING:
     from src.domain.futures.strategy.tiered_workflow.dataclasses import Layer1Result
 
 _DEFAULT_COST_MODEL = ExecutionCostModel()
@@ -1073,6 +1076,7 @@ class PerTfL1Result:
     tf: str
     l1_result: Layer1Result
     n_winning_signals: int
+    event_grid_audit: NativeEventGridAudit | None = None
 
 
 # ── Family Prior Score Deprioritization ────────────────────────────────
