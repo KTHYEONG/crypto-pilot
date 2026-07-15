@@ -1055,8 +1055,10 @@ class TestBuildL0SignalCandidate:
             stress_cost_bps=0.0,
             tf_fusion=None,
         )
-        assert "insufficient_events" in cand.hard_reject_reasons
-        assert cand.discovery_tier == "blocked"
+        assert "insufficient_events" not in cand.hard_reject_reasons
+        assert "insufficient_events" in cand.soft_flags
+        assert cand.support_state == "uncertain"
+        assert cand.discovery_tier == "seed"
 
     def test_soft_flags_bootstrap_disagree(self) -> None:
         from src.domain.futures.alpha_foundry.cheap_gate import build_l0_signal_candidate

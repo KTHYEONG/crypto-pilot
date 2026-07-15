@@ -57,6 +57,7 @@ AlphaTimeframe: TypeAlias = Literal["30m", "1h", "2h", "3h", "4h", "6h", "8h", "
 
 # ── L0/L1 Signal Discovery types ──────────────────────────────────────
 DiscoveryTier: TypeAlias = Literal["seed", "candidate", "verified", "blocked"]
+SupportState: TypeAlias = Literal["sufficient", "uncertain", "negative"]
 
 L0HardRejectReason: TypeAlias = Literal[
     "insufficient_events",
@@ -77,6 +78,8 @@ L0SoftFlag: TypeAlias = Literal[
     "below_conviction_floor",
     "insufficient_tf_coverage",
     "high_bucket_corr",
+    "insufficient_events",
+    "insufficient_effective_n",
     "weak_rank_ic",
 ]
 
@@ -323,6 +326,7 @@ class L0SignalCandidate:
     hard_reject_reasons: tuple[L0HardRejectReason, ...]
     soft_flags: tuple[L0SoftFlag, ...]
     data_support_tier: DataSupportTier = "full_support"
+    support_state: SupportState = "sufficient"
 
 
 @dataclass(slots=True, frozen=True)
@@ -1015,8 +1019,8 @@ class AlphaFoundryRuntimeConfig:
 
     # L0 parallel gate execution [LIMIT-03] 1=sequential (current behavior), 2-4=parallel
     l0_parallel_max_workers: int = 1
-    # TF-probe skip capability [LIMIT-07] default unchanged (still runs)
-    enable_tf_probe_scoped: bool = True
+    # TF-probe is telemetry-only and opt-in; canonical L0/L1 do not depend on it.
+    enable_tf_probe_scoped: bool = False
 
     # Cross-TF corroboration reference set [LIMIT-12]
     corroboration_reference_tfs: tuple[str, ...] = (

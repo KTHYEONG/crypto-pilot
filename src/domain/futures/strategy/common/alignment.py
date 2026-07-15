@@ -318,6 +318,8 @@ def align_data_maps(
         else:
             for col, sym in enumerate(valid_symbols):
                 if sym not in cube_sym_idx:
+                    active_mask[:, col] = False
+                    entry_block_mask[:, col] = True
                     continue
                 cube_n = cube_sym_idx[sym]
                 active_mask[t_valid, col] = state_cube.eligible[p_valid, cube_n]
