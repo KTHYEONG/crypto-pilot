@@ -211,10 +211,10 @@ def test_candidate_config_bnrr_defaults_injected() -> None:
 # ─── Fix A: TF Portfolio Restructure ──────────────────────────────────
 
 
-def test_default_l1_tfs_excludes_1h_includes_1d() -> None:
-    assert "1h" not in DEFAULT_L1_TFS
+def test_default_l1_tfs_includes_1h() -> None:
+    assert "1h" in DEFAULT_L1_TFS
     assert "1d" in DEFAULT_L1_TFS
-    assert set(DEFAULT_L1_TFS) == {"2h", "4h", "6h", "8h", "12h", "1d"}
+    assert DEFAULT_L1_TFS.index("1h") < DEFAULT_L1_TFS.index("2h")
 
 
 def test_1d_family_pool_excludes_mtf_fusion() -> None:
@@ -237,7 +237,7 @@ def test_residual_reversion_survives_pruning() -> None:
     assert "residual_reversion" in cfg.candidate_families
 
 
-@pytest.mark.parametrize("tf", ["2h", "4h", "6h", "8h", "12h", "1d"])
+@pytest.mark.parametrize("tf", ["1h", "2h", "4h", "6h", "8h", "12h", "1d"])
 def test_no_removed_family_in_any_tf_pool(tf: str) -> None:
     pool = _DEFAULT_PER_TF_FAMILIES[tf]
     for fam in _REMOVED_FAMILIES:
@@ -251,7 +251,7 @@ def test_deprioritized_family_prior_no_longer_lists_removed_families() -> None:
 
 # ── Fix A: TF-relative field metadata governance ────────────────────────────
 
-_TF_SCALE_NAME_PATTERNS = ("_bars", "_window", "_span", "_hours", "_days")
+_TF_SCALE_NAME_PATTERNS = ("_bars", "_window", "_span", "_hours", "_days", "_per_fold", "_events_per_fold")
 _TF_SCALE_EXEMPT_FIELDS = frozenset({
     "wf_n_folds", "train_months", "valid_months", "test_months",
     "l1_evidence_max_folds", "l1_outer_warmup_blocks", "min_wf_fold_pass_ratio",
