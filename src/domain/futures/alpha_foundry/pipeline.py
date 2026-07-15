@@ -39,6 +39,7 @@ from src.domain.futures.alpha_foundry.contracts import (
     AlphaRecipe,
     AlphaSignalBlueprint,
     BucketKey,
+    CausalFeedbackError,
     CheapGateConfig,
     CheapGateEvidence,
     CrossBucketDiversityResult,
@@ -49,12 +50,15 @@ from src.domain.futures.alpha_foundry.contracts import (
     L0ReportStageCounts,
     L0SearchCell,
     L0SignalCandidate,
+    L1CausalFeedback,
     L1PosteriorEvidence,
     L1VerificationUnit,
     L2PosteriorPolicyConfig,
     L2PosteriorSleeve,
     MultiTimeframeEvidence,
     PosteriorGateConfig,
+    SignalHypothesisKey,
+    resolve_l1_feedback_multiplier,
 )
 from src.domain.futures.alpha_foundry.diversity import (
     resolve_cross_bucket_diversity,
@@ -248,7 +252,35 @@ def run_alpha_foundry_l0_pipeline(
     evidence_by_tf: Mapping[str, pd.DataFrame] | None = None,
     runtime_config: AlphaFoundryRuntimeConfig | None = None,
     precomputed_cheap_evidences: tuple[CheapGateEvidence, ...] | None = None,
+    l1_feedback_by_key: Mapping[SignalHypothesisKey, L1CausalFeedback] | None = None,
+    current_evidence_start_ns: int | None = None,
 ) -> AlphaFoundryL0Artifacts:
+    """Build the L0 candidate set with causal L1 feedback adjustments.
+
+    [ADR_20260715_L0_L1_NET_EVIDENCE_REPLAY]
+    """
+    feedback_multiplier_by_key: dict[SignalHypothesisKey, float] = {}
+    if l1_feedback_by_key is not None:
+        if current_evidence_start_ns is None:
+            _logger.warning(
+                "[DATA] stage=l0_feedback status=disabled reason=missing_current_evidence_start"
+            )
+        else:
+            try:
+                feedback_multiplier_by_key = {
+                    key: resolve_l1_feedback_multiplier(
+                        feedback=feedback,
+                        current_evidence_start_ns=current_evidence_start_ns,
+                    )
+                    for key, feedback in l1_feedback_by_key.items()
+                }
+            except CausalFeedbackError as exc:
+                _logger.warning(
+                    "[DATA] stage=l0_feedback status=disabled reason=causal_cutoff error=%s",
+                    exc,
+                )
+                feedback_multiplier_by_key = {}
+
     # 1. Search cell creation (if runtime_config provided)
     search_cells: tuple[L0SearchCell, ...] = ()
     if runtime_config is not None:
@@ -371,6 +403,11 @@ def run_alpha_foundry_l0_pipeline(
         normalized_variant = _strip_tf_suffix(recipe.variant, recipe.timeframe)
         tf_key = (recipe.family, normalized_variant, recipe.timeframe)
         tf_ev = tf_fusion_index.get(tf_key)
+        feedback_key = SignalHypothesisKey(
+            family=recipe.family,
+            normalized_variant=normalized_variant,
+            timeframe=recipe.timeframe,
+        )
 
         candidate = build_l0_signal_candidate(
             run_id=run_id,
@@ -381,6 +418,8 @@ def run_alpha_foundry_l0_pipeline(
             stress_cost_bps=cost_model.stress_round_trip_bps(),
             tf_fusion=tf_ev,
             min_conviction_lcb_bps=min_conviction_lcb_bps,
+            capacity_observed=False,
+            feedback_multiplier=feedback_multiplier_by_key.get(feedback_key, 1.0),
         )
         all_candidates.append(candidate)
 
