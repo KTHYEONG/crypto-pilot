@@ -619,6 +619,10 @@ class AlphaGateConfig:
     high_turnover_per_year: float = 180.0
     liquidity_cost_stress_mult: float = 1.0
     l0_cost_diagnostics_enabled: bool = False  # opt-in, log-only [ADR_20260711_L0_NAN_COST_HTF_BLIND_REJECTION]
+    daily_event_density: float = 0.30
+    daily_effective_n_density: float = 0.15
+    min_events_floor: int = 10
+    min_effective_n_floor: float = 5.0
 
     def __post_init__(self) -> None:
         if self.min_candidate_rank_ic_tstat < 0.0:
@@ -631,6 +635,14 @@ class AlphaGateConfig:
             raise ValueError("high_turnover_per_year must be >= 0.0")
         if self.liquidity_cost_stress_mult < 0.0:
             raise ValueError("liquidity_cost_stress_mult must be >= 0.0")
+        if self.daily_event_density < 0.0:
+            raise ValueError("daily_event_density must be >= 0.0")
+        if self.daily_effective_n_density < 0.0:
+            raise ValueError("daily_effective_n_density must be >= 0.0")
+        if self.min_events_floor < 0:
+            raise ValueError("min_events_floor must be >= 0")
+        if self.min_effective_n_floor < 0.0:
+            raise ValueError("min_effective_n_floor must be >= 0.0")
 
 
 # Backward-compat alias
