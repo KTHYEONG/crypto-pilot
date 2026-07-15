@@ -203,7 +203,20 @@ def test_run_active_strategy_output_bridge_accepts_l0_phase(
         _fake_run_candidate_strategy_for_universe,
     )
 
-    run_config = build_run_config_from_args({"phase": "l0", "timeframe": "4h", "trials": 1, "sync": "auto"})
+    from src.application.futures.run_contracts import FuturesRunConfig
+    from src.domain.futures.alpha_foundry.contracts import AlphaFoundryRuntimeConfig
+
+    run_config = FuturesRunConfig(
+        timeframe="4h",
+        date=None,
+        trials=1,
+        phase="l0",
+        sync="skip",
+        refresh_universe=False,
+        sync_metrics=False,
+        seed=42,
+        l0_runtime=AlphaFoundryRuntimeConfig(mode="gate"),
+    )
     out = run_active_strategy_output_bridge(
         run_config=run_config,
         symbols=["BTCUSDT"],
