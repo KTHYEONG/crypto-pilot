@@ -77,6 +77,7 @@ from src.application.futures.optimization.universe_service import (
     discover_universe_timeline,
     validate_universe_quality,
 )
+from src.application.futures.runner.models import RunnerResult
 from src.core.settings import BASE_DIR
 from src.core.utils.utils import PERF, setup_logger
 from src.domain.futures.optimization.observability.run_tracker import (
@@ -735,10 +736,6 @@ def _ensure_cached_symbol_data_for_targets(
         )
         _logger.debug("[perf-data] backfill 1m data took %.4fs", time.perf_counter() - t_sync_1m)
 
-
-from src.application.futures.runner.models import RunnerResult  # [ADR_20260715_L0_L1_DIAGNOSTIC_PIPELINE_INTEGRITY] single-source RunnerResult; local duplicate removed
-
-
 def _has_l1_delivery_candidates(strategy_output: Any) -> bool:
     """[ADR_20260713_TASK_L1_HYBRID_MEMORY_AUDIT] Return whether L0 admitted L1.
 
@@ -763,6 +760,18 @@ class QuarterlyWindow:
     is_start_date: date
     oos_start_date: date
     end_date_value: date
+
+
+@dataclass(frozen=True, slots=True)
+class EffectiveL0L1Boundary:
+    l0_evidence_end: date
+    l1_start: date
+    stable_universe_start: date
+    membership_warmup_end: date
+
+
+class EffectiveBoundaryError(ValueError):
+    """Raised when no causal L0/L1 boundary exists before L2."""
 
 
 @dataclass(slots=True, frozen=True)
@@ -948,6 +957,54 @@ def _build_data_not_ready_reasons(report: pd.DataFrame) -> dict[str, int]:
         report["reason"].value_counts().to_dict()
         if isinstance(report, pd.DataFrame) and not report.empty and "reason" in report.columns
         else {}
+    )
+
+
+def resolve_effective_l0_l1_boundary(
+    *,
+    timeline_windows: Sequence[Any],
+    configured_l1_start: date,
+    l2_start: date,
+    data_start: date,
+    regime_floor: date,
+    min_universe_size: int,
+    membership_warmup_days: float,
+) -> EffectiveL0L1Boundary:
+    sorted_windows = sorted(timeline_windows, key=lambda w: w.effective_from.date())
+    stable_start: date | None = None
+    for i in range(len(sorted_windows) - 1):
+        if (
+            len(sorted_windows[i].active_symbols) >= min_universe_size
+            and len(sorted_windows[i + 1].active_symbols) >= min_universe_size
+        ):
+            stable_start = sorted_windows[i].effective_from.date()
+            break
+    if stable_start is None:
+        raise EffectiveBoundaryError(
+            f"universe timeline never reaches {min_universe_size} symbols "
+            f"for 2 consecutive quarters; cannot derive L0/L1 boundary"
+        )
+    from datetime import timedelta
+
+    warmup_bound = data_start + timedelta(days=membership_warmup_days)
+    resolved_start = max(regime_floor, stable_start, warmup_bound, configured_l1_start)
+    if resolved_start >= l2_start:
+        raise EffectiveBoundaryError(
+            f"resolved boundary {resolved_start} is not before l2_start={l2_start}"
+        )
+    _logger.debug(
+        "[BOUNDARY] resolved L0 evidence_end / L1 start = %s "
+        "(stable_quarter=%s warmup_bound=%s configured_l1=%s)",
+        resolved_start,
+        stable_start,
+        warmup_bound,
+        configured_l1_start,
+    )
+    return EffectiveL0L1Boundary(
+        l0_evidence_end=resolved_start,
+        l1_start=resolved_start,
+        stable_universe_start=stable_start,
+        membership_warmup_end=warmup_bound,
     )
 
 
@@ -2331,7 +2388,7 @@ def _run_strategy_stage(
     _t_probe = time.perf_counter()
     _af_cfg = getattr(run_config, "alpha_foundry", None)
     _run_probe = run_config.phase != "l0" and (
-        getattr(_af_cfg, "enable_tf_probe_scoped", True) if _af_cfg is not None else True
+        getattr(_af_cfg, "enable_tf_probe_scoped", False) if _af_cfg is not None else False
     )
     _probe_result_local = (
         _run_tf_probe_stage_scoped(
@@ -2801,7 +2858,7 @@ def _run_strategy_stage(
                 _resolve_l2_master_tf,
             )
 
-            l2_master_tf = _resolve_l2_master_tf(tiered_cfg, {}, _probe_manifest_raw)
+            l2_master_tf = _resolve_l2_master_tf(tiered_cfg, {})
             l2_study_result = _run_tiered_l2_study(
                 signal_batch=l2_signals,
                 aligned=aligned_tiered,

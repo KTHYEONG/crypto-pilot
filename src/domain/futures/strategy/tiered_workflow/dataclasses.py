@@ -161,6 +161,7 @@ class Layer1Result:
     artifacts_by_tf: dict[str, Layer1InferenceArtifact] = field(default_factory=dict)
     validation_parity_capture: ValidationParityCapture | None = None
     validation_parity_report: ValidationParityReport | None = None
+    selected_timeframe: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
