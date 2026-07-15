@@ -198,6 +198,7 @@ class TestAlphaFoundryRuntimeConfig:
         assert cfg.max_recipes_per_family == 64
         assert cfg.top_k_per_family_tf == 5
         assert cfg.initial_fold_budget == 3
+        assert cfg.enable_tf_probe_scoped is False
 
     def test_valid_audit_mode(self) -> None:
         cfg = AlphaFoundryRuntimeConfig(mode="audit")
