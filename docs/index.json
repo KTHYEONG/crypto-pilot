@@ -11,7 +11,8 @@
       "tests/unit/domain/futures/alpha_foundry/test_alpha_search_contracts.py",
       "tests/unit/domain/futures/alpha_foundry/test_gate_v2.py",
       "tests/unit/domain/futures/alpha_foundry/test_alpha_family_registration.py",
-      "tests/unit/domain/futures/alpha_foundry/test_entry_timing.py"
+      "tests/unit/domain/futures/alpha_foundry/test_entry_timing.py",
+      "tests/unit/domain/futures/alpha_foundry/test_causal_l1_feedback.py"
     ]
   },
   "src/domain/futures/alpha_foundry/recipes.py": {
@@ -412,5 +413,8 @@
   "scripts/calibrate_l1_pair_gate.py": {
     "architecture": "docs/architecture/layer1.md",
     "testing": "tests/unit/domain/futures/strategy/test_calibrate_l1_pair_gate.py"
+  },
+  "src/domain/futures/strategy/tiered_workflow/evidence_policy.py": {
+    "testing": "tests/unit/domain/futures/strategy/tiered_workflow/test_evidence_policy.py"
   }
 }
