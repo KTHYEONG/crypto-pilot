@@ -1,17 +1,23 @@
 from __future__ import annotations
 
+import dataclasses
+
 import pytest
 
 from src.domain.futures.strategy.config import (
     _DEFAULT_PER_TF_FAMILIES,
     DEFAULT_L1_TFS,
     DEPRIORITIZED_FAMILY_PRIOR,
+    BlendConfig,
     BtcNeutralResidualReversalConfig,
     CandidateStrategyConfig,
     LiquidityParticipationBreakoutConfig,
+    RegimeConfig,
+    apply_tf_gate_overrides,
     resolve_purge_and_embargo_bars,
     with_max_holding_bars,
 )
+from src.domain.futures.strategy.timeframe_contracts import scale_bar_count
 
 _REMOVED_FAMILIES = (
     "xs_momentum", "xs_flow", "xs_oi_skew", "funding_flow_carry",
@@ -241,3 +247,64 @@ def test_no_removed_family_in_any_tf_pool(tf: str) -> None:
 def test_deprioritized_family_prior_no_longer_lists_removed_families() -> None:
     assert "supertrend" not in DEPRIORITIZED_FAMILY_PRIOR
     assert "funding_flow_carry" not in DEPRIORITIZED_FAMILY_PRIOR
+
+
+# ── Fix A: TF-relative field metadata governance ────────────────────────────
+
+_TF_SCALE_NAME_PATTERNS = ("_bars", "_window", "_span", "_hours", "_days")
+_TF_SCALE_EXEMPT_FIELDS = frozenset({
+    "wf_n_folds", "train_months", "valid_months", "test_months",
+    "l1_evidence_max_folds", "l1_outer_warmup_blocks", "min_wf_fold_pass_ratio",
+})
+
+
+@pytest.mark.parametrize(
+    "dc_cls",
+    [
+        CandidateStrategyConfig,
+        RegimeConfig,
+        BlendConfig,
+        LiquidityParticipationBreakoutConfig,
+        BtcNeutralResidualReversalConfig,
+    ],
+)
+def test_all_tf_relative_fields_have_scale_metadata(dc_cls: type) -> None:
+    unclassified = [
+        f.name for f in dataclasses.fields(dc_cls)
+        if any(p in f.name for p in _TF_SCALE_NAME_PATTERNS)
+        and f.name not in _TF_SCALE_EXEMPT_FIELDS
+        and "tf_scale_base" not in f.metadata
+    ]
+    assert unclassified == [], f"미분류 TF-상대 필드 발견: {unclassified}"
+
+
+# ── Fix B: apply_tf_gate_overrides scaling ──────────────────────────────────
+
+
+def test_apply_tf_gate_overrides_scales_max_holding_bars_for_1d() -> None:
+    cfg = CandidateStrategyConfig(max_holding_bars=36)
+    resolved = apply_tf_gate_overrides(cfg, "1d")
+    assert resolved.max_holding_bars == scale_bar_count(36, "1d", base_tf="4h")
+    assert resolved.max_holding_bars < 36
+
+
+def test_apply_tf_gate_overrides_purge_bars_rederived_after_scaling() -> None:
+    cfg = CandidateStrategyConfig(max_holding_bars=36, purge_bars=None, embargo_bars=None)
+    resolved = apply_tf_gate_overrides(cfg, "1d")
+    expected_max_holding = scale_bar_count(36, "1d", base_tf="4h")
+    assert resolved.max_holding_bars == expected_max_holding
+    assert resolved.purge_bars is not None
+    assert resolved.purge_bars >= expected_max_holding
+
+
+def test_apply_tf_gate_overrides_ignores_none_metadata_fields() -> None:
+    cfg = CandidateStrategyConfig(l1_bootstrap_block_bars=6)
+    resolved = apply_tf_gate_overrides(cfg, "1d")
+    assert resolved.l1_bootstrap_block_bars == 6
+
+
+def test_apply_tf_gate_overrides_roundtrip_same_tf() -> None:
+    cfg = CandidateStrategyConfig(max_holding_bars=36, label_horizon_bars=12)
+    resolved = apply_tf_gate_overrides(cfg, "4h")
+    assert resolved.max_holding_bars == 36
+    assert resolved.label_horizon_bars == 12
