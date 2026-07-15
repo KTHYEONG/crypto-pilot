@@ -10,8 +10,9 @@ from typing import Any, Literal, cast
 import numpy as np
 import pandas as pd
 
-from src.application.futures.optimization.config import FuturesRunConfig
+from src.application.futures.run_contracts import FuturesRunConfig
 from src.core.utils.utils import PERF
+from src.domain.futures.alpha_foundry.contracts import AlphaFoundryRuntimeConfig
 from src.domain.futures.strategy import StrategyConfig
 from src.domain.futures.strategy_runtime.bridge import (
     CandidatePipelineOutput,
@@ -217,6 +218,22 @@ def _candidate_panel_has_non_finite_metadata(alpha_panel: pd.DataFrame) -> bool:
     return any(_scan(value) for value in meta.values())
 
 
+class ActiveL0RuntimeContractError(RuntimeError):
+    """Raised when an L0/L1 run does not carry an active L0 runtime."""
+
+
+def require_active_l0_runtime(
+    run_config: FuturesRunConfig,
+) -> AlphaFoundryRuntimeConfig:
+    """[ADR_20260715_L0_L1_NATIVE_CONTRACT] Require gate mode for L0/L1."""
+    runtime = run_config.l0_runtime
+    if run_config.phase in {"l0", "l1"} and runtime.mode != "gate":
+        raise ActiveL0RuntimeContractError(
+            f"phase={run_config.phase} requires l0_runtime.mode='gate', got {runtime.mode!r}"
+        )
+    return runtime
+
+
 def summarize_candidate_output_readiness(
     *,
     candidate_out: CandidatePipelineOutput,
@@ -336,6 +353,7 @@ def run_active_strategy_output_bridge(
     state_cube: Any | None = None,
     l0_evidence_end: Any | None = None,
 ) -> CandidatePipelineOutput:
+    """[ADR_20260715_L0_L1_NATIVE_CONTRACT] Bridge an active run into strategy output."""
     del (
         fetch_start,
         end_date,
@@ -359,12 +377,13 @@ def run_active_strategy_output_bridge(
         raise ValueError("candidate ML scope is empty")
 
     t_bridge_inner = time.perf_counter()
+    alpha_foundry_config = require_active_l0_runtime(run_config)
     result = run_candidate_strategy_for_universe(
         symbols=effective_symbols,
         tf=tf,
         strategy_cfg=strategy_cfg,
         preloaded_data_maps=preloaded_data_maps,
-        alpha_foundry_config=getattr(run_config, "alpha_foundry", None),
+        alpha_foundry_config=alpha_foundry_config,
         silent=silent,
         state_cube=state_cube,
         l0_evidence_end=l0_evidence_end,

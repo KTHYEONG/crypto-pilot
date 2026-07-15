@@ -8,9 +8,10 @@ from __future__ import annotations
 import os
 from argparse import Namespace
 from collections.abc import Mapping
-from dataclasses import dataclass, field
 from typing import Any, Literal
 
+from src.application.futures.run_contracts import ActivePhase
+from src.application.futures.run_contracts import FuturesRunConfig as FuturesRunConfig
 from src.domain.futures.alpha_foundry.contracts import AlphaFoundryRuntimeConfig
 
 
@@ -47,8 +48,7 @@ def _l0_ltf_exec_1m_max_workers() -> int:
     return int(raw) if raw.strip() else 1
 
 
-ActivePhase = Literal["l0", "l1", "l2", "l3"]
-SyncMode = Literal["auto", "skip"]
+
 
 _ACTIVE_PHASES: frozenset[str] = frozenset({"l0", "l1", "l2", "l3"})
 _REMOVED_PHASES: frozenset[str] = frozenset({"strategy-smoke", "quick-backtest"})
@@ -71,23 +71,7 @@ _REMOVED_ARG_KEYS: tuple[str, ...] = (
 )
 
 
-@dataclass(slots=True, frozen=True)
-class FuturesRunConfig:
-    """[ADR_20260705_MAJOR_SYMBOL_REGISTRY_REPLAY_SYNC] Runtime config for futures runner orchestration."""
-
-    timeframe: str
-    date: str | None
-    trials: int
-    phase: ActivePhase
-    sync: SyncMode
-    refresh_universe: bool
-    sync_metrics: bool
-    seed: int = 42
-    l0_runtime: AlphaFoundryRuntimeConfig = field(default_factory=AlphaFoundryRuntimeConfig)
-
-    @property
-    def alpha_foundry(self) -> AlphaFoundryRuntimeConfig:
-        return self.l0_runtime
+# FuturesRunConfig is now canonical at src.application.futures.run_contracts
 
 
 def parse_active_phase(phase: str) -> ActivePhase:
@@ -162,6 +146,7 @@ def build_l0_runtime_config(
     phase: ActivePhase,
     settings: Mapping[str, Any],
 ) -> AlphaFoundryRuntimeConfig:
+    """[ADR_20260715_L0_L1_NATIVE_CONTRACT] Build the active L0 runtime contract."""
     """Build internal L0 runtime config from phase + static settings, not CLI flags."""
     raw_budget = settings.get("alpha_foundry_total_l1_budget")
     total_l1_budget = int(raw_budget) if raw_budget is not None else 30
