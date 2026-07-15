@@ -23,12 +23,13 @@ Translate the logical Blueprint (`docs/specs/*.md`) into working Python code usi
   - **[Self-Gate]**: Run `ruff check` and `uv run mypy [stub_file]` to guarantee API signatures and type hints match the `spec` contract 100% before coding tests.
 - **Step 2: Write Failing Tests (Red Phase)**
   - Open or create the test file (`tests/...`).
-  - Write test cases matching **Scenario 1, 2, and 3** from the spec blueprint (using the mock templates provided in spec).
+  - Write test cases matching **Scenario 1, 2, 3, and Scenario 4 (Integration/Wiring)** from the spec blueprint (using the templates provided in spec).
   - **Coverage Gap Exception**: If the spec's scenarios do not achieve the coverage target (Domain >= 90%, Adapter >= 70%), you MUST write supplementary test cases targeting the uncovered lines.
-  - Run the test command: `uv run pytest -k "test_name"` to confirm the tests **FAIL** (showing `NotImplementedError` or AssertionError).
-- **Step 3: Implement Logic (Green Phase)**
-  - Write the minimum code required in the source file (`src/...`) to make the failing tests pass.
-  - Run `uv run pytest -k "test_name"` until they all **PASS**.
+  - Run the test command: `uv run pytest -k "test_name"` to confirm the tests **FAIL** (showing `NotImplementedError`, AssertionError, or mock failing assertions for integration).
+- **Step 3: Implement Logic & Integration (Green Phase)**
+  - Write the implementation logic in the target source file (`src/...`).
+  - **Integration Wiring**: You MUST modify the parent calling module/pipeline to connect and activate the new logic as planned in the spec's `Integration & Connection Plan`. Do not leave the new module isolated.
+  - Run `uv run pytest -k "test_name"` until all unit and integration tests (Scenario 4) **PASS**.
   - **Loop Limit:** Limit this trial-and-error cycle to **max 3 iterations**. If pytest continues to fail after 3 attempts, **STOP** and return to the `spec` phase to refine the design.
 - **Step 4: Refactor & L1.5 Local Gate (Green & Clean Gate)**
   - Clean up code duplication, optimize local variables, and ensure docstrings match standards.
