@@ -539,6 +539,10 @@ class Layer1FoldReadiness:
     label_drift_unmatched_count: int = 0
     bars_per_fold_native: int = 0
     decision_points_per_calendar_year: float = 0.0
+    dynamic_funding_cost_bps: tuple[float, ...] = ()
+    dynamic_execution_cost_bps: tuple[float, ...] = ()
+    funding_observed: tuple[bool, ...] = ()
+    cost_observed: tuple[bool, ...] = ()
 
     def __init__(
         self,
@@ -570,6 +574,10 @@ class Layer1FoldReadiness:
         label_drift_unmatched_count: int = 0,
         bars_per_fold_native: int = 0,
         decision_points_per_calendar_year: float = 0.0,
+        dynamic_funding_cost_bps: tuple[float, ...] = (),
+        dynamic_execution_cost_bps: tuple[float, ...] = (),
+        funding_observed: tuple[bool, ...] = (),
+        cost_observed: tuple[bool, ...] = (),
     ) -> None:
         compat_ic_series = tuple(opportunity_ic_series or ())
         compat_probe_series = tuple(probe_series_bps or probe_gross_edge_series_bps or ())
@@ -620,6 +628,10 @@ class Layer1FoldReadiness:
         object.__setattr__(self, "label_drift_unmatched_count", int(label_drift_unmatched_count))
         object.__setattr__(self, "bars_per_fold_native", int(bars_per_fold_native))
         object.__setattr__(self, "decision_points_per_calendar_year", float(decision_points_per_calendar_year))
+        object.__setattr__(self, "dynamic_funding_cost_bps", tuple(float(x) for x in dynamic_funding_cost_bps))
+        object.__setattr__(self, "dynamic_execution_cost_bps", tuple(float(x) for x in dynamic_execution_cost_bps))
+        object.__setattr__(self, "funding_observed", tuple(bool(x) for x in funding_observed))
+        object.__setattr__(self, "cost_observed", tuple(bool(x) for x in cost_observed))
         object.__setattr__(self, "_compat_ic_series", compat_ic_series)
 
     @property

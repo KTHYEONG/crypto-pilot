@@ -146,13 +146,14 @@
     ]
   },
   "src/domain/futures/strategy/tiered_workflow/signal_selection.py": {
-    "architecture": "docs/architecture/layer1.md",
+    "architecture": "docs/results/result.md",
     "testing": [
       "tests/unit/domain/futures/strategy/tiered_workflow/test_l1_xs_alpha_admission.py",
       "tests/unit/domain/futures/strategy/test_layer1_nested_followup.py",
       "tests/unit/domain/futures/strategy/tiered_workflow/test_l1_readiness_gate_redesign.py",
       "tests/unit/domain/futures/strategy/test_signal_selection_evidence.py",
-      "tests/unit/domain/futures/strategy/tiered_workflow/test_signal_selection.py"
+      "tests/unit/domain/futures/strategy/tiered_workflow/test_signal_selection.py",
+      "tests/domain/futures/strategy/tiered_workflow/test_l0_l1_improvements.py"
     ]
   },
   "src/domain/futures/strategy/tiered_workflow/pipeline.py": {
@@ -194,7 +195,8 @@
     "architecture": "docs/architecture/layer1.md",
     "testing": [
       "tests/unit/domain/futures/strategy/test_adverse_regime_evidence.py",
-      "tests/unit/domain/futures/strategy/tiered_workflow/test_l1_readiness_gate_redesign.py"
+      "tests/unit/domain/futures/strategy/tiered_workflow/test_l1_readiness_gate_redesign.py",
+      "tests/domain/futures/strategy/tiered_workflow/test_l0_l1_improvements.py"
     ]
   },
   "src/domain/futures/optimization/observability/run_tracker.py": {
