@@ -14,8 +14,8 @@ Enforce the Single Source of Truth (SSOT). Finalize the task by promoting epheme
 - **Conceptual Distinction & Surgical Boundaries (Crucial)**:
   - **Architecture (docs/architecture/)**: **"The What/Current Static State"** (SSOT).
     - **Surgical Update Only & Token Saving**: Never append raw text or specs directly to the end of architecture files. You must surgically edit existing tables, schemas, or Mermaid nodes to match the file's current layout. **Do NOT load the entire document; use view_file with specific line ranges to read and edit only the targeted sections.**
-    - **Strict Content Restriction**: Only include public API signatures (I/O contracts), core state transitions, domain formulas, and data structures.
-    - **No Implementation/History**: Do not include implementation guides, step-by-step logic, temporal examples, change history, or `[ADR_...]` tags in architecture files (these belong only in `decisions.md`).
+    - **Strict Content Restriction (AI-First structured format)**: Formulate updates strictly within standardized templates: 1. System Boundary, 2. Mathematical Formalism (LaTeX), 3. Strict I/O Contract Table, 4. Topology & State transitions (Mermaid), and 5. Configurable Parameters. Do not exceed a 300 lines limit per file.
+    - **No Implementation/History**: Do not include implementation guides, step-by-step logic, temporal examples, change history, memory/concurrency optimization details (e.g. GIL, ProcessPool, Cache mappings), or `[ADR_...]` tags in architecture files. Relocate these code-level details to the source code docstrings (Google Style) or decisions.md.
   - **Decisions (docs/decisions/)**: **"The Why/How/History"** (ADR).
     - Isolate and record technical options, implementation context, work progress, and compromises at specific points in time.
 - **In-Code ADR Referencing**:
