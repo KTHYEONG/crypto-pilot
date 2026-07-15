@@ -764,8 +764,9 @@ def _run_phase3_sequential(
     run_id_prefix: str,
     evidence_by_tf: Mapping[str, Any],
     cheap_evidences_by_tf: Mapping[str, tuple[Any, ...]],
+    diagnostic_fusion_exclusions: Mapping[str, frozenset[str]] | None = None,
 ) -> dict[str, AlphaFoundryL0Result]:
-    """Run Phase 3 canonical gate sequentially (the original behavior)."""
+    """[ADR_20260715_L0_L1_NATIVE_CONTRACT] Run Phase 3 canonical gate sequentially."""
     results: dict[str, AlphaFoundryL0Result] = {}
     for tf in panels_by_tf:
         tf_panels = panels_by_tf[tf]
@@ -773,6 +774,12 @@ def _run_phase3_sequential(
         tf_recipes = recipes_by_tf.get(tf, {})
         tf_aligned = aligned_by_tf[tf]
         _run_id = f"{run_id_prefix}_{tf}"
+        excluded_tfs = (
+            diagnostic_fusion_exclusions.get(tf, frozenset())
+            if diagnostic_fusion_exclusions
+            else frozenset()
+        )
+        evidence_for_tf = {key: value for key, value in evidence_by_tf.items() if key not in excluded_tfs}
         results[tf] = run_alpha_foundry_l0_gate(
             panels=tf_panels,
             bindings=tf_bindings,
@@ -782,7 +789,7 @@ def _run_phase3_sequential(
             runtime_config=runtime_config,
             run_id=_run_id,
             timeframe=tf,
-            evidence_by_tf=evidence_by_tf,
+            evidence_by_tf=evidence_for_tf,
             precomputed_cheap_evidences=cheap_evidences_by_tf.get(tf),
         )
     return results
@@ -840,8 +847,9 @@ def run_alpha_foundry_l0_gate_multi_tf(
     runtime_config: Any,
     run_id_prefix: str,
     parallel_max_workers: int = 1,
+    diagnostic_fusion_exclusions: Mapping[str, frozenset[str]] | None = None,
 ) -> dict[str, AlphaFoundryL0Result]:
-    """[LIMIT-05] Signature/return type UNCHANGED except the additive
+    """[ADR_20260715_L0_L1_NATIVE_CONTRACT] [LIMIT-05] Signature/return type UNCHANGED except the additive
     keyword-only `parallel_max_workers` (default 1 = today's exact
     sequential behavior, zero call-site changes required).
 
@@ -854,6 +862,8 @@ def run_alpha_foundry_l0_gate_multi_tf(
         raise ValueError(
             f"parallel_max_workers must be in [1,4], got {parallel_max_workers}"
         )
+    if diagnostic_fusion_exclusions is not None and parallel_max_workers != 1:
+        raise ValueError("diagnostic fusion exclusions require parallel_max_workers=1")
 
     missing = set(panels_by_tf) - set(aligned_by_tf)
     if missing:
@@ -971,6 +981,7 @@ def run_alpha_foundry_l0_gate_multi_tf(
             run_id_prefix=run_id_prefix,
             evidence_by_tf=evidence_by_tf,
             cheap_evidences_by_tf=cheap_evidences_by_tf,
+            diagnostic_fusion_exclusions=diagnostic_fusion_exclusions,
         )
     else:
         results = _run_phase3_parallel(
