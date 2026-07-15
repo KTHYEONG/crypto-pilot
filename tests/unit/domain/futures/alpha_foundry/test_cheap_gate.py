@@ -970,11 +970,12 @@ class TestResolveFamilyTimeframeGatePolicy:
             max_turnover_per_year=365.0,
         )
         cfg = CheapGateConfig(
-            family_event_floors={"test_fam": 5},
+            family_event_floors={"test_fam": 100},
             archetype_event_floors={"trend": 30},
         )
         policy = resolve_family_timeframe_gate_policy(recipe=recipe, config=cfg)
-        assert policy.min_events == 5
+        # density: 90*0.3=27, floor=10 ->27; archetype=max(27,30)=30; family=max(30,100)=100
+        assert policy.min_events == 100
 
     def test_archetype_fallback_when_no_family_floor(self) -> None:
         from src.domain.futures.alpha_foundry.cheap_gate import resolve_family_timeframe_gate_policy
@@ -994,7 +995,8 @@ class TestResolveFamilyTimeframeGatePolicy:
         )
         cfg = CheapGateConfig()
         policy = resolve_family_timeframe_gate_policy(recipe=recipe, config=cfg)
-        assert policy.min_events == 12  # flow archetype floor
+        # density: 90*0.3=27, floor=10 ->27; flow archetype floor=12 -> max(27,12)=27
+        assert policy.min_events == 27
 
 
 class TestBuildL0SignalCandidate:
