@@ -105,6 +105,10 @@ last_verified: 2026-07-13
 - **Cadence Rules**: Synthesizes 2h/6h/8h/12h bars from nearest native timeframe (1h/4h) using left-closed, left-labeled resampling.
 - **Completeness Rule**: Final bin acceptance requires bin_count >= target_hours / source_hours.
 
+### L0 Runtime Contract
+- L0/L1 phases require an active `AlphaFoundryRuntimeConfig.mode == "gate"`; diagnostic/off mode is invalid for production handoff.
+- Multi-timeframe gate execution is single-process by default (`parallel_max_workers=1`) to bound memory and avoid cross-TF worker oversubscription.
+
 # 3. Principal Data Structures
 
 - `AlphaRecipe`: recipe_id, family, variant, timeframe, archetype, indicator_params, side_rule_id, exit_policy_id.
