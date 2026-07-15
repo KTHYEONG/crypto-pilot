@@ -41,6 +41,11 @@ To ensure low-reasoning models can build and integrate the code without guessing
     - **Scenario 4 (Integration Verification)**: Asserting the correct trigger and connection inside the parent module.
 - **Copy-Pasteable Mock Boilerplate**: Provide raw, ready-to-run Python test templates with literal mocks.
 
+## Constraints (Strictly Prohibited)
+- **No Python Modifications**: Do NOT create, touch, or modify any `.py` source or test files during the `spec` phase.
+- **No Verification Execution**: Never execute `lean_check.py`, `pytest`, `ruff`, or `mypy` during this phase.
+- **Immediate Pause (STOP)**: Once the `docs/specs/[feature].md` file is generated, stop tool execution immediately and wait for user feedback. Do not proceed to `check` or run tests.
+
 ## Output Format
 Create a markdown file at `docs/specs/[feature].md`:
 
