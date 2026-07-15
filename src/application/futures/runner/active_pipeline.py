@@ -946,6 +946,9 @@ def _build_data_not_ready_reasons(report: pd.DataFrame) -> dict[str, int]:
         Dictionary mapping reason strings to their counts. Empty dict if report
         is not a DataFrame, is empty, or lacks 'reason' column.
     """
+    if not isinstance(report, pd.DataFrame):
+        return {}
+
     return (
         report["reason"].value_counts().to_dict()
         if isinstance(report, pd.DataFrame) and not report.empty and "reason" in report.columns
@@ -3590,7 +3593,12 @@ def run_pipeline(
     seed: int = 42,
     resume: bool = False,
 ) -> RunnerResult:
-    """[ADR_20260715_L0_L1_RUNTIME_TERMINAL_OBSERVABILITY][ADR_20260705_MAJOR_SYMBOL_REGISTRY_REPLAY_SYNC] Run the active pipeline with explicit failure results."""
+    """
+    Run the active pipeline with explicit failure results.
+
+    ADRs: ADR_20260715_L0_L1_RUNTIME_TERMINAL_OBSERVABILITY,
+    ADR_20260705_MAJOR_SYMBOL_REGISTRY_REPLAY_SYNC.
+    """
     pipeline_t0 = time.perf_counter()
     # Step 1) parse run window
     t_window = time.perf_counter()
