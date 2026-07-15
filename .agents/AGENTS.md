@@ -30,7 +30,7 @@
 - **Dependency Management:** Check `pyproject.toml` before using external packages. If a new package is essential for implementation, add the dependency first using `uv add [package_name]` before writing code.
 - **Codebase Discovery:** Use `rg` to prevent duplicate code, but limit output (e.g., `head -n 30`) to avoid token overflow.
 - **Check Loop:** 
-    - **Trigger:** Execute when a `.py` file is created or modified.
+    - **Trigger:** Execute when a `.py` file is created or modified. (Excluding the `spec` design phase or markdown-only updates).
     - **Action:** 
         - **Implementation Phase (L1):** Run stub signature checks first.
         - **Check Phase (L2):** Execute targeted regression test and coverage under the `check` skill batch plan.
@@ -56,8 +56,8 @@ For code generation or structural code changes, use this compact structure:
 
 For simple Q&A, documentation-only answers, scanning, specification writing, and audit-only tasks, do not force this structure.
 
-When a skill is explicitly invoked, the skill controls the phase-specific workflow.
-This protocol applies only inside code-writing phases such as `implement`.
+When a skill is explicitly invoked, the skill controls the phase-specific workflow and its specific output format. This protocol (and its 4-step structure) is automatically deactivated in favor of the active skill's requirements to prevent format conflicts and redundant checks.
+This protocol applies only inside code-writing phases such as `implement` when no skill-specific format is enforced.
 
 ## 7. File Structure & Architecture
 - **Separation of Concerns:** Maintain clear separation between logic, data, and router layers.
