@@ -7,6 +7,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import os
 import sys
 from dataclasses import replace
 from pathlib import Path
@@ -20,9 +21,8 @@ if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
 from src.application.futures.optimization import strategy_service
-from src.application.futures.optimization.config import FuturesRunConfig
+from src.application.futures.run_policy import build_effective_run_config
 from src.application.futures.runner import active_pipeline
-from src.application.futures.runner.config import build_l0_runtime_config
 from src.domain.futures.alpha_foundry import bridge_helpers
 from src.domain.futures.alpha_foundry.multi_tf_fusion import fuse_multi_timeframe_evidence
 from src.domain.futures.strategy.tiered_workflow import pipeline as tiered_pipeline
@@ -92,7 +92,7 @@ def _l1_snapshot(result: object) -> dict[str, object]:
 
 
 def run_once(*, label: str, tfs: tuple[str, ...], ablate_1h_fusion: bool) -> dict[str, dict[str, dict[str, object]]]:
-    """Run one process-local replay and restore every patched callable."""
+    """[ADR_20260715_L0_L1_RUNTIME_TERMINAL_OBSERVABILITY] Run one process-local replay."""
     trace: dict[str, dict[str, dict[str, object]]] = {
         stage: {}
         for stage in (
@@ -212,15 +212,16 @@ def run_once(*, label: str, tfs: tuple[str, ...], ablate_1h_fusion: bool) -> dic
     tiered_pipeline.run_per_tf_l1 = per_tf_capture
     try:
         active_pipeline.run_pipeline(
-            FuturesRunConfig(
-                timeframe="4h",
-                date="2026-05-01",
-                trials=1,
-                phase="l1",
-                sync="skip",
-                refresh_universe=False,
-                sync_metrics=False,
-                l0_runtime=build_l0_runtime_config(phase="l1", settings={}),
+            build_effective_run_config(
+                {
+                    "timeframe": "4h",
+                    "date": "2026-05-01",
+                    "trials": 1,
+                    "phase": "l1",
+                    "sync": "skip",
+                    "seed": 42,
+                },
+                environ=os.environ,
             ),
             seed=42,
         )

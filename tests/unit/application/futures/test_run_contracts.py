@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import pytest
+
 from src.application.futures.run_contracts import FuturesRunConfig
 from src.domain.futures.alpha_foundry.contracts import AlphaFoundryRuntimeConfig
 
@@ -9,7 +11,7 @@ def test_default_alpha_foundry_is_off() -> None:
         timeframe="4h",
         date=None,
         trials=1,
-        phase="l1",
+        phase="l2",
         sync="skip",
         refresh_universe=False,
         sync_metrics=False,
@@ -35,8 +37,6 @@ def test_custom_l0_runtime() -> None:
 
 
 def test_frozen_cannot_be_mutated() -> None:
-    import pytest
-
     cfg = FuturesRunConfig(
         timeframe="4h",
         date=None,
