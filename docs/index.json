@@ -12,7 +12,8 @@
       "tests/unit/domain/futures/alpha_foundry/test_gate_v2.py",
       "tests/unit/domain/futures/alpha_foundry/test_alpha_family_registration.py",
       "tests/unit/domain/futures/alpha_foundry/test_entry_timing.py",
-      "tests/unit/domain/futures/alpha_foundry/test_causal_l1_feedback.py"
+      "tests/unit/domain/futures/alpha_foundry/test_causal_l1_feedback.py",
+      "tests/unit/domain/futures/alpha_foundry/test_timeframe_scaled_gate_policy.py"
     ]
   },
   "src/domain/futures/alpha_foundry/recipes.py": {
@@ -24,11 +25,12 @@
     ]
   },
   "src/domain/futures/alpha_foundry/cheap_gate.py": {
-    "architecture": "docs/specs/l0_l1_pipeline_speed_optimization.md",
+    "architecture": "docs/results/result.md",
     "testing": [
       "tests/unit/domain/futures/alpha_foundry/test_cheap_gate.py",
       "tests/unit/domain/futures/alpha_foundry/test_gate_v2.py",
-      "tests/unit/domain/futures/alpha_foundry/test_bridge_helpers_multi_tf.py"
+      "tests/unit/domain/futures/alpha_foundry/test_bridge_helpers_multi_tf.py",
+      "tests/unit/domain/futures/alpha_foundry/test_timeframe_scaled_gate_policy.py"
     ]
   },
   "src/domain/futures/alpha_foundry/forward_returns.py": {
@@ -80,7 +82,8 @@
     "architecture": "docs/architecture/layer0.md",
     "testing": [
       "tests/unit/domain/futures/alpha_foundry/test_pipeline.py",
-      "tests/unit/domain/futures/alpha_foundry/test_cheap_gate.py"
+      "tests/unit/domain/futures/alpha_foundry/test_cheap_gate.py",
+      "tests/unit/domain/futures/alpha_foundry/test_timeframe_scaled_gate_policy.py"
     ]
   },
   "src/domain/futures/alpha_foundry/bridge_helpers.py": {
