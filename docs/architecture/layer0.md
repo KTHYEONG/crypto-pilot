@@ -99,3 +99,4 @@ graph TD
 | `enable_cross_tf_pruning` | True | Enforces cross-TF redundancy pruning before L1 handoff |
 | `cross_tf_pruning_min_survivors_per_tf` | 1 | Minimum surviving candidates per timeframe |
 | `l0_parallel_max_workers` | 1 | Workers worker budget for Phase 3 parallel forks |
+| `AlphaFoundryRuntimeConfig.mode` | `gate` for active L0/L1 | Runtime gate is required before delivery-manifest construction |

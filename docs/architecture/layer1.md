@@ -71,6 +71,9 @@ $$B_{\text{size}} = \max(\text{l1\_bootstrap\_block\_bars}, 2 \cdot \text{max\_h
 | ├─ `q_value` | Member | `float` | FDR-corrected p-value |
 | ├─ `hard_eligible` | Member | `bool` | True if all structural gates passed |
 | **QualifiedSignalRegistry**| Registry | `dict` | Output registry of active deployment-ready signals |
+| **NativeEventGridResult** | Validation result | `struct` | TF-native eligible events plus terminal-maturity audit |
+| ├─ `eligible_events` / `audit` | Members | `DataFrame` / `NativeEventGridAudit` | Only mature, index-consistent events enter L1 |
+| **TieredRunOutcome** | Run result | `struct` | Explicit completed/failed L1 orchestration result |
 
 # 4. Topology & Dynamic Flow
 
@@ -82,6 +85,8 @@ graph TD
     D --> E[Bayesian Posterior Cell Admission]
     E --> F[Multiplicity Controls: FDR & SPA]
     F --> G[QualifiedSignalRegistry]
+    C --> H[Native Event Grid & Maturity Contract]
+    H --> D
 ```
 
 # 5. Configurable Parameters
