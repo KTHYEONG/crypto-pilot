@@ -27,116 +27,69 @@ dependencies:
 last_verified: 2026-07-11
 ---
 
-# 1. Purpose
-Layer 0에서 추천된 Alpha Recipes 또는 vectorized Rule Panels에 대해, Walk-forward Validation 환경에서 L1 Breakeven Hard Gate 및 Multiplicity Control을 적용하여 유효한 Candidate Events를 생성하고 Qualified Signals를 선별한다.
+# 1. System Boundary
+- **In-Scope**:
+  - Gating sequence evaluation for L0 candidates in a Walk-forward Validation framework.
+  - Multiplicity control (BH-FDR & Single Predictive Ability test) for alpha signals.
+  - Dynamic Bayesian cell admission and shrinkage estimation.
+  - Management of the `QualifiedSignalRegistry` lifecycle.
+- **Out-of-Scope**:
+  - Raw event extraction and candidate recipe construction (managed in Layer 0).
+  - Portfolio weight optimization and execution sizing (managed in Layer 2/3).
 
-# 2. Core Logic & Math
+# 2. Mathematical Formalism & Constraints
 
-### Signal Gating Sequence
-1. **Vectorization**:
-   - S_t = f(Data_1..t)
-   - Sparse Trigger: E_t = 1 if (S_t != 0 and S_t-1 == 0) else 0 (Causal)
-2. **Regime Gating**:
-   - mean_rev Archetype: ("bull_quiet", "bear_quiet", "transition") 허용
-   - beta_neut Archetype: ("bull_quiet",) 허용
-3. **L1 Breakeven Hard Gate**:
-   - mean(Edge) > 0 and t_stat >= min_rule_ir_t
-4. **Profit Floor**:
-   - mean_OOS >= min_variant_oos_profit_bps
-5. **Regime-Cell Admission**:
-   - Bayesian Posterior: P(mu > delta | data) >= p_admit_min
-   - Applies Newey-West variance and cross-cell tau^2 shrinkage.
-6. **Multiplicity Controls**:
-   - BH-FDR: q <= l1_pair_fdr_alpha (0.10)
-   - SPA (Single Predictive Ability): Fail-closed circular bootstrap test.
+### Signal Gating & Sparse Triggering
+$$E_t = \begin{cases} 1 & \text{if } S_t \ne 0 \land S_{t-1} = 0 \\ 0 & \text{otherwise} \end{cases}$$
 
-### Ensemble Shrinkage
-- Empirical-Bayes James-Stein shrinkage applied to archetype cell mean and variant-level prior:
-  - x_hat_a = w_prior * x_bar_a + (1 - w_prior) * mu_prior
-  - w_prior = n_eff / (n_eff + n_prior)
+### Empirical-Bayes James-Stein Shrinkage
+$$\hat{x}_a = w_{\text{prior}} \cdot \bar{x}_a + (1 - w_{\text{prior}}) \cdot \mu_{\text{prior}}$$
+$$w_{\text{prior}} = \frac{n_{\text{eff}}}{n_{\text{eff}} + n_{\text{prior}}}$$
 
-### Cross-Sectional Alpha Families (xs_alpha archetype)
-- 4대 Family: `xs_momentum`, `xs_carry`, `xs_flow`, `xs_oi_skew`
-- Per-bar rank score 변환을 통한 beta-neutral 구성 (Regime Gating 면제).
+### Multiplicity Control (Benjamini-Hochberg FDR)
+$$P_{(i)} \le \frac{i}{m} \cdot q_{\text{FDR}}$$
+- Rejects hypotheses for all $i \le k$ where $k = \max \left\{ i : P_{(i)} \le \frac{i}{m} \cdot q_{\text{FDR}} \right\}$.
 
-### Outer-Fold Opportunity Blocker Loci
-- Gating failures within `evaluate_outer_signal_opportunities()` are tracked by semantic codes in `Layer1FoldReadiness.blockers`:
-  - `empty_opportunities:registry_empty`: No qualified symbols passed the nested-pairwise gate.
-  - `empty_opportunities:prediction_unmatched`: Registry symbols loaded but failed to align against realized event timelines.
+### L1 Readiness Gate (Pooled LCB)
+$$\text{LCB}_{\text{net}} > \max(\text{l1\_min\_probe\_bps}, \text{l1\_breakeven\_floor\_bps})$$
+- Calculated using moving-block bootstrap where block size is:
+$$B_{\text{size}} = \max(\text{l1\_bootstrap\_block\_bars}, 2 \cdot \text{max\_holding\_bars})$$
 
-### Pooled Alpha Admission (Generalized Factor-Level Substitution)
-- Under high peer-correlation (e.g. signal competition), individual symbol evidence is substituted by factor-level pool statistics calculated via `compute_xs_factor_spread_diagnostics()`:
-  - Substitution condition: `lcb > l1_breakeven_floor_bps` and `sharpe >= l1_xs_admission_min_sharpe`.
-  - Strategy `mean_gross_bps` and `mean_incremental_bps` are replaced with factor-level equivalents to resolve peer exclusivity degradation.
-  - Excludes sample adequacy validation gates (e.g. `insufficient_effective_obs`), which must always remain symbol-specific.
+# 3. Strict I/O Contract
 
-# 3. Core I/O Interfaces
+### Interface Data Structures
+| Struct / Field | Type | Data Type | Description |
+| :--- | :--- | :--- | :--- |
+| **CandidateSignalPanel** | Model | `struct` | Input vector containing scores, sides, and config |
+| ├─ `signed_score_2d` | Member | `NDArray[float64]` | Alpha signal scores |
+| ├─ `side_hint_2d` | Member | `NDArray[int8]` | Intended trading direction hints |
+| ├─ `allowed_regimes` | Member | `tuple[str]` | Regime whitelist constraints |
+| **SymbolStrategyEvidence**| Model | `struct` | Statistical diagnostics computed per-strategy |
+| ├─ `mean_gross_bps` | Member | `float` | Average gross edge return |
+| ├─ `mean_incremental_bps` | Member | `float` | Incremental return above benchmark |
+| ├─ `block_tstat_incremental`| Member | `float` | Moving-block bootstrap t-stat |
+| ├─ `q_value` | Member | `float` | FDR-corrected p-value |
+| ├─ `hard_eligible` | Member | `bool` | True if all structural gates passed |
+| **QualifiedSignalRegistry**| Registry | `dict` | Output registry of active deployment-ready signals |
 
-### Input Data
-- `AlignedMarketData`: OHLCV, indicators, flow, funding rates
-- `MarketRegimeContext`: Compressed 3-state 및 6-state regime codes
-- `labeled_events_by_tf`: per-timeframe event frames on each timeframe's native datetime grid; pooled/base-grid event frames are not valid substitutes.
-
-### Native Event Grid Contract
-- Event identity is `(datetime, symbol, strategy_id, native_tf)` with `entry_idx` resolved against the matching timeframe grid.
-- Events whose forward label would mature after the native grid are terminal-maturity observations and are excluded from L1 input; non-terminal index mismatches are contract failures.
-
-### Principal Data Structures (src/domain/futures/signals/contracts.py)
-- `CandidateSignalPanel`:
-  - `signed_score_2d`: NDArray[np.float64]
-  - `side_hint_2d`: NDArray[np.int8]
-  - `allowed_regimes`: tuple[RegimeName, ...]
-  - `exit_policies`: tuple[SignalExitPolicy, ...]
-- `SymbolStrategyEvidence`:
-  - `mean_gross_bps`: float
-  - `mean_incremental_bps`: float
-  - `block_tstat_incremental`: float
-  - `q_value`: float
-  - `quality_weight`: float
-  - `hard_eligible`: bool
-  - `lcb_net_bps`: float
-- `QualifiedSignalRegistry`:
-  - `by_symbol`: dict[str, tuple[SymbolStrategyEvidence, ...]]
-  - `ready_symbols`: tuple[str, ...]
-
-### Principal Data Structures (src/domain/futures/strategy/tiered_workflow/*.py)
-- `XsAdmissionBasis` (signal_selection.py): `mean_bps`, `lcb_bps`, `sharpe`, `probability_positive`, `n_bars`
-- `AtomizationDiagnosticReport` (atomization_diagnostics.py): `strategy_id`, `n_cells`, `n_cells_below_min_effective_obs`, `pooled_mean_gross_bps`, `atomized_mean_gross_bps_median`, `sign_flip_ratio`
-
-# 4. Architecture Flow
+# 4. Topology & Dynamic Flow
 
 ```mermaid
 graph TD
-    A[L0 Selected Recipes] --> B[Vectorized Indicators]
-    B --> C[CandidateSignalPanel]
-    C --> D[Archetype & Regime Gating]
-    D --> E[L1 Breakeven & Profit Floor Gate]
-    E --> F[Regime-Cell OR-path Admission]
-    F --> G[Multiplicity Controls: BH-FDR & SPA]
-    G --> H[Qualified Signal Registry]
+    A[L0 Selected Recipes] --> B[CandidateSignalPanel]
+    B --> C[Regime Whitelist Gate]
+    C --> D[L1 Breakeven & Profit Floor Gate]
+    D --> E[Bayesian Posterior Cell Admission]
+    E --> F[Multiplicity Controls: FDR & SPA]
+    F --> G[QualifiedSignalRegistry]
 ```
 
-# 5. Core Readiness & Promotion Gates
+# 5. Configurable Parameters
 
-### Readiness Gate — Structural (blocking, `Layer1GateReport.structural_passed`)
-- **Fold Coverage**: >= 0.80
-- **Effective N (N_eff)**: >= `l1_min_effective_sym_n` (default 3.0; per-TF override via `_DEFAULT_PER_TF_GATE_OVERRIDES`, e.g. 1h/2h = 5.0)
-- **Pooled LCB**: > `max(l1_min_probe_bps, l1_breakeven_floor_bps)` (≈ round-trip cost floor, not a flat 0) — moving-block bootstrap, pooled across passed folds (`_compute_pooled_probe_lcb`). Block size is TF/holding-period-scaled (`_resolve_block_bars_eff` = `max(l1_bootstrap_block_bars, 2 * max_holding_bars)`), where `max_holding_bars` is resolved to the current TF's native bar count via `apply_tf_gate_overrides(cfg, tf)` (base-TF-calibrated fields carry `field(metadata={"tf_scale_base": ...})` — see `config.py::CandidateStrategyConfig`).
-
-### Readiness Gate — Advisory (`Layer1GateReport.advisory_checks`, non-blocking on `structural_passed`)
-- **Match Ratio**: >= 0.90 — pooled `(matched, true_unmatched)` counts across folds, Wilson score-interval lower bound (`_wilson_lower_bound`). `true_unmatched` excludes label-drift mismatches (same `decision_idx`/`symbol`/`strategy_id` but differing `activation_context`), tracked separately as `Layer1FoldReadiness.label_drift_unmatched_count`.
-- **Fold Ratio**: >= 0.50 — fraction of outer folds individually passed; diagnostic-only given `wf_n_folds` (default 4) yields only 5 discrete values.
-- `Layer1GateReport.passed` = `structural_passed AND all(advisory_checks passed)` (legacy strict semantics, unchanged). `CandidateStrategyConfig.l1_structural_gate_only` (default `True`) gates whether `build_qualified_signal_registry()` requires `structural_passed` only (`True`) or the legacy `passed` (`False`); when advisory checks fail under the relaxed mode, `build_qualified_signal_registry(advisory_penalty=...)` dampens `quality_weight` per-strategy instead of blocking the whole TF.
-- `Layer1Result.gate_passed` is the deployment handoff result: the selected policy gate must pass and the deployment registry must contain at least one ready symbol. In multi-TF execution, the aggregate gate and registry MUST come from the same selected master timeframe; a missing or empty registry is blocking.
-
-### Promotion Gate (4 Conditions)
-- **Hard Eligible**: L1 structural gates 통과 여부
-- **LCB Net**: `lcb_net_bps > l1_breakeven_floor_bps`
-- **BH-FDR**: q-value <= 0.10
-- **Quality Weight**: `quality_weight > 0`
-
-# 6. Performance Optimizations
-- **Numba JIT Acceleration**: Rolling z-score, cross-sectional rank, warm/ready 검사에 `@njit(cache=True)` 적용.
-- **t.ppf LRU Cache**: Student-t 분포의 Percent Point Function 연산을 `@lru_cache`화하여 중복 연산 제거.
-- **searchsorted Indexing**: 시계열 datetime 매칭 탐색을 O(log T)로 최적화.
-- **Prefork Cache Prime**: Process fork 이전에 shared cache를 초기화하여 Copy-on-Write 메모리 효율화.
+| Parameter | Default | Purpose |
+| :--- | :--- | :--- |
+| `l1_pair_fdr_alpha` | 0.10 | Target false discovery rate threshold for BH-FDR correction |
+| `l1_min_effective_sym_n` | 3.0 | Minimum effective sample size $N_{\text{eff}}$ required for structural pass |
+| `min_rule_ir_t` | 1.96 | Minimum t-stat hurdle for L1 breakeven |
+| `min_variant_oos_profit_bps` | 5.0 | Hard minimum OOS net profit rate limit |
+| `l1_structural_gate_only` | True | Controls if registry requires structural-only or full (advisory) pass |
