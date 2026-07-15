@@ -4,9 +4,9 @@ from typing import Any
 
 import pytest
 
+from src.application.futures.run_contracts import ActivePhase, FuturesRunConfig
+from src.application.futures.run_policy import build_effective_run_config
 from src.application.futures.runner.config import (
-    FuturesRunConfig,
-    build_alpha_foundry_runtime_config,
     build_run_config_from_args,
     parse_active_phase,
     validate_run_config,
@@ -14,7 +14,7 @@ from src.application.futures.runner.config import (
 from src.application.futures.runner.models import MarketDataBundle, RunWindow
 
 
-def make_run_config(phase: str = "l3") -> FuturesRunConfig:
+def make_run_config(phase: ActivePhase = "l3") -> FuturesRunConfig:
     return FuturesRunConfig(
         timeframe="4h",
         date="2026-05-01",
@@ -22,7 +22,7 @@ def make_run_config(phase: str = "l3") -> FuturesRunConfig:
         phase=phase,
         sync="skip",
         refresh_universe=False,
-        sync_metrics=False,  # type: ignore[arg-type]
+        sync_metrics=False,
     )
 
 
@@ -109,23 +109,13 @@ class TestBuildRunConfig:
         with pytest.raises(ValueError, match="trials must be >= 1"):
             validate_run_config(config)
 
-    def test_build_alpha_foundry_runtime_config_direct(self) -> None:
-        config = build_alpha_foundry_runtime_config({"alpha_foundry": "audit"})
-        assert config.mode == "audit"
-        assert config.artifact_write_enabled is True
-
-    def test_build_alpha_foundry_runtime_config_default(self) -> None:
-        config = build_alpha_foundry_runtime_config({})
-        assert config.mode == "off"
-        assert config.artifact_write_enabled is False
-
     def test_build_l0_runtime_config_uses_debug_log_without_artifact_write(self) -> None:
-        from src.application.futures.runner.config import build_l0_runtime_config
-
-        config = build_l0_runtime_config(phase="l0", settings={})
-        assert config.mode == "gate"
-        assert config.artifact_write_enabled is False
-        assert config.observability_mode == "debug_log"
+        config = build_effective_run_config(
+            {"phase": "l0", "timeframe": "4h", "trials": 1, "sync": "skip"},
+            environ={},
+        )
+        assert config.l0_runtime.mode == "gate"
+        assert config.execution_policy.heavy_process_workers == 1
 
     def test_unknown_phase_via_build(self) -> None:
         with pytest.raises(ValueError, match="unknown phase"):
