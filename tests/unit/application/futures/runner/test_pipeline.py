@@ -1,11 +1,12 @@
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Literal
 
 import pandas as pd
 import pytest
 from pytest_mock import MockerFixture
 
+from src.application.futures.run_contracts import ActivePhase
 from src.application.futures.runner.active_pipeline import (
     RunnerResult as ActiveRunnerResult,
 )
@@ -18,7 +19,7 @@ from src.application.futures.runner.pipeline import run_pipeline
 from src.domain.futures.alpha_foundry.contracts import AlphaFoundryRuntimeConfig
 
 
-def make_run_config(phase: str = "l3") -> FuturesRunConfig:
+def make_run_config(phase: ActivePhase = "l3") -> FuturesRunConfig:
     l0_runtime = (
         AlphaFoundryRuntimeConfig(mode="gate")
         if phase in {"l0", "l1"}
@@ -152,7 +153,9 @@ class TestRunPipeline:
         mock_optimize.assert_called_once()
 
     @pytest.mark.parametrize("phase", ["l1", "l2"])
-    def test_run_pipeline_l1_l2_skip_optimization(self, mocker: MockerFixture, phase: str) -> None:
+    def test_run_pipeline_l1_l2_skip_optimization(
+        self, mocker: MockerFixture, phase: Literal["l1", "l2"]
+    ) -> None:
         universe_result = _universe_result(mocker)
         mocker.patch(
             "src.application.futures.runner.active_pipeline._resolve_quarterly_window", return_value=make_window()
@@ -242,5 +245,5 @@ class TestBuildDataNotReadyReasons:
         assert result == {}
 
     def test_returns_empty_dict_for_non_dataframe(self) -> None:
-        result = _build_data_not_ready_reasons(None)  # type: ignore[arg-type]
+        result = _build_data_not_ready_reasons(None)
         assert result == {}
