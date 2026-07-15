@@ -251,12 +251,12 @@ class TestOpt1AllTimestampsBeforeCube:
 
 
 class TestOpt1PartialCubeSymbolCoverage:
-    """S3: Symbols absent from cube_sym_idx keep initial column values."""
+    """S3: Symbols absent from cube_sym_idx are fail-closed (inactive+blocked)."""
 
     def test_s3_absent_symbol_columns_unchanged(self) -> None:
-        """When only a subset of valid_symbols exists in cube, absent columns are untouched.
+        """When only a subset of valid_symbols exists in cube, absent columns are fail-closed.
 
-        Cube covers only [AAA, CCC]; BBB is absent → BBB columns keep initial values.
+        [LIMIT-03] Cube covers only [AAA, CCC]; BBB absent → BBB must be inactive+blocked.
         """
         # Arrange
         symbols = ["AAA", "BBB", "CCC"]
@@ -280,10 +280,10 @@ class TestOpt1PartialCubeSymbolCoverage:
         bbb_col = list(aligned.symbols).index("BBB")
         aaa_col = list(aligned.symbols).index("AAA")
 
-        # BBB column: active_mask must still be all True (initial), entry_block all False
-        assert aligned.active_mask[:, bbb_col].all(), "BBB active_mask must remain initial True (not in cube)"
-        assert not aligned.entry_block_mask[:, bbb_col].any(), (
-            "BBB entry_block_mask must remain initial False (not in cube)"
+        # BBB column: absent from cube → fail-closed: inactive + blocked
+        assert not aligned.active_mask[:, bbb_col].any(), "BBB active_mask must be False (fail-closed)"
+        assert aligned.entry_block_mask[:, bbb_col].all(), (
+            "BBB entry_block_mask must be True (fail-closed)"
         )
 
         # AAA column: cube overwrote eligible=False → active_mask must be False

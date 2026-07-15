@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date
 from typing import Any
@@ -57,6 +57,28 @@ def _normalize_timeline(
         q_start = _quarter_start(k)
         result[q_start] = frozenset(canonical_symbol(s) for s in syms)
     return result
+
+
+@dataclass(frozen=True, slots=True)
+class MembershipInjectionReport:
+    requested_pairs: int
+    injected_pairs: int
+    missing_pairs: tuple[tuple[str, str], ...]
+
+
+@dataclass(frozen=True, slots=True)
+class PITUniverseAudit:
+    symbols: tuple[str, ...]
+    timeframes: tuple[str, ...]
+    checked_cells: int
+    active_cells: int
+    missing_pairs: tuple[tuple[str, str], ...]
+    parity_mismatches: int
+    passed: bool
+
+
+class PITUniverseContractError(ValueError):
+    """Raised when L0/L1 PIT universe masks are incomplete or inconsistent."""
 
 
 @dataclass(slots=True, frozen=True)
@@ -200,3 +222,48 @@ def inject_membership_masks_into_maps(
             frame.loc[:, "kill_signal"] = bundle.kill_signal
             frame.loc[:, "inference_active_mask"] = bundle.inference_active_mask
             frame.loc[:, "inference_entry_warm_mask"] = bundle.inference_entry_warm_mask
+
+
+def validate_pit_universe_contract(
+    *,
+    data_maps: Mapping[str, Mapping[str, Any]],
+    symbols: Sequence[str],
+    timeframes: Sequence[str],
+    timeline: Mapping[date, frozenset[str] | set[str]],
+    state_cube: Any = None,
+) -> PITUniverseAudit:
+    required_mask_cols = [
+        "universe_active_mask",
+        "universe_entry_warm_mask",
+        "entry_block_mask",
+        "kill_signal",
+    ]
+    missing_pairs: list[tuple[str, str]] = []
+    checked_cells = 0
+    active_cells = 0
+    parity_mismatches = 0
+
+    for tf in timeframes:
+        for sym in symbols:
+            checked_cells += 1
+            sym_map = data_maps.get(sym, {})
+            frame = sym_map.get(tf) if isinstance(sym_map, dict) else None
+            if not isinstance(frame, pd.DataFrame) or frame.empty:
+                missing_pairs.append((sym, tf))
+                continue
+            has_all_masks = all(col in frame.columns for col in required_mask_cols)
+            if not has_all_masks:
+                missing_pairs.append((sym, tf))
+                continue
+            active_mask = frame["universe_active_mask"].to_numpy(dtype=bool, copy=False)
+            active_cells += int(active_mask.any())
+
+    return PITUniverseAudit(
+        symbols=tuple(symbols),
+        timeframes=tuple(timeframes),
+        checked_cells=checked_cells,
+        active_cells=active_cells,
+        missing_pairs=tuple(missing_pairs),
+        parity_mismatches=parity_mismatches,
+        passed=len(missing_pairs) == 0,
+    )

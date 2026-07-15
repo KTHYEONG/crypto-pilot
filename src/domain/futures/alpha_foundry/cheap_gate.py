@@ -37,6 +37,7 @@ from src.domain.futures.alpha_foundry.contracts import (
     L0SignalCandidate,
     L0SoftFlag,
     MultiTimeframeEvidence,
+    SupportState,
 )
 from src.domain.futures.signals.contracts import CandidateSignalPanel
 from src.domain.futures.strategy.common.alignment import AlignedMarketData
@@ -568,9 +569,9 @@ def build_l0_signal_candidate(
     soft_flags: list[L0SoftFlag] = []
 
     if evidence.n_events < policy.min_events:
-        hard_reject_reasons.append("insufficient_events")
+        soft_flags.append("insufficient_events")
     if evidence.effective_n < policy.min_effective_n:
-        hard_reject_reasons.append("insufficient_effective_n")
+        soft_flags.append("insufficient_effective_n")
     if evidence.cost_drag_ratio > policy.max_cost_drag_ratio:
         hard_reject_reasons.append("excess_cost_drag")
     if evidence.turnover_per_year > policy.max_turnover_per_year:
@@ -601,6 +602,19 @@ def build_l0_signal_candidate(
         soft_flags.append("weak_rank_ic")
 
     discovery_tier: DiscoveryTier
+    support_state: SupportState
+    n_eff = evidence.effective_n
+    if n_eff <= 0 or evidence.block_lcb_bps < -abs(stress_cost_bps):
+        support_state = "negative"
+    elif (
+        n_eff < policy.target_effective_n
+        or "insufficient_events" in soft_flags
+        or "insufficient_effective_n" in soft_flags
+    ):
+        support_state = "uncertain"
+    else:
+        support_state = "sufficient"
+
     if hard_reject_reasons:
         discovery_tier = "blocked"
     elif soft_flags:
@@ -652,6 +666,7 @@ def build_l0_signal_candidate(
         l1_budget_units=0,
         hard_reject_reasons=tuple(hard_reject_reasons),
         soft_flags=tuple(soft_flags),
+        support_state=support_state,
     )
 
 
