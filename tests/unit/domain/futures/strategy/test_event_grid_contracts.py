@@ -1,16 +1,10 @@
 from __future__ import annotations
 
-from dataclasses import replace
-
 import numpy as np
 import pandas as pd
 import pytest
 
-from src.application.futures.optimization.strategy_service import (
-    ActiveL0RuntimeContractError,
-    require_active_l0_runtime,
-)
-from src.application.futures.run_contracts import FuturesRunConfig
+from src.application.futures.run_contracts import FuturesRunConfig, RunPolicyError
 from src.domain.futures.alpha_foundry.contracts import (
     AlphaFoundryRuntimeConfig,
     resolve_corroboration_evidence_for_target,
@@ -18,19 +12,19 @@ from src.domain.futures.alpha_foundry.contracts import (
 from src.domain.futures.strategy.event_grid_contracts import (
     EventGridContractError,
     MissingNativeTfEventsError,
-    validate_native_event_grid,
+    normalize_native_l1_events,
 )
 from src.domain.futures.strategy.tiered_workflow.pipeline import (
     _resolve_labeled_events_for_tf,
 )
 
 
-def _run_config(*, mode: str = "gate") -> FuturesRunConfig:
+def _run_config(*, mode: str = "gate", phase: str = "l1") -> FuturesRunConfig:
     return FuturesRunConfig(
         timeframe="4h",
         date="2026-05-01",
         trials=1,
-        phase="l1",
+        phase=phase,  # type: ignore[arg-type]
         sync="skip",
         refresh_universe=False,
         sync_metrics=False,
@@ -40,20 +34,18 @@ def _run_config(*, mode: str = "gate") -> FuturesRunConfig:
 
 
 def test_l1_rejects_inactive_l0_runtime() -> None:
-    with pytest.raises(ActiveL0RuntimeContractError, match=r"requires l0_runtime.mode='gate'"):
-        require_active_l0_runtime(_run_config(mode="off"))
+    with pytest.raises(RunPolicyError, match=r"requires l0_runtime.mode='gate'"):
+        _run_config(mode="off")
 
 
 def test_active_l0_runtime_ok() -> None:
     cfg = _run_config(mode="gate")
-    runtime = require_active_l0_runtime(cfg)
-    assert runtime.mode == "gate"
+    assert cfg.l0_runtime.mode == "gate"
 
 
 def test_l2_no_l0_runtime_check_skipped() -> None:
-    cfg = replace(_run_config(mode="off"), phase="l2")
-    runtime = require_active_l0_runtime(cfg)
-    assert runtime.mode == "off"
+    cfg = _run_config(mode="off", phase="l2")
+    assert cfg.l0_runtime.mode == "off"
 
 
 def test_native_event_grid_rejects_cross_tf_index() -> None:
@@ -69,12 +61,14 @@ def test_native_event_grid_rejects_cross_tf_index() -> None:
         }
     )
     with pytest.raises(EventGridContractError, match="event_id=7"):
-        validate_native_event_grid(events=events, native_datetimes=native_dt, timeframe="12h")
+        normalize_native_l1_events(
+            events=events, native_datetimes=native_dt, timeframe="12h", required_horizon_bars=1,
+        )
 
 
 def test_native_event_grid_happy_path() -> None:
     native_dt = np.array(
-        ["2024-01-01T00:00", "2024-01-01T06:00", "2024-01-01T12:00"],
+        ["2024-01-01T00:00", "2024-01-01T06:00", "2024-01-01T12:00", "2024-01-01T18:00"],
         dtype="datetime64[ns]",
     )
     events = pd.DataFrame(
@@ -88,16 +82,18 @@ def test_native_event_grid_happy_path() -> None:
             "entry_idx": [1, 1, 2],
         }
     )
-    result, audit = validate_native_event_grid(events=events, native_datetimes=native_dt, timeframe="1h")
-    assert audit.valid_count == 3
-    assert audit.mismatch_count == 0
-    assert audit.terminal_maturity_count == 0
-    assert len(result) == 3
+    result = normalize_native_l1_events(
+        events=events, native_datetimes=native_dt, timeframe="1h", required_horizon_bars=1,
+    )
+    assert result.audit.eligible_count == 3
+    assert result.audit.mismatch_count == 0
+    assert result.audit.terminal_maturity_count == 0
+    assert len(result.eligible_events) == 3
 
 
 def test_terminal_maturity_removed() -> None:
     native_dt = np.array(
-        ["2024-01-01T00:00", "2024-01-01T12:00"],
+        ["2024-01-01T00:00", "2024-01-01T12:00", "2024-01-02T00:00"],
         dtype="datetime64[ns]",
     )
     events = pd.DataFrame(
@@ -105,16 +101,63 @@ def test_terminal_maturity_removed() -> None:
             "event_id": [1, 2],
             "datetime": [
                 pd.Timestamp("2024-01-01T00:00Z"),
-                pd.Timestamp("2024-01-02T00:00Z"),
+                pd.Timestamp("2024-01-01T18:00Z"),
             ],
             "entry_idx": [1, 2],
         }
     )
-    result, audit = validate_native_event_grid(events=events, native_datetimes=native_dt, timeframe="12h")
-    assert audit.valid_count == 1
-    assert audit.terminal_maturity_count == 1
-    assert audit.mismatch_count == 0
-    assert len(result) == 1
+    result = normalize_native_l1_events(
+        events=events, native_datetimes=native_dt, timeframe="12h", required_horizon_bars=1,
+    )
+    assert result.audit.eligible_count == 1
+    assert result.audit.terminal_maturity_count == 1
+    assert result.audit.mismatch_count == 0
+    assert len(result.eligible_events) == 1
+
+
+def _events(entry_idx: list[int]) -> pd.DataFrame:
+    timestamps = pd.date_range("2026-01-01", periods=len(entry_idx), freq="2h", tz="UTC")
+    return pd.DataFrame(
+        {
+            "event_id": list(range(100, 100 + len(entry_idx))),
+            "datetime": timestamps,
+            "entry_idx": entry_idx,
+            "native_tf": ["2h"] * len(entry_idx),
+            "symbol": ["BTCUSDT"] * len(entry_idx),
+            "strategy_id": ["r1"] * len(entry_idx),
+        }
+    )
+
+
+def test_terminal_events_are_audited_not_silently_dropped() -> None:
+    grid = pd.date_range("2026-01-01", periods=8, freq="2h", tz="UTC").to_numpy(dtype="datetime64[ns]")
+    events = _events([1, 2, 3, 4, 5, 6, 7, 8])
+
+    result = normalize_native_l1_events(
+        events=events,
+        native_datetimes=grid,
+        timeframe="2h",
+        required_horizon_bars=2,
+    )
+
+    assert result.audit.status == "terminal_excluded"
+    assert result.audit.terminal_maturity_count == 3
+    assert result.audit.first_terminal_event_id == 105
+    assert result.audit.last_terminal_event_id == 107
+    assert result.eligible_events["event_id"].tolist() == [100, 101, 102, 103, 104]
+
+
+def test_non_terminal_index_mismatch_fails_closed() -> None:
+    grid = pd.date_range("2026-01-01", periods=8, freq="2h", tz="UTC").to_numpy(dtype="datetime64[ns]")
+    events = _events([0, 2])
+
+    with pytest.raises(EventGridContractError, match="timeframe=2h event_id=100"):
+        normalize_native_l1_events(
+            events=events,
+            native_datetimes=grid,
+            timeframe="2h",
+            required_horizon_bars=1,
+        )
 
 
 def test_missing_native_frame_never_falls_back_to_pooled() -> None:

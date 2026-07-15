@@ -2275,7 +2275,7 @@ def _run_strategy_stage(
     *,
     probe_result: TfProbeStageResult | None = None,
 ) -> CandidatePipelineOutput | RunnerResult | Layer1Result | None:
-    """[ADR_20260705_TF_PROBE_SCOPED_SYNC][ADR_20260710_L0_TERMINAL_DEBUG_OBSERVABILITY]
+    """[ADR_20260715_L0_L1_RUNTIME_TERMINAL_OBSERVABILITY][ADR_20260705_TF_PROBE_SCOPED_SYNC][ADR_20260710_L0_TERMINAL_DEBUG_OBSERVABILITY]
     Build the strategy maps, run scoped TF probe
     before early data release, then continue the existing tiered pipeline flow.
     """
@@ -2480,8 +2480,8 @@ def _run_strategy_stage(
         )
         has_l1_delivery = _has_l1_delivery_candidates(ml_out)
         if af_report.mode == "gate" and af_report.n_passed <= 0 and not has_l1_delivery:
-            _logger.debug("[ALPHA-FOUNDRY] gate produced zero survivors; stopping before tiered L1")
-            return None
+            _logger.error("[ALPHA-FOUNDRY] gate produced zero survivors; L1 cannot start")
+            return RunnerResult(exit_code=1, reason="l0_gate_no_delivery")
         if af_report.mode == "gate" and af_report.n_passed <= 0:
             _logger.debug(
                 "[ALPHA-FOUNDRY] base_tf_survivors=0; continuing with cross_tf L1 delivery candidates"
@@ -2617,7 +2617,7 @@ def _run_strategy_stage(
             _log_mem("tiered_pipeline", _mem_tiered_before, extra=f"phase={run_config.phase}")
             if not l1_res.gate_passed:
                 _logger.info("[TIERED] L1 BLOCKED — gate_passed=False")
-                return None
+                return RunnerResult(exit_code=1, reason="layer1_blocked")
             if run_config.phase not in _recognized_multilayer:
                 _logger.info("[TIERED] Phase=%s — stopping after L1 (not a multilayer phase)", run_config.phase)
                 return l1_res
@@ -2944,7 +2944,10 @@ def _run_strategy_stage(
                 _tiered_exc,
                 exc_info=True,
             )
-            return None
+            return RunnerResult(
+                exit_code=1,
+                reason=f"tiered_pipeline_error:{type(_tiered_exc).__name__}",
+            )
         except Exception as _exc:
             _logger.error(
                 "[TIERED] terminal tiered failure=%s — Phase D fallback removed (legacy fallback disabled)",
@@ -3587,7 +3590,7 @@ def run_pipeline(
     seed: int = 42,
     resume: bool = False,
 ) -> RunnerResult:
-    """[ADR_20260705_MAJOR_SYMBOL_REGISTRY_REPLAY_SYNC] Run active futures pipeline in explicit orchestration order."""
+    """[ADR_20260715_L0_L1_RUNTIME_TERMINAL_OBSERVABILITY][ADR_20260705_MAJOR_SYMBOL_REGISTRY_REPLAY_SYNC] Run the active pipeline with explicit failure results."""
     pipeline_t0 = time.perf_counter()
     # Step 1) parse run window
     t_window = time.perf_counter()
@@ -3707,6 +3710,9 @@ def run_pipeline(
 
     if isinstance(strategy_out, RunnerResult):
         return strategy_out
+    if strategy_out is None:
+        _logger.error("[STRATEGY] stage returned no result; refusing successful phase completion")
+        return RunnerResult(exit_code=1, reason="strategy_stage_no_result")
 
     # Step 4.5) C3/C4 gold standard: 전략 이벤트로 scorecard 갱신
     # Layer1Result는 labeled 속성이 없으므로 isinstance guard

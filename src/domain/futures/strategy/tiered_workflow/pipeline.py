@@ -144,6 +144,9 @@ if TYPE_CHECKING:
         DirectionalVetoSummary,
         ReversalEpisode,
     )
+    from src.domain.futures.strategy.tiered_workflow.outcomes import (
+        TieredRunOutcome,
+    )
 
 for _env in (
     "NUMBA_NUM_THREADS",
@@ -2926,20 +2929,21 @@ def run_per_tf_l1(
     _tf_labeled = select_l1_delivery_events(
         labeled_events=labeled_events, tf=tf, manifest=l0_delivery_manifest,
     )
-    # ── [LIMIT-09] OOB row drop 제거 — grid contract 위반은 fail-fast ──
+    # ── Native event grid contract: normalize and validate ──
     if not _tf_labeled.empty and "entry_idx" in _tf_labeled.columns:
-        _n_bars_tf = len(aligned.datetimes)
-        _oob_mask = (_tf_labeled["entry_idx"] < 0) | (_tf_labeled["entry_idx"] >= _n_bars_tf)
-        _n_oob = int(_oob_mask.sum())
-        if _n_oob > 0:
-            from src.domain.futures.strategy.event_grid_contracts import EventGridContractError
-            _first_oob_id = int(
-                _tf_labeled["event_id"].to_numpy(dtype=np.int64)[np.flatnonzero(_oob_mask)[0]]
-            ) if "event_id" in _tf_labeled.columns else -1
-            raise EventGridContractError(
-                f"timeframe={tf} event_id={_first_oob_id} entry_idx OOB "
-                f"(total OOB={_n_oob}) — silent drop prohibited [LIMIT-09]"
-            )
+        from src.domain.futures.strategy.event_grid_contracts import normalize_native_l1_events
+
+        grid_result = normalize_native_l1_events(
+            events=_tf_labeled,
+            native_datetimes=aligned.datetimes,
+            timeframe=tf,
+            required_horizon_bars=int(getattr(_tf_cfg, "max_holding_bars", 1)),
+        )
+        _tf_labeled = grid_result.eligible_events
+        _event_grid_audit = grid_result.audit
+    else:
+        _event_grid_audit = None
+
     if _tf_labeled.empty:
         logger.debug("[L1] tf=%s delivery route has no labeled events; blocking TF", tf)
         l1 = Layer1Result(
@@ -2954,7 +2958,11 @@ def run_per_tf_l1(
             n_valid=0,
             n_total=0,
         )
-        return PerTfL1Result(tf=tf, l1_result=l1, n_winning_signals=0)
+        result = PerTfL1Result(tf=tf, l1_result=l1, n_winning_signals=0)
+        if _event_grid_audit is not None:
+            object.__setattr__(result, "event_grid_audit", _event_grid_audit)
+        return result
+
     from src.domain.futures.strategy import tiered_workflow as _tiered_workflow
 
     run_l1_nested = cast(Any, _tiered_workflow.run_l1_nested_swf)
@@ -2971,7 +2979,10 @@ def run_per_tf_l1(
         tf=tf,
         defer_artifact=defer_artifact,
     )
-    return PerTfL1Result(tf=tf, l1_result=l1, n_winning_signals=len(l1.oos_stacked))
+    result = PerTfL1Result(tf=tf, l1_result=l1, n_winning_signals=len(l1.oos_stacked))
+    if _event_grid_audit is not None:
+        object.__setattr__(result, "event_grid_audit", _event_grid_audit)
+    return result
 
 
 def _tf_hours(tf: str) -> float:
@@ -3878,3 +3889,104 @@ def run_tiered_pipeline(
     if verbose:
         logger.info("\n" + "=" * 80)
     return (l1, l2, l3)
+
+
+def run_tiered_pipeline_outcome(
+    *,
+    labeled_events: pd.DataFrame,
+    aligned: AlignedMarketData,
+    cfg: CandidateStrategyConfig,
+    window: LayeredWindow,
+    l1_params: dict[str, Any],
+    l2_params: dict[str, Any],
+    caps: PortfolioCaps | None = None,
+    target_phase: str = "l3",
+    l1_tfs: tuple[str, ...] = ("4h", "6h", "8h", "12h", "1h", "2h"),
+    per_tf_data_maps: dict[str, AlignedMarketData] | None = None,
+    labeled_events_by_tf: dict[str, pd.DataFrame] | None = None,
+    l0_delivery_manifest: object | None = None,
+    diagnostic_sink: object | None = None,
+    policy_fingerprint: str = "",
+) -> TieredRunOutcome:
+    """Run tiered validation with explicit completed/failed result semantics."""
+    from src.domain.futures.strategy.event_grid_contracts import (
+        EventGridContractError,
+        MissingNativeTfEventsError,
+    )
+    from src.domain.futures.strategy.tiered_workflow.outcomes import (
+        TieredRunFailure,
+        TieredRunOutcome,
+    )
+
+    per_tf_results: tuple[PerTfL1Result, ...] = ()
+    try:
+        l1, l2, l3 = run_tiered_pipeline(
+            labeled_events=labeled_events,
+            aligned=aligned,
+            cfg=cfg,
+            window=window,
+            l1_params=l1_params,
+            l2_params=l2_params,
+            caps=caps,
+            target_phase=target_phase,
+            l1_tfs=l1_tfs,
+            per_tf_data_maps=per_tf_data_maps,
+            labeled_events_by_tf=labeled_events_by_tf,
+            l0_delivery_manifest=l0_delivery_manifest,
+        )
+        return TieredRunOutcome(
+            status="completed",
+            l1_result=l1,
+            l2_result=l2,
+            l3_result=l3,
+            per_tf_l1=per_tf_results,
+            failure=None,
+            policy_fingerprint=policy_fingerprint,
+            diagnostic_complete=True,
+        )
+    except EventGridContractError as exc:
+        return TieredRunOutcome(
+            status="failed",
+            l1_result=None,
+            l2_result=None,
+            l3_result=None,
+            per_tf_l1=per_tf_results,
+            failure=TieredRunFailure(
+                code="native_event_contract",
+                timeframe=None,
+                message=str(exc),
+            ),
+            policy_fingerprint=policy_fingerprint,
+            diagnostic_complete=False,
+        )
+    except (TieredPipelineError, MissingNativeTfEventsError) as exc:
+        return TieredRunOutcome(
+            status="failed",
+            l1_result=None,
+            l2_result=None,
+            l3_result=None,
+            per_tf_l1=per_tf_results,
+            failure=TieredRunFailure(
+                code="missing_native_frame",
+                timeframe=None,
+                message=str(exc),
+            ),
+            policy_fingerprint=policy_fingerprint,
+            diagnostic_complete=False,
+        )
+    except Exception as exc:
+        logger.exception("run_tiered_pipeline_outcome: unexpected error")
+        return TieredRunOutcome(
+            status="failed",
+            l1_result=None,
+            l2_result=None,
+            l3_result=None,
+            per_tf_l1=per_tf_results,
+            failure=TieredRunFailure(
+                code="unexpected",
+                timeframe=None,
+                message=str(exc),
+            ),
+            policy_fingerprint=policy_fingerprint,
+            diagnostic_complete=False,
+        )
