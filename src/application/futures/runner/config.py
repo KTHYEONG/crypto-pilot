@@ -8,47 +8,11 @@ from __future__ import annotations
 import os
 from argparse import Namespace
 from collections.abc import Mapping
-from typing import Any, Literal
+from typing import Any
 
 from src.application.futures.run_contracts import ActivePhase
 from src.application.futures.run_contracts import FuturesRunConfig as FuturesRunConfig
-from src.domain.futures.alpha_foundry.contracts import AlphaFoundryRuntimeConfig
-
-
-def _l0_cross_tf_diversity_audit_enabled() -> bool:
-    """[ADR_20260711_L0_STRATEGY_DELIVERY_HARDENING] measurement-run opt-in env gate."""
-    return os.environ.get("L0_CROSS_TF_DIVERSITY_AUDIT", "") not in ("", "0", "false", "False")
-
-
-def _l0_cross_tf_pruning_enabled() -> bool:
-    """[ADR_20260711_L0_CROSS_TF_PRUNING_ADMISSION] 기본 활성화(opt-out).
-
-    fail-open 안전성이 3개 ADR에서 반복 검증됨. L0_CROSS_TF_PRUNING=0 으로 명시적 비활성 가능.
-    """
-    return os.environ.get("L0_CROSS_TF_PRUNING", "") not in ("0", "false", "False")
-
-
-def _l0_parallel_max_workers() -> int:
-    """[ADR_20260711_L0_L1_PIPELINE_LATENCY_PROFILING] measurement-run opt-in env gate."""
-    raw = os.environ.get("L0_PARALLEL_MAX_WORKERS", "")
-    return int(raw) if raw.strip() else 1
-
-
-def _l0_ltf_pool_widened() -> bool:
-    """[ADR_20260712_L0_EVIDENCE_CONDITIONED_CROSS_TF_ADMISSION] opt-in env gate."""
-    return os.environ.get("L0_LTF_POOL_WIDENED", "") not in ("", "0", "false", "False")
-
-
-def _l0_ltf_exec_1m_max_workers() -> int:
-    """[ADR_20260714_L0_LTF_STREAM_PARALLEL] opt-in LTF 1m parallel workers.
-
-    Default 1 (serial). Set L0_LTF_EXEC_1M_MAX_WORKERS=2 for 2-worker I/O parallel.
-    """
-    raw = os.environ.get("L0_LTF_EXEC_1M_MAX_WORKERS", "")
-    return int(raw) if raw.strip() else 1
-
-
-
+from src.application.futures.run_policy import build_effective_run_config
 
 _ACTIVE_PHASES: frozenset[str] = frozenset({"l0", "l1", "l2", "l3"})
 _REMOVED_PHASES: frozenset[str] = frozenset({"strategy-smoke", "quick-backtest"})
@@ -88,94 +52,11 @@ def validate_run_config(config: FuturesRunConfig) -> FuturesRunConfig:
     return config
 
 
-def build_alpha_foundry_runtime_config(
-    args: Namespace | Mapping[str, Any],
-) -> AlphaFoundryRuntimeConfig:
-    if isinstance(args, Namespace):
-        args = vars(args)
-    alpha_foundry_mode = str(args.get("alpha_foundry", "off"))
-    total_l1_budget = int(args.get("alpha_foundry_total_l1_budget", 30))
-    min_conviction = float(args.get("alpha_foundry_min_conviction_lcb_bps", 5.0))
-    enable_fast_tf = bool(args.get("alpha_foundry_enable_fast_tf", False))
-    config = AlphaFoundryRuntimeConfig(
-        mode=alpha_foundry_mode,  # type: ignore[arg-type]
-        total_l1_verification_budget=max(1, total_l1_budget),
-        min_conviction_lcb_bps=min_conviction,
-        enable_fast_discovery_timeframes=enable_fast_tf,
-        artifact_write_enabled=alpha_foundry_mode != "off",
-    )
-    return validate_alpha_foundry_runtime_config(config)
-
-
-def validate_alpha_foundry_runtime_config(
-    config: AlphaFoundryRuntimeConfig,
-) -> AlphaFoundryRuntimeConfig:
-    if config.mode not in {"off", "audit", "gate"}:
-        raise ValueError(f"invalid alpha_foundry mode: {config.mode!r}")
-    if config.max_recipes_per_family < 1:
-        raise ValueError(f"max_recipes_per_family must be >= 1, got {config.max_recipes_per_family}")
-    if config.top_k_per_family_tf < 1:
-        raise ValueError(f"top_k_per_family_tf must be >= 1, got {config.top_k_per_family_tf}")
-    if config.initial_fold_budget < 1:
-        raise ValueError(f"initial_fold_budget must be >= 1, got {config.initial_fold_budget}")
-    if config.total_l1_verification_budget < 1:
-        raise ValueError(f"total_l1_verification_budget must be >= 1, got {config.total_l1_verification_budget}")
-    if config.min_conviction_lcb_bps < 0.0:
-        raise ValueError(f"min_conviction_lcb_bps must be >= 0.0, got {config.min_conviction_lcb_bps}")
-    if config.enable_fast_discovery_timeframes:
-        for tf in config.fast_discovery_timeframes:
-            if not tf.endswith("h") or not tf[:-1].isdigit():
-                raise ValueError(f"invalid fast discovery timeframe: {tf!r}")
-    # Validate cheap_gate constraints
-    cg = config.cheap_gate
-    if cg.min_seed_slots_per_archetype < 1:
-        raise ValueError(f"min_seed_slots_per_archetype must be >= 1, got {cg.min_seed_slots_per_archetype}")
-    if cg.min_seed_slots_per_timeframe < 1:
-        raise ValueError(f"min_seed_slots_per_timeframe must be >= 1, got {cg.min_seed_slots_per_timeframe}")
-    for archetype, floor in cg.archetype_event_floors.items():
-        if floor < 0:
-            raise ValueError(f"negative event floor for archetype {archetype}: {floor}")
-    for family, floor in cg.family_event_floors.items():
-        if floor < 0:
-            raise ValueError(f"negative event floor for family {family}: {floor}")
-    return config
-
-
-def build_l0_runtime_config(
-    *,
-    phase: ActivePhase,
-    settings: Mapping[str, Any],
-) -> AlphaFoundryRuntimeConfig:
-    """[ADR_20260715_L0_L1_NATIVE_CONTRACT] Build the active L0 runtime contract."""
-    """Build internal L0 runtime config from phase + static settings, not CLI flags."""
-    raw_budget = settings.get("alpha_foundry_total_l1_budget")
-    total_l1_budget = int(raw_budget) if raw_budget is not None else 30
-    raw_conviction = settings.get("alpha_foundry_min_conviction_lcb_bps")
-    min_conviction = float(raw_conviction) if raw_conviction is not None else 5.0
-    raw_fast_tf = settings.get("alpha_foundry_enable_fast_tf")
-    enable_fast_tf = bool(raw_fast_tf) if raw_fast_tf is not None else False
-    mode: Literal["audit", "gate"] = "gate"
-    config = AlphaFoundryRuntimeConfig(
-        mode=mode,
-        total_l1_verification_budget=max(1, total_l1_budget),
-        min_conviction_lcb_bps=min_conviction,
-        enable_fast_discovery_timeframes=enable_fast_tf,
-        artifact_write_enabled=False,
-        observability_mode="debug_log",
-        enable_cross_tf_diversity_audit=_l0_cross_tf_diversity_audit_enabled(),
-        enable_cross_tf_pruning=_l0_cross_tf_pruning_enabled(),
-        l0_parallel_max_workers=_l0_parallel_max_workers(),
-        enable_ltf_family_pool_experiment=_l0_ltf_pool_widened(),
-        ltf_exec_1m_max_workers=_l0_ltf_exec_1m_max_workers(),
-    )
-    return validate_alpha_foundry_runtime_config(config)
-
-
 def build_run_config_from_args(args: Namespace | Mapping[str, Any]) -> FuturesRunConfig:
-    """[ADR_20260705_MAJOR_SYMBOL_REGISTRY_REPLAY_SYNC] Build runner config from CLI args or mapping."""
+    """[ADR_20260705_MAJOR_SYMBOL_REGISTRY_REPLAY_SYNC] Build runner config via canonical RunPolicyFactory."""
     if isinstance(args, Namespace):
         args = vars(args)
-    phase = parse_active_phase(args.get("phase", "l3"))
+    parse_active_phase(args.get("phase", "l3"))
     for key in _REMOVED_ALPHA_FOUNDRY_ARG_KEYS:
         value = args.get(key)
         if value is not None and value is not False:
@@ -187,19 +68,6 @@ def build_run_config_from_args(args: Namespace | Mapping[str, Any]) -> FuturesRu
     sync = str(args.get("sync", "auto"))
     if sync not in {"auto", "skip"}:
         raise ValueError(f"invalid sync mode: {sync!r}, expected 'auto' or 'skip'")
-    l0_runtime_cfg = build_l0_runtime_config(
-        phase=phase,
-        settings=args,
-    )
-    config = FuturesRunConfig(
-        timeframe=str(args.get("timeframe", "4h")),
-        date=args.get("date"),
-        trials=int(args.get("trials", 42)),
-        phase=phase,
-        sync=sync,  # type: ignore[arg-type]
-        refresh_universe=bool(args.get("refresh_universe", False)),
-        sync_metrics=bool(args.get("sync_metrics", False)),
-        seed=int(args.get("seed", 42)),
-        l0_runtime=l0_runtime_cfg,
-    )
+
+    config = build_effective_run_config(args, environ=os.environ)
     return validate_run_config(config)
