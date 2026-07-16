@@ -41,6 +41,9 @@ Translate the logical Blueprint (`docs/specs/*.md`) into working Python code usi
 ### 3. Single Responsibility
 - Stop immediately after the L1.5 Local Gate passes; submit results to the `check` phase for full regression and coverage auditing.
 
+### 4. Constraints (Strictly Prohibited)
+- **No Scripts Directory Modifications**: Do NOT create, modify, or delete any files inside the `scripts/` directory. The `scripts/` directory is reserved exclusively for validation/sync tooling. All production logic and helpers must be created in the `src/` directory.
+
 
 ## Output Format
 ```md
