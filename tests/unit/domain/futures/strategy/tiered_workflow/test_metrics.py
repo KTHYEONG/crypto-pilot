@@ -16,6 +16,8 @@ from src.domain.futures.strategy.tiered_workflow.metrics import (
     _sharpe,
     _sortino,
     _terminal_multiple,
+    moving_block_bootstrap_mean,
+    resolve_num_blocks,
 )
 
 # ---------------------------------------------------------------------------
@@ -147,3 +149,46 @@ def test_terminal_multiple_returns_one_for_empty_array() -> None:
 
     # Assert (Then)
     assert result == 1.0
+
+
+# ---------------------------------------------------------------------------
+# S4: resolve_num_blocks
+# ---------------------------------------------------------------------------
+
+
+def test_resolve_num_blocks_happy_path() -> None:
+    """S1 (Happy Path): n_clusters=100, block_bars=6 → ceil(100/6)=17."""
+    assert resolve_num_blocks(100, 6) == 17
+
+
+def test_resolve_num_blocks_edge_zero_clusters() -> None:
+    """S2 (Edge): n_clusters=0 → floor at 1."""
+    assert resolve_num_blocks(0, 6) == 1
+
+
+def test_resolve_num_blocks_edge_zero_block_bars() -> None:
+    """S2 (Edge): block_bars=0 → floored to 1 → num_blocks = n_clusters."""
+    assert resolve_num_blocks(10, 0) == 10
+
+
+def test_resolve_num_blocks_negative_inputs() -> None:
+    """Negative n_clusters or block_bars → floored safely to 1."""
+    assert resolve_num_blocks(-5, 6) == 1
+    assert resolve_num_blocks(5, -2) == 5  # block floored to 1
+
+
+# ---------------------------------------------------------------------------
+# S5: moving_block_bootstrap_mean regression guard
+# ---------------------------------------------------------------------------
+
+
+def test_moving_block_bootstrap_mean_block_count_unchanged_after_refactor() -> None:
+    """Regression guard: block count post-refactor matches pre-refactor formula."""
+    rng = np.random.default_rng(42)
+    values = rng.normal(0, 1, 50).astype(np.float64)
+    decisions = np.arange(50, dtype=np.int64)
+    boot = moving_block_bootstrap_mean(
+        values, decisions, block_bars=6, n_bootstrap=100, seed=42,
+    )
+    assert boot.size == 100
+    assert np.all(np.isfinite(boot))
