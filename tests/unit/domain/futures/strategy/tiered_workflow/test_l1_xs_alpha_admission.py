@@ -51,6 +51,10 @@ def _make_cfg(**overrides: object) -> MagicMock:
         "l1_evidence_lookback_bars": None,
         "l1_signal_activation_floor_bps": 0.0,
         "l1_conviction_metric": "prob_positive",
+        "l1_lcb_quantile_base": 0.05,
+        "l1_lcb_quantile_relaxed": 0.20,
+        "l1_lcb_quantile_full_conf_blocks": 15,
+        "l1_lcb_quantile_floor_blocks": 3,
     }
     defaults.update(overrides)
     for k, v in defaults.items():
