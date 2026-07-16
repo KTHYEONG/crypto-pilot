@@ -12,6 +12,7 @@ from unittest.mock import MagicMock
 import numpy as np
 import pandas as pd
 import pytest
+from pytest_mock import MockerFixture
 
 from src.domain.futures.strategy.candidate_contracts import (
     CandidateModelOutput,
@@ -97,6 +98,27 @@ def test_insufficient_effective_obs_rejection() -> None:
     assert len(evidence) == 1
     assert not evidence[0].qualified
     assert "insufficient_effective_obs" in evidence[0].rejection_reasons
+
+
+# ─── Scenario: l1_pair_fdr_procedure wiring [ADR pending: L1_REGISTRY_ADMISSION_RECALIBRATION Phase B] ──
+
+
+def test_compute_symbol_strategy_evidence_forwards_bh_procedure_to_by_q_values(mocker: MockerFixture) -> None:
+    """Integration (Scenario 4): cfg.l1_pair_fdr_procedure='bh' is forwarded as
+    harmonic_override=1.0 into _by_q_values; default 'by' forwards None
+    (zero behavior change)."""
+    import src.domain.futures.strategy.tiered_workflow.signal_selection as sel_mod
+
+    spy = mocker.spy(sel_mod, "_by_q_values")
+    df = _make_event_frame(gross_bps_list=[5.0, 4.0, 6.0])
+
+    cfg_bh = _make_cfg(l1_pair_fdr_procedure="bh")
+    compute_symbol_strategy_evidence(event_results=df, cfg=cfg_bh, seed=0, registry_as_of_idx=999)
+    assert spy.call_args.kwargs["harmonic_override"] == 1.0
+
+    cfg_by = _make_cfg(l1_pair_fdr_procedure="by")
+    compute_symbol_strategy_evidence(event_results=df, cfg=cfg_by, seed=0, registry_as_of_idx=999)
+    assert spy.call_args.kwargs["harmonic_override"] is None
 
 
 # ─── Scenario 2: Adaptive t-statistic and MDES Filtering ──────────────────
