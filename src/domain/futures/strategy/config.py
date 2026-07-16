@@ -20,6 +20,11 @@ DEFAULT_L1_TFS: tuple[str, ...] = (
     "1h", "2h", "4h", "6h", "8h", "12h", "1d"
 )  # [ADR_20260713_L0_L1_ASSET_GROWTH_RESTRUCTURE]
 
+SLOW_TF_XS_CHALLENGER_FAMILIES: tuple[str, ...] = (
+    "residual_momentum_xs",
+    "xs_residual_rebalance",
+)
+
 
 @dataclass(slots=True, frozen=True)
 class BlendConfig:
@@ -219,7 +224,7 @@ class BtcNeutralResidualReversalConfig:
 
 @dataclass(slots=True, frozen=True)
 class CandidateStrategyConfig:
-    """Candidate strategy routing config."""
+    """Candidate strategy routing config. [ADR_20260716_L0_SLOW_TF_XS_CHALLENGER]"""
 
     name: Literal["candidate_ml", "rule_baseline"] = "candidate_ml"
     timeframe: str = "4h"
@@ -484,6 +489,8 @@ class CandidateStrategyConfig:
     per_family_params: dict[str, dict[str, Any]] | None = None
     per_tf_signal_pool_enabled: bool = True
     l1_ltf_family_pool_widened: bool = False  # [LIMIT-05] widen 1h/2h family pool
+    slow_tf_xs_challenger_enabled: bool = False
+    slow_tf_xs_challenger_tfs: tuple[str, ...] = ("6h", "1d")
     # Execution cost model (SSOT; replaces flat 24bps)
     maker_fee_bps: float = 2.0
     taker_fee_bps: float = 5.0
@@ -1039,6 +1046,12 @@ class CandidateStrategyConfig:
                 raise ValueError("btc_neutral_residual_reversal.min_cross_section must be >= 2")
             if bnrr.max_abs_btc_beta < 0.0:
                 raise ValueError("btc_neutral_residual_reversal.max_abs_btc_beta must be >= 0")
+        invalid_challenger_tfs = set(self.slow_tf_xs_challenger_tfs) - set(DEFAULT_L1_TFS)
+        if invalid_challenger_tfs:
+            raise ValueError(
+                "slow_tf_xs_challenger_tfs must be a subset of DEFAULT_L1_TFS: "
+                f"{sorted(invalid_challenger_tfs)}"
+            )
 
 
 def with_max_holding_bars(
@@ -1311,6 +1324,8 @@ def apply_tf_gate_overrides(
 ) -> CandidateStrategyConfig:
     """Return a config copy with per-TF gate thresholds and bar-duration fields scaled.
 
+    [ADR_20260716_L0_SLOW_TF_XS_CHALLENGER]
+
     Phase 1 — per-TF gate threshold overrides (existing logic).
     Phase 2 — TF-scale bar-duration fields (metadata-driven via Fix B).
     """
@@ -1327,6 +1342,10 @@ def apply_tf_gate_overrides(
         valid_overrides = {k: v for k, v in overrides.items() if hasattr(cfg, k)}
         if valid_overrides:
             cfg = dataclasses.replace(cfg, **valid_overrides)  # type: ignore[arg-type]
+
+    # ── [Slow-TF XS Challenger] Enable XS admission for opted-in TFs ──
+    if cfg.slow_tf_xs_challenger_enabled and tf in cfg.slow_tf_xs_challenger_tfs:
+        cfg = dataclasses.replace(cfg, l1_xs_alpha_admission_enabled=True)
 
     # ── Phase 2: TF-scale bar-duration fields ──
     scaled_updates: dict[str, int] = {}
@@ -1349,6 +1368,8 @@ def apply_tf_gate_overrides(
 def resolve_tf_signal_pool(cfg: CandidateStrategyConfig, tf: str) -> tuple[str, ...]:
     """Resolve the signal pool for a given TF.
 
+    [ADR_20260716_L0_SLOW_TF_XS_CHALLENGER]
+
     Returns per_tf_candidate_families[tf] when available, otherwise
     falls back to cfg.candidate_families (backward compat).
 
@@ -1356,14 +1377,25 @@ def resolve_tf_signal_pool(cfg: CandidateStrategyConfig, tf: str) -> tuple[str, 
     _WIDENED_PER_TF_FAMILIES[tf] for 1h/2h (widened pool), falling back
     to _DEFAULT_PER_TF_FAMILIES.get(tf, cfg.candidate_families) for other TFs.
     [LIMIT-05]
+
+    When cfg.slow_tf_xs_challenger_enabled is True and tf is in
+    cfg.slow_tf_xs_challenger_tfs, appends SLOW_TF_XS_CHALLENGER_FAMILIES to
+    the resolved pool using order-preserving deduplication. [LIMIT-01] [LIMIT-02]
     """
     if cfg.per_tf_candidate_families and tf in cfg.per_tf_candidate_families:
-        return cfg.per_tf_candidate_families[tf]
-    if getattr(cfg, "l1_ltf_family_pool_widened", False) and tf in _WIDENED_PER_TF_FAMILIES:
-        return _WIDENED_PER_TF_FAMILIES[tf]
-    if getattr(cfg, "per_tf_signal_pool_enabled", False):
-        return _DEFAULT_PER_TF_FAMILIES.get(tf, cfg.candidate_families)
-    return cfg.candidate_families
+        base_pool = cfg.per_tf_candidate_families[tf]
+    elif getattr(cfg, "l1_ltf_family_pool_widened", False) and tf in _WIDENED_PER_TF_FAMILIES:
+        base_pool = _WIDENED_PER_TF_FAMILIES[tf]
+    elif getattr(cfg, "per_tf_signal_pool_enabled", False):
+        base_pool = _DEFAULT_PER_TF_FAMILIES.get(tf, cfg.candidate_families)
+    else:
+        base_pool = cfg.candidate_families
+
+    if not (cfg.slow_tf_xs_challenger_enabled and tf in cfg.slow_tf_xs_challenger_tfs):
+        return base_pool
+    seen = set(base_pool)
+    extras = tuple(f for f in SLOW_TF_XS_CHALLENGER_FAMILIES if f not in seen)
+    return base_pool + extras
 
 
 def resolve_family_registration_gap(
