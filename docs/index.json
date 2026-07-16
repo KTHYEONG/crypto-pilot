@@ -156,7 +156,8 @@
       "tests/unit/domain/futures/strategy/tiered_workflow/test_l1_readiness_gate_redesign.py",
       "tests/unit/domain/futures/strategy/test_signal_selection_evidence.py",
       "tests/unit/domain/futures/strategy/tiered_workflow/test_signal_selection.py",
-      "tests/domain/futures/strategy/tiered_workflow/test_l0_l1_improvements.py"
+      "tests/domain/futures/strategy/tiered_workflow/test_l0_l1_improvements.py",
+      "tests/unit/domain/futures/strategy/tiered_workflow/test_c2_effective_n_fdr.py"
     ]
   },
   "src/domain/futures/strategy/tiered_workflow/pipeline.py": {
