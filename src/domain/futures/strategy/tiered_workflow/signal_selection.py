@@ -297,7 +297,23 @@ def align_outer_opportunities_with_realized(
 def _by_q_values(
     p_values: NDArray[np.float64],
     m_eff: float | None = None,
+    *,
+    harmonic_override: float | None = None,
 ) -> NDArray[np.float64]:
+    """Benjamini-Yekutieli (default) or plain-BH (harmonic_override=1.0) q-values.
+
+    harmonic_override, when provided, replaces the internally-computed
+    Sum(1/k for k in 1..m) term. None (default) preserves the exact
+    Benjamini-Yekutieli behavior for every existing caller.
+
+    [ADR pending: L1_REGISTRY_ADMISSION_RECALIBRATION Phase B] BY's harmonic
+    penalty (~ln(m)) is only necessary under arbitrary/adversarial hypothesis
+    dependence; measured control-replay data shows L1 pair-admission pools
+    (144-2500 candidates/fold) are dominated by 2-3 strategy families
+    replicated across ~500 symbols each (33-67% top-family concentration),
+    not independent hypotheses -- plain BH is the standard, less conservative
+    choice under such known positive dependence (Benjamini-Yekutieli 2001).
+    """
     if p_values.size == 0:
         return np.zeros((0,), dtype=np.float64)
     order = np.argsort(p_values)
@@ -305,7 +321,11 @@ def _by_q_values(
     # m_eff < p_values.size → less conservative (fewer effective tests)
     m = float(m_eff) if (m_eff is not None and m_eff > 0.0) else float(p_values.size)
     m_int = max(1, round(m))
-    harmonic = float(np.sum(1.0 / np.arange(1, m_int + 1, dtype=np.float64)))
+    harmonic = (
+        float(harmonic_override)
+        if harmonic_override is not None
+        else float(np.sum(1.0 / np.arange(1, m_int + 1, dtype=np.float64)))
+    )
     n = ordered.size
     adjusted = np.empty_like(ordered)
     running = 1.0
@@ -682,9 +702,11 @@ def compute_symbol_strategy_evidence(
             groups=[(e.key.symbol, e.key.strategy_id, str(e.key.activation_context)) for e in evidence_list],
             diversity_corr=probe_diversity_corr,
         )
+    _fdr_procedure = str(getattr(cfg, "l1_pair_fdr_procedure", "by"))
     q_values = _by_q_values(
         np.asarray(raw_p_values, dtype=np.float64),
         m_eff=_m_eff,
+        harmonic_override=1.0 if _fdr_procedure == "bh" else None,
     )
     final_evidence: list[SymbolStrategyEvidence] = []
     for idx, evidence in enumerate(evidence_list):
