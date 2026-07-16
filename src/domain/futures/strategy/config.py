@@ -508,6 +508,8 @@ class CandidateStrategyConfig:
     min_fit_obs: int = 200
     min_wf_fold_pass_ratio: float = 0.60
     l1_min_valid_strategies: int = 5
+    l2_master_min_ready_symbols: int = 5
+    l2_master_min_source_families: int = 2
     l1_min_panel_diversity: float = 0.30
     l1_min_cs_fold_pass_ratio: float = 0.60
     l1_pair_min_effective_obs: float = 5.0
@@ -847,6 +849,10 @@ class CandidateStrategyConfig:
             raise ValueError("min_wf_fold_pass_ratio must be in [0.0, 1.0]")
         if self.l1_min_valid_strategies < 1:
             raise ValueError("l1_min_valid_strategies must be >= 1")
+        if self.l2_master_min_ready_symbols < 1:
+            raise ValueError("l2_master_min_ready_symbols must be >= 1")
+        if self.l2_master_min_source_families < 1:
+            raise ValueError("l2_master_min_source_families must be >= 1")
         if not (0.0 <= self.l1_min_panel_diversity <= 1.0):
             raise ValueError("l1_min_panel_diversity must be in [0.0, 1.0]")
         if not (0.0 <= self.l1_min_cs_fold_pass_ratio <= 1.0):

@@ -594,7 +594,7 @@ class TestL2SimulationCacheFields:
 
         field_names = {f.name for f in dataclasses.fields(L2SimulationCache)}
         assert "sleeve_to_sym" in field_names
-        assert "sleeve_ids" in field_names
+        assert "sleeve_keys" in field_names
 
     def test_build_cache_returns_correct_sleeve_shapes(self) -> None:
         """build_l2_simulation_cache: 신호 행렬 [T, S], 심볼 행렬 [T, N] shape 일치."""

@@ -120,6 +120,20 @@ def _parse_meta_group_ids(strategy_id: str) -> tuple[str, str]:
     return (family, tf)
 
 
+def _sk_family_tf(sk: object) -> tuple[str, str]:
+    """Extract (family, tf) from a SignalSleeveKey-like object.
+
+    Uses explicit native_tf field rather than parsing strategy_id suffix.
+    Falls back to _parse_meta_group_ids when native_tf is empty (legacy compat).
+    """
+    sid = getattr(sk, "strategy_id", "")
+    family = sid.split(":")[0] if ":" in sid else sid
+    native_tf = getattr(sk, "native_tf", "")
+    if native_tf:
+        return (family, native_tf)
+    return _parse_meta_group_ids(sid)
+
+
 def _available_micro_feature(
     aligned: AlignedMarketData,
     name: str,
@@ -182,8 +196,7 @@ def build_sleeve_meta_dataset(
     family_list: list[str] = []
 
     sleeve_to_sym_arr = cache.sleeve_to_sym
-    sleeve_ids = cache.sleeve_ids
-    sleeve_to_tf_arr = cache.sleeve_to_tf
+    sleeve_keys = cache.sleeve_keys
 
     for t in range(start, end):
         mask = cache.signal_mask_2d[t]
@@ -246,10 +259,11 @@ def build_sleeve_meta_dataset(
             event_t_list.append(t)
             event_sym_list.append(sym_col)
 
-            tf_key = sleeve_to_tf_arr[sj] if sj < len(sleeve_to_tf_arr) else "unk"
+            _sk = sleeve_keys[sj]
+            tf_key = _sk.native_tf or "unk"
             tf_list.append(tf_key)
 
-            strat_id = sleeve_ids[sj][1]
+            strat_id = _sk.strategy_id
             fam_key, _ = _parse_meta_group_ids(strat_id)
             family_list.append(fam_key)
 
@@ -546,7 +560,7 @@ def compute_bucket_realized_edge_stats(
 
     close_2d = np.asarray(aligned.close_2d, dtype=np.float64)
 
-    sleeve_ids = cache.sleeve_ids
+    sleeve_keys = cache.sleeve_keys
 
     bucket_sum: dict[tuple[int, str, str], float] = {}
     bucket_cnt: dict[tuple[int, str, str], int] = {}
@@ -560,7 +574,9 @@ def compute_bucket_realized_edge_stats(
         regime = int(regime_code_1d[t]) if t < len(regime_code_1d) else 0
         for j in active_js:
             sj = int(j)
-            family, tf = _parse_meta_group_ids(sleeve_ids[sj][1])
+            _sk = sleeve_keys[sj]
+            family = _sk.strategy_id.split(":")[0] if ":" in _sk.strategy_id else _sk.strategy_id
+            tf = _sk.native_tf or "unk"
             edge = _compute_sleeve_realized_edge_bps(
                 cache=cache,
                 close_2d=close_2d,
@@ -722,7 +738,7 @@ def compute_pooled_realized_edge_stats(
         if len(active_js) == 0:
             continue
         for j in active_js:
-            family, tf = _parse_meta_group_ids(cache.sleeve_ids[int(j)][1])
+            family, tf = _sk_family_tf(cache.sleeve_keys[int(j)])
             edge = _compute_sleeve_realized_edge_bps(
                 cache=cache,
                 close_2d=close_2d,
@@ -1380,7 +1396,7 @@ def _collect_regime_cell_accumulators(
             state = int(regime_code_1d[t]) if t < regime_code_1d.shape[0] else 0
             state_name = _state_name_for_index(state_names, state)
             for j in active_js:
-                family, tf = _parse_meta_group_ids(cache.sleeve_ids[int(j)][1])
+                family, tf = _sk_family_tf(cache.sleeve_keys[int(j)])
                 key = (fold_idx, state, family, tf)
                 acc = accumulators.get(key)
                 if acc is None:
@@ -1403,7 +1419,7 @@ def _collect_regime_cell_accumulators(
             state = int(regime_code_1d[t]) if t < regime_code_1d.shape[0] else 0
             state_name = _state_name_for_index(state_names, state)
             for j in active_js:
-                family, tf = _parse_meta_group_ids(cache.sleeve_ids[int(j)][1])
+                family, tf = _sk_family_tf(cache.sleeve_keys[int(j)])
                 key = (fold_idx, state, family, tf)
                 acc = accumulators.get(key)
                 if acc is None:
@@ -1498,7 +1514,7 @@ def _build_regime_proof_inputs(
                 continue
             state = int(regime_code_1d[t]) if t < regime_code_1d.shape[0] else 0
             for j in active_js:
-                family, tf = _parse_meta_group_ids(cache.sleeve_ids[int(j)][1])
+                family, tf = _sk_family_tf(cache.sleeve_keys[int(j)])
                 regime_cond_edges.append(float(fit_edges.get((state, family, tf), 0.0)))
                 pooled_edges.append(float(pooled_fit_edges.get((family, tf), 0.0)))
                 realized_edges.append(
@@ -1841,7 +1857,7 @@ def _bucket_hit_pct_by_fold_for(
             state = int(regime_code_1d[t]) if t < regime_code_1d.shape[0] else 0
             has_hit = False
             for j in active_js:
-                family, tf = _parse_meta_group_ids(cache.sleeve_ids[int(j)][1])
+                family, tf = _sk_family_tf(cache.sleeve_keys[int(j)])
                 if float(bucket_edges_by_fold[fold_idx].get((state, family, tf), 0.0)) > edge_floor_bps:
                     has_hit = True
                     break
@@ -1983,7 +1999,7 @@ def build_regime_routing_plan(
             regime_now = int(effective_codes[t])
             has_hit = False
             for j in active_js:
-                family, tf = _parse_meta_group_ids(cache.sleeve_ids[int(j)][1])
+                family, tf = _sk_family_tf(cache.sleeve_keys[int(j)])
                 realized_edge = _compute_sleeve_realized_edge_bps(
                     cache=cache,
                     close_2d=close_2d,
