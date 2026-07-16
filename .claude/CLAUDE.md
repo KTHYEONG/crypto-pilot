@@ -63,6 +63,7 @@ This protocol applies only inside code-writing phases such as `implement` when n
 - **Separation of Concerns:** Maintain clear separation between logic, data, and router layers.
 - **Modularity:** Design new files to be within 500 lines. (Defer refactoring of existing files if unit tests are not secured).
 - **Configuration:** Manage all settings via environment variables (`.env`) and `pydantic-settings`.
+- **Directory Isolation:** The `scripts/` directory is strictly reserved for verification (check) and documentation synchronization (sync) tooling. Do NOT create or modify any production logic, auxiliary tools, or helper modules under `scripts/`. All production-related code must reside in the `src/` directory.
 
 ## 8. Anti-Patterns & Alternatives
 - **Focused Changes:** Implement the smallest necessary change; avoid copying unrelated legacy code.

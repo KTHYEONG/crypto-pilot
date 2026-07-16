@@ -22,7 +22,7 @@ Leverage **high-reasoning models** for creative architectural design, while outp
 
 ### 2. High-Reasoning Architectural Thought (High Autonomy)
 - **Alternatives & Trade-offs**: Contrast multiple design options. Justify why the chosen design is selected and state its design trade-offs.
-- **Scale-to-Fit Specifying**: For simple helper functions or trivial scripts, scale down the detailing. Do NOT force strict `[PERF-xx]` budgeting unless the module involves signal calculations, concurrent routines, or heavy IO.
+- **Scale-to-Fit Specifying**: For simple helper functions or utility modules, scale down the detailing. Do NOT force strict `[PERF-xx]` budgeting unless the module involves signal calculations, concurrent routines, or heavy IO.
 - **Quant & System Resilience**: For trading signals, execution modules, or data collectors, explicitly plan for resilience: network time-outs, database state mismatch, and recovery flows.
 - **Algorithmic & Logical Modeling**: Define mathematical models, data structures, state machines, and state transition rules.
 - **System Flow Visualization**: Draw text-based Mermaid sequence/data flow diagrams showing module interactions.
@@ -48,6 +48,7 @@ To ensure low-reasoning models can build and integrate the code without guessing
 
 ## Constraints (Strictly Prohibited)
 - **No Production Code Modifications**: Do NOT create, touch, or modify any `.py` source (`src/`) or official test (`tests/`) files during the `spec` phase. (Exploratory scripts inside `scratch/` are fully allowed).
+- **No Scripts Directory Design/Modifications**: Do NOT design, suggest, or write code paths inside the `scripts/` directory. The `scripts/` directory is reserved exclusively for validation/sync tooling. All production logic, auxiliary scripts, and helpers MUST reside in the `src/` directory.
 - **No Quality Verification Execution**: Never execute quality-check loops such as `lean_check.py`, `pytest`, `ruff`, or `mypy` during this phase. (Simple `python scratch/temp.py` runs for data collection are fully allowed).
 - **Immediate Pause (STOP)**: Once the `docs/specs/[feature].md` file is generated, stop tool execution immediately and wait for user feedback. Do not proceed to `check` or run tests.
 
