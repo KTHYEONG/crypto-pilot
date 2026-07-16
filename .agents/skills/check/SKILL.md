@@ -1,44 +1,15 @@
 ---
 name: check
-description: Perform Regression Testing, Coverage Auditing, and Error Triage with Minimal Token Consumption.
+description: Regression Testing, Coverage Auditing, Error Triage.
 ---
 
-# Skill: Check (Ultra-Lean Validation & Triage Gatekeeper)
+# Check
+Run: `uv run python scripts/lean_check.py --files [modified_files] [--spec docs/specs/[feature]_contract.json]`
+- `--files`: include all modified .py files (source + test pairs).
+- `--spec`: optional path to spec contract JSON for spec compliance verification (runs first).
+Pipeline order: spec(s) → co-modification → print() → ruff → mypy → pytest+coverage (stops at first failure).
 
-## Purpose
-Unify static contract compliance, dynamic regression test execution, and structural test coverage auditing. Maintain strict token efficiency by minimizing command output logs and isolating verification scope.
-
-## Execution Rules
-
-### 1. Minimal Output Validation Pipeline (Token Saving)
-Run the integrated check script targeting the modified files to avoid multiple command runs and massive terminal logs:
-- **Command:** `uv run python scripts/lean_check.py --files [modified_files]`
-- **Strict Constraint (1:1 Mapping & Wiring)**: You **MUST** include both the source file, its corresponding unit test file (e.g. `src/x.py` and `tests/unit/test_x.py`), and any modified parent/calling modules (along with integration tests validating the connection) in `--files` to prevent bypassing integration failures.
-- **Strict Constraint (No print)**: Raw `print()` is strictly prohibited. Ensure all outputs use `logging` following the tag schema in `logging.md`.
-- **Diagnostic Exception**: If the coverage target is missed or tests fail, inspect the minimal summary printed. You are exceptionally allowed to run a targeted pytest with `--tb=short` once to view detailed traceback if the cause is not clear from the summary.
-
-### 2. Verification Scope
-
-#### 2a. Target Limits
-- **Precise Paths**: Always specify the exact target test file path (e.g. `tests/unit/domain/.../test_x.py`). Never run pytest on broad directories like `tests/` to prevent execution overhead and massive terminal outputs.
-
-#### 2b. Coverage Thresholds
-- Compare against target thresholds using the printed coverage summary.
-- **SSOT Directive**: The exact coverage targets (e.g., Domain/Signal >= 90%, Adapter >= 70%) and their respective Tolerance Buffers (Conditional PASS ranges) are defined exclusively in [testing.md](file:///.agents/rules/testing.md). You MUST reference and adhere to those limits; do not hardcode or verify static numbers here.
-- Measure coverage exclusively on files created or modified by the current task.
-
-### 3. Triage & Circuit Breaker (On Failure)
-If any step fails, retrieve ONLY the specific failing assertion line or traceback summary:
-- **Diagnostics**: Determine if it requires a design change (`spec` rollback) or a bug fix (`implement` rollback).
-- **Circuit Breaker**: If regression fails for **3 consecutive cycles**, STOP and request human intervention.
-
-## Output Format
-Write check results strictly in the compact format below:
-
-### 🟢 PASS Format:
-🟢 PASS | All checks passed (Cov [value]%)
-
-### 🔴 FAIL Format:
-🔴 FAIL | [brief failure summary]
-- 🔍 Cause: [file path:line number] - [error reason]
-- 🛠️ Fix: Apply [modification action] to [function/class] in [target file]
+On **PASS**: report `Cov [value]%` from output.
+On **FAIL**: read stderr JSON diagnostic → apply suggested fix.
+If regression fails for **3 consecutive check cycles**, STOP and request human intervention.
+Coverage thresholds: see testing.md §5.
