@@ -601,3 +601,149 @@ def test_compute_symbol_strategy_evidence_baseline_mode_override_takes_precedenc
 
     assert "no_incremental_edge" in xs_no_override.structural_reasons  # cfg default: washed out
     assert "no_incremental_edge" not in xs_with_override.structural_reasons  # override: rescued
+
+
+# ─── FDR Hard-Reject Override Scenarios (L1_SNAPSHOT_FDR_DECOUPLING) ───────
+
+
+def test_fdr_hard_reject_override_soft_scales_instead_of_zeroing() -> None:
+    """Scenario 1 (Happy Path): fdr_hard_reject_override=False keeps qw positive
+    (same as no-FDR baseline) instead of zeroing it when q_value > l1_pair_fdr_alpha.
+    """
+    rng = np.random.default_rng(1)
+    rows = [
+        {"symbol": "BTCUSDT", "side": 1, "strategy_id": "trend_ma:ema_12_72",
+         "gross_event_bps": g, "expected_holding_bars": 4, "fold_id": 0}
+        for g in rng.normal(1.0, 8.0, size=4).tolist()
+    ]
+    df = pd.DataFrame(rows)
+
+    cfg_no_fdr = _make_cfg(l1_pair_fdr_alpha=1.0, l1_fdr_hard_reject=True,
+                            l1_pair_min_effective_obs=1.0, l1_pair_min_folds=1)
+    cfg_hard = _make_cfg(l1_pair_fdr_alpha=0.15, l1_fdr_hard_reject=True,
+                          l1_pair_min_effective_obs=1.0, l1_pair_min_folds=1)
+
+    ev_no_fdr = compute_symbol_strategy_evidence(event_results=df, cfg=cfg_no_fdr, seed=1, registry_as_of_idx=999)
+    ev_hard = compute_symbol_strategy_evidence(event_results=df, cfg=cfg_hard, seed=1, registry_as_of_idx=999)
+    ev_soft = compute_symbol_strategy_evidence(
+        event_results=df, cfg=cfg_hard, seed=1, registry_as_of_idx=999,
+        fdr_hard_reject_override=False,
+    )
+
+    ev0_nofdr, ev0_hard, ev0_soft = ev_no_fdr[0], ev_hard[0], ev_soft[0]
+
+    # Fixture must trigger FDR (q > alpha)
+    assert ev0_nofdr.q_value > cfg_hard.l1_pair_fdr_alpha, (
+        f"fixture q_value={ev0_nofdr.q_value:.4f} not > 0.15"
+    )
+    assert ev0_hard.quality_weight == 0.0  # hard reject zeros
+    # Soft reject preserves qw (same scaling as no-FDR unconditional path)
+    assert ev0_soft.quality_weight == pytest.approx(ev0_nofdr.quality_weight)
+
+
+def test_fdr_hard_reject_override_none_is_bit_identical() -> None:
+    """Scenario 2 (Edge, LIMIT-01): Explicit fdr_hard_reject_override=None produces
+    bit-identical result to omitting the parameter entirely.
+    """
+    rng = np.random.default_rng(1)
+    rows = [
+        {"symbol": "BTCUSDT", "side": 1, "strategy_id": "trend_ma:ema_12_72",
+         "gross_event_bps": g, "expected_holding_bars": 4, "fold_id": 0}
+        for g in rng.normal(1.0, 8.0, size=4).tolist()
+    ]
+    df = pd.DataFrame(rows)
+    cfg = _make_cfg(l1_pair_fdr_alpha=0.15, l1_fdr_hard_reject=True,
+                     l1_pair_min_effective_obs=1.0, l1_pair_min_folds=1)
+
+    ev_no_param = compute_symbol_strategy_evidence(
+        event_results=df, cfg=cfg, seed=1, registry_as_of_idx=999,
+    )
+    ev_none = compute_symbol_strategy_evidence(
+        event_results=df, cfg=cfg, seed=1, registry_as_of_idx=999,
+        fdr_hard_reject_override=None,
+    )
+
+    for a, b in zip(ev_no_param, ev_none, strict=True):
+        assert a.quality_weight == b.quality_weight
+        assert a.hard_eligible == b.hard_eligible
+        assert a.structural_reasons == b.structural_reasons
+
+
+def test_fdr_hard_reject_override_does_not_rescue_zero_raw_qw() -> None:
+    """Scenario 3 (Boundary): fdr_hard_reject_override=False does NOT rescue a
+    candidate whose raw quality_weight is already 0.0 (probability_positive <= 0.5).
+    """
+    rng = np.random.default_rng(2)
+    rows = [
+        {"symbol": "BTCUSDT", "side": 1, "strategy_id": "trend_ma:ema_12_72",
+         "gross_event_bps": g, "expected_holding_bars": 4, "fold_id": 0}
+        for g in rng.normal(0.0, 10.0, size=4).tolist()
+    ]
+    df = pd.DataFrame(rows)
+    cfg = _make_cfg(l1_pair_fdr_alpha=0.15, l1_fdr_hard_reject=True,
+                     l1_pair_min_effective_obs=1.0, l1_pair_min_folds=1)
+
+    # Verify raw qw is already 0.0 (no-FDR reference)
+    ev_ref = compute_symbol_strategy_evidence(
+        event_results=df, cfg=_make_cfg(l1_pair_fdr_alpha=1.0, l1_fdr_hard_reject=True,
+                                         l1_pair_min_effective_obs=1.0, l1_pair_min_folds=1),
+        seed=2, registry_as_of_idx=999,
+    )
+    assert ev_ref[0].quality_weight == 0.0, "fixture must have zero raw qw"
+
+    ev_soft = compute_symbol_strategy_evidence(
+        event_results=df, cfg=cfg, seed=2, registry_as_of_idx=999,
+        fdr_hard_reject_override=False,
+    )
+
+    for ev in ev_soft:
+        if ev.q_value > cfg.l1_pair_fdr_alpha:
+            assert ev.quality_weight == 0.0, (
+                f"symbol={ev.key.symbol} q_value={ev.q_value:.4f} qw={ev.quality_weight:.6f}"
+            )
+
+
+def test_fdr_hard_reject_override_unblocks_qualified_registry() -> None:
+    """Scenario 4 (Integration): thin-early-fold fixture where hard-reject
+    produces registry.ready_symbols == () and soft override produces non-empty.
+    """
+    rng = np.random.default_rng(1)
+    rows = [
+        {"symbol": "BTCUSDT", "side": 1, "strategy_id": "trend_ma:ema_12_72",
+         "gross_event_bps": g, "expected_holding_bars": 4, "fold_id": 0}
+        for g in rng.normal(1.0, 8.0, size=4).tolist()
+    ]
+    df = pd.DataFrame(rows)
+
+    cfg = _make_cfg(l1_pair_fdr_alpha=0.15, l1_fdr_hard_reject=True,
+                     l1_pair_min_effective_obs=1.0, l1_pair_min_folds=1,
+                     l1_breakeven_floor_bps=0.0)
+
+    ev_hard = compute_symbol_strategy_evidence(
+        event_results=df, cfg=cfg, seed=1, registry_as_of_idx=999,
+    )
+    ev_soft = compute_symbol_strategy_evidence(
+        event_results=df, cfg=cfg, seed=1, registry_as_of_idx=999,
+        fdr_hard_reject_override=False,
+    )
+
+    registry_hard = build_qualified_signal_registry(
+        evidence=ev_hard,
+        symbols=("BTCUSDT",),
+        min_signals_per_symbol=1,
+        registry_version="test",
+        cfg=cfg,
+    )
+    registry_soft = build_qualified_signal_registry(
+        evidence=ev_soft,
+        symbols=("BTCUSDT",),
+        min_signals_per_symbol=1,
+        registry_version="test",
+        cfg=cfg,
+    )
+
+    assert not registry_hard.ready_symbols, "fixture must produce empty hard registry"
+    assert registry_soft.ready_symbols, (
+        f"hard registry empty, soft also empty (n_evidence={len(ev_hard)})"
+    )
+    assert len(registry_soft.ready_symbols) >= len(registry_hard.ready_symbols)
