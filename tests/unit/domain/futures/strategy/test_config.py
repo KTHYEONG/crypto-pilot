@@ -343,11 +343,73 @@ def test_slow_tfs_l1_min_effective_sym_n_relaxed_below_flat_default() -> None:
     relaxation -- guards against silently reintroducing the single-symbol-signal
     rejection bug for 8h/12h/1d."""
     for tf, max_allowed in (("8h", 2.0), ("12h", 1.0), ("1d", 1.0)):
-        value = _DEFAULT_PER_TF_GATE_OVERRIDES[tf]["l1_min_effective_sym_n"]
+        value = float(_DEFAULT_PER_TF_GATE_OVERRIDES[tf]["l1_min_effective_sym_n"])
         assert value <= max_allowed, (
             f"tf={tf} l1_min_effective_sym_n={value} was not relaxed below the flat "
             f"default (3.0) despite measured calibration support"
         )
+
+
+def test_slow_tfs_have_l1_min_cross_section_override() -> None:
+    """[ADR pending: L1_REGISTRY_ADMISSION_RECALIBRATION Phase A] 8h/12h/1d have
+    explicit l1_min_cross_section entries (the fold-level counterpart to
+    l1_min_effective_sym_n -- fixes insufficient_ready_symbols rejecting
+    single-symbol folds even after the pooled metric was relaxed)."""
+    for tf in ("8h", "12h", "1d"):
+        assert "l1_min_cross_section" in _DEFAULT_PER_TF_GATE_OVERRIDES.get(tf, {}), (
+            f"tf={tf} missing l1_min_cross_section override"
+        )
+
+
+def test_12h_1d_l1_min_cross_section_relaxed_to_one() -> None:
+    """Adopted values must not be a no-op copy of the flat default (2) for
+    12h/1d, where the measured p10 (logs/futures/diagnostics/
+    l1_symbol_breadth_calibration.json) supports relaxation to 1 -- guards
+    against silently reintroducing the LUNA2USDT/JASMYUSDT single-symbol-fold
+    rejection bug."""
+    for tf in ("12h", "1d"):
+        value = _DEFAULT_PER_TF_GATE_OVERRIDES[tf]["l1_min_cross_section"]
+        assert value == 1, (
+            f"tf={tf} l1_min_cross_section={value} was not relaxed to 1 despite "
+            f"measured calibration support"
+        )
+
+
+def test_6h_l1_min_cross_section_not_adopted() -> None:
+    """[LIMIT-07] 6h is deliberately excluded from Phase A cross-section
+    adoption -- its blocker is economic (negative gross edge), not structural,
+    so no gate relaxation should be applied there."""
+    assert "l1_min_cross_section" not in _DEFAULT_PER_TF_GATE_OVERRIDES.get("6h", {})
+
+
+def test_l1_pair_fdr_procedure_default_is_by() -> None:
+    """Default preserves the exact pre-change Benjamini-Yekutieli behavior."""
+    cfg = CandidateStrategyConfig()
+    assert cfg.l1_pair_fdr_procedure == "by"
+
+
+def test_8h_12h_1d_have_l1_pair_fdr_procedure_bh_override() -> None:
+    """[ADR pending: L1_REGISTRY_ADMISSION_RECALIBRATION Phase B] Measured:
+    98.9~99.8% of hard_eligible candidates were rejected only by the BY
+    harmonic penalty for 8h/12h/1d, with candidate pools dominated by 2-3
+    strategy families (33-67% top-family concentration) -- not independent
+    hypotheses, supporting plain BH."""
+    for tf in ("8h", "12h", "1d"):
+        assert _DEFAULT_PER_TF_GATE_OVERRIDES[tf]["l1_pair_fdr_procedure"] == "bh"
+
+
+def test_6h_l1_pair_fdr_procedure_not_adopted() -> None:
+    """6h is excluded from the FDR-procedure relaxation too -- consistent with
+    its cross-section exclusion, since its blocker is economic, not the FDR gate."""
+    assert "l1_pair_fdr_procedure" not in _DEFAULT_PER_TF_GATE_OVERRIDES.get("6h", {})
+
+
+def test_apply_tf_gate_overrides_fdr_procedure_adoption() -> None:
+    """Integration: apply_tf_gate_overrides(cfg, '12h') returns a config whose
+    l1_pair_fdr_procedure equals the adopted override value."""
+    cfg = CandidateStrategyConfig(l1_pair_fdr_procedure="by")
+    resolved = apply_tf_gate_overrides(cfg, "12h")
+    assert resolved.l1_pair_fdr_procedure == "bh"
 
 
 class TestLcbQuantileConfig:

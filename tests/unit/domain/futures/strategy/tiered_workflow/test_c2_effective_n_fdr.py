@@ -138,6 +138,62 @@ def test_by_q_values_m_eff_none_matches_default() -> None:
 
 
 # ---------------------------------------------------------------------------
+# S7 [ADR pending: L1_REGISTRY_ADMISSION_RECALIBRATION Phase B]: harmonic_override
+# switches Benjamini-Yekutieli (default) to plain Benjamini-Hochberg
+# ---------------------------------------------------------------------------
+
+
+def test_by_q_values_harmonic_override_matches_plain_bh() -> None:
+    """S1 (Happy Path): harmonic_override=1.0 reproduces a textbook plain-BH
+    q-value for the smallest p-value; harmonic_override=None (default) BY
+    q-values are never smaller than plain-BH (BY is more conservative)."""
+    # Arrange — 5 hypotheses, textbook BH example
+    p_values: NDArray[np.float64] = np.array([0.001, 0.01, 0.02, 0.04, 0.20], dtype=np.float64)
+
+    # Act
+    q_by = _by_q_values(p_values)  # default: BY harmonic
+    q_bh = _by_q_values(p_values, harmonic_override=1.0)  # plain BH
+
+    # Assert
+    assert np.all(q_bh <= q_by + 1e-9), "plain BH must never be more conservative than BY"
+    assert q_bh[0] == pytest.approx(0.001 * 5 / 1, abs=1e-9)
+
+
+def test_by_q_values_harmonic_override_none_matches_default() -> None:
+    """S2 (Regression): harmonic_override=None (default) is bit-identical to the
+    pre-change BY-only signature — proves the default path is untouched."""
+    # Arrange
+    p_values: NDArray[np.float64] = np.array([0.01, 0.03, 0.07, 0.12, 0.25], dtype=np.float64)
+
+    # Act
+    q_explicit_none = _by_q_values(p_values, harmonic_override=None)
+    q_omitted = _by_q_values(p_values)
+
+    # Assert
+    assert np.allclose(q_explicit_none, q_omitted, atol=1e-12)
+
+
+def test_by_q_values_harmonic_override_survives_large_pool_where_by_kills_everything() -> None:
+    """S4 (Integration): at realistic L1 pool size (m=300), one strongly
+    significant p-value survives FDR under plain BH but not under BY --
+    demonstrates the harmonic penalty's measured practical effect
+    (control-replay showed 98.9~99.8% FDR-rejection among hard_eligible
+    candidates for 8h/12h/1d at this pool size)."""
+    # Arrange — 1 strong signal + 299 null p-values uniform in (0.5, 1.0)
+    rng = np.random.default_rng(7)
+    p_values = np.concatenate([[0.0003], rng.uniform(0.5, 1.0, size=299)]).astype(np.float64)
+    alpha = 0.15
+
+    # Act
+    q_by = _by_q_values(p_values)
+    q_bh = _by_q_values(p_values, harmonic_override=1.0)
+
+    # Assert
+    assert q_bh[0] <= alpha, f"strong candidate should survive plain BH; q_bh[0]={q_bh[0]}"
+    assert q_by[0] > alpha, f"strong candidate should be killed by BY harmonic penalty; q_by[0]={q_by[0]}"
+
+
+# ---------------------------------------------------------------------------
 # S6: Bidirectional key lookup — b~a fallback when a~b absent
 # ---------------------------------------------------------------------------
 

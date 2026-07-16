@@ -510,6 +510,14 @@ class CandidateStrategyConfig:
     l1_pair_min_incremental_tstat: float = 1.96
     l1_pair_min_positive_fold_ratio: float = 0.60
     l1_pair_fdr_alpha: float = 0.15
+    # [ADR pending: L1_REGISTRY_ADMISSION_RECALIBRATION Phase B] "by" (default,
+    # zero behavior change) preserves the existing Benjamini-Yekutieli harmonic
+    # penalty; "bh" uses plain Benjamini-Hochberg (harmonic term=1), which is
+    # the standard, less conservative choice when candidates are known to be
+    # positively dependent (not arbitrary/adversarial) -- measured control-replay
+    # data shows L1 pair pools are dominated by 2-3 strategy families replicated
+    # across ~500 symbols each, not independent hypotheses.
+    l1_pair_fdr_procedure: Literal["by", "bh"] = "by"
     l1_breakeven_floor_bps: float = _DEFAULT_RT_BPS  # = ExecutionCostModel.round_trip_bps() ≈ 7.5bps
     l1_xs_alpha_admission_enabled: bool = False  # factor-level XS alpha admission gate
     l1_xs_admission_min_sharpe: float = 0.15  # min spread_sharpe for XS admission
@@ -565,7 +573,7 @@ class CandidateStrategyConfig:
     # ── L1 Gate Fairness ──
     l1_qw_floor: float = 0.05
     l1_qw_probe_boost: float = 0.3
-    per_tf_gate_overrides: dict[str, dict[str, float]] | None = None
+    per_tf_gate_overrides: dict[str, dict[str, float | str]] | None = None
     per_tf_gate_enabled: bool = False
     l2_master_tf: str | None = None
     l1_tfs: tuple[str, ...] = DEFAULT_L1_TFS
@@ -1186,7 +1194,7 @@ _WIDENED_PER_TF_FAMILIES: dict[str, tuple[str, ...]] = {
     ),
 }
 
-_DEFAULT_PER_TF_GATE_OVERRIDES: dict[str, dict[str, float]] = {
+_DEFAULT_PER_TF_GATE_OVERRIDES: dict[str, dict[str, float | str]] = {
     "1h": {
         "l1_pair_min_effective_obs": 3.0,
         "l1_min_sym_count": 4,
@@ -1225,20 +1233,48 @@ _DEFAULT_PER_TF_GATE_OVERRIDES: dict[str, dict[str, float]] = {
     # measurement), clipped to [1.0, 3.0] -- floor=1.0 is the HHI-based effective-N
     # theoretical minimum for a single firing symbol, ceiling=3.0 is today's flat
     # default so calibration may only relax slower TFs, never tighten them.
+    # [ADR pending: L1_REGISTRY_ADMISSION_RECALIBRATION Phase A] l1_min_cross_section
+    # below is measured, not guessed: calibrate_l1_symbol_breadth_gate.py
+    # measure_fold_min_ready_symbols_by_tf() control-replay p10 of raw
+    # len(ready_symbols) across non-registry_empty folds per TF, clipped to
+    # [1, 2] (int -- l1_min_cross_section is int-typed). 8h/12h/1d only:
+    # this is the fold-level counterpart to l1_min_effective_sym_n above --
+    # the pooled fix alone still let the fold-level raw-count floor (default
+    # 2, TF-flat) reject single-symbol folds (e.g. 12h LUNA2USDT +229bps,
+    # 1d JASMYUSDT +98.5bps) before they ever reached the pooled LCB stage.
+    # 6h is deliberately excluded: its non-empty folds show real negative
+    # gross edge (-54.45bps/-32.96bps), an economic blocker no gate
+    # relaxation should paper over (quant.md anti-curve-fitting).
+    #
+    # [ADR pending: L1_REGISTRY_ADMISSION_RECALIBRATION Phase B] l1_pair_fdr_procedure
+    # below is measured, not guessed: a control-replay instrumentation of
+    # compute_symbol_strategy_evidence showed 98.9~99.8% of already-hard_eligible
+    # candidates were rejected only by the Benjamini-Yekutieli harmonic penalty for
+    # 8h/12h/1d (vs 76% for 2h, which still admits 303 candidates from a much larger
+    # starting pool). The same measurement showed only 2-3 distinct strategy families
+    # (33-67% top-family concentration) account for every candidate pool (950-1515
+    # pairs), i.e. these are not independent hypotheses -- plain BH is the standard,
+    # less conservative choice under this known positive-dependence structure.
     "8h": {
         "l1_pair_min_effective_obs": 4.0,
         "l1_min_effective_sym_n": 2.0,
+        "l1_min_cross_section": 2,
+        "l1_pair_fdr_procedure": "bh",
     },
     "12h": {
         "l1_pair_min_effective_obs": 4.0,
         "l1_min_fold_ratio": 0.55,
         "l1_min_effective_sym_n": 1.0,
+        "l1_min_cross_section": 1,
+        "l1_pair_fdr_procedure": "bh",
     },
     "1d": {
         "l1_pair_min_effective_obs": 4.0,
         "l1_min_fold_ratio": 0.60,
         "l1_min_realized_match_ratio": 0.85,
         "l1_min_effective_sym_n": 1.0,
+        "l1_min_cross_section": 1,
+        "l1_pair_fdr_procedure": "bh",
     },
 }
 
@@ -1339,7 +1375,7 @@ def resolve_family_registration_gap(
     return tuple(f for f in all_families if f not in candidate_set)
 
 
-def resolve_tf_gate_overrides(cfg: CandidateStrategyConfig, tf: str) -> dict[str, float]:
+def resolve_tf_gate_overrides(cfg: CandidateStrategyConfig, tf: str) -> dict[str, float | str]:
     """Resolve gate threshold overrides for a given TF.
 
     Returns the raw override dict from per_tf_gate_overrides[tf] (instance-level),
