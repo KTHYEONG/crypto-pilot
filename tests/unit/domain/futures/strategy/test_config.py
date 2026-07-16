@@ -317,3 +317,59 @@ def test_default_per_tf_gate_overrides_covers_every_control_tf() -> None:
         assert "l1_pair_min_effective_obs" in _DEFAULT_PER_TF_GATE_OVERRIDES.get(tf, {}), (
             f"tf={tf} missing explicit l1_pair_min_effective_obs override -- falls back to global default"
         )
+
+
+def test_slow_tfs_have_l1_min_effective_sym_n_override() -> None:
+    """Phase A: 4h/6h/8h/12h/1d all have explicit l1_min_effective_sym_n entries."""
+    for tf in ("4h", "6h", "8h", "12h", "1d"):
+        assert "l1_min_effective_sym_n" in _DEFAULT_PER_TF_GATE_OVERRIDES.get(tf, {}), (
+            f"tf={tf} missing l1_min_effective_sym_n override"
+        )
+
+
+def test_apply_tf_gate_overrides_effective_sym_n_adoption() -> None:
+    """Scenario 4 (Integration): apply_tf_gate_overrides(cfg, '12h') returns config
+    whose l1_min_effective_sym_n equals the adopted override value."""
+    cfg = CandidateStrategyConfig(l1_min_effective_sym_n=3.0)
+    resolved = apply_tf_gate_overrides(cfg, "12h")
+    expected = _DEFAULT_PER_TF_GATE_OVERRIDES.get("12h", {}).get("l1_min_effective_sym_n", 3.0)
+    assert resolved.l1_min_effective_sym_n == pytest.approx(expected)
+
+
+def test_slow_tfs_l1_min_effective_sym_n_relaxed_below_flat_default() -> None:
+    """[ADR_20260716_L1_SLOW_TF_GATE_RECALIBRATION] Adopted values must not be a
+    no-op copy of the pre-existing flat default (3.0) for TFs where the measured
+    p10 (logs/futures/diagnostics/l1_symbol_breadth_calibration.json) supports
+    relaxation -- guards against silently reintroducing the single-symbol-signal
+    rejection bug for 8h/12h/1d."""
+    for tf, max_allowed in (("8h", 2.0), ("12h", 1.0), ("1d", 1.0)):
+        value = _DEFAULT_PER_TF_GATE_OVERRIDES[tf]["l1_min_effective_sym_n"]
+        assert value <= max_allowed, (
+            f"tf={tf} l1_min_effective_sym_n={value} was not relaxed below the flat "
+            f"default (3.0) despite measured calibration support"
+        )
+
+
+class TestLcbQuantileConfig:
+    """Validation tests for l1_lcb_quantile_* fields in CandidateStrategyConfig."""
+
+    def test_invalid_full_conf_le_floor_raises(self) -> None:
+        """S3: full_conf_blocks <= floor_blocks raises ValueError."""
+        with pytest.raises(ValueError, match="l1_lcb_quantile_full_conf_blocks"):
+            CandidateStrategyConfig(
+                l1_lcb_quantile_full_conf_blocks=2,
+                l1_lcb_quantile_floor_blocks=5,
+            )
+
+    def test_invalid_quantile_bounds_raises(self) -> None:
+        """S3: base > relaxed or out-of-(0,1) raises ValueError."""
+        with pytest.raises(ValueError, match="l1_lcb_quantile"):
+            CandidateStrategyConfig(l1_lcb_quantile_base=0.10, l1_lcb_quantile_relaxed=0.05)
+
+    def test_happy_path_defaults(self) -> None:
+        """Default values create valid config."""
+        cfg = CandidateStrategyConfig()
+        assert cfg.l1_lcb_quantile_base == pytest.approx(0.05)
+        assert cfg.l1_lcb_quantile_relaxed == pytest.approx(0.20)
+        assert cfg.l1_lcb_quantile_full_conf_blocks == 15
+        assert cfg.l1_lcb_quantile_floor_blocks == 3
