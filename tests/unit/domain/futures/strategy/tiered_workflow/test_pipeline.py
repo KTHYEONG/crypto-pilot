@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 from typing import Any
 from unittest.mock import MagicMock
 
@@ -10,6 +11,8 @@ import pytest
 from src.domain.futures.strategy.candidate_contracts import (
     Layer1GateReport,
     QualifiedSignalRegistry,
+    SignalSourceKey,
+    SymbolStrategyEvidence,
 )
 from src.domain.futures.strategy.config import CandidateStrategyConfig, PerTfL1Result
 from src.domain.futures.strategy.tiered_workflow.dataclasses import Layer1Result, StrategySignal
@@ -19,6 +22,7 @@ from src.domain.futures.strategy.tiered_workflow.pipeline import (
     _is_deployable_per_tf_result,
     _log_pertf_registry_diag,
     _resolve_l2_master_tf,
+    _resolve_l2_master_tf_from_prior,
     _resolve_labeled_events_for_tf,
     _resolve_layer1_deployment_passed,
     _resolve_selected_l1_tf,
@@ -83,6 +87,36 @@ def _mock_per_tf(
     m = MagicMock(spec=PerTfL1Result, tf=tf, l1_result=l1, n_winning_signals=n_winning_signals)
     m.l1_result = l1
     return m
+
+
+def _registry_with_family_diversity(
+    *, items_by_symbol: Mapping[str, tuple[str, ...]],
+) -> QualifiedSignalRegistry:
+    by_symbol = {
+        sym: tuple(
+            SymbolStrategyEvidence(
+                key=SignalSourceKey(symbol=sym, strategy_id=sid, activation_context="all"),
+                mean_gross_bps=50.0,
+                mean_incremental_bps=20.0,
+                p_value=0.02,
+                q_value=0.08,
+                positive_fold_ratio=0.8,
+                n_obs=200,
+                effective_n=150.0,
+                n_folds=4,
+                quality_weight=0.8,
+                lcb_net_bps=15.0,
+            )
+            for sid in strategy_ids
+        )
+        for sym, strategy_ids in items_by_symbol.items()
+    }
+    return QualifiedSignalRegistry(
+        by_symbol=by_symbol,
+        ready_symbols=tuple(items_by_symbol.keys()),
+        trade_scope_count=len(items_by_symbol),
+        registry_version="test",
+    )
 
 
 # ── _resolve_layer1_deployment_passed ────────────────────────────────
@@ -251,8 +285,15 @@ class TestResolveSelectedL1Tf:
 
 class TestResolveL2MasterTf:
     def test_s7_auto_master_selects_deployable_tf(self) -> None:
-        cfg = MagicMock(spec=CandidateStrategyConfig, l2_master_tf=None)
-        registry_8h = _registry(ready_symbols=("ETHUSDT",))
+        cfg = MagicMock(
+            spec=CandidateStrategyConfig,
+            l2_master_tf=None,
+            l2_master_min_ready_symbols=1,
+            l2_master_min_source_families=1,
+        )
+        registry_8h = _registry_with_family_diversity(items_by_symbol={
+            "ETHUSDT": ("family_a:v1",),
+        })
         per_tf = {
             "4h": _mock_per_tf(tf="4h", gate_passed=False, registry=None, n_winning_signals=100),
             "8h": _mock_per_tf(
@@ -323,8 +364,12 @@ class TestSelectRepresentativeL1Registry:
 
 class TestAggregatePerTfL1:
     def test_s9_atomicity_aggregate_uses_master_tf_registry(self) -> None:
-        registry_4h = _registry(ready_symbols=("BTCUSDT",))
-        registry_8h = _registry(ready_symbols=("ETHUSDT",))
+        registry_4h = _registry_with_family_diversity(items_by_symbol={
+            "BTCUSDT": ("family_a:v1",),
+        })
+        registry_8h = _registry_with_family_diversity(items_by_symbol={
+            "ETHUSDT": ("family_a:v1",),
+        })
         per_tf = {
             "4h": _mock_per_tf(
                 tf="4h", gate_passed=True, registry=registry_4h,
@@ -335,7 +380,12 @@ class TestAggregatePerTfL1:
                 n_winning_signals=100, strategy_panel_edge_bps=50.0,
             ),
         }
-        cfg = MagicMock(spec=CandidateStrategyConfig, l2_master_tf=None)
+        cfg = MagicMock(
+            spec=CandidateStrategyConfig,
+            l2_master_tf=None,
+            l2_master_min_ready_symbols=1,
+            l2_master_min_source_families=1,
+        )
         master_tf = _resolve_l2_master_tf(cfg, per_tf)
         assert master_tf == "8h"
 
@@ -455,3 +505,165 @@ def test_run_per_tf_l1_fails_on_oob_mismatch_entry_idx() -> None:
             cfg=cfg,
             seed=42,
         )
+
+
+class TestResolveL2MasterTfMasterEligibleGate:
+    def test_resolve_l2_master_tf_selects_highest_edge_quality_among_master_eligible(self) -> None:
+        cfg = MagicMock(
+            spec=CandidateStrategyConfig,
+            l2_master_tf=None,
+            l2_master_min_ready_symbols=5,
+            l2_master_min_source_families=2,
+        )
+        registry_4h = _registry_with_family_diversity(items_by_symbol={
+            f"SYM{i}": ("family_a:v1",) for i in range(5)
+        } | {"SYM5": ("family_b:v2",)})
+        registry_8h = _registry_with_family_diversity(items_by_symbol={
+            f"SYM{i}": ("family_a:v1",) for i in range(5)
+        } | {"SYM5": ("family_b:v2",)})
+        per_tf = {
+            "4h": _mock_per_tf(tf="4h", gate_passed=True, registry=registry_4h, strategy_panel_edge_bps=5.0),
+            "8h": _mock_per_tf(tf="8h", gate_passed=True, registry=registry_8h, strategy_panel_edge_bps=15.0),
+        }
+
+        master = _resolve_l2_master_tf(cfg, per_tf)
+
+        assert master == "8h"
+
+    def test_resolve_l2_master_tf_rejects_narrow_tf_favors_diversified_master_eligible_tf(self) -> None:
+        cfg = MagicMock(
+            spec=CandidateStrategyConfig,
+            l2_master_tf=None,
+            l2_master_min_ready_symbols=5,
+            l2_master_min_source_families=2,
+        )
+        registry_1d = _registry_with_family_diversity(items_by_symbol={
+            "BTCUSDT": ("btc_regime_pullback:slow",),
+            "ETHUSDT": ("btc_regime_pullback:slow",),
+            "SOLUSDT": ("trend_donchian:72",),
+        })
+        registry_4h = _registry_with_family_diversity(items_by_symbol={
+            f"SYM{i}": ("family_a:v1",) for i in range(4)
+        } | {"SYM4": ("family_b:v2",), "SYM5": ("family_b:v2",)})
+        per_tf = {
+            "1d": _mock_per_tf(tf="1d", gate_passed=True, registry=registry_1d, strategy_panel_edge_bps=100.0),
+            "4h": _mock_per_tf(tf="4h", gate_passed=True, registry=registry_4h, strategy_panel_edge_bps=5.0),
+        }
+
+        master = _resolve_l2_master_tf(cfg, per_tf)
+
+        assert master == "4h"
+
+    def test_resolve_l2_master_tf_raises_with_rejection_reasons_when_none_master_eligible(self) -> None:
+        cfg = MagicMock(
+            spec=CandidateStrategyConfig,
+            l2_master_tf=None,
+            l2_master_min_ready_symbols=5,
+            l2_master_min_source_families=2,
+        )
+        registry_1sym = _registry_with_family_diversity(items_by_symbol={"BTCUSDT": ("family_a:v1",)})
+        per_tf = {
+            "4h": _mock_per_tf(tf="4h", gate_passed=True, registry=registry_1sym, strategy_panel_edge_bps=5.0),
+            "8h": _mock_per_tf(tf="8h", gate_passed=True, registry=registry_1sym, strategy_panel_edge_bps=5.0),
+        }
+
+        with pytest.raises(TieredPipelineError, match=r"deployable.*timeframe") as exc_info:
+            _resolve_l2_master_tf(cfg, per_tf)
+        assert "ready_symbols 1 < 5" in str(exc_info.value)
+
+
+class TestResolveL2MasterTfFromPrior:
+    def test_reuses_prior_selected_timeframe_without_empty_dict_recompute(self) -> None:
+        cfg = MagicMock(spec=CandidateStrategyConfig, l2_master_tf=None)
+        prior = MagicMock(spec=Layer1Result, selected_timeframe="8h")
+
+        result = _resolve_l2_master_tf_from_prior(prior, cfg)
+
+        assert result == "8h"
+
+    def test_falls_back_to_fail_closed_when_prior_has_no_selected_timeframe(self) -> None:
+        cfg = MagicMock(spec=CandidateStrategyConfig, l2_master_tf=None)
+        prior = MagicMock(spec=Layer1Result, selected_timeframe=None)
+
+        with pytest.raises(TieredPipelineError, match=r"deployable.*timeframe"):
+            _resolve_l2_master_tf_from_prior(prior, cfg)
+
+
+class TestRunTieredPipelineSelectedTimeframe:
+    def test_run_tiered_pipeline_l1_only_populates_selected_timeframe(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """S4b: L1-only phase populates Layer1Result.selected_timeframe with the
+        auto-resolved master TF (was always None before this fix)."""
+        import datetime as _dt
+
+        from src.domain.futures.optimization.opt_config import LayeredWindow
+        from src.domain.futures.strategy.common.alignment import AlignedMarketData
+        from src.domain.futures.strategy.tiered_workflow.pipeline import run_tiered_pipeline
+
+        n_bars = 200
+        datetimes = (
+            np.datetime64("2024-01-01T00:00", "h") + np.arange(n_bars).astype("timedelta64[h]")
+        ).astype("datetime64[ns]")
+        aligned = AlignedMarketData(
+            datetimes=datetimes,
+            symbols=("BTCUSDT",),
+            open_2d=np.ones((n_bars, 1)),
+            high_2d=np.ones((n_bars, 1)),
+            low_2d=np.ones((n_bars, 1)),
+            close_2d=np.ones((n_bars, 1)),
+            volume_2d=np.ones((n_bars, 1)),
+            funding_2d=np.zeros((n_bars, 1)),
+            active_mask=np.ones(n_bars, dtype=bool),
+            warm_mask=np.ones(n_bars, dtype=bool),
+            entry_block_mask=np.zeros(n_bars, dtype=bool),
+            kill_mask=np.zeros(n_bars, dtype=bool),
+        )
+        window = LayeredWindow(
+            fetch_start=_dt.date(2024, 1, 1),
+            l1_start=_dt.date(2024, 1, 1),
+            l2_start=_dt.date(2024, 1, 5),
+            holdout_start=_dt.date(2024, 1, 6),
+            holdout_end=_dt.date(2024, 1, 8),
+            regime_floor=_dt.date(2024, 1, 1),
+        )
+        cfg = CandidateStrategyConfig(l2_master_tf=None, l2_master_min_ready_symbols=5, l2_master_min_source_families=2)
+
+        registry_8h = _registry_with_family_diversity(items_by_symbol={
+            f"SYM{i}": ("family_a:v1",) for i in range(5)
+        } | {"SYM5": ("family_b:v2",)})
+        per_tf_results = {
+            "4h": _mock_per_tf(tf="4h", gate_passed=False, registry=None),
+            "8h": _mock_per_tf(
+                tf="8h", gate_passed=True, registry=registry_8h, strategy_panel_edge_bps=15.0
+            ),
+        }
+
+        def _fake_run_per_tf_l1(*, tf: str, **_kwargs: Any) -> PerTfL1Result:
+            return per_tf_results[tf]
+
+        import src.domain.futures.strategy.tiered_workflow.pipeline as pipeline_module
+
+        monkeypatch.setattr(pipeline_module, "run_per_tf_l1", _fake_run_per_tf_l1)
+        monkeypatch.setattr(
+            "src.domain.futures.strategy.tiered_workflow.build_l1_nested_swf_folds",
+            lambda **_kwargs: (),
+        )
+
+        empty_events = pd.DataFrame({"entry_idx": []})
+        l1, l2, l3 = run_tiered_pipeline(
+            labeled_events=empty_events,
+            aligned=aligned,
+            cfg=cfg,
+            window=window,
+            l1_params={},
+            l2_params={},
+            target_phase="l1",
+            l1_tfs=("4h", "8h"),
+            labeled_events_by_tf={"4h": empty_events, "8h": empty_events},
+            verbose=False,
+        )
+
+        assert l1.selected_timeframe == "8h"
+        assert l2 is None
+        assert l3 is None

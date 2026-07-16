@@ -2855,10 +2855,10 @@ def _run_strategy_stage(
             _mem_l2_study = _get_rss_mb()
             _t_l2_study_start = time.perf_counter()
             from src.domain.futures.strategy.tiered_workflow.pipeline import (
-                _resolve_l2_master_tf,
+                _resolve_l2_master_tf_from_prior,
             )
 
-            l2_master_tf = _resolve_l2_master_tf(tiered_cfg, {})
+            l2_master_tf = _resolve_l2_master_tf_from_prior(l1_res, tiered_cfg)
             l2_study_result = _run_tiered_l2_study(
                 signal_batch=l2_signals,
                 aligned=aligned_tiered,
