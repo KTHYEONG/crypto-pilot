@@ -551,7 +551,12 @@ class CandidateStrategyConfig:
     l1_qualify_by_regime: bool = False  # False=전략단위 풀링, True=regime-cell 검증
     l1_activation_match_regime: bool = False  # OOS 발화 시 regime 일치 요구 여부
     # peer_exclusive=leave-self-out baseline; absolute=incremental==gross (D1)
-    l1_baseline_mode: Literal["peer_exclusive", "absolute"] = "peer_exclusive"
+    # NOTE: this default governs walk-forward SNAPSHOT admission (drives probe_lcb_bps
+    # structural gate). Deployment-time family-scoped admission is applied via
+    # compute_symbol_strategy_evidence's baseline_mode_override param instead of this
+    # default, to keep the snapshot-level OOS portfolio composition unaffected
+    # ([ADR pending: L1_BASELINE_FAMILY_SCOPED_ADMISSION regression fix]).
+    l1_baseline_mode: Literal["peer_exclusive", "peer_exclusive_family", "absolute"] = "peer_exclusive"
     l1_opp_ic_mode: Literal["cross_section", "time_series"] = "time_series"
     l1_min_opp_ic: float = 0.02
     l1_min_opp_tstat: float = 1.96
@@ -755,8 +760,8 @@ class CandidateStrategyConfig:
             raise ValueError("min_variant_oos_obs must be >= 1")
         if self.allocation_backend not in {"ensemble_b0", "ml_edge"}:
             raise ValueError("allocation_backend must be ensemble_b0 or ml_edge")
-        if self.l1_baseline_mode not in ("peer_exclusive", "absolute"):
-            raise ValueError("l1_baseline_mode must be 'peer_exclusive' or 'absolute'")
+        if self.l1_baseline_mode not in ("peer_exclusive", "peer_exclusive_family", "absolute"):
+            raise ValueError("l1_baseline_mode must be 'peer_exclusive', 'peer_exclusive_family', or 'absolute'")
         if self.ensemble_shrinkage_k <= 0.0:
             raise ValueError("ensemble_shrinkage_k must be positive")
         if self.ensemble_conditioning not in {"archetype_regime", "archetype_only", "auto"}:
