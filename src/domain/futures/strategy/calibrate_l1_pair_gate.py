@@ -16,11 +16,11 @@ from typing import Any, cast
 
 import numpy as np
 
-_PROJECT_ROOT = Path(__file__).resolve().parents[1]
+_PROJECT_ROOT = Path(__file__).resolve().parents[4]
 if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
-from scripts.run_l1_cross_tf_replay import _CONTROL_TFS, run_once  # noqa: E402
+from src.domain.futures.strategy.run_l1_cross_tf_replay import _CONTROL_TFS, run_once  # noqa: E402
 from src.domain.futures.strategy.tiered_workflow.cross_tf_diagnostics import STAGE_ORDER  # noqa: E402
 
 _FLOOR = 2.0
