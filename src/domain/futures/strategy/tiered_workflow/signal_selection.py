@@ -46,6 +46,8 @@ from src.domain.futures.strategy.tiered_workflow.metrics import (
     _one_sided_p_value,
     _series_tstat,
     moving_block_bootstrap_mean,
+    resolve_lcb_quantile,
+    resolve_num_blocks,
 )
 
 if TYPE_CHECKING:
@@ -580,7 +582,16 @@ def compute_symbol_strategy_evidence(
         probability_positive = (
             float(np.mean(boot_means > 0.0)) if boot_means.size > 0 else (1.0 if mean_incremental > 0.0 else 0.0)
         )
-        lcb_net = float(np.quantile(boot_means, 0.05)) if boot_means.size > 0 else mean_incremental
+        block_bars_eff = _resolve_block_bars_eff(cfg)
+        num_blocks = resolve_num_blocks(round(effective_n), block_bars_eff)
+        q = resolve_lcb_quantile(
+            num_blocks,
+            base_quantile=float(getattr(cfg, "l1_lcb_quantile_base", 0.05)),
+            relaxed_quantile=float(getattr(cfg, "l1_lcb_quantile_relaxed", 0.20)),
+            full_conf_blocks=int(getattr(cfg, "l1_lcb_quantile_full_conf_blocks", 15)),
+            floor_blocks=int(getattr(cfg, "l1_lcb_quantile_floor_blocks", 3)),
+        )
+        lcb_net = float(np.quantile(boot_means, q)) if boot_means.size > 0 else mean_incremental
         block_tstat = (
             float(mean_incremental / (np.std(boot_means, ddof=1) + 1e-12))
             if boot_means.size >= 2 and float(np.std(boot_means, ddof=1)) > 0.0
