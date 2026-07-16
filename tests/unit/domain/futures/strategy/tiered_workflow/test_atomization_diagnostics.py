@@ -82,7 +82,7 @@ def test_compute_incremental_bps_peer_exclusive_converges_to_zero() -> None:
     mean gross → each strategy's mean incremental converges to 0 (peer-
     cannibalization mathematical property). [LIMIT-01]
     """
-    rows: list[dict] = [
+    rows: list[dict[str, object]] = [
         {
             "gross_event_bps": 100.0,
             "symbol": "BTCUSDT",
@@ -157,3 +157,91 @@ def test_diagnose_strategy_atomization_zero_min_effective_obs() -> None:
     reports = diagnose_strategy_atomization(evidence, min_effective_obs=0.0)
     assert len(reports) == 1
     assert reports[0].n_cells_below_min_effective_obs == 0
+
+
+# ─── L1 Baseline Family-Scoped Admission (l1-baseline-family-scoped-admission.md) ──
+
+
+def _make_two_family_frame(
+    *,
+    family_a_gross: list[float],
+    family_b_gross: list[float],
+) -> pd.DataFrame:
+    _base = {"symbol": "BTCUSDT", "side": 1, "holding_bucket": 4,
+             "expected_holding_bars": 4, "fold_id": 0, "activation_context": "all"}
+    rows = [
+        {**_base, "strategy_id": "xs_momentum:v1", "family": "xs_momentum", "gross_event_bps": g}
+        for g in family_a_gross
+    ]
+    rows.extend(
+        {**_base, "strategy_id": "trend_donchian:donchian_72", "family": "trend_donchian", "gross_event_bps": g}
+        for g in family_b_gross
+    )
+    return pd.DataFrame(rows)
+
+
+def _make_same_family_frame(
+    *,
+    strat_a_gross: list[float],
+    strat_b_gross: list[float],
+) -> pd.DataFrame:
+    _base = {"symbol": "BTCUSDT", "side": 1, "holding_bucket": 4,
+             "expected_holding_bars": 4, "fold_id": 0, "activation_context": "all"}
+    rows = [
+        {**_base, "strategy_id": "trend_ma:ema_12_72", "family": "trend_ma", "gross_event_bps": g}
+        for g in strat_a_gross
+    ]
+    rows.extend(
+        {**_base, "strategy_id": "trend_ma:ema_6_36", "family": "trend_ma", "gross_event_bps": g}
+        for g in strat_b_gross
+    )
+    return pd.DataFrame(rows)
+
+
+# --- Scenario 1 (Happy Path): same-family variants produce identical
+#     incremental_bps under peer_exclusive_family and legacy peer_exclusive.
+def test_compute_incremental_bps_single_family_bucket_matches_legacy_peer_exclusive() -> None:
+    df = _make_same_family_frame(
+        strat_a_gross=[100.0] * 20,
+        strat_b_gross=[80.0] * 20,
+    )
+    inc_family = _compute_incremental_bps(df, mode="peer_exclusive_family")
+    inc_legacy = _compute_incremental_bps(df, mode="peer_exclusive")
+    pd.testing.assert_series_equal(inc_family, inc_legacy)
+
+
+# --- Scenario 2 (Edge Case, [LIMIT-01]/[LIMIT-02]): lone-family member
+#     gets no peer subtraction under peer_exclusive_family (peer_count==0
+#     fallback to absolute), but DOES get subtracted under legacy
+#     peer_exclusive which includes unrelated-family peers.
+def test_compute_incremental_bps_lone_family_member_falls_back_to_absolute_baseline() -> None:
+    """Lone-family member gets no peer subtraction under family mode
+    (peer_count==0 → absolute fallback). Legacy mode subtracts unrelated
+    higher-return peer mean → incremental washed down.
+    """
+    df = _make_two_family_frame(
+        family_a_gross=[15.0, 15.0, 15.0],
+        family_b_gross=[30.0, 30.0, 30.0],
+    )
+    inc_family = _compute_incremental_bps(df, mode="peer_exclusive_family")
+    inc_legacy = _compute_incremental_bps(df, mode="peer_exclusive")
+
+    # lone family member (xs_momentum): family-scoped → peer_count==0 → baseline=0
+    idx_a = df["strategy_id"] == "xs_momentum:v1"
+    assert (inc_family[idx_a] == df.loc[idx_a, "gross_event_bps"]).all()
+    # legacy: unrelated higher-return peers push baseline above gross → incremental < 0
+    assert (inc_legacy[idx_a] < 0).all()
+
+
+# --- Scenario 3 (Boundary, [LIMIT-02]): strategy_id without ':' separator
+#     degrades family to full strategy_id (no crash).
+def test_compute_incremental_bps_strategy_id_without_colon_uses_full_id_as_family() -> None:
+    rows = [
+        {"symbol": "BTCUSDT", "side": 1, "holding_bucket": 4,
+         "strategy_id": "legacyname", "family": "legacyname",
+         "gross_event_bps": 50.0},
+    ]
+    df = pd.DataFrame(rows)
+    inc = _compute_incremental_bps(df, mode="peer_exclusive_family")
+    assert not inc.empty
+    assert inc.iloc[0] == 50.0  # peer_count==0 → baseline=0

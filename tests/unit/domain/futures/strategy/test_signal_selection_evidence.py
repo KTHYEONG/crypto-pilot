@@ -503,3 +503,101 @@ def test_compute_symbol_strategy_evidence_small_n_relaxes_lcb_net_quantile() -> 
     )
 
     assert adaptive[0].lcb_net_bps >= baseline[0].lcb_net_bps
+
+
+# ─── L1 Baseline Family-Scoped Admission Integration (Scenario 4) ──────────
+
+
+def test_compute_symbol_strategy_evidence_lone_family_member_not_washed_out_by_unrelated_peers() -> None:
+    """Integration test: lone-family candidate not washed out under new default
+    (peer_exclusive_family), but IS washed out under legacy peer_exclusive.
+
+    The fixture models the measured 12h washout pattern:
+    xs_momentum:v1 (lone family member, gross ~10bps) shares a bucket with
+    trend_donchian:donchian_72 (unrelated family, gross ~25bps, higher
+    positive returns). Under legacy peer_exclusive the peer mean drags
+    xs_momentum's incremental below 0 → false no_incremental_edge rejection.
+    Under peer_exclusive_family family-of-one → peer_count=0 → baseline=0
+    → incremental == gross → no rejection.
+    """
+    rng = np.random.default_rng(42)
+    rows: list[dict[str, object]] = []
+    for g in rng.normal(10.0, 2.0, size=100).tolist():
+        rows.append({
+            "symbol": "BTCUSDT", "side": 1, "strategy_id": "xs_momentum:v1",
+            "gross_event_bps": g, "expected_holding_bars": 4,
+            "fold_id": (len(rows) // 20) % 5,
+        })
+    for g in rng.normal(25.0, 3.0, size=100).tolist():
+        rows.append({
+            "symbol": "BTCUSDT", "side": 1, "strategy_id": "trend_donchian:donchian_72",
+            "gross_event_bps": g, "expected_holding_bars": 4,
+            "fold_id": (len(rows) // 20) % 5,
+        })
+    df = pd.DataFrame(rows)
+
+    cfg_family = _make_cfg(l1_baseline_mode="peer_exclusive_family", l1_pair_min_incremental_bps=0.0,
+                            l1_pair_min_mean_gross_bps=0.0, l1_pair_min_positive_fold_ratio=0.0,
+                            l1_quality_weight_enabled=False, l1_pair_min_effective_obs=1.0,
+                            l1_pair_min_folds=1)
+    cfg_legacy = _make_cfg(l1_baseline_mode="peer_exclusive", l1_pair_min_incremental_bps=0.0,
+                           l1_pair_min_mean_gross_bps=0.0, l1_pair_min_positive_fold_ratio=0.0,
+                           l1_quality_weight_enabled=False, l1_pair_min_effective_obs=1.0,
+                           l1_pair_min_folds=1)
+
+    ev_family = compute_symbol_strategy_evidence(event_results=df, cfg=cfg_family, seed=42, registry_as_of_idx=999)
+    ev_legacy = compute_symbol_strategy_evidence(event_results=df, cfg=cfg_legacy, seed=42, registry_as_of_idx=999)
+
+    xs_family = next(e for e in ev_family if e.key.strategy_id == "xs_momentum:v1")
+    xs_legacy = next(e for e in ev_legacy if e.key.strategy_id == "xs_momentum:v1")
+
+    assert "no_incremental_edge" not in xs_family.structural_reasons
+    assert xs_family.mean_incremental_bps > 0
+    assert xs_legacy.mean_incremental_bps < 0  # washed out by unrelated peers
+    assert "no_incremental_edge" in xs_legacy.structural_reasons
+
+
+def test_compute_symbol_strategy_evidence_baseline_mode_override_takes_precedence_over_cfg() -> None:
+    """[ADR pending: L1_BASELINE_FAMILY_SCOPED_ADMISSION regression fix]
+
+    baseline_mode_override, when passed, must win over cfg.l1_baseline_mode --
+    this is how the deployment call site applies family-scoped admission without
+    touching walk-forward snapshot calls (which omit the override and therefore
+    keep using cfg.l1_baseline_mode's plain 'peer_exclusive' default).
+    """
+    rng = np.random.default_rng(42)
+    rows: list[dict[str, object]] = []
+    for g in rng.normal(10.0, 2.0, size=100).tolist():
+        rows.append({
+            "symbol": "BTCUSDT", "side": 1, "strategy_id": "xs_momentum:v1",
+            "gross_event_bps": g, "expected_holding_bars": 4,
+            "fold_id": (len(rows) // 20) % 5,
+        })
+    for g in rng.normal(25.0, 3.0, size=100).tolist():
+        rows.append({
+            "symbol": "BTCUSDT", "side": 1, "strategy_id": "trend_donchian:donchian_72",
+            "gross_event_bps": g, "expected_holding_bars": 4,
+            "fold_id": (len(rows) // 20) % 5,
+        })
+    df = pd.DataFrame(rows)
+
+    # cfg default is now plain "peer_exclusive" (post-regression-fix) -- override must
+    # still force family-scoped behavior for this call.
+    cfg_default = _make_cfg(l1_baseline_mode="peer_exclusive", l1_pair_min_incremental_bps=0.0,
+                             l1_pair_min_mean_gross_bps=0.0, l1_pair_min_positive_fold_ratio=0.0,
+                             l1_quality_weight_enabled=False, l1_pair_min_effective_obs=1.0,
+                             l1_pair_min_folds=1)
+
+    ev_no_override = compute_symbol_strategy_evidence(
+        event_results=df, cfg=cfg_default, seed=42, registry_as_of_idx=999,
+    )
+    ev_with_override = compute_symbol_strategy_evidence(
+        event_results=df, cfg=cfg_default, seed=42, registry_as_of_idx=999,
+        baseline_mode_override="peer_exclusive_family",
+    )
+
+    xs_no_override = next(e for e in ev_no_override if e.key.strategy_id == "xs_momentum:v1")
+    xs_with_override = next(e for e in ev_with_override if e.key.strategy_id == "xs_momentum:v1")
+
+    assert "no_incremental_edge" in xs_no_override.structural_reasons  # cfg default: washed out
+    assert "no_incremental_edge" not in xs_with_override.structural_reasons  # override: rescued
