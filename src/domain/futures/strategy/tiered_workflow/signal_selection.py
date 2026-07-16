@@ -734,19 +734,37 @@ def compute_symbol_strategy_evidence(
         )
         raw_p_values.append(p_value)
         t_qualify_total += time.perf_counter() - t_qf
-    # C2: effective-N correction for correlated probe TF hypotheses
-    _m_eff: float | None = None
-    if probe_diversity_corr is not None and raw_p_values:
-        _m_eff = _compute_probe_m_eff(
-            groups=[(e.key.symbol, e.key.strategy_id, str(e.key.activation_context)) for e in evidence_list],
-            diversity_corr=probe_diversity_corr,
-        )
-    _fdr_procedure = str(getattr(cfg, "l1_pair_fdr_procedure", "by"))
-    q_values = _by_q_values(
-        np.asarray(raw_p_values, dtype=np.float64),
-        m_eff=_m_eff,
-        harmonic_override=1.0 if _fdr_procedure == "bh" else None,
+    # [ADR pending: L1_FDR_HARD_ELIGIBLE_SCOPING] FDR correction restricted to the
+    # hard_eligible subset -- structurally-doomed candidates were previously counted
+    # in the multiple-testing correction denominator m, inflating q-values for the few
+    # real candidates without providing any actual false-discovery protection (those
+    # candidates are already excluded via hard_eligible=False regardless of q_value).
+    hard_eligible_idx = np.asarray(
+        [i for i, e in enumerate(evidence_list) if e.hard_eligible], dtype=np.int64,
     )
+    q_values = np.ones(len(evidence_list), dtype=np.float64)
+    if hard_eligible_idx.size > 0:
+        _m_eff_hard: float | None = None
+        if probe_diversity_corr is not None:
+            _m_eff_hard = _compute_probe_m_eff(
+                groups=[
+                    (
+                        evidence_list[i].key.symbol,
+                        evidence_list[i].key.strategy_id,
+                        str(evidence_list[i].key.activation_context),
+                    )
+                    for i in hard_eligible_idx
+                ],
+                diversity_corr=probe_diversity_corr,
+            )
+        _fdr_procedure = str(getattr(cfg, "l1_pair_fdr_procedure", "by"))
+        _raw_p_hard = np.asarray(raw_p_values, dtype=np.float64)[hard_eligible_idx]
+        q_hard = _by_q_values(
+            _raw_p_hard,
+            m_eff=_m_eff_hard,
+            harmonic_override=1.0 if _fdr_procedure == "bh" else None,
+        )
+        q_values[hard_eligible_idx] = q_hard
     final_evidence: list[SymbolStrategyEvidence] = []
     for idx, evidence in enumerate(evidence_list):
         q_value = float(q_values[idx])
