@@ -476,6 +476,7 @@ def compute_symbol_strategy_evidence(
     xs_admission: dict[str, XsAdmissionBasis] | None = None,
     effective_n_sink: EffectiveNSink | None = None,
     baseline_mode_override: Literal["peer_exclusive", "peer_exclusive_family", "absolute"] | None = None,
+    fdr_hard_reject_override: bool | None = None,
 ) -> tuple[SymbolStrategyEvidence, ...]:
     """Compute per-source signal evidence from event-level OOS results.
 
@@ -488,6 +489,12 @@ def compute_symbol_strategy_evidence(
     deployment-evidence call site to apply family-scoped baseline admission without altering
     walk-forward SNAPSHOT calls (which drive the probe_lcb_bps structural gate and must keep
     cfg.l1_baseline_mode's plain default to avoid changing OOS portfolio composition).
+
+    fdr_hard_reject_override, when set, takes precedence over cfg.l1_fdr_hard_reject for
+    this call only -- mirrors baseline_mode_override's precedence semantics. The walk-forward
+    SNAPSHOT call site passes False (soft FDR scaling) so slow-TF early folds are not silenced
+    by registry_empty before any OOS economics are measured; the deployment call site omits it,
+    keeping strict hard-reject for the one final, consequential admission decision.
     """
     if event_results.empty:
         return ()
@@ -745,7 +752,11 @@ def compute_symbol_strategy_evidence(
         q_value = float(q_values[idx])
         diag_flags = list(evidence.diagnostic_flags)
         quality_weight = evidence.quality_weight
-        fdr_hard = bool(getattr(cfg, "l1_fdr_hard_reject", False))
+        fdr_hard = (
+            fdr_hard_reject_override
+            if fdr_hard_reject_override is not None
+            else bool(getattr(cfg, "l1_fdr_hard_reject", True))
+        )
         if q_value > float(cfg.l1_pair_fdr_alpha):
             diag_flags.append("fdr_reject")
             if fdr_hard:

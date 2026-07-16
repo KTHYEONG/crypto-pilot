@@ -546,6 +546,7 @@ def build_l1_prequential_evidence_snapshots(
             seed=seed + snapshot_offset,
             registry_as_of_idx=as_of_idx,
             snapshot_index=snapshot_offset,
+            fdr_hard_reject_override=False,
         )
         _registry = build_qualified_signal_registry(
             evidence=_evidence,
