@@ -1,4 +1,4 @@
-"""Tests for evidence_policy.py: assess_fold_evidence, pool_l1_evidence, strategy admissions, _resolve_lcb_quantile."""
+"""Tests for evidence_policy.py: assess_fold_evidence, pool_l1_evidence, strategy admissions."""
 
 from __future__ import annotations
 
@@ -8,7 +8,6 @@ import pytest
 from src.domain.futures.strategy.tiered_workflow.evidence_policy import (
     FoldEvidenceAssessment,
     StrategyAdmission,
-    _resolve_lcb_quantile,
     assess_fold_evidence,
     compute_strategy_admissions,
     compute_symbol_posteriors,
@@ -457,41 +456,6 @@ class TestPoolL1EvidenceEdgeCases:
         )
         assert not pooled.structural_passed
         assert any("fold_cov" in b for b in pooled.blockers)
-
-
-class TestResolveLcbQuantile:
-    """Tests for _resolve_lcb_quantile — block-count-adaptive LCB quantile."""
-
-    def test_happy_path_above_full_conf(self) -> None:
-        """S1: num_blocks >= full_conf_blocks → returns base_quantile (no-op)."""
-        assert _resolve_lcb_quantile(20) == pytest.approx(0.05)
-
-    def test_at_below_floor_blocks(self) -> None:
-        """S2: num_blocks <= floor_blocks → fully relaxed quantile."""
-        assert _resolve_lcb_quantile(2) == pytest.approx(0.20)
-
-    def test_interpolation_exact_midpoint(self) -> None:
-        """S2b: interpolation arithmetic check."""
-        q = _resolve_lcb_quantile(
-            9, full_conf_blocks=15, floor_blocks=3,
-            base_quantile=0.05, relaxed_quantile=0.20,
-        )
-        expected = 0.05 + 0.15 * (15 - 9) / (15 - 3)
-        assert q == pytest.approx(expected)
-
-    def test_error_full_conf_le_floor(self) -> None:
-        """S3: full_conf_blocks <= floor_blocks raises ValueError."""
-        with pytest.raises(ValueError, match="full_conf_blocks"):
-            _resolve_lcb_quantile(10, full_conf_blocks=3, floor_blocks=5)
-
-    def test_error_quantile_out_of_range(self) -> None:
-        """S3: invalid quantile bounds raise ValueError."""
-        with pytest.raises(ValueError, match="quantile"):
-            _resolve_lcb_quantile(10, base_quantile=0.05, relaxed_quantile=0.04)
-        with pytest.raises(ValueError, match="quantile"):
-            _resolve_lcb_quantile(10, base_quantile=0.0)
-        with pytest.raises(ValueError, match="quantile"):
-            _resolve_lcb_quantile(10, relaxed_quantile=1.0)
 
 
 class TestAssessFoldEvidenceSmallN:

@@ -576,6 +576,30 @@ def resolve_num_blocks(n_clusters: int, block_bars: int) -> int:
     return max(1, (max(0, int(n_clusters)) + block - 1) // block)
 
 
+def resolve_lcb_quantile(
+    num_blocks: int,
+    *,
+    base_quantile: float = 0.05,
+    relaxed_quantile: float = 0.20,
+    full_conf_blocks: int = 15,
+    floor_blocks: int = 3,
+) -> float:
+    if full_conf_blocks <= floor_blocks:
+        raise ValueError(
+            f"full_conf_blocks ({full_conf_blocks}) must be > floor_blocks ({floor_blocks})"
+        )
+    if not (0.0 < base_quantile <= relaxed_quantile < 1.0):
+        raise ValueError(
+            f"quantile must satisfy 0 < base ({base_quantile}) <= relaxed ({relaxed_quantile}) < 1"
+        )
+    if num_blocks >= full_conf_blocks:
+        return base_quantile
+    if num_blocks <= floor_blocks:
+        return relaxed_quantile
+    frac = float(full_conf_blocks - num_blocks) / float(full_conf_blocks - floor_blocks)
+    return base_quantile + (relaxed_quantile - base_quantile) * frac
+
+
 def _series_tstat(values: NDArray[np.float64]) -> float:
     if values.size < 2:
         return 0.0
