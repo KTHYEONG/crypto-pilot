@@ -169,7 +169,8 @@
       "tests/unit/domain/futures/strategy/test_signal_selection_evidence.py",
       "tests/unit/domain/futures/strategy/tiered_workflow/test_pipeline.py",
       "tests/unit/domain/futures/strategy/tiered_workflow/test_l0_delivery_routing.py",
-      "tests/unit/domain/futures/strategy/tiered_workflow/test_per_tf_architecture.py"
+      "tests/unit/domain/futures/strategy/tiered_workflow/test_per_tf_architecture.py",
+      "tests/unit/domain/futures/strategy/tiered_workflow/test_atomization_diagnostics.py"
     ]
   },
   "src/domain/futures/strategy/config.py": {
