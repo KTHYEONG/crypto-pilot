@@ -3228,17 +3228,52 @@ def _resolve_l2_master_tf(
             f"configured l2_master_tf={cfg.l2_master_tf} is not deployable"
         )
 
-    eligible = {
-        tf: result
+    readiness_by_tf: dict[str, L1TfHandoffReadiness] = {
+        tf: assess_l1_tf_handoff(
+            result,
+            min_ready_symbols=cfg.l2_master_min_ready_symbols,
+            min_source_families=cfg.l2_master_min_source_families,
+        )
         for tf, result in per_tf_l1.items()
-        if _is_deployable_per_tf_result(result)
     }
-    if eligible:
-        best_tf = max(eligible, key=lambda t: _tf_edge_quality(eligible[t]))
-        if _tf_edge_quality(eligible[best_tf]) > 0.0:
-            return best_tf
+    if logger.isEnabledFor(logging.DEBUG):
+        _log_master_tf_rejection_diag(readiness_by_tf)
 
-    raise TieredPipelineError("no deployable timeframe found for L2 master TF")
+    master_candidates = {tf: r for tf, r in readiness_by_tf.items() if r.master_eligible}
+    if master_candidates:
+        return max(master_candidates, key=lambda t: master_candidates[t].edge_quality)
+
+    reasons = {tf: (",".join(r.rejection_reasons) or "none") for tf, r in readiness_by_tf.items()}
+    raise TieredPipelineError(
+        f"no deployable timeframe found for L2 master TF; rejection_reasons={reasons}"
+    )
+
+
+def _log_master_tf_rejection_diag(
+    readiness_by_tf: dict[str, L1TfHandoffReadiness],
+) -> None:
+    for tf, r in readiness_by_tf.items():
+        logger.debug(
+            "[ALGO] tf=%s master_eligible=%s auxiliary_eligible=%s "
+            "ready_symbol_count=%d source_family_count=%d edge_quality=%.3f "
+            "rejection_reasons=%s",
+            tf,
+            r.master_eligible,
+            r.auxiliary_eligible,
+            r.ready_symbol_count,
+            r.source_family_count,
+            r.edge_quality,
+            ",".join(r.rejection_reasons) if r.rejection_reasons else "none",
+        )
+
+
+def _resolve_l2_master_tf_from_prior(
+    prior: Layer1Result,
+    cfg: CandidateStrategyConfig,
+) -> str:
+    if prior.selected_timeframe:
+        return prior.selected_timeframe
+    return _resolve_l2_master_tf(cfg, {})
 
 
 def _select_representative_l1_registry(
@@ -3398,7 +3433,7 @@ def run_tiered_pipeline(
     _l2_tf_resolved: str = ""
     if l1_result_override is not None:
         l1 = l1_result_override
-        l2_tf = _resolve_l2_master_tf(cfg, {})
+        l2_tf = _resolve_l2_master_tf_from_prior(l1_result_override, cfg)
     else:
         _l2_date_resolved: date | None = (
             window.l2_start
@@ -3519,13 +3554,14 @@ def run_tiered_pipeline(
             l1,
             validation_parity_capture=_capture,
             validation_parity_report=_l1_report,
+            selected_timeframe=_l2_tf_resolved,
         )
         per_tf_l1.clear()
         gc.collect()
         _rss_after_agg = _get_rss_mb()
         logger.debug("[MEM] stage=aggregate_l1 rss=%.0fMB", _rss_after_agg)
 
-    l2_tf = _l2_tf_resolved if l1_result_override is None else _resolve_l2_master_tf(cfg, {})
+    l2_tf = _l2_tf_resolved if l1_result_override is None else _resolve_l2_master_tf_from_prior(l1_result_override, cfg)
     logger.log(PERF, "[PERF] run_tiered_pipeline_l1_total took=%.4fs", time.perf_counter() - t_l1)
 
     if not l1.gate_passed:
