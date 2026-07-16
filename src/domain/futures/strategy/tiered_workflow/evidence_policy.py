@@ -13,7 +13,11 @@ import numpy as np
 import scipy.stats as stats
 from numpy.typing import NDArray
 
-from src.domain.futures.strategy.tiered_workflow.metrics import moving_block_bootstrap_mean, resolve_num_blocks
+from src.domain.futures.strategy.tiered_workflow.metrics import (
+    moving_block_bootstrap_mean,
+    resolve_lcb_quantile,
+    resolve_num_blocks,
+)
 
 FoldEvidenceState: TypeAlias = Literal[
     "invalid_contract",
@@ -287,30 +291,6 @@ def compute_symbol_posteriors(
     return tuple(post_list)
 
 
-def _resolve_lcb_quantile(
-    num_blocks: int,
-    *,
-    base_quantile: float = 0.05,
-    relaxed_quantile: float = 0.20,
-    full_conf_blocks: int = 15,
-    floor_blocks: int = 3,
-) -> float:
-    if full_conf_blocks <= floor_blocks:
-        raise ValueError(
-            f"full_conf_blocks ({full_conf_blocks}) must be > floor_blocks ({floor_blocks})"
-        )
-    if not (0.0 < base_quantile <= relaxed_quantile < 1.0):
-        raise ValueError(
-            f"quantile must satisfy 0 < base ({base_quantile}) <= relaxed ({relaxed_quantile}) < 1"
-        )
-    if num_blocks >= full_conf_blocks:
-        return base_quantile
-    if num_blocks <= floor_blocks:
-        return relaxed_quantile
-    frac = float(full_conf_blocks - num_blocks) / float(full_conf_blocks - floor_blocks)
-    return base_quantile + (relaxed_quantile - base_quantile) * frac
-
-
 def assess_fold_evidence(
     *,
     fold_id: int,
@@ -403,7 +383,7 @@ def assess_fold_evidence(
         )
         if boot.size > 0:
             num_blocks = resolve_num_blocks(n, block_bars)
-            q = _resolve_lcb_quantile(
+            q = resolve_lcb_quantile(
                 num_blocks,
                 base_quantile=lcb_quantile_base,
                 relaxed_quantile=lcb_quantile_relaxed,
@@ -510,7 +490,7 @@ def pool_l1_evidence(
         )
         if pooled_boot.size > 0:
             num_blocks = resolve_num_blocks(pooled_arr.size, block_bars)
-            q = _resolve_lcb_quantile(
+            q = resolve_lcb_quantile(
                 num_blocks,
                 base_quantile=lcb_quantile_base,
                 relaxed_quantile=lcb_quantile_relaxed,
