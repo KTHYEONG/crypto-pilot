@@ -1,5 +1,10 @@
 # Active Decisions Log (Sliding Window)
 
+## [2026-07-16] [TASK_L1_L2_MASTER_TF_HANDOFF_WIRING] [ADR_20260716_L1_L2_MASTER_TF_HANDOFF_WIRING]
+- **Context/Why:** L1 7개 TF 전부 PASS했음에도 L2가 TieredPipelineError(no deployable timeframe found for L2 master TF)로 fail-closed됨. 원인 2가지: (1) _resolve_l2_master_tf(cfg, {})가 empty per_tf_l1 dict로 호출되는 3개 프로덕션 콜사이트(pipeline.py 2곳, active_pipeline.py 1곳)가 override 유무와 무관하게 항상 실패, (2) 자동선택 분기가 assess_l1_tf_handoff의 master/auxiliary readiness(breadth+family diversity+finite positive edge)를 배선하지 않고 legacy _is_deployable_per_tf_result만 사용.
+- **Resolution/What:** Layer1Result.selected_timeframe(기존 미사용 필드)를 run_tiered_pipeline의 실제 per-TF 계산 분기에서 채우고, 신규 _resolve_l2_master_tf_from_prior 헬퍼가 empty-dict 재계산 대신 이 값을 재사용하도록 3개 콜사이트를 교체. _resolve_l2_master_tf 자동선택 분기는 assess_l1_tf_handoff(min_ready_symbols=cfg.l2_master_min_ready_symbols, min_source_families=cfg.l2_master_min_source_families, 기존 config 필드 재사용) 기반 master_eligible 필터로 교체하고 rejection reason을 [ALGO] trace로 기록.
+- **Impact:** 동일 cutoff/seed(2026-07-16, seed=42) replay 재실행 결과 fail-closed 재발 없이 L2 최종 시뮬레이션까지 완주 확인(master_tf=8h 자동선정, CAGR +61.2%/Sharpe 2.026/MDD 19.9%, Uplift 게이트 1개만 미달). L1 7개 TF 수치는 수정 전과 완전 동일(회귀 없음). lean_check.py 전 구간 PASS(spec-compliance 포함, Cov 17%). NO-CRISIS-WINDOW 캐비아트로 이번 replay 수치의 production 승격 근거 사용은 금지.
+
 ## [2026-07-16] [L1_L2_NATIVE_TF_SPEC_CLEANUP] [ADR_20260716_L1_L2_NATIVE_TF_SPEC_CLEANUP]
 - **Context/Why:** The native-TF handoff implementation, regression checks, ADR, and replay report are complete; the working spec must not remain active.
 - **Resolution/What:** Removed the completed implementation blueprint and contract JSON from docs/specs.
@@ -69,8 +74,3 @@
 - **Context/Why:** 느린 시간프레임의 L0 Cheap Gate 차단 및 4h 강결합을 해소하기 위해, 달력일수와 하루평균 최소 빈도에 기반한 동적 밀도 스케일러를 도입함.
 - **Resolution/What:** contracts.py와 cheap_gate.py에서 oos_window_days를 datetimes로부터 자동 추출하고 daily_event_density와 daily_effective_n_density를 기반으로 임계값을 비례 스케일링하며 archetype/family 최소 하한값을 max 필터링으로 융합 적용함.
 - **Impact:** 실측 Replay 통과. 4h 유효 신호 12➔34개로 대폭 증가, 2h 74➔77개로 증가. 6h의 비정상 -inf 및 sym_count 블로커가 정상적인 경제성 LCB (-40.4bps) 필터링으로 정상화됨.
-
-## [2026-07-15] [TASK_L0_L1_DYNAMIC_COST_CAUSAL_FEEDBACK] [ADR_20260715_L0_L1_DYNAMIC_COST_CAUSAL_FEEDBACK]
-- **Context/Why:** 느린 TF들의 L1 블로킹을 해소하기 위한 펀딩/슬리피지 동적 비용 모델과, look-ahead free causal feedback loop의 부재를 해결하기 위함.
-- **Resolution/What:** Layer1FoldReadiness 필드를 확장하여 dynamic_funding_cost_bps, dynamic_execution_cost_bps 등을 추가하고 signal_selection.py에서 이를 연동하여 fold LCB 경제성을 동적으로 계산하도록 구현함.
-- **Impact:** 실측 4-run Sequential Replay 완주 확인. Peak RSS 9.4GB로 안정화. 1h 및 2h PASS, 4h WARNING, 6h~1d는 registry_empty로 BLOCKED 상태 유지. 아블레이션 후 L1 최종 결과가 control과 100% 동일하게 수렴되어 인과성 검증 완료.
