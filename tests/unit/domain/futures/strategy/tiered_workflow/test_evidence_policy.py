@@ -1,4 +1,4 @@
-"""Tests for evidence_policy.py: assess_fold_evidence, pool_l1_evidence, strategy admissions."""
+"""Tests for evidence_policy.py: assess_fold_evidence, pool_l1_evidence, strategy admissions, _resolve_lcb_quantile."""
 
 from __future__ import annotations
 
@@ -8,6 +8,7 @@ import pytest
 from src.domain.futures.strategy.tiered_workflow.evidence_policy import (
     FoldEvidenceAssessment,
     StrategyAdmission,
+    _resolve_lcb_quantile,
     assess_fold_evidence,
     compute_strategy_admissions,
     compute_symbol_posteriors,
@@ -456,3 +457,104 @@ class TestPoolL1EvidenceEdgeCases:
         )
         assert not pooled.structural_passed
         assert any("fold_cov" in b for b in pooled.blockers)
+
+
+class TestResolveLcbQuantile:
+    """Tests for _resolve_lcb_quantile — block-count-adaptive LCB quantile."""
+
+    def test_happy_path_above_full_conf(self) -> None:
+        """S1: num_blocks >= full_conf_blocks → returns base_quantile (no-op)."""
+        assert _resolve_lcb_quantile(20) == pytest.approx(0.05)
+
+    def test_at_below_floor_blocks(self) -> None:
+        """S2: num_blocks <= floor_blocks → fully relaxed quantile."""
+        assert _resolve_lcb_quantile(2) == pytest.approx(0.20)
+
+    def test_interpolation_exact_midpoint(self) -> None:
+        """S2b: interpolation arithmetic check."""
+        q = _resolve_lcb_quantile(
+            9, full_conf_blocks=15, floor_blocks=3,
+            base_quantile=0.05, relaxed_quantile=0.20,
+        )
+        expected = 0.05 + 0.15 * (15 - 9) / (15 - 3)
+        assert q == pytest.approx(expected)
+
+    def test_error_full_conf_le_floor(self) -> None:
+        """S3: full_conf_blocks <= floor_blocks raises ValueError."""
+        with pytest.raises(ValueError, match="full_conf_blocks"):
+            _resolve_lcb_quantile(10, full_conf_blocks=3, floor_blocks=5)
+
+    def test_error_quantile_out_of_range(self) -> None:
+        """S3: invalid quantile bounds raise ValueError."""
+        with pytest.raises(ValueError, match="quantile"):
+            _resolve_lcb_quantile(10, base_quantile=0.05, relaxed_quantile=0.04)
+        with pytest.raises(ValueError, match="quantile"):
+            _resolve_lcb_quantile(10, base_quantile=0.0)
+        with pytest.raises(ValueError, match="quantile"):
+            _resolve_lcb_quantile(10, relaxed_quantile=1.0)
+
+
+class TestAssessFoldEvidenceSmallN:
+    """Small-n integration: adaptive quantile should raise LCB vs fixed baseline."""
+
+    def test_small_n_relaxed_quantile_raises_lcb(self) -> None:
+        """S4: small N (n=8, block_bars=6 → num_blocks=2) → relaxed quantile > base."""
+        rng = np.random.default_rng(7)
+        gross = np.full(8, 50.0) + rng.normal(0, 5.0, size=8)
+        exec_cost = np.full(8, 7.5)
+        funding = np.zeros(8)
+        cost_obs = np.ones(8, dtype=bool)
+        funding_obs = np.ones(8, dtype=bool)
+
+        adaptive = assess_fold_evidence(
+            fold_id=0, gross_series_bps=gross, execution_cost_bps=exec_cost,
+            funding_cost_bps=funding, matched_event_count=8, unmatched_event_count=0,
+            decision_count=8, effective_symbol_count=1.0, cost_observed=cost_obs,
+            funding_observed=funding_obs, min_matched_events=1, min_match_wilson_lcb=0.0,
+            min_decision_count=1, max_cost_fallback_ratio=1.0, min_funding_coverage_ratio=0.0,
+            block_bars=6, n_bootstrap=500, seed=42,
+        )
+        baseline = assess_fold_evidence(
+            fold_id=0, gross_series_bps=gross, execution_cost_bps=exec_cost,
+            funding_cost_bps=funding, matched_event_count=8, unmatched_event_count=0,
+            decision_count=8, effective_symbol_count=1.0, cost_observed=cost_obs,
+            funding_observed=funding_obs, min_matched_events=1, min_match_wilson_lcb=0.0,
+            min_decision_count=1, max_cost_fallback_ratio=1.0, min_funding_coverage_ratio=0.0,
+            block_bars=6, n_bootstrap=500, seed=42,
+            lcb_quantile_floor_blocks=0,
+        )
+
+        assert adaptive.net_mean_bps == pytest.approx(baseline.net_mean_bps)
+        assert adaptive.net_lcb_bps is not None
+        assert baseline.net_lcb_bps is not None
+        assert adaptive.net_lcb_bps > baseline.net_lcb_bps
+
+    def test_large_n_regression_against_fixed_quantile(self) -> None:
+        """S5: large N (n=200, block_bars=6 → num_blocks>>15) → bit-identical to fixed 0.05."""
+        rng = np.random.default_rng(42)
+        gross = np.full(200, 20.0) + rng.normal(0, 10.0, size=200)
+        exec_cost = np.full(200, 7.5)
+        funding = np.zeros(200)
+        cost_obs = np.ones(200, dtype=bool)
+        funding_obs = np.ones(200, dtype=bool)
+
+        adaptive = assess_fold_evidence(
+            fold_id=0, gross_series_bps=gross, execution_cost_bps=exec_cost,
+            funding_cost_bps=funding, matched_event_count=200, unmatched_event_count=0,
+            decision_count=200, effective_symbol_count=10.0, cost_observed=cost_obs,
+            funding_observed=funding_obs, min_matched_events=1, min_match_wilson_lcb=0.0,
+            min_decision_count=1, max_cost_fallback_ratio=1.0, min_funding_coverage_ratio=0.0,
+            block_bars=6, n_bootstrap=500, seed=42,
+        )
+        baseline = assess_fold_evidence(
+            fold_id=0, gross_series_bps=gross, execution_cost_bps=exec_cost,
+            funding_cost_bps=funding, matched_event_count=200, unmatched_event_count=0,
+            decision_count=200, effective_symbol_count=10.0, cost_observed=cost_obs,
+            funding_observed=funding_obs, min_matched_events=1, min_match_wilson_lcb=0.0,
+            min_decision_count=1, max_cost_fallback_ratio=1.0, min_funding_coverage_ratio=0.0,
+            block_bars=6, n_bootstrap=500, seed=42,
+            lcb_quantile_floor_blocks=0,
+        )
+
+        assert adaptive.net_mean_bps == pytest.approx(baseline.net_mean_bps)
+        assert adaptive.net_lcb_bps == pytest.approx(baseline.net_lcb_bps)

@@ -450,7 +450,7 @@ def compute_symbol_strategy_evidence(
 
     [ADR_20260715_L1_PAIR_GATE_TF_DENSITY_CALIBRATION] effective_n_sink is an
     optional opt-in hook (default None, zero behavior change) used by
-    scripts/calibrate_l1_pair_gate.py to measure per-TF effective_n density.
+    src/domain/futures/strategy/calibrate_l1_pair_gate.py to measure per-TF effective_n density.
     """
     if event_results.empty:
         return ()
@@ -2102,6 +2102,10 @@ def _compute_pooled_probe_lcb(
                 block_bars=_resolve_block_bars_eff(cfg),
                 n_bootstrap=int(getattr(cfg, "l1_bootstrap_samples", 200)),
                 seed=seed + r.fold_id,
+                lcb_quantile_base=float(getattr(cfg, "l1_lcb_quantile_base", 0.05)),
+                lcb_quantile_relaxed=float(getattr(cfg, "l1_lcb_quantile_relaxed", 0.20)),
+                lcb_quantile_full_conf_blocks=int(getattr(cfg, "l1_lcb_quantile_full_conf_blocks", 15)),
+                lcb_quantile_floor_blocks=int(getattr(cfg, "l1_lcb_quantile_floor_blocks", 3)),
             )
         )
 
@@ -2121,6 +2125,10 @@ def _compute_pooled_probe_lcb(
         block_bars=_resolve_block_bars_eff(cfg),
         n_bootstrap=int(getattr(cfg, "l1_bootstrap_samples", 200)),
         seed=seed,
+        lcb_quantile_base=float(getattr(cfg, "l1_lcb_quantile_base", 0.05)),
+        lcb_quantile_relaxed=float(getattr(cfg, "l1_lcb_quantile_relaxed", 0.20)),
+        lcb_quantile_full_conf_blocks=int(getattr(cfg, "l1_lcb_quantile_full_conf_blocks", 15)),
+        lcb_quantile_floor_blocks=int(getattr(cfg, "l1_lcb_quantile_floor_blocks", 3)),
     )
     if pooled.pooled_net_lcb_bps is None:
         return -float("inf")

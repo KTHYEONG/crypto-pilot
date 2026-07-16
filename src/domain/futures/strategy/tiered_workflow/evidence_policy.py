@@ -13,7 +13,7 @@ import numpy as np
 import scipy.stats as stats
 from numpy.typing import NDArray
 
-from src.domain.futures.strategy.tiered_workflow.metrics import moving_block_bootstrap_mean
+from src.domain.futures.strategy.tiered_workflow.metrics import moving_block_bootstrap_mean, resolve_num_blocks
 
 FoldEvidenceState: TypeAlias = Literal[
     "invalid_contract",
@@ -287,6 +287,30 @@ def compute_symbol_posteriors(
     return tuple(post_list)
 
 
+def _resolve_lcb_quantile(
+    num_blocks: int,
+    *,
+    base_quantile: float = 0.05,
+    relaxed_quantile: float = 0.20,
+    full_conf_blocks: int = 15,
+    floor_blocks: int = 3,
+) -> float:
+    if full_conf_blocks <= floor_blocks:
+        raise ValueError(
+            f"full_conf_blocks ({full_conf_blocks}) must be > floor_blocks ({floor_blocks})"
+        )
+    if not (0.0 < base_quantile <= relaxed_quantile < 1.0):
+        raise ValueError(
+            f"quantile must satisfy 0 < base ({base_quantile}) <= relaxed ({relaxed_quantile}) < 1"
+        )
+    if num_blocks >= full_conf_blocks:
+        return base_quantile
+    if num_blocks <= floor_blocks:
+        return relaxed_quantile
+    frac = float(full_conf_blocks - num_blocks) / float(full_conf_blocks - floor_blocks)
+    return base_quantile + (relaxed_quantile - base_quantile) * frac
+
+
 def assess_fold_evidence(
     *,
     fold_id: int,
@@ -307,6 +331,10 @@ def assess_fold_evidence(
     block_bars: int,
     n_bootstrap: int,
     seed: int,
+    lcb_quantile_base: float = 0.05,
+    lcb_quantile_relaxed: float = 0.20,
+    lcb_quantile_full_conf_blocks: int = 15,
+    lcb_quantile_floor_blocks: int = 3,
 ) -> FoldEvidenceAssessment:
     blockers: list[str] = []
 
@@ -373,7 +401,18 @@ def assess_fold_evidence(
             n_bootstrap=n_bootstrap,
             seed=seed,
         )
-        net_lcb_bps = float(np.quantile(boot, 0.05)) if boot.size > 0 else net_mean_bps
+        if boot.size > 0:
+            num_blocks = resolve_num_blocks(n, block_bars)
+            q = _resolve_lcb_quantile(
+                num_blocks,
+                base_quantile=lcb_quantile_base,
+                relaxed_quantile=lcb_quantile_relaxed,
+                full_conf_blocks=lcb_quantile_full_conf_blocks,
+                floor_blocks=lcb_quantile_floor_blocks,
+            )
+            net_lcb_bps = float(np.quantile(boot, q))
+        else:
+            net_lcb_bps = net_mean_bps
         if state == "data_eligible" and net_lcb_bps > 0:
             state = "economic_positive"
     else:
@@ -407,6 +446,10 @@ def pool_l1_evidence(
     block_bars: int,
     n_bootstrap: int,
     seed: int,
+    lcb_quantile_base: float = 0.05,
+    lcb_quantile_relaxed: float = 0.20,
+    lcb_quantile_full_conf_blocks: int = 15,
+    lcb_quantile_floor_blocks: int = 3,
 ) -> PooledL1Evidence:
     """Pool fold evidence while preserving negative economic observations.
 
@@ -465,7 +508,18 @@ def pool_l1_evidence(
             n_bootstrap=n_bootstrap,
             seed=seed,
         )
-        pooled_lcb = float(np.quantile(pooled_boot, 0.05)) if pooled_boot.size > 0 else pooled_mean
+        if pooled_boot.size > 0:
+            num_blocks = resolve_num_blocks(pooled_arr.size, block_bars)
+            q = _resolve_lcb_quantile(
+                num_blocks,
+                base_quantile=lcb_quantile_base,
+                relaxed_quantile=lcb_quantile_relaxed,
+                full_conf_blocks=lcb_quantile_full_conf_blocks,
+                floor_blocks=lcb_quantile_floor_blocks,
+            )
+            pooled_lcb = float(np.quantile(pooled_boot, q))
+        else:
+            pooled_lcb = pooled_mean
     else:
         pooled_lcb = pooled_mean
 
