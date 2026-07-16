@@ -431,5 +431,7 @@
   "src/domain/futures/strategy/calibrate_l1_symbol_breadth_gate.py": {
     "architecture": "docs/results/result.md",
     "testing": "tests/unit/domain/futures/strategy/test_calibrate_l1_symbol_breadth_gate.py"
-  }
+  },
+  "scripts/lean_check.py": {},
+  "scripts/sync_task.py": {}
 }
