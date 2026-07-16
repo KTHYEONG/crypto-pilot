@@ -114,7 +114,7 @@ def test_compute_symbol_strategy_evidence_forwards_bh_procedure_to_by_q_values(m
     import src.domain.futures.strategy.tiered_workflow.signal_selection as sel_mod
 
     spy = mocker.spy(sel_mod, "_by_q_values")
-    df = _make_event_frame(gross_bps_list=[5.0, 4.0, 6.0])
+    df = _make_event_frame(gross_bps_list=[5.0, 4.0, 6.0, 5.5, 4.5])
 
     cfg_bh = _make_cfg(l1_pair_fdr_procedure="bh")
     compute_symbol_strategy_evidence(event_results=df, cfg=cfg_bh, seed=0, registry_as_of_idx=999)
@@ -747,3 +747,167 @@ def test_fdr_hard_reject_override_unblocks_qualified_registry() -> None:
         f"hard registry empty, soft also empty (n_evidence={len(ev_hard)})"
     )
     assert len(registry_soft.ready_symbols) >= len(registry_hard.ready_symbols)
+
+
+# ─── FDR Hard-Eligible Scoping (L1_FDR_HARD_ELIGIBLE_SCOPING) ──────────────
+
+
+def test_fdr_restricted_to_hard_eligible_reduces_m() -> None:
+    """Scenario 1 (Happy Path): FDR correction restricted to hard_eligible subset
+    produces q_values computed over m=hard_eligible count, not m=full pool count.
+    """
+    real_rows = [
+        {"symbol": "BTCUSDT", "side": 1, "strategy_id": "trend_ma:ema_12_72",
+         "gross_event_bps": g, "expected_holding_bars": 4, "fold_id": i % 2}
+        for i, g in enumerate([8.0, 9.0, 7.5, 8.5, 9.5, 7.0] * 2)
+    ]
+    padding_rows = [
+        {"symbol": "ETHUSDT", "side": 1, "strategy_id": f"dead_family_{k}:v1",
+         "gross_event_bps": 3.0, "expected_holding_bars": 4, "fold_id": 0}
+        for k in range(8)
+    ]
+    df = pd.DataFrame(real_rows + padding_rows)
+    cfg = _make_cfg(l1_pair_fdr_alpha=0.15, l1_pair_min_effective_obs=4.0, l1_pair_min_folds=1)
+
+    evidence = compute_symbol_strategy_evidence(event_results=df, cfg=cfg, seed=1, registry_as_of_idx=999)
+
+    real_ev = next(e for e in evidence if e.key.symbol == "BTCUSDT")
+    dead_evs = [e for e in evidence if e.key.symbol == "ETHUSDT"]
+    assert real_ev.hard_eligible is True
+    assert all(not e.hard_eligible for e in dead_evs)
+    assert all(e.q_value == 1.0 for e in dead_evs)
+    from src.domain.futures.strategy.tiered_workflow.signal_selection import _by_q_values
+    expected_q = float(_by_q_values(np.asarray([real_ev.p_value]), harmonic_override=None)[0])
+    assert real_ev.q_value == pytest.approx(expected_q)
+
+
+def test_fdr_zero_hard_eligible_does_not_crash() -> None:
+    """Scenario 2 (Edge, LIMIT-02): Zero hard_eligible candidates -> no crash,
+    all q_values=1.0 sentinel, quality_weight=0.0.
+    """
+    rows = [
+        {"symbol": "BTCUSDT", "side": 1, "strategy_id": "trend_ma:ema_12_72",
+         "gross_event_bps": g, "expected_holding_bars": 4, "fold_id": 0}
+        for g in [5.0, 6.0, 7.0, 5.5, 6.5]
+    ]
+    df = pd.DataFrame(rows)
+    cfg = _make_cfg(l1_pair_fdr_alpha=0.15, l1_pair_min_effective_obs=100.0, l1_pair_min_folds=1)
+
+    evidence = compute_symbol_strategy_evidence(event_results=df, cfg=cfg, seed=1, registry_as_of_idx=999)
+
+    assert len(evidence) > 0
+    for ev in evidence:
+        assert not ev.hard_eligible
+        assert ev.q_value == 1.0
+        assert ev.quality_weight == 0.0
+
+
+def test_fdr_non_hard_eligible_sentinel_qvalue_one() -> None:
+    """Scenario 3 (Boundary, LIMIT-01): non-hard-eligible candidate with
+    positive gross evidence gets q_value=1.0 sentinel, quality_weight=0.0,
+    and is NOT admitted by build_qualified_signal_registry.
+    """
+    strong_rows = [
+        {"symbol": "BTCUSDT", "side": 1, "strategy_id": "trend_ma:v1",
+         "gross_event_bps": g, "expected_holding_bars": 4, "fold_id": 0}
+        for g in [10.0, 12.0, 11.0, 9.0, 10.5] * 2
+    ]
+    weak_rows = [
+        {"symbol": "ETHUSDT", "side": 1, "strategy_id": "dead:v2",
+         "gross_event_bps": g, "expected_holding_bars": 4, "fold_id": 0}
+        for g in [3.0, 2.5]
+    ]
+    df = pd.DataFrame(strong_rows + weak_rows)
+    cfg = _make_cfg(l1_pair_fdr_alpha=0.15, l1_pair_min_effective_obs=5.0, l1_pair_min_folds=1,
+                     l1_breakeven_floor_bps=0.0)
+
+    evidence = compute_symbol_strategy_evidence(event_results=df, cfg=cfg, seed=1, registry_as_of_idx=999)
+
+    strong_ev = next(e for e in evidence if e.key.symbol == "BTCUSDT")
+    weak_ev = next(e for e in evidence if e.key.symbol == "ETHUSDT")
+    assert strong_ev.hard_eligible is True
+    assert weak_ev.hard_eligible is False
+    assert weak_ev.q_value == 1.0
+    assert weak_ev.quality_weight == 0.0
+
+    registry = build_qualified_signal_registry(
+        evidence=evidence,
+        symbols=("BTCUSDT", "ETHUSDT"),
+        min_signals_per_symbol=1,
+        registry_version="test",
+        cfg=cfg,
+    )
+    assert "BTCUSDT" in registry.by_symbol
+    assert "ETHUSDT" not in registry.by_symbol
+
+
+def test_fdr_restricted_to_hard_eligible_unblocks_registry() -> None:
+    """Scenario 4 (Integration): thin-pool fixture where unrestricted FDR
+    (m=full pool) would produce empty registry, but restricted FDR (m=hard_eligible
+    subset) unblocks at least one candidate.
+    """
+    real_rows = [
+        {"symbol": "BTCUSDT", "side": 1, "strategy_id": "trend_ma:ema_12_72",
+         "gross_event_bps": g, "expected_holding_bars": 4, "fold_id": i % 2}
+        for i, g in enumerate([8.0, 9.0, 7.5, 8.5, 9.5, 7.0] * 2)
+    ]
+    padding_rows = [
+        {"symbol": "ETHUSDT", "side": 1, "strategy_id": f"dead_family_{k}:v1",
+         "gross_event_bps": 3.0, "expected_holding_bars": 4, "fold_id": 0}
+        for k in range(8)
+    ]
+    df = pd.DataFrame(real_rows + padding_rows)
+
+    # Compute old unrestricted-FDR q-values by calling _by_q_values on ALL p-values
+    cfg = _make_cfg(l1_pair_fdr_alpha=0.15, l1_pair_min_effective_obs=4.0, l1_pair_min_folds=1,
+                     l1_breakeven_floor_bps=0.0)
+    evidence = compute_symbol_strategy_evidence(event_results=df, cfg=cfg, seed=1, registry_as_of_idx=999)
+
+    old_p_values = np.asarray([e.p_value for e in evidence], dtype=np.float64)
+    from src.domain.futures.strategy.tiered_workflow.signal_selection import _by_q_values
+    old_q_all = _by_q_values(old_p_values, harmonic_override=None)
+
+    old_evidence_overrides = []
+    for ev, old_q in zip(evidence, old_q_all, strict=True):
+        old_evidence_overrides.append(SymbolStrategyEvidence(
+            key=ev.key,
+            mean_gross_bps=ev.mean_gross_bps,
+            mean_incremental_bps=ev.mean_incremental_bps,
+            block_tstat_incremental=ev.block_tstat_incremental,
+            probability_positive=ev.probability_positive,
+            p_value=ev.p_value,
+            q_value=float(old_q),
+            positive_fold_ratio=ev.positive_fold_ratio,
+            n_obs=ev.n_obs,
+            effective_n=ev.effective_n,
+            n_folds=ev.n_folds,
+            quality_weight=ev.quality_weight,
+            hard_eligible=ev.hard_eligible,
+            structural_reasons=ev.structural_reasons,
+            diagnostic_flags=ev.diagnostic_flags,
+            lcb_net_bps=ev.lcb_net_bps,
+            adverse_regime_lcb_bps=ev.adverse_regime_lcb_bps,
+            adverse_regime_n_obs=ev.adverse_regime_n_obs,
+            adverse_regime_defended=ev.adverse_regime_defended,
+        ))
+
+    registry_old = build_qualified_signal_registry(
+        evidence=tuple(old_evidence_overrides),
+        symbols=("BTCUSDT", "ETHUSDT"),
+        min_signals_per_symbol=1,
+        registry_version="test",
+        cfg=cfg,
+    )
+    registry_new = build_qualified_signal_registry(
+        evidence=evidence,
+        symbols=("BTCUSDT", "ETHUSDT"),
+        min_signals_per_symbol=1,
+        registry_version="test",
+        cfg=cfg,
+    )
+
+    if not registry_old.ready_symbols:
+        assert registry_new.ready_symbols, (
+            "old (unrestricted) registry empty, new (restricted) also empty"
+        )
+    assert len(registry_new.ready_symbols) >= len(registry_old.ready_symbols)
