@@ -571,6 +571,11 @@ def hurst_dfa(rets: NDArray[np.float64], *, min_scale: int = 8, max_scale: int |
     return float(np.clip(h, 0.0, 1.0))
 
 
+def resolve_num_blocks(n_clusters: int, block_bars: int) -> int:
+    block = max(1, int(block_bars))
+    return max(1, (max(0, int(n_clusters)) + block - 1) // block)
+
+
 def _series_tstat(values: NDArray[np.float64]) -> float:
     if values.size < 2:
         return 0.0
@@ -644,7 +649,7 @@ def moving_block_bootstrap_mean(
     if n_clusters < 2 or n_bootstrap < 1:
         return np.zeros((0,), dtype=np.float64)
     block = max(1, int(block_bars))
-    num_blocks = max(1, (n_clusters + block - 1) // block)
+    num_blocks = resolve_num_blocks(n_clusters, block_bars)
     rng = np.random.default_rng(seed)
     rand_indices = rng.integers(0, n_clusters, size=(n_bootstrap, num_blocks), dtype=np.int64)
 

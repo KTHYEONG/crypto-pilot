@@ -527,6 +527,10 @@ class CandidateStrategyConfig:
     l1_pair_mdes_multiplier: float = 0.5
     l1_bootstrap_block_bars: int = field(default=6, metadata={"tf_scale_base": None})
     l1_bootstrap_samples: int = 200
+    l1_lcb_quantile_base: float = 0.05
+    l1_lcb_quantile_relaxed: float = 0.20
+    l1_lcb_quantile_full_conf_blocks: int = 15
+    l1_lcb_quantile_floor_blocks: int = 3
     l1_signal_activation_floor_bps: float = 0.0
     l1_min_signals_per_symbol: int = 1
     l1_min_fold_cov: float = 0.80
@@ -841,6 +845,16 @@ class CandidateStrategyConfig:
             raise ValueError("l1_bootstrap_block_bars must be >= 1")
         if self.l1_bootstrap_samples < 1:
             raise ValueError("l1_bootstrap_samples must be >= 1")
+        if not (0.0 < self.l1_lcb_quantile_base <= self.l1_lcb_quantile_relaxed < 1.0):
+            raise ValueError(
+                "l1_lcb_quantile must satisfy 0 < base <= relaxed < 1"
+            )
+        if self.l1_lcb_quantile_floor_blocks < 1:
+            raise ValueError("l1_lcb_quantile_floor_blocks must be >= 1")
+        if self.l1_lcb_quantile_full_conf_blocks <= self.l1_lcb_quantile_floor_blocks:
+            raise ValueError(
+                "l1_lcb_quantile_full_conf_blocks must be > l1_lcb_quantile_floor_blocks"
+            )
         if self.l1_min_signals_per_symbol < 1:
             raise ValueError("l1_min_signals_per_symbol must be >= 1")
         if not (0.0 <= self.l1_min_fold_cov <= 1.0):
@@ -1188,7 +1202,7 @@ _DEFAULT_PER_TF_GATE_OVERRIDES: dict[str, dict[str, float]] = {
         "l1_min_realized_match_ratio": 0.85,
     },
     # [ADR_20260715_L1_PAIR_GATE_TF_DENSITY_CALIBRATION] l1_pair_min_effective_obs below
-    # is measured, not guessed: scripts/calibrate_l1_pair_gate.py control-replay p10 of
+    # is measured, not guessed: src/domain/futures/strategy/calibrate_l1_pair_gate.py control-replay p10 of
     # per-pair effective_n at the final outer-fold snapshot, per TF (see
     # logs/futures/diagnostics/l1_pair_gate_calibration.json for the raw measurement).
     # Every TF's measured p10 (4.9~28.4) exceeded the 4.0 ceiling (2h's own proven value),
@@ -1198,21 +1212,33 @@ _DEFAULT_PER_TF_GATE_OVERRIDES: dict[str, dict[str, float]] = {
     # than 2h already clears.
     "4h": {
         "l1_pair_min_effective_obs": 4.0,
+        "l1_min_effective_sym_n": 3.0,
     },
     "6h": {
         "l1_pair_min_effective_obs": 4.0,
+        "l1_min_effective_sym_n": 3.0,
     },
+    # [ADR_20260716_L1_SLOW_TF_GATE_RECALIBRATION] l1_min_effective_sym_n below is
+    # measured, not guessed: src/domain/futures/strategy/calibrate_l1_symbol_breadth_gate.py control-replay
+    # p10 of _compute_effective_sym_n(fold_reports) per TF (see
+    # logs/futures/diagnostics/l1_symbol_breadth_calibration.json for the raw
+    # measurement), clipped to [1.0, 3.0] -- floor=1.0 is the HHI-based effective-N
+    # theoretical minimum for a single firing symbol, ceiling=3.0 is today's flat
+    # default so calibration may only relax slower TFs, never tighten them.
     "8h": {
         "l1_pair_min_effective_obs": 4.0,
+        "l1_min_effective_sym_n": 2.0,
     },
     "12h": {
         "l1_pair_min_effective_obs": 4.0,
         "l1_min_fold_ratio": 0.55,
+        "l1_min_effective_sym_n": 1.0,
     },
     "1d": {
         "l1_pair_min_effective_obs": 4.0,
         "l1_min_fold_ratio": 0.60,
         "l1_min_realized_match_ratio": 0.85,
+        "l1_min_effective_sym_n": 1.0,
     },
 }
 
