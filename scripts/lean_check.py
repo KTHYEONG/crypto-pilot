@@ -101,7 +101,7 @@ def _check_spec_compliance(spec_path: str) -> tuple[int, list[JsonDiag]]:
                 if not fn.endswith(".py"):
                     continue
                 with open(os.path.join(root, fn)) as tf:
-                    if re.search(rf"^def\s+{re.escape(test_name)}\b", tf.read(), re.MULTILINE):
+                    if re.search(rf"^[ \t]*def\s+{re.escape(test_name)}\b", tf.read(), re.MULTILINE):
                         found = True
                         break
             if found:
