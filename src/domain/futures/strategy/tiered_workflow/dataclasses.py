@@ -17,6 +17,7 @@ if TYPE_CHECKING:
         Layer1GateReport,
         Layer1InferenceArtifact,
         QualifiedSignalRegistry,
+        SignalSleeveKey,
         SymbolStrategyEvidence,
         ValidatedSignalEvent,
     )
@@ -1487,7 +1488,7 @@ class L2SimulationCache:
         quality_weight_2d: sleeve 단위 quality weight [T, S].
         signal_mask_2d: sleeve 단위 활성 마스크 [T, S].
         sleeve_to_sym: sleeve j → symbol column idx 매핑 [S].
-        sleeve_ids: (symbol, strategy_id) 결정적 정렬 튜플 [S].
+        sleeve_keys: SignalSleeveKey 결정적 정렬 튜플 [S].
     """
 
     vol_matrix_2d: NDArray[np.float64]
@@ -1506,8 +1507,16 @@ class L2SimulationCache:
 
     # Sleeve→symbol mapping (신규, multi-TF 핵심)
     sleeve_to_sym: NDArray[np.int64]  # [S]
-    sleeve_ids: tuple[tuple[str, str], ...]  # [S] (symbol, strategy_id)
-    sleeve_to_tf: tuple[str, ...]  # [S] each sleeve's native TF (from strategy_id suffix)
+    sleeve_keys: tuple[SignalSleeveKey, ...]  # [S] (symbol, native_tf, strategy_id)
+
+    # ── Backward-compat properties ──────────────────────────────────────────────
+    @property
+    def sleeve_ids(self) -> tuple[tuple[str, str], ...]:
+        return tuple((sk.symbol, sk.strategy_id) for sk in self.sleeve_keys)
+
+    @property
+    def sleeve_to_tf(self) -> tuple[str, ...]:
+        return tuple(sk.native_tf for sk in self.sleeve_keys)
 
     # Pre-computed bucket realized edges (trial-param independent → cached once)
     bucket_edges_by_fold: tuple[dict[tuple[int, str, str], float], ...] = ()

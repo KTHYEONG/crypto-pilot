@@ -11,6 +11,7 @@ from unittest.mock import MagicMock
 
 import numpy as np
 
+from src.domain.futures.strategy.candidate_contracts import SignalSleeveKey
 from src.domain.futures.strategy.tiered_workflow.awf_sim import (
     _parse_tf_from_strategy_id,
     compute_per_tf_fit_edge,
@@ -54,12 +55,9 @@ def _make_minimal_cache(
     t_max: int = 10,
     n_sleeve: int = 2,
     n_sym: int = 2,
-    sleeve_to_tf: tuple[str, ...] | None = None,
     side_vals: list[list[float]] | None = None,
     active_mask: list[list[bool]] | None = None,
 ) -> L2SimulationCache:
-    if sleeve_to_tf is None:
-        sleeve_to_tf = ("4h", "12h")
     if side_vals is None:
         side_vals = [[1.0, 1.0] for _ in range(t_max)]
     if active_mask is None:
@@ -68,9 +66,9 @@ def _make_minimal_cache(
     side_2d = np.array(side_vals, dtype=np.float64)
     signal_mask_2d = np.array(active_mask, dtype=np.bool_)
     sleeve_to_sym = np.array([0, 1], dtype=np.int64)
-    sleeve_ids: tuple[tuple[str, str], ...] = (
-        ("SYM_A", "strat_4h"),
-        ("SYM_B", "strat_12h"),
+    sleeve_keys: tuple[SignalSleeveKey, ...] = (
+        SignalSleeveKey(symbol="SYM_A", native_tf="4h", strategy_id="strat_4h"),
+        SignalSleeveKey(symbol="SYM_B", native_tf="12h", strategy_id="strat_12h"),
     )
 
     return L2SimulationCache(
@@ -86,8 +84,7 @@ def _make_minimal_cache(
         quality_weight_2d=np.ones((t_max, n_sleeve), dtype=np.float64),
         signal_mask_2d=signal_mask_2d,
         sleeve_to_sym=sleeve_to_sym,
-        sleeve_ids=sleeve_ids,
-        sleeve_to_tf=sleeve_to_tf,
+        sleeve_keys=sleeve_keys,
     )
 
 
@@ -132,9 +129,9 @@ class TestComputePerTfFitEdge:
         side_2d = np.ones((t_max, n_sleeve), dtype=np.float64)  # both +1
         signal_mask_2d = np.ones((t_max, n_sleeve), dtype=np.bool_)
         sleeve_to_sym = np.array([0, 1], dtype=np.int64)
-        sleeve_ids: tuple[tuple[str, str], ...] = (
-            ("SYM_A", "strat_4h"),
-            ("SYM_B", "strat_12h"),
+        sleeve_keys: tuple[SignalSleeveKey, ...] = (
+            SignalSleeveKey(symbol="SYM_A", native_tf="4h", strategy_id="strat_4h"),
+            SignalSleeveKey(symbol="SYM_B", native_tf="12h", strategy_id="strat_12h"),
         )
         cache = L2SimulationCache(
             vol_matrix_2d=np.ones((t_max, n_sym), dtype=np.float64),
@@ -149,8 +146,7 @@ class TestComputePerTfFitEdge:
             quality_weight_2d=np.ones((t_max, n_sleeve), dtype=np.float64),
             signal_mask_2d=signal_mask_2d,
             sleeve_to_sym=sleeve_to_sym,
-            sleeve_ids=sleeve_ids,
-            sleeve_to_tf=("4h", "12h"),
+            sleeve_keys=sleeve_keys,
         )
         edge = compute_per_tf_fit_edge(cache, aligned, fit_start=0, fit_end=t_max - 1)
         # 12h (SYM_B, upward + side +1 → positive) should be > 4h (SYM_A, downward + side +1 → negative)
@@ -166,9 +162,9 @@ class TestComputePerTfFitEdge:
         signal_mask_2d = np.zeros((t_max, n_sleeve), dtype=np.bool_)  # no active sleeves
         side_2d = np.ones((t_max, n_sleeve), dtype=np.float64)
         sleeve_to_sym = np.array([0, 1], dtype=np.int64)
-        sleeve_ids: tuple[tuple[str, str], ...] = (
-            ("SYM_A", "strat_4h"),
-            ("SYM_B", "strat_12h"),
+        sleeve_keys: tuple[SignalSleeveKey, ...] = (
+            SignalSleeveKey(symbol="SYM_A", native_tf="4h", strategy_id="strat_4h"),
+            SignalSleeveKey(symbol="SYM_B", native_tf="12h", strategy_id="strat_12h"),
         )
         cache = L2SimulationCache(
             vol_matrix_2d=np.ones((t_max, n_sym), dtype=np.float64),
@@ -183,8 +179,7 @@ class TestComputePerTfFitEdge:
             quality_weight_2d=np.ones((t_max, n_sleeve), dtype=np.float64),
             signal_mask_2d=signal_mask_2d,
             sleeve_to_sym=sleeve_to_sym,
-            sleeve_ids=sleeve_ids,
-            sleeve_to_tf=("4h", "12h"),
+            sleeve_keys=sleeve_keys,
         )
         aligned = _make_aligned(t_max, n_sym)
         edge = compute_per_tf_fit_edge(cache, aligned, fit_start=0, fit_end=5)

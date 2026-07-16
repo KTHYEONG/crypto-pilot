@@ -430,6 +430,7 @@ class ValidatedSignalEvent:
     decision_time: np.datetime64
     symbol: str
     strategy_id: str
+    native_tf: str
     activation_context: str
     side: Literal[-1, 1]
     expected_net_bps: float
@@ -450,6 +451,7 @@ class ValidatedSignalEvent:
         decision_time: np.datetime64,
         symbol: str,
         strategy_id: str,
+        native_tf: str = "",
         activation_context: str,
         side: Literal[-1, 1],
         expected_net_bps: float | None = None,
@@ -468,6 +470,7 @@ class ValidatedSignalEvent:
         object.__setattr__(self, "decision_time", decision_time)
         object.__setattr__(self, "symbol", symbol)
         object.__setattr__(self, "strategy_id", strategy_id)
+        object.__setattr__(self, "native_tf", str(native_tf))
         object.__setattr__(self, "activation_context", activation_context)
         object.__setattr__(self, "side", side)
         object.__setattr__(
@@ -676,3 +679,22 @@ class Layer1InferenceArtifact:
     l1_fit_end_idx: int
     model_version: str
     config_hash: str
+
+
+@dataclass(frozen=True, slots=True)
+class SignalSleeveKey:
+    symbol: str
+    native_tf: str
+    strategy_id: str
+
+
+@dataclass(frozen=True, slots=True)
+class L1TfHandoffReadiness:
+    timeframe: str
+    gate_passed: bool
+    ready_symbol_count: int
+    source_family_count: int
+    edge_quality: float
+    auxiliary_eligible: bool
+    master_eligible: bool
+    rejection_reasons: tuple[str, ...]
