@@ -87,3 +87,23 @@ def test_run_policy_when_cli_omits_removed_alpha_foundry_flag_keeps_l1_gate() ->
     )
 
     assert config.l0_runtime.mode == "gate"
+
+
+@pytest.mark.parametrize("phase", ["l2", "l3"])
+def test_multilayer_phase_builds_native_l0_artifacts(phase: str) -> None:
+    config = build_runner(
+        {
+            "phase": phase,
+            "timeframe": "4h",
+            "trials": 1,
+            "sync": "skip",
+            "alpha_foundry": None,
+            "alpha_foundry_total_l1_budget": None,
+            "alpha_foundry_min_conviction_lcb_bps": None,
+            "alpha_foundry_enable_fast_tf": False,
+        }
+    )
+
+    assert config.l0_runtime.mode == "gate"
+    assert config.l0_runtime.total_l1_verification_budget == 30
+    assert config.l0_runtime.min_conviction_lcb_bps == 5.0

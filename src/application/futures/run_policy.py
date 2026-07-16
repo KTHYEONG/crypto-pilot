@@ -69,7 +69,7 @@ def build_effective_run_config(
     *,
     environ: Mapping[str, str],
 ) -> FuturesRunConfig:
-    """[ADR_20260715_L0_L1_RUNTIME_TERMINAL_OBSERVABILITY] Construct the effective active-run policy."""
+    """[ADR_20260715_L0_L1_RUNTIME_TERMINAL_OBSERVABILITY][ADR_20260716_L2_NATIVE_TF_HANDOFF] Construct the effective active-run policy."""
     env_overrides = _parse_env_overrides(environ)
 
     phase_raw = str(args.get("phase", "l1"))
@@ -94,11 +94,16 @@ def build_effective_run_config(
     mode_raw = "off" if raw_mode is None else str(raw_mode)
     if mode_raw not in {"off", "audit", "gate"}:
         raise RunPolicyError(f"invalid alpha_foundry mode: {mode_raw!r}")
-    is_active_run = phase_raw in {"l0", "l1"}
+    # L2/L3 consume the native per-timeframe L0→L1 handoff.  Running either
+    # phase with L0 disabled leaves ``labeled_events_by_tf`` empty and must not
+    # silently fall back to a pooled event grid.
+    is_active_run = phase_raw in {"l0", "l1", "l2", "l3"}
     l0_runtime_mode = "gate" if is_active_run else mode_raw
 
-    total_l1_budget = int(args.get("alpha_foundry_total_l1_budget", 30))
-    min_conviction = float(args.get("alpha_foundry_min_conviction_lcb_bps", 5.0))
+    raw_total_l1_budget = args.get("alpha_foundry_total_l1_budget")
+    total_l1_budget = int(30 if raw_total_l1_budget is None else raw_total_l1_budget)
+    raw_min_conviction = args.get("alpha_foundry_min_conviction_lcb_bps")
+    min_conviction = float(5.0 if raw_min_conviction is None else raw_min_conviction)
     enable_fast_tf = bool(args.get("alpha_foundry_enable_fast_tf", False))
 
     effective_runtime = AlphaFoundryRuntimeConfig(
