@@ -12,7 +12,7 @@ from src.domain.futures.strategy.candidate_contracts import (
     QualifiedSignalRegistry,
 )
 from src.domain.futures.strategy.config import CandidateStrategyConfig, PerTfL1Result
-from src.domain.futures.strategy.tiered_workflow.dataclasses import Layer1Result
+from src.domain.futures.strategy.tiered_workflow.dataclasses import Layer1Result, StrategySignal
 from src.domain.futures.strategy.tiered_workflow.pipeline import (
     TieredPipelineError,
     _aggregate_per_tf_l1,
@@ -52,7 +52,20 @@ def _mock_per_tf(
     gate_passed: bool = False,
     registry: QualifiedSignalRegistry | None = None,
     n_winning_signals: int = 0,
+    strategy_panel_edge_bps: float = 0.0,
 ) -> PerTfL1Result:
+    from src.domain.futures.strategy.tiered_workflow.dataclasses import StrategySignal
+
+    panel: tuple[StrategySignal, ...] = ()
+    if strategy_panel_edge_bps > 0.0:
+        panel = (
+            MagicMock(
+                spec=StrategySignal,
+                valid=True,
+                oos_edge_bps=strategy_panel_edge_bps,
+                quality_weight=1.0,
+            ),
+        )
     l1 = Layer1Result(
         signals_per_fold=(),
         oos_stacked={},
@@ -65,6 +78,7 @@ def _mock_per_tf(
         n_valid=0,
         n_total=0,
         deployment_registry=registry,
+        strategy_panel=panel,
     )
     m = MagicMock(spec=PerTfL1Result, tf=tf, l1_result=l1, n_winning_signals=n_winning_signals)
     m.l1_result = l1
@@ -241,7 +255,10 @@ class TestResolveL2MasterTf:
         registry_8h = _registry(ready_symbols=("ETHUSDT",))
         per_tf = {
             "4h": _mock_per_tf(tf="4h", gate_passed=False, registry=None, n_winning_signals=100),
-            "8h": _mock_per_tf(tf="8h", gate_passed=True, registry=registry_8h, n_winning_signals=20),
+            "8h": _mock_per_tf(
+                tf="8h", gate_passed=True, registry=registry_8h,
+                n_winning_signals=20, strategy_panel_edge_bps=15.0,
+            ),
         }
 
         master = _resolve_l2_master_tf(cfg, per_tf)
@@ -309,8 +326,14 @@ class TestAggregatePerTfL1:
         registry_4h = _registry(ready_symbols=("BTCUSDT",))
         registry_8h = _registry(ready_symbols=("ETHUSDT",))
         per_tf = {
-            "4h": _mock_per_tf(tf="4h", gate_passed=True, registry=registry_4h, n_winning_signals=10),
-            "8h": _mock_per_tf(tf="8h", gate_passed=True, registry=registry_8h, n_winning_signals=100),
+            "4h": _mock_per_tf(
+                tf="4h", gate_passed=True, registry=registry_4h,
+                n_winning_signals=10, strategy_panel_edge_bps=5.0,
+            ),
+            "8h": _mock_per_tf(
+                tf="8h", gate_passed=True, registry=registry_8h,
+                n_winning_signals=100, strategy_panel_edge_bps=50.0,
+            ),
         }
         cfg = MagicMock(spec=CandidateStrategyConfig, l2_master_tf=None)
         master_tf = _resolve_l2_master_tf(cfg, per_tf)

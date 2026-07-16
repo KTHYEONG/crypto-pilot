@@ -25,6 +25,7 @@ from src.domain.futures.portfolio.signal_composer import (
     hours_per_bar_tf,
 )
 from src.domain.futures.strategy.candidate_contracts import (
+    SignalSleeveKey,
     ValidatedSignalBatch,
     ValidatedSignalEvent,
 )
@@ -1773,20 +1774,26 @@ def build_l2_simulation_cache(
     sym_to_idx: dict[str, int] = {s: i for i, s in enumerate(aligned.symbols)}
 
     # ── Sleeve 인덱싱 ─────────────────────────────────────────────────────────
-    # sleeve_ids: 결정적 정렬 — (symbol, strategy_id) unique 집합
-    # Shape track: sleeve_ids: [S], sleeve_to_sym: [S], 신호 행렬: [T, S]
-    sleeve_id_set: set[tuple[str, str]] = set()
+    # sleeve_keys: 결정적 정렬 — SignalSleeveKey(symbol, native_tf, strategy_id) unique 집합
+    # Shape track: sleeve_keys: [S], sleeve_to_sym: [S], 신호 행렬: [T, S]
+    sleeve_key_set: set[SignalSleeveKey] = set()
     for event in signal_batch.events:
         if sym_to_idx.get(event.symbol) is not None:
-            sleeve_id_set.add((event.symbol, event.strategy_id))
+            sleeve_key_set.add(SignalSleeveKey(
+                symbol=event.symbol,
+                native_tf=event.native_tf,
+                strategy_id=event.strategy_id,
+            ))
 
-    sleeve_ids_sorted: tuple[tuple[str, str], ...] = tuple(sorted(sleeve_id_set))
-    n_sleeve = len(sleeve_ids_sorted)
-    sleeve_to_idx: dict[tuple[str, str], int] = {sid: j for j, sid in enumerate(sleeve_ids_sorted)}
+    sleeve_keys_sorted: tuple[SignalSleeveKey, ...] = tuple(
+        sorted(sleeve_key_set, key=lambda k: (k.native_tf, k.symbol, k.strategy_id))
+    )
+    n_sleeve = len(sleeve_keys_sorted)
+    sleeve_to_idx: dict[SignalSleeveKey, int] = {sk: j for j, sk in enumerate(sleeve_keys_sorted)}
     # sleeve_to_sym[j] = symbol col idx (underlying symbol의 vol/beta 참조용)
     sleeve_to_sym_arr: NDArray[np.int64] = (
         np.array(
-            [sym_to_idx[sid[0]] for sid in sleeve_ids_sorted],
+            [sym_to_idx[sk.symbol] for sk in sleeve_keys_sorted],
             dtype=np.int64,
         )
         if n_sleeve > 0
@@ -1818,12 +1825,11 @@ def build_l2_simulation_cache(
             quality_weight_2d=empty_t_s.copy(),
             signal_mask_2d=empty_t_s_bool,
             sleeve_to_sym=sleeve_to_sym_arr,
-            sleeve_ids=sleeve_ids_sorted,
-            sleeve_to_tf=(),
+            sleeve_keys=(),
         )
 
     # ── Sleeve 신호 행렬 [T, S] ───────────────────────────────────────────────
-    # sleeve가 unique (symbol, strategy_id) key이므로 같은 bar·sleeve 충돌은
+    # sleeve가 unique SignalSleeveKey key이므로 같은 bar·sleeve 충돌은
     # 같은 strategy의 동일 bar 복수 이벤트(rare)만 발생 → strength tie-break.
     expected_gross_bps_2d = np.zeros((t_max, n_sleeve), dtype=np.float64)
     expected_net_bps_2d = np.zeros((t_max, n_sleeve), dtype=np.float64)
@@ -1843,7 +1849,11 @@ def build_l2_simulation_cache(
     strengths = []
 
     for event in signal_batch.events:
-        sleeve_key = (event.symbol, event.strategy_id)
+        sleeve_key = SignalSleeveKey(
+            symbol=event.symbol,
+            native_tf=event.native_tf,
+            strategy_id=event.strategy_id,
+        )
         sleeve_j = sleeve_to_idx.get(sleeve_key)
         if sleeve_j is None:
             continue
@@ -1880,9 +1890,11 @@ def build_l2_simulation_cache(
     if _log.isEnabledFor(_logging.DEBUG) and len(sleeve_js) > 0:
         _tf_agg: dict[str, dict[str, list[float]]] = {}
         for _ei in range(len(sleeve_js)):
-            _sid = sleeve_ids_sorted[sleeve_js[_ei]][1]
-            _m = _re.search(r"_(\d+h)\b", _sid) or _re.search(r"(\d+h)$", _sid)
-            _tfk = _m.group(1) if _m else "unk"
+            _tfk = sleeve_keys_sorted[sleeve_js[_ei]].native_tf
+            if not _tfk:
+                _sid = sleeve_keys_sorted[sleeve_js[_ei]].strategy_id
+                _m = _re.search(r"_(\d+h)\b", _sid) or _re.search(r"(\d+h)$", _sid)
+                _tfk = _m.group(1) if _m else "unk"
             _b = _tf_agg.setdefault(_tfk, {"hold": [], "gross": [], "net": [], "didx": []})
             _b["hold"].append(float(holding_bars_arr[_ei]))
             _b["gross"].append(float(gross_vals[_ei]))
@@ -1921,8 +1933,7 @@ def build_l2_simulation_cache(
         quality_weight_2d=quality_weight_2d,
         signal_mask_2d=signal_mask_2d,
         sleeve_to_sym=sleeve_to_sym_arr,
-        sleeve_ids=sleeve_ids_sorted,
-        sleeve_to_tf=tuple(_parse_tf_from_strategy_id(sid[1]) for sid in sleeve_ids_sorted),
+        sleeve_keys=sleeve_keys_sorted,
     )
 
 

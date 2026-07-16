@@ -18,6 +18,8 @@ from src.domain.futures.strategy.walk_forward import WFFold
 
 
 def _make_cache(n_bars: int, *, n_sleeve: int = 1) -> MagicMock:
+    from src.domain.futures.strategy.candidate_contracts import SignalSleeveKey
+
     cache = MagicMock()
     cache.signal_mask_2d = np.ones((n_bars, n_sleeve), dtype=bool)
     cache.side_2d = np.ones((n_bars, n_sleeve), dtype=np.float64)
@@ -25,6 +27,7 @@ def _make_cache(n_bars: int, *, n_sleeve: int = 1) -> MagicMock:
     cache.sleeve_to_sym = np.zeros(n_sleeve, dtype=np.int64)
     cache.sleeve_ids = (("BTCUSDT", "trend_4h"),)
     cache.sleeve_to_tf = ("4h",)
+    cache.sleeve_keys = (SignalSleeveKey(symbol="BTCUSDT", native_tf="4h", strategy_id="trend"),)
     return cache
 
 
