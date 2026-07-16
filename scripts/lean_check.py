@@ -90,6 +90,20 @@ def main() -> None:
     test_files = [f for f in py_files if f.startswith("tests/") or "test_" in f]
     source_files = [f for f in py_files if not (f.startswith("tests/") or "test_" in f)]
 
+    # Auto-resolve matching test files for validation if omitted in arguments
+    for sf in source_files:
+        if sf.startswith("src/") and not sf.endswith("__init__.py"):
+            parts = sf.split("/")
+            module_name = parts[-1]
+            test_module_name = f"test_{module_name}"
+            for category in ["unit", "integration", "e2e"]:
+                sub_path = "/".join(parts[1:-1])
+                test_dir = f"tests/{category}/{sub_path}" if sub_path else f"tests/{category}"
+                test_path = f"{test_dir}/{test_module_name}"
+                if os.path.exists(test_path) and test_path not in test_files:
+                    test_files.append(test_path)
+                    break
+
     if test_files:
         # Run pytest quiet on tests
         pytest_res = run_cmd(["uv", "run", "pytest", *test_files, "-q", "--tb=line"])
