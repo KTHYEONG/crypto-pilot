@@ -1580,6 +1580,10 @@ def run_l1_nested_swf(
         registry_as_of_idx=max((fold.oos_end for fold in outer_folds), default=0) + 1,
         probe_diversity_corr=probe_diversity_corr,
         xs_admission=_deploy_xs_admission,
+        # [ADR pending: L1_BASELINE_FAMILY_SCOPED_ADMISSION regression fix] family-scoped
+        # baseline applies only to final deployment admission, not walk-forward snapshots
+        # (which keep cfg.l1_baseline_mode's plain default -- see signal_selection.py docstring).
+        baseline_mode_override="peer_exclusive_family",
     )
     # [ADR_20260711_L1_POOLED_ALPHA_ADMISSION_GENERALIZATION]
     if bool(getattr(cfg, "l1_atomization_diagnostics_enabled", False)):
