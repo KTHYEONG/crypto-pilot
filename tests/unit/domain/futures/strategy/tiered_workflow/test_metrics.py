@@ -17,6 +17,7 @@ from src.domain.futures.strategy.tiered_workflow.metrics import (
     _sortino,
     _terminal_multiple,
     moving_block_bootstrap_mean,
+    resolve_lcb_quantile,
     resolve_num_blocks,
 )
 
@@ -192,3 +193,38 @@ def test_moving_block_bootstrap_mean_block_count_unchanged_after_refactor() -> N
     )
     assert boot.size == 100
     assert np.all(np.isfinite(boot))
+
+
+class TestResolveLcbQuantile:
+    """Tests for resolve_lcb_quantile — block-count-adaptive LCB quantile (relocated from evidence_policy)."""
+
+    def test_happy_path_above_full_conf(self) -> None:
+        """S1: num_blocks >= full_conf_blocks → returns base_quantile (no-op)."""
+        assert resolve_lcb_quantile(20) == pytest.approx(0.05)
+
+    def test_at_below_floor_blocks(self) -> None:
+        """S2: num_blocks <= floor_blocks → fully relaxed quantile."""
+        assert resolve_lcb_quantile(2) == pytest.approx(0.20)
+
+    def test_interpolation_exact_midpoint(self) -> None:
+        """S2b: interpolation arithmetic check."""
+        q = resolve_lcb_quantile(
+            9, full_conf_blocks=15, floor_blocks=3,
+            base_quantile=0.05, relaxed_quantile=0.20,
+        )
+        expected = 0.05 + 0.15 * (15 - 9) / (15 - 3)
+        assert q == pytest.approx(expected)
+
+    def test_error_full_conf_le_floor(self) -> None:
+        """S3: full_conf_blocks <= floor_blocks raises ValueError."""
+        with pytest.raises(ValueError, match="full_conf_blocks"):
+            resolve_lcb_quantile(10, full_conf_blocks=3, floor_blocks=5)
+
+    def test_error_quantile_out_of_range(self) -> None:
+        """S3: invalid quantile bounds raise ValueError."""
+        with pytest.raises(ValueError, match="quantile"):
+            resolve_lcb_quantile(10, base_quantile=0.05, relaxed_quantile=0.04)
+        with pytest.raises(ValueError, match="quantile"):
+            resolve_lcb_quantile(10, base_quantile=0.0)
+        with pytest.raises(ValueError, match="quantile"):
+            resolve_lcb_quantile(10, relaxed_quantile=1.0)
