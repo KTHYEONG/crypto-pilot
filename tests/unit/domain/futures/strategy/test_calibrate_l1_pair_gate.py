@@ -18,7 +18,7 @@ from src.domain.futures.strategy.tiered_workflow.signal_selection import (
 
 def test_propose_thresholds_happy_path() -> None:
     """Scenario 1 (Happy Path): mixture of low and high effective_n yields floor(p10) clamped."""
-    from scripts.calibrate_l1_pair_gate import propose_thresholds
+    from src.domain.futures.strategy.calibrate_l1_pair_gate import propose_thresholds
 
     measured = {"4h": [3.0] * 90 + [6.0] * 10}
     proposals = propose_thresholds(measured)
@@ -27,7 +27,7 @@ def test_propose_thresholds_happy_path() -> None:
 
 def test_propose_thresholds_clamps_to_floor_and_ceiling() -> None:
     """Scenario 2 (Edge Cases): low-density clamped to 2.0, high-density clamped to 4.0, empty omitted."""
-    from scripts.calibrate_l1_pair_gate import propose_thresholds
+    from src.domain.futures.strategy.calibrate_l1_pair_gate import propose_thresholds
 
     measured = {
         "1d": [0.1, 0.2, 0.3, 0.15, 0.25],
@@ -44,7 +44,7 @@ def test_propose_thresholds_clamps_to_floor_and_ceiling() -> None:
 
 def test_propose_thresholds_empty_input() -> None:
     """Empty input dict returns empty proposals."""
-    from scripts.calibrate_l1_pair_gate import propose_thresholds
+    from src.domain.futures.strategy.calibrate_l1_pair_gate import propose_thresholds
 
     assert propose_thresholds({}) == {}
 
@@ -136,9 +136,9 @@ def test_measure_effective_n_by_tf_seeds_trace_with_stage_order(mocker: MockerFi
         captured_trace.update(trace)
         return RunnerResult(exit_code=0, reason="l1_mode_done")
 
-    mocker.patch("scripts.calibrate_l1_pair_gate.run_once", side_effect=_fake_run_once)
+    mocker.patch("src.domain.futures.strategy.calibrate_l1_pair_gate.run_once", side_effect=_fake_run_once)
 
-    from scripts.calibrate_l1_pair_gate import measure_effective_n_by_tf
+    from src.domain.futures.strategy.calibrate_l1_pair_gate import measure_effective_n_by_tf
 
     measure_effective_n_by_tf()
 
@@ -178,9 +178,9 @@ def test_measure_effective_n_by_tf_captures_only_final_snapshot_per_tf(mocker: M
             _pipeline.run_per_tf_l1(tf=tf)
         return RunnerResult(exit_code=0, reason="l1_mode_done")
 
-    mocker.patch("scripts.calibrate_l1_pair_gate.run_once", side_effect=_fake_run_once)
+    mocker.patch("src.domain.futures.strategy.calibrate_l1_pair_gate.run_once", side_effect=_fake_run_once)
 
-    from scripts.calibrate_l1_pair_gate import measure_effective_n_by_tf
+    from src.domain.futures.strategy.calibrate_l1_pair_gate import measure_effective_n_by_tf
 
     result = measure_effective_n_by_tf(final_snapshot_index=3)
 
@@ -194,12 +194,12 @@ def test_main_writes_calibration_artifact_and_does_not_touch_config(
 ) -> None:
     """main() writes the proposal artifact and never imports/mutates config.py directly."""
     mocker.patch(
-        "scripts.calibrate_l1_pair_gate.measure_effective_n_by_tf",
+        "src.domain.futures.strategy.calibrate_l1_pair_gate.measure_effective_n_by_tf",
         return_value={"2h": [10.0, 12.0], "4h": [2.0, 2.5]},
     )
     monkeypatch.chdir(tmp_path)
 
-    from scripts.calibrate_l1_pair_gate import main
+    from src.domain.futures.strategy.calibrate_l1_pair_gate import main
 
     exit_code = main()
 
@@ -218,8 +218,8 @@ def test_script_importable_via_direct_invocation_path(tmp_path: Path) -> None:
     import subprocess
     import sys as _sys
 
-    repo_root = Path(__file__).resolve().parents[5]
-    script_path = repo_root / "scripts" / "calibrate_l1_pair_gate.py"
+    repo_root = Path(__file__).resolve().parents[4]
+    script_path = repo_root / "src" / "domain" / "futures" / "strategy" / "calibrate_l1_pair_gate.py"
     try:
         result = subprocess.run(  # noqa: S603
             [_sys.executable, str(script_path)],

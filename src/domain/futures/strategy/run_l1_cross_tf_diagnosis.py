@@ -47,7 +47,7 @@ def _last_stage_reached(trace: dict[str, dict[str, object]]) -> str | None:
 
 def _run_one_label(label: str) -> SupervisorRunRecord:
     t0 = time.perf_counter()
-    proc = subprocess.Popen([sys.executable, "scripts/run_l1_cross_tf_replay.py", label])  # noqa: S603
+    proc = subprocess.Popen([sys.executable, "-m", "src.domain.futures.strategy.run_l1_cross_tf_replay", label])  # noqa: S603
     peak_rss_mb = 0.0
     try:
         ps_proc = psutil.Process(proc.pid)

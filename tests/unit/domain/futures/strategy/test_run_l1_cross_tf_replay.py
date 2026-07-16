@@ -54,19 +54,19 @@ def _wire_closure_exercising_mocks(mocker: MockerFixture) -> None:
     bridge_override/select_capture/per_tf_capture) so their bodies execute
     instead of staying dead code under mock.patch of run_pipeline alone."""
     mocker.patch(
-        "scripts.run_l1_cross_tf_replay.strategy_service.build_candidate_strategy_config",
+        "src.domain.futures.strategy.run_l1_cross_tf_replay.strategy_service.build_candidate_strategy_config",
         return_value=_FakeConfig(candidate=_FakeCandidate(l1_tfs=("4h",))),
     )
     mocker.patch(
-        "scripts.run_l1_cross_tf_replay.active_pipeline.build_candidate_strategy_config",
+        "src.domain.futures.strategy.run_l1_cross_tf_replay.active_pipeline.build_candidate_strategy_config",
         return_value=_FakeConfig(candidate=_FakeCandidate(l1_tfs=("4h",))),
     )
     mocker.patch(
-        "scripts.run_l1_cross_tf_replay.bridge_helpers.run_alpha_foundry_l0_gate_multi_tf",
+        "src.domain.futures.strategy.run_l1_cross_tf_replay.bridge_helpers.run_alpha_foundry_l0_gate_multi_tf",
         return_value={},
     )
     mocker.patch(
-        "scripts.run_l1_cross_tf_replay.bridge_helpers._run_phase3_sequential",
+        "src.domain.futures.strategy.run_l1_cross_tf_replay.bridge_helpers._run_phase3_sequential",
         return_value={},
     )
 
@@ -82,22 +82,22 @@ def _wire_closure_exercising_mocks(mocker: MockerFixture) -> None:
         )
 
     mocker.patch(
-        "scripts.run_l1_cross_tf_replay.strategy_service.run_candidate_strategy_for_universe",
+        "src.domain.futures.strategy.run_l1_cross_tf_replay.strategy_service.run_candidate_strategy_for_universe",
         side_effect=_fake_original_bridge,
     )
     mocker.patch(
-        "scripts.run_l1_cross_tf_replay.bridge._build_single_tf_panels",
+        "src.domain.futures.strategy.run_l1_cross_tf_replay.bridge._build_single_tf_panels",
         return_value=(None, None, []),
     )
     mocker.patch(
-        "scripts.run_l1_cross_tf_replay.tiered_pipeline.select_l1_delivery_events",
+        "src.domain.futures.strategy.run_l1_cross_tf_replay.tiered_pipeline.select_l1_delivery_events",
         return_value=pd.DataFrame({"a": [1]}),
     )
     mock_per_tf_result = mocker.MagicMock()
     mock_per_tf_result.event_grid_audit = mocker.MagicMock()
     mock_per_tf_result.event_grid_audit.n_dropped = 3
     mocker.patch(
-        "scripts.run_l1_cross_tf_replay.tiered_pipeline.run_per_tf_l1",
+        "src.domain.futures.strategy.run_l1_cross_tf_replay.tiered_pipeline.run_per_tf_l1",
         return_value=mock_per_tf_result,
     )
 
@@ -117,31 +117,31 @@ def _wire_closure_exercising_mocks(mocker: MockerFixture) -> None:
         return RunnerResult(exit_code=0, reason="l1_mode_done")
 
     mocker.patch(
-        "scripts.run_l1_cross_tf_replay.active_pipeline.run_pipeline",
+        "src.domain.futures.strategy.run_l1_cross_tf_replay.active_pipeline.run_pipeline",
         side_effect=_fake_run_pipeline,
     )
     mocker.patch(
-        "scripts.run_l1_cross_tf_replay.build_effective_run_config",
+        "src.domain.futures.strategy.run_l1_cross_tf_replay.build_effective_run_config",
         return_value=cast(Any, object()),
     )
 
 
 def _default_mocks(mocker: MockerFixture) -> None:
     mocker.patch(
-        "scripts.run_l1_cross_tf_replay.active_pipeline.run_pipeline",
+        "src.domain.futures.strategy.run_l1_cross_tf_replay.active_pipeline.run_pipeline",
         return_value=RunnerResult(exit_code=0, reason="l1_mode_done"),
     )
     mocker.patch(
-        "scripts.run_l1_cross_tf_replay.build_effective_run_config",
+        "src.domain.futures.strategy.run_l1_cross_tf_replay.build_effective_run_config",
         return_value=cast(Any, object()),
     )
-    mock_per_tf = mocker.patch("scripts.run_l1_cross_tf_replay.tiered_pipeline.run_per_tf_l1")
+    mock_per_tf = mocker.patch("src.domain.futures.strategy.run_l1_cross_tf_replay.tiered_pipeline.run_per_tf_l1")
     mock_per_tf_result = mocker.MagicMock()
     mock_per_tf_result.event_grid_audit = mocker.MagicMock()
     mock_per_tf_result.event_grid_audit.n_dropped = 0
     mock_per_tf.return_value = mock_per_tf_result
     mocker.patch(
-        "scripts.run_l1_cross_tf_replay.tiered_pipeline.select_l1_delivery_events",
+        "src.domain.futures.strategy.run_l1_cross_tf_replay.tiered_pipeline.select_l1_delivery_events",
         return_value=pd.DataFrame(),
     )
 
@@ -151,7 +151,7 @@ class TestRunOnce:
 
     def test_run_once_persists_runner_result_and_all_ten_stages(self, mocker: MockerFixture) -> None:
         _default_mocks(mocker)
-        from scripts.run_l1_cross_tf_replay import run_once
+        from src.domain.futures.strategy.run_l1_cross_tf_replay import run_once
 
         trace: dict[str, dict[str, dict[str, object]]] = {stage: {} for stage in STAGE_ORDER}
         result = run_once(label="control", tfs=("2h",), ablate_1h_fusion=False, trace=trace)
@@ -165,7 +165,7 @@ class TestRunOnce:
         select_capture/per_tf_capture actually populate trace with real captured values,
         not just the pre-seeded empty-dict keys."""
         _wire_closure_exercising_mocks(mocker)
-        from scripts.run_l1_cross_tf_replay import run_once
+        from src.domain.futures.strategy.run_l1_cross_tf_replay import run_once
 
         trace: dict[str, dict[str, dict[str, object]]] = {stage: {} for stage in STAGE_ORDER}
         result = run_once(label="control", tfs=("4h",), ablate_1h_fusion=False, trace=trace)
@@ -184,17 +184,17 @@ class TestRunOnce:
 
     def test_run_once_with_layer1_blocked(self, mocker: MockerFixture) -> None:
         mocker.patch(
-            "scripts.run_l1_cross_tf_replay.active_pipeline.run_pipeline",
+            "src.domain.futures.strategy.run_l1_cross_tf_replay.active_pipeline.run_pipeline",
             return_value=RunnerResult(exit_code=1, reason="layer1_blocked"),
         )
         mocker.patch(
-            "scripts.run_l1_cross_tf_replay.build_effective_run_config",
+            "src.domain.futures.strategy.run_l1_cross_tf_replay.build_effective_run_config",
             return_value=cast(Any, object()),
         )
-        mocker.patch("scripts.run_l1_cross_tf_replay.tiered_pipeline.run_per_tf_l1")
-        mocker.patch("scripts.run_l1_cross_tf_replay.tiered_pipeline.select_l1_delivery_events")
+        mocker.patch("src.domain.futures.strategy.run_l1_cross_tf_replay.tiered_pipeline.run_per_tf_l1")
+        mocker.patch("src.domain.futures.strategy.run_l1_cross_tf_replay.tiered_pipeline.select_l1_delivery_events")
 
-        from scripts.run_l1_cross_tf_replay import run_once
+        from src.domain.futures.strategy.run_l1_cross_tf_replay import run_once
 
         trace: dict[str, dict[str, dict[str, object]]] = {stage: {} for stage in STAGE_ORDER}
         result = run_once(label="control", tfs=("2h",), ablate_1h_fusion=False, trace=trace)
@@ -204,17 +204,17 @@ class TestRunOnce:
 
     def test_run_once_with_l0_gate_no_delivery(self, mocker: MockerFixture) -> None:
         mocker.patch(
-            "scripts.run_l1_cross_tf_replay.active_pipeline.run_pipeline",
+            "src.domain.futures.strategy.run_l1_cross_tf_replay.active_pipeline.run_pipeline",
             return_value=RunnerResult(exit_code=1, reason="l0_gate_no_delivery"),
         )
         mocker.patch(
-            "scripts.run_l1_cross_tf_replay.build_effective_run_config",
+            "src.domain.futures.strategy.run_l1_cross_tf_replay.build_effective_run_config",
             return_value=cast(Any, object()),
         )
-        mocker.patch("scripts.run_l1_cross_tf_replay.tiered_pipeline.run_per_tf_l1")
-        mocker.patch("scripts.run_l1_cross_tf_replay.tiered_pipeline.select_l1_delivery_events")
+        mocker.patch("src.domain.futures.strategy.run_l1_cross_tf_replay.tiered_pipeline.run_per_tf_l1")
+        mocker.patch("src.domain.futures.strategy.run_l1_cross_tf_replay.tiered_pipeline.select_l1_delivery_events")
 
-        from scripts.run_l1_cross_tf_replay import run_once
+        from src.domain.futures.strategy.run_l1_cross_tf_replay import run_once
 
         trace: dict[str, dict[str, dict[str, object]]] = {stage: {} for stage in STAGE_ORDER}
         result = run_once(label="control", tfs=("2h",), ablate_1h_fusion=False, trace=trace)
@@ -230,28 +230,28 @@ class TestMain:
         _default_mocks(mocker)
         mocker.patch("sys.argv", ["prog", "control"])
         mocker.patch(
-            "scripts.run_l1_cross_tf_replay.Path",
+            "src.domain.futures.strategy.run_l1_cross_tf_replay.Path",
             side_effect=lambda *a: tmp_path / "/".join(a) if a else Path(*a),
         )
-        from scripts.run_l1_cross_tf_replay import main
+        from src.domain.futures.strategy.run_l1_cross_tf_replay import main
 
         exit_code = main()
         assert exit_code == 0
 
     def test_main_returns_one_when_runner_result_exit_code_one(self, mocker: MockerFixture) -> None:
         mocker.patch(
-            "scripts.run_l1_cross_tf_replay.active_pipeline.run_pipeline",
+            "src.domain.futures.strategy.run_l1_cross_tf_replay.active_pipeline.run_pipeline",
             return_value=RunnerResult(exit_code=1, reason="layer1_blocked"),
         )
         mocker.patch(
-            "scripts.run_l1_cross_tf_replay.build_effective_run_config",
+            "src.domain.futures.strategy.run_l1_cross_tf_replay.build_effective_run_config",
             return_value=cast(Any, object()),
         )
-        mocker.patch("scripts.run_l1_cross_tf_replay.tiered_pipeline.run_per_tf_l1")
-        mocker.patch("scripts.run_l1_cross_tf_replay.tiered_pipeline.select_l1_delivery_events")
+        mocker.patch("src.domain.futures.strategy.run_l1_cross_tf_replay.tiered_pipeline.run_per_tf_l1")
+        mocker.patch("src.domain.futures.strategy.run_l1_cross_tf_replay.tiered_pipeline.select_l1_delivery_events")
         mocker.patch("sys.argv", ["prog", "control"])
 
-        from scripts.run_l1_cross_tf_replay import main
+        from src.domain.futures.strategy.run_l1_cross_tf_replay import main
 
         exit_code = main()
         assert exit_code == 1
@@ -259,34 +259,34 @@ class TestMain:
     def test_main_returns_two_for_bad_label(self, mocker: MockerFixture) -> None:
         mocker.patch("sys.argv", ["prog", "invalid_label"])
 
-        from scripts.run_l1_cross_tf_replay import main
+        from src.domain.futures.strategy.run_l1_cross_tf_replay import main
 
         exit_code = main()
         assert exit_code == 2
 
     def test_main_persists_partial_trace_on_exception(self, mocker: MockerFixture, tmp_path: Path) -> None:
-        mock_run_once = mocker.patch("scripts.run_l1_cross_tf_replay.run_once")
+        mock_run_once = mocker.patch("src.domain.futures.strategy.run_l1_cross_tf_replay.run_once")
         mock_run_once.side_effect = ValueError("test crash at tf 2 of 3")
         mocker.patch("sys.argv", ["prog", "control"])
-        from scripts.run_l1_cross_tf_replay import main
+        from src.domain.futures.strategy.run_l1_cross_tf_replay import main
 
         with pytest.raises(ValueError, match="test crash at tf 2 of 3"):
             main()
 
     def test_main_returns_one_for_layer1_blocked(self, mocker: MockerFixture) -> None:
         mocker.patch(
-            "scripts.run_l1_cross_tf_replay.active_pipeline.run_pipeline",
+            "src.domain.futures.strategy.run_l1_cross_tf_replay.active_pipeline.run_pipeline",
             return_value=RunnerResult(exit_code=1, reason="layer1_blocked"),
         )
         mocker.patch(
-            "scripts.run_l1_cross_tf_replay.build_effective_run_config",
+            "src.domain.futures.strategy.run_l1_cross_tf_replay.build_effective_run_config",
             return_value=cast(Any, object()),
         )
-        mocker.patch("scripts.run_l1_cross_tf_replay.tiered_pipeline.run_per_tf_l1")
-        mocker.patch("scripts.run_l1_cross_tf_replay.tiered_pipeline.select_l1_delivery_events")
+        mocker.patch("src.domain.futures.strategy.run_l1_cross_tf_replay.tiered_pipeline.run_per_tf_l1")
+        mocker.patch("src.domain.futures.strategy.run_l1_cross_tf_replay.tiered_pipeline.select_l1_delivery_events")
         mocker.patch("sys.argv", ["prog", "control"])
 
-        from scripts.run_l1_cross_tf_replay import main
+        from src.domain.futures.strategy.run_l1_cross_tf_replay import main
 
         exit_code = main()
         assert exit_code == 1
