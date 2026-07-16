@@ -46,6 +46,28 @@ To ensure low-reasoning models can build and integrate the code without guessing
     - **Scenario 4 (Integration Verification)**: Asserting the correct trigger and connection inside the parent module.
 - **Skeleton Mock Boilerplate**: Provide the structural test setup and mock boundary logic (focus on verification assertion points rather than verbose syntax completeness).
 
+### 4. Machine-Readable Contract (`docs/specs/[feature]_contract.json`)
+Generate a JSON contract alongside the spec markdown for automated compliance checking in the check phase:
+```json
+{
+  "contracts": [
+    {"kind": "class|function", "name": "ExactName", "file_hint": "src/domain/x.py"}
+  ],
+  "scenarios": [
+    {"id": 1, "scope": "unit", "name": "test_exact_name_happy_path"},
+    {"id": 2, "scope": "unit", "name": "test_exact_name_edge_case"},
+    {"id": 3, "scope": "unit", "name": "test_exact_name_error"},
+    {"id": 4, "scope": "integration", "name": "test_parent_module_wiring"}
+  ],
+  "wiring": [
+    {"file": "src/application/parent.py", "anchor": "ExactAnchorSymbol"}
+  ]
+}
+```
+- `contracts`: every public class/fn with `file_hint` (target src/ file).
+- `scenarios`: 1:1 with the TDD Scenario Matrix (id 1-4), `name` matching the exact test function name.
+- `wiring`: integration connection — parent file path + anchor symbol to search for.
+
 ## Constraints (Strictly Prohibited)
 - **No Production Code Modifications**: Do NOT create, touch, or modify any `.py` source (`src/`) or official test (`tests/`) files during the `spec` phase. (Exploratory scripts inside `scratch/` are fully allowed).
 - **No Scripts Directory Design/Modifications**: Do NOT design, suggest, or write code paths inside the `scripts/` directory. The `scripts/` directory is reserved exclusively for validation/sync tooling. All production logic, auxiliary scripts, and helpers MUST reside in the `src/` directory.
