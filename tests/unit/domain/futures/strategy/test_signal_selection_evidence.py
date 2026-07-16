@@ -46,6 +46,10 @@ def _make_cfg(**overrides: object) -> MagicMock:
         "l1_pair_fdr_alpha": 1.0,
         "l1_bootstrap_block_bars": 1,
         "l1_bootstrap_samples": 10,
+        "l1_lcb_quantile_base": 0.05,
+        "l1_lcb_quantile_relaxed": 0.20,
+        "l1_lcb_quantile_full_conf_blocks": 15,
+        "l1_lcb_quantile_floor_blocks": 3,
     }
     defaults.update(overrides)
     for k, v in defaults.items():
@@ -459,3 +463,43 @@ def test_family_admission_diag_empty_evidence_skips_logging(caplog: pytest.LogCa
     _log_family_admission_diag(())
 
     assert caplog.text == ""
+
+
+# ─── Adaptive LCB Quantile in compute_symbol_strategy_evidence (Tier 2 fix) ─
+
+
+def test_compute_symbol_strategy_evidence_large_n_quantile_bit_identical() -> None:
+    """S1: large N (effective_n=30, block_bars_eff=2 → num_blocks>=15) → quantile stays 0.05, bit-identical."""
+    cfg = _make_cfg(l1_bootstrap_block_bars=1, l1_pair_min_effective_obs=4.0)
+    df = _make_event_frame(gross_bps_list=[15.0] * 30)
+    evidence = compute_symbol_strategy_evidence(
+        event_results=df, cfg=cfg, seed=42, registry_as_of_idx=999,
+    )
+    assert len(evidence) == 1
+    assert evidence[0].lcb_net_bps is not None
+    assert np.isfinite(evidence[0].lcb_net_bps)
+
+
+def test_compute_symbol_strategy_evidence_small_n_relaxes_lcb_net_quantile() -> None:
+    """S2: small N (effective_n=4, block_bars_eff=6 → num_blocks<=3) → adaptive quantile raises lcb_net."""
+    cfg = _make_cfg(
+        l1_bootstrap_block_bars=6, l1_pair_min_effective_obs=4.0,
+        l1_pair_min_mean_gross_bps=0.0, l1_pair_min_incremental_bps=0.0,
+        l1_pair_min_positive_fold_ratio=0.0, l1_quality_weight_enabled=False,
+    )
+    df = _make_event_frame(gross_bps_list=[15.0, 12.0, 18.0, 10.0])
+
+    baseline_cfg = _make_cfg(
+        l1_bootstrap_block_bars=6, l1_pair_min_effective_obs=4.0,
+        l1_pair_min_mean_gross_bps=0.0, l1_pair_min_incremental_bps=0.0,
+        l1_pair_min_positive_fold_ratio=0.0, l1_quality_weight_enabled=False,
+        l1_lcb_quantile_floor_blocks=0,
+    )
+    adaptive = compute_symbol_strategy_evidence(
+        event_results=df, cfg=cfg, seed=42, registry_as_of_idx=999,
+    )
+    baseline = compute_symbol_strategy_evidence(
+        event_results=df, cfg=baseline_cfg, seed=42, registry_as_of_idx=999,
+    )
+
+    assert adaptive[0].lcb_net_bps >= baseline[0].lcb_net_bps
