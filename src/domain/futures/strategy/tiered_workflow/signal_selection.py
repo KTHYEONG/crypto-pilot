@@ -995,6 +995,7 @@ def _candidate_output_to_signal_batch(
     model_version: str,
     activation_floor_bps: float,
     cfg: CandidateStrategyConfig | None = None,
+    native_tf: str = "",
 ) -> ValidatedSignalBatch:
     _t_batch_total = time.perf_counter()
     frame = model_output.events.reset_index(drop=True).copy()
@@ -1143,6 +1144,7 @@ def _candidate_output_to_signal_batch(
                 decision_time=datetimes[_d],
                 symbol=_s,
                 strategy_id=_st,
+                native_tf=native_tf,
                 activation_context=_a,
                 side=int(side_arr_v[_i]),  # type: ignore[arg-type]
                 expected_net_bps=float(n_net_p[_i]),
@@ -2499,6 +2501,7 @@ def predict_layer1_signals(
     start_idx: int,
     end_idx: int,
     cfg: CandidateStrategyConfig,
+    native_tf: str | None = None,
 ) -> ValidatedSignalBatch:
     inference_set = build_candidate_dataset(
         labeled_events=candidate_events,
@@ -2515,11 +2518,13 @@ def predict_layer1_signals(
         cfg=cfg,
     )
     logger.debug(
-        "[L2-SIGNAL-PRE] predict_layer1_signals: registry_symbols=%d activation_floor=%.1f start_idx=%d end_idx=%d",
+        "[L2-SIGNAL-PRE] predict_layer1_signals: registry_symbols=%d "
+        "activation_floor=%.1f start_idx=%d end_idx=%d native_tf=%s",
         len(artifact.deployment_registry.by_symbol),
         float(cfg.l1_signal_activation_floor_bps),
         start_idx,
         end_idx,
+        native_tf or cfg.timeframe,
     )
     return _candidate_output_to_signal_batch(
         model_output=prediction,
@@ -2529,6 +2534,7 @@ def predict_layer1_signals(
         model_version=artifact.model_version,
         activation_floor_bps=float(cfg.l1_signal_activation_floor_bps),
         cfg=cfg,
+        native_tf=native_tf or cfg.timeframe,
     )
 
 
@@ -2601,6 +2607,7 @@ def predict_layer1_signals_multi_tf(
                 start_idx=start_idx,
                 end_idx=end_idx,
                 cfg=cfg,
+                native_tf=tf,
             )
         except Exception:
             logger.exception("[MULTI-TF] tf=%s predict_layer1_signals 실패 — skip", tf)
@@ -2625,13 +2632,14 @@ def predict_layer1_signals_multi_tf(
             model_version="empty",
         )
 
-    # 이벤트 병합 — (symbol, strategy_id, decision_idx) 중복 체크
+    # 이벤트 병합 — (native_tf, symbol, strategy_id, decision_idx) 중복 체크
+    # native_tf를 포함해 cross-TF 동일 전략 event를 독립적으로 보존한다.
     merged_events: list[ValidatedSignalEvent] = []
-    seen_keys: set[tuple[str, str, int]] = set()
+    seen_keys: set[tuple[str, str, str, int]] = set()
     dup_count = 0
     for batch in batches:
         for ev in batch.events:
-            key = (ev.symbol, ev.strategy_id, int(ev.decision_idx))
+            key = (ev.native_tf, ev.symbol, ev.strategy_id, int(ev.decision_idx))
             if key in seen_keys:
                 dup_count += 1
                 continue
@@ -2640,7 +2648,7 @@ def predict_layer1_signals_multi_tf(
 
     if dup_count > 0:
         logger.warning(
-            "[MULTI-TF] 중복 (symbol, strategy_id, decision_idx) %d건 — fail-closed 제거",
+            "[MULTI-TF] 중복 (native_tf, symbol, strategy_id, decision_idx) %d건 — fail-closed 제거",
             dup_count,
         )
 

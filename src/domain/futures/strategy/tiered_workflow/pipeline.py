@@ -31,6 +31,7 @@ from src.domain.futures.portfolio.signal_composer import (
 )
 from src.domain.futures.strategy.candidate_contracts import (
     CandidateFoldOutput,
+    L1TfHandoffReadiness,
     Layer1EvidenceSnapshot,
     Layer1FoldReadiness,
     Layer1GateReport,
@@ -3094,6 +3095,92 @@ def _log_pertf_registry_diag(
         )
 
 
+def assess_l1_tf_handoff(
+    result: PerTfL1Result,
+    *,
+    min_ready_symbols: int,
+    min_source_families: int,
+) -> L1TfHandoffReadiness:
+    """L1→L2 handoff readiness for a single TF.
+
+    Computes eligibility and edge quality from registry evidence.
+    Master eligibility requires both breadth (symbols, families) and finite positive edge.
+
+    Args:
+        result: Per-TF L1 result.
+        min_ready_symbols: Minimum ready symbols for master eligibility.
+        min_source_families: Minimum source families for master eligibility.
+
+    Returns:
+        L1TfHandoffReadiness with auxiliary/master eligibility separated.
+    """
+    timeframe = result.tf
+    gate_passed = result.l1_result.gate_passed
+    registry = result.l1_result.deployment_registry
+    panel = result.l1_result.strategy_panel
+
+    rejection_reasons: list[str] = []
+    if not gate_passed:
+        rejection_reasons.append("L1 gate not passed")
+    if registry is None:
+        rejection_reasons.append("no deployment registry")
+    elif not registry.ready_symbols:
+        rejection_reasons.append("registry empty")
+
+    ready_symbol_count = len(registry.ready_symbols) if registry is not None else 0
+
+    # source_family_count: unique families from registry evidence
+    families: set[str] = set()
+    if registry is not None:
+        for items in registry.by_symbol.values():
+            for item in items:
+                sid = item.key.strategy_id
+                family = sid.split(":")[0] if ":" in sid else sid
+                families.add(family)
+    source_family_count = len(families)
+
+    # auxiliary_eligible: gate passed + non-empty registry
+    auxiliary_eligible = bool(gate_passed and registry is not None and registry.ready_symbols)
+
+    # edge_quality: from strategy panel edge evidence (spec §5.4)
+    edge_quality = 0.0
+    if panel:
+        for s in panel:
+            if s.valid and s.oos_edge_bps > 0.0:
+                edge_quality += s.oos_edge_bps
+
+    # When panel has no valid edge evidence, fall back to registry evidence
+    if edge_quality <= 0.0 and registry is not None:
+        for items in registry.by_symbol.values():
+            for item in items:
+                lcb = getattr(item, "lcb_net_bps", 0.0)
+                qw = getattr(item, "quality_weight", 0.0)
+                if lcb > 0.0 and qw > 0.0:
+                    edge_quality += lcb * qw
+
+    if not auxiliary_eligible:
+        rejection_reasons.append("auxiliary ineligible")
+    elif ready_symbol_count < min_ready_symbols:
+        rejection_reasons.append(f"ready_symbols {ready_symbol_count} < {min_ready_symbols}")
+    elif source_family_count < min_source_families:
+        rejection_reasons.append(f"source_families {source_family_count} < {min_source_families}")
+    elif not np.isfinite(edge_quality) or edge_quality <= 0.0:
+        rejection_reasons.append("no finite positive edge quality")
+
+    master_eligible = auxiliary_eligible and not rejection_reasons
+
+    return L1TfHandoffReadiness(
+        timeframe=timeframe,
+        gate_passed=gate_passed,
+        ready_symbol_count=ready_symbol_count,
+        source_family_count=source_family_count,
+        edge_quality=edge_quality,
+        auxiliary_eligible=auxiliary_eligible,
+        master_eligible=master_eligible,
+        rejection_reasons=tuple(rejection_reasons),
+    )
+
+
 def _tf_edge_quality(r: PerTfL1Result) -> float:
     """Edge quality score for TF selection: Σ quality_weight*oos_edge_bps over valid strategies.
 
@@ -3105,14 +3192,11 @@ def _tf_edge_quality(r: PerTfL1Result) -> float:
     Returns:
         Weighted edge quality score (higher is better).
     """
-    panel = r.l1_result.strategy_panel
-    if not panel:
-        # fallback: n_winning_signals (정규화)
-        return float(r.n_winning_signals)
     total: float = 0.0
-    for s in panel:
+    for s in r.l1_result.strategy_panel or ():
         if s.valid and s.oos_edge_bps > 0.0:
             total += s.oos_edge_bps
+    # Spec §5.4: remove raw count fallback; when panel is empty, return 0
     return total
 
 
