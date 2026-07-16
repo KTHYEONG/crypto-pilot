@@ -79,14 +79,19 @@ def _holding_bucket(holding_bars: int) -> int:
 def _compute_incremental_bps(
     frame: pd.DataFrame,
     *,
-    mode: Literal["peer_exclusive", "absolute"],
+    mode: Literal["peer_exclusive", "peer_exclusive_family", "absolute"],
 ) -> pd.Series:
     """Compute per-event incremental bps relative to peer strategies.
 
     Args:
         frame: Event DataFrame with columns gross_event_bps, symbol, side,
-            holding_bucket, strategy_id.
-        mode: ``peer_exclusive`` uses leave-self-out peer mean as baseline.
+            holding_bucket, strategy_id, and (for peer_exclusive_family) family.
+        mode: ``peer_exclusive`` uses leave-self-out peer mean over ALL other
+            strategies sharing (symbol, side, holding_bucket) as baseline.
+            ``peer_exclusive_family`` restricts that peer set to strategies
+            sharing the same top-level family (strategy_id.split(':', 1)[0]) --
+            preserves same-family duplicate suppression while eliminating
+            cross-family washout of statistically independent strategies.
             ``absolute`` sets baseline=0 (incremental == gross).
 
     Returns:
@@ -95,15 +100,18 @@ def _compute_incremental_bps(
     Note:
         Time complexity: O(N) two-pass groupby.
         Space: O(B*S) where B=buckets, S=strategies.
-        peer_count==0 (single strategy in bucket) falls back to absolute
+        peer_count==0 (single strategy in partition) falls back to absolute
         (baseline=0) to avoid ``incremental ≡ 0`` degenerate case.
+        Under peer_exclusive_family this is the common, correct path for a
+        strategy that is the sole member of its family in a bucket.
     """
-    # gross: shape [N_events]
     gross = frame["gross_event_bps"]
     if mode == "absolute":
         return gross.copy()
 
     bucket_key = ["symbol", "side", "holding_bucket"]
+    if mode == "peer_exclusive_family":
+        bucket_key = [*bucket_key, "family"]
     strategy_key = [*bucket_key, "strategy_id"]
 
     bucket_sum = frame.groupby(bucket_key)["gross_event_bps"].transform("sum")
@@ -467,12 +475,19 @@ def compute_symbol_strategy_evidence(
     probe_diversity_corr: dict[str, float] | None = None,
     xs_admission: dict[str, XsAdmissionBasis] | None = None,
     effective_n_sink: EffectiveNSink | None = None,
+    baseline_mode_override: Literal["peer_exclusive", "peer_exclusive_family", "absolute"] | None = None,
 ) -> tuple[SymbolStrategyEvidence, ...]:
     """Compute per-source signal evidence from event-level OOS results.
 
     [ADR_20260715_L1_PAIR_GATE_TF_DENSITY_CALIBRATION] effective_n_sink is an
     optional opt-in hook (default None, zero behavior change) used by
     src/domain/futures/strategy/calibrate_l1_pair_gate.py to measure per-TF effective_n density.
+
+    [ADR pending: L1_BASELINE_FAMILY_SCOPED_ADMISSION regression fix] baseline_mode_override,
+    when set, takes precedence over cfg.l1_baseline_mode for this call only. Used by the
+    deployment-evidence call site to apply family-scoped baseline admission without altering
+    walk-forward SNAPSHOT calls (which drive the probe_lcb_bps structural gate and must keep
+    cfg.l1_baseline_mode's plain default to avoid changing OOS portfolio composition).
     """
     if event_results.empty:
         return ()
@@ -523,7 +538,13 @@ def compute_symbol_strategy_evidence(
     if frame.empty:
         return ()
     frame["holding_bucket"] = frame["expected_holding_bars"].map(_holding_bucket)
-    baseline_mode: Literal["peer_exclusive", "absolute"] = getattr(cfg, "l1_baseline_mode", "peer_exclusive")
+    if "family" not in frame.columns:
+        frame["family"] = frame["strategy_id"].astype(str).str.split(":", n=1).str[0]
+    baseline_mode: Literal["peer_exclusive", "peer_exclusive_family", "absolute"] = (
+        baseline_mode_override
+        if baseline_mode_override is not None
+        else getattr(cfg, "l1_baseline_mode", "peer_exclusive")
+    )
     frame["incremental_bps"] = _compute_incremental_bps(frame, mode=baseline_mode)
     grouped = frame.groupby(["symbol", "strategy_id", "activation_context"], sort=False)
     # 사전 일괄 벡터화: per-pair inner groupby 제거 (P2 최적화)

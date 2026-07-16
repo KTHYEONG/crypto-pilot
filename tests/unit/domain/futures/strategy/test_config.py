@@ -435,3 +435,27 @@ class TestLcbQuantileConfig:
         assert cfg.l1_lcb_quantile_relaxed == pytest.approx(0.20)
         assert cfg.l1_lcb_quantile_full_conf_blocks == 15
         assert cfg.l1_lcb_quantile_floor_blocks == 3
+
+
+# ─── L1 Baseline Family-Scoped Admission Config Validation ──────────────────
+
+
+def test_candidate_strategy_config_l1_baseline_mode_accepts_peer_exclusive_family() -> None:
+    cfg = CandidateStrategyConfig(l1_baseline_mode="peer_exclusive_family")
+    assert cfg.l1_baseline_mode == "peer_exclusive_family"
+
+
+def test_candidate_strategy_config_l1_baseline_mode_default_is_peer_exclusive() -> None:
+    """Default stays legacy peer_exclusive -- walk-forward snapshot admission must not
+    change behavior. Family-scoped mode is applied only via compute_symbol_strategy_evidence's
+    baseline_mode_override at the deployment call site, not through this default."""
+    cfg = CandidateStrategyConfig()
+    assert cfg.l1_baseline_mode == "peer_exclusive"
+
+
+def test_candidate_strategy_config_l1_baseline_mode_rejects_invalid_literal() -> None:
+    with pytest.raises(ValueError, match="l1_baseline_mode must be"):
+        CandidateStrategyConfig(l1_baseline_mode="bogus")  # type: ignore[arg-type]
+
+    with pytest.raises(ValueError, match="l1_baseline_mode must be"):
+        CandidateStrategyConfig(l1_baseline_mode="peer_exclusive_family_typo")  # type: ignore[arg-type]
