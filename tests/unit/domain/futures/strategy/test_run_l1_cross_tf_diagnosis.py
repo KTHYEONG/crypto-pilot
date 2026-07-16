@@ -53,14 +53,14 @@ class TestRunSupervised:
             proc.wait.return_value = 0
             return proc
 
-        mocker.patch("scripts.run_l1_cross_tf_diagnosis.subprocess.Popen", side_effect=fake_popen)
-        mocker.patch("scripts.run_l1_cross_tf_diagnosis.psutil.Process")
+        mocker.patch("src.domain.futures.strategy.run_l1_cross_tf_diagnosis.subprocess.Popen", side_effect=fake_popen)
+        mocker.patch("src.domain.futures.strategy.run_l1_cross_tf_diagnosis.psutil.Process")
         mocker.patch(
-            "scripts.run_l1_cross_tf_diagnosis._OUT_DIR",
+            "src.domain.futures.strategy.run_l1_cross_tf_diagnosis._OUT_DIR",
             out_dir,
         )
 
-        from scripts.run_l1_cross_tf_diagnosis import run_supervised
+        from src.domain.futures.strategy.run_l1_cross_tf_diagnosis import run_supervised
 
         exit_code = run_supervised()
 
@@ -84,14 +84,14 @@ class TestRunSupervised:
             proc.wait.return_value = 0
             return proc
 
-        mocker.patch("scripts.run_l1_cross_tf_diagnosis.subprocess.Popen", side_effect=fake_popen)
-        mocker.patch("scripts.run_l1_cross_tf_diagnosis.psutil.Process")
+        mocker.patch("src.domain.futures.strategy.run_l1_cross_tf_diagnosis.subprocess.Popen", side_effect=fake_popen)
+        mocker.patch("src.domain.futures.strategy.run_l1_cross_tf_diagnosis.psutil.Process")
         mocker.patch(
-            "scripts.run_l1_cross_tf_diagnosis._OUT_DIR",
+            "src.domain.futures.strategy.run_l1_cross_tf_diagnosis._OUT_DIR",
             out_dir,
         )
 
-        from scripts.run_l1_cross_tf_diagnosis import run_supervised
+        from src.domain.futures.strategy.run_l1_cross_tf_diagnosis import run_supervised
 
         exit_code = run_supervised()
         assert exit_code == 0
@@ -113,14 +113,14 @@ class TestRunSupervised:
             proc.wait.return_value = 0
             return proc
 
-        mocker.patch("scripts.run_l1_cross_tf_diagnosis.subprocess.Popen", side_effect=fake_popen)
-        mocker.patch("scripts.run_l1_cross_tf_diagnosis.psutil.Process")
+        mocker.patch("src.domain.futures.strategy.run_l1_cross_tf_diagnosis.subprocess.Popen", side_effect=fake_popen)
+        mocker.patch("src.domain.futures.strategy.run_l1_cross_tf_diagnosis.psutil.Process")
         mocker.patch(
-            "scripts.run_l1_cross_tf_diagnosis._OUT_DIR",
+            "src.domain.futures.strategy.run_l1_cross_tf_diagnosis._OUT_DIR",
             out_dir,
         )
 
-        from scripts.run_l1_cross_tf_diagnosis import run_supervised
+        from src.domain.futures.strategy.run_l1_cross_tf_diagnosis import run_supervised
 
         exit_code = run_supervised()
         assert exit_code == 1
