@@ -16,6 +16,7 @@ from src.domain.futures.strategy.config import (
     RegimeConfig,
     apply_tf_gate_overrides,
     resolve_purge_and_embargo_bars,
+    resolve_tf_signal_pool,
     with_max_holding_bars,
 )
 from src.domain.futures.strategy.timeframe_contracts import scale_bar_count
@@ -459,3 +460,73 @@ def test_candidate_strategy_config_l1_baseline_mode_rejects_invalid_literal() ->
 
     with pytest.raises(ValueError, match="l1_baseline_mode must be"):
         CandidateStrategyConfig(l1_baseline_mode="peer_exclusive_family_typo")  # type: ignore[arg-type]
+
+
+# ─── Slow-TF XS Alpha Challenger ─────────────────────────────────────────────
+
+
+def test_slow_tf_xs_challenger_enables_pool_and_factor_admission() -> None:
+    cfg = CandidateStrategyConfig(slow_tf_xs_challenger_enabled=True)
+    for tf in ("6h", "1d"):
+        pool = resolve_tf_signal_pool(cfg, tf)
+        assert pool[-2:] == ("residual_momentum_xs", "xs_residual_rebalance")
+        assert len(pool) == len(set(pool))
+        assert apply_tf_gate_overrides(cfg, tf).l1_xs_alpha_admission_enabled is True
+    assert cfg.l1_xs_alpha_admission_enabled is False
+
+
+def test_slow_tf_xs_challenger_isolated_and_idempotent() -> None:
+    control = CandidateStrategyConfig()
+    off_pool = resolve_tf_signal_pool(control, "6h")
+    off_override = apply_tf_gate_overrides(control, "6h")
+    assert off_override.l1_xs_alpha_admission_enabled is False
+
+    cfg_on = CandidateStrategyConfig(slow_tf_xs_challenger_enabled=True)
+    non_target_pool = resolve_tf_signal_pool(cfg_on, "8h")
+    assert non_target_pool == off_pool
+    assert apply_tf_gate_overrides(cfg_on, "8h").l1_xs_alpha_admission_enabled is False
+
+    cfg_explicit = CandidateStrategyConfig(
+        slow_tf_xs_challenger_enabled=True,
+        per_tf_candidate_families={"6h": ("residual_momentum_xs",)},
+    )
+    pool_explicit = resolve_tf_signal_pool(cfg_explicit, "6h")
+    assert pool_explicit == ("residual_momentum_xs", "xs_residual_rebalance")
+    assert len(pool_explicit) == len(set(pool_explicit))
+
+    cfg_dup = CandidateStrategyConfig(
+        slow_tf_xs_challenger_enabled=True,
+        per_tf_candidate_families={
+            "6h": ("residual_momentum_xs", "xs_residual_rebalance", "trend_ma")
+        },
+    )
+    pool_dup = resolve_tf_signal_pool(cfg_dup, "6h")
+    assert pool_dup == ("residual_momentum_xs", "xs_residual_rebalance", "trend_ma")
+    assert len(pool_dup) == len(set(pool_dup))
+
+
+def test_slow_tf_xs_challenger_wires_panel_pool_and_factor_admission() -> None:
+    cfg = CandidateStrategyConfig(slow_tf_xs_challenger_enabled=True)
+    family_pool = resolve_tf_signal_pool
+    pool_6h = family_pool(cfg, "6h")
+    assert "residual_momentum_xs" in pool_6h
+    assert "xs_residual_rebalance" in pool_6h
+    pool_8h = family_pool(cfg, "8h")
+    assert "residual_momentum_xs" not in pool_8h
+    assert "xs_residual_rebalance" not in pool_8h
+    effective = apply_tf_gate_overrides(cfg, "6h")
+    assert effective.l1_xs_alpha_admission_enabled is True
+    assert apply_tf_gate_overrides(cfg, "8h").l1_xs_alpha_admission_enabled is False
+
+
+def test_slow_tf_xs_challenger_rejects_unknown_target_tf() -> None:
+    with pytest.raises(ValueError, match=r"slow_tf_xs_challenger_tfs.*5h"):
+        CandidateStrategyConfig(
+            slow_tf_xs_challenger_enabled=True,
+            slow_tf_xs_challenger_tfs=("6h", "5h"),
+        )
+    with pytest.raises(ValueError, match=r"slow_tf_xs_challenger_tfs.*unknown"):
+        CandidateStrategyConfig(
+            slow_tf_xs_challenger_enabled=True,
+            slow_tf_xs_challenger_tfs=("6h", "unknown"),
+        )
