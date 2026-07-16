@@ -31,10 +31,10 @@
 - **Codebase Discovery:** Use `rg` to prevent duplicate code, but limit output (e.g., `head -n 30`) to avoid token overflow.
 - **Check Loop:** 
     - **Trigger:** Execute when a `.py` file is created or modified. (Excluding the `spec` design phase or markdown-only updates).
-    - **Action:** 
-        - **Implementation Phase (L1):** Run stub signature checks first.
-        - **Check Phase (L2):** Execute targeted regression test and coverage under the `check` skill batch plan.
-    - **Test Scope:** Do **not** run raw `uv run pytest` for the entire project. Run `uv run pytest` targeting **only** the modified test files (Targeted Verification) matching the 1:1 Co-modification Mapping, using `--tb=short` for fast feedback.
+    - **Action:** Follow the active skill's phase instructions.
+      - **Implement phase (L1):** Stub signature check + TDD cycle + L1.5 gate (`ruff + pytest`).
+      - **Check phase (L2):** Full regression + coverage via `lean_check.py`.
+    - **Test Scope:** Target modified test files only (1:1 co-modification mapping). Never run `pytest` on broad directories.
 
 ## 5. Tech Stack & Standards (Python 3.11)
 - **Version:** Based on Python 3.11+. Actively utilize modern syntax (TaskGroup, `|` operator, `Self`, etc.).
@@ -112,6 +112,8 @@ To maintain a clean and navigable codebase, documentation must follow a strict s
 - **Architecture (`docs/architecture/`):** "AI-First Structured Constraints".
   - Contents: System boundary, mathematical formalisms & constraints (LaTeX), strict I/O tables, and topology/state transitions (Mermaid).
   - Guidelines: Omit all procedural implementation details, code optimization tricks (e.g. parallel pooling, cache maps), logging/error policy descriptions, and conversational prose. Keep each document strictly under a 300 lines limit. Shift procedural optimization and private details to in-code docstrings.
+  - **Surgical Update Only**: Never append raw text to architecture files. Surgically edit existing tables, schemas, or Mermaid nodes to match the file's current layout. Do NOT load the entire document; use targeted line ranges to read/edit only the relevant sections.
+  - **No Implementation/History**: Do not include implementation guides, step-by-step logic, temporal examples, change history, memory/concurrency optimization details, or `[ADR_...]` tags in architecture files.
 - **Decisions (`docs/decisions/`):** "Two-File Decisions Log Architecture" (ADR).
   - decisions.md (Active Window): Cumulative log, strictly maximum of 5 lines per task (Max 5 Lines Rule) appended to the top. Max 15 active entries.
   - decisions_archive.md (Permanent Archive): Use automated archiving (`python scripts/archive_decisions.py --max-entries 15`) to manage older ADR entries; avoid manual edits to this file.

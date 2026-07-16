@@ -20,6 +20,7 @@ Translate the logical Blueprint (`docs/specs/*.md`) into working Python code usi
 - **Step 1: Stub/Interface Registration & Self-Gate (Compilation Pass)**
   - Open the target source file (`src/...`) and create only the stub of the function/class matching the signature.
   - Return dummy values or raise `NotImplementedError`.
+  - **Contract Alignment**: Read `docs/specs/[feature]_contract.json` and verify every function/class in `contracts` has a matching stub. If any contract has no stub, it was missed — create it now.
   - **[Self-Gate]**: Run `ruff check` and `uv run mypy [stub_file]` to guarantee API signatures and type hints match the `spec` contract 100% before coding tests.
 - **Step 2: Write Failing Tests (Red Phase)**
   - Open or create the test file (`tests/...`).
@@ -34,7 +35,7 @@ Translate the logical Blueprint (`docs/specs/*.md`) into working Python code usi
 - **Step 4: Refactor & L1.5 Local Gate (Green & Clean Gate)**
   - Clean up code duplication, optimize local variables, and ensure docstrings match standards.
   - **[L1.5 Local Gate]**: Run the lightweight sanity check command targeting exclusively the modified files to verify local correctness:
-    `uv run ruff check [modified_files] && uv run pytest -k [target_test_name] --tb=short`
+    `uv run ruff check [modified_files] && uv run pytest [test_files] --tb=short`
     If any check fails, resolve it immediately. **Do not exit this phase until the L1.5 Gate is 100% Green.**
     *(Deep type checking via mypy and coverage audit are deferred to the check phase to prevent duplicate test runs.)*
 
