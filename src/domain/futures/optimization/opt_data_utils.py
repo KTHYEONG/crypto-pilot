@@ -636,6 +636,15 @@ def _prepare_funding_metrics(
     return funding_df, funding_df_prepared, metrics_df_prepared
 
 
+def _resolve_timestamp_column(df: pd.DataFrame) -> str | None:
+    """[ADR_20260717_L2_CRISIS_BTC_REGIME_DATA_INTEGRITY_FIX] merge-suffixed schema fallback."""
+    if "timestamp" in df.columns:
+        return "timestamp"
+    if "timestamp_x" in df.columns:
+        return "timestamp_x"
+    return None
+
+
 def load_single_symbol_data(
     sym: str,
     tf: str,
@@ -701,8 +710,10 @@ def load_single_symbol_data(
                                 ("timestamp", "<=", end_ms),
                             ],
                         )
-                        if not df.empty and "datetime" not in df.columns and "timestamp" in df.columns:
-                            df["datetime"] = pd.to_datetime(df["timestamp"], unit="ms", utc=True)
+                        if not df.empty and "datetime" not in df.columns:
+                            _ts_col = _resolve_timestamp_column(df)
+                            if _ts_col is not None:
+                                df["datetime"] = pd.to_datetime(df[_ts_col], unit="ms", utc=True)
                         # Row-group boundary precision: trim any residual rows outside window.
                         boundary_mask = (df["datetime"] >= req_start_dt) & (df["datetime"] <= req_end_dt)
                         df = df.loc[boundary_mask]
@@ -714,8 +725,10 @@ def load_single_symbol_data(
                             _e,
                         )
                         df_full = pd.read_parquet(enriched_path)
-                        if not df_full.empty and "datetime" not in df_full.columns and "timestamp" in df_full.columns:
-                            df_full["datetime"] = pd.to_datetime(df_full["timestamp"], unit="ms", utc=True)
+                        if not df_full.empty and "datetime" not in df_full.columns:
+                            _ts_col = _resolve_timestamp_column(df_full)
+                            if _ts_col is not None:
+                                df_full["datetime"] = pd.to_datetime(df_full[_ts_col], unit="ms", utc=True)
                         fallback_mask = (df_full["datetime"] >= req_start_dt) & (df_full["datetime"] <= req_end_dt)
                         df = df_full.loc[fallback_mask].copy()
                     if df.empty:

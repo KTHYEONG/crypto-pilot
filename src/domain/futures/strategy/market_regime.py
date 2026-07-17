@@ -124,10 +124,11 @@ def _infer_bars_per_year(datetimes: NDArray[np.datetime64]) -> float:
 
 
 def _btc_index(symbols: tuple[str, ...]) -> int:
+    """[ADR_20260717_L2_CRISIS_BTC_REGIME_DATA_INTEGRITY_FIX] fail-closed BTC anchor lookup."""
     for idx, symbol in enumerate(symbols):
         if "BTC" in symbol.upper():
             return idx
-    return 0
+    raise ValueError(f"no BTC-named symbol found in {symbols!r}; market regime classification requires a BTC anchor")
 
 
 def _btc_log_returns(aligned: AlignedMarketData) -> NDArray[np.float64]:

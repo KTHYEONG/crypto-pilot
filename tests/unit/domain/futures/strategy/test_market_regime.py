@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import numpy as np
+import pytest
 
 from src.domain.futures.strategy.common.alignment import AlignedMarketData
 from src.domain.futures.strategy.config import RegimeConfig
@@ -38,6 +39,21 @@ def _make_aligned() -> AlignedMarketData:
         kill_mask=np.zeros((t, 2), dtype=bool),
         execution_cost_bps_2d=np.zeros((t, 2), dtype=np.float64),
     )
+
+
+def test_btc_index_raises_when_no_btc_symbol_present() -> None:
+    from src.domain.futures.strategy.market_regime import _btc_index
+
+    symbols = ("ETHUSDT", "SOLUSDT")
+    with pytest.raises(ValueError, match="BTC"):
+        _btc_index(symbols)
+
+
+def test_btc_index_returns_index_when_btc_present() -> None:
+    from src.domain.futures.strategy.market_regime import _btc_index
+
+    assert _btc_index(("ETHUSDT", "BTCUSDT", "SOLUSDT")) == 1
+    assert _btc_index(("BTCUSDT",)) == 0
 
 
 def test_compute_market_regime_context_when_overlay_based_returns_expected_shapes() -> None:

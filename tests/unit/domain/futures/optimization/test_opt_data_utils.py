@@ -18,7 +18,7 @@ def test_safe_read_funding_parquet_normalizes_duplicate_columns(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    monkeypatch.setattr(opt_data_utils, "FUTURES_DATA_DIR", tmp_path)
+    monkeypatch.setattr("src.core.settings.FUTURES_DATA_DIR", tmp_path)
     path = tmp_path / "HOOKUSDT_funding.parquet"
     path.touch()
 
@@ -133,7 +133,7 @@ def test_load_single_symbol_data_cache_hit_pushdown_clips_to_window(
     # Arrange
     safe_sym = "BTCUSDT"
     tf_l = "4h"
-    monkeypatch.setattr(opt_data_utils, "FUTURES_DATA_DIR", tmp_path)
+    monkeypatch.setattr("src.core.settings.FUTURES_DATA_DIR", tmp_path)
 
     _setup_multi_tf_enriched(tmp_path, safe_sym)
 
@@ -181,7 +181,7 @@ def test_load_single_symbol_data_cache_hit_skips_funding_metrics_read(
     # Arrange
     safe_sym = "ETHUSDT"
     tf_l = "4h"
-    monkeypatch.setattr(opt_data_utils, "FUTURES_DATA_DIR", tmp_path)
+    monkeypatch.setattr("src.core.settings.FUTURES_DATA_DIR", tmp_path)
 
     _setup_multi_tf_enriched(tmp_path, safe_sym)
 
@@ -225,7 +225,7 @@ def test_load_single_symbol_data_cache_hit_empty_window_returns_insufficient(
     # Arrange
     safe_sym = "SOLUSDT"
     tf_l = "4h"
-    monkeypatch.setattr(opt_data_utils, "FUTURES_DATA_DIR", tmp_path)
+    monkeypatch.setattr("src.core.settings.FUTURES_DATA_DIR", tmp_path)
 
     # enriched data only covers 2020-2021; request window is 2022 (outside range)
     full_range = pd.date_range("2020-01-01", "2021-12-31", freq="4h", tz="UTC")
@@ -267,7 +267,7 @@ def test_load_single_symbol_data_cache_hit_fallback_on_pushdown_error(
     # Arrange
     safe_sym = "BNBUSDT"
     tf_l = "4h"
-    monkeypatch.setattr(opt_data_utils, "FUTURES_DATA_DIR", tmp_path)
+    monkeypatch.setattr("src.core.settings.FUTURES_DATA_DIR", tmp_path)
 
     _setup_multi_tf_enriched(tmp_path, safe_sym)
 
@@ -479,7 +479,7 @@ def test_load_futures_data_maps_exec_1m_routes_all_to_threadpool(
     """
     # Arrange
     safe_sym = "BTCUSDT"
-    monkeypatch.setattr(opt_data_utils, "FUTURES_DATA_DIR", tmp_path)
+    monkeypatch.setattr("src.core.settings.FUTURES_DATA_DIR", tmp_path)
     monkeypatch.setenv("FUTURES_EXECUTION_MODE", "intrabar_1m")
 
     _setup_multi_tf_enriched(tmp_path, safe_sym)
@@ -531,7 +531,7 @@ def test_searchsorted_mask_equivalence(tmp_path: Any, monkeypatch: pytest.Monkey
 
     from src.domain.futures.optimization import opt_data_utils
 
-    monkeypatch.setattr(opt_data_utils, "FUTURES_DATA_DIR", tmp_path)
+    monkeypatch.setattr("src.core.settings.FUTURES_DATA_DIR", tmp_path)
 
     sym_raw = "BTC/USDT"
     safe_sym = sym_raw.replace("/", "_")
@@ -574,6 +574,24 @@ def test_searchsorted_mask_equivalence(tmp_path: Any, monkeypatch: pytest.Monkey
         skey = f"is_start_idx_{tf_l}"
         assert skey in is_map, f"Missing is_start_idx_{tf_l}"
         assert 0 <= is_map[skey] <= len(is_map.get(tf_l, []))
+
+
+def test_resolve_timestamp_column_returns_timestamp_when_present_no_regression() -> None:
+    df = pd.DataFrame({"timestamp": [1000, 2000], "close": [1.0, 2.0]})
+    col = opt_data_utils._resolve_timestamp_column(df)
+    assert col == "timestamp"
+
+
+def test_resolve_timestamp_column_prefers_timestamp_x_when_timestamp_absent() -> None:
+    df = pd.DataFrame({"timestamp_x": [1000, 2000], "timestamp_y": [1000, 2000], "close": [1.0, 2.0]})
+    col = opt_data_utils._resolve_timestamp_column(df)
+    assert col == "timestamp_x"
+
+
+def test_resolve_timestamp_column_returns_none_when_no_timestamp_present() -> None:
+    df = pd.DataFrame({"close": [1.0, 2.0]})
+    col = opt_data_utils._resolve_timestamp_column(df)
+    assert col is None
 
 
 def test_bars_per_day_matches_hours_per_bar_for_all_l1_tfs() -> None:
