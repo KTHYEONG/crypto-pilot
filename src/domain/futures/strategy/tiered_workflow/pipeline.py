@@ -38,8 +38,9 @@ from src.domain.futures.strategy.candidate_contracts import (
     Layer1InferenceArtifact,
     QualifiedSignalRegistry,
     ValidatedSignalBatch,
+    ValidatedSignalEvent,
 )
-from src.domain.futures.strategy.common.alignment import AlignedMarketData
+from src.domain.futures.strategy.common.alignment import AlignedMarketData, align_data_maps
 from src.domain.futures.strategy.config import CandidateStrategyConfig, PerTfL1Result
 from src.domain.futures.strategy.cs_rank import SymbolSignal
 from src.domain.futures.strategy.tiered_logging import (
@@ -2056,6 +2057,7 @@ def run_l2_awf(
         logger.info(
             format_layer2_table(
                 result,
+                config=config,
                 evaluation_start=l2_eval_start,
                 evaluation_end=l2_eval_end,
                 awf_folds=awf_fold_diags,
@@ -2063,6 +2065,305 @@ def run_l2_awf(
             )
         )
     return dataclasses.replace(result, master_tf=tf)
+
+
+@dataclass(slots=True, frozen=True)
+class CrisisWindow:
+    start: date
+    end: date
+    label: str
+    symbols: tuple[str, ...]
+    source_note: str
+
+
+DEFAULT_CRISIS_WINDOWS: tuple[CrisisWindow, ...] = (
+    CrisisWindow(
+        start=date(2022, 4, 1),
+        end=date(2023, 2, 15),
+        label="luna_ftx_2022_collapse",
+        symbols=(
+            "1000SHIBUSDT", "1000XECUSDT", "AAVEUSDT", "ADAUSDT", "ANKRUSDT",
+            "API3USDT", "ARPAUSDT", "ARUSDT", "ATOMUSDT", "AVAXUSDT",
+            "AXSUSDT", "BANDUSDT", "BCHUSDT", "BNBUSDT", "BTCUSDT",
+            "CRVUSDT", "DOGEUSDT", "DOTUSDT", "DYDXUSDT", "ENSUSDT",
+            "ETCUSDT", "ETHUSDT", "FILUSDT", "FTMUSDT", "GALAUSDT",
+            "ICPUSDT", "IOTAUSDT", "JASMYUSDT", "KAVAUSDT", "LINKUSDT",
+            "LPTUSDT", "LTCUSDT", "MANAUSDT", "MKRUSDT", "MTLUSDT",
+            "NEARUSDT", "NEOUSDT", "OPUSDT", "PEOPLEUSDT", "RSRUSDT",
+            "RUNEUSDT", "RVNUSDT", "SANDUSDT", "SNXUSDT", "SOLUSDT",
+            "STORJUSDT", "THETAUSDT", "TRBUSDT", "TRXUSDT", "UNIUSDT",
+            "VETUSDT", "XLMUSDT", "XRPUSDT", "ZECUSDT", "ZENUSDT",
+            "ZILUSDT", "ZRXUSDT",
+        ),
+        source_note=(
+            "LUNA collapse (2022-05) + FTX bankruptcy (2022-11). "
+            "Measured BTC peak $46,580 -> trough $15,773 (-66.1%). "
+            "Entirely outside L1/L2/L3 data range — true out-of-band data."
+        ),
+    ),
+)
+
+
+@dataclass(slots=True, frozen=True)
+class CrisisReliabilityAssessment:
+    status: str
+    verified: bool
+    detail: str
+    stress_window_label: str | None = None
+    stress_symbol_count: int = 0
+    stress_mdd: float | None = None
+    stress_cagr: float | None = None
+
+
+def _build_rule_based_stress_batch(
+    *,
+    registry: QualifiedSignalRegistry,
+    aligned: AlignedMarketData,
+    strategy_cfg: CandidateStrategyConfig,
+    tf: str,
+) -> ValidatedSignalBatch:
+    """champion registry의 (symbol, strategy) 정체성을 유지한 채, 순수 rule-based 신호
+    (``build_rule_signal_panels``)를 새 aligned 데이터에 적용해 ``ValidatedSignalBatch``를
+    재구성한다.
+
+    ML 아티팩트 재학습이나 L0 이벤트 라벨링 파이프라인을 우회한다 — champion이 이미
+    확정한 전략 정체성(family/variant)과 이미 확정한 evidence(mean_gross_bps,
+    lcb_net_bps, quality_weight)를 그대로 재사용하고, 오직 가격 데이터만 새 구간
+    (crisis window)의 것으로 교체한다. [LIMIT-08] 완화판 — 순수 rule-based
+    family만 지원(ML 학습 필요한 family는 매칭되지 않아 자동 제외됨).
+    """
+    families = sorted(
+        {
+            (item.key.strategy_id.split(":")[0] if ":" in item.key.strategy_id else item.key.strategy_id)
+            for items in registry.by_symbol.values()
+            for item in items
+        }
+    )
+    if not families:
+        return ValidatedSignalBatch(
+            events=(), start_idx=0, end_idx=len(aligned.datetimes),
+            symbols=aligned.symbols, registry_version="crisis_stress_v1",
+            model_version="rule_based_replay",
+        )
+
+    from src.domain.futures.strategy.rule_signals import build_rule_signal_panels
+
+    panel_cfg = dataclasses.replace(strategy_cfg, timeframe=tf)
+    try:
+        panels = build_rule_signal_panels(aligned=aligned, cfg=panel_cfg, family_filter=tuple(families))
+    except Exception:
+        logger.exception("[CRISIS-STRESS] build_rule_signal_panels failed tf=%s", tf)
+        return ValidatedSignalBatch(
+            events=(), start_idx=0, end_idx=len(aligned.datetimes),
+            symbols=aligned.symbols, registry_version="crisis_stress_v1",
+            model_version="rule_based_replay",
+        )
+
+    sym_to_idx = {s: i for i, s in enumerate(aligned.symbols)}
+    events: list[ValidatedSignalEvent] = []
+    for panel in panels:
+        for sym, items in registry.by_symbol.items():
+            col = sym_to_idx.get(sym)
+            if col is None or col >= panel.signed_score_2d.shape[1]:
+                continue
+            evidence = next(
+                (
+                    it
+                    for it in items
+                    if panel.variant in it.key.strategy_id or it.key.strategy_id.endswith(panel.variant)
+                ),
+                None,
+            )
+            if evidence is None:
+                continue
+            score_col = panel.signed_score_2d[:, col]
+            valid_col = panel.valid_mask_2d[:, col]
+            spread = abs(evidence.mean_gross_bps - evidence.lcb_net_bps)
+            if spread <= 1e-9:
+                spread = abs(evidence.mean_gross_bps) * 0.5 + 1e-6
+            active_bars = np.nonzero(valid_col & (score_col != 0.0))[0]
+            for bar in active_bars.tolist():
+                side: Literal[-1, 1] = 1 if score_col[bar] > 0 else -1
+                events.append(
+                    ValidatedSignalEvent(
+                        decision_idx=int(bar),
+                        decision_time=aligned.datetimes[bar],
+                        symbol=sym,
+                        strategy_id=evidence.key.strategy_id,
+                        native_tf=tf,
+                        activation_context="all",
+                        side=side,
+                        expected_gross_bps=float(evidence.mean_gross_bps),
+                        q10_gross_bps=float(evidence.mean_gross_bps - spread),
+                        q90_gross_bps=float(evidence.mean_gross_bps + spread),
+                        expected_holding_bars=int(panel.expected_holding_bars),
+                        quality_weight=float(evidence.quality_weight),
+                        registry_version="crisis_stress_v1",
+                        model_version="rule_based_replay",
+                    )
+                )
+
+    return ValidatedSignalBatch(
+        events=tuple(events),
+        start_idx=0,
+        end_idx=len(aligned.datetimes),
+        symbols=aligned.symbols,
+        registry_version="crisis_stress_v1",
+        model_version="rule_based_replay",
+    )
+
+
+def assess_crisis_reliability(
+    *,
+    native_covered: bool,
+    native_detail: str,
+    deployment_registry: QualifiedSignalRegistry | None,
+    strategy_cfg: CandidateStrategyConfig,
+    config: Layer2AllocationConfig,
+    caps: PortfolioCaps,
+    tf: str,
+    deploy_leverage: float,
+    crisis_windows: tuple[CrisisWindow, ...] = DEFAULT_CRISIS_WINDOWS,
+) -> CrisisReliabilityAssessment:
+    """L2 champion(이미 확정된 registry)이 L1/L2/L3가 전혀 보지 않은 실제 역사적
+    붕괴장에서 기존 리스크 한도(l2_max_mdd_abs)를 벗어나지 않는지 검증한다.
+
+    champion의 전략 정체성은 재학습하지 않는다 — 순수 rule-based 신호를 crisis window
+    가격 데이터에 그대로 적용한다([LIMIT-08]).
+    """
+    if native_covered:
+        return CrisisReliabilityAssessment(
+            status="native_coverage", verified=True, detail=native_detail,
+        )
+
+    if deployment_registry is None or not deployment_registry.by_symbol:
+        return CrisisReliabilityAssessment(
+            status="untested_no_data", verified=False,
+            detail="no deployment registry available to stress-test",
+        )
+
+    from src.domain.futures.optimization.opt_data_utils import load_futures_data_maps_for_symbols
+    from src.domain.futures.strategy.timeframe_contracts import resample_alias
+    from src.domain.futures.strategy.timeframe_probe import _resample_ohlcv
+
+    # "8h" 등 파생 TF는 enriched 정적 파일이 없다(4h에서 런타임 리샘플링되는 대상) — 항상
+    # 실제 파일이 존재하는 "4h" 기준으로 로드한 뒤, 필요 시 target tf로 리샘플링한다.
+    _load_tf = "4h"
+
+    for window in crisis_windows:
+        overlap_symbols = sorted(set(window.symbols) & set(deployment_registry.by_symbol.keys()))
+        logger.info(
+            "[CRISIS-STRESS] window=%s registry_symbols=%d overlap_symbols=%d",
+            window.label,
+            len(deployment_registry.by_symbol),
+            len(overlap_symbols),
+        )
+        if not overlap_symbols:
+            continue
+        try:
+            data_maps, _oos_maps, valid_symbols = load_futures_data_maps_for_symbols(
+                symbols=overlap_symbols,
+                tf=_load_tf,
+                fetch_start=str(window.start),
+                start=str(window.start),
+                is_end=str(window.end),
+                end=str(window.end),
+                skip_metrics=True,
+                scope_name="l2_crisis_stress",
+            )
+        except Exception:
+            logger.exception("[CRISIS-STRESS] data load failed window=%s", window.label)
+            continue
+        logger.info("[CRISIS-STRESS] window=%s valid_symbols=%d", window.label, len(valid_symbols))
+        if not valid_symbols:
+            continue
+
+        if tf == _load_tf:
+            aligned_maps = {s: {tf: data_maps[s][_load_tf]} for s in valid_symbols if _load_tf in data_maps[s]}
+        else:
+            alias = resample_alias(tf)
+            aligned_maps = {}
+            for sym in valid_symbols:
+                base_df = data_maps[sym].get(_load_tf)
+                if base_df is None or (hasattr(base_df, "empty") and base_df.empty):
+                    continue
+                try:
+                    aligned_maps[sym] = {tf: _resample_ohlcv(base_df, alias)}
+                except Exception:
+                    logger.exception("[CRISIS-STRESS] resample failed sym=%s tf=%s", sym, tf)
+        valid_symbols = [s for s in valid_symbols if s in aligned_maps]
+        logger.info("[CRISIS-STRESS] window=%s resampled_symbols=%d", window.label, len(valid_symbols))
+        if not valid_symbols:
+            continue
+
+        aligned_stress = align_data_maps(aligned_maps, valid_symbols, tf, cache_result=False)
+        logger.info("[CRISIS-STRESS] window=%s aligned_bars=%d", window.label, len(aligned_stress.datetimes))
+        if len(aligned_stress.datetimes) < 10:
+            continue
+
+        stress_registry = dataclasses.replace(
+            deployment_registry,
+            by_symbol={
+                s: deployment_registry.by_symbol[s] for s in valid_symbols if s in deployment_registry.by_symbol
+            },
+            ready_symbols=tuple(s for s in valid_symbols if s in deployment_registry.by_symbol),
+        )
+        stress_batch = _build_rule_based_stress_batch(
+            registry=stress_registry, aligned=aligned_stress, strategy_cfg=strategy_cfg, tf=tf,
+        )
+        logger.info("[CRISIS-STRESS] window=%s events=%d", window.label, len(stress_batch.events))
+        if not stress_batch.events:
+            continue
+
+        stress_result = run_l3_holdout(
+            signal_batch=stress_batch,
+            aligned=aligned_stress,
+            holdout_span=(0, len(aligned_stress.datetimes)),
+            config=config,
+            caps=caps,
+            tf=tf,
+            deploy_leverage=deploy_leverage,
+            verbose=False,
+        )
+        exceeded = stress_result.mdd > float(config.l2_max_mdd_abs)
+        return CrisisReliabilityAssessment(
+            status="stress_tested_fail" if exceeded else "stress_tested_pass",
+            verified=not exceeded,
+            detail=(
+                f"{window.label}: mdd={stress_result.mdd:.4f} cagr={stress_result.cagr:+.4f} "
+                f"symbols={len(valid_symbols)}"
+            ),
+            stress_window_label=window.label,
+            stress_symbol_count=len(valid_symbols),
+            stress_mdd=stress_result.mdd,
+            stress_cagr=stress_result.cagr,
+        )
+
+    return CrisisReliabilityAssessment(
+        status="untested_no_data",
+        verified=False,
+        detail="no registered crisis window produced usable overlap/data",
+    )
+
+
+def apply_crisis_reliability_override(
+    l2_result: Layer2Result,
+    assessment: CrisisReliabilityAssessment,
+    *,
+    require_crisis_reliability: bool,
+) -> Layer2Result:
+    import dataclasses
+
+    updated = dataclasses.replace(
+        l2_result,
+        crisis_reliability_status=assessment.status,
+        crisis_reliability_detail=assessment.detail,
+    )
+    if require_crisis_reliability and not assessment.verified:
+        return dataclasses.replace(
+            updated, gate_passed=False, blocker_reason="crisis_unverified",
+        )
+    return updated
 
 
 def run_l3_holdout(
