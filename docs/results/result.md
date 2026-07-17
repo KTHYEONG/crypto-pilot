@@ -112,11 +112,33 @@ STATUS  : ✅ PASS
 
 **해석**: 데이터 무결성 수정 자체는 검증됐다(BTC 정상 복구, valid_symbols 증가). 그러나 `timestamp_x` 스키마 버그는 위기 replay 경로에만 국한되지 않고 정상 L1/L2 유니버스 로딩에도 걸쳐 있었다 — 이번 수정으로 registry_symbols가 93→103으로 늘며 Optuna가 전혀 다른(더 공격적인) 챔피언을 선택했다(정상장 CAGR +61.2%→+92.8%, Uplift +0.10→+0.29). 위기 MDD/CAGR 악화는 이 새 챔피언의 진짜 꼬리위험이 이제야 정직하게 드러난 결과로 판단되며, 위기 게이트는 여전히(그리고 정당하게) `stress_tested_fail`로 승격을 차단 중이다. "이 수정이 위기 생존율을 개선한다"는 메커니즘 레벨의 사전 추정은 이번 실측으로 반증됐다 — 게이트가 설계대로 작동하고 있다는 뜻으로 해석한다.
 
+## L2 배치 레버리지 Kelly/Worst-Fold 안전장치 + Ceiling 구조 리팩토링 (`ADR_20260717_L2_DEPLOY_LEVERAGE_KELLY_WORST_FOLD_SAFETY`, `ADR_20260717_L2_LEVERAGE_CEILING_REFACTOR`)
+
+**출발점**: 새 챔피언(registry_symbols=103)의 위기 MDD 초과폭(55.47%/21% ≈ 2.64배)을 역산하면, fit-leg(2025 정상장) 단위 레버리지 MDD(~10.2%)와 2022 위기 구간 단위 레버리지 MDD(~27.0%)의 비율과 정확히 일치 — 레버리지 `L*`가 우연히 평온했던 과거 경로 하나에만 맞춰 산출되고 있음을 실측으로 확정.
+
+**1차 수정(opt-in 안전장치 도입)**: `calibrate_deployment_leverage`에 신규 candidate 2종 추가 — (1) `select_worst_fold_returns`로 챔피언 자신의 walk-forward fold 중 unit MDD 최대 fold를 찾아 별도 MDD 제약으로 사용(위기 윈도우 미참조, look-ahead 없음), (2) `kelly_safety_fraction=0.25`(심볼 레벨에 이미 쓰이는 `KELLY_FRACTION`과 동일 상수) 기반 fractional-Kelly 이론 상한. `Layer2AllocationConfig.l2_deploy_worst_fold_gate_enabled`/`l2_deploy_kelly_safety_fraction`으로 기본 비활성(opt-in) 노출.
+
+**버그 발견(동일 챔피언 고정 A/B)**: 게이트를 켜고 전체 파이프라인을 재실행하니 위기 MDD가 55.47%→47.13%로 개선됐으나, Optuna champion drift(정상장 CAGR 92.8%→65.5%로 다른 챔피언이 뽑힘)로 confound돼 순수 효과 판별 불가. 동일 챔피언의 fit-leg 데이터를 직접 캡처해 격리 비교한 결과, `l_worst_fold=1.0000`(가장 타이트한 후보)임에도 최종 `L*=2.0610`(게이트 off와 완전 동일)이 산출됨을 확인 — 원인은 candidates `min()`으로 후보를 모으는 1단계와 RC-2 OOS-blend가 그 결과를 조건부로 재상향하는 2단계가 분리돼 있고, `hard_cap`/`exchange_cap`만 함수 말미에서 재검증되고 `worst_fold`/`kelly`는 재검증 지점이 없는 비일관적 구조였기 때문.
+
+**2차 수정(구조 리팩토링)**: `calibrate_deployment_leverage`를 `_resolve_safety_ceiling`(모든 절대 상한 후보를 모아 `l_full`(mdd/cvar 포함, OOS-blend가 재추정 가능) / `l_hard`(hard_cap/exchange_cap/worst_fold/kelly만 — 절대 상한) 반환) + `_resolve_oos_adaptive_leverage`(기존 RC-2 blend 로직 유지, 최종 후보를 `min(l_blend, oos_floor_cap, l_hard)`로 클램프 — 정확한 수정 지점) + `_apply_concentration_haircut`으로 분리. 공개 시그니처/반환 타입/binding 라벨은 전혀 변경 없음. 향후 신규 안전장치는 `_resolve_safety_ceiling`의 candidates 리스트에 한 줄만 추가하면 자동 강제되는 구조로 전환.
+
+**실측 검증(리팩토링 후, 실제 챔피언 fit-leg 데이터 재캡처)**:
+
+| capture | mu(per-bar) | l_hard_ceiling(raw) | L*_on(게이트 활성) | 불변식 `L* ≤ max(ceiling, l_floor)` |
+| :--- | ---: | ---: | ---: | :---: |
+| #1 | 0.0000045 | 0.0991 | **1.0000**(kelly_theoretical) | ✅ |
+| #2(=이전 세션 실제 챔피언, L*=2.0543과 일치 확인) | 0.0000148 | 0.0447 | **1.0000**(kelly_theoretical) | ✅ |
+
+- 수정 전 `L*_off=2.0543`이 그대로 유지됐던 바로 그 챔피언 데이터에서, 수정 후에는 `L*_on=1.0000`으로 정확히 제약이 걸림 — ceiling 우회 버그가 실측 재현 케이스에서 해소됨을 확인.
+- **부가 발견**: quarter-Kelly 이론값(`l_kelly_raw`)이 0.04~0.10 수준 — `l_floor=1.0` 하한이 없었다면 사실상 무포지션 수준까지 de-lever됨. 이 챔피언의 실제 per-bar mu(~1~2×10⁻⁵)가 quarter-Kelly 기준으로는 매우 작아, **Kelly 게이트를 켜면 사실상 항상 1x로 강하게 de-lever되는 극단적 안전장치**로 작동 — 이 시스템의 엣지 크기에 quarter-Kelly가 과도하게 보수적인 기준일 수 있음을 시사(다음 조치 참고).
+- `/check` PASS: `risk_deployment.py` 자체 Cov 92%, spec compliance 포함 전 항목 통과.
+
 ## Verdict
 
 - **L0→L1→native TF handoff / L1 robustness gate:** PASS (회귀 없음).
 - **L2 스코어카드 정합성(Bug-A1/A2):** PASS — 실측 확인 완료, production 신뢰 가능.
 - **BTC 레짐 데이터 무결성(`_resolve_timestamp_column`/`_btc_index` fail-closed):** ✅ 수정 완료 및 메커니즘 레벨 실측 검증 — 단, 정상 유니버스 확장으로 챔피언이 달라져 위기 MDD/CAGR은 개선되지 않고 악화(55.47%/-38.44%).
+- **L2 배치 레버리지 ceiling 구조 리팩토링:** ✅ 수정 완료 및 실제 챔피언 데이터로 불변식 검증 — worst_fold/kelly 게이트가 이제 RC-2 OOS-blend에 의해 우회되지 않음. 단, 두 게이트 모두 여전히 opt-in(기본 비활성) — 프로덕션 기본값 전환 전 위기 replay 재검증 필요.
 - **L2 위기 재현성 게이트:** FAIL-CLOSED 유지 — replay는 정상 완주했으나 MDD/CAGR 생존 조건을 여전히 위반해 `stress_tested_fail`, `verified=False`, 최종 promotion 차단.
 
 ## 다음 조치
@@ -125,4 +147,5 @@ STATUS  : ✅ PASS
 2. `[REGIME-L2] proof_failed path=pooled_fallback` 원인 규명 — 별도 이슈로 트래킹.
 3. ~~crisis detail에 MDD/CAGR/CVaR 원시값을 함께 출력~~ — `[CRISIS-WINDOW-DETAIL]` 로그로 해소(2026-07-17).
 4. `docs/results/next.md` §1(`run_config.timeframe` CLI 기본값 "4h"의 tf-probe 기반 근거화)은 별도 `/spec` 대기 중.
-5. 새 챔피언(registry_symbols=103)이 왜 위기에 더 취약한지 원인 진단 — 어떤 family/variant가 선택됐는지, `deploy_leverage` 값이 이전 대비 얼마나 늘었는지 확인 필요(별도 `/spec` 대상).
+5. ~~새 챔피언이 왜 위기에 더 취약한지 원인 진단~~ — ceiling 우회 버그로 확정, 리팩토링으로 해소(2026-07-17).
+6. `l2_deploy_worst_fold_gate_enabled`/`l2_deploy_kelly_safety_fraction`을 프로덕션 기본값으로 전환할지 결정 — 이번 시스템의 실제 mu 크기(quarter-Kelly가 사실상 항상 1x floor로 수렴)를 감안해 `kelly_safety_fraction` 계수 자체를 재검토하거나, worst_fold 게이트만 우선 활성화하는 방안 검토 필요. 활성화 시 위기 replay(LUNA/FTX) 재실행으로 실제 MDD/CAGR 개선 여부 재확인 필수.
