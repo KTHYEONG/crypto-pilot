@@ -243,7 +243,7 @@
     "testing": "tests/unit/domain/futures/optimization/test_param_spaces.py"
   },
   "src/domain/futures/optimization/opt_data_utils.py": {
-    "architecture": "docs/results/result.md",
+    "architecture": "docs/architecture/layer2.md",
     "testing": [
       "tests/unit/domain/futures/optimization/test_data_window_floor_consistency.py",
       "tests/unit/domain/futures/optimization/test_opt_data_utils.py",
