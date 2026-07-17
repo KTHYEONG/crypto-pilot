@@ -1937,17 +1937,20 @@ def build_l2_simulation_cache(
     )
 
 
-def _parse_tf_from_strategy_id(strategy_id: str) -> str:
-    """strategy_id 접미사에서 TF 문자열을 추출한다.
+def _build_sleeve_tf_lookup(
+    cache: L2SimulationCache,
+) -> dict[tuple[str, str], str]:
+    """Build (symbol, strategy_id) -> native_tf lookup from cache sleeve keys.
+
+    [ADR_20260717_L2_TF_INCLUSION_GATE_NATIVE_TF_FIX]
 
     Args:
-        strategy_id: 전략 식별자 (예: ``donchian_72_8h``).
+        cache: L2SimulationCache containing sleeve_keys.
 
     Returns:
-        TF 문자열 (예: ``"8h"``), 미매치 시 ``"unk"``.
+        (symbol, strategy_id) -> native_tf dict. Empty if no sleeve keys.
     """
-    _m = _re.search(r"_(\d+h)\b", strategy_id) or _re.search(r"(\d+h)$", strategy_id)
-    return _m.group(1) if _m else "unk"
+    return dict(zip(cache.sleeve_ids, cache.sleeve_to_tf, strict=True))
 
 
 def compute_per_tf_fit_edge(
@@ -2853,6 +2856,8 @@ def _run_awf_simulation(
         else:
             included_tfs_by_fold.append(set(cache.sleeve_to_tf) - {"unk"})
 
+    _sleeve_tf_lookup = _build_sleeve_tf_lookup(cache)
+
     prof_mid = time.perf_counter() - _t_pre_loop
     # ── bucket routing + step H + init ─────────────────────────────────────
     _l2_routing_mode = str(getattr(config, "l2_routing_mode", "bucket"))
@@ -3202,10 +3207,10 @@ def _run_awf_simulation(
             if _tf_inclusion_enabled:
                 _current_included = included_tfs_by_fold[_fold_idx]
                 _oos_sleeve_sigs = {
-                    k: v for k, v in _oos_sleeve_sigs.items() if _parse_tf_from_strategy_id(k[1]) in _current_included
+                    k: v for k, v in _oos_sleeve_sigs.items() if _sleeve_tf_lookup.get(k, "unk") in _current_included
                 }
                 _oos_sleeve_edges = {
-                    k: v for k, v in _oos_sleeve_edges.items() if _parse_tf_from_strategy_id(k[1]) in _current_included
+                    k: v for k, v in _oos_sleeve_edges.items() if _sleeve_tf_lookup.get(k, "unk") in _current_included
                 }
             # L2 bucket routing: OOS bar t의 regime 기반 sleeve 필터링
             if _l2_routing_mode == "bucket" and (
