@@ -633,6 +633,9 @@ class Layer2AllocationConfig:
     l2_regime_bull_gross_cap: float = 1.0
     l2_regime_bear_gross_cap: float = 0.35
     l2_regime_crisis_gross_cap: float = 0.25
+    l2_regime_long_short_asymmetry_enabled: bool = False
+    l2_regime_bear_long_extra_mult: float = 1.0
+    l2_regime_crisis_long_extra_mult: float = 1.0
     # L3: Walk-forward 적응형 Regime-Reliability (A/B baseline=off)
     l2_regime_reliability_enabled: bool = False
     l2_regime_reliability_window: int = 2
@@ -950,6 +953,27 @@ class Layer2AllocationConfig:
             raise ValueError("l2_regime_bear_gross_cap must be in range (0.0, 1.0]")
         if l2_regime_crisis_gross_cap <= 0.0:
             raise ValueError("l2_regime_crisis_gross_cap must be in range (0.0, 1.0]")
+        l2_regime_long_short_asymmetry_enabled = bool(
+            params.get("l2_regime_long_short_asymmetry_enabled", _dc.l2_regime_long_short_asymmetry_enabled)
+        )
+        l2_regime_bear_long_extra_mult = cls._validate_range(
+            "l2_regime_bear_long_extra_mult",
+            cls._as_float(
+                params.get("l2_regime_bear_long_extra_mult", _dc.l2_regime_bear_long_extra_mult),
+                _dc.l2_regime_bear_long_extra_mult,
+            ),
+            0.0,
+            1.0,
+        )
+        l2_regime_crisis_long_extra_mult = cls._validate_range(
+            "l2_regime_crisis_long_extra_mult",
+            cls._as_float(
+                params.get("l2_regime_crisis_long_extra_mult", _dc.l2_regime_crisis_long_extra_mult),
+                _dc.l2_regime_crisis_long_extra_mult,
+            ),
+            0.0,
+            1.0,
+        )
         _reliability_env = os.environ.get("L2_REGIME_RELIABILITY", "")
         l2_regime_reliability_enabled = (
             _reliability_env not in ("", "0", "false", "False")
@@ -1197,6 +1221,9 @@ class Layer2AllocationConfig:
             l2_regime_bull_gross_cap=l2_regime_bull_gross_cap,
             l2_regime_bear_gross_cap=l2_regime_bear_gross_cap,
             l2_regime_crisis_gross_cap=l2_regime_crisis_gross_cap,
+            l2_regime_long_short_asymmetry_enabled=l2_regime_long_short_asymmetry_enabled,
+            l2_regime_bear_long_extra_mult=l2_regime_bear_long_extra_mult,
+            l2_regime_crisis_long_extra_mult=l2_regime_crisis_long_extra_mult,
             l2_regime_reliability_enabled=l2_regime_reliability_enabled,
             l2_regime_reliability_window=l2_regime_reliability_window,
             l2_regime_reliability_floor=l2_regime_reliability_floor,
