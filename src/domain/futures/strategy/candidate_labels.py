@@ -26,8 +26,15 @@ _BARRIER_EXIT_REASON_MAP: dict[int, str] = {
 
 # Result keys for compute_triple_barrier_returns
 _TBR_KEYS: tuple[str, ...] = (
-    "gross_bps", "cost_bps", "funding_bps", "edge_bps",
-    "raw_barrier", "exit_code", "exit_idx", "mae_bps", "mfe_bps",
+    "gross_bps",
+    "cost_bps",
+    "funding_bps",
+    "edge_bps",
+    "raw_barrier",
+    "exit_code",
+    "exit_idx",
+    "mae_bps",
+    "mfe_bps",
     "same_bar_collision",
 )
 _logger = logging.getLogger(__name__)
@@ -415,15 +422,17 @@ def compute_triple_barrier_returns(
 
     # Validate array length consistency
     arrays: dict[str, NDArray[Any]] = {
-        "entry_idx_arr": entry_idx_arr, "side_arr": side_arr, "horizon_arr": horizon_arr,
-        "stop_mult_arr": stop_mult_arr, "tp_mult_arr": tp_mult_arr, "min_hold_arr": min_hold_arr,
+        "entry_idx_arr": entry_idx_arr,
+        "side_arr": side_arr,
+        "horizon_arr": horizon_arr,
+        "stop_mult_arr": stop_mult_arr,
+        "tp_mult_arr": tp_mult_arr,
+        "min_hold_arr": min_hold_arr,
         "sym_idx_arr": sym_idx_arr,
     }
     for name, arr in arrays.items():
         if len(arr) != n:
-            raise ValueError(
-                f"mismatched array length: {name} has {len(arr)} elements, expected {n}"
-            )
+            raise ValueError(f"mismatched array length: {name} has {len(arr)} elements, expected {n}")
 
     if cost_floor_arr is None:
         cost_floor_arr = np.full(n, np.nan, dtype=np.float64)
@@ -461,9 +470,11 @@ def compute_triple_barrier_returns(
         _cost_nan_frac = float(np.isnan(cost_2d_c).mean())
         _floor_nan_frac = float(np.isnan(cost_floor_arr).mean())
         _logger.debug(
-            "[DATA] stage=tbr_cost_check has_cost_2d=%s cost_2d_nan_frac=%.3f "
-            "cost_floor_nan_frac=%.3f n_events=%d",
-            has_cost_2d, _cost_nan_frac, _floor_nan_frac, n,
+            "[DATA] stage=tbr_cost_check has_cost_2d=%s cost_2d_nan_frac=%.3f cost_floor_nan_frac=%.3f n_events=%d",
+            has_cost_2d,
+            _cost_nan_frac,
+            _floor_nan_frac,
+            n,
         )
 
     (
@@ -513,7 +524,9 @@ def compute_triple_barrier_returns(
         _edge_finite = float(np.isfinite(edge_arr).mean()) if edge_arr.size else 0.0
         _logger.debug(
             "[DATA] stage=tbr_output_finiteness gross_finite=%.3f cost_finite=%.3f edge_finite=%.3f",
-            _gross_finite, _cost_finite, _edge_finite,
+            _gross_finite,
+            _cost_finite,
+            _edge_finite,
         )
 
     return {

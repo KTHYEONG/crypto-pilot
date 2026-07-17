@@ -72,13 +72,15 @@ def test_cost_amortize_by_holding_field_removed() -> None:
 def test_cagr_calculation_uses_tf_generic_bars_per_year_for_6h() -> None:
     cfg = CandidateStrategyConfig(timeframe="6h")
     equity_curve = np.array([100.0, 101.0, 102.0, 103.0], dtype=np.float64)
-    trades = pd.DataFrame({
-        "pnl": [1.0, 1.0, 1.0],
-        "fee": [0.1, 0.1, 0.1],
-        "funding": [0.0, 0.0, 0.0],
-        "size": [10.0, 10.0, 10.0],
-        "is_liquidation": [0, 0, 0],
-    })
+    trades = pd.DataFrame(
+        {
+            "pnl": [1.0, 1.0, 1.0],
+            "fee": [0.1, 0.1, 0.1],
+            "funding": [0.0, 0.0, 0.0],
+            "size": [10.0, 10.0, 10.0],
+            "is_liquidation": [0, 0, 0],
+        }
+    )
 
     report = evaluate_compound_backtest(trades=trades, equity_curve=equity_curve, cfg=cfg)
 

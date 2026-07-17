@@ -1,4 +1,5 @@
 """Tests for calibrate_l1_symbol_breadth_gate.py — propose_thresholds logic and measurement hook."""
+
 from __future__ import annotations
 
 import json
@@ -79,19 +80,31 @@ def test_measure_effective_sym_n_by_tf_captures_per_tf(mocker: MockerFixture) ->
     def _fake_orig_per_tf(*, tf: str, **kwargs: Any) -> None:
         captured_tfs.append(tf)
         report = Layer1FoldReadiness(
-            fold_id=0, registry_source_end_idx=0,
-            outer_oos_start_idx=0, outer_oos_end_idx=100,
+            fold_id=0,
+            registry_source_end_idx=0,
+            outer_oos_start_idx=0,
+            outer_oos_end_idx=100,
             ready_symbols=("BTCUSDT", "ETHUSDT"),
-            matched_event_count=10, unmatched_event_count=0,
-            realized_match_ratio=1.0, unique_decision_count=5,
-            prediction_unique_count=0, opportunity_ic=None,
-            opportunity_ic_tstat=0.0, probe_bps=10.0,
-            probe_lcb_bps=5.0, probe_series_bps=(10.0, 12.0),
-            effective_symbol_count=2.0, passed=True, blockers=(),
+            matched_event_count=10,
+            unmatched_event_count=0,
+            realized_match_ratio=1.0,
+            unique_decision_count=5,
+            prediction_unique_count=0,
+            opportunity_ic=None,
+            opportunity_ic_tstat=0.0,
+            probe_bps=10.0,
+            probe_lcb_bps=5.0,
+            probe_series_bps=(10.0, 12.0),
+            effective_symbol_count=2.0,
+            passed=True,
+            blockers=(),
         )
         _pipeline.evaluate_layer1_readiness(
-            fold_reports=(report,), fold_cov=1.0,
-            trade_scope_count=10, cfg=CandidateStrategyConfig(), seed=42,
+            fold_reports=(report,),
+            fold_cov=1.0,
+            trade_scope_count=10,
+            cfg=CandidateStrategyConfig(),
+            seed=42,
         )
 
     mocker.patch.object(_pipeline_mod, "run_per_tf_l1", side_effect=_fake_orig_per_tf)
@@ -172,30 +185,51 @@ def test_measure_fold_min_ready_symbols_by_tf_excludes_registry_empty_folds(mock
 
     def _fake_orig_per_tf(*, tf: str, **kwargs: Any) -> None:
         empty_report = Layer1FoldReadiness(
-            fold_id=0, registry_source_end_idx=0,
-            outer_oos_start_idx=0, outer_oos_end_idx=100,
-            ready_symbols=(), matched_event_count=0, unmatched_event_count=0,
-            realized_match_ratio=0.0, unique_decision_count=0,
-            prediction_unique_count=0, opportunity_ic=None,
-            opportunity_ic_tstat=0.0, probe_bps=0.0,
-            probe_lcb_bps=0.0, probe_series_bps=(),
-            effective_symbol_count=0.0, passed=False,
+            fold_id=0,
+            registry_source_end_idx=0,
+            outer_oos_start_idx=0,
+            outer_oos_end_idx=100,
+            ready_symbols=(),
+            matched_event_count=0,
+            unmatched_event_count=0,
+            realized_match_ratio=0.0,
+            unique_decision_count=0,
+            prediction_unique_count=0,
+            opportunity_ic=None,
+            opportunity_ic_tstat=0.0,
+            probe_bps=0.0,
+            probe_lcb_bps=0.0,
+            probe_series_bps=(),
+            effective_symbol_count=0.0,
+            passed=False,
             blockers=("empty_opportunities:registry_empty",),
         )
         non_empty_report = Layer1FoldReadiness(
-            fold_id=1, registry_source_end_idx=0,
-            outer_oos_start_idx=0, outer_oos_end_idx=100,
-            ready_symbols=("LUNA2USDT",), matched_event_count=10, unmatched_event_count=0,
-            realized_match_ratio=1.0, unique_decision_count=5,
-            prediction_unique_count=0, opportunity_ic=None,
-            opportunity_ic_tstat=0.0, probe_bps=229.12,
-            probe_lcb_bps=100.0, probe_series_bps=(229.12,),
-            effective_symbol_count=1.0, passed=False,
+            fold_id=1,
+            registry_source_end_idx=0,
+            outer_oos_start_idx=0,
+            outer_oos_end_idx=100,
+            ready_symbols=("LUNA2USDT",),
+            matched_event_count=10,
+            unmatched_event_count=0,
+            realized_match_ratio=1.0,
+            unique_decision_count=5,
+            prediction_unique_count=0,
+            opportunity_ic=None,
+            opportunity_ic_tstat=0.0,
+            probe_bps=229.12,
+            probe_lcb_bps=100.0,
+            probe_series_bps=(229.12,),
+            effective_symbol_count=1.0,
+            passed=False,
             blockers=("insufficient_ready_symbols",),
         )
         _pipeline.evaluate_layer1_readiness(
-            fold_reports=(empty_report, non_empty_report), fold_cov=1.0,
-            trade_scope_count=10, cfg=CandidateStrategyConfig(), seed=42,
+            fold_reports=(empty_report, non_empty_report),
+            fold_cov=1.0,
+            trade_scope_count=10,
+            cfg=CandidateStrategyConfig(),
+            seed=42,
         )
 
     mocker.patch.object(_pipeline_mod, "run_per_tf_l1", side_effect=_fake_orig_per_tf)

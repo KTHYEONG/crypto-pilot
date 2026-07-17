@@ -372,7 +372,7 @@ class TestEvaluatePanelGateV2:
         rng = np.random.default_rng(99)
         side = np.zeros((t, n), dtype=np.int8)
         for start in range(20, t - 10, 12):
-            side[start:start+6, :] = 1
+            side[start : start + 6, :] = 1
         score = side.astype(np.float64) * rng.uniform(-1, 1, (t, n)).astype(np.float64)
         valid = np.ones((t, n), dtype=np.bool_)
         panel = CandidateSignalPanel(

@@ -117,16 +117,18 @@ def _resample_1m_to_ltf(
 ) -> pd.DataFrame:
     indexed = df.set_index("datetime")
     pandas_rule = _LTF_TO_PANDAS.get(rule, rule)
-    resampled = indexed.resample(pandas_rule, label="right").agg({
-        "high": "max",
-        "low": "min",
-        "close": "last",
-        "volume": "sum",
-        "quote_vol": "sum",
-        "taker_buy_base_volume": "sum",
-        "taker_buy_quote_volume": "sum",
-        "trades": "sum",
-    })
+    resampled = indexed.resample(pandas_rule, label="right").agg(
+        {
+            "high": "max",
+            "low": "min",
+            "close": "last",
+            "volume": "sum",
+            "quote_vol": "sum",
+            "taker_buy_base_volume": "sum",
+            "taker_buy_quote_volume": "sum",
+            "trades": "sum",
+        }
+    )
     resampled = resampled.dropna()
     return resampled
 
@@ -145,9 +147,9 @@ def _normalize_exec_1m_columns(df: pd.DataFrame) -> pd.DataFrame:
     if "trades" not in normalized.columns:
         normalized["trades"] = normalized["volume"].astype(float)
     if "taker_buy_quote_volume" not in normalized.columns:
-        normalized["taker_buy_quote_volume"] = (
-            normalized["taker_buy_base_volume"].astype(float) * normalized["close"].astype(float)
-        )
+        normalized["taker_buy_quote_volume"] = normalized["taker_buy_base_volume"].astype(float) * normalized[
+            "close"
+        ].astype(float)
     return normalized
 
 
@@ -690,9 +692,14 @@ def build_ltf_native_alpha_panels_streaming(
             if col is None:
                 continue
             _process_streaming_symbol(
-                symbol=symbol, col=col, aligned=aligned, families=families,
-                base_dt=base_dt, load_frame=load_frame,
-                accumulators=accumulators, metadata_by_key=metadata_by_key,
+                symbol=symbol,
+                col=col,
+                aligned=aligned,
+                families=families,
+                base_dt=base_dt,
+                load_frame=load_frame,
+                accumulators=accumulators,
+                metadata_by_key=metadata_by_key,
             )
     else:
         with ThreadPoolExecutor(max_workers=max_workers) as pool:
@@ -701,17 +708,23 @@ def build_ltf_native_alpha_panels_streaming(
                 col = symbol_to_col.get(symbol)
                 if col is None:
                     continue
-                futs[pool.submit(
-                    _process_streaming_symbol,
-                    symbol=symbol, col=col, aligned=aligned, families=families,
-                    base_dt=base_dt, load_frame=load_frame,
-                    accumulators=accumulators, metadata_by_key=metadata_by_key,
-                )] = symbol
+                futs[
+                    pool.submit(
+                        _process_streaming_symbol,
+                        symbol=symbol,
+                        col=col,
+                        aligned=aligned,
+                        families=families,
+                        base_dt=base_dt,
+                        load_frame=load_frame,
+                        accumulators=accumulators,
+                        metadata_by_key=metadata_by_key,
+                    )
+                ] = symbol
             for future in as_completed(futs):
                 exc = future.exception()
                 if exc is not None:
-                    _logger.warning("[LTF_STREAM] worker symbol=%s failed: %s",
-                                    futs[future], exc)
+                    _logger.warning("[LTF_STREAM] worker symbol=%s failed: %s", futs[future], exc)
 
     result: list[CandidateSignalPanel] = []
     for (family, ltf_name), acc in accumulators.items():
@@ -729,9 +742,7 @@ def build_ltf_native_alpha_panels_streaming(
         result.append(
             CandidateSignalPanel(
                 family=family,
-                variant=_FAMILY_VARIANT_BY_LTF.get(
-                    (family, ltf_name), f"{family}_{ltf_name}"
-                ),
+                variant=_FAMILY_VARIANT_BY_LTF.get((family, ltf_name), f"{family}_{ltf_name}"),
                 params={"ltf": ltf_name},
                 datetimes=base_dt,
                 symbols=aligned.symbols,

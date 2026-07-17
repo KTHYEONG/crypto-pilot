@@ -345,6 +345,7 @@ def _log_probe_tf_source_coverage(
         )
     if rows:
         from src.domain.futures.strategy.tiered_logging import format_layer_header
+
         _logger.info(format_layer_header(0, "Timeframe Probe & Source Readiness"))
         _logger.info("🔍 [L0-PROBE] SOURCE READINESS Dashboard")
         for row in rows:
@@ -736,6 +737,7 @@ def _ensure_cached_symbol_data_for_targets(
         )
         _logger.debug("[perf-data] backfill 1m data took %.4fs", time.perf_counter() - t_sync_1m)
 
+
 def _has_l1_delivery_candidates(strategy_output: Any) -> bool:
     """[ADR_20260713_TASK_L1_HYBRID_MEMORY_AUDIT] Return whether L0 admitted L1.
 
@@ -782,7 +784,6 @@ class DataStageResult:
     oos_data_maps: dict[str, dict[str, Any]]
     valid_symbols: list[str]
     effective_l0_evidence_end: date | None = None
-
 
 
 def _wrap_segments(segments: list[str], width: int, sep: str = " | ") -> list[str]:
@@ -989,12 +990,9 @@ def resolve_effective_l0_l1_boundary(
     warmup_bound = data_start + timedelta(days=membership_warmup_days)
     resolved_start = max(regime_floor, stable_start, warmup_bound, configured_l1_start)
     if resolved_start >= l2_start:
-        raise EffectiveBoundaryError(
-            f"resolved boundary {resolved_start} is not before l2_start={l2_start}"
-        )
+        raise EffectiveBoundaryError(f"resolved boundary {resolved_start} is not before l2_start={l2_start}")
     _logger.debug(
-        "[BOUNDARY] resolved L0 evidence_end / L1 start = %s "
-        "(stable_quarter=%s warmup_bound=%s configured_l1=%s)",
+        "[BOUNDARY] resolved L0 evidence_end / L1 start = %s (stable_quarter=%s warmup_bound=%s configured_l1=%s)",
         resolved_start,
         stable_start,
         warmup_bound,
@@ -1036,8 +1034,7 @@ def _resolve_effective_evidence_start(
     warmup_bound = data_start + timedelta(days=membership_warmup_days)
     result = max(regime_floor, stable_start, warmup_bound)
     _logger.debug(
-        "[DATA] effective_evidence_start tf=%s regime_floor=%s stable_quarter=%s "
-        "warmup_bound=%s -> resolved=%s",
+        "[DATA] effective_evidence_start tf=%s regime_floor=%s stable_quarter=%s warmup_bound=%s -> resolved=%s",
         tf,
         regime_floor,
         stable_start,
@@ -1129,7 +1126,7 @@ def _run_data_stage(
                     )
                 except Exception as exc:
                     _logger.warning("Failed to resolve effective evidence start for tf=%s: %s", _inject_tf, exc)
-            
+
             base_start = effective_starts.get(run_config.timeframe)
             if base_start is not None:
                 effective_l0_evidence_end = max(layered_window.l1_start, base_start)
@@ -1242,6 +1239,7 @@ def _run_tf_probe_stage(
         for cell in winning:
             winning_by_tf.setdefault(cell.tf, []).append(cell)
         from src.domain.futures.strategy.tiered_logging import format_layer_header
+
         _logger.info(format_layer_header(0, "TF-Probe Gate Survivorship & Selection"))
         _logger.info(
             "[L0-PROBE] %d winning cells across %d tf: %s",
@@ -2402,7 +2400,9 @@ def _run_strategy_stage(
     )
     _logger.debug(
         "[SYS] stage=tf_probe_scoped took=%.4fs rss=%.0fMB skipped=%s",
-        time.perf_counter() - _t_probe, _get_rss_mb(), not _run_probe,
+        time.perf_counter() - _t_probe,
+        _get_rss_mb(),
+        not _run_probe,
     )
 
     _effective_probe_result = probe_result or _probe_result_local
@@ -2538,9 +2538,7 @@ def _run_strategy_stage(
             _logger.error("[ALPHA-FOUNDRY] gate produced zero survivors; L1 cannot start")
             return RunnerResult(exit_code=1, reason="l0_gate_no_delivery")
         if af_report.mode == "gate" and af_report.n_passed <= 0:
-            _logger.debug(
-                "[ALPHA-FOUNDRY] base_tf_survivors=0; continuing with cross_tf L1 delivery candidates"
-            )
+            _logger.debug("[ALPHA-FOUNDRY] base_tf_survivors=0; continuing with cross_tf L1 delivery candidates")
     if run_config.phase == "l0":
         _logger.info("[L0] alpha gate completed; stopping before L1 routing")
         return RunnerResult(exit_code=0, reason="l0_mode_done")
@@ -2935,6 +2933,7 @@ def _run_strategy_stage(
                     apply_crisis_reliability_override,
                     assess_crisis_reliability,
                 )
+
                 _l2_config = Layer2AllocationConfig.from_mapping(best_l2_params)
                 _crisis_assessment = assess_crisis_reliability(
                     deployment_registry=getattr(l1_res, "deployment_registry", None),
@@ -2953,7 +2952,8 @@ def _run_strategy_stage(
                 for wm in _crisis_assessment.window_results:
                     _logger.info("[CRISIS-WINDOW-DETAIL] label=%s status=%s %s", wm.label, wm.status, wm.detail)
                 l2_final = apply_crisis_reliability_override(
-                    l2_final, _crisis_assessment,
+                    l2_final,
+                    _crisis_assessment,
                     require_crisis_reliability=bool(getattr(tiered_cfg, "l2_require_crisis_reliability", True)),
                 )
             if l2_final is not None and l2_study_result.best_evaluation is not None:

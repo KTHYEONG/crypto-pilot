@@ -414,9 +414,11 @@ def align_data_maps(
         _cost_nan_frac = float(np.isnan(execution_cost_bps_2d).mean())
         _adv_nan_frac = float(np.isnan(adv_usdt_2d).mean())
         _logger.debug(
-            "[DATA] stage=align_cost_liquidity tf=%s n_symbols=%d "
-            "execution_cost_nan_frac=%.3f adv_usdt_nan_frac=%.3f",
-            tf, len(valid_symbols), _cost_nan_frac, _adv_nan_frac,
+            "[DATA] stage=align_cost_liquidity tf=%s n_symbols=%d execution_cost_nan_frac=%.3f adv_usdt_nan_frac=%.3f",
+            tf,
+            len(valid_symbols),
+            _cost_nan_frac,
+            _adv_nan_frac,
         )
 
     if state_cube is None and cache_result:

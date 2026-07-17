@@ -132,10 +132,12 @@ def test_weighted_fusion_insufficient_coverage() -> None:
 def test_weighted_fusion_duplicate_rows_raises() -> None:
     """Duplicate (family, variant, timeframe) raises ValueError."""
     evidence_by_tf = {
-        "4h": pd.DataFrame([
-            _row("4h", 18.8, family="trend_ma", variant="ema_18_108"),
-            _row("4h", 15.0, family="trend_ma", variant="ema_18_108"),
-        ]),
+        "4h": pd.DataFrame(
+            [
+                _row("4h", 18.8, family="trend_ma", variant="ema_18_108"),
+                _row("4h", 15.0, family="trend_ma", variant="ema_18_108"),
+            ]
+        ),
     }
     with pytest.raises(ValueError, match="duplicate"):
         fuse_multi_timeframe_evidence_weighted(evidence_by_tf=evidence_by_tf)

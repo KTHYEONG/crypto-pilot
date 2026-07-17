@@ -357,6 +357,7 @@ def _load_symbol_sync_profiles() -> dict[str, SymbolSyncProfile]:
     import time
 
     from src.core.settings import FuturesStorageLayout
+
     cache_path = FuturesStorageLayout.get_metadata_path("symbol_sync_profiles.json")
     cache_valid_seconds = 24 * 3600
 
@@ -809,6 +810,7 @@ def sync_single_symbol_data(
     collector.ensure_funding_data(symbol, str(effective_start), str(effective_end))
     funding = pd.DataFrame()
     from src.core.settings import FuturesStorageLayout
+
     funding_path = FuturesStorageLayout.get_funding_path(symbol)
     if funding_path.exists():
         try:
@@ -1047,6 +1049,7 @@ def _worker(
 
 def _sync_cache_path(symbol: str, timeframe: str) -> Path:
     from src.core.settings import FuturesStorageLayout
+
     # Pass the storage module's root explicitly so tests and alternate data
     # roots remain isolated from the settings singleton; the layout helper also
     # performs the legacy flat-path migration.
@@ -1087,6 +1090,7 @@ def _requested_sync_caches_missing(
             import json
 
             from src.core.settings import FuturesStorageLayout
+
             meta_path = FuturesStorageLayout.get_metadata_path("parquet_cache_meta.json")
             if meta_path.exists():
                 with open(meta_path, encoding="utf-8") as f:
@@ -1167,6 +1171,7 @@ def _requested_sync_caches_missing(
         return False
 
     from src.core.settings import FuturesStorageLayout
+
     metrics_path = FuturesStorageLayout.get_metrics_path(symbol, base_dir=FUTURES_DATA_DIR)
     if not metrics_path.exists():
         return True
@@ -1294,6 +1299,7 @@ def run_historical_sync(
         import json
 
         from src.core.settings import FuturesStorageLayout
+
         meta_path = FuturesStorageLayout.get_metadata_path("parquet_cache_meta.json")
         if meta_path.exists():
             with open(meta_path, encoding="utf-8") as f:

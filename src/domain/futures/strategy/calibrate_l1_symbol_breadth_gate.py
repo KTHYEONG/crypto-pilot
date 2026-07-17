@@ -11,6 +11,7 @@ _DEFAULT_PER_TF_GATE_OVERRIDES must be updated by hand after review.
 extends this file to the fold-level raw symbol-count gate (l1_min_cross_section),
 which the pooled effective_sym_n fix above does not reach.
 """
+
 from __future__ import annotations
 
 import json

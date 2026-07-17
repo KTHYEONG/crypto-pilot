@@ -90,7 +90,8 @@ def _mock_per_tf(
 
 
 def _registry_with_family_diversity(
-    *, items_by_symbol: Mapping[str, tuple[str, ...]],
+    *,
+    items_by_symbol: Mapping[str, tuple[str, ...]],
 ) -> QualifiedSignalRegistry:
     by_symbol = {
         sym: tuple(
@@ -242,9 +243,7 @@ class TestResolveSelectedL1Tf:
 
     def test_returns_none_when_preferred_tf_not_in_map(self) -> None:
         per_tf = {
-            "4h": _mock_per_tf(
-                tf="4h", gate_passed=True, registry=_registry(ready_symbols=("BTCUSDT",))
-            ),
+            "4h": _mock_per_tf(tf="4h", gate_passed=True, registry=_registry(ready_symbols=("BTCUSDT",))),
         }
 
         selected = _resolve_selected_l1_tf(per_tf, preferred_tf="8h")
@@ -291,14 +290,19 @@ class TestResolveL2MasterTf:
             l2_master_min_ready_symbols=1,
             l2_master_min_source_families=1,
         )
-        registry_8h = _registry_with_family_diversity(items_by_symbol={
-            "ETHUSDT": ("family_a:v1",),
-        })
+        registry_8h = _registry_with_family_diversity(
+            items_by_symbol={
+                "ETHUSDT": ("family_a:v1",),
+            }
+        )
         per_tf = {
             "4h": _mock_per_tf(tf="4h", gate_passed=False, registry=None, n_winning_signals=100),
             "8h": _mock_per_tf(
-                tf="8h", gate_passed=True, registry=registry_8h,
-                n_winning_signals=20, strategy_panel_edge_bps=15.0,
+                tf="8h",
+                gate_passed=True,
+                registry=registry_8h,
+                n_winning_signals=20,
+                strategy_panel_edge_bps=15.0,
             ),
         }
 
@@ -364,20 +368,30 @@ class TestSelectRepresentativeL1Registry:
 
 class TestAggregatePerTfL1:
     def test_s9_atomicity_aggregate_uses_master_tf_registry(self) -> None:
-        registry_4h = _registry_with_family_diversity(items_by_symbol={
-            "BTCUSDT": ("family_a:v1",),
-        })
-        registry_8h = _registry_with_family_diversity(items_by_symbol={
-            "ETHUSDT": ("family_a:v1",),
-        })
+        registry_4h = _registry_with_family_diversity(
+            items_by_symbol={
+                "BTCUSDT": ("family_a:v1",),
+            }
+        )
+        registry_8h = _registry_with_family_diversity(
+            items_by_symbol={
+                "ETHUSDT": ("family_a:v1",),
+            }
+        )
         per_tf = {
             "4h": _mock_per_tf(
-                tf="4h", gate_passed=True, registry=registry_4h,
-                n_winning_signals=10, strategy_panel_edge_bps=5.0,
+                tf="4h",
+                gate_passed=True,
+                registry=registry_4h,
+                n_winning_signals=10,
+                strategy_panel_edge_bps=5.0,
             ),
             "8h": _mock_per_tf(
-                tf="8h", gate_passed=True, registry=registry_8h,
-                n_winning_signals=100, strategy_panel_edge_bps=50.0,
+                tf="8h",
+                gate_passed=True,
+                registry=registry_8h,
+                n_winning_signals=100,
+                strategy_panel_edge_bps=50.0,
             ),
         }
         cfg = MagicMock(
@@ -474,8 +488,6 @@ def test_resolve_labeled_events_for_tf_falls_back_when_require_native_false() ->
     assert result is pooled
 
 
-
-
 def test_run_per_tf_l1_fails_on_oob_mismatch_entry_idx() -> None:
     from src.domain.futures.strategy.event_grid_contracts import EventGridContractError
 
@@ -486,14 +498,16 @@ def test_run_per_tf_l1_fails_on_oob_mismatch_entry_idx() -> None:
     )
 
     cfg = CandidateStrategyConfig()
-    labeled = pd.DataFrame({
-        "event_id": [1, 2],
-        "datetime": [pd.Timestamp("2024-01-01T00:00Z"), pd.Timestamp("2024-01-01T12:00Z")],
-        "entry_idx": [1, 5],
-        "native_tf": ["6h", "6h"],
-        "symbol": ["BTCUSDT", "BTCUSDT"],
-        "strategy_id": ["r1", "r1"],
-    })
+    labeled = pd.DataFrame(
+        {
+            "event_id": [1, 2],
+            "datetime": [pd.Timestamp("2024-01-01T00:00Z"), pd.Timestamp("2024-01-01T12:00Z")],
+            "entry_idx": [1, 5],
+            "native_tf": ["6h", "6h"],
+            "symbol": ["BTCUSDT", "BTCUSDT"],
+            "strategy_id": ["r1", "r1"],
+        }
+    )
     outer_folds: tuple[Any, ...] = ()
 
     with pytest.raises(EventGridContractError, match="timeframe=6h event_id=2"):
@@ -515,12 +529,12 @@ class TestResolveL2MasterTfMasterEligibleGate:
             l2_master_min_ready_symbols=5,
             l2_master_min_source_families=2,
         )
-        registry_4h = _registry_with_family_diversity(items_by_symbol={
-            f"SYM{i}": ("family_a:v1",) for i in range(5)
-        } | {"SYM5": ("family_b:v2",)})
-        registry_8h = _registry_with_family_diversity(items_by_symbol={
-            f"SYM{i}": ("family_a:v1",) for i in range(5)
-        } | {"SYM5": ("family_b:v2",)})
+        registry_4h = _registry_with_family_diversity(
+            items_by_symbol={f"SYM{i}": ("family_a:v1",) for i in range(5)} | {"SYM5": ("family_b:v2",)}
+        )
+        registry_8h = _registry_with_family_diversity(
+            items_by_symbol={f"SYM{i}": ("family_a:v1",) for i in range(5)} | {"SYM5": ("family_b:v2",)}
+        )
         per_tf = {
             "4h": _mock_per_tf(tf="4h", gate_passed=True, registry=registry_4h, strategy_panel_edge_bps=5.0),
             "8h": _mock_per_tf(tf="8h", gate_passed=True, registry=registry_8h, strategy_panel_edge_bps=15.0),
@@ -537,14 +551,17 @@ class TestResolveL2MasterTfMasterEligibleGate:
             l2_master_min_ready_symbols=5,
             l2_master_min_source_families=2,
         )
-        registry_1d = _registry_with_family_diversity(items_by_symbol={
-            "BTCUSDT": ("btc_regime_pullback:slow",),
-            "ETHUSDT": ("btc_regime_pullback:slow",),
-            "SOLUSDT": ("trend_donchian:72",),
-        })
-        registry_4h = _registry_with_family_diversity(items_by_symbol={
-            f"SYM{i}": ("family_a:v1",) for i in range(4)
-        } | {"SYM4": ("family_b:v2",), "SYM5": ("family_b:v2",)})
+        registry_1d = _registry_with_family_diversity(
+            items_by_symbol={
+                "BTCUSDT": ("btc_regime_pullback:slow",),
+                "ETHUSDT": ("btc_regime_pullback:slow",),
+                "SOLUSDT": ("trend_donchian:72",),
+            }
+        )
+        registry_4h = _registry_with_family_diversity(
+            items_by_symbol={f"SYM{i}": ("family_a:v1",) for i in range(4)}
+            | {"SYM4": ("family_b:v2",), "SYM5": ("family_b:v2",)}
+        )
         per_tf = {
             "1d": _mock_per_tf(tf="1d", gate_passed=True, registry=registry_1d, strategy_panel_edge_bps=100.0),
             "4h": _mock_per_tf(tf="4h", gate_passed=True, registry=registry_4h, strategy_panel_edge_bps=5.0),
@@ -590,9 +607,7 @@ class TestResolveL2MasterTfFromPrior:
 
 
 class TestRunTieredPipelineSelectedTimeframe:
-    def test_run_tiered_pipeline_l1_only_populates_selected_timeframe(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_run_tiered_pipeline_l1_only_populates_selected_timeframe(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """S4b: L1-only phase populates Layer1Result.selected_timeframe with the
         auto-resolved master TF (was always None before this fix)."""
         import datetime as _dt
@@ -602,9 +617,9 @@ class TestRunTieredPipelineSelectedTimeframe:
         from src.domain.futures.strategy.tiered_workflow.pipeline import run_tiered_pipeline
 
         n_bars = 200
-        datetimes = (
-            np.datetime64("2024-01-01T00:00", "h") + np.arange(n_bars).astype("timedelta64[h]")
-        ).astype("datetime64[ns]")
+        datetimes = (np.datetime64("2024-01-01T00:00", "h") + np.arange(n_bars).astype("timedelta64[h]")).astype(
+            "datetime64[ns]"
+        )
         aligned = AlignedMarketData(
             datetimes=datetimes,
             symbols=("BTCUSDT",),
@@ -629,14 +644,12 @@ class TestRunTieredPipelineSelectedTimeframe:
         )
         cfg = CandidateStrategyConfig(l2_master_tf=None, l2_master_min_ready_symbols=5, l2_master_min_source_families=2)
 
-        registry_8h = _registry_with_family_diversity(items_by_symbol={
-            f"SYM{i}": ("family_a:v1",) for i in range(5)
-        } | {"SYM5": ("family_b:v2",)})
+        registry_8h = _registry_with_family_diversity(
+            items_by_symbol={f"SYM{i}": ("family_a:v1",) for i in range(5)} | {"SYM5": ("family_b:v2",)}
+        )
         per_tf_results = {
             "4h": _mock_per_tf(tf="4h", gate_passed=False, registry=None),
-            "8h": _mock_per_tf(
-                tf="8h", gate_passed=True, registry=registry_8h, strategy_panel_edge_bps=15.0
-            ),
+            "8h": _mock_per_tf(tf="8h", gate_passed=True, registry=registry_8h, strategy_panel_edge_bps=15.0),
         }
 
         def _fake_run_per_tf_l1(*, tf: str, **_kwargs: Any) -> PerTfL1Result:

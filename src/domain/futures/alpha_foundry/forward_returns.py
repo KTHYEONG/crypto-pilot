@@ -34,9 +34,5 @@ def compute_causal_forward_returns_bps(
     for i in range(idx_end):
         entry = i + causal_lag_bars
         exit_bar = entry + holding_bars
-        fwd_ret[i, :] = (
-            side[i, :].astype(np.float64)
-            * np.log(close[exit_bar, :] / close[entry, :])
-            * 10000.0
-        )
+        fwd_ret[i, :] = side[i, :].astype(np.float64) * np.log(close[exit_bar, :] / close[entry, :]) * 10000.0
     return fwd_ret

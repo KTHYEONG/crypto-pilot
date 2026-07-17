@@ -585,13 +585,9 @@ def resolve_lcb_quantile(
     floor_blocks: int = 3,
 ) -> float:
     if full_conf_blocks <= floor_blocks:
-        raise ValueError(
-            f"full_conf_blocks ({full_conf_blocks}) must be > floor_blocks ({floor_blocks})"
-        )
+        raise ValueError(f"full_conf_blocks ({full_conf_blocks}) must be > floor_blocks ({floor_blocks})")
     if not (0.0 < base_quantile <= relaxed_quantile < 1.0):
-        raise ValueError(
-            f"quantile must satisfy 0 < base ({base_quantile}) <= relaxed ({relaxed_quantile}) < 1"
-        )
+        raise ValueError(f"quantile must satisfy 0 < base ({base_quantile}) <= relaxed ({relaxed_quantile}) < 1")
     if num_blocks >= full_conf_blocks:
         return base_quantile
     if num_blocks <= floor_blocks:

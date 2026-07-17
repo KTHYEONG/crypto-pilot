@@ -20,16 +20,18 @@ from src.domain.futures.signals.contracts import CandidateSignalPanel
 from src.domain.futures.strategy.common.alignment import AlignedMarketData
 from src.domain.futures.strategy.execution_cost import ExecutionCostModel
 
-_KNOWN_AXES: frozenset[str] = frozenset({
-    "symbol_liquidity",
-    "symbol_cluster",
-    "market_regime",
-    "volatility_regime",
-    "funding_polarity",
-    "score_quantile",
-    "event_hour_utc",
-    "source_tf",
-})
+_KNOWN_AXES: frozenset[str] = frozenset(
+    {
+        "symbol_liquidity",
+        "symbol_cluster",
+        "market_regime",
+        "volatility_regime",
+        "funding_polarity",
+        "score_quantile",
+        "event_hour_utc",
+        "source_tf",
+    }
+)
 
 
 @dataclass(slots=True, frozen=True)
@@ -59,17 +61,11 @@ class ConditionalCellEvidence:
 def _validate_shape(panel: CandidateSignalPanel, aligned: AlignedMarketData) -> None:
     t, n = aligned.close_2d.shape
     if panel.signed_score_2d.shape != (t, n):
-        raise ValueError(
-            f"shape mismatch: panel.signed_score_2d shape {panel.signed_score_2d.shape} != ({t}, {n})"
-        )
+        raise ValueError(f"shape mismatch: panel.signed_score_2d shape {panel.signed_score_2d.shape} != ({t}, {n})")
     if panel.side_hint_2d.shape != (t, n):
-        raise ValueError(
-            f"shape mismatch: panel.side_hint_2d shape {panel.side_hint_2d.shape} != ({t}, {n})"
-        )
+        raise ValueError(f"shape mismatch: panel.side_hint_2d shape {panel.side_hint_2d.shape} != ({t}, {n})")
     if panel.valid_mask_2d.shape != (t, n):
-        raise ValueError(
-            f"shape mismatch: panel.valid_mask_2d shape {panel.valid_mask_2d.shape} != ({t}, {n})"
-        )
+        raise ValueError(f"shape mismatch: panel.valid_mask_2d shape {panel.valid_mask_2d.shape} != ({t}, {n})")
 
 
 def _sparse_entry_mask(
@@ -138,20 +134,39 @@ def evaluate_event_mask_gate(
     if n_events < gate_config.min_events:
         return AlphaGateEvidence(
             schema_version="unified",
-            run_id=run_id, timeframe=recipe.timeframe,
-            family=recipe.family, variant=recipe.variant,
-            recipe_id=recipe.recipe_id, archetype=recipe.archetype,
-            symbol_scope="symbol", n_events=n_events, effective_n=0.0,
-            mean_gross_bps=0.0, mean_cost_bps=0.0, mean_net_bps=0.0,
-            gross_lcb_bps=0.0, net_lcb_bps=0.0, nw_tstat=0.0,
-            rank_ic=0.0, rank_ic_tstat=0.0, cost_drag_ratio=0.0,
-            turnover_per_year=0.0, novelty_corr_max=0.0,
-            incremental_rank_ic=0.0, compute_cost_score=0.0,
-            event_hit_rate=0.0, payoff_skew=0.0, xs_spread_lcb_bps=None,
-            liquidity_cost_stress_bps=0.0, bootstrap_lcb_bps=0.0,
-            bootstrap_agree=True, gate_passed=False,
-            handoff_tier="blocked", selected_for_l1=False,
-            reject_reasons=("insufficient_events",), soft_flags=(),
+            run_id=run_id,
+            timeframe=recipe.timeframe,
+            family=recipe.family,
+            variant=recipe.variant,
+            recipe_id=recipe.recipe_id,
+            archetype=recipe.archetype,
+            symbol_scope="symbol",
+            n_events=n_events,
+            effective_n=0.0,
+            mean_gross_bps=0.0,
+            mean_cost_bps=0.0,
+            mean_net_bps=0.0,
+            gross_lcb_bps=0.0,
+            net_lcb_bps=0.0,
+            nw_tstat=0.0,
+            rank_ic=0.0,
+            rank_ic_tstat=0.0,
+            cost_drag_ratio=0.0,
+            turnover_per_year=0.0,
+            novelty_corr_max=0.0,
+            incremental_rank_ic=0.0,
+            compute_cost_score=0.0,
+            event_hit_rate=0.0,
+            payoff_skew=0.0,
+            xs_spread_lcb_bps=None,
+            liquidity_cost_stress_bps=0.0,
+            bootstrap_lcb_bps=0.0,
+            bootstrap_agree=True,
+            gate_passed=False,
+            handoff_tier="blocked",
+            selected_for_l1=False,
+            reject_reasons=("insufficient_events",),
+            soft_flags=(),
         )
 
     idx_end_fwd = t - holding_bars
@@ -160,9 +175,7 @@ def evaluate_event_mask_gate(
         close_entry = close[i, :]
         close_exit = close[i + holding_bars, :]
         fwd_ret_bps[i, :] = (
-            side[i, :].astype(np.float64)
-            * (close_exit / np.maximum(close_entry, 1e-10) - 1.0)
-            * 10000.0
+            side[i, :].astype(np.float64) * (close_exit / np.maximum(close_entry, 1e-10) - 1.0) * 10000.0
         )
 
     stress_cost = round_trip_cost_bps
@@ -212,25 +225,39 @@ def evaluate_event_mask_gate(
 
     return AlphaGateEvidence(
         schema_version="unified",
-        run_id=run_id, timeframe=recipe.timeframe,
-        family=recipe.family, variant=recipe.variant,
-        recipe_id=recipe.recipe_id, archetype=recipe.archetype,
-        symbol_scope="symbol", n_events=n_events,
+        run_id=run_id,
+        timeframe=recipe.timeframe,
+        family=recipe.family,
+        variant=recipe.variant,
+        recipe_id=recipe.recipe_id,
+        archetype=recipe.archetype,
+        symbol_scope="symbol",
+        n_events=n_events,
         effective_n=effective_n,
-        mean_gross_bps=mean_gross_bps, mean_cost_bps=mean_cost_bps,
+        mean_gross_bps=mean_gross_bps,
+        mean_cost_bps=mean_cost_bps,
         mean_net_bps=mean_net_bps,
-        gross_lcb_bps=0.0, net_lcb_bps=net_lcb_bps,
-        nw_tstat=nw_tstat, rank_ic=0.0, rank_ic_tstat=0.0,
+        gross_lcb_bps=0.0,
+        net_lcb_bps=net_lcb_bps,
+        nw_tstat=nw_tstat,
+        rank_ic=0.0,
+        rank_ic_tstat=0.0,
         cost_drag_ratio=cost_drag_ratio,
         turnover_per_year=turnover,
-        novelty_corr_max=0.0, incremental_rank_ic=0.0,
-        compute_cost_score=0.0, event_hit_rate=0.0, payoff_skew=0.0,
-        xs_spread_lcb_bps=None, liquidity_cost_stress_bps=0.0,
-        bootstrap_lcb_bps=0.0, bootstrap_agree=True,
+        novelty_corr_max=0.0,
+        incremental_rank_ic=0.0,
+        compute_cost_score=0.0,
+        event_hit_rate=0.0,
+        payoff_skew=0.0,
+        xs_spread_lcb_bps=None,
+        liquidity_cost_stress_bps=0.0,
+        bootstrap_lcb_bps=0.0,
+        bootstrap_agree=True,
         gate_passed=gate_passed,
         handoff_tier="candidate" if gate_passed else "blocked",
         selected_for_l1=False,
-        reject_reasons=tuple(reject_reasons), soft_flags=(),
+        reject_reasons=tuple(reject_reasons),
+        soft_flags=(),
     )
 
 
@@ -462,30 +489,34 @@ def generate_default_cell_specs(
                     if cell_count >= config.max_cells_per_recipe:
                         break
                     cell_id = f"{axis}:{bucket_label}"
-                    specs.append(ConditionalCellSpec(
-                        cell_id=cell_id,
-                        axes=(axis,),
-                        values=bucket_values,
-                        min_events=config.min_cell_events,
-                        min_effective_n=config.min_cell_effective_n,
-                    ))
+                    specs.append(
+                        ConditionalCellSpec(
+                            cell_id=cell_id,
+                            axes=(axis,),
+                            values=bucket_values,
+                            min_events=config.min_cell_events,
+                            min_effective_n=config.min_cell_effective_n,
+                        )
+                    )
                     cell_count += 1
         elif combine_n == 2:
             for i, a1 in enumerate(axes_list):
-                for a2 in axes_list[i + 1:]:
+                for a2 in axes_list[i + 1 :]:
                     for b1_label, b1_values in axis_buckets[a1]:
                         for b2_label, b2_values in axis_buckets[a2]:
                             if cell_count >= config.max_cells_per_recipe:
                                 break
                             cell_id = f"{a1}:{b1_label}|{a2}:{b2_label}"
                             merged = {**b1_values, **b2_values}
-                            specs.append(ConditionalCellSpec(
-                                cell_id=cell_id,
-                                axes=(a1, a2),
-                                values=merged,
-                                min_events=config.min_cell_events,
-                                min_effective_n=config.min_cell_effective_n,
-                            ))
+                            specs.append(
+                                ConditionalCellSpec(
+                                    cell_id=cell_id,
+                                    axes=(a1, a2),
+                                    values=merged,
+                                    min_events=config.min_cell_events,
+                                    min_effective_n=config.min_cell_effective_n,
+                                )
+                            )
                             cell_count += 1
                         if cell_count >= config.max_cells_per_recipe:
                             break
@@ -552,46 +583,59 @@ def evaluate_conditional_l0_cells(
 
         if cell_n < spec.min_events:
             gate_ev = evaluate_event_mask_gate(
-                event_mask=cell_mask, panel=panel, aligned=aligned,
+                event_mask=cell_mask,
+                panel=panel,
+                aligned=aligned,
                 recipe=recipe,
                 round_trip_cost_bps=cost_model.stress_round_trip_bps(),
-                gate_config=gate_config, bars_per_year=bars_per_year,
+                gate_config=gate_config,
+                bars_per_year=bars_per_year,
                 run_id=run_id,
             )
-            cells.append(ConditionalCellEvidence(
-                cell_id=spec.cell_id,
-                axes=spec.axes,
-                values=spec.values,
-                event_mask_2d=cell_mask,
-                gate_evidence=gate_ev,
-                failure_axis="insufficient_sample",
-            ))
+            cells.append(
+                ConditionalCellEvidence(
+                    cell_id=spec.cell_id,
+                    axes=spec.axes,
+                    values=spec.values,
+                    event_mask_2d=cell_mask,
+                    gate_evidence=gate_ev,
+                    failure_axis="insufficient_sample",
+                )
+            )
             continue
 
         n_symbols = int(np.sum(np.any(cell_mask, axis=0)))
         if n_symbols < cell_config.min_symbols_per_cell and not cell_config.allow_single_symbol_cells:
             gate_ev = evaluate_event_mask_gate(
-                event_mask=cell_mask, panel=panel, aligned=aligned,
+                event_mask=cell_mask,
+                panel=panel,
+                aligned=aligned,
                 recipe=recipe,
                 round_trip_cost_bps=cost_model.stress_round_trip_bps(),
-                gate_config=gate_config, bars_per_year=bars_per_year,
+                gate_config=gate_config,
+                bars_per_year=bars_per_year,
                 run_id=run_id,
             )
-            cells.append(ConditionalCellEvidence(
-                cell_id=spec.cell_id,
-                axes=spec.axes,
-                values=spec.values,
-                event_mask_2d=cell_mask,
-                gate_evidence=gate_ev,
-                failure_axis="insufficient_sample",
-            ))
+            cells.append(
+                ConditionalCellEvidence(
+                    cell_id=spec.cell_id,
+                    axes=spec.axes,
+                    values=spec.values,
+                    event_mask_2d=cell_mask,
+                    gate_evidence=gate_ev,
+                    failure_axis="insufficient_sample",
+                )
+            )
             continue
 
         gate_ev = evaluate_event_mask_gate(
-            event_mask=cell_mask, panel=panel, aligned=aligned,
+            event_mask=cell_mask,
+            panel=panel,
+            aligned=aligned,
             recipe=recipe,
             round_trip_cost_bps=cost_model.stress_round_trip_bps(),
-            gate_config=gate_config, bars_per_year=bars_per_year,
+            gate_config=gate_config,
+            bars_per_year=bars_per_year,
             run_id=run_id,
         )
 
@@ -616,13 +660,15 @@ def evaluate_conditional_l0_cells(
             if not failure_axis:
                 failure_axis = "unknown"
 
-        cells.append(ConditionalCellEvidence(
-            cell_id=spec.cell_id,
-            axes=spec.axes,
-            values=spec.values,
-            event_mask_2d=cell_mask,
-            gate_evidence=gate_ev,
-            failure_axis=failure_axis,
-        ))
+        cells.append(
+            ConditionalCellEvidence(
+                cell_id=spec.cell_id,
+                axes=spec.axes,
+                values=spec.values,
+                event_mask_2d=cell_mask,
+                gate_evidence=gate_ev,
+                failure_axis=failure_axis,
+            )
+        )
 
     return tuple(cells)

@@ -28,18 +28,35 @@ _ROBUST_Z_CLIP = 3.0
 
 # [ADR_20260706_L0_SIGNAL_FAMILY_DIVERSITY] Must stay identical to strategy/rule_signals.py's copy.
 ALL_SIGNAL_FAMILIES: tuple[str, ...] = (
-    "trend_ma", "trend_donchian", "vol_breakout",
-    "btc_regime_pullback", "trend_pullback_continuation", "dual_momentum",
-    "residual_reversion", "xs_momentum", "xs_flow", "xs_oi_skew",
-    "mtf_trend_pullback", "mtf_breakout_retest", "taker_imbalance_momentum",
-    "funding_flow_carry", "funding_extreme_reversal",
-    "lsr_oi_regime_filter", "vol_term_structure_gate",
-    "macd_4h", "supertrend", "ichimoku_trend",
-    "trend_pullback_quality_v2", "residual_momentum_xs",
+    "trend_ma",
+    "trend_donchian",
+    "vol_breakout",
+    "btc_regime_pullback",
+    "trend_pullback_continuation",
+    "dual_momentum",
+    "residual_reversion",
+    "xs_momentum",
+    "xs_flow",
+    "xs_oi_skew",
+    "mtf_trend_pullback",
+    "mtf_breakout_retest",
+    "taker_imbalance_momentum",
+    "funding_flow_carry",
+    "funding_extreme_reversal",
+    "lsr_oi_regime_filter",
+    "vol_term_structure_gate",
+    "macd_4h",
+    "supertrend",
+    "ichimoku_trend",
+    "trend_pullback_quality_v2",
+    "residual_momentum_xs",
     "funding_flow_exhaustion_sparse",
-    "oi_lsr_unwind", "vol_contraction_breakout",
-    "xs_residual_rebalance", "carry_net_of_funding",
-    "liquidity_participation_breakout", "btc_neutral_residual_reversal",
+    "oi_lsr_unwind",
+    "vol_contraction_breakout",
+    "xs_residual_rebalance",
+    "carry_net_of_funding",
+    "liquidity_participation_breakout",
+    "btc_neutral_residual_reversal",
     "price_band_reversion",
     "mtf_fusion",
 )
@@ -847,7 +864,9 @@ def build_rule_signal_panels(
                         family="btc_regime_pullback",
                         variant=_variant,
                         params={
-                            "window": _alt_window, "btc_fast": _btc_fast, "btc_slow": _btc_slow,
+                            "window": _alt_window,
+                            "btc_fast": _btc_fast,
+                            "btc_slow": _btc_slow,
                             "oscillator": _oscillator,
                         },
                         datetimes=aligned.datetimes,
@@ -1185,9 +1204,7 @@ def build_rule_signal_panels(
                                 "[LIMIT-03] slow-lookback control: turnover_per_year should drop "
                                 "materially vs baseline if the archetype's survival is turnover-driven"
                                 if _n_htf == 100
-                                else (
-                                    "1d trend direction filters 4h rsi oversold/overbought pullback trigger entries"
-                                )
+                                else ("1d trend direction filters 4h rsi oversold/overbought pullback trigger entries")
                             ),
                         },
                     )
@@ -1656,8 +1673,7 @@ def build_rule_signal_panels(
                             "archetype": "trend",
                             "regime": "sparse_breakout_retest",
                             "edge_hypothesis": (
-                                "channel breakout confirmed by retest within 1% "
-                                "produces higher quality sparse entries"
+                                "channel breakout confirmed by retest within 1% produces higher quality sparse entries"
                             ),
                         },
                     )
@@ -1752,8 +1768,7 @@ def build_rule_signal_panels(
                         metadata={
                             "archetype": "xs_alpha",
                             "edge_hypothesis": (
-                                "cross-sectional residual momentum captures "
-                                "relative strength after removing BTC beta"
+                                "cross-sectional residual momentum captures relative strength after removing BTC beta"
                             ),
                             "max_abs_btc_beta": 0.80,
                         },
@@ -1817,8 +1832,8 @@ def build_rule_signal_panels(
             _ffes_entry = _entry_rising_edge_2d(_ffes_condition)
             _ffes_side = np.where(_ffes_entry, -np.sign(_ffes_funding_z).astype(np.int8), 0).astype(np.int8, copy=False)
             _ffes_score = np.where(_ffes_side != 0, np.clip((np.abs(_ffes_funding_z) - 1.5) / 1.5, 0.0, 1.0), 0.0)
-            _ffes_side[:scale_window(96)] = 0
-            _ffes_score[:scale_window(96)] = 0.0
+            _ffes_side[: scale_window(96)] = 0
+            _ffes_score[: scale_window(96)] = 0.0
             fam_panels.append(
                 CandidateSignalPanel(
                     family="funding_flow_exhaustion_sparse",
@@ -1837,7 +1852,7 @@ def build_rule_signal_panels(
                     metadata={
                         "archetype": "flow",
                         "regime": "funding_flow_exhaustion",
-                            "edge_hypothesis": "funding extreme + taker crowding + OI fade for sparse flow exhaustion",
+                        "edge_hypothesis": "funding extreme + taker crowding + OI fade for sparse flow exhaustion",
                     },
                 )
             )
@@ -1845,7 +1860,7 @@ def build_rule_signal_panels(
         elif fam == "oi_lsr_unwind":
             _oiu_log = np.where(oi_valid, np.log(oi), np.nan)
             _oiu_log_change = _oiu_log - np.roll(_oiu_log, scale_window(21), axis=0)
-            _oiu_log_change[:scale_window(21)] = np.nan
+            _oiu_log_change[: scale_window(21)] = np.nan
             _oiu_oi_z = _zscore_2d(_oiu_log_change, window=scale_window(42))
             _oiu_lsr_z = _zscore_2d(lsr_log, window=lsr_log_z_42_window)
             _oiu_crowding = (np.abs(_oiu_lsr_z) >= 1.0) & (_oiu_oi_z > 0.5)
@@ -1930,8 +1945,11 @@ def build_rule_signal_panels(
                 _sign = np.sign(_raw)
                 _sign_prev = np.vstack([_sign[:1], _sign[:-1]])
                 _sign_flip = (
-                    np.isfinite(_sign) & np.isfinite(_sign_prev)
-                    & (_sign != 0) & (_sign_prev != 0) & (_sign != _sign_prev)
+                    np.isfinite(_sign)
+                    & np.isfinite(_sign_prev)
+                    & (_sign != 0)
+                    & (_sign_prev != 0)
+                    & (_sign != _sign_prev)
                 )
                 _xsrr_entry = (_bucket_cross | _sign_flip) & np.isfinite(_raw)
                 _count = valid_mask.sum(axis=1)
@@ -1984,8 +2002,8 @@ def build_rule_signal_panels(
                 np.clip(np.abs(_cnf_carry_z) / 2.0, 0.0, 1.0) * np.where(_cnf_favourable, 1.0, 0.5),
                 0.0,
             )
-            _cnf_side[:scale_window(96)] = 0
-            _cnf_score[:scale_window(96)] = 0.0
+            _cnf_side[: scale_window(96)] = 0
+            _cnf_score[: scale_window(96)] = 0.0
             fam_panels.append(
                 CandidateSignalPanel(
                     family="carry_net_of_funding",
@@ -2079,9 +2097,7 @@ def build_rule_signal_panels(
                     metadata={
                         "archetype": "mean_rev",
                         "regime": "price_band_reversion",
-                        "edge_hypothesis": (
-                            "price reclaim of ATR band signals faded mean-reversion entry"
-                        ),
+                        "edge_hypothesis": ("price reclaim of ATR band signals faded mean-reversion entry"),
                     },
                 )
             )
@@ -2188,9 +2204,7 @@ def candidate_panels_to_events(
         l0_mask = panel.metadata.get("l0_event_mask_2d")
         if l0_mask is not None:
             if l0_mask.shape != scores.shape:
-                raise ValueError(
-                    f"l0_event_mask_2d shape {l0_mask.shape} != signed_score_2d shape {scores.shape}"
-                )
+                raise ValueError(f"l0_event_mask_2d shape {l0_mask.shape} != signed_score_2d shape {scores.shape}")
             if l0_mask.dtype != np.bool_:
                 raise ValueError("event_mask_2d must be bool")
         mask = panel.valid_mask_2d & (np.abs(scores) >= min_abs_score) & (sides != 0)

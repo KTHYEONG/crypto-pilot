@@ -20,13 +20,31 @@ from src.domain.futures.alpha_foundry.contracts import (
 
 def _candidate(recipe_id: str, archetype: AlphaArchetype, timeframe: str, priority: float) -> L0SignalCandidate:
     return L0SignalCandidate(
-        run_id="test", timeframe=timeframe, family="btc_regime_pullback", variant="v",
-        recipe_id=recipe_id, archetype=archetype, source="synthetic_recipe",
-        n_events=100, effective_n=50.0, mean_net_bps=priority, block_lcb_bps=priority * 0.5,
-        nw_tstat=1.5, bootstrap_lcb_bps=0.0, bootstrap_agree=True, cost_drag_ratio=0.3,
-        turnover_per_year=50.0, max_abs_corr_in_bucket=0.0, tf_coverage_count=0,
-        sign_agreement_ratio=0.0, corroboration_tier="single_tf_strict", discovery_tier="candidate",
-        l1_priority_score=priority, l1_budget_units=1, hard_reject_reasons=(), soft_flags=(),
+        run_id="test",
+        timeframe=timeframe,
+        family="btc_regime_pullback",
+        variant="v",
+        recipe_id=recipe_id,
+        archetype=archetype,
+        source="synthetic_recipe",
+        n_events=100,
+        effective_n=50.0,
+        mean_net_bps=priority,
+        block_lcb_bps=priority * 0.5,
+        nw_tstat=1.5,
+        bootstrap_lcb_bps=0.0,
+        bootstrap_agree=True,
+        cost_drag_ratio=0.3,
+        turnover_per_year=50.0,
+        max_abs_corr_in_bucket=0.0,
+        tf_coverage_count=0,
+        sign_agreement_ratio=0.0,
+        corroboration_tier="single_tf_strict",
+        discovery_tier="candidate",
+        l1_priority_score=priority,
+        l1_budget_units=1,
+        hard_reject_reasons=(),
+        soft_flags=(),
     )
 
 
@@ -37,6 +55,7 @@ def _real_aligned() -> Any:
         warm_mask = np.ones((3, 1), dtype=np.bool_)
         entry_block_mask = np.zeros((3, 1), dtype=np.bool_)
         kill_mask = np.zeros((3, 1), dtype=np.bool_)
+
     return _Aligned()
 
 
@@ -51,14 +70,19 @@ def _mock_panel(recipe_id: str) -> Any:
             self.datetimes = np.array(["2026-01-01T00:00:00", "2026-01-02T00:00:00"], dtype="datetime64[ns]")
             self.signed_score_2d = np.zeros((2, 1), dtype=np.float64)
             self.valid_mask_2d = np.ones((2, 1), dtype=bool)
+
     return _Panel()
 
 
 FIXED_AUDIT = L0IndependenceAudit(
-    n_selected_total=2, n_distinct_thesis_ids=1, n_independent_clusters=1,
+    n_selected_total=2,
+    n_distinct_thesis_ids=1,
+    n_independent_clusters=1,
     cluster_members={0: ("r1",), 1: ("r2",)},
-    demoted_recipe_ids=(), demoted_reason_by_id={},
-    canonical_tf="1h", max_corr_threshold=0.70,
+    demoted_recipe_ids=(),
+    demoted_reason_by_id={},
+    canonical_tf="1h",
+    max_corr_threshold=0.70,
 )
 
 FIXED_CROSS_RESULT = CrossBucketDiversityResult(
@@ -69,9 +93,12 @@ FIXED_CROSS_RESULT = CrossBucketDiversityResult(
     global_eff_test_count=1.2,
     pair_evidence=(
         CrossTFPairEvidence(
-            recipe_id_a="r1", recipe_id_b="r2",
-            score_corr=0.9, shared_directional_entries=15,
-            directional_entry_jaccard=0.6, is_redundant=True,
+            recipe_id_a="r1",
+            recipe_id_b="r2",
+            score_corr=0.9,
+            shared_directional_entries=15,
+            directional_entry_jaccard=0.6,
+            is_redundant=True,
         ),
     ),
     canonical_tf="1h",
@@ -88,7 +115,9 @@ def _base_multi_results() -> dict[str, AlphaFoundryL0Result]:
     return {
         "4h": AlphaFoundryL0Result(
             panels_for_l1=(_mock_panel("r1"), _mock_panel("r2")),
-            summary_report=None, gate_results=(), panel_bindings=(),
+            summary_report=None,
+            gate_results=(),
+            panel_bindings=(),
             candidates_for_l1=(c1, c2),
         ),
     }
@@ -99,7 +128,6 @@ def _base_aligned() -> dict[str, Any]:
 
 
 class TestAssembleL0StrategyDeliveryManifest:
-
     def test_passthrough_when_both_disabled(self) -> None:
         multi_results = _base_multi_results()
         aligned_by_tf = _base_aligned()
@@ -230,9 +258,12 @@ class TestAssembleL0StrategyDeliveryManifest:
             global_eff_test_count=2.0,
             pair_evidence=(
                 CrossTFPairEvidence(
-                    recipe_id_a="r1", recipe_id_b="r2",
-                    score_corr=0.3, shared_directional_entries=3,
-                    directional_entry_jaccard=0.1, is_redundant=False,
+                    recipe_id_a="r1",
+                    recipe_id_b="r2",
+                    score_corr=0.3,
+                    shared_directional_entries=3,
+                    directional_entry_jaccard=0.1,
+                    is_redundant=False,
                 ),
             ),
             canonical_tf="1h",

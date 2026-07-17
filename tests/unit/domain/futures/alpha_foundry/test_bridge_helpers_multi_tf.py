@@ -46,11 +46,18 @@ def make_aligned_for_tf(
     close = 100.0 * np.exp(0.001 * np.arange(t, dtype=np.float64))[:, None] * np.ones((1, n))
     mask = np.ones((t, n), dtype=np.bool_)
     return AlignedMarketData(
-        datetimes=dt, symbols=symbols,
-        open_2d=close.copy(), high_2d=close * 1.01, low_2d=close * 0.99, close_2d=close,
-        volume_2d=np.full((t, n), 1000.0), funding_2d=np.full((t, n), 0.00005),
-        active_mask=mask, warm_mask=mask,
-        entry_block_mask=np.zeros((t, n), dtype=np.bool_), kill_mask=np.zeros((t, n), dtype=np.bool_),
+        datetimes=dt,
+        symbols=symbols,
+        open_2d=close.copy(),
+        high_2d=close * 1.01,
+        low_2d=close * 0.99,
+        close_2d=close,
+        volume_2d=np.full((t, n), 1000.0),
+        funding_2d=np.full((t, n), 0.00005),
+        active_mask=mask,
+        warm_mask=mask,
+        entry_block_mask=np.zeros((t, n), dtype=np.bool_),
+        kill_mask=np.zeros((t, n), dtype=np.bool_),
     )
 
 
@@ -67,14 +74,19 @@ def make_panel_for_tf(
     side = np.zeros((bars, n_symbols), dtype=np.int8)
     for start in range(10, bars, 20):
         score[start, :] = sign * 0.8
-        side[start:start + 3, :] = int(sign)
+        side[start : start + 3, :] = int(sign)
     return CandidateSignalPanel(
-        family=family, variant=f"{variant}_{tf}",
-        params={"lookback": 20}, datetimes=np.arange(bars, dtype=np.int64),
+        family=family,
+        variant=f"{variant}_{tf}",
+        params={"lookback": 20},
+        datetimes=np.arange(bars, dtype=np.int64),
         symbols=("BTCUSDT", "ETHUSDT")[:n_symbols],
-        signed_score_2d=score, side_hint_2d=side,
-        expected_holding_bars=3, min_holding_bars=1,
-        stop_atr_mult=2.0, take_profit_atr_mult=4.0,
+        signed_score_2d=score,
+        side_hint_2d=side,
+        expected_holding_bars=3,
+        min_holding_bars=1,
+        stop_atr_mult=2.0,
+        take_profit_atr_mult=4.0,
         turnover_proxy_2d=np.abs(np.diff(score, axis=0, prepend=0.0)),
         valid_mask_2d=np.ones((bars, n_symbols), dtype=np.bool_),
         metadata={"recipe_id": f"{family}:{variant}:{tf}"},
@@ -83,17 +95,29 @@ def make_panel_for_tf(
 
 def make_recipe_for_tf(*, tf: str, family: str = "fam", variant: str = "var") -> AlphaRecipe:
     return AlphaRecipe(
-        recipe_id=f"{family}:{variant}:{tf}", family=family, variant=f"{variant}_{tf}",
-        timeframe=tf, archetype="trend", indicator_params={"lookback": 20},
-        side_rule_id="trend_follow", exit_policy_id="atr_trail_2",
-        required_fields=("close",), causal_lag_bars=1, max_turnover_per_year=365.0,
+        recipe_id=f"{family}:{variant}:{tf}",
+        family=family,
+        variant=f"{variant}_{tf}",
+        timeframe=tf,
+        archetype="trend",
+        indicator_params={"lookback": 20},
+        side_rule_id="trend_follow",
+        exit_policy_id="atr_trail_2",
+        required_fields=("close",),
+        causal_lag_bars=1,
+        max_turnover_per_year=365.0,
     )
 
 
 def make_gate_config() -> AlphaGateConfig:
     return AlphaGateConfig(
-        min_events=1, min_effective_n=1.0, min_lcb_net_bps=-1000.0, min_nw_tstat=0.0,
-        max_cost_drag_ratio=100.0, max_turnover_per_year=10000.0, min_candidate_rank_ic_tstat=0.0,
+        min_events=1,
+        min_effective_n=1.0,
+        min_lcb_net_bps=-1000.0,
+        min_nw_tstat=0.0,
+        max_cost_drag_ratio=100.0,
+        max_turnover_per_year=10000.0,
+        min_candidate_rank_ic_tstat=0.0,
         # archetype_event_floors now takes precedence over min_events
         # (resolve_family_timeframe_gate_policy wired into the real gate) — clear it
         # so this fixture's permissive min_events=1 actually applies.
@@ -372,16 +396,26 @@ class TestParallelMaxWorkersValidation:
     def test_exceeds_max_raises(self) -> None:
         with pytest.raises(ValueError, match="parallel_max_workers"):
             run_alpha_foundry_l0_gate_multi_tf(
-                panels_by_tf={}, bindings_by_tf={}, recipes_by_tf={}, aligned_by_tf={},
-                cost_model=None, runtime_config=None, run_id_prefix="test",
+                panels_by_tf={},
+                bindings_by_tf={},
+                recipes_by_tf={},
+                aligned_by_tf={},
+                cost_model=None,
+                runtime_config=None,
+                run_id_prefix="test",
                 parallel_max_workers=5,
             )
 
     def test_below_min_raises(self) -> None:
         with pytest.raises(ValueError, match="parallel_max_workers"):
             run_alpha_foundry_l0_gate_multi_tf(
-                panels_by_tf={}, bindings_by_tf={}, recipes_by_tf={}, aligned_by_tf={},
-                cost_model=None, runtime_config=None, run_id_prefix="test",
+                panels_by_tf={},
+                bindings_by_tf={},
+                recipes_by_tf={},
+                aligned_by_tf={},
+                cost_model=None,
+                runtime_config=None,
+                run_id_prefix="test",
                 parallel_max_workers=0,
             )
 
@@ -395,16 +429,23 @@ class TestSequentialAndParallelIdentical:
         panels_by_tf, recipes_by_tf, aligned_by_tf, bindings_by_tf = _build_panels_recipes_aligned(tfs)
 
         base = run_alpha_foundry_l0_gate_multi_tf(
-            panels_by_tf=panels_by_tf, bindings_by_tf=bindings_by_tf,
-            recipes_by_tf=recipes_by_tf, aligned_by_tf=aligned_by_tf,
-            cost_model=ExecutionCostModel(), runtime_config=RUNTIME_CONFIG,
+            panels_by_tf=panels_by_tf,
+            bindings_by_tf=bindings_by_tf,
+            recipes_by_tf=recipes_by_tf,
+            aligned_by_tf=aligned_by_tf,
+            cost_model=ExecutionCostModel(),
+            runtime_config=RUNTIME_CONFIG,
             run_id_prefix="test_seq_default",
         )
         explicit = run_alpha_foundry_l0_gate_multi_tf(
-            panels_by_tf=panels_by_tf, bindings_by_tf=bindings_by_tf,
-            recipes_by_tf=recipes_by_tf, aligned_by_tf=aligned_by_tf,
-            cost_model=ExecutionCostModel(), runtime_config=RUNTIME_CONFIG,
-            run_id_prefix="test_seq_explicit", parallel_max_workers=1,
+            panels_by_tf=panels_by_tf,
+            bindings_by_tf=bindings_by_tf,
+            recipes_by_tf=recipes_by_tf,
+            aligned_by_tf=aligned_by_tf,
+            cost_model=ExecutionCostModel(),
+            runtime_config=RUNTIME_CONFIG,
+            run_id_prefix="test_seq_explicit",
+            parallel_max_workers=1,
         )
         for tf in tfs:
             base_report = base[tf].report
@@ -421,9 +462,12 @@ class TestSequentialAndParallelIdentical:
         panels_by_tf, recipes_by_tf, aligned_by_tf, bindings_by_tf = _build_panels_recipes_aligned(tfs)
 
         seq = run_alpha_foundry_l0_gate_multi_tf(
-            panels_by_tf=panels_by_tf, bindings_by_tf=bindings_by_tf,
-            recipes_by_tf=recipes_by_tf, aligned_by_tf=aligned_by_tf,
-            cost_model=ExecutionCostModel(), runtime_config=RUNTIME_CONFIG,
+            panels_by_tf=panels_by_tf,
+            bindings_by_tf=bindings_by_tf,
+            recipes_by_tf=recipes_by_tf,
+            aligned_by_tf=aligned_by_tf,
+            cost_model=ExecutionCostModel(),
+            runtime_config=RUNTIME_CONFIG,
             run_id_prefix="test_seq",
         )
         with patch(
@@ -431,10 +475,14 @@ class TestSequentialAndParallelIdentical:
             new=SafeThreadPoolExecutor,
         ):
             par = run_alpha_foundry_l0_gate_multi_tf(
-                panels_by_tf=panels_by_tf, bindings_by_tf=bindings_by_tf,
-                recipes_by_tf=recipes_by_tf, aligned_by_tf=aligned_by_tf,
-                cost_model=ExecutionCostModel(), runtime_config=RUNTIME_CONFIG,
-                run_id_prefix="test_par", parallel_max_workers=3,
+                panels_by_tf=panels_by_tf,
+                bindings_by_tf=bindings_by_tf,
+                recipes_by_tf=recipes_by_tf,
+                aligned_by_tf=aligned_by_tf,
+                cost_model=ExecutionCostModel(),
+                runtime_config=RUNTIME_CONFIG,
+                run_id_prefix="test_par",
+                parallel_max_workers=3,
             )
 
         assert set(seq.keys()) == set(par.keys())
@@ -460,22 +508,26 @@ class TestPrimeCacheAndWorker:
 
         # Compute real cheap evidences for the worker test
         tf_key = "4h"
-        bound_panels = list(
-            _bind_panels_to_recipe_ids(panels_by_tf[tf_key], bindings_by_tf.get(tf_key, []))
-        )
+        bound_panels = list(_bind_panels_to_recipe_ids(panels_by_tf[tf_key], bindings_by_tf.get(tf_key, [])))
         real_evidences = evaluate_alpha_cheap_gate_batch(
-            panels=bound_panels, recipes=recipes_by_tf.get(tf_key, {}),
+            panels=bound_panels,
+            recipes=recipes_by_tf.get(tf_key, {}),
             aligned=aligned_by_tf[tf_key],
-            cost_model=ExecutionCostModel(), config=RUNTIME_CONFIG.cheap_gate,
+            cost_model=ExecutionCostModel(),
+            config=RUNTIME_CONFIG.cheap_gate,
         )
         cheap_evidences_by_tf = {tf_key: real_evidences}
 
         # Prime cache with actual cheap evidences
         _prime_l0_tf_input_cache(
-            panels_by_tf=panels_by_tf, bindings_by_tf=bindings_by_tf,
-            recipes_by_tf=recipes_by_tf, aligned_by_tf=aligned_by_tf,
-            cost_model=ExecutionCostModel(), runtime_config=RUNTIME_CONFIG,
-            evidence_by_tf={}, cheap_evidences_by_tf=cheap_evidences_by_tf,
+            panels_by_tf=panels_by_tf,
+            bindings_by_tf=bindings_by_tf,
+            recipes_by_tf=recipes_by_tf,
+            aligned_by_tf=aligned_by_tf,
+            cost_model=ExecutionCostModel(),
+            runtime_config=RUNTIME_CONFIG,
+            evidence_by_tf={},
+            cheap_evidences_by_tf=cheap_evidences_by_tf,
         )
 
         # Worker result
@@ -507,10 +559,14 @@ class TestPrimeCacheAndWorker:
         tfs_first = ("4h", "6h")
         panels_1, recipes_1, aligned_1, bindings_1 = _build_panels_recipes_aligned(tfs_first)
         _prime_l0_tf_input_cache(
-            panels_by_tf=panels_1, bindings_by_tf=bindings_1,
-            recipes_by_tf=recipes_1, aligned_by_tf=aligned_1,
-            cost_model=ExecutionCostModel(), runtime_config=RUNTIME_CONFIG,
-            evidence_by_tf={}, cheap_evidences_by_tf={},
+            panels_by_tf=panels_1,
+            bindings_by_tf=bindings_1,
+            recipes_by_tf=recipes_1,
+            aligned_by_tf=aligned_1,
+            cost_model=ExecutionCostModel(),
+            runtime_config=RUNTIME_CONFIG,
+            evidence_by_tf={},
+            cheap_evidences_by_tf={},
         )
         assert set(_L0_TF_INPUT_CACHE.keys()) == set(tfs_first)
 
@@ -518,10 +574,14 @@ class TestPrimeCacheAndWorker:
         tfs_second = ("8h", "12h")
         panels_2, recipes_2, aligned_2, bindings_2 = _build_panels_recipes_aligned(tfs_second)
         _prime_l0_tf_input_cache(
-            panels_by_tf=panels_2, bindings_by_tf=bindings_2,
-            recipes_by_tf=recipes_2, aligned_by_tf=aligned_2,
-            cost_model=ExecutionCostModel(), runtime_config=RUNTIME_CONFIG,
-            evidence_by_tf={}, cheap_evidences_by_tf={},
+            panels_by_tf=panels_2,
+            bindings_by_tf=bindings_2,
+            recipes_by_tf=recipes_2,
+            aligned_by_tf=aligned_2,
+            cost_model=ExecutionCostModel(),
+            runtime_config=RUNTIME_CONFIG,
+            evidence_by_tf={},
+            cheap_evidences_by_tf={},
         )
         assert set(_L0_TF_INPUT_CACHE.keys()) == set(tfs_second)
         assert "4h" not in _L0_TF_INPUT_CACHE
@@ -540,16 +600,24 @@ class TestParallelDeterminism:
             new=SafeThreadPoolExecutor,
         ):
             run_1 = run_alpha_foundry_l0_gate_multi_tf(
-                panels_by_tf=panels_by_tf, bindings_by_tf=bindings_by_tf,
-                recipes_by_tf=recipes_by_tf, aligned_by_tf=aligned_by_tf,
-                cost_model=ExecutionCostModel(), runtime_config=RUNTIME_CONFIG,
-                run_id_prefix="test_det_1", parallel_max_workers=3,
+                panels_by_tf=panels_by_tf,
+                bindings_by_tf=bindings_by_tf,
+                recipes_by_tf=recipes_by_tf,
+                aligned_by_tf=aligned_by_tf,
+                cost_model=ExecutionCostModel(),
+                runtime_config=RUNTIME_CONFIG,
+                run_id_prefix="test_det_1",
+                parallel_max_workers=3,
             )
             run_2 = run_alpha_foundry_l0_gate_multi_tf(
-                panels_by_tf=panels_by_tf, bindings_by_tf=bindings_by_tf,
-                recipes_by_tf=recipes_by_tf, aligned_by_tf=aligned_by_tf,
-                cost_model=ExecutionCostModel(), runtime_config=RUNTIME_CONFIG,
-                run_id_prefix="test_det_2", parallel_max_workers=3,
+                panels_by_tf=panels_by_tf,
+                bindings_by_tf=bindings_by_tf,
+                recipes_by_tf=recipes_by_tf,
+                aligned_by_tf=aligned_by_tf,
+                cost_model=ExecutionCostModel(),
+                runtime_config=RUNTIME_CONFIG,
+                run_id_prefix="test_det_2",
+                parallel_max_workers=3,
             )
 
         for tf in tfs:
@@ -578,13 +646,18 @@ class TestParallelWorkerExceptionPropagates:
             patch(
                 "src.domain.futures.alpha_foundry.bridge_helpers.run_alpha_foundry_l0_gate",
                 side_effect=ValueError("simulated worker failure"),
-            ),pytest.raises((ValueError, concurrent.futures.process.BrokenProcessPool))
+            ),
+            pytest.raises((ValueError, concurrent.futures.process.BrokenProcessPool)),
         ):
             run_alpha_foundry_l0_gate_multi_tf(
-                panels_by_tf=panels_by_tf, bindings_by_tf=bindings_by_tf,
-                recipes_by_tf=recipes_by_tf, aligned_by_tf=aligned_by_tf,
-                cost_model=ExecutionCostModel(), runtime_config=RUNTIME_CONFIG,
-                run_id_prefix="test_err", parallel_max_workers=2,
+                panels_by_tf=panels_by_tf,
+                bindings_by_tf=bindings_by_tf,
+                recipes_by_tf=recipes_by_tf,
+                aligned_by_tf=aligned_by_tf,
+                cost_model=ExecutionCostModel(),
+                runtime_config=RUNTIME_CONFIG,
+                run_id_prefix="test_err",
+                parallel_max_workers=2,
             )
 
 
@@ -601,16 +674,24 @@ class TestCheapGateEvidenceFrameFromEvidences:
         cheap_gate_config = make_gate_config()
 
         fresh_df = build_cheap_gate_evidence_frame(
-            panels=[panel], recipes=recipes, aligned=aligned,
-            cost_model=ExecutionCostModel(), cheap_gate_config=cheap_gate_config, timeframe=tf,
+            panels=[panel],
+            recipes=recipes,
+            aligned=aligned,
+            cost_model=ExecutionCostModel(),
+            cheap_gate_config=cheap_gate_config,
+            timeframe=tf,
         )
 
         evidences = evaluate_alpha_cheap_gate_batch(
-            panels=[panel], recipes=recipes, aligned=aligned,
-            cost_model=ExecutionCostModel(), config=cheap_gate_config,
+            panels=[panel],
+            recipes=recipes,
+            aligned=aligned,
+            cost_model=ExecutionCostModel(),
+            config=cheap_gate_config,
         )
         reused_df = build_cheap_gate_evidence_frame_from_evidences(
-            cheap_evidences=evidences, recipes=recipes,
+            cheap_evidences=evidences,
+            recipes=recipes,
         )
 
         pd.testing.assert_frame_equal(fresh_df, reused_df)
@@ -628,16 +709,24 @@ class TestCheapGateEvidenceFrameFromEvidences:
         panels = [panel_a, panel_b]
 
         fresh_df = build_cheap_gate_evidence_frame(
-            panels=panels, recipes=recipes, aligned=aligned,
-            cost_model=ExecutionCostModel(), cheap_gate_config=cheap_gate_config, timeframe=tf,
+            panels=panels,
+            recipes=recipes,
+            aligned=aligned,
+            cost_model=ExecutionCostModel(),
+            cheap_gate_config=cheap_gate_config,
+            timeframe=tf,
         )
         evidences = evaluate_alpha_cheap_gate_batch(
-            panels=panels, recipes=recipes, aligned=aligned,
-            cost_model=ExecutionCostModel(), config=cheap_gate_config,
+            panels=panels,
+            recipes=recipes,
+            aligned=aligned,
+            cost_model=ExecutionCostModel(),
+            config=cheap_gate_config,
         )
         shuffled = tuple(reversed(evidences))
         reused_df = build_cheap_gate_evidence_frame_from_evidences(
-            cheap_evidences=shuffled, recipes=recipes,
+            cheap_evidences=shuffled,
+            recipes=recipes,
         )
 
         # Output must match on content regardless of evidence order [LIMIT-02]
@@ -658,27 +747,44 @@ class TestRunAlphaFoundryL0GateDedup:
         recipes = {recipe.recipe_id: recipe}
         bindings = list(
             bind_panels_to_alpha_recipes(
-                panels=[panel], recipes=recipes, timeframe=tf,
-                max_recipes_per_family=10, include_families=(),
-                exclude_families=(), enable_synthetic_recipes=True,
+                panels=[panel],
+                recipes=recipes,
+                timeframe=tf,
+                max_recipes_per_family=10,
+                include_families=(),
+                exclude_families=(),
+                enable_synthetic_recipes=True,
             )
         )
         assert bindings, "panel must bind to its own recipe"
 
         fresh_result = run_alpha_foundry_l0_gate(
-            panels=[panel], bindings=bindings, recipes=recipes, aligned=aligned,
-            cost_model=ExecutionCostModel(), runtime_config=RUNTIME_CONFIG,
-            run_id="test_fresh", timeframe=tf,
+            panels=[panel],
+            bindings=bindings,
+            recipes=recipes,
+            aligned=aligned,
+            cost_model=ExecutionCostModel(),
+            runtime_config=RUNTIME_CONFIG,
+            run_id="test_fresh",
+            timeframe=tf,
         )
 
         cheap_evidences = evaluate_alpha_cheap_gate_batch(
-            panels=[panel], recipes=recipes, aligned=aligned,
-            cost_model=ExecutionCostModel(), config=RUNTIME_CONFIG.cheap_gate,
+            panels=[panel],
+            recipes=recipes,
+            aligned=aligned,
+            cost_model=ExecutionCostModel(),
+            config=RUNTIME_CONFIG.cheap_gate,
         )
         dedup_result = run_alpha_foundry_l0_gate(
-            panels=[panel], bindings=bindings, recipes=recipes, aligned=aligned,
-            cost_model=ExecutionCostModel(), runtime_config=RUNTIME_CONFIG,
-            run_id="test_dedup", timeframe=tf,
+            panels=[panel],
+            bindings=bindings,
+            recipes=recipes,
+            aligned=aligned,
+            cost_model=ExecutionCostModel(),
+            runtime_config=RUNTIME_CONFIG,
+            run_id="test_dedup",
+            timeframe=tf,
             precomputed_cheap_evidences=cheap_evidences,
         )
 
@@ -697,21 +803,36 @@ class TestRunAlphaFoundryL0GateDedup:
         recipes = {recipe.recipe_id: recipe}
         bindings = list(
             bind_panels_to_alpha_recipes(
-                panels=[panel], recipes=recipes, timeframe=tf,
-                max_recipes_per_family=10, include_families=(),
-                exclude_families=(), enable_synthetic_recipes=True,
+                panels=[panel],
+                recipes=recipes,
+                timeframe=tf,
+                max_recipes_per_family=10,
+                include_families=(),
+                exclude_families=(),
+                enable_synthetic_recipes=True,
             )
         )
 
         explicit_none = run_alpha_foundry_l0_gate(
-            panels=[panel], bindings=bindings, recipes=recipes, aligned=aligned,
-            cost_model=ExecutionCostModel(), runtime_config=RUNTIME_CONFIG,
-            run_id="test_none", timeframe=tf, precomputed_cheap_evidences=None,
+            panels=[panel],
+            bindings=bindings,
+            recipes=recipes,
+            aligned=aligned,
+            cost_model=ExecutionCostModel(),
+            runtime_config=RUNTIME_CONFIG,
+            run_id="test_none",
+            timeframe=tf,
+            precomputed_cheap_evidences=None,
         )
         default = run_alpha_foundry_l0_gate(
-            panels=[panel], bindings=bindings, recipes=recipes, aligned=aligned,
-            cost_model=ExecutionCostModel(), runtime_config=RUNTIME_CONFIG,
-            run_id="test_default", timeframe=tf,
+            panels=[panel],
+            bindings=bindings,
+            recipes=recipes,
+            aligned=aligned,
+            cost_model=ExecutionCostModel(),
+            runtime_config=RUNTIME_CONFIG,
+            run_id="test_default",
+            timeframe=tf,
         )
         assert explicit_none.report is not None
         assert default.report is not None
@@ -727,16 +848,26 @@ class TestRunAlphaFoundryL0GateDedup:
         recipes = {recipe.recipe_id: recipe}
         bindings = list(
             bind_panels_to_alpha_recipes(
-                panels=[panel], recipes=recipes, timeframe=tf,
-                max_recipes_per_family=10, include_families=(),
-                exclude_families=(), enable_synthetic_recipes=True,
+                panels=[panel],
+                recipes=recipes,
+                timeframe=tf,
+                max_recipes_per_family=10,
+                include_families=(),
+                exclude_families=(),
+                enable_synthetic_recipes=True,
             )
         )
 
         result = run_alpha_foundry_l0_gate(
-            panels=[panel], bindings=bindings, recipes=recipes, aligned=aligned,
-            cost_model=ExecutionCostModel(), runtime_config=RUNTIME_CONFIG,
-            run_id="test_empty", timeframe=tf, precomputed_cheap_evidences=(),
+            panels=[panel],
+            bindings=bindings,
+            recipes=recipes,
+            aligned=aligned,
+            cost_model=ExecutionCostModel(),
+            runtime_config=RUNTIME_CONFIG,
+            run_id="test_empty",
+            timeframe=tf,
+            precomputed_cheap_evidences=(),
         )
         assert isinstance(result, AlphaFoundryL0Result)
 
@@ -750,9 +881,12 @@ class TestRunAlphaFoundryL0GateMultiTfDedup:
         panels_by_tf, recipes_by_tf, aligned_by_tf, bindings_by_tf = _build_panels_recipes_aligned(tfs)
 
         results = run_alpha_foundry_l0_gate_multi_tf(
-            panels_by_tf=panels_by_tf, bindings_by_tf=bindings_by_tf,
-            recipes_by_tf=recipes_by_tf, aligned_by_tf=aligned_by_tf,
-            cost_model=ExecutionCostModel(), runtime_config=RUNTIME_CONFIG,
+            panels_by_tf=panels_by_tf,
+            bindings_by_tf=bindings_by_tf,
+            recipes_by_tf=recipes_by_tf,
+            aligned_by_tf=aligned_by_tf,
+            cost_model=ExecutionCostModel(),
+            runtime_config=RUNTIME_CONFIG,
             run_id_prefix="test_dedup_wired",
         )
 
@@ -761,7 +895,8 @@ class TestRunAlphaFoundryL0GateMultiTfDedup:
             assert len(results[tf].evidence_rows) == 1, f"tf={tf} expected 1 evidence row"
 
     def test_l0_gate_multi_tf_calls_cheap_gate_batch_once_per_tf_not_twice(
-        self, mocker: Any,
+        self,
+        mocker: Any,
     ) -> None:
         """Scenario 4: Direct proof the redundant computation is eliminated.
         evaluate_alpha_cheap_gate_batch must be called N times (Phase 1 only),
@@ -802,9 +937,12 @@ class TestRunAlphaFoundryL0GateMultiTfDedup:
         panels_by_tf, recipes_by_tf, aligned_by_tf, bindings_by_tf = _build_panels_recipes_aligned(tfs)
 
         run_alpha_foundry_l0_gate_multi_tf(
-            panels_by_tf=panels_by_tf, bindings_by_tf=bindings_by_tf,
-            recipes_by_tf=recipes_by_tf, aligned_by_tf=aligned_by_tf,
-            cost_model=ExecutionCostModel(), runtime_config=RUNTIME_CONFIG,
+            panels_by_tf=panels_by_tf,
+            bindings_by_tf=bindings_by_tf,
+            recipes_by_tf=recipes_by_tf,
+            aligned_by_tf=aligned_by_tf,
+            cost_model=ExecutionCostModel(),
+            runtime_config=RUNTIME_CONFIG,
             run_id_prefix="test_dedup_spy",
         )
 
@@ -818,21 +956,40 @@ class TestRunAlphaFoundryL0GateMultiTfDedup:
 
 
 def _make_l0_candidate(
-    recipe_id: str, family: str = "fam", variant: str = "var",
-    timeframe: str = "4h", score: float = 1.0,
+    recipe_id: str,
+    family: str = "fam",
+    variant: str = "var",
+    timeframe: str = "4h",
+    score: float = 1.0,
 ) -> Any:
     from src.domain.futures.alpha_foundry.contracts import L0SignalCandidate
 
     return L0SignalCandidate(
-        run_id="test", timeframe=timeframe, family=family, variant=variant,
-        recipe_id=recipe_id, archetype="trend", source="synthetic_recipe",
-        n_events=100, effective_n=50.0, mean_net_bps=score, block_lcb_bps=score * 0.5,
-        nw_tstat=1.5, bootstrap_lcb_bps=0.0, bootstrap_agree=True,
-        cost_drag_ratio=0.3, turnover_per_year=50.0, max_abs_corr_in_bucket=0.0,
-        tf_coverage_count=0, sign_agreement_ratio=0.0,
-        corroboration_tier="single_tf_strict", discovery_tier="candidate",
-        l1_priority_score=score, l1_budget_units=1,
-        hard_reject_reasons=(), soft_flags=(),
+        run_id="test",
+        timeframe=timeframe,
+        family=family,
+        variant=variant,
+        recipe_id=recipe_id,
+        archetype="trend",
+        source="synthetic_recipe",
+        n_events=100,
+        effective_n=50.0,
+        mean_net_bps=score,
+        block_lcb_bps=score * 0.5,
+        nw_tstat=1.5,
+        bootstrap_lcb_bps=0.0,
+        bootstrap_agree=True,
+        cost_drag_ratio=0.3,
+        turnover_per_year=50.0,
+        max_abs_corr_in_bucket=0.0,
+        tf_coverage_count=0,
+        sign_agreement_ratio=0.0,
+        corroboration_tier="single_tf_strict",
+        discovery_tier="candidate",
+        l1_priority_score=score,
+        l1_budget_units=1,
+        hard_reject_reasons=(),
+        soft_flags=(),
     )
 
 
@@ -854,12 +1011,17 @@ def _build_manifest_multi_results_fixture(
         for start in range(10, bars, 20):
             score[start, :] = 1.0 * (1.0 if i % 2 == 0 else -1.0)
         panel = CandidateSignalPanel(
-            family="fam", variant=f"var_{tf}",
-            params={"lookback": 20}, datetimes=np.arange(bars, dtype=np.int64),
+            family="fam",
+            variant=f"var_{tf}",
+            params={"lookback": 20},
+            datetimes=np.arange(bars, dtype=np.int64),
             symbols=("BTCUSDT", "ETHUSDT"),
-            signed_score_2d=score, side_hint_2d=np.where(score > 0, np.int8(1), np.int8(-1)),
-            expected_holding_bars=3, min_holding_bars=1,
-            stop_atr_mult=2.0, take_profit_atr_mult=4.0,
+            signed_score_2d=score,
+            side_hint_2d=np.where(score > 0, np.int8(1), np.int8(-1)),
+            expected_holding_bars=3,
+            min_holding_bars=1,
+            stop_atr_mult=2.0,
+            take_profit_atr_mult=4.0,
             turnover_proxy_2d=np.zeros((bars, 2), dtype=np.float64),
             valid_mask_2d=np.ones((bars, 2), dtype=np.bool_),
             metadata={"recipe_id": f"r{i}"},
@@ -879,7 +1041,8 @@ class TestAssembleL0ManifestSharedContext:
     """Scenario 4: Integration verification for shared context dedup."""
 
     def test_assemble_l0_strategy_delivery_manifest_builds_shared_context_once_when_both_enabled(
-        self, mocker: Any,
+        self,
+        mocker: Any,
     ) -> None:
         """[LIMIT-04] With enable_audit=True and enable_pruning=True,
         resolve_cross_tf_shared_context called exactly once (not twice)."""
@@ -903,7 +1066,8 @@ class TestAssembleL0ManifestSharedContext:
         assert spy_shared_ctx.call_count == 1
 
     def test_assemble_l0_manifest_disabled_does_not_build_shared_context(
-        self, mocker: Any,
+        self,
+        mocker: Any,
     ) -> None:
         """When both disabled, resolve_cross_tf_shared_context is never called."""
         from src.domain.futures.alpha_foundry import diversity as _div_mod
@@ -923,7 +1087,8 @@ class TestAssembleL0ManifestSharedContext:
         assert spy_shared_ctx.call_count == 0
 
     def test_assemble_l0_manifest_logs_audit_timing_on_failure(
-        self, mocker: Any,
+        self,
+        mocker: Any,
     ) -> None:
         """[ADR_20260712_L0_CROSS_TF_PRUNING_PERFORMANCE] stage=l0_cross_tf_audit
         timing must be logged even when audit raises (not success-only).
@@ -959,8 +1124,7 @@ class TestAssembleL0ManifestSharedContext:
         )
 
         timing_calls = [
-            call for call in mock_logger.info.call_args_list
-            if "stage=l0_cross_tf_audit took=" in call.args[0]
+            call for call in mock_logger.info.call_args_list if "stage=l0_cross_tf_audit took=" in call.args[0]
         ]
         assert len(timing_calls) == 1
         formatted = timing_calls[0].args[0] % timing_calls[0].args[1:]

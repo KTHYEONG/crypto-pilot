@@ -6,6 +6,7 @@ deliberately separate: this script only writes a proposal artifact
 (logs/futures/diagnostics/l1_pair_gate_calibration.json); config.py's
 _DEFAULT_PER_TF_GATE_OVERRIDES must be updated by hand after review.
 """
+
 from __future__ import annotations
 
 import json
@@ -52,10 +53,8 @@ def measure_effective_n_by_tf(*, final_snapshot_index: int = 3) -> dict[str, lis
 
     def _evidence_wrapper(*args: Any, **kwargs: Any) -> Any:
         if "effective_n_sink" not in kwargs:
-            kwargs["effective_n_sink"] = (
-                lambda snap_idx, eff_n: captured[_current_tf].append(eff_n)
-                if snap_idx == final_snapshot_index
-                else None
+            kwargs["effective_n_sink"] = lambda snap_idx, eff_n: (
+                captured[_current_tf].append(eff_n) if snap_idx == final_snapshot_index else None
             )
         return _orig_evidence(*args, **kwargs)
 

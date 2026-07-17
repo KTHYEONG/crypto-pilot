@@ -119,9 +119,7 @@ def build_effective_run_config(
         ltf_exec_1m_max_workers=lt_f_workers,
     )
 
-    fingerprint = _build_policy_fingerprint(
-        args, env_overrides, effective_runtime, execution_policy
-    )
+    fingerprint = _build_policy_fingerprint(args, env_overrides, effective_runtime, execution_policy)
 
     config = FuturesRunConfig(
         timeframe=str(args.get("timeframe", "4h")),

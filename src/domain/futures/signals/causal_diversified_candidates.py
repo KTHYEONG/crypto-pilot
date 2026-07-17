@@ -208,7 +208,7 @@ def _build_bnrr_panels(
     log_returns = np.log(close[1:] / close[:-1])
     log_returns = np.vstack([np.zeros((1, n)), log_returns])
 
-    btc_ret = log_returns[:, btc_index:btc_index + 1]
+    btc_ret = log_returns[:, btc_index : btc_index + 1]
 
     has_liquidity = cost_arr is not None and adv_arr is not None
     cost: NDArray[np.float64] | None = cost_arr
@@ -219,9 +219,7 @@ def _build_bnrr_panels(
             continue
 
         btc_tiled = np.tile(btc_ret, (1, n))
-        beta = _trailing_cov(log_returns, btc_tiled, w) / np.maximum(
-            _trailing_var(btc_tiled, w), _EPS
-        )
+        beta = _trailing_cov(log_returns, btc_tiled, w) / np.maximum(_trailing_var(btc_tiled, w), _EPS)
 
         u_i = np.zeros_like(close)
         for bar in range(w + 1, t):

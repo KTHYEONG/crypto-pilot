@@ -1785,6 +1785,7 @@ def evaluate_l2_trial(
         apply_deployment,
         calibrate_deployment_leverage,
         compute_layer2_fold_diagnostics,
+        select_worst_fold_returns,
     )
 
     sim = _run_awf_simulation(
@@ -1830,6 +1831,11 @@ def evaluate_l2_trial(
             _calib_rets = np.asarray(rets_hybrid, dtype=np.float64)
             _calib_src = "oos_proxy"
         if _calib_rets.size >= 2:
+            _worst_fold_rets: NDArray[np.float64] | None = None
+            if getattr(config, "l2_deploy_worst_fold_gate_enabled", False):
+                _wf = select_worst_fold_returns(getattr(sim, "fit_rets_by_fold", ()))
+                if _wf.size >= 2:
+                    _worst_fold_rets = _wf
             _l_star, _l_binding, _l_cross_mdd = calibrate_deployment_leverage(
                 fit_rets=_calib_rets,
                 oos_rets=np.asarray(rets_hybrid, dtype=np.float64) if _calib_src == "fit_leg" else None,
@@ -1840,6 +1846,8 @@ def evaluate_l2_trial(
                 l_hard_cap=float(config.l2_deploy_l_hard_cap),
                 exchange_leverage_cap=getattr(config, "l2_max_exchange_leverage", None),
                 fit_mdd_crisis_gate=getattr(config, "l2_deploy_fit_mdd_crisis_gate", None),
+                worst_fold_rets=_worst_fold_rets,
+                kelly_safety_fraction=getattr(config, "l2_deploy_kelly_safety_fraction", None),
             )
             _logger.debug(
                 "[L2-EVAL] L*=%.3f (binding=%s, src=%s)",

@@ -427,27 +427,19 @@ def run_alpha_foundry_l0_gate(
     n_panels_in = len(panels)
     n_bound = len(bindings)
     n_evidence = len(evidences)
-    passed_ids_for_report = (
-        set(l0_artifacts.passed_recipe_ids)
-        if mode == "gate" and l0_artifacts is not None
-        else None
-    )
+    passed_ids_for_report = set(l0_artifacts.passed_recipe_ids) if mode == "gate" and l0_artifacts is not None else None
     n_passed = sum(
         1
         for row in evidence_rows
         if bool(getattr(row, "gate_passed", False))
-        and (
-            passed_ids_for_report is None
-            or str(getattr(row, "recipe_id", "")) in passed_ids_for_report
-        )
+        and (passed_ids_for_report is None or str(getattr(row, "recipe_id", "")) in passed_ids_for_report)
     )
     n_rejected = n_evidence - n_passed
 
     from src.domain.futures.alpha_foundry.diversity import estimate_distinct_thesis_count
+
     passed_families = [
-        str(getattr(row, "family", ""))
-        for row in evidence_rows
-        if bool(getattr(row, "gate_passed", False))
+        str(getattr(row, "family", "")) for row in evidence_rows if bool(getattr(row, "gate_passed", False))
     ]
     n_distinct_thesis_ids_passed = estimate_distinct_thesis_count(passed_families)
 
@@ -484,7 +476,9 @@ def run_alpha_foundry_l0_gate(
     )
     setup_logger("opt_main_futures", write_file=False).debug(
         "[SYS] stage=report_write tf=%s n_rows=%d took=%.4fs",
-        timeframe, len(evidence_rows), _time_module.perf_counter() - _t_report_write,
+        timeframe,
+        len(evidence_rows),
+        _time_module.perf_counter() - _t_report_write,
     )
     json_path = jp if jp is not None else ""
     parquet_path = pp if pp is not None else ""
@@ -657,7 +651,8 @@ def build_cheap_gate_evidence_frame(
         config=cheap_gate_config,
     )
     return build_cheap_gate_evidence_frame_from_evidences(
-        cheap_evidences=cheap_evidences, recipes=recipes,
+        cheap_evidences=cheap_evidences,
+        recipes=recipes,
     )
 
 
@@ -683,11 +678,10 @@ def _prime_l0_phase1_input_cache(
 
 
 def _run_l0_cheap_evidence_worker(tf: str) -> tuple[str, tuple[Any, ...], pd.DataFrame]:
-    panels, recipes, bindings, aligned, cost_model, runtime_config = (
-        _L0_PHASE1_INPUT_CACHE[tf]
-    )
+    panels, recipes, bindings, aligned, cost_model, runtime_config = _L0_PHASE1_INPUT_CACHE[tf]
     bound_tf_panels = _bind_panels_to_recipe_ids(panels, bindings)
     from src.domain.futures.alpha_foundry.cheap_gate import evaluate_alpha_cheap_gate_batch
+
     cheap_evidences = evaluate_alpha_cheap_gate_batch(
         panels=bound_tf_panels,
         recipes=recipes,
@@ -696,7 +690,8 @@ def _run_l0_cheap_evidence_worker(tf: str) -> tuple[str, tuple[Any, ...], pd.Dat
         config=runtime_config.cheap_gate,
     )
     evidence_df = build_cheap_gate_evidence_frame_from_evidences(
-        cheap_evidences=cheap_evidences, recipes=recipes,
+        cheap_evidences=cheap_evidences,
+        recipes=recipes,
     )
     return tf, cheap_evidences, evidence_df
 
@@ -775,9 +770,7 @@ def _run_phase3_sequential(
         tf_aligned = aligned_by_tf[tf]
         _run_id = f"{run_id_prefix}_{tf}"
         excluded_tfs = (
-            diagnostic_fusion_exclusions.get(tf, frozenset())
-            if diagnostic_fusion_exclusions
-            else frozenset()
+            diagnostic_fusion_exclusions.get(tf, frozenset()) if diagnostic_fusion_exclusions else frozenset()
         )
         evidence_for_tf = {key: value for key, value in evidence_by_tf.items() if key not in excluded_tfs}
         results[tf] = run_alpha_foundry_l0_gate(
@@ -825,10 +818,7 @@ def _run_phase3_parallel(
 
     tfs = list(panels_by_tf)
     with ProcessPoolExecutor(max_workers=max_workers, mp_context=_mp.get_context("fork")) as executor:
-        futures = {
-            executor.submit(_run_l0_gate_worker, tf, f"{run_id_prefix}_{tf}"): tf
-            for tf in tfs
-        }
+        futures = {executor.submit(_run_l0_gate_worker, tf, f"{run_id_prefix}_{tf}"): tf for tf in tfs}
         results: dict[str, AlphaFoundryL0Result] = {}
         for future in futures:
             tf_key = futures[future]
@@ -859,9 +849,7 @@ def run_alpha_foundry_l0_gate_multi_tf(
             in panels_by_tf.
     """
     if not (1 <= parallel_max_workers <= 4):
-        raise ValueError(
-            f"parallel_max_workers must be in [1,4], got {parallel_max_workers}"
-        )
+        raise ValueError(f"parallel_max_workers must be in [1,4], got {parallel_max_workers}")
     if diagnostic_fusion_exclusions is not None and parallel_max_workers != 1:
         raise ValueError("diagnostic fusion exclusions require parallel_max_workers=1")
 
@@ -907,13 +895,17 @@ def run_alpha_foundry_l0_gate_multi_tf(
             )
             cheap_evidences_by_tf[tf] = cheap_evidences
             evidence_by_tf[tf] = build_cheap_gate_evidence_frame_from_evidences(
-                cheap_evidences=cheap_evidences, recipes=tf_recipes,
+                cheap_evidences=cheap_evidences,
+                recipes=tf_recipes,
             )
             n_evidence_rows = len(evidence_by_tf[tf])
             _log_fn = _logger.warning if (tf_bindings and n_evidence_rows == 0) else _logger.debug
             _log_fn(
                 "[SYS] stage=multi_tf_cheap_evidence tf=%s n_panels_in=%d n_bindings=%d n_evidence_rows=%d",
-                tf, len(tf_panels), len(tf_bindings), n_evidence_rows,
+                tf,
+                len(tf_panels),
+                len(tf_bindings),
+                n_evidence_rows,
             )  # [LIMIT-08][LIMIT-09]
     else:
         _prime_l0_phase1_input_cache(
@@ -925,6 +917,7 @@ def run_alpha_foundry_l0_gate_multi_tf(
             runtime_config=runtime_config,
         )
         import multiprocessing as _mp
+
         with ProcessPoolExecutor(max_workers=parallel_max_workers, mp_context=_mp.get_context("fork")) as executor:
             futures = {
                 executor.submit(_run_l0_cheap_evidence_worker, tf): tf
@@ -958,13 +951,17 @@ def run_alpha_foundry_l0_gate_multi_tf(
                 _log_fn = _logger.warning if (tf_bindings and n_evidence_rows == 0) else _logger.debug
                 _log_fn(
                     "[SYS] stage=multi_tf_cheap_evidence tf=%s n_panels_in=%d n_bindings=%d n_evidence_rows=%d",
-                    tf_key, len(panels_by_tf[tf_key]), len(tf_bindings), n_evidence_rows,
+                    tf_key,
+                    len(panels_by_tf[tf_key]),
+                    len(tf_bindings),
+                    n_evidence_rows,
                 )
         _L0_PHASE1_INPUT_CACHE.clear()
 
     setup_logger("opt_main_futures", write_file=False).debug(
         "[SYS] stage=l0_phase1_cheap_evidence took=%.4fs n_tfs=%d",
-        _time_module.perf_counter() - _t_phase1, len(panels_by_tf),
+        _time_module.perf_counter() - _t_phase1,
+        len(panels_by_tf),
     )
 
     # Phase 2: fuse_multi_timeframe_evidence is called inside pipeline
@@ -998,7 +995,8 @@ def run_alpha_foundry_l0_gate_multi_tf(
         )
     setup_logger("opt_main_futures", write_file=False).debug(
         "[SYS] stage=l0_phase3_canonical_gate took=%.4fs parallel_max_workers=%d",
-        _time_module.perf_counter() - _t_phase3, parallel_max_workers,
+        _time_module.perf_counter() - _t_phase3,
+        parallel_max_workers,
     )
 
     # [EVAL] tf_corroboration distribution summary — once per run [LIMIT-08]
@@ -1019,7 +1017,9 @@ def run_alpha_foundry_l0_gate_multi_tf(
         _logger.debug(
             "[EVAL] stage=tf_corroboration_summary"
             " n_rows_total=%d n_rows_tf_coverage_gt0=%d median_tf_coverage_count=%d",
-            _n_total, _n_gt0, _median_cov,
+            _n_total,
+            _n_gt0,
+            _median_cov,
         )
     return results
 
@@ -1119,14 +1119,11 @@ def assemble_l0_strategy_delivery_manifest(
                 _l.warning(
                     "[EVAL] stage=l0_cross_tf_shared_context run_id=%s failed: %s,"
                     " falling back to unpruned multi_results",
-                    run_id_prefix, exc,
+                    run_id_prefix,
+                    exc,
                 )
             pruned_multi_results = dict(multi_results)
-            manifest_final_ids = tuple(
-                c.recipe_id
-                for res in multi_results.values()
-                for c in res.candidates_for_l1
-            )
+            manifest_final_ids = tuple(c.recipe_id for res in multi_results.values() for c in res.candidates_for_l1)
             _early_reports: dict[str, Any] = {}
             for _tf_k, _res in multi_results.items():
                 _r = getattr(_res, "summary_report", None)
@@ -1162,12 +1159,14 @@ def assemble_l0_strategy_delivery_manifest(
             for _l in (_fallback_logger, _logger):
                 _l.warning(
                     "[EVAL] stage=l0_cross_tf_audit run_id=%s failed: %s",
-                    run_id_prefix, exc,
+                    run_id_prefix,
+                    exc,
                 )
         finally:
             setup_logger("opt_main_futures", write_file=False).info(
                 "[SYS] stage=l0_cross_tf_audit took=%.4fs enabled=True status=%s",
-                _time_module.perf_counter() - _t_audit_start, _audit_status,
+                _time_module.perf_counter() - _t_audit_start,
+                _audit_status,
             )
 
     if enable_pruning and all_tfs_with_candidates:
@@ -1192,10 +1191,7 @@ def assemble_l0_strategy_delivery_manifest(
             floor_result = apply_cross_tf_survival_floor(
                 cross_tf_result=cross_tf_result,
                 candidate_by_recipe_id={
-                    c.recipe_id: c
-                    for cands in selected_by_tf.values()
-                    for c in cands
-                    if hasattr(c, "recipe_id")
+                    c.recipe_id: c for cands in selected_by_tf.values() for c in cands if hasattr(c, "recipe_id")
                 },
                 min_survivors_per_archetype=min_survivors_per_archetype,
                 min_survivors_per_tf=min_survivors_per_tf,
@@ -1206,8 +1202,7 @@ def assemble_l0_strategy_delivery_manifest(
             if not manifest_final_ids:
                 manifest_status = "fail_open"
                 manifest_reason = (
-                    "cross_tf_survival_floor collapsed to zero survivors; "
-                    "falling back to unpruned multi_results"
+                    "cross_tf_survival_floor collapsed to zero survivors; falling back to unpruned multi_results"
                 )
                 _fallback_logger = setup_logger("opt_main_futures", write_file=False)
                 for _l in (_fallback_logger, _logger):
@@ -1216,9 +1211,9 @@ def assemble_l0_strategy_delivery_manifest(
                         _time_module.perf_counter() - _t_prune_start,
                     )
                     _l.warning(
-                        "[EVAL] stage=l0_cross_tf_pruning run_id=%s failed: %s,"
-                        " falling back to unpruned multi_results",
-                        run_id_prefix, manifest_reason,
+                        "[EVAL] stage=l0_cross_tf_pruning run_id=%s failed: %s, falling back to unpruned multi_results",
+                        run_id_prefix,
+                        manifest_reason,
                     )
                 pruned_multi_results = dict(multi_results)
                 manifest_final_ids = ()
@@ -1235,24 +1230,20 @@ def assemble_l0_strategy_delivery_manifest(
                     manifest_reason = "no redundant pairs found"
                 setup_logger("opt_main_futures", write_file=False).debug(
                     "[SYS] stage=l0_cross_tf_pruning took=%.4fs enabled=True status=%s",
-                    _time_module.perf_counter() - _t_prune_start, manifest_status,
+                    _time_module.perf_counter() - _t_prune_start,
+                    manifest_status,
                 )
 
                 final_set = set(manifest_final_ids)
                 pruned_multi_results = {}
                 for tf_k, res in multi_results.items():
-                    kept_candidates = tuple(
-                        c for c in res.candidates_for_l1
-                        if c.recipe_id in final_set
-                    )
+                    kept_candidates = tuple(c for c in res.candidates_for_l1 if c.recipe_id in final_set)
                     kept_panels = tuple(
-                        p for p in res.panels_for_l1
-                        if getattr(p, "metadata", {}).get("recipe_id", "") in final_set
+                        p for p in res.panels_for_l1 if getattr(p, "metadata", {}).get("recipe_id", "") in final_set
                     )
-                    if (
-                    len(kept_candidates) == len(res.candidates_for_l1)
-                    and len(kept_panels) == len(res.panels_for_l1)
-                ):
+                    if len(kept_candidates) == len(res.candidates_for_l1) and len(kept_panels) == len(
+                        res.panels_for_l1
+                    ):
                         pruned_multi_results[tf_k] = res
                     else:
                         pruned_multi_results[tf_k] = replace(
@@ -1271,19 +1262,15 @@ def assemble_l0_strategy_delivery_manifest(
                     _time_module.perf_counter() - _t_prune_start,
                 )
                 _l.warning(
-                    "[EVAL] stage=l0_cross_tf_pruning run_id=%s failed: %s,"
-                    " falling back to unpruned multi_results",
-                    run_id_prefix, exc,
+                    "[EVAL] stage=l0_cross_tf_pruning run_id=%s failed: %s, falling back to unpruned multi_results",
+                    run_id_prefix,
+                    exc,
                 )
             pruned_multi_results = dict(multi_results)
             manifest_final_ids = ()
 
     if not manifest_final_ids:
-        manifest_final_ids = tuple(
-            c.recipe_id
-            for res in multi_results.values()
-            for c in res.candidates_for_l1
-        )
+        manifest_final_ids = tuple(c.recipe_id for res in multi_results.values() for c in res.candidates_for_l1)
 
     reports_by_tf: dict[str, Any] = {}
     for tf_k, res in multi_results.items():
@@ -1404,9 +1391,7 @@ def run_alpha_foundry_l0_gate_streaming(
                 err_expected = expected
                 err_got = bundle.fingerprint
                 del bundle
-                raise L0StreamingContractError(
-                    f"fingerprint mismatch for {tf}: expected {err_expected}, got {err_got}"
-                )
+                raise L0StreamingContractError(f"fingerprint mismatch for {tf}: expected {err_expected}, got {err_got}")
 
             result = run_alpha_foundry_l0_gate(
                 panels=bundle.panels,

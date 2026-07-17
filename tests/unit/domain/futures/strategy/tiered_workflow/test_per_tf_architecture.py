@@ -135,6 +135,7 @@ def test_resolve_tf_signal_pool_widened_6h_falls_back_to_default() -> None:
     )
     families = resolve_tf_signal_pool(cfg, "6h")
     from src.domain.futures.strategy.config import _DEFAULT_PER_TF_FAMILIES
+
     assert families == _DEFAULT_PER_TF_FAMILIES["6h"]
 
 

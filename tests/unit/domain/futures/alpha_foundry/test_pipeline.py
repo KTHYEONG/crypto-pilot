@@ -266,9 +266,14 @@ class TestRunAlphaFoundryL0Pipeline:
             recipes={"r1": SAMPLE_RECIPE},
             aligned=aligned_with_liq,
             cost_model=ExecutionCostModel(),
-            cheap_gate_config=CheapGateConfig(min_events=10, min_effective_n=5.0,
-                                              min_candidate_rank_ic_tstat=0.0, min_nw_tstat=0.0,
-                                              max_cost_drag_ratio=1.0, max_turnover_per_year=2000.0),
+            cheap_gate_config=CheapGateConfig(
+                min_events=10,
+                min_effective_n=5.0,
+                min_candidate_rank_ic_tstat=0.0,
+                min_nw_tstat=0.0,
+                max_cost_drag_ratio=1.0,
+                max_turnover_per_year=2000.0,
+            ),
         )
         found_canonical = False
         for row in artifacts.evidence_rows:
@@ -298,9 +303,14 @@ class TestRunAlphaFoundryL0Pipeline:
             execution_cost_bps_2d=np.full(aligned.close_2d.shape, 4.0, dtype=np.float64),
             adv_usdt_2d=np.full(aligned.close_2d.shape, 1_000_000.0, dtype=np.float64),
         )
-        cfg = CheapGateConfig(min_events=10, min_effective_n=5.0,
-                              min_candidate_rank_ic_tstat=0.0, min_nw_tstat=0.0,
-                              max_cost_drag_ratio=1.0, max_turnover_per_year=2000.0)
+        cfg = CheapGateConfig(
+            min_events=10,
+            min_effective_n=5.0,
+            min_candidate_rank_ic_tstat=0.0,
+            min_nw_tstat=0.0,
+            max_cost_drag_ratio=1.0,
+            max_turnover_per_year=2000.0,
+        )
         artifacts = run_alpha_foundry_l0_pipeline(
             panels=[panel],
             recipes={"r1": SAMPLE_RECIPE},
@@ -328,9 +338,14 @@ class TestRunAlphaFoundryL0Pipeline:
 
         panel = _make_panel()
         aligned = _make_aligned()
-        cfg = CheapGateConfig(min_events=10, min_effective_n=5.0,
-                              min_candidate_rank_ic_tstat=0.0, min_nw_tstat=0.0,
-                              max_cost_drag_ratio=1.0, max_turnover_per_year=2000.0)
+        cfg = CheapGateConfig(
+            min_events=10,
+            min_effective_n=5.0,
+            min_candidate_rank_ic_tstat=0.0,
+            min_nw_tstat=0.0,
+            max_cost_drag_ratio=1.0,
+            max_turnover_per_year=2000.0,
+        )
 
         kwargs: dict[str, Any] = {
             "panels": [panel],
@@ -716,9 +731,7 @@ def _make_candidate_handoff(
     corroboration_tier: CorroborationTier = "insufficient_coverage",
     timeframe: str = "4h",
 ) -> L0SignalCandidate:
-    hard_reject_reasons: tuple[L0HardRejectReason, ...] = (
-        ("deep_negative_lcb",) if blocked else ()
-    )
+    hard_reject_reasons: tuple[L0HardRejectReason, ...] = ("deep_negative_lcb",) if blocked else ()
     return L0SignalCandidate(
         run_id="test",
         timeframe=timeframe,

@@ -94,7 +94,10 @@ def _l1_snapshot(result: object) -> dict[str, object]:
 
 
 def run_once(
-    *, label: str, tfs: tuple[str, ...], ablate_1h_fusion: bool,
+    *,
+    label: str,
+    tfs: tuple[str, ...],
+    ablate_1h_fusion: bool,
     trace: dict[str, dict[str, dict[str, object]]],
 ) -> RunnerResult:
     """[ADR_20260715_L0_L1_RUNTIME_TERMINAL_OBSERVABILITY][ADR_20260715_L0_L1_DIAGNOSTIC_PIPELINE_INTEGRITY]
@@ -203,7 +206,8 @@ def run_once(
         }
         audit = getattr(result, "event_grid_audit", None)
         trace["terminal_event_audit"][str(kwargs["tf"])] = (
-            {"count": 0, "digest": _digest(None)} if audit is None
+            {"count": 0, "digest": _digest(None)}
+            if audit is None
             else {"count": int(getattr(audit, "n_dropped", 0)), "digest": _digest(audit)}
         )
         return result

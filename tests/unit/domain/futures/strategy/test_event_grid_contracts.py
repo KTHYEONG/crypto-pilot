@@ -62,7 +62,10 @@ def test_native_event_grid_rejects_cross_tf_index() -> None:
     )
     with pytest.raises(EventGridContractError, match="event_id=7"):
         normalize_native_l1_events(
-            events=events, native_datetimes=native_dt, timeframe="12h", required_horizon_bars=1,
+            events=events,
+            native_datetimes=native_dt,
+            timeframe="12h",
+            required_horizon_bars=1,
         )
 
 
@@ -83,7 +86,10 @@ def test_native_event_grid_happy_path() -> None:
         }
     )
     result = normalize_native_l1_events(
-        events=events, native_datetimes=native_dt, timeframe="1h", required_horizon_bars=1,
+        events=events,
+        native_datetimes=native_dt,
+        timeframe="1h",
+        required_horizon_bars=1,
     )
     assert result.audit.eligible_count == 3
     assert result.audit.mismatch_count == 0
@@ -107,7 +113,10 @@ def test_terminal_maturity_removed() -> None:
         }
     )
     result = normalize_native_l1_events(
-        events=events, native_datetimes=native_dt, timeframe="12h", required_horizon_bars=1,
+        events=events,
+        native_datetimes=native_dt,
+        timeframe="12h",
+        required_horizon_bars=1,
     )
     assert result.audit.eligible_count == 1
     assert result.audit.terminal_maturity_count == 1
@@ -185,14 +194,16 @@ def test_adding_1h_does_not_change_existing_target_fusion_input() -> None:
                 "block_lcb_bps": [8.0],
             }
         )
+
     control = {tf: frame(tf) for tf in ("2h", "4h", "6h", "8h", "12h", "1d")}
     treatment = {"1h": frame("1h"), **control}
     refs = ("2h", "4h", "6h", "8h", "12h", "1d")
-    assert resolve_corroboration_evidence_for_target(
-        target_tf="6h", evidence_by_tf=control, reference_tfs=refs
-    ).keys() == resolve_corroboration_evidence_for_target(
-        target_tf="6h", evidence_by_tf=treatment, reference_tfs=refs
-    ).keys()
+    assert (
+        resolve_corroboration_evidence_for_target(target_tf="6h", evidence_by_tf=control, reference_tfs=refs).keys()
+        == resolve_corroboration_evidence_for_target(
+            target_tf="6h", evidence_by_tf=treatment, reference_tfs=refs
+        ).keys()
+    )
 
 
 def test_resolve_corroboration_missing_target_raises() -> None:

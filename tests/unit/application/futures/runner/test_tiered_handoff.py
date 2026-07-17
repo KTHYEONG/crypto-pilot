@@ -22,9 +22,7 @@ from src.domain.futures.strategy_runtime.bridge import CandidatePipelineOutput
 def test_tiered_handoff_moves_without_copy() -> None:
     aligned = MagicMock()
     aligned.symbols = ("BTCUSDT", "ETHUSDT")
-    labeled = pd.DataFrame(
-        {"native_tf": ["4h"], "l0_recipe_id": ["r1"], "realized_return": [0.01]}
-    )
+    labeled = pd.DataFrame({"native_tf": ["4h"], "l0_recipe_id": ["r1"], "realized_return": [0.01]})
     output = CandidatePipelineOutput(
         alpha_panel=pd.DataFrame({"BTCUSDT": [1.0]}),
         aligned=aligned,

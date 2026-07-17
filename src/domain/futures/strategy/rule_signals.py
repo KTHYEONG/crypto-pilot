@@ -29,18 +29,35 @@ _ROBUST_Z_CLIP = 3.0
 
 # [ADR_20260706_L0_SIGNAL_FAMILY_DIVERSITY] Must stay identical to signals/rules.py's copy.
 ALL_SIGNAL_FAMILIES: tuple[str, ...] = (
-    "trend_ma", "trend_donchian", "vol_breakout",
-    "btc_regime_pullback", "trend_pullback_continuation", "dual_momentum",
-    "residual_reversion", "xs_momentum", "xs_flow", "xs_oi_skew",
-    "mtf_trend_pullback", "mtf_breakout_retest", "taker_imbalance_momentum",
-    "funding_flow_carry", "funding_extreme_reversal",
-    "lsr_oi_regime_filter", "vol_term_structure_gate",
-    "macd_4h", "supertrend", "ichimoku_trend",
-    "trend_pullback_quality_v2", "residual_momentum_xs",
+    "trend_ma",
+    "trend_donchian",
+    "vol_breakout",
+    "btc_regime_pullback",
+    "trend_pullback_continuation",
+    "dual_momentum",
+    "residual_reversion",
+    "xs_momentum",
+    "xs_flow",
+    "xs_oi_skew",
+    "mtf_trend_pullback",
+    "mtf_breakout_retest",
+    "taker_imbalance_momentum",
+    "funding_flow_carry",
+    "funding_extreme_reversal",
+    "lsr_oi_regime_filter",
+    "vol_term_structure_gate",
+    "macd_4h",
+    "supertrend",
+    "ichimoku_trend",
+    "trend_pullback_quality_v2",
+    "residual_momentum_xs",
     "funding_flow_exhaustion_sparse",
-    "oi_lsr_unwind", "vol_contraction_breakout",
-    "xs_residual_rebalance", "carry_net_of_funding",
-    "liquidity_participation_breakout", "btc_neutral_residual_reversal",
+    "oi_lsr_unwind",
+    "vol_contraction_breakout",
+    "xs_residual_rebalance",
+    "carry_net_of_funding",
+    "liquidity_participation_breakout",
+    "btc_neutral_residual_reversal",
     "price_band_reversion",
     "mtf_fusion",
 )
@@ -416,12 +433,14 @@ def _resample_ohlc_to_htf_and_project(
 
 _MTF_FUSION_HTF_CANDIDATES: tuple[str, ...] = ("1D", "12h", "8h")
 
+
 def _tf_hours(tf: str) -> float:
     if tf.endswith("h"):
         return float(tf[:-1])
     if tf.endswith("D") or tf.endswith("d"):
         return float(tf[:-1]) * 24
     return hours_per_bar(tf)
+
 
 def resolve_valid_htf_choices(native_tf: str) -> tuple[str, ...]:
     """Return HTF candidates strictly coarser than native_tf. [ADR_20260713_L0_MTF_FUSION_FACTORY]"""
@@ -465,7 +484,12 @@ def _htf_hma_slope_filter(df_htf: pd.DataFrame, window: int) -> pd.DataFrame:
 
 
 def _htf_ichimoku_cloud_filter(
-    high_df: pd.DataFrame, low_df: pd.DataFrame, close_df: pd.DataFrame, tenkan: int, kijun: int, senkou_b: int,
+    high_df: pd.DataFrame,
+    low_df: pd.DataFrame,
+    close_df: pd.DataFrame,
+    tenkan: int,
+    kijun: int,
+    senkou_b: int,
 ) -> pd.DataFrame:
     """Multi-column (all symbols at once) Ichimoku cloud direction. [ADR_20260713_L0_MTF_FUSION_PERF_OPT]"""
     tenkan_line = (high_df.rolling(tenkan).max() + low_df.rolling(tenkan).min()) / 2.0
@@ -483,7 +507,11 @@ def _htf_ichimoku_cloud_filter(
 
 
 def _htf_adx_dmi_filter(
-    high_df: pd.DataFrame, low_df: pd.DataFrame, close_df: pd.DataFrame, period: int, threshold: float,
+    high_df: pd.DataFrame,
+    low_df: pd.DataFrame,
+    close_df: pd.DataFrame,
+    period: int,
+    threshold: float,
 ) -> pd.DataFrame:
     """Multi-column (all symbols at once) ADX/DMI direction, strength-gated. [ADR_20260713_L0_MTF_FUSION_PERF_OPT]
 
@@ -494,9 +522,14 @@ def _htf_adx_dmi_filter(
     down_move = -low_df.diff()
     plus_dm = up_move.where((up_move > down_move) & (up_move > 0), 0.0)
     minus_dm = down_move.where((down_move > up_move) & (down_move > 0), 0.0)
-    tr = pd.concat(
-        [high_df - low_df, (high_df - prev_close).abs(), (low_df - prev_close).abs()], keys=["a", "b", "c"],
-    ).groupby(level=1).max()
+    tr = (
+        pd.concat(
+            [high_df - low_df, (high_df - prev_close).abs(), (low_df - prev_close).abs()],
+            keys=["a", "b", "c"],
+        )
+        .groupby(level=1)
+        .max()
+    )
     alpha = 1.0 / period
     smoothed_tr = tr.ewm(alpha=alpha, adjust=False).mean()
     smoothed_plus = plus_dm.ewm(alpha=alpha, adjust=False).mean()
@@ -510,7 +543,11 @@ def _htf_adx_dmi_filter(
 
 
 def _ltf_rsi_band_trigger(
-    *, close: NDArray[np.float64], period: int, lo: float, hi: float,
+    *,
+    close: NDArray[np.float64],
+    period: int,
+    lo: float,
+    hi: float,
 ) -> tuple[NDArray[np.bool_], NDArray[np.bool_], NDArray[np.float64]]:
     rsi = _rsi_2d(close, period)
     rsi_prev = np.vstack([rsi[:1], rsi[:-1]])
@@ -521,7 +558,12 @@ def _ltf_rsi_band_trigger(
 
 
 def _ltf_macd_cross_trigger(
-    *, close: NDArray[np.float64], atr: NDArray[np.float64], fast: int, slow: int, signal: int,
+    *,
+    close: NDArray[np.float64],
+    atr: NDArray[np.float64],
+    fast: int,
+    slow: int,
+    signal: int,
 ) -> tuple[NDArray[np.bool_], NDArray[np.bool_], NDArray[np.float64]]:
     ema_fast = _ema_2d(close, span=fast)
     ema_slow = _ema_2d(close, span=slow)
@@ -536,8 +578,12 @@ def _ltf_macd_cross_trigger(
 
 
 def _ltf_donchian_retest_trigger(
-    *, close: NDArray[np.float64], high: NDArray[np.float64], low: NDArray[np.float64],
-    atr: NDArray[np.float64], lookback: int,
+    *,
+    close: NDArray[np.float64],
+    high: NDArray[np.float64],
+    low: NDArray[np.float64],
+    atr: NDArray[np.float64],
+    lookback: int,
 ) -> tuple[NDArray[np.bool_], NDArray[np.bool_], NDArray[np.float64]]:
     upper = _rolling_max_2d(high, window=lookback)
     lower = _rolling_min_2d(low, window=lookback)
@@ -549,8 +595,14 @@ def _ltf_donchian_retest_trigger(
 
 
 def _ltf_stochastic_cross_trigger(
-    *, close: NDArray[np.float64], high: NDArray[np.float64], low: NDArray[np.float64],
-    k_period: int, d_period: int, lo: float, hi: float,
+    *,
+    close: NDArray[np.float64],
+    high: NDArray[np.float64],
+    low: NDArray[np.float64],
+    k_period: int,
+    d_period: int,
+    lo: float,
+    hi: float,
 ) -> tuple[NDArray[np.bool_], NDArray[np.bool_], NDArray[np.float64]]:
     lowest_low = _rolling_min_2d(low, window=k_period)
     highest_high = _rolling_max_2d(high, window=k_period)
@@ -791,6 +843,7 @@ class _SignalIndicatorCache:
     the long indicator-preparation block is skipped and these cached arrays are
     used directly.
     """
+
     atr: NDArray[np.float64]
     flow_imbalance: NDArray[np.float64]
     flow_mean_6: NDArray[np.float64]
@@ -824,6 +877,7 @@ def _precompute_shared_indicators(
         if not normalize_time_horizon:
             return max(minimum, base_bars)
         from src.domain.futures.strategy.timeframe_contracts import scale_bar_count
+
         return scale_bar_count(base_bars, cfg.timeframe, horizon_base_tf, minimum=minimum)
 
     atr_period = scale_window(14)
@@ -963,7 +1017,9 @@ def build_rule_signal_panels(
         funding_z_168 = precomputed.funding_z_168
         oi_build_z_42 = precomputed.oi_build_z_42
         lsr_log_z_42 = precomputed.lsr_log_z_42
-        flow_valid = np.isfinite(flow_imbalance) & np.isfinite(aligned.taker_buy_2d if aligned.taker_buy_2d is not None else flow_imbalance)  # noqa: E501
+        flow_valid = np.isfinite(flow_imbalance) & np.isfinite(
+            aligned.taker_buy_2d if aligned.taker_buy_2d is not None else flow_imbalance
+        )  # noqa: E501
     else:
         atr = _atr_2d(high, low, close, period=atr_period)
         atr = np.maximum(atr, 1e-12)
@@ -1139,7 +1195,9 @@ def build_rule_signal_panels(
                         family="btc_regime_pullback",
                         variant=_variant,
                         params={
-                            "window": _alt_window, "btc_fast": _btc_fast, "btc_slow": _btc_slow,
+                            "window": _alt_window,
+                            "btc_fast": _btc_fast,
+                            "btc_slow": _btc_slow,
                             "oscillator": _oscillator,
                         },
                         datetimes=aligned.datetimes,
@@ -1477,9 +1535,7 @@ def build_rule_signal_panels(
                                 "[LIMIT-03] slow-lookback control: turnover_per_year should drop "
                                 "materially vs baseline if the archetype's survival is turnover-driven"
                                 if _n_htf == 100
-                                else (
-                                    "1d trend direction filters 4h rsi oversold/overbought pullback trigger entries"
-                                )
+                                else ("1d trend direction filters 4h rsi oversold/overbought pullback trigger entries")
                             ),
                         },
                     )
@@ -1567,18 +1623,37 @@ def build_rule_signal_panels(
             _ltf_triggers: tuple[tuple[str, _ltf_trig_fn, dict[str, Any]], ...] = (
                 ("rsi_band", _ltf_rsi_band_trigger, {"period": rsi_14_window, "lo": 30.0, "hi": 70.0}),
                 ("macd_cross", _ltf_macd_cross_trigger, {"atr": atr, "fast": 12, "slow": 26, "signal": 9}),
-                ("donchian_retest", _ltf_donchian_retest_trigger, {
-                    "high": high, "low": low, "atr": atr, "lookback": scale_window(20),
-                }),
-                ("stochastic_cross", _ltf_stochastic_cross_trigger, {
-                    "high": high, "low": low, "k_period": scale_window(14), "d_period": 3, "lo": 20.0, "hi": 80.0,
-                }),
+                (
+                    "donchian_retest",
+                    _ltf_donchian_retest_trigger,
+                    {
+                        "high": high,
+                        "low": low,
+                        "atr": atr,
+                        "lookback": scale_window(20),
+                    },
+                ),
+                (
+                    "stochastic_cross",
+                    _ltf_stochastic_cross_trigger,
+                    {
+                        "high": high,
+                        "low": low,
+                        "k_period": scale_window(14),
+                        "d_period": 3,
+                        "lo": 20.0,
+                        "hi": 80.0,
+                    },
+                ),
             )
             for _htf in resolve_valid_htf_choices(cfg.timeframe):
                 for _filter_name, _filter_fn, _filter_params in _htf_filters:
                     if _filter_name in ("ichimoku_cloud", "adx_dmi"):
+
                         def _mtf_fusion_ohlc_fn(
-                            h: pd.DataFrame, l: pd.DataFrame, c: pd.DataFrame,
+                            h: pd.DataFrame,
+                            l: pd.DataFrame,
+                            c: pd.DataFrame,
                             _fn: Callable[..., pd.DataFrame] = _filter_fn,
                             _p: dict[str, Any] = _filter_params,
                         ) -> pd.DataFrame:
@@ -1586,13 +1661,18 @@ def build_rule_signal_panels(
 
                         _proj_htf_dir = _resample_ohlc_to_htf_and_project(
                             datetimes_4h=aligned.datetimes,
-                            high_4h=high, low_4h=low, close_4h=close,
+                            high_4h=high,
+                            low_4h=low,
+                            close_4h=close,
                             htf=_htf,
                             compute_feature_fn=_mtf_fusion_ohlc_fn,
                         )
                     else:
+
                         def _mtf_fusion_close_fn(
-                            df: pd.DataFrame, _fn: Callable[..., Any] = _filter_fn, _p: dict[str, Any] = _filter_params,
+                            df: pd.DataFrame,
+                            _fn: Callable[..., Any] = _filter_fn,
+                            _p: dict[str, Any] = _filter_params,
                         ) -> pd.DataFrame:
                             return _fn(df, **_p)
 
@@ -1614,7 +1694,9 @@ def build_rule_signal_panels(
                                 family="mtf_fusion",
                                 variant=_variant,
                                 params=apply_per_family_params(
-                                    cfg, "mtf_fusion", _variant,
+                                    cfg,
+                                    "mtf_fusion",
+                                    _variant,
                                     {"htf": _htf, "filter": _filter_name, "trigger": _trigger_name},
                                 ),
                                 datetimes=aligned.datetimes,
@@ -2032,8 +2114,7 @@ def build_rule_signal_panels(
                             "archetype": "trend",
                             "regime": "sparse_breakout_retest",
                             "edge_hypothesis": (
-                                "channel breakout confirmed by retest within 1% "
-                                "produces higher quality sparse entries"
+                                "channel breakout confirmed by retest within 1% produces higher quality sparse entries"
                             ),
                         },
                     )
@@ -2128,8 +2209,7 @@ def build_rule_signal_panels(
                         metadata={
                             "archetype": "xs_alpha",
                             "edge_hypothesis": (
-                                "cross-sectional residual momentum captures "
-                                "relative strength after removing BTC beta"
+                                "cross-sectional residual momentum captures relative strength after removing BTC beta"
                             ),
                             "max_abs_btc_beta": 0.80,
                         },
@@ -2193,8 +2273,8 @@ def build_rule_signal_panels(
             _ffes_entry = _entry_rising_edge_2d(_ffes_condition)
             _ffes_side = np.where(_ffes_entry, -np.sign(_ffes_funding_z).astype(np.int8), 0).astype(np.int8, copy=False)
             _ffes_score = np.where(_ffes_side != 0, np.clip((np.abs(_ffes_funding_z) - 1.5) / 1.5, 0.0, 1.0), 0.0)
-            _ffes_side[:scale_window(96)] = 0
-            _ffes_score[:scale_window(96)] = 0.0
+            _ffes_side[: scale_window(96)] = 0
+            _ffes_score[: scale_window(96)] = 0.0
             fam_panels.append(
                 CandidateSignalPanel(
                     family="funding_flow_exhaustion_sparse",
@@ -2213,7 +2293,7 @@ def build_rule_signal_panels(
                     metadata={
                         "archetype": "flow",
                         "regime": "funding_flow_exhaustion",
-                            "edge_hypothesis": "funding extreme + taker crowding + OI fade for sparse flow exhaustion",
+                        "edge_hypothesis": "funding extreme + taker crowding + OI fade for sparse flow exhaustion",
                     },
                 )
             )
@@ -2221,7 +2301,7 @@ def build_rule_signal_panels(
         elif fam == "oi_lsr_unwind":
             _oiu_log = np.where(oi_valid, np.log(oi), np.nan)
             _oiu_log_change = _oiu_log - np.roll(_oiu_log, scale_window(21), axis=0)
-            _oiu_log_change[:scale_window(21)] = np.nan
+            _oiu_log_change[: scale_window(21)] = np.nan
             _oiu_oi_z = _zscore_2d(_oiu_log_change, window=scale_window(42))
             _oiu_lsr_z = _zscore_2d(lsr_log, window=lsr_log_z_42_window)
             _oiu_crowding = (np.abs(_oiu_lsr_z) >= 1.0) & (_oiu_oi_z > 0.5)
@@ -2306,8 +2386,11 @@ def build_rule_signal_panels(
                 _sign = np.sign(_raw)
                 _sign_prev = np.vstack([_sign[:1], _sign[:-1]])
                 _sign_flip = (
-                    np.isfinite(_sign) & np.isfinite(_sign_prev)
-                    & (_sign != 0) & (_sign_prev != 0) & (_sign != _sign_prev)
+                    np.isfinite(_sign)
+                    & np.isfinite(_sign_prev)
+                    & (_sign != 0)
+                    & (_sign_prev != 0)
+                    & (_sign != _sign_prev)
                 )
                 _xsrr_entry = (_bucket_cross | _sign_flip) & np.isfinite(_raw)
                 _count = valid_mask.sum(axis=1)
@@ -2360,8 +2443,8 @@ def build_rule_signal_panels(
                 np.clip(np.abs(_cnf_carry_z) / 2.0, 0.0, 1.0) * np.where(_cnf_favourable, 1.0, 0.5),
                 0.0,
             )
-            _cnf_side[:scale_window(96)] = 0
-            _cnf_score[:scale_window(96)] = 0.0
+            _cnf_side[: scale_window(96)] = 0
+            _cnf_score[: scale_window(96)] = 0.0
             fam_panels.append(
                 CandidateSignalPanel(
                     family="carry_net_of_funding",
@@ -2455,9 +2538,7 @@ def build_rule_signal_panels(
                     metadata={
                         "archetype": "mean_rev",
                         "regime": "price_band_reversion",
-                        "edge_hypothesis": (
-                            "price reclaim of ATR band signals faded mean-reversion entry"
-                        ),
+                        "edge_hypothesis": ("price reclaim of ATR band signals faded mean-reversion entry"),
                     },
                 )
             )
@@ -2568,9 +2649,7 @@ def candidate_panels_to_events(
         l0_mask = panel.metadata.get("l0_event_mask_2d")
         if l0_mask is not None:
             if l0_mask.shape != scores.shape:
-                raise ValueError(
-                    f"l0_event_mask_2d shape {l0_mask.shape} != signed_score_2d shape {scores.shape}"
-                )
+                raise ValueError(f"l0_event_mask_2d shape {l0_mask.shape} != signed_score_2d shape {scores.shape}")
             if l0_mask.dtype != np.bool_:
                 raise ValueError("event_mask_2d must be bool")
         mask = panel.valid_mask_2d & (np.abs(scores) >= min_abs_score) & (sides != 0)
