@@ -510,6 +510,7 @@ class Layer2AllocationConfig:
     """Typed L2 config. [ADR_20260717_L2_CRISIS_SURVIVAL_POLICY]
 
     [ADR_20260704_L2_DIRECTIONAL_VETO]
+    [ADR_20260717_L2_CRISIS_LEVERAGE_SAFETY_DEFAULT]
     """
 
     k_rank: int = 3
@@ -570,7 +571,7 @@ class Layer2AllocationConfig:
     l2_deploy_l_hard_cap: float = 20.0
     # RC-2 crisis gate: fit-leg unit-vol MDD 이 값 이상이면 oos_blend 억제. None=비활성.
     l2_deploy_fit_mdd_crisis_gate: float | None = None
-    l2_deploy_worst_fold_gate_enabled: bool = False
+    l2_deploy_worst_fold_gate_enabled: bool = True
     l2_deploy_kelly_safety_fraction: float | None = None
     # 거래소 실행가능 notional 레버리지 상한 (None=무제한). Binance perp 기본 10x.
     l2_max_exchange_leverage: float | None = 10.0
@@ -776,7 +777,7 @@ class Layer2AllocationConfig:
         )
         _raw_worst_fold_gate = params.get("l2_deploy_worst_fold_gate_enabled")
         l2_deploy_worst_fold_gate_enabled: bool = (
-            bool(_raw_worst_fold_gate) if _raw_worst_fold_gate is not None else False
+            bool(_raw_worst_fold_gate) if _raw_worst_fold_gate is not None else _dc.l2_deploy_worst_fold_gate_enabled
         )
         _raw_kelly_frac = params.get("l2_deploy_kelly_safety_fraction")
         l2_deploy_kelly_safety_fraction: float | None = (
