@@ -1279,6 +1279,38 @@ def apply_regime_risk_cap(
     return arr * multiplier, multiplier
 
 
+def apply_asymmetric_long_short_regime_cap(
+    weights: NDArray[np.float64],
+    regime_now: int,
+    state_names: tuple[str, ...],
+    *,
+    enabled: bool = False,
+    bear_long_extra_mult: float = 1.0,
+    crisis_long_extra_mult: float = 1.0,
+) -> tuple[NDArray[np.float64], float]:
+    """[ADR_20260717_L2_CRISIS_ASYMMETRIC_LONG_SHORT_CAP] bear/crisis 레짐에서
+    롱 레그에만 추가 축소 배수를 적용한다(숏 레그는 변경 없음). 기본값은 no-op."""
+    if not (0.0 <= bear_long_extra_mult <= 1.0):
+        raise ValueError(f"bear_long_extra_mult must be in [0.0, 1.0], got {bear_long_extra_mult}")
+    if not (0.0 <= crisis_long_extra_mult <= 1.0):
+        raise ValueError(f"crisis_long_extra_mult must be in [0.0, 1.0], got {crisis_long_extra_mult}")
+    arr = np.asarray(weights, dtype=np.float64)
+    if not enabled:
+        return arr.copy(), 1.0
+    state_name = state_names[regime_now] if 0 <= regime_now < len(state_names) else "crisis"
+    if state_name.startswith("bull"):
+        mult = 1.0
+    elif state_name.startswith("bear"):
+        mult = bear_long_extra_mult
+    else:
+        mult = crisis_long_extra_mult
+    if mult >= 1.0:
+        return arr.copy(), 1.0
+    w_long = np.where(arr > 0.0, arr, 0.0)
+    w_short = np.where(arr < 0.0, arr, 0.0)
+    return w_long * mult + w_short, float(mult)
+
+
 def compute_regime_reliability_multiplier(
     trailing_edges_per_bar_bps: Sequence[float],
     *,
