@@ -23,6 +23,7 @@ class ExecutionPolicy:
 @dataclass(slots=True, frozen=True)
 class FuturesRunConfig:
     """[ADR_20260715_L0_L1_NATIVE_CONTRACT] Canonical phase/run contract."""
+
     timeframe: str
     date: str | None
     trials: int
@@ -37,9 +38,7 @@ class FuturesRunConfig:
 
     def __post_init__(self) -> None:
         if self.phase in {"l0", "l1"} and self.l0_runtime.mode != "gate":
-            raise RunPolicyError(
-                f"phase={self.phase} requires l0_runtime.mode='gate', got {self.l0_runtime.mode!r}"
-            )
+            raise RunPolicyError(f"phase={self.phase} requires l0_runtime.mode='gate', got {self.l0_runtime.mode!r}")
 
     @property
     def alpha_foundry(self) -> AlphaFoundryRuntimeConfig:

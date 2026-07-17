@@ -67,8 +67,7 @@ def normalize_native_l1_events(
         mismatch_indices = np.flatnonzero(mismatch)
         first_mismatch_id = int(events["event_id"].to_numpy(dtype=np.int64)[mismatch_indices[0]])
         raise EventGridContractError(
-            f"timeframe={timeframe} event_id={first_mismatch_id} entry_idx mismatch "
-            f"(total mismatches={mismatch_count})"
+            f"timeframe={timeframe} event_id={first_mismatch_id} entry_idx mismatch (total mismatches={mismatch_count})"
         )
 
     if terminal_count > 0:

@@ -1,4 +1,5 @@
 "[LIMIT-01] cross-TF HTF labeled events not discarded on empty raw_events."
+
 from __future__ import annotations
 
 from dataclasses import replace
@@ -26,7 +27,8 @@ def _minimal_ohlc_bar() -> pd.DataFrame:
 
 
 def _make_panel(
-    variant: str = "ema_12_72", native_tf: str = "8h",
+    variant: str = "ema_12_72",
+    native_tf: str = "8h",
 ) -> CandidateSignalPanel:
     return CandidateSignalPanel(
         family="trend_ma",
@@ -49,15 +51,31 @@ def _make_panel(
 
 def _make_l0_candidate(recipe_id: str = "r1") -> L0SignalCandidate:
     return L0SignalCandidate(
-        run_id="test", timeframe="8h", family="trend_ma", variant="ema_12_72",
-        recipe_id=recipe_id, archetype="trend", source="synthetic_recipe",
-        n_events=100, effective_n=50.0, mean_net_bps=1.0, block_lcb_bps=0.5,
-        nw_tstat=1.5, bootstrap_lcb_bps=0.0, bootstrap_agree=True,
-        cost_drag_ratio=0.3, turnover_per_year=50.0, max_abs_corr_in_bucket=0.0,
-        tf_coverage_count=0, sign_agreement_ratio=0.0,
-        corroboration_tier="single_tf_strict", discovery_tier="candidate",
-        l1_priority_score=1.0, l1_budget_units=1,
-        hard_reject_reasons=(), soft_flags=(),
+        run_id="test",
+        timeframe="8h",
+        family="trend_ma",
+        variant="ema_12_72",
+        recipe_id=recipe_id,
+        archetype="trend",
+        source="synthetic_recipe",
+        n_events=100,
+        effective_n=50.0,
+        mean_net_bps=1.0,
+        block_lcb_bps=0.5,
+        nw_tstat=1.5,
+        bootstrap_lcb_bps=0.0,
+        bootstrap_agree=True,
+        cost_drag_ratio=0.3,
+        turnover_per_year=50.0,
+        max_abs_corr_in_bucket=0.0,
+        tf_coverage_count=0,
+        sign_agreement_ratio=0.0,
+        corroboration_tier="single_tf_strict",
+        discovery_tier="candidate",
+        l1_priority_score=1.0,
+        l1_budget_units=1,
+        hard_reject_reasons=(),
+        soft_flags=(),
     )
 
 
@@ -104,14 +122,13 @@ def _make_multi_result(
 
 
 def _make_htf_projected_panels(htf_tfs: tuple[str, ...]) -> tuple[Any, ...]:
-    return tuple(
-        _make_panel(variant=f"var_{t}", native_tf=t)
-        for t in htf_tfs
-    )
+    return tuple(_make_panel(variant=f"var_{t}", native_tf=t) for t in htf_tfs)
 
 
 def _mock_panels_to_events(
-    panels: Any, *args: Any, **kwargs: Any,
+    panels: Any,
+    *args: Any,
+    **kwargs: Any,
 ) -> pd.DataFrame:
     if panels:
         rows = []
@@ -172,10 +189,7 @@ def _setup_htf_mocks(
     )
     monkeypatch.setattr(
         "src.domain.futures.strategy_runtime.bridge.build_native_htf_panels",
-        lambda *_, **__: {
-            t: (aligned, (_make_panel(variant=f"native_{t}", native_tf=t),))
-            for t in htf_tfs
-        },
+        lambda *_, **__: {t: (aligned, (_make_panel(variant=f"native_{t}", native_tf=t),)) for t in htf_tfs},
     )
     monkeypatch.setattr(
         "src.domain.futures.alpha_foundry.bridge_helpers.run_alpha_foundry_l0_gate_multi_tf",
@@ -207,7 +221,8 @@ class TestBridgeCrossTFLabeledEvents:
     """[LIMIT-01] raw_events.empty early return and HTF-labeled events consistency."""
 
     def test_bridge_returns_htf_labeled_events_when_base_tf_raw_events_empty(
-        self, monkeypatch: Any,
+        self,
+        monkeypatch: Any,
     ) -> None:
         base_tf = "4h"
         htf_tfs = ("8h", "12h")
@@ -252,18 +267,17 @@ class TestBridgeCrossTFLabeledEvents:
 
         assert result.labeled_unfiltered is not None
         assert not result.labeled_unfiltered.empty, (
-            "base TF raw_events is empty, but cross-TF HTF panels exist: "
-            "labeled_unfiltered must be non-empty"
+            "base TF raw_events is empty, but cross-TF HTF panels exist: labeled_unfiltered must be non-empty"
         )
         assert "native_tf" in result.labeled_unfiltered.columns
         native_tfs = set(result.labeled_unfiltered["native_tf"])
         assert native_tfs & set(htf_tfs), (
-            f"labeled_unfiltered must contain events from HTF TFs {htf_tfs}, "
-            f"got {native_tfs}"
+            f"labeled_unfiltered must contain events from HTF TFs {htf_tfs}, got {native_tfs}"
         )
 
     def test_bridge_labeled_unfiltered_stays_empty_when_both_base_and_htf_events_empty(
-        self, monkeypatch: Any,
+        self,
+        monkeypatch: Any,
     ) -> None:
         aligned = _make_aligned()
 
@@ -295,7 +309,8 @@ class TestBridgeCrossTFLabeledEvents:
         assert result.labeled_unfiltered.empty
 
     def test_bridge_htf_only_labeling_failure_is_suppressed_not_propagated(
-        self, monkeypatch: Any,
+        self,
+        monkeypatch: Any,
     ) -> None:
         base_tf = "4h"
         htf_tfs = ("8h",)
@@ -307,7 +322,11 @@ class TestBridgeCrossTFLabeledEvents:
             raise ValueError("simulated labeling failure")
 
         _setup_htf_mocks(
-            monkeypatch, aligned, htf_tfs, htf_projected, multi_results,
+            monkeypatch,
+            aligned,
+            htf_tfs,
+            htf_projected,
+            multi_results,
             label_mock=_raise_label_error,
         )
 

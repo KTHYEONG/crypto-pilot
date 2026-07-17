@@ -512,14 +512,26 @@ class TestMarkRetiredSearchCells:
         from src.domain.futures.alpha_foundry.search_space import mark_retired_search_cells
 
         cell1 = L0SearchCell(
-            blueprint_id="b1", family="f", variant="v1", timeframe="4h",
-            tf_minutes=240, symbol_scope="global", cost_floor_bps=3.0,
-            expected_event_rate=0.25, family_prior_score=0.0,
+            blueprint_id="b1",
+            family="f",
+            variant="v1",
+            timeframe="4h",
+            tf_minutes=240,
+            symbol_scope="global",
+            cost_floor_bps=3.0,
+            expected_event_rate=0.25,
+            family_prior_score=0.0,
         )
         cell2 = L0SearchCell(
-            blueprint_id="b2", family="f", variant="v2", timeframe="4h",
-            tf_minutes=240, symbol_scope="global", cost_floor_bps=3.0,
-            expected_event_rate=0.25, family_prior_score=0.0,
+            blueprint_id="b2",
+            family="f",
+            variant="v2",
+            timeframe="4h",
+            tf_minutes=240,
+            symbol_scope="global",
+            cost_floor_bps=3.0,
+            expected_event_rate=0.25,
+            family_prior_score=0.0,
         )
         result = mark_retired_search_cells(
             cells=(cell1, cell2),

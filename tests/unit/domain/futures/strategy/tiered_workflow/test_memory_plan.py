@@ -197,8 +197,10 @@ def test_snapshot_process_tree_memory_handles_child_failure() -> None:
             uss = 400
 
         good_child = type("GoodChild", (), {"memory_full_info": lambda self: FakeFullInfo()})()
+
         def _raise_no_such_process(_self: object) -> None:
             raise psutil.NoSuchProcess(pid=999)
+
         bad_child = type(
             "BadChild",
             (),

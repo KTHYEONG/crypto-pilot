@@ -104,9 +104,7 @@ def test_evidence_by_tf_nonempty_when_bindings_present() -> None:
     )
 
     evidence_rows = results[tf].evidence_rows
-    assert len(evidence_rows) >= 1, (
-        f"evidence_by_tf must have >=1 row when bindings exist, got {len(evidence_rows)}"
-    )
+    assert len(evidence_rows) >= 1, f"evidence_by_tf must have >=1 row when bindings exist, got {len(evidence_rows)}"
 
 
 def test_tf_coverage_count_nonzero_across_two_timeframes() -> None:
@@ -177,9 +175,7 @@ def test_warning_logged_when_bindings_exist_but_no_evidence(caplog: pytest.LogCa
     recipes_by_tf: dict[str, MutableMapping[str, AlphaRecipe]] = {tf: {recipe.recipe_id: recipe}}
     aligned_by_tf = {tf: aligned}
     # Bind to a recipe_id that does NOT exist in recipes -> skip in cheap gate
-    bindings_by_tf: dict[str, list[Any]] = {
-        tf: [_FakeBinding(panel_index=0, recipe_id="nonexistent:recipe:id")]
-    }
+    bindings_by_tf: dict[str, list[Any]] = {tf: [_FakeBinding(panel_index=0, recipe_id="nonexistent:recipe:id")]}
 
     results = run_alpha_foundry_l0_gate_multi_tf(
         panels_by_tf=panels_by_tf,
@@ -211,11 +207,18 @@ def _make_aligned(*, tf_hours: int, bars: int = 200) -> AlignedMarketData:
     close = 100.0 * np.exp(0.001 * np.arange(t, dtype=np.float64))[:, None]
     mask = np.ones((t, 1), dtype=np.bool_)
     return AlignedMarketData(
-        datetimes=dt, symbols=("BTCUSDT",),
-        open_2d=close.copy(), high_2d=close * 1.01, low_2d=close * 0.99, close_2d=close,
-        volume_2d=np.full((t, 1), 1000.0), funding_2d=np.full((t, 1), 0.00005),
-        active_mask=mask, warm_mask=mask,
-        entry_block_mask=np.zeros((t, 1), dtype=np.bool_), kill_mask=np.zeros((t, 1), dtype=np.bool_),
+        datetimes=dt,
+        symbols=("BTCUSDT",),
+        open_2d=close.copy(),
+        high_2d=close * 1.01,
+        low_2d=close * 0.99,
+        close_2d=close,
+        volume_2d=np.full((t, 1), 1000.0),
+        funding_2d=np.full((t, 1), 0.00005),
+        active_mask=mask,
+        warm_mask=mask,
+        entry_block_mask=np.zeros((t, 1), dtype=np.bool_),
+        kill_mask=np.zeros((t, 1), dtype=np.bool_),
     )
 
 
@@ -225,12 +228,17 @@ def _make_panel_for_tf(*, tf: str, family: str, variant: str, bars: int = 200) -
     score[10, 0] = 0.8
     side[10:13, 0] = 1
     return CandidateSignalPanel(
-        family=family, variant=f"{variant}_{tf}",
-        params={"lookback": 20}, datetimes=np.arange(bars, dtype=np.int64),
+        family=family,
+        variant=f"{variant}_{tf}",
+        params={"lookback": 20},
+        datetimes=np.arange(bars, dtype=np.int64),
         symbols=("BTCUSDT",),
-        signed_score_2d=score, side_hint_2d=side,
-        expected_holding_bars=3, min_holding_bars=1,
-        stop_atr_mult=2.0, take_profit_atr_mult=4.0,
+        signed_score_2d=score,
+        side_hint_2d=side,
+        expected_holding_bars=3,
+        min_holding_bars=1,
+        stop_atr_mult=2.0,
+        take_profit_atr_mult=4.0,
         turnover_proxy_2d=np.abs(np.diff(score, axis=0, prepend=0.0)),
         valid_mask_2d=np.ones((bars, 1), dtype=np.bool_),
         metadata={},
@@ -239,13 +247,17 @@ def _make_panel_for_tf(*, tf: str, family: str, variant: str, bars: int = 200) -
 
 def _make_panel_no_events(family: str, variant: str, bars: int = 200) -> CandidateSignalPanel:
     return CandidateSignalPanel(
-        family=family, variant=variant,
-        params={}, datetimes=np.arange(bars, dtype=np.int64),
+        family=family,
+        variant=variant,
+        params={},
+        datetimes=np.arange(bars, dtype=np.int64),
         symbols=("BTCUSDT",),
         signed_score_2d=np.zeros((bars, 1), dtype=np.float64),
         side_hint_2d=np.zeros((bars, 1), dtype=np.int8),
-        expected_holding_bars=1, min_holding_bars=1,
-        stop_atr_mult=2.0, take_profit_atr_mult=4.0,
+        expected_holding_bars=1,
+        min_holding_bars=1,
+        stop_atr_mult=2.0,
+        take_profit_atr_mult=4.0,
         turnover_proxy_2d=np.zeros((bars, 1), dtype=np.float64),
         valid_mask_2d=np.zeros((bars, 1), dtype=bool),
         metadata={},
@@ -254,17 +266,29 @@ def _make_panel_no_events(family: str, variant: str, bars: int = 200) -> Candida
 
 def _make_recipe_for_tf(*, tf: str, family: str, variant: str) -> AlphaRecipe:
     return AlphaRecipe(
-        recipe_id=f"{family}:{variant}:{tf}", family=family, variant=f"{variant}_{tf}",
-        timeframe=tf, archetype="trend", indicator_params={"lookback": 20},
-        side_rule_id="trend_follow", exit_policy_id="atr_trail_2",
-        required_fields=("close",), causal_lag_bars=1, max_turnover_per_year=365.0,
+        recipe_id=f"{family}:{variant}:{tf}",
+        family=family,
+        variant=f"{variant}_{tf}",
+        timeframe=tf,
+        archetype="trend",
+        indicator_params={"lookback": 20},
+        side_rule_id="trend_follow",
+        exit_policy_id="atr_trail_2",
+        required_fields=("close",),
+        causal_lag_bars=1,
+        max_turnover_per_year=365.0,
     )
 
 
 def _make_gate_config() -> AlphaGateConfig:
     return AlphaGateConfig(
-        min_events=1, min_effective_n=1.0, min_lcb_net_bps=-1000.0, min_nw_tstat=0.0,
-        max_cost_drag_ratio=100.0, max_turnover_per_year=10000.0, min_candidate_rank_ic_tstat=0.0,
+        min_events=1,
+        min_effective_n=1.0,
+        min_lcb_net_bps=-1000.0,
+        min_nw_tstat=0.0,
+        max_cost_drag_ratio=100.0,
+        max_turnover_per_year=10000.0,
+        min_candidate_rank_ic_tstat=0.0,
         archetype_event_floors={},
     )
 

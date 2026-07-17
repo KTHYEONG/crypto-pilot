@@ -248,23 +248,20 @@ class TestSignalFamilyBranchCoverage:
             tpc_variants = {panel.variant for panel in by_family["trend_pullback_continuation"]}
             assert "tpc_100_400" in tpc_variants
             assert any(
-                panel.variant == "tpc_100_400"
-                and "[LIMIT-03]" in str(panel.metadata.get("edge_hypothesis", ""))
+                panel.variant == "tpc_100_400" and "[LIMIT-03]" in str(panel.metadata.get("edge_hypothesis", ""))
                 for panel in by_family["trend_pullback_continuation"]
             )
 
             mtf_variants = {panel.variant for panel in by_family["mtf_trend_pullback"]}
             assert "mtf_tpb_100_30" in mtf_variants
             assert any(
-                panel.variant == "mtf_tpb_100_30"
-                and "[LIMIT-03]" in str(panel.metadata.get("edge_hypothesis", ""))
+                panel.variant == "mtf_tpb_100_30" and "[LIMIT-03]" in str(panel.metadata.get("edge_hypothesis", ""))
                 for panel in by_family["mtf_trend_pullback"]
             )
 
             tpq_variants = {panel.variant for panel in by_family["trend_pullback_quality_v2"]}
             assert "tpq_v2_100_400" in tpq_variants
             assert any(
-                panel.variant == "tpq_v2_100_400"
-                and "[LIMIT-03]" in str(panel.metadata.get("edge_hypothesis", ""))
+                panel.variant == "tpq_v2_100_400" and "[LIMIT-03]" in str(panel.metadata.get("edge_hypothesis", ""))
                 for panel in by_family["trend_pullback_quality_v2"]
             )

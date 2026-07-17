@@ -24,9 +24,7 @@ def test_fix1_logs_blockers_when_gate_fails(caplog: Any) -> None:
     from src.domain.futures.strategy.tiered_workflow.dataclasses import Layer1Result
 
     caplog.set_level(logging.DEBUG)
-    gate_report = Layer1GateReport(
-        checks=(), passed=False, blockers=("fold_ratio:0.400", "probe_lcb_bps:-1.200")
-    )
+    gate_report = Layer1GateReport(checks=(), passed=False, blockers=("fold_ratio:0.400", "probe_lcb_bps:-1.200"))
     l1_result = MagicMock(spec=Layer1Result)
     l1_result.gate_report = gate_report
     l1_result.gate_passed = False
@@ -116,6 +114,7 @@ def test_fix3_vol_breakout_added_to_untested_timeframes(tf: str) -> None:
 def test_fix3_vol_breakout_absent_from_retired_4h() -> None:
     assert "vol_breakout" not in _DEFAULT_PER_TF_FAMILIES["4h"]
     from src.domain.futures.strategy.family_lifecycle import is_family_tf_retired
+
     assert is_family_tf_retired("vol_breakout", "4h") is True
 
 
@@ -125,6 +124,7 @@ def test_fix3_vol_breakout_absent_from_retired_4h() -> None:
 def test_fix4_pruning_default_enabled(monkeypatch: Any) -> None:
     monkeypatch.delenv("L0_CROSS_TF_PRUNING", raising=False)
     from src.application.futures.runner.config import _l0_cross_tf_pruning_enabled
+
     assert _l0_cross_tf_pruning_enabled() is True
 
 
@@ -132,10 +132,12 @@ def test_fix4_pruning_default_enabled(monkeypatch: Any) -> None:
 def test_fix4_pruning_explicit_opt_out(monkeypatch: Any, val: str) -> None:
     monkeypatch.setenv("L0_CROSS_TF_PRUNING", val)
     from src.application.futures.runner.config import _l0_cross_tf_pruning_enabled
+
     assert _l0_cross_tf_pruning_enabled() is False
 
 
 def test_fix4_pruning_truthy_values_enable(monkeypatch: Any) -> None:
     monkeypatch.setenv("L0_CROSS_TF_PRUNING", "1")
     from src.application.futures.runner.config import _l0_cross_tf_pruning_enabled
+
     assert _l0_cross_tf_pruning_enabled() is True

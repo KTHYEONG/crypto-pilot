@@ -202,6 +202,7 @@ def index_multi_timeframe_evidence(
         result[key] = row
     return result
 
+
 def project_signal_to_canonical_grid(
     *,
     panel: CandidateSignalPanel,

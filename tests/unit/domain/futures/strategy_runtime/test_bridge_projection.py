@@ -295,9 +295,7 @@ def test_2d_project_higher_tf_to_grid_returns_2d() -> None:
     )
 
     # 2D call
-    result_2d = project_higher_tf_to_grid(
-        feature_higher=feature_2d, dt_higher=dt_higher, dt_grid=dt_grid
-    )
+    result_2d = project_higher_tf_to_grid(feature_higher=feature_2d, dt_higher=dt_higher, dt_grid=dt_grid)
 
     # Manual per-column equivalent
     expected = np.full((t_base, n_syms), np.nan, dtype=np.float64)
@@ -323,9 +321,7 @@ def test_2d_project_higher_tf_to_grid_with_nan() -> None:
         np.datetime64("2024-01-01"), np.datetime64("2024-01-01") + np.timedelta64(t_base, "h"), dtype="datetime64[h]"
     )
 
-    result = project_higher_tf_to_grid(
-        feature_higher=feature_2d, dt_higher=dt_higher, dt_grid=dt_grid
-    )
+    result = project_higher_tf_to_grid(feature_higher=feature_2d, dt_higher=dt_higher, dt_grid=dt_grid)
 
     assert result.shape == (t_base, n_syms)
     # First 5 rows (hours 0-4) should be NaN (dt_grid < dt_higher[0])
@@ -345,9 +341,7 @@ def test_2d_project_higher_tf_to_grid_1d_backward_compat() -> None:
         np.datetime64("2024-01-01"), np.datetime64("2024-01-01") + np.timedelta64(t_base, "h"), dtype="datetime64[h]"
     )
 
-    result = project_higher_tf_to_grid(
-        feature_higher=feature_1d, dt_higher=dt_higher, dt_grid=dt_grid
-    )
+    result = project_higher_tf_to_grid(feature_higher=feature_1d, dt_higher=dt_higher, dt_grid=dt_grid)
 
     assert result.shape == (t_base,)
     assert result.dtype == np.float64

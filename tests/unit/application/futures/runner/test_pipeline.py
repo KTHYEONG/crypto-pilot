@@ -18,9 +18,7 @@ from src.domain.futures.alpha_foundry.contracts import AlphaFoundryRuntimeConfig
 
 def make_run_config(phase: ActivePhase = "l3") -> FuturesRunConfig:
     l0_runtime = (
-        AlphaFoundryRuntimeConfig(mode="gate")
-        if phase in {"l0", "l1"}
-        else AlphaFoundryRuntimeConfig(mode="off")
+        AlphaFoundryRuntimeConfig(mode="gate") if phase in {"l0", "l1"} else AlphaFoundryRuntimeConfig(mode="off")
     )
     return FuturesRunConfig(
         timeframe="4h",
@@ -150,9 +148,7 @@ class TestRunPipeline:
         mock_optimize.assert_called_once()
 
     @pytest.mark.parametrize("phase", ["l1", "l2"])
-    def test_run_pipeline_l1_l2_skip_optimization(
-        self, mocker: MockerFixture, phase: Literal["l1", "l2"]
-    ) -> None:
+    def test_run_pipeline_l1_l2_skip_optimization(self, mocker: MockerFixture, phase: Literal["l1", "l2"]) -> None:
         universe_result = _universe_result(mocker)
         mocker.patch(
             "src.application.futures.runner.active_pipeline._resolve_quarterly_window", return_value=make_window()
