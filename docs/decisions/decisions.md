@@ -1,5 +1,10 @@
 # Active Decisions Log (Sliding Window)
 
+## [2026-07-17] [TASK_L2_CRISIS_SURVIVAL_POLICY] [ADR_20260717_L2_CRISIS_SURVIVAL_POLICY]
+- **Context/Why:** 정상장 L2 스코어카드는 PASS했지만 독립 LUNA/FTX replay에서 champion이 MDD 29.01%와 CAGR -32.73%를 기록했고, 기존 위기 판정은 첫 window의 MDD만 확인해 production 승격을 막지 못함.
+- **Resolution/What:** CrisisWindowMetrics와 순수 evaluate_crisis_survival 정책을 도입하고, 모든 configured crisis window에 대해 데이터 충분성·MDD·CAGR·CVaR·거래 수를 함께 판정하도록 assess_crisis_reliability를 집계형으로 변경했다. 현재 L2 threshold에서 하나라도 실패하거나 데이터가 부족하면 apply_crisis_reliability_override가 gate를 monotonic fail-closed로 차단하며, 위기 결과는 Optuna selection에 재투입하지 않는다.
+- **Impact:** 동일 4h/2026-07-17/seed42 replay에서 L1 7TF 및 정상 L2 수치(CAGR +61.2%, Sharpe 2.026, MDD 19.9%)는 유지됐고, crisis replay는 stress_tested_fail/verified=False로 승격을 차단했다. 35 symbols·903 bars·50,532 events를 평가했으며 기존 false PASS 경로를 제거했다. Spec compliance와 전체 check PASS(Cov 35%).
+
 ## [2026-07-17] [TASK_L2_TF_INCLUSION_GATE_NATIVE_TF_FIX] [ADR_20260717_L2_TF_INCLUSION_GATE_NATIVE_TF_FIX]
 - **Context/Why:** 위기 재현성 게이트 replay(2026-07-16)에서 mdd=0.0000 cagr=+0.0000이 정확히 0으로 산출. 코드 조사 결과 crisis-stress 전용 버그가 아니라, 커밋 c2831990(L1→L2 네이티브 TF 핸드오프)이 strategy_id 포맷을 TF 접미사 포함(donchian_72_8h)에서 family:variant(TF 별도 native_tf 필드)로 바꾼 뒤, C4 게이트의 OOS 필터(awf_sim.py:3205,3208)가 옛 정규식 파서 _parse_tf_from_strategy_id로 여전히 strategy_id를 파싱해 항상 unk를 반환 → included_tfs_by_fold와 매칭 실패 → 매 OOS bar 전체 sleeve 탈락. l2_tf_inclusion_enabled(기본값 True) 전 경로에 적용되는 전역 회귀였음.
 - **Resolution/What:** docs/specs/l2-tf-inclusion-gate-native-tf-fix.md 구현: cache.sleeve_to_tf(SSOT)로 (symbol, strategy_id)->native_tf 룩업(_build_sleeve_tf_lookup) 구축, OOS 필터가 파싱 대신 직접 조회하도록 변경. 죽은 파서 함수(_parse_tf_from_strategy_id)와 스텁 테스트(S4) 정리, 실제 필터 경로를 검증하는 통합 테스트로 교체.
@@ -69,8 +74,3 @@
 - **Context/Why:** SKILL.md contained redundant rules, scripts had 3 separate subprocess calls, pytest ran twice, no AI-first diagnostic output
 - **Resolution/What:** SKILL.md 축소 44→11/42→15줄, lean_check.py pytest 2→1회+JSON stderr, sync_task.py 통합, AGENTS.md SSOT 강화
 - **Impact:** AI 판단 cycle 50%+ 감소, task당 토큰 ~200줄 절감, old scripts 3개 제거
-
-## [2026-07-16] [TASK_L1_REGISTRY_ADMISSION_RECALIBRATION] [ADR_20260716_L1_REGISTRY_ADMISSION_RECALIBRATION]
-- **Context/Why:** 직전 ADR(L1_SLOW_TF_GATE_RECALIBRATION)이 pooled 심볼 다양성만 고쳐서 6h~1d가 여전히 BLOCKED로 남았음. 재실측 결과 두 원인 확인: (1) fold-level 원시 심볼 수 하한(l1_min_cross_section=2, TF 무관 고정)이 LUNA2USDT/JASMYUSDT 단일심볼 fold를 pooled LCB 계산에서 배제. (2) registry_empty 가설(L0 데이터 부재)을 실측으로 반증 -- 실제로는 fold당 144~2500개 후보가 만들어지는데 pair-level FDR(compute_symbol_strategy_evidence의 Benjamini-Yekutieli 조화급수 보정)이 hard_eligible 후보의 98.9~99.8%(8h/12h/1d)를 탈락시키고 있었음(2h는 76%).
-- **Resolution/What:** calibrate_l1_symbol_breadth_gate.py에 measure_fold_min_ready_symbols_by_tf()/propose_cross_section_thresholds() 추가(측정=p10 raw ready_symbols, registry_empty fold 제외). config.py에 l1_min_cross_section 오버라이드(8h=2/12h=1/1d=1) 및 l1_pair_fdr_procedure: Literal['by','bh']='by' 필드 신설, 8h/12h/1d만 'bh' 채택(6h는 실측 negative gross edge로 의도적 제외). signal_selection.py의 _by_q_values에 harmonic_override 파라미터 추가(1.0=plain BH, None=기존 BY 그대로 -- 기본값 불변).
-- **Impact:** 실측 control replay 4-run 재실행(수치 완전 동일, ablation_restores_control=true): 12h는 3/4 fold ready로 완전 신규 PASS(probe_lcb_bps -inf -> +122.5bps, 후보 10개 실제 승급). 1d는 게이트 지표 대폭 개선(probe_lcb_bps -inf -> +143.3bps, 구조 3/3 통과)했으나 advisory fold_ratio 경고 및 개별 후보 승급 0건이라는 새 하류 병목 노출. 8h는 오히려 probe_lcb_bps -35.1 -> -147.9bps로 악화 -- FDR 완화로 그동안 우연히 함께 걸러지던 진짜 마이너스 분기(fold#1, -129.5bps, 8심볼)가 evidence pool에 들어온 결과로, 게이트 버그가 아닌 진짜 경제적 악재 노출로 잠정 판단. 6h는 의도적 미조정으로 변화 없음(예상대로). 1h/2h/4h 회귀 없음(수치 완전 동일). 236/236 테스트 통과, 신규 코드 94~100% 커버리지. 후속 과제: 1d의 게이트-통과/승급-0건 괴리 원인 규명, registry_empty 잔존분 L0 원인 규명.

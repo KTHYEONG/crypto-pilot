@@ -399,7 +399,7 @@ class Layer2StudyResult:
 
 @dataclass(slots=True, frozen=True)
 class Layer2Result:
-    """Layer2 AWF 포트폴리오 검증 결과. [ADR_20260704_L2_DIRECTIONAL_VETO]
+    """Layer2 AWF 포트폴리오 검증 결과. [ADR_20260717_L2_CRISIS_SURVIVAL_POLICY] [ADR_20260704_L2_DIRECTIONAL_VETO]
 
     [ADR_20260705_TF_VALIDATION_ROOT_CAUSE_CAPTURE]
 
@@ -499,12 +499,18 @@ class Layer2Result:
     directional_veto_summary: tuple[DirectionalVetoSummary, ...] = ()
     crisis_reliability_status: str = "not_evaluated"
     crisis_reliability_detail: str = ""
+    crisis_reliability_blockers: tuple[str, ...] = ()
+    crisis_window_count: int = 0
+    crisis_usable_window_count: int = 0
     validation_parity_report: ValidationParityReport | None = None
 
 
 @dataclass(slots=True, frozen=True)
 class Layer2AllocationConfig:
-    """Typed Layer2 allocation and gate configuration. [ADR_20260704_L2_DIRECTIONAL_VETO]"""
+    """Typed L2 config. [ADR_20260717_L2_CRISIS_SURVIVAL_POLICY]
+
+    [ADR_20260704_L2_DIRECTIONAL_VETO]
+    """
 
     k_rank: int = 3
     rebalance_bars: int = 3
@@ -670,6 +676,9 @@ class Layer2AllocationConfig:
     l2_intra_symbol_divergence_cooldown_bars: int = 3
     l2_intra_symbol_divergence_dominant_damp_mult: float = 0.5
     l2_require_crisis_reliability: bool = True
+    l2_crisis_min_symbols: int = 10
+    l2_crisis_min_observation_days: int = 300
+    l2_crisis_min_usable_windows: int = 1
     l2_intra_symbol_divergence_dissent_boost_mult: float = 2.0
 
     @staticmethod
@@ -691,6 +700,7 @@ class Layer2AllocationConfig:
             raise ValueError(f"{name} must be in range [{lower}{suffix}]")
         return value
 
+    # Anchor: Layer2AllocationConfig.from_mapping (crisis config fields + validation)
     @classmethod
     def from_mapping(cls, params: dict[str, object] | None) -> Layer2AllocationConfig:
         _dc = _L2_DEFAULT_CONFIG  # SSOT shortcut
@@ -943,6 +953,15 @@ class Layer2AllocationConfig:
         )
         if l2_regime_reliability_floor <= 0.0 or l2_regime_reliability_floor > 1.0:
             raise ValueError("l2_regime_reliability_floor must be in range (0.0, 1.0]")
+
+        _l2_deploy_mdd_margin = cls._as_float(
+            params.get("l2_deploy_mdd_margin", _dc.l2_deploy_mdd_margin),
+            _dc.l2_deploy_mdd_margin,
+        )
+        if not (0.0 < _l2_deploy_mdd_margin < 1.0):
+            raise ValueError(
+                f"l2_deploy_mdd_margin must be in (0, 1), got {_l2_deploy_mdd_margin}"
+            )
         return cls(
             k_rank=cls._as_int(params.get("K_RANK", 3), 3),
             rebalance_bars=cls._as_int(params.get("REBALANCE_BARS", 3), 3),
@@ -1021,7 +1040,7 @@ class Layer2AllocationConfig:
             l2_worst_fold_penalty_threshold=cls._as_float(params.get("l2_worst_fold_penalty_threshold", -0.30), -0.30),
             l2_worst_fold_penalty_weight=cls._as_float(params.get("l2_worst_fold_penalty_weight", 0.005), 0.005),
             l2_deploy_enabled=bool(params.get("l2_deploy_enabled", True)),
-            l2_deploy_mdd_margin=cls._as_float(params.get("l2_deploy_mdd_margin", 0.30), 0.30),
+            l2_deploy_mdd_margin=_l2_deploy_mdd_margin,
             l2_deploy_cvar_margin=cls._as_float(params.get("l2_deploy_cvar_margin", 0.20), 0.20),
             l2_deploy_l_hard_cap=cls._as_float(params.get("l2_deploy_l_hard_cap", 20.0), 20.0),
             l2_deploy_fit_mdd_crisis_gate=l2_deploy_fit_mdd_crisis_gate,
@@ -1453,6 +1472,36 @@ class Layer2AllocationConfig:
                     _dc.l2_intra_symbol_divergence_dissent_boost_mult,
                 ),
                 0.0,
+            ),
+            l2_crisis_min_symbols=int(
+                cls._validate_range(
+                    "l2_crisis_min_symbols",
+                    cls._as_int(
+                        params.get("l2_crisis_min_symbols", _dc.l2_crisis_min_symbols),
+                        _dc.l2_crisis_min_symbols,
+                    ),
+                    1,
+                )
+            ),
+            l2_crisis_min_observation_days=int(
+                cls._validate_range(
+                    "l2_crisis_min_observation_days",
+                    cls._as_int(
+                        params.get("l2_crisis_min_observation_days", _dc.l2_crisis_min_observation_days),
+                        _dc.l2_crisis_min_observation_days,
+                    ),
+                    1,
+                )
+            ),
+            l2_crisis_min_usable_windows=int(
+                cls._validate_range(
+                    "l2_crisis_min_usable_windows",
+                    cls._as_int(
+                        params.get("l2_crisis_min_usable_windows", _dc.l2_crisis_min_usable_windows),
+                        _dc.l2_crisis_min_usable_windows,
+                    ),
+                    1,
+                )
             ),
             l2_require_crisis_reliability=bool(
                 params.get("l2_require_crisis_reliability", _dc.l2_require_crisis_reliability)
