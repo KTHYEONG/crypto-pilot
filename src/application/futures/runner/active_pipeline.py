@@ -2950,6 +2950,8 @@ def _run_strategy_stage(
                     _crisis_assessment.verified,
                     _crisis_assessment.detail,
                 )
+                for wm in _crisis_assessment.window_results:
+                    _logger.info("[CRISIS-WINDOW-DETAIL] label=%s status=%s %s", wm.label, wm.status, wm.detail)
                 l2_final = apply_crisis_reliability_override(
                     l2_final, _crisis_assessment,
                     require_crisis_reliability=bool(getattr(tiered_cfg, "l2_require_crisis_reliability", True)),
