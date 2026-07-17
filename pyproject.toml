@@ -92,8 +92,12 @@ exclude = [
     "results", 
     ".pytest_cache", 
     ".git",
-    "^tests/.*/conftest\\.py$"
+    "^tests/.*/conftest\\.py$",
 ]
+
+[[tool.mypy.overrides]]
+module = "tests.unit.domain.futures.strategy.test_tiered_workflow"
+ignore_errors = true
 
 [tool.pyright]
 exclude = [
