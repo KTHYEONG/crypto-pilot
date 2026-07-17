@@ -2,6 +2,11 @@
 
 This file holds historical architecture decision records (ADRs) that have been pruned from the active window.
 
+## [2026-07-16] [TASK_L1_SLOW_TF_GATE_RECALIBRATION] [ADR_20260716_L1_SLOW_TF_GATE_RECALIBRATION]
+- **Context/Why:** result.md가 지목한 6h~1d BLOCKED의 3대 가설 중 대상2(비용 이중차감)은 코드 감사로 반증(dynamic_funding/execution_cost_bps 필드가 생산자 없이 항상 빈 튜플). 실제 원인은 pooled Symbol-Breadth 게이트(l1_min_effective_sym_n)가 1h/2h만 오버라이드되고 4h~1d는 방치되어 플랫 기본값(3.0)을 적용받은 것과, 부트스트랩 LCB가 블록 수와 무관하게 quantile 0.05 고정이라 소표본 fold를 과도하게 벌점화한 것 2가지였음.
+- **Resolution/What:** src/domain/futures/strategy/calibrate_l1_symbol_breadth_gate.py 신규(측정=p10 effective_sym_n per TF, 채택=config.py 수동 반영, calibrate_l1_pair_gate.py와 동일 거버넌스). config.py에 8h=2.0/12h=1.0/1d=1.0 l1_min_effective_sym_n 오버라이드 및 l1_lcb_quantile_* 4개 필드 추가. evidence_policy.py에 block-count 적응형 _resolve_lcb_quantile 신설(num_blocks>=15는 no-op, 이하일수록 0.05->0.20 선형 완화), metrics.py에 resolve_num_blocks 추출(DRY), signal_selection.py에 quantile 파라미터 배선.
+- **Impact:** 실측 control replay 재실행(PYTHONPATH=. uv run python -m src.domain.futures.strategy.run_l1_cross_tf_diagnosis, 4-run 전부 동일/ablation_restores_control=true): 1h/2h/4h 회귀 없음(수치 완전 동일). 6h/8h/12h/1d Symbol-Breadth 구조적 게이트는 목표대로 전부 PASS로 전환되었으나, 그럼에도 전체 판정은 여전히 BLOCKED — fold-level insufficient_ready_symbols(l1_min_cross_section=2, TF 무관 고정, 이번 범위 밖)가 LUNA2USDT(+229bps)/JASMYUSDT(+98.5bps) 단일심볼 fold를 pooled LCB evidence pool에서 별도로 배제하고 있음이 실측으로 새로 확인됨. registry_empty(L0 상류, 4개 분기 중 3개 후보 0건)도 별개 병목으로 노출. 6h는 게이트와 무관하게 실측 gross edge가 마이너스(-54/-33bps)로 진짜 무엣지 가능성. 후속 스펙 필요: fold-level 심볼 게이트 TF-스케일링 확장, registry_empty L0 원인 규명.
+
 ## [2026-07-16] [TASK_L0_L1_TIMEFRAME_SCALED_DAILY_DENSITY_GATE] [ADR_20260716_L0_L1_TIMEFRAME_SCALED_DAILY_DENSITY_GATE]
 - **Context/Why:** 느린 시간프레임의 L0 Cheap Gate 차단 및 4h 강결합을 해소하기 위해, 달력일수와 하루평균 최소 빈도에 기반한 동적 밀도 스케일러를 도입함.
 - **Resolution/What:** contracts.py와 cheap_gate.py에서 oos_window_days를 datetimes로부터 자동 추출하고 daily_event_density와 daily_effective_n_density를 기반으로 임계값을 비례 스케일링하며 archetype/family 최소 하한값을 max 필터링으로 융합 적용함.
