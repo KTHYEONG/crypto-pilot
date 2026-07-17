@@ -18,6 +18,7 @@ import numpy as np
 from numpy.typing import NDArray
 
 from src.domain.futures.optimization.opt_config import LayeredWindow
+from src.domain.futures.strategy.tiered_workflow.dataclasses import Layer2AllocationConfig
 
 # ---------------------------------------------------------------------------
 # Internal helpers
@@ -692,6 +693,7 @@ def evaluation_window_bottleneck_verdict(
 def format_layer2_table(
     r: Any,
     *,
+    config: Layer2AllocationConfig | None = None,
     evaluation_start: str | None = None,
     evaluation_end: str | None = None,
     awf_folds: list[dict[str, Any]] | None = None,
@@ -705,6 +707,7 @@ def format_layer2_table(
            mdd_baseline, cagr_hybrid, cagr_baseline, mar_hybrid, mar_baseline,
            fold_pass_ratio, turnover, friction_pass_pct, gate_passed,
            blocker_reason 필드 필요).
+        config: Layer2AllocationConfig for gate thresholds. Uses defaults if None.
         awf_folds: Optional fold 상세 (fold, sharpe, mdd, pass 키).
         topk_selection: Optional Top-K 선택 (rank, symbol, score, selected 키).
 
@@ -738,9 +741,12 @@ def format_layer2_table(
     gate_passed: bool = getattr(r, "gate_passed", False)
     blocker: str = getattr(r, "blocker_reason", "")
 
-    # 가산식 uplift 게이트 (부호 무관): base+0.20
+    if config is None:
+        config = Layer2AllocationConfig()
+
+    # 가산식 uplift 게이트 (부호 무관): base+config.l2_min_sharpe_uplift
     uplift_val = sharpe_h - sharpe_b
-    uplift_gate_val = 0.20
+    uplift_gate_val = config.l2_min_sharpe_uplift
 
     def _f(v: float, fmt: str = ".3f") -> str:
         return "nan" if not math.isfinite(v) else format(v, fmt)
@@ -754,18 +760,18 @@ def format_layer2_table(
             return "n/a(loss)"
         return format(mar_val, ".3f")
 
-    # Status determination (2026-06-16 평가체계 재편: 복리성장+위험효율+꼬리위험+표본강건성)
-    cagr_ok = cagr_h >= 0.30
-    sharpe_ok = sharpe_h >= 1.0
-    sortino_ok = sortino_h >= 1.5
-    mar_ok = mar_h >= 1.0 and cagr_h >= 0.0
-    mdd_ok = mdd_h <= 0.30
-    cvar_ok = math.isfinite(cvar_h) and cvar_h <= 0.06
-    fold_ok = fold_pass >= 0.6
-    trades_ok = trade_count >= 30
-    friction_ok = friction_pct >= 0.50
+    # Status determination — config-sourced thresholds (replaces hardcoded literals)
+    cagr_ok = cagr_h >= config.l2_min_cagr
+    sharpe_ok = sharpe_h >= config.l2_min_sharpe_abs
+    sortino_ok = sortino_h >= config.l2_min_sortino
+    mar_ok = mar_h >= config.l2_min_calmar and cagr_h >= 0.0
+    mdd_ok = mdd_h <= config.l2_max_mdd_abs
+    cvar_ok = math.isfinite(cvar_h) and cvar_h <= config.l2_max_cvar_95
+    fold_ok = fold_pass >= config.l2_min_fold_pass_ratio
+    trades_ok = trade_count >= config.l2_min_trades
+    friction_ok = friction_pct >= config.l2_min_friction_pass
     uplift_ok = uplift_val >= uplift_gate_val
-    dsr_ok = dsr_val >= min_dsr
+    psr_ok = psr_val >= config.l2_min_psr  # PSR is the real hard blocker
     # 진단 전용 (게이트 미반영): 상대MDD 표시
     mdd_rel_display = (mdd_h / mdd_b) if mdd_b > 1e-9 else float("nan")
 
@@ -783,7 +789,7 @@ def format_layer2_table(
     efficiency_ok = sharpe_ok and sortino_ok and mar_ok
     risk_ok = mdd_ok and cvar_ok
     robust_ok = fold_ok and trades_ok and friction_ok
-    integrity_ok = dsr_ok
+    integrity_ok = psr_ok  # PSR is blocker; DSR is diagnostic-only
 
     header = "● [LAYER 2 PORTFOLIO SCORECARD]"
     if evaluation_start and evaluation_end:
@@ -818,8 +824,12 @@ def format_layer2_table(
             f"Trades: {trade_count} (>=30) | "
             f"Friction: {_f(friction_pct, '.1%')}"
         ),
-        f"  {_status(uplift_ok)} [Uplift    ] Sharpe Uplift: {_f(uplift_val, '+.2f')} (>=+0.20)",
-        (f"  {_status(integrity_ok)} [Integrity ] DSR: {_f(dsr_val)} (>={min_dsr:.2f}) | PSR: {_f(psr_val)} (diag)"),
+        f"  {_status(uplift_ok)} [Uplift    ] Sharpe Uplift: {_f(uplift_val, '+.2f')} (>={uplift_gate_val:+.2f})",
+        (
+            f"  {_status(integrity_ok)} [Integrity ] "
+            f"PSR: {_f(psr_val)} (>={config.l2_min_psr:.2f}) | "
+            f"DSR: {_f(dsr_val)} (diag)"
+        ),
         (f"  [Diag     ] RelMDD: {_f(mdd_rel_display, '.2f')}x | Turnover: {turnover:.3f}"),
         (f"  [L2-REGIME] Trend Efficiency(ER): mean={_f(mean_er, '.3f')} corr={_f(er_corr, '+.3f')}"),
         (f"  [L2-LONGSHORT] Realized Price: long={_f(price_long, '+.4f')} short={_f(price_short, '+.4f')}"),
