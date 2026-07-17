@@ -497,6 +497,8 @@ class Layer2Result:
     major_symbol_sleeve_diag: tuple[MajorSymbolSleeveContributionSummary, ...] = ()
     major_symbol_incoherence: tuple[MajorSymbolIncoherenceSummary, ...] = ()
     directional_veto_summary: tuple[DirectionalVetoSummary, ...] = ()
+    crisis_reliability_status: str = "not_evaluated"
+    crisis_reliability_detail: str = ""
     validation_parity_report: ValidationParityReport | None = None
 
 
@@ -667,6 +669,7 @@ class Layer2AllocationConfig:
     l2_intra_symbol_divergence_release_bars: int = 2
     l2_intra_symbol_divergence_cooldown_bars: int = 3
     l2_intra_symbol_divergence_dominant_damp_mult: float = 0.5
+    l2_require_crisis_reliability: bool = True
     l2_intra_symbol_divergence_dissent_boost_mult: float = 2.0
 
     @staticmethod
@@ -1450,6 +1453,9 @@ class Layer2AllocationConfig:
                     _dc.l2_intra_symbol_divergence_dissent_boost_mult,
                 ),
                 0.0,
+            ),
+            l2_require_crisis_reliability=bool(
+                params.get("l2_require_crisis_reliability", _dc.l2_require_crisis_reliability)
             ),
         )
 

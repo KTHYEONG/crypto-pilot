@@ -2928,6 +2928,34 @@ def _run_strategy_stage(
                 import dataclasses as _dc
 
                 l2_final = _dc.replace(l2_final, gate_passed=False, blocker_reason="annualization_tf_mismatch")
+            # Crisis reliability override
+            if l2_final is not None and l2_final.gate_passed:
+                from src.domain.futures.strategy.tiered_workflow.dataclasses import Layer2AllocationConfig
+                from src.domain.futures.strategy.tiered_workflow.pipeline import (
+                    apply_crisis_reliability_override,
+                    assess_crisis_reliability,
+                )
+                _l2_config = Layer2AllocationConfig.from_mapping(best_l2_params)
+                _crisis_assessment = assess_crisis_reliability(
+                    native_covered=False,
+                    native_detail="",
+                    deployment_registry=getattr(l1_res, "deployment_registry", None),
+                    strategy_cfg=tiered_cfg,
+                    config=_l2_config,
+                    caps=tiered_caps,
+                    tf=l2_master_tf,
+                    deploy_leverage=l2_final.deploy_leverage,
+                )
+                _logger.info(
+                    "[CRISIS-RELIABILITY] status=%s verified=%s detail=%s",
+                    _crisis_assessment.status,
+                    _crisis_assessment.verified,
+                    _crisis_assessment.detail,
+                )
+                l2_final = apply_crisis_reliability_override(
+                    l2_final, _crisis_assessment,
+                    require_crisis_reliability=bool(getattr(tiered_cfg, "l2_require_crisis_reliability", True)),
+                )
             if l2_final is not None and l2_study_result.best_evaluation is not None:
                 from src.domain.futures.strategy.tiered_workflow.replay_parity import (
                     assert_selection_replay_parity,
