@@ -12,6 +12,7 @@ from src.domain.futures.strategy.tiered_workflow.risk_deployment import (
     _cvar_95_at_leverage,
     _mdd_at_leverage,
     _mdd_from_returns,
+    _resolve_safety_ceiling,
     _sharpe_from_returns,
     apply_deployment,
     calibrate_deployment_leverage,
@@ -543,6 +544,28 @@ class TestSupplementaryCoverage:
         result = _annualized_cagr_from_returns(np.array([0.01], dtype=np.float64), bars_per_year=1e12)
         assert result == 0.0
 
+    def test_kelly_ceiling_survives_oos_blend_raise(self) -> None:
+        """[LIMIT-01] OOS-blend가 kelly hard ceiling을 넘어서면 안 됨."""
+        np.random.seed(42)
+        fit_rets = np.random.normal(0.002, 0.02, 1000).astype(np.float64)
+        oos_rets = np.random.normal(0.0002, 0.005, 500).astype(np.float64)
+
+        l_star, binding, _ = calibrate_deployment_leverage(
+            fit_rets=fit_rets,
+            oos_rets=oos_rets,
+            mdd_cap=0.30,
+            mdd_margin=0.30,
+            l_hard_cap=20.0,
+            kelly_safety_fraction=0.25,
+        )
+        _, _, l_hard, _ = _resolve_safety_ceiling(
+            fit_rets, mdd_target=0.30 * 0.70, cvar_target=0.06 * 0.80,
+            l_floor=1.0, l_hard_cap=20.0, l_search_hi=200.0,
+            exchange_leverage_cap=None, worst_fold_rets=None, kelly_safety_fraction=0.25,
+        )
+
+        assert l_star <= l_hard + 1e-6
+
     def test_crisis_gate_suppresses_oos_blend(self) -> None:
         """fit_mdd_crisis_gate=0.001 → fit_MDD_vol1 확정 초과 → OOS blend 차단."""
         np.random.seed(42)
@@ -586,7 +609,7 @@ class TestSupplementaryCoverage:
             l_hard_cap=3.0,
             exchange_leverage_cap=None,
         )
-        assert binding in ("hard_cap", "mdd", "cvar")
+        assert binding in ("hard_cap", "mdd", "cvar", "oos_blend")
         assert lev <= 3.0 + 1e-6
 
     def test_awf_sim_result_fit_rets_by_field(self) -> None:
@@ -672,3 +695,46 @@ class TestSupplementaryCoverage:
             bars_per_year=2190,
         )
         assert result.fold_pass_ratio >= 0.0
+
+
+# ---------------------------------------------------------------------------
+# S13: Safety Ceiling Invariant Tests
+# ---------------------------------------------------------------------------
+class TestSafetyCeilingInvariant:
+    def test_worst_fold_ceiling_survives_oos_blend_raise(self) -> None:
+        """[LIMIT-01] OOS-blend가 worst_fold hard ceiling을 넘어서면 안 됨."""
+        np.random.seed(7)
+        fit_rets = np.random.normal(-0.0005, 0.015, 1200).astype(np.float64)
+        worst_fold = np.random.normal(-0.001, 0.05, 300).astype(np.float64)
+        oos_rets = np.random.normal(0.001, 0.005, 800).astype(np.float64)
+
+        l_star, binding, _ = calibrate_deployment_leverage(
+            fit_rets=fit_rets,
+            oos_rets=oos_rets,
+            mdd_cap=0.30,
+            mdd_margin=0.30,
+            l_hard_cap=20.0,
+            worst_fold_rets=worst_fold,
+        )
+        _, _, l_hard, _ = _resolve_safety_ceiling(
+            fit_rets, mdd_target=0.30 * 0.70, cvar_target=0.06 * 0.80,
+            l_floor=1.0, l_hard_cap=20.0, l_search_hi=200.0,
+            exchange_leverage_cap=None, worst_fold_rets=worst_fold, kelly_safety_fraction=None,
+        )
+
+        assert l_star <= l_hard + 1e-6
+
+    def test_resolve_safety_ceiling_matches_legacy_stage1_when_gates_disabled(self) -> None:
+        """[LIMIT-02] 신규 게이트 비활성 시 기존 stage-1 min()과 완전 동일."""
+        fit_rets = np.array([0.01, -0.02, 0.015, -0.01, 0.02, -0.005], dtype=np.float64)
+        l_ceiling, binding, _, _ = _resolve_safety_ceiling(
+            fit_rets, mdd_target=0.21, cvar_target=0.048,
+            l_floor=1.0, l_hard_cap=20.0, l_search_hi=200.0,
+            exchange_leverage_cap=None, worst_fold_rets=None, kelly_safety_fraction=None,
+        )
+        l_legacy, binding_legacy, _ = calibrate_deployment_leverage(
+            fit_rets=fit_rets, mdd_cap=0.30, cvar_cap=0.06, mdd_margin=0.30, cvar_margin=0.20,
+            l_hard_cap=20.0,
+        )
+        assert l_ceiling == pytest.approx(l_legacy, rel=1e-6)
+        assert binding == binding_legacy
