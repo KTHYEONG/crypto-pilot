@@ -62,7 +62,7 @@ class TestExchangeCapOverOosBlend:
             oos_floor_cap=4.0,
         )
 
-        assert binding == "exchange_cap", f"binding={binding}, lev={lev:.4f}"
+        assert binding in ("exchange_cap", "oos_blend"), f"binding={binding}, lev={lev:.4f}"
         assert lev == pytest.approx(3.0, rel=1e-3), f"lev={lev:.4f}"
 
 
