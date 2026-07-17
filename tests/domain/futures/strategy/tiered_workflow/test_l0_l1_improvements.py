@@ -18,7 +18,7 @@ def test_dynamic_cost_injection() -> None:
     gross = np.array([10.0, 15.0, 20.0])
     exec_cost = np.array([2.0, 2.5, 3.0])
     funding_cost = np.array([0.5, 0.5, 0.5])
-    
+
     readiness = Layer1FoldReadiness(
         fold_id=1,
         registry_source_end_idx=100,
@@ -31,7 +31,7 @@ def test_dynamic_cost_injection() -> None:
         funding_observed=(True, True, True),
         cost_observed=(True, True, True),
     )
-    
+
     assert readiness.dynamic_funding_cost_bps == (0.5, 0.5, 0.5)
     assert readiness.dynamic_execution_cost_bps == (2.0, 2.5, 3.0)
 
@@ -55,7 +55,7 @@ def test_dynamic_cost_injection() -> None:
         n_bootstrap=10,
         seed=42,
     )
-    
+
     expected_net = gross - exec_cost - funding_cost
     assert np.allclose(assessment.net_series_bps, expected_net)
 
@@ -74,10 +74,7 @@ def test_causal_cutoff_violation() -> None:
         positive_fold_ratio=0.8,
     )
     with pytest.raises(CausalFeedbackError):
-        resolve_l1_feedback_multiplier(
-            feedback=fb,
-            current_evidence_start_ns=1000
-        )
+        resolve_l1_feedback_multiplier(feedback=fb, current_evidence_start_ns=1000)
 
 
 def test_incomplete_cost_mask() -> None:
@@ -85,7 +82,7 @@ def test_incomplete_cost_mask() -> None:
     gross = np.array([10.0, 15.0, 20.0])
     exec_cost = np.array([2.0, 2.5, 3.0])
     funding_cost = np.array([0.5, 0.5, 0.5])
-    
+
     assessment = assess_fold_evidence(
         fold_id=1,
         gross_series_bps=gross,
@@ -116,7 +113,7 @@ def test_integration_pooled_probe_lcb() -> None:
     gross = (10.0, 15.0, 20.0)
     exec_cost = (2.0, 2.0, 2.0)
     funding_cost = (0.5, 0.5, 0.5)
-    
+
     readiness = Layer1FoldReadiness(
         fold_id=1,
         registry_source_end_idx=100,
@@ -133,18 +130,18 @@ def test_integration_pooled_probe_lcb() -> None:
         effective_symbol_count=1.0,
         passed=True,
     )
-    
+
     cfg = CandidateStrategyConfig(
         l1_breakeven_floor_bps=0.0,
         l1_bootstrap_samples=10,
     )
-    
+
     lcb = _compute_pooled_probe_lcb(
         fold_reports=(readiness,),
         cfg=cfg,
         seed=42,
     )
-    
+
     # 동적 비용이 연동되었다면 LCB는 12.5 이하(대략 12.5 근처)여야 하며, 연동되지 않았다면 15.0 근처일 것임
     # 따라서 LCB가 14.0 미만임을 어서트하여 동적 비용 반영을 강제 검증함.
     assert lcb < 14.0

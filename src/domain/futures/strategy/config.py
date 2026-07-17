@@ -17,7 +17,13 @@ _DEFAULT_RT_BPS: float = _DEFAULT_COST_MODEL.round_trip_bps()  # ≈ 7.5
 _DEFAULT_MAX_EXPECTED_HOLDING_BARS = 36
 
 DEFAULT_L1_TFS: tuple[str, ...] = (
-    "1h", "2h", "4h", "6h", "8h", "12h", "1d"
+    "1h",
+    "2h",
+    "4h",
+    "6h",
+    "8h",
+    "12h",
+    "1d",
 )  # [ADR_20260713_L0_L1_ASSET_GROWTH_RESTRUCTURE]
 
 SLOW_TF_XS_CHALLENGER_FAMILIES: tuple[str, ...] = (
@@ -872,15 +878,11 @@ class CandidateStrategyConfig:
         if self.l1_bootstrap_samples < 1:
             raise ValueError("l1_bootstrap_samples must be >= 1")
         if not (0.0 < self.l1_lcb_quantile_base <= self.l1_lcb_quantile_relaxed < 1.0):
-            raise ValueError(
-                "l1_lcb_quantile must satisfy 0 < base <= relaxed < 1"
-            )
+            raise ValueError("l1_lcb_quantile must satisfy 0 < base <= relaxed < 1")
         if self.l1_lcb_quantile_floor_blocks < 1:
             raise ValueError("l1_lcb_quantile_floor_blocks must be >= 1")
         if self.l1_lcb_quantile_full_conf_blocks <= self.l1_lcb_quantile_floor_blocks:
-            raise ValueError(
-                "l1_lcb_quantile_full_conf_blocks must be > l1_lcb_quantile_floor_blocks"
-            )
+            raise ValueError("l1_lcb_quantile_full_conf_blocks must be > l1_lcb_quantile_floor_blocks")
         if self.l1_min_signals_per_symbol < 1:
             raise ValueError("l1_min_signals_per_symbol must be >= 1")
         if not (0.0 <= self.l1_min_fold_cov <= 1.0):
@@ -1055,8 +1057,7 @@ class CandidateStrategyConfig:
         invalid_challenger_tfs = set(self.slow_tf_xs_challenger_tfs) - set(DEFAULT_L1_TFS)
         if invalid_challenger_tfs:
             raise ValueError(
-                "slow_tf_xs_challenger_tfs must be a subset of DEFAULT_L1_TFS: "
-                f"{sorted(invalid_challenger_tfs)}"
+                f"slow_tf_xs_challenger_tfs must be a subset of DEFAULT_L1_TFS: {sorted(invalid_challenger_tfs)}"
             )
 
 
@@ -1209,12 +1210,22 @@ _DEFAULT_PER_TF_FAMILIES: dict[str, tuple[str, ...]] = {
 
 _WIDENED_PER_TF_FAMILIES: dict[str, tuple[str, ...]] = {
     "1h": (
-        "residual_reversion", "trend_ma", "funding_flow_carry", "trend_pullback_continuation",
-        "xs_momentum", "xs_flow", "dual_momentum",
+        "residual_reversion",
+        "trend_ma",
+        "funding_flow_carry",
+        "trend_pullback_continuation",
+        "xs_momentum",
+        "xs_flow",
+        "dual_momentum",
     ),
     "2h": (
-        "residual_reversion", "btc_regime_pullback", "trend_ma", "trend_pullback_continuation",
-        "xs_momentum", "dual_momentum", "trend_donchian",
+        "residual_reversion",
+        "btc_regime_pullback",
+        "trend_ma",
+        "trend_pullback_continuation",
+        "xs_momentum",
+        "dual_momentum",
+        "trend_donchian",
     ),
 }
 

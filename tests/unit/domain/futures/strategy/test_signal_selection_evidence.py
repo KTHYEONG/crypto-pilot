@@ -434,15 +434,21 @@ def test_family_admission_diag_groups_by_family(caplog: pytest.LogCaptureFixture
     caplog.set_level(logging.DEBUG)
     evidence = (
         _make_evidence(
-            family="dual_momentum", n_obs=8000, effective_n=2.1,
+            family="dual_momentum",
+            n_obs=8000,
+            effective_n=2.1,
             structural_reasons=("insufficient_effective_obs",),
         ),
         _make_evidence(
-            family="dual_momentum", n_obs=6000, effective_n=1.8,
+            family="dual_momentum",
+            n_obs=6000,
+            effective_n=1.8,
             structural_reasons=("insufficient_effective_obs",),
         ),
         _make_evidence(
-            family="trend_ma", n_obs=500, effective_n=6.2,
+            family="trend_ma",
+            n_obs=500,
+            effective_n=6.2,
             structural_reasons=(),
         ),
     )
@@ -473,7 +479,10 @@ def test_compute_symbol_strategy_evidence_large_n_quantile_bit_identical() -> No
     cfg = _make_cfg(l1_bootstrap_block_bars=1, l1_pair_min_effective_obs=4.0)
     df = _make_event_frame(gross_bps_list=[15.0] * 30)
     evidence = compute_symbol_strategy_evidence(
-        event_results=df, cfg=cfg, seed=42, registry_as_of_idx=999,
+        event_results=df,
+        cfg=cfg,
+        seed=42,
+        registry_as_of_idx=999,
     )
     assert len(evidence) == 1
     assert evidence[0].lcb_net_bps is not None
@@ -483,23 +492,35 @@ def test_compute_symbol_strategy_evidence_large_n_quantile_bit_identical() -> No
 def test_compute_symbol_strategy_evidence_small_n_relaxes_lcb_net_quantile() -> None:
     """S2: small N (effective_n=4, block_bars_eff=6 → num_blocks<=3) → adaptive quantile raises lcb_net."""
     cfg = _make_cfg(
-        l1_bootstrap_block_bars=6, l1_pair_min_effective_obs=4.0,
-        l1_pair_min_mean_gross_bps=0.0, l1_pair_min_incremental_bps=0.0,
-        l1_pair_min_positive_fold_ratio=0.0, l1_quality_weight_enabled=False,
+        l1_bootstrap_block_bars=6,
+        l1_pair_min_effective_obs=4.0,
+        l1_pair_min_mean_gross_bps=0.0,
+        l1_pair_min_incremental_bps=0.0,
+        l1_pair_min_positive_fold_ratio=0.0,
+        l1_quality_weight_enabled=False,
     )
     df = _make_event_frame(gross_bps_list=[15.0, 12.0, 18.0, 10.0])
 
     baseline_cfg = _make_cfg(
-        l1_bootstrap_block_bars=6, l1_pair_min_effective_obs=4.0,
-        l1_pair_min_mean_gross_bps=0.0, l1_pair_min_incremental_bps=0.0,
-        l1_pair_min_positive_fold_ratio=0.0, l1_quality_weight_enabled=False,
+        l1_bootstrap_block_bars=6,
+        l1_pair_min_effective_obs=4.0,
+        l1_pair_min_mean_gross_bps=0.0,
+        l1_pair_min_incremental_bps=0.0,
+        l1_pair_min_positive_fold_ratio=0.0,
+        l1_quality_weight_enabled=False,
         l1_lcb_quantile_floor_blocks=0,
     )
     adaptive = compute_symbol_strategy_evidence(
-        event_results=df, cfg=cfg, seed=42, registry_as_of_idx=999,
+        event_results=df,
+        cfg=cfg,
+        seed=42,
+        registry_as_of_idx=999,
     )
     baseline = compute_symbol_strategy_evidence(
-        event_results=df, cfg=baseline_cfg, seed=42, registry_as_of_idx=999,
+        event_results=df,
+        cfg=baseline_cfg,
+        seed=42,
+        registry_as_of_idx=999,
     )
 
     assert adaptive[0].lcb_net_bps >= baseline[0].lcb_net_bps
@@ -523,27 +544,47 @@ def test_compute_symbol_strategy_evidence_lone_family_member_not_washed_out_by_u
     rng = np.random.default_rng(42)
     rows: list[dict[str, object]] = []
     for g in rng.normal(10.0, 2.0, size=100).tolist():
-        rows.append({
-            "symbol": "BTCUSDT", "side": 1, "strategy_id": "xs_momentum:v1",
-            "gross_event_bps": g, "expected_holding_bars": 4,
-            "fold_id": (len(rows) // 20) % 5,
-        })
+        rows.append(
+            {
+                "symbol": "BTCUSDT",
+                "side": 1,
+                "strategy_id": "xs_momentum:v1",
+                "gross_event_bps": g,
+                "expected_holding_bars": 4,
+                "fold_id": (len(rows) // 20) % 5,
+            }
+        )
     for g in rng.normal(25.0, 3.0, size=100).tolist():
-        rows.append({
-            "symbol": "BTCUSDT", "side": 1, "strategy_id": "trend_donchian:donchian_72",
-            "gross_event_bps": g, "expected_holding_bars": 4,
-            "fold_id": (len(rows) // 20) % 5,
-        })
+        rows.append(
+            {
+                "symbol": "BTCUSDT",
+                "side": 1,
+                "strategy_id": "trend_donchian:donchian_72",
+                "gross_event_bps": g,
+                "expected_holding_bars": 4,
+                "fold_id": (len(rows) // 20) % 5,
+            }
+        )
     df = pd.DataFrame(rows)
 
-    cfg_family = _make_cfg(l1_baseline_mode="peer_exclusive_family", l1_pair_min_incremental_bps=0.0,
-                            l1_pair_min_mean_gross_bps=0.0, l1_pair_min_positive_fold_ratio=0.0,
-                            l1_quality_weight_enabled=False, l1_pair_min_effective_obs=1.0,
-                            l1_pair_min_folds=1)
-    cfg_legacy = _make_cfg(l1_baseline_mode="peer_exclusive", l1_pair_min_incremental_bps=0.0,
-                           l1_pair_min_mean_gross_bps=0.0, l1_pair_min_positive_fold_ratio=0.0,
-                           l1_quality_weight_enabled=False, l1_pair_min_effective_obs=1.0,
-                           l1_pair_min_folds=1)
+    cfg_family = _make_cfg(
+        l1_baseline_mode="peer_exclusive_family",
+        l1_pair_min_incremental_bps=0.0,
+        l1_pair_min_mean_gross_bps=0.0,
+        l1_pair_min_positive_fold_ratio=0.0,
+        l1_quality_weight_enabled=False,
+        l1_pair_min_effective_obs=1.0,
+        l1_pair_min_folds=1,
+    )
+    cfg_legacy = _make_cfg(
+        l1_baseline_mode="peer_exclusive",
+        l1_pair_min_incremental_bps=0.0,
+        l1_pair_min_mean_gross_bps=0.0,
+        l1_pair_min_positive_fold_ratio=0.0,
+        l1_quality_weight_enabled=False,
+        l1_pair_min_effective_obs=1.0,
+        l1_pair_min_folds=1,
+    )
 
     ev_family = compute_symbol_strategy_evidence(event_results=df, cfg=cfg_family, seed=42, registry_as_of_idx=999)
     ev_legacy = compute_symbol_strategy_evidence(event_results=df, cfg=cfg_legacy, seed=42, registry_as_of_idx=999)
@@ -568,31 +609,52 @@ def test_compute_symbol_strategy_evidence_baseline_mode_override_takes_precedenc
     rng = np.random.default_rng(42)
     rows: list[dict[str, object]] = []
     for g in rng.normal(10.0, 2.0, size=100).tolist():
-        rows.append({
-            "symbol": "BTCUSDT", "side": 1, "strategy_id": "xs_momentum:v1",
-            "gross_event_bps": g, "expected_holding_bars": 4,
-            "fold_id": (len(rows) // 20) % 5,
-        })
+        rows.append(
+            {
+                "symbol": "BTCUSDT",
+                "side": 1,
+                "strategy_id": "xs_momentum:v1",
+                "gross_event_bps": g,
+                "expected_holding_bars": 4,
+                "fold_id": (len(rows) // 20) % 5,
+            }
+        )
     for g in rng.normal(25.0, 3.0, size=100).tolist():
-        rows.append({
-            "symbol": "BTCUSDT", "side": 1, "strategy_id": "trend_donchian:donchian_72",
-            "gross_event_bps": g, "expected_holding_bars": 4,
-            "fold_id": (len(rows) // 20) % 5,
-        })
+        rows.append(
+            {
+                "symbol": "BTCUSDT",
+                "side": 1,
+                "strategy_id": "trend_donchian:donchian_72",
+                "gross_event_bps": g,
+                "expected_holding_bars": 4,
+                "fold_id": (len(rows) // 20) % 5,
+            }
+        )
     df = pd.DataFrame(rows)
 
     # cfg default is now plain "peer_exclusive" (post-regression-fix) -- override must
     # still force family-scoped behavior for this call.
-    cfg_default = _make_cfg(l1_baseline_mode="peer_exclusive", l1_pair_min_incremental_bps=0.0,
-                             l1_pair_min_mean_gross_bps=0.0, l1_pair_min_positive_fold_ratio=0.0,
-                             l1_quality_weight_enabled=False, l1_pair_min_effective_obs=1.0,
-                             l1_pair_min_folds=1)
+    cfg_default = _make_cfg(
+        l1_baseline_mode="peer_exclusive",
+        l1_pair_min_incremental_bps=0.0,
+        l1_pair_min_mean_gross_bps=0.0,
+        l1_pair_min_positive_fold_ratio=0.0,
+        l1_quality_weight_enabled=False,
+        l1_pair_min_effective_obs=1.0,
+        l1_pair_min_folds=1,
+    )
 
     ev_no_override = compute_symbol_strategy_evidence(
-        event_results=df, cfg=cfg_default, seed=42, registry_as_of_idx=999,
+        event_results=df,
+        cfg=cfg_default,
+        seed=42,
+        registry_as_of_idx=999,
     )
     ev_with_override = compute_symbol_strategy_evidence(
-        event_results=df, cfg=cfg_default, seed=42, registry_as_of_idx=999,
+        event_results=df,
+        cfg=cfg_default,
+        seed=42,
+        registry_as_of_idx=999,
         baseline_mode_override="peer_exclusive_family",
     )
 
@@ -612,30 +674,39 @@ def test_fdr_hard_reject_override_soft_scales_instead_of_zeroing() -> None:
     """
     rng = np.random.default_rng(1)
     rows = [
-        {"symbol": "BTCUSDT", "side": 1, "strategy_id": "trend_ma:ema_12_72",
-         "gross_event_bps": g, "expected_holding_bars": 4, "fold_id": 0}
+        {
+            "symbol": "BTCUSDT",
+            "side": 1,
+            "strategy_id": "trend_ma:ema_12_72",
+            "gross_event_bps": g,
+            "expected_holding_bars": 4,
+            "fold_id": 0,
+        }
         for g in rng.normal(1.0, 8.0, size=4).tolist()
     ]
     df = pd.DataFrame(rows)
 
-    cfg_no_fdr = _make_cfg(l1_pair_fdr_alpha=1.0, l1_fdr_hard_reject=True,
-                            l1_pair_min_effective_obs=1.0, l1_pair_min_folds=1)
-    cfg_hard = _make_cfg(l1_pair_fdr_alpha=0.15, l1_fdr_hard_reject=True,
-                          l1_pair_min_effective_obs=1.0, l1_pair_min_folds=1)
+    cfg_no_fdr = _make_cfg(
+        l1_pair_fdr_alpha=1.0, l1_fdr_hard_reject=True, l1_pair_min_effective_obs=1.0, l1_pair_min_folds=1
+    )
+    cfg_hard = _make_cfg(
+        l1_pair_fdr_alpha=0.15, l1_fdr_hard_reject=True, l1_pair_min_effective_obs=1.0, l1_pair_min_folds=1
+    )
 
     ev_no_fdr = compute_symbol_strategy_evidence(event_results=df, cfg=cfg_no_fdr, seed=1, registry_as_of_idx=999)
     ev_hard = compute_symbol_strategy_evidence(event_results=df, cfg=cfg_hard, seed=1, registry_as_of_idx=999)
     ev_soft = compute_symbol_strategy_evidence(
-        event_results=df, cfg=cfg_hard, seed=1, registry_as_of_idx=999,
+        event_results=df,
+        cfg=cfg_hard,
+        seed=1,
+        registry_as_of_idx=999,
         fdr_hard_reject_override=False,
     )
 
     ev0_nofdr, ev0_hard, ev0_soft = ev_no_fdr[0], ev_hard[0], ev_soft[0]
 
     # Fixture must trigger FDR (q > alpha)
-    assert ev0_nofdr.q_value > cfg_hard.l1_pair_fdr_alpha, (
-        f"fixture q_value={ev0_nofdr.q_value:.4f} not > 0.15"
-    )
+    assert ev0_nofdr.q_value > cfg_hard.l1_pair_fdr_alpha, f"fixture q_value={ev0_nofdr.q_value:.4f} not > 0.15"
     assert ev0_hard.quality_weight == 0.0  # hard reject zeros
     # Soft reject preserves qw (same scaling as no-FDR unconditional path)
     assert ev0_soft.quality_weight == pytest.approx(ev0_nofdr.quality_weight)
@@ -647,19 +718,30 @@ def test_fdr_hard_reject_override_none_is_bit_identical() -> None:
     """
     rng = np.random.default_rng(1)
     rows = [
-        {"symbol": "BTCUSDT", "side": 1, "strategy_id": "trend_ma:ema_12_72",
-         "gross_event_bps": g, "expected_holding_bars": 4, "fold_id": 0}
+        {
+            "symbol": "BTCUSDT",
+            "side": 1,
+            "strategy_id": "trend_ma:ema_12_72",
+            "gross_event_bps": g,
+            "expected_holding_bars": 4,
+            "fold_id": 0,
+        }
         for g in rng.normal(1.0, 8.0, size=4).tolist()
     ]
     df = pd.DataFrame(rows)
-    cfg = _make_cfg(l1_pair_fdr_alpha=0.15, l1_fdr_hard_reject=True,
-                     l1_pair_min_effective_obs=1.0, l1_pair_min_folds=1)
+    cfg = _make_cfg(l1_pair_fdr_alpha=0.15, l1_fdr_hard_reject=True, l1_pair_min_effective_obs=1.0, l1_pair_min_folds=1)
 
     ev_no_param = compute_symbol_strategy_evidence(
-        event_results=df, cfg=cfg, seed=1, registry_as_of_idx=999,
+        event_results=df,
+        cfg=cfg,
+        seed=1,
+        registry_as_of_idx=999,
     )
     ev_none = compute_symbol_strategy_evidence(
-        event_results=df, cfg=cfg, seed=1, registry_as_of_idx=999,
+        event_results=df,
+        cfg=cfg,
+        seed=1,
+        registry_as_of_idx=999,
         fdr_hard_reject_override=None,
     )
 
@@ -675,24 +757,35 @@ def test_fdr_hard_reject_override_does_not_rescue_zero_raw_qw() -> None:
     """
     rng = np.random.default_rng(2)
     rows = [
-        {"symbol": "BTCUSDT", "side": 1, "strategy_id": "trend_ma:ema_12_72",
-         "gross_event_bps": g, "expected_holding_bars": 4, "fold_id": 0}
+        {
+            "symbol": "BTCUSDT",
+            "side": 1,
+            "strategy_id": "trend_ma:ema_12_72",
+            "gross_event_bps": g,
+            "expected_holding_bars": 4,
+            "fold_id": 0,
+        }
         for g in rng.normal(0.0, 10.0, size=4).tolist()
     ]
     df = pd.DataFrame(rows)
-    cfg = _make_cfg(l1_pair_fdr_alpha=0.15, l1_fdr_hard_reject=True,
-                     l1_pair_min_effective_obs=1.0, l1_pair_min_folds=1)
+    cfg = _make_cfg(l1_pair_fdr_alpha=0.15, l1_fdr_hard_reject=True, l1_pair_min_effective_obs=1.0, l1_pair_min_folds=1)
 
     # Verify raw qw is already 0.0 (no-FDR reference)
     ev_ref = compute_symbol_strategy_evidence(
-        event_results=df, cfg=_make_cfg(l1_pair_fdr_alpha=1.0, l1_fdr_hard_reject=True,
-                                         l1_pair_min_effective_obs=1.0, l1_pair_min_folds=1),
-        seed=2, registry_as_of_idx=999,
+        event_results=df,
+        cfg=_make_cfg(
+            l1_pair_fdr_alpha=1.0, l1_fdr_hard_reject=True, l1_pair_min_effective_obs=1.0, l1_pair_min_folds=1
+        ),
+        seed=2,
+        registry_as_of_idx=999,
     )
     assert ev_ref[0].quality_weight == 0.0, "fixture must have zero raw qw"
 
     ev_soft = compute_symbol_strategy_evidence(
-        event_results=df, cfg=cfg, seed=2, registry_as_of_idx=999,
+        event_results=df,
+        cfg=cfg,
+        seed=2,
+        registry_as_of_idx=999,
         fdr_hard_reject_override=False,
     )
 
@@ -709,21 +802,37 @@ def test_fdr_hard_reject_override_unblocks_qualified_registry() -> None:
     """
     rng = np.random.default_rng(1)
     rows = [
-        {"symbol": "BTCUSDT", "side": 1, "strategy_id": "trend_ma:ema_12_72",
-         "gross_event_bps": g, "expected_holding_bars": 4, "fold_id": 0}
+        {
+            "symbol": "BTCUSDT",
+            "side": 1,
+            "strategy_id": "trend_ma:ema_12_72",
+            "gross_event_bps": g,
+            "expected_holding_bars": 4,
+            "fold_id": 0,
+        }
         for g in rng.normal(1.0, 8.0, size=4).tolist()
     ]
     df = pd.DataFrame(rows)
 
-    cfg = _make_cfg(l1_pair_fdr_alpha=0.15, l1_fdr_hard_reject=True,
-                     l1_pair_min_effective_obs=1.0, l1_pair_min_folds=1,
-                     l1_breakeven_floor_bps=0.0)
+    cfg = _make_cfg(
+        l1_pair_fdr_alpha=0.15,
+        l1_fdr_hard_reject=True,
+        l1_pair_min_effective_obs=1.0,
+        l1_pair_min_folds=1,
+        l1_breakeven_floor_bps=0.0,
+    )
 
     ev_hard = compute_symbol_strategy_evidence(
-        event_results=df, cfg=cfg, seed=1, registry_as_of_idx=999,
+        event_results=df,
+        cfg=cfg,
+        seed=1,
+        registry_as_of_idx=999,
     )
     ev_soft = compute_symbol_strategy_evidence(
-        event_results=df, cfg=cfg, seed=1, registry_as_of_idx=999,
+        event_results=df,
+        cfg=cfg,
+        seed=1,
+        registry_as_of_idx=999,
         fdr_hard_reject_override=False,
     )
 
@@ -743,9 +852,7 @@ def test_fdr_hard_reject_override_unblocks_qualified_registry() -> None:
     )
 
     assert not registry_hard.ready_symbols, "fixture must produce empty hard registry"
-    assert registry_soft.ready_symbols, (
-        f"hard registry empty, soft also empty (n_evidence={len(ev_hard)})"
-    )
+    assert registry_soft.ready_symbols, f"hard registry empty, soft also empty (n_evidence={len(ev_hard)})"
     assert len(registry_soft.ready_symbols) >= len(registry_hard.ready_symbols)
 
 
@@ -757,13 +864,25 @@ def test_fdr_restricted_to_hard_eligible_reduces_m() -> None:
     produces q_values computed over m=hard_eligible count, not m=full pool count.
     """
     real_rows = [
-        {"symbol": "BTCUSDT", "side": 1, "strategy_id": "trend_ma:ema_12_72",
-         "gross_event_bps": g, "expected_holding_bars": 4, "fold_id": i % 2}
+        {
+            "symbol": "BTCUSDT",
+            "side": 1,
+            "strategy_id": "trend_ma:ema_12_72",
+            "gross_event_bps": g,
+            "expected_holding_bars": 4,
+            "fold_id": i % 2,
+        }
         for i, g in enumerate([8.0, 9.0, 7.5, 8.5, 9.5, 7.0] * 2)
     ]
     padding_rows = [
-        {"symbol": "ETHUSDT", "side": 1, "strategy_id": f"dead_family_{k}:v1",
-         "gross_event_bps": 3.0, "expected_holding_bars": 4, "fold_id": 0}
+        {
+            "symbol": "ETHUSDT",
+            "side": 1,
+            "strategy_id": f"dead_family_{k}:v1",
+            "gross_event_bps": 3.0,
+            "expected_holding_bars": 4,
+            "fold_id": 0,
+        }
         for k in range(8)
     ]
     df = pd.DataFrame(real_rows + padding_rows)
@@ -777,6 +896,7 @@ def test_fdr_restricted_to_hard_eligible_reduces_m() -> None:
     assert all(not e.hard_eligible for e in dead_evs)
     assert all(e.q_value == 1.0 for e in dead_evs)
     from src.domain.futures.strategy.tiered_workflow.signal_selection import _by_q_values
+
     expected_q = float(_by_q_values(np.asarray([real_ev.p_value]), harmonic_override=None)[0])
     assert real_ev.q_value == pytest.approx(expected_q)
 
@@ -786,8 +906,14 @@ def test_fdr_zero_hard_eligible_does_not_crash() -> None:
     all q_values=1.0 sentinel, quality_weight=0.0.
     """
     rows = [
-        {"symbol": "BTCUSDT", "side": 1, "strategy_id": "trend_ma:ema_12_72",
-         "gross_event_bps": g, "expected_holding_bars": 4, "fold_id": 0}
+        {
+            "symbol": "BTCUSDT",
+            "side": 1,
+            "strategy_id": "trend_ma:ema_12_72",
+            "gross_event_bps": g,
+            "expected_holding_bars": 4,
+            "fold_id": 0,
+        }
         for g in [5.0, 6.0, 7.0, 5.5, 6.5]
     ]
     df = pd.DataFrame(rows)
@@ -808,18 +934,31 @@ def test_fdr_non_hard_eligible_sentinel_qvalue_one() -> None:
     and is NOT admitted by build_qualified_signal_registry.
     """
     strong_rows = [
-        {"symbol": "BTCUSDT", "side": 1, "strategy_id": "trend_ma:v1",
-         "gross_event_bps": g, "expected_holding_bars": 4, "fold_id": 0}
+        {
+            "symbol": "BTCUSDT",
+            "side": 1,
+            "strategy_id": "trend_ma:v1",
+            "gross_event_bps": g,
+            "expected_holding_bars": 4,
+            "fold_id": 0,
+        }
         for g in [10.0, 12.0, 11.0, 9.0, 10.5] * 2
     ]
     weak_rows = [
-        {"symbol": "ETHUSDT", "side": 1, "strategy_id": "dead:v2",
-         "gross_event_bps": g, "expected_holding_bars": 4, "fold_id": 0}
+        {
+            "symbol": "ETHUSDT",
+            "side": 1,
+            "strategy_id": "dead:v2",
+            "gross_event_bps": g,
+            "expected_holding_bars": 4,
+            "fold_id": 0,
+        }
         for g in [3.0, 2.5]
     ]
     df = pd.DataFrame(strong_rows + weak_rows)
-    cfg = _make_cfg(l1_pair_fdr_alpha=0.15, l1_pair_min_effective_obs=5.0, l1_pair_min_folds=1,
-                     l1_breakeven_floor_bps=0.0)
+    cfg = _make_cfg(
+        l1_pair_fdr_alpha=0.15, l1_pair_min_effective_obs=5.0, l1_pair_min_folds=1, l1_breakeven_floor_bps=0.0
+    )
 
     evidence = compute_symbol_strategy_evidence(event_results=df, cfg=cfg, seed=1, registry_as_of_idx=999)
 
@@ -847,49 +986,65 @@ def test_fdr_restricted_to_hard_eligible_unblocks_registry() -> None:
     subset) unblocks at least one candidate.
     """
     real_rows = [
-        {"symbol": "BTCUSDT", "side": 1, "strategy_id": "trend_ma:ema_12_72",
-         "gross_event_bps": g, "expected_holding_bars": 4, "fold_id": i % 2}
+        {
+            "symbol": "BTCUSDT",
+            "side": 1,
+            "strategy_id": "trend_ma:ema_12_72",
+            "gross_event_bps": g,
+            "expected_holding_bars": 4,
+            "fold_id": i % 2,
+        }
         for i, g in enumerate([8.0, 9.0, 7.5, 8.5, 9.5, 7.0] * 2)
     ]
     padding_rows = [
-        {"symbol": "ETHUSDT", "side": 1, "strategy_id": f"dead_family_{k}:v1",
-         "gross_event_bps": 3.0, "expected_holding_bars": 4, "fold_id": 0}
+        {
+            "symbol": "ETHUSDT",
+            "side": 1,
+            "strategy_id": f"dead_family_{k}:v1",
+            "gross_event_bps": 3.0,
+            "expected_holding_bars": 4,
+            "fold_id": 0,
+        }
         for k in range(8)
     ]
     df = pd.DataFrame(real_rows + padding_rows)
 
     # Compute old unrestricted-FDR q-values by calling _by_q_values on ALL p-values
-    cfg = _make_cfg(l1_pair_fdr_alpha=0.15, l1_pair_min_effective_obs=4.0, l1_pair_min_folds=1,
-                     l1_breakeven_floor_bps=0.0)
+    cfg = _make_cfg(
+        l1_pair_fdr_alpha=0.15, l1_pair_min_effective_obs=4.0, l1_pair_min_folds=1, l1_breakeven_floor_bps=0.0
+    )
     evidence = compute_symbol_strategy_evidence(event_results=df, cfg=cfg, seed=1, registry_as_of_idx=999)
 
     old_p_values = np.asarray([e.p_value for e in evidence], dtype=np.float64)
     from src.domain.futures.strategy.tiered_workflow.signal_selection import _by_q_values
+
     old_q_all = _by_q_values(old_p_values, harmonic_override=None)
 
     old_evidence_overrides = []
     for ev, old_q in zip(evidence, old_q_all, strict=True):
-        old_evidence_overrides.append(SymbolStrategyEvidence(
-            key=ev.key,
-            mean_gross_bps=ev.mean_gross_bps,
-            mean_incremental_bps=ev.mean_incremental_bps,
-            block_tstat_incremental=ev.block_tstat_incremental,
-            probability_positive=ev.probability_positive,
-            p_value=ev.p_value,
-            q_value=float(old_q),
-            positive_fold_ratio=ev.positive_fold_ratio,
-            n_obs=ev.n_obs,
-            effective_n=ev.effective_n,
-            n_folds=ev.n_folds,
-            quality_weight=ev.quality_weight,
-            hard_eligible=ev.hard_eligible,
-            structural_reasons=ev.structural_reasons,
-            diagnostic_flags=ev.diagnostic_flags,
-            lcb_net_bps=ev.lcb_net_bps,
-            adverse_regime_lcb_bps=ev.adverse_regime_lcb_bps,
-            adverse_regime_n_obs=ev.adverse_regime_n_obs,
-            adverse_regime_defended=ev.adverse_regime_defended,
-        ))
+        old_evidence_overrides.append(
+            SymbolStrategyEvidence(
+                key=ev.key,
+                mean_gross_bps=ev.mean_gross_bps,
+                mean_incremental_bps=ev.mean_incremental_bps,
+                block_tstat_incremental=ev.block_tstat_incremental,
+                probability_positive=ev.probability_positive,
+                p_value=ev.p_value,
+                q_value=float(old_q),
+                positive_fold_ratio=ev.positive_fold_ratio,
+                n_obs=ev.n_obs,
+                effective_n=ev.effective_n,
+                n_folds=ev.n_folds,
+                quality_weight=ev.quality_weight,
+                hard_eligible=ev.hard_eligible,
+                structural_reasons=ev.structural_reasons,
+                diagnostic_flags=ev.diagnostic_flags,
+                lcb_net_bps=ev.lcb_net_bps,
+                adverse_regime_lcb_bps=ev.adverse_regime_lcb_bps,
+                adverse_regime_n_obs=ev.adverse_regime_n_obs,
+                adverse_regime_defended=ev.adverse_regime_defended,
+            )
+        )
 
     registry_old = build_qualified_signal_registry(
         evidence=tuple(old_evidence_overrides),
@@ -907,7 +1062,5 @@ def test_fdr_restricted_to_hard_eligible_unblocks_registry() -> None:
     )
 
     if not registry_old.ready_symbols:
-        assert registry_new.ready_symbols, (
-            "old (unrestricted) registry empty, new (restricted) also empty"
-        )
+        assert registry_new.ready_symbols, "old (unrestricted) registry empty, new (restricted) also empty"
     assert len(registry_new.ready_symbols) >= len(registry_old.ready_symbols)

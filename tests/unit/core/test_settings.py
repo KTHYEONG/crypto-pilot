@@ -1,4 +1,3 @@
-
 from pathlib import Path
 
 import pandas as pd
@@ -28,6 +27,7 @@ def test_futures_storage_layout_paths() -> None:
     # Test metadata path
     metadata_path = FuturesStorageLayout.get_metadata_path("parquet_cache_meta.json")
     assert metadata_path == FUTURES_DATA_DIR / "metadata" / "parquet_cache_meta.json"
+
 
 def test_futures_storage_layout_migration(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     # Scenario 2: Auto-Migration - LIMIT-03
@@ -73,6 +73,7 @@ def test_futures_storage_layout_migration(tmp_path: Path, monkeypatch: pytest.Mo
     assert not legacy_metrics.exists()
     assert not legacy_metadata.exists()
 
+
 def test_futures_storage_zstd_float32_datetime_reconstruction(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     # Setup mock FUTURES_DATA_DIR
     mock_futures_dir = tmp_path / "futures"
@@ -81,18 +82,21 @@ def test_futures_storage_zstd_float32_datetime_reconstruction(tmp_path: Path, mo
     monkeypatch.setattr("src.domain.futures.backtest.data_loader.FUTURES_DATA_DIR", mock_futures_dir)
 
     from src.domain.futures.backtest.data_loader import DataCollector
+
     collector = DataCollector()
 
     # Create dummy DataFrame with datetime, open, high, low, close as float64
-    df_orig = pd.DataFrame({
-        "timestamp": [1700000000000],
-        "datetime": pd.to_datetime([1700000000000], unit="ms", utc=True),
-        "open": [30000.0],
-        "high": [31000.0],
-        "low": [29000.0],
-        "close": [30500.0],
-        "volume": [1.5]
-    })
+    df_orig = pd.DataFrame(
+        {
+            "timestamp": [1700000000000],
+            "datetime": pd.to_datetime([1700000000000], unit="ms", utc=True),
+            "open": [30000.0],
+            "high": [31000.0],
+            "low": [29000.0],
+            "close": [30500.0],
+            "volume": [1.5],
+        }
+    )
 
     # Save cache (this will internally trigger _save_cache, dropping datetime,
     # downcasting price cols to float32, and saving with zstd)
@@ -116,12 +120,14 @@ def test_futures_storage_zstd_float32_datetime_reconstruction(tmp_path: Path, mo
     assert pd.api.types.is_datetime64_any_dtype(df_loaded["datetime"])
     assert df_loaded["datetime"].iloc[0] == df_orig["datetime"].iloc[0]
 
+
 def test_list_cached_parquet_symbols(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     mock_futures_dir = tmp_path / "futures"
     mock_futures_dir.mkdir()
     monkeypatch.setattr("src.domain.futures.backtest.data_loader.FUTURES_DATA_DIR", mock_futures_dir)
 
     from src.domain.futures.backtest.data_loader import DataCollector
+
     collector = DataCollector()
 
     # 1. Create a file in the new partitioned directory
@@ -137,5 +143,3 @@ def test_list_cached_parquet_symbols(tmp_path: Path, monkeypatch: pytest.MonkeyP
     assert "BTC/USDT" in symbols
     assert "ETH/USDT" in symbols
     assert len(symbols) == 2
-
-

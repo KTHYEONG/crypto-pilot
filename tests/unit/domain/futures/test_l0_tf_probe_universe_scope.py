@@ -22,18 +22,20 @@ from src.domain.futures.strategy.tiered_workflow.pipeline import (
 def _make_data_maps(symbols: list[str]) -> dict[str, dict[str, pd.DataFrame]]:
     n = 200
     idx = pd.date_range("2023-01-01", periods=n, freq="4h", tz="UTC")
-    base = pd.DataFrame({
-        "open": np.ones(n) * 100,
-        "high": np.ones(n) * 101,
-        "low": np.ones(n) * 99,
-        "close": np.ones(n) * 100,
-        "volume": np.ones(n) * 1000,
-        "datetime": idx,
-        "universe_active_mask": np.ones(n, dtype=float),
-        "universe_entry_warm_mask": np.ones(n, dtype=float),
-        "entry_block_mask": np.zeros(n, dtype=float),
-        "kill_signal": np.zeros(n, dtype=float),
-    })
+    base = pd.DataFrame(
+        {
+            "open": np.ones(n) * 100,
+            "high": np.ones(n) * 101,
+            "low": np.ones(n) * 99,
+            "close": np.ones(n) * 100,
+            "volume": np.ones(n) * 1000,
+            "datetime": idx,
+            "universe_active_mask": np.ones(n, dtype=float),
+            "universe_entry_warm_mask": np.ones(n, dtype=float),
+            "entry_block_mask": np.zeros(n, dtype=float),
+            "kill_signal": np.zeros(n, dtype=float),
+        }
+    )
     return {sym: {"4h": base.copy()} for sym in symbols}
 
 
@@ -113,9 +115,7 @@ def _deployable_per_tf_result(tf: str, *, edge_bps: float) -> SimpleNamespace:
             deployment_registry=SimpleNamespace(
                 ready_symbols=("BTCUSDT",),
             ),
-            strategy_panel=(
-                SimpleNamespace(valid=True, oos_edge_bps=edge_bps),
-            ),
+            strategy_panel=(SimpleNamespace(valid=True, oos_edge_bps=edge_bps),),
             n_winning_signals=1,
         ),
         n_winning_signals=1,
@@ -224,9 +224,7 @@ def test_diagnostic_sample_reports_resource_shortfall() -> None:
         resolve_tf_diagnostic_sample,
     )
 
-    metadata = tuple(
-        _symbol_meta(f"S{i}", rank=i + 1, cluster=i % 5) for i in range(100)
-    )
+    metadata = tuple(_symbol_meta(f"S{i}", rank=i + 1, cluster=i % 5) for i in range(100))
     sample = resolve_tf_diagnostic_sample(
         symbol_metadata=metadata,
         available_symbols={m.symbol for m in metadata},

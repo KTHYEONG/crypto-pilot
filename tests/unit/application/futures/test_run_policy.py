@@ -27,16 +27,26 @@ def test_execution_policy_defaults() -> None:
 def test_run_policy_validation_l0_requires_gate() -> None:
     with pytest.raises(RunPolicyError, match=r"requires l0_runtime.mode='gate'"):
         FuturesRunConfig(
-            timeframe="4h", date=None, trials=1, phase="l0", sync="skip",
-            refresh_universe=False, sync_metrics=False,
+            timeframe="4h",
+            date=None,
+            trials=1,
+            phase="l0",
+            sync="skip",
+            refresh_universe=False,
+            sync_metrics=False,
             l0_runtime=AlphaFoundryRuntimeConfig(mode="off"),
         )
 
 
 def test_run_policy_l2_accepts_off() -> None:
     cfg = FuturesRunConfig(
-        timeframe="4h", date=None, trials=1, phase="l2", sync="skip",
-        refresh_universe=False, sync_metrics=False,
+        timeframe="4h",
+        date=None,
+        trials=1,
+        phase="l2",
+        sync="skip",
+        refresh_universe=False,
+        sync_metrics=False,
         l0_runtime=AlphaFoundryRuntimeConfig(mode="off"),
     )
     assert cfg.l0_runtime.mode == "off"
@@ -44,8 +54,14 @@ def test_run_policy_l2_accepts_off() -> None:
 
 def test_config_facades_share_effective_policy(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("L0_LTF_EXEC_1M_MAX_WORKERS", "2")
-    args = {"phase": "l1", "timeframe": "4h", "trials": 1, "sync": "skip",
-            "refresh_universe": False, "sync_metrics": False}
+    args = {
+        "phase": "l1",
+        "timeframe": "4h",
+        "trials": 1,
+        "sync": "skip",
+        "refresh_universe": False,
+        "sync_metrics": False,
+    }
 
     runner_config = build_runner(args)
     optimization_config = build_optimization(args)
@@ -59,8 +75,14 @@ def test_config_facades_share_effective_policy(monkeypatch: pytest.MonkeyPatch) 
 def test_run_policy_rejects_invalid_env_override() -> None:
     with pytest.raises(RunPolicyError, match="invalid value for L0_LTF_EXEC_1M_MAX_WORKERS"):
         build_effective_run_config(
-            {"phase": "l1", "timeframe": "4h", "trials": 1, "sync": "skip",
-             "refresh_universe": False, "sync_metrics": False},
+            {
+                "phase": "l1",
+                "timeframe": "4h",
+                "trials": 1,
+                "sync": "skip",
+                "refresh_universe": False,
+                "sync_metrics": False,
+            },
             environ={"L0_LTF_EXEC_1M_MAX_WORKERS": "abc"},
         )
 
@@ -68,8 +90,14 @@ def test_run_policy_rejects_invalid_env_override() -> None:
 def test_execution_policy_rejects_invalid_ltf_workers() -> None:
     with pytest.raises(RunPolicyError, match="L0_LTF_EXEC_1M_MAX_WORKERS must be 1 or 2"):
         build_effective_run_config(
-            {"phase": "l1", "timeframe": "4h", "trials": 1, "sync": "skip",
-             "refresh_universe": False, "sync_metrics": False},
+            {
+                "phase": "l1",
+                "timeframe": "4h",
+                "trials": 1,
+                "sync": "skip",
+                "refresh_universe": False,
+                "sync_metrics": False,
+            },
             environ={"L0_LTF_EXEC_1M_MAX_WORKERS": "5"},
         )
 

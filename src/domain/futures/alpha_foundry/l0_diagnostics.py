@@ -31,13 +31,15 @@ from src.domain.futures.signals.contracts import CandidateSignalPanel
 from src.domain.futures.strategy.common.alignment import AlignedMarketData
 from src.domain.futures.strategy.execution_cost import ExecutionCostModel
 
-_REQUIRED_CANONICAL_COLUMNS: frozenset[str] = frozenset({
-    "cost_drag_ratio",
-    "gross_lcb_bps",
-    "nw_tstat",
-    "turnover_per_year",
-    "effective_n",
-})
+_REQUIRED_CANONICAL_COLUMNS: frozenset[str] = frozenset(
+    {
+        "cost_drag_ratio",
+        "gross_lcb_bps",
+        "nw_tstat",
+        "turnover_per_year",
+        "effective_n",
+    }
+)
 
 
 def run_l0_diagnostic_pass(
@@ -100,7 +102,9 @@ def run_l0_diagnostic_pass(
             bars_per_year = _bars_per_year_for_tf(recipe.timeframe)
 
             specs = generate_default_cell_specs(
-                panel=panel, aligned=aligned, config=cell_config,
+                panel=panel,
+                aligned=aligned,
+                config=cell_config,
             )
             if not specs:
                 continue
@@ -135,12 +139,14 @@ def run_l0_diagnostic_pass(
                     run_id=run_id,
                 )
 
-                cell_evidences.append({
-                    "gate_ev": gate_ev,
-                    "spec": spec,
-                    "calib_n": calib_n,
-                    "eval_n": eval_n,
-                })
+                cell_evidences.append(
+                    {
+                        "gate_ev": gate_ev,
+                        "spec": spec,
+                        "calib_n": calib_n,
+                        "eval_n": eval_n,
+                    }
+                )
 
             # [LIMIT-02] BH-FDR correction across all cells in this run
             if cell_evidences:
@@ -169,22 +175,23 @@ def run_l0_diagnostic_pass(
                     spec = ce["spec"]
                     cell_id = spec.cell_id
                     axes_str = "|".join(spec.axes)
-                    values_str = (
-                        f"calib_n={ce['calib_n']},eval_n={ce['eval_n']},"
-                        + ",".join(f"{k}={v}" for k, v in spec.values.items())
+                    values_str = f"calib_n={ce['calib_n']},eval_n={ce['eval_n']}," + ",".join(
+                        f"{k}={v}" for k, v in spec.values.items()
                     )
-                    diagnostic_rows.append(_build_diagnostic_row(
-                        recipe_id=f"{recipe_id}::cell={cell_id}",
-                        gate_ev=gate_ev,
-                        run_id=run_id,
-                        canon_ev=canon_ev,
-                        cell_id=cell_id,
-                        cell_axes=axes_str,
-                        cell_values=values_str,
-                        execution_style="",
-                        selected_for_l1=False,
-                        failure_axis=failure_map.get(recipe_id, "unknown"),
-                    ))
+                    diagnostic_rows.append(
+                        _build_diagnostic_row(
+                            recipe_id=f"{recipe_id}::cell={cell_id}",
+                            gate_ev=gate_ev,
+                            run_id=run_id,
+                            canon_ev=canon_ev,
+                            cell_id=cell_id,
+                            cell_axes=axes_str,
+                            cell_values=values_str,
+                            execution_style="",
+                            selected_for_l1=False,
+                            failure_axis=failure_map.get(recipe_id, "unknown"),
+                        )
+                    )
 
     # Step 3: Execution-arm re-costing (if enabled)
     if runtime_config.enable_execution_arms:
@@ -222,18 +229,20 @@ def run_l0_diagnostic_pass(
                     bars_per_year=bars_per_year,
                     run_id=run_id,
                 )
-                diagnostic_rows.append(_build_diagnostic_row(
-                    recipe_id=f"{ev.recipe_id}::arm={arm.style}",
-                    gate_ev=arm_gate_ev,
-                    run_id=run_id,
-                    canon_ev=ev,
-                    cell_id="",
-                    cell_axes="",
-                    cell_values="",
-                    execution_style=arm.style,
-                    selected_for_l1=False,
-                    failure_axis=failure_axis,
-                ))
+                diagnostic_rows.append(
+                    _build_diagnostic_row(
+                        recipe_id=f"{ev.recipe_id}::arm={arm.style}",
+                        gate_ev=arm_gate_ev,
+                        run_id=run_id,
+                        canon_ev=ev,
+                        cell_id="",
+                        cell_axes="",
+                        cell_values="",
+                        execution_style=arm.style,
+                        selected_for_l1=False,
+                        failure_axis=failure_axis,
+                    )
+                )
 
     return tuple(diagnostic_rows)
 

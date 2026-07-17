@@ -282,9 +282,7 @@ class TestOpt1PartialCubeSymbolCoverage:
 
         # BBB column: absent from cube → fail-closed: inactive + blocked
         assert not aligned.active_mask[:, bbb_col].any(), "BBB active_mask must be False (fail-closed)"
-        assert aligned.entry_block_mask[:, bbb_col].all(), (
-            "BBB entry_block_mask must be True (fail-closed)"
-        )
+        assert aligned.entry_block_mask[:, bbb_col].all(), "BBB entry_block_mask must be True (fail-closed)"
 
         # AAA column: cube overwrote eligible=False → active_mask must be False
         # (only for bars within cube range; at minimum some bars must be False)

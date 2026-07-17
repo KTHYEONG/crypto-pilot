@@ -46,9 +46,7 @@ def test_exact_recipe_route_does_not_expand_by_family() -> None:
         manifest=_manifest("r1"),
     )
 
-    assert selected[["native_tf", "l0_recipe_id"]].to_dict("records") == [
-        {"native_tf": "4h", "l0_recipe_id": "r1"}
-    ]
+    assert selected[["native_tf", "l0_recipe_id"]].to_dict("records") == [{"native_tf": "4h", "l0_recipe_id": "r1"}]
 
 
 def test_gate_manifest_missing_recipe_identity_fails_closed() -> None:
@@ -73,9 +71,7 @@ def test_gate_manifest_empty_events_without_identity_returns_empty() -> None:
 
 
 def test_none_manifest_preserves_legacy_native_tf_filter() -> None:
-    events = pd.DataFrame(
-        {"native_tf": ["4h", "12h"], "entry_idx": [1, 2]}
-    )
+    events = pd.DataFrame({"native_tf": ["4h", "12h"], "entry_idx": [1, 2]})
 
     selected = select_l1_delivery_events(
         labeled_events=events,

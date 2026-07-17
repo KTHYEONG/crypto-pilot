@@ -1222,9 +1222,7 @@ def test_xs_momentum_common_beta_move_produces_no_signal() -> None:
 # =============================================================================
 
 
-def _make_panel_fixture(
-    *, family: str, variant: str, metadata: dict[str, object]
-) -> CandidateSignalPanel:
+def _make_panel_fixture(*, family: str, variant: str, metadata: dict[str, object]) -> CandidateSignalPanel:
     n_bars, n_sym = 10, 2
     zeros_f = np.zeros((n_bars, n_sym), dtype=np.float64)
     zeros_i8 = np.zeros((n_bars, n_sym), dtype=np.int8)
@@ -1269,9 +1267,7 @@ def test_resolve_panel_archetype_identical_across_dual_modules() -> None:
 def test_resolve_panel_archetype_explicit_metadata_overrides_family_inference() -> None:
     from src.domain.futures.strategy.rule_signals import _resolve_panel_archetype
 
-    panel = _make_panel_fixture(
-        family="btc_regime_pullback", variant="v", metadata={"archetype": "carry_rev"}
-    )
+    panel = _make_panel_fixture(family="btc_regime_pullback", variant="v", metadata={"archetype": "carry_rev"})
 
     assert _resolve_panel_archetype(panel) == "carry_rev"
 
@@ -1344,7 +1340,7 @@ def test_build_rule_signal_panels_btc_regime_pullback_rsi_variant_flat_rsi() -> 
     assert rsi_panel.side_hint_2d.shape == (t, n)
     # After Fix 2 (rising-edge), entries are sparse — less than 5% of bars
     n_entries = int(np.sum(np.abs(rsi_panel.side_hint_2d) > 0))
-    assert n_entries <= t * n * 0.05, f"Too many entries: {n_entries} (>{t*n*0.05})"
+    assert n_entries <= t * n * 0.05, f"Too many entries: {n_entries} (>{t * n * 0.05})"
 
 
 def _make_pbr_aligned_with_dip_and_reclaim() -> tuple[AlignedMarketData, int, int]:
@@ -1467,8 +1463,10 @@ def test_rule_variant_names_match_rule_signals_sync_guard() -> None:
     panels_sigs = rsignals_mod.build_rule_signal_panels(aligned=aligned, cfg=cfg)
 
     _sync_families = (
-        "btc_regime_pullback", "trend_pullback_continuation",
-        "mtf_trend_pullback", "trend_pullback_quality_v2",
+        "btc_regime_pullback",
+        "trend_pullback_continuation",
+        "mtf_trend_pullback",
+        "trend_pullback_quality_v2",
     )
     for fam in _sync_families:
         v_rules = frozenset(p.variant for p in panels_rules if p.family == fam)
@@ -1531,7 +1529,9 @@ class TestMtfFusionFactory:
         aligned = _make_aligned(t=300, n=2)
         cfg = CandidateStrategyConfig()
         panels = build_rule_signal_panels(
-            aligned=aligned, cfg=cfg, family_filter=("mtf_fusion",),
+            aligned=aligned,
+            cfg=cfg,
+            family_filter=("mtf_fusion",),
         )
         assert len(panels) == 60
         assert all(p.family == "mtf_fusion" for p in panels)
@@ -1539,6 +1539,7 @@ class TestMtfFusionFactory:
 
     def test_mtf_fusion_variant_count_stays_within_max_recipes_per_family_cap(self) -> None:
         from src.domain.futures.alpha_foundry.contracts import AlphaFoundryRuntimeConfig
+
         cfg = AlphaFoundryRuntimeConfig()
         max_variants_at_4h = 3 * 5 * 4
         assert max_variants_at_4h <= cfg.max_recipes_per_family
@@ -1547,7 +1548,9 @@ class TestMtfFusionFactory:
         aligned = _make_aligned(t=300, n=2)
         cfg = CandidateStrategyConfig(timeframe="12h")
         panels = build_rule_signal_panels(
-            aligned=aligned, cfg=cfg, family_filter=("mtf_fusion",),
+            aligned=aligned,
+            cfg=cfg,
+            family_filter=("mtf_fusion",),
         )
         assert len(panels) == 20
 
@@ -1555,7 +1558,9 @@ class TestMtfFusionFactory:
         aligned = _make_aligned(t=300, n=2)
         cfg = CandidateStrategyConfig(timeframe="1D")
         panels = build_rule_signal_panels(
-            aligned=aligned, cfg=cfg, family_filter=("mtf_fusion",),
+            aligned=aligned,
+            cfg=cfg,
+            family_filter=("mtf_fusion",),
         )
         assert len(panels) == 0
 
@@ -1563,7 +1568,9 @@ class TestMtfFusionFactory:
         aligned = _make_aligned(t=20, n=2)
         cfg = CandidateStrategyConfig()
         panels = build_rule_signal_panels(
-            aligned=aligned, cfg=cfg, family_filter=("mtf_fusion",),
+            aligned=aligned,
+            cfg=cfg,
+            family_filter=("mtf_fusion",),
         )
         for p in panels:
             assert p.valid_mask_2d.dtype == bool
@@ -1578,7 +1585,9 @@ class TestMtfFusionFactory:
         taker_buy = np.full((t, n), 500.0, dtype=np.float64)
         aligned = _make_flow_aligned(close=close, funding=funding, taker_buy=taker_buy)
         panels = build_rule_signal_panels(
-            aligned=aligned, cfg=CandidateStrategyConfig(), family_filter=("mtf_fusion",),
+            aligned=aligned,
+            cfg=CandidateStrategyConfig(),
+            family_filter=("mtf_fusion",),
         )
         adx_panel = next(p for p in panels if "adx_dmi" in p.variant and "1D" in p.variant)
         neutral_ratio = float(np.mean(adx_panel.side_hint_2d == 0))
@@ -1586,11 +1595,13 @@ class TestMtfFusionFactory:
 
     def test_mtf_fusion_registered_in_all_signal_families(self) -> None:
         from src.domain.futures.signals.rules import ALL_SIGNAL_FAMILIES as rules_families  # noqa: N811
+
         assert "mtf_fusion" in rules_families
         assert rules_families == ALL_SIGNAL_FAMILIES
 
     def test_mtf_fusion_in_per_tf_pool_correct_tfs(self) -> None:
         from src.domain.futures.strategy.config import _DEFAULT_PER_TF_FAMILIES
+
         for tf in ("4h", "6h", "8h", "12h"):
             assert "mtf_fusion" in _DEFAULT_PER_TF_FAMILIES[tf], f"missing in {tf}"
         for tf in ("1h", "2h"):
@@ -1600,7 +1611,9 @@ class TestMtfFusionFactory:
         aligned = _make_aligned(t=300, n=2)
         cfg = CandidateStrategyConfig()
         panels = build_rule_signal_panels(
-            aligned=aligned, cfg=cfg, family_filter=("mtf_fusion",),
+            aligned=aligned,
+            cfg=cfg,
+            family_filter=("mtf_fusion",),
         )
         for p in panels:
             assert p.metadata["archetype"] == "trend"
@@ -1612,6 +1625,7 @@ class TestMtfFusionFactory:
         import inspect
 
         from src.domain.futures.strategy.rule_signals import _htf_ichimoku_cloud_filter
+
         source = inspect.getsource(_htf_ichimoku_cloud_filter)
         assert ".shift(26)" not in source, "Ichimoku filter must NOT use forward charting shift"
         assert ".shift(26," not in source, "Ichimoku filter must not shift senkou forward"
@@ -1620,6 +1634,7 @@ class TestMtfFusionFactory:
         import inspect
 
         from src.domain.futures.strategy.rule_signals import _htf_adx_dmi_filter
+
         source = inspect.getsource(_htf_adx_dmi_filter)
         assert "ewm" in source, "ADX must use ewm for Wilder smoothing"
         assert ".shift(" not in source.replace("shift(1)", ""), "ADX filter must not introduce forward-looking shifts"
@@ -1665,7 +1680,6 @@ class TestMtfFusionFactory:
 
 
 class TestMtfFusionPerfOptimization:
-
     def test_htf_hma_slope_filter_matches_apply_along_axis_reference(self) -> None:
         from src.domain.futures.strategy.rule_signals import _weighted_moving_average_2d
 
@@ -1686,6 +1700,7 @@ class TestMtfFusionPerfOptimization:
             return pd.DataFrame(np.sign(np.nan_to_num(slope, nan=0.0)), index=df_htf.index)
 
         from src.domain.futures.strategy.rule_signals import _htf_hma_slope_filter
+
         result = _htf_hma_slope_filter(df_htf, window=window)
         expected = _reference_htf_hma_slope_filter(df_htf, window=window)
 
@@ -1698,22 +1713,32 @@ class TestMtfFusionPerfOptimization:
         high, low = close * 1.01, close * 0.99
 
         def _reference_per_symbol(
-            high_df: pd.DataFrame, low_df: pd.DataFrame, close_df: pd.DataFrame,
-            period: int, threshold: float,
+            high_df: pd.DataFrame,
+            low_df: pd.DataFrame,
+            close_df: pd.DataFrame,
+            period: int,
+            threshold: float,
         ) -> np.ndarray:
             out = np.zeros_like(close_df.values)
             for s in range(close_df.shape[1]):
-                df_sym = pd.DataFrame({
-                    "high": high_df.values[:, s], "low": low_df.values[:, s],
-                    "close": close_df.values[:, s],
-                })
+                df_sym = pd.DataFrame(
+                    {
+                        "high": high_df.values[:, s],
+                        "low": low_df.values[:, s],
+                        "close": close_df.values[:, s],
+                    }
+                )
                 prev_close = df_sym["close"].shift(1)
                 up_move, down_move = df_sym["high"].diff(), -df_sym["low"].diff()
                 plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
                 minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
                 tr = pd.concat(
-                    [df_sym["high"] - df_sym["low"], (df_sym["high"] - prev_close).abs(),
-                     (df_sym["low"] - prev_close).abs()], axis=1,
+                    [
+                        df_sym["high"] - df_sym["low"],
+                        (df_sym["high"] - prev_close).abs(),
+                        (df_sym["low"] - prev_close).abs(),
+                    ],
+                    axis=1,
                 ).max(axis=1)
                 alpha = 1.0 / period
                 smoothed_tr = tr.ewm(alpha=alpha, adjust=False).mean()
@@ -1728,6 +1753,7 @@ class TestMtfFusionPerfOptimization:
             return out  # type: ignore[no-any-return]
 
         from src.domain.futures.strategy.rule_signals import _htf_adx_dmi_filter
+
         result = _htf_adx_dmi_filter(high, low, close, period=14, threshold=25.0)
         expected = _reference_per_symbol(high, low, close, period=14, threshold=25.0)
 
@@ -1737,7 +1763,9 @@ class TestMtfFusionPerfOptimization:
         aligned = _make_aligned(t=300, n=2)
         cfg = CandidateStrategyConfig()
         panels = build_rule_signal_panels(
-            aligned=aligned, cfg=cfg, family_filter=("mtf_fusion",),
+            aligned=aligned,
+            cfg=cfg,
+            family_filter=("mtf_fusion",),
         )
         assert len(panels) == 60
 
@@ -1767,6 +1795,7 @@ class TestMtfFusionPerfOptimization:
         high, low = close * 1.01, close * 0.99
 
         from src.domain.futures.strategy.rule_signals import _htf_adx_dmi_filter
+
         result = _htf_adx_dmi_filter(high, low, close, period=14, threshold=25.0)
         assert result.shape == (5, 3)
         assert not np.any(np.isnan(result.to_numpy()))
@@ -1782,8 +1811,12 @@ class TestMtfFusionPerfOptimization:
         high, low = close * 1.01, close * 0.99
 
         def _reference_per_symbol(
-            high_df: pd.DataFrame, low_df: pd.DataFrame, close_df: pd.DataFrame,
-            tenkan: int, kijun: int, senkou_b: int,
+            high_df: pd.DataFrame,
+            low_df: pd.DataFrame,
+            close_df: pd.DataFrame,
+            tenkan: int,
+            kijun: int,
+            senkou_b: int,
         ) -> np.ndarray:
             out = np.zeros_like(close_df.values)
             for s in range(close_df.shape[1]):
@@ -1805,6 +1838,7 @@ class TestMtfFusionPerfOptimization:
             return np.asarray(out)
 
         from src.domain.futures.strategy.rule_signals import _htf_ichimoku_cloud_filter
+
         result = _htf_ichimoku_cloud_filter(high, low, close, tenkan=9, kijun=26, senkou_b=52)
         expected = _reference_per_symbol(high, low, close, tenkan=9, kijun=26, senkou_b=52)
         assert np.array_equal(result.to_numpy(), expected)
@@ -1823,6 +1857,7 @@ class TestMtfFusionPerfOptimization:
         high, low = close + 1.0, close - 1.0
 
         from src.domain.futures.strategy.rule_signals import _htf_ichimoku_cloud_filter
+
         result = _htf_ichimoku_cloud_filter(high, low, close, tenkan=tenkan, kijun=kijun, senkou_b=senkou_b)
 
         # senkou_a valid from bar index kijun-1=3; senkou_b_line valid from bar index senkou_b-1=7.
@@ -1840,7 +1875,9 @@ def test_precomputed_cache_produces_identical_panels() -> None:
 
     cache = _precompute_shared_indicators(aligned=aligned, cfg=cfg)
     panels_with_cache = build_rule_signal_panels(
-        aligned=aligned, cfg=cfg, precomputed=cache,
+        aligned=aligned,
+        cfg=cfg,
+        precomputed=cache,
     )
 
     assert len(panels_no_cache) == len(panels_with_cache)
@@ -1860,7 +1897,10 @@ def test_precomputed_cache_with_family_filter() -> None:
 
     cache = _precompute_shared_indicators(aligned=aligned, cfg=cfg)
     panels = build_rule_signal_panels(
-        aligned=aligned, cfg=cfg, family_filter=family_filter, precomputed=cache,
+        aligned=aligned,
+        cfg=cfg,
+        family_filter=family_filter,
+        precomputed=cache,
     )
 
     assert len(panels) > 0
@@ -1874,7 +1914,9 @@ def test_precomputed_cache_with_short_history() -> None:
 
     cache = _precompute_shared_indicators(aligned=aligned, cfg=cfg)
     panels = build_rule_signal_panels(
-        aligned=aligned, cfg=cfg, precomputed=cache,
+        aligned=aligned,
+        cfg=cfg,
+        precomputed=cache,
     )
 
     assert isinstance(panels, tuple)
@@ -1887,12 +1929,17 @@ def test_precomputed_cache_with_normalize_time_horizon() -> None:
     cfg = CandidateStrategyConfig(timeframe="6h")
 
     cache = _precompute_shared_indicators(
-        aligned=aligned, cfg=cfg,
-        normalize_time_horizon=True, horizon_base_tf="4h",
+        aligned=aligned,
+        cfg=cfg,
+        normalize_time_horizon=True,
+        horizon_base_tf="4h",
     )
     panels = build_rule_signal_panels(
-        aligned=aligned, cfg=cfg, precomputed=cache,
-        normalize_time_horizon=True, horizon_base_tf="4h",
+        aligned=aligned,
+        cfg=cfg,
+        precomputed=cache,
+        normalize_time_horizon=True,
+        horizon_base_tf="4h",
     )
 
     assert isinstance(panels, tuple)

@@ -267,10 +267,12 @@ class TestComputeStrategyAdmissions:
         g = np.random.default_rng(42)
         n1, n2 = 20, 20
         sids = np.array(["a"] * n1 + ["b"] * n2, dtype="U4")
-        returns = np.concatenate([
-            np.full(n1, 15.0) + g.normal(0, 5, n1),
-            g.normal(0, 5, n2),
-        ])
+        returns = np.concatenate(
+            [
+                np.full(n1, 15.0) + g.normal(0, 5, n1),
+                g.normal(0, 5, n2),
+            ]
+        )
         weights = np.ones(n1 + n2, dtype=np.float64)
         decisions = np.arange(n1 + n2, dtype=np.int64)
 
@@ -319,10 +321,12 @@ class TestComputeSymbolPosteriors:
         sids = np.array(["trend:ma"] * 40, dtype="U12")
         syms = np.array(["AAPL"] * 5 + ["MSFT"] * 35, dtype="U8")
         g = np.random.default_rng(42)
-        returns = np.concatenate([
-            np.full(5, 2.0) + g.normal(0, 3, 5),   # AAPL low n
-            np.full(35, 15.0) + g.normal(0, 5, 35), # MSFT high n
-        ])
+        returns = np.concatenate(
+            [
+                np.full(5, 2.0) + g.normal(0, 3, 5),  # AAPL low n
+                np.full(35, 15.0) + g.normal(0, 5, 35),  # MSFT high n
+            ]
+        )
         weights = np.ones(40, dtype=np.float64)
         fold_ids = np.arange(40, dtype=np.int64)
         admissions = (
@@ -471,20 +475,44 @@ class TestAssessFoldEvidenceSmallN:
         funding_obs = np.ones(8, dtype=bool)
 
         adaptive = assess_fold_evidence(
-            fold_id=0, gross_series_bps=gross, execution_cost_bps=exec_cost,
-            funding_cost_bps=funding, matched_event_count=8, unmatched_event_count=0,
-            decision_count=8, effective_symbol_count=1.0, cost_observed=cost_obs,
-            funding_observed=funding_obs, min_matched_events=1, min_match_wilson_lcb=0.0,
-            min_decision_count=1, max_cost_fallback_ratio=1.0, min_funding_coverage_ratio=0.0,
-            block_bars=6, n_bootstrap=500, seed=42,
+            fold_id=0,
+            gross_series_bps=gross,
+            execution_cost_bps=exec_cost,
+            funding_cost_bps=funding,
+            matched_event_count=8,
+            unmatched_event_count=0,
+            decision_count=8,
+            effective_symbol_count=1.0,
+            cost_observed=cost_obs,
+            funding_observed=funding_obs,
+            min_matched_events=1,
+            min_match_wilson_lcb=0.0,
+            min_decision_count=1,
+            max_cost_fallback_ratio=1.0,
+            min_funding_coverage_ratio=0.0,
+            block_bars=6,
+            n_bootstrap=500,
+            seed=42,
         )
         baseline = assess_fold_evidence(
-            fold_id=0, gross_series_bps=gross, execution_cost_bps=exec_cost,
-            funding_cost_bps=funding, matched_event_count=8, unmatched_event_count=0,
-            decision_count=8, effective_symbol_count=1.0, cost_observed=cost_obs,
-            funding_observed=funding_obs, min_matched_events=1, min_match_wilson_lcb=0.0,
-            min_decision_count=1, max_cost_fallback_ratio=1.0, min_funding_coverage_ratio=0.0,
-            block_bars=6, n_bootstrap=500, seed=42,
+            fold_id=0,
+            gross_series_bps=gross,
+            execution_cost_bps=exec_cost,
+            funding_cost_bps=funding,
+            matched_event_count=8,
+            unmatched_event_count=0,
+            decision_count=8,
+            effective_symbol_count=1.0,
+            cost_observed=cost_obs,
+            funding_observed=funding_obs,
+            min_matched_events=1,
+            min_match_wilson_lcb=0.0,
+            min_decision_count=1,
+            max_cost_fallback_ratio=1.0,
+            min_funding_coverage_ratio=0.0,
+            block_bars=6,
+            n_bootstrap=500,
+            seed=42,
             lcb_quantile_floor_blocks=0,
         )
 
@@ -503,20 +531,44 @@ class TestAssessFoldEvidenceSmallN:
         funding_obs = np.ones(200, dtype=bool)
 
         adaptive = assess_fold_evidence(
-            fold_id=0, gross_series_bps=gross, execution_cost_bps=exec_cost,
-            funding_cost_bps=funding, matched_event_count=200, unmatched_event_count=0,
-            decision_count=200, effective_symbol_count=10.0, cost_observed=cost_obs,
-            funding_observed=funding_obs, min_matched_events=1, min_match_wilson_lcb=0.0,
-            min_decision_count=1, max_cost_fallback_ratio=1.0, min_funding_coverage_ratio=0.0,
-            block_bars=6, n_bootstrap=500, seed=42,
+            fold_id=0,
+            gross_series_bps=gross,
+            execution_cost_bps=exec_cost,
+            funding_cost_bps=funding,
+            matched_event_count=200,
+            unmatched_event_count=0,
+            decision_count=200,
+            effective_symbol_count=10.0,
+            cost_observed=cost_obs,
+            funding_observed=funding_obs,
+            min_matched_events=1,
+            min_match_wilson_lcb=0.0,
+            min_decision_count=1,
+            max_cost_fallback_ratio=1.0,
+            min_funding_coverage_ratio=0.0,
+            block_bars=6,
+            n_bootstrap=500,
+            seed=42,
         )
         baseline = assess_fold_evidence(
-            fold_id=0, gross_series_bps=gross, execution_cost_bps=exec_cost,
-            funding_cost_bps=funding, matched_event_count=200, unmatched_event_count=0,
-            decision_count=200, effective_symbol_count=10.0, cost_observed=cost_obs,
-            funding_observed=funding_obs, min_matched_events=1, min_match_wilson_lcb=0.0,
-            min_decision_count=1, max_cost_fallback_ratio=1.0, min_funding_coverage_ratio=0.0,
-            block_bars=6, n_bootstrap=500, seed=42,
+            fold_id=0,
+            gross_series_bps=gross,
+            execution_cost_bps=exec_cost,
+            funding_cost_bps=funding,
+            matched_event_count=200,
+            unmatched_event_count=0,
+            decision_count=200,
+            effective_symbol_count=10.0,
+            cost_observed=cost_obs,
+            funding_observed=funding_obs,
+            min_matched_events=1,
+            min_match_wilson_lcb=0.0,
+            min_decision_count=1,
+            max_cost_fallback_ratio=1.0,
+            min_funding_coverage_ratio=0.0,
+            block_bars=6,
+            n_bootstrap=500,
+            seed=42,
             lcb_quantile_floor_blocks=0,
         )
 

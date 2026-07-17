@@ -124,9 +124,7 @@ def make_panel() -> CandidateSignalPanel:
     )
 
 
-def make_gate_evidence(
-    recipe_id: str, *, net_lcb_bps: float, gross_lcb_bps: float
-) -> AlphaGateEvidence:
+def make_gate_evidence(recipe_id: str, *, net_lcb_bps: float, gross_lcb_bps: float) -> AlphaGateEvidence:
     return AlphaGateEvidence(
         schema_version="unified",
         run_id="unit",

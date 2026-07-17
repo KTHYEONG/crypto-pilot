@@ -92,7 +92,9 @@ def build_alpha_hypotheses(
     seen: set[str] = set()
     for bp in blueprints:
         hid = make_alpha_blueprint_id(
-            family=bp.family, variant=bp.variant, timeframe=bp.timeframe,
+            family=bp.family,
+            variant=bp.variant,
+            timeframe=bp.timeframe,
             params={"lookback": max(bp.lookback_bars) if bp.lookback_bars else 1, "holding": bp.holding_bars},
         )
         if hid in seen:
@@ -240,9 +242,7 @@ def build_l0_search_cells(
 
         if generator_exists_by_family is not None:
             if bp.family not in generator_exists_by_family:
-                raise ValueError(
-                    f"family {bp.family!r} missing from generator_exists_by_family"
-                )
+                raise ValueError(f"family {bp.family!r} missing from generator_exists_by_family")
             has_generator = generator_exists_by_family[bp.family]
             if not has_generator:
                 cells.append(

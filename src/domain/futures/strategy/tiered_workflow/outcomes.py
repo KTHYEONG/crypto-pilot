@@ -11,6 +11,7 @@ TieredRunStatus = Literal["completed", "failed"]
 @dataclass(frozen=True, slots=True)
 class TieredRunFailure:
     """[ADR_20260715_L0_L1_RUNTIME_TERMINAL_OBSERVABILITY] Explicit non-measurement failure."""
+
     code: Literal["native_event_contract", "missing_native_frame", "runtime_policy", "unexpected"]
     timeframe: str | None
     message: str
@@ -19,6 +20,7 @@ class TieredRunFailure:
 @dataclass(frozen=True, slots=True)
 class TieredRunOutcome:
     """[ADR_20260715_L0_L1_RUNTIME_TERMINAL_OBSERVABILITY] Completed or failed tiered outcome."""
+
     status: TieredRunStatus
     l1_result: object | None
     l2_result: object | None

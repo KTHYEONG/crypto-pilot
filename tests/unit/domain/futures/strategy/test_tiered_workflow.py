@@ -5086,23 +5086,27 @@ def test_assess_crisis_reliability_includes_btc_symbol_with_suffixed_schema(
     # pd.merge with suffixes)
     t0 = int(pd.Timestamp("2022-04-01", tz="UTC").value // 1_000_000)
     n = 100
-    btc_df = pd.DataFrame({
-        "timestamp_x": [t0 + i * 3600_000 for i in range(n)],
-        "timestamp_y": [t0 + i * 3600_000 for i in range(n)],
-        "open": np.full(n, 40000.0, dtype=np.float32),
-        "high": np.full(n, 41000.0, dtype=np.float32),
-        "low": np.full(n, 39000.0, dtype=np.float32),
-        "close": np.linspace(40000.0, 35000.0, n, dtype=np.float32),
-        "volume": np.full(n, 1000.0, dtype=np.float32),
-    })
-    eth_df = pd.DataFrame({
-        "timestamp": [t0 + i * 3600_000 for i in range(n)],
-        "open": np.full(n, 3000.0, dtype=np.float32),
-        "high": np.full(n, 3100.0, dtype=np.float32),
-        "low": np.full(n, 2900.0, dtype=np.float32),
-        "close": np.linspace(3000.0, 2500.0, n, dtype=np.float32),
-        "volume": np.full(n, 5000.0, dtype=np.float32),
-    })
+    btc_df = pd.DataFrame(
+        {
+            "timestamp_x": [t0 + i * 3600_000 for i in range(n)],
+            "timestamp_y": [t0 + i * 3600_000 for i in range(n)],
+            "open": np.full(n, 40000.0, dtype=np.float32),
+            "high": np.full(n, 41000.0, dtype=np.float32),
+            "low": np.full(n, 39000.0, dtype=np.float32),
+            "close": np.linspace(40000.0, 35000.0, n, dtype=np.float32),
+            "volume": np.full(n, 1000.0, dtype=np.float32),
+        }
+    )
+    eth_df = pd.DataFrame(
+        {
+            "timestamp": [t0 + i * 3600_000 for i in range(n)],
+            "open": np.full(n, 3000.0, dtype=np.float32),
+            "high": np.full(n, 3100.0, dtype=np.float32),
+            "low": np.full(n, 2900.0, dtype=np.float32),
+            "close": np.linspace(3000.0, 2500.0, n, dtype=np.float32),
+            "volume": np.full(n, 5000.0, dtype=np.float32),
+        }
+    )
 
     data_maps = {
         "BTCUSDT": {"4h": btc_df},
@@ -5115,10 +5119,12 @@ def test_assess_crisis_reliability_includes_btc_symbol_with_suffixed_schema(
     )
     mock_load.return_value = (data_maps, {}, ["BTCUSDT", "ETHUSDT"])
 
-    btc_close_2d = np.column_stack([
-        np.full(n, 40000.0, dtype=np.float64),
-        np.full(n, 3000.0, dtype=np.float64),
-    ])
+    btc_close_2d = np.column_stack(
+        [
+            np.full(n, 40000.0, dtype=np.float64),
+            np.full(n, 3000.0, dtype=np.float64),
+        ]
+    )
     aligned_mock = AlignedMarketData(
         datetimes=np.datetime64("2022-04-01", "h") + np.arange(n).astype("timedelta64[h]"),
         symbols=("BTCUSDT", "ETHUSDT"),
