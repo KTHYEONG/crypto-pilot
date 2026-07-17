@@ -138,8 +138,10 @@ STATUS  : ✅ PASS
 - **L0→L1→native TF handoff / L1 robustness gate:** PASS (회귀 없음).
 - **L2 스코어카드 정합성(Bug-A1/A2):** PASS — 실측 확인 완료, production 신뢰 가능.
 - **BTC 레짐 데이터 무결성(`_resolve_timestamp_column`/`_btc_index` fail-closed):** ✅ 수정 완료 및 메커니즘 레벨 실측 검증 — 단, 정상 유니버스 확장으로 챔피언이 달라져 위기 MDD/CAGR은 개선되지 않고 악화(55.47%/-38.44%).
-- **L2 배치 레버리지 ceiling 구조 리팩토링:** ✅ 수정 완료 및 실제 챔피언 데이터로 불변식 검증 — worst_fold/kelly 게이트가 이제 RC-2 OOS-blend에 의해 우회되지 않음. 단, 두 게이트 모두 여전히 opt-in(기본 비활성) — 프로덕션 기본값 전환 전 위기 replay 재검증 필요.
-- **L2 위기 재현성 게이트:** FAIL-CLOSED 유지 — replay는 정상 완주했으나 MDD/CAGR 생존 조건을 여전히 위반해 `stress_tested_fail`, `verified=False`, 최종 promotion 차단.
+- **L2 배치 레버리지 ceiling 구조 리팩토링:** ✅ 수정 완료 및 실제 챔피언 데이터로 불변식 검증 — worst_fold/kelly 게이트가 이제 RC-2 OOS-blend에 의해 우회되지 않음.
+- **L2 worst_fold 게이트 기본값 전환:** ✅ 적용 완료·실측 검증 — 위기 MDD/CAGR 방향성 개선(55.47%→46.53%, -38.44%→-28.04%)했으나 예산 미달로 위기 게이트는 계속 차단. kelly는 과잉보정 확인되어 opt-in 유지.
+- **L2 롱/숏 방향 비대칭 진단·완화 레버:** ✅ 근본원인(롱 레그 -11.29% vs 숏 레그 +3.59%, 대칭 cap 적용 후에도 존속) 실측 확정, opt-in 레버 구현·스윕 검증 완료 — CAGR은 대폭 개선(-28.04%→-14.19%)했으나 **MDD는 사실상 미개선(46.1~46.9% 평평)**, 위기 게이트의 실제 지배적 제약(MDD 예산)은 여전히 미해결. 기본값 비활성 유지.
+- **L2 위기 재현성 게이트:** FAIL-CLOSED 유지 — replay는 정상 완주했으나 MDD/CAGR 생존 조건을 여전히 위반해 `stress_tested_fail`, `verified=False`, 최종 promotion 차단. 병목은 CAGR보다 **MDD**로 좁혀짐(현재 두 레버 모두 MDD를 21% 예산까지 끌어내리지 못함) — 다음 조치는 MDD 드라이버(peak-to-trough 구간 분해) 규명.
 
 ## 다음 조치
 
@@ -148,4 +150,52 @@ STATUS  : ✅ PASS
 3. ~~crisis detail에 MDD/CAGR/CVaR 원시값을 함께 출력~~ — `[CRISIS-WINDOW-DETAIL]` 로그로 해소(2026-07-17).
 4. `docs/results/next.md` §1(`run_config.timeframe` CLI 기본값 "4h"의 tf-probe 기반 근거화)은 별도 `/spec` 대기 중.
 5. ~~새 챔피언이 왜 위기에 더 취약한지 원인 진단~~ — ceiling 우회 버그로 확정, 리팩토링으로 해소(2026-07-17).
-6. `l2_deploy_worst_fold_gate_enabled`/`l2_deploy_kelly_safety_fraction`을 프로덕션 기본값으로 전환할지 결정 — 이번 시스템의 실제 mu 크기(quarter-Kelly가 사실상 항상 1x floor로 수렴)를 감안해 `kelly_safety_fraction` 계수 자체를 재검토하거나, worst_fold 게이트만 우선 활성화하는 방안 검토 필요. 활성화 시 위기 replay(LUNA/FTX) 재실행으로 실제 MDD/CAGR 개선 여부 재확인 필수.
+6. ~~`l2_deploy_worst_fold_gate_enabled`을 프로덕션 기본값으로 전환할지 결정~~ — worst_fold 게이트만 기본 활성화, kelly는 opt-in 유지(아래 §L2 worst_fold 기본값 전환 참고). 활성화했으나 위기 게이트는 여전히 `stress_tested_fail` — 아래 §L2 롱/숏 방향 비대칭 진단으로 후속 조치 진행 중.
+
+## L2 worst_fold 안전장치 프로덕션 기본값 전환 (`ADR_20260717_L2_CRISIS_LEVERAGE_SAFETY_DEFAULT`)
+
+**변경**: `Layer2AllocationConfig.l2_deploy_worst_fold_gate_enabled` 기본값을 `False`→`True`로 전환. 동시에 `from_mapping`이 파라미터 키 부재 시 SSOT(`_dc.<field>`) 대신 하드코딩된 `False`로 침묵 복귀하던 버그를 수정(수정 없이 기본값만 바꿨다면 Optuna `best_l2_params`에 이 키가 보통 없어 여전히 비활성으로 침묵 복귀했을 것). `kelly_safety_fraction`은 이 시스템의 극소 mu(~1~2×10⁻⁵)에서 quarter-Kelly가 거의 항상 `l_floor=1.0`으로 수렴하는 과잉보정 특성이 확인되어 opt-in 유지.
+
+**실측 검증(전체 파이프라인 재실행, 2026-07-17, `--seed 42`)**:
+
+| 지표 | Before(게이트 off) | After(게이트 on, 기본값) | 변화 |
+| :--- | ---: | ---: | ---: |
+| 정상장 L* | ~2.06 | 1.72 | -16.5% |
+| 정상장 CAGR | +92.8% | +53.2% | champion drift(아래 참고) |
+| 정상장 MDD | 17.4% | 14.3% | 개선 |
+| 위기 MDD | 55.47% | 46.53% | -8.9pp 개선(상대 -16%) |
+| 위기 CAGR | -38.44% | -28.04% | +10.4pp 개선 |
+| 위기 게이트 판정 | stress_tested_fail | stress_tested_fail(유지) | 방향은 맞으나 예산(MDD≤21%, CAGR≥-5%) 미달 |
+
+**champion drift 원인(코드 조사로 확정)**: `build_layer2_deployable_score`의 `score = cagr + 0.10·sortino + 0.05·calmar - …`에서 `cagr` 항은 후보별 **배치된(leveraged) CAGR**이며 leverage-scale에 불변이 아니다. worst_fold 게이트가 후보마다 서로 다른 L*를 제약하면서, Optuna가 "raw Sharpe 최고" 후보 대신 "worst-fold 제약 하 배치 CAGR 최고" 후보를 선택하도록 목적함수가 사실상 바뀌었다(Sharpe 2.026→1.700). 프로젝트 목표(복리 성장 극대화)와 부합하는 의도된 설계로 판단, 결함 아님 — 단, "후보 품질 랭킹"과 "레버리지 사이징" 분리 여부는 별도 검토 과제로 남김.
+
+**결론**: 게이트는 설계대로 작동(위기 MDD/CAGR 방향성 개선)하지만 단독으로는 위기 예산을 충족 못함 — worst_fold만으로는 부족함을 실측 확인. `/check` PASS(Cov 97%, spec compliance 포함). SSOT: `docs/specs/l2-crisis-leverage-safety-defaults.md`.
+
+## L2 롱/숏 방향 비대칭 진단 및 opt-in 완화 레버 (`ADR_TBD_L2_CRISIS_ASYMMETRIC_LONG_SHORT_CAP`)
+
+**진단 배경**: worst_fold 게이트 적용 후에도 위기 게이트가 실패해 근본원인을 추가 조사. `scratch/diag_crisis_longshort.py`로 실제 champion registry의 LUNA/FTX replay를 롱/숏 레그로 분리 측정(기존 `apply_regime_risk_cap` 방향-무관 대칭 축소가 이미 적용된 이후 값).
+
+| 지표 | 롱 레그 | 숏 레그 |
+| :--- | ---: | ---: |
+| 활성 bar 수 | 683 | 786 |
+| 실현 가격 P&L(비용 차감 전) | **-11.29%** | **+3.59%** |
+
+- **숏 레그는 이미 위기장에서 순이익** — bar 빈도도 롱(683)보다 많음(786). "숏을 못한다"가 문제가 아니라 **롱의 손실 크기가 숏의 이익 크기의 3배 이상**인 것이 문제.
+- 롱 상위 손실 종목(DOGE/ZIL/API3/VET/LPT/SNX/UNI/ANKR)이 전부 알트코인 — LUNA/FTX 전염발 상관붕괴 국면에서 추세추종 롱("눌림목 매수")이 반복 휩쏘당한 패턴과 일치. 기존 대칭적 `apply_regime_risk_cap`(bear=0.35x/crisis=0.25x)은 이 방향 비대칭을 교정하지 못함(위 수치가 그 적용 *이후* 값).
+
+**opt-in 완화 레버 구현**: bear/crisis 레짐에서 롱 레그에만 추가 축소 배수를 적용하는 `apply_asymmetric_long_short_regime_cap`(순수 함수, `l2_meta.py`) + `Layer2AllocationConfig` 3개 opt-in 필드(`l2_regime_long_short_asymmetry_enabled`, `l2_regime_{bear,crisis}_long_extra_mult`, 기본값 전부 no-op) 추가. `/check` PASS(spec compliance 포함). SSOT: `docs/specs/l2-crisis-asymmetric-long-short-regime-cap.md`.
+
+**스윕 실측(동일 champion 고정, `scratch/sweep_crisis_asymmetric_cap.py`, LUNA/FTX)**:
+
+| long_extra_mult | MDD | CAGR |
+| :--- | ---: | ---: |
+| 1.00(off, baseline) | 46.53% | -28.04% |
+| 0.70 | 46.11% | -23.57% |
+| 0.50 | 46.19% | -20.72% |
+| 0.30 | 46.47% | -18.00% |
+| 0.15 | 46.68% | -16.05% |
+| 0.00(롱 완전 차단) | 46.90% | **-14.19%** |
+
+**혼재된 결과**: CAGR은 크게 개선(-28.04%→-14.19%, 손실 절반 이하로 축소)해 롱/숏 비대칭 가설을 CAGR 측면에서 강하게 확인. **그러나 MDD는 사실상 평평(46.1~46.9%)하고 롱을 완전 차단한 mult=0.00에서 오히려 소폭 악화** — 위기 게이트의 실제 지배적 제약(MDD≤21% 예산, 현재 2.2배 초과)을 이 레버가 전혀 못 건드림. 전 구간 `stress_tested_fail` 유지. MDD를 결정하는 최대낙폭 구간이 이 레그별 평균 P&L 비대칭과 다른 곳(특정 급락/반등 구간의 회전비용 또는 숏 스퀴즈 등)에서 발생하는 것으로 추정되나 현재 데이터로는 특정 못함 — 추가 진단(peak-to-trough 구간별 롱/숏/비용 분해) 필요.
+
+**주의(전례 참고)**: 2026-07-02 reversal kill-switch 실측 반증(방향-무관 대칭적 de-gross가 실제 위기 홀드아웃에서 baseline보다 악화, `risk_off_realized_price` 전 variant 양수)과 달리 이번 레버는 방향-분리 설계라 같은 함정은 아니지만, 같은 실수(단일 윈도우 백테스트만으로 승격)를 반복하지 않기 위해 두 개의 독립 위기 윈도우(LUNA/FTX + 2025-12-31~2026-06-30 BTC 위기 홀드아웃) 모두에서 개선 확인 전까지 기본값 비활성 유지(spec `[LIMIT-01]`).
