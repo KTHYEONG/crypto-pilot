@@ -13,6 +13,7 @@ from src.domain.futures.strategy.tiered_workflow.dataclasses import (
     RegimeCellPolicy,
 )
 from src.domain.futures.strategy.tiered_workflow.l2_meta import (
+    apply_asymmetric_long_short_regime_cap,
     apply_regime_cell_policy,
     apply_regime_risk_cap,
     build_regime_policy_by_fold,
@@ -29,6 +30,7 @@ def _make_cache(n_bars: int, *, strategy_id: str = "donchian_72_4h") -> MagicMoc
     cache.sleeve_to_sym = np.zeros(1, dtype=np.int64)
     cache.sleeve_ids = (("BTCUSDT", strategy_id),)
     cache.sleeve_to_tf = ("4h",)
+    cache.sleeve_keys = (SimpleNamespace(symbol="BTCUSDT", native_tf="4h", strategy_id=strategy_id),)
     return cache
 
 
@@ -144,7 +146,7 @@ def test_build_regime_policy_by_fold_ignores_oos_extreme_returns() -> None:
         min_confidence=0.0,
     )
 
-    key = (0, "donchian_72", "4h")
+    key = (0, "donchian_72_4h", "4h")
     assert policy_a == policy_b
     assert policy_a[0][key].action == policy_b[0][key].action
     assert diag_a.reason == diag_b.reason
@@ -839,3 +841,78 @@ def test_build_regime_policy_by_fold_require_fit_n_for_downweight_blocks(
     key = (0, "donchian_72", "4h")
     assert policy_by_fold[0][key].action == "pooled"
     assert policy_by_fold[0][key].reason == "insufficient_fit"
+
+
+def test_apply_asymmetric_long_short_regime_cap_squeezes_long_only_in_crisis() -> None:
+    weights = np.asarray([0.8, -0.7], dtype=np.float64)
+
+    scaled, mult = apply_asymmetric_long_short_regime_cap(
+        weights, 2, ("bull", "bear", "crisis"),
+        enabled=True, crisis_long_extra_mult=0.5,
+    )
+
+    assert scaled == pytest.approx([0.4, -0.7])
+    assert mult == pytest.approx(0.5)
+
+
+def test_apply_asymmetric_long_short_regime_cap_noop_in_bull_regardless_of_mult() -> None:
+    weights = np.asarray([0.8, -0.7], dtype=np.float64)
+
+    scaled, mult = apply_asymmetric_long_short_regime_cap(
+        weights, 0, ("bull", "bear", "crisis"),
+        enabled=True, bear_long_extra_mult=0.1,
+    )
+
+    assert scaled == pytest.approx(weights)
+    assert mult == pytest.approx(1.0)
+
+
+def test_apply_asymmetric_long_short_regime_cap_noop_when_disabled() -> None:
+    weights = np.asarray([0.8, -0.7], dtype=np.float64)
+
+    scaled, mult = apply_asymmetric_long_short_regime_cap(
+        weights, 2, ("bull", "bear", "crisis"),
+        enabled=False, crisis_long_extra_mult=0.1,
+    )
+
+    assert scaled == pytest.approx(weights)
+    assert mult == pytest.approx(1.0)
+
+
+def test_apply_asymmetric_long_short_regime_cap_noop_when_mult_is_one() -> None:
+    weights = np.asarray([0.8, -0.7], dtype=np.float64)
+
+    scaled, mult = apply_asymmetric_long_short_regime_cap(
+        weights, 1, ("bull", "bear", "crisis"),
+        enabled=True, bear_long_extra_mult=1.0,
+    )
+
+    assert scaled == pytest.approx(weights)
+    assert mult == pytest.approx(1.0)
+
+
+def test_apply_asymmetric_long_short_regime_cap_invalid_mult_raises() -> None:
+    weights = np.asarray([0.8, -0.7], dtype=np.float64)
+
+    with pytest.raises(ValueError, match="bear_long_extra_mult"):
+        apply_asymmetric_long_short_regime_cap(
+            weights, 0, ("bull", "bear", "crisis"),
+            enabled=True, bear_long_extra_mult=1.5,
+        )
+
+    with pytest.raises(ValueError, match="crisis_long_extra_mult"):
+        apply_asymmetric_long_short_regime_cap(
+            weights, 0, ("bull", "bear", "crisis"),
+            enabled=True, crisis_long_extra_mult=-0.1,
+        )
+
+
+def test_run_awf_simulation_wires_asymmetric_long_short_cap_after_regime_risk_cap() -> None:
+    import inspect
+    from src.domain.futures.strategy.tiered_workflow.awf_sim import _run_awf_simulation
+
+    source = inspect.getsource(_run_awf_simulation)
+
+    assert "apply_asymmetric_long_short_regime_cap(" in source
+    assert source.index("apply_asymmetric_long_short_regime_cap(") > source.index("apply_regime_risk_cap(")
+    assert "l2_regime_long_short_asymmetry_enabled" in source

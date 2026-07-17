@@ -2870,6 +2870,7 @@ def _run_awf_simulation(
     policy_by_fold = list(cache.regime_policy_by_fold)
     _routing_diag = cache.regime_routing_diagnostics
     from src.domain.futures.strategy.tiered_workflow.l2_meta import (
+        apply_asymmetric_long_short_regime_cap,
         apply_regime_risk_cap,
         bear_edge_per_bar_bps,
         compute_regime_reliability_multiplier,
@@ -3847,6 +3848,20 @@ def _run_awf_simulation(
                     _regime_now_for_cap,
                     _gross_before_cap,
                     _regime_risk_mult,
+                )
+
+            w, _long_extra_mult = apply_asymmetric_long_short_regime_cap(
+                w,
+                _regime_now_for_cap,
+                _state_names_for_cap,
+                enabled=bool(getattr(config, "l2_regime_long_short_asymmetry_enabled", False)),
+                bear_long_extra_mult=float(getattr(config, "l2_regime_bear_long_extra_mult", 1.0)),
+                crisis_long_extra_mult=float(getattr(config, "l2_regime_crisis_long_extra_mult", 1.0)),
+            )
+            if logger.isEnabledFor(logging.DEBUG) and _long_extra_mult < 1.0:
+                logger.debug(
+                    "[L2-REGIME-LONG-ASYM] t=%d fold=%d regime=%s(%d) long_extra_mult=%.4f",
+                    t, _fold_idx, _state_names_for_cap[_regime_now_for_cap], _regime_now_for_cap, _long_extra_mult,
                 )
 
             # Phase 3-5: capacity_usdt clip (OOS)
