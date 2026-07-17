@@ -641,6 +641,8 @@ class TestFormatLayer2Table:
         assert "Sharpe" in result
         assert "1.500" in result
         assert "CAGR" in result
+        assert "PSR" in result
+        assert "0.920" in result
         assert "DSR" in result
         assert "0.850" in result
 
@@ -669,15 +671,15 @@ class TestFormatLayer2Table:
         assert "❌" in result  # friction_pass_pct=0.30 < 0.50
 
     def test_uplift_gate_shown_as_additive(self) -> None:
-        """Sharpe Uplift 임계가 가산식 (>=+0.20) 으로 표기됨 검증."""
+        """Sharpe Uplift 임계가 config 값 (>=+0.05) 으로 표기됨 검증."""
         # Arrange
         r2 = _make_l2_ns(sharpe_baseline=0.5)
 
         # Act
         result = format_layer2_table(r2)
 
-        # Assert — ">=+0.20" 포함
-        assert ">=+0.20" in result
+        # Assert — 기본 config.l2_min_sharpe_uplift=0.05
+        assert ">=+0.05" in result
 
     def test_awf_folds_appended(self) -> None:
         """awf_folds 있으면 fold 테이블 추가 검증."""
@@ -787,18 +789,20 @@ class TestFormatLayer2Table:
 
         assert "[LAYER 2 PORTFOLIO SCORECARD] (2025-10-01 ~ 2026-03-31)" in result
 
-    def test_format_layer2_table_dsr_gate_shown(self) -> None:
-        """DSR 행이 표시되고 dsr_hybrid=0.50 < 0.60이면 ❌ 상태 검증."""
+    def test_format_layer2_table_psr_gate_shown(self) -> None:
+        """PSR 게이트가 표시되고 psr_hybrid=0.50 < 0.90이면 ❌ 상태 검증."""
         # Arrange
-        r2 = _make_l2_ns(dsr_hybrid=0.50)
+        r2 = _make_l2_ns(psr_hybrid=0.50, dsr_hybrid=0.80)
 
         # Act
-        result = format_layer2_table(r2, min_dsr=0.60)
+        result = format_layer2_table(r2)
 
-        # Assert
+        # Assert — PSR is the blocker gate
         assert "Integrity" in result
+        assert "PSR" in result
+        assert "❌" in result  # psr_hybrid=0.50 < config.l2_min_psr=0.90
         assert "DSR" in result
-        assert "❌" in result  # dsr_hybrid=0.50 < 0.60
+        assert "(diag)" in result
 
     def test_format_layer2_table_renders_long_short_pnl_split(self) -> None:
         """Scenario 6: [L2-LONGSHORT] 라인에 long/short realized price가 정확히 렌더링."""
@@ -822,6 +826,20 @@ class TestFormatLayer2Table:
         assert "[L2-LONGSHORT-TOP]" in result
         assert "ARUSDT(-0.0210)" in result
         assert "BTCUSDT(+0.0120)" in result
+
+    def test_format_layer2_table_uses_config_uplift_threshold_not_hardcoded(self) -> None:
+        """config.l2_min_sharpe_uplift=0.05로 통과하는 uplift (0.10)이 ✅로 표시됨."""
+        from src.domain.futures.strategy.tiered_workflow.dataclasses import (
+            Layer2AllocationConfig,
+        )
+
+        cfg = Layer2AllocationConfig(l2_min_sharpe_uplift=0.05)
+        r2 = _make_l2_ns(sharpe_hybrid=1.2, sharpe_baseline=1.1)
+
+        result = format_layer2_table(r2, config=cfg)
+
+        assert ">=+0.05" in result
+        assert "✅ [Uplift" in result
 
 
 class TestEvaluationWindowBottleneckVerdict:
