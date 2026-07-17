@@ -780,6 +780,42 @@ def _apply_persistence_and_cooldown_1d(
     return np.concatenate([[False], state[:-1]]).astype(np.bool_)
 
 
+def apply_regime_cap_release_cooldown(
+    code_1d: NDArray[np.int8],
+    *,
+    cooldown_bars: int,
+) -> NDArray[np.int8]:
+    """[ADR_20260718_L2_CRISIS_REGIME_CAP_RELEASE_COOLDOWN] 레짐 캡 전용 파생 코드.
+
+    code_1d 자체(방향 alpha 신호)는 변경하지 않는다 — 오직 캡 계산에만 쓰는
+    파생 배열을 반환한다. bear/crisis(1,2) 진입은 항상 즉시 반영되고, bull(0)
+    으로의 "복귀"만 최근 cooldown_bars 이내에 bear/crisis가 있었으면 지연된다
+    (대체 상태는 항상 bear=1, crisis로 승격하지 않음).
+
+    Args:
+        code_1d: 원본 레짐 코드 [T] ∈ {0=bull, 1=bear, 2=crisis}.
+        cooldown_bars: bear/crisis 이후 bull 복귀를 지연시킬 최소 bar 수.
+            0이면 원본과 동일(no-op).
+
+    Returns:
+        [T] int8, 캡 계산 전용 파생 코드. code_1d와 shape 동일.
+
+    Raises:
+        ValueError: cooldown_bars < 0.
+    """
+    if cooldown_bars < 0:
+        raise ValueError(f"cooldown_bars must be >= 0, got {cooldown_bars}")
+    if cooldown_bars == 0 or code_1d.size == 0:
+        return code_1d.copy()
+    defensive_raw = code_1d != 0
+    sticky_defensive = _apply_persistence_and_cooldown_1d(
+        defensive_raw, persistence_bars=1, recovery_cooldown_bars=cooldown_bars
+    )
+    out = code_1d.copy()
+    out[sticky_defensive & (code_1d == 0)] = 1
+    return out
+
+
 def compute_reversal_risk_off_1d(
     btc_close_1d: NDArray[np.float64],
     *,
