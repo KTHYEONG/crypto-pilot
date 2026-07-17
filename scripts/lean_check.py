@@ -66,6 +66,30 @@ def _get_source_files(py_files: list[str]) -> list[str]:
     return [f for f in py_files if not (f.startswith("tests/") or "test_" in f)]
 
 
+def _get_target_coverage(file_path: str) -> int:
+    # Tier 1 (Core): domain, signal, sizing, portfolio
+    if any(k in file_path for k in ("domain/", "signal/", "sizing/", "portfolio/")):
+        return 85
+    # Tier 2 (Adapter/Runner): adapters, runners, repository, services, db
+    if any(k in file_path for k in ("adapters/", "runners/", "repository/", "services/", "db/")):
+        return 65
+    return 0
+
+
+def _parse_file_coverage(stdout: str, file_path: str) -> int | None:
+    mkey = file_path.replace(".py", "")
+    for line in stdout.splitlines():
+        if mkey in line:
+            parts = line.split()
+            for part in parts:
+                if "%" in part:
+                    try:
+                        return int(part.replace("%", ""))
+                    except ValueError:
+                        pass
+    return None
+
+
 def _check_spec_compliance(spec_path: str) -> tuple[int, list[JsonDiag]]:
     diagnostics: list[JsonDiag] = []
     try:
@@ -218,13 +242,43 @@ def main() -> None:
                 m = re.search(r"(\d+)%", line)
                 if m:
                     cov_val = int(m.group(1))
+
+        # Check coverage targets per file
+        coverage_violations: list[JsonDiag] = []
         for sf in source_files:
+            target_cov = _get_target_coverage(sf)
+            if target_cov == 0:
+                continue
+
+            actual_cov = _parse_file_coverage(pt_res.stdout, sf)
+            if actual_cov is None:
+                # Could not find file coverage in stdout
+                continue
+
+            if actual_cov < target_cov:
+                d = {
+                    "file": sf,
+                    "line": 0,
+                    "error": f"Coverage target violation: actual {actual_cov}% < target {target_cov}%",
+                    "fix_hint": f"Add test cases targeting missing paths in {sf}",
+                }
+                coverage_violations.append(d)
+
             mkey = sf.replace(".py", "")
             for line in pt_res.stdout.splitlines():
                 if mkey in line or sf in line:
                     parts = line.split()
                     if len(parts) >= 5 and "%" in parts[-2]:
                         missing_infos.append(f"{sf.split('/')[-1]}:{parts[-1]}")
+
+        if coverage_violations:
+            first_fail = coverage_violations[0]
+            _fail_exit(
+                "coverage-target",
+                f"FAIL | Coverage target missed: {first_fail['file']} ({first_fail['error']})",
+                first_fail,
+            )
+
         suffix = f", Missing: [{', '.join(missing_infos)}]" if missing_infos else ""
         cov_s = f"{cov_val}%" if cov_val is not None else "N/A"
         print(f"PASS | All checks passed (Cov {cov_s}{suffix})")
@@ -237,6 +291,7 @@ def main() -> None:
         cause = last_err[-1] if last_err else "Check pytest output."
         d = {"file": "", "line": 0, "error": cause, "fix_hint": "Fix failing assertions in tests"}
         _fail_exit("pytest", f"FAIL | Pytest Failed: {cause}", d)
+
 
 
 if __name__ == "__main__":
