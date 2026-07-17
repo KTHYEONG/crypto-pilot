@@ -70,6 +70,11 @@ from src.domain.futures.strategy.tiered_workflow.awf_sim import (
     summarize_major_symbol_signal_sizing,
     summarize_major_symbol_sleeve_contribution,
 )
+from src.domain.futures.strategy.tiered_workflow.crisis_policy import (
+    CrisisReliabilityAssessment,
+    CrisisWindowMetrics,
+    evaluate_crisis_survival,
+)
 from src.domain.futures.strategy.tiered_workflow.dataclasses import (
     FoldDiagnostic,
     L2SimulationCache,
@@ -2104,17 +2109,6 @@ DEFAULT_CRISIS_WINDOWS: tuple[CrisisWindow, ...] = (
 )
 
 
-@dataclass(slots=True, frozen=True)
-class CrisisReliabilityAssessment:
-    status: str
-    verified: bool
-    detail: str
-    stress_window_label: str | None = None
-    stress_symbol_count: int = 0
-    stress_mdd: float | None = None
-    stress_cagr: float | None = None
-
-
 def _build_rule_based_stress_batch(
     *,
     registry: QualifiedSignalRegistry,
@@ -2215,8 +2209,7 @@ def _build_rule_based_stress_batch(
 
 def assess_crisis_reliability(
     *,
-    native_covered: bool,
-    native_detail: str,
+    native_window_metrics: tuple[CrisisWindowMetrics, ...] = (),
     deployment_registry: QualifiedSignalRegistry | None,
     strategy_cfg: CandidateStrategyConfig,
     config: Layer2AllocationConfig,
@@ -2225,124 +2218,167 @@ def assess_crisis_reliability(
     deploy_leverage: float,
     crisis_windows: tuple[CrisisWindow, ...] = DEFAULT_CRISIS_WINDOWS,
 ) -> CrisisReliabilityAssessment:
-    """L2 champion(이미 확정된 registry)이 L1/L2/L3가 전혀 보지 않은 실제 역사적
-    붕괴장에서 기존 리스크 한도(l2_max_mdd_abs)를 벗어나지 않는지 검증한다.
-
-    champion의 전략 정체성은 재학습하지 않는다 — 순수 rule-based 신호를 crisis window
-    가격 데이터에 그대로 적용한다([LIMIT-08]).
-    """
-    if native_covered:
-        return CrisisReliabilityAssessment(
-            status="native_coverage", verified=True, detail=native_detail,
-        )
-
-    if deployment_registry is None or not deployment_registry.by_symbol:
-        return CrisisReliabilityAssessment(
-            status="untested_no_data", verified=False,
-            detail="no deployment registry available to stress-test",
-        )
-
+    """Replay the frozen champion across crisis windows. [ADR_20260717_L2_CRISIS_SURVIVAL_POLICY]"""
     from src.domain.futures.optimization.opt_data_utils import load_futures_data_maps_for_symbols
     from src.domain.futures.strategy.timeframe_contracts import resample_alias
     from src.domain.futures.strategy.timeframe_probe import _resample_ohlcv
 
-    # "8h" 등 파생 TF는 enriched 정적 파일이 없다(4h에서 런타임 리샘플링되는 대상) — 항상
-    # 실제 파일이 존재하는 "4h" 기준으로 로드한 뒤, 필요 시 target tf로 리샘플링한다.
     _load_tf = "4h"
+    replayed_metrics: list[CrisisWindowMetrics] = []
 
-    for window in crisis_windows:
-        overlap_symbols = sorted(set(window.symbols) & set(deployment_registry.by_symbol.keys()))
-        logger.info(
-            "[CRISIS-STRESS] window=%s registry_symbols=%d overlap_symbols=%d",
-            window.label,
-            len(deployment_registry.by_symbol),
-            len(overlap_symbols),
-        )
-        if not overlap_symbols:
-            continue
-        try:
-            data_maps, _oos_maps, valid_symbols = load_futures_data_maps_for_symbols(
-                symbols=overlap_symbols,
-                tf=_load_tf,
-                fetch_start=str(window.start),
-                start=str(window.start),
-                is_end=str(window.end),
-                end=str(window.end),
-                skip_metrics=True,
-                scope_name="l2_crisis_stress",
+    if deployment_registry is None or not deployment_registry.by_symbol:
+        replayed_metrics = []
+    else:
+        for window in crisis_windows:
+            overlap_symbols = sorted(set(window.symbols) & set(deployment_registry.by_symbol.keys()))
+            logger.info(
+                "[CRISIS-STRESS] window=%s registry_symbols=%d overlap_symbols=%d",
+                window.label,
+                len(deployment_registry.by_symbol),
+                len(overlap_symbols),
             )
-        except Exception:
-            logger.exception("[CRISIS-STRESS] data load failed window=%s", window.label)
-            continue
-        logger.info("[CRISIS-STRESS] window=%s valid_symbols=%d", window.label, len(valid_symbols))
-        if not valid_symbols:
-            continue
+            if not overlap_symbols:
+                replayed_metrics.append(
+                    _make_invalid_metric(window.label, "no overlapping symbols")
+                )
+                continue
+            try:
+                data_maps, _oos_maps, valid_symbols = load_futures_data_maps_for_symbols(
+                    symbols=overlap_symbols,
+                    tf=_load_tf,
+                    fetch_start=str(window.start),
+                    start=str(window.start),
+                    is_end=str(window.end),
+                    end=str(window.end),
+                    skip_metrics=True,
+                    scope_name="l2_crisis_stress",
+                )
+            except Exception:
+                logger.exception("[CRISIS-STRESS] data load failed window=%s", window.label)
+                replayed_metrics.append(
+                    _make_invalid_metric(window.label, "data load exception: see log")
+                )
+                continue
+            logger.info("[CRISIS-STRESS] window=%s valid_symbols=%d", window.label, len(valid_symbols))
+            if not valid_symbols:
+                replayed_metrics.append(
+                    _make_invalid_metric(window.label, "no valid symbols after load")
+                )
+                continue
 
-        if tf == _load_tf:
-            aligned_maps = {s: {tf: data_maps[s][_load_tf]} for s in valid_symbols if _load_tf in data_maps[s]}
-        else:
-            alias = resample_alias(tf)
-            aligned_maps = {}
-            for sym in valid_symbols:
-                base_df = data_maps[sym].get(_load_tf)
-                if base_df is None or (hasattr(base_df, "empty") and base_df.empty):
-                    continue
-                try:
-                    aligned_maps[sym] = {tf: _resample_ohlcv(base_df, alias)}
-                except Exception:
-                    logger.exception("[CRISIS-STRESS] resample failed sym=%s tf=%s", sym, tf)
-        valid_symbols = [s for s in valid_symbols if s in aligned_maps]
-        logger.info("[CRISIS-STRESS] window=%s resampled_symbols=%d", window.label, len(valid_symbols))
-        if not valid_symbols:
-            continue
+            if tf == _load_tf:
+                aligned_maps = {s: {tf: data_maps[s][_load_tf]} for s in valid_symbols if _load_tf in data_maps[s]}
+            else:
+                alias = resample_alias(tf)
+                aligned_maps = {}
+                for sym in valid_symbols:
+                    base_df = data_maps[sym].get(_load_tf)
+                    if base_df is None or (hasattr(base_df, "empty") and base_df.empty):
+                        continue
+                    try:
+                        aligned_maps[sym] = {tf: _resample_ohlcv(base_df, alias)}
+                    except Exception:
+                        logger.exception("[CRISIS-STRESS] resample failed sym=%s tf=%s", sym, tf)
+            valid_symbols = [s for s in valid_symbols if s in aligned_maps]
+            logger.info("[CRISIS-STRESS] window=%s resampled_symbols=%d", window.label, len(valid_symbols))
+            if not valid_symbols:
+                replayed_metrics.append(
+                    _make_invalid_metric(window.label, "no symbols after resample")
+                )
+                continue
 
-        aligned_stress = align_data_maps(aligned_maps, valid_symbols, tf, cache_result=False)
-        logger.info("[CRISIS-STRESS] window=%s aligned_bars=%d", window.label, len(aligned_stress.datetimes))
-        if len(aligned_stress.datetimes) < 10:
-            continue
+            aligned_stress = align_data_maps(aligned_maps, valid_symbols, tf, cache_result=False)
+            logger.info("[CRISIS-STRESS] window=%s aligned_bars=%d", window.label, len(aligned_stress.datetimes))
+            if len(aligned_stress.datetimes) < 10:
+                replayed_metrics.append(
+                    _make_invalid_metric(window.label, f"aligned bars {len(aligned_stress.datetimes)} < 10")
+                )
+                continue
 
-        stress_registry = dataclasses.replace(
-            deployment_registry,
-            by_symbol={
-                s: deployment_registry.by_symbol[s] for s in valid_symbols if s in deployment_registry.by_symbol
-            },
-            ready_symbols=tuple(s for s in valid_symbols if s in deployment_registry.by_symbol),
-        )
-        stress_batch = _build_rule_based_stress_batch(
-            registry=stress_registry, aligned=aligned_stress, strategy_cfg=strategy_cfg, tf=tf,
-        )
-        logger.info("[CRISIS-STRESS] window=%s events=%d", window.label, len(stress_batch.events))
-        if not stress_batch.events:
-            continue
+            stress_registry = dataclasses.replace(
+                deployment_registry,
+                by_symbol={
+                    s: deployment_registry.by_symbol[s] for s in valid_symbols if s in deployment_registry.by_symbol
+                },
+                ready_symbols=tuple(s for s in valid_symbols if s in deployment_registry.by_symbol),
+            )
+            stress_batch = _build_rule_based_stress_batch(
+                registry=stress_registry, aligned=aligned_stress, strategy_cfg=strategy_cfg, tf=tf,
+            )
+            logger.info("[CRISIS-STRESS] window=%s events=%d", window.label, len(stress_batch.events))
+            if not stress_batch.events:
+                replayed_metrics.append(
+                    _make_invalid_metric(window.label, "no events generated")
+                )
+                continue
 
-        stress_result = run_l3_holdout(
-            signal_batch=stress_batch,
-            aligned=aligned_stress,
-            holdout_span=(0, len(aligned_stress.datetimes)),
-            config=config,
-            caps=caps,
-            tf=tf,
-            deploy_leverage=deploy_leverage,
-            verbose=False,
-        )
-        exceeded = stress_result.mdd > float(config.l2_max_mdd_abs)
-        return CrisisReliabilityAssessment(
-            status="stress_tested_fail" if exceeded else "stress_tested_pass",
-            verified=not exceeded,
-            detail=(
-                f"{window.label}: mdd={stress_result.mdd:.4f} cagr={stress_result.cagr:+.4f} "
-                f"symbols={len(valid_symbols)}"
-            ),
-            stress_window_label=window.label,
-            stress_symbol_count=len(valid_symbols),
-            stress_mdd=stress_result.mdd,
-            stress_cagr=stress_result.cagr,
-        )
+            try:
+                stress_result = run_l3_holdout(
+                    signal_batch=stress_batch,
+                    aligned=aligned_stress,
+                    holdout_span=(0, len(aligned_stress.datetimes)),
+                    config=config,
+                    caps=caps,
+                    tf=tf,
+                    deploy_leverage=deploy_leverage,
+                    verbose=False,
+                )
+            except Exception:
+                logger.exception("[CRISIS-STRESS] simulation failed window=%s", window.label)
+                replayed_metrics.append(
+                    _make_invalid_metric(window.label, "simulation exception: see log")
+                )
+                continue
 
-    return CrisisReliabilityAssessment(
-        status="untested_no_data",
-        verified=False,
-        detail="no registered crisis window produced usable overlap/data",
+            bar_count = len(aligned_stress.datetimes)
+            event_count = len(stress_batch.events)
+            obs_days = (window.end - window.start).days
+            replayed_metrics.append(
+                CrisisWindowMetrics(
+                    label=window.label,
+                    status="stress_tested_fail",
+                    detail=(
+                        f"mdd={stress_result.mdd:.4f} cagr={stress_result.cagr:+.4f} "
+                        f"cvar95={stress_result.cvar95:.4f} trades={stress_result.n_trades} "
+                        f"symbols={len(valid_symbols)}"
+                    ),
+                    symbol_count=len(valid_symbols),
+                    observation_days=obs_days,
+                    bar_count=bar_count,
+                    event_count=event_count,
+                    trade_count=stress_result.n_trades,
+                    mdd=stress_result.mdd,
+                    cagr=stress_result.cagr,
+                    cvar_95=stress_result.cvar95,
+                )
+            )
+
+    all_metrics = tuple(native_window_metrics) + tuple(replayed_metrics)
+    return evaluate_crisis_survival(
+        all_metrics,
+        max_mdd_abs=config.l2_max_mdd_abs * (1.0 - config.l2_deploy_mdd_margin),
+        min_cagr=config.l2_min_worst_fold_cagr,
+        max_cvar_95=config.l2_max_cvar_95,
+        min_symbols=config.l2_crisis_min_symbols,
+        min_observation_days=config.l2_crisis_min_observation_days,
+        min_trades=config.l2_min_trades,
+        min_usable_windows=config.l2_crisis_min_usable_windows,
+    )
+
+
+def _make_invalid_metric(label: str, reason: str) -> CrisisWindowMetrics:
+    return CrisisWindowMetrics(
+        label=label,
+        status="stress_data_invalid",
+        detail=reason,
+        symbol_count=0,
+        observation_days=0,
+        bar_count=0,
+        event_count=0,
+        trade_count=0,
+        mdd=None,
+        cagr=None,
+        cvar_95=None,
     )
 
 
@@ -2352,16 +2388,24 @@ def apply_crisis_reliability_override(
     *,
     require_crisis_reliability: bool,
 ) -> Layer2Result:
+    """Apply the monotonic crisis survival promotion override. [ADR_20260717_L2_CRISIS_SURVIVAL_POLICY]"""
     import dataclasses
 
     updated = dataclasses.replace(
         l2_result,
         crisis_reliability_status=assessment.status,
         crisis_reliability_detail=assessment.detail,
+        crisis_reliability_blockers=assessment.blockers,
+        crisis_window_count=len(assessment.window_results),
+        crisis_usable_window_count=assessment.usable_window_count,
     )
     if require_crisis_reliability and not assessment.verified:
+        if not l2_result.gate_passed:
+            return updated
         return dataclasses.replace(
-            updated, gate_passed=False, blocker_reason="crisis_unverified",
+            updated,
+            gate_passed=False,
+            blocker_reason="crisis_survival",
         )
     return updated
 

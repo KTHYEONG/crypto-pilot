@@ -10,11 +10,11 @@ from src.domain.futures.strategy.candidate_contracts import (
     SymbolStrategyEvidence,
 )
 from src.domain.futures.strategy.common.alignment import AlignedMarketData
-from src.domain.futures.strategy.config import CandidateStrategyConfig
+from src.domain.futures.strategy.tiered_workflow.crisis_policy import (
+    CrisisReliabilityAssessment,
+)
 from src.domain.futures.strategy.tiered_workflow.dataclasses import Layer2Result
 from src.domain.futures.strategy.tiered_workflow.pipeline import (
-    CrisisReliabilityAssessment,
-    CrisisWindow,
     apply_crisis_reliability_override,
     assess_crisis_reliability,
 )
@@ -83,30 +83,20 @@ def _make_l2_result(**kwargs: Any) -> Layer2Result:
     return dataclasses.replace(base, **kwargs)
 
 
-def test_assess_crisis_reliability_native_coverage_skips_stress_check() -> None:
-    result = assess_crisis_reliability(
-        native_covered=True,
-        native_detail="fold=0 mdd=0.180 cagr=-0.050",
-        deployment_registry=None,
-        strategy_cfg=MagicMock(),
-        config=MagicMock(l2_max_mdd_abs=0.30),
-        caps=MagicMock(),
-        tf="8h",
-        deploy_leverage=1.5,
-    )
-
-    assert result.status == "native_coverage"
-    assert result.verified is True
-    assert result.detail == "fold=0 mdd=0.180 cagr=-0.050"
-
-
 def test_assess_crisis_reliability_untested_when_no_registry() -> None:
     result = assess_crisis_reliability(
-        native_covered=False,
-        native_detail="no_bottleneck_caliber_fold_in_window",
         deployment_registry=None,
         strategy_cfg=MagicMock(),
-        config=MagicMock(l2_max_mdd_abs=0.30),
+        config=MagicMock(
+            l2_max_mdd_abs=0.30,
+            l2_deploy_mdd_margin=0.30,
+            l2_min_worst_fold_cagr=-0.05,
+            l2_max_cvar_95=0.06,
+            l2_crisis_min_symbols=10,
+            l2_crisis_min_observation_days=300,
+            l2_min_trades=30,
+            l2_crisis_min_usable_windows=1,
+        ),
         caps=MagicMock(),
         tf="8h",
         deploy_leverage=1.5,
@@ -120,11 +110,18 @@ def test_assess_crisis_reliability_untested_when_registry_has_no_window_overlap(
     registry = _make_registry(symbol="NOTINCRISISUSDT", strategy_id="trend_donchian:donchian_72")
 
     result = assess_crisis_reliability(
-        native_covered=False,
-        native_detail="no_bottleneck_caliber_fold_in_window",
         deployment_registry=registry,
         strategy_cfg=MagicMock(),
-        config=MagicMock(l2_max_mdd_abs=0.30),
+        config=MagicMock(
+            l2_max_mdd_abs=0.30,
+            l2_deploy_mdd_margin=0.30,
+            l2_min_worst_fold_cagr=-0.05,
+            l2_max_cvar_95=0.06,
+            l2_crisis_min_symbols=10,
+            l2_crisis_min_observation_days=300,
+            l2_min_trades=30,
+            l2_crisis_min_usable_windows=1,
+        ),
         caps=MagicMock(),
         tf="8h",
         deploy_leverage=1.5,
@@ -134,66 +131,15 @@ def test_assess_crisis_reliability_untested_when_registry_has_no_window_overlap(
     assert result.verified is False
 
 
-def test_assess_crisis_reliability_stress_tested_fail_when_mdd_exceeds_cap(
-    mocker: Any,
-) -> None:
-    registry = _make_registry(symbol="ARUSDT", strategy_id="trend_donchian:donchian_72")
-    aligned_stress = _make_aligned()
-    window = CrisisWindow(
-        start=aligned_stress.datetimes[0].astype("datetime64[D]").tolist(),
-        end=aligned_stress.datetimes[-1].astype("datetime64[D]").tolist(),
-        label="test_crisis",
-        symbols=("ARUSDT",),
-        source_note="synthetic",
-    )
-    panel = MagicMock(
-        family="trend_donchian",
-        variant="donchian_72",
-        expected_holding_bars=12,
-        signed_score_2d=np.ones((len(aligned_stress.datetimes), 1)),
-        valid_mask_2d=np.ones((len(aligned_stress.datetimes), 1), dtype=bool),
-    )
-
-    mocker.patch(
-        "src.domain.futures.optimization.opt_data_utils.load_futures_data_maps_for_symbols",
-        return_value=({"ARUSDT": {}}, {}, ["ARUSDT"]),
-    )
-    mocker.patch(
-        "src.domain.futures.strategy.tiered_workflow.pipeline.align_data_maps",
-        return_value=aligned_stress,
-    )
-    mocker.patch(
-        "src.domain.futures.strategy.rule_signals.build_rule_signal_panels",
-        return_value=(panel,),
-    )
-    mocker.patch(
-        "src.domain.futures.strategy.tiered_workflow.pipeline.run_l3_holdout",
-        return_value=MagicMock(mdd=0.40, cagr=-0.10),
-    )
-
-    result = assess_crisis_reliability(
-        native_covered=False,
-        native_detail="no_bottleneck_caliber_fold_in_window",
-        deployment_registry=registry,
-        strategy_cfg=CandidateStrategyConfig(),
-        config=MagicMock(l2_max_mdd_abs=0.30),
-        caps=MagicMock(),
-        tf="8h",
-        deploy_leverage=1.5,
-        crisis_windows=(window,),
-    )
-
-    assert result.status == "stress_tested_fail"
-    assert result.verified is False
-    assert result.stress_mdd == 0.40
-    assert result.stress_symbol_count == 1
-
-
 def test_apply_crisis_reliability_override_blocks_when_unverified() -> None:
     l2_result = _make_l2_result()
     assessment = CrisisReliabilityAssessment(
-        status="stress_tested_fail", verified=False,
+        status="stress_tested_fail",
+        verified=False,
         detail="luna_ftx_2022_collapse: mdd=0.4000 > 0.30",
+        window_results=(),
+        blockers=("test:mdd_abs",),
+        usable_window_count=0,
     )
 
     updated = apply_crisis_reliability_override(
@@ -201,14 +147,19 @@ def test_apply_crisis_reliability_override_blocks_when_unverified() -> None:
     )
 
     assert updated.gate_passed is False
-    assert updated.blocker_reason == "crisis_unverified"
+    assert updated.blocker_reason == "crisis_survival"
     assert updated.crisis_reliability_status == "stress_tested_fail"
 
 
 def test_apply_crisis_reliability_override_opt_out_preserves_gate() -> None:
     l2_result = _make_l2_result()
     assessment = CrisisReliabilityAssessment(
-        status="stress_tested_fail", verified=False, detail="...",
+        status="stress_tested_fail",
+        verified=False,
+        detail="...",
+        window_results=(),
+        blockers=("test:mdd_abs",),
+        usable_window_count=0,
     )
 
     updated = apply_crisis_reliability_override(

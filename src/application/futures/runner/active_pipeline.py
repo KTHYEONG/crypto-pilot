@@ -2937,8 +2937,6 @@ def _run_strategy_stage(
                 )
                 _l2_config = Layer2AllocationConfig.from_mapping(best_l2_params)
                 _crisis_assessment = assess_crisis_reliability(
-                    native_covered=False,
-                    native_detail="",
                     deployment_registry=getattr(l1_res, "deployment_registry", None),
                     strategy_cfg=tiered_cfg,
                     config=_l2_config,
