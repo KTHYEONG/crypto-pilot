@@ -2888,6 +2888,13 @@ def _run_awf_simulation(
 
                 _regime_code_1d = compress_regime_codes(_regime_code_1d)
 
+        from src.domain.futures.strategy.market_regime import apply_regime_cap_release_cooldown
+
+        _regime_code_1d_for_cap = apply_regime_cap_release_cooldown(
+            _regime_code_1d,
+            cooldown_bars=int(getattr(config, "l2_regime_cap_release_cooldown_bars", 0)),
+        )
+
         if cache.bucket_edges_by_fold:
             bucket_edges_by_fold = list(cache.bucket_edges_by_fold)
             if logger.isEnabledFor(logging.DEBUG):
@@ -3819,7 +3826,7 @@ def _run_awf_simulation(
                     support_mask=support_mask,
                 )
             w = np.where(tradeable_mask, w, 0.0)
-            _regime_now_for_cap = int(_regime_code_1d[t]) if t < len(_regime_code_1d) else 2
+            _regime_now_for_cap = int(_regime_code_1d_for_cap[t]) if t < len(_regime_code_1d_for_cap) else 2
             _state_names_for_cap = (
                 _routing_diag.active_state_names if _routing_diag is not None else ("bull", "bear", "crisis")
             )

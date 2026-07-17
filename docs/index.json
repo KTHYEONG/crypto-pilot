@@ -120,7 +120,8 @@
     "testing": [
       "tests/unit/domain/futures/strategy/test_tiered_workflow.py",
       "tests/unit/domain/futures/optimization/test_workflow.py",
-      "tests/unit/domain/futures/strategy/tiered_workflow/test_regime_policy.py"
+      "tests/unit/domain/futures/strategy/tiered_workflow/test_regime_policy.py",
+      "tests/unit/domain/futures/strategy/test_market_regime.py"
     ]
   },
   "src/domain/futures/strategy/tiered_logging.py": {

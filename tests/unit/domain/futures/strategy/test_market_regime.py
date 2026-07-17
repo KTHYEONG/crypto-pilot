@@ -8,11 +8,13 @@ from src.domain.futures.strategy.config import RegimeConfig
 from src.domain.futures.strategy.market_regime import (
     _persistence_targeted_band,
     _schmitt_directional_state,
+    apply_regime_cap_release_cooldown,
     compute_market_regime_context,
     compute_risk_overlay,
     compute_trend_efficiency_1d,
     evaluate_regime_quality,
 )
+from src.domain.futures.strategy.tiered_workflow.awf_sim import _run_awf_simulation
 
 
 def _make_aligned() -> AlignedMarketData:
@@ -363,3 +365,48 @@ class TestRegimeCompression:
         er = compute_trend_efficiency_1d(close, window=4)
         assert np.isnan(er[:4]).all()
         assert np.isfinite(er[4:]).all()
+
+
+# ---------------------------------------------------------------------------
+# L2 Crisis Regime Cap Release Cooldown
+# ---------------------------------------------------------------------------
+
+def test_apply_regime_cap_release_cooldown_noop_when_zero() -> None:
+    code = np.asarray([0, 1, 2, 0, 1], dtype=np.int8)
+    out = apply_regime_cap_release_cooldown(code, cooldown_bars=0)
+    assert np.array_equal(out, code)
+
+
+def test_apply_regime_cap_release_cooldown_never_delays_bear_crisis_entry() -> None:
+    code = np.asarray([0, 0, 0, 2, 2], dtype=np.int8)
+    out = apply_regime_cap_release_cooldown(code, cooldown_bars=5)
+    assert out[3] == 2
+
+
+def test_apply_regime_cap_release_cooldown_delays_bull_return_after_crisis() -> None:
+    code = np.asarray([2, 2, 0, 0, 0, 0], dtype=np.int8)
+    out = apply_regime_cap_release_cooldown(code, cooldown_bars=3)
+    expected = np.asarray([2, 2, 1, 1, 1, 0], dtype=np.int8)
+    assert np.array_equal(out, expected)
+
+
+def test_apply_regime_cap_release_cooldown_substitutes_bear_not_crisis() -> None:
+    code = np.asarray([2, 0, 0], dtype=np.int8)
+    out = apply_regime_cap_release_cooldown(code, cooldown_bars=3)
+    # cooldown-substituted bars become bear(1), never crisis(2)
+    assert out[1] == 1
+    assert (out[out == 2]).size == 1  # only original crisis at bar 0 remains 2
+
+
+def test_apply_regime_cap_release_cooldown_negative_cooldown_raises() -> None:
+    code = np.asarray([0, 1, 2], dtype=np.int8)
+    with pytest.raises(ValueError, match="cooldown_bars"):
+        apply_regime_cap_release_cooldown(code, cooldown_bars=-1)
+
+
+def test_run_awf_simulation_wires_regime_cap_release_cooldown_before_cap_call() -> None:
+    import inspect
+
+    source = inspect.getsource(_run_awf_simulation)
+    assert "apply_regime_cap_release_cooldown(" in source
+    assert "_regime_code_1d_for_cap[t]" in source
