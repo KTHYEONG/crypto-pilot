@@ -27,6 +27,7 @@ from src.domain.futures.strategy.tiered_workflow.pipeline import (
 # helpers
 # ---------------------------------------------------------------------------
 
+
 def _make_metric(
     label: str = "test_window",
     status: str = "stress_tested_pass",
@@ -72,6 +73,7 @@ def _make_assessment(**kw: object) -> CrisisReliabilityAssessment:
 # Scenario 1 — Happy path
 # ---------------------------------------------------------------------------
 
+
 def test_evaluate_crisis_survival_passes_all_usable_windows() -> None:
     w1 = _make_metric(label="window_a")
     w2 = _make_metric(label="window_b")
@@ -97,6 +99,7 @@ def test_evaluate_crisis_survival_passes_all_usable_windows() -> None:
 # ---------------------------------------------------------------------------
 # Scenario 2 — Current LUNA/FTX metrics fail
 # ---------------------------------------------------------------------------
+
 
 def test_evaluate_crisis_survival_blocks_current_luna_ftx_metrics() -> None:
     w = _make_metric(
@@ -127,6 +130,7 @@ def test_evaluate_crisis_survival_blocks_current_luna_ftx_metrics() -> None:
 # Scenario 3 — Data insufficiency / non-finite metrics
 # ---------------------------------------------------------------------------
 
+
 def test_evaluate_crisis_survival_rejects_insufficient_or_nonfinite_metrics() -> None:
     cases: list[tuple[str, CrisisWindowMetrics]] = [
         ("too few symbols", _make_metric(symbol_count=9)),
@@ -154,6 +158,7 @@ def test_evaluate_crisis_survival_rejects_insufficient_or_nonfinite_metrics() ->
 # ---------------------------------------------------------------------------
 # Scenario 4 — No early return
 # ---------------------------------------------------------------------------
+
 
 def test_assess_crisis_reliability_evaluates_every_window_without_early_return(
     mocker: MockerFixture,
@@ -185,12 +190,18 @@ def test_assess_crisis_reliability_evaluates_every_window_without_early_return(
 
     _all_syms = tuple(_make_registry().by_symbol.keys())
     window_a = CrisisWindow(
-        start=date(2022, 4, 1), end=date(2023, 2, 15),
-        label="crisis_a", symbols=_all_syms, source_note="a",
+        start=date(2022, 4, 1),
+        end=date(2023, 2, 15),
+        label="crisis_a",
+        symbols=_all_syms,
+        source_note="a",
     )
     window_b = CrisisWindow(
-        start=date(2022, 4, 1), end=date(2023, 2, 15),
-        label="crisis_b", symbols=_all_syms, source_note="b",
+        start=date(2022, 4, 1),
+        end=date(2023, 2, 15),
+        label="crisis_b",
+        symbols=_all_syms,
+        source_note="b",
     )
 
     assessment = assess_crisis_reliability(
@@ -212,6 +223,7 @@ def test_assess_crisis_reliability_evaluates_every_window_without_early_return(
 # ---------------------------------------------------------------------------
 # Scenario 5 — Error isolation
 # ---------------------------------------------------------------------------
+
 
 def test_assess_crisis_reliability_records_loader_failure_and_continues(
     mocker: MockerFixture,
@@ -239,12 +251,18 @@ def test_assess_crisis_reliability_records_loader_failure_and_continues(
 
     _all_syms = tuple(_make_registry().by_symbol.keys())
     window_a = CrisisWindow(
-        start=date(2022, 4, 1), end=date(2023, 2, 15),
-        label="crash_a", symbols=_all_syms, source_note="a",
+        start=date(2022, 4, 1),
+        end=date(2023, 2, 15),
+        label="crash_a",
+        symbols=_all_syms,
+        source_note="a",
     )
     window_b = CrisisWindow(
-        start=date(2022, 4, 1), end=date(2023, 2, 15),
-        label="crash_b", symbols=_all_syms, source_note="b",
+        start=date(2022, 4, 1),
+        end=date(2023, 2, 15),
+        label="crash_b",
+        symbols=_all_syms,
+        source_note="b",
     )
 
     assessment = assess_crisis_reliability(
@@ -265,6 +283,7 @@ def test_assess_crisis_reliability_records_loader_failure_and_continues(
 # ---------------------------------------------------------------------------
 # Scenario 6 — Native parity
 # ---------------------------------------------------------------------------
+
 
 def test_assess_crisis_reliability_native_metrics_use_same_policy() -> None:
     w = _make_metric(
@@ -292,6 +311,7 @@ def test_assess_crisis_reliability_native_metrics_use_same_policy() -> None:
 # ---------------------------------------------------------------------------
 # Scenario 8 — Monotonic override
 # ---------------------------------------------------------------------------
+
 
 def test_apply_crisis_reliability_override_is_monotonic_and_typed() -> None:
     existing_passed = Layer2Result(
@@ -411,6 +431,7 @@ def test_apply_crisis_reliability_override_passes_through_opt_out() -> None:
 # Scenario 9 — Config validation
 # ---------------------------------------------------------------------------
 
+
 def test_layer2_crisis_config_defaults_and_validation() -> None:
     cfg = Layer2AllocationConfig()
     assert cfg.l2_crisis_min_symbols == 10
@@ -431,6 +452,7 @@ def test_layer2_crisis_config_defaults_and_validation() -> None:
 # Test: insufficient usable windows
 # ---------------------------------------------------------------------------
 
+
 def test_evaluate_crisis_survival_insufficient_usable_windows() -> None:
     assessment = evaluate_crisis_survival(
         (),
@@ -449,6 +471,7 @@ def test_evaluate_crisis_survival_insufficient_usable_windows() -> None:
 # ---------------------------------------------------------------------------
 # Scenario 10 — Sequential replay (performance proxy)
 # ---------------------------------------------------------------------------
+
 
 def test_assess_crisis_reliability_replays_windows_sequentially(
     mocker: MockerFixture,
@@ -484,8 +507,11 @@ def test_assess_crisis_reliability_replays_windows_sequentially(
     _all_syms = tuple(_make_registry().by_symbol.keys())
     windows = tuple(
         CrisisWindow(
-            start=date(2022, 4, 1), end=date(2023, 2, 15),
-            label=f"w{i}", symbols=_all_syms, source_note="x",
+            start=date(2022, 4, 1),
+            end=date(2023, 2, 15),
+            label=f"w{i}",
+            symbols=_all_syms,
+            source_note="x",
         )
         for i in range(3)
     )
@@ -508,18 +534,29 @@ def test_assess_crisis_reliability_replays_windows_sequentially(
 # Test: threshold integrity — evaluate_crisis_survival rejects invalid thresholds
 # ---------------------------------------------------------------------------
 
+
 def test_evaluate_crisis_survival_rejects_bad_thresholds() -> None:
     w = _make_metric()
     with pytest.raises(ValueError, match="max_mdd_abs"):
         evaluate_crisis_survival(
-            (w,), max_mdd_abs=0.0, min_cagr=-0.05, max_cvar_95=0.06,
-            min_symbols=10, min_observation_days=300, min_trades=30,
+            (w,),
+            max_mdd_abs=0.0,
+            min_cagr=-0.05,
+            max_cvar_95=0.06,
+            min_symbols=10,
+            min_observation_days=300,
+            min_trades=30,
             min_usable_windows=1,
         )
     with pytest.raises(ValueError, match="min_usable_windows"):
         evaluate_crisis_survival(
-            (w,), max_mdd_abs=0.21, min_cagr=-0.05, max_cvar_95=0.06,
-            min_symbols=10, min_observation_days=300, min_trades=30,
+            (w,),
+            max_mdd_abs=0.21,
+            min_cagr=-0.05,
+            max_cvar_95=0.06,
+            min_symbols=10,
+            min_observation_days=300,
+            min_trades=30,
             min_usable_windows=0,
         )
 
@@ -527,6 +564,7 @@ def test_evaluate_crisis_survival_rejects_bad_thresholds() -> None:
 # ---------------------------------------------------------------------------
 # Scenario 7 — Anti-leakage: crisis assessment has no Optuna/study fields
 # ---------------------------------------------------------------------------
+
 
 def test_active_pipeline_applies_crisis_only_after_champion_selection() -> None:
     fields = {f.name for f in dataclasses.fields(CrisisReliabilityAssessment)}
@@ -536,6 +574,7 @@ def test_active_pipeline_applies_crisis_only_after_champion_selection() -> None:
     assert "study_name" not in fields
 
     import inspect
+
     sig = inspect.signature(evaluate_crisis_survival)
     for p in ("params", "objective", "trial", "study"):
         assert p not in sig.parameters, f"leak: {p} in evaluate_crisis_survival"
@@ -544,6 +583,7 @@ def test_active_pipeline_applies_crisis_only_after_champion_selection() -> None:
 # ---------------------------------------------------------------------------
 # Mock helpers
 # ---------------------------------------------------------------------------
+
 
 @dataclass
 class _MockL3Result:
@@ -584,6 +624,7 @@ def _make_aligned(n_bars: int = 100) -> _MockAligned:
 
 def _make_dummy_dataframe() -> object:
     import pandas as pd
+
     return pd.DataFrame({"open": [1.0], "high": [1.0], "low": [1.0], "close": [1.0]})
 
 
@@ -607,6 +648,7 @@ class _MockRegistry:
 
 def _make_registry() -> Any:
     return _MockRegistry()
+
 
 def _make_data_maps() -> dict[str, dict[str, object]]:
     return {f"SYM{i}USDT": {"4h": _make_dummy_dataframe()} for i in range(15)}

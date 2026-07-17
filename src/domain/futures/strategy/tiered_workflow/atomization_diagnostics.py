@@ -44,16 +44,10 @@ def _build_report(
     atomized_median = float(median(gross_values))
 
     if n_cells > 0:
-        n_flip = sum(
-            1 for c in cells if (c.mean_gross_bps > 0) != (pooled_gross > 0)
-        )
+        n_flip = sum(1 for c in cells if (c.mean_gross_bps > 0) != (pooled_gross > 0))
         sign_flip = n_flip / n_cells
         if total_obs > 0:
-            n_flip_weighted = sum(
-                c.n_obs
-                for c in cells
-                if (c.mean_gross_bps > 0) != (pooled_gross > 0)
-            )
+            n_flip_weighted = sum(c.n_obs for c in cells if (c.mean_gross_bps > 0) != (pooled_gross > 0))
             sign_flip_w = n_flip_weighted / total_obs
         else:
             sign_flip_w = sign_flip
@@ -109,8 +103,5 @@ def diagnose_strategy_atomization(
     for ev in evidence:
         groups.setdefault(ev.key.strategy_id, []).append(ev)
 
-    reports = [
-        _build_report(sid, cells, min_effective_obs=min_effective_obs)
-        for sid, cells in sorted(groups.items())
-    ]
+    reports = [_build_report(sid, cells, min_effective_obs=min_effective_obs) for sid, cells in sorted(groups.items())]
     return tuple(reports)

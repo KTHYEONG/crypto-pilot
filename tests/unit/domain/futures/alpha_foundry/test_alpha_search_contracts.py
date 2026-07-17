@@ -314,7 +314,6 @@ class TestTimeframeGrid:
         with pytest.raises(ValueError, match="timeframe value must be positive"):
             timeframe_to_minutes("0h")
 
-
     def test_rejects_unsupported_timeframe(self) -> None:
         """S3-6: unsupported timeframe raises ValueError."""
         with pytest.raises(ValueError, match="unsupported timeframe"):

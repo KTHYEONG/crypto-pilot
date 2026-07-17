@@ -168,11 +168,7 @@ def evaluate_symbol_data_sufficiency(
         pass_flag = bool(warmup_ok and actual_is_bars >= min_is_bars and panel_history_ok and gap_ok)
     else:
         pass_flag = bool(
-            fetch_ok
-            and warmup_ok
-            and actual_is_bars >= min_is_bars
-            and actual_oos_bars >= min_oos_bars
-            and gap_ok
+            fetch_ok and warmup_ok and actual_is_bars >= min_is_bars and actual_oos_bars >= min_oos_bars and gap_ok
         )
     reason = "ok"
     if not fetch_ok and not is_historical_stage5:
@@ -297,6 +293,7 @@ def filter_symbols_by_data_sufficiency(
         import json
 
         from src.core.settings import FuturesStorageLayout
+
         profiles_path = FuturesStorageLayout.get_metadata_path("symbol_sync_profiles.json")
         if not profiles_path.exists():
             try:
@@ -382,6 +379,7 @@ def _should_load_exec_1m(load_exec_1m: bool | None) -> bool:
 def _safe_read_funding_parquet(symbol: str) -> pd.DataFrame | None:
     """Read funding parquet for symbol with defensive fallback."""
     from src.core.settings import FuturesStorageLayout
+
     f_path = FuturesStorageLayout.get_funding_path(symbol)
     if not f_path.exists():
         return None
@@ -617,6 +615,7 @@ def _prepare_funding_metrics(
         funding_df_prepared = funding_df[cols_fr].sort_values("timestamp").reset_index(drop=True)
 
     from src.core.settings import FuturesStorageLayout
+
     m_path = FuturesStorageLayout.get_metrics_path(sym)
     if m_path.exists():
         try:
@@ -687,6 +686,7 @@ def load_single_symbol_data(
             req_end_dt = pd.Timestamp(end, tz="UTC")
             from_cache = False
             from src.core.settings import FuturesStorageLayout
+
             enriched_path = FuturesStorageLayout.get_enriched_path(sym, tf_l)
             if enriched_path.exists():
                 deps = [
@@ -811,6 +811,7 @@ def load_single_symbol_data(
 
                 # Save enriched cache (full date range) for future runs
                 from src.core.settings import FuturesStorageLayout
+
                 raw_parquet_path = FuturesStorageLayout.get_ohlcv_path(sym, tf_l)
                 enriched_stale = not enriched_path.exists() or (
                     raw_parquet_path.exists() and enriched_path.stat().st_mtime < raw_parquet_path.stat().st_mtime
@@ -1001,6 +1002,7 @@ def load_futures_data_maps_for_symbols(
         all_cache_hit = True
         for tf_l in tfs_to_load:
             from src.core.settings import FuturesStorageLayout
+
             enriched_path = FuturesStorageLayout.get_enriched_path(sym, tf_l)
             if enriched_path.exists():
                 deps = [
@@ -1206,8 +1208,14 @@ def load_ltf_exec_1m_frame(
     start_datetime: pd.Timestamp,
     end_datetime: pd.Timestamp,
     required_columns: tuple[str, ...] = (
-        "datetime", "high", "low", "close", "volume",
-        "taker_buy_base_volume", "quote_vol", "trades",
+        "datetime",
+        "high",
+        "low",
+        "close",
+        "volume",
+        "taker_buy_base_volume",
+        "quote_vol",
+        "trades",
     ),
 ) -> pd.DataFrame | None:
     """[ADR_20260713_TASK_L1_HYBRID_MEMORY_AUDIT] Load bounded 1m LTF data.

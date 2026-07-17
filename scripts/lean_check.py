@@ -13,17 +13,20 @@ JsonDiag = dict[str, Any]
 
 
 def _emit_json(
-    status: str, phase: str,
+    status: str,
+    phase: str,
     diagnostics: list[JsonDiag],
     coverage: int | None = None,
 ) -> str:
-    return json.dumps({
-        "status": status,
-        "phase": phase,
-        "exit_code": 0 if status == "PASS" else 1,
-        "coverage": coverage,
-        "diagnostics": diagnostics,
-    })
+    return json.dumps(
+        {
+            "status": status,
+            "phase": phase,
+            "exit_code": 0 if status == "PASS" else 1,
+            "coverage": coverage,
+            "diagnostics": diagnostics,
+        }
+    )
 
 
 def run_cmd(cmd: list[str], timeout: int = 120) -> subprocess.CompletedProcess[str]:
@@ -33,7 +36,9 @@ def run_cmd(cmd: list[str], timeout: int = 120) -> subprocess.CompletedProcess[s
         )
     except subprocess.TimeoutExpired:
         return subprocess.CompletedProcess(
-            args=cmd, returncode=124, stdout="",
+            args=cmd,
+            returncode=124,
+            stdout="",
             stderr=f"Error: timed out after {timeout}s.",
         )
 
@@ -182,8 +187,7 @@ def main() -> None:
         test_name = f"test_{module_name}"
         found = any(
             os.path.exists(
-                f"tests/{cat}/{'/'.join(parts[1:-1])}/{test_name}"
-                if parts[1:-1] else f"tests/{cat}/{test_name}"
+                f"tests/{cat}/{'/'.join(parts[1:-1])}/{test_name}" if parts[1:-1] else f"tests/{cat}/{test_name}"
             )
             for cat in ["unit", "integration", "e2e"]
         )
@@ -226,8 +230,7 @@ def main() -> None:
         return
 
     cov_args = (
-        [f"--cov={sf.replace('.py', '').replace('/', '.')}" for sf in source_files]
-        if source_files else ["--cov=src"]
+        [f"--cov={sf.replace('.py', '').replace('/', '.')}" for sf in source_files] if source_files else ["--cov=src"]
     )
 
     core_cmd = ["uv", "run", "pytest", *cov_args, *test_files, "-q", "--tb=line", "--cov-report=term-missing"]
@@ -285,13 +288,11 @@ def main() -> None:
         print(_emit_json("PASS", "all", [], cov_val), file=sys.stderr)
     else:
         last_err = [
-            line for line in pt_res.stdout.splitlines()
-            if any(x in line for x in ("FAIL", "Error", "AssertionError"))
+            line for line in pt_res.stdout.splitlines() if any(x in line for x in ("FAIL", "Error", "AssertionError"))
         ]
         cause = last_err[-1] if last_err else "Check pytest output."
         d = {"file": "", "line": 0, "error": cause, "fix_hint": "Fix failing assertions in tests"}
         _fail_exit("pytest", f"FAIL | Pytest Failed: {cause}", d)
-
 
 
 if __name__ == "__main__":

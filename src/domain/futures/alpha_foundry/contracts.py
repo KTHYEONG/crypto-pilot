@@ -147,7 +147,7 @@ class CrossTfDiagnosticSink(Protocol):
 
 @dataclass(slots=True, frozen=True)
 class CrossTFSharedContext:
-    """    [ADR_20260712_L0_CROSS_TF_PRUNING_PERFORMANCE] Precomputed inputs shared
+    """[ADR_20260712_L0_CROSS_TF_PRUNING_PERFORMANCE] Precomputed inputs shared
     between audit_l0_selected_recipe_independence() and compute_cross_tf_redundancy()
     to eliminate duplicate canonical-context/projection/correlation work when both
     are invoked in the same manifest call.
@@ -155,6 +155,7 @@ class CrossTFSharedContext:
     [ADR_20260712_L0_CROSS_TF_BATCH_ACCELERATION] entry_pos_flat/entry_neg_flat/
     n_entries added for batch jaccard matmul. dict[str, "NDArray[np.int8]"] string
     annotation avoids numpy-eager resolution in slots=True runtime."""
+
     canonical_context: CrossTFCanonicalContext
     proj_cache: dict[str, tuple[NDArray[np.float32], NDArray[np.bool_]]]
     side_entry_cache: dict[str, tuple[NDArray[np.int8], NDArray[np.bool_]]]
@@ -563,11 +564,20 @@ class AlphaGateEvidence:
         if not (0.0 <= self.event_hit_rate <= 1.0):
             raise ValueError("event_hit_rate must be in [0.0, 1.0]")
         numeric_fields = [
-            self.mean_gross_bps, self.mean_cost_bps, self.mean_net_bps,
-            self.gross_lcb_bps, self.net_lcb_bps, self.nw_tstat,
-            self.rank_ic, self.rank_ic_tstat, self.cost_drag_ratio,
-            self.turnover_per_year, self.event_hit_rate, self.payoff_skew,
-            self.liquidity_cost_stress_bps, self.bootstrap_lcb_bps,
+            self.mean_gross_bps,
+            self.mean_cost_bps,
+            self.mean_net_bps,
+            self.gross_lcb_bps,
+            self.net_lcb_bps,
+            self.nw_tstat,
+            self.rank_ic,
+            self.rank_ic_tstat,
+            self.cost_drag_ratio,
+            self.turnover_per_year,
+            self.event_hit_rate,
+            self.payoff_skew,
+            self.liquidity_cost_stress_bps,
+            self.bootstrap_lcb_bps,
         ]
         for v in numeric_fields:
             if not np.isfinite(v):
@@ -606,9 +616,7 @@ class AlphaGateConfig:
             "hedge": 10,
         }
     )
-    family_event_floors: Mapping[str, int] = field(
-        default_factory=lambda: {"funding_flow_carry": 200}
-    )
+    family_event_floors: Mapping[str, int] = field(default_factory=lambda: {"funding_flow_carry": 200})
     min_seed_slots_per_archetype: int = 1
     min_seed_slots_per_timeframe: int = 1
     allow_soft_seed_when_only_soft_failures: bool = True
@@ -931,9 +939,14 @@ class ExecutionArmConfig:
     min_adverse_selection_bps: float = 1.0
     max_arm_count_per_cell: int = 3
 
-    _VALID_STYLES: frozenset[str] = frozenset({
-        "taker_now", "maker_retest", "maker_or_cancel", "hybrid",
-    })
+    _VALID_STYLES: frozenset[str] = frozenset(
+        {
+            "taker_now",
+            "maker_retest",
+            "maker_or_cancel",
+            "hybrid",
+        }
+    )
 
     def __post_init__(self) -> None:
         for s in self.styles:
@@ -969,6 +982,7 @@ class L0DiagnosticConfig:
 @dataclass(slots=True, frozen=True)
 class AlphaFoundryRuntimeConfig:
     """[ADR_20260715_L0_L1_NATIVE_CONTRACT] Runtime mode and L0 gate settings."""
+
     mode: AlphaFoundryMode = "off"
     report_dir: Path = Path("logs/futures/alpha_foundry")
     max_recipes_per_family: int = 64
@@ -1087,9 +1101,7 @@ class AlphaFoundryRuntimeConfig:
                 f"max_discovery_event_jaccard must be in [0.0, 1.0], got {self.max_discovery_event_jaccard}"
             )
         if self.min_discovery_unit_lcb_bps < 0.0:
-            raise ValueError(
-                f"min_discovery_unit_lcb_bps must be >= 0.0, got {self.min_discovery_unit_lcb_bps}"
-            )
+            raise ValueError(f"min_discovery_unit_lcb_bps must be >= 0.0, got {self.min_discovery_unit_lcb_bps}")
         if self.cross_tf_pruning_min_survivors_per_archetype < 1:
             raise ValueError(
                 f"cross_tf_pruning_min_survivors_per_archetype must be >= 1, "
@@ -1097,13 +1109,11 @@ class AlphaFoundryRuntimeConfig:
             )
         if self.cross_tf_pruning_min_survivors_per_tf < 0:
             raise ValueError(
-                f"cross_tf_pruning_min_survivors_per_tf must be >= 0, "
-                f"got {self.cross_tf_pruning_min_survivors_per_tf}"
+                f"cross_tf_pruning_min_survivors_per_tf must be >= 0, got {self.cross_tf_pruning_min_survivors_per_tf}"
             )
         if self.cross_tf_min_common_active_bars < 1:
             raise ValueError(
-                f"cross_tf_min_common_active_bars must be >= 1, "
-                f"got {self.cross_tf_min_common_active_bars}"
+                f"cross_tf_min_common_active_bars must be >= 1, got {self.cross_tf_min_common_active_bars}"
             )
         if not (0.0 <= self.cross_tf_min_directional_entry_jaccard <= 1.0):
             raise ValueError(
@@ -1116,36 +1126,21 @@ class AlphaFoundryRuntimeConfig:
                 f"got {self.cross_tf_min_shared_directional_entries}"
             )
         if not (0.0 <= self.ltf_exec_1m_min_coverage <= 1.0):
-            raise ValueError(
-                f"ltf_exec_1m_min_coverage must be in [0.0, 1.0], "
-                f"got {self.ltf_exec_1m_min_coverage}"
-            )
+            raise ValueError(f"ltf_exec_1m_min_coverage must be in [0.0, 1.0], got {self.ltf_exec_1m_min_coverage}")
         if self.l0_max_rss_mb < 1:
             raise ValueError(f"l0_max_rss_mb must be >= 1, got {self.l0_max_rss_mb}")
         if not (0.0 < self.l0_memory_fraction_cap <= 1.0):
-            raise ValueError(
-                f"l0_memory_fraction_cap must be in (0.0, 1.0], got {self.l0_memory_fraction_cap}"
-            )
+            raise ValueError(f"l0_memory_fraction_cap must be in (0.0, 1.0], got {self.l0_memory_fraction_cap}")
         if self.l0_memory_safety_margin_mb < 0:
-            raise ValueError(
-                f"l0_memory_safety_margin_mb must be >= 0, got {self.l0_memory_safety_margin_mb}"
-            )
+            raise ValueError(f"l0_memory_safety_margin_mb must be >= 0, got {self.l0_memory_safety_margin_mb}")
         if self.ltf_exec_1m_max_symbols < 1:
-            raise ValueError(
-                f"ltf_exec_1m_max_symbols must be >= 1, got {self.ltf_exec_1m_max_symbols}"
-            )
+            raise ValueError(f"ltf_exec_1m_max_symbols must be >= 1, got {self.ltf_exec_1m_max_symbols}")
         if not (1 <= self.ltf_exec_1m_max_workers <= 2):
-            raise ValueError(
-                f"ltf_exec_1m_max_workers must be in [1,2], got {self.ltf_exec_1m_max_workers}"
-            )
+            raise ValueError(f"ltf_exec_1m_max_workers must be in [1,2], got {self.ltf_exec_1m_max_workers}")
         if not (1 <= self.l0_native_tf_max_workers <= 2):
-            raise ValueError(
-                f"l0_native_tf_max_workers must be in [1,2], got {self.l0_native_tf_max_workers}"
-            )
+            raise ValueError(f"l0_native_tf_max_workers must be in [1,2], got {self.l0_native_tf_max_workers}")
         if not (1 <= self.l0_parallel_max_workers <= 4):
-            raise ValueError(
-                f"l0_parallel_max_workers must be in [1,4], got {self.l0_parallel_max_workers}"
-            )
+            raise ValueError(f"l0_parallel_max_workers must be in [1,4], got {self.l0_parallel_max_workers}")
 
         # ── corroboration_reference_tfs contract [LIMIT-12] ──
         _valid_tfs = frozenset({"1h", "2h", "4h", "6h", "8h", "12h", "1d"})
@@ -1278,9 +1273,7 @@ class EntryTimingGateConfig:
     min_net_timing_edge_lcb_bps: float = 1.0
     cvd_lookback_bars: int = 96
     vwap_anchor_max_bars: int = 288
-    confluence_weights: Mapping[str, float] = field(
-        default_factory=lambda: {"cvd": 0.5, "vwap": 0.5}
-    )
+    confluence_weights: Mapping[str, float] = field(default_factory=lambda: {"cvd": 0.5, "vwap": 0.5})
     enabled_combos: frozenset[tuple[str, str, str]] = frozenset()
 
     def __post_init__(self) -> None:

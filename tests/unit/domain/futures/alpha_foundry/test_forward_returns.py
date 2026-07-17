@@ -13,7 +13,10 @@ class TestComputeCausalForwardReturnsBps:
         close = np.array([100.0 + i * 0.5 for i in range(30)], dtype=np.float64).reshape(-1, 1)
         side = np.ones((30, 1), dtype=np.int8)
         fwd_ret = compute_causal_forward_returns_bps(
-            close=close, side=side, causal_lag_bars=1, holding_bars=18,
+            close=close,
+            side=side,
+            causal_lag_bars=1,
+            holding_bars=18,
         )
         expected = np.log(close[24, 0] / close[6, 0]) * 10000.0
         assert fwd_ret[5, 0] == pytest.approx(expected, rel=1e-9)
@@ -23,7 +26,10 @@ class TestComputeCausalForwardReturnsBps:
         close = np.array([100.0 + i * 0.5 for i in range(20)], dtype=np.float64).reshape(-1, 1)
         side = np.ones((20, 1), dtype=np.int8)
         fwd = compute_causal_forward_returns_bps(
-            close=close, side=side, causal_lag_bars=0, holding_bars=3,
+            close=close,
+            side=side,
+            causal_lag_bars=0,
+            holding_bars=3,
         )
         idx_end = 20 - 0 - 3
         expected_vals = np.log(close[3:20, :] / close[0:17, :]) * 10000.0
@@ -37,7 +43,10 @@ class TestComputeCausalForwardReturnsBps:
         close = np.ones((10, 1), dtype=np.float64)
         side = np.ones((10, 1), dtype=np.int8)
         fwd = compute_causal_forward_returns_bps(
-            close=close, side=side, causal_lag_bars=2, holding_bars=8,
+            close=close,
+            side=side,
+            causal_lag_bars=2,
+            holding_bars=8,
         )
         assert np.all(np.isnan(fwd))
 
@@ -46,7 +55,10 @@ class TestComputeCausalForwardReturnsBps:
         side = np.ones((10, 1), dtype=np.int8)
         with pytest.raises(ValueError, match="causal_lag_bars"):
             compute_causal_forward_returns_bps(
-                close=close, side=side, causal_lag_bars=-1, holding_bars=3,
+                close=close,
+                side=side,
+                causal_lag_bars=-1,
+                holding_bars=3,
             )
 
     def test_rejects_zero_holding(self) -> None:
@@ -54,5 +66,8 @@ class TestComputeCausalForwardReturnsBps:
         side = np.ones((10, 1), dtype=np.int8)
         with pytest.raises(ValueError, match="holding_bars"):
             compute_causal_forward_returns_bps(
-                close=close, side=side, causal_lag_bars=1, holding_bars=0,
+                close=close,
+                side=side,
+                causal_lag_bars=1,
+                holding_bars=0,
             )

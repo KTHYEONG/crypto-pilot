@@ -1,4 +1,5 @@
 """Tests for calibrate_l1_pair_gate.py — propose_thresholds logic and effective_n_sink hook."""
+
 from __future__ import annotations
 
 import json
@@ -51,17 +52,19 @@ def test_propose_thresholds_empty_input() -> None:
 
 def test_compute_symbol_strategy_evidence_effective_n_sink_matches_computed_value() -> None:
     """Scenario 4: effective_n_sink is called with correct snapshot_index and effective_n."""
-    event_results = pd.DataFrame({
-        "symbol": ["BTCUSDT"] * 5,
-        "family": ["trend_ma"] * 5,
-        "variant": ["ema_12_72"] * 5,
-        "gross_event_bps": [10.0, 12.0, 8.0, 11.0, 9.0],
-        "side": [1, 1, 1, 1, 1],
-        "expected_holding_bars": [6] * 5,
-        "fold_id": [0, 0, 1, 1, 1],
-        "exit_idx": [10, 20, 30, 40, 50],
-        "entry_idx": [5, 15, 25, 35, 45],
-    })
+    event_results = pd.DataFrame(
+        {
+            "symbol": ["BTCUSDT"] * 5,
+            "family": ["trend_ma"] * 5,
+            "variant": ["ema_12_72"] * 5,
+            "gross_event_bps": [10.0, 12.0, 8.0, 11.0, 9.0],
+            "side": [1, 1, 1, 1, 1],
+            "expected_holding_bars": [6] * 5,
+            "fold_id": [0, 0, 1, 1, 1],
+            "exit_idx": [10, 20, 30, 40, 50],
+            "entry_idx": [5, 15, 25, 35, 45],
+        }
+    )
     cfg = CandidateStrategyConfig()
     captured: list[tuple[int, float]] = []
 
@@ -81,17 +84,19 @@ def test_compute_symbol_strategy_evidence_effective_n_sink_matches_computed_valu
 
 def test_effective_n_sink_none_preserves_existing_behavior() -> None:
     """effective_n_sink=None does not change function behavior (regression guard)."""
-    event_results = pd.DataFrame({
-        "symbol": ["BTCUSDT"] * 3,
-        "family": ["trend_ma"] * 3,
-        "variant": ["ema_12_72"] * 3,
-        "gross_event_bps": [5.0, 4.0, 6.0],
-        "side": [1, 1, 1],
-        "expected_holding_bars": [4] * 3,
-        "fold_id": [0, 0, 0],
-        "exit_idx": [10, 20, 30],
-        "entry_idx": [5, 15, 25],
-    })
+    event_results = pd.DataFrame(
+        {
+            "symbol": ["BTCUSDT"] * 3,
+            "family": ["trend_ma"] * 3,
+            "variant": ["ema_12_72"] * 3,
+            "gross_event_bps": [5.0, 4.0, 6.0],
+            "side": [1, 1, 1],
+            "expected_holding_bars": [4] * 3,
+            "fold_id": [0, 0, 0],
+            "exit_idx": [10, 20, 30],
+            "entry_idx": [5, 15, 25],
+        }
+    )
     cfg = CandidateStrategyConfig()
 
     result = compute_symbol_strategy_evidence(
@@ -106,17 +111,19 @@ def test_effective_n_sink_none_preserves_existing_behavior() -> None:
 
 
 def _make_minimal_event_results() -> pd.DataFrame:
-    return pd.DataFrame({
-        "symbol": ["BTCUSDT"] * 3,
-        "family": ["trend_ma"] * 3,
-        "variant": ["ema_12_72"] * 3,
-        "gross_event_bps": [5.0, 4.0, 6.0],
-        "side": [1, 1, 1],
-        "expected_holding_bars": [4] * 3,
-        "fold_id": [0, 0, 0],
-        "exit_idx": [10, 20, 30],
-        "entry_idx": [5, 15, 25],
-    })
+    return pd.DataFrame(
+        {
+            "symbol": ["BTCUSDT"] * 3,
+            "family": ["trend_ma"] * 3,
+            "variant": ["ema_12_72"] * 3,
+            "gross_event_bps": [5.0, 4.0, 6.0],
+            "side": [1, 1, 1],
+            "expected_holding_bars": [4] * 3,
+            "fold_id": [0, 0, 0],
+            "exit_idx": [10, 20, 30],
+            "entry_idx": [5, 15, 25],
+        }
+    )
 
 
 def test_measure_effective_n_by_tf_seeds_trace_with_stage_order(mocker: MockerFixture) -> None:
@@ -163,10 +170,18 @@ def test_measure_effective_n_by_tf_captures_only_final_snapshot_per_tf(mocker: M
         event_results = _make_minimal_event_results()
         cfg = CandidateStrategyConfig()
         _pipeline.compute_symbol_strategy_evidence(
-            event_results=event_results, cfg=cfg, seed=0, registry_as_of_idx=999, snapshot_index=0,
+            event_results=event_results,
+            cfg=cfg,
+            seed=0,
+            registry_as_of_idx=999,
+            snapshot_index=0,
         )
         _pipeline.compute_symbol_strategy_evidence(
-            event_results=event_results, cfg=cfg, seed=0, registry_as_of_idx=999, snapshot_index=3,
+            event_results=event_results,
+            cfg=cfg,
+            seed=0,
+            registry_as_of_idx=999,
+            snapshot_index=3,
         )
 
     mocker.patch.object(_pipeline_mod, "run_per_tf_l1", side_effect=_fake_orig_per_tf)

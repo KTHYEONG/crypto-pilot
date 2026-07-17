@@ -138,16 +138,25 @@ class TestEndpointShortage:
         }
 
         req_1h = DataRequirement(
-            timeframe="1h", start=date(2023, 4, 29), end=date(2026, 6, 30),
-            required=True, consumer_phases=("l0", "l1", "l2", "l3"),
+            timeframe="1h",
+            start=date(2023, 4, 29),
+            end=date(2026, 6, 30),
+            required=True,
+            consumer_phases=("l0", "l1", "l2", "l3"),
         )
         req_4h = DataRequirement(
-            timeframe="4h", start=date(2023, 4, 29), end=date(2026, 6, 30),
-            required=True, consumer_phases=("l0", "l1", "l2", "l3"),
+            timeframe="4h",
+            start=date(2023, 4, 29),
+            end=date(2026, 6, 30),
+            required=True,
+            consumer_phases=("l0", "l1", "l2", "l3"),
         )
         req_1d = DataRequirement(
-            timeframe="1d", start=date(2022, 10, 1), end=date(2026, 6, 30),
-            required=True, consumer_phases=("l0", "l1", "l2", "l3"),
+            timeframe="1d",
+            start=date(2022, 10, 1),
+            end=date(2026, 6, 30),
+            required=True,
+            consumer_phases=("l0", "l1", "l2", "l3"),
         )
 
         plan = build_base_data_plan(

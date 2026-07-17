@@ -147,10 +147,12 @@ def test_emit_dataframe_artifact_debug(caplog: pytest.LogCaptureFixture) -> None
     logger.setLevel(logging.DEBUG)
     caplog.set_level(logging.DEBUG, logger="artifact-df-test")
 
-    frame = pd.DataFrame([
-        {"family": "btc_regime_pullback", "tf": "4h", "gate_passed": True},
-        {"family": "trend_pullback_continuation", "tf": "12h", "gate_passed": True},
-    ])
+    frame = pd.DataFrame(
+        [
+            {"family": "btc_regime_pullback", "tf": "4h", "gate_passed": True},
+            {"family": "trend_pullback_continuation", "tf": "12h", "gate_passed": True},
+        ]
+    )
     emit_dataframe_artifact_debug(
         logger=logger,
         artifact_name="df_artifact",

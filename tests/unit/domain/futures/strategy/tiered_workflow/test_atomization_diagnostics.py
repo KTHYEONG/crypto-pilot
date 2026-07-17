@@ -151,9 +151,7 @@ def test_diagnose_strategy_atomization_degenerate_zero_nobs() -> None:
 
 
 def test_diagnose_strategy_atomization_zero_min_effective_obs() -> None:
-    evidence = (
-        _make_evidence(symbol="BTCUSDT", strategy_id="bnd:v1", n_obs=10, mean_gross_bps=10.0),
-    )
+    evidence = (_make_evidence(symbol="BTCUSDT", strategy_id="bnd:v1", n_obs=10, mean_gross_bps=10.0),)
     reports = diagnose_strategy_atomization(evidence, min_effective_obs=0.0)
     assert len(reports) == 1
     assert reports[0].n_cells_below_min_effective_obs == 0
@@ -167,8 +165,14 @@ def _make_two_family_frame(
     family_a_gross: list[float],
     family_b_gross: list[float],
 ) -> pd.DataFrame:
-    _base = {"symbol": "BTCUSDT", "side": 1, "holding_bucket": 4,
-             "expected_holding_bars": 4, "fold_id": 0, "activation_context": "all"}
+    _base = {
+        "symbol": "BTCUSDT",
+        "side": 1,
+        "holding_bucket": 4,
+        "expected_holding_bars": 4,
+        "fold_id": 0,
+        "activation_context": "all",
+    }
     rows = [
         {**_base, "strategy_id": "xs_momentum:v1", "family": "xs_momentum", "gross_event_bps": g}
         for g in family_a_gross
@@ -185,15 +189,20 @@ def _make_same_family_frame(
     strat_a_gross: list[float],
     strat_b_gross: list[float],
 ) -> pd.DataFrame:
-    _base = {"symbol": "BTCUSDT", "side": 1, "holding_bucket": 4,
-             "expected_holding_bars": 4, "fold_id": 0, "activation_context": "all"}
+    _base = {
+        "symbol": "BTCUSDT",
+        "side": 1,
+        "holding_bucket": 4,
+        "expected_holding_bars": 4,
+        "fold_id": 0,
+        "activation_context": "all",
+    }
     rows = [
         {**_base, "strategy_id": "trend_ma:ema_12_72", "family": "trend_ma", "gross_event_bps": g}
         for g in strat_a_gross
     ]
     rows.extend(
-        {**_base, "strategy_id": "trend_ma:ema_6_36", "family": "trend_ma", "gross_event_bps": g}
-        for g in strat_b_gross
+        {**_base, "strategy_id": "trend_ma:ema_6_36", "family": "trend_ma", "gross_event_bps": g} for g in strat_b_gross
     )
     return pd.DataFrame(rows)
 
@@ -237,9 +246,14 @@ def test_compute_incremental_bps_lone_family_member_falls_back_to_absolute_basel
 #     degrades family to full strategy_id (no crash).
 def test_compute_incremental_bps_strategy_id_without_colon_uses_full_id_as_family() -> None:
     rows = [
-        {"symbol": "BTCUSDT", "side": 1, "holding_bucket": 4,
-         "strategy_id": "legacyname", "family": "legacyname",
-         "gross_event_bps": 50.0},
+        {
+            "symbol": "BTCUSDT",
+            "side": 1,
+            "holding_bucket": 4,
+            "strategy_id": "legacyname",
+            "family": "legacyname",
+            "gross_event_bps": 50.0,
+        },
     ]
     df = pd.DataFrame(rows)
     inc = _compute_incremental_bps(df, mode="peer_exclusive_family")

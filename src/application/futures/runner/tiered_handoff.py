@@ -37,9 +37,7 @@ def consume_candidate_output_for_tiered(
     actual = tuple(output.aligned.symbols)
     expected = tuple(expected_symbols)
     if actual != expected:
-        raise TieredHandoffError(
-            f"symbol order mismatch: got {actual}, expected {expected}"
-        )
+        raise TieredHandoffError(f"symbol order mismatch: got {actual}, expected {expected}")
 
     aligned = output.aligned
     aligned_by_tf = output.aligned_by_tf

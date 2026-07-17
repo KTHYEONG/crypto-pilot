@@ -61,11 +61,13 @@ def _run_one_label(label: str) -> SupervisorRunRecord:
     payload = json.loads((_OUT_DIR / f"{label}.json").read_text(encoding="utf-8"))
     runner_result = payload.get("runner_result")
     return SupervisorRunRecord(
-        label=label, returncode=returncode,
+        label=label,
+        returncode=returncode,
         signal=(-returncode if returncode < 0 else None),
         exit_code=(runner_result or {}).get("exit_code"),
         reason=(runner_result or {}).get("reason"),
-        wall_s=wall_s, peak_rss_mb=peak_rss_mb,
+        wall_s=wall_s,
+        peak_rss_mb=peak_rss_mb,
         last_stage=_last_stage_reached(payload),
     )
 
@@ -73,7 +75,8 @@ def _run_one_label(label: str) -> SupervisorRunRecord:
 def run_supervised() -> int:
     records = [_run_one_label(label) for label in _LABELS]
     (_OUT_DIR / "supervisor.json").write_text(
-        json.dumps([asdict(r) for r in records], sort_keys=True), encoding="utf-8",
+        json.dumps([asdict(r) for r in records], sort_keys=True),
+        encoding="utf-8",
     )
     snapshots: list[CrossTfStageSnapshot] = []
     for label in _LABELS:

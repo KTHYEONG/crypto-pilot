@@ -1,4 +1,5 @@
 "[LIMIT-01] floor \ubd95\uad34 \uc2dc manifest.final_selected_recipe_ids \uc640 routes \uc77c\uad00\uc131 \uac80\uc99d."
+
 from __future__ import annotations
 
 from unittest.mock import patch
@@ -34,11 +35,18 @@ def _make_aligned(*, tf_hours: int, bars: int = 200) -> object:
     close = 100.0 * np.exp(0.001 * np.arange(t, dtype=np.float64))[:, None] * np.ones((1, 2))
     mask = np.ones((t, 2), dtype=np.bool_)
     return AlignedMarketData(
-        datetimes=dt, symbols=("BTCUSDT", "ETHUSDT"),
-        open_2d=close.copy(), high_2d=close * 1.01, low_2d=close * 0.99, close_2d=close,
-        volume_2d=np.full((t, 2), 1000.0), funding_2d=np.full((t, 2), 0.00005),
-        active_mask=mask, warm_mask=mask,
-        entry_block_mask=np.zeros((t, 2), dtype=np.bool_), kill_mask=np.zeros((t, 2), dtype=np.bool_),
+        datetimes=dt,
+        symbols=("BTCUSDT", "ETHUSDT"),
+        open_2d=close.copy(),
+        high_2d=close * 1.01,
+        low_2d=close * 0.99,
+        close_2d=close,
+        volume_2d=np.full((t, 2), 1000.0),
+        funding_2d=np.full((t, 2), 0.00005),
+        active_mask=mask,
+        warm_mask=mask,
+        entry_block_mask=np.zeros((t, 2), dtype=np.bool_),
+        kill_mask=np.zeros((t, 2), dtype=np.bool_),
     )
 
 
@@ -46,15 +54,31 @@ def _make_l0_candidate(recipe_id: str, timeframe: str = "4h", score: float = 1.0
     from src.domain.futures.alpha_foundry.contracts import L0SignalCandidate
 
     return L0SignalCandidate(
-        run_id="test", timeframe=timeframe, family="fam", variant="var",
-        recipe_id=recipe_id, archetype="trend", source="synthetic_recipe",
-        n_events=100, effective_n=50.0, mean_net_bps=score, block_lcb_bps=score * 0.5,
-        nw_tstat=1.5, bootstrap_lcb_bps=0.0, bootstrap_agree=True,
-        cost_drag_ratio=0.3, turnover_per_year=50.0, max_abs_corr_in_bucket=0.0,
-        tf_coverage_count=0, sign_agreement_ratio=0.0,
-        corroboration_tier="single_tf_strict", discovery_tier="candidate",
-        l1_priority_score=score, l1_budget_units=1,
-        hard_reject_reasons=(), soft_flags=(),
+        run_id="test",
+        timeframe=timeframe,
+        family="fam",
+        variant="var",
+        recipe_id=recipe_id,
+        archetype="trend",
+        source="synthetic_recipe",
+        n_events=100,
+        effective_n=50.0,
+        mean_net_bps=score,
+        block_lcb_bps=score * 0.5,
+        nw_tstat=1.5,
+        bootstrap_lcb_bps=0.0,
+        bootstrap_agree=True,
+        cost_drag_ratio=0.3,
+        turnover_per_year=50.0,
+        max_abs_corr_in_bucket=0.0,
+        tf_coverage_count=0,
+        sign_agreement_ratio=0.0,
+        corroboration_tier="single_tf_strict",
+        discovery_tier="candidate",
+        l1_priority_score=score,
+        l1_budget_units=1,
+        hard_reject_reasons=(),
+        soft_flags=(),
     )
 
 
@@ -72,12 +96,17 @@ def _build_multi_results(
         for start in range(10, bars, 20):
             score[start, :] = 1.0 * (1.0 if i % 2 == 0 else -1.0)
         panel = CandidateSignalPanel(
-            family="fam", variant=f"var_{tf}",
-            params={"lookback": 20}, datetimes=np.arange(bars, dtype=np.int64),
+            family="fam",
+            variant=f"var_{tf}",
+            params={"lookback": 20},
+            datetimes=np.arange(bars, dtype=np.int64),
             symbols=("BTCUSDT", "ETHUSDT"),
-            signed_score_2d=score, side_hint_2d=np.where(score > 0, np.int8(1), np.int8(-1)),
-            expected_holding_bars=3, min_holding_bars=1,
-            stop_atr_mult=2.0, take_profit_atr_mult=4.0,
+            signed_score_2d=score,
+            side_hint_2d=np.where(score > 0, np.int8(1), np.int8(-1)),
+            expected_holding_bars=3,
+            min_holding_bars=1,
+            stop_atr_mult=2.0,
+            take_profit_atr_mult=4.0,
             turnover_proxy_2d=np.zeros((bars, 2), dtype=np.float64),
             valid_mask_2d=np.ones((bars, 2), dtype=np.bool_),
             metadata={"recipe_id": f"r{i}"},
@@ -103,11 +132,7 @@ class TestManifestRouteConsistency:
 
         collapsed_result = CrossBucketDiversityResult(
             final_selected_recipe_ids=(),
-            demoted_recipe_ids=tuple(
-                c.recipe_id
-                for res in multi_results.values()
-                for c in res.candidates_for_l1
-            ),
+            demoted_recipe_ids=tuple(c.recipe_id for res in multi_results.values() for c in res.candidates_for_l1),
             demoted_reason_by_id={},
             cross_bucket_corr=np.zeros((1, 1)),
             global_eff_test_count=0.0,
@@ -137,16 +162,8 @@ class TestManifestRouteConsistency:
                 min_common_active_bars=0,
             )
 
-        original_ids = {
-            c.recipe_id
-            for res in multi_results.values()
-            for c in res.candidates_for_l1
-        }
-        route_ids = {
-            rid
-            for route in manifest.routes
-            for rid in route.selected_recipe_ids
-        }
+        original_ids = {c.recipe_id for res in multi_results.values() for c in res.candidates_for_l1}
+        route_ids = {rid for route in manifest.routes for rid in route.selected_recipe_ids}
 
         assert manifest.pruning_status == "fail_open"
         assert set(manifest.final_selected_recipe_ids) == original_ids
@@ -156,20 +173,14 @@ class TestManifestRouteConsistency:
             "blocks every TF despite a non-empty top-level id list"
         )
         for tf_k in multi_results:
-            assert len(pruned_multi_results[tf_k].candidates_for_l1) == len(
-                multi_results[tf_k].candidates_for_l1
-            )
+            assert len(pruned_multi_results[tf_k].candidates_for_l1) == len(multi_results[tf_k].candidates_for_l1)
 
     def test_assemble_manifest_happy_path_partial_demotion_routes_match_final_ids(
         self,
     ) -> None:
         multi_results, aligned_by_tf = _build_multi_results()
 
-        all_ids = [
-            c.recipe_id
-            for res in multi_results.values()
-            for c in res.candidates_for_l1
-        ]
+        all_ids = [c.recipe_id for res in multi_results.values() for c in res.candidates_for_l1]
         kept_ids = tuple(all_ids[:2])
         demoted_ids = tuple(all_ids[2:])
 
@@ -205,34 +216,23 @@ class TestManifestRouteConsistency:
                 min_common_active_bars=0,
             )
 
-        route_ids = {
-            rid
-            for route in manifest.routes
-            for rid in route.selected_recipe_ids
-        }
+        route_ids = {rid for route in manifest.routes for rid in route.selected_recipe_ids}
 
         assert manifest.pruning_status in ("applied", "audit_only")
         assert set(manifest.final_selected_recipe_ids) == set(kept_ids)
         assert route_ids == set(kept_ids), (
-            "manifest.routes must cover exactly the kept recipe ids "
-            "when pruning partially demotes"
+            "manifest.routes must cover exactly the kept recipe ids when pruning partially demotes"
         )
         for tf_k in multi_results:
             pruned_ids = {c.recipe_id for c in pruned_multi_results[tf_k].candidates_for_l1}
-            assert pruned_ids == set(kept_ids) & {
-                c.recipe_id for c in multi_results[tf_k].candidates_for_l1
-            }
+            assert pruned_ids == set(kept_ids) & {c.recipe_id for c in multi_results[tf_k].candidates_for_l1}
 
     def test_assemble_manifest_audit_only_when_no_redundant_pairs(
         self,
     ) -> None:
         multi_results, aligned_by_tf = _build_multi_results()
 
-        all_ids = [
-            c.recipe_id
-            for res in multi_results.values()
-            for c in res.candidates_for_l1
-        ]
+        all_ids = [c.recipe_id for res in multi_results.values() for c in res.candidates_for_l1]
 
         no_redundancy_result = CrossBucketDiversityResult(
             final_selected_recipe_ids=tuple(all_ids),
@@ -291,27 +291,16 @@ class TestManifestRouteConsistency:
                 min_common_active_bars=0,
             )
 
-        original_ids = {
-            c.recipe_id
-            for res in multi_results.values()
-            for c in res.candidates_for_l1
-        }
-        route_ids = {
-            rid
-            for route in manifest.routes
-            for rid in route.selected_recipe_ids
-        }
+        original_ids = {c.recipe_id for res in multi_results.values() for c in res.candidates_for_l1}
+        route_ids = {rid for route in manifest.routes for rid in route.selected_recipe_ids}
 
         assert manifest.pruning_status == "fail_open"
         assert set(manifest.final_selected_recipe_ids) == original_ids
         assert route_ids == original_ids, (
-            "manifest.routes must cover all original recipe ids "
-            "after ValueError fail-open"
+            "manifest.routes must cover all original recipe ids after ValueError fail-open"
         )
         for tf_k in multi_results:
-            assert len(pruned_multi_results[tf_k].candidates_for_l1) == len(
-                multi_results[tf_k].candidates_for_l1
-            )
+            assert len(pruned_multi_results[tf_k].candidates_for_l1) == len(multi_results[tf_k].candidates_for_l1)
 
     def test_select_l1_delivery_events_routes_events_after_floor_collapse_fallback(
         self,
@@ -346,9 +335,7 @@ class TestManifestRouteConsistency:
             ),
         )
 
-        result = select_l1_delivery_events(
-            labeled_events=labeled_events, tf="8h", manifest=manifest
-        )
+        result = select_l1_delivery_events(labeled_events=labeled_events, tf="8h", manifest=manifest)
 
         assert not result.empty
         assert set(result["l0_recipe_id"]) == {"r1", "r2"}

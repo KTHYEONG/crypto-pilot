@@ -65,4 +65,4 @@ def test_causal_mask_effect_limits_evidence_window() -> None:
 
     max_valid_t = c_tf - 1 - h_p
     if max_valid_t >= 0:
-        assert not masked.valid_mask_2d[max_valid_t + 1:, :].any()
+        assert not masked.valid_mask_2d[max_valid_t + 1 :, :].any()

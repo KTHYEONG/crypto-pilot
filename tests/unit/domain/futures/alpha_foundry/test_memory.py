@@ -15,7 +15,6 @@ from src.domain.futures.alpha_foundry.memory import (
 
 
 class TestMemoryBudget:
-
     def test_resolve_budget_defaults_returns_positive(self) -> None:
         budget = resolve_effective_memory_budget()
         assert budget.limit_mb > 0
@@ -24,15 +23,19 @@ class TestMemoryBudget:
     def test_admit_memory_stage_under_budget(self) -> None:
         budget = L0MemoryBudget(limit_mb=1024, safety_margin_mb=64)
         assert admit_memory_stage(
-            budget=budget, stage="test",
-            estimated_increment_mb=100, current_rss_mb=500,
+            budget=budget,
+            stage="test",
+            estimated_increment_mb=100,
+            current_rss_mb=500,
         )
 
     def test_admit_memory_stage_over_budget(self) -> None:
         budget = L0MemoryBudget(limit_mb=1024, safety_margin_mb=64)
         assert not admit_memory_stage(
-            budget=budget, stage="test",
-            estimated_increment_mb=500, current_rss_mb=500,
+            budget=budget,
+            stage="test",
+            estimated_increment_mb=500,
+            current_rss_mb=500,
         )
 
     def test_rss_returns_non_negative(self) -> None:
@@ -65,7 +68,6 @@ class TestMemoryBudget:
 
 
 class TestLtfExec1mPlan:
-
     def test_plan_with_skip_reason_returns_empty(self) -> None:
         plan = resolve_ltf_exec_1m_plan(
             covered_symbols=frozenset({"BTCUSDT"}),

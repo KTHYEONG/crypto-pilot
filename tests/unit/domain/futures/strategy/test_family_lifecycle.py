@@ -79,8 +79,11 @@ def test_resample_to_htf_and_project_1d_alias_no_lookahead() -> None:
     datetimes_4h, values_4h = _make_synthetic_4h_series(n_days=10)
 
     projected = _resample_to_htf_and_project(
-        datetimes_4h=datetimes_4h, values_4h=values_4h,
-        htf="1D", agg_method="last", compute_feature_fn=lambda df: df,
+        datetimes_4h=datetimes_4h,
+        values_4h=values_4h,
+        htf="1D",
+        agg_method="last",
+        compute_feature_fn=lambda df: df,
     )
 
     assert np.isnan(projected[:6]).all()

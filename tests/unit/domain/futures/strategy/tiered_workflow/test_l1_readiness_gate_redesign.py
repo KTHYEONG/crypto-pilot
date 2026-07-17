@@ -61,14 +61,16 @@ def _make_realized_frame(
     activation_context: str = "bull_quiet",
     gross_bps: float = 10.0,
 ) -> pd.DataFrame:
-    return pd.DataFrame({
-        "entry_idx": [decision_idx + 1],
-        "symbol": [symbol],
-        "family": [strategy_id.split(":")[0]],
-        "variant": [strategy_id.split(":")[1]],
-        "signal_cell": [activation_context],
-        "gross_event_bps": [gross_bps],
-    })
+    return pd.DataFrame(
+        {
+            "entry_idx": [decision_idx + 1],
+            "symbol": [symbol],
+            "family": [strategy_id.split(":")[0]],
+            "variant": [strategy_id.split(":")[1]],
+            "signal_cell": [activation_context],
+            "gross_event_bps": [gross_bps],
+        }
+    )
 
 
 def _fold(
@@ -129,7 +131,9 @@ def test_align_opportunities_happy_path() -> None:
     realized = _make_realized_frame()
 
     matched, true_unmatched, label_drift = align_outer_opportunities_with_realized(
-        opportunities=opp, realized_event_results=realized, activation_match_regime=True,
+        opportunities=opp,
+        realized_event_results=realized,
+        activation_match_regime=True,
     )
 
     assert true_unmatched == 0
@@ -143,7 +147,9 @@ def test_align_opportunities_separates_label_drift_from_true_unmatched() -> None
     realized = _make_realized_frame(activation_context="bull_volatile")
 
     matched, true_unmatched, label_drift = align_outer_opportunities_with_realized(
-        opportunities=opp, realized_event_results=realized, activation_match_regime=True,
+        opportunities=opp,
+        realized_event_results=realized,
+        activation_match_regime=True,
     )
 
     assert true_unmatched == 0
@@ -158,7 +164,9 @@ def test_align_opportunities_missing_activation_context_column() -> None:
     realized = realized.drop(columns=["signal_cell"], errors="ignore")
 
     matched, true_unmatched, label_drift = align_outer_opportunities_with_realized(
-        opportunities=opp, realized_event_results=realized, activation_match_regime=True,
+        opportunities=opp,
+        realized_event_results=realized,
+        activation_match_regime=True,
     )
 
     assert true_unmatched == 0
@@ -172,7 +180,9 @@ def test_align_opportunities_activation_match_false() -> None:
     realized = _make_realized_frame(activation_context="bull_volatile")
 
     matched, true_unmatched, label_drift = align_outer_opportunities_with_realized(
-        opportunities=opp, realized_event_results=realized, activation_match_regime=False,
+        opportunities=opp,
+        realized_event_results=realized,
+        activation_match_regime=False,
     )
 
     assert true_unmatched == 0
@@ -201,13 +211,14 @@ class TestWilsonLowerBound:
 
 def test_evaluate_readiness_happy_path() -> None:
     """All folds pass all checks → passed, structural_passed, and advisory all True."""
-    fold_reports = tuple(
-        _fold(fid, matched=50, unmatched=0, passed=True, probe_lcb_bps=20.0)
-        for fid in range(4)
-    )
+    fold_reports = tuple(_fold(fid, matched=50, unmatched=0, passed=True, probe_lcb_bps=20.0) for fid in range(4))
     cfg = _base_cfg()
     report = evaluate_layer1_readiness(
-        fold_reports=fold_reports, fold_cov=1.0, trade_scope_count=57, cfg=cfg, seed=42,
+        fold_reports=fold_reports,
+        fold_cov=1.0,
+        trade_scope_count=57,
+        cfg=cfg,
+        seed=42,
     )
 
     assert report.structural_passed is True
@@ -227,7 +238,11 @@ def test_fold_ratio_check_is_advisory_not_blocking() -> None:
     )
     cfg = _base_cfg(l1_min_fold_ratio=0.75)  # requires 3/4 but only 2 ready
     report = evaluate_layer1_readiness(
-        fold_reports=fold_reports, fold_cov=1.0, trade_scope_count=57, cfg=cfg, seed=42,
+        fold_reports=fold_reports,
+        fold_cov=1.0,
+        trade_scope_count=57,
+        cfg=cfg,
+        seed=42,
     )
 
     fold_ratio_check = next(c for c in report.advisory_checks if c.key == "fold_ratio")
@@ -238,13 +253,14 @@ def test_fold_ratio_check_is_advisory_not_blocking() -> None:
 
 def test_match_ratio_uses_pooled_wilson_not_per_fold_mean() -> None:
     """match_ratio is computed as pooled Wilson LCB, not per-fold mean."""
-    fold_reports = tuple(
-        _fold(fid, matched=100, unmatched=1, passed=True, probe_lcb_bps=20.0)
-        for fid in range(4)
-    )
+    fold_reports = tuple(_fold(fid, matched=100, unmatched=1, passed=True, probe_lcb_bps=20.0) for fid in range(4))
     cfg = _base_cfg(l1_min_realized_match_ratio=0.95)  # 100/101 ≈ 0.990 → Wilson LCB > 0.95
     report = evaluate_layer1_readiness(
-        fold_reports=fold_reports, fold_cov=1.0, trade_scope_count=57, cfg=cfg, seed=42,
+        fold_reports=fold_reports,
+        fold_cov=1.0,
+        trade_scope_count=57,
+        cfg=cfg,
+        seed=42,
     )
 
     match_ratio_check = next(c for c in report.advisory_checks if c.key == "match_ratio")
@@ -256,14 +272,32 @@ def test_match_ratio_uses_pooled_wilson_not_per_fold_mean() -> None:
 def test_structural_failure_still_blocks_passed() -> None:
     """structural_passed=False → passed=False."""
     fold_reports = (
-        _fold(0, matched=50, unmatched=0, passed=True,
-              probe_series_bps=(-10.0,), probe_lcb_bps=-20.0, effective_symbol_count=1.0),
-        _fold(1, matched=40, unmatched=0, passed=True,
-              probe_series_bps=(-10.0,), probe_lcb_bps=-20.0, effective_symbol_count=1.0),
+        _fold(
+            0,
+            matched=50,
+            unmatched=0,
+            passed=True,
+            probe_series_bps=(-10.0,),
+            probe_lcb_bps=-20.0,
+            effective_symbol_count=1.0,
+        ),
+        _fold(
+            1,
+            matched=40,
+            unmatched=0,
+            passed=True,
+            probe_series_bps=(-10.0,),
+            probe_lcb_bps=-20.0,
+            effective_symbol_count=1.0,
+        ),
     )
     cfg = _base_cfg(l1_min_probe_bps=5.0, l1_min_effective_sym_n=3.0)
     report = evaluate_layer1_readiness(
-        fold_reports=fold_reports, fold_cov=0.5, trade_scope_count=57, cfg=cfg, seed=42,
+        fold_reports=fold_reports,
+        fold_cov=0.5,
+        trade_scope_count=57,
+        cfg=cfg,
+        seed=42,
     )
 
     assert report.structural_passed is False
@@ -282,13 +316,17 @@ def _make_symbol_strategy_evidence(
     lcb_net_bps: float = 10.0,
 ) -> Any:
     key = SignalSourceKey(symbol=symbol, strategy_id=strategy_id, activation_context=activation_context)
-    mock = type("_MockEvidence", (), {
-        "key": key,
-        "hard_eligible": hard_eligible,
-        "quality_weight": quality_weight,
-        "reliability": quality_weight,
-        "lcb_net_bps": lcb_net_bps,
-    })()
+    mock = type(
+        "_MockEvidence",
+        (),
+        {
+            "key": key,
+            "hard_eligible": hard_eligible,
+            "quality_weight": quality_weight,
+            "reliability": quality_weight,
+            "lcb_net_bps": lcb_net_bps,
+        },
+    )()
     return mock
 
 
@@ -326,12 +364,23 @@ def test_structural_failure_still_blocks_registry() -> None:
     """structural_passed=False → build_qualified_signal_registry won't be called.
     This test verifies the gate condition by passing a failing gate report scenario."""
     fold_reports = (
-        _fold(0, matched=50, unmatched=0, passed=True,
-              probe_series_bps=(-10.0,), probe_lcb_bps=-50.0, effective_symbol_count=1.0),
+        _fold(
+            0,
+            matched=50,
+            unmatched=0,
+            passed=True,
+            probe_series_bps=(-10.0,),
+            probe_lcb_bps=-50.0,
+            effective_symbol_count=1.0,
+        ),
     )
     cfg = _base_cfg(l1_min_probe_bps=10.0)
     report = evaluate_layer1_readiness(
-        fold_reports=fold_reports, fold_cov=0.3, trade_scope_count=10, cfg=cfg, seed=42,
+        fold_reports=fold_reports,
+        fold_cov=0.3,
+        trade_scope_count=10,
+        cfg=cfg,
+        seed=42,
     )
 
     assert report.structural_passed is False

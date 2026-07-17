@@ -296,9 +296,7 @@ def test_bridge_passes_no_leak_recommendation_window(monkeypatch: Any) -> None:
     assert result.rule_report["recommended_flip_variants"] == ()
 
 
-def test_bridge_writes_family_correlation_audit_when_enabled(
-    monkeypatch: Any, tmp_path: Any
-) -> None:
+def test_bridge_writes_family_correlation_audit_when_enabled(monkeypatch: Any, tmp_path: Any) -> None:
     """enable_correlation_audit=True 시 {run_id}_family_correlation.parquet가 실제로 생성돼야 한다."""
     from src.domain.futures.alpha_foundry.contracts import AlphaFoundryRuntimeConfig
 
@@ -1189,6 +1187,7 @@ def test_verify_data_integrity_edge_cases() -> None:
 # Change 4: labeled.assign(native_tf=tf) preserves original
 # ===================================================================
 
+
 def test_labeled_assign_preserves_original() -> None:
     """.assign(native_tf=tf) returns new DataFrame without mutating original."""
     labeled = pd.DataFrame({"score": [1.0, 2.0], "side": [1, -1]})
@@ -1206,6 +1205,7 @@ def test_labeled_assign_preserves_original() -> None:
 # CandidatePipelineOutput aligned_by_tf refactor tests
 # [LIMIT-01][LIMIT-03][LIMIT-04]
 # ===================================================================
+
 
 def test_candidate_pipeline_output_warns_when_aligned_by_tf_missing(
     caplog: pytest.LogCaptureFixture,

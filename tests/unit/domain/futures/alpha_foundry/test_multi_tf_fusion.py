@@ -245,7 +245,9 @@ def test_project_signal_to_canonical_grid_clips_out_of_range_datetimes_instead_o
     canonical_dt = np.array([0, 3600], dtype=np.int64)
 
     projected_scores, projected_valid = project_signal_to_canonical_grid(
-        panel=panel, canonical_datetimes=canonical_dt, causal_lag_bars=1,
+        panel=panel,
+        canonical_datetimes=canonical_dt,
+        causal_lag_bars=1,
     )
 
     assert projected_valid[0, 0] == False  # noqa: E712
@@ -259,7 +261,9 @@ def test_project_signal_to_canonical_grid_forward_fills_when_dt_precedes_canonic
     canonical_dt = np.array([0, 1, 2, 3], dtype=np.int64) * 3_600_000_000_000
 
     projected_scores, projected_valid = project_signal_to_canonical_grid(
-        panel=panel, canonical_datetimes=canonical_dt, causal_lag_bars=1,
+        panel=panel,
+        canonical_datetimes=canonical_dt,
+        causal_lag_bars=1,
     )
 
     assert projected_valid[0, 0] == False  # noqa: E712
@@ -274,7 +278,9 @@ def test_project_signal_to_canonical_grid_ignores_dt_after_canonical_end() -> No
     canonical_dt = np.array([0, 1, 2, 3], dtype=np.int64) * 3_600_000_000_000
 
     projected_scores, projected_valid = project_signal_to_canonical_grid(
-        panel=panel, canonical_datetimes=canonical_dt, causal_lag_bars=1,
+        panel=panel,
+        canonical_datetimes=canonical_dt,
+        causal_lag_bars=1,
     )
 
     assert np.all(np.isnan(projected_scores))
@@ -287,7 +293,9 @@ def test_project_signal_to_canonical_grid_no_overlap_returns_all_invalid_no_rais
     canonical_dt = np.array([0, 1, 2, 3], dtype=np.int64) * 3_600_000_000_000
 
     projected_scores, projected_valid = project_signal_to_canonical_grid(
-        panel=panel, canonical_datetimes=canonical_dt, causal_lag_bars=100,
+        panel=panel,
+        canonical_datetimes=canonical_dt,
+        causal_lag_bars=100,
     )
 
     assert np.all(np.isnan(projected_scores))

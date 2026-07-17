@@ -110,9 +110,7 @@ def _prune_archive(max_entries: int = 15) -> tuple[int, int]:
             existing = "".join(ap[1:])
 
     archived_ids = set(re.findall(r"\[ADR_\w+\]", existing))
-    new_entries = [e for e in excess if not all(
-        eid in archived_ids for eid in re.findall(r"\[ADR_\w+\]", e)
-    )]
+    new_entries = [e for e in excess if not all(eid in archived_ids for eid in re.findall(r"\[ADR_\w+\]", e))]
 
     if new_entries:
         updated = archive_header.rstrip() + "\n\n" + "".join(new_entries) + existing.lstrip()
