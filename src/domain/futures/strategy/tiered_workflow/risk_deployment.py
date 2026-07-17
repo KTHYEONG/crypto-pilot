@@ -114,8 +114,9 @@ def _cvar_95_at_leverage(rets: NDArray[np.float64], leverage: float) -> float:
 def select_worst_fold_returns(
     fit_rets_by_fold: tuple[tuple[float, ...], ...],
 ) -> NDArray[np.float64]:
-    """챔피언 자신의 walk-forward fold 중 단위 레버리지 MDD가 가장 큰 fold의
-    fit-leg 수익률을 반환한다.
+    """[ADR_20260717_L2_DEPLOY_LEVERAGE_KELLY_WORST_FOLD_SAFETY] 챔피언 자신의
+    walk-forward fold 중 단위 레버리지 MDD가 가장 큰 fold의 fit-leg 수익률을
+    반환한다.
 
     Crisis window를 전혀 참조하지 않는다 — 입력은 이미 champion selection이
     끝난 학습 horizon 내부의 fold들뿐이다(look-ahead 없음).
@@ -174,6 +175,162 @@ def _bisect_max_leverage(
     return (l_lo + l_hi) * 0.5
 
 
+def _resolve_safety_ceiling(
+    fit_rets: NDArray[np.float64],
+    *,
+    mdd_target: float,
+    cvar_target: float,
+    l_floor: float,
+    l_hard_cap: float,
+    l_search_hi: float,
+    exchange_leverage_cap: float | None,
+    worst_fold_rets: NDArray[np.float64] | None,
+    kelly_safety_fraction: float | None,
+) -> tuple[float, str, float, str]:
+    """[ADR_20260717_L2_LEVERAGE_CEILING_REFACTOR] Returns (l_full, full_binding,
+    l_hard, hard_binding). l_full includes mdd/cvar (RC-2 OOS-blend may still
+    override these); l_hard excludes them and is the absolute ceiling no
+    adaptive logic downstream may exceed."""
+    l_mdd = _bisect_max_leverage(fit_rets, _mdd_at_leverage, mdd_target, float(l_floor), l_search_hi)
+    l_cvar = _bisect_max_leverage(fit_rets, _cvar_95_at_leverage, cvar_target, float(l_floor), l_search_hi)
+
+    candidates: list[tuple[float, str]] = [
+        (l_mdd, "mdd"),
+        (l_cvar, "cvar"),
+        (l_hard_cap, "hard_cap"),
+    ]
+    if exchange_leverage_cap is not None and exchange_leverage_cap > 0.0:
+        candidates.append((exchange_leverage_cap, "exchange_cap"))
+    if worst_fold_rets is not None:
+        wf_arr = np.asarray(worst_fold_rets, dtype=np.float64)
+        if wf_arr.size >= 2:
+            l_worst_fold = _bisect_max_leverage(wf_arr, _mdd_at_leverage, mdd_target, float(l_floor), l_search_hi)
+            candidates.append((l_worst_fold, "worst_fold"))
+    if kelly_safety_fraction is not None:
+        mu = float(np.mean(fit_rets))
+        sigma = float(np.std(fit_rets, ddof=1))
+        if mu > 0.0 and sigma > 1e-12:
+            l_kelly = kelly_safety_fraction * mu / (sigma * sigma)
+            if l_kelly > 0.0 and np.isfinite(l_kelly):
+                candidates.append((l_kelly, "kelly_theoretical"))
+
+    l_full, full_binding = min(candidates, key=lambda x: x[0])
+    hard_candidates = [(v, l) for v, l in candidates if l not in ("mdd", "cvar")]
+    l_hard, hard_binding = min(hard_candidates, key=lambda x: x[0]) if hard_candidates else (l_full, full_binding)
+    return l_full, full_binding, l_hard, hard_binding
+
+
+def _resolve_oos_adaptive_leverage(
+    fit_rets: NDArray[np.float64],
+    oos_rets: NDArray[np.float64] | None,
+    *,
+    l_ceiling: float,
+    l_hard_ceiling: float,
+    ceiling_binding: str,
+    mdd_cap: float,
+    mdd_margin: float,
+    oos_budget_blend: float,
+    oos_floor_cap: float,
+    fit_mdd_crisis_gate: float | None,
+    l_floor: float,
+    l_search_hi: float,
+) -> tuple[float, str, float]:
+    """[ADR_20260717_L2_LEVERAGE_CEILING_REFACTOR] RC-2 blend raise is clamped
+    to l_hard_ceiling — the fix for the OOS-blend bypass bug."""
+    l_final = max(l_ceiling, float(l_floor))
+    binding = ceiling_binding
+    cross_valid_mdd: float = 0.0
+
+    if oos_rets is not None:
+        oos_arr = np.asarray(oos_rets, dtype=np.float64)
+        if oos_arr.size >= 2:
+            cross_valid_mdd = _mdd_at_leverage(oos_arr, l_final)
+            _oos_mdd_v1 = _mdd_at_leverage(oos_arr, 1.0)
+            _fit_mdd_v1 = _mdd_at_leverage(fit_rets, 1.0)
+            _mdd_ratio = _oos_mdd_v1 / _fit_mdd_v1 if _fit_mdd_v1 > 1e-12 else 1.0
+            _fit_cagr_v1 = _annualized_cagr_from_returns(fit_rets, bars_per_year=2190)
+            _oos_cagr_v1 = _annualized_cagr_from_returns(oos_arr, bars_per_year=2190)
+            _fit_sharpe_v1 = _sharpe_from_returns(fit_rets, bars_per_year=2190)
+            _oos_sharpe_v1 = _sharpe_from_returns(oos_arr, bars_per_year=2190)
+            _logger.debug(
+                "[L2-CALIB-CV] L*=%.4f(%s) | fit_MDD_vol1=%.6f OOS_MDD_vol1=%.6f "
+                "MDD_ratio=%.2f | OOS_deployed_MDD=%.6f (cap=%.4f) | "
+                "fit_CAGR_v1=%.4f fit_sharpe_v1=%.4f OOS_CAGR_v1=%.4f OOS_sharpe_v1=%.4f",
+                l_final,
+                binding,
+                _fit_mdd_v1,
+                _oos_mdd_v1,
+                _mdd_ratio,
+                cross_valid_mdd,
+                mdd_cap,
+                _fit_cagr_v1,
+                _fit_sharpe_v1,
+                _oos_cagr_v1,
+                _oos_sharpe_v1,
+            )
+            if fit_mdd_crisis_gate is not None and _fit_mdd_v1 >= fit_mdd_crisis_gate:
+                _logger.debug(
+                    "[L2-OOS-BLEND-SUPPRESSED] fit_MDD_vol1=%.4f >= crisis_gate=%.4f "
+                    "-> oos_blend skipped, L* stays %.4f (%s)",
+                    _fit_mdd_v1, fit_mdd_crisis_gate, l_final, binding,
+                )
+            elif _mdd_ratio < 1.0:
+                _mdd_target_oos = mdd_cap * (1.0 - mdd_margin * 0.5)
+                l_oos = _bisect_max_leverage(oos_arr, _mdd_at_leverage, _mdd_target_oos, float(l_floor), l_search_hi)
+                l_blend = l_final * (1.0 - oos_budget_blend) + l_oos * oos_budget_blend
+                _l_candidate = min(l_blend, oos_floor_cap, l_hard_ceiling)
+                if _l_candidate > l_final:
+                    _prev_final = l_final
+                    l_final = _l_candidate
+                    binding = "oos_blend"
+                    _deployed_mdd = _mdd_at_leverage(oos_arr, l_final)
+                    _oos_invariant = mdd_cap * (1.0 - mdd_margin * 0.5)
+                    if _deployed_mdd > _oos_invariant:
+                        l_final = _prev_final
+                        binding = "oos_blend"
+                        _logger.debug(
+                            "[L2-OOS-BLEND] L_candidate=%.4f exceeds OOS invariant %.4f → reverted to L*=%.4f",
+                            _l_candidate, _oos_invariant, l_final,
+                        )
+                    else:
+                        cross_valid_mdd = _deployed_mdd
+                        _logger.debug(
+                            "[L2-OOS-BLEND] Raised L* from %.4f to %.4f (blend=%.2f, "
+                            "oos_mdd_v1=%.4f, L_oos=%.4f, OOS_deployed_MDD=%.4f ≤ %.4f)",
+                            _prev_final, l_final, oos_budget_blend,
+                            _oos_mdd_v1, l_oos, cross_valid_mdd, _oos_invariant,
+                        )
+        else:
+            _logger.debug("[L2-CALIB-CV] oos_rets size<2, skipping cross-validation")
+
+    return l_final, binding, cross_valid_mdd
+
+
+def _apply_concentration_haircut(
+    l_final: float,
+    binding: str,
+    *,
+    diversification_ratio_fit: NDArray[np.float64] | None,
+    diversification_gate_enabled: bool,
+    concentration_recent_window_bars: int,
+    concentration_floor: float | None,
+) -> tuple[float, str]:
+    if diversification_gate_enabled:
+        if concentration_floor is None:
+            raise ValueError("concentration_floor must be explicitly set when diversification_gate_enabled=True")
+        if diversification_ratio_fit is not None:
+            dr_arr = np.asarray(diversification_ratio_fit, dtype=np.float64)
+            if dr_arr.size >= concentration_recent_window_bars:
+                dr_fit_median = float(np.median(dr_arr))
+                dr_recent = float(np.median(dr_arr[-concentration_recent_window_bars:]))
+                if dr_fit_median > 1e-9:
+                    concentration_ratio = float(np.clip(dr_recent / dr_fit_median, concentration_floor, 1.0))
+                    if concentration_ratio < 1.0:
+                        l_final = l_final * concentration_ratio
+                        binding = "concentration_gate"
+    return l_final, binding
+
+
 def calibrate_deployment_leverage(
     *,
     fit_rets: NDArray[np.float64],
@@ -195,56 +352,6 @@ def calibrate_deployment_leverage(
     worst_fold_rets: NDArray[np.float64] | None = None,
     kelly_safety_fraction: float | None = None,
 ) -> tuple[float, str, float]:
-    """히스토리컬 수익률에서 배치 레버리지 L*를 결정론적으로 산출.
-
-    Spec 설계: fit-leg 수익률로 L*를 산출하고 OOS leg에 적용(look-ahead 방지).
-    fit-leg 수익률은 전략 unit-vol book의 실현 수익률이므로 MDD/CVaR 예산이
-    실제 binding이 된다 → l_hard_cap=20.0으로 완화해도 budget이 진짜 제약.
-    `mdd_margin=0.30` / `cvar_margin=0.20` 안전여유가 OOS-fit 분포 이격 완충.
-    `exchange_leverage_cap`으로 거래소 실행가능 notional 상한 제한(trading_bot.md §4).
-
-    RC-2: fit/OOS 역전 시 OOS 실현 리스크 예산을 직접 사용하도록 blended budget L*
-    도입. `oos_budget_blend`로 fit-OOS 혼합비 조절, `oos_floor_cap`으로 OOS-floor
-    상한 파라미터화(기존 하드코딩 2.0 대체).
-
-    Args:
-        fit_rets: 캘리브레이션용 per-bar simple return 배열 [T].
-            이상적으로는 fit-leg 수익률; 현재는 champion OOS 경로 대리.
-        oos_rets: OOS per-bar simple return 배열 [T] (선택). 제공 시 L*의 OOS
-            크로스 검증 MDD를 계산하여 세 번째 반환값으로 전달.
-        mdd_cap: MDD 하드상한 (예: 0.30).
-        cvar_cap: CVaR95 하드상한 (예: 0.06).
-        mdd_margin: MDD 목표 = mdd_cap*(1-margin). 기본 30% 안전여유.
-        cvar_margin: CVaR95 목표 = cvar_cap*(1-margin). 기본 20% 안전여유.
-        l_hard_cap: 레버리지 절대 상한.
-        exchange_leverage_cap: 거래소 실행가능 notional 레버리지 상한. None=무제한.
-            Binance perp 기본 10x. L* > cap 이면 "exchange_cap" binding으로 차단.
-        l_floor: L* 하한. 기본 1.0(기존 동작 보존). <1.0 허용 시 100%-vol book을
-            MDD 예산까지 de-lever 가능(RC-5 수정 동반 필수).
-        oos_budget_blend: fit-OOS blended budget ratio. 0=pure fit, 1=pure OOS.
-            기본 0.5. RC-2 look-ahead 완충.
-        oos_floor_cap: OOS-floor L* 상한. 기본 4.0 (기존 하드코딩 2.0 대체).
-        fit_mdd_crisis_gate: fit-leg unit-vol MDD 임계값(0~1). None(기본)=비활성(기존 동작).
-            지정 시 fit_MDD_vol1 >= 임계값이면 RC-2 oos_blend 분기 자체를 건너뛰고
-            fit-only calibration 결과(binding∈{mdd,cvar,hard_cap,exchange_cap})를 유지.
-
-        diversification_ratio_fit: fit-leg per-bar DR 시계열 [T_fit].
-            diversification_gate_enabled=True 시 사용. None이면 게이트 no-op.
-        diversification_gate_enabled: True면 concentration gate 활성.
-        concentration_recent_window_bars: 최근 DR median 계산 구간 (bars).
-        concentration_floor: concentration_ratio 하한 클립 값. 활성 시 명시 필수.
-        worst_fold_rets: select_worst_fold_returns()로 선택된 최악 fold의
-            fit-leg 수익률. None 또는 size<2면 이 candidate를 생략한다.
-        kelly_safety_fraction: fractional-Kelly 안전계수 (0,1]. None(기본)이면
-            비활성. 지정 시 l_kelly = kelly_safety_fraction * mu/sigma²
-            (mu<=0이면 candidate 생략)를 min(...) 후보에 추가한다.
-
-    Returns:
-        (L*, binding_constraint, cross_valid_MDD_at_L) — cross_valid_MDD_at_L는
-        oos_rets가 제공된 경우에만 실제 계산값. 미제공 시 0.0 반환.
-        binding ∈ {\"mdd\",\"cvar\",\"hard_cap\",\"exchange_cap\",\"oos_blend\",
-                     \"concentration_gate\",\"worst_fold\",\"kelly_theoretical\",\"none\"}.
-    """
     arr = np.asarray(fit_rets, dtype=np.float64)
     if arr.size < 2:
         _logger.debug("[L2-CALIB] fit_rets size<2, returning L*=1.0 (none)")
@@ -252,137 +359,51 @@ def calibrate_deployment_leverage(
 
     mdd_target = mdd_cap * (1.0 - mdd_margin)
     cvar_target = cvar_cap * (1.0 - cvar_margin)
-    l_search_hi = l_hard_cap * 10.0  # 충분히 넓은 탐색 범위
+    l_search_hi = l_hard_cap * 10.0
 
-    l_mdd = _bisect_max_leverage(arr, _mdd_at_leverage, mdd_target, float(l_floor), l_search_hi)
-    l_cvar = _bisect_max_leverage(arr, _cvar_95_at_leverage, cvar_target, float(l_floor), l_search_hi)
-
-    # kelly_safety_fraction validation
     if kelly_safety_fraction is not None and (kelly_safety_fraction <= 0.0 or kelly_safety_fraction > 1.0):
         raise ValueError(f"kelly_safety_fraction must be in (0, 1], got {kelly_safety_fraction}")
 
-    # 모든 제약 후보 수집 → argmin으로 binding 결정 (realism: trading_bot.md §4)
-    candidates: list[tuple[float, str]] = [
-        (l_mdd, "mdd"),
-        (l_cvar, "cvar"),
-        (l_hard_cap, "hard_cap"),
-    ]
-    if exchange_leverage_cap is not None and exchange_leverage_cap > 0.0:
-        candidates.append((exchange_leverage_cap, "exchange_cap"))
+    # Stage 1: Safety Ceiling
+    l_ceiling, ceiling_binding, l_hard_ceiling, _ = _resolve_safety_ceiling(
+        arr,
+        mdd_target=mdd_target,
+        cvar_target=cvar_target,
+        l_floor=float(l_floor),
+        l_hard_cap=float(l_hard_cap),
+        l_search_hi=l_search_hi,
+        exchange_leverage_cap=exchange_leverage_cap,
+        worst_fold_rets=worst_fold_rets,
+        kelly_safety_fraction=kelly_safety_fraction,
+    )
 
-    # Worst-fold MDD 제약: 최악 fold의 MDD가 mdd_target 이하가 되도록 이분탐색
-    if worst_fold_rets is not None:
-        wf_arr = np.asarray(worst_fold_rets, dtype=np.float64)
-        if wf_arr.size >= 2:
-            l_worst_fold = _bisect_max_leverage(wf_arr, _mdd_at_leverage, mdd_target, float(l_floor), l_search_hi)
-            candidates.append((l_worst_fold, "worst_fold"))
+    # Stage 2: OOS Adaptive
+    l_final, binding, cross_valid_mdd = _resolve_oos_adaptive_leverage(
+        arr,
+        oos_rets,
+        l_ceiling=l_ceiling,
+        l_hard_ceiling=l_hard_ceiling,
+        ceiling_binding=ceiling_binding,
+        mdd_cap=mdd_cap,
+        mdd_margin=mdd_margin,
+        oos_budget_blend=oos_budget_blend,
+        oos_floor_cap=oos_floor_cap,
+        fit_mdd_crisis_gate=fit_mdd_crisis_gate,
+        l_floor=float(l_floor),
+        l_search_hi=l_search_hi,
+    )
 
-    # Fractional-Kelly 제약: mu/sigma² * safety_fraction
-    if kelly_safety_fraction is not None:
-        mu = float(np.mean(arr))
-        sigma = float(np.std(arr, ddof=1))
-        if mu > 0.0 and sigma > 1e-12:
-            l_kelly = kelly_safety_fraction * mu / (sigma * sigma)
-            if l_kelly > 0.0 and np.isfinite(l_kelly):
-                candidates.append((l_kelly, "kelly_theoretical"))
+    # Stage 3: Concentration Haircut
+    l_final, binding = _apply_concentration_haircut(
+        l_final,
+        binding,
+        diversification_ratio_fit=diversification_ratio_fit,
+        diversification_gate_enabled=diversification_gate_enabled,
+        concentration_recent_window_bars=concentration_recent_window_bars,
+        concentration_floor=concentration_floor,
+    )
 
-    l_optimal, binding = min(candidates, key=lambda x: x[0])
-    l_final = max(l_optimal, float(l_floor))
-
-    # OOS 크로스 검증 + RC-2 blended budget (fit/OOS 역전 시 OOS 예산 직접 사용)
-    cross_valid_mdd: float = 0.0
-    if oos_rets is not None:
-        oos_arr = np.asarray(oos_rets, dtype=np.float64)
-        if oos_arr.size >= 2:
-            cross_valid_mdd = _mdd_at_leverage(oos_arr, l_final)
-            _oos_mdd_v1 = _mdd_at_leverage(oos_arr, 1.0)
-            _fit_mdd_v1 = _mdd_at_leverage(arr, 1.0)
-            _mdd_ratio = _oos_mdd_v1 / _fit_mdd_v1 if _fit_mdd_v1 > 1e-12 else 1.0
-            _fit_cagr_v1 = _annualized_cagr_from_returns(arr, bars_per_year=2190)
-            _oos_cagr_v1 = _annualized_cagr_from_returns(oos_arr, bars_per_year=2190)
-            _fit_sharpe_v1 = _sharpe_from_returns(arr, bars_per_year=2190)
-            _oos_sharpe_v1 = _sharpe_from_returns(oos_arr, bars_per_year=2190)
-            _logger.debug(
-                "[L2-CALIB-CV] L*=%.4f(%s) | fit_MDD_vol1=%.6f OOS_MDD_vol1=%.6f "
-                "MDD_ratio=%.2f | OOS_deployed_MDD=%.6f (cap=%.4f) | "
-                "fit_CAGR_v1=%.4f fit_sharpe_v1=%.4f OOS_CAGR_v1=%.4f OOS_sharpe_v1=%.4f",
-                l_final,
-                binding,
-                _fit_mdd_v1,
-                _oos_mdd_v1,
-                _mdd_ratio,
-                cross_valid_mdd,
-                mdd_cap,
-                _fit_cagr_v1,
-                _fit_sharpe_v1,
-                _oos_cagr_v1,
-                _oos_sharpe_v1,
-            )
-            # Crisis gate: fit-leg 자체가 재앙적 MDD(>=threshold)면 OOS가 "안전해 보인다"는
-            # 이유만으로 레버리지를 올리지 않음 — fit-leg의 보수적 경고를 무시하지 않도록 조기 차단.
-            if fit_mdd_crisis_gate is not None and _fit_mdd_v1 >= fit_mdd_crisis_gate:
-                _logger.debug(
-                    "[L2-OOS-BLEND-SUPPRESSED] fit_MDD_vol1=%.4f >= crisis_gate=%.4f "
-                    "-> oos_blend skipped, L* stays %.4f (%s)",
-                    _fit_mdd_v1,
-                    fit_mdd_crisis_gate,
-                    l_final,
-                    binding,
-                )
-            # RC-2: fit/OOS 역전 시 blended budget (기존 매직캡 min(2.0, ...) 대체)
-            elif _mdd_ratio < 1.0:
-                _mdd_target_oos = mdd_cap * (1.0 - mdd_margin * 0.5)
-                l_oos = _bisect_max_leverage(oos_arr, _mdd_at_leverage, _mdd_target_oos, float(l_floor), l_search_hi)
-                l_blend = l_final * (1.0 - oos_budget_blend) + l_oos * oos_budget_blend
-                _l_candidate = min(l_blend, oos_floor_cap)
-                if _l_candidate > l_final:
-                    _prev_final = l_final
-                    l_final = _l_candidate
-                    binding = "oos_blend"
-                    # 불변식: OOS deployed MDD ≤ mdd_cap*(1-mdd_margin*0.5)
-                    _deployed_mdd = _mdd_at_leverage(oos_arr, l_final)
-                    _oos_invariant = mdd_cap * (1.0 - mdd_margin * 0.5)
-                    if _deployed_mdd > _oos_invariant:
-                        l_final = _prev_final
-                        binding = "oos_blend"
-                        _logger.debug(
-                            "[L2-OOS-BLEND] L_candidate=%.4f exceeds OOS invariant %.4f → reverted to L*=%.4f",
-                            _l_candidate,
-                            _oos_invariant,
-                            l_final,
-                        )
-                    else:
-                        cross_valid_mdd = _deployed_mdd
-                        _logger.debug(
-                            "[L2-OOS-BLEND] Raised L* from %.4f to %.4f (blend=%.2f, "
-                            "oos_mdd_v1=%.4f, L_oos=%.4f, OOS_deployed_MDD=%.4f ≤ %.4f)",
-                            _prev_final,
-                            l_final,
-                            oos_budget_blend,
-                            _oos_mdd_v1,
-                            l_oos,
-                            cross_valid_mdd,
-                            _oos_invariant,
-                        )
-        else:
-            _logger.debug("[L2-CALIB-CV] oos_rets size<2, skipping cross-validation")
-
-    # Concentration gate: 독립적인 DR 기반 제약 (OOS 결과와 무관)
-    if diversification_gate_enabled:
-        if concentration_floor is None:
-            raise ValueError("concentration_floor must be explicitly set when diversification_gate_enabled=True")
-        if diversification_ratio_fit is not None:
-            dr_arr = np.asarray(diversification_ratio_fit, dtype=np.float64)
-            if dr_arr.size >= concentration_recent_window_bars:
-                dr_fit_median = float(np.median(dr_arr))
-                dr_recent = float(np.median(dr_arr[-concentration_recent_window_bars:]))
-                if dr_fit_median > 1e-9:
-                    concentration_ratio = float(np.clip(dr_recent / dr_fit_median, concentration_floor, 1.0))
-                    if concentration_ratio < 1.0:
-                        l_final = l_final * concentration_ratio
-                        binding = "concentration_gate"
-
-    # 최종: clip(L*, l_floor, min(l_hard_cap, exchange_cap)) — spec Algorithm §6
+    # Stage 4: Final invariant clip (defense-in-depth)
     if exchange_leverage_cap is not None and exchange_leverage_cap > 0.0 and l_final > exchange_leverage_cap:
         l_final = exchange_leverage_cap
         binding = "exchange_cap"

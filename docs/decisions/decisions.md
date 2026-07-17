@@ -1,5 +1,15 @@
 # Active Decisions Log (Sliding Window)
 
+## [2026-07-17] [TASK_L2_DEPLOY_LEVERAGE_KELLY_WORST_FOLD_SAFETY] [ADR_20260717_L2_DEPLOY_LEVERAGE_KELLY_WORST_FOLD_SAFETY]
+- **Context/Why:** 위기 재현성 replay에서 챔피언 L*가 2025년 정상장(fit-leg) 단일 경로 하나에만 맞춰 산출됨을 확인 — 위기 MDD 초과폭(2.64배)이 fit-leg 구간과 2022 위기 구간의 변동성 비율과 정확히 일치. 이미 존재하는 DR 기반 concentration gate는 이 시장 유형(알트코인 급락)에서 반증되어 폐기된 경로이므로, 새 파라미터 없이 이론적으로 근거 있는 대안이 필요했다.
+- **Resolution/What:** risk_deployment.py에 select_worst_fold_returns(챔피언 자신의 walk-forward fold 중 unit MDD 최대 fold 선택, 위기 윈도우 미참조)와 calibrate_deployment_leverage의 신규 candidate 2종(worst_fold_rets 기반 MDD 제약, kelly_safety_fraction=0.25 기반 fractional-Kelly 이론 상한 — 심볼 레벨에 이미 쓰이는 KELLY_FRACTION=0.25와 동일 상수) 추가. Layer2AllocationConfig에 l2_deploy_worst_fold_gate_enabled(기본 False)/l2_deploy_kelly_safety_fraction(기본 None) opt-in 필드 추가. workflow.py의 evaluate_l2_trial 호출부에 배선.
+- **Impact:** 전체 파이프라인 A/B 실측(게이트 강제 on): 위기 MDD 55.47%→47.13%로 개선됐으나 champion drift(Optuna 탐색 stochasticity)로 confound돼 순수 효과 분리 실패. 동일 챔피언 고정 격리 테스트에서 l_worst_fold=1.0(가장 타이트)임에도 최종 L*가 off와 동일함을 발견 — RC-2 OOS-blend가 새 candidate를 무시하고 재상향하는 구조적 버그 확정(후속 ADR_20260717_L2_LEVERAGE_CEILING_REFACTOR에서 수정). /check PASS(spec compliance + ruff/mypy/pytest, risk_deployment.py 자체 Cov 92%, workflow.py는 사전 존재 무관 실패 3건 제외 후 Cov 50% — 레거시 대형 파일 기존 갭).
+
+## [2026-07-17] [TASK_L2_LEVERAGE_CEILING_REFACTOR] [ADR_20260717_L2_LEVERAGE_CEILING_REFACTOR]
+- **Context/Why:** 동일 챔피언의 fit-leg 데이터를 고정해 worst_fold_rets/kelly_safety_fraction on/off를 직접 비교한 결과, l_worst_fold=1.0(가장 타이트한 후보)임에도 최종 L*가 off와 완전 동일하게 산출됨을 실측 확인. 원인은 candidates min()으로 후보를 모으는 1단계와, RC-2 OOS-blend가 그 결과를 조건부로 재상향하는 2단계가 분리되어 있고 hard_cap/exchange_cap만 함수 말미에서 재검증되고 worst_fold/kelly는 재검증 지점이 없는 비일관적 구조였음. 새 안전장치를 추가할 때마다 이 비일관성으로 인해 조용히 무력화되는 버그가 반복될 위험.
+- **Resolution/What:** calibrate_deployment_leverage를 3개 순수 함수로 분리: _resolve_safety_ceiling(모든 절대 상한 후보를 모아 l_full/l_hard 반환 — l_full은 mdd/cvar 포함 OOS-blend가 재추정 가능한 기준선, l_hard는 hard_cap/exchange_cap/worst_fold/kelly만 포함한 절대 상한), _resolve_oos_adaptive_leverage(RC-2 blend 로직 그대로 유지하되 최종 후보를 min(l_blend, oos_floor_cap, l_hard)로 클램프 — 이번 버그의 정확한 수정 지점), _apply_concentration_haircut(기존 로직 추출). 공개 함수 시그니처/반환 타입/binding 라벨 집합은 전혀 변경 없음.
+- **Impact:** 회귀 테스트(test_resolve_safety_ceiling_matches_legacy_stage1_when_gates_disabled)로 게이트 비활성 시 기존 stage-1 min()과 완전 동일함을 확인. 버그 재현 테스트(test_worst_fold_ceiling_survives_oos_blend_raise)로 OOS-blend가 worst_fold ceiling을 더 이상 넘지 못함을 실측 확인 — 이 fixture는 실제 세션에서 발견한 버그 패턴(음의 mu fit-leg, 높은 unit MDD worst-fold, 평온한 OOS)을 그대로 재현. /check PASS(spec compliance + ruff/mypy/pytest, Cov 92%). 향후 신규 안전장치는 _resolve_safety_ceiling의 candidates 리스트에 한 줄만 추가하면 자동으로 강제되는 구조로 전환.
+
 ## [2026-07-17] [TASK_L2_CRISIS_BTC_REGIME_DATA_INTEGRITY_FIX] [ADR_20260717_L2_CRISIS_BTC_REGIME_DATA_INTEGRITY_FIX]
 - **Context/Why:** assess_crisis_reliability가 LUNA/FTX 위기 윈도우를 로드할 때 BTCUSDT 등 timestamp_x/timestamp_y 병합-접미사 스키마 심볼(전체 ~4%)이 load_single_symbol_data의 3단 폴백에서 전부 실패해 침묵 탈락(has_btc=False 실측 확인). market_regime._btc_index()는 BTC 부재 시 예외 없이 return 0(임의 심볼 대체)해, 이미 프로덕션에 활성화된 regime-conditional 익스포저 캡(apply_regime_risk_cap, bull=1.0/bear=0.35/crisis=0.25)이 엉뚱한 심볼로 레짐을 오판정하고 있었다.
 - **Resolution/What:** opt_data_utils.py에 _resolve_timestamp_column 헬퍼를 추가해 timestamp 부재 시 timestamp_x로 폴백하도록 load_single_symbol_data 두 분기를 수정. market_regime._btc_index()는 BTC 부재 시 ValueError로 fail-closed 전환. active_pipeline.py의 [CRISIS-RELIABILITY] 로그에 윈도우별 raw MDD/CAGR/CVaR detail을 추가. 사전 존재하던 테스트 버그(FUTURES_DATA_DIR를 opt_data_utils 모듈에 잘못 monkeypatch, 실제 소유자는 src.core.settings)도 함께 수정해 xfail 7건을 실통과로 전환.
@@ -64,13 +74,3 @@
 - **Context/Why:** check phase had no way to verify spec implementation completeness; all verification was manual
 - **Resolution/What:** spec SKILL.md: contract.json 생성 지침 추가. lean_check.py: --spec + _check_spec_compliance. check SKILL.md: --spec usage. sync_task.py: contract.json도 cleanup
 - **Impact:** Spec-to-implementation gap can now be auto-detected in check phase
-
-## [2026-07-16] [TASK_SKILL_REFACTOR_V2] [ADR_20260716_SKILL_REFACTOR_V2]
-- **Context/Why:** 첫 실행에서 2965개 삭제 — .git/__pycache__ .venv/*.pyc 포함, 실제 temp 파일(.tmp .bak)만 대상으로 제한 필요
-- **Resolution/What:** _wipe_temp_artifacts: EXCLUDED_DIRS 추가, .pyc 제거 (__pycache__가 이미 excluded)
-- **Impact:** 정확한 temp wipe, 생태계 손상 방지
-
-## [2026-07-16] [TASK_SKILL_REFACTOR_V2] [ADR_20260716_SKILL_REFACTOR_V2]
-- **Context/Why:** 1차 개편 후 audit에서 circuit breaker 누락, temp artifact wipe 미구현, clean state verify 미명시 발견
-- **Resolution/What:** check SKILL.md: circuit breaker 복원. sync_task.py: _wipe_temp_artifacts() 추가. sync SKILL.md: git status verify 명시
-- **Impact:** 모든 원래 요구사항 충족, gap zero
