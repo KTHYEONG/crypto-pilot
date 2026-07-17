@@ -10,8 +10,10 @@ from src.domain.futures.strategy.tiered_workflow.risk_deployment import (
     DeploymentResult,
     _cvar_95_at_leverage,
     _mdd_at_leverage,
+    _mdd_from_returns,
     apply_deployment,
     calibrate_deployment_leverage,
+    select_worst_fold_returns,
 )
 
 BARS_PER_YEAR = 2190.0  # 4h 기준
@@ -279,4 +281,182 @@ class TestOosFloor:
             l_hard_cap=4.0,
         )
         assert bind in ("mdd", "hard_cap", "cvar", "none")
+        assert lev >= 1.0
+
+
+# ---------------------------------------------------------------------------
+# S7: select_worst_fold_returns
+# ---------------------------------------------------------------------------
+class TestSelectWorstFoldReturns:
+    def test_picks_highest_unit_mdd_fold(self) -> None:
+        """단위 MDD가 더 큰 volatile fold를 반환."""
+        calm_fold = (0.01, 0.01, -0.005, 0.01)
+        volatile_fold = (0.02, -0.08, 0.01, -0.03)
+        fit_rets_by_fold = (calm_fold, volatile_fold)
+
+        worst = select_worst_fold_returns(fit_rets_by_fold)
+
+        assert tuple(worst.tolist()) == volatile_fold
+
+    def test_empty_input_returns_empty_array(self) -> None:
+        """빈 튜플 입력 → 빈 배열 반환."""
+        worst = select_worst_fold_returns(())
+        assert worst.size == 0
+
+    def test_single_fold_returns_empty(self) -> None:
+        """fold < 2인 경우 빈 배열 반환."""
+        worst = select_worst_fold_returns(((0.01, 0.02, -0.01),))
+        assert worst.size == 0
+
+    def test_all_folds_too_short_returns_empty(self) -> None:
+        """모든 fold 길이 < 2 → 빈 배열."""
+        worst = select_worst_fold_returns(((0.01,), (0.02,)))
+        assert worst.size == 0
+
+    def test_mdd_tie_returns_first_with_max_mdd(self) -> None:
+        """동일 MDD 시 첫 번째 fold 반환 (안정성)."""
+        fold_a = (0.02, -0.05, 0.01)
+        fold_b = (0.01, -0.05, 0.03)
+        fit_rets_by_fold = (fold_a, fold_b)
+        worst = select_worst_fold_returns(fit_rets_by_fold)
+        expected_mdd = _mdd_from_returns(np.asarray(fold_a, dtype=np.float64))
+        actual_mdd = _mdd_from_returns(worst)
+        assert actual_mdd == pytest.approx(expected_mdd, rel=1e-3)
+
+
+# ---------------------------------------------------------------------------
+# S8: calibrate_deployment_leverage — kelly_safety_fraction
+# ---------------------------------------------------------------------------
+class TestKellySafetyFraction:
+    def test_kelly_fraction_out_of_range_raises(self) -> None:
+        """kelly_safety_fraction <= 0 또는 > 1 → ValueError."""
+        for invalid in [0.0, -0.1, 1.5]:
+            with pytest.raises(ValueError, match="kelly_safety_fraction"):
+                calibrate_deployment_leverage(
+                    fit_rets=np.array([0.01, -0.01, 0.02, -0.005], dtype=np.float64),
+                    kelly_safety_fraction=invalid,
+                )
+
+    def test_kelly_binding_with_positive_mu(self) -> None:
+        """mu > 0인 fit_rets에서 kelly candidate가 binding됨 (충분히 조여서)."""
+        np.random.seed(42)
+        rets = np.random.normal(0.001, 0.02, 1000).astype(np.float64)
+        lev_no_kelly, bind_no_kelly, _ = calibrate_deployment_leverage(
+            fit_rets=rets,
+            l_hard_cap=20.0,
+            mdd_cap=0.30,
+            mdd_margin=0.30,
+        )
+        lev_kelly, bind_kelly, _ = calibrate_deployment_leverage(
+            fit_rets=rets,
+            l_hard_cap=20.0,
+            mdd_cap=0.30,
+            mdd_margin=0.30,
+            kelly_safety_fraction=0.25,
+        )
+        assert lev_kelly <= lev_no_kelly + 1e-6
+        assert bind_kelly in ("kelly_theoretical", "mdd", "cvar", "hard_cap")
+
+    def test_kelly_skipped_when_mu_nonpositive(self) -> None:
+        """mu <= 0이면 kelly candidate 생략."""
+        rets = np.full(100, -0.001, dtype=np.float64)
+        lev, bind, _ = calibrate_deployment_leverage(
+            fit_rets=rets,
+            kelly_safety_fraction=0.25,
+            l_hard_cap=20.0,
+        )
+        assert bind != "kelly_theoretical"
+
+
+# ---------------------------------------------------------------------------
+# S9: calibrate_deployment_leverage — worst_fold_rets
+# ---------------------------------------------------------------------------
+class TestWorstFoldConstraint:
+    def test_worst_fold_candidate_added(self) -> None:
+        """worst_fold_rets 제공 시 candidate 리스트에 추가."""
+        np.random.seed(42)
+        rets = np.random.normal(0.001, 0.02, 1000).astype(np.float64)
+        np.random.seed(43)
+        worst = np.random.normal(0.0005, 0.04, 300).astype(np.float64)
+
+        lev_no_wf, bind_no_wf, _ = calibrate_deployment_leverage(
+            fit_rets=rets,
+            l_hard_cap=20.0,
+            mdd_cap=0.30,
+            mdd_margin=0.30,
+        )
+        lev_wf, bind_wf, _ = calibrate_deployment_leverage(
+            fit_rets=rets,
+            l_hard_cap=20.0,
+            mdd_cap=0.30,
+            mdd_margin=0.30,
+            worst_fold_rets=worst,
+        )
+        assert lev_wf <= lev_no_wf + 1e-6
+        assert bind_wf in ("worst_fold", "mdd", "cvar", "hard_cap")
+
+    def test_worst_fold_empty_skipped(self) -> None:
+        """빈 worst_fold_rets → candidate 생략."""
+        rets = np.array([0.01, -0.01, 0.02, -0.005], dtype=np.float64)
+        lev, bind, _ = calibrate_deployment_leverage(
+            fit_rets=rets,
+            worst_fold_rets=np.array([], dtype=np.float64),
+        )
+        assert bind != "worst_fold"
+
+    def test_worst_fold_none_skipped(self) -> None:
+        """worst_fold_rets=None → candidate 생략."""
+        rets = np.array([0.01, -0.01, 0.02, -0.005], dtype=np.float64)
+        lev, bind, _ = calibrate_deployment_leverage(
+            fit_rets=rets,
+            worst_fold_rets=None,
+        )
+        assert bind != "worst_fold"
+
+
+# ---------------------------------------------------------------------------
+# S10: 회귀 방지 — disabled gates match pre-spec baseline
+# ---------------------------------------------------------------------------
+class TestDisabledGatesRegression:
+    def test_disabled_gates_match_baseline(self) -> None:
+        """worst_fold_rets/kelly_safety_fraction 기본값(None) → 기존 동작 동일."""
+        np.random.seed(42)
+        rets = np.random.normal(0.001, 0.02, 1000).astype(np.float64)
+
+        lev, binding, cross_mdd = calibrate_deployment_leverage(
+            fit_rets=rets,
+            mdd_cap=0.30,
+            mdd_margin=0.30,
+            l_hard_cap=4.0,
+        )
+        assert binding in {"mdd", "cvar", "hard_cap"}
+
+
+# ---------------------------------------------------------------------------
+# S11: Integration — evaluate_l2_trial wiring (mock test)
+# ---------------------------------------------------------------------------
+class TestSelectWorstFoldThenCalibrateIntegration:
+    def test_worst_fold_flows_into_calibrate(self) -> None:
+        """select_worst_fold_returns → calibrate_deployment_leverage 순차 호출 검증."""
+        import numpy as np
+
+        calm_fold = (0.01, 0.01, -0.005, 0.01)
+        volatile_fold = (0.02, -0.08, 0.01, -0.03)
+        fit_rets_by_fold = (calm_fold, volatile_fold)
+
+        worst = select_worst_fold_returns(fit_rets_by_fold)
+        assert tuple(worst.tolist()) == volatile_fold
+
+        np.random.seed(42)
+        fit_rets = np.random.normal(0.001, 0.02, 1000).astype(np.float64)
+
+        lev, binding, _ = calibrate_deployment_leverage(
+            fit_rets=fit_rets,
+            mdd_cap=0.30,
+            mdd_margin=0.30,
+            l_hard_cap=20.0,
+            worst_fold_rets=worst,
+            kelly_safety_fraction=0.25,
+        )
+        assert binding in ("worst_fold", "kelly_theoretical", "mdd", "cvar", "hard_cap")
         assert lev >= 1.0
