@@ -116,10 +116,11 @@
     ]
   },
   "src/domain/futures/strategy/tiered_workflow/dataclasses.py": {
-    "architecture": "docs/architecture/layer2.md",
+    "architecture": "docs/results/result.md",
     "testing": [
       "tests/unit/domain/futures/strategy/test_tiered_workflow.py",
-      "tests/unit/domain/futures/optimization/test_workflow.py"
+      "tests/unit/domain/futures/optimization/test_workflow.py",
+      "tests/unit/domain/futures/strategy/tiered_workflow/test_regime_policy.py"
     ]
   },
   "src/domain/futures/strategy/tiered_logging.py": {
