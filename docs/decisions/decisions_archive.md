@@ -2,6 +2,11 @@
 
 This file holds historical architecture decision records (ADRs) that have been pruned from the active window.
 
+## [2026-07-16] [TASK_CHECK_SYNC_REFACTOR] [ADR_20260716_CHECK_SYNC_REFACTOR]
+- **Context/Why:** SKILL.md contained redundant rules, scripts had 3 separate subprocess calls, pytest ran twice, no AI-first diagnostic output
+- **Resolution/What:** SKILL.md 축소 44→11/42→15줄, lean_check.py pytest 2→1회+JSON stderr, sync_task.py 통합, AGENTS.md SSOT 강화
+- **Impact:** AI 판단 cycle 50%+ 감소, task당 토큰 ~200줄 절감, old scripts 3개 제거
+
 ## [2026-07-16] [TASK_L1_REGISTRY_ADMISSION_RECALIBRATION] [ADR_20260716_L1_REGISTRY_ADMISSION_RECALIBRATION]
 - **Context/Why:** 직전 ADR(L1_SLOW_TF_GATE_RECALIBRATION)이 pooled 심볼 다양성만 고쳐서 6h~1d가 여전히 BLOCKED로 남았음. 재실측 결과 두 원인 확인: (1) fold-level 원시 심볼 수 하한(l1_min_cross_section=2, TF 무관 고정)이 LUNA2USDT/JASMYUSDT 단일심볼 fold를 pooled LCB 계산에서 배제. (2) registry_empty 가설(L0 데이터 부재)을 실측으로 반증 -- 실제로는 fold당 144~2500개 후보가 만들어지는데 pair-level FDR(compute_symbol_strategy_evidence의 Benjamini-Yekutieli 조화급수 보정)이 hard_eligible 후보의 98.9~99.8%(8h/12h/1d)를 탈락시키고 있었음(2h는 76%).
 - **Resolution/What:** calibrate_l1_symbol_breadth_gate.py에 measure_fold_min_ready_symbols_by_tf()/propose_cross_section_thresholds() 추가(측정=p10 raw ready_symbols, registry_empty fold 제외). config.py에 l1_min_cross_section 오버라이드(8h=2/12h=1/1d=1) 및 l1_pair_fdr_procedure: Literal['by','bh']='by' 필드 신설, 8h/12h/1d만 'bh' 채택(6h는 실측 negative gross edge로 의도적 제외). signal_selection.py의 _by_q_values에 harmonic_override 파라미터 추가(1.0=plain BH, None=기존 BY 그대로 -- 기본값 불변).
