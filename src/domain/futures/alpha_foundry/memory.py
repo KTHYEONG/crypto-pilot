@@ -111,10 +111,13 @@ def admit_memory_stage(
     projected = rss + estimated_increment_mb + budget.safety_margin_mb
     admitted = projected <= budget.limit_mb
     _logger.debug(
-        "[MEM] stage=%s rss_mb=%d estimated_increment_mb=%d safety_margin_mb=%d "
-        "budget_mb=%d admitted=%s",
-        stage, rss, estimated_increment_mb, budget.safety_margin_mb,
-        budget.limit_mb, admitted,
+        "[MEM] stage=%s rss_mb=%d estimated_increment_mb=%d safety_margin_mb=%d budget_mb=%d admitted=%s",
+        stage,
+        rss,
+        estimated_increment_mb,
+        budget.safety_margin_mb,
+        budget.limit_mb,
+        admitted,
     )
     return admitted
 
@@ -138,7 +141,8 @@ def resolve_ltf_exec_1m_plan(
         return LtfExec1mPlan(symbols=(), max_workers=max_workers, skip_reason="no_covered_symbols")
 
     if budget is not None and not admit_memory_stage(
-        budget=budget, stage="ltf_stream",
+        budget=budget,
+        stage="ltf_stream",
         estimated_increment_mb=512,
     ):
         return LtfExec1mPlan(symbols=(), max_workers=max_workers, skip_reason="budget")

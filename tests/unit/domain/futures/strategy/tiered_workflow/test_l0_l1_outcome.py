@@ -110,8 +110,14 @@ def test_invalid_measurement() -> None:
 
 def test_build_report_aggregates() -> None:
     m1 = _metrics(timeframe="2h")
-    m2 = _metrics(timeframe="4h", passed_fold_count=0, net_probe_lcb_bps=None, gross_probe_lcb_bps=None,
-                  mean_execution_cost_bps=None, mean_funding_bps=None)
+    m2 = _metrics(
+        timeframe="4h",
+        passed_fold_count=0,
+        net_probe_lcb_bps=None,
+        gross_probe_lcb_bps=None,
+        mean_execution_cost_bps=None,
+        mean_funding_bps=None,
+    )
     report = build_l0_l1_outcome_report((m1, m2))
     assert isinstance(report, L0L1OutcomeReport)
     assert report.deployable_tfs == ("2h",)
@@ -134,9 +140,7 @@ def test_build_report_no_deployable() -> None:
 
 
 def test_classification_priority_blocks_lower() -> None:
-    report = classify_tf_outcome(
-        _metrics(runtime_valid=False, l0_survivor_count=0, passed_fold_count=0)
-    )
+    report = classify_tf_outcome(_metrics(runtime_valid=False, l0_survivor_count=0, passed_fold_count=0))
     assert report.outcome == "invalid_measurement"
 
 

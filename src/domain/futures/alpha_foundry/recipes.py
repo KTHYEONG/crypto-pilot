@@ -58,23 +58,27 @@ RECIPE_DEFINITIONS: dict[str, tuple[dict[str, object], ...]] = {
     "funding_flow_exhaustion_sparse": (
         _rd("ffes_96", {"funding_window": 96, "funding_z": 1.5, "imbalance_window": 12}, 2, ("close", "funding")),
     ),
-    "oi_lsr_unwind": (
-        _rd("oiu_42", {"oi_window": 42, "lsr_window": 21, "z_exit": 0.5}, 3, ("close", "oi", "lsr")),
-    ),
+    "oi_lsr_unwind": (_rd("oiu_42", {"oi_window": 42, "lsr_window": 21, "z_exit": 0.5}, 3, ("close", "oi", "lsr")),),
     "vol_contraction_breakout": (
         _rd("vcb_20_120", {"bb_window": 20, "vol_window": 120, "expansion_ratio": 1.5}, 1, ("close", "high", "low")),
     ),
-    "xs_residual_rebalance": (
-        _rd("xsrr_12", {"rank_window": 12, "bucket_threshold": 0.20}, 1, ("close",)),
-    ),
+    "xs_residual_rebalance": (_rd("xsrr_12", {"rank_window": 12, "bucket_threshold": 0.20}, 1, ("close",)),),
     "carry_net_of_funding": (
         _rd("cnf_96", {"funding_window": 96, "z_threshold": 0.5, "carry_window": 24}, 2, ("close", "funding")),
     ),
     "funding_session_orb_flow": (
-        _rd("fs_orb_15m", {"ltf": "15m", "opening_minutes": 15, "volume_z": 1.5, "cvd_min": 0.15},
-            1, ("close", "taker_buy")),
-        _rd("fs_orb_30m", {"ltf": "30m", "opening_minutes": 30, "volume_z": 1.5, "cvd_min": 0.15},
-            1, ("close", "taker_buy")),
+        _rd(
+            "fs_orb_15m",
+            {"ltf": "15m", "opening_minutes": 15, "volume_z": 1.5, "cvd_min": 0.15},
+            1,
+            ("close", "taker_buy"),
+        ),
+        _rd(
+            "fs_orb_30m",
+            {"ltf": "30m", "opening_minutes": 30, "volume_z": 1.5, "cvd_min": 0.15},
+            1,
+            ("close", "taker_buy"),
+        ),
     ),
     "liquidity_sweep_reclaim": (
         _rd("lsr_5m_36", {"ltf": "5m", "sweep_window": 36, "atr_mult": 0.25}, 1, ("close", "high", "low", "taker_buy")),

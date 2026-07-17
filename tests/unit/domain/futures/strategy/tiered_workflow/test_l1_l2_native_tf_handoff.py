@@ -104,12 +104,8 @@ def _make_l1_result(
 
 def test_multi_tf_same_strategy_id_preserves_distinct_native_tf_sleeves() -> None:
     """동일 symbol/strategy/index의 6h·1d event가 모두 보존됨."""
-    ev_6h = _make_event(
-        symbol="BTCUSDT", strategy_id="trend_ma:ema_12_72", native_tf="6h", decision_idx=100
-    )
-    ev_1d = _make_event(
-        symbol="BTCUSDT", strategy_id="trend_ma:ema_12_72", native_tf="1d", decision_idx=100
-    )
+    ev_6h = _make_event(symbol="BTCUSDT", strategy_id="trend_ma:ema_12_72", native_tf="6h", decision_idx=100)
+    ev_1d = _make_event(symbol="BTCUSDT", strategy_id="trend_ma:ema_12_72", native_tf="1d", decision_idx=100)
 
     # Merge dedup key should be (native_tf, symbol, strategy_id, decision_idx)
     key_6h = (ev_6h.native_tf, ev_6h.symbol, ev_6h.strategy_id, ev_6h.decision_idx)
@@ -161,10 +157,7 @@ def test_native_tf_identity_rejects_missing_and_deduplicates_same_tf_only() -> N
     ev_c = _make_event(symbol="BTCUSDT", strategy_id="trend_ma:ema_12_72", native_tf="4h", decision_idx=100)
 
     # Merge logic: 4-tuple dedup key
-    keys = {
-        (ev.native_tf, ev.symbol, ev.strategy_id, ev.decision_idx)
-        for ev in (ev_a, ev_b, ev_c)
-    }
+    keys = {(ev.native_tf, ev.symbol, ev.strategy_id, ev.decision_idx) for ev in (ev_a, ev_b, ev_c)}
     assert len(keys) == 2, "ev_a and ev_b are duplicates → 2 unique keys"
     assert (ev_a.native_tf, ev_a.symbol, ev_a.strategy_id, ev_a.decision_idx) in keys
     assert (ev_c.native_tf, ev_c.symbol, ev_c.strategy_id, ev_c.decision_idx) in keys
@@ -194,14 +187,10 @@ def test_l2_master_readiness_rejects_narrow_registry_without_blocking_auxiliary(
     )
 
     assert readiness.auxiliary_eligible, "1d gate passed + non-empty registry → auxiliary eligible"
-    assert not readiness.master_eligible, (
-        "1d: ready_symbol_count=3 < min_ready_symbols=5 → master ineligible"
-    )
+    assert not readiness.master_eligible, "1d: ready_symbol_count=3 < min_ready_symbols=5 → master ineligible"
     assert readiness.ready_symbol_count == 3
     assert readiness.source_family_count == 2
-    assert readiness.edge_quality > 0.0, (
-        "edge quality from registry evidence"
-    )
+    assert readiness.edge_quality > 0.0, "edge quality from registry evidence"
 
     # Verify no raw count fallback: n_winning_signals=3 but not used as edge_quality
     # (edge_quality computed from registry evidence, not raw count)
@@ -210,8 +199,7 @@ def test_l2_master_readiness_rejects_narrow_registry_without_blocking_auxiliary(
 def test_l2_master_readiness_accepts_diversified_registry() -> None:
     """5+ symbols, 2+ families → master eligible."""
     items: dict[str, tuple[SymbolStrategyEvidence, ...]] = {
-        f"SYM{i}": (_make_registry_item(f"SYM{i}", "family_a:variant_1"),)
-        for i in range(3)
+        f"SYM{i}": (_make_registry_item(f"SYM{i}", "family_a:variant_1"),) for i in range(3)
     }
     items["SYM3"] = (_make_registry_item("SYM3", "family_b:variant_2"),)
     items["SYM4"] = (_make_registry_item("SYM4", "family_b:variant_2"),)

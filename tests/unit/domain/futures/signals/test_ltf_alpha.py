@@ -20,6 +20,7 @@ from src.domain.futures.strategy.config import CandidateStrategyConfig
 # Helpers
 # ---------------------------------------------------------------------------
 
+
 def _exec_1m_frame() -> pd.DataFrame:
     dt = pd.date_range("2026-01-01 00:00:00", periods=24 * 60, freq="1min", tz="UTC")
     close = np.full(24 * 60, 104.0, dtype=np.float64)
@@ -71,6 +72,7 @@ def _aligned_3h_2sym() -> AlignedMarketData:
 # Scenario 1: Happy Path
 # ===================================================================
 
+
 class TestLtfFeatureGridHappyPath:
     def test_streaming_panels_accumulate_one_symbol_at_a_time(self) -> None:
         aligned = _aligned_3h_2sym()
@@ -92,12 +94,13 @@ class TestLtfFeatureGridHappyPath:
 
     def test_streaming_skip_plan_returns_empty(self) -> None:
         aligned = _aligned_3h_2sym()
-        plan = dataclasses.make_dataclass("Plan", [("symbols", tuple), ("skip_reason", object)])(
-            ("BTCUSDT",), "budget"
+        plan = dataclasses.make_dataclass("Plan", [("symbols", tuple), ("skip_reason", object)])(("BTCUSDT",), "budget")
+        assert (
+            build_ltf_native_alpha_panels_streaming(
+                aligned=aligned, plan=plan, load_frame=lambda _symbol: None, budget=None
+            )
+            == ()
         )
-        assert build_ltf_native_alpha_panels_streaming(
-            aligned=aligned, plan=plan, load_frame=lambda _symbol: None, budget=None
-        ) == ()
 
     def test_literal_15m_grid_aggregation(self) -> None:
         frame = _exec_1m_frame()
@@ -156,6 +159,7 @@ class TestLtfFeatureGridHappyPath:
 # ===================================================================
 # Scenario 2: Edge Cases
 # ===================================================================
+
 
 class TestLtfEdgeCases:
     def test_limit01_ltf_bar_not_visible_until_base_row(self) -> None:
@@ -304,6 +308,7 @@ class TestLtfEdgeCases:
 # Scenario 3: Error Handling
 # ===================================================================
 
+
 class TestLtfErrorHandling:
     def test_unsupported_ltf_raises_value_error(self) -> None:
         """Unsupported LTF '1m' in build_ltf_alpha_feature_grid -> ValueError."""
@@ -400,6 +405,7 @@ def test_ltf_feature_grid_literal_mock() -> None:
 # Scenario 4: Parallel Streaming (Change 2)
 # ===================================================================
 
+
 class TestLtfStreamingParallel:
     """ThreadPoolExecutor path: max_workers=1 vs max_workers=2 identity."""
 
@@ -412,12 +418,16 @@ class TestLtfStreamingParallel:
         )
 
         panels_1 = build_ltf_native_alpha_panels_streaming(
-            aligned=aligned, plan=PlanCls(symbols, 1, None),
-            load_frame=dict.fromkeys(symbols, frame).get, budget=None,
+            aligned=aligned,
+            plan=PlanCls(symbols, 1, None),
+            load_frame=dict.fromkeys(symbols, frame).get,
+            budget=None,
         )
         panels_2 = build_ltf_native_alpha_panels_streaming(
-            aligned=aligned, plan=PlanCls(symbols, 2, None),
-            load_frame=dict.fromkeys(symbols, frame).get, budget=None,
+            aligned=aligned,
+            plan=PlanCls(symbols, 2, None),
+            load_frame=dict.fromkeys(symbols, frame).get,
+            budget=None,
         )
         assert len(panels_1) == len(panels_2)
         for p1, p2 in zip(panels_1, panels_2, strict=False):
@@ -435,8 +445,10 @@ class TestLtfStreamingParallel:
             "Plan", [("symbols", tuple), ("max_workers", int), ("skip_reason", object)]
         )
         panels = build_ltf_native_alpha_panels_streaming(
-            aligned=aligned, plan=PlanCls(symbols, 2, None),
-            load_frame=frames.get, budget=None,
+            aligned=aligned,
+            plan=PlanCls(symbols, 2, None),
+            load_frame=frames.get,
+            budget=None,
         )
         assert isinstance(panels, tuple)
         # ETHUSDT column should remain all zeros (no data)
@@ -451,8 +463,10 @@ class TestLtfStreamingParallel:
             "Plan", [("symbols", tuple), ("max_workers", int), ("skip_reason", object)]
         )
         panels = build_ltf_native_alpha_panels_streaming(
-            aligned=aligned, plan=PlanCls(symbols, 2, None),
-            load_frame=lambda _s: empty, budget=None,
+            aligned=aligned,
+            plan=PlanCls(symbols, 2, None),
+            load_frame=lambda _s: empty,
+            budget=None,
         )
         assert isinstance(panels, tuple)
         assert all(not p.valid_mask_2d.any() for p in panels)
@@ -460,14 +474,14 @@ class TestLtfStreamingParallel:
     def test_plan_without_max_workers_defaults_serial(self) -> None:
         """Plan without max_workers attr falls back to serial path."""
         aligned = _aligned_3h_2sym()
-        PlanCls = dataclasses.make_dataclass(
-            "Plan", [("symbols", tuple), ("skip_reason", object)]
-        )
+        PlanCls = dataclasses.make_dataclass("Plan", [("symbols", tuple), ("skip_reason", object)])
         plan = PlanCls(("BTCUSDT", "ETHUSDT"), None)
         frames = {"BTCUSDT": _exec_1m_frame(), "ETHUSDT": _exec_1m_frame()}
         panels = build_ltf_native_alpha_panels_streaming(
-            aligned=aligned, plan=plan,
-            load_frame=frames.get, budget=None,
+            aligned=aligned,
+            plan=plan,
+            load_frame=frames.get,
+            budget=None,
         )
         assert panels
         assert all(panel.signed_score_2d.shape == aligned.close_2d.shape for panel in panels)
@@ -475,6 +489,7 @@ class TestLtfStreamingParallel:
     def test_parallel_worker_exception_caught(self, caplog) -> None:
         """Worker exception in ThreadPoolExecutor is caught and logged."""
         import logging
+
         caplog.set_level(logging.WARNING)
         aligned = _aligned_3h_2sym()
         symbols = ("BTCUSDT", "ETHUSDT")
@@ -483,6 +498,7 @@ class TestLtfStreamingParallel:
             "Plan", [("symbols", tuple), ("max_workers", int), ("skip_reason", object)]
         )
         call_count = 0
+
         def _raise_for_first(sym: str):
             nonlocal call_count
             call_count += 1
@@ -491,8 +507,10 @@ class TestLtfStreamingParallel:
             return frame
 
         panels = build_ltf_native_alpha_panels_streaming(
-            aligned=aligned, plan=PlanCls(symbols, 2, None),
-            load_frame=_raise_for_first, budget=None,
+            aligned=aligned,
+            plan=PlanCls(symbols, 2, None),
+            load_frame=_raise_for_first,
+            budget=None,
         )
         assert isinstance(panels, tuple)
         assert any("simulated worker failure" in r.message for r in caplog.records)

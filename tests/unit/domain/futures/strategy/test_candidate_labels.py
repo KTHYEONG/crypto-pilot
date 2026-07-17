@@ -782,15 +782,17 @@ def test_label_candidate_events_nan_cost_produces_finite_edge() -> None:
         kill_mask=np.zeros((t, n), dtype=bool),
         execution_cost_bps_2d=np.full((t, n), np.nan, dtype=np.float64),
     )
-    events = pd.DataFrame({
-        "symbol": ["BTCUSDT"],
-        "side": [1],
-        "entry_idx": [11],
-        "expected_holding_bars": [5],
-        "min_holding_bars": [1],
-        "stop_atr_mult": [2.0],
-        "take_profit_atr_mult": [4.0],
-    })
+    events = pd.DataFrame(
+        {
+            "symbol": ["BTCUSDT"],
+            "side": [1],
+            "entry_idx": [11],
+            "expected_holding_bars": [5],
+            "min_holding_bars": [1],
+            "stop_atr_mult": [2.0],
+            "take_profit_atr_mult": [4.0],
+        }
+    )
     out = label_candidate_events(events=events, aligned=aligned, cfg=CandidateStrategyConfig())
     assert np.isfinite(float(out.loc[0, "net_event_bps"])), "net_event_bps is NaN"
     assert np.isfinite(float(out.loc[0, "execution_cost_bps"])), "execution_cost_bps is NaN"

@@ -204,56 +204,78 @@ class TestDebugSummary:
         from src.domain.futures.strategy.execution_cost import ExecutionCostModel
 
         t = 96
-        dt = np.arange(np.datetime64("2026-01-01T00"), np.datetime64("2026-01-05T00"),
-                        np.timedelta64(1, "h"))[:t]
-        close = np.column_stack([
-            np.linspace(100.0, 124.0, t, dtype=np.float64),
-            np.linspace(50.0, 61.0, t, dtype=np.float64),
-        ])
+        dt = np.arange(np.datetime64("2026-01-01T00"), np.datetime64("2026-01-05T00"), np.timedelta64(1, "h"))[:t]
+        close = np.column_stack(
+            [
+                np.linspace(100.0, 124.0, t, dtype=np.float64),
+                np.linspace(50.0, 61.0, t, dtype=np.float64),
+            ]
+        )
         zeros = np.zeros((t, 2), dtype=np.float64)
         valid = np.ones((t, 2), dtype=np.bool_)
         side = np.zeros((t, 2), dtype=np.int8)
         side[::2, :] = 1
         score = np.where(side == 1, np.array([0.8, 0.4]), 0.0).astype(np.float64)
         aligned = AlignedMarketData(
-            datetimes=dt, symbols=("BTCUSDT", "ETHUSDT"),
-            open_2d=close, high_2d=close, low_2d=close, close_2d=close,
+            datetimes=dt,
+            symbols=("BTCUSDT", "ETHUSDT"),
+            open_2d=close,
+            high_2d=close,
+            low_2d=close,
+            close_2d=close,
             volume_2d=np.full((t, 2), 1000.0, dtype=np.float64),
             funding_2d=zeros.copy(),
-            active_mask=valid.copy(), warm_mask=valid.copy(),
+            active_mask=valid.copy(),
+            warm_mask=valid.copy(),
             entry_block_mask=np.zeros((t, 2), dtype=np.bool_),
             kill_mask=np.zeros((t, 2), dtype=np.bool_),
             adv_usdt_2d=np.full((t, 2), 1_000_000.0, dtype=np.float64),
             execution_cost_bps_2d=np.full((t, 2), 4.0, dtype=np.float64),
         )
         panel = CandidateSignalPanel(
-            family="sparse_breakout_retest_v2", variant="bor_v2_40_4h",
+            family="sparse_breakout_retest_v2",
+            variant="bor_v2_40_4h",
             params={"lookback": 40},
-            datetimes=dt, symbols=("BTCUSDT", "ETHUSDT"),
-            signed_score_2d=score, side_hint_2d=side,
-            expected_holding_bars=2, min_holding_bars=1,
-            stop_atr_mult=2.0, take_profit_atr_mult=3.0,
+            datetimes=dt,
+            symbols=("BTCUSDT", "ETHUSDT"),
+            signed_score_2d=score,
+            side_hint_2d=side,
+            expected_holding_bars=2,
+            min_holding_bars=1,
+            stop_atr_mult=2.0,
+            take_profit_atr_mult=3.0,
             turnover_proxy_2d=zeros.copy(),
             valid_mask_2d=valid,
             metadata={"recipe_id": "bor_v2_40_4h"},
         )
         recipe = AlphaRecipe(
-            recipe_id="bor_v2_40_4h", family="sparse_breakout_retest_v2",
-            variant="bor_v2_40_4h", timeframe="1h", archetype="trend",
+            recipe_id="bor_v2_40_4h",
+            family="sparse_breakout_retest_v2",
+            variant="bor_v2_40_4h",
+            timeframe="1h",
+            archetype="trend",
             indicator_params={"lookback": 40},
-            side_rule_id="breakout", exit_policy_id="sparse",
-            required_fields=("close",), causal_lag_bars=1,
+            side_rule_id="breakout",
+            exit_policy_id="sparse",
+            required_fields=("close",),
+            causal_lag_bars=1,
             max_turnover_per_year=2000.0,
         )
         evidence = evaluate_panel_gate(
-            panel=panel, aligned=aligned, recipe=recipe,
+            panel=panel,
+            aligned=aligned,
+            recipe=recipe,
             cost_model=ExecutionCostModel(),
-            config=AlphaGateConfig(min_events=10, min_effective_n=5.0,
-                                    min_candidate_rank_ic_tstat=0.0,
-                                    min_nw_tstat=0.0,
-                                    max_cost_drag_ratio=1.0,
-                                    max_turnover_per_year=2000.0),
-            bars_per_year=365.0 * 24.0, run_id="test_debug",
+            config=AlphaGateConfig(
+                min_events=10,
+                min_effective_n=5.0,
+                min_candidate_rank_ic_tstat=0.0,
+                min_nw_tstat=0.0,
+                max_cost_drag_ratio=1.0,
+                max_turnover_per_year=2000.0,
+            ),
+            bars_per_year=365.0 * 24.0,
+            run_id="test_debug",
         )
         caplog.set_level(logging.DEBUG)
         emit_alpha_foundry_debug_summary(
@@ -445,7 +467,6 @@ class TestMaybeWriteAlphaFoundryReport:
 
 
 class TestRunAlphaFoundryL0Gate:
-
     def test_mode_off_returns_empty_evidences(self) -> None:
         from src.domain.futures.alpha_foundry.bridge_helpers import (
             run_alpha_foundry_l0_gate,
@@ -475,42 +496,58 @@ class TestRunAlphaFoundryL0Gate:
         )
 
         t = 96
-        dt = np.arange(np.datetime64("2026-01-01T00"), np.datetime64("2026-01-17T00"),
-                        np.timedelta64(4, "h"))[:t]
-        close = np.column_stack([
-            np.linspace(100.0, 124.0, t, dtype=np.float64),
-            np.linspace(50.0, 61.0, t, dtype=np.float64),
-        ])
+        dt = np.arange(np.datetime64("2026-01-01T00"), np.datetime64("2026-01-17T00"), np.timedelta64(4, "h"))[:t]
+        close = np.column_stack(
+            [
+                np.linspace(100.0, 124.0, t, dtype=np.float64),
+                np.linspace(50.0, 61.0, t, dtype=np.float64),
+            ]
+        )
         zeros = np.zeros((t, 2), dtype=np.float64)
         valid = np.ones((t, 2), dtype=np.bool_)
         side = np.zeros((t, 2), dtype=np.int8)
         side[::2, :] = 1
         score = np.where(side == 1, np.array([0.8, 0.4]), 0.0).astype(np.float64)
         aligned = AlignedMarketData(
-            datetimes=dt, symbols=("BTCUSDT", "ETHUSDT"),
-            open_2d=close, high_2d=close, low_2d=close, close_2d=close,
+            datetimes=dt,
+            symbols=("BTCUSDT", "ETHUSDT"),
+            open_2d=close,
+            high_2d=close,
+            low_2d=close,
+            close_2d=close,
             volume_2d=np.full((t, 2), 1000.0, dtype=np.float64),
             funding_2d=zeros.copy(),
-            active_mask=valid.copy(), warm_mask=valid.copy(),
+            active_mask=valid.copy(),
+            warm_mask=valid.copy(),
             entry_block_mask=np.zeros((t, 2), dtype=np.bool_),
             kill_mask=np.zeros((t, 2), dtype=np.bool_),
         )
         panel = CandidateSignalPanel(
-            family="trend_ma", variant="ema_12_72",
+            family="trend_ma",
+            variant="ema_12_72",
             params={"fast": 12, "slow": 72},
-            datetimes=dt, symbols=("BTCUSDT", "ETHUSDT"),
-            signed_score_2d=score, side_hint_2d=side,
-            expected_holding_bars=2, min_holding_bars=1,
-            stop_atr_mult=2.0, take_profit_atr_mult=3.0,
-            turnover_proxy_2d=zeros.copy(), valid_mask_2d=valid,
+            datetimes=dt,
+            symbols=("BTCUSDT", "ETHUSDT"),
+            signed_score_2d=score,
+            side_hint_2d=side,
+            expected_holding_bars=2,
+            min_holding_bars=1,
+            stop_atr_mult=2.0,
+            take_profit_atr_mult=3.0,
+            turnover_proxy_2d=zeros.copy(),
+            valid_mask_2d=valid,
             metadata={"recipe_id": "", "archetype": "trend"},
         )
         binding = PanelRecipeBinding(
-            panel_index=0, recipe_id="synth_1", family="trend_ma",
-            variant="ema_12_72", source="synthetic_recipe",
+            panel_index=0,
+            recipe_id="synth_1",
+            family="trend_ma",
+            variant="ema_12_72",
+            source="synthetic_recipe",
         )
         config = AlphaFoundryRuntimeConfig(
-            mode="audit", artifact_write_enabled=False,
+            mode="audit",
+            artifact_write_enabled=False,
             observability_mode="off",
         )
         result = run_alpha_foundry_l0_gate(
@@ -535,42 +572,58 @@ class TestRunAlphaFoundryL0Gate:
         )
 
         t = 96
-        dt = np.arange(np.datetime64("2026-01-01T00"), np.datetime64("2026-01-17T00"),
-                        np.timedelta64(4, "h"))[:t]
-        close = np.column_stack([
-            np.linspace(100.0, 124.0, t, dtype=np.float64),
-            np.linspace(50.0, 61.0, t, dtype=np.float64),
-        ])
+        dt = np.arange(np.datetime64("2026-01-01T00"), np.datetime64("2026-01-17T00"), np.timedelta64(4, "h"))[:t]
+        close = np.column_stack(
+            [
+                np.linspace(100.0, 124.0, t, dtype=np.float64),
+                np.linspace(50.0, 61.0, t, dtype=np.float64),
+            ]
+        )
         zeros = np.zeros((t, 2), dtype=np.float64)
         valid = np.ones((t, 2), dtype=np.bool_)
         side = np.zeros((t, 2), dtype=np.int8)
         side[::2, :] = 1
         score = np.where(side == 1, np.array([0.8, 0.4]), 0.0).astype(np.float64)
         aligned = AlignedMarketData(
-            datetimes=dt, symbols=("BTCUSDT", "ETHUSDT"),
-            open_2d=close, high_2d=close, low_2d=close, close_2d=close,
+            datetimes=dt,
+            symbols=("BTCUSDT", "ETHUSDT"),
+            open_2d=close,
+            high_2d=close,
+            low_2d=close,
+            close_2d=close,
             volume_2d=np.full((t, 2), 1000.0, dtype=np.float64),
             funding_2d=zeros.copy(),
-            active_mask=valid.copy(), warm_mask=valid.copy(),
+            active_mask=valid.copy(),
+            warm_mask=valid.copy(),
             entry_block_mask=np.zeros((t, 2), dtype=np.bool_),
             kill_mask=np.zeros((t, 2), dtype=np.bool_),
         )
         panel = CandidateSignalPanel(
-            family="trend_ma", variant="ema_12_72",
+            family="trend_ma",
+            variant="ema_12_72",
             params={"fast": 12, "slow": 72},
-            datetimes=dt, symbols=("BTCUSDT", "ETHUSDT"),
-            signed_score_2d=score, side_hint_2d=side,
-            expected_holding_bars=2, min_holding_bars=1,
-            stop_atr_mult=2.0, take_profit_atr_mult=3.0,
-            turnover_proxy_2d=zeros.copy(), valid_mask_2d=valid,
+            datetimes=dt,
+            symbols=("BTCUSDT", "ETHUSDT"),
+            signed_score_2d=score,
+            side_hint_2d=side,
+            expected_holding_bars=2,
+            min_holding_bars=1,
+            stop_atr_mult=2.0,
+            take_profit_atr_mult=3.0,
+            turnover_proxy_2d=zeros.copy(),
+            valid_mask_2d=valid,
             metadata={"recipe_id": "", "archetype": "trend"},
         )
         binding = PanelRecipeBinding(
-            panel_index=0, recipe_id="synth_1", family="trend_ma",
-            variant="ema_12_72", source="synthetic_recipe",
+            panel_index=0,
+            recipe_id="synth_1",
+            family="trend_ma",
+            variant="ema_12_72",
+            source="synthetic_recipe",
         )
         config = AlphaFoundryRuntimeConfig(
-            mode="audit", artifact_write_enabled=False,
+            mode="audit",
+            artifact_write_enabled=False,
             observability_mode="debug_log",
         )
         result = run_alpha_foundry_l0_gate(
