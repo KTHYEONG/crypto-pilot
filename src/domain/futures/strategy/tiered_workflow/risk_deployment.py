@@ -111,6 +111,42 @@ def _cvar_95_at_leverage(rets: NDArray[np.float64], leverage: float) -> float:
     return float(np.maximum(np.mean(tail), 0.0))
 
 
+def select_worst_fold_returns(
+    fit_rets_by_fold: tuple[tuple[float, ...], ...],
+) -> NDArray[np.float64]:
+    """챔피언 자신의 walk-forward fold 중 단위 레버리지 MDD가 가장 큰 fold의
+    fit-leg 수익률을 반환한다.
+
+    Crisis window를 전혀 참조하지 않는다 — 입력은 이미 champion selection이
+    끝난 학습 horizon 내부의 fold들뿐이다(look-ahead 없음).
+
+    Args:
+        fit_rets_by_fold: fold별 fit-leg per-bar simple return 튜플들.
+
+    Returns:
+        최악(unit-leverage MDD 최대) fold의 수익률 배열. 입력이 비어있거나
+        모든 fold의 크기가 2 미만이면 빈 배열(size=0)을 반환한다.
+    """
+    if len(fit_rets_by_fold) < 2:
+        return np.array([], dtype=np.float64)
+
+    worst_idx = -1
+    worst_mdd = -1.0
+    for i, fold in enumerate(fit_rets_by_fold):
+        if len(fold) < 2:
+            continue
+        arr = np.asarray(fold, dtype=np.float64)
+        mdd = _mdd_from_returns(arr)
+        if mdd > worst_mdd:
+            worst_mdd = mdd
+            worst_idx = i
+
+    if worst_idx < 0:
+        return np.array([], dtype=np.float64)
+
+    return np.asarray(fit_rets_by_fold[worst_idx], dtype=np.float64)
+
+
 def _bisect_max_leverage(
     rets: NDArray[np.float64],
     metric_fn: Callable[[NDArray[np.float64], float], float],
@@ -156,6 +192,8 @@ def calibrate_deployment_leverage(
     diversification_gate_enabled: bool = False,
     concentration_recent_window_bars: int = 60,
     concentration_floor: float | None = None,
+    worst_fold_rets: NDArray[np.float64] | None = None,
+    kelly_safety_fraction: float | None = None,
 ) -> tuple[float, str, float]:
     """히스토리컬 수익률에서 배치 레버리지 L*를 결정론적으로 산출.
 
@@ -195,11 +233,17 @@ def calibrate_deployment_leverage(
         diversification_gate_enabled: True면 concentration gate 활성.
         concentration_recent_window_bars: 최근 DR median 계산 구간 (bars).
         concentration_floor: concentration_ratio 하한 클립 값. 활성 시 명시 필수.
+        worst_fold_rets: select_worst_fold_returns()로 선택된 최악 fold의
+            fit-leg 수익률. None 또는 size<2면 이 candidate를 생략한다.
+        kelly_safety_fraction: fractional-Kelly 안전계수 (0,1]. None(기본)이면
+            비활성. 지정 시 l_kelly = kelly_safety_fraction * mu/sigma²
+            (mu<=0이면 candidate 생략)를 min(...) 후보에 추가한다.
 
     Returns:
         (L*, binding_constraint, cross_valid_MDD_at_L) — cross_valid_MDD_at_L는
         oos_rets가 제공된 경우에만 실제 계산값. 미제공 시 0.0 반환.
-        binding ∈ {"mdd","cvar","hard_cap","exchange_cap","oos_blend","concentration_gate","none"}.
+        binding ∈ {\"mdd\",\"cvar\",\"hard_cap\",\"exchange_cap\",\"oos_blend\",
+                     \"concentration_gate\",\"worst_fold\",\"kelly_theoretical\",\"none\"}.
     """
     arr = np.asarray(fit_rets, dtype=np.float64)
     if arr.size < 2:
@@ -213,6 +257,10 @@ def calibrate_deployment_leverage(
     l_mdd = _bisect_max_leverage(arr, _mdd_at_leverage, mdd_target, float(l_floor), l_search_hi)
     l_cvar = _bisect_max_leverage(arr, _cvar_95_at_leverage, cvar_target, float(l_floor), l_search_hi)
 
+    # kelly_safety_fraction validation
+    if kelly_safety_fraction is not None and (kelly_safety_fraction <= 0.0 or kelly_safety_fraction > 1.0):
+        raise ValueError(f"kelly_safety_fraction must be in (0, 1], got {kelly_safety_fraction}")
+
     # 모든 제약 후보 수집 → argmin으로 binding 결정 (realism: trading_bot.md §4)
     candidates: list[tuple[float, str]] = [
         (l_mdd, "mdd"),
@@ -221,6 +269,22 @@ def calibrate_deployment_leverage(
     ]
     if exchange_leverage_cap is not None and exchange_leverage_cap > 0.0:
         candidates.append((exchange_leverage_cap, "exchange_cap"))
+
+    # Worst-fold MDD 제약: 최악 fold의 MDD가 mdd_target 이하가 되도록 이분탐색
+    if worst_fold_rets is not None:
+        wf_arr = np.asarray(worst_fold_rets, dtype=np.float64)
+        if wf_arr.size >= 2:
+            l_worst_fold = _bisect_max_leverage(wf_arr, _mdd_at_leverage, mdd_target, float(l_floor), l_search_hi)
+            candidates.append((l_worst_fold, "worst_fold"))
+
+    # Fractional-Kelly 제약: mu/sigma² * safety_fraction
+    if kelly_safety_fraction is not None:
+        mu = float(np.mean(arr))
+        sigma = float(np.std(arr, ddof=1))
+        if mu > 0.0 and sigma > 1e-12:
+            l_kelly = kelly_safety_fraction * mu / (sigma * sigma)
+            if l_kelly > 0.0 and np.isfinite(l_kelly):
+                candidates.append((l_kelly, "kelly_theoretical"))
 
     l_optimal, binding = min(candidates, key=lambda x: x[0])
     l_final = max(l_optimal, float(l_floor))

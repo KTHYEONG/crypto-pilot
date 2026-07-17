@@ -85,7 +85,6 @@ class CrossTfDiagnosis:
     notes: tuple[str, ...]
 
 
-
 def snapshot_from_raw_stage_entry(
     *,
     run: CrossTfDiagnosticRun,
@@ -105,10 +104,16 @@ def snapshot_from_raw_stage_entry(
     raw_blockers = entry.get("blockers", ())
     identity_keys: tuple[str, ...] = tuple(sorted(raw_blockers)) if isinstance(raw_blockers, (list, tuple)) else ()
     return CrossTfStageSnapshot(
-        schema_version=1, run=run, stage=stage, timeframe=timeframe,
-        digest_sha256=digest, item_count=item_count,
-        identity_keys=identity_keys, metrics=metrics,
+        schema_version=1,
+        run=run,
+        stage=stage,
+        timeframe=timeframe,
+        digest_sha256=digest,
+        item_count=item_count,
+        identity_keys=identity_keys,
+        metrics=metrics,
     )
+
 
 class CrossTfSnapshotRecorder:
     """[ADR_20260715_L0_L1_NATIVE_CONTRACT] Collect snapshots through the diagnostic sink contract."""
@@ -152,9 +157,7 @@ def diagnose_snapshots(
     for timeframe in common_timeframes:
         for stage in STAGE_ORDER:
             missing.extend(
-                f"{run}:{stage}:{timeframe}"
-                for run in _REQUIRED_RUNS
-                if (run, stage, timeframe) not in indexed
+                f"{run}:{stage}:{timeframe}" for run in _REQUIRED_RUNS if (run, stage, timeframe) not in indexed
             )
     if missing:
         return CrossTfDiagnosis(

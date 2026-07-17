@@ -158,6 +158,7 @@ def _run_tf_probe_stage_scoped(
         for cell in winning:
             winning_by_tf.setdefault(cell.tf, []).append(cell)
         from src.domain.futures.strategy.tiered_logging import format_layer_header
+
         _logger.info(format_layer_header(0, "TF-Probe Gate Survivorship & Selection"))
         _logger.info(
             "[L0-PROBE] %d winning cells across %d tf: %s",

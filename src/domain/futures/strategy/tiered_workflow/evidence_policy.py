@@ -116,15 +116,17 @@ def compute_strategy_admissions(
         strat_decisions = decision_indices[mask]
 
         if strat_net.size < 2:
-            admissions.append(StrategyAdmission(
-                strategy_id=str(sid),
-                mean_net_bps=0.0,
-                lcb_net_bps=0.0,
-                p_value=1.0,
-                q_value=1.0,
-                effective_n=0.0,
-                admitted=False,
-            ))
+            admissions.append(
+                StrategyAdmission(
+                    strategy_id=str(sid),
+                    mean_net_bps=0.0,
+                    lcb_net_bps=0.0,
+                    p_value=1.0,
+                    q_value=1.0,
+                    effective_n=0.0,
+                    admitted=False,
+                )
+            )
             p_values.append(1.0)
             continue
 
@@ -154,15 +156,17 @@ def compute_strategy_admissions(
             p_val = 1.0 - float(stats.norm.cdf(t_stat))
 
         p_values.append(p_val)
-        admissions.append(StrategyAdmission(
-            strategy_id=str(sid),
-            mean_net_bps=mean_net,
-            lcb_net_bps=lcb_net,
-            p_value=p_val,
-            q_value=1.0,  # placeholder, updated after BH
-            effective_n=effective_n,
-            admitted=False,
-        ))
+        admissions.append(
+            StrategyAdmission(
+                strategy_id=str(sid),
+                mean_net_bps=mean_net,
+                lcb_net_bps=lcb_net,
+                p_value=p_val,
+                q_value=1.0,  # placeholder, updated after BH
+                effective_n=effective_n,
+                admitted=False,
+            )
+        )
 
     # BH FDR adjustment
     p_arr = np.asarray(p_values, dtype=np.float64)
@@ -173,7 +177,7 @@ def compute_strategy_admissions(
         for i in range(n_hypotheses - 1, -1, -1):
             q_values[order[i]] = min(
                 p_arr[order[i]] * n_hypotheses / (i + 1),
-                q_values[order[ min(i + 1, n_hypotheses - 1) ]],
+                q_values[order[min(i + 1, n_hypotheses - 1)]],
             )
         for i, adm in enumerate(admissions):
             admissions[i] = StrategyAdmission(
@@ -231,9 +235,7 @@ def compute_symbol_posteriors(
             f_ws = float(np.sum(f_w))
             if f_ws > 0:
                 fold_means[int(fold_id)] = float(np.average(f_net, weights=f_w))
-        positive_fold_ratio = (
-            sum(1 for v in fold_means.values() if v > 0) / len(fold_means) if fold_means else 0.0
-        )
+        positive_fold_ratio = sum(1 for v in fold_means.values() if v > 0) / len(fold_means) if fold_means else 0.0
 
         admission = strategy_map.get(str(sid))
         mu_strategy = admission.mean_net_bps if (admission and admission.admitted) else 0.0
@@ -260,11 +262,7 @@ def compute_symbol_posteriors(
             posterior_prob_pos = 1.0 if posterior_mean > 0 else 0.0
 
         sign_conflict = bool(
-            admission is not None
-            and admission.admitted
-            and mu_strategy > 0
-            and obs_mean <= 0
-            and posterior_lcb <= 0
+            admission is not None and admission.admitted and mu_strategy > 0 and obs_mean <= 0 and posterior_lcb <= 0
         )
 
         eligible = bool(
@@ -277,16 +275,18 @@ def compute_symbol_posteriors(
             and not sign_conflict
         )
 
-        post_list.append(SymbolPosterior(
-            symbol=str(symbol),
-            strategy_id=str(sid),
-            effective_n=effective_n,
-            posterior_mean_net_bps=posterior_mean,
-            posterior_lcb_net_bps=posterior_lcb,
-            posterior_probability_positive=posterior_prob_pos,
-            sign_conflict=sign_conflict,
-            eligible=eligible,
-        ))
+        post_list.append(
+            SymbolPosterior(
+                symbol=str(symbol),
+                strategy_id=str(sid),
+                effective_n=effective_n,
+                posterior_mean_net_bps=posterior_mean,
+                posterior_lcb_net_bps=posterior_lcb,
+                posterior_probability_positive=posterior_prob_pos,
+                sign_conflict=sign_conflict,
+                eligible=eligible,
+            )
+        )
 
     return tuple(post_list)
 

@@ -15,8 +15,7 @@ def test_archive_decisions_happy_path(tmp_path):
     decisions_content = "# Active Decisions\n\n"
     for i in range(18, 0, -1):
         decisions_content += (
-            f"## [2026-07-10] [TASK_{i}] [ADR_20260710_TASK_{i}]\n"
-            f"- Context {i}\n- Resolution {i}\n- Impact {i}\n\n"
+            f"## [2026-07-10] [TASK_{i}] [ADR_20260710_TASK_{i}]\n- Context {i}\n- Resolution {i}\n- Impact {i}\n\n"
         )
     decisions_file.write_text(decisions_content, encoding="utf-8")
 
@@ -106,4 +105,3 @@ def test_archive_decisions_no_need_to_archive(tmp_path):
 
     # Assert
     assert code == 0
-

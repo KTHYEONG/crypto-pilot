@@ -263,9 +263,7 @@ def run_alpha_foundry_l0_pipeline(
     feedback_multiplier_by_key: dict[SignalHypothesisKey, float] = {}
     if l1_feedback_by_key is not None:
         if current_evidence_start_ns is None:
-            _logger.warning(
-                "[DATA] stage=l0_feedback status=disabled reason=missing_current_evidence_start"
-            )
+            _logger.warning("[DATA] stage=l0_feedback status=disabled reason=missing_current_evidence_start")
         else:
             try:
                 feedback_multiplier_by_key = {
@@ -361,7 +359,9 @@ def run_alpha_foundry_l0_pipeline(
         _n_evidence_rows_total = sum(len(df) for df in evidence_by_tf.values())
         _logger.debug(
             "[ALGO] stage=tf_fusion n_evidence_rows_total=%d n_fusion_groups=%d n_recipes_indexed=%d",
-            _n_evidence_rows_total, len(tf_fusion), len(tf_fusion_index),
+            _n_evidence_rows_total,
+            len(tf_fusion),
+            len(tf_fusion_index),
         )  # [LIMIT-08]
     else:
         tf_fusion = ()
@@ -378,9 +378,7 @@ def run_alpha_foundry_l0_pipeline(
         tf_fusion_index=tf_fusion_index if evidence_by_tf else None,
         cheap_evidences=cheap_evidences,
     )
-    canonical_by_rid: dict[str, AlphaGateEvidence] = {
-        e.recipe_id: e for e in canonical_evidences if e.recipe_id
-    }
+    canonical_by_rid: dict[str, AlphaGateEvidence] = {e.recipe_id: e for e in canonical_evidences if e.recipe_id}
 
     # 4. Convert evidences to candidates (with capacity/regime/tf fields)
     all_candidates: list[L0SignalCandidate] = []
@@ -560,11 +558,7 @@ def run_alpha_foundry_l0_pipeline(
         ev_cand = candidate_by_rid.get(ev.recipe_id)
         decision = decision_map.get(ev.recipe_id)
         bucket_result = next(
-            (
-                br
-                for br in bucket_results
-                if ev.recipe_id in br.ranked_recipe_ids
-            ),
+            (br for br in bucket_results if ev.recipe_id in br.ranked_recipe_ids),
             None,
         )
         evidence_rows.append(

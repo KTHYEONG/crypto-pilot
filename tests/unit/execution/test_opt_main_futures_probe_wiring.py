@@ -141,6 +141,7 @@ def test_run_strategy_stage_injects_probe_cells_before_bridge(
             datetimes=pd.date_range("2023-01-01", "2026-03-31", freq="4d").to_numpy()
         ),
     )
+
     def _fake_run_tiered_pipeline(**kwargs: Any) -> tuple[SimpleNamespace, None, None]:
         captured["extra_probe_cells"] = kwargs.get("probe_manifest")
         return SimpleNamespace(gate_passed=True), None, None

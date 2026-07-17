@@ -34,6 +34,7 @@ FUTURES_CACHE_DIR.mkdir(parents=True, exist_ok=True)
 RESULTS_DIR.mkdir(parents=True, exist_ok=True)
 LOG_DIR.mkdir(parents=True, exist_ok=True)
 
+
 class FuturesStorageLayout:
     """Manages the partitioned layout of futures data files with automatic migration from flat legacy paths."""
 
@@ -95,8 +96,6 @@ class FuturesStorageLayout:
             with contextlib.suppress(FileNotFoundError):
                 old_path.rename(new_path)
         return new_path
-
-
 
 
 # 매매 기록 데이터베이스 파일 (SQLite)

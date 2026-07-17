@@ -316,6 +316,7 @@ def resolve_1m_backfill_targets(
     missing: list[str] = []
     for symbol in universe_symbols:
         from src.core.settings import FUTURES_DATA_DIR, FuturesStorageLayout
+
         if Path(data_root).resolve() == FUTURES_DATA_DIR.resolve():
             path = FuturesStorageLayout.get_ohlcv_path(symbol, "1m")
         else:

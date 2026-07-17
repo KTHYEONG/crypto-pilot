@@ -20,12 +20,14 @@ from src.domain.futures.signals.contracts import CandidateSignalPanel
 from src.domain.futures.strategy.common.alignment import AlignedMarketData
 from src.domain.futures.strategy.execution_cost import ExecutionCostModel
 
-_KNOWN_STYLES: frozenset[str] = frozenset({
-    "taker_now",
-    "maker_retest",
-    "maker_or_cancel",
-    "hybrid",
-})
+_KNOWN_STYLES: frozenset[str] = frozenset(
+    {
+        "taker_now",
+        "maker_retest",
+        "maker_or_cancel",
+        "hybrid",
+    }
+)
 
 
 @dataclass(slots=True, frozen=True)

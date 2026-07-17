@@ -19,16 +19,18 @@ EdgeFailureAxis = Literal[
     "unknown",
 ]
 
-_KNOWN_AXES: frozenset[str] = frozenset({
-    "weak_gross_edge",
-    "cost_dominated",
-    "turnover_dominated",
-    "statistically_unstable",
-    "insufficient_sample",
-    "heterogeneous_edge",
-    "execution_model_mismatch",
-    "unknown",
-})
+_KNOWN_AXES: frozenset[str] = frozenset(
+    {
+        "weak_gross_edge",
+        "cost_dominated",
+        "turnover_dominated",
+        "statistically_unstable",
+        "insufficient_sample",
+        "heterogeneous_edge",
+        "execution_model_mismatch",
+        "unknown",
+    }
+)
 
 
 @dataclass(slots=True, frozen=True)

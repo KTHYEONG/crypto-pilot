@@ -80,9 +80,7 @@ def test_diagnose_snapshots_when_required_stage_is_missing_returns_incomplete_tr
     # Arrange (Given)
     snapshots = _four_run_snapshots(changed_from="fusion_evidence", ablation_restores=True)
     snapshots = [
-        snapshot
-        for snapshot in snapshots
-        if not (snapshot.run == "treatment" and snapshot.stage == "l1_result")
+        snapshot for snapshot in snapshots if not (snapshot.run == "treatment" and snapshot.stage == "l1_result")
     ]
 
     # Act (When)

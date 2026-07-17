@@ -1139,6 +1139,7 @@ class _AwfSimResult:
     block_rets_baseline: tuple[tuple[float, ...], ...]
     rets_baseline_ew: list[float]  # 순수 1/N EW baseline (uplift 측정 전용)
     fit_rets_hybrid: tuple[float, ...] = ()  # D3: fit-leg 수익률 (look-ahead-free L* calibration용)
+    fit_rets_by_fold: tuple[tuple[float, ...], ...] = ()  # fold별 fit-leg 수익률 (worst-fold MDD 제약용)
     fold_attributions: tuple[Layer2FoldAttribution, ...] = ()
     policy_effect_by_fold: tuple[RegimePolicyEffectSummary, ...] = ()
 
@@ -1779,11 +1780,13 @@ def build_l2_simulation_cache(
     sleeve_key_set: set[SignalSleeveKey] = set()
     for event in signal_batch.events:
         if sym_to_idx.get(event.symbol) is not None:
-            sleeve_key_set.add(SignalSleeveKey(
-                symbol=event.symbol,
-                native_tf=event.native_tf,
-                strategy_id=event.strategy_id,
-            ))
+            sleeve_key_set.add(
+                SignalSleeveKey(
+                    symbol=event.symbol,
+                    native_tf=event.native_tf,
+                    strategy_id=event.strategy_id,
+                )
+            )
 
     sleeve_keys_sorted: tuple[SignalSleeveKey, ...] = tuple(
         sorted(sleeve_key_set, key=lambda k: (k.native_tf, k.symbol, k.strategy_id))
@@ -4599,6 +4602,7 @@ def _run_awf_simulation(
         block_rets_baseline=tuple(tuple(block) for block in fold_rets_baseline),
         rets_baseline_ew=all_rets_baseline_ew,
         fit_rets_hybrid=tuple(all_fit_rets_hybrid),
+        fit_rets_by_fold=tuple(tuple(f) for f in _per_fold_fit_rets),
         fold_attributions=tuple(fold_attributions),
         policy_effect_by_fold=policy_effect_by_fold,
     )

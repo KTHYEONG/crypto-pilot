@@ -44,8 +44,12 @@ def test_effective_evidence_start_requires_two_consecutive_stable_quarters() -> 
     ]
 
     result = _resolve_effective_evidence_start(
-        tf="4h", timeline_windows=windows, data_start=date(2023, 4, 29),
-        regime_floor=date(2023, 1, 1), min_universe_size=50, membership_warmup_days=10,
+        tf="4h",
+        timeline_windows=windows,
+        data_start=date(2023, 4, 29),
+        regime_floor=date(2023, 1, 1),
+        min_universe_size=50,
+        membership_warmup_days=10,
     )
 
     assert result == date(2024, 1, 1)
@@ -58,8 +62,12 @@ def test_effective_evidence_start_respects_membership_warmup_days() -> None:
     ]
 
     result = _resolve_effective_evidence_start(
-        tf="4h", timeline_windows=windows, data_start=date(2023, 4, 29),
-        regime_floor=date(2023, 1, 1), min_universe_size=50, membership_warmup_days=90,
+        tf="4h",
+        timeline_windows=windows,
+        data_start=date(2023, 4, 29),
+        regime_floor=date(2023, 1, 1),
+        min_universe_size=50,
+        membership_warmup_days=90,
     )
 
     assert result > date(2023, 7, 1)
@@ -70,8 +78,12 @@ def test_effective_evidence_start_raises_when_never_stable() -> None:
 
     with pytest.raises(ValueError, match="never reaches"):
         _resolve_effective_evidence_start(
-            tf="4h", timeline_windows=windows, data_start=date(2023, 4, 29),
-            regime_floor=date(2023, 1, 1), min_universe_size=50, membership_warmup_days=10,
+            tf="4h",
+            timeline_windows=windows,
+            data_start=date(2023, 4, 29),
+            regime_floor=date(2023, 1, 1),
+            min_universe_size=50,
+            membership_warmup_days=10,
         )
 
 

@@ -106,9 +106,7 @@ def _wire_closure_exercising_mocks(mocker: MockerFixture) -> None:
         from src.domain.futures.alpha_foundry import bridge_helpers
         from src.domain.futures.strategy.tiered_workflow import pipeline as tiered_pipeline
 
-        cast(Any, strategy_service).build_candidate_strategy_config(
-            strategy_cfg=None, opt_config=None, timeframe="4h"
-        )
+        cast(Any, strategy_service).build_candidate_strategy_config(strategy_cfg=None, opt_config=None, timeframe="4h")
         cast(Any, bridge_helpers).run_alpha_foundry_l0_gate_multi_tf()
         cast(Any, bridge_helpers)._run_phase3_sequential(evidence_by_tf={})
         cast(Any, strategy_service).run_candidate_strategy_for_universe()

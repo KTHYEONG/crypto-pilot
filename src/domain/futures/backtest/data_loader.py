@@ -419,6 +419,7 @@ class DataCollector:
 
     def _cache_path(self, symbol: str, timeframe: str) -> Path:
         from src.core.settings import FuturesStorageLayout
+
         return FuturesStorageLayout.get_ohlcv_path(symbol, timeframe, base_dir=FUTURES_DATA_DIR)
 
     def list_cached_parquet_symbols(self, timeframe: str) -> list[str]:
@@ -442,6 +443,7 @@ class DataCollector:
 
     def _meta_path(self) -> Path:
         from src.core.settings import FuturesStorageLayout
+
         return FuturesStorageLayout.get_metadata_path("parquet_cache_meta.json", base_dir=FUTURES_DATA_DIR)
 
     def _meta_key(self, symbol: str, timeframe: str) -> str:
@@ -570,17 +572,17 @@ class DataCollector:
         df = self._normalize_df(df)
         path = self._cache_path(symbol, timeframe)
         temp_path = path.with_suffix(".tmp.parquet")
-        
+
         # Optimize storage: drop redundant datetime and cast OHLC to float32
         df_to_save = df.copy()
         if "datetime" in df_to_save.columns:
             df_to_save = df_to_save.drop(columns=["datetime"])
-        
+
         price_cols = ["open", "high", "low", "close"]
         for col in price_cols:
             if col in df_to_save.columns:
                 df_to_save[col] = df_to_save[col].astype("float32")
-                
+
         df_to_save.to_parquet(temp_path, index=False, compression="zstd")
         temp_path.replace(path)
 
@@ -1188,6 +1190,7 @@ class DataCollector:
 
         """
         from src.core.settings import FuturesStorageLayout
+
         path = FuturesStorageLayout.get_metrics_path(symbol, base_dir=FUTURES_DATA_DIR)
         req_start = pd.to_datetime(start_date, utc=True)
         req_end = pd.to_datetime(end_date, utc=True)
@@ -1267,6 +1270,7 @@ class DataCollector:
         Uses Vision for bulk history and API for recent data.
         """
         from src.core.settings import FuturesStorageLayout
+
         path = FuturesStorageLayout.get_funding_path(symbol, base_dir=FUTURES_DATA_DIR)
         req_start = pd.to_datetime(start_date, utc=True)
         req_end = pd.to_datetime(end_date, utc=True)
@@ -1401,6 +1405,7 @@ def merge_funding_into_ohlcv(symbol: str, df: pd.DataFrame, data_dir: Path) -> p
 
     if Path(data_dir).resolve() == FUTURES_DATA_DIR.resolve():
         from src.core.settings import FuturesStorageLayout
+
         path = FuturesStorageLayout.get_funding_path(symbol, base_dir=FUTURES_DATA_DIR)
     else:
         path = Path(data_dir) / f"{symbol.replace('/', '_')}_funding.parquet"
@@ -1445,6 +1450,7 @@ def merge_metrics_into_ohlcv(
         return df.copy() if df is not None else pd.DataFrame()
     if Path(data_dir).resolve() == FUTURES_DATA_DIR.resolve():
         from src.core.settings import FuturesStorageLayout
+
         path = FuturesStorageLayout.get_metrics_path(symbol, base_dir=FUTURES_DATA_DIR)
     else:
         path = Path(data_dir) / f"{symbol.replace('/', '_')}_metrics.parquet"

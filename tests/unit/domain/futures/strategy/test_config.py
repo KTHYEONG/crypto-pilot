@@ -22,11 +22,20 @@ from src.domain.futures.strategy.config import (
 from src.domain.futures.strategy.timeframe_contracts import scale_bar_count
 
 _REMOVED_FAMILIES = (
-    "xs_momentum", "xs_flow", "xs_oi_skew", "funding_flow_carry",
-    "lsr_oi_regime_filter", "supertrend", "ichimoku_trend",
-    "carry_net_of_funding", "liquidity_participation_breakout",
-    "btc_neutral_residual_reversal", "price_band_reversion",
-    "funding_flow_exhaustion_sparse", "oi_lsr_unwind", "vol_contraction_breakout",
+    "xs_momentum",
+    "xs_flow",
+    "xs_oi_skew",
+    "funding_flow_carry",
+    "lsr_oi_regime_filter",
+    "supertrend",
+    "ichimoku_trend",
+    "carry_net_of_funding",
+    "liquidity_participation_breakout",
+    "btc_neutral_residual_reversal",
+    "price_band_reversion",
+    "funding_flow_exhaustion_sparse",
+    "oi_lsr_unwind",
+    "vol_contraction_breakout",
 )
 
 
@@ -254,10 +263,17 @@ def test_deprioritized_family_prior_no_longer_lists_removed_families() -> None:
 # ── Fix A: TF-relative field metadata governance ────────────────────────────
 
 _TF_SCALE_NAME_PATTERNS = ("_bars", "_window", "_span", "_hours", "_days", "_per_fold", "_events_per_fold")
-_TF_SCALE_EXEMPT_FIELDS = frozenset({
-    "wf_n_folds", "train_months", "valid_months", "test_months",
-    "l1_evidence_max_folds", "l1_outer_warmup_blocks", "min_wf_fold_pass_ratio",
-})
+_TF_SCALE_EXEMPT_FIELDS = frozenset(
+    {
+        "wf_n_folds",
+        "train_months",
+        "valid_months",
+        "test_months",
+        "l1_evidence_max_folds",
+        "l1_outer_warmup_blocks",
+        "min_wf_fold_pass_ratio",
+    }
+)
 
 
 @pytest.mark.parametrize(
@@ -272,7 +288,8 @@ _TF_SCALE_EXEMPT_FIELDS = frozenset({
 )
 def test_all_tf_relative_fields_have_scale_metadata(dc_cls: type) -> None:
     unclassified = [
-        f.name for f in dataclasses.fields(dc_cls)
+        f.name
+        for f in dataclasses.fields(dc_cls)
         if any(p in f.name for p in _TF_SCALE_NAME_PATTERNS)
         and f.name not in _TF_SCALE_EXEMPT_FIELDS
         and "tf_scale_base" not in f.metadata
@@ -371,8 +388,7 @@ def test_12h_1d_l1_min_cross_section_relaxed_to_one() -> None:
     for tf in ("12h", "1d"):
         value = _DEFAULT_PER_TF_GATE_OVERRIDES[tf]["l1_min_cross_section"]
         assert value == 1, (
-            f"tf={tf} l1_min_cross_section={value} was not relaxed to 1 despite "
-            f"measured calibration support"
+            f"tf={tf} l1_min_cross_section={value} was not relaxed to 1 despite measured calibration support"
         )
 
 
@@ -496,9 +512,7 @@ def test_slow_tf_xs_challenger_isolated_and_idempotent() -> None:
 
     cfg_dup = CandidateStrategyConfig(
         slow_tf_xs_challenger_enabled=True,
-        per_tf_candidate_families={
-            "6h": ("residual_momentum_xs", "xs_residual_rebalance", "trend_ma")
-        },
+        per_tf_candidate_families={"6h": ("residual_momentum_xs", "xs_residual_rebalance", "trend_ma")},
     )
     pool_dup = resolve_tf_signal_pool(cfg_dup, "6h")
     assert pool_dup == ("residual_momentum_xs", "xs_residual_rebalance", "trend_ma")

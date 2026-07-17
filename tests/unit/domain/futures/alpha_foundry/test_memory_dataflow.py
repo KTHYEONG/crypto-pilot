@@ -110,27 +110,35 @@ def test_load_ltf_exec_1m_frame_reads_partitioned_ohlcv_layout(tmp_path: Path) -
 
 def test_oos_covers_is_range_true_when_covering() -> None:
     """[M02] [LIMIT-02] OOS covering full IS range returns True."""
-    is_df = pd.DataFrame({
-        "datetime": pd.date_range("2026-01-05", "2026-01-10", freq="1h", tz="UTC"),
-        "close": np.random.randn(121),
-    })
-    oos_df = pd.DataFrame({
-        "datetime": pd.date_range("2026-01-01", "2026-01-15", freq="1h", tz="UTC"),
-        "close": np.random.randn(337),
-    })
+    is_df = pd.DataFrame(
+        {
+            "datetime": pd.date_range("2026-01-05", "2026-01-10", freq="1h", tz="UTC"),
+            "close": np.random.randn(121),
+        }
+    )
+    oos_df = pd.DataFrame(
+        {
+            "datetime": pd.date_range("2026-01-01", "2026-01-15", freq="1h", tz="UTC"),
+            "close": np.random.randn(337),
+        }
+    )
     assert _oos_covers_is_range(is_df, oos_df)
 
 
 def test_oos_covers_is_range_false_when_not_covering() -> None:
     """[M02] [LIMIT-02] OOS missing IS start returns False."""
-    is_df = pd.DataFrame({
-        "datetime": pd.date_range("2026-01-05", "2026-01-10", freq="1h", tz="UTC"),
-        "close": np.random.randn(121),
-    })
-    oos_df = pd.DataFrame({
-        "datetime": pd.date_range("2026-01-08", "2026-01-15", freq="1h", tz="UTC"),
-        "close": np.random.randn(169),
-    })
+    is_df = pd.DataFrame(
+        {
+            "datetime": pd.date_range("2026-01-05", "2026-01-10", freq="1h", tz="UTC"),
+            "close": np.random.randn(121),
+        }
+    )
+    oos_df = pd.DataFrame(
+        {
+            "datetime": pd.date_range("2026-01-08", "2026-01-15", freq="1h", tz="UTC"),
+            "close": np.random.randn(169),
+        }
+    )
     assert not _oos_covers_is_range(is_df, oos_df)
 
 

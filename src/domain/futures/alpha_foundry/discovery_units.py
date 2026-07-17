@@ -26,25 +26,29 @@ from src.domain.futures.strategy.execution_cost import ExecutionCostModel
 
 DiscoveryUnitKind = Literal["conditional_cell", "execution_arm", "horizon", "hybrid"]
 
-_VALID_CONDITIONAL_AXES: frozenset[str] = frozenset({
-    "symbol_liquidity",
-    "symbol_cluster",
-    "market_regime",
-    "volatility_regime",
-    "funding_polarity",
-    "score_quantile",
-    "event_hour_utc",
-    "source_tf",
-    "cost_regime",
-    "symbol_age",
-})
+_VALID_CONDITIONAL_AXES: frozenset[str] = frozenset(
+    {
+        "symbol_liquidity",
+        "symbol_cluster",
+        "market_regime",
+        "volatility_regime",
+        "funding_polarity",
+        "score_quantile",
+        "event_hour_utc",
+        "source_tf",
+        "cost_regime",
+        "symbol_age",
+    }
+)
 
-_VALID_EXECUTION_STYLES: frozenset[str] = frozenset({
-    "taker_now",
-    "maker_retest",
-    "maker_or_cancel",
-    "hybrid",
-})
+_VALID_EXECUTION_STYLES: frozenset[str] = frozenset(
+    {
+        "taker_now",
+        "maker_retest",
+        "maker_or_cancel",
+        "hybrid",
+    }
+)
 
 
 @dataclass(slots=True, frozen=True)

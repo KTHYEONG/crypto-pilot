@@ -247,7 +247,6 @@ class TestAlphaFoundryRuntimeConfig:
         with pytest.raises(ValueError, match="exclude_families contains empty string after trim"):
             AlphaFoundryRuntimeConfig(exclude_families=(" ",))
 
-
     def test_rejects_invalid_observability_mode(self) -> None:
         """S3-3: invalid observability_mode raises ValueError."""
         with pytest.raises(ValueError, match="invalid observability_mode"):
@@ -346,10 +345,12 @@ class TestVersionSprawlControl:
 
     def test_alpha_gate_evidence_v2_not_exposed(self) -> None:
         import src.domain.futures.alpha_foundry.contracts as c
+
         assert not hasattr(c, "AlphaGateEvidenceV2")
 
     def test_evaluate_panel_gate_v2_not_exposed_via_public_import(self) -> None:
         from src.domain.futures.alpha_foundry.cheap_gate import evaluate_panel_gate
+
         assert evaluate_panel_gate is not None
         assert not hasattr(evaluate_panel_gate, "__name__") or "v2" not in evaluate_panel_gate.__name__
 

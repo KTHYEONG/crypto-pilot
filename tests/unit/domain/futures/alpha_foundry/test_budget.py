@@ -141,9 +141,9 @@ class TestBuildL1VerificationUnits:
                 reject_reasons=(),
                 bootstrap_lcb_bps=1.5,
                 bootstrap_agree=True,
-            mean_gross_bps=0.0,
-            mean_cost_bps=0.0,
-        )
+                mean_gross_bps=0.0,
+                mean_cost_bps=0.0,
+            )
             for i in range(6)
         ]
         big_recipes = {

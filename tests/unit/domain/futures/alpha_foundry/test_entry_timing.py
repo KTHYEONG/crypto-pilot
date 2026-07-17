@@ -92,9 +92,7 @@ class TestScenario1HappyPath:
         low = close - 0.5
         volume = np.full(n, 10.0, dtype=np.float64)
 
-        result = compute_anchored_vwap_dev_sigma(
-            high, low, close, volume, anchor_pos=0
-        )
+        result = compute_anchored_vwap_dev_sigma(high, low, close, volume, anchor_pos=0)
 
         assert np.all(result[1:] > 0.0)
 
@@ -384,9 +382,7 @@ class TestSupplementaryCoverage:
         low = close - 0.5
         volume = np.zeros(n, dtype=np.float64)
 
-        result = compute_anchored_vwap_dev_sigma(
-            high, low, close, volume, anchor_pos=0
-        )
+        result = compute_anchored_vwap_dev_sigma(high, low, close, volume, anchor_pos=0)
 
         assert np.all(result == 0.0)
 
@@ -582,7 +578,9 @@ class TestSupplementaryCoverage:
         )
         ltf_frames = {"BTCUSDT": frame}
         config = EntryTimingGateConfig(
-            enabled=True, ltf_grid=("1h",), max_wait_bars_ratio=0.25,
+            enabled=True,
+            ltf_grid=("1h",),
+            max_wait_bars_ratio=0.25,
             cvd_lookback_bars=30,
         )
 
@@ -636,7 +634,9 @@ class TestSupplementaryCoverage:
         )
         ltf_frames = {"BTCUSDT": frame}
         config = EntryTimingGateConfig(
-            enabled=True, ltf_grid=("1h",), max_wait_bars_ratio=0.25,
+            enabled=True,
+            ltf_grid=("1h",),
+            max_wait_bars_ratio=0.25,
             cvd_lookback_bars=30,
         )
 
@@ -758,7 +758,6 @@ class TestResolve1mBackfillTargetsDateRange:
 
 
 class TestLtfBackfillCoverageScenario1HappyPath:
-
     @pytest.fixture
     def fake_data_root(self, tmp_path: Path) -> Path:
         # Write valid 1m parquet with full coverage for BTCUSDT
@@ -769,34 +768,32 @@ class TestLtfBackfillCoverageScenario1HappyPath:
         (tmp_path / "NEWCOINUSDT_4h.parquet").touch()
         return tmp_path
 
-    def test_resolve_1m_backfill_targets_returns_symbols_missing_1m_file(
-        self, fake_data_root: Path
-    ) -> None:
+    def test_resolve_1m_backfill_targets_returns_symbols_missing_1m_file(self, fake_data_root: Path) -> None:
         result = resolve_1m_backfill_targets(
-            ("BTCUSDT", "NEWCOINUSDT"), data_root=fake_data_root,
-            start_date=date(2019, 1, 1), end_date=date(2026, 7, 8),
+            ("BTCUSDT", "NEWCOINUSDT"),
+            data_root=fake_data_root,
+            start_date=date(2019, 1, 1),
+            end_date=date(2026, 7, 8),
         )
         assert result == ("NEWCOINUSDT",)
 
-    def test_resolve_1m_coverage_tier_computes_ratio(
-        self, fake_data_root: Path
-    ) -> None:
+    def test_resolve_1m_coverage_tier_computes_ratio(self, fake_data_root: Path) -> None:
         tier = resolve_1m_coverage_tier(
             ("BTCUSDT", "NEWCOINUSDT", "OTHER1", "OTHER2"),
             data_root=fake_data_root,
-            start_date=date(2019, 1, 1), end_date=date(2026, 7, 8),
+            start_date=date(2019, 1, 1),
+            end_date=date(2026, 7, 8),
         )
         assert tier.coverage_ratio == 0.25
         assert tier.is_covered("BTCUSDT") is True
 
-    def test_resolve_1m_coverage_tier_parallel_path(
-        self, fake_data_root: Path
-    ) -> None:
+    def test_resolve_1m_coverage_tier_parallel_path(self, fake_data_root: Path) -> None:
         """ThreadPoolExecutor coverage scan produces same result as serial."""
         tier = resolve_1m_coverage_tier(
             ("BTCUSDT", "NEWCOINUSDT", "OTHER1", "OTHER2"),
             data_root=fake_data_root,
-            start_date=date(2019, 1, 1), end_date=date(2026, 7, 8),
+            start_date=date(2019, 1, 1),
+            end_date=date(2026, 7, 8),
         )
         assert tier.coverage_ratio == 0.25
         assert tier.is_covered("BTCUSDT") is True
@@ -836,26 +833,26 @@ class TestLtfBackfillCoverageScenario1HappyPath:
 
 
 class TestLtfBackfillCoverageScenario2EdgeCases:
-
     def test_resolve_1m_backfill_targets_empty_universe_returns_empty(
         self,
     ) -> None:
         result = resolve_1m_backfill_targets(
             (),
-            start_date=date(2019, 1, 1), end_date=date(2026, 7, 8),
+            start_date=date(2019, 1, 1),
+            end_date=date(2026, 7, 8),
         )
         assert result == ()
 
-    def test_resolve_1m_backfill_targets_all_covered_returns_empty(
-        self, tmp_path: Path
-    ) -> None:
+    def test_resolve_1m_backfill_targets_all_covered_returns_empty(self, tmp_path: Path) -> None:
         full_idx = pd.date_range("2019-01-01", "2026-07-08", freq="1min", tz="UTC")
         full_frame = pd.DataFrame({"datetime": full_idx, "close": 1.0})
         full_frame.to_parquet(tmp_path / "BTCUSDT_1m.parquet", index=False)
         full_frame.to_parquet(tmp_path / "ETHUSDT_1m.parquet", index=False)
         result = resolve_1m_backfill_targets(
-            ("BTCUSDT", "ETHUSDT"), data_root=tmp_path,
-            start_date=date(2019, 1, 1), end_date=date(2026, 7, 8),
+            ("BTCUSDT", "ETHUSDT"),
+            data_root=tmp_path,
+            start_date=date(2019, 1, 1),
+            end_date=date(2026, 7, 8),
         )
         assert result == ()
 
@@ -944,16 +941,13 @@ class TestLtfBackfillCoverageScenario2EdgeCases:
         for tf in ("1h", "2h"):
             families = _DEFAULT_PER_TF_FAMILIES.get(tf, ())
             assert len(families) >= 2, f"{tf} has fewer than 2 families"
-            assert set(families) <= set(ALL_SIGNAL_FAMILIES), (
-                f"{tf} families not subset of ALL_SIGNAL_FAMILIES"
-            )
+            assert set(families) <= set(ALL_SIGNAL_FAMILIES), f"{tf} families not subset of ALL_SIGNAL_FAMILIES"
 
 
 # ── LTF Native Directional Search: Scenario 3 (Error Handling) ──────────
 
 
 class TestLtfBackfillCoverageScenario3ErrorHandling:
-
     def test_run_1m_backfill_rejects_empty_missing_symbols(self, mocker) -> None:
         mock_sync = mocker.patch(
             "src.domain.futures.alpha_foundry.entry_timing.run_historical_sync",
@@ -980,8 +974,10 @@ class TestLtfBackfillCoverageScenario3ErrorHandling:
         self,
     ) -> None:
         tier = resolve_1m_coverage_tier(
-            ("BTCUSDT",), data_root=Path("/nonexistent/path/xyz"),
-            start_date=date(2019, 1, 1), end_date=date(2026, 7, 8),
+            ("BTCUSDT",),
+            data_root=Path("/nonexistent/path/xyz"),
+            start_date=date(2019, 1, 1),
+            end_date=date(2026, 7, 8),
         )
         assert tier.coverage_ratio == 0.0
 
@@ -992,7 +988,8 @@ class TestParallelCoverageScan:
     def test_parallel_coverage_empty_universe_returns_empty(self) -> None:
         tier = resolve_1m_coverage_tier(
             (),
-            start_date=date(2019, 1, 1), end_date=date(2026, 7, 8),
+            start_date=date(2019, 1, 1),
+            end_date=date(2026, 7, 8),
         )
         assert tier.coverage_ratio == 0.0
         assert len(tier.covered_symbols) == 0

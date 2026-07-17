@@ -18,14 +18,10 @@ def _mock_build_native_panels_ltf(
 ) -> None:
     """Helper: stub bridge internals so build_native_htf_panels returns one entry per TF."""
 
-    def fake_virtual_maps(
-        data_maps: dict[str, Any], symbols: list[str], target_tf: str
-    ) -> dict[str, Any]:
+    def fake_virtual_maps(data_maps: dict[str, Any], symbols: list[str], target_tf: str) -> dict[str, Any]:
         return {s: {target_tf: MagicMock()} for s in symbols[:1]}
 
-    def fake_align(
-        data_maps: dict[str, Any], symbols: list[str], tf: str
-    ) -> MagicMock:
+    def fake_align(data_maps: dict[str, Any], symbols: list[str], tf: str) -> MagicMock:
         aligned = MagicMock()
         aligned.datetimes = MagicMock()
         return aligned

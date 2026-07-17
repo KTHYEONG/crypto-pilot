@@ -350,12 +350,16 @@ class TestEdgeCases:
         )
         mask = np.ones((t, n), dtype=bool)
         aligned = AlignedMarketData(
-            datetimes=datetimes, symbols=("BTCUSDT", "ETHUSDT"),
-            open_2d=flat_close, high_2d=flat_close, low_2d=flat_close,
+            datetimes=datetimes,
+            symbols=("BTCUSDT", "ETHUSDT"),
+            open_2d=flat_close,
+            high_2d=flat_close,
+            low_2d=flat_close,
             close_2d=flat_close,
             volume_2d=np.full((t, n), 1000.0, dtype=np.float64),
             funding_2d=np.zeros((t, n), dtype=np.float64),
-            active_mask=mask, warm_mask=mask,
+            active_mask=mask,
+            warm_mask=mask,
             entry_block_mask=np.zeros((t, n), dtype=bool),
             kill_mask=np.zeros((t, n), dtype=bool),
             adv_usdt_2d=np.full((t, n), 1_000_000.0, dtype=np.float64),
@@ -387,7 +391,10 @@ class TestEdgeCases:
 
         # Zero-cost model so that net returns = forward returns (all zero with flat close)
         zero_cost = ExecutionCostModel(
-            maker_fee_bps=0.0, taker_fee_bps=0.0, slippage_bps=0.0, stress_multiplier=1.0,
+            maker_fee_bps=0.0,
+            taker_fee_bps=0.0,
+            slippage_bps=0.0,
+            stress_multiplier=1.0,
         )
         result = run_l0_diagnostic_pass(
             canonical_evidences=(canon,),
@@ -402,9 +409,7 @@ class TestEdgeCases:
 
         cell_rows = [r for r in result if "::cell=" in r.recipe_id]
         # With flat close (all returns = 0), NW t-stat = 0 → pval = 1.0 → no BH survivals
-        assert len(cell_rows) == 0, (
-            f"Expected 0 BH survivals with zero-return null, got {len(cell_rows)}"
-        )
+        assert len(cell_rows) == 0, f"Expected 0 BH survivals with zero-return null, got {len(cell_rows)}"
 
     def test_isolation_invariant(self) -> None:
         """[LIMIT-06] Isolation invariant.
@@ -457,9 +462,13 @@ class TestEdgeCases:
             rid = f"R{i}"
             recipes_map[rid] = _build_recipe(rid)
             panels_map[rid] = _build_panel(side=side)
-            ev_list.append(_build_canon_ev(
-                rid, handoff_tier="blocked", net_lcb_bps=float(-i),
-            ))
+            ev_list.append(
+                _build_canon_ev(
+                    rid,
+                    handoff_tier="blocked",
+                    net_lcb_bps=float(-i),
+                )
+            )
 
         runtime = AlphaFoundryRuntimeConfig(
             enable_failure_attribution=True,
