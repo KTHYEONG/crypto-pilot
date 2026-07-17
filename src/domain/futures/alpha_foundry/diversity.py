@@ -425,16 +425,20 @@ def audit_full_family_correlation(
     ]
 
     df = pd.DataFrame(rows)
-    summary = pd.DataFrame([{
-        "family_a": "__SUMMARY__",
-        "variant_a": "",
-        "family_b": "",
-        "variant_b": "",
-        "timeframe": timeframe,
-        "pairwise_corr": eff_test_count,
-        "cluster_id": -1,
-        "run_id": run_id,
-    }])
+    summary = pd.DataFrame(
+        [
+            {
+                "family_a": "__SUMMARY__",
+                "variant_a": "",
+                "family_b": "",
+                "variant_b": "",
+                "timeframe": timeframe,
+                "pairwise_corr": eff_test_count,
+                "cluster_id": -1,
+                "run_id": run_id,
+            }
+        ]
+    )
 
     return pd.concat([df, summary], ignore_index=True)
 
@@ -442,13 +446,17 @@ def audit_full_family_correlation(
 # ── Economic Thesis Grouping (Fix 3 — additive/observability only) ────────
 
 FAMILY_THESIS_GROUP: Mapping[str, str] = {
-    "trend_ma": "trend_ma_cross", "ema_trend": "trend_ma_cross", "ichimoku_trend": "trend_ma_cross",
+    "trend_ma": "trend_ma_cross",
+    "ema_trend": "trend_ma_cross",
+    "ichimoku_trend": "trend_ma_cross",
     "volume_participation_breakout": "breakout_retest_liquidity",
     "liquidity_participation_breakout": "breakout_retest_liquidity",
     "vol_contraction_breakout": "breakout_retest_liquidity",
-    "carry_net_of_funding": "funding_carry", "funding_slope_carry": "funding_carry",
+    "carry_net_of_funding": "funding_carry",
+    "funding_slope_carry": "funding_carry",
     "oi_lsr_unwind": "oi_unwind",
-    "xs_momentum": "xs_momentum_continuation", "residual_momentum_xs": "xs_momentum_continuation",
+    "xs_momentum": "xs_momentum_continuation",
+    "residual_momentum_xs": "xs_momentum_continuation",
     "xs_residual_rebalance": "xs_momentum_continuation",
     "btc_neutral_residual_reversal": "xs_residual_reversal",
     "price_band_reversion": "price_band_reversion",
@@ -500,12 +508,7 @@ def resolve_cross_tf_canonical_context(
     aligned = aligned_by_tf[canonical_tf]
     canonical_datetimes_ns = aligned.datetimes.astype("datetime64[ns]").astype(np.int64)
 
-    active_mask_2d = (
-        aligned.active_mask
-        & aligned.warm_mask
-        & ~aligned.entry_block_mask
-        & ~aligned.kill_mask
-    )
+    active_mask_2d = aligned.active_mask & aligned.warm_mask & ~aligned.entry_block_mask & ~aligned.kill_mask
 
     # Compute common start/end from all bound panels
     common_start_ns: int = 0
@@ -599,8 +602,7 @@ def resolve_cross_tf_shared_context(
         estimated_increment_mb=max(estimated_increment_mb, 1),
     ):
         raise ValueError(
-            f"memory_budget_exceeded: estimated_increment_mb={estimated_increment_mb}"
-            f" > budget_mb={budget.limit_mb}"
+            f"memory_budget_exceeded: estimated_increment_mb={estimated_increment_mb} > budget_mb={budget.limit_mb}"
         )
 
     proj_cache: dict[str, tuple[NDArray[np.float32], NDArray[np.bool_]]] = {}
@@ -615,7 +617,9 @@ def resolve_cross_tf_shared_context(
             )
             proj_cache[rid] = proj
             side_entry_cache[rid] = _causal_projected_side_and_entry(
-                proj[0], proj[1], context.active_mask_2d,
+                proj[0],
+                proj[1],
+                context.active_mask_2d,
             )
 
     entry_pos_flat: dict[str, "NDArray[np.int8]"] = {}  # noqa: UP037
@@ -637,9 +641,7 @@ def resolve_cross_tf_shared_context(
     n = len(all_recipe_ids_list)
     n_canonical_bars_v = len(context.canonical_datetimes_ns)
     n_symbols_v = (
-        proj_cache[all_recipe_ids_list[0]][0].shape[1]
-        if n > 0 and all_recipe_ids_list[0] in proj_cache
-        else 0
+        proj_cache[all_recipe_ids_list[0]][0].shape[1] if n > 0 and all_recipe_ids_list[0] in proj_cache else 0
     )
     valid_stack = np.zeros((n, n_canonical_bars_v, n_symbols_v), dtype=np.bool_)
     for i_idx, rid in enumerate(all_recipe_ids_list):
@@ -693,9 +695,7 @@ def _batch_pairwise_corr(
     if ndim < 2:
         raise ValueError("projected_stack must be at least 2D")
     if projected_stack.shape != mask_stack.shape:
-        raise ValueError(
-            f"shape mismatch projected={projected_stack.shape} mask={mask_stack.shape}"
-        )
+        raise ValueError(f"shape mismatch projected={projected_stack.shape} mask={mask_stack.shape}")
 
     n = projected_stack.shape[0]
     if n == 0:
@@ -772,7 +772,8 @@ def compute_cross_tf_pair_evidence(
             union_count = int(np.sum(union))
             j_dir = shared_count / max(union_count, 1)
         return CrossTFPairEvidence(
-            recipe_id_a=recipe_id_a, recipe_id_b=recipe_id_b,
+            recipe_id_a=recipe_id_a,
+            recipe_id_b=recipe_id_b,
             score_corr=score_corr,
             shared_directional_entries=shared_count,
             directional_entry_jaccard=j_dir,
@@ -788,13 +789,17 @@ def compute_cross_tf_pair_evidence(
         proj_a_s, proj_a_v = precomputed_proj_a
     else:
         proj_a_s, proj_a_v = project_signal_to_canonical_grid(
-            panel=panel_a, canonical_datetimes=canonical_dt, causal_lag_bars=1,
+            panel=panel_a,
+            canonical_datetimes=canonical_dt,
+            causal_lag_bars=1,
         )
     if precomputed_proj_b is not None:
         proj_b_s, proj_b_v = precomputed_proj_b
     else:
         proj_b_s, proj_b_v = project_signal_to_canonical_grid(
-            panel=panel_b, canonical_datetimes=canonical_dt, causal_lag_bars=1,
+            panel=panel_b,
+            canonical_datetimes=canonical_dt,
+            causal_lag_bars=1,
         )
 
     active = context.active_mask_2d
@@ -803,9 +808,12 @@ def compute_cross_tf_pair_evidence(
     flat_b = proj_b_s[valid_ab]
     if len(flat_a) < 2:
         return CrossTFPairEvidence(
-            recipe_id_a=recipe_id_a, recipe_id_b=recipe_id_b,
-            score_corr=0.0, shared_directional_entries=0,
-            directional_entry_jaccard=0.0, is_redundant=False,
+            recipe_id_a=recipe_id_a,
+            recipe_id_b=recipe_id_b,
+            score_corr=0.0,
+            shared_directional_entries=0,
+            directional_entry_jaccard=0.0,
+            is_redundant=False,
         )
 
     c = float(np.corrcoef(flat_a, flat_b)[0, 1])
@@ -834,7 +842,8 @@ def compute_cross_tf_pair_evidence(
     )
 
     return CrossTFPairEvidence(
-        recipe_id_a=recipe_id_a, recipe_id_b=recipe_id_b,
+        recipe_id_a=recipe_id_a,
+        recipe_id_b=recipe_id_b,
         score_corr=score_corr,
         shared_directional_entries=shared_count,
         directional_entry_jaccard=float(j_dir),
@@ -886,7 +895,8 @@ def compute_cross_tf_redundancy(
                 demoted_reason_by_id={},
                 cross_bucket_corr=(
                     np.eye(len(all_selected_local), dtype=np.float64)
-                    if all_selected_local else np.empty((0, 0), dtype=np.float64)
+                    if all_selected_local
+                    else np.empty((0, 0), dtype=np.float64)
                 ),
                 global_eff_test_count=float(len(all_selected_local)),
                 canonical_tf=context.canonical_tf,
@@ -922,7 +932,9 @@ def compute_cross_tf_redundancy(
                 )
                 proj_cache[rid] = proj
                 side_entry_cache[rid] = _causal_projected_side_and_entry(
-                    proj[0], proj[1], context.active_mask_2d,
+                    proj[0],
+                    proj[1],
+                    context.active_mask_2d,
                 )
 
         # Score correlation matrix for report consumers — i<j only, mirror to j,i
@@ -957,13 +969,11 @@ def compute_cross_tf_redundancy(
     if precomputed_shared_context is not None and precomputed_shared_context.entry_pos_flat:
         # [OPT-2] Batch jaccard via matmul
         pos_flat_stack = np.array(
-            [precomputed_shared_context.entry_pos_flat.get(rid, np.array([], dtype=np.int8))
-             for rid in all_recipe_ids],
+            [precomputed_shared_context.entry_pos_flat.get(rid, np.array([], dtype=np.int8)) for rid in all_recipe_ids],
             dtype=np.int16,
         )
         neg_flat_stack = np.array(
-            [precomputed_shared_context.entry_neg_flat.get(rid, np.array([], dtype=np.int8))
-             for rid in all_recipe_ids],
+            [precomputed_shared_context.entry_neg_flat.get(rid, np.array([], dtype=np.int8)) for rid in all_recipe_ids],
             dtype=np.int16,
         )
         entry_flat = pos_flat_stack | neg_flat_stack
@@ -992,7 +1002,8 @@ def compute_cross_tf_redundancy(
                     and j_dir >= min_directional_entry_jaccard
                 )
                 pair_ev = CrossTFPairEvidence(
-                    recipe_id_a=all_recipe_ids[i], recipe_id_b=all_recipe_ids[j],
+                    recipe_id_a=all_recipe_ids[i],
+                    recipe_id_b=all_recipe_ids[j],
                     score_corr=score_corr_val,
                     shared_directional_entries=shared_count,
                     directional_entry_jaccard=float(j_dir),
@@ -1009,8 +1020,10 @@ def compute_cross_tf_redundancy(
                 if panel_i is None or panel_j is None:
                     continue
                 pair_ev = compute_cross_tf_pair_evidence(
-                    recipe_id_a=ri, recipe_id_b=rj,
-                    panel_a=panel_i, panel_b=panel_j,
+                    recipe_id_a=ri,
+                    recipe_id_b=rj,
+                    panel_a=panel_i,
+                    panel_b=panel_j,
                     context=context,
                     min_score_corr=max_novelty_corr,
                     min_directional_entry_jaccard=min_directional_entry_jaccard,

@@ -2087,18 +2087,63 @@ DEFAULT_CRISIS_WINDOWS: tuple[CrisisWindow, ...] = (
         end=date(2023, 2, 15),
         label="luna_ftx_2022_collapse",
         symbols=(
-            "1000SHIBUSDT", "1000XECUSDT", "AAVEUSDT", "ADAUSDT", "ANKRUSDT",
-            "API3USDT", "ARPAUSDT", "ARUSDT", "ATOMUSDT", "AVAXUSDT",
-            "AXSUSDT", "BANDUSDT", "BCHUSDT", "BNBUSDT", "BTCUSDT",
-            "CRVUSDT", "DOGEUSDT", "DOTUSDT", "DYDXUSDT", "ENSUSDT",
-            "ETCUSDT", "ETHUSDT", "FILUSDT", "FTMUSDT", "GALAUSDT",
-            "ICPUSDT", "IOTAUSDT", "JASMYUSDT", "KAVAUSDT", "LINKUSDT",
-            "LPTUSDT", "LTCUSDT", "MANAUSDT", "MKRUSDT", "MTLUSDT",
-            "NEARUSDT", "NEOUSDT", "OPUSDT", "PEOPLEUSDT", "RSRUSDT",
-            "RUNEUSDT", "RVNUSDT", "SANDUSDT", "SNXUSDT", "SOLUSDT",
-            "STORJUSDT", "THETAUSDT", "TRBUSDT", "TRXUSDT", "UNIUSDT",
-            "VETUSDT", "XLMUSDT", "XRPUSDT", "ZECUSDT", "ZENUSDT",
-            "ZILUSDT", "ZRXUSDT",
+            "1000SHIBUSDT",
+            "1000XECUSDT",
+            "AAVEUSDT",
+            "ADAUSDT",
+            "ANKRUSDT",
+            "API3USDT",
+            "ARPAUSDT",
+            "ARUSDT",
+            "ATOMUSDT",
+            "AVAXUSDT",
+            "AXSUSDT",
+            "BANDUSDT",
+            "BCHUSDT",
+            "BNBUSDT",
+            "BTCUSDT",
+            "CRVUSDT",
+            "DOGEUSDT",
+            "DOTUSDT",
+            "DYDXUSDT",
+            "ENSUSDT",
+            "ETCUSDT",
+            "ETHUSDT",
+            "FILUSDT",
+            "FTMUSDT",
+            "GALAUSDT",
+            "ICPUSDT",
+            "IOTAUSDT",
+            "JASMYUSDT",
+            "KAVAUSDT",
+            "LINKUSDT",
+            "LPTUSDT",
+            "LTCUSDT",
+            "MANAUSDT",
+            "MKRUSDT",
+            "MTLUSDT",
+            "NEARUSDT",
+            "NEOUSDT",
+            "OPUSDT",
+            "PEOPLEUSDT",
+            "RSRUSDT",
+            "RUNEUSDT",
+            "RVNUSDT",
+            "SANDUSDT",
+            "SNXUSDT",
+            "SOLUSDT",
+            "STORJUSDT",
+            "THETAUSDT",
+            "TRBUSDT",
+            "TRXUSDT",
+            "UNIUSDT",
+            "VETUSDT",
+            "XLMUSDT",
+            "XRPUSDT",
+            "ZECUSDT",
+            "ZENUSDT",
+            "ZILUSDT",
+            "ZRXUSDT",
         ),
         source_note=(
             "LUNA collapse (2022-05) + FTX bankruptcy (2022-11). "
@@ -2135,8 +2180,11 @@ def _build_rule_based_stress_batch(
     )
     if not families:
         return ValidatedSignalBatch(
-            events=(), start_idx=0, end_idx=len(aligned.datetimes),
-            symbols=aligned.symbols, registry_version="crisis_stress_v1",
+            events=(),
+            start_idx=0,
+            end_idx=len(aligned.datetimes),
+            symbols=aligned.symbols,
+            registry_version="crisis_stress_v1",
             model_version="rule_based_replay",
         )
 
@@ -2148,8 +2196,11 @@ def _build_rule_based_stress_batch(
     except Exception:
         logger.exception("[CRISIS-STRESS] build_rule_signal_panels failed tf=%s", tf)
         return ValidatedSignalBatch(
-            events=(), start_idx=0, end_idx=len(aligned.datetimes),
-            symbols=aligned.symbols, registry_version="crisis_stress_v1",
+            events=(),
+            start_idx=0,
+            end_idx=len(aligned.datetimes),
+            symbols=aligned.symbols,
+            registry_version="crisis_stress_v1",
             model_version="rule_based_replay",
         )
 
@@ -2238,9 +2289,7 @@ def assess_crisis_reliability(
                 len(overlap_symbols),
             )
             if not overlap_symbols:
-                replayed_metrics.append(
-                    _make_invalid_metric(window.label, "no overlapping symbols")
-                )
+                replayed_metrics.append(_make_invalid_metric(window.label, "no overlapping symbols"))
                 continue
             try:
                 data_maps, _oos_maps, valid_symbols = load_futures_data_maps_for_symbols(
@@ -2255,15 +2304,11 @@ def assess_crisis_reliability(
                 )
             except Exception:
                 logger.exception("[CRISIS-STRESS] data load failed window=%s", window.label)
-                replayed_metrics.append(
-                    _make_invalid_metric(window.label, "data load exception: see log")
-                )
+                replayed_metrics.append(_make_invalid_metric(window.label, "data load exception: see log"))
                 continue
             logger.info("[CRISIS-STRESS] window=%s valid_symbols=%d", window.label, len(valid_symbols))
             if not valid_symbols:
-                replayed_metrics.append(
-                    _make_invalid_metric(window.label, "no valid symbols after load")
-                )
+                replayed_metrics.append(_make_invalid_metric(window.label, "no valid symbols after load"))
                 continue
 
             if tf == _load_tf:
@@ -2282,9 +2327,7 @@ def assess_crisis_reliability(
             valid_symbols = [s for s in valid_symbols if s in aligned_maps]
             logger.info("[CRISIS-STRESS] window=%s resampled_symbols=%d", window.label, len(valid_symbols))
             if not valid_symbols:
-                replayed_metrics.append(
-                    _make_invalid_metric(window.label, "no symbols after resample")
-                )
+                replayed_metrics.append(_make_invalid_metric(window.label, "no symbols after resample"))
                 continue
 
             aligned_stress = align_data_maps(aligned_maps, valid_symbols, tf, cache_result=False)
@@ -2303,13 +2346,14 @@ def assess_crisis_reliability(
                 ready_symbols=tuple(s for s in valid_symbols if s in deployment_registry.by_symbol),
             )
             stress_batch = _build_rule_based_stress_batch(
-                registry=stress_registry, aligned=aligned_stress, strategy_cfg=strategy_cfg, tf=tf,
+                registry=stress_registry,
+                aligned=aligned_stress,
+                strategy_cfg=strategy_cfg,
+                tf=tf,
             )
             logger.info("[CRISIS-STRESS] window=%s events=%d", window.label, len(stress_batch.events))
             if not stress_batch.events:
-                replayed_metrics.append(
-                    _make_invalid_metric(window.label, "no events generated")
-                )
+                replayed_metrics.append(_make_invalid_metric(window.label, "no events generated"))
                 continue
 
             try:
@@ -2325,9 +2369,7 @@ def assess_crisis_reliability(
                 )
             except Exception:
                 logger.exception("[CRISIS-STRESS] simulation failed window=%s", window.label)
-                replayed_metrics.append(
-                    _make_invalid_metric(window.label, "simulation exception: see log")
-                )
+                replayed_metrics.append(_make_invalid_metric(window.label, "simulation exception: see log"))
                 continue
 
             bar_count = len(aligned_stress.datetimes)
@@ -3190,7 +3232,7 @@ def _resolve_labeled_events_for_tf(
     require_native: bool = True,
 ) -> pd.DataFrame:
     """[ADR_20260715_L0_L1_NATIVE_CONTRACT] Resolve per-TF-native labeled events.
-    
+
     When require_native is True (default), a missing native key raises
     MissingNativeTfEventsError instead of falling back to the pooled frame.
     """
@@ -3198,6 +3240,7 @@ def _resolve_labeled_events_for_tf(
         return labeled_events_by_tf[tf]
     if require_native:
         from src.domain.futures.strategy.event_grid_contracts import MissingNativeTfEventsError
+
         raise MissingNativeTfEventsError(f"missing native labeled events for tf={tf}")
     if "native_tf" in labeled_events.columns:
         return labeled_events[labeled_events["native_tf"] == tf]
@@ -3233,6 +3276,7 @@ def select_l1_delivery_events(
             return labeled_events[labeled_events["native_tf"] == tf]
         return labeled_events
     from src.domain.futures.alpha_foundry.contracts import L0DeliveryContractError, L0StrategyDeliveryManifest
+
     if not isinstance(manifest, L0StrategyDeliveryManifest):
         if "native_tf" in labeled_events.columns:
             return labeled_events[labeled_events["native_tf"] == tf]
@@ -3254,9 +3298,7 @@ def select_l1_delivery_events(
             route_ids.update(route.selected_recipe_ids)
     if not route_ids:
         return labeled_events.iloc[:0]
-    return labeled_events[
-        (labeled_events["native_tf"] == tf) & (labeled_events["l0_recipe_id"].isin(route_ids))
-    ]
+    return labeled_events[(labeled_events["native_tf"] == tf) & (labeled_events["l0_recipe_id"].isin(route_ids))]
 
 
 def run_per_tf_l1(
@@ -3278,7 +3320,9 @@ def run_per_tf_l1(
 
     _tf_cfg = strategy_config.apply_tf_gate_overrides(cfg, tf)
     _tf_labeled = select_l1_delivery_events(
-        labeled_events=labeled_events, tf=tf, manifest=l0_delivery_manifest,
+        labeled_events=labeled_events,
+        tf=tf,
+        manifest=l0_delivery_manifest,
     )
     # ── Native event grid contract: normalize and validate ──
     if not _tf_labeled.empty and "entry_idx" in _tf_labeled.columns:
@@ -3366,26 +3410,14 @@ def _resolve_layer1_deployment_passed(
     structural_gate_only: bool,
 ) -> bool:
     """[ADR_20260713_L1_DEPLOYMENT_PASS_CONTRACT] Return L1 handoff eligibility."""
-    selected_gate = (
-        gate_report.structural_passed
-        if structural_gate_only
-        else gate_report.passed
-    )
-    return bool(
-        selected_gate
-        and deployment_registry is not None
-        and deployment_registry.ready_symbols
-    )
+    selected_gate = gate_report.structural_passed if structural_gate_only else gate_report.passed
+    return bool(selected_gate and deployment_registry is not None and deployment_registry.ready_symbols)
 
 
 def _is_deployable_per_tf_result(result: PerTfL1Result) -> bool:
     """[ADR_20260713_L1_DEPLOYMENT_PASS_CONTRACT] Check per-TF handoff eligibility."""
     registry = result.l1_result.deployment_registry
-    return bool(
-        result.l1_result.gate_passed
-        and registry is not None
-        and registry.ready_symbols
-    )
+    return bool(result.l1_result.gate_passed and registry is not None and registry.ready_symbols)
 
 
 def _resolve_selected_l1_tf(
@@ -3395,11 +3427,7 @@ def _resolve_selected_l1_tf(
     """[ADR_20260713_L1_DEPLOYMENT_PASS_CONTRACT] Resolve one TF for gate and registry."""
     if preferred_tf is not None:
         return preferred_tf if preferred_tf in per_tf_l1 else None
-    eligible_tfs = tuple(
-        tf
-        for tf, result in per_tf_l1.items()
-        if _is_deployable_per_tf_result(result)
-    )
+    eligible_tfs = tuple(tf for tf, result in per_tf_l1.items() if _is_deployable_per_tf_result(result))
     return min(eligible_tfs, key=_tf_hours) if eligible_tfs else None
 
 
@@ -3416,9 +3444,7 @@ def _log_pertf_registry_diag(
         _gr = _r.l1_result.gate_report
         _blockers = _gr.blockers if _gr is not None else ()
         _advisory_failures = (
-            ",".join(c.key for c in _gr.advisory_checks if not c.passed) or "none"
-            if _gr is not None
-            else "none"
+            ",".join(c.key for c in _gr.advisory_checks if not c.passed) or "none" if _gr is not None else "none"
         )
         _strict_gate = _gr.passed if _gr is not None else False
         _structural = _gr.structural_passed if _gr is not None else False
@@ -3569,9 +3595,7 @@ def _resolve_l2_master_tf(
     if cfg.l2_master_tf:
         if cfg.l2_master_tf in per_tf_l1 and _is_deployable_per_tf_result(per_tf_l1[cfg.l2_master_tf]):
             return cfg.l2_master_tf
-        raise TieredPipelineError(
-            f"configured l2_master_tf={cfg.l2_master_tf} is not deployable"
-        )
+        raise TieredPipelineError(f"configured l2_master_tf={cfg.l2_master_tf} is not deployable")
 
     readiness_by_tf: dict[str, L1TfHandoffReadiness] = {
         tf: assess_l1_tf_handoff(
@@ -3589,9 +3613,7 @@ def _resolve_l2_master_tf(
         return max(master_candidates, key=lambda t: master_candidates[t].edge_quality)
 
     reasons = {tf: (",".join(r.rejection_reasons) or "none") for tf, r in readiness_by_tf.items()}
-    raise TieredPipelineError(
-        f"no deployable timeframe found for L2 master TF; rejection_reasons={reasons}"
-    )
+    raise TieredPipelineError(f"no deployable timeframe found for L2 master TF; rejection_reasons={reasons}")
 
 
 def _log_master_tf_rejection_diag(
@@ -3687,9 +3709,7 @@ def _aggregate_per_tf_l1(
         preferred_tf=preferred_tf,
     )
     gate_passed = bool(
-        selected is not None
-        and _is_deployable_per_tf_result(selected)
-        and deployment_registry is not None
+        selected is not None and _is_deployable_per_tf_result(selected) and deployment_registry is not None
     )
 
     # artifacts_by_tf: 모든 TF artifact 보존 (multi-TF signal 예측 핵심).

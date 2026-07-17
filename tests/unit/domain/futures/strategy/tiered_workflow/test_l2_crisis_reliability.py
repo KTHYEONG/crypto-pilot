@@ -43,9 +43,9 @@ def _make_registry(*, symbol: str, strategy_id: str) -> QualifiedSignalRegistry:
 
 
 def _make_aligned(n_bars: int = 200) -> AlignedMarketData:
-    datetimes = (
-        np.datetime64("2022-04-01T00:00", "h") + np.arange(n_bars).astype("timedelta64[h]") * 8
-    ).astype("datetime64[ns]")
+    datetimes = (np.datetime64("2022-04-01T00:00", "h") + np.arange(n_bars).astype("timedelta64[h]") * 8).astype(
+        "datetime64[ns]"
+    )
     return AlignedMarketData(
         datetimes=datetimes,
         symbols=("ARUSDT",),
@@ -143,7 +143,9 @@ def test_apply_crisis_reliability_override_blocks_when_unverified() -> None:
     )
 
     updated = apply_crisis_reliability_override(
-        l2_result, assessment, require_crisis_reliability=True,
+        l2_result,
+        assessment,
+        require_crisis_reliability=True,
     )
 
     assert updated.gate_passed is False
@@ -163,7 +165,9 @@ def test_apply_crisis_reliability_override_opt_out_preserves_gate() -> None:
     )
 
     updated = apply_crisis_reliability_override(
-        l2_result, assessment, require_crisis_reliability=False,
+        l2_result,
+        assessment,
+        require_crisis_reliability=False,
     )
 
     assert updated.gate_passed is True

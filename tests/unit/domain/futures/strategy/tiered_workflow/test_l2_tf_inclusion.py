@@ -80,14 +80,17 @@ def _build_tf_gate_fixture(
     sym_4h_close = 100.0 + np.arange(t_max, dtype=np.float64) * 1.0
     sym_12h_close = 100.0 - np.arange(t_max, dtype=np.float64) * 1.0
     aligned.close_2d = np.column_stack((sym_4h_close, sym_12h_close))
-    aligned.datetimes = np.array(
-        [np.datetime64("2024-01-01", "ns") + np.timedelta64(i * 4, "h") for i in range(t_max)]
-    )
+    aligned.datetimes = np.array([np.datetime64("2024-01-01", "ns") + np.timedelta64(i * 4, "h") for i in range(t_max)])
     aligned.beta_vs_market_1d = np.zeros(n_sym, dtype=np.float64)
     aligned.execution_cost_bps_2d = np.full((t_max, n_sym), 3.8, dtype=np.float64)
     aligned.funding_2d = np.zeros((t_max, n_sym), dtype=np.float64)
-    for mask_name in ("active_mask", "warm_mask", "execution_eligibility_mask",
-                      "strategy_readiness_mask", "promotion_active_mask"):
+    for mask_name in (
+        "active_mask",
+        "warm_mask",
+        "execution_eligibility_mask",
+        "strategy_readiness_mask",
+        "promotion_active_mask",
+    ):
         setattr(aligned, mask_name, np.ones((t_max, n_sym), dtype=np.bool_))
     aligned.entry_block_mask = np.zeros((t_max, n_sym), dtype=np.bool_)
     aligned.kill_mask = np.zeros((t_max, n_sym), dtype=np.bool_)
@@ -277,9 +280,7 @@ class TestRunAwfSimulationTfGateIntegration:
             sim_origin="test_tf_gate",
         )
 
-        assert result.trade_count > 0, (
-            f"TF gate should allow 4h sleeve through, got trade_count={result.trade_count}"
-        )
+        assert result.trade_count > 0, f"TF gate should allow 4h sleeve through, got trade_count={result.trade_count}"
 
 
 class TestTfInclusionFilter:

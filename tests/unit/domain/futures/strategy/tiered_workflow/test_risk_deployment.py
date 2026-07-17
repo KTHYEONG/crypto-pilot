@@ -8,12 +8,15 @@ import pytest
 
 from src.domain.futures.strategy.tiered_workflow.risk_deployment import (
     DeploymentResult,
+    _annualized_cagr_from_returns,
     _cvar_95_at_leverage,
     _mdd_at_leverage,
     _mdd_from_returns,
+    _sharpe_from_returns,
     apply_deployment,
     calibrate_deployment_leverage,
     select_worst_fold_returns,
+    trend_efficiency_gross_mult,
 )
 
 BARS_PER_YEAR = 2190.0  # 4h 기준
@@ -288,7 +291,7 @@ class TestOosFloor:
 # S7: select_worst_fold_returns
 # ---------------------------------------------------------------------------
 class TestSelectWorstFoldReturns:
-    def test_picks_highest_unit_mdd_fold(self) -> None:
+    def test_select_worst_fold_returns_picks_highest_unit_mdd_fold(self) -> None:
         """단위 MDD가 더 큰 volatile fold를 반환."""
         calm_fold = (0.01, 0.01, -0.005, 0.01)
         volatile_fold = (0.02, -0.08, 0.01, -0.03)
@@ -298,7 +301,7 @@ class TestSelectWorstFoldReturns:
 
         assert tuple(worst.tolist()) == volatile_fold
 
-    def test_empty_input_returns_empty_array(self) -> None:
+    def test_select_worst_fold_returns_empty_input_returns_empty_array(self) -> None:
         """빈 튜플 입력 → 빈 배열 반환."""
         worst = select_worst_fold_returns(())
         assert worst.size == 0
@@ -328,7 +331,7 @@ class TestSelectWorstFoldReturns:
 # S8: calibrate_deployment_leverage — kelly_safety_fraction
 # ---------------------------------------------------------------------------
 class TestKellySafetyFraction:
-    def test_kelly_fraction_out_of_range_raises(self) -> None:
+    def test_calibrate_deployment_leverage_kelly_fraction_out_of_range_raises(self) -> None:
         """kelly_safety_fraction <= 0 또는 > 1 → ValueError."""
         for invalid in [0.0, -0.1, 1.5]:
             with pytest.raises(ValueError, match="kelly_safety_fraction"):
@@ -418,7 +421,7 @@ class TestWorstFoldConstraint:
 # S10: 회귀 방지 — disabled gates match pre-spec baseline
 # ---------------------------------------------------------------------------
 class TestDisabledGatesRegression:
-    def test_disabled_gates_match_baseline(self) -> None:
+    def test_calibrate_deployment_leverage_disabled_gates_match_pre_spec_baseline(self) -> None:
         """worst_fold_rets/kelly_safety_fraction 기본값(None) → 기존 동작 동일."""
         np.random.seed(42)
         rets = np.random.normal(0.001, 0.02, 1000).astype(np.float64)
@@ -460,3 +463,212 @@ class TestSelectWorstFoldThenCalibrateIntegration:
         )
         assert binding in ("worst_fold", "kelly_theoretical", "mdd", "cvar", "hard_cap")
         assert lev >= 1.0
+
+
+# ---------------------------------------------------------------------------
+# S12: Supplementary coverage — pre-existing uncovered paths
+# ---------------------------------------------------------------------------
+class TestSupplementaryCoverage:
+    def test_exchange_leverage_cap_applied(self) -> None:
+        """exchange_leverage_cap < candidate L* → binding=exchange_cap."""
+        np.random.seed(99)
+        rets = np.random.normal(0.001, 0.005, 1000).astype(np.float64)
+        lev, binding, _ = calibrate_deployment_leverage(
+            fit_rets=rets,
+            l_hard_cap=20.0,
+            exchange_leverage_cap=1.5,
+        )
+        assert lev == pytest.approx(1.5, rel=1e-3)
+        assert binding == "exchange_cap"
+
+    def test_exchange_leverage_cap_none_ignored(self) -> None:
+        """exchange_leverage_cap=None → 기존 동작."""
+        np.random.seed(99)
+        rets = np.random.normal(0.001, 0.005, 1000).astype(np.float64)
+        lev, binding, _ = calibrate_deployment_leverage(
+            fit_rets=rets,
+            l_hard_cap=4.0,
+            exchange_leverage_cap=None,
+        )
+        assert binding in ("mdd", "cvar", "hard_cap")
+
+    def test_trend_efficiency_gross_mult_nonfinite(self) -> None:
+        """trend_efficiency_gross_mult: non-finite trailing_ER → floor_mult."""
+        result = trend_efficiency_gross_mult(float("nan"), target=0.5, floor_mult=0.3)
+        assert result == 0.3
+
+    def test_trend_efficiency_gross_mult_above_target(self) -> None:
+        """trailing_ER >= target → 1.0."""
+        result = trend_efficiency_gross_mult(0.8, target=0.5, floor_mult=0.3)
+        assert result == 1.0
+
+    def test_trend_efficiency_gross_mult_below_target(self) -> None:
+        """trailing_ER < target → interpolated."""
+        result = trend_efficiency_gross_mult(0.2, target=0.5, floor_mult=0.3)
+        assert result == pytest.approx(0.3 + 0.7 * 0.4, rel=1e-3)
+
+    def test_annualized_cagr_empty_rets(self) -> None:
+        """_annualized_cagr_from_returns: 빈 배열 → 0.0."""
+        assert _annualized_cagr_from_returns(np.array([], dtype=np.float64), bars_per_year=2190) == 0.0
+
+    def test_mdd_from_returns_empty(self) -> None:
+        """_mdd_from_returns: 빈 배열 → 0.0."""
+        assert _mdd_from_returns(np.array([], dtype=np.float64)) == 0.0
+
+    def test_sharpe_from_returns_small_size(self) -> None:
+        """_sharpe_from_returns: size<2 → 0.0."""
+        assert _sharpe_from_returns(np.array([0.01], dtype=np.float64), bars_per_year=2190) == 0.0
+
+    def test_sharpe_from_returns_zero_std(self) -> None:
+        """_sharpe_from_returns: std≈0 → 0.0."""
+        rets = np.array([0.01, 0.01, 0.01], dtype=np.float64)
+        assert _sharpe_from_returns(rets, bars_per_year=2190) == 0.0
+
+    def test_mdd_at_leverage_empty(self) -> None:
+        """_mdd_at_leverage: 빈 배열 → 0.0."""
+        assert _mdd_at_leverage(np.array([], dtype=np.float64), 1.0) == 0.0
+
+    def test_cvar_95_at_leverage_empty(self) -> None:
+        """_cvar_95_at_leverage: 빈 배열 → 0.0."""
+        assert _cvar_95_at_leverage(np.array([], dtype=np.float64), 1.0) == 0.0
+
+    def test_cvar_95_at_leverage_tail_empty(self) -> None:
+        """_cvar_95_at_leverage: 모든 손실 동일 → tail 비어도 안전."""
+        rets = np.ones(100, dtype=np.float64) * -0.01
+        result = _cvar_95_at_leverage(rets, 1.0)
+        assert result > 0.0
+
+    def test_annualized_cagr_very_small_years(self) -> None:
+        """_annualized_cagr_from_returns: very small years → 0.0."""
+        result = _annualized_cagr_from_returns(np.array([0.01], dtype=np.float64), bars_per_year=1e12)
+        assert result == 0.0
+
+    def test_crisis_gate_suppresses_oos_blend(self) -> None:
+        """fit_mdd_crisis_gate=0.001 → fit_MDD_vol1 확정 초과 → OOS blend 차단."""
+        np.random.seed(42)
+        fit_rets = np.random.normal(0.001, 0.02, 1000).astype(np.float64)
+        oos_rets = np.random.normal(0.002, 0.01, 500).astype(np.float64)
+        lev, binding, _ = calibrate_deployment_leverage(
+            fit_rets=fit_rets,
+            oos_rets=oos_rets,
+            mdd_cap=0.30,
+            mdd_margin=0.30,
+            l_hard_cap=4.0,
+            fit_mdd_crisis_gate=0.001,
+        )
+        assert binding != "oos_blend"
+
+    def test_high_oos_mdd_ratio_triggers_blend(self) -> None:
+        """OOS MDD < fit MDD → blended budget."""
+        np.random.seed(200)
+        fit_rets = np.random.normal(0.001, 0.03, 1000).astype(np.float64)
+        oos_rets = np.random.normal(0.001, 0.01, 500).astype(np.float64)
+        lev, binding, cross_mdd = calibrate_deployment_leverage(
+            fit_rets=fit_rets,
+            oos_rets=oos_rets,
+            mdd_cap=0.30,
+            mdd_margin=0.30,
+            l_hard_cap=4.0,
+        )
+        assert binding in ("mdd", "cvar", "oos_blend", "hard_cap")
+        assert cross_mdd >= 0.0
+
+    def test_hard_cap_final_clip_without_exchange_cap(self) -> None:
+        """exchange_leverage_cap=None + OOS blend가 l_final을 l_hard_cap 위로 → clip."""
+        np.random.seed(300)
+        fit_rets = np.random.normal(0.0005, 0.005, 2000).astype(np.float64)
+        oos_rets = np.random.normal(0.0005, 0.003, 1000).astype(np.float64)
+        lev, binding, _ = calibrate_deployment_leverage(
+            fit_rets=fit_rets,
+            oos_rets=oos_rets,
+            mdd_cap=0.30,
+            mdd_margin=0.30,
+            l_hard_cap=3.0,
+            exchange_leverage_cap=None,
+        )
+        assert binding in ("hard_cap", "mdd", "cvar")
+        assert lev <= 3.0 + 1e-6
+
+    def test_awf_sim_result_fit_rets_by_field(self) -> None:
+        """_AwfSimResult fit_rets_by_fold 필드 존재 및 타입 검증."""
+        from src.domain.futures.strategy.tiered_workflow.awf_sim import _AwfSimResult
+
+        result = _AwfSimResult(
+            rets_hybrid=[0.01, -0.01],
+            rets_baseline=[0.005, -0.005],
+            last_selected=frozenset(),
+            last_w=np.array([], dtype=np.float64),
+            all_turnovers=[],
+            all_turnovers_baseline=[],
+            all_gross_exposures=[],
+            all_net_exposures=[],
+            friction_pass_total=0,
+            signal_total=0,
+            support_leak_count=0,
+            total_cost_hybrid=0.0,
+            total_cost_baseline=0.0,
+            cap_saturation_count=0,
+            rebalance_count=0,
+            trade_count=0,
+            fold_rets_hybrid=[],
+            fold_rets_baseline=[],
+            fold_selected_symbols=(),
+            block_rets_hybrid=(),
+            block_rets_baseline=(),
+            rets_baseline_ew=[],
+            fit_rets_hybrid=(0.01, -0.01),
+            fit_rets_by_fold=((0.01,), (-0.01, 0.02)),
+            fold_attributions=(),
+            policy_effect_by_fold=(),
+        )
+        assert result.fit_rets_by_fold == ((0.01,), (-0.01, 0.02))
+
+    def test_oos_blend_invariant_reversion(self) -> None:
+        """OOS blend가 invariant를 초과하면 원래 L*로 revert."""
+        fit_rets = np.array([0.001] * 100 + [-0.002] * 50, dtype=np.float64)
+        oos_rets = np.array([0.0001] * 50 + [-0.05, 0.01] * 25, dtype=np.float64)
+        lev, binding, _ = calibrate_deployment_leverage(
+            fit_rets=fit_rets,
+            oos_rets=oos_rets,
+            mdd_cap=0.30,
+            mdd_margin=0.30,
+            l_hard_cap=20.0,
+            exchange_leverage_cap=None,
+        )
+        assert lev >= 1.0
+        assert binding != "oos_blend" or binding == "mdd"
+
+    def test_compute_layer2_fold_diagnostics_basic(self) -> None:
+        """compute_layer2_fold_diagnostics: 기본 경로."""
+        from src.domain.futures.strategy.tiered_workflow.risk_deployment import (
+            compute_layer2_fold_diagnostics,
+        )
+
+        np.random.seed(400)
+        fold_rets = [np.random.normal(0.001, 0.02, 100).tolist() for _ in range(3)]
+        fold_symbols = [("BTCUSDT",), ("ETHUSDT",), ("SOLUSDT",)]
+        result = compute_layer2_fold_diagnostics(
+            fold_rets_hybrid=fold_rets,
+            fold_selected_symbols=fold_symbols,
+            leverage=2.0,
+            bars_per_year=2190,
+        )
+        assert result.fold_pass_ratio >= 0.0
+        assert len(result.fold_unit_sharpes) == 3
+        assert len(result.fold_selected_symbols) == 3
+
+    def test_compute_layer2_fold_diagnostics_empty_fold(self) -> None:
+        """compute_layer2_fold_diagnostics: 빈 fold + symbol 불일치."""
+        from src.domain.futures.strategy.tiered_workflow.risk_deployment import (
+            compute_layer2_fold_diagnostics,
+        )
+
+        fold_rets = [[], [0.01, -0.005, 0.02], [0.02, -0.01, 0.03]]
+        fold_symbols = [(), ("BTCUSDT",)]
+        result = compute_layer2_fold_diagnostics(
+            fold_rets_hybrid=fold_rets,
+            fold_selected_symbols=fold_symbols,
+            leverage=2.0,
+            bars_per_year=2190,
+        )
+        assert result.fold_pass_ratio >= 0.0

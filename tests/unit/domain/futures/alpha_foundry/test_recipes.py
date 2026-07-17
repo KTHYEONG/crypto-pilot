@@ -150,47 +150,35 @@ class TestBuildAlphaRecipeCatalogErrors:
 
 class TestNewRecipeRegistrations:
     def test_lpb_recipes_have_causal_lag_one(self) -> None:
-        recipes = build_alpha_recipe_catalog(
-            timeframe="4h", include_families=("liquidity_participation_breakout",)
-        )
+        recipes = build_alpha_recipe_catalog(timeframe="4h", include_families=("liquidity_participation_breakout",))
         assert len(recipes) == 2
         for r in recipes:
             assert r.causal_lag_bars == 1
 
     def test_bnrr_recipes_have_causal_lag_one(self) -> None:
-        recipes = build_alpha_recipe_catalog(
-            timeframe="4h", include_families=("btc_neutral_residual_reversal",)
-        )
+        recipes = build_alpha_recipe_catalog(timeframe="4h", include_families=("btc_neutral_residual_reversal",))
         assert len(recipes) == 2
         for r in recipes:
             assert r.causal_lag_bars == 1
 
     def test_lpb_recipes_use_catalog_exact_ids(self) -> None:
-        recipes = build_alpha_recipe_catalog(
-            timeframe="4h", include_families=("liquidity_participation_breakout",)
-        )
+        recipes = build_alpha_recipe_catalog(timeframe="4h", include_families=("liquidity_participation_breakout",))
         variants = {r.variant for r in recipes}
         assert "lpb_40" in variants
         assert "lpb_60" in variants
 
     def test_bnrr_recipes_use_catalog_exact_ids(self) -> None:
-        recipes = build_alpha_recipe_catalog(
-            timeframe="4h", include_families=("btc_neutral_residual_reversal",)
-        )
+        recipes = build_alpha_recipe_catalog(timeframe="4h", include_families=("btc_neutral_residual_reversal",))
         variants = {r.variant for r in recipes}
         assert "bnrr_24" in variants
         assert "bnrr_48" in variants
 
     def test_lpb_archetype_is_trend(self) -> None:
-        recipes = build_alpha_recipe_catalog(
-            timeframe="4h", include_families=("liquidity_participation_breakout",)
-        )
+        recipes = build_alpha_recipe_catalog(timeframe="4h", include_families=("liquidity_participation_breakout",))
         for r in recipes:
             assert r.archetype == "trend"
 
     def test_bnrr_archetype_is_cross_sectional(self) -> None:
-        recipes = build_alpha_recipe_catalog(
-            timeframe="4h", include_families=("btc_neutral_residual_reversal",)
-        )
+        recipes = build_alpha_recipe_catalog(timeframe="4h", include_families=("btc_neutral_residual_reversal",))
         for r in recipes:
             assert r.archetype == "cross_sectional"

@@ -740,7 +740,8 @@ def compute_symbol_strategy_evidence(
     # real candidates without providing any actual false-discovery protection (those
     # candidates are already excluded via hard_eligible=False regardless of q_value).
     hard_eligible_idx = np.asarray(
-        [i for i, e in enumerate(evidence_list) if e.hard_eligible], dtype=np.int64,
+        [i for i, e in enumerate(evidence_list) if e.hard_eligible],
+        dtype=np.int64,
     )
     q_values = np.ones(len(evidence_list), dtype=np.float64)
     if hard_eligible_idx.size > 0:
@@ -877,7 +878,11 @@ def _log_family_admission_diag(evidence: tuple[SymbolStrategyEvidence, ...]) -> 
         logger.debug(
             "[SYS] stage=l1_family_admission_diag family=%s n_pairs=%d n_obs_sum=%.0f"
             " effective_n_sum=%.2f eff_n_over_n_obs=%.4f top_reasons=%s",
-            _fam, int(_stats["n_pairs"]), _stats["n_obs_sum"], _stats["effective_n_sum"], _ratio,
+            _fam,
+            int(_stats["n_pairs"]),
+            _stats["n_obs_sum"],
+            _stats["effective_n_sum"],
+            _ratio,
             _reasons_str if _reasons_str else "none(all_hard_eligible)",
         )
 
@@ -1897,7 +1902,10 @@ def evaluate_outer_signal_opportunities(
         logger.debug(
             "[DATA] stage=l1_nested_opportunity_diag fold=%d locus=prediction_unmatched"
             " registry_ready=%d n_predictions=%d n_realized=%d",
-            fold_id, len(opportunities.symbols), n_predictions, n_realized,
+            fold_id,
+            len(opportunities.symbols),
+            n_predictions,
+            n_realized,
         )
         return Layer1FoldReadiness(
             fold_id=fold_id,
@@ -2141,7 +2149,7 @@ def _compute_pooled_probe_lcb(
         if not r.probe_series_bps or support_blockers.intersection(r.blockers):
             continue
         series = np.asarray(r.probe_series_bps, dtype=np.float64)
-        
+
         exec_cost = (
             np.asarray(r.dynamic_execution_cost_bps, dtype=np.float64)
             if getattr(r, "dynamic_execution_cost_bps", None)
@@ -2320,8 +2328,12 @@ def evaluate_layer1_readiness(
         blocker_: str | None = None if passed else f"{value:.3f}"
         comparator_lit = cast(Literal["ge", "gt"], comparator)
         return Layer1GateCheck(
-            key=key, value=float(value), threshold=float(threshold),
-            comparator=comparator_lit, passed=passed, blocker=blocker_,
+            key=key,
+            value=float(value),
+            threshold=float(threshold),
+            comparator=comparator_lit,
+            passed=passed,
+            blocker=blocker_,
             blocking=blocking,
         )
 

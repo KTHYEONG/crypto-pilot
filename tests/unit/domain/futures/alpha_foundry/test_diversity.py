@@ -191,6 +191,7 @@ class TestEstimateEffectiveTestCount:
 # Rule 3 — Family correlation audit
 # ---------------------------------------------------------------------------
 
+
 def _make_multi_family_panel_fixtures(n_families: int = 4) -> list[CandidateSignalPanel]:
     t, n = 50, 2
     datetimes = np.arange(
@@ -204,22 +205,24 @@ def _make_multi_family_panel_fixtures(n_families: int = 4) -> list[CandidateSign
         rng = np.random.default_rng(42 + i)
         score = rng.normal(0, 1, (t, n))
         side = np.where(score > 0, np.int8(1), np.int8(-1))
-        panels.append(CandidateSignalPanel(
-            family=f"family_{i}",
-            variant=f"v{i}",
-            params={},
-            datetimes=datetimes,
-            symbols=tuple(f"s{j}" for j in range(n)),
-            signed_score_2d=score,
-            side_hint_2d=side,
-            expected_holding_bars=3,
-            min_holding_bars=1,
-            stop_atr_mult=2.0,
-            take_profit_atr_mult=4.0,
-            turnover_proxy_2d=np.zeros((t, n), dtype=np.float64),
-            valid_mask_2d=np.ones((t, n), dtype=bool),
-            metadata={},
-        ))
+        panels.append(
+            CandidateSignalPanel(
+                family=f"family_{i}",
+                variant=f"v{i}",
+                params={},
+                datetimes=datetimes,
+                symbols=tuple(f"s{j}" for j in range(n)),
+                signed_score_2d=score,
+                side_hint_2d=side,
+                expected_holding_bars=3,
+                min_holding_bars=1,
+                stop_atr_mult=2.0,
+                take_profit_atr_mult=4.0,
+                turnover_proxy_2d=np.zeros((t, n), dtype=np.float64),
+                valid_mask_2d=np.ones((t, n), dtype=bool),
+                metadata={},
+            )
+        )
     return panels
 
 
@@ -232,11 +235,20 @@ def test_audit_full_family_correlation_matrix_symmetric() -> None:
     panels = _make_multi_family_panel_fixtures(n_families=4)
     active_mask = np.ones(panels[0].signed_score_2d.shape, dtype=bool)
     result = audit_full_family_correlation(
-        panels=panels, active_mask=active_mask, run_id="test", timeframe="4h",
+        panels=panels,
+        active_mask=active_mask,
+        run_id="test",
+        timeframe="4h",
     )
     assert set(result.columns) == {
-        "family_a", "variant_a", "family_b", "variant_b",
-        "timeframe", "pairwise_corr", "cluster_id", "run_id",
+        "family_a",
+        "variant_a",
+        "family_b",
+        "variant_b",
+        "timeframe",
+        "pairwise_corr",
+        "cluster_id",
+        "run_id",
     }
     summary_rows = result[result["family_a"] == "__SUMMARY__"]
     assert len(summary_rows) == 1
@@ -282,8 +294,10 @@ class TestEstimateDistinctThesisCount:
 def test_audit_full_family_correlation_raises_on_empty_panels() -> None:
     with pytest.raises(ValueError, match="panels must not be empty"):
         audit_full_family_correlation(
-            panels=(), active_mask=np.ones((10, 2), dtype=bool),
-            run_id="test", timeframe="4h",
+            panels=(),
+            active_mask=np.ones((10, 2), dtype=bool),
+            run_id="test",
+            timeframe="4h",
         )
 
 
@@ -302,24 +316,41 @@ def test_audit_full_family_correlation_clustering_branch() -> None:
     for i in range(3):
         score = base_score + rng.normal(0, 0.01, (t, n))
         side = np.where(score > 0, np.int8(1), np.int8(-1))
-        panels.append(CandidateSignalPanel(
-            family=f"fam_{i}", variant=f"v{i}", params={},
-            datetimes=datetimes, symbols=tuple(f"s{j}" for j in range(n)),
-            signed_score_2d=score, side_hint_2d=side,
-            expected_holding_bars=3, min_holding_bars=1,
-            stop_atr_mult=2.0, take_profit_atr_mult=4.0,
-            turnover_proxy_2d=np.zeros((t, n), dtype=np.float64),
-            valid_mask_2d=np.ones((t, n), dtype=bool),
-            metadata={},
-        ))
+        panels.append(
+            CandidateSignalPanel(
+                family=f"fam_{i}",
+                variant=f"v{i}",
+                params={},
+                datetimes=datetimes,
+                symbols=tuple(f"s{j}" for j in range(n)),
+                signed_score_2d=score,
+                side_hint_2d=side,
+                expected_holding_bars=3,
+                min_holding_bars=1,
+                stop_atr_mult=2.0,
+                take_profit_atr_mult=4.0,
+                turnover_proxy_2d=np.zeros((t, n), dtype=np.float64),
+                valid_mask_2d=np.ones((t, n), dtype=bool),
+                metadata={},
+            )
+        )
     active_mask = np.ones((t, n), dtype=bool)
     result = audit_full_family_correlation(
-        panels=panels, active_mask=active_mask, run_id="test", timeframe="4h",
+        panels=panels,
+        active_mask=active_mask,
+        run_id="test",
+        timeframe="4h",
         max_corr=0.5,
     )
     assert set(result.columns) == {
-        "family_a", "variant_a", "family_b", "variant_b",
-        "timeframe", "pairwise_corr", "cluster_id", "run_id",
+        "family_a",
+        "variant_a",
+        "family_b",
+        "variant_b",
+        "timeframe",
+        "pairwise_corr",
+        "cluster_id",
+        "run_id",
     }
 
 
@@ -338,6 +369,7 @@ def _make_aligned(
             self.warm_mask = np.ones((t, n_syms), dtype=np.bool_)
             self.entry_block_mask = np.zeros((t, n_syms), dtype=np.bool_)
             self.kill_mask = np.zeros((t, n_syms), dtype=np.bool_)
+
     return _MockAligned(datetimes_ns, n_syms)
 
 
@@ -385,13 +417,17 @@ def _make_canonical_panel(
     n = len(score_vals)
     dts = [dt_start + i * bar_step_ns for i in range(n)]
     return CandidateSignalPanel(
-        family="test", variant="tv", params={},
+        family="test",
+        variant="tv",
+        params={},
         datetimes=np.array(dts, dtype=np.int64),
         symbols=("BTCUSDT",),
         signed_score_2d=np.array(score_vals, dtype=np.float64).reshape(n, 1),
         side_hint_2d=np.zeros((n, 1), dtype=np.int8),
-        expected_holding_bars=4, min_holding_bars=1,
-        stop_atr_mult=2.0, take_profit_atr_mult=4.0,
+        expected_holding_bars=4,
+        min_holding_bars=1,
+        stop_atr_mult=2.0,
+        take_profit_atr_mult=4.0,
         turnover_proxy_2d=np.zeros((n, 1), dtype=np.float64),
         valid_mask_2d=np.ones((n, 1), dtype=np.bool_),
         metadata={"recipe_id": "test:tv:4h:abc"},
@@ -406,13 +442,17 @@ def _make_canonical_panel_from_2d(
     n = score_2d.shape[0]
     dts = [dt_start + i * bar_step_ns for i in range(n)]
     return CandidateSignalPanel(
-        family="test", variant="tv", params={},
+        family="test",
+        variant="tv",
+        params={},
         datetimes=np.array(dts, dtype=np.int64),
         symbols=tuple(f"s{j}" for j in range(score_2d.shape[1])),
         signed_score_2d=score_2d,
         side_hint_2d=np.zeros(score_2d.shape, dtype=np.int8),
-        expected_holding_bars=4, min_holding_bars=1,
-        stop_atr_mult=2.0, take_profit_atr_mult=4.0,
+        expected_holding_bars=4,
+        min_holding_bars=1,
+        stop_atr_mult=2.0,
+        take_profit_atr_mult=4.0,
         turnover_proxy_2d=np.zeros(score_2d.shape, dtype=np.float64),
         valid_mask_2d=np.ones(score_2d.shape, dtype=np.bool_),
         metadata={},
@@ -523,8 +563,10 @@ def test_compute_cross_tf_pair_evidence_sparse_overlap_no_demotion() -> None:
         n_common_active_bars=n_bars,
     )
     ev = compute_cross_tf_pair_evidence(
-        recipe_id_a="r1", recipe_id_b="r2",
-        panel_a=p_a, panel_b=p_b,
+        recipe_id_a="r1",
+        recipe_id_b="r2",
+        panel_a=p_a,
+        panel_b=p_b,
         context=context,
         min_score_corr=0.70,
         min_directional_entry_jaccard=0.50,
@@ -698,8 +740,10 @@ def test_compute_cross_tf_pair_evidence_identical_scores_redundant() -> None:
         n_common_active_bars=n_bars,
     )
     ev = compute_cross_tf_pair_evidence(
-        recipe_id_a="r1", recipe_id_b="r2",
-        panel_a=p_a, panel_b=p_b,
+        recipe_id_a="r1",
+        recipe_id_b="r2",
+        panel_a=p_a,
+        panel_b=p_b,
         context=context,
         min_score_corr=0.70,
         min_directional_entry_jaccard=0.50,
@@ -728,8 +772,7 @@ def test_audit_l0_selected_recipe_independence_basic_counts() -> None:
     def _p(rid: str, offset: float) -> CandidateSignalPanel:
         return _make_canonical_panel_from_2d(base + offset, dt_start=0)
 
-    panels = {"r1": _p("r1", 0.0), "r2": _p("r2", 0.01), "r3": _p("r3", 0.5),
-              "r4": _p("r4", -0.3), "r5": _p("r5", 0.2)}
+    panels = {"r1": _p("r1", 0.0), "r2": _p("r2", 0.01), "r3": _p("r3", 0.5), "r4": _p("r4", -0.3), "r5": _p("r5", 0.2)}
 
     aligned_4h = _make_aligned(canonical_dt, n_syms=1)
     aligned_by_tf = {"4h": aligned_4h}
@@ -780,17 +823,33 @@ def test_audit_l0_selected_recipe_independence_heterogeneous_native_tf_shapes() 
 # ── apply_cross_tf_survival_floor ─────────────────────────────────────────────
 
 
-def _floor_candidate(
-    recipe_id: str, archetype: AlphaArchetype, timeframe: str, priority: float
-) -> L0SignalCandidate:
+def _floor_candidate(recipe_id: str, archetype: AlphaArchetype, timeframe: str, priority: float) -> L0SignalCandidate:
     return L0SignalCandidate(
-        run_id="test", timeframe=timeframe, family="btc_regime_pullback", variant="v",
-        recipe_id=recipe_id, archetype=archetype, source="synthetic_recipe",
-        n_events=100, effective_n=50.0, mean_net_bps=priority, block_lcb_bps=priority * 0.5,
-        nw_tstat=1.5, bootstrap_lcb_bps=0.0, bootstrap_agree=True, cost_drag_ratio=0.3,
-        turnover_per_year=50.0, max_abs_corr_in_bucket=0.0, tf_coverage_count=0,
-        sign_agreement_ratio=0.0, corroboration_tier="single_tf_strict", discovery_tier="candidate",
-        l1_priority_score=priority, l1_budget_units=1, hard_reject_reasons=(), soft_flags=(),
+        run_id="test",
+        timeframe=timeframe,
+        family="btc_regime_pullback",
+        variant="v",
+        recipe_id=recipe_id,
+        archetype=archetype,
+        source="synthetic_recipe",
+        n_events=100,
+        effective_n=50.0,
+        mean_net_bps=priority,
+        block_lcb_bps=priority * 0.5,
+        nw_tstat=1.5,
+        bootstrap_lcb_bps=0.0,
+        bootstrap_agree=True,
+        cost_drag_ratio=0.3,
+        turnover_per_year=50.0,
+        max_abs_corr_in_bucket=0.0,
+        tf_coverage_count=0,
+        sign_agreement_ratio=0.0,
+        corroboration_tier="single_tf_strict",
+        discovery_tier="candidate",
+        l1_priority_score=priority,
+        l1_budget_units=1,
+        hard_reject_reasons=(),
+        soft_flags=(),
     )
 
 
@@ -987,8 +1046,8 @@ def test_compute_cross_tf_redundancy_handles_non_nested_tf_calendar_ranges() -> 
     beyond the (dynamically finest-selected) canonical TF's own range."""
     bar_4h_ns = 4 * 3_600_000_000_000
     bar_1h_ns = 3_600_000_000_000
-    dt_a = np.arange(0, 100, dtype=np.int64) * bar_4h_ns       # hours [0, 396] step 4, 100 bars
-    dt_b = np.arange(30, 70, dtype=np.int64) * bar_1h_ns       # hours [30, 69] step 1, 40 bars
+    dt_a = np.arange(0, 100, dtype=np.int64) * bar_4h_ns  # hours [0, 396] step 4, 100 bars
+    dt_b = np.arange(30, 70, dtype=np.int64) * bar_1h_ns  # hours [30, 69] step 1, 40 bars
 
     aligned_by_tf = {
         "4h": _make_aligned(dt_a, n_syms=1),
@@ -998,10 +1057,14 @@ def test_compute_cross_tf_redundancy_handles_non_nested_tf_calendar_ranges() -> 
     candidate_b = _candidate("b", timeframe="1h", score=1.0)
 
     panel_a = _make_canonical_panel_from_2d(
-        np.ones((len(dt_a), 1), dtype=np.float64), dt_start=0, bar_step_ns=bar_4h_ns,
+        np.ones((len(dt_a), 1), dtype=np.float64),
+        dt_start=0,
+        bar_step_ns=bar_4h_ns,
     )
     panel_b = _make_canonical_panel_from_2d(
-        np.ones((len(dt_b), 1), dtype=np.float64), dt_start=int(dt_b[0]), bar_step_ns=bar_1h_ns,
+        np.ones((len(dt_b), 1), dtype=np.float64),
+        dt_start=int(dt_b[0]),
+        bar_step_ns=bar_1h_ns,
     )
 
     result = compute_cross_tf_redundancy(
@@ -1052,7 +1115,6 @@ def _build_four_recipe_fixture() -> tuple[
 
 
 class TestCrossTFSharedContext:
-
     def test_resolve_cross_tf_shared_context_matches_inline_computation(self) -> None:
         """Scenario 1: shared_context.corr matches inline corr from compute_cross_tf_redundancy."""
         selected_by_tf, panel_by_recipe_id, aligned_by_tf = _build_four_recipe_fixture()
@@ -1077,7 +1139,8 @@ class TestCrossTFSharedContext:
         np.testing.assert_allclose(shared.corr, result.cross_bucket_corr, atol=1e-10)
 
     def test_resolve_cross_tf_shared_context_raises_when_memory_budget_exceeded(
-        self, mocker: Any,
+        self,
+        mocker: Any,
     ) -> None:
         """Scenario 2 [LIMIT-05]: memory budget exceeded raises ValueError."""
         mocker.patch(
@@ -1110,7 +1173,6 @@ class TestCrossTFSharedContext:
 
 
 class TestCrossTFPairEvidencePrecomputed:
-
     def test_compute_cross_tf_pair_evidence_with_precomputed_inputs_matches_self_computed(
         self,
     ) -> None:
@@ -1136,8 +1198,10 @@ class TestCrossTFPairEvidencePrecomputed:
 
         # Self-computed
         ev_self = compute_cross_tf_pair_evidence(
-            recipe_id_a="a", recipe_id_b="b",
-            panel_a=p_a, panel_b=p_b,
+            recipe_id_a="a",
+            recipe_id_b="b",
+            panel_a=p_a,
+            panel_b=p_b,
             context=context,
             min_score_corr=0.70,
             min_directional_entry_jaccard=0.50,
@@ -1161,8 +1225,10 @@ class TestCrossTFPairEvidencePrecomputed:
         precomputed_corr = c if np.isfinite(c) else 0.0
 
         ev_pre = compute_cross_tf_pair_evidence(
-            recipe_id_a="a", recipe_id_b="b",
-            panel_a=p_a, panel_b=p_b,
+            recipe_id_a="a",
+            recipe_id_b="b",
+            panel_a=p_a,
+            panel_b=p_b,
             context=context,
             min_score_corr=0.70,
             min_directional_entry_jaccard=0.50,
@@ -1181,9 +1247,9 @@ class TestCrossTFPairEvidencePrecomputed:
 
 
 class TestCrossTFRedundancyDedup:
-
     def test_compute_cross_tf_redundancy_corr_matrix_is_symmetric_computed_once(
-        self, mocker: Any,
+        self,
+        mocker: Any,
     ) -> None:
         """Scenario 2 [LIMIT-03]: corr matrix uses i<j only, mirror to j,i.
         np.corrcoef calls should be N*(N-1)/2 = 6 for 4 recipes."""
@@ -1207,7 +1273,8 @@ class TestCrossTFRedundancyDedup:
         assert spy.call_count == n_pairs
 
     def test_compute_cross_tf_redundancy_projects_each_recipe_exactly_once(
-        self, mocker: Any,
+        self,
+        mocker: Any,
     ) -> None:
         """Scenario 2 [LIMIT-01][LIMIT-02]: proj + side/entry each called N times, not N + 2*C(N,2)."""
         from src.domain.futures.alpha_foundry import multi_tf_fusion as _fusion_mod
@@ -1225,12 +1292,15 @@ class TestCrossTFRedundancyDedup:
         ) -> Any:
             call_count["project"] += 1
             return _fusion_mod.project_signal_to_canonical_grid(
-                panel=panel, canonical_datetimes=canonical_datetimes,
+                panel=panel,
+                canonical_datetimes=canonical_datetimes,
                 causal_lag_bars=causal_lag_bars,
             )
 
         def _counting_side_entry(
-            score: Any, valid: Any, active: Any,
+            score: Any,
+            valid: Any,
+            active: Any,
         ) -> Any:
             call_count["side_entry"] += 1
             return _real_side_entry(score, valid, active)
@@ -1334,7 +1404,6 @@ class TestCrossTFRedundancyDedup:
 
 
 class TestCrossTFBatchAcceleration:
-
     def test_batch_jaccard_matches_per_pair_on_synthetic(self) -> None:
         """OPT-2 batch jaccard path yields byte-identical results to per-pair fallback path."""
         selected_by_tf, panel_by_recipe_id, aligned_by_tf = _build_four_recipe_fixture()
@@ -1446,12 +1515,11 @@ class TestCrossTFBatchAcceleration:
         for i in range(n):
             rid = recipe_ids[i]
             expected = ctx.n_entries[rid]
-            msg = f"dir_shared[{i},{i}]={dir_shared[i,i]} != n_entries[{rid}]={expected}"
+            msg = f"dir_shared[{i},{i}]={dir_shared[i, i]} != n_entries[{rid}]={expected}"
             assert int(dir_shared[i, i]) == expected, msg
 
 
 class TestProjectSignalToCanonicalGridFloat32:
-
     def test_project_signal_to_canonical_grid_returns_float32_dtype(self) -> None:
         """Scenario 2 [LIMIT-05]: projected array dtype is float32."""
         from src.domain.futures.alpha_foundry.multi_tf_fusion import project_signal_to_canonical_grid
@@ -1461,7 +1529,9 @@ class TestProjectSignalToCanonicalGridFloat32:
         panel = _make_canonical_panel_from_2d(np.random.default_rng(0).normal(0, 1, (n_bars, 1)), dt_start=0)
 
         projected, valid = project_signal_to_canonical_grid(
-            panel=panel, canonical_datetimes=canonical_dt, causal_lag_bars=1,
+            panel=panel,
+            canonical_datetimes=canonical_dt,
+            causal_lag_bars=1,
         )
 
         assert projected.dtype == np.float32
@@ -1473,7 +1543,10 @@ class TestBatchPairwiseCorr:
 
     @staticmethod
     def _make_stack(
-        n: int, n_bars: int, n_syms: int, seed: int = 42,
+        n: int,
+        n_bars: int,
+        n_syms: int,
+        seed: int = 42,
     ) -> tuple[NDArray[np.float32], NDArray[np.bool_], NDArray[np.bool_]]:
         rng = np.random.default_rng(seed)
         P = rng.normal(0, 1, (n, n_bars, n_syms)).astype(np.float32)

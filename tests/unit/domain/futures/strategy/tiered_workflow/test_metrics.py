@@ -189,7 +189,11 @@ def test_moving_block_bootstrap_mean_block_count_unchanged_after_refactor() -> N
     values = rng.normal(0, 1, 50).astype(np.float64)
     decisions = np.arange(50, dtype=np.int64)
     boot = moving_block_bootstrap_mean(
-        values, decisions, block_bars=6, n_bootstrap=100, seed=42,
+        values,
+        decisions,
+        block_bars=6,
+        n_bootstrap=100,
+        seed=42,
     )
     assert boot.size == 100
     assert np.all(np.isfinite(boot))
@@ -209,8 +213,11 @@ class TestResolveLcbQuantile:
     def test_interpolation_exact_midpoint(self) -> None:
         """S2b: interpolation arithmetic check."""
         q = resolve_lcb_quantile(
-            9, full_conf_blocks=15, floor_blocks=3,
-            base_quantile=0.05, relaxed_quantile=0.20,
+            9,
+            full_conf_blocks=15,
+            floor_blocks=3,
+            base_quantile=0.05,
+            relaxed_quantile=0.20,
         )
         expected = 0.05 + 0.15 * (15 - 9) / (15 - 3)
         assert q == pytest.approx(expected)
