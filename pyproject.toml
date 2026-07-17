@@ -44,7 +44,8 @@ exclude = [
     "logs", 
     "results", 
     ".pytest_cache", 
-    ".git"
+    ".git",
+    ".venv",
 ]
 
 [tool.ruff.lint]
@@ -59,15 +60,24 @@ select = [
     "PT",   # flake8-pytest-style (Testing)
     "SIM",  # flake8-simplify (Readability)
     "TID",  # flake8-tidy-imports
-    "ASYNC" # flake8-async
+    "ASYNC", # flake8-async
+    "T20",  # flake8-print (Ensures no print statements are used, enforcing logger)
+    "ARG",  # flake8-unused-arguments (Prevents unused variables/arguments cluttering context)
 ]
 ignore = [
     "S101",   # Allow assert (essential for pytest and invariant checking)
     "E741",   # Allow ambiguous variable names like 'l', 'O', 'I' (often used in math/quant formulas)
+    "E501",   # Ignore line length violations (leave it to formatters and prevent AI retry loops)
+    "ARG001", # Allow unused function arguments (important for standard signatures / overrides)
+    "ARG002", # Allow unused method arguments (important for standard subclasses / interfaces)
+    "ARG004", # Allow unused static method arguments
+    "ARG005", # Allow unused lambda arguments
+    "RUF100", # Allow unused noqa directives (prevents errors when globally ignoring rules like E501)
 ]
 
 [tool.ruff.lint.per-file-ignores]
-"tests/*" = ["S101", "E402", "N806"]
+"tests/*" = ["S101", "E402", "N806", "ARG", "I001", "RUF059", "F841"]
+"scripts/*" = ["T20"]
 "src/domain/futures/ml_pipeline/**/*.py" = ["N803", "N806"]
 "src/domain/futures/backtest/engine.py" = ["E501"]
 "src/domain/futures/optimization/evaluator.py" = ["E501"]
@@ -92,8 +102,17 @@ exclude = [
     "results", 
     ".pytest_cache", 
     ".git",
+    ".venv",
     "^tests/.*/conftest\\.py$",
 ]
+
+[[tool.mypy.overrides]]
+module = "tests.*"
+ignore_errors = true
+
+[[tool.mypy.overrides]]
+module = "scripts.*"
+ignore_errors = true
 
 [[tool.mypy.overrides]]
 module = "tests.unit.domain.futures.strategy.test_tiered_workflow"
@@ -106,7 +125,8 @@ exclude = [
     "logs", 
     "results", 
     ".pytest_cache", 
-    ".git"
+    ".git",
+    ".venv"
 ]
 
 [tool.pytest.ini_options]
