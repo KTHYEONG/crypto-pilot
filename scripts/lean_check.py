@@ -95,6 +95,50 @@ def _parse_file_coverage(stdout: str, file_path: str) -> int | None:
     return None
 
 
+def _get_changed_lines(file_path: str) -> set[int]:
+    """Return line numbers added/modified by git diff (uncommitted changes)."""
+    try:
+        res = subprocess.run(
+            ["git", "diff", "--unified=0", "HEAD", "--", file_path],
+            capture_output=True, text=True, timeout=30,
+        )
+    except Exception:
+        return set()
+    changed: set[int] = set()
+    for line in res.stdout.splitlines():
+        if line.startswith("@@"):
+            m = re.search(r"\+(\d+)(?:,(\d+))?", line)
+            if m:
+                start = int(m.group(1))
+                count = int(m.group(2)) if m.group(2) else 1
+                for i in range(start, start + count):
+                    changed.add(i)
+    return changed
+
+
+def _get_missing_lines(stdout: str, file_path: str) -> set[int]:
+    """Parse the Missing column from coverage term-missing output."""
+    mkey = file_path.replace(".py", "")
+    for line in stdout.splitlines():
+        if mkey in line:
+            parts = line.split()
+            if len(parts) >= 5:
+                missing_raw = parts[-1]
+                missing: set[int] = set()
+                for token in missing_raw.split(","):
+                    token = token.strip()
+                    if not token:
+                        continue
+                    if "-" in token:
+                        a, b = token.split("-", 1)
+                        for i in range(int(a.strip()), int(b.strip()) + 1):
+                            missing.add(i)
+                    else:
+                        missing.add(int(token))
+                return missing
+    return set()
+
+
 def _check_spec_compliance(spec_path: str) -> tuple[int, list[JsonDiag]]:
     diagnostics: list[JsonDiag] = []
     try:
@@ -255,8 +299,18 @@ def main() -> None:
 
             actual_cov = _parse_file_coverage(pt_res.stdout, sf)
             if actual_cov is None:
-                # Could not find file coverage in stdout
                 continue
+
+            # Per testing.md §5: measure only on git diff lines (uncommitted changes)
+            changed = _get_changed_lines(sf)
+            if changed:
+                missing = _get_missing_lines(pt_res.stdout, sf)
+                uncovered_changed = missing & changed
+                if not uncovered_changed:
+                    continue  # all changed lines are covered
+                # Recompute effective coverage over diff lines
+                covered_changed = changed - missing
+                actual_cov = int(len(covered_changed) / len(changed) * 100) if changed else actual_cov
 
             if actual_cov < target_cov:
                 d = {
