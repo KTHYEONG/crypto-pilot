@@ -419,7 +419,7 @@ def align_data_maps(
             tf, len(valid_symbols), _cost_nan_frac, _adv_nan_frac,
         )
 
-    if state_cube is None:
+    if state_cube is None and cache_result:
         shapes: dict[str, tuple[int, int]] = {}
         for sym in symbols:
             if sym in data_maps and tf in data_maps[sym]:
