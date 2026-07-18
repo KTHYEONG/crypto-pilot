@@ -83,3 +83,6 @@ graph TD
 | `l2_deploy_mdd_margin` | 0.30 (searchable 0.05–0.30) | Normal-market leverage-ceiling safety margin |
 | `l2_deploy_crisis_mdd_margin` | 0.30 (fixed, non-searchable) | Crisis-window leverage-ceiling safety margin, decoupled from `l2_deploy_mdd_margin` |
 | `l2_wf_n_folds` | 4 (fixed, non-searchable) | L2-only walk-forward fold count, decoupled from the shared `CandidateStrategyConfig.wf_n_folds` used by L1/live/ablation |
+| `l2_regime_policy_mode` | `"soft"` (searchable: soft / hybrid) | Regime-cell admission mode; `"hybrid"` unlocks the hard-block path |
+| `l2_regime_hard_block_enabled` | False (searchable) | Excludes (not just downweights) regime cells with confident negative calibration lift |
+| `l2_regime_pooled_is_passthrough` | True (searchable) | Whether unresolved/unstable regime cells default to full-weight allow vs. cautious pooled treatment |

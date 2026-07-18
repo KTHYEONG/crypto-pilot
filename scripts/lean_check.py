@@ -161,7 +161,10 @@ def _check_spec_compliance(spec_path: str) -> tuple[int, list[JsonDiag]]:
             sf_content = sf.read()
             if kind == "field":
                 field_name = name.split(".")[-1] if "." in name else name
-                pat = rf"\b{re.escape(field_name)}\s*(?::|=)"
+                # [ADR_20260718_L2_REGIME_CELL_ADMISSION_SEARCHABILITY] 일반 필드 선언
+                # (name: type / name=value)과 quoted dict 키(dict literal 내 "name": value)
+                # 양쪽을 모두 인식 — 따옴표는 optional.
+                pat = rf"\b{re.escape(field_name)}[\"']?\s*(?::|=)"
             else:
                 pat = rf"^(?:class|def)\s+{re.escape(name)}\b"
             if not re.search(pat, sf_content, re.MULTILINE):
