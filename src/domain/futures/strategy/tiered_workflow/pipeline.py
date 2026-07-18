@@ -76,6 +76,7 @@ from src.domain.futures.strategy.tiered_workflow.crisis_policy import (
     evaluate_crisis_survival,
 )
 from src.domain.futures.strategy.tiered_workflow.dataclasses import (
+    CrisisReplayContext,
     FoldDiagnostic,
     L2SimulationCache,
     Layer1Result,
@@ -2270,44 +2271,31 @@ def _build_rule_based_stress_batch(
 
 
 
-def compute_crisis_unit_returns(
+def _load_crisis_replay_context(
     *,
     deployment_registry: QualifiedSignalRegistry | None,
     strategy_cfg: CandidateStrategyConfig,
     tf: str,
     crisis_windows: tuple[CrisisWindow, ...] = DEFAULT_CRISIS_WINDOWS,
-) -> NDArray[np.float64]:
-    """LUNA/FTX 등 out-of-band 위기 윈도우에서 champion의 rule-based 신호를
-    레짐 방어 레버 전부 off(구조적 최소 방어)인 Layer2AllocationConfig로 L=1.0
-    재생성해 unit 레버리지 per-bar 수익률을 반환한다. 다중 윈도우 시
-    select_worst_fold_returns와 동일하게 unit-MDD가 최대인 윈도우를 선택한다.
-    데이터 로드/시뮬레이션 실패 시 빈 배열(size=0) 반환(호출부가 candidate
-    제외 처리)."""
+) -> CrisisReplayContext | None:
+    """위기 윈도우 데이터 로드+정렬+신호배치(config 무관, 1회만 수행).
+    다중 윈도우 중 관측 bar 수가 가장 많은 윈도우를 선택.
+    로드/정렬/이벤트 생성 실패 시 None 반환."""
     from src.domain.futures.optimization.opt_data_utils import load_futures_data_maps_for_symbols
     from src.domain.futures.strategy.timeframe_contracts import resample_alias
     from src.domain.futures.strategy.timeframe_probe import _resample_ohlcv
 
     _load_tf = "4h"
-
     if deployment_registry is None or not deployment_registry.by_symbol:
-        return np.array([], dtype=np.float64)
+        return None
 
-    worst_unit_mdd: float = -1.0
-    worst_unit_rets: NDArray[np.float64] = np.array([], dtype=np.float64)
-
-    _min_config = dataclasses.replace(
-        _MIN_CRISIS_PROTECTION_CONFIG,
-        l2_regime_long_short_asymmetry_enabled=False,
-        l2_regime_cap_release_cooldown_bars=0,
-        l2_regime_bull_gross_cap=1.0,
-        l2_regime_bear_gross_cap=0.35,
-        l2_regime_crisis_gross_cap=0.25,
-    )
+    best_ctx: CrisisReplayContext | None = None
+    best_n_bars: int = 0
 
     for window in crisis_windows:
         overlap_symbols = sorted(set(window.symbols) & set(deployment_registry.by_symbol.keys()))
         logger.info(
-            "[CRISIS-UNIT] window=%s registry_symbols=%d overlap_symbols=%d",
+            "[CRISIS-LOAD] window=%s registry_symbols=%d overlap_symbols=%d",
             window.label,
             len(deployment_registry.by_symbol),
             len(overlap_symbols),
@@ -2323,10 +2311,10 @@ def compute_crisis_unit_returns(
                 is_end=str(window.end),
                 end=str(window.end),
                 skip_metrics=True,
-                scope_name="l2_crisis_unit",
+                scope_name="l2_crisis_replay_context",
             )
         except Exception:
-            logger.exception("[CRISIS-UNIT] data load failed window=%s", window.label)
+            logger.exception("[CRISIS-LOAD] data load failed window=%s", window.label)
             continue
         if not valid_symbols:
             continue
@@ -2343,7 +2331,7 @@ def compute_crisis_unit_returns(
                 try:
                     aligned_maps[sym] = {tf: _resample_ohlcv(base_df, alias)}
                 except Exception:
-                    logger.exception("[CRISIS-UNIT] resample failed sym=%s tf=%s", sym, tf)
+                    logger.exception("[CRISIS-LOAD] resample failed sym=%s tf=%s", sym, tf)
         valid_symbols = [s for s in valid_symbols if s in aligned_maps]
         if not valid_symbols:
             continue
@@ -2368,47 +2356,78 @@ def compute_crisis_unit_returns(
         if not stress_batch.events:
             continue
 
-        try:
-            from src.domain.futures.strategy.tiered_workflow.awf_sim import (
-                _run_awf_simulation,
-                build_l2_simulation_cache,
-            )
-            from src.domain.futures.strategy.walk_forward import WFFold
+        from src.domain.futures.strategy.tiered_workflow.awf_sim import build_l2_simulation_cache
+        from src.domain.futures.strategy.walk_forward import WFFold
 
-            cache = build_l2_simulation_cache(aligned_stress, stress_batch, tf)
-            dummy_fold = WFFold(
-                fit_start=0,
-                fit_end=len(aligned_stress.datetimes),
-                cal_start=0,
-                cal_end=len(aligned_stress.datetimes),
-                oos_start=0,
-                oos_end=len(aligned_stress.datetimes),
-            )
-            sim = _run_awf_simulation(
+        cache = build_l2_simulation_cache(aligned_stress, stress_batch, tf)
+        n_bars = len(aligned_stress.datetimes)
+        dummy_fold = WFFold(
+            fit_start=0,
+            fit_end=n_bars,
+            cal_start=0,
+            cal_end=n_bars,
+            oos_start=0,
+            oos_end=n_bars,
+        )
+
+        if n_bars > best_n_bars:
+            best_n_bars = n_bars
+            best_ctx = CrisisReplayContext(
                 cache=cache,
                 signal_batch=stress_batch,
                 aligned=aligned_stress,
                 awf_folds=(dummy_fold,),
-                config=_min_config,
-                caps=PortfolioCaps(),
-                tf=tf,
             )
-        except Exception:
-            logger.exception("[CRISIS-UNIT] simulation failed window=%s", window.label)
-            continue
 
-        unit_rets = np.asarray(sim.rets_hybrid, dtype=np.float64)
-        if unit_rets.size < 2:
-            continue
+    return best_ctx
 
-        equity = np.cumprod(1.0 + unit_rets)
-        peak = np.maximum.accumulate(equity)
-        unit_mdd = float(np.max((peak - equity) / np.maximum(peak, 1e-12)))
-        if unit_mdd > worst_unit_mdd:
-            worst_unit_mdd = unit_mdd
-            worst_unit_rets = unit_rets
+def compute_crisis_unit_returns(
+    *,
+    deployment_registry: QualifiedSignalRegistry | None,
+    strategy_cfg: CandidateStrategyConfig,
+    tf: str,
+    crisis_windows: tuple[CrisisWindow, ...] = DEFAULT_CRISIS_WINDOWS,
+) -> NDArray[np.float64]:
+    """LUNA/FTX 등 out-of-band 위기 윈도우에서 champion의 rule-based 신호를
+    레짐 방어 레버 전부 off(구조적 최소 방어)인 Layer2AllocationConfig로 L=1.0
+    재생성해 unit 레버리지 per-bar 수익률을 반환한다. 내부적으로
+    _load_crisis_replay_context에 위임해 데이터 로드를 1회만 수행한다.
+    데이터 로드/시뮬레이션 실패 시 빈 배열(size=0) 반환."""
+    ctx = _load_crisis_replay_context(
+        deployment_registry=deployment_registry,
+        strategy_cfg=strategy_cfg,
+        tf=tf,
+        crisis_windows=crisis_windows,
+    )
+    if ctx is None:
+        return np.array([], dtype=np.float64)
 
-    return worst_unit_rets
+    try:
+        from src.domain.futures.strategy.tiered_workflow.awf_sim import _run_awf_simulation
+
+        _min_config = dataclasses.replace(
+            _MIN_CRISIS_PROTECTION_CONFIG,
+            l2_regime_long_short_asymmetry_enabled=False,
+            l2_regime_cap_release_cooldown_bars=0,
+            l2_regime_bull_gross_cap=1.0,
+            l2_regime_bear_gross_cap=0.35,
+            l2_regime_crisis_gross_cap=0.25,
+        )
+        sim = _run_awf_simulation(
+            cache=ctx.cache,
+            signal_batch=ctx.signal_batch,
+            aligned=ctx.aligned,
+            awf_folds=ctx.awf_folds,
+            config=_min_config,
+            caps=PortfolioCaps(),
+            tf=tf,
+        )
+    except Exception:
+        logger.exception("[CRISIS-UNIT] simulation failed")
+        return np.array([], dtype=np.float64)
+
+    unit_rets = np.asarray(sim.rets_hybrid, dtype=np.float64)
+    return unit_rets if unit_rets.size >= 2 else np.array([], dtype=np.float64)
 
 def assess_crisis_reliability(
     *,

@@ -88,6 +88,8 @@ def evaluate_layer2_gate(
     config: Layer2AllocationConfig = _DEFAULT_L2_CONFIG,
     std_hybrid: float | None = None,
     std_baseline: float | None = None,
+    crisis_mdd_hybrid: float | None = None,
+    crisis_mdd_budget: float | None = None,
 ) -> Layer2GateEvaluation:
     """Build Optuna safety constraints and final L2 promotion gate diagnostics.
 
@@ -143,6 +145,11 @@ def evaluate_layer2_gate(
         if positive_block_delta_ratio is None or not np.isfinite(float(positive_block_delta_ratio))
         else _finite_or_fail(float(config.l2_min_positive_block_delta_ratio) - float(positive_block_delta_ratio))
     )
+    _crisis_constraint = (
+        -1.0
+        if crisis_mdd_hybrid is None or crisis_mdd_budget is None
+        else _finite_or_fail(float(crisis_mdd_hybrid) - float(crisis_mdd_budget))
+    )
     optuna_constraint_values = (
         1.0 if deployment_failed else -1.0,
         float(max(support_leak_count, 0)),
@@ -153,6 +160,7 @@ def evaluate_layer2_gate(
         _finite_or_fail(float(int(config.l2_min_active_blocks) - active_block_count)),
         _finite_or_fail(float(config.l2_min_friction_pass) - friction_pass_pct),
         _finite_or_fail(float(int(config.l2_min_trades) - trade_count)),
+        _crisis_constraint,
     )
 
     promotion_constraint_values = (
