@@ -26,4 +26,10 @@ L2_SEARCH_SPACE: dict[str, dict[str, Any]] = {
     # [SPEC_L2_DEPLOYMENT_MARGIN_CAGR_GATE] 정상장 leverage 캘리브레이션 안전마진.
     # crisis 예산(l2_deploy_crisis_mdd_margin)은 별도 고정 필드로 분리되어 있어 탐색 영향 없음.
     "l2_deploy_mdd_margin": {"type": "float", "low": 0.05, "high": 0.30, "step": 0.05},
+    # [ADR_20260718_L2_REGIME_CELL_ADMISSION_SEARCHABILITY] 실측(LOG_LEVEL=DEBUG):
+    # aggregate proof nw_tstat=-8.01, cell mean_cal_lift_bps=-21.97, sign_consistency=0.45
+    # — 이미 구현된 hard-block 경로가 policy_mode="soft" 고정으로 구조적 도달 불가능했음.
+    "l2_regime_policy_mode": {"type": "categorical", "choices": ("soft", "hybrid")},
+    "l2_regime_hard_block_enabled": {"type": "categorical", "choices": (False, True)},
+    "l2_regime_pooled_is_passthrough": {"type": "categorical", "choices": (False, True)},
 }
