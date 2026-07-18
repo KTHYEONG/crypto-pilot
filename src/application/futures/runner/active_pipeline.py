@@ -1381,7 +1381,7 @@ def _build_l2_signal_batch(
     cfg: Any,
     window: Any,
 ) -> Any:
-    """L1 artifact로 L2 window 신호 예측.
+    """L1 artifact로 L2 window 신호 예측 (디스크 캐시 적용).
 
     Args:
         l1_res: Layer1Result (gate_passed=True, inference_artifact 필수).
@@ -1396,10 +1396,40 @@ def _build_l2_signal_batch(
     Raises:
         ValueError: l1_res.inference_artifact가 None인 경우.
     """
+    import hashlib
+    import pickle as _pickle
+
     from src.domain.futures.strategy.tiered_workflow.signal_selection import (
         predict_layer1_signals,
         predict_layer1_signals_multi_tf,
     )
+
+    artifacts_by_tf = getattr(l1_res, "artifacts_by_tf", {})
+    # fingerprint: window + TFs + model_versions
+    fp_src = (
+        f"{window.l2_start}|{window.holdout_start}|"
+        f"{len(labeled_events)}|"
+        f"{sorted(artifacts_by_tf.keys())}|"
+        f"{[getattr(a, 'model_version', '') for a in artifacts_by_tf.values()]}"
+    )
+    _fp = hashlib.sha1(fp_src.encode()).hexdigest()[:16]  # noqa: S324
+    _cache_dir = Path(
+        str(OPT_FUTURES_CONFIG.get(
+            "L2_SIGNAL_BATCH_CACHE_DIR",
+            f"{BASE_DIR}/logs/futures/optimization/l2_signal_cache",
+        ))
+    )
+    _cache_dir.mkdir(parents=True, exist_ok=True)
+    _cache_path = _cache_dir / f"signal_batch_{_fp}.pkl"
+
+    if _cache_path.exists():
+        try:
+            with open(_cache_path, "rb") as _f:
+                _logger.debug("[L2-SIGNAL-CACHE] hit fp=%s", _fp)
+                return _pickle.load(_f)  # noqa: S301
+        except Exception:
+            _logger.warning("[L2-SIGNAL-CACHE] read failed, recomputing")
+            _cache_path.unlink(missing_ok=True)
 
     datetimes = aligned.datetimes
     l2_start_ts = pd.Timestamp(window.l2_start, tz="UTC")
@@ -1408,9 +1438,8 @@ def _build_l2_signal_batch(
     ho_start_bar = int(np.searchsorted(datetimes, np.datetime64(ho_start_ts.replace(tzinfo=None), "ns")))
 
     # multi-TF: artifacts_by_tf가 있으면 전 TF 신호를 통합 예측
-    artifacts_by_tf = getattr(l1_res, "artifacts_by_tf", {})
     if artifacts_by_tf:
-        return predict_layer1_signals_multi_tf(
+        result = predict_layer1_signals_multi_tf(
             artifacts_by_tf=artifacts_by_tf,
             candidate_events=labeled_events,
             aligned=aligned,
@@ -1418,20 +1447,56 @@ def _build_l2_signal_batch(
             end_idx=ho_start_bar,
             cfg=cfg,
         )
+    else:
+        # fallback: 단일 artifact (구 동작 호환)
+        artifact = getattr(l1_res, "inference_artifact", None)
+        if artifact is None:
+            raise ValueError("L1 artifact 없음 — l1_result.inference_artifact is None (L1 gate_passed=False 상태)")
+        result = predict_layer1_signals(
+            artifact=artifact,
+            candidate_events=labeled_events,
+            aligned=aligned,
+            start_idx=l2_start_bar,
+            end_idx=ho_start_bar,
+            cfg=cfg,
+        )
 
-    # fallback: 단일 artifact (구 동작 호환)
-    artifact = getattr(l1_res, "inference_artifact", None)
-    if artifact is None:
-        raise ValueError("L1 artifact 없음 — l1_result.inference_artifact is None (L1 gate_passed=False 상태)")
+    try:
+        with open(_cache_path, "wb") as _f:
+            _pickle.dump(result, _f, protocol=_pickle.HIGHEST_PROTOCOL)
+        _logger.debug("[L2-SIGNAL-CACHE] saved fp=%s", _fp)
+    except Exception as _cache_exc:
+        _logger.warning("[L2-SIGNAL-CACHE] write failed: %s", _cache_exc)
 
-    return predict_layer1_signals(
-        artifact=artifact,
-        candidate_events=labeled_events,
-        aligned=aligned,
-        start_idx=l2_start_bar,
-        end_idx=ho_start_bar,
-        cfg=cfg,
-    )
+    return result
+
+
+class L2EarlyStopCallback:
+    """Optuna study early-stop callback: N trial 연속 무개선 시 중지.
+
+    Args:
+        no_improve_limit: 연속 무개선 허용 trial 수.
+        min_trials: 최소 진행 trial 수 (TPE warmup 보호).
+    """
+
+    def __init__(self, no_improve_limit: int, min_trials: int):
+        self.no_improve_limit = no_improve_limit
+        self.min_trials = min_trials
+        self.best = float("-inf")
+        self.last_improve = 0
+
+    def __call__(self, study: Any, trial: Any) -> None:
+        v = getattr(trial, "value", None)
+        if v is None:
+            return
+        if v > self.best:
+            self.best = v
+            self.last_improve = trial.number
+        if (
+            trial.number >= self.min_trials
+            and trial.number - self.last_improve >= self.no_improve_limit
+        ):
+            study._stop_flag = True
 
 
 def _run_tiered_l2_study(
@@ -1506,6 +1571,7 @@ def _run_tiered_l2_study(
         compute_market_regime_context,
         compute_risk_severity_code,
     )
+    from src.domain.futures.strategy.tiered_workflow.diagnostics import build_layer_universe_audit
     from src.domain.futures.strategy.tiered_workflow.l2_meta import (
         build_regime_routing_plan,
     )
@@ -1709,6 +1775,12 @@ def _run_tiered_l2_study(
             _debug_diag.compression_loss_bps,
         )
 
+    _audit = build_layer_universe_audit(
+        aligned=aligned,
+        layer="L2",
+        start_idx=int(signal_batch.start_idx),
+        end_idx=int(signal_batch.end_idx),
+    )
     ctx = TieredContext(
         labeled_events=pd.DataFrame(),
         aligned=aligned,
@@ -1721,6 +1793,8 @@ def _run_tiered_l2_study(
         awf_folds=_awf_folds_l2,
         crisis_rets=crisis_rets,
         crisis_replay_ctx=crisis_replay_ctx,
+        entry_audit=_audit,
+        lightweight_eval=True,
     )
 
     study_name = _layer2_experiment_key(
@@ -1733,13 +1807,16 @@ def _run_tiered_l2_study(
     _unique_symbols_list = sorted({str(event.symbol) for event in signal_batch.events})
     unique_symbols = ",".join(_unique_symbols_list) or "-"
     storage_url = ""
+    storage: _optuna.storages.BaseStorage
     try:
-        storage_url, storage = setup_optuna_storage(str(BASE_DIR))
+        if bool(OPT_FUTURES_CONFIG.get("L2_OPTUNA_USE_MEMORY_STORAGE", True)):
+            storage = _optuna.storages.InMemoryStorage()
+            storage_url = ""
+        else:
+            storage_url, storage = setup_optuna_storage(str(BASE_DIR), use_memory=True)
     except Exception as _storage_exc:
         _logger.warning("[L2-OPT] Optuna storage 셋업 실패: %s", _storage_exc)
-        import optuna.storages
-
-        storage = optuna.storages.InMemoryStorage()
+        storage = _optuna.storages.InMemoryStorage()
 
     storage_type = "InMemory"
     if storage_url:
@@ -1786,6 +1863,16 @@ def _run_tiered_l2_study(
         # 매 실행마다 완전 초기화 (resume=False): 이종 search-space trial이 한
         # study에 섞여 TPESampler가 dynamic search space로 오판 -> RandomSampler
         # fallback 경고 및 trial 누적(120 초과)을 유발하던 근본원인 제거.
+        _n_ei = int(OPT_FUTURES_CONFIG.get("L2_OPTUNA_N_EI_CANDIDATES", 24))
+        _no_improve = int(OPT_FUTURES_CONFIG.get("L2_OPTUNA_EARLY_STOP_NO_IMPROVE", 30))
+        _min_trials = int(OPT_FUTURES_CONFIG.get("L2_OPTUNA_EARLY_STOP_MIN_TRIALS", 60))
+
+        _optuna_pruner = _optuna.pruners.MedianPruner(
+            n_startup_trials=24,
+            n_warmup_steps=10,
+            interval_steps=1,
+        )
+
         study = get_or_create_study(
             study_name=study_name,
             storage=storage,
@@ -1793,7 +1880,7 @@ def _run_tiered_l2_study(
                 seed=seed,
                 multivariate=True,
                 group=True,
-                n_ei_candidates=48,
+                n_ei_candidates=_n_ei,
                 n_startup_trials=min(
                     n_trials,
                     max(24, min(int(n_trials * 0.20), 4 * len(L2_ALLOC_SPACE))),
@@ -1801,7 +1888,9 @@ def _run_tiered_l2_study(
                 constraints_func=layer2_constraints_from_trial,
             ),
             resume=False,
+            pruner=_optuna_pruner,
         )
+        _early_stop_cb = L2EarlyStopCallback(no_improve_limit=_no_improve, min_trials=_min_trials)
 
         # Warm-start anchor: 영구 챔피언 레저(과거 run 중 최고 성과)가 있으면 우선
         # 사용하고, 레저가 비었거나 일부 키가 비어있으면 검증된 기본값으로 보강.
@@ -1845,13 +1934,15 @@ def _run_tiered_l2_study(
             except Exception as _mem_err:
                 _logger.warning("[L2-OPT] Failed to check system memory: %s", _mem_err)
 
+            _gc_interval = int(OPT_FUTURES_CONFIG.get("L2_OPTUNA_GC_INTERVAL_BATCHES", 5))
+
             if batch_size <= 1:
                 study.optimize(
                     lambda trial: objective_l2_growth(trial, ctx),
                     n_trials=n_trials,
                     n_jobs=1,
                     show_progress_bar=False,
-                    callbacks=[progress_cb],
+                    callbacks=[progress_cb, _early_stop_cb],
                 )
             else:
                 import multiprocessing
@@ -1879,7 +1970,7 @@ def _run_tiered_l2_study(
                     with ProcessPoolExecutor(max_workers=max_workers, mp_context=mp_ctx) as executor:
                         trial_idx = len([t for t in study.trials if t.state.is_finished()])
                         _batch_num = 0
-                        while trial_idx < n_trials:
+                        while trial_idx < n_trials and not getattr(study, "_stop_flag", False):
                             _batch_num += 1
                             _t_batch = time.perf_counter()
                             current_batch = min(batch_size, n_trials - trial_idx)
@@ -1937,10 +2028,13 @@ def _run_tiered_l2_study(
                                     value,
                                 )
                                 progress_cb(study, trial, value=value)
+                                if study.trials:
+                                    _early_stop_cb(study, study.trials[-1])
                                 trial_idx += 1
 
                             _t_gc = time.perf_counter()
-                            gc.collect()
+                            if _batch_num % _gc_interval == 0:
+                                gc.collect()
                             _t_gc = time.perf_counter() - _t_gc
                             _t_batch = time.perf_counter() - _t_batch
                             _t_result = _t_batch - _t_ask - _t_submit - _t_attrs - _t_tell - _t_gc
