@@ -641,6 +641,9 @@ class Layer2AllocationConfig:
     l2_regime_crisis_long_extra_mult: float = 1.0
     # L2 crisis regime cap release cooldown (l2-crisis-regime-cap-release-cooldown.md)
     l2_regime_cap_release_cooldown_bars: int = 0
+    l2_regime_severity_gating_enabled: bool = False
+    l2_regime_severity_vol_quantile: float = 0.35
+    l2_regime_elevated_gross_cap: float = 0.35
     # L3: Walk-forward 적응형 Regime-Reliability (A/B baseline=off)
     l2_regime_reliability_enabled: bool = False
     l2_regime_reliability_window: int = 2
@@ -989,6 +992,27 @@ class Layer2AllocationConfig:
                 0.0,
             )
         )
+        l2_regime_severity_gating_enabled = bool(
+            params.get("l2_regime_severity_gating_enabled", _dc.l2_regime_severity_gating_enabled)
+        )
+        l2_regime_severity_vol_quantile = cls._validate_range(
+            "l2_regime_severity_vol_quantile",
+            cls._as_float(
+                params.get("l2_regime_severity_vol_quantile", _dc.l2_regime_severity_vol_quantile),
+                _dc.l2_regime_severity_vol_quantile,
+            ),
+            0.0,
+            1.0,
+        )
+        l2_regime_elevated_gross_cap = cls._validate_range(
+            "l2_regime_elevated_gross_cap",
+            cls._as_float(
+                params.get("l2_regime_elevated_gross_cap", _dc.l2_regime_elevated_gross_cap),
+                _dc.l2_regime_elevated_gross_cap,
+            ),
+            0.0,
+            1.0,
+        )
         _reliability_env = os.environ.get("L2_REGIME_RELIABILITY", "")
         l2_regime_reliability_enabled = (
             _reliability_env not in ("", "0", "false", "False")
@@ -1240,6 +1264,9 @@ class Layer2AllocationConfig:
             l2_regime_bear_long_extra_mult=l2_regime_bear_long_extra_mult,
             l2_regime_crisis_long_extra_mult=l2_regime_crisis_long_extra_mult,
             l2_regime_cap_release_cooldown_bars=l2_regime_cap_release_cooldown_bars,
+            l2_regime_severity_gating_enabled=l2_regime_severity_gating_enabled,
+            l2_regime_severity_vol_quantile=l2_regime_severity_vol_quantile,
+            l2_regime_elevated_gross_cap=l2_regime_elevated_gross_cap,
             l2_regime_reliability_enabled=l2_regime_reliability_enabled,
             l2_regime_reliability_window=l2_regime_reliability_window,
             l2_regime_reliability_floor=l2_regime_reliability_floor,
@@ -1639,6 +1666,7 @@ class L2SimulationCache:
     pooled_edges_by_fold: tuple[dict[tuple[str, str], float], ...] = ()
     # Pre-computed regime code 1d (trial-param independent → cached once)
     regime_code_1d: NDArray[np.int8] | None = None
+    risk_severity_code_1d: NDArray[np.int8] | None = None
     regime_routing_diagnostics: RegimeRoutingDiagnostics | None = None
     regime_policy_by_fold: tuple[dict[tuple[int, str, str], RegimeCellPolicy], ...] = ()
 

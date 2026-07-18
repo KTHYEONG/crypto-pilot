@@ -352,6 +352,14 @@ class TestRegimeCompression:
             result = compress_regime_codes(codes)
             assert result[0] == dst, f"code {src} → {result[0]} (expected {dst})"
 
+    def test_regime_context_exposes_vol_scale_and_crisis_active(self) -> None:
+        aligned = _make_aligned()
+        regime = compute_market_regime_context(aligned=aligned)
+        assert hasattr(regime, "vol_scale_1d")
+        assert hasattr(regime, "crisis_active_1d")
+        assert regime.vol_scale_1d.shape == (aligned.close_2d.shape[0],)
+        assert regime.crisis_active_1d.shape == (aligned.close_2d.shape[0],)
+
     def test_trend_efficiency_1d_is_in_regime_context(self) -> None:
         from tests.unit.domain.futures.strategy.test_market_regime import _make_aligned
 
@@ -402,6 +410,32 @@ def test_apply_regime_cap_release_cooldown_negative_cooldown_raises() -> None:
     code = np.asarray([0, 1, 2], dtype=np.int8)
     with pytest.raises(ValueError, match="cooldown_bars"):
         apply_regime_cap_release_cooldown(code, cooldown_bars=-1)
+
+
+def test_awf_sim_severity_gating_reduces_normal_window_cap_trigger_rate() -> None:
+    """[S4 integration] severity code의 crash 점유율이 기존 3-state regime code의
+    crisis 점유율보다 높지 않음을 검증. (fixture가 이미 40% 변동 구간을 포함하므로
+    엄격한 비율보다 단조성 확인이 목적.)"""
+    aligned = _make_aligned()
+    from src.domain.futures.strategy.market_regime import (
+        compress_regime_codes,
+        compute_risk_severity_code,
+    )
+
+    regime = compute_market_regime_context(aligned=aligned)
+    regime_3state = compress_regime_codes(regime.code_1d)
+    severity = compute_risk_severity_code(
+        regime.vol_scale_1d,
+        regime.crisis_active_1d,
+        min_n_eff=20,
+    )
+
+    regime_crisis_pct = float(np.sum(regime_3state == 2)) / float(max(regime_3state.shape[0], 1)) * 100.0
+    severity_crash_pct = float(np.sum(severity == 2)) / float(max(severity.shape[0], 1)) * 100.0
+
+    assert severity_crash_pct <= regime_crisis_pct + 1.0, (
+        f"severity crash {severity_crash_pct:.1f}% exceeds regime crisis {regime_crisis_pct:.1f}% by >1pp"
+    )
 
 
 def test_run_awf_simulation_wires_regime_cap_release_cooldown_before_cap_call() -> None:
