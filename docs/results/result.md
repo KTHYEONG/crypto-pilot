@@ -1,12 +1,11 @@
-# L1→L2 Replay 결과 — 2026-07-18 (위기 재현성 게이트: 레짐 캡 해제 쿨다운 진단)
+# L1→L2 Replay 결과 — 2026-07-18 (위기 재현성 게이트: 레짐 심각도 신호 재설계)
 
 ## 실행 조건
 
 - 실행: `PYTHONPATH=. uv run python src/execution/opt_main_futures.py --phase l2 --sync skip --timeframe 4h --date 2026-07-17 --seed 42`
 - 완료 분기 cutoff: `2026-06-30`; horizon: `2023-10-31~2026-06-30`; IS/OOS split: `2026-01-01`.
-- Universe: Pool 414 → Selected 150 → Loaded 125~137(run마다 변동); L1 admission 대부분 late_start 소수 제외.
-- **주의**: 동일 `--seed 42`에도 Optuna champion이 run마다 달라지는 비결정성 확인됨(단일 run 내부 비교는 유효, run 간 절대 수치 비교는 champion drift로 confound될 수 있음 — 알려진 이슈, `ProcessPoolExecutor fork` 관련으로 추정, 별도 트래킹 필요).
-- 정상 L2 계산 완료 후 crisis survival 승격 차단으로 exit code `1`(의도된 fail-closed) — 아래 위기 게이트 섹션 참고.
+- Universe: Pool 414 → Selected 150 → Loaded 103~137(run마다 변동); L1 admission 대부분 late_start 소수 제외.
+- **주의**: 동일 `--seed 42`에도 Optuna champion이 run마다 크게 달라지는 비결정성 지속 확인(`ProcessPoolExecutor fork` 관련으로 추정, 별도 트래킹 필요) — 단일 run 내부 champion-고정 A/B 비교는 유효, run 간 절대 수치 비교는 confound.
 
 ## L1 결과 (안정 — 회귀 없음)
 
@@ -16,79 +15,51 @@
 
 - Master TF는 `8h`(최대 breadth 기준)로 선정.
 
-## L2 정상장 스코어카드 (2025-03-20~2025-12-30 평가 윈도우)
-
-- 최신 baseline(worst_fold 기본 on): `STATUS PASS` — CAGR +53.2%, Sharpe 1.700, Sortino 2.743, Calmar 3.724, MDD 14.3%, CVaR95 1.8%, Sharpe Uplift +0.20, PSR 0.986/DSR 0.902.
-- `⚠️ NO-CRISIS-WINDOW` — 이 평가 윈도우는 병목-caliber fold(MDD≥15% & CAGR≤0)를 포함하지 않아 승격 근거로 단독 인용 금지. 위기 재현성은 별도 out-of-band 게이트(아래)로 검증.
-
 ## 위기 재현성 게이트 — 정책 및 예산
 
-`CrisisWindowMetrics`/`evaluate_crisis_survival()`(순수 함수)가 LUNA/FTX 2022 붕괴장(`2022-04-01~2023-02-15`, out-of-band 데이터)에 대해 champion의 rule-based 신호를 재생성해 생존 테스트한다. 위기 MDD 예산 `l2_max_mdd_abs×(1-l2_deploy_mdd_margin)=21%`, CAGR 하한 `l2_min_worst_fold_cagr=-5%`. 실패 시 `apply_crisis_reliability_override()`가 monotonic fail-closed로 production 승격을 차단(위기 결과는 Optuna selection에 재투입하지 않음).
+`CrisisWindowMetrics`/`evaluate_crisis_survival()`(순수 함수)가 LUNA/FTX 2022 붕괴장(`2022-04-01~2023-02-15`, out-of-band 데이터)에 대해 champion의 rule-based 신호를 재생성해 생존 테스트한다. 위기 MDD 예산 `l2_max_mdd_abs×(1-l2_deploy_mdd_margin)=21%`, CAGR 하한 `l2_min_worst_fold_cagr=-5%`.
 
 ## 이전 수정 이력 (요약, 상세 서사는 decisions_archive.md 참고)
 
 | 수정 | ADR | 핵심 결과 |
 | :--- | :--- | :--- |
-| BTC 레짐 데이터 무결성(`timestamp_x` 폴백 + `_btc_index` fail-closed) | `ADR_20260717_L2_CRISIS_BTC_REGIME_DATA_INTEGRITY_FIX` | has_btc False→True 복구 검증. 단, universe 확장(93→103 심볼)으로 champion drift 발생 — 위기 MDD 29.01%→55.47%(악화, 새 챔피언의 진짜 꼬리위험이 드러난 것으로 판단) |
-| 레버리지 ceiling 구조 리팩토링(`_resolve_safety_ceiling`/`_resolve_oos_adaptive_leverage` 분리) | `ADR_20260717_L2_LEVERAGE_CEILING_REFACTOR` | OOS-blend가 worst_fold/kelly ceiling을 더 이상 우회 못 하는 불변식 실측 검증(L*_off=2.05→L*_on=1.00 정확 제약) |
-| worst_fold 안전장치 기본값 전환(`False`→`True`) + `from_mapping` SSOT fallback 버그 수정 | `ADR_20260717_L2_CRISIS_LEVERAGE_SAFETY_DEFAULT` | 위기 MDD 55.47%→46.53%, CAGR -38.44%→-28.04%(방향 개선이나 예산 미달). champion drift로 정상장 CAGR 92.8%→53.2%(Optuna 목적함수가 배치-CAGR 반영하는 의도된 설계로 판단) |
-| 롱/숏 방향 비대칭 진단 + opt-in 완화 레버(`apply_asymmetric_long_short_regime_cap`) | `ADR_20260717_L2_CRISIS_ASYMMETRIC_LONG_SHORT_CAP` | 위기 replay 실측: 대칭 캡 적용 후에도 롱 레그 -11.29% vs 숏 레그 +3.59%(bars_long=683/bars_short=786, 빈도는 균형). 스윕 결과 CAGR -28.04%→-14.19%(개선) but **MDD 46.1~46.9% 평평(미개선)** — 병목이 MDD로 좁혀짐 |
+| BTC 레짐 데이터 무결성 | `ADR_20260717_L2_CRISIS_BTC_REGIME_DATA_INTEGRITY_FIX` | has_btc False→True 복구, universe 확장(93→103)으로 champion drift(위기 MDD 29.01%→55.47%) |
+| 레버리지 ceiling 구조 리팩토링 | `ADR_20260717_L2_LEVERAGE_CEILING_REFACTOR` | OOS-blend가 worst_fold/kelly ceiling을 더 이상 우회 못 하는 불변식 검증 |
+| worst_fold 안전장치 기본 on | `ADR_20260717_L2_CRISIS_LEVERAGE_SAFETY_DEFAULT` | 위기 MDD 55.47%→46.53%, CAGR -38.44%→-28.04%(방향 개선, 예산 미달) |
+| 롱/숏 방향 비대칭 opt-in 레버 | `ADR_20260717_L2_CRISIS_ASYMMETRIC_LONG_SHORT_CAP` | CAGR -28.04%→-14.19% 개선, **MDD 평평(미개선)** |
+| 레짐 캡 해제 쿨다운 opt-in 레버 | `ADR_20260718_L2_CRISIS_REGIME_CAP_RELEASE_COOLDOWN` | 3개 레버 중 최선(MDD 46.5%→29.5%, cooldown=30 sweet spot), 단독으로는 21% 예산 미달 |
+| **L2 위기 leverage 상한(l_crisis) + 방어 레버 탐색공간 편입** | `ADR_20260718_L2_CRISIS_LEVERAGE_CEILING` | 3-레버 조합 champion-고정 스윕(정식 코드화 전 진단): asym full-block+cooldown=30에서 crisis MDD 21.75%(예산 0.75pp 초과, 최선점). 그러나 프로덕션 코드화 후 200-trial replay: 탐색공간만 넓히고 objective가 crisis-blind라 Optuna가 방어 레버를 전부 off로 선택(asymmetry/cooldown 미사용) — 정상장 CAGR만 악화(53%→34.6%), 위기 MDD 25.38%로 미해결 |
+| **L2 trial별 crisis MDD Optuna 제약(10번째 슬롯)** | `ADR_20260718_L2_CRISIS_AWARE_OPTUNA_CONSTRAINT` | 기존 정상장 게이트(9-tuple, `TPESampler(constraints_func=...)`에 이미 배선된 검증된 인프라)를 확장. 200-trial 실측: 방어 레버 사용률 0/200→154~198/200으로 반전, 챔피언의 crisis 제약값=-0.0424(예산 내, MDD≈16.8%) — **메커니즘은 설계대로 작동**. 그러나 정상장 CAGR+14.9%로 게이트 자체가 BLOCKED(cagr) — `_shape_efficiency_l2_objective`(Sortino 기반 scale-invariant, growth 미직접보상)와 신규 안전 제약이 만나 과도하게 보수적인 지점에 수렴 |
 
-## 신규: 레짐 캡 해제 쿨다운 진단 (`ADR_20260717_L2_CRISIS_REGIME_CAP_RELEASE_COOLDOWN`)
+## 신규: 레짐 심각도 신호 재설계 (`ADR_20260718_L2_REGIME_SEVERITY_SIGNAL_REDESIGN`)
 
-**정확한 MDD 드라이버 특정** (`scratch/diag_crisis_regime_whipsaw.py`, 동일 champion 고정, `deploy_leverage=1.7187`, 재구성 equity curve가 공식 로그 `mdd=0.4653`과 정확히 일치):
+**근본 원인 재진단** — 3번의 할당(leverage/Optuna)-레이어 수정이 전부 "정상장 죽이거나 위기 못 막거나"의 동일한 딜레마로 되돌아온 원인을 신호 자체에서 직접 실측:
 
-- 최대낙폭 구간(전체 902bar 중 마지막 26%, bar 627~861)은 LUNA 붕괴(윈도우 초반)가 아니라 **FTX 붕괴 국면(2022-11)**에 집중.
-- 이 구간(rebalance-event 기준 79건) 레짐 분포: bull 22 / bear 47 / crisis 10 — 위기 한복판에서 28%가 "bull"로 오분류.
-- 이 구간 내 `gross_exposure≥0.9`(사실상 무제한) 이벤트 **13건 전부가 예외 없이 bull 오분류 시점**과 일치.
-- 근본 원인: 레짐 코드는 이미 Schmitt 히스테리시스(`persistence_target_dwell=6.0`)로 산출되지만 이는 방향 신호 안정화용일 뿐, **캡의 "해제" 타이밍에는 별도 지속성이 없어** bull로 한 번만 튀어도 캡이 즉시 완전히 풀림.
+- **발견 1(구조적 결함, 정상장에서 확인)**: 6→3-state 압축맵(`_REGIME_COMPRESSION_MAP`)이 `transition`(방향 불확실, 단순 횡보)과 `crash`(CUSUM 진짜 급변)를 동일한 "crisis" 버킷으로 합산. 정상장(2023-2026) 실측: CUSUM 단독 8.5% vs 압축된 "crisis" 40.2% — **"위기" 라벨의 79%가 실은 단순 횡보**. 방어 레버를 강화할수록 정상장이 무너진 정확한 메커니즘.
+- **발견 2(데이터 가용성 한계, LUNA/FTX 위기 검증에 국한)**: BTC 원시 가격 데이터가 정확히 2022-04-01부터 시작 — 위기 윈도우 시작일과 완전히 동일. 인과적(look-ahead 방지) 통계 설계상 위기 시작 시점엔 비교할 과거 기준선이 존재할 수 없음. 실측: CUSUM 발동률이 정상장 8.5% vs 위기장 8.2%로 **통계적으로 구분 불가** — 이 특정 위기 검증에 대해 레짐 신호의 판별력이 사실상 0.
 
-**opt-in 완화 레버 구현**: `apply_regime_cap_release_cooldown`(순수 함수, `market_regime.py`, 기존 검증된 `_apply_persistence_and_cooldown_1d` 재사용) — bear/crisis 진입은 항상 즉시 반영, **bull로의 "복귀"만 최근 N bar 이내 bear/crisis 이력이 있으면 지연**(대체 상태는 항상 bear, crisis로 인위 승격 안 함). 방향 alpha 신호(`_regime_code_1d` 원본)는 불변 — 캡 전용 파생 배열만 신규 도입, 다른 4개 소비처는 실측으로 영향 없음 확인. `Layer2AllocationConfig.l2_regime_cap_release_cooldown_bars`(기본값 `0`=no-op) opt-in 필드. `/check` PASS(Cov 42%, spec compliance 포함). SSOT: `docs/specs/l2-crisis-regime-cap-release-cooldown.md`.
+**구현**: `MarketRegimeContext`에 `vol_scale_1d`/`crisis_active_1d` 신규 노출(기존 계산값 재사용, 추가 비용 0). `compute_risk_severity_code`(market_regime.py) 신설 — 방향 무관, 0=calm/1=elevated(causal quantile 기반 실현변동성)/2=crash(CUSUM). `Layer2AllocationConfig` opt-in 3필드(`l2_regime_severity_gating_enabled` 기본 False 등), `awf_sim.py`의 cap-gating 호출부(`apply_regime_risk_cap`/`apply_asymmetric_long_short_regime_cap`) 조건부 분기 — 기존 3-state 경로 완전 보존.
 
-**코스 스윕**(`scratch/sweep_crisis_cap_cooldown.py`, 동일 champion, LUNA/FTX):
+**실측 검증**:
 
-| cooldown_bars(4h) | MDD | CAGR |
-| ---: | ---: | ---: |
-| 0(off) | 46.53% | -28.04% |
-| 3 | 47.55%(악화) | -29.78%(악화) |
-| 6 | 42.64% | -20.14% |
-| 12 | 42.51% | -18.24% |
-| 24 | 31.13% | **+1.16%**(첫 흑자) |
-| 48 | 32.85%(24보다 악화) | -21.06%(24보다 악화) |
-
-**파인 스윕**(24 근방, `scratch/sweep_crisis_cap_cooldown_v2.py`):
-
-| cooldown_bars | MDD | CAGR |
-| ---: | ---: | ---: |
-| 15 | 34.67% | -5.75% |
-| 18 | 34.17% | -4.34% |
-| 20 / 22 | 34.30% | -5.16% |
-| 24 | 31.13% | +1.16% |
-| 26 / 28 | 31.30% | **+3.54%** |
-| **30** | **29.46%**(MDD 최저) | -2.92% |
-| 32 | 29.46% | -7.30%(CAGR 하한 이탈) |
-| 36 | 31.03% | -17.70%(급격 악화) |
-
-- Sweet spot: **26~30bar**. 최선의 경우(30bar)에도 MDD 29.46%로 21% 예산에 여전히 미달 — baseline(46.53%) 대비 대폭 개선(상대 -37%)했고 세 레버 중 가장 효과적이나 단독으로는 게이트 통과 못함.
-- 32bar 이후 급격 악화 — 과잉 쿨다운의 기회비용(진짜 회복기까지 방어 유지) 확인.
-
-**두 번째 독립 위기 윈도우 검증 — 블로커(미해결)**: `[LIMIT-01]`이 요구하는 2025-12-31~2026-06-30 BTC 위기 홀드아웃(2026-07-02 기록, BTC -32.8%)을 LUNA/FTX와 동일한 `CrisisWindow` 프레임워크로 재현 시도했으나 `load_futures_data_maps_for_symbols`가 "no valid symbols after load" 반환. 원시 parquet(`enriched/4h/BTCUSDT.parquet`)엔 2026-07-02까지 데이터가 실존함을 확인(원본 데이터 부재 아님) — 원래 2026-07-02 실측은 `CrisisWindow` out-of-band 프레임워크가 아니라 `L2_REVERSAL_KILL`/`L3_REVERSAL_REPLAY` env 기반의 파이프라인 내부 OOS holdout 슬라이스 메커니즘을 썼던 것으로, 이번 시도(`CrisisWindow` 임의 구성)가 그 메커니즘과 안 맞아 발생한 재현 방법 오류로 추정. 원인 미확정 — 별도 진단 필요.
+| 검증 단계 | 결과 |
+| :--- | :--- |
+| 신호 품질(실제 구현 함수 직접 측정) | 정상장 "crash" 점유율 40.2%→**8.5%**(CUSUM 단독 수준까지 정확히 수렴), 위기장 33.1%→7.9% |
+| 200-trial 챔피언 고정 A/B(severity_gating on/off) | 평균 gross exposure **0.3359→0.3852(+14.7%)** — 정상장에서 불필요한 억제가 풀리는 방향 확인(메커니즘 실작동 증명) |
+| 최종 CAGR/MDD 정밀 비교 | **미완료** — fit_rets_hybrid(캘리브레이션 전용 부분구간) 기반 요약 함수가 전체 walk-forward 궤적의 차이를 못 잡음, 이번 챔피언도 정상장 CAGR+20.2%로 게이트(cagr) 미달 |
 
 ## Verdict
 
 - **L0→L1→native TF handoff / L1 robustness gate:** PASS(회귀 없음).
-- **L2 스코어카드 정합성:** PASS — production 신뢰 가능.
-- **레버리지 안전장치(worst_fold 기본 on, ceiling 리팩토링):** ✅ 완료·검증 — 위기 MDD/CAGR 방향 개선하나 단독 예산 미달.
-- **롱/숏 비대칭 완화 레버:** ✅ 구현·검증 완료(opt-in) — CAGR 개선(-28%→-14%), MDD 불변.
-- **레짐 캡 해제 쿨다운:** ✅ 구현·검증 완료(opt-in) — 현재까지 최선의 단일 레버(MDD 46.5%→29.5%, CAGR 최대 +3.5%), 단독으로는 여전히 MDD 예산(21%) 미달.
-- **L2 위기 재현성 게이트:** FAIL-CLOSED 유지 — 3개 opt-in 레버 모두 개별적으로는 예산 미충족. 조합 효과 미측정.
-- **`[LIMIT-01]` 2차 독립 윈도우 검증:** 블로커로 미완료.
+- **레짐 심각도 신호 재설계:** ✅ 신호 품질 결함 구조적 해소(실측 검증), ✅ 프로덕션 배선 정상 작동(gross exposure 변화 실측 확인) — ⚠️ 최종 CAGR/MDD 정밀 재검증 미완료.
+- **L2 위기 재현성 게이트:** FAIL-CLOSED 유지 — 레짐 신호 결함은 해소했으나, 3번의 champion 전부 정상장 CAGR 게이트(30%) 자체에서 막힘(4.2%/14.9%/20.2%, 점진적 개선 추세는 확인). Optuna 목적함수(`_shape_efficiency_l2_objective`, growth 미직접보상)와 안전 제약이 만나 과보수화되는 패턴이 반복 관측됨.
+- **Optuna champion 비결정성:** 여전히 미해결, 매 run 결과 비교를 어렵게 함.
 
 ## 다음 조치
 
-1. 세 레버(worst_fold 기본 on + `l2_regime_long_short_asymmetry_enabled` + `l2_regime_cap_release_cooldown_bars=26~30`) **조합 효과** 실측 — 각각 부분적 개선이라 조합 시 예산 통과 가능성 있음, 최우선 순위.
-2. 2025-12-31~2026-06-30 BTC 위기 홀드아웃 재현 방법 규명(원 메커니즘은 `L2_REVERSAL_KILL`/`L3_REVERSAL_REPLAY` env 기반으로 추정) — `[LIMIT-01]` 충족을 위해 필수.
-3. Optuna champion 비결정성(동일 `--seed`에도 run마다 challenger 상이) 원인 규명 — 별도 이슈로 트래킹.
-4. `[REGIME-L2] proof_failed path=pooled_fallback` 원인 규명 — 별도 이슈로 트래킹.
-5. 위기장을 포함하는 정상 holdout 윈도우로 Uplift/CAGR 재검증 — 미해결(`NO-CRISIS-WINDOW` 경고 지속).
-6. `run_config.timeframe` CLI 기본값 "4h"의 tf-probe 기반 근거화 — 별도 `/spec` 대기.
+1. **[최우선]** `evaluate_l2_trial`의 정확한 fit-leg/전체궤적 metrics를 활용해 severity_gating on/off의 최종 CAGR/MDD를 정밀 재비교(직전 세션에서 fit_rets_hybrid 한계로 미완료) — 신호 수정의 실질 효과를 CAGR/MDD 단위로 확정.
+2. **[최우선]** `_shape_efficiency_l2_objective`(Sortino 기반 scale-invariant, growth_lcb는 diagnostic으로 강등된 상태)가 안전 제약과 결합했을 때 과보수화로 수렴하는 패턴이 3회 연속 관측됨 — objective에 원시 CAGR/growth 보상을 재편입할지 검토 필요(단, 세션 내 규율에 따라 다른 변경과 분리해 독립적으로 A/B 검증할 것).
+3. Optuna champion 비결정성(동일 `--seed`에도 run마다 challenger 상이) 원인 규명 — 매 검증마다 confound를 일으키는 근본 이슈, 우선순위 상향 검토.
+4. `[LIMIT-01]` 2차 독립 위기 윈도우(2025-12-31~2026-06-30 BTC -32.8%) 검증 — 미해결.
+5. `[REGIME-L2] proof_failed path=pooled_fallback` 원인 규명 — 별도 이슈로 트래킹.
+6. 위기장을 포함하는 정상 holdout 윈도우로 Uplift/CAGR 재검증 — 미해결(`NO-CRISIS-WINDOW` 경고 지속).
