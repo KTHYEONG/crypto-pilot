@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import itertools
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Literal, cast
 
 import numpy as np
@@ -438,3 +438,21 @@ def build_l2_simulation_folds(
             oos_end=holdout_start_idx,
         ),
     )
+
+
+def resolve_l2_fold_cfg(
+    cfg: CandidateStrategyConfig,
+    l2_wf_n_folds: int | None,
+) -> CandidateStrategyConfig:
+    """[ADR_20260718_L2_FOLD_GRANULARITY_ROBUSTNESS] L2 전용 walk-forward fold 개수 override.
+
+    L1(build_l1_swf_folds, cfg 미의존)·live 실행·ablation 등 cfg.wf_n_folds를
+    공유하는 다른 소비처는 이 함수를 거치지 않으므로 영향받지 않는다.
+    l2_wf_n_folds가 None이거나 cfg.wf_n_folds와 동일하면 cfg를 그대로 반환한다
+    (불필요한 객체 생성 방지, 완전한 하위호환).
+    """
+    if l2_wf_n_folds is None or int(l2_wf_n_folds) == int(cfg.wf_n_folds):
+        return cfg
+    if int(l2_wf_n_folds) < 2:
+        raise ValueError(f"l2_wf_n_folds must be >= 2, got {l2_wf_n_folds}")
+    return replace(cfg, wf_n_folds=int(l2_wf_n_folds))

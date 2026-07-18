@@ -797,3 +797,69 @@ class TestSafetyCeilingInvariant:
         )
 
         assert l_star <= l_hard + 1e-6
+
+
+class TestDecoupledMargins:
+    def test_resolve_safety_ceiling_uses_crisis_mdd_target_when_provided(self) -> None:
+        rng = np.random.default_rng(42)
+        fit = rng.normal(0.001, 0.015, 500).astype(np.float64)
+        crisis = rng.normal(-0.002, 0.04, 100).astype(np.float64)
+        mdd_target = 0.21
+
+        _, _, l_hard_default, hb_default = _resolve_safety_ceiling(
+            fit, mdd_target=mdd_target, cvar_target=0.048,
+            l_floor=1.0, l_hard_cap=20.0, l_search_hi=200.0,
+            exchange_leverage_cap=None, worst_fold_rets=None,
+            kelly_safety_fraction=None, crisis_rets=crisis,
+        )
+        _, _, l_hard_tight, hb_tight = _resolve_safety_ceiling(
+            fit, mdd_target=mdd_target, cvar_target=0.048,
+            l_floor=1.0, l_hard_cap=20.0, l_search_hi=200.0,
+            exchange_leverage_cap=None, worst_fold_rets=None,
+            kelly_safety_fraction=None, crisis_rets=crisis,
+            crisis_mdd_target=0.05,
+        )
+
+        assert hb_tight == "crisis_window"
+        assert l_hard_tight <= l_hard_default
+
+    def test_calibrate_deployment_leverage_decoupled_margins_matches_legacy_when_crisis_margin_equals_normal(self) -> None:
+        rng = np.random.default_rng(42)
+        fit = rng.normal(0.0008, 0.01, 500).astype(np.float64)
+        crisis = rng.normal(-0.001, 0.03, 100).astype(np.float64)
+
+        l1, b1, _ = calibrate_deployment_leverage(
+            fit_rets=fit, crisis_rets=crisis,
+            mdd_margin=0.30,
+        )
+        l2, b2, _ = calibrate_deployment_leverage(
+            fit_rets=fit, crisis_rets=crisis,
+            mdd_margin=0.30, crisis_mdd_margin=0.30,
+        )
+
+        assert l1 == pytest.approx(l2, rel=1e-6)
+        assert b1 == b2
+
+    def test_calibrate_deployment_leverage_looser_normal_margin_raises_leverage(self) -> None:
+        rng = np.random.default_rng(42)
+        fit = rng.normal(loc=0.0008, scale=0.01, size=500)
+
+        l_tight, _, _ = calibrate_deployment_leverage(fit_rets=fit, mdd_margin=0.30)
+        l_loose, _, _ = calibrate_deployment_leverage(fit_rets=fit, mdd_margin=0.05)
+
+        assert l_loose >= l_tight
+
+    def test_calibrate_deployment_leverage_crisis_margin_none_preserves_legacy_behavior(self) -> None:
+        rng = np.random.default_rng(42)
+        fit = rng.normal(0.0008, 0.01, 500).astype(np.float64)
+        crisis = rng.normal(-0.002, 0.04, 100).astype(np.float64)
+
+        l_legacy, b_legacy, _ = calibrate_deployment_leverage(
+            fit_rets=fit, crisis_rets=crisis, mdd_margin=0.30,
+        )
+        l_new, b_new, _ = calibrate_deployment_leverage(
+            fit_rets=fit, crisis_rets=crisis, mdd_margin=0.30,
+        )
+
+        assert l_legacy == pytest.approx(l_new, rel=1e-6)
+        assert b_legacy == b_new
