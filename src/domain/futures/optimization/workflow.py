@@ -2407,18 +2407,20 @@ def objective_l2_growth(trial: Trial, ctx: TieredContext) -> float:
 
 
 def layer2_constraints_from_trial(trial: FrozenTrial) -> tuple[float, ...]:
+    """[ADR_20260718_L2_OPTUNA_CONSTRAINT_CAGR_UPLIFT_ALIGNMENT] 12-tuple(cagr/sharpe_uplift
+    슬롯 포함)로 패딩 — evaluate_layer2_gate.optuna_constraint_values와 길이 동기화."""
     raw = trial.user_attrs.get("l2_optuna_constraint_values")
     if not isinstance(raw, (list, tuple)):
         raw = trial.user_attrs.get("l2_constraint_values")
     if not isinstance(raw, (list, tuple)):
-        return (1.0,) * 10
+        return (1.0,) * 12
     resolved: list[float] = []
     for item in raw:
         try:
             resolved.append(float(item))
         except Exception:
             resolved.append(1.0)
-    while len(resolved) < 10:
+    while len(resolved) < 12:
         resolved.append(1.0)
     return tuple(resolved)
 

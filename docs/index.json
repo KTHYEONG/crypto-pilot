@@ -461,7 +461,8 @@
     "testing": "tests/unit/domain/futures/strategy/tiered_workflow/test_risk_deployment.py"
   },
   "src/domain/futures/strategy/tiered_workflow/l2_gate.py": {
-    "testing": "tests/unit/domain/futures/strategy/tiered_workflow/test_l2_gate.py"
+    "testing": "tests/unit/domain/futures/strategy/tiered_workflow/test_l2_gate.py",
+    "architecture": "docs/architecture/layer2.md"
   },
   "src/domain/futures/strategy/tiered_workflow/selection.py": {
     "architecture": "docs/specs/l2_phase_perf_optimization.md",
