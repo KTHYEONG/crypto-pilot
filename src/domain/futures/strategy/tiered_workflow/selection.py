@@ -380,9 +380,14 @@ def select_layer2_champion(
     ]
 
     if gate_passed_candidates:
-        eval_candidates = gate_passed_candidates[:8]
+        # user_attrs에 이미 cagr/mdd/sharpe 저장됨 → 재평가 없이 top 3 선정
+        eval_candidates = sorted(
+            gate_passed_candidates,
+            key=lambda t: float(t.user_attrs.get("growth_lcb_hybrid", -1e6)),
+            reverse=True,
+        )[:3]
         _logger.info(
-            "[L2-SELECTION] Found %d gate-passed trials in frontier. Reducing replay size to %d.",
+            "[L2-SELECTION] gate-passed=%d replay reduced to top %d by user_attrs.",
             len(gate_passed_candidates),
             len(eval_candidates),
         )

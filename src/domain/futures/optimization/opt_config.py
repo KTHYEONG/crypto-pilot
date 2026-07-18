@@ -69,9 +69,21 @@ OPT_FUTURES_CONFIG: dict[str, Any] = {
     # True = tiered pipeline 실행 (Phase D allocation 스킵); False = Phase D 유지.
     "USE_CS_RANK_ENGINE": True,
     # Tiered L2 AWF Optuna 탐색 trial 수 (Phase D와 별도)
-    "L2_OPTUNA_TRIALS": 200,
+    "L2_OPTUNA_TRIALS": 120,
     # L2 Optuna 병렬 최적화 배치 사이즈 (1 이하는 순차 실행)
     "L2_OPTUNA_BATCH_SIZE": 6,
+    # L2 Optuna TPE n_ei_candidates (default optuna=24, was 48)
+    "L2_OPTUNA_N_EI_CANDIDATES": 24,
+    # L2 Optuna early-stop: 연속 무개선 trial 수
+    "L2_OPTUNA_EARLY_STOP_NO_IMPROVE": 30,
+    # L2 Optuna early-stop: 최소 trial 수 (TPE warmup 보호)
+    "L2_OPTUNA_EARLY_STOP_MIN_TRIALS": 60,
+    # L2 Optuna gc.collect() 호출 주기 (배치 단위)
+    "L2_OPTUNA_GC_INTERVAL_BATCHES": 5,
+    # L2 Optuna InMemoryStorage 사용 (True=disk I/O 회피)
+    "L2_OPTUNA_USE_MEMORY_STORAGE": True,
+    # L2 signal batch disk cache 디렉토리
+    "L2_SIGNAL_BATCH_CACHE_DIR": "logs/futures/optimization/l2_signal_cache",
     # Universal Cross-Sectional Alpha Miner Settings
     "FUTURES_ML_ALPHA_POPULATION": 1500,
     "FUTURES_ALPHA_LONG_BIAS": 2.0,
