@@ -680,3 +680,30 @@ class TestRunTieredPipelineSelectedTimeframe:
         assert l1.selected_timeframe == "8h"
         assert l2 is None
         assert l3 is None
+
+
+# ---------------------------------------------------------------------------
+# S14: compute_crisis_unit_returns
+# ---------------------------------------------------------------------------
+class TestComputeCrisisUnitReturns:
+    def test_compute_crisis_unit_returns_returns_empty_on_load_failure(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """[S3] load_futures_data_maps_for_symbols 예외 시 빈 배열 반환."""
+        from src.domain.futures.strategy.tiered_workflow.pipeline import compute_crisis_unit_returns
+
+        registry = _registry(ready_symbols=("BTCUSDT",))
+
+        def _mock_load_fail(*, symbols: Any, **kwargs: Any) -> Any:
+            raise RuntimeError("mock data load failure")
+
+        monkeypatch.setattr(
+            "src.domain.futures.optimization.opt_data_utils.load_futures_data_maps_for_symbols",
+            _mock_load_fail,
+        )
+
+        result = compute_crisis_unit_returns(
+            deployment_registry=registry,
+            strategy_cfg=CandidateStrategyConfig(),
+            tf="4h",
+        )
+        assert isinstance(result, np.ndarray)
+        assert result.size == 0
