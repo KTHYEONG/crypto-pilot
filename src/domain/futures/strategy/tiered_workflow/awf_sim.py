@@ -2895,6 +2895,16 @@ def _run_awf_simulation(
             cooldown_bars=int(getattr(config, "l2_regime_cap_release_cooldown_bars", 0)),
         )
 
+        _severity_gating_enabled = bool(getattr(config, "l2_regime_severity_gating_enabled", False))
+        _risk_severity_code_1d = getattr(cache, "risk_severity_code_1d", None)
+        if _severity_gating_enabled and _risk_severity_code_1d is not None:
+            _cap_code_for_cap = apply_regime_cap_release_cooldown(
+                _risk_severity_code_1d,
+                cooldown_bars=int(getattr(config, "l2_regime_cap_release_cooldown_bars", 0)),
+            )
+        else:
+            _cap_code_for_cap = _regime_code_1d_for_cap
+
         if cache.bucket_edges_by_fold:
             bucket_edges_by_fold = list(cache.bucket_edges_by_fold)
             if logger.isEnabledFor(logging.DEBUG):
@@ -3830,38 +3840,50 @@ def _run_awf_simulation(
             _state_names_for_cap = (
                 _routing_diag.active_state_names if _routing_diag is not None else ("bull", "bear", "crisis")
             )
+            _cap_now = _regime_now_for_cap
+            _cap_names: tuple[str, ...] = _state_names_for_cap
+            if _severity_gating_enabled and _risk_severity_code_1d is not None:
+                _cap_now = int(_cap_code_for_cap[t]) if t < len(_cap_code_for_cap) else 2
+                _cap_names = ("bull", "bear", "crisis")
             _gross_before_cap = float(np.sum(np.abs(w)))
             w_precap = w.copy()
             w, _regime_risk_mult = apply_regime_risk_cap(
                 w,
-                _regime_now_for_cap,
-                _state_names_for_cap,
+                _cap_now,
+                _cap_names,
                 enabled=bool(getattr(config, "l2_regime_risk_cap_enabled", True)),
                 bull_gross_cap=float(getattr(config, "l2_regime_bull_gross_cap", 1.0)),
-                bear_gross_cap=float(getattr(config, "l2_regime_bear_gross_cap", 0.35)) * _bear_reliability_mult,
+                bear_gross_cap=(
+                    float(getattr(config, "l2_regime_elevated_gross_cap", 0.35))
+                    if (_severity_gating_enabled and _risk_severity_code_1d is not None)
+                    else float(getattr(config, "l2_regime_bear_gross_cap", 0.35))
+                ) * _bear_reliability_mult,
                 crisis_gross_cap=float(getattr(config, "l2_regime_crisis_gross_cap", 0.25)),
             )
             if logger.isEnabledFor(logging.DEBUG) and _regime_risk_mult < 1.0:
                 _regime_label_for_cap = (
-                    _state_names_for_cap[_regime_now_for_cap]
-                    if 0 <= _regime_now_for_cap < len(_state_names_for_cap)
-                    else f"unknown({_regime_now_for_cap})"
+                    _cap_names[_cap_now]
+                    if 0 <= _cap_now < len(_cap_names)
+                    else f"unknown({_cap_now})"
                 )
                 logger.debug(
                     "[L2-REGIME-RISK-CAP] t=%d fold=%d regime=%s(%d) gross_before=%.4f mult=%.4f",
                     t,
                     _fold_idx,
                     _regime_label_for_cap,
-                    _regime_now_for_cap,
+                    _cap_now,
                     _gross_before_cap,
                     _regime_risk_mult,
                 )
 
+            _asym_enabled = bool(getattr(config, "l2_regime_long_short_asymmetry_enabled", False))
+            if _asym_enabled and _severity_gating_enabled and _risk_severity_code_1d is not None:
+                _asym_enabled = _cap_now >= 1
             w, _long_extra_mult = apply_asymmetric_long_short_regime_cap(
                 w,
                 _regime_now_for_cap,
                 _state_names_for_cap,
-                enabled=bool(getattr(config, "l2_regime_long_short_asymmetry_enabled", False)),
+                enabled=_asym_enabled,
                 bear_long_extra_mult=float(getattr(config, "l2_regime_bear_long_extra_mult", 1.0)),
                 crisis_long_extra_mult=float(getattr(config, "l2_regime_crisis_long_extra_mult", 1.0)),
             )

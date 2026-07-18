@@ -1446,6 +1446,7 @@ def _run_tiered_l2_study(
     seed: int,
     l2_sim_cache: Any = None,
     crisis_rets: NDArray[np.float64] | None = None,
+    crisis_replay_ctx: Any | None = None,
 ) -> Any:
     """Optuna objective_l2_growth로 best l2_params 탐색."""
 
@@ -1501,7 +1502,10 @@ def _run_tiered_l2_study(
     # Precompute bucket realized edges (trial-param independent → 1회만 계산)
     from dataclasses import replace
 
-    from src.domain.futures.strategy.market_regime import compute_market_regime_context
+    from src.domain.futures.strategy.market_regime import (
+        compute_market_regime_context,
+        compute_risk_severity_code,
+    )
     from src.domain.futures.strategy.tiered_workflow.l2_meta import (
         build_regime_routing_plan,
     )
@@ -1509,11 +1513,12 @@ def _run_tiered_l2_study(
     _fallback_mode = str(getattr(cfg, "l2_regime_fallback_mode", "pooled"))
     if _fallback_mode not in {"pooled", "empty"}:
         raise ValueError("l2_regime_fallback_mode must be one of pooled/empty")
+    _market_regime_ctx = compute_market_regime_context(aligned=aligned)
     _routing_plan = build_regime_routing_plan(
         cache=l2_sim_cache,
         aligned=aligned,
         awf_folds=_awf_folds_l2,
-        raw_regime_code_1d=compute_market_regime_context(aligned=aligned).code_1d,
+        raw_regime_code_1d=_market_regime_ctx.code_1d,
         compression_enabled=bool(getattr(cfg, "l2_regime_compression_enabled", True)),
         cost_bps=float(getattr(cfg, "l2_bucket_cost_bps", 6.0)),
         min_n=int(getattr(cfg, "l2_bucket_min_n", 15)),
@@ -1555,6 +1560,11 @@ def _run_tiered_l2_study(
         ).lower()
         in ("1", "true", "yes"),
     )
+    _risk_severity_code_1d = compute_risk_severity_code(
+        _market_regime_ctx.vol_scale_1d,
+        _market_regime_ctx.crisis_active_1d,
+        elevated_vol_quantile=float(getattr(cfg, "l2_regime_severity_vol_quantile", 0.35)),
+    )
     l2_sim_cache = replace(
         l2_sim_cache,
         bucket_edges_by_fold=_routing_plan.effective_bucket_edges_by_fold,
@@ -1562,6 +1572,7 @@ def _run_tiered_l2_study(
         regime_code_1d=_routing_plan.effective_regime_code_1d,
         regime_routing_diagnostics=_routing_plan.diagnostics,
         regime_policy_by_fold=_routing_plan.policy_by_fold,
+        risk_severity_code_1d=_risk_severity_code_1d,
     )
     _policy_diag = _routing_plan.diagnostics.policy_diagnostics
     # Source contract for diagnostics tests:
@@ -1709,6 +1720,7 @@ def _run_tiered_l2_study(
         l2_sim_cache=l2_sim_cache,
         awf_folds=_awf_folds_l2,
         crisis_rets=crisis_rets,
+        crisis_replay_ctx=crisis_replay_ctx,
     )
 
     study_name = _layer2_experiment_key(
@@ -2059,6 +2071,7 @@ def _run_tiered_l2_study(
 
 from src.domain.futures.strategy.tiered_workflow.pipeline import (
     _l2_reversal_replay_variants,
+    _load_crisis_replay_context,
     _temporary_reversal_env,
     compute_crisis_unit_returns,
 )
@@ -2863,8 +2876,14 @@ def _run_strategy_stage(
 
             _deployment_registry = getattr(l1_res, "deployment_registry", None)
             _crisis_rets: NDArray[np.float64] | None = None
+            _crisis_replay_ctx: Any = None
             try:
                 _crisis_rets = compute_crisis_unit_returns(
+                    deployment_registry=_deployment_registry,
+                    strategy_cfg=tiered_cfg,
+                    tf=l2_master_tf,
+                )
+                _crisis_replay_ctx = _load_crisis_replay_context(
                     deployment_registry=_deployment_registry,
                     strategy_cfg=tiered_cfg,
                     tf=l2_master_tf,
@@ -2882,6 +2901,7 @@ def _run_strategy_stage(
                 n_trials=n_l2_trials,
                 seed=_seed,
                 crisis_rets=_crisis_rets,
+                crisis_replay_ctx=_crisis_replay_ctx,
                 l2_sim_cache=shared_l2_cache,
             )
             _log_mem(
