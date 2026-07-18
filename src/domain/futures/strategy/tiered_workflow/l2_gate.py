@@ -161,6 +161,10 @@ def evaluate_layer2_gate(
         _finite_or_fail(float(config.l2_min_friction_pass) - friction_pass_pct),
         _finite_or_fail(float(int(config.l2_min_trades) - trade_count)),
         _crisis_constraint,
+        # [ADR_20260718_L2_OPTUNA_CONSTRAINT_CAGR_UPLIFT_ALIGNMENT] promotion_constraint_values의
+        # 기존 표현식 재사용 — TPESampler가 CAGR/Sharpe-uplift를 직접 겨냥하도록 유도.
+        _finite_or_fail(float(config.l2_min_cagr) - cagr_hybrid),
+        _finite_or_fail(sharpe_hac_baseline + float(config.l2_min_sharpe_uplift) - sharpe_hac_hybrid),
     )
 
     promotion_constraint_values = (

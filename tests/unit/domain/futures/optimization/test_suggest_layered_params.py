@@ -418,7 +418,7 @@ def test_evaluate_l2_trial_uses_universe_audit_warning_for_entry_spike_penalty()
 
 
 def test_layer2_constraints_from_trial_reads_saved_values() -> None:
-    """Optuna safety constraints는 10-tuple로 패딩된다(crisis constraint 슬롯 포함)."""
+    """Optuna safety constraints는 12-tuple로 패딩된다(crisis + cagr + sharpe_uplift 슬롯 포함)."""
     trial = cast(
         FrozenTrial,
         SimpleNamespace(user_attrs={"l2_optuna_constraint_values": [0, -1, 2.5]}),
@@ -426,7 +426,34 @@ def test_layer2_constraints_from_trial_reads_saved_values() -> None:
 
     constraints = layer2_constraints_from_trial(trial)
 
-    assert constraints == (0.0, -1.0, 2.5, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0)
+    assert constraints == (0.0, -1.0, 2.5, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0)
+
+
+def test_layer2_constraints_from_trial_pads_to_twelve() -> None:
+    """[S1] user_attrs에 3개 값만 있어도 반환 튜플은 길이 12, 나머지 1.0 패딩."""
+    trial = cast(
+        FrozenTrial,
+        SimpleNamespace(user_attrs={"l2_optuna_constraint_values": [0, -1, 2.5]}),
+    )
+
+    constraints = layer2_constraints_from_trial(trial)
+
+    assert len(constraints) == 12
+    assert constraints == (0.0, -1.0, 2.5, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0)
+
+
+def test_layer2_constraints_from_trial_legacy_ten_tuple_treated_infeasible_on_new_slots() -> None:
+    """[S2-LIMIT-02] 과거 정확히 10개 원소 저장 trial -> 신규 슬롯(10,11)은 1.0(infeasible)."""
+    trial = cast(
+        FrozenTrial,
+        SimpleNamespace(user_attrs={"l2_optuna_constraint_values": [-1.0] * 10}),
+    )
+
+    constraints = layer2_constraints_from_trial(trial)
+
+    assert len(constraints) == 12
+    assert constraints[10] == 1.0
+    assert constraints[11] == 1.0
 
 
 def test_evaluate_l2_trial_crisis_budget_uses_crisis_margin_not_normal_margin() -> None:
@@ -557,3 +584,18 @@ def test_suggest_layered_params_l2_regime_cell_admission_roundtrips_through_conf
     assert config.l2_regime_policy_mode == l2_params["l2_regime_policy_mode"]
     assert config.l2_regime_hard_block_enabled == l2_params["l2_regime_hard_block_enabled"]
     assert config.l2_regime_pooled_is_passthrough == l2_params["l2_regime_pooled_is_passthrough"]
+
+
+def test_select_layer2_champion_feasible_trials_filter_uses_twelve_tuple() -> None:
+    """[S4] feasible_trials 필터링은 12-tuple layer2_constraints_from_trial 반환값으로 동작.
+    cagr 위반 trial(index 10 > 0)이 feasible 목록에서 제외됨을 확인."""
+    trials = [
+        cast(FrozenTrial, SimpleNamespace(user_attrs={"l2_optuna_constraint_values": [-1.0] * 12})),
+        cast(FrozenTrial, SimpleNamespace(user_attrs={"l2_optuna_constraint_values": [-1.0] * 10 + [0.5, -1.0]})),
+        cast(FrozenTrial, SimpleNamespace(user_attrs={"l2_optuna_constraint_values": [-1.0] * 11 + [2.0]})),
+    ]
+
+    feasible = [t for t in trials if all(c <= 0.0 for c in layer2_constraints_from_trial(t))]
+
+    assert len(feasible) == 1
+    assert feasible[0].user_attrs["l2_optuna_constraint_values"][10] <= 0.0
