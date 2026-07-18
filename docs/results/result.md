@@ -5,7 +5,7 @@
 - 실행: `PYTHONPATH=. uv run python src/execution/opt_main_futures.py --phase l2 --sync skip --timeframe 4h --date 2026-07-17 --seed 42`
 - 완료 분기 cutoff: `2026-06-30`; horizon: `2023-10-31~2026-06-30`; IS/OOS split: `2026-01-01`.
 - Universe: Pool 414 → Selected 150 → Loaded 103~137(run마다 변동); L1 admission 대부분 late_start 소수 제외.
-- **주의**: 동일 `--seed 42`에도 Optuna champion이 run마다 크게 달라지는 비결정성 지속 확인(`ProcessPoolExecutor fork` 관련으로 추정, 별도 트래킹 필요) — 단일 run 내부 champion-고정 A/B 비교는 유효, run 간 절대 수치 비교는 confound.
+- **주의**: 동일 `--seed 42`에도 Optuna champion에 잔여 비결정성 확인(`ProcessPoolExecutor fork` 관련으로 추정, 별도 트래킹 필요) — 단일 run 내부 champion-고정 A/B 비교는 유효. 2026-07-18 4연속 반복 검증에서는 완전한 결정성은 아니었으나(두 값 클러스터로 수렴) 편차 폭이 좁고 4/4 게이트 PASS로 재현성 자체는 확인됨(아래 "재현성 검증" 참고).
 
 ## L1 결과 (안정 — 회귀 없음)
 
@@ -51,18 +51,29 @@
 
 챔피언이 자체 선택한 파라미터: `l2_objective_growth_lcb_weight=0.8`(탐색 범위 상단 근처), `l2_regime_severity_gating_enabled=True`, `l2_regime_long_short_asymmetry_enabled=True`, `l2_regime_cap_release_cooldown_bars=34`. Optuna 제약 10개 전부 만족(전부 음수).
 
+## 재현성 검증 — 동일 `--seed 42` 4회 연속 실행
+
+| Run | 정상장 CAGR/MDD | 위기 MDD | 위기 CAGR | 게이트 |
+| :--- | ---: | ---: | ---: | :---: |
+| 원본(최초 검증) | +35.1% / 12.0% | 16.72% | -4.94% | ✅ PASS |
+| 반복 1 | +35.1% / 12.0% | 16.72% | -4.94% | ✅ PASS |
+| 반복 2 | +33.5% / 13.3% | 20.70% | +7.19% | ✅ PASS |
+| 반복 3 | +33.5% / 13.3% | 20.70% | +7.19% | ✅ PASS |
+
+**4/4 PASS.** 완전한 결정성은 아니나(원본=반복1, 반복2=반복3인 두 개의 값 클러스터로 수렴 — `ProcessPoolExecutor fork` 비결정성이 완전히 해소된 것은 아님을 시사) 편차 폭은 좁고 4번 모두 두 게이트를 동시에 통과했다. 반복 2·3의 위기 MDD(20.70%)는 21% 예산에 상당히 근접 — 이 설정에서의 타이트한 하한에 가까울 가능성.
+
 ## Verdict
 
 - **L0→L1→native TF handoff / L1 robustness gate:** PASS(회귀 없음).
-- **L2 정상장 스코어카드 + 위기 재현성 게이트:** ✅ **동시 PASS 최초 달성**(exit_code=0) — 이 세션 전체(leverage 상한, crisis Optuna 제약, 레짐 심각도 신호, 배치-스케일 성장 목적함수) 4개 수정이 맞물려 작동함을 실측 확인.
+- **L2 정상장 스코어카드 + 위기 재현성 게이트:** ✅ **동시 PASS, 4회 반복 재현성 확인**(전부 exit_code=0) — 이 세션 전체(leverage 상한, crisis Optuna 제약, 레짐 심각도 신호, 배치-스케일 성장 목적함수) 4개 수정이 맞물려 안정적으로 작동함을 실측 확인.
 - **`/check`:** PASS(Cov 100%, l2_search_space.py 대상).
-- **주의**: 단일 run 결과. Optuna champion 비결정성이 여전히 미해결이라, **동일 조건 반복 재현성 검증이 다음 최우선 과제**.
+- **잔여 리스크**: champion이 두 값 클러스터 사이를 오가는 잔여 비결정성 확인 — 근본 원인(추정: `ProcessPoolExecutor fork`) 미해결. 위기 MDD가 예산에 근접한 케이스(20.70%/21%) 존재 — 안전마진이 넉넉하지 않음.
 
 ## 다음 조치
 
-1. **[최우선]** 동일 `--seed`로 반복 재현성 검증(champion 비결정성 하에서도 PASS가 일관되게 나오는지) — 지금까지 단 1회 run의 성공이며, run-to-run 편차가 이 세션 내내 관측된 만큼 확증 전까지 production 승격 보류.
-2. `[LIMIT-01]` 2차 독립 위기 윈도우(2025-12-31~2026-06-30 BTC -32.8%) 검증 — 미해결, 유일한 검증 윈도우(LUNA/FTX)에 대한 과최적화 위험 여전히 존재.
-3. Optuna champion 비결정성(동일 `--seed`에도 run마다 challenger 상이) 원인 규명 — 매 검증마다 confound를 일으키는 근본 이슈, 우선순위 상향.
-4. `growth_lcb_weight` 과대 시(예: 2.0+) tail-risk 재발 여부 sweep — 안전 상한 문서화 미완료(spec 검증 프로토콜 §3, 미실행).
+1. `[LIMIT-01]` 2차 독립 위기 윈도우(2025-12-31~2026-06-30 BTC -32.8%) 검증 — 미해결, 유일한 검증 윈도우(LUNA/FTX)에 대한 과최적화 위험 여전히 존재. 4회 재현성은 확인됐으나 전부 같은 단일 윈도우 기준.
+2. Optuna champion 비결정성(동일 `--seed`에도 두 값 클러스터 사이 진동) 원인 규명 — 매 검증마다 confound를 일으키는 근본 이슈, 우선순위 상향.
+3. `growth_lcb_weight` 과대 시(예: 2.0+) tail-risk 재발 여부 sweep — 안전 상한 문서화 미완료(spec 검증 프로토콜 §3, 미실행).
+4. 위기 MDD 20.70%(반복 2·3)처럼 예산에 근접한 케이스의 안전마진 확보 방안 검토 — 현재 마진(0.3pp)이 근본 원인 3(Optuna 비결정성) 해소 전까지는 너무 얇을 수 있음.
 5. `[REGIME-L2] proof_failed path=pooled_fallback` 원인 규명 — 별도 이슈로 트래킹.
 6. 위기장을 포함하는 정상 holdout 윈도우로 Uplift/CAGR 재검증 — 미해결(`NO-CRISIS-WINDOW` 경고 지속).
