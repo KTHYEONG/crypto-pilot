@@ -1512,8 +1512,14 @@ def _run_tiered_l2_study(
     l2_sim_cache: Any = None,
     crisis_rets: NDArray[np.float64] | None = None,
     crisis_replay_ctx: Any | None = None,
+    l2_wf_n_folds: int | None = None,
 ) -> Any:
-    """Optuna objective_l2_growth로 best l2_params 탐색."""
+    """Optuna objective_l2_growth로 best l2_params 탐색.
+
+    [ADR_20260718_L2_FOLD_GRANULARITY_ROBUSTNESS] l2_wf_n_folds가 지정되면
+    resolve_l2_fold_cfg로 이 study 전용 fold 구조를 국소 override한다(원본 cfg
+    불변, L1/live 등 다른 소비처는 영향받지 않음).
+    """
 
     import optuna as _optuna
     from optuna.samplers import TPESampler
@@ -1536,7 +1542,10 @@ def _run_tiered_l2_study(
         _signal_batch_fingerprint,
         select_layer2_champion,
     )
-    from src.domain.futures.strategy.walk_forward import build_walk_forward_folds
+    from src.domain.futures.strategy.walk_forward import (
+        build_walk_forward_folds,
+        resolve_l2_fold_cfg,
+    )
 
     if l2_sim_cache is None:
         l2_sim_cache = build_l2_simulation_cache(aligned, signal_batch, tf)
@@ -1545,7 +1554,11 @@ def _run_tiered_l2_study(
     # AWF folds pre-computation: ctx에 저장하여 _resolve_l2_signal_batch_and_folds 재사용
     _ho_ts = pd.Timestamp(window.holdout_start).tz_localize(None)
     _ho_start_idx = int(np.searchsorted(aligned.datetimes, np.datetime64(_ho_ts, "ns")))
-    _awf_all = build_walk_forward_folds(n_bars=_ho_start_idx, cfg=cfg)
+    from src.domain.futures.strategy.tiered_workflow.dataclasses import Layer2AllocationConfig
+
+    _effective_n_folds = l2_wf_n_folds if l2_wf_n_folds is not None else Layer2AllocationConfig().l2_wf_n_folds
+    _l2_fold_cfg = resolve_l2_fold_cfg(cfg, _effective_n_folds)
+    _awf_all = build_walk_forward_folds(n_bars=_ho_start_idx, cfg=_l2_fold_cfg)
     _l2_ts = pd.Timestamp(window.l2_start).tz_localize(None)
     _l1_end = int(np.searchsorted(aligned.datetimes, np.datetime64(_l2_ts, "ns")))
     _awf_folds_l2 = tuple(f for f in _awf_all if f.oos_start >= _l1_end and f.oos_end <= _ho_start_idx)
