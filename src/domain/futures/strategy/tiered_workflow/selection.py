@@ -255,6 +255,10 @@ def select_layer2_champion(
 
     DSR은 2026-06-16부로 diagnostic으로 강등되었으나, 2026-06-17 무결성 강화
     결정에 따라 pipeline 하드 게이트와 동기화하여 선정 단계에서도 필터링을 수행한다.
+
+    [ADR_20260718_L2_DEPLOYMENT_MARGIN_CAGR_GATE] gate-passed 후보 replay 검증을
+    top-3 고정에서 fallback_limit까지 확장해, 희소한 gate-pass trial이 replay
+    단계에서 부당 탈락하지 않도록 커버리지를 넓혔다.
     """
     complete_trials = [
         t
@@ -380,12 +384,12 @@ def select_layer2_champion(
     ]
 
     if gate_passed_candidates:
-        # user_attrs에 이미 cagr/mdd/sharpe 저장됨 → 재평가 없이 top 3 선정
+        # [SPEC_L2_DEPLOYMENT_MARGIN_CAGR_GATE] replay 검증 대상을 최대 fallback_limit까지 확장
         eval_candidates = sorted(
             gate_passed_candidates,
             key=lambda t: float(t.user_attrs.get("growth_lcb_hybrid", -1e6)),
             reverse=True,
-        )[:3]
+        )[: min(len(gate_passed_candidates), fallback_limit)]
         _logger.info(
             "[L2-SELECTION] gate-passed=%d replay reduced to top %d by user_attrs.",
             len(gate_passed_candidates),
@@ -477,17 +481,27 @@ def select_layer2_champion(
         )
 
         if replay_mismatch:
-            _logger.debug(
-                "[L2-REPLAY] Trial #%d | stored_CAGR=%.4f replay_CAGR=%.4f | "
-                "stored_MDD=%.4f replay_MDD=%.4f | stored_LCB=%.4f replay_LCB=%.4f",
-                candidate.number,
-                stored_cagr,
-                candidate_evaluation.cagr_hybrid,
-                stored_mdd,
-                candidate_evaluation.mdd_hybrid,
-                stored_growth_lcb,
-                candidate_evaluation.growth_lcb_hybrid,
-            )
+            _was_stored_passed = bool(candidate.user_attrs.get("l2_promotion_passed", False))
+            _is_replay_passed = bool(gate.promotion_passed)
+            if _was_stored_passed and not _is_replay_passed:
+                _logger.warning(
+                    "[EVAL] event=replay_flip trial=%d stored_pass=True replay_pass=False "
+                    "stored_cagr=%.4f replay_cagr=%.4f stored_mdd=%.4f replay_mdd=%.4f",
+                    candidate.number, stored_cagr, candidate_evaluation.cagr_hybrid,
+                    stored_mdd, candidate_evaluation.mdd_hybrid,
+                )
+            else:
+                _logger.debug(
+                    "[L2-REPLAY] Trial #%d | stored_CAGR=%.4f replay_CAGR=%.4f | "
+                    "stored_MDD=%.4f replay_MDD=%.4f | stored_LCB=%.4f replay_LCB=%.4f",
+                    candidate.number,
+                    stored_cagr,
+                    candidate_evaluation.cagr_hybrid,
+                    stored_mdd,
+                    candidate_evaluation.mdd_hybrid,
+                    stored_growth_lcb,
+                    candidate_evaluation.growth_lcb_hybrid,
+                )
 
         # gate 진단 로그
         _logger.debug(

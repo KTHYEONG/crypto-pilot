@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 from src.domain.futures.strategy.tiered_workflow.dataclasses import Layer1Result
 
 
@@ -69,3 +71,74 @@ def test_from_mapping_kelly_safety_fraction_default_unaffected() -> None:
 
     cfg = Layer2AllocationConfig.from_mapping({})
     assert cfg.l2_deploy_kelly_safety_fraction is None
+
+
+def test_layer2_allocation_config_from_mapping_rejects_crisis_mdd_margin_out_of_range() -> None:
+    from src.domain.futures.strategy.tiered_workflow.dataclasses import (
+        Layer2AllocationConfig,
+    )
+
+    with pytest.raises(ValueError, match="l2_deploy_crisis_mdd_margin"):
+        Layer2AllocationConfig.from_mapping({"l2_deploy_crisis_mdd_margin": 1.5})
+
+
+def test_layer2_allocation_config_from_mapping_rejects_crisis_mdd_margin_zero() -> None:
+    from src.domain.futures.strategy.tiered_workflow.dataclasses import (
+        Layer2AllocationConfig,
+    )
+
+    with pytest.raises(ValueError, match="l2_deploy_crisis_mdd_margin"):
+        Layer2AllocationConfig.from_mapping({"l2_deploy_crisis_mdd_margin": 0.0})
+
+
+def test_layer2_allocation_config_from_mapping_legacy_params_without_new_fields_uses_defaults() -> None:
+    from src.domain.futures.strategy.tiered_workflow.dataclasses import (
+        Layer2AllocationConfig,
+    )
+
+    cfg = Layer2AllocationConfig.from_mapping({})
+    assert cfg.l2_deploy_crisis_mdd_margin == 0.30
+    assert cfg.l2_deploy_oos_budget_blend == 0.5
+    assert cfg.l2_deploy_oos_floor_cap == 4.0
+
+
+def test_layer2_allocation_config_explicit_new_fields() -> None:
+    from src.domain.futures.strategy.tiered_workflow.dataclasses import (
+        Layer2AllocationConfig,
+    )
+
+    cfg = Layer2AllocationConfig.from_mapping({
+        "l2_deploy_crisis_mdd_margin": 0.25,
+        "l2_deploy_oos_budget_blend": 0.6,
+        "l2_deploy_oos_floor_cap": 3.0,
+    })
+    assert cfg.l2_deploy_crisis_mdd_margin == 0.25
+    assert cfg.l2_deploy_oos_budget_blend == 0.6
+    assert cfg.l2_deploy_oos_floor_cap == 3.0
+
+
+def test_layer2_allocation_config_from_mapping_reads_l2_wf_n_folds() -> None:
+    from src.domain.futures.strategy.tiered_workflow.dataclasses import (
+        Layer2AllocationConfig,
+    )
+
+    cfg = Layer2AllocationConfig.from_mapping({"l2_wf_n_folds": 6})
+    assert cfg.l2_wf_n_folds == 6
+
+
+def test_layer2_allocation_config_from_mapping_rejects_l2_wf_n_folds_below_two() -> None:
+    from src.domain.futures.strategy.tiered_workflow.dataclasses import (
+        Layer2AllocationConfig,
+    )
+
+    with pytest.raises(ValueError, match="l2_wf_n_folds"):
+        Layer2AllocationConfig.from_mapping({"l2_wf_n_folds": 0})
+
+
+def test_layer2_allocation_config_from_mapping_legacy_params_without_l2_wf_n_folds_uses_default() -> None:
+    from src.domain.futures.strategy.tiered_workflow.dataclasses import (
+        Layer2AllocationConfig,
+    )
+
+    cfg = Layer2AllocationConfig.from_mapping({})
+    assert cfg.l2_wf_n_folds == 4
