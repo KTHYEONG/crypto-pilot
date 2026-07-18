@@ -569,6 +569,9 @@ class Layer2AllocationConfig:
     # D3: 결정론적 리스크 배치 파라미터 (fit-leg 기반, look-ahead-free)
     l2_deploy_enabled: bool = True
     l2_deploy_mdd_margin: float = 0.30
+    l2_deploy_crisis_mdd_margin: float = 0.30  # [SPEC_L2_DEPLOYMENT_MARGIN_CAGR_GATE] 위기 예산 고정, 탐색 불가
+    l2_deploy_oos_budget_blend: float = 0.5   # [SPEC] OOS 예산 블렌드 계수 (기존 oos_budget_blend 기본값)
+    l2_deploy_oos_floor_cap: float = 4.0      # [SPEC] OOS floor cap (기존 oos_floor_cap 기본값)
     l2_deploy_cvar_margin: float = 0.20
     # fit-leg 사용 시 MDD/CVaR 예산이 실제 binding → hard_cap 완화해도 안전.
     # OOS 대리(fallback) 시에도 mdd_margin=0.30이 완충.
@@ -695,6 +698,8 @@ class Layer2AllocationConfig:
     l2_crisis_min_observation_days: int = 300
     l2_crisis_min_usable_windows: int = 1
     l2_intra_symbol_divergence_dissent_boost_mult: float = 2.0
+    # [SPEC_L2_FOLD_GRANULARITY_ROBUSTNESS] L2 전용 walk-forward fold 개수
+    l2_wf_n_folds: int = 4
 
     @staticmethod
     def _as_int(value: object, default: int) -> int:
@@ -1047,6 +1052,15 @@ class Layer2AllocationConfig:
         )
         if not (0.0 < _l2_deploy_mdd_margin < 1.0):
             raise ValueError(f"l2_deploy_mdd_margin must be in (0, 1), got {_l2_deploy_mdd_margin}")
+
+        _l2_deploy_crisis_mdd_margin = cls._as_float(
+            params.get("l2_deploy_crisis_mdd_margin", _dc.l2_deploy_crisis_mdd_margin),
+            _dc.l2_deploy_crisis_mdd_margin,
+        )
+        if not (0.0 < _l2_deploy_crisis_mdd_margin < 1.0):
+            raise ValueError(
+                f"l2_deploy_crisis_mdd_margin must be in (0, 1), got {_l2_deploy_crisis_mdd_margin}"
+            )
         return cls(
             k_rank=cls._as_int(params.get("K_RANK", 3), 3),
             rebalance_bars=cls._as_int(params.get("REBALANCE_BARS", 3), 3),
@@ -1127,6 +1141,15 @@ class Layer2AllocationConfig:
             l2_worst_fold_penalty_weight=cls._as_float(params.get("l2_worst_fold_penalty_weight", 0.005), 0.005),
             l2_deploy_enabled=bool(params.get("l2_deploy_enabled", True)),
             l2_deploy_mdd_margin=_l2_deploy_mdd_margin,
+            l2_deploy_crisis_mdd_margin=_l2_deploy_crisis_mdd_margin,
+            l2_deploy_oos_budget_blend=cls._as_float(
+                params.get("l2_deploy_oos_budget_blend", _dc.l2_deploy_oos_budget_blend),
+                _dc.l2_deploy_oos_budget_blend,
+            ),
+            l2_deploy_oos_floor_cap=cls._as_float(
+                params.get("l2_deploy_oos_floor_cap", _dc.l2_deploy_oos_floor_cap),
+                _dc.l2_deploy_oos_floor_cap,
+            ),
             l2_deploy_cvar_margin=cls._as_float(params.get("l2_deploy_cvar_margin", 0.20), 0.20),
             l2_deploy_l_hard_cap=cls._as_float(params.get("l2_deploy_l_hard_cap", 20.0), 20.0),
             l2_deploy_fit_mdd_crisis_gate=l2_deploy_fit_mdd_crisis_gate,
@@ -1556,6 +1579,13 @@ class Layer2AllocationConfig:
                     _dc.l2_intra_symbol_divergence_dominant_damp_mult,
                 ),
                 0.0,
+            ),
+            l2_wf_n_folds=int(
+                cls._validate_range(
+                    "l2_wf_n_folds",
+                    cls._as_int(params.get("l2_wf_n_folds", _dc.l2_wf_n_folds), _dc.l2_wf_n_folds),
+                    2,
+                )
             ),
             l2_intra_symbol_divergence_dissent_boost_mult=cls._validate_range(
                 "l2_intra_symbol_divergence_dissent_boost_mult",
