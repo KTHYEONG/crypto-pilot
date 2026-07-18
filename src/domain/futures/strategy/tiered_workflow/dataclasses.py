@@ -558,6 +558,7 @@ class Layer2AllocationConfig:
     l2_objective_risk_util_weight: float = 0.03
     l2_objective_trade_target: int = 90
     l2_objective_trade_weight: float = 0.02
+    l2_objective_growth_lcb_weight: float = 0.0
     l2_replay_max_fallbacks: int = 24
     l2_worst_fold_penalty_threshold: float = -0.30
     l2_worst_fold_penalty_weight: float = 0.005
@@ -824,6 +825,11 @@ class Layer2AllocationConfig:
         l2_objective_trade_weight = cls._validate_range(
             "l2_objective_trade_weight",
             cls._as_float(params.get("l2_objective_trade_weight", 0.02), 0.02),
+            0.0,
+        )
+        l2_objective_growth_lcb_weight = cls._validate_range(
+            "l2_objective_growth_lcb_weight",
+            cls._as_float(params.get("l2_objective_growth_lcb_weight", 0.0), 0.0),
             0.0,
         )
         l2_replay_max_fallbacks = int(
@@ -1111,6 +1117,7 @@ class Layer2AllocationConfig:
             l2_objective_risk_util_weight=l2_objective_risk_util_weight,
             l2_objective_trade_target=l2_objective_trade_target,
             l2_objective_trade_weight=l2_objective_trade_weight,
+            l2_objective_growth_lcb_weight=l2_objective_growth_lcb_weight,
             l2_replay_max_fallbacks=l2_replay_max_fallbacks,
             l2_min_worst_fold_cagr=l2_min_worst_fold_cagr,
             l2_min_positive_block_delta_ratio=l2_min_positive_block_delta_ratio,
