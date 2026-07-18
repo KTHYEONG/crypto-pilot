@@ -493,3 +493,162 @@ class TestEvaluateL2TrialCrisisConstraint:
         # Two crisis replay calls used different configs — this verifies
         # crisis_replay_ctx is reused but config varies per trial.
         assert mock_gate.call_count == 2
+
+
+class TestEvaluateL2TrialGrowthLcbDeployed:
+    """Scenario 4 (Integration): growth_lcb_deployed가 leverage 억제 효과를 objective에 반영."""
+
+    def _make_sim(self) -> SimpleNamespace:
+        n_bars = 200
+        returns = [0.002] * n_bars  # deterministic positive returns
+        return SimpleNamespace(
+            rets_hybrid=returns,
+            rets_baseline=[0.001] * n_bars,
+            rets_baseline_ew=(),
+            fit_rets_hybrid=tuple(returns),
+            fit_rets_by_fold=(tuple(returns),),
+            trade_count=90,
+            fold_attributions=(),
+            fold_rets_hybrid=[returns],
+            fold_selected_symbols=[("BTCUSDT",)],
+            all_turnovers=[0.05] * n_bars,
+            all_gross_exposures=[1.0] * n_bars,
+            rebalance_count=10,
+            all_net_exposures=[1.0] * n_bars,
+            total_cost_hybrid=0.0003,
+            friction_pass_total=45,
+            signal_total=50,
+            cap_saturation_count=1,
+            support_leak_count=0,
+            last_selected=frozenset({"BTCUSDT"}),
+            last_w=MagicMock(),
+            capacity_diagnostics=None,
+        )
+
+    def _make_fold_diag(self) -> SimpleNamespace:
+        return SimpleNamespace(
+            fold_pass_ratio=1.0,
+            fold_compound_pass=(True,),
+            fold_unit_sharpes=(1.0,),
+            fold_deployed_cagrs=(0.10,),
+            fold_deployed_mdds=(0.05,),
+            fold_selected_symbols=(("BTCUSDT",),),
+            recent_fold_passed=True,
+            recent_fold_sharpe=1.0,
+            recent_fold_cagr=0.10,
+            recent_fold_mdd=0.05,
+            latest_to_median_cagr=1.0,
+        )
+
+    @patch("src.domain.futures.strategy.tiered_workflow.awf_sim._run_awf_simulation")
+    @patch("src.domain.futures.strategy.tiered_workflow.risk_deployment.compute_layer2_fold_diagnostics")
+    @patch("src.domain.futures.strategy.tiered_workflow.l2_gate.evaluate_layer2_gate")
+    @patch("src.domain.futures.strategy.tiered_workflow.risk_deployment.calibrate_deployment_leverage")
+    @patch("src.domain.futures.optimization.workflow.build_layer2_deployable_score")
+    @patch("src.domain.futures.optimization.workflow.build_layer_universe_audit")
+    def test_evaluate_l2_trial_leverage_suppressed_trial_scores_lower_with_growth_weight(
+        self,
+        mock_universe_audit: MagicMock,
+        mock_build_score: MagicMock,
+        mock_calibrate: MagicMock,
+        mock_gate: MagicMock,
+        mock_fold_diag: MagicMock,
+        mock_sim: MagicMock,
+    ) -> None:
+        """동일 sortino_hac_unit을 갖는 두 trial(A: L*=3.0, B: L*=1.0)에서
+        growth_lcb_weight>0 시 A의 objective_value가 B보다 유의미하게 높음.
+        growth_lcb_weight=0(레거시)에서는 A/B가 거의 동일."""
+        from src.domain.futures.strategy.tiered_workflow.dataclasses import (
+            Layer2AllocationConfig,
+        )
+
+        sim = self._make_sim()
+        # sim이 두 번 호출되는데, 같은 rets_hybrid이므로 sortino_hac_unit 동일
+        mock_sim.return_value = sim
+        mock_fold_diag.return_value = self._make_fold_diag()
+        mock_gate.return_value = SimpleNamespace(
+            optuna_constraint_values=(0.0,) * 10,
+            gate_passed=True,
+            blocker_reason="",
+        )
+        # 첫 호출 L*=3.0(high), 두 번째 호출 L*=1.0(floor, crisis-suppressed)
+        mock_calibrate.side_effect = [
+            (3.0, "mdd", 0.0),
+            (1.0, "crisis_constraint", 0.0),
+        ]
+        mock_build_score.return_value = SimpleNamespace(
+            cagr=0.0, sortino=0.0, sharpe=0.0, calmar=0.0, mdd=0.0,
+            fold_pass_ratio=0.0, score=0.0, worst_fold_cagr=0.0,
+        )
+
+        config = Layer2AllocationConfig.from_mapping({
+            "l2_objective_growth_lcb_weight": 0.3,
+        })
+        caps = SimpleNamespace()
+        aligned = SimpleNamespace(
+            symbols=("BTCUSDT",),
+            close_2d=MagicMock(),
+            datetimes=[MagicMock()] * 200,
+        )
+
+        result_high = evaluate_l2_trial(
+            cache=MagicMock(),
+            signal_batch=SimpleNamespace(start_idx=0, end_idx=200),
+            aligned=aligned,
+            awf_folds=(MagicMock(),),
+            config=config,
+            caps=caps,
+            tf="1h",
+        )
+
+        result_low = evaluate_l2_trial(
+            cache=MagicMock(),
+            signal_batch=SimpleNamespace(start_idx=0, end_idx=200),
+            aligned=aligned,
+            awf_folds=(MagicMock(),),
+            config=config,
+            caps=caps,
+            tf="1h",
+        )
+
+        # growth_lcb_weight=0.3일 때 L* 높은 trial(=high deployed scale)이 더 높은 objective
+        assert result_high.objective_value > result_low.objective_value, (
+            f"High L* trial ({result_high.deploy_leverage}) should score > low L* trial "
+            f"({result_low.deploy_leverage}) with growth_lcb_weight=0.3"
+        )
+
+        # growth_lcb_weight=0.0(legacy)에서는 차이가 거의 없어야 함
+        config_zero = Layer2AllocationConfig.from_mapping({
+            "l2_objective_growth_lcb_weight": 0.0,
+        })
+        mock_calibrate.side_effect = [
+            (3.0, "mdd", 0.0),
+            (1.0, "crisis_constraint", 0.0),
+        ]
+
+        result_high_zero = evaluate_l2_trial(
+            cache=MagicMock(),
+            signal_batch=SimpleNamespace(start_idx=0, end_idx=200),
+            aligned=aligned,
+            awf_folds=(MagicMock(),),
+            config=config_zero,
+            caps=caps,
+            tf="1h",
+        )
+
+        result_low_zero = evaluate_l2_trial(
+            cache=MagicMock(),
+            signal_batch=SimpleNamespace(start_idx=0, end_idx=200),
+            aligned=aligned,
+            awf_folds=(MagicMock(),),
+            config=config_zero,
+            caps=caps,
+            tf="1h",
+        )
+
+        diff_weight = result_high.objective_value - result_low.objective_value
+        diff_zero = result_high_zero.objective_value - result_low_zero.objective_value
+        assert diff_weight > diff_zero, (
+            f"Objective gap with weight=0.3 ({diff_weight:.6f}) should exceed "
+            f"gap with weight=0.0 ({diff_zero:.6f})"
+        )
