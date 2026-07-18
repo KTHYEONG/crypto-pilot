@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import dataclasses
+import gc
 import logging
 from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -668,6 +669,7 @@ def build_ltf_native_alpha_panels_streaming(
     from pathlib import Path
 
     from src.domain.futures.optimization.opt_config import OPT_FUTURES_CONFIG
+    from src.domain.futures.strategy.tiered_workflow.pipeline import _should_load_cache
 
     _cache_enabled = bool(OPT_FUTURES_CONFIG.get("LTF_PANEL_CACHE_ENABLED", True))
     _cache_dir_raw = str(OPT_FUTURES_CONFIG.get("LTF_PANEL_CACHE_DIR", "logs/futures/optimization/ltf_panel_cache"))
@@ -688,14 +690,19 @@ def build_ltf_native_alpha_panels_streaming(
         _fp = hashlib.sha1(_fp_src.encode()).hexdigest()[:16]  # noqa: S324
         _cache_path = _cache_dir / f"ltf_panels_{_fp}.pkl"
         if _cache_dir.exists() and _cache_path.exists():
-            try:
-                with open(_cache_path, "rb") as _cf:
-                    _logger.debug("[LTF-CACHE] hit fp=%s", _fp)
-                    _cached: tuple[CandidateSignalPanel, ...] = pickle.load(_cf)  # noqa: S301
-                    return _cached
-            except Exception:
-                _logger.warning("[LTF-CACHE] corrupt cache, recomputing")
-                _cache_path.unlink(missing_ok=True)
+            _st_mb = _cache_path.stat().st_size / (1024 * 1024)
+            if not _should_load_cache(_st_mb):
+                _logger.info("[LTF-CACHE] skip (RSS guard)")
+            else:
+                try:
+                    with open(_cache_path, "rb") as _cf:
+                        _logger.debug("[LTF-CACHE] hit fp=%s", _fp)
+                        _cached: tuple[CandidateSignalPanel, ...] = pickle.load(_cf)  # noqa: S301
+                        gc.collect()
+                        return _cached
+                except Exception:
+                    _logger.warning("[LTF-CACHE] corrupt cache, recomputing")
+                    _cache_path.unlink(missing_ok=True)
 
     if getattr(plan, "skip_reason", None) is not None:
         return ()
