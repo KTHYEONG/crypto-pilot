@@ -2,6 +2,11 @@
 
 This file holds historical architecture decision records (ADRs) that have been pruned from the active window.
 
+## [2026-07-16] [L2_NATIVE_TF_HANDOFF] [ADR_20260716_L2_NATIVE_TF_HANDOFF]
+- **Context/Why:** L2 required native timeframe artifacts but its runtime policy disabled L0, causing fail-closed missing event maps.
+- **Resolution/What:** Run L0 gate for multi-layer phases and normalize removed CLI defaults before the L1-to-L2 handoff.
+- **Impact:** Native artifacts now reach L1; current replay advances to master selection, which remains separately fail-closed.
+
 ## [2026-07-16] [TASK_L0_SLOW_TF_XS_CHALLENGER] [ADR_20260716_L0_SLOW_TF_XS_CHALLENGER]
 - **Context/Why:** 6h/1d는 구조 게이트와 pooled LCB가 양수인데도 개별 pair quality_weight_zero로 0건 승급이었고, 기존 XS residual family는 이 TF pool에 없었다.
 - **Resolution/What:** slow_tf_xs_challenger_enabled opt-in 아래 6h/1d pool에 residual_momentum_xs와 xs_residual_rebalance를 중복 없이 추가하고 해당 TF effective config에만 XS factor-level admission을 활성화했다.
