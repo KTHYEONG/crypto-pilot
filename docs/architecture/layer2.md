@@ -23,7 +23,7 @@ last_verified: 2026-07-10
 # 1. System Boundary
 - **In-Scope**:
   - Cross-sectional ranking, regime-conditional shrinkage, and diagonal Kelly sizing weight calculations.
-  - Optuna parameter tuning for 9 leverage-routing variables.
+  - Optuna parameter tuning for leverage-routing variables, with a 12-dim `constraints_func` vector (mdd/cvar/fold/recent_fold/active_blocks/friction/trades/crisis/**cagr/sharpe_uplift**) guiding constrained-TPE search directly toward the promotion gate.
   - Out-of-Sample leverage calibration ($L^*$) under drawdown and CVaR budgets.
 - **Out-of-Scope**:
   - Low-latency order routing and live execution client interfaces (managed in L3/Execution).
