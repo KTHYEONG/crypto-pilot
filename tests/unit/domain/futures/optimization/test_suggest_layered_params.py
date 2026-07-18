@@ -537,3 +537,23 @@ def test_objective_l2_growth_suggests_l2_deploy_mdd_margin_from_search_space() -
     assert spec["low"] == 0.05
     assert spec["high"] == 0.30
     assert spec["step"] == 0.05
+
+
+def test_suggest_layered_params_l2_regime_cell_admission_roundtrips_through_config() -> None:
+    """suggest_layered_params(L2)의 신규 3키가 Layer2AllocationConfig.from_mapping과 끊김없이 연결됨을 검증."""
+    from src.domain.futures.strategy.tiered_workflow.dataclasses import Layer2AllocationConfig
+
+    study = optuna.create_study(direction="maximize")
+    trial = study.ask()
+
+    l2_params = suggest_layered_params(trial, "L2")
+
+    assert l2_params["l2_regime_policy_mode"] in ("soft", "hybrid")
+    assert l2_params["l2_regime_hard_block_enabled"] in (False, True)
+    assert l2_params["l2_regime_pooled_is_passthrough"] in (False, True)
+
+    config = Layer2AllocationConfig.from_mapping(l2_params)
+
+    assert config.l2_regime_policy_mode == l2_params["l2_regime_policy_mode"]
+    assert config.l2_regime_hard_block_enabled == l2_params["l2_regime_hard_block_enabled"]
+    assert config.l2_regime_pooled_is_passthrough == l2_params["l2_regime_pooled_is_passthrough"]
