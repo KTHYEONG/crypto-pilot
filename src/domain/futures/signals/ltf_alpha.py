@@ -659,7 +659,44 @@ def build_ltf_native_alpha_panels_streaming(
     One symbol is loaded and reduced at a time.  Only base-grid accumulators
     survive between symbols, so peak source memory is independent of universe
     width.  ``load_frame`` must return a bounded 1m frame for the symbol.
+
+    Disk cache: fingerprint(windowing + symbols + families + LTFs + aligned shape).
+    Cache hit → pickle load (~2s). Cache miss → compute → pickle write.
     """
+    import hashlib
+    import pickle
+    from pathlib import Path
+
+    from src.domain.futures.optimization.opt_config import OPT_FUTURES_CONFIG
+
+    _cache_enabled = bool(OPT_FUTURES_CONFIG.get("LTF_PANEL_CACHE_ENABLED", True))
+    _cache_dir_raw = str(OPT_FUTURES_CONFIG.get("LTF_PANEL_CACHE_DIR", "logs/futures/optimization/ltf_panel_cache"))
+    _cache_dir: Path | None = Path(_cache_dir_raw) if _cache_enabled else None
+    _cache_path: Path | None = None
+    _fp: str = ""
+
+    if _cache_dir is not None:
+        _c = np.asarray(aligned.close_2d, dtype=np.float64)
+        _content_fp = str(hash((_c.shape, float(_c[0, 0]), float(_c[-1, 0]))))
+        _fp_src = (
+            f"{aligned.datetimes[0]}|{aligned.datetimes[-1]}|"
+            f"{aligned.close_2d.shape[0]}|{aligned.close_2d.shape[1]}|"
+            f"{sorted(getattr(plan, 'symbols', ()))}|"
+            f"{sorted(_LTF_NATIVE_FAMILIES)}|{sorted(_VALID_LTFS)}|"
+            f"{_content_fp}"
+        )
+        _fp = hashlib.sha1(_fp_src.encode()).hexdigest()[:16]  # noqa: S324
+        _cache_path = _cache_dir / f"ltf_panels_{_fp}.pkl"
+        if _cache_dir.exists() and _cache_path.exists():
+            try:
+                with open(_cache_path, "rb") as _cf:
+                    _logger.debug("[LTF-CACHE] hit fp=%s", _fp)
+                    _cached: tuple[CandidateSignalPanel, ...] = pickle.load(_cf)  # noqa: S301
+                    return _cached
+            except Exception:
+                _logger.warning("[LTF-CACHE] corrupt cache, recomputing")
+                _cache_path.unlink(missing_ok=True)
+
     if getattr(plan, "skip_reason", None) is not None:
         return ()
     symbols = tuple(getattr(plan, "symbols", ()))
@@ -759,4 +796,13 @@ def build_ltf_native_alpha_panels_streaming(
                 exit_policies=(),
             )
         )
-    return tuple(result)
+    _result = tuple(result)
+    if _cache_dir is not None and _cache_path is not None:
+        try:
+            _cache_dir.mkdir(parents=True, exist_ok=True)
+            with open(_cache_path, "wb") as _cf:
+                pickle.dump(_result, _cf, protocol=pickle.HIGHEST_PROTOCOL)
+            _logger.debug("[LTF-CACHE] saved fp=%s size=%.1fMB", _fp, _cache_path.stat().st_size / 1e6)
+        except Exception as _e:
+            _logger.warning("[LTF-CACHE] write failed: %s", _e)
+    return _result
