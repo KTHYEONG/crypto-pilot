@@ -1445,6 +1445,7 @@ def _run_tiered_l2_study(
     n_trials: int,
     seed: int,
     l2_sim_cache: Any = None,
+    crisis_rets: NDArray[np.float64] | None = None,
 ) -> Any:
     """Optuna objective_l2_growth로 best l2_params 탐색."""
 
@@ -1707,6 +1708,7 @@ def _run_tiered_l2_study(
         fixed_l1_params={"signal_batch": signal_batch},
         l2_sim_cache=l2_sim_cache,
         awf_folds=_awf_folds_l2,
+        crisis_rets=crisis_rets,
     )
 
     study_name = _layer2_experiment_key(
@@ -2058,6 +2060,7 @@ def _run_tiered_l2_study(
 from src.domain.futures.strategy.tiered_workflow.pipeline import (
     _l2_reversal_replay_variants,
     _temporary_reversal_env,
+    compute_crisis_unit_returns,
 )
 
 
@@ -2857,6 +2860,18 @@ def _run_strategy_stage(
             )
 
             l2_master_tf = _resolve_l2_master_tf_from_prior(l1_res, tiered_cfg)
+
+            _deployment_registry = getattr(l1_res, "deployment_registry", None)
+            _crisis_rets: NDArray[np.float64] | None = None
+            try:
+                _crisis_rets = compute_crisis_unit_returns(
+                    deployment_registry=_deployment_registry,
+                    strategy_cfg=tiered_cfg,
+                    tf=l2_master_tf,
+                )
+            except Exception:
+                _logger.warning("[L2-CRISIS-CEILING] compute failed, crisis_window disabled")
+
             l2_study_result = _run_tiered_l2_study(
                 signal_batch=l2_signals,
                 aligned=aligned_tiered,
@@ -2866,6 +2881,7 @@ def _run_strategy_stage(
                 tf=l2_master_tf,
                 n_trials=n_l2_trials,
                 seed=_seed,
+                crisis_rets=_crisis_rets,
                 l2_sim_cache=shared_l2_cache,
             )
             _log_mem(
