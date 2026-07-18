@@ -1496,6 +1496,7 @@ class TieredContext:
     l2_sim_cache: L2SimulationCache | None = None
     awf_folds: tuple[Any, ...] | None = None
     crisis_rets: NDArray[np.float64] | None = None
+    crisis_replay_ctx: Any | None = None
 
 
 def suggest_layered_params(
@@ -1763,6 +1764,7 @@ def evaluate_l2_trial(
     deploy_leverage_override: float | None = None,
     eval_tag: str = "unspecified",
     crisis_rets: NDArray[np.float64] | None = None,
+    crisis_replay_ctx: Any | None = None,
 ) -> Any:
     from src.domain.futures.portfolio.signal_composer import hours_per_bar_tf
     from src.domain.futures.strategy.tiered_workflow.awf_sim import _run_awf_simulation
@@ -2068,6 +2070,31 @@ def evaluate_l2_trial(
         or not np.isfinite(cagr_hybrid)
         or not np.isfinite(sharpe_hac_hybrid)
     )
+    _crisis_mdd_hybrid: float | None = None
+    _crisis_mdd_budget: float | None = None
+    if crisis_replay_ctx is not None:
+        try:
+            _crisis_sim = _run_awf_simulation(
+                cache=crisis_replay_ctx.cache,
+                signal_batch=crisis_replay_ctx.signal_batch,
+                aligned=crisis_replay_ctx.aligned,
+                awf_folds=crisis_replay_ctx.awf_folds,
+                config=config,
+                caps=caps,
+                tf=tf,
+                sim_origin="crisis_constraint",
+            )
+            _crisis_unit_rets = np.asarray(_crisis_sim.rets_hybrid, dtype=np.float64)
+            if _crisis_unit_rets.size >= 2:
+                _crisis_dep = apply_deployment(rets=_crisis_unit_rets, leverage=_l_star, bars_per_year=bars_per_year)
+                _crisis_mdd_hybrid = float(_crisis_dep.mdd)
+                _crisis_mdd_budget = float(config.l2_max_mdd_abs) * (1.0 - float(config.l2_deploy_mdd_margin))
+        except Exception:
+            _logger.warning(
+                "[L2-CRISIS-CONSTRAINT] trial=%d simulation_failed, crisis constraint skipped",
+                getattr(caps, "trial_number", 0),
+            )
+
     gate = evaluate_layer2_gate(
         deployment_failed=deployment_failed,
         support_leak_count=int(sim.support_leak_count),
@@ -2093,6 +2120,8 @@ def evaluate_l2_trial(
         positive_block_delta_ratio=float(positive_block_delta_ratio),
         fold_attributions=sim.fold_attributions,
         config=config,
+        crisis_mdd_hybrid=_crisis_mdd_hybrid,
+        crisis_mdd_budget=_crisis_mdd_budget,
     )
     deployable_score = build_layer2_deployable_score(
         cagr=float(cagr_hybrid),
@@ -2287,6 +2316,7 @@ def _evaluate_l2_params(
         caps=ctx.caps,
         tf=ctx.tf,
         crisis_rets=ctx.crisis_rets,
+        crisis_replay_ctx=ctx.crisis_replay_ctx,
     )
     t_elapsed = time.perf_counter() - t_start
 
@@ -2350,14 +2380,14 @@ def layer2_constraints_from_trial(trial: FrozenTrial) -> tuple[float, ...]:
     if not isinstance(raw, (list, tuple)):
         raw = trial.user_attrs.get("l2_constraint_values")
     if not isinstance(raw, (list, tuple)):
-        return (1.0,) * 9
+        return (1.0,) * 10
     resolved: list[float] = []
     for item in raw:
         try:
             resolved.append(float(item))
         except Exception:
             resolved.append(1.0)
-    while len(resolved) < 9:
+    while len(resolved) < 10:
         resolved.append(1.0)
     return tuple(resolved)
 

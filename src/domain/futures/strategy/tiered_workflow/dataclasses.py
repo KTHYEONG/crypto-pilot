@@ -19,8 +19,10 @@ if TYPE_CHECKING:
         QualifiedSignalRegistry,
         SignalSleeveKey,
         SymbolStrategyEvidence,
+        ValidatedSignalBatch,
         ValidatedSignalEvent,
     )
+    from src.domain.futures.strategy.common.alignment import AlignedMarketData
     from src.domain.futures.strategy.cs_rank import SymbolSignal
     from src.domain.futures.strategy.tiered_workflow.awf_sim import (
         DirectionalVetoSummary,
@@ -34,6 +36,7 @@ if TYPE_CHECKING:
         ValidationParityCapture,
         ValidationParityReport,
     )
+    from src.domain.futures.strategy.walk_forward import WFFold
 
 
 def _validate_directional_veto_action(value: str) -> Literal["drop_long", "zero_mu", "cap_mu"]:
@@ -1661,6 +1664,20 @@ class RegimeCellPolicy:
     n_fit: int
     n_cal: int
     reliability: float = 0.0
+
+
+
+@dataclass(slots=True, frozen=True)
+class CrisisReplayContext:
+    """Pre-loaded, trial-invariant crisis-window replay inputs.
+
+    Config is trial-specific (injected at call-site), so not included here.
+    """
+
+    cache: L2SimulationCache
+    signal_batch: ValidatedSignalBatch
+    aligned: AlignedMarketData
+    awf_folds: tuple[WFFold, ...]
 
 
 @dataclass(frozen=True, slots=True)
