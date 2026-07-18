@@ -84,6 +84,14 @@ OPT_FUTURES_CONFIG: dict[str, Any] = {
     "L2_OPTUNA_USE_MEMORY_STORAGE": True,
     # L2 signal batch disk cache 디렉토리
     "L2_SIGNAL_BATCH_CACHE_DIR": "logs/futures/optimization/l2_signal_cache",
+    # LTF alpha panel disk cache
+    "LTF_PANEL_CACHE_ENABLED": True,
+    "LTF_PANEL_CACHE_DIR": "logs/futures/optimization/ltf_panel_cache",
+    # L1 per-TF result disk cache
+    "L1_RESULT_CACHE_ENABLED": True,
+    "L1_RESULT_CACHE_DIR": "logs/futures/optimization/l1_result_cache",
+    # Maximum number of cache fingerprints to retain (LRU eviction)
+    "CACHE_MAX_FINGERPRINTS": 10,
     # Universal Cross-Sectional Alpha Miner Settings
     "FUTURES_ML_ALPHA_POPULATION": 1500,
     "FUTURES_ALPHA_LONG_BIAS": 2.0,
