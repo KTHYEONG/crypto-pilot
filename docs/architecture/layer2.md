@@ -44,9 +44,10 @@ $$w_s \propto f_k \cdot \frac{\mu_s}{\sigma_R^2}$$
 $$\sigma_R = \frac{q_{90} - q_{10}}{2.563} \quad (\text{Robust Volatility via quantiles})$$
 
 ### Leverage Calibration
-$$L^* = \text{clip}\left(\min(L_{\text{mdd}}, L_{\text{cvar}}), 1.0, 20.0\right)$$
+$$L^* = \text{clip}\left(\min(L_{\text{mdd}}, L_{\text{cvar}}, L_{\text{crisis}}), 1.0, 20.0\right)$$
 $$L^*_{\text{final}} = L^* \times \text{concentration\_ratio}$$
 - Concentration ratio is a haircut multiplier based on Choueifaty-Coignard Diversification Ratio (DR).
+- $L_{\text{mdd}}$ targets $\text{mdd\_cap} \times (1 - \text{mdd\_margin})$ (normal-market, searchable). $L_{\text{crisis}}$ targets $\text{mdd\_cap} \times (1 - \text{crisis\_mdd\_margin})$ — a decoupled, non-searchable target so CAGR-gate tuning cannot erode crisis-window MDD protection.
 
 # 3. Strict I/O Contract
 
@@ -79,3 +80,6 @@ graph TD
 | `l2_portfolio_cov_mode` | `"diagonal"` | Covariance covariance model configuration for Kelly weights |
 | `l2_max_cost_drag_ratio` | 0.60 | Hard ceiling for cumulative friction relative to gross returns |
 | `l2_leverage_diversification_gate_enabled` | False | Toggle to enable DR-based leverage haircut scaling |
+| `l2_deploy_mdd_margin` | 0.30 (searchable 0.05–0.30) | Normal-market leverage-ceiling safety margin |
+| `l2_deploy_crisis_mdd_margin` | 0.30 (fixed, non-searchable) | Crisis-window leverage-ceiling safety margin, decoupled from `l2_deploy_mdd_margin` |
+| `l2_wf_n_folds` | 4 (fixed, non-searchable) | L2-only walk-forward fold count, decoupled from the shared `CandidateStrategyConfig.wf_n_folds` used by L1/live/ablation |

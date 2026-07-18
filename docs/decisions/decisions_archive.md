@@ -2,6 +2,16 @@
 
 This file holds historical architecture decision records (ADRs) that have been pruned from the active window.
 
+## [2026-07-17] [TASK_L2_CRISIS_SURVIVAL_POLICY] [ADR_20260717_L2_CRISIS_SURVIVAL_POLICY]
+- **Context/Why:** 정상장 L2 스코어카드는 PASS했지만 독립 LUNA/FTX replay에서 champion이 MDD 29.01%와 CAGR -32.73%를 기록했고, 기존 위기 판정은 첫 window의 MDD만 확인해 production 승격을 막지 못함.
+- **Resolution/What:** CrisisWindowMetrics와 순수 evaluate_crisis_survival 정책을 도입하고, 모든 configured crisis window에 대해 데이터 충분성·MDD·CAGR·CVaR·거래 수를 함께 판정하도록 assess_crisis_reliability를 집계형으로 변경했다. 현재 L2 threshold에서 하나라도 실패하거나 데이터가 부족하면 apply_crisis_reliability_override가 gate를 monotonic fail-closed로 차단하며, 위기 결과는 Optuna selection에 재투입하지 않는다.
+- **Impact:** 동일 4h/2026-07-17/seed42 replay에서 L1 7TF 및 정상 L2 수치(CAGR +61.2%, Sharpe 2.026, MDD 19.9%)는 유지됐고, crisis replay는 stress_tested_fail/verified=False로 승격을 차단했다. 35 symbols·903 bars·50,532 events를 평가했으며 기존 false PASS 경로를 제거했다. Spec compliance와 전체 check PASS(Cov 35%).
+
+## [2026-07-17] [TASK_L2_TF_INCLUSION_GATE_NATIVE_TF_FIX] [ADR_20260717_L2_TF_INCLUSION_GATE_NATIVE_TF_FIX]
+- **Context/Why:** 위기 재현성 게이트 replay(2026-07-16)에서 mdd=0.0000 cagr=+0.0000이 정확히 0으로 산출. 코드 조사 결과 crisis-stress 전용 버그가 아니라, 커밋 c2831990(L1→L2 네이티브 TF 핸드오프)이 strategy_id 포맷을 TF 접미사 포함(donchian_72_8h)에서 family:variant(TF 별도 native_tf 필드)로 바꾼 뒤, C4 게이트의 OOS 필터(awf_sim.py:3205,3208)가 옛 정규식 파서 _parse_tf_from_strategy_id로 여전히 strategy_id를 파싱해 항상 unk를 반환 → included_tfs_by_fold와 매칭 실패 → 매 OOS bar 전체 sleeve 탈락. l2_tf_inclusion_enabled(기본값 True) 전 경로에 적용되는 전역 회귀였음.
+- **Resolution/What:** docs/specs/l2-tf-inclusion-gate-native-tf-fix.md 구현: cache.sleeve_to_tf(SSOT)로 (symbol, strategy_id)->native_tf 룩업(_build_sleeve_tf_lookup) 구축, OOS 필터가 파싱 대신 직접 조회하도록 변경. 죽은 파서 함수(_parse_tf_from_strategy_id)와 스텁 테스트(S4) 정리, 실제 필터 경로를 검증하는 통합 테스트로 교체.
+- **Impact:** A/B 실측(git stash 전/후 동일 champion registry로 assess_crisis_reliability 직접 실행): 수정 전 mdd=0.0000/cagr=+0.0000 재현, 수정 후 mdd=0.0635/cagr=-0.0093로 정상 산출 확인. 전체 L2 phase 재실행(2026-07-17)에서도 실제 champion registry(93심볼)로 mdd=0.2901 cagr=-0.3273 정상 산출(더 이상 0 아님). L1 수치 회귀 없음, /check PASS(spec compliance + ruff/mypy/pytest, Cov 45%). 산출된 CAGR -32.7%가 위기 방어 관점에서 허용 가능한지는 별도 정책 판단 필요(result.md 다음 조치 기록).
+
 ## [2026-07-17] [TASK_L2_GATE_SCORECARD_AND_CRISIS_RELIABILITY] [ADR_20260717_L2_GATE_SCORECARD_AND_CRISIS_RELIABILITY]
 - **Context/Why:** L2 스코어카드(format_layer2_table)의 개별 ✅/❌ 판정이 실제 Layer2AllocationConfig 값을 읽지 않고 하드코딩된 리터럴(uplift 0.20 등)로 재계산되어 실제 게이트(0.05)와 표시가 자기모순됐고, DSR/PSR 표시 역할이 실제 게이팅(PSR이 하드 블로커, DSR은 diagnostic)과 반대로 표시됐다. 또한 evaluation_window_bottleneck_verdict()가 계산하는 NO-CRISIS-WINDOW 여부가 텍스트 경고로만 출력되고 promotion_passed에 전혀 반영되지 않아, 위기 미검증 상태로도 PASS가 나갈 수 있었다(reversal kill-switch가 실제 위기 replay에서 손실을 악화시킨 것으로 반증된 사고가 사후 ad-hoc replay로만 발견됐던 사례가 이 공백의 실제 위험을 보여줌).
 - **Resolution/What:** format_layer2_table에 config 파라미터를 추가해 모든 임계값을 config.l2_min_*/l2_max_*에서 읽도록 SSOT화하고 PSR/DSR 표시 역할을 실제 게이팅과 일치시켰다. L1/L2/L3가 전혀 보지 않은 out-of-band 역사적 붕괴장(2022 LUNA+FTX 붕괴, 2022-04-01~2023-02-15, 챔피언 registry와 실제 겹치는 legacy 심볼만 사용)에 대해 champion의 이미 확정된 전략 정체성(rule-based family/variant)을 재학습 없이 그대로 적용해 생존 테스트하는 assess_crisis_reliability()/apply_crisis_reliability_override()를 신설하고 active_pipeline.py의 기존 사후 override 패턴(master_tf mismatch와 동일)에 배선했다. evaluate_layer2_gate/Optuna 200-trial 탐색 루프는 전혀 건드리지 않았다.
