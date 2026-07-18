@@ -39,14 +39,31 @@ class TestEvaluateLayer2GateCrisisConstraint:
         """[S1] crisis_mdd_hybrid > crisis_mdd_budget -> 10th slot 양수(위반)."""
         gate = evaluate_layer2_gate(**_BASE_KWARGS, crisis_mdd_hybrid=0.30, crisis_mdd_budget=0.21)
 
-        assert len(gate.optuna_constraint_values) == 10
-        assert gate.optuna_constraint_values[-1] == pytest.approx(0.09, abs=1e-6)
+        assert len(gate.optuna_constraint_values) == 12
+        assert gate.optuna_constraint_values[9] == pytest.approx(0.09, abs=1e-6)
 
     def test_evaluate_layer2_gate_crisis_constraint_absent_defaults_to_satisfied(self) -> None:
         """[S2] crisis_mdd_hybrid=None -> 10th slot -1.0(항상 만족), 기존 9개 제약 동일."""
         gate_with = evaluate_layer2_gate(**_BASE_KWARGS, crisis_mdd_hybrid=0.30, crisis_mdd_budget=0.21)
         gate_without = evaluate_layer2_gate(**_BASE_KWARGS, crisis_mdd_hybrid=None, crisis_mdd_budget=None)
 
-        assert len(gate_without.optuna_constraint_values) == 10
-        assert gate_without.optuna_constraint_values[-1] == pytest.approx(-1.0, abs=1e-6)
+        assert len(gate_without.optuna_constraint_values) == 12
+        assert gate_without.optuna_constraint_values[9] == pytest.approx(-1.0, abs=1e-6)
         assert gate_without.optuna_constraint_values[:9] == gate_with.optuna_constraint_values[:9]
+
+    def test_evaluate_layer2_gate_optuna_constraints_include_cagr_and_uplift(self) -> None:
+        """[S1] cagr>=0.30, sharpe_uplift>=0.05 -> optuna_constraint_values[10]<=0, [11]<=0."""
+        kwargs = dict(_BASE_KWARGS, cagr_hybrid=0.35, sharpe_hac_hybrid=1.2, sharpe_hac_baseline=1.0)
+        gate = evaluate_layer2_gate(**kwargs)
+
+        assert len(gate.optuna_constraint_values) == 12
+        assert gate.optuna_constraint_values[10] <= 0.0
+        assert gate.optuna_constraint_values[11] <= 0.0
+
+    def test_evaluate_layer2_gate_optuna_constraints_flag_cagr_violation(self) -> None:
+        """[S1] cagr_hybrid=0.10 (<0.30) -> optuna_constraint_values[10] > 0.0 (infeasible)."""
+        kwargs = dict(_BASE_KWARGS, cagr_hybrid=0.10, sharpe_hac_hybrid=1.2, sharpe_hac_baseline=1.0)
+        gate = evaluate_layer2_gate(**kwargs)
+
+        assert len(gate.optuna_constraint_values) == 12
+        assert gate.optuna_constraint_values[10] > 0.0
