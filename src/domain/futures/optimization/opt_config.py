@@ -92,6 +92,9 @@ OPT_FUTURES_CONFIG: dict[str, Any] = {
     "L1_RESULT_CACHE_DIR": "logs/futures/optimization/l1_result_cache",
     # Maximum number of cache fingerprints to retain (LRU eviction)
     "CACHE_MAX_FINGERPRINTS": 10,
+    # Pipeline cache memory guard
+    "CACHE_RSS_THRESHOLD_MB": 11500,           # RSS ceiling: skip cache load if exceeded
+    "CACHE_DESERIALIZE_EXPANSION_RATIO": 15.0, # file→memory expansion multiplier
     # Universal Cross-Sectional Alpha Miner Settings
     "FUTURES_ML_ALPHA_POPULATION": 1500,
     "FUTURES_ALPHA_LONG_BIAS": 2.0,
