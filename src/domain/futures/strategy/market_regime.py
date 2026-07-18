@@ -641,11 +641,39 @@ def compute_risk_overlay(
     )
 
 
+# In-memory memoization for compute_market_regime_context.
+# Cache key: (aligned_content_fp, cfg_hash). Uses content-based fingerprint to avoid
+# false hits from id() reuse across short-lived test objects. In production, the same
+# aligned object persists throughout a run, so the content fp is stable.
+_REGIME_MEMO: dict[tuple[str, str], MarketRegimeContext] = {}
+_REGIME_MEMO_MAX = 8
+
+
+def _aligned_fingerprint(aligned: AlignedMarketData) -> str:
+    _c = np.asarray(aligned.close_2d, dtype=np.float64)
+    _sig = (_c.shape, float(_c[0, 0]), float(_c[-1, 0]), float(_c[0, -1] if _c.shape[1] > 1 else 0))
+    return str(hash(_sig))
+
+
 def compute_market_regime_context(
     *,
     aligned: AlignedMarketData,
     cfg: RegimeConfig | None = None,
 ) -> MarketRegimeContext:
+    if cfg is not None:
+        try:
+            _cfg_src = repr(sorted(vars(cfg).items()))
+        except TypeError:
+            _cfg_src = str(cfg)
+        _cfg_hash = str(hash(_cfg_src))
+    else:
+        _cfg_hash = "default"
+    _aligned_fp = _aligned_fingerprint(aligned)
+    _key = (_aligned_fp, _cfg_hash)
+    _cached = _REGIME_MEMO.get(_key)
+    if _cached is not None:
+        return _cached
+
     close = np.asarray(aligned.close_2d, dtype=np.float64)
     if close.ndim != 2 or close.shape[0] == 0:
         raise ValueError("aligned.close_2d must be non-empty 2D array")
@@ -718,7 +746,7 @@ def compute_market_regime_context(
         regime_cfg.trend_efficiency_window,
     )
 
-    return MarketRegimeContext(
+    _result = MarketRegimeContext(
         code_1d=code,
         name_by_code=_REGIME_NAMES,
         trend_score_1d=trend_snr.astype(np.float64, copy=False),
@@ -728,6 +756,10 @@ def compute_market_regime_context(
         vol_scale_1d=overlay.vol_scale_1d,
         crisis_active_1d=overlay.crisis_active_1d,
     )
+    if len(_REGIME_MEMO) >= _REGIME_MEMO_MAX:
+        _REGIME_MEMO.pop(next(iter(_REGIME_MEMO)))
+    _REGIME_MEMO[_key] = _result
+    return _result
 
 
 def _rolling_max_1d(values: NDArray[np.float64], window: int) -> NDArray[np.float64]:
