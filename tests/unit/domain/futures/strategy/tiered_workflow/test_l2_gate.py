@@ -1,0 +1,52 @@
+"""Scenarios 1-2: evaluate_layer2_gate crisis constraint."""
+from __future__ import annotations
+
+import pytest
+
+from src.domain.futures.strategy.tiered_workflow.dataclasses import Layer2AllocationConfig
+from src.domain.futures.strategy.tiered_workflow.l2_gate import evaluate_layer2_gate
+
+_BASE_KWARGS = {
+    "deployment_failed": False,
+    "support_leak_count": 0,
+    "cagr_hybrid": 0.30,
+    "sharpe_hybrid": 1.0,
+    "sharpe_hac_hybrid": 1.0,
+    "sharpe_hac_baseline": 0.5,
+    "sortino_hybrid": 1.5,
+    "mar_hybrid": 2.0,
+    "mdd_hybrid": 0.10,
+    "cvar_95_hybrid": 0.03,
+    "fold_pass_ratio": 0.80,
+    "active_block_count": 10,
+    "friction_pass_pct": 0.90,
+    "trade_count": 50,
+    "growth_lcb_hybrid": 0.20,
+    "growth_lcb_baseline": 0.10,
+    "dsr_hybrid": None,
+    "psr_hybrid": 0.95,
+    "recent_fold_passed": True,
+    "recent_fold_sharpe": 1.0,
+    "worst_fold_cagr": -0.02,
+    "positive_block_delta_ratio": 0.60,
+    "fold_attributions": (),
+    "config": Layer2AllocationConfig(),
+}
+
+
+class TestEvaluateLayer2GateCrisisConstraint:
+    def test_evaluate_layer2_gate_crisis_constraint_violated_when_mdd_exceeds_budget(self) -> None:
+        """[S1] crisis_mdd_hybrid > crisis_mdd_budget -> 10th slot 양수(위반)."""
+        gate = evaluate_layer2_gate(**_BASE_KWARGS, crisis_mdd_hybrid=0.30, crisis_mdd_budget=0.21)
+
+        assert len(gate.optuna_constraint_values) == 10
+        assert gate.optuna_constraint_values[-1] == pytest.approx(0.09, abs=1e-6)
+
+    def test_evaluate_layer2_gate_crisis_constraint_absent_defaults_to_satisfied(self) -> None:
+        """[S2] crisis_mdd_hybrid=None -> 10th slot -1.0(항상 만족), 기존 9개 제약 동일."""
+        gate_with = evaluate_layer2_gate(**_BASE_KWARGS, crisis_mdd_hybrid=0.30, crisis_mdd_budget=0.21)
+        gate_without = evaluate_layer2_gate(**_BASE_KWARGS, crisis_mdd_hybrid=None, crisis_mdd_budget=None)
+
+        assert len(gate_without.optuna_constraint_values) == 10
+        assert gate_without.optuna_constraint_values[-1] == pytest.approx(-1.0, abs=1e-6)
+        assert gate_without.optuna_constraint_values[:9] == gate_with.optuna_constraint_values[:9]
