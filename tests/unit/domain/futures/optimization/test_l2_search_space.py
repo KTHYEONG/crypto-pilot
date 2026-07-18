@@ -40,3 +40,17 @@ class TestL2SearchSpace:
         assert spec["low"] == 0.05
         assert spec["high"] == 0.30
         assert spec["step"] == 0.05
+
+    def test_l2_search_space_includes_regime_cell_admission_keys(self) -> None:
+        assert L2_SEARCH_SPACE["l2_regime_policy_mode"] == {
+            "type": "categorical",
+            "choices": ("soft", "hybrid"),
+        }
+        assert L2_SEARCH_SPACE["l2_regime_hard_block_enabled"] == {
+            "type": "categorical",
+            "choices": (False, True),
+        }
+        assert L2_SEARCH_SPACE["l2_regime_pooled_is_passthrough"] == {
+            "type": "categorical",
+            "choices": (False, True),
+        }
