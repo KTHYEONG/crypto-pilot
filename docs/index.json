@@ -229,10 +229,11 @@
     "testing": "tests/unit/domain/futures/test_l0_naming_and_debug_observability.py"
   },
   "src/domain/futures/optimization/opt_config.py": {
-    "architecture": "docs/results/result.md",
+    "architecture": "docs/specs/pipeline_stage_caching.md",
     "testing": [
       "tests/unit/domain/futures/optimization/test_data_window_floor_consistency.py",
-      "tests/unit/domain/futures/optimization/test_opt_config.py"
+      "tests/unit/domain/futures/optimization/test_opt_config.py",
+      "tests/unit/domain/futures/strategy/tiered_workflow/test_l1_result_cache.py"
     ]
   },
   "src/domain/futures/validation/gates.py": {
