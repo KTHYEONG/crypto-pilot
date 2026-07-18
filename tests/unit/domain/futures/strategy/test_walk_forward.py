@@ -11,6 +11,7 @@ from src.domain.futures.strategy.walk_forward import (
     build_l1_swf_folds,
     build_l2_simulation_folds,
     build_walk_forward_folds,
+    resolve_l2_fold_cfg,
 )
 
 
@@ -278,3 +279,31 @@ def test_build_l1_nested_swf_folds_invalid_range_raises() -> None:
             max_label_horizon_bars=5,
             cfg=cfg,
         )
+
+
+# ---------------------------------------------------------------------------
+# [SPEC_L2_FOLD_GRANULARITY_ROBUSTNESS] resolve_l2_fold_cfg
+# ---------------------------------------------------------------------------
+class TestResolveL2FoldCfg:
+    def test_resolve_l2_fold_cfg_overrides_wf_n_folds_only(self) -> None:
+        cfg = _cfg(wf_n_folds=4)
+        overridden = resolve_l2_fold_cfg(cfg, 8)
+        unchanged = resolve_l2_fold_cfg(cfg, None)
+        assert overridden.wf_n_folds == 8
+        assert overridden is not cfg
+        assert unchanged is cfg
+
+    def test_resolve_l2_fold_cfg_returns_original_when_none(self) -> None:
+        cfg = _cfg(wf_n_folds=4)
+        result = resolve_l2_fold_cfg(cfg, None)
+        assert result is cfg
+
+    def test_resolve_l2_fold_cfg_returns_original_when_equal(self) -> None:
+        cfg = _cfg(wf_n_folds=4)
+        result = resolve_l2_fold_cfg(cfg, 4)
+        assert result is cfg
+
+    def test_resolve_l2_fold_cfg_rejects_n_folds_below_two(self) -> None:
+        cfg = _cfg(wf_n_folds=4)
+        with pytest.raises(ValueError, match="l2_wf_n_folds must be >= 2"):
+            resolve_l2_fold_cfg(cfg, 1)

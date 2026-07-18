@@ -23,4 +23,7 @@ L2_SEARCH_SPACE: dict[str, dict[str, Any]] = {
     "l2_objective_growth_lcb_weight": {"type": "float", "low": 0.0, "high": 1.0, "step": 0.1},
     # [ADR_20260718_L2_REGIME_SEVERITY_SIGNAL_REDESIGN] 방향-변동성 분리 cap-gating.
     "l2_regime_severity_gating_enabled": {"type": "categorical", "choices": (False, True)},
+    # [SPEC_L2_DEPLOYMENT_MARGIN_CAGR_GATE] 정상장 leverage 캘리브레이션 안전마진.
+    # crisis 예산(l2_deploy_crisis_mdd_margin)은 별도 고정 필드로 분리되어 있어 탐색 영향 없음.
+    "l2_deploy_mdd_margin": {"type": "float", "low": 0.05, "high": 0.30, "step": 0.05},
 }

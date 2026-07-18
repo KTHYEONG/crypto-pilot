@@ -27,3 +27,16 @@ class TestL2SearchSpace:
         assert L2_SEARCH_SPACE["l2_objective_growth_lcb_weight"]["high"] == 1.0
         assert "l2_regime_severity_gating_enabled" in L2_SEARCH_SPACE
         assert L2_SEARCH_SPACE["l2_regime_severity_gating_enabled"]["choices"] == (False, True)
+
+    def test_l2_search_space_excludes_crisis_and_oos_fields(self) -> None:
+        excluded = {"l2_deploy_crisis_mdd_margin", "l2_deploy_oos_budget_blend", "l2_deploy_oos_floor_cap"}
+        for key in excluded:
+            assert key not in L2_SEARCH_SPACE, f"{key} should not be in L2_SEARCH_SPACE"
+
+    def test_l2_deploy_mdd_margin_param_in_search_space(self) -> None:
+        assert "l2_deploy_mdd_margin" in L2_SEARCH_SPACE
+        spec = L2_SEARCH_SPACE["l2_deploy_mdd_margin"]
+        assert spec["type"] == "float"
+        assert spec["low"] == 0.05
+        assert spec["high"] == 0.30
+        assert spec["step"] == 0.05

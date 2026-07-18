@@ -98,8 +98,8 @@ def _parse_file_coverage(stdout: str, file_path: str) -> int | None:
 def _get_changed_lines(file_path: str) -> set[int]:
     """Return line numbers added/modified by git diff (uncommitted changes)."""
     try:
-        res = subprocess.run(
-            ["git", "diff", "--unified=0", "HEAD", "--", file_path],
+        res = subprocess.run(  # noqa: S603
+            ["git", "diff", "--unified=0", "HEAD", "--", file_path],  # noqa: S607
             capture_output=True, text=True, timeout=30,
         )
     except Exception:
@@ -158,8 +158,13 @@ def _check_spec_compliance(spec_path: str) -> tuple[int, list[JsonDiag]]:
             diagnostics.append(d)
             continue
         with open(fh) as sf:
-            pat = rf"^(?:class|def)\s+{re.escape(name)}\b"
-            if not re.search(pat, sf.read(), re.MULTILINE):
+            sf_content = sf.read()
+            if kind == "field":
+                field_name = name.split(".")[-1] if "." in name else name
+                pat = rf"\b{re.escape(field_name)}\s*(?::|=)"
+            else:
+                pat = rf"^(?:class|def)\s+{re.escape(name)}\b"
+            if not re.search(pat, sf_content, re.MULTILINE):
                 msg = f"Spec: {kind} '{name}' not implemented"
                 d = {"file": fh, "line": 0, "error": msg, "fix_hint": f"Implement {kind} {name} in {fh}"}
                 diagnostics.append(d)
