@@ -411,8 +411,9 @@ def test_gate_dsr_diagnostic_field_preserved() -> None:
     assert result.promotion_passed
     # _PROMOTION_BLOCKERS = 16개 항목 -> promotion_constraint_values = 16개
     assert len(result.promotion_constraint_values) == 16
-    # optuna_constraint_values = 9개 (별도 구조)
-    assert len(result.optuna_constraint_values) == 9
+    # optuna_constraint_values = 10개 (별도 구조, ADR_20260718_L2_CRISIS_AWARE_OPTUNA_CONSTRAINT의
+    # crisis_mdd_hybrid 10번째 슬롯 포함 — crisis 인자 미전달 시 -1.0 sentinel로 항상 만족)
+    assert len(result.optuna_constraint_values) == 10
 
 
 # ---------------------------------------------------------------------------
@@ -524,3 +525,76 @@ def test_layer2_allocation_config_new_gate_defaults() -> None:
     assert config.l2_min_sortino == pytest.approx(1.5, rel=1e-9)
     assert config.l2_min_sharpe_abs == pytest.approx(0.7, rel=1e-9)
     assert config.l2_min_calmar == pytest.approx(0.5, rel=1e-9)
+
+
+# ---------------------------------------------------------------------------
+# E2: _shape_efficiency_l2_objective — growth_lcb_deployed 블렌드 (Scenarios 1-3)
+# ---------------------------------------------------------------------------
+# Scenario 1: growth term scales with weight
+# Scenario 2: zero weight = legacy; non-finite growth_lcb_deployed safe fallback
+# Scenario 3: empty deployed rets → growth_lcb_deployed is large negative → finite clipped
+# ---------------------------------------------------------------------------
+
+
+def test_shape_efficiency_l2_objective_growth_term_scales_with_weight() -> None:
+    """동일 sortino_hac_unit, growth_lcb_deployed=0.30 고정,
+    growth_lcb_weight=0.0 → 0.5 시 objective가 0.5*0.30=0.15만큼 증가."""
+    base_kwargs: dict[str, float] = {
+        "sortino_hac_unit": 2.0,
+        "worst_fold_sortino": 0.0,
+        "worst_fold_threshold": -0.30,
+        "worst_fold_weight": 0.005,
+        "downside_dispersion": 0.0,
+        "risk_util_weight": 0.0,
+        "trade_weight": 0.0,
+    }
+    growth_val = 0.30
+    obj_zero = _shape_efficiency_l2_objective(growth_lcb_deployed=growth_val, growth_lcb_weight=0.0, **base_kwargs)
+    obj_half = _shape_efficiency_l2_objective(growth_lcb_deployed=growth_val, growth_lcb_weight=0.5, **base_kwargs)
+    expected_diff = 0.5 * growth_val
+    assert math.isclose(obj_half - obj_zero, expected_diff, rel_tol=1e-9, abs_tol=1e-12)
+
+
+def test_shape_efficiency_l2_objective_growth_weight_zero_matches_legacy() -> None:
+    """growth_lcb_weight=0.0 시 legacy(신규 파라미터 없는) 호출과 동일한 값."""
+    base_kwargs: dict[str, float] = {
+        "sortino_hac_unit": 1.5,
+        "worst_fold_sortino": -0.5,
+        "worst_fold_threshold": -0.30,
+        "worst_fold_weight": 0.005,
+        "downside_dispersion": 0.01,
+        "risk_util_realized": 0.40,
+        "risk_util_target": 0.50,
+        "risk_util_weight": 0.03,
+        "trade_count": 50,
+        "trade_target": 90,
+        "trade_weight": 0.02,
+    }
+    legacy = _shape_efficiency_l2_objective(**base_kwargs)
+    with_new = _shape_efficiency_l2_objective(growth_lcb_deployed=999.0, growth_lcb_weight=0.0, **base_kwargs)
+    assert math.isclose(legacy, with_new, rel_tol=1e-9, abs_tol=1e-12)
+
+    nan_safe = _shape_efficiency_l2_objective(
+        growth_lcb_deployed=float("nan"), growth_lcb_weight=1.0, **base_kwargs
+    )
+    assert math.isclose(nan_safe, legacy, rel_tol=1e-9, abs_tol=1e-12)
+
+
+def test_evaluate_l2_trial_empty_deployed_rets_growth_lcb_deployed_is_neg_large() -> None:
+    """빈 deployed 수익률 → growth_lcb_deployed = -1e6.
+    growth_lcb_weight가 곱해져도 finite 상한 유지 → objective 폭주 없음."""
+    base_kwargs: dict[str, float] = {
+        "sortino_hac_unit": 2.0,
+        "worst_fold_sortino": 0.0,
+        "worst_fold_threshold": -0.30,
+        "worst_fold_weight": 0.005,
+        "downside_dispersion": 0.0,
+        "risk_util_weight": 0.0,
+        "trade_weight": 0.0,
+    }
+    growth_val = float("-1e6")
+    obj = _shape_efficiency_l2_objective(growth_lcb_deployed=growth_val, growth_lcb_weight=0.3, **base_kwargs)
+    assert np.isfinite(obj)
+    # growth term = 0.3 * (-1e6) = -300_000. base objective ~2.0. result ≈ -299_998.
+    expected = base_kwargs["sortino_hac_unit"] + 0.3 * growth_val
+    assert math.isclose(obj, expected, rel_tol=1e-9, abs_tol=1e-6)

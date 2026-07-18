@@ -1676,17 +1676,21 @@ def _shape_efficiency_l2_objective(
     trade_weight: float = 0.02,
     mean_turnover: float = 0.0,
     turnover_penalty_weight: float = 0.0,
+    growth_lcb_deployed: float = 0.0,
+    growth_lcb_weight: float = 0.0,
 ) -> float:
-    """Scale-invariant Sortino_HAC_unit 기반 shape 최적화 목적함수.
+    """Scale-invariant Sortino_HAC_unit 기반 shape + deployed growth 블렌드 목적함수.
 
-    J = Sortino_HAC_unit - lambda_w * max(0, tau_wf - worst_fold_sortino)
+    J = Sortino_HAC_unit + growth_lcb_weight * growth_lcb_deployed
+        - lambda_w * max(0, tau_wf - worst_fold_sortino)
         - lambda_d * downside_dispersion
-        - risk_util_weight * max(0, risk_util_target - risk_util_realized)  [RC-2 soft penalty]
-        - trade_weight * max(0, trade_target - trade_count) / trade_target  [RC-2 soft penalty]
-        - turnover_penalty_weight * mean_turnover                        [C4: cost-aware]
+        - risk_util_weight * max(0, risk_util_target - risk_util_realized)
+        - trade_weight * max(0, trade_target - trade_count) / trade_target
+        - turnover_penalty_weight * mean_turnover
 
-    scale-invariant 1차항 유지 + soft 2차항으로 배치 가능성 약한 gradient 부여.
-    weight ≤ 0.03 유지 → 1차 shape 압도 방지 (quant.md §0 Anti-Overfitting).
+    growth_lcb_deployed 항이 leverage 억제 효과를 objective에 전달하여,
+    shape만 좋고 L*가 낮은 trial이 챔피언으로 선택되는 괴리를 해소.
+    growth_lcb_weight=0.0 → legacy 동작(no-op, 하위호환).
 
     Args:
         sortino_hac_unit: HAC 조정 unit-vol Sortino (1차 목적, scale-invariant).
@@ -1695,14 +1699,16 @@ def _shape_efficiency_l2_objective(
         worst_fold_weight: worst-fold 페널티 가중치 λ_w.
         downside_dispersion: 하방 분산 λ_d·dispersion 항.
         lambda_w: 미사용 호환 파라미터 (worst_fold_weight 우선).
-        risk_util_realized: 실현 리스크 활용도 (MDD/MDD_cap). RC-2 dead param 활성화.
-        risk_util_target: 리스크 활용 목표 (기본 0.50). soft 패널티 기준.
+        risk_util_realized: 실현 리스크 활용도 (MDD/MDD_cap).
+        risk_util_target: 리스크 활용 목표 (기본 0.50).
         risk_util_weight: risk_util soft 패널티 가중치 (≤ 0.03 유지).
-        trade_count: 실현 거래 횟수. scale 정합 soft 패널티 입력.
-        trade_target: 목표 거래 횟수 (기본 90). soft 패널티 기준.
+        trade_count: 실현 거래 횟수.
+        trade_target: 목표 거래 횟수 (기본 90).
         trade_weight: trade_count soft 패널티 가중치 (≤ 0.02 유지).
-        mean_turnover: 평균 리밸런싱 turnover 비율 (C4 turnover penalty 입력).
-        turnover_penalty_weight: turnover 페널티 가중치 λ_t (0=off, 기본 0.0).
+        mean_turnover: 평균 리밸런싱 turnover 비율.
+        turnover_penalty_weight: turnover 페널티 가중치 λ_t.
+        growth_lcb_deployed: deployed-scale growth LCB (배치 인지 성장 신호).
+        growth_lcb_weight: growth_lcb_deployed 블렌드 가중치 (0.0=no-op).
 
     Returns:
         float: 목적함수 값. 비정상 입력 시 -1e6 fail-fast 반환.
@@ -1717,8 +1723,10 @@ def _shape_efficiency_l2_objective(
         0.0, (float(trade_target) - float(trade_count)) / max(float(trade_target), 1.0)
     )
     turnover_penalty = float(turnover_penalty_weight) * float(mean_turnover)
+    growth_term = float(growth_lcb_weight) * float(growth_lcb_deployed) if np.isfinite(growth_lcb_deployed) else 0.0
     return float(
         sortino_hac_unit
+        + growth_term
         - worst_fold_penalty
         - float(downside_dispersion)
         - risk_util_penalty
@@ -1955,6 +1963,16 @@ def evaluate_l2_trial(
         z_value=float(config.l2_growth_lcb_z),
     )
 
+    block_growth_deployed = _contiguous_block_log_growth(
+        _dep.scaled_rets,
+        block_bars=block_size,
+    )
+    growth_lcb_deployed = _growth_lower_confidence_bound(
+        block_growth_deployed,
+        blocks_per_year=blocks_per_year,
+        z_value=float(config.l2_growth_lcb_z),
+    )
+
     block_metrics: list[Layer2BlockMetric] = []
     n_blocks = max(len(block_growth_hybrid), len(block_growth_baseline))
     for block_idx in range(n_blocks):
@@ -2061,6 +2079,8 @@ def evaluate_l2_trial(
         trade_weight=float(config.l2_objective_trade_weight),
         mean_turnover=float(np.mean(sim.all_turnovers)) if sim.all_turnovers else 0.0,
         turnover_penalty_weight=float(config.l2_turnover_penalty_weight),
+        growth_lcb_deployed=float(growth_lcb_deployed),
+        growth_lcb_weight=float(getattr(config, "l2_objective_growth_lcb_weight", 0.0)),
     )
     # growth_lcb는 diagnostic으로 강등 — objective에서 제외 (RC-2 해소)
     deployment_objective_bonus = float(objective_value - finite_score)
