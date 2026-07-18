@@ -119,13 +119,24 @@ def log_optuna_contract(
     return payload
 
 
-def setup_optuna_storage(project_root: str | Path) -> tuple[str, optuna.storages.BaseStorage]:
+def setup_optuna_storage(
+    project_root: str | Path,
+    *,
+    use_memory: bool = False,
+) -> tuple[str, optuna.storages.BaseStorage]:
     """SQLite WAL 기반 RDBStorage를 생성하고 반환한다.
+
+    Args:
+        project_root: 프로젝트 루트 경로.
+        use_memory: True면 InMemoryStorage 반환 (disk I/O 회피).
 
     Returns:
         (storage_url, storage) 튜플.
-        storage_url: "sqlite:///absolute/path/to/optuna.db" 형식.
+        storage_url: "sqlite:///absolute/path/to/optuna.db" 형식 (use_memory=False).
     """
+    if use_memory:
+        return "", optuna.storages.InMemoryStorage()
+
     import sqlite3
 
     db_dir = Path(project_root) / "logs" / "futures" / "optimization"
@@ -138,10 +149,14 @@ def setup_optuna_storage(project_root: str | Path) -> tuple[str, optuna.storages
         conn.execute("PRAGMA synchronous=NORMAL")
 
     storage_url = f"sqlite:///{db_path.resolve()}"
-    storage = optuna.storages.RDBStorage(
-        storage_url,
-        engine_kwargs={"connect_args": {"timeout": 60, "check_same_thread": False}},
-    )
+    try:
+        storage = optuna.storages.RDBStorage(
+            storage_url,
+            engine_kwargs={"connect_args": {"timeout": 60, "check_same_thread": False}},
+        )
+    except Exception:
+        _logger.warning("[OPT-STORAGE] RDBStorage failed, falling back to InMemoryStorage")
+        return "", optuna.storages.InMemoryStorage()
 
     return storage_url, storage
 
