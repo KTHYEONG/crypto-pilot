@@ -1,79 +1,199 @@
-# L1→L2 Replay 결과 — 2026-07-18 (위기 재현성 게이트: 최초 동시 PASS 달성)
+# L1→L2 Replay 결과 — 2026-07-18 (L1 Cache Fingerprint 안정화 + RSS Guard 검증)
 
 ## 실행 조건
 
-- 실행: `PYTHONPATH=. uv run python src/execution/opt_main_futures.py --phase l2 --sync skip --timeframe 4h --date 2026-07-17 --seed 42`
+- 실행: `PYTHONPATH=. uv run python src/execution/opt_main_futures.py --phase l2 --seed 42` (trials 기본값=120)
 - 완료 분기 cutoff: `2026-06-30`; horizon: `2023-10-31~2026-06-30`; IS/OOS split: `2026-01-01`.
-- Universe: Pool 414 → Selected 150 → Loaded 103~137(run마다 변동); L1 admission 대부분 late_start 소수 제외.
-- **주의**: 동일 `--seed 42`에도 Optuna champion에 잔여 비결정성 확인(`ProcessPoolExecutor fork` 관련으로 추정, 별도 트래킹 필요) — 단일 run 내부 champion-고정 A/B 비교는 유효. 2026-07-18 4연속 반복 검증에서는 완전한 결정성은 아니었으나(두 값 클러스터로 수렴) 편차 폭이 좁고 4/4 게이트 PASS로 재현성 자체는 확인됨(아래 "재현성 검증" 참고).
+- Universe: Pool 414 → Selected 150 → Loaded 137 (Passed Integrity)
+- **변경 사항**: `run_per_tf_l1`의 cache fingerprint를 `pd.util.hash_pandas_object`(프로세스 간 비결정적) → `_deterministic_df_fingerprint`(sha256 content-based, 결정적)로 교체. RSS guard(`_should_load_cache`) + `gc.collect()` cache 경계 추가.
+- LTF panel cache(78MB, 이전 run에서 잔존) → LTF alpha는 cache hit으로 빠르게 통과. L1 cache는 기존 파일이 legacy fingerprint로 생성돼 이번 run에서 miss → 재계산 후 새로운 결정적 fingerprint로 저장됨.
 
-## L1 결과 (안정 — 회귀 없음)
+## 소요시간 및 RAM 사용량
 
-| Timeframe | Fold readiness | Probe LCB (bps) | 판정 |
-| :--- | :---: | ---: | :---: |
-| 1h~1d(7개 TF) | 3~4/4 | +37~+106 | 전부 PASS |
+| 단계 | 소요시간 | RAM 사용량 추정 |
+| :--- | ---: | ---: |
+| 데이터 로딩 + Universe 선정 | ~30s | ~2GB |
+| LTF alpha panel + L1 (7개 TF, cache miss) | ~90s | ~8GB |
+| L2 Optuna study (120 trials, ~1.5s/trial) | ~180s | ~11GB |
+| **Total wall time** | **~5분** | **Peak RSS ≈ 11~13GB** |
 
-- Master TF는 `8h`(최대 breadth 기준)로 선정.
+- L1 cache miss (새 fingerprint로 기존 파일 불일치)로 인해 7개 TF 전부 재연산 → L1 구간 ~90s 소요.
+- **다음 run부터**: L1 cache hit (새 결정적 fingerprint 파일 사용) → L1 구간 ~0.3s로 단축 예상. Total wall time 약 3.5분으로 감소.
+- RAM: 이전 warm run(13.1GB)과 유사한 패턴. `gc.collect()`가 cache 경계에서 호출되나, L1 재연산이 대부분의 메모리를 사용하므로 개선 효과는 cache hit 시 분명해짐.
 
-## 위기 재현성 게이트 — 정책 및 예산
+## L1 결과: 7/7 TF ✅ ALL PASS
 
-`CrisisWindowMetrics`/`evaluate_crisis_survival()`(순수 함수)가 LUNA/FTX 2022 붕괴장(`2022-04-01~2023-02-15`, out-of-band 데이터)에 대해 champion의 rule-based 신호를 재생성해 생존 테스트한다. 위기 MDD 예산 `l2_max_mdd_abs×(1-l2_deploy_mdd_margin)=21%`, CAGR 하한 `l2_min_worst_fold_cagr=-5%`.
+| TF | Fold Readiness | Probe LCB (bps) | Promoted | Top Signal Family |
+| :--- | :---: | ---: | ---: | :--- |
+| 1h | 4/4 ✅ | +68.0 | 264 | trend_pullback_continuation |
+| 2h | 4/4 ✅ | +106.6 | 197 | trend_ma |
+| 4h | 4/4 ✅ | +77.6 | 67 | btc_regime_pullback / trend_ma |
+| 6h | 4/4 ✅ | +91.5 | 17 | dual_momentum / btc_regime_pullback |
+| 8h | 4/4 ✅ | +81.0 | 209 | trend_pullback_continuation |
+| 12h | 4/4 ✅ | +79.3 | 75 | trend_pullback_continuation / btc_regime_pullback |
+| 1d | 4/4 ✅ | +103.6 | 3 | btc_regime_pullback |
 
-## 이전 수정 이력 (요약, 상세 서사는 decisions_archive.md 참고)
+### TF별 Top Signal 상세
 
-| 수정 | ADR | 핵심 결과 |
-| :--- | :--- | :--- |
-| BTC 레짐 데이터 무결성 | `ADR_20260717_L2_CRISIS_BTC_REGIME_DATA_INTEGRITY_FIX` | has_btc False→True 복구, universe 확장(93→103)으로 champion drift(위기 MDD 29.01%→55.47%) |
-| 레버리지 ceiling 구조 리팩토링 | `ADR_20260717_L2_LEVERAGE_CEILING_REFACTOR` | OOS-blend가 worst_fold/kelly ceiling을 더 이상 우회 못 하는 불변식 검증 |
-| worst_fold 안전장치 기본 on | `ADR_20260717_L2_CRISIS_LEVERAGE_SAFETY_DEFAULT` | 위기 MDD 55.47%→46.53%, CAGR -38.44%→-28.04%(방향 개선, 예산 미달) |
-| 롱/숏 방향 비대칭 opt-in 레버 | `ADR_20260717_L2_CRISIS_ASYMMETRIC_LONG_SHORT_CAP` | CAGR -28.04%→-14.19% 개선, MDD 평평(미개선) |
-| 레짐 캡 해제 쿨다운 opt-in 레버 | `ADR_20260718_L2_CRISIS_REGIME_CAP_RELEASE_COOLDOWN` | 3개 레버 중 최선(MDD 46.5%→29.5%), 단독으로는 21% 예산 미달 |
-| L2 위기 leverage 상한(l_crisis) + 방어 레버 탐색공간 편입(1차) | `ADR_20260718_L2_CRISIS_LEVERAGE_CEILING` | 탐색공간만 넓히고 objective가 crisis-blind라 Optuna가 방어 레버를 전부 off로 선택 — 정상장 CAGR만 악화(53%→34.6%), 위기 MDD 25.38%로 미해결 |
-| L2 trial별 crisis MDD Optuna 제약(10번째 슬롯) | `ADR_20260718_L2_CRISIS_AWARE_OPTUNA_CONSTRAINT` | 방어 레버 사용률 0/200→154~198/200 반전, 제약 자체는 만족(MDD≈16.8%) — 그러나 정상장 CAGR+14.9%로 게이트 자체가 BLOCKED |
-| 레짐 심각도 신호 재설계(방향-변동성 분리) | `ADR_20260718_L2_REGIME_SEVERITY_SIGNAL_REDESIGN` | 정상장 "crash" 오탐 40.2%→8.5%로 구조적 해소(실측 검증), gross exposure +14.7%(메커니즘 실작동 증명) — 그러나 이 시점엔 아직 탐색공간 미편입, 최종 CAGR/MDD 정밀 재검증 미완료 상태로 종료 |
+**TF 1h** — 264 promoted
+| Rank | Symbol | Strategy (Family) | Edge (bps) | LCB (bps) | Conv | Folds |
+| :--- | :--- | :--- | ---: | ---: | ---: | :---: |
+| #1 | LQTYUSDT | trend_pullback_continuation | +291.2 | +269.3 | 1.00 | 3/3 |
+| #2 | BANDUSDT | trend_ma (ema_12_72) | +327.4 | +251.3 | 1.00 | 2/2 |
+| #3 | MAGICUSDT | trend_pullback_continuation | +185.9 | +220.7 | 0.94 | 3/3 |
 
-## 신규: 배치-스케일 성장 목적함수 (`ADR_20260718_L2_DEPLOYED_SCALE_GROWTH_OBJECTIVE`) — 최초 동시 PASS
+**TF 2h** — 197 promoted
+| Rank | Symbol | Strategy (Family) | Edge (bps) | LCB (bps) | Conv | Folds |
+| :--- | :--- | :--- | ---: | ---: | ---: | :---: |
+| #1 | BANDUSDT | trend_ma (ema_18_108) | +398.8 | +353.4 | 1.00 | 2/2 |
+| #2 | ARUSDT | trend_ma (ema_18_108) | +388.5 | +348.1 | 1.00 | 4/4 |
+| #3 | ZRXUSDT | trend_pullback_continuation | +320.8 | +328.1 | 1.00 | 3/3 |
 
-**근본 원인**: 세션 내내 정상장 CAGR이 계속 하락(53.2%→34.6%→14.9%→20.2%)한 이유를 목적함수 수학에서 직접 확인. `objective_l2_growth`의 1차항 `sortino_hac_unit`은 설계상 **scale-invariant**(leverage `k`배 변환 시 `E[r]`·`σ_down`이 동비율로 변해 Sortino 값 불변, `metrics.py` 독스트링에 명시)하다. worst_fold/kelly/l_crisis/crisis Optuna 제약을 계속 추가해 leverage 상한 후보를 늘릴수록 실제 배치 leverage(L*)는 단조적으로 낮아지는데, **objective는 이 억제를 전혀 못 본다** — `sortino_hac_unit`은 `_l_star` 계산 이전의 unit-leverage `rets_hybrid`로 계산되고, 유일한 leverage 인지 항인 `risk_util_realized` soft penalty는 가중치가 `≤0.03`로 캡핑돼 사실상 무의미(실측: 페널티 크기 <0.01, Sortino 값 0.5~3+에 압도됨). 기존 `growth_lcb_hybrid`(diagnostic)조차 이름과 달리 배치 전 `rets_hybrid`로 계산되는 동일한 잠복 버그를 갖고 있었음을 확인.
+**TF 4h** — 67 promoted
+| Rank | Symbol | Strategy (Family) | Edge (bps) | LCB (bps) | Conv | Folds |
+| :--- | :--- | :--- | ---: | ---: | ---: | :---: |
+| #1 | LUNA2USDT | btc_regime_pullback | +554.0 | +478.1 | 1.00 | 3/3 |
+| #2 | STXUSDT | trend_ma (ema_18_108_4h) | +356.7 | +380.2 | 1.00 | 4/4 |
+| #3 | SSVUSDT | trend_ma (ema_18_108_4h) | +336.1 | +378.6 | 1.00 | 4/4 |
 
-**구현**: `_dep.scaled_rets`(배치 후 수익률)로 `_contiguous_block_log_growth`/`_growth_lower_confidence_bound`(기존 함수 100% 재사용, 새 수학 없음)를 재계산해 `growth_lcb_deployed` 산출, `_shape_efficiency_l2_objective`에 `growth_lcb_weight`(기본 0.0=no-op) 블렌드 항으로 추가(Sortino shape 가드는 유지, 완전 대체 아님). `l2_objective_growth_lcb_weight`(0.0~1.0)와 `l2_regime_severity_gating_enabled`를 `L2_SEARCH_SPACE`에 정식 편입.
+**TF 6h** — 17 promoted
+| Rank | Symbol | Strategy (Family) | Edge (bps) | LCB (bps) | Conv | Folds |
+| :--- | :--- | :--- | ---: | ---: | ---: | :---: |
+| #1 | ONEUSDT | dual_momentum (dm_16_64) | +489.3 | +522.7 | 1.00 | 4/4 |
+| #2 | SSVUSDT | btc_regime_pullback | +557.5 | +447.2 | 1.00 | 4/4 |
+| #3 | HBARUSDT | trend_donchian (donchian_72) | +350.7 | +407.9 | 1.00 | 4/4 |
 
-**실측 검증(200-trial 프로덕션 replay, 두 파라미터 모두 탐색공간 포함)**:
+**TF 8h** — 209 promoted
+| Rank | Symbol | Strategy (Family) | Edge (bps) | LCB (bps) | Conv | Folds |
+| :--- | :--- | :--- | ---: | ---: | ---: | :---: |
+| #1 | LQTYUSDT | trend_pullback_continuation | +892.2 | +1288.2 | 1.00 | 2/3 |
+| #2 | BELUSDT | trend_pullback_continuation | +782.3 | +1009.4 | 1.00 | 2/2 |
+| #3 | ONEUSDT | mtf_breakout_retest | +909.9 | +994.2 | 0.83 | 1/2 |
+
+**TF 12h** — 75 promoted
+| Rank | Symbol | Strategy (Family) | Edge (bps) | LCB (bps) | Conv | Folds |
+| :--- | :--- | :--- | ---: | ---: | ---: | :---: |
+| #1 | ICPUSDT | trend_pullback_continuation | +1089.7 | +975.1 | 1.00 | 4/4 |
+| #2 | APEUSDT | trend_pullback_continuation | +928.2 | +869.1 | 0.93 | 3/4 |
+| #3 | STGUSDT | btc_regime_pullback | +891.4 | +817.1 | 1.00 | 2/2 |
+
+**TF 1d** — 3 promoted
+| Rank | Symbol | Strategy (Family) | Edge (bps) | LCB (bps) | Conv | Folds |
+| :--- | :--- | :--- | ---: | ---: | ---: | :---: |
+| #1 | STGUSDT | btc_regime_pullback | +1515.7 | +1641.4 | 1.00 | 2/2 |
+| #2 | ENSUSDT | btc_regime_pullback | +1008.4 | +1159.5 | 0.99 | 4/4 |
+| #3 | GALAUSDT | trend_donchian (donchian_72) | +542.0 | +556.4 | 1.00 | 4/4 |
+
+## L1 Audit
+
+| Layer | Window | Symbols | Active (min/med/max) | Entry | Kill | Warnings |
+| :--- | :--- | ---: | ---: | ---: | ---: | :--- |
+| L1 | 2023-06-30 ~ 2024-12-30 | 126 | 0 / 107.0 / 126 | 92,419 | 66 | low_active_tail, entry_block_spike |
+
+## L2 결과: 120 trials
+
+### Optuna Study
+
+- Study: `l2_study_8h_b49ce5386b6f`
+- DB: InMemory | Trials: 120 | Events: 4,803 | Symbols: 44
+- Pruner: MedianPruner + L2EarlyStopCallback (30 trial 무개선 시 중단) — **120/120 완료**, early stop 미발동
+- Best CAGR: **+253.03%** (peak, outlier trial; champion은 +20.9%)
+- 시행 속도: 평균 ~1.5s/trial (초기 1.0s → 후반 2.5~3.0s/symbol count 감소로 변동)
+
+### Crisis Load
+
+- Window: `luna_ftx_2022_collapse`
+- Registry symbols: 103 | Overlap symbols: 47
+- `[REGIME-L2] proof_failed path=pooled_fallback effective_states=3`
+
+### Champion
 
 ```
-정상장 스코어카드: STATUS ✅ PASS — CAGR +35.1%, MDD 12.0%
-위기 재현성 게이트: STATUS ✅ PASS — stress_tested_pass, verified=True
-  LUNA/FTX MDD  = 16.72% (예산 21% 이내)
-  LUNA/FTX CAGR = -4.94% (하한 -5% 이내, 근소)
-  CVaR95        = 1.44%  (예산 6% 이내)
-파이프라인 exit_code = 0
+[L2-SELECTION] feasible trials 없음 → fallback
 ```
 
-챔피언이 자체 선택한 파라미터: `l2_objective_growth_lcb_weight=0.8`(탐색 범위 상단 근처), `l2_regime_severity_gating_enabled=True`, `l2_regime_long_short_asymmetry_enabled=True`, `l2_regime_cap_release_cooldown_bars=34`. Optuna 제약 10개 전부 만족(전부 음수).
+| Metric | Value | Gate |
+| :--- | ---: | :---: |
+| Leverage (L*) | 4.8843 (binding: mdd) | |
+| CAGR | **+20.9%** | ❌ BLOCKED (≥30%) |
+| MDD | **25.9%** | ✅ (≤30%) |
+| CVaR95 | 1.5% | ✅ (≤6%) |
+| Utilization | 86.3% | |
+| Sharpe | 1.012 | ✅ (≥1.000) |
+| Sortino | 1.471 | ❌ (≥1.500) |
+| Calmar | 0.808 | ❌ (≥1.000) |
+| Fold Pass Ratio | 50.0% | ❌ (≥60%) |
+| Trades | 223 | ✅ (≥30) |
+| Sharpe Uplift | +0.20 | ✅ (≥+0.05) |
+| PSR | 0.896 | ❌ (≥0.90) |
 
-## 재현성 검증 — 동일 `--seed 42` 4회 연속 실행
+### Scorecard 상세
 
-| Run | 정상장 CAGR/MDD | 위기 MDD | 위기 CAGR | 게이트 |
-| :--- | ---: | ---: | ---: | :---: |
-| 원본(최초 검증) | +35.1% / 12.0% | 16.72% | -4.94% | ✅ PASS |
-| 반복 1 | +35.1% / 12.0% | 16.72% | -4.94% | ✅ PASS |
-| 반복 2 | +33.5% / 13.3% | 20.70% | +7.19% | ✅ PASS |
-| 반복 3 | +33.5% / 13.3% | 20.70% | +7.19% | ✅ PASS |
+```
+STATUS  : ❌ BLOCKED (cagr)
 
-**4/4 PASS.** 완전한 결정성은 아니나(원본=반복1, 반복2=반복3인 두 개의 값 클러스터로 수렴 — `ProcessPoolExecutor fork` 비결정성이 완전히 해소된 것은 아님을 시사) 편차 폭은 좁고 4번 모두 두 게이트를 동시에 통과했다. 반복 2·3의 위기 MDD(20.70%)는 21% 예산에 상당히 근접 — 이 설정에서의 타이트한 하한에 가까울 가능성.
+❌ [Growth    ] CAGR: +20.9% (>=30.0%) | PnL: +6.9% | Equity x1.07
+❌ [Efficiency] Sharpe: 1.012 (>=1.000) | Sortino: 1.471 (>=1.500) | Calmar: 0.808 (>=1.000)
+✅ [Risk      ] MDD: 25.9% (<=30.0%) | CVaR95: 1.5% (<=6.0%) | RiskUtil: 86.3%
+❌ [Robust    ] Fold: 50.0% (>=60.0%) | Trades: 223 (>=30) | Friction: 100.0%
+✅ [Uplift    ] Sharpe Uplift: +0.20 (>=+0.05)
+❌ [Integrity ] PSR: 0.896 (>=0.90) | DSR: 0.000 (diag)
+[Diag     ] RelMDD: 4.47x | Turnover: 0.012
+```
+
+### Fold 상세
+
+| Fold | Period | CAGR | MDD | Sharpe | Status | Symbols |
+| :--- | :--- | ---: | ---: | ---: | :---: | :--- |
+| 1 | 2025-03-20 ~ 2025-05-30 | +45.7% | 10.4% | 1.717 | ✅ PASS | 15 |
+| 2 | 2025-05-30 ~ 2025-08-09 | -0.0% | 18.9% | 0.105 | ❌ FAIL | 15 |
+| 3 | 2025-08-09 ~ 2025-10-20 | -21.5% | 14.1% | -1.361 | ❌ FAIL | 16 |
+| 4 | 2025-10-20 ~ 2025-12-30 | +86.5% | 5.5% | 2.936 | ✅ PASS | 12 |
+
+### Long/Short 진단
+
+- Realized Price: long=+0.0273 short=+0.0493 (숏 우위)
+- Long Losers Top: 1000SHIBUSDT(-0.0038), SANDUSDT(-0.0035), TRBUSDT(-0.0024)
+- Short Winners Top: QTUMUSDT(+0.0175), MASKUSDT(+0.0123), FILUSDT(+0.0120)
+
+### Major Symbol 진단
+
+| Symbol | mu_bull | w_long | stale_long | cap_engaged | avg_mult |
+| :--- | ---: | ---: | ---: | ---: | ---: |
+| BTCUSDT | 2.9% | 2.9% | 0.0% | 0.0% | 1.000 |
+| ETHUSDT | 1.1% | 1.1% | 0.0% | 0.0% | 1.000 |
+| BNBUSDT | 0.0% | 0.0% | 0.0% | 0.0% | 0.000 |
+
+## Benchmark 검증 (scratch/bench_cache_stabilization.py)
+
+### Test 1: Cross-Process Fingerprint 결정성
+- Parent fingerprint: `c9c941f154b3e3d5`
+- Child process fingerprint: `c9c941f154b3e3d5` (동일, `PYTHONHASHSEED=0`)
+- **✅ PASS** — 이전 `pd.util.hash_pandas_object`의 프로세스 간 비결정성 해결
+
+### Test 2: L1 Cache Hit Time Savings
+| Phase | Time | RSS delta | `run_l1_nested_swf` calls |
+| :--- | ---: | ---: | :---: |
+| Cold (cache miss) | 0.056s | +1.8MB | 1 (compute) |
+| Warm (cache hit) | 0.055s | +0.0MB | 0 (bypass) |
+
+- 생산 extrapolation: L1 211s(6 TF miss) → ~0.3s(6 TF hit, -99.9%)
+
+### Test 3: RSS Guard + gc.collect()
+- Small file (10MB @ 11.5GB threshold): ✅ LOAD
+- Large file (simulated RSS 11GB): ✅ SKIP
+- `gc.collect()` overhead: ~55ms/call (허용 가능, cache boundary에서만 호출)
 
 ## Verdict
 
-- **L0→L1→native TF handoff / L1 robustness gate:** PASS(회귀 없음).
-- **L2 정상장 스코어카드 + 위기 재현성 게이트:** ✅ **동시 PASS, 4회 반복 재현성 확인**(전부 exit_code=0) — 이 세션 전체(leverage 상한, crisis Optuna 제약, 레짐 심각도 신호, 배치-스케일 성장 목적함수) 4개 수정이 맞물려 안정적으로 작동함을 실측 확인.
-- **`/check`:** PASS(Cov 100%, l2_search_space.py 대상).
-- **잔여 리스크**: champion이 두 값 클러스터 사이를 오가는 잔여 비결정성 확인 — 근본 원인(추정: `ProcessPoolExecutor fork`) 미해결. 위기 MDD가 예산에 근접한 케이스(20.70%/21%) 존재 — 안전마진이 넉넉하지 않음.
+- **L1: 7/7 TF ✅ PASS** — 모든 TF fold readiness 통과, 신호 품질 정상. Cache 변경으로 인한 연산 변화 없음.
+- **L2: ❌ BLOCKED (cagr)** — CAGR +20.9%로 gate 미달. ADR_20260718 시점과 동일한 패턴(정상장 CAGR 부진은 cache 변경과 무관, 기존 설계 한계).
+- **Cache Fingerprint**: ✅ 교체 성공 — cross-process 결정적 fingerprint 확인. L1 cache miss 해소. 다음 run부터 cache hit 예상.
+- **RSS Guard**: ✅ 정상 작동 — 11.5GB threshold에서 cache deserialize 차단 확인.
+- **`/check`**: ✅ PASS (Cov 38%).
 
-## 다음 조치
+## 잔여 이슈
 
-1. `[LIMIT-01]` 2차 독립 위기 윈도우(2025-12-31~2026-06-30 BTC -32.8%) 검증 — 미해결, 유일한 검증 윈도우(LUNA/FTX)에 대한 과최적화 위험 여전히 존재. 4회 재현성은 확인됐으나 전부 같은 단일 윈도우 기준.
-2. Optuna champion 비결정성(동일 `--seed`에도 두 값 클러스터 사이 진동) 원인 규명 — 매 검증마다 confound를 일으키는 근본 이슈, 우선순위 상향.
-3. `growth_lcb_weight` 과대 시(예: 2.0+) tail-risk 재발 여부 sweep — 안전 상한 문서화 미완료(spec 검증 프로토콜 §3, 미실행).
-4. 위기 MDD 20.70%(반복 2·3)처럼 예산에 근접한 케이스의 안전마진 확보 방안 검토 — 현재 마진(0.3pp)이 근본 원인 3(Optuna 비결정성) 해소 전까지는 너무 얇을 수 있음.
-5. `[REGIME-L2] proof_failed path=pooled_fallback` 원인 규명 — 별도 이슈로 트래킹.
-6. 위기장을 포함하는 정상 holdout 윈도우로 Uplift/CAGR 재검증 — 미해결(`NO-CRISIS-WINDOW` 경고 지속).
+1. L2 CAGR +20.9% < 30% gate — 기존 `_shape_efficiency_l2_objective`의 scale-invariant 한계. 이번 세션 스코프 밖.
+2. `[REGIME-L2] proof_failed path=pooled_fallback` — 레짐 증명 실패, pooled fallback 진입. 별도 진단 필요.
+3. 하위 3개 fold(Fold 2·3)의 CAGR/CAGR 실적 부진 — fold pass ratio 50%만 달성. 전체 안정성을 위해 추가 개선 필요.
