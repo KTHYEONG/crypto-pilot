@@ -3529,6 +3529,45 @@ def run_per_tf_l1(
             object.__setattr__(result, "event_grid_audit", _event_grid_audit)
         return result
 
+    # ── L1 result disk cache ──────────────────────────────────────────
+    import hashlib
+    import pickle
+
+    from src.domain.futures.optimization.opt_config import OPT_FUTURES_CONFIG
+
+    _cache_enabled = bool(OPT_FUTURES_CONFIG.get("L1_RESULT_CACHE_ENABLED", True))
+    _cache_dir_raw = str(OPT_FUTURES_CONFIG.get("L1_RESULT_CACHE_DIR", "logs/futures/optimization/l1_result_cache"))
+    _cache_dir: Path | None = Path(_cache_dir_raw) if _cache_enabled else None
+    _cache_path: Path | None = None
+    _fp: str = ""
+
+    if _cache_dir is not None:
+        _c_arr = np.asarray(aligned.close_2d, dtype=np.float64)
+        _content_fp = str(hash((_c_arr.shape, float(_c_arr[0, 0]), float(_c_arr[-1, 0]))))
+        _aligned_fp = (
+            f"{aligned.datetimes[0]}|{aligned.datetimes[-1]}|"
+            f"{aligned.close_2d.shape[0]}|{aligned.close_2d.shape[1]}|"
+            f"{_content_fp}"
+        )
+        _events_fp = hashlib.sha1(pd.util.hash_pandas_object(_tf_labeled, index=True).values).hexdigest()[:8]  # noqa: S324
+        try:
+            _cfg_hash_src = repr(sorted(vars(cfg).items()))
+        except TypeError:
+            _cfg_hash_src = str(cfg)
+        _cfg_fp = hashlib.sha1(_cfg_hash_src.encode()).hexdigest()[:8]  # noqa: S324
+        _fp_src = f"{tf}|{_aligned_fp}|{_events_fp}|{_cfg_fp}|{seed}"
+        _fp = hashlib.sha1(_fp_src.encode()).hexdigest()[:16]  # noqa: S324
+        _cache_path = _cache_dir / f"l1_{tf}_{_fp}.pkl"
+        if _cache_dir.exists() and _cache_path.exists():
+            try:
+                with open(_cache_path, "rb") as _cf:
+                    logger.debug("[L1-CACHE] hit tf=%s fp=%s", tf, _fp)
+                    _cached: PerTfL1Result = pickle.load(_cf)  # noqa: S301
+                    return _cached
+            except Exception:
+                logger.warning("[L1-CACHE] corrupt cache tf=%s, recomputing", tf)
+                _cache_path.unlink(missing_ok=True)
+
     from src.domain.futures.strategy import tiered_workflow as _tiered_workflow
 
     run_l1_nested = cast(Any, _tiered_workflow.run_l1_nested_swf)
@@ -3548,6 +3587,14 @@ def run_per_tf_l1(
     result = PerTfL1Result(tf=tf, l1_result=l1, n_winning_signals=len(l1.oos_stacked))
     if _event_grid_audit is not None:
         object.__setattr__(result, "event_grid_audit", _event_grid_audit)
+    if _cache_dir is not None and _cache_path is not None:
+        try:
+            _cache_dir.mkdir(parents=True, exist_ok=True)
+            with open(_cache_path, "wb") as _cf:
+                pickle.dump(result, _cf, protocol=pickle.HIGHEST_PROTOCOL)
+            logger.debug("[L1-CACHE] saved tf=%s fp=%s size=%.1fKB", tf, _fp, _cache_path.stat().st_size / 1024)
+        except Exception as _e:
+            logger.warning("[L1-CACHE] write failed tf=%s: %s", tf, _e)
     return result
 
 
