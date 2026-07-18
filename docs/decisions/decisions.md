@@ -1,5 +1,15 @@
 # Active Decisions Log (Sliding Window)
 
+## [2026-07-18] [TASK_L2_REGIME_SEVERITY_SIGNAL_REDESIGN] [ADR_20260718_L2_REGIME_SEVERITY_SIGNAL_REDESIGN]
+- **Context/Why:** 직전 crisis-aware Optuna 제약이 방어 레버를 실제로 작동시켰음에도 정상장이 붕괴한 근본 원인을 역추적. 실측: 6→3state 압축맵이 transition(방향 불확실, 정상장의 31.6%)과 crash(CUSUM 진짜 급변, 8.5%)를 동일한 'crisis' 버킷(40.2%)으로 합산 — crisis 라벨의 79%가 실은 단순 횡보. 추가로 유일한 위기 검증 데이터(LUNA/FTX)가 BTC 원시가격 데이터 시작일(2022-04-01)과 우연히 일치해 인과적 통계가 cold-start 상태(CUSUM 발동률이 정상장 8.5% vs 위기장 8.2%로 통계적 구분 불가)임을 확인.
+- **Resolution/What:** MarketRegimeContext에 vol_scale_1d/crisis_active_1d 신규 노출(이미 계산되는 값 재사용, 추가 비용 0), compute_risk_severity_code(market_regime.py) 신설 — 방향 무관, 0=calm/1=elevated(causal quantile 기반 실현변동성)/2=crash(CUSUM). Layer2AllocationConfig에 opt-in 3필드(l2_regime_severity_gating_enabled 기본 False 등) 추가, awf_sim.py의 cap-gating 호출부(apply_regime_risk_cap/apply_asymmetric_long_short_regime_cap)를 조건부 분기 — 기존 3-state 경로 완전 보존.
+- **Impact:** 실제 구현 함수로 직접 재측정: 정상장 'crash'(구 crisis) 점유율 40.2%→8.5%(CUSUM 단독 수준까지 정확히 수렴), 위기장도 33.1%→7.9%. 200-trial 프로덕션 챔피언 고정 A/B: severity_gating on 전환 시 평균 gross exposure 0.3359→0.3852(+14.7%, 정상장에서 불필요한 억제가 풀리는 방향 확인). 다만 이번 챔피언도 정상장 CAGR+20.2%로 게이트(cagr) 미달 — 레짐 신호 결함은 해소했으나 objective 설계(성장 미보상) 문제가 잔존, 최종 CAGR/MDD 정밀 재검증은 미완료. /check PASS.
+
+## [2026-07-18] [TASK_L2_CRISIS_AWARE_OPTUNA_CONSTRAINT] [ADR_20260718_L2_CRISIS_AWARE_OPTUNA_CONSTRAINT]
+- **Context/Why:** 직전 L*_crisis 정적 leverage 상한 + 탐색공간 편입만으로는 위기 게이트 미해결. Optuna DB 직접 조회로 원인 확정: 방어 레버가 탐색공간엔 있지만 objective_l2_growth가 crisis-blind라 보상 신호가 없어 챔피언이 asymmetry=False/cooldown=0(전부 off)로 수렴, 위기 MDD 25.38%로 예산(21%) 초과 유지.
+- **Resolution/What:** 정상장 게이트(mdd_hybrid/cvar_95_hybrid 등)가 이미 쓰는 evaluate_layer2_gate의 optuna_constraint_values 9-tuple(TPESampler(constraints_func=layer2_constraints_from_trial)에 이미 배선된 검증된 인프라)에 10번째 슬롯으로 crisis_mdd_hybrid 추가. trial마다 자신의 실제 config·leverage로 crisis window를 재시뮬레이션(_load_crisis_replay_context가 L1 확정 시 1회만 IO, trial마다 _run_awf_simulation만 재실행)해 계산 — 정적 백스톱(l_crisis)과 달리 trial-loyal.
+- **Impact:** 200-trial 프로덕션 replay 실측: 방어 레버 사용률이 asymmetry ON 0/200→154/200, cooldown>0 0/200→198/200으로 반전, 챔피언의 10번째 제약값=-0.0424(음수=예산 내, crisis MDD≈16.8%)로 제약 자체는 실제로 만족됨 — 메커니즘은 설계대로 작동. 그러나 이 챔피언의 정상장 CAGR+14.9%로 게이트 자체가 BLOCKED(cagr) — objective가 원시 CAGR/growth를 직접 보상하지 않는 _shape_efficiency_l2_objective(Sortino 기반, scale-invariant) 설계와 신규 안전 제약이 만나 과도하게 보수적인 지점에 수렴함을 확인. /check PASS.
+
 ## [2026-07-18] [TASK_L2_CRISIS_LEVERAGE_CEILING] [ADR_20260718_L2_CRISIS_LEVERAGE_CEILING]
 - **Context/Why:** 위기 재현성 게이트가 계속 stress_tested_fail. 3개 opt-in 방어 레버(worst_fold/비대칭/쿨다운) 조합 실측 결과 champion마다 MDD가 21.75~26.52%로 크게 흔들려, 진짜 지배 변수가 leverage 계산(calibrate_deployment_leverage)이 crisis window를 전혀 안 본다는 점임을 확인.
 - **Resolution/What:** _resolve_safety_ceiling에 worst_fold와 동일 패턴의 crisis_rets 후보(l_crisis) 추가, compute_crisis_unit_returns(pipeline.py)가 L1 확정 후 1회만 계산해 전 trial에 재사용. l2_regime_long_short_asymmetry_enabled/bear·crisis_long_extra_mult/cap_release_cooldown_bars/crisis_gross_cap 5개 파라미터를 L2_SEARCH_SPACE에 신규 편입(전역 기본값은 no-op 유지, LIMIT-01 미해결로 하드코딩 금지).
@@ -64,13 +74,3 @@
 - **Context/Why:** L2 required native timeframe artifacts but its runtime policy disabled L0, causing fail-closed missing event maps.
 - **Resolution/What:** Run L0 gate for multi-layer phases and normalize removed CLI defaults before the L1-to-L2 handoff.
 - **Impact:** Native artifacts now reach L1; current replay advances to master selection, which remains separately fail-closed.
-
-## [2026-07-16] [TASK_L0_SLOW_TF_XS_CHALLENGER] [ADR_20260716_L0_SLOW_TF_XS_CHALLENGER]
-- **Context/Why:** 6h/1d는 구조 게이트와 pooled LCB가 양수인데도 개별 pair quality_weight_zero로 0건 승급이었고, 기존 XS residual family는 이 TF pool에 없었다.
-- **Resolution/What:** slow_tf_xs_challenger_enabled opt-in 아래 6h/1d pool에 residual_momentum_xs와 xs_residual_rebalance를 중복 없이 추가하고 해당 TF effective config에만 XS factor-level admission을 활성화했다.
-- **Impact:** 동일 historical replay 2회에서 6h는 BLOCKED 0에서 PASS 8, 1d는 BLOCKED 0에서 PASS 1로 전환했고 비목표 TF 최종 L1 결과는 불변이다. full upstream trace 비결정성과 독립 holdout 부재로 production promotion은 보류한다.
-
-## [2026-07-16] [L1_FDR_HARD_ELIGIBLE_SCOPING] [ADR_20260716_L1_FDR_HARD_ELIGIBLE_SCOPING]
-- **Context/Why:** FDR 디커플링 수정 이후에도 6h/1d가 구조 게이트 clean+probe_lcb_bps 양수임에도 0건 승급. 추적 결과 compute_symbol_strategy_evidence의 q-value 계산이 이미 구조적으로 탈락 확정된(hard_eligible=False) 후보까지 다중검정 보정 분모 m에 포함시켜, 실제 경쟁하지도 않는 후보 수백 개가 진짜 후보 몇 개의 q-value를 인위적으로 부풀리고 있었음을 확인(decisions.md 기존 실측: 8h/12h/1d 후보 풀 950~1515개 중 2~3개 패밀리가 대부분).
-- **Resolution/What:** FDR q-value 계산을 hard_eligible 부분집합에만 적용하도록 제한(raw_p_values를 hard_eligible_idx로 필터링 후 _by_q_values 호출, non-hard-eligible은 q_value=1.0 sentinel). _compute_probe_m_eff의 groups도 동일 부분집합으로 제한. 단조적으로 안전한 수정(m 축소는 q-value를 개선만 시킴)이라 스냅샷/deployment 양쪽 호출부 모두에 call-site 분리 없이 동일 적용.
-- **Impact:** 실측 treatment replay(1h 포함 전체 7TF) 결과: 모든 TF가 동일하거나 증가(1h=100 동일, 2h 86->87, 4h 32->33, 8h 25->44 큰 개선, 12h 18->21), 감소 0건으로 단조성 검증 완료. 6h/1d는 여전히 0건 승급이나 원인이 명확해짐 -- FDR 재계산 후에도 quality_weight_zero의 대부분이 probability_positive<=0.5(진짜 약한 부트스트랩 증거)로 확인되어, 이 두 TF는 게이트 결함이 아닌 순수 데이터 검정력 부족으로 최종 판단(quant.md anti-overfitting 원칙에 따라 추가 완화 보류). lean_check PASS, spec contract 4개 시나리오 전부 구현.
