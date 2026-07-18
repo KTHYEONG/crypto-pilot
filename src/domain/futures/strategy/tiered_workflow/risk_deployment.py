@@ -186,6 +186,7 @@ def _resolve_safety_ceiling(
     exchange_leverage_cap: float | None,
     worst_fold_rets: NDArray[np.float64] | None,
     kelly_safety_fraction: float | None,
+    crisis_rets: NDArray[np.float64] | None = None,
 ) -> tuple[float, str, float, str]:
     """[ADR_20260717_L2_LEVERAGE_CEILING_REFACTOR] Returns (l_full, full_binding,
     l_hard, hard_binding). l_full includes mdd/cvar (RC-2 OOS-blend may still
@@ -213,6 +214,11 @@ def _resolve_safety_ceiling(
             l_kelly = kelly_safety_fraction * mu / (sigma * sigma)
             if l_kelly > 0.0 and np.isfinite(l_kelly):
                 candidates.append((l_kelly, "kelly_theoretical"))
+    if crisis_rets is not None:
+        cr_arr = np.asarray(crisis_rets, dtype=np.float64)
+        if cr_arr.size >= 2:
+            l_crisis = _bisect_max_leverage(cr_arr, _mdd_at_leverage, mdd_target, float(l_floor), l_search_hi)
+            candidates.append((l_crisis, "crisis_window"))
 
     l_full, full_binding = min(candidates, key=lambda x: x[0])
     hard_candidates = [(v, l) for v, l in candidates if l not in ("mdd", "cvar")]
@@ -351,6 +357,7 @@ def calibrate_deployment_leverage(
     concentration_floor: float | None = None,
     worst_fold_rets: NDArray[np.float64] | None = None,
     kelly_safety_fraction: float | None = None,
+    crisis_rets: NDArray[np.float64] | None = None,
 ) -> tuple[float, str, float]:
     arr = np.asarray(fit_rets, dtype=np.float64)
     if arr.size < 2:
@@ -375,6 +382,7 @@ def calibrate_deployment_leverage(
         exchange_leverage_cap=exchange_leverage_cap,
         worst_fold_rets=worst_fold_rets,
         kelly_safety_fraction=kelly_safety_fraction,
+        crisis_rets=crisis_rets,
     )
 
     # Stage 2: OOS Adaptive
