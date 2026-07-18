@@ -2154,6 +2154,17 @@ DEFAULT_CRISIS_WINDOWS: tuple[CrisisWindow, ...] = (
 )
 
 
+
+_MIN_CRISIS_PROTECTION_CONFIG: Layer2AllocationConfig = dataclasses.replace(
+    Layer2AllocationConfig(),
+    l2_regime_long_short_asymmetry_enabled=False,
+    l2_regime_cap_release_cooldown_bars=0,
+    l2_regime_bull_gross_cap=1.0,
+    l2_regime_bear_gross_cap=0.35,
+    l2_regime_crisis_gross_cap=0.25,
+)
+
+
 def _build_rule_based_stress_batch(
     *,
     registry: QualifiedSignalRegistry,
@@ -2257,6 +2268,147 @@ def _build_rule_based_stress_batch(
         model_version="rule_based_replay",
     )
 
+
+
+def compute_crisis_unit_returns(
+    *,
+    deployment_registry: QualifiedSignalRegistry | None,
+    strategy_cfg: CandidateStrategyConfig,
+    tf: str,
+    crisis_windows: tuple[CrisisWindow, ...] = DEFAULT_CRISIS_WINDOWS,
+) -> NDArray[np.float64]:
+    """LUNA/FTX 등 out-of-band 위기 윈도우에서 champion의 rule-based 신호를
+    레짐 방어 레버 전부 off(구조적 최소 방어)인 Layer2AllocationConfig로 L=1.0
+    재생성해 unit 레버리지 per-bar 수익률을 반환한다. 다중 윈도우 시
+    select_worst_fold_returns와 동일하게 unit-MDD가 최대인 윈도우를 선택한다.
+    데이터 로드/시뮬레이션 실패 시 빈 배열(size=0) 반환(호출부가 candidate
+    제외 처리)."""
+    from src.domain.futures.optimization.opt_data_utils import load_futures_data_maps_for_symbols
+    from src.domain.futures.strategy.timeframe_contracts import resample_alias
+    from src.domain.futures.strategy.timeframe_probe import _resample_ohlcv
+
+    _load_tf = "4h"
+
+    if deployment_registry is None or not deployment_registry.by_symbol:
+        return np.array([], dtype=np.float64)
+
+    worst_unit_mdd: float = -1.0
+    worst_unit_rets: NDArray[np.float64] = np.array([], dtype=np.float64)
+
+    _min_config = dataclasses.replace(
+        _MIN_CRISIS_PROTECTION_CONFIG,
+        l2_regime_long_short_asymmetry_enabled=False,
+        l2_regime_cap_release_cooldown_bars=0,
+        l2_regime_bull_gross_cap=1.0,
+        l2_regime_bear_gross_cap=0.35,
+        l2_regime_crisis_gross_cap=0.25,
+    )
+
+    for window in crisis_windows:
+        overlap_symbols = sorted(set(window.symbols) & set(deployment_registry.by_symbol.keys()))
+        logger.info(
+            "[CRISIS-UNIT] window=%s registry_symbols=%d overlap_symbols=%d",
+            window.label,
+            len(deployment_registry.by_symbol),
+            len(overlap_symbols),
+        )
+        if not overlap_symbols:
+            continue
+        try:
+            data_maps, _oos_maps, valid_symbols = load_futures_data_maps_for_symbols(
+                symbols=overlap_symbols,
+                tf=_load_tf,
+                fetch_start=str(window.start),
+                start=str(window.start),
+                is_end=str(window.end),
+                end=str(window.end),
+                skip_metrics=True,
+                scope_name="l2_crisis_unit",
+            )
+        except Exception:
+            logger.exception("[CRISIS-UNIT] data load failed window=%s", window.label)
+            continue
+        if not valid_symbols:
+            continue
+
+        if tf == _load_tf:
+            aligned_maps = {s: {tf: data_maps[s][_load_tf]} for s in valid_symbols if _load_tf in data_maps[s]}
+        else:
+            alias = resample_alias(tf)
+            aligned_maps = {}
+            for sym in valid_symbols:
+                base_df = data_maps[sym].get(_load_tf)
+                if base_df is None or (hasattr(base_df, "empty") and base_df.empty):
+                    continue
+                try:
+                    aligned_maps[sym] = {tf: _resample_ohlcv(base_df, alias)}
+                except Exception:
+                    logger.exception("[CRISIS-UNIT] resample failed sym=%s tf=%s", sym, tf)
+        valid_symbols = [s for s in valid_symbols if s in aligned_maps]
+        if not valid_symbols:
+            continue
+
+        aligned_stress = align_data_maps(aligned_maps, valid_symbols, tf, cache_result=False)
+        if len(aligned_stress.datetimes) < 10:
+            continue
+
+        stress_registry = dataclasses.replace(
+            deployment_registry,
+            by_symbol={
+                s: deployment_registry.by_symbol[s] for s in valid_symbols if s in deployment_registry.by_symbol
+            },
+            ready_symbols=tuple(s for s in valid_symbols if s in deployment_registry.by_symbol),
+        )
+        stress_batch = _build_rule_based_stress_batch(
+            registry=stress_registry,
+            aligned=aligned_stress,
+            strategy_cfg=strategy_cfg,
+            tf=tf,
+        )
+        if not stress_batch.events:
+            continue
+
+        try:
+            from src.domain.futures.strategy.tiered_workflow.awf_sim import (
+                _run_awf_simulation,
+                build_l2_simulation_cache,
+            )
+            from src.domain.futures.strategy.walk_forward import WFFold
+
+            cache = build_l2_simulation_cache(aligned_stress, stress_batch, tf)
+            dummy_fold = WFFold(
+                fit_start=0,
+                fit_end=len(aligned_stress.datetimes),
+                cal_start=0,
+                cal_end=len(aligned_stress.datetimes),
+                oos_start=0,
+                oos_end=len(aligned_stress.datetimes),
+            )
+            sim = _run_awf_simulation(
+                cache=cache,
+                signal_batch=stress_batch,
+                aligned=aligned_stress,
+                awf_folds=(dummy_fold,),
+                config=_min_config,
+                caps=PortfolioCaps(),
+                tf=tf,
+            )
+        except Exception:
+            logger.exception("[CRISIS-UNIT] simulation failed window=%s", window.label)
+            continue
+
+        unit_rets = np.asarray(sim.rets_hybrid, dtype=np.float64)
+        if unit_rets.size < 2:
+            continue
+
+        equity = np.cumprod(1.0 + unit_rets)
+        peak = np.maximum.accumulate(equity)
+        unit_mdd = float(np.max((peak - equity) / np.maximum(peak, 1e-12)))
+        if unit_mdd > worst_unit_mdd:
+            worst_unit_mdd = unit_mdd
+            worst_unit_rets = unit_rets
+
+    return worst_unit_rets
 
 def assess_crisis_reliability(
     *,

@@ -738,3 +738,62 @@ class TestSafetyCeilingInvariant:
         )
         assert l_ceiling == pytest.approx(l_legacy, rel=1e-6)
         assert binding == binding_legacy
+
+
+    def test_resolve_safety_ceiling_crisis_candidate_bounds_leverage(self) -> None:
+        """[S1] crisis_rets가 mdd_target 이하로 leverage를 제한."""
+        fit_rets = np.full(100, 0.001)
+        crisis_rets = np.concatenate([np.full(100, 0.005), np.full(1, -0.10)])
+
+        l_full, full_binding, l_hard, hard_binding = _resolve_safety_ceiling(
+            fit_rets, mdd_target=0.21, cvar_target=0.048, l_floor=1.0, l_hard_cap=20.0,
+            l_search_hi=200.0, exchange_leverage_cap=None, worst_fold_rets=None,
+            kelly_safety_fraction=None, crisis_rets=crisis_rets,
+        )
+
+        assert l_hard < 20.0
+        assert hard_binding == "crisis_window"
+
+    def test_resolve_safety_ceiling_matches_legacy_when_crisis_rets_absent(self) -> None:
+        """[S2] crisis_rets=None 시 기존 4-candidate 동작과 동일."""
+        fit_rets = np.array([0.01, -0.02, 0.015, -0.01, 0.02, -0.005], dtype=np.float64)
+        l_ceiling, binding, l_hard, hard_binding = _resolve_safety_ceiling(
+            fit_rets, mdd_target=0.21, cvar_target=0.048,
+            l_floor=1.0, l_hard_cap=20.0, l_search_hi=200.0,
+            exchange_leverage_cap=None, worst_fold_rets=None, kelly_safety_fraction=None,
+            crisis_rets=None,
+        )
+        l_ceiling_base, binding_base, l_hard_base, hard_binding_base = _resolve_safety_ceiling(
+            fit_rets, mdd_target=0.21, cvar_target=0.048,
+            l_floor=1.0, l_hard_cap=20.0, l_search_hi=200.0,
+            exchange_leverage_cap=None, worst_fold_rets=None, kelly_safety_fraction=None,
+        )
+        assert l_ceiling == pytest.approx(l_ceiling_base, rel=1e-6)
+        assert binding == binding_base
+        assert l_hard == l_hard_base
+        assert hard_binding == hard_binding_base
+
+
+    def test_calibrate_deployment_leverage_crisis_ceiling_survives_oos_blend_raise(self) -> None:
+        """[S4] OOS-blend가 crisis_window hard ceiling을 넘어서면 안 됨."""
+        np.random.seed(7)
+        fit_rets = np.random.normal(-0.0005, 0.015, 1200).astype(np.float64)
+        crisis_rets = np.random.normal(-0.001, 0.05, 300).astype(np.float64)
+        oos_rets = np.random.normal(0.001, 0.005, 800).astype(np.float64)
+
+        l_star, binding, _ = calibrate_deployment_leverage(
+            fit_rets=fit_rets,
+            oos_rets=oos_rets,
+            mdd_cap=0.30,
+            mdd_margin=0.30,
+            l_hard_cap=20.0,
+            crisis_rets=crisis_rets,
+        )
+        _, _, l_hard, _ = _resolve_safety_ceiling(
+            fit_rets, mdd_target=0.30 * 0.70, cvar_target=0.06 * 0.80,
+            l_floor=1.0, l_hard_cap=20.0, l_search_hi=200.0,
+            exchange_leverage_cap=None, worst_fold_rets=None, kelly_safety_fraction=None,
+            crisis_rets=crisis_rets,
+        )
+
+        assert l_star <= l_hard + 1e-6
