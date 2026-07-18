@@ -1,0 +1,36 @@
+{
+  "contracts": [
+    {
+      "kind": "function",
+      "name": "resolve_l2_fold_cfg",
+      "file_hint": "src/domain/futures/strategy/walk_forward.py"
+    },
+    {
+      "kind": "field",
+      "name": "Layer2AllocationConfig.l2_wf_n_folds",
+      "file_hint": "src/domain/futures/strategy/tiered_workflow/dataclasses.py"
+    },
+    {
+      "kind": "function",
+      "name": "_run_tiered_l2_study",
+      "file_hint": "src/application/futures/runner/active_pipeline.py"
+    }
+  ],
+  "scenarios": [
+    {"id": 1, "scope": "unit", "name": "test_resolve_l2_fold_cfg_overrides_wf_n_folds_only"},
+    {"id": 1, "scope": "unit", "name": "test_layer2_allocation_config_from_mapping_reads_l2_wf_n_folds"},
+    {"id": 1, "scope": "unit", "name": "test_run_tiered_l2_study_uses_override_fold_cfg_not_original_cfg"},
+    {"id": 2, "scope": "unit", "name": "test_resolve_l2_fold_cfg_returns_original_when_none"},
+    {"id": 2, "scope": "unit", "name": "test_resolve_l2_fold_cfg_returns_original_when_equal"},
+    {"id": 2, "scope": "unit", "name": "test_build_l1_swf_folds_unaffected_by_l2_override"},
+    {"id": 3, "scope": "unit", "name": "test_resolve_l2_fold_cfg_rejects_n_folds_below_two"},
+    {"id": 3, "scope": "unit", "name": "test_layer2_allocation_config_from_mapping_rejects_l2_wf_n_folds_below_two"},
+    {"id": 3, "scope": "unit", "name": "test_layer2_allocation_config_from_mapping_legacy_params_without_l2_wf_n_folds_uses_default"},
+    {"id": 4, "scope": "integration", "name": "test_run_tiered_l2_study_defaults_to_layer2_allocation_config_value"},
+    {"id": 4, "scope": "integration", "name": "test_run_tiered_l2_study_wall_time_within_perf_budget"}
+  ],
+  "wiring": [
+    {"file": "src/application/futures/runner/active_pipeline.py", "anchor": "_run_tiered_l2_study"},
+    {"file": "src/domain/futures/strategy/walk_forward.py", "anchor": "resolve_l2_fold_cfg"}
+  ]
+}
