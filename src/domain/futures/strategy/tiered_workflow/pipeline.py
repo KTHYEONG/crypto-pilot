@@ -3472,6 +3472,44 @@ def select_l1_delivery_events(
     return labeled_events[(labeled_events["native_tf"] == tf) & (labeled_events["l0_recipe_id"].isin(route_ids))]
 
 
+def _deterministic_df_fingerprint(df: pd.DataFrame, *, salt: str = "") -> str:
+    """Deterministic content fingerprint for DataFrame cache keys.
+
+    Replaces pd.util.hash_pandas_object which uses Python's process-salted
+    hash() and produces different values across process invocations.
+    """
+    import hashlib
+
+    nrows, ncols = df.shape
+    if nrows == 0:
+        return hashlib.sha256(f"empty|{nrows}|{ncols}|{salt}".encode()).hexdigest()[:16]  # noqa: S324
+    col_names = "|".join(str(c) for c in df.columns)
+    dtypes_str = "|".join(str(d) for d in df.dtypes)
+    try:
+        first = str([repr(v) for v in df.iloc[0].tolist()])
+        last = str([repr(v) for v in df.iloc[-1].tolist()])
+    except IndexError:
+        return hashlib.sha256(f"idxerr|{nrows}|{ncols}|{salt}".encode()).hexdigest()[:16]  # noqa: S324
+    src = f"{nrows}|{ncols}|{col_names}|{dtypes_str}|{first}|{last}|{salt}"
+    return hashlib.sha256(src.encode()).hexdigest()[:16]  # noqa: S324
+
+
+def _should_load_cache(
+    cache_file_size_mb: float,
+    threshold_mb: int = 11500,
+    expansion_ratio: float = 15.0,
+) -> bool:
+    """Gate cache deserialization based on current RSS + estimated expansion."""
+    import resource
+
+    try:
+        current_rss_mb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024.0
+    except Exception:
+        return True
+    estimated = current_rss_mb + (cache_file_size_mb * expansion_ratio)
+    return estimated <= threshold_mb
+
+
 def run_per_tf_l1(
     *,
     tf: str,
@@ -3549,7 +3587,7 @@ def run_per_tf_l1(
             f"{aligned.close_2d.shape[0]}|{aligned.close_2d.shape[1]}|"
             f"{_content_fp}"
         )
-        _events_fp = hashlib.sha1(pd.util.hash_pandas_object(_tf_labeled, index=True).values).hexdigest()[:8]  # noqa: S324
+        _events_fp = _deterministic_df_fingerprint(_tf_labeled, salt="l1_events")
         try:
             _cfg_hash_src = repr(sorted(vars(cfg).items()))
         except TypeError:
@@ -3559,14 +3597,19 @@ def run_per_tf_l1(
         _fp = hashlib.sha1(_fp_src.encode()).hexdigest()[:16]  # noqa: S324
         _cache_path = _cache_dir / f"l1_{tf}_{_fp}.pkl"
         if _cache_dir.exists() and _cache_path.exists():
-            try:
-                with open(_cache_path, "rb") as _cf:
-                    logger.debug("[L1-CACHE] hit tf=%s fp=%s", tf, _fp)
-                    _cached: PerTfL1Result = pickle.load(_cf)  # noqa: S301
-                    return _cached
-            except Exception:
-                logger.warning("[L1-CACHE] corrupt cache tf=%s, recomputing", tf)
-                _cache_path.unlink(missing_ok=True)
+            _st_mb = _cache_path.stat().st_size / (1024 * 1024)
+            if not _should_load_cache(_st_mb):
+                logger.info("[L1-CACHE] skip tf=%s (RSS guard)", tf)
+            else:
+                try:
+                    with open(_cache_path, "rb") as _cf:
+                        logger.debug("[L1-CACHE] hit tf=%s fp=%s", tf, _fp)
+                        _cached: PerTfL1Result = pickle.load(_cf)  # noqa: S301
+                        gc.collect()
+                        return _cached
+                except Exception:
+                    logger.warning("[L1-CACHE] corrupt cache tf=%s, recomputing", tf)
+                    _cache_path.unlink(missing_ok=True)
 
     from src.domain.futures.strategy import tiered_workflow as _tiered_workflow
 
@@ -3595,6 +3638,7 @@ def run_per_tf_l1(
             logger.debug("[L1-CACHE] saved tf=%s fp=%s size=%.1fKB", tf, _fp, _cache_path.stat().st_size / 1024)
         except Exception as _e:
             logger.warning("[L1-CACHE] write failed tf=%s: %s", tf, _e)
+    gc.collect()
     return result
 
 
