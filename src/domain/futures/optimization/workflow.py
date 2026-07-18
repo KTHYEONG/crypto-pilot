@@ -1865,6 +1865,9 @@ def evaluate_l2_trial(
                 worst_fold_rets=_worst_fold_rets,
                 kelly_safety_fraction=getattr(config, "l2_deploy_kelly_safety_fraction", None),
                 crisis_rets=crisis_rets,
+                crisis_mdd_margin=float(config.l2_deploy_crisis_mdd_margin),
+                oos_budget_blend=float(config.l2_deploy_oos_budget_blend),
+                oos_floor_cap=float(config.l2_deploy_oos_floor_cap),
             )
             _logger.debug(
                 "[L2-EVAL] L*=%.3f (binding=%s, src=%s)",
@@ -2114,7 +2117,7 @@ def evaluate_l2_trial(
             if _crisis_unit_rets.size >= 2:
                 _crisis_dep = apply_deployment(rets=_crisis_unit_rets, leverage=_l_star, bars_per_year=bars_per_year)
                 _crisis_mdd_hybrid = float(_crisis_dep.mdd)
-                _crisis_mdd_budget = float(config.l2_max_mdd_abs) * (1.0 - float(config.l2_deploy_mdd_margin))
+                _crisis_mdd_budget = float(config.l2_max_mdd_abs) * (1.0 - float(config.l2_deploy_crisis_mdd_margin))
         except Exception:
             _logger.warning(
                 "[L2-CRISIS-CONSTRAINT] trial=%d simulation_failed, crisis constraint skipped",

@@ -187,11 +187,14 @@ def _resolve_safety_ceiling(
     worst_fold_rets: NDArray[np.float64] | None,
     kelly_safety_fraction: float | None,
     crisis_rets: NDArray[np.float64] | None = None,
+    crisis_mdd_target: float | None = None,  # [SPEC_L2_DEPLOYMENT_MARGIN_CAGR_GATE] None이면 mdd_target로 폴백
 ) -> tuple[float, str, float, str]:
-    """[ADR_20260717_L2_LEVERAGE_CEILING_REFACTOR] Returns (l_full, full_binding,
-    l_hard, hard_binding). l_full includes mdd/cvar (RC-2 OOS-blend may still
-    override these); l_hard excludes them and is the absolute ceiling no
-    adaptive logic downstream may exceed."""
+    """[ADR_20260717_L2_LEVERAGE_CEILING_REFACTOR] [ADR_20260718_L2_DEPLOYMENT_MARGIN_CAGR_GATE]
+    Returns (l_full, full_binding, l_hard, hard_binding). l_full includes mdd/cvar
+    (RC-2 OOS-blend may still override these); l_hard excludes them and is the
+    absolute ceiling no adaptive logic downstream may exceed. crisis_mdd_target
+    decouples the crisis-window candidate from the (now searchable) normal-market
+    mdd_target so CAGR-gate tuning cannot erode crisis protection."""
     l_mdd = _bisect_max_leverage(fit_rets, _mdd_at_leverage, mdd_target, float(l_floor), l_search_hi)
     l_cvar = _bisect_max_leverage(fit_rets, _cvar_95_at_leverage, cvar_target, float(l_floor), l_search_hi)
 
@@ -217,7 +220,8 @@ def _resolve_safety_ceiling(
     if crisis_rets is not None:
         cr_arr = np.asarray(crisis_rets, dtype=np.float64)
         if cr_arr.size >= 2:
-            l_crisis = _bisect_max_leverage(cr_arr, _mdd_at_leverage, mdd_target, float(l_floor), l_search_hi)
+            _crisis_target = crisis_mdd_target if crisis_mdd_target is not None else mdd_target
+            l_crisis = _bisect_max_leverage(cr_arr, _mdd_at_leverage, _crisis_target, float(l_floor), l_search_hi)
             candidates.append((l_crisis, "crisis_window"))
 
     l_full, full_binding = min(candidates, key=lambda x: x[0])
@@ -358,13 +362,21 @@ def calibrate_deployment_leverage(
     worst_fold_rets: NDArray[np.float64] | None = None,
     kelly_safety_fraction: float | None = None,
     crisis_rets: NDArray[np.float64] | None = None,
+    crisis_mdd_margin: float | None = None,  # [SPEC_L2_DEPLOYMENT_MARGIN_CAGR_GATE] None이면 mdd_margin으로 폴백
 ) -> tuple[float, str, float]:
+    """[ADR_20260718_L2_DEPLOYMENT_MARGIN_CAGR_GATE] crisis_mdd_margin이 지정되면
+    crisis-window leverage 후보를 mdd_margin과 분리된 target으로 계산해, 정상장
+    CAGR 개선을 위한 mdd_margin 탐색이 crisis MDD 예산을 잠식하지 않도록 한다.
+    미지정 시 mdd_margin으로 폴백해 기존 동작을 완전히 보존한다."""
     arr = np.asarray(fit_rets, dtype=np.float64)
     if arr.size < 2:
         _logger.debug("[L2-CALIB] fit_rets size<2, returning L*=1.0 (none)")
         return 1.0, "none", 0.0
 
     mdd_target = mdd_cap * (1.0 - mdd_margin)
+    crisis_mdd_target = (
+        mdd_cap * (1.0 - crisis_mdd_margin) if crisis_mdd_margin is not None else None
+    )
     cvar_target = cvar_cap * (1.0 - cvar_margin)
     l_search_hi = l_hard_cap * 10.0
 
@@ -383,6 +395,7 @@ def calibrate_deployment_leverage(
         worst_fold_rets=worst_fold_rets,
         kelly_safety_fraction=kelly_safety_fraction,
         crisis_rets=crisis_rets,
+        crisis_mdd_target=crisis_mdd_target,
     )
 
     # Stage 2: OOS Adaptive
