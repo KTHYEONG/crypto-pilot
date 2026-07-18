@@ -2,6 +2,11 @@
 
 This file holds historical architecture decision records (ADRs) that have been pruned from the active window.
 
+## [2026-07-17] [TASK_L2_CRISIS_BTC_REGIME_DATA_INTEGRITY_FIX] [ADR_20260717_L2_CRISIS_BTC_REGIME_DATA_INTEGRITY_FIX]
+- **Context/Why:** assess_crisis_reliability가 LUNA/FTX 위기 윈도우를 로드할 때 BTCUSDT 등 timestamp_x/timestamp_y 병합-접미사 스키마 심볼(전체 ~4%)이 load_single_symbol_data의 3단 폴백에서 전부 실패해 침묵 탈락(has_btc=False 실측 확인). market_regime._btc_index()는 BTC 부재 시 예외 없이 return 0(임의 심볼 대체)해, 이미 프로덕션에 활성화된 regime-conditional 익스포저 캡(apply_regime_risk_cap, bull=1.0/bear=0.35/crisis=0.25)이 엉뚱한 심볼로 레짐을 오판정하고 있었다.
+- **Resolution/What:** opt_data_utils.py에 _resolve_timestamp_column 헬퍼를 추가해 timestamp 부재 시 timestamp_x로 폴백하도록 load_single_symbol_data 두 분기를 수정. market_regime._btc_index()는 BTC 부재 시 ValueError로 fail-closed 전환. active_pipeline.py의 [CRISIS-RELIABILITY] 로그에 윈도우별 raw MDD/CAGR/CVaR detail을 추가. 사전 존재하던 테스트 버그(FUTURES_DATA_DIR를 opt_data_utils 모듈에 잘못 monkeypatch, 실제 소유자는 src.core.settings)도 함께 수정해 xfail 7건을 실통과로 전환.
+- **Impact:** 실측(scratch/probe_crisis_regime*.py): BTC 데이터 정상 복구 확인(overlap_symbols 37→47, valid_symbols 35→45, has_btc False→True, events 50532→67593). 전체 L2 파이프라인 재실행 결과 위기 MDD/CAGR은 오히려 악화(29.01%→55.47%, -32.73%→-38.44%) — timestamp_x 버그가 위기 replay 경로뿐 아니라 정상 L1/L2 유니버스 로딩에도 걸쳐 있어 이번 수정으로 정상장 데이터 풀이 바뀌었고(registry_symbols 93→103), Optuna가 더 공격적인 챔피언을 선택(정상장 CAGR +61.2%→+92.8%, Uplift +0.10→+0.29)한 결과로 판단됨. 위기 게이트는 여전히 stress_tested_fail로 정상 차단 중 — 데이터 무결성 수정 자체는 검증됨, production 승격은 계속 차단.
+
 ## [2026-07-17] [TASK_L2_CRISIS_SURVIVAL_POLICY] [ADR_20260717_L2_CRISIS_SURVIVAL_POLICY]
 - **Context/Why:** 정상장 L2 스코어카드는 PASS했지만 독립 LUNA/FTX replay에서 champion이 MDD 29.01%와 CAGR -32.73%를 기록했고, 기존 위기 판정은 첫 window의 MDD만 확인해 production 승격을 막지 못함.
 - **Resolution/What:** CrisisWindowMetrics와 순수 evaluate_crisis_survival 정책을 도입하고, 모든 configured crisis window에 대해 데이터 충분성·MDD·CAGR·CVaR·거래 수를 함께 판정하도록 assess_crisis_reliability를 집계형으로 변경했다. 현재 L2 threshold에서 하나라도 실패하거나 데이터가 부족하면 apply_crisis_reliability_override가 gate를 monotonic fail-closed로 차단하며, 위기 결과는 Optuna selection에 재투입하지 않는다.
