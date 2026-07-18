@@ -1497,6 +1497,8 @@ class TieredContext:
     awf_folds: tuple[Any, ...] | None = None
     crisis_rets: NDArray[np.float64] | None = None
     crisis_replay_ctx: Any | None = None
+    entry_audit: Any | None = None  # pre-computed LayerUniverseAudit, param-invariant
+    lightweight_eval: bool = True  # True=skip block_metrics/fold_attributions/crisis in trial eval
 
 
 def suggest_layered_params(
@@ -1773,6 +1775,8 @@ def evaluate_l2_trial(
     eval_tag: str = "unspecified",
     crisis_rets: NDArray[np.float64] | None = None,
     crisis_replay_ctx: Any | None = None,
+    entry_audit: Any | None = None,
+    lightweight: bool = False,
 ) -> Any:
     from src.domain.futures.portfolio.signal_composer import hours_per_bar_tf
     from src.domain.futures.strategy.tiered_workflow.awf_sim import _run_awf_simulation
@@ -1974,26 +1978,27 @@ def evaluate_l2_trial(
     )
 
     block_metrics: list[Layer2BlockMetric] = []
-    n_blocks = max(len(block_growth_hybrid), len(block_growth_baseline))
-    for block_idx in range(n_blocks):
-        start_idx = block_idx * block_size
-        end_idx = min((block_idx + 1) * block_size, len(rets_hybrid))
-        turnover_slice = sim.all_turnovers[block_idx : block_idx + 1]
-        block_metrics.append(
-            Layer2BlockMetric(
-                start_idx=start_idx,
-                end_idx=end_idx,
-                log_growth_hybrid=(
-                    float(block_growth_hybrid[block_idx]) if block_idx < len(block_growth_hybrid) else 0.0
-                ),
-                log_growth_baseline=(
-                    float(block_growth_baseline[block_idx]) if block_idx < len(block_growth_baseline) else 0.0
-                ),
-                mdd_hybrid=_mdd(rets_hybrid[start_idx:end_idx]),
-                turnover_hybrid=float(np.mean(turnover_slice)) if turnover_slice else 0.0,
-                active_rebalances=int(sum(1 for value in turnover_slice if abs(value) > 0.0)),
+    if not lightweight:
+        n_blocks = max(len(block_growth_hybrid), len(block_growth_baseline))
+        for block_idx in range(n_blocks):
+            start_idx = block_idx * block_size
+            end_idx = min((block_idx + 1) * block_size, len(rets_hybrid))
+            turnover_slice = sim.all_turnovers[block_idx : block_idx + 1]
+            block_metrics.append(
+                Layer2BlockMetric(
+                    start_idx=start_idx,
+                    end_idx=end_idx,
+                    log_growth_hybrid=(
+                        float(block_growth_hybrid[block_idx]) if block_idx < len(block_growth_hybrid) else 0.0
+                    ),
+                    log_growth_baseline=(
+                        float(block_growth_baseline[block_idx]) if block_idx < len(block_growth_baseline) else 0.0
+                    ),
+                    mdd_hybrid=_mdd(rets_hybrid[start_idx:end_idx]),
+                    turnover_hybrid=float(np.mean(turnover_slice)) if turnover_slice else 0.0,
+                    active_rebalances=int(sum(1 for value in turnover_slice if abs(value) > 0.0)),
+                )
             )
-        )
 
     fold_diag = compute_layer2_fold_diagnostics(
         fold_rets_hybrid=sim.fold_rets_hybrid,
@@ -2030,12 +2035,13 @@ def evaluate_l2_trial(
         if np.isfinite(float(getattr(policy, "reliability", policy.confidence)))
     ]
     bucket_reliability_mean = float(np.mean(reliability_values)) if reliability_values else 0.0
-    entry_audit = build_layer_universe_audit(
-        aligned=aligned,
-        layer="L2",
-        start_idx=int(signal_batch.start_idx),
-        end_idx=int(signal_batch.end_idx),
-    )
+    if entry_audit is None:
+        entry_audit = build_layer_universe_audit(
+            aligned=aligned,
+            layer="L2",
+            start_idx=int(signal_batch.start_idx),
+            end_idx=int(signal_batch.end_idx),
+        )
     entry_spike_penalty = (
         float(config.l2_entry_spike_penalty_weight) if "entry_block_spike" in entry_audit.warnings else 0.0
     )
@@ -2092,7 +2098,7 @@ def evaluate_l2_trial(
     )
     _crisis_mdd_hybrid: float | None = None
     _crisis_mdd_budget: float | None = None
-    if crisis_replay_ctx is not None:
+    if not lightweight and crisis_replay_ctx is not None:
         try:
             _crisis_sim = _run_awf_simulation(
                 cache=crisis_replay_ctx.cache,
@@ -2337,6 +2343,8 @@ def _evaluate_l2_params(
         tf=ctx.tf,
         crisis_rets=ctx.crisis_rets,
         crisis_replay_ctx=ctx.crisis_replay_ctx,
+        entry_audit=getattr(ctx, "entry_audit", None),
+        lightweight=bool(getattr(ctx, "lightweight_eval", True)),
     )
     t_elapsed = time.perf_counter() - t_start
 
