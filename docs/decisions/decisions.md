@@ -1,5 +1,10 @@
 # Active Decisions Log (Sliding Window)
 
+## [2026-07-18] [TASK_L2_PHASE_PERF_OPTIMIZATION] [ADR_20260718_L2_PHASE_PERF_OPTIMIZATION]
+- **Context/Why:** L2 stage (--phase l2) wall time 268s, peak RSS 9497MB (12GB threshold 78%). SQLite RDBStorage I/O (optuna.db 91MB), per-trial block_metrics/audit/crisis_replay 중복, n_trials=200 고정 no pruner, 매 batch gc.collect, n_ei_candidates=48 과다 — 13개 비효율 식별.
+- **Resolution/What:** InMemoryStorage 전환 (SQLite RDBStorage→optuna.storages.InMemoryStorage, L2_OPTUNA_USE_MEMORY_STORAGE=True). n_trials 200→120. evaluate_l2_trial에 lightweight=True 시 block_metrics/crisis_replay_ctx 재시뮬 스킵, entry_audit 1회 cache. MedianPruner + L2EarlyStopCallback (30 trial 무개선 시 중단). n_ei_candidates 48→24. gc.collect 매 batch→5 batch마다. _build_l2_signal_batch SHA1 fingerprint disk cache. select_layer2_champion user_attrs pre-filter top 3. setup_optuna_storage use_memory=True 옵션.
+- **Impact:** L2 stage 목표 268s→~115s (-57%). Peak RSS 9497MB→~8900MB. Tests 10/10 PASS, regression 30/30 PASS, /check Cov 28%.
+
 ## [2026-07-18] [TASK_L2_DEPLOYED_SCALE_GROWTH_OBJECTIVE] [ADR_20260718_L2_DEPLOYED_SCALE_GROWTH_OBJECTIVE]
 - **Context/Why:** 오늘 세션 내내 정상장 CAGR이 계속 하락(53.2%→34.6%→14.9%→20.2%)한 원인을 역추적. objective_l2_growth의 1차항 sortino_hac_unit은 설계상 scale-invariant(leverage kL 변환에 불변)라, worst_fold/kelly/l_crisis/crisis Optuna 제약이 leverage를 아무리 깎아도 objective가 이를 전혀 못 봄 — 안전장치를 추가할수록 챔피언 선택과 실제 성장의 괴리만 커지는 구조였음. 기존 growth_lcb_hybrid(현재 diagnostic)조차 이름과 달리 L* 반영 전 unit-leverage rets_hybrid로 계산되는 잠복 버그도 함께 확인.
 - **Resolution/What:** _dep.scaled_rets(배치 후 수익률)로 _contiguous_block_log_growth/_growth_lower_confidence_bound(기존 함수 100% 재사용)를 재계산해 growth_lcb_deployed 산출, _shape_efficiency_l2_objective에 growth_lcb_weight(기본 0.0=no-op) 블렌드 항으로 추가(Sortino shape 가드는 유지, 완전 대체 아님). l2_objective_growth_lcb_weight(0.0~1.0)와 l2_regime_severity_gating_enabled를 L2_SEARCH_SPACE에 정식 편입해 Optuna가 실제로 탐색하도록 배선.
@@ -69,8 +74,3 @@
 - **Context/Why:** L1 7개 TF 전부 PASS했음에도 L2가 TieredPipelineError(no deployable timeframe found for L2 master TF)로 fail-closed됨. 원인 2가지: (1) _resolve_l2_master_tf(cfg, {})가 empty per_tf_l1 dict로 호출되는 3개 프로덕션 콜사이트(pipeline.py 2곳, active_pipeline.py 1곳)가 override 유무와 무관하게 항상 실패, (2) 자동선택 분기가 assess_l1_tf_handoff의 master/auxiliary readiness(breadth+family diversity+finite positive edge)를 배선하지 않고 legacy _is_deployable_per_tf_result만 사용.
 - **Resolution/What:** Layer1Result.selected_timeframe(기존 미사용 필드)를 run_tiered_pipeline의 실제 per-TF 계산 분기에서 채우고, 신규 _resolve_l2_master_tf_from_prior 헬퍼가 empty-dict 재계산 대신 이 값을 재사용하도록 3개 콜사이트를 교체. _resolve_l2_master_tf 자동선택 분기는 assess_l1_tf_handoff(min_ready_symbols=cfg.l2_master_min_ready_symbols, min_source_families=cfg.l2_master_min_source_families, 기존 config 필드 재사용) 기반 master_eligible 필터로 교체하고 rejection reason을 [ALGO] trace로 기록.
 - **Impact:** 동일 cutoff/seed(2026-07-16, seed=42) replay 재실행 결과 fail-closed 재발 없이 L2 최종 시뮬레이션까지 완주 확인(master_tf=8h 자동선정, CAGR +61.2%/Sharpe 2.026/MDD 19.9%, Uplift 게이트 1개만 미달). L1 7개 TF 수치는 수정 전과 완전 동일(회귀 없음). lean_check.py 전 구간 PASS(spec-compliance 포함, Cov 17%). NO-CRISIS-WINDOW 캐비아트로 이번 replay 수치의 production 승격 근거 사용은 금지.
-
-## [2026-07-16] [L1_L2_NATIVE_TF_SPEC_CLEANUP] [ADR_20260716_L1_L2_NATIVE_TF_SPEC_CLEANUP]
-- **Context/Why:** The native-TF handoff implementation, regression checks, ADR, and replay report are complete; the working spec must not remain active.
-- **Resolution/What:** Removed the completed implementation blueprint and contract JSON from docs/specs.
-- **Impact:** docs/specs contains no stale active blueprint; permanent decisions and current replay status remain documented.
