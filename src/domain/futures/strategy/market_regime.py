@@ -562,6 +562,8 @@ class MarketRegimeContext:
     vol_z_1d: NDArray[np.float64]
     dispersion_z_1d: NDArray[np.float64]
     trend_efficiency_1d: NDArray[np.float64] = field(default_factory=lambda: np.empty(0, dtype=np.float64))
+    vol_scale_1d: NDArray[np.float64] = field(default_factory=lambda: np.empty(0, dtype=np.float64))
+    crisis_active_1d: NDArray[np.bool_] = field(default_factory=lambda: np.empty(0, dtype=np.bool_))
 
     def names(self) -> NDArray[np.object_]:
         return np.asarray([self.name_by_code[int(code)] for code in self.code_1d], dtype=object)
@@ -723,6 +725,8 @@ def compute_market_regime_context(
         vol_z_1d=vol_z.astype(np.float64, copy=False),
         dispersion_z_1d=dispersion_z.astype(np.float64, copy=False),
         trend_efficiency_1d=trend_efficiency_1d,
+        vol_scale_1d=overlay.vol_scale_1d,
+        crisis_active_1d=overlay.crisis_active_1d,
     )
 
 
@@ -814,6 +818,52 @@ def apply_regime_cap_release_cooldown(
     out = code_1d.copy()
     out[sticky_defensive & (code_1d == 0)] = 1
     return out
+
+
+
+def compute_risk_severity_code(
+    vol_scale_1d: NDArray[np.float64],
+    crisis_active_1d: NDArray[np.bool_],
+    *,
+    elevated_vol_quantile: float = 0.35,
+    min_n_eff: int = 60,
+) -> NDArray[np.int8]:
+    """방향(trend) 신뢰도와 완전히 독립적인 리스크 심각도 코드.
+
+    0=calm, 1=elevated(causal expanding quantile 이하 vol_scale — 고변동성),
+    2=crash(CUSUM crisis_active, 항상 최우선 오버라이드). transition(방향
+    불확실)은 더 이상 자동으로 crisis 취급되지 않고 자신의 실제 변동성
+    수준에 따라 calm 또는 elevated로 분류된다.
+
+    Args:
+        vol_scale_1d: target_vol/realized_vol [T] (낮을수록 고변동성).
+        crisis_active_1d: CUSUM 급변 플래그 [T].
+        elevated_vol_quantile: elevated 판정 causal quantile.
+        min_n_eff: 최소 관측치(이전은 보수적으로 calm 처리).
+
+    Returns:
+        int8 [T], {0,1,2}.
+    """
+    vs = np.asarray(vol_scale_1d, dtype=np.float64)
+    ca = np.asarray(crisis_active_1d, dtype=np.bool_)
+    if vs.size == 0:
+        return np.array([], dtype=np.int8)
+
+    elevated_threshold = _expanding_quantile_causal(vs, elevated_vol_quantile)
+    if elevated_threshold.size == 0:
+        elevated_threshold = np.full(vs.shape, 0.5)
+
+    code = np.zeros(vs.shape[0], dtype=np.int8)
+    for t in range(vs.shape[0]):
+        if t < min_n_eff:
+            code[t] = 0
+        elif ca[t]:
+            code[t] = 2
+        elif vs[t] < elevated_threshold[t]:
+            code[t] = 1
+        else:
+            code[t] = 0
+    return code
 
 
 def compute_reversal_risk_off_1d(
