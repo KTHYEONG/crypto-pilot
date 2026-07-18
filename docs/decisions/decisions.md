@@ -1,5 +1,10 @@
 # Active Decisions Log (Sliding Window)
 
+## [2026-07-18] [TASK_L2_DEPLOYED_SCALE_GROWTH_OBJECTIVE] [ADR_20260718_L2_DEPLOYED_SCALE_GROWTH_OBJECTIVE]
+- **Context/Why:** 오늘 세션 내내 정상장 CAGR이 계속 하락(53.2%→34.6%→14.9%→20.2%)한 원인을 역추적. objective_l2_growth의 1차항 sortino_hac_unit은 설계상 scale-invariant(leverage kL 변환에 불변)라, worst_fold/kelly/l_crisis/crisis Optuna 제약이 leverage를 아무리 깎아도 objective가 이를 전혀 못 봄 — 안전장치를 추가할수록 챔피언 선택과 실제 성장의 괴리만 커지는 구조였음. 기존 growth_lcb_hybrid(현재 diagnostic)조차 이름과 달리 L* 반영 전 unit-leverage rets_hybrid로 계산되는 잠복 버그도 함께 확인.
+- **Resolution/What:** _dep.scaled_rets(배치 후 수익률)로 _contiguous_block_log_growth/_growth_lower_confidence_bound(기존 함수 100% 재사용)를 재계산해 growth_lcb_deployed 산출, _shape_efficiency_l2_objective에 growth_lcb_weight(기본 0.0=no-op) 블렌드 항으로 추가(Sortino shape 가드는 유지, 완전 대체 아님). l2_objective_growth_lcb_weight(0.0~1.0)와 l2_regime_severity_gating_enabled를 L2_SEARCH_SPACE에 정식 편입해 Optuna가 실제로 탐색하도록 배선.
+- **Impact:** 200-trial 프로덕션 replay 실측(두 파라미터 모두 탐색공간에 포함): 챔피언이 growth_lcb_weight=0.8을 자체 선택, 정상장 스코어카드 STATUS PASS(CAGR +35.1%, MDD 12.0%) AND 위기 재현성 게이트 STATUS PASS(stress_tested_pass, verified=True, LUNA/FTX MDD 16.72%<21% 예산, CAGR -4.94%>-5% 하한) 동시 달성 — 이 세션 전체에서 정상장·위기장 게이트를 동시에 통과한 최초 사례(exit_code=0). 10개 Optuna 제약 전부 만족. /check PASS(Cov 100%, 검증 스크립트로 사전 확인 완료 상태에서 구현).
+
 ## [2026-07-18] [TASK_L2_REGIME_SEVERITY_SIGNAL_REDESIGN] [ADR_20260718_L2_REGIME_SEVERITY_SIGNAL_REDESIGN]
 - **Context/Why:** 직전 crisis-aware Optuna 제약이 방어 레버를 실제로 작동시켰음에도 정상장이 붕괴한 근본 원인을 역추적. 실측: 6→3state 압축맵이 transition(방향 불확실, 정상장의 31.6%)과 crash(CUSUM 진짜 급변, 8.5%)를 동일한 'crisis' 버킷(40.2%)으로 합산 — crisis 라벨의 79%가 실은 단순 횡보. 추가로 유일한 위기 검증 데이터(LUNA/FTX)가 BTC 원시가격 데이터 시작일(2022-04-01)과 우연히 일치해 인과적 통계가 cold-start 상태(CUSUM 발동률이 정상장 8.5% vs 위기장 8.2%로 통계적 구분 불가)임을 확인.
 - **Resolution/What:** MarketRegimeContext에 vol_scale_1d/crisis_active_1d 신규 노출(이미 계산되는 값 재사용, 추가 비용 0), compute_risk_severity_code(market_regime.py) 신설 — 방향 무관, 0=calm/1=elevated(causal quantile 기반 실현변동성)/2=crash(CUSUM). Layer2AllocationConfig에 opt-in 3필드(l2_regime_severity_gating_enabled 기본 False 등) 추가, awf_sim.py의 cap-gating 호출부(apply_regime_risk_cap/apply_asymmetric_long_short_regime_cap)를 조건부 분기 — 기존 3-state 경로 완전 보존.
@@ -69,8 +74,3 @@
 - **Context/Why:** The native-TF handoff implementation, regression checks, ADR, and replay report are complete; the working spec must not remain active.
 - **Resolution/What:** Removed the completed implementation blueprint and contract JSON from docs/specs.
 - **Impact:** docs/specs contains no stale active blueprint; permanent decisions and current replay status remain documented.
-
-## [2026-07-16] [L2_NATIVE_TF_HANDOFF] [ADR_20260716_L2_NATIVE_TF_HANDOFF]
-- **Context/Why:** L2 required native timeframe artifacts but its runtime policy disabled L0, causing fail-closed missing event maps.
-- **Resolution/What:** Run L0 gate for multi-layer phases and normalize removed CLI defaults before the L1-to-L2 handoff.
-- **Impact:** Native artifacts now reach L1; current replay advances to master selection, which remains separately fail-closed.
