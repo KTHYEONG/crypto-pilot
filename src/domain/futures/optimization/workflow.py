@@ -1495,6 +1495,7 @@ class TieredContext:
     fixed_l1_params: dict[str, Any] | None = None  # L2 study 시 L1 best params 고정
     l2_sim_cache: L2SimulationCache | None = None
     awf_folds: tuple[Any, ...] | None = None
+    crisis_rets: NDArray[np.float64] | None = None
 
 
 def suggest_layered_params(
@@ -1761,6 +1762,7 @@ def evaluate_l2_trial(
     tf: str,
     deploy_leverage_override: float | None = None,
     eval_tag: str = "unspecified",
+    crisis_rets: NDArray[np.float64] | None = None,
 ) -> Any:
     from src.domain.futures.portfolio.signal_composer import hours_per_bar_tf
     from src.domain.futures.strategy.tiered_workflow.awf_sim import _run_awf_simulation
@@ -1848,6 +1850,7 @@ def evaluate_l2_trial(
                 fit_mdd_crisis_gate=getattr(config, "l2_deploy_fit_mdd_crisis_gate", None),
                 worst_fold_rets=_worst_fold_rets,
                 kelly_safety_fraction=getattr(config, "l2_deploy_kelly_safety_fraction", None),
+                crisis_rets=crisis_rets,
             )
             _logger.debug(
                 "[L2-EVAL] L*=%.3f (binding=%s, src=%s)",
@@ -2283,6 +2286,7 @@ def _evaluate_l2_params(
         config=Layer2AllocationConfig.from_mapping(l2_params),
         caps=ctx.caps,
         tf=ctx.tf,
+        crisis_rets=ctx.crisis_rets,
     )
     t_elapsed = time.perf_counter() - t_start
 
