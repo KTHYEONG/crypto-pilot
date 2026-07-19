@@ -102,6 +102,32 @@ def select_probe_source_tf(sym_maps: Mapping[str, Any], target_tf: str) -> str |
     return min(compatible, key=hours_per_bar)
 
 
+def select_crisis_load_tf(target_tf: str) -> str:
+    """Select source TF for crisis data loading — source-backed TF preferred.
+
+    [ADR_TBD_L2_CRISIS_AWARE_OPTUNA_SEARCH_TF_FIX] raw OHLCV가 실제로
+    파일시스템에 저장되는 TF는 PROBE_SOURCE_TFS(1h, 4h)뿐이며, 8h/12h 등
+    상위 TF는 항상 리샘플로만 합성된다(원천 파일 없음). target_tf를 직접
+    요청하면 100% cache-miss로 귀결되는 문제를 방지하기 위해, target_tf가
+    이미 원천-백드 TF가 아닌 한 클린하게 합성 가능한 가장 coarse한
+    PROBE_SOURCE_TFS 후보로 대체한다.
+
+    Args:
+        target_tf: 최종적으로 필요한 마스터 타임프레임(예: "8h").
+
+    Returns:
+        실제로 load_futures_data_maps_for_symbols에 전달할 원천 TF.
+        호출부는 반환값이 target_tf와 다르면 기존 리샘플 로직으로 합성해야 한다.
+    """
+    if target_tf in PROBE_SOURCE_TFS:
+        return target_tf
+    finest_probe = min(PROBE_SOURCE_TFS, key=hours_per_bar)
+    if hours_per_bar(target_tf) < hours_per_bar(finest_probe):
+        return target_tf
+    compatible = [c for c in PROBE_SOURCE_TFS if is_resample_compatible(c, target_tf)]
+    return max(compatible, key=hours_per_bar) if compatible else target_tf
+
+
 def infer_source_bar_hours(index: pd.DatetimeIndex, *, default: float = 1.0) -> float:
     """Infer the modal source-bar cadence (hours) from a sorted datetime index.
 
