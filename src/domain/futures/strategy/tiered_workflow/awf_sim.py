@@ -1137,6 +1137,7 @@ class _AwfSimResult:
     fold_selected_symbols: tuple[tuple[str, ...], ...]
     block_rets_hybrid: tuple[tuple[float, ...], ...]
     block_rets_baseline: tuple[tuple[float, ...], ...]
+    turnover_return_indices: list[int]
     rets_baseline_ew: list[float]  # 순수 1/N EW baseline (uplift 측정 전용)
     fit_rets_hybrid: tuple[float, ...] = ()  # D3: fit-leg 수익률 (look-ahead-free L* calibration용)
     fit_rets_by_fold: tuple[tuple[float, ...], ...] = ()  # fold별 fit-leg 수익률 (worst-fold MDD 제약용)
@@ -2554,6 +2555,7 @@ def _run_awf_simulation(
     all_rets_baseline: list[float] = []
     all_rets_baseline_ew: list[float] = []
     all_turnovers: list[float] = []
+    turnover_return_indices: list[int] = []
     all_turnovers_baseline: list[float] = []
     all_gross_exposures: list[float] = []
     all_net_exposures: list[float] = []
@@ -3967,6 +3969,7 @@ def _run_awf_simulation(
 
             t0_eval = time.perf_counter()
             turnover = float(np.sum(np.abs(w - prev_w))) / 2.0
+            turnover_return_indices.append(len(all_rets_hybrid))
             all_turnovers.append(turnover)
             turnover_baseline = float(np.sum(np.abs(w_base - prev_w_baseline))) / 2.0
             all_turnovers_baseline.append(turnover_baseline)
@@ -4628,6 +4631,7 @@ def _run_awf_simulation(
         last_selected=last_selected,
         last_w=last_w,
         all_turnovers=all_turnovers,
+        turnover_return_indices=turnover_return_indices,
         all_turnovers_baseline=all_turnovers_baseline,
         all_gross_exposures=all_gross_exposures,
         all_net_exposures=all_net_exposures,
