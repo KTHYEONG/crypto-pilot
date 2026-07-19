@@ -90,6 +90,8 @@ def evaluate_layer2_gate(
     std_baseline: float | None = None,
     crisis_mdd_hybrid: float | None = None,
     crisis_mdd_budget: float | None = None,
+    crisis_cagr_hybrid: float | None = None,
+    crisis_cagr_floor: float | None = None,
 ) -> Layer2GateEvaluation:
     """Build Optuna safety constraints and final L2 promotion gate diagnostics.
 
@@ -150,6 +152,11 @@ def evaluate_layer2_gate(
         if crisis_mdd_hybrid is None or crisis_mdd_budget is None
         else _finite_or_fail(float(crisis_mdd_hybrid) - float(crisis_mdd_budget))
     )
+    _crisis_cagr_constraint = (
+        -1.0
+        if crisis_cagr_hybrid is None or crisis_cagr_floor is None
+        else _finite_or_fail(float(crisis_cagr_floor) - float(crisis_cagr_hybrid))
+    )
     optuna_constraint_values = (
         1.0 if deployment_failed else -1.0,
         float(max(support_leak_count, 0)),
@@ -165,6 +172,7 @@ def evaluate_layer2_gate(
         # 기존 표현식 재사용 — TPESampler가 CAGR/Sharpe-uplift를 직접 겨냥하도록 유도.
         _finite_or_fail(float(config.l2_min_cagr) - cagr_hybrid),
         _finite_or_fail(sharpe_hac_baseline + float(config.l2_min_sharpe_uplift) - sharpe_hac_hybrid),
+        _crisis_cagr_constraint,  # 13th slot — [ADR_TBD_L2_CRISIS_CAGR_CHAMPION_SELECTION_BLINDNESS_FIX]
     )
 
     promotion_constraint_values = (

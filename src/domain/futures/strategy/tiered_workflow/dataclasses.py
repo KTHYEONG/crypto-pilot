@@ -570,6 +570,7 @@ class Layer2AllocationConfig:
     l2_deploy_enabled: bool = True
     l2_deploy_mdd_margin: float = 0.30
     l2_deploy_crisis_mdd_margin: float = 0.30  # [SPEC_L2_DEPLOYMENT_MARGIN_CAGR_GATE] 위기 예산 고정, 탐색 불가
+    l2_min_crisis_cagr: float = -0.05  # [ADR_TBD_L2_CRISIS_CAGR_CHAMPION_SELECTION_BLINDNESS_FIX] crisis 전용, l2_min_worst_fold_cagr와 값 우연 일치이나 독립 필드, fixed/non-searchable
     l2_deploy_oos_budget_blend: float = 0.5   # [SPEC] OOS 예산 블렌드 계수 (기존 oos_budget_blend 기본값)
     l2_deploy_oos_floor_cap: float = 4.0      # [SPEC] OOS floor cap (기존 oos_floor_cap 기본값)
     l2_deploy_cvar_margin: float = 0.20
@@ -1061,6 +1062,10 @@ class Layer2AllocationConfig:
             raise ValueError(
                 f"l2_deploy_crisis_mdd_margin must be in (0, 1), got {_l2_deploy_crisis_mdd_margin}"
             )
+        _l2_min_crisis_cagr = cls._as_float(
+            params.get("l2_min_crisis_cagr", _dc.l2_min_crisis_cagr),
+            _dc.l2_min_crisis_cagr,
+        )
         return cls(
             k_rank=cls._as_int(params.get("K_RANK", 3), 3),
             rebalance_bars=cls._as_int(params.get("REBALANCE_BARS", 3), 3),
@@ -1142,6 +1147,7 @@ class Layer2AllocationConfig:
             l2_deploy_enabled=bool(params.get("l2_deploy_enabled", True)),
             l2_deploy_mdd_margin=_l2_deploy_mdd_margin,
             l2_deploy_crisis_mdd_margin=_l2_deploy_crisis_mdd_margin,
+            l2_min_crisis_cagr=_l2_min_crisis_cagr,
             l2_deploy_oos_budget_blend=cls._as_float(
                 params.get("l2_deploy_oos_budget_blend", _dc.l2_deploy_oos_budget_blend),
                 _dc.l2_deploy_oos_budget_blend,

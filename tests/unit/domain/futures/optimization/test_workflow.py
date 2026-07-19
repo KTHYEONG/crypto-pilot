@@ -5,9 +5,13 @@ from __future__ import annotations
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 from src.domain.futures.optimization.workflow import (
-    compute_crisis_mdd_budget,
+    CrisisReplayBudget,
+    compute_crisis_replay_budget,
     evaluate_l2_trial,
+    layer2_constraints_from_trial,
 )
 
 
@@ -660,46 +664,57 @@ class TestEvaluateL2TrialGrowthLcbDeployed:
         )
 
 
-class TestComputeCrisisMddBudget:
-    """compute_crisis_mdd_budget pure function tests."""
+class TestComputeCrisisReplayBudget:
+    """compute_crisis_replay_budget pure function tests."""
 
     @patch("src.domain.futures.strategy.tiered_workflow.awf_sim._run_awf_simulation")
     @patch("src.domain.futures.strategy.tiered_workflow.risk_deployment.apply_deployment")
-    def test_computes_from_replay_ctx(
+    def test_compute_crisis_replay_budget_returns_mdd_and_cagr_from_deployment_result(
         self, mock_apply: MagicMock, mock_sim: MagicMock,
     ) -> None:
-        """[S1] 합성 crisis_replay_ctx + leverage=2.0 → crisis_mdd_hybrid가 deploy MDD, budget이 공식대로."""
+        """[S1] 합성 crisis_replay_ctx + leverage=2.0 → CrisisReplayBudget에 MDD/CAGR/floor 정확히 매칭."""
         from src.domain.futures.strategy.tiered_workflow.dataclasses import Layer2AllocationConfig
 
         mock_sim.return_value = SimpleNamespace(
             rets_hybrid=[0.01, -0.02, 0.015, -0.01, 0.005],
         )
-        mock_apply.return_value = SimpleNamespace(mdd=0.25)
+        mock_apply.return_value = SimpleNamespace(mdd=0.25, cagr=-0.10)
         config = Layer2AllocationConfig.from_mapping({})
         ctx = SimpleNamespace(
             cache=MagicMock(), signal_batch=MagicMock(),
             aligned=SimpleNamespace(datetimes=[MagicMock()] * 50),
             awf_folds=(MagicMock(),),
         )
-        crisis_mdd_hybrid, crisis_mdd_budget = compute_crisis_mdd_budget(
+        budget = compute_crisis_replay_budget(
             crisis_replay_ctx=ctx, config=config, caps=MagicMock(),
             tf="8h", leverage=2.0, bars_per_year=1095.0,
         )
         expected_budget = float(config.l2_max_mdd_abs) * (1.0 - float(config.l2_deploy_crisis_mdd_margin))
-        assert crisis_mdd_hybrid == 0.25
-        assert crisis_mdd_budget == expected_budget
+        assert isinstance(budget, CrisisReplayBudget)
+        assert budget.mdd_hybrid == 0.25
+        assert budget.mdd_budget == expected_budget
+        assert budget.cagr_hybrid == -0.10
+        assert budget.cagr_floor == config.l2_min_crisis_cagr
 
-    def test_returns_none_when_ctx_is_none(self) -> None:
-        """[S3] crisis_replay_ctx=None → 즉시 (None, None)."""
-        result = compute_crisis_mdd_budget(
+    def test_compute_crisis_replay_budget_with_none_ctx_returns_all_none(self) -> None:
+        """[S3] crisis_replay_ctx=None → 4개 필드 전부 None."""
+        budget = compute_crisis_replay_budget(
             crisis_replay_ctx=None, config=MagicMock(), caps=MagicMock(),
             tf="8h", leverage=1.0, bars_per_year=1095.0,
         )
-        assert result == (None, None)
+        assert isinstance(budget, CrisisReplayBudget)
+        assert budget.mdd_hybrid is None
+        assert budget.mdd_budget is None
+        assert budget.cagr_hybrid is None
+        assert budget.cagr_floor is None
 
     @patch("src.domain.futures.strategy.tiered_workflow.awf_sim._run_awf_simulation")
-    def test_returns_none_on_simulation_exception(self, mock_sim: MagicMock) -> None:
-        """[S2] _run_awf_simulation 예외 → (None, None), 예외 미전파."""
+    def test_compute_crisis_replay_budget_simulation_exception_returns_all_none_and_warns(
+        self, mock_sim: MagicMock, caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """[S2] _run_awf_simulation 예외 → 전 필드 None, simulation_failed warning 확인."""
+        import logging
+        caplog.set_level(logging.WARNING)
         from src.domain.futures.strategy.tiered_workflow.dataclasses import Layer2AllocationConfig
 
         mock_sim.side_effect = ValueError("boom")
@@ -709,24 +724,29 @@ class TestComputeCrisisMddBudget:
             aligned=SimpleNamespace(datetimes=[MagicMock()] * 50),
             awf_folds=(MagicMock(),),
         )
-        result = compute_crisis_mdd_budget(
+        budget = compute_crisis_replay_budget(
             crisis_replay_ctx=ctx, config=config, caps=MagicMock(),
             tf="8h", leverage=1.0, bars_per_year=1095.0,
         )
-        assert result == (None, None)
+        assert isinstance(budget, CrisisReplayBudget)
+        assert budget.mdd_hybrid is None
+        assert budget.mdd_budget is None
+        assert budget.cagr_hybrid is None
+        assert budget.cagr_floor is None
+        assert any("simulation_failed" in r.message for r in caplog.records)
 
 
-class TestEvaluateL2TrialUsesComputeCrisisMddBudget:
-    """Refactoring verification: evaluate_l2_trial delegates to compute_crisis_mdd_budget."""
+class TestEvaluateL2TrialUsesComputeCrisisReplayBudget:
+    """Refactoring verification: evaluate_l2_trial delegates to compute_crisis_replay_budget."""
 
-    @patch("src.domain.futures.optimization.workflow.compute_crisis_mdd_budget")
+    @patch("src.domain.futures.optimization.workflow.compute_crisis_replay_budget")
     @patch("src.domain.futures.strategy.tiered_workflow.awf_sim._run_awf_simulation")
     @patch("src.domain.futures.strategy.tiered_workflow.risk_deployment.compute_layer2_fold_diagnostics")
     @patch("src.domain.futures.strategy.tiered_workflow.l2_gate.evaluate_layer2_gate")
     @patch("src.domain.futures.strategy.tiered_workflow.risk_deployment.calibrate_deployment_leverage")
     @patch("src.domain.futures.optimization.workflow.build_layer2_deployable_score")
     @patch("src.domain.futures.optimization.workflow.build_layer_universe_audit")
-    def test_calls_compute_crisis_mdd_budget(
+    def test_calls_compute_crisis_replay_budget(
         self,
         mock_universe: MagicMock,
         mock_build_score: MagicMock,
@@ -736,7 +756,7 @@ class TestEvaluateL2TrialUsesComputeCrisisMddBudget:
         mock_sim: MagicMock,
         mock_crisis_fn: MagicMock,
     ) -> None:
-        """[S4] evaluate_l2_trial이 compute_crisis_mdd_budget를 호출하고 반환값이 gate로 전달됨."""
+        """[S4] evaluate_l2_trial이 compute_crisis_replay_budget를 호출하고 반환값이 gate로 전달됨."""
         from src.domain.futures.strategy.tiered_workflow.dataclasses import Layer2AllocationConfig
 
         n_bars = 50
@@ -779,7 +799,9 @@ class TestEvaluateL2TrialUsesComputeCrisisMddBudget:
             cagr=0.0, sortino=0.0, sharpe=0.0, calmar=0.0, mdd=0.0,
             fold_pass_ratio=0.0, score=0.0, worst_fold_cagr=0.0,
         )
-        mock_crisis_fn.return_value = (0.12, 0.15)
+        mock_crisis_fn.return_value = CrisisReplayBudget(
+            mdd_hybrid=0.12, mdd_budget=0.15, cagr_hybrid=-0.08, cagr_floor=-0.05,
+        )
 
         config = Layer2AllocationConfig.from_mapping({})
         caps = SimpleNamespace(trial_number=42)
@@ -806,3 +828,18 @@ class TestEvaluateL2TrialUsesComputeCrisisMddBudget:
         gate_kwargs = mock_gate.call_args[1]
         assert gate_kwargs["crisis_mdd_hybrid"] == 0.12
         assert gate_kwargs["crisis_mdd_budget"] == 0.15
+        assert gate_kwargs["crisis_cagr_hybrid"] == -0.08
+        assert gate_kwargs["crisis_cagr_floor"] == -0.05
+
+
+def test_layer2_constraints_from_trial_pads_to_13() -> None:
+    """[S4] 12개짜리 legacy l2_optuna_constraint_values를 가진 trial → 13-tuple로 패딩되고 13번째 원소가 1.0(fail-safe)."""
+    from unittest.mock import MagicMock
+
+    mock_trial = MagicMock()
+    mock_trial.user_attrs = {"l2_optuna_constraint_values": [-1.0] * 12}
+
+    result = layer2_constraints_from_trial(mock_trial)
+
+    assert len(result) == 13
+    assert result[12] == pytest.approx(1.0)
