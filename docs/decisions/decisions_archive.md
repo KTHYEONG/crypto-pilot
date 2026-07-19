@@ -2,6 +2,11 @@
 
 This file holds historical architecture decision records (ADRs) that have been pruned from the active window.
 
+## [2026-07-18] [TASK_L2_CRISIS_LEVERAGE_CEILING] [ADR_20260718_L2_CRISIS_LEVERAGE_CEILING]
+- **Context/Why:** 위기 재현성 게이트가 계속 stress_tested_fail. 3개 opt-in 방어 레버(worst_fold/비대칭/쿨다운) 조합 실측 결과 champion마다 MDD가 21.75~26.52%로 크게 흔들려, 진짜 지배 변수가 leverage 계산(calibrate_deployment_leverage)이 crisis window를 전혀 안 본다는 점임을 확인.
+- **Resolution/What:** _resolve_safety_ceiling에 worst_fold와 동일 패턴의 crisis_rets 후보(l_crisis) 추가, compute_crisis_unit_returns(pipeline.py)가 L1 확정 후 1회만 계산해 전 trial에 재사용. l2_regime_long_short_asymmetry_enabled/bear·crisis_long_extra_mult/cap_release_cooldown_bars/crisis_gross_cap 5개 파라미터를 L2_SEARCH_SPACE에 신규 편입(전역 기본값은 no-op 유지, LIMIT-01 미해결로 하드코딩 금지).
+- **Impact:** 프로덕션급 replay(200 trials) 실측: crisis ceiling 정상 작동(compute 성공, exception 없음) 확인했으나 이번 챔피언은 L*가 이미 fit-leg mdd로 floor(1.0)돼 crisis candidate가 binding되지 않았고, Optuna가 고른 방어 레버는 asymmetry=False/cooldown=0(전부 off) — objective_l2_growth가 crisis-blind라 탐색공간 편입만으로는 방어 레버가 자동 선택되지 않음을 실측 확인. 위기 gate 자체는 여전히 fail(MDD 25.38%>21%). 후속: Optuna 9-슬롯 constraint 벡터에 trial별 crisis MDD 위반을 직접 페널티화하는 설계 필요.
+
 ## [2026-07-18] [L2_CRISIS_REGIME_CAP_RELEASE_COOLDOWN] [ADR_20260718_L2_CRISIS_REGIME_CAP_RELEASE_COOLDOWN]
 - **Context/Why:** worst_fold 기본 활성화 + 롱/숏 비대칭 완화 레버 도입 후에도 위기 게이트가 계속 stress_tested_fail. 롱/숏 비대칭은 CAGR만 개선하고 MDD(실제 지배적 제약, 21% 예산 대비 2.2배 초과)는 전혀 못 건드림을 실측 확인해 추가 진단 필요했음.
 - **Resolution/What:** scratch 진단(diag_crisis_regime_whipsaw.py)으로 최대낙폭 구간(FTX 붕괴 국면 집중)의 gross_exposure>=0.9 스파이크 13건 전부가 순간적 bull 오분류와 일치함을 실측 확정 — 레짐 캡이 방향 신호와 같은 타임스케일로 즉시 해제되는 것이 MDD의 실제 드라이버. market_regime.py에 apply_regime_cap_release_cooldown 순수함수 추가(기존 검증된 _apply_persistence_and_cooldown_1d 재사용) — bear/crisis 진입은 즉시, bull 복귀만 지연. Layer2AllocationConfig.l2_regime_cap_release_cooldown_bars opt-in 필드(기본 0). awf_sim.py의 _regime_code_1d_for_cap 파생 배열로 캡 호출부만 교체, 다른 4개 소비처는 원본 유지.
