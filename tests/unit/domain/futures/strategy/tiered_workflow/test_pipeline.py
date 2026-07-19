@@ -784,3 +784,90 @@ class TestComputeCrisisUnitReturns:
         )
         assert isinstance(result, np.ndarray)
         assert result.size == 0
+
+    def test_crisis_context_loads_at_4h_source_when_master_is_8h(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """8h master replay must load from 4h source (raw 8h storage does not exist)."""
+        from datetime import date
+
+        from src.domain.futures.strategy.tiered_workflow.pipeline import (
+            CrisisWindow,
+            _load_crisis_replay_context,
+        )
+
+        requested_tfs: list[str] = []
+
+        def _empty_data(*, tf: str, **_kwargs: Any) -> tuple[dict[str, Any], dict[str, Any], list[str]]:
+            requested_tfs.append(tf)
+            return {}, {}, []
+
+        monkeypatch.setattr(
+            "src.domain.futures.optimization.opt_data_utils.load_futures_data_maps_for_symbols",
+            _empty_data,
+        )
+
+        result = _load_crisis_replay_context(
+            deployment_registry=_registry(ready_symbols=("BTCUSDT",)),
+            strategy_cfg=CandidateStrategyConfig(),
+            tf="8h",
+            crisis_windows=(
+                CrisisWindow(
+                    start=date(2022, 4, 1),
+                    end=date(2022, 4, 2),
+                    label="test",
+                    symbols=("BTCUSDT",),
+                    source_note="test",
+                ),
+            ),
+        )
+
+        assert result is None
+        assert requested_tfs == ["4h"]
+
+    def test_assess_crisis_reliability_loads_at_4h_source_when_master_is_8h(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """8h master stress test must load from 4h source, not hardcoded 4h."""
+        from datetime import date
+
+        from src.domain.futures.strategy.tiered_workflow.pipeline import (
+            CrisisWindow,
+            assess_crisis_reliability,
+        )
+        from src.domain.futures.portfolio.portfolio_constructor import PortfolioCaps
+        from src.domain.futures.strategy.tiered_workflow.dataclasses import Layer2AllocationConfig
+
+        requested_tfs: list[str] = []
+
+        def _empty_data(*, tf: str, **_kwargs: Any) -> tuple[dict[str, Any], dict[str, Any], list[str]]:
+            requested_tfs.append(tf)
+            return {}, {}, []
+
+        monkeypatch.setattr(
+            "src.domain.futures.optimization.opt_data_utils.load_futures_data_maps_for_symbols",
+            _empty_data,
+        )
+
+        result = assess_crisis_reliability(
+            deployment_registry=_registry(ready_symbols=("BTCUSDT",)),
+            strategy_cfg=CandidateStrategyConfig(),
+            config=Layer2AllocationConfig(),
+            caps=PortfolioCaps(),
+            tf="8h",
+            deploy_leverage=1.0,
+            crisis_windows=(
+                CrisisWindow(
+                    start=date(2022, 4, 1),
+                    end=date(2022, 4, 2),
+                    label="test",
+                    symbols=("BTCUSDT",),
+                    source_note="test",
+                ),
+            ),
+        )
+
+        assert requested_tfs == ["4h"]
+        assert not result.verified
