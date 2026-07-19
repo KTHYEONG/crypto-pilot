@@ -22,9 +22,7 @@ class TestL2SearchSpace:
         assert "l2_regime_crisis_gross_cap" in L2_SEARCH_SPACE
 
     def test_deployed_scale_growth_and_severity_gating_params_present(self) -> None:
-        assert "l2_objective_growth_lcb_weight" in L2_SEARCH_SPACE
-        assert L2_SEARCH_SPACE["l2_objective_growth_lcb_weight"]["low"] == 0.0
-        assert L2_SEARCH_SPACE["l2_objective_growth_lcb_weight"]["high"] == 1.0
+        assert "l2_objective_growth_lcb_weight" not in L2_SEARCH_SPACE  # [LIMIT-04] removed
         assert "l2_regime_severity_gating_enabled" in L2_SEARCH_SPACE
         assert L2_SEARCH_SPACE["l2_regime_severity_gating_enabled"]["choices"] == (False, True)
 

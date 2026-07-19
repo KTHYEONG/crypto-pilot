@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import MagicMock
 
@@ -686,6 +687,82 @@ class TestRunTieredPipelineSelectedTimeframe:
 # S14: compute_crisis_unit_returns
 # ---------------------------------------------------------------------------
 class TestComputeCrisisUnitReturns:
+    def test_crisis_context_loads_at_requested_master_timeframe(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """1h master replay must load 1h bars, never upsample 4h bars."""
+        from datetime import date
+
+        from src.domain.futures.strategy.tiered_workflow.pipeline import (
+            CrisisWindow,
+            _load_crisis_replay_context,
+        )
+
+        requested_tfs: list[str] = []
+
+        def _empty_data(*, tf: str, **_kwargs: Any) -> tuple[dict[str, Any], dict[str, Any], list[str]]:
+            requested_tfs.append(tf)
+            return {}, {}, []
+
+        monkeypatch.setattr(
+            "src.domain.futures.optimization.opt_data_utils.load_futures_data_maps_for_symbols",
+            _empty_data,
+        )
+
+        result = _load_crisis_replay_context(
+            deployment_registry=_registry(ready_symbols=("BTCUSDT",)),
+            strategy_cfg=CandidateStrategyConfig(),
+            tf="1h",
+            crisis_windows=(
+                CrisisWindow(
+                    start=date(2022, 4, 1),
+                    end=date(2022, 4, 2),
+                    label="test",
+                    symbols=("BTCUSDT",),
+                    source_note="test",
+                ),
+            ),
+        )
+
+        assert result is None
+        assert requested_tfs == ["1h"]
+
+    def test_compute_crisis_unit_returns_reuses_provided_context_without_reloading(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Provided crisis context is the sole source for calibration returns."""
+        from src.domain.futures.strategy.tiered_workflow.pipeline import compute_crisis_unit_returns
+
+        context = SimpleNamespace(
+            cache=object(),
+            signal_batch=object(),
+            aligned=object(),
+            awf_folds=(),
+        )
+
+        def _unexpected_reload(**_kwargs: Any) -> Any:
+            raise AssertionError("crisis context must not be reloaded")
+
+        monkeypatch.setattr(
+            "src.domain.futures.strategy.tiered_workflow.pipeline._load_crisis_replay_context",
+            _unexpected_reload,
+        )
+        monkeypatch.setattr(
+            "src.domain.futures.strategy.tiered_workflow.awf_sim._run_awf_simulation",
+            lambda **_kwargs: SimpleNamespace(rets_hybrid=(0.01, -0.02)),
+        )
+
+        result = compute_crisis_unit_returns(
+            deployment_registry=_registry(ready_symbols=("BTCUSDT",)),
+            strategy_cfg=CandidateStrategyConfig(),
+            tf="4h",
+            crisis_replay_ctx=context,
+        )
+
+        assert result.tolist() == [0.01, -0.02]
+
     def test_compute_crisis_unit_returns_returns_empty_on_load_failure(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """[S3] load_futures_data_maps_for_symbols 예외 시 빈 배열 반환."""
         from src.domain.futures.strategy.tiered_workflow.pipeline import compute_crisis_unit_returns

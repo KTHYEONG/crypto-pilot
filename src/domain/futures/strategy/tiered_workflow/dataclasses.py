@@ -327,6 +327,10 @@ class Layer2TrialEvaluation:
     rets_baseline_ew: tuple[float, ...] = ()
     fold_attributions: tuple[Layer2FoldAttribution, ...] = ()
     deployable_score: Layer2DeployableScore | None = None
+    active_block_count: int = 0
+    block_log_growth_signature: tuple[float, ...] = ()
+    growth_lcb_deployed: float = float("-inf")
+    crisis_constraints_measured: bool = False
 
 
 @dataclass(slots=True, frozen=True)
@@ -381,6 +385,7 @@ class Layer2GateEvaluation:
     promotion_passed: bool
     promotion_blocker: str
     promotion_constraint_values: tuple[float, ...]
+    constraint_vector: Any | None = None  # Layer2ConstraintVector (lazy import)
 
 
 @dataclass(slots=True, frozen=True)
