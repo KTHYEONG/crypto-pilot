@@ -6,7 +6,7 @@ import hashlib
 import os
 import re as _re
 from collections import defaultdict
-from dataclasses import dataclass, fields, is_dataclass, replace
+from dataclasses import dataclass, field, fields, is_dataclass, replace
 from typing import TYPE_CHECKING, Literal, cast
 
 import numba
@@ -1143,6 +1143,7 @@ class _AwfSimResult:
     fit_rets_by_fold: tuple[tuple[float, ...], ...] = ()  # fold별 fit-leg 수익률 (worst-fold MDD 제약용)
     fold_attributions: tuple[Layer2FoldAttribution, ...] = ()
     policy_effect_by_fold: tuple[RegimePolicyEffectSummary, ...] = ()
+    regime_codes_hybrid: list[int] = field(default_factory=list)
 
 
 def _summarize_regime_policy_effects(
@@ -2554,6 +2555,7 @@ def _run_awf_simulation(
     all_rets_hybrid: list[float] = []
     all_rets_baseline: list[float] = []
     all_rets_baseline_ew: list[float] = []
+    regime_codes_hybrid: list[int] = []
     all_turnovers: list[float] = []
     turnover_return_indices: list[int] = []
     all_turnovers_baseline: list[float] = []
@@ -3073,6 +3075,16 @@ def _run_awf_simulation(
             _diag_regime_full = compress_regime_codes(compute_market_regime_context(aligned=aligned).code_1d)
         except Exception:
             _diag_regime_full = None
+    _regime_codes_for_boost: NDArray[np.int8] | None = None
+    try:
+        from src.domain.futures.strategy.market_regime import (
+            compress_regime_codes,
+            compute_market_regime_context,
+        )
+
+        _regime_codes_for_boost = compress_regime_codes(compute_market_regime_context(aligned=aligned).code_1d)
+    except Exception:
+        _regime_codes_for_boost = None
     _diag_regime_names = ("bull", "bear", "crisis")
     # L3: Adaptive Regime-Reliability init
     _reliability_enabled = bool(getattr(config, "l2_regime_reliability_enabled", False))
@@ -4144,6 +4156,9 @@ def _run_awf_simulation(
                 all_rets_hybrid.append(r_h)
                 all_rets_baseline.append(r_b)
                 all_rets_baseline_ew.append(r_b_ew)
+                regime_codes_hybrid.append(
+                    int(_regime_codes_for_boost[t2]) if _regime_codes_for_boost is not None and t2 < len(_regime_codes_for_boost) else 2
+                )
                 _fold_h.append(r_h)
                 _fold_b.append(r_b)
 
@@ -4653,6 +4668,7 @@ def _run_awf_simulation(
         fit_rets_by_fold=tuple(tuple(f) for f in _per_fold_fit_rets),
         fold_attributions=tuple(fold_attributions),
         policy_effect_by_fold=policy_effect_by_fold,
+        regime_codes_hybrid=regime_codes_hybrid,
     )
 
 
