@@ -658,6 +658,8 @@ class Layer2AllocationConfig:
     l2_regime_reliability_enabled: bool = False
     l2_regime_reliability_window: int = 2
     l2_regime_reliability_floor: float = 0.2
+    l2_regime_bull_leverage_boost_enabled: bool = False
+    l2_regime_bull_leverage_boost: float = 1.0
     l2_entry_cooldown_bars: int = 12
     l2_entry_spike_penalty_weight: float = 0.05
     l2_entry_spike_warn_threshold: float = 0.20
@@ -1052,6 +1054,17 @@ class Layer2AllocationConfig:
         if l2_regime_reliability_floor <= 0.0 or l2_regime_reliability_floor > 1.0:
             raise ValueError("l2_regime_reliability_floor must be in range (0.0, 1.0]")
 
+        _l2_bull_boost_enabled = bool(params.get("l2_regime_bull_leverage_boost_enabled", _dc.l2_regime_bull_leverage_boost_enabled))
+        _l2_bull_boost = cls._validate_range(
+            "l2_regime_bull_leverage_boost",
+            cls._as_float(
+                params.get("l2_regime_bull_leverage_boost", _dc.l2_regime_bull_leverage_boost),
+                _dc.l2_regime_bull_leverage_boost,
+            ),
+            1.0,
+            1.3,
+        )
+
         _l2_deploy_mdd_margin = cls._as_float(
             params.get("l2_deploy_mdd_margin", _dc.l2_deploy_mdd_margin),
             _dc.l2_deploy_mdd_margin,
@@ -1311,6 +1324,8 @@ class Layer2AllocationConfig:
             l2_regime_reliability_enabled=l2_regime_reliability_enabled,
             l2_regime_reliability_window=l2_regime_reliability_window,
             l2_regime_reliability_floor=l2_regime_reliability_floor,
+            l2_regime_bull_leverage_boost_enabled=_l2_bull_boost_enabled,
+            l2_regime_bull_leverage_boost=_l2_bull_boost,
             l2_entry_cooldown_bars=cls._as_int(params.get("l2_entry_cooldown_bars", 12), 12),
             l2_entry_spike_penalty_weight=cls._validate_range(
                 "l2_entry_spike_penalty_weight",

@@ -1396,6 +1396,26 @@ def _state_name_for_index(state_names: Sequence[str], state: int) -> str:
     return f"unknown({state})"
 
 
+def build_regime_bull_boost_path(
+    regime_codes: Sequence[int],
+    state_names: tuple[str, ...],
+    *,
+    enabled: bool = False,
+    bull_leverage_boost: float = 1.0,
+) -> NDArray[np.float64]:
+    n = len(regime_codes)
+    if not enabled or bull_leverage_boost <= 1.0:
+        return np.ones(n, dtype=np.float64)
+    if bull_leverage_boost > 1.3:
+        raise ValueError(f"bull_leverage_boost must be in (1.0, 1.3], got {bull_leverage_boost}")
+    path = np.ones(n, dtype=np.float64)
+    for i, code in enumerate(regime_codes):
+        state_name = state_names[code] if 0 <= code < len(state_names) else "crisis"
+        if state_name.startswith("bull"):
+            path[i] = bull_leverage_boost
+    return path
+
+
 def _collect_regime_cell_accumulators(
     *,
     cache: L2SimulationCache,
