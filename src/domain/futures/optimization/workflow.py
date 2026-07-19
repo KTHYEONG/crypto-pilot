@@ -1983,13 +1983,20 @@ def evaluate_l2_trial(
         z_value=float(config.l2_growth_lcb_z),
     )
 
+    # [ADR_20260719_L2_ACTIVE_BLOCK_COUNT_LIGHTWEIGHT_FIX] active_block_count는 lightweight 여부와
+    # 무관하게 항상 정확히 계산 — Optuna constraints_func가 참조하는 값이 lightweight=True(전 탐색
+    # trial의 기본값)일 때 항상 0으로 조작되던 버그 수정. Layer2BlockMetric 상세 객체 생성만
+    # 계속 lightweight로 skip(진단용, 비용 절감 대상 유지).
+    n_blocks = max(len(block_growth_hybrid), len(block_growth_baseline))
     block_metrics: list[Layer2BlockMetric] = []
-    if not lightweight:
-        n_blocks = max(len(block_growth_hybrid), len(block_growth_baseline))
-        for block_idx in range(n_blocks):
+    active_block_count = 0
+    for block_idx in range(n_blocks):
+        turnover_slice = sim.all_turnovers[block_idx : block_idx + 1]
+        if any(abs(value) > 0.0 for value in turnover_slice):
+            active_block_count += 1
+        if not lightweight:
             start_idx = block_idx * block_size
             end_idx = min((block_idx + 1) * block_size, len(rets_hybrid))
-            turnover_slice = sim.all_turnovers[block_idx : block_idx + 1]
             block_metrics.append(
                 Layer2BlockMetric(
                     start_idx=start_idx,
@@ -2020,9 +2027,6 @@ def evaluate_l2_trial(
     break_even_pass_pct = float(sim.friction_pass_total) / float(sim.signal_total) if sim.signal_total > 0 else 0.0
     average_gross_exposure = float(np.mean(sim.all_gross_exposures)) if sim.all_gross_exposures else 0.0
     total_cost_bps = float(sim.total_cost_hybrid * 1e4)
-    # FIX-1: active_block_count 정의 통일 — 최종 게이트(pipeline.py)와 동일한 AWF fold 기반.
-    # contiguous-block 기반(이전)과 달리 pipeline 게이트가 보는 len(block_metrics)와 일치.
-    active_block_count = len([m for m in block_metrics if m.active_rebalances > 0])
     # FIX-2/4: 순수 1/N EW baseline Sharpe (uplift 제약 전용)
     sharpe_hac_baseline_ew = _sharpe_hac(list(sim.rets_baseline_ew), bars_per_year=bars_per_year)
     cap_saturation_ratio = (
