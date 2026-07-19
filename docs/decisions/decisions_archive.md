@@ -2,6 +2,11 @@
 
 This file holds historical architecture decision records (ADRs) that have been pruned from the active window.
 
+## [2026-07-18] [TASK_CACHE_FINGERPRINT_STABILIZATION] [ADR_20260718_CACHE_FINGERPRINT_STABILIZATION]
+- **Context/Why:** L1 result cache가 pd.util.hash_pandas_object로 인해 프로세스 간 비결정적 fingerprint를 생성 — 모든 cold start에서 cache miss(211s 재연산). Peak RSS 13.1GB로 12GB threshold 초과.
+- **Resolution/What:** _deterministic_df_fingerprint(sha256 content-based)로 대체해 cross-process 결정성 확보. _should_load_cache(RSS 11.5GB threshold)로 cache deserialize gating. gc.collect()를 cache 경계에 추가해 RSS 회수.
+- **Impact:** Cross-process fingerprint 결정성 확인(c9c941f154b3e3d5 동일). L1 cache hit 정상 작동(mock 검증: run_l1_nested_swf 호출 2→1). RSS guard 정상 gating 확인. Production replay(L2 120 trials): L1 7/7 PASS, L2 BLOCKED(cagr CAGR+20.9%) — cache 변경으로 인한 연산 변화 0. /check PASS(Cov 38%).
+
 ## [2026-07-18] [TASK_PIPELINE_STAGE_CACHING] [ADR_20260718_PIPELINE_STAGE_CACHING]
 - **Context/Why:** cProfile 실측(666s)에서 LTF alpha panels(246s, 37%)와 L1 multi-TF(211s, 32%)가 전체 실행시간의 69% 차지. L2 study(35s, 5%)만 최적화한 이전 스펙 대비 94%의 병목을 추가 발굴.
 - **Resolution/What:** 3개 캐싱 메커니즘 도입: (1) LTF panel disk cache — fingerprint(windowing+symbols+families+LTFs+data content) 기반 pickle 영속화, 246s→2s, (2) L1 per-TF result disk cache — fingerprint(tf+aligned+events+cfg+seed) 기반, 211s→2s, (3) compute_market_regime_context in-memory memo — content-fingerprint 키 FIFO eviction(max 8), 50s→5s. opt_config.py에 5개 config 키 추가.
