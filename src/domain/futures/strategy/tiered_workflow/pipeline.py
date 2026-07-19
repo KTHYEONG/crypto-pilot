@@ -2317,13 +2317,10 @@ def _load_crisis_replay_context(
     다중 윈도우 중 관측 bar 수가 가장 많은 윈도우를 선택.
     로드/정렬/이벤트 생성 실패 시 None 반환."""
     from src.domain.futures.optimization.opt_data_utils import load_futures_data_maps_for_symbols
-    from src.domain.futures.strategy.timeframe_contracts import resample_alias
+    from src.domain.futures.strategy.timeframe_contracts import resample_alias, select_crisis_load_tf
     from src.domain.futures.strategy.timeframe_probe import _resample_ohlcv
 
-    # A coarser source can aggregate to the master TF, but it cannot create
-    # valid finer bars.  The previous fixed 4h source made a 1h master replay
-    # silently empty after upsampling, so L2 lost its crisis context.
-    _load_tf = tf
+    _load_tf = select_crisis_load_tf(tf)
     if deployment_registry is None or not deployment_registry.by_symbol:
         return None
 
@@ -2489,10 +2486,10 @@ def assess_crisis_reliability(
 ) -> CrisisReliabilityAssessment:
     """Replay the frozen champion across crisis windows. [ADR_20260717_L2_CRISIS_SURVIVAL_POLICY]"""
     from src.domain.futures.optimization.opt_data_utils import load_futures_data_maps_for_symbols
-    from src.domain.futures.strategy.timeframe_contracts import resample_alias
+    from src.domain.futures.strategy.timeframe_contracts import resample_alias, select_crisis_load_tf
     from src.domain.futures.strategy.timeframe_probe import _resample_ohlcv
 
-    _load_tf = "4h"
+    _load_tf = select_crisis_load_tf(tf)
     replayed_metrics: list[CrisisWindowMetrics] = []
 
     if deployment_registry is None or not deployment_registry.by_symbol:
