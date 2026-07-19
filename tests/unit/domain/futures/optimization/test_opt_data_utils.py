@@ -602,3 +602,130 @@ def test_bars_per_day_matches_hours_per_bar_for_all_l1_tfs() -> None:
         result = _bars_per_day(tf)
 
         assert result == pytest.approx(24.0 / HOURS_PER_BAR[tf])
+
+
+# ── Enriched Cache Content Signature Hardening Tests ──────────────────────────
+
+
+def test_is_enriched_cache_fresh_when_deps_unchanged_returns_true(tmp_path: Path) -> None:
+    enriched = tmp_path / "BTCUSDT_4h_enriched.parquet"
+    enriched.write_bytes(b"parquet-bytes")
+    dep = tmp_path / "BTCUSDT_4h.parquet"
+    dep.write_bytes(b"raw-bytes")
+    opt_data_utils._write_enriched_cache_signature(enriched, [dep])
+
+    result = opt_data_utils._is_enriched_cache_fresh(enriched, [dep])
+
+    assert result is True
+
+
+def test_is_enriched_cache_fresh_detects_content_change_with_preserved_mtime(
+    tmp_path: Path,
+) -> None:
+    enriched = tmp_path / "BTCUSDT_4h_enriched.parquet"
+    enriched.write_bytes(b"parquet-bytes")
+    dep = tmp_path / "BTCUSDT_4h.parquet"
+    dep.write_bytes(b"raw-bytes-v1")
+    opt_data_utils._write_enriched_cache_signature(enriched, [dep])
+    original_mtime = dep.stat().st_mtime
+
+    dep.write_bytes(b"raw-bytes-v2-longer-content-changed")
+    os.utime(dep, (original_mtime, original_mtime))
+    result = opt_data_utils._is_enriched_cache_fresh(enriched, [dep])
+
+    assert result is False
+
+
+def test_is_enriched_cache_fresh_legacy_cache_without_sidecar_falls_back_to_mtime(
+    tmp_path: Path,
+) -> None:
+    dep = tmp_path / "BTCUSDT_4h.parquet"
+    dep.write_bytes(b"raw-bytes")
+    os.utime(dep, (time.time() - 10, time.time() - 10))
+    enriched = tmp_path / "BTCUSDT_4h_enriched.parquet"
+    enriched.write_bytes(b"parquet-bytes")
+
+    result = opt_data_utils._is_enriched_cache_fresh(enriched, [dep])
+
+    assert result is True
+
+
+def test_is_enriched_cache_fresh_corrupted_sidecar_returns_false(tmp_path: Path) -> None:
+    enriched = tmp_path / "BTCUSDT_4h_enriched.parquet"
+    enriched.write_bytes(b"parquet-bytes")
+    dep = tmp_path / "BTCUSDT_4h.parquet"
+    dep.write_bytes(b"raw-bytes")
+    sig_path = opt_data_utils._enriched_signature_sidecar_path(enriched)
+    sig_path.write_text("{not valid json")
+
+    result = opt_data_utils._is_enriched_cache_fresh(enriched, [dep])
+
+    assert result is False
+
+
+def test_load_single_symbol_data_stale_enriched_content_triggers_regeneration(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    safe_sym = "TESTUSDT"
+    tf_l = "4h"
+    monkeypatch.setattr("src.core.settings.FUTURES_DATA_DIR", tmp_path)
+    from src.core.settings import FuturesStorageLayout
+
+    _setup_multi_tf_enriched(tmp_path, safe_sym)
+
+    enriched_path = FuturesStorageLayout.get_enriched_path(safe_sym, tf_l)
+    enriched_mtime = enriched_path.stat().st_mtime
+    old_time = enriched_mtime - 10
+
+    ohlcv_dep = FuturesStorageLayout.get_ohlcv_path(safe_sym, tf_l)
+    funding_dep = FuturesStorageLayout.get_funding_path(safe_sym)
+    metrics_dep = FuturesStorageLayout.get_metrics_path(safe_sym)
+
+    for d in [funding_dep, metrics_dep]:
+        if not d.exists():
+            d.parent.mkdir(parents=True, exist_ok=True)
+            d.write_bytes(b"dep-data")
+    for d in [ohlcv_dep, funding_dep, metrics_dep]:
+        os.utime(d, (old_time, old_time))
+
+    deps = [ohlcv_dep, funding_dep, metrics_dep]
+    opt_data_utils._write_enriched_cache_signature(enriched_path, deps)
+
+    old_ohlcv_mtime = ohlcv_dep.stat().st_mtime
+    ohlcv_dep.write_bytes(b"modified-ohlcv-content-longer")
+    os.utime(ohlcv_dep, (old_ohlcv_mtime, old_ohlcv_mtime))
+
+    collect_call_count: list[int] = [0]
+
+    def _fake_collect(self: Any, sym: str, tf: str, *_a: Any, **_kw: Any) -> pd.DataFrame:
+        collect_call_count[0] += 1
+        return pd.DataFrame()
+
+    monkeypatch.setattr(opt_data_utils.DataCollector, "collect_and_save", _fake_collect)
+    monkeypatch.setattr(opt_data_utils, "compute_segment_merge_index", lambda *_a, **_kw: 0)
+    monkeypatch.setattr(opt_data_utils, "_append_stage_integrity", lambda *a, **kw: None)
+    monkeypatch.setattr(opt_data_utils, "_prepare_funding_metrics", lambda *a, **kw: (None, None, None))
+
+    _, _, _, insufficient = opt_data_utils.load_single_symbol_data(
+        sym=safe_sym,
+        tf=tf_l,
+        fetch_start="2022-01-01",
+        start="2022-07-01",
+        is_end="2023-10-01",
+        end="2023-12-31",
+        skip_metrics=True,
+        target_tfs=[tf_l],
+    )
+
+    assert collect_call_count[0] >= 1
+
+
+def test_is_enriched_cache_fresh_when_enriched_missing_returns_false(tmp_path: Path) -> None:
+    enriched = tmp_path / "MISSING_enriched.parquet"
+    dep = tmp_path / "BTCUSDT_4h.parquet"
+    dep.write_bytes(b"raw-bytes")
+
+    result = opt_data_utils._is_enriched_cache_fresh(enriched, [dep])
+
+    assert result is False
