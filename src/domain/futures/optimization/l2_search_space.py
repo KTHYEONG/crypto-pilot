@@ -31,4 +31,6 @@ L2_SEARCH_SPACE: dict[str, dict[str, Any]] = {
     "l2_regime_policy_mode": {"type": "categorical", "choices": ("soft", "hybrid")},
     "l2_regime_hard_block_enabled": {"type": "categorical", "choices": (False, True)},
     "l2_regime_pooled_is_passthrough": {"type": "categorical", "choices": (False, True)},
+    "l2_regime_bull_leverage_boost_enabled": {"type": "categorical", "choices": (False, True)},
+    "l2_regime_bull_leverage_boost": {"type": "float", "low": 1.0, "high": 1.3, "step": 0.05},
 }
