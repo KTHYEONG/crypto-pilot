@@ -2126,6 +2126,8 @@ def _run_tiered_l2_study(
         caps=caps,
         min_dsr=_min_dsr,
         prebuilt_cache=l2_sim_cache,
+        crisis_rets=crisis_rets,
+        crisis_replay_ctx=crisis_replay_ctx,
     )
 
     _log_mem("select_layer2_champion", _mem_champ_before, extra=f"took={time.perf_counter() - _t_champ_start:.4f}s")
