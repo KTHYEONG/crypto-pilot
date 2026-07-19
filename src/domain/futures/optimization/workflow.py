@@ -1762,6 +1762,49 @@ def _deployment_shaped_l2_objective(
     return float(growth_lcb - 0.10 * downside_lpm - 0.05 * mad - worst_fold_penalty)
 
 
+
+def compute_crisis_mdd_budget(
+    *,
+    crisis_replay_ctx: Any | None,
+    config: Any,
+    caps: Any,
+    tf: str,
+    leverage: float,
+    bars_per_year: float,
+    trial_number: int = 0,
+) -> tuple[float | None, float | None]:
+    """[ADR_20260719_L2_CHAMPION_SELECTION_CRISIS_BLINDNESS_FIX] crisis-window 배치
+    MDD와 예산을 계산 — evaluate_l2_trial과 select_layer2_champion이 공유(로직 이중화 방지).
+    crisis_replay_ctx가 None이거나 시뮬레이션 실패 시 (None, None) 반환."""
+    from src.domain.futures.strategy.tiered_workflow.awf_sim import _run_awf_simulation
+    from src.domain.futures.strategy.tiered_workflow.risk_deployment import apply_deployment
+
+    if crisis_replay_ctx is None:
+        return None, None
+    try:
+        _crisis_sim = _run_awf_simulation(
+            cache=crisis_replay_ctx.cache,
+            signal_batch=crisis_replay_ctx.signal_batch,
+            aligned=crisis_replay_ctx.aligned,
+            awf_folds=crisis_replay_ctx.awf_folds,
+            config=config,
+            caps=caps,
+            tf=tf,
+            sim_origin="crisis_constraint",
+        )
+        _crisis_unit_rets = np.asarray(_crisis_sim.rets_hybrid, dtype=np.float64)
+        if _crisis_unit_rets.size < 2:
+            return None, None
+        _crisis_dep = apply_deployment(rets=_crisis_unit_rets, leverage=leverage, bars_per_year=bars_per_year)
+        _crisis_mdd_budget = float(config.l2_max_mdd_abs) * (1.0 - float(config.l2_deploy_crisis_mdd_margin))
+        return float(_crisis_dep.mdd), _crisis_mdd_budget
+    except Exception:
+        _logger.warning(
+            "[L2-CRISIS-CONSTRAINT] trial=%d simulation_failed, crisis constraint skipped",
+            trial_number,
+        )
+        return None, None
+
 def evaluate_l2_trial(
     *,
     cache: L2SimulationCache,
@@ -2106,30 +2149,15 @@ def evaluate_l2_trial(
         or not np.isfinite(cagr_hybrid)
         or not np.isfinite(sharpe_hac_hybrid)
     )
-    _crisis_mdd_hybrid: float | None = None
-    _crisis_mdd_budget: float | None = None
-    if not lightweight and crisis_replay_ctx is not None:
-        try:
-            _crisis_sim = _run_awf_simulation(
-                cache=crisis_replay_ctx.cache,
-                signal_batch=crisis_replay_ctx.signal_batch,
-                aligned=crisis_replay_ctx.aligned,
-                awf_folds=crisis_replay_ctx.awf_folds,
-                config=config,
-                caps=caps,
-                tf=tf,
-                sim_origin="crisis_constraint",
-            )
-            _crisis_unit_rets = np.asarray(_crisis_sim.rets_hybrid, dtype=np.float64)
-            if _crisis_unit_rets.size >= 2:
-                _crisis_dep = apply_deployment(rets=_crisis_unit_rets, leverage=_l_star, bars_per_year=bars_per_year)
-                _crisis_mdd_hybrid = float(_crisis_dep.mdd)
-                _crisis_mdd_budget = float(config.l2_max_mdd_abs) * (1.0 - float(config.l2_deploy_crisis_mdd_margin))
-        except Exception:
-            _logger.warning(
-                "[L2-CRISIS-CONSTRAINT] trial=%d simulation_failed, crisis constraint skipped",
-                getattr(caps, "trial_number", 0),
-            )
+    _crisis_mdd_hybrid, _crisis_mdd_budget = compute_crisis_mdd_budget(
+        crisis_replay_ctx=crisis_replay_ctx if not lightweight else None,
+        config=config,
+        caps=caps,
+        tf=tf,
+        leverage=float(_l_star),
+        bars_per_year=bars_per_year,
+        trial_number=int(getattr(caps, "trial_number", 0)),
+    )
 
     gate = evaluate_layer2_gate(
         deployment_failed=deployment_failed,
