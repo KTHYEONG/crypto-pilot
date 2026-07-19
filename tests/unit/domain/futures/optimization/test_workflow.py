@@ -639,6 +639,61 @@ class TestEvaluateL2TrialGrowthLcbDeployed:
         assert result_high.objective_value == pytest.approx(result_high.growth_lcb_deployed, abs=1e-10)
         assert result_low.objective_value == pytest.approx(result_low.growth_lcb_deployed, abs=1e-10)
 
+    @patch("src.domain.futures.strategy.tiered_workflow.awf_sim._run_awf_simulation")
+    @patch("src.domain.futures.strategy.tiered_workflow.risk_deployment.compute_layer2_fold_diagnostics")
+    @patch("src.domain.futures.strategy.tiered_workflow.l2_gate.evaluate_layer2_gate")
+    @patch("src.domain.futures.strategy.tiered_workflow.risk_deployment.calibrate_deployment_leverage")
+    @patch("src.domain.futures.optimization.workflow.build_layer2_deployable_score")
+    @patch("src.domain.futures.optimization.workflow.build_layer_universe_audit")
+    def test_evaluate_l2_trial_leverage_wipeout_trial_does_not_collapse_to_sentinel(
+        self,
+        mock_universe_audit: MagicMock,
+        mock_build_score: MagicMock,
+        mock_calibrate: MagicMock,
+        mock_gate: MagicMock,
+        mock_fold_diag: MagicMock,
+        mock_sim: MagicMock,
+    ) -> None:
+        """[S4 Integration] wipeout bar가 포함된 trial이 -1e6 sentinel로 붕괴하지 않음."""
+        from src.domain.futures.strategy.tiered_workflow.dataclasses import Layer2AllocationConfig
+
+        sim = self._make_sim()
+        sim.rets_hybrid = [0.002] * 100 + [-0.65] + [0.002] * 99
+        mock_sim.return_value = sim
+        mock_fold_diag.return_value = self._make_fold_diag()
+        mock_gate.return_value = SimpleNamespace(
+            optuna_constraint_values=(0.0,) * 13,
+            gate_passed=True,
+            blocker_reason="",
+            constraint_vector=SimpleNamespace(crisis_measured=True),
+        )
+        mock_calibrate.side_effect = [(2.0, "mdd", 0.0)]
+        mock_build_score.return_value = SimpleNamespace(
+            cagr=0.0, sortino=0.0, sharpe=0.0, calmar=0.0, mdd=0.0,
+            fold_pass_ratio=0.0, score=0.0, worst_fold_cagr=0.0,
+        )
+        config = Layer2AllocationConfig.from_mapping({})
+        caps = SimpleNamespace()
+        aligned = SimpleNamespace(
+            symbols=("BTCUSDT",),
+            close_2d=MagicMock(),
+            datetimes=[MagicMock()] * 200,
+        )
+
+        result = evaluate_l2_trial(
+            cache=MagicMock(),
+            signal_batch=SimpleNamespace(start_idx=0, end_idx=200),
+            aligned=aligned,
+            awf_folds=(MagicMock(),),
+            config=config,
+            caps=caps,
+            tf="1h",
+        )
+
+        assert result.growth_lcb_deployed != pytest.approx(-1e6)
+        assert result.objective_value == pytest.approx(result.growth_lcb_deployed, abs=1e-10)
+        assert result.growth_lcb_deployed < 0
+
 
 class TestComputeCrisisReplayBudget:
     """compute_crisis_replay_budget pure function tests."""
