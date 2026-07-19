@@ -1,4 +1,19 @@
-# L2 Phase 성과 개선 세션 결과 — 2026-07-19 (8개 spec 누적: 정상장 PASS 유지, crisis는 champion-selection fallback 취약점으로 재악화)
+# L2 Phase 성과 개선 세션 결과 — 2026-07-19 (최신 feasibility-first 재측정 포함)
+
+## 최신 재측정: feasibility-first 120 trials
+
+실행 조건: 기준일 `2026-05-01`, `--phase l2`, 4h 실행 요청, L2 master TF=1h, `seed=42`, `120 trials`, `sync=skip`.
+
+| 항목 | 측정값 | 판정 |
+| :--- | ---: | :--- |
+| 완료 trials | 120 / 120 | ✅ |
+| 위기 입력 | 53 symbols · 7,221 bars · 120 matched pairs · 26,806 events | ✅ 측정 가능 |
+| 위기 측정 trials | 120 / 120 | ✅ |
+| joint-feasible trials | 0 / 120 | ❌ |
+| 최고 정상 CAGR | -11.77% | ❌ 자산증식 기준 미달 |
+| 최종 champion | 없음 | 🛑 fail-closed |
+
+주요 제약 위반은 `fold=120`, `CAGR=119`, `recent_fold=70`, `sharpe_uplift=47`, `mdd=10`, `crisis_cagr=8`, `crisis_mdd=6`건(중복 집계)이다. 이번 결과는 `None`으로 인한 측정 공백이 아니라 정상·위기 제약을 모두 계산한 뒤 공동 feasibility가 0건인 결과이며, fallback champion을 승격하지 않고 최종 파이프라인을 중단했다. 원본 로그: `/tmp/l2_feasibility_120.log`.
 
 ## 세션 개요
 
