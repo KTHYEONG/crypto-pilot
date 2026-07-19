@@ -48,6 +48,7 @@ $$L^* = \text{clip}\left(\min(L_{\text{mdd}}, L_{\text{cvar}}, L_{\text{crisis}}
 $$L^*_{\text{final}} = L^* \times \text{concentration\_ratio}$$
 - Concentration ratio is a haircut multiplier based on Choueifaty-Coignard Diversification Ratio (DR).
 - $L_{\text{mdd}}$ targets $\text{mdd\_cap} \times (1 - \text{mdd\_margin})$ (normal-market, searchable). $L_{\text{crisis}}$ targets $\text{mdd\_cap} \times (1 - \text{crisis\_mdd\_margin})$ — a decoupled, non-searchable target so CAGR-gate tuning cannot erode crisis-window MDD protection.
+- $L^*_{\text{final}}$ is further clamped downward, symmetric to the raise-only OOS blend, if the worst realized OOS fold's CAGR at $L^*$ falls below $\text{l2\_min\_worst\_fold\_cagr}$ — bounded to $[1.0, L^*]$ (no sub-unit deployment support).
 
 # 3. Strict I/O Contract
 
