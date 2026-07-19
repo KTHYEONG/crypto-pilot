@@ -5,6 +5,7 @@ from __future__ import annotations
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
+import numpy as np
 import pytest
 
 from src.domain.futures.optimization.workflow import (
@@ -693,6 +694,137 @@ class TestEvaluateL2TrialGrowthLcbDeployed:
         assert result.growth_lcb_deployed != pytest.approx(-1e6)
         assert result.objective_value == pytest.approx(result.growth_lcb_deployed, abs=1e-10)
         assert result.growth_lcb_deployed < 0
+
+
+class TestEvaluateL2TrialBullBoostCalibrationIsolation:
+    """Scenario 4 (Integration — [LIMIT-01] 핵심 회귀 방지)."""
+
+    def _make_sim(self, *, regime_codes: list[int] | None = None) -> SimpleNamespace:
+        n_bars = 200
+        returns = [0.002] * n_bars
+        return SimpleNamespace(
+            rets_hybrid=returns,
+            rets_baseline=[0.001] * n_bars,
+            rets_baseline_ew=(),
+            fit_rets_hybrid=tuple(returns),
+            fit_rets_by_fold=(tuple(returns),),
+            trade_count=90,
+            fold_attributions=(),
+            fold_rets_hybrid=[returns],
+            fold_selected_symbols=[("BTCUSDT",)],
+            all_turnovers=[0.05] * n_bars,
+            turnover_return_indices=list(range(n_bars)),
+            all_gross_exposures=[1.0] * n_bars,
+            rebalance_count=10,
+            all_net_exposures=[1.0] * n_bars,
+            total_cost_hybrid=0.0003,
+            friction_pass_total=45,
+            signal_total=50,
+            cap_saturation_count=1,
+            support_leak_count=0,
+            last_selected=frozenset({"BTCUSDT"}),
+            last_w=MagicMock(),
+            regime_codes_hybrid=regime_codes or [0] * n_bars,
+        )
+
+    def _make_fold_diag(self) -> SimpleNamespace:
+        return SimpleNamespace(
+            fold_pass_ratio=1.0,
+            fold_compound_pass=(True,),
+            fold_unit_sharpes=(1.0,),
+            fold_deployed_cagrs=(0.10,),
+            fold_deployed_mdds=(0.05,),
+            fold_selected_symbols=(("BTCUSDT",),),
+            recent_fold_passed=True,
+            recent_fold_sharpe=1.0,
+            recent_fold_cagr=0.10,
+            recent_fold_mdd=0.05,
+            latest_to_median_cagr=1.0,
+        )
+
+    @patch("src.domain.futures.strategy.tiered_workflow.awf_sim._run_awf_simulation")
+    @patch("src.domain.futures.strategy.tiered_workflow.risk_deployment.compute_layer2_fold_diagnostics")
+    @patch("src.domain.futures.strategy.tiered_workflow.l2_gate.evaluate_layer2_gate")
+    @patch("src.domain.futures.optimization.workflow.build_layer2_deployable_score")
+    @patch("src.domain.futures.optimization.workflow.build_layer_universe_audit")
+    def test_evaluate_l2_trial_bull_boost_does_not_contaminate_leverage_calibration(
+        self,
+        mock_universe_audit: MagicMock,
+        mock_build_score: MagicMock,
+        mock_gate: MagicMock,
+        mock_fold_diag: MagicMock,
+        mock_sim: MagicMock,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from src.domain.futures.strategy.tiered_workflow.dataclasses import (
+            Layer2AllocationConfig,
+        )
+        from src.domain.futures.strategy.tiered_workflow.risk_deployment import (
+            calibrate_deployment_leverage,
+        )
+
+        n_bars = 200
+        regime_codes = [0] * (n_bars // 2) + [1] * (n_bars // 2)
+        sim = self._make_sim(regime_codes=regime_codes)
+        mock_sim.return_value = sim
+        mock_fold_diag.return_value = self._make_fold_diag()
+        mock_gate.return_value = SimpleNamespace(
+            optuna_constraint_values=(0.0,) * 13,
+            gate_passed=True,
+            blocker_reason="",
+            constraint_vector=SimpleNamespace(crisis_measured=True),
+        )
+        mock_build_score.return_value = SimpleNamespace(
+            cagr=0.0, sortino=0.0, sharpe=0.0, calmar=0.0, mdd=0.0,
+            fold_pass_ratio=0.0, score=0.0, worst_fold_cagr=0.0,
+        )
+
+        captured_calib_kwargs: list[dict[str, object]] = []
+        original_calibrate = calibrate_deployment_leverage
+
+        def _spy_calibrate(**kwargs: object) -> tuple[float, str, float]:
+            captured_calib_kwargs.append({"fit_rets": kwargs["fit_rets"], "oos_rets": kwargs.get("oos_rets")})
+            return original_calibrate(**kwargs)
+
+        monkeypatch.setattr(
+            "src.domain.futures.strategy.tiered_workflow.risk_deployment.calibrate_deployment_leverage",
+            _spy_calibrate,
+        )
+
+        config_off = Layer2AllocationConfig.from_mapping({"l2_regime_bull_leverage_boost_enabled": False})
+        config_on = Layer2AllocationConfig.from_mapping(
+            {"l2_regime_bull_leverage_boost_enabled": True, "l2_regime_bull_leverage_boost": 1.3}
+        )
+
+        caps = SimpleNamespace()
+        aligned = SimpleNamespace(
+            symbols=("BTCUSDT",),
+            close_2d=MagicMock(),
+            datetimes=[MagicMock()] * n_bars,
+        )
+
+        result_off = evaluate_l2_trial(
+            cache=MagicMock(),
+            signal_batch=SimpleNamespace(start_idx=0, end_idx=n_bars),
+            aligned=aligned,
+            awf_folds=(MagicMock(),),
+            config=config_off,
+            caps=caps,
+            tf="1h",
+        )
+        result_on = evaluate_l2_trial(
+            cache=MagicMock(),
+            signal_batch=SimpleNamespace(start_idx=0, end_idx=n_bars),
+            aligned=aligned,
+            awf_folds=(MagicMock(),),
+            config=config_on,
+            caps=caps,
+            tf="1h",
+        )
+
+        assert len(captured_calib_kwargs) == 2
+        assert np.array_equal(captured_calib_kwargs[0]["fit_rets"], captured_calib_kwargs[1]["fit_rets"])
+        assert result_on.cagr_hybrid != pytest.approx(result_off.cagr_hybrid)
 
 
 class TestComputeCrisisReplayBudget:

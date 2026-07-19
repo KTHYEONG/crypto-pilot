@@ -16,6 +16,7 @@ from src.domain.futures.strategy.tiered_workflow.l2_meta import (
     apply_asymmetric_long_short_regime_cap,
     apply_regime_cell_policy,
     apply_regime_risk_cap,
+    build_regime_bull_boost_path,
     build_regime_policy_by_fold,
     build_regime_routing_plan,
 )
@@ -916,3 +917,44 @@ def test_run_awf_simulation_wires_asymmetric_long_short_cap_after_regime_risk_ca
     assert "apply_asymmetric_long_short_regime_cap(" in source
     assert source.index("apply_asymmetric_long_short_regime_cap(") > source.index("apply_regime_risk_cap(")
     assert "l2_regime_long_short_asymmetry_enabled" in source
+
+
+# ── L2 Decoupled Bull Deployment Boost (ADR_TBD_L2_DECOUPLED_BULL_DEPLOYMENT_BOOST) ──
+
+
+def test_build_regime_bull_boost_path_boosts_only_bull_bars() -> None:
+    path = build_regime_bull_boost_path(
+        [0, 1, 2, 0], ("bull", "bear", "crisis"), enabled=True, bull_leverage_boost=1.2
+    )
+    assert path.tolist() == pytest.approx([1.2, 1.0, 1.0, 1.2])
+
+
+def test_build_regime_bull_boost_path_disabled_returns_all_ones() -> None:
+    path = build_regime_bull_boost_path(
+        [0, 0, 0], ("bull", "bear", "crisis"), enabled=False, bull_leverage_boost=1.3
+    )
+    assert path.tolist() == pytest.approx([1.0, 1.0, 1.0])
+
+
+def test_build_regime_bull_boost_path_above_hard_max_raises() -> None:
+    with pytest.raises(ValueError, match="bull_leverage_boost"):
+        build_regime_bull_boost_path(
+            [0], ("bull", "bear", "crisis"), enabled=True, bull_leverage_boost=1.5
+        )
+
+
+def test_build_regime_bull_boost_path_bull_prefix_matching() -> None:
+    path = build_regime_bull_boost_path(
+        [0, 3], ("bullish", "bear", "crisis", "bull"), enabled=True, bull_leverage_boost=1.2
+    )
+    assert path.tolist() == pytest.approx([1.2, 1.2])
+
+
+# ── Scenario 3: [LIMIT-05] crisis replay 자동 무해화 ──
+
+
+def test_crisis_replay_regime_codes_all_bear_or_crisis_boost_is_noop() -> None:
+    path = build_regime_bull_boost_path(
+        [1, 2, 1, 2], ("bull", "bear", "crisis"), enabled=True, bull_leverage_boost=1.2
+    )
+    assert path.tolist() == pytest.approx([1.0, 1.0, 1.0, 1.0])
