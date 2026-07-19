@@ -2,6 +2,11 @@
 
 This file holds historical architecture decision records (ADRs) that have been pruned from the active window.
 
+## [2026-07-18] [L2_CRISIS_REGIME_CAP_RELEASE_COOLDOWN] [ADR_20260718_L2_CRISIS_REGIME_CAP_RELEASE_COOLDOWN]
+- **Context/Why:** worst_fold 기본 활성화 + 롱/숏 비대칭 완화 레버 도입 후에도 위기 게이트가 계속 stress_tested_fail. 롱/숏 비대칭은 CAGR만 개선하고 MDD(실제 지배적 제약, 21% 예산 대비 2.2배 초과)는 전혀 못 건드림을 실측 확인해 추가 진단 필요했음.
+- **Resolution/What:** scratch 진단(diag_crisis_regime_whipsaw.py)으로 최대낙폭 구간(FTX 붕괴 국면 집중)의 gross_exposure>=0.9 스파이크 13건 전부가 순간적 bull 오분류와 일치함을 실측 확정 — 레짐 캡이 방향 신호와 같은 타임스케일로 즉시 해제되는 것이 MDD의 실제 드라이버. market_regime.py에 apply_regime_cap_release_cooldown 순수함수 추가(기존 검증된 _apply_persistence_and_cooldown_1d 재사용) — bear/crisis 진입은 즉시, bull 복귀만 지연. Layer2AllocationConfig.l2_regime_cap_release_cooldown_bars opt-in 필드(기본 0). awf_sim.py의 _regime_code_1d_for_cap 파생 배열로 캡 호출부만 교체, 다른 4개 소비처는 원본 유지.
+- **Impact:** 코스+파인 스윕(동일 champion 고정, LUNA/FTX): cooldown_bars=30에서 MDD 46.53%->29.46%(상대 -37%, 세 레버 중 최대 개선), cooldown=26~28에서 CAGR -28.04%->+3.54%(첫 흑자권). 32bar 이후 급격 악화(비단조, sweet spot 26~30 확인). 그러나 최선의 경우에도 MDD 29.46%로 21% 예산 미달 -- 단독 레버로는 여전히 게이트 통과 못함. [LIMIT-01] 요구 2차 독립 위기 윈도우(2025-12-31~2026-06-30 BTC) 검증은 CrisisWindow 프레임워크 재현 방법 불일치로 데이터 로드 실패(no valid symbols after load) -- 원본 데이터는 존재 확인(원인 미확정, 재현 방법 오류로 추정), 별도 후속 필요. /check PASS(Cov 42%, spec compliance 포함).
+
 ## [2026-07-17] [L2_CRISIS_ASYMMETRIC_LONG_SHORT_CAP] [ADR_20260717_L2_CRISIS_ASYMMETRIC_LONG_SHORT_CAP]
 - **Context/Why:** worst_fold 게이트 기본 활성화(ADR_20260717_L2_CRISIS_LEVERAGE_SAFETY_DEFAULT) 후에도 위기 재현성 게이트가 stress_tested_fail 유지. 실측 진단 결과 기존 apply_regime_risk_cap(방향-무관 대칭 축소)가 이미 적용된 이후에도 LUNA/FTX 위기 replay에서 롱 레그 realized price -11.29% vs 숏 레그 +3.59%로 손실이 롱에 집중됨을 확인(bars_long=683, bars_short=786로 빈도는 균형). 숏이 부재한 게 아니라 롱의 손실 크기가 숏의 이익 크기의 3배 이상인 방향 비대칭이 진짜 문제.
 - **Resolution/What:** l2_meta.py에 apply_asymmetric_long_short_regime_cap 순수함수 추가 — bear/crisis 레짐에서 롱 레그에만 추가 축소 배수 적용, 숏 레그는 그대로 유지. Layer2AllocationConfig에 opt-in 필드 3종(l2_regime_long_short_asymmetry_enabled, l2_regime_bear_long_extra_mult, l2_regime_crisis_long_extra_mult, 기본값 전부 no-op) 추가, from_mapping은 SSOT(_dc.<field>) fallback 패턴 준수. awf_sim.py의 기존 apply_regime_risk_cap 호출 직후에 배선.
