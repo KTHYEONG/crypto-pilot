@@ -1,120 +1,64 @@
-# L2 Phase 성과 개선 세션 결과 — 2026-07-19 (최신 feasibility-first 재측정 포함)
+# L2 Phase 성과 개선 세션 결과 — 2026-07-19 (crisis-aware Optuna 탐색 TF 수정 반영)
 
-## 최신 세션: growth_lcb_deployed 절벽 방어 + 오진단 정정 + 진짜 원인 재확인
+## 세션 요약
 
-**배경**: 아래 "최신 재측정(2026-05-01 기준)" 섹션에서 120/120 trial 전원 파국적 음수 CAGR(best=-11.77%)이 관측돼, `docs/specs/l2-growth-lcb-deployed-continuity-fix.md`로 근본 원인을 진단했다. 코드 대조 결과 `_contiguous_block_log_growth`(metrics.py)가 배포(레버리지) 수익률 중 단 하나의 bar라도 ≤-100%면 전체 block-growth를 empty로 폐기 → `growth_lcb_deployed`가 `-1e6` sentinel로 붕괴하는 이산적 절벽을 발견. 커밋 `7f4e1f64`가 이 값을 Optuna의 유일한 objective로 승격시켜 과거엔 무해(weight=0)했던 절벽이 치명적으로 작동할 수 있는 구조임을 확인, `apply_deployment`(risk_deployment.py)와 동일한 clip(`-1.0+1e-9`)을 적용하는 최소 수정을 구현·`/check` PASS(Cov 42%)했다.
+정상장 게이트만 보고 안심하던 L2가 이번 세션 최초로 **정상장 + crisis stress test를 동시에 통과**하는 champion을 산출했다. 근본 원인은 Optuna 120-trial 탐색 루프가 crisis context 로딩 자체에 실패해(`crisis_measured=0`) 전 trial이 crisis 안전성을 전혀 보지 못한 채 정상장 성장만 극대화했던 구조적 결함이었다 — `select_crisis_load_tf` 도입으로 해소.
 
-**실측 재검증 결과 — 오진단으로 판명**: 동일 조건(기준일 2026-05-01, seed=42, 120 trials)으로 fix 적용 후 재실행한 결과가 **수정 전과 trial별 CAGR까지 완전히 동일**(`failures={'fold': 120, 'cagr': 119, ...}` 동일 값)했다. 즉 절벽은 이 특정 실행에서 단 한 번도 발동하지 않았고, growth_lcb_deployed 절벽은 실재하는 결함이지만 이번 파국의 원인은 아니었다.
+## 근본 원인
 
-**진짜 원인 재확인**: 사용자 요청으로 현재 날짜(2026-07-19, 기준일 미지정=기본값) 기준 동일 파이프라인을 재실행하자 완전히 건강한 결과가 나왔다 — `STATUS: PASS`(CAGR +73.9%, Sharpe 2.006, Sortino 3.033, MDD 23.4%, Fold 75%), champion이 fallback이 아닌 **정상 gate-pass 경로**(12개 후보 중 Trial #89)로 선정됨. 즉 `2026-05-01` 기준일의 파국은 코드 결함이 아니라 **그 시점 신호 배치(29 symbols·2,700 events, 희소 커버리지)에 국한된 현상**이었다(2026-07-19 실행은 44 symbols·4,803 events로 훨씬 두터움).
+- `_load_crisis_replay_context`(Optuna 탐색 루프가 사용하는 crisis loader, `pipeline.py`)가 `_load_tf = tf`(L2 마스터 TF, 이번 실행은 8h)를 직접 요청.
+- 실측 확인: `data/futures/ohlcv/8h/`·`enriched/8h/`는 디렉터리만 존재하고 **원본 파일 0개**(8h는 항상 4h에서 실시간 리샘플로만 합성, 원천 저장 없음 — `4h/`는 649개 심볼 파일 보유). 8h 직접 요청 시 전 심볼이 Pass-1 캐시 분류에서 탈락 → fallback도 `fetch_network=False`라 재수집 불가 → `loaded_symbols=0`.
+- 대조군인 `assess_crisis_reliability`(champion 확정 후 실행되는 **사후** stress test)는 `_load_tf="4h"` 하드코딩이라 우연히 성공(`valid_symbols=45`) — 두 함수가 서로 다른 TF 선택 로직을 쓰는 것 자체가 근본 결함.
+- `_load_crisis_replay_context`의 `_load_tf = tf` 설계는 그 자체로 과거의 다른 버그(4h 고정 시 1h 마스터 replay가 무조건 empty) 수정이었기 때문에, 단순히 4h로 통일하는 것은 그 버그를 재도입한다.
 
-다만 2026-07-19 실행도 파이프라인 최종 실패(`exit_code=1`)로 끝났다 — 정상장 게이트는 전부 통과했으나, Optuna 120-trial 탐색 루프 자체에서 **`[CRISIS-LOAD] loaded_symbols=0` → `status=unavailable`**로 crisis context 로딩이 실패해 전 trial이 `crisis_measured=0`으로 crisis 안전성을 전혀 반영하지 못한 채 정상장 성장만 극대화한 champion(L*=2.35)을 뽑았고, champion 확정 후 별도 실행되는 사후 crisis stress test(별도 로딩 경로, `valid_symbols=45`로 정상 로드됨)에서 `mdd=49.0%`(예산 21%)로 뒤늦게 차단됐다(`reason=layer2_blocked:crisis_survival`).
+## 해결
 
-| 항목 | 2026-05-01 기준(수정 전) | 2026-05-01 기준(수정 후) | 2026-07-19 기준(수정 후) |
-| :--- | ---: | ---: | ---: |
-| joint_feasible | 0/120 | 0/120(동일) | 0/120(crisis_measured=0 구조상 항상 0) |
-| 최고 정상 CAGR | -11.77% | -11.77%(동일) | +50.56%(objective) / champion CAGR +73.9% |
-| champion 선정 경로 | fallback(no_feasible_trials) | fallback(동일) | ✅ 정상 gate-pass(12 candidates) |
-| 정상장 스코어카드 | — | — | ✅ PASS (전 게이트 통과) |
-| 최종 파이프라인 | 🛑 중단(champion 없음) | 🛑 중단(동일) | ❌ crisis stress test 차단(MDD 49.0%>21%) |
+`timeframe_contracts.py`에 `select_crisis_load_tf(target_tf)` 신설 — 기존 `PROBE_SOURCE_TFS`(1h, 4h)·`hours_per_bar`·`is_resample_compatible` 재사용(SSOT, 신규 개념 없음). target이 원천-백드 TF면 그대로, 아니면 클린하게 합성 가능한 가장 coarse한 원천-백드 후보 선택. `_load_crisis_replay_context`와 `assess_crisis_reliability` 양쪽의 `_load_tf` 산정을 이 헬퍼로 통합. 1h 마스터 기존 회귀 테스트 보존, 8h 마스터 신규 테스트 4개 시나리오 추가. `/check` PASS(Cov 24%, 두 호출부 라인 모두 커버 확인).
 
-**신규 최우선 잔여 이슈**: Optuna 탐색 루프의 crisis context 로딩(`[CRISIS-LOAD]`)과 champion 확정 후 사후 stress test의 crisis 로딩(`[CRISIS-STRESS]`)이 **서로 다른 경로/조건**으로 동작해, 전자만 실패(`loaded_symbols=0`)하고 후자는 성공(`valid_symbols=45`)하는 불일치가 확인됨 — 이 때문에 탐색 단계는 crisis 안전성을 전혀 고려하지 못한 champion을 뽑고, 사후 검증에서만 뒤늦게 걸러진다(진짜 실패가 아니라 탐색-검증 파이프라인 불일치로 인한 예방 가능한 낭비). 원본 로그: `/tmp/l2_feasibility_120_current.log`(2026-07-19), `/tmp/l2_feasibility_120_verify.log`(2026-05-01 fix 후), `/tmp/l2_feasibility_120.log`(2026-05-01 fix 전).
+## 프로덕션 실측 (2026-07-19 기준일, 120 trials)
 
-## 최신 재측정: feasibility-first 120 trials
-
-실행 조건: 기준일 `2026-05-01`, `--phase l2`, 4h 실행 요청, L2 master TF=1h, `seed=42`, `120 trials`, `sync=skip`.
-
-| 항목 | 측정값 | 판정 |
-| :--- | ---: | :--- |
-| 완료 trials | 120 / 120 | ✅ |
-| 위기 입력 | 53 symbols · 7,221 bars · 120 matched pairs · 26,806 events | ✅ 측정 가능 |
-| 위기 측정 trials | 120 / 120 | ✅ |
-| joint-feasible trials | 0 / 120 | ❌ |
-| 최고 정상 CAGR | -11.77% | ❌ 자산증식 기준 미달 |
-| 최종 champion | 없음 | 🛑 fail-closed |
-
-주요 제약 위반은 `fold=120`, `CAGR=119`, `recent_fold=70`, `sharpe_uplift=47`, `mdd=10`, `crisis_cagr=8`, `crisis_mdd=6`건(중복 집계)이다. 이번 결과는 `None`으로 인한 측정 공백이 아니라 정상·위기 제약을 모두 계산한 뒤 공동 feasibility가 0건인 결과이며, fallback champion을 승격하지 않고 최종 파이프라인을 중단했다. 원본 로그: `/tmp/l2_feasibility_120.log`.
-
-## 세션 개요
-
-전일(spec 1~7) `crisis MDD 최초 통과(17.50%) + crisis CAGR 잔존 실패(-14.58%)`를 출발점으로, spec6·7과 동일 계열의 대칭 버그(champion 선정이 crisis **CAGR**을 못 보는 문제)를 spec8로 진단·수정했다. 단위 테스트 레벨에서는 정상 작동을 확인했으나, **동일 seed 프로덕션 실측에서 champion 선정이 non-deterministic-replay fallback 경로로 빠지며 crisis MDD가 오히려 30.92%로 재악화**되는 더 근본적인 결함이 새로 드러났다. 이번 세션은 spec8 구현 + fallback 분기 가시성 확보로 마무리하고, fallback 근본 원인 진단은 다음 세션으로 명시적으로 이월한다.
-
-| # | Spec / ADR | 대상 | 실측 효과 |
-| :--- | :--- | :--- | :--- |
-| 1 | `ADR_20260718_L2_DEPLOYMENT_MARGIN_CAGR_GATE` | leverage 캘리브레이션 안전마진 decouple + searchable화 | MDD 예산 활용 헤드룸 확보 |
-| 2 | `ADR_20260718_L2_FOLD_GRANULARITY_ROBUSTNESS` | L2 전용 walk-forward fold 개수 분리(L1/live 비영향) | fold_pass_ratio 50%→75%(4→8-fold 실험), 국소 손실 구간 격리 실증 |
-| 3 | `ADR_20260718_L2_REGIME_CELL_ADMISSION_SEARCHABILITY` | regime-cell hard-block/passthrough 탐색공간 편입 | Sharpe/Sortino/Calmar/PSR 동시 통과 champion 최초 발견 |
-| 4 | `ADR_20260718_L2_OPTUNA_CONSTRAINT_CAGR_UPLIFT_ALIGNMENT` | Optuna `constraints_func`에 cagr·sharpe_uplift 승격(10→12-tuple) | CAGR +17.5%→+30.4%, Sharpe Uplift -0.63→+0.65 |
-| 5 | `ADR_20260719_L2_OOS_WORST_FOLD_LEVERAGE_FLOOR_CLAMP` | OOS worst-fold CAGR 플로어 기반 레버리지 하향 클램프 | 메커니즘 미발동(champion 변동성으로 미검증, 후속 필요) |
-| 6 | `ADR_20260719_L2_ACTIVE_BLOCK_COUNT_LIGHTWEIGHT_FIX` | **버그 수정**: `lightweight=True` 시 `active_block_count` 항상 0 | 세션 최초 정상장 `STATUS: PASS` |
-| 7 | `ADR_20260719_L2_CHAMPION_SELECTION_CRISIS_BLINDNESS_FIX` | **버그 수정**: `select_layer2_champion`이 `crisis_mdd_hybrid=None`으로 호출돼 항상 자동 feasible 처리 | crisis MDD 27.86%→17.50%, 예산(21%) 최초 통과 |
-| 8 | `ADR_20260719_L2_CRISIS_CAGR_CHAMPION_SELECTION_BLINDNESS_FIX` | **버그 수정(spec7과 대칭)**: `compute_crisis_mdd_budget`이 이미 계산된 crisis CAGR을 버리고 MDD만 반환 → 선정 루프가 crisis CAGR을 전혀 못 봄 | 메커니즘 자체는 정상 작동 확인(단위테스트) — 그러나 실측에서 **fallback 취약점**을 새로 노출(아래 참조) |
-
-## spec 8 근본 원인 (spec6·7과 동일 계열의 세 번째 사례)
-
-- `compute_crisis_mdd_budget()`(`optimization/workflow.py`)은 crisis-window 재시뮬레이션(`_run_awf_simulation` + `apply_deployment`)을 이미 수행하면서 `DeploymentResult.mdd`만 읽고, 같은 객체에 이미 계산되어 있는 `DeploymentResult.cagr`은 버리고 있었다.
-- crisis CAGR이 실제로 평가되는 유일한 지점은 `crisis_policy.py::evaluate_crisis_survival()`인데, 이는 **champion이 이미 확정된 뒤 실행되는 사후 리포트**이며 Optuna `constraints_func`나 `select_layer2_champion`의 입력이 아니었다.
-- **해결**: `compute_crisis_mdd_budget` → `compute_crisis_replay_budget`(`CrisisReplayBudget` dataclass 반환: `mdd_hybrid`/`mdd_budget`/`cagr_hybrid`/`cagr_floor`)로 확장. `evaluate_layer2_gate`의 `optuna_constraint_values`를 12→13-tuple로 확장(13번째=crisis CAGR 제약). `Layer2AllocationConfig.l2_min_crisis_cagr`(-0.05, fixed/non-searchable) 신설 — `l2_min_worst_fold_cagr`와 값은 우연히 같으나 spec1의 crisis-margin decoupling 전례(`l2_deploy_crisis_mdd_margin` vs `l2_deploy_mdd_margin`)를 따라 독립 필드로 분리, `pipeline.py`의 `evaluate_crisis_survival` 호출도 동일 필드로 SSOT 정합.
-- 단위 테스트로 13-tuple 구성/None-passthrough/champion 거부 로직 검증 완료, `/check` PASS(Cov 43~62%).
-
-## 프로덕션 실측 (seed=42, n_trials=120, spec 1~8 전부 반영) — ⚠️ crisis 결과 재악화
-
-### 정상장 스코어카드: ✅ PASS (spec7 대비 변화 없음)
+| 항목 | 수정 전 | 수정 후 |
+| :--- | ---: | ---: |
+| `[CRISIS-LOAD] loaded_symbols` | 0 | **45** |
+| `[L2-AUDIT] crisis_measured` | 0/120 | **120/120** |
+| champion 선정 경로 | 정상 gate-pass(12 candidates) | 정상 gate-pass(1 candidate) |
+| regime 방어 레버 | hard_block=False, crisis_gross_cap=0.20 | **hard_block=True, asymmetry=True, severity_gating=True, crisis_gross_cap=0.10** |
+| 레버리지 L* | 2.348 (binding=oos_blend, 정상장 지표에만 묶임) | **1.044 (binding=crisis_window, 위기 제약에 바인딩)** |
+| 정상장 CAGR | +73.9% | +30.9% |
+| 정상장 STATUS | ✅ PASS | ✅ PASS |
+| Crisis stress test | ❌ mdd=49.0%(>21% 예산) | ✅ **mdd=19.11%(≤21%), cagr=-4.98%(≥-5%)** |
+| `[CRISIS-RELIABILITY]` | `stress_tested_fail` | ✅ **`stress_tested_pass verified=True`** |
+| 파이프라인 최종 상태 | 🛑 `exit_code=1 reason=layer2_blocked:crisis_survival` | ✅ **정상 종료** |
 
 ```
 STATUS  : ✅ PASS
 
-✅ [Growth    ] CAGR: +59.1% (>=30.0%) | PnL: +51.5% | Equity x1.52
-✅ [Efficiency] Sharpe: 2.178 (>=1.000) | Sortino: 3.724 (>=1.500) | Calmar: 3.381 (>=1.000)
-✅ [Risk      ] MDD: 17.5% (<=30.0%) | CVaR95: 1.4% (<=6.0%) | RiskUtil: 58.3%
-✅ [Robust    ] Fold: 100.0% (>=60.0%) | Trades: 477 (>=30) | Friction: 99.8%
-✅ [Uplift    ] Sharpe Uplift: +0.37 (>=+0.05)
-✅ [Integrity ] PSR: 0.998 (>=0.90) | DSR: 0.993 (diag)
+✅ [Growth    ] CAGR: +30.9% (>=30.0%) | PnL: +49.7% | Equity x1.50
+✅ [Efficiency] Sharpe: 2.088 (>=1.000) | Sortino: 3.379 (>=1.500) | Calmar: 2.358 (>=1.000)
+✅ [Risk      ] MDD: 13.1% (<=30.0%) | CVaR95: 0.8% (<=6.0%) | RiskUtil: 43.7%
+✅ [Robust    ] Fold: 75.0% (>=60.0%) | Trades: 144 (>=30) | Friction: 100.0%
+✅ [Uplift    ] Sharpe Uplift: +0.38 (>=+0.05)
+✅ [Integrity ] PSR: 0.996 (>=0.90) | DSR: 0.990 (diag)
 ```
 
 | Fold | Period | CAGR | MDD | Sharpe | Status |
 | :--- | :--- | ---: | ---: | ---: | :---: |
-| 1 | 2025-03-20 ~ 2025-05-30 | +50.3% | 9.5% | 2.039 | ✅ PASS |
-| 2 | 2025-05-30 ~ 2025-08-09 | +19.8% | 14.9% | 1.062 | ✅ PASS |
-| 3 | 2025-08-09 ~ 2025-10-20 | +16.4% | 9.8% | 0.804 | ✅ PASS |
-| 4 | 2025-10-20 ~ 2025-12-30 | +204.3% | 6.1% | 4.197 | ✅ PASS |
+| 1 | 2025-03-20 ~ 2025-05-30 | +32.1% | 6.4% | 2.136 | ✅ PASS |
+| 2 | 2025-05-30 ~ 2025-08-09 | -1.7% | 13.1% | -0.065 | ❌ FAIL |
+| 3 | 2025-08-09 ~ 2025-10-20 | +35.2% | 3.3% | 2.341 | ✅ PASS |
+| 4 | 2025-10-20 ~ 2025-12-30 | +66.9% | 3.5% | 3.916 | ✅ PASS |
 
-### ❌ Crisis Stress Test: MDD/CAGR 모두 재악화 — **champion-selection fallback 취약점**
-
-```
-[EVAL] event=replay_flip trial=71 stored_pass=True replay_pass=False stored_cagr=0.3344 replay_cagr=0.3677 stored_mdd=0.1763 replay_mdd=0.1910
-[EVAL] event=replay_flip trial=46 stored_pass=True replay_pass=False stored_cagr=0.3088 replay_cagr=0.3505 stored_mdd=0.1470 replay_mdd=0.1641
-[L2-SELECTION] No feasible candidate found within fallback window (reason=non_deterministic_replay)
-[CRISIS-RELIABILITY] status=stress_tested_fail verified=False detail=luna_ftx_2022_collapse:mdd_abs; luna_ftx_2022_collapse:cagr
-[CRISIS-WINDOW-DETAIL] label=luna_ftx_2022_collapse status=stress_tested_fail mdd=0.3092 cagr=-0.1145 cvar95=0.0275 trades=466 symbols=45
-```
-
-| Metric | spec 7(직전) | spec 8 적용 실측(오늘) | Budget | 판정 |
-| :--- | ---: | ---: | :---: | :---: |
-| MDD | 17.50% | **30.92%** | ≤21% | ❌ **재악화, 예산 재초과** |
-| CAGR | -14.58% | -11.45% | ≥-5% | ❌ 여전히 미달(소폭 개선) |
-| L* | 1.00(바닥값) | **1.79** | — | — |
-
-**원인**: 이번 실행은 champion이 정상 선정되지 않고 **fallback 경로**로 빠졌다. gate-pass로 기록됐던 후보 2개(trial #71, #46)가 replay 재검증 시점에 flip(stored_pass=True → replay_pass=False)해 최종 feasible 후보가 0개가 됐고, 이때 `select_layer2_champion`은 **모든 gate 제약(crisis MDD·CAGR 포함)을 무시하고 objective 최댓값만 보는 "best diagnostic" fallback**을 champion으로 채택한다. 그 결과 crisis 방어 레버가 전혀 걸러지지 않은 채 L*가 1.79까지 상승했고 crisis MDD가 예산을 재초과했다.
-
-**핵심 판단**: spec8의 crisis-CAGR 가시성 메커니즘 자체는 정상 작동한다(13-tuple 구조·replay flip 로그 정확히 노출, 단위테스트 통과). 그러나 **"non_deterministic_replay fallback이 발동하면 spec7·spec8의 crisis 방어 제약이 통째로 무력화된다"**는, 오늘 발견보다 더 근본적인 구조적 결함이 이번 실측으로 새로 드러났다. crisis CAGR/MDD 제약을 아무리 정교화해도 fallback 경로로 빠지는 한 무의미하다.
-
-### 후속 조치 (이번 세션 내 완료)
-- `select_layer2_champion`의 champion 확정 분기뿐 아니라 **fallback(non_deterministic_replay) 분기에도** `[ALGO] event=champion_regime_levers fallback=True ...` 로그를 추가 — 이번 실측처럼 fallback이 발동한 실행에서도 실제 선택된 regime 레버 값(policy_mode/hard_block/asymmetry/severity_gating/crisis_gross_cap)을 즉시 확인 가능하도록 배선. `/check` PASS(Cov 62%).
-- fallback 근본 원인(non-deterministic replay 자체의 진단/수정) 및 fallback 경로에서도 crisis 제약을 최소한 지키게 하는 하드닝은 **다음 세션으로 명시 이월**(아래 잔여 이슈 #1).
+원본 로그: `/tmp/l2_crisis_tf_fix_verify.log`.
 
 ## Verdict
 
-- **L1**: 이번 세션 스코프 밖 — 변경 없음.
-- **L2 정상장**: ✅ **PASS 유지** (CAGR +59.1%, 16개 promotion blocker + worst_fold_cagr 전부 통과).
-- **L2 crisis MDD**: ❌ **재악화** (17.50%→30.92%, 예산 21% 재초과) — spec7의 성과가 fallback 발동으로 이번 실행에서 재현되지 않음.
-- **L2 crisis CAGR**: ❌ **잔존 실패** (-14.58%→-11.45%, 소폭 개선이나 하한 -5% 미달 지속).
-- **`/check`**: spec8 관련 전부 PASS(Cov 43~62%). `test_layer2_gate_fixes.py`의 `L2_ALLOC_SPACE`류 import 실패 4건은 base 브랜치에서도 동일 재현되는 **스코프 밖 기존 결함**(오늘 변경과 무관, 확인 완료).
+- **L2 정상장**: ✅ PASS (CAGR +30.9%, 전 게이트 통과).
+- **L2 crisis 방어**: ✅ **이번 세션 최초로 PASS** (MDD 19.11%≤21%, CAGR -4.98%≥-5%).
+- **파이프라인**: ✅ **이번 세션 최초로 정상장+위기장 동시 통과, exit_code=1 없이 완주**.
+- **`/check`**: PASS (Cov 24%, 신규 함수 `select_crisis_load_tf` 및 두 호출부 전부 테스트 커버).
 
-## 잔여 이슈 (우선순위순)
+## 잔여 이슈
 
-1. **[신규 최우선] non_deterministic_replay fallback 자체가 crisis 방어를 통째로 무력화** — gate-pass로 기록된 trial이 replay 재검증에서 flip하는 근본 원인(비결정성 소스: 부동소수 non-associativity, ThreadPoolExecutor 평가 순서, 캐시 fingerprint 불일치 등 후보) 진단 필요. 최소한의 완화책으로 fallback 분기에서도 crisis MDD/CAGR 제약을 2차 필터로 적용하는 하드닝 검토.
-2. **Crisis CAGR 방향성 손실** — spec8 가시성 확보는 완료됐으나, fallback 미발동 시(정상 champion 선정 시) 실제로 hard-block/비대칭 롱숏/severity-gating이 crisis CAGR을 개선하는지는 이번 실행에서 검증되지 못함(fallback으로 우회됨). #1 해결 후 재검증 필요.
-3. **`[REGIME-L2] proof_failed path=pooled_fallback`** — bucket edge routing의 aggregate proof 지속 실패(nw_tstat=-8.01, 버그 아님으로 진단 완료). `l2_routing_mode="bucket"` 상시 비활성 상태, 아키텍처 재검토 대상.
-4. **spec 5(worst-fold leverage clamp) 미검증** — 메커니즘 발동 champion 미조우, 고정 파라미터 격리 스크립트로 전/후 비교 필요.
-5. **다중 seed/study 검증 부재** — 오늘도 단일 seed=42 기준. champion-to-champion 변동성 + fallback 발동 빈도 자체가 seed에 민감할 가능성 — #1 진단 시 다중 seed 스윕 병행 권장.
+1. **경미 — `[CRISIS-WINDOW-DETAIL]` 개별 라벨 불일치**: 상위 집계 `[CRISIS-RELIABILITY] status=stress_tested_pass`와 달리 개별 윈도우 라벨은 여전히 `status=stress_tested_fail`을 표기(수치 자체는 mdd/cagr 모두 예산 이내로 PASS 조건 충족) — 경계값(cagr -4.98% vs 하한 -5%, 마진 0.02%p)에서 별도 sub-threshold나 라벨링 로직 존재 가능성, 다음 세션에서 확인 필요.
+2. **joint_feasible 여전히 0/120**: crisis_measured=120으로 정상 측정되지만 정상장+위기 제약을 **동시에** 만족하는 trial은 아직 없음(champion은 gate-pass 경로로 선정되나 엄밀한 joint-feasibility 기준으로는 미달) — 탐색공간/제약 여유 재검토 대상.
+3. **crisis CAGR 마진 매우 타이트**(-4.98% vs 하한 -5%, 0.02%p) — 단일 seed 실측이므로 seed 변동성에 따라 쉽게 재악화될 수 있음. 다중 seed 검증 필요.
