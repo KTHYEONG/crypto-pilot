@@ -34,6 +34,10 @@ def _make_mock_evaluation() -> MagicMock:
     ev.recent_fold_passed = True
     ev.deploy_binding = "mdd"
     ev.constraint_values = [0.0, -0.1]
+    ev.active_block_count = 10
+    ev.growth_lcb_deployed = 0.15
+    ev.crisis_constraints_measured = True
+    ev.block_log_growth_signature = (0.02, 0.03)
     block_mock = MagicMock()
     block_mock.log_growth_hybrid = 0.02
     ev.block_metrics = [block_mock]
@@ -41,6 +45,13 @@ def _make_mock_evaluation() -> MagicMock:
     gate.promotion_constraint_values = [0.0, -0.05]
     gate.promotion_passed = True
     gate.promotion_blocker = ""
+    from src.domain.futures.strategy.tiered_workflow.l2_gate import Layer2ConstraintVector
+    cv = Layer2ConstraintVector(
+        deployment=-1.0, support_leak=0.0, mdd=-0.1, cvar_95=-0.05,
+        fold=-0.2, recent_fold=-1.0, active_blocks=-3.0, friction=-0.1,
+        trades=-2.0, crisis_mdd=-1.0, cagr=-0.3, sharpe_uplift=-0.2,
+        crisis_cagr=-1.0, crisis_measured=True,
+    )
     ev.gate = gate
     return ev
 
@@ -78,6 +89,11 @@ EXPECTED_KEYS: set[str] = {
     "l2_promotion_passed",
     "l2_promotion_blocker",
     "l2_block_log_growth_signature",
+    "active_block_count",
+    "growth_lcb_deployed",
+    "l2_crisis_measured",
+    "l2_joint_feasible",
+    "l2_constraint_map",
 }
 
 

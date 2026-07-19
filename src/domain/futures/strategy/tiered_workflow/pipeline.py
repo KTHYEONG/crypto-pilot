@@ -2173,7 +2173,7 @@ def _build_rule_based_stress_batch(
     strategy_cfg: CandidateStrategyConfig,
     tf: str,
 ) -> ValidatedSignalBatch:
-    """champion registry의 (symbol, strategy) 정체성을 유지한 채, 순수 rule-based 신호
+    """[ADR_20260719_L2_CRISIS_REPLAY_PARITY] champion registry의 (symbol, strategy) 정체성을 유지한 채, 순수 rule-based 신호
     (``build_rule_signal_panels``)를 새 aligned 데이터에 적용해 ``ValidatedSignalBatch``를
     재구성한다.
 
@@ -2190,7 +2190,15 @@ def _build_rule_based_stress_batch(
             for item in items
         }
     )
+    registry_strategy_ids = sorted(
+        {
+            item.key.strategy_id
+            for items in registry.by_symbol.values()
+            for item in items
+        }
+    )
     if not families:
+        logger.warning("[CRISIS-STRESS] status=no_registry_families")
         return ValidatedSignalBatch(
             events=(),
             start_idx=0,
@@ -2204,7 +2212,13 @@ def _build_rule_based_stress_batch(
 
     panel_cfg = dataclasses.replace(strategy_cfg, timeframe=tf)
     try:
-        panels = build_rule_signal_panels(aligned=aligned, cfg=panel_cfg, family_filter=tuple(families))
+        panels = build_rule_signal_panels(
+            aligned=aligned,
+            cfg=panel_cfg,
+            normalize_time_horizon=True,
+            horizon_base_tf="4h",
+            family_filter=tuple(families),
+        )
     except Exception:
         logger.exception("[CRISIS-STRESS] build_rule_signal_panels failed tf=%s", tf)
         return ValidatedSignalBatch(
@@ -2216,8 +2230,20 @@ def _build_rule_based_stress_batch(
             model_version="rule_based_replay",
         )
 
+    logger.info(
+        "[CRISIS-STRESS] tf=%s families=%s panels=%d panel_variants=%s registry_strategies=%s symbols=%d",
+        tf,
+        ",".join(families),
+        len(panels),
+        ",".join(sorted({panel.variant for panel in panels})),
+        ",".join(registry_strategy_ids),
+        len(aligned.symbols),
+    )
+
     sym_to_idx = {s: i for i, s in enumerate(aligned.symbols)}
     events: list[ValidatedSignalEvent] = []
+    matched_pairs = 0
+    active_score_bars = 0
     for panel in panels:
         for sym, items in registry.by_symbol.items():
             col = sym_to_idx.get(sym)
@@ -2233,12 +2259,14 @@ def _build_rule_based_stress_batch(
             )
             if evidence is None:
                 continue
+            matched_pairs += 1
             score_col = panel.signed_score_2d[:, col]
             valid_col = panel.valid_mask_2d[:, col]
             spread = abs(evidence.mean_gross_bps - evidence.lcb_net_bps)
             if spread <= 1e-9:
                 spread = abs(evidence.mean_gross_bps) * 0.5 + 1e-6
             active_bars = np.nonzero(valid_col & (score_col != 0.0))[0]
+            active_score_bars += len(active_bars)
             for bar in active_bars.tolist():
                 side: Literal[-1, 1] = 1 if score_col[bar] > 0 else -1
                 events.append(
@@ -2260,6 +2288,13 @@ def _build_rule_based_stress_batch(
                     )
                 )
 
+    logger.info(
+        "[CRISIS-STRESS] tf=%s matched_pairs=%d active_score_bars=%d events=%d",
+        tf,
+        matched_pairs,
+        active_score_bars,
+        len(events),
+    )
     return ValidatedSignalBatch(
         events=tuple(events),
         start_idx=0,
@@ -2278,14 +2313,17 @@ def _load_crisis_replay_context(
     tf: str,
     crisis_windows: tuple[CrisisWindow, ...] = DEFAULT_CRISIS_WINDOWS,
 ) -> CrisisReplayContext | None:
-    """위기 윈도우 데이터 로드+정렬+신호배치(config 무관, 1회만 수행).
+    """[ADR_20260719_L2_CRISIS_REPLAY_PARITY] 위기 윈도우 데이터 로드+정렬+신호배치(config 무관, 1회만 수행).
     다중 윈도우 중 관측 bar 수가 가장 많은 윈도우를 선택.
     로드/정렬/이벤트 생성 실패 시 None 반환."""
     from src.domain.futures.optimization.opt_data_utils import load_futures_data_maps_for_symbols
     from src.domain.futures.strategy.timeframe_contracts import resample_alias
     from src.domain.futures.strategy.timeframe_probe import _resample_ohlcv
 
-    _load_tf = "4h"
+    # A coarser source can aggregate to the master TF, but it cannot create
+    # valid finer bars.  The previous fixed 4h source made a 1h master replay
+    # silently empty after upsampling, so L2 lost its crisis context.
+    _load_tf = tf
     if deployment_registry is None or not deployment_registry.by_symbol:
         return None
 
@@ -2316,6 +2354,7 @@ def _load_crisis_replay_context(
         except Exception:
             logger.exception("[CRISIS-LOAD] data load failed window=%s", window.label)
             continue
+        logger.info("[CRISIS-LOAD] window=%s loaded_symbols=%d", window.label, len(valid_symbols))
         if not valid_symbols:
             continue
 
@@ -2333,10 +2372,12 @@ def _load_crisis_replay_context(
                 except Exception:
                     logger.exception("[CRISIS-LOAD] resample failed sym=%s tf=%s", sym, tf)
         valid_symbols = [s for s in valid_symbols if s in aligned_maps]
+        logger.info("[CRISIS-LOAD] window=%s aligned_symbols=%d", window.label, len(valid_symbols))
         if not valid_symbols:
             continue
 
         aligned_stress = align_data_maps(aligned_maps, valid_symbols, tf, cache_result=False)
+        logger.info("[CRISIS-LOAD] window=%s aligned_bars=%d", window.label, len(aligned_stress.datetimes))
         if len(aligned_stress.datetimes) < 10:
             continue
 
@@ -2354,6 +2395,7 @@ def _load_crisis_replay_context(
             tf=tf,
         )
         if not stress_batch.events:
+            logger.warning("[CRISIS-LOAD] window=%s status=no_rule_based_events", window.label)
             continue
 
         from src.domain.futures.strategy.tiered_workflow.awf_sim import build_l2_simulation_cache
@@ -2387,18 +2429,23 @@ def compute_crisis_unit_returns(
     strategy_cfg: CandidateStrategyConfig,
     tf: str,
     crisis_windows: tuple[CrisisWindow, ...] = DEFAULT_CRISIS_WINDOWS,
+    crisis_replay_ctx: CrisisReplayContext | None = None,
 ) -> NDArray[np.float64]:
-    """LUNA/FTX 등 out-of-band 위기 윈도우에서 champion의 rule-based 신호를
+    """[ADR_20260719_L2_CRISIS_REPLAY_PARITY] LUNA/FTX 등 out-of-band 위기 윈도우에서 champion의 rule-based 신호를
     레짐 방어 레버 전부 off(구조적 최소 방어)인 Layer2AllocationConfig로 L=1.0
-    재생성해 unit 레버리지 per-bar 수익률을 반환한다. 내부적으로
-    _load_crisis_replay_context에 위임해 데이터 로드를 1회만 수행한다.
+    재생성해 unit 레버리지 per-bar 수익률을 반환한다. 제공된 context가 있으면
+    이를 재사용해 calibration과 champion replay의 crisis 입력을 동일하게 유지한다.
     데이터 로드/시뮬레이션 실패 시 빈 배열(size=0) 반환."""
-    ctx = _load_crisis_replay_context(
-        deployment_registry=deployment_registry,
-        strategy_cfg=strategy_cfg,
-        tf=tf,
-        crisis_windows=crisis_windows,
-    )
+    ctx = crisis_replay_ctx
+    if ctx is None:
+        ctx = _load_crisis_replay_context(
+            deployment_registry=deployment_registry,
+            strategy_cfg=strategy_cfg,
+            tf=tf,
+            crisis_windows=crisis_windows,
+        )
+    else:
+        logger.debug("[DATA] stage=crisis_unit_returns source=provided_context status=reused")
     if ctx is None:
         return np.array([], dtype=np.float64)
 

@@ -1824,6 +1824,124 @@ def compute_crisis_replay_budget(
         )
         return CrisisReplayBudget(mdd_hybrid=None, mdd_budget=None, cagr_hybrid=None, cagr_floor=None)
 
+
+def count_active_turnover_blocks(
+    *,
+    turnovers: Sequence[float],
+    turnover_return_indices: Sequence[int],
+    n_returns: int,
+    block_bars: int,
+    epsilon: float = 1e-12,
+) -> int:
+    if len(turnovers) != len(turnover_return_indices):
+        raise ValueError(
+            f"turnovers ({len(turnovers)}) / turnover_return_indices ({len(turnover_return_indices)}) length mismatch"
+        )
+    if n_returns <= 0 or block_bars <= 0:
+        return 0
+    active_blocks: set[int] = set()
+    for turnover, return_idx in zip(turnovers, turnover_return_indices, strict=True):
+        if return_idx < 0 or return_idx >= n_returns:
+            raise ValueError(f"turnover_return_index {return_idx} out of range [0, {n_returns})")
+        if abs(turnover) > epsilon:
+            block_idx = int(return_idx // block_bars)
+            active_blocks.add(block_idx)
+    _validate_indices_monotonic(turnover_return_indices)
+    return len(active_blocks)
+
+
+def _validate_indices_monotonic(indices: Sequence[int]) -> None:
+    for i in range(1, len(indices)):
+        if indices[i] < indices[i - 1]:
+            raise ValueError(
+                f"turnover_return_indices not monotonic at position {i}: {indices[i-1]} > {indices[i]}"
+            )
+
+
+def compute_l2_compound_growth_objective(
+    *,
+    growth_lcb_deployed: float,
+) -> float:
+    if not np.isfinite(growth_lcb_deployed):
+        return -1e6
+    return float(growth_lcb_deployed)
+
+
+@dataclass(slots=True, frozen=True)
+class Layer2FeasibilityAudit:
+    requested_trials: int
+    completed_trials: int
+    joint_feasible_trials: int
+    crisis_measured_trials: int
+    failure_counts: tuple[tuple[str, int], ...]
+    diagnostic_frontier_trial_numbers: tuple[int, ...]
+
+
+def summarize_layer2_feasibility(
+    *,
+    trials: Sequence[optuna.trial.FrozenTrial],
+    requested_trials: int,
+) -> Layer2FeasibilityAudit:
+    from src.domain.futures.strategy.tiered_workflow.l2_gate import Layer2ConstraintVector
+
+    completed = [t for t in trials if t.state == TrialState.COMPLETE]
+    n_completed = len(completed)
+    crisis_measured = sum(
+        1 for t in completed if t.user_attrs.get("l2_crisis_measured", False)
+    )
+    constraint_names: list[str] = [
+        "deployment", "support_leak", "mdd", "cvar_95", "fold",
+        "recent_fold", "active_blocks", "friction", "trades",
+        "crisis_mdd", "cagr", "sharpe_uplift", "crisis_cagr",
+    ]
+    failure_counts: dict[str, int] = {name: 0 for name in constraint_names}  # noqa: C420
+    joint_feasible_count = 0
+    diagnostic_candidates: list[tuple[int, int, int]] = []
+
+    for t in completed:
+        raw_map = t.user_attrs.get("l2_constraint_map")
+        if isinstance(raw_map, dict):
+            _cv_map = {k: float(v) for k, v in raw_map.items() if k != "crisis_measured"}
+            _cv_measured = bool(raw_map.get("crisis_measured", False))
+            cv = Layer2ConstraintVector(**_cv_map, crisis_measured=_cv_measured)
+        else:
+            raw_list = t.user_attrs.get("l2_constraint_values")
+            if not isinstance(raw_list, (list, tuple)):
+                continue
+            vals = [float(v) for v in raw_list]
+            padded = (vals + [1.0] * 13)[:13]
+            cv = Layer2ConstraintVector(
+                deployment=padded[0], support_leak=padded[1], mdd=padded[2],
+                cvar_95=padded[3], fold=padded[4], recent_fold=padded[5],
+                active_blocks=padded[6], friction=padded[7], trades=padded[8],
+                crisis_mdd=padded[9], cagr=padded[10], sharpe_uplift=padded[11],
+                crisis_cagr=padded[12],
+                crisis_measured=bool(t.user_attrs.get("l2_crisis_measured", False)),
+            )
+        for name, value in zip(constraint_names, cv.as_tuple(), strict=True):
+            if value > 0.0:
+                failure_counts[name] = failure_counts.get(name, 0) + 1
+        if cv.jointly_feasible():
+            joint_feasible_count += 1
+        n_failures = sum(1 for v in cv.as_tuple() if v > 0.0)
+        diagnostic_candidates.append((n_failures, int(t.number), int(t.number)))
+
+    diagnostic_candidates.sort(key=lambda x: (x[0], x[2]))
+    frontier_numbers = tuple(t[1] for t in diagnostic_candidates[:10])
+    sorted_failures = tuple(
+        (name, count) for name, count in sorted(failure_counts.items(), key=lambda x: -x[1]) if count > 0
+    )
+
+    return Layer2FeasibilityAudit(
+        requested_trials=int(requested_trials),
+        completed_trials=n_completed,
+        joint_feasible_trials=joint_feasible_count,
+        crisis_measured_trials=crisis_measured,
+        failure_counts=sorted_failures,
+        diagnostic_frontier_trial_numbers=frontier_numbers,
+    )
+
+
 def evaluate_l2_trial(
     *,
     cache: L2SimulationCache,
@@ -2045,18 +2163,18 @@ def evaluate_l2_trial(
         z_value=float(config.l2_growth_lcb_z),
     )
 
-    # [ADR_20260719_L2_ACTIVE_BLOCK_COUNT_LIGHTWEIGHT_FIX] active_block_count는 lightweight 여부와
-    # 무관하게 항상 정확히 계산 — Optuna constraints_func가 참조하는 값이 lightweight=True(전 탐색
-    # trial의 기본값)일 때 항상 0으로 조작되던 버그 수정. Layer2BlockMetric 상세 객체 생성만
-    # 계속 lightweight로 skip(진단용, 비용 절감 대상 유지).
-    n_blocks = max(len(block_growth_hybrid), len(block_growth_baseline))
     block_metrics: list[Layer2BlockMetric] = []
-    active_block_count = 0
-    for block_idx in range(n_blocks):
-        turnover_slice = sim.all_turnovers[block_idx : block_idx + 1]
-        if any(abs(value) > 0.0 for value in turnover_slice):
-            active_block_count += 1
-        if not lightweight:
+    active_block_count = count_active_turnover_blocks(
+        turnovers=sim.all_turnovers,
+        turnover_return_indices=sim.turnover_return_indices,
+        n_returns=len(rets_hybrid),
+        block_bars=block_size,
+    )
+    block_log_growth_signature = tuple(float(v) for v in block_growth_deployed if np.isfinite(v))
+    n_blocks = max(len(block_growth_hybrid), len(block_growth_baseline))
+    if not lightweight:
+        for block_idx in range(n_blocks):
+            turnover_slice = sim.all_turnovers[block_idx : block_idx + 1]
             start_idx = block_idx * block_size
             end_idx = min((block_idx + 1) * block_size, len(rets_hybrid))
             block_metrics.append(
@@ -2143,7 +2261,7 @@ def evaluate_l2_trial(
     _block_downside = _block_arr[_block_arr < 0.0]
     downside_dispersion = float(np.std(_block_downside, ddof=1)) * 0.05 if _block_downside.size > 1 else 0.0
 
-    objective_value = _shape_efficiency_l2_objective(
+    shape_efficiency_value = _shape_efficiency_l2_objective(
         sortino_hac_unit=sortino_hac_unit,
         worst_fold_sortino=worst_fold_sortino,
         worst_fold_threshold=_wf_threshold,
@@ -2158,10 +2276,13 @@ def evaluate_l2_trial(
         mean_turnover=float(np.mean(sim.all_turnovers)) if sim.all_turnovers else 0.0,
         turnover_penalty_weight=float(config.l2_turnover_penalty_weight),
         growth_lcb_deployed=float(growth_lcb_deployed),
-        growth_lcb_weight=float(getattr(config, "l2_objective_growth_lcb_weight", 0.0)),
+        growth_lcb_weight=0.0,
     )
-    # growth_lcb는 diagnostic으로 강등 — objective에서 제외 (RC-2 해소)
-    deployment_objective_bonus = float(objective_value - finite_score)
+    objective_value = compute_l2_compound_growth_objective(
+        growth_lcb_deployed=float(growth_lcb_deployed),
+    )
+    # growth_lcb는 primary objective — shape efficiency는 diagnostic으로 저장
+    deployment_objective_bonus = float(shape_efficiency_value - finite_score)
     deployment_failed = (
         sim.signal_total <= 0
         or sim.support_leak_count > 0
@@ -2169,7 +2290,7 @@ def evaluate_l2_trial(
         or not np.isfinite(sharpe_hac_hybrid)
     )
     _crisis_budget = compute_crisis_replay_budget(
-        crisis_replay_ctx=crisis_replay_ctx if not lightweight else None,
+        crisis_replay_ctx=crisis_replay_ctx,
         config=config,
         caps=caps,
         tf=tf,
@@ -2284,6 +2405,14 @@ def evaluate_l2_trial(
         rets_baseline_ew=tuple(sim.rets_baseline_ew),
         fold_attributions=tuple(getattr(sim, "fold_attributions", ())),
         deployable_score=deployable_score,
+        active_block_count=int(active_block_count),
+        block_log_growth_signature=block_log_growth_signature,
+        growth_lcb_deployed=float(growth_lcb_deployed),
+        crisis_constraints_measured=(
+            bool(gate.constraint_vector.crisis_measured)
+            if gate.constraint_vector is not None
+            else False
+        ),
     )
 
 
@@ -2318,11 +2447,23 @@ def _build_l2_user_attrs(evaluation: Any) -> dict[str, Any]:
     gate = getattr(evaluation, "gate", None)
     user_attrs["l2_constraint_values"] = list(evaluation.constraint_values)
     user_attrs["l2_optuna_constraint_values"] = list(evaluation.constraint_values)
+    user_attrs["active_block_count"] = int(getattr(evaluation, "active_block_count", 0))
+    user_attrs["growth_lcb_deployed"] = float(getattr(evaluation, "growth_lcb_deployed", float("-inf")))
+    user_attrs["l2_crisis_measured"] = bool(getattr(evaluation, "crisis_constraints_measured", False))
+    user_attrs["l2_joint_feasible"] = bool(
+        getattr(evaluation, "crisis_constraints_measured", False)
+        and all(v <= 0.0 for v in evaluation.constraint_values)
+    )
     if gate is not None:
         user_attrs["l2_promotion_constraint_values"] = list(gate.promotion_constraint_values)
         user_attrs["l2_promotion_passed"] = bool(gate.promotion_passed)
         user_attrs["l2_promotion_blocker"] = gate.promotion_blocker
-    user_attrs["l2_block_log_growth_signature"] = [metric.log_growth_hybrid for metric in evaluation.block_metrics]
+        cv = getattr(gate, "constraint_vector", None)
+        if cv is not None:
+            user_attrs["l2_constraint_map"] = cv.as_mapping()
+    user_attrs["l2_block_log_growth_signature"] = list(
+        getattr(evaluation, "block_log_growth_signature", ())
+    ) or [metric.log_growth_hybrid for metric in evaluation.block_metrics]
     return user_attrs
 
 
@@ -2337,13 +2478,18 @@ def evaluate_l2_trial_cached(
     tf: str,
     deploy_leverage_override: float | None = None,
     eval_tag: str = "unspecified",
+    crisis_rets: NDArray[np.float64] | None = None,
     _memo: dict[tuple[Any, ...], Any],
 ) -> Any:
     from src.domain.futures.strategy.tiered_workflow.awf_sim import _content_hash_dataclass
 
     cfg_ch = _content_hash_dataclass(config)
-    # memo 키는 eval_tag 제외 (tag는 진단용 라벨, 결과 불변 → 캐시 무력화 방지).
-    key = (id(cache), cfg_ch, id(signal_batch), id(caps), tf, deploy_leverage_override)
+    crisis_identity = (
+        None
+        if crisis_rets is None
+        else (id(crisis_rets), tuple(int(v) for v in crisis_rets.shape), crisis_rets.dtype.str)
+    )
+    key = (id(cache), cfg_ch, id(signal_batch), id(caps), tf, deploy_leverage_override, crisis_identity)
     cached = _memo.get(key)
     if cached is not None:
         return cached
@@ -2357,6 +2503,7 @@ def evaluate_l2_trial_cached(
         tf=tf,
         deploy_leverage_override=deploy_leverage_override,
         eval_tag=eval_tag,
+        crisis_rets=crisis_rets,
     )
     _memo[key] = result
     return result
@@ -2437,6 +2584,8 @@ def _evaluate_l2_params_threadsafe(
         config=Layer2AllocationConfig.from_mapping(l2_params),
         caps=ctx.caps,
         tf=ctx.tf,
+        crisis_rets=ctx.crisis_rets,
+        crisis_replay_ctx=ctx.crisis_replay_ctx,
     )
     t_elapsed = time.perf_counter() - t_start
 

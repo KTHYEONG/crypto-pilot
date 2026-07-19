@@ -17,10 +17,9 @@ L2_SEARCH_SPACE: dict[str, dict[str, Any]] = {
     "l2_regime_crisis_long_extra_mult": {"type": "float", "low": 0.0, "high": 1.0, "step": 0.1},
     "l2_regime_cap_release_cooldown_bars": {"type": "int", "low": 0, "high": 36, "step": 1},
     "l2_regime_crisis_gross_cap": {"type": "float", "low": 0.10, "high": 0.25, "step": 0.01},
-    # [ADR_20260718_L2_DEPLOYED_SCALE_GROWTH_OBJECTIVE] 배치-스케일 성장 블렌드 가중치.
-    # 200-trial 실측(scratch/spec_l2_growth_objective_full_validation.py): champion이
-    # 0.8을 선택, 정상장 CAGR 게이트 + 위기 crisis MDD 제약 동시 통과 최초 확인.
-    "l2_objective_growth_lcb_weight": {"type": "float", "low": 0.0, "high": 1.0, "step": 0.1},
+    # [DEPRECATED] l2_objective_growth_lcb_weight removed from search space per
+    # [LIMIT-04]. All trials use fixed objective J = growth_lcb_deployed.
+    # Field kept one release for config deserialization compatibility with warning.
     # [ADR_20260718_L2_REGIME_SEVERITY_SIGNAL_REDESIGN] 방향-변동성 분리 cap-gating.
     "l2_regime_severity_gating_enabled": {"type": "categorical", "choices": (False, True)},
     # [SPEC_L2_DEPLOYMENT_MARGIN_CAGR_GATE] 정상장 leverage 캘리브레이션 안전마진.
