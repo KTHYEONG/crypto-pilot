@@ -555,6 +555,90 @@ def test_evaluate_l2_trial_crisis_budget_uses_crisis_margin_not_normal_margin() 
     assert crisis_budget != pytest.approx(unexpected, rel=1e-6)
 
 
+def test_evaluate_l2_trial_passes_fold_rets_hybrid_to_leverage_calibration() -> None:
+    """[SPEC_L2_OOS_WORST_FOLD_LEVERAGE_FLOOR_CLAMP] evaluate_l2_trial이 calibrate_deployment_leverage에
+    sim.fold_rets_hybrid와 l2_min_worst_fold_cagr를 정확히 전달하는지 배선 검증."""
+    fake_sim = SimpleNamespace(
+        rets_hybrid=[0.02, 0.03, 0.01],
+        rets_baseline=[0.01, 0.01, 0.0],
+        rets_baseline_ew=[0.01, 0.01, 0.01],
+        fit_rets_hybrid=(0.01, 0.02),
+        all_turnovers=[0.2],
+        all_gross_exposures=[0.4],
+        all_net_exposures=[0.1],
+        friction_pass_total=1,
+        signal_total=1,
+        support_leak_count=0,
+        total_cost_hybrid=0.0,
+        cap_saturation_count=0,
+        rebalance_count=1,
+        trade_count=3,
+        fold_rets_hybrid=([0.02, 0.01], [-0.05, -0.03]),
+        block_rets_hybrid=([0.02, 0.01],),
+        block_rets_baseline=([0.0, 0.0],),
+        fold_attributions=(SimpleNamespace(realized_cost=0.0, realized_price=0.2),),
+        fold_selected_symbols=(("BTC",),),
+        policy_effect_by_fold=(),
+    )
+    fake_diag = SimpleNamespace(
+        fold_pass_ratio=1.0,
+        recent_fold_passed=True,
+        recent_fold_sharpe=0.8,
+        recent_fold_cagr=0.04,
+        recent_fold_mdd=0.02,
+        latest_to_median_cagr=0.01,
+        fold_deployed_cagrs=(0.02, -0.10),
+        fold_selected_symbols=(("BTC",),),
+        fold_unit_sharpes=(0.5, -0.2),
+        fold_unit_cagrs=(0.02, -0.10),
+        fold_unit_mdds=(0.01, 0.05),
+        fold_unit_sortinos=(0.3, -0.1),
+    )
+    fake_deployment = SimpleNamespace(cagr=0.12, mdd=0.08, cvar_95=0.03, scaled_rets=np.array([0.0, 0.0]))
+
+    with (
+        patch(
+            "src.domain.futures.strategy.tiered_workflow.awf_sim._run_awf_simulation",
+            return_value=fake_sim,
+        ),
+        patch(
+            "src.domain.futures.strategy.tiered_workflow.risk_deployment.apply_deployment",
+            return_value=fake_deployment,
+        ),
+        patch(
+            "src.domain.futures.strategy.tiered_workflow.risk_deployment.calibrate_deployment_leverage",
+            return_value=(2.0, "mdd", 0.0),
+        ) as mock_calibrate,
+        patch(
+            "src.domain.futures.strategy.tiered_workflow.risk_deployment.compute_layer2_fold_diagnostics",
+            return_value=fake_diag,
+        ),
+        patch(
+            "src.domain.futures.strategy.tiered_workflow.l2_gate.evaluate_layer2_gate",
+            return_value=SimpleNamespace(
+                optuna_constraint_values=(-1.0,) * 18,
+                promotion_constraint_values=(-1.0,) * 18,
+                promotion_passed=False,
+                promotion_blocker="cagr",
+            ),
+        ),
+    ):
+        config = Layer2AllocationConfig(l2_min_worst_fold_cagr=-0.05)
+        evaluate_l2_trial(
+            cache=MagicMock(),
+            signal_batch=MagicMock(),
+            aligned=MagicMock(),
+            awf_folds=(MagicMock(),),
+            config=config,
+            caps=MagicMock(),
+            tf="4h",
+        )
+
+    assert mock_calibrate.call_args is not None
+    assert mock_calibrate.call_args.kwargs["oos_fold_rets"] == fake_sim.fold_rets_hybrid
+    assert mock_calibrate.call_args.kwargs["oos_worst_fold_cagr_floor"] == pytest.approx(-0.05)
+
+
 def test_objective_l2_growth_suggests_l2_deploy_mdd_margin_from_search_space() -> None:
     from src.domain.futures.optimization.l2_search_space import L2_SEARCH_SPACE
 

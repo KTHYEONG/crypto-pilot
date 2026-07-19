@@ -98,6 +98,19 @@ def _mdd_at_leverage(rets: NDArray[np.float64], leverage: float) -> float:
     return float(np.max(dd))
 
 
+def _neg_cagr_at_leverage(
+    rets: NDArray[np.float64],
+    leverage: float,
+    *,
+    bars_per_year: float,
+) -> float:
+    """[ADR_20260719_L2_OOS_WORST_FOLD_LEVERAGE_FLOOR_CLAMP] _bisect_max_leverage와 함께 쓰기 위해
+    부호를 뒤집은 CAGR — 레버리지가 오를수록 값이 커지도록(단조증가) 만들어 기존
+    _bisect_max_leverage(최대 L을 찾는 함수)를 '최소 CAGR 플로어'용으로 그대로 재사용."""
+    scaled = leverage * rets
+    return -_annualized_cagr_from_returns(scaled, bars_per_year=bars_per_year)
+
+
 def _cvar_95_at_leverage(rets: NDArray[np.float64], leverage: float) -> float:
     """레버리지 L 하에서의 CVaR95 (손실 기준, 0~1)."""
     scaled = leverage * rets
@@ -363,11 +376,19 @@ def calibrate_deployment_leverage(
     kelly_safety_fraction: float | None = None,
     crisis_rets: NDArray[np.float64] | None = None,
     crisis_mdd_margin: float | None = None,  # [SPEC_L2_DEPLOYMENT_MARGIN_CAGR_GATE] None이면 mdd_margin으로 폴백
+    oos_fold_rets: Sequence[NDArray[np.float64]] | None = None,  # [ADR_20260719_L2_OOS_WORST_FOLD_LEVERAGE_FLOOR_CLAMP]
+    oos_worst_fold_cagr_floor: float | None = None,  # [ADR_20260719_L2_OOS_WORST_FOLD_LEVERAGE_FLOOR_CLAMP]
+    bars_per_year: float = 2190.0,  # [ADR_20260719_L2_OOS_WORST_FOLD_LEVERAGE_FLOOR_CLAMP]
 ) -> tuple[float, str, float]:
     """[ADR_20260718_L2_DEPLOYMENT_MARGIN_CAGR_GATE] crisis_mdd_margin이 지정되면
     crisis-window leverage 후보를 mdd_margin과 분리된 target으로 계산해, 정상장
     CAGR 개선을 위한 mdd_margin 탐색이 crisis MDD 예산을 잠식하지 않도록 한다.
-    미지정 시 mdd_margin으로 폴백해 기존 동작을 완전히 보존한다."""
+    미지정 시 mdd_margin으로 폴백해 기존 동작을 완전히 보존한다.
+
+    [ADR_20260719_L2_OOS_WORST_FOLD_LEVERAGE_FLOOR_CLAMP] oos_fold_rets/
+    oos_worst_fold_cagr_floor가 지정되면 Stage 2 이후 OOS worst-fold CAGR이
+    플로어 미달일 때 [l_floor, l_final] 구간에서 레버리지를 하향 클램프한다 —
+    OOS 교차검증이 레버리지를 올리는 방향으로만 비대칭 작동하던 것을 대칭화."""
     arr = np.asarray(fit_rets, dtype=np.float64)
     if arr.size < 2:
         _logger.debug("[L2-CALIB] fit_rets size<2, returning L*=1.0 (none)")
@@ -413,6 +434,28 @@ def calibrate_deployment_leverage(
         l_floor=float(l_floor),
         l_search_hi=l_search_hi,
     )
+
+    # Stage 2.5: OOS Worst-Fold CAGR Floor Clamp (NEW)
+    if oos_fold_rets is not None and oos_worst_fold_cagr_floor is not None:
+        worst_fold_arr: NDArray[np.float64] | None = None
+        worst_cagr_now = float("inf")
+        for fold_rets in oos_fold_rets:
+            arr = np.asarray(fold_rets, dtype=np.float64)
+            if arr.size < 2:
+                continue
+            cagr_now = _annualized_cagr_from_returns(arr * l_final, bars_per_year=bars_per_year)
+            if cagr_now < worst_cagr_now:
+                worst_cagr_now = cagr_now
+                worst_fold_arr = arr
+        if worst_fold_arr is not None and worst_cagr_now < oos_worst_fold_cagr_floor:
+            l_final = _bisect_max_leverage(
+                worst_fold_arr,
+                lambda r, l: _neg_cagr_at_leverage(r, l, bars_per_year=bars_per_year),
+                -oos_worst_fold_cagr_floor,
+                float(l_floor),
+                l_final,
+            )
+            binding = "oos_worst_fold_cagr"
 
     # Stage 3: Concentration Haircut
     l_final, binding = _apply_concentration_haircut(

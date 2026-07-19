@@ -12,6 +12,7 @@ from src.domain.futures.strategy.tiered_workflow.risk_deployment import (
     _cvar_95_at_leverage,
     _mdd_at_leverage,
     _mdd_from_returns,
+    _neg_cagr_at_leverage,
     _resolve_safety_ceiling,
     _sharpe_from_returns,
     apply_deployment,
@@ -863,3 +864,95 @@ class TestDecoupledMargins:
 
         assert l_legacy == pytest.approx(l_new, rel=1e-6)
         assert b_legacy == b_new
+
+
+# ---------------------------------------------------------------------------
+# S14: OOS Worst-Fold CAGR Floor Clamp (SPEC_L2_OOS_WORST_FOLD_LEVERAGE_FLOOR_CLAMP)
+# ---------------------------------------------------------------------------
+class TestOosWorstFoldCagrFloorClamp:
+    """Stage 2.5: OOS worst-fold CAGR floor clamp."""
+
+    def test_calibrate_deployment_leverage_clamps_down_when_oos_worst_fold_breaches_floor(self) -> None:
+        rng = np.random.default_rng(7)
+        fit_rets = rng.normal(loc=0.0010, scale=0.008, size=500)
+        good_fold = rng.normal(loc=0.0015, scale=0.006, size=90)
+        bad_fold = rng.normal(loc=-0.0040, scale=0.010, size=90)
+
+        baseline_l, _, _ = calibrate_deployment_leverage(fit_rets=fit_rets)
+        clamped_l, binding, _ = calibrate_deployment_leverage(
+            fit_rets=fit_rets,
+            oos_fold_rets=[good_fold, bad_fold],
+            oos_worst_fold_cagr_floor=-0.05,
+            bars_per_year=1095.0,
+        )
+
+        assert clamped_l <= baseline_l
+        assert binding == "oos_worst_fold_cagr"
+
+    def test_neg_cagr_at_leverage_monotonic_increasing_for_losing_fold(self) -> None:
+        rng = np.random.default_rng(42)
+        rets = rng.normal(loc=-0.002, scale=0.010, size=100)
+        values = [_neg_cagr_at_leverage(rets, l, bars_per_year=2190.0) for l in [1.0, 1.5, 2.0, 3.0, 4.0]]
+        for i in range(len(values) - 1):
+            assert values[i] <= values[i + 1], f"Not monotonic at index {i}: {values[i]} > {values[i + 1]}"
+
+    def test_calibrate_deployment_leverage_clamps_to_floor_when_unit_leverage_already_breaches(self) -> None:
+        rng = np.random.default_rng(13)
+        fit_rets = rng.normal(loc=0.001, scale=0.008, size=500)
+        bad_fold = rng.normal(loc=-0.010, scale=0.020, size=90)
+
+        clamped_l, binding, _ = calibrate_deployment_leverage(
+            fit_rets=fit_rets,
+            oos_fold_rets=[bad_fold],
+            oos_worst_fold_cagr_floor=-0.05,
+            l_floor=1.0,
+            bars_per_year=1095.0,
+        )
+
+        assert clamped_l == pytest.approx(1.0, rel=1e-4)
+        assert binding == "oos_worst_fold_cagr"
+
+    def test_calibrate_deployment_leverage_oos_fold_rets_none_is_noop(self) -> None:
+        rng = np.random.default_rng(7)
+        fit_rets = rng.normal(loc=0.0010, scale=0.008, size=500)
+
+        baseline_l, baseline_b, _ = calibrate_deployment_leverage(fit_rets=fit_rets)
+        noop_l, noop_b, _ = calibrate_deployment_leverage(
+            fit_rets=fit_rets,
+            oos_fold_rets=None,
+            oos_worst_fold_cagr_floor=-0.05,
+            bars_per_year=1095.0,
+        )
+
+        assert noop_l == pytest.approx(baseline_l, rel=1e-6)
+        assert noop_b == baseline_b
+
+    def test_calibrate_deployment_leverage_floor_none_is_noop(self) -> None:
+        rng = np.random.default_rng(7)
+        fit_rets = rng.normal(loc=0.0010, scale=0.008, size=500)
+        good_fold = rng.normal(loc=0.0015, scale=0.006, size=90)
+
+        baseline_l, baseline_b, _ = calibrate_deployment_leverage(fit_rets=fit_rets)
+        noop_l, noop_b, _ = calibrate_deployment_leverage(
+            fit_rets=fit_rets,
+            oos_fold_rets=[good_fold],
+            oos_worst_fold_cagr_floor=None,
+            bars_per_year=1095.0,
+        )
+
+        assert noop_l == pytest.approx(baseline_l, rel=1e-6)
+        assert noop_b == baseline_b
+
+    def test_calibrate_deployment_leverage_ignores_empty_or_short_folds(self) -> None:
+        rng = np.random.default_rng(7)
+        fit_rets = rng.normal(loc=0.0010, scale=0.008, size=500)
+        good_fold = rng.normal(loc=0.0015, scale=0.006, size=90)
+
+        clamped_l, binding, _ = calibrate_deployment_leverage(
+            fit_rets=fit_rets,
+            oos_fold_rets=[np.array([], dtype=np.float64), np.array([0.01], dtype=np.float64), good_fold],
+            oos_worst_fold_cagr_floor=-0.05,
+            bars_per_year=1095.0,
+        )
+
+        assert binding != "oos_worst_fold_cagr" or clamped_l >= 1.0
