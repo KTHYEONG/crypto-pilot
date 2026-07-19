@@ -465,7 +465,7 @@
     "architecture": "docs/architecture/layer2.md"
   },
   "src/domain/futures/strategy/tiered_workflow/selection.py": {
-    "architecture": "docs/specs/l2_phase_perf_optimization.md",
+    "architecture": "docs/architecture/layer2.md",
     "testing": "tests/unit/domain/futures/strategy/tiered_workflow/test_selection.py"
   },
   "src/domain/futures/strategy/walk_forward.py": {
