@@ -173,21 +173,52 @@ def _clean_specs(task: str) -> int:
     if not _path_exists(specs_dir):
         return 0
     count = 0
+    
+    # Normalize task name for filename check (e.g. TASK_L2_OPTUNA_CONSTRAINT_CAGR_UPLIFT_ALIGNMENT -> l2-optuna-constraint-cagr-uplift-alignment)
+    task_normalized = task.lower().replace("task_", "").replace("_", "-")
+    
     for fname in os.listdir(specs_dir):
+        if not fname.endswith(".md"):
+            continue
+            
         fpath = os.path.join(specs_dir, fname)
+        json_path = fpath.replace(".md", "_contract.json")
+        
+        matches_task = False
+        
+        # 1. Check content of the spec file
         try:
             content = _read_file(fpath)
-            if task not in content:
-                continue
-            os.remove(fpath)
-            count += 1
-            json_path = fpath.replace(".md", "_contract.json")
-            if os.path.exists(json_path):
-                os.remove(json_path)
-                count += 1
+            if task in content:
+                matches_task = True
         except OSError:
             pass
+            
+        # 2. Check normalized filename
+        if not matches_task and task_normalized and task_normalized in fname.lower():
+            matches_task = True
+            
+        # 3. Check corresponding contract JSON content if exists
+        if not matches_task and os.path.exists(json_path):
+            try:
+                json_content = _read_file(json_path)
+                if task in json_content:
+                    matches_task = True
+            except OSError:
+                pass
+                
+        if matches_task:
+            try:
+                os.remove(fpath)
+                count += 1
+                if os.path.exists(json_path):
+                    os.remove(json_path)
+                    count += 1
+            except OSError:
+                pass
+                
     return count
+
 
 
 def main() -> None:
