@@ -1965,6 +1965,7 @@ def evaluate_l2_trial(
         Layer2TrialEvaluation,
     )
     from src.domain.futures.strategy.tiered_workflow.l2_gate import evaluate_layer2_gate
+    from src.domain.futures.strategy.tiered_workflow.l2_meta import build_regime_bull_boost_path
     from src.domain.futures.strategy.tiered_workflow.metrics import (
         _bars_per_year_for_tf,
         _cagr,
@@ -2073,8 +2074,21 @@ def evaluate_l2_trial(
                         _l_star,
                     )
 
+    _ret_arr = np.asarray(rets_hybrid, dtype=np.float64)
+    _bull_boost_enabled = bool(getattr(config, "l2_regime_bull_leverage_boost_enabled", False))
+    _regime_codes_hybrid: list[int] = getattr(sim, "regime_codes_hybrid", [])
+    if _bull_boost_enabled and len(_regime_codes_hybrid) == len(_ret_arr):
+        _state_names: tuple[str, ...] = ("bull", "bear", "crisis")
+        _boost_path = build_regime_bull_boost_path(
+            _regime_codes_hybrid,
+            _state_names,
+            enabled=True,
+            bull_leverage_boost=float(getattr(config, "l2_regime_bull_leverage_boost", 1.0)),
+        )
+        _ret_arr = _ret_arr * _boost_path
+    _boosted_rets_hybrid = _ret_arr
     _dep = apply_deployment(
-        rets=np.asarray(rets_hybrid, dtype=np.float64),
+        rets=_boosted_rets_hybrid,
         leverage=_l_star,
         bars_per_year=bars_per_year,
     )
