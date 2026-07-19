@@ -115,7 +115,8 @@
     "architecture": "docs/architecture/layer2.md",
     "testing": [
       "tests/unit/domain/futures/strategy/tiered_workflow/test_directional_veto.py",
-      "tests/unit/domain/futures/strategy/tiered_workflow/test_l2_tf_inclusion.py"
+      "tests/unit/domain/futures/strategy/tiered_workflow/test_l2_tf_inclusion.py",
+      "tests/unit/domain/futures/optimization/test_workflow.py"
     ]
   },
   "src/domain/futures/strategy/tiered_workflow/dataclasses.py": {
