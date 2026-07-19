@@ -2,6 +2,11 @@
 
 This file holds historical architecture decision records (ADRs) that have been pruned from the active window.
 
+## [2026-07-17] [L2_CRISIS_LEVERAGE_SAFETY_DEFAULT] [ADR_20260717_L2_CRISIS_LEVERAGE_SAFETY_DEFAULT]
+- **Context/Why:** L2 정상장 스코어카드는 PASS(CAGR +92.8%)했으나 위기 재현성 게이트(LUNA/FTX 2022)가 stress_tested_fail로 production 승격을 상시 차단(MDD 55.47%>21% 예산, CAGR -38.44%<-5% 하한). 원인은 calibrate_deployment_leverage의 L*가 fit-leg(2025 평온장) 단일 경로에만 맞춰지고, 이미 구현된 worst_fold 안전장치가 opt-in 비활성(기본 False)이었기 때문. 추가로 from_mapping이 파라미터 키 부재 시 SSOT(dataclass 기본값) 대신 하드코딩된 False로 침묵 복귀하는 버그가 함께 확인됨.
+- **Resolution/What:** Layer2AllocationConfig.l2_deploy_worst_fold_gate_enabled 기본값을 True로 전환하고, from_mapping의 fallback을 하드코딩 False에서 _dc.l2_deploy_worst_fold_gate_enabled(SSOT) 참조로 수정. kelly_safety_fraction은 이 시스템의 극소 mu에 과도 보수적(quarter-Kelly가 거의 항상 L*를 1.0으로 강제)이라 opt-in 유지, 기본 활성화 보류.
+- **Impact:** 실측 재검증(uv run opt_main_futures.py --phase l2 --seed 42): champion drift 발생(정상장 CAGR +92.8%→+53.2%, L* 2.06→1.72). 위기 MDD 55.47%→46.53%(개선), CAGR -38.44%→-28.04%(개선)했으나 예산(MDD<=21%, CAGR>=-5%) 여전히 미달 — status=stress_tested_fail 유지, production 승격 계속 차단. worst_fold 단독으로는 부족함을 실측 확인, l2_deploy_fit_mdd_crisis_gate를 2차 레버로 검토하는 후속 spec 필요(docs/specs/l2-crisis-leverage-safety-defaults.md Escalation Path 참고). /check PASS(Cov 97%, spec compliance 포함).
+
 ## [2026-07-17] [TASK_L2_DEPLOY_LEVERAGE_KELLY_WORST_FOLD_SAFETY] [ADR_20260717_L2_DEPLOY_LEVERAGE_KELLY_WORST_FOLD_SAFETY]
 - **Context/Why:** 위기 재현성 replay에서 챔피언 L*가 2025년 정상장(fit-leg) 단일 경로 하나에만 맞춰 산출됨을 확인 — 위기 MDD 초과폭(2.64배)이 fit-leg 구간과 2022 위기 구간의 변동성 비율과 정확히 일치. 이미 존재하는 DR 기반 concentration gate는 이 시장 유형(알트코인 급락)에서 반증되어 폐기된 경로이므로, 새 파라미터 없이 이론적으로 근거 있는 대안이 필요했다.
 - **Resolution/What:** risk_deployment.py에 select_worst_fold_returns(챔피언 자신의 walk-forward fold 중 unit MDD 최대 fold 선택, 위기 윈도우 미참조)와 calibrate_deployment_leverage의 신규 candidate 2종(worst_fold_rets 기반 MDD 제약, kelly_safety_fraction=0.25 기반 fractional-Kelly 이론 상한 — 심볼 레벨에 이미 쓰이는 KELLY_FRACTION=0.25와 동일 상수) 추가. Layer2AllocationConfig에 l2_deploy_worst_fold_gate_enabled(기본 False)/l2_deploy_kelly_safety_fraction(기본 None) opt-in 필드 추가. workflow.py의 evaluate_l2_trial 호출부에 배선.
