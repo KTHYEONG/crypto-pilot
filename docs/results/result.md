@@ -1,5 +1,25 @@
 # L2 Phase 성과 개선 세션 결과 — 2026-07-19 (최신 feasibility-first 재측정 포함)
 
+## 최신 세션: growth_lcb_deployed 절벽 방어 + 오진단 정정 + 진짜 원인 재확인
+
+**배경**: 아래 "최신 재측정(2026-05-01 기준)" 섹션에서 120/120 trial 전원 파국적 음수 CAGR(best=-11.77%)이 관측돼, `docs/specs/l2-growth-lcb-deployed-continuity-fix.md`로 근본 원인을 진단했다. 코드 대조 결과 `_contiguous_block_log_growth`(metrics.py)가 배포(레버리지) 수익률 중 단 하나의 bar라도 ≤-100%면 전체 block-growth를 empty로 폐기 → `growth_lcb_deployed`가 `-1e6` sentinel로 붕괴하는 이산적 절벽을 발견. 커밋 `7f4e1f64`가 이 값을 Optuna의 유일한 objective로 승격시켜 과거엔 무해(weight=0)했던 절벽이 치명적으로 작동할 수 있는 구조임을 확인, `apply_deployment`(risk_deployment.py)와 동일한 clip(`-1.0+1e-9`)을 적용하는 최소 수정을 구현·`/check` PASS(Cov 42%)했다.
+
+**실측 재검증 결과 — 오진단으로 판명**: 동일 조건(기준일 2026-05-01, seed=42, 120 trials)으로 fix 적용 후 재실행한 결과가 **수정 전과 trial별 CAGR까지 완전히 동일**(`failures={'fold': 120, 'cagr': 119, ...}` 동일 값)했다. 즉 절벽은 이 특정 실행에서 단 한 번도 발동하지 않았고, growth_lcb_deployed 절벽은 실재하는 결함이지만 이번 파국의 원인은 아니었다.
+
+**진짜 원인 재확인**: 사용자 요청으로 현재 날짜(2026-07-19, 기준일 미지정=기본값) 기준 동일 파이프라인을 재실행하자 완전히 건강한 결과가 나왔다 — `STATUS: PASS`(CAGR +73.9%, Sharpe 2.006, Sortino 3.033, MDD 23.4%, Fold 75%), champion이 fallback이 아닌 **정상 gate-pass 경로**(12개 후보 중 Trial #89)로 선정됨. 즉 `2026-05-01` 기준일의 파국은 코드 결함이 아니라 **그 시점 신호 배치(29 symbols·2,700 events, 희소 커버리지)에 국한된 현상**이었다(2026-07-19 실행은 44 symbols·4,803 events로 훨씬 두터움).
+
+다만 2026-07-19 실행도 파이프라인 최종 실패(`exit_code=1`)로 끝났다 — 정상장 게이트는 전부 통과했으나, Optuna 120-trial 탐색 루프 자체에서 **`[CRISIS-LOAD] loaded_symbols=0` → `status=unavailable`**로 crisis context 로딩이 실패해 전 trial이 `crisis_measured=0`으로 crisis 안전성을 전혀 반영하지 못한 채 정상장 성장만 극대화한 champion(L*=2.35)을 뽑았고, champion 확정 후 별도 실행되는 사후 crisis stress test(별도 로딩 경로, `valid_symbols=45`로 정상 로드됨)에서 `mdd=49.0%`(예산 21%)로 뒤늦게 차단됐다(`reason=layer2_blocked:crisis_survival`).
+
+| 항목 | 2026-05-01 기준(수정 전) | 2026-05-01 기준(수정 후) | 2026-07-19 기준(수정 후) |
+| :--- | ---: | ---: | ---: |
+| joint_feasible | 0/120 | 0/120(동일) | 0/120(crisis_measured=0 구조상 항상 0) |
+| 최고 정상 CAGR | -11.77% | -11.77%(동일) | +50.56%(objective) / champion CAGR +73.9% |
+| champion 선정 경로 | fallback(no_feasible_trials) | fallback(동일) | ✅ 정상 gate-pass(12 candidates) |
+| 정상장 스코어카드 | — | — | ✅ PASS (전 게이트 통과) |
+| 최종 파이프라인 | 🛑 중단(champion 없음) | 🛑 중단(동일) | ❌ crisis stress test 차단(MDD 49.0%>21%) |
+
+**신규 최우선 잔여 이슈**: Optuna 탐색 루프의 crisis context 로딩(`[CRISIS-LOAD]`)과 champion 확정 후 사후 stress test의 crisis 로딩(`[CRISIS-STRESS]`)이 **서로 다른 경로/조건**으로 동작해, 전자만 실패(`loaded_symbols=0`)하고 후자는 성공(`valid_symbols=45`)하는 불일치가 확인됨 — 이 때문에 탐색 단계는 crisis 안전성을 전혀 고려하지 못한 champion을 뽑고, 사후 검증에서만 뒤늦게 걸러진다(진짜 실패가 아니라 탐색-검증 파이프라인 불일치로 인한 예방 가능한 낭비). 원본 로그: `/tmp/l2_feasibility_120_current.log`(2026-07-19), `/tmp/l2_feasibility_120_verify.log`(2026-05-01 fix 후), `/tmp/l2_feasibility_120.log`(2026-05-01 fix 전).
+
 ## 최신 재측정: feasibility-first 120 trials
 
 실행 조건: 기준일 `2026-05-01`, `--phase l2`, 4h 실행 요청, L2 master TF=1h, `seed=42`, `120 trials`, `sync=skip`.
