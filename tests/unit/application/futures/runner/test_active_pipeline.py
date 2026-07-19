@@ -334,12 +334,10 @@ class TestRunTieredL2StudyFoldOverride:
             "src.domain.futures.optimization.workflow.objective_l2_growth",
             return_value=0.0,
         )
-        # 저메모리로 위장해 순차(n_jobs=1, in-process) 경로를 강제 — subprocess pickling으로
+        # 순차(n_jobs=1, in-process) 경로를 config로 강제 — subprocess pickling으로
         # 인해 objective_l2_growth mock이 미적용되는 것을 방지.
-        mocker.patch(
-            "psutil.virtual_memory",
-            return_value=SimpleNamespace(available=1 * (1024.0**3)),
-        )
+        from src.domain.futures.optimization.opt_config import OPT_FUTURES_CONFIG
+        mocker.patch.dict(OPT_FUTURES_CONFIG, {"L2_OPTUNA_BATCH_SIZE": 1})
         champion_spy = mocker.patch(
             "src.domain.futures.strategy.tiered_workflow.selection.select_layer2_champion",
             return_value=mocker.MagicMock(
@@ -395,6 +393,284 @@ class TestRunTieredL2StudyFoldOverride:
         assert champion_spy.called
         assert champion_spy.call_args.kwargs["crisis_rets"] is fake_crisis_rets
         assert champion_spy.call_args.kwargs["crisis_replay_ctx"] is fake_crisis_replay_ctx
+
+
+def test_l2_batch_size_invariant_to_available_memory(mocker) -> None:
+    """[l2-optuna-batch-determinism-fix] batch_size는 RAM 상태와 무관 — ask() 호출 횟수 불변."""
+    from src.application.futures.runner.active_pipeline import _run_tiered_l2_study
+    from src.domain.futures.strategy.config import CandidateStrategyConfig
+    from src.domain.futures.optimization.opt_config import OPT_FUTURES_CONFIG
+
+    cfg = CandidateStrategyConfig(wf_n_folds=4)
+    ask_call_counts: list[int] = []
+    max_workers_seen: list[int] = []
+
+    mocker.patch(
+        "src.domain.futures.strategy.walk_forward.build_walk_forward_folds",
+        return_value=(),
+    )
+    mocker.patch(
+        "src.domain.futures.strategy.tiered_workflow.awf_sim.build_l2_simulation_cache",
+        return_value=mocker.MagicMock(),
+    )
+    mocker.patch(
+        "src.domain.futures.strategy.market_regime.compute_market_regime_context",
+        return_value=mocker.MagicMock(),
+    )
+    mocker.patch(
+        "src.domain.futures.strategy.tiered_workflow.l2_meta.build_regime_routing_plan",
+        return_value=mocker.MagicMock(),
+    )
+    mocker.patch(
+        "src.domain.futures.strategy.tiered_workflow.diagnostics.build_layer_universe_audit",
+        return_value=mocker.MagicMock(warnings=()),
+    )
+    mocker.patch(
+        "src.domain.futures.strategy.market_regime.compute_risk_severity_code",
+        return_value=mocker.MagicMock(),
+    )
+    mocker.patch(
+        "src.domain.futures.optimization.workflow.objective_l2_growth",
+        return_value=0.0,
+    )
+    mocker.patch(
+        "src.domain.futures.strategy.tiered_workflow.selection.select_layer2_champion",
+        return_value=mocker.MagicMock(best_params={}, best_trial_number=0, completed_trials=0),
+    )
+    mocker.patch(
+        "src.application.futures.runner.active_pipeline._get_rss_mb",
+        return_value=100.0,
+    )
+    import dataclasses
+    mocker.patch.object(
+        dataclasses,
+        "replace",
+        side_effect=lambda obj, **kw: obj,
+    )
+    mocker.patch.dict(OPT_FUTURES_CONFIG, {"L2_OPTUNA_BATCH_SIZE": 6}, clear=False)
+
+    from datetime import date
+    window = SimpleNamespace(
+        holdout_start=date(2025, 6, 1),
+        l2_start=date(2024, 6, 1),
+    )
+    aligned = SimpleNamespace(
+        symbols=("BTCUSDT",),
+        close_2d=mocker.MagicMock(),
+        datetimes=pd.date_range("2024-01-01", periods=500, freq="h"),
+    )
+    caps = SimpleNamespace(trial_number=0)
+    signal_batch = mocker.MagicMock()
+    signal_batch.start_idx = 0
+    signal_batch.end_idx = 500
+    signal_batch.registry_version = "v1"
+    signal_batch.model_version = "v1"
+    signal_batch.events = ()
+
+    for avail_gb in (0.5, 32.0):
+        mocker.patch(
+            "psutil.virtual_memory",
+            return_value=SimpleNamespace(available=avail_gb * (1024.0**3)),
+        )
+
+        def _make_executor_spy(**kwargs):
+            max_workers_seen.append(kwargs.get("max_workers"))
+            mock_executor = mocker.MagicMock()
+            mock_executor.__enter__.return_value = mock_executor
+            mock_future = mocker.MagicMock()
+            mock_future.result.return_value = (0.1, {}, 0.01)
+            mock_executor.submit.return_value = mock_future
+            return mock_executor
+
+        mocker.patch(
+            "concurrent.futures.ProcessPoolExecutor",
+            side_effect=_make_executor_spy,
+        )
+
+        mock_study = mocker.MagicMock()
+        mock_study.trials = []
+        mock_study.ask.side_effect = [mocker.MagicMock(number=i) for i in range(6)]
+        mock_study._stop_flag = False
+        mocker.patch(
+            "src.application.futures.runner.active_pipeline.get_or_create_study",
+            return_value=mock_study,
+        )
+
+        _run_tiered_l2_study(
+            signal_batch=signal_batch,
+            aligned=aligned,
+            cfg=cfg,
+            window=window,
+            caps=caps,
+            tf="1h",
+            n_trials=6,
+            seed=42,
+            l2_sim_cache=mocker.MagicMock(),
+            l2_wf_n_folds=None,
+        )
+
+        ask_call_counts.append(mock_study.ask.call_count)
+
+    assert ask_call_counts[0] == ask_call_counts[1] == 6
+    assert max_workers_seen[0] <= max_workers_seen[1]
+
+
+def test_l2_batch_size_defaults_when_config_missing() -> None:
+    """[l2-optuna-batch-determinism-fix] L2_OPTUNA_BATCH_SIZE 키 없을 때 기본값 2."""
+    from src.domain.futures.optimization.opt_config import OPT_FUTURES_CONFIG
+
+    saved = OPT_FUTURES_CONFIG.pop("L2_OPTUNA_BATCH_SIZE")
+    try:
+        assert int(OPT_FUTURES_CONFIG.get("L2_OPTUNA_BATCH_SIZE", 2)) == 2
+    finally:
+        OPT_FUTURES_CONFIG["L2_OPTUNA_BATCH_SIZE"] = saved
+
+
+def test_l2_study_trial_sequence_reproducible_across_memory_states(mocker) -> None:
+    """[l2-optuna-batch-determinism-fix] 동일 seed면 저RAM/고RAM 모두 tell() 순서·값이 동일해야 한다.
+
+    tests/unit/execution/test_tiered_l2_optuna_integration.py의 TestS14는
+    `src.execution.opt_main_futures._run_tiered_l2_study`를 import하나 해당 심볼이
+    그 모듈에 존재하지 않는 기존(스코프 밖) 깨진 참조라 이 spec의 대상이 아니다 —
+    실제 구현체가 있는 이 모듈에서 종단 재현성을 검증한다.
+    """
+    import optuna
+
+    from src.application.futures.runner.active_pipeline import _run_tiered_l2_study
+    from src.domain.futures.strategy.config import CandidateStrategyConfig
+    from src.domain.futures.optimization.opt_config import OPT_FUTURES_CONFIG
+
+    cfg = CandidateStrategyConfig(wf_n_folds=4)
+
+    mocker.patch(
+        "src.domain.futures.strategy.walk_forward.build_walk_forward_folds",
+        return_value=(),
+    )
+    mocker.patch(
+        "src.domain.futures.strategy.tiered_workflow.awf_sim.build_l2_simulation_cache",
+        return_value=mocker.MagicMock(),
+    )
+    mocker.patch(
+        "src.domain.futures.strategy.market_regime.compute_market_regime_context",
+        return_value=mocker.MagicMock(),
+    )
+    mocker.patch(
+        "src.domain.futures.strategy.tiered_workflow.l2_meta.build_regime_routing_plan",
+        return_value=mocker.MagicMock(),
+    )
+    mocker.patch(
+        "src.domain.futures.strategy.tiered_workflow.diagnostics.build_layer_universe_audit",
+        return_value=mocker.MagicMock(warnings=()),
+    )
+    mocker.patch(
+        "src.domain.futures.strategy.market_regime.compute_risk_severity_code",
+        return_value=mocker.MagicMock(),
+    )
+    mocker.patch(
+        "src.application.futures.runner.active_pipeline._get_rss_mb",
+        return_value=100.0,
+    )
+    import dataclasses
+    mocker.patch.object(
+        dataclasses,
+        "replace",
+        side_effect=lambda obj, **kw: obj,
+    )
+    mocker.patch.dict(OPT_FUTURES_CONFIG, {"L2_OPTUNA_BATCH_SIZE": 6}, clear=False)
+
+    from datetime import date
+    window = SimpleNamespace(
+        holdout_start=date(2025, 6, 1),
+        l2_start=date(2024, 6, 1),
+    )
+    aligned = SimpleNamespace(
+        symbols=("BTCUSDT",),
+        close_2d=mocker.MagicMock(),
+        datetimes=pd.date_range("2024-01-01", periods=500, freq="h"),
+    )
+    caps = SimpleNamespace(trial_number=0)
+    signal_batch = mocker.MagicMock()
+    signal_batch.start_idx = 0
+    signal_batch.end_idx = 500
+    signal_batch.registry_version = "v1"
+    signal_batch.model_version = "v1"
+    signal_batch.events = ()
+
+    told_sequences: list[list[tuple[int, float]]] = []
+
+    for avail_gb in (0.5, 32.0):
+        mocker.patch(
+            "psutil.virtual_memory",
+            return_value=SimpleNamespace(available=avail_gb * (1024.0**3)),
+        )
+
+        told: list[tuple[int, float]] = []
+
+        def _make_executor_spy(**kwargs):
+            mock_executor = mocker.MagicMock()
+            mock_executor.__enter__.return_value = mock_executor
+
+            def _submit(fn, params):
+                mock_future = mocker.MagicMock()
+                mock_future.result.return_value = (0.1, {}, 0.01)
+                return mock_future
+
+            mock_executor.submit.side_effect = _submit
+            return mock_executor
+
+        mocker.patch(
+            "concurrent.futures.ProcessPoolExecutor",
+            side_effect=_make_executor_spy,
+        )
+
+        champion_spy = mocker.patch(
+            "src.domain.futures.strategy.tiered_workflow.selection.select_layer2_champion",
+            return_value=mocker.MagicMock(best_params={"seed_check": "ok"}, best_trial_number=5, completed_trials=6),
+        )
+
+        mock_study = mocker.MagicMock()
+        mock_study.trials = []
+        _ask_trials = [mocker.MagicMock(number=i, params={"_trial_number": i}) for i in range(6)]
+        mock_study.ask.side_effect = _ask_trials
+        mock_study._stop_flag = False
+
+        def _tell(
+            trial: Any,
+            value: Any,
+            _told: list[tuple[int, float]] = told,
+            _study: Any = mock_study,
+        ) -> None:
+            _told.append((trial.number, float(value)))
+            trial.value = value
+            trial.state = optuna.trial.TrialState.COMPLETE
+            if trial not in _study.trials:
+                _study.trials.append(trial)
+
+        mock_study.tell.side_effect = _tell
+        mocker.patch(
+            "src.application.futures.runner.active_pipeline.get_or_create_study",
+            return_value=mock_study,
+        )
+
+        _run_tiered_l2_study(
+            signal_batch=signal_batch,
+            aligned=aligned,
+            cfg=cfg,
+            window=window,
+            caps=caps,
+            tf="1h",
+            n_trials=6,
+            seed=42,
+            l2_sim_cache=mocker.MagicMock(),
+            l2_wf_n_folds=None,
+        )
+
+        told_sequences.append(told)
+        assert champion_spy.called
+
+    assert told_sequences[0] == told_sequences[1], (
+        f"tell() sequence diverged across memory states: {told_sequences[0]} != {told_sequences[1]}"
+    )
 
 
 @pytest.mark.slow
