@@ -34,6 +34,7 @@ class TestEvaluateL2TrialWiresWorstFoldAndKellyWhenEnabled:
             fold_rets_hybrid=[fold_a, fold_b],
             fold_selected_symbols=[("BTCUSDT",), ("ETHUSDT",)],
             all_turnovers=[0.1] * n_bars,
+            turnover_return_indices=list(range(n_bars)),
             all_gross_exposures=[1.5] * n_bars,
             rebalance_count=10,
             all_net_exposures=[1.0] * n_bars,
@@ -80,10 +81,10 @@ class TestEvaluateL2TrialWiresWorstFoldAndKellyWhenEnabled:
         mock_sim.return_value = self._make_sim()
         mock_fold_diag.return_value = self._make_fold_diag()
         mock_gate.return_value = SimpleNamespace(
-            optuna_constraint_values=(0.0,),
+            optuna_constraint_values=(0.0,) * 13,
             gate_passed=True,
             blocker_reason="",
-            regime_pass_ratio=1.0,
+            constraint_vector=SimpleNamespace(crisis_measured=True),
         )
         mock_calibrate.return_value = (2.0, "mdd", 0.0)
         mock_build_score.return_value = SimpleNamespace(
@@ -168,6 +169,7 @@ class TestEvaluateL2TrialDefaultConfigWiresWorstFoldWithoutExplicitOverride:
             fold_rets_hybrid=[fold_a, fold_b],
             fold_selected_symbols=[("BTCUSDT",), ("ETHUSDT",)],
             all_turnovers=[0.1] * n_bars,
+            turnover_return_indices=list(range(n_bars)),
             all_gross_exposures=[1.5] * n_bars,
             rebalance_count=10,
             all_net_exposures=[1.0] * n_bars,
@@ -218,10 +220,10 @@ class TestEvaluateL2TrialDefaultConfigWiresWorstFoldWithoutExplicitOverride:
         mock_sim.return_value = self._make_sim()
         mock_fold_diag.return_value = self._make_fold_diag()
         mock_gate.return_value = SimpleNamespace(
-            optuna_constraint_values=(0.0,),
+            optuna_constraint_values=(0.0,) * 13,
             gate_passed=True,
             blocker_reason="",
-            regime_pass_ratio=1.0,
+            constraint_vector=SimpleNamespace(crisis_measured=True),
         )
         mock_calibrate.return_value = (2.0, "mdd", 0.0)
         mock_build_score.return_value = SimpleNamespace(
@@ -272,6 +274,7 @@ class TestEvaluateL2TrialCrisisConstraint:
             fold_rets_hybrid=[[0.001] * n_bars],
             fold_selected_symbols=[("BTCUSDT",)],
             all_turnovers=[0.1] * n_bars,
+            turnover_return_indices=list(range(n_bars)),
             all_gross_exposures=[1.5] * n_bars,
             rebalance_count=10,
             all_net_exposures=[1.0] * n_bars,
@@ -323,9 +326,10 @@ class TestEvaluateL2TrialCrisisConstraint:
         mock_sim.return_value = self._make_sim()
         mock_fold_diag.return_value = self._make_fold_diag()
         mock_gate.return_value = SimpleNamespace(
-            optuna_constraint_values=(0.0,) * 10,
+            optuna_constraint_values=(0.0,) * 13,
             gate_passed=True,
             blocker_reason="",
+            constraint_vector=SimpleNamespace(crisis_measured=True),
         )
         mock_calibrate.return_value = (2.0, "mdd", 0.0)
         mock_build_score.return_value = SimpleNamespace(
@@ -402,6 +406,7 @@ class TestEvaluateL2TrialCrisisConstraint:
                 fold_rets_hybrid=[[]],
                 fold_selected_symbols=[("BTCUSDT",)],
                 all_turnovers=[0.1] * 50,
+                turnover_return_indices=list(range(50)),
                 all_gross_exposures=[1.0] * 50,
                 rebalance_count=5,
                 all_net_exposures=[1.0] * 50,
@@ -426,6 +431,7 @@ class TestEvaluateL2TrialCrisisConstraint:
                 fold_rets_hybrid=[[]],
                 fold_selected_symbols=[("BTCUSDT",)],
                 all_turnovers=[0.1] * 50,
+                turnover_return_indices=list(range(50)),
                 all_gross_exposures=[1.0] * 50,
                 rebalance_count=3,
                 all_net_exposures=[1.0] * 50,
@@ -441,9 +447,10 @@ class TestEvaluateL2TrialCrisisConstraint:
         ]
         mock_fold_diag.return_value = self._make_fold_diag()
         mock_gate.return_value = SimpleNamespace(
-            optuna_constraint_values=(0.0,) * 10,
+            optuna_constraint_values=(0.0,) * 13,
             gate_passed=True,
             blocker_reason="",
+            constraint_vector=SimpleNamespace(crisis_measured=True),
         )
         mock_calibrate.return_value = (2.0, "mdd", 0.0)
         mock_build_score.return_value = SimpleNamespace(
@@ -522,6 +529,7 @@ class TestEvaluateL2TrialGrowthLcbDeployed:
             fold_rets_hybrid=[returns],
             fold_selected_symbols=[("BTCUSDT",)],
             all_turnovers=[0.05] * n_bars,
+            turnover_return_indices=list(range(n_bars)),
             all_gross_exposures=[1.0] * n_bars,
             rebalance_count=10,
             all_net_exposures=[1.0] * n_bars,
@@ -577,9 +585,10 @@ class TestEvaluateL2TrialGrowthLcbDeployed:
         mock_sim.return_value = sim
         mock_fold_diag.return_value = self._make_fold_diag()
         mock_gate.return_value = SimpleNamespace(
-            optuna_constraint_values=(0.0,) * 10,
+            optuna_constraint_values=(0.0,) * 13,
             gate_passed=True,
             blocker_reason="",
+            constraint_vector=SimpleNamespace(crisis_measured=True),
         )
         # 첫 호출 L*=3.0(high), 두 번째 호출 L*=1.0(floor, crisis-suppressed)
         mock_calibrate.side_effect = [
@@ -591,9 +600,7 @@ class TestEvaluateL2TrialGrowthLcbDeployed:
             fold_pass_ratio=0.0, score=0.0, worst_fold_cagr=0.0,
         )
 
-        config = Layer2AllocationConfig.from_mapping({
-            "l2_objective_growth_lcb_weight": 0.3,
-        })
+        config = Layer2AllocationConfig.from_mapping({})
         caps = SimpleNamespace()
         aligned = SimpleNamespace(
             symbols=("BTCUSDT",),
@@ -621,47 +628,16 @@ class TestEvaluateL2TrialGrowthLcbDeployed:
             tf="1h",
         )
 
-        # growth_lcb_weight=0.3일 때 L* 높은 trial(=high deployed scale)이 더 높은 objective
+        # [LIMIT-04] Fixed objective: growth_lcb_deployed. High L* trial has higher deployed LCB.
         assert result_high.objective_value > result_low.objective_value, (
             f"High L* trial ({result_high.deploy_leverage}) should score > low L* trial "
-            f"({result_low.deploy_leverage}) with growth_lcb_weight=0.3"
+            f"({result_low.deploy_leverage}) with fixed growth_lcb_deployed objective"
         )
 
-        # growth_lcb_weight=0.0(legacy)에서는 차이가 거의 없어야 함
-        config_zero = Layer2AllocationConfig.from_mapping({
-            "l2_objective_growth_lcb_weight": 0.0,
-        })
-        mock_calibrate.side_effect = [
-            (3.0, "mdd", 0.0),
-            (1.0, "crisis_constraint", 0.0),
-        ]
-
-        result_high_zero = evaluate_l2_trial(
-            cache=MagicMock(),
-            signal_batch=SimpleNamespace(start_idx=0, end_idx=200),
-            aligned=aligned,
-            awf_folds=(MagicMock(),),
-            config=config_zero,
-            caps=caps,
-            tf="1h",
-        )
-
-        result_low_zero = evaluate_l2_trial(
-            cache=MagicMock(),
-            signal_batch=SimpleNamespace(start_idx=0, end_idx=200),
-            aligned=aligned,
-            awf_folds=(MagicMock(),),
-            config=config_zero,
-            caps=caps,
-            tf="1h",
-        )
-
-        diff_weight = result_high.objective_value - result_low.objective_value
-        diff_zero = result_high_zero.objective_value - result_low_zero.objective_value
-        assert diff_weight > diff_zero, (
-            f"Objective gap with weight=0.3 ({diff_weight:.6f}) should exceed "
-            f"gap with weight=0.0 ({diff_zero:.6f})"
-        )
+        # With fixed objective, high L* always scores higher (deployed returns are scaled)
+        # Verify the objective value IS growth_lcb_deployed
+        assert result_high.objective_value == pytest.approx(result_high.growth_lcb_deployed, abs=1e-10)
+        assert result_low.objective_value == pytest.approx(result_low.growth_lcb_deployed, abs=1e-10)
 
 
 class TestComputeCrisisReplayBudget:
@@ -771,6 +747,7 @@ class TestEvaluateL2TrialUsesComputeCrisisReplayBudget:
             fold_rets_hybrid=[[]],
             fold_selected_symbols=[("BTCUSDT",)],
             all_turnovers=[0.1] * n_bars,
+            turnover_return_indices=list(range(n_bars)),
             all_gross_exposures=[1.0] * n_bars,
             rebalance_count=5,
             all_net_exposures=[1.0] * n_bars,
@@ -792,7 +769,8 @@ class TestEvaluateL2TrialUsesComputeCrisisReplayBudget:
             latest_to_median_cagr=1.0,
         )
         mock_gate.return_value = SimpleNamespace(
-            optuna_constraint_values=(0.0,) * 10, gate_passed=True, blocker_reason="",
+            optuna_constraint_values=(0.0,) * 13, gate_passed=True, blocker_reason="",
+            constraint_vector=SimpleNamespace(crisis_measured=True),
         )
         mock_calibrate.return_value = (1.5, "mdd", 0.0)
         mock_build_score.return_value = SimpleNamespace(
