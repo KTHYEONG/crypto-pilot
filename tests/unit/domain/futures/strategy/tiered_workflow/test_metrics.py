@@ -13,6 +13,8 @@ import numpy as np
 import pytest
 
 from src.domain.futures.strategy.tiered_workflow.metrics import (
+    _contiguous_block_log_growth,
+    _growth_lower_confidence_bound,
     _sharpe,
     _sortino,
     _terminal_multiple,
@@ -235,3 +237,57 @@ class TestResolveLcbQuantile:
             resolve_lcb_quantile(10, base_quantile=0.0)
         with pytest.raises(ValueError, match="quantile"):
             resolve_lcb_quantile(10, relaxed_quantile=1.0)
+
+
+# ---------------------------------------------------------------------------
+# S6: _contiguous_block_log_growth — wipeout cliff fix
+# ---------------------------------------------------------------------------
+
+
+def test_contiguous_block_log_growth_no_breach_matches_prior_formula() -> None:
+    """S1 (Happy Path): breach 없는 입력에서 clip 전/후 동일 (회귀 없음, [LIMIT-03])."""
+    rets = [0.01, -0.005, 0.02, 0.01, -0.01, 0.03]
+    block_bars = 3
+    expected_block0 = np.log1p(0.01) + np.log1p(-0.005) + np.log1p(0.02)
+    expected_block1 = np.log1p(0.01) + np.log1p(-0.01) + np.log1p(0.03)
+
+    result = _contiguous_block_log_growth(rets, block_bars=block_bars)
+
+    assert result == pytest.approx([expected_block0, expected_block1], rel=1e-6)
+
+
+def test_contiguous_block_log_growth_wipeout_bar_clips_instead_of_collapsing() -> None:
+    """S2 (Edge — [LIMIT-01][LIMIT-02]): wipeout bar ≤-100%를 clip, empty 반환 대신 유한값."""
+    wipeout_rets = [0.01, -1.20, 0.01]
+    near_miss_rets = [0.01, -0.99, 0.01]
+    block_bars = 3
+
+    wipeout_block = _contiguous_block_log_growth(wipeout_rets, block_bars=block_bars)
+    near_miss_block = _contiguous_block_log_growth(near_miss_rets, block_bars=block_bars)
+    wipeout_lcb = _growth_lower_confidence_bound(
+        wipeout_block, blocks_per_year=12.0, z_value=0.5,
+    )
+
+    assert wipeout_block.size == 1
+    expected = np.log1p(0.01) + np.log1p(-1.0 + 1e-9) + np.log1p(0.01)
+    assert wipeout_block[0] == pytest.approx(expected, rel=1e-6)
+    assert wipeout_block[0] < near_miss_block[0]
+    assert wipeout_lcb != pytest.approx(-1e6)
+
+
+def test_contiguous_block_log_growth_clip_epsilon_matches_apply_deployment() -> None:
+    """S3 (Parity): clip epsilon(1e-9)이 apply_deployment와 동일한지 검증."""
+    from src.domain.futures.strategy.tiered_workflow.risk_deployment import apply_deployment
+
+    rets = np.array([0.01, -0.65, 0.01], dtype=np.float64)
+    leverage = 2.0
+    deploy_result = apply_deployment(
+        rets=rets, leverage=leverage, bars_per_year=2190.0,
+    )
+    growth = _contiguous_block_log_growth(
+        deploy_result.scaled_rets.tolist(), block_bars=3,
+    )
+
+    assert growth.size == 1
+    assert np.isfinite(growth[0])
+    assert growth[0] < 0.0

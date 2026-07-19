@@ -160,11 +160,12 @@ def _contiguous_block_log_growth(
     block_bars: int,
 ) -> NDArray[np.float64]:
     arr = _clean_rets_array(rets)
-    if arr.size == 0 or block_bars <= 0 or np.any(arr <= -1.0):
+    if arr.size == 0 or block_bars <= 0:
         return np.zeros((0,), dtype=np.float64)
+    clipped = np.clip(arr, -1.0 + 1e-9, None)
     blocks: list[float] = []
-    for start in range(0, arr.size, int(block_bars)):
-        block = arr[start : start + int(block_bars)]
+    for start in range(0, clipped.size, int(block_bars)):
+        block = clipped[start : start + int(block_bars)]
         if block.size == 0:
             continue
         blocks.append(float(np.sum(np.log1p(block), dtype=np.float64)))
