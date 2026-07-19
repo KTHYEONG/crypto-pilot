@@ -1868,6 +1868,9 @@ def evaluate_l2_trial(
                 crisis_mdd_margin=float(config.l2_deploy_crisis_mdd_margin),
                 oos_budget_blend=float(config.l2_deploy_oos_budget_blend),
                 oos_floor_cap=float(config.l2_deploy_oos_floor_cap),
+                oos_fold_rets=getattr(sim, "fold_rets_hybrid", None),
+                oos_worst_fold_cagr_floor=float(config.l2_min_worst_fold_cagr),
+                bars_per_year=bars_per_year,
             )
             _logger.debug(
                 "[L2-EVAL] L*=%.3f (binding=%s, src=%s)",
