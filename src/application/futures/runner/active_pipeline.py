@@ -81,12 +81,15 @@ from src.application.futures.runner.models import RunnerResult
 from src.core.settings import BASE_DIR
 from src.core.utils.utils import PERF, setup_logger
 from src.domain.futures.optimization.observability.run_tracker import (
+    L2ChampionSnapshot,
+    _compute_search_space_hash,
     build_joint_study_name,
     build_run_id,
     get_or_create_study,
     load_champion_params,
     log_optuna_contract,
     resolve_futures_parallel_policy,
+    save_l2_champion_snapshot,
     setup_optuna_storage,
     update_champion_store,
 )
@@ -1471,30 +1474,51 @@ def _build_l2_signal_batch(
     return result
 
 
-class L2EarlyStopCallback:
-    """Optuna study early-stop callback: N trial 연속 무개선 시 중지.
+class L2FeasibilityEarlyStopCallback:
+    """Feasibility-aware early stop: requires min_joint_feasible_trials before stopping.
 
     Args:
-        no_improve_limit: 연속 무개선 허용 trial 수.
+        no_improve_limit: 연속 feasible objective 무개선 허용 trial 수.
         min_trials: 최소 진행 trial 수 (TPE warmup 보호).
+        min_joint_feasible_trials: stop 전 최소 joint-feasible trial 수 (기본 5).
+        requested_trials: 요청 trial 수 (zero feasible 시 전부 소진).
     """
 
-    def __init__(self, no_improve_limit: int, min_trials: int):
+    def __init__(
+        self,
+        no_improve_limit: int,
+        min_trials: int,
+        min_joint_feasible_trials: int = 5,
+        requested_trials: int = 120,
+    ):
         self.no_improve_limit = no_improve_limit
         self.min_trials = min_trials
-        self.best = float("-inf")
-        self.last_improve = 0
+        self.min_joint_feasible = min_joint_feasible_trials
+        self.requested_trials = requested_trials
+        self.best_feasible = float("-inf")
+        self.last_feasible_improve_at = 0
+        self._completed_trials = 0
 
     def __call__(self, study: Any, trial: Any) -> None:
-        v = getattr(trial, "value", None)
-        if v is None:
+        self._completed_trials += 1
+        joint_feasible = bool(getattr(trial, "user_attrs", {}).get("l2_joint_feasible", False))
+        if joint_feasible:
+            v = getattr(trial, "value", None)
+            if v is not None and v > self.best_feasible:
+                self.best_feasible = v
+                self.last_feasible_improve_at = trial.number
+
+        joint_feasible_count = sum(
+            1 for t in study.trials
+            if t.state == optuna.trial.TrialState.COMPLETE
+            and t.user_attrs.get("l2_joint_feasible", False)
+        )
+        if joint_feasible_count < self.min_joint_feasible:
             return
-        if v > self.best:
-            self.best = v
-            self.last_improve = trial.number
+
         if (
-            trial.number >= self.min_trials
-            and trial.number - self.last_improve >= self.no_improve_limit
+            self._completed_trials >= self.min_trials
+            and trial.number - self.last_feasible_improve_at >= self.no_improve_limit
         ):
             study._stop_flag = True
 
@@ -1903,7 +1927,12 @@ def _run_tiered_l2_study(
             resume=False,
             pruner=_optuna_pruner,
         )
-        _early_stop_cb = L2EarlyStopCallback(no_improve_limit=_no_improve, min_trials=_min_trials)
+        _early_stop_cb = L2FeasibilityEarlyStopCallback(
+            no_improve_limit=_no_improve,
+            min_trials=_min_trials,
+            min_joint_feasible_trials=5,
+            requested_trials=n_trials,
+        )
 
         # Warm-start anchor: 영구 챔피언 레저(과거 run 중 최고 성과)가 있으면 우선
         # 사용하고, 레저가 비었거나 일부 키가 비어있으면 검증된 기본값으로 보강.
@@ -2133,6 +2162,24 @@ def _run_tiered_l2_study(
     _log_mem("select_layer2_champion", _mem_champ_before, extra=f"took={time.perf_counter() - _t_champ_start:.4f}s")
     gc.collect()
 
+    from src.domain.futures.optimization.workflow import (
+        summarize_layer2_feasibility,
+    )
+
+    _feasibility_audit = summarize_layer2_feasibility(
+        trials=study.trials,
+        requested_trials=n_trials,
+    )
+    _logger.info(
+        "[L2-AUDIT] completed=%d/%d joint_feasible=%d crisis_measured=%d failures=%s",
+        _feasibility_audit.completed_trials,
+        _feasibility_audit.requested_trials,
+        _feasibility_audit.joint_feasible_trials,
+        _feasibility_audit.crisis_measured_trials,
+        dict(_feasibility_audit.failure_counts),
+    )
+
+    _blocker_reason = l2_study_result.blocker_reason
     if l2_study_result.blocker_reason == "" and l2_study_result.best_evaluation is not None:
         from src.domain.futures.strategy.market_regime import synthetic_crash_defense_verdict
         from src.domain.futures.strategy.tiered_workflow.awf_sim import _reversal_config_from_env
@@ -2159,21 +2206,40 @@ def _run_tiered_l2_study(
                     _crash_bars,
                 )
         else:
+            _best_eval = l2_study_result.best_evaluation
             updated = update_champion_store(
                 tag=tf,
                 storage=storage,
                 params=l2_study_result.best_params,
-                value=l2_study_result.best_evaluation.growth_lcb_hybrid,
+                value=float(_best_eval.growth_lcb_deployed),
                 space=L2_ALLOC_SPACE,
             )
             if updated:
                 _logger.info(
-                    "  ● [CHAMPION STORE] 신규 챔피언 갱신 (tf=%s, growth_lcb=%.4f)",
+                    "  ● [CHAMPION STORE] 신규 챔피언 갱신 (tf=%s, growth_lcb_deployed=%.4f)",
                     tf,
-                    l2_study_result.best_evaluation.growth_lcb_hybrid,
+                    float(_best_eval.growth_lcb_deployed),
                 )
+            _snapshot_path = _project_root / "logs" / "futures" / "optimization" / "l2_champion.json"
+            _constraint_map = {}
+            if _best_eval.gate is not None and _best_eval.gate.constraint_vector is not None:
+                _constraint_map = _best_eval.gate.constraint_vector.as_mapping()
+            _snapshot = L2ChampionSnapshot(
+                schema_version=1,
+                tf=tf,
+                search_space_hash=_compute_search_space_hash(L2_ALLOC_SPACE),
+                params=l2_study_result.best_params,
+                growth_lcb_deployed=float(_best_eval.growth_lcb_deployed),
+                constraints=_constraint_map,
+                replay_fingerprint=str(_layer2_experiment_key(
+                    tf=tf, window=window, signal_batch=signal_batch, search_space_version="v7",
+                )),
+            )
+            save_l2_champion_snapshot(path=_snapshot_path, snapshot=_snapshot)
+    elif l2_study_result.blocker_reason:
+        _logger.warning("[L2-AUDIT] No joint-feasible champion: blocker=%s", l2_study_result.blocker_reason)
 
-    _blocker = l2_study_result.blocker_reason or "none"
+    _blocker = _blocker_reason or "none"
     _logger.debug("[MEM] stage=l2_champion rss=%.0fMB blocked=%s", _get_rss_mb(), _blocker)
     return l2_study_result
 
@@ -2987,16 +3053,20 @@ def _run_strategy_stage(
             _crisis_rets: NDArray[np.float64] | None = None
             _crisis_replay_ctx: Any = None
             try:
-                _crisis_rets = compute_crisis_unit_returns(
-                    deployment_registry=_deployment_registry,
-                    strategy_cfg=tiered_cfg,
-                    tf=l2_master_tf,
-                )
                 _crisis_replay_ctx = _load_crisis_replay_context(
                     deployment_registry=_deployment_registry,
                     strategy_cfg=tiered_cfg,
                     tf=l2_master_tf,
                 )
+                if _crisis_replay_ctx is not None:
+                    _crisis_rets = compute_crisis_unit_returns(
+                        deployment_registry=_deployment_registry,
+                        strategy_cfg=tiered_cfg,
+                        tf=l2_master_tf,
+                        crisis_replay_ctx=_crisis_replay_ctx,
+                    )
+                else:
+                    _logger.warning("[DATA] stage=l2_crisis_context status=unavailable")
             except Exception:
                 _logger.warning("[L2-CRISIS-CEILING] compute failed, crisis_window disabled")
 
@@ -3020,8 +3090,16 @@ def _run_strategy_stage(
             )
             best_l2_params = dict(getattr(l2_study_result, "best_params", {}))
 
-            # ── INTEGRITY GUARD: infeasible 챔피언 L3 승격 차단 ─────────────
-            # 차단 로그는 최종 pipeline 내부 또는 종료 시점에 출력되므로 생략
+            # ── FAIL-CLOSED BOUNDARY: blocked selection → final pipeline 미실행 ──
+            if getattr(l2_study_result, "blocker_reason", ""):
+                _logger.warning(
+                    "[L2-SELECTION-BLOCKED] reason=%s stopping before final pipeline",
+                    l2_study_result.blocker_reason,
+                )
+                return RunnerResult(
+                    exit_code=1,
+                    reason=f"layer2_selection_blocked:{l2_study_result.blocker_reason}",
+                )
 
             # ── Step E: 최적 params + L1 override로 최종 실행 ────────────────
             gc.collect()

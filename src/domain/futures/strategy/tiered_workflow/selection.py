@@ -53,6 +53,46 @@ def _assert_selection_replay_parity(
     )
 
 
+_REPLAY_PARITY_ABS_TOL = 1e-8
+_REPLAY_PARITY_FIELDS: tuple[tuple[str, str], ...] = (
+    ("cagr_hybrid", "cagr_hybrid"),
+    ("mdd_hybrid", "mdd_hybrid"),
+    ("growth_lcb_hybrid", "growth_lcb_hybrid"),
+    ("growth_lcb_deployed", "growth_lcb_deployed"),
+    ("deploy_leverage", "deploy_leverage"),
+    ("fold_pass_ratio", "fold_pass_ratio"),
+)
+
+
+def _trial_replay_mismatches(
+    *,
+    trial: optuna.trial.FrozenTrial,
+    evaluation: Any,
+    abs_tolerance: float = _REPLAY_PARITY_ABS_TOL,
+) -> tuple[str, ...]:
+    mismatches: list[str] = []
+    for stored_key, replay_key in _REPLAY_PARITY_FIELDS:
+        stored_val = trial.user_attrs.get(stored_key)
+        replay_val = getattr(evaluation, replay_key, None)
+        if stored_val is None or replay_val is None:
+            # ``growth_lcb_deployed`` was introduced after existing studies;
+            # absent legacy values must not mask an otherwise valid replay.
+            if stored_key == "growth_lcb_deployed" and stored_val is None and replay_val is None:
+                continue
+            mismatches.append(stored_key)
+            continue
+        if not (np.isfinite(float(stored_val)) and np.isfinite(float(replay_val))):
+            mismatches.append(stored_key)
+            continue
+        if not np.isclose(float(stored_val), float(replay_val), rtol=0.0, atol=abs_tolerance):
+            mismatches.append(stored_key)
+    stored_trade = trial.user_attrs.get("trade_count")
+    replay_trade = getattr(evaluation, "trade_count", None)
+    if stored_trade is not None and replay_trade is not None and int(stored_trade) != int(replay_trade):
+        mismatches.append("trade_count")
+    return tuple(mismatches)
+
+
 def _update_hashed_value(
     hasher: Any,
     *,
@@ -242,6 +282,22 @@ def _apply_deployment_to_params(
     return deployed
 
 
+
+def _resolve_blocker_reason(
+    *,
+    parity_failed: bool,
+    crisis_unavailable: bool,
+    gate: Any | None,
+) -> str:
+    if parity_failed:
+        return "replay_parity_divergence"
+    if crisis_unavailable:
+        return "crisis_replay_unavailable"
+    if gate is not None and gate.promotion_blocker:
+        return str(gate.promotion_blocker)
+    return "replay_constraints_failed"
+
+
 def select_layer2_champion(
     *,
     study: optuna.Study,
@@ -290,6 +346,23 @@ def select_layer2_champion(
             completed_trials=0,
             feasible_trials=0,
             blocker_reason="no_complete_trials",
+            awf_folds=awf_folds,
+        )
+
+    # [LIMIT-01] Crisis input pairing validation
+    _has_crisis_rets = crisis_rets is not None
+    _has_crisis_ctx = crisis_replay_ctx is not None
+    if _has_crisis_rets != _has_crisis_ctx:
+        _logger.warning("[L2-SELECTION] crisis_context_mismatch: crisis_rets=%s crisis_ctx=%s", _has_crisis_rets, _has_crisis_ctx)
+        return Layer2StudyResult(
+            best_params={},
+            best_trial_number=None,
+            best_evaluation=None,
+            dsr=0.0,
+            effective_trial_count=0.0,
+            completed_trials=len(complete_trials),
+            feasible_trials=0,
+            blocker_reason="crisis_context_mismatch",
             awf_folds=awf_folds,
         )
 
@@ -349,8 +422,8 @@ def select_layer2_champion(
     first_dsr = 0.0
     # Fix B: gate-pass 후보를 수집하여 argmax(dsr, cagr)로 champion 선택
     passed_candidates: list[
-        tuple[float, float, optuna.trial.FrozenTrial, Any, float]
-    ] = []  # (dsr, cagr_hybrid, trial, evaluation, candidate_dsr)
+        tuple[float, float, float, optuna.trial.FrozenTrial, Any, float]
+    ] = []  # (growth_lcb_deployed, sortino_hybrid, cagr_hybrid, trial, evaluation, candidate_dsr)
     champion_trial = None
     champion_evaluation = None
     champion_dsr = 0.0
@@ -358,6 +431,8 @@ def select_layer2_champion(
     best_diagnostic_evaluation = None
     best_diagnostic_gate: Layer2GateEvaluation | None = None
     best_diagnostic_dsr = float("-inf")
+    _replay_parity_failures = 0
+    _crisis_unavailable_failures = 0
 
     if prebuilt_cache is not None:
         cache = prebuilt_cache
@@ -381,6 +456,7 @@ def select_layer2_champion(
             caps=caps,
             tf=tf,
             eval_tag="selection",
+            crisis_rets=crisis_rets,
             _memo=_eval_memo,
         )
         return trial, eval_val, cfg_mapping
@@ -412,15 +488,20 @@ def select_layer2_champion(
         )
 
     # ThreadPool 평가: numba GIL 해제 활용 → ProcessPool 대비 fork/serialize 오버헤드 제거
+    # [LIMIT-03] frontier 순서 보존: as_completed 결과를 trial-number→index map으로 재정렬
     if len(eval_candidates) <= 1:
         evaluated_triples = [_eval_candidate(trial) for trial in eval_candidates]
     else:
         max_workers = min(len(eval_candidates), 4)
-        evaluated_triples = []
+        frontier_index = {int(t.number): i for i, t in enumerate(eval_candidates)}
+        unordered: list[tuple[int, Any, Any, Any]] = []
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
             future_map = {executor.submit(_eval_candidate, t): t for t in eval_candidates}
             for future in as_completed(future_map):
-                evaluated_triples.append(future.result())
+                trial, eval_val, cfg = future.result()
+                unordered.append((int(trial.number), trial, eval_val, cfg))
+        unordered.sort(key=lambda x: frontier_index.get(x[0], len(eval_candidates)))
+        evaluated_triples = [(trial, eval_val, cfg) for _, trial, eval_val, cfg in unordered]
 
     for candidate, candidate_evaluation, candidate_config in evaluated_triples:
         dsr = _deflated_sharpe_probability(
@@ -434,15 +515,7 @@ def select_layer2_champion(
             first_evaluation = candidate_evaluation
             first_dsr = dsr
 
-        stored_cagr = float(candidate.user_attrs.get("cagr_hybrid", 0.0))
-        stored_growth_lcb = float(candidate.user_attrs.get("growth_lcb_hybrid", 0.0))
-        stored_mdd = float(candidate.user_attrs.get("mdd_hybrid", 0.0))
-        eps = 1e-5
-        replay_mismatch = (
-            abs(candidate_evaluation.cagr_hybrid - stored_cagr) > eps
-            or abs(candidate_evaluation.growth_lcb_hybrid - stored_growth_lcb) > eps
-            or abs(candidate_evaluation.mdd_hybrid - stored_mdd) > eps
-        )
+        replay_mismatches = _trial_replay_mismatches(trial=candidate, evaluation=candidate_evaluation)
 
         # 단일 gate 평가: pre-gate + final-gate 중복 제거
         raw_sharpe = _trial_metric(
@@ -502,28 +575,29 @@ def select_layer2_champion(
             config=candidate_config,
         )
 
-        if replay_mismatch:
-            _was_stored_passed = bool(candidate.user_attrs.get("l2_promotion_passed", False))
-            _is_replay_passed = bool(gate.promotion_passed)
-            if _was_stored_passed and not _is_replay_passed:
-                _logger.warning(
-                    "[EVAL] event=replay_flip trial=%d stored_pass=True replay_pass=False "
-                    "stored_cagr=%.4f replay_cagr=%.4f stored_mdd=%.4f replay_mdd=%.4f",
-                    candidate.number, stored_cagr, candidate_evaluation.cagr_hybrid,
-                    stored_mdd, candidate_evaluation.mdd_hybrid,
-                )
-            else:
-                _logger.debug(
-                    "[L2-REPLAY] Trial #%d | stored_CAGR=%.4f replay_CAGR=%.4f | "
-                    "stored_MDD=%.4f replay_MDD=%.4f | stored_LCB=%.4f replay_LCB=%.4f",
-                    candidate.number,
-                    stored_cagr,
-                    candidate_evaluation.cagr_hybrid,
-                    stored_mdd,
-                    candidate_evaluation.mdd_hybrid,
-                    stored_growth_lcb,
-                    candidate_evaluation.growth_lcb_hybrid,
-                )
+        # [LIMIT-03] Hard parity gate: stored vs replay metric divergence blocks admission
+        _parity_fail = len(replay_mismatches) > 0
+        if _parity_fail:
+            _replay_parity_failures += 1
+            _logger.warning(
+                "[EVAL] event=replay_parity_violation trial=%d fields=%s",
+                candidate.number,
+                ",".join(replay_mismatches),
+            )
+        # [LIMIT-04] Crisis availability gate: strict mode에서 None/non-finite field는 blocker
+        _crisis_unavailable = (
+            _has_crisis_ctx
+            and any(
+                getattr(_crisis_budget, f, None) is None or not np.isfinite(float(getattr(_crisis_budget, f, 0.0)))
+                for f in ("mdd_hybrid", "mdd_budget", "cagr_hybrid", "cagr_floor")
+            )
+        )
+        if _crisis_unavailable:
+            _crisis_unavailable_failures += 1
+            _logger.warning(
+                "[L2-SELECTION] event=crisis_replay_unavailable trial=%d",
+                candidate.number,
+            )
 
         # gate 진단 로그
         _logger.debug(
@@ -573,12 +647,20 @@ def select_layer2_champion(
             best_diagnostic_dsr = float(dsr)
 
         constraints_ok = all(v <= 0.0 for v in gate.optuna_constraint_values)
-        if constraints_ok and gate.promotion_passed:
+        # [LIMIT-03][LIMIT-04] admission equation: parity ∧ availability ∧ 13 constraints ∧ promotion
+        if not _parity_fail and not _crisis_unavailable and constraints_ok and gate.promotion_passed:
             # D4: argmax(dsr, cagr) → argmax(sortino, cagr) 교체.
             # DSR은 자기참조(동일 신호셋 파라미터 섭동) → 독립성 불성립.
             # Sortino가 하방위험 조정 shape를 직접 반영 (shape 최적화 D1과 정합).
             passed_candidates.append(
                 (
+                    float(
+                        getattr(
+                            candidate_evaluation,
+                            "growth_lcb_deployed",
+                            candidate_evaluation.growth_lcb_hybrid,
+                        )
+                    ),
                     float(candidate_evaluation.sortino_hybrid),
                     float(candidate_evaluation.cagr_hybrid),
                     candidate,
@@ -587,28 +669,29 @@ def select_layer2_champion(
                 )
             )
 
-    # D4: gate-pass 후보 중 argmax(sortino_hybrid, cagr_hybrid) 선택
+    # [LIMIT-06] 최종 키: (growth_lcb_deployed, sortino_hybrid, cagr_hybrid, -trial_number)
     if passed_candidates:
-        best_entry = max(passed_candidates, key=lambda x: (x[0], x[1], -x[2].number))
-        champion_trial = best_entry[2]
-        champion_evaluation = best_entry[3]
-        champion_dsr = best_entry[4]
+        best_entry = max(passed_candidates, key=lambda x: (x[0], x[1], x[2], -x[3].number))
+        champion_trial = best_entry[3]
+        champion_evaluation = best_entry[4]
+        champion_dsr = best_entry[5]
         _logger.info(
-            "[L2-SELECTION] %d gate-pass 후보 수집 → champion Trial #%d Sortino=%.4f CAGR=%.4f",
+            "[L2-SELECTION] %d gate-pass 후보 수집 → champion Trial #%d growth_lcb=%.4f Sortino=%.4f CAGR=%.4f",
             len(passed_candidates),
             champion_trial.number,
             best_entry[0],
             best_entry[1],
+            best_entry[2],
         )
 
     if champion_trial is None or champion_evaluation is None:
         diagnostic_trial = best_diagnostic_trial or first_trial
         diagnostic_evaluation = best_diagnostic_evaluation or first_evaluation
         diagnostic_gate = best_diagnostic_gate
-        reason = (
-            diagnostic_gate.promotion_blocker
-            if diagnostic_gate is not None and diagnostic_gate.promotion_blocker
-            else "non_deterministic_replay"
+        reason = _resolve_blocker_reason(
+            parity_failed=_replay_parity_failures > 0,
+            crisis_unavailable=_crisis_unavailable_failures > 0,
+            gate=diagnostic_gate,
         )
         _logger.error("[L2-SELECTION] No feasible candidate found within fallback window (reason=%s)", reason)
         _logger.info(

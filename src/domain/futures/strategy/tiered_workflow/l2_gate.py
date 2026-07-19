@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import time
+from dataclasses import dataclass
 from typing import cast
 
 import numpy as np
@@ -16,6 +17,75 @@ from src.domain.futures.strategy.tiered_workflow.dataclasses import (
 )
 
 _logger = logging.getLogger(__name__)
+
+
+@dataclass(slots=True, frozen=True)
+class Layer2ConstraintVector:
+    deployment: float
+    support_leak: float
+    mdd: float
+    cvar_95: float
+    fold: float
+    recent_fold: float
+    active_blocks: float
+    friction: float
+    trades: float
+    crisis_mdd: float
+    cagr: float
+    sharpe_uplift: float
+    crisis_cagr: float
+    crisis_measured: bool
+
+    def as_tuple(self) -> tuple[float, ...]:
+        return (
+            self.deployment,
+            self.support_leak,
+            self.mdd,
+            self.cvar_95,
+            self.fold,
+            self.recent_fold,
+            self.active_blocks,
+            self.friction,
+            self.trades,
+            self.crisis_mdd,
+            self.cagr,
+            self.sharpe_uplift,
+            self.crisis_cagr,
+        )
+
+    def as_mapping(self) -> dict[str, float]:
+        return {
+            "deployment": self.deployment,
+            "support_leak": self.support_leak,
+            "mdd": self.mdd,
+            "cvar_95": self.cvar_95,
+            "fold": self.fold,
+            "recent_fold": self.recent_fold,
+            "active_blocks": self.active_blocks,
+            "friction": self.friction,
+            "trades": self.trades,
+            "crisis_mdd": self.crisis_mdd,
+            "cagr": self.cagr,
+            "sharpe_uplift": self.sharpe_uplift,
+            "crisis_cagr": self.crisis_cagr,
+        }
+
+    def non_crisis_feasible(self) -> bool:
+        non_crisis = (
+            self.deployment,
+            self.support_leak,
+            self.mdd,
+            self.cvar_95,
+            self.fold,
+            self.recent_fold,
+            self.active_blocks,
+            self.friction,
+            self.trades,
+        )
+        return all(v <= 0.0 for v in non_crisis)
+
+    def jointly_feasible(self) -> bool:
+        return bool(self.crisis_measured) and all(v <= 0.0 for v in self.as_tuple())
 
 _DEFAULT_L2_CONFIG: Layer2AllocationConfig = Layer2AllocationConfig()
 
@@ -265,9 +335,27 @@ def evaluate_layer2_gate(
         promotion_blocker or "OK",
     )
 
+    _crisis_measured = crisis_mdd_hybrid is not None and crisis_mdd_budget is not None
+    constraint_vector = Layer2ConstraintVector(
+        deployment=optuna_constraint_values[0],
+        support_leak=optuna_constraint_values[1],
+        mdd=optuna_constraint_values[2],
+        cvar_95=optuna_constraint_values[3],
+        fold=optuna_constraint_values[4],
+        recent_fold=optuna_constraint_values[5],
+        active_blocks=optuna_constraint_values[6],
+        friction=optuna_constraint_values[7],
+        trades=optuna_constraint_values[8],
+        crisis_mdd=optuna_constraint_values[9],
+        cagr=optuna_constraint_values[10],
+        sharpe_uplift=optuna_constraint_values[11],
+        crisis_cagr=optuna_constraint_values[12],
+        crisis_measured=_crisis_measured,
+    )
     return Layer2GateEvaluation(
         optuna_constraint_values=cast(tuple[float, ...], optuna_constraint_values),
         promotion_passed=promotion_passed,
         promotion_blocker=promotion_blocker,
         promotion_constraint_values=cast(tuple[float, ...], promotion_constraint_values),
+        constraint_vector=constraint_vector,
     )
