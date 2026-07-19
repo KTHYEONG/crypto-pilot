@@ -2570,7 +2570,7 @@ def assess_crisis_reliability(
     return evaluate_crisis_survival(
         all_metrics,
         max_mdd_abs=config.l2_max_mdd_abs * (1.0 - config.l2_deploy_mdd_margin),
-        min_cagr=config.l2_min_worst_fold_cagr,
+        min_cagr=config.l2_min_crisis_cagr,
         max_cvar_95=config.l2_max_cvar_95,
         min_symbols=config.l2_crisis_min_symbols,
         min_observation_days=config.l2_crisis_min_observation_days,
