@@ -11,6 +11,7 @@ import subprocess
 import time
 from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -272,6 +273,86 @@ def update_champion_store(
     )
     study.add_trial(trial)
     return True
+
+
+@dataclass(slots=True, frozen=True)
+class L2ChampionSnapshot:
+    schema_version: int
+    tf: str
+    search_space_hash: str
+    params: Mapping[str, Any]
+    growth_lcb_deployed: float
+    constraints: Mapping[str, float]
+    replay_fingerprint: str
+
+
+def load_l2_champion_snapshot(
+    *,
+    path: Path,
+    tf: str,
+    search_space: Mapping[str, Mapping[str, Any]],
+) -> L2ChampionSnapshot | None:
+    if not path.exists():
+        return None
+    try:
+        with open(path) as f:
+            raw = json.load(f)
+        if not isinstance(raw, dict):
+            _logger.warning("[L2-SNAPSHOT] invalid format, ignoring")
+            return None
+        if int(raw.get("schema_version", 0)) != 1:
+            _logger.warning("[L2-SNAPSHOT] unsupported schema_version=%s, ignoring", raw.get("schema_version"))
+            return None
+        if str(raw.get("tf", "")) != tf:
+            _logger.warning("[L2-SNAPSHOT] tf mismatch: stored=%s current=%s, ignoring", raw.get("tf"), tf)
+            return None
+        stored_hash = str(raw.get("search_space_hash", ""))
+        current_hash = _compute_search_space_hash(search_space)
+        if stored_hash != current_hash:
+            _logger.warning("[L2-SNAPSHOT] search_space_hash mismatch, ignoring")
+            return None
+        return L2ChampionSnapshot(
+            schema_version=int(raw["schema_version"]),
+            tf=str(raw["tf"]),
+            search_space_hash=str(raw["search_space_hash"]),
+            params=dict(raw.get("params", {})),
+            growth_lcb_deployed=float(raw.get("growth_lcb_deployed", float("-inf"))),
+            constraints=dict(raw.get("constraints", {})),
+            replay_fingerprint=str(raw.get("replay_fingerprint", "")),
+        )
+    except Exception as exc:
+        _logger.warning("[L2-SNAPSHOT] load failed: %s", exc)
+        return None
+
+
+def save_l2_champion_snapshot(
+    *,
+    path: Path,
+    snapshot: L2ChampionSnapshot,
+) -> None:
+    tmp = path.with_suffix(".tmp.json")
+    try:
+        tmp.parent.mkdir(parents=True, exist_ok=True)
+        with open(tmp, "w") as f:
+            json.dump({
+                "schema_version": snapshot.schema_version,
+                "tf": snapshot.tf,
+                "search_space_hash": snapshot.search_space_hash,
+                "params": dict(snapshot.params),
+                "growth_lcb_deployed": snapshot.growth_lcb_deployed,
+                "constraints": dict(snapshot.constraints),
+                "replay_fingerprint": snapshot.replay_fingerprint,
+            }, f, indent=2)
+        os.replace(str(tmp), str(path))
+    except Exception as exc:
+        _logger.error("[L2-SNAPSHOT] save failed: %s", exc)
+        with contextlib.suppress(Exception):
+            tmp.unlink(missing_ok=True)
+
+
+def _compute_search_space_hash(search_space: Mapping[str, Mapping[str, Any]]) -> str:
+    raw = json.dumps(search_space, sort_keys=True, ensure_ascii=True)
+    return hashlib.sha256(raw.encode()).hexdigest()[:16]
 
 
 def adr_sharpe_pool_study_name(tag: str) -> str:

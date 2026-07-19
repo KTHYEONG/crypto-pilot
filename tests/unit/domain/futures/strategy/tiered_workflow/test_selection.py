@@ -271,7 +271,8 @@ def test_select_layer2_champion_logs_replay_flip_warning(mocker, caplog):
     )
 
     assert result is not None
-    assert any("event=replay_flip" in r.message for r in caplog.records)
+    assert any("event=replay_parity_violation" in r.message for r in caplog.records)
+    assert result.blocker_reason != ""
 
 
 def test_select_layer2_champion_rejects_candidate_with_crisis_mdd_over_budget(mocker):
