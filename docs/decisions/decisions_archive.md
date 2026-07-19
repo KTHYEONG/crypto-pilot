@@ -2,6 +2,11 @@
 
 This file holds historical architecture decision records (ADRs) that have been pruned from the active window.
 
+## [2026-07-18] [TASK_L2_CRISIS_AWARE_OPTUNA_CONSTRAINT] [ADR_20260718_L2_CRISIS_AWARE_OPTUNA_CONSTRAINT]
+- **Context/Why:** 직전 L*_crisis 정적 leverage 상한 + 탐색공간 편입만으로는 위기 게이트 미해결. Optuna DB 직접 조회로 원인 확정: 방어 레버가 탐색공간엔 있지만 objective_l2_growth가 crisis-blind라 보상 신호가 없어 챔피언이 asymmetry=False/cooldown=0(전부 off)로 수렴, 위기 MDD 25.38%로 예산(21%) 초과 유지.
+- **Resolution/What:** 정상장 게이트(mdd_hybrid/cvar_95_hybrid 등)가 이미 쓰는 evaluate_layer2_gate의 optuna_constraint_values 9-tuple(TPESampler(constraints_func=layer2_constraints_from_trial)에 이미 배선된 검증된 인프라)에 10번째 슬롯으로 crisis_mdd_hybrid 추가. trial마다 자신의 실제 config·leverage로 crisis window를 재시뮬레이션(_load_crisis_replay_context가 L1 확정 시 1회만 IO, trial마다 _run_awf_simulation만 재실행)해 계산 — 정적 백스톱(l_crisis)과 달리 trial-loyal.
+- **Impact:** 200-trial 프로덕션 replay 실측: 방어 레버 사용률이 asymmetry ON 0/200→154/200, cooldown>0 0/200→198/200으로 반전, 챔피언의 10번째 제약값=-0.0424(음수=예산 내, crisis MDD≈16.8%)로 제약 자체는 실제로 만족됨 — 메커니즘은 설계대로 작동. 그러나 이 챔피언의 정상장 CAGR+14.9%로 게이트 자체가 BLOCKED(cagr) — objective가 원시 CAGR/growth를 직접 보상하지 않는 _shape_efficiency_l2_objective(Sortino 기반, scale-invariant) 설계와 신규 안전 제약이 만나 과도하게 보수적인 지점에 수렴함을 확인. /check PASS.
+
 ## [2026-07-18] [TASK_L2_CRISIS_LEVERAGE_CEILING] [ADR_20260718_L2_CRISIS_LEVERAGE_CEILING]
 - **Context/Why:** 위기 재현성 게이트가 계속 stress_tested_fail. 3개 opt-in 방어 레버(worst_fold/비대칭/쿨다운) 조합 실측 결과 champion마다 MDD가 21.75~26.52%로 크게 흔들려, 진짜 지배 변수가 leverage 계산(calibrate_deployment_leverage)이 crisis window를 전혀 안 본다는 점임을 확인.
 - **Resolution/What:** _resolve_safety_ceiling에 worst_fold와 동일 패턴의 crisis_rets 후보(l_crisis) 추가, compute_crisis_unit_returns(pipeline.py)가 L1 확정 후 1회만 계산해 전 trial에 재사용. l2_regime_long_short_asymmetry_enabled/bear·crisis_long_extra_mult/cap_release_cooldown_bars/crisis_gross_cap 5개 파라미터를 L2_SEARCH_SPACE에 신규 편입(전역 기본값은 no-op 유지, LIMIT-01 미해결로 하드코딩 금지).
