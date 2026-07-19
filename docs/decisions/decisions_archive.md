@@ -2,6 +2,11 @@
 
 This file holds historical architecture decision records (ADRs) that have been pruned from the active window.
 
+## [2026-07-17] [L2_CRISIS_ASYMMETRIC_LONG_SHORT_CAP] [ADR_20260717_L2_CRISIS_ASYMMETRIC_LONG_SHORT_CAP]
+- **Context/Why:** worst_fold 게이트 기본 활성화(ADR_20260717_L2_CRISIS_LEVERAGE_SAFETY_DEFAULT) 후에도 위기 재현성 게이트가 stress_tested_fail 유지. 실측 진단 결과 기존 apply_regime_risk_cap(방향-무관 대칭 축소)가 이미 적용된 이후에도 LUNA/FTX 위기 replay에서 롱 레그 realized price -11.29% vs 숏 레그 +3.59%로 손실이 롱에 집중됨을 확인(bars_long=683, bars_short=786로 빈도는 균형). 숏이 부재한 게 아니라 롱의 손실 크기가 숏의 이익 크기의 3배 이상인 방향 비대칭이 진짜 문제.
+- **Resolution/What:** l2_meta.py에 apply_asymmetric_long_short_regime_cap 순수함수 추가 — bear/crisis 레짐에서 롱 레그에만 추가 축소 배수 적용, 숏 레그는 그대로 유지. Layer2AllocationConfig에 opt-in 필드 3종(l2_regime_long_short_asymmetry_enabled, l2_regime_bear_long_extra_mult, l2_regime_crisis_long_extra_mult, 기본값 전부 no-op) 추가, from_mapping은 SSOT(_dc.<field>) fallback 패턴 준수. awf_sim.py의 기존 apply_regime_risk_cap 호출 직후에 배선.
+- **Impact:** 실측 스윕(scratch/sweep_crisis_asymmetric_cap.py, 동일 champion 고정, LUNA/FTX): long_extra_mult를 1.0(off)→0.0(롱 완전차단)까지 스윕한 결과 CAGR은 -28.04%→-14.19%로 대폭 개선(가설 확인)했으나 MDD는 46.1~46.9%로 사실상 평평, mult=0.0에서 오히려 소폭 악화. 위기 게이트의 실제 지배적 제약(MDD<=21% 예산, 현재 2.2배 초과)을 이 레버가 전혀 해소하지 못함 — 전 구간 stress_tested_fail 유지. 병목이 CAGR에서 MDD로 좁혀짐, MDD 드라이버(peak-to-trough 구간별 롱/숏/비용 분해)는 별도 후속 진단 필요. 기본값은 [LIMIT-01](두 독립 위기 윈도우 모두 개선 확인 전까지) 비활성 유지. /check PASS(spec compliance 포함).
+
 ## [2026-07-17] [L2_CRISIS_LEVERAGE_SAFETY_DEFAULT] [ADR_20260717_L2_CRISIS_LEVERAGE_SAFETY_DEFAULT]
 - **Context/Why:** L2 정상장 스코어카드는 PASS(CAGR +92.8%)했으나 위기 재현성 게이트(LUNA/FTX 2022)가 stress_tested_fail로 production 승격을 상시 차단(MDD 55.47%>21% 예산, CAGR -38.44%<-5% 하한). 원인은 calibrate_deployment_leverage의 L*가 fit-leg(2025 평온장) 단일 경로에만 맞춰지고, 이미 구현된 worst_fold 안전장치가 opt-in 비활성(기본 False)이었기 때문. 추가로 from_mapping이 파라미터 키 부재 시 SSOT(dataclass 기본값) 대신 하드코딩된 False로 침묵 복귀하는 버그가 함께 확인됨.
 - **Resolution/What:** Layer2AllocationConfig.l2_deploy_worst_fold_gate_enabled 기본값을 True로 전환하고, from_mapping의 fallback을 하드코딩 False에서 _dc.l2_deploy_worst_fold_gate_enabled(SSOT) 참조로 수정. kelly_safety_fraction은 이 시스템의 극소 mu에 과도 보수적(quarter-Kelly가 거의 항상 L*를 1.0으로 강제)이라 opt-in 유지, 기본 활성화 보류.
