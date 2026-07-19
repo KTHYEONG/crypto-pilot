@@ -9,9 +9,11 @@ from typing import Any
 
 import numpy as np
 import optuna
+from numpy.typing import NDArray
 
 from src.domain.futures.optimization.evaluator import calc_n_trials_eff_entropy
 from src.domain.futures.optimization.workflow import (
+    compute_crisis_mdd_budget,
     evaluate_l2_trial_cached,
     layer2_constraints_from_trial,
 )
@@ -250,6 +252,8 @@ def select_layer2_champion(
     caps: Any,
     min_dsr: float = 0.60,
     prebuilt_cache: Any | None = None,
+    crisis_rets: NDArray[np.float64] | None = None,
+    crisis_replay_ctx: Any | None = None,
 ) -> Layer2StudyResult:
     """feasible completed trials 중 growth_lcb(objective) 최상위 챔피언 선정 및 검증.
 
@@ -259,6 +263,11 @@ def select_layer2_champion(
     [ADR_20260718_L2_DEPLOYMENT_MARGIN_CAGR_GATE] gate-passed 후보 replay 검증을
     top-3 고정에서 fallback_limit까지 확장해, 희소한 gate-pass trial이 replay
     단계에서 부당 탈락하지 않도록 커버리지를 넓혔다.
+
+    [ADR_20260719_L2_CHAMPION_SELECTION_CRISIS_BLINDNESS_FIX] crisis_rets/
+    crisis_replay_ctx가 지정되면 replay 후보(fallback_limit개)에 한해
+    compute_crisis_mdd_budget로 crisis MDD를 재계산해 gate 판정에 반영한다 —
+    이전에는 champion 선정이 crisis 데이터를 전혀 참조하지 못했다.
     """
     complete_trials = [
         t
@@ -446,6 +455,15 @@ def select_layer2_champion(
             "sharpe_hac_baseline_ew",
             "sharpe_hac_baseline",
         )
+        _crisis_mdd_hybrid, _crisis_mdd_budget = compute_crisis_mdd_budget(
+            crisis_replay_ctx=crisis_replay_ctx,
+            config=candidate_config,
+            caps=caps,
+            tf=tf,
+            leverage=float(getattr(candidate_evaluation, "deploy_leverage", 1.0)),
+            bars_per_year=bars_per_year,
+            trial_number=int(candidate.number),
+        )
         gate = evaluate_layer2_gate(
             deployment_failed=bool(candidate_evaluation.constraint_values[0] > 0.0),
             support_leak_count=0,
@@ -474,6 +492,8 @@ def select_layer2_champion(
                 None,
             ),
             config=candidate_config,
+            crisis_mdd_hybrid=_crisis_mdd_hybrid,
+            crisis_mdd_budget=_crisis_mdd_budget,
         )
         deployable_score = _score_layer2_deployable_fallback(
             candidate_evaluation,
