@@ -639,6 +639,259 @@ def test_evaluate_l2_trial_passes_fold_rets_hybrid_to_leverage_calibration() -> 
     assert mock_calibrate.call_args.kwargs["oos_worst_fold_cagr_floor"] == pytest.approx(-0.05)
 
 
+def _make_fake_sim_for_active_block(
+    rets_len: int = 500,
+    turnovers: list[float] | None = None,
+) -> SimpleNamespace:
+    """Reusable fixture for active_block_count tests."""
+    rng = np.random.default_rng(42)
+    rets = rng.normal(0.001, 0.02, rets_len).tolist()
+    if turnovers is None:
+        turnovers = [0.2, 0.0, 0.15]  # 2 active out of 3 blocks
+    return SimpleNamespace(
+        rets_hybrid=rets,
+        rets_baseline=rets,
+        rets_baseline_ew=rets,
+        fit_rets_hybrid=tuple(rets[:100]),
+        all_turnovers=turnovers,
+        all_gross_exposures=[0.4] * len(turnovers),
+        all_net_exposures=[0.1] * len(turnovers),
+        friction_pass_total=1,
+        signal_total=1,
+        support_leak_count=0,
+        total_cost_hybrid=0.0,
+        cap_saturation_count=0,
+        rebalance_count=1,
+        trade_count=3,
+        fold_rets_hybrid=([0.02, 0.01], [-0.05, -0.03]),
+        block_rets_hybrid=([0.02, 0.01],),
+        block_rets_baseline=([0.0, 0.0],),
+        fold_attributions=(),
+        fold_selected_symbols=(("BTC",),),
+        policy_effect_by_fold=(),
+    )
+
+
+def test_evaluate_l2_trial_active_block_count_nonzero_when_lightweight_true() -> None:
+    """[SPEC_L2_ACTIVE_BLOCK_COUNT_LIGHTWEIGHT_FIX] lightweight=True에서도
+    active_block_count가 올바르게 계산됨을 검증 — all_turnovers에 활성 구간 포함."""
+    fake_sim = _make_fake_sim_for_active_block()
+    fake_deployment = SimpleNamespace(cagr=0.12, mdd=0.08, cvar_95=0.03, scaled_rets=np.zeros(500))
+    gate_result = SimpleNamespace(optuna_constraint_values=(-1.0,) * 18, promotion_passed=True)
+
+    with (
+        patch(
+            "src.domain.futures.strategy.tiered_workflow.awf_sim._run_awf_simulation",
+            return_value=fake_sim,
+        ),
+        patch(
+            "src.domain.futures.strategy.tiered_workflow.risk_deployment.apply_deployment",
+            return_value=fake_deployment,
+        ),
+        patch(
+            "src.domain.futures.strategy.tiered_workflow.risk_deployment.calibrate_deployment_leverage",
+            return_value=(2.0, "mdd", 0.0),
+        ),
+        patch(
+            "src.domain.futures.strategy.tiered_workflow.risk_deployment.compute_layer2_fold_diagnostics",
+            return_value=SimpleNamespace(
+                fold_pass_ratio=1.0,
+                recent_fold_passed=True,
+                recent_fold_sharpe=0.8,
+                recent_fold_cagr=0.04,
+                recent_fold_mdd=0.02,
+                latest_to_median_cagr=0.01,
+                fold_deployed_cagrs=(0.02, -0.10),
+                fold_selected_symbols=(("BTC",),),
+                fold_unit_sharpes=(0.5, -0.2),
+                fold_unit_cagrs=(0.02, -0.10),
+                fold_unit_mdds=(0.01, 0.05),
+                fold_unit_sortinos=(0.3, -0.1),
+            ),
+        ),
+        patch(
+            "src.domain.futures.strategy.tiered_workflow.l2_gate.evaluate_layer2_gate",
+            return_value=gate_result,
+        ) as mock_gate,
+    ):
+        config = Layer2AllocationConfig(l2_min_worst_fold_cagr=-0.05)
+        evaluate_l2_trial(
+            cache=MagicMock(),
+            signal_batch=MagicMock(),
+            aligned=MagicMock(),
+            awf_folds=(MagicMock(),),
+            config=config,
+            caps=MagicMock(),
+            tf="4h",
+            lightweight=True,
+        )
+
+    assert mock_gate.call_args is not None
+    abc = mock_gate.call_args.kwargs["active_block_count"]
+    assert abc > 0, f"active_block_count should be > 0, got {abc}"
+
+
+def test_evaluate_l2_trial_active_block_count_matches_between_lightweight_and_full() -> None:
+    """[SPEC_L2_ACTIVE_BLOCK_COUNT_LIGHTWEIGHT_FIX] 동일 입력에서 lightweight=True와
+    lightweight=False의 active_block_count가 일치함을 검증([LIMIT-01]/[LIMIT-02])."""
+    fake_sim = _make_fake_sim_for_active_block()
+    fake_deployment = SimpleNamespace(cagr=0.12, mdd=0.08, cvar_95=0.03, scaled_rets=np.zeros(500))
+    gate_result = SimpleNamespace(optuna_constraint_values=(-1.0,) * 18, promotion_passed=True)
+
+    abc_values: list[int] = []
+
+    for lightweight in (True, False):
+        with (
+            patch(
+                "src.domain.futures.strategy.tiered_workflow.awf_sim._run_awf_simulation",
+                return_value=fake_sim,
+            ),
+            patch(
+                "src.domain.futures.strategy.tiered_workflow.risk_deployment.apply_deployment",
+                return_value=fake_deployment,
+            ),
+            patch(
+                "src.domain.futures.strategy.tiered_workflow.risk_deployment.calibrate_deployment_leverage",
+                return_value=(2.0, "mdd", 0.0),
+            ),
+            patch(
+                "src.domain.futures.strategy.tiered_workflow.risk_deployment.compute_layer2_fold_diagnostics",
+                return_value=SimpleNamespace(
+                    fold_pass_ratio=1.0,
+                    recent_fold_passed=True,
+                    recent_fold_sharpe=0.8,
+                    recent_fold_cagr=0.04,
+                    recent_fold_mdd=0.02,
+                    latest_to_median_cagr=0.01,
+                    fold_deployed_cagrs=(0.02, -0.10),
+                    fold_selected_symbols=(("BTC",),),
+                    fold_unit_sharpes=(0.5, -0.2),
+                    fold_unit_cagrs=(0.02, -0.10),
+                    fold_unit_mdds=(0.01, 0.05),
+                    fold_unit_sortinos=(0.3, -0.1),
+                ),
+            ),
+            patch(
+                "src.domain.futures.strategy.tiered_workflow.l2_gate.evaluate_layer2_gate",
+                return_value=gate_result,
+            ) as mock_gate,
+        ):
+            config = Layer2AllocationConfig(l2_min_worst_fold_cagr=-0.05)
+            evaluate_l2_trial(
+                cache=MagicMock(),
+                signal_batch=MagicMock(),
+                aligned=MagicMock(),
+                awf_folds=(MagicMock(),),
+                config=config,
+                caps=MagicMock(),
+                tf="4h",
+                lightweight=lightweight,
+            )
+            abc_values.append(int(mock_gate.call_args.kwargs["active_block_count"]))
+
+    assert abc_values[0] > 0, f"lightweight=True active_block_count should be > 0, got {abc_values[0]}"
+    assert abc_values[0] == abc_values[1], (
+        f"active_block_count mismatch: lightweight=True={abc_values[0]} != lightweight=False={abc_values[1]}"
+    )
+
+
+def test_evaluate_l2_trial_active_block_count_zero_when_no_turnover_activity() -> None:
+    """[SPEC_L2_ACTIVE_BLOCK_COUNT_LIGHTWEIGHT_FIX] 모든 turnover가 0이면
+    active_block_count가 0이어야 함 — lightweight 여부와 무관."""
+    fake_sim = _make_fake_sim_for_active_block(turnovers=[0.0, 0.0, 0.0])
+    fake_deployment = SimpleNamespace(cagr=0.12, mdd=0.08, cvar_95=0.03, scaled_rets=np.zeros(500))
+    gate_result = SimpleNamespace(optuna_constraint_values=(-1.0,) * 18, promotion_passed=True)
+
+    with (
+        patch(
+            "src.domain.futures.strategy.tiered_workflow.awf_sim._run_awf_simulation",
+            return_value=fake_sim,
+        ),
+        patch(
+            "src.domain.futures.strategy.tiered_workflow.risk_deployment.apply_deployment",
+            return_value=fake_deployment,
+        ),
+        patch(
+            "src.domain.futures.strategy.tiered_workflow.risk_deployment.calibrate_deployment_leverage",
+            return_value=(2.0, "mdd", 0.0),
+        ),
+        patch(
+            "src.domain.futures.strategy.tiered_workflow.risk_deployment.compute_layer2_fold_diagnostics",
+            return_value=SimpleNamespace(
+                fold_pass_ratio=1.0,
+                recent_fold_passed=True,
+                recent_fold_sharpe=0.8,
+                recent_fold_cagr=0.04,
+                recent_fold_mdd=0.02,
+                latest_to_median_cagr=0.01,
+                fold_deployed_cagrs=(0.02, -0.10),
+                fold_selected_symbols=(("BTC",),),
+                fold_unit_sharpes=(0.5, -0.2),
+                fold_unit_cagrs=(0.02, -0.10),
+                fold_unit_mdds=(0.01, 0.05),
+                fold_unit_sortinos=(0.3, -0.1),
+            ),
+        ),
+        patch(
+            "src.domain.futures.strategy.tiered_workflow.l2_gate.evaluate_layer2_gate",
+            return_value=gate_result,
+        ) as mock_gate,
+    ):
+        config = Layer2AllocationConfig(l2_min_worst_fold_cagr=-0.05)
+        evaluate_l2_trial(
+            cache=MagicMock(),
+            signal_batch=MagicMock(),
+            aligned=MagicMock(),
+            awf_folds=(MagicMock(),),
+            config=config,
+            caps=MagicMock(),
+            tf="4h",
+            lightweight=True,
+        )
+
+    assert mock_gate.call_args is not None
+    abc = mock_gate.call_args.kwargs["active_block_count"]
+    assert abc == 0, f"active_block_count should be 0 for all-zero turnovers, got {abc}"
+
+
+def test_layer2_constraints_from_trial_active_block_count_filter() -> None:
+    """[SPEC_L2_ACTIVE_BLOCK_COUNT_LIGHTWEIGHT_FIX] layer2_constraints_from_trial이
+    active_block_count constraint를 올바르게 적용해 feasible_trials 필터링이
+    정상 작동함을 검증."""
+    # active_block_count 통과 trial (index 6 < 0)
+    pass_trial = cast(
+        FrozenTrial,
+        SimpleNamespace(
+            number=0,
+            state=optuna.trial.TrialState.COMPLETE,
+            value=0.5,
+            user_attrs={
+                "l2_optuna_constraint_values": tuple([-1.0] * 12),  # 전부 통과
+                "l2_block_log_growth_signature": "abc",
+                "sharpe_hac_hybrid": 0.8,
+            },
+        ),
+    )
+    # active_block_count 위반 trial (index 6 > 0)
+    fail_trial = cast(
+        FrozenTrial,
+        SimpleNamespace(
+            number=1,
+            state=optuna.trial.TrialState.COMPLETE,
+            value=0.6,
+            user_attrs={
+                "l2_optuna_constraint_values": tuple([-1.0] * 6 + [3.0] + [-1.0] * 5),  # 슬롯[6] 위반
+                "l2_block_log_growth_signature": "abc",
+                "sharpe_hac_hybrid": 0.7,
+            },
+        ),
+    )
+    trials = [pass_trial, fail_trial]
+    feasible = [t for t in trials if all(c <= 0.0 for c in layer2_constraints_from_trial(t))]
+    assert len(feasible) == 1
+    assert feasible[0].number == 0
+
+
 def test_objective_l2_growth_suggests_l2_deploy_mdd_margin_from_search_space() -> None:
     from src.domain.futures.optimization.l2_search_space import L2_SEARCH_SPACE
 
