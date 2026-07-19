@@ -2,6 +2,11 @@
 
 This file holds historical architecture decision records (ADRs) that have been pruned from the active window.
 
+## [2026-07-18] [TASK_L2_REGIME_SEVERITY_SIGNAL_REDESIGN] [ADR_20260718_L2_REGIME_SEVERITY_SIGNAL_REDESIGN]
+- **Context/Why:** 직전 crisis-aware Optuna 제약이 방어 레버를 실제로 작동시켰음에도 정상장이 붕괴한 근본 원인을 역추적. 실측: 6→3state 압축맵이 transition(방향 불확실, 정상장의 31.6%)과 crash(CUSUM 진짜 급변, 8.5%)를 동일한 'crisis' 버킷(40.2%)으로 합산 — crisis 라벨의 79%가 실은 단순 횡보. 추가로 유일한 위기 검증 데이터(LUNA/FTX)가 BTC 원시가격 데이터 시작일(2022-04-01)과 우연히 일치해 인과적 통계가 cold-start 상태(CUSUM 발동률이 정상장 8.5% vs 위기장 8.2%로 통계적 구분 불가)임을 확인.
+- **Resolution/What:** MarketRegimeContext에 vol_scale_1d/crisis_active_1d 신규 노출(이미 계산되는 값 재사용, 추가 비용 0), compute_risk_severity_code(market_regime.py) 신설 — 방향 무관, 0=calm/1=elevated(causal quantile 기반 실현변동성)/2=crash(CUSUM). Layer2AllocationConfig에 opt-in 3필드(l2_regime_severity_gating_enabled 기본 False 등) 추가, awf_sim.py의 cap-gating 호출부(apply_regime_risk_cap/apply_asymmetric_long_short_regime_cap)를 조건부 분기 — 기존 3-state 경로 완전 보존.
+- **Impact:** 실제 구현 함수로 직접 재측정: 정상장 'crash'(구 crisis) 점유율 40.2%→8.5%(CUSUM 단독 수준까지 정확히 수렴), 위기장도 33.1%→7.9%. 200-trial 프로덕션 챔피언 고정 A/B: severity_gating on 전환 시 평균 gross exposure 0.3359→0.3852(+14.7%, 정상장에서 불필요한 억제가 풀리는 방향 확인). 다만 이번 챔피언도 정상장 CAGR+20.2%로 게이트(cagr) 미달 — 레짐 신호 결함은 해소했으나 objective 설계(성장 미보상) 문제가 잔존, 최종 CAGR/MDD 정밀 재검증은 미완료. /check PASS.
+
 ## [2026-07-18] [TASK_L2_CRISIS_AWARE_OPTUNA_CONSTRAINT] [ADR_20260718_L2_CRISIS_AWARE_OPTUNA_CONSTRAINT]
 - **Context/Why:** 직전 L*_crisis 정적 leverage 상한 + 탐색공간 편입만으로는 위기 게이트 미해결. Optuna DB 직접 조회로 원인 확정: 방어 레버가 탐색공간엔 있지만 objective_l2_growth가 crisis-blind라 보상 신호가 없어 챔피언이 asymmetry=False/cooldown=0(전부 off)로 수렴, 위기 MDD 25.38%로 예산(21%) 초과 유지.
 - **Resolution/What:** 정상장 게이트(mdd_hybrid/cvar_95_hybrid 등)가 이미 쓰는 evaluate_layer2_gate의 optuna_constraint_values 9-tuple(TPESampler(constraints_func=layer2_constraints_from_trial)에 이미 배선된 검증된 인프라)에 10번째 슬롯으로 crisis_mdd_hybrid 추가. trial마다 자신의 실제 config·leverage로 crisis window를 재시뮬레이션(_load_crisis_replay_context가 L1 확정 시 1회만 IO, trial마다 _run_awf_simulation만 재실행)해 계산 — 정적 백스톱(l_crisis)과 달리 trial-loyal.

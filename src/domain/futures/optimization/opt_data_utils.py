@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import concurrent.futures
+import json
 import logging
 import math
 import os
+from collections.abc import Sequence
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -644,6 +647,45 @@ def _resolve_timestamp_column(df: pd.DataFrame) -> str | None:
     return None
 
 
+
+
+@dataclass(slots=True, frozen=True)
+class _DepFileSignature:
+    mtime_ns: int
+    size_bytes: int
+
+
+def _capture_dep_signatures(dep_paths: Sequence[Path]) -> dict[str, list[int]]:
+    result: dict[str, list[int]] = {}
+    for dep in dep_paths:
+        if dep.exists():
+            st = dep.stat()
+            result[str(dep)] = [st.st_mtime_ns, st.st_size]
+    return result
+
+
+def _enriched_signature_sidecar_path(enriched_path: Path) -> Path:
+    return enriched_path.with_suffix(".sig.json")
+
+
+def _write_enriched_cache_signature(enriched_path: Path, dep_paths: Sequence[Path]) -> None:
+    sig_path = _enriched_signature_sidecar_path(enriched_path)
+    sig_path.write_text(json.dumps(_capture_dep_signatures(dep_paths)))
+
+
+def _is_enriched_cache_fresh(enriched_path: Path, dep_paths: Sequence[Path]) -> bool:
+    if not enriched_path.exists():
+        return False
+    sig_path = _enriched_signature_sidecar_path(enriched_path)
+    if not sig_path.exists():
+        enriched_mtime = enriched_path.stat().st_mtime
+        return all(not d.exists() or d.stat().st_mtime <= enriched_mtime for d in dep_paths)
+    try:
+        stored: object = json.loads(sig_path.read_text())
+    except Exception:
+        return False
+    return _capture_dep_signatures(dep_paths) == stored
+
 def load_single_symbol_data(
     sym: str,
     tf: str,
@@ -688,16 +730,14 @@ def load_single_symbol_data(
             from src.core.settings import FuturesStorageLayout
 
             enriched_path = FuturesStorageLayout.get_enriched_path(sym, tf_l)
-            if enriched_path.exists():
-                deps = [
-                    FuturesStorageLayout.get_ohlcv_path(sym, tf_l),
-                    FuturesStorageLayout.get_funding_path(sym),
-                    FuturesStorageLayout.get_metrics_path(sym),
-                ]
-                enriched_mtime = enriched_path.stat().st_mtime
-                if all(not dep.exists() or dep.stat().st_mtime <= enriched_mtime for dep in deps):
-                    # [P1-B] predicate pushdown via row-group statistics.
-                    # timestamp column is int64 unix-ms, sorted at write time (wide_df.to_parquet).
+            deps = [
+                FuturesStorageLayout.get_ohlcv_path(sym, tf_l),
+                FuturesStorageLayout.get_funding_path(sym),
+                FuturesStorageLayout.get_metrics_path(sym),
+            ]
+            if enriched_path.exists() and _is_enriched_cache_fresh(enriched_path, deps):
+                # [P1-B] predicate pushdown via row-group statistics.
+                # timestamp column is int64 unix-ms, sorted at write time (wide_df.to_parquet).
                     # filters skip row-groups outside [start_ms, end_ms] → reduced decode.
                     # Fallback: full-read + mask when filters raises (e.g. legacy pyarrow engine).
                     start_ms = int(req_start_dt.value // 1_000_000)
@@ -810,12 +850,7 @@ def load_single_symbol_data(
                         df[_mc] = pd.to_numeric(df[_mc], errors="coerce")
 
                 # Save enriched cache (full date range) for future runs
-                from src.core.settings import FuturesStorageLayout
-
-                raw_parquet_path = FuturesStorageLayout.get_ohlcv_path(sym, tf_l)
-                enriched_stale = not enriched_path.exists() or (
-                    raw_parquet_path.exists() and enriched_path.stat().st_mtime < raw_parquet_path.stat().st_mtime
-                )
+                enriched_stale = not _is_enriched_cache_fresh(enriched_path, deps)
                 if enriched_stale:
                     try:
                         wide_df = collector.collect_and_save(sym, tf_l, "1970-01-01", "2099-12-31", fetch_network=False)
@@ -865,6 +900,7 @@ def load_single_symbol_data(
                                 if col in wide_df_to_save.columns:
                                     wide_df_to_save[col] = wide_df_to_save[col].astype("float32")
                             wide_df_to_save.to_parquet(enriched_path, index=False, compression="zstd")
+                            _write_enriched_cache_signature(enriched_path, deps)
                     except Exception as _ec:
                         _logger.debug("[%s] Failed to save enriched cache: %s", sym, _ec)
 
@@ -1010,8 +1046,7 @@ def load_futures_data_maps_for_symbols(
                     FuturesStorageLayout.get_funding_path(sym),
                     FuturesStorageLayout.get_metrics_path(sym),
                 ]
-                enriched_mtime = enriched_path.stat().st_mtime
-                if all(not d.exists() or d.stat().st_mtime <= enriched_mtime for d in deps):
+                if _is_enriched_cache_fresh(enriched_path, deps):
                     sym_paths[tf_l] = enriched_path
                     continue
             all_cache_hit = False
