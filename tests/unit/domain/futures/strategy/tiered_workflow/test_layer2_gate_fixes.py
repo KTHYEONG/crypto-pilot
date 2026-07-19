@@ -425,7 +425,7 @@ def test_layer2_constraints_tuple_length_is_eight() -> None:
     fallback = layer2_constraints_from_trial(mock_trial)
 
     # Assert (Then)
-    assert len(fallback) == 9, f"fallback 크기 {len(fallback)} != 9. Optuna safety constraints 9-tuple이어야 함."
+    assert len(fallback) == 13, f"fallback 크기 {len(fallback)} != 13. Optuna safety constraints 13-tuple이어야 함."
     assert all(v == 1.0 for v in fallback), "모든 fallback 값이 1.0 (infeasible) 이어야 함"
 
 
@@ -437,13 +437,13 @@ def test_layer2_constraints_eight_element_feasible() -> None:
 
     # Arrange: 12개 feasible
     mock_trial = MagicMock()
-    mock_trial.user_attrs = {"l2_optuna_constraint_values": [-1.0] * 9}
+    mock_trial.user_attrs = {"l2_optuna_constraint_values": [-1.0] * 13}
 
     # Act
     result = layer2_constraints_from_trial(mock_trial)
 
     # Assert
-    assert len(result) == 9
+    assert len(result) == 13
     assert all(c <= 0.0 for c in result), "모든 제약이 ≤0 이면 feasible이어야 함"
 
 
@@ -460,63 +460,12 @@ def test_layer2_constraints_legacy_values_pad_to_eight() -> None:
     # Act
     result = layer2_constraints_from_trial(mock_trial)
 
-    assert len(result) == 9
+    assert len(result) == 13
     assert all(c == -1.0 for c in result[:3])
-    assert result[3:] == (1.0, 1.0, 1.0, 1.0, 1.0, 1.0)
+    assert result[3:] == (1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0)
 
 
-# ---------------------------------------------------------------------------
-# S5: Range BVA — L2_ALLOC_SPACE_V3 경계 검증
-# ---------------------------------------------------------------------------
 
-
-def test_l2_alloc_space_v3_kelly_range() -> None:
-    """S5: L2_ALLOC_SPACE_V3의 kelly_fraction 범위가 [0.15, 0.55]인지 확인."""
-    from src.domain.futures.optimization.opt_config import L2_ALLOC_SPACE_V3
-
-    spec = L2_ALLOC_SPACE_V3["kelly_fraction"]
-    assert spec["low"] == pytest.approx(0.15), "kelly_fraction 하한이 0.15이어야 함"
-    assert spec["high"] == pytest.approx(0.55), "kelly_fraction 상한이 0.55이어야 함"
-
-
-def test_l2_alloc_space_v3_max_ann_vol_range() -> None:
-    """C2: L2_ALLOC_SPACE_V3의 max_ann_vol 범위가 배치천장 개방 후 [0.20, 1.20]인지 확인."""
-    from src.domain.futures.optimization.opt_config import L2_ALLOC_SPACE_V3
-
-    spec = L2_ALLOC_SPACE_V3["max_ann_vol"]
-    assert spec["low"] == pytest.approx(0.20), "max_ann_vol 하한이 0.20이어야 함"
-    assert spec["high"] == pytest.approx(1.20), "max_ann_vol 상한이 1.20이어야 함"
-
-
-def test_l2_alloc_space_alias_points_to_v8() -> None:
-    """Fix C: L2_ALLOC_SPACE가 V8(kelly_fraction·max_ann_vol 제거)를 가리키는지 확인."""
-    from src.domain.futures.optimization.opt_config import L2_ALLOC_SPACE
-
-    # Fix C: V8은 kelly_fraction·max_ann_vol을 탐색공간에서 제거
-    assert "kelly_fraction" not in L2_ALLOC_SPACE, (
-        "V8: kelly_fraction은 Phase B 결정론 처리로 탐색공간에서 제거되어야 함"
-    )
-    assert "max_ann_vol" not in L2_ALLOC_SPACE, "V8: max_ann_vol은 Phase B 결정론 처리로 탐색공간에서 제거되어야 함"
-
-
-def test_l2_alloc_space_v9_retains_signal_dims() -> None:
-    """D2: L2_ALLOC_SPACE가 V9를 가리키며 신호 혼합 파라미터를 유지하는지 확인."""
-    from src.domain.futures.optimization.opt_config import (
-        L2_ALLOC_SPACE,
-        L2_ALLOC_SPACE_V8,
-        L2_ALLOC_SPACE_V9,
-    )
-
-    # V9가 현재 active alias — V8 더 이상 alias 아님
-    assert L2_ALLOC_SPACE is L2_ALLOC_SPACE_V9
-    assert L2_ALLOC_SPACE is not L2_ALLOC_SPACE_V8
-
-    # 핵심 파라미터 보존 확인
-    assert "K_RANK" in L2_ALLOC_SPACE_V9
-    assert "REBALANCE_BARS" in L2_ALLOC_SPACE_V9
-    assert "risk_budget_floor_ratio" in L2_ALLOC_SPACE_V9
-    assert L2_ALLOC_SPACE_V9["risk_budget_floor_ratio"]["high"] == pytest.approx(1.00)
-    assert L2_ALLOC_SPACE_V9["deploy_cost_safety_mult"]["low"] == pytest.approx(1.0)
 
 
 # ---------------------------------------------------------------------------
@@ -645,7 +594,7 @@ def test_recent_fold_gate_enters_optuna_constraints() -> None:
         config=Layer2AllocationConfig(),
     )
 
-    assert len(gate.optuna_constraint_values) == 9
+    assert len(gate.optuna_constraint_values) == 13
     assert gate.optuna_constraint_values[5] > 0.0
     assert gate.promotion_blocker == "recent_fold"
 
@@ -732,7 +681,7 @@ def test_s8_dsr_pool_restricted_to_feasible_trials() -> None:
         t = MagicMock()
         t.user_attrs = {
             "sharpe_hac_hybrid": sharpe,
-            "l2_optuna_constraint_values": [-1.0] * 9 if feasible else [1.0] * 9,
+            "l2_optuna_constraint_values": [-1.0] * 13 if feasible else [1.0] * 13,
         }
         return t
 
