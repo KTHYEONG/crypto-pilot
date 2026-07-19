@@ -13,7 +13,7 @@ from numpy.typing import NDArray
 
 from src.domain.futures.optimization.evaluator import calc_n_trials_eff_entropy
 from src.domain.futures.optimization.workflow import (
-    compute_crisis_mdd_budget,
+    compute_crisis_replay_budget,
     evaluate_l2_trial_cached,
     layer2_constraints_from_trial,
 )
@@ -455,7 +455,7 @@ def select_layer2_champion(
             "sharpe_hac_baseline_ew",
             "sharpe_hac_baseline",
         )
-        _crisis_mdd_hybrid, _crisis_mdd_budget = compute_crisis_mdd_budget(
+        _crisis_budget = compute_crisis_replay_budget(
             crisis_replay_ctx=crisis_replay_ctx,
             config=candidate_config,
             caps=caps,
@@ -492,8 +492,10 @@ def select_layer2_champion(
                 None,
             ),
             config=candidate_config,
-            crisis_mdd_hybrid=_crisis_mdd_hybrid,
-            crisis_mdd_budget=_crisis_mdd_budget,
+            crisis_mdd_hybrid=_crisis_budget.mdd_hybrid,
+            crisis_mdd_budget=_crisis_budget.mdd_budget,
+            crisis_cagr_hybrid=_crisis_budget.cagr_hybrid,
+            crisis_cagr_floor=_crisis_budget.cagr_floor,
         )
         deployable_score = _score_layer2_deployable_fallback(
             candidate_evaluation,
@@ -609,6 +611,16 @@ def select_layer2_champion(
             else "non_deterministic_replay"
         )
         _logger.error("[L2-SELECTION] No feasible candidate found within fallback window (reason=%s)", reason)
+        _logger.info(
+            "[ALGO] event=champion_regime_levers trial=%d fallback=True "
+            "policy_mode=%s hard_block=%s asymmetry=%s severity_gating=%s crisis_gross_cap=%.2f",
+            diagnostic_trial.number,
+            diagnostic_trial.params.get("l2_regime_policy_mode", "N/A"),
+            diagnostic_trial.params.get("l2_regime_hard_block_enabled", "N/A"),
+            diagnostic_trial.params.get("l2_regime_long_short_asymmetry_enabled", "N/A"),
+            diagnostic_trial.params.get("l2_regime_severity_gating_enabled", "N/A"),
+            float(diagnostic_trial.params.get("l2_regime_crisis_gross_cap", 0.0)),
+        )
         # Fix-A: 블로킹 경로에서도 배치 적용 → 파이프라인 최종 재실행에서 CAGR 변화 관측
         deployed_params = _apply_deployment_to_params(
             dict(diagnostic_trial.params),
@@ -635,6 +647,16 @@ def select_layer2_champion(
         champion_trial.value,
         champion_dsr,
         n_trials_eff,
+    )
+    _logger.info(
+        "[ALGO] event=champion_regime_levers trial=%d "
+        "policy_mode=%s hard_block=%s asymmetry=%s severity_gating=%s crisis_gross_cap=%.2f",
+        champion_trial.number,
+        champion_trial.params.get("l2_regime_policy_mode", "N/A"),
+        champion_trial.params.get("l2_regime_hard_block_enabled", "N/A"),
+        champion_trial.params.get("l2_regime_long_short_asymmetry_enabled", "N/A"),
+        champion_trial.params.get("l2_regime_severity_gating_enabled", "N/A"),
+        float(champion_trial.params.get("l2_regime_crisis_gross_cap", 0.0)),
     )
     # Fix-A: champion 경로에서도 배치 적용
     deployed_champion_params = _apply_deployment_to_params(

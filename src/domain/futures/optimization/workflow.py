@@ -1763,7 +1763,18 @@ def _deployment_shaped_l2_objective(
 
 
 
-def compute_crisis_mdd_budget(
+@dataclass(slots=True, frozen=True)
+class CrisisReplayBudget:
+    """[ADR_TBD_L2_CRISIS_CAGR_CHAMPION_SELECTION_BLINDNESS_FIX] crisis-window 재시뮬레이션
+    결과 — MDD/CAGR 동시 노출. evaluate_l2_trial과 select_layer2_champion이 공유."""
+
+    mdd_hybrid: float | None
+    mdd_budget: float | None
+    cagr_hybrid: float | None
+    cagr_floor: float | None
+
+
+def compute_crisis_replay_budget(
     *,
     crisis_replay_ctx: Any | None,
     config: Any,
@@ -1772,15 +1783,17 @@ def compute_crisis_mdd_budget(
     leverage: float,
     bars_per_year: float,
     trial_number: int = 0,
-) -> tuple[float | None, float | None]:
-    """[ADR_20260719_L2_CHAMPION_SELECTION_CRISIS_BLINDNESS_FIX] crisis-window 배치
-    MDD와 예산을 계산 — evaluate_l2_trial과 select_layer2_champion이 공유(로직 이중화 방지).
-    crisis_replay_ctx가 None이거나 시뮬레이션 실패 시 (None, None) 반환."""
+) -> CrisisReplayBudget:
+    """crisis-window 배치 MDD/CAGR과 각각의 예산/하한을 계산.
+
+    crisis_replay_ctx가 None이거나 시뮬레이션 실패 시 전 필드 None인
+    CrisisReplayBudget 반환 (spec7의 None-passthrough 패턴 유지).
+    """
     from src.domain.futures.strategy.tiered_workflow.awf_sim import _run_awf_simulation
     from src.domain.futures.strategy.tiered_workflow.risk_deployment import apply_deployment
 
     if crisis_replay_ctx is None:
-        return None, None
+        return CrisisReplayBudget(mdd_hybrid=None, mdd_budget=None, cagr_hybrid=None, cagr_floor=None)
     try:
         _crisis_sim = _run_awf_simulation(
             cache=crisis_replay_ctx.cache,
@@ -1794,16 +1807,22 @@ def compute_crisis_mdd_budget(
         )
         _crisis_unit_rets = np.asarray(_crisis_sim.rets_hybrid, dtype=np.float64)
         if _crisis_unit_rets.size < 2:
-            return None, None
+            return CrisisReplayBudget(mdd_hybrid=None, mdd_budget=None, cagr_hybrid=None, cagr_floor=None)
         _crisis_dep = apply_deployment(rets=_crisis_unit_rets, leverage=leverage, bars_per_year=bars_per_year)
         _crisis_mdd_budget = float(config.l2_max_mdd_abs) * (1.0 - float(config.l2_deploy_crisis_mdd_margin))
-        return float(_crisis_dep.mdd), _crisis_mdd_budget
+        _crisis_cagr_floor = float(config.l2_min_crisis_cagr)
+        return CrisisReplayBudget(
+            mdd_hybrid=float(_crisis_dep.mdd),
+            mdd_budget=_crisis_mdd_budget,
+            cagr_hybrid=float(_crisis_dep.cagr),
+            cagr_floor=_crisis_cagr_floor,
+        )
     except Exception:
         _logger.warning(
             "[L2-CRISIS-CONSTRAINT] trial=%d simulation_failed, crisis constraint skipped",
             trial_number,
         )
-        return None, None
+        return CrisisReplayBudget(mdd_hybrid=None, mdd_budget=None, cagr_hybrid=None, cagr_floor=None)
 
 def evaluate_l2_trial(
     *,
@@ -2149,7 +2168,7 @@ def evaluate_l2_trial(
         or not np.isfinite(cagr_hybrid)
         or not np.isfinite(sharpe_hac_hybrid)
     )
-    _crisis_mdd_hybrid, _crisis_mdd_budget = compute_crisis_mdd_budget(
+    _crisis_budget = compute_crisis_replay_budget(
         crisis_replay_ctx=crisis_replay_ctx if not lightweight else None,
         config=config,
         caps=caps,
@@ -2184,8 +2203,10 @@ def evaluate_l2_trial(
         positive_block_delta_ratio=float(positive_block_delta_ratio),
         fold_attributions=sim.fold_attributions,
         config=config,
-        crisis_mdd_hybrid=_crisis_mdd_hybrid,
-        crisis_mdd_budget=_crisis_mdd_budget,
+        crisis_mdd_hybrid=_crisis_budget.mdd_hybrid,
+        crisis_mdd_budget=_crisis_budget.mdd_budget,
+        crisis_cagr_hybrid=_crisis_budget.cagr_hybrid,
+        crisis_cagr_floor=_crisis_budget.cagr_floor,
     )
     deployable_score = build_layer2_deployable_score(
         cagr=float(cagr_hybrid),
@@ -2442,20 +2463,20 @@ def objective_l2_growth(trial: Trial, ctx: TieredContext) -> float:
 
 
 def layer2_constraints_from_trial(trial: FrozenTrial) -> tuple[float, ...]:
-    """[ADR_20260718_L2_OPTUNA_CONSTRAINT_CAGR_UPLIFT_ALIGNMENT] 12-tuple(cagr/sharpe_uplift
+    """[ADR_TBD_L2_CRISIS_CAGR_CHAMPION_SELECTION_BLINDNESS_FIX] 13-tuple(crisis_cagr
     슬롯 포함)로 패딩 — evaluate_layer2_gate.optuna_constraint_values와 길이 동기화."""
     raw = trial.user_attrs.get("l2_optuna_constraint_values")
     if not isinstance(raw, (list, tuple)):
         raw = trial.user_attrs.get("l2_constraint_values")
     if not isinstance(raw, (list, tuple)):
-        return (1.0,) * 12
+        return (1.0,) * 13
     resolved: list[float] = []
     for item in raw:
         try:
             resolved.append(float(item))
         except Exception:
             resolved.append(1.0)
-    while len(resolved) < 12:
+    while len(resolved) < 13:
         resolved.append(1.0)
     return tuple(resolved)
 
