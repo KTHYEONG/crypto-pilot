@@ -1,57 +1,46 @@
-# L2 Phase 성과 개선 세션 결과 — 2026-07-19 (배포단계 격리 bull boost 반영)
+# L2 Phase 성과 개선 세션 결과 — 2026-07-19 (Optuna 탐색 재현성 확보)
 
 ## 세션 요약
 
-L2가 이번 세션 최초로 **정상장·위기장 성과를 트레이드오프 없이 동시에 개선**하는 champion을 산출했다. 근본 원인은 "정상장 상방을 결정하는 유일한 레버(L*, 전역 정적 레버리지)가 위기 생존 요건에 의해 하한이 정해져 정상장이 항상 위기 방어의 인질로 잡히는" 비대칭 아키텍처였다 — bull 국면 노출을 늘리는 배포단계(deployment-only) boost를 **L* 캘리브레이션과 수학적으로 완전히 격리**해 도입함으로써 해소했다.
+동일 `seed=42`, 동일 코드로 L2 파이프라인을 반복 실행해도 결과가 극단적으로 갈리는(gate-pass 7개 성공 vs 0개 완전 실패) 비재현성 문제의 근본 원인을 규명하고 해결했다. 원인은 병렬 최적화 로직 자체가 아니라, **기동 시점의 살아있는 시스템 RAM 상태**가 Optuna의 ask/tell 구조 자체를 바꿔버리는 숨은 스위치였다.
 
-## 시행착오 및 근본 원인
+## 근본 원인
 
-- **1차 시도(실패, 되돌림)**: `apply_regime_risk_cap`의 `bull_gross_cap` 상한(1.0)을 weight 생성 단계에서 2.0으로 완화 — 실측 결과 120/300 trial 모두 `joint_feasible=0`, champion 산출 실패(직전보다 악화).
-- **실패 원인 재추적**: fit-leg 수익률(`fit_rets_hybrid`)은 `apply_regime_risk_cap`을 거치지 않는 별도 가중치 파이프라인(`_fit_w`)이라 오염되지 않았으나, `calibrate_deployment_leverage`의 **Stage 2(OOS Adaptive)**에 전달되는 `oos_rets` 인자가 boost 반영된 `rets_hybrid`를 그대로 사용(`workflow.py:2037`)해 **boost로 커진 변동성을 보고 L*를 도로 깎는 피드백 루프**가 실제 원인이었다.
-- **2차 시도(성공)**: boost를 weight 생성 단계가 아니라 **L* 확정 이후, `apply_deployment` 직전에만** 적용하도록 재설계. `calibrate_deployment_leverage`에 전달되는 `fit_rets`/`oos_rets`/`crisis_rets`는 boost 존재를 전혀 모르는 unit 시리즈 그대로 유지(핵심 불변식, 회귀테스트로 직접 검증) — 탐색범위도 실패 데이터를 반영해 `[1.0, 2.0]`→`[1.0, 1.3]`으로 보수화.
+- `active_pipeline.py`의 `_run_tiered_l2_study`가 `study.optimize()` 호출 직전 `psutil.virtual_memory().available`을 읽어, 3.0GB 미만이면 `batch_size`(Optuna ask/tell **청킹 크기**, 기본 6)를 1로 강제 변경했다.
+- 이는 단순 성능 파라미터가 아니라 **구조적으로 다른 두 알고리즘**을 무작위(=기동 시점 RAM 상태)로 선택하는 스위치였다:
+  - `batch_size=1` → `study.optimize(n_jobs=1)`(Optuna 내장 순차 루프) — 매 trial마다 직전 결과를 즉시 반영.
+  - `batch_size=6`(기본) → 수동 배치 루프 — 배치 내 6개 trial을 **전부 `ask()`한 뒤에야** `tell()`을 수행, 배치 내 2~6번째 trial은 같은 배치 앞선 trial들의 실제 결과를 전혀 반영 못 하는 stale한 이력으로 제안됨.
+- `TPESampler(multivariate=True, group=True)`는 이력 의존도가 매우 높아 이 staleness가 120 trial 전체로 누적 전파 — 동일 seed에서도 완전히 다른 탐색 궤적을 만들었다.
+- `max_workers`(`ProcessPoolExecutor`의 실제 동시 실행 수)는 `future.result()`가 제출 순서로 블로킹 수집되므로 `tell()` 순서에 영향을 주지 않는다 — 즉 "몇 개가 동시에 도는가"(안전하게 RAM 적응 가능)와 "샘플러가 무엇을 언제 보는가"(반드시 고정돼야 함)는 애초에 분리 가능한 별개의 축이었다.
 
-## 프로덕션 실측 (2026-07-19 기준일, 120 trials)
+## 해결
 
-| 항목 | 이전(crisis-TF-fix만 적용) | 이번(배포단계 격리 boost) |
-| :--- | ---: | ---: |
-| gate-pass 후보 수 | 1 | **7** |
-| champion 선정 경로 | 정상 gate-pass | 정상 gate-pass |
-| 정상장 CAGR | +30.9% | **+42.5%** |
-| Sharpe | 2.088 | **2.404** |
-| Sortino | 3.379 | **4.247** |
-| 정상장 MDD | 13.1% | **10.4%**(개선) |
-| Fold 통과율 | 75.0%(3/4) | **100.0%(4/4)** |
-| Sharpe Uplift | +0.38 | **+0.66** |
-| L* 바인딩 사유 | `crisis_window`(위기 요건에 발목) | **`mdd`(순수 정상장 리스크로 전환)** |
-| Crisis MDD | 19.11%(budget 21%) | **17.35%**(개선) |
-| Crisis CAGR | -4.98%(간신히 통과, 마진 0.02%p) | **+3.51%**(양수 전환) |
-| `[CRISIS-RELIABILITY]` | `stress_tested_pass` | ✅ **`stress_tested_pass verified=True`(유지, 마진 대폭 개선)** |
+"논리적 ask/tell 청킹 크기"(`batch_size`, 고정)와 "물리적 동시 실행 워커 수"(`max_workers`, RAM 적응)를 분리했다. RAM 기반 `batch_size` 강제변경 블록을 삭제하고 `batch_size`는 config 고정값만 사용, 기존 `max_workers`의 RAM 적응(OOM 안전장치)은 100% 보존 — 병렬 처리 속도와 메모리 안전성을 그대로 유지하면서 재현성만 복원하는 최소 변경이다. 조사 중 기존 테스트가 이 RAM 분기를 mock 우회 트릭으로 의존하던 것을 발견해 config 직접 patch 방식으로 마이그레이션했고, 저RAM/고RAM 양쪽에서 `study.tell()` 시퀀스가 완전히 동일함을 직접 검증하는 종단 재현성 테스트를 신규 추가했다.
+
+## 프로덕션 실측 (2026-07-19 기준일, seed=42, 120 trials, 2회 연속 실행)
 
 ```
-STATUS  : ✅ PASS
-
-✅ [Growth    ] CAGR: +42.5% (>=30.0%) | PnL: +71.8% | Equity x1.72
-✅ [Efficiency] Sharpe: 2.404 (>=1.000) | Sortino: 4.247 (>=1.500) | Calmar: 4.073 (>=1.000)
-✅ [Risk      ] MDD: 10.4% (<=30.0%) | CVaR95: 0.9% (<=6.0%) | RiskUtil: 34.7%
-✅ [Robust    ] Fold: 100.0% (>=60.0%) | Trades: 418 (>=30) | Friction: 100.0%
-✅ [Uplift    ] Sharpe Uplift: +0.66 (>=+0.05)
-✅ [Integrity ] PSR: 0.999 (>=0.90) | DSR: 0.991 (diag)
+Run 1: [L2-AUDIT] completed=120/120 joint_feasible=0 crisis_measured=120
+       failures={'crisis_cagr': 110, 'cagr': 106, 'crisis_mdd': 85, 'sharpe_uplift': 40, 'fold': 28, 'recent_fold': 13, 'mdd': 3}
+Run 2: [L2-AUDIT] completed=120/120 joint_feasible=0 crisis_measured=120
+       failures={'crisis_cagr': 110, 'cagr': 106, 'crisis_mdd': 85, 'sharpe_uplift': 40, 'fold': 28, 'recent_fold': 13, 'mdd': 3}
 ```
 
-Champion: Trial #101, `growth_lcb=0.2910`, `L*=1.0000(binding=mdd)`, regime levers `hard_block=False asymmetry=True severity_gating=True crisis_gross_cap=0.23`.
+- 최종 집계 라인(`completed`/`joint_feasible`/`crisis_measured`/`failures` 7개 항목) **바이트 단위 완전 일치**.
+- Best CAGR 궤적도 동일한 마일스톤(6.12%→11.20%→12.59%→13.81%→16.40%→19.85%→23.92%→23.94%→25.61%→27.12%)에서 동일하게 갱신됨.
+- `Current:` 진행률 라인에 미세한 순서 차이가 있었으나 tqdm 진행바 postfix의 터미널 출력 버퍼링 타이밍 차이일 뿐, trial 결과값/최종 집계에는 영향 없음을 확인.
 
-원본 로그: `/tmp/l2_decoupled_boost_verify.log`.
+원본 로그: `/tmp/l2_determinism_run1.log`, `/tmp/l2_determinism_run2.log`.
 
 ## Verdict
 
-- **L2 정상장**: ✅ PASS — 전 게이트 통과, 직전 대비 CAGR/Sharpe/Sortino/MDD/Fold/Uplift **전 지표 개선**.
-- **L2 crisis 방어**: ✅ PASS — MDD·CAGR 둘 다 직전보다 개선(트레이드오프 없음).
-- **핵심 검증**: L*의 바인딩 사유가 `crisis_window`에서 `mdd`로 전환 — boost가 crisis 방어를 훼손하지 않으면서 정상장 상방을 실제로 넓혔음을 확인.
-- **`/check`**: PASS (Cov 39%, 캘리브레이션 무오염 회귀테스트 포함).
+- **재현성**: ✅ **확보** — 이전에는 동일 seed로 gate-pass 7개(성공) vs 0개(완전 실패)처럼 극단적으로 갈리던 것이, 이번엔 두 실행 모두 정확히 같은 결과로 수렴.
+- **⚠️ 결과 자체는 이번 검증 시점 조건에서 `no_feasible_trials`**: 재현성은 확보됐으나, 이전 세션에서 관측된 "gate-pass 7건 성공"은 우연한(더 유리한) RAM 상태에서 batch_size=1(순차 경로)로 실행됐던 결과였을 가능성이 있다 — 즉 이전 "성공"이 재현 가능한 champion이 아니라 실행마다 달라지는 요행이었을 수 있다는 뜻이기도 하다.
+- **`/check`**: PASS (Cov 24%, 종단 재현성 회귀테스트 포함).
 
 ## 잔여 이슈
 
-1. **joint_feasible 여전히 0/120**: 개별 게이트(정상장/위기)는 다수 trial이 통과하나, 13개 제약을 **동시에** 만족하는 엄밀한 joint-feasibility 기준으로는 아직 0건 — champion은 gate-pass 경로(promotion 게이트 기준)로 정상 선정되지만, 이 구조적 gap 자체는 다음 세션 재검토 대상.
-2. **`[CRISIS-WINDOW-DETAIL]` 개별 라벨 불일치(경미)**: 상위 집계 `stress_tested_pass`와 달리 개별 윈도우 라벨이 `stress_tested_fail`로 표기되는 기존 관측 이슈 — 이번 실측에서도 재확인, 라벨링 로직 자체 점검 필요(수치상 실패는 아님).
-3. **단일 seed 실측**: 오늘도 seed=42 단일 실행 기준 — 다중 seed 검증으로 이번 개선(gate-pass 7건, crisis CAGR 양전환)의 안정성 확인 필요.
-4. **fold-level 게이트(`fold_pass_ratio`/`recent_fold`)는 boost 미반영**: 이번 spec은 의도적으로 fold-level 진단을 boost-blind 상태로 남겼다(안전한 보수적 편향) — boost 효과가 fold 단위에서도 온전히 인정되지 않아 실제 여력은 이번 실측보다 더 클 수 있음, 후속 spec 대상.
+1. **[신규] 재현 가능한 기반 위에서 탐색공간/제약 재검토 필요**: 이제 결과가 결정적이므로, 현재 seed=42 조건에서 `no_feasible_trials`가 나오는 것이 진짜 탐색공간의 한계인지(제약이 과도하게 타이트) 판단할 수 있는 신뢰 가능한 기준선이 생겼다 — 다음 세션 최우선 분석 대상.
+2. **다중 seed 검증 부재**: 재현성 fix로 "같은 seed → 같은 결과"는 보장되나, "seed 간 결과 분산이 얼마나 큰가"는 여전히 미검증 — 여러 seed로 champion 안정성을 평가할 필요.
+3. **joint_feasible 상시 0**: 관측된 모든 실행(재현성 fix 전/후 포함)에서 13개 제약을 동시 만족하는 trial이 한 번도 나온 적 없음 — 근본적으로 탐색공간이나 게이트 임계값 재설계가 필요할 가능성.
+4. **`[CRISIS-WINDOW-DETAIL]` 개별 라벨 불일치(경미, 이전 세션부터 이월)**: 상위 집계와 개별 윈도우 라벨 표기가 다른 기존 관측 이슈, 미해결.

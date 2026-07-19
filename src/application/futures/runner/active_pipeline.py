@@ -1962,19 +1962,7 @@ def _run_tiered_l2_study(
 
         progress_cb = L2OptunaProgressCallback(n_trials)
         try:
-            import psutil
-
             batch_size = int(OPT_FUTURES_CONFIG.get("L2_OPTUNA_BATCH_SIZE", 2))
-            try:
-                avail_mem_gb = psutil.virtual_memory().available / (1024.0**3)
-                if avail_mem_gb < 3.0 and batch_size > 1:
-                    _logger.warning(
-                        "[L2-OPT] Low system memory (%.2f GB < 3.0 GB). Forcing sequential n_jobs=1 for OOM safety.",
-                        avail_mem_gb,
-                    )
-                    batch_size = 1
-            except Exception as _mem_err:
-                _logger.warning("[L2-OPT] Failed to check system memory: %s", _mem_err)
 
             _gc_interval = int(OPT_FUTURES_CONFIG.get("L2_OPTUNA_GC_INTERVAL_BATCHES", 5))
 
@@ -1990,18 +1978,15 @@ def _run_tiered_l2_study(
                 import multiprocessing
                 from concurrent.futures import ProcessPoolExecutor
 
+                import psutil
                 avail_gb = psutil.virtual_memory().available / (1024.0**3)
                 cpu_cores = os.cpu_count() or 4
                 # Fork CoW: child shares parent numpy arrays. Unique allocation ≈ 0.7GB per worker.
                 mem_safe = max(1, int(avail_gb / 0.7))
                 max_workers = max(1, min(batch_size, cpu_cores, mem_safe))
                 _logger.debug(
-                    "[L2-OPT] ProcessPool workers=%d (mem=%.1fGB, mem_safe=%d, cpu=%d, batch=%d)",
-                    max_workers,
-                    avail_gb,
-                    mem_safe,
-                    cpu_cores,
-                    batch_size,
+                    "[L2-OPT] batch_size=%d(fixed) max_workers=%d(RAM-adaptive, mem=%.1fGB)",
+                    batch_size, max_workers, avail_gb,
                 )
 
                 global _GLOBAL_L2_CTX
