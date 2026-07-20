@@ -141,7 +141,8 @@ graph TD
    - Adapters/Runners/DTOs/Boilerplate: Target >= 70%. (Tolerance Buffer: **65% ~ 69%** is accepted as a **Conditional PASS**). Restrict the self-correction loop to 1 iteration.
    - Entrypoints / CLI / `__init__.py`: Skip coverage requirement entirely. Use `# pragma: no cover` where applicable.
 4. **Modified-Files-Only Coverage Scope:**
-   - Measure coverage ONLY on files created or modified by the current spec (determinable via `git diff --name-only` against the base branch). Exclude unchanged files in the same module directory from the coverage report to prevent false-negative penalties.
+   - **New Files:** Newly created source files MUST satisfy the full tiered coverage targets (Core >= 85%, Adapter >= 65%).
+   - **Modified Existing Files:** Existing files that have been modified do not need to meet the global file target. However, **100% of the newly added/modified lines (git diff lines) MUST be covered by tests**. Any uncovered modified line results in an immediate FAIL.
 5. **Coverage Loop Limit & Diagnostics:**
    - Limit the coverage self-correction loop to a maximum of 3 iterations. If targets are not met within 3 iterations, stop, commit the current progress, and report the specific bottleneck to the user.
    - **Diagnostic Exception:** If coverage target is missed on the 1st run, the AI is allowed to run `--cov-report=term-missing` targeting **exclusively the modified file** to identify exact missing lines, minimizing token consumption.
