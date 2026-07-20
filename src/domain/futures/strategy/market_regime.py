@@ -659,6 +659,7 @@ def compute_market_regime_context(
     *,
     aligned: AlignedMarketData,
     cfg: RegimeConfig | None = None,
+    overlay: RiskOverlayContext | None = None,
 ) -> MarketRegimeContext:
     if cfg is not None:
         try:
@@ -679,7 +680,7 @@ def compute_market_regime_context(
         raise ValueError("aligned.close_2d must be non-empty 2D array")
 
     regime_cfg = _safe_regime_cfg(cfg)
-    overlay = compute_risk_overlay(aligned=aligned, cfg=regime_cfg)
+    overlay = compute_risk_overlay(aligned=aligned, cfg=regime_cfg) if overlay is None else overlay
     btc_close = np.maximum(close[:, _btc_index(aligned.symbols)], _EPS)
     trend_anchor = _ema_1d(np.log(btc_close), regime_cfg.overlay_trend_snr_span)
     trend_score = np.log(btc_close) - trend_anchor
