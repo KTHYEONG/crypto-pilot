@@ -1,3 +1,57 @@
+# L0→L2 파이프라인 상세 소요시간/RAM 실측 — 2026-07-20 (다음 세션 최적화 기준선)
+
+## 세션 요약
+
+`--phase l2` 프로덕션 실행(seed=42, 120 trials) 1회를 `LOG_LEVEL=DEBUG`로 전 구간 계측해 universe 로드부터 L2 champion 선정까지 스테이지별 소요시간과 RSS를 기록했다. 목적은 다음 최적화 세션에서 "어디부터 손댈지" 바로 판단할 수 있는 기준선을 남기는 것 — 이번 세션에 완료한 L1 워커 병렬화(`docs/decisions/decisions.md` ADR_20260720_L1_MEMORY_FLOOR_ADAPTIVE_CALIBRATION)는 이미 이 실측치에 반영돼 있다(즉 아래 수치는 "적용 후" 상태).
+
+- 전체 wall time: **353.46s**
+- Peak RSS: **12414MB** (성능 예산 `performance.md` RSS<12GB 근접, 여유 매우 적음)
+- 원본 로그: 세션 스크래치패드(`new_run.log`, 653줄), 이 세션에서만 생성/휘발됨 — 재현하려면 `logs/futures/optimization/l1_result_cache/*.pkl` 삭제 후 `LOG_LEVEL=DEBUG uv run python src/execution/opt_main_futures.py --phase l2 --trials 2 --sync skip` 재실행.
+
+## 스테이지별 소요시간 (Top-level)
+
+| 스테이지 | 소요시간 | RSS(시작→종료) | 비고 |
+|---|---|---|---|
+| universe (유니버스 스캔) | 1.8s | 327→419MB | discover 1.58s + validate 0.19s |
+| data (OHLCV/펀딩 로드) | ~21.5s | 419→3045MB (+2598MB) | `load_futures_data_maps_for_symbols` 16.2s가 대부분 |
+| bridge_post_align (TF 정렬) | **35.25s** | 3120→6269MB (+3149MB) | 7개 TF 그리드 동시 정렬, **RAM 단일 최대 증가 구간** |
+| L0 게이트(phase1+phase3+pruning) | ~24.4s | 6038→7274MB | cheap_evidence 7.68s + canonical_gate 4.09s + cross_tf_pruning 10.66s, `n_passed=10/81 n_rejected=69` |
+| **L1 nested WF 전체(7개 TF)** | **145.36s** | 7174→7316MB (평탄) | 아래 TF별 breakdown 참조 |
+| L2 signal_batch + sim_cache | ~3.5s | 7316→7484MB | |
+| **L2 Optuna 배치 루프(120 trials)** | **~75s** | 7484MB (변화없음) | RAM 안정적, 워커 부족 징후 없음(기존 결론 재확인) |
+| **L2 champion 선정(select_layer2_champion)** | **35.80s** | 7484→7507MB | replay 후보 재평가 — L1 한 TF 처리량과 맞먹는 단일 병목, **다음 세션 조사 후보** |
+| L2 최종 파이프라인(champion 재평가+정리) | 6.39s | 7507→7497MB | |
+| (정리 후) | | →6873MB | 파이프라인 종료 시 GC로 RSS 대폭 감소 |
+
+## L1 nested WF: TF별 breakdown (`[LIMIT-07]` 세밀한 TF부터 처리 순서 적용됨)
+
+| TF | n_bars | 전체 소요 | `feature_cache_prime` | evidence(workers) | outer(workers) | wall(evidence+outer) |
+|---|---|---|---|---|---|---|
+| 1h | 23472 | 37.46s | **23.40s (63%)** | 10.4s (1) | 3.0s (1) | 13.4s |
+| 2h | 11736 | 28.20s | **10.70s (38%)** | 13.4s (1) | 3.6s (1) | 17.1s |
+| 4h | 6949 | 15.31s | 0.001s | 10.6s (1) | 1.8s (2) | 12.4s |
+| 6h | 3912 | 16.08s | 3.39s | 9.6s (2) | 1.5s (2) | 11.1s |
+| 8h | 2934 | 15.56s | 2.50s | 9.9s (2) | 1.5s (2) | 11.4s |
+| 12h | 1956 | 14.43s | 1.67s | 9.6s (2) | 1.5s (2) | 11.2s |
+| 1d | 978 | 7.84s | 0.80s | 5.4s (2) | 1.1s (2) | 6.5s |
+
+- **`feature_cache_prime`가 1h/2h TF에서만 압도적으로 크다**(1h 23.4s, 2h 10.7s = 합계 34.1s, L1 전체 145.36s의 **23.5%**) — bar 수가 가장 많은 두 TF에 집중, 4h 이하는 사실상 무시 가능(캐시 재사용 추정). **다음 세션 1순위 최적화 후보**: 이번 세션(워커 병렬화, ~17% 개선)보다 단일 항목 절대량이 더 크다.
+- 워커 캘리브레이션은 설계대로 동작(`docs/specs/l1_adaptive_worker_calibration.md` 참조): TF#1(1h)·TF#2(2h)는 관측치 부족으로 cold-start(workers=1) 유지, TF#3(4h)부터 outer가 2워커로 전환, TF#4(6h)부터는 evidence도 2워커로 전환.
+
+## Peak RSS 위치 특정
+
+- 스테이지별 표시 RSS는 7100~7500MB 수준을 벗어나지 않는데 `peak=12414MB`가 L1→L2 전환 시점부터 계속 표시됨 — **12414MB는 L1 nested WF 처리 도중 순간적으로 스파이크된 값**(스테이지 경계 로그 사이 어딘가, 아마 evidence fold 워커가 fork 직후 피처 계산을 하는 짧은 구간)이며, 정상 스테이지 로그의 조밀도로는 정확한 스파이크 지점을 못 잡음.
+- **다음 세션 조사 필요**: `tracemalloc`이나 더 촘촘한(초 단위) RSS 폴링으로 12414MB 스파이크의 정확한 발생 지점을 특정하면, peak 자체를 낮춰 `tree_pss_cap_bytes`(현재 10GiB 고정) 헤드룸을 추가로 확보할 여지가 있음 — `l1_adaptive_worker_calibration.md`의 워커 캘리브레이션과는 별개 레버.
+
+## 다음 세션 최적화 우선순위 (실측 근거 기반)
+
+1. **`l1_nested_feature_cache_prime`(1h/2h TF) — 34.1s, L1 전체의 23.5%.** 이번 세션 워커 병렬화 효과(L1 -16.8%)보다 절대량이 크다. 무엇을 계산하는지, 캐시가 왜 4h 이하에서만 사실상 free인지부터 확인 필요(진짜 캐시 히트인지, 4h 이하가 애초에 계산량이 적은 건지 미확인).
+2. **`select_layer2_champion` — 35.80s.** L2 Optuna 배치 루프(120 trials, 75s) 다음으로 큰 단일 블록. Replay 후보 재평가 로직이 병목인지, 워커 부족인지 미측정 — `l1_adaptive_worker_calibration.md` Appendix에서 낮은 우선순위로 미룬 "L2 실측"이 이 지점부터 시작하면 적절.
+3. **`bridge_post_align`(TF 정렬) — 35.25s, RAM +3149MB 단일 최대 증가.** 시간보다 RAM 스파이크 원인으로 더 흥미로움 — peak RSS 12414MB의 실제 발생 구간일 가능성.
+4. **Peak RSS 정확한 위치 특정.** 현재 12GB 예산에 근접(12414MB)해 있어 위 최적화들을 병렬성 확대 방향으로 밀어붙이기 전에 먼저 확인해야 안전.
+
+---
+
 # L2 Phase 성과 개선 세션 결과 — 2026-07-19 (Optuna 탐색 재현성 확보)
 
 ## 세션 요약
