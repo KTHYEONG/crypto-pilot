@@ -2025,65 +2025,67 @@ def _run_tiered_l2_study(
                         _batch_num = 0
                         while trial_idx < n_trials and not getattr(study, "_stop_flag", False):
                             _batch_num += 1
-                            _t_batch = time.perf_counter()
-                            current_batch = min(batch_size, n_trials - trial_idx)
-                            batch_trials = []
-                            batch_params = []
+                            with _l2_probe.span("l2_optuna_batch", batch_num=_batch_num, n_workers=max_workers):
+                                _t_batch = time.perf_counter()
+                                current_batch = min(batch_size, n_trials - trial_idx)
+                                batch_trials = []
+                                batch_params = []
 
-                            _mem_batch_start = _get_rss_mb()
-                            _t_ask = 0.0
+                                _mem_batch_start = _get_rss_mb()
+                                _t_ask = 0.0
 
-                            for _ in range(current_batch):
-                                _t0 = time.perf_counter()
-                                trial = study.ask()
-                                batch_trials.append(trial)
-                                params = suggest_layered_params(trial, "L2", fixed=ctx.fixed_l1_params)
-                                batch_params.append(params)
-                                _t_ask += time.perf_counter() - _t0
+                                for _ in range(current_batch):
+                                    _t0 = time.perf_counter()
+                                    trial = study.ask()
+                                    batch_trials.append(trial)
+                                    params = suggest_layered_params(trial, "L2", fixed=ctx.fixed_l1_params)
+                                    batch_params.append(params)
+                                    _t_ask += time.perf_counter() - _t0
 
-                            _t_submit = time.perf_counter()
-                            futures = [
-                                executor.submit(_evaluate_l2_trial_from_global, params) for params in batch_params
-                            ]
-                            _t_submit = time.perf_counter() - _t_submit
+                                _t_submit = time.perf_counter()
+                                futures = [
+                                    executor.submit(_evaluate_l2_trial_from_global, params)
+                                    for params in batch_params
+                                ]
+                                _t_submit = time.perf_counter() - _t_submit
 
-                            _t_tell = 0.0
-                            _t_attrs = 0.0
-                            _sum_eval = 0.0
-                            for trial, future in zip(batch_trials, futures, strict=False):
-                                try:
-                                    value, attrs, t_elapsed = future.result()
-                                except Exception as exc:
-                                    _logger.error(
-                                        "[L2-OPT] Subprocess trial %d failed: %s",
+                                _t_tell = 0.0
+                                _t_attrs = 0.0
+                                _sum_eval = 0.0
+                                for trial, future in zip(batch_trials, futures, strict=False):
+                                    try:
+                                        value, attrs, t_elapsed = future.result()
+                                    except Exception as exc:
+                                        _logger.error(
+                                            "[L2-OPT] Subprocess trial %d failed: %s",
+                                            trial.number,
+                                            exc,
+                                        )
+                                        value = -1e6
+                                        attrs = {}
+                                        t_elapsed = 0.0
+                                    _sum_eval += t_elapsed
+
+                                    _t0 = time.perf_counter()
+                                    for k, v in attrs.items():
+                                        trial.set_user_attr(k, v)
+                                    _t_attrs += time.perf_counter() - _t0
+
+                                    _t0 = time.perf_counter()
+                                    study.tell(trial, value)
+                                    _t_tell += time.perf_counter() - _t0
+
+                                    _logger.log(
+                                        logging.DEBUG,
+                                        "[perf-optuna] Trial %d eval=%.3fs obj=%.6f",
                                         trial.number,
-                                        exc,
+                                        t_elapsed,
+                                        value,
                                     )
-                                    value = -1e6
-                                    attrs = {}
-                                    t_elapsed = 0.0
-                                _sum_eval += t_elapsed
-
-                                _t0 = time.perf_counter()
-                                for k, v in attrs.items():
-                                    trial.set_user_attr(k, v)
-                                _t_attrs += time.perf_counter() - _t0
-
-                                _t0 = time.perf_counter()
-                                study.tell(trial, value)
-                                _t_tell += time.perf_counter() - _t0
-
-                                _logger.log(
-                                    logging.DEBUG,
-                                    "[perf-optuna] Trial %d eval=%.3fs obj=%.6f",
-                                    trial.number,
-                                    t_elapsed,
-                                    value,
-                                )
-                                progress_cb(study, trial, value=value)
-                                if study.trials:
-                                    _early_stop_cb(study, study.trials[-1])
-                                trial_idx += 1
+                                    progress_cb(study, trial, value=value)
+                                    if study.trials:
+                                        _early_stop_cb(study, study.trials[-1])
+                                    trial_idx += 1
 
                             _t_gc = time.perf_counter()
                             if _batch_num % _gc_interval == 0:
