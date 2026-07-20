@@ -138,7 +138,8 @@
       "tests/unit/application/futures/runner/test_pipeline.py",
       "tests/unit/execution/test_opt_main_futures_strategy_mode.py",
       "tests/unit/application/futures/runner/test_active_pipeline.py",
-      "tests/unit/domain/futures/optimization/test_l2_feasibility_first.py"
+      "tests/unit/domain/futures/optimization/test_l2_feasibility_first.py",
+      "tests/unit/domain/futures/optimization/observability/test_l2_runtime_probe.py"
     ]
   },
   "src/application/futures/runner/tf_probe_scoped.py": {
