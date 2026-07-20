@@ -37,19 +37,19 @@ class AlignedMarketData:
     high_2d: NDArray[np.float64]
     low_2d: NDArray[np.float64]
     close_2d: NDArray[np.float64]
-    volume_2d: NDArray[np.float64]
-    funding_2d: NDArray[np.float64]
+    volume_2d: NDArray[np.float32]
+    funding_2d: NDArray[np.float32]
     active_mask: NDArray[np.bool_]
     warm_mask: NDArray[np.bool_]
     entry_block_mask: NDArray[np.bool_]
     kill_mask: NDArray[np.bool_]
-    basis_2d: NDArray[np.float64] | None = None
-    oi_2d: NDArray[np.float64] | None = None
-    lsr_2d: NDArray[np.float64] | None = None
-    taker_buy_2d: NDArray[np.float64] | None = None
-    trades_2d: NDArray[np.float64] | None = None
-    adv_usdt_2d: NDArray[np.float64] | None = None
-    execution_cost_bps_2d: NDArray[np.float64] | None = None
+    basis_2d: NDArray[np.float32] | None = None
+    oi_2d: NDArray[np.float32] | None = None
+    lsr_2d: NDArray[np.float32] | None = None
+    taker_buy_2d: NDArray[np.float32] | None = None
+    trades_2d: NDArray[np.float32] | None = None
+    adv_usdt_2d: NDArray[np.float32] | None = None
+    execution_cost_bps_2d: NDArray[np.float32] | None = None
     # Phase D: C1 inference panel 전용 마스크 (Stage5 timeline 기반). None이면 미사용.
     inference_active_mask: NDArray[np.bool_] | None = None
     inference_entry_warm_mask: NDArray[np.bool_] | None = None
@@ -148,15 +148,15 @@ def align_data_maps(
     high_2d: NDArray[np.float64] = np.zeros((eff_len, n), dtype=np.float64)
     low_2d: NDArray[np.float64] = np.zeros((eff_len, n), dtype=np.float64)
     close_2d: NDArray[np.float64] = np.zeros((eff_len, n), dtype=np.float64)
-    volume_2d: NDArray[np.float64] = np.zeros((eff_len, n), dtype=np.float64)
-    funding_2d: NDArray[np.float64] = np.zeros((eff_len, n), dtype=np.float64)
-    basis_2d: NDArray[np.float64] | None = None
-    oi_2d: NDArray[np.float64] | None = None
-    lsr_2d: NDArray[np.float64] | None = None
-    taker_buy_2d: NDArray[np.float64] | None = None
-    trades_2d: NDArray[np.float64] | None = None
-    adv_usdt_2d: NDArray[np.float64] = np.full((eff_len, n), np.nan, dtype=np.float64)
-    execution_cost_bps_2d: NDArray[np.float64] = np.full((eff_len, n), np.nan, dtype=np.float64)
+    volume_2d: NDArray[np.float32] = np.zeros((eff_len, n), dtype=np.float32)
+    funding_2d: NDArray[np.float32] = np.zeros((eff_len, n), dtype=np.float32)
+    basis_2d: NDArray[np.float32] | None = None
+    oi_2d: NDArray[np.float32] | None = None
+    lsr_2d: NDArray[np.float32] | None = None
+    taker_buy_2d: NDArray[np.float32] | None = None
+    trades_2d: NDArray[np.float32] | None = None
+    adv_usdt_2d: NDArray[np.float32] = np.full((eff_len, n), np.nan, dtype=np.float32)
+    execution_cost_bps_2d: NDArray[np.float32] = np.full((eff_len, n), np.nan, dtype=np.float32)
     active_mask: NDArray[np.bool_] = np.ones((eff_len, n), dtype=bool)
     warm_mask: NDArray[np.bool_] = np.ones((eff_len, n), dtype=bool)
     entry_block_mask: NDArray[np.bool_] = np.zeros((eff_len, n), dtype=bool)
@@ -264,33 +264,33 @@ def align_data_maps(
             funding_2d[:, col] = block.numeric[:, n_idx["funding_rate"]]
         if "basis" in n_idx:
             if basis_2d is None:
-                basis_2d = np.full((eff_len, n), np.nan, dtype=np.float64)
+                basis_2d = np.full((eff_len, n), np.nan, dtype=np.float32)
             basis_2d[:, col] = block.numeric[:, n_idx["basis"]]
         elif "basis_rate" in n_idx:
             if basis_2d is None:
-                basis_2d = np.full((eff_len, n), np.nan, dtype=np.float64)
+                basis_2d = np.full((eff_len, n), np.nan, dtype=np.float32)
             basis_2d[:, col] = block.numeric[:, n_idx["basis_rate"]]
         for _oi_alias in ("sum_open_interest", "open_interest", "oi"):
             if _oi_alias in n_idx:
                 if oi_2d is None:
-                    oi_2d = np.full((eff_len, n), np.nan, dtype=np.float64)
+                    oi_2d = np.full((eff_len, n), np.nan, dtype=np.float32)
                 oi_2d[:, col] = block.numeric[:, n_idx[_oi_alias]]
                 break
         for _lsr_alias in ("long_short_ratio", "global_long_short_ratio"):
             if _lsr_alias in n_idx:
                 if lsr_2d is None:
-                    lsr_2d = np.full((eff_len, n), np.nan, dtype=np.float64)
+                    lsr_2d = np.full((eff_len, n), np.nan, dtype=np.float32)
                 lsr_2d[:, col] = block.numeric[:, n_idx[_lsr_alias]]
                 break
         for _taker_alias in ("taker_buy_base", "taker_buy_quote"):
             if _taker_alias in n_idx:
                 if taker_buy_2d is None:
-                    taker_buy_2d = np.full((eff_len, n), np.nan, dtype=np.float64)
+                    taker_buy_2d = np.full((eff_len, n), np.nan, dtype=np.float32)
                 taker_buy_2d[:, col] = block.numeric[:, n_idx[_taker_alias]]
                 break
         if "trades" in n_idx:
             if trades_2d is None:
-                trades_2d = np.full((eff_len, n), np.nan, dtype=np.float64)
+                trades_2d = np.full((eff_len, n), np.nan, dtype=np.float32)
             trades_2d[:, col] = block.numeric[:, n_idx["trades"]]
         if "adv_usdt" in n_idx:
             adv_usdt_2d[:, col] = block.numeric[:, n_idx["adv_usdt"]]
