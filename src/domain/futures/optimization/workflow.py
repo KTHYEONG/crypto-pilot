@@ -1903,7 +1903,7 @@ def summarize_layer2_feasibility(
         raw_map = t.user_attrs.get("l2_constraint_map")
         if isinstance(raw_map, dict):
             _cv_map = {k: float(v) for k, v in raw_map.items() if k != "crisis_measured"}
-            _cv_measured = bool(raw_map.get("crisis_measured", False))
+            _cv_measured = bool(raw_map.get("crisis_measured", t.user_attrs.get("l2_crisis_measured", False)))
             cv = Layer2ConstraintVector(**_cv_map, crisis_measured=_cv_measured)
         else:
             raw_list = t.user_attrs.get("l2_constraint_values")
