@@ -429,3 +429,42 @@ def align_data_maps(
                 shapes[sym] = (len(df), len(df.columns))
         _ALIGNED_DATA_MAPS_CACHE[cache_key] = (result, shapes)
     return result
+
+
+@dataclass(frozen=True, slots=True)
+class AlignedSymbolBlock:
+    numeric: NDArray[np.float64]
+    numeric_columns: tuple[str, ...]
+    masks: NDArray[np.bool_]
+    mask_columns: tuple[str, ...]
+
+
+def extract_aligned_symbol_block(
+    frame: pd.DataFrame,
+    *,
+    start: int,
+    end: int,
+    numeric_columns: tuple[str, ...],
+    mask_columns: tuple[str, ...],
+) -> AlignedSymbolBlock:
+    """Extract a bulk symbol block from a single aligned DataFrame slice.
+
+    Args:
+        frame: Symbol DataFrame indexed by bar.
+        start: Start row (inclusive).
+        end: End row (exclusive).
+        numeric_columns: Numeric column names to extract.
+        mask_columns: Boolean mask column names to extract.
+
+    Returns:
+        AlignedSymbolBlock with one ndarray per group.
+    """
+    segment = frame.iloc[start:end]
+    numeric_arr = segment[list(numeric_columns)].to_numpy(dtype=np.float64, copy=False) if numeric_columns else np.empty((end - start, 0), dtype=np.float64)
+    mask_arr = segment[list(mask_columns)].to_numpy(dtype=np.bool_, copy=False) if mask_columns else np.empty((end - start, 0), dtype=np.bool_)
+    return AlignedSymbolBlock(
+        numeric=numeric_arr,
+        numeric_columns=numeric_columns,
+        masks=mask_arr,
+        mask_columns=mask_columns,
+    )

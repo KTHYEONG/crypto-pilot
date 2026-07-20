@@ -197,6 +197,35 @@ class TestScenario2EdgePerformance:
 # ---------------------------------------------------------------------------
 
 class TestScenario3ErrorHandling:
+    def test_jsonl_writes_detail_and_aggregate_samples(self, tmp_path: Path) -> None:
+        parent = _fake_proc(pid=1000, ppid=999, rss=500 * 1024 * 1024, pss=400 * 1024 * 1024)
+        jsonl_path = tmp_path / "probe.jsonl"
+
+        with (
+            patch.object(os, "getpid", return_value=1000),
+            patch("psutil.Process", return_value=parent),
+        ):
+            probe = L2RuntimeProbe(
+                enabled=True,
+                sample_interval_ms=250,
+                hot_sample_interval_ms=50,
+                jsonl_enabled=True,
+                jsonl_path=jsonl_path,
+                pss_interval_samples=100,
+            )
+            probe.start_run(stage="l2")
+            probe._last_child_pids = frozenset()
+            probe._last_pss_timestamp = time.time()
+            probe._peak_tree_rss = 10_000.0
+            probe._do_sample(reason="run_end", stage_path="l2")
+            probe._do_sample(reason="steady", stage_path="l2")
+            probe.stop_run(outcome="completed")
+
+        records = [line for line in jsonl_path.read_text().splitlines() if line]
+        assert records
+        assert any('"reason": "steady"' in line and '"tree_rss_mb"' in line for line in records)
+        assert any('"pss_mb"' in line and '"run_end"' in line for line in records)
+
     def test_jsonl_oserror_suppressed(self) -> None:
         parent = _fake_proc(pid=1000, ppid=999, rss=500 * 1024 * 1024, pss=400 * 1024 * 1024)
 
