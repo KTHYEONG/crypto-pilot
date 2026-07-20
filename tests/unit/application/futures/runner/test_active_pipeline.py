@@ -733,6 +733,128 @@ def test_run_tiered_l2_study_batch_loop_without_probe(mocker) -> None:
     assert result is not None
 
 
+def test_run_tiered_l2_study_logs_child_peak_rss(mocker: Any) -> None:
+    from src.application.futures.runner.active_pipeline import _run_tiered_l2_study
+    from src.domain.futures.strategy.config import CandidateStrategyConfig
+    from src.domain.futures.optimization.opt_config import OPT_FUTURES_CONFIG
+
+    cfg = CandidateStrategyConfig(wf_n_folds=4)
+
+    mocker.patch(
+        "src.domain.futures.strategy.walk_forward.build_walk_forward_folds",
+        return_value=(),
+    )
+    mocker.patch(
+        "src.domain.futures.strategy.tiered_workflow.awf_sim.build_l2_simulation_cache",
+        return_value=mocker.MagicMock(),
+    )
+    mocker.patch(
+        "src.domain.futures.strategy.market_regime.compute_market_regime_context",
+        return_value=mocker.MagicMock(),
+    )
+    _routing_mock = mocker.MagicMock()
+    _routing_mock.diagnostics.policy_diagnostics.sign_consistency_ratio = 1.0
+    _routing_mock.diagnostics.policy_diagnostics.mean_cal_lift_bps = 0.0
+    _routing_mock.diagnostics.policy_diagnostics.mean_confidence = 1.0
+    _routing_mock.diagnostics.policy_diagnostics.mode = "test"
+    _routing_mock.diagnostics.policy_diagnostics.global_reliable = True
+    _routing_mock.diagnostics.policy_diagnostics.n_allow = 1
+    _routing_mock.diagnostics.policy_diagnostics.n_downweight = 0
+    _routing_mock.diagnostics.policy_diagnostics.n_block = 0
+    _routing_mock.diagnostics.policy_diagnostics.n_pooled = 0
+    _routing_mock.diagnostics.policy_diagnostics.n_unstable = 0
+    _routing_mock.diagnostics.policy_diagnostics.n_hard_block_eligible = 0
+    _routing_mock.diagnostics.policy_diagnostics.hard_block_enabled = False
+    _routing_mock.diagnostics.compression_enabled = False
+    _routing_mock.diagnostics.conditioning_path = "direct"
+    _routing_mock.diagnostics.proof_passed = True
+    _routing_mock.diagnostics.active_state_count = 1
+    _routing_mock.diagnostics.debug_diagnostics = None
+    mocker.patch(
+        "src.domain.futures.strategy.tiered_workflow.l2_meta.build_regime_routing_plan",
+        return_value=_routing_mock,
+    )
+    mocker.patch(
+        "src.domain.futures.strategy.tiered_workflow.diagnostics.build_layer_universe_audit",
+        return_value=mocker.MagicMock(warnings=()),
+    )
+    mocker.patch(
+        "src.domain.futures.strategy.market_regime.compute_risk_severity_code",
+        return_value=mocker.MagicMock(),
+    )
+    mocker.patch(
+        "src.domain.futures.optimization.workflow.objective_l2_growth",
+        return_value=0.0,
+    )
+    mocker.patch(
+        "src.domain.futures.strategy.tiered_workflow.selection.select_layer2_champion",
+        return_value=mocker.MagicMock(best_params={}, best_trial_number=0, completed_trials=0),
+    )
+    mocker.patch(
+        "src.application.futures.runner.active_pipeline._get_rss_mb",
+        return_value=100.0,
+    )
+    import dataclasses
+
+    mocker.patch.object(dataclasses, "replace", side_effect=lambda obj, **kw: obj)
+    mocker.patch.dict(OPT_FUTURES_CONFIG, {"L2_OPTUNA_BATCH_SIZE": 2}, clear=False)
+    mocker.patch("psutil.virtual_memory", return_value=SimpleNamespace(available=32.0 * (1024.0**3)))
+
+    mock_executor = mocker.MagicMock()
+    mock_executor.__enter__.return_value = mock_executor
+    mock_future = mocker.MagicMock()
+    mock_future.result.return_value = (0.1, {}, 0.01)
+    mock_executor.submit.return_value = mock_future
+    mocker.patch("concurrent.futures.ProcessPoolExecutor", return_value=mock_executor)
+
+    mock_study = mocker.MagicMock()
+    mock_study.trials = []
+    mock_study.ask.side_effect = [mocker.MagicMock(number=i) for i in range(2)]
+    mock_study._stop_flag = False
+    mocker.patch(
+        "src.application.futures.runner.active_pipeline.get_or_create_study",
+        return_value=mock_study,
+    )
+
+    import src.application.futures.runner.active_pipeline as _ap_mod
+
+    spy = mocker.spy(_ap_mod, "_get_child_peak_rss_mb")
+
+    from datetime import date
+
+    window = SimpleNamespace(holdout_start=date(2025, 6, 1), l2_start=date(2024, 6, 1))
+    aligned = SimpleNamespace(
+        symbols=("BTCUSDT",),
+        close_2d=mocker.MagicMock(),
+        datetimes=pd.date_range("2024-01-01", periods=500, freq="h"),
+    )
+    caps = SimpleNamespace(trial_number=0)
+    signal_batch = mocker.MagicMock()
+    signal_batch.start_idx = 0
+    signal_batch.end_idx = 500
+    signal_batch.registry_version = "v1"
+    signal_batch.model_version = "v1"
+    signal_batch.events = ()
+
+    _run_tiered_l2_study(
+        signal_batch=signal_batch,
+        aligned=aligned,
+        cfg=cfg,
+        window=window,
+        caps=caps,
+        tf="1h",
+        n_trials=2,
+        seed=42,
+        l2_sim_cache=mocker.MagicMock(),
+        l2_wf_n_folds=None,
+    )
+
+    assert spy.call_count == 2
+    for ret in spy.spy_return_list:
+        assert isinstance(ret, float)
+        assert ret >= 0.0 or ret == -1.0
+
+
 def test_l2_batch_size_defaults_when_config_missing() -> None:
     """[l2-optuna-batch-determinism-fix] L2_OPTUNA_BATCH_SIZE 키 없을 때 기본값 2."""
     from src.domain.futures.optimization.opt_config import OPT_FUTURES_CONFIG
