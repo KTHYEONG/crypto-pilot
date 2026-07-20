@@ -330,3 +330,66 @@ def test_align_data_maps_cost_diagnostics_silent_when_disabled(caplog: object) -
 
     messages = [r.message for r in caplog.records]  # type: ignore[attr-defined]
     assert not any("stage=align_cost_liquidity" in m for m in messages)
+
+
+def test_align_data_maps_non_price_fields_are_float32() -> None:
+    """[WS3][LIMIT-01]: non-price 2D fields downcast to float32 to cut per-TF RAM."""
+    data_maps = _make_data_maps(["AAA"], n_bars=220)
+    frame = data_maps["AAA"][_TF]
+    frame["funding_rate"] = np.linspace(-0.01, 0.01, len(frame), dtype=np.float64)
+    frame["sum_open_interest"] = np.arange(len(frame), dtype=np.float64)
+    frame["long_short_ratio"] = np.linspace(1.0, 2.0, len(frame), dtype=np.float64)
+    frame["taker_buy_base"] = np.linspace(1.0, 2.0, len(frame), dtype=np.float64)
+    frame["trades"] = np.arange(len(frame), dtype=np.float64)
+    frame["adv_usdt"] = np.linspace(1e4, 1e5, len(frame), dtype=np.float64)
+    frame["execution_cost_bps"] = np.linspace(1.0, 5.0, len(frame), dtype=np.float64)
+
+    aligned = align_data_maps(data_maps, ["AAA"], _TF)
+
+    assert aligned.volume_2d.dtype == np.float32
+    assert aligned.funding_2d.dtype == np.float32
+    assert aligned.oi_2d is not None
+    assert aligned.oi_2d.dtype == np.float32
+    assert aligned.lsr_2d is not None
+    assert aligned.lsr_2d.dtype == np.float32
+    assert aligned.taker_buy_2d is not None
+    assert aligned.taker_buy_2d.dtype == np.float32
+    assert aligned.trades_2d is not None
+    assert aligned.trades_2d.dtype == np.float32
+    assert aligned.adv_usdt_2d.dtype == np.float32
+    assert aligned.execution_cost_bps_2d.dtype == np.float32
+
+
+def test_l1_l2_pipeline_output_stable_after_float32_downcast() -> None:
+    """[WS3][LIMIT-01] integration: align_data_maps의 float32 volume_2d를
+    실제 downstream consumer(_zscore_2d)에 통과시켜도 float64 기준선과
+    수치적으로 근접(rtol=1e-3)함을 확인 — 파이프라인 산출물 안정성 검증."""
+    from src.domain.futures.signals.rules import _zscore_2d
+
+    data_maps = _make_data_maps(["AAA", "BBB"], n_bars=220)
+    aligned = align_data_maps(data_maps, ["AAA", "BBB"], _TF)
+
+    assert aligned.volume_2d.dtype == np.float32
+
+    z_from_float32 = _zscore_2d(aligned.volume_2d, window=20)
+    z_from_float64_baseline = _zscore_2d(aligned.volume_2d.astype(np.float64), window=20)
+
+    np.testing.assert_allclose(
+        z_from_float32,
+        z_from_float64_baseline,
+        rtol=1e-3,
+        atol=1e-6,
+        equal_nan=True,
+    )
+
+
+def test_align_data_maps_price_fields_remain_float64() -> None:
+    """[WS3][LIMIT-01]: OHLC stays float64 (quant.md compounding precision policy)."""
+    data_maps = _make_data_maps(["AAA"], n_bars=220)
+
+    aligned = align_data_maps(data_maps, ["AAA"], _TF)
+
+    assert aligned.open_2d.dtype == np.float64
+    assert aligned.high_2d.dtype == np.float64
+    assert aligned.low_2d.dtype == np.float64
+    assert aligned.close_2d.dtype == np.float64
