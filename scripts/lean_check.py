@@ -228,6 +228,8 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Lean Check with JSON diagnostics.")
     parser.add_argument("--files", nargs="+", required=True)
     parser.add_argument("--spec", default=None, help="Path to spec contract JSON for compliance verification")
+    parser.add_argument("--skip-lint", action="store_true", help="Skip Ruff linting")
+    parser.add_argument("--skip-mypy", action="store_true", help="Skip Mypy static check")
     args = parser.parse_args()
 
     py_files = [f for f in args.files if f.endswith(".py")]
@@ -274,18 +276,24 @@ def main() -> None:
                     _fail_exit("print-check", f"FAIL | {pf}:{idx} print() detected", d)
 
     # 3. Ruff
-    ruff_res = run_cmd(["uv", "run", "ruff", "check", *py_files, "--quiet"])
-    if ruff_res.returncode != 0:
-        out = (ruff_res.stdout or ruff_res.stderr).strip()
-        d = {"file": py_files[0] if py_files else "", "line": 0, "error": out, "fix_hint": "Resolve ruff errors"}
-        _fail_exit("ruff", "FAIL | Ruff Lint Failed", d)
+    if not args.skip_lint:
+        ruff_res = run_cmd(["uv", "run", "ruff", "check", *py_files, "--quiet"])
+        if ruff_res.returncode != 0:
+            out = (ruff_res.stdout or ruff_res.stderr).strip()
+            # Slice error output to max 10 lines for token efficiency
+            out_sliced = "\n".join(out.splitlines()[:10])
+            d = {"file": py_files[0] if py_files else "", "line": 0, "error": out_sliced, "fix_hint": "Resolve ruff errors"}
+            _fail_exit("ruff", "FAIL | Ruff Lint Failed", d)
 
     # 4. Mypy
-    mypy_res = run_cmd(["uv", "run", "mypy", *py_files, "--ignore-missing-imports"])
-    if mypy_res.returncode != 0:
-        out = (mypy_res.stdout or mypy_res.stderr).strip()
-        d = {"file": py_files[0] if py_files else "", "line": 0, "error": out, "fix_hint": "Resolve type errors"}
-        _fail_exit("mypy", "FAIL | Mypy Type Check Failed", d)
+    if not args.skip_mypy:
+        mypy_res = run_cmd(["uv", "run", "mypy", *py_files, "--ignore-missing-imports"])
+        if mypy_res.returncode != 0:
+            out = (mypy_res.stdout or mypy_res.stderr).strip()
+            # Slice error output to max 10 lines for token efficiency
+            out_sliced = "\n".join(out.splitlines()[:10])
+            d = {"file": py_files[0] if py_files else "", "line": 0, "error": out_sliced, "fix_hint": "Resolve type errors"}
+            _fail_exit("mypy", "FAIL | Mypy Type Check Failed", d)
 
     # 5. Single pytest with coverage
     test_files = _find_test_files(py_files)
