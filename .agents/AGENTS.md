@@ -94,7 +94,7 @@ Skills define phase-specific workflows. Execute skills adaptively according to c
 
 - **Adaptive Tiered Pipeline (Thinker-Doer Split)**:
   - **Tier 1 (Light)**: Low complexity (minor fixes, simple refactoring). Skip `spec`. Go straight to `implement` ➔ `check` (L1.5 local check).
-  - **Tier 2 (Standard)**: Medium complexity. Generate lightweight Markdown spec (skip JSON contract) ➔ `implement` ➔ Auto-run `check` (`lean_check.py`).
+  - **Tier 2 (Standard)**: Medium complexity. Generate lightweight Markdown spec & `_contract.json` ➔ `implement` ➔ Auto-run `check` (`lean_check.py`).
   - **Tier 3 (Architectural)**: High complexity (core business/trading logic). Trigger `/grill-me` interview ➔ Write Spec & `_contract.json` ➔ `implement` ➔ Auto-run `check`.
 - **Pipeline Auto-Chaining**: Once the `implement` phase passes local L1.5 checks, the system must immediately trigger the `check` phase (`lean_check.py`) automatically. No user confirmation is allowed between code implementation and validation.
 - **Single Skill Scope (Tier 2/3)**: Stop immediately (STOP) and wait for user feedback *only* when the initial `spec` is created, and at the end when the full pipeline is 100% green.
