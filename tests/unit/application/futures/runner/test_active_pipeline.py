@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextlib
 import inspect
 from dataclasses import dataclass
 from datetime import date
@@ -513,6 +514,223 @@ def test_l2_batch_size_invariant_to_available_memory(mocker) -> None:
 
     assert ask_call_counts[0] == ask_call_counts[1] == 6
     assert max_workers_seen[0] <= max_workers_seen[1]
+
+
+def test_run_tiered_l2_study_wires_probe_span_around_batch_loop(mocker) -> None:
+    """[WS1][pipeline-runtime-memory-optimization] L2_optuna 배치 루프가
+    L2RuntimeProbe.span('l2_optuna_batch', ...)로 감싸져 RSS/PSS peak를
+    귀속 가능하게 계측하는지 검증."""
+    from src.application.futures.runner.active_pipeline import _run_tiered_l2_study
+    from src.domain.futures.strategy.config import CandidateStrategyConfig
+    from src.domain.futures.optimization.opt_config import OPT_FUTURES_CONFIG
+
+    cfg = CandidateStrategyConfig(wf_n_folds=4)
+
+    mocker.patch(
+        "src.domain.futures.strategy.walk_forward.build_walk_forward_folds",
+        return_value=(),
+    )
+    mocker.patch(
+        "src.domain.futures.strategy.tiered_workflow.awf_sim.build_l2_simulation_cache",
+        return_value=mocker.MagicMock(),
+    )
+    mocker.patch(
+        "src.domain.futures.strategy.market_regime.compute_market_regime_context",
+        return_value=mocker.MagicMock(),
+    )
+    mocker.patch(
+        "src.domain.futures.strategy.tiered_workflow.l2_meta.build_regime_routing_plan",
+        return_value=mocker.MagicMock(),
+    )
+    mocker.patch(
+        "src.domain.futures.strategy.tiered_workflow.diagnostics.build_layer_universe_audit",
+        return_value=mocker.MagicMock(warnings=()),
+    )
+    mocker.patch(
+        "src.domain.futures.strategy.market_regime.compute_risk_severity_code",
+        return_value=mocker.MagicMock(),
+    )
+    mocker.patch(
+        "src.domain.futures.optimization.workflow.objective_l2_growth",
+        return_value=0.0,
+    )
+    mocker.patch(
+        "src.domain.futures.strategy.tiered_workflow.selection.select_layer2_champion",
+        return_value=mocker.MagicMock(best_params={}, best_trial_number=0, completed_trials=0),
+    )
+    mocker.patch(
+        "src.application.futures.runner.active_pipeline._get_rss_mb",
+        return_value=100.0,
+    )
+    import dataclasses
+
+    mocker.patch.object(dataclasses, "replace", side_effect=lambda obj, **kw: obj)
+    mocker.patch.dict(OPT_FUTURES_CONFIG, {"L2_OPTUNA_BATCH_SIZE": 2}, clear=False)
+    mocker.patch("psutil.virtual_memory", return_value=SimpleNamespace(available=32.0 * (1024.0**3)))
+
+    mock_executor = mocker.MagicMock()
+    mock_executor.__enter__.return_value = mock_executor
+    mock_future = mocker.MagicMock()
+    mock_future.result.return_value = (0.1, {}, 0.01)
+    mock_executor.submit.return_value = mock_future
+    mocker.patch("concurrent.futures.ProcessPoolExecutor", return_value=mock_executor)
+
+    mock_study = mocker.MagicMock()
+    mock_study.trials = []
+    mock_study.ask.side_effect = [mocker.MagicMock(number=i) for i in range(2)]
+    mock_study._stop_flag = False
+    mocker.patch(
+        "src.application.futures.runner.active_pipeline.get_or_create_study",
+        return_value=mock_study,
+    )
+
+    span_calls: list[tuple[Any, dict[str, Any]]] = []
+    mock_probe = mocker.MagicMock()
+    mock_probe.enabled = True
+
+    def _record_span(stage: str, **fields: Any):
+        span_calls.append((stage, fields))
+        return contextlib.nullcontext()
+
+    mock_probe.span.side_effect = _record_span
+    mocker.patch(
+        "src.application.futures.runner.active_pipeline.L2RuntimeProbe.from_environment",
+        return_value=mock_probe,
+    )
+
+    from datetime import date
+
+    window = SimpleNamespace(holdout_start=date(2025, 6, 1), l2_start=date(2024, 6, 1))
+    aligned = SimpleNamespace(
+        symbols=("BTCUSDT",),
+        close_2d=mocker.MagicMock(),
+        datetimes=pd.date_range("2024-01-01", periods=500, freq="h"),
+    )
+    caps = SimpleNamespace(trial_number=0)
+    signal_batch = mocker.MagicMock()
+    signal_batch.start_idx = 0
+    signal_batch.end_idx = 500
+    signal_batch.registry_version = "v1"
+    signal_batch.model_version = "v1"
+    signal_batch.events = ()
+
+    _run_tiered_l2_study(
+        signal_batch=signal_batch,
+        aligned=aligned,
+        cfg=cfg,
+        window=window,
+        caps=caps,
+        tf="1h",
+        n_trials=2,
+        seed=42,
+        l2_sim_cache=mocker.MagicMock(),
+        l2_wf_n_folds=None,
+    )
+
+    assert any(stage == "l2_optuna_batch" for stage, _ in span_calls)
+    batch_fields = next(fields for stage, fields in span_calls if stage == "l2_optuna_batch")
+    assert "batch_num" in batch_fields
+    assert "n_workers" in batch_fields
+
+
+def test_run_tiered_l2_study_batch_loop_without_probe(mocker) -> None:
+    """[WS1][pipeline-runtime-memory-optimization] L2RuntimeProbe가 비활성(기본,
+    DEBUG 미설정) 상태여도 배치 루프가 예외 없이 정상 완료돼야 한다."""
+    from src.application.futures.runner.active_pipeline import _run_tiered_l2_study
+    from src.domain.futures.strategy.config import CandidateStrategyConfig
+    from src.domain.futures.optimization.opt_config import OPT_FUTURES_CONFIG
+
+    cfg = CandidateStrategyConfig(wf_n_folds=4)
+
+    mocker.patch(
+        "src.domain.futures.strategy.walk_forward.build_walk_forward_folds",
+        return_value=(),
+    )
+    mocker.patch(
+        "src.domain.futures.strategy.tiered_workflow.awf_sim.build_l2_simulation_cache",
+        return_value=mocker.MagicMock(),
+    )
+    mocker.patch(
+        "src.domain.futures.strategy.market_regime.compute_market_regime_context",
+        return_value=mocker.MagicMock(),
+    )
+    mocker.patch(
+        "src.domain.futures.strategy.tiered_workflow.l2_meta.build_regime_routing_plan",
+        return_value=mocker.MagicMock(),
+    )
+    mocker.patch(
+        "src.domain.futures.strategy.tiered_workflow.diagnostics.build_layer_universe_audit",
+        return_value=mocker.MagicMock(warnings=()),
+    )
+    mocker.patch(
+        "src.domain.futures.strategy.market_regime.compute_risk_severity_code",
+        return_value=mocker.MagicMock(),
+    )
+    mocker.patch(
+        "src.domain.futures.optimization.workflow.objective_l2_growth",
+        return_value=0.0,
+    )
+    mocker.patch(
+        "src.domain.futures.strategy.tiered_workflow.selection.select_layer2_champion",
+        return_value=mocker.MagicMock(best_params={}, best_trial_number=0, completed_trials=0),
+    )
+    mocker.patch(
+        "src.application.futures.runner.active_pipeline._get_rss_mb",
+        return_value=100.0,
+    )
+    import dataclasses
+
+    mocker.patch.object(dataclasses, "replace", side_effect=lambda obj, **kw: obj)
+    mocker.patch.dict(OPT_FUTURES_CONFIG, {"L2_OPTUNA_BATCH_SIZE": 2}, clear=False)
+    mocker.patch("psutil.virtual_memory", return_value=SimpleNamespace(available=32.0 * (1024.0**3)))
+
+    mock_executor = mocker.MagicMock()
+    mock_executor.__enter__.return_value = mock_executor
+    mock_future = mocker.MagicMock()
+    mock_future.result.return_value = (0.1, {}, 0.01)
+    mock_executor.submit.return_value = mock_future
+    mocker.patch("concurrent.futures.ProcessPoolExecutor", return_value=mock_executor)
+
+    mock_study = mocker.MagicMock()
+    mock_study.trials = []
+    mock_study.ask.side_effect = [mocker.MagicMock(number=i) for i in range(2)]
+    mock_study._stop_flag = False
+    mocker.patch(
+        "src.application.futures.runner.active_pipeline.get_or_create_study",
+        return_value=mock_study,
+    )
+
+    # L2RuntimeProbe.from_environment은 mock되지 않음 — 실제 기본(비활성) 인스턴스 사용.
+    from datetime import date
+
+    window = SimpleNamespace(holdout_start=date(2025, 6, 1), l2_start=date(2024, 6, 1))
+    aligned = SimpleNamespace(
+        symbols=("BTCUSDT",),
+        close_2d=mocker.MagicMock(),
+        datetimes=pd.date_range("2024-01-01", periods=500, freq="h"),
+    )
+    caps = SimpleNamespace(trial_number=0)
+    signal_batch = mocker.MagicMock()
+    signal_batch.start_idx = 0
+    signal_batch.end_idx = 500
+    signal_batch.registry_version = "v1"
+    signal_batch.model_version = "v1"
+    signal_batch.events = ()
+
+    result = _run_tiered_l2_study(
+        signal_batch=signal_batch,
+        aligned=aligned,
+        cfg=cfg,
+        window=window,
+        caps=caps,
+        tf="1h",
+        n_trials=2,
+        seed=42,
+        l2_sim_cache=mocker.MagicMock(),
+        l2_wf_n_folds=None,
+    )
+
+    assert result is not None
 
 
 def test_l2_batch_size_defaults_when_config_missing() -> None:
