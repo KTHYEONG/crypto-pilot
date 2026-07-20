@@ -29,12 +29,13 @@
 ## 4. Context & Harness Engineering (Pre-verification & Validation)
 - **Dependency Management:** Check `pyproject.toml` before using external packages. If a new package is essential for implementation, add the dependency first using `uv add [package_name]` before writing code.
 - **Codebase Discovery:** Use `rg` to prevent duplicate code, but limit output (e.g., `head -n 30`) to avoid token overflow.
-- **Check Loop:** 
+- **Check Loop & Pipeline Auto-Chaining:** 
     - **Trigger:** Execute when a `.py` file is created or modified. (Excluding the `spec` design phase or markdown-only updates).
-    - **Action:** 
-        - **Implementation Phase (L1):** Run stub signature checks first.
-        - **Check Phase (L2):** Execute unified regression test and coverage under the `check` skill batch plan.
-    - **Test Scope:** Use `uv run pytest` to run tests and measure coverage, strictly following the directives in [.agents/rules/testing.md](file:///.agents/rules/testing.md). Use `uv run pytest -k "keyword"` with the `--tb=short` option for fast feedback during iterations.
+    - **Action**: Run the active skill's phase instructions.
+      - **Implement phase (L1):** Stub signature check + TDD cycle. Once L1.5 local checks pass, **immediately auto-chain trigger the check phase (L2)** without asking for user permission.
+      - **Check phase (L2):** Full regression + coverage auditing via `lean_check.py`.
+    - **Test Scope:** Target modified test files only (1:1 co-modification mapping). Never run `pytest` on broad directories.
+
 
 ## 5. Tech Stack & Standards (Python 3.11)
 - **Version:** Based on Python 3.11+. Actively utilize modern syntax (TaskGroup, `|` operator, `Self`, etc.).
@@ -89,22 +90,18 @@ This protocol applies only inside code-writing phases such as `implement` when n
 
 ## 11. Skill Orchestration Boundary
 
-Skills define phase-specific workflows only. Execute skills individually; transition to the next skill only when explicitly requested.
+Skills define phase-specific workflows. Execute skills adaptively according to complexity, leveraging the automated pipeline.
 
-- **Single Skill Scope:** Stop immediately (STOP) and wait for user feedback once the active skill's objective is met.
-- **Controlled Chaining:** Wait for user feedback or explicit requests before invoking subsequent skills.
-- **Roadmap vs Pipeline:** The workflow below is a "roadmap" for user reference, not an automated execution pipeline.
+- **Adaptive Tiered Pipeline (Thinker-Doer Split)**:
+  - **Tier 1 (Light)**: Low complexity (minor fixes, simple refactoring). Skip `spec`. Go straight to `implement` ➔ `check` (L1.5 local check).
+  - **Tier 2 (Standard)**: Medium complexity. Generate lightweight Markdown spec (skip JSON contract) ➔ `implement` ➔ Auto-run `check` (`lean_check.py`).
+  - **Tier 3 (Architectural)**: High complexity (core business/trading logic). Trigger `/grill-me` interview ➔ Write Spec & `_contract.json` ➔ `implement` ➔ Auto-run `check`.
+- **Pipeline Auto-Chaining**: Once the `implement` phase passes local L1.5 checks, the system must immediately trigger the `check` phase (`lean_check.py`) automatically. No user confirmation is allowed between code implementation and validation.
+- **Single Skill Scope (Tier 2/3)**: Stop immediately (STOP) and wait for user feedback *only* when the initial `spec` is created, and at the end when the full pipeline is 100% green.
 
-[Manual Development Roadmap (User-led)]
-1. spec -> 2. implement -> 3. check -> 4. sync
+[Development Pipeline Roadmap]
+1. spec (Grill-me & Spec approval) ➔ 2. implement ➔ [Auto-run] ➔ 3. check ➔ 4. sync
 
-Commit tasks:
-- Do not route through the default skill workflow.
-- Use the `commit` skill only when explicitly requested by the user.
-
-Quant tasks:
-- Route through the default skill workflow unless `quant.md` requires otherwise.
-- Apply `.agents/rules/quant.md` automatically when its trigger conditions match.
 
 ## 12. Documentation Separation Strategy (Architecture vs. Decisions)
 
