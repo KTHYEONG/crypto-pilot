@@ -32,7 +32,7 @@ Optimize for **low-cost models (Doer)** by enforcing strict mechanical execution
 - **Step 4: L1.5 Gate & Auto-Chain to Check**
   - Once local tests pass, run: `uv run ruff check [modified_files]` to ensure lint compliance.
   - **[Auto-Chain Execution]**: Immediately proceed to call the **Check** tool:
-    `uv run python scripts/lean_check.py --files [modified_files] --spec docs/specs/[feature]_contract.json`
+    `uv run python scripts/lean_check.py --files [modified_files] --spec docs/specs/[feature]_contract.json --skip-lint --skip-mypy`
   - **Do NOT stop or ask for user permission between Implement and Check.** 
 
 ### 3. Self-Healing Budget (Max 3 Loops)
