@@ -78,7 +78,7 @@ def _get_target_coverage(file_path: str) -> int:
     # Tier 2 (Adapter/Runner): adapters, runners, repository, services, db
     if any(k in file_path for k in ("adapters/", "runners/", "repository/", "services/", "db/")):
         return 65
-    return 0
+    return 50  # Fallback target for other source paths
 
 
 def _parse_file_coverage(stdout: str, file_path: str) -> int | None:
@@ -344,7 +344,16 @@ def main() -> None:
                     }
                     coverage_violations.append(d)
             else:
-                # Existing files: only ensure 100% of the modified lines are covered (to prevent token waste on legacy code)
+                # Existing files: ensure 100% of modified lines are covered AND total coverage is at or above 40% floor
+                if actual_cov < 40:
+                    d = {
+                        "file": sf,
+                        "line": 0,
+                        "error": f"Coverage target violation: actual coverage {actual_cov}% is below minimum safety floor (40%)",
+                        "fix_hint": f"Add test cases to bring total coverage of {sf} above 40% (current: {actual_cov}%)",
+                    }
+                    coverage_violations.append(d)
+                
                 changed = _get_changed_lines(sf)
                 if changed:
                     missing = _get_missing_lines(pt_res.stdout, sf)
