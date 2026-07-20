@@ -1,5 +1,10 @@
 # Active Decisions Log (Sliding Window)
 
+## [2026-07-20] [TASK_L2_HOT_CACHE_INTEGRITY_REMEASURE] [ADR_20260720_L2_HOT_CACHE_INTEGRITY_REMEASURE]
+- **Context/Why:** L1 캐시 재사용과 L2 feasibility 감사 수정 이후 실제 120-trial phase L2 결과를 문서화하고 잔여 RSS 병목을 추적
+- **Resolution/What:** 7개 timeframe L1 cache hit을 확인하고 총시간·단계별 시간·RSS·자산증식·위기검증 수치를 docs/results/result.md에 기록; L2 worker peak RSS를 다음 P0 계측 대상으로 지정
+- **Impact:** 총 소요시간 323.20s→217.43s(-32.7%), L1 122.55s→7.84s(-93.6%) 개선. RSS 13,608MiB로 12GiB 예산 1,320MiB 초과하여 worker 메모리 제한 최적화가 필요
+
 ## [2026-07-20] [COLD_PATH_RUNTIME_BOTTLENECK_ELIMINATION] [ADR_20260720_COLD_PATH_RUNTIME_BOTTLENECK_ELIMINATION]
 - **Context/Why:** Cold L2 measurements identified bridge alignment, transient cache ownership, snapshot worker memory, and TF lifecycle retention as remaining bottlenecks; contract tests and runtime lifecycle boundaries now need a synchronized ADR record.
 - **Resolution/What:** Recorded the cold-path optimization contract, added exact scenario coverage for causal statistics, bulk alignment, adaptive snapshot execution, TF resource release, and signal/timeframe-independent runtime planning; synchronized the implementation and regression-test references.
@@ -69,8 +74,3 @@
 - **Context/Why:** active_block_count 수정(ADR_20260719) 후 오늘 세션 최초 정상장 PASS 달성했으나 독립 crisis stress test(LUNA/FTX)에서 MDD 27.86%(예산 초과)·CAGR -24.53%로 붕괴. 코드 추적 결과 select_layer2_champion이 crisis_rets/crisis_replay_ctx 파라미터를 아예 받지 않아, replay 단계의 evaluate_layer2_gate 호출이 crisis_mdd_hybrid=None(암묵적 기본값)으로 호출되고 이는 항상 자동 feasible(-1.0) 처리됨 — champion 선정이 crisis 데이터를 단 한 번도 참조하지 못하는 구조. active_block_count 버그와 대칭(존재하지 않는 신호로 인한 오판정)이나 방향이 반대(오판정이 fail이 아니라 pass).
 - **Resolution/What:** evaluate_l2_trial 내부의 crisis MDD 계산 블록을 compute_crisis_mdd_budget 순수 함수로 추출(evaluate_l2_trial과 select_layer2_champion이 공유, 로직 이중화 방지). select_layer2_champion에 crisis_rets/crisis_replay_ctx 파라미터 추가, replay 루프(최대 fallback_limit=24개 후보)에서 이 헬퍼로 crisis MDD를 재계산해 evaluate_layer2_gate 호출에 crisis_mdd_hybrid/crisis_mdd_budget로 전달. _run_tiered_l2_study가 이미 보유한 crisis_rets/crisis_replay_ctx를 select_layer2_champion에 전달하도록 배선. 전체 120 trial이 아닌 replay 후보(최대 24개)에만 적용해 L2_PHASE_PERF_OPTIMIZATION 성능 예산 보존.
 - **Impact:** 실측 재검증(동일 seed=42, n=120): 정상장 STATUS 유지 PASS(CAGR +38.9%→+33.7%, 소폭 하락하나 게이트 여유 통과), L*가 1.14→1.00(바닥값)으로 더 보수적인 champion 선택. crisis MDD 27.86%→17.50%로 10.4%p 개선되며 예산(21%) 최초 통과, crisis 실패 사유가 'mdd_abs; cagr' 2건→'cagr' 단독으로 축소. crisis CAGR은 -24.53%→-14.58%로 개선됐으나 -5% 하한 미달 지속 — 레버리지(사이징)로는 더 개선 불가(이미 L*=1.0), 다음 병목은 방향성(regime cap/비대칭 롱숏) 문제로 명확히 좁혀짐. /check PASS(Cov 30%).
-
-## [2026-07-19] [TASK_L2_ACTIVE_BLOCK_COUNT_LIGHTWEIGHT_FIX] [ADR_20260719_L2_ACTIVE_BLOCK_COUNT_LIGHTWEIGHT_FIX]
-- **Context/Why:** 오늘 실행된 8번의 L2 파이프라인 전부에서 [L2-SELECTION] feasible trials 없음 → fallback이 예외 없이 재현. 코드 역추적 결과: Optuna 탐색 루프의 전 trial이 lightweight=True로 평가되는데, evaluate_l2_trial의 block_metrics 리스트가 lightweight=True 시 항상 빈 리스트라 active_block_count가 입력과 무관하게 항상 0으로 계산됨. l2_min_active_blocks=3(기본값) 대비 0은 optuna_constraint_values 6번째 슬롯을 100% trial에서 위반시켜 feasible_trials가 구조적으로 항상 공집합이었음 — 오늘 구현한 5개 spec(margin/fold/regime/cagr-uplift/worst-fold-clamp)이 전부 fallback 경로를 통해서만 검증된 근본 원인.
-- **Resolution/What:** active_block_count 계산을 Layer2BlockMetric 상세 객체 리스트에서 파생하는 대신 sim.all_turnovers 슬라이싱만으로 lightweight 여부와 무관하게 항상 계산하도록 분리. Layer2BlockMetric 객체 생성(진단용, 비용 절감 대상)은 계속 lightweight로 skip 유지 — 성능 예산 영향 없음.
-- **Impact:** 실측 검증(seed=42, n=120): 오늘 세션 최초로 [CHAMPION STORE] 신규 챔피언 갱신 + STATUS: PASS 달성(CAGR +38.9%, Sharpe 2.217, Sortino 3.738, Calmar 3.244, Fold 100%, PSR 0.998, Sharpe Uplift +0.37 전부 통과). [EVAL] event=replay_flip 로그로 replay 검증도 정상 작동 확인. 다만 이어진 crisis stress test(LUNA/FTX)는 실패(status=stress_tested_fail, mdd=27.86%>예산, cagr=-24.53%) — 정상장 gate 완전 통과 + 스트레스 붕괴라는, 오늘 세션 초반 사용자가 지적했던 역사적 패턴이 버그 수정 후 최초로 실측 재현됨. 다음 병목은 crisis 방어로 명확히 좁혀짐. /check PASS(Cov 37%).
