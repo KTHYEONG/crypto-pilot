@@ -141,6 +141,10 @@ class TestRunTieredL2StudyFoldOverride:
             return_value=mocker.MagicMock(),
         )
         mocker.patch(
+            "src.domain.futures.strategy.tiered_workflow.awf_sim.compute_per_tf_fit_edge",
+            return_value={},
+        )
+        mocker.patch(
             "src.domain.futures.strategy.market_regime.compute_market_regime_context",
             return_value=mocker.MagicMock(),
         )
@@ -226,6 +230,10 @@ class TestRunTieredL2StudyFoldOverride:
         mocker.patch(
             "src.domain.futures.strategy.tiered_workflow.awf_sim.build_l2_simulation_cache",
             return_value=mocker.MagicMock(),
+        )
+        mocker.patch(
+            "src.domain.futures.strategy.tiered_workflow.awf_sim.compute_per_tf_fit_edge",
+            return_value={},
         )
         mocker.patch(
             "src.domain.futures.strategy.market_regime.compute_market_regime_context",
@@ -314,6 +322,10 @@ class TestRunTieredL2StudyFoldOverride:
         mocker.patch(
             "src.domain.futures.strategy.tiered_workflow.awf_sim.build_l2_simulation_cache",
             return_value=mocker.MagicMock(),
+        )
+        mocker.patch(
+            "src.domain.futures.strategy.tiered_workflow.awf_sim.compute_per_tf_fit_edge",
+            return_value={},
         )
         mocker.patch(
             "src.domain.futures.strategy.market_regime.compute_market_regime_context",
@@ -413,6 +425,10 @@ def test_l2_batch_size_invariant_to_available_memory(mocker) -> None:
     mocker.patch(
         "src.domain.futures.strategy.tiered_workflow.awf_sim.build_l2_simulation_cache",
         return_value=mocker.MagicMock(),
+    )
+    mocker.patch(
+        "src.domain.futures.strategy.tiered_workflow.awf_sim.compute_per_tf_fit_edge",
+        return_value={},
     )
     mocker.patch(
         "src.domain.futures.strategy.market_regime.compute_market_regime_context",
@@ -535,6 +551,10 @@ def test_run_tiered_l2_study_wires_probe_span_around_batch_loop(mocker) -> None:
         return_value=mocker.MagicMock(),
     )
     mocker.patch(
+        "src.domain.futures.strategy.tiered_workflow.awf_sim.compute_per_tf_fit_edge",
+        return_value={},
+    )
+    mocker.patch(
         "src.domain.futures.strategy.market_regime.compute_market_regime_context",
         return_value=mocker.MagicMock(),
     )
@@ -651,6 +671,10 @@ def test_run_tiered_l2_study_batch_loop_without_probe(mocker) -> None:
         return_value=mocker.MagicMock(),
     )
     mocker.patch(
+        "src.domain.futures.strategy.tiered_workflow.awf_sim.compute_per_tf_fit_edge",
+        return_value={},
+    )
+    mocker.patch(
         "src.domain.futures.strategy.market_regime.compute_market_regime_context",
         return_value=mocker.MagicMock(),
     )
@@ -747,6 +771,10 @@ def test_run_tiered_l2_study_logs_child_peak_rss(mocker: Any) -> None:
     mocker.patch(
         "src.domain.futures.strategy.tiered_workflow.awf_sim.build_l2_simulation_cache",
         return_value=mocker.MagicMock(),
+    )
+    mocker.patch(
+        "src.domain.futures.strategy.tiered_workflow.awf_sim.compute_per_tf_fit_edge",
+        return_value={},
     )
     mocker.patch(
         "src.domain.futures.strategy.market_regime.compute_market_regime_context",
@@ -874,6 +902,10 @@ def _setup_l2_study_mocks(
     mocker.patch(
         "src.domain.futures.strategy.tiered_workflow.awf_sim.build_l2_simulation_cache",
         return_value=mocker.MagicMock(),
+    )
+    mocker.patch(
+        "src.domain.futures.strategy.tiered_workflow.awf_sim.compute_per_tf_fit_edge",
+        return_value={},
     )
     mocker.patch(
         "src.domain.futures.strategy.market_regime.compute_market_regime_context",
@@ -1128,6 +1160,10 @@ def test_l2_study_trial_sequence_reproducible_across_memory_states(mocker) -> No
         return_value=mocker.MagicMock(),
     )
     mocker.patch(
+        "src.domain.futures.strategy.tiered_workflow.awf_sim.compute_per_tf_fit_edge",
+        return_value={},
+    )
+    mocker.patch(
         "src.domain.futures.strategy.market_regime.compute_market_regime_context",
         return_value=mocker.MagicMock(),
     )
@@ -1205,6 +1241,11 @@ def test_l2_study_trial_sequence_reproducible_across_memory_states(mocker) -> No
             return_value=mocker.MagicMock(best_params={"seed_check": "ok"}, best_trial_number=5, completed_trials=6),
         )
 
+        mocker.patch(
+            "src.domain.futures.strategy.tiered_workflow.awf_sim.compute_per_tf_fit_edge",
+            return_value={},
+        )
+
         mock_study = mocker.MagicMock()
         mock_study.trials = []
         _ask_trials = [mocker.MagicMock(number=i, params={"_trial_number": i}) for i in range(6)]
@@ -1255,3 +1296,33 @@ def test_run_tiered_l2_study_wall_time_within_perf_budget() -> None:
     """L2 wf_n_folds=8 실행 시 wall-time이 baseline 대비 15% 이내인지 확인.
     수동/스크립트 성격 테스트 — 실제 full 실행 필요."""
     pass
+
+
+def test_active_pipeline_helpers() -> None:
+    from src.application.futures.runner.active_pipeline import (
+        _btc_index_if_present,
+        _get_rss_mb,
+        _get_child_peak_rss_mb,
+        _get_peak_rss_mb,
+        _fit_table_cell,
+        _select_probe_source_tf,
+    )
+    
+    # 1. _btc_index_if_present
+    assert _btc_index_if_present(("ETHUSDT", "BTCUSDT", "SOLUSDT")) == 1
+    assert _btc_index_if_present(("ETHUSDT", "SOLUSDT")) == -1
+
+    # 2. _get_rss_mb, _get_child_peak_rss_mb, _get_peak_rss_mb (execution test)
+    _get_rss_mb()
+    _get_child_peak_rss_mb()
+    _get_peak_rss_mb()
+
+    # 3. _fit_table_cell
+    assert _fit_table_cell("hello", 10) == "hello"
+    assert _fit_table_cell("hello world", 5) == "he..."
+    assert _fit_table_cell("hi", 2) == "hi"
+
+    # 4. _select_probe_source_tf
+    sym_maps = {"BTCUSDT": {"candles_1h": None}}
+    _select_probe_source_tf(sym_maps, "1h")
+
