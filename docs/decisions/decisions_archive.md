@@ -2,6 +2,11 @@
 
 This file holds historical architecture decision records (ADRs) that have been pruned from the active window.
 
+## [2026-07-19] [TASK_L2_FEASIBILITY_FIRST_REMEASURE] [ADR_20260719_L2_FEASIBILITY_FIRST_REMEASURE]
+- **Context/Why:** 위기 리플레이 입력은 정상화됐지만 이전 실행에서 fallback과 None 측정 공백이 결과 신뢰성을 훼손했으므로, 정상·위기 제약을 함께 평가한 120-trial 재측정 결과를 ADR로 고정한다.
+- **Resolution/What:** 위기 컨텍스트 53심볼·7,221 bars·120 matched pairs·26,806 events를 확인하고 120/120 trials를 완료했다. crisis_measured=120이었으며 joint_feasible=0으로 no_feasible_trials fail-closed 처리하고 최종 파이프라인 실행을 중단했다.
+- **Impact:** 최고 정상 CAGR -11.77%, 주요 탈락은 fold 120/120·CAGR 119/120·recent_fold 70/120이며 배포 가능한 L2 champion을 승격하지 않는다. 데이터 누락이 아닌 현재 탐색공간의 공동 제약 실패로 다음 개선은 fold/CAGR 구조와 탐색공간을 재검토해야 한다.
+
 ## [2026-07-19] [TASK_L2_CRISIS_CAGR_CHAMPION_SELECTION_BLINDNESS_FIX] [ADR_20260719_L2_CRISIS_CAGR_CHAMPION_SELECTION_BLINDNESS_FIX]
 - **Context/Why:** spec7(crisis MDD blindness fix) 이후에도 crisis CAGR(-14.58%)이 L*=1.0에서도 미달 지속. 코드 추적 결과 compute_crisis_mdd_budget()이 crisis-window 재시뮬레이션(DeploymentResult)에서 mdd만 읽고 이미 계산된 cagr은 버림 — crisis CAGR이 평가되는 유일한 지점은 champion 확정 후 실행되는 evaluate_crisis_survival() 사후 리포트뿐, Optuna constraints_func/select_layer2_champion의 입력이 아니었음(spec6·spec7과 동일 계열, crisis MDD의 대칭 버그).
 - **Resolution/What:** compute_crisis_mdd_budget을 CrisisReplayBudget(mdd_hybrid, mdd_budget, cagr_hybrid, cagr_floor) 반환 dataclass로 확장(compute_crisis_replay_budget, 신규 IO/연산 없이 기존 DeploymentResult.cagr 노출). evaluate_layer2_gate의 optuna_constraint_values를 12->13-tuple로 확장(crisis_cagr_hybrid/crisis_cagr_floor 신규 슬롯). Layer2AllocationConfig.l2_min_crisis_cagr(-0.05, fixed/non-searchable) 신설 — l2_min_worst_fold_cagr와 값은 같으나 spec1의 crisis-margin decoupling 전례를 따라 독립 필드로 분리. pipeline.py의 evaluate_crisis_survival 호출도 동일 필드로 SSOT 정합. select_layer2_champion의 champion 확정 분기와 fallback(non_deterministic_replay) 분기 양쪽에 [ALGO] event=champion_regime_levers 로그 추가(실제 선택된 policy_mode/hard_block/asymmetry/severity_gating/crisis_gross_cap 노출).
