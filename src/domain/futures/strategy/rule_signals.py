@@ -205,16 +205,16 @@ def _ema_2d(arr: NDArray[np.float64], span: int) -> NDArray[np.float64]:
     return np.asarray(_ema_2d_jit(arr, span), dtype=np.float64)
 
 
-def _rolling_mean_2d(arr: NDArray[np.float64], window: int) -> NDArray[np.float64]:
+def _rolling_mean_2d(arr: NDArray[np.floating[Any]], window: int) -> NDArray[np.float64]:
     # Time: O(T*N) via pandas C-layer; Space: O(T*N)
     if window <= 1:
-        return arr.copy()
+        return arr.astype(np.float64, copy=True)
     df = pd.DataFrame(arr)
     result: NDArray[np.float64] = df.rolling(window=window, min_periods=1).mean().shift(1).to_numpy(dtype=np.float64)
     return result
 
 
-def _rolling_std_2d(arr: NDArray[np.float64], window: int) -> NDArray[np.float64]:
+def _rolling_std_2d(arr: NDArray[np.floating[Any]], window: int) -> NDArray[np.float64]:
     # Time: O(T*N) via pandas C-layer; Space: O(T*N)
     if window <= 1:
         return np.zeros_like(arr, dtype=np.float64)
@@ -231,15 +231,15 @@ def _log_return_2d(close: NDArray[np.float64], lag: int) -> NDArray[np.float64]:
     return out.astype(np.float64, copy=False)
 
 
-def _zscore_2d(arr: NDArray[np.float64], window: int, eps: float = 1e-12) -> NDArray[np.float64]:
+def _zscore_2d(arr: NDArray[np.floating[Any]], window: int, eps: float = 1e-12) -> NDArray[np.float64]:
     mean = _rolling_mean_2d(arr, window=window)
     std = _rolling_std_2d(arr, window=window)
     return (arr - mean) / np.maximum(std, eps)
 
 
 def _safe_taker_imbalance_2d(
-    taker_buy: NDArray[np.float64] | None,
-    volume: NDArray[np.float64],
+    taker_buy: NDArray[np.floating[Any]] | None,
+    volume: NDArray[np.floating[Any]],
 ) -> tuple[NDArray[np.float64], NDArray[np.bool_]]:
     """Return bounded taker imbalance and a validity mask."""
     if taker_buy is None:
@@ -2598,7 +2598,7 @@ def candidate_panels_to_events(
     min_abs_score: float,
     side_flip_variants: tuple[str, ...] = (),
     cost_floor_bps: float = 24.0,
-    execution_cost_bps_2d: NDArray[np.float64] | None = None,
+    execution_cost_bps_2d: NDArray[np.floating[Any]] | None = None,
     n_workers: int = 4,
 ) -> pd.DataFrame:
     """Convert dense [T,N] panels into sparse candidate event rows.
