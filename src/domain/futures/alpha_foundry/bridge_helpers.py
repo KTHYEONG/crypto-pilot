@@ -55,6 +55,55 @@ arrays. [LIMIT-02]
 """
 
 
+@dataclass(frozen=True, slots=True)
+class _LazyCausalPanelView:
+    """L0-only panel view that applies the evidence cutoff on access.
+
+    It avoids retaining a second full ``valid_mask_2d`` for every panel while
+    the serial multi-TF gate is running. The source panel remains immutable and
+    the full source is restored for every L1-admitted panel.
+    """
+
+    source: Any
+    causal_mask_1d: np.ndarray
+    metadata_override: Mapping[str, Any] | None = None
+
+    @property
+    def valid_mask_2d(self) -> np.ndarray:
+        return np.asarray(self.source.valid_mask_2d & self.causal_mask_1d[:, None], dtype=np.bool_)
+
+    @property
+    def metadata(self) -> Mapping[str, Any]:
+        return self.metadata_override if self.metadata_override is not None else self.source.metadata
+
+    def with_metadata(self, metadata: Mapping[str, Any]) -> _LazyCausalPanelView:
+        return replace(self, metadata_override=metadata)
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self.source, name)
+
+
+def _panel_with_recipe_metadata(panel: Any, recipe_id: str) -> Any:
+    metadata = {
+        **dict(getattr(panel, "metadata", {}) or {}),
+        "recipe_id": recipe_id,
+    }
+    if isinstance(panel, _LazyCausalPanelView):
+        return panel.with_metadata(metadata)
+    return replace(panel, metadata=metadata)
+
+
+def _full_panel_with_recipe_metadata(panel: Any, recipe_id: str) -> Any:
+    source = panel.source if isinstance(panel, _LazyCausalPanelView) else panel
+    return replace(
+        source,
+        metadata={
+            **dict(getattr(source, "metadata", {}) or {}),
+            "recipe_id": recipe_id,
+        },
+    )
+
+
 @dataclass(slots=True, frozen=True)
 class AlphaFoundryL0Result:
     panels_for_l1: tuple[Any, ...]
@@ -95,13 +144,7 @@ def _bind_panels_to_recipe_ids(
     """
     binding_by_index = {b.panel_index: b for b in bindings}
     return tuple(
-        replace(
-            panel,
-            metadata={
-                **dict(getattr(panel, "metadata", {}) or {}),
-                "recipe_id": binding_by_index[i].recipe_id,
-            },
-        )
+        _panel_with_recipe_metadata(panel, binding_by_index[i].recipe_id)
         for i, panel in enumerate(panels)
         if i in binding_by_index
     )
@@ -406,13 +449,7 @@ def run_alpha_foundry_l0_gate(
         # cross-TF independence audit — can key panels by recipe_id without
         # needing the discarded `bound_panels` local. [ADR_20260711_L0_STRATEGY_DELIVERY_HARDENING]
         panels_for_l1 = tuple(
-            replace(
-                p,
-                metadata={
-                    **dict(getattr(p, "metadata", {}) or {}),
-                    "recipe_id": binding_by_panel_index[i].recipe_id,
-                },
-            )
+            _full_panel_with_recipe_metadata(p, binding_by_panel_index[i].recipe_id)
             for i, p in enumerate(panels)
             if i in binding_by_panel_index and binding_by_panel_index[i].recipe_id in passed_ids
         )
@@ -760,11 +797,16 @@ def _run_phase3_sequential(
     evidence_by_tf: Mapping[str, Any],
     cheap_evidences_by_tf: Mapping[str, tuple[Any, ...]],
     diagnostic_fusion_exclusions: Mapping[str, frozenset[str]] | None = None,
+    evidence_end_ns: int | None = None,
 ) -> dict[str, AlphaFoundryL0Result]:
     """[ADR_20260715_L0_L1_NATIVE_CONTRACT] Run Phase 3 canonical gate sequentially."""
     results: dict[str, AlphaFoundryL0Result] = {}
     for tf in panels_by_tf:
-        tf_panels = panels_by_tf[tf]
+        tf_panels = (
+            build_lazy_causal_l0_panel_views(panels=panels_by_tf[tf], evidence_end_ns=evidence_end_ns)
+            if evidence_end_ns is not None
+            else panels_by_tf[tf]
+        )
         tf_bindings = bindings_by_tf.get(tf, [])
         tf_recipes = recipes_by_tf.get(tf, {})
         tf_aligned = aligned_by_tf[tf]
@@ -838,6 +880,7 @@ def run_alpha_foundry_l0_gate_multi_tf(
     run_id_prefix: str,
     parallel_max_workers: int = 1,
     diagnostic_fusion_exclusions: Mapping[str, frozenset[str]] | None = None,
+    evidence_end_ns: int | None = None,
 ) -> dict[str, AlphaFoundryL0Result]:
     """[ADR_20260715_L0_L1_NATIVE_CONTRACT] [LIMIT-05] Signature/return type UNCHANGED except the additive
     keyword-only `parallel_max_workers` (default 1 = today's exact
@@ -864,8 +907,23 @@ def run_alpha_foundry_l0_gate_multi_tf(
     _t_phase1 = _time_module.perf_counter()
     evidence_by_tf: dict[str, Any] = {}
     cheap_evidences_by_tf: dict[str, tuple[Any, ...]] = {}
+    causal_panels_by_tf: dict[str, tuple[Any, ...]] | None = None
+    if evidence_end_ns is not None and parallel_max_workers > 1:
+        causal_panels_by_tf = {
+            tf: build_causal_l0_panel_views(panels=tf_panels, evidence_end_ns=evidence_end_ns)
+            for tf, tf_panels in panels_by_tf.items()
+        }
+
+    def _gate_panels(tf: str) -> Sequence[Any]:
+        if causal_panels_by_tf is not None:
+            return causal_panels_by_tf[tf]
+        if evidence_end_ns is not None:
+            return build_lazy_causal_l0_panel_views(panels=panels_by_tf[tf], evidence_end_ns=evidence_end_ns)
+        return panels_by_tf[tf]
+
     if parallel_max_workers <= 1:
-        for tf, tf_panels in panels_by_tf.items():
+        for tf in panels_by_tf:
+            tf_panels = _gate_panels(tf)
             tf_recipes = recipes_by_tf.get(tf, {})
             tf_bindings = bindings_by_tf.get(tf, [])
             if not tf_panels or not tf_recipes:
@@ -908,8 +966,9 @@ def run_alpha_foundry_l0_gate_multi_tf(
                 n_evidence_rows,
             )  # [LIMIT-08][LIMIT-09]
     else:
+        phase1_panels_by_tf = causal_panels_by_tf or panels_by_tf
         _prime_l0_phase1_input_cache(
-            panels_by_tf=panels_by_tf,
+            panels_by_tf=phase1_panels_by_tf,
             recipes_by_tf=recipes_by_tf,
             bindings_by_tf=bindings_by_tf,
             aligned_by_tf=aligned_by_tf,
@@ -921,12 +980,12 @@ def run_alpha_foundry_l0_gate_multi_tf(
         with ProcessPoolExecutor(max_workers=parallel_max_workers, mp_context=_mp.get_context("fork")) as executor:
             futures = {
                 executor.submit(_run_l0_cheap_evidence_worker, tf): tf
-                for tf in panels_by_tf
-                if panels_by_tf[tf] and recipes_by_tf.get(tf)
+                for tf in phase1_panels_by_tf
+                if phase1_panels_by_tf[tf] and recipes_by_tf.get(tf)
             }
             # Populate empty results for those without panels or recipes
-            for tf in panels_by_tf:
-                if not panels_by_tf[tf] or not recipes_by_tf.get(tf):
+            for tf in phase1_panels_by_tf:
+                if not phase1_panels_by_tf[tf] or not recipes_by_tf.get(tf):
                     evidence_by_tf[tf] = pd.DataFrame(
                         {
                             "family": pd.Series(dtype=str),
@@ -952,7 +1011,7 @@ def run_alpha_foundry_l0_gate_multi_tf(
                 _log_fn(
                     "[SYS] stage=multi_tf_cheap_evidence tf=%s n_panels_in=%d n_bindings=%d n_evidence_rows=%d",
                     tf_key,
-                    len(panels_by_tf[tf_key]),
+                    len(phase1_panels_by_tf[tf_key]),
                     len(tf_bindings),
                     n_evidence_rows,
                 )
@@ -979,10 +1038,12 @@ def run_alpha_foundry_l0_gate_multi_tf(
             evidence_by_tf=evidence_by_tf,
             cheap_evidences_by_tf=cheap_evidences_by_tf,
             diagnostic_fusion_exclusions=diagnostic_fusion_exclusions,
+            evidence_end_ns=evidence_end_ns,
         )
     else:
+        phase3_panels_by_tf = causal_panels_by_tf or panels_by_tf
         results = _run_phase3_parallel(
-            panels_by_tf=panels_by_tf,
+            panels_by_tf=phase3_panels_by_tf,
             bindings_by_tf=bindings_by_tf,
             recipes_by_tf=recipes_by_tf,
             aligned_by_tf=aligned_by_tf,
@@ -993,6 +1054,7 @@ def run_alpha_foundry_l0_gate_multi_tf(
             cheap_evidences_by_tf=cheap_evidences_by_tf,
             max_workers=parallel_max_workers,
         )
+    causal_panels_by_tf = None
     setup_logger("opt_main_futures", write_file=False).debug(
         "[SYS] stage=l0_phase3_canonical_gate took=%.4fs parallel_max_workers=%d",
         _time_module.perf_counter() - _t_phase3,
@@ -1046,6 +1108,23 @@ def build_causal_l0_panel_views(
         new_valid = panel.valid_mask_2d.copy()
         new_valid &= causal_mask[:, None]
         result.append(replace(panel, valid_mask_2d=new_valid))
+    return tuple(result)
+
+
+def build_lazy_causal_l0_panel_views(
+    *,
+    panels: Sequence[Any],
+    evidence_end_ns: int,
+) -> tuple[_LazyCausalPanelView, ...]:
+    """Build causal L0 views without copying every panel validity matrix."""
+    cutoff_dt = np.datetime64(evidence_end_ns, "ns")
+    result: list[_LazyCausalPanelView] = []
+    for panel in panels:
+        c_tf = int(np.searchsorted(panel.datetimes, cutoff_dt, side="left"))
+        h_p = int(panel.expected_holding_bars)
+        n_bars = len(panel.datetimes)
+        causal_mask = (np.arange(n_bars, dtype=np.int64) + 1 + h_p) <= c_tf
+        result.append(_LazyCausalPanelView(source=panel, causal_mask_1d=causal_mask))
     return tuple(result)
 
 

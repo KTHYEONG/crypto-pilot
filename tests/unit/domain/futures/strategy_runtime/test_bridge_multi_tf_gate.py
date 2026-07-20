@@ -7,9 +7,18 @@ import pytest
 
 from src.domain.futures.strategy.config import CandidateStrategyConfig
 from src.domain.futures.strategy_runtime.bridge import (
+    _release_consumed_preloaded_data_maps,
     build_multi_tf_panels,
     build_native_htf_panels,
 )
+
+
+def test_release_consumed_preloaded_data_maps_drops_all_symbol_frames() -> None:
+    data_maps: dict[str, dict[str, Any]] = {"BTCUSDT": {"4h": MagicMock()}}
+
+    _release_consumed_preloaded_data_maps(data_maps)
+
+    assert data_maps == {}
 
 
 def _mock_build_native_panels_ltf(

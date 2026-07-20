@@ -247,6 +247,29 @@ class TestRunAlphaFoundryL0GateMultiTf:
             assert isinstance(results[tf], AlphaFoundryL0Result)
             assert len(results[tf].evidence_rows) == 1, f"tf={tf} should bind and gate exactly 1 recipe"
 
+    def test_causal_views_are_materialized_per_tf_not_as_a_full_grid(self) -> None:
+        """Causal evidence masks are held for one TF at a time in serial mode."""
+        tfs = ("4h", "6h")
+        panels_by_tf, recipes_by_tf, aligned_by_tf, bindings_by_tf = _build_panels_recipes_aligned(tfs)
+
+        with patch(
+            "src.domain.futures.alpha_foundry.bridge_helpers.build_lazy_causal_l0_panel_views",
+            side_effect=lambda *, panels, evidence_end_ns: tuple(panels),
+        ) as causal_views:
+            results = run_alpha_foundry_l0_gate_multi_tf(
+                panels_by_tf=panels_by_tf,
+                bindings_by_tf=bindings_by_tf,
+                recipes_by_tf=recipes_by_tf,
+                aligned_by_tf=aligned_by_tf,
+                cost_model=ExecutionCostModel(),
+                runtime_config=RUNTIME_CONFIG,
+                run_id_prefix="test_streamed_causal_views",
+                evidence_end_ns=int(np.datetime64("2026-01-05", "ns").astype(np.int64)),
+            )
+
+        assert set(results) == set(tfs)
+        assert causal_views.call_count == 2 * len(tfs)
+
     def test_raises_on_key_mismatch(self) -> None:
         """X3-1: panels_by_tf and aligned_by_tf key mismatch."""
         tfs = ("4h", "6h")
