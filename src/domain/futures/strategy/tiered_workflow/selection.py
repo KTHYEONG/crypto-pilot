@@ -12,6 +12,7 @@ import optuna
 from numpy.typing import NDArray
 
 from src.domain.futures.optimization.evaluator import calc_n_trials_eff_entropy
+from src.domain.futures.optimization.observability.l2_runtime_probe import L2RuntimeProbe
 from src.domain.futures.optimization.workflow import (
     compute_crisis_replay_budget,
     evaluate_l2_trial_cached,
@@ -310,6 +311,7 @@ def select_layer2_champion(
     prebuilt_cache: Any | None = None,
     crisis_rets: NDArray[np.float64] | None = None,
     crisis_replay_ctx: Any | None = None,
+    probe: L2RuntimeProbe | None = None,
 ) -> Layer2StudyResult:
     """feasible completed trials 중 growth_lcb(objective) 최상위 챔피언 선정 및 검증.
 
@@ -577,6 +579,27 @@ def select_layer2_champion(
 
         # [LIMIT-03] Hard parity gate: stored vs replay metric divergence blocks admission
         _parity_fail = len(replay_mismatches) > 0
+        if probe is not None and probe.enabled:
+            _probe_crisis_status = "unavailable" if (
+                _has_crisis_ctx
+                and any(
+                    getattr(_crisis_budget, f, None) is None or not np.isfinite(float(getattr(_crisis_budget, f, 0.0)))
+                    for f in ("mdd_hybrid", "mdd_budget", "cagr_hybrid", "cagr_floor")
+                )
+            ) else "passed"
+            _probe_blocker = gate.promotion_blocker if not gate.promotion_passed else "none"
+            _probe_outcome = "selected" if gate.promotion_passed and not _parity_fail else "rejected"
+            probe.record(
+                "EVAL", "l2_champion_replay",
+                trial=candidate.number,
+                rank=len(passed_candidates) + 1,
+                elapsed_ms=0.0,
+                cache_status="replay",
+                promotion=str(gate.promotion_passed).lower(),
+                crisis_status=_probe_crisis_status,
+                outcome=_probe_outcome,
+                blocker=_probe_blocker,
+            )
         if _parity_fail:
             _replay_parity_failures += 1
             _logger.warning(
