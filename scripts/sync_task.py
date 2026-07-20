@@ -174,8 +174,9 @@ def _clean_specs(task: str) -> int:
         return 0
     count = 0
     
-    # Normalize task name for filename check (e.g. TASK_L2_OPTUNA_CONSTRAINT_CAGR_UPLIFT_ALIGNMENT -> l2-optuna-constraint-cagr-uplift-alignment)
-    task_normalized = task.lower().replace("task_", "").replace("_", "-")
+    # Normalize task name for filename check (e.g. TASK_L2_OPTUNA_CONSTRAINT_CAGR_UPLIFT_ALIGNMENT -> l2-optuna-constraint-cagr-uplift-alignment or l2_optuna_constraint_cagr_uplift_alignment)
+    task_normalized_hyphen = task.lower().replace("task_", "").replace("_", "-")
+    task_normalized_underscore = task.lower().replace("task_", "").replace("-", "_")
     
     for fname in os.listdir(specs_dir):
         if not fname.endswith(".md"):
@@ -194,8 +195,12 @@ def _clean_specs(task: str) -> int:
         except OSError:
             pass
             
-        # 2. Check normalized filename
-        if not matches_task and task_normalized and task_normalized in fname.lower():
+        # 2. Check normalized filename (both hyphen and underscore versions)
+        fname_lower = fname.lower()
+        if not matches_task and (
+            (task_normalized_hyphen and task_normalized_hyphen in fname_lower) or
+            (task_normalized_underscore and task_normalized_underscore in fname_lower)
+        ):
             matches_task = True
             
         # 3. Check corresponding contract JSON content if exists
