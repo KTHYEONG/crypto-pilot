@@ -1,3 +1,41 @@
+## Phase L2 hot-cache 재측정 — 2026-07-20
+
+실행 조건: `--phase l2 --sync skip --timeframe 4h`, 120 trials, `USE_CS_RANK_ENGINE=1`, DEBUG 로깅, 7개 timeframe L1 캐시 활성.
+
+### 핵심 결과
+
+- 종료 코드: `0` / L2 감사: `120/120 completed`, `joint_feasible=1`, `crisis_measured=120`
+- 총 소요시간: `217.43s` (3분 37.43초)
+- 전략 구간: `187.60s`
+- 최대 RSS: `13,608 MiB` (약 `13.29 GiB`), swap `0`
+- 자산증식: CAGR `33.24%`, PnL `+56.6%`, 최종 자산 `1.57x`, MDD `13.70%`
+- 효율: Sharpe `1.815`, Sortino `2.854`, Calmar `2.426`
+- 무결성: PSR `0.989`, DSR `0.986`, Sharpe uplift `+0.45`
+- 위기 검증: `stress_tested_pass`, 검증 창 MDD `19.69%`, CAGR `-4.46%`, CVaR95 `1.92%`
+
+### 단계별 시간
+
+| 단계 | 소요시간 |
+|---|---:|
+| Data | 24.6627s |
+| Bridge align | 27.0374s |
+| Bridge rules | 2.7352s |
+| L0 phase 1 / phase 3 | 10.2717s / 4.9083s |
+| L0 gate wall / cross-TF pruning | 15.1809s / 9.9271s |
+| L1 전체 (7/7 cache hit) | 7.8409s |
+| L2 Optuna study | 103.3569s |
+| L2 final pipeline | 4.5320s |
+
+### 이전 측정 대비
+
+이전 실행(`323.20s`, 전략 `293.95s`, L1 `122.55s`, RSS `12,180.6 MiB`) 대비 총 시간은 `105.77s`(`32.7%`) 단축되었고, 전략 구간은 `36.2%`, L1은 `93.6%` 단축되었다. 반면 L2 study는 `103.36s`로 `11.1s` 증가했고 RSS는 `13,608 MiB`로 `1,427 MiB` 증가했다.
+
+### 판정 및 후속 병목
+
+- 시간/캐시/결과 무결성: PASS
+- 메모리 예산(12 GiB): FAIL (`+1,320 MiB`, 약 `10.7%` 초과)
+- 최우선 최적화: L2 병렬 worker(최대 6개) 구간의 프로세스별 RSS와 부모/자식 합산 peak를 분리 계측하고, worker 수·배치 크기·대형 dataframe 복제를 제한한다.
+
 # L0→L2 파이프라인 상세 소요시간/RAM 실측 — 2026-07-20 (다음 세션 최적화 기준선)
 
 ## 세션 요약
@@ -98,3 +136,4 @@ Run 2: [L2-AUDIT] completed=120/120 joint_feasible=0 crisis_measured=120
 2. **다중 seed 검증 부재**: 재현성 fix로 "같은 seed → 같은 결과"는 보장되나, "seed 간 결과 분산이 얼마나 큰가"는 여전히 미검증 — 여러 seed로 champion 안정성을 평가할 필요.
 3. **joint_feasible 상시 0**: 관측된 모든 실행(재현성 fix 전/후 포함)에서 13개 제약을 동시 만족하는 trial이 한 번도 나온 적 없음 — 근본적으로 탐색공간이나 게이트 임계값 재설계가 필요할 가능성.
 4. **`[CRISIS-WINDOW-DETAIL]` 개별 라벨 불일치(경미, 이전 세션부터 이월)**: 상위 집계와 개별 윈도우 라벨 표기가 다른 기존 관측 이슈, 미해결.
+
