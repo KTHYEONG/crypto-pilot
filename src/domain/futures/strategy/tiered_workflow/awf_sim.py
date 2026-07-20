@@ -2477,7 +2477,7 @@ def _run_awf_simulation(
     import logging
     import time
 
-    logger = logging.getLogger("src.domain.futures.strategy.tiered_workflow")
+    logger = logging.getLogger("opt_main_futures")
     # L2 mutual exclusion guard: regime-conditional weight vs intra-symbol divergence
     _l2_regime_weight = bool(getattr(config, "l2_regime_conditional_weight_enabled", False))
     _l2_intra_divergence = bool(getattr(config, "l2_intra_symbol_divergence_enabled", False))
@@ -2836,14 +2836,22 @@ def _run_awf_simulation(
     # C4: per-TF fit-leg edge → included_tfs (TF 게이트)
     _tf_inclusion_enabled = bool(getattr(config, "l2_tf_inclusion_enabled", True))
     _tf_min_edge = float(getattr(config, "l2_tf_inclusion_min_edge", 0.0))
+    if cache.per_tf_edge_by_fold:
+        _per_tf_edges_precomputed = list(cache.per_tf_edge_by_fold)
+        if logger.isEnabledFor(logging.DEBUG):
+            logger.debug("[L2-TFEDGE-CACHE] HIT n_folds=%d", len(_per_tf_edges_precomputed))
+    else:
+        _per_tf_edges_precomputed = None
     included_tfs_by_fold: list[set[str]] = []
     for _f_idx, _f_fold in enumerate(awf_folds):
         if _tf_inclusion_enabled and int(_f_fold.fit_start) < int(_f_fold.oos_start):
-            _per_tf_edge = compute_per_tf_fit_edge(
-                cache=cache,
-                aligned=aligned,
-                fit_start=int(_f_fold.fit_start),
-                fit_end=int(_f_fold.oos_start),
+            _per_tf_edge = (
+                _per_tf_edges_precomputed[_f_idx]
+                if _per_tf_edges_precomputed is not None
+                else compute_per_tf_fit_edge(
+                    cache=cache, aligned=aligned,
+                    fit_start=int(_f_fold.fit_start), fit_end=int(_f_fold.oos_start),
+                )
             )
             _included = {tf for tf, e in _per_tf_edge.items() if e > _tf_min_edge}
             if not _included:
