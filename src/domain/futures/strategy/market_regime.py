@@ -87,26 +87,9 @@ def _zscore_1d(values: NDArray[np.float64], window: int) -> NDArray[np.float64]:
 
 
 def _expanding_quantile_causal(values: NDArray[np.float64], q: float) -> NDArray[np.float64]:
-    """Causal expanding q-th quantile — no lookahead. q in [0, 1].
+    from src.domain.futures.strategy.causal_statistics import causal_expanding_quantile
 
-    Args:
-        values: 1-D float64 array of input values.
-        q: Quantile to compute, in [0, 1]. q=0.5 is equivalent to the median.
-
-    Returns:
-        Array of same shape where out[i] = q-th percentile of values[:i+1]
-        ignoring non-finite. Entries remain NaN if no finite value has been seen.
-
-    Time complexity: O(T²·logT) — expanding prefix sort per step.
-    Space complexity: O(T).
-    """
-    out = np.full(values.shape[0], np.nan, dtype=np.float64)
-    for idx in range(values.shape[0]):
-        sample = values[: idx + 1]
-        finite = sample[np.isfinite(sample)]
-        if finite.size > 0:
-            out[idx] = float(np.percentile(finite, q * 100.0))
-    return out
+    return causal_expanding_quantile(values, q, min_periods=1, fill_value=np.nan)
 
 
 def _infer_bars_per_year(datetimes: NDArray[np.datetime64]) -> float:
@@ -142,18 +125,9 @@ def _btc_log_returns(aligned: AlignedMarketData) -> NDArray[np.float64]:
 def _expanding_robust_location_scale(
     values: NDArray[np.float64],
 ) -> tuple[NDArray[np.float64], NDArray[np.float64]]:
-    location = np.zeros(values.shape[0], dtype=np.float64)
-    scale = np.ones(values.shape[0], dtype=np.float64)
-    for idx in range(values.shape[0]):
-        sample = values[: idx + 1]
-        finite = sample[np.isfinite(sample)]
-        if finite.size == 0:
-            continue
-        median = float(np.median(finite))
-        mad = float(np.median(np.abs(finite - median)))
-        location[idx] = median
-        scale[idx] = max(1.4826 * mad, _EPS)
-    return location, scale
+    from src.domain.futures.strategy.causal_statistics import causal_expanding_robust_location_scale
+
+    return causal_expanding_robust_location_scale(values, min_periods=1, eps=_EPS)
 
 
 def _cusum_thresholds(target_arl_bars: int) -> tuple[float, float, int]:
@@ -241,40 +215,11 @@ def _persistence_targeted_band(
     target_dwell: float,
     min_n_eff: int = 60,
 ) -> NDArray[np.float64]:
-    """Causal persistence-targeted transition band via Markov p_ii inversion.
+    from src.domain.futures.strategy.causal_statistics import causal_expanding_quantile
 
-    Derives a per-bar band threshold such that the fraction of bars classified
-    as decisive (``|snr| >= band``) approximates the target steady-state
-    probability implied by the desired dwell time.
-
-    Math:
-        E[dwell] = 1 / (1 - p_ii)  →  p_ii = 1 - 1 / target_dwell
-        decisive_fraction ≈ 1 - p_ii = 1 / target_dwell
-        band[t] = quantile(|snr|[0..t], 1 - 1/target_dwell)
-
-    Args:
-        snr_abs: Absolute SNR values [T] (non-negative, finite or NaN).
-        target_dwell: Target expected dwell in bars. Clamped to >= 2.
-        min_n_eff: Bars required before band is updated from default (0.5).
-
-    Returns:
-        float64 band array [T].
-
-    Time complexity: O(T²·logT) causal expanding quantile.
-    Space complexity: O(T).
-    """
-    t_len: int = snr_abs.shape[0]
-    band: NDArray[np.float64] = np.full(t_len, 0.5, dtype=np.float64)
     safe_dwell = max(float(target_dwell), 2.0)
     target_p_ii = 1.0 - 1.0 / safe_dwell
-    # Decisive_fraction (|snr| >= band) should equal 1 - target_p_ii = 1/target_dwell.
-    # → band must be the target_p_ii-th quantile so only the top 1/dwell fraction exceeds it.
-    for t in range(min_n_eff, t_len):
-        sample = snr_abs[: t + 1]
-        finite = sample[np.isfinite(sample)]
-        if finite.size > 0:
-            band[t] = float(np.percentile(finite, target_p_ii * 100.0))
-    return band
+    return causal_expanding_quantile(snr_abs, target_p_ii, min_periods=min_n_eff, fill_value=0.5)
 
 
 def _continuous_regime_codes(
