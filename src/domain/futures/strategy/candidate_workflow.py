@@ -202,6 +202,19 @@ def _fit_and_predict_single_fold_from_globals(
             is_evidence_fold=is_evidence_fold,
             compact_result=compact_result,
         )
+        from src.core.utils.utils import setup_logger
+
+        _ipc_logger = setup_logger("opt_main_futures", write_file=False)
+        if _ipc_logger.isEnabledFor(logging.DEBUG):
+            import pickle
+
+            _payload_mb = len(pickle.dumps(res, protocol=pickle.HIGHEST_PROTOCOL)) / (1024.0 * 1024.0)
+            _ipc_logger.debug(
+                "[SYS] stage=l1_evidence_ipc_payload fold_idx=%d compact=%s payload_mb=%.3f",
+                fold_idx,
+                compact_result,
+                _payload_mb,
+            )
         return res
     finally:
         gc.enable()
