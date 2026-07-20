@@ -292,10 +292,20 @@ def resolve_safe_nested_workers(
     stage_worker_caps = {"evidence": 3, "outer": 2, "l2_optuna": 3}
     stage_cap = stage_worker_caps.get(stage, 3)
     soft_cap_mb = result_soft_cap_mb if result_soft_cap_mb is not None else predicted_result_mb
+    from src.domain.futures.optimization.opt_config import OPT_FUTURES_CONFIG
     from src.domain.futures.strategy.tiered_workflow.memory import (
         MIB,
+        get_worker_private_observations,
+        predict_calibrated_worker_private_mb,
         resolve_l1_memory_plan,
         snapshot_process_tree_memory,
+    )
+
+    _calibrated_floor_mb = predict_calibrated_worker_private_mb(
+        observations=get_worker_private_observations(stage),
+        shared_mb=frame_memory_bytes / MIB,
+        default_mb=float(OPT_FUTURES_CONFIG.get("L1_WORKER_PRIVATE_FLOOR_MB", 1024)),
+        margin=float(OPT_FUTURES_CONFIG.get("L1_WORKER_PRIVATE_CALIBRATION_MARGIN", 1.3)),
     )
 
     memory_plan = resolve_l1_memory_plan(
@@ -306,6 +316,7 @@ def resolve_safe_nested_workers(
         stage_cap=stage_cap,
         cpu_cap=cpu_limit,
         pinned=pinned,
+        worker_private_floor_bytes=int(_calibrated_floor_mb * MIB),
     )
     workers = memory_plan.workers
     logger.log(
@@ -1285,11 +1296,18 @@ def run_l1_nested_swf(
     _prefit_future: Any = None
     _prefit_core: _Layer1ModelCore | None = None
 
+    from src.domain.futures.strategy.tiered_workflow.memory import (
+        measure_worker_private_bytes,
+        record_worker_private_observation,
+        snapshot_process_tree_memory,
+    )
+
     try:
         with ProcessPoolExecutor(max_workers=max_pool_workers, mp_context=mp_ctx) as executor:
             # ── Phase 1: Evidence folds ─────────────────────────────────────────────
             t_exec = time.perf_counter()
             if evidence_folds:
+                _tree_before_ev = snapshot_process_tree_memory(os.getpid())
                 ev_submits = {
                     executor.submit(
                         cw._fit_and_predict_single_fold_from_globals,
@@ -1326,6 +1344,20 @@ def run_l1_nested_swf(
                     _rss_ev - _mem_ipc_ref,
                     len(evidence_results),
                 )
+                _tree_after_ev = snapshot_process_tree_memory(os.getpid())
+                _measured_wp_ev = measure_worker_private_bytes(_tree_before_ev, _tree_after_ev, workers_evidence)
+                logger.log(
+                    PERF,
+                    "[SYS] stage=worker_private_measured name=evidence workers=%d "
+                    "before_tree_mb=%s after_tree_mb=%s measured_worker_private_mb=%s",
+                    workers_evidence,
+                    f"{(_tree_before_ev.tree_pss_bytes or 0) / (1024**2):.0f}",
+                    f"{(_tree_after_ev.tree_pss_bytes or 0) / (1024**2):.0f}",
+                    f"{_measured_wp_ev / (1024**2):.0f}" if _measured_wp_ev is not None else "n/a",
+                )
+
+                if _measured_wp_ev is not None:
+                    record_worker_private_observation("evidence", frame_memory_bytes / (1024**2), _measured_wp_ev / (1024**2))
 
                 _log_fold_avg_profile(evidence_results, "evidence")
 
@@ -1369,6 +1401,7 @@ def run_l1_nested_swf(
 
                 t_out_ipc = time.perf_counter()
                 _mem_ipc_ref = _get_rss_mb()
+                _tree_before_out = snapshot_process_tree_memory(os.getpid())
 
                 for idx, fold in enumerate(outer_folds):
                     while len(active_futures) >= workers_outer:
@@ -1408,6 +1441,19 @@ def run_l1_nested_swf(
                     _rss_out - _mem_ipc_ref,
                     len(outer_results),
                 )
+                _tree_after_out = snapshot_process_tree_memory(os.getpid())
+                _measured_wp_out = measure_worker_private_bytes(_tree_before_out, _tree_after_out, workers_outer)
+                logger.log(
+                    PERF,
+                    "[SYS] stage=worker_private_measured name=outer workers=%d "
+                    "before_tree_mb=%s after_tree_mb=%s measured_worker_private_mb=%s",
+                    workers_outer,
+                    f"{(_tree_before_out.tree_pss_bytes or 0) / (1024**2):.0f}",
+                    f"{(_tree_after_out.tree_pss_bytes or 0) / (1024**2):.0f}",
+                    f"{_measured_wp_out / (1024**2):.0f}" if _measured_wp_out is not None else "n/a",
+                )
+                if _measured_wp_out is not None:
+                    record_worker_private_observation("outer", frame_memory_bytes / (1024**2), _measured_wp_out / (1024**2))
 
             # ── Collect speculative pre-fit result ────────────────────────────────
             if _prefit_future is not None:
@@ -4088,6 +4134,12 @@ def run_tiered_pipeline(
         probe_manifest: Probe winning cell 목록 (L2 master TF 선정용).
     """
     _L1_SWF_FOLD_CACHE.clear()
+    from src.domain.futures.strategy.tiered_workflow.memory import reset_worker_private_calibration
+
+    reset_worker_private_calibration()
+    from src.domain.futures.strategy.timeframe_contracts import hours_per_bar
+
+    l1_tfs = tuple(sorted(l1_tfs, key=hours_per_bar))
     if caps is None:
         caps = PortfolioCaps(
             gross=3.0,
