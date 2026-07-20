@@ -13,6 +13,8 @@ from typing import Any, Literal
 
 import psutil
 
+PSS_INTERVAL_SAMPLES: int = 20
+
 _logger: logging.Logger = logging.getLogger(__name__)
 
 
@@ -278,18 +280,25 @@ class L2RuntimeProbe:
         hot_sample_interval_ms: int,
         jsonl_enabled: bool,
         jsonl_path: Path,
+        logger: logging.Logger | None = None,
+        pss_interval_samples: int = PSS_INTERVAL_SAMPLES,
     ) -> None:
         self._enabled = enabled
         self._sample_interval_ms = sample_interval_ms
         self._hot_sample_interval_ms = hot_sample_interval_ms
         self._jsonl_enabled = jsonl_enabled
         self._jsonl_path = jsonl_path
+        self._logger = logger or _logger
+        self._pss_interval_samples = max(1, pss_interval_samples)
 
         self._run_id: str = ""
         self._run_start_ns: int = 0
         self._sampler_thread: threading.Thread | None = None
         self._sampler_stop = threading.Event()
         self._sample_seq: int = 0
+        self._pss_sample_counter: int = 0
+        self._last_pss_timestamp: float = 0.0
+        self._last_child_pids: frozenset[int] = frozenset()
         self._degraded: bool = False
         self._slow_sample_count: int = 0
         self._degraded_reported: bool = False
@@ -314,9 +323,10 @@ class L2RuntimeProbe:
         self._enter_tree_pss: float = 0.0
 
     @classmethod
-    def from_environment(cls, *, logger: Any, base_dir: Path) -> L2RuntimeProbe:
+    def from_environment(cls, *, logger: logging.Logger | None = None, base_dir: Path) -> L2RuntimeProbe:
         _env_val = os.environ.get("L2_RUNTIME_PROBE_ENABLED", "false").lower()
-        _enabled = logger.isEnabledFor(logging.DEBUG) and _env_val in ("true", "1", "yes")
+        _effective_logger = logger if logger is not None else _logger
+        _enabled = _effective_logger.isEnabledFor(logging.DEBUG) and _env_val in ("true", "1", "yes")
         sample_ms = _clamp(
             int(os.environ.get("L2_RUNTIME_PROBE_SAMPLE_MS", str(_SAMPLE_MS_DEFAULT))),
             _SAMPLE_MS_MIN, _SAMPLE_MS_MAX, "L2_RUNTIME_PROBE_SAMPLE_MS", "from_env",
@@ -334,6 +344,7 @@ class L2RuntimeProbe:
             hot_sample_interval_ms=hot_ms,
             jsonl_enabled=jsonl_enabled,
             jsonl_path=jsonl_path,
+            logger=logger,
         )
 
     @property
@@ -572,14 +583,77 @@ class L2RuntimeProbe:
             if wait > 0:
                 self._sampler_stop.wait(timeout=wait)
 
-    def _do_sample(self, *, reason: str, stage_path: str) -> None:
+    def _collect_rss_only(self) -> tuple[list[dict[str, Any]], float, float]:
+        """Fast RSS-only collection without PSS."""
         t0 = time.perf_counter_ns()
         try:
-            tree = _collect_tree_snap(self._parent_pid)
-        except Exception:
-            return
-        tree_rss = sum(s.get("rss_mb", 0.0) for s in tree if s.get("rss_mb", -1.0) >= 0.0)
-        tree_pss = sum(s.get("pss_mb", 0.0) for s in tree if s.get("pss_mb", -1.0) >= 0.0)
+            parent = psutil.Process(self._parent_pid)
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            return [], 0.0, 0.0
+        parent_rss = _rss_mib(parent)
+        tree_rss = parent_rss if parent_rss >= 0 else 0.0
+        children_rss = 0.0
+        try:
+            for child in parent.children(recursive=True):
+                cr = _rss_mib(child)
+                if cr >= 0:
+                    children_rss += cr
+            tree_rss += children_rss
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            pass
+        sample_ms = (time.perf_counter_ns() - t0) / 1_000_000.0
+        tree = [
+            {
+                "pid": self._parent_pid,
+                "role": "parent",
+                "rss_mb": round(parent_rss, 3) if parent_rss >= 0 else -1.0,
+                "pss_mb": -1.0,
+                "status": "ok" if parent_rss >= 0 else "denied",
+            }
+        ]
+        return tree, tree_rss, sample_ms
+
+    def _should_collect_pss(self, reason: str, tree_rss: float) -> bool:
+        if reason in ("run_start", "run_end", "span_start", "span_end"):
+            return True
+        # topology change: child PIDs changed
+        try:
+            parent = psutil.Process(self._parent_pid)
+            child_pids = frozenset(
+                c.pid for c in parent.children(recursive=True)
+            )
+            if child_pids != self._last_child_pids:
+                self._last_child_pids = child_pids
+                return True
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            pass
+        # periodic PSS every pss_interval_samples
+        self._pss_sample_counter += 1
+        if self._pss_sample_counter >= self._pss_interval_samples:
+            self._pss_sample_counter = 0
+            return True
+        # RSS peak update with debounce
+        if tree_rss > self._peak_tree_rss:
+            now = time.time()
+            if now - self._last_pss_timestamp >= 1.0:
+                self._last_pss_timestamp = now
+                return True
+        return False
+
+    def _do_sample(self, *, reason: str, stage_path: str) -> None:
+        t0 = time.perf_counter_ns()
+        collect_pss = self._should_collect_pss(reason, self._peak_tree_rss)
+
+        if collect_pss:
+            try:
+                tree = _collect_tree_snap(self._parent_pid)
+            except Exception:
+                return
+            tree_rss = sum(s.get("rss_mb", 0.0) for s in tree if s.get("rss_mb", -1.0) >= 0.0)
+            tree_pss = sum(s.get("pss_mb", 0.0) for s in tree if s.get("pss_mb", -1.0) >= 0.0)
+        else:
+            tree, tree_rss, _ = self._collect_rss_only()
+            tree_pss = -1.0
         sample_ms = (time.perf_counter_ns() - t0) / 1_000_000.0
 
         with self._lock:
@@ -598,13 +672,9 @@ class L2RuntimeProbe:
             self._peak_tree_pss = tree_pss
             self._peak_owner_stage = stage_path
             self._peak_sample_seq = seq
-            for _t in tree:
-                if _t.get("role") == "parent" or _t.get("rss_mb", 0.0) == max(
-                    (x.get("rss_mb", 0.0) for x in tree), default=0.0
-                ):
-                    self._peak_pid = _t.get("pid", 0)
-                    self._peak_role = _t.get("role", "")
-                    break
+            if tree:
+                self._peak_pid = tree[0].get("pid", 0)
+                self._peak_role = tree[0].get("role", "")
 
         with self._lock:
             for _st in self._spans.values():
@@ -613,12 +683,23 @@ class L2RuntimeProbe:
         if self._jsonl_enabled:
             try:
                 with self._jsonl_path.open("a") as f:
-                    for entry in tree:
-                        f.write(json.dumps(entry, default=str) + "\n")
+                    if collect_pss or reason in ("run_start", "run_end"):
+                        for entry in tree:
+                            f.write(json.dumps(entry, default=str) + "\n")
+                    else:
+                        agg = {
+                            "sample_seq": seq,
+                            "run_id": self._run_id,
+                            "stage_path": stage_path,
+                            "reason": reason,
+                            "tree_rss_mb": round(tree_rss, 3),
+                            "sample_elapsed_ms": round(sample_ms, 3),
+                        }
+                        f.write(json.dumps(agg) + "\n")
             except OSError as exc:
                 if not self._degraded_reported:
                     self._degraded_reported = True
-                    _logger.warning(
+                    self._logger.warning(
                         "[SYS] stage=l2_probe status=degraded reason=jsonl_write_failed err=%s",
                         exc,
                     )
