@@ -16,7 +16,7 @@ Leverage **high-reasoning models (Thinker)** for creative architectural design, 
 - **Rule Constraints**: Read and strictly adhere to `performance.md` and `quant.md` (timezone isolation, look-ahead bias).
 - **Determine Workflow Tier**:
   - **Tier 1 (Light)**: Minor refactor, simple fix. *Directly skip Spec and proceed to implement.*
-  - **Tier 2 (Standard)**: Medium complexity. Generate lightweight Markdown spec. (No JSON contract).
+  - **Tier 2 (Standard)**: Medium complexity. Generate lightweight Markdown spec + `[feature]_contract.json`.
   - **Tier 3 (Architectural)**: Complex module, trading logic. Requires full Markdown spec + `[feature]_contract.json`.
 - **Dynamic Interview (/grill-me)**:
   - For **Tier 3** tasks, before creating the spec document, analyze the user's prompt for design ambiguities.
@@ -43,7 +43,7 @@ To ensure low-reasoning models can build and integrate the code mechanically:
     - **Scenario 4 (Integration Verification)**: Asserting the correct trigger inside the parent module.
 
 ### 4. Machine-Readable Compliance Contract (`docs/specs/[feature]_contract.json`)
-*(Mandatory for Tier 3 only)*
+*(Mandatory for Tier 2 and Tier 3)*
 Generate a JSON contract alongside the spec markdown for automated compliance checking in the check phase:
 ```json
 {
