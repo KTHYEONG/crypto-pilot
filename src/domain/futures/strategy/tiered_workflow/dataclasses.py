@@ -331,6 +331,8 @@ class Layer2TrialEvaluation:
     block_log_growth_signature: tuple[float, ...] = ()
     growth_lcb_deployed: float = float("-inf")
     crisis_constraints_measured: bool = False
+    boosted_returns_hybrid: tuple[float, ...] = ()
+    deployed_returns_hybrid: tuple[float, ...] = ()
 
 
 @dataclass(slots=True, frozen=True)
