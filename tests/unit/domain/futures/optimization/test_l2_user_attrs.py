@@ -52,6 +52,7 @@ def _make_mock_evaluation() -> MagicMock:
         trades=-2.0, crisis_mdd=-1.0, cagr=-0.3, sharpe_uplift=-0.2,
         crisis_cagr=-1.0, crisis_measured=True,
     )
+    gate.constraint_vector = cv
     ev.gate = gate
     return ev
 
@@ -102,3 +103,4 @@ def test_build_l2_user_attrs_matches_legacy_keys() -> None:
     attrs = _build_l2_user_attrs(ev)
     for key in EXPECTED_KEYS:
         assert key in attrs, f"Missing key: {key}"
+    assert attrs["l2_constraint_map"]["crisis_measured"] is True
