@@ -487,5 +487,9 @@
   },
   "src/domain/futures/backtest/jax_batch_engine.py": {
     "testing": "tests/unit/domain/futures/backtest/test_jax_batch_engine.py"
+  },
+  "src/domain/futures/strategy/causal_statistics.py": {
+    "architecture": "docs/specs/shape_adaptive_runtime_optimization.md",
+    "testing": "tests/unit/domain/futures/strategy/test_shape_adaptive_optimization.py"
   }
 }
