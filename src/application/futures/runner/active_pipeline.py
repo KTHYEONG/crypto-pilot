@@ -2198,6 +2198,18 @@ def _run_tiered_l2_study(
         dict(_feasibility_audit.failure_counts),
     )
 
+    selector_feasible = l2_study_result.feasible_trials if hasattr(l2_study_result, "feasible_trials") else 0
+    if _feasibility_audit.joint_feasible_trials != selector_feasible:
+        _logger.warning(
+            "[L2-AUDIT] feasibility_contract_divergence: audit=%d selector=%d",
+            _feasibility_audit.joint_feasible_trials,
+            selector_feasible,
+        )
+        l2_study_result = replace(
+            l2_study_result,
+            blocker_reason="feasibility_contract_divergence",
+        )
+
     _blocker_reason = l2_study_result.blocker_reason
     if l2_study_result.blocker_reason == "" and l2_study_result.best_evaluation is not None:
         from src.domain.futures.strategy.market_regime import synthetic_crash_defense_verdict
