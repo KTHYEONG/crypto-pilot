@@ -21,7 +21,7 @@ def _mock_build_native_panels_ltf(
     def fake_virtual_maps(data_maps: dict[str, Any], symbols: list[str], target_tf: str) -> dict[str, Any]:
         return {s: {target_tf: MagicMock()} for s in symbols[:1]}
 
-    def fake_align(data_maps: dict[str, Any], symbols: list[str], tf: str) -> MagicMock:
+    def fake_align(data_maps: dict[str, Any], symbols: list[str], tf: str, **kwargs: Any) -> MagicMock:
         aligned = MagicMock()
         aligned.datetimes = MagicMock()
         return aligned
