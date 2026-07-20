@@ -353,6 +353,23 @@ def _build_virtual_probe_tf_maps(
     return virtual_maps
 
 
+def _release_consumed_preloaded_data_maps(data_maps: MutableMapping[str, Any]) -> None:
+    """Release raw per-symbol frames once the multi-TF bridge owns dense panels.
+
+    The tiered L0 path only needs the source map until native aligned panels and
+    optional LTF panels have been built. Retaining both representations doubles
+    the live market-data footprint before the gate can release rejected panels.
+    """
+    n_symbols = len(data_maps)
+    data_maps.clear()
+    gc.collect()
+    _run_logger.debug(
+        "[SYS] stage=bridge_release_preloaded_maps released_symbols=%d rss=%.0fMB",
+        n_symbols,
+        _get_rss_mb(),
+    )
+
+
 def _build_single_tf_panels(
     data_maps: Mapping[str, Mapping[str, Any]],
     symbols: list[str] | tuple[str, ...],
@@ -1277,6 +1294,7 @@ def run_candidate_strategy_for_universe(
         _use_multi_tf = getattr(alpha_foundry_config, "use_all_timeframes_in_l0", True) and len(l1_tfs) > 1
 
         if _use_multi_tf:
+            _release_consumed_preloaded_data_maps(preloaded_data_maps)
             # ── Multi-TF L0 gate path (fan-out/fuse/fan-in) ──────────────────
             import time as _time_panel
 
@@ -1329,17 +1347,6 @@ def run_candidate_strategy_for_universe(
                 len(panels_by_tf),
             )
             full_panels_by_tf = dict(panels_by_tf)
-            l0_panels_by_tf = (
-                {
-                    _tf: build_causal_l0_panel_views(
-                        panels=_tf_panels,
-                        evidence_end_ns=l0_evidence_end_ns,
-                    )
-                    for _tf, _tf_panels in panels_by_tf.items()
-                }
-                if l0_evidence_end_ns is not None
-                else panels_by_tf
-            )
             _af_run_id = f"{tf}_{int(_time_panel.time())}"
             _t_l0_gate = _time_panel.perf_counter()
             # The multi-TF panel map is still resident at this point. Forking
@@ -1355,7 +1362,7 @@ def run_candidate_strategy_for_universe(
                 _workers,
             )
             multi_results = run_alpha_foundry_l0_gate_multi_tf(
-                panels_by_tf=l0_panels_by_tf,
+                panels_by_tf=panels_by_tf,
                 bindings_by_tf=bindings_by_tf,
                 recipes_by_tf=recipes_by_tf,
                 aligned_by_tf=aligned_by_tf,
@@ -1363,6 +1370,7 @@ def run_candidate_strategy_for_universe(
                 runtime_config=alpha_foundry_config,
                 run_id_prefix=_af_run_id,
                 parallel_max_workers=_workers,
+                evidence_end_ns=l0_evidence_end_ns,
             )
             _run_logger.debug(
                 "[SYS] stage=l0_gate_multi_tf_wall took=%.4fs rss=%.0fMB parallel_max_workers=%d",
@@ -1370,6 +1378,8 @@ def run_candidate_strategy_for_universe(
                 _get_rss_mb(),
                 _workers,
             )
+
+            _run_logger.debug("[SYS] stage=l0_manifest_pre rss=%.0fMB", _get_rss_mb())
 
             # [ADR_20260712_L0_EVIDENCE_CONDITIONED_CROSS_TF_ADMISSION] Cross-TF
             # evidence-conditioned pruning. canonical_tf is resolved internally
@@ -1394,6 +1404,7 @@ def run_candidate_strategy_for_universe(
                     alpha_foundry_config, "cross_tf_min_shared_directional_entries", 12
                 ),
             )
+            _run_logger.debug("[SYS] stage=l0_manifest_post rss=%.0fMB", _get_rss_mb())
             for _tf_k, _res in pruned_multi_results.items():
                 _full_by_recipe = {
                     str(getattr(_binding, "recipe_id", "")): replace(
@@ -1415,13 +1426,14 @@ def run_candidate_strategy_for_universe(
                         _full_by_recipe[_recipe_id] for _recipe_id in _selected_ids if _recipe_id in _full_by_recipe
                     ),
                 )
+            _run_logger.debug("[SYS] stage=l0_full_panel_rebind_post rss=%.0fMB", _get_rss_mb())
             l0_delivery_manifest = _l0_manifest
             # [LIMIT-01] Build per-TF native labeled events from the recipe-stamped,
             # L0-admitted panel set (panels_for_l1), now that binding has completed.
             for _tf_k, _res in pruned_multi_results.items():
                 _label_panels_for_tf_native(_tf_k, getattr(_res, "panels_for_l1", ()))
-            if getattr(alpha_foundry_config, "enable_cross_tf_pruning", False):
-                multi_results = pruned_multi_results
+            _run_logger.debug("[SYS] stage=l0_native_label_post rss=%.0fMB", _get_rss_mb())
+            multi_results = pruned_multi_results
             if _l0_manifest.independence_audit is not None:
                 _ia = _l0_manifest.independence_audit
                 _run_logger.info(
@@ -1474,6 +1486,16 @@ def run_candidate_strategy_for_universe(
                 report_dir = Path(report_dir) if isinstance(report_dir, str) else report_dir
                 report_dir.mkdir(parents=True, exist_ok=True)
                 corr_df.to_parquet(str(report_dir / f"{_af_run_id}_family_correlation.parquet"))
+
+            panels_by_tf.clear()
+            full_panels_by_tf.clear()
+            gated_htf.clear()
+            multi_results.clear()
+            gc.collect()
+            _run_logger.debug(
+                "[SYS] stage=l0_release_rejected_panel_maps rss=%.0fMB",
+                _get_rss_mb(),
+            )
 
             bridge_prof["alpha_foundry"] = time.perf_counter() - t_step
             _sample_rss("alpha_foundry")
