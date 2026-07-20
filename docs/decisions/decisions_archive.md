@@ -2,6 +2,11 @@
 
 This file holds historical architecture decision records (ADRs) that have been pruned from the active window.
 
+## [2026-07-18] [TASK_L2_DEPLOYMENT_MARGIN_CAGR_GATE] [ADR_20260718_L2_DEPLOYMENT_MARGIN_CAGR_GATE]
+- **Context/Why:** 실측(optuna.db 4개 200-trial study): promotion_blocker의 90~94%가 cagr 단일 원인, growth_lcb_weight objective 블렌드는 realized CAGR과 상관계수 r=0.09~0.18로 사실상 무관. 근본원인은 calibrate_deployment_leverage의 mdd_margin(기본 0.30, 비탐색)이 전 trial 공통으로 MDD 예산의 70%(0.21)만 타겟팅해 레버리지를 구조적으로 억제. 동일 필드가 crisis 캘리브레이션(l_crisis)에도 재사용돼 그대로 풀면 크라이시스 방어가 침식되는 문제 확인.
+- **Resolution/What:** l2_deploy_mdd_margin을 정상장 한정 L2_SEARCH_SPACE에 편입(0.05~0.30)하고, l2_deploy_crisis_mdd_margin(고정 0.30, 비탐색)으로 crisis 캘리브레이션을 완전 분리(_resolve_safety_ceiling에 crisis_mdd_target 파라미터 추가). oos_budget_blend/oos_floor_cap 하드코딩을 config 필드화. select_layer2_champion의 gate-passed replay 검증을 top-3 고정에서 fallback_limit(24)까지 확장, replay_mismatch로 인한 promotion 플립을 [EVAL] WARNING으로 승격.
+- **Impact:** 실측 재검증(동일 seed=42, n=120 재실행): margin decouple 배선 정상 확인(MDD/CVaR/PSR 전부 예산 내, crisis 회귀 없음), Sortino/Calmar/PSR 3개 게이트가 이전 실행 대비 신규 통과. 다만 CAGR은 여전히 BLOCKED(13.3%, 이전 20.9%보다 낮은 국소해로 수렴) — Optuna stochastic 특성상 단일 seed로는 개선 검증 불가 확인, fold_pass_ratio(2/4=50%)가 이번 spec과 무관한 별개 잔여 병목으로 확정. /check PASS(Cov 66%).
+
 ## [2026-07-18] [TASK_CACHE_FINGERPRINT_STABILIZATION] [ADR_20260718_CACHE_FINGERPRINT_STABILIZATION]
 - **Context/Why:** L1 result cache가 pd.util.hash_pandas_object로 인해 프로세스 간 비결정적 fingerprint를 생성 — 모든 cold start에서 cache miss(211s 재연산). Peak RSS 13.1GB로 12GB threshold 초과.
 - **Resolution/What:** _deterministic_df_fingerprint(sha256 content-based)로 대체해 cross-process 결정성 확보. _should_load_cache(RSS 11.5GB threshold)로 cache deserialize gating. gc.collect()를 cache 경계에 추가해 RSS 회수.
