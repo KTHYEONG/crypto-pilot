@@ -1701,8 +1701,8 @@ class L2SimulationCache:
 
     vol_matrix_2d: NDArray[np.float64]
     tradeable_mask_2d: NDArray[np.bool_]
-    hurdle_2d: NDArray[np.float64]
-    funding_2d: NDArray[np.float64]
+    hurdle_2d: NDArray[np.floating[Any]]
+    funding_2d: NDArray[np.floating[Any]]
     beta_1d: NDArray[np.float64]
 
     # Vectorized Signal Matrices (Shape: [T, S] where S = n_sleeves)
