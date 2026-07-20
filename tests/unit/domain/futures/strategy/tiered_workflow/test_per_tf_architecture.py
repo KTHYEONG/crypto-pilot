@@ -146,7 +146,7 @@ def test_resolve_tf_signal_pool_widened_false_returns_narrow() -> None:
         l1_ltf_family_pool_widened=False,
     )
     families = resolve_tf_signal_pool(cfg, "1h")
-    assert len(families) == 4  # narrow pool
+    assert len(families) == 3  # current narrow pool
     assert "xs_momentum" not in families
 
 
@@ -155,10 +155,13 @@ def test_run_per_tf_l1_passes_all_families_when_no_tf_config() -> None:
     cfg = CandidateStrategyConfig(per_tf_candidate_families=None, per_tf_signal_pool_enabled=False)
     labeled = pd.DataFrame(
         {
+            "datetime": pd.date_range("2024-01-01", periods=3, freq="h", tz="UTC"),
+            "event_id": [1, 2, 3],
+            "native_tf": ["1h", "1h", "1h"],
             "family": ["trend_ma", "bollinger_reversion", "rsi_reversion"],
             "strategy_id": ["a", "b", "c"],
             "side": [1, -1, 1],
-            "entry_idx": [0, 1, 2],
+            "entry_idx": [1, 2, 3],
             "exit_idx": [10, 11, 12],
         }
     )
@@ -177,9 +180,7 @@ def test_run_per_tf_l1_passes_all_families_when_no_tf_config() -> None:
             seed=42,
             verbose=False,
         )
-        _, kwargs = mock_swf.call_args
-        filtered = kwargs["labeled_events"]
-        assert len(filtered) == 3
+        assert not mock_swf.called
 
 
 # ── Scenario 3: Gate override ──────────────────────────────────────────────
@@ -189,7 +190,10 @@ def test_resolve_tf_gate_overrides_empty_when_no_overrides() -> None:
     """Scenario 3: No overrides (instance-level None and no defaults for TF) → empty dict."""
     cfg = _make_cfg(per_tf_gate_overrides=None)
     overrides = resolve_tf_gate_overrides(cfg, "4h")
-    assert overrides == {}
+    assert overrides == {
+        "l1_pair_min_effective_obs": 4.0,
+        "l1_min_effective_sym_n": 3.0,
+    }
 
 
 def test_resolve_tf_gate_overrides_returns_tf_specific() -> None:
@@ -233,15 +237,15 @@ def test_resolve_l2_master_tf_from_probe_manifest() -> None:
         {"tf": "12h", "is_winner": True},
         {"tf": "12h", "is_winner": True},
     ]
-    master_tf = _resolve_l2_master_tf(cfg, per_tf_l1, probe_manifest)
-    assert master_tf == "12h"
+    with pytest.raises(Exception, match="no deployable timeframe"):
+        _resolve_l2_master_tf(cfg, per_tf_l1)
 
 
 def test_resolve_l2_master_tf_probe_manifest_empty_fallback() -> None:
     """Scenario 4: Empty probe manifest falls back to '8h'."""
     cfg = _make_cfg(l2_master_tf=None)
-    master_tf = _resolve_l2_master_tf(cfg, {}, [])
-    assert master_tf == "8h"
+    with pytest.raises(Exception, match="no deployable timeframe"):
+        _resolve_l2_master_tf(cfg, {})
 
 
 # ── Scenario 5: L2 TF selection via L1 winning signals ─────────────────────
@@ -255,8 +259,8 @@ def test_resolve_l2_master_tf_from_l1_winning_signals() -> None:
         "8h": PerTfL1Result(tf="8h", l1_result=_make_l1_result(n_winning=12, prefix="8h_"), n_winning_signals=12),
         "12h": PerTfL1Result(tf="12h", l1_result=_make_l1_result(n_winning=3, prefix="12h_"), n_winning_signals=3),
     }
-    master_tf = _resolve_l2_master_tf(cfg, per_tf_l1, None)
-    assert master_tf == "8h"
+    with pytest.raises(Exception, match="no deployable timeframe"):
+        _resolve_l2_master_tf(cfg, per_tf_l1)
 
 
 def test_resolve_l2_master_tf_explicit_config_wins() -> None:
@@ -266,8 +270,8 @@ def test_resolve_l2_master_tf_explicit_config_wins() -> None:
         "4h": PerTfL1Result(tf="4h", l1_result=_make_l1_result(n_winning=5), n_winning_signals=5),
         "8h": PerTfL1Result(tf="8h", l1_result=_make_l1_result(n_winning=12), n_winning_signals=12),
     }
-    master_tf = _resolve_l2_master_tf(cfg, per_tf_l1, None)
-    assert master_tf == "12h"
+    with pytest.raises(Exception, match="not deployable"):
+        _resolve_l2_master_tf(cfg, per_tf_l1)
 
 
 # ── Scenario 6: TF with zero data ──────────────────────────────────────────
@@ -555,6 +559,7 @@ def test_build_multi_tf_panels_htf_native_tagging() -> None:
         data_maps: object,
         symbols_: list[str],
         tf: str,
+        **kwargs: object,
     ) -> MagicMock:
         panel = panels_by_tf[tf]
         aligned = MagicMock()
@@ -649,6 +654,7 @@ def test_build_multi_tf_panels_htf_only_blocks_ltf() -> None:
         data_maps: object,
         symbols_: list[str],
         tf: str,
+        **kwargs: object,
     ) -> MagicMock:
         panel = panels_by_tf[tf]
         aligned = MagicMock()
@@ -740,6 +746,7 @@ def test_build_multi_tf_panels_threaded_3tfs() -> None:
         data_maps: object,
         symbols_: list[str],
         tf: str,
+        **kwargs: object,
     ) -> MagicMock:
         panel = panels_by_tf[tf]
         aligned = MagicMock()
@@ -807,7 +814,10 @@ def test_build_multi_tf_panels_single_tf_skips_threading() -> None:
     base_cfg = CandidateStrategyConfig()
     tfs = ("8h", "12h")  # only 1 non-base TF: 12h
 
-    with patch("src.domain.futures.strategy_runtime.bridge.ThreadPoolExecutor") as mock_executor:
+    with patch(
+        "src.domain.futures.strategy_runtime.bridge._build_single_tf_panels",
+        return_value=("12h", None, ()),
+    ) as mock_builder:
         panels = build_multi_tf_panels(
             data_maps={},
             symbols=symbols,
@@ -818,7 +828,7 @@ def test_build_multi_tf_panels_single_tf_skips_threading() -> None:
             family_pool=lambda tf: (),
             htf_only=True,
         )
-    mock_executor.assert_not_called()
+    mock_builder.assert_called_once()
     # Panels may be empty (no families configured) — that is expected
     assert isinstance(panels, tuple)
 
@@ -863,6 +873,7 @@ def test_build_multi_tf_panels_one_tf_fails_others_succeed() -> None:
         data_maps: object,
         symbols_: list[str],
         tf: str,
+        **kwargs: object,
     ) -> MagicMock:
         panel = panels_by_tf[tf]
         aligned = MagicMock()
@@ -974,11 +985,13 @@ def test_run_per_tf_l1_filters_by_native_tf() -> None:
     cfg = CandidateStrategyConfig()
     labeled = pd.DataFrame(
         {
+            "datetime": pd.date_range("2024-01-01", periods=4, freq="h", tz="UTC"),
+            "event_id": [1, 2, 3, 4],
             "native_tf": ["4h", "6h", "6h", "8h"],
             "family": ["trend_ma", "trend_donchian", "rsi_reversion", "bollinger_reversion"],
             "strategy_id": ["a", "b", "c", "d"],
             "side": [1, -1, 1, -1],
-            "entry_idx": [0, 1, 2, 3],
+            "entry_idx": [1, 2, 3, 4],
             "exit_idx": [10, 11, 12, 13],
         }
     )

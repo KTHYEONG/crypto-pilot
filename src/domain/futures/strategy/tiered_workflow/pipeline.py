@@ -439,13 +439,18 @@ def build_l1_prequential_evidence_snapshots(
     cfg: CandidateStrategyConfig,
     seed: int,
     precomputed_results: list[CandidateFoldOutput] | None = None,
+    prepared_evidence_store: pd.DataFrame | None = None,
 ) -> tuple[Layer1EvidenceSnapshot, ...]:
     """Build causal evidence snapshots from a single pass over evidence folds."""
+    if precomputed_results is not None and prepared_evidence_store is not None:
+        raise ValueError("precomputed_results and prepared_evidence_store are mutually exclusive")
     purge_bars, _embargo_bars = strategy_config.resolve_purge_and_embargo_bars(cfg)
     evidence_frames: list[pd.DataFrame] = []
 
-    if not evidence_folds:
+    if not evidence_folds and prepared_evidence_store is None:
         evidence_store = pd.DataFrame()
+    elif prepared_evidence_store is not None:
+        evidence_store = prepared_evidence_store
     elif precomputed_results is not None:
         flat_results = precomputed_results
         for evidence_idx, evidence_out in enumerate(flat_results):
@@ -1361,20 +1366,13 @@ def run_l1_nested_swf(
 
                 _log_fold_avg_profile(evidence_results, "evidence")
 
-                t_ev_snap = time.perf_counter()
-                evidence_snapshots = build_l1_prequential_evidence_snapshots(
-                    labeled_events=labeled_events,
-                    aligned=aligned,
-                    evidence_folds=evidence_folds,
-                    snapshot_indices=tuple(fold.oos_start for fold in outer_folds),
-                    cfg=l1_cfg,
-                    seed=seed,
-                    precomputed_results=evidence_results,
-                )
-                logger.log(PERF, "[PERF] l1_prequential_evidence_snapshots took=%.4fs", time.perf_counter() - t_ev_snap)
-                logger.debug(
-                    "[MEM] stage=evidence_snapshots rss=%.0fMB n_snapshots=%d", _get_rss_mb(), len(evidence_snapshots)
-                )
+                evidence_frames: list[pd.DataFrame] = []
+                for evidence_idx, evidence_out in enumerate(evidence_results):
+                    if _is_trained_fold_output(evidence_out):
+                        evidence_frames.append(
+                            _event_results_from_fold_output(fold_id=evidence_idx, fold_out=evidence_out)
+                        )
+                evidence_store: pd.DataFrame = _build_evidence_store(evidence_frames)
 
                 _wf_agg_timings = dict.fromkeys(_wf_profile_keys, 0.0)
                 for _r in evidence_results:
@@ -1385,11 +1383,10 @@ def run_l1_nested_swf(
                 gc.collect()
                 logger.debug("[MEM] stage=post_evidence_free rss=%.0fMB", _get_rss_mb())
             else:
-                evidence_snapshots = ()
+                evidence_store = pd.DataFrame()
                 _wf_agg_timings = dict.fromkeys(_wf_profile_keys, 0.0)
 
             logger.log(PERF, "[PERF] l1_evidence_phase took=%.4fs", time.perf_counter() - t_exec)
-            snapshots_by_idx = {s.as_of_idx: s for s in evidence_snapshots}
 
             # ── Phase 2: Outer folds ────────────────────────────────────────────────
             t_outer_exec = time.perf_counter()
@@ -1469,6 +1466,37 @@ def run_l1_nested_swf(
         cw._GLOBAL_CFG = None
         cw._GLOBAL_PURGE_BARS = None
         gc.collect()
+
+    # ── Phase: Prequential snapshots (fold pool fully closed) ─────────────
+    from src.domain.futures.strategy.tiered_workflow.snapshot_executor import (
+        L1SnapshotTask,
+        execute_l1_snapshot_batch,
+    )
+
+    t_ev_snap = time.perf_counter()
+    _snapshot_indices = tuple(fold.oos_start for fold in outer_folds)
+    _snapshot_tasks = tuple(
+        L1SnapshotTask(snapshot_offset=offset, as_of_idx=aidx)
+        for offset, aidx in enumerate(_snapshot_indices)
+    )
+    evidence_snapshots, _snap_report = execute_l1_snapshot_batch(
+        evidence_store=evidence_store,
+        tasks=_snapshot_tasks,
+        cfg=l1_cfg,
+        symbols=aligned.symbols,
+        seed=seed,
+    )
+    logger.log(
+        PERF,
+        "[PERF] l1_prequential_evidence_snapshots took=%.4fs mode=%s workers=%d",
+        time.perf_counter() - t_ev_snap,
+        _snap_report.mode,
+        _snap_report.resolved_workers,
+    )
+    logger.debug(
+        "[MEM] stage=evidence_snapshots rss=%.0fMB n_snapshots=%d", _get_rss_mb(), len(evidence_snapshots)
+    )
+    snapshots_by_idx = {s.as_of_idx: s for s in evidence_snapshots}
 
     _log_fold_avg_profile(outer_results, "outer")
 
@@ -4260,8 +4288,16 @@ def run_tiered_pipeline(
                 time.perf_counter() - t_tf,
                 _get_rss_mb(),
             )
-            if tf_idx < len(l1_tfs) - 1:
-                time.sleep(0.5)
+            from src.domain.futures.strategy.tiered_workflow.lifecycle import (
+                release_completed_tf_resources,
+            )
+
+            release_completed_tf_resources(
+                tf=tf,
+                aligned_tf=aligned_tf,
+                primary_aligned=aligned,
+                per_tf_aligned=per_tf_data_maps,
+            )
 
         _l2_tf_resolved = _resolve_l2_master_tf(cfg, per_tf_l1)
         if logger.isEnabledFor(logging.DEBUG):
