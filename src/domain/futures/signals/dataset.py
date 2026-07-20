@@ -263,7 +263,7 @@ def _rolling_robust_z_1d(values: NDArray[np.float64], window: int) -> NDArray[np
     return cast(NDArray[np.float64], res)
 
 
-def _rolling_robust_z_2d(values: NDArray[np.float64], window: int) -> NDArray[np.float64]:
+def _rolling_robust_z_2d(values: NDArray[np.floating[Any]], window: int) -> NDArray[np.float64]:
     res = _numba_rolling_robust_z_2d(values, window, _ROBUST_Z_EPS, _ROBUST_Z_CLIP)
     return cast(NDArray[np.float64], res)
 

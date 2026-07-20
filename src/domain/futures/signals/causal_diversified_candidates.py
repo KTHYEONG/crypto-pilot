@@ -5,6 +5,8 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 import numpy as np
 from numpy.typing import NDArray
 
@@ -41,9 +43,9 @@ def _trailing_min(
 
 
 def _trailing_mean(
-    values_2d: NDArray[np.float64],
+    values_2d: NDArray[np.floating[Any]],
     window: int,
-) -> NDArray[np.float64]:
+) -> NDArray[np.floating[Any]]:
     n = len(values_2d)
     result = np.full_like(values_2d, np.nan)
     for t in range(window, n):
@@ -52,9 +54,9 @@ def _trailing_mean(
 
 
 def _trailing_std(
-    values_2d: NDArray[np.float64],
+    values_2d: NDArray[np.floating[Any]],
     window: int,
-) -> NDArray[np.float64]:
+) -> NDArray[np.floating[Any]]:
     n = len(values_2d)
     result = np.full_like(values_2d, np.nan)
     for t in range(window, n):
@@ -113,8 +115,8 @@ def _build_lpb_panels(
     adv_arr = aligned.adv_usdt_2d
 
     has_liquidity = cost_arr is not None and adv_arr is not None
-    cost: NDArray[np.float64] | None = cost_arr
-    adv: NDArray[np.float64] | None = adv_arr
+    cost: NDArray[np.floating[Any]] | None = cost_arr
+    adv: NDArray[np.floating[Any]] | None = adv_arr
 
     for w in cfg.channel_bars:
         if w < 2 or t <= w:
@@ -211,8 +213,8 @@ def _build_bnrr_panels(
     btc_ret = log_returns[:, btc_index : btc_index + 1]
 
     has_liquidity = cost_arr is not None and adv_arr is not None
-    cost: NDArray[np.float64] | None = cost_arr
-    adv: NDArray[np.float64] | None = adv_arr
+    cost: NDArray[np.floating[Any]] | None = cost_arr
+    adv: NDArray[np.floating[Any]] | None = adv_arr
 
     for w in cfg.lookback_bars:
         if w < 2 or t <= w:
