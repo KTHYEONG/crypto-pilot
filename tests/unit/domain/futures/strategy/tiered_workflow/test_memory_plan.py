@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from unittest.mock import patch
 
+import pytest
+
 import psutil
 
 from src.domain.futures.strategy.tiered_workflow.memory import (
@@ -223,3 +225,118 @@ def test_estimate_unique_array_bytes_pandas_series_fallback() -> None:
     s = pd.Series(arr, name="x")
     mem = estimate_unique_array_bytes(s)
     assert mem > 0
+
+
+# ── binding_constraint diagnosis tests (Phase 1) ────────────────────────
+
+
+def test_binding_constraint_memory_workers_happy_path() -> None:
+    snapshot = ProcessTreeMemory(
+        parent_rss_bytes=0,
+        tree_pss_bytes=int(7 * GIB),
+        tree_uss_bytes=None,
+        available_bytes=int(20 * GIB),
+    )
+    plan = resolve_l1_memory_plan(
+        n_tasks=12, shared_input_bytes=60 * 1024 * 1024,
+        result_soft_cap_bytes=100 * 1024 * 1024, snapshot=snapshot,
+        stage_cap=3, cpu_cap=6,
+    )
+    assert plan.workers == 2
+    assert plan.reason == "ok"
+    assert plan.binding_constraint == "memory_workers"
+
+
+def test_binding_constraint_tree_pss_cap() -> None:
+    snapshot = ProcessTreeMemory(
+        parent_rss_bytes=0,
+        tree_pss_bytes=int(9.5 * GIB),
+        tree_uss_bytes=None,
+        available_bytes=int(20 * GIB),
+    )
+    plan = resolve_l1_memory_plan(
+        n_tasks=12, shared_input_bytes=60 * 1024 * 1024,
+        result_soft_cap_bytes=100 * 1024 * 1024, snapshot=snapshot,
+        stage_cap=3, cpu_cap=6,
+    )
+    assert plan.workers == 1
+    assert plan.reason == "memory_floor_serial"
+    assert plan.binding_constraint == "tree_pss_cap"
+
+
+def test_binding_constraint_system_available() -> None:
+    snapshot = ProcessTreeMemory(
+        parent_rss_bytes=0,
+        tree_pss_bytes=int(2 * GIB),
+        tree_uss_bytes=None,
+        available_bytes=int(0.5 * GIB),
+    )
+    plan = resolve_l1_memory_plan(
+        n_tasks=12, shared_input_bytes=60 * 1024 * 1024,
+        result_soft_cap_bytes=100 * 1024 * 1024, snapshot=snapshot,
+        stage_cap=3, cpu_cap=6,
+    )
+    assert plan.workers == 1
+    assert plan.binding_constraint == "system_available"
+
+
+def test_binding_constraint_metrics_unavailable() -> None:
+    snapshot = ProcessTreeMemory(
+        parent_rss_bytes=0,
+        tree_pss_bytes=None,
+        tree_uss_bytes=None,
+        available_bytes=6 * GIB,
+    )
+    plan = resolve_l1_memory_plan(
+        n_tasks=12, shared_input_bytes=2 * GIB,
+        result_soft_cap_bytes=512 * MIB, snapshot=snapshot,
+        stage_cap=3, cpu_cap=6,
+    )
+    assert plan.workers == 1
+    assert plan.reason == "memory_metrics_unavailable"
+    assert plan.binding_constraint == "metrics_unavailable"
+
+
+def test_binding_constraint_stage_cap() -> None:
+    snapshot = ProcessTreeMemory(
+        parent_rss_bytes=0,
+        tree_pss_bytes=int(2 * GIB),
+        tree_uss_bytes=None,
+        available_bytes=int(20 * GIB),
+    )
+    plan = resolve_l1_memory_plan(
+        n_tasks=12, shared_input_bytes=60 * 1024 * 1024,
+        result_soft_cap_bytes=100 * 1024 * 1024, snapshot=snapshot,
+        stage_cap=2, cpu_cap=6,
+    )
+    assert plan.workers > 1
+    assert plan.binding_constraint == "stage_cap"
+
+
+def test_worker_plan_log_includes_binding_token(
+    caplog: pytest.LogCaptureFixture,
+    mocker: pytest.MockFixture,
+) -> None:
+    import logging
+
+    from src.domain.futures.strategy.tiered_workflow.memory import (
+        GIB as _GIB,
+        ProcessTreeMemory,
+    )
+    from src.domain.futures.strategy.tiered_workflow.pipeline import (
+        resolve_safe_nested_workers,
+    )
+
+    mocker.patch(
+        "src.domain.futures.strategy.tiered_workflow.memory.snapshot_process_tree_memory",
+        return_value=ProcessTreeMemory(
+            parent_rss_bytes=0,
+            tree_pss_bytes=int(2 * _GIB),
+            tree_uss_bytes=None,
+            available_bytes=int(20 * _GIB),
+        ),
+    )
+    caplog.set_level(logging.DEBUG)
+    resolve_safe_nested_workers(12, 60 * 1024 * 1024, stage="evidence")
+
+    assert any("binding=" in r.message for r in caplog.records)
