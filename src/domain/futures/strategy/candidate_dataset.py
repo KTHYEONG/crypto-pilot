@@ -1524,8 +1524,9 @@ def _warm_aligned_2d_cache(aligned: AlignedMarketData, cfg: CandidateStrategyCon
 
     if "overlay_ctx" not in cache:
         cache["overlay_ctx"] = compute_risk_overlay(aligned=aligned)
+    overlay_ctx = cache["overlay_ctx"]
     if "regime_ctx" not in cache:
-        cache["regime_ctx"] = compute_market_regime_context(aligned=aligned)
+        cache["regime_ctx"] = compute_market_regime_context(aligned=aligned, overlay=overlay_ctx)
 
 
 def prime_aligned_feature_cache(
@@ -1535,3 +1536,24 @@ def prime_aligned_feature_cache(
 ) -> None:
     """부모 프로세스에서 2D 캐시 워밍 전용 — per-event 조립 없이 fork COW 상속용."""
     _warm_aligned_2d_cache(aligned, cfg)
+
+
+def release_aligned_feature_cache(aligned: AlignedMarketData) -> int:
+    """Remove cache entry for ``aligned`` and return estimated freed nbytes.
+
+    Idempotent: returns 0 when no entry exists.  Does not mutate ``aligned``.
+    """
+    global _ALIGNED_FEATURE_CACHE
+    aligned_id = id(aligned)
+    entry = _ALIGNED_FEATURE_CACHE.pop(aligned_id, None)
+    if entry is None:
+        return 0
+    freed = 0
+    seen: set[int] = set()
+    for value in entry.values():
+        if isinstance(value, np.ndarray):
+            ptr = id(value)
+            if ptr not in seen:
+                seen.add(ptr)
+                freed += int(value.nbytes)
+    return freed
