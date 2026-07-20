@@ -1682,10 +1682,28 @@ def _run_tiered_l2_study(
         _market_regime_ctx.crisis_active_1d,
         elevated_vol_quantile=float(getattr(cfg, "l2_regime_severity_vol_quantile", 0.35)),
     )
+    # Precompute per-TF fit edge (trial-param independent → 1회만 계산)
+    # [LIMIT-01] l2_tf_inclusion_enabled / l2_tf_inclusion_min_edge가 L2_SEARCH_SPACE에
+    # 없음을 확인 완료. 향후 이 필드들이 탐색공간에 추가되면 이 hoisting을 되돌려야 함.
+    from src.domain.futures.strategy.tiered_workflow.awf_sim import compute_per_tf_fit_edge
+
+    _tf_inclusion_enabled_pre = bool(getattr(cfg, "l2_tf_inclusion_enabled", True))
+    _per_tf_edge_by_fold: tuple[dict[str, float], ...] = tuple(
+        compute_per_tf_fit_edge(
+            cache=l2_sim_cache,
+            aligned=aligned,
+            fit_start=int(f.fit_start),
+            fit_end=int(f.oos_start),
+        )
+        if _tf_inclusion_enabled_pre and int(f.fit_start) < int(f.oos_start)
+        else {}
+        for f in _awf_folds_l2
+    )
     l2_sim_cache = replace(
         l2_sim_cache,
         bucket_edges_by_fold=_routing_plan.effective_bucket_edges_by_fold,
         pooled_edges_by_fold=_routing_plan.pooled_edges_by_fold,
+        per_tf_edge_by_fold=_per_tf_edge_by_fold,
         regime_code_1d=_routing_plan.effective_regime_code_1d,
         regime_routing_diagnostics=_routing_plan.diagnostics,
         regime_policy_by_fold=_routing_plan.policy_by_fold,
