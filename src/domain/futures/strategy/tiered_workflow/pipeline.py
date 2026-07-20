@@ -311,7 +311,7 @@ def resolve_safe_nested_workers(
     logger.log(
         PERF,
         "[SYS] stage=l1_worker_plan name=%s n_tasks=%d requested_workers=%d cpu_limit=%d "
-        "shared_mb=%.0f worker_mb=%.0f projected_mb=%.0f reason=%s workers=%d",
+        "shared_mb=%.0f worker_mb=%.0f projected_mb=%.0f reason=%s workers=%d binding=%s",
         stage,
         n_tasks,
         requested_workers,
@@ -321,6 +321,7 @@ def resolve_safe_nested_workers(
         memory_plan.projected_tree_bytes / (1024**2),
         memory_plan.reason,
         workers,
+        memory_plan.binding_constraint,
     )
     return workers
 

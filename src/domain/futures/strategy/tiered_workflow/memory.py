@@ -23,6 +23,7 @@ class L1MemoryPlan:
     estimated_worker_private_bytes: int
     projected_tree_bytes: int
     reason: str
+    binding_constraint: str
 
 
 def estimate_unique_array_bytes(value: object) -> int:
@@ -118,6 +119,7 @@ def resolve_l1_memory_plan(
             estimated_worker_private_bytes=0,
             projected_tree_bytes=0,
             reason="memory_metrics_unavailable",
+            binding_constraint="metrics_unavailable",
         )
 
     tree_bytes = pss if pss is not None else (uss or 0)
@@ -128,23 +130,30 @@ def resolve_l1_memory_plan(
         available - reserve_bytes,
     )
 
+    tree_available = tree_pss_cap_bytes - tree_bytes - reserve_bytes
+    system_available = available - reserve_bytes
     if headroom <= 0:
+        binding = "tree_pss_cap" if tree_available <= system_available else "system_available"
         return L1MemoryPlan(
             workers=1,
             estimated_worker_private_bytes=worker_private,
             projected_tree_bytes=tree_bytes + worker_private,
             reason="memory_floor_serial",
+            binding_constraint=binding,
         )
 
     memory_workers = max(1, int(headroom / worker_private))
-    workers = min(
-        n_tasks,
-        pinned if pinned is not None else n_tasks,
-        stage_cap,
-        cpu_cap,
-        memory_workers,
-    )
+    candidates: list[tuple[str, int]] = [
+        ("n_tasks", n_tasks),
+        ("pinned", pinned if pinned is not None else n_tasks),
+        ("stage_cap", stage_cap),
+        ("cpu_cap", cpu_cap),
+        ("memory_workers", memory_workers),
+    ]
+    workers = min(v for _, v in candidates)
     workers = max(1, workers)
+
+    binding = next(name for name, v in candidates if v == workers)
 
     projected = tree_bytes + workers * worker_private
     return L1MemoryPlan(
@@ -152,4 +161,5 @@ def resolve_l1_memory_plan(
         estimated_worker_private_bytes=worker_private,
         projected_tree_bytes=projected,
         reason="ok" if workers > 1 else "memory_floor_serial",
+        binding_constraint=binding,
     )
