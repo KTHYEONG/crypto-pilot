@@ -1729,6 +1729,8 @@ class L2SimulationCache:
     # Pre-computed bucket realized edges (trial-param independent → cached once)
     bucket_edges_by_fold: tuple[dict[tuple[int, str, str], float], ...] = ()
     pooled_edges_by_fold: tuple[dict[tuple[str, str], float], ...] = ()
+    # Pre-computed per-TF fit edge (trial-param independent → cached once)
+    per_tf_edge_by_fold: tuple[dict[str, float], ...] = ()
     # Pre-computed regime code 1d (trial-param independent → cached once)
     regime_code_1d: NDArray[np.int8] | None = None
     risk_severity_code_1d: NDArray[np.int8] | None = None
