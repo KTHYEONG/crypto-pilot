@@ -82,6 +82,9 @@ OPT_FUTURES_CONFIG: dict[str, Any] = {
     "L2_OPTUNA_GC_INTERVAL_BATCHES": 5,
     # L2 Optuna InMemoryStorage 사용 (True=disk I/O 회피)
     "L2_OPTUNA_USE_MEMORY_STORAGE": True,
+    # JAX GPU batch backtest (hybrid compilation opt, Phase 1, gated by LIMIT-01)
+    "L2_JAX_BATCH_ENABLED": False,
+    "L2_JAX_BATCH_MAX_VRAM_GB": 8.5,
     # L2 signal batch disk cache 디렉토리
     "L2_SIGNAL_BATCH_CACHE_DIR": "logs/futures/optimization/l2_signal_cache",
     # LTF alpha panel disk cache
