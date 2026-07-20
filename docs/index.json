@@ -335,7 +335,7 @@
     "testing": "tests/unit/domain/futures/strategy_runtime/test_bridge.py"
   },
   "src/domain/futures/strategy_runtime/bridge.py": {
-    "architecture": "docs/decisions/decisions.md",
+    "architecture": "docs/specs/cold_path_runtime_bottleneck_elimination.md",
     "testing": [
       "tests/unit/domain/futures/strategy_runtime/test_bridge.py",
       "tests/unit/domain/futures/strategy_runtime/test_bridge_alpha_foundry.py",
@@ -343,7 +343,8 @@
       "tests/unit/domain/futures/signals/test_ltf_alpha.py",
       "tests/unit/domain/futures/strategy/tiered_workflow/test_per_tf_architecture.py",
       "tests/unit/domain/futures/strategy_runtime/test_bridge_cross_tf_labeled_events.py",
-      "tests/unit/domain/futures/strategy_runtime/test_bridge_projection.py"
+      "tests/unit/domain/futures/strategy_runtime/test_bridge_projection.py",
+      "tests/unit/domain/futures/strategy/tiered_workflow/test_snapshot_executor.py"
     ]
   },
   "src/domain/futures/alpha_foundry/edge_failure.py": {
