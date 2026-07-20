@@ -2,6 +2,11 @@
 
 This file holds historical architecture decision records (ADRs) that have been pruned from the active window.
 
+## [2026-07-19] [TASK_L2_GROWTH_LCB_CLIFF_FIX] [ADR_20260719_L2_GROWTH_LCB_CLIFF_FIX]
+- **Context/Why:** 2026-05-01 기준 feasibility-first 120-trial 재측정에서 120/120 trial 전원 파국적 음수 CAGR(best=-11.77%) 관측, 커밋 7f4e1f64 이후 회귀로 의심됨. 코드 대조 결과 _contiguous_block_log_growth(metrics.py)가 배포 레버리지 수익률 중 단 한 bar라도 <=-100%면 block-growth 전체를 empty로 폐기해 growth_lcb_deployed가 -1e6 sentinel로 붕괴하는 이산적 절벽을 발견 — 해당 커밋이 이 값을 Optuna 유일 objective로 승격시켜 과거 무해(weight=0)했던 절벽이 치명적으로 작동 가능한 구조였음.
+- **Resolution/What:** apply_deployment(risk_deployment.py)와 동일한 clip(-1.0+1e-9)을 _contiguous_block_log_growth의 log1p 이전에 적용해 절벽을 제거(np.any(arr<=-1.0) 조기반환 분기 삭제). 단위테스트 3건 추가(정상경로/wipeout 클립 단조성/evaluate_l2_trial 통합).
+- **Impact:** 실측 재검증(동일 조건 2026-05-01/seed=42/120trials)에서 fix 적용 전후 trial별 CAGR이 완전 동일 -- 절벽은 이 실행에서 발동하지 않았음이 확인되어 최초 진단이 오진단이었음을 인정. 사용자 요청으로 현재 날짜(2026-07-19) 기준 재실행하자 STATUS PASS(CAGR +73.9%, Sortino 3.033) 정상 gate-pass champion 선정 확인 -- 2026-05-01 파국은 코드 결함이 아니라 해당 시점 신호 배치(29 symbols/2700 events, 희소 커버리지)에 국한된 현상이었음. 다만 2026-07-19 실행도 Optuna 탐색 루프의 crisis context 로딩 실패([CRISIS-LOAD] loaded_symbols=0)로 crisis_measured=0인 채 champion이 선정되고, 별도 경로로 정상 로드되는 사후 crisis stress test에서 뒤늦게 차단(MDD 49.0%>21%)되는 신규 불일치를 확인 -- 다음 세션 최우선 과제로 이월.
+
 ## [2026-07-19] [TASK_L2_FEASIBILITY_FIRST_REMEASURE] [ADR_20260719_L2_FEASIBILITY_FIRST_REMEASURE]
 - **Context/Why:** 위기 리플레이 입력은 정상화됐지만 이전 실행에서 fallback과 None 측정 공백이 결과 신뢰성을 훼손했으므로, 정상·위기 제약을 함께 평가한 120-trial 재측정 결과를 ADR로 고정한다.
 - **Resolution/What:** 위기 컨텍스트 53심볼·7,221 bars·120 matched pairs·26,806 events를 확인하고 120/120 trials를 완료했다. crisis_measured=120이었으며 joint_feasible=0으로 no_feasible_trials fail-closed 처리하고 최종 파이프라인 실행을 중단했다.
