@@ -110,4 +110,17 @@ Create a markdown file at `docs/specs/[feature].md`:
 - **Mock & Integration Boilerplate**: Structural test template demonstrating mock boundaries and assertions.
 ```
 
+## First Response Protocol after Spec Creation (Token-Efficient & Human-Friendly)
+[Trigger: Immediately after docs/specs/[feature].md is created/updated]
+Do NOT just say "I have created the file" and do NOT repeat the technical contents of the file. To prevent the user from asking for an easier explanation, your VERY FIRST chat response MUST present a highly-condensed, human-friendly summary in **Korean** (except for technical terms) within 8 lines:
+
+1. **🎯 핵심 목표**: [1-sentence summary of the business goal/problem solved].
+2. **🔄 로직 흐름**: [Sequential flow (e.g., A -> B -> C) without technical code, max 2 lines].
+3. **⚖️ 설계 핵심 결정**: [Reasoning for choosing this design/structure, 1 sentence].
+4. **👉 후속 대기**: [Wait for user review and ask to type `Proceed` to continue].
+
+
+* Note: Avoid any fenced code/JSON blocks in this chat response to maximize token efficiency.
+
+
 
