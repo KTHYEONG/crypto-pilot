@@ -3,56 +3,48 @@ name: implement
 description: Translate logic and test blueprints into working Python code following TDD with L1 validation.
 ---
 
-# Skill: Implement (TDD Executor)
+# Skill: Implement (TDD Executor & Auto-Chaining)
 
 ## Purpose
 Translate the logical Blueprint (`docs/specs/*.md`) into working Python code using a **TDD (Test-Driven Development)** cycle. Adhere strictly to the defined contract and test matrix in the spec.
+Optimize for **low-cost models (Doer)** by enforcing strict mechanical execution and automatic pipeline triggering.
 
 ## Execution Rules
 
 ### 1. Read the Blueprint
 - Read `docs/specs/*.md` to extract:
-  - Exact file locations
-  - Target function/class contracts (signatures)
-  - The **TDD Test Scenario Matrix**
+  - Exact file locations and target function/class contracts (signatures).
+  - The **Skeleton Mock Boilerplate** and scenario descriptions.
 
-### 2. The TDD Cycle (CRITICAL - DO NOT SKIP STEPS)
-- **Step 1: Stub/Interface Registration & Self-Gate (Compilation Pass)**
-  - Open the target source file (`src/...`) and create only the stub of the function/class matching the signature.
+### 2. Strict Mechanical TDD Cycle (DO NOT REFACTOR ARCHITECTURE)
+- **Step 1: Stub Registration & Verification**
+  - Create only the stub matching the signature in the source file (`src/...`).
   - Return dummy values or raise `NotImplementedError`.
-  - **Contract Alignment**: Read `docs/specs/[feature]_contract.json` and verify every function/class in `contracts` has a matching stub. If any contract has no stub, it was missed — create it now.
-  - **[Self-Gate]**: Run `ruff check` and `uv run mypy [stub_file]` to guarantee API signatures and type hints match the `spec` contract 100% before coding tests.
-- **Step 2: Write Failing Tests (Red Phase)**
-  - Open or create the test file (`tests/...`).
-  - Write test cases matching **Scenario 1, 2, 3, and Scenario 4 (Integration/Wiring)** from the spec blueprint (using the templates provided in spec).
-  - **Coverage Gap Exception**: If the spec's scenarios do not achieve the coverage target (Domain >= 90%, Adapter >= 70%), you MUST write supplementary test cases targeting the uncovered lines.
-  - Run the test command: `uv run pytest -k "test_name"` to confirm the tests **FAIL** (showing `NotImplementedError`, AssertionError, or mock failing assertions for integration).
-- **Step 3: Implement Logic & Integration (Green Phase)**
-  - Write the implementation logic in the target source file (`src/...`).
-  - **Integration Wiring**: You MUST modify the parent calling module/pipeline to connect and activate the new logic as planned in the spec's `Integration & Connection Plan`. Do not leave the new module isolated.
-  - Run `uv run pytest -k "test_name"` until all unit and integration tests (Scenario 4) **PASS**.
-  - **Loop Limit:** Limit this trial-and-error cycle to **max 3 iterations**. If pytest continues to fail after 3 attempts, **STOP** and return to the `spec` phase to refine the design.
-- **Step 4: Refactor & L1.5 Local Gate (Green & Clean Gate)**
-  - Clean up code duplication, optimize local variables, and ensure docstrings match standards.
-  - **[L1.5 Local Gate]**: Run the lightweight sanity check command targeting exclusively the modified files to verify local correctness:
-    `uv run ruff check [modified_files] && uv run pytest [test_files] --tb=short`
-    If any check fails, resolve it immediately. **Do not exit this phase until the L1.5 Gate is 100% Green.**
-    *(Deep type checking via mypy and coverage audit are deferred to the check phase to prevent duplicate test runs.)*
+  - Verify signatures using local type-checking: `uv run ruff check [stub_file]` and `uv run mypy [stub_file]`.
+- **Step 2: Write Tests using Skeleton Mocks (Red Phase)**
+  - Copy the **Skeleton Mock Boilerplate** from the spec into the test file (`tests/...`).
+  - Implement test functions matching Scenario 1, 2, 3, and 4.
+  - Run `uv run pytest -k "test_name"` to confirm the tests **FAIL** (proving Red phase).
+- **Step 3: Implement minimal logic & Connection (Green Phase)**
+  - Write the minimal code to satisfy the tests.
+  - Integrate/wire the new logic into the parent calling module as defined in the Spec's Connection Plan.
+  - Run pytest locally until the tests pass.
+- **Step 4: L1.5 Gate & Auto-Chain to Check**
+  - Once local tests pass, run: `uv run ruff check [modified_files]` to ensure lint compliance.
+  - **[Auto-Chain Execution]**: Immediately proceed to call the **Check** tool:
+    `uv run python scripts/lean_check.py --files [modified_files] --spec docs/specs/[feature]_contract.json`
+  - **Do NOT stop or ask for user permission between Implement and Check.** 
 
-### 3. Single Responsibility
-- Stop immediately after the L1.5 Local Gate passes; submit results to the `check` phase for full regression and coverage auditing.
+### 3. Self-Healing Budget (Max 3 Loops)
+- If the integration check (`lean_check.py`) fails, the low-cost model is allowed a maximum of **3 consecutive auto-correction attempts** to fix the errors.
+- If it still fails after the 3rd attempt, **STOP execution immediately** and report the error logs to the user for human triage or escalation to the high-reasoning model.
 
-### 4. Constraints (Strictly Prohibited)
-- **No Scripts Directory Modifications**: Do NOT create, modify, or delete any files inside the `scripts/` directory. The `scripts/` directory is reserved exclusively for validation/sync tooling. All production logic and helpers must be created in the `src/` directory.
-
-
-## Output Format
+## Output Format (Only output when the entire Pipeline is Green)
 ```md
-### 🏗️ TDD Implementation: [Blueprint Name]
+### 🏗️ TDD Implementation Pipeline: [Blueprint Name]
 - **Target Files:** `[src/...]`, `[tests/...]`
-- **TDD Verification & L1.5 Gate:**
-  - [ ] Wrote failing tests based on scenarios (Red)
-  - [ ] Implemented minimal code & passed tests (Green)
-  - [ ] Passed L1.5 Local Gate (Ruff + Mypy + Targeted Test) (🟢 PASS)
-- **Next Phase:** Proceed to `check` (Regression & Coverage Review)
+- **TDD Verification & L2 Auto-Gate:**
+  - [x] Implemented minimal code & passed tests (Green)
+  - [x] Passed Auto-Chained Gate (lean_check.py) (🟢 PASS)
+  - [x] Coverage Metric: Cov [value]%
 ```
