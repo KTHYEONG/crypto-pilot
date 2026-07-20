@@ -162,6 +162,15 @@ def _get_rss_mb() -> float:
     return -1.0
 
 
+def _get_child_peak_rss_mb() -> float:
+    try:
+        import resource
+
+        return float(resource.getrusage(resource.RUSAGE_CHILDREN).ru_maxrss) / 1024.0
+    except Exception:
+        return -1.0
+
+
 def _get_peak_rss_mb() -> float:
     """Return peak RSS (VmHWM) in MB via proc status with fallback."""
     try:
@@ -2018,6 +2027,7 @@ def _run_tiered_l2_study(
                         "[L2-JAX] JAX batch engine imported; GPU dispatch ready (LIMIT-01 gate pending)"
                     )
 
+                _child_rss_before_pool = _get_child_peak_rss_mb()
                 try:
                     mp_ctx = multiprocessing.get_context("fork")
                     with ProcessPoolExecutor(max_workers=max_workers, mp_context=mp_ctx) as executor:
@@ -2116,6 +2126,13 @@ def _run_tiered_l2_study(
                             )
                             _log_mem("l2_optuna_batch", _mem_batch_start, extra=f"trial_idx={trial_idx}/{n_trials}")
                 finally:
+                    _child_rss_after_pool = _get_child_peak_rss_mb()
+                    _logger.log(
+                        logging.DEBUG,
+                        "[SYS] stage=l2_pool_child_peak_rss before_mb=%.0f after_mb=%.0f delta_mb=%.0f workers=%d",
+                        _child_rss_before_pool, _child_rss_after_pool,
+                        max(0.0, _child_rss_after_pool - _child_rss_before_pool), max_workers,
+                    )
                     _GLOBAL_L2_CTX = None
         finally:
             progress_cb.pbar.close()

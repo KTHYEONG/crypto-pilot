@@ -185,7 +185,8 @@
       "tests/unit/domain/futures/strategy/tiered_workflow/test_l0_delivery_routing.py",
       "tests/unit/domain/futures/strategy/tiered_workflow/test_per_tf_architecture.py",
       "tests/unit/domain/futures/strategy/tiered_workflow/test_atomization_diagnostics.py",
-      "tests/unit/domain/futures/strategy/tiered_workflow/test_l2_crisis_reliability.py"
+      "tests/unit/domain/futures/strategy/tiered_workflow/test_l2_crisis_reliability.py",
+      "tests/unit/domain/futures/strategy/tiered_workflow/test_pipeline_child_rss.py"
     ]
   },
   "src/domain/futures/strategy/config.py": {
