@@ -48,6 +48,26 @@ def estimate_unique_array_bytes(value: object) -> int:
     return 0
 
 
+def measure_worker_private_bytes(
+    before: ProcessTreeMemory,
+    after: ProcessTreeMemory,
+    workers: int,
+) -> int | None:
+    """Empirically derive per-worker private growth from tree snapshots taken
+    immediately before fork-pool submission and immediately after result collection.
+
+    [ADR pending] Validates (or refutes) the fixed `worker_private = max(GIB, ...)`
+    assumption in `resolve_l1_memory_plan` against actual fork COW-defeat growth.
+    Returns None when PSS/USS metrics are unavailable on either snapshot (fail-open,
+    diagnostic only — never affects worker count).
+    """
+    before_bytes = before.tree_pss_bytes if before.tree_pss_bytes is not None else before.tree_uss_bytes
+    after_bytes = after.tree_pss_bytes if after.tree_pss_bytes is not None else after.tree_uss_bytes
+    if before_bytes is None or after_bytes is None or workers <= 0:
+        return None
+    return max(0, after_bytes - before_bytes) // workers
+
+
 def snapshot_process_tree_memory(root_pid: int) -> ProcessTreeMemory:
     """Capture parent and descendant memory for fork planning.
 
@@ -104,10 +124,16 @@ def resolve_l1_memory_plan(
     pinned: int | None = None,
     tree_pss_cap_bytes: int = 10 * GIB,
     reserve_bytes: int = 1 * GIB,
+    worker_private_floor_bytes: int = GIB,
 ) -> L1MemoryPlan:
     """Resolve bounded nested-worker concurrency from process-tree memory.
 
     [ADR_20260714_L1_MEMORY_EXECUTION]
+
+    worker_private_floor_bytes: minimum assumed per-worker private growth (default 1GiB,
+    a conservative fork-COW-defeat estimate). Overridable via
+    OPT_FUTURES_CONFIG["L1_WORKER_PRIVATE_FLOOR_MB"] for empirical calibration runs —
+    see [SYS] stage=worker_private_measured for the actually observed value.
     """
     pss = snapshot.tree_pss_bytes
     uss = snapshot.tree_uss_bytes
@@ -124,7 +150,7 @@ def resolve_l1_memory_plan(
 
     tree_bytes = pss if pss is not None else (uss or 0)
 
-    worker_private = max(GIB, result_soft_cap_bytes + int(0.25 * shared_input_bytes))
+    worker_private = max(worker_private_floor_bytes, result_soft_cap_bytes + int(0.25 * shared_input_bytes))
     headroom = min(
         tree_pss_cap_bytes - tree_bytes - reserve_bytes,
         available - reserve_bytes,
@@ -163,3 +189,79 @@ def resolve_l1_memory_plan(
         reason="ok" if workers > 1 else "memory_floor_serial",
         binding_constraint=binding,
     )
+
+
+# ── Worker-private online calibration store (Phase 1 adaptive) ────────────
+# [ADR_20260720_L1_MEMORY_FLOOR_ADAPTIVE_CALIBRATION]
+
+_WORKER_PRIVATE_OBSERVATIONS: dict[str, list[tuple[float, float]]] = {}
+
+
+def reset_worker_private_calibration() -> None:
+    """[LIMIT-05] Clear all accumulated (shared_mb, measured_mb) observations."""
+    _WORKER_PRIVATE_OBSERVATIONS.clear()
+
+
+def record_worker_private_observation(stage: str, shared_mb: float, measured_mb: float) -> None:
+    """Append one (shared_mb, measured_mb) sample for `stage`."""
+    _WORKER_PRIVATE_OBSERVATIONS.setdefault(stage, []).append((shared_mb, measured_mb))
+
+
+def get_worker_private_observations(stage: str) -> list[tuple[float, float]]:
+    """Return a copy of accumulated observations for `stage` (empty list if none)."""
+    return list(_WORKER_PRIVATE_OBSERVATIONS.get(stage, []))
+
+
+def fit_worker_private_linear_model(
+    observations: list[tuple[float, float]],
+) -> tuple[float, float] | None:
+    """OLS fit of measured_mb = intercept + slope * shared_mb.
+
+    Returns None if fewer than 2 observations or if all shared_mb values
+    are identical (zero variance, undefined slope).
+    """
+    if len(observations) < 2:
+        return None
+
+    n = len(observations)
+    x_vals = [x for x, _ in observations]
+    y_vals = [y for _, y in observations]
+
+    x_mean = sum(x_vals) / n
+    y_mean = sum(y_vals) / n
+
+    num = sum((x - x_mean) * (y - y_mean) for x, y in observations)
+    den = sum((x - x_mean) ** 2 for x in x_vals)
+
+    if abs(den) < 1e-12:
+        return None
+
+    slope = num / den
+    intercept = y_mean - slope * x_mean
+    return (intercept, slope)
+
+
+def predict_calibrated_worker_private_mb(
+    observations: list[tuple[float, float]],
+    shared_mb: float,
+    default_mb: float,
+    margin: float = 1.3,
+) -> float:
+    """[LIMIT-01][LIMIT-02][LIMIT-03] Predict worker_private for the next TF.
+
+    - len(observations) < 2 -> return default_mb unchanged (cold start).
+    - Else: fit linear model, predict at `shared_mb`, clamp to
+      max(predicted, max(m for _, m in observations)), multiply by `margin`.
+    """
+    if len(observations) < 2:
+        return default_mb
+
+    model = fit_worker_private_linear_model(observations)
+    if model is None:
+        return default_mb
+
+    intercept, slope = model
+    predicted = intercept + slope * shared_mb
+    observed_max = max(m for _, m in observations)
+    clamped = max(predicted, observed_max)
+    return clamped * margin
