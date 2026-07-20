@@ -13,6 +13,7 @@ import pandas as pd
 import pytest
 
 from src.core.utils.utils import PERF
+from src.domain.futures.strategy.config import CandidateStrategyConfig
 from src.domain.futures.strategy.tiered_workflow import run_l1_nested_swf
 from src.domain.futures.strategy.walk_forward import WFFold
 
@@ -32,16 +33,16 @@ def minimal_aligned() -> MagicMock:
 
 
 @pytest.fixture
-def minimal_cfg() -> MagicMock:
-    cfg = MagicMock()
-    cfg.wf_n_folds = 2
-    cfg.l1_min_signals_per_symbol = 1
-    cfg.l1_signal_activation_floor_bps = 0.0
-    cfg.l1_bootstrap_block_bars = 6
-    cfg.l1_bootstrap_samples = 200
-    cfg.l1_pair_alpha = 0.05
-    cfg.l1_pair_power = 0.80
-    return cfg
+def minimal_cfg() -> CandidateStrategyConfig:
+    return CandidateStrategyConfig(
+        wf_n_folds=2,
+        l1_min_signals_per_symbol=1,
+        l1_signal_activation_floor_bps=0.0,
+        l1_bootstrap_block_bars=6,
+        l1_bootstrap_samples=200,
+        l1_pair_alpha=0.05,
+        l1_pair_power=0.80,
+    )
 
 
 @pytest.fixture
@@ -92,6 +93,10 @@ def _run_l1_nested(aligned: Any, cfg: Any, empty_fold_out: Any) -> Any:
             "src.domain.futures.strategy.candidate_workflow._fit_and_predict_single_fold",
             return_value=empty_fold_out,
         ),
+        patch(
+            "src.domain.futures.strategy.tiered_workflow.pipeline._prefit_layer1_from_globals",
+            return_value=None,
+        ),
         patch("concurrent.futures.ProcessPoolExecutor", new=SafeThreadPoolExecutor),
         patch(
             "src.domain.futures.strategy.tiered_workflow.pipeline.format_layer1_gate_table",
@@ -104,6 +109,10 @@ def _run_l1_nested(aligned: Any, cfg: Any, empty_fold_out: Any) -> Any:
         patch(
             "src.domain.futures.strategy.tiered_workflow.pipeline.format_layer1_deployment_registry_table",
             return_value="reg",
+        ),
+        patch(
+            "src.domain.futures.strategy.tiered_workflow.snapshot_executor.execute_l1_snapshot_batch",
+            return_value=([], SimpleNamespace(mode="mock", resolved_workers=1)),
         ),
     ):
         return run_l1_nested_swf(
@@ -373,6 +382,18 @@ def test_l1_nested_mem_log_emitted(minimal_aligned: Any, minimal_cfg: Any, empty
     has_evidence = any("stage=evidence_ipc" in m for m in mem_logs)
     has_outer = any("stage=outer_ipc" in m for m in mem_logs)
     assert has_evidence or has_outer, "evidence_ipc or outer_ipc mem log missing"
+
+
+def test_run_l1_nested_swf_logs_child_peak_rss(
+    minimal_aligned: Any, minimal_cfg: Any, empty_fold_out: Any,
+) -> None:
+    with patch(
+        "src.domain.futures.strategy.tiered_workflow.pipeline._get_child_peak_rss_mb",
+        side_effect=[200.0, 250.0],
+    ) as mock_child_rss:
+        _run_l1_nested(minimal_aligned, minimal_cfg, empty_fold_out)
+
+    assert mock_child_rss.call_count == 2
 
 
 def test_no_legacy_perf_tiered_prefix(minimal_aligned: Any, minimal_cfg: Any, empty_fold_out: Any, caplog: Any) -> None:
