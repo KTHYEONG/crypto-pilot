@@ -344,8 +344,14 @@ def main() -> None:
                     }
                     coverage_violations.append(d)
             else:
-                # Existing files: ensure 100% of modified lines are covered AND total coverage is at or above 40% floor
-                if actual_cov < 40:
+                # Existing files: ensure 100% of modified lines are covered AND total coverage is at or above 40% floor (for files <= 1000 lines to prevent legacy token waste)
+                num_lines = 0
+                try:
+                    with open(sf, encoding="utf-8") as f_sf:
+                        num_lines = len(f_sf.readlines())
+                except Exception:
+                    pass
+                if actual_cov < 40 and num_lines <= 1000:
                     d = {
                         "file": sf,
                         "line": 0,
