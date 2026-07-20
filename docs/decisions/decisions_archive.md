@@ -2,6 +2,11 @@
 
 This file holds historical architecture decision records (ADRs) that have been pruned from the active window.
 
+## [2026-07-18] [TASK_L2_FOLD_GRANULARITY_ROBUSTNESS] [ADR_20260718_L2_FOLD_GRANULARITY_ROBUSTNESS]
+- **Context/Why:** margin decouple(ADR_20260718_L2_DEPLOYMENT_MARGIN_CAGR_GATE) 재검증 결과 CAGR gate는 여전히 BLOCKED, 두 번의 독립 재실행 모두 fold_pass_ratio=50%(2/4)에 고정되고 2025-05-30~08-09 구간이 공통 실패. fold pass 판정이 deployed.cagr>0.0 이진 기준이고 fold가 단 4개뿐이라 {0,25,50,75,100%} 5개 값만 가능 — 노이즈성 fold 하나가 25%p를 흔드는 이산성 취약점 확인. wf_n_folds=4는 CandidateStrategyConfig 전역 공유 필드(L1/live/ablation과 공유)라 직접 상향 시 회귀 리스크.
+- **Resolution/What:** Layer2AllocationConfig.l2_wf_n_folds(기본 4, no-op) 신설, walk_forward.py에 resolve_l2_fold_cfg 순수함수 추가(dataclasses.replace로 cfg.wf_n_folds만 국소 override), active_pipeline.py::_run_tiered_l2_study의 유일한 L2 fold 빌드 호출부(build_walk_forward_folds) 1곳에만 적용 — L1(build_l1_swf_folds, cfg 미의존)·live·ablation 등 다른 소비처는 원본 cfg 그대로 사용해 완전히 비영향. Optuna 탐색공간에는 미편입(study 전체가 동일 fold 공유해야 공정 비교, 캐싱 설계 정합).
+- **Impact:** 실측 검증(seed=42, n=120, l2_wf_n_folds=8 임시 실험 후 기본값 4로 원복): fold_pass_ratio 50%→75%로 개선 확인 — 기존 4-fold의 단일 실패 구간(05-30~08-09)이 실제로는 균일하지 않고 05-30~07-05는 +41.2% PASS, 07-05~09-14만 국소적으로 손실(-39.7%/-14.2%)임을 8-fold 분해로 실증. 다만 CAGR은 여전히 BLOCKED(+13.4%, 3회 실행 모두 13~21% 정체) — fold 벽을 낮추자 Sharpe/Sortino/Calmar/PSR이 새로 실패하며 매번 다른 게이트 조합이 걸림돌이 되는 패턴 반복 확인. fold 측정 결함은 해소됐으나 champion이 16개 게이트를 동시 충족할 만큼의 절대적 signal 품질 한계가 근본 병목으로 재확인됨. /check PASS(Cov 50%).
+
 ## [2026-07-18] [TASK_L2_DEPLOYMENT_MARGIN_CAGR_GATE] [ADR_20260718_L2_DEPLOYMENT_MARGIN_CAGR_GATE]
 - **Context/Why:** 실측(optuna.db 4개 200-trial study): promotion_blocker의 90~94%가 cagr 단일 원인, growth_lcb_weight objective 블렌드는 realized CAGR과 상관계수 r=0.09~0.18로 사실상 무관. 근본원인은 calibrate_deployment_leverage의 mdd_margin(기본 0.30, 비탐색)이 전 trial 공통으로 MDD 예산의 70%(0.21)만 타겟팅해 레버리지를 구조적으로 억제. 동일 필드가 crisis 캘리브레이션(l_crisis)에도 재사용돼 그대로 풀면 크라이시스 방어가 침식되는 문제 확인.
 - **Resolution/What:** l2_deploy_mdd_margin을 정상장 한정 L2_SEARCH_SPACE에 편입(0.05~0.30)하고, l2_deploy_crisis_mdd_margin(고정 0.30, 비탐색)으로 crisis 캘리브레이션을 완전 분리(_resolve_safety_ceiling에 crisis_mdd_target 파라미터 추가). oos_budget_blend/oos_floor_cap 하드코딩을 config 필드화. select_layer2_champion의 gate-passed replay 검증을 top-3 고정에서 fallback_limit(24)까지 확장, replay_mismatch로 인한 promotion 플립을 [EVAL] WARNING으로 승격.
