@@ -179,6 +179,15 @@ def _get_rss_mb() -> float:
     return -1.0
 
 
+def _get_child_peak_rss_mb() -> float:
+    try:
+        import resource
+
+        return float(resource.getrusage(resource.RUSAGE_CHILDREN).ru_maxrss) / 1024.0
+    except Exception:
+        return -1.0
+
+
 def _compute_advisory_penalty(advisory_checks: tuple[Any, ...]) -> float:
     if not advisory_checks:
         return 1.0
@@ -1307,6 +1316,7 @@ def run_l1_nested_swf(
         snapshot_process_tree_memory,
     )
 
+    _child_rss_before_pool = _get_child_peak_rss_mb()
     try:
         with ProcessPoolExecutor(max_workers=max_pool_workers, mp_context=mp_ctx) as executor:
             # ── Phase 1: Evidence folds ─────────────────────────────────────────────
@@ -1460,6 +1470,13 @@ def run_l1_nested_swf(
                     logger.exception("[L1] speculative pre-fit failed — falling back to serial fit")
                     _prefit_core = None
     finally:
+        _child_rss_after_pool = _get_child_peak_rss_mb()
+        logger.log(
+            PERF,
+            "[SYS] stage=l1_pool_child_peak_rss before_mb=%.0f after_mb=%.0f delta_mb=%.0f workers=%d",
+            _child_rss_before_pool, _child_rss_after_pool,
+            max(0.0, _child_rss_after_pool - _child_rss_before_pool), max_pool_workers,
+        )
         cw._GLOBAL_LABELED_EVENTS = None
         cw._GLOBAL_PREPARED_EVENTS = None
         cw._GLOBAL_ALIGNED = None
