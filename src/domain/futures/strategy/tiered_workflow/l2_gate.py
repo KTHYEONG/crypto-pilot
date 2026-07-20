@@ -53,7 +53,7 @@ class Layer2ConstraintVector:
             self.crisis_cagr,
         )
 
-    def as_mapping(self) -> dict[str, float]:
+    def as_mapping(self) -> dict[str, float | bool]:
         return {
             "deployment": self.deployment,
             "support_leak": self.support_leak,
@@ -68,6 +68,7 @@ class Layer2ConstraintVector:
             "cagr": self.cagr,
             "sharpe_uplift": self.sharpe_uplift,
             "crisis_cagr": self.crisis_cagr,
+            "crisis_measured": self.crisis_measured,
         }
 
     def non_crisis_feasible(self) -> bool:

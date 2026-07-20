@@ -138,7 +138,7 @@ class TestLayer2ConstraintVector:
         assert len(t) == 13
         assert t[2] == pytest.approx(0.1)
 
-    def test_as_mapping_contains_all_keys(self) -> None:
+    def test_as_mapping_serializes_crisis_measurement_state(self) -> None:
         cv = Layer2ConstraintVector(
             deployment=-1.0, support_leak=0.0, mdd=0.1, cvar_95=-0.05,
             fold=-0.2, recent_fold=-0.1, active_blocks=0.0, friction=-0.1,
@@ -148,7 +148,8 @@ class TestLayer2ConstraintVector:
         m = cv.as_mapping()
         assert "crisis_mdd" in m
         assert "crisis_cagr" in m
-        assert len(m) == 13
+        assert m["crisis_measured"] is True
+        assert len(m) == 14
 
     def test_non_crisis_feasible_true_when_all_non_crisis_slots_leq_zero(self) -> None:
         cv = Layer2ConstraintVector(
@@ -300,6 +301,26 @@ class TestLayer2FeasibilityAudit:
         audit = summarize_layer2_feasibility(trials=trials, requested_trials=5)
         assert audit.joint_feasible_trials == 0
         assert len(audit.failure_counts) == 13
+
+    def test_audit_uses_trial_crisis_measurement_for_legacy_constraint_map(self) -> None:
+        constraint_map = Layer2ConstraintVector(
+            deployment=-1.0, support_leak=-1.0, mdd=-1.0, cvar_95=-1.0,
+            fold=-1.0, recent_fold=-1.0, active_blocks=-1.0, friction=-1.0,
+            trades=-1.0, crisis_mdd=-1.0, cagr=-1.0, sharpe_uplift=-1.0,
+            crisis_cagr=-1.0, crisis_measured=True,
+        ).as_mapping()
+        constraint_map.pop("crisis_measured")
+        trial = self._make_trial(
+            0,
+            optuna.trial.TrialState.COMPLETE,
+            constraint_map=constraint_map,
+            l2_crisis_measured=True,
+        )
+
+        audit = summarize_layer2_feasibility(trials=[trial], requested_trials=1)
+
+        assert audit.crisis_measured_trials == 1
+        assert audit.joint_feasible_trials == 1
 
     def test_audit_diagnostic_frontier_includes_minimal_failure_candidates(self) -> None:
         trials = []
