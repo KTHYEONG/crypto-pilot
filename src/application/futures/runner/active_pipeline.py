@@ -80,6 +80,7 @@ from src.application.futures.optimization.universe_service import (
 from src.application.futures.runner.models import RunnerResult
 from src.core.settings import BASE_DIR
 from src.core.utils.utils import PERF, setup_logger
+from src.domain.futures.optimization.observability.l2_runtime_probe import L2RuntimeProbe
 from src.domain.futures.optimization.observability.run_tracker import (
     L2ChampionSnapshot,
     _compute_search_space_hash,
@@ -1575,6 +1576,10 @@ def _run_tiered_l2_study(
         l2_sim_cache = build_l2_simulation_cache(aligned, signal_batch, tf)
     _logger.debug("[MEM] stage=l2_sim_cache rss=%.0fMB", _get_rss_mb())
 
+    _l2_probe = L2RuntimeProbe.from_environment(logger=_logger, base_dir=BASE_DIR)
+    if _l2_probe.enabled:
+        _l2_probe.start_run(stage="l2")
+
     # AWF folds pre-computation: ctx에 저장하여 _resolve_l2_signal_batch_and_folds 재사용
     _ho_ts = pd.Timestamp(window.holdout_start).tz_localize(None)
     _ho_start_idx = int(np.searchsorted(aligned.datetimes, np.datetime64(_ho_ts, "ns")))
@@ -2152,6 +2157,10 @@ def _run_tiered_l2_study(
     _t_champ_start = time.perf_counter()
     _mem_champ_before = _get_rss_mb()
 
+    _l2_probe_span_champ = _l2_probe.span("l2_champion_selection") if _l2_probe.enabled else None
+    if _l2_probe_span_champ is not None:
+        _l2_probe_span_champ.__enter__()
+
     l2_study_result = select_layer2_champion(
         study=study,
         tf=tf,
@@ -2163,7 +2172,11 @@ def _run_tiered_l2_study(
         prebuilt_cache=l2_sim_cache,
         crisis_rets=crisis_rets,
         crisis_replay_ctx=crisis_replay_ctx,
+        probe=_l2_probe if _l2_probe.enabled else None,
     )
+
+    if _l2_probe_span_champ is not None:
+        _l2_probe_span_champ.__exit__(None, None, None)
 
     _log_mem("select_layer2_champion", _mem_champ_before, extra=f"took={time.perf_counter() - _t_champ_start:.4f}s")
     gc.collect()
@@ -2247,6 +2260,8 @@ def _run_tiered_l2_study(
 
     _blocker = _blocker_reason or "none"
     _logger.debug("[MEM] stage=l2_champion rss=%.0fMB blocked=%s", _get_rss_mb(), _blocker)
+    if _l2_probe.enabled:
+        _l2_probe.stop_run(outcome=_blocker)
     return l2_study_result
 
 
