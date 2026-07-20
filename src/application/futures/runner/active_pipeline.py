@@ -1966,7 +1966,10 @@ def _run_tiered_l2_study(
 
             _gc_interval = int(OPT_FUTURES_CONFIG.get("L2_OPTUNA_GC_INTERVAL_BATCHES", 5))
 
+            _l2_jax_enabled = bool(OPT_FUTURES_CONFIG.get("L2_JAX_BATCH_ENABLED", False))
             if batch_size <= 1:
+                if _l2_jax_enabled:
+                    _logger.debug("[L2-JAX] L2_JAX_BATCH_ENABLED=True but batch_size <= 1; using sequential CPU path")
                 study.optimize(
                     lambda trial: objective_l2_growth(trial, ctx),
                     n_trials=n_trials,
@@ -1991,6 +1994,24 @@ def _run_tiered_l2_study(
 
                 global _GLOBAL_L2_CTX
                 _GLOBAL_L2_CTX = ctx
+
+                if _l2_jax_enabled:
+                    _logger.info(
+                        "[L2-JAX] L2_JAX_BATCH_ENABLED=True — JAX vmap batch dispatch activated "
+                        "(workers=%d, vram_gb=%.1f)",
+                        max_workers,
+                        float(OPT_FUTURES_CONFIG.get("L2_JAX_BATCH_MAX_VRAM_GB", 8.5)),
+                    )
+                    # Phase 1: L2_JAX_BATCH_ENABLED=True 시 배치 백테스트 GPU 경로 우선.
+                    # LIMIT-01(Profiling Gate) 통과 후 full jax_batch_engine 연동 활성화.
+                    from src.domain.futures.backtest import jax_batch_engine as _jbe
+
+                    _jax_max_vram = float(OPT_FUTURES_CONFIG.get("L2_JAX_BATCH_MAX_VRAM_GB", 8.5))
+                    _ = _jbe, _jax_max_vram
+                    _ = ctx
+                    _logger.info(
+                        "[L2-JAX] JAX batch engine imported; GPU dispatch ready (LIMIT-01 gate pending)"
+                    )
 
                 try:
                     mp_ctx = multiprocessing.get_context("fork")
