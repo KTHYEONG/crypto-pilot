@@ -4,6 +4,7 @@ import hashlib
 import inspect
 import logging
 import math
+import os
 import warnings
 from collections.abc import Callable, Iterable, Sequence
 from contextlib import suppress
@@ -2553,6 +2554,8 @@ def _evaluate_l2_params(
     assert cache is not None
 
     t_start = time.perf_counter()
+    _t_config_end = time.perf_counter()
+
     evaluation = evaluate_l2_trial(
         cache=cache,
         signal_batch=signal_batch,
@@ -2569,6 +2572,12 @@ def _evaluate_l2_params(
     t_elapsed = time.perf_counter() - t_start
 
     user_attrs = _build_l2_user_attrs(evaluation)
+    user_attrs["l2_probe_pid"] = os.getpid()
+    user_attrs["l2_probe_awf_ms"] = 0.0
+    user_attrs["l2_probe_deploy_ms"] = 0.0
+    user_attrs["l2_probe_gate_ms"] = 0.0
+    user_attrs["l2_probe_attr_ms"] = 0.0
+    user_attrs["l2_probe_eval_ms"] = round(t_elapsed * 1000.0, 3)
     return float(evaluation.objective_value), user_attrs, t_elapsed
 
 
