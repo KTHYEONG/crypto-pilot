@@ -53,7 +53,7 @@ def _ensure_debug_visible(logger: logging.Logger) -> None:
         logger.addHandler(handler)
 
 
-def _is_usable_cost_array(arr: NDArray[np.float64] | None) -> bool:
+def _is_usable_cost_array(arr: NDArray[np.floating[Any]] | None) -> bool:
     """True when arr carries at least one finite value (not None, not all-NaN).
 
     [ADR_20260711_L0_NAN_COST_HTF_BLIND_REJECTION]
