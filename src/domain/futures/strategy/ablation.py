@@ -1078,7 +1078,7 @@ def _run_backtest_and_evaluate(
     # Phase 1 (RC1): track eval window start for global→local index remapping
     _eval_start = 0 if start_idx is None else max(0, int(start_idx))
 
-    aligned_data = {
+    aligned_data: dict[str, NDArray[Any]] = {
         "close": aligned_eval.close_2d,
         "high": aligned_eval.high_2d,
         "low": aligned_eval.low_2d,
