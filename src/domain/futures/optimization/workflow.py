@@ -2366,6 +2366,9 @@ def evaluate_l2_trial(
     )
     _last_selected_tuple = tuple(sorted(_last_selected))
 
+    _boosted_rets_tuple = tuple(float(v) for v in _boosted_rets_hybrid) if _boosted_rets_hybrid.size > 0 else ()
+    _deployed_rets_tuple = tuple(float(v) for v in _dep.scaled_rets) if hasattr(_dep, "scaled_rets") and _dep.scaled_rets.size > 0 else ()
+
     return Layer2TrialEvaluation(
         objective_value=float(objective_value),
         constraint_values=gate.optuna_constraint_values,
@@ -2386,6 +2389,8 @@ def evaluate_l2_trial(
         block_metrics=tuple(block_metrics),
         master_tf=str(tf),
         returns_hybrid=tuple(rets_hybrid),
+        boosted_returns_hybrid=_boosted_rets_tuple,
+        deployed_returns_hybrid=_deployed_rets_tuple,
         returns_baseline=tuple(rets_baseline),
         sharpe_hybrid=float(sharpe_hybrid),
         sharpe_hac_baseline_ew=float(sharpe_hac_baseline_ew),
