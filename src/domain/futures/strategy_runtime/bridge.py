@@ -1075,15 +1075,26 @@ def run_candidate_strategy_for_universe(
         "weights": 0.0,
         "alpha_panel": 0.0,
     }
-    stage_rss_samples: list[tuple[str, float, float]] = []
+    stage_rss_samples: list[tuple[str, float, float, float]] = []
     rss_baseline = _get_rss_mb()
     wf_fold_times: list[float] = []
     wf_fold_n_events: list[int] = []
 
+    def _get_vmhwm_mb() -> float:
+        try:
+            with open("/proc/self/status") as f:
+                for line in f:
+                    if line.startswith("VmHWM:"):
+                        return float(line.split()[1]) / 1024.0
+        except Exception:
+            return -1.0
+        return -1.0
+
     def _sample_rss(stage_name: str) -> None:
         rss = _get_rss_mb()
+        hwm = _get_vmhwm_mb()
         delta = rss - rss_baseline if rss >= 0 and rss_baseline >= 0 else -1.0
-        stage_rss_samples.append((stage_name, rss, delta))
+        stage_rss_samples.append((stage_name, rss, delta, hwm))
 
     def _emit_bridge_profile() -> None:
         total_time = time.perf_counter() - bridge_t0
@@ -1125,17 +1136,18 @@ def run_candidate_strategy_for_universe(
         # Memory section
         if stage_rss_samples:
             peak_rss = max(s[1] for s in stage_rss_samples)
+            peak_hwm = max(s[3] for s in stage_rss_samples if s[3] > 0)
             lines.append("")
-            lines.append(f"  [MEMORY] Peak RSS: {peak_rss:.0f} MB | Baseline: {rss_baseline:.0f} MB")
+            lines.append(f"  [MEMORY] Peak RSS: {peak_rss:.0f} MB | Peak VmHWM: {peak_hwm:.0f} MB | Baseline: {rss_baseline:.0f} MB")
             lines.append("  Stage RSS Delta (top 5 by delta):")
             sorted_rss = sorted(
-                [(name, delta) for name, rss, delta in stage_rss_samples if delta > 0],
+                [(name, delta, hwm) for name, rss, delta, hwm in stage_rss_samples if delta > 0],
                 key=lambda x: x[1],
                 reverse=True,
             )[:5]
-            for name, delta in sorted_rss:
+            for name, delta, hwm in sorted_rss:
                 label = name.replace("_", " ").title()
-                lines.append(f"    {label:<15}: +{delta:>7.1f} MB")
+                lines.append(f"    {label:<15}: +{delta:>7.1f} MB (VmHWM={hwm:.0f} MB)" if hwm > 0 else f"    {label:<15}: +{delta:>7.1f} MB")
 
         # WF fold timing section
         if wf_fold_times:

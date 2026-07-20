@@ -2007,7 +2007,10 @@ def run_l2_awf(
     dsr_hybrid = (
         float(override_dsr) if override_dsr is not None else _psr(list(_rets_h_arr), bars_per_year=bars_per_year)
     )
-    terminal_multiple = _terminal_multiple(list(_rets_h_arr))
+    _deployed_rets = eval_result.deployed_returns_hybrid or tuple(
+        float(v) for v in np.asarray(eval_result.returns_hybrid, dtype=np.float64) * eval_result.deploy_leverage
+    )
+    terminal_multiple = _terminal_multiple(list(_deployed_rets))
 
     extras: dict[str, Any] = {
         "sharpe_baseline": sharpe_baseline,
@@ -3615,16 +3618,25 @@ def _deterministic_df_fingerprint(df: pd.DataFrame, *, salt: str = "") -> str:
 
 def _should_load_cache(
     cache_file_size_mb: float,
-    threshold_mb: int = 11500,
+    threshold_mb: int = 11_500,
     expansion_ratio: float = 15.0,
+    *,
+    current_rss_mb: float | None = None,
+    unknown_rss_cache_limit_mb: float = 64.0,
 ) -> bool:
-    """Gate cache deserialization based on current RSS + estimated expansion."""
-    import resource
+    """Gate cache deserialization based on current RSS + estimated expansion.
 
-    try:
-        current_rss_mb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024.0
-    except Exception:
-        return True
+    Args:
+        cache_file_size_mb: On-disk pickle size in MiB.
+        threshold_mb: Hard RSS budget ceiling in MiB (default 11_500).
+        expansion_ratio: Pessimistic in-memory expansion multiplier (default 15.0).
+        current_rss_mb: Explicit current RSS in MiB.  ``None`` = auto-read.
+        unknown_rss_cache_limit_mb: Threshold for allowing cache when RSS is unknown.
+    """
+    if current_rss_mb is None:
+        current_rss_mb = _get_rss_mb()
+    if current_rss_mb is None or current_rss_mb < 0.0:
+        return cache_file_size_mb <= unknown_rss_cache_limit_mb
     estimated = current_rss_mb + (cache_file_size_mb * expansion_ratio)
     return estimated <= threshold_mb
 
@@ -3717,7 +3729,23 @@ def run_per_tf_l1(
         _cache_path = _cache_dir / f"l1_{tf}_{_fp}.pkl"
         if _cache_dir.exists() and _cache_path.exists():
             _st_mb = _cache_path.stat().st_size / (1024 * 1024)
-            if not _should_load_cache(_st_mb):
+            _rss_now = _get_rss_mb()
+            _cache_decision = _should_load_cache(
+                _st_mb,
+                current_rss_mb=_rss_now if _rss_now >= 0 else None,
+            )
+            _projected = (
+                (_rss_now + _st_mb * 15.0) if _rss_now >= 0 else float("inf")
+            )
+            logger.info(
+                "[L1-CACHE] tf=%s size=%.2fMiB current_rss=%.0fMiB projected=%.0fMiB budget=11500MiB decision=%s",
+                tf,
+                _st_mb,
+                _rss_now if _rss_now >= 0 else -1.0,
+                _projected,
+                "hit" if _cache_decision else "cold",
+            )
+            if not _cache_decision:
                 logger.info("[L1-CACHE] skip tf=%s (RSS guard)", tf)
             else:
                 try:
