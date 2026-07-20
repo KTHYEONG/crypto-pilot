@@ -228,10 +228,11 @@ def test_persistence_targeted_band_shape_and_default_before_min_n() -> None:
 
     # Assert
     assert band.shape == (t,)
-    # min_n_eff 이전 구간은 기본값 0.5
-    assert np.all(band[:60] == 0.5)
-    # min_n_eff 이후 구간은 양수 (quantile 결과)
-    assert np.all(band[60:] > 0.0)
+    # finte count < min_periods 구간은 기본값 0.5
+    # (valid-count 기반: index 59부터 valid_count >= min_n_eff)
+    assert np.all(band[:59] == 0.5)
+    # 충분한 finite 값 이후 구간은 양수 (quantile 결과)
+    assert np.all(band[59:] > 0.0)
 
 
 def test_persistence_targeted_band_causal_no_lookahead() -> None:

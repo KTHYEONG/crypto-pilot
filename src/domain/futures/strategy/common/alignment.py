@@ -191,59 +191,145 @@ def align_data_maps(
         for required in ("open", "high", "low", "close", "volume", "datetime"):
             if required not in frame.columns:
                 raise ValueError(f"missing required column: {required} symbol={sym}")
-        open_2d[:, col] = frame["open"].iloc[start:end].to_numpy(dtype=np.float64)
-        high_2d[:, col] = frame["high"].iloc[start:end].to_numpy(dtype=np.float64)
-        low_2d[:, col] = frame["low"].iloc[start:end].to_numpy(dtype=np.float64)
-        close_2d[:, col] = frame["close"].iloc[start:end].to_numpy(dtype=np.float64)
-        volume_2d[:, col] = frame["volume"].iloc[start:end].to_numpy(dtype=np.float64)
+
+        numeric_cols: list[str] = ["open", "high", "low", "close", "volume"]
         if "funding_rate_sum" in frame.columns:
-            funding_2d[:, col] = frame["funding_rate_sum"].iloc[start:end].to_numpy(dtype=np.float64)
+            numeric_cols.append("funding_rate_sum")
         elif "funding_rate" in frame.columns:
-            funding_2d[:, col] = frame["funding_rate"].iloc[start:end].to_numpy(dtype=np.float64)
-        if "basis" in frame.columns or "basis_rate" in frame.columns:
+            numeric_cols.append("funding_rate")
+        if "basis" in frame.columns:
+            numeric_cols.append("basis")
+        elif "basis_rate" in frame.columns:
+            numeric_cols.append("basis_rate")
+        if "sum_open_interest" in frame.columns:
+            numeric_cols.append("sum_open_interest")
+        elif "open_interest" in frame.columns:
+            numeric_cols.append("open_interest")
+        elif "oi" in frame.columns:
+            numeric_cols.append("oi")
+        if "long_short_ratio" in frame.columns:
+            numeric_cols.append("long_short_ratio")
+        elif "global_long_short_ratio" in frame.columns:
+            numeric_cols.append("global_long_short_ratio")
+        if "taker_buy_base" in frame.columns:
+            numeric_cols.append("taker_buy_base")
+        elif "taker_buy_quote" in frame.columns:
+            numeric_cols.append("taker_buy_quote")
+        if "trades" in frame.columns:
+            numeric_cols.append("trades")
+        if "adv_usdt" in frame.columns:
+            numeric_cols.append("adv_usdt")
+        if "execution_cost_bps" in frame.columns:
+            numeric_cols.append("execution_cost_bps")
+
+        mask_cols: list[str] = []
+        if "universe_active_mask" in frame.columns:
+            mask_cols.append("universe_active_mask")
+        if "universe_entry_warm_mask" in frame.columns:
+            mask_cols.append("universe_entry_warm_mask")
+        if "entry_block_mask" in frame.columns:
+            mask_cols.append("entry_block_mask")
+        if "kill_signal" in frame.columns:
+            mask_cols.append("kill_signal")
+        if "inference_active_mask" in frame.columns:
+            mask_cols.append("inference_active_mask")
+        if "inference_entry_warm_mask" in frame.columns:
+            mask_cols.append("inference_entry_warm_mask")
+        if "execution_eligibility_mask" in frame.columns:
+            mask_cols.append("execution_eligibility_mask")
+        if "strategy_readiness_mask" in frame.columns:
+            mask_cols.append("strategy_readiness_mask")
+        if "promotion_active_mask" in frame.columns:
+            mask_cols.append("promotion_active_mask")
+
+        block = extract_aligned_symbol_block(
+            frame=frame,
+            start=start,
+            end=end,
+            numeric_columns=tuple(numeric_cols),
+            mask_columns=tuple(mask_cols),
+        )
+        n_idx: dict[str, int] = {n: i for i, n in enumerate(numeric_cols)}
+        m_idx: dict[str, int] = {m: i for i, m in enumerate(mask_cols)}
+
+        open_2d[:, col] = block.numeric[:, n_idx["open"]]
+        high_2d[:, col] = block.numeric[:, n_idx["high"]]
+        low_2d[:, col] = block.numeric[:, n_idx["low"]]
+        close_2d[:, col] = block.numeric[:, n_idx["close"]]
+        volume_2d[:, col] = block.numeric[:, n_idx["volume"]]
+
+        if "funding_rate_sum" in n_idx:
+            funding_2d[:, col] = block.numeric[:, n_idx["funding_rate_sum"]]
+        elif "funding_rate" in n_idx:
+            funding_2d[:, col] = block.numeric[:, n_idx["funding_rate"]]
+        if "basis" in n_idx:
             if basis_2d is None:
                 basis_2d = np.full((eff_len, n), np.nan, dtype=np.float64)
-            col_name = "basis" if "basis" in frame.columns else "basis_rate"
-            basis_2d[:, col] = frame[col_name].iloc[start:end].to_numpy(dtype=np.float64)
-        if "sum_open_interest" in frame.columns or "open_interest" in frame.columns or "oi" in frame.columns:
-            if oi_2d is None:
-                oi_2d = np.full((eff_len, n), np.nan, dtype=np.float64)
-            col_name = (
-                "sum_open_interest"
-                if "sum_open_interest" in frame.columns
-                else ("open_interest" if "open_interest" in frame.columns else "oi")
-            )
-            oi_2d[:, col] = frame[col_name].iloc[start:end].to_numpy(dtype=np.float64)
-        if "long_short_ratio" in frame.columns or "global_long_short_ratio" in frame.columns:
-            if lsr_2d is None:
-                lsr_2d = np.full((eff_len, n), np.nan, dtype=np.float64)
-            col_name = "long_short_ratio" if "long_short_ratio" in frame.columns else "global_long_short_ratio"
-            lsr_2d[:, col] = frame[col_name].iloc[start:end].to_numpy(dtype=np.float64)
-        if "taker_buy_base" in frame.columns or "taker_buy_quote" in frame.columns:
-            if taker_buy_2d is None:
-                taker_buy_2d = np.full((eff_len, n), np.nan, dtype=np.float64)
-            col_name = "taker_buy_base" if "taker_buy_base" in frame.columns else "taker_buy_quote"
-            taker_buy_2d[:, col] = frame[col_name].iloc[start:end].to_numpy(dtype=np.float64)
-        if "trades" in frame.columns:
+            basis_2d[:, col] = block.numeric[:, n_idx["basis"]]
+        elif "basis_rate" in n_idx:
+            if basis_2d is None:
+                basis_2d = np.full((eff_len, n), np.nan, dtype=np.float64)
+            basis_2d[:, col] = block.numeric[:, n_idx["basis_rate"]]
+        for _oi_alias in ("sum_open_interest", "open_interest", "oi"):
+            if _oi_alias in n_idx:
+                if oi_2d is None:
+                    oi_2d = np.full((eff_len, n), np.nan, dtype=np.float64)
+                oi_2d[:, col] = block.numeric[:, n_idx[_oi_alias]]
+                break
+        for _lsr_alias in ("long_short_ratio", "global_long_short_ratio"):
+            if _lsr_alias in n_idx:
+                if lsr_2d is None:
+                    lsr_2d = np.full((eff_len, n), np.nan, dtype=np.float64)
+                lsr_2d[:, col] = block.numeric[:, n_idx[_lsr_alias]]
+                break
+        for _taker_alias in ("taker_buy_base", "taker_buy_quote"):
+            if _taker_alias in n_idx:
+                if taker_buy_2d is None:
+                    taker_buy_2d = np.full((eff_len, n), np.nan, dtype=np.float64)
+                taker_buy_2d[:, col] = block.numeric[:, n_idx[_taker_alias]]
+                break
+        if "trades" in n_idx:
             if trades_2d is None:
                 trades_2d = np.full((eff_len, n), np.nan, dtype=np.float64)
-            trades_2d[:, col] = frame["trades"].iloc[start:end].to_numpy(dtype=np.float64)
-        if "adv_usdt" in frame.columns:
-            adv_usdt_2d[:, col] = frame["adv_usdt"].iloc[start:end].to_numpy(dtype=np.float64)
-        if "execution_cost_bps" in frame.columns:
-            execution_cost_bps_2d[:, col] = frame["execution_cost_bps"].iloc[start:end].to_numpy(dtype=np.float64)
-        if "universe_active_mask" in frame.columns:
-            active_mask[:, col] = frame["universe_active_mask"].iloc[start:end].to_numpy(dtype=bool)
-        if "universe_entry_warm_mask" in frame.columns:
-            warm_mask[:, col] = frame["universe_entry_warm_mask"].iloc[start:end].to_numpy(dtype=bool)
-        if "entry_block_mask" in frame.columns:
-            entry_block_mask[:, col] = frame["entry_block_mask"].iloc[start:end].to_numpy(dtype=bool)
-        if "kill_signal" in frame.columns:
-            kill_mask[:, col] = frame["kill_signal"].iloc[start:end].to_numpy(dtype=bool)
+            trades_2d[:, col] = block.numeric[:, n_idx["trades"]]
+        if "adv_usdt" in n_idx:
+            adv_usdt_2d[:, col] = block.numeric[:, n_idx["adv_usdt"]]
+        if "execution_cost_bps" in n_idx:
+            execution_cost_bps_2d[:, col] = block.numeric[:, n_idx["execution_cost_bps"]]
+
+        if "universe_active_mask" in m_idx:
+            active_mask[:, col] = block.masks[:, m_idx["universe_active_mask"]]
+        if "universe_entry_warm_mask" in m_idx:
+            warm_mask[:, col] = block.masks[:, m_idx["universe_entry_warm_mask"]]
+        if "entry_block_mask" in m_idx:
+            entry_block_mask[:, col] = block.masks[:, m_idx["entry_block_mask"]]
+        if "kill_signal" in m_idx:
+            kill_mask[:, col] = block.masks[:, m_idx["kill_signal"]]
+
+        if "inference_active_mask" in m_idx:
+            if _inf_active is None:
+                _inf_active = np.ones((eff_len, n), dtype=bool)
+            _inf_active[:, col] = block.masks[:, m_idx["inference_active_mask"]]
+        if "inference_entry_warm_mask" in m_idx:
+            if _inf_warm is None:
+                _inf_warm = np.ones((eff_len, n), dtype=bool)
+            _inf_warm[:, col] = block.masks[:, m_idx["inference_entry_warm_mask"]]
+        if "execution_eligibility_mask" in m_idx:
+            if _execution_eligibility is None:
+                _execution_eligibility = np.ones((eff_len, n), dtype=bool)
+            _execution_eligibility[:, col] = block.masks[:, m_idx["execution_eligibility_mask"]]
+        if "strategy_readiness_mask" in m_idx:
+            if _strategy_readiness is None:
+                _strategy_readiness = np.ones((eff_len, n), dtype=bool)
+            _strategy_readiness[:, col] = block.masks[:, m_idx["strategy_readiness_mask"]]
+        if "promotion_active_mask" in m_idx:
+            if _promotion_active is None:
+                _promotion_active = np.ones((eff_len, n), dtype=bool)
+            _promotion_active[:, col] = block.masks[:, m_idx["promotion_active_mask"]]
+
         # Phase D/E: per-symbol 정적 메타 (PIT-safe: aligned window의 첫 유효값 사용)
         for _mc in _meta_cols_to_read:
             if _mc in frame.columns:
-                # Fast numpy-backed array scanning to extract first non-NaN value
                 arr = (
                     frame[_mc].values[start:end]
                     if hasattr(frame[_mc], "values")
@@ -254,27 +340,6 @@ def align_data_maps(
                 _sym_meta_lists[_mc].append(_meta_value)
             else:
                 _sym_meta_lists[_mc].append(float("nan"))
-        # Phase D: inference panel 마스크 (Stage5 timeline 기반)
-        if "inference_active_mask" in frame.columns:
-            if _inf_active is None:
-                _inf_active = np.ones((eff_len, n), dtype=bool)
-            _inf_active[:, col] = frame["inference_active_mask"].iloc[start:end].to_numpy(dtype=bool)
-        if "inference_entry_warm_mask" in frame.columns:
-            if _inf_warm is None:
-                _inf_warm = np.ones((eff_len, n), dtype=bool)
-            _inf_warm[:, col] = frame["inference_entry_warm_mask"].iloc[start:end].to_numpy(dtype=bool)
-        if "execution_eligibility_mask" in frame.columns:
-            if _execution_eligibility is None:
-                _execution_eligibility = np.ones((eff_len, n), dtype=bool)
-            _execution_eligibility[:, col] = frame["execution_eligibility_mask"].iloc[start:end].to_numpy(dtype=bool)
-        if "strategy_readiness_mask" in frame.columns:
-            if _strategy_readiness is None:
-                _strategy_readiness = np.ones((eff_len, n), dtype=bool)
-            _strategy_readiness[:, col] = frame["strategy_readiness_mask"].iloc[start:end].to_numpy(dtype=bool)
-        if "promotion_active_mask" in frame.columns:
-            if _promotion_active is None:
-                _promotion_active = np.ones((eff_len, n), dtype=bool)
-            _promotion_active[:, col] = frame["promotion_active_mask"].iloc[start:end].to_numpy(dtype=bool)
         if datetimes is None:
             datetimes = np.asarray(
                 frame["datetime"].iloc[start:end].to_numpy(),
