@@ -116,6 +116,18 @@ def _get_changed_lines(file_path: str) -> set[int]:
     return changed
 
 
+def _is_new_file(file_path: str) -> bool:
+    """Return True if the file is new (does not exist in Git HEAD)."""
+    try:
+        res = subprocess.run(  # noqa: S603
+            ["git", "cat-file", "-e", f"HEAD:{file_path}"],
+            capture_output=True, text=True, timeout=10
+        )
+        return res.returncode != 0
+    except Exception:
+        return False
+
+
 def _get_missing_lines(stdout: str, file_path: str) -> set[int]:
     """Parse the Missing column from coverage term-missing output."""
     mkey = file_path.replace(".py", "")
@@ -307,27 +319,34 @@ def main() -> None:
 
             actual_cov = _parse_file_coverage(pt_res.stdout, sf)
             if actual_cov is None:
-                continue
+                actual_cov = 0  # Fail-safe: if file not executed at all, count as 0%
 
-            # Per testing.md §5: measure only on git diff lines (uncommitted changes)
-            changed = _get_changed_lines(sf)
-            if changed:
-                missing = _get_missing_lines(pt_res.stdout, sf)
-                uncovered_changed = missing & changed
-                if not uncovered_changed:
-                    continue  # all changed lines are covered
-                # Recompute effective coverage over diff lines
-                covered_changed = changed - missing
-                actual_cov = int(len(covered_changed) / len(changed) * 100) if changed else actual_cov
+            is_new = _is_new_file(sf)
+            if is_new:
+                # New files must meet the target coverage globally
+                if actual_cov < target_cov:
+                    d = {
+                        "file": sf,
+                        "line": 0,
+                        "error": f"Coverage target violation (New File): actual {actual_cov}% < target {target_cov}%",
+                        "fix_hint": f"Add test cases to cover the new file {sf} up to {target_cov}%",
+                    }
+                    coverage_violations.append(d)
+            else:
+                # Existing files: only ensure 100% of the modified lines are covered (to prevent token waste on legacy code)
+                changed = _get_changed_lines(sf)
+                if changed:
+                    missing = _get_missing_lines(pt_res.stdout, sf)
+                    uncovered_changed = missing & changed
+                    if uncovered_changed:
+                        d = {
+                            "file": sf,
+                            "line": 0,
+                            "error": f"Coverage target violation (Modified File): changed lines {sorted(list(uncovered_changed))} are not covered by tests",
+                            "fix_hint": f"Add test cases targeting the modified lines in {sf}: {sorted(list(uncovered_changed))}",
+                        }
+                        coverage_violations.append(d)
 
-            if actual_cov < target_cov:
-                d = {
-                    "file": sf,
-                    "line": 0,
-                    "error": f"Coverage target violation: actual {actual_cov}% < target {target_cov}%",
-                    "fix_hint": f"Add test cases targeting missing paths in {sf}",
-                }
-                coverage_violations.append(d)
 
             mkey = sf.replace(".py", "")
             for line in pt_res.stdout.splitlines():
