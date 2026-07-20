@@ -855,6 +855,243 @@ def test_run_tiered_l2_study_logs_child_peak_rss(mocker: Any) -> None:
         assert ret >= 0.0 or ret == -1.0
 
 
+def _setup_l2_study_mocks(
+    mocker: Any,
+    n_trials: int = 2,
+    batch_size_val: int = 2,
+    routing_diag: Any = None,
+) -> tuple[Any, Any, Any, Any]:
+    from src.application.futures.runner.active_pipeline import _run_tiered_l2_study
+    from src.domain.futures.strategy.config import CandidateStrategyConfig
+    from src.domain.futures.optimization.opt_config import OPT_FUTURES_CONFIG
+
+    cfg = CandidateStrategyConfig(wf_n_folds=4)
+
+    mocker.patch(
+        "src.domain.futures.strategy.walk_forward.build_walk_forward_folds",
+        return_value=(),
+    )
+    mocker.patch(
+        "src.domain.futures.strategy.tiered_workflow.awf_sim.build_l2_simulation_cache",
+        return_value=mocker.MagicMock(),
+    )
+    mocker.patch(
+        "src.domain.futures.strategy.market_regime.compute_market_regime_context",
+        return_value=mocker.MagicMock(),
+    )
+    if routing_diag is None:
+        _routing_mock = mocker.MagicMock()
+        _routing_mock.diagnostics.policy_diagnostics.sign_consistency_ratio = 1.0
+        _routing_mock.diagnostics.policy_diagnostics.mean_cal_lift_bps = 0.0
+        _routing_mock.diagnostics.policy_diagnostics.mean_confidence = 1.0
+        _routing_mock.diagnostics.policy_diagnostics.mode = "test"
+        _routing_mock.diagnostics.policy_diagnostics.global_reliable = True
+        _routing_mock.diagnostics.policy_diagnostics.n_allow = 1
+        _routing_mock.diagnostics.policy_diagnostics.n_downweight = 0
+        _routing_mock.diagnostics.policy_diagnostics.n_block = 0
+        _routing_mock.diagnostics.policy_diagnostics.n_pooled = 0
+        _routing_mock.diagnostics.policy_diagnostics.n_unstable = 0
+        _routing_mock.diagnostics.policy_diagnostics.n_hard_block_eligible = 0
+        _routing_mock.diagnostics.policy_diagnostics.hard_block_enabled = False
+        _routing_mock.diagnostics.compression_enabled = False
+        _routing_mock.diagnostics.conditioning_path = "direct"
+        _routing_mock.diagnostics.proof_passed = True
+        _routing_mock.diagnostics.active_state_count = 1
+        _routing_mock.diagnostics.debug_diagnostics = None
+        routing_diag = _routing_mock
+    mocker.patch(
+        "src.domain.futures.strategy.tiered_workflow.l2_meta.build_regime_routing_plan",
+        return_value=routing_diag,
+    )
+    mocker.patch(
+        "src.domain.futures.strategy.tiered_workflow.diagnostics.build_layer_universe_audit",
+        return_value=mocker.MagicMock(warnings=()),
+    )
+    mocker.patch(
+        "src.domain.futures.strategy.market_regime.compute_risk_severity_code",
+        return_value=mocker.MagicMock(),
+    )
+    mocker.patch(
+        "src.domain.futures.optimization.workflow.objective_l2_growth",
+        return_value=0.0,
+    )
+    mocker.patch(
+        "src.domain.futures.strategy.tiered_workflow.selection.select_layer2_champion",
+        return_value=mocker.MagicMock(best_params={}, best_trial_number=0, completed_trials=0),
+    )
+    mocker.patch(
+        "src.application.futures.runner.active_pipeline._get_rss_mb",
+        return_value=100.0,
+    )
+    import dataclasses
+
+    mocker.patch.object(dataclasses, "replace", side_effect=lambda obj, **kw: obj)
+    mocker.patch.dict(OPT_FUTURES_CONFIG, {"L2_OPTUNA_BATCH_SIZE": batch_size_val}, clear=False)
+    mocker.patch("psutil.virtual_memory", return_value=SimpleNamespace(available=32.0 * (1024.0**3)))
+
+    mock_executor = mocker.MagicMock()
+    mock_executor.__enter__.return_value = mock_executor
+    mock_future = mocker.MagicMock()
+    mock_future.result.return_value = (0.1, {}, 0.01)
+    mock_executor.submit.return_value = mock_future
+    mocker.patch("concurrent.futures.ProcessPoolExecutor", return_value=mock_executor)
+
+    mock_study = mocker.MagicMock()
+    mock_study.trials = []
+    mock_study.ask.side_effect = [mocker.MagicMock(number=i) for i in range(n_trials)]
+    mock_study._stop_flag = False
+    mocker.patch(
+        "src.application.futures.runner.active_pipeline.get_or_create_study",
+        return_value=mock_study,
+    )
+
+    return cfg, mock_study, _run_tiered_l2_study, mock_executor
+
+
+def _call_l2_study(
+    run_fn: Any,
+    cfg: Any,
+    n_trials: int = 2,
+    tf: str = "1h",
+    seed: int = 42,
+) -> Any:
+    from datetime import date
+
+    window = SimpleNamespace(holdout_start=date(2025, 6, 1), l2_start=date(2024, 6, 1))
+    aligned = SimpleNamespace(
+        symbols=("BTCUSDT",),
+        close_2d=SimpleNamespace(),
+        datetimes=pd.date_range("2024-01-01", periods=500, freq="h"),
+    )
+    caps = SimpleNamespace(trial_number=0)
+    signal_batch = SimpleNamespace()
+    signal_batch.start_idx = 0
+    signal_batch.end_idx = 500
+    signal_batch.registry_version = "v1"
+    signal_batch.model_version = "v1"
+    signal_batch.events = ()
+    signal_batch.symbols = ("BTCUSDT",)
+
+    return run_fn(
+        signal_batch=signal_batch,
+        aligned=aligned,
+        cfg=cfg,
+        window=window,
+        caps=caps,
+        tf=tf,
+        n_trials=n_trials,
+        seed=seed,
+        l2_sim_cache=SimpleNamespace(),
+        l2_wf_n_folds=None,
+    )
+
+
+def test_run_tiered_l2_study_logs_worker_private_per_batch(mocker: Any) -> None:
+    MB = 1024 * 1024
+    from src.domain.futures.strategy.tiered_workflow.memory import ProcessTreeMemory
+
+    mocker.patch(
+        "src.domain.futures.strategy.tiered_workflow.memory.snapshot_process_tree_memory",
+        side_effect=[
+            ProcessTreeMemory(parent_rss_bytes=0, tree_pss_bytes=6000 * MB, tree_uss_bytes=None, available_bytes=0),
+            ProcessTreeMemory(parent_rss_bytes=0, tree_pss_bytes=6600 * MB, tree_uss_bytes=None, available_bytes=0),
+            ProcessTreeMemory(parent_rss_bytes=0, tree_pss_bytes=6600 * MB, tree_uss_bytes=None, available_bytes=0),
+            ProcessTreeMemory(parent_rss_bytes=0, tree_pss_bytes=6800 * MB, tree_uss_bytes=None, available_bytes=0),
+            ProcessTreeMemory(parent_rss_bytes=0, tree_pss_bytes=6800 * MB, tree_uss_bytes=None, available_bytes=0),
+            ProcessTreeMemory(parent_rss_bytes=0, tree_pss_bytes=7000 * MB, tree_uss_bytes=None, available_bytes=0),
+        ],
+    )
+
+    import logging
+
+    captured_logs: list[str] = []
+
+    class _CaptureHandler(logging.Handler):
+        def emit(self, record: logging.LogRecord) -> None:
+            captured_logs.append(record.getMessage())
+
+    logger = logging.getLogger("opt_main_futures")
+    saved_level = logger.level
+    saved_handlers = list(logger.handlers)
+    saved_propagate = logger.propagate
+    logger.setLevel(logging.DEBUG)
+    logger.handlers.clear()
+    logger.addHandler(_CaptureHandler())
+    logger.propagate = False
+
+    cfg, _study, run_fn, _executor = _setup_l2_study_mocks(mocker, n_trials=6, batch_size_val=2)
+    _call_l2_study(run_fn, cfg, n_trials=6)
+
+    logger.setLevel(saved_level)
+    logger.handlers.clear()
+    logger.handlers.extend(saved_handlers)
+    logger.propagate = saved_propagate
+
+    wp_logs = [m for m in captured_logs if "worker_private_measured" in m]
+    assert len(wp_logs) == 3
+    assert "batch_num=1" in wp_logs[0]
+    assert "batch_num=2" in wp_logs[1]
+    assert "batch_num=3" in wp_logs[2]
+    assert "measured_worker_private_mb=" in wp_logs[0]
+
+
+def test_run_tiered_l2_study_logs_worker_private_na_when_pss_unavailable(mocker: Any) -> None:
+    from src.domain.futures.strategy.tiered_workflow.memory import ProcessTreeMemory
+
+    mocker.patch(
+        "src.domain.futures.strategy.tiered_workflow.memory.snapshot_process_tree_memory",
+        return_value=ProcessTreeMemory(parent_rss_bytes=0, tree_pss_bytes=None, tree_uss_bytes=None, available_bytes=0),
+    )
+
+    import logging
+
+    captured_logs: list[str] = []
+
+    class _CaptureHandler(logging.Handler):
+        def emit(self, record: logging.LogRecord) -> None:
+            captured_logs.append(record.getMessage())
+
+    logger = logging.getLogger("opt_main_futures")
+    saved_level = logger.level
+    saved_handlers = list(logger.handlers)
+    saved_propagate = logger.propagate
+    logger.setLevel(logging.DEBUG)
+    logger.handlers.clear()
+    logger.addHandler(_CaptureHandler())
+    logger.propagate = False
+
+    cfg, _study, run_fn, _executor = _setup_l2_study_mocks(mocker, n_trials=2, batch_size_val=2)
+    _call_l2_study(run_fn, cfg, n_trials=2)
+
+    logger.setLevel(saved_level)
+    logger.handlers.clear()
+    logger.handlers.extend(saved_handlers)
+    logger.propagate = saved_propagate
+
+    wp_logs = [m for m in captured_logs if "worker_private_measured" in m]
+    assert wp_logs
+    assert "measured_worker_private_mb=n/a" in wp_logs[0]
+
+
+def test_run_tiered_l2_study_batch_determinism_unaffected_by_memory_snapshot(mocker: Any) -> None:
+    from src.domain.futures.strategy.tiered_workflow.memory import ProcessTreeMemory
+
+    mocker.patch(
+        "src.domain.futures.strategy.tiered_workflow.memory.snapshot_process_tree_memory",
+        side_effect=[
+            ProcessTreeMemory(parent_rss_bytes=0, tree_pss_bytes=6000 * 1024 * 1024, tree_uss_bytes=None, available_bytes=0),
+            ProcessTreeMemory(parent_rss_bytes=0, tree_pss_bytes=6600 * 1024 * 1024, tree_uss_bytes=None, available_bytes=0),
+        ],
+    )
+
+    cfg, mock_study, run_fn, _executor = _setup_l2_study_mocks(mocker, n_trials=2, batch_size_val=2)
+
+    _call_l2_study(run_fn, cfg, n_trials=2)
+
+    assert mock_study.ask.call_count == 2
+    assert mock_study.tell.call_count == 2
+
+
 def test_l2_batch_size_defaults_when_config_missing() -> None:
     """[l2-optuna-batch-determinism-fix] L2_OPTUNA_BATCH_SIZE 키 없을 때 기본값 2."""
     from src.domain.futures.optimization.opt_config import OPT_FUTURES_CONFIG

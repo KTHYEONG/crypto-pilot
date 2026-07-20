@@ -2030,6 +2030,11 @@ def _run_tiered_l2_study(
                 _child_rss_before_pool = _get_child_peak_rss_mb()
                 try:
                     mp_ctx = multiprocessing.get_context("fork")
+                    from src.domain.futures.strategy.tiered_workflow.memory import (
+                        measure_worker_private_bytes,
+                        snapshot_process_tree_memory,
+                    )
+
                     with ProcessPoolExecutor(max_workers=max_workers, mp_context=mp_ctx) as executor:
                         trial_idx = len([t for t in study.trials if t.state.is_finished()])
                         _batch_num = 0
@@ -2052,6 +2057,7 @@ def _run_tiered_l2_study(
                                     batch_params.append(params)
                                     _t_ask += time.perf_counter() - _t0
 
+                                _tree_before_batch = snapshot_process_tree_memory(os.getpid())
                                 _t_submit = time.perf_counter()
                                 futures = [
                                     executor.submit(_evaluate_l2_trial_from_global, params)
@@ -2096,6 +2102,20 @@ def _run_tiered_l2_study(
                                     if study.trials:
                                         _early_stop_cb(study, study.trials[-1])
                                     trial_idx += 1
+
+                            _tree_after_batch = snapshot_process_tree_memory(os.getpid())
+                            _measured_wp_batch = measure_worker_private_bytes(
+                                _tree_before_batch, _tree_after_batch, max_workers,
+                            )
+                            _logger.log(
+                                logging.DEBUG,
+                                "[SYS] stage=worker_private_measured name=l2_optuna_batch batch_num=%d "
+                                "workers=%d before_tree_mb=%s after_tree_mb=%s measured_worker_private_mb=%s",
+                                _batch_num, max_workers,
+                                f"{(_tree_before_batch.tree_pss_bytes or 0) / (1024**2):.0f}",
+                                f"{(_tree_after_batch.tree_pss_bytes or 0) / (1024**2):.0f}",
+                                f"{_measured_wp_batch / (1024**2):.0f}" if _measured_wp_batch is not None else "n/a",
+                            )
 
                             _t_gc = time.perf_counter()
                             if _batch_num % _gc_interval == 0:
