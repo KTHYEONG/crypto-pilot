@@ -371,10 +371,12 @@ def _build_single_tf_panels(
     if not tf_maps:
         return (tf_i, None, ())
     try:
-        aligned_i = align_data_maps(tf_maps, symbols, tf_i)
+        aligned_i = align_data_maps(tf_maps, symbols, tf_i, cache_result=False)
     except Exception as exc:
         _logger.warning("[MULTI-TF] align_data_maps failed tf=%s: %s", tf_i, exc)
         return (tf_i, None, ())
+    del tf_maps
+    gc.collect()
     try:
         cfg_i = dataclasses.replace(cfg, timeframe=tf_i)
         try:
@@ -397,6 +399,8 @@ def _build_single_tf_panels(
     except Exception as exc:
         _logger.warning("[MULTI-TF] build_rule_signal_panels failed tf=%s: %s", tf_i, exc)
         return (tf_i, None, ())
+    del htf_cache
+    gc.collect()
     return (tf_i, aligned_i, tuple(panels_i))
 
 
