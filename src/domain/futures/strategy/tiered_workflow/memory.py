@@ -1,9 +1,13 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 import numpy as np
 import pandas as pd
+
+if TYPE_CHECKING:
+    from src.domain.futures.strategy.walk_forward import WFFold
 
 MIB: int = 1024 * 1024
 GIB: int = 1024 * MIB
@@ -239,6 +243,94 @@ def fit_worker_private_linear_model(
     slope = num / den
     intercept = y_mean - slope * x_mean
     return (intercept, slope)
+
+
+MIN_PILOT_TASKS: int = 6
+MIN_WORKER_BYTES: int = 512 * MIB
+
+
+@dataclass(frozen=True, slots=True)
+class L1PilotMeasurement:
+    stage: str
+    fold_id: int
+    shared_input_bytes: int
+    worker_private_bytes: int
+    result_bytes: int
+    elapsed_seconds: float
+
+
+def resolve_post_pilot_memory_plan(
+    *,
+    n_remaining: int,
+    pilot: L1PilotMeasurement,
+    snapshot: ProcessTreeMemory,
+    stage_cap: int,
+    cpu_cap: int,
+    pinned: int | None = None,
+    tree_pss_cap_bytes: int = 10 * GIB,
+    reserve_bytes: int = GIB,
+    safety_margin: float = 1.3,
+) -> L1MemoryPlan:
+    usable = min(
+        snapshot.available_bytes,
+        tree_pss_cap_bytes - (snapshot.tree_pss_bytes or 0),
+    ) - reserve_bytes
+
+    per_worker = max(
+        pilot.worker_private_bytes + pilot.result_bytes,
+        MIN_WORKER_BYTES,
+    )
+    if usable <= 0:
+        return L1MemoryPlan(
+            workers=1,
+            estimated_worker_private_bytes=per_worker,
+            projected_tree_bytes=0,
+            reason="memory_floor_serial",
+            binding_constraint="usable_zero",
+        )
+
+    safe_workers = max(1, int(usable / (per_worker * safety_margin)))
+    candidates: list[tuple[str, int]] = [
+        ("n_remaining", n_remaining),
+        ("stage_cap", stage_cap),
+        ("cpu_cap", cpu_cap),
+    ]
+    if pinned is not None:
+        candidates.append(("pinned", pinned))
+    resolved = min(v for _, v in candidates)
+    resolved = max(1, min(safe_workers, resolved))
+    binding = "memory_floor_serial"
+    if resolved > 1:
+        for name, val in candidates:
+            if resolved == val:
+                binding = name
+                break
+
+    projected = (snapshot.tree_pss_bytes or 0) + resolved * per_worker
+    return L1MemoryPlan(
+        workers=resolved,
+        estimated_worker_private_bytes=per_worker,
+        projected_tree_bytes=projected,
+        reason="ok" if resolved > 1 else "memory_floor_serial",
+        binding_constraint=binding,
+    )
+
+
+def select_l1_pilot_fold_index(folds: tuple[WFFold, ...]) -> int:
+    """Select the fold with largest estimated input (bar span x event count).
+
+    Tie-break: smallest fold_id.
+    """
+    best_idx = 0
+    best_size = -1
+    for i, f in enumerate(folds):
+        span = f.fit_end - f.fit_start
+        cal_span = f.cal_end - f.cal_start
+        size = span + cal_span
+        if size > best_size:
+            best_size = size
+            best_idx = i
+    return best_idx
 
 
 def predict_calibrated_worker_private_mb(
