@@ -72,8 +72,7 @@ This protocol applies only inside code-writing phases such as `implement` when n
 - **Verified Refactoring:** Ensure structural changes are covered by test code and have guaranteed behavior.
 - **Error Handling:** Always verify and handle return values and exceptions.
 - **Controlled Task Scope:** Limit execution strictly to the current task or active phase; avoid unsolicited task expansion. (Exception: Automated pipeline transitions, such as Implement to Check auto-chaining, are explicitly allowed and must be executed without stopping.)
-  - **Coverage Gap Exception:** During the `implement` phase, if the spec's test scenarios do not cover newly introduced functions/classes, write supplementary test cases targeting those lines as part of the implementation task.
-
+  - **Coverage Gap Exception:** If implementation coverage falls below the targets defined in [.agents/rules/testing.md](file:///.agents/rules/testing.md) (Core >= 85%, Adapter >= 65%, Minimum Floor >= 40% for existing files), you MUST write supplementary unit tests to satisfy the targets as part of the implementation.
 
 ## 9. Rule Isolation & Priority: Commit Skill
 
