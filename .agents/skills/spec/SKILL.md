@@ -7,46 +7,43 @@ description: Actionable implementation blueprint. Logic, Contracts, and Test Sce
 
 ## Purpose
 Merge core architecture conceptualization (Why/What) and detailed TDD interfaces (How/API Contract) into a single blueprint document (`docs/specs/[feature].md`).
-Leverage **high-reasoning models** for creative architectural design, while outputting absolute, deterministic specifications for **low-reasoning models** to implement and integrate mechanically with zero token waste.
+Leverage **high-reasoning models (Thinker)** for creative architectural design, while outputting absolute, deterministic specifications for **low-cost models (Doer)** to implement mechanically with zero token waste.
 
 ## Execution Rules
 
-### 1. Pre-process (Context Discovery)
+### 1. Pre-process & Dynamic Interview (/grill-me)
 - **Decisions Context**: Load `docs/decisions/decisions.md` (align history).
-- **Rule Constraints**: Read and strictly adhere to `performance.md` (WSL resource limits, GPU limits) and `quant.md` (look-ahead bias, timezone isolation).
-- **Dependency Topology Scan**: 
-  - Inspect the codebase to identify the target calling module and dependency flow.
-  - Ensure the new imports do not violate layering rules or create circular dependencies.
-- **Data & API Discovery**: 
-  - To verify API payloads, database schemas, or external library behavior, you are **encouraged** to create and execute temporary exploration scripts in the `scratch/` folder. Use literal data collection rather than guessing.
+- **Rule Constraints**: Read and strictly adhere to `performance.md` and `quant.md` (timezone isolation, look-ahead bias).
+- **Determine Workflow Tier**:
+  - **Tier 1 (Light)**: Minor refactor, simple fix. *Directly skip Spec and proceed to implement.*
+  - **Tier 2 (Standard)**: Medium complexity. Generate lightweight Markdown spec. (No JSON contract).
+  - **Tier 3 (Architectural)**: Complex module, trading logic. Requires full Markdown spec + `[feature]_contract.json`.
+- **Dynamic Interview (/grill-me)**:
+  - For **Tier 3** tasks, before creating the spec document, analyze the user's prompt for design ambiguities.
+  - Output exactly **3 targeted questions** to clarify architecture, DB schema, API interfaces, or edge-case handling.
+  - **STOP immediately** and wait for user answers. Do NOT write the spec until the user answers.
 
 ### 2. High-Reasoning Architectural Thought (High Autonomy)
-- **Alternatives & Trade-offs**: Contrast multiple design options. Justify why the chosen design is selected and state its design trade-offs.
-- **Scale-to-Fit Specifying**: For simple helper functions or utility modules, scale down the detailing. Do NOT force strict `[PERF-xx]` budgeting unless the module involves signal calculations, concurrent routines, or heavy IO.
-- **Quant & System Resilience**: For trading signals, execution modules, or data collectors, explicitly plan for resilience: network time-outs, database state mismatch, and recovery flows.
-- **Algorithmic & Logical Modeling**: Define mathematical models, data structures, state machines, and state transition rules.
-- **System Flow Visualization**: Draw text-based Mermaid sequence/data flow diagrams showing module interactions.
-- **Constraints & Boundaries**: 
-  - Identify edge cases, performance bottlenecks, and algorithmic limitations, tagging each with a unique label (`[LIMIT-01]`, etc.).
-  - **Performance & Resource Budgeting**: For resource-intensive components, define hardware constraints using `[PERF-xx]` tags (RSS limit, GPU VRAM, CPU workers matching WSL constraints in `performance.md`).
+- **Alternatives & Trade-offs**: Contrast multiple design options. Justify why the chosen design is selected.
+- **Constraints & Boundaries**: Identify edge cases, performance bottlenecks, and algorithmic limitations, tagging each with a unique label (`[LIMIT-01]`, etc.).
+- **Quant & System Resilience**: Explicitly plan for network timeouts, timezone normalization, and look-ahead bias prevention.
 
 ### 3. Low-Reasoning Implementation Specifications (Deterministic Constraints)
-To ensure low-reasoning models can build and integrate the code without guessing:
+To ensure low-reasoning models can build and integrate the code mechanically:
 - **Exact Contract changes**: Define class/function signatures with Python 3.11+ type hints.
-- **Integration Spec (Wiring & Data Flow)**:
-  - **Connection Point**: Define the exact file path, class, method, and local context anchor (e.g., `Class.method` -> "right before returning") for invocation.
-  - **State Mutability & Side Effects**: Specify whether the invocation modifies existing state (`Mutable`) or behaves as a pure function (`Immutable`).
-  - **Data Diff**: Express payload modifications using a compact representation: `{"+new_field": "Type", "-deprecated_field": "Type"}`.
+- **Wiring & Connection Plan**: Define the exact file path, class, method, and local context anchor line.
+- **Skeleton Mock Boilerplate (CRITICAL)**:
+  - Provide a **100% syntactically correct test setup and skeleton mock logic**.
+  - Since low-cost models cannot design mocks from scratch, you must output copy-pasteable test skeletons matching the scenarios.
 - **TDD Scenario Matrix**:
-  - Map each LIMIT and PERF tag directly to a concrete test scenario.
-  - Scenarios:
+  - Map each LIMIT and PERF tag directly to a concrete test scenario:
     - **Scenario 1 (Happy Path)**: Unit input/output.
     - **Scenario 2 (Edge Cases)**: `[LIMIT-xx]` boundary conditions.
     - **Scenario 3 (Error Handling)**: Expected Exceptions and Error logs.
-    - **Scenario 4 (Integration Verification)**: Asserting the correct trigger and connection inside the parent module.
-- **Skeleton Mock Boilerplate**: Provide the structural test setup and mock boundary logic (focus on verification assertion points rather than verbose syntax completeness).
+    - **Scenario 4 (Integration Verification)**: Asserting the correct trigger inside the parent module.
 
-### 4. Machine-Readable Contract (`docs/specs/[feature]_contract.json`)
+### 4. Machine-Readable Compliance Contract (`docs/specs/[feature]_contract.json`)
+*(Mandatory for Tier 3 only)*
 Generate a JSON contract alongside the spec markdown for automated compliance checking in the check phase:
 ```json
 {
@@ -64,15 +61,6 @@ Generate a JSON contract alongside the spec markdown for automated compliance ch
   ]
 }
 ```
-- `contracts`: every public class/fn with `file_hint` (target src/ file).
-- `scenarios`: 1:1 with the TDD Scenario Matrix (id 1-4), `name` matching the exact test function name.
-- `wiring`: integration connection — parent file path + anchor symbol to search for.
-
-## Constraints (Strictly Prohibited)
-- **No Production Code Modifications**: Do NOT create, touch, or modify any `.py` source (`src/`) or official test (`tests/`) files during the `spec` phase. (Exploratory scripts inside `scratch/` are fully allowed).
-- **No Scripts Directory Design/Modifications**: Do NOT design, suggest, or write code paths inside the `scripts/` directory. The `scripts/` directory is reserved exclusively for validation/sync tooling. All production logic, auxiliary scripts, and helpers MUST reside in the `src/` directory.
-- **No Quality Verification Execution**: Never execute quality-check loops such as `lean_check.py`, `pytest`, `ruff`, or `mypy` during this phase. (Simple `python scratch/temp.py` runs for data collection are fully allowed).
-- **Immediate Pause (STOP)**: Once the `docs/specs/[feature].md` file is generated, stop tool execution immediately and wait for user feedback. Do not proceed to `check` or run tests.
 
 ## Output Format
 Create a markdown file at `docs/specs/[feature].md`:
@@ -80,47 +68,29 @@ Create a markdown file at `docs/specs/[feature].md`:
 ```md
 # 🎯 Goal & Architecture
 - **Goal**: 1-sentence capability.
-- **Alternatives & Trade-offs**: Brief comparison of alternative design paths and reasons for the chosen design.
+- **Alternatives & Trade-offs**: Brief comparison.
 - **Mermaid Diagram**: Text-based sequence showing system integration context.
 
 # ⚡ Performance & Resource Budget
-*(Note: Can be simplified/omitted for trivial helper modules)*
-- **Complexity**: Time & Space Complexity (Big-O) for core logic.
-- **Limits**: `[PERF-01] RSS Limit (e.g. RSS < 4GB)`
-- **Concurrency**: `[PERF-02] Concurrency Limit (e.g. max_workers <= 4)`
-- **Hardware Acceleration**: `[PERF-03] GPU/VRAM Limit (e.g. VRAM < 2GB or CPU-only)`
+- Complexity, limits, concurrency.
 
 # ⚙️ Logical Rules, State Machine & Resilience
 - Logical rules, state transition tables, tagged constraints (`[LIMIT-01]`, etc.), and resilience/recovery flow.
 
 # 🔌 Integration & Connection Plan
-- **Target Location**: `path/to/file.py` > `ClassName.method_name` (anchor context, e.g., "before return")
-- **State Impact**: `Mutable (Side-effects)` | `Immutable (Pure Function)`
-- **Data Schema Diff**: `{"+new_field": "type", "~modified_field": "new_type"}`
-- **Error Behavior**: `Propagate` | `Suppress` (how errors affect the caller)
+- Target Location, state impact, error behavior.
 
 # ✍️ Contract Changes
-- Exact imports, class definitions, function signatures, and return types (100% complete syntax).
+- Exact imports, class definitions, function signatures, and return types.
 
-# 🧪 TDD Test Scenario Matrix
-- **Scenario 1 (Happy Path)**: Input -> Expected Output.
-- **Scenario 2 (Edge Cases)**: [LIMIT-xx] boundary / [PERF-xx] resource verification.
-- **Scenario 3 (Error Handling)**: Expected Exceptions.
-- **Scenario 4 (Integration)**: Assertion verifying the connection inside the parent module.
-- **Mock & Integration Boilerplate**: Structural test template demonstrating mock boundaries and assertions.
+# 🧪 TDD Test Scenario Matrix & Mocks
+- Scenario 1-4 descriptions.
+- **Skeleton Mock Boilerplate**: Complete mock testing file template.
 ```
 
-## First Response Protocol after Spec Creation (Token-Efficient & Human-Friendly)
-[Trigger: Immediately after docs/specs/[feature].md is created/updated]
-Do NOT just say "I have created the file" and do NOT repeat the technical contents of the file. To prevent the user from asking for an easier explanation, your VERY FIRST chat response MUST present a highly-condensed, human-friendly summary in **Korean** (except for technical terms) within 8 lines:
-
-1. **🎯 핵심 목표**: [1-sentence summary of the business goal/problem solved].
-2. **🔄 로직 흐름**: [Sequential flow (e.g., A -> B -> C) without technical code, max 2 lines].
-3. **⚖️ 설계 핵심 결정**: [Reasoning for choosing this design/structure, 1 sentence].
-4. **👉 후속 대기**: [Wait for user review and ask to type `Proceed` to continue].
-
-
-* Note: Avoid any fenced code/JSON blocks in this chat response to maximize token efficiency.
-
-
-
+## First Response Protocol after Spec Creation (Token-Efficient)
+Do NOT repeat the technical contents. Present a highly-condensed summary in **Korean** within 8 lines:
+1. **🎯 핵심 목표**: [Business goal]
+2. **🔄 로직 흐름**: [A -> B -> C flow]
+3. **⚖️ 설계 핵심 결정**: [Reasoning for design]
+4. **👉 후속 대기**: [Wait for user review. Type `Proceed` to start Implement pipeline]
