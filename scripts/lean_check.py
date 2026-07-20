@@ -141,12 +141,15 @@ def _get_missing_lines(stdout: str, file_path: str) -> set[int]:
                     token = token.strip()
                     if not token:
                         continue
-                    if "-" in token:
-                        a, b = token.split("-", 1)
-                        for i in range(int(a.strip()), int(b.strip()) + 1):
-                            missing.add(i)
-                    else:
-                        missing.add(int(token))
+                    try:
+                        if "-" in token:
+                            a, b = token.split("-", 1)
+                            for i in range(int(a.strip()), int(b.strip()) + 1):
+                                missing.add(i)
+                        else:
+                            missing.add(int(token))
+                    except ValueError:
+                        continue
                 return missing
     return set()
 
