@@ -93,6 +93,10 @@ OPT_FUTURES_CONFIG: dict[str, Any] = {
     # L1 per-TF result disk cache
     "L1_RESULT_CACHE_ENABLED": True,
     "L1_RESULT_CACHE_DIR": "logs/futures/optimization/l1_result_cache",
+    # L1 nested WF worker sizing: assumed private memory (MB) reserved per forked worker.
+    # Default 1024 = prior hardcoded floor. Diagnostic-only override for calibration runs
+    # against [SYS] stage=worker_private_measured actual observations.
+    "L1_WORKER_PRIVATE_FLOOR_MB": 1024,
     # Maximum number of cache fingerprints to retain (LRU eviction)
     "CACHE_MAX_FINGERPRINTS": 10,
     # Pipeline cache memory guard
