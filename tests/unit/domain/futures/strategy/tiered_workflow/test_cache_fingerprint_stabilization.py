@@ -56,7 +56,10 @@ def test_should_load_cache_accepts_when_rss_low(mocker):
     from src.domain.futures.strategy.tiered_workflow.pipeline import (
         _should_load_cache,
     )
-    mocker.patch("resource.getrusage", return_value=mocker.MagicMock(ru_maxrss=5000 * 1024))
+    mocker.patch(
+        "src.domain.futures.strategy.tiered_workflow.pipeline._get_rss_mb",
+        return_value=5000.0,
+    )
     assert _should_load_cache(10, threshold_mb=11500, expansion_ratio=15.0) is True
 
 
@@ -64,7 +67,10 @@ def test_should_load_cache_rejects_when_rss_high(mocker):
     from src.domain.futures.strategy.tiered_workflow.pipeline import (
         _should_load_cache,
     )
-    mocker.patch("resource.getrusage", return_value=mocker.MagicMock(ru_maxrss=11000 * 1024))
+    mocker.patch(
+        "src.domain.futures.strategy.tiered_workflow.pipeline._get_rss_mb",
+        return_value=11000.0,
+    )
     assert _should_load_cache(100, threshold_mb=11500, expansion_ratio=15.0) is False
 
 
@@ -72,8 +78,23 @@ def test_should_load_cache_returns_true_on_resource_error(mocker):
     from src.domain.futures.strategy.tiered_workflow.pipeline import (
         _should_load_cache,
     )
-    mocker.patch("resource.getrusage", side_effect=OSError("nope"))
-    assert _should_load_cache(999, threshold_mb=100, expansion_ratio=10.0) is True
+    # RSS unknown (negative) and small cache -> allowed
+    mocker.patch(
+        "src.domain.futures.strategy.tiered_workflow.pipeline._get_rss_mb",
+        return_value=-1.0,
+    )
+    assert _should_load_cache(64.0, threshold_mb=100, expansion_ratio=10.0) is True
+
+
+def test_should_load_cache_rejects_large_cache_on_unknown_rss(mocker):
+    from src.domain.futures.strategy.tiered_workflow.pipeline import (
+        _should_load_cache,
+    )
+    mocker.patch(
+        "src.domain.futures.strategy.tiered_workflow.pipeline._get_rss_mb",
+        return_value=-1.0,
+    )
+    assert _should_load_cache(100, threshold_mb=100, expansion_ratio=10.0) is False
 
 
 def test_l1_cache_hit_cross_process_deterministic(tmp_path, mocker):

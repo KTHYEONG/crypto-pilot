@@ -17,6 +17,45 @@ def _resolve_bars_per_year(obj: Any) -> float | None:
     return None
 
 
+def _cagr(rets: list[float], bars_per_year: float) -> float:
+    """Compound annual growth rate from a return series."""
+    arr = np.asarray(rets, dtype=np.float64)
+    if arr.size < 2:
+        return 0.0
+    valid = arr[np.isfinite(arr)]
+    if valid.size < 2:
+        return 0.0
+    total_log = float(np.sum(np.log1p(valid)))
+    n_years = len(valid) / max(bars_per_year, 1.0)
+    return float(np.expm1(total_log / max(n_years, 1e-12)))
+
+
+def _recompute_deployed_cagr(obj: Any) -> float | None:
+    """Recompute CAGR from deployed_returns_hybrid if present, else fallback."""
+    deployed = getattr(obj, "deployed_returns_hybrid", None)
+    if deployed and len(deployed) >= 2:
+        bars_per_year = _resolve_bars_per_year(obj)
+        if bars_per_year is not None:
+            return _cagr(list(deployed), bars_per_year)
+    rets = getattr(obj, "returns_hybrid", None)
+    if rets is None or len(rets) < 2:
+        return None
+    bars_per_year = _resolve_bars_per_year(obj)
+    if bars_per_year is None:
+        return None
+    l_star = getattr(obj, "deploy_leverage", None)
+    if l_star is not None and l_star > 0.0:
+        from src.domain.futures.strategy.tiered_workflow.risk_deployment import (
+            apply_deployment,
+        )
+        try:
+            _arr = np.asarray(rets, dtype=np.float64)
+            return apply_deployment(rets=_arr, leverage=float(l_star), bars_per_year=bars_per_year).cagr
+        except Exception:
+            return None
+    return _cagr(list(rets), bars_per_year)
+
+
 def assert_selection_replay_parity(
     *,
     replay_evaluation: Any,
@@ -64,41 +103,18 @@ def assert_selection_replay_parity(
             details.append(f"{label} replay={replay_v!r} final={final_v!r}")
 
     for side, obj in (("replay", replay_evaluation), ("final", final_evaluation)):
-        rets = getattr(obj, "returns_hybrid", None)
-        if rets is None:
-            continue
-        n_rets = len(rets)
-        l_star = getattr(obj, "deploy_leverage", None)
-        bars_per_year = _resolve_bars_per_year(obj)
-        if bars_per_year is None:
-            continue
-        details.append(f"{side}_n_rets={n_rets} {side}_L*={l_star!r} bpy={bars_per_year!r}")
-        if n_rets >= 2 and l_star is not None:
-            try:
-                from src.domain.futures.strategy.tiered_workflow.risk_deployment import (
-                    apply_deployment,
-                )
-
-                _arr = np.asarray(rets, dtype=np.float64)
-                _recomputed = apply_deployment(
-                    rets=_arr,
-                    leverage=float(l_star),
-                    bars_per_year=bars_per_year,
-                ).cagr
-                _stored = getattr(obj, "cagr_hybrid", None)
-                if _stored is not None and abs(float(_stored) - float(_recomputed)) > 1e-6:
-                    _logger.warning(
-                        "[L2-PARITY-SELFCHECK] side=%s stored=%.6f recomputed=%.6f "
-                        "(n_rets=%d L*=%.6f bpy=%.1f) -> field/metric DECOUPLED",
-                        side,
-                        float(_stored),
-                        float(_recomputed),
-                        n_rets,
-                        float(l_star),
-                        bars_per_year,
-                    )
-            except Exception as exc:
-                _logger.debug("[L2-PARITY-SELFCHECK] side=%s skipped: %r", side, exc)
+        _recomputed = _recompute_deployed_cagr(obj)
+        _stored = getattr(obj, "cagr_hybrid", None)
+        if _stored is not None and _recomputed is not None and abs(float(_stored) - float(_recomputed)) > 1e-6:
+            mismatches.append(f"{side}_deployed_cagr stored={_stored:.6f} != recomputed={_recomputed:.6f}")
+            details.append(f"{side}: deployed CAGR DECOUPLED")
+            _logger.warning(
+                "[L2-PARITY-SELFCHECK] side=%s stored=%.6f recomputed=%.6f "
+                "-> field/metric DECOUPLED",
+                side,
+                float(_stored),
+                float(_recomputed),
+            )
 
     if mismatches:
         _logger.warning(

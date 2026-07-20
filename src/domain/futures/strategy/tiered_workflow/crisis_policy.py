@@ -58,7 +58,11 @@ def evaluate_crisis_survival(
     min_trades: int,
     min_usable_windows: int,
 ) -> CrisisReliabilityAssessment:
-    """Evaluate immutable metrics against survival limits. [ADR_20260717_L2_CRISIS_SURVIVAL_POLICY]"""
+    """Evaluate immutable metrics against survival limits. [ADR_20260717_L2_CRISIS_SURVIVAL_POLICY]
+
+    Placeholder statuses from creation time are replaced with canonical values:
+    ``stress_tested_pass``, ``stress_tested_fail``, or ``stress_data_invalid``.
+    """
     if max_mdd_abs <= 0.0 or min_usable_windows < 1 or min_symbols < 1 or min_observation_days < 1 or min_trades < 1:
         raise ValueError(
             f"thresholds must be positive: max_mdd_abs={max_mdd_abs}, min_usable_windows={min_usable_windows}, "
@@ -73,29 +77,28 @@ def evaluate_crisis_survival(
 
     for wm in window_results:
         if wm.mdd is None or wm.cagr is None or wm.cvar_95 is None:
-            evaluated.append(wm)
-            if wm.status == "stress_tested_pass":
-                pass
+            evaluated.append(_replace_status(wm, "stress_data_invalid"))
             continue
 
         if wm.symbol_count < min_symbols:
             blockers.append(f"{wm.label}:symbols")
             all_pass = False
+            evaluated.append(_replace_status(wm, "stress_data_invalid"))
             continue
         if wm.observation_days < min_observation_days:
             blockers.append(f"{wm.label}:observation_days")
             all_pass = False
+            evaluated.append(_replace_status(wm, "stress_data_invalid"))
             continue
         if wm.trade_count < min_trades:
             blockers.append(f"{wm.label}:trades")
             all_pass = False
+            evaluated.append(_replace_status(wm, "stress_data_invalid"))
             continue
 
         if not (math.isfinite(wm.mdd) and math.isfinite(wm.cagr) and math.isfinite(wm.cvar_95)):
-            evaluated.append(wm)
+            evaluated.append(_replace_status(wm, "stress_data_invalid"))
             all_pass = False
-            if wm.status == "stress_tested_pass":
-                pass
             continue
 
         usable_count += 1
@@ -111,6 +114,11 @@ def evaluate_crisis_survival(
         if window_blockers:
             all_pass = False
             blockers.extend(window_blockers)
+            evaluated.append(_replace_status(wm, "stress_tested_fail"))
+        else:
+            evaluated.append(_replace_status(wm, "stress_tested_pass"))
+
+    evaluated_tuple = tuple(evaluated)
 
     if usable_count < min_usable_windows:
         detail = (
@@ -121,7 +129,7 @@ def evaluate_crisis_survival(
             status="untested_no_data",
             verified=False,
             detail=detail,
-            window_results=window_results,
+            window_results=evaluated_tuple,
             blockers=tuple(blockers) if blockers else ("insufficient_usable_windows",),
             usable_window_count=usable_count,
         )
@@ -132,7 +140,7 @@ def evaluate_crisis_survival(
             status="stress_tested_fail",
             verified=False,
             detail=detail,
-            window_results=window_results,
+            window_results=evaluated_tuple,
             blockers=tuple(blockers),
             usable_window_count=usable_count,
         )
@@ -141,7 +149,13 @@ def evaluate_crisis_survival(
         status="stress_tested_pass",
         verified=True,
         detail=f"all {len(window_results)} windows pass",
-        window_results=window_results,
+        window_results=evaluated_tuple,
         blockers=(),
         usable_window_count=usable_count,
     )
+
+
+def _replace_status(wm: CrisisWindowMetrics, new_status: CrisisWindowStatus) -> CrisisWindowMetrics:
+    """Return a new ``CrisisWindowMetrics`` with the status replaced."""
+    import dataclasses
+    return dataclasses.replace(wm, status=new_status)
