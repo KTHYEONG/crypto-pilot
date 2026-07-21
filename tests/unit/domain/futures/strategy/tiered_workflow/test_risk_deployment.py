@@ -17,6 +17,8 @@ from src.domain.futures.strategy.tiered_workflow.risk_deployment import (
     _sharpe_from_returns,
     apply_deployment,
     calibrate_deployment_leverage,
+    compute_recency_holdout_diagnostics,
+    evaluation_window_bottleneck_verdict,
     select_worst_fold_returns,
     trend_efficiency_gross_mult,
 )
@@ -644,6 +646,7 @@ class TestSupplementaryCoverage:
             fit_rets_by_fold=((0.01,), (-0.01, 0.02)),
             fold_attributions=(),
             policy_effect_by_fold=(),
+            turnover_return_indices=(),
         )
         assert result.fit_rets_by_fold == ((0.01,), (-0.01, 0.02))
 
@@ -956,3 +959,35 @@ class TestOosWorstFoldCagrFloorClamp:
         )
 
         assert binding != "oos_worst_fold_cagr" or clamped_l >= 1.0
+
+
+class TestComputeRecencyHoldoutDiagnostics:
+    def test_compute_recency_holdout_diagnostics_positive_tail_returns_applicable_true(self):
+        rets_hybrid = [0.001] * 200
+        diag = compute_recency_holdout_diagnostics(
+            rets_hybrid=rets_hybrid, leverage=1.0, bars_per_year=2190.0, holdout_days=30.0,
+        )
+        assert diag.applicable is True
+        assert diag.recency_holdout_cagr > 0.0
+
+    def test_compute_recency_holdout_diagnostics_short_window_returns_not_applicable(self):
+        rets_hybrid = [0.001] * 6
+        diag = compute_recency_holdout_diagnostics(
+            rets_hybrid=rets_hybrid, leverage=1.0, bars_per_year=2190.0, holdout_days=30.0,
+        )
+        assert diag.applicable is False
+        assert diag.recency_holdout_cagr == 0.0
+
+    def test_compute_recency_holdout_diagnostics_empty_returns_not_applicable(self):
+        diag = compute_recency_holdout_diagnostics(
+            rets_hybrid=(), leverage=1.0, bars_per_year=2190.0, holdout_days=30.0,
+        )
+        assert diag.applicable is False
+
+
+class TestEvaluationWindowBottleneckVerdict:
+    def test_evaluation_window_bottleneck_verdict_detects_bottleneck_caliber_fold(self):
+        folds = [{"mdd": 0.05, "cagr": 0.10}, {"mdd": 0.20, "cagr": -0.02}]
+        covered, detail = evaluation_window_bottleneck_verdict(folds)
+        assert covered is True
+        assert "fold=1" in detail

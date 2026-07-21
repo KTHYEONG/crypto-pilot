@@ -412,43 +412,40 @@ def test_gate_still_blocks_low_cagr() -> None:
 
 
 def test_layer2_constraints_tuple_length_is_eight() -> None:
-    """Optuna safety constraints fallback 크기가 9인지 확인."""
-    # Arrange (Given): l2_constraint_values 미존재 trial 시뮬레이션
+    """Optuna safety constraints fallback 크기가 14인지 확인."""
     from unittest.mock import MagicMock
 
     from src.domain.futures.optimization.workflow import layer2_constraints_from_trial
 
     mock_trial = MagicMock()
-    mock_trial.user_attrs = {}  # l2_constraint_values 없음
+    mock_trial.user_attrs = {}
 
-    # Act (When)
     fallback = layer2_constraints_from_trial(mock_trial)
 
-    # Assert (Then)
-    assert len(fallback) == 13, f"fallback 크기 {len(fallback)} != 13. Optuna safety constraints 13-tuple이어야 함."
-    assert all(v == 1.0 for v in fallback), "모든 fallback 값이 1.0 (infeasible) 이어야 함"
+    assert len(fallback) == 14
+    assert all(v == 1.0 for v in fallback)
 
 
 def test_layer2_constraints_eight_element_feasible() -> None:
-    """Optuna safety constraints 9개가 모두 feasible(≤0)이면 통과 판정."""
+    """Optuna safety constraints 14개가 모두 feasible(≤0)이면 통과 판정."""
     from unittest.mock import MagicMock
 
     from src.domain.futures.optimization.workflow import layer2_constraints_from_trial
 
-    # Arrange: 12개 feasible
+    # Arrange: 14개 feasible
     mock_trial = MagicMock()
-    mock_trial.user_attrs = {"l2_optuna_constraint_values": [-1.0] * 13}
+    mock_trial.user_attrs = {"l2_optuna_constraint_values": [-1.0] * 14}
 
     # Act
     result = layer2_constraints_from_trial(mock_trial)
 
     # Assert
-    assert len(result) == 13
+    assert len(result) == 14
     assert all(c <= 0.0 for c in result), "모든 제약이 ≤0 이면 feasible이어야 함"
 
 
 def test_layer2_constraints_legacy_values_pad_to_eight() -> None:
-    """구 saved values는 9-tuple Optuna safety constraints로 하위호환 패딩된다."""
+    """구 saved values는 14-tuple Optuna safety constraints로 하위호환 패딩된다."""
     from unittest.mock import MagicMock
 
     from src.domain.futures.optimization.workflow import layer2_constraints_from_trial
@@ -460,9 +457,9 @@ def test_layer2_constraints_legacy_values_pad_to_eight() -> None:
     # Act
     result = layer2_constraints_from_trial(mock_trial)
 
-    assert len(result) == 13
+    assert len(result) == 14
     assert all(c == -1.0 for c in result[:3])
-    assert result[3:] == (1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0)
+    assert result[3:] == (1.0,) * 11
 
 
 
@@ -594,7 +591,7 @@ def test_recent_fold_gate_enters_optuna_constraints() -> None:
         config=Layer2AllocationConfig(),
     )
 
-    assert len(gate.optuna_constraint_values) == 13
+    assert len(gate.optuna_constraint_values) == 14
     assert gate.optuna_constraint_values[5] > 0.0
     assert gate.promotion_blocker == "recent_fold"
 
@@ -681,7 +678,7 @@ def test_s8_dsr_pool_restricted_to_feasible_trials() -> None:
         t = MagicMock()
         t.user_attrs = {
             "sharpe_hac_hybrid": sharpe,
-            "l2_optuna_constraint_values": [-1.0] * 13 if feasible else [1.0] * 13,
+            "l2_optuna_constraint_values": [-1.0] * 14 if feasible else [1.0] * 14,
         }
         return t
 
@@ -743,3 +740,94 @@ def test_s9_dsr_monotone_improvement_with_smaller_pool() -> None:
         f"Fix C 후 DSR이 상승해야 함: pool4 DSR={dsr_pool4:.4f} <= pool10 DSR={dsr_pool10:.4f}. "
         "feasible pool 제한이 benchmark를 낮춰 DSR을 높여야 함."
     )
+
+
+# ---------------------------------------------------------------------------
+# Recency Holdout Gate
+# ---------------------------------------------------------------------------
+
+
+from src.domain.futures.strategy.tiered_workflow.l2_gate import Layer2ConstraintVector
+
+
+def _base_gate_kwargs() -> dict:
+    return {
+        "deployment_failed": False,
+        "support_leak_count": 0,
+        "cagr_hybrid": 0.35,
+        "sharpe_hybrid": 1.2,
+        "sharpe_hac_hybrid": 1.1,
+        "sharpe_hac_baseline": 0.9,
+        "sortino_hybrid": 1.8,
+        "mar_hybrid": 1.4,
+        "mdd_hybrid": 0.12,
+        "cvar_95_hybrid": 0.03,
+        "fold_pass_ratio": 0.80,
+        "active_block_count": 4,
+        "friction_pass_pct": 0.80,
+        "trade_count": 80,
+        "growth_lcb_hybrid": 0.10,
+        "growth_lcb_baseline": 0.05,
+        "dsr_hybrid": 0.8,
+        "psr_hybrid": 0.95,
+        "worst_fold_cagr": -0.01,
+        "positive_block_delta_ratio": 0.50,
+        "config": Layer2AllocationConfig(),
+    }
+
+
+class TestRecencyHoldoutConstraint:
+    def test_evaluate_layer2_gate_recency_holdout_below_floor_blocks_promotion(self):
+        kwargs = _base_gate_kwargs()
+        del kwargs["config"]
+        config = Layer2AllocationConfig(l2_min_recency_holdout_cagr=-0.05)
+        gate = evaluate_layer2_gate(
+            **kwargs,
+            config=config,
+            recency_holdout_cagr=-0.10,
+            recency_holdout_applicable=True,
+        )
+        assert gate.promotion_passed is False
+        assert gate.promotion_blocker == "recency_holdout"
+        assert gate.constraint_vector.recency_holdout > 0.0
+
+    def test_evaluate_layer2_gate_recency_holdout_not_applicable_does_not_block(self):
+        kwargs = _base_gate_kwargs()
+        gate = evaluate_layer2_gate(
+            **kwargs,
+            recency_holdout_cagr=-0.99,
+            recency_holdout_applicable=False,
+        )
+        assert gate.promotion_blocker != "recency_holdout"
+
+    def test_evaluate_layer2_gate_recency_holdout_disabled_via_config_does_not_block(self):
+        kwargs = _base_gate_kwargs()
+        del kwargs["config"]
+        config = Layer2AllocationConfig(l2_require_recency_holdout_pass=False)
+        gate = evaluate_layer2_gate(
+            **kwargs,
+            config=config,
+            recency_holdout_cagr=-0.99,
+            recency_holdout_applicable=True,
+        )
+        assert gate.promotion_blocker != "recency_holdout"
+
+
+def test_layer2_constraint_vector_as_tuple_has_14_elements() -> None:
+    vec = Layer2ConstraintVector(
+        deployment=-1.0, support_leak=-1.0, mdd=-1.0, cvar_95=-1.0,
+        fold=-1.0, recent_fold=-1.0, active_blocks=-1.0, friction=-1.0,
+        trades=-1.0, crisis_mdd=-1.0, cagr=-1.0, sharpe_uplift=-1.0,
+        crisis_cagr=-1.0, crisis_measured=False, recency_holdout=-1.0,
+    )
+    assert len(vec.as_tuple()) == 14
+
+
+def test_layer2_constraint_vector_non_crisis_feasible_includes_recency_holdout() -> None:
+    vec = Layer2ConstraintVector(
+        deployment=-1.0, support_leak=-1.0, mdd=-1.0, cvar_95=-1.0,
+        fold=-1.0, recent_fold=-1.0, active_blocks=-1.0, friction=-1.0,
+        trades=-1.0, crisis_mdd=-1.0, cagr=-1.0, sharpe_uplift=-1.0,
+        crisis_cagr=-1.0, crisis_measured=False, recency_holdout=1.0,
+    )
+    assert vec.non_crisis_feasible() is False

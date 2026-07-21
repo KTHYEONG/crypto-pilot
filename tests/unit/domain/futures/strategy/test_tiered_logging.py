@@ -878,7 +878,7 @@ class TestEvaluationWindowBottleneckVerdict:
         assert detail == "no_bottleneck_caliber_fold_in_window"
 
     def test_banner_appended_when_not_covered(self) -> None:
-        r2 = _make_l2_ns()
+        r2 = _make_l2_ns(window_bottleneck_covered=False)
         folds = [{"fold": 1, "mdd": 0.05, "cagr": 0.10, "sharpe": 1.0, "pass": True}]
         result = format_layer2_table(r2, awf_folds=folds)
         assert "NO-CRISIS-WINDOW" in result
@@ -1281,6 +1281,24 @@ class TestLayerTableOmitsMajorDiag:
         )
         result = format_layer2_table(r)
         assert "[L2-MAJOR-DIAG]" not in result
+
+    def test_format_layer2_table_reads_window_coverage_from_result_not_recomputed(self) -> None:
+        r = SimpleNamespace(
+            sharpe_hybrid=1.5, sharpe_baseline=1.0, mdd_hybrid=0.20,
+            mdd_baseline=0.25, cagr_hybrid=0.40, mar_hybrid=2.0,
+            fold_pass_ratio=0.8, turnover=5.0, friction_pass_pct=0.75,
+            gate_passed=True, blocker_reason="",
+            psr_hybrid=0.9, dsr_hybrid=0.8,
+            mean_trend_efficiency=0.3, trend_efficiency_corr=0.1,
+            realized_price_long=0.0, realized_price_short=0.0,
+            cvar_95_hybrid=0.04, sortino_hybrid=2.0,
+            terminal_multiple=1.5, total_pnl_pct=0.5, trade_count=50,
+            risk_utilization=0.8,
+            window_bottleneck_covered=False,
+            window_bottleneck_detail="fold=2 mdd=0.03 cagr=+0.01",
+        )
+        result = format_layer2_table(r, awf_folds=[])
+        assert "fold=2 mdd=0.03 cagr=+0.01" in result
 
     def test_format_layer3_table_omits_major_diag_lines_when_attribute_absent(self) -> None:
         """Scenario 3b: major_symbol_diag 속성 없는 최소 L3 result → [L3-MAJOR-DIAG] 라인 없음."""

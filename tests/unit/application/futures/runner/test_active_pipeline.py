@@ -1341,7 +1341,7 @@ from src.application.futures.runner.active_pipeline import (
 
 def _make_outcome(seed: int, *, passed: bool, cagr: float) -> SeedRobustnessOutcome:
     l3_final = type("L3", (), {"gate_passed": passed, "cagr": cagr})()
-    l2_final = type("L2", (), {"gate_passed": True, "cagr_hybrid": cagr})()
+    l2_final = type("L2", (), {"gate_passed": True, "cagr_hybrid": cagr, "window_bottleneck_covered": True})()
     return SeedRobustnessOutcome(
         seed=seed,
         l1_result=None,  # type: ignore[arg-type]
@@ -1437,9 +1437,9 @@ def test_run_multi_seed_robustness_consensus_selects_most_conservative_not_best(
 
 def test_run_multi_seed_robustness_consensus_l2_phase_uses_l2_cagr(mocker) -> None:
     l3_final_passed = type("L3", (), {"gate_passed": True, "cagr": 0.99})()
-    l2_final_42 = type("L2", (), {"gate_passed": True, "cagr_hybrid": 0.08})()
-    l2_final_43 = type("L2", (), {"gate_passed": True, "cagr_hybrid": 0.03})()
-    l2_final_44 = type("L2", (), {"gate_passed": True, "cagr_hybrid": 0.15})()
+    l2_final_42 = type("L2", (), {"gate_passed": True, "cagr_hybrid": 0.08, "window_bottleneck_covered": True})()
+    l2_final_43 = type("L2", (), {"gate_passed": True, "cagr_hybrid": 0.03, "window_bottleneck_covered": True})()
+    l2_final_44 = type("L2", (), {"gate_passed": True, "cagr_hybrid": 0.15, "window_bottleneck_covered": True})()
     outcomes_by_seed = {
         42: SeedRobustnessOutcome(
             seed=42, l1_result=None, l2_study_result=None,
@@ -1599,3 +1599,34 @@ def test_active_pipeline_l3_blocked_when_consensus_fails_returns_exit_code_1(moc
     assert isinstance(_output, RunnerResult)
     assert _output.exit_code == 1
     assert _output.reason == "seed_consensus_blocked:0/3"
+
+
+# ─── Recency Holdout Gate: window_covered log ─────────────────────────────
+
+
+class TestMultiSeedWindowCoverageLogging:
+    def test_run_single_seed_outcome_logs_window_covered(self, mocker):
+        from src.application.futures.runner import active_pipeline as _ap
+        l2_final = type("L2", (), {"gate_passed": True, "cagr_hybrid": 0.05, "window_bottleneck_covered": False})()
+        outcome = SeedRobustnessOutcome(
+            seed=42, l1_result=None, l2_study_result=None,
+            l2_final=l2_final, l3_final=None, passed=True, blocker_reason="",
+        )
+        mocker.patch.object(_ap, "_run_single_seed_outcome", return_value=outcome)
+        mock_logger = mocker.patch.object(_ap, "_logger")
+        _ap._run_multi_seed_robustness_consensus(
+            signal_batch=mocker.Mock(), aligned=mocker.Mock(), cfg=mocker.Mock(),
+            window=mocker.Mock(), caps=mocker.Mock(), tf="8h", n_trials=120,
+            base_seed=42, target_phase="l2", l1_res=mocker.Mock(),
+            labeled_events=mocker.Mock(), per_tf_data_maps=None, labeled_events_by_tf=None,
+            crisis_rets=None, crisis_replay_ctx=None, l2_sim_cache=None,
+            probe_manifest=None, l3_regime_code_1d=mocker.Mock(),
+        )
+        pass_count_call = next(
+            (c for c in mock_logger.info.call_args_list if "pass_count=" in str(c.args)),
+            None,
+        )
+        assert pass_count_call is not None
+        _, kwargs = pass_count_call
+        # kwargs가 없으면 args[0]이 format string, args[-1]이 window_covered value
+        assert pass_count_call.args[-1] is False

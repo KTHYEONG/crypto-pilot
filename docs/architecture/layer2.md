@@ -87,3 +87,6 @@ graph TD
 | `l2_regime_policy_mode` | `"soft"` (searchable: soft / hybrid) | Regime-cell admission mode; `"hybrid"` unlocks the hard-block path |
 | `l2_regime_hard_block_enabled` | False (searchable) | Excludes (not just downweights) regime cells with confident negative calibration lift |
 | `l2_regime_pooled_is_passthrough` | True (searchable) | Whether unresolved/unstable regime cells default to full-weight allow vs. cautious pooled treatment |
+| `l2_require_recency_holdout_pass` | True (searchable) | Toggle for the 14th Optuna constraint: trailing objective-excluded return slice must clear a CAGR floor |
+| `l2_min_recency_holdout_cagr` | -0.05 (searchable) | CAGR floor for the recency holdout slice, decoupled from `l2_min_worst_fold_cagr` |
+| `l2_recency_holdout_days` | 30.0 (fixed, non-searchable) | Trailing calendar-day span excluded from the primary objective, used only for the recency holdout constraint |
