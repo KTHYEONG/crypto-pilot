@@ -16,7 +16,8 @@ L2_SEARCH_SPACE: dict[str, dict[str, Any]] = {
     "l2_regime_bear_long_extra_mult": {"type": "float", "low": 0.0, "high": 1.0, "step": 0.1},
     "l2_regime_crisis_long_extra_mult": {"type": "float", "low": 0.0, "high": 1.0, "step": 0.1},
     "l2_regime_cap_release_cooldown_bars": {"type": "int", "low": 0, "high": 36, "step": 1},
-    "l2_regime_crisis_gross_cap": {"type": "float", "low": 0.10, "high": 0.25, "step": 0.01},
+    "l2_regime_crisis_gross_cap": {"type": "float", "low": 0.25, "high": 0.85, "step": 0.01},
+    "l2_regime_bear_gross_cap": {"type": "float", "low": 0.35, "high": 0.85, "step": 0.01},
     # [DEPRECATED] l2_objective_growth_lcb_weight removed from search space per
     # [LIMIT-04]. All trials use fixed objective J = growth_lcb_deployed.
     # Field kept one release for config deserialization compatibility with warning.
