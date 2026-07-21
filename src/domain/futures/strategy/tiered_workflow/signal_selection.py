@@ -55,7 +55,9 @@ if TYPE_CHECKING:
     from src.domain.futures.strategy.config import CandidateStrategyConfig
     from src.domain.futures.strategy.walk_forward import WFFold
 
-logger = logging.getLogger(__name__)
+# [ADR_20260721_L2_PER_TF_EDGE_HOISTING]과 동일 패턴: bare __name__ logger는
+# setup_logger() 미경유로 프로덕션에서 침묵 — 검증된 컨벤션으로 통일 (4번째 사례).
+logger = logging.getLogger("opt_main_futures")
 
 
 @lru_cache(maxsize=512)
@@ -1540,6 +1542,72 @@ def compute_family_regime_edge_diagnostics(
         by_family_regime=by_family_regime,
         by_family_regime_side=by_family_regime_side,
     )
+
+
+def log_family_regime_funnel_diagnostics(
+    *,
+    realized_event_results: pd.DataFrame,
+    cfg: CandidateStrategyConfig,
+    fold_id: int,
+    seed: int,
+    timeframe: str = "",
+) -> None:
+    """[SPEC alpha-funnel-regime-coverage Phase 0] family x regime x side 깔때기 실측 로그.
+
+    기존 고아 함수 compute_family_regime_edge_diagnostics(split_side=True)를 배선해
+    (a) regime 셀별 raw 이벤트 수(발화 커버리지 — min_bars 필터 이전), (b) 셀별
+    gross 엣지 LCB, (c) side 분해(crash/bear 숏 엣지 = Phase B GO 판정 데이터)를
+    [EVAL] 태그로 방출한다. 게이트 무영향, 예외 시 degraded 로그 후 계속.
+
+    Time Complexity: O(E·B) — E=events, B=bootstrap samples (셀별).
+    """
+    try:
+        df = realized_event_results
+        if df.empty or "family" not in df.columns or "entry_regime_code" not in df.columns:
+            logger.info(
+                "[EVAL] [FUNNEL] fold=%d tf=%s status=no_data cols_missing=%s",
+                fold_id,
+                timeframe,
+                "entry_regime_code" not in getattr(df, "columns", ()),
+            )
+            return
+        raw = df.groupby(["family", "entry_regime_code"], sort=True).size()
+        for family, grp in raw.groupby(level=0):
+            counts = {int(code): int(n) for (_f, code), n in grp.items()}
+            logger.info(
+                "[EVAL] [FUNNEL-RAW] fold=%d tf=%s family=%s regime_counts=%s total=%d",
+                fold_id,
+                timeframe,
+                family,
+                counts,
+                int(grp.sum()),
+            )
+        diag = compute_family_regime_edge_diagnostics(
+            realized_event_results=df,
+            cfg=cfg,
+            fold_id=fold_id,
+            seed=seed,
+            split_side=True,
+        )
+        if diag is None:
+            logger.info("[EVAL] [FUNNEL] fold=%d tf=%s status=below_min_bars", fold_id, timeframe)
+            return
+        for (family, code), (n_bars, n_events, mean, _std, sharpe, lcb, ic) in sorted(diag.by_family_regime.items()):
+            logger.info(
+                "[EVAL] [FUNNEL-CELL] fold=%d tf=%s family=%s regime_code=%d n_bars=%d n_events=%d"
+                " mean_bps=%.3f sharpe=%.3f lcb_bps=%.3f ic=%.3f",
+                fold_id, timeframe, family, code, n_bars, n_events, mean, sharpe, lcb, ic,
+            )
+        for (family, code, side), (n_bars, n_events, mean, _std, sharpe, lcb, _ic) in sorted(
+            (diag.by_family_regime_side or {}).items()
+        ):
+            logger.info(
+                "[EVAL] [FUNNEL-SIDE] fold=%d tf=%s family=%s regime_code=%d side=%s n_bars=%d n_events=%d"
+                " mean_bps=%.3f sharpe=%.3f lcb_bps=%.3f",
+                fold_id, timeframe, family, code, side, n_bars, n_events, mean, sharpe, lcb,
+            )
+    except Exception:
+        logger.warning("[SYS] stage=funnel_attribution status=degraded fold=%d", fold_id, exc_info=True)
 
 
 def compute_probe_breadth_diagnostics(

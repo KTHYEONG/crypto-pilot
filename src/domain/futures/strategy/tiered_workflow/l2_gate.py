@@ -135,6 +135,20 @@ def _growth_lcb_vol_matched_baseline(
     return baseline
 
 
+def _cagr_gate_constraint(
+    *,
+    cagr_hybrid: float,
+    cagr_baseline: float | None,
+    mode: str,
+    l2_min_cagr: float,
+    l2_min_cagr_uplift: float,
+) -> float:
+    if mode == "relative" and cagr_baseline is not None:
+        threshold = max(0.0, float(cagr_baseline) + float(l2_min_cagr_uplift))
+        return _finite_or_fail(threshold - float(cagr_hybrid))
+    return _finite_or_fail(float(l2_min_cagr) - float(cagr_hybrid))
+
+
 def evaluate_layer2_gate(
     *,
     deployment_failed: bool,
@@ -161,6 +175,7 @@ def evaluate_layer2_gate(
     positive_block_delta_ratio: float | None = None,
     fold_attributions: tuple[Layer2FoldAttribution, ...] = (),
     config: Layer2AllocationConfig = _DEFAULT_L2_CONFIG,
+    cagr_baseline: float | None = None,
     std_hybrid: float | None = None,
     std_baseline: float | None = None,
     crisis_mdd_hybrid: float | None = None,
@@ -249,6 +264,13 @@ def evaluate_layer2_gate(
         if crisis_cagr_hybrid is None or crisis_cagr_floor is None
         else _finite_or_fail(float(crisis_cagr_floor) - float(crisis_cagr_hybrid))
     )
+    _cagr_constraint = _cagr_gate_constraint(
+        cagr_hybrid=cagr_hybrid,
+        cagr_baseline=cagr_baseline,
+        mode=config.l2_cagr_gate_mode,
+        l2_min_cagr=config.l2_min_cagr,
+        l2_min_cagr_uplift=config.l2_min_cagr_uplift,
+    )
     optuna_constraint_values = (
         1.0 if deployment_failed else -1.0,
         float(max(support_leak_count, 0)),
@@ -260,9 +282,7 @@ def evaluate_layer2_gate(
         _finite_or_fail(float(config.l2_min_friction_pass) - friction_pass_pct),
         _finite_or_fail(float(int(config.l2_min_trades) - trade_count)),
         _crisis_constraint,
-        # [ADR_20260718_L2_OPTUNA_CONSTRAINT_CAGR_UPLIFT_ALIGNMENT] promotion_constraint_values의
-        # 기존 표현식 재사용 — TPESampler가 CAGR/Sharpe-uplift를 직접 겨냥하도록 유도.
-        _finite_or_fail(float(config.l2_min_cagr) - cagr_hybrid),
+        _cagr_constraint,
         _finite_or_fail(sharpe_hac_baseline + float(config.l2_min_sharpe_uplift) - sharpe_hac_hybrid),
         _crisis_cagr_constraint,  # 13th slot — [ADR_TBD_L2_CRISIS_CAGR_CHAMPION_SELECTION_BLINDNESS_FIX]
         recency_holdout_constraint,  # 14th slot — [SPEC_L2_RECENCY_HOLDOUT_GATE]
@@ -271,7 +291,7 @@ def evaluate_layer2_gate(
     promotion_constraint_values = (
         1.0 if deployment_failed else -1.0,
         _finite_or_fail(float(int(config.l2_min_trades) - trade_count)),
-        _finite_or_fail(float(config.l2_min_cagr) - cagr_hybrid),
+        _cagr_constraint,
         _finite_or_fail(float(config.l2_min_sharpe_abs) - sharpe_hybrid),
         _finite_or_fail(float(config.l2_min_sortino) - sortino_hybrid),
         _finite_or_fail(float(config.l2_min_calmar) - calmar_hybrid),

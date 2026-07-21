@@ -249,3 +249,124 @@ class TestBarsPerYearForTf:
         r2 = _bars_per_year_for_tf("2h")
         r4 = _bars_per_year_for_tf("4h")
         assert r2 / r4 == pytest.approx(2.0, rel=1e-9)
+
+
+# ── [SPEC alpha-funnel-regime-coverage Phase 0] funnel diagnostics logging ──
+
+
+class TestLogFamilyRegimeFunnelDiagnostics:
+    @staticmethod
+    def _make_events_frame(n_per_cell: int = 12):
+        import numpy as np
+        import pandas as pd
+
+        rows = []
+        rng = np.random.default_rng(42)
+        for family, regime_code, side, base_bps in (
+            ("trend_donchian", 5, -1, 40.0),   # crash short — 양수 엣지 셀
+            ("trend_donchian", 0, 1, 25.0),    # bull long
+            ("dual_momentum", 2, -1, -10.0),   # bear short — 음수 엣지 셀
+        ):
+            rows.extend(
+                {
+                    "family": family,
+                    "entry_regime_code": regime_code,
+                    "side": side,
+                    "decision_idx": i * 3 + regime_code,
+                    "score_z": float(rng.normal()),
+                    "realized_side_adjusted_gross_bps": base_bps + float(rng.normal(0.0, 2.0)),
+                }
+                for i in range(n_per_cell)
+            )
+        return pd.DataFrame(rows)
+
+    def test_log_funnel_diagnostics_emits_raw_cell_and_side_lines(self, caplog) -> None:
+        import logging
+
+        from src.domain.futures.strategy.tiered_workflow.signal_selection import (
+            log_family_regime_funnel_diagnostics,
+        )
+
+        # Arrange
+        caplog.set_level(logging.INFO)
+        cfg = CandidateStrategyConfig(l1_bootstrap_block_bars=6, max_holding_bars=1)
+        df = self._make_events_frame()
+
+        # Act
+        log_family_regime_funnel_diagnostics(
+            realized_event_results=df, cfg=cfg, fold_id=0, seed=42, timeframe="4h",
+        )
+
+        # Assert
+        assert "[FUNNEL-RAW]" in caplog.text
+        assert "family=trend_donchian" in caplog.text
+        assert "[FUNNEL-CELL]" in caplog.text
+        assert "[FUNNEL-SIDE]" in caplog.text
+        assert "regime_code=5 side=short" in caplog.text
+
+    def test_log_funnel_diagnostics_empty_frame_logs_no_data(self, caplog) -> None:
+        import logging
+
+        import pandas as pd
+
+        from src.domain.futures.strategy.tiered_workflow.signal_selection import (
+            log_family_regime_funnel_diagnostics,
+        )
+
+        # Arrange
+        caplog.set_level(logging.INFO)
+        cfg = CandidateStrategyConfig()
+
+        # Act
+        log_family_regime_funnel_diagnostics(
+            realized_event_results=pd.DataFrame(), cfg=cfg, fold_id=1, seed=0, timeframe="4h",
+        )
+
+        # Assert
+        assert "status=no_data" in caplog.text
+
+    def test_log_funnel_diagnostics_below_min_bars_logs_status(self, caplog) -> None:
+        import logging
+
+        from src.domain.futures.strategy.tiered_workflow.signal_selection import (
+            log_family_regime_funnel_diagnostics,
+        )
+
+        # Arrange — 셀당 3개 이벤트 < min_bars=8 → diag None
+        caplog.set_level(logging.INFO)
+        cfg = CandidateStrategyConfig(l1_bootstrap_block_bars=6, max_holding_bars=1)
+        df = self._make_events_frame(n_per_cell=3)
+
+        # Act
+        log_family_regime_funnel_diagnostics(
+            realized_event_results=df, cfg=cfg, fold_id=2, seed=0, timeframe="8h",
+        )
+
+        # Assert — raw 커버리지는 여전히 찍히고, 셀 통계는 미달 상태 로그
+        assert "[FUNNEL-RAW]" in caplog.text
+        assert "status=below_min_bars" in caplog.text
+
+    def test_log_funnel_diagnostics_internal_error_degrades_without_raising(self, caplog, mocker) -> None:
+        import logging
+
+        from src.domain.futures.strategy.tiered_workflow.signal_selection import (
+            log_family_regime_funnel_diagnostics,
+        )
+
+        # Arrange
+        caplog.set_level(logging.WARNING)
+        cfg = CandidateStrategyConfig()
+        mocker.patch(
+            "src.domain.futures.strategy.tiered_workflow.signal_selection."
+            "compute_family_regime_edge_diagnostics",
+            side_effect=RuntimeError("boom"),
+        )
+        df = self._make_events_frame()
+
+        # Act — 예외가 전파되면 테스트 실패
+        log_family_regime_funnel_diagnostics(
+            realized_event_results=df, cfg=cfg, fold_id=3, seed=0, timeframe="4h",
+        )
+
+        # Assert
+        assert "stage=funnel_attribution status=degraded" in caplog.text
