@@ -11,9 +11,12 @@ from src.domain.futures.strategy.candidate_contracts import (
 )
 from src.domain.futures.strategy.tiered_workflow.portfolio_handoff import (
     PortfolioHandoffConfig,
+    _bar_level_marginal_growth_lcb,
     _kelly_proportional_weights,
+    _l1_evidence_by_key,
     _moving_block_bootstrap_lcb,
     _rank_and_cap_sleeve_indices,
+    evaluate_portfolio_handoff,
 )
 
 
@@ -46,7 +49,8 @@ def test_rank_and_cap_sleeve_indices_keeps_top_n_by_quality() -> None:
         ready_symbols=tuple(f"SYM{i}" for i in range(5)),
         trade_scope_count=5, registry_version="test-v1",
     )
-    active = _rank_and_cap_sleeve_indices(sleeve_keys, registry, max_candidate_sleeves=3)
+    evidence_by_key = _l1_evidence_by_key(registry)
+    active = _rank_and_cap_sleeve_indices(sleeve_keys, evidence_by_key, max_candidate_sleeves=3)
     assert active == (1, 2, 4)
 
 
@@ -63,8 +67,9 @@ def test_rank_and_cap_sleeve_indices_deterministic_tie_break() -> None:
         ready_symbols=("SYMa", "SYMb"),
         trade_scope_count=2, registry_version="test-v1",
     )
-    result1 = _rank_and_cap_sleeve_indices(sleeve_keys, registry, max_candidate_sleeves=1)
-    result2 = _rank_and_cap_sleeve_indices(sleeve_keys, registry, max_candidate_sleeves=1)
+    evidence_by_key = _l1_evidence_by_key(registry)
+    result1 = _rank_and_cap_sleeve_indices(sleeve_keys, evidence_by_key, max_candidate_sleeves=1)
+    result2 = _rank_and_cap_sleeve_indices(sleeve_keys, evidence_by_key, max_candidate_sleeves=1)
     assert result1 == result2
 
 
@@ -78,7 +83,8 @@ def test_rank_and_cap_sleeve_indices_missing_registry_entry_defaults_zero_qualit
         ready_symbols=("SYM_A",),
         trade_scope_count=1, registry_version="test-v1",
     )
-    result = _rank_and_cap_sleeve_indices(sleeve_keys, registry, max_candidate_sleeves=2)
+    evidence_by_key = _l1_evidence_by_key(registry)
+    result = _rank_and_cap_sleeve_indices(sleeve_keys, evidence_by_key, max_candidate_sleeves=2)
     assert result == (0, 1)
 
 
@@ -172,3 +178,247 @@ def test_moving_block_bootstrap_lcb_not_degenerate_at_three_windows() -> None:
     lcb = _moving_block_bootstrap_lcb(values, k=1.0, block_size=10, seed=42)
     assert lcb < float(np.mean(values))
     assert np.isfinite(lcb)
+
+
+# ── New bar-level bootstrap statistic tests ──
+
+
+def test_bar_level_marginal_growth_lcb_bounded_for_sparse_adverse_move() -> None:
+    n_bars = 90
+    rng = np.random.default_rng(11)
+    base = 0.0005 + rng.normal(0, 0.0002, n_bars)
+    sparse = np.zeros(n_bars)
+    sparse[10] = -0.05
+    returns_window = np.column_stack([base, sparse])
+    w = np.array([0.9, 0.1])
+
+    lcb, pos_ratio, chunk_sums = _bar_level_marginal_growth_lcb(
+        returns_window, w, sleeve_s=1, n_chunks=3, seed=7,
+    )
+
+    assert np.isfinite(lcb)
+    assert abs(lcb) < 1.0
+    assert len(chunk_sums) == 3
+
+
+def test_bar_level_marginal_growth_lcb_insufficient_bars_returns_neg_inf() -> None:
+    returns_window = np.zeros((1, 2))
+    lcb, pos_ratio, chunk_sums = _bar_level_marginal_growth_lcb(
+        returns_window, np.array([0.5, 0.5]), sleeve_s=0, n_chunks=3,
+    )
+    assert lcb == float("-inf")
+    assert pos_ratio == 0.0
+    assert chunk_sums == ()
+
+
+def test_l1_evidence_by_key_keys_by_symbol_and_strategy_id() -> None:
+    registry = QualifiedSignalRegistry(
+        by_symbol={
+            "BTCUSDT": (_ev("BTCUSDT", "strat_a", 0.8),),
+            "ETHUSDT": (_ev("ETHUSDT", "strat_b", 0.6),),
+        },
+        ready_symbols=("BTCUSDT", "ETHUSDT"), trade_scope_count=2, registry_version="test-v1",
+    )
+    lookup = _l1_evidence_by_key(registry)
+    assert lookup[("BTCUSDT", "strat_a")].quality_weight == pytest.approx(0.8)
+    assert ("ETHUSDT", "strat_a") not in lookup
+
+
+def test_l1_evidence_by_key_empty_registry() -> None:
+    registry = QualifiedSignalRegistry(
+        by_symbol={}, ready_symbols=(), trade_scope_count=0, registry_version="test-v1",
+    )
+    lookup = _l1_evidence_by_key(registry)
+    assert lookup == {}
+
+
+def test_rank_and_cap_sleeve_indices_accepts_prebuilt_evidence_lookup() -> None:
+    sleeve_keys = tuple(SignalSleeveKey(f"SYM{i}", "4h", "strat") for i in range(3))
+    registry = QualifiedSignalRegistry(
+        by_symbol={f"SYM{i}": (_ev(f"SYM{i}", "strat", qw),) for i, qw in enumerate([0.1, 0.9, 0.5])},
+        ready_symbols=tuple(f"SYM{i}" for i in range(3)), trade_scope_count=3, registry_version="test-v1",
+    )
+    lookup = _l1_evidence_by_key(registry)
+    active = _rank_and_cap_sleeve_indices(sleeve_keys, lookup, max_candidate_sleeves=2)
+    assert active == (1, 2)
+
+
+# ── L1-override precedence tests ──
+
+
+def _ev_with_lcb(sym: str, sid: str, qw: float, lcb_bps: float) -> SymbolStrategyEvidence:
+    return SymbolStrategyEvidence(
+        key=SignalSourceKey(sym, sid, "ctx"),
+        mean_gross_bps=10.0, mean_incremental_bps=5.0, block_tstat_incremental=2.0,
+        probability_positive=0.85, p_value=0.01, q_value=0.05, positive_fold_ratio=1.0,
+        n_obs=100, effective_n=80.0, n_folds=4, quality_weight=qw, hard_eligible=True,
+        lcb_net_bps=lcb_bps,
+    )
+
+
+def test_handoff_no_override_without_l1_match() -> None:
+    from src.domain.futures.strategy.tiered_workflow.dataclasses import L2SimulationCache
+    from src.domain.futures.strategy.candidate_contracts import ValidatedSignalBatch
+    from src.domain.futures.strategy.walk_forward import WFFold
+
+    sleeve_keys = (SignalSleeveKey("BTCUSDT", "4h", "unknown_strat"),)
+    n_bars = 90
+    rets = np.zeros((n_bars, 1), dtype=np.float64)
+
+    cache = L2SimulationCache(
+        vol_matrix_2d=np.ones((n_bars, 1)), tradeable_mask_2d=np.ones((n_bars, 1), dtype=np.bool_),
+        hurdle_2d=np.zeros((n_bars, 1)), funding_2d=np.zeros((n_bars, 1)), beta_1d=np.ones(1),
+        expected_gross_bps_2d=np.ones((n_bars, 1)), expected_net_bps_2d=np.ones((n_bars, 1)),
+        holding_bars_2d=np.ones((n_bars, 1)), side_2d=np.ones((n_bars, 1)),
+        quality_weight_2d=np.ones((n_bars, 1)), signal_mask_2d=np.ones((n_bars, 1), dtype=np.bool_),
+        sleeve_to_sym=np.array([0], dtype=np.int64), sleeve_keys=sleeve_keys,
+    )
+    registry = QualifiedSignalRegistry(
+        by_symbol={"OTHER": (_ev_with_lcb("OTHER", "strat", 0.9, 200.0),)},
+        ready_symbols=("OTHER",), trade_scope_count=1, registry_version="test-v1",
+    )
+    batch = ValidatedSignalBatch(
+        events=(), start_idx=0, end_idx=n_bars, symbols=("BTCUSDT",),
+        registry_version="test-v1", model_version="test",
+    )
+    fold = WFFold(fit_start=0, fit_end=30, cal_start=30, cal_end=60, oos_start=60, oos_end=90)
+
+    result = evaluate_portfolio_handoff(
+        registry=registry, signal_batch=batch, cache=cache, folds=(fold,),
+        net_sleeve_returns_by_fold=(np.ascontiguousarray(rets, dtype=np.float32),),
+        config=PortfolioHandoffConfig(),
+    )
+
+    ev = result.evidence_by_fold[0][0]
+    assert not ev.admitted
+    assert not ev.admitted_via_l1_edge_override
+
+
+def test_handoff_no_override_when_l1_lcb_net_bps_nonpositive() -> None:
+    from src.domain.futures.strategy.tiered_workflow.dataclasses import L2SimulationCache
+    from src.domain.futures.strategy.candidate_contracts import ValidatedSignalBatch
+    from src.domain.futures.strategy.walk_forward import WFFold
+
+    sleeve_keys = (SignalSleeveKey("BTCUSDT", "4h", "strat"),)
+    n_bars = 90
+    rets = np.zeros((n_bars, 1), dtype=np.float64)
+
+    cache = L2SimulationCache(
+        vol_matrix_2d=np.ones((n_bars, 1)), tradeable_mask_2d=np.ones((n_bars, 1), dtype=np.bool_),
+        hurdle_2d=np.zeros((n_bars, 1)), funding_2d=np.zeros((n_bars, 1)), beta_1d=np.ones(1),
+        expected_gross_bps_2d=np.ones((n_bars, 1)), expected_net_bps_2d=np.ones((n_bars, 1)),
+        holding_bars_2d=np.ones((n_bars, 1)), side_2d=np.ones((n_bars, 1)),
+        quality_weight_2d=np.ones((n_bars, 1)), signal_mask_2d=np.ones((n_bars, 1), dtype=np.bool_),
+        sleeve_to_sym=np.array([0], dtype=np.int64), sleeve_keys=sleeve_keys,
+    )
+    registry = QualifiedSignalRegistry(
+        by_symbol={"BTCUSDT": (_ev_with_lcb("BTCUSDT", "strat", 0.9, 0.0),)},
+        ready_symbols=("BTCUSDT",), trade_scope_count=1, registry_version="test-v1",
+    )
+    batch = ValidatedSignalBatch(
+        events=(), start_idx=0, end_idx=n_bars, symbols=("BTCUSDT",),
+        registry_version="test-v1", model_version="test",
+    )
+    fold = WFFold(fit_start=0, fit_end=30, cal_start=30, cal_end=60, oos_start=60, oos_end=90)
+
+    result = evaluate_portfolio_handoff(
+        registry=registry, signal_batch=batch, cache=cache, folds=(fold,),
+        net_sleeve_returns_by_fold=(np.ascontiguousarray(rets, dtype=np.float32),),
+        config=PortfolioHandoffConfig(),
+    )
+
+    ev = result.evidence_by_fold[0][0]
+    assert not ev.admitted
+    assert not ev.admitted_via_l1_edge_override
+
+
+def test_handoff_override_admitted_sleeve_still_pruned_by_correlation() -> None:
+    from src.domain.futures.strategy.tiered_workflow.dataclasses import L2SimulationCache
+    from src.domain.futures.strategy.candidate_contracts import ValidatedSignalBatch
+    from src.domain.futures.strategy.walk_forward import WFFold
+
+    sleeve_keys = (
+        SignalSleeveKey("BTCUSDT", "4h", "strat_a"),
+        SignalSleeveKey("BTCUSDT", "4h", "strat_b"),
+    )
+    n_bars = 90
+    rng = np.random.default_rng(42)
+    common = rng.normal(0, 0.001, n_bars)
+    rets = np.column_stack([common, common * 0.99 + rng.normal(0, 0.00001, n_bars)])
+
+    cache = L2SimulationCache(
+        vol_matrix_2d=np.ones((n_bars, 2)), tradeable_mask_2d=np.ones((n_bars, 2), dtype=np.bool_),
+        hurdle_2d=np.zeros((n_bars, 2)), funding_2d=np.zeros((n_bars, 2)), beta_1d=np.ones(2),
+        expected_gross_bps_2d=np.ones((n_bars, 2)), expected_net_bps_2d=np.ones((n_bars, 2)),
+        holding_bars_2d=np.ones((n_bars, 2)), side_2d=np.ones((n_bars, 2)),
+        quality_weight_2d=np.ones((n_bars, 2)), signal_mask_2d=np.ones((n_bars, 2), dtype=np.bool_),
+        sleeve_to_sym=np.array([0, 1], dtype=np.int64), sleeve_keys=sleeve_keys,
+    )
+    registry = QualifiedSignalRegistry(
+        by_symbol={
+            "BTCUSDT": (
+                _ev_with_lcb("BTCUSDT", "strat_a", 0.8, 200.0),
+                _ev_with_lcb("BTCUSDT", "strat_b", 0.6, 150.0),
+            ),
+        },
+        ready_symbols=("BTCUSDT",), trade_scope_count=1, registry_version="test-v1",
+    )
+    batch = ValidatedSignalBatch(
+        events=(), start_idx=0, end_idx=n_bars, symbols=("BTCUSDT",),
+        registry_version="test-v1", model_version="test",
+    )
+    fold = WFFold(fit_start=0, fit_end=30, cal_start=30, cal_end=60, oos_start=60, oos_end=90)
+
+    result = evaluate_portfolio_handoff(
+        registry=registry, signal_batch=batch, cache=cache, folds=(fold,),
+        net_sleeve_returns_by_fold=(np.ascontiguousarray(rets, dtype=np.float32),),
+        config=PortfolioHandoffConfig(),
+    )
+
+    admitted = [ev for ev in result.evidence_by_fold[0] if ev.admitted]
+    assert len(admitted) <= 1
+
+
+def test_handoff_invalid_handoff_weights_not_triggered_by_negative_override_weight_sum() -> None:
+    from src.domain.futures.strategy.tiered_workflow.dataclasses import L2SimulationCache
+    from src.domain.futures.strategy.candidate_contracts import ValidatedSignalBatch
+    from src.domain.futures.strategy.walk_forward import WFFold
+
+    sleeve_keys = (
+        SignalSleeveKey("BTCUSDT", "4h", "strat_a"),
+        SignalSleeveKey("ETHUSDT", "4h", "strat_b"),
+    )
+    n_bars = 90
+    rng = np.random.default_rng(42)
+    rets = np.zeros((n_bars, 2), dtype=np.float64)
+    rets[:, 0] = 0.002 + rng.normal(0, 0.0005, n_bars)
+    rets[:, 1] = -0.001 + rng.normal(0, 0.0003, n_bars)
+
+    cache = L2SimulationCache(
+        vol_matrix_2d=np.ones((n_bars, 2)), tradeable_mask_2d=np.ones((n_bars, 2), dtype=np.bool_),
+        hurdle_2d=np.zeros((n_bars, 2)), funding_2d=np.zeros((n_bars, 2)), beta_1d=np.ones(2),
+        expected_gross_bps_2d=np.ones((n_bars, 2)), expected_net_bps_2d=np.ones((n_bars, 2)),
+        holding_bars_2d=np.ones((n_bars, 2)), side_2d=np.ones((n_bars, 2)),
+        quality_weight_2d=np.ones((n_bars, 2)), signal_mask_2d=np.ones((n_bars, 2), dtype=np.bool_),
+        sleeve_to_sym=np.array([0, 1], dtype=np.int64), sleeve_keys=sleeve_keys,
+    )
+    registry = QualifiedSignalRegistry(
+        by_symbol={
+            "BTCUSDT": (_ev_with_lcb("BTCUSDT", "strat_a", 0.9, 200.0),),
+            "ETHUSDT": (_ev_with_lcb("ETHUSDT", "strat_b", 0.8, 100.0),),
+        },
+        ready_symbols=("BTCUSDT", "ETHUSDT"), trade_scope_count=2, registry_version="test-v1",
+    )
+    batch = ValidatedSignalBatch(
+        events=(), start_idx=0, end_idx=n_bars, symbols=("BTCUSDT", "ETHUSDT"),
+        registry_version="test-v1", model_version="test",
+    )
+    fold = WFFold(fit_start=0, fit_end=30, cal_start=30, cal_end=60, oos_start=60, oos_end=90)
+
+    result = evaluate_portfolio_handoff(
+        registry=registry, signal_batch=batch, cache=cache, folds=(fold,),
+        net_sleeve_returns_by_fold=(np.ascontiguousarray(rets, dtype=np.float32),),
+        config=PortfolioHandoffConfig(),
+    )
+
+    assert result.blocker_reason != "invalid_handoff_weights"

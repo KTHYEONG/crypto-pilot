@@ -178,6 +178,61 @@ def test_active_pipeline_runs_one_deterministic_study() -> None:
 # ── T01: Handoff keeps positive non-redundant sleeves ──
 
 
+def test_handoff_l1_certified_sleeve_survives_despite_failing_l2_growth_bar() -> None:
+    from src.domain.futures.strategy.tiered_workflow.dataclasses import L2SimulationCache
+    from src.domain.futures.strategy.candidate_contracts import (
+        SignalSleeveKey, QualifiedSignalRegistry, SymbolStrategyEvidence,
+        SignalSourceKey, ValidatedSignalBatch,
+    )
+    from src.domain.futures.strategy.walk_forward import WFFold
+    from src.domain.futures.strategy.tiered_workflow.portfolio_handoff import (
+        PortfolioHandoffConfig, evaluate_portfolio_handoff,
+    )
+
+    n_bars = 90
+    sleeve_keys = (SignalSleeveKey("BTCUSDT", "4h", "strat_a"),)
+    rng = np.random.default_rng(3)
+    rets = np.zeros((n_bars, 1))
+    rets[::10, 0] = rng.normal(0.001, 0.02, n_bars // 10)
+
+    cache = L2SimulationCache(
+        vol_matrix_2d=np.ones((n_bars, 1)), tradeable_mask_2d=np.ones((n_bars, 1), dtype=np.bool_),
+        hurdle_2d=np.zeros((n_bars, 1)), funding_2d=np.zeros((n_bars, 1)), beta_1d=np.ones(1),
+        expected_gross_bps_2d=np.ones((n_bars, 1)), expected_net_bps_2d=np.ones((n_bars, 1)),
+        holding_bars_2d=np.ones((n_bars, 1)), side_2d=np.ones((n_bars, 1)),
+        quality_weight_2d=np.ones((n_bars, 1)), signal_mask_2d=np.ones((n_bars, 1), dtype=np.bool_),
+        sleeve_to_sym=np.array([0], dtype=np.int64), sleeve_keys=sleeve_keys,
+    )
+    registry = QualifiedSignalRegistry(
+        by_symbol={"BTCUSDT": (SymbolStrategyEvidence(
+            key=SignalSourceKey("BTCUSDT", "strat_a", "ctx"),
+            mean_gross_bps=10.0, mean_incremental_bps=5.0, block_tstat_incremental=3.0,
+            probability_positive=0.9, p_value=0.001, q_value=0.01, positive_fold_ratio=1.0,
+            n_obs=500, effective_n=400.0, n_folds=6, quality_weight=0.9, hard_eligible=True,
+            lcb_net_bps=200.0,
+        ),)},
+        ready_symbols=("BTCUSDT",), trade_scope_count=1, registry_version="test-v1",
+    )
+    batch = ValidatedSignalBatch(
+        events=(), start_idx=0, end_idx=n_bars, symbols=("BTCUSDT",),
+        registry_version="test-v1", model_version="test",
+    )
+    fold = WFFold(fit_start=0, fit_end=30, cal_start=30, cal_end=60, oos_start=60, oos_end=90)
+
+    result = evaluate_portfolio_handoff(
+        registry=registry, signal_batch=batch, cache=cache, folds=(fold,),
+        net_sleeve_returns_by_fold=(np.ascontiguousarray(rets, dtype=np.float32),),
+        config=PortfolioHandoffConfig(),
+    )
+
+    ev = result.evidence_by_fold[0][0]
+    if ev.marginal_growth_lcb <= 0.0 or ev.positive_window_ratio < (2.0 / 3.0):
+        assert ev.admitted, "L1-certified sleeve must survive via override even if it fails L2's own bar"
+        assert ev.admitted_via_l1_edge_override
+    else:
+        assert ev.admitted
+
+
 def test_handoff_caps_candidate_pool_and_marks_overflow_capped() -> None:
     from src.domain.futures.strategy.tiered_workflow.dataclasses import L2SimulationCache
     from src.domain.futures.strategy.candidate_contracts import (
