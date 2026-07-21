@@ -51,6 +51,12 @@ def _validate_directional_veto_mode(value: str) -> Literal["adverse_only", "cont
     return value  # type: ignore[return-value]
 
 
+def _validate_cagr_gate_mode(value: str) -> Literal["absolute", "relative"]:
+    if value not in {"absolute", "relative"}:
+        raise ValueError(f"l2_cagr_gate_mode must be one of absolute/relative, got {value!r}")
+    return value  # type: ignore[return-value]
+
+
 def _validate_directional_veto_symbols(value: object) -> tuple[str, ...]:
     if not isinstance(value, (list, tuple)):
         raise ValueError("l2_regime_directional_veto_symbols must be a sequence")
@@ -380,6 +386,7 @@ class RegimeBucketReliability:
     sign_consistent: bool
     reliability: float
     action: RegimeBucketAction
+    side: int = 0
 
 
 @dataclass(slots=True, frozen=True)
@@ -552,6 +559,8 @@ class Layer2AllocationConfig:
     no_trade_band: float = 0.01
     max_ann_vol: float | None = None
     l2_min_cagr: float = 0.30
+    l2_cagr_gate_mode: str = "relative"
+    l2_min_cagr_uplift: float = 0.05
     l2_min_mar: float = 1.0
     l2_min_sortino: float = 1.5
     l2_min_sharpe_abs: float = 0.7
@@ -672,6 +681,7 @@ class Layer2AllocationConfig:
     l2_regime_bull_gross_cap: float = 1.0
     l2_regime_bear_gross_cap: float = 0.35
     l2_regime_crisis_gross_cap: float = 0.25
+    l2_regime_bucket_side_split_enabled: bool = False
     l2_regime_long_short_asymmetry_enabled: bool = False
     l2_regime_bear_long_extra_mult: float = 1.0
     l2_regime_crisis_long_extra_mult: float = 1.0
@@ -1006,6 +1016,9 @@ class Layer2AllocationConfig:
             raise ValueError("l2_regime_bear_gross_cap must be in range (0.0, 1.0]")
         if l2_regime_crisis_gross_cap <= 0.0:
             raise ValueError("l2_regime_crisis_gross_cap must be in range (0.0, 1.0]")
+        _l2_regime_bucket_side_split_enabled = bool(
+            params.get("l2_regime_bucket_side_split_enabled", _dc.l2_regime_bucket_side_split_enabled)
+        )
         l2_regime_long_short_asymmetry_enabled = bool(
             params.get("l2_regime_long_short_asymmetry_enabled", _dc.l2_regime_long_short_asymmetry_enabled)
         )
@@ -1110,6 +1123,13 @@ class Layer2AllocationConfig:
             params.get("l2_min_crisis_cagr", _dc.l2_min_crisis_cagr),
             _dc.l2_min_crisis_cagr,
         )
+        _l2_cagr_gate_mode = _validate_cagr_gate_mode(
+            str(params.get("l2_cagr_gate_mode", _dc.l2_cagr_gate_mode))
+        )
+        _l2_min_cagr_uplift = cls._as_float(
+            params.get("l2_min_cagr_uplift", _dc.l2_min_cagr_uplift),
+            _dc.l2_min_cagr_uplift,
+        )
         return cls(
             k_rank=cls._as_int(params.get("K_RANK", 3), 3),
             rebalance_bars=cls._as_int(params.get("REBALANCE_BARS", 3), 3),
@@ -1119,6 +1139,8 @@ class Layer2AllocationConfig:
             no_trade_band=cls._as_float(params.get("no_trade_band", 0.01), 0.01),
             max_ann_vol=vol_target,
             l2_min_cagr=cls._as_float(params.get("l2_min_cagr", _dc.l2_min_cagr), _dc.l2_min_cagr),
+            l2_cagr_gate_mode=_l2_cagr_gate_mode,
+            l2_min_cagr_uplift=_l2_min_cagr_uplift,
             l2_min_mar=cls._as_float(params.get("l2_min_mar", _dc.l2_min_mar), _dc.l2_min_mar),
             l2_min_sortino=cls._as_float(
                 params.get("l2_min_sortino", params.get("l2_min_sortino_abs", _dc.l2_min_sortino)),
@@ -1345,6 +1367,7 @@ class Layer2AllocationConfig:
             l2_regime_bull_gross_cap=l2_regime_bull_gross_cap,
             l2_regime_bear_gross_cap=l2_regime_bear_gross_cap,
             l2_regime_crisis_gross_cap=l2_regime_crisis_gross_cap,
+            l2_regime_bucket_side_split_enabled=_l2_regime_bucket_side_split_enabled,
             l2_regime_long_short_asymmetry_enabled=l2_regime_long_short_asymmetry_enabled,
             l2_regime_bear_long_extra_mult=l2_regime_bear_long_extra_mult,
             l2_regime_crisis_long_extra_mult=l2_regime_crisis_long_extra_mult,
@@ -1756,7 +1779,7 @@ class L2SimulationCache:
         return tuple(sk.native_tf for sk in self.sleeve_keys)
 
     # Pre-computed bucket realized edges (trial-param independent → cached once)
-    bucket_edges_by_fold: tuple[dict[tuple[int, str, str], float], ...] = ()
+    bucket_edges_by_fold: tuple[dict[tuple[Any, ...], float], ...] = ()
     pooled_edges_by_fold: tuple[dict[tuple[str, str], float], ...] = ()
     # Pre-computed per-TF fit edge (trial-param independent → cached once)
     per_tf_edge_by_fold: tuple[dict[str, float], ...] = ()
@@ -1764,7 +1787,7 @@ class L2SimulationCache:
     regime_code_1d: NDArray[np.int8] | None = None
     risk_severity_code_1d: NDArray[np.int8] | None = None
     regime_routing_diagnostics: RegimeRoutingDiagnostics | None = None
-    regime_policy_by_fold: tuple[dict[tuple[int, str, str], RegimeCellPolicy], ...] = ()
+    regime_policy_by_fold: tuple[dict[tuple[Any, ...], RegimeCellPolicy], ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -1788,6 +1811,7 @@ class RegimeCellPolicy:
     n_fit: int
     n_cal: int
     reliability: float = 0.0
+    side: int = 0
 
 
 
@@ -1877,6 +1901,7 @@ class RegimeCellDebugStat:
     edge_gap_bps: float
     sign_hit_rate: float
     selected_hit_pct: float
+    side: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -1908,12 +1933,12 @@ class RegimeDebugDiagnostics:
 
 @dataclass(frozen=True, slots=True)
 class RegimeRoutingPlan:
-    effective_bucket_edges_by_fold: tuple[dict[tuple[int, str, str], float], ...]
-    raw_bucket_edges_by_fold: tuple[dict[tuple[int, str, str], float], ...]
+    effective_bucket_edges_by_fold: tuple[dict[tuple[Any, ...], float], ...]
+    raw_bucket_edges_by_fold: tuple[dict[tuple[Any, ...], float], ...]
     pooled_edges_by_fold: tuple[dict[tuple[str, str], float], ...]
     effective_regime_code_1d: NDArray[np.int8]
     diagnostics: RegimeRoutingDiagnostics
-    policy_by_fold: tuple[dict[tuple[int, str, str], RegimeCellPolicy], ...] = ()
+    policy_by_fold: tuple[dict[tuple[Any, ...], RegimeCellPolicy], ...] = ()
 
 
 @dataclass(slots=True, frozen=True)
