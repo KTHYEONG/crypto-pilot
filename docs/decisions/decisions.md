@@ -1,5 +1,10 @@
 # Active Decisions Log (Sliding Window)
 
+## [2026-07-21] [PORTFOLIO_CAUSAL_ROBUST_HANDOFF] [ADR_20260721_PORTFOLIO_CAUSAL_ROBUST_HANDOFF]
+- **Context/Why:** L2 multi-seed production path bypassed the causal handoff and selected no shared candidate; latest run stopped before trial evaluation.
+- **Resolution/What:** Connected deterministic single-candidate path, generated fit/cal causal net sleeve returns, applied fold handoff masks before OOS simulation, and preserved isolated-study compatibility. Latest 120-trial run fail-closed at handoff with all folds blocked.
+- **Impact:** L1 remains passing (113/118); L2 trials and simulated trades were 0 because no sleeve survived handoff; check passed with Cov 38%.
+
 ## [2026-07-21] [L2_RISK_PROJECTED_ROBUST_SEARCH] [ADR_20260721_L2_RISK_PROJECTED_ROBUST_SEARCH]
 - **Context/Why:** 개선안 구현 후 실제 데이터에서 자산증식 로직의 병목과 적용 여부를 검증하기 위해 120-trial L2 실행 결과를 기록한다.
 - **Resolution/What:** 위기 레버리지 투영·robust search 계약을 구현하고 단일 프로세스 L2 120-trial 기준선 실측을 수행했다. seed=42에서 120/120 완료, joint_feasible=4/120, blocker=cagr를 확인했으며 기존 multi-seed/composite crisis 경로가 아직 실제 파이프라인에 남아 있음을 확인했다.
@@ -69,8 +74,3 @@
 - **Context/Why:** Cold L2 measurements identified bridge alignment, transient cache ownership, snapshot worker memory, and TF lifecycle retention as remaining bottlenecks; contract tests and runtime lifecycle boundaries now need a synchronized ADR record.
 - **Resolution/What:** Recorded the cold-path optimization contract, added exact scenario coverage for causal statistics, bulk alignment, adaptive snapshot execution, TF resource release, and signal/timeframe-independent runtime planning; synchronized the implementation and regression-test references.
 - **Impact:** Preserves signal/timeframe-agnostic behavior while making optimization changes auditable. Latest check passes with 52% coverage; full L1/L2 timing remains gated by the current L0 early termination in the production benchmark.
-
-## [2026-07-20] [TASK_SHAPE_ADAPTIVE_RUNTIME_OPT] [ADR_20260720_SHAPE_ADAPTIVE_RUNTIME_OPT]
-- **Context/Why:** L2 execution measurements showed L1 cache/expanding statistics and bridge alignment dominating wall time, while observed worker memory spikes exceeded the 12GB VmHWM budget and dense PSS probing distorted L2 timing.
-- **Resolution/What:** Added causal expanding statistics, reused risk overlay, released aligned feature cache by TF, added bulk alignment/probe observability coverage, and documented pilot/PSS-driven adaptive execution contracts and performance gates without signal/timeframe-specific knobs.
-- **Impact:** Hot-cache strategy wall time fell from 302.54s to 170.14s and VmHWM from 12.26GB to 11.21GB; bridge fell about 4%. Cold L1 recomputation remains about 143.90s with 12.15GB VmHWM, so further implementation is required before claiming cold-path optimization success.
