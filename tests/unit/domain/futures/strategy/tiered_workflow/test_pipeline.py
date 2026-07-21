@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from collections.abc import Mapping
 from types import SimpleNamespace
 from typing import Any
@@ -20,6 +21,7 @@ from src.domain.futures.strategy.tiered_workflow.dataclasses import Layer1Result
 from src.domain.futures.strategy.tiered_workflow.pipeline import (
     TieredPipelineError,
     _aggregate_per_tf_l1,
+    _build_rule_based_stress_batch,
     _is_deployable_per_tf_result,
     _log_pertf_registry_diag,
     _merge_deployment_registries_across_tf,
@@ -962,3 +964,151 @@ def test_aggregate_per_tf_l1_uses_merged_registry_not_single_tf() -> None:
 
     assert result.deployment_registry is not None
     assert set(result.deployment_registry.by_symbol.keys()) == {"BTCUSDT", "ETHUSDT"}
+
+
+# ── _build_rule_based_stress_batch ──────────────────────────────────
+
+
+def _aligned_mock(symbols: tuple[str, ...], n_bars: int = 1):
+    return MagicMock(
+        symbols=symbols,
+        datetimes=np.array([f"2024-01-{d:02d}" for d in range(1, n_bars + 1)], dtype="datetime64[ns]"),
+    )
+
+
+def _panel_mock(*, family: str, variant: str, n_symbols: int = 1, n_bars: int = 1):
+    return MagicMock(
+        family=family,
+        variant=variant,
+        signed_score_2d=np.ones((n_bars, n_symbols)),
+        valid_mask_2d=np.ones((n_bars, n_symbols), dtype=bool),
+        expected_holding_bars=10,
+    )
+
+
+def _make_stress_evidence(symbol: str, strategy_id: str, quality_weight: float = 0.8) -> SymbolStrategyEvidence:
+    return SymbolStrategyEvidence(
+        key=SignalSourceKey(symbol=symbol, strategy_id=strategy_id, activation_context="default"),
+        mean_gross_bps=10.0,
+        mean_incremental_bps=10.0,
+        p_value=0.01,
+        q_value=0.01,
+        positive_fold_ratio=0.8,
+        n_obs=100,
+        effective_n=100.0,
+        n_folds=4,
+        quality_weight=quality_weight,
+        lcb_net_bps=5.0,
+    )
+
+
+def _stress_registry(
+    entries: dict[str, tuple[SymbolStrategyEvidence, ...]],
+) -> QualifiedSignalRegistry:
+    return QualifiedSignalRegistry(
+        by_symbol=entries,
+        ready_symbols=tuple(entries.keys()),
+        trade_scope_count=sum(len(v) for v in entries.values()),
+        registry_version="test",
+    )
+
+
+def test_build_rule_based_stress_batch_matches_exact_family_variant(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    registry = _stress_registry({
+        "BTCUSDT": (_make_stress_evidence("BTCUSDT", "trend_donchian:donchian_72", 0.8),),
+    })
+    aligned = _aligned_mock(symbols=("BTCUSDT",))
+    panel = _panel_mock(family="trend_donchian", variant="donchian_72")
+    monkeypatch.setattr(
+        "src.domain.futures.strategy.rule_signals.build_rule_signal_panels",
+        lambda **_: [panel],
+    )
+    batch = _build_rule_based_stress_batch(
+        registry=registry, aligned=aligned, strategy_cfg=CandidateStrategyConfig(), tf="8h",
+    )
+
+    assert len(batch.events) == 1
+    assert batch.events[0].strategy_id == "trend_donchian:donchian_72"
+    assert batch.events[0].quality_weight == pytest.approx(0.8)
+
+
+def test_build_rule_based_stress_batch_rejects_substring_collision(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    registry = _stress_registry({
+        "BTCUSDT": (
+            _make_stress_evidence("BTCUSDT", "trend_donchian:donchian_72", quality_weight=0.5),
+            _make_stress_evidence("BTCUSDT", "trend_donchian:donchian_72_4h", quality_weight=0.9),
+        ),
+    })
+    aligned = _aligned_mock(symbols=("BTCUSDT",))
+    panel = _panel_mock(family="trend_donchian", variant="donchian_72")
+    monkeypatch.setattr(
+        "src.domain.futures.strategy.rule_signals.build_rule_signal_panels",
+        lambda **_: [panel],
+    )
+    batch = _build_rule_based_stress_batch(
+        registry=registry, aligned=aligned, strategy_cfg=CandidateStrategyConfig(), tf="8h",
+    )
+
+    assert len(batch.events) == 1
+    assert batch.events[0].quality_weight == pytest.approx(0.5)
+
+
+def test_build_rule_based_stress_batch_logs_debug_on_unmatched(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    registry = _stress_registry({
+        "BTCUSDT": (_make_stress_evidence("BTCUSDT", "dual_momentum:dm_12_48"),),
+    })
+    aligned = _aligned_mock(symbols=("BTCUSDT",))
+    panel = _panel_mock(family="trend_donchian", variant="donchian_72")
+    monkeypatch.setattr(
+        "src.domain.futures.strategy.rule_signals.build_rule_signal_panels",
+        lambda **_: [panel],
+    )
+    monkeypatch.setattr(logging.getLogger("opt_main_futures"), "propagate", True)
+    with caplog.at_level(logging.DEBUG, logger="opt_main_futures"):
+        batch = _build_rule_based_stress_batch(
+            registry=registry, aligned=aligned, strategy_cfg=CandidateStrategyConfig(), tf="8h",
+        )
+
+    assert len(batch.events) == 0
+    assert "event=stress_evidence_unmatched" in caplog.text
+
+
+def test_build_rule_based_stress_batch_end_to_end_event_count(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    registry = _stress_registry({
+        "BTCUSDT": (
+            _make_stress_evidence("BTCUSDT", "trend_donchian:donchian_72", 0.8),
+            _make_stress_evidence("BTCUSDT", "trend_donchian:donchian_72_4h", 0.9),
+            _make_stress_evidence("BTCUSDT", "dual_momentum:dm_12_48", 0.7),
+        ),
+        "ETHUSDT": (
+            _make_stress_evidence("ETHUSDT", "trend_donchian:donchian_72", 0.6),
+        ),
+    })
+    aligned = _aligned_mock(symbols=("BTCUSDT", "ETHUSDT"), n_bars=2)
+    panels = [
+        _panel_mock(family="trend_donchian", variant="donchian_72", n_symbols=2, n_bars=2),
+        _panel_mock(family="dual_momentum", variant="dm_12_48", n_symbols=2, n_bars=2),
+    ]
+    monkeypatch.setattr(
+        "src.domain.futures.strategy.rule_signals.build_rule_signal_panels",
+        lambda **_: panels,
+    )
+    batch = _build_rule_based_stress_batch(
+        registry=registry, aligned=aligned, strategy_cfg=CandidateStrategyConfig(), tf="8h",
+    )
+
+    # Expected: 2 panels x 2 symbols = 4, but dual_momentum:dm_12_48 has no match on ETHUSDT
+    # So: BTCUSDT/donchian_72, ETHUSDT/donchian_72, BTCUSDT/dm_12_48 = 3 symbol-panel matches
+    # Each have 2 active bars (n_bars=2) => 3 * 2 = 6 events (but active bars only when score_col != 0)
+    # Actually signed_score_2d is all 1.0, valid_mask is all True, so all bars are active
+    # 3 matched pairs * 2 bars = 6 events
+    assert len(batch.events) == 6
