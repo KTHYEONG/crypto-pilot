@@ -90,3 +90,5 @@ graph TD
 | `l2_require_recency_holdout_pass` | True (searchable) | Toggle for the 14th Optuna constraint: trailing objective-excluded return slice must clear a CAGR floor |
 | `l2_min_recency_holdout_cagr` | -0.05 (searchable) | CAGR floor for the recency holdout slice, decoupled from `l2_min_worst_fold_cagr` |
 | `l2_recency_holdout_days` | 30.0 (fixed, non-searchable) | Trailing calendar-day span excluded from the primary objective, used only for the recency holdout constraint |
+| `l2_regime_bucket_side_split_enabled` | False (searchable) | Widens regime bucket keys from (regime, family, tf) to (regime, family, tf, side) so long/short edges are routed independently |
+| `l2_regime_scoped_fold_override_enabled` | False (searchable) | Scopes the RC-3 fold-confidence override to individual regime states instead of demoting every cell in a fold on one blanket average |
