@@ -1732,12 +1732,17 @@ def _run_tiered_l2_study(
             n_crisis_folds=len(crisis_replay_ctx.awf_folds),
         )
         crisis_replay_ctx = dc_replace(crisis_replay_ctx, cache=_routed_cache)
+        _wildcard_cnt: int = 0
+        if _routed_cache.regime_policy_by_fold:
+            from src.domain.futures.strategy.tiered_workflow.l2_meta import TF_WILDCARD
+            _wildcard_cnt = sum(1 for k in _routed_cache.regime_policy_by_fold[0] if k[2] == TF_WILDCARD)
         _logger.info(
-            "[EVAL] [CRISIS-ROUTING] parity=on policy_cells=%d bucket_cells=%d side_split=%s",
+            "[EVAL] [CRISIS-ROUTING] parity=on policy_cells=%d bucket_cells=%d side_split=%s wildcard_cells=%d",
             len(_routed_cache.regime_policy_by_fold[0]) if _routed_cache.regime_policy_by_fold else 0,
             len(_routed_cache.bucket_edges_by_fold[0]) if _routed_cache.bucket_edges_by_fold else 0,
             (_routed_cache.regime_routing_diagnostics.side_split_enabled
              if _routed_cache.regime_routing_diagnostics else "n/a"),
+            _wildcard_cnt,
         )
     _policy_diag = _routing_plan.diagnostics.policy_diagnostics
     # Source contract for diagnostics tests:

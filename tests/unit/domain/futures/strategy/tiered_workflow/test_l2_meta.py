@@ -1,11 +1,15 @@
 from __future__ import annotations
 
+from dataclasses import replace
+
 import numpy as np
 import pytest
 
 from src.domain.futures.strategy.cs_rank import SymbolSignal
 from src.domain.futures.strategy.tiered_workflow.dataclasses import L2SimulationCache, RegimeCellPolicy
 from src.domain.futures.strategy.tiered_workflow.l2_meta import (
+    TF_UNKNOWN,
+    TF_WILDCARD,
     _build_bucket_reliability,
     _parse_meta_group_ids,
     apply_bucket_conditional_weight,
@@ -577,7 +581,10 @@ class TestTransferRoutingPlanToCrisisCache:
         routed = transfer_routing_plan_to_crisis_cache(crisis, study, n_crisis_folds=1)
 
         # Assert
-        assert routed.regime_policy_by_fold == (fold1_policy,)
+        _expected_policy = dict(fold1_policy)
+        _expected_policy[(2, "trend", TF_WILDCARD)] = replace(
+            fold1_policy[(2, "trend", "4h")], tf=TF_WILDCARD)
+        assert routed.regime_policy_by_fold == (_expected_policy,)
         assert routed.bucket_edges_by_fold == ({(2, "trend", "4h"): 12.0},)
         assert routed.pooled_edges_by_fold == ({("trend", "4h"): 3.0},)
 
@@ -624,5 +631,140 @@ class TestTransferRoutingPlanToCrisisCache:
         routed = transfer_routing_plan_to_crisis_cache(crisis, study, n_crisis_folds=3)
 
         # Assert
-        assert routed.regime_policy_by_fold == (fold_policy, fold_policy, fold_policy)
+        _expected_policy = dict(fold_policy)
+        _expected_policy[(0, "trend", TF_WILDCARD)] = replace(
+            fold_policy[(0, "trend", "4h")], tf=TF_WILDCARD)
+        assert routed.regime_policy_by_fold == (_expected_policy, _expected_policy, _expected_policy)
         assert len(routed.bucket_edges_by_fold) == 3
+
+
+# ── [SPEC l2-policy-tf-key-ssot] tf_by_sleeve SSOT ──
+
+
+class TestTfBySleeveSSOT:
+    def test_apply_regime_cell_policy_tf_by_sleeve_matches_suffixless_strategy_id(self) -> None:
+        key = ("BTCUSDT", "trend_donchian:donchian_72")
+        sleeve_sigs = {key: _sig(raw_mu=5.0)}
+        sleeve_edges = {key: 30.0}
+        policy_map = {(2, "trend_donchian", "8h"): _policy(
+            action="block", side=0, edge_multiplier=0.0, hard_block_eligible=True)}
+
+        result = apply_regime_cell_policy(
+            sleeve_sigs, sleeve_edges, policy_map, regime_now=2,
+            mode="hybrid", tf_by_sleeve={key: "8h"},
+        )
+
+        assert result.n_block == 1
+        assert key not in result.sleeve_sigs
+
+    def test_apply_regime_cell_policy_without_tf_mapping_falls_back_to_parser(self) -> None:
+        key = ("BTCUSDT", "trend_donchian:donchian_72")
+        sleeve_sigs = {key: _sig(raw_mu=5.0)}
+        sleeve_edges = {key: 30.0}
+        policy_map = {(2, "trend_donchian", "unknown"): _policy(
+            action="block", side=0, edge_multiplier=0.0, hard_block_eligible=True)}
+
+        result = apply_regime_cell_policy(
+            sleeve_sigs, sleeve_edges, policy_map, regime_now=2,
+            mode="hybrid", tf_by_sleeve=None,
+        )
+
+        assert result.n_block == 1
+        assert key not in result.sleeve_sigs
+
+    def test_apply_regime_cell_policy_wildcard_fallback_on_exact_miss(self) -> None:
+        key = ("BTCUSDT", "trend_donchian:donchian_72")
+        sleeve_sigs = {key: _sig(raw_mu=5.0)}
+        sleeve_edges = {key: 30.0}
+        policy_map = {(2, "trend_donchian", TF_WILDCARD): _policy(
+            action="allow", side=0)}
+
+        result = apply_regime_cell_policy(
+            sleeve_sigs, sleeve_edges, policy_map, regime_now=2,
+            mode="hybrid", tf_by_sleeve={key: "8h"},
+        )
+
+        assert result.n_allow == 1
+
+    def test_transfer_routing_plan_wildcard_with_side_split_4key(self) -> None:
+        fold_policy = {
+            (2, "trend", "4h", 1): _policy(action="block", side=1, hard_block_eligible=True, edge_multiplier=0.0),
+            (2, "trend", "12h", 1): _policy(action="allow", side=1),
+        }
+        study = _minimal_cache(
+            regime_policy_by_fold=(fold_policy,),
+            bucket_edges_by_fold=({},),
+            pooled_edges_by_fold=({},),
+        )
+        crisis = _minimal_cache()
+
+        result = transfer_routing_plan_to_crisis_cache(crisis, study, n_crisis_folds=1)
+
+        assert result.regime_policy_by_fold is not None
+        policy = result.regime_policy_by_fold[0]
+        assert (2, "trend", TF_WILDCARD, 1) in policy
+
+    def test_transfer_routing_plan_adds_wildcard_cells_by_max_n_cal(self) -> None:
+        fold_policy = {
+            (2, "trend", "4h"): _policy(action="block", side=0, hard_block_eligible=True, edge_multiplier=0.0),
+            (2, "trend", "12h"): _policy(action="allow", side=0),
+        }
+        study = _minimal_cache(
+            regime_policy_by_fold=(fold_policy,),
+            bucket_edges_by_fold=({},),
+            pooled_edges_by_fold=({},),
+        )
+        crisis = _minimal_cache()
+
+        result = transfer_routing_plan_to_crisis_cache(crisis, study, n_crisis_folds=1)
+
+        assert result.regime_policy_by_fold is not None
+        policy = result.regime_policy_by_fold[0]
+        assert (2, "trend", TF_WILDCARD) in policy
+        assert policy[(2, "trend", TF_WILDCARD)].action == "allow"
+
+    def test_tf_unknown_constant_unifies_builder_and_parser_fallback(self) -> None:
+        assert TF_UNKNOWN == "unknown"
+        family, tf = _parse_meta_group_ids("foo:bar")
+        assert tf == TF_UNKNOWN
+
+    def test_wildcard_fallback_respects_side_dimension(self) -> None:
+        key = ("BTCUSDT", "trend_donchian:donchian_72")
+        sleeve_sigs = {key: _sig(raw_mu=5.0)}
+        sleeve_edges = {key: -30.0}
+        policy_map = {
+            (2, "trend_donchian", TF_WILDCARD, 1): _policy(action="allow", side=1),
+        }
+
+        result = apply_regime_cell_policy(
+            sleeve_sigs, sleeve_edges, policy_map, regime_now=2,
+            mode="hybrid", side_split_enabled=True, tf_by_sleeve={key: "8h"},
+        )
+
+        assert result.n_pooled == 1
+        assert result.n_allow == 0
+
+    def test_filter_sleeves_by_bucket_tf_by_sleeve(self) -> None:
+        key = ("BTCUSDT", "trend_donchian:donchian_72")
+        sleeve_sigs = {key: _sig(raw_mu=5.0)}
+        bucket_edges = {(2, "trend_donchian", "8h"): 10.0}
+
+        result = filter_sleeves_by_bucket(
+            sleeve_sigs, bucket_edges, regime_now=2,
+            tf_by_sleeve={key: "8h"},
+        )
+
+        assert key in result
+
+    def test_apply_bucket_conditional_weight_tf_by_sleeve(self) -> None:
+        key = ("BTCUSDT", "trend_donchian:donchian_72")
+        sleeve_sigs = {key: _sig(raw_mu=5.0)}
+        bucket_edges = {(2, "trend_donchian", "8h"): 60.0}
+
+        result = apply_bucket_conditional_weight(
+            sleeve_sigs, bucket_edges, regime_now=2,
+            edge_floor_bps=5.0, edge_ref_bps=50.0,
+            tf_by_sleeve={key: "8h"},
+        )
+
+        assert key in result

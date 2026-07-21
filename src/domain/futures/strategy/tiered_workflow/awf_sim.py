@@ -2891,10 +2891,19 @@ def _run_awf_simulation(
     _side_split_enabled = bool(_routing_diag.side_split_enabled) if _routing_diag is not None else False
     from src.domain.futures.strategy.tiered_workflow.l2_meta import (
         apply_asymmetric_long_short_regime_cap,
+        apply_bucket_conditional_weight,
+        apply_regime_cell_policy,
         apply_regime_risk_cap,
         bear_edge_per_bar_bps,
         compute_regime_reliability_multiplier,
+        filter_sleeves_by_bucket,
     )
+
+    # R1: native_tf SSOT mapping — built once before bar loop
+    _tf_by_sleeve: dict[tuple[str, str], str] = {}
+    for _sleeve_key in cache.sleeve_keys:
+        if _sleeve_key.native_tf:
+            _tf_by_sleeve[(_sleeve_key.symbol, _sleeve_key.strategy_id)] = _sleeve_key.native_tf
 
     if _l2_routing_mode == "bucket":
         from src.domain.futures.strategy.market_regime import compute_market_regime_context
@@ -3313,10 +3322,12 @@ def _run_awf_simulation(
                             _long_out = _bucket_fn(
                                 _long_sigs, _current_bucket_edges, _regime_now,
                                 side=1, edge_floor_bps=_edge_floor,
+                                tf_by_sleeve=_tf_by_sleeve,
                             )
                             _short_out = _bucket_fn(
                                 _short_sigs, _current_bucket_edges, _regime_now,
                                 side=-1, edge_floor_bps=_edge_floor,
+                                tf_by_sleeve=_tf_by_sleeve,
                             )
                             _oos_sleeve_sigs = {**_long_out, **_short_out}
                         else:
@@ -3325,6 +3336,7 @@ def _run_awf_simulation(
                                 _current_bucket_edges,
                                 _regime_now,
                                 edge_floor_bps=_edge_floor,
+                                tf_by_sleeve=_tf_by_sleeve,
                             )
                         _oos_sleeve_edges = {k: v for k, v in _oos_sleeve_edges.items() if k in _oos_sleeve_sigs}
                     else:
@@ -3342,6 +3354,7 @@ def _run_awf_simulation(
                             scale_signal_mu=bool(getattr(config, "l2_regime_scale_signal_mu", True)),
                             scale_quality_weight=bool(getattr(config, "l2_regime_scale_quality_weight", True)),
                             side_split_enabled=_side_split_enabled,
+                            tf_by_sleeve=_tf_by_sleeve,
                         )
                         if _fold_idx < len(policy_effect_logs_by_fold) and _policy_applied.n_input > 0:
                             policy_effect_logs_by_fold[_fold_idx].append(_policy_applied)
