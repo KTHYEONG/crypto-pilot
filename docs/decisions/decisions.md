@@ -1,5 +1,10 @@
 # Active Decisions Log (Sliding Window)
 
+## [2026-07-21] [TASK_L2_PORTFOLIO_HANDOFF_GATE_FIX] [ADR_20260721_L2_PORTFOLIO_HANDOFF_GATE_FIX]
+- **Context/Why:** L2 Optuna가 all_folds_blocked로 0/120 trial 고정 차단됨. 코드 감사 결과 evaluate_portfolio_handoff의 5개 구조적 결함 확인: (1) max_candidate_sleeves=32가 선언만 되고 미집행되어 무제한 sleeve 풀이 equal-weight admission test를 희석, (2) admission이 equal-weight로 평가되어 실제 배포(Diagonal Kelly, layer2.md) 목적함수와 불일치, (3) _moving_block_bootstrap_lcb가 min_calibration_windows=3 < block_size=10일 때 매 resample이 동일해 sigma=0으로 퇴화, (4) insufficient_family_diversity가 개별 통과 sleeve까지 fold 전체 blanket-kill(RC-3에서 이미 발견/수정한 것과 동일 패턴 재발), (5) max_sleeves_per_cluster가 선언만 되고 전무 미참조.
+- **Resolution/What:** docs/specs/l2-portfolio-handoff-gate-fix.md 스펙에 따라 portfolio_handoff.py 수정: _rank_and_cap_sleeve_indices 신설(registry quality_weight 기준 top-32 결정적 pre-cap), _kelly_proportional_weights 신설(w_s∝max(mu,0)/sigma_R^2, layer2.md 공식과 동일, 전량 비양수 시 equal-weight fallback)로 admission base weight를 equal-weight에서 교체, _moving_block_bootstrap_lcb는 effective_block_size=min(block_size,max(1,n-1))로 자동 스케일해 퇴화 제거, insufficient_family_diversity는 fold-wide wipe에서 제외하고 [ALGO] 진단 로그로 강등(개별 admitted sleeve 보존), 미사용 max_sleeves_per_cluster 필드 삭제. 신규 rejection_reasons 값 capped_by_candidate_sleeve_limit 추가.
+- **Impact:** /check PASS(Cov 86%, spec compliance, mypy strict, 신규 11개 시나리오 포함). 프로덕션 실측 2회(2026-05-01, 2026-07-21 기준, 120 trial): 게이트 결함은 계측으로 수정 확인(cap 정상 작동 - 05-01: 34풀 중 2개, 07-21: 58풀 중 26개 절삭, Kelly weight로 음수-평균 sleeve는 marginal delta≈0으로 정당 배제, family diversity wipe 미발동). 그러나 두 날짜 모두 all_folds_blocked 불변 - admitted=0/fold, LCB 대부분 음수(07-21 fold 평균 -0.002~-0.006), 이는 게이트 버그가 아니라 L1 신호의 순 엣지 부재(기존 세션들의 Rank IC=0.000, mu<<breakeven 결론과 정합)가 근본 원인임을 재확인. L2 통과의 유일 경로는 L1 알파 재설계.
+
 ## [2026-07-21] [PORTFOLIO_CAUSAL_ROBUST_HANDOFF] [ADR_20260721_PORTFOLIO_CAUSAL_ROBUST_HANDOFF]
 - **Context/Why:** L2 multi-seed production path bypassed the causal handoff and selected no shared candidate; latest run stopped before trial evaluation.
 - **Resolution/What:** Connected deterministic single-candidate path, generated fit/cal causal net sleeve returns, applied fold handoff masks before OOS simulation, and preserved isolated-study compatibility. Latest 120-trial run fail-closed at handoff with all folds blocked.
@@ -69,8 +74,3 @@
 - **Context/Why:** L1 캐시 재사용과 L2 feasibility 감사 수정 이후 실제 120-trial phase L2 결과를 문서화하고 잔여 RSS 병목을 추적
 - **Resolution/What:** 7개 timeframe L1 cache hit을 확인하고 총시간·단계별 시간·RSS·자산증식·위기검증 수치를 docs/results/result.md에 기록; L2 worker peak RSS를 다음 P0 계측 대상으로 지정
 - **Impact:** 총 소요시간 323.20s→217.43s(-32.7%), L1 122.55s→7.84s(-93.6%) 개선. RSS 13,608MiB로 12GiB 예산 1,320MiB 초과하여 worker 메모리 제한 최적화가 필요
-
-## [2026-07-20] [COLD_PATH_RUNTIME_BOTTLENECK_ELIMINATION] [ADR_20260720_COLD_PATH_RUNTIME_BOTTLENECK_ELIMINATION]
-- **Context/Why:** Cold L2 measurements identified bridge alignment, transient cache ownership, snapshot worker memory, and TF lifecycle retention as remaining bottlenecks; contract tests and runtime lifecycle boundaries now need a synchronized ADR record.
-- **Resolution/What:** Recorded the cold-path optimization contract, added exact scenario coverage for causal statistics, bulk alignment, adaptive snapshot execution, TF resource release, and signal/timeframe-independent runtime planning; synchronized the implementation and regression-test references.
-- **Impact:** Preserves signal/timeframe-agnostic behavior while making optimization changes auditable. Latest check passes with 52% coverage; full L1/L2 timing remains gated by the current L0 early termination in the production benchmark.
