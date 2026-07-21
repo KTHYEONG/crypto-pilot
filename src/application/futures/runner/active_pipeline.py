@@ -2447,9 +2447,11 @@ def _run_single_seed_outcome(
         l3_passed = l3_final is not None and l3_final.gate_passed
         _passed = l2_passed and l3_passed
     _br = "" if _passed else ("l2_blocked" if not l2_passed else "l3_blocked")
+    _window_covered = l2_final.window_bottleneck_covered if l2_final is not None else None
     _logger.info(
-        "[MULTI-SEED] seed=%d passed=%s l2_passed=%s l3_passed=%s",
+        "[MULTI-SEED] seed=%d passed=%s l2_passed=%s l3_passed=%s window_covered=%s",
         seed, _passed, l2_passed, l3_final is not None and l3_final.gate_passed if not l2_passed else "n/a",
+        _window_covered,
     )
     return SeedRobustnessOutcome(
         seed=seed,
@@ -2533,9 +2535,12 @@ def _run_multi_seed_robustness_consensus(
     _required = math.ceil(_k * 0.5)
     _pass_count = sum(1 for o in outcomes if o.passed)
     _admitted = _pass_count >= _required
+    _window_covered_aggregate = any(
+        o.l2_final is not None and o.l2_final.window_bottleneck_covered for o in outcomes
+    ) if outcomes else None
     _logger.info(
-        "[MULTI-SEED] pass_count=%d/%d required=%d admitted=%s",
-        _pass_count, _k, _required, _admitted,
+        "[MULTI-SEED] pass_count=%d/%d required=%d admitted=%s window_covered=%s",
+        _pass_count, _k, _required, _admitted, _window_covered_aggregate,
     )
     if not _admitted:
         return MultiSeedConsensusResult(
