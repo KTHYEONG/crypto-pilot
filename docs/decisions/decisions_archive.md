@@ -2,6 +2,11 @@
 
 This file holds historical architecture decision records (ADRs) that have been pruned from the active window.
 
+## [2026-07-20] [COLD_PATH_RUNTIME_BOTTLENECK_ELIMINATION] [ADR_20260720_COLD_PATH_RUNTIME_BOTTLENECK_ELIMINATION]
+- **Context/Why:** Cold L2 measurements identified bridge alignment, transient cache ownership, snapshot worker memory, and TF lifecycle retention as remaining bottlenecks; contract tests and runtime lifecycle boundaries now need a synchronized ADR record.
+- **Resolution/What:** Recorded the cold-path optimization contract, added exact scenario coverage for causal statistics, bulk alignment, adaptive snapshot execution, TF resource release, and signal/timeframe-independent runtime planning; synchronized the implementation and regression-test references.
+- **Impact:** Preserves signal/timeframe-agnostic behavior while making optimization changes auditable. Latest check passes with 52% coverage; full L1/L2 timing remains gated by the current L0 early termination in the production benchmark.
+
 ## [2026-07-20] [TASK_SHAPE_ADAPTIVE_RUNTIME_OPT] [ADR_20260720_SHAPE_ADAPTIVE_RUNTIME_OPT]
 - **Context/Why:** L2 execution measurements showed L1 cache/expanding statistics and bridge alignment dominating wall time, while observed worker memory spikes exceeded the 12GB VmHWM budget and dense PSS probing distorted L2 timing.
 - **Resolution/What:** Added causal expanding statistics, reused risk overlay, released aligned feature cache by TF, added bulk alignment/probe observability coverage, and documented pilot/PSS-driven adaptive execution contracts and performance gates without signal/timeframe-specific knobs.
