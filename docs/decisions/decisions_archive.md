@@ -2,6 +2,11 @@
 
 This file holds historical architecture decision records (ADRs) that have been pruned from the active window.
 
+## [2026-07-20] [TASK_SHAPE_ADAPTIVE_RUNTIME_OPT] [ADR_20260720_SHAPE_ADAPTIVE_RUNTIME_OPT]
+- **Context/Why:** L2 execution measurements showed L1 cache/expanding statistics and bridge alignment dominating wall time, while observed worker memory spikes exceeded the 12GB VmHWM budget and dense PSS probing distorted L2 timing.
+- **Resolution/What:** Added causal expanding statistics, reused risk overlay, released aligned feature cache by TF, added bulk alignment/probe observability coverage, and documented pilot/PSS-driven adaptive execution contracts and performance gates without signal/timeframe-specific knobs.
+- **Impact:** Hot-cache strategy wall time fell from 302.54s to 170.14s and VmHWM from 12.26GB to 11.21GB; bridge fell about 4%. Cold L1 recomputation remains about 143.90s with 12.15GB VmHWM, so further implementation is required before claiming cold-path optimization success.
+
 ## [2026-07-20] [TASK_L2_RUNTIME_BOTTLENECK_DEBUG_OBSERVABILITY] [ADR_20260720_L2_RUNTIME_BOTTLENECK_DEBUG_OBSERVABILITY]
 - **Context/Why:** docs/results/result.md의 L2 기준선은 top-level 시간과 부모 RSS만 보여 12,414MB 순간 peak의 자식 PID/단계 소유자, L1 feature-cache 내부 비용, Optuna queue/worker 비용, champion replay 후보별 비용을 귀속하지 못한다.
 - **Resolution/What:** DEBUG 전용 L2RuntimeProbe를 도입해 부모 process tree의 RSS/PSS를 표본화하고 nested span·cache·Optuna batch/trial·AWF·champion replay를 구조화된 SYS/EVAL 레코드로 기록한다. probe 실패는 최적화 실행을 변경하지 않는 degraded 경로로 억제하며, 동일 seed/캐시 조건에서 최적화 대상 선정 기준을 고정한다.

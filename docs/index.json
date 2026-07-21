@@ -496,5 +496,9 @@
   "src/domain/futures/strategy/causal_statistics.py": {
     "architecture": "docs/specs/shape_adaptive_runtime_optimization.md",
     "testing": "tests/unit/domain/futures/strategy/test_shape_adaptive_optimization.py"
+  },
+  "src/domain/futures/optimization/robust_compounding.py": {
+    "architecture": "docs/results/result.md",
+    "testing": "tests/unit/domain/futures/strategy/tiered_workflow/test_portfolio_handoff.py"
   }
 }
