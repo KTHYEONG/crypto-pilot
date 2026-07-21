@@ -57,7 +57,7 @@ Generate a JSON contract alongside the spec markdown for automated compliance ch
     {"id": 4, "scope": "integration", "name": "test_parent_module_wiring"}
   ],
   "wiring": [
-    {"file": "src/application/parent.py", "anchor": "ExactAnchorSymbol"}
+    {"file": "src/application/parent.py", "anchor": "ExactAnchorSymbol", "import_symbol": "ExactName"}
   ]
 }
 ```
