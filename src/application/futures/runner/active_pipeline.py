@@ -1677,6 +1677,12 @@ def _run_tiered_l2_study(
             str(getattr(cfg, "l2_regime_require_fit_n_for_downweight", False)),
         ).lower()
         in ("1", "true", "yes"),
+        side_split_enabled=bool(
+            getattr(cfg, "l2_regime_bucket_side_split_enabled", Layer2AllocationConfig().l2_regime_bucket_side_split_enabled)
+        ),
+        scoped_fold_override_enabled=bool(
+            getattr(cfg, "l2_regime_scoped_fold_override_enabled", Layer2AllocationConfig().l2_regime_scoped_fold_override_enabled)
+        ),
     )
     _risk_severity_code_1d = compute_risk_severity_code(
         _market_regime_ctx.vol_scale_1d,
