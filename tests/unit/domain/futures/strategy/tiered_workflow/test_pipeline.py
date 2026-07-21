@@ -31,6 +31,7 @@ from src.domain.futures.strategy.tiered_workflow.pipeline import (
     _resolve_layer1_deployment_passed,
     _resolve_selected_l1_tf,
     _select_representative_l1_registry,
+    run_sealed_candidate_validation,
     run_per_tf_l1,
 )
 
@@ -1112,3 +1113,76 @@ def test_build_rule_based_stress_batch_end_to_end_event_count(
     # Actually signed_score_2d is all 1.0, valid_mask is all True, so all bars are active
     # 3 matched pairs * 2 bars = 6 events
     assert len(batch.events) == 6
+
+
+def test_luna_calibrates_and_ftx_remains_sealed_until_freeze() -> None:
+    calls: list[str] = []
+
+    def temporal(_: object) -> SimpleNamespace:
+        calls.append("l3")
+        return SimpleNamespace(gate_passed=True, blocker_reason="")
+
+    def ftx(_: object) -> SimpleNamespace:
+        calls.append("ftx")
+        return SimpleNamespace(passed=True, mdd=0.1, cagr=0.02, sufficient_coverage=True)
+
+    result = run_sealed_candidate_validation(
+        champion=object(), temporal_replay=temporal, ftx_replay=ftx,
+    )
+    assert result.passed
+    assert calls == ["l3", "ftx"]
+
+
+def test_sealed_failure_blocks_without_reselection() -> None:
+    calls: list[str] = []
+
+    def temporal(_: object) -> SimpleNamespace:
+        calls.append("l3")
+        return SimpleNamespace(gate_passed=False, blocker_reason="negative_cagr")
+
+    def ftx(_: object) -> SimpleNamespace:
+        calls.append("ftx")
+        return SimpleNamespace(passed=True, mdd=0.1, cagr=0.02, sufficient_coverage=True)
+
+    result = run_sealed_candidate_validation(
+        champion=object(), temporal_replay=temporal, ftx_replay=ftx,
+    )
+    assert not result.passed
+    assert result.blocker_reason == "l3_blocked:negative_cagr"
+    assert calls == ["l3"]
+
+
+def test_sealed_ftx_failure_blocks_after_temporal_pass() -> None:
+    result = run_sealed_candidate_validation(
+        champion=object(),
+        temporal_replay=lambda _: SimpleNamespace(gate_passed=True, blocker_reason=""),
+        ftx_replay=lambda _: SimpleNamespace(passed=False, mdd=0.30, cagr=-0.10, sufficient_coverage=True),
+    )
+    assert not result.passed
+    assert result.blocker_reason == "sealed_crisis_blocked"
+
+
+def test_sealed_ftx_exception_blocks() -> None:
+    def raise_ftx(_: object) -> object:
+        raise RuntimeError("missing sealed data")
+
+    result = run_sealed_candidate_validation(
+        champion=object(),
+        temporal_replay=lambda _: SimpleNamespace(gate_passed=True, blocker_reason=""),
+        ftx_replay=raise_ftx,
+    )
+    assert not result.passed
+    assert result.blocker_reason == "sealed_ftx_failed:missing sealed data"
+
+
+def test_sealed_l3_exception_blocks() -> None:
+    def raise_l3(_: object) -> object:
+        raise RuntimeError("temporal replay error")
+
+    result = run_sealed_candidate_validation(
+        champion=object(),
+        temporal_replay=raise_l3,
+        ftx_replay=lambda _: SimpleNamespace(passed=True, mdd=0.1, cagr=0.02, sufficient_coverage=True),
+    )
+    assert not result.passed
+    assert result.blocker_reason == "l3_execution_failed:temporal replay error"
