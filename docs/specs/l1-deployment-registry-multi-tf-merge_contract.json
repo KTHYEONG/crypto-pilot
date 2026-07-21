@@ -1,0 +1,42 @@
+{
+  "contracts": [
+    {
+      "kind": "function",
+      "name": "_merge_deployment_registries_across_tf",
+      "file_hint": "src/domain/futures/strategy/tiered_workflow/pipeline.py"
+    },
+    {
+      "kind": "function",
+      "name": "_aggregate_per_tf_l1",
+      "file_hint": "src/domain/futures/strategy/tiered_workflow/pipeline.py"
+    }
+  ],
+  "scenarios": [
+    {
+      "id": 1,
+      "scope": "unit",
+      "name": "test_merge_deployment_registries_across_tf_unions_distinct_symbols"
+    },
+    {
+      "id": 2,
+      "scope": "unit",
+      "name": "test_merge_deployment_registries_across_tf_keeps_higher_quality_weight_on_conflict"
+    },
+    {
+      "id": 3,
+      "scope": "unit",
+      "name": "test_merge_deployment_registries_across_tf_returns_none_when_no_tf_deployable"
+    },
+    {
+      "id": 4,
+      "scope": "integration",
+      "name": "test_aggregate_per_tf_l1_uses_merged_registry_not_single_tf"
+    }
+  ],
+  "wiring": [
+    {
+      "file": "src/domain/futures/strategy/tiered_workflow/pipeline.py",
+      "anchor": "_aggregate_per_tf_l1"
+    }
+  ]
+}
