@@ -45,11 +45,24 @@ To ensure low-reasoning models can build and integrate the code mechanically:
 
 ### 4. Machine-Readable Compliance Contract (`docs/specs/[feature]_contract.json`)
 *(Mandatory for Tier 2 and Tier 3)*
-Generate a JSON contract alongside the spec markdown for automated compliance checking in the check phase:
+Generate a semantic JSON contract alongside the spec markdown to provide strict, deterministic constraints for Doer implementation and L2 verification:
 ```json
 {
   "contracts": [
-    {"kind": "class|function", "name": "ExactName", "file_hint": "src/domain/x.py"}
+    {
+      "kind": "class|function",
+      "name": "ExactName",
+      "file_hint": "src/domain/x.py",
+      "signatures": "def ExactName(param: type) -> return_type",
+      "semantic_rules": [
+        "Rule 1: business logic constraint (e.g. rounded to 8 decimals)",
+        "Rule 2: timezone isolation or look-ahead check rules"
+      ],
+      "assertions": [
+        {"input": {"param": "valid_value"}, "output": "expected_result"},
+        {"input": {"param": "invalid_value"}, "exception": "ValueError"}
+      ]
+    }
   ],
   "scenarios": [
     {"id": 1, "scope": "unit", "name": "test_exact_name_happy_path"},
