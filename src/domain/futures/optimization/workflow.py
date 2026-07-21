@@ -17,6 +17,7 @@ import optuna
 from numpy.typing import NDArray
 from optuna.trial import FrozenTrial, Trial, TrialState
 
+from src.domain.futures.optimization.l2_robust_search import suggest_l2_robust_params  # noqa: F401
 from src.domain.futures.optimization.ml_context import MLPhaseDContext
 from src.domain.futures.optimization.objectives import objective_ml_phase_d
 from src.domain.futures.optimization.observability.trial_observability import set_trial_event_attrs
@@ -27,11 +28,43 @@ from src.domain.futures.strategy.tiered_workflow.deployable_score import (
 from src.domain.futures.strategy.tiered_workflow.diagnostics import (
     build_layer_universe_audit,
 )
+from src.domain.futures.strategy.tiered_workflow.risk_deployment import project_leverage_to_crisis_budget  # noqa: F401
 
 if TYPE_CHECKING:
     from src.domain.futures.strategy.tiered_workflow.dataclasses import L2SimulationCache
 
 _logger = logging.getLogger(__name__)
+
+
+def compute_trial_crisis_unit_returns(
+    *,
+    crisis_replay_ctx: Any,
+    config: Any,
+    caps: Any,
+    tf: str,
+) -> NDArray[np.float64]:
+    """Run the supplied trial configuration once on calibration crisis data."""
+    if crisis_replay_ctx is None:
+        raise ValueError("crisis_calibration_unavailable")
+    try:
+        from src.domain.futures.strategy.tiered_workflow.awf_sim import _run_awf_simulation
+
+        sim = _run_awf_simulation(
+            cache=crisis_replay_ctx.cache,
+            signal_batch=crisis_replay_ctx.signal_batch,
+            aligned=crisis_replay_ctx.aligned,
+            awf_folds=crisis_replay_ctx.awf_folds,
+            config=config,
+            caps=caps,
+            tf=tf,
+            sim_origin="crisis_calibration",
+        )
+        values = np.asarray(sim.rets_hybrid, dtype=np.float64)
+    except Exception as exc:
+        raise ValueError("crisis_calibration_unavailable") from exc
+    if values.size < 2 or not np.all(np.isfinite(values)):
+        raise ValueError("crisis_calibration_unavailable")
+    return np.ascontiguousarray(values, dtype=np.float64)
 
 # Optuna Experimental Warning suppression at code level
 warnings.filterwarnings("ignore", category=optuna.exceptions.ExperimentalWarning)
@@ -2039,6 +2072,7 @@ def evaluate_l2_trial(
                     _worst_fold_rets = _wf
             _l_star, _l_binding, _l_cross_mdd = calibrate_deployment_leverage(
                 fit_rets=_calib_rets,
+                l_floor=0.0,
                 oos_rets=np.asarray(rets_hybrid, dtype=np.float64) if _calib_src == "fit_leg" else None,
                 mdd_cap=float(config.l2_max_mdd_abs),
                 cvar_cap=float(config.l2_max_cvar_95),

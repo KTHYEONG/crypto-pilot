@@ -81,6 +81,7 @@ from src.application.futures.optimization.universe_service import (
 from src.application.futures.runner.models import RunnerResult
 from src.core.settings import BASE_DIR
 from src.core.utils.utils import PERF, setup_logger
+from src.domain.futures.optimization.l2_robust_search import build_l2_feasibility_anchors  # noqa: F401
 from src.domain.futures.optimization.observability.l2_runtime_probe import L2RuntimeProbe
 from src.domain.futures.optimization.observability.run_tracker import (
     L2ChampionSnapshot,
@@ -2400,6 +2401,62 @@ class MultiSeedConsensusResult:
     pass_count: int
     required_pass_count: int
     blocker_reason: str
+
+
+@dataclass(frozen=True)
+class RobustSearchOutcome:
+    l2_study_result: Any
+    l2_final: Layer2Result | None
+    l3_final: Layer3Result | None
+    passed: bool
+    blocker_reason: str
+
+
+def _run_robust_l2_l3_outcome(
+    *,
+    signal_batch: Any,
+    aligned: Any,
+    cfg: Any,
+    window: Any,
+    caps: Any,
+    tf: str,
+    n_trials: int,
+    target_phase: str,
+    l1_res: Layer1Result,
+    labeled_events: pd.DataFrame,
+    per_tf_data_maps: dict[str, Any] | None,
+    labeled_events_by_tf: dict[str, pd.DataFrame] | None,
+    crisis_replay_ctx: Any,
+    l2_sim_cache: Any,
+    probe_manifest: list[dict[str, Any]] | None,
+    l3_regime_code_1d: NDArray[np.int8] | None = None,
+) -> RobustSearchOutcome:
+    """Run one deterministic study and replay its single champion."""
+    l2_study_result = _run_tiered_l2_study(
+        signal_batch=signal_batch, aligned=aligned, cfg=cfg, window=window,
+        caps=caps, tf=tf, n_trials=n_trials, seed=0,
+        crisis_rets=None, crisis_replay_ctx=crisis_replay_ctx,
+        l2_sim_cache=l2_sim_cache,
+    )
+    blocker = getattr(l2_study_result, "blocker_reason", "")
+    if blocker:
+        return RobustSearchOutcome(l2_study_result, None, None, False, f"no_feasible_trials:{blocker}")
+    from src.domain.futures.strategy.tiered_workflow.pipeline import run_tiered_pipeline
+    _, l2_final, l3_final = run_tiered_pipeline(
+        labeled_events=labeled_events, aligned=aligned,
+        per_tf_data_maps=per_tf_data_maps, labeled_events_by_tf=labeled_events_by_tf,
+        cfg=cfg, window=window, l1_params={},
+        l2_params=dict(getattr(l2_study_result, "best_params", {})), caps=caps,
+        l1_tfs=tuple(getattr(cfg, "l1_tfs", ("4h",))), target_phase=target_phase,
+        l1_result_override=l1_res, verbose=False,
+        l2_sim_cache=getattr(l2_study_result, "sim_cache", None),
+        l2_signal_batch=signal_batch, probe_manifest=probe_manifest,
+        regime_code_1d=l3_regime_code_1d,
+    )
+    l2_passed = l2_final is not None and l2_final.gate_passed
+    l3_passed = target_phase == "l2" or (l3_final is not None and l3_final.gate_passed)
+    passed = bool(l2_passed and l3_passed)
+    return RobustSearchOutcome(l2_study_result, l2_final, l3_final, passed, "" if passed else "l2_or_l3_blocked")
 
 
 def _run_single_seed_outcome(
