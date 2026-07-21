@@ -43,6 +43,7 @@ from src.domain.futures.strategy.tiered_workflow.dataclasses import (
     RegimePolicyEffectSummary,
 )
 from src.domain.futures.strategy.tiered_workflow.entry_cooldown import apply_entry_cooldown
+from src.domain.futures.strategy.tiered_workflow.portfolio_handoff import apply_portfolio_handoff_to_cache  # noqa: F401
 from src.domain.futures.strategy.tiered_workflow.regime_debug import (
     replace_selected_regime_debug_diagnostics,
 )
@@ -1942,6 +1943,39 @@ def build_l2_simulation_cache(
     )
 
 
+def build_causal_net_sleeve_returns(
+    *,
+    cache: L2SimulationCache,
+    aligned: AlignedMarketData,
+    start: int,
+    end: int,
+) -> NDArray[np.float32]:
+    """Build causal net unit sleeve returns for a fit/calibration interval.
+
+    The return at bar ``t`` uses only the signal already active at ``t`` and
+    the following bar price move.  The execution hurdle is amortized across
+    the known holding horizon, so this matrix cannot use OOS outcomes to
+    decide the handoff mask.
+    """
+    n_bars, n_sleeves = cache.signal_mask_2d.shape
+    lo = max(0, int(start))
+    hi = min(max(lo, int(end)), max(n_bars - 1, 0))
+    if hi <= lo or n_sleeves == 0:
+        return np.zeros((0, n_sleeves), dtype=np.float32)
+
+    close = np.asarray(aligned.close_2d, dtype=np.float64)
+    prices_now = close[lo:hi, cache.sleeve_to_sym]
+    prices_next = close[lo + 1 : hi + 1, cache.sleeve_to_sym]
+    simple_returns = (prices_next - prices_now) / np.maximum(np.abs(prices_now), 1e-12)
+    active = cache.signal_mask_2d[lo:hi]
+    sides = cache.side_2d[lo:hi]
+    holding = np.maximum(cache.holding_bars_2d[lo:hi], 1.0)
+    hurdle = np.asarray(cache.hurdle_2d[lo:hi, cache.sleeve_to_sym], dtype=np.float64) / 1e4
+    net = np.where(active, sides * simple_returns - hurdle / holding, 0.0)
+    net = np.nan_to_num(net, nan=0.0, posinf=0.0, neginf=0.0)
+    return np.ascontiguousarray(net, dtype=np.float32)
+
+
 def _build_sleeve_tf_lookup(
     cache: L2SimulationCache,
 ) -> dict[tuple[str, str], str]:
@@ -2082,6 +2116,7 @@ def _resolve_sleeve_signals_at_bar(
     hurdle_row: NDArray[np.float64],
     vol_row: NDArray[np.float64],
     fixed_cost_safety_mult: float,
+    handoff_sleeve_mask: NDArray[np.bool_] | None = None,
 ) -> tuple[
     dict[tuple[str, str], SymbolSignal],
     dict[tuple[str, str], tuple[float, float]],
@@ -2114,6 +2149,10 @@ def _resolve_sleeve_signals_at_bar(
         return {}, {}, 0
 
     sleeve_mask_row = cache.signal_mask_2d[t]  # [S]
+    if handoff_sleeve_mask is not None:
+        if handoff_sleeve_mask.shape != sleeve_mask_row.shape:
+            raise ValueError("handoff sleeve mask shape mismatch")
+        sleeve_mask_row = sleeve_mask_row & handoff_sleeve_mask
     active_sleeves = np.where(sleeve_mask_row)[0]
     if len(active_sleeves) == 0:
         return {}, {}, 0
@@ -3262,6 +3301,11 @@ def _run_awf_simulation(
                 hurdle_row=hurdle,
                 vol_row=vol_matrix[t],
                 fixed_cost_safety_mult=fixed_cost_safety_mult,
+                handoff_sleeve_mask=(
+                    cache.handoff_sleeve_mask_by_fold[_fold_idx]
+                    if _fold_idx < len(cache.handoff_sleeve_mask_by_fold)
+                    else None
+                ),
             )
             # C4: TF 게이트 필터 — fit-leg에서 edge>min_edge인 TF sleeve만 유지
             if _tf_inclusion_enabled:
