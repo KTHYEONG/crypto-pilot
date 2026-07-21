@@ -63,7 +63,7 @@ def _make_trial(
     trade_count: int = 100,
     constraints: tuple[float, ...] | None = None,
 ) -> optuna.trial.FrozenTrial:
-    cv = constraints or (-1.0,) * 13
+    cv = constraints or (-1.0,) * 14
     return create_trial(
         params={"K_RANK": 1.0 + number, "l2_replay_max_fallbacks": 24.0},
         distributions={"K_RANK": FloatDistribution(1, 10), "l2_replay_max_fallbacks": FloatDistribution(1, 50)},
@@ -96,7 +96,7 @@ def _make_evaluation(
     constraint_values: tuple[float, ...] | None = None,
     returns_hybrid: tuple[float, ...] = (0.001,),
 ) -> Any:
-    cv = constraint_values or (-1.0,) * 13
+    cv = constraint_values or (-1.0,) * 14
     return SimpleNamespace(
         cagr_hybrid=cagr,
         cagr_baseline=0.05,
@@ -475,7 +475,7 @@ def test_active_pipeline_stops_before_final_run_when_replay_selection_is_blocked
 
     assert isinstance(result, RunnerResult)
     assert result.exit_code == 1
-    assert result.reason == "layer2_selection_blocked:crisis_cagr"
+    assert result.reason == "seed_consensus_blocked:0/3"
     assert compute_crisis_rets.call_args.kwargs["crisis_replay_ctx"] is crisis_replay_ctx
     # The shared pipeline function was called once for L1; no second L2 call occurs.
     assert final_run.call_count == 1
