@@ -31,7 +31,7 @@ Optimize for **low-cost models (Doer)** by enforcing strict mechanical execution
   - Run pytest locally until the tests pass.
 - **Step 4: L1.5 Gate & Auto-Chain to Check**
   - Once local tests pass, run: `uv run ruff check [modified_files]` to ensure lint compliance.
-  - **[Auto-Chain Execution]**: Immediately proceed to call the **Check** tool:
+  - **[Auto-Chain Execution]**: Immediately proceed to call the **Check** tool. **Note: `[modified_files]` must include both the new source/test files and the modified parent wiring file(s).**
     `uv run python scripts/lean_check.py --files [modified_files] --spec docs/specs/[feature]_contract.json --skip-lint --skip-mypy`
   - **Do NOT stop or ask for user permission between Implement and Check.** 
 
