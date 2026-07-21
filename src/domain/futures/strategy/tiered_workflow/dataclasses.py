@@ -271,6 +271,17 @@ class Layer2FoldDiagnostics:
 
 
 @dataclass(slots=True, frozen=True)
+class Layer2RecencyHoldoutDiagnostics:
+    """L2 study-window 최근 N일 tail slice의 objective-미참여 배포 성과."""
+
+    applicable: bool
+    holdout_bars: int
+    recency_holdout_cagr: float
+    recency_holdout_sharpe: float
+    recency_holdout_mdd: float
+
+
+@dataclass(slots=True, frozen=True)
 class Layer2TrialEvaluation:
     """Layer2 단일 trial 성장/제약 평가 결과."""
 
@@ -333,6 +344,10 @@ class Layer2TrialEvaluation:
     crisis_constraints_measured: bool = False
     boosted_returns_hybrid: tuple[float, ...] = ()
     deployed_returns_hybrid: tuple[float, ...] = ()
+    recency_holdout_cagr: float | None = None
+    recency_holdout_applicable: bool = False
+    window_bottleneck_covered: bool = True
+    window_bottleneck_detail: str = ""
 
 
 @dataclass(slots=True, frozen=True)
@@ -388,6 +403,8 @@ class Layer2GateEvaluation:
     promotion_blocker: str
     promotion_constraint_values: tuple[float, ...]
     constraint_vector: Any | None = None  # Layer2ConstraintVector (lazy import)
+    window_bottleneck_covered: bool = True
+    window_bottleneck_detail: str = ""
 
 
 @dataclass(slots=True, frozen=True)
@@ -513,6 +530,10 @@ class Layer2Result:
     crisis_window_count: int = 0
     crisis_usable_window_count: int = 0
     validation_parity_report: ValidationParityReport | None = None
+    recency_holdout_cagr: float | None = None
+    recency_holdout_applicable: bool = False
+    window_bottleneck_covered: bool = True
+    window_bottleneck_detail: str = ""
 
 
 @dataclass(slots=True, frozen=True)
@@ -592,6 +613,9 @@ class Layer2AllocationConfig:
     l2_max_exchange_leverage: float | None = 10.0
     l2_require_recent_fold_pass: bool = True
     l2_min_recent_fold_sharpe: float = 0.0
+    l2_require_recency_holdout_pass: bool = True
+    l2_min_recency_holdout_cagr: float = -0.05
+    l2_recency_holdout_days: float = 30.0
     l2_is_expansion_bars: int = 0
     l2_sleeve_combine_method: str = "precision_weighted"
     l2_sleeve_conviction_cap_mult: float = 1.5
@@ -1186,6 +1210,11 @@ class Layer2AllocationConfig:
             l2_min_recent_fold_sharpe=cls._as_float(
                 params.get("l2_min_recent_fold_sharpe", 0.0),
                 0.0,
+            ),
+            l2_require_recency_holdout_pass=bool(params.get("l2_require_recency_holdout_pass", True)),
+            l2_min_recency_holdout_cagr=cls._as_float(
+                params.get("l2_min_recency_holdout_cagr", -0.05),
+                -0.05,
             ),
             l2_is_expansion_bars=cls._as_int(params.get("l2_is_expansion_bars", 0), 0),
             l2_sleeve_combine_method=combine_method,
