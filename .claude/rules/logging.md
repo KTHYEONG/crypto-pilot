@@ -21,7 +21,13 @@ This document defines the strict logging rules and tag-based format requirements
 
 ---
 
-## 2. Standard Logging Levels & Outputs
+## 1.5 Execution Log File Path & Directory Directives
+
+- **Strict Path Scoping**: All execution logs, test outputs, and diagnostic logs generated during code execution MUST be written to the `logs/` directory in the **current project workspace** (e.g., `logs/*.log` or `logs/*.jsonl`).
+- **Prohibition of `/tmp`**: **Writing log files to `/tmp/` is strictly prohibited.**
+- **Log Directory Management**: Ensure the `logs/` directory is automatically created if it does not exist before writing log files. Clean up temporary execution log files after diagnosis unless persistent storage is required.
+
+---
 
 ### 2.1 INFO (Terminal-Clean Output)
 - **Purpose**: Minimal progress reporting for humans.
