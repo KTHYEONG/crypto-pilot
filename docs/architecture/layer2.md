@@ -38,6 +38,7 @@ $$c_s = \min\left(\sum c_i, \kappa \cdot \max c_i\right) \quad (\kappa = 1.5)$$
 $$e_{\text{raw}} = \text{mean}\left(\text{side}_j \cdot \text{fwd\_ret}(sym_j) \cdot 10000 - \text{cost\_bps}\right)$$
 $$e = (1-\lambda) \cdot e_{\text{raw}} + \lambda \cdot e_{\text{family}} \quad (\lambda = 0.3)$$
 - Gate active only if: $e > \text{l2\_bucket\_edge\_floor\_bps}$
+- Bucket key resolution (regime, family, tf[, side]) uses the sleeve's `native_tf` as the single source of truth for both bucket construction and lookup. Exact-key misses (e.g. cross-context replay where a family lacks a cell at the queried tf) fall back to a family-level wildcard cell representing the tf with the largest calibration sample.
 
 ### Diagonal Kelly Sizing
 $$w_s \propto f_k \cdot \frac{\mu_s}{\sigma_R^2}$$
