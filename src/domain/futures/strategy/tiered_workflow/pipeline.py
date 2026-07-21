@@ -130,6 +130,7 @@ from src.domain.futures.strategy.tiered_workflow.signal_selection import (
     evaluate_layer1_readiness,
     evaluate_outer_signal_opportunities,
     fit_layer1_inference_artifact,
+    log_family_regime_funnel_diagnostics,
     predict_layer1_signals,
     predict_layer1_signals_multi_tf,
     prefit_layer1_model,
@@ -1606,6 +1607,14 @@ def run_l1_nested_swf(
             fold_out=outer_out,
         )
         outer_event_frames.append(outer_events)
+        if os.environ.get("L2_FUNNEL_ATTR") == "1":
+            log_family_regime_funnel_diagnostics(
+                realized_event_results=outer_events,
+                cfg=cfg,
+                fold_id=outer_idx,
+                seed=seed + outer_idx,
+                timeframe=tf,
+            )
         _t_batch = time.perf_counter()
         prediction_batch = _candidate_output_to_signal_batch(
             model_output=outer_out.model_output,

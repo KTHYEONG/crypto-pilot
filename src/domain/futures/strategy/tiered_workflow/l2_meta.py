@@ -5,7 +5,7 @@ import re as _re
 import time
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
-from typing import TYPE_CHECKING, Literal, cast
+from typing import TYPE_CHECKING, Any, Literal, cast
 
 import numpy as np
 from numpy.typing import NDArray
@@ -50,6 +50,7 @@ def _build_bucket_reliability(
     regime: int,
     family: str,
     tf: str,
+    side: int = 0,
     fit_edge_bps: float,
     cal_edge_bps: float,
     n_fit: int,
@@ -63,6 +64,7 @@ def _build_bucket_reliability(
         regime=regime,
         family=family,
         tf=tf,
+        side=side,
         fit_edge_bps=fit_edge_bps,
         cal_edge_bps=cal_edge_bps,
         n_fit=n_fit,
@@ -549,8 +551,14 @@ def compute_bucket_realized_edge_stats(
     cost_bps: float = 6.0,
     min_n: int = 30,
     shrinkage: float = 0.3,
-) -> dict[tuple[int, str, str], _RegimeEdgeStat]:
-    """Compute realized edge statistics by `(regime, family, tf)` on a closed window."""
+    side_split_enabled: bool = False,
+) -> dict[tuple[Any, ...], _RegimeEdgeStat]:
+    """Compute realized edge statistics by `(regime, family, tf)` on a closed window.
+
+    [ADR_20260721_ALPHA_FUNNEL_REGIME_COVERAGE] side_split_enabled=True widens the
+    bucket key to `(regime, family, tf, side)` where side=sign(cache.side_2d[t,j]).
+    Disabled (default) preserves byte-identical legacy 3-key behavior.
+    """
     n_sleeve = cache.signal_mask_2d.shape[1]
     if n_sleeve == 0 or start >= end:
         return {}
@@ -562,8 +570,8 @@ def compute_bucket_realized_edge_stats(
 
     sleeve_keys = cache.sleeve_keys
 
-    bucket_sum: dict[tuple[int, str, str], float] = {}
-    bucket_cnt: dict[tuple[int, str, str], int] = {}
+    bucket_sum: dict[tuple[Any, ...], float] = {}
+    bucket_cnt: dict[tuple[Any, ...], int] = {}
 
     for t in range(start, end):
         if t + 1 >= t_max:
@@ -585,7 +593,11 @@ def compute_bucket_realized_edge_stats(
                 window_end=end,
                 cost_bps=cost_bps,
             )
-            key = (regime, family, tf)
+            if side_split_enabled:
+                side_val = int(np.sign(cache.side_2d[t, sj]))
+                key: tuple[Any, ...] = (regime, family, tf, side_val)
+            else:
+                key = (regime, family, tf)
             bucket_sum[key] = bucket_sum.get(key, 0.0) + edge
             bucket_cnt[key] = bucket_cnt.get(key, 0) + 1
 
@@ -593,12 +605,13 @@ def compute_bucket_realized_edge_stats(
         return {}
 
     family_raw_edges: dict[str, list[float]] = {}
-    for (regime, family, tf), total in bucket_sum.items():
-        count = bucket_cnt[(regime, family, tf)]
+    for key, total in bucket_sum.items():
+        family = key[1]
+        count = bucket_cnt[key]
         family_raw_edges.setdefault(family, []).append(total / count)
 
     family_prior = {family: float(np.mean(edges)) for family, edges in family_raw_edges.items()}
-    result: dict[tuple[int, str, str], _RegimeEdgeStat] = {}
+    result: dict[tuple[Any, ...], _RegimeEdgeStat] = {}
     for key, total in bucket_sum.items():
         count = bucket_cnt[key]
         raw_edge = total / count
@@ -654,10 +667,12 @@ def compute_bucket_realized_edges(
     cost_bps: float = 6.0,
     min_n: int = 30,
     shrinkage: float = 0.3,
-) -> dict[tuple[int, str, str], float]:
+    side_split_enabled: bool = False,
+) -> dict[tuple[Any, ...], float]:
     """fit-leg [fit_start, fit_end) 구간에서 버킷별 실현 순엣지 계산.
 
-    버킷 = (regime_code, family, TF) triplet.
+    버킷 = (regime_code, family, TF) triplet. side_split_enabled=True 시
+    (regime_code, family, TF, side) 4-key로 확장.
     실현엣지 = side_j * fwd_ret(sym_j) * 10000 - cost_bps, bar 단위 평균.
     min_n 미달 버킷은 family prior로 shrinkage 보정.
 
@@ -670,9 +685,10 @@ def compute_bucket_realized_edges(
         cost_bps: 거래비용 (bps).
         min_n: 최소 event 수. 미달 시 shrinkage.
         shrinkage: raw_edge -> family prior 축소율.
+        side_split_enabled: True면 4-key(side 포함), False(기본)면 legacy 3-key.
 
     Returns:
-        {(regime, family, TF): edge_bps}. 미관측 버킷은 포함 안 됨.
+        {(regime, family, TF)[, side]: edge_bps}. 미관측 버킷은 포함 안 됨.
     """
     stats = compute_bucket_realized_edge_stats(
         cache=cache,
@@ -683,6 +699,7 @@ def compute_bucket_realized_edges(
         cost_bps=cost_bps,
         min_n=min_n,
         shrinkage=shrinkage,
+        side_split_enabled=side_split_enabled,
     )
     return {key: stat.edge_bps for key, stat in stats.items()}
 
@@ -830,8 +847,13 @@ def build_regime_policy_by_fold(
     pooled_is_passthrough: bool = True,
     min_fit_n_floor: int = 5,
     require_fit_n_for_downweight: bool = False,
-) -> tuple[tuple[dict[tuple[int, str, str], RegimeCellPolicy], ...], RegimePolicyDiagnostics]:
-    """Build fold-local regime policy using fit/cal windows only."""
+    side_split_enabled: bool = False,
+) -> tuple[tuple[dict[tuple[Any, ...], RegimeCellPolicy], ...], RegimePolicyDiagnostics]:
+    """Build fold-local regime policy using fit/cal windows only.
+
+    [ADR_20260721_ALPHA_FUNNEL_REGIME_COVERAGE] side_split_enabled=True keys
+    fold_policy by (state, family, tf, side); disabled preserves legacy 3-key.
+    """
     if mode == "filter":
         return tuple({} for _ in awf_folds), RegimePolicyDiagnostics(
             mode=mode,
@@ -877,6 +899,7 @@ def build_regime_policy_by_fold(
             cost_bps=cost_bps,
             min_n=min_n,
             shrinkage=shrinkage,
+            side_split_enabled=side_split_enabled,
         )
         cal_stats = compute_bucket_realized_edge_stats(
             cache=cache,
@@ -887,6 +910,7 @@ def build_regime_policy_by_fold(
             cost_bps=cost_bps,
             min_n=min_n,
             shrinkage=shrinkage,
+            side_split_enabled=side_split_enabled,
         )
         pooled_fit_stats = compute_pooled_realized_edge_stats(
             cache=cache,
@@ -906,10 +930,15 @@ def build_regime_policy_by_fold(
         )
 
         keys = sorted(set(fit_stats) | set(cal_stats))
-        fold_policy: dict[tuple[int, str, str], RegimeCellPolicy] = {}
-        for state, family, tf in keys:
-            fit_stat = fit_stats.get((state, family, tf))
-            cal_stat = cal_stats.get((state, family, tf))
+        fold_policy: dict[tuple[Any, ...], RegimeCellPolicy] = {}
+        for key in keys:
+            if side_split_enabled:
+                state, family, tf, side_val = key
+            else:
+                state, family, tf = key
+                side_val = 0
+            fit_stat = fit_stats.get(key)
+            cal_stat = cal_stats.get(key)
             pooled_fit = pooled_fit_stats.get((family, tf), _RegimeEdgeStat(0.0, 0))
             pooled_cal = pooled_cal_stats.get((family, tf), _RegimeEdgeStat(0.0, 0))
             fit_edge_bps = float(fit_stat.edge_bps) if fit_stat is not None else 0.0
@@ -923,6 +952,7 @@ def build_regime_policy_by_fold(
                 regime=state,
                 family=family,
                 tf=tf,
+                side=side_val,
                 fit_edge_bps=fit_lift_bps,
                 cal_edge_bps=cal_lift_bps,
                 n_fit=n_fit,
@@ -1018,11 +1048,12 @@ def build_regime_policy_by_fold(
             if hard_block_eligible:
                 n_hard_block_eligible += 1
 
-            fold_policy[(state, family, tf)] = RegimeCellPolicy(
+            fold_policy[key] = RegimeCellPolicy(
                 state=state,
                 state_name=_state_name_for_index(state_names, state),
                 family=family,
                 tf=tf,
+                side=side_val,
                 action=action,
                 reason=cast(
                     Literal[
@@ -1124,14 +1155,20 @@ def build_regime_policy_by_fold(
 def apply_regime_cell_policy(
     sleeve_sigs: Mapping[tuple[str, str], SymbolSignal],
     sleeve_edges: Mapping[tuple[str, str], float],
-    policy_map: Mapping[tuple[int, str, str], RegimeCellPolicy],
+    policy_map: Mapping[tuple[Any, ...], RegimeCellPolicy],
     regime_now: int,
     *,
     mode: RegimePolicyMode,
     scale_signal_mu: bool = True,
     scale_quality_weight: bool = True,
+    side_split_enabled: bool = False,
 ) -> RegimePolicyApplication:
-    """Apply regime policy to current sleeve signals and edge scores."""
+    """Apply regime policy to current sleeve signals and edge scores.
+
+    [ADR_20260721_ALPHA_FUNNEL_REGIME_COVERAGE] side_split_enabled=True resolves
+    each sleeve's own side from sign(sleeve_edges[key]) and looks up policy_map
+    by (regime, family, tf, side) instead of the legacy 3-key.
+    """
     if not sleeve_sigs:
         return RegimePolicyApplication(
             sleeve_sigs={},
@@ -1170,8 +1207,12 @@ def apply_regime_cell_policy(
     quality_weight_before = float(sum(max(float(sig.quality_weight), 0.0) for sig in sleeve_sigs.values()))
     for key, sig in sleeve_sigs.items():
         family, tf = _parse_meta_group_ids(key[1])
-        policy = policy_map.get((regime_now, family, tf))
         gross_bps = float(sleeve_edges.get(key, 0.0))
+        if side_split_enabled:
+            side_val = int(np.sign(gross_bps))
+            policy = policy_map.get((regime_now, family, tf, side_val))
+        else:
+            policy = policy_map.get((regime_now, family, tf))
         if policy is None:
             next_sigs[key] = sig
             next_edges[key] = gross_bps
@@ -1950,8 +1991,14 @@ def build_regime_routing_plan(
     policy_pooled_is_passthrough: bool = True,
     policy_min_fit_n_floor: int = 5,
     policy_require_fit_n_for_downweight: bool = False,
+    side_split_enabled: bool = False,
 ) -> RegimeRoutingPlan:
-    """Build the fold-local routing plan used by L2 bucket selection."""
+    """Build the fold-local routing plan used by L2 bucket selection.
+
+    [ADR_20260721_ALPHA_FUNNEL_REGIME_COVERAGE] side_split_enabled=True threads
+    a 4th `side` key dimension through bucket edges and policy cells. Disabled
+    (default) preserves legacy 3-key (regime, family, tf) behavior byte-for-byte.
+    """
     n_bars = int(np.asarray(aligned.close_2d).shape[0])
     regime_code_arr = np.asarray(raw_regime_code_1d, dtype=np.int8)
     if regime_code_arr.shape[0] != n_bars:
@@ -1996,6 +2043,7 @@ def build_regime_routing_plan(
                 cost_bps=cost_bps,
                 min_n=min_n,
                 shrinkage=shrinkage,
+                side_split_enabled=side_split_enabled,
             )
             if fit_start < fit_end
             else {}
@@ -2010,6 +2058,7 @@ def build_regime_routing_plan(
                 cost_bps=cost_bps,
                 min_n=min_n,
                 shrinkage=shrinkage,
+                side_split_enabled=side_split_enabled,
             )
             if compression_enabled and fit_start < fit_end
             else dict(effective_bucket_edges)
@@ -2060,13 +2109,18 @@ def build_regime_routing_plan(
                     window_end=oos_end,
                     cost_bps=cost_bps,
                 )
-                regime_edge = float(effective_bucket_edges.get((regime_now, family, tf), 0.0))
+                if side_split_enabled:
+                    side_now = int(np.sign(cache.side_2d[t, int(j)]))
+                    edge_key: tuple[Any, ...] = (regime_now, family, tf, side_now)
+                else:
+                    edge_key = (regime_now, family, tf)
+                regime_edge = float(effective_bucket_edges.get(edge_key, 0.0))
                 pooled_edge = float(pooled_edges.get((family, tf), 0.0))
                 proof_regime_cond.append(regime_edge)
                 proof_pooled.append(pooled_edge)
                 proof_realized.append(realized_edge)
                 proof_fold_ids.append(fold_idx)
-                if (regime_now, family, tf) in effective_bucket_edges:
+                if edge_key in effective_bucket_edges:
                     has_hit = True
             if has_hit:
                 bars_with_hit += 1
@@ -2128,10 +2182,14 @@ def build_regime_routing_plan(
         pooled_is_passthrough=policy_pooled_is_passthrough,
         min_fit_n_floor=policy_min_fit_n_floor,
         require_fit_n_for_downweight=policy_require_fit_n_for_downweight,
+        side_split_enabled=side_split_enabled,
     )
 
     debug_diagnostics: RegimeDebugDiagnostics | None = None
-    if debug_diagnostics_enabled:
+    # [ADR_20260721_ALPHA_FUNNEL_REGIME_COVERAGE] evaluate_regime_granularity_debug
+    # assumes legacy 3-key buckets; skip when side_split_enabled (diagnostic-only,
+    # does not affect routing/simulation behavior).
+    if debug_diagnostics_enabled and not side_split_enabled:
         debug_diagnostics = evaluate_regime_granularity_debug(
             cache=cache,
             aligned=aligned,
@@ -2178,25 +2236,14 @@ def build_regime_routing_plan(
 
 def filter_sleeves_by_bucket(
     sleeve_sigs: Mapping[tuple[str, str], SymbolSignal],
-    bucket_edges: Mapping[tuple[int, str, str], float],
+    bucket_edges: Mapping[tuple[int, str, str], float] | Mapping[tuple[int, str, str, int], float],
     regime_now: int,
     *,
+    side: int = 0,
     edge_floor_bps: float = 0.0,
 ) -> dict[tuple[str, str], SymbolSignal]:
-    """현재 regime의 버킷 엣지로 sleeve 필터링.
-
-    (sym, strat_id) -> 해당 버킷 edge > edge_floor_bps 인 sleeve만 통과.
-    버킷 미관측(KeyError) sleeve는 edge=0 처리 -> 통상 제거됨.
-
-    Args:
-        sleeve_sigs: sleeve -> SymbolSignal dict.
-        bucket_edges: {(regime, family, TF): edge_bps}.
-        regime_now: 현재 bar의 regime code.
-        edge_floor_bps: 필터 임계값 (bps). 이하 버킷은 배치 안 함.
-
-    Returns:
-        통과한 sleeve만 담긴 dict (순서 보존).
-    """
+    """Side-awarable bucket filter. Controlled by l2_regime_bucket_side_split_enabled.
+    side=0 matches legacy 3-key (regime, family, tf) behavior."""
     if not sleeve_sigs:
         return {}
 
@@ -2204,8 +2251,10 @@ def filter_sleeves_by_bucket(
     for key, sig in sleeve_sigs.items():
         _, strat_id = key
         family, tf = _parse_meta_group_ids(strat_id)
-        bucket_key = (regime_now, family, tf)
-        edge = bucket_edges.get(bucket_key, 0.0)
+        bucket_key: tuple[int, str, str] | tuple[int, str, str, int] = (regime_now, family, tf)
+        if side != 0:
+            bucket_key = (regime_now, family, tf, side)
+        edge = bucket_edges.get(bucket_key, 0.0)  # type: ignore[arg-type]
         if edge > edge_floor_bps:
             result[key] = sig
 
@@ -2214,20 +2263,15 @@ def filter_sleeves_by_bucket(
 
 def apply_bucket_conditional_weight(
     sleeve_sigs: Mapping[tuple[str, str], SymbolSignal],
-    bucket_edges: Mapping[tuple[int, str, str], float],
+    bucket_edges: Mapping[tuple[int, str, str], float] | Mapping[tuple[int, str, str, int], float],
     regime_now: int,
     *,
+    side: int = 0,
     edge_floor_bps: float = 0.0,
     edge_ref_bps: float = 50.0,
     g_min: float = 0.5,
     g_max: float = 1.5,
 ) -> dict[tuple[str, str], SymbolSignal]:
-    """Bucket 실현엣지 기반 quality_weight 재가중. [ADR_20260705_L1L2_REGIME_CONDITIONAL_WEIGHT]
-
-    주의: `l2_regime_policy_mode="filter"` 분기에서만 호출됨(기본값 "soft"에서는 미발화,
-    실측 확인 완료 — docs/decisions/decisions.md 참조). quality_weight=0인 sleeve는
-    재가중으로 복구되지 않음(곱셈 방식의 알려진 한계).
-    """
     if not sleeve_sigs:
         return {}
 
@@ -2235,8 +2279,10 @@ def apply_bucket_conditional_weight(
     for key, sig in sleeve_sigs.items():
         _, strat_id = key
         family, tf = _parse_meta_group_ids(strat_id)
-        bucket_key = (regime_now, family, tf)
-        edge = bucket_edges.get(bucket_key, 0.0)
+        bucket_key: tuple[int, str, str] | tuple[int, str, str, int] = (regime_now, family, tf)
+        if side != 0:
+            bucket_key = (regime_now, family, tf, side)
+        edge = bucket_edges.get(bucket_key, 0.0)  # type: ignore[arg-type]
         if edge > edge_floor_bps:
             g = max(g_min, min(g_max, (edge - edge_floor_bps) / edge_ref_bps))
             result[key] = replace(sig, quality_weight=sig.quality_weight * g)
