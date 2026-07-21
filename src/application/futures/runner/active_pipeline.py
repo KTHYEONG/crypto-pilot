@@ -47,6 +47,8 @@ import numpy as np
 import optuna
 import pandas as pd
 
+from src.domain.futures.strategy.tiered_workflow.portfolio_handoff import evaluate_portfolio_handoff
+
 # Suppress noisy system warnings for clean output
 warnings.filterwarnings("ignore", category=RuntimeWarning)
 warnings.filterwarnings("ignore", category=UserWarning, module="numpy")
@@ -1549,6 +1551,7 @@ def _run_tiered_l2_study(
     crisis_rets: NDArray[np.float64] | None = None,
     crisis_replay_ctx: Any | None = None,
     l2_wf_n_folds: int | None = None,
+    handoff_registry: Any | None = None,
 ) -> Any:
     """Optuna objective_l2_growth로 best l2_params 탐색.
 
@@ -1571,7 +1574,10 @@ def _run_tiered_l2_study(
         objective_l2_growth,
         suggest_layered_params,
     )
-    from src.domain.futures.strategy.tiered_workflow.awf_sim import build_l2_simulation_cache
+    from src.domain.futures.strategy.tiered_workflow.awf_sim import (
+        build_causal_net_sleeve_returns,
+        build_l2_simulation_cache,
+    )
     from src.domain.futures.strategy.tiered_workflow.dataclasses import Layer2StudyResult
     from src.domain.futures.strategy.tiered_workflow.l2_meta import (
         transfer_routing_plan_to_crisis_cache,
@@ -1605,6 +1611,18 @@ def _run_tiered_l2_study(
     _l2_ts = pd.Timestamp(window.l2_start).tz_localize(None)
     _l1_end = int(np.searchsorted(aligned.datetimes, np.datetime64(_l2_ts, "ns")))
     _awf_folds_l2 = tuple(f for f in _awf_all if f.oos_start >= _l1_end and f.oos_end <= _ho_start_idx)
+    if not _awf_folds_l2 and handoff_registry is not None:
+        return Layer2StudyResult(
+            best_params={}, best_trial_number=None, best_evaluation=None,
+            dsr=0.0, effective_trial_count=0.0, completed_trials=0,
+            feasible_trials=0, blocker_reason="insufficient_robustness_windows",
+        )
+    if len(_awf_folds_l2) < 3 and handoff_registry is not None:
+        return Layer2StudyResult(
+            best_params={}, best_trial_number=None, best_evaluation=None,
+            dsr=0.0, effective_trial_count=0.0, completed_trials=0,
+            feasible_trials=0, blocker_reason="insufficient_robustness_windows",
+        )
     if not _awf_folds_l2:
         _cal_end = max(_l1_end - 1, 1)
         from src.domain.futures.strategy.walk_forward import WFFold
@@ -1618,6 +1636,52 @@ def _run_tiered_l2_study(
                 oos_start=_l1_end,
                 oos_end=_ho_start_idx,
             ),
+        )
+
+    if handoff_registry is None:
+        # Only isolated study tests omit L1 provenance. Production reaches this
+        # function through _run_portfolio_causal_robust_outcome with a registry.
+        _logger.debug("[HANDOFF] skipped for isolated study without L1 registry")
+    else:
+        from src.domain.futures.strategy.tiered_workflow.portfolio_handoff import (
+            PortfolioHandoffConfig,
+            apply_portfolio_handoff_to_cache,
+        )
+
+        _handoff_returns = tuple(
+            build_causal_net_sleeve_returns(
+                cache=l2_sim_cache,
+                aligned=aligned,
+                start=int(fold.fit_start),
+                end=int(fold.cal_end),
+            )
+            for fold in _awf_folds_l2
+        )
+        _handoff_result = evaluate_portfolio_handoff(
+            registry=handoff_registry,
+            signal_batch=signal_batch,
+            cache=l2_sim_cache,
+            folds=_awf_folds_l2,
+            net_sleeve_returns_by_fold=_handoff_returns,
+            config=PortfolioHandoffConfig(),
+        )
+        if not _handoff_result.passed:
+            _logger.warning(
+                "[HANDOFF] blocked reason=%s fp=%s",
+                _handoff_result.blocker_reason,
+                _handoff_result.fingerprint[:12],
+            )
+            return Layer2StudyResult(
+                best_params={}, best_trial_number=None, best_evaluation=None,
+                dsr=0.0, effective_trial_count=0.0, completed_trials=0,
+                feasible_trials=0, blocker_reason=f"handoff_blocked:{_handoff_result.blocker_reason}",
+            )
+        l2_sim_cache = apply_portfolio_handoff_to_cache(cache=l2_sim_cache, handoff=_handoff_result)
+        _logger.info(
+            "[HANDOFF] passed folds=%d admitted=%s fp=%s",
+            len(_awf_folds_l2),
+            tuple(len(keys) for keys in _handoff_result.admitted_sleeves_by_fold),
+            _handoff_result.fingerprint[:12],
         )
 
     # Precompute bucket realized edges (trial-param independent → 1회만 계산)
@@ -2437,6 +2501,7 @@ def _run_robust_l2_l3_outcome(
         caps=caps, tf=tf, n_trials=n_trials, seed=0,
         crisis_rets=None, crisis_replay_ctx=crisis_replay_ctx,
         l2_sim_cache=l2_sim_cache,
+        handoff_registry=l1_res.deployment_registry,
     )
     blocker = getattr(l2_study_result, "blocker_reason", "")
     if blocker:
@@ -2457,6 +2522,11 @@ def _run_robust_l2_l3_outcome(
     l3_passed = target_phase == "l2" or (l3_final is not None and l3_final.gate_passed)
     passed = bool(l2_passed and l3_passed)
     return RobustSearchOutcome(l2_study_result, l2_final, l3_final, passed, "" if passed else "l2_or_l3_blocked")
+
+
+def _run_portfolio_causal_robust_outcome(**kwargs: Any) -> RobustSearchOutcome:
+    """Run the production single-candidate causal-portfolio L2 path."""
+    return _run_robust_l2_l3_outcome(**kwargs)
 
 
 def _run_single_seed_outcome(
@@ -3476,7 +3546,7 @@ def _run_strategy_stage(
             except Exception:
                 _logger.warning("[L2-CRISIS-CEILING] compute failed, crisis_window disabled")
 
-            # ── Step D/E: Multi-Seed Robustness Consensus ─────────────────
+            # ── Step D/E: Causal portfolio handoff + deterministic robust search ──
             gc.collect()
             _mem_l2_final = _get_rss_mb()
             _t_l2_final_start = time.perf_counter()
@@ -3490,7 +3560,7 @@ def _run_strategy_stage(
 
             _l3_regime_code_1d = _compress_l3_regime_codes(_compute_l3_regime_ctx(aligned=aligned_tiered).code_1d)
 
-            _consensus = _run_multi_seed_robustness_consensus(
+            _robust_outcome = _run_portfolio_causal_robust_outcome(
                 signal_batch=l2_signals,
                 aligned=aligned_tiered,
                 cfg=tiered_cfg,
@@ -3498,13 +3568,11 @@ def _run_strategy_stage(
                 caps=tiered_caps,
                 tf=l2_master_tf,
                 n_trials=n_l2_trials,
-                base_seed=_seed,
                 target_phase=run_config.phase,
                 l1_res=l1_res,
                 labeled_events=labeled_tiered,
                 per_tf_data_maps=handoff.aligned_by_tf,
                 labeled_events_by_tf=handoff.labeled_events_by_tf,
-                crisis_rets=_crisis_rets,
                 crisis_replay_ctx=_crisis_replay_ctx,
                 l2_sim_cache=shared_l2_cache,
                 probe_manifest=_probe_manifest_raw,
@@ -3513,17 +3581,15 @@ def _run_strategy_stage(
             _log_mem(
                 "l2_multi_seed_consensus",
                 _mem_l2_study,
-                extra=f"base_seed={_seed} admitted={_consensus.admitted} pass_count={_consensus.pass_count}/{_consensus.required_pass_count}",
+                extra=f"seed_ignored_for_selection={_seed} passed={_robust_outcome.passed}",
             )
 
-            if not _consensus.admitted:
-                return RunnerResult(exit_code=1, reason=_consensus.blocker_reason)
+            if not _robust_outcome.passed:
+                return RunnerResult(exit_code=1, reason=_robust_outcome.blocker_reason)
 
-            _selected = _consensus.selected
-            assert _selected is not None
-            l2_study_result = _selected.l2_study_result
-            l2_final = _selected.l2_final
-            l3_final = _selected.l3_final
+            l2_study_result = _robust_outcome.l2_study_result
+            l2_final = _robust_outcome.l2_final
+            l3_final = _robust_outcome.l3_final
             best_l2_params = dict(getattr(l2_study_result, "best_params", {}))
             # B2: SSOT assert — study tf must match final deployment tf
             if l2_final is not None and hasattr(l2_final, "master_tf") and l2_master_tf != l2_final.master_tf:

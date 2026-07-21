@@ -8,7 +8,7 @@ import logging
 import multiprocessing
 import os
 import time
-from collections.abc import Iterator, Sequence
+from collections.abc import Callable, Iterator, Sequence
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -5009,3 +5009,88 @@ def run_tiered_pipeline_outcome(
             policy_fingerprint=policy_fingerprint,
             diagnostic_complete=False,
         )
+
+
+@dataclass(slots=True, frozen=True)
+class CrisisBudgetAssessment:
+    """Crisis-window budget assessment for sealed validation."""
+    passed: bool
+    mdd: float
+    cagr: float
+    sufficient_coverage: bool
+
+
+@dataclass(slots=True, frozen=True)
+class SealedValidationResult:
+    """Result of sealed candidate validation (L3 + FTX)."""
+    passed: bool
+    temporal_result: Layer3Result | None
+    crisis_result: CrisisBudgetAssessment | None
+    blocker_reason: str
+
+
+def run_sealed_candidate_validation(
+    *,
+    champion: object,
+    temporal_replay: Callable[[object], Layer3Result],
+    ftx_replay: Callable[[object], CrisisBudgetAssessment],
+) -> SealedValidationResult:
+    """Run sealed validation: temporal L3 then FTX crisis.
+
+    Each stage runs exactly once. Failure in either stage blocks the run
+    without fallback or reselection.
+    """
+    import logging as _logging
+
+    _log = _logging.getLogger(__name__)
+
+    _log.info("[SEALED-L3] Starting temporal holdout validation")
+    try:
+        l3_result = temporal_replay(champion)
+    except Exception as exc:
+        _log.error("[SEALED-L3] Execution failed: %s", exc)
+        return SealedValidationResult(
+            passed=False,
+            temporal_result=None,
+            crisis_result=None,
+            blocker_reason=f"l3_execution_failed:{exc}",
+        )
+
+    if not l3_result.gate_passed:
+        _log.info("[SEALED-L3] Blocked: %s", l3_result.blocker_reason)
+        return SealedValidationResult(
+            passed=False,
+            temporal_result=l3_result,
+            crisis_result=None,
+            blocker_reason=f"l3_blocked:{l3_result.blocker_reason}",
+        )
+    _log.info("[SEALED-L3] Passed")
+
+    _log.info("[SEALED-FTX] Starting sealed FTX crisis validation")
+    try:
+        crisis_result = ftx_replay(champion)
+    except Exception as exc:
+        _log.error("[SEALED-FTX] Execution failed: %s", exc)
+        return SealedValidationResult(
+            passed=False,
+            temporal_result=l3_result,
+            crisis_result=None,
+            blocker_reason=f"sealed_ftx_failed:{exc}",
+        )
+
+    if not crisis_result.passed:
+        _log.info("[SEALED-FTX] Blocked: mdd=%.4f cagr=%.4f", crisis_result.mdd, crisis_result.cagr)
+        return SealedValidationResult(
+            passed=False,
+            temporal_result=l3_result,
+            crisis_result=crisis_result,
+            blocker_reason="sealed_crisis_blocked",
+        )
+    _log.info("[SEALED-FTX] Passed")
+
+    return SealedValidationResult(
+        passed=True,
+        temporal_result=l3_result,
+        crisis_result=crisis_result,
+        blocker_reason="",
+    )

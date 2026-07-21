@@ -6,6 +6,7 @@ from src.domain.futures.optimization.l2_robust_search import (
     L2_FIXED_ROBUST_PARAMS,
     build_l2_feasibility_anchors,
     build_l2_refinement_trials,
+    compute_search_space_hash,
     materialize_l2_robust_params,
     resolve_l2_robust_search_budget,
     derive_l2_search_seed,
@@ -74,6 +75,24 @@ def test_robust_search_seed_and_invalid_budget() -> None:
         resolve_l2_robust_search_budget(0)
 
 
+def test_search_space_hash_is_stable_and_nonempty() -> None:
+    digest = compute_search_space_hash()
+    assert digest == compute_search_space_hash()
+    assert len(digest) == 64
+
+
+def test_anchor_generation_supports_continuous_dimension_without_step(monkeypatch) -> None:
+    from src.domain.futures.optimization import l2_robust_search
+
+    monkeypatch.setattr(
+        l2_robust_search,
+        "L2_SEARCH_SPACE",
+        {"continuous": {"type": "float", "low": 0.0, "high": 1.0}},
+    )
+    anchors = l2_robust_search.build_l2_feasibility_anchors(count=2)
+    assert len(anchors) == 2
+
+
 def test_anchor_zero_and_conditional_suggestion() -> None:
     assert build_l2_feasibility_anchors(count=0) == ()
     import optuna
@@ -94,3 +113,31 @@ def test_refinement_generates_neighbors() -> None:
     )
     values = build_l2_refinement_trials(trials=(trial,), count=2)
     assert {value["K_RANK"] for value in values} == {2, 4}
+
+
+def test_refinement_generates_float_neighbors() -> None:
+    import optuna
+    from optuna.distributions import FloatDistribution
+
+    trial = optuna.trial.create_trial(
+        value=0.1,
+        params={"edge_ref_bps": 6.0},
+        distributions={"edge_ref_bps": FloatDistribution(2.0, 12.0, step=0.5)},
+        user_attrs={"l2_joint_feasible": True},
+    )
+    values = build_l2_refinement_trials(trials=(trial,), count=2)
+    assert {value["edge_ref_bps"] for value in values} == {5.5, 6.5}
+
+
+def test_refinement_generates_categorical_neighbors() -> None:
+    import optuna
+    from optuna.distributions import CategoricalDistribution
+
+    trial = optuna.trial.create_trial(
+        value=0.1,
+        params={"REBALANCE_BARS": 2},
+        distributions={"REBALANCE_BARS": CategoricalDistribution((1, 2, 3, 6))},
+        user_attrs={"l2_joint_feasible": True},
+    )
+    values = build_l2_refinement_trials(trials=(trial,), count=2)
+    assert {value["REBALANCE_BARS"] for value in values} == {1, 3}
