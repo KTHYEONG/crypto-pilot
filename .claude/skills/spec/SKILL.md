@@ -24,6 +24,7 @@ Leverage **high-reasoning models (Thinker)** for creative architectural design, 
   - **STOP immediately** and wait for user answers. Do NOT write the spec until the user answers.
 
 ### 2. High-Reasoning Architectural Thought (High Autonomy)
+- **Data-Driven Dynamic Inspection**: First, thoroughly leverage and read existing codebase assets (source code, DB schemas, configurations, and docs). Only if design details or runtime responses (e.g., live database values, third-party API payloads, or complex runtime side-effects) remain ambiguous, write and execute temporary verification scripts in the `scratch/` directory. Always base architectural decisions on concrete facts rather than assumptions.
 - **Alternatives & Trade-offs**: Contrast multiple design options. Justify why the chosen design is selected.
 - **Constraints & Boundaries**: Identify edge cases, performance bottlenecks, and algorithmic limitations, tagging each with a unique label (`[LIMIT-01]`, etc.).
 - **Quant & System Resilience**: Explicitly plan for network timeouts, timezone normalization, and look-ahead bias prevention.
