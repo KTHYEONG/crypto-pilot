@@ -22,6 +22,7 @@ from src.domain.futures.strategy.tiered_workflow.pipeline import (
     _aggregate_per_tf_l1,
     _is_deployable_per_tf_result,
     _log_pertf_registry_diag,
+    _merge_deployment_registries_across_tf,
     _resolve_l2_master_tf,
     _resolve_l2_master_tf_from_prior,
     _resolve_labeled_events_for_tf,
@@ -407,7 +408,8 @@ class TestAggregatePerTfL1:
         agg = _aggregate_per_tf_l1(per_tf, preferred_tf=master_tf)
 
         assert agg.gate_passed is True
-        assert agg.deployment_registry is registry_8h
+        assert agg.deployment_registry is not None
+        assert set(agg.deployment_registry.by_symbol.keys()) == {"BTCUSDT", "ETHUSDT"}
 
     def test_s10_empty_map_returns_blocked(self) -> None:
         agg = _aggregate_per_tf_l1({})
@@ -425,7 +427,8 @@ class TestAggregatePerTfL1:
         agg = _aggregate_per_tf_l1(per_tf, preferred_tf="4h")
 
         assert agg.gate_passed is False
-        assert agg.deployment_registry is None
+        assert agg.deployment_registry is not None
+        assert set(agg.deployment_registry.by_symbol.keys()) == {"ETHUSDT"}
 
 
 def test_s12_registry_diag_logs_strict_structural_and_advisory_status(
@@ -871,3 +874,91 @@ class TestComputeCrisisUnitReturns:
 
         assert requested_tfs == ["4h"]
         assert not result.verified
+
+
+# ── _merge_deployment_registries_across_tf ──────────────────────────────
+
+
+def _make_evidence(
+    symbol: str, strategy_id: str, quality_weight: float,
+    *,
+    activation_context: str = "default",
+) -> SymbolStrategyEvidence:
+    return SymbolStrategyEvidence(
+        key=SignalSourceKey(symbol=symbol, strategy_id=strategy_id, activation_context=activation_context),
+        mean_gross_bps=10.0,
+        mean_incremental_bps=10.0,
+        p_value=0.01,
+        q_value=0.01,
+        positive_fold_ratio=0.8,
+        n_obs=100,
+        effective_n=100.0,
+        n_folds=4,
+        quality_weight=quality_weight,
+        lcb_net_bps=5.0,
+    )
+
+
+def _make_registry(entries: dict[str, tuple[SymbolStrategyEvidence, ...]], version: str = "test") -> QualifiedSignalRegistry:
+    return QualifiedSignalRegistry(
+        by_symbol=entries,
+        ready_symbols=tuple(entries.keys()),
+        trade_scope_count=sum(len(v) for v in entries.values()),
+        registry_version=version,
+    )
+
+
+def test_merge_deployment_registries_across_tf_unions_distinct_symbols() -> None:
+    reg_1h = _make_registry({"BTCUSDT": (_make_evidence("BTCUSDT", "dual_momentum", 0.8),)})
+    reg_8h = _make_registry({"ETHUSDT": (_make_evidence("ETHUSDT", "trend_donchian", 0.6),)})
+    per_tf_l1 = {
+        "1h": _mock_per_tf(tf="1h", gate_passed=True, registry=reg_1h),
+        "8h": _mock_per_tf(tf="8h", gate_passed=True, registry=reg_8h),
+    }
+
+    merged = _merge_deployment_registries_across_tf(per_tf_l1)
+
+    assert merged is not None
+    assert set(merged.by_symbol.keys()) == {"BTCUSDT", "ETHUSDT"}
+    assert merged.ready_symbols == ("BTCUSDT", "ETHUSDT")
+
+
+def test_merge_deployment_registries_across_tf_keeps_higher_quality_weight_on_conflict() -> None:
+    reg_1h = _make_registry({"BTCUSDT": (_make_evidence("BTCUSDT", "dual_momentum", 0.4),)})
+    reg_8h = _make_registry({"BTCUSDT": (_make_evidence("BTCUSDT", "dual_momentum", 0.9),)})
+    per_tf_l1 = {
+        "1h": _mock_per_tf(tf="1h", gate_passed=True, registry=reg_1h),
+        "8h": _mock_per_tf(tf="8h", gate_passed=True, registry=reg_8h),
+    }
+
+    merged = _merge_deployment_registries_across_tf(per_tf_l1)
+
+    assert merged is not None
+    kept = merged.by_symbol["BTCUSDT"]
+    assert len(kept) == 1
+    assert kept[0].quality_weight == pytest.approx(0.9)
+
+
+def test_merge_deployment_registries_across_tf_returns_none_when_no_tf_deployable() -> None:
+    reg_1h = _make_registry({"BTCUSDT": (_make_evidence("BTCUSDT", "dual_momentum", 0.8),)})
+    per_tf_l1 = {
+        "1h": _mock_per_tf(tf="1h", gate_passed=False, registry=reg_1h),
+    }
+
+    merged = _merge_deployment_registries_across_tf(per_tf_l1)
+
+    assert merged is None
+
+
+def test_aggregate_per_tf_l1_uses_merged_registry_not_single_tf() -> None:
+    reg_1h = _make_registry({"BTCUSDT": (_make_evidence("BTCUSDT", "dual_momentum", 0.8),)})
+    reg_8h = _make_registry({"ETHUSDT": (_make_evidence("ETHUSDT", "trend_donchian", 0.6),)})
+    per_tf_l1 = {
+        "1h": _mock_per_tf(tf="1h", gate_passed=True, registry=reg_1h),
+        "8h": _mock_per_tf(tf="8h", gate_passed=True, registry=reg_8h),
+    }
+
+    result = _aggregate_per_tf_l1(per_tf_l1, preferred_tf="1h")
+
+    assert result.deployment_registry is not None
+    assert set(result.deployment_registry.by_symbol.keys()) == {"BTCUSDT", "ETHUSDT"}
