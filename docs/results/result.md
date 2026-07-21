@@ -1,139 +1,126 @@
-## Phase L2 hot-cache 재측정 — 2026-07-20
+# L1 Multi-TF Registry Merge 적용 후 재실행 결과 — 2026-07-21 (후속)
 
-실행 조건: `--phase l2 --sync skip --timeframe 4h`, 120 trials, `USE_CS_RANK_ENGINE=1`, DEBUG 로깅, 7개 timeframe L1 캐시 활성.
+`docs/specs/l1-deployment-registry-multi-tf-merge.md` 구현(`/check` PASS, Cov 24%) 직후 동일 조건(`--phase l3 --trials 120 --timeframe 4h --sync skip --seed 42`)으로 재실행. 결과: **L3가 BLOCKED → ✅ DEPLOY-READY로 전환**.
 
-### 핵심 결과
+## Before/After 비교
 
-- 종료 코드: `0` / L2 감사: `120/120 completed`, `joint_feasible=1`, `crisis_measured=120`
-- 총 소요시간: `217.43s` (3분 37.43초)
-- 전략 구간: `187.60s`
-- 최대 RSS: `13,608 MiB` (약 `13.29 GiB`), swap `0`
-- 자산증식: CAGR `33.24%`, PnL `+56.6%`, 최종 자산 `1.57x`, MDD `13.70%`
-- 효율: Sharpe `1.815`, Sortino `2.854`, Calmar `2.426`
-- 무결성: PSR `0.989`, DSR `0.986`, Sharpe uplift `+0.45`
-- 위기 검증: `stress_tested_pass`, 검증 창 MDD `19.69%`, CAGR `-4.46%`, CVaR95 `1.92%`
-
-### 단계별 시간
-
-| 단계 | 소요시간 |
-|---|---:|
-| Data | 24.6627s |
-| Bridge align | 27.0374s |
-| Bridge rules | 2.7352s |
-| L0 phase 1 / phase 3 | 10.2717s / 4.9083s |
-| L0 gate wall / cross-TF pruning | 15.1809s / 9.9271s |
-| L1 전체 (7/7 cache hit) | 7.8409s |
-| L2 Optuna study | 103.3569s |
-| L2 final pipeline | 4.5320s |
-
-### 이전 측정 대비
-
-이전 실행(`323.20s`, 전략 `293.95s`, L1 `122.55s`, RSS `12,180.6 MiB`) 대비 총 시간은 `105.77s`(`32.7%`) 단축되었고, 전략 구간은 `36.2%`, L1은 `93.6%` 단축되었다. 반면 L2 study는 `103.36s`로 `11.1s` 증가했고 RSS는 `13,608 MiB`로 `1,427 MiB` 증가했다.
-
-### 판정 및 후속 병목
-
-- 시간/캐시/결과 무결성: PASS
-- 메모리 예산(12 GiB): FAIL (`+1,320 MiB`, 약 `10.7%` 초과)
-- 최우선 최적화: L2 병렬 worker(최대 6개) 구간의 프로세스별 RSS와 부모/자식 합산 peak를 분리 계측하고, worker 수·배치 크기·대형 dataframe 복제를 제한한다.
-
-# L0→L2 파이프라인 상세 소요시간/RAM 실측 — 2026-07-20 (다음 세션 최적화 기준선)
-
-## 세션 요약
-
-`--phase l2` 프로덕션 실행(seed=42, 120 trials) 1회를 `LOG_LEVEL=DEBUG`로 전 구간 계측해 universe 로드부터 L2 champion 선정까지 스테이지별 소요시간과 RSS를 기록했다. 목적은 다음 최적화 세션에서 "어디부터 손댈지" 바로 판단할 수 있는 기준선을 남기는 것 — 이번 세션에 완료한 L1 워커 병렬화(`docs/decisions/decisions.md` ADR_20260720_L1_MEMORY_FLOOR_ADAPTIVE_CALIBRATION)는 이미 이 실측치에 반영돼 있다(즉 아래 수치는 "적용 후" 상태).
-
-- 전체 wall time: **353.46s**
-- Peak RSS: **12414MB** (성능 예산 `performance.md` RSS<12GB 근접, 여유 매우 적음)
-- 원본 로그: 세션 스크래치패드(`new_run.log`, 653줄), 이 세션에서만 생성/휘발됨 — 재현하려면 `logs/futures/optimization/l1_result_cache/*.pkl` 삭제 후 `LOG_LEVEL=DEBUG uv run python src/execution/opt_main_futures.py --phase l2 --trials 2 --sync skip` 재실행.
-
-## 스테이지별 소요시간 (Top-level)
-
-| 스테이지 | 소요시간 | RSS(시작→종료) | 비고 |
+| 지표 | Before (버그) | After (병합 적용) | 변화 |
 |---|---|---|---|
-| universe (유니버스 스캔) | 1.8s | 327→419MB | discover 1.58s + validate 0.19s |
-| data (OHLCV/펀딩 로드) | ~21.5s | 419→3045MB (+2598MB) | `load_futures_data_maps_for_symbols` 16.2s가 대부분 |
-| bridge_post_align (TF 정렬) | **35.25s** | 3120→6269MB (+3149MB) | 7개 TF 그리드 동시 정렬, **RAM 단일 최대 증가 구간** |
-| L0 게이트(phase1+phase3+pruning) | ~24.4s | 6038→7274MB | cheap_evidence 7.68s + canonical_gate 4.09s + cross_tf_pruning 10.66s, `n_passed=10/81 n_rejected=69` |
-| **L1 nested WF 전체(7개 TF)** | **145.36s** | 7174→7316MB (평탄) | 아래 TF별 breakdown 참조 |
-| L2 signal_batch + sim_cache | ~3.5s | 7316→7484MB | |
-| **L2 Optuna 배치 루프(120 trials)** | **~75s** | 7484MB (변화없음) | RAM 안정적, 워커 부족 징후 없음(기존 결론 재확인) |
-| **L2 champion 선정(select_layer2_champion)** | **35.80s** | 7484→7507MB | replay 후보 재평가 — L1 한 TF 처리량과 맞먹는 단일 병목, **다음 세션 조사 후보** |
-| L2 최종 파이프라인(champion 재평가+정리) | 6.39s | 7507→7497MB | |
-| (정리 후) | | →6873MB | 파이프라인 종료 시 GC로 RSS 대폭 감소 |
+| **L3 STATUS** | ❌ BLOCKED (negative_return) | ✅ **DEPLOY-READY** | 전환 |
+| L3 CAGR / Total Return | -0.2% | **+5.6%** | +5.8%p |
+| L3 Sharpe / Sortino | 0.021 / 0.029 | **0.688 / 1.018** | 큰 폭 개선 |
+| L3 MDD | 8.6% | 5.8% | 개선(더 안전) |
+| L3 CVaR95 | 0.7% | 0.6% | 개선 |
+| L3 Trades | 73 | 110 | +37 |
+| L2 CAGR / Sharpe | +33.2% / 1.815 | +33.3% / 2.035 | 소폭 개선(side benefit) |
+| L2 Fold Pass | 75%(3/4) | 100%(4/4) | 개선 |
+| L2 joint_feasible | 1/120 | 2/120 | 개선 |
 
-## L1 nested WF: TF별 breakdown (`[LIMIT-07]` 세밀한 TF부터 처리 순서 적용됨)
+- **근거 확인**: `[L1-MAJOR-REGISTRY-CENSUS]`에서 `ETHUSDT/trend_pullback_continuation`(registry_mean_incremental_bps 40~269bps, 4개 variant)이 `observed_active_in_holdout=True`로 전환됨 — 이전 실행에서는 ETH가 6개월 내내 완전 비활성(`avg_mult=0.000`)이었으나 이번엔 실제로 신호가 발화해 book에 기여했다. 이는 게이트 완화가 아니라 **버려지던 실제 신호가 살아난** 결과라는 spec의 가설을 실측으로 확인한 것이다.
+- ETH의 `dual_momentum`(128bps)/`trend_donchian`(219bps)/`btc_regime_pullback`(97bps)/`mtf_fusion`(101bps), BTC의 `trend_donchian`(106bps)은 이번에도 여전히 `observed_active_in_holdout=False` — 병합 버그 수정으로 신호 "폐기"는 막았지만, 이 전략들이 정작 이번 6개월 구간에서 발화 조건 자체를 못 만난 것인지는 별도 확인 필요(추가 알파 여지 가능성).
 
-| TF | n_bars | 전체 소요 | `feature_cache_prime` | evidence(workers) | outer(workers) | wall(evidence+outer) |
-|---|---|---|---|---|---|---|
-| 1h | 23472 | 37.46s | **23.40s (63%)** | 10.4s (1) | 3.0s (1) | 13.4s |
-| 2h | 11736 | 28.20s | **10.70s (38%)** | 13.4s (1) | 3.6s (1) | 17.1s |
-| 4h | 6949 | 15.31s | 0.001s | 10.6s (1) | 1.8s (2) | 12.4s |
-| 6h | 3912 | 16.08s | 3.39s | 9.6s (2) | 1.5s (2) | 11.1s |
-| 8h | 2934 | 15.56s | 2.50s | 9.9s (2) | 1.5s (2) | 11.4s |
-| 12h | 1956 | 14.43s | 1.67s | 9.6s (2) | 1.5s (2) | 11.2s |
-| 1d | 978 | 7.84s | 0.80s | 5.4s (2) | 1.1s (2) | 6.5s |
+## ⚠️ 신규 회귀 발견 — Crisis Reliability 검증 무효화
 
-- **`feature_cache_prime`가 1h/2h TF에서만 압도적으로 크다**(1h 23.4s, 2h 10.7s = 합계 34.1s, L1 전체 145.36s의 **23.5%**) — bar 수가 가장 많은 두 TF에 집중, 4h 이하는 사실상 무시 가능(캐시 재사용 추정). **다음 세션 1순위 최적화 후보**: 이번 세션(워커 병렬화, ~17% 개선)보다 단일 항목 절대량이 더 크다.
-- 워커 캘리브레이션은 설계대로 동작(`docs/specs/l1_adaptive_worker_calibration.md` 참조): TF#1(1h)·TF#2(2h)는 관측치 부족으로 cold-start(workers=1) 유지, TF#3(4h)부터 outer가 2워커로 전환, TF#4(6h)부터는 evidence도 2워커로 전환.
-
-## Peak RSS 위치 특정
-
-- 스테이지별 표시 RSS는 7100~7500MB 수준을 벗어나지 않는데 `peak=12414MB`가 L1→L2 전환 시점부터 계속 표시됨 — **12414MB는 L1 nested WF 처리 도중 순간적으로 스파이크된 값**(스테이지 경계 로그 사이 어딘가, 아마 evidence fold 워커가 fork 직후 피처 계산을 하는 짧은 구간)이며, 정상 스테이지 로그의 조밀도로는 정확한 스파이크 지점을 못 잡음.
-- **다음 세션 조사 필요**: `tracemalloc`이나 더 촘촘한(초 단위) RSS 폴링으로 12414MB 스파이크의 정확한 발생 지점을 특정하면, peak 자체를 낮춰 `tree_pss_cap_bytes`(현재 10GiB 고정) 헤드룸을 추가로 확보할 여지가 있음 — `l1_adaptive_worker_calibration.md`의 워커 캘리브레이션과는 별개 레버.
-
-## 다음 세션 최적화 우선순위 (실측 근거 기반)
-
-1. **`l1_nested_feature_cache_prime`(1h/2h TF) — 34.1s, L1 전체의 23.5%.** 이번 세션 워커 병렬화 효과(L1 -16.8%)보다 절대량이 크다. 무엇을 계산하는지, 캐시가 왜 4h 이하에서만 사실상 free인지부터 확인 필요(진짜 캐시 히트인지, 4h 이하가 애초에 계산량이 적은 건지 미확인).
-2. **`select_layer2_champion` — 35.80s.** L2 Optuna 배치 루프(120 trials, 75s) 다음으로 큰 단일 블록. Replay 후보 재평가 로직이 병목인지, 워커 부족인지 미측정 — `l1_adaptive_worker_calibration.md` Appendix에서 낮은 우선순위로 미룬 "L2 실측"이 이 지점부터 시작하면 적절.
-3. **`bridge_post_align`(TF 정렬) — 35.25s, RAM +3149MB 단일 최대 증가.** 시간보다 RAM 스파이크 원인으로 더 흥미로움 — peak RSS 12414MB의 실제 발생 구간일 가능성.
-4. **Peak RSS 정확한 위치 특정.** 현재 12GB 예산에 근접(12414MB)해 있어 위 최적화들을 병렬성 확대 방향으로 밀어붙이기 전에 먼저 확인해야 안전.
+```
+Before: [CRISIS-RELIABILITY] status=stress_tested_pass verified=True (mdd=19.69%, cagr=-4.46%, trades=113)
+After:  [CRISIS-RELIABILITY] status=untested_no_data verified=False detail="usable_windows=0 < min_usable_windows=1"
+        [CRISIS-WINDOW-DETAIL] status=stress_data_invalid trades=3 (전 실행 113건 대비 급감)
+```
+- 병합된 registry가 새 전략 조합(`taker_imbalance_momentum:tim_12_4h` 등, 이전 실행엔 없던 panel)을 포함하게 되면서 LUNA/FTX crisis window(2022, 소수 legacy 심볼만 존재) replay 시 유효 거래가 3건으로 붕괴 — crisis 생존성 자체가 "검증 불가" 상태로 바뀌었다.
+- 이번 세션 범위 밖의 **신규 발견 이슈**로, 다음 세션에서 원인 규명 필요(병합된 신규 전략 조합이 legacy crisis 심볼 커버리지와 호환되지 않는 것으로 추정). 승격 판단 시 이 경고를 반드시 함께 고려할 것 — `L3 DEPLOY-READY` 판정은 crisis 생존성 검증과 별개다.
 
 ---
 
-# L2 Phase 성과 개선 세션 결과 — 2026-07-19 (Optuna 탐색 재현성 확보)
+# Phase L3 종단(End-to-End) 실행 결과 및 자산증식 전략 개선 분석 — 2026-07-21
 
-## 세션 요약
+## 실행 조건
 
-동일 `seed=42`, 동일 코드로 L2 파이프라인을 반복 실행해도 결과가 극단적으로 갈리는(gate-pass 7개 성공 vs 0개 완전 실패) 비재현성 문제의 근본 원인을 규명하고 해결했다. 원인은 병렬 최적화 로직 자체가 아니라, **기동 시점의 살아있는 시스템 RAM 상태**가 Optuna의 ask/tell 구조 자체를 바꿔버리는 숨은 스위치였다.
+`uv run python src/execution/opt_main_futures.py --phase l3 --trials 120 --timeframe 4h --sync skip --seed 42`
 
-## 근본 원인
+- 엔진: Tiered Pipeline (`USE_CS_RANK_ENGINE=1` 경로, `signal_only=False`)
+- L1 캐시: 7/7 TF hit (당일 이전 세션 산출물 재사용)
+- 총 소요시간: `real 3m36.1s` / `user 7m45.6s` (병렬 워커) / `sys 0m24.8s`
+- 프로세스 종료 코드: `0`
 
-- `active_pipeline.py`의 `_run_tiered_l2_study`가 `study.optimize()` 호출 직전 `psutil.virtual_memory().available`을 읽어, 3.0GB 미만이면 `batch_size`(Optuna ask/tell **청킹 크기**, 기본 6)를 1로 강제 변경했다.
-- 이는 단순 성능 파라미터가 아니라 **구조적으로 다른 두 알고리즘**을 무작위(=기동 시점 RAM 상태)로 선택하는 스위치였다:
-  - `batch_size=1` → `study.optimize(n_jobs=1)`(Optuna 내장 순차 루프) — 매 trial마다 직전 결과를 즉시 반영.
-  - `batch_size=6`(기본) → 수동 배치 루프 — 배치 내 6개 trial을 **전부 `ask()`한 뒤에야** `tell()`을 수행, 배치 내 2~6번째 trial은 같은 배치 앞선 trial들의 실제 결과를 전혀 반영 못 하는 stale한 이력으로 제안됨.
-- `TPESampler(multivariate=True, group=True)`는 이력 의존도가 매우 높아 이 staleness가 120 trial 전체로 누적 전파 — 동일 seed에서도 완전히 다른 탐색 궤적을 만들었다.
-- `max_workers`(`ProcessPoolExecutor`의 실제 동시 실행 수)는 `future.result()`가 제출 순서로 블로킹 수집되므로 `tell()` 순서에 영향을 주지 않는다 — 즉 "몇 개가 동시에 도는가"(안전하게 RAM 적응 가능)와 "샘플러가 무엇을 언제 보는가"(반드시 고정돼야 함)는 애초에 분리 가능한 별개의 축이었다.
+## 파이프라인 게이트 통과 현황
 
-## 해결
+| Layer | 윈도우 | 판정 | 핵심 사유 |
+|---|---|---|---|
+| L1 (Signal Robustness) | 2023-06-30 ~ 2024-12-30 | ✅ PASS | 126/137 심볼 admitted |
+| L2 (Optuna 튜닝, Study 윈도우) | 2025-03-20 ~ 2025-12-30 | ✅ PASS | `joint_feasible=1/120`, champion 갱신 |
+| L3 (Final Holdout) | 2025-12-31 ~ 2026-06-30 | ❌ **BLOCKED** | `negative_return` |
 
-"논리적 ask/tell 청킹 크기"(`batch_size`, 고정)와 "물리적 동시 실행 워커 수"(`max_workers`, RAM 적응)를 분리했다. RAM 기반 `batch_size` 강제변경 블록을 삭제하고 `batch_size`는 config 고정값만 사용, 기존 `max_workers`의 RAM 적응(OOM 안전장치)은 100% 보존 — 병렬 처리 속도와 메모리 안전성을 그대로 유지하면서 재현성만 복원하는 최소 변경이다. 조사 중 기존 테스트가 이 RAM 분기를 mock 우회 트릭으로 의존하던 것을 발견해 config 직접 patch 방식으로 마이그레이션했고, 저RAM/고RAM 양쪽에서 `study.tell()` 시퀀스가 완전히 동일함을 직접 검증하는 종단 재현성 테스트를 신규 추가했다.
+**주의:** L3가 BLOCKED임에도 프로세스 종료 코드는 `0`("tiered_pipeline_completed")이다 — 코드 근거는 하단 [프로세스 무결성 결함] 참조.
 
-## 프로덕션 실측 (2026-07-19 기준일, seed=42, 120 trials, 2회 연속 실행)
+## L2 스코어카드 (Study 윈도우, 2025-03-20~2025-12-30) — 참고용, 이미 안정적으로 PASS
 
 ```
-Run 1: [L2-AUDIT] completed=120/120 joint_feasible=0 crisis_measured=120
-       failures={'crisis_cagr': 110, 'cagr': 106, 'crisis_mdd': 85, 'sharpe_uplift': 40, 'fold': 28, 'recent_fold': 13, 'mdd': 3}
-Run 2: [L2-AUDIT] completed=120/120 joint_feasible=0 crisis_measured=120
-       failures={'crisis_cagr': 110, 'cagr': 106, 'crisis_mdd': 85, 'sharpe_uplift': 40, 'fold': 28, 'recent_fold': 13, 'mdd': 3}
+[L2-AUDIT] completed=120/120 joint_feasible=1 crisis_measured=120
+Champion: tf=8h (auto-selected by edge_quality, --timeframe=4h 무시됨 — 하단 참조)
+CAGR +33.2% | MDD 13.7% | Sharpe 1.815 | Sortino 2.854 | Calmar 2.426
+PSR 0.989 | DSR 0.986 | Sharpe Uplift +0.45
+Fold Pass 75% (3/4) | Trades 174 | Crisis(luna_ftx_2022) stress_tested_pass (CAGR -4.46%, MDD 19.69%, CVaR95 1.92%)
 ```
 
-- 최종 집계 라인(`completed`/`joint_feasible`/`crisis_measured`/`failures` 7개 항목) **바이트 단위 완전 일치**.
-- Best CAGR 궤적도 동일한 마일스톤(6.12%→11.20%→12.59%→13.81%→16.40%→19.85%→23.92%→23.94%→25.61%→27.12%)에서 동일하게 갱신됨.
-- `Current:` 진행률 라인에 미세한 순서 차이가 있었으나 tqdm 진행바 postfix의 터미널 출력 버퍼링 타이밍 차이일 뿐, trial 결과값/최종 집계에는 영향 없음을 확인.
+`docs/results/result.md`(2026-07-20판)와 지표가 재현되었고(seed=42 재현성 fix 이후 결정론 확인, `ADR 2026-07-19`), **L2는 2회 연속 세션에서 동일하게 견고한 PASS** — 이번 세션의 추가 튜닝은 한계효용이 없다(→ 사용자 지시대로 L3 결과 피드백에 집중).
 
-원본 로그: `/tmp/l2_determinism_run1.log`, `/tmp/l2_determinism_run2.log`.
+⚠️ L2 스코어카드 자체에 `NO-CRISIS-WINDOW` 경고 포함: 이 study 윈도우(2025Q1~Q4)는 병목-caliber fold(MDD≥15%&CAGR≤0)를 포함하지 않아 승격 근거로 단독 인용 불가 — 그래서 L3 최종 홀드아웃이 실질적인 검증 관문이다.
 
-## Verdict
+## L3 최종 홀드아웃 스코어카드 (2025-12-31 ~ 2026-06-30) — 핵심 결과
 
-- **재현성**: ✅ **확보** — 이전에는 동일 seed로 gate-pass 7개(성공) vs 0개(완전 실패)처럼 극단적으로 갈리던 것이, 이번엔 두 실행 모두 정확히 같은 결과로 수렴.
-- **⚠️ 결과 자체는 이번 검증 시점 조건에서 `no_feasible_trials`**: 재현성은 확보됐으나, 이전 세션에서 관측된 "gate-pass 7건 성공"은 우연한(더 유리한) RAM 상태에서 batch_size=1(순차 경로)로 실행됐던 결과였을 가능성이 있다 — 즉 이전 "성공"이 재현 가능한 champion이 아니라 실행마다 달라지는 요행이었을 수 있다는 뜻이기도 하다.
-- **`/check`**: PASS (Cov 24%, 종단 재현성 회귀테스트 포함).
+```
+STATUS: ❌ BLOCKED (Reason: negative_return)
 
-## 잔여 이슈
+[GROWTH]    CAGR: -0.2% | Total Return: -0.2% (필요: >0.0%) | Equity x1.00
+[EFFICIENCY] Sharpe: 0.021 | Sortino: 0.029  ← 사실상 무엣지(near-zero)
+[RISK]      MDD: 8.6% (<=35%) | CVaR95: 0.7% (<=6%) | Exposure: 0.2x  ← 매우 낮은 실배치 비중
+[DEPLOY]    Trades: 73 (>=10)
+```
 
-1. **[신규] 재현 가능한 기반 위에서 탐색공간/제약 재검토 필요**: 이제 결과가 결정적이므로, 현재 seed=42 조건에서 `no_feasible_trials`가 나오는 것이 진짜 탐색공간의 한계인지(제약이 과도하게 타이트) 판단할 수 있는 신뢰 가능한 기준선이 생겼다 — 다음 세션 최우선 분석 대상.
-2. **다중 seed 검증 부재**: 재현성 fix로 "같은 seed → 같은 결과"는 보장되나, "seed 간 결과 분산이 얼마나 큰가"는 여전히 미검증 — 여러 seed로 champion 안정성을 평가할 필요.
-3. **joint_feasible 상시 0**: 관측된 모든 실행(재현성 fix 전/후 포함)에서 13개 제약을 동시 만족하는 trial이 한 번도 나온 적 없음 — 근본적으로 탐색공간이나 게이트 임계값 재설계가 필요할 가능성.
-4. **`[CRISIS-WINDOW-DETAIL]` 개별 라벨 불일치(경미, 이전 세션부터 이월)**: 상위 집계와 개별 윈도우 라벨 표기가 다른 기존 관측 이슈, 미해결.
+- 레짐 분포(L3 윈도우): `bull=43.0% bear=17.8% crisis=39.3%` — 직전 study 윈도우(암묵적으로 alt-트렌드 우호적) 대비 **crisis 상태 비중이 이례적으로 높음**.
+- Major 심볼 신호 활성도: `BTCUSDT mu_bull=0.8% avg_mult=0.895` (유일하게 활성) vs `ETHUSDT mu_bull=0.0% avg_mult=0.000`, `BNBUSDT mu_bull=0.0% avg_mult=0.000` (완전 비활성).
+- Long/Short 활성 바 수는 균형적(long=561, short=522)이나 book은 알트코인 중심(APEUSDT, AAVEUSDT, TRBUSDT 등)이고 major는 BTC 단독 캐리.
 
+## 근본원인 진단 (코드 근거)
+
+1. **크라이시스 리스크 캡이 아니라 알파 부재가 1차 원인.** `apply_regime_risk_cap`(`l2_meta.py:1246`)의 기본값은 `crisis_gross_cap=0.55`, `bear_gross_cap=0.75` — 즉 crisis+bear 구간(57.1%)이라도 이론상 최대 0.55~0.75x까지는 배치 가능하다. 그런데 실측 평균 `Exposure=0.2x`로 이론적 캡보다 훨씬 낮다 → 캡이 바인딩된 게 아니라 **신호 자체(mu)가 대부분 0에 가까워 배치할 게 없었다.** ETH/BNB `avg_mult=0.000`이 이를 직접 증명한다.
+2. **BTC 단독 캐리 구조.** Study 윈도우(2025)에서는 알트 트렌드/모멘텀 계열(`dual_momentum`, `trend_donchian`, `mtf_fusion`)이 알트 로테이션 장에서 작동했으나, L3 홀드아웃(2026 H1)에서는 이 계열의 엣지가 재현되지 않고 BTC의 미미한 mu(0.8%)만 남았다. Sharpe 0.021은 사실상 노이즈 수준.
+3. **비용/펀딩 드래그가 마지막 한 방을 넣었다.** Total Return -0.2%는 큰 손실이 아니라 "거의 0"인 상태에서 거래비용이 부호를 음(-)으로 뒤집은 결과 — `docs/specs/l2-edge-attribution-diagnostics.md`(2026-06-28 진단, SSOT)의 "gross alpha 부재(67%) > cost(33%)" 결론과 정확히 동일한 패턴이 **실제 미래 데이터(진짜 OOS)에서 재확인**된 것이다. `feature 예측력 부재`는 추정이 아니라 지금 **실증**됐다.
+4. **L2 study 윈도우와 L3 홀드아웃 간 비정상성(non-stationarity).** L2가 auto-select한 champion tf=8h(`--timeframe 4h` 플래그는 무시됨 — `pipeline.py:4020` `_resolve_l2_master_tf`는 `cfg.l2_master_tf`가 미설정이면 CLI 인자와 무관하게 `edge_quality` 최댓값 TF를 자동 채택)는 study 윈도우에서 최적화됐을 뿐, forward 6개월에서 전혀 다른 레짐 구성(crisis 39.3%)을 만나 붕괴했다 — 전형적인 walk-forward 일반화 실패.
+
+## 프로세스 무결성 결함 (신규 발견)
+
+`active_pipeline.py:3326-3332`:
+```python
+if l2_final is None or not l2_final.gate_passed:
+    return RunnerResult(exit_code=1, reason=f"layer2_blocked:{final_reason}")
+...
+if run_config.phase == "l3":
+    return RunnerResult(exit_code=0, reason="tiered_pipeline_completed")
+```
+- 종료 코드 결정은 **`l2_final.gate_passed`만 검사**하고, L3의 `l3_gate_passed`(BLOCKED)는 검사하지 않는다.
+- 즉 `--phase l3` 실행이 L3에서 완전히 BLOCKED 되어도(이번 세션처럼) 프로세스는 `exit_code=0`으로 종료된다.
+- CI/cron 등 exit code만으로 자동화된 후속 단계(배포 승격, 알림 등)가 있다면 **이 실패를 놓친다.** 콘솔에 찍히는 `[LAYER 3: HOLDOUT VALIDATION SCORECARD]` 텍스트를 별도로 파싱하지 않는 한 실패가 은폐된다.
+
+## 개선 제안 (우선순위)
+
+### 우선순위 1 — L3 게이트를 종료 코드에 반영 (즉시, 저비용, 고가치)
+- `run_config.phase == "l3"` 분기에서 `l3_gate_passed`가 False면 `exit_code=1, reason=f"layer3_blocked:{l3.blocker_reason}"`를 반환하도록 수정.
+- 근거: 이번 세션에서 발견된 실제 사일런트 실패 사례 — 재발 방지 비용이 매우 낮고(if문 하나) 가치는 "true OOS 실패가 성공으로 오인되는" 최악의 리스크를 차단.
+
+### 우선순위 2 — L2 champion 승격 이전에 "최근 구간(Recency) 강건성 게이트" 선행 (구조적)
+- 현재 구조는 L2에서 champion을 확정(`growth_lcb_deployed` 등으로 최적화)한 뒤 L3에서 사후 검증만 한다 — 이번처럼 L2가 100% 안정적으로 PASS 해도 L3에서 뒤늦게 죽는 패턴이 반복될 수 있다.
+- 제안: L2 Optuna 목적함수/제약에 "최근 N개월(rolling) OOS 서브구간에서 Sharpe>0" 같은 recency 하드 게이트를 추가해 study 단계에서부터 최근 레짐에 죽는 파라미터를 배제한다. (단, `quant.md` §0 우선순위상 이는 "curve-fitting 방지"와 "walk-forward 강건성" 사이의 트레이드오프이므로, 새로운 고정 임계값을 급조하지 말고 기존 `l2-replay-parity-divergence.md`/`layer2-cost-aware-selection.md` SSOT에 정합되는 형태로 설계 필요 — **다음 세션 `/spec` 대상**.)
+
+### 우선순위 3 — 알파 근본 원인은 "L2 파라미터"가 아니라 "L1 신호 표현력" (재확인, 신규 작업 아님)
+- 이번 L3 결과는 `project_l2_edge_waterfall_diagnosis_2026_06_28`(gross alpha 부재)과 `project_metrics_cache_never_materialized_2026_07_02`(L1 비추세 신호 다양화 전 사이클 기각)의 결론을 **실제 미래 데이터로 재확인**한 것이다. L2 하이퍼파라미터를 더 튜닝하는 것은 이미 study 윈도우에 대해 100% 최적화되어 있으므로 추가 이득이 없다(오히려 curve-fitting 위험만 키움).
+- 알트코인 트렌드 계열 의존도를 낮추고 BTC/ETH 등 유동성 최상위 심볼에 대해 **다른 알파 원천**(예: 마이크로구조, 펀딩/베이시스 기반, 옵션 IV 파생 신호 등 — 과거에 시도하지 않은 축)을 탐색하는 것이 유일한 실질적 경로. 트렌드 계열 파라미터 재탐색은 반복하지 말 것(과거 세션에서 이미 반증됨).
+
+### 우선순위 4 — Crisis 레짐 재현빈도 재검토
+- L3 윈도우의 `crisis=39.3%`가 실제 시장 상태를 정확히 반영한 것인지, 아니면 레짐 분류기가 최근 데이터에 대해 과민(false crisis)한 것인지 미검증. 만약 후자라면 exposure 억제가 불필요하게 컸을 수 있다 — 다만 이번 세션 진단상 `avg_mult=0.2x`는 캡(0.55~0.75x)보다도 낮아 **레짐 캡이 아닌 신호 부재가 주 원인**이므로 이 항목은 2차 우선순위.
+
+## 결론
+
+- L2는 이번 세션에서도 견고하게 PASS했고 추가 튜닝의 한계효용이 없다 — 사용자 지시대로 **L3 결과에 집중**했다.
+- L3는 실질적 실패(`negative_return`, Sharpe≈0)이며, 원인은 이미 알려진 "L1 알파 예측력 부재"가 진짜 미래 데이터에서 재현된 것이다. 손실 자체는 작지만(MDD 8.6%, CVaR95 0.7%) **성장 목표(자산 증식)를 전혀 달성하지 못했다.**
+- 최우선 조치는 (1) 종료 코드가 L3 실패를 은폐하지 않도록 수정, (2) L2 study 단계에 recency 강건성 게이트 설계, (3) 트렌드-패밀리 재튜닝이 아닌 신규 알파 원천 탐색이다.
