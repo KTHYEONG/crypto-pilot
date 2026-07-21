@@ -500,5 +500,8 @@
   "src/domain/futures/optimization/robust_compounding.py": {
     "architecture": "docs/results/result.md",
     "testing": "tests/unit/domain/futures/strategy/tiered_workflow/test_portfolio_handoff.py"
+  },
+  "src/domain/futures/strategy/tiered_workflow/portfolio_handoff.py": {
+    "testing": "tests/unit/domain/futures/optimization/test_portfolio_causal_robust_compounding.py"
   }
 }
