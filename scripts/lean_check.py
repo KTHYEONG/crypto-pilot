@@ -83,10 +83,14 @@ def _get_target_coverage(file_path: str) -> int:
 
 def _parse_file_coverage(stdout: str, file_path: str) -> int | None:
     mkey = file_path.replace(".py", "")
+    module_key = mkey.replace("/", ".")
     for line in stdout.splitlines():
-        if mkey in line:
-            parts = line.split()
-            for part in parts:
+        parts = line.split()
+        if not parts:
+            continue
+        first_token = parts[0]
+        if first_token in (file_path, mkey, module_key):
+            for part in parts[1:]:
                 if "%" in part:
                     try:
                         return int(part.replace("%", ""))
@@ -131,26 +135,29 @@ def _is_new_file(file_path: str) -> bool:
 def _get_missing_lines(stdout: str, file_path: str) -> set[int]:
     """Parse the Missing column from coverage term-missing output."""
     mkey = file_path.replace(".py", "")
+    module_key = mkey.replace("/", ".")
     for line in stdout.splitlines():
-        if mkey in line:
-            parts = line.split()
-            if len(parts) >= 5:
-                missing_raw = parts[-1]
-                missing: set[int] = set()
-                for token in missing_raw.split(","):
-                    token = token.strip()
-                    if not token:
-                        continue
-                    try:
-                        if "-" in token:
-                            a, b = token.split("-", 1)
-                            for i in range(int(a.strip()), int(b.strip()) + 1):
-                                missing.add(i)
-                        else:
-                            missing.add(int(token))
-                    except ValueError:
-                        continue
-                return missing
+        parts = line.split()
+        if not parts:
+            continue
+        first_token = parts[0]
+        if first_token in (file_path, mkey, module_key) and len(parts) >= 5:
+            missing_raw = parts[-1]
+            missing: set[int] = set()
+            for token in missing_raw.split(","):
+                token = token.strip()
+                if not token:
+                    continue
+                try:
+                    if "-" in token:
+                        a, b = token.split("-", 1)
+                        for i in range(int(a.strip()), int(b.strip()) + 1):
+                            missing.add(i)
+                    else:
+                        missing.add(int(token))
+                except ValueError:
+                    continue
+            return missing
     return set()
 
 
@@ -368,8 +375,8 @@ def main() -> None:
                         d = {
                             "file": sf,
                             "line": 0,
-                            "error": f"Coverage target violation (Modified File): changed lines {sorted(list(uncovered_changed))} are not covered by tests",
-                            "fix_hint": f"Add test cases targeting the modified lines in {sf}: {sorted(list(uncovered_changed))}",
+                            "error": f"Coverage target violation (Modified File): changed lines {sorted(uncovered_changed)} are not covered by tests",
+                            "fix_hint": f"Add test cases targeting the modified lines in {sf}: {sorted(uncovered_changed)}",
                         }
                         coverage_violations.append(d)
 

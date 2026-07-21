@@ -11,4 +11,4 @@ Script handles: ADR append to decisions.md, archive pruning, index.json update, 
 ## Manual
 - **Architecture docs** (`docs/architecture/`): surgically edit existing sections only. Format rules in AGENTS.md §12.
 - **In-code ADR tag**: Insert `[ADR_YYYYMMDD_TaskID]` into modified class/fn docstrings.
-- **Verify clean state**: Run `git status` — no untracked files (except legitimate docs) should remain.
+- **Verify clean state & Spec cleanup**: Run `git status`. If any `docs/specs/*.md` or `*_contract.json` files remain, delete them directly using `rm` command. No untracked files (except legitimate docs) should remain.
