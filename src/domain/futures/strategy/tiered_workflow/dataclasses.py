@@ -683,6 +683,7 @@ class Layer2AllocationConfig:
     l2_regime_crisis_gross_cap: float = 0.25
     l2_regime_bucket_side_split_enabled: bool = False
     l2_regime_scoped_fold_override_enabled: bool = False
+    l2_crisis_replay_routing_parity_enabled: bool = True
     l2_regime_long_short_asymmetry_enabled: bool = False
     l2_regime_bear_long_extra_mult: float = 1.0
     l2_regime_crisis_long_extra_mult: float = 1.0
@@ -1022,6 +1023,9 @@ class Layer2AllocationConfig:
         )
         _l2_regime_scoped_fold_override_enabled = bool(
             params.get("l2_regime_scoped_fold_override_enabled", _dc.l2_regime_scoped_fold_override_enabled)
+        )
+        _l2_crisis_replay_routing_parity_enabled = bool(
+            params.get("l2_crisis_replay_routing_parity_enabled", _dc.l2_crisis_replay_routing_parity_enabled)
         )
         l2_regime_long_short_asymmetry_enabled = bool(
             params.get("l2_regime_long_short_asymmetry_enabled", _dc.l2_regime_long_short_asymmetry_enabled)
@@ -1373,6 +1377,7 @@ class Layer2AllocationConfig:
             l2_regime_crisis_gross_cap=l2_regime_crisis_gross_cap,
             l2_regime_bucket_side_split_enabled=_l2_regime_bucket_side_split_enabled,
             l2_regime_scoped_fold_override_enabled=_l2_regime_scoped_fold_override_enabled,
+            l2_crisis_replay_routing_parity_enabled=_l2_crisis_replay_routing_parity_enabled,
             l2_regime_long_short_asymmetry_enabled=l2_regime_long_short_asymmetry_enabled,
             l2_regime_bear_long_extra_mult=l2_regime_bear_long_extra_mult,
             l2_regime_crisis_long_extra_mult=l2_regime_crisis_long_extra_mult,

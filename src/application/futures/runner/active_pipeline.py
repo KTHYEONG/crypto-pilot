@@ -1572,6 +1572,9 @@ def _run_tiered_l2_study(
     )
     from src.domain.futures.strategy.tiered_workflow.awf_sim import build_l2_simulation_cache
     from src.domain.futures.strategy.tiered_workflow.dataclasses import Layer2StudyResult
+    from src.domain.futures.strategy.tiered_workflow.l2_meta import (
+        transfer_routing_plan_to_crisis_cache,
+    )
     from src.domain.futures.strategy.tiered_workflow.selection import (
         _layer2_experiment_key,
         _signal_batch_fingerprint,
@@ -1716,6 +1719,26 @@ def _run_tiered_l2_study(
         regime_policy_by_fold=_routing_plan.policy_by_fold,
         risk_severity_code_1d=_risk_severity_code_1d,
     )
+    _parity_enabled = bool(
+        getattr(cfg, "l2_crisis_replay_routing_parity_enabled",
+                Layer2AllocationConfig().l2_crisis_replay_routing_parity_enabled)
+    )
+    if crisis_replay_ctx is not None and _parity_enabled:
+        from dataclasses import replace as dc_replace
+
+        _routed_cache = transfer_routing_plan_to_crisis_cache(
+            crisis_cache=crisis_replay_ctx.cache,
+            study_cache=l2_sim_cache,
+            n_crisis_folds=len(crisis_replay_ctx.awf_folds),
+        )
+        crisis_replay_ctx = dc_replace(crisis_replay_ctx, cache=_routed_cache)
+        _logger.info(
+            "[EVAL] [CRISIS-ROUTING] parity=on policy_cells=%d bucket_cells=%d side_split=%s",
+            len(_routed_cache.regime_policy_by_fold[0]) if _routed_cache.regime_policy_by_fold else 0,
+            len(_routed_cache.bucket_edges_by_fold[0]) if _routed_cache.bucket_edges_by_fold else 0,
+            (_routed_cache.regime_routing_diagnostics.side_split_enabled
+             if _routed_cache.regime_routing_diagnostics else "n/a"),
+        )
     _policy_diag = _routing_plan.diagnostics.policy_diagnostics
     # Source contract for diagnostics tests:
     # [REGIME-L2] active_states=3 compression=True path=pooled_fallback proof=False ...
