@@ -2881,6 +2881,14 @@ def _run_awf_simulation(
     bucket_edges_by_fold: list[dict[tuple[int, str, str], float]] = []
     policy_by_fold = list(cache.regime_policy_by_fold)
     _routing_diag = cache.regime_routing_diagnostics
+    # [ADR_20260721_L2_REGIME_POLICY_SIDE_SPLIT_SHAPE_FIX] Single source of truth:
+    # bucket_edges_by_fold/policy_by_fold key-shape (3-key vs 4-key) is fixed at
+    # build_regime_routing_plan() precompute time. Re-deriving this flag from
+    # `config` here (a separately-resolved per-trial Layer2AllocationConfig) can
+    # disagree with what was actually precomputed, causing every policy_map.get()
+    # lookup to silently miss (4-key query against a 3-key table) — read the
+    # value the routing plan itself recorded instead.
+    _side_split_enabled = bool(_routing_diag.side_split_enabled) if _routing_diag is not None else False
     from src.domain.futures.strategy.tiered_workflow.l2_meta import (
         apply_asymmetric_long_short_regime_cap,
         apply_regime_risk_cap,
@@ -3279,19 +3287,44 @@ def _run_awf_simulation(
                         if cache.signal_mask_2d[t, _j] and cache.sleeve_ids[_j] in _before_sleeve_keys
                     }
                     if _regime_policy_mode == "filter":
-                        if bool(getattr(config, "l2_regime_conditional_weight_enabled", False)):
-                            _oos_sleeve_sigs = apply_bucket_conditional_weight(
-                                _oos_sleeve_sigs,
-                                _current_bucket_edges,
-                                _regime_now,
-                                edge_floor_bps=float(getattr(config, "l2_bucket_edge_floor_bps", 0.0)),
+                        _edge_floor = float(getattr(config, "l2_bucket_edge_floor_bps", 0.0))
+                        _side_split = _side_split_enabled
+                        _bucket_fn = (
+                            apply_bucket_conditional_weight
+                            if bool(getattr(config, "l2_regime_conditional_weight_enabled", False))
+                            else filter_sleeves_by_bucket
+                        )
+                        if _side_split:
+                            # [ADR_20260721_ALPHA_FUNNEL_REGIME_COVERAGE] bucket_edges is
+                            # keyed (regime, family, tf, side) — split the batch by each
+                            # sleeve's own realized side (filter_sleeves_by_bucket/
+                            # apply_bucket_conditional_weight only accept one scalar side
+                            # per call), apply per-side, then remerge.
+                            _long_sigs = {
+                                k: v
+                                for k, v in _oos_sleeve_sigs.items()
+                                if _oos_sleeve_edges.get(k, (0.0, 0.0))[0] > 0.0
+                            }
+                            _short_sigs = {
+                                k: v
+                                for k, v in _oos_sleeve_sigs.items()
+                                if _oos_sleeve_edges.get(k, (0.0, 0.0))[0] < 0.0
+                            }
+                            _long_out = _bucket_fn(
+                                _long_sigs, _current_bucket_edges, _regime_now,
+                                side=1, edge_floor_bps=_edge_floor,
                             )
+                            _short_out = _bucket_fn(
+                                _short_sigs, _current_bucket_edges, _regime_now,
+                                side=-1, edge_floor_bps=_edge_floor,
+                            )
+                            _oos_sleeve_sigs = {**_long_out, **_short_out}
                         else:
-                            _oos_sleeve_sigs = filter_sleeves_by_bucket(
+                            _oos_sleeve_sigs = _bucket_fn(
                                 _oos_sleeve_sigs,
                                 _current_bucket_edges,
                                 _regime_now,
-                                edge_floor_bps=float(getattr(config, "l2_bucket_edge_floor_bps", 0.0)),
+                                edge_floor_bps=_edge_floor,
                             )
                         _oos_sleeve_edges = {k: v for k, v in _oos_sleeve_edges.items() if k in _oos_sleeve_sigs}
                     else:
@@ -3308,6 +3341,7 @@ def _run_awf_simulation(
                             ),
                             scale_signal_mu=bool(getattr(config, "l2_regime_scale_signal_mu", True)),
                             scale_quality_weight=bool(getattr(config, "l2_regime_scale_quality_weight", True)),
+                            side_split_enabled=_side_split_enabled,
                         )
                         if _fold_idx < len(policy_effect_logs_by_fold) and _policy_applied.n_input > 0:
                             policy_effect_logs_by_fold[_fold_idx].append(_policy_applied)
