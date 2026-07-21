@@ -443,3 +443,26 @@ def test_build_regime_routing_plan_side_split_on_vs_off_differ_when_sides_mixed(
     assert off_key_lengths == {3}
     assert on_key_lengths == {4}
     assert plan_off.effective_bucket_edges_by_fold[0].keys() != plan_on.effective_bucket_edges_by_fold[0].keys()
+
+
+def test_build_regime_routing_plan_records_side_split_enabled_in_diagnostics() -> None:
+    """[ADR_20260721_L2_REGIME_POLICY_SIDE_SPLIT_SHAPE_FIX] Guards the single-source-of-truth
+    fix: RegimeRoutingDiagnostics.side_split_enabled must reflect what was actually used to
+    build effective_bucket_edges_by_fold/policy_by_fold, so downstream consumers (awf_sim.py)
+    never re-derive this flag independently and risk a 3-key/4-key mismatch."""
+    n_bars = 20
+    aligned = _make_aligned([100.0 + i for i in range(n_bars)])
+    raw_codes = np.zeros(n_bars, dtype=np.int8)
+    folds = (WFFold(fit_start=0, fit_end=10, cal_start=10, cal_end=12, oos_start=12, oos_end=18),)
+
+    plan_off = build_regime_routing_plan(
+        cache=_make_cache(n_bars), aligned=aligned, awf_folds=folds,
+        raw_regime_code_1d=raw_codes, compression_enabled=True, min_n=1, side_split_enabled=False,
+    )
+    plan_on = build_regime_routing_plan(
+        cache=_make_cache(n_bars), aligned=aligned, awf_folds=folds,
+        raw_regime_code_1d=raw_codes, compression_enabled=True, min_n=1, side_split_enabled=True,
+    )
+
+    assert plan_off.diagnostics.side_split_enabled is False
+    assert plan_on.diagnostics.side_split_enabled is True
