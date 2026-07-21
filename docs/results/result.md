@@ -1,4 +1,34 @@
-# L2/L3 Multi-Seed 강건성 합의 게이트 적용 결과 — 2026-07-21 (최신)
+# L2 Recency-Generalization 게이트 적용 결과 — 2026-07-21 (최신)
+
+`docs/specs/l2-recency-generalization-gate.md` 구현(`/check` PASS, Cov 57%) — L2→L3 반복 붕괴 패턴(아래 "Phase L3 종단" 섹션의 우선순위2)에 대한 구조적 방어 2건 추가. **범위는 grill-me에서 명시적으로 좁혀짐: 신규 alpha/crisis 전용 신호는 배제, 알파 부재 자체는 이번 조치로 해결되지 않음.**
+
+## 무엇을 고쳤나 (쉽게 설명)
+
+1. **Recency Holdout 하드게이트(신규)**: 기존 `recent_fold` 게이트는 "L2 study 구간 4개 fold 중 마지막 fold"만 봤는데, 이 fold는 원래 champion을 고르는 점수(objective) 계산에도 이미 들어가 있어서 "내가 채점한 답안지로 내가 검증"하는 순환 구조였다. 이번에 **채점(objective)에는 전혀 안 들어가는, study 구간 맨 끝 30일만 따로 떼어** CAGR이 일정 기준(-5%) 아래면 그 파라미터 조합을 아예 후보에서 탈락시키는 제약을 추가했다(Optuna 14번째 제약 슬롯).
+2. **"위기장 미검증" 경고를 실제로 보이게 함(투명성)**: L2 study 구간(예: 2025년)이 우연히 하락장/위기장을 하나도 안 겪었을 수 있는데, 이 경우 지금까지는 콘솔에 `NO-CRISIS-WINDOW`라는 경고 한 줄만 찍히고 아무도 이 정보를 실제 판정(멀티시드 합의 로그 등)에 반영하지 않았다. 이번에 이 정보를 **정식 필드(`window_bottleneck_covered`)로 승격**시켜 `[MULTI-SEED]` 최종 판정 로그에 항상 같이 찍히도록 배선했다.
+3. **실측 중 발견한 크래시 버그 수정**: 위 1번을 배선하는 과정에서 실제 파이프라인을 돌려보니 `zip() argument 2 is longer than argument 1`로 3개 seed 전부 크래시하는 것을 발견 — 제약 이름 목록(13개)이 새로 늘어난 제약값 목록(14개)과 개수가 안 맞았던 실수. 즉시 수정 후 재실행해서 정상 동작 확인.
+
+## 실측 결과 (`--phase l3 --trials 120 --timeframe 4h --seed 42`, 내부 42/43/44 순차)
+
+| Seed | joint_feasible | recency_holdout 때문에 걸러진 trial 수 | 최종 판정 |
+|---|---|---|---|
+| 42 | 0/120 | 53개 | ❌ no_feasible_trials |
+| 43 | 0/120 | 80개 | ❌ no_feasible_trials |
+| 44 | 0/120 | 49개 | ❌ no_feasible_trials |
+
+`[MULTI-SEED] pass_count=0/3 required=2 admitted=False window_covered=False`
+
+**해석**: 새 게이트는 설계대로 실제로 작동한다(seed당 49~80개 trial을 차단). 하지만 최종 결론(`admitted=False`, 배포 불가)은 **바뀌지 않았다** — `cagr`/`crisis_cagr`/`crisis_mdd`(=알파가 거의 없다는 신호) 위반이 이미 recency_holdout보다 더 많은 trial을 걸러내고 있어서, 이번 게이트는 "이미 안 좋은 후보를 한 번 더 확실히 안 좋다고 확인"하는 역할만 했다. **좋은 소식은 이제 이 경고가 로그에 숨지 않고 항상 보인다는 것.**
+
+## 여전히 문제인 것 (해결 안 됨, 이번 조치의 범위 밖)
+
+- **근본 병목은 그대로다**: BTC를 제외한 나머지 코인(ETH, BNB, 알트 전부)의 신호가 사실상 "0"에 가깝다(`avg_mult=0.000`). 게이트를 아무리 정교하게 만들어도, 애초에 태울 알파(수익 낼 신호)가 없으면 통과할 후보 자체가 안 생긴다.
+- 이번 spec은 사용자 확인(grill-me)에 따라 **crisis 전용 신호 재도입은 완전 배제**(과거 3번 반증된 경로라 재시도 안 함), **신규 alpha 소스 리서치도 범위 밖**으로 뒀다. 즉 이번 조치는 "잘못된 배포를 막는 방벽을 하나 더 튼튼히 한 것"이지, "돈을 벌 수 있게 만든 것"은 아니다.
+- 다음으로 실제 성과를 개선하려면 이 문서 하단 "Phase L3 종단" 섹션의 **우선순위 3(L1 신규 alpha source 탐색: 마이크로구조/펀딩-베이시스/IV파생 등)**으로 넘어가야 한다 — 트렌드/모멘텀/리버설 계열은 이미 소진됐다.
+
+---
+
+# L2/L3 Multi-Seed 강건성 합의 게이트 적용 결과 — 2026-07-21
 
 `docs/specs/l2-l3-multi-seed-robustness-consensus.md` 구현(`/check` PASS, Cov 32%) — L2 champion 승격을 단일 seed 결과에서 **K=3 독립 seed(base_seed, +1, +2) 과반수(2/3) 합의**로 전환, 미달 시 hard block(exit_code=1)하도록 기본 동작을 변경했다.
 
