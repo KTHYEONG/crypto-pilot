@@ -22,6 +22,7 @@ from src.domain.futures.optimization.ml_context import MLPhaseDContext
 from src.domain.futures.optimization.objectives import objective_ml_phase_d
 from src.domain.futures.optimization.observability.trial_observability import set_trial_event_attrs
 from src.domain.futures.optimization.opt_config import OPT_FUTURES_CONFIG
+from src.domain.futures.optimization.robust_compounding import Layer2CandidateArtifact
 from src.domain.futures.strategy.tiered_workflow.deployable_score import (
     build_layer2_deployable_score,
 )
@@ -34,6 +35,37 @@ if TYPE_CHECKING:
     from src.domain.futures.strategy.tiered_workflow.dataclasses import L2SimulationCache
 
 _logger = logging.getLogger(__name__)
+
+
+def evaluate_l2_candidate_artifact(
+    *,
+    params: dict[str, Any],
+    ctx: TieredContext,
+    robustness_windows: tuple[Any, ...],
+    data_fingerprint: str,
+    handoff_fingerprint: str,
+    routing_hash: str,
+    window_plan_hash: str,
+) -> Layer2CandidateArtifact:
+    """Create the immutable candidate boundary used by robust search.
+
+    The full simulator populates window metrics in the caller.  Returning a
+    canonical blocked artifact when those metrics are not available prevents a
+    partially evaluated trial from being promoted.
+    """
+    from src.domain.futures.optimization.robust_compounding import evaluate_l2_candidate_artifact as _evaluate
+
+    metrics = tuple(getattr(ctx, "robust_window_metrics", ()))
+    return _evaluate(
+        params=params,
+        ctx=ctx,
+        robustness_windows=robustness_windows,
+        data_fingerprint=data_fingerprint,
+        handoff_fingerprint=handoff_fingerprint,
+        routing_hash=routing_hash,
+        window_plan_hash=window_plan_hash,
+        window_metrics=metrics,
+    )
 
 
 def compute_trial_crisis_unit_returns(

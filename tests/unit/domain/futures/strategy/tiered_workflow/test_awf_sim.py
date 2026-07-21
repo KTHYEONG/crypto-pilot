@@ -11,6 +11,7 @@ from src.domain.futures.strategy.candidate_contracts import (
 )
 from src.domain.futures.strategy.common.alignment import AlignedMarketData
 from src.domain.futures.strategy.tiered_workflow.awf_sim import (
+    build_causal_net_sleeve_returns,
     build_l2_simulation_cache,
 )
 
@@ -86,3 +87,33 @@ def test_build_cache_uses_signal_sleeve_key() -> None:
     assert len(cache.sleeve_to_tf) == 3
     for stf, sk in zip(cache.sleeve_to_tf, cache.sleeve_keys, strict=True):
         assert stf == sk.native_tf
+
+
+def test_build_causal_net_sleeve_returns_uses_only_active_prior_signal_and_cost() -> None:
+    # Arrange
+    aligned = MagicMock(spec=AlignedMarketData)
+    aligned.symbols = ("BTCUSDT",)
+    aligned.datetimes = np.array([np.datetime64("2026-01-15")] * 8)
+    aligned.close_2d = np.array([[100.0], [110.0], [121.0], [121.0], [121.0], [121.0], [121.0], [121.0]])
+    aligned.execution_cost_bps_2d = np.full((8, 1), 10.0, dtype=np.float64)
+    aligned.funding_2d = np.zeros((8, 1), dtype=np.float64)
+    aligned.beta_vs_market_1d = np.zeros(1, dtype=np.float64)
+    aligned.volume_usdt_2d = np.ones((8, 1), dtype=np.float64)
+    aligned.turnover_2d = np.ones((8, 1), dtype=np.float64)
+    aligned.open_2d = np.ones((8, 1), dtype=np.float64)
+    aligned.high_2d = np.ones((8, 1), dtype=np.float64)
+    aligned.low_2d = np.ones((8, 1), dtype=np.float64)
+    batch = ValidatedSignalBatch(
+        events=(_make_event(decision_idx=0),), start_idx=0, end_idx=3,
+        symbols=("BTCUSDT",), registry_version="rv", model_version="mv",
+    )
+    cache = build_l2_simulation_cache(aligned, batch, "4h")
+
+    # Act
+    returns = build_causal_net_sleeve_returns(cache=cache, aligned=aligned, start=0, end=4)
+
+    # Assert
+    assert returns.dtype == np.float32
+    assert returns.shape == (4, 1)
+    assert returns[0, 0] == 0.0
+    assert returns[1, 0] == np.float32(0.1 - 0.001 / 12.0)
