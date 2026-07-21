@@ -2342,19 +2342,20 @@ def _build_rule_based_stress_batch(
     matched_pairs = 0
     active_score_bars = 0
     for panel in panels:
+        expected_strategy_id = f"{panel.family}:{panel.variant}"
         for sym, items in registry.by_symbol.items():
             col = sym_to_idx.get(sym)
             if col is None or col >= panel.signed_score_2d.shape[1]:
                 continue
             evidence = next(
-                (
-                    it
-                    for it in items
-                    if panel.variant in it.key.strategy_id or it.key.strategy_id.endswith(panel.variant)
-                ),
+                (it for it in items if it.key.strategy_id == expected_strategy_id),
                 None,
             )
             if evidence is None:
+                logger.debug(
+                    "[ALGO] event=stress_evidence_unmatched symbol=%s expected=%s available=%s",
+                    sym, expected_strategy_id, tuple(i.key.strategy_id for i in items),
+                )
                 continue
             matched_pairs += 1
             score_col = panel.signed_score_2d[:, col]
