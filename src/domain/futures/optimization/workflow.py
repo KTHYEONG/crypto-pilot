@@ -2357,6 +2357,7 @@ def evaluate_l2_trial(
         positive_block_delta_ratio=float(positive_block_delta_ratio),
         fold_attributions=sim.fold_attributions,
         config=config,
+        cagr_baseline=float(cagr_baseline),
         crisis_mdd_hybrid=_crisis_budget.mdd_hybrid,
         crisis_mdd_budget=_crisis_budget.mdd_budget,
         crisis_cagr_hybrid=_crisis_budget.cagr_hybrid,

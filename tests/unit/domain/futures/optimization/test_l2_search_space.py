@@ -52,3 +52,16 @@ class TestL2SearchSpace:
             "type": "categorical",
             "choices": (False, True),
         }
+
+    def test_l2_search_space_includes_bear_and_crisis_gross_cap(self) -> None:
+        assert "l2_regime_crisis_gross_cap" in L2_SEARCH_SPACE
+        crisis = L2_SEARCH_SPACE["l2_regime_crisis_gross_cap"]
+        assert crisis["type"] == "float"
+        assert crisis["low"] == 0.25
+        assert crisis["high"] == 0.85
+
+        assert "l2_regime_bear_gross_cap" in L2_SEARCH_SPACE
+        bear = L2_SEARCH_SPACE["l2_regime_bear_gross_cap"]
+        assert bear["type"] == "float"
+        assert bear["low"] == 0.35
+        assert bear["high"] == 0.85
