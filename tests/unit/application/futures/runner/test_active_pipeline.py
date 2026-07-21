@@ -408,9 +408,14 @@ class TestRunTieredL2StudyFoldOverride:
         from src.domain.futures.strategy.config import CandidateStrategyConfig
 
         cfg = CandidateStrategyConfig(wf_n_folds=4)
+        _folds = (
+            SimpleNamespace(fit_start=0, fit_end=80, cal_start=40, cal_end=80, oos_start=100, oos_end=200),
+            SimpleNamespace(fit_start=0, fit_end=160, cal_start=120, cal_end=160, oos_start=200, oos_end=300),
+            SimpleNamespace(fit_start=0, fit_end=260, cal_start=220, cal_end=260, oos_start=300, oos_end=400),
+        )
         mocker.patch(
             "src.domain.futures.strategy.walk_forward.build_walk_forward_folds",
-            return_value=(),
+            return_value=_folds,
         )
         mocker.patch(
             "src.domain.futures.strategy.tiered_workflow.awf_sim.build_l2_simulation_cache",
@@ -468,8 +473,8 @@ class TestRunTieredL2StudyFoldOverride:
 
         from datetime import date
         window = SimpleNamespace(
-            holdout_start=date(2025, 6, 1),
-            l2_start=date(2024, 6, 1),
+            holdout_start=date(2024, 1, 19),
+            l2_start=date(2024, 1, 5),
         )
         aligned = SimpleNamespace(
             symbols=("BTCUSDT",),
@@ -513,9 +518,14 @@ class TestRunTieredL2StudyFoldOverride:
         from src.domain.futures.strategy.config import CandidateStrategyConfig
 
         cfg = CandidateStrategyConfig(wf_n_folds=4)
+        _folds = (
+            SimpleNamespace(fit_start=0, fit_end=80, cal_start=40, cal_end=80, oos_start=100, oos_end=200),
+            SimpleNamespace(fit_start=0, fit_end=160, cal_start=120, cal_end=160, oos_start=200, oos_end=300),
+            SimpleNamespace(fit_start=0, fit_end=260, cal_start=220, cal_end=260, oos_start=300, oos_end=400),
+        )
         mocker.patch(
             "src.domain.futures.strategy.walk_forward.build_walk_forward_folds",
-            return_value=(),
+            return_value=_folds,
         )
         mocker.patch(
             "src.domain.futures.strategy.tiered_workflow.awf_sim.build_l2_simulation_cache",
@@ -574,8 +584,8 @@ class TestRunTieredL2StudyFoldOverride:
 
         from datetime import date
         window = SimpleNamespace(
-            holdout_start=date(2025, 6, 1),
-            l2_start=date(2024, 6, 1),
+            holdout_start=date(2024, 1, 19),
+            l2_start=date(2024, 1, 5),
         )
         aligned = SimpleNamespace(
             symbols=("BTCUSDT",),
@@ -724,9 +734,14 @@ def test_l2_batch_size_invariant_to_available_memory(mocker) -> None:
     ask_call_counts: list[int] = []
     max_workers_seen: list[int] = []
 
+    _folds = (
+        SimpleNamespace(fit_start=0, fit_end=80, cal_start=40, cal_end=80, oos_start=100, oos_end=200),
+        SimpleNamespace(fit_start=0, fit_end=160, cal_start=120, cal_end=160, oos_start=200, oos_end=300),
+        SimpleNamespace(fit_start=0, fit_end=260, cal_start=220, cal_end=260, oos_start=300, oos_end=400),
+    )
     mocker.patch(
         "src.domain.futures.strategy.walk_forward.build_walk_forward_folds",
-        return_value=(),
+        return_value=_folds,
     )
     mocker.patch(
         "src.domain.futures.strategy.tiered_workflow.awf_sim.build_l2_simulation_cache",
@@ -774,8 +789,8 @@ def test_l2_batch_size_invariant_to_available_memory(mocker) -> None:
 
     from datetime import date
     window = SimpleNamespace(
-        holdout_start=date(2025, 6, 1),
-        l2_start=date(2024, 6, 1),
+        holdout_start=date(2024, 1, 19),
+        l2_start=date(2024, 1, 5),
     )
     aligned = SimpleNamespace(
         symbols=("BTCUSDT",),
@@ -848,9 +863,14 @@ def test_run_tiered_l2_study_wires_probe_span_around_batch_loop(mocker) -> None:
 
     cfg = CandidateStrategyConfig(wf_n_folds=4)
 
+    _folds = (
+        SimpleNamespace(fit_start=0, fit_end=80, cal_start=40, cal_end=80, oos_start=100, oos_end=200),
+        SimpleNamespace(fit_start=0, fit_end=160, cal_start=120, cal_end=160, oos_start=200, oos_end=300),
+        SimpleNamespace(fit_start=0, fit_end=260, cal_start=220, cal_end=260, oos_start=300, oos_end=400),
+    )
     mocker.patch(
         "src.domain.futures.strategy.walk_forward.build_walk_forward_folds",
-        return_value=(),
+        return_value=_folds,
     )
     mocker.patch(
         "src.domain.futures.strategy.tiered_workflow.awf_sim.build_l2_simulation_cache",
@@ -926,7 +946,7 @@ def test_run_tiered_l2_study_wires_probe_span_around_batch_loop(mocker) -> None:
 
     from datetime import date
 
-    window = SimpleNamespace(holdout_start=date(2025, 6, 1), l2_start=date(2024, 6, 1))
+    window = SimpleNamespace(holdout_start=date(2024, 1, 19), l2_start=date(2024, 1, 5))
     aligned = SimpleNamespace(
         symbols=("BTCUSDT",),
         close_2d=mocker.MagicMock(),
@@ -1070,9 +1090,14 @@ def test_run_tiered_l2_study_logs_child_peak_rss(mocker: Any) -> None:
 
     cfg = CandidateStrategyConfig(wf_n_folds=4)
 
+    _folds = (
+        SimpleNamespace(fit_start=0, fit_end=80, cal_start=40, cal_end=80, oos_start=100, oos_end=200),
+        SimpleNamespace(fit_start=0, fit_end=160, cal_start=120, cal_end=160, oos_start=200, oos_end=300),
+        SimpleNamespace(fit_start=0, fit_end=260, cal_start=220, cal_end=260, oos_start=300, oos_end=400),
+    )
     mocker.patch(
         "src.domain.futures.strategy.walk_forward.build_walk_forward_folds",
-        return_value=(),
+        return_value=_folds,
     )
     mocker.patch(
         "src.domain.futures.strategy.tiered_workflow.awf_sim.build_l2_simulation_cache",
@@ -1156,7 +1181,7 @@ def test_run_tiered_l2_study_logs_child_peak_rss(mocker: Any) -> None:
 
     from datetime import date
 
-    window = SimpleNamespace(holdout_start=date(2025, 6, 1), l2_start=date(2024, 6, 1))
+    window = SimpleNamespace(holdout_start=date(2024, 1, 19), l2_start=date(2024, 1, 5))
     aligned = SimpleNamespace(
         symbols=("BTCUSDT",),
         close_2d=mocker.MagicMock(),
@@ -1201,9 +1226,14 @@ def _setup_l2_study_mocks(
 
     cfg = CandidateStrategyConfig(wf_n_folds=4)
 
+    _folds = (
+        SimpleNamespace(fit_start=0, fit_end=80, cal_start=40, cal_end=80, oos_start=100, oos_end=200),
+        SimpleNamespace(fit_start=0, fit_end=160, cal_start=120, cal_end=160, oos_start=200, oos_end=300),
+        SimpleNamespace(fit_start=0, fit_end=260, cal_start=220, cal_end=260, oos_start=300, oos_end=400),
+    )
     mocker.patch(
         "src.domain.futures.strategy.walk_forward.build_walk_forward_folds",
-        return_value=(),
+        return_value=_folds,
     )
     mocker.patch(
         "src.domain.futures.strategy.tiered_workflow.awf_sim.build_l2_simulation_cache",
@@ -1295,7 +1325,7 @@ def _call_l2_study(
 ) -> Any:
     from datetime import date
 
-    window = SimpleNamespace(holdout_start=date(2025, 6, 1), l2_start=date(2024, 6, 1))
+    window = SimpleNamespace(holdout_start=date(2024, 1, 19), l2_start=date(2024, 1, 5))
     aligned = SimpleNamespace(
         symbols=("BTCUSDT",),
         close_2d=SimpleNamespace(),
@@ -1457,9 +1487,14 @@ def test_l2_study_trial_sequence_reproducible_across_memory_states(mocker) -> No
 
     cfg = CandidateStrategyConfig(wf_n_folds=4)
 
+    _folds = (
+        SimpleNamespace(fit_start=0, fit_end=80, cal_start=40, cal_end=80, oos_start=100, oos_end=200),
+        SimpleNamespace(fit_start=0, fit_end=160, cal_start=120, cal_end=160, oos_start=200, oos_end=300),
+        SimpleNamespace(fit_start=0, fit_end=260, cal_start=220, cal_end=260, oos_start=300, oos_end=400),
+    )
     mocker.patch(
         "src.domain.futures.strategy.walk_forward.build_walk_forward_folds",
-        return_value=(),
+        return_value=_folds,
     )
     mocker.patch(
         "src.domain.futures.strategy.tiered_workflow.awf_sim.build_l2_simulation_cache",
@@ -1499,8 +1534,8 @@ def test_l2_study_trial_sequence_reproducible_across_memory_states(mocker) -> No
 
     from datetime import date
     window = SimpleNamespace(
-        holdout_start=date(2025, 6, 1),
-        l2_start=date(2024, 6, 1),
+        holdout_start=date(2024, 1, 19),
+        l2_start=date(2024, 1, 5),
     )
     aligned = SimpleNamespace(
         symbols=("BTCUSDT",),
@@ -1783,21 +1818,20 @@ def test_run_multi_seed_robustness_consensus_l2_phase_uses_l2_cagr(mocker) -> No
     assert result.selected.seed == 43  # lowest l2 cagr_hybrid=0.03
 
 
-def test_active_pipeline_l3_blocked_when_consensus_fails_returns_exit_code_1(mocker) -> None:
+def test_active_pipeline_l3_blocked_when_robust_candidate_fails_returns_exit_code_1(mocker) -> None:
     from src.application.futures.runner.active_pipeline import (
-        MultiSeedConsensusResult,
+        RobustSearchOutcome,
         _run_strategy_stage,
     )
     from src.application.futures.runner.models import RunnerResult
 
-    _failed_consensus = MultiSeedConsensusResult(
-        admitted=False, selected=None, outcomes=(),
-        pass_count=0, required_pass_count=2,
-        blocker_reason="seed_consensus_blocked:0/3",
+    _failed_outcome = RobustSearchOutcome(
+        l2_study_result=None, l2_final=None, l3_final=None,
+        passed=False, blocker_reason="no_robust_candidate",
     )
     mocker.patch(
-        "src.application.futures.runner.active_pipeline._run_multi_seed_robustness_consensus",
-        return_value=_failed_consensus,
+        "src.application.futures.runner.active_pipeline._run_portfolio_causal_robust_outcome",
+        return_value=_failed_outcome,
     )
 
     _tiered_window = mocker.Mock()
@@ -1904,7 +1938,7 @@ def test_active_pipeline_l3_blocked_when_consensus_fails_returns_exit_code_1(moc
 
     assert isinstance(_output, RunnerResult)
     assert _output.exit_code == 1
-    assert _output.reason == "seed_consensus_blocked:0/3"
+    assert _output.reason == "no_robust_candidate"
 
 
 # ─── Recency Holdout Gate: window_covered log ─────────────────────────────

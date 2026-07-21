@@ -17,6 +17,7 @@ import numpy as np
 from numpy.typing import NDArray
 
 from src.domain.futures.strategy.tiered_workflow.dataclasses import (
+    Layer2AllocationConfig,
     Layer2FoldDiagnostics,
     Layer2RecencyHoldoutDiagnostics,
 )
@@ -686,3 +687,86 @@ def evaluation_window_bottleneck_verdict(
             detail = f"fold={awf_fold_diags.index(f)} mdd={mdd:.3f} cagr={cagr:+.3f}"
             break
     return (covered, detail)
+
+
+def build_causal_leverage_schedule(
+    *,
+    fit_returns_by_window: tuple[NDArray[np.float64], ...],
+    crisis_calibration_returns_by_window: tuple[NDArray[np.float64], ...],
+    labels: tuple[str, ...],
+    config: Layer2AllocationConfig,
+    tf: str,
+) -> tuple[object, ...]:
+    """Build fold-level causal leverage schedule using only fit/cal returns.
+
+    Leverage is determined by the fit-leg safety ceiling and then projected
+    through the crisis (LUNA) calibration budget. No OOS fold returns are
+    used, eliminating look-ahead leakage.
+    """
+    from src.domain.futures.optimization.robust_compounding import FoldLeverageDecision
+
+    n_windows = len(fit_returns_by_window)
+    if not labels:
+        labels = tuple(f"fold_{i}" for i in range(n_windows))
+
+    decisions: list[FoldLeverageDecision] = []
+    for i in range(n_windows):
+        label = labels[i] if i < len(labels) else f"fold_{i}"
+        fit_arr = fit_returns_by_window[i] if i < len(fit_returns_by_window) else np.array([], dtype=np.float64)
+        cal_arr = crisis_calibration_returns_by_window[i] if i < len(crisis_calibration_returns_by_window) else np.array([], dtype=np.float64)
+
+        if fit_arr.size < 2:
+            decisions.append(FoldLeverageDecision(label, 0.0, 0.0, 0.0, "insufficient_fit_data", 0.0, 0.0))
+            continue
+
+        l_ceil, ceil_binding, _ = calibrate_deployment_leverage(
+            fit_rets=fit_arr,
+            mdd_cap=float(config.l2_max_mdd_abs),
+            mdd_margin=float(config.l2_deploy_mdd_margin),
+            cvar_cap=float(config.l2_max_cvar_95),
+            cvar_margin=float(config.l2_deploy_cvar_margin),
+            l_hard_cap=float(config.l2_deploy_l_hard_cap),
+            exchange_leverage_cap=config.l2_max_exchange_leverage,
+            l_floor=1.0,
+        )
+
+        requested = l_ceil
+
+        if cal_arr.size < 2 or not np.all(np.isfinite(cal_arr)):
+            decisions.append(FoldLeverageDecision(
+                label, requested, 0.0, 0.0,
+                "crisis_calibration_unavailable",
+                float(np.max(cal_arr) if cal_arr.size > 0 else 0.0),
+                float(np.mean(cal_arr) if cal_arr.size > 0 else 0.0),
+            ))
+            continue
+
+        try:
+            cal_mdd = float(np.max(np.maximum.accumulate(np.cumprod(1.0 + cal_arr)) - np.cumprod(1.0 + cal_arr)) / np.maximum.accumulate(np.cumprod(1.0 + cal_arr)))
+            cal_mdd = cal_mdd if np.isfinite(cal_mdd) else 0.0  # pragma: no cover - scalar is finite after validated input
+        except Exception:
+            cal_mdd = 0.0
+        cal_cagr = float(np.expm1(np.sum(np.log1p(np.clip(cal_arr, -1.0 + 1e-9, None))) / (max(float(cal_arr.size) / 2190.0, 1e-9))))
+
+        crisis_mdd_budget = float(config.l2_max_mdd_abs) * (1.0 - float(config.l2_deploy_crisis_mdd_margin))
+        projection = project_leverage_to_crisis_budget(
+            requested_leverage=requested,
+            crisis_unit_rets=cal_arr,
+            crisis_mdd_budget=crisis_mdd_budget,
+            crisis_cagr_floor=float(config.l2_min_crisis_cagr),
+            bars_per_year=2190.0,
+        )
+
+        applied = min(requested, projection.projected_leverage, float(config.l2_max_exchange_leverage or float("inf")))
+        binding = "exchange_cap" if applied >= float(config.l2_max_exchange_leverage or float("inf")) else (
+            "luna_projected" if applied < requested - 1e-12 else ceil_binding
+        )
+
+        if applied <= 0.0:
+            binding = "zero_deployable_risk"
+
+        decisions.append(FoldLeverageDecision(
+            label, requested, projection.projected_leverage, applied, binding, cal_mdd, cal_cagr,
+        ))
+
+    return tuple(decisions)

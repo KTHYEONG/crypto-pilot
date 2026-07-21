@@ -7,31 +7,8 @@ L2_SEARCH_SPACE: dict[str, dict[str, Any]] = {
     "REBALANCE_BARS": {"type": "categorical", "choices": (1, 2, 3, 6)},
     "CS_Z_SCORE_THRESHOLD": {"type": "float", "low": 0.0, "high": 1.2, "step": 0.1},
     "deploy_cost_safety_mult": {"type": "float", "low": 1.00, "high": 1.25, "step": 0.05},
-    "edge_throttle_min_active_mult": {"type": "float", "low": 0.00, "high": 0.60, "step": 0.05},
     "edge_ref_bps": {"type": "float", "low": 2.0, "high": 12.0, "step": 0.5},
     "edge_throttle_gamma": {"type": "float", "low": 0.50, "high": 2.50, "step": 0.25},
     "risk_budget_floor_ratio": {"type": "float", "low": 0.00, "high": 1.00, "step": 0.05},
     "risk_budget_max_scale": {"type": "float", "low": 1.00, "high": 6.00, "step": 0.25},
-    "l2_regime_long_short_asymmetry_enabled": {"type": "categorical", "choices": (False, True)},
-    "l2_regime_bear_long_extra_mult": {"type": "float", "low": 0.0, "high": 1.0, "step": 0.1},
-    "l2_regime_crisis_long_extra_mult": {"type": "float", "low": 0.0, "high": 1.0, "step": 0.1},
-    "l2_regime_cap_release_cooldown_bars": {"type": "int", "low": 0, "high": 36, "step": 1},
-    "l2_regime_crisis_gross_cap": {"type": "float", "low": 0.25, "high": 0.85, "step": 0.01},
-    "l2_regime_bear_gross_cap": {"type": "float", "low": 0.35, "high": 0.85, "step": 0.01},
-    # [DEPRECATED] l2_objective_growth_lcb_weight removed from search space per
-    # [LIMIT-04]. All trials use fixed objective J = growth_lcb_deployed.
-    # Field kept one release for config deserialization compatibility with warning.
-    # [ADR_20260718_L2_REGIME_SEVERITY_SIGNAL_REDESIGN] 방향-변동성 분리 cap-gating.
-    "l2_regime_severity_gating_enabled": {"type": "categorical", "choices": (False, True)},
-    # [SPEC_L2_DEPLOYMENT_MARGIN_CAGR_GATE] 정상장 leverage 캘리브레이션 안전마진.
-    # crisis 예산(l2_deploy_crisis_mdd_margin)은 별도 고정 필드로 분리되어 있어 탐색 영향 없음.
-    "l2_deploy_mdd_margin": {"type": "float", "low": 0.05, "high": 0.30, "step": 0.05},
-    # [ADR_20260718_L2_REGIME_CELL_ADMISSION_SEARCHABILITY] 실측(LOG_LEVEL=DEBUG):
-    # aggregate proof nw_tstat=-8.01, cell mean_cal_lift_bps=-21.97, sign_consistency=0.45
-    # — 이미 구현된 hard-block 경로가 policy_mode="soft" 고정으로 구조적 도달 불가능했음.
-    "l2_regime_policy_mode": {"type": "categorical", "choices": ("soft", "hybrid")},
-    "l2_regime_hard_block_enabled": {"type": "categorical", "choices": (False, True)},
-    "l2_regime_pooled_is_passthrough": {"type": "categorical", "choices": (False, True)},
-    "l2_regime_bull_leverage_boost_enabled": {"type": "categorical", "choices": (False, True)},
-    "l2_regime_bull_leverage_boost": {"type": "float", "low": 1.0, "high": 1.3, "step": 0.05},
 }
