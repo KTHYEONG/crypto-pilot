@@ -42,7 +42,9 @@ from src.domain.futures.strategy.tiered_workflow.dataclasses import (
 )
 from src.domain.futures.strategy.tiered_workflow.metrics import _newey_west_ic_tstat
 
-logger = logging.getLogger(__name__)
+# [ADR_20260721_L2_PER_TF_EDGE_HOISTING] 패턴과 동일: bare __name__ logger는
+# setup_logger() 미경유로 프로덕션에서 침묵 — 검증된 컨벤션으로 통일 (5번째 사례).
+logger = logging.getLogger("opt_main_futures")
 
 
 def _build_bucket_reliability(
@@ -847,12 +849,17 @@ def build_regime_policy_by_fold(
     pooled_is_passthrough: bool = True,
     min_fit_n_floor: int = 5,
     require_fit_n_for_downweight: bool = False,
-    side_split_enabled: bool = False,
-) -> tuple[tuple[dict[tuple[Any, ...], RegimeCellPolicy], ...], RegimePolicyDiagnostics]:
+        side_split_enabled: bool = False,
+        scoped_fold_override_enabled: bool = False,
+    ) -> tuple[tuple[dict[tuple[Any, ...], RegimeCellPolicy], ...], RegimePolicyDiagnostics]:
     """Build fold-local regime policy using fit/cal windows only.
 
     [ADR_20260721_ALPHA_FUNNEL_REGIME_COVERAGE] side_split_enabled=True keys
     fold_policy by (state, family, tf, side); disabled preserves legacy 3-key.
+
+    [ADR_20260721_L2_REGIME_SCOPED_FOLD_OVERRIDE] scoped_fold_override_enabled=True
+    scopes the RC-3 fold-confidence override to individual regime states instead
+    of demoting every cell in a fold on one blanket fold-wide average.
     """
     if mode == "filter":
         return tuple({} for _ in awf_folds), RegimePolicyDiagnostics(
@@ -931,6 +938,9 @@ def build_regime_policy_by_fold(
 
         keys = sorted(set(fit_stats) | set(cal_stats))
         fold_policy: dict[tuple[Any, ...], RegimeCellPolicy] = {}
+        _state_cal_lifts: dict[int, list[float]] = {}
+        _state_sign_comparable: dict[int, int] = {}
+        _state_sign_consistent: dict[int, int] = {}
         for key in keys:
             if side_split_enabled:
                 state, family, tf, side_val = key
@@ -980,6 +990,11 @@ def build_regime_policy_by_fold(
                 sign_comparable_total += 1
                 if sign_consistent:
                     sign_consistent_total += 1
+            _state_cal_lifts.setdefault(state, []).append(cal_lift_bps)
+            if fit_sign != 0 and cal_sign != 0:
+                _state_sign_comparable[state] = _state_sign_comparable.get(state, 0) + 1
+                if sign_consistent:
+                    _state_sign_consistent[state] = _state_sign_consistent.get(state, 0) + 1
 
             action: Literal["pooled", "allow", "downweight", "block"] = "pooled"
             reason: str = "neutral"
@@ -1095,20 +1110,57 @@ def build_regime_policy_by_fold(
             else:
                 n_pooled += 1
 
-        # RC-3: fold-level regime confidence override. If mean_cal_lift < 0 AND
-        # sign_consistency_ratio < 0.6, force ALL cells to pooled passthrough.
-        # regime is demoted to exposure governor (no alpha selection).
-        _fold_mean_cal = float(np.mean([cell.cal_lift_bps for cell in fold_policy.values()])) if fold_policy else 0.0
-        _fold_sign_cons = (
-            float(sign_consistent_total) / float(sign_comparable_total) if sign_comparable_total > 0 else 0.0
-        )
-        if _fold_mean_cal < 0.0 and _fold_sign_cons < 0.6:
-            fold_policy = {
-                key: replace(policy, action="allow", edge_multiplier=1.0, reason="pooled_passthrough")
-                for key, policy in fold_policy.items()
-            }
+        # RC-3: regime-state-scoped confidence override. If scoped_fold_override_enabled,
+        # evaluate per-state; else blanket fold-level (legacy).
+        if scoped_fold_override_enabled:
+            _states_to_demote: set[int] = set()
+            for _state in {key[0] for key in fold_policy}:
+                _s_mean = float(np.mean(_state_cal_lifts.get(_state, [0.0])))
+                _comp = _state_sign_comparable.get(_state, 0)
+                _cons = _state_sign_consistent.get(_state, 0)
+                _s_sign_cons = float(_cons) / float(_comp) if _comp > 0 else 0.0
+                if _s_mean < 0.0 and _s_sign_cons < 0.6:
+                    _states_to_demote.add(_state)
+            if _states_to_demote:
+                fold_policy = {
+                    key: (
+                        replace(policy, action="allow", edge_multiplier=1.0, reason="pooled_passthrough")
+                        if key[0] in _states_to_demote
+                        else policy
+                    )
+                    for key, policy in fold_policy.items()
+                }
+        else:
+            # RC-3: fold-level regime confidence override (legacy blanket behavior).
+            _fold_mean_cal = float(np.mean([cell.cal_lift_bps for cell in fold_policy.values()])) if fold_policy else 0.0
+            _fold_sign_cons = (
+                float(sign_consistent_total) / float(sign_comparable_total) if sign_comparable_total > 0 else 0.0
+            )
+            if _fold_mean_cal < 0.0 and _fold_sign_cons < 0.6:
+                fold_policy = {
+                    key: replace(policy, action="allow", edge_multiplier=1.0, reason="pooled_passthrough")
+                    for key, policy in fold_policy.items()
+                }
 
         policy_by_fold.append(fold_policy)
+
+        if logger.isEnabledFor(logging.DEBUG) and fold_policy:
+            _reason_counts: dict[str, int] = {}
+            for _cell in fold_policy.values():
+                _reason_counts[_cell.reason] = _reason_counts.get(_cell.reason, 0) + 1
+            _n_cal_vals = [c.n_cal for c in fold_policy.values()]
+            _n_fit_vals = [c.n_fit for c in fold_policy.values()]
+            logger.debug(
+                "[EVAL] [REGIME-POLICY-FOLD] side_split=%s n_cells=%d reasons=%s "
+                "mean_n_cal=%.1f mean_n_fit=%.1f min_n_cal=%d min_n_fit=%d",
+                side_split_enabled,
+                len(fold_policy),
+                _reason_counts,
+                float(np.mean(_n_cal_vals)) if _n_cal_vals else 0.0,
+                float(np.mean(_n_fit_vals)) if _n_fit_vals else 0.0,
+                min(_n_cal_vals) if _n_cal_vals else 0,
+                min(_n_fit_vals) if _n_fit_vals else 0,
+            )
 
     enabled = True
     sign_consistency_ratio = (
@@ -1992,6 +2044,7 @@ def build_regime_routing_plan(
     policy_min_fit_n_floor: int = 5,
     policy_require_fit_n_for_downweight: bool = False,
     side_split_enabled: bool = False,
+    scoped_fold_override_enabled: bool = False,
 ) -> RegimeRoutingPlan:
     """Build the fold-local routing plan used by L2 bucket selection.
 
@@ -2183,6 +2236,7 @@ def build_regime_routing_plan(
         min_fit_n_floor=policy_min_fit_n_floor,
         require_fit_n_for_downweight=policy_require_fit_n_for_downweight,
         side_split_enabled=side_split_enabled,
+        scoped_fold_override_enabled=scoped_fold_override_enabled,
     )
 
     debug_diagnostics: RegimeDebugDiagnostics | None = None
@@ -2223,6 +2277,7 @@ def build_regime_routing_plan(
         js_divergence_by_fold=tuple(js_divergence_by_fold),
         policy_diagnostics=policy_diagnostics,
         debug_diagnostics=debug_diagnostics,
+        side_split_enabled=side_split_enabled,
     )
     return RegimeRoutingPlan(
         effective_bucket_edges_by_fold=effective_bucket_edges_by_fold,
