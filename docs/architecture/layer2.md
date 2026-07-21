@@ -92,3 +92,4 @@ graph TD
 | `l2_recency_holdout_days` | 30.0 (fixed, non-searchable) | Trailing calendar-day span excluded from the primary objective, used only for the recency holdout constraint |
 | `l2_regime_bucket_side_split_enabled` | False (searchable) | Widens regime bucket keys from (regime, family, tf) to (regime, family, tf, side) so long/short edges are routed independently |
 | `l2_regime_scoped_fold_override_enabled` | False (searchable) | Scopes the RC-3 fold-confidence override to individual regime states instead of demoting every cell in a fold on one blanket average |
+| `l2_crisis_replay_routing_parity_enabled` | True (fixed, non-searchable) | Transfers the study's learned regime routing (last fold) into the crisis replay cache so the stress test evaluates the same routed strategy as the study window |
