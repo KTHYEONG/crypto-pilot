@@ -1,11 +1,174 @@
 from __future__ import annotations
 
+import numpy as np
+import pytest
+
+from src.domain.futures.strategy.candidate_contracts import (
+    QualifiedSignalRegistry,
+    SignalSleeveKey,
+    SignalSourceKey,
+    SymbolStrategyEvidence,
+)
 from src.domain.futures.strategy.tiered_workflow.portfolio_handoff import (
     PortfolioHandoffConfig,
+    _kelly_proportional_weights,
+    _moving_block_bootstrap_lcb,
+    _rank_and_cap_sleeve_indices,
 )
+
+
+def _ev(sym: str, sid: str, qw: float) -> SymbolStrategyEvidence:
+    return SymbolStrategyEvidence(
+        key=SignalSourceKey(sym, sid, "ctx"),
+        mean_gross_bps=10.0, mean_incremental_bps=5.0, block_tstat_incremental=2.0,
+        probability_positive=0.85, p_value=0.01, q_value=0.05, positive_fold_ratio=1.0,
+        n_obs=100, effective_n=80.0, n_folds=4, quality_weight=qw, hard_eligible=True,
+        lcb_net_bps=3.0,
+    )
 
 
 def test_portfolio_handoff_defaults_are_conservative() -> None:
     config = PortfolioHandoffConfig()
     assert config.max_candidate_sleeves == 32
     assert config.min_calibration_windows == 3
+    assert not hasattr(config, "max_sleeves_per_cluster")
+
+
+def test_rank_and_cap_sleeve_indices_keeps_top_n_by_quality() -> None:
+    sleeve_keys = tuple(
+        SignalSleeveKey(f"SYM{i}", "4h", "strat") for i in range(5)
+    )
+    registry = QualifiedSignalRegistry(
+        by_symbol={
+            f"SYM{i}": (_ev(f"SYM{i}", "strat", qw),)
+            for i, qw in enumerate([0.1, 0.9, 0.5, 0.3, 0.7])
+        },
+        ready_symbols=tuple(f"SYM{i}" for i in range(5)),
+        trade_scope_count=5, registry_version="test-v1",
+    )
+    active = _rank_and_cap_sleeve_indices(sleeve_keys, registry, max_candidate_sleeves=3)
+    assert active == (1, 2, 4)
+
+
+def test_rank_and_cap_sleeve_indices_deterministic_tie_break() -> None:
+    sleeve_keys = (
+        SignalSleeveKey("SYMa", "4h", "s1"),
+        SignalSleeveKey("SYMb", "4h", "s2"),
+    )
+    registry = QualifiedSignalRegistry(
+        by_symbol={
+            "SYMa": (_ev("SYMa", "s1", 0.5),),
+            "SYMb": (_ev("SYMb", "s2", 0.5),),
+        },
+        ready_symbols=("SYMa", "SYMb"),
+        trade_scope_count=2, registry_version="test-v1",
+    )
+    result1 = _rank_and_cap_sleeve_indices(sleeve_keys, registry, max_candidate_sleeves=1)
+    result2 = _rank_and_cap_sleeve_indices(sleeve_keys, registry, max_candidate_sleeves=1)
+    assert result1 == result2
+
+
+def test_rank_and_cap_sleeve_indices_missing_registry_entry_defaults_zero_quality() -> None:
+    sleeve_keys = (
+        SignalSleeveKey("SYM_A", "4h", "s1"),
+        SignalSleeveKey("SYM_B", "4h", "s2"),
+    )
+    registry = QualifiedSignalRegistry(
+        by_symbol={"SYM_A": (_ev("SYM_A", "s1", 0.8),)},
+        ready_symbols=("SYM_A",),
+        trade_scope_count=1, registry_version="test-v1",
+    )
+    result = _rank_and_cap_sleeve_indices(sleeve_keys, registry, max_candidate_sleeves=2)
+    assert result == (0, 1)
+
+
+def test_kelly_proportional_weights_favors_lower_volatility() -> None:
+    rng = np.random.default_rng(7)
+    n = 200
+    low_vol = 0.001 + rng.normal(0, 0.0005, n)
+    high_vol = 0.001 + rng.normal(0, 0.005, n)
+    window = np.column_stack([low_vol, high_vol])
+    weights = _kelly_proportional_weights(window)
+    assert weights.sum() == pytest.approx(1.0, abs=1e-9)
+    assert weights[0] > weights[1]
+
+
+def test_kelly_proportional_weights_zero_for_negative_mean_column() -> None:
+    window = np.column_stack([
+        np.full(50, 0.002), np.full(50, -0.001),
+    ])
+    weights = _kelly_proportional_weights(window)
+    assert weights[1] == 0.0
+    assert weights[0] == pytest.approx(1.0)
+
+
+def test_kelly_proportional_weights_falls_back_to_equal_when_all_nonpositive() -> None:
+    window = np.column_stack([np.full(30, -0.001), np.full(30, -0.002)])
+    weights = _kelly_proportional_weights(window)
+    assert weights[0] == pytest.approx(0.5)
+    assert weights[1] == pytest.approx(0.5)
+
+
+def test_kelly_proportional_weights_single_column_no_crash() -> None:
+    window = np.column_stack([np.full(50, 0.001)])
+    weights = _kelly_proportional_weights(window)
+    assert weights[0] == pytest.approx(1.0)
+
+
+def test_handoff_single_family_pool_is_no_longer_blanket_blocked() -> None:
+    from src.domain.futures.strategy.tiered_workflow.dataclasses import L2SimulationCache
+    from src.domain.futures.strategy.tiered_workflow.portfolio_handoff import evaluate_portfolio_handoff
+    from src.domain.futures.strategy.candidate_contracts import ValidatedSignalBatch
+    from src.domain.futures.strategy.walk_forward import WFFold
+
+    sleeve_keys = (
+        SignalSleeveKey("BTCUSDT", "4h", "family_a:strat1"),
+        SignalSleeveKey("ETHUSDT", "4h", "family_a:strat2"),
+    )
+    n_bars = 90
+    rng = np.random.default_rng(42)
+    rets = np.column_stack([
+        0.001 + rng.normal(0, 0.0005, n_bars),
+        0.0015 + rng.normal(0, 0.0006, n_bars),
+    ]).astype(np.float64)
+
+    cache = L2SimulationCache(
+        vol_matrix_2d=np.ones((n_bars, 2)), tradeable_mask_2d=np.ones((n_bars, 2), dtype=np.bool_),
+        hurdle_2d=np.zeros((n_bars, 2)), funding_2d=np.zeros((n_bars, 2)),
+        beta_1d=np.ones(2),
+        expected_gross_bps_2d=np.ones((n_bars, 2)), expected_net_bps_2d=np.ones((n_bars, 2)),
+        holding_bars_2d=np.ones((n_bars, 2)), side_2d=np.ones((n_bars, 2)),
+        quality_weight_2d=np.ones((n_bars, 2)), signal_mask_2d=np.ones((n_bars, 2), dtype=np.bool_),
+        sleeve_to_sym=np.array([0, 1], dtype=np.int64), sleeve_keys=sleeve_keys,
+    )
+    registry = QualifiedSignalRegistry(
+        by_symbol={
+            "BTCUSDT": (_ev("BTCUSDT", "family_a:strat1", 0.9),),
+            "ETHUSDT": (_ev("ETHUSDT", "family_a:strat2", 0.8),),
+        },
+        ready_symbols=("BTCUSDT", "ETHUSDT"),
+        trade_scope_count=2, registry_version="test-v1",
+    )
+    batch = ValidatedSignalBatch(
+        events=(), start_idx=0, end_idx=n_bars, symbols=("BTCUSDT", "ETHUSDT"),
+        registry_version="test-v1", model_version="test",
+    )
+    fold = WFFold(fit_start=0, fit_end=30, cal_start=30, cal_end=60, oos_start=60, oos_end=90)
+
+    result = evaluate_portfolio_handoff(
+        registry=registry, signal_batch=batch, cache=cache, folds=(fold,),
+        net_sleeve_returns_by_fold=(np.ascontiguousarray(rets, dtype=np.float32),),
+        config=PortfolioHandoffConfig(min_source_families=2),
+    )
+
+    assert result.passed, f"handoff blocked: {result.blocker_reason}"
+    for ev in result.evidence_by_fold[0]:
+        if ev.admitted:
+            assert "insufficient_family_diversity" not in ev.rejection_reasons
+
+
+def test_moving_block_bootstrap_lcb_not_degenerate_at_three_windows() -> None:
+    values = np.array([0.01, -0.02, 0.03])
+    lcb = _moving_block_bootstrap_lcb(values, k=1.0, block_size=10, seed=42)
+    assert lcb < float(np.mean(values))
+    assert np.isfinite(lcb)
