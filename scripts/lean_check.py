@@ -124,7 +124,7 @@ def _is_new_file(file_path: str) -> bool:
     """Return True if the file is new (does not exist in Git HEAD)."""
     try:
         res = subprocess.run(  # noqa: S603
-            ["git", "cat-file", "-e", f"HEAD:{file_path}"],
+            ["git", "cat-file", "-e", f"HEAD:{file_path}"],  # noqa: S607
             capture_output=True, text=True, timeout=10
         )
         return res.returncode != 0
@@ -216,16 +216,22 @@ def _check_spec_compliance(spec_path: str) -> tuple[int, list[JsonDiag]]:
     for w in contract.get("wiring", []):
         wf: str = w.get("file", "")
         anchor: str = w.get("anchor", "")
-        if not wf or not anchor:
+        import_symbol: str = w.get("import_symbol", "")
+        if not wf:
             continue
         if not os.path.exists(wf):
             d = {"file": wf, "line": 0, "error": "Spec: wiring target not found", "fix_hint": f"Create {wf}"}
             diagnostics.append(d)
             continue
         with open(wf) as f:
-            if anchor not in f.read():
+            wf_content = f.read()
+            if anchor and anchor not in wf_content:
                 hint = f"Add ref to {anchor} in {wf}"
                 d = {"file": wf, "line": 0, "error": f"Spec: missing anchor '{anchor}'", "fix_hint": hint}
+                diagnostics.append(d)
+            if import_symbol and import_symbol not in wf_content:
+                hint = f"Import or reference '{import_symbol}' in {wf}"
+                d = {"file": wf, "line": 0, "error": f"Spec: missing reference to '{import_symbol}'", "fix_hint": hint}
                 diagnostics.append(d)
 
     return (1 if diagnostics else 0, diagnostics)
@@ -356,7 +362,7 @@ def main() -> None:
                 try:
                     with open(sf, encoding="utf-8") as f_sf:
                         num_lines = len(f_sf.readlines())
-                except Exception:
+                except Exception:  # noqa: S110
                     pass
                 if actual_cov < 40 and num_lines <= 1000:
                     d = {
