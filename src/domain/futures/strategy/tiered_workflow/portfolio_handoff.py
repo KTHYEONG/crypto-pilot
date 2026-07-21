@@ -12,6 +12,7 @@ if TYPE_CHECKING:
     from src.domain.futures.strategy.candidate_contracts import (
         QualifiedSignalRegistry,
         SignalSleeveKey,
+        SymbolStrategyEvidence,
         ValidatedSignalBatch,
     )
     from src.domain.futures.strategy.tiered_workflow.dataclasses import (
@@ -43,6 +44,7 @@ class SleeveContributionEvidence:
     redundancy_cluster: int
     admitted: bool
     rejection_reasons: tuple[str, ...]
+    admitted_via_l1_edge_override: bool = False
 
 
 @dataclass(slots=True, frozen=True)
@@ -99,21 +101,49 @@ def _annualize_log_growth(
     return float(np.expm1(float(np.sum(log_rets)) / (float(n_bars) / bars_per_year)))
 
 
-def _window_marginal_growth(
+def _bar_level_marginal_growth_lcb(
     returns_window: NDArray[np.float64],
     w: NDArray[np.float64],
     sleeve_s: int,
+    *,
+    n_chunks: int,
     bars_per_year: float = 2190.0,
-) -> float:
+    k: float = 1.0,
+    n_resamples: int = 1000,
+    block_size: int = 10,
+    seed: int = 42,
+) -> tuple[float, float, tuple[float, ...]]:
     n_bars = returns_window.shape[0]
-    log_full = np.sum(np.log1p(returns_window @ w))
+    if n_bars < 2:
+        return (float("-inf"), 0.0, ())
+
     w_minus = np.delete(w, sleeve_s)
     returns_minus = np.delete(returns_window, sleeve_s, axis=1)
     w_minus_norm = w_minus / max(np.sum(w_minus), 1e-12)
-    log_minus = np.sum(np.log1p(returns_minus @ w_minus_norm))
-    growth_full = _annualize_log_growth(np.array([log_full]), n_bars, bars_per_year)
-    growth_minus = _annualize_log_growth(np.array([log_minus]), n_bars, bars_per_year)
-    return growth_full - growth_minus
+
+    log_full = np.log1p(returns_window @ w)
+    log_minus = np.log1p(returns_minus @ w_minus_norm)
+    delta_series = log_full - log_minus
+
+    lcb_per_bar = _moving_block_bootstrap_lcb(delta_series, k=k, n_resamples=n_resamples, block_size=block_size, seed=seed)
+
+    if np.isfinite(lcb_per_bar):
+        annualized_lcb = _annualize_log_growth(np.array([lcb_per_bar * n_bars]), n_bars, bars_per_year)
+    else:
+        annualized_lcb = float("-inf")
+
+    chunk_size = max(n_bars // max(n_chunks, 1), 1)
+    chunk_sums_list: list[float] = []
+    for c in range(n_chunks):
+        start = c * chunk_size
+        end = min(start + chunk_size, n_bars)
+        if start >= n_bars:
+            break
+        chunk_sums_list.append(float(np.sum(delta_series[start:end])))
+    chunk_sums = tuple(chunk_sums_list)
+    positive_chunk_ratio = sum(1.0 for cs in chunk_sums if cs > 0.0) / max(len(chunk_sums), 1)
+
+    return (annualized_lcb, positive_chunk_ratio, chunk_sums)
 
 
 def _moving_block_bootstrap_lcb(
@@ -141,17 +171,26 @@ def _moving_block_bootstrap_lcb(
 
 
 
+def _l1_evidence_by_key(
+    registry: QualifiedSignalRegistry,
+) -> dict[tuple[str, str], SymbolStrategyEvidence]:
+    lookup: dict[tuple[str, str], SymbolStrategyEvidence] = {}
+    for sym, ev_list in registry.by_symbol.items():
+        for ev in ev_list:
+            lookup[(sym, ev.key.strategy_id)] = ev
+    return lookup
+
+
 def _rank_and_cap_sleeve_indices(
     sleeve_keys: tuple[SignalSleeveKey, ...],
-    registry: QualifiedSignalRegistry,
+    evidence_by_key: dict[tuple[str, str], SymbolStrategyEvidence],
     max_candidate_sleeves: int,
 ) -> tuple[int, ...]:
     if not sleeve_keys or max_candidate_sleeves <= 0:
         return ()
     quality_by_key: dict[tuple[str, str], float] = {}
-    for sym, ev_list in registry.by_symbol.items():
-        for ev in ev_list:
-            quality_by_key[(sym, ev.key.strategy_id)] = ev.quality_weight
+    for key, ev in evidence_by_key.items():
+        quality_by_key[key] = ev.quality_weight
     indexed = list(range(len(sleeve_keys)))
     ranked = sorted(
         indexed,
@@ -232,9 +271,10 @@ def evaluate_portfolio_handoff(
 
     n_sleeves = len(sleeve_keys)
     bars_per_year: float = 2190.0
+    l1_evidence_by_key = _l1_evidence_by_key(registry)
 
     active_indices = _rank_and_cap_sleeve_indices(
-        sleeve_keys, registry, config.max_candidate_sleeves,
+        sleeve_keys, l1_evidence_by_key, config.max_candidate_sleeves,
     )
     active_set = set(active_indices)
     local_index_by_s: dict[int, int] = {
@@ -279,32 +319,7 @@ def evaluate_portfolio_handoff(
                     rejection_reasons=("capped_by_candidate_sleeve_limit",),
                 ))
                 continue
-            if n_bars_fold < 2:
-                sleeve_evidence.append(SleeveContributionEvidence(
-                    key=key,
-                    marginal_growth_by_window=(),
-                    marginal_growth_lcb=float("-inf"),
-                    positive_window_ratio=0.0,
-                    max_abs_pairwise_corr=0.0,
-                    redundancy_cluster=-1,
-                    admitted=False,
-                    rejection_reasons=("insufficient_bars",),
-                ))
-                continue
-
-            local_s = local_index_by_s[s]
-            calibration_subwindows: list[NDArray[np.float64]] = []
-            subwindow_size = max(n_bars_fold // max(config.min_calibration_windows, 1), 2)
-            for w in range(config.min_calibration_windows):
-                start = w * subwindow_size
-                end = min(start + subwindow_size, n_bars_fold)
-                if end - start < 2:
-                    continue
-                sub_returns = returns_active[start:end, :]
-                delta = _window_marginal_growth(sub_returns, weights_active, local_s, bars_per_year)
-                calibration_subwindows.append(np.array([delta], dtype=np.float64))
-
-            if len(calibration_subwindows) < config.min_calibration_windows:
+            if n_bars_fold < max(config.min_calibration_windows * 2, 2):
                 sleeve_evidence.append(SleeveContributionEvidence(
                     key=key,
                     marginal_growth_by_window=(),
@@ -317,13 +332,17 @@ def evaluate_portfolio_handoff(
                 ))
                 continue
 
-            deltas = np.array([d[0] for d in calibration_subwindows], dtype=np.float64)
-            lcb = _moving_block_bootstrap_lcb(deltas, k=1.0, seed=fold_idx * 1000 + s)
-            pos_ratio = float(np.sum(deltas > 0)) / max(len(deltas), 1)
+            local_s = local_index_by_s[s]
+            lcb, pos_ratio, chunk_sums = _bar_level_marginal_growth_lcb(
+                returns_active, weights_active, local_s,
+                n_chunks=config.min_calibration_windows,
+                bars_per_year=bars_per_year,
+                seed=fold_idx * 1000 + s,
+            )
 
             sleeve_evidence.append(SleeveContributionEvidence(
                 key=key,
-                marginal_growth_by_window=tuple(float(d) for d in deltas),
+                marginal_growth_by_window=chunk_sums,
                 marginal_growth_lcb=lcb,
                 positive_window_ratio=pos_ratio,
                 max_abs_pairwise_corr=0.0,
@@ -347,8 +366,29 @@ def evaluate_portfolio_handoff(
             if s not in active_set:
                 continue
             ev = sleeve_evidence[s]
-            if ev.admitted:
-                if ev.marginal_growth_lcb <= config.min_marginal_growth_lcb:
+            if not ev.admitted:
+                continue
+            fails_growth = ev.marginal_growth_lcb <= config.min_marginal_growth_lcb
+            fails_consistency = ev.positive_window_ratio < config.min_positive_window_ratio
+            if fails_growth or fails_consistency:
+                l1_ev = l1_evidence_by_key.get((ev.key.symbol, ev.key.strategy_id))
+                if l1_ev is not None and float(l1_ev.lcb_net_bps) > 0.0:
+                    _logger.info(
+                        "[ALGO] event=l2_growth_lcb_override_by_l1_edge fold=%d symbol=%s strategy=%s l1_lcb_bps=%.1f l2_growth_lcb=%.4f l2_pos_ratio=%.3f",
+                        fold_idx, ev.key.symbol, ev.key.strategy_id, float(l1_ev.lcb_net_bps), ev.marginal_growth_lcb, ev.positive_window_ratio,
+                    )
+                    sleeve_evidence[s] = SleeveContributionEvidence(
+                        key=ev.key,
+                        marginal_growth_by_window=ev.marginal_growth_by_window,
+                        marginal_growth_lcb=ev.marginal_growth_lcb,
+                        positive_window_ratio=ev.positive_window_ratio,
+                        max_abs_pairwise_corr=ev.max_abs_pairwise_corr,
+                        redundancy_cluster=ev.redundancy_cluster,
+                        admitted=True,
+                        rejection_reasons=(),
+                        admitted_via_l1_edge_override=True,
+                    )
+                elif fails_growth:
                     sleeve_evidence[s] = SleeveContributionEvidence(
                         key=ev.key,
                         marginal_growth_by_window=ev.marginal_growth_by_window,
@@ -359,7 +399,7 @@ def evaluate_portfolio_handoff(
                         admitted=False,
                         rejection_reasons=("low_marginal_growth_lcb",),
                     )
-                elif ev.positive_window_ratio < config.min_positive_window_ratio:
+                else:
                     sleeve_evidence[s] = SleeveContributionEvidence(
                         key=ev.key,
                         marginal_growth_by_window=ev.marginal_growth_by_window,
@@ -398,6 +438,7 @@ def evaluate_portfolio_handoff(
                 redundancy_cluster=admitted_idx,
                 admitted=ev.admitted,
                 rejection_reasons=ev.rejection_reasons,
+                admitted_via_l1_edge_override=ev.admitted_via_l1_edge_override,
             )
 
         if n_admitted > 0:
@@ -457,7 +498,7 @@ def evaluate_portfolio_handoff(
         )
 
         fold_blocker = ""
-        if weight_sum <= 0.0 or not np.isfinite(float(weight_sum)):
+        if not np.isfinite(float(weight_sum)):
             fold_blocker = "invalid_handoff_weights"
         elif not admitted_keys:
             fold_blocker = "all_sleeves_harmful"
