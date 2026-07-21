@@ -37,6 +37,8 @@ from src.domain.futures.strategy.candidate_contracts import (
     Layer1GateReport,
     Layer1InferenceArtifact,
     QualifiedSignalRegistry,
+    SignalSourceKey,
+    SymbolStrategyEvidence,
     ValidatedSignalBatch,
     ValidatedSignalEvent,
 )
@@ -4091,6 +4093,70 @@ def _select_representative_l1_registry(
     return selected.l1_result.deployment_registry
 
 
+def _merge_deployment_registries_across_tf(
+    per_tf_l1: dict[str, PerTfL1Result],
+) -> QualifiedSignalRegistry | None:
+    """Union-merge QualifiedSignalRegistry.by_symbol across all deployable per-TF L1 results.
+
+    [ADR_TBD_L1_MULTI_TF_REGISTRY_MERGE] 대표 TF 1개만 반영하던 기존 방식 대신
+    deployable한 모든 TF의 qualified 신호를 심볼별로 union 병합한다. 동일
+    (symbol, strategy_id, activation_context) 충돌 시 quality_weight가 더 큰
+    evidence를 유지한다. 어떤 TF도 deployable하지 않으면 None을 반환한다.
+    """
+    deployable = {tf: r for tf, r in per_tf_l1.items() if _is_deployable_per_tf_result(r)}
+    if not deployable:
+        return None
+
+    merged: dict[str, dict[SignalSourceKey, tuple[str, SymbolStrategyEvidence]]] = {}
+    registry_versions: set[str] = set()
+
+    for tf, result in deployable.items():
+        registry = result.l1_result.deployment_registry
+        if registry is None:
+            continue
+        if registry.registry_version:
+            registry_versions.add(registry.registry_version)
+        for symbol, evidences in registry.by_symbol.items():
+            if symbol not in merged:
+                merged[symbol] = {}
+            for ev in evidences:
+                existing = merged[symbol].get(ev.key)
+                if existing is None:
+                    merged[symbol][ev.key] = (tf, ev)
+                else:
+                    existing_tf, existing_ev = existing
+                    if ev.quality_weight > existing_ev.quality_weight:
+                        logger.debug(
+                            "[ALGO] event=registry_merge_conflict symbol=%s strategy=%s "
+                            "kept_tf=%s kept_qw=%s dropped_tf=%s dropped_qw=%s",
+                            ev.key.symbol, ev.key.strategy_id,
+                            tf, ev.quality_weight, existing_tf, existing_ev.quality_weight,
+                        )
+                        merged[symbol][ev.key] = (tf, ev)
+                    elif ev.quality_weight < existing_ev.quality_weight:
+                        logger.debug(
+                            "[ALGO] event=registry_merge_conflict symbol=%s strategy=%s "
+                            "kept_tf=%s kept_qw=%s dropped_tf=%s dropped_qw=%s",
+                            ev.key.symbol, ev.key.strategy_id,
+                            existing_tf, existing_ev.quality_weight, tf, ev.quality_weight,
+                        )
+
+    final_by_symbol: dict[str, tuple[SymbolStrategyEvidence, ...]] = {
+        sym: tuple(ev for _, ev in evidences.values())
+        for sym, evidences in merged.items()
+    }
+
+    total_count = sum(len(v) for v in final_by_symbol.values())
+    merged_version = "+".join(sorted(registry_versions)) if registry_versions else "merged"
+
+    return QualifiedSignalRegistry(
+        by_symbol=final_by_symbol,
+        ready_symbols=tuple(final_by_symbol.keys()),
+        trade_scope_count=total_count,
+        registry_version=merged_version,
+    )
+
+
 def _aggregate_per_tf_l1(
     per_tf_l1: dict[str, PerTfL1Result],
     *,
@@ -4130,10 +4196,7 @@ def _aggregate_per_tf_l1(
 
     selected_tf = _resolve_selected_l1_tf(per_tf_l1, preferred_tf)
     selected = per_tf_l1.get(selected_tf) if selected_tf is not None else None
-    deployment_registry = _select_representative_l1_registry(
-        per_tf_l1=per_tf_l1,
-        preferred_tf=preferred_tf,
-    )
+    deployment_registry = _merge_deployment_registries_across_tf(per_tf_l1=per_tf_l1)
     gate_passed = bool(
         selected is not None and _is_deployable_per_tf_result(selected) and deployment_registry is not None
     )

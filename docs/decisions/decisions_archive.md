@@ -2,6 +2,11 @@
 
 This file holds historical architecture decision records (ADRs) that have been pruned from the active window.
 
+## [2026-07-19] [TASK_ENRICHED_CACHE_CONTENT_SIGNATURE_HARDENING] [ADR_20260719_ENRICHED_CACHE_CONTENT_SIGNATURE_HARDENING]
+- **Context/Why:** 2026-05-01 기준 L2 파국 원인을 L1->L2 캐싱 버그로 의심해 전수 조사했으나 상위 캐시(L1 결과/LTF panel/L2 signal batch fingerprint/universe snapshot store)는 전부 날짜경계+콘텐츠해시 기반으로 안전함을 확인, 실제 원인은 min_bars_threshold PIT 어드미션 게이트(정당한 동작)였음. 다만 조사 중 opt_data_utils.py의 enriched parquet 캐시(원천 OHLCV/funding/metrics 병합 산출물, 3개 호출부: read x2/write x1)만 예외적으로 순수 mtime 비교에 의존해, 소스 파일 내용이 바뀌어도 mtime이 보존되면(파일시스템 복사/동일 타임스탬프 덮어쓰기/clock skew) 캐시가 조용히 stale한 채 재사용될 수 있는 구조였음.
+- **Resolution/What:** _DepFileSignature/_capture_dep_signatures/_write_enriched_cache_signature/_is_enriched_cache_fresh 4개 함수 신설 -- dep 파일들의 (mtime_ns, size_bytes)를 enriched parquet 옆 sidecar JSON({enriched}.sig.json)에 캐시 생성 시점에 기록하고 다음 실행에서 대조. sidecar 없는 레거시 캐시는 기존 mtime-only 비교로 폴백(하위호환, 배포 시 전량 재계산 폭풍 방지). load_single_symbol_data의 read-side(690-698)/write-side(816-819) 및 load_futures_data_maps_for_symbols의 read-side(1007-1018) 3개 호출부를 단일 헬퍼로 통합, write-side가 OHLCV mtime만 보던 기존 불일치도 함께 정합화(3개 dep 전부로 통일). 단위테스트 5건 추가(정상/콘텐츠변경+mtime보존 핵심 회귀테스트/레거시 폴백/손상 sidecar/통합 배선).
+- **Impact:** /check PASS(Cov 50%). 실측 검증: (1) 2026-07-19 기준 120-trial 프로덕션 재실행 결과가 하드닝 적용 전과 완전 동일(champion Trial #89, CAGR +73.9%, STATUS PASS) -- 기존 캐시 히트 경로 회귀 없음 확인. (2) 실제 프로덕션 BTCUSDT/4h OHLCV 파케이 파일에 직접 바이트를 추가하고 os.utime으로 mtime을 원본값으로 강제 복원해 재현한 결과, size 시그니처가 콘텐츠 변경을 정확히 탐지(post-tamper fresh check=False) -- mtime 단독 비교라면 놓쳤을 케이스를 실증 방어.
+
 ## [2026-07-19] [TASK_L2_GROWTH_LCB_CLIFF_FIX] [ADR_20260719_L2_GROWTH_LCB_CLIFF_FIX]
 - **Context/Why:** 2026-05-01 기준 feasibility-first 120-trial 재측정에서 120/120 trial 전원 파국적 음수 CAGR(best=-11.77%) 관측, 커밋 7f4e1f64 이후 회귀로 의심됨. 코드 대조 결과 _contiguous_block_log_growth(metrics.py)가 배포 레버리지 수익률 중 단 한 bar라도 <=-100%면 block-growth 전체를 empty로 폐기해 growth_lcb_deployed가 -1e6 sentinel로 붕괴하는 이산적 절벽을 발견 — 해당 커밋이 이 값을 Optuna 유일 objective로 승격시켜 과거 무해(weight=0)했던 절벽이 치명적으로 작동 가능한 구조였음.
 - **Resolution/What:** apply_deployment(risk_deployment.py)와 동일한 clip(-1.0+1e-9)을 _contiguous_block_log_growth의 log1p 이전에 적용해 절벽을 제거(np.any(arr<=-1.0) 조기반환 분기 삭제). 단위테스트 3건 추가(정상경로/wipeout 클립 단조성/evaluate_l2_trial 통합).

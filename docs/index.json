@@ -176,7 +176,7 @@
     ]
   },
   "src/domain/futures/strategy/tiered_workflow/pipeline.py": {
-    "architecture": "docs/architecture/layer1.md",
+    "architecture": "docs/specs/l1-deployment-registry-multi-tf-merge.md",
     "testing": [
       "tests/unit/domain/futures/strategy/test_tiered_workflow.py",
       "tests/unit/domain/futures/strategy/tiered_workflow/test_l0_readiness_hardening.py",
