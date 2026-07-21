@@ -4,7 +4,7 @@ from __future__ import annotations
 import pytest
 
 from src.domain.futures.strategy.tiered_workflow.dataclasses import Layer2AllocationConfig
-from src.domain.futures.strategy.tiered_workflow.l2_gate import evaluate_layer2_gate
+from src.domain.futures.strategy.tiered_workflow.l2_gate import _cagr_gate_constraint, evaluate_layer2_gate
 
 _BASE_KWARGS = {
     "deployment_failed": False,
@@ -100,3 +100,69 @@ class TestEvaluateLayer2GateCrisisConstraint:
 
         assert len(gate.optuna_constraint_values) == 14
         assert gate.optuna_constraint_values[12] <= 0.0
+
+
+class TestCagrGateConstraint:
+    @pytest.mark.parametrize(
+        ("baseline", "cagr", "should_block"),
+        [
+            (0.10, 0.12, True),
+            (0.10, 0.20, False),
+            (-0.20, -0.01, True),
+            (-0.20, 0.01, False),
+        ],
+    )
+    def test_cagr_gate_constraint_relative_mode_uses_baseline_plus_uplift(self, baseline: float, cagr: float, should_block: bool) -> None:
+        value = _cagr_gate_constraint(
+            cagr_hybrid=cagr, cagr_baseline=baseline, mode="relative",
+            l2_min_cagr=0.30, l2_min_cagr_uplift=0.05,
+        )
+        assert (value > 0.0) is should_block
+
+    def test_cagr_gate_constraint_none_baseline_falls_back_to_absolute(self) -> None:
+        value = _cagr_gate_constraint(
+            cagr_hybrid=0.20, cagr_baseline=None, mode="relative",
+            l2_min_cagr=0.30, l2_min_cagr_uplift=0.05,
+        )
+        assert value == pytest.approx(0.10)
+
+
+class TestLayer2AllocationConfigCagrGateMode:
+    def test_layer2_allocation_config_rejects_invalid_cagr_gate_mode(self) -> None:
+        from src.domain.futures.strategy.tiered_workflow.dataclasses import (
+            _validate_cagr_gate_mode,
+        )
+        with pytest.raises(ValueError, match="l2_cagr_gate_mode"):
+            _validate_cagr_gate_mode("invalid")
+
+
+class TestEvaluateLayer2GateRelativeCagr:
+    def test_evaluate_layer2_gate_relative_mode_wired_from_config(self) -> None:
+        kwargs = dict(_BASE_KWARGS,
+            cagr_hybrid=0.12,
+            cagr_baseline=0.10,
+            config=Layer2AllocationConfig(
+                l2_cagr_gate_mode="relative",
+                l2_min_cagr_uplift=0.05,
+                l2_min_cagr=0.30,
+            ),
+        )
+        gate = evaluate_layer2_gate(**kwargs)
+
+        assert gate.optuna_constraint_values[10] > 0.0
+        assert gate.promotion_constraint_values[2] > 0.0
+
+    def test_evaluate_layer2_gate_relative_mode_high_cagr_passes(self) -> None:
+        kwargs = dict(_BASE_KWARGS,
+            cagr_hybrid=0.20,
+            cagr_baseline=0.10,
+            config=Layer2AllocationConfig(
+                l2_cagr_gate_mode="relative",
+                l2_min_cagr_uplift=0.05,
+                l2_min_cagr=0.30,
+            ),
+        )
+        gate = evaluate_layer2_gate(**kwargs)
+
+        assert gate.optuna_constraint_values[10] <= 0.0
+        assert gate.promotion_constraint_values[2] <= 0.0

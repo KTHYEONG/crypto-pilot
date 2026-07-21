@@ -360,3 +360,86 @@ def test_build_regime_routing_plan_attaches_policy_by_fold_and_diagnostics() -> 
     assert hasattr(plan.diagnostics, "policy_diagnostics"), "RegimeRoutingDiagnostics must expose policy_diagnostics"
     assert plan.diagnostics.policy_diagnostics is not None
     assert plan.diagnostics.debug_diagnostics is None
+
+
+# ── [SPEC alpha-funnel-regime-coverage Phase B] side_split_enabled wiring ──
+
+
+def _make_mixed_side_cache(n_bars: int) -> MagicMock:
+    """2-sleeve cache: sleeve 0 always long, sleeve 1 always short, same family/tf."""
+    from src.domain.futures.strategy.candidate_contracts import SignalSleeveKey
+
+    cache = MagicMock()
+    cache.signal_mask_2d = np.ones((n_bars, 2), dtype=bool)
+    side = np.ones((n_bars, 2), dtype=np.float64)
+    side[:, 1] = -1.0
+    cache.side_2d = side
+    cache.holding_bars_2d = np.ones((n_bars, 2), dtype=np.float64)
+    cache.sleeve_to_sym = np.zeros(2, dtype=np.int64)
+    cache.sleeve_ids = (("BTCUSDT", "trend_4h_long"), ("BTCUSDT", "trend_4h_short"))
+    cache.sleeve_to_tf = ("4h", "4h")
+    cache.sleeve_keys = (
+        SignalSleeveKey(symbol="BTCUSDT", native_tf="4h", strategy_id="trend"),
+        SignalSleeveKey(symbol="BTCUSDT", native_tf="4h", strategy_id="trend"),
+    )
+    return cache
+
+
+def test_build_regime_routing_plan_side_split_disabled_keeps_legacy_3key_shape() -> None:
+    n_bars = 20
+    cache = _make_mixed_side_cache(n_bars)
+    aligned = _make_aligned([100.0 + i for i in range(n_bars)])
+    raw_codes = np.zeros(n_bars, dtype=np.int8)
+    folds = (WFFold(fit_start=0, fit_end=10, cal_start=10, cal_end=12, oos_start=12, oos_end=18),)
+
+    plan = build_regime_routing_plan(
+        cache=cache, aligned=aligned, awf_folds=folds, raw_regime_code_1d=raw_codes,
+        compression_enabled=True, min_n=1, side_split_enabled=False,
+    )
+
+    for key in plan.effective_bucket_edges_by_fold[0]:
+        assert len(key) == 3
+
+
+def test_build_regime_routing_plan_side_split_enabled_produces_4key_edges_with_correct_sides() -> None:
+    n_bars = 20
+    cache = _make_mixed_side_cache(n_bars)
+    aligned = _make_aligned([100.0 + i for i in range(n_bars)])
+    raw_codes = np.zeros(n_bars, dtype=np.int8)
+    folds = (WFFold(fit_start=0, fit_end=10, cal_start=10, cal_end=12, oos_start=12, oos_end=18),)
+
+    plan = build_regime_routing_plan(
+        cache=cache, aligned=aligned, awf_folds=folds, raw_regime_code_1d=raw_codes,
+        compression_enabled=True, min_n=1, side_split_enabled=True,
+    )
+
+    edges = plan.effective_bucket_edges_by_fold[0]
+    assert edges, "expected non-empty side-split bucket edges"
+    for key in edges:
+        assert len(key) == 4
+        assert key[3] in (1, -1)
+    sides_seen = {key[3] for key in edges}
+    assert sides_seen == {1, -1}, "both long and short sleeves must produce distinct side buckets"
+
+
+def test_build_regime_routing_plan_side_split_on_vs_off_differ_when_sides_mixed() -> None:
+    """Guards against the dead-flag regression: on/off must diverge structurally."""
+    n_bars = 20
+    aligned = _make_aligned([100.0 + i for i in range(n_bars)])
+    raw_codes = np.zeros(n_bars, dtype=np.int8)
+    folds = (WFFold(fit_start=0, fit_end=10, cal_start=10, cal_end=12, oos_start=12, oos_end=18),)
+
+    plan_off = build_regime_routing_plan(
+        cache=_make_mixed_side_cache(n_bars), aligned=aligned, awf_folds=folds,
+        raw_regime_code_1d=raw_codes, compression_enabled=True, min_n=1, side_split_enabled=False,
+    )
+    plan_on = build_regime_routing_plan(
+        cache=_make_mixed_side_cache(n_bars), aligned=aligned, awf_folds=folds,
+        raw_regime_code_1d=raw_codes, compression_enabled=True, min_n=1, side_split_enabled=True,
+    )
+
+    off_key_lengths = {len(k) for k in plan_off.effective_bucket_edges_by_fold[0]}
+    on_key_lengths = {len(k) for k in plan_on.effective_bucket_edges_by_fold[0]}
+    assert off_key_lengths == {3}
+    assert on_key_lengths == {4}
+    assert plan_off.effective_bucket_edges_by_fold[0].keys() != plan_on.effective_bucket_edges_by_fold[0].keys()

@@ -4,10 +4,13 @@ import numpy as np
 import pytest
 
 from src.domain.futures.strategy.cs_rank import SymbolSignal
+from src.domain.futures.strategy.tiered_workflow.dataclasses import RegimeCellPolicy
 from src.domain.futures.strategy.tiered_workflow.l2_meta import (
     _build_bucket_reliability,
     _parse_meta_group_ids,
     apply_bucket_conditional_weight,
+    apply_regime_cell_policy,
+    filter_sleeves_by_bucket,
 )
 
 
@@ -341,3 +344,173 @@ def test_mutual_exclusion_guard_passes_single_enable() -> None:
         l2_intra_symbol_divergence_enabled=False,
     )
     _simulate_guard(cfg)  # no raise
+
+
+class TestFilterSleevesByBucket:
+    """Phase B: regime x side bucket key split."""
+
+    def _make_sleeve_sigs(self) -> dict[tuple[str, str], SymbolSignal]:
+        return {
+            ("BTCUSDT", "dual_momentum:ema_12_72_4h"): _sig(raw_mu=-10.0),
+            ("ETHUSDT", "dual_momentum:ema_12_72_4h"): _sig(raw_mu=8.0),
+            ("BTCUSDT", "trend_donchian:dc_20_4h"): _sig(raw_mu=-5.0),
+        }
+
+    def _make_bucket_edges_with_side(self) -> dict[tuple[int, str, str, int], float]:
+        return {
+            (2, "dual_momentum", "4h", -1): 20.0,
+            (2, "dual_momentum", "4h", 1): -15.0,
+            (2, "trend_donchian", "4h", -1): 10.0,
+        }
+
+    def _make_bucket_edges_legacy(self) -> dict[tuple[int, str, str], float]:
+        return {
+            (2, "dual_momentum", "4h"): 12.0,
+            (2, "trend_donchian", "4h"): 10.0,
+        }
+
+    def _make_sleeve_sigs_diff_families(self) -> dict[tuple[str, str], SymbolSignal]:
+        return {
+            ("BTCUSDT", "dual_momentum:ema_12_72_4h"): _sig(raw_mu=-10.0),
+            ("BTCUSDT", "residual_reversion:rr_20_4h"): _sig(raw_mu=8.0),
+        }
+
+    def test_regime_bucket_side_split_separates_short_and_long_edges(self) -> None:
+        sleeve_sigs = self._make_sleeve_sigs_diff_families()
+        bucket_edges: dict[tuple[int, str, str, int], float] = {
+            (2, "dual_momentum", "4h", -1): 20.0,
+            (2, "dual_momentum", "4h", 1): -15.0,
+            (2, "residual_reversion", "4h", -1): -5.0,
+            (2, "residual_reversion", "4h", 1): 12.0,
+        }
+
+        short_result = filter_sleeves_by_bucket(sleeve_sigs, bucket_edges, regime_now=2, side=-1, edge_floor_bps=5.0)
+        long_result = filter_sleeves_by_bucket(sleeve_sigs, bucket_edges, regime_now=2, side=1, edge_floor_bps=5.0)
+
+        assert ("BTCUSDT", "dual_momentum:ema_12_72_4h") in short_result
+        assert ("BTCUSDT", "residual_reversion:rr_20_4h") not in short_result
+        assert len(short_result) == 1
+
+        assert ("BTCUSDT", "dual_momentum:ema_12_72_4h") not in long_result
+        assert ("BTCUSDT", "residual_reversion:rr_20_4h") in long_result
+        assert len(long_result) == 1
+
+    def test_regime_bucket_side_split_low_sample_falls_back_to_pooled(self) -> None:
+        sleeve_sigs = self._make_sleeve_sigs()
+        bucket_edges: dict[tuple[int, str, str, int], float] = {}
+
+        result = filter_sleeves_by_bucket(sleeve_sigs, bucket_edges, regime_now=2, side=-1, edge_floor_bps=5.0)
+        assert len(result) == 0
+
+    def test_regime_bucket_side_split_disabled_matches_legacy_output(self) -> None:
+        sleeve_sigs = self._make_sleeve_sigs()
+        bucket_edges = self._make_bucket_edges_legacy()
+
+        result_without_side = filter_sleeves_by_bucket(sleeve_sigs, bucket_edges, regime_now=2, side=0, edge_floor_bps=5.0)
+        result_default = filter_sleeves_by_bucket(sleeve_sigs, bucket_edges, regime_now=2, edge_floor_bps=5.0)
+
+        assert result_without_side == result_default
+        assert len(result_without_side) == 3
+        for key in result_without_side:
+            assert key in sleeve_sigs
+
+
+class TestApplyBucketConditionalWeightSide:
+    """Phase B: side-split coverage for apply_bucket_conditional_weight."""
+
+    def test_apply_bucket_conditional_weight_side_key_construction(self) -> None:
+        sleeve_sigs: dict[tuple[str, str], SymbolSignal] = {
+            ("BTCUSDT", "dual_momentum:ema_12_72_4h"): _sig(raw_mu=-10.0),
+        }
+        bucket_edges: dict[tuple[int, str, str, int], float] = {
+            (2, "dual_momentum", "4h", -1): 50.0,
+        }
+
+        result = apply_bucket_conditional_weight(
+            sleeve_sigs, bucket_edges, regime_now=2, side=-1,
+            edge_floor_bps=5.0, edge_ref_bps=50.0,
+        )
+        assert ("BTCUSDT", "dual_momentum:ema_12_72_4h") in result
+        assert result[("BTCUSDT", "dual_momentum:ema_12_72_4h")].quality_weight == pytest.approx(0.9)
+
+    def test_apply_bucket_conditional_weight_side_zero_default(self) -> None:
+        sleeve_sigs: dict[tuple[str, str], SymbolSignal] = {
+            ("BTCUSDT", "dual_momentum:ema_12_72_4h"): _sig(raw_mu=-10.0),
+        }
+        bucket_edges: dict[tuple[int, str, str], float] = {
+            (2, "dual_momentum", "4h"): 50.0,
+        }
+
+        result = apply_bucket_conditional_weight(
+            sleeve_sigs, bucket_edges, regime_now=2, side=0,
+            edge_floor_bps=5.0, edge_ref_bps=50.0,
+        )
+        assert ("BTCUSDT", "dual_momentum:ema_12_72_4h") in result
+
+
+# ── [SPEC alpha-funnel-regime-coverage Phase B] apply_regime_cell_policy side_split ──
+
+
+def _policy(
+    *, action: str, side: int, edge_multiplier: float = 1.0, hard_block_eligible: bool = False,
+) -> RegimeCellPolicy:
+    return RegimeCellPolicy(
+        state=2,
+        state_name="bear",
+        family="trend",
+        tf="4h",
+        side=side,
+        action=action,  # type: ignore[arg-type]
+        reason="positive_cal_lift",  # type: ignore[arg-type]
+        edge_multiplier=edge_multiplier,
+        confidence=1.0,
+        fit_edge_bps=10.0,
+        pooled_fit_edge_bps=0.0,
+        cal_edge_bps=10.0,
+        pooled_cal_edge_bps=0.0,
+        fit_lift_bps=10.0,
+        cal_lift_bps=10.0,
+        sign_consistent=True,
+        hard_block_eligible=hard_block_eligible,
+        n_fit=100,
+        n_cal=100,
+    )
+
+
+class TestApplyRegimeCellPolicySideSplit:
+    def test_side_split_enabled_routes_long_and_short_to_different_policies(self) -> None:
+        sleeve_sigs = {
+            ("BTCUSDT", "trend:ema_4h"): _sig(raw_mu=5.0),
+            ("ETHUSDT", "trend:ema_4h"): _sig(raw_mu=5.0),
+        }
+        sleeve_edges = {
+            ("BTCUSDT", "trend:ema_4h"): 30.0,   # long
+            ("ETHUSDT", "trend:ema_4h"): -30.0,  # short
+        }
+        policy_map = {
+            (2, "trend", "4h", 1): _policy(action="block", side=1, edge_multiplier=0.0, hard_block_eligible=True),
+            (2, "trend", "4h", -1): _policy(action="allow", side=-1, edge_multiplier=1.0),
+        }
+
+        result = apply_regime_cell_policy(
+            sleeve_sigs, sleeve_edges, policy_map, regime_now=2,
+            mode="hybrid", side_split_enabled=True,
+        )
+
+        assert result.n_block == 1
+        assert result.n_allow == 1
+        assert ("BTCUSDT", "trend:ema_4h") not in result.sleeve_sigs
+        assert ("ETHUSDT", "trend:ema_4h") in result.sleeve_sigs
+
+    def test_side_split_disabled_ignores_side_and_matches_legacy_3key(self) -> None:
+        sleeve_sigs = {("BTCUSDT", "trend:ema_4h"): _sig(raw_mu=5.0)}
+        sleeve_edges = {("BTCUSDT", "trend:ema_4h"): 30.0}
+        policy_map = {(2, "trend", "4h"): _policy(action="allow", side=0, edge_multiplier=1.0)}
+
+        result = apply_regime_cell_policy(
+            sleeve_sigs, sleeve_edges, policy_map, regime_now=2,
+            mode="hybrid", side_split_enabled=False,
+        )
+
+        assert result.n_allow == 1
+        assert ("BTCUSDT", "trend:ema_4h") in result.sleeve_sigs
