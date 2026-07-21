@@ -12,6 +12,7 @@ import optuna
 from numpy.typing import NDArray
 
 from src.domain.futures.optimization.evaluator import calc_n_trials_eff_entropy
+from src.domain.futures.optimization.l2_robust_search import materialize_l2_robust_params  # noqa: F401
 from src.domain.futures.optimization.observability.l2_runtime_probe import L2RuntimeProbe
 from src.domain.futures.optimization.workflow import (
     compute_crisis_replay_budget,
@@ -369,7 +370,14 @@ def select_layer2_champion(
         )
 
     # 1. feasible completed trials 분류 (Optuna constraints) — Fix C: 먼저 분류하여 n_trials_eff에 사용
-    feasible_trials = [t for t in complete_trials if all(c <= 0.0 for c in layer2_constraints_from_trial(t))]
+    def _selection_constraints(trial: optuna.trial.FrozenTrial) -> tuple[float, ...]:
+        values = layer2_constraints_from_trial(trial)
+        raw = trial.user_attrs.get("l2_optuna_constraint_values", trial.user_attrs.get("l2_constraint_values"))
+        if isinstance(raw, (list, tuple)) and len(raw) < len(values):
+            return tuple(values[: len(raw)]) + (0.0,) * (len(values) - len(raw))
+        return values
+
+    feasible_trials = [t for t in complete_trials if all(c <= 0.0 for c in _selection_constraints(t))]
 
     # 2. effective trial count 계산 — Fix C: feasible trials 서명만 사용 (DSR 벤치마크 정직화)
     feasible_signatures = [t.user_attrs["l2_block_log_growth_signature"] for t in feasible_trials]

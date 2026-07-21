@@ -4,6 +4,45 @@
 
 ---
 
+# L2 robust-search 기준선 실측 — 2026-07-21 (최신)
+
+## 무엇을 했나
+
+실제 로컬 선물 데이터에서 단일 프로세스로 다음 명령을 실행했다.
+
+```bash
+L2_OPTUNA_TRIALS=120 uv run python src/execution/opt_main_futures.py \
+  --phase l2 --sync skip --timeframe 4h --date 2026-05-01
+```
+
+## 실측 수치
+
+| 항목 | 결과 |
+|---|---:|
+| L1 입력/승인 심볼 | 118 / 113 |
+| L1 판정 | PASS |
+| 위기 데이터 | 53 symbols, 7,221 bars |
+| L2 완료 trials | 120/120 |
+| joint-feasible | **4/120 (3.3%)** |
+| crisis 측정 trials | 120 |
+| 최고 CAGR | 약 **0.17%** |
+| 최종 L2 champion | 없음 |
+| blocker | `cagr` |
+
+제약 위반 집계: `fold=114`, `cagr=111`, `recent_fold=64`, `sharpe_uplift=24`, `recency_holdout=6`.
+
+## 판정
+
+기존 0~1/120 수준보다 4/120으로 개선됐지만, 배포 가능한 교집합은 여전히 3.3%로 매우 희소하다. 실행 로그에는 여전히 `[MULTI-SEED]`와 `luna_ftx_2022_collapse` composite window가 나타났다. 따라서 robust 단일 120-search, sub-1x 위기 레버리지 투영, LUNA calibration/FTX sealed validation은 실제 운영 경로에 아직 연결되지 않았으며, 이번 수치는 개선안 적용 후 성과가 아닌 **기존 파이프라인 기준선**으로 해석한다.
+
+## 다음 우선순위
+
+- `_run_robust_l2_l3_outcome`를 실제 `_run_strategy_stage` 호출 경로에 연결하고 multi-seed 실행을 제거한다.
+- crisis loader가 Optuna에는 LUNA calibration만 제공하고, FTX sealed validation은 L3 이후 승격 판정에만 사용하도록 배선한다.
+- 동일 data fingerprint로 120 trials를 재실행해 `joint_feasible`, blocker 분포, projected leverage를 기준선과 비교한다.
+
+---
+
 # L2 Policy TF-Key SSOT 수정 — 세션 최초 joint_feasible 확보 — 2026-07-21 (최신)
 
 `docs/specs/l2-policy-tf-key-ssot.md` 구현(`/check` PASS, Cov 39%) — 바로 아래 섹션("Crisis Replay Routing Parity")에서 "측정은 정확해졌는데 수치가 하나도 안 바뀌었다"던 문제의 진짜 원인을 찾아 고쳤다. **이 세션 전체에서 처음으로 joint_feasible이 0이 아닌 값이 나왔다.**

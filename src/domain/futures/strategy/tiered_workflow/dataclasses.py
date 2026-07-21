@@ -354,6 +354,8 @@ class Layer2TrialEvaluation:
     recency_holdout_applicable: bool = False
     window_bottleneck_covered: bool = True
     window_bottleneck_detail: str = ""
+    crisis_mdd_hybrid: float = float("nan")
+    crisis_cagr_hybrid: float = float("nan")
 
 
 @dataclass(slots=True, frozen=True)

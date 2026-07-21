@@ -39,6 +39,49 @@ class DeploymentResult:
     binding_constraint: str  # "mdd" | "cvar" | "hard_cap" | "none"
 
 
+@dataclass(slots=True, frozen=True)
+class CrisisLeverageProjection:
+    requested_leverage: float
+    projected_leverage: float
+    crisis_mdd: float
+    crisis_cagr: float
+    binding_constraint: str
+    feasible: bool
+
+
+def project_leverage_to_crisis_budget(
+    *,
+    requested_leverage: float,
+    crisis_unit_rets: NDArray[np.float64],
+    crisis_mdd_budget: float,
+    crisis_cagr_floor: float,
+    bars_per_year: float,
+    grid_points: int = 257,
+) -> CrisisLeverageProjection:
+    """Project raw leverage to the largest crisis-safe point, including cash."""
+    if not np.isfinite(requested_leverage) or requested_leverage < 0.0:
+        raise ValueError("requested_leverage must be finite and non-negative")
+    arr = np.asarray(crisis_unit_rets, dtype=np.float64)
+    if arr.size < 2 or not np.all(np.isfinite(arr)):
+        raise ValueError("crisis_unit_rets must contain at least two finite values")
+    if grid_points < 2 or not np.isfinite(bars_per_year) or bars_per_year <= 0.0:
+        raise ValueError("invalid projection grid or annualization")
+    grid = np.linspace(0.0, requested_leverage, int(grid_points), dtype=np.float64)
+    scaled = grid[:, None] * arr[None, :]
+    equity = np.cumprod(1.0 + scaled, axis=1)
+    peaks = np.maximum.accumulate(equity, axis=1)
+    mdd = np.max((peaks - equity) / np.maximum(peaks, 1e-12), axis=1)
+    log_growth = np.sum(np.log1p(np.clip(scaled, -1.0 + 1e-9, None)), axis=1)
+    cagr = np.expm1(log_growth / (arr.size / bars_per_year))
+    ok = (mdd <= float(crisis_mdd_budget) + 1e-12) & (cagr >= float(crisis_cagr_floor) - 1e-12)
+    idx = int(np.flatnonzero(ok)[-1]) if np.any(ok) else 0
+    projected = float(grid[idx])
+    final_mdd = float(mdd[idx])
+    final_cagr = float(cagr[idx])
+    binding = "none" if projected >= requested_leverage - 1e-12 else ("crisis_mdd" if final_mdd >= crisis_mdd_budget else "crisis_cagr")
+    return CrisisLeverageProjection(float(requested_leverage), projected, final_mdd, final_cagr, binding, bool(ok[idx]))
+
+
 def trend_efficiency_gross_mult(
     trailing_er: float,
     *,
