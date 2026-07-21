@@ -2186,6 +2186,7 @@ class CrisisWindow:
     label: str
     symbols: tuple[str, ...]
     source_note: str
+    role: Literal["calibration", "sealed_validation"] = "calibration"
 
 
 DEFAULT_CRISIS_WINDOWS: tuple[CrisisWindow, ...] = (
@@ -2258,6 +2259,19 @@ DEFAULT_CRISIS_WINDOWS: tuple[CrisisWindow, ...] = (
             "Entirely outside L1/L2/L3 data range — true out-of-band data."
         ),
     ),
+)
+
+# Calibration is the only crisis data available to candidate search.  The
+# later FTX slice remains sealed until promotion, preventing objective leakage.
+CRISIS_CALIBRATION_WINDOWS: tuple[CrisisWindow, ...] = tuple(
+    dataclasses.replace(window, end=min(window.end, date(2022, 7, 1)), label="luna_2022_calibration", role="calibration")
+    for window in DEFAULT_CRISIS_WINDOWS
+    if window.start < date(2022, 7, 1)
+)
+CRISIS_SEALED_VALIDATION_WINDOWS: tuple[CrisisWindow, ...] = tuple(
+    dataclasses.replace(window, start=max(window.start, date(2022, 11, 1)), label="ftx_2022_sealed_validation", role="sealed_validation")
+    for window in DEFAULT_CRISIS_WINDOWS
+    if window.end > date(2022, 11, 1)
 )
 
 

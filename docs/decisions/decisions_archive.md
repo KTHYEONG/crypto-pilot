@@ -2,6 +2,11 @@
 
 This file holds historical architecture decision records (ADRs) that have been pruned from the active window.
 
+## [2026-07-20] [TASK_L2_RUNTIME_BOTTLENECK_DEBUG_OBSERVABILITY] [ADR_20260720_L2_RUNTIME_BOTTLENECK_DEBUG_OBSERVABILITY]
+- **Context/Why:** docs/results/result.md의 L2 기준선은 top-level 시간과 부모 RSS만 보여 12,414MB 순간 peak의 자식 PID/단계 소유자, L1 feature-cache 내부 비용, Optuna queue/worker 비용, champion replay 후보별 비용을 귀속하지 못한다.
+- **Resolution/What:** DEBUG 전용 L2RuntimeProbe를 도입해 부모 process tree의 RSS/PSS를 표본화하고 nested span·cache·Optuna batch/trial·AWF·champion replay를 구조화된 SYS/EVAL 레코드로 기록한다. probe 실패는 최적화 실행을 변경하지 않는 degraded 경로로 억제하며, 동일 seed/캐시 조건에서 최적화 대상 선정 기준을 고정한다.
+- **Impact:** /check PASS (Cov 38%). L2RuntimeProbe 및 wiring 테스트를 계약에 정렬했고, 향후 최적화 전에 wall-time 15% 이상 또는 sampled tree peak 소유 단계를 근거로 병목을 선택할 수 있다.
+
 ## [2026-07-20] [TASK_L1_MEMORY_FLOOR_ADAPTIVE_CALIBRATION] [ADR_20260720_L1_MEMORY_FLOOR_ADAPTIVE_CALIBRATION]
 - **Context/Why:** L1/L2 추가 최적화 여지 질문 발생. logs/sys.log 실측 결과 evidence/outer nested WF fold 평가가 reason=memory_floor_serial로 강제 직렬화(workers=1)되고 있었으나 자체 프로세스 PSS 상한/시스템 available 부족 중 어느 쪽이 원인인지 로그에 안 남아 원인 불명이었고 worker_private=max(1GiB,...) 고정 가정도 실측 검증된 적 없었음. 동일 세션 재조사: binding_constraint 필드 추가 후 LOG_LEVEL=DEBUG 프로덕션 재실행으로 실제 바인딩 원인이 tree_pss_cap도 system_available도 아닌 worker_private 자체(1GiB 고정 하한)임을 확정. measure_worker_private_bytes로 fork 전/후 프로세스 트리 스냅샷을 비교해 실측한 결과 evidence 단계 워커당 실제 사용량은 439~1440MB(가정치 1024MB보다 최대 41% 낮거나 40% 높음, 세션마다 변동), outer 단계는 59~133MB(가정치 대비 최대 92% 낮음)로 stage별 프로파일이 완전히 다름을 확인. shared_mb(labeled_events 크기, TF/시그널 수에 비례)와 evidence 실측치 사이에 뚜렷한 선형 상관(OLS 적합) 확인, outer는 상관 없음.
 - **Resolution/What:** 고정 회귀식 하드코딩(과적합 위험) 대신 런타임 온라인 캘리브레이션 채택: memory.py에 (shared_mb, measured_mb) 관측치를 모듈 전역으로 누적하는 저장소 + OLS 적합/예측 순수함수(fit_worker_private_linear_model, predict_calibrated_worker_private_mb) 신설. TF#1은 항상 기존 안전 기본값(1024MB, 무회귀)로 시작하는 cold-start 안전장치, 관측치 2개 미만 시 폴백, 예측값이 과거 실측 최댓값 아래로 못 내려가는 단조 안전 클램프(LIMIT-02), 안전마진(기본 1.3배) 적용. resolve_safe_nested_workers/run_l1_nested_swf에 배선해 매 TF마다 자동 기록/예측하도록 연결. 부가로 hours_per_bar SSOT 재사용해 l1_tfs를 세밀한 TF(큰 shared_mb) 먼저 처리하도록 정렬(LIMIT-07) -- 속도 목적 아니고(효과 <1%, 무시 가능 수준으로 실측 확인) 회귀 모델이 항상 관측 범위 안에서만 보간하도록 만들어 외삽 위험을 구조적으로 제거하기 위함.
