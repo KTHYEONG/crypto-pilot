@@ -16,7 +16,10 @@ from dataclasses import dataclass
 import numpy as np
 from numpy.typing import NDArray
 
-from src.domain.futures.strategy.tiered_workflow.dataclasses import Layer2FoldDiagnostics
+from src.domain.futures.strategy.tiered_workflow.dataclasses import (
+    Layer2FoldDiagnostics,
+    Layer2RecencyHoldoutDiagnostics,
+)
 
 _logger = logging.getLogger(__name__)
 
@@ -586,3 +589,57 @@ def compute_layer2_fold_diagnostics(
         recent_fold_mdd=float(recent_fold_mdd),
         latest_to_median_cagr=float(latest_to_median_cagr),
     )
+
+
+def compute_recency_holdout_diagnostics(
+    *,
+    rets_hybrid: Sequence[float],
+    leverage: float,
+    bars_per_year: float,
+    holdout_days: float,
+) -> Layer2RecencyHoldoutDiagnostics:
+    """[ADR_20260721_L2_RECENCY_GENERALIZATION_GATE] rets_hybrid 꼬리(최근 holdout_days)를 objective-미참여 slice로 계산.
+
+    growth_lcb_deployed/cagr_hybrid 등 primary objective/metric 계산에는
+    관여하지 않는다 — 순수 post-hoc 진단+제약 전용 slice.
+    """
+    n_total = len(rets_hybrid)
+    if n_total == 0:
+        return Layer2RecencyHoldoutDiagnostics(
+            applicable=False, holdout_bars=0, recency_holdout_cagr=0.0, recency_holdout_sharpe=0.0, recency_holdout_mdd=0.0,
+        )
+    holdout_bars = round(holdout_days / 365.25 * bars_per_year)
+    holdout_bars = min(holdout_bars, n_total // 2)
+    if holdout_bars < 5:
+        return Layer2RecencyHoldoutDiagnostics(
+            applicable=False, holdout_bars=holdout_bars, recency_holdout_cagr=0.0, recency_holdout_sharpe=0.0, recency_holdout_mdd=0.0,
+        )
+    tail = np.asarray(rets_hybrid[-holdout_bars:], dtype=np.float64)
+    deployed = apply_deployment(rets=tail, leverage=leverage, bars_per_year=bars_per_year)
+    sharpe_val = _sharpe_from_returns(tail, bars_per_year=bars_per_year)
+    return Layer2RecencyHoldoutDiagnostics(
+        applicable=True,
+        holdout_bars=holdout_bars,
+        recency_holdout_cagr=float(deployed.cagr),
+        recency_holdout_sharpe=float(sharpe_val),
+        recency_holdout_mdd=float(deployed.mdd),
+    )
+
+
+def evaluation_window_bottleneck_verdict(
+    awf_fold_diags: list[dict[str, float]],
+    *,
+    stress_mdd_threshold: float = 0.15,
+) -> tuple[bool, str]:
+    """[RELOCATED from tiered_logging.py, unchanged logic] Gate A window verdict."""
+    import math
+    covered = False
+    detail = "no_bottleneck_caliber_fold_in_window"
+    for f in awf_fold_diags:
+        mdd = f.get("mdd", float("nan"))
+        cagr = f.get("cagr", float("nan"))
+        if math.isfinite(mdd) and math.isfinite(cagr) and mdd >= stress_mdd_threshold and cagr <= 0.0:
+            covered = True
+            detail = f"fold={awf_fold_diags.index(f)} mdd={mdd:.3f} cagr={cagr:+.3f}"
+            break
+    return (covered, detail)

@@ -35,6 +35,7 @@ class Layer2ConstraintVector:
     sharpe_uplift: float
     crisis_cagr: float
     crisis_measured: bool
+    recency_holdout: float
 
     def as_tuple(self) -> tuple[float, ...]:
         return (
@@ -51,6 +52,7 @@ class Layer2ConstraintVector:
             self.cagr,
             self.sharpe_uplift,
             self.crisis_cagr,
+            self.recency_holdout,
         )
 
     def as_mapping(self) -> dict[str, float | bool]:
@@ -69,6 +71,7 @@ class Layer2ConstraintVector:
             "sharpe_uplift": self.sharpe_uplift,
             "crisis_cagr": self.crisis_cagr,
             "crisis_measured": self.crisis_measured,
+            "recency_holdout": self.recency_holdout,
         }
 
     def non_crisis_feasible(self) -> bool:
@@ -82,6 +85,7 @@ class Layer2ConstraintVector:
             self.active_blocks,
             self.friction,
             self.trades,
+            self.recency_holdout,
         )
         return all(v <= 0.0 for v in non_crisis)
 
@@ -163,8 +167,15 @@ def evaluate_layer2_gate(
     crisis_mdd_budget: float | None = None,
     crisis_cagr_hybrid: float | None = None,
     crisis_cagr_floor: float | None = None,
+    recency_holdout_cagr: float | None = None,
+    recency_holdout_applicable: bool = False,
+    window_bottleneck_covered: bool = True,
+    window_bottleneck_detail: str = "",
 ) -> Layer2GateEvaluation:
     """Build Optuna safety constraints and final L2 promotion gate diagnostics.
+
+    [ADR_20260721_L2_RECENCY_GENERALIZATION_GATE] 14th constraint slot
+    (recency_holdout) + window_bottleneck_covered diagnostic added.
 
     Args:
         deployment_failed: 시뮬레이션 배포 실패 여부.
@@ -218,6 +229,16 @@ def evaluate_layer2_gate(
         if positive_block_delta_ratio is None or not np.isfinite(float(positive_block_delta_ratio))
         else _finite_or_fail(float(config.l2_min_positive_block_delta_ratio) - float(positive_block_delta_ratio))
     )
+    recency_holdout_constraint = -1.0
+    if (
+        config.l2_require_recency_holdout_pass
+        and recency_holdout_applicable
+        and recency_holdout_cagr is not None
+        and np.isfinite(float(recency_holdout_cagr))
+    ):
+        recency_holdout_constraint = _finite_or_fail(
+            float(config.l2_min_recency_holdout_cagr) - float(recency_holdout_cagr),
+        )
     _crisis_constraint = (
         -1.0
         if crisis_mdd_hybrid is None or crisis_mdd_budget is None
@@ -244,6 +265,7 @@ def evaluate_layer2_gate(
         _finite_or_fail(float(config.l2_min_cagr) - cagr_hybrid),
         _finite_or_fail(sharpe_hac_baseline + float(config.l2_min_sharpe_uplift) - sharpe_hac_hybrid),
         _crisis_cagr_constraint,  # 13th slot — [ADR_TBD_L2_CRISIS_CAGR_CHAMPION_SELECTION_BLINDNESS_FIX]
+        recency_holdout_constraint,  # 14th slot — [SPEC_L2_RECENCY_HOLDOUT_GATE]
     )
 
     promotion_constraint_values = (
@@ -291,6 +313,9 @@ def evaluate_layer2_gate(
     if promotion_passed and worst_fold_cagr_constraint > 0.0:
         promotion_passed = False
         promotion_blocker = "worst_fold_cagr"
+    if promotion_passed and recency_holdout_constraint > 0.0:
+        promotion_passed = False
+        promotion_blocker = "recency_holdout"
     # RC-4: block_delta → diagnostic-only (regime inert 시 구조적 통과불가 방지)
     if block_delta_constraint > 0.0:
         _logger.debug(
@@ -352,6 +377,7 @@ def evaluate_layer2_gate(
         sharpe_uplift=optuna_constraint_values[11],
         crisis_cagr=optuna_constraint_values[12],
         crisis_measured=_crisis_measured,
+        recency_holdout=optuna_constraint_values[13],
     )
     return Layer2GateEvaluation(
         optuna_constraint_values=cast(tuple[float, ...], optuna_constraint_values),
@@ -359,4 +385,6 @@ def evaluate_layer2_gate(
         promotion_blocker=promotion_blocker,
         promotion_constraint_values=cast(tuple[float, ...], promotion_constraint_values),
         constraint_vector=constraint_vector,
+        window_bottleneck_covered=window_bottleneck_covered,
+        window_bottleneck_detail=window_bottleneck_detail,
     )

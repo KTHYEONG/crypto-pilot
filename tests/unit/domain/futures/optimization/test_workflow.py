@@ -82,7 +82,7 @@ class TestEvaluateL2TrialWiresWorstFoldAndKellyWhenEnabled:
         mock_sim.return_value = self._make_sim()
         mock_fold_diag.return_value = self._make_fold_diag()
         mock_gate.return_value = SimpleNamespace(
-            optuna_constraint_values=(0.0,) * 13,
+            optuna_constraint_values=(0.0,) * 14,
             gate_passed=True,
             blocker_reason="",
             constraint_vector=SimpleNamespace(crisis_measured=True),
@@ -128,6 +128,9 @@ class TestEvaluateL2TrialWiresWorstFoldAndKellyWhenEnabled:
             l2_objective_trade_target=90,
             l2_objective_trade_weight=0.02,
             l2_turnover_penalty_weight=0.0,
+            l2_require_recency_holdout_pass=True,
+            l2_min_recency_holdout_cagr=-0.05,
+            l2_recency_holdout_days=30.0,
         )
         caps = SimpleNamespace()
         aligned = SimpleNamespace(
@@ -221,7 +224,7 @@ class TestEvaluateL2TrialDefaultConfigWiresWorstFoldWithoutExplicitOverride:
         mock_sim.return_value = self._make_sim()
         mock_fold_diag.return_value = self._make_fold_diag()
         mock_gate.return_value = SimpleNamespace(
-            optuna_constraint_values=(0.0,) * 13,
+            optuna_constraint_values=(0.0,) * 14,
             gate_passed=True,
             blocker_reason="",
             constraint_vector=SimpleNamespace(crisis_measured=True),
@@ -327,7 +330,7 @@ class TestEvaluateL2TrialCrisisConstraint:
         mock_sim.return_value = self._make_sim()
         mock_fold_diag.return_value = self._make_fold_diag()
         mock_gate.return_value = SimpleNamespace(
-            optuna_constraint_values=(0.0,) * 13,
+            optuna_constraint_values=(0.0,) * 14,
             gate_passed=True,
             blocker_reason="",
             constraint_vector=SimpleNamespace(crisis_measured=True),
@@ -448,7 +451,7 @@ class TestEvaluateL2TrialCrisisConstraint:
         ]
         mock_fold_diag.return_value = self._make_fold_diag()
         mock_gate.return_value = SimpleNamespace(
-            optuna_constraint_values=(0.0,) * 13,
+            optuna_constraint_values=(0.0,) * 14,
             gate_passed=True,
             blocker_reason="",
             constraint_vector=SimpleNamespace(crisis_measured=True),
@@ -586,7 +589,7 @@ class TestEvaluateL2TrialGrowthLcbDeployed:
         mock_sim.return_value = sim
         mock_fold_diag.return_value = self._make_fold_diag()
         mock_gate.return_value = SimpleNamespace(
-            optuna_constraint_values=(0.0,) * 13,
+            optuna_constraint_values=(0.0,) * 14,
             gate_passed=True,
             blocker_reason="",
             constraint_vector=SimpleNamespace(crisis_measured=True),
@@ -663,7 +666,7 @@ class TestEvaluateL2TrialGrowthLcbDeployed:
         mock_sim.return_value = sim
         mock_fold_diag.return_value = self._make_fold_diag()
         mock_gate.return_value = SimpleNamespace(
-            optuna_constraint_values=(0.0,) * 13,
+            optuna_constraint_values=(0.0,) * 14,
             gate_passed=True,
             blocker_reason="",
             constraint_vector=SimpleNamespace(crisis_measured=True),
@@ -769,7 +772,7 @@ class TestEvaluateL2TrialBullBoostCalibrationIsolation:
         mock_sim.return_value = sim
         mock_fold_diag.return_value = self._make_fold_diag()
         mock_gate.return_value = SimpleNamespace(
-            optuna_constraint_values=(0.0,) * 13,
+            optuna_constraint_values=(0.0,) * 14,
             gate_passed=True,
             blocker_reason="",
             constraint_vector=SimpleNamespace(crisis_measured=True),
@@ -956,7 +959,7 @@ class TestEvaluateL2TrialUsesComputeCrisisReplayBudget:
             latest_to_median_cagr=1.0,
         )
         mock_gate.return_value = SimpleNamespace(
-            optuna_constraint_values=(0.0,) * 13, gate_passed=True, blocker_reason="",
+            optuna_constraint_values=(0.0,) * 14, gate_passed=True, blocker_reason="",
             constraint_vector=SimpleNamespace(crisis_measured=True),
         )
         mock_calibrate.return_value = (1.5, "mdd", 0.0)
@@ -997,8 +1000,90 @@ class TestEvaluateL2TrialUsesComputeCrisisReplayBudget:
         assert gate_kwargs["crisis_cagr_floor"] == -0.05
 
 
-def test_layer2_constraints_from_trial_pads_to_13() -> None:
-    """[S4] 12개짜리 legacy l2_optuna_constraint_values를 가진 trial → 13-tuple로 패딩되고 13번째 원소가 1.0(fail-safe)."""
+def test_evaluate_l2_trial_wires_recency_holdout_and_window_coverage_into_evaluation() -> None:
+    """[S4-INTEGRATION] evaluate_l2_trial가 compute_recency_holdout_diagnostics와
+    window_compute_recency_holdout_diagnostics의 결과를 gate와 trial evaluation에 전달."""
+    from unittest.mock import MagicMock, patch
+
+    from src.domain.futures.optimization.workflow import evaluate_l2_trial
+    from src.domain.futures.strategy.tiered_workflow.dataclasses import Layer2AllocationConfig
+
+    n_bars = 100
+    sim = SimpleNamespace(
+        rets_hybrid=[0.001] * n_bars,
+        rets_baseline=[0.0005] * n_bars,
+        rets_baseline_ew=(),
+        fit_rets_hybrid=(),
+        fit_rets_by_fold=(),
+        trade_count=50,
+        fold_attributions=(),
+        fold_rets_hybrid=[],
+        fold_selected_symbols=[],
+        all_turnovers=[0.1] * n_bars,
+        turnover_return_indices=list(range(n_bars)),
+        all_gross_exposures=[1.5] * n_bars,
+        rebalance_count=10,
+        all_net_exposures=[1.0] * n_bars,
+        total_cost_hybrid=0.0005,
+        friction_pass_total=40,
+        signal_total=50,
+        cap_saturation_count=2,
+        support_leak_count=0,
+        last_selected=frozenset({"BTCUSDT", "ETHUSDT"}),
+        last_w=MagicMock(),
+        capacity_diagnostics=None,
+    )
+    fold_diag = SimpleNamespace(
+        fold_pass_ratio=1.0, fold_compound_pass=(True, True),
+        fold_unit_sharpes=(1.0, 1.0), fold_deployed_cagrs=(0.10, 0.10),
+        fold_deployed_mdds=(0.05, 0.05), fold_selected_symbols=(("BTCUSDT",), ("ETHUSDT",)),
+        recent_fold_passed=True, recent_fold_sharpe=1.0,
+        recent_fold_cagr=0.10, recent_fold_mdd=0.05, latest_to_median_cagr=1.0,
+    )
+    recency_diag = SimpleNamespace(
+        applicable=True, holdout_bars=10,
+        recency_holdout_cagr=-0.08, recency_holdout_sharpe=-0.5, recency_holdout_mdd=0.12,
+    )
+    bottleneck_covered = True
+    bottleneck_detail = "fold=2 mdd=0.20 cagr=-0.05"
+
+    with (
+        patch("src.domain.futures.strategy.tiered_workflow.awf_sim._run_awf_simulation", return_value=sim),
+        patch("src.domain.futures.strategy.tiered_workflow.risk_deployment.compute_layer2_fold_diagnostics", return_value=fold_diag),
+        patch("src.domain.futures.strategy.tiered_workflow.risk_deployment.compute_recency_holdout_diagnostics", return_value=recency_diag),
+        patch("src.domain.futures.strategy.tiered_workflow.risk_deployment.evaluation_window_bottleneck_verdict", return_value=(bottleneck_covered, bottleneck_detail)),
+        patch("src.domain.futures.strategy.tiered_workflow.l2_gate.evaluate_layer2_gate") as mock_gate,
+        patch("src.domain.futures.strategy.tiered_workflow.risk_deployment.calibrate_deployment_leverage", return_value=(1.0, "none", 0.0)),
+        patch("src.domain.futures.optimization.workflow.build_layer2_deployable_score"),
+        patch("src.domain.futures.optimization.workflow.build_layer_universe_audit"),
+    ):
+        mock_gate.return_value = SimpleNamespace(
+            optuna_constraint_values=(0.0,) * 14,
+            gate_passed=True, blocker_reason="",
+            constraint_vector=SimpleNamespace(crisis_measured=True),
+        )
+        config = Layer2AllocationConfig(
+            l2_deploy_enabled=True, l2_deploy_worst_fold_gate_enabled=False,
+            l2_deploy_kelly_safety_fraction=None,
+        )
+
+        result = evaluate_l2_trial(
+            cache=MagicMock(), signal_batch=MagicMock(), aligned=MagicMock(),
+            awf_folds=(MagicMock(), MagicMock()), config=config,
+            caps=MagicMock(), tf="4h",
+        )
+
+    gate_kwargs = mock_gate.call_args[1]
+    assert gate_kwargs["recency_holdout_cagr"] == -0.08
+    assert gate_kwargs["recency_holdout_applicable"] is True
+    assert gate_kwargs["window_bottleneck_covered"] is True
+    assert gate_kwargs["window_bottleneck_detail"] == bottleneck_detail
+    assert result.recency_holdout_cagr == -0.08
+    assert result.recency_holdout_applicable is True
+
+
+def test_layer2_constraints_from_trial_pads_to_14() -> None:
+    """[S4] 12개짜리 legacy l2_optuna_constraint_values를 가진 trial → 14-tuple로 패딩되고 13/14번째 원소가 1.0(fail-safe)."""
     from unittest.mock import MagicMock
 
     mock_trial = MagicMock()
@@ -1006,5 +1091,6 @@ def test_layer2_constraints_from_trial_pads_to_13() -> None:
 
     result = layer2_constraints_from_trial(mock_trial)
 
-    assert len(result) == 13
+    assert len(result) == 14
     assert result[12] == pytest.approx(1.0)
+    assert result[13] == pytest.approx(1.0)
