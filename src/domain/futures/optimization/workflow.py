@@ -1893,7 +1893,7 @@ def summarize_layer2_feasibility(
     constraint_names: list[str] = [
         "deployment", "support_leak", "mdd", "cvar_95", "fold",
         "recent_fold", "active_blocks", "friction", "trades",
-        "crisis_mdd", "cagr", "sharpe_uplift", "crisis_cagr",
+        "crisis_mdd", "cagr", "sharpe_uplift", "crisis_cagr", "recency_holdout",
     ]
     failure_counts: dict[str, int] = {name: 0 for name in constraint_names}  # noqa: C420
     joint_feasible_count = 0
@@ -1910,7 +1910,7 @@ def summarize_layer2_feasibility(
             if not isinstance(raw_list, (list, tuple)):
                 continue
             vals = [float(v) for v in raw_list]
-            padded = (vals + [1.0] * 13)[:13]
+            padded = (vals + [1.0] * 14)[:14]
             cv = Layer2ConstraintVector(
                 deployment=padded[0], support_leak=padded[1], mdd=padded[2],
                 cvar_95=padded[3], fold=padded[4], recent_fold=padded[5],
@@ -1918,6 +1918,7 @@ def summarize_layer2_feasibility(
                 crisis_mdd=padded[9], cagr=padded[10], sharpe_uplift=padded[11],
                 crisis_cagr=padded[12],
                 crisis_measured=bool(t.user_attrs.get("l2_crisis_measured", False)),
+                recency_holdout=padded[13],
             )
         for name, value in zip(constraint_names, cv.as_tuple(), strict=True):
             if value > 0.0:
@@ -1983,6 +1984,8 @@ def evaluate_l2_trial(
         apply_deployment,
         calibrate_deployment_leverage,
         compute_layer2_fold_diagnostics,
+        compute_recency_holdout_diagnostics,
+        evaluation_window_bottleneck_verdict,
         select_worst_fold_returns,
     )
 
@@ -2214,6 +2217,21 @@ def evaluate_l2_trial(
         leverage=float(_l_star),
         bars_per_year=bars_per_year,
     )
+    _recency_diag = compute_recency_holdout_diagnostics(
+        rets_hybrid=rets_hybrid,
+        leverage=float(_l_star),
+        bars_per_year=bars_per_year,
+        holdout_days=float(config.l2_recency_holdout_days),
+    )
+    _fold_dicts = [
+        {"mdd": m, "cagr": c}
+        for m, c in zip(
+            (v for v in fold_diag.fold_deployed_mdds if v is not None),
+            (v for v in fold_diag.fold_deployed_cagrs if v is not None),
+            strict=True,
+        )
+    ] if any(v is not None for v in fold_diag.fold_deployed_mdds) else []
+    _window_bottleneck_covered, _window_bottleneck_detail = evaluation_window_bottleneck_verdict(_fold_dicts)
     fold_pass_ratio = float(fold_diag.fold_pass_ratio)
     finite_fold_cagrs = [
         float(value) for value in fold_diag.fold_deployed_cagrs if value is not None and np.isfinite(float(value))
@@ -2343,6 +2361,10 @@ def evaluate_l2_trial(
         crisis_mdd_budget=_crisis_budget.mdd_budget,
         crisis_cagr_hybrid=_crisis_budget.cagr_hybrid,
         crisis_cagr_floor=_crisis_budget.cagr_floor,
+        recency_holdout_cagr=float(_recency_diag.recency_holdout_cagr),
+        recency_holdout_applicable=bool(_recency_diag.applicable),
+        window_bottleneck_covered=bool(_window_bottleneck_covered),
+        window_bottleneck_detail=str(_window_bottleneck_detail),
     )
     deployable_score = build_layer2_deployable_score(
         cagr=float(cagr_hybrid),
@@ -2433,6 +2455,10 @@ def evaluate_l2_trial(
             if gate.constraint_vector is not None
             else False
         ),
+        recency_holdout_cagr=float(_recency_diag.recency_holdout_cagr),
+        recency_holdout_applicable=bool(_recency_diag.applicable),
+        window_bottleneck_covered=bool(_window_bottleneck_covered),
+        window_bottleneck_detail=str(_window_bottleneck_detail),
     )
 
 
@@ -2640,20 +2666,20 @@ def objective_l2_growth(trial: Trial, ctx: TieredContext) -> float:
 
 
 def layer2_constraints_from_trial(trial: FrozenTrial) -> tuple[float, ...]:
-    """[ADR_TBD_L2_CRISIS_CAGR_CHAMPION_SELECTION_BLINDNESS_FIX] 13-tuple(crisis_cagr
-    슬롯 포함)로 패딩 — evaluate_layer2_gate.optuna_constraint_values와 길이 동기화."""
+    """14-tuple(recency_holdout 슬롯 포함)로 패딩 —
+    evaluate_layer2_gate.optuna_constraint_values와 길이 동기화."""
     raw = trial.user_attrs.get("l2_optuna_constraint_values")
     if not isinstance(raw, (list, tuple)):
         raw = trial.user_attrs.get("l2_constraint_values")
     if not isinstance(raw, (list, tuple)):
-        return (1.0,) * 13
+        return (1.0,) * 14
     resolved: list[float] = []
     for item in raw:
         try:
             resolved.append(float(item))
         except Exception:
             resolved.append(1.0)
-    while len(resolved) < 13:
+    while len(resolved) < 14:
         resolved.append(1.0)
     return tuple(resolved)
 
