@@ -40,7 +40,7 @@
 ## 5. Tech Stack & Standards (Python 3.11)
 - **Version:** Based on Python 3.11+. Actively utilize modern syntax (TaskGroup, `|` operator, `Self`, etc.).
 - **Typing:** Enforce strong type hinting at a `strict = true` level.
-- **Logging:** **The use of `print()` is strictly prohibited.** Use the standard `logging` module and write traceable log messages following the standard tags and format defined in [logging.md](file:///.agents/rules/logging.md).
+- **Logging:** **The use of `print()` is strictly prohibited.** Use the standard `logging` module and write traceable log messages following the standard tags and format defined in [logging.md](file:///.agents/rules/logging.md). All log files generated during script/test executions MUST be written under the project's `logs/` directory. Outputting log files to `/tmp/` is strictly prohibited.
 - **Docstrings:** Follow Google Style Docstrings.
 
 ## 6. Local Code-Change Protocol
