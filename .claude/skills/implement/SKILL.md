@@ -42,9 +42,16 @@ Optimize for **low-cost models (Doer)** by enforcing strict mechanical execution
 ## Output Format (Only output when the entire Pipeline is Green)
 ```md
 ### 🏗️ TDD Implementation Pipeline: [Blueprint Name]
+
+#### [IMPLEMENT PHASE]
 - **Target Files:** `[src/...]`, `[tests/...]`
-- **TDD Verification & L2 Auto-Gate:**
-  - [x] Implemented minimal code & passed tests (Green)
-  - [x] Passed Auto-Chained Gate (lean_check.py) (🟢 PASS)
+- **TDD Cycle (Red-Green-Refactor):**
+  - [x] Stub Registration & Verification (ruff/mypy)
+  - [x] TDD Test Implementation (Skeleton Mock)
+  - [x] Local Tests Passing (Green)
+
+#### [CHECK PHASE]
+- **Gatekeeper Validation (lean_check.py):**
+  - [x] Passed Auto-Chained L2 Gate (🟢 PASS)
   - [x] Coverage Metric: Cov [value]%
 ```
