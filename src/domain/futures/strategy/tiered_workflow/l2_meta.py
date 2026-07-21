@@ -46,6 +46,8 @@ from src.domain.futures.strategy.tiered_workflow.metrics import _newey_west_ic_t
 # setup_logger() 미경유로 프로덕션에서 침묵 — 검증된 컨벤션으로 통일 (5번째 사례).
 logger = logging.getLogger("opt_main_futures")
 
+TF_UNKNOWN = "unknown"
+TF_WILDCARD = "*"
 
 def _build_bucket_reliability(
     *,
@@ -117,7 +119,7 @@ def _parse_meta_group_ids(strategy_id: str) -> tuple[str, str]:
     target = variant if sep else family
     m = _re.search(r"_(\d+h)$", target)
     if m is None:
-        return (family, "unknown") if sep else ("unknown", "unknown")
+        return (family, TF_UNKNOWN) if sep else (TF_UNKNOWN, TF_UNKNOWN)
     tf = m.group(1)
     if not sep:
         family = family[: m.start()]
@@ -264,7 +266,7 @@ def build_sleeve_meta_dataset(
             event_sym_list.append(sym_col)
 
             _sk = sleeve_keys[sj]
-            tf_key = _sk.native_tf or "unk"
+            tf_key = _sk.native_tf or TF_UNKNOWN
             tf_list.append(tf_key)
 
             strat_id = _sk.strategy_id
@@ -586,7 +588,7 @@ def compute_bucket_realized_edge_stats(
             sj = int(j)
             _sk = sleeve_keys[sj]
             family = _sk.strategy_id.split(":")[0] if ":" in _sk.strategy_id else _sk.strategy_id
-            tf = _sk.native_tf or "unk"
+            tf = _sk.native_tf or TF_UNKNOWN
             edge = _compute_sleeve_realized_edge_bps(
                 cache=cache,
                 close_2d=close_2d,
@@ -1214,12 +1216,19 @@ def apply_regime_cell_policy(
     scale_signal_mu: bool = True,
     scale_quality_weight: bool = True,
     side_split_enabled: bool = False,
+    tf_by_sleeve: Mapping[tuple[str, str], str] | None = None,
 ) -> RegimePolicyApplication:
     """Apply regime policy to current sleeve signals and edge scores.
 
     [ADR_20260721_ALPHA_FUNNEL_REGIME_COVERAGE] side_split_enabled=True resolves
     each sleeve's own side from sign(sleeve_edges[key]) and looks up policy_map
     by (regime, family, tf, side) instead of the legacy 3-key.
+
+    [ADR_20260721_L2_POLICY_TF_KEY_SSOT] tf_by_sleeve provides a pre-built mapping
+    from (symbol, strategy_id) to native_tf. When provided, the mapping takes
+    priority over _parse_meta_group_ids parsing, ensuring the same TF source
+    used during policy building is used during lookup. On exact key miss, a
+    fallback lookup using TF_WILDCARD is attempted.
     """
     if not sleeve_sigs:
         return RegimePolicyApplication(
@@ -1259,12 +1268,21 @@ def apply_regime_cell_policy(
     quality_weight_before = float(sum(max(float(sig.quality_weight), 0.0) for sig in sleeve_sigs.values()))
     for key, sig in sleeve_sigs.items():
         family, tf = _parse_meta_group_ids(key[1])
+        if tf_by_sleeve is not None:
+            _tf = tf_by_sleeve.get(key)
+            if _tf is not None:
+                tf = _tf
         gross_bps = float(sleeve_edges.get(key, 0.0))
         if side_split_enabled:
             side_val = int(np.sign(gross_bps))
             policy = policy_map.get((regime_now, family, tf, side_val))
         else:
             policy = policy_map.get((regime_now, family, tf))
+        if policy is None:
+            if side_split_enabled:
+                policy = policy_map.get((regime_now, family, TF_WILDCARD, side_val))
+            else:
+                policy = policy_map.get((regime_now, family, TF_WILDCARD))
         if policy is None:
             next_sigs[key] = sig
             next_edges[key] = gross_bps
@@ -2296,9 +2314,13 @@ def filter_sleeves_by_bucket(
     *,
     side: int = 0,
     edge_floor_bps: float = 0.0,
+    tf_by_sleeve: Mapping[tuple[str, str], str] | None = None,
 ) -> dict[tuple[str, str], SymbolSignal]:
     """Side-awarable bucket filter. Controlled by l2_regime_bucket_side_split_enabled.
-    side=0 matches legacy 3-key (regime, family, tf) behavior."""
+    side=0 matches legacy 3-key (regime, family, tf) behavior.
+
+    [ADR_20260721_L2_POLICY_TF_KEY_SSOT] tf_by_sleeve provides a pre-built mapping
+    from (symbol, strategy_id) to native_tf for SSOT TF lookup."""
     if not sleeve_sigs:
         return {}
 
@@ -2306,6 +2328,10 @@ def filter_sleeves_by_bucket(
     for key, sig in sleeve_sigs.items():
         _, strat_id = key
         family, tf = _parse_meta_group_ids(strat_id)
+        if tf_by_sleeve is not None:
+            _tf = tf_by_sleeve.get(key)
+            if _tf is not None:
+                tf = _tf
         bucket_key: tuple[int, str, str] | tuple[int, str, str, int] = (regime_now, family, tf)
         if side != 0:
             bucket_key = (regime_now, family, tf, side)
@@ -2326,6 +2352,7 @@ def apply_bucket_conditional_weight(
     edge_ref_bps: float = 50.0,
     g_min: float = 0.5,
     g_max: float = 1.5,
+    tf_by_sleeve: Mapping[tuple[str, str], str] | None = None,
 ) -> dict[tuple[str, str], SymbolSignal]:
     if not sleeve_sigs:
         return {}
@@ -2334,6 +2361,10 @@ def apply_bucket_conditional_weight(
     for key, sig in sleeve_sigs.items():
         _, strat_id = key
         family, tf = _parse_meta_group_ids(strat_id)
+        if tf_by_sleeve is not None:
+            _tf = tf_by_sleeve.get(key)
+            if _tf is not None:
+                tf = _tf
         bucket_key: tuple[int, str, str] | tuple[int, str, str, int] = (regime_now, family, tf)
         if side != 0:
             bucket_key = (regime_now, family, tf, side)
@@ -2358,6 +2389,11 @@ def transfer_routing_plan_to_crisis_cache(
     시나리오 윈도우에 적용한다. regime_code_1d/risk_severity_code_1d는 이식하지
     않는다(crisis 윈도우 자체 데이터로 계산되어야 하는 불변식).
     study_cache.regime_policy_by_fold가 비어있으면 crisis_cache를 그대로 반환한다.
+
+    [ADR_20260721_L2_POLICY_TF_KEY_SSOT] (regime, family, tf[, side]) 정확 매칭이
+    이식 대상 컨텍스트(crisis)에서 miss될 수 있어(예: study는 여러 tf를 학습했으나
+    crisis 이벤트는 단일 tf), 그룹(regime, family[, side])별 n_cal 최대 셀을
+    TF_WILDCARD로 복제해 함께 이식한다.
     """
     if not study_cache.regime_policy_by_fold:
         return crisis_cache
@@ -2366,9 +2402,31 @@ def transfer_routing_plan_to_crisis_cache(
     last_bucket_edges = study_cache.bucket_edges_by_fold[-1]
     last_pooled_edges = study_cache.pooled_edges_by_fold[-1]
 
+    # [ADR_20260721_L2_POLICY_TF_KEY_SSOT] Add family-level wildcard fallback cells.
+    # For each (regime, family[, side]) group, select the cell with max n_cal
+    # (tie-break: tf lexicographic) and add a copy with TF_WILDCARD.
+    _augmented_policy: dict[tuple[Any, ...], RegimeCellPolicy] = dict(last_policy)
+    _groups: dict[tuple[Any, ...], list[tuple[str, RegimeCellPolicy]]] = {}
+    for _key, _cell in last_policy.items():
+        if len(_key) == 4:
+            _gk: tuple[Any, ...] = (_key[0], _key[1], _key[3])
+            _tf = _key[2]
+        else:
+            _gk = (_key[0], _key[1])
+            _tf = _key[2]
+        _groups.setdefault(_gk, []).append((_tf, _cell))
+    for _gk, _cells in _groups.items():
+        _best_tf, _best_cell = min(_cells, key=lambda x: (-x[1].n_cal, x[0]))
+        _wildcard_key: tuple[Any, ...] = (
+            (_gk[0], _gk[1], TF_WILDCARD, _gk[2]) if len(_gk) == 3 else
+            (_gk[0], _gk[1], TF_WILDCARD)
+        )
+        if _wildcard_key not in _augmented_policy:
+            _augmented_policy[_wildcard_key] = replace(_best_cell, tf=TF_WILDCARD)
+
     return replace(
         crisis_cache,
-        regime_policy_by_fold=tuple(last_policy for _ in range(n_crisis_folds)),
+        regime_policy_by_fold=tuple(_augmented_policy for _ in range(n_crisis_folds)),
         bucket_edges_by_fold=tuple(last_bucket_edges for _ in range(n_crisis_folds)),
         pooled_edges_by_fold=tuple(last_pooled_edges for _ in range(n_crisis_folds)),
         regime_routing_diagnostics=study_cache.regime_routing_diagnostics,

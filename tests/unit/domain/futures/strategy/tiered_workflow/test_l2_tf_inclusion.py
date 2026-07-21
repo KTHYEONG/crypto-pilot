@@ -76,7 +76,7 @@ def _build_tf_gate_fixture(
 
     n_sym = 2
     aligned = MagicMock()
-    aligned.symbols = ("SYM_4H", "SYM_12H")
+    aligned.symbols = ("BTCUSDT", "ETHUSDT")
     sym_4h_close = 100.0 + np.arange(t_max, dtype=np.float64) * 1.0
     sym_12h_close = 100.0 - np.arange(t_max, dtype=np.float64) * 1.0
     aligned.close_2d = np.column_stack((sym_4h_close, sym_12h_close))
@@ -104,7 +104,7 @@ def _build_tf_gate_fixture(
         ValidatedSignalEvent(
             decision_idx=3,
             decision_time=aligned.datetimes[3],
-            symbol="SYM_4H",
+            symbol="BTCUSDT",
             strategy_id="trend_donchian:donchian_72",
             native_tf="4h",
             activation_context="all",
@@ -122,7 +122,7 @@ def _build_tf_gate_fixture(
         ValidatedSignalEvent(
             decision_idx=3,
             decision_time=aligned.datetimes[3],
-            symbol="SYM_12H",
+            symbol="ETHUSDT",
             strategy_id="mean_revert:rsi_14",
             native_tf="12h",
             activation_context="all",
@@ -281,6 +281,54 @@ class TestRunAwfSimulationTfGateIntegration:
         )
 
         assert result.trade_count > 0, f"TF gate should allow 4h sleeve through, got trade_count={result.trade_count}"
+
+    def test_run_awf_simulation_builds_tf_by_sleeve_from_cache_sleeve_keys(self, mocker) -> None:
+        """[SPEC l2-policy-tf-key-ssot][S7] regime policy 라우팅 경로 진입 시
+        apply_regime_cell_policy가 cache.sleeve_keys 유래 tf_by_sleeve로 호출됨을 검증."""
+        import dataclasses
+
+        from src.domain.futures.strategy.tiered_workflow.awf_sim import _run_awf_simulation
+        from src.domain.futures.strategy.tiered_workflow.dataclasses import RegimeCellPolicy
+
+        aligned, cache, signal_batch, awf_folds, config, caps = _build_tf_gate_fixture()
+        fold_policy = {
+            (0, "trend_donchian", "4h"): RegimeCellPolicy(
+                state=0, state_name="bull", family="trend_donchian", tf="4h", side=0,
+                action="allow", reason="positive_cal_lift", edge_multiplier=1.0,
+                confidence=1.0, fit_edge_bps=10.0, pooled_fit_edge_bps=0.0,
+                cal_edge_bps=10.0, pooled_cal_edge_bps=0.0, fit_lift_bps=10.0,
+                cal_lift_bps=10.0, sign_consistent=True, hard_block_eligible=False,
+                n_fit=100, n_cal=100,
+            ),
+        }
+        cache = dataclasses.replace(
+            cache,
+            regime_policy_by_fold=tuple(fold_policy for _ in awf_folds),
+            regime_code_1d=np.zeros(len(aligned.close_2d), dtype=np.int8),
+        )
+        policy_spy = mocker.patch(
+            "src.domain.futures.strategy.tiered_workflow.l2_meta.apply_regime_cell_policy",
+            side_effect=lambda sigs, edges, *a, **kw: mocker.MagicMock(
+                sleeve_sigs=sigs, sleeve_edges=edges, n_input=len(sigs),
+                n_allow=len(sigs), n_downweight=0, n_block=0, n_pooled=0,
+            ),
+        )
+
+        _run_awf_simulation(
+            cache=cache,
+            signal_batch=signal_batch,
+            aligned=aligned,
+            awf_folds=awf_folds,
+            config=config,
+            caps=caps,
+            sim_origin="test_tf_by_sleeve",
+        )
+
+        assert policy_spy.called
+        _tf_by_sleeve = policy_spy.call_args.kwargs.get("tf_by_sleeve")
+        assert _tf_by_sleeve
+        assert _tf_by_sleeve[("BTCUSDT", "trend_donchian:donchian_72")] == "4h"
+        assert _tf_by_sleeve[("ETHUSDT", "mean_revert:rsi_14")] == "12h"
 
 
 class TestTfInclusionFilter:
