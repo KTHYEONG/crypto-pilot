@@ -167,10 +167,32 @@ graph TD
       loop.close()
   ```
 
-### 6.2 Schema Drift Prevention (External API Mock Validation)
-- Do not blindly trust static JSON fixtures for mocking external API responses (e.g. CCXT or order APIs).
-- Always validate mock schemas against project Pydantic Models or TypedDict structures to verify contract alignment. Mock data must satisfy the exact parser logic used in source code.
-
 ### 6.3 Time-Dependent Logic Isolation (Using DI Over Patches)
 - For modules relying on datetime/timestamp logic (e.g. order expiration, backtesting, candles), prefer injecting a Clock interface (e.g. `src.core.clock.Clock`) instead of patching `datetime` with `freezegun`.
 - Use a `MockClock` in tests to manually advance time via `.advance_time(seconds)`. This prevents asynchronous loop hangs or scheduler lockups.
+
+---
+
+## 7. AI-Optimized Testing & TDD Constraints
+
+To maximize token efficiency and code quality, the AI assistant must follow these constraints:
+
+### 7.1 Single-Pass Synthesis Over Red-Phase Waste
+* Do **NOT** execute failing tests solely to confirm a Red phase.
+* Synthesize both the source stub/logic and the mocked unit tests simultaneously in a single-pass based on the locked signature and spec contract. Go straight to local Green verification.
+
+### 7.2 Strict Semantic Assertions (Anti-Shallow Coverage)
+* Writing superficial tests solely to satisfy line coverage metrics is strictly prohibited.
+* Every test case must use concrete assertions (e.g. validating exact values, floating-point tolerances via `pytest.approx()`, or checking specific exception message phrases). Weak assertions like `assert result is not None` are unacceptable.
+
+### 7.3 Mock Schema Drift Verification
+* All static mock JSON files and CCXT mock response patterns must be checked regularly against project data schemas (TypedDict, dataclass, or Pydantic models) to avoid drift from live exchange behavior.
+
+### 7.4 Architectural Isolation (No Doer Refactoring)
+* The TDD "Refactor" phase is restricted to lint polishing (`ruff --fix`) and type adjustments. Doer models must **not** perform architectural refactoring. Any structural logic changes must be driven by editing the Spec and updating the `contract.json`.
+
+### 7.5 Scenario Testing Boundaries
+* High-level integration/E2E tests must be strictly limited to the 3-4 key scenarios outlined in the Spec phase blueprint. Do not write arbitrary, non-spec integration scenarios.
+
+### 7.6 Self-Healing Loop Budget (Max 3 Loops)
+* The self-correction loop for fixing compilation or test failures is capped at a maximum of **3 iterations**. If the gate fails after 3 attempts, execution must STOP immediately to escalate.

@@ -32,8 +32,8 @@
 - **Check Loop & Pipeline Auto-Chaining:** 
     - **Trigger:** Execute when a `.py` file is created or modified. (Excluding the `spec` design phase or markdown-only updates).
     - **Action**: Run the active skill's phase instructions.
-      - **Implement phase (L1):** Stub signature check + TDD cycle. Once L1.5 local checks pass, **immediately auto-chain trigger the check phase (L2)** without asking for user permission.
-      - **Check phase (L2):** Full regression + coverage auditing via `lean_check.py`.
+      - **Implement phase (L1.5):** Single-Pass Synthesis (source logic and mock unit tests created simultaneously) + Local syntax formatting/linting (`ruff --fix`), local pytest execution, and `print()` leaks removal. Wasteful Red-phase pytest runs are bypassed. Once L1.5 checks pass, **immediately auto-chain trigger the check phase (L2)** without asking for user permission.
+      - **Check phase (L2):** Spec compliance verification, strict Mypy validation, regression testing & coverage auditing via `lean_check.py --skip-lint`.
     - **Test Scope:** Target modified test files only (1:1 co-modification mapping). Never run `pytest` on broad directories.
 
 
@@ -67,7 +67,10 @@ This protocol applies only inside code-writing phases such as `implement` when n
 - **Directory Isolation:** The `scripts/` directory is strictly reserved for verification (check) and documentation synchronization (sync) tooling. Do NOT create or modify any production logic, auxiliary tools, or helper modules under `scripts/`. All production-related code must reside in the `src/` directory.
 
 ## 8. Anti-Patterns & Alternatives
-- **Focused Changes:** Implement the smallest necessary change; avoid copying unrelated legacy code.
+- **Focused Changes & No Architectural Refactoring:** Implement the smallest necessary change. Low-cost (Doer) models must NOT perform design or architectural refactoring. Refactoring is strictly limited to styling/formatting and minor type adjustments.
+- **Spec / Signature Lock Policy:** Public APIs and class signatures defined in `contract.json` are LOCKED. Doer models must not mutate locked contracts. If a design limitation requires mutating a locked contract, the Doer model must **STOP execution immediately** and escalate to a high-reasoning model or human.
+- **Loose Assertions & Superficial Coverage:** Do not write testing code solely to hit line coverage goals. Avoid weak assertions like `assert result is not None` or `assert True`. Every test must assert strict values, mathematical precision, or exact exception message phrases to guarantee semantic correctness.
+- **Mock Schema Drift:** Regularly ensure that static JSON mock fixtures in testing files reflect CCXT/live API structures. Mock fixtures must satisfy the parser logic in source files.
 - **Constants:** Separate magic numbers into descriptive constants.
 - **Verified Refactoring:** Ensure structural changes are covered by test code and have guaranteed behavior.
 - **Error Handling:** Always verify and handle return values and exceptions.

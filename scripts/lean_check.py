@@ -278,15 +278,16 @@ def main() -> None:
             _fail_exit("co-modification", f"FAIL | {pf}: test file missing", d)
 
     # 2. print() Detection (scripts/ excluded)
-    print_re = re.compile(r"(?<!#)\bprint\s*\(")
-    for pf in py_files:
-        if pf.startswith("scripts/"):
-            continue
-        with open(pf, encoding="utf-8") as f:
-            for idx, line in enumerate(f, 1):
-                if print_re.search(line):
-                    d = {"file": pf, "line": idx, "error": "Unsanctioned print()", "fix_hint": ""}
-                    _fail_exit("print-check", f"FAIL | {pf}:{idx} print() detected", d)
+    if not args.skip_lint:
+        print_re = re.compile(r"(?<!#)\bprint\s*\(")
+        for pf in py_files:
+            if pf.startswith("scripts/"):
+                continue
+            with open(pf, encoding="utf-8") as f:
+                for idx, line in enumerate(f, 1):
+                    if print_re.search(line):
+                        d = {"file": pf, "line": idx, "error": "Unsanctioned print()", "fix_hint": ""}
+                        _fail_exit("print-check", f"FAIL | {pf}:{idx} print() detected", d)
 
     # 3. Ruff
     if not args.skip_lint:
