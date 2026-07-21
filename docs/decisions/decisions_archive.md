@@ -2,6 +2,11 @@
 
 This file holds historical architecture decision records (ADRs) that have been pruned from the active window.
 
+## [2026-07-20] [TASK_L2_HOT_CACHE_INTEGRITY_REMEASURE] [ADR_20260720_L2_HOT_CACHE_INTEGRITY_REMEASURE]
+- **Context/Why:** L1 캐시 재사용과 L2 feasibility 감사 수정 이후 실제 120-trial phase L2 결과를 문서화하고 잔여 RSS 병목을 추적
+- **Resolution/What:** 7개 timeframe L1 cache hit을 확인하고 총시간·단계별 시간·RSS·자산증식·위기검증 수치를 docs/results/result.md에 기록; L2 worker peak RSS를 다음 P0 계측 대상으로 지정
+- **Impact:** 총 소요시간 323.20s→217.43s(-32.7%), L1 122.55s→7.84s(-93.6%) 개선. RSS 13,608MiB로 12GiB 예산 1,320MiB 초과하여 worker 메모리 제한 최적화가 필요
+
 ## [2026-07-20] [COLD_PATH_RUNTIME_BOTTLENECK_ELIMINATION] [ADR_20260720_COLD_PATH_RUNTIME_BOTTLENECK_ELIMINATION]
 - **Context/Why:** Cold L2 measurements identified bridge alignment, transient cache ownership, snapshot worker memory, and TF lifecycle retention as remaining bottlenecks; contract tests and runtime lifecycle boundaries now need a synchronized ADR record.
 - **Resolution/What:** Recorded the cold-path optimization contract, added exact scenario coverage for causal statistics, bulk alignment, adaptive snapshot execution, TF resource release, and signal/timeframe-independent runtime planning; synchronized the implementation and regression-test references.
