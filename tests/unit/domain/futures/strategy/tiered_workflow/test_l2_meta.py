@@ -514,3 +514,23 @@ class TestApplyRegimeCellPolicySideSplit:
 
         assert result.n_allow == 1
         assert ("BTCUSDT", "trend:ema_4h") in result.sleeve_sigs
+
+    def test_side_split_shape_mismatch_causes_full_pooled_bypass_regression_guard(self) -> None:
+        """[ADR_20260721_L2_REGIME_POLICY_SIDE_SPLIT_SHAPE_FIX] Documents the exact failure
+        mode found in production: calling apply_regime_cell_policy with side_split_enabled=True
+        against a policy_map built with legacy 3-key entries makes every lookup miss, silently
+        bypassing all regime policy (100% pooled) instead of raising. This is why the flag
+        used to consume must always come from the routing plan that built policy_map, never be
+        re-derived independently (see awf_sim.py `_side_split_enabled` single-source fix)."""
+        sleeve_sigs = {("BTCUSDT", "trend:ema_4h"): _sig(raw_mu=5.0)}
+        sleeve_edges = {("BTCUSDT", "trend:ema_4h"): 30.0}
+        legacy_3key_policy_map = {(2, "trend", "4h"): _policy(action="block", side=0, hard_block_eligible=True)}
+
+        result = apply_regime_cell_policy(
+            sleeve_sigs, sleeve_edges, legacy_3key_policy_map, regime_now=2,
+            mode="hybrid", side_split_enabled=True,
+        )
+
+        assert result.n_pooled == 1
+        assert result.n_block == 0
+        assert ("BTCUSDT", "trend:ema_4h") in result.sleeve_sigs
