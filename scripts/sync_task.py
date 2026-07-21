@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import os
 import re
@@ -168,6 +169,28 @@ def _wipe_temp_artifacts() -> int:
     return count
 
 
+def _clean_scratch_dir() -> int:
+    scratch_dir = "scratch"
+    if not os.path.exists(scratch_dir):
+        return 0
+    count = 0
+    for root, dirs, files in os.walk(scratch_dir, topdown=False):
+        for f in files:
+            if f == ".gitignore":
+                continue
+            fpath = os.path.join(root, f)
+            try:
+                os.remove(fpath)
+                count += 1
+            except OSError:
+                pass
+        for d in dirs:
+            dpath = os.path.join(root, d)
+            with contextlib.suppress(OSError):
+                os.rmdir(dpath)
+    return count
+
+
 def _clean_specs(task: str) -> int:
     specs_dir = "docs/specs"
     if not _path_exists(specs_dir):
@@ -279,11 +302,12 @@ def main() -> None:
     except Exception as e:
         errors.append(f"Index update failed: {e}")
 
-    # 5. Temp Artifact Wipe (.tmp, .bak, .pyc)
+    # 5. Temp Artifact Wipe (.tmp, .bak, .pyc) & Scratch Cleanup
     try:
         wiped = _wipe_temp_artifacts()
-        if wiped > 0:
-            logs.append(f"Wiped {wiped} temp artifacts")
+        scratch_wiped = _clean_scratch_dir()
+        if wiped > 0 or scratch_wiped > 0:
+            logs.append(f"Wiped {wiped} temp artifacts, {scratch_wiped} scratch files")
     except Exception as e:
         errors.append(f"Temp wipe failed: {e}")
 
