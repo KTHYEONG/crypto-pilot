@@ -1,5 +1,10 @@
 # Active Decisions Log (Sliding Window)
 
+## [2026-07-21] [L2_RISK_PROJECTED_ROBUST_SEARCH] [ADR_20260721_L2_RISK_PROJECTED_ROBUST_SEARCH]
+- **Context/Why:** 개선안 구현 후 실제 데이터에서 자산증식 로직의 병목과 적용 여부를 검증하기 위해 120-trial L2 실행 결과를 기록한다.
+- **Resolution/What:** 위기 레버리지 투영·robust search 계약을 구현하고 단일 프로세스 L2 120-trial 기준선 실측을 수행했다. seed=42에서 120/120 완료, joint_feasible=4/120, blocker=cagr를 확인했으며 기존 multi-seed/composite crisis 경로가 아직 실제 파이프라인에 남아 있음을 확인했다.
+- **Impact:** L1 113/118 승인 및 PASS. 위기 데이터 53 symbols·7,221 bars. L2 최고 CAGR 약 0.17%, failures fold=114/cagr=111/recent_fold=64/sharpe_uplift=24/recency_holdout=6. champion은 생성되지 않았다. 결과는 기준선이며 robust 단일 search와 LUNA/FTX sealed wiring 완료 전에는 개선 효과로 해석하지 않는다.
+
 ## [2026-07-21] [TASK_L2_POLICY_TF_KEY_SSOT] [ADR_20260721_L2_POLICY_TF_KEY_SSOT]
 - **Context/Why:** 직전 ADR(crisis replay routing parity)에서 study 학습 라우팅을 crisis cache에 이식했음에도 crisis_mdd/crisis_cagr 수치가 parity 적용 전후 완전 동일한 원인 불명 상태였음. 실행 검증으로 확정: 정책 빌드(compute_bucket_realized_edge_stats)는 sleeve_keys.native_tf를 tf 키 소스로 쓰는데, 정책 적용(apply_regime_cell_policy 등)은 strategy_id의 variant-suffix 파싱(_parse_meta_group_ids)에 의존 — crisis sleeve strategy_id는 suffix가 없어 파싱 결과 tf='unknown'으로 100% 조회 miss, 이식된 정책이 전부 무변경 통과되고 있었음. '2022 윈도우가 단일 crash라 라우팅 여지 없음' 대안가설은 실측(bear 53.2%/crisis 30.7%/bull 16.2%)으로 반증.
 - **Resolution/What:** awf_sim.py가 cache.sleeve_keys에서 {(symbol,strategy_id): native_tf} 매핑을 1회 구성해 apply_regime_cell_policy/filter_sleeves_by_bucket/apply_bucket_conditional_weight에 tf_by_sleeve로 주입(제공 시 우선, None이면 기존 파서 폴백 유지 — 하위호환). exact (regime,family,tf[,side]) 조회 miss 시 transfer_routing_plan_to_crisis_cache가 사전 계산한 family-level wildcard 셀((regime,family,'*'[,side]), 그룹 내 n_cal 최대 tf 대표, 동률 시 tf 사전순)로 2단 폴백 — 새 집계 규칙 발명 없이 기존 shrinkage 철학 준수. 'unk'(빌드)/'unknown'(파서) 폴백 문자열도 TF_UNKNOWN 상수로 통일. [CRISIS-ROUTING] 로그에 wildcard_cells 필드 추가. /check 과정에서 신규 tf_by_sleeve 루프 변수명이 기존 _sk 변수와 충돌해 발생한 mypy 오류 수정, 무관하게 이미 깨져있던 기존 fixture(BTC 앵커 심볼 누락) 1건도 부수 수정.
@@ -69,8 +74,3 @@
 - **Context/Why:** L2 execution measurements showed L1 cache/expanding statistics and bridge alignment dominating wall time, while observed worker memory spikes exceeded the 12GB VmHWM budget and dense PSS probing distorted L2 timing.
 - **Resolution/What:** Added causal expanding statistics, reused risk overlay, released aligned feature cache by TF, added bulk alignment/probe observability coverage, and documented pilot/PSS-driven adaptive execution contracts and performance gates without signal/timeframe-specific knobs.
 - **Impact:** Hot-cache strategy wall time fell from 302.54s to 170.14s and VmHWM from 12.26GB to 11.21GB; bridge fell about 4%. Cold L1 recomputation remains about 143.90s with 12.15GB VmHWM, so further implementation is required before claiming cold-path optimization success.
-
-## [2026-07-20] [TASK_L2_RUNTIME_BOTTLENECK_DEBUG_OBSERVABILITY] [ADR_20260720_L2_RUNTIME_BOTTLENECK_DEBUG_OBSERVABILITY]
-- **Context/Why:** docs/results/result.md의 L2 기준선은 top-level 시간과 부모 RSS만 보여 12,414MB 순간 peak의 자식 PID/단계 소유자, L1 feature-cache 내부 비용, Optuna queue/worker 비용, champion replay 후보별 비용을 귀속하지 못한다.
-- **Resolution/What:** DEBUG 전용 L2RuntimeProbe를 도입해 부모 process tree의 RSS/PSS를 표본화하고 nested span·cache·Optuna batch/trial·AWF·champion replay를 구조화된 SYS/EVAL 레코드로 기록한다. probe 실패는 최적화 실행을 변경하지 않는 degraded 경로로 억제하며, 동일 seed/캐시 조건에서 최적화 대상 선정 기준을 고정한다.
-- **Impact:** /check PASS (Cov 38%). L2RuntimeProbe 및 wiring 테스트를 계약에 정렬했고, 향후 최적화 전에 wall-time 15% 이상 또는 sampled tree peak 소유 단계를 근거로 병목을 선택할 수 있다.
