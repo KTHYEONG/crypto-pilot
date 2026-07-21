@@ -14,6 +14,7 @@ if str(_project_root) not in sys.path:
 import argparse
 import gc
 import logging
+import math
 import os
 import time
 import warnings
@@ -38,7 +39,7 @@ if TYPE_CHECKING:
     from numpy.typing import NDArray
 
     from src.domain.futures.strategy.regime_evaluation import RegimeScoreCard
-    from src.domain.futures.strategy.tiered_workflow.dataclasses import Layer1Result
+    from src.domain.futures.strategy.tiered_workflow.dataclasses import Layer1Result, Layer2Result, Layer3Result
     from src.domain.futures.strategy.timeframe_probe import TfCellEvidence, TfProbeManifest
     from src.domain.futures.strategy_runtime.bridge import CandidatePipelineOutput
 
@@ -2342,6 +2343,225 @@ from src.domain.futures.strategy.tiered_workflow.pipeline import (
 )
 
 
+@dataclass(frozen=True)
+class SeedRobustnessOutcome:
+    """[MULTI-SEED] 단일 seed 실행 결과 스냅샷."""
+
+    seed: int
+    l1_result: Layer1Result
+    l2_study_result: Any
+    l2_final: Layer2Result | None
+    l3_final: Layer3Result | None
+    passed: bool
+    blocker_reason: str
+
+
+@dataclass(frozen=True)
+class MultiSeedConsensusResult:
+    """[MULTI-SEED] K-seed 과반수 합의 결과."""
+
+    admitted: bool
+    selected: SeedRobustnessOutcome | None
+    outcomes: tuple[SeedRobustnessOutcome, ...]
+    pass_count: int
+    required_pass_count: int
+    blocker_reason: str
+
+
+def _run_single_seed_outcome(
+    *,
+    signal_batch: Any,
+    aligned: Any,
+    cfg: Any,
+    window: Any,
+    caps: Any,
+    tf: str,
+    n_trials: int,
+    seed: int,
+    target_phase: str,
+    l1_res: Layer1Result,
+    labeled_events: pd.DataFrame,
+    per_tf_data_maps: dict[str, Any] | None,
+    labeled_events_by_tf: dict[str, pd.DataFrame] | None,
+    crisis_rets: NDArray[np.float64] | None,
+    crisis_replay_ctx: Any | None,
+    l2_sim_cache: Any,
+    l3_regime_code_1d: NDArray[np.int8] | None,
+    probe_manifest: list[dict[str, Any]] | None,
+) -> SeedRobustnessOutcome:
+    _logger.info("[MULTI-SEED] Running seed=%d", seed)
+    l2_study_result = _run_tiered_l2_study(
+        signal_batch=signal_batch,
+        aligned=aligned,
+        cfg=cfg,
+        window=window,
+        caps=caps,
+        tf=tf,
+        n_trials=n_trials,
+        seed=seed,
+        crisis_rets=crisis_rets,
+        crisis_replay_ctx=crisis_replay_ctx,
+        l2_sim_cache=l2_sim_cache,
+    )
+    _blocker = getattr(l2_study_result, "blocker_reason", "")
+    if _blocker:
+        _logger.warning("[MULTI-SEED] seed=%d L2 study blocked: %s", seed, _blocker)
+        return SeedRobustnessOutcome(
+            seed=seed,
+            l1_result=l1_res,
+            l2_study_result=l2_study_result,
+            l2_final=None,
+            l3_final=None,
+            passed=False,
+            blocker_reason=f"l2_study_blocked:{_blocker}",
+        )
+    _best_l2_params = dict(getattr(l2_study_result, "best_params", {}))
+    from src.domain.futures.strategy.tiered_workflow.pipeline import run_tiered_pipeline
+
+    _, l2_final, l3_final = run_tiered_pipeline(
+        labeled_events=labeled_events,
+        aligned=aligned,
+        per_tf_data_maps=per_tf_data_maps,
+        labeled_events_by_tf=labeled_events_by_tf,
+        cfg=cfg,
+        window=window,
+        l1_params={},
+        l2_params=_best_l2_params,
+        caps=caps,
+        l1_tfs=tuple(cfg.l1_tfs) if hasattr(cfg, "l1_tfs") else ("4h", "6h", "8h", "12h", "1h", "2h"),
+        target_phase=target_phase,
+        l1_result_override=l1_res,
+        verbose=False,
+        override_dsr=getattr(l2_study_result, "dsr", None),
+        l2_sim_cache=getattr(l2_study_result, "sim_cache", None),
+        l2_signal_batch=signal_batch,
+        l2_awf_folds=getattr(l2_study_result, "awf_folds", None),
+        l2_eval_memo=getattr(l2_study_result, "eval_memo", None),
+        probe_manifest=probe_manifest,
+        regime_code_1d=l3_regime_code_1d,
+    )
+    l2_passed = l2_final is not None and l2_final.gate_passed
+    if target_phase == "l2":
+        _passed = l2_passed
+    else:
+        l3_passed = l3_final is not None and l3_final.gate_passed
+        _passed = l2_passed and l3_passed
+    _br = "" if _passed else ("l2_blocked" if not l2_passed else "l3_blocked")
+    _logger.info(
+        "[MULTI-SEED] seed=%d passed=%s l2_passed=%s l3_passed=%s",
+        seed, _passed, l2_passed, l3_final is not None and l3_final.gate_passed if not l2_passed else "n/a",
+    )
+    return SeedRobustnessOutcome(
+        seed=seed,
+        l1_result=l1_res,
+        l2_study_result=l2_study_result,
+        l2_final=l2_final,
+        l3_final=l3_final,
+        passed=_passed,
+        blocker_reason=_br,
+    )
+
+
+def _run_multi_seed_robustness_consensus(
+    *,
+    signal_batch: Any,
+    aligned: Any,
+    cfg: Any,
+    window: Any,
+    caps: Any,
+    tf: str,
+    n_trials: int,
+    base_seed: int,
+    target_phase: str,
+    l1_res: Layer1Result,
+    labeled_events: pd.DataFrame,
+    per_tf_data_maps: dict[str, Any] | None,
+    labeled_events_by_tf: dict[str, pd.DataFrame] | None,
+    crisis_rets: NDArray[np.float64] | None,
+    crisis_replay_ctx: Any | None,
+    l2_sim_cache: Any,
+    probe_manifest: list[dict[str, Any]] | None,
+    l3_regime_code_1d: NDArray[np.int8] | None = None,
+    seed_offsets: tuple[int, ...] = (0, 1, 2),
+) -> MultiSeedConsensusResult:
+    if l3_regime_code_1d is None:
+        from src.domain.futures.strategy.market_regime import (
+            compress_regime_codes as _compress_rc,
+        )
+        from src.domain.futures.strategy.market_regime import (
+            compute_market_regime_context as _compute_rc,
+        )
+        l3_regime_code_1d = _compress_rc(_compute_rc(aligned=aligned).code_1d)
+    _seeds = [base_seed + offset for offset in seed_offsets]
+    outcomes: list[SeedRobustnessOutcome] = []
+    for s in _seeds:
+        try:
+            outcome = _run_single_seed_outcome(
+                signal_batch=signal_batch,
+                aligned=aligned,
+                cfg=cfg,
+                window=window,
+                caps=caps,
+                tf=tf,
+                n_trials=n_trials,
+                seed=s,
+                target_phase=target_phase,
+                l1_res=l1_res,
+                labeled_events=labeled_events,
+                per_tf_data_maps=per_tf_data_maps,
+                labeled_events_by_tf=labeled_events_by_tf,
+                crisis_rets=crisis_rets,
+                crisis_replay_ctx=crisis_replay_ctx,
+                l2_sim_cache=l2_sim_cache,
+                l3_regime_code_1d=l3_regime_code_1d,
+                probe_manifest=probe_manifest,
+            )
+        except Exception as exc:
+            _logger.exception("[MULTI-SEED] seed=%d failed: %s", s, exc)
+            outcome = SeedRobustnessOutcome(
+                seed=s,
+                l1_result=l1_res,
+                l2_study_result=None,
+                l2_final=None,
+                l3_final=None,
+                passed=False,
+                blocker_reason=str(exc),
+            )
+        outcomes.append(outcome)
+        gc.collect()
+    _k = len(seed_offsets)
+    _required = math.ceil(_k * 0.5)
+    _pass_count = sum(1 for o in outcomes if o.passed)
+    _admitted = _pass_count >= _required
+    _logger.info(
+        "[MULTI-SEED] pass_count=%d/%d required=%d admitted=%s",
+        _pass_count, _k, _required, _admitted,
+    )
+    if not _admitted:
+        return MultiSeedConsensusResult(
+            admitted=False,
+            selected=None,
+            outcomes=tuple(outcomes),
+            pass_count=_pass_count,
+            required_pass_count=_required,
+            blocker_reason=f"seed_consensus_blocked:{_pass_count}/{_k}",
+        )
+    passing = [o for o in outcomes if o.passed]
+    if target_phase == "l2":
+        selected = min(passing, key=lambda o: o.l2_final.cagr_hybrid if o.l2_final is not None else float("inf"))
+    else:
+        selected = min(passing, key=lambda o: o.l3_final.cagr if o.l3_final is not None else float("inf"))
+    _logger.info("[MULTI-SEED] selected seed=%d (most conservative among %d passing)", selected.seed, len(passing))
+    return MultiSeedConsensusResult(
+        admitted=True,
+        selected=selected,
+        outcomes=tuple(outcomes),
+        pass_count=_pass_count,
+        required_pass_count=_required,
+        blocker_reason="",
+    )
+
+
 @dataclass(slots=True, frozen=True)
 class L2ReversalReplayFoldMetric:
     variant: str
@@ -3160,39 +3380,10 @@ def _run_strategy_stage(
             except Exception:
                 _logger.warning("[L2-CRISIS-CEILING] compute failed, crisis_window disabled")
 
-            l2_study_result = _run_tiered_l2_study(
-                signal_batch=l2_signals,
-                aligned=aligned_tiered,
-                cfg=tiered_cfg,
-                window=tiered_window,
-                caps=tiered_caps,
-                tf=l2_master_tf,
-                n_trials=n_l2_trials,
-                seed=_seed,
-                crisis_rets=_crisis_rets,
-                crisis_replay_ctx=_crisis_replay_ctx,
-                l2_sim_cache=shared_l2_cache,
-            )
-            _log_mem(
-                "l2_optuna_study",
-                _mem_l2_study,
-                extra=f"trials={n_l2_trials} took={time.perf_counter() - _t_l2_study_start:.4f}s",
-            )
-            best_l2_params = dict(getattr(l2_study_result, "best_params", {}))
-
-            # ── FAIL-CLOSED BOUNDARY: blocked selection → final pipeline 미실행 ──
-            if getattr(l2_study_result, "blocker_reason", ""):
-                _logger.warning(
-                    "[L2-SELECTION-BLOCKED] reason=%s stopping before final pipeline",
-                    l2_study_result.blocker_reason,
-                )
-                return RunnerResult(
-                    exit_code=1,
-                    reason=f"layer2_selection_blocked:{l2_study_result.blocker_reason}",
-                )
-
-            # ── Step E: 최적 params + L1 override로 최종 실행 ────────────────
+            # ── Step D/E: Multi-Seed Robustness Consensus ─────────────────
             gc.collect()
+            _mem_l2_final = _get_rss_mb()
+            _t_l2_final_start = time.perf_counter()
 
             from src.domain.futures.strategy.market_regime import (
                 compress_regime_codes as _compress_l3_regime_codes,
@@ -3203,32 +3394,41 @@ def _run_strategy_stage(
 
             _l3_regime_code_1d = _compress_l3_regime_codes(_compute_l3_regime_ctx(aligned=aligned_tiered).code_1d)
 
-            from src.domain.futures.strategy.tiered_workflow.pipeline import run_tiered_pipeline
-
-            _mem_l2_final = _get_rss_mb()
-            _t_l2_final_start = time.perf_counter()
-            _, l2_final, _ = run_tiered_pipeline(
-                labeled_events=labeled_tiered,
+            _consensus = _run_multi_seed_robustness_consensus(
+                signal_batch=l2_signals,
                 aligned=aligned_tiered,
-                per_tf_data_maps=handoff.aligned_by_tf,
-                labeled_events_by_tf=handoff.labeled_events_by_tf,
                 cfg=tiered_cfg,
                 window=tiered_window,
-                l1_params={},
-                l2_params=best_l2_params,
                 caps=tiered_caps,
-                l1_tfs=tuple(tiered_cfg.l1_tfs),
+                tf=l2_master_tf,
+                n_trials=n_l2_trials,
+                base_seed=_seed,
                 target_phase=run_config.phase,
-                l1_result_override=l1_res,
-                verbose=True,  # 최종 실행시 상세 결과 출력
-                override_dsr=l2_study_result.dsr,
-                l2_sim_cache=l2_study_result.sim_cache,
-                l2_signal_batch=l2_signals,
-                l2_awf_folds=l2_study_result.awf_folds,
-                l2_eval_memo=l2_study_result.eval_memo,
+                l1_res=l1_res,
+                labeled_events=labeled_tiered,
+                per_tf_data_maps=handoff.aligned_by_tf,
+                labeled_events_by_tf=handoff.labeled_events_by_tf,
+                crisis_rets=_crisis_rets,
+                crisis_replay_ctx=_crisis_replay_ctx,
+                l2_sim_cache=shared_l2_cache,
                 probe_manifest=_probe_manifest_raw,
-                regime_code_1d=_l3_regime_code_1d,
+                l3_regime_code_1d=_l3_regime_code_1d,
             )
+            _log_mem(
+                "l2_multi_seed_consensus",
+                _mem_l2_study,
+                extra=f"base_seed={_seed} admitted={_consensus.admitted} pass_count={_consensus.pass_count}/{_consensus.required_pass_count}",
+            )
+
+            if not _consensus.admitted:
+                return RunnerResult(exit_code=1, reason=_consensus.blocker_reason)
+
+            _selected = _consensus.selected
+            assert _selected is not None
+            l2_study_result = _selected.l2_study_result
+            l2_final = _selected.l2_final
+            l3_final = _selected.l3_final
+            best_l2_params = dict(getattr(l2_study_result, "best_params", {}))
             # B2: SSOT assert — study tf must match final deployment tf
             if l2_final is not None and hasattr(l2_final, "master_tf") and l2_master_tf != l2_final.master_tf:
                 _logger.error(
@@ -3329,7 +3529,8 @@ def _run_strategy_stage(
 
             # Tiered Pipeline이 L3까지 수행했으므로 여기서 종료
             if run_config.phase == "l3":
-                return RunnerResult(exit_code=0, reason="tiered_pipeline_completed")
+                _l3_exit = 0 if l3_final is not None and l3_final.gate_passed else 1
+                return RunnerResult(exit_code=_l3_exit, reason="tiered_pipeline_completed")
             if run_config.phase == "l2":
                 return RunnerResult(exit_code=0, reason="tiered_pipeline_l2_completed")
 
