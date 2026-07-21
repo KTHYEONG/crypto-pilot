@@ -178,6 +178,63 @@ def test_active_pipeline_runs_one_deterministic_study() -> None:
 # ── T01: Handoff keeps positive non-redundant sleeves ──
 
 
+def test_handoff_caps_candidate_pool_and_marks_overflow_capped() -> None:
+    from src.domain.futures.strategy.tiered_workflow.dataclasses import L2SimulationCache
+    from src.domain.futures.strategy.candidate_contracts import (
+        SignalSleeveKey, QualifiedSignalRegistry, SymbolStrategyEvidence,
+        SignalSourceKey, ValidatedSignalBatch,
+    )
+    from src.domain.futures.strategy.walk_forward import WFFold
+    from src.domain.futures.strategy.tiered_workflow.portfolio_handoff import evaluate_portfolio_handoff
+
+    n_sleeves = 40
+    n_bars = 90
+    sleeve_keys = tuple(
+        SignalSleeveKey(f"SYM{i}", "4h", "strat") for i in range(n_sleeves)
+    )
+    rng = np.random.default_rng(3)
+    rets = (0.001 + rng.normal(0, 0.0005, (n_bars, n_sleeves))).astype(np.float64)
+
+    cache = L2SimulationCache(
+        vol_matrix_2d=np.ones((n_bars, n_sleeves)), tradeable_mask_2d=np.ones((n_bars, n_sleeves), dtype=np.bool_),
+        hurdle_2d=np.zeros((n_bars, n_sleeves)), funding_2d=np.zeros((n_bars, n_sleeves)),
+        beta_1d=np.ones(n_sleeves),
+        expected_gross_bps_2d=np.ones((n_bars, n_sleeves)), expected_net_bps_2d=np.ones((n_bars, n_sleeves)),
+        holding_bars_2d=np.ones((n_bars, n_sleeves)), side_2d=np.ones((n_bars, n_sleeves)),
+        quality_weight_2d=np.ones((n_bars, n_sleeves)), signal_mask_2d=np.ones((n_bars, n_sleeves), dtype=np.bool_),
+        sleeve_to_sym=np.arange(n_sleeves, dtype=np.int64), sleeve_keys=sleeve_keys,
+    )
+    registry = QualifiedSignalRegistry(
+        by_symbol={
+            f"SYM{i}": (SymbolStrategyEvidence(
+                key=SignalSourceKey(f"SYM{i}", "strat", "ctx"),
+                mean_gross_bps=10.0, mean_incremental_bps=5.0, block_tstat_incremental=2.0,
+                probability_positive=0.85, p_value=0.01, q_value=0.05, positive_fold_ratio=1.0,
+                n_obs=100, effective_n=80.0, n_folds=4, quality_weight=float(i), hard_eligible=True,
+                lcb_net_bps=3.0,
+            ),) for i in range(n_sleeves)
+        },
+        ready_symbols=tuple(f"SYM{i}" for i in range(n_sleeves)),
+        trade_scope_count=n_sleeves, registry_version="test-v1",
+    )
+    batch = ValidatedSignalBatch(
+        events=(), start_idx=0, end_idx=n_bars,
+        symbols=tuple(f"SYM{i}" for i in range(n_sleeves)),
+        registry_version="test-v1", model_version="test",
+    )
+    fold = WFFold(fit_start=0, fit_end=30, cal_start=30, cal_end=60, oos_start=60, oos_end=90)
+
+    result = evaluate_portfolio_handoff(
+        registry=registry, signal_batch=batch, cache=cache, folds=(fold,),
+        net_sleeve_returns_by_fold=(np.ascontiguousarray(rets, dtype=np.float32),),
+        config=PortfolioHandoffConfig(),
+    )
+
+    capped = [ev for ev in result.evidence_by_fold[0] if ev.rejection_reasons == ("capped_by_candidate_sleeve_limit",)]
+    assert len(capped) == n_sleeves - 32
+    assert not any(ev.key.symbol == "SYM39" for ev in capped)
+
+
 def test_handoff_keeps_positive_nonredundant_sleeves() -> None:
     from src.domain.futures.strategy.tiered_workflow.dataclasses import (
         L2SimulationCache,
@@ -193,9 +250,9 @@ def test_handoff_keeps_positive_nonredundant_sleeves() -> None:
     n_sleeves = 3
     rng = np.random.default_rng(42)
     rets = np.zeros((n_bars, n_sleeves), dtype=np.float64)
-    for s in range(2):
-        rets[:, s] = 0.002 + rng.normal(0, 0.001, n_bars).astype(np.float64)
-    rets[:, 2] = -0.01 + rng.normal(0, 0.001, n_bars).astype(np.float64)
+    rets[:, 0] = 0.005 + rng.normal(0, 0.002, n_bars)
+    rets[:, 1] = 0.004 + rng.normal(0, 0.001, n_bars)
+    rets[:, 2] = 0.001 + rng.normal(0, 0.0005, n_bars)
 
     cache = L2SimulationCache(
         vol_matrix_2d=np.ones((n_bars, 3), dtype=np.float64),
