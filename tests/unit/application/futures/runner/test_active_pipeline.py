@@ -460,6 +460,11 @@ class TestRunTieredL2StudyFoldOverride:
             "replace",
             side_effect=lambda obj, **kw: obj,
         )
+        # [l2-crisis-replay-routing-parity] transfer is a no-op in this test context
+        mocker.patch(
+            "src.domain.futures.strategy.tiered_workflow.l2_meta.transfer_routing_plan_to_crisis_cache",
+            side_effect=lambda crisis_cache, study_cache, **kw: crisis_cache,
+        )
 
         from datetime import date
         window = SimpleNamespace(
@@ -499,6 +504,214 @@ class TestRunTieredL2StudyFoldOverride:
         assert champion_spy.called
         assert champion_spy.call_args.kwargs["crisis_rets"] is fake_crisis_rets
         assert champion_spy.call_args.kwargs["crisis_replay_ctx"] is fake_crisis_replay_ctx
+
+    def test_run_tiered_l2_study_enriches_crisis_ctx_with_routed_cache(self, mocker) -> None:
+        """[SPEC l2-crisis-replay-routing-parity][S4] parity flag(기본 True) 시
+        transfer_routing_plan_to_crisis_cache가 호출되고 crisis_replay_ctx.cache가
+        교체됨을 검증."""
+        from src.application.futures.runner.active_pipeline import _run_tiered_l2_study
+        from src.domain.futures.strategy.config import CandidateStrategyConfig
+
+        cfg = CandidateStrategyConfig(wf_n_folds=4)
+        mocker.patch(
+            "src.domain.futures.strategy.walk_forward.build_walk_forward_folds",
+            return_value=(),
+        )
+        mocker.patch(
+            "src.domain.futures.strategy.tiered_workflow.awf_sim.build_l2_simulation_cache",
+            return_value=mocker.MagicMock(),
+        )
+        mocker.patch(
+            "src.domain.futures.strategy.tiered_workflow.awf_sim.compute_per_tf_fit_edge",
+            return_value={},
+        )
+        mocker.patch(
+            "src.domain.futures.strategy.market_regime.compute_market_regime_context",
+            return_value=mocker.MagicMock(),
+        )
+        mocker.patch(
+            "src.domain.futures.strategy.tiered_workflow.l2_meta.build_regime_routing_plan",
+            return_value=mocker.MagicMock(),
+        )
+        mocker.patch(
+            "src.domain.futures.strategy.tiered_workflow.diagnostics.build_layer_universe_audit",
+            return_value=mocker.MagicMock(warnings=()),
+        )
+        mocker.patch(
+            "src.domain.futures.strategy.market_regime.compute_risk_severity_code",
+            return_value=mocker.MagicMock(),
+        )
+        mocker.patch(
+            "src.domain.futures.optimization.workflow.objective_l2_growth",
+            return_value=0.0,
+        )
+        from src.domain.futures.optimization.opt_config import OPT_FUTURES_CONFIG
+        mocker.patch.dict(OPT_FUTURES_CONFIG, {"L2_OPTUNA_BATCH_SIZE": 1})
+        mocker.patch(
+            "src.domain.futures.strategy.tiered_workflow.selection.select_layer2_champion",
+            return_value=mocker.MagicMock(
+                best_params={}, best_trial_number=None, completed_trials=0,
+            ),
+        )
+        mocker.patch(
+            "src.application.futures.runner.active_pipeline._get_rss_mb",
+            return_value=100.0,
+        )
+        import dataclasses
+        mocker.patch.object(
+            dataclasses,
+            "replace",
+            side_effect=lambda obj, **kw: obj,
+        )
+        routed_cache_sentinel = mocker.MagicMock(
+            regime_policy_by_fold=({},), bucket_edges_by_fold=({},),
+            regime_routing_diagnostics=None,
+        )
+        transfer_spy = mocker.patch(
+            "src.domain.futures.strategy.tiered_workflow.l2_meta.transfer_routing_plan_to_crisis_cache",
+            return_value=routed_cache_sentinel,
+        )
+
+        from datetime import date
+        window = SimpleNamespace(
+            holdout_start=date(2025, 6, 1),
+            l2_start=date(2024, 6, 1),
+        )
+        aligned = SimpleNamespace(
+            symbols=("BTCUSDT",),
+            close_2d=mocker.MagicMock(),
+            datetimes=pd.date_range("2024-01-01", periods=500, freq="h"),
+        )
+        caps = SimpleNamespace(trial_number=0)
+        signal_batch = mocker.MagicMock()
+        signal_batch.start_idx = 0
+        signal_batch.end_idx = 500
+        signal_batch.registry_version = "v1"
+        signal_batch.model_version = "v1"
+        signal_batch.events = ()
+
+        fake_crisis_ctx = mocker.MagicMock(awf_folds=(mocker.MagicMock(),))
+
+        _run_tiered_l2_study(
+            signal_batch=signal_batch,
+            aligned=aligned,
+            cfg=cfg,
+            window=window,
+            caps=caps,
+            tf="1h",
+            n_trials=2,
+            seed=42,
+            l2_sim_cache=mocker.MagicMock(),
+            crisis_rets=mocker.MagicMock(),
+            crisis_replay_ctx=fake_crisis_ctx,
+        )
+
+        assert transfer_spy.called
+        assert transfer_spy.call_args.kwargs["crisis_cache"] is fake_crisis_ctx.cache
+        assert transfer_spy.call_args.kwargs["n_crisis_folds"] == 1
+
+    def test_run_tiered_l2_study_parity_flag_off_skips_transfer(self, mocker) -> None:
+        """[SPEC l2-crisis-replay-routing-parity][S3] l2_crisis_replay_routing_parity_enabled=False
+        시 transfer_routing_plan_to_crisis_cache가 호출되지 않음(회귀)."""
+        from src.application.futures.runner.active_pipeline import _run_tiered_l2_study
+        from src.domain.futures.strategy.config import CandidateStrategyConfig
+        from src.domain.futures.strategy.tiered_workflow.dataclasses import Layer2AllocationConfig
+
+        _fake_default = Layer2AllocationConfig(l2_crisis_replay_routing_parity_enabled=False)
+        mocker.patch(
+            "src.domain.futures.strategy.tiered_workflow.dataclasses.Layer2AllocationConfig",
+            return_value=_fake_default,
+        )
+        cfg = CandidateStrategyConfig(wf_n_folds=4)
+        mocker.patch(
+            "src.domain.futures.strategy.walk_forward.build_walk_forward_folds",
+            return_value=(),
+        )
+        mocker.patch(
+            "src.domain.futures.strategy.tiered_workflow.awf_sim.build_l2_simulation_cache",
+            return_value=mocker.MagicMock(),
+        )
+        mocker.patch(
+            "src.domain.futures.strategy.tiered_workflow.awf_sim.compute_per_tf_fit_edge",
+            return_value={},
+        )
+        mocker.patch(
+            "src.domain.futures.strategy.market_regime.compute_market_regime_context",
+            return_value=mocker.MagicMock(),
+        )
+        mocker.patch(
+            "src.domain.futures.strategy.tiered_workflow.l2_meta.build_regime_routing_plan",
+            return_value=mocker.MagicMock(),
+        )
+        mocker.patch(
+            "src.domain.futures.strategy.tiered_workflow.diagnostics.build_layer_universe_audit",
+            return_value=mocker.MagicMock(warnings=()),
+        )
+        mocker.patch(
+            "src.domain.futures.strategy.market_regime.compute_risk_severity_code",
+            return_value=mocker.MagicMock(),
+        )
+        mocker.patch(
+            "src.domain.futures.optimization.workflow.objective_l2_growth",
+            return_value=0.0,
+        )
+        from src.domain.futures.optimization.opt_config import OPT_FUTURES_CONFIG
+        mocker.patch.dict(OPT_FUTURES_CONFIG, {"L2_OPTUNA_BATCH_SIZE": 1})
+        mocker.patch(
+            "src.domain.futures.strategy.tiered_workflow.selection.select_layer2_champion",
+            return_value=mocker.MagicMock(
+                best_params={}, best_trial_number=None, completed_trials=0,
+            ),
+        )
+        mocker.patch(
+            "src.application.futures.runner.active_pipeline._get_rss_mb",
+            return_value=100.0,
+        )
+        import dataclasses
+        mocker.patch.object(
+            dataclasses,
+            "replace",
+            side_effect=lambda obj, **kw: obj,
+        )
+        transfer_spy = mocker.patch(
+            "src.domain.futures.strategy.tiered_workflow.l2_meta.transfer_routing_plan_to_crisis_cache",
+        )
+
+        from datetime import date
+        window = SimpleNamespace(
+            holdout_start=date(2025, 6, 1),
+            l2_start=date(2024, 6, 1),
+        )
+        aligned = SimpleNamespace(
+            symbols=("BTCUSDT",),
+            close_2d=mocker.MagicMock(),
+            datetimes=pd.date_range("2024-01-01", periods=500, freq="h"),
+        )
+        caps = SimpleNamespace(trial_number=0)
+        signal_batch = mocker.MagicMock()
+        signal_batch.start_idx = 0
+        signal_batch.end_idx = 500
+        signal_batch.registry_version = "v1"
+        signal_batch.model_version = "v1"
+        signal_batch.events = ()
+
+        fake_crisis_ctx = mocker.MagicMock(awf_folds=(mocker.MagicMock(),))
+
+        _run_tiered_l2_study(
+            signal_batch=signal_batch,
+            aligned=aligned,
+            cfg=cfg,
+            window=window,
+            caps=caps,
+            tf="1h",
+            n_trials=2,
+            seed=42,
+            l2_sim_cache=mocker.MagicMock(),
+            crisis_rets=mocker.MagicMock(),
+            crisis_replay_ctx=fake_crisis_ctx,
+        )
+
+        assert not transfer_spy.called
 
 
 def test_l2_batch_size_invariant_to_available_memory(mocker) -> None:
