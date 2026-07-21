@@ -1326,3 +1326,276 @@ def test_active_pipeline_helpers() -> None:
     sym_maps = {"BTCUSDT": {"candles_1h": None}}
     _select_probe_source_tf(sym_maps, "1h")
 
+
+# ─── Multi-Seed Robustness Consensus tests ───────────────────────────────
+
+
+import numpy as np
+import pytest
+
+from src.application.futures.runner.active_pipeline import (
+    SeedRobustnessOutcome,
+    _run_multi_seed_robustness_consensus,
+)
+
+
+def _make_outcome(seed: int, *, passed: bool, cagr: float) -> SeedRobustnessOutcome:
+    l3_final = type("L3", (), {"gate_passed": passed, "cagr": cagr})()
+    l2_final = type("L2", (), {"gate_passed": True, "cagr_hybrid": cagr})()
+    return SeedRobustnessOutcome(
+        seed=seed,
+        l1_result=None,  # type: ignore[arg-type]
+        l2_study_result=None,  # type: ignore[arg-type]
+        l2_final=l2_final,
+        l3_final=l3_final,
+        passed=passed,
+        blocker_reason="" if passed else "negative_return",
+    )
+
+
+def _dummy_regime_code() -> np.ndarray:
+    return np.array([0, 0, 1, 1, 2, 0], dtype=np.int8)
+
+
+def test_run_multi_seed_robustness_consensus_admits_when_majority_passes(mocker) -> None:
+    outcomes_by_seed = {
+        42: _make_outcome(42, passed=True, cagr=0.10),
+        43: _make_outcome(43, passed=True, cagr=0.05),
+        44: _make_outcome(44, passed=False, cagr=-0.20),
+    }
+    mocker.patch(
+        "src.application.futures.runner.active_pipeline._run_single_seed_outcome",
+        side_effect=lambda seed, **kw: outcomes_by_seed[seed],
+    )
+
+    result = _run_multi_seed_robustness_consensus(
+        signal_batch=mocker.Mock(), aligned=mocker.Mock(), cfg=mocker.Mock(),
+        window=mocker.Mock(), caps=mocker.Mock(), tf="8h", n_trials=120,
+        base_seed=42, target_phase="l3", l1_res=mocker.Mock(),
+        labeled_events=mocker.Mock(), per_tf_data_maps=None, labeled_events_by_tf=None,
+        crisis_rets=None, crisis_replay_ctx=None, l2_sim_cache=None,
+        probe_manifest=None, l3_regime_code_1d=_dummy_regime_code(),
+    )
+
+    assert result.admitted is True
+    assert result.pass_count == 2
+    assert result.selected is not None
+    assert result.selected.seed == 43  # cagr=0.05, lower than 0.10 among the passing pair
+
+
+def test_run_multi_seed_robustness_consensus_blocks_when_majority_fails(mocker) -> None:
+    outcomes_by_seed = {
+        42: _make_outcome(42, passed=False, cagr=-0.10),
+        43: _make_outcome(43, passed=True, cagr=0.31),
+        44: _make_outcome(44, passed=False, cagr=-0.20),
+    }
+    mocker.patch(
+        "src.application.futures.runner.active_pipeline._run_single_seed_outcome",
+        side_effect=lambda seed, **kw: outcomes_by_seed[seed],
+    )
+
+    result = _run_multi_seed_robustness_consensus(
+        signal_batch=mocker.Mock(), aligned=mocker.Mock(), cfg=mocker.Mock(),
+        window=mocker.Mock(), caps=mocker.Mock(), tf="8h", n_trials=120,
+        base_seed=42, target_phase="l3", l1_res=mocker.Mock(),
+        labeled_events=mocker.Mock(), per_tf_data_maps=None, labeled_events_by_tf=None,
+        crisis_rets=None, crisis_replay_ctx=None, l2_sim_cache=None,
+        probe_manifest=None, l3_regime_code_1d=_dummy_regime_code(),
+    )
+
+    assert result.admitted is False
+    assert result.blocker_reason == "seed_consensus_blocked:1/3"
+    assert result.selected is None
+
+
+def test_run_multi_seed_robustness_consensus_selects_most_conservative_not_best(mocker) -> None:
+    outcomes_by_seed = {
+        42: _make_outcome(42, passed=True, cagr=0.20),
+        43: _make_outcome(43, passed=True, cagr=0.05),
+        44: _make_outcome(44, passed=True, cagr=0.10),
+    }
+    mocker.patch(
+        "src.application.futures.runner.active_pipeline._run_single_seed_outcome",
+        side_effect=lambda seed, **kw: outcomes_by_seed[seed],
+    )
+
+    result = _run_multi_seed_robustness_consensus(
+        signal_batch=mocker.Mock(), aligned=mocker.Mock(), cfg=mocker.Mock(),
+        window=mocker.Mock(), caps=mocker.Mock(), tf="8h", n_trials=120,
+        base_seed=42, target_phase="l3", l1_res=mocker.Mock(),
+        labeled_events=mocker.Mock(), per_tf_data_maps=None, labeled_events_by_tf=None,
+        crisis_rets=None, crisis_replay_ctx=None, l2_sim_cache=None,
+        probe_manifest=None, l3_regime_code_1d=_dummy_regime_code(),
+    )
+
+    assert result.admitted is True
+    assert result.pass_count == 3
+    assert result.selected is not None
+    assert result.selected.seed == 43
+    assert result.selected.l3_final.cagr == 0.05
+
+
+def test_run_multi_seed_robustness_consensus_l2_phase_uses_l2_cagr(mocker) -> None:
+    l3_final_passed = type("L3", (), {"gate_passed": True, "cagr": 0.99})()
+    l2_final_42 = type("L2", (), {"gate_passed": True, "cagr_hybrid": 0.08})()
+    l2_final_43 = type("L2", (), {"gate_passed": True, "cagr_hybrid": 0.03})()
+    l2_final_44 = type("L2", (), {"gate_passed": True, "cagr_hybrid": 0.15})()
+    outcomes_by_seed = {
+        42: SeedRobustnessOutcome(
+            seed=42, l1_result=None, l2_study_result=None,
+            l2_final=l2_final_42, l3_final=l3_final_passed,
+            passed=True, blocker_reason="",
+        ),
+        43: SeedRobustnessOutcome(
+            seed=43, l1_result=None, l2_study_result=None,
+            l2_final=l2_final_43, l3_final=l3_final_passed,
+            passed=True, blocker_reason="",
+        ),
+        44: SeedRobustnessOutcome(
+            seed=44, l1_result=None, l2_study_result=None,
+            l2_final=l2_final_44, l3_final=l3_final_passed,
+            passed=True, blocker_reason="",
+        ),
+    }
+    mocker.patch(
+        "src.application.futures.runner.active_pipeline._run_single_seed_outcome",
+        side_effect=lambda seed, **kw: outcomes_by_seed[seed],
+    )
+
+    result = _run_multi_seed_robustness_consensus(
+        signal_batch=mocker.Mock(), aligned=mocker.Mock(), cfg=mocker.Mock(),
+        window=mocker.Mock(), caps=mocker.Mock(), tf="8h", n_trials=120,
+        base_seed=42, target_phase="l2", l1_res=mocker.Mock(),
+        labeled_events=mocker.Mock(), per_tf_data_maps=None, labeled_events_by_tf=None,
+        crisis_rets=None, crisis_replay_ctx=None, l2_sim_cache=None,
+        probe_manifest=None, l3_regime_code_1d=_dummy_regime_code(),
+    )
+
+    assert result.admitted is True
+    assert result.pass_count == 3
+    assert result.selected is not None
+    assert result.selected.seed == 43  # lowest l2 cagr_hybrid=0.03
+
+
+def test_active_pipeline_l3_blocked_when_consensus_fails_returns_exit_code_1(mocker) -> None:
+    from src.application.futures.runner.active_pipeline import (
+        MultiSeedConsensusResult,
+        _run_strategy_stage,
+    )
+    from src.application.futures.runner.models import RunnerResult
+
+    _failed_consensus = MultiSeedConsensusResult(
+        admitted=False, selected=None, outcomes=(),
+        pass_count=0, required_pass_count=2,
+        blocker_reason="seed_consensus_blocked:0/3",
+    )
+    mocker.patch(
+        "src.application.futures.runner.active_pipeline._run_multi_seed_robustness_consensus",
+        return_value=_failed_consensus,
+    )
+
+    _tiered_window = mocker.Mock()
+    _tiered_window.fetch_start = mocker.Mock()
+    _tiered_window.fetch_start.isoformat.return_value = "2024-01-01"
+    _tiered_window.holdout_start = mocker.Mock()
+    _tiered_window.holdout_start.isoformat.return_value = "2024-06-01"
+    _tiered_window.holdout_end = "2024-09-01"
+    _tiered_window.l1_start = mocker.Mock()
+    _tiered_window.l1_start.isoformat.return_value = "2024-01-01"
+
+    _cfg = mocker.Mock()
+    _cfg.phase = "l3"
+    _cfg.l1_tfs = ("4h",)
+    _cfg.seed = 42
+
+    _window = mocker.Mock(
+        fetch_start="2024-01-01", is_start="2024-03-01", oos_start="2024-06-01",
+        end_date="2024-09-01", fetch_start_date=mocker.Mock(), is_start_date=mocker.Mock(),
+        oos_start_date=mocker.Mock(), end_date_value=mocker.Mock(),
+    )
+    _data_stage = mocker.Mock()
+    _data_stage.valid_symbols = ["BTCUSDT"]
+    _data_stage.effective_l0_evidence_end = None
+    _data_stage.data_maps = {"BTCUSDT": {}}
+    _data_stage.oos_data_maps = {"BTCUSDT": {}}
+
+    mocker.patch(
+        "src.application.futures.runner.active_pipeline.pick_strategy_data_maps",
+        return_value={"BTCUSDT": {"4h": mocker.Mock()}},
+    )
+    mocker.patch(
+        "src.application.futures.runner.active_pipeline.run_active_strategy_output_bridge",
+        return_value=mocker.Mock(
+            labeled_unfiltered=mocker.Mock(),
+            alpha_foundry_report=mocker.Mock(mode="pass", n_passed=1),
+        ),
+    )
+    mocker.patch(
+        "src.application.futures.runner.active_pipeline._tiered_labeled_events",
+        return_value=mocker.Mock(),
+    )
+    mocker.patch(
+        "src.application.futures.runner.active_pipeline._resolve_layered_window",
+        return_value=_tiered_window,
+    )
+    mocker.patch(
+        "src.application.futures.runner.active_pipeline._resolve_base_symbol_scope",
+        return_value=("BTCUSDT",),
+    )
+    mocker.patch(
+        "src.application.futures.runner.active_pipeline._resolve_tradeable_scope",
+        return_value=mocker.Mock(admitted=["BTCUSDT"], dropped_by_reason={}),
+    )
+    mocker.patch(
+        "src.application.futures.runner.tiered_handoff.consume_candidate_output_for_tiered",
+        return_value=mocker.Mock(
+            aligned=mocker.Mock(datetimes=mocker.Mock(
+                __getitem__=mocker.Mock(return_value=pd.Timestamp("2024-01-01")),
+                __len__=mocker.Mock(return_value=100),
+            )),
+            labeled_events=mocker.Mock(),
+            aligned_by_tf={},
+            labeled_events_by_tf={},
+            l0_delivery_manifest=None,
+        ),
+    )
+    mocker.patch(
+        "src.domain.futures.strategy.tiered_workflow.pipeline.run_tiered_pipeline",
+        return_value=(mocker.Mock(gate_passed=True), None, None),
+    )
+    mocker.patch(
+        "src.domain.futures.strategy.tiered_workflow.awf_sim.build_l2_simulation_cache",
+        return_value=mocker.Mock(),
+    )
+    mocker.patch(
+        "src.application.futures.runner.active_pipeline._build_l2_signal_batch",
+        return_value=mocker.Mock(),
+    )
+    mocker.patch(
+        "src.domain.futures.strategy.tiered_workflow.pipeline._resolve_l2_master_tf_from_prior",
+        return_value="8h",
+    )
+    mocker.patch(
+        "src.domain.futures.strategy.tiered_workflow.pipeline._load_crisis_replay_context",
+        return_value=None,
+    )
+    mocker.patch(
+        "src.domain.futures.strategy.market_regime.compress_regime_codes",
+        return_value=np.array([0, 0, 1, 1], dtype=np.int8),
+    )
+    mocker.patch(
+        "src.domain.futures.strategy.market_regime.compute_market_regime_context",
+        return_value=mocker.Mock(code_1d=np.array([0, 0, 1, 1], dtype=np.int8)),
+    )
+
+    _output = _run_strategy_stage(
+        run_config=_cfg,
+        window=_window,
+        data_stage=_data_stage,
+        trading_symbols=("BTCUSDT",),
+        layered_window=_tiered_window,
+    )
+
+    assert isinstance(_output, RunnerResult)
+    assert _output.exit_code == 1
+    assert _output.reason == "seed_consensus_blocked:0/3"

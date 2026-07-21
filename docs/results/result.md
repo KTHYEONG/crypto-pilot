@@ -1,3 +1,59 @@
+# L2/L3 Multi-Seed 강건성 합의 게이트 적용 결과 — 2026-07-21 (최신)
+
+`docs/specs/l2-l3-multi-seed-robustness-consensus.md` 구현(`/check` PASS, Cov 32%) — L2 champion 승격을 단일 seed 결과에서 **K=3 독립 seed(base_seed, +1, +2) 과반수(2/3) 합의**로 전환, 미달 시 hard block(exit_code=1)하도록 기본 동작을 변경했다.
+
+## 실행 결과 (`--seed 42` → 내부적으로 42/43/44 순차 실행)
+
+```
+[MULTI-SEED] seed=42 L2 study blocked: no_feasible_trials
+[MULTI-SEED] seed=43 L2 study blocked: no_feasible_trials
+[MULTI-SEED] seed=44 L2 study blocked: no_feasible_trials
+[MULTI-SEED] pass_count=0/3 required=2 admitted=False
+```
+
+- 소요시간: `real 7m52.7s` (단일-seed 대비 약 2.6배 — 의도된 증가, `performance.md` §4 "15% 회귀" 규칙의 예외로 기록).
+- 3개 seed(42/43/44) **전부** `no_feasible_trials`(joint_feasible=0) — champion 자체를 못 찾음. 과반수(2/3) 미달로 즉시 hard block.
+- `test_active_pipeline_l3_blocked_when_consensus_fails_returns_exit_code_1`이 `/check`에서 이미 검증됐으므로 exit_code=1로 정상 종료(실측 재확인은 다음 세션에서 `echo $?`로 직접 캡처 권장).
+
+## 판정
+
+1. **Multi-seed 합의 게이트는 설계대로 정확히 작동했다.** 직전 세션의 수동 3-seed 실측(42/123/7 → 0/1/10 feasible, "운 좋은 seed 하나"가 존재)과 달리, 이번 연속 seed 조합(42/43/44)은 **셋 다 실패**해 더 단호하게 결론을 확인시켜준다.
+2. **이것은 게이트의 실패가 아니라 성공이다.** 이 코드/설정으로는 L2 탐색 프로세스 자체가 강건한(seed에 안정적인) champion을 찾지 못하는 상태이며, 게이트가 바로 이런 상황의 배포를 정확히 차단했다.
+3. **반복된 `no_feasible_trials`는 이제 게이트/파이프라인 설계의 문제가 아니라 L2 탐색공간·제약 자체 또는 그 상류의 L1 알파 표현력 문제로 수렴한다** — 이미 우선순위 3(L1 신호 표현력 근본원인)에서 지목된 병목과 일치.
+
+## ⚠️ 하지 말아야 할 것 (재확인)
+seed offset을 이것저것 바꿔가며 "과반수 통과하는 조합 찾기"를 시도하는 것은 **금지** — 이는 게이트를 무력화하는 새로운 형태의 p-hacking이다. `admitted=False`가 반복되면 다음 조치는 L2 탐색공간 재설계 또는 L1 알파 재검토여야 하며, 동일 로직에 seed만 바꿔 재시도하는 것이 아니다.
+
+---
+
+# Crisis Replay 매칭 버그 수정 + 3-Seed 반복 검증 — 2026-07-21 (최신)
+
+`docs/specs/crisis-replay-strategy-match-fix.md` 구현(`/check` PASS, Cov 26%) — `_build_rule_based_stress_batch()`의 `panel.variant` substring 매칭을 `panel.family:variant` 정확 일치로 교체. 목적: 직전 세션(L1 registry merge) 이후 회귀한 crisis reliability(`stress_tested_pass`→`untested_no_data`)를 근본 수정.
+
+## 3-Seed 반복 실행 결과 (동일 조건: `--trials 120 --timeframe 4h --sync skip`)
+
+| Seed | joint_feasible | L2 | L3 | Crisis Reliability |
+|---|---|---|---|---|
+| 42 | 0/120 | ❌ BLOCKED (`no_feasible_trials`) | 도달 못함 | 도달 못함 |
+| 123 | 1/120 | ✅ PASS (CAGR +31.2%) | ❌ BLOCKED (CAGR -10.0%) | ✅ **stress_tested_pass** |
+| 7 | 10/108* | ✅ PASS (CAGR +48.7%) | ❌ BLOCKED (CAGR -20.1%) | ✅ **stress_tested_pass** |
+
+\* seed=7은 120 trial 중 108에서 종료(정상 종료, exit_code=0).
+
+## 판정
+
+1. **Crisis-match 수정 자체는 확인됨 — 정상 작동.** 챔피언이 선정된 두 seed(123, 7) 모두 `stress_tested_pass`로 복구됐다(직전 세션의 `untested_no_data`/`trades=3` 붕괴가 재발하지 않음). `panel.family` 활용 정확 일치 교체가 의도대로 동작.
+2. **더 중요한 재해석: 직전 세션 seed=42의 "L3 DEPLOY-READY(+5.6%)"는 재현되지 않는다.** substring 버그가 있던 상태(부정확한 crisis 제약)에서 채택된 champion이었을 가능성이 높다 — crisis 제약을 정확하게 계산하도록 고치자, 동일 seed=42조차 아예 champion을 못 찾는(`no_feasible_trials`) 결과로 바뀌었다. 즉 이전 세션의 긍정적 결과는 **버그가 낀 상태의 우연한 산물**이었을 개연성이 크다.
+3. **3개 seed 전부 L3 최종 홀드아웃 실패** — joint_feasible이 늘어날수록(seed 7: 10개) 오히려 L3가 더 나빠짐(-20.1%, seed 123의 -10.0%보다 악화). Study 윈도우에 대한 과최적화(curve-fitting) 신호로 읽힌다 — feasible trial이 많을수록 study 윈도우에 더 잘 들어맞는 champion을 고르게 되는데, 그 champion이 forward holdout에는 더 안 맞을 수 있다는 정합적인 설명.
+4. **결론: L1 registry merge(`ADR_20260721_L1_MULTI_TF_REGISTRY_MERGE`)와 crisis-match 수정 둘 다 각자의 목적(신호 폐기 방지, crisis reliability 계산 정확도)에서는 옳고 검증됐다. 하지만 L3 진짜 forward holdout 일반화 문제는 여전히 미해결이며, 오히려 이번 정밀 재검증으로 "L2 study 윈도우 최적화가 L3 forward에 일반화되지 않는다"는 기존 진단(아래 섹션 §근본원인진단 4번, non-stationarity)이 더 강하게 재확인됐다.**
+
+## 다음 우선순위 (갱신)
+
+- 아래 섹션(2026-07-21 최초 L3 분석)의 "우선순위 2"(L2 study 단계 recency 강건성 게이트)가 이번 3-seed 결과로 **더 시급해졌다** — joint_feasible이 많을수록 L3가 나빠지는 패턴은 정확히 이 게이트가 방지하려는 현상이다.
+- seed 다양화 재실행 자체를 반복하며 "좋은 시드 찾기"로 흐르지 않도록 주의(anti-overfitting) — 다음 조치는 게이트/탐색공간 설계 변경이어야 하며, 동일 코드로 seed만 바꿔가며 재시도하는 것은 금지.
+
+---
+
 # L1 Multi-TF Registry Merge 적용 후 재실행 결과 — 2026-07-21 (후속)
 
 `docs/specs/l1-deployment-registry-multi-tf-merge.md` 구현(`/check` PASS, Cov 24%) 직후 동일 조건(`--phase l3 --trials 120 --timeframe 4h --sync skip --seed 42`)으로 재실행. 결과: **L3가 BLOCKED → ✅ DEPLOY-READY로 전환**.
