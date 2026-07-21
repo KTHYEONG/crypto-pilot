@@ -14,6 +14,7 @@ from numpy.typing import NDArray
 from src.domain.futures.optimization.evaluator import calc_n_trials_eff_entropy
 from src.domain.futures.optimization.l2_robust_search import materialize_l2_robust_params  # noqa: F401
 from src.domain.futures.optimization.observability.l2_runtime_probe import L2RuntimeProbe
+from src.domain.futures.optimization.robust_compounding import validate_candidate_artifact_parity  # noqa: F401
 from src.domain.futures.optimization.workflow import (
     compute_crisis_replay_budget,
     evaluate_l2_trial_cached,

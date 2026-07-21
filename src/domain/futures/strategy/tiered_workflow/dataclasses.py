@@ -11,6 +11,8 @@ import numpy as np
 from numpy.typing import NDArray
 
 if TYPE_CHECKING:
+    from src.domain.futures.strategy.tiered_workflow.portfolio_handoff import PortfolioHandoffResult
+    _PortfolioHandoffType = PortfolioHandoffResult
     from src.domain.futures.strategy.candidate_contracts import (
         FoldFitStatus,
         Layer1FoldReadiness,
@@ -1800,6 +1802,7 @@ class L2SimulationCache:
     risk_severity_code_1d: NDArray[np.int8] | None = None
     regime_routing_diagnostics: RegimeRoutingDiagnostics | None = None
     regime_policy_by_fold: tuple[dict[tuple[Any, ...], RegimeCellPolicy], ...] = ()
+    handoff_sleeve_mask_by_fold: tuple[NDArray[np.bool_], ...] = ()
 
 
 @dataclass(frozen=True, slots=True)

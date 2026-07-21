@@ -14,6 +14,17 @@ L2_FIXED_ROBUST_PARAMS: dict[str, Any] = {
     "l2_regime_policy_mode": "soft",
     "l2_regime_hard_block_enabled": False,
     "l2_regime_pooled_is_passthrough": True,
+    "l2_deploy_mdd_margin": 0.30,
+    "l2_deploy_crisis_mdd_margin": 0.30,
+    "l2_min_crisis_cagr": -0.05,
+    "l2_regime_bull_leverage_boost_enabled": False,
+    "l2_regime_long_short_asymmetry_enabled": False,
+    "l2_regime_severity_gating_enabled": False,
+    "l2_regime_bear_gross_cap": 0.35,
+    "l2_regime_crisis_gross_cap": 0.25,
+    "l2_regime_cap_release_cooldown_bars": 0,
+    "l2_regime_bear_long_extra_mult": 1.0,
+    "l2_regime_crisis_long_extra_mult": 1.0,
 }
 
 
@@ -31,8 +42,8 @@ class L2RobustSearchBudget:
 def resolve_l2_robust_search_budget(n_trials: int) -> L2RobustSearchBudget:
     if n_trials <= 0:
         raise ValueError("n_trials must be positive")
-    anchors = min(24, max(1, n_trials // 5))
-    refinement = min(24, n_trials // 5)
+    anchors = 24
+    refinement = 24
     adaptive = n_trials - anchors - refinement
     if adaptive < 0:
         adaptive = 0
@@ -47,12 +58,13 @@ def derive_l2_search_seed(experiment_key: str, search_space_hash: str) -> int:
 
 def materialize_l2_robust_params(params: dict[str, Any]) -> dict[str, Any]:
     merged = dict(params)
-    merged.update(L2_FIXED_ROBUST_PARAMS)
+    for key, val in L2_FIXED_ROBUST_PARAMS.items():
+        if key not in merged:
+            merged[key] = val
     return merged
 
 
 def suggest_l2_robust_params(trial: Any) -> dict[str, Any]:
-    """Suggest the configured search space and inject fixed routing controls."""
     params: dict[str, Any] = {}
     for key, spec in L2_SEARCH_SPACE.items():
         kind = spec["type"]
@@ -75,36 +87,110 @@ def build_l2_feasibility_anchors(*, count: int = 24) -> tuple[dict[str, Any], ..
         for key in keys:
             spec = L2_SEARCH_SPACE[key]
             if spec["type"] == "categorical":
-                choices = tuple(spec["choices"])
-                params[key] = choices[index % len(choices)]
+                params[key] = int(spec["choices"][index % len(spec["choices"])])
             else:
-                low, high = float(spec["low"]), float(spec["high"])
-                ratio = (index + 0.5) / max(count, 1)
-                value = low + (high - low) * ratio
-                step = float(spec.get("step", 1))
-                value = round(round((value - low) / step) * step + low, 10)
-                params[key] = int(value) if spec["type"] == "int" else value
-        if not params.get("l2_regime_long_short_asymmetry_enabled", True):
-            params.pop("l2_regime_bear_long_extra_mult", None)
-            params.pop("l2_regime_crisis_long_extra_mult", None)
+                low = float(spec["low"])
+                high = float(spec["high"])
+                ratio = (index + 0.5) / float(max(count, 1))
+                if spec.get("step"):
+                    step = float(spec["step"])
+                    n_steps = max(round((high - low) / step), 1)
+                    step_idx = min(round(ratio * n_steps), n_steps - 1)
+                    params[key] = float(low + step_idx * step)
+                else:
+                    params[key] = float(low + ratio * (high - low))
         anchors.append(materialize_l2_robust_params(params))
     return tuple(anchors)
 
 
-def build_l2_refinement_trials(*, trials: tuple[Any, ...], count: int = 24) -> tuple[dict[str, Any], ...]:
+def compute_search_space_hash() -> str:
+    hasher = hashlib.sha256()
+    for key in sorted(L2_SEARCH_SPACE.keys()):
+        spec = L2_SEARCH_SPACE[key]
+        hasher.update(key.encode("utf-8"))
+        hasher.update(str(spec).encode("utf-8"))
+    for key in sorted(L2_FIXED_ROBUST_PARAMS.keys()):
+        hasher.update(key.encode("utf-8"))
+        hasher.update(str(L2_FIXED_ROBUST_PARAMS[key]).encode("utf-8"))
+    return hasher.hexdigest()
+
+
+def build_refinement_neighbors(
+    base_params: dict[str, Any],
+    *,
+    previous_hashes: set[str],
+    max_neighbors: int = 24,
+) -> tuple[dict[str, Any], ...]:
+    """Generate discrete neighbors around a base parameter set.
+
+    Only returns configs whose hashes are not in previous_hashes.
+    """
+    neighbors: list[dict[str, Any]] = []
+    for key, spec in L2_SEARCH_SPACE.items():
+        if len(neighbors) >= max_neighbors:
+            break
+        base_val = base_params.get(key)
+        if base_val is None:
+            continue
+        variants: list[Any] = []
+        if spec["type"] == "int":
+            low, high = int(spec["low"]), int(spec["high"])
+            step = int(spec.get("step", 1))
+            for delta in (-step, step):
+                iv = int(base_val) + delta
+                if low <= iv <= high:
+                    variants.append(iv)
+        elif spec["type"] == "float":
+            flow, fhigh = float(spec["low"]), float(spec["high"])
+            fstep = float(spec.get("step", 1.0))
+            for fdelta in (-fstep, fstep):
+                fv = float(base_val) + fdelta
+                if flow <= fv <= fhigh + 1e-12:
+                    variants.append(fv)
+        else:
+            cat_choices = list(spec["choices"])
+            idx = cat_choices.index(base_val) if base_val in cat_choices else -1
+            for offset in (-1, 1):
+                candidate_idx = idx + offset
+                if 0 <= candidate_idx < len(cat_choices):
+                    variants.append(cat_choices[candidate_idx])
+        for v in variants:
+            neighbor = dict(base_params)
+            neighbor[key] = v
+            h = hashlib.sha256(str(sorted(neighbor.items())).encode()).hexdigest()
+            if h not in previous_hashes:
+                previous_hashes.add(h)
+                neighbors.append(materialize_l2_robust_params(neighbor))
+                if len(neighbors) >= max_neighbors:
+                    break
+    return tuple(neighbors)
+
+
+def build_l2_refinement_trials(
+    *,
+    trials: tuple[Any, ...],
+    count: int = 24,
+) -> tuple[dict[str, Any], ...]:
+    """Compatibility wrapper for the staged refinement API.
+
+    The public helper existed before the neighbor generator was split out.  Keep
+    it as a thin deterministic adapter so callers and regression tests do not
+    silently lose refinement after the search helper refactor.
+    """
     if count <= 0 or not trials:
         return ()
-    ranked = sorted(trials, key=lambda t: (not bool(t.user_attrs.get("l2_joint_feasible", False)), float(t.value or 0.0), t.number))
-    source = dict(ranked[0].params)
-    key = "K_RANK"
-    spec = L2_SEARCH_SPACE.get(key)
-    if spec is None:
-        return (materialize_l2_robust_params(source),)
-    values: list[dict[str, Any]] = []
-    current = int(source.get(key, spec["low"]))
-    for delta in (-1, 1):
-        candidate = max(int(spec["low"]), min(int(spec["high"]), current + delta))
-        item = dict(source)
-        item[key] = candidate
-        values.append(materialize_l2_robust_params(item))
-    return tuple(values[:count])
+    ranked = sorted(
+        trials,
+        key=lambda trial: (
+            not bool(getattr(trial, "user_attrs", {}).get("l2_joint_feasible", False)),
+            -(float(trial.value) if getattr(trial, "value", None) is not None else float("-inf")),
+            int(getattr(trial, "number", 0)),
+        ),
+    )
+    source = dict(getattr(ranked[0], "params", {}))
+    previous_hashes: set[str] = set()
+    return build_refinement_neighbors(
+        source,
+        previous_hashes=previous_hashes,
+        max_neighbors=count,
+    )
