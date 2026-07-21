@@ -30,7 +30,6 @@ class PortfolioHandoffConfig:
     min_marginal_growth_lcb: float = 0.0
     max_abs_pairwise_corr: float = 0.85
     min_pair_observations: int = 30
-    max_sleeves_per_cluster: int = 1
     min_source_families: int = 2
 
 
@@ -128,17 +127,62 @@ def _moving_block_bootstrap_lcb(
         return float("-inf")
     rng = np.random.default_rng(seed)
     n = values.size
-    n_blocks = int(np.ceil(n / block_size))
+    effective_block_size = min(block_size, max(1, n - 1))
+    n_blocks = int(np.ceil(n / effective_block_size))
     boot_means = np.empty(n_resamples, dtype=np.float64)
     for i in range(n_resamples):
-        blocks = rng.integers(0, max(n - block_size + 1, 1), size=n_blocks)
-        indices = (blocks[:, None] + np.arange(block_size)) % n
+        blocks = rng.integers(0, max(n - effective_block_size + 1, 1), size=n_blocks)
+        indices = (blocks[:, None] + np.arange(effective_block_size)) % n
         sample = values[indices.ravel()[:n]]
         boot_means[i] = float(np.mean(sample))
     mu = float(np.mean(boot_means))
     sigma = float(np.std(boot_means, ddof=1))
     return mu - k * sigma
 
+
+
+def _rank_and_cap_sleeve_indices(
+    sleeve_keys: tuple[SignalSleeveKey, ...],
+    registry: QualifiedSignalRegistry,
+    max_candidate_sleeves: int,
+) -> tuple[int, ...]:
+    if not sleeve_keys or max_candidate_sleeves <= 0:
+        return ()
+    quality_by_key: dict[tuple[str, str], float] = {}
+    for sym, ev_list in registry.by_symbol.items():
+        for ev in ev_list:
+            quality_by_key[(sym, ev.key.strategy_id)] = ev.quality_weight
+    indexed = list(range(len(sleeve_keys)))
+    ranked = sorted(
+        indexed,
+        key=lambda s: (
+            -quality_by_key.get((sleeve_keys[s].symbol, sleeve_keys[s].strategy_id), 0.0),
+            sleeve_keys[s].symbol,
+            sleeve_keys[s].strategy_id,
+        ),
+    )
+    selected = ranked[:max_candidate_sleeves]
+    return tuple(sorted(selected))
+
+
+def _kelly_proportional_weights(
+    returns_window: NDArray[np.float64],
+    *,
+    vol_floor: float = 1e-8,
+) -> NDArray[np.float64]:
+    n = returns_window.shape[1]
+    if n == 0:
+        return np.zeros(0, dtype=np.float64)
+    mu = np.mean(returns_window, axis=0)
+    q90 = np.quantile(returns_window, 0.90, axis=0)
+    q10 = np.quantile(returns_window, 0.10, axis=0)
+    sigma = np.maximum((q90 - q10) / 2.563, vol_floor)
+    raw = np.maximum(mu, 0.0) / (sigma ** 2)
+    total = float(np.sum(raw))
+    if total <= 0.0 or not np.isfinite(total):
+        return np.full(n, 1.0 / max(n, 1), dtype=np.float64)
+    out: NDArray[np.float64] = raw / total
+    return out
 
 def _handoff_fingerprint(
     registry: QualifiedSignalRegistry,
@@ -189,6 +233,14 @@ def evaluate_portfolio_handoff(
     n_sleeves = len(sleeve_keys)
     bars_per_year: float = 2190.0
 
+    active_indices = _rank_and_cap_sleeve_indices(
+        sleeve_keys, registry, config.max_candidate_sleeves,
+    )
+    active_set = set(active_indices)
+    local_index_by_s: dict[int, int] = {
+        orig: local_i for local_i, orig in enumerate(active_indices)
+    }
+
     all_evidence_by_fold: list[tuple[SleeveContributionEvidence, ...]] = []
     all_admitted_by_fold: list[tuple[SignalSleeveKey, ...]] = []
 
@@ -205,12 +257,28 @@ def evaluate_portfolio_handoff(
             all_admitted_by_fold.append(())
             continue
 
-        weights = np.ones(n_sleeves, dtype=np.float64)
-        weights /= max(np.sum(weights), 1e-12)
+        if active_indices:
+            returns_active = returns_fold_64[:, active_indices]
+        else:
+            returns_active = np.empty((n_bars_fold, 0), dtype=np.float64)
+        weights_active = _kelly_proportional_weights(returns_active)
+        n_active = returns_active.shape[1]
 
         sleeve_evidence: list[SleeveContributionEvidence] = []
         for s in range(n_sleeves):
             key = sleeve_keys[s]
+            if s not in active_set:
+                sleeve_evidence.append(SleeveContributionEvidence(
+                    key=key,
+                    marginal_growth_by_window=(),
+                    marginal_growth_lcb=float("-inf"),
+                    positive_window_ratio=0.0,
+                    max_abs_pairwise_corr=0.0,
+                    redundancy_cluster=-1,
+                    admitted=False,
+                    rejection_reasons=("capped_by_candidate_sleeve_limit",),
+                ))
+                continue
             if n_bars_fold < 2:
                 sleeve_evidence.append(SleeveContributionEvidence(
                     key=key,
@@ -224,6 +292,7 @@ def evaluate_portfolio_handoff(
                 ))
                 continue
 
+            local_s = local_index_by_s[s]
             calibration_subwindows: list[NDArray[np.float64]] = []
             subwindow_size = max(n_bars_fold // max(config.min_calibration_windows, 1), 2)
             for w in range(config.min_calibration_windows):
@@ -231,9 +300,8 @@ def evaluate_portfolio_handoff(
                 end = min(start + subwindow_size, n_bars_fold)
                 if end - start < 2:
                     continue
-                sub_returns = returns_fold_64[start:end, :]
-                w_sub = weights.copy()
-                delta = _window_marginal_growth(sub_returns, w_sub, s, bars_per_year)
+                sub_returns = returns_active[start:end, :]
+                delta = _window_marginal_growth(sub_returns, weights_active, local_s, bars_per_year)
                 calibration_subwindows.append(np.array([delta], dtype=np.float64))
 
             if len(calibration_subwindows) < config.min_calibration_windows:
@@ -264,15 +332,22 @@ def evaluate_portfolio_handoff(
                 rejection_reasons=(),
             ))
 
-        corr_matrix: NDArray[np.float64] = np.asarray(np.corrcoef(returns_fold_64, rowvar=False))
-        corr_matrix = np.nan_to_num(corr_matrix, nan=1.0)
+        if n_active > 1:
+            corr_matrix = np.asarray(np.corrcoef(returns_active, rowvar=False))
+            corr_matrix = np.nan_to_num(corr_matrix, nan=1.0)
+        elif n_active == 1:
+            corr_matrix = np.zeros((1, 1), dtype=np.float64)
+        else:
+            corr_matrix = np.zeros((0, 0), dtype=np.float64)
         low_obs_mask = n_bars_fold < config.min_pair_observations
         if low_obs_mask:
             corr_matrix[:] = 1.0
 
         for s in range(n_sleeves):
-            if sleeve_evidence[s].admitted:
-                ev = sleeve_evidence[s]
+            if s not in active_set:
+                continue
+            ev = sleeve_evidence[s]
+            if ev.admitted:
                 if ev.marginal_growth_lcb <= config.min_marginal_growth_lcb:
                     sleeve_evidence[s] = SleeveContributionEvidence(
                         key=ev.key,
@@ -298,35 +373,46 @@ def evaluate_portfolio_handoff(
 
         n_admitted = sum(1 for e in sleeve_evidence if e.admitted)
         for s in range(n_sleeves):
-            if sleeve_evidence[s].admitted:
-                admitted_idx = [i for i in range(n_sleeves) if sleeve_evidence[i].admitted].index(s)
-                cluster_corrs = []
-                for other_s in range(n_sleeves):
-                    if other_s == s or not sleeve_evidence[other_s].admitted:
-                        continue
-                    corr_val = abs(corr_matrix[s, other_s])
-                    cluster_corrs.append((corr_val, other_s))
-                max_corr = max((c for c, _ in cluster_corrs), default=0.0)
-                ev = sleeve_evidence[s]
-                sleeve_evidence[s] = SleeveContributionEvidence(
-                    key=ev.key,
-                    marginal_growth_by_window=ev.marginal_growth_by_window,
-                    marginal_growth_lcb=ev.marginal_growth_lcb,
-                    positive_window_ratio=ev.positive_window_ratio,
-                    max_abs_pairwise_corr=float(max_corr),
-                    redundancy_cluster=admitted_idx,
-                    admitted=ev.admitted,
-                    rejection_reasons=ev.rejection_reasons,
-                )
+            if s not in active_set or not sleeve_evidence[s].admitted:
+                continue
+            local_s = local_index_by_s[s]
+            admitted_idx = sum(
+                1 for i in range(n_sleeves)
+                if i in active_set and sleeve_evidence[i].admitted and i < s
+            )
+            cluster_corrs = []
+            for other_s in range(n_sleeves):
+                if other_s not in active_set or other_s == s or not sleeve_evidence[other_s].admitted:
+                    continue
+                local_other = local_index_by_s[other_s]
+                corr_val = abs(corr_matrix[local_s, local_other])
+                cluster_corrs.append((corr_val, other_s))
+            max_corr = max((c for c, _ in cluster_corrs), default=0.0)
+            ev = sleeve_evidence[s]
+            sleeve_evidence[s] = SleeveContributionEvidence(
+                key=ev.key,
+                marginal_growth_by_window=ev.marginal_growth_by_window,
+                marginal_growth_lcb=ev.marginal_growth_lcb,
+                positive_window_ratio=ev.positive_window_ratio,
+                max_abs_pairwise_corr=float(max_corr),
+                redundancy_cluster=admitted_idx,
+                admitted=ev.admitted,
+                rejection_reasons=ev.rejection_reasons,
+            )
 
         if n_admitted > 0:
-            admitted_indices = [i for i in range(n_sleeves) if sleeve_evidence[i].admitted]
+            admitted_indices = [
+                i for i in range(n_sleeves)
+                if i in active_set and sleeve_evidence[i].admitted
+            ]
             removed_in_cluster: set[int] = set()
             for i in admitted_indices:
+                local_i = local_index_by_s[i]
                 for j in admitted_indices:
                     if i >= j:
                         continue
-                    if abs(corr_matrix[i, j]) >= config.max_abs_pairwise_corr:
+                    local_j = local_index_by_s[j]
+                    if abs(corr_matrix[local_i, local_j]) >= config.max_abs_pairwise_corr:
                         ev_i = sleeve_evidence[i]
                         ev_j = sleeve_evidence[j]
                         tie_key = _deterministic_sort_key(
@@ -373,10 +459,14 @@ def evaluate_portfolio_handoff(
         fold_blocker = ""
         if weight_sum <= 0.0 or not np.isfinite(float(weight_sum)):
             fold_blocker = "invalid_handoff_weights"
-        elif len(source_families) < config.min_source_families and len(source_families) > 0:
-            fold_blocker = "insufficient_family_diversity"
         elif not admitted_keys:
             fold_blocker = "all_sleeves_harmful"
+
+        if 0 < len(source_families) < config.min_source_families:
+            _logger.warning(
+                "[ALGO] event=family_diversity_below_floor fold=%d families=%d admitted=%d",
+                fold_idx, len(source_families), len(admitted_keys),
+            )
 
         if fold_blocker:
             for s in range(n_sleeves):
