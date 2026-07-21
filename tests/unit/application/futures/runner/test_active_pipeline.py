@@ -308,6 +308,99 @@ class TestRunTieredL2StudyFoldOverride:
         assert called_cfg.wf_n_folds == Layer2AllocationConfig().l2_wf_n_folds
         assert cfg.wf_n_folds == 4
 
+    def test_active_pipeline_scoped_fold_override_falls_back_to_layer2_config_default(self, mocker) -> None:
+        from src.application.futures.runner.active_pipeline import _run_tiered_l2_study
+        from src.domain.futures.strategy.config import CandidateStrategyConfig
+        from src.domain.futures.strategy.tiered_workflow.dataclasses import Layer2AllocationConfig
+
+        cfg = CandidateStrategyConfig(wf_n_folds=4)
+        routing_spy = mocker.patch(
+            "src.domain.futures.strategy.tiered_workflow.l2_meta.build_regime_routing_plan",
+            return_value=mocker.MagicMock(),
+        )
+        mocker.patch(
+            "src.domain.futures.strategy.tiered_workflow.diagnostics.build_layer_universe_audit",
+            return_value=mocker.MagicMock(warnings=()),
+        )
+        mocker.patch(
+            "src.domain.futures.strategy.market_regime.compute_market_regime_context",
+            return_value=mocker.MagicMock(),
+        )
+        mocker.patch(
+            "src.domain.futures.strategy.market_regime.compute_risk_severity_code",
+            return_value=mocker.MagicMock(),
+        )
+        mocker.patch(
+            "src.domain.futures.strategy.tiered_workflow.awf_sim.compute_per_tf_fit_edge",
+            return_value={},
+        )
+        mocker.patch(
+            "src.domain.futures.strategy.walk_forward.build_walk_forward_folds",
+            return_value=(),
+        )
+        mocker.patch(
+            "src.domain.futures.strategy.tiered_workflow.awf_sim.build_l2_simulation_cache",
+            return_value=mocker.MagicMock(),
+        )
+        mocker.patch(
+            "src.domain.futures.optimization.workflow.objective_l2_growth",
+            return_value=0.0,
+        )
+        mocker.patch(
+            "src.domain.futures.strategy.tiered_workflow.selection.select_layer2_champion",
+            return_value=mocker.MagicMock(
+                best_params={}, best_trial_number=None, completed_trials=0,
+            ),
+        )
+        mocker.patch(
+            "src.application.futures.runner.active_pipeline._get_rss_mb",
+            return_value=100.0,
+        )
+        import dataclasses
+        mocker.patch.object(
+            dataclasses,
+            "replace",
+            side_effect=lambda obj, **kw: obj,
+        )
+
+        from datetime import date
+        window = SimpleNamespace(
+            holdout_start=date(2025, 6, 1),
+            l2_start=date(2024, 6, 1),
+        )
+        aligned = SimpleNamespace(
+            symbols=("BTCUSDT",),
+            close_2d=mocker.MagicMock(),
+            datetimes=pd.date_range("2024-01-01", periods=500, freq="h"),
+        )
+        caps = SimpleNamespace(trial_number=0)
+        signal_batch = mocker.MagicMock()
+        signal_batch.start_idx = 0
+        signal_batch.end_idx = 500
+        signal_batch.registry_version = "v1"
+        signal_batch.model_version = "v1"
+        signal_batch.events = ()
+
+        _run_tiered_l2_study(
+            signal_batch=signal_batch,
+            aligned=aligned,
+            cfg=cfg,
+            window=window,
+            caps=caps,
+            tf="1h",
+            n_trials=2,
+            seed=42,
+            l2_sim_cache=mocker.MagicMock(),
+            l2_wf_n_folds=8,
+        )
+
+        assert routing_spy.called
+        _kwargs = routing_spy.call_args.kwargs
+        assert (
+            _kwargs.get("scoped_fold_override_enabled")
+            == Layer2AllocationConfig().l2_regime_scoped_fold_override_enabled
+        )
+
     def test_run_tiered_l2_study_forwards_crisis_data_to_champion_selection(self, mocker) -> None:
         """[SPEC_L2_CHAMPION_SELECTION_CRISIS_BLINDNESS_FIX][S4] _run_tiered_l2_study가
         자신의 crisis_rets/crisis_replay_ctx를 select_layer2_champion에 그대로 전달함을 검증."""
