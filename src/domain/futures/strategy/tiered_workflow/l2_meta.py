@@ -2343,3 +2343,33 @@ def apply_bucket_conditional_weight(
             result[key] = replace(sig, quality_weight=sig.quality_weight * g)
 
     return result
+
+
+def transfer_routing_plan_to_crisis_cache(
+    crisis_cache: L2SimulationCache,
+    study_cache: L2SimulationCache,
+    *,
+    n_crisis_folds: int,
+) -> L2SimulationCache:
+    """[ADR_20260721_L2_CRISIS_REPLAY_ROUTING_PARITY] study-학습 라우팅 플랜(마지막
+    fold)을 crisis replay cache에 이식한다.
+
+    스트레스테스트 의미론: trial 파라미터와 동일하게, 배포될 설정의 일부인 라우팅을
+    시나리오 윈도우에 적용한다. regime_code_1d/risk_severity_code_1d는 이식하지
+    않는다(crisis 윈도우 자체 데이터로 계산되어야 하는 불변식).
+    study_cache.regime_policy_by_fold가 비어있으면 crisis_cache를 그대로 반환한다.
+    """
+    if not study_cache.regime_policy_by_fold:
+        return crisis_cache
+
+    last_policy = study_cache.regime_policy_by_fold[-1]
+    last_bucket_edges = study_cache.bucket_edges_by_fold[-1]
+    last_pooled_edges = study_cache.pooled_edges_by_fold[-1]
+
+    return replace(
+        crisis_cache,
+        regime_policy_by_fold=tuple(last_policy for _ in range(n_crisis_folds)),
+        bucket_edges_by_fold=tuple(last_bucket_edges for _ in range(n_crisis_folds)),
+        pooled_edges_by_fold=tuple(last_pooled_edges for _ in range(n_crisis_folds)),
+        regime_routing_diagnostics=study_cache.regime_routing_diagnostics,
+    )

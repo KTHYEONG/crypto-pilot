@@ -4,14 +4,35 @@ import numpy as np
 import pytest
 
 from src.domain.futures.strategy.cs_rank import SymbolSignal
-from src.domain.futures.strategy.tiered_workflow.dataclasses import RegimeCellPolicy
+from src.domain.futures.strategy.tiered_workflow.dataclasses import L2SimulationCache, RegimeCellPolicy
 from src.domain.futures.strategy.tiered_workflow.l2_meta import (
     _build_bucket_reliability,
     _parse_meta_group_ids,
     apply_bucket_conditional_weight,
     apply_regime_cell_policy,
     filter_sleeves_by_bucket,
+    transfer_routing_plan_to_crisis_cache,
 )
+
+
+def _minimal_cache(n_bars: int = 20, n_sym: int = 2, n_sleeve: int = 2, **overrides: object) -> L2SimulationCache:
+    base = {
+        "vol_matrix_2d": np.ones((n_bars, n_sym)),
+        "tradeable_mask_2d": np.ones((n_bars, n_sym), dtype=bool),
+        "hurdle_2d": np.zeros((n_bars, n_sym)),
+        "funding_2d": np.zeros((n_bars, n_sym)),
+        "beta_1d": np.zeros(n_sym),
+        "expected_gross_bps_2d": np.zeros((n_bars, n_sleeve)),
+        "expected_net_bps_2d": np.zeros((n_bars, n_sleeve)),
+        "holding_bars_2d": np.ones((n_bars, n_sleeve)),
+        "side_2d": np.ones((n_bars, n_sleeve)),
+        "quality_weight_2d": np.ones((n_bars, n_sleeve)),
+        "signal_mask_2d": np.ones((n_bars, n_sleeve), dtype=bool),
+        "sleeve_to_sym": np.zeros(n_sleeve, dtype=int),
+        "sleeve_keys": (),
+    }
+    base.update(overrides)
+    return L2SimulationCache(**base)  # type: ignore[arg-type]
 
 
 def _sig(raw_mu: float, quality_weight: float = 1.0) -> SymbolSignal:
@@ -534,3 +555,74 @@ class TestApplyRegimeCellPolicySideSplit:
         assert result.n_pooled == 1
         assert result.n_block == 0
         assert ("BTCUSDT", "trend:ema_4h") in result.sleeve_sigs
+
+
+# ── [SPEC l2-crisis-replay-routing-parity] transfer_routing_plan_to_crisis_cache ──
+
+
+class TestTransferRoutingPlanToCrisisCache:
+    def test_transfer_routing_plan_copies_last_fold_policy_and_edges_replicated(self) -> None:
+        # Arrange
+        fold0_policy = {(0, "trend", "4h"): _policy(action="block", side=0, hard_block_eligible=True)}
+        fold1_policy = {(2, "trend", "4h"): _policy(action="allow", side=0)}
+        study = _minimal_cache(
+            regime_policy_by_fold=(fold0_policy, fold1_policy),
+            bucket_edges_by_fold=({(0, "trend", "4h"): -5.0}, {(2, "trend", "4h"): 12.0}),
+            pooled_edges_by_fold=({("trend", "4h"): -1.0}, {("trend", "4h"): 3.0}),
+            regime_routing_diagnostics=None,
+        )
+        crisis = _minimal_cache()
+
+        # Act
+        routed = transfer_routing_plan_to_crisis_cache(crisis, study, n_crisis_folds=1)
+
+        # Assert
+        assert routed.regime_policy_by_fold == (fold1_policy,)
+        assert routed.bucket_edges_by_fold == ({(2, "trend", "4h"): 12.0},)
+        assert routed.pooled_edges_by_fold == ({("trend", "4h"): 3.0},)
+
+    def test_transfer_routing_plan_empty_study_policy_returns_crisis_cache_unchanged(self) -> None:
+        # Arrange
+        study = _minimal_cache(regime_policy_by_fold=())
+        crisis = _minimal_cache()
+
+        # Act
+        result = transfer_routing_plan_to_crisis_cache(crisis, study, n_crisis_folds=1)
+
+        # Assert
+        assert result is crisis
+
+    def test_transfer_routing_plan_does_not_copy_regime_code_arrays(self) -> None:
+        # Arrange
+        fold_policy = {(0, "trend", "4h"): _policy(action="allow", side=0)}
+        study = _minimal_cache(
+            regime_policy_by_fold=(fold_policy,),
+            bucket_edges_by_fold=({},),
+            pooled_edges_by_fold=({},),
+            regime_code_1d=np.zeros(5, dtype=np.int8),
+        )
+        crisis = _minimal_cache(regime_code_1d=None, risk_severity_code_1d=None)
+
+        # Act
+        routed = transfer_routing_plan_to_crisis_cache(crisis, study, n_crisis_folds=1)
+
+        # Assert
+        assert routed.regime_code_1d is None
+        assert routed.risk_severity_code_1d is None
+
+    def test_transfer_routing_plan_replicates_for_multiple_crisis_folds(self) -> None:
+        # Arrange
+        fold_policy = {(0, "trend", "4h"): _policy(action="allow", side=0)}
+        study = _minimal_cache(
+            regime_policy_by_fold=(fold_policy,),
+            bucket_edges_by_fold=({(0, "trend", "4h"): 7.0},),
+            pooled_edges_by_fold=({("trend", "4h"): 1.0},),
+        )
+        crisis = _minimal_cache()
+
+        # Act
+        routed = transfer_routing_plan_to_crisis_cache(crisis, study, n_crisis_folds=3)
+
+        # Assert
+        assert routed.regime_policy_by_fold == (fold_policy, fold_policy, fold_policy)
+        assert len(routed.bucket_edges_by_fold) == 3
