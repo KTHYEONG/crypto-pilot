@@ -958,3 +958,297 @@ def test_crisis_replay_regime_codes_all_bear_or_crisis_boost_is_noop() -> None:
         [1, 2, 1, 2], ("bull", "bear", "crisis"), enabled=True, bull_leverage_boost=1.2
     )
     assert path.tolist() == pytest.approx([1.0, 1.0, 1.0, 1.0])
+
+
+# ── L2 Regime-Scoped Fold Override (l2-regime-scoped-fold-override.md) ──
+
+
+class TestRegimeScopedFoldOverride:
+    """Spec scenarios 1-4 for regime-scoped RC-3 override."""
+
+    def test_build_regime_policy_by_fold_scoped_override_preserves_strong_state_when_weak_state_present(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        folds = _make_fold()
+        regime = np.zeros(8, dtype=np.int8)
+        cache = _make_cache(8)
+        aligned = _make_aligned([100.0, 101.0, 102.0, 103.0, 104.0, 105.0, 106.0, 107.0])
+
+        # Two states: state 0 (strong, positive lift, sign-consistent),
+        # state 1 (weak, negative lift, sign-inconsistent).
+        def _bucket_stats(*args: object, start: int, **kwargs: object) -> dict[tuple[int, str, str], SimpleNamespace]:
+            if start == 0:
+                return {
+                    (0, "donchian_72", "4h"): SimpleNamespace(edge_bps=30.0, n_obs=5),
+                    (1, "donchian_72", "4h"): SimpleNamespace(edge_bps=10.0, n_obs=5),
+                }
+            return {
+                (0, "donchian_72", "4h"): SimpleNamespace(edge_bps=25.0, n_obs=5),
+                (1, "donchian_72", "4h"): SimpleNamespace(edge_bps=-10.0, n_obs=5),
+            }
+
+        def _pooled_stats(*args: object, start: int, **kwargs: object) -> dict[tuple[str, str], SimpleNamespace]:
+            return {("donchian_72", "4h"): SimpleNamespace(edge_bps=5.0, n_obs=5)}
+
+        monkeypatch.setattr(l2_meta, "compute_bucket_realized_edge_stats", _bucket_stats)
+        monkeypatch.setattr(l2_meta, "compute_pooled_realized_edge_stats", _pooled_stats)
+
+        policy_on, _ = build_regime_policy_by_fold(
+            cache=cache,
+            aligned=aligned,
+            awf_folds=folds,
+            regime_code_1d=regime,
+            state_names=("bull", "bear", "crisis"),
+            mode="hybrid",
+            min_n=1,
+            cal_min_n=1,
+            min_cal_lift_bps=8.0,
+            block_lift_bps=-12.0,
+            min_confidence=0.0,
+            require_sign_consistency=True,
+            scoped_fold_override_enabled=True,
+        )
+        policy_off, _ = build_regime_policy_by_fold(
+            cache=cache,
+            aligned=aligned,
+            awf_folds=folds,
+            regime_code_1d=regime,
+            state_names=("bull", "bear", "crisis"),
+            mode="hybrid",
+            min_n=1,
+            cal_min_n=1,
+            min_cal_lift_bps=8.0,
+            block_lift_bps=-12.0,
+            min_confidence=0.0,
+            require_sign_consistency=True,
+            scoped_fold_override_enabled=False,
+        )
+
+        STRONG_STATE = 0
+        WEAK_STATE = 1
+
+        strong_cells_on = [p for k, p in policy_on[0].items() if k[0] == STRONG_STATE]
+        weak_cells_on = [p for k, p in policy_on[0].items() if k[0] == WEAK_STATE]
+
+        assert any(p.reason != "pooled_passthrough" for p in strong_cells_on)
+        assert all(p.reason == "pooled_passthrough" for p in weak_cells_on)
+        assert policy_on != policy_off
+
+    def test_build_regime_policy_by_fold_scoped_override_disabled_matches_legacy_blanket_behavior(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        folds = _make_fold()
+        regime = np.zeros(8, dtype=np.int8)
+        cache = _make_cache(8)
+        aligned = _make_aligned([100.0, 110.0, 120.0, 130.0, 140.0, 120.0, 110.0, 100.0])
+
+        def _bucket_stats(*args: object, start: int, **kwargs: object) -> dict[tuple[int, str, str], SimpleNamespace]:
+            if start == 0:
+                return {(0, "donchian_72", "4h"): SimpleNamespace(edge_bps=60.0, n_obs=5)}
+            return {(0, "donchian_72", "4h"): SimpleNamespace(edge_bps=-40.0, n_obs=5)}
+
+        def _pooled_stats(*args: object, start: int, **kwargs: object) -> dict[tuple[str, str], SimpleNamespace]:
+            if start == 0:
+                return {("donchian_72", "4h"): SimpleNamespace(edge_bps=10.0, n_obs=5)}
+            return {("donchian_72", "4h"): SimpleNamespace(edge_bps=5.0, n_obs=5)}
+
+        monkeypatch.setattr(l2_meta, "compute_bucket_realized_edge_stats", _bucket_stats)
+        monkeypatch.setattr(l2_meta, "compute_pooled_realized_edge_stats", _pooled_stats)
+
+        result_default, _ = build_regime_policy_by_fold(
+            cache=cache,
+            aligned=aligned,
+            awf_folds=folds,
+            regime_code_1d=regime,
+            state_names=("bull", "bear", "crisis"),
+            mode="soft",
+            min_n=1,
+            cal_min_n=1,
+            min_cal_lift_bps=8.0,
+            block_lift_bps=-12.0,
+            min_confidence=0.0,
+            require_sign_consistency=True,
+            pooled_is_passthrough=False,
+        )
+        result_explicit_false, _ = build_regime_policy_by_fold(
+            cache=cache,
+            aligned=aligned,
+            awf_folds=folds,
+            regime_code_1d=regime,
+            state_names=("bull", "bear", "crisis"),
+            mode="soft",
+            min_n=1,
+            cal_min_n=1,
+            min_cal_lift_bps=8.0,
+            block_lift_bps=-12.0,
+            min_confidence=0.0,
+            require_sign_consistency=True,
+            pooled_is_passthrough=False,
+            scoped_fold_override_enabled=False,
+        )
+
+        assert result_default == result_explicit_false
+
+    def test_build_regime_policy_by_fold_scoped_override_state_with_zero_comparable_defaults_to_demote(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        folds = _make_fold()
+        regime = np.zeros(8, dtype=np.int8)
+        cache = _make_cache(8)
+        aligned = _make_aligned([100.0, 101.0, 102.0, 103.0, 104.0, 105.0, 106.0, 107.0])
+
+        # State 1: all cells have fit_sign=0 => nothing comparable => should auto-demote
+        def _bucket_stats(*args: object, start: int, **kwargs: object) -> dict[tuple[int, str, str], SimpleNamespace]:
+            if start == 0:
+                return {
+                    (0, "donchian_72", "4h"): SimpleNamespace(edge_bps=25.0, n_obs=5),
+                    (1, "donchian_72", "4h"): SimpleNamespace(edge_bps=0.0, n_obs=0),
+                }
+            return {
+                (0, "donchian_72", "4h"): SimpleNamespace(edge_bps=20.0, n_obs=5),
+                (1, "donchian_72", "4h"): SimpleNamespace(edge_bps=0.0, n_obs=0),
+            }
+
+        def _pooled_stats(*args: object, start: int, **kwargs: object) -> dict[tuple[str, str], SimpleNamespace]:
+            return {("donchian_72", "4h"): SimpleNamespace(edge_bps=5.0, n_obs=5)}
+
+        monkeypatch.setattr(l2_meta, "compute_bucket_realized_edge_stats", _bucket_stats)
+        monkeypatch.setattr(l2_meta, "compute_pooled_realized_edge_stats", _pooled_stats)
+
+        policy_on, _ = build_regime_policy_by_fold(
+            cache=cache,
+            aligned=aligned,
+            awf_folds=folds,
+            regime_code_1d=regime,
+            state_names=("bull", "bear", "crisis"),
+            mode="hybrid",
+            min_n=1,
+            cal_min_n=1,
+            min_cal_lift_bps=8.0,
+            block_lift_bps=-12.0,
+            min_confidence=0.0,
+            require_sign_consistency=True,
+            scoped_fold_override_enabled=True,
+        )
+
+        state_0_cells = [p for k, p in policy_on[0].items() if k[0] == 0]
+        state_1_cells = [p for k, p in policy_on[0].items() if k[0] == 1]
+
+        assert all(p.reason != "pooled_passthrough" for p in state_0_cells)
+        assert all(p.reason == "pooled_passthrough" for p in state_1_cells)
+
+    def test_build_regime_policy_by_fold_scoped_override_all_states_weak_demotes_everything(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        folds = _make_fold()
+        regime = np.zeros(8, dtype=np.int8)
+        cache = _make_cache(8)
+        aligned = _make_aligned([100.0, 110.0, 120.0, 130.0, 140.0, 120.0, 110.0, 100.0])
+
+        def _bucket_stats(*args: object, start: int, **kwargs: object) -> dict[tuple[int, str, str], SimpleNamespace]:
+            if start == 0:
+                return {
+                    (0, "donchian_72", "4h"): SimpleNamespace(edge_bps=60.0, n_obs=5),
+                    (1, "donchian_72", "4h"): SimpleNamespace(edge_bps=30.0, n_obs=5),
+                }
+            return {
+                (0, "donchian_72", "4h"): SimpleNamespace(edge_bps=-40.0, n_obs=5),
+                (1, "donchian_72", "4h"): SimpleNamespace(edge_bps=-20.0, n_obs=5),
+            }
+
+        def _pooled_stats(*args: object, start: int, **kwargs: object) -> dict[tuple[str, str], SimpleNamespace]:
+            if start == 0:
+                return {("donchian_72", "4h"): SimpleNamespace(edge_bps=10.0, n_obs=5)}
+            return {("donchian_72", "4h"): SimpleNamespace(edge_bps=5.0, n_obs=5)}
+
+        monkeypatch.setattr(l2_meta, "compute_bucket_realized_edge_stats", _bucket_stats)
+        monkeypatch.setattr(l2_meta, "compute_pooled_realized_edge_stats", _pooled_stats)
+
+        policy_on, _ = build_regime_policy_by_fold(
+            cache=cache,
+            aligned=aligned,
+            awf_folds=folds,
+            regime_code_1d=regime,
+            state_names=("bull", "bear", "crisis"),
+            mode="soft",
+            min_n=1,
+            cal_min_n=1,
+            min_cal_lift_bps=8.0,
+            block_lift_bps=-12.0,
+            min_confidence=0.0,
+            require_sign_consistency=True,
+            pooled_is_passthrough=False,
+            scoped_fold_override_enabled=True,
+        )
+        policy_off, _ = build_regime_policy_by_fold(
+            cache=cache,
+            aligned=aligned,
+            awf_folds=folds,
+            regime_code_1d=regime,
+            state_names=("bull", "bear", "crisis"),
+            mode="soft",
+            min_n=1,
+            cal_min_n=1,
+            min_cal_lift_bps=8.0,
+            block_lift_bps=-12.0,
+            min_confidence=0.0,
+            require_sign_consistency=True,
+            pooled_is_passthrough=False,
+            scoped_fold_override_enabled=False,
+        )
+
+        assert all(p.reason == "pooled_passthrough" for p in policy_on[0].values())
+        assert all(p.reason == "pooled_passthrough" for p in policy_off[0].values())
+        assert policy_on == policy_off
+
+
+class TestRegimeScopedFoldOverrideIntegration:
+    """Scenarios 5-6: wiring integration tests."""
+
+    def test_build_regime_routing_plan_threads_scoped_fold_override_flag(self, mocker) -> None:
+        spy = mocker.spy(l2_meta, "build_regime_policy_by_fold")
+        folds = _make_fold()
+        regime = np.zeros(8, dtype=np.int8)
+        cache = _make_cache(8)
+        aligned = _make_aligned([100.0, 101.0, 102.0, 103.0, 104.0, 105.0, 106.0, 107.0])
+
+        build_regime_routing_plan(
+            cache=cache,
+            aligned=aligned,
+            awf_folds=folds,
+            raw_regime_code_1d=regime,
+            compression_enabled=True,
+            proof_enabled=False,
+            cost_bps=0.0,
+            min_n=1,
+            scoped_fold_override_enabled=True,
+        )
+
+        assert spy.called
+        _kwargs = spy.call_args.kwargs
+        assert _kwargs.get("scoped_fold_override_enabled") is True
+
+        build_regime_routing_plan(
+            cache=cache,
+            aligned=aligned,
+            awf_folds=folds,
+            raw_regime_code_1d=regime,
+            compression_enabled=True,
+            proof_enabled=False,
+            cost_bps=0.0,
+            min_n=1,
+        )
+
+        _kwargs2 = spy.call_args.kwargs
+        assert _kwargs2.get("scoped_fold_override_enabled") is False
+
+    def test_layer2_allocation_config_scoped_fold_override_default_is_false(self) -> None:
+        cfg = Layer2AllocationConfig()
+        assert cfg.l2_regime_scoped_fold_override_enabled is False
+
+    def test_layer2_allocation_config_scoped_fold_override_parses_from_mapping(self) -> None:
+        cfg_default = Layer2AllocationConfig.from_mapping({})
+        assert cfg_default.l2_regime_scoped_fold_override_enabled is False
+
+        cfg_on = Layer2AllocationConfig.from_mapping({"l2_regime_scoped_fold_override_enabled": True})
+        assert cfg_on.l2_regime_scoped_fold_override_enabled is True
