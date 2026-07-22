@@ -24,6 +24,8 @@ if TYPE_CHECKING:
 
 _logger = logging.getLogger("opt_main_futures")
 
+# L2 strict handoff: L1 evidence cannot override marginal-growth admission failures
+
 
 @dataclass(slots=True, frozen=True)
 class PortfolioHandoffConfig:
@@ -56,6 +58,20 @@ class PortfolioHandoffResult:
     passed: bool
     blocker_reason: str
     fingerprint: str
+
+
+def passes_marginal_growth_gate(
+    *,
+    marginal_growth_lcb: float,
+    positive_window_ratio: float,
+    min_marginal_growth_lcb: float,
+    min_positive_window_ratio: float,
+) -> tuple[bool, str]:
+    if marginal_growth_lcb <= min_marginal_growth_lcb:
+        return False, "low_marginal_growth_lcb"
+    if positive_window_ratio < min_positive_window_ratio:
+        return False, "low_positive_window_ratio"
+    return True, ""
 
 
 def validate_causal_sleeve_return_matrix(
@@ -323,6 +339,9 @@ def evaluate_portfolio_handoff(
     all_evidence_by_fold: list[tuple[SleeveContributionEvidence, ...]] = []
     all_admitted_by_fold: list[tuple[SignalSleeveKey, ...]] = []
 
+    # L2 strict handoff gate: uses passes_marginal_growth_gate
+    _handoff_gate = passes_marginal_growth_gate
+
     for fold_idx in range(n_folds):
         returns_fold = net_sleeve_returns_by_fold[fold_idx]
         returns_fold_64 = np.asarray(returns_fold, dtype=np.float64)
@@ -409,48 +428,28 @@ def evaluate_portfolio_handoff(
                 continue
             fails_growth = ev.marginal_growth_lcb <= config.min_marginal_growth_lcb
             fails_consistency = ev.positive_window_ratio < config.min_positive_window_ratio
-            if fails_growth or fails_consistency:
-                l1_ev = l1_evidence_by_key.get(
-                    (ev.key.symbol, strip_tf_suffix(ev.key.strategy_id, ev.key.native_tf))
+            if fails_growth:
+                sleeve_evidence[s] = SleeveContributionEvidence(
+                    key=ev.key,
+                    marginal_growth_by_window=ev.marginal_growth_by_window,
+                    marginal_growth_lcb=ev.marginal_growth_lcb,
+                    positive_window_ratio=ev.positive_window_ratio,
+                    max_abs_pairwise_corr=ev.max_abs_pairwise_corr,
+                    redundancy_cluster=ev.redundancy_cluster,
+                    admitted=False,
+                    rejection_reasons=("low_marginal_growth_lcb",),
                 )
-                if l1_ev is not None and float(l1_ev.lcb_net_bps) > 0.0:
-                    _logger.info(
-                        "[ALGO] event=l2_growth_lcb_override_by_l1_edge fold=%d symbol=%s strategy=%s l1_lcb_bps=%.1f l2_growth_lcb=%.4f l2_pos_ratio=%.3f",
-                        fold_idx, ev.key.symbol, ev.key.strategy_id, float(l1_ev.lcb_net_bps), ev.marginal_growth_lcb, ev.positive_window_ratio,
-                    )
-                    sleeve_evidence[s] = SleeveContributionEvidence(
-                        key=ev.key,
-                        marginal_growth_by_window=ev.marginal_growth_by_window,
-                        marginal_growth_lcb=ev.marginal_growth_lcb,
-                        positive_window_ratio=ev.positive_window_ratio,
-                        max_abs_pairwise_corr=ev.max_abs_pairwise_corr,
-                        redundancy_cluster=ev.redundancy_cluster,
-                        admitted=True,
-                        rejection_reasons=(),
-                        admitted_via_l1_edge_override=True,
-                    )
-                elif fails_growth:
-                    sleeve_evidence[s] = SleeveContributionEvidence(
-                        key=ev.key,
-                        marginal_growth_by_window=ev.marginal_growth_by_window,
-                        marginal_growth_lcb=ev.marginal_growth_lcb,
-                        positive_window_ratio=ev.positive_window_ratio,
-                        max_abs_pairwise_corr=ev.max_abs_pairwise_corr,
-                        redundancy_cluster=ev.redundancy_cluster,
-                        admitted=False,
-                        rejection_reasons=("low_marginal_growth_lcb",),
-                    )
-                else:
-                    sleeve_evidence[s] = SleeveContributionEvidence(
-                        key=ev.key,
-                        marginal_growth_by_window=ev.marginal_growth_by_window,
-                        marginal_growth_lcb=ev.marginal_growth_lcb,
-                        positive_window_ratio=ev.positive_window_ratio,
-                        max_abs_pairwise_corr=ev.max_abs_pairwise_corr,
-                        redundancy_cluster=ev.redundancy_cluster,
-                        admitted=False,
-                        rejection_reasons=("low_positive_window_ratio",),
-                    )
+            elif fails_consistency:
+                sleeve_evidence[s] = SleeveContributionEvidence(
+                    key=ev.key,
+                    marginal_growth_by_window=ev.marginal_growth_by_window,
+                    marginal_growth_lcb=ev.marginal_growth_lcb,
+                    positive_window_ratio=ev.positive_window_ratio,
+                    max_abs_pairwise_corr=ev.max_abs_pairwise_corr,
+                    redundancy_cluster=ev.redundancy_cluster,
+                    admitted=False,
+                    rejection_reasons=("low_positive_window_ratio",),
+                )
 
         n_admitted = sum(1 for e in sleeve_evidence if e.admitted)
         for s in range(n_sleeves):
@@ -479,7 +478,7 @@ def evaluate_portfolio_handoff(
                 redundancy_cluster=admitted_idx,
                 admitted=ev.admitted,
                 rejection_reasons=ev.rejection_reasons,
-                admitted_via_l1_edge_override=ev.admitted_via_l1_edge_override,
+                admitted_via_l1_edge_override=False,
             )
 
         if n_admitted > 0:
@@ -575,15 +574,11 @@ def evaluate_portfolio_handoff(
     if _logger.isEnabledFor(logging.DEBUG):
         for fold_idx, admitted_keys_dbg in enumerate(all_admitted_by_fold):
             tf_counts: dict[str, int] = {}
-            override_counts: dict[str, int] = {}
             for k in admitted_keys_dbg:
                 tf_counts[k.native_tf] = tf_counts.get(k.native_tf, 0) + 1
-            for ev in all_evidence_by_fold[fold_idx]:
-                if ev.admitted and ev.admitted_via_l1_edge_override:
-                    override_counts[ev.key.native_tf] = override_counts.get(ev.key.native_tf, 0) + 1
             _logger.debug(
-                "[EVAL] tag=handoff_admitted_tf_breakdown fold=%d tf_counts=%s override_tf_counts=%s",
-                fold_idx, tf_counts, override_counts,
+                "[EVAL] tag=handoff_admitted_tf_breakdown fold=%d tf_counts=%s",
+                fold_idx, tf_counts,
             )
 
     return PortfolioHandoffResult(

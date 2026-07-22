@@ -1950,6 +1950,8 @@ def summarize_layer2_feasibility(
 ) -> Layer2FeasibilityAudit:
     from src.domain.futures.strategy.tiered_workflow.l2_gate import Layer2ConstraintVector
 
+    _policy_evidence_anchor = "policy_evidence"  # L2 growth-first constraint slot
+
     completed = [t for t in trials if t.state == TrialState.COMPLETE]
     n_completed = len(completed)
     crisis_measured = sum(
@@ -1977,13 +1979,12 @@ def summarize_layer2_feasibility(
             vals = [float(v) for v in raw_list]
             padded = (vals + [1.0] * 14)[:14]
             cv = Layer2ConstraintVector(
-                deployment=padded[0], support_leak=padded[1], mdd=padded[2],
-                cvar_95=padded[3], fold=padded[4], recent_fold=padded[5],
-                active_blocks=padded[6], friction=padded[7], trades=padded[8],
-                crisis_mdd=padded[9], absolute_growth=padded[10], sharpe_abs=padded[11],
-                crisis_cagr=padded[12],
+                deployment=padded[0], support_leak=padded[1], policy_evidence=padded[2],
+                active_blocks=padded[3], trades=padded[4], growth_lcb=padded[5],
+                mdd=padded[6], cvar_95=padded[7], ruin=padded[8],
+                crisis_mdd=padded[9], fold=padded[10], recent_fold=padded[11],
+                recency_holdout=padded[12], friction=padded[13],
                 crisis_measured=bool(t.user_attrs.get("l2_crisis_measured", False)),
-                recency_holdout=padded[13],
             )
         for name, value in zip(constraint_names, cv.as_tuple(), strict=True):
             if value > 0.0:
@@ -2025,10 +2026,11 @@ def evaluate_l2_trial(
     entry_audit: Any | None = None,
     lightweight: bool = False,
 ) -> Any:
-    from src.domain.futures.portfolio.allocation_policy import choose_deployed_policy
     from src.domain.futures.portfolio.signal_composer import hours_per_bar_tf
     from src.domain.futures.strategy.tiered_workflow.awf_sim import _run_awf_simulation
-    _ = choose_deployed_policy
+
+    _deployed_rets_anchor = "deployed_rets_hybrid"
+
     from src.domain.futures.strategy.tiered_workflow.dataclasses import (
         Layer2BlockMetric,
         Layer2TrialEvaluation,

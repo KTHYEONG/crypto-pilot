@@ -1874,6 +1874,7 @@ def _layer2_result_from_trial_eval(
 
     공통 16+ 지표는 eval에서 1:1 복사, 배포 전용은 extras에서 주입.
     """
+    _fold_allocation_plans_anchor = eval.gate  # L2 growth-first fold plans
     _mean_er, _er_corr = compute_mean_trend_efficiency(eval.fold_attributions)
     _price_long, _price_short = compute_long_short_realized_price(eval.fold_attributions)
     _long_by_sym, _short_by_sym = compute_long_short_price_by_symbol(eval.fold_attributions)

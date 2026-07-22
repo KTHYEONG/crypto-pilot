@@ -39,7 +39,7 @@ class AllocationPolicyScore:
 
 @dataclass(slots=True, frozen=True)
 class AllocationPolicyDecision:
-    selected_policy: AllocationPolicy
+    selected_policy: AllocationPolicy | None
     scores: tuple[AllocationPolicyScore, ...]
     fallback_reason: str = ""
 
@@ -340,13 +340,13 @@ def select_fit_allocation_policy(
     feasible_scores = [s for s in scores if s.feasible]
     if not feasible_scores:
         _logger.info(
-            "[L2-POLICY] no feasible policy, falling back to inverse_vol: %s",
+            "[L2-POLICY] no feasible policy: %s",
             [(s.policy, s.reason) for s in scores],
         )
         return AllocationPolicyDecision(
-            selected_policy="inverse_vol",
+            selected_policy=None,
             scores=tuple(scores),
-            fallback_reason="insufficient_fit_evidence",
+            fallback_reason="no_fit_feasible_policy",
         )
 
     best = max(feasible_scores, key=lambda s: (s.growth_lcb, -_tie_breaker.index(s.policy)))
@@ -361,25 +361,3 @@ def select_fit_allocation_policy(
         selected_policy=best.policy,
         scores=tuple(scores),
     )
-
-
-def choose_deployed_policy(
-    *,
-    selected: AllocationPolicyScore,
-    inverse_vol: AllocationPolicyScore,
-) -> tuple[AllocationPolicy | None, bool]:
-    sel_ok = selected.feasible and np.isfinite(selected.growth_lcb)
-    iv_ok = inverse_vol.feasible and np.isfinite(inverse_vol.growth_lcb)
-
-    if sel_ok and iv_ok:
-        if selected.growth_lcb >= inverse_vol.growth_lcb:
-            return selected.policy, False
-        return inverse_vol.policy, True
-
-    if sel_ok and not iv_ok:
-        return selected.policy, False
-
-    if iv_ok and not sel_ok:
-        return inverse_vol.policy, True
-
-    return None, False
