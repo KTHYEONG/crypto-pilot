@@ -117,7 +117,8 @@
       "tests/unit/domain/futures/strategy/tiered_workflow/test_directional_veto.py",
       "tests/unit/domain/futures/strategy/tiered_workflow/test_l2_tf_inclusion.py",
       "tests/unit/domain/futures/optimization/test_workflow.py",
-      "tests/unit/domain/futures/strategy/tiered_workflow/test_l2_per_tf_edge_hoisting.py"
+      "tests/unit/domain/futures/strategy/tiered_workflow/test_l2_per_tf_edge_hoisting.py",
+      "tests/unit/domain/futures/strategy/tiered_workflow/test_portfolio_handoff.py"
     ]
   },
   "src/domain/futures/strategy/tiered_workflow/dataclasses.py": {
