@@ -1970,3 +1970,57 @@ class TestMultiSeedWindowCoverageLogging:
         _, kwargs = pass_count_call
         # kwargs가 없으면 args[0]이 format string, args[-1]이 window_covered value
         assert pass_count_call.args[-1] is False
+
+
+# ─── Fix A: crisis_rets wiring (L2-CRISIS-WIRING-AND-TF-SIGNAL-LOSS-FIX) ──
+
+
+def test_run_robust_l2_l3_outcome_threads_crisis_rets_symmetrically(mocker) -> None:
+    from src.application.futures.runner.active_pipeline import _run_robust_l2_l3_outcome
+
+    captured: dict = {}
+
+    def _fake_l2_study(**kwargs):
+        captured.update(kwargs)
+        return mocker.Mock(blocker_reason="stub_blocked", best_params={})
+
+    mocker.patch(
+        "src.application.futures.runner.active_pipeline._run_tiered_l2_study",
+        side_effect=_fake_l2_study,
+    )
+    _crisis_rets = np.array([0.001, -0.002, 0.0005])
+    _crisis_ctx = mocker.Mock()
+
+    _run_robust_l2_l3_outcome(
+        signal_batch=mocker.Mock(), aligned=mocker.Mock(), cfg=mocker.Mock(),
+        window=mocker.Mock(), caps=mocker.Mock(), tf="4h", n_trials=1,
+        target_phase="l2", l1_res=mocker.Mock(deployment_registry=mocker.Mock()),
+        labeled_events=mocker.Mock(), per_tf_data_maps=None, labeled_events_by_tf=None,
+        crisis_replay_ctx=_crisis_ctx, crisis_rets=_crisis_rets,
+        l2_sim_cache=None, probe_manifest=None,
+    )
+
+    assert captured["crisis_rets"] is _crisis_rets
+    assert captured["crisis_replay_ctx"] is _crisis_ctx
+
+
+def test_run_robust_l2_l3_outcome_both_absent_stays_symmetric(mocker) -> None:
+    from src.application.futures.runner.active_pipeline import _run_robust_l2_l3_outcome
+
+    captured: dict = {}
+    mocker.patch(
+        "src.application.futures.runner.active_pipeline._run_tiered_l2_study",
+        side_effect=lambda **kw: (captured.update(kw), mocker.Mock(blocker_reason="stub", best_params={}))[1],
+    )
+
+    _run_robust_l2_l3_outcome(
+        signal_batch=mocker.Mock(), aligned=mocker.Mock(), cfg=mocker.Mock(),
+        window=mocker.Mock(), caps=mocker.Mock(), tf="4h", n_trials=1,
+        target_phase="l2", l1_res=mocker.Mock(deployment_registry=mocker.Mock()),
+        labeled_events=mocker.Mock(), per_tf_data_maps=None, labeled_events_by_tf=None,
+        crisis_replay_ctx=None, crisis_rets=None,
+        l2_sim_cache=None, probe_manifest=None,
+    )
+
+    assert captured["crisis_rets"] is None
+    assert captured["crisis_replay_ctx"] is None
