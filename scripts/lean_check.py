@@ -233,6 +233,11 @@ def _check_spec_compliance(spec_path: str) -> tuple[int, list[JsonDiag]]:
                 hint = f"Import or reference '{import_symbol}' in {wf}"
                 d = {"file": wf, "line": 0, "error": f"Spec: missing reference to '{import_symbol}'", "fix_hint": hint}
                 diagnostics.append(d)
+            invocation_symbol: str = w.get("invocation_symbol", "")
+            if invocation_symbol and invocation_symbol not in wf_content:
+                hint = f"Invoke or instantiate '{invocation_symbol}' in {wf}"
+                d = {"file": wf, "line": 0, "error": f"Spec: missing invocation of '{invocation_symbol}'", "fix_hint": hint}
+                diagnostics.append(d)
 
     return (1 if diagnostics else 0, diagnostics)
 
