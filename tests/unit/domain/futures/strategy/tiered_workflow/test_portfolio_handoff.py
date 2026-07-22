@@ -232,6 +232,83 @@ def test_l1_evidence_by_key_empty_registry() -> None:
     assert lookup == {}
 
 
+def test_rank_and_cap_sleeve_indices_guarantees_per_tf_quota() -> None:
+    tfs = ("1h", "2h", "4h", "6h", "8h", "12h", "1d")
+    sleeve_keys = tuple(
+        SignalSleeveKey(f"SYM{i}", tf, "strat")
+        for tf in tfs
+        for i in range(3)
+    )
+    registry = QualifiedSignalRegistry(
+        by_symbol={
+            f"SYM{i}": (_ev(f"SYM{i}", "strat", 0.9 - i * 0.1),)
+            for i in range(3)
+        },
+        ready_symbols=tuple(f"SYM{i}" for i in range(3)),
+        trade_scope_count=3, registry_version="test-v1",
+    )
+    evidence_by_key = _l1_evidence_by_key(registry)
+    active = _rank_and_cap_sleeve_indices(sleeve_keys, evidence_by_key, max_candidate_sleeves=14)
+    selected_tfs = [sleeve_keys[i].native_tf for i in active]
+    from collections import Counter
+    counts = Counter(selected_tfs)
+    assert len(active) == 14
+    assert all(counts[tf] == 2 for tf in tfs)
+
+
+def test_rank_and_cap_sleeve_indices_backfills_from_undersized_tf_group() -> None:
+    tfs = ("1h", "2h", "4h")
+    sleeve_keys = tuple(
+        SignalSleeveKey(f"SYM{i}", tf, "strat")
+        for tf in tfs
+        for i in range(3)
+    )
+    registry = QualifiedSignalRegistry(
+        by_symbol={f"SYM{i}": (_ev(f"SYM{i}", "strat", 0.9 - i * 0.1),) for i in range(3)},
+        ready_symbols=tuple(f"SYM{i}" for i in range(3)),
+        trade_scope_count=3, registry_version="test-v1",
+    )
+    evidence_by_key = _l1_evidence_by_key(registry)
+    active = _rank_and_cap_sleeve_indices(sleeve_keys, evidence_by_key, max_candidate_sleeves=5)
+    selected_tfs = [sleeve_keys[i].native_tf for i in active]
+    from collections import Counter
+    counts = Counter(selected_tfs)
+    assert len(active) == 5
+    assert all(counts[tf] >= 1 for tf in tfs)
+
+
+def test_rank_and_cap_sleeve_indices_single_tf_matches_legacy_flat_ranking() -> None:
+    sleeve_keys = tuple(SignalSleeveKey(f"SYM{i}", "4h", "strat") for i in range(5))
+    registry = QualifiedSignalRegistry(
+        by_symbol={f"SYM{i}": (_ev(f"SYM{i}", "strat", qw),) for i, qw in enumerate([0.1, 0.9, 0.5, 0.3, 0.7])},
+        ready_symbols=tuple(f"SYM{i}" for i in range(5)), trade_scope_count=5, registry_version="test-v1",
+    )
+    evidence_by_key = _l1_evidence_by_key(registry)
+    active = _rank_and_cap_sleeve_indices(sleeve_keys, evidence_by_key, max_candidate_sleeves=3)
+    assert active == (1, 2, 4)
+
+
+def test_rank_and_cap_sleeve_indices_uneven_division_deterministic_backfill() -> None:
+    tfs = ("1h", "2h", "4h")
+    sleeve_keys = tuple(
+        SignalSleeveKey(f"SYM{i}", tf, "strat")
+        for tf in tfs
+        for i in range(3)
+    )
+    registry = QualifiedSignalRegistry(
+        by_symbol={f"SYM{i}": (_ev(f"SYM{i}", "strat", 0.95 - i * 0.1),) for i in range(3)},
+        ready_symbols=tuple(f"SYM{i}" for i in range(3)),
+        trade_scope_count=3, registry_version="test-v1",
+    )
+    evidence_by_key = _l1_evidence_by_key(registry)
+    active = _rank_and_cap_sleeve_indices(sleeve_keys, evidence_by_key, max_candidate_sleeves=7)
+    selected_tfs = [sleeve_keys[i].native_tf for i in active]
+    from collections import Counter
+    counts = Counter(selected_tfs)
+    assert len(active) == 7
+    assert len(counts) == len(tfs)
+
+
 def test_rank_and_cap_sleeve_indices_accepts_prebuilt_evidence_lookup() -> None:
     sleeve_keys = tuple(SignalSleeveKey(f"SYM{i}", "4h", "strat") for i in range(3))
     registry = QualifiedSignalRegistry(
@@ -377,6 +454,52 @@ def test_handoff_override_admitted_sleeve_still_pruned_by_correlation() -> None:
 
     admitted = [ev for ev in result.evidence_by_fold[0] if ev.admitted]
     assert len(admitted) <= 1
+
+
+def test_handoff_admits_multiple_tfs_when_multiple_have_positive_l1_edge() -> None:
+    from src.domain.futures.strategy.tiered_workflow.dataclasses import L2SimulationCache
+    from src.domain.futures.strategy.candidate_contracts import ValidatedSignalBatch
+    from src.domain.futures.strategy.walk_forward import WFFold
+
+    tfs = ("1h", "4h", "1d")
+    sleeve_keys = tuple(
+        SignalSleeveKey(f"SYM{i}", tf, "strat")
+        for i, tf in enumerate(tfs)
+    )
+    n_bars = 90
+    rng = np.random.default_rng(42)
+    rets = np.column_stack([
+        0.001 + rng.normal(0, 0.0005, n_bars) for _ in range(len(tfs))
+    ]).astype(np.float64)
+
+    cache = L2SimulationCache(
+        vol_matrix_2d=np.ones((n_bars, len(tfs))), tradeable_mask_2d=np.ones((n_bars, len(tfs)), dtype=np.bool_),
+        hurdle_2d=np.zeros((n_bars, len(tfs))), funding_2d=np.zeros((n_bars, len(tfs))),
+        beta_1d=np.ones(len(tfs)),
+        expected_gross_bps_2d=np.ones((n_bars, len(tfs))), expected_net_bps_2d=np.ones((n_bars, len(tfs))),
+        holding_bars_2d=np.ones((n_bars, len(tfs))), side_2d=np.ones((n_bars, len(tfs))),
+        quality_weight_2d=np.ones((n_bars, len(tfs))), signal_mask_2d=np.ones((n_bars, len(tfs)), dtype=np.bool_),
+        sleeve_to_sym=np.arange(len(tfs), dtype=np.int64), sleeve_keys=sleeve_keys,
+    )
+    registry = QualifiedSignalRegistry(
+        by_symbol={f"SYM{i}": (_ev_with_lcb(f"SYM{i}", "strat", 0.9 - i * 0.1, 200.0),) for i in range(len(tfs))},
+        ready_symbols=tuple(f"SYM{i}" for i in range(len(tfs))), trade_scope_count=len(tfs), registry_version="test-v1",
+    )
+    batch = ValidatedSignalBatch(
+        events=(), start_idx=0, end_idx=n_bars, symbols=tuple(f"SYM{i}" for i in range(len(tfs))),
+        registry_version="test-v1", model_version="test",
+    )
+    fold = WFFold(fit_start=0, fit_end=30, cal_start=30, cal_end=60, oos_start=60, oos_end=90)
+
+    result = evaluate_portfolio_handoff(
+        registry=registry, signal_batch=batch, cache=cache, folds=(fold,),
+        net_sleeve_returns_by_fold=(np.ascontiguousarray(rets, dtype=np.float32),),
+        config=PortfolioHandoffConfig(min_source_families=1),
+    )
+
+    assert result.passed, f"handoff blocked: {result.blocker_reason}"
+    admitted_tfs = {ev.key.native_tf for ev in result.evidence_by_fold[0] if ev.admitted}
+    assert len(admitted_tfs) > 1, f"Only one TF admitted: {admitted_tfs}"
 
 
 def test_handoff_invalid_handoff_weights_not_triggered_by_negative_override_weight_sum() -> None:

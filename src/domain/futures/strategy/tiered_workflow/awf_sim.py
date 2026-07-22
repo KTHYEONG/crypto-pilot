@@ -2900,6 +2900,20 @@ def _run_awf_simulation(
                     _per_tf_edge,
                 )
                 _included = set(cache.sleeve_to_tf) - {"unk"}
+            elif _f_idx < len(cache.handoff_sleeve_mask_by_fold):
+                _mask = cache.handoff_sleeve_mask_by_fold[_f_idx]
+                _admitted_tfs = {
+                    cache.sleeve_keys[i].native_tf
+                    for i in range(len(cache.sleeve_keys))
+                    if i < len(_mask) and _mask[i]
+                }
+                _newly_included = _admitted_tfs - _included
+                if _newly_included:
+                    logger.debug(
+                        "[L2-TFGATE] fold=%d handoff_override adds=%s (was excluded by fit-edge floor)",
+                        _f_idx, sorted(_newly_included),
+                    )
+                _included |= _admitted_tfs
             included_tfs_by_fold.append(_included)
             logger.debug(
                 "[L2-TFGATE] fold=%d included=%s edges=%s",
@@ -3307,6 +3321,11 @@ def _run_awf_simulation(
                     else None
                 ),
             )
+            if logger.isEnabledFor(logging.DEBUG) and t % 100 == 0:
+                logger.debug(
+                    "[L2-CHOKEPOINT] stage=post_resolve t=%d fold=%d n_sleeves=%d",
+                    t, _fold_idx, len(_oos_sleeve_sigs),
+                )
             # C4: TF 게이트 필터 — fit-leg에서 edge>min_edge인 TF sleeve만 유지
             if _tf_inclusion_enabled:
                 _current_included = included_tfs_by_fold[_fold_idx]
@@ -3316,6 +3335,11 @@ def _run_awf_simulation(
                 _oos_sleeve_edges = {
                     k: v for k, v in _oos_sleeve_edges.items() if _sleeve_tf_lookup.get(k, "unk") in _current_included
                 }
+            if logger.isEnabledFor(logging.DEBUG) and t % 100 == 0:
+                logger.debug(
+                    "[L2-CHOKEPOINT] stage=post_c4_filter t=%d fold=%d n_sleeves=%d",
+                    t, _fold_idx, len(_oos_sleeve_sigs),
+                )
             # L2 bucket routing: OOS bar t의 regime 기반 sleeve 필터링
             if _l2_routing_mode == "bucket" and (
                 _fold_idx < len(bucket_edges_by_fold) or _fold_idx < len(policy_by_fold)
@@ -3506,6 +3530,11 @@ def _run_awf_simulation(
                         _fold_oos_bucket_sum[_fold_idx][_bk_j] = _prev_sum + _realized_j
                         _prev_cnt = _fold_oos_bucket_cnt[_fold_idx].get(_bk_j, 0)
                         _fold_oos_bucket_cnt[_fold_idx][_bk_j] = _prev_cnt + 1
+            if logger.isEnabledFor(logging.DEBUG) and t % 100 == 0:
+                logger.debug(
+                    "[L2-CHOKEPOINT] stage=post_bucket_routing t=%d fold=%d n_sleeves=%d",
+                    t, _fold_idx, len(_oos_sleeve_sigs),
+                )
             if _diag:
                 _attr_dropped += _oos_dropped
                 _attr_sleeves_active.append(len(_oos_sleeve_sigs))
@@ -3635,6 +3664,11 @@ def _run_awf_simulation(
                 conviction_cap_mult=config.l2_sleeve_conviction_cap_mult,
                 sleeve_edges=_oos_sleeve_edges,
             )
+            if logger.isEnabledFor(logging.DEBUG) and t % 100 == 0:
+                logger.debug(
+                    "[L2-CHOKEPOINT] stage=post_netting t=%d fold=%d n_nonzero=%d",
+                    t, _fold_idx, len(valid_signals),
+                )
 
             # [L2 Major Symbol Sleeve Contribution]: Phase 0 진단 스냅샷 수집
             _regime_now = int(_regime_code_1d[t]) if t < len(_regime_code_1d) else 0
