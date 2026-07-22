@@ -1020,6 +1020,7 @@ def _candidate_output_to_signal_batch(
     activation_floor_bps: float,
     cfg: CandidateStrategyConfig | None = None,
     native_tf: str = "",
+    l1_breakeven_floor_bps: float = 0.0,
 ) -> ValidatedSignalBatch:
     _t_batch_total = time.perf_counter()
     frame = model_output.events.reset_index(drop=True).copy()
@@ -1153,13 +1154,15 @@ def _candidate_output_to_signal_batch(
         else np.ones(n_raw, dtype=np.float64)
     )
     hold_arr_v = np.maximum(hold_raw.astype(np.int64), 1)
-    # ── quality_weight lookup (registry flattened once) ───────────────────────
+    # ── quality_weight / LCB lookup (registry flattened once) ─────────────────
     qw_lookup: dict[tuple[str, str, str], float] = {}
+    lcb_lookup: dict[tuple[str, str, str], float] = {}
     for _evs in registry.by_symbol.values():
         for _ev in _evs:
             _k3 = (_ev.key.symbol, _strip_tf_suffix(_ev.key.strategy_id, native_tf), _ev.key.activation_context)
             if _k3 not in qw_lookup:
                 qw_lookup[_k3] = _ev.quality_weight
+                lcb_lookup[_k3] = _ev.lcb_net_bps
     # ── small loop over n_out survivors only ──────────────────────────────────
     for _i in np.flatnonzero(mask_dec):
         _s, _st_norm, _a = str(sym_v[_i]), str(strat_v_match[_i]), str(actx_v[_i])
@@ -1182,6 +1185,8 @@ def _candidate_output_to_signal_batch(
                 q90_gross_bps=float(q90_p[_i]),
                 expected_holding_bars=int(hold_arr_v[_i]),
                 quality_weight=qw_lookup.get((_s, _st_norm, _a), 0.0),
+                l1_lcb_net_bps=lcb_lookup.get((_s, _st_norm, _a), 0.0),
+                l1_breakeven_bps=l1_breakeven_floor_bps,
                 registry_version=registry.registry_version,
                 model_version=model_version,
             )

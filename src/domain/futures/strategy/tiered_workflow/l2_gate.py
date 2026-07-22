@@ -31,11 +31,11 @@ class Layer2ConstraintVector:
     friction: float
     trades: float
     crisis_mdd: float
-    cagr: float
-    sharpe_uplift: float
+    absolute_growth: float
+    sharpe_abs: float
     crisis_cagr: float
     crisis_measured: bool
-    recency_holdout: float
+    recency_holdout: float = 0.0
 
     def as_tuple(self) -> tuple[float, ...]:
         return (
@@ -49,8 +49,8 @@ class Layer2ConstraintVector:
             self.friction,
             self.trades,
             self.crisis_mdd,
-            self.cagr,
-            self.sharpe_uplift,
+            self.absolute_growth,
+            self.sharpe_abs,
             self.crisis_cagr,
             self.recency_holdout,
         )
@@ -67,8 +67,8 @@ class Layer2ConstraintVector:
             "friction": self.friction,
             "trades": self.trades,
             "crisis_mdd": self.crisis_mdd,
-            "cagr": self.cagr,
-            "sharpe_uplift": self.sharpe_uplift,
+            "absolute_growth": self.absolute_growth,
+            "sharpe_abs": self.sharpe_abs,
             "crisis_cagr": self.crisis_cagr,
             "crisis_measured": self.crisis_measured,
             "recency_holdout": self.recency_holdout,
@@ -135,27 +135,19 @@ def _growth_lcb_vol_matched_baseline(
     return baseline
 
 
-def _cagr_gate_constraint(
+def _absolute_growth_constraint(
     *,
     cagr_hybrid: float,
-    cagr_baseline: float | None,
-    mode: str,
-    l2_min_cagr: float,
-    l2_min_cagr_uplift: float,
+    growth_lcb_hybrid: float,
+    l2_min_absolute_cagr: float,
+    l2_min_growth_lcb: float,
 ) -> float:
-    if mode == "relative" and cagr_baseline is not None:
-        threshold = max(0.0, float(cagr_baseline) + float(l2_min_cagr_uplift))
-        constraint = _finite_or_fail(threshold - float(cagr_hybrid))
-        _logger.debug(
-            "[EVAL] tag=cagr_gate mode=relative cagr_hybrid=%.4f cagr_baseline=%.4f "
-            "uplift_required=%.4f threshold=%.4f constraint=%.4f",
-            cagr_hybrid, cagr_baseline, l2_min_cagr_uplift, threshold, constraint,
-        )
-        return constraint
-    constraint = _finite_or_fail(float(l2_min_cagr) - float(cagr_hybrid))
+    cagr_shortfall = max(0.0, float(l2_min_absolute_cagr) - float(cagr_hybrid))
+    lcb_shortfall = max(0.0, float(l2_min_growth_lcb) - float(growth_lcb_hybrid))
+    constraint = _finite_or_fail(max(cagr_shortfall, lcb_shortfall))
     _logger.debug(
-        "[EVAL] tag=cagr_gate mode=absolute cagr_hybrid=%.4f l2_min_cagr=%.4f constraint=%.4f",
-        cagr_hybrid, l2_min_cagr, constraint,
+        "[EVAL] tag=absolute_growth cagr=%.4f(vs%.4f) growth_lcb=%.4f(vs%.4f) constraint=%.4f",
+        cagr_hybrid, l2_min_absolute_cagr, growth_lcb_hybrid, l2_min_growth_lcb, constraint,
     )
     return constraint
 
@@ -178,6 +170,7 @@ def evaluate_layer2_gate(
     trade_count: int,
     growth_lcb_hybrid: float,
     growth_lcb_baseline: float,
+    growth_lcb_deployed: float = float("-inf"),
     dsr_hybrid: float | None,
     psr_hybrid: float | None = None,
     recent_fold_passed: bool | None = None,
@@ -275,12 +268,11 @@ def evaluate_layer2_gate(
         if crisis_cagr_hybrid is None or crisis_cagr_floor is None
         else _finite_or_fail(float(crisis_cagr_floor) - float(crisis_cagr_hybrid))
     )
-    _cagr_constraint = _cagr_gate_constraint(
+    _absolute_growth = _absolute_growth_constraint(
         cagr_hybrid=cagr_hybrid,
-        cagr_baseline=cagr_baseline,
-        mode=config.l2_cagr_gate_mode,
-        l2_min_cagr=config.l2_min_cagr,
-        l2_min_cagr_uplift=config.l2_min_cagr_uplift,
+        growth_lcb_hybrid=growth_lcb_deployed if np.isfinite(growth_lcb_deployed) else growth_lcb_hybrid,
+        l2_min_absolute_cagr=config.l2_min_absolute_cagr,
+        l2_min_growth_lcb=config.l2_min_growth_lcb,
     )
     optuna_constraint_values = (
         1.0 if deployment_failed else -1.0,
@@ -293,8 +285,8 @@ def evaluate_layer2_gate(
         _finite_or_fail(float(config.l2_min_friction_pass) - friction_pass_pct),
         _finite_or_fail(float(int(config.l2_min_trades) - trade_count)),
         _crisis_constraint,
-        _cagr_constraint,
-        _finite_or_fail(sharpe_hac_baseline + float(config.l2_min_sharpe_uplift) - sharpe_hac_hybrid),
+        _absolute_growth,
+        _finite_or_fail(float(config.l2_min_sharpe_abs) - sharpe_hac_hybrid),
         _crisis_cagr_constraint,  # 13th slot — [ADR_TBD_L2_CRISIS_CAGR_CHAMPION_SELECTION_BLINDNESS_FIX]
         recency_holdout_constraint,  # 14th slot — [SPEC_L2_RECENCY_HOLDOUT_GATE]
     )
@@ -302,7 +294,7 @@ def evaluate_layer2_gate(
     promotion_constraint_values = (
         1.0 if deployment_failed else -1.0,
         _finite_or_fail(float(int(config.l2_min_trades) - trade_count)),
-        _cagr_constraint,
+        _absolute_growth,
         _finite_or_fail(float(config.l2_min_sharpe_abs) - sharpe_hybrid),
         _finite_or_fail(float(config.l2_min_sortino) - sortino_hybrid),
         _finite_or_fail(float(config.l2_min_calmar) - calmar_hybrid),
@@ -404,8 +396,8 @@ def evaluate_layer2_gate(
         friction=optuna_constraint_values[7],
         trades=optuna_constraint_values[8],
         crisis_mdd=optuna_constraint_values[9],
-        cagr=optuna_constraint_values[10],
-        sharpe_uplift=optuna_constraint_values[11],
+        absolute_growth=optuna_constraint_values[10],
+        sharpe_abs=optuna_constraint_values[11],
         crisis_cagr=optuna_constraint_values[12],
         crisis_measured=_crisis_measured,
         recency_holdout=optuna_constraint_values[13],
