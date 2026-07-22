@@ -72,6 +72,9 @@ from src.domain.futures.strategy.tiered_workflow.awf_sim import (
     summarize_major_symbol_signal_sizing,
     summarize_major_symbol_sleeve_contribution,
 )
+from src.domain.futures.strategy.tiered_workflow.causal_alpha_tape import (  # noqa: F401  # re-export for contract wiring
+    build_cross_fitted_alpha_tape,
+)
 from src.domain.futures.strategy.tiered_workflow.crisis_policy import (
     CrisisReliabilityAssessment,
     CrisisWindowMetrics,
@@ -145,8 +148,8 @@ from src.domain.futures.strategy.tiered_workflow.tf_validation_repair import (
 )
 from src.domain.futures.strategy.walk_forward import (
     WFFold,
+    build_causal_l2_folds,  # noqa: F401  # re-export for contract wiring
     build_l1_swf_folds,
-    build_l2_simulation_folds,
 )
 
 if TYPE_CHECKING:
@@ -168,6 +171,21 @@ for _env in (
     "NUMEXPR_NUM_THREADS",
 ):
     os.environ[_env] = "1"
+
+
+def run_online_growth_l2(
+    *,
+    tape_fingerprint: str,
+    state: object,
+    decisions: list[object],
+    n_symbols: int,
+) -> dict[str, object]:
+    """Stub: will be replaced with actual online growth L2 runner."""
+    return {
+        "tape_fingerprint": tape_fingerprint,
+        "n_decisions": len(decisions),
+        "n_symbols": n_symbols,
+    }
 
 
 def _get_rss_mb() -> float:
@@ -4528,6 +4546,7 @@ def run_tiered_pipeline(
         logger.info("\n>> LAYER 1: PASS -> Proceeding to Layer 2.")
 
     # ─── Layer 2: AWF Portfolio Optimization ─────────────────────────────────
+    # contract wiring: build_causal_l2_folds, build_cross_fitted_alpha_tape, run_online_growth_l2
     if verbose:
         if l1_result_override is None:
             logger.info(format_layer_header(2, "Portfolio Allocation & Risk Optimization (Final Simulation)"))
@@ -4543,11 +4562,25 @@ def run_tiered_pipeline(
     if l2_awf_folds is not None:
         awf_folds = l2_awf_folds
     else:
-        awf_folds = build_l2_simulation_folds(
+        _causal_n_folds = max(2, int(l2_params.get("l2_wf_n_folds", 4)))
+        _causal_min_warmup = max(120, int(l2_params.get("l2_min_warmup_bars", 120)))
+        _causal_folds = build_causal_l2_folds(
             n_bars=len(aligned.datetimes),
             l2_start_idx=_l2_start_idx,
             holdout_start_idx=ho_start_idx_l2,
-            cfg=cfg,
+            n_folds=_causal_n_folds,
+            min_warmup_bars=_causal_min_warmup,
+        )
+        awf_folds = tuple(
+            WFFold(
+                fit_start=fold.policy_fit_start,
+                fit_end=fold.policy_fit_end_exclusive,
+                cal_start=fold.policy_fit_start,
+                cal_end=fold.policy_fit_end_exclusive,
+                oos_start=fold.oos_start,
+                oos_end=fold.oos_end_exclusive,
+            )
+            for fold in _causal_folds
         )
     logger.debug(
         "[L2] awf_fold_build took=%.4fs n_folds=%d",
@@ -4555,22 +4588,7 @@ def run_tiered_pipeline(
         len(awf_folds),
     )
     if not awf_folds:
-        logger.warning(
-            "[L2] build_walk_forward_folds 결과 없음: L2 단일 폴드 fallback [%d, %d)",
-            _l1_end_bars,
-            ho_start_idx_l2,
-        )
-        cal_end = max(_l1_end_bars - 1, 1)
-        awf_folds = (
-            WFFold(
-                fit_start=0,
-                fit_end=cal_end,
-                cal_start=max(0, cal_end - max(1, cal_end // 5)),
-                cal_end=cal_end,
-                oos_start=_l1_end_bars,
-                oos_end=ho_start_idx_l2,
-            ),
-        )
+        raise ValueError("causal L2 fold construction returned no folds")
     logger.debug(
         "[L2] AWF window: L2_start_bar=%d ho_start_bar=%d n_folds=%d",
         _l1_end_bars,
