@@ -3,7 +3,9 @@ from __future__ import annotations
 from unittest.mock import MagicMock
 
 import numpy as np
+import pytest
 
+from src.domain.futures.portfolio.portfolio_constructor import PortfolioCaps
 from src.domain.futures.strategy.candidate_contracts import (
     SignalSleeveKey,
     ValidatedSignalBatch,
@@ -14,6 +16,7 @@ from src.domain.futures.strategy.tiered_workflow.awf_sim import (
     build_causal_net_sleeve_returns,
     build_l2_simulation_cache,
 )
+from src.domain.futures.strategy.walk_forward import WFFold
 
 
 def _make_event(
@@ -117,3 +120,118 @@ def test_build_causal_net_sleeve_returns_uses_only_active_prior_signal_and_cost(
     assert returns.shape == (4, 1)
     assert returns[0, 0] == 0.0
     assert returns[1, 0] == np.float32(0.1 - 0.001 / 12.0)
+
+
+def _make_aligned(n_bars: int = 20, n_sym: int = 2) -> MagicMock:
+    close = np.ones((n_bars, n_sym), dtype=np.float64) * 100.0
+    aligned = MagicMock()
+    aligned.symbols = ("BTC", "ETH") if n_sym >= 2 else ("BTC",)
+    aligned.close_2d = close
+    aligned.datetimes = np.array(
+        [np.datetime64("2024-01-01", "ns") + np.timedelta64(i * 4, "h") for i in range(n_bars)],
+        dtype="datetime64[ns]",
+    )
+    aligned.funding_2d = np.zeros((n_bars, n_sym), dtype=np.float64)
+    aligned.active_mask = np.ones((n_bars, n_sym), dtype=bool)
+    aligned.warm_mask = np.ones((n_bars, n_sym), dtype=bool)
+    aligned.entry_block_mask = np.zeros((n_bars, n_sym), dtype=bool)
+    aligned.kill_mask = np.zeros((n_bars, n_sym), dtype=bool)
+    aligned.execution_cost_bps_2d = np.full((n_bars, n_sym), 4.0, dtype=np.float64)
+    aligned.beta_vs_market_1d = np.zeros(n_sym, dtype=np.float64)
+    return aligned
+
+
+def _make_signal_batch(n_bars: int = 20) -> ValidatedSignalBatch:
+    datetimes = np.array(
+        [np.datetime64("2024-01-01", "ns") + np.timedelta64(i * 4, "h") for i in range(n_bars)],
+        dtype="datetime64[ns]",
+    )
+    return ValidatedSignalBatch(
+        events=(
+            ValidatedSignalEvent(
+                decision_idx=0,
+                decision_time=datetimes[0],
+                symbol="BTC",
+                strategy_id="trend:fast",
+                activation_context="all",
+                side=1,
+                expected_net_bps=0.0,
+                expected_gross_bps=20.0,
+                q10_net_bps=0.0,
+                q10_gross_bps=10.0,
+                q90_net_bps=0.0,
+                q90_gross_bps=30.0,
+                expected_holding_bars=1,
+                registry_version="test",
+                model_version="test",
+            ),
+            ValidatedSignalEvent(
+                decision_idx=0,
+                decision_time=datetimes[0],
+                symbol="ETH",
+                strategy_id="trend:fast",
+                activation_context="all",
+                side=-1,
+                expected_net_bps=0.0,
+                expected_gross_bps=5.0,
+                q10_net_bps=0.0,
+                q10_gross_bps=2.0,
+                q90_net_bps=0.0,
+                q90_gross_bps=8.0,
+                expected_holding_bars=1,
+                registry_version="test",
+                model_version="test",
+            ),
+        ),
+        start_idx=1,
+        end_idx=3,
+        symbols=("BTC", "ETH"),
+        registry_version="test",
+        model_version="test",
+    )
+
+
+def _make_folds() -> tuple[WFFold, ...]:
+    return (WFFold(fit_start=0, fit_end=1, cal_start=1, cal_end=1, oos_start=1, oos_end=4),)
+
+
+def test_awf_sim_wires_kelly_shrink_to_equal_from_config(mocker: MagicMock) -> None:
+    from src.domain.futures.strategy.tiered_workflow.awf_sim import (
+        _run_awf_simulation,
+        build_l2_simulation_cache,
+    )
+    from src.domain.futures.strategy.tiered_workflow.dataclasses import (
+        Layer2AllocationConfig,
+    )
+
+    spy = mocker.patch(
+        "src.domain.futures.strategy.tiered_workflow.awf_sim.diagonal_kelly_weights",
+        return_value=np.zeros(2, dtype=np.float64),
+    )
+    aligned = _make_aligned()
+    signal_batch = _make_signal_batch()
+    config = Layer2AllocationConfig(
+        k_rank=2,
+        rank_buffer=0,
+        kelly_fraction=0.5,
+        no_trade_band=0.0,
+        rebalance_bars=1,
+        kelly_shrink_to_equal=0.3,
+    )
+    awf_folds = _make_folds()
+    caps = PortfolioCaps(gross=2.0, per_symbol=1.0, net=1.0, beta=2.0, target_ann_vol=10.0)
+    cache = build_l2_simulation_cache(aligned, signal_batch, "4h")
+
+    _run_awf_simulation(
+        cache=cache,
+        signal_batch=signal_batch,
+        aligned=aligned,
+        awf_folds=awf_folds,
+        config=config,
+        caps=caps,
+        tf="4h",
+    )
+
+    call_kwargs = spy.call_args.kwargs
+    assert "kelly_shrink_to_equal" in call_kwargs
+    assert call_kwargs["kelly_shrink_to_equal"] == pytest.approx(0.3)
