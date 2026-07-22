@@ -1624,6 +1624,7 @@ def run_l1_nested_swf(
             model_version=f"outer-{outer_idx}",
             activation_floor_bps=float(cfg.l1_signal_activation_floor_bps),
             cfg=cfg,
+            l1_breakeven_floor_bps=float(cfg.l1_breakeven_floor_bps),
         )
         _t_batch_took = time.perf_counter() - _t_batch
         _t_sel = time.perf_counter()
