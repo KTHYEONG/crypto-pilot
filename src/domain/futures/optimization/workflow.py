@@ -1958,7 +1958,7 @@ def summarize_layer2_feasibility(
     constraint_names: list[str] = [
         "deployment", "support_leak", "mdd", "cvar_95", "fold",
         "recent_fold", "active_blocks", "friction", "trades",
-        "crisis_mdd", "cagr", "sharpe_uplift", "crisis_cagr", "recency_holdout",
+        "crisis_mdd", "absolute_growth", "sharpe_abs", "crisis_cagr", "recency_holdout",
     ]
     failure_counts: dict[str, int] = {name: 0 for name in constraint_names}  # noqa: C420
     joint_feasible_count = 0
@@ -1980,7 +1980,7 @@ def summarize_layer2_feasibility(
                 deployment=padded[0], support_leak=padded[1], mdd=padded[2],
                 cvar_95=padded[3], fold=padded[4], recent_fold=padded[5],
                 active_blocks=padded[6], friction=padded[7], trades=padded[8],
-                crisis_mdd=padded[9], cagr=padded[10], sharpe_uplift=padded[11],
+                crisis_mdd=padded[9], absolute_growth=padded[10], sharpe_abs=padded[11],
                 crisis_cagr=padded[12],
                 crisis_measured=bool(t.user_attrs.get("l2_crisis_measured", False)),
                 recency_holdout=padded[13],
@@ -2025,8 +2025,10 @@ def evaluate_l2_trial(
     entry_audit: Any | None = None,
     lightweight: bool = False,
 ) -> Any:
+    from src.domain.futures.portfolio.allocation_policy import choose_deployed_policy
     from src.domain.futures.portfolio.signal_composer import hours_per_bar_tf
     from src.domain.futures.strategy.tiered_workflow.awf_sim import _run_awf_simulation
+    _ = choose_deployed_policy
     from src.domain.futures.strategy.tiered_workflow.dataclasses import (
         Layer2BlockMetric,
         Layer2TrialEvaluation,

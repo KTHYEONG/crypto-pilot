@@ -49,7 +49,7 @@ def _make_mock_evaluation() -> MagicMock:
     cv = Layer2ConstraintVector(
         deployment=-1.0, support_leak=0.0, mdd=-0.1, cvar_95=-0.05,
         fold=-0.2, recent_fold=-1.0, active_blocks=-3.0, friction=-0.1,
-        trades=-2.0, crisis_mdd=-1.0, cagr=-0.3, sharpe_uplift=-0.2,
+        trades=-2.0,             crisis_mdd=-1.0, absolute_growth=-0.3, sharpe_abs=-0.2,
         crisis_cagr=-1.0, crisis_measured=True,
     )
     gate.constraint_vector = cv
