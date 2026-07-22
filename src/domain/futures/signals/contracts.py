@@ -437,6 +437,8 @@ class ValidatedSignalEvent:
     quality_weight: float
     registry_version: str
     model_version: str
+    l1_lcb_net_bps: float = 0.0
+    l1_breakeven_bps: float = 0.0
 
     def __init__(
         self,
@@ -458,6 +460,8 @@ class ValidatedSignalEvent:
         reliability: float | None = None,
         registry_version: str,
         model_version: str,
+        l1_lcb_net_bps: float = 0.0,
+        l1_breakeven_bps: float = 0.0,
     ) -> None:
         object.__setattr__(self, "decision_idx", int(decision_idx))
         object.__setattr__(self, "decision_time", decision_time)
@@ -491,10 +495,8 @@ class ValidatedSignalEvent:
         )
         object.__setattr__(self, "registry_version", registry_version)
         object.__setattr__(self, "model_version", model_version)
-
-    @property
-    def reliability(self) -> float:
-        return self.quality_weight
+        object.__setattr__(self, "l1_lcb_net_bps", float(l1_lcb_net_bps))
+        object.__setattr__(self, "l1_breakeven_bps", float(l1_breakeven_bps))
 
 
 @dataclass(slots=True, frozen=True)
