@@ -518,5 +518,9 @@
   "src/domain/futures/strategy/tiered_workflow/causal_alpha_tape.py": {
     "architecture": "docs/results/result.md",
     "testing": "tests/unit/domain/futures/strategy/tiered_workflow/test_causal_alpha_tape.py"
+  },
+  "src/domain/futures/compound/data_plane.py": {
+    "architecture": "docs/results/explain.md",
+    "testing": "tests/unit/domain/futures/compound/test_data_plane.py"
   }
 }
