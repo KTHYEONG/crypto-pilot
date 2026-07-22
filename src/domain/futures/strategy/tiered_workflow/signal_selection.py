@@ -993,6 +993,31 @@ def _registry_to_symbol_signals(
     return adapted
 
 
+def _strip_tf_suffix(strategy_id: str, native_tf: str) -> str:
+    """Exact-suffix removal of '_{native_tf}' for cross-source key matching only.
+
+    Does not mutate what callers store on emitted events — matching-only helper.
+    """
+    if not native_tf:
+        return strategy_id
+    suffix = f"_{native_tf}"
+    if strategy_id.endswith(suffix):
+        return strategy_id[: -len(suffix)]
+    return strategy_id
+
+
+def _strip_tf_suffix_series(values: pd.Series, native_tf: str) -> pd.Series:
+    """Vectorized equivalent of _strip_tf_suffix for a full strategy_id column."""
+    if not native_tf:
+        return values
+    suffix = f"_{native_tf}"
+    mask = values.str.endswith(suffix)
+    result = values.copy()
+    result[mask] = values[mask].str.slice(stop=-len(suffix))
+    return result
+
+
+
 def _candidate_output_to_signal_batch(
     *,
     model_output: CandidateModelOutput,
@@ -1031,13 +1056,13 @@ def _candidate_output_to_signal_batch(
     source_keys_relaxed: set[tuple[str, str]] = set()
     if activation_match_regime:
         source_keys = {
-            (item.key.symbol, item.key.strategy_id, item.key.activation_context)
+            (item.key.symbol, _strip_tf_suffix(item.key.strategy_id, native_tf), item.key.activation_context)
             for items in registry.by_symbol.values()
             for item in items
         }
     else:
         source_keys_relaxed = {
-            (item.key.symbol, item.key.strategy_id) for items in registry.by_symbol.values() for item in items
+            (item.key.symbol, _strip_tf_suffix(item.key.strategy_id, native_tf)) for items in registry.by_symbol.values() for item in items
         }
     _t_keys_took = time.perf_counter() - _t_keys
     events: list[ValidatedSignalEvent] = []
@@ -1065,12 +1090,14 @@ def _candidate_output_to_signal_batch(
     else:
         actx_v = np.full(n_raw, "all", dtype=object)
     actx_v = np.where(actx_v == "", "all", actx_v)  # mirrors `str(...) or "all"`
-    # ── registry membership mask (composite isin — C-level) ──────────────────
+    # ── normalized strategy_id for matching (strip TF suffix, never mutates original) ──
+    strat_v_match = _strip_tf_suffix_series(pd.Series(strat_v), native_tf).to_numpy()
+    # ── registry membership mask (composite isin — C-level) ────────────────── (composite isin — C-level) ──────────────────
     if activation_match_regime:
-        _composite = pd.Series(sym_v) + "|" + pd.Series(strat_v) + "|" + pd.Series(actx_v)
+        _composite = pd.Series(sym_v) + "|" + pd.Series(strat_v_match) + "|" + pd.Series(actx_v)
         _keyset: set[str] = {f"{s}|{st}|{a}" for (s, st, a) in source_keys}
     else:
-        _composite = pd.Series(sym_v) + "|" + pd.Series(strat_v)
+        _composite = pd.Series(sym_v) + "|" + pd.Series(strat_v_match)
         _keyset = {f"{s}|{st}" for (s, st) in source_keys_relaxed}
     mask_reg = _composite.isin(_keyset).to_numpy()
     n_registry_pass = int(mask_reg.sum())
@@ -1138,12 +1165,13 @@ def _candidate_output_to_signal_batch(
     qw_lookup: dict[tuple[str, str, str], float] = {}
     for _evs in registry.by_symbol.values():
         for _ev in _evs:
-            _k3 = (_ev.key.symbol, _ev.key.strategy_id, _ev.key.activation_context)
+            _k3 = (_ev.key.symbol, _strip_tf_suffix(_ev.key.strategy_id, native_tf), _ev.key.activation_context)
             if _k3 not in qw_lookup:
                 qw_lookup[_k3] = _ev.quality_weight
     # ── small loop over n_out survivors only ──────────────────────────────────
     for _i in np.flatnonzero(mask_dec):
-        _s, _st, _a = str(sym_v[_i]), str(strat_v[_i]), str(actx_v[_i])
+        _s, _st_norm, _a = str(sym_v[_i]), str(strat_v_match[_i]), str(actx_v[_i])
+        _st = str(strat_v[_i])
         _d = int(dec_arr[_i])
         events.append(
             ValidatedSignalEvent(
@@ -1161,7 +1189,7 @@ def _candidate_output_to_signal_batch(
                 q90_net_bps=float(q90_net_p[_i]),
                 q90_gross_bps=float(q90_p[_i]),
                 expected_holding_bars=int(hold_arr_v[_i]),
-                quality_weight=qw_lookup.get((_s, _st, _a), 0.0),
+                quality_weight=qw_lookup.get((_s, _st_norm, _a), 0.0),
                 registry_version=registry.registry_version,
                 model_version=model_version,
             )
