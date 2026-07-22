@@ -127,35 +127,37 @@ class TestComputeL2CompoundGrowthObjective:
 class TestLayer2ConstraintVector:
     """[LIMIT-07] Named constraint vector."""
 
-    def test_as_tuple_13_slots(self) -> None:
+    def test_as_tuple_14_slots(self) -> None:
         cv = Layer2ConstraintVector(
             deployment=-1.0, support_leak=0.0, mdd=0.1, cvar_95=-0.05,
             fold=-0.2, recent_fold=-0.1, active_blocks=0.0, friction=-0.1,
-            trades=-2.0, crisis_mdd=-1.0, cagr=-0.3, sharpe_uplift=-0.2,
+            trades=-2.0, crisis_mdd=-1.0, absolute_growth=-0.3, sharpe_abs=-0.2,
             crisis_cagr=-1.0, crisis_measured=True,
         )
         t = cv.as_tuple()
-        assert len(t) == 13
+        assert len(t) == 14
         assert t[2] == pytest.approx(0.1)
 
     def test_as_mapping_serializes_crisis_measurement_state(self) -> None:
         cv = Layer2ConstraintVector(
             deployment=-1.0, support_leak=0.0, mdd=0.1, cvar_95=-0.05,
             fold=-0.2, recent_fold=-0.1, active_blocks=0.0, friction=-0.1,
-            trades=-2.0, crisis_mdd=-1.0, cagr=-0.3, sharpe_uplift=-0.2,
+            trades=-2.0, crisis_mdd=-1.0, absolute_growth=-0.3, sharpe_abs=-0.2,
             crisis_cagr=-1.0, crisis_measured=True,
         )
         m = cv.as_mapping()
         assert "crisis_mdd" in m
         assert "crisis_cagr" in m
+        assert "absolute_growth" in m
+        assert "sharpe_abs" in m
         assert m["crisis_measured"] is True
-        assert len(m) == 14
+        assert len(m) == 15
 
     def test_non_crisis_feasible_true_when_all_non_crisis_slots_leq_zero(self) -> None:
         cv = Layer2ConstraintVector(
             deployment=-1.0, support_leak=0.0, mdd=0.0, cvar_95=-0.05,
             fold=-0.2, recent_fold=-0.1, active_blocks=-3.0, friction=-0.1,
-            trades=-2.0, crisis_mdd=1.0, cagr=-0.3, sharpe_uplift=-0.2,
+            trades=-2.0, crisis_mdd=1.0, absolute_growth=-0.3, sharpe_abs=-0.2,
             crisis_cagr=1.0, crisis_measured=True,
         )
         assert cv.non_crisis_feasible()
@@ -164,7 +166,7 @@ class TestLayer2ConstraintVector:
         cv = Layer2ConstraintVector(
             deployment=-1.0, support_leak=0.0, mdd=0.1, cvar_95=-0.05,
             fold=-0.2, recent_fold=-0.1, active_blocks=-3.0, friction=-0.1,
-            trades=-2.0, crisis_mdd=-1.0, cagr=-0.3, sharpe_uplift=-0.2,
+            trades=-2.0, crisis_mdd=-1.0, absolute_growth=-0.3, sharpe_abs=-0.2,
             crisis_cagr=-1.0, crisis_measured=True,
         )
         assert not cv.non_crisis_feasible()
@@ -173,7 +175,7 @@ class TestLayer2ConstraintVector:
         cv = Layer2ConstraintVector(
             deployment=-1.0, support_leak=0.0, mdd=-0.1, cvar_95=-0.05,
             fold=-0.2, recent_fold=-0.1, active_blocks=-3.0, friction=-0.1,
-            trades=-2.0, crisis_mdd=-1.0, cagr=-0.3, sharpe_uplift=-0.2,
+            trades=-2.0, crisis_mdd=-1.0, absolute_growth=-0.3, sharpe_abs=-0.2,
             crisis_cagr=-1.0, crisis_measured=True,
         )
         assert cv.jointly_feasible()
@@ -182,7 +184,7 @@ class TestLayer2ConstraintVector:
         cv = Layer2ConstraintVector(
             deployment=-1.0, support_leak=0.0, mdd=-0.1, cvar_95=-0.05,
             fold=-0.2, recent_fold=-0.1, active_blocks=-3.0, friction=-0.1,
-            trades=-2.0, crisis_mdd=-1.0, cagr=-0.3, sharpe_uplift=-0.2,
+            trades=-2.0, crisis_mdd=-1.0, absolute_growth=-0.3, sharpe_abs=-0.2,
             crisis_cagr=-1.0, crisis_measured=False,
         )
         assert not cv.jointly_feasible()
@@ -300,13 +302,13 @@ class TestLayer2FeasibilityAudit:
 
         audit = summarize_layer2_feasibility(trials=trials, requested_trials=5)
         assert audit.joint_feasible_trials == 0
-        assert len(audit.failure_counts) == 13
+        assert len(audit.failure_counts) == 14
 
     def test_audit_uses_trial_crisis_measurement_for_legacy_constraint_map(self) -> None:
         constraint_map = Layer2ConstraintVector(
             deployment=-1.0, support_leak=-1.0, mdd=-1.0, cvar_95=-1.0,
             fold=-1.0, recent_fold=-1.0, active_blocks=-1.0, friction=-1.0,
-            trades=-1.0, crisis_mdd=-1.0, cagr=-1.0, sharpe_uplift=-1.0,
+            trades=-1.0, crisis_mdd=-1.0, absolute_growth=-1.0, sharpe_abs=-1.0,
             crisis_cagr=-1.0, crisis_measured=True,
         ).as_mapping()
         constraint_map.pop("crisis_measured")

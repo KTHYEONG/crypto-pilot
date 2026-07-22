@@ -47,6 +47,8 @@ class SymbolSignal:
     valid: bool
     beta_btc: float | None = None
     quality_weight: float = 1.0
+    l1_edge_margin_bps_per_bar: float = 0.0
+    l1_confidence: float = 0.0
 
 
 def neutralize_cross_section(
