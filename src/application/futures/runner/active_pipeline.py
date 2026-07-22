@@ -2491,6 +2491,7 @@ def _run_robust_l2_l3_outcome(
     per_tf_data_maps: dict[str, Any] | None,
     labeled_events_by_tf: dict[str, pd.DataFrame] | None,
     crisis_replay_ctx: Any,
+    crisis_rets: NDArray[np.float64] | None = None,
     l2_sim_cache: Any,
     probe_manifest: list[dict[str, Any]] | None,
     l3_regime_code_1d: NDArray[np.int8] | None = None,
@@ -2499,7 +2500,7 @@ def _run_robust_l2_l3_outcome(
     l2_study_result = _run_tiered_l2_study(
         signal_batch=signal_batch, aligned=aligned, cfg=cfg, window=window,
         caps=caps, tf=tf, n_trials=n_trials, seed=0,
-        crisis_rets=None, crisis_replay_ctx=crisis_replay_ctx,
+        crisis_rets=crisis_rets, crisis_replay_ctx=crisis_replay_ctx,
         l2_sim_cache=l2_sim_cache,
         handoff_registry=l1_res.deployment_registry,
     )
@@ -3574,6 +3575,7 @@ def _run_strategy_stage(
                 per_tf_data_maps=handoff.aligned_by_tf,
                 labeled_events_by_tf=handoff.labeled_events_by_tf,
                 crisis_replay_ctx=_crisis_replay_ctx,
+                crisis_rets=_crisis_rets,
                 l2_sim_cache=shared_l2_cache,
                 probe_manifest=_probe_manifest_raw,
                 l3_regime_code_1d=_l3_regime_code_1d,
