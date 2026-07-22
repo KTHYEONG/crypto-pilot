@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from src.domain.futures.strategy.candidate_contracts import Layer1FoldReadiness
+from src.domain.futures.strategy.candidate_contracts import Layer1FoldReadiness, strip_tf_suffix
 
 
 def test_layer1_fold_readiness_diagnostic_fields_default_to_zero() -> None:
@@ -33,3 +33,13 @@ def test_layer1_fold_readiness_diagnostic_fields_accept_explicit_values() -> Non
     # Assert
     assert report.bars_per_fold_native == 100
     assert report.decision_points_per_calendar_year == 365.0
+
+
+def test_strip_tf_suffix_removes_exact_native_tf_suffix() -> None:
+    assert strip_tf_suffix("tpc_50_200_8h", "8h") == "tpc_50_200"
+
+
+def test_strip_tf_suffix_boundary_cases_return_input_unchanged() -> None:
+    assert strip_tf_suffix("dm_12_48h", "8h") == "dm_12_48h"
+    assert strip_tf_suffix("tpc_50_200", "") == "tpc_50_200"
+    assert strip_tf_suffix("tpc_50_200_4h", "8h") == "tpc_50_200_4h"

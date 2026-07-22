@@ -8,6 +8,8 @@ from typing import TYPE_CHECKING
 import numpy as np
 from numpy.typing import NDArray
 
+from src.domain.futures.strategy.candidate_contracts import strip_tf_suffix
+
 if TYPE_CHECKING:
     from src.domain.futures.strategy.candidate_contracts import (
         QualifiedSignalRegistry,
@@ -195,7 +197,10 @@ def _rank_and_cap_sleeve_indices(
     ranked = list(range(len(sleeve_keys)))
 
     def _mk_qw(s: int) -> float:
-        return quality_by_key.get((sleeve_keys[s].symbol, sleeve_keys[s].strategy_id), 0.0)
+        return quality_by_key.get(
+            (sleeve_keys[s].symbol, strip_tf_suffix(sleeve_keys[s].strategy_id, sleeve_keys[s].native_tf)),
+            0.0,
+        )
 
     distinct_tfs: list[str] = sorted({sk.native_tf for sk in sleeve_keys})
     n_distinct_tfs = len(distinct_tfs)
@@ -405,7 +410,9 @@ def evaluate_portfolio_handoff(
             fails_growth = ev.marginal_growth_lcb <= config.min_marginal_growth_lcb
             fails_consistency = ev.positive_window_ratio < config.min_positive_window_ratio
             if fails_growth or fails_consistency:
-                l1_ev = l1_evidence_by_key.get((ev.key.symbol, ev.key.strategy_id))
+                l1_ev = l1_evidence_by_key.get(
+                    (ev.key.symbol, strip_tf_suffix(ev.key.strategy_id, ev.key.native_tf))
+                )
                 if l1_ev is not None and float(l1_ev.lcb_net_bps) > 0.0:
                     _logger.info(
                         "[ALGO] event=l2_growth_lcb_override_by_l1_edge fold=%d symbol=%s strategy=%s l1_lcb_bps=%.1f l2_growth_lcb=%.4f l2_pos_ratio=%.3f",

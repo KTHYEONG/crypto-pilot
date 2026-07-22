@@ -216,11 +216,12 @@
     "testing": "tests/unit/domain/futures/strategy/tiered_workflow/test_major_symbol_registry_replay.py"
   },
   "src/domain/futures/strategy/candidate_contracts.py": {
-    "architecture": "docs/architecture/layer1.md",
+    "architecture": "docs/architecture/",
     "testing": [
       "tests/unit/domain/futures/strategy/test_adverse_regime_evidence.py",
       "tests/unit/domain/futures/strategy/tiered_workflow/test_l1_readiness_gate_redesign.py",
-      "tests/domain/futures/strategy/tiered_workflow/test_l0_l1_improvements.py"
+      "tests/domain/futures/strategy/tiered_workflow/test_l0_l1_improvements.py",
+      "tests/unit/domain/futures/strategy/test_candidate_contracts.py"
     ]
   },
   "src/domain/futures/optimization/observability/run_tracker.py": {
