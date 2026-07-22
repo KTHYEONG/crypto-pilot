@@ -1,32 +1,32 @@
-## 2026-07-22 — TF-쿼터 handoff cap 재설계 및 C4 게이트 충돌 수정, production remeasurement
+## 2026-07-22 — Kelly↔Equal-Weight shrinkage 도입, production remeasurement
 
 ### 실행 조건
 
-- 명령: `L2_OPTUNA_TRIALS=120 uv run python src/execution/opt_main_futures.py --phase l2 --sync skip --timeframe 4h --date 2026-07-21`
-- 두 결함 수정 후 재측정 — `[ADR_20260722_L2_TF_QUOTA_CAP_AND_C4_GATE_FIX]`
-  1. `portfolio_handoff.py::_rank_and_cap_sleeve_indices`를 TF별 최소 쿼터 선발 + 잔여분 global quality_weight로 재설계 — 순수 quality_weight 랭킹이 다양화된 659개 후보 풀을 다시 100% 4h로 재집중시키던 구조적 결함 수정 (candidacy 단계 다양성 보장, 최종 admission은 기존 통계 검정 유지)
-  2. `awf_sim.py::_run_awf_simulation`의 C4 TF-inclusion 게이트에 handoff override 추가 — C4 자체 fit-edge 테스트가 handoff가 이미 admit한 TF를 재차 배제하던 충돌 수정 (직전 세션 발견된 "CAGR 0.00% 균일" 이상현상의 근본 원인)
-- 4개 chokepoint(post_resolve/post_c4_filter/post_bucket_routing/post_netting) 직접 함수 트레이싱으로 소거법 근본원인 확정 후 수정 (logger 기반 계측은 워커 프로세스 stdout 미노출로 우회, 코드는 향후 디버깅용으로 유지)
+- 명령: `LOG_LEVEL=DEBUG L2_OPTUNA_TRIALS=120 uv run python src/execution/opt_main_futures.py --phase l2 --sync skip --timeframe 4h --date 2026-07-22`
+- 선행 조치: `l2_gate.py::_cagr_gate_constraint` / `portfolio_handoff.py::evaluate_portfolio_handoff`에 `[EVAL]` DEBUG 계측 추가(로거 `__name__` → `opt_main_futures` 컨벤션 통일 병행 수정, 기존 침묵 버그 해소) 후 재실측 → `cagr_hybrid`가 `cagr_baseline`(동일 종목·동일 방향의 risk-matched 균등가중)보다 64.2%(77/120) trial에서 낮음을 확정 진단.
+- 조치: `diagonal_kelly_weights`에 `kelly_shrink_to_equal ∈ [0,1]` 탐색 파라미터 신설 — shape-space에서 Kelly 비례 벡터와 균등가중 벡터를 블렌딩(`shrink=0.0` 기본값은 기존과 byte-identical). `L2_SEARCH_SPACE`에 탐색 항목 추가.
 
 ### 결과
 
-| 지표 | 수정 전 | 수정 후 |
+| 지표 | 이전 (Kelly 100%) | 이후 (shrink 탐색 도입) |
 |---|---:|---:|
-| Trial별 CAGR | **120/120 전부 정확히 0.00%** | 실제 편차 있는 값 (예: +10.8%, +2.9%, -1.8%, -0.9%) |
-| Trial별 거래 수 | 사실상 0 | **53~249건, 정상 분포** |
-| Best CAGR (탐색 중) | 0.00% | **6.13%** |
-| Champion 선정 블로커 | 균일 플랫 아티팩트 | **`no_feasible_trials`** (진짜 제약조건 미충족으로 정상화) |
-| Admitted sleeve TF 분포 | 100% 4h | 여전히 100% 4h (쿼터는 candidacy만 보장, 비4h가 아직 admission 통계 검정 미통과 — 설계대로) |
-| `[L2-AUDIT]` failures | `{deployment:120, fold:120, recent_fold:120, active_blocks:120, friction:120, trades:120, cagr:120, sharpe_uplift:120, crisis_cagr:71, crisis_mdd:16}` | `{cagr:120, recency_holdout:113, sharpe_uplift:99, fold:88, crisis_cagr:50, recent_fold:20, crisis_mdd:3}` |
+| hybrid < baseline 비율 | 64.2% (77/120) | 60.8% (73/120) |
+| uplift(hybrid−baseline) 중앙값 | −1.38%p | −0.26%p |
+| uplift(hybrid−baseline) 평균 | −1.13%p | −0.26%p |
+| +5%p 요구치 통과 trial | 1/120 | 2/120 |
+| `[L2-AUDIT]` cagr 실패 | 120/120 | 120/120 |
+| Best CAGR (탐색 중) | 8.79% | 6.68% |
+| fold 실패 | 91/120 | 96/120 |
+| crisis_cagr 실패 | 62/120 | 49/120 |
+| joint_feasible | 0/120 | 0/120 |
 
 ### 해석
 
-두 목표 수정 모두 데이터로 완전히 검증됨: (1) TF-쿼터 cap이 candidacy 단계에서 다양성을 구조적으로 보장, (2) C4 게이트-handoff 충돌 해소로 CAGR 0.00% 균일 현상이 완전히 사라지고 trial마다 실제 편차 있는 결과가 나옴(거래 수 53~249건 정상 분포, Best CAGR 6.13%).
-
-`joint_feasible=0/120`은 유지되나, 블로커가 배선/매칭 버그가 아닌 **진짜 신호 품질·제약조건 문제**(`cagr` 120/120 실패 등)로 정상화됨 — 이제부터는 순수 경제적 병목(현재 admit되는 신호로는 CAGR 최저선 미달)이며, 다음 세션 조사 대상으로 이월.
+가설(저-SNR mu에서 Kelly-비례 사이징이 노이즈를 좇아 균등가중보다 열위)의 방향성은 실측으로 재확인됨 — uplift 중앙값이 거의 0으로 이동, hybrid 우위 비율도 소폭 개선. 그러나 `cagr:120/120` 실패는 불변 — 120-trial 예산 내 신규 탐색 차원(`kelly_shrink_to_equal`)이 기존 8개 파라미터와 동시 탐색되어 충분히 발현되지 못한 것으로 판단. Best CAGR 하락(8.79%→6.68%)·fold 실패 소폭 악화(91→96)는 탐색 예산 부족에 따른 국소 최적 미도달 가능성. 효과 크기 격리를 위해 trial 수 확대(300~500) 또는 `kelly_shrink_to_equal` 고정 그리드 A/B 스윕이 다음 조사 후보.
 
 ### 검증
 
-- `lean_check.py`: **PASS**
+- mypy strict: **PASS**
 - Spec compliance: **PASS**
-- Coverage: **56%**
+- Pytest: **100 passed**
+- Coverage (신규 diff 라인 기준): `dataclasses.py` 98%, `l2_gate.py` 85%, `portfolio_handoff.py` 84%
