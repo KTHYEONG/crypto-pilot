@@ -1,5 +1,10 @@
 # Active Decisions Log (Sliding Window)
 
+## [2026-07-22] [TASK_L1_L2_COMPOUNDING_ALIGNMENT] [ADR_20260722_L1_L2_COMPOUNDING_ALIGNMENT]
+- **Context/Why:** L2 Kelly and baseline were evaluated on mismatched allocation and leverage scales, while legacy cached signal events could abort L2 before asset-growth analysis.
+- **Resolution/What:** Added L1 confidence and LCB/breakeven handoff, fit-only allocation policy evaluation with inverse-vol fallback, absolute deployed-growth gating, and backward-compatible zero-evidence handling for legacy events.
+- **Impact:** L2 execution completed 120/120 trials on 2026-07-22 data after fixing the legacy-event crash. Only 2/120 trials were joint-feasible and no champion was promoted; sharpe_abs remained the dominant blocker (92/120). lean_check PASS, coverage 47%.
+
 ## [2026-07-22] [L2_KELLY_SHRINK] [ADR_20260722_L2_KELLY_SHRINK]
 - **Context/Why:** DEBUG 계측(120-trial)으로 mu-비례(Kelly) 사이징이 동일 지지집합의 risk-matched 균등가중 baseline보다 CAGR 열위(64.2%)임을 확인. 근본 원인은 mu SNR이 낮을 때 Kelly-비례 배분이 노이즈가 큰 종목에 과집중하는 noisy-Kelly 현상.
 - **Resolution/What:** diagonal_kelly_weights에 kelly_shrink_to_equal∈[0,1] 파라미터를 추가해 Kelly 비율과 균등가중 비율 간 shape-space 선형 블렌딩 구현. Layer2AllocationConfig 필드 + from_mapping 검증, awf_sim 호출부 배선, L2_SEARCH_SPACE 탐색 차원 추가. shrink=0.0 기본값으로 완전 하위호환.
@@ -69,8 +74,3 @@
 - **Context/Why:** 직전 세션(ADR_20260721_L1_MULTI_TF_REGISTRY_MERGE) 이후 crisis reliability가 stress_tested_pass에서 untested_no_data(trades 113→3)로 회귀. 원인 조사 결과 _build_rule_based_stress_batch()가 panel.variant만으로 it.key.strategy_id에 substring 포함 검사(panel.variant in strategy_id or endswith)를 하고 있었음 — 병합 전에는 단일 TF registry에 base 이름과 TF-suffix 이름(예: donchian_72 vs donchian_72_4h)이 동시에 존재하지 않아 우연히 안전했으나, 병합 후 공존하게 되며 substring 오탐(donchian_72 in donchian_72_4h)이 발생해 잘못된 evidence가 panel에 바인딩됨. CandidateSignalPanel은 family 필드를 이미 갖고 있었음에도 미사용.
 - **Resolution/What:** expected_strategy_id = f'{panel.family}:{panel.variant}'(candidate_variant_key와 동일 규약) 구성 후 it.key.strategy_id == expected_strategy_id 정확 일치로 교체, substring/endswith 검사 완전 제거. 매칭 실패 시 [ALGO] event=stress_evidence_unmatched DEBUG 로그 추가. 함수 시그니처/호출부(2곳, 둘 다 crisis-replay 전용) 변경 없음 — 메인 L2 study/L3 홀드아웃 경로는 이 함수와 무관함을 코드로 확인.
 - **Impact:** 3-seed(42/123/7) 반복 실측: crisis reliability는 champion이 선정된 2개 seed(123,7) 모두 stress_tested_pass로 정상 복구 확인. 단, 직전 세션 seed=42의 L3 DEPLOY-READY(+5.6%)는 재현 안 됨(정확한 crisis 제약 적용 시 동일 seed=42가 no_feasible_trials로 champion 자체를 못 찾음) — 이전 결과는 substring 버그로 인한 우연한 산물이었을 가능성 높음. 3개 seed 전부 L3 forward holdout 실패(BLOCKED), joint_feasible 많을수록(seed7:10개) L3 악화(-20.1%) — study 윈도우 과최적화 신호. L3 forward 일반화 문제는 여전히 미해결, recency 강건성 게이트 설계가 다음 우선순위로 재확인됨.
-
-## [2026-07-21] [TASK_L1_MULTI_TF_REGISTRY_MERGE] [ADR_20260721_L1_MULTI_TF_REGISTRY_MERGE]
-- **Context/Why:** L3 홀드아웃(2025-12-31~2026-06-30) BLOCKED(CAGR -0.2%) 원인 조사 중 [L1-MAJOR-REGISTRY-CENSUS] 로그로 ETHUSDT의 hard_eligible=True 전략 4개가 홀드아웃 내내 observed_active_in_holdout=False임을 발견. 코드 추적 결과 _aggregate_per_tf_l1이 대표 TF 1개의 deployment_registry만 반영하고 나머지 6개 TF에서 검증된 qualified 신호는 전량 폐기하는 구조적 버그(oos_stacked는 이미 전 TF 병합했으나 배치용 registry만 미병합인 비대칭)를 확인. 게이트 임계값 완화가 아닌 신호 활용 자체의 결함으로 판단해 근본 수정.
-- **Resolution/What:** _select_representative_l1_registry(단일 TF 선택) 대신 _merge_deployment_registries_across_tf 신설 — 모든 deployable TF의 QualifiedSignalRegistry.by_symbol을 심볼별 union 병합, 동일 (symbol,strategy_id,activation_context) 충돌 시 quality_weight 최댓값 유지. gate_passed 판정 로직은 불변, deployment_registry 내용만 확장. 4개 TDD 시나리오(union/충돌/전체 not-deployable/통합배선) 반영, /check PASS.
-- **Impact:** 동일 조건(seed=42,120 trials,4h) 재실행: L3 BLOCKED(CAGR -0.2%, Sharpe 0.021)→DEPLOY-READY(CAGR +5.6%, Sharpe 0.688, Trades 73→110, MDD 8.6%→5.8%). ETHUSDT/trend_pullback_continuation(40~269bps) observed_active_in_holdout True 전환 확인 — 실제 신호 활용으로 인한 개선. L2도 side benefit(Sharpe 1.815→2.035, Fold 75%→100%). ⚠️ 신규 회귀: crisis reliability(LUNA/FTX)가 stress_tested_pass→untested_no_data(trades 113→3)로 무효화, 원인 미규명, 후속 세션 이월.

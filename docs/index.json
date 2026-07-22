@@ -508,5 +508,8 @@
   },
   "src/domain/futures/portfolio/portfolio_constructor.py": {
     "testing": "tests/unit/domain/futures/portfolio/test_diagonal_kelly.py"
+  },
+  "src/domain/futures/portfolio/allocation_policy.py": {
+    "testing": "tests/unit/domain/futures/portfolio/test_allocation_policy.py"
   }
 }
