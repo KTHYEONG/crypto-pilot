@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date
 from typing import Any
@@ -222,6 +222,30 @@ def inject_membership_masks_into_maps(
             frame.loc[:, "kill_signal"] = bundle.kill_signal
             frame.loc[:, "inference_active_mask"] = bundle.inference_active_mask
             frame.loc[:, "inference_entry_warm_mask"] = bundle.inference_entry_warm_mask
+
+
+def validate_historical_manifest_coverage(
+    *,
+    instrument_ids: Sequence[str],
+    first_market_at_ns: np.ndarray,
+    manifest_symbols: set[str] | frozenset[str] | Collection[str],
+) -> None:
+    """[LIMIT-01] Reject universe built solely from current exchangeInfo.
+
+    Raises PITUniverseContractError if any historical instrument_id lacks
+    corresponding manifest evidence.
+    """
+    if len(first_market_at_ns) != len(instrument_ids):
+        raise ValueError("first_market_at_ns must align one-to-one with instrument_ids")
+    manifest_set = set(manifest_symbols)
+    for i, sid in enumerate(instrument_ids):
+        if int(first_market_at_ns[i]) < 0:
+            raise ValueError(f"first_market_at_ns[{i}] must be non-negative")
+        if sid not in manifest_set:
+            raise PITUniverseContractError(
+                f"Instrument {sid} not found in Vision manifest coverage; "
+                "historical universe cannot be derived from current exchangeInfo only"
+            )
 
 
 def validate_pit_universe_contract(
