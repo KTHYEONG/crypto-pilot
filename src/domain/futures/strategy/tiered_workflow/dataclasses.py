@@ -39,7 +39,6 @@ if TYPE_CHECKING:
         ValidationParityReport,
     )
     from src.domain.futures.strategy.walk_forward import WFFold
-    from src.domain.futures.portfolio.allocation_policy import AllocationPolicy as AllocationPolicyNew
 
 def _validate_directional_veto_action(value: str) -> Literal["drop_long", "zero_mu", "cap_mu"]:
     if value not in {"drop_long", "zero_mu", "cap_mu"}:
@@ -674,7 +673,7 @@ class Layer2AllocationConfig:
     l2_selection_breadth_mode: bool = False
     l2_cs_amp_alpha: float = 2.0
     l2_cs_amp_mode: str = "power"
-    kelly_shrink_to_equal: float = 0.0
+    l2_min_equity_multiplier: float = 1e-6
     l2_cs_amp_power: float = 2.0
     # Regime State Compression (6→3) for quality improvement
     l2_regime_compression_enabled: bool = True
@@ -804,6 +803,8 @@ class Layer2AllocationConfig:
         params = params or {}
         if "friction_safety_mult" in params:
             raise ValueError("friction_safety_mult is deprecated; use fixed_cost_safety_mult")
+        if "kelly_shrink_to_equal" in params:
+            raise ValueError("kelly_shrink_to_equal is deprecated and no longer supported")
         raw_vol_target = params.get("max_ann_vol", params.get("vol_target"))
         vol_target = float(raw_vol_target) if isinstance(raw_vol_target, (int, float)) else None
         min_abs_rank_z = params.get("min_abs_rank_z", params.get("CS_Z_SCORE_THRESHOLD", 0.0))
@@ -834,9 +835,9 @@ class Layer2AllocationConfig:
             cls._as_float(params.get("risk_budget_max_scale", 3.0), 3.0),
             1.0,
         )
-        kelly_shrink_to_equal = cls._validate_range(
-            "kelly_shrink_to_equal",
-            cls._as_float(params.get("kelly_shrink_to_equal", 0.0), 0.0),
+        l2_min_equity_multiplier = cls._validate_range(
+            "l2_min_equity_multiplier",
+            cls._as_float(params.get("l2_min_equity_multiplier", 1e-6), 1e-6),
             0.0,
             1.0,
         )
@@ -1240,7 +1241,7 @@ class Layer2AllocationConfig:
             edge_throttle_min_active_mult=edge_throttle_min_active_mult,
             risk_budget_floor_ratio=risk_budget_floor_ratio,
             risk_budget_max_scale=risk_budget_max_scale,
-            kelly_shrink_to_equal=kelly_shrink_to_equal,
+            l2_min_equity_multiplier=l2_min_equity_multiplier,
             adaptive_breadth_enabled=bool(params.get("adaptive_breadth_enabled", False)),
             adaptive_k_extra=adaptive_k_extra,
             adaptive_expand_below_vol_ratio=adaptive_expand_below_vol_ratio,

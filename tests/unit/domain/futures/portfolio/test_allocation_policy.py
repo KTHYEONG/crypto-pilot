@@ -8,7 +8,6 @@ import pytest
 from src.domain.futures.portfolio.allocation_policy import (
     AllocationPolicyScore,
     build_policy_weights,
-    choose_deployed_policy,
     compute_l1_confidence,
     select_fit_allocation_policy,
 )
@@ -24,6 +23,7 @@ def _score(
     *,
     growth_lcb: float,
     feasible: bool,
+    leverage: float = 1.0,
 ) -> AllocationPolicyScore:
     return AllocationPolicyScore(
         policy=policy,  # type: ignore[arg-type]
@@ -31,7 +31,7 @@ def _score(
         cagr=0.10 if feasible else -0.10,
         mdd=0.10,
         cvar_95=0.02,
-        leverage=1.0,
+        leverage=leverage,
         n_blocks=4,
         feasible=feasible,
         reason="",
@@ -58,11 +58,10 @@ def test_awf_policy_selection_is_invariant_to_oos_return_changes() -> None:
 
 
 def test_selected_and_baseline_use_policy_specific_fit_leverage() -> None:
-    score = _score("kelly", growth_lcb=0.04, feasible=True)
-    baseline = _score("inverse_vol", growth_lcb=0.03, feasible=True)
-    assert score.leverage == 1.0
+    score = _score("inverse_vol", growth_lcb=0.04, feasible=True, leverage=1.5)
+    baseline = _score("equal_weight", growth_lcb=0.03, feasible=True, leverage=1.0)
+    assert score.leverage == 1.5
     assert baseline.leverage == 1.0
-    assert choose_deployed_policy(selected=score, inverse_vol=baseline) == ("kelly", False)
 
 
 def test_l2_search_space_excludes_allocation_policy_and_kelly_shrink() -> None:
@@ -250,7 +249,7 @@ class TestSelectFitAllocationPolicy:
         )
         assert decision.selected_policy == "kelly"
 
-    def test_all_infeasible_falls_to_inverse_vol(self) -> None:
+    def test_all_infeasible_returns_none(self) -> None:
         returns = np.array([-0.02, -0.03] * 10, dtype=np.float64)
         decision = select_fit_allocation_policy(
             returns_by_policy={
@@ -267,8 +266,8 @@ class TestSelectFitAllocationPolicy:
             max_cvar_95=0.06,
             min_growth_lcb=0.0,
         )
-        assert decision.selected_policy == "inverse_vol"
-        assert decision.fallback_reason == "insufficient_fit_evidence"
+        assert decision.selected_policy is None
+        assert decision.fallback_reason == "no_fit_feasible_policy"
 
     def test_rejects_unknown_policy(self) -> None:
         with pytest.raises(ValueError, match="unknown"):
@@ -282,37 +281,3 @@ class TestSelectFitAllocationPolicy:
                 max_cvar_95=0.06,
                 min_growth_lcb=0.0,
             )
-
-
-class TestChooseDeployedPolicy:
-    def test_deployment_selects_better_growth_lcb(self) -> None:
-        deployed, fallback_used = choose_deployed_policy(
-            selected=_score("kelly", growth_lcb=0.05, feasible=True),
-            inverse_vol=_score("inverse_vol", growth_lcb=0.03, feasible=True),
-        )
-        assert deployed == "kelly"
-        assert not fallback_used
-
-    def test_deployment_falls_back_to_deployable_inverse_vol(self) -> None:
-        deployed, fallback_used = choose_deployed_policy(
-            selected=_score("kelly", growth_lcb=-0.01, feasible=False),
-            inverse_vol=_score("inverse_vol", growth_lcb=0.03, feasible=True),
-        )
-        assert deployed == "inverse_vol"
-        assert fallback_used
-
-    def test_deployment_fails_closed_when_both_policies_fail(self) -> None:
-        deployed, fallback_used = choose_deployed_policy(
-            selected=_score("kelly", growth_lcb=-0.01, feasible=False),
-            inverse_vol=_score("inverse_vol", growth_lcb=-0.02, feasible=False),
-        )
-        assert deployed is None
-        assert not fallback_used
-
-    def test_deployment_uses_selected_when_both_feasible_but_selected_lower(self) -> None:
-        deployed, fallback_used = choose_deployed_policy(
-            selected=_score("kelly", growth_lcb=0.02, feasible=True),
-            inverse_vol=_score("inverse_vol", growth_lcb=0.05, feasible=True),
-        )
-        assert deployed == "inverse_vol"
-        assert fallback_used

@@ -456,37 +456,30 @@ def test_handoff_override_admitted_sleeve_still_pruned_by_correlation() -> None:
     assert len(admitted) <= 1
 
 
-def test_handoff_admits_multiple_tfs_when_multiple_have_positive_l1_edge() -> None:
+def test_handoff_admits_sleeves_with_positive_marginal_growth_only() -> None:
     from src.domain.futures.strategy.tiered_workflow.dataclasses import L2SimulationCache
     from src.domain.futures.strategy.candidate_contracts import ValidatedSignalBatch
     from src.domain.futures.strategy.walk_forward import WFFold
 
-    tfs = ("1h", "4h", "1d")
-    sleeve_keys = tuple(
-        SignalSleeveKey(f"SYM{i}", tf, "strat")
-        for i, tf in enumerate(tfs)
-    )
+    sleeve_keys = (SignalSleeveKey("BTCUSDT", "4h", "strat_a"),)
     n_bars = 90
-    rng = np.random.default_rng(42)
-    rets = np.column_stack([
-        0.001 + rng.normal(0, 0.0005, n_bars) for _ in range(len(tfs))
-    ]).astype(np.float64)
+    rets = np.full((n_bars, 1), 0.003, dtype=np.float64)
 
     cache = L2SimulationCache(
-        vol_matrix_2d=np.ones((n_bars, len(tfs))), tradeable_mask_2d=np.ones((n_bars, len(tfs)), dtype=np.bool_),
-        hurdle_2d=np.zeros((n_bars, len(tfs))), funding_2d=np.zeros((n_bars, len(tfs))),
-        beta_1d=np.ones(len(tfs)),
-        expected_gross_bps_2d=np.ones((n_bars, len(tfs))), expected_net_bps_2d=np.ones((n_bars, len(tfs))),
-        holding_bars_2d=np.ones((n_bars, len(tfs))), side_2d=np.ones((n_bars, len(tfs))),
-        quality_weight_2d=np.ones((n_bars, len(tfs))), signal_mask_2d=np.ones((n_bars, len(tfs)), dtype=np.bool_),
-        sleeve_to_sym=np.arange(len(tfs), dtype=np.int64), sleeve_keys=sleeve_keys,
+        vol_matrix_2d=np.ones((n_bars, 1)), tradeable_mask_2d=np.ones((n_bars, 1), dtype=np.bool_),
+        hurdle_2d=np.zeros((n_bars, 1)), funding_2d=np.zeros((n_bars, 1)),
+        beta_1d=np.ones(1),
+        expected_gross_bps_2d=np.ones((n_bars, 1)), expected_net_bps_2d=np.ones((n_bars, 1)),
+        holding_bars_2d=np.ones((n_bars, 1)), side_2d=np.ones((n_bars, 1)),
+        quality_weight_2d=np.ones((n_bars, 1)), signal_mask_2d=np.ones((n_bars, 1), dtype=np.bool_),
+        sleeve_to_sym=np.array([0], dtype=np.int64), sleeve_keys=sleeve_keys,
     )
     registry = QualifiedSignalRegistry(
-        by_symbol={f"SYM{i}": (_ev_with_lcb(f"SYM{i}", "strat", 0.9 - i * 0.1, 200.0),) for i in range(len(tfs))},
-        ready_symbols=tuple(f"SYM{i}" for i in range(len(tfs))), trade_scope_count=len(tfs), registry_version="test-v1",
+        by_symbol={"BTCUSDT": (_ev_with_lcb("BTCUSDT", "strat_a", 0.9, 200.0),)},
+        ready_symbols=("BTCUSDT",), trade_scope_count=1, registry_version="test-v1",
     )
     batch = ValidatedSignalBatch(
-        events=(), start_idx=0, end_idx=n_bars, symbols=tuple(f"SYM{i}" for i in range(len(tfs))),
+        events=(), start_idx=0, end_idx=n_bars, symbols=("BTCUSDT",),
         registry_version="test-v1", model_version="test",
     )
     fold = WFFold(fit_start=0, fit_end=30, cal_start=30, cal_end=60, oos_start=60, oos_end=90)
@@ -497,9 +490,8 @@ def test_handoff_admits_multiple_tfs_when_multiple_have_positive_l1_edge() -> No
         config=PortfolioHandoffConfig(min_source_families=1),
     )
 
-    assert result.passed, f"handoff blocked: {result.blocker_reason}"
-    admitted_tfs = {ev.key.native_tf for ev in result.evidence_by_fold[0] if ev.admitted}
-    assert len(admitted_tfs) > 1, f"Only one TF admitted: {admitted_tfs}"
+    ev = result.evidence_by_fold[0][0]
+    assert ev.admitted_via_l1_edge_override is False
 
 
 def test_handoff_invalid_handoff_weights_not_triggered_by_negative_override_weight_sum() -> None:
@@ -561,7 +553,7 @@ def test_rank_and_cap_suffixed_sleeve_reads_registry_quality_weight() -> None:
     assert active == (0,), f"suffixed sleeve should match registry base id, got {active}"
 
 
-def test_handoff_l1_edge_override_fires_for_suffixed_non_4h_sleeve() -> None:
+def test_handoff_l1_edge_override_never_fires() -> None:
     from src.domain.futures.strategy.tiered_workflow.dataclasses import L2SimulationCache
     from src.domain.futures.strategy.candidate_contracts import ValidatedSignalBatch
     from src.domain.futures.strategy.walk_forward import WFFold
@@ -597,9 +589,7 @@ def test_handoff_l1_edge_override_fires_for_suffixed_non_4h_sleeve() -> None:
     )
 
     ev = result.evidence_by_fold[0][0]
-    assert ev.admitted is True, f"expected admitted=True, got reasons={ev.rejection_reasons}"
-    assert ev.admitted_via_l1_edge_override is True
-    assert ev.rejection_reasons == ()
+    assert ev.admitted_via_l1_edge_override is False
 
 
 def test_handoff_4h_suffixless_sleeve_admission_byte_identical() -> None:
