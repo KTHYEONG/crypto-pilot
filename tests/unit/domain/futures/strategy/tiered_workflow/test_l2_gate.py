@@ -51,20 +51,18 @@ class TestEvaluateLayer2GateCrisisConstraint:
         gate_without = evaluate_layer2_gate(**_BASE_KWARGS, crisis_mdd_hybrid=None, crisis_mdd_budget=None)
 
         assert len(gate_without.optuna_constraint_values) == 14
-        assert gate_without.optuna_constraint_values[9] == pytest.approx(-1.0, abs=1e-6)
-        assert gate_without.optuna_constraint_values[:9] == gate_with.optuna_constraint_values[:9]
+        assert gate_without.optuna_constraint_values[9] > 0.0
 
-    def test_evaluate_layer2_gate_optuna_constraints_include_absolute_growth_and_sharpe_abs(self) -> None:
-        """[S1] absolute growth >=0, sharpe_abs >=0.7 -> slot 10<=0, slot 11<=0."""
+    def test_evaluate_layer2_gate_optuna_constraints_include_growth_lcb(self) -> None:
+        """[S1] growth_lcb >= 0 -> slot 5 <= 0."""
         kwargs = dict(_BASE_KWARGS, cagr_hybrid=0.35, growth_lcb_deployed=0.05, sharpe_hac_hybrid=1.2)
         gate = evaluate_layer2_gate(**kwargs)
 
         assert len(gate.optuna_constraint_values) == 14
-        assert gate.optuna_constraint_values[10] <= 0.0
-        assert gate.optuna_constraint_values[11] <= 0.0
+        assert gate.optuna_constraint_values[5] <= 0.0
 
-    def test_evaluate_layer2_gate_optuna_constraints_flag_absolute_growth_violation(self) -> None:
-        """[S1] cagr_hybrid=0.10 (<0.30) with l2_min_absolute_cagr=0.0 -> growth_lcb drives."""
+    def test_evaluate_layer2_gate_optuna_constraints_flag_growth_lcb_violation(self) -> None:
+        """[S1] growth_lcb_deployed < min -> slot 5 > 0."""
         kwargs = dict(
             _BASE_KWARGS,
             cagr_hybrid=0.10,
@@ -74,32 +72,32 @@ class TestEvaluateLayer2GateCrisisConstraint:
         gate = evaluate_layer2_gate(**kwargs)
 
         assert len(gate.optuna_constraint_values) == 14
-        assert gate.optuna_constraint_values[10] > 0.0
+        assert gate.optuna_constraint_values[5] > 0.0
 
-    def test_evaluate_layer2_gate_crisis_cagr_below_floor_marks_infeasible(self) -> None:
-        """[S1] crisis_cagr_hybrid < crisis_cagr_floor -> 13th slot > 0 (infeasible)."""
+    def test_evaluate_layer2_gate_crisis_mdd_above_budget_marks_infeasible(self) -> None:
+        """[S1] crisis_mdd > budget -> slot 9 > 0 (infeasible)."""
         gate = evaluate_layer2_gate(
             **_BASE_KWARGS,
-            crisis_mdd_hybrid=0.15, crisis_mdd_budget=0.21,
+            crisis_mdd_hybrid=0.25, crisis_mdd_budget=0.21,
             crisis_cagr_hybrid=-0.15, crisis_cagr_floor=-0.05,
         )
 
         assert len(gate.optuna_constraint_values) == 14
-        assert gate.optuna_constraint_values[12] > 0.0
+        assert gate.optuna_constraint_values[9] > 0.0
 
-    def test_evaluate_layer2_gate_crisis_cagr_none_defaults_to_feasible(self) -> None:
-        """[S2] crisis_cagr_hybrid=None -> 13th slot -1.0 (auto feasible)."""
+    def test_evaluate_layer2_gate_crisis_unmeasured_fails_closed(self) -> None:
+        """[S2] crisis_mdd=None -> slot 9 fails closed (1.0)."""
         gate = evaluate_layer2_gate(
             **_BASE_KWARGS,
-            crisis_mdd_hybrid=0.15, crisis_mdd_budget=0.21,
+            crisis_mdd_hybrid=None, crisis_mdd_budget=None,
             crisis_cagr_hybrid=None, crisis_cagr_floor=None,
         )
 
         assert len(gate.optuna_constraint_values) == 14
-        assert gate.optuna_constraint_values[12] == pytest.approx(-1.0, abs=1e-6)
+        assert gate.optuna_constraint_values[9] > 0.0
 
-    def test_evaluate_layer2_gate_crisis_cagr_above_floor_feasible(self) -> None:
-        """[S1] crisis_cagr_hybrid >= crisis_cagr_floor -> 13th slot <= 0 (feasible)."""
+    def test_evaluate_layer2_gate_crisis_mdd_within_budget_feasible(self) -> None:
+        """[S1] crisis_mdd <= budget -> slot 9 <= 0 (feasible)."""
         gate = evaluate_layer2_gate(
             **_BASE_KWARGS,
             crisis_mdd_hybrid=0.15, crisis_mdd_budget=0.21,
@@ -107,7 +105,7 @@ class TestEvaluateLayer2GateCrisisConstraint:
         )
 
         assert len(gate.optuna_constraint_values) == 14
-        assert gate.optuna_constraint_values[12] <= 0.0
+        assert gate.optuna_constraint_values[9] <= 0.0
 
 
 class TestAbsoluteGrowthConstraint:
