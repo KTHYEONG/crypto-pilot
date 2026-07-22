@@ -53,6 +53,7 @@ from src.domain.futures.strategy.tiered_workflow.regime_debug import (
 from src.domain.futures.strategy.tiered_workflow.risk_deployment import trend_efficiency_gross_mult
 
 if TYPE_CHECKING:
+    from src.domain.futures.portfolio.online_growth_allocator import OnlinePolicyState
     from src.domain.futures.strategy.common.alignment import AlignedMarketData
     from src.domain.futures.strategy.tiered_workflow.dataclasses import SymbolRealizedStat
     from src.domain.futures.strategy.walk_forward import WFFold
@@ -2577,9 +2578,60 @@ def _run_awf_simulation(
     import time
 
     from src.domain.futures.portfolio.allocation_policy import select_fit_allocation_policy
-    from src.domain.futures.portfolio.policy_shadow_book import build_policy_weight_matrix
+    from src.domain.futures.portfolio.online_growth_allocator import (
+        OnlineAllocatorConfig,
+        allocate_online_policy_mix,  # noqa: F401  # contract wiring
+        initialize_online_policy_state,
+        update_online_policy_state,  # noqa: F401  # contract wiring
+    )
+    from src.domain.futures.portfolio.policy_shadow_book import (
+        build_policy_weight_matrix,
+        compute_shadow_bar_returns,
+    )
+    # contract wiring: allocate_online_policy_mix, update_online_policy_state
 
-    _ = build_policy_weight_matrix
+    _online_state: OnlinePolicyState = cast("OnlinePolicyState", None)
+    _online_previous_weights: NDArray[np.float64] = cast("NDArray[np.float64]", None)
+    _online_last_decision_idx: int | None = None
+    _online_ensemble_returns: list[float] = []
+
+    def _update_online_shadow_state(decision_idx: int) -> None:
+        nonlocal _online_state, _online_last_decision_idx, _online_previous_weights
+        if _online_last_decision_idx is None or decision_idx <= _online_last_decision_idx:
+            return
+        start = _online_last_decision_idx
+        end = min(decision_idx, aligned.close_2d.shape[0] - 1)
+        if end <= start:
+            return
+        policy_bar_returns: list[list[float]] = [[] for _ in _online_config.policies]
+        for bar_idx in range(start, end):
+            cur = np.asarray(aligned.close_2d[bar_idx], dtype=np.float64)
+            nxt = np.asarray(aligned.close_2d[bar_idx + 1], dtype=np.float64)
+            price_ret = np.where(cur > 0.0, (nxt - cur) / cur, 0.0)
+            price_ret = np.nan_to_num(price_ret, nan=0.0, posinf=0.0, neginf=0.0)
+            funding = np.asarray(cache.funding_2d[bar_idx], dtype=np.float64)
+            shadow = compute_shadow_bar_returns(
+                deployed_weights_2d=_online_previous_weights,
+                price_returns=price_ret,
+                funding_rates=funding,
+            )
+            for policy_idx, value in enumerate(shadow):
+                policy_bar_returns[policy_idx].append(float(value))
+        block_returns = np.asarray(
+            [np.prod(1.0 + np.asarray(values, dtype=np.float64)) - 1.0 for values in policy_bar_returns],
+            dtype=np.float64,
+        )
+        if not np.all(np.isfinite(block_returns)):
+            raise ValueError("non-finite online shadow block return")
+        _online_ensemble_returns.append(float(np.mean(block_returns)))
+        _online_state = update_online_policy_state(
+            state=_online_state,
+            completed_block_returns_by_policy=block_returns,
+            completed_return_end_idx=end - 1,
+            next_decision_idx=decision_idx,
+            config=_online_config,
+        )
+        _online_last_decision_idx = decision_idx
 
     logger = logging.getLogger("opt_main_futures")
     # L2 mutual exclusion guard: regime-conditional weight vs intra-symbol divergence
@@ -2646,6 +2698,15 @@ def _run_awf_simulation(
 
     symbols = aligned.symbols
     n_sym = len(symbols)
+    _online_config = OnlineAllocatorConfig()
+    _online_state = initialize_online_policy_state(
+        policies=_online_config.policies,
+        n_symbols=n_sym,
+        config_fingerprint="online_growth_v1",
+    )
+    _online_previous_weights = _online_state.previous_policy_weights_2d.copy()
+    _online_last_decision_idx = None
+    _online_ensemble_returns = []
     bars_per_year = 24.0 * 365.0 / max(hours_per_bar_tf(tf), 1e-9)
     sym_to_idx = {s: i for i, s in enumerate(symbols)}
     # Phase 3-5: capacity_usdt clip 상수
@@ -4033,25 +4094,48 @@ def _run_awf_simulation(
                 _returns_hist = np.diff(np.log(np.maximum(_price_window, 1e-12)), axis=0)
             else:
                 _returns_hist = None
-            w = diagonal_kelly_weights(
+            _update_online_shadow_state(t)
+            _policy_weights_2d = build_policy_weight_matrix(
+                policies=_online_config.policies,
                 mu_bps=mu_arr,
                 sigma=sig_arr,
-                kelly_fraction=kelly_fraction,
-                vol_target=vol_target,
+                l1_edge_margin_bps_per_bar=np.where(support_mask, mu_arr, 0.0),
+                quality_weight=np.where(support_mask, 1.0, 0.0),
                 caps=caps,
-                prev_w=prev_w,
+                previous_weights_2d=_online_previous_weights,
                 no_trade_band=no_trade_band,
+                vol_target=vol_target,
                 btc_beta=btc_beta,
                 bars_per_year=bars_per_year,
                 support_mask=support_mask,
-                z_scores=_z_score_arr,
-                cs_amp_alpha=float(config.l2_cs_amp_alpha),
-                cs_amp_mode=str(config.l2_cs_amp_mode),
-                returns_hist=_returns_hist,
-                cov_mode=config.l2_portfolio_cov_mode,
-                cov_min_obs=config.l2_portfolio_cov_min_obs,
-                kelly_shrink_to_equal=0.0,
             )
+            _exchange_cap = config.l2_max_exchange_leverage
+            _decision = allocate_online_policy_mix(
+                state=_online_state,
+                policy_weights_2d=_policy_weights_2d,
+                trailing_ensemble_returns=np.asarray(_online_ensemble_returns, dtype=np.float64),
+                config=_online_config,
+                caps=caps,
+                btc_beta=btc_beta,
+                max_mdd=float(config.l2_max_mdd_abs),
+                max_cvar_95=float(config.l2_max_cvar_95),
+                min_equity_multiplier=float(config.l2_min_equity_multiplier),
+                exchange_leverage_cap=float(_exchange_cap if _exchange_cap is not None else caps.gross),
+                decision_idx=t,
+            )
+            _online_previous_weights = _policy_weights_2d.copy()
+            _online_last_decision_idx = t
+            w = np.asarray(_decision.target_weights, dtype=np.float64)
+            if logger.isEnabledFor(logging.DEBUG) and (_fold_idx == 0 and t % max(rebalance_bars * 20, 1) == 0):
+                logger.debug(
+                    "[L2-ONLINE] fold=%d t=%d mode=%s posterior=%s cash=%.3f scale=%.3f",
+                    _fold_idx,
+                    t,
+                    _decision.mode,
+                    tuple(round(v, 4) for v in _decision.posterior_by_policy),
+                    _decision.cash_weight,
+                    _decision.risk_scale,
+                )
             if edge_throttle_enabled:
                 score = _book_edge_score(w, mu_arr)
                 m = _edge_throttle_multiplier(

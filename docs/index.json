@@ -514,5 +514,9 @@
   },
   "src/domain/futures/portfolio/policy_shadow_book.py": {
     "testing": "tests/unit/domain/futures/portfolio/test_policy_shadow_book.py"
+  },
+  "src/domain/futures/strategy/tiered_workflow/causal_alpha_tape.py": {
+    "architecture": "docs/results/result.md",
+    "testing": "tests/unit/domain/futures/strategy/tiered_workflow/test_causal_alpha_tape.py"
   }
 }
