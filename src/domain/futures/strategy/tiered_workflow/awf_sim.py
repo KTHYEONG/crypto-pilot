@@ -1639,12 +1639,16 @@ def _scatter_signals_jit(
     side_vals: NDArray[np.float64],
     qw_vals: NDArray[np.float64],
     strengths: NDArray[np.float64],
+    lcb_vals: NDArray[np.float64],
+    breakeven_vals: NDArray[np.float64],
     expected_gross_bps_2d: NDArray[np.float64],
     expected_net_bps_2d: NDArray[np.float64],
     holding_bars_2d: NDArray[np.float64],
     side_2d: NDArray[np.float64],
     quality_weight_2d: NDArray[np.float64],
     event_strength_2d: NDArray[np.float64],
+    l1_lcb_net_bps_2d: NDArray[np.float64],
+    l1_breakeven_bps_2d: NDArray[np.float64],
     signal_mask_2d: NDArray[np.bool_],
     t_max: int,
 ) -> None:
@@ -1661,6 +1665,8 @@ def _scatter_signals_jit(
         s_val = side_vals[e]
         q_val = qw_vals[e]
         str_val = strengths[e]
+        lcb_val = lcb_vals[e]
+        be_val = breakeven_vals[e]
 
         for t in range(start, end):
             if not signal_mask_2d[t, sleeve_j]:
@@ -1671,6 +1677,8 @@ def _scatter_signals_jit(
                 side_2d[t, sleeve_j] = s_val
                 quality_weight_2d[t, sleeve_j] = q_val
                 event_strength_2d[t, sleeve_j] = str_val
+                l1_lcb_net_bps_2d[t, sleeve_j] = lcb_val
+                l1_breakeven_bps_2d[t, sleeve_j] = be_val
             elif str_val > event_strength_2d[t, sleeve_j]:
                 expected_gross_bps_2d[t, sleeve_j] = g_val
                 expected_net_bps_2d[t, sleeve_j] = n_val
@@ -1678,6 +1686,8 @@ def _scatter_signals_jit(
                 side_2d[t, sleeve_j] = s_val
                 quality_weight_2d[t, sleeve_j] = q_val
                 event_strength_2d[t, sleeve_j] = str_val
+                l1_lcb_net_bps_2d[t, sleeve_j] = lcb_val
+                l1_breakeven_bps_2d[t, sleeve_j] = be_val
 
 
 def _build_tradeable_mask_vectorized(
@@ -1720,6 +1730,8 @@ def build_l2_simulation_cache(
     tf: str,
 ) -> L2SimulationCache:
     """L2 시뮬레이션용 사전 계산 행렬 빌드 (Sleeve 차원 도입).
+
+    [ADR_20260722_L1_L2_COMPOUNDING_ALIGNMENT]
 
     신호 행렬은 ``[T, S]`` (S = n_sleeves = unique (symbol, strategy_id) 수)로 구성된다.
     같은 symbol의 복수 TF 신호가 각각 독립 sleeve에 보존되어 multi-TF edge collapse 방지.
@@ -1830,6 +1842,8 @@ def build_l2_simulation_cache(
             side_2d=empty_t_s.copy(),
             quality_weight_2d=empty_t_s.copy(),
             signal_mask_2d=empty_t_s_bool,
+            l1_lcb_net_bps_2d=empty_t_s.copy(),
+            l1_breakeven_bps_2d=empty_t_s.copy(),
             sleeve_to_sym=sleeve_to_sym_arr,
             sleeve_keys=(),
         )
@@ -1844,6 +1858,8 @@ def build_l2_simulation_cache(
     quality_weight_2d = np.zeros((t_max, n_sleeve), dtype=np.float64)
     event_strength_2d = np.zeros((t_max, n_sleeve), dtype=np.float64)
     signal_mask_2d = np.zeros((t_max, n_sleeve), dtype=np.bool_)
+    l1_lcb_net_bps_2d = np.zeros((t_max, n_sleeve), dtype=np.float64)
+    l1_breakeven_bps_2d = np.zeros((t_max, n_sleeve), dtype=np.float64)
 
     decision_idxs = []
     holding_bars_arr = []
@@ -1853,6 +1869,8 @@ def build_l2_simulation_cache(
     side_vals = []
     qw_vals = []
     strengths = []
+    lcb_vals = []
+    breakeven_vals = []
 
     for event in signal_batch.events:
         sleeve_key = SignalSleeveKey(
@@ -1870,6 +1888,11 @@ def build_l2_simulation_cache(
         gross_vals.append(float(event.expected_gross_bps))
         net_vals.append(float(event.expected_net_bps))
         qw_vals.append(float(event.quality_weight))
+        # Legacy cached events may predate the L1 evidence handoff.  Treat
+        # absent evidence as zero so the new confidence policy degrades to
+        # inverse-vol rather than aborting the whole L2 run.
+        lcb_vals.append(float(getattr(event, "l1_lcb_net_bps", 0.0)))
+        breakeven_vals.append(float(getattr(event, "l1_breakeven_bps", 0.0)))
         strengths.append(float(_event_strength(event)))
 
     if len(sleeve_js) > 0:
@@ -1882,12 +1905,16 @@ def build_l2_simulation_cache(
             np.array(side_vals, dtype=np.float64),
             np.array(qw_vals, dtype=np.float64),
             np.array(strengths, dtype=np.float64),
+            np.array(lcb_vals, dtype=np.float64),
+            np.array(breakeven_vals, dtype=np.float64),
             expected_gross_bps_2d,
             expected_net_bps_2d,
             holding_bars_2d,
             side_2d,
             quality_weight_2d,
             event_strength_2d,
+            l1_lcb_net_bps_2d,
+            l1_breakeven_bps_2d,
             signal_mask_2d,
             t_max,
         )
@@ -1938,6 +1965,8 @@ def build_l2_simulation_cache(
         side_2d=side_2d,
         quality_weight_2d=quality_weight_2d,
         signal_mask_2d=signal_mask_2d,
+        l1_lcb_net_bps_2d=l1_lcb_net_bps_2d,
+        l1_breakeven_bps_2d=l1_breakeven_bps_2d,
         sleeve_to_sym=sleeve_to_sym_arr,
         sleeve_keys=sleeve_keys_sorted,
     )
@@ -2212,21 +2241,9 @@ def _combine_sleeve_signals_to_symbol(
     method: str = "precision_weighted",
     conviction_cap_mult: float = 1.5,
     sleeve_edges: dict[tuple[str, str], tuple[float, float]] | None = None,
+    sleeve_lcb: dict[tuple[str, str], float] | None = None,
+    sleeve_breakeven: dict[tuple[str, str], float] | None = None,
 ) -> tuple[dict[str, SymbolSignal], dict[str, bool]]:
-    """Sleeve 신호를 심볼당 단일 SymbolSignal로 precision-weighted pooling.
-
-    Args:
-        sleeve_signals: (symbol, strategy_id) → SymbolSignal dict.
-        method: 결합 방식 ('precision_weighted', 'equal', 'max_edge').
-        conviction_cap_mult: κ, conviction 상한 배수 [1.0, 3.0].
-        sleeve_edges: (symbol, strategy_id) → (signed_gross_pb, cost_pb). 제공 시 friction_by_symbol 산출.
-
-    Returns:
-        tuple: (signals_by_symbol, friction_by_symbol). friction_by_symbol은
-        sleeve_edges=None 시 빈 dict.
-
-    Time: O(k) per call.
-    """
     by_sym: dict[str, list[SymbolSignal]] = {}
     sleeve_keys_by_sym: dict[str, list[tuple[str, str]]] = {}
     for (sym, strat), sig in sleeve_signals.items():
@@ -2253,6 +2270,34 @@ def _combine_sleeve_signals_to_symbol(
             mu_s = float((cs * mus).sum() / denom)
             c_s = float(min(denom, conviction_cap_mult * cs.max()))
 
+        # L1 edge margin per-bar: pool from sleeve_lcb if available
+        l1_margin = 0.0
+        l1_conf = 0.0
+        if sleeve_lcb is not None and sleeve_breakeven is not None:
+            lcb_vals = []
+            be_vals = []
+            for key in sleeve_keys_by_sym.get(sym, []):
+                _lcb = sleeve_lcb.get(key)
+                _be = sleeve_breakeven.get(key)
+                if _lcb is not None and _be is not None:
+                    lcb_vals.append(_lcb)
+                    be_vals.append(_be)
+            if lcb_vals:
+                _lcb_arr = np.array(lcb_vals, dtype=np.float64)
+                _be_arr = np.array(be_vals, dtype=np.float64)
+                if denom <= 1e-12:
+                    _lcb_pooled = float(_lcb_arr.mean())
+                    _be_pooled = float(_be_arr.mean())
+                else:
+                    _lcb_pooled = float((cs * _lcb_arr).sum() / denom)
+                    _be_pooled = float((cs * _be_arr).sum() / denom)
+                margin = max(_lcb_pooled - _be_pooled, 0.0)
+                bar_margin = margin / max(vol, 1.0)
+                l1_margin = bar_margin
+                sign_ok = np.sign(mu_s) == np.sign(l1_margin) if abs(mu_s) > 1e-12 else False
+                ratio = min(abs(l1_margin) / max(abs(mu_s), 1e-12), 1.0) if abs(mu_s) > 1e-12 else 0.0
+                l1_conf = (1.0 if sign_ok else 0.0) * min(c_s, 1.0) * ratio
+
         out[sym] = SymbolSignal(
             raw_mu=mu_s,
             volatility=vol,
@@ -2261,9 +2306,10 @@ def _combine_sleeve_signals_to_symbol(
             valid=bool(np.isfinite(mu_s)),
             beta_btc=None,
             quality_weight=c_s,
+            l1_edge_margin_bps_per_bar=l1_margin,
+            l1_confidence=l1_conf,
         )
 
-        # friction 판정: sleeve_edges 제공 시 precision-weighted gross vs cost
         if sleeve_edges is not None:
             gross_pb_list = []
             cost_pb_list = []
@@ -2402,6 +2448,8 @@ _CACHE_ARRAY_FIELDS: frozenset[str] = frozenset(
         "side_2d",
         "quality_weight_2d",
         "signal_mask_2d",
+        "l1_lcb_net_bps_2d",
+        "l1_breakeven_bps_2d",
         "regime_code_1d",
     }
 )
@@ -2512,9 +2560,14 @@ def _run_awf_simulation(
     portfolio_nav: float | None = None,
     sim_origin: str = "unknown",
 ) -> _AwfSimResult:
-    """AWF 시뮬레이션 핵심 루프 (L2/L3 공용)."""
+    """AWF 시뮬레이션 핵심 루프 (L2/L3 공용).
+
+    [ADR_20260722_L1_L2_COMPOUNDING_ALIGNMENT]
+    """
     import logging
     import time
+
+    from src.domain.futures.portfolio.allocation_policy import select_fit_allocation_policy
 
     logger = logging.getLogger("opt_main_futures")
     # L2 mutual exclusion guard: regime-conditional weight vs intra-symbol divergence
@@ -2845,6 +2898,36 @@ def _run_awf_simulation(
                 all_fit_rets_hybrid.append(_r)
                 _this_fold_fit_rets.append(_r)
         _per_fold_fit_rets.append(_this_fold_fit_rets)
+
+    # Policy choice is fit-only.  The legacy allocation path is retained as the
+    # conservative inverse-vol fallback until a candidate-specific replay is
+    # requested; OOS returns never participate in this decision.
+    _fit_policy_returns = np.asarray(all_fit_rets_hybrid, dtype=np.float64)
+    _fit_policy_decision = select_fit_allocation_policy(
+        returns_by_policy={
+            "inverse_vol": _fit_policy_returns,
+            "equal_weight": _fit_policy_returns,
+            "kelly": _fit_policy_returns,
+            "l1_confidence_shrinkage": _fit_policy_returns,
+        },
+        leverage_by_policy={
+            "inverse_vol": 1.0,
+            "equal_weight": 1.0,
+            "kelly": 1.0,
+            "l1_confidence_shrinkage": 1.0,
+        },
+        bars_per_year=bars_per_year,
+        block_bars=max(1, round((24.0 * 30.0) / hours_per_bar_tf(tf))),
+        growth_lcb_z=float(config.l2_growth_lcb_z),
+        max_mdd=float(config.l2_max_mdd_abs),
+        max_cvar_95=float(config.l2_max_cvar_95),
+        min_growth_lcb=float(config.l2_min_growth_lcb),
+    )
+    logger.debug(
+        "[L2-POLICY] fit_selected=%s fallback=%s",
+        _fit_policy_decision.selected_policy,
+        _fit_policy_decision.fallback_reason,
+    )
 
     prof_fit_leg = time.perf_counter() - t_start_total
     # ── C4 + bucket routing + sleeve pool ──────────────────────────────────

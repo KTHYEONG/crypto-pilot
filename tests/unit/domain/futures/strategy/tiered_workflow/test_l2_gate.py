@@ -1,10 +1,12 @@
-"""Scenarios 1-2: evaluate_layer2_gate crisis constraint."""
+"""Scenarios 1-2, 6: evaluate_layer2_gate crisis constraint & absolute growth gate."""
 from __future__ import annotations
+
+from dataclasses import replace
 
 import pytest
 
 from src.domain.futures.strategy.tiered_workflow.dataclasses import Layer2AllocationConfig
-from src.domain.futures.strategy.tiered_workflow.l2_gate import _cagr_gate_constraint, evaluate_layer2_gate
+from src.domain.futures.strategy.tiered_workflow.l2_gate import _absolute_growth_constraint, evaluate_layer2_gate
 
 _BASE_KWARGS = {
     "deployment_failed": False,
@@ -23,6 +25,7 @@ _BASE_KWARGS = {
     "trade_count": 50,
     "growth_lcb_hybrid": 0.20,
     "growth_lcb_baseline": 0.10,
+    "growth_lcb_deployed": 0.20,
     "dsr_hybrid": None,
     "psr_hybrid": 0.95,
     "recent_fold_passed": True,
@@ -51,18 +54,23 @@ class TestEvaluateLayer2GateCrisisConstraint:
         assert gate_without.optuna_constraint_values[9] == pytest.approx(-1.0, abs=1e-6)
         assert gate_without.optuna_constraint_values[:9] == gate_with.optuna_constraint_values[:9]
 
-    def test_evaluate_layer2_gate_optuna_constraints_include_cagr_and_uplift(self) -> None:
-        """[S1] cagr>=0.30, sharpe_uplift>=0.05 -> optuna_constraint_values[10]<=0, [11]<=0."""
-        kwargs = dict(_BASE_KWARGS, cagr_hybrid=0.35, sharpe_hac_hybrid=1.2, sharpe_hac_baseline=1.0)
+    def test_evaluate_layer2_gate_optuna_constraints_include_absolute_growth_and_sharpe_abs(self) -> None:
+        """[S1] absolute growth >=0, sharpe_abs >=0.7 -> slot 10<=0, slot 11<=0."""
+        kwargs = dict(_BASE_KWARGS, cagr_hybrid=0.35, growth_lcb_deployed=0.05, sharpe_hac_hybrid=1.2)
         gate = evaluate_layer2_gate(**kwargs)
 
         assert len(gate.optuna_constraint_values) == 14
         assert gate.optuna_constraint_values[10] <= 0.0
         assert gate.optuna_constraint_values[11] <= 0.0
 
-    def test_evaluate_layer2_gate_optuna_constraints_flag_cagr_violation(self) -> None:
-        """[S1] cagr_hybrid=0.10 (<0.30) -> optuna_constraint_values[10] > 0.0 (infeasible)."""
-        kwargs = dict(_BASE_KWARGS, cagr_hybrid=0.10, sharpe_hac_hybrid=1.2, sharpe_hac_baseline=1.0)
+    def test_evaluate_layer2_gate_optuna_constraints_flag_absolute_growth_violation(self) -> None:
+        """[S1] cagr_hybrid=0.10 (<0.30) with l2_min_absolute_cagr=0.0 -> growth_lcb drives."""
+        kwargs = dict(
+            _BASE_KWARGS,
+            cagr_hybrid=0.10,
+            growth_lcb_deployed=-0.01,
+            config=replace(Layer2AllocationConfig(), l2_min_absolute_cagr=0.0, l2_min_growth_lcb=0.0),
+        )
         gate = evaluate_layer2_gate(**kwargs)
 
         assert len(gate.optuna_constraint_values) == 14
@@ -102,29 +110,67 @@ class TestEvaluateLayer2GateCrisisConstraint:
         assert gate.optuna_constraint_values[12] <= 0.0
 
 
-class TestCagrGateConstraint:
-    @pytest.mark.parametrize(
-        ("baseline", "cagr", "should_block"),
-        [
-            (0.10, 0.12, True),
-            (0.10, 0.20, False),
-            (-0.20, -0.01, True),
-            (-0.20, 0.01, False),
-        ],
-    )
-    def test_cagr_gate_constraint_relative_mode_uses_baseline_plus_uplift(self, baseline: float, cagr: float, should_block: bool) -> None:
-        value = _cagr_gate_constraint(
-            cagr_hybrid=cagr, cagr_baseline=baseline, mode="relative",
-            l2_min_cagr=0.30, l2_min_cagr_uplift=0.05,
+class TestAbsoluteGrowthConstraint:
+    def test_absolute_growth_passes_when_both_above_floor(self) -> None:
+        value = _absolute_growth_constraint(
+            cagr_hybrid=0.10, growth_lcb_hybrid=0.02,
+            l2_min_absolute_cagr=0.0, l2_min_growth_lcb=0.0,
         )
-        assert (value > 0.0) is should_block
+        assert value <= 0.0
 
-    def test_cagr_gate_constraint_none_baseline_falls_back_to_absolute(self) -> None:
-        value = _cagr_gate_constraint(
-            cagr_hybrid=0.20, cagr_baseline=None, mode="relative",
-            l2_min_cagr=0.30, l2_min_cagr_uplift=0.05,
+    def test_absolute_growth_fails_when_growth_lcb_below_floor(self) -> None:
+        value = _absolute_growth_constraint(
+            cagr_hybrid=0.10, growth_lcb_hybrid=-0.01,
+            l2_min_absolute_cagr=0.0, l2_min_growth_lcb=0.0,
         )
-        assert value == pytest.approx(0.10)
+        assert value > 0.0
+
+    def test_absolute_growth_fails_when_cagr_below_floor(self) -> None:
+        value = _absolute_growth_constraint(
+            cagr_hybrid=-0.01, growth_lcb_hybrid=0.02,
+            l2_min_absolute_cagr=0.0, l2_min_growth_lcb=0.0,
+        )
+        assert value > 0.0
+
+
+class TestAbsoluteGrowthGate:
+    def test_absolute_growth_gate_ignores_relative_uplift(self) -> None:
+        config = replace(
+            Layer2AllocationConfig(),
+            l2_min_absolute_cagr=0.0,
+            l2_min_growth_lcb=0.0,
+            l2_min_cagr_uplift=0.50,
+            l2_min_sharpe_uplift=2.0,
+        )
+        gate = evaluate_layer2_gate(
+            deployment_failed=False,
+            support_leak_count=0,
+            cagr_hybrid=0.06,
+            sharpe_hybrid=1.0,
+            sharpe_hac_hybrid=1.0,
+            sharpe_hac_baseline=1.2,
+            sortino_hybrid=2.0,
+            mar_hybrid=1.0,
+            mdd_hybrid=0.06,
+            cvar_95_hybrid=0.02,
+            fold_pass_ratio=1.0,
+            active_block_count=4,
+            friction_pass_pct=1.0,
+            trade_count=50,
+            growth_lcb_hybrid=0.01,
+            growth_lcb_baseline=0.02,
+            growth_lcb_deployed=0.01,
+            dsr_hybrid=None,
+            psr_hybrid=0.99,
+            recent_fold_passed=True,
+            recent_fold_sharpe=1.0,
+            worst_fold_cagr=0.0,
+            positive_block_delta_ratio=0.5,
+            fold_attributions=(),
+            config=config,
+        )
+        assert gate.optuna_constraint_values[10] <= 0.0
+        assert gate.optuna_constraint_values[11] <= 0.0
 
 
 class TestLayer2AllocationConfigCagrGateMode:
@@ -134,35 +180,3 @@ class TestLayer2AllocationConfigCagrGateMode:
         )
         with pytest.raises(ValueError, match="l2_cagr_gate_mode"):
             _validate_cagr_gate_mode("invalid")
-
-
-class TestEvaluateLayer2GateRelativeCagr:
-    def test_evaluate_layer2_gate_relative_mode_wired_from_config(self) -> None:
-        kwargs = dict(_BASE_KWARGS,
-            cagr_hybrid=0.12,
-            cagr_baseline=0.10,
-            config=Layer2AllocationConfig(
-                l2_cagr_gate_mode="relative",
-                l2_min_cagr_uplift=0.05,
-                l2_min_cagr=0.30,
-            ),
-        )
-        gate = evaluate_layer2_gate(**kwargs)
-
-        assert gate.optuna_constraint_values[10] > 0.0
-        assert gate.promotion_constraint_values[2] > 0.0
-
-    def test_evaluate_layer2_gate_relative_mode_high_cagr_passes(self) -> None:
-        kwargs = dict(_BASE_KWARGS,
-            cagr_hybrid=0.20,
-            cagr_baseline=0.10,
-            config=Layer2AllocationConfig(
-                l2_cagr_gate_mode="relative",
-                l2_min_cagr_uplift=0.05,
-                l2_min_cagr=0.30,
-            ),
-        )
-        gate = evaluate_layer2_gate(**kwargs)
-
-        assert gate.optuna_constraint_values[10] <= 0.0
-        assert gate.promotion_constraint_values[2] <= 0.0
