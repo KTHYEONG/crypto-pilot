@@ -39,7 +39,7 @@ if TYPE_CHECKING:
         ValidationParityReport,
     )
     from src.domain.futures.strategy.walk_forward import WFFold
-
+    from src.domain.futures.portfolio.allocation_policy import AllocationPolicy as AllocationPolicyNew
 
 def _validate_directional_veto_action(value: str) -> Literal["drop_long", "zero_mu", "cap_mu"]:
     if value not in {"drop_long", "zero_mu", "cap_mu"}:
@@ -358,6 +358,13 @@ class Layer2TrialEvaluation:
     window_bottleneck_detail: str = ""
     crisis_mdd_hybrid: float = float("nan")
     crisis_cagr_hybrid: float = float("nan")
+    # [SPEC_L1_L2_COMPOUNDING_ALIGNMENT] Policy selection fields
+    selected_policy: str = ""
+    deployed_policy: str | None = None
+    fallback_used: bool = False
+    selected_policy_scores: tuple[Any, ...] = ()
+    baseline_growth_lcb_deployed: float = float("-inf")
+    baseline_deploy_leverage: float = 1.0
 
 
 @dataclass(slots=True, frozen=True)
@@ -545,6 +552,13 @@ class Layer2Result:
     recency_holdout_applicable: bool = False
     window_bottleneck_covered: bool = True
     window_bottleneck_detail: str = ""
+    # [SPEC_L1_L2_COMPOUNDING_ALIGNMENT] Policy selection fields
+    selected_policy: str = ""
+    deployed_policy: str | None = None
+    fallback_used: bool = False
+    selected_policy_scores: tuple[Any, ...] = ()
+    baseline_growth_lcb_deployed: float = float("-inf")
+    baseline_deploy_leverage: float = 1.0
 
 
 @dataclass(slots=True, frozen=True)
@@ -752,6 +766,17 @@ class Layer2AllocationConfig:
     l2_intra_symbol_divergence_dissent_boost_mult: float = 2.0
     # [SPEC_L2_FOLD_GRANULARITY_ROBUSTNESS] L2 전용 walk-forward fold 개수
     l2_wf_n_folds: int = 4
+
+    # [SPEC_L1_L2_COMPOUNDING_ALIGNMENT] Policy candidates & absolute growth gate
+    l2_allocation_policy_candidates: tuple[str, ...] = (
+        "equal_weight",
+        "inverse_vol",
+        "kelly",
+        "l1_confidence_shrinkage",
+    )
+    l2_allocation_fallback_policy: str = "inverse_vol"
+    l2_min_absolute_cagr: float = 0.0
+    l2_min_growth_lcb: float = 0.0
 
     @staticmethod
     def _as_int(value: object, default: int) -> int:
@@ -1800,6 +1825,10 @@ class L2SimulationCache:
     @property
     def sleeve_to_tf(self) -> tuple[str, ...]:
         return tuple(sk.native_tf for sk in self.sleeve_keys)
+
+    # L1 LCB / breakeven matrices [T,S] (event-unit bps)
+    l1_lcb_net_bps_2d: NDArray[np.float64] = field(default_factory=lambda: np.empty((0, 0), dtype=np.float64))
+    l1_breakeven_bps_2d: NDArray[np.float64] = field(default_factory=lambda: np.empty((0, 0), dtype=np.float64))
 
     # Pre-computed bucket realized edges (trial-param independent → cached once)
     bucket_edges_by_fold: tuple[dict[tuple[Any, ...], float], ...] = ()
