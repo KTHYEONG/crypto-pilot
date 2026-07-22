@@ -31,6 +31,7 @@ from src.domain.futures.strategy.candidate_contracts import (
     SymbolStrategyEvidence,
     ValidatedSignalBatch,
     ValidatedSignalEvent,
+    strip_tf_suffix,
 )
 from src.domain.futures.strategy.candidate_dataset import (
     build_candidate_dataset,
@@ -994,16 +995,7 @@ def _registry_to_symbol_signals(
 
 
 def _strip_tf_suffix(strategy_id: str, native_tf: str) -> str:
-    """Exact-suffix removal of '_{native_tf}' for cross-source key matching only.
-
-    Does not mutate what callers store on emitted events — matching-only helper.
-    """
-    if not native_tf:
-        return strategy_id
-    suffix = f"_{native_tf}"
-    if strategy_id.endswith(suffix):
-        return strategy_id[: -len(suffix)]
-    return strategy_id
+    return strip_tf_suffix(strategy_id, native_tf)
 
 
 def _strip_tf_suffix_series(values: pd.Series, native_tf: str) -> pd.Series:
