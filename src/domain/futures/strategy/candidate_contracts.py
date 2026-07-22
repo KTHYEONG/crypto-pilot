@@ -688,6 +688,16 @@ class SignalSleeveKey:
     strategy_id: str
 
 
+def strip_tf_suffix(strategy_id: str, native_tf: str) -> str:
+    """[ADR_20260722_L1_SIGNAL_UTILIZATION_GATE_PARITY]"""
+    if not native_tf:
+        return strategy_id
+    suffix = f"_{native_tf}"
+    if strategy_id.endswith(suffix):
+        return strategy_id[: -len(suffix)]
+    return strategy_id
+
+
 @dataclass(frozen=True, slots=True)
 class L1TfHandoffReadiness:
     timeframe: str
