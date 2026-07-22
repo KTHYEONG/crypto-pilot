@@ -638,3 +638,67 @@ class TestCorrelatedCovMode:
             cov_min_obs=20,
         )
         assert np.all(np.isfinite(w)), "insufficient history should not crash"
+
+
+class TestKellyShrinkToEqual:
+    """Kelly ↔ Equal-Weight shape-space shrinkage (l2-kelly-equal-weight-shrinkage.md)."""
+
+    def test_shrink_zero_byte_identical_to_baseline(self) -> None:
+        kwargs = {
+            "mu_bps": np.array([8.0, -6.0, 3.0, -2.0], dtype=np.float64),
+            "sigma": np.array([0.01, 0.012, 0.009, 0.011], dtype=np.float64),
+            "kelly_fraction": 0.25,
+            "vol_target": None,
+            "caps": PortfolioCaps(per_symbol=1.0, gross=4.0, net=2.0, beta=2.0, target_ann_vol=None),
+            "prev_w": np.zeros(4, dtype=np.float64),
+            "no_trade_band": 0.0,
+            "support_mask": np.array([True, True, True, True], dtype=bool),
+        }
+        w_default = diagonal_kelly_weights(**kwargs)
+        w_explicit_zero = diagonal_kelly_weights(**kwargs, kelly_shrink_to_equal=0.0)
+        np.testing.assert_array_equal(w_default, w_explicit_zero)
+
+    @staticmethod
+    def _shape_kwargs() -> dict:
+        return {
+            "mu_bps": np.array([8.0, -6.0, 3.0, -2.0], dtype=np.float64),
+            "sigma": np.array([0.01, 0.012, 0.009, 0.011], dtype=np.float64),
+            "kelly_fraction": 0.25,
+            "vol_target": None,
+            "caps": PortfolioCaps(per_symbol=100.0, gross=400.0, net=200.0, beta=200.0, target_ann_vol=None),
+            "prev_w": np.zeros(4, dtype=np.float64),
+            "no_trade_band": 0.0,
+            "support_mask": np.array([True, True, True, True], dtype=bool),
+        }
+
+    def test_shrink_one_matches_equal_directional_shape(self) -> None:
+        kwargs = self._shape_kwargs()
+        w_kelly = diagonal_kelly_weights(**kwargs, kelly_shrink_to_equal=0.0)
+        w_equal = diagonal_kelly_weights(**kwargs, kelly_shrink_to_equal=1.0)
+        support = kwargs["support_mask"]
+        n_support = int(np.sum(support))
+        scale = float(np.sum(np.abs(w_kelly[support])))
+        expected = np.sign(w_kelly) * (scale / n_support)
+        np.testing.assert_allclose(w_equal[support], expected[support], rtol=1e-9)
+
+    def test_shrink_partial_interpolates_linearly(self) -> None:
+        kwargs = self._shape_kwargs()
+        w0 = diagonal_kelly_weights(**kwargs, kelly_shrink_to_equal=0.0)
+        w1 = diagonal_kelly_weights(**kwargs, kelly_shrink_to_equal=1.0)
+        w_half = diagonal_kelly_weights(**kwargs, kelly_shrink_to_equal=0.5)
+        expected_half = 0.5 * w0 + 0.5 * w1
+        np.testing.assert_allclose(w_half, expected_half, rtol=1e-6)
+
+    def test_shrink_zero_norm_support_guard(self) -> None:
+        kwargs = self._shape_kwargs()
+        kwargs["mu_bps"] = np.zeros(4, dtype=np.float64)
+        w = diagonal_kelly_weights(**kwargs, kelly_shrink_to_equal=0.8)
+        np.testing.assert_array_equal(w, np.zeros(4, dtype=np.float64))
+
+    def test_shrink_preserves_sign(self) -> None:
+        kwargs = self._shape_kwargs()
+        w = diagonal_kelly_weights(**kwargs, kelly_shrink_to_equal=1.0)
+        assert w[0] > 0
+        assert w[1] < 0
+        assert w[2] > 0
+        assert w[3] < 0
