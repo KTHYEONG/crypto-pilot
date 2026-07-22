@@ -710,3 +710,24 @@ class L1TfHandoffReadiness:
     auxiliary_eligible: bool
     master_eligible: bool
     rejection_reasons: tuple[str, ...]
+
+
+
+@dataclass(slots=True, frozen=True)
+class CausalAlphaSegment:
+    segment_idx: int
+    predict_start: int
+    predict_end_exclusive: int
+    model_fit_end_exclusive: int
+    max_evidence_exit_idx: int
+    is_warmup: bool
+    batch: ValidatedSignalBatch
+
+
+@dataclass(slots=True, frozen=True)
+class CausalAlphaTape:
+    segments: tuple[CausalAlphaSegment, ...]
+    start_idx: int
+    end_idx_exclusive: int
+    symbols: tuple[str, ...]
+    fingerprint: str

@@ -299,6 +299,7 @@ def _handoff_fingerprint(
     return hasher.hexdigest()
 
 
+# none: removed hard admission and L1 override from active online path
 def evaluate_portfolio_handoff(
     *,
     registry: QualifiedSignalRegistry,

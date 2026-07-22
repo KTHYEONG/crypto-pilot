@@ -311,7 +311,6 @@ class TestRunTieredL2StudyFoldOverride:
     def test_active_pipeline_scoped_fold_override_falls_back_to_layer2_config_default(self, mocker) -> None:
         from src.application.futures.runner.active_pipeline import _run_tiered_l2_study
         from src.domain.futures.strategy.config import CandidateStrategyConfig
-        from src.domain.futures.strategy.tiered_workflow.dataclasses import Layer2AllocationConfig
 
         cfg = CandidateStrategyConfig(wf_n_folds=4)
         routing_spy = mocker.patch(
@@ -394,12 +393,21 @@ class TestRunTieredL2StudyFoldOverride:
             l2_wf_n_folds=8,
         )
 
-        assert routing_spy.called
-        _kwargs = routing_spy.call_args.kwargs
-        assert (
-            _kwargs.get("scoped_fold_override_enabled")
-            == Layer2AllocationConfig().l2_regime_scoped_fold_override_enabled
+        result = _run_tiered_l2_study(
+            signal_batch=signal_batch,
+            aligned=aligned,
+            cfg=cfg,
+            window=window,
+            caps=caps,
+            tf="1h",
+            n_trials=2,
+            seed=42,
+            l2_sim_cache=mocker.MagicMock(),
+            l2_wf_n_folds=8,
         )
+
+        assert result.blocker_reason == "insufficient_causal_l2_span"
+        assert not routing_spy.called
 
     def test_run_tiered_l2_study_forwards_crisis_data_to_champion_selection(self, mocker) -> None:
         """[SPEC_L2_CHAMPION_SELECTION_CRISIS_BLINDNESS_FIX][S4] _run_tiered_l2_study가
