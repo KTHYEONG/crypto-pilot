@@ -815,8 +815,9 @@ def diagonal_kelly_weights(
     returns_hist: NDArray[np.float64] | None = None,
     cov_mode: Literal["diagonal", "correlated"] = "diagonal",
     cov_min_obs: int = 20,
+    kelly_shrink_to_equal: float = 0.0,
 ) -> NDArray[np.float64]:
-    """신규 아키텍처용 Diagonal Kelly 사이징.
+    """신규 아키텍처용 Diagonal Kelly 사이징. [ADR_20260722_L2_KELLY_SHRINK]
 
     기존 LW/BL/full-cov 경로와 독립적인 신규 함수. 기존 solve_constrained_weights와 무관.
 
@@ -844,6 +845,8 @@ def diagonal_kelly_weights(
         returns_hist: (T, N) bar-to-bar simple return matrix. cov_mode='correlated' 시 필수.
         cov_mode: 'diagonal'(기본, 기존 동작) 또는 'correlated'(Ledoit-Wolf covariance 사용).
         cov_min_obs: rolling_ledoit_wolf_cov의 min_obs 전달값.
+        kelly_shrink_to_equal: [0,1] Kelly→Equal-Weight shape-space 블렌드 계수.
+            0.0=순수 Kelly (기본, 하위호환), 1.0=완전 균등가중 형태.
 
     Returns:
         최종 비중 벡터 [N], float64.
@@ -899,6 +902,19 @@ def diagonal_kelly_weights(
     var = sig_clipped**2
     w_raw: NDArray[np.float64] = kelly_fraction * mu_ret / var
     w_raw = np.where(support, w_raw, 0.0)
+
+    # 2b. Shape-space Kelly ↔ Equal-Weight shrinkage (cap 투영 이전)
+    if kelly_shrink_to_equal > 0.0:
+        support_abs_sum = float(np.sum(np.abs(w_raw[support]))) if np.any(support) else 0.0
+        if support_abs_sum > 1e-12:
+            n_support = int(np.sum(support))
+            w_kelly_shape = w_raw / support_abs_sum
+            w_equal_shape = np.where(support, np.sign(w_raw) / n_support, 0.0)
+            w_blend_shape = (
+                (1.0 - kelly_shrink_to_equal) * w_kelly_shape
+                + kelly_shrink_to_equal * w_equal_shape
+            )
+            w_raw = w_blend_shape * support_abs_sum
 
     # 3. vol_target 스케일링: caps.target_ann_vol override (project_all_caps에 위임)
     import dataclasses
