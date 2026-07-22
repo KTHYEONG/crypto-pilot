@@ -255,6 +255,23 @@ class TestBarsPerYearForTf:
 
 
 class TestLogFamilyRegimeFunnelDiagnostics:
+    @pytest.fixture(autouse=True)
+    def _force_opt_main_futures_propagate(self):
+        # setup_logger("opt_main_futures", ...) sets propagate=False once at
+        # active_pipeline.py import time (process-wide, one-time side effect),
+        # which silently breaks caplog (root-attached) for any module logging
+        # through this shared logger name. Force propagate=True for this
+        # class's tests only, regardless of import order in the pytest session.
+        import logging
+
+        logger = logging.getLogger("opt_main_futures")
+        saved_propagate = logger.propagate
+        logger.propagate = True
+        try:
+            yield
+        finally:
+            logger.propagate = saved_propagate
+
     @staticmethod
     def _make_events_frame(n_per_cell: int = 12):
         import numpy as np
@@ -288,7 +305,7 @@ class TestLogFamilyRegimeFunnelDiagnostics:
         )
 
         # Arrange
-        caplog.set_level(logging.INFO)
+        caplog.set_level(logging.INFO, logger="opt_main_futures")
         cfg = CandidateStrategyConfig(l1_bootstrap_block_bars=6, max_holding_bars=1)
         df = self._make_events_frame()
 
@@ -314,7 +331,7 @@ class TestLogFamilyRegimeFunnelDiagnostics:
         )
 
         # Arrange
-        caplog.set_level(logging.INFO)
+        caplog.set_level(logging.INFO, logger="opt_main_futures")
         cfg = CandidateStrategyConfig()
 
         # Act
@@ -333,7 +350,7 @@ class TestLogFamilyRegimeFunnelDiagnostics:
         )
 
         # Arrange — 셀당 3개 이벤트 < min_bars=8 → diag None
-        caplog.set_level(logging.INFO)
+        caplog.set_level(logging.INFO, logger="opt_main_futures")
         cfg = CandidateStrategyConfig(l1_bootstrap_block_bars=6, max_holding_bars=1)
         df = self._make_events_frame(n_per_cell=3)
 
@@ -354,7 +371,7 @@ class TestLogFamilyRegimeFunnelDiagnostics:
         )
 
         # Arrange
-        caplog.set_level(logging.WARNING)
+        caplog.set_level(logging.WARNING, logger="opt_main_futures")
         cfg = CandidateStrategyConfig()
         mocker.patch(
             "src.domain.futures.strategy.tiered_workflow.signal_selection."
