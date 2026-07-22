@@ -3,7 +3,6 @@ from __future__ import annotations
 from unittest.mock import MagicMock
 
 import numpy as np
-import pytest
 
 from src.domain.futures.portfolio.portfolio_constructor import PortfolioCaps
 from src.domain.futures.strategy.candidate_contracts import (
@@ -195,7 +194,7 @@ def _make_folds() -> tuple[WFFold, ...]:
     return (WFFold(fit_start=0, fit_end=1, cal_start=1, cal_end=1, oos_start=1, oos_end=4),)
 
 
-def test_awf_sim_wires_inverse_vol_fallback(mocker: MagicMock) -> None:
+def test_awf_sim_wires_online_policy_mixture(mocker: MagicMock) -> None:
     from src.domain.futures.strategy.tiered_workflow.awf_sim import (
         _run_awf_simulation,
         build_l2_simulation_cache,
@@ -207,6 +206,13 @@ def test_awf_sim_wires_inverse_vol_fallback(mocker: MagicMock) -> None:
     spy = mocker.patch(
         "src.domain.futures.strategy.tiered_workflow.awf_sim.diagonal_kelly_weights",
         return_value=np.zeros(2, dtype=np.float64),
+    )
+    online_spy = mocker.patch(
+        "src.domain.futures.portfolio.online_growth_allocator.allocate_online_policy_mix",
+        wraps=__import__(
+            "src.domain.futures.portfolio.online_growth_allocator",
+            fromlist=["allocate_online_policy_mix"],
+        ).allocate_online_policy_mix,
     )
     aligned = _make_aligned()
     signal_batch = _make_signal_batch()
@@ -231,6 +237,6 @@ def test_awf_sim_wires_inverse_vol_fallback(mocker: MagicMock) -> None:
         tf="4h",
     )
 
-    call_kwargs = spy.call_args.kwargs
-    assert "kelly_shrink_to_equal" in call_kwargs
-    assert call_kwargs["kelly_shrink_to_equal"] == pytest.approx(0.0)
+    assert spy.call_count == 0
+    assert online_spy.call_count >= 1
+    assert online_spy.call_args.kwargs["policy_weights_2d"].shape == (4, 2)

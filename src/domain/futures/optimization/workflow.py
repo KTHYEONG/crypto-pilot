@@ -2010,6 +2010,27 @@ def summarize_layer2_feasibility(
     )
 
 
+def summarize_online_growth_run(
+    *,
+    tape_fingerprint: str,
+    n_segments: int,
+    n_decisions: int,
+    n_symbols: int,
+    final_cash_weight: float,
+    final_risk_scale: float,
+    final_posterior_by_policy: tuple[float, ...],
+) -> dict[str, object]:
+    return {
+        "tape_fingerprint": tape_fingerprint,
+        "n_segments": n_segments,
+        "n_decisions": n_decisions,
+        "n_symbols": n_symbols,
+        "final_cash_weight": final_cash_weight,
+        "final_risk_scale": final_risk_scale,
+        "final_posterior_by_policy": final_posterior_by_policy,
+    }
+
+
 def evaluate_l2_trial(
     *,
     cache: L2SimulationCache,
