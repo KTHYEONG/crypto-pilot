@@ -553,6 +553,7 @@ class Layer2AllocationConfig:
 
     [ADR_20260704_L2_DIRECTIONAL_VETO]
     [ADR_20260717_L2_CRISIS_LEVERAGE_SAFETY_DEFAULT]
+    [ADR_20260722_L2_KELLY_SHRINK]
     """
 
     k_rank: int = 3
@@ -659,6 +660,7 @@ class Layer2AllocationConfig:
     l2_selection_breadth_mode: bool = False
     l2_cs_amp_alpha: float = 2.0
     l2_cs_amp_mode: str = "power"
+    kelly_shrink_to_equal: float = 0.0
     l2_cs_amp_power: float = 2.0
     # Regime State Compression (6→3) for quality improvement
     l2_regime_compression_enabled: bool = True
@@ -805,6 +807,12 @@ class Layer2AllocationConfig:
         risk_budget_max_scale = cls._validate_range(
             "risk_budget_max_scale",
             cls._as_float(params.get("risk_budget_max_scale", 3.0), 3.0),
+            1.0,
+        )
+        kelly_shrink_to_equal = cls._validate_range(
+            "kelly_shrink_to_equal",
+            cls._as_float(params.get("kelly_shrink_to_equal", 0.0), 0.0),
+            0.0,
             1.0,
         )
         adaptive_k_extra = int(
@@ -1207,6 +1215,7 @@ class Layer2AllocationConfig:
             edge_throttle_min_active_mult=edge_throttle_min_active_mult,
             risk_budget_floor_ratio=risk_budget_floor_ratio,
             risk_budget_max_scale=risk_budget_max_scale,
+            kelly_shrink_to_equal=kelly_shrink_to_equal,
             adaptive_breadth_enabled=bool(params.get("adaptive_breadth_enabled", False)),
             adaptive_k_extra=adaptive_k_extra,
             adaptive_expand_below_vol_ratio=adaptive_expand_below_vol_ratio,

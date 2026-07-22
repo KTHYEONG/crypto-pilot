@@ -142,3 +142,14 @@ def test_layer2_allocation_config_from_mapping_legacy_params_without_l2_wf_n_fol
 
     cfg = Layer2AllocationConfig.from_mapping({})
     assert cfg.l2_wf_n_folds == 4
+
+
+def test_layer2_allocation_config_kelly_shrink_range_validation() -> None:
+    from src.domain.futures.strategy.tiered_workflow.dataclasses import (
+        Layer2AllocationConfig,
+    )
+
+    with pytest.raises(ValueError, match="kelly_shrink_to_equal"):
+        Layer2AllocationConfig.from_mapping({"kelly_shrink_to_equal": 1.5})
+    with pytest.raises(ValueError, match="kelly_shrink_to_equal"):
+        Layer2AllocationConfig.from_mapping({"kelly_shrink_to_equal": -0.1})
