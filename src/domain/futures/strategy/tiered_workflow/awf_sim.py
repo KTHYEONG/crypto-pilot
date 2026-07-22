@@ -3955,6 +3955,7 @@ def _run_awf_simulation(
                 returns_hist=_returns_hist,
                 cov_mode=config.l2_portfolio_cov_mode,
                 cov_min_obs=config.l2_portfolio_cov_min_obs,
+                kelly_shrink_to_equal=float(config.kelly_shrink_to_equal),
             )
             if edge_throttle_enabled:
                 score = _book_edge_score(w, mu_arr)
