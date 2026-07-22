@@ -16,7 +16,7 @@ from src.domain.futures.strategy.tiered_workflow.dataclasses import (
     Layer2GateEvaluation,
 )
 
-_logger = logging.getLogger(__name__)
+_logger = logging.getLogger("opt_main_futures")
 
 
 @dataclass(slots=True, frozen=True)
@@ -145,8 +145,19 @@ def _cagr_gate_constraint(
 ) -> float:
     if mode == "relative" and cagr_baseline is not None:
         threshold = max(0.0, float(cagr_baseline) + float(l2_min_cagr_uplift))
-        return _finite_or_fail(threshold - float(cagr_hybrid))
-    return _finite_or_fail(float(l2_min_cagr) - float(cagr_hybrid))
+        constraint = _finite_or_fail(threshold - float(cagr_hybrid))
+        _logger.debug(
+            "[EVAL] tag=cagr_gate mode=relative cagr_hybrid=%.4f cagr_baseline=%.4f "
+            "uplift_required=%.4f threshold=%.4f constraint=%.4f",
+            cagr_hybrid, cagr_baseline, l2_min_cagr_uplift, threshold, constraint,
+        )
+        return constraint
+    constraint = _finite_or_fail(float(l2_min_cagr) - float(cagr_hybrid))
+    _logger.debug(
+        "[EVAL] tag=cagr_gate mode=absolute cagr_hybrid=%.4f l2_min_cagr=%.4f constraint=%.4f",
+        cagr_hybrid, l2_min_cagr, constraint,
+    )
+    return constraint
 
 
 def evaluate_layer2_gate(

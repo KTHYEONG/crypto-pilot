@@ -22,7 +22,7 @@ if TYPE_CHECKING:
     )
     from src.domain.futures.strategy.walk_forward import WFFold
 
-_logger = logging.getLogger(__name__)
+_logger = logging.getLogger("opt_main_futures")
 
 
 @dataclass(slots=True, frozen=True)
@@ -571,6 +571,20 @@ def evaluate_portfolio_handoff(
 
     overall_passed = any(len(ak) > 0 for ak in all_admitted_by_fold)
     overall_blocker = "" if overall_passed else "all_folds_blocked"
+
+    if _logger.isEnabledFor(logging.DEBUG):
+        for fold_idx, admitted_keys_dbg in enumerate(all_admitted_by_fold):
+            tf_counts: dict[str, int] = {}
+            override_counts: dict[str, int] = {}
+            for k in admitted_keys_dbg:
+                tf_counts[k.native_tf] = tf_counts.get(k.native_tf, 0) + 1
+            for ev in all_evidence_by_fold[fold_idx]:
+                if ev.admitted and ev.admitted_via_l1_edge_override:
+                    override_counts[ev.key.native_tf] = override_counts.get(ev.key.native_tf, 0) + 1
+            _logger.debug(
+                "[EVAL] tag=handoff_admitted_tf_breakdown fold=%d tf_counts=%s override_tf_counts=%s",
+                fold_idx, tf_counts, override_counts,
+            )
 
     return PortfolioHandoffResult(
         admitted_sleeves_by_fold=tuple(all_admitted_by_fold),
