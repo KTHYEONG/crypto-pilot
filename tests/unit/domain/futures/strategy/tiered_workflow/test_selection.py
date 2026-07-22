@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import optuna
+import pytest
 from optuna.trial import create_trial
 from optuna.distributions import FloatDistribution
 
@@ -545,7 +546,7 @@ def test_select_layer2_champion_rejects_candidate_below_crisis_cagr_floor(mocker
     )
     # gate: optuna_constraints[9]=MDD OK(<=0), [12]=CAGR FAIL(>0)
     mock_gate = mocker.MagicMock(
-        optuna_constraint_values=(-1.0,) * 9 + (-1.0, -1.0, -1.0, 0.10),  # 12th slot = CAGR violation
+        optuna_constraint_values=(-1.0,) * 9 + (-1.0, -1.0, -1.0, 0.10),
         promotion_constraint_values=(-1.0,) * 4,
         promotion_passed=False,
         promotion_blocker="crisis_cagr_below_floor",
@@ -572,3 +573,104 @@ def test_select_layer2_champion_rejects_candidate_below_crisis_cagr_floor(mocker
 
     assert result is not None
     assert result.blocker_reason != ""
+
+
+def test_selection_gate_receives_cagr_baseline_relative_mode(mocker):
+    from src.domain.futures.strategy.tiered_workflow.selection import select_layer2_champion
+    from src.domain.futures.strategy.tiered_workflow.dataclasses import Layer2TrialEvaluation, Layer2GateEvaluation
+
+    mock_cache = mocker.MagicMock()
+    mock_cache.vol_matrix_2d = None
+    mock_cache.regime_policy_by_fold = ()
+
+    study = optuna.create_study(direction="maximize")
+    trial = create_trial(
+        params={"K_RANK": 2.0},
+        distributions={"K_RANK": FloatDistribution(1, 10)},
+        values=[0.1],
+        user_attrs={
+            "l2_promotion_passed": True,
+            "growth_lcb_hybrid": 0.05,
+            "l2_block_log_growth_signature": [0.05],
+            "sharpe_hac_hybrid": 1.0,
+            "l2_constraint_values": [-1.0] * 15,
+            "l2_optuna_constraint_values": [-1.0] * 15,
+        },
+        state=optuna.trial.TrialState.COMPLETE,
+    )
+    study.add_trial(trial)
+
+    mocker.patch(
+        "src.domain.futures.strategy.tiered_workflow.selection._build_layer2_replay_frontier",
+        return_value=list(study.trials),
+    )
+
+    gate_spy = mocker.patch(
+        "src.domain.futures.strategy.tiered_workflow.selection.evaluate_layer2_gate",
+        return_value=mocker.MagicMock(
+            optuna_constraint_values=(-1.0,) * 15,
+            promotion_constraint_values=(-1.0,) * 7,
+            promotion_passed=True,
+            spec=Layer2GateEvaluation,
+        ),
+    )
+
+    mocker.patch(
+        "src.domain.futures.strategy.tiered_workflow.selection.calc_n_trials_eff_entropy",
+        return_value=1.0,
+    )
+
+    eval_mock = mocker.MagicMock(
+        spec=Layer2TrialEvaluation,
+        cagr_hybrid=0.22776246051717214,
+        cagr_baseline=0.16973394944364828,
+        growth_lcb_hybrid=0.05,
+        mdd_hybrid=0.2,
+        returns_hybrid=[0.001],
+        constraint_values=(-1.0,) * 15,
+        objective_value=0.05,
+        sharpe_hac_hybrid=1.0,
+        sharpe_hac_baseline=0.0,
+        sortino_hybrid=0.5,
+        fold_pass_ratio=1.0,
+        break_even_pass_pct=1.0,
+        average_gross_exposure=0.5,
+        cap_saturation_ratio=0.0,
+        total_cost_bps=10.0,
+        block_metrics=(),
+        trade_count=10,
+        risk_utilization=0.5,
+        deployment_objective_bonus=0.0,
+        worst_fold_sharpe=0.0,
+        recency_holdout_cagr=None,
+        recency_holdout_applicable=False,
+        window_bottleneck_covered=True,
+        window_bottleneck_detail="",
+    )
+
+    mocker.patch(
+        "src.domain.futures.strategy.tiered_workflow.selection.evaluate_l2_trial_cached",
+        return_value=eval_mock,
+    )
+
+    mock_aligned = mocker.MagicMock(datetimes=[], close_2d=None, symbols=())
+    mock_signal_batch = mocker.MagicMock(start_idx=0, end_idx=10)
+
+    result = select_layer2_champion(
+        study=study,
+        tf="4h",
+        signal_batch=mock_signal_batch,
+        aligned=mock_aligned,
+        awf_folds=(),
+        caps=mocker.MagicMock(),
+        prebuilt_cache=mock_cache,
+    )
+
+    assert result is not None
+    kwargs = gate_spy.call_args.kwargs
+    assert kwargs["cagr_baseline"] == pytest.approx(0.16973394944364828)
+    assert "recency_holdout_cagr" in kwargs
+    assert kwargs["recency_holdout_cagr"] is None
+    assert "recency_holdout_applicable" in kwargs
+    assert "window_bottleneck_covered" in kwargs
+    assert "window_bottleneck_detail" in kwargs
