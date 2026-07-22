@@ -31,8 +31,8 @@ Leverage **high-reasoning models (Thinker)** for creative architectural design, 
 
 ### 3. Low-Reasoning Implementation Specifications (Deterministic Constraints)
 To ensure low-reasoning models can build and integrate the code mechanically:
-- **Exact Contract changes**: Define class/function signatures with Python 3.11+ type hints.
-- **Wiring & Connection Plan**: Define the exact file path, class, method, and local context anchor line.
+- **Exact Contract changes**: Define class/function signatures with Python 3.11+ type hints, including 1-line `error_policy` (Raise vs Fallback) and explicit `side_effects` (state mutations, logging).
+- **Wiring & Connection Plan**: Define the exact file path, class, method, local context anchor line, and mandatory `invocation_symbol` (the exact 1-line invocation statement to guarantee pipeline integration).
 - **Skeleton Mock Boilerplate (CRITICAL)**:
   - Provide a **100% syntactically correct test setup and skeleton mock logic**.
   - Since low-cost models cannot design mocks from scratch, you must output copy-pasteable test skeletons matching the scenarios.
@@ -54,6 +54,8 @@ Generate a semantic JSON contract alongside the spec markdown to provide strict,
       "name": "ExactName",
       "file_hint": "src/domain/x.py",
       "signatures": "def ExactName(param: type) -> return_type",
+      "error_policy": "Raise ValueError on invalid param; Return None on timeout",
+      "side_effects": ["Updates self.state cache"],
       "semantic_rules": [
         "Rule 1: business logic constraint (e.g. rounded to 8 decimals)",
         "Rule 2: timezone isolation or look-ahead check rules"
@@ -71,7 +73,7 @@ Generate a semantic JSON contract alongside the spec markdown to provide strict,
     {"id": 4, "scope": "integration", "name": "test_parent_module_wiring"}
   ],
   "wiring": [
-    {"file": "src/application/parent.py", "anchor": "ExactAnchorSymbol", "import_symbol": "ExactName"}
+    {"file": "src/application/parent.py", "anchor": "ExactAnchorSymbol", "import_symbol": "ExactName", "invocation_symbol": "self.x = ExactName(); self.x.run()"}
   ]
 }
 ```

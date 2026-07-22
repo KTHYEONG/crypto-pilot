@@ -25,7 +25,7 @@ Optimize for **low-cost models (Doer)** by enforcing strict mechanical execution
   - Do **NOT** waste token cycles executing failing tests just to prove a Red phase.
   - Copy the **Skeleton Mock Boilerplate** from the spec into the test file (`tests/...`).
   - Write both the source logic (`src/...`) and the corresponding unit/scenario tests (`tests/...`) simultaneously, adhering strictly to the contract.json spec.
-  - Wire the new logic into the parent calling module as defined in the Connection Plan.
+  - Wire the new logic into the parent calling module as defined in the Connection Plan, ensuring both `import_symbol` and `invocation_symbol` (actual call/instantiation) are implemented.
   - Limit high-level scenario tests strictly to the 3-4 scenarios defined in the spec.
 - **Step 3: Local Verification & Green Enforcement**
   - Run pytest locally (`uv run pytest -k [target_name]`) to verify that the synthesized code is functional.
