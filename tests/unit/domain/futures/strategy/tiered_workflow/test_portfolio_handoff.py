@@ -642,3 +642,54 @@ def test_handoff_4h_suffixless_sleeve_admission_byte_identical() -> None:
     assert ev.key.symbol == "BTCUSDT"
     assert ev.key.strategy_id == "strat_a"
     assert ev.key.native_tf == "4h"
+
+
+def test_handoff_admitted_tf_breakdown_logged_at_debug_level(caplog: pytest.LogCaptureFixture) -> None:
+    import logging
+
+    from src.domain.futures.strategy.tiered_workflow.dataclasses import L2SimulationCache
+    from src.domain.futures.strategy.candidate_contracts import ValidatedSignalBatch
+    from src.domain.futures.strategy.walk_forward import WFFold
+
+    caplog.set_level(logging.DEBUG, logger="opt_main_futures")
+    target_logger = logging.getLogger("opt_main_futures")
+    prior_propagate = target_logger.propagate
+    target_logger.propagate = True
+
+    sleeve_keys = (SignalSleeveKey("BTCUSDT", "4h", "strat_a"),)
+    n_bars = 90
+    rng = np.random.default_rng(42)
+    rets = np.column_stack([rng.normal(0.001, 0.0005, n_bars)])
+
+    cache = L2SimulationCache(
+        vol_matrix_2d=np.ones((n_bars, 1)), tradeable_mask_2d=np.ones((n_bars, 1), dtype=np.bool_),
+        hurdle_2d=np.zeros((n_bars, 1)), funding_2d=np.zeros((n_bars, 1)), beta_1d=np.ones(1),
+        expected_gross_bps_2d=np.ones((n_bars, 1)), expected_net_bps_2d=np.ones((n_bars, 1)),
+        holding_bars_2d=np.ones((n_bars, 1)), side_2d=np.ones((n_bars, 1)),
+        quality_weight_2d=np.ones((n_bars, 1)), signal_mask_2d=np.ones((n_bars, 1), dtype=np.bool_),
+        sleeve_to_sym=np.array([0], dtype=np.int64), sleeve_keys=sleeve_keys,
+    )
+    registry = QualifiedSignalRegistry(
+        by_symbol={"BTCUSDT": (_ev_with_lcb("BTCUSDT", "strat_a", 0.9, 200.0),)},
+        ready_symbols=("BTCUSDT",),
+        trade_scope_count=1, registry_version="test-v1",
+    )
+    batch = ValidatedSignalBatch(
+        events=(), start_idx=0, end_idx=n_bars, symbols=("BTCUSDT",),
+        registry_version="test-v1", model_version="test",
+    )
+    fold = WFFold(fit_start=0, fit_end=30, cal_start=30, cal_end=60, oos_start=60, oos_end=90)
+
+    try:
+        evaluate_portfolio_handoff(
+            registry=registry, signal_batch=batch, cache=cache, folds=(fold,),
+            net_sleeve_returns_by_fold=(np.ascontiguousarray(rets, dtype=np.float32),),
+            config=PortfolioHandoffConfig(),
+        )
+    finally:
+        target_logger.propagate = prior_propagate
+
+    debug_msgs = [r.message for r in caplog.records if "handoff_admitted_tf_breakdown" in r.message]
+    assert len(debug_msgs) == 1
+    assert "fold=0" in debug_msgs[0]
+    assert "'4h': 1" in debug_msgs[0]
