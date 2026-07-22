@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 import time
 from dataclasses import dataclass
-from typing import cast
+from typing import Literal, cast
 
 import numpy as np
 from numpy.typing import NDArray
@@ -19,7 +19,120 @@ from src.domain.futures.strategy.tiered_workflow.dataclasses import (
 
 _logger = logging.getLogger("opt_main_futures")
 
+DeploymentMode = Literal["warmup_cash", "risk_on", "abstain_cash", "risk_off_cash", "blocked"]
 
+
+@dataclass(slots=True, frozen=True)
+class GrowthSafetyConstraintVector:
+    data_integrity: float
+    execution_integrity: float
+    mdd: float
+    cvar_95: float
+    ruin: float
+
+    def as_mapping(self) -> dict[str, float]:
+        return {
+            "data_integrity": self.data_integrity,
+            "execution_integrity": self.execution_integrity,
+            "mdd": self.mdd,
+            "cvar_95": self.cvar_95,
+            "ruin": self.ruin,
+        }
+
+
+@dataclass(slots=True, frozen=True)
+class GrowthSafetyGate:
+    mode: DeploymentMode
+    passed: bool
+    blockers: tuple[str, ...]
+    constraints: GrowthSafetyConstraintVector
+
+
+def evaluate_growth_safety_gate(
+    *,
+    tape_valid: bool,
+    execution_valid: bool,
+    deployed_returns: NDArray[np.float64],
+    max_mdd: float,
+    max_cvar_95: float,
+    min_equity_multiplier: float,
+    growth_lcb: float,
+) -> GrowthSafetyGate:
+    blockers: list[str] = []
+
+    if not tape_valid:
+        blockers.append("data_integrity")
+    if not execution_valid:
+        blockers.append("execution_integrity")
+
+    n = len(deployed_returns)
+    if n >= 1:
+        eq = _compute_equity_path(deployed_returns)
+        dd = _compute_max_drawdown(eq)
+        if dd > max_mdd:
+            blockers.append("mdd")
+        cvar95 = _compute_cvar_95(deployed_returns)
+        if cvar95 > max_cvar_95:
+            blockers.append("cvar_95")
+        eq_mult = float(eq[-1])
+        if eq_mult < min_equity_multiplier:
+            blockers.append("ruin")
+    else:
+        dd = 0.0
+        cvar95 = 0.0
+        eq_mult = 1.0
+
+    passed = len(blockers) == 0 and growth_lcb > 0.0
+    if growth_lcb <= 0.0 and not blockers:
+        mode: DeploymentMode = "abstain_cash"
+    elif passed:
+        mode = "risk_on"
+    elif blockers:
+        mode = "blocked"
+    else:
+        mode = "abstain_cash"
+
+    constraints = GrowthSafetyConstraintVector(
+        data_integrity=0.0 if tape_valid else 1.0,
+        execution_integrity=0.0 if execution_valid else 1.0,
+        mdd=dd,
+        cvar_95=cvar95,
+        ruin=max(0.0, min_equity_multiplier - eq_mult),
+    )
+
+    return GrowthSafetyGate(
+        mode=mode,
+        passed=passed,
+        blockers=tuple(blockers),
+        constraints=constraints,
+    )
+
+
+def _compute_equity_path(returns: NDArray[np.float64]) -> NDArray[np.float64]:
+    eq = np.empty(len(returns) + 1, dtype=np.float64)
+    eq[0] = 1.0
+    for t in range(len(returns)):
+        eq[t + 1] = eq[t] * (1.0 + returns[t])
+    return eq
+
+
+def _compute_max_drawdown(equity: NDArray[np.float64]) -> float:
+    if len(equity) == 0:
+        return 0.0
+    peak = np.maximum.accumulate(equity)
+    dd = (equity - peak) / peak
+    return float(np.min(dd))
+
+
+def _compute_cvar_95(returns: NDArray[np.float64]) -> float:
+    sorted_rets = np.sort(returns)
+    n = len(sorted_rets)
+    var_idx = max(1, int(0.05 * n))
+    tail = sorted_rets[:var_idx]
+    return float(np.abs(np.mean(tail)))
+
+
+# contract wiring: GrowthSafetyConstraintVector, evaluate_growth_safety_gate
 @dataclass(slots=True, frozen=True)
 class Layer2ConstraintVector:
     deployment: float

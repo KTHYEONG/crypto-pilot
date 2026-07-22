@@ -456,3 +456,48 @@ def resolve_l2_fold_cfg(
     if int(l2_wf_n_folds) < 2:
         raise ValueError(f"l2_wf_n_folds must be >= 2, got {l2_wf_n_folds}")
     return replace(cfg, wf_n_folds=int(l2_wf_n_folds))
+
+
+
+@dataclass(slots=True, frozen=True)
+class CausalL2Fold:
+    fold_idx: int
+    policy_fit_start: int
+    policy_fit_end_exclusive: int
+    oos_start: int
+    oos_end_exclusive: int
+
+
+def build_causal_l2_folds(
+    *,
+    n_bars: int,
+    l2_start_idx: int,
+    holdout_start_idx: int,
+    n_folds: int,
+    min_warmup_bars: int,
+) -> tuple[CausalL2Fold, ...]:
+    l2_span = holdout_start_idx - l2_start_idx
+    warmup_bars = max(min_warmup_bars, l2_span // 4)
+    remaining = l2_span - warmup_bars
+    if remaining < n_folds or l2_span < min_warmup_bars + n_folds:
+        raise ValueError(
+            f"insufficient L2 span: l2_span={l2_span}, warmup_bars={warmup_bars}, "
+            f"remaining={remaining}, n_folds={n_folds}"
+        )
+    fold_size = remaining // n_folds
+    folds: list[CausalL2Fold] = []
+    for i in range(n_folds):
+        oos_start = l2_start_idx + warmup_bars + i * fold_size
+        oos_end = oos_start + (fold_size if i < n_folds - 1 else remaining - (n_folds - 1) * fold_size)
+        policy_fit_start = l2_start_idx
+        policy_fit_end = oos_start
+        folds.append(
+            CausalL2Fold(
+                fold_idx=i,
+                policy_fit_start=policy_fit_start,
+                policy_fit_end_exclusive=policy_fit_end,
+                oos_start=oos_start,
+                oos_end_exclusive=oos_end,
+            )
+        )
+    return tuple(folds)
