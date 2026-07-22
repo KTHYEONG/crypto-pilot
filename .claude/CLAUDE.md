@@ -15,7 +15,7 @@
 - **SELECTIVE OMISSION & TOOLING:**
     - **Existing Files:** Modify existing files using `replace_file_content` or `multi_replace_file_content`. Use `write_to_file` only when creating new files.
     - **Markdown Output:** Omit unchanged parts in explanations using the `# ... existing code ...` comment to save tokens.
-- **CONTEXT WINDOW MGMT:** Specify line ranges in `view_file` to read only relevant parts for files over 300 lines.
+- **CONTEXT WINDOW MGMT:** Specify line ranges in `view_file` to read only relevant parts for files over 500 lines.
 - **EXPLICIT UNCERTAINTY:** State "Clarification Needed: [item]" and ask clarifying questions when requirements are unclear before writing code.
 - **VERDICT FORMAT:** Print check results in 1 line for 🟢 PASS. For 🔴 FAIL, output a markdown block under 3 lines including a [brief failure summary] along with 🔍 Cause and 🛠️ Fix (actionable modification instructions).
 
@@ -62,12 +62,14 @@ This protocol applies only inside code-writing phases such as `implement` when n
 
 ## 7. File Structure & Architecture
 - **Separation of Concerns:** Maintain clear separation between logic, data, and router layers.
-- **Modularity:** Design new files to be within 500 lines. (Defer refactoring of existing files if unit tests are not secured).
+- **Modularity & Module Boundary:** Target 500–800 lines per module (Soft Limit). Prioritize high cohesion and Single Responsibility over strict line count. Split files when distinct architectural layers (e.g., DB access, business logic, DTO mapping) become mixed, not merely due to line count.
+- **Single Source of Truth (Self-Documenting Code):** Rely on in-code `Protocol`, `dataclass`, `Pydantic` models, and type annotations as the authoritative contract reference over external documentation files to avoid doc-code mismatch.
 - **Configuration:** Manage all settings via environment variables (`.env`) and `pydantic-settings`.
 - **Directory Isolation:** The `scripts/` directory is strictly reserved for verification (check) and documentation synchronization (sync) tooling. Do NOT create or modify any production logic, auxiliary tools, or helper modules under `scripts/`. All production-related code must reside in the `src/` directory.
 
 ## 8. Anti-Patterns & Alternatives
 - **Focused Changes & No Architectural Refactoring:** Implement the smallest necessary change. Low-cost (Doer) models must NOT perform design or architectural refactoring. Refactoring is strictly limited to styling/formatting and minor type adjustments.
+- **Refactor On Touch & Dead Code Removal:** Avoid blind appending (spaghetti additions) to existing functions. When touching existing modules, clean up parameters/structures and immediately purge unused variables, dead functions, or commented-out legacy code.
 - **Spec / Signature Lock Policy:** Public APIs and class signatures defined in `contract.json` are LOCKED. Doer models must not mutate locked contracts. If a design limitation requires mutating a locked contract, the Doer model must **STOP execution immediately** and escalate to a high-reasoning model or human.
 - **Loose Assertions & Superficial Coverage:** Do not write testing code solely to hit line coverage goals. Avoid weak assertions like `assert result is not None` or `assert True`. Every test must assert strict values, mathematical precision, or exact exception message phrases to guarantee semantic correctness.
 - **Mock Schema Drift:** Regularly ensure that static JSON mock fixtures in testing files reflect CCXT/live API structures. Mock fixtures must satisfy the parser logic in source files.
@@ -111,7 +113,7 @@ To maintain a clean and navigable codebase, documentation must follow a strict s
 
 - **Architecture (`docs/architecture/`):** "AI-First Structured Constraints".
   - Contents: System boundary, mathematical formalisms & constraints (LaTeX), strict I/O tables, and topology/state transitions (Mermaid).
-  - Guidelines: Omit all procedural implementation details, code optimization tricks (e.g. parallel pooling, cache maps), logging/error policy descriptions, and conversational prose. Keep each document strictly under a 300 lines limit. Shift procedural optimization and private details to in-code docstrings.
+  - Guidelines: Omit all procedural implementation details, code optimization tricks (e.g. parallel pooling, cache maps), logging/error policy descriptions, and conversational prose. Keep each document strictly under a 300 lines limit. In case of schema/contract mismatch, in-code Type/Protocol definitions strictly override external markdown files.
   - **Surgical Update Only**: Never append raw text to architecture files. Surgically edit existing tables, schemas, or Mermaid nodes to match the file's current layout. Do NOT load the entire document; use targeted line ranges to read/edit only the relevant sections.
   - **No Implementation/History**: Do not include implementation guides, step-by-step logic, temporal examples, change history, memory/concurrency optimization details, or `[ADR_...]` tags in architecture files.
 - **Decisions (`docs/decisions/`):** "Two-File Decisions Log Architecture" (ADR).
