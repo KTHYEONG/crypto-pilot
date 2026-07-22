@@ -97,6 +97,7 @@ def _call(
     n_bars: int = 200,
     floor: float = 0.0,
     cfg: Any = None,
+    native_tf: str = "",
 ) -> ValidatedSignalBatch:
     from src.domain.futures.strategy.tiered_workflow.signal_selection import _candidate_output_to_signal_batch
 
@@ -109,6 +110,7 @@ def _call(
         model_version="v1",
         activation_floor_bps=floor,
         cfg=cfg,
+        native_tf=native_tf,
     )
 
 
@@ -356,3 +358,81 @@ def test_signal_batch_quality_weight_first_match() -> None:
     # Assert — 첫 번째 ev의 qw(0.90) 사용
     assert len(result.events) == 1
     assert result.events[0].quality_weight == pytest.approx(0.90)
+
+
+# ─── Fix B: TF-suffix-aware key matching (L2-CRISIS-WIRING-AND-TF-SIGNAL-LOSS-FIX) ──
+
+
+def test_strip_tf_suffix_exact_match_only() -> None:
+    from src.domain.futures.strategy.tiered_workflow.signal_selection import _strip_tf_suffix
+
+    assert _strip_tf_suffix("trend_donchian:donchian_72_12h", "12h") == "trend_donchian:donchian_72"
+    assert _strip_tf_suffix("trend_donchian:donchian_72", "12h") == "trend_donchian:donchian_72"
+    assert _strip_tf_suffix("trend_donchian:donchian_72", "") == "trend_donchian:donchian_72"
+    # not a substring match: "...472" does not end with "_4h"
+    assert _strip_tf_suffix("weird_variant_472", "4h") == "weird_variant_472"
+
+
+def test_strip_tf_suffix_series_matches_scalar_elementwise() -> None:
+    import pandas as pd
+    from src.domain.futures.strategy.tiered_workflow.signal_selection import _strip_tf_suffix_series
+
+    values = pd.Series(["strat_a_4h", "strat_b", "strat_c_12h", "strat_d_472"])
+    result = _strip_tf_suffix_series(values, "12h")
+    expected = pd.Series(["strat_a_4h", "strat_b", "strat_c", "strat_d_472"])
+    pd.testing.assert_series_equal(result, expected)
+
+    # empty native_tf → no-op
+    result_noop = _strip_tf_suffix_series(values, "")
+    pd.testing.assert_series_equal(result_noop, values)
+
+
+def test_candidate_output_to_signal_batch_recovers_suffix_mismatched_htf_events() -> None:
+    model_output = _make_model_output(
+        symbols=["BTCUSDT"],
+        strategy_ids=["trend_donchian:donchian_72_12h"],
+        activation_contexts=["all"],
+        entry_idxs=[10],
+        sides=[1],
+        gross_bps=[15.0],
+    )
+    registry = _make_registry([("BTCUSDT", "trend_donchian:donchian_72", "all", 0.80)])
+
+    result = _call(model_output, registry, native_tf="12h")
+
+    assert len(result.events) == 1
+    assert result.events[0].strategy_id == "trend_donchian:donchian_72_12h"
+    assert result.events[0].quality_weight == pytest.approx(0.80)
+
+
+def test_candidate_output_to_signal_batch_native_tf_4h_no_regression() -> None:
+    model_output = _make_model_output(
+        symbols=["BTCUSDT"],
+        strategy_ids=["trend_donchian:donchian_72_4h"],
+        activation_contexts=["all"],
+        entry_idxs=[10],
+        sides=[1],
+        gross_bps=[15.0],
+    )
+    registry = _make_registry([("BTCUSDT", "trend_donchian:donchian_72_4h", "all", 0.80)])
+
+    result = _call(model_output, registry, native_tf="4h")
+
+    assert len(result.events) == 1
+    assert result.events[0].quality_weight == pytest.approx(0.80)
+
+
+def test_candidate_output_to_signal_batch_genuine_nonmembership_still_excluded() -> None:
+    model_output = _make_model_output(
+        symbols=["BTCUSDT"],
+        strategy_ids=["no_such_strat:variant_xyz_12h"],
+        activation_contexts=["all"],
+        entry_idxs=[10],
+        sides=[1],
+        gross_bps=[15.0],
+    )
+    registry = _make_registry([("BTCUSDT", "different_strat:variant_abc", "all", 0.80)])
+
+    result = _call(model_output, registry, native_tf="12h")
+
+    assert len(result.events) == 0
