@@ -511,5 +511,8 @@
   },
   "src/domain/futures/portfolio/allocation_policy.py": {
     "testing": "tests/unit/domain/futures/portfolio/test_allocation_policy.py"
+  },
+  "src/domain/futures/portfolio/policy_shadow_book.py": {
+    "testing": "tests/unit/domain/futures/portfolio/test_policy_shadow_book.py"
   }
 }
