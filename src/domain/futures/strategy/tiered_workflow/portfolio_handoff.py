@@ -191,16 +191,50 @@ def _rank_and_cap_sleeve_indices(
     quality_by_key: dict[tuple[str, str], float] = {}
     for key, ev in evidence_by_key.items():
         quality_by_key[key] = ev.quality_weight
-    indexed = list(range(len(sleeve_keys)))
-    ranked = sorted(
-        indexed,
-        key=lambda s: (
-            -quality_by_key.get((sleeve_keys[s].symbol, sleeve_keys[s].strategy_id), 0.0),
-            sleeve_keys[s].symbol,
-            sleeve_keys[s].strategy_id,
-        ),
-    )
-    selected = ranked[:max_candidate_sleeves]
+
+    ranked = list(range(len(sleeve_keys)))
+
+    def _mk_qw(s: int) -> float:
+        return quality_by_key.get((sleeve_keys[s].symbol, sleeve_keys[s].strategy_id), 0.0)
+
+    distinct_tfs: list[str] = sorted({sk.native_tf for sk in sleeve_keys})
+    n_distinct_tfs = len(distinct_tfs)
+    per_tf_quota = max(max_candidate_sleeves // n_distinct_tfs, 1) if n_distinct_tfs > 0 else max_candidate_sleeves
+
+    tf_groups: dict[str, list[int]] = {tf: [] for tf in distinct_tfs}
+    for s in ranked:
+        tf_groups[sleeve_keys[s].native_tf].append(s)
+
+    selected: list[int] = []
+    selected_set: set[int] = set()
+    for tf in distinct_tfs:
+        group = tf_groups[tf]
+        group_sorted = sorted(
+            group,
+            key=lambda s: (
+                -_mk_qw(s),
+                sleeve_keys[s].symbol,
+                sleeve_keys[s].strategy_id,
+            ),
+        )
+        for s in group_sorted[:per_tf_quota]:
+            selected.append(s)
+            selected_set.add(s)
+
+    if len(selected) < max_candidate_sleeves:
+        remaining_budget = max_candidate_sleeves - len(selected)
+        global_ranked = sorted(
+            [s for s in ranked if s not in selected_set],
+            key=lambda s: (
+                -_mk_qw(s),
+                sleeve_keys[s].symbol,
+                sleeve_keys[s].strategy_id,
+            ),
+        )
+        for s in global_ranked[:remaining_budget]:
+            selected.append(s)
+            selected_set.add(s)
+
     return tuple(sorted(selected))
 
 
