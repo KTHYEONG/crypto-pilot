@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from typing import cast
 
 import numpy as np
+from numpy.typing import NDArray
 
 from src.domain.futures.strategy.tiered_workflow.awf_sim import (
     Layer2FoldAttribution,
@@ -23,69 +24,72 @@ _logger = logging.getLogger("opt_main_futures")
 class Layer2ConstraintVector:
     deployment: float
     support_leak: float
+    policy_evidence: float
+    active_blocks: float
+    trades: float
+    growth_lcb: float
     mdd: float
     cvar_95: float
+    ruin: float
+    crisis_mdd: float
     fold: float
     recent_fold: float
-    active_blocks: float
+    recency_holdout: float
     friction: float
-    trades: float
-    crisis_mdd: float
-    absolute_growth: float
-    sharpe_abs: float
-    crisis_cagr: float
     crisis_measured: bool
-    recency_holdout: float = 0.0
 
     def as_tuple(self) -> tuple[float, ...]:
         return (
             self.deployment,
             self.support_leak,
+            self.policy_evidence,
+            self.active_blocks,
+            self.trades,
+            self.growth_lcb,
             self.mdd,
             self.cvar_95,
+            self.ruin,
+            self.crisis_mdd,
             self.fold,
             self.recent_fold,
-            self.active_blocks,
-            self.friction,
-            self.trades,
-            self.crisis_mdd,
-            self.absolute_growth,
-            self.sharpe_abs,
-            self.crisis_cagr,
             self.recency_holdout,
+            self.friction,
         )
 
     def as_mapping(self) -> dict[str, float | bool]:
         return {
             "deployment": self.deployment,
             "support_leak": self.support_leak,
+            "policy_evidence": self.policy_evidence,
+            "active_blocks": self.active_blocks,
+            "trades": self.trades,
+            "growth_lcb": self.growth_lcb,
             "mdd": self.mdd,
             "cvar_95": self.cvar_95,
+            "ruin": self.ruin,
+            "crisis_mdd": self.crisis_mdd,
             "fold": self.fold,
             "recent_fold": self.recent_fold,
-            "active_blocks": self.active_blocks,
-            "friction": self.friction,
-            "trades": self.trades,
-            "crisis_mdd": self.crisis_mdd,
-            "absolute_growth": self.absolute_growth,
-            "sharpe_abs": self.sharpe_abs,
-            "crisis_cagr": self.crisis_cagr,
-            "crisis_measured": self.crisis_measured,
             "recency_holdout": self.recency_holdout,
+            "friction": self.friction,
+            "crisis_measured": self.crisis_measured,
         }
 
     def non_crisis_feasible(self) -> bool:
         non_crisis = (
             self.deployment,
             self.support_leak,
+            self.policy_evidence,
+            self.active_blocks,
+            self.trades,
+            self.growth_lcb,
             self.mdd,
             self.cvar_95,
+            self.ruin,
             self.fold,
             self.recent_fold,
-            self.active_blocks,
-            self.friction,
-            self.trades,
             self.recency_holdout,
+            self.friction,
         )
         return all(v <= 0.0 for v in non_crisis)
 
@@ -112,6 +116,22 @@ _PROMOTION_BLOCKERS: tuple[str, ...] = (
     "uplift",
     "psr_floor",
 )
+
+
+def compute_ruin_constraint(
+    *,
+    deployed_returns: NDArray[np.float64],
+    min_equity_multiplier: float,
+) -> float:
+    equity = np.asarray(deployed_returns, dtype=np.float64).ravel()
+    if equity.size == 0:
+        return 1.0
+    safe = np.maximum(equity, -1.0 + 1e-9)
+    cum_mult = np.exp(np.log1p(safe).cumsum())
+    min_mult = np.min(cum_mult)
+    if min_mult <= min_equity_multiplier:
+        return 1.0
+    return -1.0
 
 
 def _finite_or_fail(value: float, *, default_fail: float = 1.0) -> float:
@@ -259,16 +279,11 @@ def evaluate_layer2_gate(
             float(config.l2_min_recency_holdout_cagr) - float(recency_holdout_cagr),
         )
     _crisis_constraint = (
-        -1.0
+        1.0
         if crisis_mdd_hybrid is None or crisis_mdd_budget is None
         else _finite_or_fail(float(crisis_mdd_hybrid) - float(crisis_mdd_budget))
     )
-    _crisis_cagr_constraint = (
-        -1.0
-        if crisis_cagr_hybrid is None or crisis_cagr_floor is None
-        else _finite_or_fail(float(crisis_cagr_floor) - float(crisis_cagr_hybrid))
-    )
-    _absolute_growth = _absolute_growth_constraint(
+    _growth_lcb = _absolute_growth_constraint(
         cagr_hybrid=cagr_hybrid,
         growth_lcb_hybrid=growth_lcb_deployed if np.isfinite(growth_lcb_deployed) else growth_lcb_hybrid,
         l2_min_absolute_cagr=config.l2_min_absolute_cagr,
@@ -277,24 +292,24 @@ def evaluate_layer2_gate(
     optuna_constraint_values = (
         1.0 if deployment_failed else -1.0,
         float(max(support_leak_count, 0)),
+        -1.0,
+        _finite_or_fail(float(int(config.l2_min_active_blocks) - active_block_count)),
+        _finite_or_fail(float(int(config.l2_min_trades) - trade_count)),
+        _growth_lcb,
         _finite_or_fail(mdd_hybrid - float(config.l2_max_mdd_abs)),
         _finite_or_fail(cvar_95_hybrid - float(config.l2_max_cvar_95)),
+        -1.0,
+        _crisis_constraint,
         _finite_or_fail(float(config.l2_min_fold_pass_ratio) - fold_pass_ratio),
         recent_fold_constraint,
-        _finite_or_fail(float(int(config.l2_min_active_blocks) - active_block_count)),
+        recency_holdout_constraint,
         _finite_or_fail(float(config.l2_min_friction_pass) - friction_pass_pct),
-        _finite_or_fail(float(int(config.l2_min_trades) - trade_count)),
-        _crisis_constraint,
-        _absolute_growth,
-        _finite_or_fail(float(config.l2_min_sharpe_abs) - sharpe_hac_hybrid),
-        _crisis_cagr_constraint,  # 13th slot — [ADR_TBD_L2_CRISIS_CAGR_CHAMPION_SELECTION_BLINDNESS_FIX]
-        recency_holdout_constraint,  # 14th slot — [SPEC_L2_RECENCY_HOLDOUT_GATE]
     )
 
     promotion_constraint_values = (
         1.0 if deployment_failed else -1.0,
         _finite_or_fail(float(int(config.l2_min_trades) - trade_count)),
-        _absolute_growth,
+        _growth_lcb,
         _finite_or_fail(float(config.l2_min_sharpe_abs) - sharpe_hybrid),
         _finite_or_fail(float(config.l2_min_sortino) - sortino_hybrid),
         _finite_or_fail(float(config.l2_min_calmar) - calmar_hybrid),
@@ -388,19 +403,19 @@ def evaluate_layer2_gate(
     constraint_vector = Layer2ConstraintVector(
         deployment=optuna_constraint_values[0],
         support_leak=optuna_constraint_values[1],
-        mdd=optuna_constraint_values[2],
-        cvar_95=optuna_constraint_values[3],
-        fold=optuna_constraint_values[4],
-        recent_fold=optuna_constraint_values[5],
-        active_blocks=optuna_constraint_values[6],
-        friction=optuna_constraint_values[7],
-        trades=optuna_constraint_values[8],
+        policy_evidence=optuna_constraint_values[2],
+        active_blocks=optuna_constraint_values[3],
+        trades=optuna_constraint_values[4],
+        growth_lcb=optuna_constraint_values[5],
+        mdd=optuna_constraint_values[6],
+        cvar_95=optuna_constraint_values[7],
+        ruin=optuna_constraint_values[8],
         crisis_mdd=optuna_constraint_values[9],
-        absolute_growth=optuna_constraint_values[10],
-        sharpe_abs=optuna_constraint_values[11],
-        crisis_cagr=optuna_constraint_values[12],
+        fold=optuna_constraint_values[10],
+        recent_fold=optuna_constraint_values[11],
+        recency_holdout=optuna_constraint_values[12],
+        friction=optuna_constraint_values[13],
         crisis_measured=_crisis_measured,
-        recency_holdout=optuna_constraint_values[13],
     )
     return Layer2GateEvaluation(
         optuna_constraint_values=cast(tuple[float, ...], optuna_constraint_values),

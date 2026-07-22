@@ -195,7 +195,7 @@ def _make_folds() -> tuple[WFFold, ...]:
     return (WFFold(fit_start=0, fit_end=1, cal_start=1, cal_end=1, oos_start=1, oos_end=4),)
 
 
-def test_awf_sim_wires_kelly_shrink_to_equal_from_config(mocker: MagicMock) -> None:
+def test_awf_sim_wires_inverse_vol_fallback(mocker: MagicMock) -> None:
     from src.domain.futures.strategy.tiered_workflow.awf_sim import (
         _run_awf_simulation,
         build_l2_simulation_cache,
@@ -216,7 +216,6 @@ def test_awf_sim_wires_kelly_shrink_to_equal_from_config(mocker: MagicMock) -> N
         kelly_fraction=0.5,
         no_trade_band=0.0,
         rebalance_bars=1,
-        kelly_shrink_to_equal=0.3,
     )
     awf_folds = _make_folds()
     caps = PortfolioCaps(gross=2.0, per_symbol=1.0, net=1.0, beta=2.0, target_ann_vol=10.0)
@@ -234,4 +233,4 @@ def test_awf_sim_wires_kelly_shrink_to_equal_from_config(mocker: MagicMock) -> N
 
     call_kwargs = spy.call_args.kwargs
     assert "kelly_shrink_to_equal" in call_kwargs
-    assert call_kwargs["kelly_shrink_to_equal"] == pytest.approx(0.3)
+    assert call_kwargs["kelly_shrink_to_equal"] == pytest.approx(0.0)

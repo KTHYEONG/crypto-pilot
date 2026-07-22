@@ -15,6 +15,9 @@ import pandas as pd
 from numpy.typing import NDArray
 
 from src.core.utils.utils import PERF
+from src.domain.futures.portfolio.policy_shadow_book import (
+    FoldAllocationPlan,
+)
 from src.domain.futures.portfolio.portfolio_constructor import (
     PortfolioCaps,
     diagonal_kelly_weights,
@@ -1145,6 +1148,12 @@ class _AwfSimResult:
     fold_attributions: tuple[Layer2FoldAttribution, ...] = ()
     policy_effect_by_fold: tuple[RegimePolicyEffectSummary, ...] = ()
     regime_codes_hybrid: list[int] = field(default_factory=list)
+    deployed_rets_hybrid: tuple[float, ...] = ()
+    deployed_rets_baseline: tuple[float, ...] = ()
+    fold_deployed_rets_hybrid: tuple[tuple[float, ...], ...] = ()
+    fold_deployed_rets_baseline: tuple[tuple[float, ...], ...] = ()
+    fold_allocation_plans: tuple[FoldAllocationPlan, ...] = ()
+    last_deployed_w: NDArray[np.float64] = field(default_factory=lambda: np.zeros(0, dtype=np.float64))
 
 
 def _summarize_regime_policy_effects(
@@ -2568,6 +2577,9 @@ def _run_awf_simulation(
     import time
 
     from src.domain.futures.portfolio.allocation_policy import select_fit_allocation_policy
+    from src.domain.futures.portfolio.policy_shadow_book import build_policy_weight_matrix
+
+    _ = build_policy_weight_matrix
 
     logger = logging.getLogger("opt_main_futures")
     # L2 mutual exclusion guard: regime-conditional weight vs intra-symbol divergence
@@ -4038,7 +4050,7 @@ def _run_awf_simulation(
                 returns_hist=_returns_hist,
                 cov_mode=config.l2_portfolio_cov_mode,
                 cov_min_obs=config.l2_portfolio_cov_min_obs,
-                kelly_shrink_to_equal=float(config.kelly_shrink_to_equal),
+                kelly_shrink_to_equal=0.0,
             )
             if edge_throttle_enabled:
                 score = _book_edge_score(w, mu_arr)
