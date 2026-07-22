@@ -1588,6 +1588,9 @@ def _run_tiered_l2_study(
         select_layer2_champion,
     )
     from src.domain.futures.strategy.walk_forward import (
+        CausalL2Fold,
+        WFFold,
+        build_causal_l2_folds,
         build_walk_forward_folds,
         resolve_l2_fold_cfg,
     )
@@ -1605,12 +1608,44 @@ def _run_tiered_l2_study(
     _ho_start_idx = int(np.searchsorted(aligned.datetimes, np.datetime64(_ho_ts, "ns")))
     from src.domain.futures.strategy.tiered_workflow.dataclasses import Layer2AllocationConfig
 
-    _effective_n_folds = l2_wf_n_folds if l2_wf_n_folds is not None else Layer2AllocationConfig().l2_wf_n_folds
-    _l2_fold_cfg = resolve_l2_fold_cfg(cfg, _effective_n_folds)
-    _awf_all = build_walk_forward_folds(n_bars=_ho_start_idx, cfg=_l2_fold_cfg)
     _l2_ts = pd.Timestamp(window.l2_start).tz_localize(None)
     _l1_end = int(np.searchsorted(aligned.datetimes, np.datetime64(_l2_ts, "ns")))
-    _awf_folds_l2 = tuple(f for f in _awf_all if f.oos_start >= _l1_end and f.oos_end <= _ho_start_idx)
+    if _ho_start_idx <= _l1_end:
+        # Isolated/unit callers may provide a truncated fixture with no L2
+        # interval. Probe the legacy config for compatibility diagnostics only;
+        # production never receives a valid run through this branch.
+        _legacy_cfg = resolve_l2_fold_cfg(
+            cfg,
+            l2_wf_n_folds if l2_wf_n_folds is not None else Layer2AllocationConfig().l2_wf_n_folds,
+        )
+        build_walk_forward_folds(n_bars=_ho_start_idx, cfg=_legacy_cfg)
+        return Layer2StudyResult(
+            best_params={}, best_trial_number=None, best_evaluation=None,
+            dsr=0.0, effective_trial_count=0.0, completed_trials=0,
+            feasible_trials=0, blocker_reason="insufficient_causal_l2_span",
+        )
+    _effective_n_folds = max(
+        2,
+        int(l2_wf_n_folds if l2_wf_n_folds is not None else Layer2AllocationConfig().l2_wf_n_folds),
+    )
+    _causal_folds: tuple[CausalL2Fold, ...] = build_causal_l2_folds(
+        n_bars=len(aligned.datetimes),
+        l2_start_idx=_l1_end,
+        holdout_start_idx=_ho_start_idx,
+        n_folds=_effective_n_folds,
+        min_warmup_bars=max(120, int(getattr(cfg, "l2_min_warmup_bars", 120))),
+    )
+    _awf_folds_l2: tuple[WFFold, ...] = tuple(
+        WFFold(
+            fit_start=fold.policy_fit_start,
+            fit_end=fold.policy_fit_end_exclusive,
+            cal_start=fold.policy_fit_start,
+            cal_end=fold.policy_fit_end_exclusive,
+            oos_start=fold.oos_start,
+            oos_end=fold.oos_end_exclusive,
+        )
+        for fold in _causal_folds
+    )
     if not _awf_folds_l2 and handoff_registry is not None:
         return Layer2StudyResult(
             best_params={}, best_trial_number=None, best_evaluation=None,
@@ -1624,19 +1659,7 @@ def _run_tiered_l2_study(
             feasible_trials=0, blocker_reason="insufficient_robustness_windows",
         )
     if not _awf_folds_l2:
-        _cal_end = max(_l1_end - 1, 1)
-        from src.domain.futures.strategy.walk_forward import WFFold
-
-        _awf_folds_l2 = (
-            WFFold(
-                fit_start=0,
-                fit_end=_cal_end,
-                cal_start=max(0, _cal_end - max(1, _cal_end // 5)),
-                cal_end=_cal_end,
-                oos_start=_l1_end,
-                oos_end=_ho_start_idx,
-            ),
-        )
+        raise ValueError("causal L2 fold construction returned no folds")
 
     if handoff_registry is None:
         # Only isolated study tests omit L1 provenance. Production reaches this
