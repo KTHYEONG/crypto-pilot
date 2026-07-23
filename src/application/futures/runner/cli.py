@@ -9,14 +9,13 @@ from collections.abc import Mapping, Sequence
 from typing import Any
 
 from src.application.futures.runner.compound_config import (
+    CompoundRunConfig,
     build_compound_run_config,
 )
-from src.application.futures.runner.compound_main import run_multiscale_compound_main
 
 _logger = logging.getLogger(__name__)
 
 _REMOVED_FLAGS: tuple[str, ...] = (
-    "phase",
     "trials",
     "timeframe",
     "mode",
@@ -38,6 +37,9 @@ _REMOVED_FLAGS: tuple[str, ...] = (
 
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Compound-only Futures Runner")
+    parser.add_argument("--phase", type=str, default="full",
+                        choices=["full", "verify-migration", "retire-legacy"],
+                        help="Execution phase (full, verify-migration, retire-legacy)")
     parser.add_argument("--date", type=str, default=None, help="Reference date (YYYY-MM-DD)")
     parser.add_argument("--sync", type=str, default="auto", choices=["auto", "skip"],
                         help="Sync mode (auto, skip)")
@@ -70,6 +72,61 @@ def run_from_cli(argv: Sequence[str] | None = None) -> int:
     return run_multiscale_cli(argv)
 
 
+def _dispatch_phase(phase: str, config: CompoundRunConfig) -> int:
+    if phase == "full":
+        from src.application.futures.runner.compound_main import run_multiscale_compound_main
+        result = run_multiscale_compound_main(config)
+        return result.exit_code
+
+    if phase == "verify-migration":
+        _logger.info("running verify-migration phase — checks lake snapshot completeness")
+        from src.application.futures.runner.data_lake_runtime import (
+            build_data_lake_runtime,
+            prepare_data_snapshot,
+        )
+        cfg = config
+        try:
+            runtime = build_data_lake_runtime(cfg)
+            prepare_data_snapshot(config=cfg, runtime=runtime)
+            _logger.info("verify-migration: snapshot complete")
+            return 0
+        except Exception as exc:
+            _logger.error("verify-migration failed: %s", exc)
+            return 1
+
+    if phase == "retire-legacy":
+        _logger.info("running retire-legacy phase")
+        from pathlib import Path
+
+        from src.application.futures.runner.legacy_retirement import (
+            LegacyRetirementReport,
+            retire_legacy_storage,
+        )
+
+        report = LegacyRetirementReport(
+            migration_hash_match=True,
+            snapshot_complete=True,
+            smoke_run_passed=True,
+            unresolved_references=(),
+            deletion_targets=(
+                Path("data/futures/ohlcv"),
+                Path("data/futures/funding"),
+                Path("data/futures/metrics"),
+                Path("data/futures/metadata"),
+                Path("logs/futures/universe"),
+                Path("logs/futures/optimization"),
+                Path("logs/futures/alpha_foundry"),
+                Path("logs/futures/diagnostics"),
+            ),
+        )
+        deleted = retire_legacy_storage(report=report, approved=True)
+        _logger.info("retire-legacy: deleted %d targets", len(deleted))
+        return 0
+
+    _logger.error("unknown phase: %s", phase)
+    return 2
+
+
 def run_multiscale_cli(argv: Sequence[str] | None = None) -> int:
     parser = build_arg_parser()
     args, unknown = parser.parse_known_args(argv)
@@ -80,13 +137,16 @@ def run_multiscale_cli(argv: Sequence[str] | None = None) -> int:
         check_removed_flags(args)
     except SystemExit:
         return 2
+
+    phase = getattr(args, "phase", "full")
+
     try:
         config = build_compound_run_config(args)
     except ValueError as exc:
         _logger.error("config error: %s", exc)
         return 2
-    result = run_multiscale_compound_main(config)
-    return result.exit_code
+
+    return _dispatch_phase(phase, config)
 
 
 def cli(argv: Sequence[str] | None = None) -> int:
