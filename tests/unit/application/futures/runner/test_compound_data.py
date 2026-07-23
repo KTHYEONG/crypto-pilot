@@ -8,34 +8,46 @@ import pandas as pd
 from src.application.futures.runner.compound_config import CompoundRunConfig
 from src.application.futures.runner.compound_data import (
     build_multiscale_market_cube,
-    check_data_readiness,
 )
-from src.application.futures.runner.compound_universe import DailyPITUniverse
-from src.domain.futures.data_lake.contracts import DataSnapshot, DatasetKind, PartitionManifest
+from src.domain.futures.data_lake.contracts import (
+    DataSnapshot,
+    DatasetKind,
+    LakeUniverse,
+    PartitionManifest,
+)
+from src.domain.futures.universe.contracts import UniverseStateCube
 
 
-def test_empty_data_is_not_ready() -> None:
-    assert not check_data_readiness({})
+def _lake_universe(symbols: tuple[str, ...], n_bars: int) -> LakeUniverse:
+    n_syms = len(symbols)
+    calendar = pd.date_range("2026-07-01", periods=n_bars, freq="h", tz="UTC")
+    cube = UniverseStateCube(
+        calendar=calendar,
+        instrument_ids=symbols,
+        eligible=np.ones((n_bars, n_syms), dtype=np.bool_),
+        entry_block=np.zeros((n_bars, n_syms), dtype=np.bool_),
+        exit_required=np.zeros((n_bars, n_syms), dtype=np.bool_),
+        capacity_usdt=np.full((n_bars, n_syms), 1_000_000.0, dtype=np.float64),
+        risk_scale=np.ones((n_bars, n_syms), dtype=np.float64),
+        cost_bps=np.full((n_bars, n_syms), 12.0, dtype=np.float64),
+    )
+    return LakeUniverse(symbols=symbols, state_cube=cube, state_hash="test-hash")
 
 
-def test_readiness_requires_eighty_percent_symbols() -> None:
-    ready = {f"S{i}": {"1h": pd.DataFrame({"close": [1.0]})} for i in range(4)}
-    ready["S4"] = {}
-    assert check_data_readiness(ready)
+def _make_snap(partitions: tuple = (), *, hash_val: str = "h1") -> DataSnapshot:
+    return DataSnapshot(
+        snapshot_id="s1",
+        reference_time_ms=1_000_000,
+        partitions=partitions,
+        manifest_hash=hash_val,
+        universe_state_hash="",
+        total_bytes=0,
+    )
 
 
 def test_build_multiscale_market_cube_with_empty_snapshot() -> None:
-    snap = DataSnapshot(
-        snapshot_id="empty",
-        reference_time_ms=1_000_000,
-        partitions=(),
-        manifest_hash="h1",
-        total_bytes=0,
-    )
-    universe = DailyPITUniverse(
-        symbols=("BTCUSDT", "ETHUSDT"),
-        decision_dates=(),
-    )
+    snap = _make_snap()
+    universe = _lake_universe(symbols=("BTCUSDT", "ETHUSDT"), n_bars=24)
     config = CompoundRunConfig(
         reference_date="2026-07-08",
         sync="skip",
@@ -49,6 +61,9 @@ def test_build_multiscale_market_cube_with_empty_snapshot() -> None:
     assert cube.symbols == ("BTCUSDT", "ETHUSDT")
     assert "close" in cube.fields_2d
     assert "funding" in cube.fields_2d
+    assert {"premium", "mark", "index", "taker_buy_quote", "open_interest"}.issubset(
+        cube.fields_2d
+    )
     assert np.all(np.isnan(cube.fields_2d["close"][:, 0]))
 
 
@@ -59,18 +74,19 @@ def test_build_multiscale_market_cube_reads_snapshot_partitions(tmp_path: Path) 
     df = pd.DataFrame({
         "datetime": dates,
         "open": 100.0, "high": 101.0, "low": 99.0, "close": 100.5,
-        "quote_volume": 1_000_000.0, "funding_rate_sum": 0.0001,
+        "quote_volume": 1_000_000.0,
     })
+    df["timestamp"] = dates.as_unit("ns").view(np.int64) // 1_000_000
     df.to_parquet(part, index=False)
 
-    snap = DataSnapshot(
-        snapshot_id="funding-sum",
-        reference_time_ms=int(ref_date.timestamp() * 1000),
-        partitions=(PartitionManifest(DatasetKind.KLINES_1H, "BTCUSDT", int(dates[0].timestamp() * 1000), int(dates[-1].timestamp() * 1000), len(df), "h", "test", True, part),),
-        manifest_hash="h1",
-        total_bytes=0,
+    snap = _make_snap(
+        partitions=(PartitionManifest(
+            DatasetKind.KLINES_1H, "BTCUSDT",
+            int(dates[0].timestamp() * 1000), int(dates[-1].timestamp() * 1000),
+            len(df), "h", "test", True, part,
+        ),),
     )
-    universe = DailyPITUniverse(symbols=("BTCUSDT",), decision_dates=())
+    universe = _lake_universe(symbols=("BTCUSDT",), n_bars=168)
     config = CompoundRunConfig(
         reference_date="2026-07-08", sync="skip", refresh_universe=False, history_days=7,
     )
@@ -79,17 +95,8 @@ def test_build_multiscale_market_cube_reads_snapshot_partitions(tmp_path: Path) 
 
 
 def test_build_multiscale_market_cube_data_manifest_hash() -> None:
-    snap = DataSnapshot(
-        snapshot_id="s1",
-        reference_time_ms=1_000_000,
-        partitions=(),
-        manifest_hash="expected-hash",
-        total_bytes=0,
-    )
-    universe = DailyPITUniverse(
-        symbols=("BTCUSDT",),
-        decision_dates=(),
-    )
+    snap = _make_snap(hash_val="expected-hash")
+    universe = _lake_universe(symbols=("BTCUSDT",), n_bars=24)
     config = CompoundRunConfig(
         reference_date="2026-07-08",
         sync="skip",

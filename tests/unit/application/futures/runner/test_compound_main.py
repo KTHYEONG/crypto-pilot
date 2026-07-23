@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import numpy as np
-import pytest
 
 from src.application.futures.runner.compound_config import CompoundRunConfig
 from src.application.futures.runner.compound_main import run_multiscale_compound_main
@@ -13,7 +12,6 @@ from src.domain.futures.compound.contracts import (
     L3ValidationResult,
     MarketFeatureCube,
 )
-from src.domain.futures.compound.config import CompoundEngineConfig
 
 
 def _make_mock_engine_result(mocker) -> object:
@@ -53,6 +51,7 @@ def _make_mock_engine_result(mocker) -> object:
     mock_l3.reasons = ()
 
     result = mocker.Mock()
+    result.handoff = mock_tape
     result.alpha_tape = mock_tape
     result.ledger = mock_ledger
     result.l2 = mock_l2
@@ -65,6 +64,21 @@ class TestRunMultiscaleCompoundMain:
     def test_main_is_callable(self) -> None:
         assert callable(run_multiscale_compound_main)
 
+    def _lake_universe_mock(self, mocker, symbols: tuple[str, ...] = ("BTCUSDT", "ETHUSDT")) -> object:
+        n_bars = 24
+        n_syms = len(symbols)
+        state_cube = mocker.Mock()
+        state_cube.eligible = np.ones((n_bars, n_syms), dtype=np.bool_)
+        state_cube.entry_block = np.zeros((n_bars, n_syms), dtype=np.bool_)
+        state_cube.exit_required = np.zeros((n_bars, n_syms), dtype=np.bool_)
+        state_cube.capacity_usdt = np.full((n_bars, n_syms), 1_000_000.0, dtype=np.float64)
+        state_cube.cost_bps = np.full((n_bars, n_syms), 12.0, dtype=np.float64)
+        lake = mocker.Mock()
+        lake.symbols = symbols
+        lake.state_cube = state_cube
+        lake.state_hash = "test-hash"
+        return lake
+
     def test_happy_path_returns_zero(self, mocker) -> None:
         mocker.patch(
             "src.application.futures.runner.compound_main.build_data_lake_runtime",
@@ -72,15 +86,17 @@ class TestRunMultiscaleCompoundMain:
         mocker.patch(
             "src.application.futures.runner.compound_main.prepare_data_snapshot",
             return_value=mocker.Mock(snapshot_id="s1", manifest_hash="h1",
-                                      reference_time_ms=1_000_000, partitions=(), total_bytes=0),
+                                      reference_time_ms=1_000_000, partitions=(), total_bytes=0,
+                                      universe_state_hash="u1"),
         )
         mocker.patch(
             "src.application.futures.runner.compound_main.build_daily_pit_universe",
-            return_value=mocker.Mock(symbols=("BTCUSDT", "ETHUSDT"), decision_dates=()),
+            return_value=self._lake_universe_mock(mocker),
         )
         mock_cube = mocker.Mock(spec=MarketFeatureCube)
         mock_cube.timestamps_ns = np.array([0, 1, 2], dtype=np.int64)
         mock_cube.data_manifest_hash = "h1"
+        mock_cube.symbols = ("BTCUSDT", "ETHUSDT")
         mocker.patch(
             "src.application.futures.runner.compound_main.build_multiscale_market_cube",
             return_value=mock_cube,
@@ -104,15 +120,17 @@ class TestRunMultiscaleCompoundMain:
         mocker.patch(
             "src.application.futures.runner.compound_main.prepare_data_snapshot",
             return_value=mocker.Mock(snapshot_id="s1", manifest_hash="h1",
-                                      reference_time_ms=1_000_000, partitions=(), total_bytes=0),
+                                      reference_time_ms=1_000_000, partitions=(), total_bytes=0,
+                                      universe_state_hash="u1"),
         )
         mocker.patch(
             "src.application.futures.runner.compound_main.build_daily_pit_universe",
-            return_value=mocker.Mock(symbols=("BTCUSDT",), decision_dates=()),
+            return_value=self._lake_universe_mock(mocker, symbols=("BTCUSDT",)),
         )
         mock_cube = mocker.Mock(spec=MarketFeatureCube)
         mock_cube.timestamps_ns = np.array([0, 1], dtype=np.int64)
         mock_cube.data_manifest_hash = "h1"
+        mock_cube.symbols = ("BTCUSDT",)
         mocker.patch(
             "src.application.futures.runner.compound_main.build_multiscale_market_cube",
             return_value=mock_cube,
@@ -138,15 +156,17 @@ class TestRunMultiscaleCompoundMain:
         mocker.patch(
             "src.application.futures.runner.compound_main.prepare_data_snapshot",
             return_value=mocker.Mock(snapshot_id="s1", manifest_hash="h1",
-                                      reference_time_ms=1_000_000, partitions=(), total_bytes=0),
+                                      reference_time_ms=1_000_000, partitions=(), total_bytes=0,
+                                      universe_state_hash="u1"),
         )
         mocker.patch(
             "src.application.futures.runner.compound_main.build_daily_pit_universe",
-            return_value=mocker.Mock(symbols=("BTCUSDT",), decision_dates=()),
+            return_value=self._lake_universe_mock(mocker, symbols=("BTCUSDT",)),
         )
         mock_cube = mocker.Mock(spec=MarketFeatureCube)
         mock_cube.timestamps_ns = np.array([0, 1], dtype=np.int64)
         mock_cube.data_manifest_hash = "h1"
+        mock_cube.symbols = ("BTCUSDT",)
         mocker.patch(
             "src.application.futures.runner.compound_main.build_multiscale_market_cube",
             return_value=mock_cube,
@@ -173,7 +193,8 @@ def _setup_mocks(mocker) -> None:
     mocker.patch(
         "src.application.futures.runner.compound_main.prepare_data_snapshot",
         return_value=mocker.Mock(snapshot_id="s1", manifest_hash="h1",
-                                  reference_time_ms=1_000_000, partitions=(), total_bytes=0),
+                                  reference_time_ms=1_000_000, partitions=(), total_bytes=0,
+                                  universe_state_hash="u1"),
     )
 
 
@@ -225,6 +246,34 @@ def test_storage_budget_error_returns_one(mocker) -> None:
     result = run_multiscale_compound_main(config)
     assert result.exit_code == 1
     assert "storage_budget" in result.reason
+
+
+def test_no_admissible_alpha_returns_cash_status(mocker) -> None:
+    from src.domain.futures.compound.l1_multiscale import NoAdmissibleAlphaError
+
+    _setup_mocks(mocker)
+    mocker.patch(
+        "src.application.futures.runner.compound_main.build_daily_pit_universe",
+        return_value=TestRunMultiscaleCompoundMain()._lake_universe_mock(mocker),
+    )
+    mock_cube = mocker.Mock(spec=MarketFeatureCube)
+    mock_cube.timestamps_ns = np.array([0, 1], dtype=np.int64)
+    mock_cube.data_manifest_hash = "h1"
+    mock_cube.symbols = ("BTCUSDT", "ETHUSDT")
+    mocker.patch(
+        "src.application.futures.runner.compound_main.build_multiscale_market_cube",
+        return_value=mock_cube,
+    )
+    mocker.patch(
+        "src.application.futures.runner.compound_main.run_multiscale_compound_engine",
+        side_effect=NoAdmissibleAlphaError("none"),
+    )
+
+    result = run_multiscale_compound_main(
+        CompoundRunConfig(reference_date="2026-07-08", sync="skip", refresh_universe=False)
+    )
+
+    assert result == type(result)(exit_code=0, reason="no_admissible_alpha")
 
 
 def test_generic_exception_returns_one(mocker) -> None:
