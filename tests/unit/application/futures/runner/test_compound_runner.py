@@ -90,19 +90,14 @@ class TestCliCompoundOnly:
         args = argparse.Namespace(date="2026-07-08", sync="skip", phase=None, trials=None, timeframe=None)
         check_removed_flags(args)
 
-    def test_check_removed_flags_raises_for_removed_flag(self) -> None:
-        args = argparse.Namespace(phase="l3")
-        with pytest.raises(SystemExit):
-            check_removed_flags(args)
-
     def test_check_removed_flags_raises_for_trials(self) -> None:
         args = argparse.Namespace(trials=42)
         with pytest.raises(SystemExit):
             check_removed_flags(args)
 
-    def test_run_from_cli_returns_2_for_removed_flag(self) -> None:
-        result = run_from_cli(["--phase", "l3"])
-        assert result == 2
+    def test_run_from_cli_returns_2_for_invalid_phase(self) -> None:
+        with pytest.raises(SystemExit):
+            run_from_cli(["--phase", "l3"])
 
     def test_run_from_cli_returns_2_for_unknown_flag(self) -> None:
         result = run_from_cli(["--unknown-flag"])
