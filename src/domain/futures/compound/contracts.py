@@ -282,15 +282,33 @@ class SealedHoldoutManifest:
     holdout_days: int
     model_version: str
     data_manifest_hash: str
+    strategy_spec_hash: str = ""
     first_consumed_at_ns: int | None = None
 
 
 @dataclass(slots=True, frozen=True)
 class CompoundEngineResult:
-    alpha_tape: AlphaForecastTape
+    handoff: AlphaEventTape
     ledger: ExecutionLedger
     l2: L2Evaluation
     l3: L3ValidationResult
+
+
+@dataclass(slots=True, frozen=True)
+class StrategyDataCoverageEntry:
+    dataset: str
+    recipe_id: str
+    ratio: float
+    max_gap_bars: int
+    readiness: str
+    reason: str
+
+
+@dataclass(slots=True, frozen=True)
+class StrategyDataCoverage:
+    entries: tuple[StrategyDataCoverageEntry, ...]
+    all_ready: bool
+    data_manifest_hash: str
 
 
 @dataclass(slots=True, frozen=True)
@@ -362,5 +380,7 @@ __all__ = [
     "RawAlphaTape",
     "RiskOverlayResult",
     "SealedHoldoutManifest",
+    "StrategyDataCoverage",
+    "StrategyDataCoverageEntry",
     "UniverseLedgerCoverage",
 ]
