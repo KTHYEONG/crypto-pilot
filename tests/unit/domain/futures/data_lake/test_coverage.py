@@ -18,6 +18,7 @@ def test_validate_strategy_data_coverage_marks_missing_recipe_fields() -> None:
     snapshot = DataSnapshot(
         snapshot_id="snapshot",
         reference_time_ms=1,
+        universe_state_hash="",
         partitions=(
             PartitionManifest(
                 dataset=DatasetKind.KLINES_1H,

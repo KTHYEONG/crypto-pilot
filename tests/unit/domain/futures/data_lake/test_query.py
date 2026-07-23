@@ -20,15 +20,26 @@ from src.domain.futures.data_lake.query import (
 )
 
 
+def _snap(
+    snapshot_id: str = "s1",
+    reference_time_ms: int = 1_000_000,
+    partitions: tuple = (),
+    manifest_hash: str = "h1",
+    total_bytes: int = 0,
+) -> DataSnapshot:
+    return DataSnapshot(
+        snapshot_id=snapshot_id,
+        reference_time_ms=reference_time_ms,
+        partitions=partitions,
+        manifest_hash=manifest_hash,
+        universe_state_hash="",
+        total_bytes=total_bytes,
+    )
+
+
 class TestMaterializeNativeGrid:
     def test_requires_symbols(self) -> None:
-        snap = DataSnapshot(
-            snapshot_id="s1",
-            reference_time_ms=1,
-            partitions=(),
-            manifest_hash="h1",
-            total_bytes=0,
-        )
+        snap = _snap()
         request = GridRequest(
             symbols=(),
             timeframe="1h",
@@ -41,13 +52,7 @@ class TestMaterializeNativeGrid:
             materialize_native_grid(request=request, snapshot=snap)
 
     def test_requires_fields(self) -> None:
-        snap = DataSnapshot(
-            snapshot_id="s1",
-            reference_time_ms=1,
-            partitions=(),
-            manifest_hash="h1",
-            total_bytes=0,
-        )
+        snap = _snap()
         request = GridRequest(
             symbols=("BTCUSDT",),
             timeframe="1h",
@@ -60,7 +65,7 @@ class TestMaterializeNativeGrid:
             materialize_native_grid(request=request, snapshot=snap)
 
     def test_rejects_unsupported_native_timeframe(self) -> None:
-        snap = DataSnapshot("s1", 1, (), "h1", 0)
+        snap = _snap()
         request = GridRequest(
             symbols=("BTCUSDT",), timeframe="5m", source_timeframe="5m", fields=("close",),
             start_time_ns=0, end_time_ns=300_000_000_000,
@@ -69,7 +74,7 @@ class TestMaterializeNativeGrid:
             materialize_native_grid(request=request, snapshot=snap)
 
     def test_rejects_resampling_inside_native_grid(self) -> None:
-        snap = DataSnapshot("s1", 1, (), "h1", 0)
+        snap = _snap()
         request = GridRequest(
             symbols=("BTCUSDT",), timeframe="1h", source_timeframe="5m", fields=("close",),
             start_time_ns=0, end_time_ns=3_600_000_000_000,
@@ -78,13 +83,7 @@ class TestMaterializeNativeGrid:
             materialize_native_grid(request=request, snapshot=snap)
 
     def test_returns_native_feature_grid(self) -> None:
-        snap = DataSnapshot(
-            snapshot_id="s1",
-            reference_time_ms=1,
-            partitions=(),
-            manifest_hash="h1",
-            total_bytes=0,
-        )
+        snap = _snap()
         request = GridRequest(
             symbols=("BTCUSDT",),
             timeframe="1h",
@@ -100,20 +99,18 @@ class TestMaterializeNativeGrid:
 
 
 class TestBinanceQueryClient:
-    def test_downloads_month_from_local_cache(self, tmp_path: Path) -> None:
-        raw = tmp_path / "ohlcv" / "1h"
-        raw.mkdir(parents=True)
-        pd.DataFrame({"timestamp": [1_783_440_000_000], "close": [100.0]}).to_parquet(
-            raw / "BTCUSDT.parquet", index=False
-        )
+    def test_downloads_partition_from_vision(self, tmp_path: Path, monkeypatch) -> None:
         client = BinanceQueryClient(source_root=tmp_path)
+        monkeypatch.setattr(
+            client._vision,
+            "fetch_klines_archive_monthly",
+            lambda *_: pd.DataFrame([[1_783_440_000_000, 100.0, 102.0, 99.0, 101.0]]),
+        )
         assert client.download_calls == 0
         payload = client.download_partition(DatasetKind.KLINES_1H, "BTCUSDT", 1_783_440_000_000)
         assert client.download_calls == 1
-        assert pd.read_parquet(__import__("io").BytesIO(payload))["close"].tolist() == [100.0]
+        assert pd.read_parquet(__import__("io").BytesIO(payload))["close"].tolist() == [101.0]
         assert client.download_checksum(DatasetKind.KLINES_1H, "BTCUSDT", 1_783_440_000_000) == hashlib.sha256(payload).hexdigest()
-        uncached = BinanceQueryClient(source_root=tmp_path)
-        assert uncached.download_checksum(DatasetKind.KLINES_1H, "BTCUSDT", 1_783_440_000_000) == hashlib.sha256(payload).hexdigest()
 
     def test_uses_vision_only_when_local_symbol_is_absent(self, tmp_path: Path, monkeypatch) -> None:
         client = BinanceQueryClient(source_root=tmp_path)
@@ -122,19 +119,10 @@ class TestBinanceQueryClient:
             "fetch_klines_archive_monthly",
             lambda *_: pd.DataFrame([[1_783_440_000_000, 100.0, 102.0, 99.0, 101.0]]),
         )
-
         payload = client.download_partition(DatasetKind.KLINES_1H, "BTCUSDT", 1_783_440_000_000)
-
         assert pd.read_parquet(__import__("io").BytesIO(payload))["close"].tolist() == [101.0]
 
-    def test_uses_vision_one_minute_when_only_hourly_cache_exists(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        raw = tmp_path / "ohlcv" / "1h"
-        raw.mkdir(parents=True)
-        pd.DataFrame({"timestamp": [1_783_440_000_000], "close": [100.0]}).to_parquet(
-            raw / "BTCUSDT.parquet", index=False
-        )
+    def test_uses_vision_one_minute_when_no_cache(self, tmp_path: Path, monkeypatch) -> None:
         client = BinanceQueryClient(source_root=tmp_path)
         called: list[tuple[str, str]] = []
 
@@ -143,9 +131,7 @@ class TestBinanceQueryClient:
             return pd.DataFrame([[1_783_440_000_000, 100.0, 102.0, 99.0, 101.0]])
 
         monkeypatch.setattr(client._vision, "fetch_klines_archive_monthly", fetch)
-
         payload = client.download_partition(DatasetKind.KLINES_1M, "BTCUSDT", 1_783_440_000_000)
-
         assert called == [("BTCUSDT", "1m")]
         assert pd.read_parquet(__import__("io").BytesIO(payload))["close"].tolist() == [101.0]
 
@@ -156,38 +142,10 @@ class TestBinanceQueryClient:
             "fetch_funding_rate_monthly",
             lambda *_: pd.DataFrame([[1_783_440_000_000, 0.0001]]),
         )
-
         payload = client.download_partition(DatasetKind.FUNDING_EVENT, "BTCUSDT", 1_783_440_000_000)
-
         assert pd.read_parquet(__import__("io").BytesIO(payload))["funding_rate"].tolist() == [0.0001]
-        assert client._vision_frame(DatasetKind.METRICS_5M, "BTCUSDT", client._month(1_783_440_000_000)).empty
-        assert client._local_frame(DatasetKind.METRICS_5M, "BTCUSDT").empty
-        assert not client._has_local_source(DatasetKind.METRICS_5M, "BTCUSDT")
 
-    def test_resamples_local_one_minute_source(self, tmp_path: Path) -> None:
-        raw = tmp_path / "ohlcv" / "1m"
-        raw.mkdir(parents=True)
-        pd.DataFrame(
-            {
-                "timestamp": [1_783_440_000_000, 1_783_440_060_000],
-                "open": [100.0, 101.0], "high": [102.0, 103.0], "low": [99.0, 100.0],
-                "close": [101.0, 102.0], "volume": [2.0, 3.0], "quote_vol": [200.0, 300.0],
-            }
-        ).to_parquet(raw / "BTCUSDT.parquet", index=False)
-
-        payload = BinanceQueryClient(source_root=tmp_path).download_partition(
-            DatasetKind.KLINES_1H, "BTCUSDT", 1_783_440_000_000
-        )
-
-        frame = pd.read_parquet(__import__("io").BytesIO(payload))
-        assert frame[["open", "high", "low", "close", "quote_volume"]].iloc[0].tolist() == [100.0, 103.0, 99.0, 102.0, 500.0]
-
-    def test_empty_local_one_minute_source_stays_empty(self, tmp_path: Path) -> None:
-        raw = tmp_path / "ohlcv" / "1m"
-        raw.mkdir(parents=True)
-        pd.DataFrame({"timestamp": [], "close": []}).to_parquet(raw / "BTCUSDT.parquet", index=False)
-
-        assert BinanceQueryClient(source_root=tmp_path)._local_frame(DatasetKind.KLINES_1H, "BTCUSDT").empty
+    def test_empty_dataframe_functions_return_empty(self) -> None:
         assert BinanceQueryClient._normalize_vision_funding(pd.DataFrame()).empty
         assert BinanceQueryClient._normalize_vision_klines(pd.DataFrame()).empty
         assert BinanceQueryClient._normalize_timestamp(pd.DataFrame({"close": [1.0]})).empty
@@ -207,21 +165,22 @@ class TestBinanceQueryClient:
                 }
             )
         )
-
         assert normalized["quote_volume"].tolist() == [202.0]
 
 
 class TestLocalDataCatalog:
-    def test_default_no_coverage(self) -> None:
-        catalog = LocalDataCatalog(root="/tmp")  # noqa: S108
+    def test_read_only_catalog_uses_canonical_manifest(self, tmp_path: Path) -> None:
+        writable = LocalDataCatalog(root=tmp_path)
+        writable._connection.close()
+
+        read_only = LocalDataCatalog(root=tmp_path, read_only=True)
+
+        assert read_only.total_bytes() == 0
+
+    def test_default_no_coverage(self, tmp_path: Path) -> None:
+        catalog = LocalDataCatalog(root=tmp_path)
         assert not catalog.partition_exists(DatasetKind.KLINES_1H, "BTCUSDT", 1)
-        snap = DataSnapshot(
-            snapshot_id="s1",
-            reference_time_ms=1,
-            partitions=(),
-            manifest_hash="h1",
-            total_bytes=0,
-        )
+        snap = _snap()
         from src.domain.futures.data_lake.contracts import IngestionPlan, DataLakeConfig
 
         plan = IngestionPlan(
@@ -229,9 +188,54 @@ class TestLocalDataCatalog:
             broad_symbols=(),
             selected_symbols=(),
             datasets=(),
-            config=DataLakeConfig(root="/tmp"),  # noqa: S108
+            config=DataLakeConfig(root=tmp_path),
         )
         assert catalog.has_complete_coverage(snapshot=snap, plan=plan) is False
+
+
+def test_materialize_feature_grid_rejects_mismatched_timeframes() -> None:
+    from src.domain.futures.data_lake.contracts import GridRequest
+    from src.domain.futures.data_lake.query import materialize_feature_grid
+
+    with pytest.raises(ValueError, match="matching request"):
+        materialize_feature_grid(
+            request=GridRequest(
+                symbols=("BTCUSDT",), timeframe="1h", source_timeframe="5m",
+                fields=("close",), start_time_ns=0, end_time_ns=3_600_000_000_000,
+            ),
+            snapshot=_snap(),
+            dataset=DatasetKind.KLINES_1H,
+        )
+
+
+def test_materialize_feature_grid_rejects_empty_fields() -> None:
+    from src.domain.futures.data_lake.contracts import GridRequest
+    from src.domain.futures.data_lake.query import materialize_feature_grid
+
+    with pytest.raises(ValueError, match="at least one field"):
+        materialize_feature_grid(
+            request=GridRequest(
+                symbols=("BTCUSDT",), timeframe="1h", source_timeframe="1h",
+                fields=(), start_time_ns=0, end_time_ns=3_600_000_000_000,
+            ),
+            snapshot=_snap(),
+            dataset=DatasetKind.KLINES_1H,
+        )
+
+
+def test_materialize_feature_grid_rejects_empty_symbols() -> None:
+    from src.domain.futures.data_lake.contracts import GridRequest
+    from src.domain.futures.data_lake.query import materialize_feature_grid
+
+    with pytest.raises(ValueError, match="at least one symbol"):
+        materialize_feature_grid(
+            request=GridRequest(
+                symbols=(), timeframe="1h", source_timeframe="1h",
+                fields=("close",), start_time_ns=0, end_time_ns=3_600_000_000_000,
+            ),
+            snapshot=_snap(),
+            dataset=DatasetKind.KLINES_1H,
+        )
 
     def test_lock_falls_back_to_recovery_catalog(self, tmp_path: Path, monkeypatch) -> None:
         import duckdb
@@ -249,7 +253,6 @@ class TestLocalDataCatalog:
 
         monkeypatch.setattr(query_module.duckdb, "connect", connect_with_first_lock)
         catalog = LocalDataCatalog(tmp_path)
-
         assert catalog._database.name == "catalog_recovered.duckdb"
 
     def test_persists_manifest_and_materializes_exact_timestamp(self, tmp_path: Path) -> None:

@@ -15,11 +15,14 @@ from src.domain.futures.data_lake.contracts import (
     DatasetKind,
     IngestionPlan,
     PartitionManifest,
+    UniverseStateRequest,
 )
 from src.domain.futures.data_lake.ingestion import (
     ChecksumMismatchError,
     StorageBudgetError,
     build_ingestion_plan,
+    migrate_legacy_universe_state,
+    refresh_live_universe_state,
     sync_futures_data_lake,
 )
 from src.domain.futures.data_lake.query import LocalDataCatalog
@@ -74,20 +77,35 @@ class TestIngestionPlan:
             )
 
     def test_plan_excludes_non_binance_symbol_candidates(self, tmp_path: Path) -> None:
-        source = tmp_path / "data" / "ohlcv" / "1h"
-        source.mkdir(parents=True)
+        lake_root = tmp_path / "data" / "lake"
+        kline_root = lake_root / DatasetKind.KLINES_1H.value
+        btc_path = kline_root / "symbol=BTCUSDT" / "year=2026" / "month=07" / "part.parquet"
+        btc_path.parent.mkdir(parents=True)
+        bad_path = kline_root / "symbol=币安人生USDT" / "year=2026" / "month=07" / "part.parquet"
+        bad_path.parent.mkdir(parents=True)
         frame = pd.DataFrame(
             {"timestamp": [1_783_440_000_000], "close": [100.0], "quote_volume": [1_000_000.0]}
         )
-        frame.to_parquet(source / "BTCUSDT.parquet", index=False)
-        frame.to_parquet(source / "币安人生USDT.parquet", index=False)
+        frame.to_parquet(btc_path, index=False)
+        frame.to_parquet(bad_path, index=False)
 
         plan = build_ingestion_plan(
-            config=DataLakeConfig(root=tmp_path / "data" / "lake"),
+            config=DataLakeConfig(root=lake_root),
             reference_date=date(2026, 7, 8),
         )
 
         assert plan.broad_symbols == ("BTCUSDT",)
+
+
+def test_universe_state_request_rejects_invalid_axes() -> None:
+    import numpy as np
+
+    with pytest.raises(ValueError, match="must not be empty"):
+        UniverseStateRequest(np.array([], dtype=np.int64), 1)
+    with pytest.raises(ValueError, match="must be >= 1"):
+        UniverseStateRequest(np.array([1], dtype=np.int64), 0)
+    with pytest.raises(ValueError, match="strictly increasing"):
+        UniverseStateRequest(np.array([2, 1], dtype=np.int64), 1)
 
 
 class TestChecksumFailure:
@@ -114,6 +132,7 @@ class TestChecksumFailure:
                 reference_time_ms=1,
                 partitions=(),
                 manifest_hash="",
+                universe_state_hash="",
                 total_bytes=0,
             ),
             complete=False,
@@ -143,6 +162,7 @@ class TestHardCap:
                 reference_time_ms=1,
                 partitions=(),
                 manifest_hash="",
+                universe_state_hash="",
                 total_bytes=0,
             ),
             complete=False,
@@ -227,6 +247,188 @@ class TestLocalCommit:
         )
 
         assert snapshot.partitions == ()
+
+
+def test_migrate_legacy_universe_state_writes_lake_state_and_exchange_info(
+    tmp_path: Path,
+) -> None:
+    import sqlite3
+
+    root = tmp_path / "lake"
+    kline = root / "klines_1h" / "symbol=BTCUSDT" / "year=2026" / "month=07" / "part.parquet"
+    kline.parent.mkdir(parents=True)
+    pd.DataFrame({"timestamp": [1_783_440_000_000], "close": [100.0]}).to_parquet(kline, index=False)
+    ledger = tmp_path / "universe_ledger.db"
+    conn = sqlite3.connect(ledger)
+    conn.execute(
+        "CREATE TABLE ledger (symbol TEXT, date TEXT, knowledge_date TEXT, is_listed INT, "
+        "is_trading INT, status TEXT, adv_usdt_median REAL, listing_age_days INT, "
+        "taker_fee_bps REAL, contract_type TEXT, quote_asset TEXT)"
+    )
+    conn.execute(
+        "INSERT INTO ledger VALUES ('BTCUSDT', '2026-07-01', '2026-07-02', 1, 1, "
+        "'TRADING', 1000000, 100, 5, 'PERPETUAL', 'USDT')"
+    )
+    conn.commit()
+    conn.close()
+
+    catalog = LocalDataCatalog(root)
+    state_hash = migrate_legacy_universe_state(source_ledger=ledger, catalog=catalog, root=root)
+    snapshot = catalog.load_snapshot(1_800_000_000_000)
+
+    assert state_hash == snapshot.universe_state_hash
+    assert {part.dataset for part in snapshot.partitions} == {
+        DatasetKind.EXCHANGE_INFO,
+        DatasetKind.UNIVERSE_STATE,
+    }
+    state_partition = next(
+        part for part in snapshot.partitions if part.dataset is DatasetKind.UNIVERSE_STATE
+    )
+    state = pd.read_parquet(state_partition.path)
+    assert int(state.loc[0, "effective_time_ns"]) == 1_783_036_800_000_000_000
+
+
+def test_migrate_legacy_universe_state_rejects_symbols_missing_from_lake(
+    tmp_path: Path,
+) -> None:
+    import sqlite3
+
+    root = tmp_path / "lake"
+    kline = root / DatasetKind.KLINES_1H.value / "symbol=BTCUSDT" / "part.parquet"
+    kline.parent.mkdir(parents=True)
+    pd.DataFrame({"timestamp": [1], "close": [1.0]}).to_parquet(kline, index=False)
+    ledger = tmp_path / "universe_ledger.db"
+    conn = sqlite3.connect(ledger)
+    conn.execute(
+        "CREATE TABLE ledger (symbol TEXT, date TEXT, knowledge_date TEXT, is_listed INT, "
+        "is_trading INT, status TEXT, adv_usdt_median REAL, listing_age_days INT, "
+        "taker_fee_bps REAL, contract_type TEXT, quote_asset TEXT)"
+    )
+    conn.execute(
+        "INSERT INTO ledger VALUES ('ETHUSDT', '2026-07-01', '2026-07-02', 1, 1, "
+        "'TRADING', 1000000, 100, 5, 'PERPETUAL', 'USDT')"
+    )
+    conn.commit()
+    conn.close()
+
+    with pytest.raises(RuntimeError, match="no rows for lake symbols"):
+        migrate_legacy_universe_state(
+            source_ledger=ledger, catalog=LocalDataCatalog(root), root=root,
+        )
+
+
+def test_migrate_legacy_universe_state_requires_lake_klines(tmp_path: Path) -> None:
+    import sqlite3
+
+    ledger = tmp_path / "universe_ledger.db"
+    conn = sqlite3.connect(ledger)
+    conn.execute(
+        "CREATE TABLE ledger (symbol TEXT, date TEXT, knowledge_date TEXT, is_listed INT, "
+        "is_trading INT, status TEXT, adv_usdt_median REAL, listing_age_days INT, "
+        "taker_fee_bps REAL, contract_type TEXT, quote_asset TEXT)"
+    )
+    conn.execute(
+        "INSERT INTO ledger VALUES ('BTCUSDT', '2026-07-01', '2026-07-02', 1, 1, "
+        "'TRADING', 1000000, 100, 5, 'PERPETUAL', 'USDT')"
+    )
+    conn.commit()
+    conn.close()
+
+    with pytest.raises(RuntimeError, match="no valid klines_1h"):
+        migrate_legacy_universe_state(
+            source_ledger=ledger,
+            catalog=LocalDataCatalog(tmp_path / "lake"),
+            root=tmp_path / "lake",
+        )
+
+
+def test_refresh_live_universe_state_writes_next_causal_day(tmp_path: Path) -> None:
+    class ExchangeInfoClient:
+        def fetch_exchange_info(self) -> dict[str, object]:
+            return {"symbols": [
+                {"symbol": "BTCUSDT", "quoteAsset": "USDT", "contractType": "PERPETUAL", "status": "TRADING"},
+                {"symbol": "BAD", "quoteAsset": "BTC", "contractType": "PERPETUAL", "status": "TRADING"},
+            ]}
+
+    catalog = LocalDataCatalog(tmp_path)
+    hash_value = refresh_live_universe_state(
+        root=tmp_path,
+        catalog=catalog,
+        client=ExchangeInfoClient(),
+        knowledge_time_ns=1_783_468_800_000_000_000,
+    )
+    snapshot = catalog.load_snapshot(1_783_555_200_000)
+    state_path = next(part.path for part in snapshot.partitions if part.dataset is DatasetKind.UNIVERSE_STATE)
+    state = pd.read_parquet(state_path)
+    assert hash_value == snapshot.universe_state_hash
+    assert state.symbol.tolist() == ["BTCUSDT"]
+    assert int(state.effective_time_ns.iloc[0]) > int(state.knowledge_time_ns.iloc[0])
+
+
+def test_refresh_live_universe_state_limits_to_lake_symbols(tmp_path: Path) -> None:
+    kline = tmp_path / DatasetKind.KLINES_1H.value / "symbol=BTCUSDT" / "part.parquet"
+    kline.parent.mkdir(parents=True)
+    pd.DataFrame({"timestamp": [1], "close": [1.0]}).to_parquet(kline, index=False)
+
+    class ExchangeInfoClient:
+        def fetch_exchange_info(self) -> dict[str, object]:
+            return {"symbols": [
+                {"symbol": "BTCUSDT", "quoteAsset": "USDT", "contractType": "PERPETUAL", "status": "TRADING"},
+                {"symbol": "ETHUSDT", "quoteAsset": "USDT", "contractType": "PERPETUAL", "status": "TRADING"},
+            ]}
+
+    catalog = LocalDataCatalog(tmp_path)
+    refresh_live_universe_state(
+        root=tmp_path, catalog=catalog, client=ExchangeInfoClient(),
+        knowledge_time_ns=1_783_468_800_000_000_000,
+    )
+    state_path = next(
+        part.path for part in catalog.load_snapshot(1_783_555_200_000).partitions
+        if part.dataset is DatasetKind.UNIVERSE_STATE
+    )
+    assert pd.read_parquet(state_path)["symbol"].tolist() == ["BTCUSDT"]
+
+
+def test_refresh_live_universe_state_rejects_empty_exchange_info(tmp_path: Path) -> None:
+    class EmptyExchangeInfoClient:
+        def fetch_exchange_info(self) -> dict[str, object]:
+            return {"symbols": []}
+
+    with pytest.raises(RuntimeError, match="no USDT perpetual"):
+        refresh_live_universe_state(
+            root=tmp_path,
+            catalog=LocalDataCatalog(tmp_path),
+            client=EmptyExchangeInfoClient(),
+            knowledge_time_ns=1_783_468_800_000_000_000,
+        )
+
+
+def test_refresh_live_universe_state_rejects_invalid_exchange_schema(tmp_path: Path) -> None:
+    class InvalidExchangeInfoClient:
+        def fetch_exchange_info(self) -> dict[str, object]:
+            return {"symbols": "invalid"}
+
+    with pytest.raises(RuntimeError, match="symbols must be a list"):
+        refresh_live_universe_state(
+            root=tmp_path,
+            catalog=LocalDataCatalog(tmp_path),
+            client=InvalidExchangeInfoClient(),
+            knowledge_time_ns=1_783_468_800_000_000_000,
+        )
+
+
+def test_refresh_live_universe_state_skips_non_mapping_records(tmp_path: Path) -> None:
+    class NonMappingExchangeInfoClient:
+        def fetch_exchange_info(self) -> dict[str, object]:
+            return {"symbols": [None]}
+
+    with pytest.raises(RuntimeError, match="no USDT perpetual"):
+        refresh_live_universe_state(
+            root=tmp_path,
+            catalog=LocalDataCatalog(tmp_path),
+            client=NonMappingExchangeInfoClient(),
+            knowledge_time_ns=1_783_468_800_000_000_000,
+        )
 
     def test_invalid_parquet_month_is_quarantined_without_catalog_commit(self, tmp_path: Path) -> None:
         class InvalidParquetClient:
