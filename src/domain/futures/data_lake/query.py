@@ -44,6 +44,11 @@ class BinanceQueryClient:
         normalized = frame.copy()
         if "quote_volume" not in normalized.columns and "quote_vol" in normalized.columns:
             normalized = normalized.rename(columns={"quote_vol": "quote_volume"})
+        if {"quote_volume", "close", "volume"}.issubset(normalized.columns):
+            quote_volume = pd.to_numeric(normalized["quote_volume"], errors="coerce")
+            close = pd.to_numeric(normalized["close"], errors="coerce")
+            volume = pd.to_numeric(normalized["volume"], errors="coerce")
+            normalized["quote_volume"] = quote_volume.fillna(close * volume)
         if "timestamp" not in normalized.columns:
             if "datetime" not in normalized.columns:
                 return pd.DataFrame()
@@ -89,14 +94,29 @@ class BinanceQueryClient:
                     self._source_root / "ohlcv" / "1m" / f"{symbol[:-4]}_USDT.parquet",
                 )
             )
+        if dataset is DatasetKind.KLINES_1M:
+            return any(
+                path.exists()
+                for path in (
+                    self._source_root / "ohlcv" / "1m" / f"{symbol}.parquet",
+                    self._source_root / "ohlcv" / "1m" / f"{symbol[:-4]}_USDT.parquet",
+                )
+            )
         if dataset is DatasetKind.FUNDING_EVENT:
             return (self._source_root / "funding" / f"{symbol}.parquet").exists()
+        if dataset is DatasetKind.METRICS_5M:
+            return (self._source_root / "metrics" / f"{symbol}.parquet").exists()
         return False
 
     def _local_frame(self, dataset: DatasetKind, symbol: str) -> pd.DataFrame:
-        if dataset is DatasetKind.KLINES_1H:
-            path = self._source_root / "ohlcv" / "1h" / f"{symbol}.parquet"
+        if dataset in (DatasetKind.KLINES_1H, DatasetKind.KLINES_1M):
+            source_interval = "1h" if dataset is DatasetKind.KLINES_1H else "1m"
+            path = self._source_root / "ohlcv" / source_interval / f"{symbol}.parquet"
             if not path.exists():
+                if dataset is DatasetKind.KLINES_1M:
+                    path = self._source_root / "ohlcv" / source_interval / f"{symbol[:-4]}_USDT.parquet"
+                    if not path.exists():
+                        return pd.DataFrame()
                 one_minute_path = self._source_root / "ohlcv" / "1m" / f"{symbol}.parquet"
                 if not one_minute_path.exists():
                     one_minute_path = self._source_root / "ohlcv" / "1m" / f"{symbol[:-4]}_USDT.parquet"
@@ -118,11 +138,66 @@ class BinanceQueryClient:
                 return hourly.reset_index(drop=True)
         elif dataset is DatasetKind.FUNDING_EVENT:
             path = self._source_root / "funding" / f"{symbol}.parquet"
+        elif dataset is DatasetKind.METRICS_5M:
+            path = self._source_root / "metrics" / f"{symbol}.parquet"
         else:
             return pd.DataFrame()
         if not path.exists():
             return pd.DataFrame()
         return self._normalize_timestamp(pd.read_parquet(path))
+
+    def _local_partition_frame(
+        self,
+        dataset: DatasetKind,
+        symbol: str,
+        month: datetime,
+    ) -> pd.DataFrame:
+        """Read only one calendar month from a local Parquet source.
+
+        Avoiding a full-file read per monthly partition keeps the 1m materialization
+        memory-bounded and prevents repeated scans of multi-gigabyte raw files.
+        """
+        period_start = int(datetime(month.year, month.month, 1, tzinfo=UTC).timestamp() * 1000)
+        period_end = int((pd.Timestamp(month) + pd.offsets.MonthBegin(1)).timestamp() * 1000)
+        filters = [("timestamp", ">=", period_start), ("timestamp", "<", period_end)]
+
+        if dataset is DatasetKind.KLINES_1H:
+            hourly_path = self._source_root / "ohlcv" / "1h" / f"{symbol}.parquet"
+            if hourly_path.exists():
+                return self._normalize_timestamp(pd.read_parquet(hourly_path, filters=filters))
+            minute_path = self._source_root / "ohlcv" / "1m" / f"{symbol}.parquet"
+            if not minute_path.exists():
+                minute_path = self._source_root / "ohlcv" / "1m" / f"{symbol[:-4]}_USDT.parquet"
+            if not minute_path.exists():
+                return pd.DataFrame()
+            minute = self._normalize_timestamp(pd.read_parquet(minute_path, filters=filters))
+            if minute.empty:
+                return minute
+            minute["datetime"] = pd.to_datetime(minute["timestamp"], unit="ms", utc=True)
+            aggregations = {
+                "open": "first", "high": "max", "low": "min", "close": "last",
+                "volume": "sum", "quote_volume": "sum",
+            }
+            usable = {key: value for key, value in aggregations.items() if key in minute.columns}
+            hourly = minute.set_index("datetime").resample("1h").agg(usable).dropna(subset=["close"])
+            hourly["timestamp"] = (
+                hourly.index.to_numpy(dtype="datetime64[ns]").astype(np.int64) // 1_000_000
+            )
+            return hourly.reset_index(drop=True)
+
+        if dataset is DatasetKind.KLINES_1M:
+            path = self._source_root / "ohlcv" / "1m" / f"{symbol}.parquet"
+            if not path.exists():
+                path = self._source_root / "ohlcv" / "1m" / f"{symbol[:-4]}_USDT.parquet"
+        elif dataset is DatasetKind.METRICS_5M:
+            path = self._source_root / "metrics" / f"{symbol}.parquet"
+        elif dataset is DatasetKind.FUNDING_EVENT:
+            path = self._source_root / "funding" / f"{symbol}.parquet"
+        else:
+            return pd.DataFrame()
+        if not path.exists():
+            return pd.DataFrame()
+        return self._normalize_timestamp(pd.read_parquet(path, filters=filters))
 
     def _vision_frame(self, dataset: DatasetKind, symbol: str, month: datetime) -> pd.DataFrame:
         if dataset is DatasetKind.KLINES_1H:
@@ -133,18 +208,35 @@ class BinanceQueryClient:
             return self._normalize_vision_funding(
                 self._vision.fetch_funding_rate_monthly(symbol, month.year, month.month)
             )
+        indicator_map = {
+            DatasetKind.PREMIUM_5M: ("premiumIndexKlines", "5m"),
+            DatasetKind.MARK_1M: ("markPriceKlines", "1h"),
+            DatasetKind.INDEX_1M: ("indexPriceKlines", "1h"),
+        }
+        if dataset is DatasetKind.KLINES_1M:
+            return self._normalize_vision_klines(
+                self._vision.fetch_klines_archive_monthly(symbol, "1m", month.year, month.month)
+            )
+        if dataset in indicator_map:
+            archive, interval = indicator_map[dataset]
+            frame = self._vision.fetch_indicator_klines_monthly(
+                archive, symbol, interval, month.year, month.month
+            )
+            return self._normalize_vision_klines(frame)
+        if dataset is DatasetKind.METRICS_5M:
+            start = month.replace(day=1)
+            end = (pd.Timestamp(start) + pd.offsets.MonthBegin(1) - pd.Timedelta(days=1)).to_pydatetime()
+            return BinanceQueryClient._normalize_timestamp(
+                self._vision.fetch_range_metrics(symbol, start, end)
+            )
         return pd.DataFrame()
 
     def download_partition(self, dataset: DatasetKind, symbol: str, start_time_ms: int = 0, **_: Any) -> bytes:
         self.download_calls += 1
         key = (dataset, symbol, start_time_ms)
         month = self._month(start_time_ms)
-        frame = self._local_frame(dataset, symbol)
-        if not frame.empty:
-            period_start = int(datetime(month.year, month.month, 1, tzinfo=UTC).timestamp() * 1000)
-            period_end = int((pd.Timestamp(month) + pd.offsets.MonthBegin(1)).timestamp() * 1000)
-            frame = frame.loc[(frame["timestamp"] >= period_start) & (frame["timestamp"] < period_end)]
-        if frame.empty and not self._has_local_source(dataset, symbol):
+        frame = self._local_partition_frame(dataset, symbol, month)
+        if frame.empty:
             frame = self._vision_frame(dataset, symbol, month)
         payload = self._to_parquet_bytes(frame) if not frame.empty else b""
         self._payloads[key] = payload
@@ -227,7 +319,15 @@ class LocalDataCatalog:
     def has_complete_coverage(self, snapshot: DataSnapshot, plan: IngestionPlan) -> bool:
         if not plan.broad_symbols:
             return False
-        required = {(DatasetKind.KLINES_1H, symbol) for symbol in plan.broad_symbols}
+        required_datasets = tuple(
+            dataset for dataset in plan.datasets
+            if dataset is not DatasetKind.COST_CALIBRATION
+        )
+        required = {
+            (dataset, symbol)
+            for dataset in required_datasets
+            for symbol in plan.broad_symbols
+        }
         present = {(p.dataset, p.symbol) for p in snapshot.partitions if p.row_count > 0}
         return required.issubset(present)
 
