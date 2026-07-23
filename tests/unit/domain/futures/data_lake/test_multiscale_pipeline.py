@@ -609,27 +609,34 @@ class TestSimulator:
 
 
 class TestMainWiring:
-    def test_single_main_wiring_no_signal_and_disjoint_holdout(self) -> None:
+    def test_single_main_wiring_no_signal_and_disjoint_holdout(self, tmp_path) -> None:
         from src.domain.futures.compound.engine import (
             run_multiscale_compound_engine,
         )
+        from src.domain.futures.compound.holdout_store import SealedHoldoutStore
         from src.domain.futures.compound.config import CompoundEngineConfig
         from src.domain.futures.compound.contracts import (
             MarketFeatureCube,
             SealedHoldoutManifest,
         )
 
-        n = 500
+        n = 750
+        rng = np.random.default_rng(42)
+        base = np.linspace(100, 120, n).reshape(-1, 1)
+        noise = rng.normal(0, 0.5, (n, 2))
+        close = np.maximum(base + noise * 0.01 * base, 10.0).astype(np.float64)
         cube = MarketFeatureCube(
             timestamps_ns=np.arange(n, dtype=np.int64) * 3_600_000_000_000,
             symbols=("BTCUSDT", "ETHUSDT"),
             fields_2d={
-                "close": np.column_stack((
-                    np.linspace(100, 110, n),
-                    np.linspace(50, 55, n),
-                )).astype(np.float64),
+                "open": close.copy(),
+                "high": close * 1.002,
+                "low": close * 0.998,
+                "close": close,
                 "funding": np.zeros((n, 2), dtype=np.float32),
+                "premium": np.zeros((n, 2), dtype=np.float32),
                 "quote_volume": np.ones((n, 2), dtype=np.float32) * 1e8,
+                "taker_buy_quote": np.ones((n, 2), dtype=np.float32) * 5e7,
             },
             available_2d={"core": np.ones((n, 2), dtype=np.bool_)},
             eligible_2d=np.ones((n, 2), dtype=np.bool_),
@@ -643,17 +650,22 @@ class TestMainWiring:
             DailyPITUniverse,
         )
 
+        store = SealedHoldoutStore(tmp_path / "wiring_test.sqlite3")
+        store.create(SealedHoldoutManifest(
+            holdout_id="test",
+            start_time_ns=int(cube.timestamps_ns[-360]),
+            end_time_ns=int(cube.timestamps_ns[-1]),
+            holdout_days=180,
+            model_version="multiscale-v1",
+            data_manifest_hash="h1",
+            strategy_spec_hash="",
+        ))
+
         result = run_multiscale_compound_engine(
             market=cube,
             universe=DailyPITUniverse(symbols=cube.symbols, decision_dates=()),
-            holdout_manifest=SealedHoldoutManifest(
-                holdout_id="test",
-                start_time_ns=int(cube.timestamps_ns[-180]),
-                end_time_ns=int(cube.timestamps_ns[-1]),
-                holdout_days=180,
-                model_version="v1",
-                data_manifest_hash="h1",
-            ),
+            holdout_store=store,
+            holdout_id="test",
             config=CompoundEngineConfig(),
         )
         assert isinstance(result, object)
@@ -664,13 +676,44 @@ class TestMainWiring:
 class TestRunL1Multiscale:
     def test_run_l1_returns_event_tape(self) -> None:
         from src.domain.futures.compound.l1_multiscale import run_l1_multiscale
-
-        tape = run_l1_multiscale(
-            market=object(),
-            universe=object(),
-            catalog=(),
-            config=object(),
+        from src.domain.futures.compound.config import L1MultiscaleConfig
+        from src.domain.futures.compound.contracts import (
+            AlphaEventTape,
+            MarketFeatureCube,
         )
-        from src.domain.futures.compound.contracts import AlphaEventTape
+        from src.domain.futures.compound.alpha_catalog import build_multiscale_alpha_catalog
+
+        n = 750
+        rng = np.random.default_rng(42)
+        close = np.linspace(100, 120, n).reshape(-1, 1).astype(np.float64)
+        close += rng.normal(0, 0.5, (n, 1))
+        close = np.maximum(close, 10.0)
+        cube = MarketFeatureCube(
+            timestamps_ns=np.arange(n, dtype=np.int64) * 3_600_000_000_000,
+            symbols=("BTCUSDT",),
+            fields_2d={
+                "open": close.copy(),
+                "high": close * 1.002,
+                "low": close * 0.998,
+                "close": close,
+                "funding": np.zeros((n, 1), dtype=np.float32),
+                "premium": np.zeros((n, 1), dtype=np.float32),
+                "quote_volume": np.ones((n, 1), dtype=np.float32) * 1e8,
+                "taker_buy_quote": np.ones((n, 1), dtype=np.float32) * 5e7,
+            },
+            available_2d={"core": np.ones((n, 1), dtype=np.bool_)},
+            eligible_2d=np.ones((n, 1), dtype=np.bool_),
+            entry_block_2d=np.zeros((n, 1), dtype=np.bool_),
+            exit_required_2d=np.zeros((n, 1), dtype=np.bool_),
+            capacity_usdt_2d=np.full((n, 1), 1e6, dtype=np.float64),
+            execution_cost_bps_2d=np.full((n, 1), 12.0, dtype=np.float32),
+            data_manifest_hash="h1",
+        )
+        tape = run_l1_multiscale(
+            market=cube,
+            universe=object(),
+            catalog=build_multiscale_alpha_catalog(),
+            config=L1MultiscaleConfig(),
+        )
 
         assert isinstance(tape, AlphaEventTape)
