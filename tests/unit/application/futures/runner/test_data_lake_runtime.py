@@ -29,6 +29,23 @@ from src.domain.futures.data_lake.ingestion import (
 from src.domain.futures.universe.config import PITUniverseConfig
 
 
+def _snap(
+    snapshot_id: str = "s1",
+    reference_time_ms: int = 1_000_000,
+    partitions: tuple = (),
+    manifest_hash: str = "h1",
+    total_bytes: int = 0,
+) -> DataSnapshot:
+    return DataSnapshot(
+        snapshot_id=snapshot_id,
+        reference_time_ms=reference_time_ms,
+        partitions=partitions,
+        manifest_hash=manifest_hash,
+        universe_state_hash="",
+        total_bytes=total_bytes,
+    )
+
+
 class FakeClient:
     def __init__(self) -> None:
         self.download_calls = 0
@@ -92,13 +109,7 @@ class TestRuntimeFactory:
 
 class TestLocalSnapshot:
     def test_complete_local_snapshot_avoids_network(self) -> None:
-        snap = DataSnapshot(
-            snapshot_id="test-complete",
-            reference_time_ms=1_000_000,
-            partitions=(),
-            manifest_hash="h1",
-            total_bytes=0,
-        )
+        snap = _snap(snapshot_id="test-complete")
         runtime = DataLakeRuntime(
             client=FakeClient(),
             catalog=FakeCatalog(snap, complete=True),
@@ -115,13 +126,7 @@ class TestLocalSnapshot:
 
 class TestCoverageFailure:
     def test_incomplete_cache_without_approval_fails_closed(self) -> None:
-        snap = DataSnapshot(
-            snapshot_id="test-incomplete",
-            reference_time_ms=1_000_000,
-            partitions=(),
-            manifest_hash="h1",
-            total_bytes=0,
-        )
+        snap = _snap(snapshot_id="test-incomplete")
         runtime = DataLakeRuntime(
             client=FakeClient(),
             catalog=FakeCatalog(snap, complete=False),
@@ -138,20 +143,12 @@ class TestCoverageFailure:
 
 class TestApprovedSync:
     def test_approved_sync_revalidates_snapshot(self, tmp_path: Path) -> None:
-        snap = DataSnapshot(
-            snapshot_id="test-incomplete",
-            reference_time_ms=1_000_000,
-            partitions=(),
-            manifest_hash="h1",
-            total_bytes=0,
-        )
+        snap = _snap(snapshot_id="test-incomplete")
         client = FakeClient()
         catalog = FakeCatalog(snap, complete=False)
         runtime = DataLakeRuntime(client=client, catalog=catalog)
         config = CompoundRunConfig(
-            reference_date="2026-07-08",
-            sync="skip",
-            refresh_universe=False,
+            reference_date="2026-07-08", sync="skip", refresh_universe=False,
             allow_network_sync=True,
             data_lake=DataLakeConfig(root=tmp_path / "lake"),
         )
@@ -168,16 +165,10 @@ class TestChecksumFailure:
             broad_symbols=("BTCUSDT",),
             selected_symbols=("BTCUSDT",),
             datasets=(DatasetKind.KLINES_1H,),
-            config=DataLakeConfig(root=Path("/tmp/lake")),  # noqa: S108
+            config=DataLakeConfig(root=Path("/tmp/lake")),
         )
         cat = FakeCatalog(
-            DataSnapshot(
-                snapshot_id="s1",
-                reference_time_ms=1,
-                partitions=(),
-                manifest_hash="",
-                total_bytes=0,
-            ),
+            _snap(snapshot_id="s1", reference_time_ms=1),
             complete=False,
         )
 
@@ -203,7 +194,7 @@ class TestHardCap:
             broad_symbols=("BTCUSDT",),
             selected_symbols=("BTCUSDT",),
             datasets=(DatasetKind.KLINES_1H,),
-            config=DataLakeConfig(root=Path("/tmp/lake"), hard_cap_gib=64),  # noqa: S108
+            config=DataLakeConfig(root=Path("/tmp/lake"), hard_cap_gib=64),
         )
 
         class FullCatalog(FakeCatalog):
@@ -211,13 +202,7 @@ class TestHardCap:
                 return 100 * 1024**3
 
         cat = FullCatalog(
-            DataSnapshot(
-                snapshot_id="s1",
-                reference_time_ms=1,
-                partitions=(),
-                manifest_hash="",
-                total_bytes=0,
-            ),
+            _snap(snapshot_id="s1", reference_time_ms=1),
             complete=False,
         )
         with pytest.raises(StorageBudgetError):
