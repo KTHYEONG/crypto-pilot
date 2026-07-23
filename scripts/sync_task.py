@@ -191,14 +191,22 @@ def _clean_scratch_dir() -> int:
     return count
 
 
-def _clean_specs(task: str) -> int:
+def _clean_specs(task: str, keep_specs: list[str] | None = None, keep_all_specs: bool = False) -> int:
     _ = task
+    if keep_all_specs:
+        return 0
     specs_dir = "docs/specs"
     if not _path_exists(specs_dir):
         return 0
+
+    keep_set = set(keep_specs) if keep_specs else set()
+
     count = 0
     for fname in os.listdir(specs_dir):
         if fname.endswith((".md", "_contract.json")):
+            if fname in keep_set or fname.lower() in keep_set:
+                continue
+
             fpath = os.path.join(specs_dir, fname)
             try:
                 os.remove(fpath)
@@ -206,7 +214,6 @@ def _clean_specs(task: str) -> int:
             except OSError:
                 pass
     return count
-
 
 
 def main() -> None:
@@ -219,6 +226,17 @@ def main() -> None:
     parser.add_argument("--source", required=True, help="Modified source file path")
     parser.add_argument("--test", default=None, help="Test file path (auto-resolved if omitted)")
     parser.add_argument("--doc", default=None, help="Architecture doc path")
+    parser.add_argument(
+        "--keep-specs",
+        nargs="*",
+        default=[],
+        help="Spec files or filenames to preserve in docs/specs (e.g. --keep-specs custom_spec.md)",
+    )
+    parser.add_argument(
+        "--keep-all-specs",
+        action="store_true",
+        help="Preserve all files in docs/specs during sync cleanup",
+    )
     args = parser.parse_args()
 
     logs: list[str] = []
@@ -273,7 +291,7 @@ def main() -> None:
 
     # 6. Spec Cleanup
     try:
-        cleaned = _clean_specs(args.task)
+        cleaned = _clean_specs(args.task, keep_specs=args.keep_specs, keep_all_specs=args.keep_all_specs)
         if cleaned > 0:
             logs.append(f"Cleaned {cleaned} spec files")
         else:
