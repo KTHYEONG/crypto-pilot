@@ -9,6 +9,9 @@ from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 
+import numpy as np
+import pandas as pd
+
 from src.domain.futures.data_lake.contracts import (
     BinanceDataClient,
     DataCatalog,
@@ -44,15 +47,25 @@ def build_ingestion_plan(
 
     _logger.info("building ingestion plan for %s with market=%s", reference_date, config.market)
 
-    source_root = config.root.parent
-    ohlcv_root = source_root / "ohlcv" / "1h"
-    candidates = tuple(sorted(path.stem for path in ohlcv_root.glob("*.parquet")))
+    lake_root = config.root
+    exchange_info_root = lake_root / DatasetKind.EXCHANGE_INFO.value
+    universe_root = lake_root / DatasetKind.UNIVERSE_STATE.value
+    candidates: tuple[str, ...] = ()
+    if exchange_info_root.exists():
+        candidates = tuple(sorted(
+            path.name.removeprefix("symbol=") for path in exchange_info_root.glob("symbol=*")
+        ))
+    if not candidates and universe_root.exists():
+        candidates = tuple(sorted({
+            path.name.removeprefix("symbol=") for path in universe_root.glob("symbol=*")
+        }))
     if not candidates:
-        ohlcv_root = source_root / "ohlcv" / "1m"
-        candidates = tuple(sorted(path.stem for path in ohlcv_root.glob("*.parquet")))
-    lake_root = config.root / DatasetKind.KLINES_1H.value
-    if not candidates and lake_root.exists():
-        candidates = tuple(sorted(path.name.removeprefix("symbol=") for path in lake_root.glob("symbol=*")))
+        kline_root = lake_root / DatasetKind.KLINES_1H.value
+        if kline_root.exists():
+            candidates = tuple(sorted(
+                path.name.removeprefix("symbol=") for path in kline_root.glob("symbol=*")
+            ))
+
     liquidity: list[tuple[float, str]] = []
     for symbol in candidates:
         normalized_symbol = symbol.replace("_", "")
@@ -66,16 +79,16 @@ def build_ingestion_plan(
         try:
             import pandas as pd
 
-            raw_path = ohlcv_root / f"{symbol}.parquet"
-            lake_paths = tuple((lake_root / f"symbol={symbol}").glob("year=*/month=*/part.parquet"))
-            path = raw_path if raw_path.exists() else max(lake_paths, default=raw_path)
-            sample = pd.read_parquet(path)
-            volume_column = "quote_volume" if "quote_volume" in sample.columns else "quote_vol"
-            score = float(pd.to_numeric(sample[volume_column], errors="coerce").tail(24 * 30).median())
-            if score > 0:
-                liquidity.append((score, symbol))
+            lake_paths = tuple((lake_root / DatasetKind.KLINES_1H.value / f"symbol={symbol}").glob("year=*/month=*/part.parquet"))
+            if lake_paths:
+                sample = pd.read_parquet(max(lake_paths))
+                volume_column = "quote_volume" if "quote_volume" in sample.columns else "quote_vol"
+                score = float(pd.to_numeric(sample[volume_column], errors="coerce").tail(min(24 * 30, len(sample))).median())
+                if score > 0:
+                    liquidity.append((score, symbol))
         except (KeyError, OSError, ValueError):
             continue
+
     selected_symbols: list[str] = []
     seen_symbols: set[str] = set()
     for _, raw_symbol in sorted(liquidity, key=lambda item: (-item[0], item[1])):
@@ -88,7 +101,7 @@ def build_ingestion_plan(
             break
     broad_symbols = tuple(selected_symbols)
     if not broad_symbols:
-        _logger.warning("no local 1h source files found under %s", ohlcv_root)
+        _logger.warning("no lake source files found under %s", lake_root)
 
     return IngestionPlan(
         reference_date=reference_date,
@@ -103,6 +116,7 @@ def build_ingestion_plan(
             DatasetKind.INDEX_1M,
             DatasetKind.METRICS_5M,
             DatasetKind.COST_CALIBRATION,
+            DatasetKind.UNIVERSE_STATE,
         ),
         config=config,
         start_date=reference_date - timedelta(days=730),
@@ -222,6 +236,8 @@ def sync_futures_data_lake(
     start_date = plan.start_date or plan.reference_date
 
     for dataset_kind in plan.datasets:
+        if dataset_kind in (DatasetKind.EXCHANGE_INFO, DatasetKind.UNIVERSE_STATE):
+            continue
         symbols = plan.broad_symbols if dataset_kind is DatasetKind.KLINES_1H else plan.selected_symbols
         dataset_start = start_date
         if dataset_kind in (DatasetKind.KLINES_1M, DatasetKind.METRICS_5M):
@@ -269,3 +285,213 @@ def sync_futures_data_lake(
 
     reference_time_ms = int(datetime.combine(plan.reference_date, datetime.max.time(), tzinfo=UTC).timestamp() * 1000)
     return catalog.load_snapshot(reference_time_ms)
+
+
+def migrate_legacy_universe_state(
+    *, source_ledger: Path, catalog: DataCatalog, root: Path
+) -> str:
+    _logger.info("migrating legacy universe state from %s", source_ledger)
+    if not source_ledger.exists():
+        raise DataCoverageError(f"source ledger not found: {source_ledger}")  # pragma: no cover - defensive input guard
+
+    import sqlite3
+
+
+    conn = sqlite3.connect(str(source_ledger))
+    try:
+        df = pd.read_sql_query(
+            "SELECT symbol, date, knowledge_date, is_listed, is_trading, status, "
+            "adv_usdt_median, listing_age_days, taker_fee_bps, contract_type, quote_asset "
+            "FROM ledger ORDER BY symbol, date, knowledge_date",
+            conn,
+        )
+    finally:
+        conn.close()
+
+    if df.empty:
+        raise DataCoverageError(f"no rows in ledger: {source_ledger}")  # pragma: no cover - defensive input guard
+
+    lake_symbols = {
+        path.name.removeprefix("symbol=")
+        for path in (root / DatasetKind.KLINES_1H.value).glob("symbol=*")
+        if path.name.removeprefix("symbol=").isascii()
+        and path.name.removeprefix("symbol=").isalnum()
+        and path.name.removeprefix("symbol=").endswith("USDT")
+    }
+    if not lake_symbols:
+        raise DataCoverageError("no valid klines_1h symbols available for universe migration")
+    df = df.loc[df["symbol"].isin(lake_symbols)].copy()
+    if df.empty:
+        raise DataCoverageError("legacy ledger has no rows for lake symbols")
+
+    knowledge_time = pd.to_datetime(df["knowledge_date"], utc=True)
+    df["knowledge_time_ns"] = knowledge_time.to_numpy(dtype="datetime64[ns]").astype(np.int64)
+    df["effective_time_ns"] = (
+        (knowledge_time + pd.Timedelta(days=1))
+        .to_numpy(dtype="datetime64[ns]")
+        .astype(np.int64)
+    )
+    df["eligible"] = df["is_listed"].fillna(False).astype(bool) & df["is_trading"].fillna(False).astype(bool)
+    df["entry_block"] = ~df["eligible"]
+    df["exit_required"] = False
+    df["capacity_usdt"] = df["adv_usdt_median"].fillna(0.0).astype(float) * 0.1
+    df["risk_scale"] = 1.0
+    df["execution_cost_bps"] = (df["taker_fee_bps"].fillna(5.0).astype(float) * 2.0)
+    df["state_reason"] = ""
+    df["universe_config_hash"] = "migration-v1"
+    df["source_manifest_hash"] = "migration-v1"
+
+    output_cols = [
+        "effective_time_ns", "knowledge_time_ns", "symbol", "eligible", "entry_block",
+        "exit_required", "capacity_usdt", "risk_scale", "execution_cost_bps",
+        "state_reason", "universe_config_hash", "source_manifest_hash",
+    ]
+    output = df[output_cols].copy()
+    output["month"] = (
+        (knowledge_time + pd.Timedelta(days=1)).dt.tz_localize(None).dt.to_period("M")
+    )
+
+    total_rows = 0
+    for month_period, group in output.groupby("month"):
+        month_start = month_period.start_time
+        year = month_start.year
+        month_num = month_start.month
+        payload_buffer = io.BytesIO()
+        monthly = group.drop(columns=["month"])
+        monthly.to_parquet(payload_buffer, index=False, compression="zstd")
+        payload = payload_buffer.getvalue()
+
+        path = (
+            root
+            / DatasetKind.UNIVERSE_STATE.value
+            / "symbol=__all__"
+            / f"year={year:04d}"
+            / f"month={month_num:02d}"
+            / "part.parquet"
+        )
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = path.with_suffix(".tmp.parquet")
+        temporary.write_bytes(payload)
+        os.replace(temporary, path)
+
+        start_ms = int(datetime(year, month_num, 1, tzinfo=UTC).timestamp() * 1000)
+        manifest = PartitionManifest(
+            dataset=DatasetKind.UNIVERSE_STATE,
+            symbol="__all__",
+            start_time_ms=start_ms,
+            end_time_ms=start_ms,
+            row_count=len(monthly),
+            sha256=hashlib.sha256(payload).hexdigest(),
+            source="legacy_migration",
+            is_final=True,
+            path=path,
+        )
+        catalog.commit_partition(manifest)
+        total_rows += len(monthly)
+        _logger.info("migrated universe_state partition %s-%02d: %d rows", year, month_num, len(monthly))
+
+    latest = df.sort_values(["symbol", "knowledge_date"]).groupby("symbol", as_index=False).tail(1)
+    for row in latest.itertuples(index=False):
+        observed = pd.Timestamp(row.knowledge_date, tz="UTC")
+        exchange_frame = pd.DataFrame(({
+            "timestamp": int(observed.timestamp() * 1000),
+            "symbol": str(row.symbol),
+            "quote_asset": str(row.quote_asset),
+            "contract_type": str(row.contract_type),
+            "is_trading": bool(row.is_trading),
+        },))
+        exchange_payload = io.BytesIO()
+        exchange_frame.to_parquet(exchange_payload, index=False, compression="zstd")
+        payload = exchange_payload.getvalue()
+        month = observed.date().replace(day=1)
+        manifest = _payload_manifest(
+            dataset=DatasetKind.EXCHANGE_INFO,
+            symbol=str(row.symbol),
+            month=month,
+            payload=payload,
+            root=root,
+        )
+        catalog.commit_partition(manifest)
+
+    _logger.info("migration complete: %d total rows across %d partitions", total_rows, len(output["month"].unique()))
+    reference_time_ms = int(datetime.now(UTC).timestamp() * 1000)
+    snap = catalog.load_snapshot(reference_time_ms)
+    return snap.universe_state_hash
+
+
+def refresh_live_universe_state(
+    *, root: Path, catalog: DataCatalog, client: BinanceDataClient,
+    knowledge_time_ns: int,
+) -> str:
+    """Persist one causal daily PIT state from current Binance exchangeInfo."""
+    exchange_info = client.fetch_exchange_info()
+    records = exchange_info.get("symbols", [])
+    if not isinstance(records, list):
+        raise DataCoverageError("exchangeInfo symbols must be a list")
+
+    lake_symbols = {
+        path.name.removeprefix("symbol=")
+        for path in (root / DatasetKind.KLINES_1H.value).glob("symbol=*")
+        if path.name.removeprefix("symbol=").isascii()
+        and path.name.removeprefix("symbol=").isalnum()
+        and path.name.removeprefix("symbol=").endswith("USDT")
+    }
+    knowledge = pd.Timestamp(knowledge_time_ns, unit="ns", tz="UTC")
+    effective = (knowledge.normalize() + pd.Timedelta(days=1)).value
+    state_rows: list[dict[str, object]] = []
+    for record in records:
+        if not isinstance(record, dict):
+            continue
+        symbol = str(record.get("symbol", "")).upper()
+        if (
+            not symbol.isascii() or not symbol.isalnum()
+            or str(record.get("quoteAsset", "")).upper() != "USDT"
+            or str(record.get("contractType", "")).upper() != "PERPETUAL"
+            or (lake_symbols and symbol not in lake_symbols)
+        ):
+            continue
+        eligible = str(record.get("status", "")).upper() == "TRADING"
+        state_rows.append({
+            "effective_time_ns": effective,
+            "knowledge_time_ns": knowledge_time_ns,
+            "symbol": symbol,
+            "eligible": eligible,
+            "entry_block": not eligible,
+            "exit_required": False,
+            "capacity_usdt": 1_000_000.0 if eligible else 0.0,
+            "risk_scale": 1.0 if eligible else 0.0,
+            "execution_cost_bps": 12.0,
+            "state_reason": "live_exchange_info",
+            "universe_config_hash": "live-exchange-info-v1",
+            "source_manifest_hash": "exchange-info-live",
+        })
+    if not state_rows:
+        raise DataCoverageError("live exchangeInfo produced no USDT perpetual symbols")
+
+    frame = pd.DataFrame(state_rows)
+    observed = pd.Timestamp(effective, unit="ns", tz="UTC")
+    path = (
+        root / DatasetKind.UNIVERSE_STATE.value / "symbol=__all__"
+        / f"year={observed.year:04d}" / f"month={observed.month:02d}"
+        / f"day={observed.day:02d}.parquet"
+    )
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload_buffer = io.BytesIO()
+    frame.to_parquet(payload_buffer, index=False, compression="zstd")
+    payload = payload_buffer.getvalue()
+    temporary = path.with_suffix(".tmp.parquet")
+    temporary.write_bytes(payload)
+    os.replace(temporary, path)
+    manifest = PartitionManifest(
+        dataset=DatasetKind.UNIVERSE_STATE,
+        symbol="__all__",
+        start_time_ms=effective // 1_000_000,
+        end_time_ms=effective // 1_000_000,
+        row_count=len(frame),
+        sha256=hashlib.sha256(payload).hexdigest(),
+        source="binance_exchange_info_live",
+        is_final=True,
+        path=path,
+    )
+    catalog.commit_partition(manifest)
+    return catalog.load_snapshot(manifest.end_time_ms).universe_state_hash

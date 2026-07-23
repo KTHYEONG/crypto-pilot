@@ -9,6 +9,8 @@ from typing import Any, Protocol
 import numpy as np
 from numpy.typing import NDArray
 
+from src.domain.futures.universe.contracts import UniverseStateCube
+
 
 class DatasetKind(StrEnum):
     EXCHANGE_INFO = "exchange_info"
@@ -20,6 +22,7 @@ class DatasetKind(StrEnum):
     INDEX_1M = "index_1m"
     METRICS_5M = "metrics_5m"
     COST_CALIBRATION = "cost_calibration"
+    UNIVERSE_STATE = "universe_state"
 
 
 @dataclass(slots=True, frozen=True)
@@ -64,11 +67,50 @@ class PartitionManifest:
 
 
 @dataclass(slots=True, frozen=True)
+class UniverseStateRow:
+    effective_time_ns: int
+    knowledge_time_ns: int
+    symbol: str
+    eligible: bool
+    entry_block: bool
+    exit_required: bool
+    capacity_usdt: float
+    risk_scale: float
+    execution_cost_bps: float
+    state_reason: str
+    universe_config_hash: str
+    source_manifest_hash: str
+
+
+@dataclass(slots=True, frozen=True)
+class UniverseStateRequest:
+    execution_timestamps_ns: NDArray[np.int64]
+    max_axis_symbols: int
+
+    def __post_init__(self) -> None:
+        timestamps = self.execution_timestamps_ns
+        if timestamps.size == 0:
+            raise ValueError("execution_timestamps_ns must not be empty")
+        if self.max_axis_symbols < 1:
+            raise ValueError("max_axis_symbols must be >= 1")
+        if np.any(np.diff(timestamps) <= 0):
+            raise ValueError("execution_timestamps_ns must be strictly increasing")
+
+
+@dataclass(slots=True, frozen=True)
+class LakeUniverse:
+    symbols: tuple[str, ...]
+    state_cube: UniverseStateCube
+    state_hash: str
+
+
+@dataclass(slots=True, frozen=True)
 class DataSnapshot:
     snapshot_id: str
     reference_time_ms: int
     partitions: tuple[PartitionManifest, ...]
     manifest_hash: str
+    universe_state_hash: str
     total_bytes: int
 
 
@@ -104,6 +146,7 @@ class NativeFeatureGrid:
 class BinanceDataClient(Protocol):
     def download_partition(self, *args: Any, **kwargs: Any) -> bytes: ...
     def download_checksum(self, *args: Any, **kwargs: Any) -> str: ...
+    def fetch_exchange_info(self) -> dict[str, Any]: ...
 
 
 class DataCatalog(Protocol):
@@ -112,5 +155,4 @@ class DataCatalog(Protocol):
     def total_bytes(self) -> int: ...
     def load_snapshot(self, reference_time_ms: int) -> DataSnapshot: ...
     def has_complete_coverage(self, snapshot: DataSnapshot, plan: IngestionPlan) -> bool: ...
-
-
+    def compute_universe_state_hash(self, snapshot: DataSnapshot) -> str: ...
