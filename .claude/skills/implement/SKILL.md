@@ -23,10 +23,11 @@ Optimize for **low-cost models (Doer)** by enforcing strict mechanical execution
   - Do **NOT** modify any locked method/class signature. If a design change is required, **STOP execution immediately** and escalate to the human or high-reasoning model.
 - **Step 2: Single-Pass Contract & Test Synthesis (Combined Red-Green)**
   - Do **NOT** waste token cycles executing failing tests just to prove a Red phase.
-  - Copy the **Skeleton Mock Boilerplate** from the spec into the test file (`tests/...`).
+  - Read `contract.json` to extract `contracts`, `assertions`, and `wiring`.
   - Write both the source logic (`src/...`) and the corresponding unit/scenario tests (`tests/...`) simultaneously, adhering strictly to the contract.json spec.
-  - **Do NOT leave source methods/functions as stubs (`pass`, `Ellipsis`, or `raise NotImplementedError`). Full concrete logic must be implemented.**
-  - Wire the new logic into the parent calling module as defined in the Connection Plan, ensuring both `import_symbol` and `invocation_symbol` (actual call/instantiation) are implemented in the caller module context.
+  - **Do NOT copy-paste dummy mock templates or return static dummy values (e.g. `return {}`, `return True`, or logger-only calls). Full concrete business logic must be implemented.**
+  - **Strict Value Assertions**: Write test cases targeting the exact `assertions` defined in `contract.json`. Loose assertions like `assert result is not None` are strictly prohibited.
+  - Wire the new logic into the parent calling module as defined in the `wiring` section of `contract.json`, ensuring both `import_symbol` and `invocation_symbol` (actual call/instantiation) are implemented in the caller module context.
   - Limit high-level scenario tests strictly to the 3-4 scenarios defined in the spec.
 - **Step 3: Local Verification & Green Enforcement**
   - Run pytest locally (`uv run pytest -k [target_name]`) to verify that the synthesized code is functional.
