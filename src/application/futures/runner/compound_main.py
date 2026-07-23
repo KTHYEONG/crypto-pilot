@@ -11,21 +11,25 @@ from src.application.futures.runner.compound_config import (
     CompoundRunArtifacts,
     CompoundRunConfig,
 )
-from src.application.futures.runner.compound_data import check_data_readiness, load_hourly_data
+from src.application.futures.runner.compound_data import (
+    build_multiscale_market_cube,
+)
 from src.application.futures.runner.compound_universe import (
-    build_pit_universe_state,
-    resolve_universe_symbols,
-    sync_universe_ledger,
+    EmptyPITUniverseError,
+    build_daily_pit_universe,
+)
+from src.application.futures.runner.data_lake_runtime import (
+    build_data_lake_runtime,
+    prepare_data_snapshot,
 )
 from src.application.futures.runner.models import RunnerResult
 from src.domain.futures.compound.config import CompoundEngineConfig
 from src.domain.futures.compound.contracts import (
     CompoundEngineResult,
-    MarketFeatureCube,
     SealedHoldoutManifest,
 )
-from src.domain.futures.compound.data_plane import build_compound_market_feature_cube
-from src.domain.futures.compound.engine import run_compound_engine
+from src.domain.futures.compound.engine import run_multiscale_compound_engine
+from src.domain.futures.data_lake.ingestion import DataCoverageError, StorageBudgetError
 
 _logger = logging.getLogger(__name__)
 
@@ -52,6 +56,7 @@ def _write_artifacts(
         "base_timeframe": config.base_timeframe,
         "n_bars": int(engine_result.ledger.timestamps_ns.size),
         "n_symbols": int(engine_result.ledger.target_weights_2d.shape[1]) if engine_result.ledger.target_weights_2d.ndim > 1 else 0,
+        "universe_symbols": list(engine_result.alpha_tape.symbols),
         "l2": {
             "annualized_log_growth": engine_result.l2.annualized_log_growth,
             "growth_ci90_lower": engine_result.l2.growth_ci90[0],
@@ -92,76 +97,42 @@ def _write_artifacts(
                  paths.result_path, paths.target_weights_path, paths.manifest_path)
 
 
-def _run_engine_from_loaded_data(
-    cube: MarketFeatureCube,
-    holdout_manifest: SealedHoldoutManifest,
-    config: CompoundEngineConfig,
-) -> CompoundEngineResult:
-    return run_compound_engine(
-        cube=cube,
-        holdout_manifest=holdout_manifest,
-        config=config,
-    )
-
-
-def run_compound_main(config: CompoundRunConfig) -> RunnerResult:
+def run_multiscale_compound_main(config: CompoundRunConfig) -> RunnerResult:
     try:
-        _logger.info("compound run starting: date=%s sync=%s seed=%d",
-                     config.reference_date, config.sync, config.seed)
-
-        ref_dt, _synced = sync_universe_ledger(config)
-
-        symbols = resolve_universe_symbols(config, ref_dt)
-        if not symbols:
-            _logger.info("no cached symbols found; using empty universe")
-            symbols = ("BTCUSDT", "ETHUSDT")
-
-        _logger.info("loading hourly data for %d symbols", len(symbols))
-        data_maps = load_hourly_data(config, symbols, ref_dt=ref_dt)
-
-        if not check_data_readiness(data_maps):
-            return RunnerResult(exit_code=1, reason="insufficient_data_readiness")
-
-        valid_symbols = tuple(
-            sym for sym in symbols
-            if sym in data_maps and "1h" in data_maps[sym] and not data_maps[sym]["1h"].empty
-        )
-        if not valid_symbols:
-            return RunnerResult(exit_code=1, reason="no_valid_symbol_data")
-
-        state_cube = build_pit_universe_state(valid_symbols, ref_dt)
+        _logger.info("multiscale compound run: date=%s sync=%s",
+                     config.reference_date, config.sync)
 
         engine_config = CompoundEngineConfig()
-        cube = build_compound_market_feature_cube(
-            data_maps=data_maps,
-            symbols=valid_symbols,
-            state_cube=state_cube,
-            timeframe="1h",
-            data_manifest_hash="cached-hourly-data",
-            config=engine_config.data,
+
+        runtime = build_data_lake_runtime(config)
+        snapshot = prepare_data_snapshot(config=config, runtime=runtime)
+
+        universe = build_daily_pit_universe(snapshot=snapshot, config=config.universe)
+
+        _logger.info(
+            "universe built: %d symbols from snapshot %s",
+            len(universe.symbols), snapshot.snapshot_id,
         )
 
-        holdout_start_ns = (
-            int(cube.timestamps_ns[-1])
-            if cube.timestamps_ns.size > 0
-            else int(np.datetime64(ref_dt).astype(np.int64))
-        )
-        holdout_days = 90
-        holdout_start_bar = max(0, cube.timestamps_ns.size - holdout_days * 24)
-        holdout_start_ns = int(cube.timestamps_ns[holdout_start_bar]) if holdout_start_bar < cube.timestamps_ns.size else holdout_start_ns
+        market = build_multiscale_market_cube(snapshot=snapshot, universe=universe, config=config)
+
+        holdout_bars = 180 * 24
+        holdout_start_bar = max(0, market.timestamps_ns.size - holdout_bars)
+        holdout_start_ns = int(market.timestamps_ns[holdout_start_bar]) if market.timestamps_ns.size > 0 else 0
 
         holdout_manifest = SealedHoldoutManifest(
-            holdout_id=f"compound-{config.reference_date or 'live'}",
+            holdout_id=f"multiscale-{config.reference_date or 'live'}",
             start_time_ns=holdout_start_ns,
-            end_time_ns=int(cube.timestamps_ns[-1]) if cube.timestamps_ns.size > 0 else holdout_start_ns,
-            holdout_days=holdout_days,
-            model_version="compound-v1",
-            data_manifest_hash=cube.data_manifest_hash,
+            end_time_ns=int(market.timestamps_ns[-1]) if market.timestamps_ns.size > 0 else holdout_start_ns,
+            holdout_days=180,
+            model_version="multiscale-v1",
+            data_manifest_hash=market.data_manifest_hash,
         )
 
-        _logger.info("running compound engine")
-        engine_result = _run_engine_from_loaded_data(
-            cube=cube,
+        _logger.info("running multiscale compound engine")
+        engine_result = run_multiscale_compound_engine(
+            market=market,
+            universe=universe,
             holdout_manifest=holdout_manifest,
             config=engine_config,
         )
@@ -169,21 +140,23 @@ def run_compound_main(config: CompoundRunConfig) -> RunnerResult:
         paths = _build_artifact_paths(config)
         _write_artifacts(paths, engine_result, config)
 
-        equity_len = len(engine_result.ledger.equity_1d)
-        ts_len = len(engine_result.ledger.timestamps_ns)
-        tw_len = len(engine_result.ledger.target_weights_2d)
-        if not (equity_len == ts_len == tw_len):
-            _logger.error("length mismatch: equity=%d timestamps=%d target_weights=%d",
-                          equity_len, ts_len, tw_len)
-            return RunnerResult(exit_code=1, reason="ledger_length_mismatch")
+        if not engine_result.l2.integrity_ok:
+            return RunnerResult(exit_code=1, reason="integrity_failure")
 
-        _logger.info("compound run successful: equity=%.4f l2_growth=%.6f l3_verdict=%s",
-                     float(engine_result.ledger.equity_1d[-1]),
-                     engine_result.l2.annualized_log_growth,
-                     engine_result.l3.verdict.value)
+        if engine_result.l3.verdict.value in ("reject",):
+            return RunnerResult(exit_code=0, reason=f"l3_{engine_result.l3.verdict.value}")
 
         return RunnerResult(exit_code=0, reason=f"ok:l3_{engine_result.l3.verdict.value}")
 
+    except EmptyPITUniverseError as exc:
+        _logger.error("no deployable universe: %s", exc)
+        return RunnerResult(exit_code=1, reason=f"empty_universe:{exc}")
+    except DataCoverageError as exc:
+        _logger.error("data coverage error: %s", exc)
+        return RunnerResult(exit_code=1, reason=f"data_coverage:{exc}")
+    except StorageBudgetError as exc:
+        _logger.error("storage budget exceeded: %s", exc)
+        return RunnerResult(exit_code=1, reason=f"storage_budget:{exc}")
     except Exception as exc:
-        _logger.exception("compound run failed")
+        _logger.exception("multiscale compound run failed")
         return RunnerResult(exit_code=1, reason=str(exc))
