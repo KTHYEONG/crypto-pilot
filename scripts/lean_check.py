@@ -167,10 +167,11 @@ def _is_stub_node(node: ast.AST) -> bool:
     if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
         return False
     body = node.body
-    # Filter out docstrings
+    # Filter out docstrings and logger calls
     filtered_body = [
         stmt for stmt in body
         if not (isinstance(stmt, ast.Expr) and isinstance(stmt.value, ast.Constant) and isinstance(stmt.value.value, str))
+        and not (isinstance(stmt, ast.Expr) and isinstance(stmt.value, ast.Call) and getattr(getattr(stmt.value, "func", None), "attr", "") in ("debug", "info", "warning", "error", "critical"))
     ]
     if not filtered_body:
         return True
@@ -185,11 +186,11 @@ def _is_stub_node(node: ast.AST) -> bool:
                 return True
             if isinstance(single.exc, ast.Name) and single.exc.id == "NotImplementedError":
                 return True
-        # Check dummy single return (e.g. return None, return {}, return [], return "")
+        # Check dummy single return (e.g. return None, return {}, return [], return "", return True, return False)
         if isinstance(single, ast.Return):
             if single.value is None:
                 return True
-            if isinstance(single.value, ast.Constant) and single.value.value in (None, "", 0, False):
+            if isinstance(single.value, ast.Constant) and (single.value.value in (None, "", 0, False, True) or isinstance(single.value.value, (int, float, str))):
                 return True
             if isinstance(single.value, (ast.List, ast.Dict, ast.Tuple, ast.Set)) and not getattr(single.value, "elts", getattr(single.value, "keys", None)):
                 return True
@@ -208,12 +209,20 @@ def _check_spec_compliance(spec_path: str) -> tuple[int, list[JsonDiag]]:
         fh: str = c.get("file_hint", "")
         kind: str = c.get("kind", "function")
         name: str = c.get("name", "")
+        assertions: list[Any] = c.get("assertions", [])
         if not fh or not name:
             continue
         if not os.path.exists(fh):
             d = {"file": fh, "line": 0, "error": f"Spec: file not found ({kind} {name})", "fix_hint": f"Create {fh}"}
             diagnostics.append(d)
             continue
+        
+        # Check assertions requirement
+        if not assertions:
+            msg = f"Spec contract '{name}' in {fh} must define at least one exact input/output assertion in 'assertions'"
+            d = {"file": fh, "line": 0, "error": msg, "fix_hint": "Add 'assertions' array in contract.json"}
+            diagnostics.append(d)
+
         with open(fh) as sf:
             sf_content = sf.read()
             if kind == "field":
@@ -239,7 +248,7 @@ def _check_spec_compliance(spec_path: str) -> tuple[int, list[JsonDiag]]:
                                 and node.name == name
                                 and _is_stub_node(node)
                             ):
-                                msg = f"Spec: {kind} '{name}' is a stub (pass / Ellipsis / NotImplementedError / dummy return)"
+                                msg = f"Spec: {kind} '{name}' is a stub or dummy implementation (pass / Ellipsis / NotImplementedError / logger+dummy return)"
                                 d = {"file": fh, "line": node.lineno, "error": msg, "fix_hint": f"Implement real logic in {name}"}
                                 diagnostics.append(d)
                     except Exception:  # noqa: S110
@@ -264,7 +273,12 @@ def _check_spec_compliance(spec_path: str) -> tuple[int, list[JsonDiag]]:
             d = {"file": "", "line": 0, "error": f"Spec: missing test '{test_name}'", "fix_hint": f"Write {test_name}"}
             diagnostics.append(d)
 
-    for w in contract.get("wiring", []):
+    wirings = contract.get("wiring", [])
+    if not wirings:
+        msg = "Spec: contract.json missing mandatory 'wiring' section defining pipeline integration"
+        diagnostics.append({"file": spec_path, "line": 0, "error": msg, "fix_hint": "Add 'wiring' array to contract.json"})
+
+    for w in wirings:
         wf: str = w.get("file", "")
         anchor: str = w.get("anchor", "")
         import_symbol: str = w.get("import_symbol", "")
@@ -273,7 +287,7 @@ def _check_spec_compliance(spec_path: str) -> tuple[int, list[JsonDiag]]:
         if not wf:
             continue
         if not os.path.exists(wf):
-            d = {"file": wf, "line": 0, "error": f"Spec wiring target not found: {wf}", "fix_hint": f"Create {wf}"}
+            d = {"file": wf, "line": 0, "error": f"Spec wiring target file not found: {wf}", "fix_hint": f"Create {wf}"}
             diagnostics.append(d)
             continue
         with open(wf) as f:
@@ -284,15 +298,15 @@ def _check_spec_compliance(spec_path: str) -> tuple[int, list[JsonDiag]]:
                 diagnostics.append(d)
             if import_symbol and import_symbol not in wf_content:
                 hint = f"Import or reference '{import_symbol}' in {wf}"
-                d = {"file": wf, "line": 0, "error": f"Spec wiring: missing reference to '{import_symbol}'", "fix_hint": hint}
+                d = {"file": wf, "line": 0, "error": f"Spec wiring: missing reference to '{import_symbol}' in {wf}", "fix_hint": hint}
                 diagnostics.append(d)
             if invocation_symbol and invocation_symbol not in wf_content:
                 hint = f"Invoke or instantiate '{invocation_symbol}' in {wf}"
-                d = {"file": wf, "line": 0, "error": f"Spec wiring: missing invocation of '{invocation_symbol}'", "fix_hint": hint}
+                d = {"file": wf, "line": 0, "error": f"Spec wiring: missing invocation of '{invocation_symbol}' in {wf}", "fix_hint": hint}
                 diagnostics.append(d)
             if invocation_regex and not re.search(invocation_regex, wf_content, re.MULTILINE):
                 hint = f"Invoke matching pattern '{invocation_regex}' in {wf}"
-                d = {"file": wf, "line": 0, "error": f"Spec wiring: missing pattern match '{invocation_regex}'", "fix_hint": hint}
+                d = {"file": wf, "line": 0, "error": f"Spec wiring: missing pattern match '{invocation_regex}' in {wf}", "fix_hint": hint}
                 diagnostics.append(d)
 
     return (1 if diagnostics else 0, diagnostics)
