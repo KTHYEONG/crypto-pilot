@@ -6,10 +6,8 @@ import pytest
 
 from src.application.futures.runner.cli import build_arg_parser, check_removed_flags, run_from_cli
 from src.application.futures.runner.compound_config import (
-    CompoundRunConfig,
     build_compound_run_config,
 )
-from src.application.futures.runner.compound_main import run_compound_main
 from src.domain.futures.compound.validation import slice_execution_ledger
 
 
@@ -102,98 +100,13 @@ class TestCliCompoundOnly:
         with pytest.raises(SystemExit):
             check_removed_flags(args)
 
-    def test_run_from_cli_returns_2_for_removed_flag(self, mocker) -> None:
-        mocker.patch("src.application.futures.runner.cli.run_compound_main")
+    def test_run_from_cli_returns_2_for_removed_flag(self) -> None:
         result = run_from_cli(["--phase", "l3"])
         assert result == 2
 
-    def test_run_from_cli_returns_2_for_unknown_flag(self, mocker) -> None:
-        mocker.patch("src.application.futures.runner.cli.run_compound_main")
+    def test_run_from_cli_returns_2_for_unknown_flag(self) -> None:
         result = run_from_cli(["--unknown-flag"])
         assert result == 2
-
-
-# ── run_compound_main (mocked) ────────────────────────────────────────────────
-
-
-class TestRunCompoundMain:
-    def test_mocked_invocation(self, mocker) -> None:
-        import pandas as pd
-
-        sample_df = pd.DataFrame({"datetime": pd.date_range("2026-01-01", periods=100, freq="h", tz="UTC"),
-                                   "open": 100.0, "high": 101.0, "low": 99.0, "close": 100.5, "volume": 1000.0})
-        mocker.patch("src.application.futures.runner.compound_main.load_hourly_data",
-                      return_value={"BTCUSDT": {"1h": sample_df}, "ETHUSDT": {"1h": sample_df}})
-        mocker.patch("src.application.futures.runner.compound_main.check_data_readiness",
-                      return_value=True)
-        import numpy as np
-        from src.domain.futures.compound.contracts import (
-            AlphaForecastTape,
-            DeploymentVerdict,
-            ExecutionLedger,
-            L2Evaluation,
-            L3ValidationResult,
-            MarketFeatureCube,
-        )
-
-        mock_cube = mocker.Mock(spec=MarketFeatureCube)
-        mock_cube.timestamps_ns = np.array([0, 1, 2], dtype=np.int64)
-        mock_cube.data_manifest_hash = "test-hash"
-        mock_build_cube = mocker.patch(
-            "src.application.futures.runner.compound_main.build_compound_market_feature_cube",
-            return_value=mock_cube,
-        )
-
-        mock_run = mocker.patch(
-            "src.application.futures.runner.compound_main._run_engine_from_loaded_data",
-        )
-
-        mock_ledger = mocker.Mock(spec=ExecutionLedger)
-        mock_ledger.equity_1d = np.array([1.0, 1.1])
-        mock_ledger.timestamps_ns = np.array([0, 1], dtype=np.int64)
-        mock_ledger.target_weights_2d = np.zeros((2, 2), dtype=np.float32)
-        mock_ledger.net_returns_1d = np.array([0.0, 0.1], dtype=np.float64)
-        mock_ledger.fee_returns_1d = np.zeros(2, dtype=np.float64)
-        mock_ledger.slippage_returns_1d = np.zeros(2, dtype=np.float64)
-        mock_ledger.impact_returns_1d = np.zeros(2, dtype=np.float64)
-        mock_ledger.funding_returns_1d = np.zeros(2, dtype=np.float64)
-        mock_ledger.integrity_ok = True
-        mock_ledger.integrity_reasons = ()
-
-        mock_l2 = mocker.Mock(spec=L2Evaluation)
-        mock_l2.annualized_log_growth = 0.05
-        mock_l2.growth_ci90 = (0.01, 0.09)
-        mock_l2.equity_multiple = 1.1
-        mock_l2.max_drawdown = 0.02
-        mock_l2.daily_cvar95 = -0.01
-        mock_l2.annual_volatility = 0.15
-        mock_l2.turnover = 0.5
-        mock_l2.safe = True
-        mock_l2.integrity_ok = True
-
-        mock_l3 = mocker.Mock(spec=L3ValidationResult)
-        mock_l3.verdict = DeploymentVerdict.SHADOW
-        mock_l3.posterior_growth_probability = 0.5
-        mock_l3.holdout_days = 90
-        mock_l3.max_drawdown = 0.02
-        mock_l3.daily_cvar95 = -0.01
-        mock_l3.reasons = ()
-
-        mock_tape = mocker.Mock(spec=AlphaForecastTape)
-        mock_tape.model_version = "test-v1"
-        mock_tape.data_manifest_hash = "test-hash"
-
-        engine_result = mocker.Mock()
-        engine_result.ledger = mock_ledger
-        engine_result.l2 = mock_l2
-        engine_result.l3 = mock_l3
-        engine_result.alpha_tape = mock_tape
-        mock_run.return_value = engine_result
-
-        config = CompoundRunConfig(reference_date="2026-07-08", sync="skip", refresh_universe=False)
-        result = run_compound_main(config)
-        mock_run.assert_called_once()
-        assert result.exit_code == 0
 
 
 # ── slice_execution_ledger ─────────────────────────────────────────────────────

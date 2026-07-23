@@ -11,12 +11,14 @@ from numpy.typing import NDArray
 
 from src.domain.futures.compound.config import DataPlaneConfig
 from src.domain.futures.compound.contracts import MarketFeatureCube
+from src.domain.futures.universe.contracts import UniverseStateCube
 
 if TYPE_CHECKING:
     from src.domain.futures.strategy.common.alignment import AlignedMarketData
-    from src.domain.futures.universe.contracts import UniverseStateCube
 
 _logger = logging.getLogger(__name__)
+
+_VALIDATION_FAILED_MSG: str = "market feature cube validation failed"
 
 
 def build_market_feature_cube(
@@ -51,6 +53,7 @@ def build_market_feature_cube(
     n_bars = timestamps_ns.size
     n_syms = len(symbols)
     entry_block_2d = np.zeros((n_bars, n_syms), dtype=np.bool_)
+    exit_required_2d = np.zeros((n_bars, n_syms), dtype=np.bool_)
     capacity_usdt_2d = np.full((n_bars, n_syms), np.nan, dtype=np.float64)
     exec_cost_2d = np.full((n_bars, n_syms), np.nan, dtype=np.float32)
 
@@ -60,6 +63,7 @@ def build_market_feature_cube(
             continue
         col = idx_map[sid]
         entry_block_2d[:, col] = universe.entry_block[:, i]
+        exit_required_2d[:, col] = universe.exit_required[:, i]
         capacity_usdt_2d[:, col] = universe.capacity_usdt[:, i]
 
     if aligned.execution_cost_bps_2d is not None:
@@ -75,6 +79,7 @@ def build_market_feature_cube(
         available_2d=available_2d,
         eligible_2d=universe.eligible,
         entry_block_2d=entry_block_2d,
+        exit_required_2d=exit_required_2d,
         capacity_usdt_2d=capacity_usdt_2d,
         execution_cost_bps_2d=exec_cost_2d,
         data_manifest_hash="",
@@ -120,6 +125,7 @@ def build_compound_market_feature_cube(
     funding = np.zeros((n_bars, n_syms), dtype=np.float32)
     available_core = np.zeros((n_bars, n_syms), dtype=np.bool_)
     entry_block = np.ones((n_bars, n_syms), dtype=np.bool_)
+    exit_required = np.zeros((n_bars, n_syms), dtype=np.bool_)
     eligible = np.zeros((n_bars, n_syms), dtype=np.bool_)
     capacity = np.zeros((n_bars, n_syms), dtype=np.float64)
     costs = np.full((n_bars, n_syms), 12.0, dtype=np.float32)
@@ -170,6 +176,7 @@ def build_compound_market_feature_cube(
             state_valid = state_positions >= 0
             eligible[state_valid, col] = state_cube.eligible[state_positions[state_valid], state_col]
             entry_block[state_valid, col] = state_cube.entry_block[state_positions[state_valid], state_col]
+            exit_required[state_valid, col] = state_cube.exit_required[state_positions[state_valid], state_col]
             capacity[state_valid, col] = state_cube.capacity_usdt[state_positions[state_valid], state_col]
             costs[state_valid, col] = state_cube.cost_bps[state_positions[state_valid], state_col].astype(np.float32)
         available_core[:, col] = valid_pos & np.all(
@@ -191,6 +198,7 @@ def build_compound_market_feature_cube(
         available_2d={"core": available_core},
         eligible_2d=eligible,
         entry_block_2d=entry_block,
+        exit_required_2d=exit_required,
         capacity_usdt_2d=capacity,
         execution_cost_bps_2d=costs,
         data_manifest_hash=data_manifest_hash,
@@ -216,6 +224,7 @@ def validate_market_feature_cube(cube: MarketFeatureCube) -> None:
         assert aarr.dtype == np.bool_
     assert cube.eligible_2d.shape == (n_bars, n_syms)
     assert cube.entry_block_2d.shape == (n_bars, n_syms)
+    assert cube.exit_required_2d.shape == (n_bars, n_syms)
     assert cube.capacity_usdt_2d.shape == (n_bars, n_syms)
     assert cube.capacity_usdt_2d.dtype == np.float64
     assert cube.execution_cost_bps_2d.shape == (n_bars, n_syms)
