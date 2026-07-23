@@ -6,6 +6,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 import numpy as np
+import pandas as pd
 
 from src.application.futures.runner.compound_config import (
     CompoundRunArtifacts,
@@ -26,12 +27,25 @@ from src.application.futures.runner.models import RunnerResult
 from src.domain.futures.compound.config import CompoundEngineConfig
 from src.domain.futures.compound.contracts import (
     CompoundEngineResult,
+    MarketFeatureCube,
     SealedHoldoutManifest,
 )
 from src.domain.futures.compound.engine import run_multiscale_compound_engine
+from src.domain.futures.compound.holdout_store import SealedHoldoutStore
+from src.domain.futures.compound.l1_multiscale import NoAdmissibleAlphaError
 from src.domain.futures.data_lake.ingestion import DataCoverageError, StorageBudgetError
 
 _logger = logging.getLogger(__name__)
+
+_holdout_store_instance: SealedHoldoutStore | None = None
+
+
+def _get_holdout_store(config: CompoundRunConfig) -> SealedHoldoutStore:
+    global _holdout_store_instance
+    if _holdout_store_instance is None:
+        holdout_path = Path("data/futures/lake/holdout_store.db")
+        _holdout_store_instance = SealedHoldoutStore(holdout_path)
+    return _holdout_store_instance
 
 
 def _build_artifact_paths(config: CompoundRunConfig) -> CompoundRunArtifacts:
@@ -49,6 +63,7 @@ def _write_artifacts(
     paths: CompoundRunArtifacts,
     engine_result: CompoundEngineResult,
     config: CompoundRunConfig,
+    market: MarketFeatureCube | None = None,
 ) -> None:
     result_data = {
         "reference_date": config.reference_date,
@@ -56,7 +71,7 @@ def _write_artifacts(
         "base_timeframe": config.base_timeframe,
         "n_bars": int(engine_result.ledger.timestamps_ns.size),
         "n_symbols": int(engine_result.ledger.target_weights_2d.shape[1]) if engine_result.ledger.target_weights_2d.ndim > 1 else 0,
-        "universe_symbols": list(engine_result.alpha_tape.symbols),
+        "universe_symbols": list(market.symbols) if market is not None and hasattr(market, 'symbols') else [],
         "l2": {
             "annualized_log_growth": engine_result.l2.annualized_log_growth,
             "growth_ci90_lower": engine_result.l2.growth_ci90[0],
@@ -84,8 +99,8 @@ def _write_artifacts(
     np.save(paths.target_weights_path, engine_result.ledger.target_weights_2d)
 
     manifest = {
-        "model_version": engine_result.alpha_tape.model_version,
-        "data_manifest_hash": engine_result.alpha_tape.data_manifest_hash,
+        "model_version": engine_result.handoff.model_version,
+        "data_manifest_hash": engine_result.handoff.data_manifest_hash,
         "n_timestamps": int(engine_result.ledger.timestamps_ns.size),
         "integrity_ok": engine_result.ledger.integrity_ok,
         "l3_verdict": engine_result.l3.verdict.value,
@@ -107,7 +122,13 @@ def run_multiscale_compound_main(config: CompoundRunConfig) -> RunnerResult:
         runtime = build_data_lake_runtime(config)
         snapshot = prepare_data_snapshot(config=config, runtime=runtime)
 
-        universe = build_daily_pit_universe(snapshot=snapshot, config=config.universe)
+        ref_date_str = config.reference_date or datetime.now(UTC).strftime("%Y-%m-%d")
+        ref_dt = pd.Timestamp(ref_date_str, tz="UTC")
+        start_dt = ref_dt - pd.Timedelta(days=config.history_days)
+        n_bars = config.history_days * 24
+        execution_calendar = pd.date_range(start=start_dt, periods=n_bars, freq="h", tz="UTC")
+
+        universe = build_daily_pit_universe(snapshot=snapshot, execution_calendar=execution_calendar, config=config)
 
         _logger.info(
             "universe built: %d symbols from snapshot %s",
@@ -120,25 +141,29 @@ def run_multiscale_compound_main(config: CompoundRunConfig) -> RunnerResult:
         holdout_start_bar = max(0, market.timestamps_ns.size - holdout_bars)
         holdout_start_ns = int(market.timestamps_ns[holdout_start_bar]) if market.timestamps_ns.size > 0 else 0
 
+        holdout_store = _get_holdout_store(config)
+        holdout_id = f"multiscale-{config.reference_date or 'live'}"
+
         holdout_manifest = SealedHoldoutManifest(
-            holdout_id=f"multiscale-{config.reference_date or 'live'}",
+            holdout_id=holdout_id,
             start_time_ns=holdout_start_ns,
             end_time_ns=int(market.timestamps_ns[-1]) if market.timestamps_ns.size > 0 else holdout_start_ns,
             holdout_days=180,
             model_version="multiscale-v1",
             data_manifest_hash=market.data_manifest_hash,
+            universe_state_hash=snapshot.universe_state_hash,
         )
+
+        try:
+            holdout_store.create(holdout_manifest)
+        except Exception:
+            _logger.info("holdout %s already exists, reusing", holdout_id)
 
         _logger.info("running multiscale compound engine")
-        engine_result = run_multiscale_compound_engine(
-            market=market,
-            universe=universe,
-            holdout_manifest=holdout_manifest,
-            config=engine_config,
-        )
+        engine_result = run_multiscale_compound_engine(market=market, universe=universe.state_cube, holdout_store=holdout_store, holdout_id=holdout_id, config=engine_config)
 
         paths = _build_artifact_paths(config)
-        _write_artifacts(paths, engine_result, config)
+        _write_artifacts(paths, engine_result, config, market=market)
 
         if not engine_result.l2.integrity_ok:
             return RunnerResult(exit_code=1, reason="integrity_failure")
@@ -157,6 +182,9 @@ def run_multiscale_compound_main(config: CompoundRunConfig) -> RunnerResult:
     except StorageBudgetError as exc:
         _logger.error("storage budget exceeded: %s", exc)
         return RunnerResult(exit_code=1, reason=f"storage_budget:{exc}")
+    except NoAdmissibleAlphaError:
+        _logger.info("no admissible L1 alpha; deployment remains in cash")
+        return RunnerResult(exit_code=0, reason="no_admissible_alpha")
     except Exception as exc:
         _logger.exception("multiscale compound run failed")
         return RunnerResult(exit_code=1, reason=str(exc))
