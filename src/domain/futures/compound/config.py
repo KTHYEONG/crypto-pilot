@@ -69,6 +69,8 @@ class AllocatorConfig:
     turnover_l2: float = 1e-3
     max_iterations: int = 64
     objective_tolerance: float = 1e-10
+    portfolio_nav_usdt: float = 100_000.0
+    risk_scale: float = 1.0
 
     def __post_init__(self) -> None:
         assert self.rebalance_bars > 0
@@ -81,6 +83,8 @@ class AllocatorConfig:
         assert self.turnover_l2 >= 0
         assert 1 <= self.max_iterations <= 64
         assert self.objective_tolerance > 0
+        assert self.portfolio_nav_usdt > 0
+        assert self.risk_scale > 0
 
 
 @dataclass(slots=True, frozen=True)
@@ -93,6 +97,32 @@ class RiskOverlayConfig:
     def __post_init__(self) -> None:
         assert 0 <= self.soft_drawdown_start < self.drawdown_second_knot < self.hard_drawdown
         assert self.hard_drawdown_cooldown_bars > 0
+
+
+@dataclass(slots=True, frozen=True)
+class L1Config:
+    max_residual_correlation: float = 0.60
+    min_positive_folds: int = 4
+    total_outer_folds: int = 5
+    min_effective_days: float = 180.0
+    min_effective_events_short: int = 1000
+    bootstrap_iterations: int = 1000
+    min_posterior_probability: float = 0.65
+    fdr_q_threshold: float = 0.10
+    sign_consistency_min: float = 0.80
+    cost_stress_multiplier: float = 2.0
+
+    def __post_init__(self) -> None:
+        assert 0 < self.max_residual_correlation <= 1
+        assert self.min_positive_folds > 0
+        assert self.total_outer_folds >= self.min_positive_folds
+        assert self.min_effective_days > 0
+        assert self.min_effective_events_short > 0
+        assert self.bootstrap_iterations > 0
+        assert 0 < self.min_posterior_probability <= 1
+        assert 0 < self.fdr_q_threshold <= 1
+        assert 0 < self.sign_consistency_min <= 1
+        assert self.cost_stress_multiplier >= 1
 
 
 @dataclass(slots=True, frozen=True)
@@ -114,9 +144,19 @@ class L3ValidationConfig:
 
 
 @dataclass(slots=True, frozen=True)
+class L1MultiscaleConfig:
+    n_folds: int = 5
+    purge_bars: int = 25
+    embargo_bars: int = 1
+    min_positive_folds: int = 4
+    bootstrap_iterations: int = 1000
+
+
+@dataclass(slots=True, frozen=True)
 class CompoundEngineConfig:
     data: DataPlaneConfig = field(default_factory=DataPlaneConfig)
     l1: L1EstimatorConfig = field(default_factory=L1EstimatorConfig)
+    l1_multiscale: L1MultiscaleConfig = field(default_factory=L1MultiscaleConfig)
     factor_risk: FactorRiskConfig = field(default_factory=FactorRiskConfig)
     allocator: AllocatorConfig = field(default_factory=AllocatorConfig)
     risk: RiskOverlayConfig = field(default_factory=RiskOverlayConfig)
@@ -125,6 +165,7 @@ class CompoundEngineConfig:
     def __post_init__(self) -> None:
         assert isinstance(self.data, DataPlaneConfig)
         assert isinstance(self.l1, L1EstimatorConfig)
+        assert isinstance(self.l1_multiscale, L1MultiscaleConfig)
         assert isinstance(self.factor_risk, FactorRiskConfig)
         assert isinstance(self.allocator, AllocatorConfig)
         assert isinstance(self.risk, RiskOverlayConfig)
