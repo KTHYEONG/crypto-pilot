@@ -24,6 +24,10 @@ _PARTICIPATION_RATE: float = 0.05
 _MAX_SLICE_MINUTES: int = 15
 
 
+class PortfolioIntegrityError(RuntimeError):
+    ...
+
+
 def simulate_compound_portfolio(
     *,
     cube: MarketFeatureCube,
@@ -73,7 +77,7 @@ def simulate_compound_portfolio(
         net_returns[t] = bar_return + funding_ret
         equity[t] = equity[t - 1] * max(1.0 + net_returns[t], 1e-12)
 
-        exit_required_1d = cube.exit_required_2d[t] if hasattr(cube, 'exit_required_2d') and t < cube.exit_required_2d.shape[0] else np.zeros(n_syms, dtype=np.bool_)
+        exit_required_1d = cube.exit_required_2d[t] if t < cube.exit_required_2d.shape[0] else np.zeros(n_syms, dtype=np.bool_)
         if np.any(exit_required_1d):
             for i in range(n_syms):
                 if exit_required_1d[i] and abs(curr_w[i]) > 0:
@@ -147,8 +151,8 @@ def simulate_compound_portfolio(
             target_weights[t] = curr_w.astype(np.float32)
 
     if integrity_failures:
-        integrity_ok = False  # pragma: no cover - reserved for future integrity checks
-        integrity_reasons = tuple(integrity_failures)  # pragma: no cover
+        integrity_ok = False
+        integrity_reasons = tuple(integrity_failures)
     else:
         integrity_ok = True
         integrity_reasons = ()
@@ -223,8 +227,8 @@ def simulate_multiscale_portfolio(
 
     curr_w = np.zeros(n_syms, dtype=np.float64)
     integrity_failures: list[str] = []
-
-    cov = np.eye(n_syms, dtype=np.float64) * 1e-4
+    rebalance_interval = config.allocator.rebalance_bars
+    last_rebalance_bar = -rebalance_interval
 
     for t in range(n_bars):
         if t == 0:
@@ -247,14 +251,32 @@ def simulate_multiscale_portfolio(
         if np.any(exit_req):
             for i in range(n_syms):
                 if exit_req[i] and abs(curr_w[i]) > 0:
-                    fee_returns[t] -= abs(curr_w[i]) * 0.0006
+                    turnover_cost = abs(curr_w[i]) * 0.0006
+                    fee_returns[t] -= turnover_cost
+                    net_returns[t] -= turnover_cost
                     curr_w[i] = 0.0
+
+        is_rebalance = (t - last_rebalance_bar) >= rebalance_interval
 
         state = build_active_forecast_state(
             tape=handoff, decision_time_ns=int(market.timestamps_ns[t]), symbols=market.symbols,
         )
+        has_active = np.any(np.abs(state.alpha_rate_1d) > 0)
 
-        if np.any(np.abs(state.alpha_rate_1d) > 0):
+        if is_rebalance and has_active:
+            daily_ret = _compute_daily_returns(market, t)
+            cluster_ids = (
+                market.fields_2d["cluster_id"][t].astype(np.int16)
+                if "cluster_id" in market.fields_2d
+                else np.zeros(n_syms, dtype=np.int16)
+            )
+            cov = estimate_causal_factor_covariance(
+                daily_returns_2d=daily_ret,
+                end_exclusive=daily_ret.shape[0],
+                cluster_ids_1d=cluster_ids,
+                config=config.factor_risk,
+            )
+
             entry_b = market.entry_block_2d[t] if t < market.entry_block_2d.shape[0] else np.zeros(n_syms, dtype=np.bool_)
             capacity_w = market.capacity_usdt_2d[t] if t < market.capacity_usdt_2d.shape[0] else np.zeros(n_syms, dtype=np.float64)
             cost_bps = market.execution_cost_bps_2d[t] if t < market.execution_cost_bps_2d.shape[0] else np.full(n_syms, 12.0, dtype=np.float32)
@@ -292,12 +314,16 @@ def simulate_multiscale_portfolio(
 
             curr_w = new_w
             target_weights[t] = curr_w.astype(np.float32)
+            last_rebalance_bar = t
         else:
             target_weights[t] = curr_w.astype(np.float32)
 
+        if not np.all(np.isfinite(curr_w)):
+            integrity_failures.append(f"bar {t}: non-finite target weights")
+
     if integrity_failures:
-        integrity_ok = False  # pragma: no cover - reserved for future integrity checks
-        integrity_reasons = tuple(integrity_failures)  # pragma: no cover
+        integrity_ok = False
+        integrity_reasons = tuple(integrity_failures)
     else:
         integrity_ok = True
         integrity_reasons = ()
