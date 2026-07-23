@@ -8,6 +8,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import zipfile
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta
 from email.utils import parsedate_to_datetime
 from typing import cast
@@ -35,7 +36,9 @@ class BinanceVisionDownloader:
     BASE_URL = "https://data.binance.vision/data/futures/um"
     S3_LISTING_URL = "https://s3-ap-northeast-1.amazonaws.com/data.binance.vision"
     DEFAULT_TIMEOUT_SECONDS = 20
-    DEFAULT_MAX_CONCURRENCY = 2
+    # Vision archive requests are globally paced below the configured RPM ceiling.
+    # Four in-flight requests hide archive latency without increasing the request rate.
+    DEFAULT_MAX_CONCURRENCY = 4
     DEFAULT_MAX_WEIGHT_PER_MIN = 600
     DEFAULT_BACKOFF_BASE_SECONDS = 1.0
     DEFAULT_BACKOFF_MAX_SECONDS = 30.0
@@ -219,12 +222,11 @@ class BinanceVisionDownloader:
     def fetch_daily_metrics(self, symbol: str, date: datetime) -> pd.DataFrame:
         """특정 날짜의 metrics ZIP 파일을 다운로드하여 DataFrame으로 반환합니다."""
         date_str = date.strftime("%Y-%m-%d")
-        safe_symbol = urllib.parse.quote(symbol)
         url = self._vision_path_url(
             "daily",
             "metrics",
-            safe_symbol,
-            f"{safe_symbol}-metrics-{date_str}.zip",
+            symbol,
+            f"{symbol}-metrics-{date_str}.zip",
         )
 
         try:
@@ -253,13 +255,22 @@ class BinanceVisionDownloader:
 
     def fetch_range_metrics(self, symbol: str, start_date: datetime, end_date: datetime) -> pd.DataFrame:
         """지정된 기간 전체의 metrics 수집 및 병합합니다."""
-        all_dfs = []
+        dates: list[datetime] = []
         current = start_date
         while current <= end_date:
-            df = self.fetch_daily_metrics(symbol, current)
-            if not df.empty:
-                all_dfs.append(df)
+            dates.append(current)
             current += timedelta(days=1)
+
+        all_dfs: list[pd.DataFrame] = []
+        with ThreadPoolExecutor(max_workers=self.max_concurrency) as executor:
+            futures = {
+                executor.submit(self.fetch_daily_metrics, symbol, day): day
+                for day in dates
+            }
+            for future in as_completed(futures):
+                df = future.result()
+                if not df.empty:
+                    all_dfs.append(df)
 
         if not all_dfs:
             return pd.DataFrame()
@@ -277,6 +288,21 @@ class BinanceVisionDownloader:
         month_str = f"{month:02d}"
         filename = f"{symbol}-{interval}-{year}-{month_str}.zip"
         return self._fetch_zip_by_path("monthly", "klines", symbol, interval, filename)
+
+    def fetch_indicator_klines_monthly(
+        self,
+        dataset: str,
+        symbol: str,
+        interval: str,
+        year: int,
+        month: int,
+    ) -> pd.DataFrame:
+        """Fetch a monthly mark/index/premium kline archive."""
+        allowed = {"markPriceKlines", "indexPriceKlines", "premiumIndexKlines"}
+        if dataset not in allowed:
+            raise ValueError(f"unsupported indicator dataset: {dataset}")
+        filename = f"{symbol}-{interval}-{year}-{month:02d}.zip"
+        return self._fetch_zip_by_path("monthly", dataset, symbol, interval, filename)
 
     def fetch_klines_archive(
         self,
