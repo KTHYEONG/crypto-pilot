@@ -12,6 +12,7 @@ from src.domain.futures.compound.contracts import (
     AlphaLifecycle,
     ExecutionLedger,
     MarketFeatureCube,
+    PortfolioDecision,
 )
 from src.application.futures.runner.compound_universe import DailyPITUniverse
 from src.domain.futures.compound.data_plane import materialize_hourly_execution_features
@@ -145,6 +146,52 @@ class TestSimulateCompoundPortfolio:
                 handoff=mocker.Mock(spec=AlphaEventTape),
                 config=CompoundEngineConfig(),
             )
+
+    def test_multiscale_marks_nonfinite_allocation_as_integrity_failure(
+        self, mocker, small_cube: MarketFeatureCube
+    ) -> None:
+        from src.domain.futures.compound.simulator import simulate_multiscale_portfolio
+
+        handoff = AlphaEventTape(
+            events=pa.table(
+                {
+                    "recipe_id": ["r1"],
+                    "symbol": ["BTCUSDT"],
+                    "decision_time_ns": [0],
+                    "expiry_time_ns": [10**18],
+                    "alpha_rate_per_hour": [0.02],
+                    "mean_edge_variance": [1e-8],
+                    "combination_weight": [1.0],
+                }
+            ),
+            recipe_definitions=(),
+            evidence=(),
+            active_recipe_ids=(),
+            model_version="v1",
+            data_manifest_hash=small_cube.data_manifest_hash,
+            fold_manifest_hash="f1",
+        )
+        decision = PortfolioDecision(
+            decision_idx=1,
+            decision_time_ns=small_cube.timestamps_ns[1],
+            target_weights_1d=np.array([np.nan, 0.0]),
+            gross_exposure=float("nan"),
+            net_exposure=float("nan"),
+            forecast_ann_vol=float("nan"),
+            risk_scale=1.0,
+            binding_constraints=(),
+        )
+        mocker.patch(
+            "src.domain.futures.compound.allocator.solve_event_growth_weights",
+            return_value=decision,
+        )
+        ledger = simulate_multiscale_portfolio(
+            market=small_cube,
+            universe=DailyPITUniverse(symbols=small_cube.symbols, decision_dates=()),
+            handoff=handoff,
+            config=CompoundEngineConfig(),
+        )
+        assert not ledger.integrity_ok
 
 
 def test_simulator_when_market_data_stale_for_two_bars_forces_exit() -> None:
