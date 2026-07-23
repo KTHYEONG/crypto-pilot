@@ -41,7 +41,7 @@ To ensure low-reasoning models can build and integrate the code mechanically:
     - **Scenario 1 (Happy Path)**: Unit input/output.
     - **Scenario 2 (Edge Cases)**: `[LIMIT-xx]` boundary conditions.
     - **Scenario 3 (Error Handling)**: Expected Exceptions and Error logs.
-    - **Scenario 4 (Integration Verification)**: Asserting the correct trigger inside the parent module.
+    - **Scenario 4 (Integration Verification)**: Asserting the correct trigger inside the parent module without over-mocking. Must instantiate Real Objects (no top-level MagicMock masking) to verify caller-callee pipeline integration.
 
 ### 4. Machine-Readable Compliance Contract (`docs/specs/[feature]_contract.json`)
 *(Mandatory for Tier 2 and Tier 3)*
@@ -73,7 +73,13 @@ Generate a semantic JSON contract alongside the spec markdown to provide strict,
     {"id": 4, "scope": "integration", "name": "test_parent_module_wiring"}
   ],
   "wiring": [
-    {"file": "src/application/parent.py", "anchor": "ExactAnchorSymbol", "import_symbol": "ExactName", "invocation_symbol": "self.x = ExactName(); self.x.run()"}
+    {
+      "file": "src/application/parent.py",
+      "anchor": "ExactAnchorSymbol",
+      "import_symbol": "ExactName",
+      "invocation_symbol": "self.x = ExactName(); self.x.run()",
+      "invocation_regex": "self\\.[a_z0-9_]+\\s*=\\s*ExactName\\(.*\\)"
+    }
   ]
 }
 ```
