@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import io
+import threading
 from datetime import date
 from pathlib import Path
 
@@ -72,6 +73,22 @@ class TestIngestionPlan:
                 reference_date=tomorrow,
             )
 
+    def test_plan_excludes_non_binance_symbol_candidates(self, tmp_path: Path) -> None:
+        source = tmp_path / "data" / "ohlcv" / "1h"
+        source.mkdir(parents=True)
+        frame = pd.DataFrame(
+            {"timestamp": [1_783_440_000_000], "close": [100.0], "quote_volume": [1_000_000.0]}
+        )
+        frame.to_parquet(source / "BTCUSDT.parquet", index=False)
+        frame.to_parquet(source / "币安人生USDT.parquet", index=False)
+
+        plan = build_ingestion_plan(
+            config=DataLakeConfig(root=tmp_path / "data" / "lake"),
+            reference_date=date(2026, 7, 8),
+        )
+
+        assert plan.broad_symbols == ("BTCUSDT",)
+
 
 class TestChecksumFailure:
     def test_checksum_failure_is_not_committed(self) -> None:
@@ -135,6 +152,43 @@ class TestHardCap:
 
 
 class TestLocalCommit:
+    def test_high_frequency_datasets_limit_history_to_recent_180_days(self, tmp_path: Path) -> None:
+        payload_buffer = io.BytesIO()
+        pd.DataFrame({"timestamp": [1_783_440_000_000], "close": [100.0]}).to_parquet(
+            payload_buffer, index=False
+        )
+        payload = payload_buffer.getvalue()
+
+        class RecordingClient:
+            def __init__(self) -> None:
+                self.start_times: list[int] = []
+
+            def download_partition(
+                self, dataset: DatasetKind, symbol: str, start_time_ms: int
+            ) -> bytes:
+                _ = (dataset, symbol)
+                self.start_times.append(start_time_ms)
+                return payload
+
+            def download_checksum(self, *args: object, **kwargs: object) -> str:
+                _ = (args, kwargs)
+                return hashlib.sha256(payload).hexdigest()
+
+        plan = IngestionPlan(
+            reference_date=date(2026, 7, 8),
+            broad_symbols=("BTCUSDT",),
+            selected_symbols=("BTCUSDT",),
+            datasets=(DatasetKind.KLINES_1M,),
+            config=DataLakeConfig(root=tmp_path / "lake"),
+            start_date=date(2024, 7, 8),
+        )
+        client = RecordingClient()
+
+        sync_futures_data_lake(plan=plan, client=client, catalog=LocalDataCatalog(plan.config.root))
+
+        assert len(client.start_times) == 7
+        assert min(client.start_times) == 1_767_225_600_000
+
     def test_verified_payload_is_committed_to_durable_catalog(self, tmp_path: Path) -> None:
         plan = IngestionPlan(
             reference_date=date(2026, 7, 8),
@@ -173,3 +227,77 @@ class TestLocalCommit:
         )
 
         assert snapshot.partitions == ()
+
+    def test_invalid_parquet_month_is_quarantined_without_catalog_commit(self, tmp_path: Path) -> None:
+        class InvalidParquetClient:
+            payload = b"not-a-parquet"
+
+            def download_partition(self, *args: object, **kwargs: object) -> bytes:
+                _ = (args, kwargs)
+                return self.payload
+
+            def download_checksum(self, *args: object, **kwargs: object) -> str:
+                _ = (args, kwargs)
+                return hashlib.sha256(self.payload).hexdigest()
+
+        plan = IngestionPlan(
+            reference_date=date(2026, 7, 8),
+            broad_symbols=("BTCUSDT",),
+            selected_symbols=(),
+            datasets=(DatasetKind.KLINES_1H,),
+            config=DataLakeConfig(root=tmp_path / "lake"),
+            start_date=date(2026, 7, 1),
+        )
+
+        snapshot = sync_futures_data_lake(
+            plan=plan,
+            client=InvalidParquetClient(),
+            catalog=LocalDataCatalog(plan.config.root),
+        )
+
+        assert snapshot.partitions == ()
+
+    def test_bounded_parallel_downloads_commit_all_partitions(self, tmp_path: Path) -> None:
+        payload_buffer = io.BytesIO()
+        pd.DataFrame({"timestamp": [1_783_440_000_000], "close": [100.0]}).to_parquet(
+            payload_buffer, index=False
+        )
+        payload = payload_buffer.getvalue()
+
+        class ConcurrentClient:
+            def __init__(self) -> None:
+                self.active = 0
+                self.max_active = 0
+                self.lock = threading.Lock()
+                self.barrier = threading.Barrier(4)
+
+            def download_partition(self, *args: object, **kwargs: object) -> bytes:
+                _ = (args, kwargs)
+                with self.lock:
+                    self.active += 1
+                    self.max_active = max(self.max_active, self.active)
+                self.barrier.wait(timeout=3)
+                with self.lock:
+                    self.active -= 1
+                return payload
+
+            def download_checksum(self, *args: object, **kwargs: object) -> str:
+                _ = (args, kwargs)
+                return hashlib.sha256(payload).hexdigest()
+
+        plan = IngestionPlan(
+            reference_date=date(2026, 7, 8),
+            broad_symbols=("BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT"),
+            selected_symbols=(),
+            datasets=(DatasetKind.KLINES_1H,),
+            config=DataLakeConfig(root=tmp_path / "lake", max_workers=4),
+            start_date=date(2026, 7, 1),
+        )
+        client = ConcurrentClient()
+
+        snapshot = sync_futures_data_lake(
+            plan=plan, client=client, catalog=LocalDataCatalog(plan.config.root)
+        )
+
+        assert client.max_active == 4
+        assert len(snapshot.partitions) == 4
