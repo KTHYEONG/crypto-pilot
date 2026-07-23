@@ -47,9 +47,9 @@ def test_compound_cli_config_accepts_single_run_arguments() -> None:
     assert config.base_timeframe == "1h" and config.reference_date == "2026-07-08"
 
 
-def test_opt_main_futures_invokes_compound_main_exactly_once() -> None:
+def test_opt_main_futures_invokes_multiscale_cli_exactly_once() -> None:
     source = Path("src/execution/opt_main_futures.py").read_text(encoding="utf-8")
-    assert source.count("raise SystemExit(main())") == 1
+    assert source.count("raise SystemExit(cli())") == 1
 
 
 def test_retained_source_has_zero_legacy_imports() -> None:

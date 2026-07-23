@@ -45,6 +45,7 @@ class TestMarketFeatureCube:
             available_2d={"core": np.ones((n_bars, n_syms), dtype=np.bool_)},
             eligible_2d=np.ones((n_bars, n_syms), dtype=np.bool_),
             entry_block_2d=np.zeros((n_bars, n_syms), dtype=np.bool_),
+            exit_required_2d=np.zeros((n_bars, n_syms), dtype=np.bool_),
             capacity_usdt_2d=np.full((n_bars, n_syms), 1e6, dtype=np.float64),
             execution_cost_bps_2d=np.full((n_bars, n_syms), 12.0, dtype=np.float32),
             data_manifest_hash="hash1",

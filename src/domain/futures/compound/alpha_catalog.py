@@ -7,7 +7,13 @@ from typing import Any, Literal
 import numpy as np
 from numpy.typing import NDArray
 
-from src.domain.futures.compound.contracts import AlphaDefinition, MarketFeatureCube, RawAlphaTape
+from src.domain.futures.compound.contracts import (
+    AlphaCandidateState,
+    AlphaDefinition,
+    MarketFeatureCube,
+    MultiscaleAlphaDefinition,
+    RawAlphaTape,
+)
 
 _logger = logging.getLogger(__name__)
 
@@ -52,6 +58,62 @@ def build_canonical_alpha_catalog() -> tuple[AlphaDefinition, ...]:
     return tuple(catalog)
 
 
+_MULTISCALE_RECIPES: tuple[dict[str, Any], ...] = (
+    {"recipe_id": "ts_trend_4h_h24", "family": "trend", "native_timeframe": "4h", "lookback_hours": (72, 168), "horizon_hours": 24, "required_fields": ("open", "high", "low", "close", "quote_volume"), "initial_state": AlphaCandidateState.CORE_CANDIDATE, "max_half_life_hours": 12.0},
+    {"recipe_id": "ts_trend_12h_h72", "family": "trend", "native_timeframe": "12h", "lookback_hours": (168, 504), "horizon_hours": 72, "required_fields": ("open", "high", "low", "close", "quote_volume"), "initial_state": AlphaCandidateState.CORE_CANDIDATE, "max_half_life_hours": 36.0},
+    {"recipe_id": "ts_trend_1d_h168", "family": "trend", "native_timeframe": "1d", "lookback_hours": (336, 1008), "horizon_hours": 168, "required_fields": ("open", "high", "low", "close", "quote_volume"), "initial_state": AlphaCandidateState.CORE_CANDIDATE, "max_half_life_hours": 84.0},
+    {"recipe_id": "xs_resmom_4h_h24", "family": "residual_momentum", "native_timeframe": "4h", "lookback_hours": (72,), "horizon_hours": 24, "required_fields": ("open", "high", "low", "close", "quote_volume"), "initial_state": AlphaCandidateState.CORE_CANDIDATE, "max_half_life_hours": 12.0},
+    {"recipe_id": "xs_resmom_12h_h72", "family": "residual_momentum", "native_timeframe": "12h", "lookback_hours": (168,), "horizon_hours": 72, "required_fields": ("open", "high", "low", "close", "quote_volume"), "initial_state": AlphaCandidateState.CORE_CANDIDATE, "max_half_life_hours": 36.0},
+    {"recipe_id": "breakout_4h_h24", "family": "breakout", "native_timeframe": "4h", "lookback_hours": (72,), "horizon_hours": 24, "required_fields": ("open", "high", "low", "close", "quote_volume"), "initial_state": AlphaCandidateState.CONDITIONAL_CANDIDATE, "max_half_life_hours": 12.0},
+    {"recipe_id": "breakout_12h_h72", "family": "breakout", "native_timeframe": "12h", "lookback_hours": (168,), "horizon_hours": 72, "required_fields": ("open", "high", "low", "close", "quote_volume"), "initial_state": AlphaCandidateState.CONDITIONAL_CANDIDATE, "max_half_life_hours": 36.0},
+    {"recipe_id": "carry_funding_event_h8", "family": "carry", "native_timeframe": "funding_event", "lookback_hours": (168,), "horizon_hours": 8, "required_fields": ("funding", "premium"), "initial_state": AlphaCandidateState.CONDITIONAL_CANDIDATE, "max_half_life_hours": 4.0},
+    {"recipe_id": "basis_reversion_1h_h8", "family": "basis_reversion", "native_timeframe": "1h", "lookback_hours": (24, 72), "horizon_hours": 8, "required_fields": ("mark", "index"), "initial_state": AlphaCandidateState.SHADOW_RESEARCH, "max_half_life_hours": 4.0},
+    {"recipe_id": "flow_imbalance_15m_h1", "family": "taker_flow", "native_timeframe": "15m", "lookback_hours": (4, 12), "horizon_hours": 1, "required_fields": ("taker_buy_quote", "quote_volume"), "initial_state": AlphaCandidateState.SHADOW_RESEARCH, "max_half_life_hours": 0.5},
+    {"recipe_id": "flow_oi_confirm_1h_h4", "family": "flow_oi", "native_timeframe": "1h", "lookback_hours": (24, 72), "horizon_hours": 4, "required_fields": ("taker_buy_quote", "quote_volume", "open_interest"), "initial_state": AlphaCandidateState.CONDITIONAL_CANDIDATE, "max_half_life_hours": 2.0},
+    {"recipe_id": "liquidity_exhaustion_15m_h1", "family": "reversal", "native_timeframe": "15m", "lookback_hours": (2, 6), "horizon_hours": 1, "required_fields": ("open", "high", "low", "close", "quote_volume"), "initial_state": AlphaCandidateState.SHADOW_RESEARCH, "max_half_life_hours": 0.5},
+)
+
+
+def build_multiscale_alpha_catalog() -> tuple[MultiscaleAlphaDefinition, ...]:
+    seen_ids: set[str] = set()
+    supported_tfs = {"15m", "1h", "4h", "12h", "1d", "funding_event"}
+
+    definitions: list[MultiscaleAlphaDefinition] = []
+    for recipe in _MULTISCALE_RECIPES:
+        rid: str = recipe["recipe_id"]
+        if rid in seen_ids:
+            msg = f"duplicate recipe_id: {rid}"
+            raise ValueError(msg)
+        seen_ids.add(rid)
+
+        tf: str = recipe["native_timeframe"]
+        if tf not in supported_tfs:
+            msg = f"unsupported timeframe {tf!r} for {rid}, supported: {supported_tfs}"
+            raise ValueError(msg)
+
+        for field in recipe["required_fields"]:
+            if field not in ("open", "high", "low", "close", "quote_volume", "funding", "premium", "mark", "index", "taker_buy_quote", "open_interest"):
+                msg = f"undeclared field {field!r} in {rid}"
+                raise ValueError(msg)
+
+        definitions.append(
+            MultiscaleAlphaDefinition(
+                recipe_id=rid,
+                family=recipe["family"],
+                native_timeframe=recipe["native_timeframe"],
+                lookback_hours=recipe["lookback_hours"],
+                horizon_hours=recipe["horizon_hours"],
+                required_fields=recipe["required_fields"],
+                initial_state=recipe["initial_state"],
+                max_half_life_hours=recipe["max_half_life_hours"],
+            )
+        )
+
+    result = tuple(definitions)
+    _logger.info("built multiscale alpha catalog: %d recipes", len(result))
+    return result
+
+
 def _ewm(arr: NDArray[Any], span: int) -> NDArray[Any]:
     alpha = 2.0 / (span + 1.0)
     out = np.empty_like(arr)
@@ -77,6 +139,13 @@ def _atr(high: NDArray[Any], low: NDArray[Any], close: NDArray[Any], span: int) 
     prev_close[0] = close[0]
     tr = np.maximum(high - low, np.maximum(np.abs(high - prev_close), np.abs(low - prev_close)))
     return _ewm(tr, span)
+
+
+def _check_required_fields(
+    recipe: AlphaDefinition,
+    cube: MarketFeatureCube,
+) -> bool:
+    return all(field in cube.fields_2d for field in recipe.required_fields)
 
 
 def compute_raw_alpha_tape(
@@ -107,6 +176,9 @@ def compute_raw_alpha_tape(
         log_return[0] = 0.0
 
     for k, recipe in enumerate(catalog):
+        if not _check_required_fields(recipe, cube):
+            continue
+
         h = recipe.horizon_bars
         span_6h = 6 * h
         span_12h = 12 * h
@@ -140,9 +212,12 @@ def compute_raw_alpha_tape(
                 np.log(close[lookback:] / close[:-lookback]),
                 np.nan,
             )
+            eligible_breadth = np.sum(cube.eligible_2d, axis=1, keepdims=True)
+            min_breadth = 5
+            breadth_ok = eligible_breadth >= min_breadth
             z = _robust_z_score(ret_6h)
-            scores[:, :, k] = z
-            valid[:, :, k] = cube.eligible_2d & np.isfinite(scores[:, :, k])
+            scores[:, :, k] = np.where(breadth_ok, z, np.nan)
+            valid[:, :, k] = cube.eligible_2d & np.isfinite(scores[:, :, k]) & breadth_ok
 
         elif recipe.family == "short_term_reversal":
             if close is None:
