@@ -522,5 +522,8 @@
   "src/domain/futures/compound/data_plane.py": {
     "architecture": "docs/results/explain.md",
     "testing": "tests/unit/domain/futures/compound/test_data_plane.py"
+  },
+  "src/application/futures/runner/compound_main.py": {
+    "testing": "tests/unit/application/futures/runner/test_compound_main.py"
   }
 }
