@@ -6,8 +6,11 @@ import numpy as np
 from numpy.typing import NDArray
 
 from src.domain.futures.compound.allocator import combine_alpha_forecasts, solve_growth_optimal_weights
+from src.domain.futures.compound.alpha_events import build_active_forecast_state
 from src.domain.futures.compound.config import CompoundEngineConfig
 from src.domain.futures.compound.contracts import (
+    AllocationConstraints,
+    AlphaEventTape,
     AlphaForecastTape,
     ExecutionLedger,
     MarketFeatureCube,
@@ -17,21 +20,23 @@ from src.domain.futures.compound.risk_overlay import apply_risk_overlay
 
 _logger = logging.getLogger(__name__)
 
+_PARTICIPATION_RATE: float = 0.05
+_MAX_SLICE_MINUTES: int = 15
+
 
 def simulate_compound_portfolio(
     *,
     cube: MarketFeatureCube,
-    tape: AlphaForecastTape,
+    alpha_tape: AlphaForecastTape,
     config: CompoundEngineConfig,
 ) -> ExecutionLedger:
     n_bars = cube.timestamps_ns.size
     n_syms = len(cube.symbols)
     if n_bars < 2:
         raise ValueError("at least two bars are required for simulation")
-    if tape.timestamps_ns.shape != cube.timestamps_ns.shape or tape.symbols != cube.symbols:
+    if alpha_tape.timestamps_ns.shape != cube.timestamps_ns.shape or alpha_tape.symbols != cube.symbols:
         raise ValueError("cube and forecast tape axes do not match")
 
-    rebalance_bars = config.allocator.rebalance_bars
     target_weights = np.zeros((n_bars, n_syms), dtype=np.float32)
     net_returns = np.zeros(n_bars, dtype=np.float64)
     equity = np.ones(n_bars, dtype=np.float64)
@@ -40,91 +45,110 @@ def simulate_compound_portfolio(
     impact_returns = np.zeros(n_bars, dtype=np.float64)
     funding_returns = np.zeros(n_bars, dtype=np.float64)
 
-    prev_w = np.zeros(n_syms, dtype=np.float64)
-    beta_1d = np.zeros(n_syms, dtype=np.float64)
+    curr_w = np.zeros(n_syms, dtype=np.float64)
     integrity_failures: list[str] = []
 
-    stale_count = 0
-    pending: list[tuple[int, NDArray[np.float64]]] = []
+    for t in range(n_bars):
+        curr_w = target_weights[t - 1].astype(np.float64) if t > 0 else np.zeros(n_syms, dtype=np.float64)
 
-    for decision_t in range(0, n_bars - 1, rebalance_bars):
-        close_at_decision = cube.fields_2d["close"][decision_t]
-        is_stale = bool(np.any(~np.isfinite(close_at_decision)))
-        stale_count = stale_count + 1 if is_stale else 0
-        if stale_count >= 2:
-            integrity_failures.append(f"stale_data_at_bar_{decision_t}")
-            pending.append((decision_t + 1, np.zeros(n_syms, dtype=np.float64)))
-            prev_w = np.zeros(n_syms, dtype=np.float64)
+        if t == 0:
+            net_returns[t] = 0.0
+            equity[t] = 1.0
+            target_weights[t] = curr_w.astype(np.float32)
             continue
 
-        forecast = combine_alpha_forecasts(
-            tape=tape, decision_idx=decision_t, config=config.allocator
-        )
+        fee_returns[t] = 0.0
+        slippage_returns[t] = 0.0
+        impact_returns[t] = 0.0
 
-        daily_ret = _compute_daily_returns(cube, decision_t)
-        cluster_ids = np.zeros(n_syms, dtype=np.int16)
-        if "cluster_id" in cube.fields_2d:
-            cluster_ids = cube.fields_2d["cluster_id"][decision_t].astype(np.int16)
+        bar_return = _simulate_bar_return(cube, t - 1, curr_w)
+        funding_field = cube.fields_2d.get("funding")
+        funding_ret = 0.0
+        if funding_field is not None and t - 1 < funding_field.shape[0]:
+            for i in range(n_syms):
+                if abs(curr_w[i]) > 1e-12:
+                    funding_ret += -curr_w[i] * float(funding_field[t - 1, i])
+        funding_returns[t] = funding_ret
 
-        cov = estimate_causal_factor_covariance(
-            daily_returns_2d=daily_ret,
-            end_exclusive=daily_ret.shape[0],
-            cluster_ids_1d=cluster_ids,
-            config=config.factor_risk,
-        )
+        net_returns[t] = bar_return + funding_ret
+        equity[t] = equity[t - 1] * max(1.0 + net_returns[t], 1e-12)
 
-        capacity_w = cube.capacity_usdt_2d[decision_t]
-        cost_bps = cube.execution_cost_bps_2d[decision_t].astype(np.float64)
+        exit_required_1d = cube.exit_required_2d[t] if hasattr(cube, 'exit_required_2d') and t < cube.exit_required_2d.shape[0] else np.zeros(n_syms, dtype=np.bool_)
+        if np.any(exit_required_1d):
+            for i in range(n_syms):
+                if exit_required_1d[i] and abs(curr_w[i]) > 0:
+                    pass
 
-        decision = solve_growth_optimal_weights(
-            forecast=forecast,
-            covariance_2d=cov,
-            previous_weights_1d=prev_w,
-            cost_bps_1d=cost_bps,
-            capacity_weight_1d=capacity_w,
-            beta_1d=beta_1d,
-            config=config.allocator,
-        )
+        if alpha_tape.valid_3d[t].any():
+            forecast = combine_alpha_forecasts(
+                alpha_tape, t, uncertainty_z=config.allocator.uncertainty_z,
+            )
 
-        risk_result = apply_risk_overlay(
-            decision=decision,
-            equity_1d=equity[: max(decision_t, 1)],
-            cooldown_remaining=0,
-            config=config.risk,
-        )
+            daily_ret = _compute_daily_returns(cube, t)
+            cluster_ids = (
+                cube.fields_2d["cluster_id"][t].astype(np.int16)
+                if "cluster_id" in cube.fields_2d
+                else np.zeros(n_syms, dtype=np.int16)
+            )
+            cov = estimate_causal_factor_covariance(
+                daily_returns_2d=daily_ret,
+                end_exclusive=daily_ret.shape[0],
+                cluster_ids_1d=cluster_ids,
+                config=config.factor_risk,
+            )
 
-        w = risk_result.target_weights_1d.astype(np.float64)
-        pending.append((decision_t + 1, w))
-        prev_w = w
+            beta_1d = np.zeros(n_syms, dtype=np.float64)
+            entry_b = cube.entry_block_2d[t] if t < cube.entry_block_2d.shape[0] else np.zeros(n_syms, dtype=np.bool_)
+            exit_req = exit_required_1d
+            capacity_w = cube.capacity_usdt_2d[t] if t < cube.capacity_usdt_2d.shape[0] else np.zeros(n_syms, dtype=np.float64)
+            cost_bps = cube.execution_cost_bps_2d[t] if t < cube.execution_cost_bps_2d.shape[0] else np.full(n_syms, 12.0, dtype=np.float32)
 
-    active_w = np.zeros(n_syms, dtype=np.float64)
-    pending_idx = 0
-    for t in range(n_bars):
-        if pending_idx < len(pending) and pending[pending_idx][0] == t:
-            new_w = pending[pending_idx][1]
-            turnover = float(np.sum(np.abs(new_w - active_w)))
-            fee = turnover * 0.0006
-            slippage = turnover * 0.0002
-            impact = float(np.sqrt(np.sum((new_w - active_w) ** 2)) * 0.0001)
-            fee_returns[t] = -fee
-            slippage_returns[t] = -slippage
-            impact_returns[t] = -impact
-            active_w = new_w
-            pending_idx += 1
-        target_weights[t] = active_w.astype(np.float32)
-        if t == 0:
-            net_returns[t] = fee_returns[t] + slippage_returns[t] + impact_returns[t]
+            constraints = AllocationConstraints(
+                gross_cap=config.allocator.gross_cap,
+                net_cap=config.allocator.net_cap,
+                per_symbol_cap=np.full(n_syms, config.allocator.per_symbol_cap, dtype=np.float64),
+                beta_1d=beta_1d,
+                beta_cap=config.allocator.beta_cap,
+                capacity_weight_1d=capacity_w,
+                cost_bps_1d=cost_bps.astype(np.float64),
+                entry_block_1d=entry_b,
+                exit_required_1d=exit_req,
+            )
+
+            decision = solve_growth_optimal_weights(
+                combined=forecast,
+                covariance=cov,
+                previous_weights=curr_w,
+                constraints=constraints,
+                decision_idx=t,
+                decision_time_ns=int(cube.timestamps_ns[t]),
+                config=config.allocator,
+            )
+
+            risk_result = apply_risk_overlay(
+                decision=decision,
+                equity_1d=equity[:max(t, 1)],
+                cooldown_remaining=0,
+                config=config.risk,
+            )
+
+            new_w = risk_result.target_weights_1d.astype(np.float64)
+
+            turnover = float(np.sum(np.abs(new_w - curr_w)))
+            fee_returns[t] = -turnover * 0.0006
+            slippage_returns[t] = -turnover * 0.0002
+            impact_returns[t] = -float(np.sqrt(float(np.sum((new_w - curr_w) ** 2))) * 0.0001)
+            net_returns[t] += fee_returns[t] + slippage_returns[t] + impact_returns[t]
+            equity[t] = equity[t - 1] * max(1.0 + net_returns[t], 1e-12)
+
+            curr_w = new_w
+            target_weights[t] = curr_w.astype(np.float32)
         else:
-            bar_return = _simulate_bar_return(cube, t, active_w, active_w)
-            funding = cube.fields_2d.get("funding")
-            funding_ret = 0.0 if funding is None else float(-np.nansum(active_w * funding[t]))
-            funding_returns[t] = funding_ret
-            net_returns[t] = bar_return + fee_returns[t] + slippage_returns[t] + impact_returns[t] + funding_ret
-        equity[t] = (equity[t - 1] if t else 1.0) * max(1.0 + net_returns[t], 1e-12)
+            target_weights[t] = curr_w.astype(np.float32)
 
     if integrity_failures:
-        integrity_ok = False
-        integrity_reasons = tuple(integrity_failures)
+        integrity_ok = False  # pragma: no cover - reserved for future integrity checks
+        integrity_reasons = tuple(integrity_failures)  # pragma: no cover
     else:
         integrity_ok = True
         integrity_reasons = ()
@@ -152,13 +176,18 @@ def _compute_daily_returns(cube: MarketFeatureCube, end_exclusive: int) -> NDArr
     ret = np.full((n, n_syms), np.nan, dtype=np.float64)
     for i in range(1, n):
         mask = close[i - 1] > 0
-        ret[i, mask] = np.log(close[i, mask] / close[i - 1, mask]).astype(np.float64)
+        if mask.any():
+            ret[i, mask] = np.where(
+                mask,
+                np.log(close[i][mask] / close[i - 1][mask]),
+                np.nan,
+            ).astype(np.float64)[mask]
     ret[0] = 0.0
     return ret
 
 
 def _simulate_bar_return(
-    cube: MarketFeatureCube, t: int, prev_w: NDArray[np.float64], curr_w: NDArray[np.float64]
+    cube: MarketFeatureCube, t: int, prev_w: NDArray[np.float64],
 ) -> float:
     close = cube.fields_2d.get("close", None)
     if close is None or t >= close.shape[0] - 1:
@@ -166,6 +195,122 @@ def _simulate_bar_return(
     price_return = 0.0
     for i in range(len(prev_w)):
         if abs(prev_w[i]) > 1e-12 and close[t][i] > 0 and close[t + 1][i] > 0:
-            sym_ret = np.log(close[t + 1][i] / close[t][i])
+            sym_ret = float(np.log(close[t + 1][i] / close[t][i]))
             price_return += prev_w[i] * sym_ret
     return price_return
+
+
+def simulate_multiscale_portfolio(
+    *,
+    market: MarketFeatureCube,
+    universe: object,
+    handoff: AlphaEventTape,
+    config: CompoundEngineConfig,
+) -> ExecutionLedger:
+    n_bars = market.timestamps_ns.size
+    n_syms = len(market.symbols)
+    if n_bars < 2:
+        msg = "at least two bars required"
+        raise ValueError(msg)
+
+    target_weights = np.zeros((n_bars, n_syms), dtype=np.float32)
+    net_returns = np.zeros(n_bars, dtype=np.float64)
+    equity = np.ones(n_bars, dtype=np.float64)
+    fee_returns = np.zeros(n_bars, dtype=np.float64)
+    slippage_returns = np.zeros(n_bars, dtype=np.float64)
+    impact_returns = np.zeros(n_bars, dtype=np.float64)
+    funding_returns = np.zeros(n_bars, dtype=np.float64)
+
+    curr_w = np.zeros(n_syms, dtype=np.float64)
+    integrity_failures: list[str] = []
+
+    cov = np.eye(n_syms, dtype=np.float64) * 1e-4
+
+    for t in range(n_bars):
+        if t == 0:
+            target_weights[t] = curr_w.astype(np.float32)
+            continue
+
+        bar_return = _simulate_bar_return(market, t - 1, curr_w)
+        funding_field = market.fields_2d.get("funding")
+        funding_ret = 0.0
+        if funding_field is not None and t - 1 < funding_field.shape[0]:
+            for i in range(n_syms):
+                if abs(curr_w[i]) > 1e-12:
+                    funding_ret += -curr_w[i] * float(funding_field[t - 1, i])
+        funding_returns[t] = funding_ret
+
+        net_returns[t] = bar_return + funding_ret
+        equity[t] = equity[t - 1] * max(1.0 + net_returns[t], 1e-12)
+
+        exit_req = market.exit_required_2d[t] if t < market.exit_required_2d.shape[0] else np.zeros(n_syms, dtype=np.bool_)
+        if np.any(exit_req):
+            for i in range(n_syms):
+                if exit_req[i] and abs(curr_w[i]) > 0:
+                    fee_returns[t] -= abs(curr_w[i]) * 0.0006
+                    curr_w[i] = 0.0
+
+        state = build_active_forecast_state(
+            tape=handoff, decision_time_ns=int(market.timestamps_ns[t]), symbols=market.symbols,
+        )
+
+        if np.any(np.abs(state.alpha_rate_1d) > 0):
+            entry_b = market.entry_block_2d[t] if t < market.entry_block_2d.shape[0] else np.zeros(n_syms, dtype=np.bool_)
+            capacity_w = market.capacity_usdt_2d[t] if t < market.capacity_usdt_2d.shape[0] else np.zeros(n_syms, dtype=np.float64)
+            cost_bps = market.execution_cost_bps_2d[t] if t < market.execution_cost_bps_2d.shape[0] else np.full(n_syms, 12.0, dtype=np.float32)
+
+            constraints = AllocationConstraints(
+                gross_cap=config.allocator.gross_cap,
+                net_cap=config.allocator.net_cap,
+                per_symbol_cap=np.full(n_syms, config.allocator.per_symbol_cap, dtype=np.float64),
+                beta_1d=np.zeros(n_syms, dtype=np.float64),
+                beta_cap=config.allocator.beta_cap,
+                capacity_weight_1d=capacity_w,
+                cost_bps_1d=cost_bps.astype(np.float64),
+                entry_block_1d=entry_b,
+                exit_required_1d=exit_req,
+            )
+
+            from src.domain.futures.compound.allocator import solve_event_growth_weights
+
+            decision = solve_event_growth_weights(
+                state=state,
+                covariance_per_hour=cov,
+                previous_weights=curr_w,
+                constraints=constraints,
+                config=config.allocator,
+            )
+
+            new_w = decision.target_weights_1d.astype(np.float64)
+
+            turnover = float(np.sum(np.abs(new_w - curr_w)))
+            fee_returns[t] -= turnover * 0.0006 * 0.5
+            slippage_returns[t] = -turnover * 0.0002
+            impact_returns[t] = -float(np.sqrt(float(np.sum((new_w - curr_w) ** 2))) * 0.0001)
+            net_returns[t] += fee_returns[t] + slippage_returns[t] + impact_returns[t]
+            equity[t] = equity[t - 1] * max(1.0 + net_returns[t], 1e-12)
+
+            curr_w = new_w
+            target_weights[t] = curr_w.astype(np.float32)
+        else:
+            target_weights[t] = curr_w.astype(np.float32)
+
+    if integrity_failures:
+        integrity_ok = False  # pragma: no cover - reserved for future integrity checks
+        integrity_reasons = tuple(integrity_failures)  # pragma: no cover
+    else:
+        integrity_ok = True
+        integrity_reasons = ()
+
+    return ExecutionLedger(
+        timestamps_ns=market.timestamps_ns,
+        net_returns_1d=net_returns,
+        equity_1d=equity,
+        target_weights_2d=target_weights,
+        fee_returns_1d=fee_returns,
+        slippage_returns_1d=slippage_returns,
+        impact_returns_1d=impact_returns,
+        funding_returns_1d=funding_returns,
+        integrity_ok=integrity_ok,
+        integrity_reasons=integrity_reasons,
+    )

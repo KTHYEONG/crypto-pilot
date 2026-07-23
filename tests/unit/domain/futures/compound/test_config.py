@@ -8,6 +8,7 @@ from src.domain.futures.compound.config import (
     DataPlaneConfig,
     FactorRiskConfig,
     L1EstimatorConfig,
+    L1Config,
     L3ValidationConfig,
     RiskOverlayConfig,
 )
@@ -36,6 +37,23 @@ class TestL1EstimatorConfig:
     def test_valid(self) -> None:
         cfg = L1EstimatorConfig()
         assert cfg.retire_effective_n > cfg.active_effective_n
+
+
+class TestL1Config:
+    def test_defaults_satisfy_edge_gate_bounds(self) -> None:
+        cfg = L1Config()
+
+        assert cfg.max_residual_correlation == pytest.approx(0.60)
+        assert cfg.total_outer_folds >= cfg.min_positive_folds
+        assert cfg.cost_stress_multiplier >= 1
+
+    def test_invalid_edge_gate_bounds_raise(self) -> None:
+        with pytest.raises(AssertionError):
+            L1Config(max_residual_correlation=0.0)
+        with pytest.raises(AssertionError):
+            L1Config(total_outer_folds=3, min_positive_folds=4)
+        with pytest.raises(AssertionError):
+            L1Config(cost_stress_multiplier=0.5)
 
 
 class TestAllocatorConfig:
