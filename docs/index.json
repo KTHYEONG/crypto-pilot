@@ -525,5 +525,8 @@
   },
   "src/application/futures/runner/compound_main.py": {
     "testing": "tests/unit/application/futures/runner/test_compound_main.py"
+  },
+  "src/core/exchange/binance_vision.py": {
+    "testing": "tests/unit/core/exchange/test_binance_vision.py"
   }
 }
