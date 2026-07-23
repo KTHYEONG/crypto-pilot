@@ -79,6 +79,7 @@ class IngestionPlan:
     selected_symbols: tuple[str, ...]
     datasets: tuple[DatasetKind, ...]
     config: DataLakeConfig
+    start_date: date | None = None
 
 
 @dataclass(slots=True, frozen=True)
@@ -111,6 +112,5 @@ class DataCatalog(Protocol):
     def total_bytes(self) -> int: ...
     def load_snapshot(self, reference_time_ms: int) -> DataSnapshot: ...
     def has_complete_coverage(self, snapshot: DataSnapshot, plan: IngestionPlan) -> bool: ...
-
 
 
