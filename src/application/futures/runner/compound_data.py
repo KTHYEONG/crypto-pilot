@@ -7,32 +7,15 @@ import pandas as pd
 from numpy.typing import NDArray
 
 from src.application.futures.runner.compound_config import CompoundRunConfig
-from src.application.futures.runner.compound_universe import DailyPITUniverse
 from src.domain.futures.compound.contracts import MarketFeatureCube
-from src.domain.futures.data_lake.contracts import DataSnapshot, GridRequest
-from src.domain.futures.data_lake.query import materialize_native_grid
+from src.domain.futures.data_lake.contracts import DatasetKind, DataSnapshot, GridRequest, LakeUniverse
+from src.domain.futures.data_lake.query import materialize_feature_grid
 
 _logger = logging.getLogger(__name__)
-def check_data_readiness(
-    data_maps: dict[str, dict[str, pd.DataFrame]],
-    *,
-    min_ready_pct: float = 0.80,
-) -> bool:
-    if not data_maps:
-        return False
-    ready = sum(1 for sym_data in data_maps.values() if "1h" in sym_data and not sym_data["1h"].empty)
-    ratio = ready / max(len(data_maps), 1)
-    if ratio < min_ready_pct:
-        _logger.error(
-            "data readiness %.1f%% < %.1f%% (%d/%d symbols ready)",
-            ratio * 100, min_ready_pct * 100, ready, len(data_maps),
-        )
-        return False
-    return True
 
 
 def build_multiscale_market_cube(
-    *, snapshot: DataSnapshot, universe: DailyPITUniverse, config: CompoundRunConfig
+    *, snapshot: DataSnapshot, universe: LakeUniverse, config: CompoundRunConfig
 ) -> MarketFeatureCube:
     _logger.info(
         "building multiscale market cube: %d symbols from snapshot %s",
@@ -50,8 +33,10 @@ def build_multiscale_market_cube(
     execution_calendar = pd.date_range(start=start_dt, periods=n_bars, freq="h", tz="UTC")
     timestamps_ns = execution_calendar.to_numpy(dtype="datetime64[ns]").astype(np.int64)
 
-    core_names = ("open", "high", "low", "close", "quote_volume")
-    grid = materialize_native_grid(
+    core_names = (
+        "open", "high", "low", "close", "quote_volume", "taker_quote_volume",
+    )
+    grid = materialize_feature_grid(
         request=GridRequest(
             symbols=symbols,
             timeframe="1h",
@@ -61,31 +46,90 @@ def build_multiscale_market_cube(
             end_time_ns=int(timestamps_ns[-1] + 3_600_000_000_000),
         ),
         snapshot=snapshot,
+        dataset=DatasetKind.KLINES_1H,
     )
     arrays: dict[str, NDArray[np.float64]] = {
         name: np.asarray(grid.fields[name], dtype=np.float64) for name in core_names
     }
-    funding = np.zeros((n_bars, n_syms), dtype=np.float32)
+    funding_request = GridRequest(
+            symbols=symbols,
+            timeframe="1h",
+            source_timeframe="1h",
+            fields=("funding_rate",),
+            start_time_ns=int(timestamps_ns[0]),
+            end_time_ns=int(timestamps_ns[-1] + 3_600_000_000_000),
+        )
+    funding_grid = materialize_feature_grid(request=funding_request, snapshot=snapshot, dataset=DatasetKind.FUNDING_EVENT)
+    funding = np.asarray(funding_grid.fields.get("funding_rate", np.full((n_bars, n_syms), np.nan, dtype=np.float64)), dtype=np.float32)
+    funding_available = funding_grid.available.get("funding_rate", np.zeros((n_bars, n_syms), dtype=np.bool_))
+
+    feature_request = GridRequest(
+        symbols=symbols,
+        timeframe="1h",
+        source_timeframe="1h",
+        fields=("close",),
+        start_time_ns=int(timestamps_ns[0]),
+        end_time_ns=int(timestamps_ns[-1] + 3_600_000_000_000),
+    )
+    premium_grid = materialize_feature_grid(
+        request=feature_request, snapshot=snapshot, dataset=DatasetKind.PREMIUM_5M,
+    )
+    mark_grid = materialize_feature_grid(
+        request=feature_request, snapshot=snapshot, dataset=DatasetKind.MARK_1M,
+    )
+    index_grid = materialize_feature_grid(
+        request=feature_request, snapshot=snapshot, dataset=DatasetKind.INDEX_1M,
+    )
+    metrics_request = GridRequest(
+        symbols=symbols,
+        timeframe="1h",
+        source_timeframe="1h",
+        fields=("sum_open_interest_value",),
+        start_time_ns=int(timestamps_ns[0]),
+        end_time_ns=int(timestamps_ns[-1] + 3_600_000_000_000),
+    )
+    metrics_grid = materialize_feature_grid(
+        request=metrics_request, snapshot=snapshot, dataset=DatasetKind.METRICS_5M,
+    )
     available_core = np.logical_and.reduce(
         [np.asarray(grid.available[name], dtype=np.bool_) for name in core_names]
     )
-    eligible = np.ones((n_bars, n_syms), dtype=np.bool_)
-    entry_block = np.zeros((n_bars, n_syms), dtype=np.bool_)
-    exit_required = np.zeros((n_bars, n_syms), dtype=np.bool_)
-    capacity = np.full((n_bars, n_syms), 1_000_000.0, dtype=np.float64)
-    costs = np.full((n_bars, n_syms), 12.0, dtype=np.float32)
+
+    state_cube = universe.state_cube
+    eligible = state_cube.eligible
+    entry_block = state_cube.entry_block
+    exit_required = state_cube.exit_required
+    capacity = state_cube.capacity_usdt
+    costs = state_cube.cost_bps.astype(np.float32)
 
     fields: dict[str, NDArray[np.float32] | NDArray[np.float64]] = {
         **arrays,
         "quote_volume": arrays["quote_volume"].astype(np.float32),
         "funding": funding,
+        "premium": np.asarray(premium_grid.fields["close"], dtype=np.float32),
+        "mark": np.asarray(mark_grid.fields["close"], dtype=np.float32),
+        "index": np.asarray(index_grid.fields["close"], dtype=np.float32),
+        "taker_buy_quote": arrays["taker_quote_volume"].astype(np.float32),
+        "open_interest": np.asarray(
+            metrics_grid.fields["sum_open_interest_value"], dtype=np.float32,
+        ),
+    }
+
+    available_all: dict[str, NDArray[np.bool_]] = {
+        "core": available_core,
+        "funding": funding_available,
+        "premium": premium_grid.available["close"],
+        "mark": mark_grid.available["close"],
+        "index": index_grid.available["close"],
+        "taker_buy_quote": grid.available["taker_quote_volume"],
+        "open_interest": metrics_grid.available["sum_open_interest_value"],
     }
 
     cube = MarketFeatureCube(
         timestamps_ns=timestamps_ns,
         symbols=symbols,
         fields_2d=fields,
-        available_2d={"core": available_core},
+        available_2d=available_all,
         eligible_2d=eligible,
         entry_block_2d=entry_block,
         exit_required_2d=exit_required,
@@ -103,5 +147,4 @@ def build_multiscale_market_cube(
 
 __all__ = [
     "build_multiscale_market_cube",
-    "check_data_readiness",
 ]

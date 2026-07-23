@@ -30,7 +30,9 @@ def build_data_lake_runtime(config: CompoundRunConfig) -> DataLakeRuntime:
     from src.domain.futures.data_lake.query import BinanceQueryClient, LocalDataCatalog
 
     client: BinanceDataClient = BinanceQueryClient()
-    catalog: DataCatalog = LocalDataCatalog(root=config.data_lake.root)
+    catalog: DataCatalog = LocalDataCatalog(
+        root=config.data_lake.root, read_only=config.sync == "skip",
+    )
     return DataLakeRuntime(client=client, catalog=catalog)
 
 
