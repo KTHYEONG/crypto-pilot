@@ -88,6 +88,7 @@ def run_multiscale_compound_engine(
         data_manifest_hash=holdout_manifest.data_manifest_hash,
         strategy_spec_hash=holdout_manifest.strategy_spec_hash,
         evaluate=evaluate_fn,
+        universe_state_hash=holdout_manifest.universe_state_hash,
     )
 
     _logger.info(

@@ -283,6 +283,7 @@ class SealedHoldoutManifest:
     model_version: str
     data_manifest_hash: str
     strategy_spec_hash: str = ""
+    universe_state_hash: str = ""
     first_consumed_at_ns: int | None = None
 
 
