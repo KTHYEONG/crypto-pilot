@@ -45,6 +45,7 @@ def mock_universe() -> MagicMock:
     universe.capacity_usdt = np.full((n_bars, n_syms), 1_000_000.0, dtype=np.float64)
     universe.risk_scale = np.ones((n_bars, n_syms), dtype=np.float64)
     universe.cost_bps = np.full((n_bars, n_syms), 12.0, dtype=np.float64)
+    universe.exit_required = np.zeros((n_bars, n_syms), dtype=np.bool_)
     return universe
 
 
@@ -95,6 +96,7 @@ class TestValidateMarketFeatureCube:
             available_2d={"core": np.ones((5, 2), dtype=np.bool_)},
             eligible_2d=np.ones((5, 2), dtype=np.bool_),
             entry_block_2d=np.zeros((5, 2), dtype=np.bool_),
+            exit_required_2d=np.zeros((5, 2), dtype=np.bool_),
             capacity_usdt_2d=np.full((5, 2), 1e6, dtype=np.float64),
             execution_cost_bps_2d=np.full((5, 2), 12.0, dtype=np.float32),
             data_manifest_hash="h1",
