@@ -49,12 +49,20 @@ class SealedHoldoutStore:
                     model_version TEXT NOT NULL,
                     data_manifest_hash TEXT NOT NULL,
                     strategy_spec_hash TEXT NOT NULL DEFAULT '',
+                    universe_state_hash TEXT NOT NULL DEFAULT '',
                     first_consumed_at_ns INTEGER,
                     result_json TEXT,
                     created_at_ns INTEGER NOT NULL,
                     PRIMARY KEY (holdout_id)
                 )
             """)
+            columns = {
+                str(row[1]) for row in self._conn.execute("PRAGMA table_info(sealed_holdouts)")
+            }
+            if "universe_state_hash" not in columns:
+                self._conn.execute(
+                    "ALTER TABLE sealed_holdouts ADD COLUMN universe_state_hash TEXT NOT NULL DEFAULT ''"
+                )
             self._conn.commit()
         return self._conn
 
@@ -66,9 +74,9 @@ class SealedHoldoutStore:
                 """
                 INSERT INTO sealed_holdouts
                     (holdout_id, start_time_ns, end_time_ns, holdout_days,
-                     model_version, data_manifest_hash, strategy_spec_hash,
+                     model_version, data_manifest_hash, strategy_spec_hash, universe_state_hash,
                      first_consumed_at_ns, result_json, created_at_ns)
-                VALUES (?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?)
                 """,
                 (
                     manifest.holdout_id,
@@ -78,6 +86,7 @@ class SealedHoldoutStore:
                     manifest.model_version,
                     manifest.data_manifest_hash,
                     manifest.strategy_spec_hash,
+                    manifest.universe_state_hash,
                     now_ns,
                 ),
             )
@@ -92,7 +101,7 @@ class SealedHoldoutStore:
         conn = self._ensure_db()
         row = conn.execute(
             """SELECT holdout_id, start_time_ns, end_time_ns, holdout_days,
-                      model_version, data_manifest_hash, strategy_spec_hash
+                      model_version, data_manifest_hash, strategy_spec_hash, universe_state_hash
                FROM sealed_holdouts WHERE holdout_id = ?""",
             (holdout_id,),
         ).fetchone()
@@ -106,6 +115,7 @@ class SealedHoldoutStore:
             model_version=row[4],
             data_manifest_hash=row[5],
             strategy_spec_hash=row[6] or "",
+            universe_state_hash=row[7] or "",
         )
 
     def consume(
@@ -116,12 +126,13 @@ class SealedHoldoutStore:
         data_manifest_hash: str,
         strategy_spec_hash: str,
         evaluate: Callable[[SealedHoldoutManifest], L3ValidationResult],
+        universe_state_hash: str = "",
     ) -> L3ValidationResult:
         conn = self._ensure_db()
         cursor = conn.execute(
             """
             SELECT start_time_ns, end_time_ns, holdout_days, model_version,
-                   data_manifest_hash, strategy_spec_hash, first_consumed_at_ns,
+                   data_manifest_hash, strategy_spec_hash, universe_state_hash, first_consumed_at_ns,
                    result_json
             FROM sealed_holdouts WHERE holdout_id = ?
             """,
@@ -133,10 +144,11 @@ class SealedHoldoutStore:
             raise HoldoutNotFoundError(msg)
 
         (stored_start, stored_end, stored_days, stored_model,
-         stored_data_hash, stored_spec_hash, consumed_at_ns, result_json) = row
+         stored_data_hash, stored_spec_hash, stored_universe_hash, consumed_at_ns, result_json) = row
 
         if (stored_data_hash != data_manifest_hash
                 or stored_spec_hash != strategy_spec_hash
+                or (stored_universe_hash != "" and stored_universe_hash != universe_state_hash)
                 or stored_model != model_version):
             msg = (
                 f"holdout {holdout_id} hash mismatch: "
@@ -159,6 +171,7 @@ class SealedHoldoutStore:
             model_version=stored_model,
             data_manifest_hash=stored_data_hash,
             strategy_spec_hash=stored_spec_hash,
+            universe_state_hash=stored_universe_hash,
             first_consumed_at_ns=now_ns,
         )
 
