@@ -1,5 +1,15 @@
 # Active Decisions Log (Sliding Window)
 
+## [2026-07-23] [live-pit-universe-refresh-gate] [ADR_20260723_live-pit-universe-refresh-gate]
+- **Context/Why:** live PIT collector 추가 후 경계조건과 lake-only query의 coverage gate를 완료해야 운영 갱신 결과를 신뢰할 수 있음
+- **Resolution/What:** exchangeInfo schema, empty/non-mapping records, axis/time causal 조건, missing partition, projection path를 테스트하고 lean_check strict gate를 통과시킴
+- **Impact:** 실제 live state는 120 symbols/119 eligible로 저장되었고 final check PASS Cov 91%. raw legacy data는 아직 삭제하지 않음
+
+## [2026-07-23] [live-pit-universe-refresh] [ADR_20260723_live-pit-universe-refresh]
+- **Context/Why:** lake-only 전환 후 과거 ledger 이관만으로는 현재 거래 가능 상태를 갱신할 수 없고 Binance exchangeInfo 전체를 사용하면 운영 120심볼 축을 초과함
+- **Resolution/What:** Binance exchangeInfo를 조회하고 data/futures/lake의 기존 운영 심볼과 교집합을 취해 다음 UTC 일자의 causal universe_state를 immutable Parquet와 DuckDB catalog에 저장하는 refresh_live_universe_state를 추가함
+- **Impact:** 실제 Binance 846개 응답에서 120개를 선별해 119개 eligible state를 2026-07-24 partition에 저장하고 state hash 및 24시간/120심볼 cube 검증을 완료함. 구형 raw 데이터 삭제와 L2/L3 성과 검증은 별도 잔여 작업임
+
 ## [2026-07-23] [data-lake-collection-verification] [ADR_20260723_data-lake-collection-verification]
 - **Context/Why:** 유니버스·L1·L2 백테스트에 필요한 Binance Futures 데이터를 수집하고 저장 완전성을 검증
 - **Resolution/What:** 유효 symbol 120개를 기준으로 1h/1m OHLCV, funding, premium, mark/index, metrics를 수집하고 bounded parallel ingestion, symbol 검증, quote volume 보정을 적용
@@ -64,13 +74,3 @@
 - **Context/Why:** L2 multi-seed production path bypassed the causal handoff and selected no shared candidate; latest run stopped before trial evaluation.
 - **Resolution/What:** Connected deterministic single-candidate path, generated fit/cal causal net sleeve returns, applied fold handoff masks before OOS simulation, and preserved isolated-study compatibility. Latest 120-trial run fail-closed at handoff with all folds blocked.
 - **Impact:** L1 remains passing (113/118); L2 trials and simulated trades were 0 because no sleeve survived handoff; check passed with Cov 38%.
-
-## [2026-07-21] [L2_RISK_PROJECTED_ROBUST_SEARCH] [ADR_20260721_L2_RISK_PROJECTED_ROBUST_SEARCH]
-- **Context/Why:** 개선안 구현 후 실제 데이터에서 자산증식 로직의 병목과 적용 여부를 검증하기 위해 120-trial L2 실행 결과를 기록한다.
-- **Resolution/What:** 위기 레버리지 투영·robust search 계약을 구현하고 단일 프로세스 L2 120-trial 기준선 실측을 수행했다. seed=42에서 120/120 완료, joint_feasible=4/120, blocker=cagr를 확인했으며 기존 multi-seed/composite crisis 경로가 아직 실제 파이프라인에 남아 있음을 확인했다.
-- **Impact:** L1 113/118 승인 및 PASS. 위기 데이터 53 symbols·7,221 bars. L2 최고 CAGR 약 0.17%, failures fold=114/cagr=111/recent_fold=64/sharpe_uplift=24/recency_holdout=6. champion은 생성되지 않았다. 결과는 기준선이며 robust 단일 search와 LUNA/FTX sealed wiring 완료 전에는 개선 효과로 해석하지 않는다.
-
-## [2026-07-21] [TASK_L2_POLICY_TF_KEY_SSOT] [ADR_20260721_L2_POLICY_TF_KEY_SSOT]
-- **Context/Why:** 직전 ADR(crisis replay routing parity)에서 study 학습 라우팅을 crisis cache에 이식했음에도 crisis_mdd/crisis_cagr 수치가 parity 적용 전후 완전 동일한 원인 불명 상태였음. 실행 검증으로 확정: 정책 빌드(compute_bucket_realized_edge_stats)는 sleeve_keys.native_tf를 tf 키 소스로 쓰는데, 정책 적용(apply_regime_cell_policy 등)은 strategy_id의 variant-suffix 파싱(_parse_meta_group_ids)에 의존 — crisis sleeve strategy_id는 suffix가 없어 파싱 결과 tf='unknown'으로 100% 조회 miss, 이식된 정책이 전부 무변경 통과되고 있었음. '2022 윈도우가 단일 crash라 라우팅 여지 없음' 대안가설은 실측(bear 53.2%/crisis 30.7%/bull 16.2%)으로 반증.
-- **Resolution/What:** awf_sim.py가 cache.sleeve_keys에서 {(symbol,strategy_id): native_tf} 매핑을 1회 구성해 apply_regime_cell_policy/filter_sleeves_by_bucket/apply_bucket_conditional_weight에 tf_by_sleeve로 주입(제공 시 우선, None이면 기존 파서 폴백 유지 — 하위호환). exact (regime,family,tf[,side]) 조회 miss 시 transfer_routing_plan_to_crisis_cache가 사전 계산한 family-level wildcard 셀((regime,family,'*'[,side]), 그룹 내 n_cal 최대 tf 대표, 동률 시 tf 사전순)로 2단 폴백 — 새 집계 규칙 발명 없이 기존 shrinkage 철학 준수. 'unk'(빌드)/'unknown'(파서) 폴백 문자열도 TF_UNKNOWN 상수로 통일. [CRISIS-ROUTING] 로그에 wildcard_cells 필드 추가. /check 과정에서 신규 tf_by_sleeve 루프 변수명이 기존 _sk 변수와 충돌해 발생한 mypy 오류 수정, 무관하게 이미 깨져있던 기존 fixture(BTC 앵커 심볼 누락) 1건도 부수 수정.
-- **Impact:** /check PASS(spec compliance 포함, lint+mypy+pytest, Cov 39%). 프로덕션 실측(--phase l3, seed 42/43/44): [CRISIS-ROUTING] policy_cells=36(exact 18 + wildcard 18)으로 정책이 실제 매칭됨을 확인. 세션 최초로 seed=42 joint_feasible=1/120 달성 — 실패 사유가 no_feasible_trials에서 cagr blocker로 질적 전환(crisis_cagr 위반 107→95, recent_fold 11→6 개선). seed 43/44는 여전히 0/120, 전체 admitted=False 유지(2/3 seed 합의 미달). 다음 우선순위: side-split+scoped-override+본 수정 3종 조합 실측.

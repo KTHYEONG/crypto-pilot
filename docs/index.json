@@ -528,5 +528,11 @@
   },
   "src/core/exchange/binance_vision.py": {
     "testing": "tests/unit/core/exchange/test_binance_vision.py"
+  },
+  "src/domain/futures/data_lake/contracts.py": {
+    "testing": "tests/unit/domain/futures/data_lake/test_ingestion.py"
+  },
+  "src/domain/futures/data_lake/query.py": {
+    "testing": "tests/unit/application/futures/runner/test_lake_only_cutover.py"
   }
 }
