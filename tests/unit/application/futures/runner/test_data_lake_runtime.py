@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import hashlib
+import io
 from datetime import date
 from pathlib import Path
 
 import pytest
+import pandas as pd
 
 from src.application.futures.runner.compound_config import CompoundRunConfig
 from src.application.futures.runner.data_lake_runtime import (
@@ -33,10 +35,12 @@ class FakeClient:
 
     def download_partition(self, *args: object, **kwargs: object) -> bytes:
         self.download_calls += 1
-        return b"valid"
+        buffer = io.BytesIO()
+        pd.DataFrame({"timestamp": [1_783_440_000_000], "close": [100.0]}).to_parquet(buffer, index=False)
+        return buffer.getvalue()
 
     def download_checksum(self, *args: object, **kwargs: object) -> str:
-        return hashlib.sha256(b"valid").hexdigest()
+        return hashlib.sha256(self.download_partition()).hexdigest()
 
 
 class FakeCatalog:
@@ -133,7 +137,7 @@ class TestCoverageFailure:
 
 
 class TestApprovedSync:
-    def test_approved_sync_revalidates_snapshot(self) -> None:
+    def test_approved_sync_revalidates_snapshot(self, tmp_path: Path) -> None:
         snap = DataSnapshot(
             snapshot_id="test-incomplete",
             reference_time_ms=1_000_000,
@@ -149,6 +153,7 @@ class TestApprovedSync:
             sync="skip",
             refresh_universe=False,
             allow_network_sync=True,
+            data_lake=DataLakeConfig(root=tmp_path / "lake"),
         )
         with pytest.raises(DataCoverageError, match="still incomplete after sync"):
             prepare_data_snapshot(config=config, runtime=runtime)
@@ -198,7 +203,7 @@ class TestHardCap:
             broad_symbols=("BTCUSDT",),
             selected_symbols=("BTCUSDT",),
             datasets=(DatasetKind.KLINES_1H,),
-            config=DataLakeConfig(root=Path("/tmp/lake"), hard_cap_gib=64),
+            config=DataLakeConfig(root=Path("/tmp/lake"), hard_cap_gib=64),  # noqa: S108
         )
 
         class FullCatalog(FakeCatalog):
