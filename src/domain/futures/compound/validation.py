@@ -37,7 +37,7 @@ def _cvar95(returns: NDArray[np.float64]) -> float:
 
 
 def _stationary_bootstrap_ci(
-    returns: NDArray[np.float64], n_bootstrap: int = 1000, block_size: int = 5
+    returns: NDArray[np.float64], n_bootstrap: int = 1000, block_size: int = 5,
 ) -> tuple[float, float]:
     r = returns[np.isfinite(returns)]
     n = len(r)
@@ -55,6 +55,29 @@ def _stationary_bootstrap_ci(
             idx += block_len
         samples[i] = _annualized_log_growth(boot, 8766)
     return (float(np.percentile(samples, 5)), float(np.percentile(samples, 95)))
+
+
+def _stationary_bootstrap_probability_positive(
+    returns: NDArray[np.float64], n_bootstrap: int = 2000, block_size: int = 5,
+) -> float:
+    r = returns[np.isfinite(returns)]
+    n = len(r)
+    if n < 10:
+        return 0.5
+    count_positive = 0
+    for _ in range(n_bootstrap):
+        idx = 0
+        boot = np.empty(n)
+        while idx < n:
+            block_start = np.random.randint(0, n)
+            block_len = min(np.random.geometric(1.0 / block_size), n - block_start)
+            block_len = min(block_len, n - idx)
+            boot[idx : idx + block_len] = r[block_start : block_start + block_len]
+            idx += block_len
+        mean_growth = float(np.nanmean(boot))
+        if mean_growth > 0:
+            count_positive += 1
+    return count_positive / n_bootstrap
 
 
 def _compute_turnover(ledger: ExecutionLedger) -> float:
@@ -144,37 +167,41 @@ def evaluate_l3_sealed_holdout(
 
     effective_prior = min(len(l2_prior_returns), config.l2_prior_effective_days_cap)
     prior_returns = l2_prior_returns[:effective_prior]
-    holdout_returns = holdout_ledger.net_returns_1d
 
-    prior_mean = float(np.mean(prior_returns)) if len(prior_returns) > 0 else 0.0
-    prior_var = float(np.var(prior_returns)) if len(prior_returns) > 1 else 1e-6
-    holdout_mean = float(np.mean(holdout_returns)) if len(holdout_returns) > 0 else 0.0
-    holdout_var = float(np.var(holdout_returns)) if len(holdout_returns) > 1 else 1e-6
+    holdout_hourly = holdout_ledger.net_returns_1d
+    daily_bars = 24
+    n_days = holdout_hourly.size // daily_bars
+    holdout_daily_returns = np.array([
+        float(np.sum(holdout_hourly[i * daily_bars:(i + 1) * daily_bars]))
+        for i in range(n_days)
+    ], dtype=np.float64)
 
-    prior_precision = 1.0 / max(prior_var, 1e-12)
-    holdout_precision = 1.0 / max(holdout_var, 1e-12)
-    posterior_mean = (prior_precision * prior_mean + holdout_precision * holdout_mean) / (prior_precision + holdout_precision)
-    posterior_var = 1.0 / (prior_precision + holdout_precision)
-    posterior_std = np.sqrt(posterior_var)
+    holdout_growth_prob = _stationary_bootstrap_probability_positive(
+        holdout_daily_returns, n_bootstrap=2000, block_size=5,
+    )
 
-    prob_positive = 1.0 - float(np.float64(np.float64(0.0) if posterior_std <= 0 else 0.0))
-    if posterior_std > 0:
-        from scipy.stats import norm
-        prob_positive = float(norm.cdf(posterior_mean / posterior_std))
+    if len(prior_returns) > 0:
+        prior_growth_prob = _stationary_bootstrap_probability_positive(
+            prior_returns, n_bootstrap=1000, block_size=5,
+        )
+        prior_weight = min(1.0, len(prior_returns) / config.l2_prior_effective_days_cap)
+        holdout_weight = 1.0 - prior_weight * 0.5
+        posterior_prob = prior_weight * prior_growth_prob + holdout_weight * holdout_growth_prob
+        posterior_prob /= (prior_weight + holdout_weight)
+    else:
+        posterior_prob = holdout_growth_prob
 
-    if prob_positive >= config.promote_probability:
+    if posterior_prob >= config.promote_probability:
         verdict = DeploymentVerdict.PROMOTE
-    elif prob_positive <= config.reject_probability and holdout_manifest.holdout_days >= config.min_holdout_days:
+    elif posterior_prob <= config.reject_probability:
         verdict = DeploymentVerdict.REJECT
         reasons.append("low_growth_probability")
     else:
         verdict = DeploymentVerdict.SHADOW
-        if holdout_manifest.holdout_days < config.holdout_days:
-            reasons.append("insufficient_holdout_days")
 
     return L3ValidationResult(
         verdict=verdict,
-        posterior_growth_probability=prob_positive,
+        posterior_growth_probability=posterior_prob,
         holdout_days=holdout_manifest.holdout_days,
         max_drawdown=mdd,
         daily_cvar95=cvar,
@@ -183,7 +210,7 @@ def evaluate_l3_sealed_holdout(
 
 
 def slice_execution_ledger(
-    *, ledger: ExecutionLedger, start_time_ns: int, end_time_ns: int
+    *, ledger: ExecutionLedger, start_time_ns: int, end_time_ns: int,
 ) -> ExecutionLedger:
     if ledger.timestamps_ns.size == 0:
         raise ValueError("cannot slice empty ledger")
