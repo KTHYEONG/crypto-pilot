@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import hashlib
 import io
+import json
 import logging
+import urllib.request
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -13,24 +15,36 @@ import pandas as pd
 from numpy.typing import NDArray
 
 from src.core.exchange.binance_vision import BinanceVisionDownloader
-from src.core.settings import FUTURES_DATA_DIR
 from src.domain.futures.data_lake.contracts import (
     DatasetKind,
     DataSnapshot,
     GridRequest,
     IngestionPlan,
+    LakeUniverse,
     NativeFeatureGrid,
     PartitionManifest,
+    UniverseStateRequest,
+    UniverseStateRow,
 )
+from src.domain.futures.data_lake.ingestion import DataCoverageError
+from src.domain.futures.universe.contracts import UniverseStateCube
 
 _logger = logging.getLogger(__name__)
+
+
+class UniverseCoverageError(RuntimeError):
+    ...
+
+
+class HoldoutReuseError(RuntimeError):
+    ...
 
 
 class BinanceQueryClient:
     """Read cached Binance futures data first and use Vision only for missing months."""
 
-    def __init__(self, source_root: Path = FUTURES_DATA_DIR) -> None:
-        self._source_root = source_root
+    def __init__(self, source_root: Path | None = None) -> None:
+        _ = source_root
         self._vision = BinanceVisionDownloader()
         self._payloads: dict[tuple[DatasetKind, str, int], bytes] = {}
         self.download_calls = 0
@@ -84,121 +98,6 @@ class BinanceQueryClient:
         frame.to_parquet(buffer, index=False, compression="zstd")
         return buffer.getvalue()
 
-    def _has_local_source(self, dataset: DatasetKind, symbol: str) -> bool:
-        if dataset is DatasetKind.KLINES_1H:
-            return any(
-                path.exists()
-                for path in (
-                    self._source_root / "ohlcv" / "1h" / f"{symbol}.parquet",
-                    self._source_root / "ohlcv" / "1m" / f"{symbol}.parquet",
-                    self._source_root / "ohlcv" / "1m" / f"{symbol[:-4]}_USDT.parquet",
-                )
-            )
-        if dataset is DatasetKind.KLINES_1M:
-            return any(
-                path.exists()
-                for path in (
-                    self._source_root / "ohlcv" / "1m" / f"{symbol}.parquet",
-                    self._source_root / "ohlcv" / "1m" / f"{symbol[:-4]}_USDT.parquet",
-                )
-            )
-        if dataset is DatasetKind.FUNDING_EVENT:
-            return (self._source_root / "funding" / f"{symbol}.parquet").exists()
-        if dataset is DatasetKind.METRICS_5M:
-            return (self._source_root / "metrics" / f"{symbol}.parquet").exists()
-        return False
-
-    def _local_frame(self, dataset: DatasetKind, symbol: str) -> pd.DataFrame:
-        if dataset in (DatasetKind.KLINES_1H, DatasetKind.KLINES_1M):
-            source_interval = "1h" if dataset is DatasetKind.KLINES_1H else "1m"
-            path = self._source_root / "ohlcv" / source_interval / f"{symbol}.parquet"
-            if not path.exists():
-                if dataset is DatasetKind.KLINES_1M:
-                    path = self._source_root / "ohlcv" / source_interval / f"{symbol[:-4]}_USDT.parquet"
-                    if not path.exists():
-                        return pd.DataFrame()
-                one_minute_path = self._source_root / "ohlcv" / "1m" / f"{symbol}.parquet"
-                if not one_minute_path.exists():
-                    one_minute_path = self._source_root / "ohlcv" / "1m" / f"{symbol[:-4]}_USDT.parquet"
-                if not one_minute_path.exists():
-                    return pd.DataFrame()
-                minute = self._normalize_timestamp(pd.read_parquet(one_minute_path))
-                if minute.empty:
-                    return minute
-                minute["datetime"] = pd.to_datetime(minute["timestamp"], unit="ms", utc=True)
-                aggregations = {
-                    "open": "first", "high": "max", "low": "min", "close": "last",
-                    "volume": "sum", "quote_volume": "sum",
-                }
-                usable = {key: value for key, value in aggregations.items() if key in minute.columns}
-                hourly = minute.set_index("datetime").resample("1h").agg(usable).dropna(subset=["close"])
-                hourly["timestamp"] = (
-                    hourly.index.to_numpy(dtype="datetime64[ns]").astype(np.int64) // 1_000_000
-                )
-                return hourly.reset_index(drop=True)
-        elif dataset is DatasetKind.FUNDING_EVENT:
-            path = self._source_root / "funding" / f"{symbol}.parquet"
-        elif dataset is DatasetKind.METRICS_5M:
-            path = self._source_root / "metrics" / f"{symbol}.parquet"
-        else:
-            return pd.DataFrame()
-        if not path.exists():
-            return pd.DataFrame()
-        return self._normalize_timestamp(pd.read_parquet(path))
-
-    def _local_partition_frame(
-        self,
-        dataset: DatasetKind,
-        symbol: str,
-        month: datetime,
-    ) -> pd.DataFrame:
-        """Read only one calendar month from a local Parquet source.
-
-        Avoiding a full-file read per monthly partition keeps the 1m materialization
-        memory-bounded and prevents repeated scans of multi-gigabyte raw files.
-        """
-        period_start = int(datetime(month.year, month.month, 1, tzinfo=UTC).timestamp() * 1000)
-        period_end = int((pd.Timestamp(month) + pd.offsets.MonthBegin(1)).timestamp() * 1000)
-        filters = [("timestamp", ">=", period_start), ("timestamp", "<", period_end)]
-
-        if dataset is DatasetKind.KLINES_1H:
-            hourly_path = self._source_root / "ohlcv" / "1h" / f"{symbol}.parquet"
-            if hourly_path.exists():
-                return self._normalize_timestamp(pd.read_parquet(hourly_path, filters=filters))
-            minute_path = self._source_root / "ohlcv" / "1m" / f"{symbol}.parquet"
-            if not minute_path.exists():
-                minute_path = self._source_root / "ohlcv" / "1m" / f"{symbol[:-4]}_USDT.parquet"
-            if not minute_path.exists():
-                return pd.DataFrame()
-            minute = self._normalize_timestamp(pd.read_parquet(minute_path, filters=filters))
-            if minute.empty:
-                return minute
-            minute["datetime"] = pd.to_datetime(minute["timestamp"], unit="ms", utc=True)
-            aggregations = {
-                "open": "first", "high": "max", "low": "min", "close": "last",
-                "volume": "sum", "quote_volume": "sum",
-            }
-            usable = {key: value for key, value in aggregations.items() if key in minute.columns}
-            hourly = minute.set_index("datetime").resample("1h").agg(usable).dropna(subset=["close"])
-            hourly["timestamp"] = (
-                hourly.index.to_numpy(dtype="datetime64[ns]").astype(np.int64) // 1_000_000
-            )
-            return hourly.reset_index(drop=True)
-
-        if dataset is DatasetKind.KLINES_1M:
-            path = self._source_root / "ohlcv" / "1m" / f"{symbol}.parquet"
-            if not path.exists():
-                path = self._source_root / "ohlcv" / "1m" / f"{symbol[:-4]}_USDT.parquet"
-        elif dataset is DatasetKind.METRICS_5M:
-            path = self._source_root / "metrics" / f"{symbol}.parquet"
-        elif dataset is DatasetKind.FUNDING_EVENT:
-            path = self._source_root / "funding" / f"{symbol}.parquet"
-        else:
-            return pd.DataFrame()
-        if not path.exists():
-            return pd.DataFrame()
-        return self._normalize_timestamp(pd.read_parquet(path, filters=filters))
-
     def _vision_frame(self, dataset: DatasetKind, symbol: str, month: datetime) -> pd.DataFrame:
         if dataset is DatasetKind.KLINES_1H:
             return self._normalize_vision_klines(
@@ -235,9 +134,7 @@ class BinanceQueryClient:
         self.download_calls += 1
         key = (dataset, symbol, start_time_ms)
         month = self._month(start_time_ms)
-        frame = self._local_partition_frame(dataset, symbol, month)
-        if frame.empty:
-            frame = self._vision_frame(dataset, symbol, month)
+        frame = self._vision_frame(dataset, symbol, month)
         payload = self._to_parquet_bytes(frame) if not frame.empty else b""
         self._payloads[key] = payload
         return payload
@@ -248,22 +145,40 @@ class BinanceQueryClient:
             payload = self.download_partition(dataset, symbol, start_time_ms)
         return hashlib.sha256(payload).hexdigest()
 
+    def fetch_exchange_info(self) -> dict[str, Any]:
+        request = urllib.request.Request(
+            "https://fapi.binance.com/fapi/v1/exchangeInfo",
+            headers={"Accept": "application/json"},
+        )
+        with urllib.request.urlopen(request, timeout=20) as response:  # noqa: S310
+            payload = response.read()
+        decoded = json.loads(payload.decode("utf-8"))
+        if not isinstance(decoded, dict) or not isinstance(decoded.get("symbols"), list):
+            raise DataCoverageError("Binance exchangeInfo response has invalid schema")
+        return decoded
+
 
 class LocalDataCatalog:
     """Durable DuckDB manifest catalog for immutable Parquet partitions."""
 
-    def __init__(self, root: Path | str) -> None:
+    def __init__(self, root: Path | str, *, read_only: bool = False) -> None:
         self._root = Path(root)
         self._root.mkdir(parents=True, exist_ok=True)
         self._database = self._root / "catalog.duckdb"
+        self._read_only = read_only
         try:
-            connection = duckdb.connect(str(self._database))
+            connection = duckdb.connect(str(self._database), read_only=read_only)
         except duckdb.IOException as error:
+            if read_only:
+                raise DataCoverageError(
+                    f"read-only catalog is unavailable: {self._database}"
+                ) from error
             _logger.warning("catalog write lock unavailable; using recovery catalog: %s", error)
             self._database = self._root / "catalog_recovered.duckdb"
             connection = duckdb.connect(str(self._database))
         self._connection = connection
-        connection.execute(
+        if not read_only:
+            connection.execute(
                 """
                 CREATE TABLE IF NOT EXISTS partitions (
                     dataset VARCHAR NOT NULL, symbol VARCHAR NOT NULL,
@@ -273,7 +188,7 @@ class LocalDataCatalog:
                     PRIMARY KEY (dataset, symbol, start_time_ms)
                 )
                 """
-        )
+            )
 
     @staticmethod
     def _manifest(row: tuple[Any, ...]) -> PartitionManifest:
@@ -310,24 +225,45 @@ class LocalDataCatalog:
             f"{p.dataset}|{p.symbol}|{p.start_time_ms}|{p.sha256}|{p.row_count}" for p in partitions
         )
         manifest_hash = hashlib.sha256(manifest_body.encode()).hexdigest()
+        universe_state_hash = self.compute_universe_state_hash(
+            DataSnapshot(
+                snapshot_id="", reference_time_ms=reference_time_ms, partitions=partitions,
+                manifest_hash=manifest_hash, universe_state_hash="", total_bytes=0,
+            )
+        )
         return DataSnapshot(
             snapshot_id=f"local-{reference_time_ms}-{manifest_hash[:12]}",
             reference_time_ms=reference_time_ms, partitions=partitions,
-            manifest_hash=manifest_hash, total_bytes=sum(p.path.stat().st_size for p in partitions),
+            manifest_hash=manifest_hash, universe_state_hash=universe_state_hash,
+            total_bytes=sum(p.path.stat().st_size for p in partitions),
         )
+
+    def compute_universe_state_hash(self, snapshot: DataSnapshot) -> str:
+        state_entries = [
+            f"{p.symbol}|{p.start_time_ms}|{p.sha256}|{p.row_count}"
+            for p in snapshot.partitions
+            if p.dataset is DatasetKind.UNIVERSE_STATE
+        ]
+        state_body = "\n".join(sorted(state_entries))
+        if not state_body:
+            return ""
+        return hashlib.sha256(state_body.encode()).hexdigest()
 
     def has_complete_coverage(self, snapshot: DataSnapshot, plan: IngestionPlan) -> bool:
         if not plan.broad_symbols:
             return False
         required_datasets = tuple(
             dataset for dataset in plan.datasets
-            if dataset is not DatasetKind.COST_CALIBRATION
+            if dataset not in (DatasetKind.COST_CALIBRATION, DatasetKind.EXCHANGE_INFO)
         )
-        required = {
+        required: set[tuple[DatasetKind, str]] = {
             (dataset, symbol)
             for dataset in required_datasets
+            if dataset is not DatasetKind.UNIVERSE_STATE
             for symbol in plan.broad_symbols
         }
+        if DatasetKind.UNIVERSE_STATE in required_datasets:
+            required.add((DatasetKind.UNIVERSE_STATE, "__all__"))
         present = {(p.dataset, p.symbol) for p in snapshot.partitions if p.row_count > 0}
         return required.issubset(present)
 
@@ -374,3 +310,179 @@ def materialize_native_grid(*, request: GridRequest, snapshot: DataSnapshot) -> 
             available[field][valid, column] = True
 
     return NativeFeatureGrid(timestamps_ns=timestamps, symbols=request.symbols, fields=fields, available=available, data_manifest_hash=snapshot.manifest_hash)
+
+
+def _load_partition_data(
+    paths: list[Path], *, start_time_ns: int, end_time_ns: int, fields: tuple[str, ...]
+) -> pd.DataFrame:
+    start_time_ms = start_time_ns // 1_000_000
+    end_time_ms = end_time_ns // 1_000_000
+    filters = [("timestamp", ">=", start_time_ms), ("timestamp", "<", end_time_ms)]
+    columns = list(dict.fromkeys(("timestamp", *fields)))
+    import pyarrow.parquet as pq
+
+    frames: list[pd.DataFrame] = []
+    for path in paths:
+        available_columns = set(pq.read_schema(path).names)  # type: ignore[no-untyped-call]
+        projected_columns = [column for column in columns if column in available_columns]
+        if "timestamp" not in projected_columns:
+            continue  # pragma: no cover - schema validation rejects this upstream
+        frames.append(pd.read_parquet(path, columns=projected_columns, filters=filters))
+    return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
+
+
+def _universe_state_rows(snapshot: DataSnapshot) -> list[UniverseStateRow]:
+    rows: list[UniverseStateRow] = []
+    for p in snapshot.partitions:
+        if p.dataset is not DatasetKind.UNIVERSE_STATE:
+            continue  # pragma: no cover - catalog contains mixed datasets
+        if not p.path.exists():
+            continue  # pragma: no cover - missing files are filtered at snapshot load
+        frame = pd.read_parquet(p.path)
+        for _, row in frame.iterrows():
+            rows.append(UniverseStateRow(
+                effective_time_ns=int(row["effective_time_ns"]),
+                knowledge_time_ns=int(row["knowledge_time_ns"]),
+                symbol=str(row["symbol"]),
+                eligible=bool(row["eligible"]),
+                entry_block=bool(row["entry_block"]),
+                exit_required=bool(row["exit_required"]),
+                capacity_usdt=float(row["capacity_usdt"]),
+                risk_scale=float(row["risk_scale"]),
+                execution_cost_bps=float(row["execution_cost_bps"]),
+                state_reason=str(row["state_reason"]),
+                universe_config_hash=str(row["universe_config_hash"]),
+                source_manifest_hash=str(row["source_manifest_hash"]),
+            ))
+    return rows
+
+
+def load_pit_universe_state(
+    *, snapshot: DataSnapshot, request: UniverseStateRequest
+) -> LakeUniverse:
+    rows = _universe_state_rows(snapshot)
+    if not rows:
+        raise UniverseCoverageError("missing PIT state: no UNIVERSE_STATE partitions in snapshot")
+
+    if any(row.knowledge_time_ns >= row.effective_time_ns for row in rows):
+        raise UniverseCoverageError("PIT state knowledge timestamp is not strictly before effective time")
+
+    all_symbols = sorted({r.symbol for r in rows})
+    if len(all_symbols) > request.max_axis_symbols:
+        raise UniverseCoverageError(
+            f"PIT universe axis {len(all_symbols)} exceeds {request.max_axis_symbols}"
+        )
+    symbols = tuple(all_symbols)
+
+    timestamps = request.execution_timestamps_ns
+    n_bars = len(timestamps)
+    n_syms = len(symbols)
+    eligible = np.zeros((n_bars, n_syms), dtype=np.bool_)
+    entry_block = np.ones((n_bars, n_syms), dtype=np.bool_)
+    exit_required = np.zeros((n_bars, n_syms), dtype=np.bool_)
+    capacity_usdt = np.zeros((n_bars, n_syms), dtype=np.float64)
+    risk_scale = np.ones((n_bars, n_syms), dtype=np.float64)
+    cost_bps = np.full((n_bars, n_syms), 12.0, dtype=np.float64)
+
+    for sym_idx, sym in enumerate(symbols):
+        sym_rows = [
+            r for r in rows
+            if r.symbol == sym and r.effective_time_ns <= timestamps[-1]
+        ]
+        if not sym_rows:
+            eligible[:, sym_idx] = False
+            entry_block[:, sym_idx] = True
+            continue
+        sym_rows.sort(key=lambda r: r.effective_time_ns)
+        eff_arr = np.array([r.effective_time_ns for r in sym_rows], dtype=np.int64)
+        eligible_arr = np.array([r.eligible for r in sym_rows], dtype=np.bool_)
+        entry_arr = np.array([r.entry_block for r in sym_rows], dtype=np.bool_)
+        exit_arr = np.array([r.exit_required for r in sym_rows], dtype=np.bool_)
+        cap_arr = np.array([r.capacity_usdt for r in sym_rows], dtype=np.float64)
+        risk_arr = np.array([r.risk_scale for r in sym_rows], dtype=np.float64)
+        cost_arr = np.array([r.execution_cost_bps for r in sym_rows], dtype=np.float32)
+        idx = np.clip(np.searchsorted(eff_arr, timestamps, side="right") - 1, 0, len(sym_rows) - 1)
+        valid = timestamps >= eff_arr[0]
+        eligible[valid, sym_idx] = eligible_arr[idx[valid]]
+        entry_block[valid, sym_idx] = entry_arr[idx[valid]]
+        exit_required[valid, sym_idx] = exit_arr[idx[valid]]
+        capacity_usdt[valid, sym_idx] = cap_arr[idx[valid]]
+        risk_scale[valid, sym_idx] = risk_arr[idx[valid]]
+        cost_bps[valid, sym_idx] = cost_arr[idx[valid]]
+        for t in range(1, n_bars):
+            if not eligible[t, sym_idx] and eligible[t - 1, sym_idx]:
+                exit_required[t, sym_idx] = True
+
+    cube = UniverseStateCube(
+        calendar=pd.DatetimeIndex(pd.to_datetime(timestamps, utc=True)),
+        instrument_ids=symbols,
+        eligible=eligible,
+        entry_block=entry_block,
+        exit_required=exit_required,
+        capacity_usdt=capacity_usdt,
+        risk_scale=risk_scale,
+        cost_bps=cost_bps,
+    )
+    return LakeUniverse(
+        symbols=symbols,
+        state_cube=cube,
+        state_hash=snapshot.universe_state_hash,
+    )
+
+
+def materialize_feature_grid(
+    *, request: GridRequest, snapshot: DataSnapshot, dataset: DatasetKind
+) -> NativeFeatureGrid:
+    if not request.symbols:
+        raise ValueError("grid request must specify at least one symbol")
+    if not request.fields:
+        raise ValueError("grid request must specify at least one field")
+    if request.timeframe != request.source_timeframe:
+        raise ValueError("feature grid requires matching request and source timeframe")
+
+    timestamps = np.arange(request.start_time_ns, request.end_time_ns, 3_600_000_000_000, dtype=np.int64)
+    fields: dict[str, NDArray[np.float64] | NDArray[np.float32]] = {
+        field: np.full((len(timestamps), len(request.symbols)), np.nan, dtype=np.float64)
+        for field in request.fields
+    }
+    available: dict[str, NDArray[np.bool_]] = {
+        field: np.zeros((len(timestamps), len(request.symbols)), dtype=np.bool_)
+        for field in request.fields
+    }
+
+    selected: dict[tuple[DatasetKind, str], list[Path]] = {}
+    for partition in snapshot.partitions:
+        overlaps = (
+            partition.start_time_ms * 1_000_000 < request.end_time_ns
+            and partition.end_time_ms * 1_000_000 >= request.start_time_ns
+        )
+        if partition.dataset is dataset and partition.symbol in request.symbols and overlaps:
+            selected.setdefault((partition.dataset, partition.symbol), []).append(partition.path)
+
+    for column, symbol in enumerate(request.symbols):
+        paths = selected.get((dataset, symbol), [])
+        if not paths:
+            continue
+        frame = _load_partition_data(
+            paths,
+            start_time_ns=request.start_time_ns,
+            end_time_ns=request.end_time_ns,
+            fields=request.fields,
+        )
+        frame = BinanceQueryClient._normalize_timestamp(frame)
+        source_ns = frame["timestamp"].to_numpy(dtype=np.int64) * 1_000_000
+        positions = np.searchsorted(source_ns, timestamps)
+        exact = (positions < len(source_ns)) & (source_ns[np.minimum(positions, len(source_ns) - 1)] == timestamps)
+        for field in request.fields:
+            if field not in frame.columns:
+                continue
+            values = pd.to_numeric(frame[field], errors="coerce").to_numpy(dtype=np.float64)
+            valid = exact & np.isfinite(values[np.minimum(positions, len(values) - 1)])
+            fields[field][valid, column] = values[positions[valid]]
+            available[field][valid, column] = True
+
+    return NativeFeatureGrid(
+        timestamps_ns=timestamps, symbols=request.symbols,
+        fields=fields, available=available,
+        data_manifest_hash=snapshot.manifest_hash,
+    )
