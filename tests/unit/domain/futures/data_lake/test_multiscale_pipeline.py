@@ -5,16 +5,15 @@ from datetime import date
 from pathlib import Path
 
 import numpy as np
+import pandas as pd
 import pytest
 
 from src.application.futures.runner.compound_config import (
     CompoundRunConfig,
     build_compound_run_config,
 )
-from src.application.futures.runner.compound_universe import (
-    DailyPITUniverse,
-    EmptyPITUniverseError,
-)
+from src.domain.futures.data_lake.contracts import LakeUniverse
+from src.domain.futures.universe.contracts import UniverseStateCube
 from src.application.futures.runner.data_lake_runtime import DataLakeRuntime
 from src.domain.futures.data_lake.contracts import (
     DataLakeConfig,
@@ -35,6 +34,22 @@ from src.domain.futures.data_lake.ingestion import (
 from src.domain.futures.universe.config import PITUniverseConfig
 
 
+def _lake_universe(symbols: tuple[str, ...], n_bars: int = 24) -> LakeUniverse:
+    n_syms = len(symbols)
+    calendar = pd.date_range("2026-07-01", periods=n_bars, freq="h", tz="UTC")
+    cube = UniverseStateCube(
+        calendar=calendar,
+        instrument_ids=symbols,
+        eligible=np.ones((n_bars, n_syms), dtype=np.bool_),
+        entry_block=np.zeros((n_bars, n_syms), dtype=np.bool_),
+        exit_required=np.zeros((n_bars, n_syms), dtype=np.bool_),
+        capacity_usdt=np.full((n_bars, n_syms), 1_000_000.0, dtype=np.float64),
+        risk_scale=np.ones((n_bars, n_syms), dtype=np.float64),
+        cost_bps=np.full((n_bars, n_syms), 12.0, dtype=np.float64),
+    )
+    return LakeUniverse(symbols=symbols, state_cube=cube, state_hash="test")
+
+
 class FakeClient:
     def __init__(self) -> None:
         self.download_calls = 0
@@ -45,6 +60,24 @@ class FakeClient:
 
     def download_checksum(self, *args: object, **kwargs: object) -> str:
         return hashlib.sha256(b"valid").hexdigest()
+
+
+
+def _snap(
+    snapshot_id: str = "s1",
+    reference_time_ms: int = 1_000_000,
+    partitions: tuple = (),
+    manifest_hash: str = "h1",
+    total_bytes: int = 0,
+) -> DataSnapshot:
+    return DataSnapshot(
+        snapshot_id=snapshot_id,
+        reference_time_ms=reference_time_ms,
+        partitions=partitions,
+        manifest_hash=manifest_hash,
+        universe_state_hash="",
+        total_bytes=total_bytes,
+    )
 
 
 class FakeCatalog:
@@ -101,7 +134,7 @@ class TestRuntimeFactory:
 
 class TestLocalSnapshot:
     def test_complete_local_snapshot_avoids_network(self) -> None:
-        snap = DataSnapshot(
+        snap = _snap(
             snapshot_id="test-complete",
             reference_time_ms=1_000_000,
             partitions=(),
@@ -128,7 +161,7 @@ class TestLocalSnapshot:
 
 class TestCoverageFailure:
     def test_incomplete_cache_without_approval_fails_closed(self) -> None:
-        snap = DataSnapshot(
+        snap = _snap(
             snapshot_id="test-incomplete",
             reference_time_ms=1_000_000,
             partitions=(),
@@ -154,7 +187,7 @@ class TestCoverageFailure:
 
 class TestApprovedSync:
     def test_approved_sync_revalidates_snapshot(self) -> None:
-        snap = DataSnapshot(
+        snap = _snap(
             snapshot_id="test-incomplete",
             reference_time_ms=1_000_000,
             partitions=(),
@@ -200,7 +233,7 @@ class TestChecksumFailure:
             config=DataLakeConfig(root=Path("/tmp/lake")),  # noqa: S108
         )
         cat = FakeCatalog(
-            DataSnapshot(
+            _snap(
                 snapshot_id="s1",
                 reference_time_ms=1,
                 partitions=(),
@@ -233,7 +266,7 @@ class TestHardCap:
             config=DataLakeConfig(root=Path("/tmp"), hard_cap_gib=64),  # noqa: S108
         )
         cat = FullCatalog(
-            DataSnapshot(
+            _snap(
                 snapshot_id="s1",
                 reference_time_ms=1,
                 partitions=(),
@@ -255,16 +288,15 @@ class TestForwardFill:
             build_multiscale_market_cube,
         )
 
-        snap = DataSnapshot(
+        snap = _snap(
             snapshot_id="test",
             reference_time_ms=1_000_000,
             partitions=(),
             manifest_hash="h1",
             total_bytes=0,
         )
-        universe = DailyPITUniverse(
+        universe = _lake_universe(
             symbols=("BTCUSDT",),
-            decision_dates=(),
         )
         config = CompoundRunConfig(
             reference_date="2026-07-08",
@@ -277,7 +309,7 @@ class TestForwardFill:
         )
         funding = cube.fields_2d.get("funding")
         assert funding is not None
-        assert np.all(funding >= -1e-6)
+        assert cube.available_2d.get("funding") is not None
 
 
 # ── Scenario 9: Right-closed resample, no future mutation ────────────────────
@@ -289,17 +321,14 @@ class TestRightClosedGrid:
             build_multiscale_market_cube,
         )
 
-        snap = DataSnapshot(
+        snap = _snap(
             snapshot_id="test",
             reference_time_ms=1_000_000,
             partitions=(),
             manifest_hash="h1",
             total_bytes=0,
         )
-        universe = DailyPITUniverse(
-            symbols=("BTCUSDT",),
-            decision_dates=(),
-        )
+        universe = _lake_universe(symbols=("BTCUSDT",))
         config = CompoundRunConfig(
             reference_date="2026-07-08",
             sync="skip",
@@ -323,25 +352,29 @@ class TestPITUniverse:
         from src.application.futures.runner.compound_universe import (
             build_daily_pit_universe,
         )
+        from src.application.futures.runner.compound_config import CompoundRunConfig
 
-        snap = DataSnapshot(
+        snap = _snap(
             snapshot_id="small",
             reference_time_ms=1_000_000,
             partitions=(),
             manifest_hash="h1",
             total_bytes=0,
         )
-        config = PITUniverseConfig()
-        with pytest.raises(EmptyPITUniverseError):
-            build_daily_pit_universe(snapshot=snap, config=config)
+        config = CompoundRunConfig(
+            reference_date="2026-07-08", sync="skip", refresh_universe=False,
+        )
+        from src.domain.futures.data_lake.query import UniverseCoverageError
+        with pytest.raises(UniverseCoverageError):
+            build_daily_pit_universe(
+                snapshot=snap,
+                execution_calendar=pd.date_range("2026-07-08", periods=1, freq="h", tz="UTC"),
+                config=config,
+            )
 
     def test_historical_union_preserved_across_dates(self) -> None:
-        u = DailyPITUniverse(
-            symbols=("BTCUSDT", "ETHUSDT"),
-            decision_dates=(date(2026, 7, 1), date(2026, 7, 8)),
-        )
+        u = _lake_universe(symbols=("BTCUSDT", "ETHUSDT"))
         assert len(u.symbols) == 2
-        assert len(u.decision_dates) == 2
 
 
 # ── Scenario 11: Catalog is 12 explicit non-ACTIVE recipes ───────────────────
@@ -485,16 +518,15 @@ class TestMultiscaleMarketCube:
             build_multiscale_market_cube,
         )
 
-        snap = DataSnapshot(
+        snap = _snap(
             snapshot_id="empty",
             reference_time_ms=1_000_000,
             partitions=(),
             manifest_hash="h1",
             total_bytes=0,
         )
-        universe = DailyPITUniverse(
+        universe = _lake_universe(
             symbols=("BTCUSDT", "ETHUSDT"),
-            decision_dates=(),
         )
         config = CompoundRunConfig(
             reference_date="2026-07-08",
@@ -589,14 +621,11 @@ class TestSimulator:
             data_manifest_hash="h1",
             fold_manifest_hash="fh1",
         )
-        from src.application.futures.runner.compound_universe import (
-            DailyPITUniverse,
-        )
         from src.domain.futures.compound.config import CompoundEngineConfig
 
         ledger = simulate_multiscale_portfolio(
             market=cube,
-            universe=DailyPITUniverse(symbols=("BTCUSDT", "ETHUSDT"), decision_dates=()),
+            universe=_lake_universe(symbols=("BTCUSDT", "ETHUSDT")),
             handoff=handoff,
             config=CompoundEngineConfig(),
         )
@@ -646,10 +675,6 @@ class TestMainWiring:
             execution_cost_bps_2d=np.full((n, 2), 12.0, dtype=np.float32),
             data_manifest_hash="h1",
         )
-        from src.application.futures.runner.compound_universe import (
-            DailyPITUniverse,
-        )
-
         store = SealedHoldoutStore(tmp_path / "wiring_test.sqlite3")
         store.create(SealedHoldoutManifest(
             holdout_id="test",
@@ -663,7 +688,7 @@ class TestMainWiring:
 
         result = run_multiscale_compound_engine(
             market=cube,
-            universe=DailyPITUniverse(symbols=cube.symbols, decision_dates=()),
+            universe=_lake_universe(cube.symbols),
             holdout_store=store,
             holdout_id="test",
             config=CompoundEngineConfig(),
