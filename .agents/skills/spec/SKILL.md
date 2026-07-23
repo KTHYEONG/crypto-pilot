@@ -32,10 +32,11 @@ Leverage **high-reasoning models (Thinker)** for creative architectural design, 
 ### 3. Low-Reasoning Implementation Specifications (Deterministic Constraints)
 To ensure low-reasoning models can build and integrate the code mechanically:
 - **Exact Contract changes**: Define class/function signatures with Python 3.11+ type hints, including 1-line `error_policy` (Raise vs Fallback) and explicit `side_effects` (state mutations, logging).
+- **Mandatory Assertions**: Define exact input/output mathematical or structural mappings in `assertions` to prevent dummy/stub implementations.
 - **Wiring & Connection Plan**: Define the exact file path, class, method, local context anchor line, and mandatory `invocation_symbol` (the exact 1-line invocation statement to guarantee pipeline integration).
-- **Skeleton Mock Boilerplate (CRITICAL)**:
-  - Provide a **100% syntactically correct test setup and skeleton mock logic**.
-  - Since low-cost models cannot design mocks from scratch, you must output copy-pasteable test skeletons matching the scenarios.
+- **Minimal Mock / Fixture Hints (Token Efficient)**:
+  - Do **NOT** generate full 100+ line copy-paste test files in the markdown spec (saves 40%+ tokens).
+  - Provide only a **3~5 line fixture/mock snippet** if complex setup or API mocking is required.
 - **TDD Scenario Matrix**:
   - Map each LIMIT and PERF tag directly to a concrete test scenario:
     - **Scenario 1 (Happy Path)**: Unit input/output.
@@ -107,7 +108,7 @@ Create a markdown file at `docs/specs/[feature].md`:
 
 # 🧪 TDD Test Scenario Matrix & Mocks
 - Scenario 1-4 descriptions.
-- **Skeleton Mock Boilerplate**: Complete mock testing file template.
+- **Minimal Mock / Fixture Snippets**: (3~5 lines only if complex setup required)
 ```
 
 ## First Response Protocol after Spec Creation (Token-Efficient)
