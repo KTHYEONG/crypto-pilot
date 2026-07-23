@@ -11,7 +11,7 @@ from typing import Any
 from src.application.futures.runner.compound_config import (
     build_compound_run_config,
 )
-from src.application.futures.runner.compound_main import run_compound_main
+from src.application.futures.runner.compound_main import run_multiscale_compound_main
 
 _logger = logging.getLogger(__name__)
 
@@ -42,6 +42,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--sync", type=str, default="auto", choices=["auto", "skip"],
                         help="Sync mode (auto, skip)")
     parser.add_argument("--refresh-universe", action="store_true", help="Force universe refresh")
+    parser.add_argument("--allow-network-sync", action="store_true", help="Allow network sync if local snapshot incomplete")
     parser.add_argument("--seed", type=int, default=42, help="Random seed")
     for flag in _REMOVED_FLAGS:
         parser.add_argument(f"--{flag.replace('_', '-')}", action="store_true", default=None,
@@ -66,6 +67,10 @@ def check_removed_flags(parsed: object) -> None:
 
 
 def run_from_cli(argv: Sequence[str] | None = None) -> int:
+    return run_multiscale_cli(argv)
+
+
+def run_multiscale_cli(argv: Sequence[str] | None = None) -> int:
     parser = build_arg_parser()
     args, unknown = parser.parse_known_args(argv)
     if unknown:
@@ -80,9 +85,14 @@ def run_from_cli(argv: Sequence[str] | None = None) -> int:
     except ValueError as exc:
         _logger.error("config error: %s", exc)
         return 2
-    result = run_compound_main(build_compound_run_config(args))
+    result = run_multiscale_compound_main(config)
     return result.exit_code
 
 
+def cli(argv: Sequence[str] | None = None) -> int:
+    """Run the sole supported multiscale futures pipeline."""
+    return run_multiscale_cli(argv)
+
+
 def main() -> int:
-    return run_from_cli(sys.argv[1:] if len(sys.argv) > 1 else None)
+    return cli(sys.argv[1:] if len(sys.argv) > 1 else None)

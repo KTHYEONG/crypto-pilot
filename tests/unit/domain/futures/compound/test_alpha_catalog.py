@@ -53,6 +53,7 @@ class TestComputeRawAlphaTape:
             available_2d={"core": np.ones((n_bars, n_syms), dtype=np.bool_)},
             eligible_2d=np.ones((n_bars, n_syms), dtype=np.bool_),
             entry_block_2d=np.zeros((n_bars, n_syms), dtype=np.bool_),
+            exit_required_2d=np.zeros((n_bars, n_syms), dtype=np.bool_),
             capacity_usdt_2d=np.full((n_bars, n_syms), 1e6, dtype=np.float64),
             execution_cost_bps_2d=np.full((n_bars, n_syms), 12.0, dtype=np.float32),
             data_manifest_hash="h1",
@@ -65,10 +66,10 @@ class TestComputeRawAlphaTape:
         assert len(raw.horizon_bars_1d) == 18
 
     def test_when_metrics_missing_disables_only_flow_recipe(self) -> None:
-        n_bars, n_syms = 200, 2
+        n_bars, n_syms = 200, 5
         cube = MarketFeatureCube(
             timestamps_ns=np.arange(n_bars, dtype=np.int64) * 3_600_000_000_000,
-            symbols=("A", "B"),
+            symbols=("A", "B", "C", "D", "E"),
             fields_2d={
                 "open": np.ones((n_bars, n_syms), dtype=np.float64) * 100,
                 "high": np.ones((n_bars, n_syms), dtype=np.float64) * 101,
@@ -81,6 +82,7 @@ class TestComputeRawAlphaTape:
             available_2d={"core": np.ones((n_bars, n_syms), dtype=np.bool_)},
             eligible_2d=np.ones((n_bars, n_syms), dtype=np.bool_),
             entry_block_2d=np.zeros((n_bars, n_syms), dtype=np.bool_),
+            exit_required_2d=np.zeros((n_bars, n_syms), dtype=np.bool_),
             capacity_usdt_2d=np.full((n_bars, n_syms), 1e6, dtype=np.float64),
             execution_cost_bps_2d=np.full((n_bars, n_syms), 12.0, dtype=np.float32),
             data_manifest_hash="h1",
@@ -112,6 +114,7 @@ def test_alpha_tape_uses_memmap_blocks_not_dense_ram_copy() -> None:
         available_2d={"core": np.ones((n_bars, n_syms), dtype=np.bool_), "conditional": np.ones((n_bars, n_syms), dtype=np.bool_)},
         eligible_2d=np.ones((n_bars, n_syms), dtype=np.bool_),
         entry_block_2d=np.zeros((n_bars, n_syms), dtype=np.bool_),
+        exit_required_2d=np.zeros((n_bars, n_syms), dtype=np.bool_),
         capacity_usdt_2d=np.full((n_bars, n_syms), 1e6, dtype=np.float64),
         execution_cost_bps_2d=np.full((n_bars, n_syms), 12.0, dtype=np.float32),
         data_manifest_hash="h1",
@@ -135,10 +138,10 @@ def test_build_canonical_alpha_catalog_returns_six_families_three_horizons() -> 
 
 
 def test_compute_raw_alpha_tape_when_metrics_missing_disables_only_flow_recipe() -> None:
-    n_bars, n_syms = 200, 2
+    n_bars, n_syms = 200, 5
     cube = MarketFeatureCube(
         timestamps_ns=np.arange(n_bars, dtype=np.int64) * 3_600_000_000_000,
-        symbols=("A", "B"),
+        symbols=("A", "B", "C", "D", "E"),
         fields_2d={
             "open": np.ones((n_bars, n_syms), dtype=np.float64) * 100,
             "high": np.ones((n_bars, n_syms), dtype=np.float64) * 101,
@@ -151,6 +154,7 @@ def test_compute_raw_alpha_tape_when_metrics_missing_disables_only_flow_recipe()
         available_2d={"core": np.ones((n_bars, n_syms), dtype=np.bool_)},
         eligible_2d=np.ones((n_bars, n_syms), dtype=np.bool_),
         entry_block_2d=np.zeros((n_bars, n_syms), dtype=np.bool_),
+        exit_required_2d=np.zeros((n_bars, n_syms), dtype=np.bool_),
         capacity_usdt_2d=np.full((n_bars, n_syms), 1e6, dtype=np.float64),
         execution_cost_bps_2d=np.full((n_bars, n_syms), 12.0, dtype=np.float32),
         data_manifest_hash="h1",
