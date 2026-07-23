@@ -127,6 +127,28 @@ class TestBinanceQueryClient:
 
         assert pd.read_parquet(__import__("io").BytesIO(payload))["close"].tolist() == [101.0]
 
+    def test_uses_vision_one_minute_when_only_hourly_cache_exists(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        raw = tmp_path / "ohlcv" / "1h"
+        raw.mkdir(parents=True)
+        pd.DataFrame({"timestamp": [1_783_440_000_000], "close": [100.0]}).to_parquet(
+            raw / "BTCUSDT.parquet", index=False
+        )
+        client = BinanceQueryClient(source_root=tmp_path)
+        called: list[tuple[str, str]] = []
+
+        def fetch(symbol: str, interval: str, *_: object) -> pd.DataFrame:
+            called.append((symbol, interval))
+            return pd.DataFrame([[1_783_440_000_000, 100.0, 102.0, 99.0, 101.0]])
+
+        monkeypatch.setattr(client._vision, "fetch_klines_archive_monthly", fetch)
+
+        payload = client.download_partition(DatasetKind.KLINES_1M, "BTCUSDT", 1_783_440_000_000)
+
+        assert called == [("BTCUSDT", "1m")]
+        assert pd.read_parquet(__import__("io").BytesIO(payload))["close"].tolist() == [101.0]
+
     def test_normalizes_vision_funding(self, tmp_path: Path, monkeypatch) -> None:
         client = BinanceQueryClient(source_root=tmp_path)
         monkeypatch.setattr(
@@ -173,6 +195,20 @@ class TestBinanceQueryClient:
             pd.DataFrame({"datetime": [pd.Timestamp("2026-07-01", tz="UTC")], "close": [1.0]})
         )
         assert normalized["timestamp"].tolist() == [1782864000000]
+
+    def test_normalizes_missing_quote_volume_from_close_and_volume(self) -> None:
+        normalized = BinanceQueryClient._normalize_timestamp(
+            pd.DataFrame(
+                {
+                    "timestamp": [1_783_440_000_000],
+                    "close": [101.0],
+                    "volume": [2.0],
+                    "quote_vol": [np.nan],
+                }
+            )
+        )
+
+        assert normalized["quote_volume"].tolist() == [202.0]
 
 
 class TestLocalDataCatalog:
