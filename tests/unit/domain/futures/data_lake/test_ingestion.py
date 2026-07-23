@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import hashlib
+import io
 from datetime import date
 from pathlib import Path
 
 import pytest
+import pandas as pd
 
 from src.domain.futures.data_lake.contracts import (
     DataLakeConfig,
@@ -15,11 +17,11 @@ from src.domain.futures.data_lake.contracts import (
 )
 from src.domain.futures.data_lake.ingestion import (
     ChecksumMismatchError,
-    DataCoverageError,
     StorageBudgetError,
     build_ingestion_plan,
     sync_futures_data_lake,
 )
+from src.domain.futures.data_lake.query import LocalDataCatalog
 
 
 class FakeClient:
@@ -28,10 +30,12 @@ class FakeClient:
 
     def download_partition(self, *args: object, **kwargs: object) -> bytes:
         self.download_calls += 1
-        return b"valid"
+        buffer = io.BytesIO()
+        pd.DataFrame({"timestamp": [1_783_440_000_000], "close": [100.0]}).to_parquet(buffer, index=False)
+        return buffer.getvalue()
 
     def download_checksum(self, *args: object, **kwargs: object) -> str:
-        return hashlib.sha256(b"valid").hexdigest()
+        return hashlib.sha256(self.download_partition()).hexdigest()
 
 
 class FakeCatalog:
@@ -64,7 +68,7 @@ class TestIngestionPlan:
         tomorrow = date.today() + timedelta(days=1)
         with pytest.raises(ValueError, match="cannot be in the future"):
             build_ingestion_plan(
-                config=DataLakeConfig(root=Path("/tmp")),
+                config=DataLakeConfig(root=Path("/tmp")),  # noqa: S108
                 reference_date=tomorrow,
             )
 
@@ -76,7 +80,7 @@ class TestChecksumFailure:
             broad_symbols=("BTCUSDT",),
             selected_symbols=("BTCUSDT",),
             datasets=(DatasetKind.KLINES_1H,),
-            config=DataLakeConfig(root=Path("/tmp")),
+            config=DataLakeConfig(root=Path("/tmp")),  # noqa: S108
         )
 
         class BadClient(FakeClient):
@@ -109,7 +113,7 @@ class TestHardCap:
             broad_symbols=("BTCUSDT",),
             selected_symbols=("BTCUSDT",),
             datasets=(DatasetKind.KLINES_1H,),
-            config=DataLakeConfig(root=Path("/tmp"), hard_cap_gib=64),
+            config=DataLakeConfig(root=Path("/tmp"), hard_cap_gib=64),  # noqa: S108
         )
 
         class FullCatalog(FakeCatalog):
@@ -128,3 +132,44 @@ class TestHardCap:
         )
         with pytest.raises(StorageBudgetError):
             sync_futures_data_lake(plan=plan, client=FakeClient(), catalog=cat)
+
+
+class TestLocalCommit:
+    def test_verified_payload_is_committed_to_durable_catalog(self, tmp_path: Path) -> None:
+        plan = IngestionPlan(
+            reference_date=date(2026, 7, 8),
+            broad_symbols=("BTCUSDT",),
+            selected_symbols=(),
+            datasets=(DatasetKind.KLINES_1H,),
+            config=DataLakeConfig(root=tmp_path / "lake"),
+            start_date=date(2026, 7, 1),
+        )
+        catalog = LocalDataCatalog(plan.config.root)
+        snapshot = sync_futures_data_lake(plan=plan, client=FakeClient(), catalog=catalog)
+
+        assert len(snapshot.partitions) == 1
+        assert snapshot.partitions[0].path.exists()
+        assert catalog.partition_exists(
+            DatasetKind.KLINES_1H, "BTCUSDT", snapshot.partitions[0].start_time_ms
+        )
+        repeated = sync_futures_data_lake(plan=plan, client=FakeClient(), catalog=catalog)
+        assert len(repeated.partitions) == 1
+
+    def test_empty_month_is_not_committed(self, tmp_path: Path) -> None:
+        class EmptyClient(FakeClient):
+            def download_partition(self, *args: object, **kwargs: object) -> bytes:
+                return b""
+
+        plan = IngestionPlan(
+            reference_date=date(2026, 7, 8),
+            broad_symbols=("BTCUSDT",),
+            selected_symbols=(),
+            datasets=(DatasetKind.KLINES_1H,),
+            config=DataLakeConfig(root=tmp_path / "lake"),
+            start_date=date(2026, 7, 1),
+        )
+        snapshot = sync_futures_data_lake(
+            plan=plan, client=EmptyClient(), catalog=LocalDataCatalog(plan.config.root)
+        )
+
+        assert snapshot.partitions == ()
