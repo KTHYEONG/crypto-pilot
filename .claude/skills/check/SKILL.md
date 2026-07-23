@@ -14,7 +14,7 @@ Run: `uv run python scripts/lean_check.py --files [modified_files] --spec docs/s
 - **Mypy Static Check:** Strictly enforced (do NOT pass `--skip-mypy`). Validates semantic type compliance across interfaces.
 
 Pipeline Order:
-1. Spec Compliance Verification (against contract.json)
+1. Spec Compliance Verification (against contract.json: assertions, wiring & AST non-dummy implementation)
 2. Co-modification mapping check (source module must have a corresponding test)
 3. Strict Mypy Type Checking
 4. Pytest Execution & Coverage Audit (regression prevention)
