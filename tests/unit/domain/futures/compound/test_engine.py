@@ -173,7 +173,7 @@ class TestRunMultiscaleCompoundEngine:
         )
         handoff_result = HandoffResult(forecast=forecast_panel, evidence=evidence)
         mocker.patch(
-            "src.domain.futures.compound.engine.build_prequential_handoff",
+            "src.domain.futures.compound.engine.build_exit_aware_handoff",
             return_value=handoff_result,
         )
 
@@ -239,7 +239,7 @@ class TestRunMultiscaleCompoundEngine:
         )
         handoff_result = HandoffResult(forecast=forecast_panel, evidence=evidence)
         mocker.patch(
-            "src.domain.futures.compound.engine.build_prequential_handoff",
+            "src.domain.futures.compound.engine.build_exit_aware_handoff",
             return_value=handoff_result,
         )
         path_spy = mocker.patch(
