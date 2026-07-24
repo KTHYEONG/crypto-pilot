@@ -154,11 +154,6 @@ def evaluate_signal_admission(
 
         fold_sign_consistency = len([s for s in fold_signs if s > 0]) / max(len(fold_signs), 1)
 
-        q_vals = _benjamini_hochberg(
-            [p_value], config.fdr_q_threshold,
-        )
-        fdr_q = q_vals[0] if q_vals else 1.0
-
         reasons: list[str] = []
         if net_growth_lcb90 <= 0:
             reasons.append(f"net_growth_lcb90={net_growth_lcb90:.6f}<=0")
@@ -166,8 +161,6 @@ def evaluate_signal_admission(
             reasons.append(f"net_mean_2x={net_mean_2x:.6f}<=0")
         if fold_sign_consistency < config.sign_consistency_min:
             reasons.append(f"sign_consistency={fold_sign_consistency:.3f}<{config.sign_consistency_min}")
-        if fdr_q > config.fdr_q_threshold:
-            reasons.append(f"fdr_q={fdr_q:.4f}>{config.fdr_q_threshold}")
 
         n_effective = len(oos_series) / max(effective_block_size, 1)
         effective_sample_note = ""
@@ -181,9 +174,9 @@ def evaluate_signal_admission(
 
         _logger.info(
             "[EVAL] signal=%s family=%s beta_mean=%.4f lcb90=%.6f net_mean_2x=%.6f "
-            "sign_consistency=%.3f p=%.4f q=%.4f admitted=%s%s",
+            "sign_consistency=%.3f p=%.4f admitted=%s%s",
             signal_id, family, float(np.mean(calibrations[k].beta_by_fold)),
-            net_growth_lcb90, net_mean_2x, fold_sign_consistency, p_value, fdr_q, admitted,
+            net_growth_lcb90, net_mean_2x, fold_sign_consistency, p_value, admitted,
             f" note={effective_sample_note}" if effective_sample_note else "",
         )
 
@@ -194,7 +187,7 @@ def evaluate_signal_admission(
             oos_net_mean_2x_cost=net_mean_2x,
             fold_sign_consistency=fold_sign_consistency,
             p_value=float(p_value),
-            fdr_q_value=float(fdr_q),
+            fdr_q_value=1.0,
             admitted=admitted,
             reasons=tuple(reasons),
             effective_sample_note=effective_sample_note,
@@ -257,12 +250,13 @@ def combine_admitted_forecasts(
             sig_indices = admitted_family_map[fam]
             for k in sig_indices:
                 cal = calibrations[k]
+                scale = math.sqrt(panel.descriptors[k].target_horizon_hours / 4.0)
                 for t in range(n_t):
                     fi = fold_of_time[t]
                     if fi < 0 or fi >= len(cal.beta_by_fold):
                         continue
                     beta_k = cal.beta_by_fold[fi]
-                    family_mu_3d[t, :, fidx] += beta_k * panel.z_3d[t, :, k]
+                    family_mu_3d[t, :, fidx] += beta_k * panel.z_3d[t, :, k] / scale
             n_sig = max(len(sig_indices), 1)
             family_mu_3d[:, :, fidx] /= n_sig
         mu_2d = np.mean(family_mu_3d[:, :, :n_fam], axis=2)

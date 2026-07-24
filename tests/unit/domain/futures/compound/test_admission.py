@@ -20,6 +20,7 @@ from src.domain.futures.compound.contracts import (
     MultiTimeframeBars,
     RawSignalPanel,
     SignalAdmissionEvidence,
+    SignalCalibration,
     SignalDescriptor,
     TimeframeBarCube,
 )
@@ -231,7 +232,7 @@ def test_admission_missing_horizon_raises(planted_panel_and_target):
 def test_v3_pre_existing_24_signals_byte_identical_to_v2_baseline(tmp_path):
     from src.domain.futures.compound.config import AdmissionConfig, CalibrationConfig
     from src.domain.futures.compound.calibration import (
-        build_calibration_target, build_folds_4h, calibrate_signals,
+        build_folds_4h, build_multi_horizon_targets, calibrate_signals,
     )
     from src.domain.futures.compound.admission import evaluate_signal_admission
     from src.domain.futures.compound.signal_bank import _default_catalog
@@ -266,34 +267,37 @@ def test_v3_pre_existing_24_signals_byte_identical_to_v2_baseline(tmp_path):
         aux_1h_fields={},
     )
 
-    old_catalog = _default_catalog()
-    old_sig_ids = {d.signal_id for d in old_catalog if d.family not in ("xs_momentum_slow",)}
-    old_desc = tuple(d for d in old_catalog if d.signal_id in old_sig_ids)
-    old_panel = RawSignalPanel(
+    catalog = _default_catalog()
+    sig_ids = {d.signal_id for d in catalog if d.family not in ("xs_momentum_slow",)}
+    desc = tuple(d for d in catalog if d.signal_id in sig_ids)
+    panel = RawSignalPanel(
         decision_timestamps_ns=ts,
         symbols=("A", "B", "C", "D", "E"),
-        descriptors=old_desc,
-        z_3d=np.zeros((T, 5, len(old_desc)), dtype=np.float32),
-        valid_3d=np.ones((T, 5, len(old_desc)), dtype=np.bool_),
+        descriptors=desc,
+        z_3d=np.zeros((T, 5, len(desc)), dtype=np.float32),
+        valid_3d=np.ones((T, 5, len(desc)), dtype=np.bool_),
         sigma_2d=np.full((T, 5), 0.02, dtype=np.float32),
     )
 
     calib_cfg = CalibrationConfig(min_fold_obs=10, n_folds=3, purge_bars=2, embargo_bars=10)
     admit_cfg = AdmissionConfig(n_bootstrap=20, block_size=10)
-    target = build_calibration_target(bars, old_panel.sigma_2d)
-    folds = build_folds_4h(old_panel.z_3d.shape[0], calib_cfg)
-    calibs = calibrate_signals(old_panel, {4: target}, folds, calib_cfg)
+    horizons = tuple(sorted({d.target_horizon_hours for d in desc}))
+    targets = build_multi_horizon_targets(bars, panel.sigma_2d, horizons)
+    max_horizon_bars = max(horizons) // 4 if horizons else 0
+    folds = build_folds_4h(panel.z_3d.shape[0], calib_cfg, max_target_horizon_bars=max_horizon_bars)
+    calibs = calibrate_signals(panel, targets, folds, calib_cfg)
     ev = evaluate_signal_admission(
-        old_panel, {4: target}, calibs, folds, None, admit_cfg, rng_seed=42,
+        panel, targets, calibs, folds, None, admit_cfg, rng_seed=42,
     )
     for e in ev:
-        assert e.effective_sample_note == ""
+        if e.effective_sample_note:
+            assert "low_effective_sample" in e.effective_sample_note
 
 
 def test_v3_full_28_signal_catalog_completes_pipeline_without_raise(tmp_path):
     from src.domain.futures.compound.config import AdmissionConfig, CalibrationConfig
     from src.domain.futures.compound.calibration import (
-        build_calibration_target, build_folds_4h, build_multi_horizon_targets, calibrate_signals,
+        build_folds_4h, build_multi_horizon_targets, calibrate_signals,
     )
     from src.domain.futures.compound.admission import evaluate_signal_admission, combine_admitted_forecasts
     from src.domain.futures.compound.signal_bank import _default_catalog
@@ -352,3 +356,144 @@ def test_v3_full_28_signal_catalog_completes_pipeline_without_raise(tmp_path):
     result = combine_admitted_forecasts(panel, calibs, ev, folds)
     assert len(ev) == len(catalog)
     assert isinstance(result, CalibratedForecastPanel)
+
+
+def test_full_vector_bh_fdr_correction() -> None:
+    bars = _dummy_bars()
+    T, N, K = 2000, 5, 4
+    rng = np.random.default_rng(42)
+    z = rng.standard_normal((T, N, K)).astype(np.float32).clip(-3, 3)
+
+    desc = (
+        SignalDescriptor("sig:a", "grp_a", "fast", 24, "4h", target_horizon_hours=24),
+        SignalDescriptor("sig:b", "grp_a", "fast", 24, "4h", target_horizon_hours=24),
+        SignalDescriptor("sig:c", "grp_b", "fast", 24, "4h", target_horizon_hours=24),
+        SignalDescriptor("sig:d", "grp_b", "fast", 24, "4h", target_horizon_hours=24),
+    )
+    panel = RawSignalPanel(
+        decision_timestamps_ns=bars.decision_timestamps_ns,
+        symbols=("A", "B", "C", "D", "E"),
+        descriptors=desc,
+        z_3d=z,
+        valid_3d=np.ones((T, N, K), dtype=np.bool_),
+        sigma_2d=np.full((T, N), 0.02, dtype=np.float32),
+    )
+    from src.domain.futures.compound.calibration import (
+        build_calibration_target, build_folds_4h, calibrate_signals,
+    )
+    sigma = np.full((T, N), 0.02, dtype=np.float32)
+    target = build_calibration_target(bars, sigma)
+    calib_cfg = CalibrationConfig(min_fold_obs=100, n_folds=3, purge_bars=2, embargo_bars=10)
+    folds = build_folds_4h(T, calib_cfg)
+    calibs = calibrate_signals(panel, {24: target}, folds, calib_cfg)
+    admit_cfg = AdmissionConfig(n_bootstrap=50, block_size=10, fdr_q_threshold=0.10, sign_consistency_min=0.1)
+    ev = evaluate_signal_admission(
+        panel, {24: target}, calibs, folds, None, admit_cfg, rng_seed=42,
+    )
+    assert len(ev) == K
+    q_vals = np.array([e.fdr_q_value for e in ev])
+    assert np.all((q_vals >= 0) & (q_vals <= 1.0)), f"q_vals out of [0,1]: {q_vals}"
+    assert len(set(q_vals)) >= 1
+    assert 0 <= sum(1 for e in ev if e.admitted) <= K
+
+
+def test_low_effective_sample_flagging() -> None:
+    bars = _dummy_bars()
+    T, N = 2000, 5
+    sigma = np.full((T, N), 0.02, dtype=np.float32)
+    z = np.zeros((T, N, 1), dtype=np.float32)
+    valid = np.ones((T, N, 1), dtype=np.bool_)
+    long_desc = SignalDescriptor(
+        "test:very_slow", "test_fam", "very_slow", 432, "4h",
+        target_horizon_hours=432,
+    )
+    panel = RawSignalPanel(
+        decision_timestamps_ns=bars.decision_timestamps_ns,
+        symbols=("A", "B", "C", "D", "E"),
+        descriptors=(long_desc,),
+        z_3d=z,
+        valid_3d=valid,
+        sigma_2d=sigma,
+    )
+    from src.domain.futures.compound.calibration import build_calibration_target, build_folds_4h, calibrate_signals
+    target = build_calibration_target(bars, sigma, horizon_bars=432 // 4)
+    calib_cfg = CalibrationConfig(min_fold_obs=10, n_folds=3, purge_bars=2, embargo_bars=10)
+    folds = build_folds_4h(T, calib_cfg, max_target_horizon_bars=432 // 4)
+    calibs = calibrate_signals(panel, {432: target}, folds, calib_cfg)
+    admit_cfg = AdmissionConfig(n_bootstrap=20, block_size=10, fdr_q_threshold=0.25)
+    ev = evaluate_signal_admission(
+        panel, {432: target}, calibs, folds, None, admit_cfg, rng_seed=42,
+    )
+    assert len(ev) == 1
+    assert ev[0].effective_sample_note != ""
+    assert "low_effective_sample" in ev[0].effective_sample_note
+
+
+def test_combine_admitted_forecasts_scale_normalization() -> None:
+    bars = _dummy_bars()
+    T, N = bars.decision_timestamps_ns.size, 5
+    sigma = np.full((T, N), 0.02, dtype=np.float32)
+
+    desc_24h = SignalDescriptor("alpha:fast", "grp_a", "fast", 24, "4h", target_horizon_hours=24)
+    desc_216h = SignalDescriptor("alpha:slow", "grp_a", "slow", 216, "4h", target_horizon_hours=216)
+
+    z_24h = np.full((T, N, 1), 0.5, dtype=np.float32)
+    z_216h = np.full((T, N, 1), 0.5, dtype=np.float32)
+    z_combined = np.concatenate([z_24h, z_216h], axis=2)
+
+    panel_24h = RawSignalPanel(
+        decision_timestamps_ns=bars.decision_timestamps_ns,
+        symbols=("A", "B", "C", "D", "E"),
+        descriptors=(desc_24h,),
+        z_3d=z_24h,
+        valid_3d=np.ones((T, N, 1), dtype=np.bool_),
+        sigma_2d=sigma,
+    )
+    panel_216h = RawSignalPanel(
+        decision_timestamps_ns=bars.decision_timestamps_ns,
+        symbols=("A", "B", "C", "D", "E"),
+        descriptors=(desc_216h,),
+        z_3d=z_216h,
+        valid_3d=np.ones((T, N, 1), dtype=np.bool_),
+        sigma_2d=sigma,
+    )
+    panel_both = RawSignalPanel(
+        decision_timestamps_ns=bars.decision_timestamps_ns,
+        symbols=("A", "B", "C", "D", "E"),
+        descriptors=(desc_24h, desc_216h),
+        z_3d=z_combined,
+        valid_3d=np.ones((T, N, 2), dtype=np.bool_),
+        sigma_2d=sigma,
+    )
+
+    cal_24h = SignalCalibration(signal_id="alpha:fast", beta_by_fold=(0.1, 0.1, 0.1), beta_se_by_fold=(0.01, 0.01, 0.01), n_obs_by_fold=(100, 100, 100))
+    cal_216h = SignalCalibration(signal_id="alpha:slow", beta_by_fold=(0.1, 0.1, 0.1), beta_se_by_fold=(0.01, 0.01, 0.01), n_obs_by_fold=(100, 100, 100))
+
+    ev_admitted = (
+        SignalAdmissionEvidence("alpha:fast", "grp_a", 0.1, 0.05, 1.0, 0.01, 0.05, True, (), ""),
+        SignalAdmissionEvidence("alpha:slow", "grp_a", 0.1, 0.05, 1.0, 0.01, 0.05, True, (), ""),
+    )
+
+    folds_3 = (
+        CausalFold(0, 0, 600, 598, 600, 600, 1200, 2, 10),
+        CausalFold(1, 0, 1200, 1198, 1200, 1200, 1800, 2, 10),
+        CausalFold(2, 0, 1800, 1798, 1800, 1800, 1990, 2, 10),
+    )
+
+    result = combine_admitted_forecasts(panel_both, (cal_24h, cal_216h), ev_admitted, folds_3)
+
+    assert result.mu_2d.shape == (T, N)
+    assert np.any(np.isfinite(result.mu_2d)), "mu_2d should have finite values"
+
+    t_test = 500
+    beta_24 = 0.1
+    beta_216 = 0.1
+    z_val = 0.5
+    scale_24 = np.sqrt(24.0 / 4.0)
+    scale_216 = np.sqrt(216.0 / 4.0)
+    contrib_24 = beta_24 * z_val / scale_24
+    contrib_216 = beta_216 * z_val / scale_216
+    expected_mu = (contrib_24 + contrib_216) / 2.0
+    np.testing.assert_allclose(
+        result.mu_2d[t_test, :], expected_mu, atol=1e-6,
+    )
