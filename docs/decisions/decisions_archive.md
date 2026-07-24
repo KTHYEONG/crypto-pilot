@@ -2,6 +2,11 @@
 
 This file holds historical architecture decision records (ADRs) that have been pruned from the active window.
 
+## [2026-07-23] [TASK_MULTISCALE_DATA_LAKE_CUTOVER] [ADR_20260723_MULTISCALE_DATA_LAKE_CUTOVER]
+- **Context/Why:** 최신 구현과 기존 explain 문서가 data snapshot, PIT universe, L1/L2 engine 경계를 일치시키지 못했고 실제 network 수집과 기존 데이터 삭제 시점도 분리되어야 했다.
+- **Resolution/What:** 단일 multiscale engine 경로, runner-owned Binance/DuckDB runtime, 승인 기반 network sync, checksum/atomic Parquet snapshot, historical PIT union, sparse L1 event와 signed L2 allocation 계약을 최신 설명 문서에 동기화했다.
+- **Impact:** check PASS(Cov 93%) 기준의 현재 로직을 문서화했다. 실제 Binance 다운로드와 data/futures 중복 데이터 삭제는 사용자 승인 전 수행하지 않는다.
+
 ## [2026-07-23] [TASK_COMPOUND_MAIN_REAL_DATA_ALIGNMENT] [ADR_20260723_COMPOUND_MAIN_REAL_DATA_ALIGNMENT]
 - **Context/Why:** 실제 메인 실행에서 Binance timestamp 정밀도 불일치와 기준일 미전달로 결측·무결성 실패가 발생했고, explain 문서가 최신 compound-only 경로와 불일치했다.
 - **Resolution/What:** OHLCV timestamp를 내부 ns로 정규화하고 reference_date를 데이터 로더와 PIT state에 동일하게 전달했다. compound-only 실행 흐름, 18개 recipe, L1 uncertainty, L2 단일 allocator, simulator, L3 결과 및 현재 fallback universe·zero-support 원인을 docs/results/explain.md에 기록했다.
