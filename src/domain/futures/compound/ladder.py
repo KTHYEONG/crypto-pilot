@@ -9,25 +9,18 @@ from typing import Literal
 import numpy as np
 from numpy.typing import NDArray
 
-from src.domain.futures.compound.admission import (
-    combine_composite_forecast,
-    evaluate_composite_admission,
-    evaluate_signal_admission,
-    select_composite_candidates,
-)
 from src.domain.futures.compound.allocator import apply_cost_aware_net_edge
-from src.domain.futures.compound.bar_engine import build_multi_timeframe_bars
+from src.domain.futures.compound.bar_engine import align_costs_to_decision_grid, build_multi_timeframe_bars
 from src.domain.futures.compound.baseline_alloc import solve_baseline_weights
 from src.domain.futures.compound.calibration import (
     build_folds_4h,
     build_multi_horizon_targets,
-    calibrate_signals,
 )
 from src.domain.futures.compound.config import (
-    AdmissionConfig,
     BaselineAllocConfig,
     CalibrationConfig,
     DenseSimConfig,
+    HandoffConfig,
     LadderConfig,
     RiskModelConfig,
 )
@@ -41,6 +34,7 @@ from src.domain.futures.compound.contracts import (
     TimeframeBarCube,
 )
 from src.domain.futures.compound.dense_simulator import simulate_dense_portfolio
+from src.domain.futures.compound.handoff import build_prequential_handoff
 from src.domain.futures.compound.risk_model import estimate_covariance_path
 from src.domain.futures.compound.risk_overlay import apply_fractional_kelly_scaling
 from src.domain.futures.compound.signal_bank import _default_catalog, build_raw_signal_panel
@@ -123,30 +117,25 @@ def _build_l1_forecast(
         )
 
     try:
-        calib_config = CalibrationConfig()
-        admit_config = AdmissionConfig(n_bootstrap=min(config.n_bootstrap, 100))
+        handoff_config = HandoffConfig(n_bootstrap=min(config.n_bootstrap, 200))
         catalog = _default_catalog()
         horizons = tuple(sorted({d.target_horizon_hours for d in catalog}))
         targets = build_multi_horizon_targets(bars, panel.sigma_2d, horizons)
         max_horizon_bars = max(horizons) // 4 if horizons else 0
-        folds = build_folds_4h(panel.z_3d.shape[0], calib_config, max_target_horizon_bars=max_horizon_bars)
-        calibs = calibrate_signals(panel, targets, folds, calib_config)
-        evidence = evaluate_signal_admission(
-            panel, targets, calibs, folds,
-            market.execution_cost_bps_2d, admit_config,
+        folds = build_folds_4h(panel.z_3d.shape[0], CalibrationConfig(), max_target_horizon_bars=max_horizon_bars)
+        bars_4h = bars.cubes["4h"]
+        cost_bps_4h = align_costs_to_decision_grid(
+            market.timestamps_ns, bars_4h.timestamps_ns, market.execution_cost_bps_2d,
         )
-        candidate_idx = select_composite_candidates(evidence, admit_config)
-        forecast = combine_composite_forecast(panel, calibs, evidence, folds, admit_config)
-        composite_evidence = evaluate_composite_admission(
-            panel, targets, forecast, folds,
-            market.execution_cost_bps_2d, admit_config,
+        handoff = build_prequential_handoff(
+            panel, targets, folds, bars_4h, cost_bps_4h, handoff_config,
         )
-        if composite_evidence.admitted:
-            _logger.info("[L1-3] composite admitted (%d candidates)", len(candidate_idx))
-            return forecast
-        _logger.info("[L1-3] composite not admitted (%d candidates), using zero-mu fallback", len(candidate_idx))
+        if handoff.evidence.admitted:
+            _logger.info("[L1-3] handoff admitted: active=%s", handoff.evidence.active_signal_ids)
+            return handoff.forecast
+        _logger.info("[L1-3] handoff not admitted, using zero-mu fallback")
     except Exception as exc:
-        _logger.warning("[L1-3] calibration/admission failed: %s", exc)
+        _logger.warning("[L1-3] handoff failed: %s", exc)
 
     bars_4h = bars.cubes["4h"]
     n_bars_4h_fb = bars_4h.timestamps_ns.size
