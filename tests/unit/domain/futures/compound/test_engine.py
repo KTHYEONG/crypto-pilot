@@ -152,16 +152,31 @@ class TestRunMultiscaleCompoundEngine:
         mocker.patch("src.domain.futures.compound.engine.calibrate_signals", return_value=())
         mocker.patch("src.domain.futures.compound.engine.evaluate_signal_admission", return_value=())
         mocker.patch(
-            "src.domain.futures.compound.engine.combine_admitted_forecasts",
-            return_value=CalibratedForecastPanel(
-                decision_timestamps_ns=np.arange(256, dtype=np.int64),
-                symbols=small_cube.symbols,
-                mu_2d=np.ones((256, len(small_cube.symbols)), dtype=np.float32) * 0.001,
-                se_2d=np.full((256, len(small_cube.symbols)), 0.01, dtype=np.float32),
-                family_mu_3d=np.zeros((256, len(small_cube.symbols), 1), dtype=np.float32),
-                family_ids=("test",),
-                admitted_signal_ids=("sig1",),
-                fold_manifest_hash="test",
+            "src.domain.futures.compound.engine.select_composite_candidates",
+            return_value=(0,),
+        )
+        forecast_panel = CalibratedForecastPanel(
+            decision_timestamps_ns=np.arange(256, dtype=np.int64),
+            symbols=small_cube.symbols,
+            mu_2d=np.ones((256, len(small_cube.symbols)), dtype=np.float32) * 0.001,
+            se_2d=np.full((256, len(small_cube.symbols)), 0.01, dtype=np.float32),
+            family_mu_3d=np.zeros((256, len(small_cube.symbols), 1), dtype=np.float32),
+            family_ids=(),
+            admitted_signal_ids=("sig1",),
+            fold_manifest_hash="test",
+        )
+        mocker.patch(
+            "src.domain.futures.compound.engine.combine_composite_forecast",
+            return_value=forecast_panel,
+        )
+        from src.domain.futures.compound.contracts import SignalAdmissionEvidence
+        mocker.patch(
+            "src.domain.futures.compound.engine.evaluate_composite_admission",
+            return_value=SignalAdmissionEvidence(
+                signal_id="composite", family="composite",
+                oos_net_growth_lcb90=0.1, oos_net_mean_2x_cost=0.05,
+                fold_sign_consistency=1.0, p_value=0.01, fdr_q_value=0.01,
+                admitted=True, reasons=(),
             ),
         )
 
@@ -206,16 +221,31 @@ class TestRunMultiscaleCompoundEngine:
         mocker.patch("src.domain.futures.compound.engine.calibrate_signals", return_value=())
         mocker.patch("src.domain.futures.compound.engine.evaluate_signal_admission", return_value=())
         mocker.patch(
-            "src.domain.futures.compound.engine.combine_admitted_forecasts",
-            return_value=CalibratedForecastPanel(
-                decision_timestamps_ns=np.arange(256, dtype=np.int64),
-                symbols=small_cube.symbols,
-                mu_2d=np.ones((256, len(small_cube.symbols)), dtype=np.float32) * 0.001,
-                se_2d=np.full((256, len(small_cube.symbols)), 0.01, dtype=np.float32),
-                family_mu_3d=np.zeros((256, len(small_cube.symbols), 1), dtype=np.float32),
-                family_ids=("test",),
-                admitted_signal_ids=("sig1",),
-                fold_manifest_hash="test",
+            "src.domain.futures.compound.engine.select_composite_candidates",
+            return_value=(0,),
+        )
+        forecast_panel = CalibratedForecastPanel(
+            decision_timestamps_ns=np.arange(256, dtype=np.int64),
+            symbols=small_cube.symbols,
+            mu_2d=np.ones((256, len(small_cube.symbols)), dtype=np.float32) * 0.001,
+            se_2d=np.full((256, len(small_cube.symbols)), 0.01, dtype=np.float32),
+            family_mu_3d=np.zeros((256, len(small_cube.symbols), 1), dtype=np.float32),
+            family_ids=(),
+            admitted_signal_ids=("sig1",),
+            fold_manifest_hash="test",
+        )
+        mocker.patch(
+            "src.domain.futures.compound.engine.combine_composite_forecast",
+            return_value=forecast_panel,
+        )
+        from src.domain.futures.compound.contracts import SignalAdmissionEvidence
+        mocker.patch(
+            "src.domain.futures.compound.engine.evaluate_composite_admission",
+            return_value=SignalAdmissionEvidence(
+                signal_id="composite", family="composite",
+                oos_net_growth_lcb90=0.1, oos_net_mean_2x_cost=0.05,
+                fold_sign_consistency=1.0, p_value=0.01, fdr_q_value=0.01,
+                admitted=True, reasons=(),
             ),
         )
         path_spy = mocker.patch(
