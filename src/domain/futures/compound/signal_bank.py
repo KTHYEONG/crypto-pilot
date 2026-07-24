@@ -155,6 +155,24 @@ def _compute_basis_gap(
     return _ewm_2d(basis, max(lookback_hours, 42))
 
 
+def _compute_smart_money_divergence(
+    top_trader_ratio: NDArray[np.float32], retail_ratio: NDArray[np.float32], lb_bars: int,
+) -> NDArray[np.float64]:
+    mask = (top_trader_ratio > 0) & np.isfinite(top_trader_ratio) & (retail_ratio > 0) & np.isfinite(retail_ratio)
+    raw = np.full(top_trader_ratio.shape, np.nan, dtype=np.float64)
+    if np.any(mask):
+        tt = top_trader_ratio.astype(np.float64)
+        rt = retail_ratio.astype(np.float64)
+        lt = np.empty_like(tt)
+        lr = np.empty_like(rt)
+        lt[:] = np.nan
+        lr[:] = np.nan
+        lt[mask] = np.log(tt[mask])
+        lr[mask] = np.log(rt[mask])
+        raw[mask] = -(lt[mask] - lr[mask])
+    return _ewm_2d(raw, max(lb_bars, 42))
+
+
 def _compute_flow_taker(
     taker_buy_quote: NDArray[np.float32], quote_volume: NDArray[np.float32],
     lookback_hours: int,
@@ -200,6 +218,7 @@ _FAMILY_NATIVE_TF: dict[str, str] = {
     "flow_taker": "1h",
     "xs_reversal": "4h",
     "xs_momentum_slow": "4h",
+    "smart_money_divergence": "1h",
 }
 
 
@@ -255,6 +274,15 @@ def _default_catalog() -> tuple[SignalDescriptor, ...]:
         native_timeframe="4h",
         target_horizon_hours=432,
     ))
+    for speed, lb_hours in (("fast", 24), ("medium", 72)):
+        descriptors.append(SignalDescriptor(
+            signal_id=f"smart_money_divergence:{speed}",
+            family="smart_money_divergence",
+            speed=speed,
+            lookback_hours=lb_hours,
+            native_timeframe="1h",
+            target_horizon_hours=lb_hours,
+        ))
     return tuple(descriptors)
 
 
@@ -370,6 +398,19 @@ def build_raw_signal_panel(
                 else:
                     lb_bars_xs = desc.lookback_hours // 4
                     raw = _compute_xs_rank_signal(close_4h, lb_bars_xs, eligible_2d, sign=+1.0)
+            elif family == "smart_money_divergence":
+                top_trader = bars.aux_1h_fields.get("top_trader_long_short_ratio")
+                retail = bars.aux_1h_fields.get("long_short_ratio")
+                if top_trader is None or retail is None:
+                    _logger.warning(
+                        "[DATA] smart_money_divergence: missing top_trader_long_short_ratio"
+                        "/long_short_ratio in aux_1h_fields",
+                    )
+                    recipe_ok = False
+                else:
+                    raw_1h = _compute_smart_money_divergence(top_trader, retail, desc.lookback_hours)
+                    raw = _subsample_to_4h(raw_1h, n_t)
+                    raw = _normalize_mad_z(raw)
             else:
                 recipe_ok = False
         except Exception:

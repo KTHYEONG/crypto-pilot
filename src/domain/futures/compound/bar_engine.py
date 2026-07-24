@@ -24,7 +24,7 @@ _TF_HOURS: Mapping[str, int] = {
 
 _OHLCV_FIELDS = ("open", "high", "low", "close", "quote_volume")
 
-_AUX_FIELDS = ("funding", "premium", "mark", "index", "taker_buy_quote", "quote_volume")
+_AUX_FIELDS = ("funding", "premium", "mark", "index", "taker_buy_quote", "quote_volume", "top_trader_long_short_ratio", "long_short_ratio")
 
 
 def _validate_monotonic(timestamps_ns: NDArray[np.int64]) -> None:
