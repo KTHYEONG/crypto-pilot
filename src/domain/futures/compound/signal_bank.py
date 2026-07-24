@@ -19,8 +19,9 @@ _logger = logging.getLogger(__name__)
 SPEED_LADDER: tuple[tuple[str, int], ...] = (
     ("fast", 24),
     ("medium", 72),
+    ("moderate", 144),
     ("slow", 216),
-    ("very_slow", 648),
+    ("very_slow", 432),
 )
 
 
@@ -204,36 +205,39 @@ _FAMILY_NATIVE_TF: dict[str, str] = {
 
 def _default_catalog() -> tuple[SignalDescriptor, ...]:
     descriptors: list[SignalDescriptor] = []
-    for family in ("trend_ema", "momentum_ts", "breakout_donchian", "carry_funding", "basis_gap"):
+    for family in ("trend_ema", "momentum_ts", "breakout_donchian", "basis_gap"):
         for speed, lb_hours in SPEED_LADDER:
-            desc = SignalDescriptor(
+            descriptors.append(SignalDescriptor(
                 signal_id=f"{family}:{speed}",
                 family=family,
                 speed=speed,
                 lookback_hours=lb_hours,
                 native_timeframe=_FAMILY_NATIVE_TF[family],
-            )
-            descriptors.append(desc)
+                target_horizon_hours=lb_hours,
+            ))
     descriptors.append(SignalDescriptor(
         signal_id="reversal_st:fast",
         family="reversal_st",
         speed="fast",
         lookback_hours=24,
         native_timeframe="4h",
+        target_horizon_hours=24,
     ))
     descriptors.append(SignalDescriptor(
         signal_id="xs_reversal:fast",
         family="xs_reversal",
         speed="fast",
-        lookback_hours=8,
+        lookback_hours=24,
         native_timeframe="4h",
+        target_horizon_hours=24,
     ))
     descriptors.append(SignalDescriptor(
         signal_id="xs_reversal:medium",
         family="xs_reversal",
         speed="medium",
-        lookback_hours=24,
+        lookback_hours=72,
         native_timeframe="4h",
+        target_horizon_hours=72,
     ))
     descriptors.append(SignalDescriptor(
         signal_id="xs_momentum_slow:slow",
@@ -247,9 +251,9 @@ def _default_catalog() -> tuple[SignalDescriptor, ...]:
         signal_id="xs_momentum_slow:very_slow",
         family="xs_momentum_slow",
         speed="very_slow",
-        lookback_hours=648,
+        lookback_hours=432,
         native_timeframe="4h",
-        target_horizon_hours=648,
+        target_horizon_hours=432,
     ))
     return tuple(descriptors)
 
