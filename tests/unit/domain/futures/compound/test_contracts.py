@@ -79,3 +79,21 @@ class TestExecutionLedger:
             integrity_reasons=(),
         )
         assert ledger.integrity_ok
+
+
+class TestSignalDescriptor:
+    def test_default_target_horizon(self) -> None:
+        from src.domain.futures.compound.contracts import SignalDescriptor
+        sd = SignalDescriptor("test", "test_fam", "fast", 24, "4h")
+        assert sd.target_horizon_hours == 4
+
+    def test_custom_target_horizon(self) -> None:
+        from src.domain.futures.compound.contracts import SignalDescriptor
+        sd = SignalDescriptor("test", "test_fam", "slow", 216, "4h", target_horizon_hours=216)
+        assert sd.target_horizon_hours == 216
+
+    def test_signal_descriptor_rejects_non_multiple_of_4_target_horizon(self) -> None:
+        from src.domain.futures.compound.contracts import SignalDescriptor
+        import pytest
+        with pytest.raises(ValueError, match="multiple of 4"):
+            SignalDescriptor("test", "test_fam", "fast", 24, "4h", target_horizon_hours=5)
