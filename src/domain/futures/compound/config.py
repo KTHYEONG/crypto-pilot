@@ -153,6 +153,84 @@ class L1MultiscaleConfig:
 
 
 @dataclass(slots=True, frozen=True)
+class CalibrationConfig:
+    ridge_lambda_scale: float = 0.01
+    family_shrink: float = 0.5
+    min_fold_obs: int = 1000
+    n_folds: int = 5
+    purge_bars: int = 2
+    embargo_bars: int = 42
+
+    def __post_init__(self) -> None:
+        assert self.ridge_lambda_scale >= 0
+        assert 0 <= self.family_shrink <= 1
+        assert self.min_fold_obs > 0
+        assert self.n_folds >= 3
+        assert self.purge_bars >= 0
+        assert self.embargo_bars >= 0
+
+
+@dataclass(slots=True, frozen=True)
+class AdmissionConfig:
+    n_bootstrap: int = 500
+    block_size: int = 42
+    fdr_q_threshold: float = 0.10
+    default_cost_bps: float = 8.0
+    sign_consistency_min: float = 0.6
+
+    def __post_init__(self) -> None:
+        assert self.n_bootstrap > 0
+        assert self.block_size > 0
+        assert 0 < self.fdr_q_threshold <= 1
+        assert self.default_cost_bps >= 0
+        assert 0 < self.sign_consistency_min <= 1
+
+
+@dataclass(slots=True, frozen=True)
+class RiskModelConfig:
+    ewm_half_life_bars: int = 60
+    shrink_delta: float = 0.3
+    variance_floor: float = 1e-10
+    min_history_bars: int = 60
+
+    def __post_init__(self) -> None:
+        assert self.ewm_half_life_bars > 0
+        assert 0 <= self.shrink_delta <= 1
+        assert self.variance_floor > 0
+        assert self.min_history_bars > 0
+
+
+@dataclass(slots=True, frozen=True)
+class BaselineAllocConfig:
+    target_ann_vol: float = 0.20
+    per_symbol_cap: float = 0.05
+    gross_cap: float = 2.0
+
+    def __post_init__(self) -> None:
+        assert self.target_ann_vol > 0
+        assert 0 < self.per_symbol_cap <= 1
+        assert self.gross_cap > 0
+
+
+@dataclass(slots=True, frozen=True)
+class DenseSimConfig:
+    bars_per_year: float = 2190.0
+
+    def __post_init__(self) -> None:
+        assert self.bars_per_year > 0
+
+
+@dataclass(slots=True, frozen=True)
+class LadderConfig:
+    cost_bps: float = 8.0
+    n_bootstrap: int = 1000
+
+    def __post_init__(self) -> None:
+        assert self.cost_bps >= 0
+        assert self.n_bootstrap > 0
+
+
+@dataclass(slots=True, frozen=True)
 class CompoundEngineConfig:
     data: DataPlaneConfig = field(default_factory=DataPlaneConfig)
     l1: L1EstimatorConfig = field(default_factory=L1EstimatorConfig)
@@ -161,6 +239,12 @@ class CompoundEngineConfig:
     allocator: AllocatorConfig = field(default_factory=AllocatorConfig)
     risk: RiskOverlayConfig = field(default_factory=RiskOverlayConfig)
     l3: L3ValidationConfig = field(default_factory=L3ValidationConfig)
+    risk_model: RiskModelConfig = field(default_factory=RiskModelConfig)
+    baseline_alloc: BaselineAllocConfig = field(default_factory=BaselineAllocConfig)
+    dense_sim: DenseSimConfig = field(default_factory=DenseSimConfig)
+    ladder: LadderConfig = field(default_factory=LadderConfig)
+    calibration: CalibrationConfig = field(default_factory=CalibrationConfig)
+    admission: AdmissionConfig = field(default_factory=AdmissionConfig)
 
     def __post_init__(self) -> None:
         assert isinstance(self.data, DataPlaneConfig)
@@ -170,3 +254,9 @@ class CompoundEngineConfig:
         assert isinstance(self.allocator, AllocatorConfig)
         assert isinstance(self.risk, RiskOverlayConfig)
         assert isinstance(self.l3, L3ValidationConfig)
+        assert isinstance(self.risk_model, RiskModelConfig)
+        assert isinstance(self.baseline_alloc, BaselineAllocConfig)
+        assert isinstance(self.dense_sim, DenseSimConfig)
+        assert isinstance(self.ladder, LadderConfig)
+        assert isinstance(self.calibration, CalibrationConfig)
+        assert isinstance(self.admission, AdmissionConfig)
