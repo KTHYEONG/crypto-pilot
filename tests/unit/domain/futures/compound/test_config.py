@@ -3,13 +3,19 @@ from __future__ import annotations
 import pytest
 
 from src.domain.futures.compound.config import (
+    AdmissionConfig,
     AllocatorConfig,
+    BaselineAllocConfig,
+    CalibrationConfig,
     CompoundEngineConfig,
     DataPlaneConfig,
+    DenseSimConfig,
     FactorRiskConfig,
     L1EstimatorConfig,
     L1Config,
     L3ValidationConfig,
+    LadderConfig,
+    RiskModelConfig,
     RiskOverlayConfig,
 )
 
@@ -88,11 +94,108 @@ class TestL3ValidationConfig:
             L3ValidationConfig(holdout_days=20, min_holdout_days=30)
 
 
+class TestCalibrationConfig:
+    def test_defaults_valid(self) -> None:
+        cfg = CalibrationConfig()
+        assert cfg.n_folds >= 3
+
+    def test_invalid_folds_raises(self) -> None:
+        with pytest.raises(AssertionError):
+            CalibrationConfig(n_folds=2)
+
+    def test_invalid_shrink_raises(self) -> None:
+        with pytest.raises(AssertionError):
+            CalibrationConfig(family_shrink=-0.1)
+        with pytest.raises(AssertionError):
+            CalibrationConfig(family_shrink=1.5)
+
+
+class TestAdmissionConfig:
+    def test_defaults_valid(self) -> None:
+        cfg = AdmissionConfig()
+        assert cfg.n_bootstrap == 500
+
+    def test_zero_bootstrap_raises(self) -> None:
+        with pytest.raises(AssertionError):
+            AdmissionConfig(n_bootstrap=0)
+
+    def test_invalid_fdr_raises(self) -> None:
+        with pytest.raises(AssertionError):
+            AdmissionConfig(fdr_q_threshold=0.0)
+        with pytest.raises(AssertionError):
+            AdmissionConfig(fdr_q_threshold=1.5)
+
+    def test_invalid_sign_consistency_raises(self) -> None:
+        with pytest.raises(AssertionError):
+            AdmissionConfig(sign_consistency_min=0.0)
+
+
+class TestRiskModelConfig:
+    def test_defaults_valid(self) -> None:
+        cfg = RiskModelConfig()
+        assert cfg.ewm_half_life_bars == 60
+        assert cfg.shrink_delta == 0.3
+
+    def test_zero_half_life_raises(self) -> None:
+        with pytest.raises(AssertionError):
+            RiskModelConfig(ewm_half_life_bars=0)
+
+    def test_invalid_delta_raises(self) -> None:
+        with pytest.raises(AssertionError):
+            RiskModelConfig(shrink_delta=-0.1)
+        with pytest.raises(AssertionError):
+            RiskModelConfig(shrink_delta=1.5)
+
+
+class TestBaselineAllocConfig:
+    def test_defaults_valid(self) -> None:
+        cfg = BaselineAllocConfig()
+        assert cfg.target_ann_vol == 0.20
+
+    def test_zero_target_vol_raises(self) -> None:
+        with pytest.raises(AssertionError):
+            BaselineAllocConfig(target_ann_vol=0.0)
+
+    def test_invalid_cap_raises(self) -> None:
+        with pytest.raises(AssertionError):
+            BaselineAllocConfig(per_symbol_cap=0.0)
+        with pytest.raises(AssertionError):
+            BaselineAllocConfig(gross_cap=-1.0)
+
+
+class TestDenseSimConfig:
+    def test_defaults_valid(self) -> None:
+        cfg = DenseSimConfig()
+        assert cfg.bars_per_year == 2190.0
+
+    def test_zero_bars_raises(self) -> None:
+        with pytest.raises(AssertionError):
+            DenseSimConfig(bars_per_year=0.0)
+
+
+class TestLadderConfig:
+    def test_defaults_valid(self) -> None:
+        cfg = LadderConfig()
+        assert cfg.cost_bps == 8.0
+
+    def test_negative_cost_raises(self) -> None:
+        with pytest.raises(AssertionError):
+            LadderConfig(cost_bps=-1.0)
+
+    def test_zero_bootstrap_raises(self) -> None:
+        with pytest.raises(AssertionError):
+            LadderConfig(n_bootstrap=0)
+
+
 class TestCompoundEngineConfig:
     def test_default_constructs(self) -> None:
         cfg = CompoundEngineConfig()
         assert isinstance(cfg.data, DataPlaneConfig)
         assert isinstance(cfg.l1, L1EstimatorConfig)
+        assert isinstance(cfg.risk_model, RiskModelConfig)
+        assert isinstance(cfg.baseline_alloc, BaselineAllocConfig)
+        assert isinstance(cfg.dense_sim, DenseSimConfig)
+        assert isinstance(cfg.ladder, LadderConfig)
 
     def test_invalid_subconfig_raises(self) -> None:
         with pytest.raises(AssertionError):
