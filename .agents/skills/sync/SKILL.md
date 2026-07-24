@@ -5,14 +5,14 @@ description: Documentation Synchronization, ADR Logging, Cleanup.
 
 # Sync
 ## Automated
-Run: `uv run python scripts/sync_task.py --task TASK_ID --title "<Title>" --why "<Context/Why>" --what "<Resolution/What>" --impact "<Impact>" --source src/x.py [--test tests/...] [--doc docs/architecture/...] [--remove-specs spec_file.md ...] [--clean-specs]`
+Run: `uv run python scripts/sync_task.py --task TASK_ID --title "<Title>" --why "<Context/Why>" --what "<Resolution/What>" --impact "<Impact>" --source src/x.py [--test tests/...] [--doc docs/architecture/...] [--remove-specs spec_file_or_prefix ...] [--keep-all-specs]`
 
-Script handles: ADR append to decisions.md, archive pruning, index.json update, scratch/temp file cleanup.
+Script handles: ADR append to decisions.md, archive pruning, index.json update, scratch/temp file cleanup, and spec file cleanup.
 > [!NOTE]
-> **Spec File Cleanup Safety**:
-> - `docs/specs/` files are **preserved by default**.
-> - To delete specific completed/obsolete spec files, pass `--remove-specs spec_a.md spec_b.md`.
-> - To clean unpreserved specs, pass `--clean-specs` (with optional `--keep-specs ...`).
+> **Spec File Cleanup**:
+> - `docs/specs/` files are **removed by default** during sync.
+> - To remove only specific spec files or prefixes (e.g. `signal_bank_v4`), pass `--remove-specs signal_bank_v4` (will remove `signal_bank_v4.md` and `signal_bank_v4_contract.json`).
+> - To preserve all spec files, pass `--keep-all-specs` (or specify `--keep-specs ...`).
 
 ## Manual
 - **Architecture docs** (`docs/architecture/`): surgically edit existing sections only. Format rules in AGENTS.md §12.
