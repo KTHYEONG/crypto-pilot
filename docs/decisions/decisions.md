@@ -1,5 +1,10 @@
 # Active Decisions Log (Sliding Window)
 
+## [2026-07-24] [TASK_L1_EXIT_AWARE_HANDOFF] [ADR_20260724_L1_EXIT_AWARE_HANDOFF]
+- **Context/Why:** Validate L1 signal x exit policy x horizon edge evidence and enforce L2 risk budgeting and L3 fail-closed deployment gate
+- **Resolution/What:** Executed l1_exit_aware_edge_handoff benchmark and opt_main_futures on full 120-symbol universe, updated result.md with empirical metrics
+- **Impact:** Guaranteed capital preservation (Cash-only) under zero alpha and validated L2 volatility/MDD control (<20%)
+
 ## [2026-07-24] [TASK_HORIZON_COHERENT_L1_L2_HANDOFF] [ADR_20260724_HORIZON_COHERENT_L1_L2_HANDOFF]
 - **Context/Why:** 실제 730일 120종목 데이터에서 기존 L1 composite가 horizon 계약과 L2 실행주기를 혼합했고, 중앙값·winsorized 평균도 손실을 개선하지 못했습니다. 구현 후 dev-only 실행에서 후보는 있었지만 최종 admission은 실패했습니다.
 - **Resolution/What:** horizon holding kernel, causal 4h cost alignment, family/correlation 중복 제거, prequential handoff와 경제성 게이트를 배선했습니다. 실제 full run은 신호를 거래하지 않고 cash-only로 차단했으며, dev diagnostic은 5개 fold에서 positive fold 0/5를 기록했습니다.
@@ -69,8 +74,3 @@
 - **Context/Why:** live PIT collector 추가 후 경계조건과 lake-only query의 coverage gate를 완료해야 운영 갱신 결과를 신뢰할 수 있음
 - **Resolution/What:** exchangeInfo schema, empty/non-mapping records, axis/time causal 조건, missing partition, projection path를 테스트하고 lean_check strict gate를 통과시킴
 - **Impact:** 실제 live state는 120 symbols/119 eligible로 저장되었고 final check PASS Cov 91%. raw legacy data는 아직 삭제하지 않음
-
-## [2026-07-23] [live-pit-universe-refresh] [ADR_20260723_live-pit-universe-refresh]
-- **Context/Why:** lake-only 전환 후 과거 ledger 이관만으로는 현재 거래 가능 상태를 갱신할 수 없고 Binance exchangeInfo 전체를 사용하면 운영 120심볼 축을 초과함
-- **Resolution/What:** Binance exchangeInfo를 조회하고 data/futures/lake의 기존 운영 심볼과 교집합을 취해 다음 UTC 일자의 causal universe_state를 immutable Parquet와 DuckDB catalog에 저장하는 refresh_live_universe_state를 추가함
-- **Impact:** 실제 Binance 846개 응답에서 120개를 선별해 119개 eligible state를 2026-07-24 partition에 저장하고 state hash 및 24시간/120심볼 cube 검증을 완료함. 구형 raw 데이터 삭제와 L2/L3 성과 검증은 별도 잔여 작업임
