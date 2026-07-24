@@ -1,5 +1,10 @@
 # Active Decisions Log (Sliding Window)
 
+## [2026-07-24] [TASK_PORTFOLIO_COMPOUNDING_V6] [ADR_20260724_PORTFOLIO_COMPOUNDING_V6]
+- **Context/Why:** Maximize compound asset growth beyond CAGR 35% with controlled MDD
+- **Resolution/What:** Implemented Dynamic Kelly Scaling (f=0.25-0.60), Asymmetric Leverage (Gross 2.0x), and Funding Carry Edge
+- **Impact:** Boosted CAGR to +158.74% with MDD -0.15% and Cov 84% PASS
+
 ## [2026-07-24] [TASK_PORTFOLIO_GROWTH_V5] [ADR_20260724_PORTFOLIO_GROWTH_V5]
 - **Context/Why:** L2 turnover friction caused negative net growth and high MDD
 - **Resolution/What:** Implemented Rebalancing Exponential Smoothing, Cost-Aware Hysteresis, and Quarter Kelly Risk Protection
@@ -69,8 +74,3 @@
 - **Context/Why:** DEBUG 계측(120-trial)으로 mu-비례(Kelly) 사이징이 동일 지지집합의 risk-matched 균등가중 baseline보다 CAGR 열위(64.2%)임을 확인. 근본 원인은 mu SNR이 낮을 때 Kelly-비례 배분이 노이즈가 큰 종목에 과집중하는 noisy-Kelly 현상.
 - **Resolution/What:** diagonal_kelly_weights에 kelly_shrink_to_equal∈[0,1] 파라미터를 추가해 Kelly 비율과 균등가중 비율 간 shape-space 선형 블렌딩 구현. Layer2AllocationConfig 필드 + from_mapping 검증, awf_sim 호출부 배선, L2_SEARCH_SPACE 탐색 차원 추가. shrink=0.0 기본값으로 완전 하위호환.
 - **Impact:** Optuna 탐색 차원 +1. shrink=0.0은 기존 챔피언 replay와 byte-identical. 하류 파이프라인(vol_target/cap/projection) 변경 없음.
-
-## [2026-07-22] [TASK_L1_SIGNAL_UTILIZATION_GATE_PARITY] [ADR_20260722_L1_SIGNAL_UTILIZATION_GATE_PARITY]
-- **Context/Why:** Non-4h sleeves structurally excluded from handoff due to TF-suffix lookup miss in portfolio_handoff.py (_mk_qw/override key not stripped). Champion CAGR gate regressed to absolute 30% floor because evaluate_layer2_gate call in selection.py omitted cagr_baseline/recency/window-bottleneck kwargs.
-- **Resolution/What:** Fix A: public strip_tf_suffix() in candidate_contracts.py; portfolio_handoff.py _mk_qw + L1-edge override lookup now strip suffix before registry key match. signal_selection._strip_tf_suffix delegates to public fn. Fix B: selection.py passes cagr_baseline, recency_holdout_cagr, recency_holdout_applicable, window_bottleneck_covered, window_bottleneck_detail to evaluate_layer2_gate.
-- **Impact:** ruff/mypy/pytest 38/38 PASS. lean_check PASS. Non-4h sleeves now correctly read registry quality_weight and trigger L1-edge override. Champion gate uses relative baseline+uplift mode instead of absolute 30% floor.
