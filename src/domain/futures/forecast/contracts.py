@@ -29,3 +29,42 @@ class RiskForecast:
     forecast_vol_2d: np.ndarray
     beta_source: str  # raw_column | trailing_btc | trailing_equal_weight_market | unavailable
     source: str
+
+
+@dataclass(slots=True, frozen=True)
+class ExitPathRequest:
+    """Causal, array-oriented request for intrabar exit labeling."""
+
+    decision_idx: np.ndarray
+    entry_idx: np.ndarray
+    side: np.ndarray
+    horizon_bars: np.ndarray
+    stop_atr_mult: np.ndarray
+    target_atr_mult: np.ndarray
+    min_hold_bars: np.ndarray
+    symbol_idx: np.ndarray
+    open_2d: np.ndarray
+    high_2d: np.ndarray
+    low_2d: np.ndarray
+    close_2d: np.ndarray
+    atr_2d: np.ndarray
+    cost_bps_2d: np.ndarray
+    funding_2d: np.ndarray
+    cost_floor_bps: np.ndarray
+    hurdle_bps: np.ndarray
+    taker_round_trip_bps: float
+
+
+@dataclass(slots=True, frozen=True)
+class ExitPathLabels:
+    """Vectorized realized outcomes for each requested trade event."""
+
+    gross_bps: np.ndarray
+    cost_bps: np.ndarray
+    funding_bps: np.ndarray
+    edge_bps: np.ndarray
+    exit_reason: np.ndarray
+    exit_idx: np.ndarray
+    mae_bps: np.ndarray
+    mfe_bps: np.ndarray
+    same_bar_collision: np.ndarray

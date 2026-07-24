@@ -408,6 +408,9 @@ class SignalDescriptor:
     lookback_hours: int
     native_timeframe: str
     target_horizon_hours: int = 4
+    archetype: str = ""
+    economic_hypothesis: str = ""
+    candidate_version: str = "v1"
 
     def __post_init__(self) -> None:
         if self.native_timeframe == "4h" and self.target_horizon_hours % 4 != 0:
@@ -415,6 +418,57 @@ class SignalDescriptor:
                 f"target_horizon_hours must be a multiple of 4 for 4h-native signals, "
                 f"got {self.target_horizon_hours}"
             )
+
+
+class ExitPolicyKind(StrEnum):
+    TIME = "time"
+    ASYMMETRIC_ATR = "asymmetric_atr"
+    ATR_TRAILING = "atr_trailing"
+
+
+@dataclass(slots=True, frozen=True)
+class ExitPolicySpec:
+    policy_id: str
+    kind: ExitPolicyKind
+    stop_atr_mult: float | None
+    target_atr_mult: float | None
+    trail_atr_mult: float | None
+    trail_activation_bars: int
+    max_holding_bars: int
+    calibration_fold_id: int
+    calibration_hash: str
+
+    def __post_init__(self) -> None:
+        if self.max_holding_bars <= 0 or self.trail_activation_bars < 0:
+            raise ValueError("exit holding periods must be valid")
+        for value in (self.stop_atr_mult, self.target_atr_mult, self.trail_atr_mult):
+            if value is not None and value <= 0.0:
+                raise ValueError("exit multipliers must be positive")
+        if not self.calibration_hash:
+            raise ValueError("calibration_hash is required")
+
+
+@dataclass(slots=True, frozen=True)
+class L1SleevePosterior:
+    sleeve_id: str
+    signal_id: str
+    family: str
+    exit_policy: ExitPolicySpec
+    mean_net_return: float
+    standard_error: float
+    posterior_positive_probability: float
+    residual_novelty: float
+    fold_net_returns: tuple[float, ...]
+    effective_events: int
+    admitted: bool
+    reasons: tuple[str, ...]
+
+    def __post_init__(self) -> None:
+        values = (self.mean_net_return, self.standard_error, self.posterior_positive_probability, self.residual_novelty)
+        if not all(np.isfinite(value) for value in values):
+            raise ValueError("posterior fields must be finite")
+        if self.standard_error <= 0.0 or not 0.0 <= self.posterior_positive_probability <= 1.0:
+            raise ValueError("posterior range is invalid")
 
 
 @dataclass(slots=True, frozen=True)
@@ -512,10 +566,13 @@ __all__ = [
     "EdgeEvidence",
     "ExecutionCostFrame",
     "ExecutionLedger",
+    "ExitPolicyKind",
+    "ExitPolicySpec",
     "ForecastFrame",
     "HandoffAdmissionEvidence",
     "HandoffResult",
     "InsufficientCoverageError",
+    "L1SleevePosterior",
     "L2Evaluation",
     "L3ValidationResult",
     "LadderStageResult",
