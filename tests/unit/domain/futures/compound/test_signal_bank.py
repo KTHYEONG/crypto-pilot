@@ -357,6 +357,17 @@ def test_build_raw_signal_panel_default_catalog_has_25_signals_with_new_families
     assert len(msm) == 2
 
 
+def test_signal_bank_v4_default_catalog_matched_horizons() -> None:
+    catalog = _default_catalog()
+    assert len(catalog) == 25
+    for desc in catalog:
+        assert desc.target_horizon_hours > 0
+        assert desc.target_horizon_hours == desc.lookback_hours, (
+            f"{desc.signal_id}: target_horizon_hours={desc.target_horizon_hours} "
+            f"!= lookback_hours={desc.lookback_hours}"
+        )
+
+
 def test_p2_pipeline_handles_updated_catalog_size_without_hardcoded_25(synthetic_market: MarketFeatureCube) -> None:
     bars = build_multi_timeframe_bars(synthetic_market)
     T = bars.decision_timestamps_ns.size

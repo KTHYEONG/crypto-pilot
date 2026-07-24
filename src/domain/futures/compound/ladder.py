@@ -39,7 +39,7 @@ from src.domain.futures.compound.contracts import (
 )
 from src.domain.futures.compound.dense_simulator import simulate_dense_portfolio
 from src.domain.futures.compound.risk_model import estimate_covariance_path
-from src.domain.futures.compound.signal_bank import build_raw_signal_panel
+from src.domain.futures.compound.signal_bank import _default_catalog, build_raw_signal_panel
 
 _logger = logging.getLogger(__name__)
 
@@ -121,7 +121,8 @@ def _build_l1_forecast(
     try:
         calib_config = CalibrationConfig()
         admit_config = AdmissionConfig(n_bootstrap=min(config.n_bootstrap, 100))
-        horizons = tuple(sorted({d.target_horizon_hours for d in panel.descriptors}))
+        catalog = _default_catalog()
+        horizons = tuple(sorted({d.target_horizon_hours for d in catalog}))
         targets = build_multi_horizon_targets(bars, panel.sigma_2d, horizons)
         max_horizon_bars = max(horizons) // 4 if horizons else 0
         folds = build_folds_4h(panel.z_3d.shape[0], calib_config, max_target_horizon_bars=max_horizon_bars)
