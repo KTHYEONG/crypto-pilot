@@ -16,6 +16,7 @@ from src.domain.futures.data_lake.contracts import (
 from src.domain.futures.data_lake.query import (
     BinanceQueryClient,
     LocalDataCatalog,
+    materialize_causal_metrics_grid,
     materialize_native_grid,
 )
 
@@ -286,3 +287,197 @@ def test_materialize_feature_grid_rejects_empty_symbols() -> None:
             datasets=(DatasetKind.KLINES_1H,), config=DataLakeConfig(root=root),
         )
         assert catalog.has_complete_coverage(snapshot, plan)
+
+
+def _write_metrics_parquet(
+    root: Path, symbol: str, rows: list[dict[str, float]],
+) -> None:
+    root.mkdir(parents=True, exist_ok=True)
+    part = root / "metrics_5m" / f"symbol={symbol}" / "year=2026" / "month=07" / "part.parquet"
+    part.parent.mkdir(parents=True, exist_ok=True)
+    # real Binance Vision metrics_5m files embed a "symbol" column alongside the Hive-style
+    # symbol= partition directory; pyarrow's dataset factory infers a dictionary-typed partition
+    # column from the path and can collide with an embedded large_string "symbol" column
+    # (ArrowTypeError) unless the reader avoids ds.dataset()-based schema unification.
+    for row in rows:
+        row.setdefault("symbol", symbol)
+    pd.DataFrame(rows).to_parquet(part, index=False)
+
+
+class TestMaterializeCausalMetricsGrid:
+    def test_materialize_causal_metrics_grid_asof_join_uses_available_at(self, tmp_path: Path) -> None:
+        one_hour_ms = 3_600_000
+        ts_base = 1_783_440_000_000
+        rows: list[dict[str, float]] = []
+        for i in range(12):
+            t = ts_base + i * 300_000
+            avail = t + 300_000
+            rows.append({
+                "timestamp": float(t),
+                "available_at": float(avail),
+                "top_trader_long_short_ratio": float(1.0 + i * 0.1),
+            })
+        _write_metrics_parquet(tmp_path, "BTCUSDT", rows)
+
+        second_hour_ns = (ts_base + one_hour_ms) * 1_000_000
+        start_ns = second_hour_ns
+        end_ns = (ts_base + 2 * one_hour_ms) * 1_000_000
+        result = materialize_causal_metrics_grid(
+            symbols=("BTCUSDT",),
+            start_time_ns=start_ns,
+            end_time_ns=end_ns,
+            lake_root=tmp_path,
+            field="top_trader_long_short_ratio",
+        )
+        assert isinstance(result, NativeFeatureGrid)
+        assert result.symbols == ("BTCUSDT",)
+        assert result.timestamps_ns.shape[0] == 1
+        val = result.fields["top_trader_long_short_ratio"][0, 0]
+        assert np.isfinite(val), f"Expected finite value, got {val}"
+        assert result.available["top_trader_long_short_ratio"][0, 0]
+        last_obs_idx = 11
+        expected_val = 1.0 + last_obs_idx * 0.1
+        assert abs(val - expected_val) < 1e-6, (
+            f"Expected {expected_val} (last available_at <= grid), got {val}"
+        )
+
+    def test_materialize_causal_metrics_grid_tolerance_exceeded_returns_nan(self, tmp_path: Path) -> None:
+        one_hour_ms = 3_600_000
+        ts_base = 1_783_440_000_000
+        rows: list[dict[str, float]] = [
+            {"timestamp": float(ts_base), "available_at": float(ts_base + 60_000),
+             "top_trader_long_short_ratio": 1.5},
+        ]
+        later = ts_base + 4 * one_hour_ms
+        rows.append({
+            "timestamp": float(later), "available_at": float(later + 60_000),
+            "top_trader_long_short_ratio": 2.0,
+        })
+        _write_metrics_parquet(tmp_path, "BTCUSDT", rows)
+
+        start_ns = (ts_base + one_hour_ms) * 1_000_000
+        end_ns = (ts_base + 6 * one_hour_ms) * 1_000_000
+        result = materialize_causal_metrics_grid(
+            symbols=("BTCUSDT",),
+            start_time_ns=start_ns,
+            end_time_ns=end_ns,
+            lake_root=tmp_path,
+            field="top_trader_long_short_ratio",
+            tolerance_ns=7_200_000_000_000,
+        )
+        assert result.timestamps_ns.shape[0] == 5
+        assert np.isfinite(result.fields["top_trader_long_short_ratio"][0, 0])
+        assert result.available["top_trader_long_short_ratio"][0, 0]
+        assert np.isnan(result.fields["top_trader_long_short_ratio"][2, 0])
+        assert not result.available["top_trader_long_short_ratio"][2, 0]
+
+    def test_rejects_empty_symbols(self, tmp_path: Path) -> None:
+        with pytest.raises(ValueError, match="symbols must not be empty"):
+            materialize_causal_metrics_grid(
+                symbols=(),
+                start_time_ns=0,
+                end_time_ns=3_600_000_000_000,
+                lake_root=tmp_path,
+                field="top_trader_long_short_ratio",
+            )
+
+    def test_rejects_empty_field(self, tmp_path: Path) -> None:
+        with pytest.raises(ValueError, match="field must not be empty"):
+            materialize_causal_metrics_grid(
+                symbols=("BTCUSDT",),
+                start_time_ns=0,
+                end_time_ns=3_600_000_000_000,
+                lake_root=tmp_path,
+                field="",
+            )
+
+    def test_grid_entirely_before_first_available_at_returns_all_nan(self, tmp_path: Path) -> None:
+        one_hour_ms = 3_600_000
+        ts_base = 1_783_440_000_000
+        available_at = ts_base + int(2.9 * one_hour_ms)
+        rows: list[dict[str, float]] = [
+            {"timestamp": float(ts_base), "available_at": float(available_at),
+             "top_trader_long_short_ratio": 1.5},
+        ]
+        _write_metrics_parquet(tmp_path, "BTCUSDT", rows)
+
+        start_ns = ts_base * 1_000_000
+        end_ns = (ts_base + 3 * one_hour_ms) * 1_000_000
+        result = materialize_causal_metrics_grid(
+            symbols=("BTCUSDT",),
+            start_time_ns=start_ns,
+            end_time_ns=end_ns,
+            lake_root=tmp_path,
+            field="top_trader_long_short_ratio",
+        )
+        assert result.timestamps_ns.shape[0] == 3
+        assert np.all(np.isnan(result.fields["top_trader_long_short_ratio"]))
+        assert not np.any(result.available["top_trader_long_short_ratio"])
+
+    def test_symbol_with_no_partition_directory_returns_all_nan(self, tmp_path: Path) -> None:
+        result = materialize_causal_metrics_grid(
+            symbols=("NOSUCHSYMBOL",),
+            start_time_ns=1_783_440_000_000 * 1_000_000,
+            end_time_ns=(1_783_440_000_000 + 3_600_000) * 1_000_000,
+            lake_root=tmp_path,
+            field="top_trader_long_short_ratio",
+        )
+        assert result.timestamps_ns.shape[0] == 1
+        assert np.all(np.isnan(result.fields["top_trader_long_short_ratio"]))
+        assert not np.any(result.available["top_trader_long_short_ratio"])
+
+    def test_parquet_missing_required_columns_is_skipped(self, tmp_path: Path) -> None:
+        part = tmp_path / "metrics_5m" / "symbol=BTCUSDT" / "year=2026" / "month=07" / "part.parquet"
+        part.parent.mkdir(parents=True, exist_ok=True)
+        pd.DataFrame({"timestamp": [1_783_440_000_000.0], "unrelated_col": [1.0]}).to_parquet(part, index=False)
+
+        result = materialize_causal_metrics_grid(
+            symbols=("BTCUSDT",),
+            start_time_ns=1_783_440_000_000 * 1_000_000,
+            end_time_ns=(1_783_440_000_000 + 3_600_000) * 1_000_000,
+            lake_root=tmp_path,
+            field="top_trader_long_short_ratio",
+        )
+        assert result.timestamps_ns.shape[0] == 1
+        assert np.all(np.isnan(result.fields["top_trader_long_short_ratio"]))
+        assert not np.any(result.available["top_trader_long_short_ratio"])
+
+    def test_corrupted_parquet_file_is_skipped_without_raising(self, tmp_path: Path) -> None:
+        part = tmp_path / "metrics_5m" / "symbol=BTCUSDT" / "year=2026" / "month=07" / "part.parquet"
+        part.parent.mkdir(parents=True, exist_ok=True)
+        part.write_bytes(b"not a real parquet file")
+
+        result = materialize_causal_metrics_grid(
+            symbols=("BTCUSDT",),
+            start_time_ns=1_783_440_000_000 * 1_000_000,
+            end_time_ns=(1_783_440_000_000 + 3_600_000) * 1_000_000,
+            lake_root=tmp_path,
+            field="top_trader_long_short_ratio",
+        )
+        assert result.timestamps_ns.shape[0] == 1
+        assert np.all(np.isnan(result.fields["top_trader_long_short_ratio"]))
+        assert not np.any(result.available["top_trader_long_short_ratio"])
+
+    def test_data_entirely_outside_requested_range_returns_all_nan(self, tmp_path: Path) -> None:
+        one_hour_ms = 3_600_000
+        ts_base = 1_783_440_000_000
+        rows: list[dict[str, float]] = [
+            {"timestamp": float(ts_base), "available_at": float(ts_base + 60_000),
+             "top_trader_long_short_ratio": 1.5},
+        ]
+        _write_metrics_parquet(tmp_path, "BTCUSDT", rows)
+
+        far_future_start = ts_base + 1000 * one_hour_ms
+        start_ns = far_future_start * 1_000_000
+        end_ns = (far_future_start + 3 * one_hour_ms) * 1_000_000
+        result = materialize_causal_metrics_grid(
+            symbols=("BTCUSDT",),
+            start_time_ns=start_ns,
+            end_time_ns=end_ns,
+            lake_root=tmp_path,
+            field="top_trader_long_short_ratio",
+            tolerance_ns=7_200_000_000_000,
+        )
+        assert result.timestamps_ns.shape[0] == 3
+        assert np.all(np.isnan(result.fields["top_trader_long_short_ratio"]))
+        assert not np.any(result.available["top_trader_long_short_ratio"])
