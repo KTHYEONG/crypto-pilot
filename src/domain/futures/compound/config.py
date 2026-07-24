@@ -261,6 +261,26 @@ class DynamicCompoundingConfig:
 
 
 @dataclass(slots=True, frozen=True)
+class HandoffConfig:
+    max_pairwise_correlation: float = 0.80
+    min_positive_outer_folds: int = 4
+    target_ann_vol: float = 0.15
+    max_ann_vol: float = 0.20
+    max_drawdown: float = 0.20
+    cost_stress_multiplier: float = 2.0
+    n_bootstrap: int = 1_000
+
+    def __post_init__(self) -> None:
+        assert 0 < self.max_pairwise_correlation <= 1
+        assert self.min_positive_outer_folds > 0
+        assert self.target_ann_vol > 0
+        assert self.max_ann_vol > 0
+        assert self.max_drawdown > 0
+        assert self.cost_stress_multiplier >= 1
+        assert self.n_bootstrap > 0
+
+
+@dataclass(slots=True, frozen=True)
 class CompoundEngineConfig:
     data: DataPlaneConfig = field(default_factory=DataPlaneConfig)
     l1: L1EstimatorConfig = field(default_factory=L1EstimatorConfig)
@@ -275,6 +295,7 @@ class CompoundEngineConfig:
     ladder: LadderConfig = field(default_factory=LadderConfig)
     calibration: CalibrationConfig = field(default_factory=CalibrationConfig)
     admission: AdmissionConfig = field(default_factory=AdmissionConfig)
+    handoff: HandoffConfig = field(default_factory=HandoffConfig)
     dynamic_compounding: DynamicCompoundingConfig = field(default_factory=DynamicCompoundingConfig)
 
     def __post_init__(self) -> None:
@@ -291,4 +312,5 @@ class CompoundEngineConfig:
         assert isinstance(self.ladder, LadderConfig)
         assert isinstance(self.calibration, CalibrationConfig)
         assert isinstance(self.admission, AdmissionConfig)
+        assert isinstance(self.handoff, HandoffConfig)
         assert isinstance(self.dynamic_compounding, DynamicCompoundingConfig)

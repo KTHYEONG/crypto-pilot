@@ -25,14 +25,14 @@ def build_folds_4h(
     n_folds = config.n_folds
     purge = max(config.purge_bars, max_target_horizon_bars)
     embargo = config.embargo_bars
-    if n_bars < n_folds * (purge + embargo + 2):
+    n_sections = n_folds + 1
+    if n_bars < n_sections * (purge + embargo + 2):
         raise CausalityError(
             f"n_bars={n_bars} insufficient for {n_folds} folds with purge={purge}, embargo={embargo}",
         )
-    fold_size = (n_bars - purge - embargo) // n_folds
+    fold_size = (n_bars - purge - embargo) // n_sections
     folds: list[CausalFold] = []
     for i in range(n_folds):
-        fit_start = 0
         fit_end = (i + 1) * fold_size
         cal_start = max(0, fit_end - purge)
         oos_start = fit_end + purge
@@ -41,7 +41,7 @@ def build_folds_4h(
             oos_end = n_bars - embargo
         folds.append(CausalFold(
             fold_id=i,
-            fit_start=fit_start,
+            fit_start=0,
             fit_end_exclusive=fit_end,
             calibration_start=cal_start,
             calibration_end_exclusive=fit_end,
