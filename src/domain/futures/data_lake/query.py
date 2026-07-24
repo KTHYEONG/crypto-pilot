@@ -79,7 +79,7 @@ class BinanceQueryClient:
     def _normalize_vision_klines(frame: pd.DataFrame) -> pd.DataFrame:
         if frame.empty:
             return frame
-        columns = ("timestamp", "open", "high", "low", "close", "volume", "close_time", "quote_volume", "trades", "taker_base_volume", "taker_quote_volume", "ignore")
+        columns = ("timestamp", "open", "high", "low", "close", "volume", "close_time", "quote_volume", "trades", "taker_buy_base", "taker_buy_quote", "ignore")
         data = frame.iloc[:, : len(columns)].copy()
         data.columns = columns[: len(data.columns)]
         return BinanceQueryClient._normalize_timestamp(data)
