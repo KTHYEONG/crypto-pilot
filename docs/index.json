@@ -542,6 +542,9 @@
     "testing": "tests/unit/domain/futures/compound/test_admission.py"
   },
   "src/domain/futures/compound/allocator.py": {
-    "testing": "tests/unit/domain/futures/compound/test_allocator.py"
+    "testing": [
+      "tests/unit/domain/futures/compound/test_allocator.py",
+      "tests/unit/domain/futures/compound/test_dynamic_compounding.py"
+    ]
   }
 }
