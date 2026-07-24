@@ -271,6 +271,12 @@ def combine_admitted_forecasts(
         if n_fam == 0:
             family_mu_3d = np.zeros((n_t, n_syms, 1), dtype=np.float32)
 
+    if folds:
+        oos_start = folds[0].oos_start
+        mu_2d[:oos_start] = 0.0
+        se_2d[:oos_start] = np.nan
+        family_mu_3d[:oos_start] = 0.0
+
     fold_manifest_hash = f"folds_{len(folds)}_{folds[0].purge_bars}_{folds[0].embargo_bars}" if folds else "no_folds"
 
     _logger.info(

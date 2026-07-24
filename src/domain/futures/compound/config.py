@@ -232,20 +232,27 @@ class LadderConfig:
 
 @dataclass(slots=True, frozen=True)
 class DynamicCompoundingConfig:
-    min_kelly_fraction: float = 0.25
-    max_kelly_fraction: float = 0.60
-    max_gross_leverage: float = 2.00
-    max_long_leverage: float = 1.50
-    max_short_leverage: float = 0.50
+    kelly_fraction: float = 0.20
+    target_ann_vol: float = 0.15
+    vol_lookback_bars: int = 180
+    vol_scale_max: float = 1.5
+    max_gross_leverage: float = 1.00
+    max_long_leverage: float = 0.70
+    max_short_leverage: float = 0.30
+    sigma_floor: float = 1e-4
     funding_carry_enabled: bool = True
-    soft_drawdown_limit: float = 0.15
-    hard_drawdown_limit: float = 0.25
+    soft_drawdown_limit: float = 0.10
+    hard_drawdown_limit: float = 0.18
 
     def __post_init__(self) -> None:
-        assert 0 < self.min_kelly_fraction <= self.max_kelly_fraction <= 1
+        assert 0 < self.kelly_fraction <= 1
+        assert self.target_ann_vol > 0
+        assert self.vol_lookback_bars > 0
+        assert self.vol_scale_max >= 1.0
         assert self.max_long_leverage > 0
         assert self.max_short_leverage > 0
         assert self.max_gross_leverage >= self.max_long_leverage + self.max_short_leverage
+        assert self.sigma_floor > 0
         assert 0 < self.soft_drawdown_limit < self.hard_drawdown_limit <= 1
 
 

@@ -119,7 +119,7 @@ class TestRunMultiscaleCompoundEngine:
 
         mock_panel = mocker.Mock(spec=RawSignalPanel)
         mock_panel.z_3d = np.zeros((256, 5, 3))
-        mock_panel.sigma_2d = np.ones((256, 5), dtype=np.float32)
+        mock_panel.sigma_2d = np.full((256, 5), 0.01, dtype=np.float32)
         mock_panel.descriptors = (mocker.Mock(spec=SignalDescriptor, target_horizon_hours=4),)
         mocker.patch(
             "src.domain.futures.compound.engine.build_raw_signal_panel",
@@ -164,6 +164,63 @@ class TestRunMultiscaleCompoundEngine:
         assert isinstance(result, CompoundEngineResult)
         assert not np.allclose(result.ledger.target_weights_2d, 0.0)
 
+    def test_engine_passes_sigma_to_path(self, tmp_path, mocker, small_cube: MarketFeatureCube) -> None:
+        from src.domain.futures.compound.contracts import (
+            CalibratedForecastPanel,
+            RawSignalPanel,
+        )
+
+        distinct_sigma = np.full((256, 5), 0.037, dtype=np.float32)
+        mock_panel = mocker.Mock(spec=RawSignalPanel)
+        mock_panel.z_3d = np.zeros((256, 5, 3))
+        mock_panel.sigma_2d = distinct_sigma
+        mock_panel.descriptors = (mocker.Mock(spec=SignalDescriptor, target_horizon_hours=4),)
+        mocker.patch(
+            "src.domain.futures.compound.engine.build_raw_signal_panel",
+            return_value=mock_panel,
+        )
+        mocker.patch("src.domain.futures.compound.engine.build_folds_4h", return_value=())
+        mocker.patch("src.domain.futures.compound.engine.build_multi_horizon_targets", return_value={4: mocker.Mock()})
+        mocker.patch("src.domain.futures.compound.engine.calibrate_signals", return_value=())
+        mocker.patch("src.domain.futures.compound.engine.evaluate_signal_admission", return_value=())
+        mocker.patch(
+            "src.domain.futures.compound.engine.combine_admitted_forecasts",
+            return_value=CalibratedForecastPanel(
+                decision_timestamps_ns=np.arange(256, dtype=np.int64),
+                symbols=small_cube.symbols,
+                mu_2d=np.ones((256, len(small_cube.symbols)), dtype=np.float32) * 0.001,
+                se_2d=np.full((256, len(small_cube.symbols)), 0.01, dtype=np.float32),
+                family_mu_3d=np.zeros((256, len(small_cube.symbols), 1), dtype=np.float32),
+                family_ids=("test",),
+                admitted_signal_ids=("sig1",),
+                fold_manifest_hash="test",
+            ),
+        )
+        path_spy = mocker.patch(
+            "src.domain.futures.compound.engine.compute_dynamic_compounding_path",
+            return_value=np.zeros((256, len(small_cube.symbols)), dtype=np.float64),
+        )
+
+        universe = type("Universe", (), {"symbols": small_cube.symbols, "snapshots": ()})()
+        store = SealedHoldoutStore(tmp_path / "sigma_wiring_test.sqlite3")
+        manifest = SealedHoldoutManifest(
+            holdout_id="sigma-test",
+            start_time_ns=int(small_cube.timestamps_ns[-180]),
+            end_time_ns=int(small_cube.timestamps_ns[-1]),
+            holdout_days=90,
+            model_version="v1",
+            data_manifest_hash="h1",
+            strategy_spec_hash="spec1",
+        )
+        store.create(manifest)
+        run_multiscale_compound_engine(
+            market=small_cube, universe=universe,
+            holdout_store=store, holdout_id="sigma-test", config=CompoundEngineConfig(),
+        )
+
+        assert path_spy.call_count == 1
+        np.testing.assert_array_equal(path_spy.call_args.kwargs["sigma_2d"], distinct_sigma)
+
     def test_missing_close_field_raises(self, tmp_path) -> None:
         n_bars, n_syms = 10, 2
         cube = MarketFeatureCube(
@@ -192,6 +249,31 @@ class TestRunMultiscaleCompoundEngine:
                 holdout_store=store, holdout_id="mc",
                 config=CompoundEngineConfig(),
             )
+
+    def test_allocate_portfolio_step_wiring(self) -> None:
+        from src.domain.futures.compound.engine import allocate_portfolio_step
+        from src.domain.futures.compound.config import DynamicCompoundingConfig
+        from src.domain.futures.compound.contracts import CombinedForecast
+
+        forecast = CombinedForecast(
+            mu_robust_1d=np.array([0.005, -0.003], dtype=np.float64),
+            variance_1d=np.array([1e-4, 1e-4], dtype=np.float64),
+            support_1d=np.array([True, True], dtype=np.bool_),
+        )
+        sigma_1d = np.array([0.01, 0.01], dtype=np.float64)
+        funding = np.array([0.0001, -0.0001], dtype=np.float64)
+        prev = np.zeros(2, dtype=np.float64)
+        config = DynamicCompoundingConfig()
+        result = allocate_portfolio_step(
+            forecast=forecast, sigma_1d=sigma_1d,
+            funding_rates=funding, previous_weights=prev,
+            config=config,
+        )
+        assert isinstance(result, np.ndarray)
+        assert result.shape == (2,)
+        assert result[0] > 0
+        assert result[1] < 0
+        assert np.all(np.isfinite(result))
 
     def test_cash_only_no_admitted_signals(self, tmp_path) -> None:
         n_bars, n_syms = 500, 3
