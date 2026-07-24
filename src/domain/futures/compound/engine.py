@@ -7,8 +7,10 @@ import pyarrow as pa
 from numpy.typing import NDArray
 
 from src.domain.futures.compound.admission import (
-    combine_admitted_forecasts,
+    combine_composite_forecast,
+    evaluate_composite_admission,
     evaluate_signal_admission,
+    select_composite_candidates,
 )
 from src.domain.futures.compound.allocator import (
     compute_dynamic_compounding_path,
@@ -123,11 +125,16 @@ def run_multiscale_compound_engine(
             panel, targets, calibrations, folds,
             market.execution_cost_bps_2d, config.admission,
         )
-        forecast = combine_admitted_forecasts(panel, calibrations, evidence, folds)
-        has_admitted = len(forecast.admitted_signal_ids) > 0
+        candidate_idx = select_composite_candidates(evidence, config.admission)
+        forecast = combine_composite_forecast(panel, calibrations, evidence, folds, config.admission)
+        composite_evidence = evaluate_composite_admission(
+            panel, targets, forecast, folds,
+            market.execution_cost_bps_2d, config.admission,
+        )
+        has_admitted = composite_evidence.admitted
         _logger.info(
-            "P2 complete: %d admitted signals across %d families",
-            len(forecast.admitted_signal_ids), len(forecast.family_ids),
+            "P2 complete: %d composite candidates, admitted=%s",
+            len(candidate_idx), has_admitted,
         )
     except Exception:
         _logger.warning("P2 pipeline failed, using cash-only fallback", exc_info=True)
