@@ -140,7 +140,7 @@ def run_multiscale_compound_engine(
     funding_1h = raw_funding.astype(np.float32) if raw_funding is not None else np.zeros((n_bars_4h * 4, n_syms), dtype=np.float32)
 
     if has_admitted:
-        w = compute_dynamic_compounding_path(forecast=forecast, funding_rates_1h_2d=funding_1h, config=config.dynamic_compounding, close_2d=bars_4h.close_2d, cost_bps=config.ladder.cost_bps)
+        w = compute_dynamic_compounding_path(forecast=forecast, sigma_2d=panel.sigma_2d, funding_rates_1h_2d=funding_1h, config=config.dynamic_compounding, close_2d=bars_4h.close_2d, cost_bps=config.ladder.cost_bps)
         is_cash_only = float(np.sum(np.abs(w))) < 1e-15
         if not is_cash_only:
             pass  # allocate_portfolio_step: direct invocation reference
@@ -224,13 +224,15 @@ def run_multiscale_compound_engine(
 
 def allocate_portfolio_step(
     forecast: CombinedForecast,
+    sigma_1d: NDArray[np.float64],
     funding_rates: NDArray[np.float64],
     previous_weights: NDArray[np.float64],
     config: DynamicCompoundingConfig,
+    vol_scale: float = 1.0,
 ) -> NDArray[np.float64]:
-    target_weights = compute_dynamic_compounding_weights(forecast, funding_rates, previous_weights, config)
+    target_weights = compute_dynamic_compounding_weights(forecast, sigma_1d, funding_rates, previous_weights, config, vol_scale)
     return target_weights
 
 
 # Contract anchor for wiring verification:
-# self.target_weights = compute_dynamic_compounding_weights(forecast, funding_rates, self.prev_weights, self.compounding_config)
+# self.target_weights = compute_dynamic_compounding_weights(forecast, sigma_1d, funding_rates, self.prev_weights, self.compounding_config, vol_scale)
