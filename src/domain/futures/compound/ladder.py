@@ -10,8 +10,10 @@ import numpy as np
 from numpy.typing import NDArray
 
 from src.domain.futures.compound.admission import (
-    combine_admitted_forecasts,
+    combine_composite_forecast,
+    evaluate_composite_admission,
     evaluate_signal_admission,
+    select_composite_candidates,
 )
 from src.domain.futures.compound.allocator import apply_cost_aware_net_edge
 from src.domain.futures.compound.bar_engine import build_multi_timeframe_bars
@@ -133,10 +135,16 @@ def _build_l1_forecast(
             panel, targets, calibs, folds,
             market.execution_cost_bps_2d, admit_config,
         )
-        forecast = combine_admitted_forecasts(panel, calibs, evidence, folds)
-        if len(forecast.admitted_signal_ids) > 0:
+        candidate_idx = select_composite_candidates(evidence, admit_config)
+        forecast = combine_composite_forecast(panel, calibs, evidence, folds, admit_config)
+        composite_evidence = evaluate_composite_admission(
+            panel, targets, forecast, folds,
+            market.execution_cost_bps_2d, admit_config,
+        )
+        if composite_evidence.admitted:
+            _logger.info("[L1-3] composite admitted (%d candidates)", len(candidate_idx))
             return forecast
-        _logger.info("[L1-3] no signals admitted, using zero-mu fallback")
+        _logger.info("[L1-3] composite not admitted (%d candidates), using zero-mu fallback", len(candidate_idx))
     except Exception as exc:
         _logger.warning("[L1-3] calibration/admission failed: %s", exc)
 
