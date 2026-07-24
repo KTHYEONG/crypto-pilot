@@ -23,9 +23,14 @@ Leverage **high-reasoning models (Thinker)** for creative architectural design, 
   - Output exactly **3 targeted questions** to clarify architecture, DB schema, API interfaces, or edge-case handling.
   - **STOP immediately** and wait for user answers. Do NOT write the spec until the user answers.
 
-### 2. High-Reasoning Architectural Thought (High Autonomy)
-- **Data-Driven Dynamic Inspection**: First, thoroughly leverage and read existing codebase assets (source code, DB schemas, configurations, and docs). Only if design details or runtime responses (e.g., live database values, third-party API payloads, or complex runtime side-effects) remain ambiguous, write and execute temporary verification scripts in the `scratch/` directory. Always base architectural decisions on concrete facts rather than assumptions.
-- **Alternatives & Trade-offs**: Contrast multiple design options. Justify why the chosen design is selected.
+### 2. High-Reasoning Architectural Thought (High Autonomy & Multi-Hypothesis)
+- **Multi-Hypothesis Data-Driven Experimentation**:
+  - **Trigger**: Automatically activate when working on signal logic, portfolio allocation, risk sizing, performance optimization, or whenever DB schemas / API payloads have runtime uncertainty.
+  - **Hypothesis Setup**: Formulate at least 2~3 alternative hypotheses (e.g., `[HYPOTHESIS-A]`, `[HYPOTHESIS-B]`).
+  - **Execution & Data Harvesting**: Write concise (<50 lines) verification scripts in `scratch/` and execute them via `uv run` against empirical data (e.g., market bar data, DB records, or live API endpoints).
+  - **Quantitative Evaluation**: Evaluate hypotheses using concrete metrics (e.g., Sharpe Ratio, Max Drawdown, Execution Latency, Win Rate, or Memory Usage).
+  - **Evidence-Based Selection**: Select the winning hypothesis based strictly on empirical evidence and document the benchmark comparison in the spec.
+- **Alternatives & Trade-offs**: Contrast multiple design options using empirical benchmark data. Justify why the winning hypothesis was selected.
 - **Constraints & Boundaries**: Identify edge cases, performance bottlenecks, and algorithmic limitations, tagging each with a unique label (`[LIMIT-01]`, etc.).
 - **Quant & System Resilience**: Explicitly plan for network timeouts, timezone normalization, and look-ahead bias prevention.
 
@@ -93,6 +98,18 @@ Create a markdown file at `docs/specs/[feature].md`:
 - **Goal**: 1-sentence capability.
 - **Alternatives & Trade-offs**: Brief comparison.
 - **Mermaid Diagram**: Text-based sequence showing system integration context.
+
+# 🧪 Multi-Hypothesis Empirical Benchmarks (If Triggered)
+- **Target Metrics**: (e.g., Sharpe, MDD, Execution Time)
+- **Dataset / Experiment Script**: `scratch/verify_[feature].py`
+
+| Hypothesis | Approach / Algorithm | Metric 1 | Metric 2 | Verdict |
+| :--- | :--- | :--- | :--- | :--- |
+| `[HYPOTHESIS-A]` | Baseline approach | Value | Value | Baseline |
+| `[HYPOTHESIS-B]` | Alternative 1 | Value | Value | Selected (Best Sharpe/Latency) |
+| `[HYPOTHESIS-C]` | Alternative 2 | Value | Value | Rejected |
+
+- **Selection Rationale**: Empirical justification for choosing the winning hypothesis.
 
 # ⚡ Performance & Resource Budget
 - Complexity, limits, concurrency.
