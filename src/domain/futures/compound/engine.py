@@ -6,32 +6,25 @@ import numpy as np
 import pyarrow as pa
 from numpy.typing import NDArray
 
-from src.domain.futures.compound.admission import (
-    combine_composite_forecast,
-    evaluate_composite_admission,
-    evaluate_signal_admission,
-    select_composite_candidates,
-)
 from src.domain.futures.compound.allocator import (
     compute_dynamic_compounding_path,
     compute_dynamic_compounding_weights,
 )
-from src.domain.futures.compound.bar_engine import build_multi_timeframe_bars
+from src.domain.futures.compound.bar_engine import align_costs_to_decision_grid, build_multi_timeframe_bars
 from src.domain.futures.compound.calibration import (
     build_folds_4h,
     build_multi_horizon_targets,
-    calibrate_signals,
 )
 from src.domain.futures.compound.config import CompoundEngineConfig, DynamicCompoundingConfig
 from src.domain.futures.compound.contracts import (
     AlphaEventTape,
-    CalibratedForecastPanel,
     CombinedForecast,
     CompoundEngineResult,
     L3ValidationResult,
     MarketFeatureCube,
 )
 from src.domain.futures.compound.dense_simulator import simulate_dense_portfolio
+from src.domain.futures.compound.handoff import _build_cash_only_forecast, build_prequential_handoff
 from src.domain.futures.compound.holdout_store import SealedHoldoutStore
 from src.domain.futures.compound.signal_bank import build_raw_signal_panel
 from src.domain.futures.compound.validation import (
@@ -73,24 +66,6 @@ def _compute_4h_returns(
     return ret, valid
 
 
-def _build_cash_only_forecast(
-    timestamps_ns: NDArray[np.int64],
-    symbols: tuple[str, ...],
-) -> CalibratedForecastPanel:
-    n_bars = timestamps_ns.size
-    n_syms = len(symbols)
-    return CalibratedForecastPanel(
-        decision_timestamps_ns=timestamps_ns,
-        symbols=symbols,
-        mu_2d=np.zeros((n_bars, n_syms), dtype=np.float32),
-        se_2d=np.full((n_bars, n_syms), np.nan, dtype=np.float32),
-        family_mu_3d=np.zeros((n_bars, n_syms, 1), dtype=np.float32),
-        family_ids=(),
-        admitted_signal_ids=(),
-        fold_manifest_hash="",
-    )
-
-
 def run_multiscale_compound_engine(
     *,
     market: MarketFeatureCube,
@@ -115,26 +90,22 @@ def run_multiscale_compound_engine(
 
     has_admitted = False
     try:
-        _logger.info("P2: calibrating signals and evaluating admission")
+        _logger.info("P2: building prequential handoff")
         horizons = tuple(sorted({d.target_horizon_hours for d in panel.descriptors}))
         targets = build_multi_horizon_targets(bars, panel.sigma_2d, horizons)
         max_horizon_bars = max(horizons) // 4 if horizons else 0
         folds = build_folds_4h(panel.z_3d.shape[0], config.calibration, max_target_horizon_bars=max_horizon_bars)
-        calibrations = calibrate_signals(panel, targets, folds, config.calibration)
-        evidence = evaluate_signal_admission(
-            panel, targets, calibrations, folds,
-            market.execution_cost_bps_2d, config.admission,
+        cost_bps_4h = align_costs_to_decision_grid(
+            market.timestamps_ns, bars_4h.timestamps_ns, market.execution_cost_bps_2d,
         )
-        candidate_idx = select_composite_candidates(evidence, config.admission)
-        forecast = combine_composite_forecast(panel, calibrations, evidence, folds, config.admission)
-        composite_evidence = evaluate_composite_admission(
-            panel, targets, forecast, folds,
-            market.execution_cost_bps_2d, config.admission,
+        handoff = build_prequential_handoff(
+            panel, targets, folds, bars_4h, cost_bps_4h, config.handoff,
         )
-        has_admitted = composite_evidence.admitted
+        has_admitted = handoff.evidence.admitted
+        forecast = handoff.forecast
         _logger.info(
-            "P2 complete: %d composite candidates, admitted=%s",
-            len(candidate_idx), has_admitted,
+            "P2 complete: admitted=%s active=%s",
+            has_admitted, handoff.evidence.active_signal_ids,
         )
     except Exception:
         _logger.warning("P2 pipeline failed, using cash-only fallback", exc_info=True)
