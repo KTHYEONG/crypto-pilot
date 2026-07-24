@@ -240,7 +240,7 @@ def sync_futures_data_lake(
             continue
         symbols = plan.broad_symbols if dataset_kind is DatasetKind.KLINES_1H else plan.selected_symbols
         dataset_start = start_date
-        if dataset_kind in (DatasetKind.KLINES_1M, DatasetKind.METRICS_5M):
+        if dataset_kind is DatasetKind.KLINES_1M:
             dataset_start = max(
                 start_date,
                 plan.reference_date - timedelta(days=180),

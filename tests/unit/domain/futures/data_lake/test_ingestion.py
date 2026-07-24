@@ -209,6 +209,43 @@ class TestLocalCommit:
         assert len(client.start_times) == 7
         assert min(client.start_times) == 1_767_225_600_000
 
+    def test_metrics_5m_is_not_limited_to_recent_180_days(self, tmp_path: Path) -> None:
+        payload_buffer = io.BytesIO()
+        pd.DataFrame({"timestamp": [1_783_440_000_000], "close": [100.0]}).to_parquet(
+            payload_buffer, index=False
+        )
+        payload = payload_buffer.getvalue()
+
+        class RecordingClient:
+            def __init__(self) -> None:
+                self.start_times: list[int] = []
+
+            def download_partition(
+                self, dataset: DatasetKind, symbol: str, start_time_ms: int
+            ) -> bytes:
+                _ = (dataset, symbol)
+                self.start_times.append(start_time_ms)
+                return payload
+
+            def download_checksum(self, *args: object, **kwargs: object) -> str:
+                _ = (args, kwargs)
+                return hashlib.sha256(payload).hexdigest()
+
+        plan = IngestionPlan(
+            reference_date=date(2026, 7, 8),
+            broad_symbols=("BTCUSDT",),
+            selected_symbols=("BTCUSDT",),
+            datasets=(DatasetKind.METRICS_5M,),
+            config=DataLakeConfig(root=tmp_path / "lake"),
+            start_date=date(2024, 7, 8),
+        )
+        client = RecordingClient()
+
+        sync_futures_data_lake(plan=plan, client=client, catalog=LocalDataCatalog(plan.config.root))
+
+        assert len(client.start_times) == 25
+        assert min(client.start_times) == 1_719_792_000_000
+
     def test_verified_payload_is_committed_to_durable_catalog(self, tmp_path: Path) -> None:
         plan = IngestionPlan(
             reference_date=date(2026, 7, 8),
