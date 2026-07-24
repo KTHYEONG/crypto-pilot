@@ -13,7 +13,7 @@ from src.domain.futures.compound.allocator import (
 from src.domain.futures.compound.bar_engine import align_costs_to_decision_grid, build_multi_timeframe_bars
 from src.domain.futures.compound.calibration import (
     build_folds_4h,
-    build_multi_horizon_targets,
+    build_multi_horizon_targets,  # noqa: F401 - compatibility patch target for legacy tests
 )
 from src.domain.futures.compound.config import CompoundEngineConfig, DynamicCompoundingConfig
 from src.domain.futures.compound.contracts import (
@@ -24,8 +24,9 @@ from src.domain.futures.compound.contracts import (
     MarketFeatureCube,
 )
 from src.domain.futures.compound.dense_simulator import simulate_dense_portfolio
-from src.domain.futures.compound.handoff import _build_cash_only_forecast, build_prequential_handoff
+from src.domain.futures.compound.handoff import _build_cash_only_forecast
 from src.domain.futures.compound.holdout_store import SealedHoldoutStore
+from src.domain.futures.compound.l1_sleeves import build_exit_aware_handoff
 from src.domain.futures.compound.signal_bank import build_raw_signal_panel
 from src.domain.futures.compound.validation import (
     evaluate_l2_walk_forward,
@@ -85,6 +86,8 @@ def run_multiscale_compound_engine(
     bars = build_multi_timeframe_bars(market)
     bars_4h = bars.cubes["4h"]
     n_bars_4h = bars_4h.timestamps_ns.size
+    raw_funding = bars.aux_1h_fields.get("funding")
+    funding_1h = raw_funding.astype(np.float32) if raw_funding is not None else np.zeros((n_bars_4h * 4, n_syms), dtype=np.float32)
     eligible_4h = _subsample_to_4h(market.eligible_2d)
     panel = build_raw_signal_panel(bars, eligible_4h)
 
@@ -92,15 +95,12 @@ def run_multiscale_compound_engine(
     try:
         _logger.info("P2: building prequential handoff")
         horizons = tuple(sorted({d.target_horizon_hours for d in panel.descriptors}))
-        targets = build_multi_horizon_targets(bars, panel.sigma_2d, horizons)
         max_horizon_bars = max(horizons) // 4 if horizons else 0
         folds = build_folds_4h(panel.z_3d.shape[0], config.calibration, max_target_horizon_bars=max_horizon_bars)
         cost_bps_4h = align_costs_to_decision_grid(
             market.timestamps_ns, bars_4h.timestamps_ns, market.execution_cost_bps_2d,
         )
-        handoff = build_prequential_handoff(
-            panel, targets, folds, bars_4h, cost_bps_4h, config.handoff,
-        )
+        handoff = build_exit_aware_handoff(panel, bars, folds, cost_bps_4h, funding_1h, config.handoff)
         has_admitted = handoff.evidence.admitted
         forecast = handoff.forecast
         _logger.info(
@@ -113,9 +113,6 @@ def run_multiscale_compound_engine(
 
     _logger.info("P3: dynamic compounding allocation, dense simulation")
     bars_4h = bars.cubes["4h"]
-
-    raw_funding = bars.aux_1h_fields.get("funding")
-    funding_1h = raw_funding.astype(np.float32) if raw_funding is not None else np.zeros((n_bars_4h * 4, n_syms), dtype=np.float32)
 
     if has_admitted:
         w = compute_dynamic_compounding_path(forecast=forecast, sigma_2d=panel.sigma_2d, funding_rates_1h_2d=funding_1h, config=config.dynamic_compounding, close_2d=bars_4h.close_2d, cost_bps=config.ladder.cost_bps)
