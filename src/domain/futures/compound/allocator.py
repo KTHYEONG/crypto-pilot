@@ -344,28 +344,94 @@ def solve_growth_optimal_weights(
     )
 
 
+def _apply_portfolio_level_caps(
+    w: NDArray[np.float64],
+    max_long: float,
+    max_short: float,
+    max_gross: float,
+) -> NDArray[np.float64]:
+    long_sum = np.sum(np.maximum(w, 0.0))
+    if long_sum > max_long:
+        w = np.where(w > 0, w * (max_long / max(long_sum, 1e-15)), w)
+
+    short_sum = np.sum(np.maximum(-w, 0.0))
+    if short_sum > max_short:
+        w = np.where(w < 0, w * (max_short / max(short_sum, 1e-15)), w)
+
+    gross = np.sum(np.abs(w))
+    if gross > max_gross:
+        w = w * (max_gross / max(gross, 1e-15))
+
+    return w
+
+
 def compute_dynamic_compounding_path(
     forecast: CalibratedForecastPanel,
     funding_rates_1h_2d: NDArray[np.float32],
     config: DynamicCompoundingConfig,
+    *,
+    close_2d: NDArray[np.float32],
+    cost_bps: float,
 ) -> NDArray[np.float64]:
     n_bars = forecast.decision_timestamps_ns.size
     n_syms = len(forecast.symbols)
     weights = np.zeros((n_bars, n_syms), dtype=np.float64)
 
+    equity = 1.0
+    peak_equity = 1.0
+    cooldown_bars = 0
+
     for t in range(n_bars):
-        mu = forecast.mu_2d[t]
-        var = forecast.se_2d[t] ** 2
-        support = np.isfinite(mu) & np.isfinite(var) & (np.abs(mu) > 0)
+        mu = np.nan_to_num(forecast.mu_2d[t], nan=0.0, posinf=0.0, neginf=0.0)
+        se = forecast.se_2d[t]
+        var = np.nan_to_num(se ** 2, nan=1e-4, posinf=1e-4, neginf=1e-4)
+        support = (np.abs(mu) > 0)
         combined = CombinedForecast(mu_robust_1d=mu.astype(np.float64), variance_1d=var.astype(np.float64), support_1d=support)
-        fr = funding_rates_1h_2d[t * 4].astype(np.float64) if t * 4 < funding_rates_1h_2d.shape[0] else np.zeros(n_syms, dtype=np.float64)
+
+        if t == 0:
+            fr = np.zeros(n_syms, dtype=np.float64)
+        else:
+            idx = (t - 1) * 4
+            fr_raw = funding_rates_1h_2d[idx].astype(np.float64) if idx < funding_rates_1h_2d.shape[0] else np.zeros(n_syms, dtype=np.float64)
+            fr = np.nan_to_num(fr_raw, nan=0.0, posinf=0.0, neginf=0.0)
+
         prev_w = weights[t - 1] if t > 0 else np.zeros(n_syms, dtype=np.float64)
-        weights[t] = compute_dynamic_compounding_weights(
+
+        raw_w = compute_dynamic_compounding_weights(
             forecast=combined,
             funding_rates_1d=fr,
             previous_weights_1d=prev_w,
             config=config,
         )
+
+        scale = 1.0
+        if cooldown_bars > 0:
+            scale = 0.0
+            cooldown_bars -= 1
+        else:
+            dd = 1.0 - equity / max(peak_equity, 1e-15)
+            if dd >= config.hard_drawdown_limit:
+                scale = 0.0
+                cooldown_bars = 168
+                equity = peak_equity  # reset equity to prevent infinite hard-stop loop
+            elif dd >= config.soft_drawdown_limit:
+                frac = (dd - config.soft_drawdown_limit) / max(
+                    config.hard_drawdown_limit - config.soft_drawdown_limit, 1e-15
+                )
+                scale = max(0.0, min(1.0, 1.0 - frac))
+
+        w_scaled = raw_w * scale
+        weights[t] = w_scaled
+
+        if t < n_bars - 1:
+            close_t = close_2d[t].astype(np.float64)
+            close_next = close_2d[t + 1].astype(np.float64)
+            valid = (close_t > 0) & np.isfinite(close_t) & (close_next > 0) & np.isfinite(close_next)
+            ret = np.where(valid, np.log(close_next / close_t), 0.0)
+            portfolio_ret = np.dot(w_scaled, ret) - cost_bps * 1e-4 * np.sum(np.abs(w_scaled - prev_w))
+            equity = equity * (1.0 + portfolio_ret)
+            peak_equity = max(peak_equity, equity)
+
     return weights
 
 
@@ -415,10 +481,6 @@ def compute_dynamic_compounding_weights(
 
     w = np.where(support, w, 0.0)
 
-    w = np.clip(w, -config.max_short_leverage, config.max_long_leverage)
-
-    gross = np.sum(np.abs(w))
-    if gross > config.max_gross_leverage:
-        w = w * (config.max_gross_leverage / max(gross, 1e-15))
+    w = _apply_portfolio_level_caps(w, config.max_long_leverage, config.max_short_leverage, config.max_gross_leverage)
 
     return w

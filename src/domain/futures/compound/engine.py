@@ -140,11 +140,7 @@ def run_multiscale_compound_engine(
     funding_1h = raw_funding.astype(np.float32) if raw_funding is not None else np.zeros((n_bars_4h * 4, n_syms), dtype=np.float32)
 
     if has_admitted:
-        w = compute_dynamic_compounding_path(
-            forecast=forecast,
-            funding_rates_1h_2d=funding_1h,
-            config=config.dynamic_compounding,
-        )
+        w = compute_dynamic_compounding_path(forecast=forecast, funding_rates_1h_2d=funding_1h, config=config.dynamic_compounding, close_2d=bars_4h.close_2d, cost_bps=config.ladder.cost_bps)
         is_cash_only = float(np.sum(np.abs(w))) < 1e-15
         if not is_cash_only:
             pass  # allocate_portfolio_step: direct invocation reference
