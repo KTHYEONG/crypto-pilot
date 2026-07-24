@@ -18,6 +18,20 @@ _logger = logging.getLogger(__name__)
 
 _VARIANCE_FLOOR: float = 1e-12
 
+_COST_EDGE_THETA: float = 0.0006
+
+
+def apply_cost_aware_net_edge(
+    target_weights: NDArray[np.float64],
+    previous_weights: NDArray[np.float64],
+    mu: NDArray[np.float64],
+    theta_cost: float = _COST_EDGE_THETA,
+) -> NDArray[np.float64]:
+    delta_w = target_weights - previous_weights
+    edge = np.abs(delta_w * mu)
+    above_threshold = edge > theta_cost
+    return np.where(above_threshold, target_weights, previous_weights)
+
 
 def combine_alpha_forecasts(
     tape: AlphaForecastTape,

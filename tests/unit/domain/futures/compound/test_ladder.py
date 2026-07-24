@@ -5,7 +5,7 @@ import pytest
 
 from src.domain.futures.compound.config import LadderConfig
 from src.domain.futures.compound.contracts import LadderStageResult, MarketFeatureCube
-from src.domain.futures.compound.ladder import run_experiment_ladder
+from src.domain.futures.compound.ladder import run_experiment_ladder, run_ladder_evaluation
 
 _NS_PER_HOUR = 3_600_000_000_000
 
@@ -82,6 +82,47 @@ class TestRunExperimentLadder:
             assert parts[1] in expected_l2
 
     def test_error_resilience(self):
+        n_bars, n_syms = 500, 2
+        rng = np.random.default_rng(7)
+        close = np.cumprod(1.0 + rng.normal(0.0002, 0.005, (n_bars, n_syms)), axis=0).astype(np.float32) * 100.0
+        market = MarketFeatureCube(
+            timestamps_ns=np.arange(n_bars, dtype=np.int64) * _NS_PER_HOUR,
+            symbols=("A", "B"),
+            fields_2d={"close": close},
+            available_2d={"core": np.ones((n_bars, n_syms), dtype=np.bool_)},
+            eligible_2d=np.ones((n_bars, n_syms), dtype=np.bool_),
+            entry_block_2d=np.zeros((n_bars, n_syms), dtype=np.bool_),
+            exit_required_2d=np.zeros((n_bars, n_syms), dtype=np.bool_),
+            capacity_usdt_2d=np.full((n_bars, n_syms), 1_000_000.0, dtype=np.float64),
+            execution_cost_bps_2d=np.full((n_bars, n_syms), 8.0, dtype=np.float32),
+            data_manifest_hash="h2",
+        )
+        config = LadderConfig(cost_bps=8.0, n_bootstrap=50)
+        results = run_experiment_ladder(market, market.eligible_2d, config, rng_seed=7)
+        assert len(results) == 8
+
+
+class TestRunLadderEvaluation:
+    @pytest.fixture
+    def small_market(self):
+        return _make_market(1024, 3, ("BTCUSDT", "ETHUSDT", "SOLUSDT"))
+
+    def test_v5_end_to_end_produces_valid_metrics(self, small_market):
+        config = LadderConfig(cost_bps=8.0, n_bootstrap=100)
+        results = run_ladder_evaluation(small_market, small_market.eligible_2d, config, rng_seed=42)
+        assert len(results) == 1
+        r = results[0]
+        assert r.status == "ok"
+        assert np.isfinite(r.oos_log_growth)
+        assert np.isfinite(r.sharpe)
+        assert r.max_drawdown <= 0.0
+        assert r.turnover_per_year >= 0.0
+
+    def test_v5_stage_id_format(self, small_market):
+        config = LadderConfig(cost_bps=8.0, n_bootstrap=50)
+        results = run_ladder_evaluation(small_market, small_market.eligible_2d, config, rng_seed=42)
+        assert len(results) == 1
+        assert results[0].stage_id == "L1-3|L2-V5"
         n_bars, n_syms = 500, 2
         rng = np.random.default_rng(7)
         close = np.cumprod(1.0 + rng.normal(0.0002, 0.005, (n_bars, n_syms)), axis=0).astype(np.float32) * 100.0
