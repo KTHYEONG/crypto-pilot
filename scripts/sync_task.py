@@ -191,15 +191,23 @@ def _clean_scratch_dir() -> int:
     return count
 
 
-def _clean_specs(task: str, keep_specs: list[str] | None = None, keep_all_specs: bool = False) -> int:
+def _clean_specs(
+    task: str,
+    clean_specs: bool = False,
+    clean_all_specs: bool = False,
+    remove_specs: list[str] | None = None,
+    keep_specs: list[str] | None = None,
+) -> int:
     _ = task
-    if keep_all_specs:
+    # Safe by default: do not delete anything unless clean_specs/clean_all_specs or remove_specs is requested
+    if not (clean_specs or clean_all_specs or remove_specs):
         return 0
     specs_dir = "docs/specs"
     if not _path_exists(specs_dir):
         return 0
 
     keep_set = set(keep_specs) if keep_specs else set()
+    remove_set = set(remove_specs) if remove_specs else set()
 
     count = 0
     for fname in os.listdir(specs_dir):
@@ -207,12 +215,14 @@ def _clean_specs(task: str, keep_specs: list[str] | None = None, keep_all_specs:
             if fname in keep_set or fname.lower() in keep_set:
                 continue
 
-            fpath = os.path.join(specs_dir, fname)
-            try:
-                os.remove(fpath)
-                count += 1
-            except OSError:
-                pass
+            # If specific remove list provided, remove only those
+            if (remove_specs and (fname in remove_set or fname.lower() in remove_set)) or clean_specs or clean_all_specs:
+                fpath = os.path.join(specs_dir, fname)
+                try:
+                    os.remove(fpath)
+                    count += 1
+                except OSError:
+                    pass
     return count
 
 
@@ -227,6 +237,22 @@ def main() -> None:
     parser.add_argument("--test", default=None, help="Test file path (auto-resolved if omitted)")
     parser.add_argument("--doc", default=None, help="Architecture doc path")
     parser.add_argument(
+        "--clean-specs",
+        action="store_true",
+        help="Clean unpreserved spec files in docs/specs",
+    )
+    parser.add_argument(
+        "--clean-all-specs",
+        action="store_true",
+        help="Clean all spec files in docs/specs",
+    )
+    parser.add_argument(
+        "--remove-specs",
+        nargs="*",
+        default=[],
+        help="Specific spec files to remove (e.g. --remove-specs old_spec.md)",
+    )
+    parser.add_argument(
         "--keep-specs",
         nargs="*",
         default=[],
@@ -235,7 +261,7 @@ def main() -> None:
     parser.add_argument(
         "--keep-all-specs",
         action="store_true",
-        help="Preserve all files in docs/specs during sync cleanup",
+        help="Preserve all files in docs/specs during sync cleanup (default behavior)",
     )
     args = parser.parse_args()
 
@@ -289,9 +315,15 @@ def main() -> None:
     except Exception as e:
         errors.append(f"Temp wipe failed: {e}")
 
-    # 6. Spec Cleanup
+    # 6. Spec Cleanup (Safe by default; requires explicit clean/remove flags)
     try:
-        cleaned = _clean_specs(args.task, keep_specs=args.keep_specs, keep_all_specs=args.keep_all_specs)
+        cleaned = _clean_specs(
+            args.task,
+            clean_specs=args.clean_specs,
+            clean_all_specs=args.clean_all_specs,
+            remove_specs=args.remove_specs,
+            keep_specs=args.keep_specs,
+        )
         if cleaned > 0:
             logs.append(f"Cleaned {cleaned} spec files")
         else:
