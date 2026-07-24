@@ -540,5 +540,8 @@
   },
   "src/domain/futures/compound/ladder.py": {
     "testing": "tests/unit/domain/futures/compound/test_admission.py"
+  },
+  "src/domain/futures/compound/allocator.py": {
+    "testing": "tests/unit/domain/futures/compound/test_allocator.py"
   }
 }
