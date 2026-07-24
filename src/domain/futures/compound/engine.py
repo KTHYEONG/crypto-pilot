@@ -193,7 +193,7 @@ def run_multiscale_compound_engine(
     l3_result = holdout_store.consume(
         holdout_id=holdout_id,
         model_version=holdout_manifest.model_version,
-        data_manifest_hash=holdout_manifest.data_manifest_hash,
+        data_manifest_hash=market.data_manifest_hash,
         strategy_spec_hash=holdout_manifest.strategy_spec_hash,
         evaluate=evaluate_fn,
         universe_state_hash=holdout_manifest.universe_state_hash,
