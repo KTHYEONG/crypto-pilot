@@ -1,5 +1,10 @@
 # Active Decisions Log (Sliding Window)
 
+## [2026-07-24] [L1_SMART_MONEY_DIVERGENCE_AND_HOLDOUT_INTEGRITY] [ADR_20260724_L1_SMART_MONEY_DIVERGENCE_AND_HOLDOUT_INTEGRITY]
+- **Context/Why:** metrics_5m 18개월 공백 백필 후 top-trader/retail 괴리 신호를 신규 L1 알파로 시도. 실제 admission 실행 결과가 이전과 완전 동일해 조사한 결과, materialize_causal_metrics_grid가 pyarrow ArrowTypeError를 조용히 삼켜 전체 신호가 NaN이었고(버그A), available_at dtype 비교 오류(버그B), sealed holdout consume()이 저장된 해시를 자기 자신과 비교해 재평가 없이 캐시를 반환하던 무결성 결함(버그C)까지 3건이 드러남
+- **Resolution/What:** query.py: pq.read_table->pd.read_parquet 교체, available_at dtype-safe ns 정규화. ingestion.py: METRICS_5M을 180일 cap에서 분리. engine.py: holdout consume()에 market.data_manifest_hash(신선값) 전달로 무결성 검증 복원. signal_bank.py/bar_engine.py/compound_data.py: smart_money_divergence family 신규 배선. 버그 수정 후 재실행한 진짜 admission 결과는 sign_consistency=0.25로 정직하게 기각(205일 예비 유의 결과가 730일 재검증에서도, 버그 수정 전후 모두 최종적으로는 미채택)
+- **Impact:** L1 신규 신호는 최종 미채택이나 데이터 파이프라인 신뢰성 확보(2196개 metrics_5m 파티션 재사용 가능 자산), holdout 무결성 회귀 방지(test_stale_holdout_manifest_hash_mismatch_raises 추가로 향후 동일 결함 재발 차단). L2/L3는 admitted 신호 집합 불변으로 v6.1과 동일(log growth -0.384, MDD -16.5%, L3 SHADOW)
+
 ## [2026-07-24] [L1L2_PRICE_RISK_SIZING] [ADR_20260724_L1L2_PRICE_RISK_SIZING]
 - **Context/Why:** v6 Dynamic Kelly(epistemic-var sizing)가 실측 -68% 파산(MDD -71.6%, L3 REJECT). 유저 가설은 signal SNR 부족이었으나 진단 결과 진짜 주범은 사이징 분모(가격리스크 아닌 family간 forecast 분산)와 182일 admission 창의 검정력 부족
 - **Resolution/What:** allocator.py 사이징을 f=0.20·mu/sigma_price + causal 15% vol target으로 교체, admission.py에 pre-OOS look-ahead 마스킹 추가, config.py DynamicCompoundingConfig 재정의, engine.py에 sigma_2d 전달 wiring. 730d 실측: 앙상블 확장/SNR-조건부 f 가설 전량 기각, 사이징 교체만으로 dev log growth -6.90→+0.265 확인 후 프로덕션 파이프라인 실행(730d, holdout 신선 소비)
@@ -69,8 +74,3 @@
 - **Context/Why:** 최신 구현과 기존 explain 문서가 data snapshot, PIT universe, L1/L2 engine 경계를 일치시키지 못했고 실제 network 수집과 기존 데이터 삭제 시점도 분리되어야 했다.
 - **Resolution/What:** 단일 multiscale engine 경로, runner-owned Binance/DuckDB runtime, 승인 기반 network sync, checksum/atomic Parquet snapshot, historical PIT union, sparse L1 event와 signed L2 allocation 계약을 최신 설명 문서에 동기화했다.
 - **Impact:** check PASS(Cov 93%) 기준의 현재 로직을 문서화했다. 실제 Binance 다운로드와 data/futures 중복 데이터 삭제는 사용자 승인 전 수행하지 않는다.
-
-## [2026-07-23] [TASK_COMPOUND_MAIN_REAL_DATA_ALIGNMENT] [ADR_20260723_COMPOUND_MAIN_REAL_DATA_ALIGNMENT]
-- **Context/Why:** 실제 메인 실행에서 Binance timestamp 정밀도 불일치와 기준일 미전달로 결측·무결성 실패가 발생했고, explain 문서가 최신 compound-only 경로와 불일치했다.
-- **Resolution/What:** OHLCV timestamp를 내부 ns로 정규화하고 reference_date를 데이터 로더와 PIT state에 동일하게 전달했다. compound-only 실행 흐름, 18개 recipe, L1 uncertainty, L2 단일 allocator, simulator, L3 결과 및 현재 fallback universe·zero-support 원인을 docs/results/explain.md에 기록했다.
-- **Impact:** 메인 실행은 integrity 정상으로 완료되며, 현재 실측은 2종목 fallback과 robust uncertainty shrink로 target weight 0·L2 성장률 0·L3 SHADOW를 명확히 보고한다. check Cov 91% PASS.
