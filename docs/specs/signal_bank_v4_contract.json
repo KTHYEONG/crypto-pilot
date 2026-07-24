@@ -1,0 +1,86 @@
+{
+  "contracts": [
+    {
+      "kind": "function",
+      "name": "_default_catalog",
+      "file_hint": "src/domain/futures/compound/signal_bank.py",
+      "signatures": "def _default_catalog() -> tuple[SignalDescriptor, ...]",
+      "error_policy": "Return valid tuple of 25 matched-horizon SignalDescriptors",
+      "side_effects": [],
+      "semantic_rules": [
+        "Every descriptor must have target_horizon_hours matching its lookback scale"
+      ],
+      "assertions": [
+        {
+          "input": {},
+          "output": "tuple of 25 SignalDescriptors with target_horizon_hours > 0"
+        }
+      ]
+    },
+    {
+      "kind": "function",
+      "name": "evaluate_signal_admission",
+      "file_hint": "src/domain/futures/compound/admission.py",
+      "signatures": "def evaluate_signal_admission(panel: RawSignalPanel, targets: dict[int, CalibrationTarget], calibrations: tuple[SignalCalibration, ...], folds: tuple[CausalFold, ...], cost_bps_2d: NDArray[np.float32] | None, config: AdmissionConfig, rng_seed: int = 42) -> tuple[SignalAdmissionEvidence, ...]",
+      "error_policy": "Raise ValueError on missing target horizon; return evidence tuple",
+      "side_effects": [],
+      "semantic_rules": [
+        "Must compute Benjamini-Hochberg FDR q-values across full vector of p-values"
+      ],
+      "assertions": [
+        {
+          "input": {"calibrations": "25 items"},
+          "output": "tuple of 25 SignalAdmissionEvidence items"
+        }
+      ]
+    },
+    {
+      "kind": "function",
+      "name": "combine_admitted_forecasts",
+      "file_hint": "src/domain/futures/compound/admission.py",
+      "signatures": "def combine_admitted_forecasts(panel: RawSignalPanel, calibrations: tuple[SignalCalibration, ...], evidence: tuple[SignalAdmissionEvidence, ...], folds: tuple[CausalFold, ...]) -> CalibratedForecastPanel",
+      "error_policy": "Return zero-mu fallback if no signals admitted; scale-normalize admitted signals",
+      "side_effects": [],
+      "semantic_rules": [
+        "Must divide forecast contribution by sqrt(H / 4) to normalize to 4h return scale"
+      ],
+      "assertions": [
+        {
+          "input": {"admitted_signals": ["trend_ema:slow_tgt216h"]},
+          "output": "CalibratedForecastPanel with non-zero mu_2d and non-nan se_2d"
+        }
+      ]
+    }
+  ],
+  "scenarios": [
+    {
+      "id": 1,
+      "scope": "unit",
+      "name": "test_signal_bank_v4_default_catalog_matched_horizons"
+    },
+    {
+      "id": 2,
+      "scope": "unit",
+      "name": "test_full_vector_bh_fdr_correction"
+    },
+    {
+      "id": 3,
+      "scope": "unit",
+      "name": "test_low_effective_sample_flagging"
+    },
+    {
+      "id": 4,
+      "scope": "integration",
+      "name": "test_combine_admitted_forecasts_scale_normalization"
+    }
+  ],
+  "wiring": [
+    {
+      "file": "src/domain/futures/compound/ladder.py",
+      "anchor": "run_experiment_ladder",
+      "import_symbol": "_default_catalog",
+      "invocation_symbol": "catalog = _default_catalog()",
+      "invocation_regex": "catalog\\s*=\\s*_default_catalog\\(\\)"
+    }
+  ]
+}
