@@ -231,6 +231,25 @@ class LadderConfig:
 
 
 @dataclass(slots=True, frozen=True)
+class DynamicCompoundingConfig:
+    min_kelly_fraction: float = 0.25
+    max_kelly_fraction: float = 0.60
+    max_gross_leverage: float = 2.00
+    max_long_leverage: float = 1.50
+    max_short_leverage: float = 0.50
+    funding_carry_enabled: bool = True
+    soft_drawdown_limit: float = 0.15
+    hard_drawdown_limit: float = 0.25
+
+    def __post_init__(self) -> None:
+        assert 0 < self.min_kelly_fraction <= self.max_kelly_fraction <= 1
+        assert self.max_long_leverage > 0
+        assert self.max_short_leverage > 0
+        assert self.max_gross_leverage >= self.max_long_leverage + self.max_short_leverage
+        assert 0 < self.soft_drawdown_limit < self.hard_drawdown_limit <= 1
+
+
+@dataclass(slots=True, frozen=True)
 class CompoundEngineConfig:
     data: DataPlaneConfig = field(default_factory=DataPlaneConfig)
     l1: L1EstimatorConfig = field(default_factory=L1EstimatorConfig)
@@ -245,6 +264,7 @@ class CompoundEngineConfig:
     ladder: LadderConfig = field(default_factory=LadderConfig)
     calibration: CalibrationConfig = field(default_factory=CalibrationConfig)
     admission: AdmissionConfig = field(default_factory=AdmissionConfig)
+    dynamic_compounding: DynamicCompoundingConfig = field(default_factory=DynamicCompoundingConfig)
 
     def __post_init__(self) -> None:
         assert isinstance(self.data, DataPlaneConfig)
@@ -260,3 +280,4 @@ class CompoundEngineConfig:
         assert isinstance(self.ladder, LadderConfig)
         assert isinstance(self.calibration, CalibrationConfig)
         assert isinstance(self.admission, AdmissionConfig)
+        assert isinstance(self.dynamic_compounding, DynamicCompoundingConfig)

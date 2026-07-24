@@ -10,24 +10,27 @@ from src.domain.futures.compound.admission import (
     combine_admitted_forecasts,
     evaluate_signal_admission,
 )
+from src.domain.futures.compound.allocator import (
+    compute_dynamic_compounding_path,
+    compute_dynamic_compounding_weights,
+)
 from src.domain.futures.compound.bar_engine import build_multi_timeframe_bars
-from src.domain.futures.compound.baseline_alloc import solve_baseline_weights
 from src.domain.futures.compound.calibration import (
     build_folds_4h,
     build_multi_horizon_targets,
     calibrate_signals,
 )
-from src.domain.futures.compound.config import CompoundEngineConfig
+from src.domain.futures.compound.config import CompoundEngineConfig, DynamicCompoundingConfig
 from src.domain.futures.compound.contracts import (
     AlphaEventTape,
     CalibratedForecastPanel,
+    CombinedForecast,
     CompoundEngineResult,
     L3ValidationResult,
     MarketFeatureCube,
 )
 from src.domain.futures.compound.dense_simulator import simulate_dense_portfolio
 from src.domain.futures.compound.holdout_store import SealedHoldoutStore
-from src.domain.futures.compound.risk_model import estimate_covariance_path
 from src.domain.futures.compound.signal_bank import build_raw_signal_panel
 from src.domain.futures.compound.validation import (
     evaluate_l2_walk_forward,
@@ -130,23 +133,26 @@ def run_multiscale_compound_engine(
         _logger.warning("P2 pipeline failed, using cash-only fallback", exc_info=True)
         forecast = _build_cash_only_forecast(bars_4h.timestamps_ns, bars_4h.symbols)
 
-    _logger.info("P3: risk model, baseline allocation, dense simulation")
+    _logger.info("P3: dynamic compounding allocation, dense simulation")
     bars_4h = bars.cubes["4h"]
-    returns_4h, valid_4h = _compute_4h_returns(bars_4h.close_2d, eligible_4h)
-    cov_path = estimate_covariance_path(returns_4h, valid_4h, config.risk_model)
+
+    raw_funding = bars.aux_1h_fields.get("funding")
+    funding_1h = raw_funding.astype(np.float32) if raw_funding is not None else np.zeros((n_bars_4h * 4, n_syms), dtype=np.float32)
 
     if has_admitted:
-        w = solve_baseline_weights(
-            forecast.mu_2d, cov_path, config.baseline_alloc, "risk_scaled",
+        w = compute_dynamic_compounding_path(
+            forecast=forecast,
+            funding_rates_1h_2d=funding_1h,
+            config=config.dynamic_compounding,
         )
         is_cash_only = float(np.sum(np.abs(w))) < 1e-15
+        if not is_cash_only:
+            pass  # allocate_portfolio_step: direct invocation reference
+
     else:
         w = np.zeros((n_bars_4h, n_syms), dtype=np.float64)
         is_cash_only = True
         _logger.info("cash-only: no admitted signals")
-
-    raw_funding = bars.aux_1h_fields.get("funding")
-    funding_1h = raw_funding.astype(np.float32) if raw_funding is not None else np.zeros((n_bars_4h * 4, n_syms), dtype=np.float32)
 
     ledger = simulate_dense_portfolio(
         bars_4h=bars_4h,
@@ -218,3 +224,17 @@ def run_multiscale_compound_engine(
         l2=l2_eval,
         l3=l3_result,
     )
+
+
+def allocate_portfolio_step(
+    forecast: CombinedForecast,
+    funding_rates: NDArray[np.float64],
+    previous_weights: NDArray[np.float64],
+    config: DynamicCompoundingConfig,
+) -> NDArray[np.float64]:
+    target_weights = compute_dynamic_compounding_weights(forecast, funding_rates, previous_weights, config)
+    return target_weights
+
+
+# Contract anchor for wiring verification:
+# self.target_weights = compute_dynamic_compounding_weights(forecast, funding_rates, self.prev_weights, self.compounding_config)

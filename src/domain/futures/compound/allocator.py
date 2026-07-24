@@ -5,11 +5,12 @@ import logging
 import numpy as np
 from numpy.typing import NDArray
 
-from src.domain.futures.compound.config import AllocatorConfig
+from src.domain.futures.compound.config import AllocatorConfig, DynamicCompoundingConfig
 from src.domain.futures.compound.contracts import (
     ActiveForecastState,
     AllocationConstraints,
     AlphaForecastTape,
+    CalibratedForecastPanel,
     CombinedForecast,
     PortfolioDecision,
 )
@@ -341,3 +342,83 @@ def solve_growth_optimal_weights(
         risk_scale=1.0,
         binding_constraints=tuple(binding),
     )
+
+
+def compute_dynamic_compounding_path(
+    forecast: CalibratedForecastPanel,
+    funding_rates_1h_2d: NDArray[np.float32],
+    config: DynamicCompoundingConfig,
+) -> NDArray[np.float64]:
+    n_bars = forecast.decision_timestamps_ns.size
+    n_syms = len(forecast.symbols)
+    weights = np.zeros((n_bars, n_syms), dtype=np.float64)
+
+    for t in range(n_bars):
+        mu = forecast.mu_2d[t]
+        var = forecast.se_2d[t] ** 2
+        support = np.isfinite(mu) & np.isfinite(var) & (np.abs(mu) > 0)
+        combined = CombinedForecast(mu_robust_1d=mu.astype(np.float64), variance_1d=var.astype(np.float64), support_1d=support)
+        fr = funding_rates_1h_2d[t * 4].astype(np.float64) if t * 4 < funding_rates_1h_2d.shape[0] else np.zeros(n_syms, dtype=np.float64)
+        prev_w = weights[t - 1] if t > 0 else np.zeros(n_syms, dtype=np.float64)
+        weights[t] = compute_dynamic_compounding_weights(
+            forecast=combined,
+            funding_rates_1d=fr,
+            previous_weights_1d=prev_w,
+            config=config,
+        )
+    return weights
+
+
+def compute_dynamic_compounding_weights(
+    forecast: CombinedForecast,
+    funding_rates_1d: NDArray[np.float64],
+    previous_weights_1d: NDArray[np.float64],
+    config: DynamicCompoundingConfig,
+) -> NDArray[np.float64]:
+    if not np.all(np.isfinite(forecast.mu_robust_1d)):
+        raise ValueError("non-finite mu_robust_1d in forecast")
+    if not np.all(np.isfinite(forecast.variance_1d)):
+        raise ValueError("non-finite variance_1d in forecast")
+    if not np.all(np.isfinite(funding_rates_1d)):
+        raise ValueError("non-finite funding_rates_1d")
+    if not np.all(np.isfinite(previous_weights_1d)):
+        raise ValueError("non-finite previous_weights_1d")
+
+    mu = forecast.mu_robust_1d.copy()
+    variance = forecast.variance_1d.copy()
+    support = forecast.support_1d
+
+    variance_safe = np.maximum(variance, 1e-12)
+
+    if config.funding_carry_enabled:
+        carry = np.where(mu > 0, 1.0, np.where(mu < 0, -1.0, 0.0)) * funding_rates_1d
+        mu = mu + carry
+
+    mu_support = np.abs(mu) > 0
+    support = support & mu_support
+
+    sigma = np.sqrt(variance_safe)
+    snr = np.where(support, np.abs(mu) / np.maximum(sigma, 1e-12), 0.0)
+
+    snr_clipped = np.clip(snr * 5.0, 0.0, 1.0)
+    kelly_frac = config.min_kelly_fraction + (config.max_kelly_fraction - config.min_kelly_fraction) * snr_clipped
+
+    raw_weights = np.where(support, kelly_frac * mu / variance_safe, 0.0)
+
+    alpha_smooth = 0.03
+    smoothed = alpha_smooth * raw_weights + (1.0 - alpha_smooth) * previous_weights_1d
+
+    theta = 0.0006
+    delta = np.abs(smoothed - previous_weights_1d)
+    hysteresis_mask = delta > theta
+    w = np.where(hysteresis_mask, smoothed, previous_weights_1d)
+
+    w = np.where(support, w, 0.0)
+
+    w = np.clip(w, -config.max_short_leverage, config.max_long_leverage)
+
+    gross = np.sum(np.abs(w))
+    if gross > config.max_gross_leverage:
+        w = w * (config.max_gross_leverage / max(gross, 1e-15))
+
+    return w
