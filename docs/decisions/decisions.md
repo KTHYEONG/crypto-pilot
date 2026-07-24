@@ -1,5 +1,10 @@
 # Active Decisions Log (Sliding Window)
 
+## [2026-07-24] [TASK_HORIZON_COHERENT_L1_L2_HANDOFF] [ADR_20260724_HORIZON_COHERENT_L1_L2_HANDOFF]
+- **Context/Why:** 실제 730일 120종목 데이터에서 기존 L1 composite가 horizon 계약과 L2 실행주기를 혼합했고, 중앙값·winsorized 평균도 손실을 개선하지 못했습니다. 구현 후 dev-only 실행에서 후보는 있었지만 최종 admission은 실패했습니다.
+- **Resolution/What:** horizon holding kernel, causal 4h cost alignment, family/correlation 중복 제거, prequential handoff와 경제성 게이트를 배선했습니다. 실제 full run은 신호를 거래하지 않고 cash-only로 차단했으며, dev diagnostic은 5개 fold에서 positive fold 0/5를 기록했습니다.
+- **Impact:** L2 실거래 노출은 0으로 안전 차단되었습니다. 다만 handoff weight gross cap 누락으로 log1p invalid와 NaN MDD가 발생했고 engine의 holdout dev 경계 및 전체시계열 상관 계산은 후속 수정이 필요합니다. sealed holdout은 dev diagnostic에서 사용하지 않았습니다.
+
 ## [2026-07-24] [L1L2_COMPOSITE_ADMISSION] [ADR_20260724_L1L2_COMPOSITE_ADMISSION]
 - **Context/Why:** L1 27개 signal 개별 이진 admission 게이트(2/27만 통과, trend_ema:slow p=0.0000조차 LCB90 근소미달로 탈락)가 근본 병목이라는 코드분석 진단. result.md 실측 p-value Stouffer 메타분석(scratch/verify_composite_admission.py)에서 breadth 결합 Z=7.94 vs status-quo Z=4.67로 가설 지지.
 - **Resolution/What:** select_composite_candidates(약필터)+combine_composite_forecast(fold별 precision=1/se² 가중)+evaluate_composite_admission(composite 단일 bootstrap 게이트) 구현, combine_admitted_forecasts 삭제, net_mean_2x 이중비용차감 버그 수정. check 단계서 sigma 재나눔 스펙이탈 및 NaN마스킹 누락 실버그(표본 0개 붕괴) 발견수정. lean_check PASS(Cov 94%).
@@ -69,8 +74,3 @@
 - **Context/Why:** lake-only 전환 후 과거 ledger 이관만으로는 현재 거래 가능 상태를 갱신할 수 없고 Binance exchangeInfo 전체를 사용하면 운영 120심볼 축을 초과함
 - **Resolution/What:** Binance exchangeInfo를 조회하고 data/futures/lake의 기존 운영 심볼과 교집합을 취해 다음 UTC 일자의 causal universe_state를 immutable Parquet와 DuckDB catalog에 저장하는 refresh_live_universe_state를 추가함
 - **Impact:** 실제 Binance 846개 응답에서 120개를 선별해 119개 eligible state를 2026-07-24 partition에 저장하고 state hash 및 24시간/120심볼 cube 검증을 완료함. 구형 raw 데이터 삭제와 L2/L3 성과 검증은 별도 잔여 작업임
-
-## [2026-07-23] [data-lake-collection-verification] [ADR_20260723_data-lake-collection-verification]
-- **Context/Why:** 유니버스·L1·L2 백테스트에 필요한 Binance Futures 데이터를 수집하고 저장 완전성을 검증
-- **Resolution/What:** 유효 symbol 120개를 기준으로 1h/1m OHLCV, funding, premium, mark/index, metrics를 수집하고 bounded parallel ingestion, symbol 검증, quote volume 보정을 적용
-- **Impact:** 13,167개 partition과 101,540,621 rows를 검증했으며 누락·hash·row count·schema·시간축·비정상값이 모두 0이다. L1/L2/L3 성과 검증은 다음 작업으로 남겼다.
