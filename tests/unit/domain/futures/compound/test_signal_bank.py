@@ -16,6 +16,7 @@ from src.domain.futures.compound.contracts import (
 )
 from src.domain.futures.compound.signal_bank import (
     _compute_basis_gap,
+    _compute_smart_money_divergence,
     _compute_xs_rank_signal,
     _compute_xs_reversal,
     _default_catalog,
@@ -346,26 +347,105 @@ def test_build_raw_signal_panel_default_catalog_has_25_signals_with_new_families
     N = len(bars.cubes["4h"].symbols)
     eligible = np.ones((T, N), np.bool_)
     panel = build_raw_signal_panel(bars, eligible_2d=eligible)
-    assert len(panel.descriptors) == 25
+    assert len(panel.descriptors) == 27
     families = {d.family for d in panel.descriptors}
     assert "xs_reversal" in families
     assert "xs_momentum_slow" in families
+    assert "smart_money_divergence" in families
     assert "flow_taker" not in families
     xs = [d for d in panel.descriptors if d.family == "xs_reversal"]
     assert len(xs) == 2
     msm = [d for d in panel.descriptors if d.family == "xs_momentum_slow"]
     assert len(msm) == 2
+    smd = [d for d in panel.descriptors if d.family == "smart_money_divergence"]
+    assert len(smd) == 2
 
 
 def test_signal_bank_v4_default_catalog_matched_horizons() -> None:
     catalog = _default_catalog()
-    assert len(catalog) == 25
+    assert len(catalog) == 27
     for desc in catalog:
         assert desc.target_horizon_hours > 0
         assert desc.target_horizon_hours == desc.lookback_hours, (
             f"{desc.signal_id}: target_horizon_hours={desc.target_horizon_hours} "
             f"!= lookback_hours={desc.lookback_hours}"
         )
+
+
+def test_compute_smart_money_divergence_sign_and_nan_handling() -> None:
+    n_t, n_s = 200, 3
+    top_trader = np.full((n_t, n_s), 2.0, dtype=np.float32)
+    retail = np.full((n_t, n_s), 1.0, dtype=np.float32)
+    result = _compute_smart_money_divergence(top_trader, retail, 24)
+    assert result.shape == (n_t, n_s)
+    valid = result[42:]
+    assert np.all(valid < 0), "contrarian sign: top_trader > retail -> negative"
+
+    top_trader_invalid = top_trader.copy()
+    top_trader_invalid[50] = -1.0
+    top_trader_invalid[60] = 0.0
+    top_trader_invalid[70, 1] = np.nan
+    _compute_smart_money_divergence(top_trader_invalid, retail, 24)
+
+
+def test_build_raw_signal_panel_smart_money_divergence_wiring() -> None:
+    n_bars = 24 * 90
+    t = np.arange(n_bars, dtype=np.float64)[:, None]
+    close = (100.0 + 10.0 * np.sin(t / 96.0) + 0.01 * t).astype(np.float32)
+    close = np.repeat(close, 3, axis=1)
+    ts = np.arange(n_bars, dtype=np.int64) * HOUR_NS + 1_700_000_000_000_000_000
+
+    rng = np.random.default_rng(42)
+    top_trader_ratio = 1.0 + 0.5 * rng.random((n_bars, 3)).astype(np.float32)
+    retail_ratio = 1.0 + 0.3 * rng.random((n_bars, 3)).astype(np.float32)
+
+    n_syms = 3
+    market = MarketFeatureCube(
+        timestamps_ns=ts,
+        symbols=tuple(f"SYM{i}USDT" for i in range(n_syms)),
+        fields_2d={
+            "open": close,
+            "high": close * 1.001,
+            "low": close * 0.999,
+            "close": close,
+            "quote_volume": np.full((n_bars, n_syms), 1e6, np.float32),
+            "funding": np.full((n_bars, n_syms), 1e-4, np.float32),
+            "premium": np.zeros((n_bars, n_syms), np.float32),
+            "mark": close,
+            "index": close,
+            "taker_buy_quote": np.full((n_bars, n_syms), 6e5, np.float32),
+            "top_trader_long_short_ratio": top_trader_ratio,
+            "long_short_ratio": retail_ratio,
+        },
+        available_2d={k: np.ones((n_bars, n_syms), np.bool_) for k in
+                      ("open", "high", "low", "close", "quote_volume", "funding",
+                       "premium", "mark", "index", "taker_buy_quote",
+                       "top_trader_long_short_ratio", "long_short_ratio")},
+        eligible_2d=np.ones((n_bars, n_syms), np.bool_),
+        entry_block_2d=np.zeros((n_bars, n_syms), np.bool_),
+        exit_required_2d=np.zeros((n_bars, n_syms), np.bool_),
+        capacity_usdt_2d=np.full((n_bars, n_syms), 1e6, np.float64),
+        execution_cost_bps_2d=np.full((n_bars, n_syms), 12.0, np.float32),
+        data_manifest_hash="test",
+    )
+
+    bars = build_multi_timeframe_bars(market)
+    T = bars.decision_timestamps_ns.size
+    eligible = np.ones((T, n_syms), np.bool_)
+    panel = build_raw_signal_panel(bars, eligible_2d=eligible)
+
+    smd_fast_idx = next(i for i, d in enumerate(panel.descriptors)
+                        if d.signal_id == "smart_money_divergence:fast")
+    smd_medium_idx = next(i for i, d in enumerate(panel.descriptors)
+                         if d.signal_id == "smart_money_divergence:medium")
+    assert np.any(panel.valid_3d[:, :, smd_fast_idx])
+    assert np.any(panel.valid_3d[:, :, smd_medium_idx])
+    fast_scores = panel.z_3d[:, :, smd_fast_idx]
+    medium_scores = panel.z_3d[:, :, smd_medium_idx]
+    assert np.any(np.isfinite(fast_scores))
+    assert np.any(np.isfinite(medium_scores))
+    assert panel.descriptors[smd_fast_idx].native_timeframe == "1h"
+    assert panel.descriptors[smd_medium_idx].native_timeframe == "1h"
 
 
 def test_p2_pipeline_handles_updated_catalog_size_without_hardcoded_25(synthetic_market: MarketFeatureCube) -> None:
@@ -375,7 +455,7 @@ def test_p2_pipeline_handles_updated_catalog_size_without_hardcoded_25(synthetic
     eligible = np.ones((T, N), np.bool_)
     panel = build_raw_signal_panel(bars, eligible_2d=eligible)
     assert isinstance(panel, RawSignalPanel)
-    assert panel.z_3d.shape[-1] == 25
+    assert panel.z_3d.shape[-1] == 27
     assert panel.z_3d.dtype == np.float32
     finite_mask = np.isfinite(panel.z_3d)
     if np.any(finite_mask):
