@@ -367,6 +367,7 @@ def _apply_portfolio_level_caps(
 
 def compute_dynamic_compounding_path(
     forecast: CalibratedForecastPanel,
+    sigma_2d: NDArray[np.float32],
     funding_rates_1h_2d: NDArray[np.float32],
     config: DynamicCompoundingConfig,
     *,
@@ -380,13 +381,13 @@ def compute_dynamic_compounding_path(
     equity = 1.0
     peak_equity = 1.0
     cooldown_bars = 0
+    return_history: list[float] = []
 
     for t in range(n_bars):
         mu = np.nan_to_num(forecast.mu_2d[t], nan=0.0, posinf=0.0, neginf=0.0)
-        se = forecast.se_2d[t]
-        var = np.nan_to_num(se ** 2, nan=1e-4, posinf=1e-4, neginf=1e-4)
+        sigma_t = np.nan_to_num(sigma_2d[t], nan=1e-4, posinf=1e-4, neginf=1e-4)
         support = (np.abs(mu) > 0)
-        combined = CombinedForecast(mu_robust_1d=mu.astype(np.float64), variance_1d=var.astype(np.float64), support_1d=support)
+        combined = CombinedForecast(mu_robust_1d=mu.astype(np.float64), variance_1d=np.ones(n_syms, dtype=np.float64), support_1d=support)
 
         if t == 0:
             fr = np.zeros(n_syms, dtype=np.float64)
@@ -397,11 +398,19 @@ def compute_dynamic_compounding_path(
 
         prev_w = weights[t - 1] if t > 0 else np.zeros(n_syms, dtype=np.float64)
 
+        if len(return_history) >= 42:
+            rv_ann = float(np.std(return_history[-config.vol_lookback_bars:], ddof=1)) * np.sqrt(2190.0)
+            vol_scale = min(config.target_ann_vol / max(rv_ann, 1e-15), config.vol_scale_max)
+        else:
+            vol_scale = 1.0
+
         raw_w = compute_dynamic_compounding_weights(
             forecast=combined,
+            sigma_1d=sigma_t.astype(np.float64),
             funding_rates_1d=fr,
             previous_weights_1d=prev_w,
             config=config,
+            vol_scale=vol_scale,
         )
 
         scale = 1.0
@@ -413,7 +422,7 @@ def compute_dynamic_compounding_path(
             if dd >= config.hard_drawdown_limit:
                 scale = 0.0
                 cooldown_bars = 168
-                equity = peak_equity  # reset equity to prevent infinite hard-stop loop
+                equity = peak_equity
             elif dd >= config.soft_drawdown_limit:
                 frac = (dd - config.soft_drawdown_limit) / max(
                     config.hard_drawdown_limit - config.soft_drawdown_limit, 1e-15
@@ -431,30 +440,32 @@ def compute_dynamic_compounding_path(
             portfolio_ret = np.dot(w_scaled, ret) - cost_bps * 1e-4 * np.sum(np.abs(w_scaled - prev_w))
             equity = equity * (1.0 + portfolio_ret)
             peak_equity = max(peak_equity, equity)
+            return_history.append(portfolio_ret)
 
     return weights
 
 
 def compute_dynamic_compounding_weights(
     forecast: CombinedForecast,
+    sigma_1d: NDArray[np.float64],
     funding_rates_1d: NDArray[np.float64],
     previous_weights_1d: NDArray[np.float64],
     config: DynamicCompoundingConfig,
+    vol_scale: float = 1.0,
 ) -> NDArray[np.float64]:
     if not np.all(np.isfinite(forecast.mu_robust_1d)):
         raise ValueError("non-finite mu_robust_1d in forecast")
-    if not np.all(np.isfinite(forecast.variance_1d)):
-        raise ValueError("non-finite variance_1d in forecast")
+    if not np.all(np.isfinite(sigma_1d)):
+        raise ValueError("non-finite sigma_1d")
     if not np.all(np.isfinite(funding_rates_1d)):
         raise ValueError("non-finite funding_rates_1d")
     if not np.all(np.isfinite(previous_weights_1d)):
         raise ValueError("non-finite previous_weights_1d")
 
     mu = forecast.mu_robust_1d.copy()
-    variance = forecast.variance_1d.copy()
     support = forecast.support_1d
 
-    variance_safe = np.maximum(variance, 1e-12)
+    sigma_safe = np.maximum(sigma_1d, config.sigma_floor)
 
     if config.funding_carry_enabled:
         carry = np.where(mu > 0, 1.0, np.where(mu < 0, -1.0, 0.0)) * funding_rates_1d
@@ -463,13 +474,9 @@ def compute_dynamic_compounding_weights(
     mu_support = np.abs(mu) > 0
     support = support & mu_support
 
-    sigma = np.sqrt(variance_safe)
-    snr = np.where(support, np.abs(mu) / np.maximum(sigma, 1e-12), 0.0)
+    raw_weights = np.where(support, config.kelly_fraction * mu / sigma_safe, 0.0)
 
-    snr_clipped = np.clip(snr * 5.0, 0.0, 1.0)
-    kelly_frac = config.min_kelly_fraction + (config.max_kelly_fraction - config.min_kelly_fraction) * snr_clipped
-
-    raw_weights = np.where(support, kelly_frac * mu / variance_safe, 0.0)
+    raw_weights = raw_weights * vol_scale
 
     alpha_smooth = 0.03
     smoothed = alpha_smooth * raw_weights + (1.0 - alpha_smooth) * previous_weights_1d
