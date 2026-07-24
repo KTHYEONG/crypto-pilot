@@ -1,74 +1,113 @@
-# Quant Multiscale Futures Engine Evaluation Report (v6.1 Price-Risk Sizing)
+# Quant Multiscale Futures Engine Evaluation Report (v6.2)
 
 **Date**: 2026-07-24
-**Evaluation Horizon**: 730 days (4,380 4-hour bars / 17,520 1-hour bars), 120 Binance Perpetual Futures Symbols (PIT Causal Data)
-**Execution Mode**: Full Multiscale Pipeline (`run_multiscale_compound_engine`, direct invocation — CLI `if __name__` guard missing)
+**Evaluation Horizon**: 730 days (4,380 4h bars / 17,520 1h bars), 120 Binance Perpetual Futures Symbols
 **Data Integrity**: PASS (`integrity_ok: true`)
-**Prior Baseline**: v6 Dynamic Kelly (182-day eval) — Log Growth **-3.05**, MDD **-71.6%**, L3 **REJECT**
 
 ---
 
-## 1. Executive Summary & Level-by-Level Breakdown
+## 1. L1 Signal Admission — Full Catalog (730d, n_folds=5)
 
-| Pipeline Layer | Evaluation Scope & Strategy Config | Core Metric / Finding | Verdict & Status |
-| :--- | :--- | :--- | :--- |
-| **Level 1 (L1 Alpha Bank)** | 730d admission (n_folds=5, purge/embargo dynamic), 2 admitted signals (`xs_reversal:fast`, `xs_momentum_slow:slow`) | XS rank IC +0.0170, **Newey-West t=+2.71** (182d 창에서는 동일 신호 IC 음수 — 검정력 부족) | PASS (통계적으로 유의, 182d 대비 개선) |
-| **Level 2 (L2 Allocation)** | Price-risk Kelly sizing (`f=0.20 · mu/σ_price`), causal 15% vol target, gross cap 1.0x | **Log Growth: -0.384**, MDD **-16.5%**, 연변동성 **16.0%** | 파산 방어 성공, 순수익은 미약한 음수 |
-| **Level 3 (L3 Validation)** | Sealed Holdout Gate (180-day), 신선 소비 확인(05:34:05 생성→05:35:54 소비, 캐시 재사용 아님) | Posterior growth prob **0.635**, MDD **-7.0%** | **SHADOW** (REJECT 탈출, promote 문턱 0.65 미달) |
+| Signal | Family | β mean | LCB90 | Net Mean (2x cost) | Sign Consistency | p-value | FDR q | Admitted |
+| :--- | :--- | ---: | ---: | ---: | ---: | ---: | ---: | :---: |
+| trend_ema:fast | trend_ema | 0.0580 | -130.0609 | -49.8969 | 0.50 | 0.8480 | 1.0000 | False |
+| trend_ema:medium | trend_ema | 0.0417 | -54.0965 | 85.6189 | 0.25 | 0.2000 | 0.4611 | False |
+| trend_ema:moderate | trend_ema | 0.0412 | -45.8651 | 217.6241 | 1.00 | 0.0020 | 0.0135 | False |
+| trend_ema:slow | trend_ema | 0.0685 | -1.3531 | 148.0265 | 1.00 | 0.0000 | 0.0000 | False |
+| trend_ema:very_slow | trend_ema | 0.0486 | -17.9337 | 313.4665 | 1.00 | 0.0040 | 0.0216 | False |
+| momentum_ts:fast | momentum_ts | 0.1107 | -0.6831 | 1.0801 | 0.75 | 0.2220 | 0.4611 | False |
+| momentum_ts:medium | momentum_ts | 0.0618 | -0.8502 | 1.5841 | 0.75 | 0.1700 | 0.4611 | False |
+| momentum_ts:moderate | momentum_ts | -0.0006 | -1.0246 | 1.1457 | 0.50 | 0.2680 | 0.4824 | False |
+| momentum_ts:slow | momentum_ts | -0.1549 | -1.8261 | 1.7699 | 0.25 | 0.3440 | 0.5559 | False |
+| momentum_ts:very_slow | momentum_ts | 0.0886 | -2.9980 | 2.9883 | 0.75 | 0.3500 | 0.5559 | False |
+| breakout_donchian:fast | breakout_donchian | 0.0568 | -0.0302 | 0.0297 | 0.75 | 0.2160 | 0.4611 | False |
+| breakout_donchian:medium | breakout_donchian | 0.0216 | -0.1688 | -0.0199 | 0.25 | 0.5820 | 0.8730 | False |
+| breakout_donchian:moderate | breakout_donchian | -0.1027 | -0.2377 | 0.1733 | 0.50 | 0.2500 | 0.4821 | False |
+| breakout_donchian:slow | breakout_donchian | -0.0148 | -1.0698 | -0.5218 | 0.50 | 0.9440 | 1.0000 | False |
+| breakout_donchian:very_slow | breakout_donchian | 0.0005 | -2.7109 | -0.9585 | 0.50 | 0.8020 | 1.0000 | False |
+| basis_gap:fast | basis_gap | 0.2671 | -0.0307 | 0.0729 | 0.75 | 0.1120 | 0.3780 | False |
+| basis_gap:medium | basis_gap | 0.2991 | -0.0892 | 0.0970 | 0.50 | 0.1980 | 0.4611 | False |
+| basis_gap:moderate | basis_gap | 0.4239 | -0.0098 | 0.3268 | 0.75 | 0.0400 | 0.1543 | False |
+| basis_gap:slow | basis_gap | 0.5186 | -317.3018 | -132.8601 | 0.50 | 0.8440 | 1.0000 | False |
+| basis_gap:very_slow | basis_gap | 0.9872 | -743.7990 | -321.4381 | 0.50 | 0.8780 | 1.0000 | False |
+| reversal_st:fast | reversal_st | -0.0947 | -1.7768 | -0.6741 | 0.75 | 0.7120 | 1.0000 | False |
+| **xs_reversal:fast** | xs_reversal | 0.0011 | **+0.0117** | 0.0276 | 1.00 | 0.0020 | 0.0135 | **True** |
+| xs_reversal:medium | xs_reversal | -0.0063 | -0.0936 | -0.0497 | 0.50 | 0.9580 | 1.0000 | False |
+| **xs_momentum_slow:slow** | xs_momentum_slow | 0.1330 | **+0.1391** | 0.2705 | 0.75 | 0.0000 | 0.0000 | **True** |
+| xs_momentum_slow:very_slow | xs_momentum_slow | 0.1318 | +0.0048 | 0.2737 | 0.75 | 0.0340 | 0.1530 | False |
+| smart_money_divergence:fast | smart_money_divergence | 0.0357 | -0.0454 | -0.0115 | 0.25 | 0.6660 | 0.9464 | False |
+| smart_money_divergence:medium | smart_money_divergence | 0.0690 | -0.1724 | -0.0611 | 0.25 | 0.8100 | 0.9482 | False |
 
----
-
-## 2. 근본 원인 진단: v6 파산의 주범
-
-유저 가설("신호 SNR 부족")은 부분적으로만 사실이었음. 실측 결과 파산의 진짜 주범은 **L2 사이징 결함**이었고, L1 검정력 부족은 부차적 요인이었다.
-
-### 2.1 사이징 결함 (주범, [HYP-L2-A/B] vs [HYP-L2-C])
-- v6/v5 공통 결함: `w ∝ f·mu/se²`에서 `se`는 family 간 forecast 분산(epistemic uncertainty)이며 **가격 변동성이 아님**. 여러 family가 의견 합치 시 se→0 → 웨이트가 캡까지 폭주 (실측 연변동성 89.8%).
-- 올바른 Kelly 등가식: mu는 이미 vol-normalized 단위이므로 `w ∝ f·mu/σ_price`.
-- **동일 mu, 사이징만 교체한 730d dev 실측**: log growth **-6.90 (v6 재현) / -3.14 (v5 quarter-Kelly, 동일 결함) → +0.265 (price-risk + 15% vol target)**, MDD 100%/98% → 9.7%.
-- 프로덕션 전체 파이프라인 실행(비용·funding·5-fold admission 전부 반영) 결과는 dev 스크립트 근사치보다 보수적: log growth -0.384, MDD -16.5% — **파산은 확실히 해소**되었으나 **비용 차감 후 순수익은 아직 미약한 음수**.
-
-### 2.2 L1 검정력 부족 (부차 요인)
-- 182일 평가 창에서는 admitted 신호(xs_reversal:fast)의 dev IC가 **음수**(-0.0123, t=-1.71)로 뒤집힘 — 노이즈를 신호로 오인.
-- 730일로 확장 시 admitted 2개 신호 IC **+0.0170, Newey-West HAC 보정 t=+2.71**로 유의. → **admission 평가 창은 730일 고정 필수**.
-- 겹침 horizon(216h+) 신호의 t-stat은 NW 보정 없이 과대평가됨(t_naive +2.4 → t_NW +0.5 소멸) — HAC 보정 없는 admission gate는 위험.
-
-### 2.3 기각된 대안 가설
-| 가설 | 결과 | 판정 |
-| :--- | :--- | :--- |
-| top-8 q-shrunk 앙상블 | IC -0.0005, t=-0.10 | 기각 (희석) |
-| slow-only(≥216h) 앙상블 | IC -0.0036~-0.0063, t<1 | 기각 |
-| causal rolling-IC 게이트 | IC +0.010, t=+0.93 | 기각 (개선 없음) |
-| SNR-조건부 Kelly f 스케일링 | g -0.06~-0.07 (기준 대비 악화) | 기각 (자유도 추가=과적합) |
-
-프로덕션 결함 추가 발견: `combine_admitted_forecasts`가 fold0 OOS 시작 이전 구간에 미래 β를 그대로 적용하는 **pre-OOS look-ahead 누수**. 마스킹 적용 후 182d slow-ensemble 실측 g +0.597(누수 포함) → -0.118(제거)로 정정 — 기존 앙상블 우위 판단은 이 누수의 산물이었음.
-
----
-
-## 3. Level 2 (L2) Portfolio Performance Matrix
-
-| Metric Parameter | v6 (Dynamic Kelly, epistemic var, REJECT) | **v6.1 (Price-Risk Sizing)** |
-| :--- | :--- | :--- |
-| **Net Log Growth Rate ($g$)** | -3.0470 | **-0.3836** |
-| **Equity Multiple** | 0.3176 (-68.24%) | **0.8655 (-13.4%)** |
-| **Maximum Drawdown (MDD)** | -71.60% | **-16.55%** |
-| **Annualized Volatility** | 89.80% | **15.99%** |
-| **Daily CVaR (95%)** | -1.75% | **-0.42%** |
-| **Sizing formula** | `f·mu/se²_epistemic`, gross 2.0x | `0.20·mu/σ_price + 15% vol target`, gross 1.0x |
-
-## 4. Level 3 (L3) Gate Verdict & Next Action
-
-- **L3 Deployment Verdict**: **SHADOW** (REJECT 탈출; promote_probability 0.65 문턱 대비 0.635로 미달)
-- **Holdout 소비 무결성**: `data_manifest_hash`/`strategy_spec_hash` 매칭 확인, 05:34:05 최초 생성 → 05:35:54 최초 소비 — 과거 v6 캐시 재사용 아닌 이번 코드 기준 신선 평가.
-- **Architectural Next Steps**:
-  1. **L1 알파 원천 재탐색이 최우선**: 현재 admitted 신호(IC +0.017)는 비용을 겨우 상쇄하는 수준. 앙상블/조건화로는 개선 안 됨(§2.3 전량 기각) — 신규 signal family 또는 microstructure/horizon 재설계 필요.
-  2. Promote 문턱(0.635 vs 0.65) 근접 — L1 IC를 소폭만 개선해도 SHADOW→PROMOTE 전환 가능성.
-  3. CLI 진입점 `run_multiscale_cli`에 `if __name__ == "__main__": main()` 가드 누락 확인 — `python -m` 직접 실행 불가 결함, 별도 수정 필요(범위 외).
+**Admitted (2/26)**: `xs_reversal:fast`, `xs_momentum_slow:slow`
 
 ---
 
-## 5. Spec/구현 계보
+## 2. L1 Cross-Sectional Rank-IC (Newey-West HAC, 신규 신호 candidate screening)
 
-- Spec: `docs/specs/l1l2_price_risk_sizing.md` (+ `_contract.json`) — 730d L1 admission 고정 + L2 가격리스크 사이징 전환.
-- 구현: `src/domain/futures/compound/{allocator,admission,config,engine}.py`, 테스트 5개 시나리오(`test_admission.py`, `test_dynamic_compounding.py`, `test_engine.py`) 전량 PASS, Cov 88%.
-- 실험 스크립트(비영구): `scratch/verify_l1_ensemble.py`, `verify_l1_nw.py`, `verify_l2_sizing.py`, `verify_730_full.py`, `prep_forecast_cache{,_730}.py`.
+| Signal (candidate) | Window | meanIC @24h | t_NW @24h | meanIC @72h | t_NW @72h |
+| :--- | :--- | ---: | ---: | ---: | ---: |
+| oi_momentum(72h lb) | 205d | +0.0141 | +2.08 | +0.0155 | +1.51 |
+| oi_momentum(72h lb) | **730d** | +0.0041 | +0.94 | +0.0080 | +1.23 |
+| oi_confirmed_price_momentum(24h) | 205d | +0.0052 | +0.51 | — | — |
+| oi_confirmed_price_momentum(24h) | **730d** | -0.0326 | -5.27 | — | — |
+| plain_price_momentum(24h) baseline | 730d | -0.0339 | -6.30 | — | — |
+| retail_LSR_contrarian | 205d | +0.0081 | +1.07 | +0.0163 | +1.32 |
+| retail_LSR_contrarian | **730d** | -0.0031 | -0.61 | +0.0013 | +0.16 |
+| smart_money_divergence(top-trader−retail) | 205d | +0.0063 | +0.93 | +0.0129 | +1.20 |
+| smart_money_divergence(top-trader−retail) | **730d** | **-0.0156** | **-3.53** | **-0.0179** | **-2.44** |
+| taker_LS_vol_ratio(level EWM6) | 205d/730d | -0.0022/-0.0060 | -0.40/-1.63 | — | — |
+| taker_LS_vol_ratio(momentum) | 205d/730d | +0.0024/+0.0012 | +0.46/+0.36 | — | — |
+| oi_momentum_extreme_contrarian | 205d/730d | -0.0123/+0.0030 | -2.13/+0.75 | — | — |
+| xs_admitted_baseline(reference) | 730d | +0.0168 | +2.69 | — | — |
+
+**smart_money_divergence split-half robustness (730d)**: 전반부(oos0~mid) n=1437 meanIC=-0.0113 t_NW=-1.76 / 후반부(mid~dev_end) n=1437 meanIC=-0.0196 t_NW=-3.26
+
+**Orthogonality**: oi_momentum(72h) vs price_momentum(72h) XS-rank corr = +0.075~+0.076 (양쪽 window 동일)
+
+---
+
+## 3. metrics_5m Data Coverage
+
+| | 백필 전 | 백필 후 |
+| :--- | ---: | ---: |
+| 파티션 수 (전체 120종목) | 823 | 2,196 |
+| 평균 월별 파티션/종목 | 6.8 | 18.1 |
+| 저장 용량 | 399 MB | 1.1 GB |
+| BTCUSDT 연속 구간 | 2024-07 + 2026-01~07 (공백) | 2024-07~2026-07 (25개월 연속) |
+| 체크섬 오류 | — | 0건 |
+| null rate (OI / long_short_ratio) | — | 0.0% / 0.01% |
+
+---
+
+## 4. L2 Portfolio Performance
+
+| Metric | Value |
+| :--- | ---: |
+| Net Log Growth Rate ($g$) | -0.3836 |
+| Equity Multiple | 0.8655 |
+| Maximum Drawdown | -16.55% |
+| Annualized Volatility | 15.99% |
+| Daily CVaR (95%) | -0.42% |
+| Turnover | 0.0244 |
+| Sizing formula | `0.20 · mu/σ_price + 15% vol target`, gross cap 1.0x |
+
+## 5. L3 Sealed Holdout Gate
+
+| Metric | Value |
+| :--- | ---: |
+| Verdict | SHADOW |
+| Posterior Growth Probability | 0.6352 |
+| Promote Threshold | 0.65 |
+| Holdout Days | 180 |
+| Max Drawdown (holdout) | -6.98% |
+| Daily CVaR95 (holdout) | -0.65% |
+
+---
+
+## 6. L2 Sizing Comparison (v6 vs v6.1, 730d dev window)
+
+| Sizing | Log Growth | MDD | Ann. Vol | Gross Leverage |
+| :--- | ---: | ---: | ---: | ---: |
+| v6 dyn-Kelly (epistemic var, 2.0x) | -6.90 | 100.0% | 102.8% | 2.00 |
+| v5 quarter-Kelly (epistemic var, 1.0x) | -3.14 | 98.4% | 45.6% | 1.00 |
+| price-risk Kelly f=0.20 + 15% vol target (v6.1, production) | -0.384 | 16.5% | 16.0% | 1.00 |

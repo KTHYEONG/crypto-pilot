@@ -2,6 +2,11 @@
 
 This file holds historical architecture decision records (ADRs) that have been pruned from the active window.
 
+## [2026-07-23] [TASK_COMPOUND_MAIN_REAL_DATA_ALIGNMENT] [ADR_20260723_COMPOUND_MAIN_REAL_DATA_ALIGNMENT]
+- **Context/Why:** 실제 메인 실행에서 Binance timestamp 정밀도 불일치와 기준일 미전달로 결측·무결성 실패가 발생했고, explain 문서가 최신 compound-only 경로와 불일치했다.
+- **Resolution/What:** OHLCV timestamp를 내부 ns로 정규화하고 reference_date를 데이터 로더와 PIT state에 동일하게 전달했다. compound-only 실행 흐름, 18개 recipe, L1 uncertainty, L2 단일 allocator, simulator, L3 결과 및 현재 fallback universe·zero-support 원인을 docs/results/explain.md에 기록했다.
+- **Impact:** 메인 실행은 integrity 정상으로 완료되며, 현재 실측은 2종목 fallback과 robust uncertainty shrink로 target weight 0·L2 성장률 0·L3 SHADOW를 명확히 보고한다. check Cov 91% PASS.
+
 ## [2026-07-22] [TASK_CAUSAL_ALPHA_ONLINE_GROWTH_ENGINE] [ADR_20260722_CAUSAL_ALPHA_ONLINE_GROWTH_ENGINE]
 - **Context/Why:** L2의 zero-overlap fit, direct Kelly-only OOS, legacy fallback 및 production Optuna 경로가 자산증식을 방해하는 구조적 결함을 최신 실측으로 재검증했다.
 - **Resolution/What:** Causal 4-fold warm-up, 4-policy shadow posterior, cash abstention, zero leverage support를 active AWF 경로에 연결하고 최신 실행 결과 및 잔여 production migration blocker를 result.md에 기록했다.

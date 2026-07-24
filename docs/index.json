@@ -550,5 +550,9 @@
   "src/domain/futures/compound/engine.py": {
     "architecture": "docs/results/result.md",
     "testing": "tests/unit/domain/futures/compound/test_engine.py"
+  },
+  "src/application/futures/runner/compound_data.py": {
+    "architecture": "docs/results/result.md",
+    "testing": "tests/unit/domain/futures/compound/test_signal_bank.py"
   }
 }
