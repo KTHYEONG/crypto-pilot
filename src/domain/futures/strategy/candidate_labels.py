@@ -9,6 +9,8 @@ import pandas as pd
 from numba import njit
 from numpy.typing import NDArray
 
+from src.domain.futures.forecast.contracts import ExitPathRequest
+from src.domain.futures.forecast.exit_path import label_exit_paths
 from src.domain.futures.strategy.common.alignment import AlignedMarketData
 from src.domain.futures.strategy.config import CandidateStrategyConfig
 from src.domain.futures.strategy.execution_cost import ExecutionCostModel
@@ -464,6 +466,29 @@ def compute_triple_barrier_returns(
         if has_cost_2d
         else np.zeros_like(close_2d_c)
     )
+
+    request = ExitPathRequest(
+        decision_idx=entry_idx_arr - 1,
+        entry_idx=entry_idx_arr,
+        side=side_arr,
+        horizon_bars=horizon_arr,
+        stop_atr_mult=stop_mult_arr,
+        target_atr_mult=tp_mult_arr,
+        min_hold_bars=min_hold_arr,
+        symbol_idx=sym_idx_arr,
+        open_2d=open_2d_c,
+        high_2d=high_2d_c,
+        low_2d=low_2d_c,
+        close_2d=close_2d_c,
+        atr_2d=atr_2d_c,
+        cost_bps_2d=cost_2d_c,
+        funding_2d=funding_2d_c,
+        cost_floor_bps=cost_floor_arr,
+        hurdle_bps=hurdle_arr,
+        taker_round_trip_bps=taker_round_trip_bps,
+    )
+    labels = label_exit_paths(request)
+    del labels
 
     if cost_diagnostics_enabled:
         _ensure_debug_visible(_logger)
