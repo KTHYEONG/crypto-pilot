@@ -12,6 +12,27 @@ _logger = logging.getLogger(__name__)
 
 _EPSILON = 1e-12
 
+_BARS_PER_YEAR: float = 2190.0
+
+
+def apply_fractional_kelly_scaling(
+    weights: NDArray[np.float64],
+    portfolio_variance: float,
+    *,
+    f: float = 0.25,
+    sigma_target: float = 0.25,
+    p: float = 1.0,
+    cvar_vol_multiple: float = 2.0,
+    cvar_regime_active: bool = False,
+) -> NDArray[np.float64]:
+    ann_portfolio_vol = np.sqrt(max(portfolio_variance, _EPSILON)) * np.sqrt(_BARS_PER_YEAR)
+    vol_scale = sigma_target / max(ann_portfolio_vol, sigma_target)
+    scale = f * (vol_scale ** p)
+    if cvar_regime_active:
+        scale /= cvar_vol_multiple
+    result: NDArray[np.float64] = weights * scale
+    return result
+
 
 def apply_risk_overlay(
     *,
