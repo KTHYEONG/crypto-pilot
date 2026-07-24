@@ -485,7 +485,7 @@ def test_combine_admitted_forecasts_scale_normalization() -> None:
     assert result.mu_2d.shape == (T, N)
     assert np.any(np.isfinite(result.mu_2d)), "mu_2d should have finite values"
 
-    t_test = 500
+    t_test = 1500  # must be >= folds[0].oos_start (600) due to pre-OOS masking
     beta_24 = 0.1
     beta_216 = 0.1
     z_val = 0.5
@@ -497,3 +497,35 @@ def test_combine_admitted_forecasts_scale_normalization() -> None:
     np.testing.assert_allclose(
         result.mu_2d[t_test, :], expected_mu, atol=1e-6,
     )
+
+
+def test_combine_forecasts_pre_oos_bars_zeroed() -> None:
+    bars = _dummy_bars()
+    T, N = bars.decision_timestamps_ns.size, 5
+
+    desc = SignalDescriptor("alpha:fast", "grp_a", "fast", 24, "4h", target_horizon_hours=24)
+    z = np.full((T, N, 1), 0.5, dtype=np.float32)
+    panel = RawSignalPanel(
+        decision_timestamps_ns=bars.decision_timestamps_ns,
+        symbols=("A", "B", "C", "D", "E"),
+        descriptors=(desc,),
+        z_3d=z,
+        valid_3d=np.ones((T, N, 1), dtype=np.bool_),
+        sigma_2d=np.full((T, N), 0.02, dtype=np.float32),
+    )
+    cal = SignalCalibration(signal_id="alpha:fast", beta_by_fold=(0.1, 0.1, 0.1), beta_se_by_fold=(0.01, 0.01, 0.01), n_obs_by_fold=(100, 100, 100))
+    ev = (SignalAdmissionEvidence("alpha:fast", "grp_a", 0.1, 0.05, 1.0, 0.01, 0.05, True, (), ""),)
+    folds_3 = (
+        CausalFold(0, 0, 600, 598, 600, 600, 1200, 2, 10),
+        CausalFold(1, 0, 1200, 1198, 1200, 1200, 1800, 2, 10),
+        CausalFold(2, 0, 1800, 1798, 1800, 1800, 1990, 2, 10),
+    )
+
+    result = combine_admitted_forecasts(panel, (cal,), ev, folds_3)
+
+    oos_start = folds_3[0].oos_start
+    assert oos_start == 600
+    np.testing.assert_array_equal(result.mu_2d[:oos_start], 0.0)
+    assert np.all(np.isnan(result.se_2d[:oos_start]))
+    np.testing.assert_array_equal(result.family_mu_3d[:oos_start], 0.0)
+    assert np.any(result.mu_2d[oos_start:] != 0.0), "post-OOS bars must retain non-trivial mu"
