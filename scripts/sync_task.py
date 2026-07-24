@@ -192,22 +192,25 @@ def _clean_scratch_dir() -> int:
 
 
 def _clean_specs(
-    task: str,
-    clean_specs: bool = False,
-    clean_all_specs: bool = False,
     remove_specs: list[str] | None = None,
     keep_specs: list[str] | None = None,
+    keep_all_specs: bool = False,
 ) -> int:
-    _ = task
-    # Safe by default: do not delete anything unless clean_specs/clean_all_specs or remove_specs is requested
-    if not (clean_specs or clean_all_specs or remove_specs):
+    if keep_all_specs:
         return 0
     specs_dir = "docs/specs"
     if not _path_exists(specs_dir):
         return 0
 
     keep_set = set(keep_specs) if keep_specs else set()
-    remove_set = set(remove_specs) if remove_specs else set()
+
+    # Expand remove_specs to include matching .md and _contract.json files
+    target_prefixes: set[str] = set()
+    if remove_specs:
+        for item in remove_specs:
+            base = item.replace(".md", "").replace("_contract.json", "").replace("docs/specs/", "").strip()
+            if base:
+                target_prefixes.add(base.lower())
 
     count = 0
     for fname in os.listdir(specs_dir):
@@ -215,14 +218,18 @@ def _clean_specs(
             if fname in keep_set or fname.lower() in keep_set:
                 continue
 
-            # If specific remove list provided, remove only those
-            if (remove_specs and (fname in remove_set or fname.lower() in remove_set)) or clean_specs or clean_all_specs:
-                fpath = os.path.join(specs_dir, fname)
-                try:
-                    os.remove(fpath)
-                    count += 1
-                except OSError:
-                    pass
+            # If user specified target files/prefixes, check if fname matches
+            if target_prefixes:
+                fname_base = fname.replace(".md", "").replace("_contract.json", "").lower()
+                if fname_base not in target_prefixes and fname.lower() not in target_prefixes:
+                    continue
+
+            fpath = os.path.join(specs_dir, fname)
+            try:
+                os.remove(fpath)
+                count += 1
+            except OSError:
+                pass
     return count
 
 
@@ -237,31 +244,21 @@ def main() -> None:
     parser.add_argument("--test", default=None, help="Test file path (auto-resolved if omitted)")
     parser.add_argument("--doc", default=None, help="Architecture doc path")
     parser.add_argument(
-        "--clean-specs",
-        action="store_true",
-        help="Clean unpreserved spec files in docs/specs",
-    )
-    parser.add_argument(
-        "--clean-all-specs",
-        action="store_true",
-        help="Clean all spec files in docs/specs",
-    )
-    parser.add_argument(
         "--remove-specs",
         nargs="*",
         default=[],
-        help="Specific spec files to remove (e.g. --remove-specs old_spec.md)",
+        help="Specific spec files or prefixes to remove (e.g. --remove-specs signal_bank_v4)",
     )
     parser.add_argument(
         "--keep-specs",
         nargs="*",
         default=[],
-        help="Spec files or filenames to preserve in docs/specs (e.g. --keep-specs custom_spec.md)",
+        help="Spec files or filenames to preserve in docs/specs",
     )
     parser.add_argument(
         "--keep-all-specs",
         action="store_true",
-        help="Preserve all files in docs/specs during sync cleanup (default behavior)",
+        help="Preserve all files in docs/specs during sync cleanup",
     )
     args = parser.parse_args()
 
@@ -315,14 +312,12 @@ def main() -> None:
     except Exception as e:
         errors.append(f"Temp wipe failed: {e}")
 
-    # 6. Spec Cleanup (Safe by default; requires explicit clean/remove flags)
+    # 6. Spec Cleanup (Default: remove all specs, or remove specified targets/prefixes)
     try:
         cleaned = _clean_specs(
-            args.task,
-            clean_specs=args.clean_specs,
-            clean_all_specs=args.clean_all_specs,
             remove_specs=args.remove_specs,
             keep_specs=args.keep_specs,
+            keep_all_specs=args.keep_all_specs,
         )
         if cleaned > 0:
             logs.append(f"Cleaned {cleaned} spec files")
