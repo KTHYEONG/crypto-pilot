@@ -18,7 +18,7 @@ from src.domain.futures.compound.contracts import (
 
 _logger = logging.getLogger(__name__)
 
-# P3 wiring: calibs = calibrate_signals(panel, target, folds, config.calibration); evidence = evaluate_signal_admission(panel, target, calibs, folds, cost_bps, config.admission); forecast = combine_admitted_forecasts(panel, calibs, evidence, folds)
+# P3 wiring: calibs = calibrate_signals(panel, target, folds, config.calibration); evidence = evaluate_signal_admission(panel, target, calibs, folds, cost_bps, config.admission); candidates = select_composite_candidates(evidence, config.admission); forecast = combine_composite_forecast(panel, calibs, evidence, folds, config.admission); composite_evidence = evaluate_composite_admission(panel, target, forecast, folds, cost_bps, config.admission)
 
 def _block_bootstrap_lcb(
     series: NDArray[np.float64], n_bootstrap: int, block_size: int,
@@ -66,6 +66,40 @@ def _annualize_factor(n_bars: int) -> float:
     return math.sqrt(bars_per_year / max(n_bars, 1))
 
 
+def _compute_net_return_series(
+    position_norm: NDArray[np.float64],
+    y_2d: NDArray[np.float64],
+    prev_position_norm: NDArray[np.float64] | None,
+    cost_bps_2d: NDArray[np.float32] | None,
+    default_cost_bps: float,
+    cost_multiplier: float = 1.0,
+) -> tuple[NDArray[np.float64], NDArray[np.float64]]:
+    oos_t = position_norm.shape[0]
+    raw_return = np.sum(position_norm * y_2d, axis=1)
+    turnover = np.full(oos_t, np.nan, dtype=np.float64)
+    if prev_position_norm is not None:
+        for t in range(oos_t):
+            prev = prev_position_norm[t]
+            curr = position_norm[t]
+            turnover[t] = float(np.sum(np.abs(curr - prev)))
+    else:
+        for t in range(1, oos_t):
+            prev = position_norm[t - 1]
+            curr = position_norm[t]
+            turnover[t] = float(np.sum(np.abs(curr - prev)))
+        turnover[0] = 0.0
+
+    if cost_bps_2d is not None:
+        cost_arr = cost_bps_2d[:oos_t, :]
+        cost = float(np.nanmean(cost_arr)) * 1e-4
+    else:
+        cost = default_cost_bps * 1e-4
+
+    turnover_norm = np.where(np.isfinite(turnover), turnover, 0.0)
+    net = raw_return - cost_multiplier * cost * turnover_norm
+    return net, turnover_norm
+
+
 def evaluate_signal_admission(
     panel: RawSignalPanel, targets: dict[int, CalibrationTarget],
     calibrations: tuple[SignalCalibration, ...],
@@ -94,6 +128,7 @@ def evaluate_signal_admission(
         effective_block_size = max(config.block_size, desc.target_horizon_hours // 4)
 
         oos_net_returns: list[float] = []
+        oos_net_2x_returns: list[float] = []
         fold_signs: list[int] = []
 
         for fi, fold in enumerate(folds):
@@ -116,41 +151,36 @@ def evaluate_signal_admission(
             position_norm = position / gross
 
             raw_return = np.sum(position_norm * y_k, axis=1)
-            turnover = np.full(oos_t, np.nan, dtype=np.float64)
-            for t in range(1, oos_t):
-                prev_valid = np.isfinite(panel.z_3d[fold.oos_start + t - 1, :, k])
-                prev_pos = beta_k * np.where(prev_valid, panel.z_3d[fold.oos_start + t - 1, :, k], 0.0)
-                curr_pos = position[t]
-                prev_gross = np.abs(prev_pos).sum()
-                curr_gross = np.abs(curr_pos).sum()
-                pg = max(prev_gross, 1.0)
-                cg = max(curr_gross, 1.0)
-                turnover[t] = np.sum(np.abs(curr_pos / cg - prev_pos / pg))
+            cost_2d = cost_bps_2d[oos_slice] if cost_bps_2d is not None else None
 
-            if cost_bps_2d is not None:
-                cost_arr = cost_bps_2d[oos_slice, :]
-                cost = float(np.nanmean(cost_arr)) * 1e-4
-            else:
-                cost = config.default_cost_bps * 1e-4
+            net_1x, _ = _compute_net_return_series(
+                position_norm, y_k, None, cost_2d, config.default_cost_bps, 1.0,
+            )
+            net_2x, _ = _compute_net_return_series(
+                position_norm, y_k, None, cost_2d, config.default_cost_bps, 2.0,
+            )
 
-            turnover_norm = np.where(np.isfinite(turnover), turnover, 0.0)
-            net = raw_return - cost * turnover_norm
-
-            oos_net_returns.extend(net.tolist())
+            oos_net_returns.extend(net_1x.tolist())
+            oos_net_2x_returns.extend(net_2x.tolist())
 
             signal_mean_return = float(np.nanmean(raw_return))
             fold_signs.append(1 if signal_mean_return > 0 else 0)
 
         oos_series = np.array(oos_net_returns, dtype=np.float64)
         oos_series = oos_series[np.isfinite(oos_series)]
+        oos_series_2x = np.array(oos_net_2x_returns, dtype=np.float64)
+        oos_series_2x = oos_series_2x[np.isfinite(oos_series_2x)]
 
-        lcb90, boot_mean, p_value = _block_bootstrap_lcb(
+        lcb90, _, p_value = _block_bootstrap_lcb(
             oos_series, config.n_bootstrap, effective_block_size, rng,
         )
         ann_factor = _annualize_factor(len(oos_series))
         net_growth_lcb90 = lcb90 * ann_factor
 
-        net_mean_2x = boot_mean * ann_factor - 2.0 * (config.default_cost_bps * 1e-4) * ann_factor
+        _, boot_mean_2x, _ = _block_bootstrap_lcb(
+            oos_series_2x, config.n_bootstrap, effective_block_size, rng,
+        )
+        net_mean_2x = boot_mean_2x * ann_factor
 
         fold_sign_consistency = len([s for s in fold_signs if s > 0]) / max(len(fold_signs), 1)
 
@@ -218,70 +248,84 @@ def evaluate_signal_admission(
     return tuple(final_evidence)
 
 
-def combine_admitted_forecasts(
+def select_composite_candidates(
+    evidence: tuple[SignalAdmissionEvidence, ...],
+    config: AdmissionConfig,
+) -> tuple[int, ...]:
+    candidates: list[int] = []
+    for k, ev in enumerate(evidence):
+        if (ev.fold_sign_consistency >= config.composite_sign_consistency_min
+                and ev.p_value <= config.composite_p_value_max):
+            candidates.append(k)
+    return tuple(candidates)
+
+
+def combine_composite_forecast(
     panel: RawSignalPanel, calibrations: tuple[SignalCalibration, ...],
     evidence: tuple[SignalAdmissionEvidence, ...],
     folds: tuple[CausalFold, ...],
+    config: AdmissionConfig,
 ) -> CalibratedForecastPanel:
-    n_cat = len(calibrations)
     n_t = panel.z_3d.shape[0]
     n_syms = panel.z_3d.shape[1]
 
-    admitted_ids: list[str] = []
-    admitted_family_map: dict[str, list[int]] = {}
-    for k in range(n_cat):
-        if evidence[k].admitted:
-            admitted_ids.append(evidence[k].signal_id)
-            fam = evidence[k].family
-            if fam not in admitted_family_map:
-                admitted_family_map[fam] = []
-            admitted_family_map[fam].append(k)
+    candidate_idx = select_composite_candidates(evidence, config)
+    n_candidates = len(candidate_idx)
 
     fold_of_time = np.full(n_t, max(len(folds) - 1, 0), dtype=np.int32)
     for fi, fold in enumerate(folds):
         fold_of_time[fold.oos_start:fold.oos_end_exclusive] = fi
 
-    family_ids = tuple(sorted(admitted_family_map.keys()))
-    n_fam = len(family_ids)
-
-    family_mu_3d = np.zeros((n_t, n_syms, max(n_fam, 1)), dtype=np.float32)
-    if n_fam > 0 and len(admitted_ids) > 0:
-        for fidx, fam in enumerate(family_ids):
-            sig_indices = admitted_family_map[fam]
-            for k in sig_indices:
-                cal = calibrations[k]
-                scale = math.sqrt(panel.descriptors[k].target_horizon_hours / 4.0)
-                for t in range(n_t):
-                    fi = fold_of_time[t]
-                    if fi < 0 or fi >= len(cal.beta_by_fold):
-                        continue
-                    beta_k = cal.beta_by_fold[fi]
-                    family_mu_3d[t, :, fidx] += beta_k * panel.z_3d[t, :, k] / scale
-            n_sig = max(len(sig_indices), 1)
-            family_mu_3d[:, :, fidx] /= n_sig
-        mu_2d = np.mean(family_mu_3d[:, :, :n_fam], axis=2)
-        se_2d = np.full((n_t, n_syms), np.nan, dtype=np.float32)
-        for t in range(n_t):
-            for i in range(n_syms):
-                vals = family_mu_3d[t, i, :n_fam]
-                se_2d[t, i] = float(np.nanstd(vals, ddof=1) if np.sum(np.isfinite(vals)) > 1 else np.nan)
-    else:
+    if n_candidates == 0:
+        _logger.info("[ALGO] composite: zero candidates, returning zero-forecast")
         mu_2d = np.zeros((n_t, n_syms), dtype=np.float32)
         se_2d = np.full((n_t, n_syms), np.nan, dtype=np.float32)
-        if n_fam == 0:
-            family_mu_3d = np.zeros((n_t, n_syms, 1), dtype=np.float32)
+        family_mu_3d = np.zeros((n_t, n_syms, 1), dtype=np.float32)
+        return CalibratedForecastPanel(
+            decision_timestamps_ns=panel.decision_timestamps_ns,
+            symbols=panel.symbols,
+            mu_2d=mu_2d,
+            se_2d=se_2d,
+            family_mu_3d=family_mu_3d,
+            family_ids=(),
+            admitted_signal_ids=(),
+            fold_manifest_hash=f"folds_{len(folds)}_{folds[0].purge_bars}_{folds[0].embargo_bars}" if folds else "no_folds",
+        )
 
-    if folds:
-        oos_start = folds[0].oos_start
-        mu_2d[:oos_start] = 0.0
-        se_2d[:oos_start] = np.nan
-        family_mu_3d[:oos_start] = 0.0
+    mu_2d = np.zeros((n_t, n_syms), dtype=np.float32)
+    se_2d_flat = np.full(n_t, np.nan, dtype=np.float32)
+    for t in range(n_t):
+        fi = fold_of_time[t]
+        weighted_sum = np.zeros(n_syms, dtype=np.float64)
+        total_precision = 0.0
+        for kidx in candidate_idx:
+            cal = calibrations[kidx]
+            beta_se = cal.beta_se_by_fold[fi] if fi < len(cal.beta_se_by_fold) else 0.0
+            if beta_se <= 0:
+                continue
+            precision = 1.0 / (beta_se * beta_se)
+            beta_k = cal.beta_by_fold[fi] if fi < len(cal.beta_by_fold) else 0.0
+            scale_k = math.sqrt(panel.descriptors[kidx].target_horizon_hours / 4.0)
+            z_t = panel.z_3d[t, :, kidx].astype(np.float64)
+            weighted_sum += precision * beta_k * z_t / scale_k
+            total_precision += precision
+        if total_precision > 0:
+            mu_2d[t, :] = (weighted_sum / total_precision).astype(np.float32)
+            se_2d_flat[t] = float(np.sqrt(1.0 / total_precision))
+        else:
+            se_2d_flat[t] = np.nan
 
+    se_2d = np.tile(se_2d_flat[:, np.newaxis], (1, n_syms)).astype(np.float32)
+    oos_start = folds[0].oos_start
+    mu_2d[:oos_start] = 0.0
+    se_2d[:oos_start] = np.nan
+
+    family_mu_3d = np.zeros((n_t, n_syms, 1), dtype=np.float32)
     fold_manifest_hash = f"folds_{len(folds)}_{folds[0].purge_bars}_{folds[0].embargo_bars}" if folds else "no_folds"
 
     _logger.info(
-        "[ALGO] combine: %d admitted signals across %d families; mu_2d shape %s",
-        len(admitted_ids), n_fam, mu_2d.shape,
+        "[ALGO] composite: %d candidates combined (precision-weighted); mu_2d shape %s",
+        n_candidates, mu_2d.shape,
     )
 
     return CalibratedForecastPanel(
@@ -289,8 +333,122 @@ def combine_admitted_forecasts(
         symbols=panel.symbols,
         mu_2d=mu_2d,
         se_2d=se_2d,
-        family_mu_3d=family_mu_3d[:, :, :max(n_fam, 1)],
-        family_ids=family_ids,
-        admitted_signal_ids=tuple(admitted_ids),
+        family_mu_3d=family_mu_3d,
+        family_ids=(),
+        admitted_signal_ids=tuple(evidence[k].signal_id for k in candidate_idx),
         fold_manifest_hash=fold_manifest_hash,
+    )
+
+
+def evaluate_composite_admission(
+    panel: RawSignalPanel, targets: dict[int, CalibrationTarget],
+    forecast: CalibratedForecastPanel,
+    folds: tuple[CausalFold, ...],
+    cost_bps_2d: NDArray[np.float32] | None,
+    config: AdmissionConfig,
+    rng_seed: int = 42,
+) -> SignalAdmissionEvidence:
+    rng = np.random.default_rng(rng_seed)
+
+    oos_net_returns: list[float] = []
+    oos_net_2x_returns: list[float] = []
+    fold_signs: list[int] = []
+
+    for _fi, fold in enumerate(folds):
+        oos_slice = slice(fold.oos_start, fold.oos_end_exclusive)
+        oos_t = fold.oos_end_exclusive - fold.oos_start
+        if oos_t < 1:
+            continue
+
+        y_2d_slice: NDArray[np.float64] = np.zeros((oos_t, panel.z_3d.shape[1]), dtype=np.float64)
+        for target in targets.values():
+            if oos_t <= target.y_2d.shape[0]:
+                y_2d_slice = target.y_2d[oos_slice].astype(np.float64)
+                break
+
+        mu_t = forecast.mu_2d[oos_slice].astype(np.float64)
+        valid_t = np.isfinite(mu_t) & np.isfinite(y_2d_slice)
+        position_norm = np.where(valid_t, mu_t, 0.0)
+        y_2d_slice = np.where(valid_t, y_2d_slice, 0.0)
+        gross = np.abs(position_norm).sum(axis=1, keepdims=True)
+        gross = np.where(gross > 0, gross, 1.0)
+        position_norm = position_norm / gross
+
+        raw_return = np.sum(position_norm * y_2d_slice, axis=1)
+        cost_2d = cost_bps_2d[oos_slice] if cost_bps_2d is not None else None
+
+        net_1x, _ = _compute_net_return_series(
+            position_norm, y_2d_slice, None, cost_2d, config.default_cost_bps, 1.0,
+        )
+        net_2x, _ = _compute_net_return_series(
+            position_norm, y_2d_slice, None, cost_2d, config.default_cost_bps, 2.0,
+        )
+
+        oos_net_returns.extend(net_1x.tolist())
+        oos_net_2x_returns.extend(net_2x.tolist())
+
+        signal_mean_return = float(np.nanmean(raw_return))
+        fold_signs.append(1 if signal_mean_return > 0 else 0)
+
+    oos_series = np.array(oos_net_returns, dtype=np.float64)
+    oos_series = oos_series[np.isfinite(oos_series)]
+    oos_series_2x = np.array(oos_net_2x_returns, dtype=np.float64)
+    oos_series_2x = oos_series_2x[np.isfinite(oos_series_2x)]
+
+    effective_block_size = config.block_size
+    lcb90, _, p_value = _block_bootstrap_lcb(
+        oos_series, config.n_bootstrap, effective_block_size, rng,
+    )
+    ann_factor = _annualize_factor(len(oos_series))
+    net_growth_lcb90 = lcb90 * ann_factor
+
+    _, boot_mean_2x, _ = _block_bootstrap_lcb(
+        oos_series_2x, config.n_bootstrap, effective_block_size, rng,
+    )
+    net_mean_2x = boot_mean_2x * ann_factor
+
+    fold_sign_consistency = len([s for s in fold_signs if s > 0]) / max(len(fold_signs), 1)
+
+    reasons: list[str] = []
+    if net_growth_lcb90 <= 0:
+        reasons.append(f"net_growth_lcb90={net_growth_lcb90:.6f}<=0")
+    if net_mean_2x <= 0:
+        reasons.append(f"net_mean_2x={net_mean_2x:.6f}<=0")
+    if fold_sign_consistency < config.sign_consistency_min:
+        reasons.append(f"sign_consistency={fold_sign_consistency:.3f}<{config.sign_consistency_min}")
+
+    n_effective = len(oos_series) / max(effective_block_size, 1)
+    effective_sample_note = ""
+    if n_effective < 50:
+        effective_sample_note = (
+            f"low_effective_sample: n_effective={n_effective:.1f}<50 "
+            f"(block_size={effective_block_size})"
+        )
+
+    admitted = len(reasons) == 0
+
+    p_val = float(p_value)
+    fdr_q_val = p_val
+    admitted_signal_ids = forecast.admitted_signal_ids
+    family = "composite"
+
+    _logger.info(
+        "[EVAL] composite=%s lcb90=%.6f net_mean_2x=%.6f "
+        "sign_consistency=%.3f p=%.4f admitted=%s fdr_q=%.4f (%d candidates)%s",
+        family, net_growth_lcb90, net_mean_2x, fold_sign_consistency, p_val, admitted,
+        fdr_q_val, len(admitted_signal_ids),
+        f" note={effective_sample_note}" if effective_sample_note else "",
+    )
+
+    return SignalAdmissionEvidence(
+        signal_id="composite",
+        family=family,
+        oos_net_growth_lcb90=net_growth_lcb90,
+        oos_net_mean_2x_cost=net_mean_2x,
+        fold_sign_consistency=fold_sign_consistency,
+        p_value=p_val,
+        fdr_q_value=fdr_q_val,
+        admitted=admitted,
+        reasons=tuple(reasons),
+        effective_sample_note=effective_sample_note,
     )
