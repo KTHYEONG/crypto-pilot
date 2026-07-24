@@ -13,6 +13,7 @@ from src.domain.futures.compound.admission import (
     combine_admitted_forecasts,
     evaluate_signal_admission,
 )
+from src.domain.futures.compound.allocator import apply_cost_aware_net_edge
 from src.domain.futures.compound.bar_engine import build_multi_timeframe_bars
 from src.domain.futures.compound.baseline_alloc import solve_baseline_weights
 from src.domain.futures.compound.calibration import (
@@ -39,6 +40,7 @@ from src.domain.futures.compound.contracts import (
 )
 from src.domain.futures.compound.dense_simulator import simulate_dense_portfolio
 from src.domain.futures.compound.risk_model import estimate_covariance_path
+from src.domain.futures.compound.risk_overlay import apply_fractional_kelly_scaling
 from src.domain.futures.compound.signal_bank import _default_catalog, build_raw_signal_panel
 
 _logger = logging.getLogger(__name__)
@@ -371,3 +373,125 @@ def _error_result(stage_id: str) -> LadderStageResult:
         status="error",
         promoted=False,
     )
+
+
+def run_ladder_evaluation(
+    market: MarketFeatureCube,
+    eligible_2d: NDArray[np.bool_],
+    config: LadderConfig,
+    rng_seed: int = 42,
+) -> tuple[LadderStageResult, ...]:
+    bars = build_multi_timeframe_bars(market)
+    bars_4h = bars.cubes["4h"]
+    eligible_4h = _subsample_to_4h(eligible_2d)
+    returns_4h, valid_4h = _compute_returns_4h(bars_4h)
+    returns_4h = np.where(eligible_4h, returns_4h, 0.0).astype(np.float32)
+    valid_4h = valid_4h & eligible_4h
+
+    risk_config = RiskModelConfig()
+    sim_config = DenseSimConfig()
+    bars_per_year = sim_config.bars_per_year
+
+    funding_field = bars.aux_1h_fields.get("funding", None)
+    if funding_field is not None:
+        funding_upsampled = funding_field.astype(np.float32)
+    else:
+        funding_upsampled = np.zeros((bars_4h.timestamps_ns.size * 4, len(market.symbols)), dtype=np.float32)
+
+    cost_bps_arr = eligible_2d.astype(np.float32) * config.cost_bps
+    rng = np.random.default_rng(rng_seed)
+    results: list[LadderStageResult] = []
+
+    l1_stages = ["L1-3"]
+
+    for l1_id in l1_stages:
+        try:
+            panel = build_raw_signal_panel(bars, eligible_4h, catalog=None)
+        except Exception as exc:
+            _logger.error("[LADDER_V5] stage %s signal panel build failed: %s", l1_id, exc)
+            results.append(_error_result(f"{l1_id}|L2-V5"))
+            continue
+
+        forecast = _build_l1_forecast(market, l1_id, bars, panel, config)
+
+        stage_id = f"{l1_id}|L2-V5"
+        try:
+            cov_path = estimate_covariance_path(returns_4h, valid_4h, risk_config)
+            mu_2d = forecast.mu_2d
+            w = solve_baseline_weights(mu_2d, cov_path, BaselineAllocConfig(), mode="inverse_vol")
+
+            for t in range(1, w.shape[0]):
+                mu_t = mu_2d[t].astype(np.float64)
+                w_t = apply_cost_aware_net_edge(w[t], w[t - 1], mu_t)
+
+                port_var = float(w_t @ cov_path.covariance_3d[t] @ w_t)
+                w_scaled = apply_fractional_kelly_scaling(w_t, port_var)
+                w[t] = w_scaled
+
+            ledger = simulate_dense_portfolio(
+                bars_4h=bars_4h,
+                target_weights_2d=w,
+                funding_1h_2d=funding_upsampled,
+                cost_bps=cost_bps_arr,
+                config=sim_config,
+            )
+
+            oos_growth, lcb90, sharpe, mdd = _compute_ladder_metrics(
+                ledger.net_returns_1d, bars_per_year, config.n_bootstrap, rng,
+            )
+
+            ledger_2x = simulate_dense_portfolio(
+                bars_4h=bars_4h,
+                target_weights_2d=w,
+                funding_1h_2d=funding_upsampled,
+                cost_bps=config.cost_bps * 2.0,
+                config=sim_config,
+            )
+            growth_2x, _, _, _ = _compute_ladder_metrics(
+                ledger_2x.net_returns_1d, bars_per_year, config.n_bootstrap, rng,
+            )
+
+            turnover = _compute_turnover(w, bars_per_year)
+
+            _logger.info(
+                "[LADDER_V5] stage=%s growth=%.6f lcb90=%.6f sharpe=%.3f mdd=%.4f to=%.2f 2x=%.6f",
+                stage_id, oos_growth, lcb90, sharpe, mdd, turnover, growth_2x,
+            )
+
+            results.append(LadderStageResult(
+                stage_id=stage_id,
+                oos_log_growth=oos_growth,
+                oos_growth_lcb90=lcb90,
+                sharpe=sharpe,
+                max_drawdown=mdd,
+                turnover_per_year=turnover,
+                growth_2x_cost=growth_2x,
+                status="ok",
+                promoted=True,
+            ))
+        except Exception as exc:
+            _logger.error("[LADDER_V5] stage %s failed: %s", stage_id, exc)
+            results.append(_error_result(stage_id))
+
+    ts = datetime.now(UTC).strftime("%Y%m%d_%H%M%S")
+    report_dir = Path(f"logs/futures/redesign_ladder_v5/{ts}")
+    report_dir.mkdir(parents=True, exist_ok=True)
+    report_path = report_dir / "ladder_v5_report.json"
+
+    report_data = [
+        {
+            "stage_id": r.stage_id,
+            "oos_log_growth": r.oos_log_growth,
+            "oos_growth_lcb90": r.oos_growth_lcb90,
+            "sharpe": r.sharpe,
+            "max_drawdown": r.max_drawdown,
+            "turnover_per_year": r.turnover_per_year,
+            "growth_2x_cost": r.growth_2x_cost,
+            "status": r.status,
+            "promoted": r.promoted,
+        }
+        for r in results
+    ]
+    report_path.write_text(json.dumps(report_data, indent=2), encoding="utf-8")
+
+    return tuple(results)
