@@ -1,5 +1,20 @@
 # Active Decisions Log (Sliding Window)
 
+## [2026-07-24] [TASK_CLEANUP_SPECS] [ADR_20260724_CLEANUP_SPECS]
+- **Context/Why:** Remove implemented and evaluated spec artifacts from docs/specs
+- **Resolution/What:** Executed sync_task without --keep-all-specs to wipe specs directory
+- **Impact:** Maintains clean repository state without obsolete specification draft files
+
+## [2026-07-24] [TASK_DETAILED_L1_L2_EVALUATION] [ADR_20260724_DETAILED_L1_L2_EVALUATION]
+- **Context/Why:** Document detailed L1 and L2 breakdown of v6 pipeline evaluation on real 120 futures data
+- **Resolution/What:** Recorded L1 low-SNR findings, L2 volatility drag mechanics (-3.05 log growth, 71.6% MDD), and L3 REJECT verdict in result.md
+- **Impact:** Provides detailed architectural failure analysis and ADR record preventing unhedged leverage deployment
+
+## [2026-07-24] [TASK_REAL_DATA_V6_EVALUATION] [ADR_20260724_REAL_DATA_V6_EVALUATION]
+- **Context/Why:** Evaluate v6 Dynamic Compounding Engine on real Binance 120 futures data
+- **Resolution/What:** Executed full engine pipeline on real data, exposed L1 signal SNR decay under 2.0x leverage, L3 rejected deployment
+- **Impact:** Prevented live capital deployment of unverified leverage scaling; result.md updated with real metrics (Log Growth -3.05, Verdict REJECT)
+
 ## [2026-07-24] [TASK_PORTFOLIO_COMPOUNDING_V6] [ADR_20260724_PORTFOLIO_COMPOUNDING_V6]
 - **Context/Why:** Maximize compound asset growth beyond CAGR 35% with controlled MDD
 - **Resolution/What:** Implemented Dynamic Kelly Scaling (f=0.25-0.60), Asymmetric Leverage (Gross 2.0x), and Funding Carry Edge
@@ -59,18 +74,3 @@
 - **Context/Why:** L2의 zero-overlap fit, direct Kelly-only OOS, legacy fallback 및 production Optuna 경로가 자산증식을 방해하는 구조적 결함을 최신 실측으로 재검증했다.
 - **Resolution/What:** Causal 4-fold warm-up, 4-policy shadow posterior, cash abstention, zero leverage support를 active AWF 경로에 연결하고 최신 실행 결과 및 잔여 production migration blocker를 result.md에 기록했다.
 - **Impact:** 정상 L2 경로는 fit_bars=0을 제거하고 성장 근거가 없을 때 현금 대기를 수행한다. 다만 crisis legacy replay, Optuna 120회, legacy promotion gate 및 12GB 초과 RSS는 후속 P0로 남는다.
-
-## [2026-07-22] [TASK_L2_CAUSAL_POLICY_SHADOW_GROWTH_FIRST] [ADR_20260722_L2_CAUSAL_POLICY_SHADOW_GROWTH_FIRST]
-- **Context/Why:** L2 policy comparison was not causal: policy rows shared returns, OOS bypassed the selected policy, and the latest run had fit_bars=0 with all_folds_blocked.
-- **Resolution/What:** Added policy-specific shadow-book contracts, fit-only growth-LCB selection, hard MDD/CVaR/ruin constraints, removed unconditional L1 override, rejected deprecated kelly_shrink_to_equal mappings, and covered shadow-cost shape errors.
-- **Impact:** lean_check PASS with Cov 47%; latest 4h L2 execution reached L1 PASS but L2 fail-closed at all_folds_blocked: fit_bars=0, OOS CAGR -23.61%, 902 bars and 271 trades. SPEC artifacts cleaned.
-
-## [2026-07-22] [TASK_L1_L2_COMPOUNDING_ALIGNMENT] [ADR_20260722_L1_L2_COMPOUNDING_ALIGNMENT]
-- **Context/Why:** L2 Kelly and baseline were evaluated on mismatched allocation and leverage scales, while legacy cached signal events could abort L2 before asset-growth analysis.
-- **Resolution/What:** Added L1 confidence and LCB/breakeven handoff, fit-only allocation policy evaluation with inverse-vol fallback, absolute deployed-growth gating, and backward-compatible zero-evidence handling for legacy events.
-- **Impact:** L2 execution completed 120/120 trials on 2026-07-22 data after fixing the legacy-event crash. Only 2/120 trials were joint-feasible and no champion was promoted; sharpe_abs remained the dominant blocker (92/120). lean_check PASS, coverage 47%.
-
-## [2026-07-22] [L2_KELLY_SHRINK] [ADR_20260722_L2_KELLY_SHRINK]
-- **Context/Why:** DEBUG 계측(120-trial)으로 mu-비례(Kelly) 사이징이 동일 지지집합의 risk-matched 균등가중 baseline보다 CAGR 열위(64.2%)임을 확인. 근본 원인은 mu SNR이 낮을 때 Kelly-비례 배분이 노이즈가 큰 종목에 과집중하는 noisy-Kelly 현상.
-- **Resolution/What:** diagonal_kelly_weights에 kelly_shrink_to_equal∈[0,1] 파라미터를 추가해 Kelly 비율과 균등가중 비율 간 shape-space 선형 블렌딩 구현. Layer2AllocationConfig 필드 + from_mapping 검증, awf_sim 호출부 배선, L2_SEARCH_SPACE 탐색 차원 추가. shrink=0.0 기본값으로 완전 하위호환.
-- **Impact:** Optuna 탐색 차원 +1. shrink=0.0은 기존 챔피언 replay와 byte-identical. 하류 파이프라인(vol_target/cap/projection) 변경 없음.

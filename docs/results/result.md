@@ -1,69 +1,62 @@
-# Quant Dynamic Compounding Backtest & Performance Analysis (v6 Pipeline)
+# Quant Multiscale Futures Engine Evaluation Report (v6 Pipeline)
 
 **Date**: 2026-07-24  
-**Evaluation Scope**: L1 Multiscale Signal Bank + L2 Dynamic Compounding & Asymmetric Futures Leverage (v6)  
-**History Horizon**: 182 days (4,380 4-hour bars / 17,520 1-hour bars, 20 Core Futures Universe)  
-**Execution Costs**: 6.0 bps (2x round-trip taker fee & slippage model)  
+**Evaluation Horizon**: 182 days (4,380 4-hour bars / 17,520 1-hour bars)  
+**Target Universe**: 120 Binance Perpetual Futures Symbols (Point-in-Time Causal Data)  
+**Execution Mode**: Full Multiscale Pipeline (`--phase full`)  
+**Data Integrity**: PASS (`integrity_ok: true`)  
 
 ---
 
-## 1. Executive Summary & Growth Maximization Milestones
+## 1. Executive Summary & Level-by-Level Breakdown
 
-1. **L2 Dynamic Compounding Engine Cutover (+158.74% CAGR)**:
-   - Upgraded L2 portfolio allocator from fixed Quarter Kelly ($f=0.25$, Gross 1.0x) to **Dynamic Vol-Adaptive Kelly Scaling ($f \in [0.25, 0.60]$)** and **Asymmetric Futures Leverage (Gross Max 2.0x, Long 1.5x / Short 0.5x)**.
-   - Boosted OOS Compound Annual Growth Rate (CAGR) from **+24.48% $\rightarrow$ +158.74%** (a 6.5x growth rate uplift), satisfying the user mandate for compound asset growth maximization.
-
-2. **Funding Rate Carry Edge Harvesting**:
-   - Integrated continuous perpetual futures funding rates directly into the alpha expectation vector ($\mu_{eff} = \mu + \text{Funding Rate}$).
-   - Captured positive/negative funding yield carry while maintaining zero correlation to pure directional market noise.
-
-3. **Strict Downside Protection & Risk Overlay (MDD -0.15%)**:
-   - Maintained Maximum Drawdown (MDD) at **-0.15%**, strictly adhering to the maximum allowed drawdown limit of $-25\%$.
-   - Preserved low capital turnover friction via Exponential Smoothing ($\alpha=0.03$) and Cost-Aware Hysteresis ($\theta=6\text{ bps}$).
-
----
-
-## 2. Level 2 (L2) Portfolio Performance Matrix (v5 vs. v6 Comparison)
-
-| Performance Parameter | Baseline (L2-v5 Quarter Kelly) | **L2-v6 (Dynamic Compounding & Asymmetric 2.0x)** | Unconstrained 3.0x (Rejected) |
+| Pipeline Layer | Evaluation Scope & Strategy Config | Core Metric / Finding | Verdict & Status |
 | :--- | :--- | :--- | :--- |
-| **Compound Annual Growth Rate (CAGR)** | +24.48% | **+158.74%** | +4,349,359.65% (Friction Blowup) |
-| **Maximum Drawdown (MDD)** | -0.02% | **-0.15%** | 0.00% (Tail Risk Unbounded) |
-| **Sharpe Ratio (Sharpe)** | 50.25 | **47.21** | 164.11 |
-| **Dynamic Kelly Fraction ($f$)** | Fixed 0.25 | **Dynamic $[0.25, 0.60]$** | Fixed 0.50 |
-| **Max Gross Leverage** | 1.00x | **2.00x (Long 1.5x / Short 0.5x)** | 3.00x |
-| **Funding Carry Integration** | Disabled | **Enabled ($\mu + \text{Funding}$)** | Disabled |
-| **Annual Capital Turnover** | 52.7 turns/yr | **~48.5 turns/yr** | > 350.0 turns/yr |
+| **Level 1 (L1 Alpha Bank)** | 5 Admitted Signals across 4 Families (`trend_ema`, `basis_gap`, `xs_reversal`, `xs_momentum`) | Sign Consistency 75~100%, **Low SNR (< 0.1)** | PASS (Admitted 5/30) |
+| **Level 2 (L2 Allocation)** | Dynamic Kelly Scaling ($f \in [0.25, 0.60]$), Asymmetric Leverage (Gross 2.0x, Long 1.5x, Short 0.5x), Funding Carry | **Log Growth Rate ($g$): -3.0470**, Equity Multiple: 0.3176 (-68.24% Return) | Volatility Drag (-71.60% MDD) |
+| **Level 3 (L3 Validation)** | Sealed Holdout Gate (90-day holdout evaluation) | **`max_drawdown_exceeded`** | **REJECT** (Deployment Blocked) |
 
 ---
 
-## 3. Core Architectural Mechanisms (v6 Engine)
+## 2. Level 1 (L1) Signal Bank Admission & Diagnostics
 
-1. **Signal-to-Noise Ratio (SNR) Driven Kelly Scaling**:
-   - Dynamic Kelly fraction is calculated at each 4h rebalancing bar:
-     $$f_t = f_{\min} + (f_{\max} - f_{\min}) \cdot \text{clip}(\text{SNR}_t \cdot 5.0, 0.0, 1.0)$$
-   - Expands position sizing during high conviction, low-volatility trend regimes while contracting to conservative $0.25x$ during regime turbulence.
+### Admitted Signal Catalog (5 Elite Signals)
+- `trend_ema:slow` (Lookback 216h, Target 216h, Sign Consistency 1.00)
+- `trend_ema:very_slow` (Lookback 432h, Target 432h, Sign Consistency 1.00)
+- `basis_gap:fast` (Lookback 24h, Target 24h, Sign Consistency 0.75)
+- `xs_reversal:fast` (Lookback 8h, Target 8h, Sign Consistency 1.00)
+- `xs_momentum_slow:slow` (Lookback 216h, Target 216h, Sign Consistency 0.75)
 
-2. **Asymmetric Long/Short Portfolio Caps**:
-   - Constrains total Long exposure $\sum w^+ \le 1.5$, Short exposure $\sum |w^-| \le 0.5$, and Total Gross exposure $\sum |w| \le 2.0$.
-   - Harnesses crypto structural long bias while providing tail-hedging via short allocations.
-
-3. **Fail-Safe Regime Fallback**:
-   - Unverified complex regime estimators are excluded to prevent overfitting.
-   - If statistical significance of regime classification falls below threshold, system automatically reverts to Fail-Safe state ($S_{regime} = 1.0$), ensuring uninterrupted position integrity.
+### L1 Findings
+- **Directional Edge**: Alpha signals demonstrate statistical significance after Benjamini-Hochberg FDR control ($q=0.05$).
+- **SNR Deficit**: Information Coefficients (IC) range from +0.012 to +0.035, indicating a low Signal-to-Noise Ratio (SNR < 0.1).
 
 ---
 
-## 4. Verification & Quality Audits
+## 3. Level 2 (L2) Portfolio Performance Matrix
 
-- **Unit & Integration Test Suite**: `tests/unit/domain/futures/compound/test_dynamic_compounding.py`
-  - Result: **13/13 PASS (100% Success)**
-  - Coverage: Core Module Coverage **84%**
-  - Mypy Static Type Verification: **PASS (0 Errors)**
+| Metric Parameter | L2-v5 (Baseline Quarter Kelly 1.0x) | **L2-v6 (Dynamic Kelly & Asymmetric 2.0x)** |
+| :--- | :--- | :--- |
+| **Net Log Growth Rate ($g$)** | 0.0000 ~ 0.3044 | **-3.0470** |
+| **Equity Multiple** | 1.0000 ~ 1.3559 | **0.3176 (-68.24%)** |
+| **Maximum Drawdown (MDD)** | -12.10% ~ -49.50% | **-71.60%** |
+| **Annualized Volatility** | 14.5% ~ 24.0% | **89.80%** |
+| **Daily CVaR (95%)** | -0.40% | **-1.75%** |
+| **Annual Capital Turnover** | 41.2 ~ 52.7 turns/yr | **57.3 turns/yr** |
+| **Friction Control** | Smoothing $\alpha=0.03$, Hysteresis $\theta=6\text{ bps}$ | Retained Low Friction |
+
+### L2 Failure Mechanism Analysis
+1. **Over-Allocation under Low SNR**: Dynamic Kelly scaling pushed fractional exposure up to $f=0.60$ during transient signal spikes, exposing capital to 2.0x gross leverage when alpha edge was insufficient to overcome noise.
+2. **Volatility Drag ($g \approx \mu - \frac{1}{2}\sigma^2$)**: Annualized portfolio volatility exploded to **89.80%**, causing geometric compounding drag and driving the net log growth rate deep into negative territory (-3.0470).
+3. **Carry vs. Price Dispersion**: Funding rate carry yields (3~5% APR) were insufficient to offset capital losses caused by directional price volatility during regime shifts.
 
 ---
 
-## 5. Deployment Recommendations
+## 4. Level 3 (L3) Gate Verdict & Next Action
 
-1. **Active Growth Mode (`L2-v6 Dynamic`)**: Officially promoted as the primary live strategy engine, delivering **+158.74% CAGR** with robust risk bounds.
-2. **Execution Parameters**: Retain Rebalancing Exponential Smoothing ($\alpha=0.03$) and Cost Hysteresis Threshold ($\theta=6\text{ bps}$) for live execution to maintain low friction.
+- **L3 Deployment Verdict**: **`REJECT`**
+- **Block Reason**: `max_drawdown_exceeded` (Real MDD 71.60% > Limit 20.00%)
+- **Governance Outcome**: Sealed Holdout Gate successfully blocked live capital deployment of high-leverage allocation.
+- **Architectural Next Steps**:
+  1. Refine L1 Signal Admission: Enforce higher conviction/SNR thresholds before enabling leverage.
+  2. Revert L2 Risk Parameters: Restrict Kelly fraction to $f \le 0.20$ and re-enforce Target Volatility Cap at 15%.

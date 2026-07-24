@@ -2,6 +2,21 @@
 
 This file holds historical architecture decision records (ADRs) that have been pruned from the active window.
 
+## [2026-07-22] [TASK_L2_CAUSAL_POLICY_SHADOW_GROWTH_FIRST] [ADR_20260722_L2_CAUSAL_POLICY_SHADOW_GROWTH_FIRST]
+- **Context/Why:** L2 policy comparison was not causal: policy rows shared returns, OOS bypassed the selected policy, and the latest run had fit_bars=0 with all_folds_blocked.
+- **Resolution/What:** Added policy-specific shadow-book contracts, fit-only growth-LCB selection, hard MDD/CVaR/ruin constraints, removed unconditional L1 override, rejected deprecated kelly_shrink_to_equal mappings, and covered shadow-cost shape errors.
+- **Impact:** lean_check PASS with Cov 47%; latest 4h L2 execution reached L1 PASS but L2 fail-closed at all_folds_blocked: fit_bars=0, OOS CAGR -23.61%, 902 bars and 271 trades. SPEC artifacts cleaned.
+
+## [2026-07-22] [TASK_L1_L2_COMPOUNDING_ALIGNMENT] [ADR_20260722_L1_L2_COMPOUNDING_ALIGNMENT]
+- **Context/Why:** L2 Kelly and baseline were evaluated on mismatched allocation and leverage scales, while legacy cached signal events could abort L2 before asset-growth analysis.
+- **Resolution/What:** Added L1 confidence and LCB/breakeven handoff, fit-only allocation policy evaluation with inverse-vol fallback, absolute deployed-growth gating, and backward-compatible zero-evidence handling for legacy events.
+- **Impact:** L2 execution completed 120/120 trials on 2026-07-22 data after fixing the legacy-event crash. Only 2/120 trials were joint-feasible and no champion was promoted; sharpe_abs remained the dominant blocker (92/120). lean_check PASS, coverage 47%.
+
+## [2026-07-22] [L2_KELLY_SHRINK] [ADR_20260722_L2_KELLY_SHRINK]
+- **Context/Why:** DEBUG 계측(120-trial)으로 mu-비례(Kelly) 사이징이 동일 지지집합의 risk-matched 균등가중 baseline보다 CAGR 열위(64.2%)임을 확인. 근본 원인은 mu SNR이 낮을 때 Kelly-비례 배분이 노이즈가 큰 종목에 과집중하는 noisy-Kelly 현상.
+- **Resolution/What:** diagonal_kelly_weights에 kelly_shrink_to_equal∈[0,1] 파라미터를 추가해 Kelly 비율과 균등가중 비율 간 shape-space 선형 블렌딩 구현. Layer2AllocationConfig 필드 + from_mapping 검증, awf_sim 호출부 배선, L2_SEARCH_SPACE 탐색 차원 추가. shrink=0.0 기본값으로 완전 하위호환.
+- **Impact:** Optuna 탐색 차원 +1. shrink=0.0은 기존 챔피언 replay와 byte-identical. 하류 파이프라인(vol_target/cap/projection) 변경 없음.
+
 ## [2026-07-22] [TASK_L1_SIGNAL_UTILIZATION_GATE_PARITY] [ADR_20260722_L1_SIGNAL_UTILIZATION_GATE_PARITY]
 - **Context/Why:** Non-4h sleeves structurally excluded from handoff due to TF-suffix lookup miss in portfolio_handoff.py (_mk_qw/override key not stripped). Champion CAGR gate regressed to absolute 30% floor because evaluate_layer2_gate call in selection.py omitted cagr_baseline/recency/window-bottleneck kwargs.
 - **Resolution/What:** Fix A: public strip_tf_suffix() in candidate_contracts.py; portfolio_handoff.py _mk_qw + L1-edge override lookup now strip suffix before registry key match. signal_selection._strip_tf_suffix delegates to public fn. Fix B: selection.py passes cagr_baseline, recency_holdout_cagr, recency_holdout_applicable, window_bottleneck_covered, window_bottleneck_detail to evaluate_layer2_gate.
