@@ -2,6 +2,11 @@
 
 This file holds historical architecture decision records (ADRs) that have been pruned from the active window.
 
+## [2026-07-22] [TASK_CAUSAL_ALPHA_ONLINE_GROWTH_ENGINE] [ADR_20260722_CAUSAL_ALPHA_ONLINE_GROWTH_ENGINE]
+- **Context/Why:** L2의 zero-overlap fit, direct Kelly-only OOS, legacy fallback 및 production Optuna 경로가 자산증식을 방해하는 구조적 결함을 최신 실측으로 재검증했다.
+- **Resolution/What:** Causal 4-fold warm-up, 4-policy shadow posterior, cash abstention, zero leverage support를 active AWF 경로에 연결하고 최신 실행 결과 및 잔여 production migration blocker를 result.md에 기록했다.
+- **Impact:** 정상 L2 경로는 fit_bars=0을 제거하고 성장 근거가 없을 때 현금 대기를 수행한다. 다만 crisis legacy replay, Optuna 120회, legacy promotion gate 및 12GB 초과 RSS는 후속 P0로 남는다.
+
 ## [2026-07-22] [TASK_L2_CAUSAL_POLICY_SHADOW_GROWTH_FIRST] [ADR_20260722_L2_CAUSAL_POLICY_SHADOW_GROWTH_FIRST]
 - **Context/Why:** L2 policy comparison was not causal: policy rows shared returns, OOS bypassed the selected policy, and the latest run had fit_bars=0 with all_folds_blocked.
 - **Resolution/What:** Added policy-specific shadow-book contracts, fit-only growth-LCB selection, hard MDD/CVaR/ruin constraints, removed unconditional L1 override, rejected deprecated kelly_shrink_to_equal mappings, and covered shadow-cost shape errors.

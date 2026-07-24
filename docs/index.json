@@ -546,5 +546,9 @@
       "tests/unit/domain/futures/compound/test_allocator.py",
       "tests/unit/domain/futures/compound/test_dynamic_compounding.py"
     ]
+  },
+  "src/domain/futures/compound/engine.py": {
+    "architecture": "docs/results/result.md",
+    "testing": "tests/unit/domain/futures/compound/test_engine.py"
   }
 }
