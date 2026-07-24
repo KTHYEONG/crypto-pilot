@@ -136,6 +136,8 @@ class TestRunMultiscaleCompoundEngine:
     def test_admitted_signals_path_produces_weights(self, tmp_path, mocker, small_cube: MarketFeatureCube) -> None:
         from src.domain.futures.compound.contracts import (
             CalibratedForecastPanel,
+            HandoffResult,
+            HandoffAdmissionEvidence,
             RawSignalPanel,
         )
 
@@ -147,14 +149,12 @@ class TestRunMultiscaleCompoundEngine:
             "src.domain.futures.compound.engine.build_raw_signal_panel",
             return_value=mock_panel,
         )
-        mocker.patch("src.domain.futures.compound.engine.build_folds_4h", return_value=())
+        from src.domain.futures.compound.contracts import CausalFold
+        mock_folds = (CausalFold(0, 0, 50, 48, 50, 52, 102, 2, 42),)
+        mocker.patch("src.domain.futures.compound.engine.build_folds_4h", return_value=mock_folds)
         mocker.patch("src.domain.futures.compound.engine.build_multi_horizon_targets", return_value={4: mocker.Mock()})
-        mocker.patch("src.domain.futures.compound.engine.calibrate_signals", return_value=())
-        mocker.patch("src.domain.futures.compound.engine.evaluate_signal_admission", return_value=())
-        mocker.patch(
-            "src.domain.futures.compound.engine.select_composite_candidates",
-            return_value=(0,),
-        )
+        mocker.patch("src.domain.futures.compound.engine.align_costs_to_decision_grid", return_value=np.full((256, 5), 8.0, dtype=np.float32))
+
         forecast_panel = CalibratedForecastPanel(
             decision_timestamps_ns=np.arange(256, dtype=np.int64),
             symbols=small_cube.symbols,
@@ -165,19 +165,16 @@ class TestRunMultiscaleCompoundEngine:
             admitted_signal_ids=("sig1",),
             fold_manifest_hash="test",
         )
-        mocker.patch(
-            "src.domain.futures.compound.engine.combine_composite_forecast",
-            return_value=forecast_panel,
+        evidence = HandoffAdmissionEvidence(
+            annualized_log_growth=0.1, growth_lcb90=0.05, growth_2x_cost=0.05,
+            max_drawdown=0.1, annual_volatility=0.15, positive_outer_folds=5,
+            effective_breadth=1.0, active_signal_ids=("sig1",),
+            admitted=True, reasons=(),
         )
-        from src.domain.futures.compound.contracts import SignalAdmissionEvidence
+        handoff_result = HandoffResult(forecast=forecast_panel, evidence=evidence)
         mocker.patch(
-            "src.domain.futures.compound.engine.evaluate_composite_admission",
-            return_value=SignalAdmissionEvidence(
-                signal_id="composite", family="composite",
-                oos_net_growth_lcb90=0.1, oos_net_mean_2x_cost=0.05,
-                fold_sign_consistency=1.0, p_value=0.01, fdr_q_value=0.01,
-                admitted=True, reasons=(),
-            ),
+            "src.domain.futures.compound.engine.build_prequential_handoff",
+            return_value=handoff_result,
         )
 
         n_syms = len(small_cube.symbols)
@@ -204,6 +201,8 @@ class TestRunMultiscaleCompoundEngine:
     def test_engine_passes_sigma_to_path(self, tmp_path, mocker, small_cube: MarketFeatureCube) -> None:
         from src.domain.futures.compound.contracts import (
             CalibratedForecastPanel,
+            HandoffResult,
+            HandoffAdmissionEvidence,
             RawSignalPanel,
         )
 
@@ -216,14 +215,12 @@ class TestRunMultiscaleCompoundEngine:
             "src.domain.futures.compound.engine.build_raw_signal_panel",
             return_value=mock_panel,
         )
-        mocker.patch("src.domain.futures.compound.engine.build_folds_4h", return_value=())
+        from src.domain.futures.compound.contracts import CausalFold
+        mock_folds = (CausalFold(0, 0, 50, 48, 50, 52, 102, 2, 42),)
+        mocker.patch("src.domain.futures.compound.engine.build_folds_4h", return_value=mock_folds)
         mocker.patch("src.domain.futures.compound.engine.build_multi_horizon_targets", return_value={4: mocker.Mock()})
-        mocker.patch("src.domain.futures.compound.engine.calibrate_signals", return_value=())
-        mocker.patch("src.domain.futures.compound.engine.evaluate_signal_admission", return_value=())
-        mocker.patch(
-            "src.domain.futures.compound.engine.select_composite_candidates",
-            return_value=(0,),
-        )
+        mocker.patch("src.domain.futures.compound.engine.align_costs_to_decision_grid", return_value=np.full((256, 5), 8.0, dtype=np.float32))
+
         forecast_panel = CalibratedForecastPanel(
             decision_timestamps_ns=np.arange(256, dtype=np.int64),
             symbols=small_cube.symbols,
@@ -234,19 +231,16 @@ class TestRunMultiscaleCompoundEngine:
             admitted_signal_ids=("sig1",),
             fold_manifest_hash="test",
         )
-        mocker.patch(
-            "src.domain.futures.compound.engine.combine_composite_forecast",
-            return_value=forecast_panel,
+        evidence = HandoffAdmissionEvidence(
+            annualized_log_growth=0.1, growth_lcb90=0.05, growth_2x_cost=0.05,
+            max_drawdown=0.1, annual_volatility=0.15, positive_outer_folds=5,
+            effective_breadth=1.0, active_signal_ids=("sig1",),
+            admitted=True, reasons=(),
         )
-        from src.domain.futures.compound.contracts import SignalAdmissionEvidence
+        handoff_result = HandoffResult(forecast=forecast_panel, evidence=evidence)
         mocker.patch(
-            "src.domain.futures.compound.engine.evaluate_composite_admission",
-            return_value=SignalAdmissionEvidence(
-                signal_id="composite", family="composite",
-                oos_net_growth_lcb90=0.1, oos_net_mean_2x_cost=0.05,
-                fold_sign_consistency=1.0, p_value=0.01, fdr_q_value=0.01,
-                admitted=True, reasons=(),
-            ),
+            "src.domain.futures.compound.engine.build_prequential_handoff",
+            return_value=handoff_result,
         )
         path_spy = mocker.patch(
             "src.domain.futures.compound.engine.compute_dynamic_compounding_path",

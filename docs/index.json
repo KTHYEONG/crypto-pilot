@@ -557,5 +557,8 @@
   },
   "src/domain/futures/compound/admission.py": {
     "testing": "tests/unit/domain/futures/compound/test_admission.py"
+  },
+  "src/domain/futures/compound/handoff.py": {
+    "testing": "tests/unit/domain/futures/compound/test_handoff.py"
   }
 }
