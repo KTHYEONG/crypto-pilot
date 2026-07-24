@@ -11,7 +11,7 @@ from src.domain.futures.compound.contracts import (
     SignalDescriptor,
 )
 from src.domain.futures.compound.engine import run_multiscale_compound_engine
-from src.domain.futures.compound.holdout_store import SealedHoldoutStore
+from src.domain.futures.compound.holdout_store import HoldoutReuseError, SealedHoldoutStore
 
 _NS_PER_HOUR = 3_600_000_000_000
 
@@ -110,6 +110,28 @@ class TestRunMultiscaleCompoundEngine:
             holdout_store=store, holdout_id="idem-test", config=config,
         )
         assert r1.l3 == r2.l3
+
+    def test_stale_holdout_manifest_hash_mismatch_raises(self, tmp_path, small_cube: MarketFeatureCube) -> None:
+        universe = type("Universe", (), {
+            "symbols": small_cube.symbols, "snapshots": (),
+        })()
+        store = SealedHoldoutStore(tmp_path / "engine_hash_mismatch.sqlite3")
+        manifest = SealedHoldoutManifest(
+            holdout_id="hash-mismatch-test",
+            start_time_ns=int(small_cube.timestamps_ns[-180]),
+            end_time_ns=int(small_cube.timestamps_ns[-1]),
+            holdout_days=90,
+            model_version="v1",
+            data_manifest_hash="stale_hash_from_prior_run",
+            strategy_spec_hash="spec1",
+        )
+        store.create(manifest)
+        config = CompoundEngineConfig()
+        with pytest.raises(HoldoutReuseError, match="hash mismatch"):
+            run_multiscale_compound_engine(
+                market=small_cube, universe=universe,
+                holdout_store=store, holdout_id="hash-mismatch-test", config=config,
+            )
 
     def test_admitted_signals_path_produces_weights(self, tmp_path, mocker, small_cube: MarketFeatureCube) -> None:
         from src.domain.futures.compound.contracts import (

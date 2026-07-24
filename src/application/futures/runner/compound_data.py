@@ -8,8 +8,14 @@ from numpy.typing import NDArray
 
 from src.application.futures.runner.compound_config import CompoundRunConfig
 from src.domain.futures.compound.contracts import MarketFeatureCube
-from src.domain.futures.data_lake.contracts import DatasetKind, DataSnapshot, GridRequest, LakeUniverse
-from src.domain.futures.data_lake.query import materialize_feature_grid
+from src.domain.futures.data_lake.contracts import (
+    DatasetKind,
+    DataSnapshot,
+    GridRequest,
+    LakeUniverse,
+    NativeFeatureGrid,
+)
+from src.domain.futures.data_lake.query import materialize_causal_metrics_grid, materialize_feature_grid
 
 _logger = logging.getLogger(__name__)
 
@@ -91,6 +97,22 @@ def build_multiscale_market_cube(
     metrics_grid = materialize_feature_grid(
         request=metrics_request, snapshot=snapshot, dataset=DatasetKind.METRICS_5M,
     )
+
+    causal_grids: dict[str, NativeFeatureGrid] = {}
+    for metric_field in ("top_trader_long_short_ratio", "long_short_ratio"):
+        cg = materialize_causal_metrics_grid(
+            symbols=symbols,
+            start_time_ns=int(timestamps_ns[0]),
+            end_time_ns=int(timestamps_ns[-1] + 3_600_000_000_000),
+            lake_root=config.data_lake.root,
+            field=metric_field,
+        )
+        causal_grids[metric_field] = cg
+        arrays[metric_field] = np.asarray(
+            cg.fields.get(metric_field, np.full((n_bars, n_syms), np.nan, dtype=np.float64)),
+            dtype=np.float64,
+        )
+
     available_core = np.logical_and.reduce(
         [np.asarray(grid.available[name], dtype=np.bool_) for name in core_names]
     )
@@ -123,6 +145,8 @@ def build_multiscale_market_cube(
         "index": index_grid.available["close"],
         "taker_buy_quote": grid.available["taker_buy_quote"],
         "open_interest": metrics_grid.available["sum_open_interest_value"],
+        "top_trader_long_short_ratio": causal_grids["top_trader_long_short_ratio"].available.get("top_trader_long_short_ratio", np.zeros((n_bars, n_syms), dtype=np.bool_)),
+        "long_short_ratio": causal_grids["long_short_ratio"].available.get("long_short_ratio", np.zeros((n_bars, n_syms), dtype=np.bool_)),
     }
 
     cube = MarketFeatureCube(
