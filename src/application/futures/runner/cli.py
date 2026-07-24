@@ -38,8 +38,8 @@ _REMOVED_FLAGS: tuple[str, ...] = (
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Compound-only Futures Runner")
     parser.add_argument("--phase", type=str, default="full",
-                        choices=["full", "verify-migration", "retire-legacy"],
-                        help="Execution phase (full, verify-migration, retire-legacy)")
+                        choices=["full", "verify-migration", "retire-legacy", "ladder"],
+                        help="Execution phase (full, verify-migration, retire-legacy, ladder)")
     parser.add_argument("--date", type=str, default=None, help="Reference date (YYYY-MM-DD)")
     parser.add_argument("--sync", type=str, default="auto", choices=["auto", "skip"],
                         help="Sync mode (auto, skip)")
@@ -113,6 +113,7 @@ def _dispatch_phase(phase: str, config: CompoundRunConfig) -> int:
                 Path("data/futures/funding"),
                 Path("data/futures/metrics"),
                 Path("data/futures/metadata"),
+                Path("data/futures/universe"),
                 Path("logs/futures/universe"),
                 Path("logs/futures/optimization"),
                 Path("logs/futures/alpha_foundry"),
@@ -122,6 +123,46 @@ def _dispatch_phase(phase: str, config: CompoundRunConfig) -> int:
         deleted = retire_legacy_storage(report=report, approved=True)
         _logger.info("retire-legacy: deleted %d targets", len(deleted))
         return 0
+
+    if phase == "ladder":
+        _logger.info("running ladder experiment phase")
+        from datetime import UTC, datetime
+
+        from src.application.futures.runner.compound_data import build_multiscale_market_cube
+        from src.application.futures.runner.compound_universe import build_daily_pit_universe
+        from src.application.futures.runner.data_lake_runtime import (
+            build_data_lake_runtime,
+            prepare_data_snapshot,
+        )
+        from src.domain.futures.compound.config import LadderConfig
+        from src.domain.futures.compound.ladder import run_experiment_ladder
+
+        cfg = config
+        try:
+            runtime = build_data_lake_runtime(cfg)
+            snapshot = prepare_data_snapshot(config=cfg, runtime=runtime)
+            import pandas as pd
+            ref_dt = pd.Timestamp(cfg.reference_date or datetime.now(UTC).strftime("%Y-%m-%d"), tz="UTC")
+            start_dt = ref_dt - pd.Timedelta(days=cfg.history_days)
+            n_bars = cfg.history_days * 24
+            calendar = pd.date_range(start=start_dt, periods=n_bars, freq="h", tz="UTC")
+            universe = build_daily_pit_universe(snapshot=snapshot, execution_calendar=calendar, config=cfg)
+            market = build_multiscale_market_cube(snapshot=snapshot, universe=universe, config=cfg)
+            ladder_cfg = LadderConfig()
+            results = run_experiment_ladder(
+                market=market, eligible_2d=market.eligible_2d,
+                config=ladder_cfg, rng_seed=cfg.seed,
+            )
+            n_ok = sum(1 for r in results if r.status == "ok")
+            n_promoted = sum(1 for r in results if r.promoted)
+            _logger.info(
+                "ladder complete: %d/%d ok, %d promoted",
+                n_ok, len(results), n_promoted,
+            )
+            return 0
+        except Exception as exc:
+            _logger.exception("ladder phase failed: %s", exc)
+            return 1
 
     _logger.error("unknown phase: %s", phase)
     return 2
