@@ -27,7 +27,7 @@ Leverage **high-reasoning models (Thinker)** for creative architectural design, 
 - **Multi-Hypothesis Data-Driven Experimentation**:
   - **Trigger**: Automatically activate when working on signal logic, portfolio allocation, risk sizing, performance optimization, or whenever DB schemas / API payloads have runtime uncertainty.
   - **Hypothesis Setup**: Formulate at least 2~3 alternative hypotheses (e.g., `[HYPOTHESIS-A]`, `[HYPOTHESIS-B]`).
-  - **Execution & Data Harvesting**: Write concise (<50 lines) verification scripts in `scratch/` and execute them via `uv run` against empirical data (e.g., market bar data, DB records, or live API endpoints).
+  - **Execution & Data Harvesting**: Write focused verification scripts in `scratch/`. Reuse existing `src/` modules via fast `rg` lookups when obvious, or write self-contained helper functions directly in `scratch/` when search overhead is high, ensuring zero token waste and unconstrained hypothesis testing.
   - **Quantitative Evaluation**: Evaluate hypotheses using concrete metrics (e.g., Sharpe Ratio, Max Drawdown, Execution Latency, Win Rate, or Memory Usage).
   - **Evidence-Based Selection**: Select the winning hypothesis based strictly on empirical evidence and document the benchmark comparison in the spec.
 - **Alternatives & Trade-offs**: Contrast multiple design options using empirical benchmark data. Justify why the winning hypothesis was selected.
