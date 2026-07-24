@@ -13,6 +13,14 @@ from src.domain.futures.universe.contracts import UniverseStateCube
 from src.domain.futures.universe.models import UniverseSnapshot
 
 
+class CausalityError(RuntimeError):
+    ...
+
+
+class InsufficientCoverageError(RuntimeError):
+    ...
+
+
 class AlphaLifecycle(StrEnum):
     SHADOW = "shadow"
     ACTIVE = "active"
@@ -288,6 +296,26 @@ class SealedHoldoutManifest:
 
 
 @dataclass(slots=True, frozen=True)
+class CovariancePath:
+    decision_timestamps_ns: NDArray[np.int64]
+    covariance_3d: NDArray[np.float64]
+    investable_2d: NDArray[np.bool_]
+
+
+@dataclass(slots=True, frozen=True)
+class LadderStageResult:
+    stage_id: str
+    oos_log_growth: float
+    oos_growth_lcb90: float
+    sharpe: float
+    max_drawdown: float
+    turnover_per_year: float
+    growth_2x_cost: float
+    status: str
+    promoted: bool
+
+
+@dataclass(slots=True, frozen=True)
 class CompoundEngineResult:
     handoff: AlphaEventTape
     ledger: ExecutionLedger
@@ -352,6 +380,94 @@ class AllocationConstraints:
     exit_required_1d: NDArray[np.bool_]
 
 
+@dataclass(slots=True, frozen=True)
+class TimeframeBarCube:
+    timeframe: str
+    timestamps_ns: NDArray[np.int64]
+    symbols: tuple[str, ...]
+    open_2d: NDArray[np.float32]
+    high_2d: NDArray[np.float32]
+    low_2d: NDArray[np.float32]
+    close_2d: NDArray[np.float32]
+    quote_volume_2d: NDArray[np.float32]
+    complete_2d: NDArray[np.bool_]
+
+
+@dataclass(slots=True, frozen=True)
+class MultiTimeframeBars:
+    decision_timestamps_ns: NDArray[np.int64]
+    cubes: dict[str, TimeframeBarCube]
+    aux_1h_fields: dict[str, NDArray[np.float32]]
+
+
+@dataclass(slots=True, frozen=True)
+class SignalDescriptor:
+    signal_id: str
+    family: str
+    speed: str
+    lookback_hours: int
+    native_timeframe: str
+    target_horizon_hours: int = 4
+
+    def __post_init__(self) -> None:
+        if self.native_timeframe == "4h" and self.target_horizon_hours % 4 != 0:
+            raise ValueError(
+                f"target_horizon_hours must be a multiple of 4 for 4h-native signals, "
+                f"got {self.target_horizon_hours}"
+            )
+
+
+@dataclass(slots=True, frozen=True)
+class CalibrationTarget:
+    decision_timestamps_ns: NDArray[np.int64]
+    y_2d: NDArray[np.float32]
+    valid_2d: NDArray[np.bool_]
+
+
+@dataclass(slots=True, frozen=True)
+class SignalCalibration:
+    signal_id: str
+    beta_by_fold: tuple[float, ...]
+    beta_se_by_fold: tuple[float, ...]
+    n_obs_by_fold: tuple[int, ...]
+
+
+@dataclass(slots=True, frozen=True)
+class SignalAdmissionEvidence:
+    signal_id: str
+    family: str
+    oos_net_growth_lcb90: float
+    oos_net_mean_2x_cost: float
+    fold_sign_consistency: float
+    p_value: float
+    fdr_q_value: float
+    admitted: bool
+    reasons: tuple[str, ...]
+    effective_sample_note: str = ""
+
+
+@dataclass(slots=True, frozen=True)
+class CalibratedForecastPanel:
+    decision_timestamps_ns: NDArray[np.int64]
+    symbols: tuple[str, ...]
+    mu_2d: NDArray[np.float32]
+    se_2d: NDArray[np.float32]
+    family_mu_3d: NDArray[np.float32]
+    family_ids: tuple[str, ...]
+    admitted_signal_ids: tuple[str, ...]
+    fold_manifest_hash: str
+
+
+@dataclass(slots=True, frozen=True)
+class RawSignalPanel:
+    decision_timestamps_ns: NDArray[np.int64]
+    symbols: tuple[str, ...]
+    descriptors: tuple[SignalDescriptor, ...]
+    z_3d: NDArray[np.float32]
+    valid_3d: NDArray[np.bool_]
+    sigma_2d: NDArray[np.float32]
+
+
 __all__ = [
     "ActiveForecastState",
     "AllocationConstraints",
@@ -362,26 +478,38 @@ __all__ = [
     "AlphaForecastTape",
     "AlphaLifecycle",
     "AlphaLifecycleEvidence",
+    "CalibratedForecastPanel",
+    "CalibrationTarget",
     "CausalAlphaFold",
     "CausalFold",
+    "CausalityError",
     "CombinedForecast",
     "CompoundEngineResult",
     "CompoundPipelineOutcome",
     "CompoundUniverseResult",
+    "CovariancePath",
     "DeploymentVerdict",
     "EdgeEvidence",
     "ExecutionCostFrame",
     "ExecutionLedger",
     "ForecastFrame",
+    "InsufficientCoverageError",
     "L2Evaluation",
     "L3ValidationResult",
+    "LadderStageResult",
     "MarketFeatureCube",
+    "MultiTimeframeBars",
     "MultiscaleAlphaDefinition",
     "PortfolioDecision",
     "RawAlphaTape",
+    "RawSignalPanel",
     "RiskOverlayResult",
     "SealedHoldoutManifest",
+    "SignalAdmissionEvidence",
+    "SignalCalibration",
+    "SignalDescriptor",
     "StrategyDataCoverage",
     "StrategyDataCoverageEntry",
+    "TimeframeBarCube",
     "UniverseLedgerCoverage",
 ]
