@@ -560,5 +560,9 @@
   },
   "src/domain/futures/compound/handoff.py": {
     "testing": "tests/unit/domain/futures/compound/test_handoff.py"
+  },
+  "src/domain/futures/compound/l1_sleeves.py": {
+    "architecture": "docs/results/result.md",
+    "testing": "tests/unit/domain/futures/compound/test_l1_sleeves.py"
   }
 }
