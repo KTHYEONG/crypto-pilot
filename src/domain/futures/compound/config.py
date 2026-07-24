@@ -177,6 +177,8 @@ class AdmissionConfig:
     fdr_q_threshold: float = 0.10
     default_cost_bps: float = 8.0
     sign_consistency_min: float = 0.6
+    composite_sign_consistency_min: float = 0.5
+    composite_p_value_max: float = 0.5
 
     def __post_init__(self) -> None:
         assert self.n_bootstrap > 0
@@ -184,6 +186,8 @@ class AdmissionConfig:
         assert 0 < self.fdr_q_threshold <= 1
         assert self.default_cost_bps >= 0
         assert 0 < self.sign_consistency_min <= 1
+        assert 0 < self.composite_sign_consistency_min <= 1
+        assert 0 <= self.composite_p_value_max <= 1
 
 
 @dataclass(slots=True, frozen=True)
