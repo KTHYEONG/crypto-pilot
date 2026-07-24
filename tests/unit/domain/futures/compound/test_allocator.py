@@ -3,7 +3,11 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from src.domain.futures.compound.allocator import combine_alpha_forecasts, solve_growth_optimal_weights
+from src.domain.futures.compound.allocator import (
+    apply_cost_aware_net_edge,
+    combine_alpha_forecasts,
+    solve_growth_optimal_weights,
+)
 from src.domain.futures.compound.config import AllocatorConfig
 from src.domain.futures.compound.contracts import (
     AllocationConstraints,
@@ -37,6 +41,33 @@ def two_recipe_tape() -> AlphaForecastTape:
         data_manifest_hash="h1",
         fold_manifest_hash="fh1",
     )
+
+
+class TestCostAwareNetEdge:
+    def test_high_alpha_triggers_instant_rebalance(self) -> None:
+        prev = np.array([0.1, 0.0, -0.05], dtype=np.float64)
+        target = np.array([0.2, 0.15, -0.12], dtype=np.float64)
+        mu = np.array([0.01, 0.005, 0.01], dtype=np.float64)
+        result = apply_cost_aware_net_edge(target, prev, mu)
+        expected_edge = np.abs((target - prev) * mu)
+        assert np.all(expected_edge > 0.0006)
+        np.testing.assert_array_equal(result, target)
+
+    def test_low_noise_keeps_previous_weights(self) -> None:
+        prev = np.array([0.1, 0.0, -0.05], dtype=np.float64)
+        target = np.array([0.1001, 0.0005, -0.0498], dtype=np.float64)
+        mu = np.array([1e-6, 1e-6, 1e-6], dtype=np.float64)
+        result = apply_cost_aware_net_edge(target, prev, mu)
+        np.testing.assert_array_equal(result, prev)
+
+    def test_mixed_threshold_respects_per_symbol(self) -> None:
+        prev = np.array([0.1, 0.0, -0.05], dtype=np.float64)
+        target = np.array([0.3, 0.0, -0.05], dtype=np.float64)
+        mu = np.array([0.01, 0.0, 0.0], dtype=np.float64)
+        result = apply_cost_aware_net_edge(target, prev, mu)
+        assert result[0] == target[0]
+        assert result[1] == prev[1]
+        assert result[2] == prev[2]
 
 
 class TestCombineAlphaForecasts:
