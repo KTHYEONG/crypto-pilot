@@ -486,3 +486,96 @@ def materialize_feature_grid(
         fields=fields, available=available,
         data_manifest_hash=snapshot.manifest_hash,
     )
+
+
+def _collect_metrics_paths(lake_root: Path, symbol: str) -> list[Path]:
+    sym_dir = lake_root / "metrics_5m" / f"symbol={symbol}"
+    if not sym_dir.is_dir():
+        return []
+    return sorted(sym_dir.rglob("*.parquet"))
+
+
+def materialize_causal_metrics_grid(
+    *, symbols: tuple[str, ...], start_time_ns: int, end_time_ns: int,
+    lake_root: Path, field: str, tolerance_ns: int = 7_200_000_000_000,
+) -> NativeFeatureGrid:
+    if not symbols:
+        raise ValueError("symbols must not be empty")
+    if not field:
+        raise ValueError("field must not be empty")
+
+    step_ns = 3_600_000_000_000
+    timestamps = np.arange(start_time_ns, end_time_ns, step_ns, dtype=np.int64)
+    n_t = len(timestamps)
+    n_s = len(symbols)
+
+    fields_dict: dict[str, NDArray[np.float64] | NDArray[np.float32]] = {
+        field: np.full((n_t, n_s), np.nan, dtype=np.float64)
+    }
+    avail: dict[str, NDArray[np.bool_]] = {
+        field: np.zeros((n_t, n_s), dtype=np.bool_)
+    }
+
+    import pyarrow.parquet as pq
+
+    for col, sym in enumerate(symbols):
+        paths = _collect_metrics_paths(lake_root, sym)
+        if not paths:
+            continue
+
+        columns = ["timestamp", "available_at", field]
+        frames: list[pd.DataFrame] = []
+        for p in paths:
+            try:
+                schema = pq.read_schema(p)  # type: ignore[no-untyped-call]
+                proj = [c for c in columns if c in set(schema.names)]
+                if "available_at" not in proj or field not in proj:
+                    continue
+                frames.append(pd.read_parquet(p, columns=proj))
+            except Exception:  # noqa: S112
+                continue
+
+        if not frames:
+            continue
+        df = pd.concat(frames, ignore_index=True)
+
+        avail_raw = df["available_at"]
+        if pd.api.types.is_datetime64_any_dtype(avail_raw):
+            avail_ns_col = pd.to_datetime(avail_raw, utc=True).astype("datetime64[ns, UTC]").astype("int64")
+        else:
+            avail_ns_col = pd.to_numeric(avail_raw, errors="coerce").astype("int64") * 1_000_000
+        df = df.assign(_available_at_ns=avail_ns_col)
+
+        start_ns_bound = max(0, start_time_ns - tolerance_ns)
+        df = df[(df["_available_at_ns"] >= start_ns_bound) & (df["_available_at_ns"] < end_time_ns)]
+        if df.empty:
+            continue
+
+        df = df.sort_values("_available_at_ns").drop_duplicates(subset=["_available_at_ns"], keep="last")
+        avail_ns = df["_available_at_ns"].to_numpy(dtype=np.int64)
+        values = pd.to_numeric(df[field], errors="coerce").to_numpy(dtype=np.float64)
+
+        pos = np.searchsorted(avail_ns, timestamps, side="right") - 1
+        valid = pos >= 0
+        if not np.any(valid):
+            continue
+
+        vpos = pos[valid]
+        lag = timestamps[valid] - avail_ns[vpos]
+        within_tol = lag <= tolerance_ns
+        hit = np.where(valid)[0][within_tol]
+        hit_pos = vpos[within_tol]
+
+        finite = np.isfinite(values[hit_pos])
+        hit = hit[finite]
+        hit_pos = hit_pos[finite]
+
+        if len(hit) > 0:
+            fields_dict[field][hit, col] = values[hit_pos]
+            avail[field][hit, col] = True
+
+    return NativeFeatureGrid(
+        timestamps_ns=timestamps, symbols=symbols,
+        fields=fields_dict, available=avail,
+        data_manifest_hash="",
+    )
