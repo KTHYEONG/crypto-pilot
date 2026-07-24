@@ -32,7 +32,6 @@ from src.domain.futures.compound.contracts import (
 )
 from src.domain.futures.compound.engine import run_multiscale_compound_engine
 from src.domain.futures.compound.holdout_store import SealedHoldoutStore
-from src.domain.futures.compound.l1_multiscale import NoAdmissibleAlphaError
 from src.domain.futures.data_lake.ingestion import DataCoverageError, StorageBudgetError
 
 _logger = logging.getLogger(__name__)
@@ -182,9 +181,6 @@ def run_multiscale_compound_main(config: CompoundRunConfig) -> RunnerResult:
     except StorageBudgetError as exc:
         _logger.error("storage budget exceeded: %s", exc)
         return RunnerResult(exit_code=1, reason=f"storage_budget:{exc}")
-    except NoAdmissibleAlphaError:
-        _logger.info("no admissible L1 alpha; deployment remains in cash")
-        return RunnerResult(exit_code=0, reason="no_admissible_alpha")
     except Exception as exc:
         _logger.exception("multiscale compound run failed")
         return RunnerResult(exit_code=1, reason=str(exc))

@@ -248,9 +248,7 @@ def test_storage_budget_error_returns_one(mocker) -> None:
     assert "storage_budget" in result.reason
 
 
-def test_no_admissible_alpha_returns_cash_status(mocker) -> None:
-    from src.domain.futures.compound.l1_multiscale import NoAdmissibleAlphaError
-
+def test_cash_only_engine_returns_normally(mocker) -> None:
     _setup_mocks(mocker)
     mocker.patch(
         "src.application.futures.runner.compound_main.build_daily_pit_universe",
@@ -264,16 +262,53 @@ def test_no_admissible_alpha_returns_cash_status(mocker) -> None:
         "src.application.futures.runner.compound_main.build_multiscale_market_cube",
         return_value=mock_cube,
     )
+
+    from src.domain.futures.compound.contracts import DeploymentVerdict
+
+    class FakeL2:
+        annualized_log_growth = 0.0
+        growth_ci90 = (0.0, 0.0)
+        equity_multiple = 1.0
+        max_drawdown = 0.0
+        daily_cvar95 = 0.0
+        annual_volatility = 0.0
+        turnover = 0.0
+        safe = True
+        integrity_ok = True
+
+    class FakeL3:
+        verdict = DeploymentVerdict.PROMOTE
+        posterior_growth_probability = 0.0
+        holdout_days = 0
+        max_drawdown = 0.0
+        daily_cvar95 = 0.0
+        reasons = ()
+
+    class FakeHandoff:
+        model_version = "v1"
+        data_manifest_hash = "h1"
+
+    class FakeLedger:
+        timestamps_ns = np.array([0, 1], dtype=np.int64)
+        target_weights_2d = np.zeros((2, 2), dtype=np.float32)
+        integrity_ok = True
+
     mocker.patch(
         "src.application.futures.runner.compound_main.run_multiscale_compound_engine",
-        side_effect=NoAdmissibleAlphaError("none"),
+        return_value=mocker.Mock(
+            ledger=FakeLedger(),
+            l2=FakeL2(),
+            l3=FakeL3(),
+            handoff=FakeHandoff(),
+            spec=["ledger", "l2", "l3", "handoff"],
+        ),
     )
 
     result = run_multiscale_compound_main(
         CompoundRunConfig(reference_date="2026-07-08", sync="skip", refresh_universe=False)
     )
 
-    assert result == type(result)(exit_code=0, reason="no_admissible_alpha")
+    assert result.exit_code == 0
 
 
 def test_generic_exception_returns_one(mocker) -> None:

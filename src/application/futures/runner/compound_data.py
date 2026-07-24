@@ -34,7 +34,7 @@ def build_multiscale_market_cube(
     timestamps_ns = execution_calendar.to_numpy(dtype="datetime64[ns]").astype(np.int64)
 
     core_names = (
-        "open", "high", "low", "close", "quote_volume", "taker_quote_volume",
+        "open", "high", "low", "close", "quote_volume", "taker_buy_quote",
     )
     grid = materialize_feature_grid(
         request=GridRequest(
@@ -109,7 +109,7 @@ def build_multiscale_market_cube(
         "premium": np.asarray(premium_grid.fields["close"], dtype=np.float32),
         "mark": np.asarray(mark_grid.fields["close"], dtype=np.float32),
         "index": np.asarray(index_grid.fields["close"], dtype=np.float32),
-        "taker_buy_quote": arrays["taker_quote_volume"].astype(np.float32),
+        "taker_buy_quote": arrays["taker_buy_quote"].astype(np.float32),
         "open_interest": np.asarray(
             metrics_grid.fields["sum_open_interest_value"], dtype=np.float32,
         ),
@@ -121,7 +121,7 @@ def build_multiscale_market_cube(
         "premium": premium_grid.available["close"],
         "mark": mark_grid.available["close"],
         "index": index_grid.available["close"],
-        "taker_buy_quote": grid.available["taker_quote_volume"],
+        "taker_buy_quote": grid.available["taker_buy_quote"],
         "open_interest": metrics_grid.available["sum_open_interest_value"],
     }
 
