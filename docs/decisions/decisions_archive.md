@@ -2,6 +2,16 @@
 
 This file holds historical architecture decision records (ADRs) that have been pruned from the active window.
 
+## [2026-07-21] [TASK_L2_PORTFOLIO_HANDOFF_GATE_FIX] [ADR_20260721_L2_PORTFOLIO_HANDOFF_GATE_FIX]
+- **Context/Why:** L2 Optuna가 all_folds_blocked로 0/120 trial 고정 차단됨. 코드 감사 결과 evaluate_portfolio_handoff의 5개 구조적 결함 확인: (1) max_candidate_sleeves=32가 선언만 되고 미집행되어 무제한 sleeve 풀이 equal-weight admission test를 희석, (2) admission이 equal-weight로 평가되어 실제 배포(Diagonal Kelly, layer2.md) 목적함수와 불일치, (3) _moving_block_bootstrap_lcb가 min_calibration_windows=3 < block_size=10일 때 매 resample이 동일해 sigma=0으로 퇴화, (4) insufficient_family_diversity가 개별 통과 sleeve까지 fold 전체 blanket-kill(RC-3에서 이미 발견/수정한 것과 동일 패턴 재발), (5) max_sleeves_per_cluster가 선언만 되고 전무 미참조.
+- **Resolution/What:** docs/specs/l2-portfolio-handoff-gate-fix.md 스펙에 따라 portfolio_handoff.py 수정: _rank_and_cap_sleeve_indices 신설(registry quality_weight 기준 top-32 결정적 pre-cap), _kelly_proportional_weights 신설(w_s∝max(mu,0)/sigma_R^2, layer2.md 공식과 동일, 전량 비양수 시 equal-weight fallback)로 admission base weight를 equal-weight에서 교체, _moving_block_bootstrap_lcb는 effective_block_size=min(block_size,max(1,n-1))로 자동 스케일해 퇴화 제거, insufficient_family_diversity는 fold-wide wipe에서 제외하고 [ALGO] 진단 로그로 강등(개별 admitted sleeve 보존), 미사용 max_sleeves_per_cluster 필드 삭제. 신규 rejection_reasons 값 capped_by_candidate_sleeve_limit 추가.
+- **Impact:** /check PASS(Cov 86%, spec compliance, mypy strict, 신규 11개 시나리오 포함). 프로덕션 실측 2회(2026-05-01, 2026-07-21 기준, 120 trial): 게이트 결함은 계측으로 수정 확인(cap 정상 작동 - 05-01: 34풀 중 2개, 07-21: 58풀 중 26개 절삭, Kelly weight로 음수-평균 sleeve는 marginal delta≈0으로 정당 배제, family diversity wipe 미발동). 그러나 두 날짜 모두 all_folds_blocked 불변 - admitted=0/fold, LCB 대부분 음수(07-21 fold 평균 -0.002~-0.006), 이는 게이트 버그가 아니라 L1 신호의 순 엣지 부재(기존 세션들의 Rank IC=0.000, mu<<breakeven 결론과 정합)가 근본 원인임을 재확인. L2 통과의 유일 경로는 L1 알파 재설계.
+
+## [2026-07-21] [PORTFOLIO_CAUSAL_ROBUST_HANDOFF] [ADR_20260721_PORTFOLIO_CAUSAL_ROBUST_HANDOFF]
+- **Context/Why:** L2 multi-seed production path bypassed the causal handoff and selected no shared candidate; latest run stopped before trial evaluation.
+- **Resolution/What:** Connected deterministic single-candidate path, generated fit/cal causal net sleeve returns, applied fold handoff masks before OOS simulation, and preserved isolated-study compatibility. Latest 120-trial run fail-closed at handoff with all folds blocked.
+- **Impact:** L1 remains passing (113/118); L2 trials and simulated trades were 0 because no sleeve survived handoff; check passed with Cov 38%.
+
 ## [2026-07-21] [L2_RISK_PROJECTED_ROBUST_SEARCH] [ADR_20260721_L2_RISK_PROJECTED_ROBUST_SEARCH]
 - **Context/Why:** 개선안 구현 후 실제 데이터에서 자산증식 로직의 병목과 적용 여부를 검증하기 위해 120-trial L2 실행 결과를 기록한다.
 - **Resolution/What:** 위기 레버리지 투영·robust search 계약을 구현하고 단일 프로세스 L2 120-trial 기준선 실측을 수행했다. seed=42에서 120/120 완료, joint_feasible=4/120, blocker=cagr를 확인했으며 기존 multi-seed/composite crisis 경로가 아직 실제 파이프라인에 남아 있음을 확인했다.
