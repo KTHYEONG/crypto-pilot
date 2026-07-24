@@ -42,6 +42,26 @@
 
 ---
 
+## 1b. Composite Admission (L1→L2 재설계 실측, 2026-07-24)
+
+개별 signal 이진 admission 게이트(위 표)가 근본 병목이라는 진단(SSOT: `docs/decisions/decisions.md` ADR_20260724_L1L2_COMPOSITE_ADMISSION)에 따라, 약필터(sign_consistency≥0.5 & p≤0.5) 통과 후보를 fold별 precision(1/se²) 가중으로 결합한 단일 composite에 대해 admission을 재정의했다. `engine.py`/`ladder.py`는 이미 이 composite 게이트로 전환됐다.
+
+| Metric | Value |
+| :--- | ---: |
+| 결합 방식 | Precision-weighted (fold별 1/beta_se²) |
+| 후보 수 (약필터 통과) | 16 / 27 |
+| Composite LCB90 | -0.0286 |
+| Composite net_mean_2x | +0.0347 |
+| Composite sign_consistency | 0.500 (문턱 0.6 미달) |
+| Composite p-value | 0.202 |
+| **Composite admitted** | **False** |
+
+**L2/L3 impact**: composite 미채택 → cash-only fallback. L2 log growth **0.000**(무포지션, v6.1 baseline -0.3836 대비 손실은 회피했으나 수익도 없음), L3 verdict **REJECT**(v6.1 SHADOW 대비 악화).
+
+**결론**: composite 아키텍처는 코드적으로 정상 동작(NaN 마스킹 버그 수정 후 실측치 확인)하나, 이번 730d 데이터에서는 admission 문턱을 근소하게 넘지 못했다. 사전 Stouffer 메타분석(Z=7.94, 독립가정)이 과대추정한 원인은 후보 신호(특히 trend_ema 5-speed 등)간 강한 상관 — Grinold-Kahn 유효breadth(`N/(1+(N-1)ρ)`)가 명목 16개보다 크게 축소됨. 현재 실거동은 admitted 신호 카운트(2/26, 위 표)와 무관하게 **cash-only**이며, composite가 문턱을 통과하지 못하는 한 프로덕션 배포 신호셋 교체는 일어나지 않는다. SSOT: 스펙은 `docs/decisions/decisions.md`(sync 시 `docs/specs/`에서 제거됨) 참조.
+
+---
+
 ## 2. L1 Cross-Sectional Rank-IC (Newey-West HAC, 신규 신호 candidate screening)
 
 | Signal (candidate) | Window | meanIC @24h | t_NW @24h | meanIC @72h | t_NW @72h |
