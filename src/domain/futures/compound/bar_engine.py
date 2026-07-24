@@ -125,3 +125,23 @@ def build_multi_timeframe_bars(
         cubes=cubes,
         aux_1h_fields=aux_fields,
     )
+
+
+def align_costs_to_decision_grid(
+    market_timestamps_ns: NDArray[np.int64],
+    decision_timestamps_ns: NDArray[np.int64],
+    execution_cost_bps_2d: NDArray[np.float32],
+) -> NDArray[np.float32]:
+    _validate_monotonic(market_timestamps_ns)
+    _validate_monotonic(decision_timestamps_ns)
+
+    n_decision = decision_timestamps_ns.size
+    if market_timestamps_ns.size < 1:
+        raise CausalityError("market_timestamps_ns is empty")
+    n_syms = execution_cost_bps_2d.shape[1]
+
+    cost_bps_4h = np.full((n_decision, n_syms), np.nan, dtype=np.float32)
+    idx = np.searchsorted(market_timestamps_ns, decision_timestamps_ns, side="right") - 1
+    idx = np.clip(idx, 0, market_timestamps_ns.size - 1)
+    cost_bps_4h[:] = execution_cost_bps_2d[idx, :]
+    return cost_bps_4h

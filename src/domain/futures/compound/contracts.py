@@ -468,6 +468,26 @@ class RawSignalPanel:
     sigma_2d: NDArray[np.float32]
 
 
+@dataclass(slots=True, frozen=True)
+class HandoffAdmissionEvidence:
+    annualized_log_growth: float
+    growth_lcb90: float
+    growth_2x_cost: float
+    max_drawdown: float
+    annual_volatility: float
+    positive_outer_folds: int
+    effective_breadth: float
+    active_signal_ids: tuple[str, ...]
+    admitted: bool
+    reasons: tuple[str, ...]
+
+
+@dataclass(slots=True, frozen=True)
+class HandoffResult:
+    forecast: CalibratedForecastPanel
+    evidence: HandoffAdmissionEvidence
+
+
 __all__ = [
     "ActiveForecastState",
     "AllocationConstraints",
@@ -493,6 +513,8 @@ __all__ = [
     "ExecutionCostFrame",
     "ExecutionLedger",
     "ForecastFrame",
+    "HandoffAdmissionEvidence",
+    "HandoffResult",
     "InsufficientCoverageError",
     "L2Evaluation",
     "L3ValidationResult",
