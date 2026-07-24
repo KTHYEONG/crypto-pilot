@@ -2,9 +2,36 @@ from __future__ import annotations
 
 import numpy as np
 
+
 from src.domain.futures.compound.config import RiskOverlayConfig
 from src.domain.futures.compound.contracts import PortfolioDecision
-from src.domain.futures.compound.risk_overlay import apply_risk_overlay
+from src.domain.futures.compound.risk_overlay import apply_fractional_kelly_scaling, apply_risk_overlay
+
+
+class TestApplyFractionalKellyScaling:
+    def test_quarter_kelly_scales_precisely(self) -> None:
+        w = np.array([0.2, 0.15, -0.10], dtype=np.float64)
+        port_var = 0.0001
+        result = apply_fractional_kelly_scaling(w, port_var)
+        ann_vol = np.sqrt(port_var) * np.sqrt(2190.0)
+        expected_scale = 0.25 * (0.25 / max(ann_vol, 0.25))
+        expected = w * expected_scale
+        np.testing.assert_array_almost_equal(result, expected)
+
+    def test_high_vol_brings_vol_below_target(self) -> None:
+        w = np.array([0.5, 0.3], dtype=np.float64)
+        port_var = 0.001
+        result = apply_fractional_kelly_scaling(w, port_var)
+        result_ann_vol = np.sqrt(np.sum(result ** 2) * port_var) * np.sqrt(2190.0)
+        assert result_ann_vol <= 0.26
+
+    def test_cvar_regime_reduces_scale_further(self) -> None:
+        w = np.array([0.2, 0.15], dtype=np.float64)
+        port_var = 0.0001
+        normal = apply_fractional_kelly_scaling(w, port_var)
+        cvar = apply_fractional_kelly_scaling(w, port_var, cvar_regime_active=True)
+        assert np.all(cvar < normal)
+        np.testing.assert_array_almost_equal(cvar, normal / 2.0)
 
 
 class TestApplyRiskOverlay:
