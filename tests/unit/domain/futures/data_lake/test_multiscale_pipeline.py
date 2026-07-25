@@ -20,6 +20,7 @@ from src.domain.futures.data_lake.contracts import (
     DataSnapshot,
     IngestionPlan,
     PartitionManifest,
+    SyncMode,
 )
 from src.application.futures.runner.data_lake_runtime import (
     build_data_lake_runtime,
@@ -108,8 +109,8 @@ class FakeCatalog:
 
 class TestConfigDefaults:
     def test_config_disables_network_sync_by_default(self) -> None:
-        config = build_compound_run_config({"sync": "skip", "seed": 42})
-        assert config.allow_network_sync is False
+        config = build_compound_run_config({"sync": "local", "seed": 42})
+        assert config.sync == SyncMode.LOCAL
         assert isinstance(config.data_lake, DataLakeConfig)
         assert isinstance(config.universe, PITUniverseConfig)
 
@@ -121,7 +122,7 @@ class TestRuntimeFactory:
     def test_runtime_factory_does_not_download(self) -> None:
         config = CompoundRunConfig(
             reference_date="2026-07-08",
-            sync="skip",
+            sync=SyncMode.LOCAL,
             refresh_universe=False,
         )
         runtime = build_data_lake_runtime(config)
@@ -147,9 +148,8 @@ class TestLocalSnapshot:
         )
         config = CompoundRunConfig(
             reference_date="2026-07-08",
-            sync="skip",
+            sync=SyncMode.LOCAL,
             refresh_universe=False,
-            allow_network_sync=False,
         )
         result = prepare_data_snapshot(config=config, runtime=runtime)
         assert result.snapshot_id == "test-complete"
@@ -174,9 +174,8 @@ class TestCoverageFailure:
         )
         config = CompoundRunConfig(
             reference_date="2026-07-08",
-            sync="skip",
+            sync=SyncMode.LOCAL,
             refresh_universe=False,
-            allow_network_sync=False,
         )
         with pytest.raises(DataCoverageError):
             prepare_data_snapshot(config=config, runtime=runtime)
@@ -199,9 +198,8 @@ class TestApprovedSync:
         runtime = DataLakeRuntime(client=client, catalog=catalog)
         config = CompoundRunConfig(
             reference_date="2026-07-08",
-            sync="skip",
+            sync=SyncMode.AUTO,
             refresh_universe=False,
-            allow_network_sync=True,
         )
 
         with pytest.raises(DataCoverageError, match="still incomplete after sync"):
@@ -300,7 +298,7 @@ class TestForwardFill:
         )
         config = CompoundRunConfig(
             reference_date="2026-07-08",
-            sync="skip",
+            sync=SyncMode.LOCAL,
             refresh_universe=False,
             history_days=2,
         )
@@ -331,7 +329,7 @@ class TestRightClosedGrid:
         universe = _lake_universe(symbols=("BTCUSDT",))
         config = CompoundRunConfig(
             reference_date="2026-07-08",
-            sync="skip",
+            sync=SyncMode.LOCAL,
             refresh_universe=False,
             history_days=2,
         )
@@ -362,7 +360,7 @@ class TestPITUniverse:
             total_bytes=0,
         )
         config = CompoundRunConfig(
-            reference_date="2026-07-08", sync="skip", refresh_universe=False,
+            reference_date="2026-07-08", sync=SyncMode.LOCAL, refresh_universe=False,
         )
         from src.domain.futures.data_lake.query import UniverseCoverageError
         with pytest.raises(UniverseCoverageError):
@@ -530,7 +528,7 @@ class TestMultiscaleMarketCube:
         )
         config = CompoundRunConfig(
             reference_date="2026-07-08",
-            sync="skip",
+            sync=SyncMode.LOCAL,
             refresh_universe=False,
             history_days=1,
         )
