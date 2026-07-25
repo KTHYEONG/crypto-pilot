@@ -15,12 +15,13 @@ from src.domain.futures.compound.calibration import (
     build_folds_4h,
     build_multi_horizon_targets,  # noqa: F401 - compatibility patch target for legacy tests
 )
-from src.domain.futures.compound.clustering import compute_market_regime_clusters
+from src.domain.futures.compound.clustering import build_causal_cluster_folds
 from src.domain.futures.compound.config import CompoundEngineConfig, DynamicCompoundingConfig
 from src.domain.futures.compound.contracts import (
     AlphaEventTape,
     CombinedForecast,
     CompoundEngineResult,
+    HandoffResult,
     L3ValidationResult,
     MarketFeatureCube,
 )
@@ -30,6 +31,7 @@ from src.domain.futures.compound.holdout_store import SealedHoldoutStore
 from src.domain.futures.compound.l1_sleeves import build_exit_aware_handoff
 from src.domain.futures.compound.signal_bank import build_raw_signal_panel
 from src.domain.futures.compound.validation import (
+    build_causal_l2_benchmark,
     evaluate_l2_walk_forward,
     evaluate_l3_sealed_holdout,
     slice_execution_ledger,
@@ -92,23 +94,24 @@ def run_multiscale_compound_engine(
     eligible_4h = _subsample_to_4h(market.eligible_2d)
     panel = build_raw_signal_panel(bars, eligible_4h)
 
-    has_admitted = False
+    handoff_result: HandoffResult | None = None
     try:
-        _logger.info("P2: building prequential handoff")
+        _logger.info("P2: building causal cluster folds and handoff")
         horizons = tuple(sorted({d.target_horizon_hours for d in panel.descriptors}))
         max_horizon_bars = max(horizons) // 4 if horizons else 0
         folds = build_folds_4h(panel.z_3d.shape[0], config.calibration, max_target_horizon_bars=max_horizon_bars)
         cost_bps_4h = align_costs_to_decision_grid(
             market.timestamps_ns, bars_4h.timestamps_ns, market.execution_cost_bps_2d,
         )
-        clusters = compute_market_regime_clusters(market, k_clusters=4)
-        _logger.info("[P2] computed %d market regime clusters", clusters.k_clusters)
-        handoff = build_exit_aware_handoff(panel, bars, folds, cost_bps_4h, funding_1h, config.handoff, clusters=clusters)
-        has_admitted = handoff.evidence.admitted
-        forecast = handoff.forecast
+        cluster_folds = build_causal_cluster_folds(
+            market=market, bars_4h=bars_4h, folds=folds, config=config.cluster,
+        )
+        _logger.info("[P2] computed %d causal cluster folds", len(cluster_folds))
+        handoff_result = build_exit_aware_handoff(panel, bars, folds, cluster_folds, cost_bps_4h, funding_1h, config.handoff)
+        forecast = handoff_result.forecast
         _logger.info(
             "P2 complete: admitted=%s active=%s",
-            has_admitted, handoff.evidence.active_signal_ids,
+            handoff_result.evidence.admitted, handoff_result.evidence.active_signal_ids,
         )
     except Exception:
         _logger.warning("P2 pipeline failed, using cash-only fallback", exc_info=True)
@@ -116,12 +119,13 @@ def run_multiscale_compound_engine(
 
     _logger.info("P3: dynamic compounding allocation, dense simulation")
     bars_4h = bars.cubes["4h"]
+    has_admitted = handoff_result.evidence.admitted if handoff_result is not None else False
 
     if has_admitted:
         w = compute_dynamic_compounding_path(forecast=forecast, sigma_2d=panel.sigma_2d, funding_rates_1h_2d=funding_1h, config=config.dynamic_compounding, close_2d=bars_4h.close_2d, cost_bps=config.ladder.cost_bps)
         is_cash_only = float(np.sum(np.abs(w))) < 1e-15
         if not is_cash_only:
-            pass  # allocate_portfolio_step: direct invocation reference
+            pass
 
     else:
         w = np.zeros((n_bars_4h, n_syms), dtype=np.float64)
@@ -148,9 +152,27 @@ def run_multiscale_compound_engine(
         end_time_ns=int(ledger.timestamps_ns[holdout_start_idx - 1]),
     )
 
+    _logger.info("building causal L2 benchmark")
+    daily_market_returns: dict[str, NDArray[np.float64]] = {}
+    daily_timestamps_ns = _daily_timestamps_from_4h(l2_ledger.timestamps_ns)
+    if "close" in market.fields_2d:
+        close = np.asarray(market.fields_2d["close"], dtype=np.float64)
+        daily_close = _aggregate_1h_to_daily(market.timestamps_ns, close)
+        for sym_idx, sym in enumerate(market.symbols):
+            daily_ret = np.diff(daily_close[:, sym_idx]) / np.maximum(daily_close[:-1, sym_idx], 1e-12)
+            daily_market_returns[sym] = daily_ret[:len(daily_timestamps_ns)]
+
+    benchmark = build_causal_l2_benchmark(
+        daily_market_returns=daily_market_returns,
+        timestamps_ns=daily_timestamps_ns,
+        config=config.l2_benchmark,
+    )
+
     _logger.info("evaluating L2 walk-forward")
     l2_eval = evaluate_l2_walk_forward(
-        ledger=l2_ledger, bars_per_year=8766.0, bootstrap_seed=42,
+        ledger=l2_ledger, fold_ids_1d=np.zeros(l2_ledger.timestamps_ns.shape[0], dtype=np.int16),
+        benchmark=benchmark, candidate_count=len(panel.descriptors),
+        config=config.l2_gate, bootstrap_seed=42,
     )
 
     holdout_ledger = slice_execution_ledger(
@@ -198,6 +220,29 @@ def run_multiscale_compound_engine(
         l2=l2_eval,
         l3=l3_result,
     )
+
+
+def _daily_timestamps_from_4h(timestamps_ns_4h: NDArray[np.int64]) -> NDArray[np.int64]:
+    ns_per_4h = 4 * 3600 * 10**9
+    day_start_ns = timestamps_ns_4h - (timestamps_ns_4h % (6 * np.int64(ns_per_4h)))
+    unique_days: NDArray[np.int64] = np.unique(day_start_ns).astype(np.int64)
+    counts: NDArray[np.int64] = np.array([int(np.sum(day_start_ns == d)) for d in unique_days], dtype=np.int64)
+    complete: NDArray[np.int64] = unique_days[counts == 6].astype(np.int64)
+    return complete + np.int64(6 * ns_per_4h - 1)
+
+
+def _aggregate_1h_to_daily(
+    timestamps_ns: NDArray[np.int64],
+    values_2d: NDArray[np.float64],
+) -> NDArray[np.float64]:
+    ns_per_1h = 3600 * 10**9
+    day_start_ns = timestamps_ns - (timestamps_ns % (24 * ns_per_1h))
+    unique_days = np.unique(day_start_ns)
+    daily = np.zeros((len(unique_days), values_2d.shape[1]), dtype=np.float64)
+    for i, day_start in enumerate(unique_days):
+        mask = day_start_ns == day_start
+        daily[i] = np.nanmean(values_2d[mask], axis=0)
+    return daily
 
 
 def allocate_portfolio_step(

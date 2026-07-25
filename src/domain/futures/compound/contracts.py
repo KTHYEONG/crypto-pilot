@@ -9,6 +9,9 @@ import numpy as np
 import pyarrow as pa
 from numpy.typing import NDArray
 
+from src.domain.futures.universe.contracts import UniverseStateCube
+from src.domain.futures.universe.models import UniverseSnapshot
+
 
 class ClusteringAlgorithm(StrEnum):
     ROBUST_KMEANS = "robust_kmeans"
@@ -30,8 +33,60 @@ class ClusterPanel:
             raise ValueError("cluster_centroids must be 2-D with k_clusters rows")
 
 
-from src.domain.futures.universe.contracts import UniverseStateCube
-from src.domain.futures.universe.models import UniverseSnapshot
+class L2GateVerdict(StrEnum):
+    PASS = "pass"  # noqa: S105
+    FAIL = "fail"
+    NO_EVIDENCE = "no_evidence"
+
+
+@dataclass(slots=True, frozen=True)
+class L2CategoryResult:
+    category: str
+    passed: bool
+    reasons: tuple[str, ...]
+
+    def __post_init__(self) -> None:
+        if not self.category:
+            raise ValueError("category must be non-empty")
+        if self.passed and self.reasons:
+            raise ValueError("passed category must have empty reasons")
+        if not self.passed and not self.reasons:
+            raise ValueError("failed category must have at least one reason")
+
+
+@dataclass(slots=True, frozen=True)
+class CausalClusterFold:
+    fold_id: int
+    fit_end_exclusive_4h: int
+    fit_end_time_ns: int
+    panel: ClusterPanel
+    member_hash: str
+
+    def __post_init__(self) -> None:
+        if self.fit_end_exclusive_4h <= 0:
+            raise ValueError("fit_end_exclusive_4h must be > 0")
+
+
+@dataclass(slots=True, frozen=True)
+class L2BenchmarkSeries:
+    benchmark_id: str
+    timestamps_ns: NDArray[np.int64]
+    daily_returns_1d: NDArray[np.float64]
+    causal_scale_1d: NDArray[np.float64]
+
+    def __post_init__(self) -> None:
+        if not self.benchmark_id:
+            raise ValueError("benchmark_id must be non-empty")
+        if self.timestamps_ns.ndim != 1 or self.daily_returns_1d.ndim != 1 or self.causal_scale_1d.ndim != 1:
+            raise ValueError("arrays must be 1-D")
+        if not (self.timestamps_ns.shape[0] == self.daily_returns_1d.shape[0] == self.causal_scale_1d.shape[0]):
+            raise ValueError("arrays must have the same length")
+        if len(np.unique(self.timestamps_ns)) != len(self.timestamps_ns):
+            raise ValueError("timestamps_ns must be unique")
+        if not np.all(np.isfinite(self.daily_returns_1d)):
+            raise ValueError("daily_returns_1d must be finite")
+        if not np.all(np.isfinite(self.causal_scale_1d)):
+            raise ValueError("causal_scale_1d must be finite")
 
 
 class CausalityError(RuntimeError):
@@ -282,15 +337,81 @@ class ExecutionLedger:
 
 @dataclass(slots=True, frozen=True)
 class L2Evaluation:
+    verdict: L2GateVerdict
+    benchmark_id: str
     annualized_log_growth: float
-    growth_ci90: tuple[float, float]
+    cagr: float
+    excess_growth_lcb90: float
+    excess_growth_probability: float
+    stressed_excess_growth_lcb90: float
     equity_multiple: float
+    sharpe: float
+    sharpe_probability: float
+    deflated_sharpe_probability: float
+    candidate_count: int
+    calmar: float
     max_drawdown: float
     daily_cvar95: float
     annual_volatility: float
-    turnover: float
-    safe: bool
+    annual_turnover: float
+    cost_drag_ratio: float
+    capacity_utilisation_p95: float
+    active_days_ratio: float
+    rebalance_count: int
+    positive_outer_folds: int
+    oos_days: int
+    category_results: tuple[L2CategoryResult, ...]
     integrity_ok: bool
+    reasons: tuple[str, ...]
+
+    def __post_init__(self) -> None:
+        for metric in (
+            self.annualized_log_growth, self.cagr, self.excess_growth_lcb90,
+            self.excess_growth_probability, self.stressed_excess_growth_lcb90,
+            self.sharpe, self.sharpe_probability, self.deflated_sharpe_probability,
+            self.calmar, self.max_drawdown, self.daily_cvar95,
+            self.annual_volatility, self.annual_turnover, self.cost_drag_ratio,
+            self.capacity_utilisation_p95, self.active_days_ratio,
+        ):
+            if not np.isfinite(metric):
+                raise ValueError(f"non-finite metric: {metric}")
+        if self.verdict == L2GateVerdict.PASS and (not self.category_results or not all(r.passed for r in self.category_results)):
+            raise ValueError("PASS verdict requires non-empty category results with all passed")
+        if self.verdict != L2GateVerdict.PASS and self.category_results and all(r.passed for r in self.category_results):
+            raise ValueError("non-PASS verdict requires at least one failed category")
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "verdict": self.verdict.value,
+            "benchmark_id": self.benchmark_id,
+            "annualized_log_growth": {"value": self.annualized_log_growth, "unit": "log_returns/year"},
+            "cagr": {"value": self.cagr, "unit": "fraction/year"},
+            "excess_growth_lcb90": {"value": self.excess_growth_lcb90, "unit": "log_returns/year"},
+            "excess_growth_probability": {"value": self.excess_growth_probability, "unit": "probability"},
+            "stressed_excess_growth_lcb90": {"value": self.stressed_excess_growth_lcb90, "unit": "log_returns/year"},
+            "equity_multiple": {"value": self.equity_multiple, "unit": "ratio"},
+            "sharpe": {"value": self.sharpe, "unit": "annualized"},
+            "sharpe_probability": {"value": self.sharpe_probability, "unit": "probability"},
+            "deflated_sharpe_probability": {"value": self.deflated_sharpe_probability, "unit": "probability"},
+            "candidate_count": {"value": self.candidate_count, "unit": "count"},
+            "calmar": {"value": self.calmar, "unit": "ratio"},
+            "max_drawdown": {"value": self.max_drawdown, "unit": "fraction"},
+            "daily_cvar95": {"value": self.daily_cvar95, "unit": "fraction"},
+            "annual_volatility": {"value": self.annual_volatility, "unit": "fraction/year"},
+            "annual_turnover": {"value": self.annual_turnover, "unit": "turns/year"},
+            "cost_drag_ratio": {"value": self.cost_drag_ratio, "unit": "fraction"},
+            "capacity_utilisation_p95": {"value": self.capacity_utilisation_p95, "unit": "fraction"},
+            "active_days_ratio": {"value": self.active_days_ratio, "unit": "fraction"},
+            "rebalance_count": {"value": self.rebalance_count, "unit": "count"},
+            "positive_outer_folds": {"value": self.positive_outer_folds, "unit": "count"},
+            "oos_days": {"value": self.oos_days, "unit": "days"},
+            "integrity_ok": self.integrity_ok,
+            "category_results": [
+                {"category": r.category, "passed": r.passed, "reasons": list(r.reasons)}
+                for r in self.category_results
+            ],
+            "reasons": list(self.reasons),
+        }
 
 
 @dataclass(slots=True, frozen=True)
@@ -474,6 +595,10 @@ class L1SleevePosterior:
     sleeve_id: str
     signal_id: str
     family: str
+    outer_fold_id: int
+    cluster_id: int
+    member_mask_1d: NDArray[np.bool_]
+    member_hash: str
     exit_policy: ExitPolicySpec
     mean_net_return: float
     standard_error: float
@@ -490,6 +615,12 @@ class L1SleevePosterior:
             raise ValueError("posterior fields must be finite")
         if self.standard_error <= 0.0 or not 0.0 <= self.posterior_positive_probability <= 1.0:
             raise ValueError("posterior range is invalid")
+        if self.member_mask_1d.ndim != 1:
+            raise ValueError("member_mask_1d must be 1-D")
+        if int(np.sum(self.member_mask_1d)) == 0:
+            raise ValueError("member_mask_1d must have at least one True entry")
+        if not self.member_hash:
+            raise ValueError("member_hash is required")
 
 
 @dataclass(slots=True, frozen=True)
@@ -576,6 +707,7 @@ __all__ = [
     "CalibratedForecastPanel",
     "CalibrationTarget",
     "CausalAlphaFold",
+    "CausalClusterFold",
     "CausalFold",
     "CausalityError",
     "ClusterPanel",
@@ -596,7 +728,10 @@ __all__ = [
     "HandoffResult",
     "InsufficientCoverageError",
     "L1SleevePosterior",
+    "L2BenchmarkSeries",
+    "L2CategoryResult",
     "L2Evaluation",
+    "L2GateVerdict",
     "L3ValidationResult",
     "LadderStageResult",
     "MarketFeatureCube",
