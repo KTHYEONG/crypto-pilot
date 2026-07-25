@@ -21,7 +21,8 @@ _logger = logging.getLogger(__name__)
 
 
 def build_multiscale_market_cube(
-    *, snapshot: DataSnapshot, universe: LakeUniverse, config: CompoundRunConfig
+    *, snapshot: DataSnapshot, universe: LakeUniverse, config: CompoundRunConfig,
+    field_plan: tuple[str, ...] | None = None,
 ) -> MarketFeatureCube:
     _logger.info(
         "building multiscale market cube: %d symbols from snapshot %s",
@@ -148,6 +149,10 @@ def build_multiscale_market_cube(
         "top_trader_long_short_ratio": causal_grids["top_trader_long_short_ratio"].available.get("top_trader_long_short_ratio", np.zeros((n_bars, n_syms), dtype=np.bool_)),
         "long_short_ratio": causal_grids["long_short_ratio"].available.get("long_short_ratio", np.zeros((n_bars, n_syms), dtype=np.bool_)),
     }
+
+    if field_plan is not None:
+        fields = {k: v for k, v in fields.items() if k in field_plan}
+        available_all = {k: v for k, v in available_all.items() if k in field_plan}
 
     cube = MarketFeatureCube(
         timestamps_ns=timestamps_ns,
