@@ -26,7 +26,6 @@ class DatasetKind(StrEnum):
     MARK_1M = "mark_1m"
     INDEX_1M = "index_1m"
     METRICS_5M = "metrics_5m"
-    COST_CALIBRATION = "cost_calibration"
     UNIVERSE_STATE = "universe_state"
 
 
