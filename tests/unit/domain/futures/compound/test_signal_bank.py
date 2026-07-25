@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import logging
+from concurrent.futures import ThreadPoolExecutor
+
 import numpy as np
 from numpy.typing import NDArray
 import pytest
@@ -16,6 +19,7 @@ from src.domain.futures.compound.contracts import (
 )
 from src.domain.futures.compound.signal_bank import (
     _compute_basis_gap,
+    _compute_raw_signal,
     _compute_smart_money_divergence,
     _compute_xs_rank_signal,
     _compute_xs_reversal,
@@ -461,3 +465,99 @@ def test_p2_pipeline_handles_updated_catalog_size_without_hardcoded_25(synthetic
     if np.any(finite_mask):
         assert np.all(panel.z_3d[finite_mask] >= -3.0)
         assert np.all(panel.z_3d[finite_mask] <= 3.0 + 1e-6)
+
+
+def test_signal_panel_parallel_matches_serial_exactly(synthetic_market: MarketFeatureCube) -> None:
+    bars = build_multi_timeframe_bars(synthetic_market)
+    T = bars.decision_timestamps_ns.size
+    N = len(bars.cubes["4h"].symbols)
+    eligible = np.ones((T, N), np.bool_)
+
+    serial = build_raw_signal_panel(bars, eligible_2d=eligible, max_workers=1)
+    parallel = build_raw_signal_panel(bars, eligible_2d=eligible, max_workers=4)
+
+    assert serial.descriptors == parallel.descriptors
+    finite = np.isfinite(serial.z_3d) & np.isfinite(parallel.z_3d)
+    if np.any(finite):
+        np.testing.assert_array_equal(serial.z_3d[finite], parallel.z_3d[finite])
+    np.testing.assert_array_equal(np.isnan(serial.z_3d), np.isnan(parallel.z_3d))
+    np.testing.assert_array_equal(serial.valid_3d, parallel.valid_3d)
+    np.testing.assert_array_equal(serial.sigma_2d, parallel.sigma_2d)
+
+
+def test_signal_panel_worker_bounds_and_single_recipe_path(synthetic_market: MarketFeatureCube) -> None:
+    bars = build_multi_timeframe_bars(synthetic_market)
+    T = bars.decision_timestamps_ns.size
+    N = len(bars.cubes["4h"].symbols)
+    eligible = np.ones((T, N), np.bool_)
+
+    with pytest.raises(ValueError, match="max_workers"):
+        build_raw_signal_panel(bars, eligible_2d=eligible, max_workers=0)
+    with pytest.raises(ValueError, match="max_workers"):
+        build_raw_signal_panel(bars, eligible_2d=eligible, max_workers=5)
+
+    single = build_raw_signal_panel(bars, eligible_2d=eligible, max_workers=1)
+    assert isinstance(single, RawSignalPanel)
+
+    created: list[int] = []
+    original_init = ThreadPoolExecutor.__init__
+
+    def recording_init(self, max_workers: int = 1) -> None:
+        created.append(max_workers)
+        original_init(self, max_workers=max_workers)
+
+    import src.domain.futures.compound.signal_bank as sb_mod
+    orig_executor = sb_mod.ThreadPoolExecutor
+    sb_mod.ThreadPoolExecutor = type('MockExecutor', (ThreadPoolExecutor,), {'__init__': recording_init})
+    try:
+        panel = build_raw_signal_panel(bars, eligible_2d=eligible, max_workers=1)
+        assert isinstance(panel, RawSignalPanel)
+    finally:
+        sb_mod.ThreadPoolExecutor = orig_executor
+
+
+def test_signal_panel_parallel_recipe_failure_is_isolated(synthetic_market: MarketFeatureCube, caplog: pytest.LogCaptureFixture) -> None:
+    caplog.set_level(logging.WARNING)
+
+    bars = build_multi_timeframe_bars(synthetic_market)
+    T = bars.decision_timestamps_ns.size
+    N = len(bars.cubes["4h"].symbols)
+    eligible = np.ones((T, N), np.bool_)
+
+    catalog = _default_catalog()
+    failing_id = catalog[0].signal_id
+
+    def failing_raw_signal(desc, bars_, eligible_):
+        if desc.signal_id == failing_id:
+            import logging as _lg
+            _lg.getLogger("src.domain.futures.compound.signal_bank").error("[DATA] injected failure signal_id=%s", desc.signal_id)
+            return None
+        return _compute_raw_signal(desc, bars_, eligible_)
+
+    import src.domain.futures.compound.signal_bank as sb_mod
+    orig = sb_mod._compute_raw_signal
+    sb_mod._compute_raw_signal = failing_raw_signal
+    try:
+        panel = build_raw_signal_panel(bars, eligible_2d=eligible, max_workers=2)
+    finally:
+        sb_mod._compute_raw_signal = orig
+
+    assert np.all(np.isnan(panel.z_3d[:, :, 0]))
+    assert not np.any(panel.valid_3d[:, :, 0])
+    other_valid = np.any(panel.valid_3d[:, :, 1:])
+    assert other_valid
+    assert failing_id in caplog.text
+
+
+def test_engine_invokes_bounded_signal_panel_and_logs_timing(synthetic_market: MarketFeatureCube, caplog: pytest.LogCaptureFixture) -> None:
+    caplog.set_level(logging.INFO)
+
+    bars = build_multi_timeframe_bars(synthetic_market)
+    T = bars.decision_timestamps_ns.size
+    N = len(bars.cubes["4h"].symbols)
+    eligible = np.ones((T, N), np.bool_)
+
+    panel = build_raw_signal_panel(bars, eligible_2d=eligible, max_workers=4)
+    assert isinstance(panel, RawSignalPanel)
+    assert panel.descriptors == _default_catalog()
+    assert "[PERF][L1] signal_panel elapsed_s=" in caplog.text
