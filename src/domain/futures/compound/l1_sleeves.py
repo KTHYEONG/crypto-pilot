@@ -12,8 +12,8 @@ from numpy.typing import NDArray
 from src.domain.futures.compound.config import HandoffConfig
 from src.domain.futures.compound.contracts import (
     CalibratedForecastPanel,
+    CausalClusterFold,
     CausalFold,
-    ClusterPanel,
     ExitPolicyKind,
     ExitPolicySpec,
     HandoffAdmissionEvidence,
@@ -167,9 +167,15 @@ def estimate_sleeve_posteriors(
         mean = float(np.mean(fold_returns)) if fold_returns else 0.0
         se = max(float(np.std(fold_returns, ddof=1) / math.sqrt(len(fold_returns))) if len(fold_returns) > 1 else 1.0, 1e-8)
         probability = float(0.5 * (1.0 + math.erf(mean / se / math.sqrt(2.0))))
+        n_symbols = len(panel.symbols)
+        member_mask = np.zeros(n_symbols, dtype=np.bool_)
+        member_mask[:] = True
+        import hashlib
+        member_hash = hashlib.sha256(f"all:{descriptor.signal_id}".encode()).hexdigest()[:16]
         output.append(L1SleevePosterior(
-            f"{descriptor.signal_id}:{policy.policy_id}", descriptor.signal_id, descriptor.family, policy,
-            mean, se, probability, 1.0, tuple(fold_returns), len(fold_returns),
+            f"{descriptor.signal_id}:{policy.policy_id}", descriptor.signal_id, descriptor.family,
+            -1, -1, member_mask, member_hash,
+            policy, mean, se, probability, 1.0, tuple(fold_returns), len(fold_returns),
             probability >= 0.65 and sum(value > 0.0 for value in fold_returns) >= 4,
             () if probability >= 0.65 else ("posterior_below_floor",),
         ))
@@ -179,13 +185,13 @@ def estimate_sleeve_posteriors(
 def combine_posterior_sleeves(
     panel: RawSignalPanel,
     sleeves: tuple[L1SleevePosterior, ...],
+    cluster_folds: tuple[CausalClusterFold, ...],
     folds: tuple[CausalFold, ...],
     config: HandoffConfig,
 ) -> CalibratedForecastPanel:
-    "Combine sleeves with posterior reliability and family balancing."
     del folds, config
     t_total, n_symbols, _ = panel.z_3d.shape
-    active = [sleeve for sleeve in sleeves if sleeve.admitted]
+
     def empty() -> CalibratedForecastPanel:
         return CalibratedForecastPanel(
             panel.decision_timestamps_ns, panel.symbols,
@@ -193,57 +199,84 @@ def combine_posterior_sleeves(
             np.full((t_total, n_symbols), np.nan, dtype=np.float32),
             np.zeros((t_total, n_symbols, 1), dtype=np.float32), (), (), "",
         )
+
+    active = [sleeve for sleeve in sleeves if sleeve.admitted]
     if not active:
         return empty()
+
     families = sorted({sleeve.family for sleeve in active})
-    family_mu: list[NDArray[np.float32]] = []
     ids: list[str] = []
+    family_mu: list[NDArray[np.float32]] = []
     for family in families:
         selected = [sleeve for sleeve in active if sleeve.family == family]
-        quality = np.asarray([max(sleeve.posterior_positive_probability - 0.5, 0.0) ** 2 / (sleeve.standard_error ** 2 + 1e-6) * sleeve.residual_novelty for sleeve in selected], dtype=np.float64)
+        quality = np.asarray([
+            max(sleeve.posterior_positive_probability - 0.5, 0.0) ** 2
+            / (sleeve.standard_error ** 2 + 1e-6) * sleeve.residual_novelty
+            for sleeve in selected
+        ], dtype=np.float64)
         if float(quality.sum()) <= 0.0:
             continue
         quality /= quality.sum()
-        matrices = []
-        for sleeve in selected:
-            signal_index = next(i for i, descriptor in enumerate(panel.descriptors) if descriptor.signal_id == sleeve.signal_id)
-            matrices.append(panel.z_3d[:, :, signal_index])
-        family_mu.append(np.nansum(np.stack(matrices, axis=2) * quality.reshape(1, 1, -1), axis=2).astype(np.float32) / max(len(families), 1))
+        mu_combined = np.zeros((t_total, n_symbols), dtype=np.float64)
+        for q, sleeve in zip(quality, selected, strict=True):
+            signal_idx = next(i for i, d in enumerate(panel.descriptors) if d.signal_id == sleeve.signal_id)
+            sleeve_mu = q * panel.z_3d[:, :, signal_idx].astype(np.float64)
+            mask_2d = sleeve.member_mask_1d.reshape(1, -1)
+            sleeve_mu = np.where(mask_2d, sleeve_mu, 0.0)
+            mu_combined += sleeve_mu
+        family_mu.append(mu_combined.astype(np.float32))
         ids.extend(sleeve.signal_id for sleeve in selected)
+
     if not family_mu:
         return empty()
+
     mu = np.sum(np.stack(family_mu, axis=2), axis=2)
     gross = np.sum(np.abs(mu), axis=1, keepdims=True)
     mu = np.clip(mu / np.where(gross > 1e-12, gross, 1.0), -0.10, 0.10).astype(np.float32)
-    return CalibratedForecastPanel(panel.decision_timestamps_ns, panel.symbols, mu, np.full((t_total, n_symbols), np.nan, dtype=np.float32), np.stack(family_mu, axis=2), tuple(families), tuple(ids), "")
+    return CalibratedForecastPanel(
+        panel.decision_timestamps_ns, panel.symbols,
+        mu, np.full((t_total, n_symbols), np.nan, dtype=np.float32),
+        np.stack(family_mu, axis=2), tuple(families), tuple(ids), "",
+    )
 
 
 def build_exit_aware_handoff(
     panel: RawSignalPanel,
     bars: MultiTimeframeBars,
     folds: tuple[CausalFold, ...],
+    cluster_folds: tuple[CausalClusterFold, ...],
     cost_bps_4h: NDArray[np.float32],
     funding_1h_2d: NDArray[np.float32],
     config: HandoffConfig,
-    clusters: ClusterPanel | None = None,
 ) -> HandoffResult:
-    "Build an L1 handoff whose admission is based on exit-aware sleeves."
-    if clusters is not None:
-        sleeves = estimate_cluster_sleeve_posteriors(panel, bars.cubes["4h"], clusters, folds, cost_bps_4h, config)
-    else:
-        sleeves = estimate_sleeve_posteriors(panel, bars.cubes["4h"], folds, cost_bps_4h, funding_1h_2d, config)
-    forecast = combine_posterior_sleeves(panel, sleeves, folds, config)
-    fold_returns = np.asarray([value for sleeve in sleeves for value in sleeve.fold_net_returns], dtype=np.float64)
-    growth = float(np.mean(fold_returns) * 2190.0) if fold_returns.size else 0.0
+    sleeves = estimate_cluster_sleeve_posteriors(panel, bars.cubes["4h"], cluster_folds, folds, cost_bps_4h, funding_1h_2d, config)
+    forecast = combine_posterior_sleeves(panel, sleeves, cluster_folds, folds, config)
+
+    admitted_sleeves = [s for s in sleeves if s.admitted]
+    if not admitted_sleeves:
+        no_evidence = HandoffAdmissionEvidence(0.0, 0.0, 0.0, 0.0, 0.0, 0, 0.0, (), False, ("no_admitted_sleeves",))
+        _LOGGER.info("[L1] exit-aware handoff: no admitted sleeves, NO_EVIDENCE")
+        return HandoffResult(forecast, no_evidence)
+
+    fold_returns_list: list[float] = []
+    for sleeve in admitted_sleeves:
+        fold_returns_list.extend(sleeve.fold_net_returns)
+    fold_returns = np.asarray(fold_returns_list, dtype=np.float64)
+    growth = float(np.mean(fold_returns) * 2191.5) if fold_returns.size else 0.0
     positive = int(np.sum(fold_returns > 0.0)) if fold_returns.size else 0
+
     reasons: list[str] = []
     if growth <= 0.0:
         reasons.append("growth_lcb90_not_positive")
     if positive < config.min_positive_outer_folds:
         reasons.append("positive_folds_below_floor")
+
     admitted = not reasons
-    evidence = HandoffAdmissionEvidence(growth, growth, growth, 0.0, 0.0, positive, float(len(sleeves)), tuple(sleeve.signal_id for sleeve in sleeves if sleeve.admitted), admitted, tuple(reasons))
-    _LOGGER.info("[L1] exit-aware handoff admitted=%s sleeves=%d", admitted, len(sleeves))
+    evidence = HandoffAdmissionEvidence(
+        growth, growth, growth, 0.0, 0.0, positive, float(len(admitted_sleeves)),
+        tuple(s.signal_id for s in admitted_sleeves), admitted, tuple(reasons),
+    )
+    _LOGGER.info("[L1] exit-aware handoff admitted=%s sleeves=%d", admitted, len(admitted_sleeves))
     return HandoffResult(forecast, evidence)
 
 
@@ -279,21 +312,45 @@ def aggregate_cluster_group_returns(
     return result
 
 
+def _cluster_masked_beta(
+    feature: NDArray[np.float32],
+    close: NDArray[np.float32],
+    descriptor: SignalDescriptor,
+    fit_end: int,
+    sym_indices: NDArray[np.int64],
+) -> tuple[float, float, float, int]:
+    horizon = max(descriptor.target_horizon_hours // 4, 1)
+    if fit_end <= horizon + 2:
+        return 0.0, 1.0, 0.5, 0
+    future = np.roll(close.astype(np.float64), -horizon, axis=0) / np.maximum(close, 1e-12) - 1.0
+    future[-horizon:] = np.nan
+    x = feature[: fit_end - horizon, sym_indices].astype(np.float64)
+    y = future[: fit_end - horizon, sym_indices]
+    mask = np.isfinite(x) & np.isfinite(y)
+    x_valid, y_valid = x[mask], y[mask]
+    denom = float(np.dot(x_valid, x_valid)) + 1e-8
+    beta = float(np.dot(x_valid, y_valid) / denom) if x_valid.size else 0.0
+    residual = y_valid - beta * x_valid
+    se = float(np.std(residual, ddof=1) / math.sqrt(denom)) if residual.size > 1 else 1.0
+    probability = float(0.5 * (1.0 + math.erf(beta / max(se, 1e-12) / math.sqrt(2.0))))
+    return beta, max(se, 1e-8), probability, int(x_valid.size)
+
+
 def estimate_cluster_sleeve_posteriors(
     panel: RawSignalPanel,
     bars_4h: TimeframeBarCube,
-    clusters: ClusterPanel,
+    cluster_folds: tuple[CausalClusterFold, ...],
     folds: tuple[CausalFold, ...],
     cost_bps_4h: NDArray[np.float32],
+    funding_1h_2d: NDArray[np.float32],
     config: HandoffConfig,
 ) -> tuple[L1SleevePosterior, ...]:
     if panel.z_3d.shape[:2] != bars_4h.close_2d.shape or cost_bps_4h.shape != bars_4h.close_2d.shape:
         raise ValueError("panel, bars, and cost shapes must agree")
     if not folds or not panel.descriptors:
         return ()
-
+    n_symbols = len(panel.symbols)
     output: list[L1SleevePosterior] = []
-    unique_clusters = sorted(int(x) for x in np.unique(clusters.cluster_labels))
     future_cache: dict[int, NDArray[np.float64]] = {}
 
     for descriptor in panel.descriptors:
@@ -305,81 +362,73 @@ def estimate_cluster_sleeve_posteriors(
             - 1.0,
         )
         future[-horizon:] = np.nan
+        signal_idx = panel.descriptors.index(descriptor)
+        signal_z = panel.z_3d[:, :, signal_idx]
 
-        for cluster_id in unique_clusters:
-            sym_mask = clusters.cluster_labels == cluster_id
-            sym_indices = np.where(sym_mask)[0]
-            if len(sym_indices) < 2:
-                continue
+        for cf in cluster_folds:
+            fold = next(f for f in folds if f.fold_id == cf.fold_id)
+            cluster_panel = cf.panel
+            unique_clusters = sorted(int(x) for x in np.unique(cluster_panel.cluster_labels))
 
-            fold_returns: list[float] = []
-            betas: list[float] = []
-            ses: list[float] = []
-            for fold in folds:
-                beta, se, _, observations = _signal_evidence(
-                    panel.z_3d[:, :, panel.descriptors.index(descriptor)],
-                    bars_4h.close_2d,
-                    descriptor,
-                    fold.fit_end_exclusive,
+            for cluster_id in unique_clusters:
+                sym_mask = cluster_panel.cluster_labels == cluster_id
+                sym_indices = np.where(sym_mask)[0]
+                if len(sym_indices) < 2:
+                    continue
+
+                beta, se, probability, observations = _cluster_masked_beta(
+                    signal_z, bars_4h.close_2d, descriptor,
+                    fold.fit_end_exclusive, sym_indices,
                 )
                 if observations == 0:
                     continue
-                betas.append(beta)
-                ses.append(se)
 
                 oos_slice = slice(fold.oos_start, fold.oos_end_exclusive)
-                cluster_z = panel.z_3d[oos_slice, :, panel.descriptors.index(descriptor)][:, sym_indices].astype(np.float64)
+                cluster_z = signal_z[oos_slice][:, sym_indices].astype(np.float64)
                 cluster_future = future[oos_slice][:, sym_indices]
                 cluster_sigma = panel.sigma_2d[oos_slice][:, sym_indices].astype(np.float64)
-
                 raw_values = beta * cluster_z * cluster_future
                 aggregated = aggregate_cluster_group_returns(raw_values, cluster_sigma, 0.10)
                 aggregated = aggregated[np.isfinite(aggregated)]
-                fold_returns.append(float(np.mean(aggregated)) if aggregated.size else 0.0)
+                fold_return = float(np.mean(aggregated)) if aggregated.size else 0.0
 
-            if not fold_returns:
-                continue
+                sleeve_id = f"{descriptor.signal_id}:fold{cf.fold_id}:cluster_{cluster_id}"
+                member_mask = np.zeros(n_symbols, dtype=np.bool_)
+                member_mask[sym_indices] = True
 
-            fit_end = folds[0].fit_end_exclusive
-            beta = float(np.mean(betas)) if betas else 0.0
-            mean = float(np.mean(fold_returns))
-            se = max(
-                float(np.std(fold_returns, ddof=1) / math.sqrt(len(fold_returns)))
-                if len(fold_returns) > 1 else 1.0,
-                1e-8,
-            )
-            probability = float(0.5 * (1.0 + math.erf(mean / max(se, 1e-12) / math.sqrt(2.0))))
+                exit_policy = calibrate_exit_policy(
+                    descriptor,
+                    (np.sign(beta) * signal_z).astype(np.float32),
+                    bars_4h,
+                    slice(0, fold.fit_end_exclusive),
+                    folds,
+                    cost_bps_4h,
+                    funding_1h_2d,
+                    config,
+                )
 
-            sleeve_id = f"{descriptor.signal_id}:cluster_{cluster_id}"
-            exit_policy = calibrate_exit_policy(
-                descriptor,
-                (np.sign(beta) * panel.z_3d[:, :, panel.descriptors.index(descriptor)]).astype(np.float32),
-                bars_4h,
-                slice(0, fit_end),
-                folds,
-                cost_bps_4h,
-                np.zeros_like(bars_4h.close_2d, dtype=np.float32),
-                config,
-            )
+                admitted = probability >= 0.65 and fold_return > 0.0
+                reasons: tuple[str, ...] = ()
+                if not admitted:
+                    reasons = ("posterior_below_floor",)
 
-            admitted = probability >= 0.65 and sum(v > 0.0 for v in fold_returns) >= 4
-            reasons: tuple[str, ...] = ()
-            if not admitted:
-                reasons = ("posterior_below_floor",)
-
-            output.append(L1SleevePosterior(
-                sleeve_id=sleeve_id,
-                signal_id=descriptor.signal_id,
-                family=descriptor.family,
-                exit_policy=exit_policy,
-                mean_net_return=mean,
-                standard_error=se,
-                posterior_positive_probability=probability,
-                residual_novelty=1.0,
-                fold_net_returns=tuple(fold_returns),
-                effective_events=len(fold_returns),
-                admitted=admitted,
-                reasons=reasons,
-            ))
+                output.append(L1SleevePosterior(
+                    sleeve_id=sleeve_id,
+                    signal_id=descriptor.signal_id,
+                    family=descriptor.family,
+                    outer_fold_id=cf.fold_id,
+                    cluster_id=cluster_id,
+                    member_mask_1d=member_mask,
+                    member_hash=cf.member_hash,
+                    exit_policy=exit_policy,
+                    mean_net_return=fold_return,
+                    standard_error=max(se, 1e-8),
+                    posterior_positive_probability=probability,
+                    residual_novelty=1.0,
+                    fold_net_returns=(fold_return,),
+                    effective_events=observations,
+                    admitted=admitted,
+                    reasons=reasons,
+                ))
 
     return tuple(output)

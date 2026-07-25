@@ -8,10 +8,16 @@ from numpy.typing import NDArray
 from scipy.cluster.hierarchy import fcluster, linkage
 from sklearn.cluster import DBSCAN, KMeans
 
+from src.domain.futures.compound.config import ClusterConfig
 from src.domain.futures.compound.contracts import (
+    CausalClusterFold,
+    CausalFold,
+    CausalityError,
     ClusteringAlgorithm,
     ClusterPanel,
+    InsufficientCoverageError,
     MarketFeatureCube,
+    TimeframeBarCube,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -250,3 +256,148 @@ def compute_market_regime_clusters(
         cluster_centroids=centroids,
         k_clusters=final_k,
     )
+
+
+def _compute_features_from_arrays(
+    close: NDArray[np.float64],
+    volume: NDArray[np.float64],
+    symbols: tuple[str, ...],
+) -> NDArray[np.float64]:
+    n_syms = close.shape[1]
+    features = np.zeros((n_syms, 4), dtype=np.float64)
+
+    if close.shape[0] < 2:
+        return features
+
+    btc_idx = 0
+    for i, sym in enumerate(symbols):
+        if "BTC" in sym.upper():
+            btc_idx = i
+            break
+
+    btc_close = close[:, btc_idx]
+    btc_ret = _log_returns(btc_close)
+
+    for i in range(n_syms):
+        sym_close = close[:, i]
+        sym_vol = volume[:, i]
+        valid_mask = np.isfinite(sym_close) & (sym_close > 0)
+
+        if np.any(valid_mask):
+            valid_close = sym_close[valid_mask]
+            sym_ret = _log_returns(sym_close)
+            lookback_actual = sym_ret.shape[0]
+            sym_volatility = float(np.nanstd(sym_ret[-lookback_actual:], ddof=1)) if lookback_actual > 1 else 0.0
+            features[i, 0] = sym_volatility
+
+            vol_valid = sym_vol[np.isfinite(sym_vol) & (sym_vol > 0)]
+            features[i, 1] = float(np.log(np.mean(vol_valid))) if vol_valid.size > 0 else 0.0
+
+            both_valid = np.isfinite(btc_ret) & np.isfinite(sym_ret)
+            if np.sum(both_valid) > 5:
+                b = btc_ret[both_valid]
+                s = sym_ret[both_valid]
+                cov = float(np.cov(s, b, ddof=1)[0, 1])
+                var_b = float(np.var(b, ddof=1))
+                features[i, 2] = cov / max(var_b, 1e-12)
+            else:
+                features[i, 2] = 0.0
+
+            if valid_close.size >= 10:
+                features[i, 3] = _hurst_exponent(np.log(valid_close))
+            else:
+                features[i, 3] = 0.5
+        else:
+            features[i, :] = [0.0, 0.0, 0.0, 0.5]
+
+    return features
+
+
+def _fit_cluster_panel(
+    features: NDArray[np.float64],
+    symbols: tuple[str, ...],
+    k_clusters: int,
+    min_cluster_size: int,
+    winsorize_pct: float,
+) -> ClusterPanel:
+    n_syms = features.shape[0]
+    if k_clusters < 2:
+        raise ValueError("k_clusters must be >= 2")
+    if n_syms < k_clusters:
+        raise InsufficientCoverageError(
+            f"fit-eligible symbols {n_syms} < k_clusters {k_clusters} * min_cluster_size {min_cluster_size}"
+        )
+
+    features_w = _winsorize(features, winsorize_pct)
+    features_s = _standardize(features_w)
+
+    n_init = min(10, n_syms)
+    km = KMeans(
+        n_clusters=k_clusters,
+        init="k-means++",
+        n_init=n_init,
+        max_iter=300,
+        random_state=42,
+        algorithm="lloyd",
+    )
+    km.fit(features_s)
+    labels = km.labels_.astype(np.int32)
+    centroids = km.cluster_centers_
+
+    labels, centroids = _enforce_min_cluster_size(labels, centroids, features_s, min_cluster_size)
+
+    return ClusterPanel(
+        symbols=symbols,
+        cluster_labels=labels,
+        cluster_centroids=centroids,
+        k_clusters=centroids.shape[0],
+    )
+
+
+def _make_member_hash(fold_id: int, panel: ClusterPanel) -> str:
+    import hashlib
+    payload = f"{fold_id}|{panel.symbols}|{panel.cluster_labels.tobytes().hex()}|{panel.k_clusters}"
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]
+
+
+def build_causal_cluster_folds(
+    *,
+    market: MarketFeatureCube,
+    bars_4h: TimeframeBarCube,
+    folds: tuple[CausalFold, ...],
+    config: ClusterConfig,
+) -> tuple[CausalClusterFold, ...]:
+    market_close = np.asarray(market.fields_2d["close"], dtype=np.float64)
+    market_volume = np.asarray(market.fields_2d["quote_volume"], dtype=np.float64)
+    market_timestamps = market.timestamps_ns
+    lookback_hours = config.feature_lookback_hours
+    lookback_bars = lookback_hours  # 1h bars
+    result: list[CausalClusterFold] = []
+
+    for fold in folds:
+        if fold.fit_end_exclusive <= 0:
+            raise CausalityError("fold fit_end_exclusive must be > 0")
+        last_4h_idx = fold.fit_end_exclusive - 1
+        if last_4h_idx < 0 or last_4h_idx >= len(bars_4h.timestamps_ns):
+            raise CausalityError("fold fit_end_exclusive out of 4h bar range")
+        fit_end_ns = int(bars_4h.timestamps_ns[last_4h_idx])
+        row_end = int(np.searchsorted(market_timestamps, fit_end_ns, side="right"))
+        row_start = max(0, row_end - lookback_bars)
+
+        if row_end - row_start < 10:
+            raise CausalityError(f"insufficient 1h data for fold {fold.fold_id}: only {row_end - row_start} bars")
+
+        close_slice = market_close[row_start:row_end]
+        volume_slice = market_volume[row_start:row_end]
+        features = _compute_features_from_arrays(close_slice, volume_slice, market.symbols)
+        panel = _fit_cluster_panel(features, market.symbols, config.k_clusters, config.min_cluster_size, config.winsorize_pct)
+
+        result.append(CausalClusterFold(
+            fold_id=fold.fold_id,
+            fit_end_exclusive_4h=fold.fit_end_exclusive,
+            fit_end_time_ns=fit_end_ns,
+            panel=panel,
+            member_hash=_make_member_hash(fold.fold_id, panel),
+        ))
+
+    return tuple(result)

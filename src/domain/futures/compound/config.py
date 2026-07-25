@@ -1,6 +1,70 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from typing import Literal
+
+
+@dataclass(slots=True, frozen=True)
+class ClusterConfig:
+    k_clusters: int = 4
+    min_cluster_size: int = 5
+    feature_lookback_hours: int = 480
+    winsorize_pct: float = 0.05
+    live_refit_days: int = 30
+
+    def __post_init__(self) -> None:
+        assert self.k_clusters >= 2, "k_clusters must be >= 2"
+        assert self.min_cluster_size >= 1
+        assert self.feature_lookback_hours > 0
+        assert 0 <= self.winsorize_pct <= 0.5
+        assert self.live_refit_days > 0
+
+
+@dataclass(slots=True, frozen=True)
+class L2BenchmarkConfig:
+    mode: Literal["risk_matched_crypto", "cash_collateral"] = "risk_matched_crypto"
+    crypto_symbols: tuple[str, str] = ("BTCUSDT", "ETHUSDT")
+    crypto_weights: tuple[float, float] = (0.5, 0.5)
+    volatility_lookback_days: int = 60
+    target_ann_vol: float = 0.15
+
+    def __post_init__(self) -> None:
+        assert self.volatility_lookback_days > 0
+        assert self.target_ann_vol > 0
+        assert len(self.crypto_symbols) == len(self.crypto_weights) >= 2
+        assert abs(sum(self.crypto_weights) - 1.0) < 1e-10, "crypto_weights must sum to 1"
+
+
+@dataclass(slots=True, frozen=True)
+class L2GateConfig:
+    min_oos_days: int = 365
+    min_active_days_ratio: float = 0.10
+    min_rebalances: int = 30
+    min_excess_growth_probability: float = 0.90
+    min_bootstrap_sharpe_probability: float = 0.90
+    min_deflated_sharpe_probability: float = 0.90
+    max_drawdown: float = 0.20
+    min_daily_cvar95: float = -0.025
+    max_annual_volatility: float = 0.25
+    max_cost_drag_ratio: float = 0.50
+    max_capacity_utilisation_p95: float = 0.10
+    min_positive_outer_folds: int = 3
+    stressed_cost_multiplier: float = 2.0
+
+    def __post_init__(self) -> None:
+        assert self.min_oos_days > 0
+        assert 0 < self.min_active_days_ratio <= 1
+        assert self.min_rebalances > 0
+        assert 0 < self.min_excess_growth_probability <= 1
+        assert 0 < self.min_bootstrap_sharpe_probability <= 1
+        assert 0 < self.min_deflated_sharpe_probability <= 1
+        assert self.max_drawdown > 0
+        assert self.min_daily_cvar95 < 0
+        assert self.max_annual_volatility > 0
+        assert self.max_cost_drag_ratio > 0
+        assert self.max_capacity_utilisation_p95 > 0
+        assert self.min_positive_outer_folds >= 1
+        assert self.stressed_cost_multiplier >= 1.0
 
 
 @dataclass(slots=True, frozen=True)
@@ -283,11 +347,14 @@ class HandoffConfig:
 @dataclass(slots=True, frozen=True)
 class CompoundEngineConfig:
     data: DataPlaneConfig = field(default_factory=DataPlaneConfig)
+    cluster: ClusterConfig = field(default_factory=ClusterConfig)
     l1: L1EstimatorConfig = field(default_factory=L1EstimatorConfig)
     l1_multiscale: L1MultiscaleConfig = field(default_factory=L1MultiscaleConfig)
     factor_risk: FactorRiskConfig = field(default_factory=FactorRiskConfig)
     allocator: AllocatorConfig = field(default_factory=AllocatorConfig)
     risk: RiskOverlayConfig = field(default_factory=RiskOverlayConfig)
+    l2_gate: L2GateConfig = field(default_factory=L2GateConfig)
+    l2_benchmark: L2BenchmarkConfig = field(default_factory=L2BenchmarkConfig)
     l3: L3ValidationConfig = field(default_factory=L3ValidationConfig)
     risk_model: RiskModelConfig = field(default_factory=RiskModelConfig)
     baseline_alloc: BaselineAllocConfig = field(default_factory=BaselineAllocConfig)
@@ -300,11 +367,14 @@ class CompoundEngineConfig:
 
     def __post_init__(self) -> None:
         assert isinstance(self.data, DataPlaneConfig)
+        assert isinstance(self.cluster, ClusterConfig)
         assert isinstance(self.l1, L1EstimatorConfig)
         assert isinstance(self.l1_multiscale, L1MultiscaleConfig)
         assert isinstance(self.factor_risk, FactorRiskConfig)
         assert isinstance(self.allocator, AllocatorConfig)
         assert isinstance(self.risk, RiskOverlayConfig)
+        assert isinstance(self.l2_gate, L2GateConfig)
+        assert isinstance(self.l2_benchmark, L2BenchmarkConfig)
         assert isinstance(self.l3, L3ValidationConfig)
         assert isinstance(self.risk_model, RiskModelConfig)
         assert isinstance(self.baseline_alloc, BaselineAllocConfig)
