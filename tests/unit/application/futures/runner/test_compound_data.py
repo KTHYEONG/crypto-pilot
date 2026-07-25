@@ -14,6 +14,7 @@ from src.domain.futures.data_lake.contracts import (
     DatasetKind,
     LakeUniverse,
     PartitionManifest,
+    SyncMode,
 )
 from src.domain.futures.universe.contracts import UniverseStateCube
 
@@ -50,7 +51,7 @@ def test_build_multiscale_market_cube_with_empty_snapshot() -> None:
     universe = _lake_universe(symbols=("BTCUSDT", "ETHUSDT"), n_bars=24)
     config = CompoundRunConfig(
         reference_date="2026-07-08",
-        sync="skip",
+        sync=SyncMode.LOCAL,
         refresh_universe=False,
         history_days=1,
     )
@@ -88,7 +89,7 @@ def test_build_multiscale_market_cube_reads_snapshot_partitions(tmp_path: Path) 
     )
     universe = _lake_universe(symbols=("BTCUSDT",), n_bars=168)
     config = CompoundRunConfig(
-        reference_date="2026-07-08", sync="skip", refresh_universe=False, history_days=7,
+        reference_date="2026-07-08", sync=SyncMode.LOCAL, refresh_universe=False, history_days=7,
     )
     cube = build_multiscale_market_cube(snapshot=snap, universe=universe, config=config)
     assert np.isfinite(cube.fields_2d["close"]).any()
@@ -99,11 +100,12 @@ def test_build_multiscale_market_cube_data_manifest_hash() -> None:
     universe = _lake_universe(symbols=("BTCUSDT",), n_bars=24)
     config = CompoundRunConfig(
         reference_date="2026-07-08",
-        sync="skip",
+        sync=SyncMode.LOCAL,
         refresh_universe=False,
         history_days=1,
     )
     cube = build_multiscale_market_cube(
-        snapshot=snap, universe=universe, config=config,
+        snapshot=snap, universe=universe, config=config, field_plan=("close",),
     )
     assert cube.data_manifest_hash == "expected-hash"
+    assert set(cube.fields_2d) == {"close"}

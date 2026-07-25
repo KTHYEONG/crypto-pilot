@@ -7,18 +7,23 @@ from pathlib import Path
 
 import pytest
 import pandas as pd
+import numpy as np
 
 from src.application.futures.runner.compound_config import CompoundRunConfig
 from src.application.futures.runner.data_lake_runtime import (
     DataLakeRuntime,
     build_data_lake_runtime,
+    finalize_quarterly_signal_data,
     prepare_data_snapshot,
+    prepare_quarterly_bootstrap,
 )
 from src.domain.futures.data_lake.contracts import (
     DataLakeConfig,
     DataSnapshot,
     IngestionPlan,
     PartitionManifest,
+    SyncMode,
+    PreparedBootstrap,
 )
 from src.domain.futures.data_lake.ingestion import (
     ChecksumMismatchError,
@@ -27,6 +32,7 @@ from src.domain.futures.data_lake.ingestion import (
     sync_futures_data_lake,
 )
 from src.domain.futures.universe.config import PITUniverseConfig
+from src.domain.futures.data_lake.run_windows import QuarterlyWindowConfig, resolve_completed_quarter_window
 
 
 def _snap(
@@ -89,8 +95,8 @@ class TestConfigDefaults:
             build_compound_run_config,
         )
 
-        config = build_compound_run_config({"sync": "skip", "seed": 42})
-        assert config.allow_network_sync is False
+        config = build_compound_run_config({"sync": "local", "seed": 42})
+        assert config.sync == SyncMode.LOCAL
         assert isinstance(config.data_lake, DataLakeConfig)
         assert isinstance(config.universe, PITUniverseConfig)
 
@@ -99,7 +105,7 @@ class TestRuntimeFactory:
     def test_runtime_factory_does_not_download(self) -> None:
         config = CompoundRunConfig(
             reference_date="2026-07-08",
-            sync="skip",
+            sync=SyncMode.LOCAL,
             refresh_universe=False,
         )
         runtime = build_data_lake_runtime(config)
@@ -116,9 +122,8 @@ class TestLocalSnapshot:
         )
         config = CompoundRunConfig(
             reference_date="2026-07-08",
-            sync="skip",
+            sync=SyncMode.LOCAL,
             refresh_universe=False,
-            allow_network_sync=False,
         )
         result = prepare_data_snapshot(config=config, runtime=runtime)
         assert result.snapshot_id == "test-complete"
@@ -133,12 +138,47 @@ class TestCoverageFailure:
         )
         config = CompoundRunConfig(
             reference_date="2026-07-08",
-            sync="skip",
+            sync=SyncMode.LOCAL,
             refresh_universe=False,
-            allow_network_sync=False,
         )
         with pytest.raises(DataCoverageError):
             prepare_data_snapshot(config=config, runtime=runtime)
+
+
+def test_prepare_quarterly_bootstrap_returns_window_bound_snapshot(monkeypatch: pytest.MonkeyPatch) -> None:
+    import src.application.futures.runner.data_lake_runtime as runtime_module
+
+    snapshot = _snap(snapshot_id="bootstrap")
+    monkeypatch.setattr(runtime_module, "prepare_data_snapshot", lambda **_: snapshot)
+    config = CompoundRunConfig(reference_date="2026-07-25", sync=SyncMode.LOCAL, refresh_universe=False)
+    window = resolve_completed_quarter_window(date(2026, 7, 25), QuarterlyWindowConfig())
+    prepared = prepare_quarterly_bootstrap(
+        config=config,
+        runtime=DataLakeRuntime(client=FakeClient(), catalog=FakeCatalog(snapshot, complete=True)),
+        window=window,
+    )
+    assert prepared.snapshot is snapshot
+    assert prepared.window is window
+
+
+def test_prepare_quarterly_bootstrap_auto_reconciles(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    import src.application.futures.runner.data_lake_runtime as runtime_module
+
+    snapshot = _snap(snapshot_id="auto-bootstrap")
+    monkeypatch.setattr(runtime_module, "prepare_data_snapshot", lambda **_: snapshot)
+    report = type("Report", (), {"scanned_files": 1, "added_rows": 1, "quarantined_files": ()})()
+    monkeypatch.setattr(runtime_module, "reconcile_local_catalog", lambda **_: report)
+    config = CompoundRunConfig(
+        reference_date="2026-07-25", sync=SyncMode.AUTO, refresh_universe=False,
+        data_lake=DataLakeConfig(root=tmp_path / "lake"),
+    )
+    window = resolve_completed_quarter_window(date(2026, 7, 25), QuarterlyWindowConfig())
+    prepared = prepare_quarterly_bootstrap(
+        config=config,
+        runtime=DataLakeRuntime(client=FakeClient(), catalog=FakeCatalog(snapshot, complete=True)),
+        window=window,
+    )
+    assert prepared.reconciliation_report is report
 
 
 class TestApprovedSync:
@@ -148,12 +188,68 @@ class TestApprovedSync:
         catalog = FakeCatalog(snap, complete=False)
         runtime = DataLakeRuntime(client=client, catalog=catalog)
         config = CompoundRunConfig(
-            reference_date="2026-07-08", sync="skip", refresh_universe=False,
-            allow_network_sync=True,
+            reference_date="2026-07-08", sync=SyncMode.AUTO, refresh_universe=False,
             data_lake=DataLakeConfig(root=tmp_path / "lake"),
         )
         with pytest.raises(DataCoverageError, match="still incomplete after sync"):
             prepare_data_snapshot(config=config, runtime=runtime)
+
+
+def test_sync_report_survives_quant_failure(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import src.application.futures.runner.data_lake_runtime as runtime_module
+
+    monkeypatch.chdir(tmp_path)
+    window = resolve_completed_quarter_window(date(2026, 7, 25), QuarterlyWindowConfig())
+    bootstrap = PreparedBootstrap(window=window, snapshot=_snap(), reconciliation_report=None)
+    monkeypatch.setattr(runtime_module, "evaluate_layered_coverage", lambda **_: ())
+    from src.domain.futures.compound.alpha_catalog import build_multiscale_alpha_catalog
+    recipe = build_multiscale_alpha_catalog()[0]
+    monkeypatch.setattr(
+        runtime_module,
+        "resolve_recipe_availability",
+        lambda **_: (type("Availability", (), {"status": type("Status", (), {"value": "enabled"})(), "recipe_id": recipe.recipe_id, "reasons": ()})(),),
+    )
+
+    from src.domain.futures.universe.contracts import UniverseStateCube
+
+    universe = UniverseStateCube(
+        calendar=pd.date_range("2026-01-01", periods=1, freq="h", tz="UTC"),
+        instrument_ids=("BTCUSDT",),
+        eligible=np.ones((1, 1), dtype=np.bool_),
+        entry_block=np.zeros((1, 1), dtype=np.bool_),
+        exit_required=np.zeros((1, 1), dtype=np.bool_),
+        capacity_usdt=np.ones((1, 1), dtype=np.float64),
+        risk_scale=np.ones((1, 1), dtype=np.float64),
+        cost_bps=np.ones((1, 1), dtype=np.float64),
+    )
+
+    prepared = finalize_quarterly_signal_data(
+        config=CompoundRunConfig(reference_date="2026-07-25", sync=SyncMode.LOCAL, refresh_universe=False),
+        runtime=DataLakeRuntime(client=FakeClient(), catalog=FakeCatalog(_snap(), complete=True)),
+        bootstrap=bootstrap,
+        universe=universe,
+        catalog=(recipe,),
+    )
+
+    report_path = tmp_path / "logs/futures/compound/data_sync_report.json"
+    assert report_path.exists()
+    assert prepared.downloaded_partitions == 0
+    wrapped = type("WrappedUniverse", (), {"state_cube": universe})()
+    finalize_quarterly_signal_data(
+        config=CompoundRunConfig(reference_date="2026-07-25", sync=SyncMode.LOCAL, refresh_universe=False),
+        runtime=DataLakeRuntime(client=FakeClient(), catalog=FakeCatalog(_snap(), complete=True)),
+        bootstrap=bootstrap,
+        universe=wrapped,
+        catalog=(recipe,),
+    )
+    with pytest.raises(TypeError, match="universe must be UniverseStateCube"):
+        finalize_quarterly_signal_data(
+            config=CompoundRunConfig(reference_date="2026-07-25", sync=SyncMode.LOCAL, refresh_universe=False),
+            runtime=DataLakeRuntime(client=FakeClient(), catalog=FakeCatalog(_snap(), complete=True)),
+            bootstrap=bootstrap,
+            universe=object(),
+            catalog=(recipe,),
+        )
 
 
 class TestChecksumFailure:
