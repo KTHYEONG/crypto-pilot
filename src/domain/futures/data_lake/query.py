@@ -251,7 +251,7 @@ class LocalDataCatalog:
             return False
         required_datasets = tuple(
             dataset for dataset in plan.datasets
-            if dataset not in (DatasetKind.COST_CALIBRATION, DatasetKind.EXCHANGE_INFO)
+            if dataset is not DatasetKind.EXCHANGE_INFO
         )
         required: set[tuple[DatasetKind, str]] = {
             (dataset, symbol)

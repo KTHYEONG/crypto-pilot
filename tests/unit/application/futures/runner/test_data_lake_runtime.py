@@ -102,11 +102,17 @@ class TestConfigDefaults:
 
 
 class TestRuntimeFactory:
-    def test_runtime_factory_does_not_download(self) -> None:
+    def test_runtime_factory_does_not_download(self, tmp_path: Path) -> None:
+        from src.domain.futures.data_lake.query import LocalDataCatalog
+
+        lake_root = tmp_path / "lake"
+        writable_catalog = LocalDataCatalog(lake_root)
+        writable_catalog._connection.close()
         config = CompoundRunConfig(
             reference_date="2026-07-08",
             sync=SyncMode.LOCAL,
             refresh_universe=False,
+            data_lake=DataLakeConfig(root=lake_root),
         )
         runtime = build_data_lake_runtime(config)
         assert isinstance(runtime, DataLakeRuntime)
@@ -252,6 +258,48 @@ def test_sync_report_survives_quant_failure(tmp_path: Path, monkeypatch: pytest.
         )
 
 
+def test_finalize_signal_data_excludes_unsupported_cost_calibration_requirement(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import src.application.futures.runner.data_lake_runtime as runtime_module
+    from src.domain.futures.compound.alpha_catalog import build_multiscale_alpha_catalog
+    from src.domain.futures.universe.contracts import UniverseStateCube
+
+    monkeypatch.chdir(tmp_path)
+    window = resolve_completed_quarter_window(date(2026, 7, 25), QuarterlyWindowConfig())
+    bootstrap = PreparedBootstrap(window=window, snapshot=_snap(), reconciliation_report=None)
+    captured: dict[str, tuple] = {}
+
+    def capture_coverage(**kwargs: object) -> tuple:
+        captured["requirements"] = kwargs["requirements"]  # type: ignore[assignment,index]
+        return ()
+
+    monkeypatch.setattr(runtime_module, "evaluate_layered_coverage", capture_coverage)
+    monkeypatch.setattr(runtime_module, "resolve_recipe_availability", lambda **_: ())
+    universe = UniverseStateCube(
+        calendar=pd.date_range("2026-01-01", periods=1, freq="h", tz="UTC"),
+        instrument_ids=("BTCUSDT",),
+        eligible=np.ones((1, 1), dtype=np.bool_),
+        entry_block=np.zeros((1, 1), dtype=np.bool_),
+        exit_required=np.zeros((1, 1), dtype=np.bool_),
+        capacity_usdt=np.ones((1, 1), dtype=np.float64),
+        risk_scale=np.ones((1, 1), dtype=np.float64),
+        cost_bps=np.full((1, 1), 12.0, dtype=np.float64),
+    )
+
+    finalize_quarterly_signal_data(
+        config=CompoundRunConfig(reference_date="2026-07-25", sync=SyncMode.LOCAL, refresh_universe=False),
+        runtime=DataLakeRuntime(client=FakeClient(), catalog=FakeCatalog(_snap(), complete=True)),
+        bootstrap=bootstrap,
+        universe=universe,
+        catalog=tuple(build_multiscale_alpha_catalog()),
+    )
+
+    assert {requirement.dataset.value for requirement in captured["requirements"]} == {
+        "klines_1h", "funding_event", "premium_5m", "mark_1m", "index_1m", "metrics_5m", "klines_1m",
+    }
+
+
 class TestChecksumFailure:
     def test_checksum_failure_is_not_committed(self) -> None:
         from src.domain.futures.data_lake.contracts import DatasetKind
@@ -261,7 +309,7 @@ class TestChecksumFailure:
             broad_symbols=("BTCUSDT",),
             selected_symbols=("BTCUSDT",),
             datasets=(DatasetKind.KLINES_1H,),
-            config=DataLakeConfig(root=Path("/tmp/lake")),
+            config=DataLakeConfig(root=Path("/tmp/lake")),  # noqa: S108
         )
         cat = FakeCatalog(
             _snap(snapshot_id="s1", reference_time_ms=1),
@@ -290,7 +338,7 @@ class TestHardCap:
             broad_symbols=("BTCUSDT",),
             selected_symbols=("BTCUSDT",),
             datasets=(DatasetKind.KLINES_1H,),
-            config=DataLakeConfig(root=Path("/tmp/lake"), hard_cap_gib=64),
+            config=DataLakeConfig(root=Path("/tmp/lake"), hard_cap_gib=64),  # noqa: S108
         )
 
         class FullCatalog(FakeCatalog):
