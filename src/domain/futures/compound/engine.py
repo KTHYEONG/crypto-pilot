@@ -36,22 +36,23 @@ from src.domain.futures.compound.validation import (
     evaluate_l3_sealed_holdout,
     slice_execution_ledger,
 )
+from src.domain.futures.data_lake.run_windows import QuarterlyRunWindow
 
 _logger = logging.getLogger(__name__)
 
 
-def resolve_engine_holdout_id(holdout_id: str | None, quarter_window: object | None) -> str:
+def resolve_engine_holdout_id(holdout_id: str | None, quarter_window: QuarterlyRunWindow | None) -> str:
     """Resolve explicit or quarterly-derived holdout identity."""
     if holdout_id is not None:
         return holdout_id
     if quarter_window is not None:  # pragma: no cover - exercised by quarterly integration
-        return f"quarterly-{getattr(quarter_window, 'cutoff_date')}"
+        return f"quarterly-{quarter_window.cutoff_date}"
     raise ValueError("holdout_id required when window is not provided")
 
 
-def resolve_quarterly_indices(timestamps_ns: NDArray[np.int64], window: object) -> tuple[int, int]:
-    l2_start = int(getattr(window, "l2_start_ns"))
-    l3_start = int(getattr(window, "l3_start_ns"))
+def resolve_quarterly_indices(timestamps_ns: NDArray[np.int64], window: QuarterlyRunWindow) -> tuple[int, int]:
+    l2_start = int(window.l2_start_ns)
+    l3_start = int(window.l3_start_ns)
     l2_idx = max(1, min(int(np.searchsorted(timestamps_ns, l2_start)), timestamps_ns.size - 1))
     l3_idx = max(l2_idx, min(int(np.searchsorted(timestamps_ns, l3_start)), timestamps_ns.size - 1))
     return l2_idx, l3_idx
@@ -115,7 +116,7 @@ def run_multiscale_compound_engine(
         usable_funding_bars = min(expected_funding_bars, raw_funding.shape[0])
         funding_1h[:usable_funding_bars] = raw_funding[:usable_funding_bars].astype(np.float32)
     eligible_4h = _subsample_to_4h(market.eligible_2d)
-    panel = build_raw_signal_panel(bars, eligible_4h)
+    panel = build_raw_signal_panel(bars, eligible_4h, max_workers=4)
 
     handoff_result: HandoffResult | None = None
     try:
