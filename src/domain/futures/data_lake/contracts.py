@@ -12,6 +12,11 @@ from numpy.typing import NDArray
 from src.domain.futures.universe.contracts import UniverseStateCube
 
 
+class SyncMode(StrEnum):
+    AUTO = "auto"
+    LOCAL = "local"
+
+
 class DatasetKind(StrEnum):
     EXCHANGE_INFO = "exchange_info"
     KLINES_1H = "klines_1h"
@@ -141,6 +146,24 @@ class NativeFeatureGrid:
     fields: dict[str, NDArray[np.float64] | NDArray[np.float32]]
     available: dict[str, NDArray[np.bool_]]
     data_manifest_hash: str
+
+
+@dataclass(slots=True, frozen=True)
+class PreparedBootstrap:
+    window: object
+    snapshot: DataSnapshot
+    reconciliation_report: object | None = None
+
+
+@dataclass(slots=True, frozen=True)
+class PreparedQuarterlyData:
+    window: object
+    snapshot: DataSnapshot
+    field_plan: tuple[str, ...]
+    recipe_plan: tuple[object, ...]
+    reconciliation: object | None = None
+    coverage: tuple[object, ...] = ()
+    downloaded_partitions: int = 0
 
 
 class BinanceDataClient(Protocol):

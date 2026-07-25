@@ -27,6 +27,7 @@ from src.domain.futures.data_lake.contracts import (
     UniverseStateRow,
 )
 from src.domain.futures.data_lake.ingestion import DataCoverageError
+from src.domain.futures.data_lake.reconciliation import CatalogLockError
 from src.domain.futures.universe.contracts import UniverseStateCube
 
 _logger = logging.getLogger(__name__)
@@ -169,13 +170,9 @@ class LocalDataCatalog:
         try:
             connection = duckdb.connect(str(self._database), read_only=read_only)
         except duckdb.IOException as error:
-            if read_only:
-                raise DataCoverageError(
-                    f"read-only catalog is unavailable: {self._database}"
-                ) from error
-            _logger.warning("catalog write lock unavailable; using recovery catalog: %s", error)
-            self._database = self._root / "catalog_recovered.duckdb"
-            connection = duckdb.connect(str(self._database))
+            raise CatalogLockError(
+                f"canonical catalog lock unavailable: {self._database}"
+            ) from error
         self._connection = connection
         if not read_only:
             connection.execute(
