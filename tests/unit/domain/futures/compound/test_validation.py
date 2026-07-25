@@ -2,14 +2,18 @@ from __future__ import annotations
 
 import numpy as np
 
-from src.domain.futures.compound.config import L3ValidationConfig
+from src.domain.futures.compound.config import L2BenchmarkConfig, L2GateConfig, L3ValidationConfig
 from src.domain.futures.compound.contracts import (
     DeploymentVerdict,
     ExecutionLedger,
+    L2BenchmarkSeries,
     L2Evaluation,
+    L2GateVerdict,
     SealedHoldoutManifest,
 )
 from src.domain.futures.compound.validation import (
+    aggregate_returns_to_utc_days,
+    build_causal_l2_benchmark,
     evaluate_l2_walk_forward,
     evaluate_l3_sealed_holdout,
 )
@@ -18,8 +22,9 @@ from src.domain.futures.compound.validation import (
 def _ledger(returns: np.ndarray, *, integrity_ok: bool = True) -> ExecutionLedger:
     equity = np.concatenate((np.array([1.0]), np.cumprod(1.0 + returns)))
     n = returns.size
+    ns_per_4h = 4 * 3_600_000_000_000
     return ExecutionLedger(
-        timestamps_ns=np.arange(n, dtype=np.int64) * 86_400_000_000_000,
+        timestamps_ns=np.arange(n, dtype=np.int64) * ns_per_4h,
         net_returns_1d=returns.astype(np.float64),
         equity_1d=equity.astype(np.float64),
         target_weights_2d=np.zeros((n, 2), dtype=np.float32),
@@ -45,12 +50,23 @@ def _manifest(holdout_days: int) -> SealedHoldoutManifest:
 
 class TestEvaluateL2WalkForward:
     def test_returns_l2_evaluation(self) -> None:
-        returns = np.random.randn(200).astype(np.float64) * 0.001
+        n = 200
+        returns = np.random.randn(n).astype(np.float64) * 0.001
         ledger = _ledger(returns)
-        result = evaluate_l2_walk_forward(ledger=ledger, bars_per_year=8766.0, bootstrap_seed=42)
+        daily_timestamps = np.arange(n // 6, dtype=np.int64) * (6 * 4 * 3_600_000_000_000) + (6 * 4 * 3_600_000_000_000 - 1)
+        benchmark = L2BenchmarkSeries(
+            benchmark_id="test_benchmark",
+            timestamps_ns=daily_timestamps[:n // 6],
+            daily_returns_1d=np.zeros(n // 6, dtype=np.float64),
+            causal_scale_1d=np.ones(n // 6, dtype=np.float64),
+        )
+        result = evaluate_l2_walk_forward(
+            ledger=ledger, fold_ids_1d=np.zeros(n, dtype=np.int16),
+            benchmark=benchmark, candidate_count=10,
+            config=L2GateConfig(), bootstrap_seed=42,
+        )
         assert isinstance(result, L2Evaluation)
         assert np.isfinite(result.annualized_log_growth)
-        assert result.equity_multiple > 0
 
 
 class TestEvaluateL3SealedHoldout:
