@@ -15,6 +15,7 @@ from src.domain.futures.compound.calibration import (
     build_folds_4h,
     build_multi_horizon_targets,  # noqa: F401 - compatibility patch target for legacy tests
 )
+from src.domain.futures.compound.clustering import compute_market_regime_clusters
 from src.domain.futures.compound.config import CompoundEngineConfig, DynamicCompoundingConfig
 from src.domain.futures.compound.contracts import (
     AlphaEventTape,
@@ -100,7 +101,9 @@ def run_multiscale_compound_engine(
         cost_bps_4h = align_costs_to_decision_grid(
             market.timestamps_ns, bars_4h.timestamps_ns, market.execution_cost_bps_2d,
         )
-        handoff = build_exit_aware_handoff(panel, bars, folds, cost_bps_4h, funding_1h, config.handoff)
+        clusters = compute_market_regime_clusters(market, k_clusters=4)
+        _logger.info("[P2] computed %d market regime clusters", clusters.k_clusters)
+        handoff = build_exit_aware_handoff(panel, bars, folds, cost_bps_4h, funding_1h, config.handoff, clusters=clusters)
         has_admitted = handoff.evidence.admitted
         forecast = handoff.forecast
         _logger.info(
