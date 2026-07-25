@@ -171,16 +171,6 @@ def finalize_quarterly_signal_data(
             recipe_ids=(),
         ),
         DatasetRequirement(
-            dataset=DatasetKind.COST_CALIBRATION,
-            fields=("execution_cost_bps", "capacity_usdt"),
-            criticality=DataCriticality.CORE,
-            start_time_ns=window.l1_start_ns,
-            end_time_ns=window.cutoff_exclusive_ns,
-            min_coverage_ratio=0.5,
-            max_gap_ns=30 * 86_400_000_000_000,
-            recipe_ids=(),
-        ),
-        DatasetRequirement(
             dataset=DatasetKind.PREMIUM_5M,
             fields=("close",),
             criticality=DataCriticality.OPTIONAL,
