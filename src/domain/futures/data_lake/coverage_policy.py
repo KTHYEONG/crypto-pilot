@@ -4,6 +4,8 @@ import logging
 from dataclasses import dataclass
 from enum import StrEnum
 
+import numpy as np
+
 from src.domain.futures.compound.contracts import MultiscaleAlphaDefinition
 from src.domain.futures.data_lake.contracts import DatasetKind, DataSnapshot
 from src.domain.futures.data_lake.ingestion import DataCoverageError
@@ -62,6 +64,111 @@ class RecipeAvailability:
     reasons: tuple[str, ...]
 
 
+def exclude_symbols_with_funding_gaps(
+    *,
+    snapshot: DataSnapshot,
+    universe: UniverseStateCube,
+    start_time_ns: int,
+    end_time_ns: int,
+    max_gap_ns: int,
+) -> tuple[UniverseStateCube, tuple[str, ...]]:
+    """Disable symbols with an active funding-data gap in the required window.
+
+    The function never fills missing funding observations.  It only prevents a
+    symbol from entering the backtest when an eligible interval overlaps a
+    funding gap longer than the strategy's maximum tolerated staleness.
+    """
+    if end_time_ns <= start_time_ns:
+        raise ValueError("end_time_ns must be greater than start_time_ns")
+
+    calendar_ns = universe.calendar.to_numpy(dtype="datetime64[ns]").astype(np.int64)
+    active_window = (calendar_ns >= start_time_ns) & (calendar_ns < end_time_ns)
+    excluded: list[str] = []
+
+    eligible = universe.eligible.copy()
+    entry_block = universe.entry_block.copy()
+    exit_required = universe.exit_required.copy()
+    capacity_usdt = universe.capacity_usdt.copy()
+    risk_scale = universe.risk_scale.copy()
+
+    for sym_idx, symbol in enumerate(universe.instrument_ids):
+        active_ns = calendar_ns[active_window & eligible[:, sym_idx]]
+        if active_ns.size == 0:
+            continue
+        parts = sorted(
+            (
+                partition for partition in snapshot.partitions
+                if partition.dataset is DatasetKind.FUNDING_EVENT and partition.symbol == symbol
+            ),
+            key=lambda partition: partition.start_time_ms,
+        )
+        intervals = [
+            (
+                int(partition.start_time_ms) * 1_000_000,
+                int(partition.end_time_ms) * 1_000_000,
+            )
+            for partition in parts
+            if partition.end_time_ms is not None
+        ]
+        if _has_active_funding_gap(
+            active_ns=active_ns,
+            intervals=intervals,
+            start_time_ns=start_time_ns,
+            end_time_ns=end_time_ns,
+            max_gap_ns=max_gap_ns,
+        ):
+            excluded.append(symbol)
+            eligible[:, sym_idx] = False
+            entry_block[:, sym_idx] = True
+            exit_required[:, sym_idx] = True
+            capacity_usdt[:, sym_idx] = 0.0
+            risk_scale[:, sym_idx] = 0.0
+
+    filtered = UniverseStateCube(
+        calendar=universe.calendar,
+        instrument_ids=universe.instrument_ids,
+        eligible=eligible,
+        entry_block=entry_block,
+        exit_required=exit_required,
+        capacity_usdt=capacity_usdt,
+        risk_scale=risk_scale,
+        cost_bps=universe.cost_bps.copy(),
+    )
+    return filtered, tuple(excluded)
+
+
+def _has_active_funding_gap(
+    *,
+    active_ns: np.ndarray,
+    intervals: list[tuple[int, int]],
+    start_time_ns: int,
+    end_time_ns: int,
+    max_gap_ns: int,
+) -> bool:
+    clipped = [
+        (max(start, start_time_ns), min(end, end_time_ns))
+        for start, end in intervals
+        if end > start_time_ns and start < end_time_ns
+    ]
+    if not clipped:
+        return True
+
+    previous_end = start_time_ns
+    for start, end in clipped:
+        if start - previous_end > max_gap_ns and _active_between(active_ns, previous_end, start):
+            return True
+        previous_end = max(previous_end, end)
+    return (
+        end_time_ns - previous_end > max_gap_ns
+        and _active_between(active_ns, previous_end, end_time_ns)
+    )
+
+
+def _active_between(active_ns: np.ndarray, start_time_ns: int, end_time_ns: int) -> bool:
+    lower = int(np.searchsorted(active_ns, start_time_ns, side="left"))
+    return lower < active_ns.size and int(active_ns[lower]) < end_time_ns
+
+
 def evaluate_layered_coverage(
     *,
     snapshot: DataSnapshot,
@@ -73,9 +180,16 @@ def evaluate_layered_coverage(
 
     ns_per_hour = 3_600_000_000_000
     ns_per_day = 86_400_000_000_000
+    funding_interval_ns = 8 * ns_per_hour
 
     known_symbols = set(universe.instrument_ids) if hasattr(universe, "instrument_ids") else set()
     eligible_2d = universe.eligible if hasattr(universe, "eligible") else None
+    universe_timestamps_ns: np.ndarray | None = None
+    calendar = getattr(universe, "calendar", None)
+    if eligible_2d is not None and calendar is not None:
+        candidate_timestamps = calendar.to_numpy(dtype="datetime64[ns]").astype(np.int64)
+        if candidate_timestamps.shape[0] == eligible_2d.shape[0]:
+            universe_timestamps_ns = candidate_timestamps
 
     for req in requirements:
         dataset_paths = [
@@ -97,8 +211,11 @@ def evaluate_layered_coverage(
                     continue
 
                 if eligible_2d.ndim == 2:
-                    import numpy as np
-                    timestamps = np.arange(req.start_time_ns, req.end_time_ns, ns_per_hour, dtype=np.int64)
+                    timestamps = (
+                        universe_timestamps_ns
+                        if universe_timestamps_ns is not None
+                        else np.arange(req.start_time_ns, req.end_time_ns, ns_per_hour, dtype=np.int64)
+                    )
                     usable_rows = min(len(timestamps), eligible_2d.shape[0])
                     causal_mask = (
                         (timestamps[:usable_rows] >= req.start_time_ns - ns_per_day)
@@ -108,29 +225,59 @@ def evaluate_layered_coverage(
                         1,
                         int(np.sum(eligible_2d[:usable_rows, sym_idx][causal_mask])),
                     )
-                    expected_total += causal_hours
+                    if req.dataset is DatasetKind.FUNDING_EVENT:
+                        expected_total += max(1, (causal_hours * ns_per_hour + funding_interval_ns - 1) // funding_interval_ns)
+                    else:
+                        expected_total += causal_hours
 
                 for p in sym_paths:
                     if p.row_count is not None:
                         observed_total += int(p.row_count)
 
                 if sym_paths and req.max_gap_ns > 0:
+                    previous_end_ns: int | None = None
+                    eligibility_timestamps = None
+                    eligibility_values = None
+                    if eligible_2d.ndim == 2:
+                        eligibility_timestamps = (
+                            universe_timestamps_ns
+                            if universe_timestamps_ns is not None
+                            else np.arange(
+                                req.start_time_ns,
+                                req.end_time_ns,
+                                ns_per_hour,
+                                dtype=np.int64,
+                            )
+                        )
+                        if len(eligibility_timestamps) <= eligible_2d.shape[0]:
+                            eligibility_values = eligible_2d[:len(eligibility_timestamps), sym_idx]
                     for p in sorted(sym_paths, key=lambda x: x.start_time_ms if x.start_time_ms else 0):
-                        gap_start = int(p.end_time_ms or 0) * 1_000_000
-                        gap_end = int(p.start_time_ms or 0) * 1_000_000
-                        gap = gap_start - gap_end if gap_start > gap_end else 0
-                        if gap > max_gap:
-                            max_gap = gap
+                        start_ns = int(p.start_time_ms or 0) * 1_000_000
+                        end_ns = int(p.end_time_ms or 0) * 1_000_000
+                        if previous_end_ns is not None:
+                            gap_ns = max(0, start_ns - previous_end_ns)
+                            if eligibility_timestamps is not None and eligibility_values is not None:
+                                active_in_gap = np.any(
+                                    eligibility_values[
+                                        (eligibility_timestamps >= previous_end_ns)
+                                        & (eligibility_timestamps < start_ns)
+                                    ]
+                                )
+                                if not active_in_gap:
+                                    gap_ns = 0
+                            max_gap = max(max_gap, gap_ns)
+                        previous_end_ns = max(previous_end_ns or end_ns, end_ns)
         else:
             expected_total = len(dataset_paths) or 1
             observed_total = sum(int(p.row_count or 0) for p in dataset_paths)
+            previous_end_ns_fallback: int | None = None
             for p in sorted(dataset_paths, key=lambda x: x.start_time_ms if x.start_time_ms else 0):
                 if hasattr(p, "end_time_ms") and hasattr(p, "start_time_ms"):
-                    gap = (int(p.end_time_ms or 0) - int(p.start_time_ms or 0)) * 1_000_000
-                    if gap < 0:
-                        gap = 0
-                    if gap > max_gap:
-                        max_gap = gap
+                    start_ns = int(p.start_time_ms or 0) * 1_000_000
+                    end_ns = int(p.end_time_ms or 0) * 1_000_000
+                    if previous_end_ns_fallback is not None:
+                        max_gap = max(max_gap, max(0, start_ns - previous_end_ns_fallback))
+                    previous_end_ns_fallback = max(previous_end_ns_fallback or end_ns, end_ns)
 
         coverage_ratio = observed_total / max(expected_total, 1)
         if coverage_ratio > 1.0:
@@ -217,5 +364,6 @@ __all__ = [
     "RecipeAvailability",
     "RecipeDataStatus",
     "evaluate_layered_coverage",
+    "exclude_symbols_with_funding_gaps",
     "resolve_recipe_availability",
 ]
