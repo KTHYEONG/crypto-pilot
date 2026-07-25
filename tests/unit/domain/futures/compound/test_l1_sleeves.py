@@ -5,6 +5,7 @@ import pytest
 
 from src.domain.futures.compound.config import HandoffConfig
 from src.domain.futures.compound.contracts import (
+    CausalClusterFold,
     CausalFold,
     ClusterPanel,
     ExitPolicyKind,
@@ -22,6 +23,14 @@ from src.domain.futures.compound.l1_sleeves import (
     estimate_cluster_sleeve_posteriors,
     estimate_sleeve_posteriors,
 )
+
+
+def _cluster_folds(clusters: ClusterPanel, bars_4h: TimeframeBarCube, fold_id: int = 0, fit_end: int = 20) -> tuple[CausalClusterFold, ...]:
+    fit_end_ns = int(bars_4h.timestamps_ns[min(fit_end - 1, len(bars_4h.timestamps_ns) - 1)]) if fit_end > 0 and len(bars_4h.timestamps_ns) > 0 else 0
+    return (CausalClusterFold(
+        fold_id=fold_id, fit_end_exclusive_4h=fit_end, fit_end_time_ns=fit_end_ns,
+        panel=clusters, member_hash="test_hash",
+    ),)
 
 
 def _bars(t: int = 40, n: int = 2) -> TimeframeBarCube:
@@ -89,14 +98,14 @@ def test_posterior_quality_and_residual_novelty_exact() -> None:
     sleeves = estimate_sleeve_posteriors(panel, bars, folds, np.ones((40, 2), dtype=np.float32), np.zeros((40, 2), dtype=np.float32), HandoffConfig())
     assert len(sleeves) == 1
     assert np.isfinite(sleeves[0].standard_error)
-    forecast = combine_posterior_sleeves(panel, sleeves, folds, HandoffConfig())
+    forecast = combine_posterior_sleeves(panel, sleeves, (), folds, HandoffConfig())
     assert forecast.mu_2d.shape == (40, 2)
 
 
 def test_zero_quality_and_invalid_return_fail_to_cash() -> None:
     panel = _panel()
     bars = _bars()
-    result = build_exit_aware_handoff(panel, MultiTimeframeBars(np.arange(40, dtype=np.int64), {"4h": bars}, {}), (), np.ones((40, 2), dtype=np.float32), np.zeros((40, 2), dtype=np.float32), HandoffConfig())
+    result = build_exit_aware_handoff(panel, MultiTimeframeBars(np.arange(40, dtype=np.int64), {"4h": bars}, {}), (), (), np.ones((40, 2), dtype=np.float32), np.zeros((40, 2), dtype=np.float32), HandoffConfig())
     assert result.forecast.mu_2d.shape == (40, 2)
     assert not result.evidence.admitted
 
@@ -116,8 +125,9 @@ def test_zero_novelty_active_sleeve_returns_cash() -> None:
     panel = _panel()
     policy = ExitPolicySpec("p", ExitPolicyKind.TIME, None, None, None, 0, 4, -1, "hash")
     from src.domain.futures.compound.contracts import L1SleevePosterior
-    sleeve = L1SleevePosterior("s", "trend:fast", "trend", policy, 0.1, 0.1, 0.9, 0.0, (0.1,), 1, True, ())
-    forecast = combine_posterior_sleeves(panel, (sleeve,), _folds(), HandoffConfig())
+    mask = np.ones(2, dtype=np.bool_)
+    sleeve = L1SleevePosterior("s", "trend:fast", "trend", 0, 0, mask, "test_hash", policy, 0.1, 0.1, 0.9, 0.0, (0.1,), 1, True, ())
+    forecast = combine_posterior_sleeves(panel, (sleeve,), (), _folds(), HandoffConfig())
     assert np.all(forecast.mu_2d == 0.0)
 
 
@@ -229,7 +239,8 @@ class TestEstimateClusterSleevePosteriors:
         folds = _folds()
         cost = np.ones((40, 10), dtype=np.float32)
         config = HandoffConfig()
-        posteriors = estimate_cluster_sleeve_posteriors(panel, bars_4h, clusters, folds, cost, config)
+        cfolds = _cluster_folds(clusters, bars_4h)
+        posteriors = estimate_cluster_sleeve_posteriors(panel, bars_4h, cfolds, folds, cost, np.zeros_like(cost), config)
         assert isinstance(posteriors, tuple)
 
     def test_empty_panel_returns_empty_tuple(self) -> None:
@@ -266,7 +277,8 @@ class TestEstimateClusterSleevePosteriors:
             valid_3d=np.zeros((40, 5, 0), dtype=bool),
             sigma_2d=np.ones((40, 5), dtype=np.float32),
         )
-        posteriors = estimate_cluster_sleeve_posteriors(empty_panel, bars_4h, clusters, folds, cost, config)
+        cfolds = _cluster_folds(clusters, bars_4h)
+        posteriors = estimate_cluster_sleeve_posteriors(empty_panel, bars_4h, cfolds, folds, cost, np.zeros_like(cost), config)
         assert len(posteriors) == 0
 
     def test_mismatched_shapes_raises_value_error(self) -> None:
@@ -297,7 +309,7 @@ class TestEstimateClusterSleevePosteriors:
         cost = np.ones((39, 5), dtype=np.float32)
         config = HandoffConfig()
         with pytest.raises(ValueError, match="shapes"):
-            estimate_cluster_sleeve_posteriors(panel, bars_4h, clusters, folds, cost, config)
+            estimate_cluster_sleeve_posteriors(panel, bars_4h, _cluster_folds(clusters, bars_4h), folds, cost, np.zeros_like(cost), config)
 
     def test_small_cluster_skipped(self) -> None:
         clusters = ClusterPanel(
@@ -311,7 +323,8 @@ class TestEstimateClusterSleevePosteriors:
         folds = _folds()
         cost = np.ones((40, 10), dtype=np.float32)
         config = HandoffConfig()
-        posteriors = estimate_cluster_sleeve_posteriors(panel, bars_4h, clusters, folds, cost, config)
+        cfolds = _cluster_folds(clusters, bars_4h)
+        posteriors = estimate_cluster_sleeve_posteriors(panel, bars_4h, cfolds, folds, cost, np.zeros_like(cost), config)
         assert isinstance(posteriors, tuple)
 
     def test_very_small_cluster_symbols_skipped(self) -> None:
@@ -326,7 +339,8 @@ class TestEstimateClusterSleevePosteriors:
         folds = _folds()
         cost = np.ones((40, 10), dtype=np.float32)
         config = HandoffConfig()
-        posteriors = estimate_cluster_sleeve_posteriors(panel, bars_4h, clusters, folds, cost, config)
+        cfolds = _cluster_folds(clusters, bars_4h)
+        posteriors = estimate_cluster_sleeve_posteriors(panel, bars_4h, cfolds, folds, cost, np.zeros_like(cost), config)
         assert isinstance(posteriors, tuple)
 
     def test_short_fit_window_skips_cluster_sleeve(self) -> None:
@@ -363,7 +377,8 @@ class TestEstimateClusterSleevePosteriors:
             valid_3d=np.ones((40, 5, 1), dtype=bool),
             sigma_2d=np.ones((40, 5), dtype=np.float32),
         )
-        posteriors = estimate_cluster_sleeve_posteriors(panel, bars_4h, clusters, folds, cost, config)
+        cfolds = _cluster_folds(clusters, bars_4h)
+        posteriors = estimate_cluster_sleeve_posteriors(panel, bars_4h, cfolds, folds, cost, np.zeros_like(cost), config)
         assert isinstance(posteriors, tuple)
 
     def test_weak_signal_produces_non_admitted(self) -> None:
@@ -400,7 +415,8 @@ class TestEstimateClusterSleevePosteriors:
             valid_3d=np.ones((40, 5, 1), dtype=bool),
             sigma_2d=np.ones((40, 5), dtype=np.float32),
         )
-        posteriors = estimate_cluster_sleeve_posteriors(weak_panel, bars_4h, clusters, folds, cost, config)
+        cfolds = _cluster_folds(clusters, bars_4h)
+        posteriors = estimate_cluster_sleeve_posteriors(weak_panel, bars_4h, cfolds, folds, cost, np.zeros_like(cost), config)
         for p in posteriors:
             if not p.admitted:
                 assert "posterior_below_floor" in p.reasons
@@ -435,7 +451,8 @@ class TestEstimateClusterSleevePosteriors:
         funding = np.zeros((160, 5), dtype=np.float32)
         config = HandoffConfig()
 
-        handoff = build_exit_aware_handoff(panel, mt_bars, folds, cost, funding, config, clusters=clusters)
+        cfolds = _cluster_folds(clusters, bars_4h)
+        handoff = build_exit_aware_handoff(panel, mt_bars, folds, cfolds, cost, funding, config)
         assert handoff is not None
         assert isinstance(handoff.evidence.admitted, bool)
 
