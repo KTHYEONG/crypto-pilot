@@ -1,4 +1,3 @@
-import numpy as np
 
 from src.domain.futures.compound.bar_engine import (
     aggregate_timeframe_bars,

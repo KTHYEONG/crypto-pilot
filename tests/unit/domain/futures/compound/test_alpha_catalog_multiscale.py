@@ -38,7 +38,6 @@ class TestBuildMultiscaleAlphaCatalog:
             assert r.native_timeframe in supported
 
     def test_raises_on_duplicate_id(self) -> None:
-        from src.domain.futures.compound.alpha_catalog import _MULTISCALE_RECIPES
         from unittest.mock import patch
 
         with patch(
@@ -53,6 +52,5 @@ class TestBuildMultiscaleAlphaCatalog:
                  "required_fields": ("close",), "initial_state": AlphaCandidateState.CORE_CANDIDATE,
                  "max_half_life_hours": 36.0},
             ),
-        ):
-            with pytest.raises(ValueError, match="duplicate"):
-                build_multiscale_alpha_catalog()
+        ), pytest.raises(ValueError, match="duplicate"):
+            build_multiscale_alpha_catalog()
