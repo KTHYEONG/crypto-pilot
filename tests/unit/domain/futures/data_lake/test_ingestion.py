@@ -96,6 +96,24 @@ class TestIngestionPlan:
 
         assert plan.broad_symbols == ("BTCUSDT",)
 
+    def test_plan_excludes_cost_calibration_derived_from_pit_universe(self, tmp_path: Path) -> None:
+        lake_root = tmp_path / "data" / "lake"
+        kline_path = (
+            lake_root / DatasetKind.KLINES_1H.value / "symbol=BTCUSDT"
+            / "year=2026" / "month=07" / "part.parquet"
+        )
+        kline_path.parent.mkdir(parents=True)
+        pd.DataFrame(
+            {"timestamp": [1_783_440_000_000], "close": [100.0], "quote_volume": [1_000_000.0]}
+        ).to_parquet(kline_path, index=False)
+
+        plan = build_ingestion_plan(
+            config=DataLakeConfig(root=lake_root),
+            reference_date=date(2026, 7, 8),
+        )
+
+        assert "cost_calibration" not in {dataset.value for dataset in plan.datasets}
+
 
 def test_universe_state_request_rejects_invalid_axes() -> None:
     import numpy as np
