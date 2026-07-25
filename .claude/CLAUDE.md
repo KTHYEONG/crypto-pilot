@@ -29,11 +29,11 @@
 ## 4. Context & Harness Engineering (Pre-verification & Validation)
 - **Dependency Management:** Check `pyproject.toml` before using external packages. If a new package is essential for implementation, add the dependency first using `uv add [package_name]` before writing code.
 - **Codebase Discovery:** Use `rg` to prevent duplicate code, but limit output (e.g., `head -n 30`) to avoid token overflow.
-- **Check Loop & Pipeline Auto-Chaining:** 
+- **Check Loop & Phase Separation:** 
     - **Trigger:** Execute when a `.py` file is created or modified. (Excluding the `spec` design phase or markdown-only updates).
     - **Action**: Run the active skill's phase instructions.
-      - **Implement phase (L1.5):** Single-Pass Synthesis (source logic and mock unit tests created simultaneously) + Local syntax formatting/linting (`ruff --fix`), local pytest execution, and `print()` leaks removal. Wasteful Red-phase pytest runs are bypassed. Once L1.5 checks pass, **immediately auto-chain trigger the check phase (L2)** without asking for user permission.
-      - **Check phase (L2):** Spec compliance verification, strict Mypy validation, regression testing & coverage auditing via `lean_check.py --skip-lint`.
+      - **Implement phase (L1.5):** Single-Pass Synthesis (source logic and mock unit tests created simultaneously) + Local syntax formatting/linting (`ruff --fix`), local pytest execution with coverage check. Once L1.5 local checks pass, **STOP and present local implementation status**.
+      - **Check phase (L2):** Independent audit gatekeeper. Spec compliance verification (dynamic `wiring` caller integration & AST non-dummy code), strict Mypy validation, regression testing & coverage auditing via `lean_check.py --skip-lint`.
     - **Test Scope:** Target modified test files only (1:1 co-modification mapping). Never run `pytest` on broad directories.
 
 
