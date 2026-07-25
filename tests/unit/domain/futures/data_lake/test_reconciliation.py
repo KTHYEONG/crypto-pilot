@@ -24,10 +24,12 @@ class TestReconcileLocalCatalog:
         shutil.rmtree(tmp, ignore_errors=True)
 
     def test_reconcile_registers_unindexed_physical_parquet(self, lake_root: Path) -> None:
+        import duckdb
         import pandas as pd
+
         parquet_dir = lake_root / "klines_1h" / "symbol=BTCUSDT" / "year=2024" / "month=01"
         parquet_dir.mkdir(parents=True, exist_ok=True)
-        df = pd.DataFrame({"timestamp": [1704067200000, 1704153600000], "close": [40000.0, 40100.0]})
+        df = pd.DataFrame({"timestamp": [1704412800000, 1704499200000], "close": [40000.0, 40100.0]})
         parquet_path = parquet_dir / "part.parquet"
         df.to_parquet(parquet_path, index=False)
 
@@ -35,6 +37,43 @@ class TestReconcileLocalCatalog:
 
         assert report.added_rows >= 1
         assert report.scanned_files >= 1
+        conn = duckdb.connect(str(lake_root / "catalog.duckdb"), read_only=True)
+        start_time_ms, = conn.execute("SELECT start_time_ms FROM partitions").fetchone()
+        conn.close()
+        assert start_time_ms == 1704067200000
+
+    def test_reconcile_replaces_existing_path_manifest_with_month_partition_key(
+        self, lake_root: Path,
+    ) -> None:
+        import duckdb
+        import pandas as pd
+
+        parquet_dir = lake_root / "funding_event" / "symbol=BTCUSDT" / "year=2024" / "month=01"
+        parquet_dir.mkdir(parents=True, exist_ok=True)
+        parquet_path = parquet_dir / "part.parquet"
+        pd.DataFrame({"timestamp": [1704412800000], "funding_rate": [0.0001]}).to_parquet(
+            parquet_path, index=False,
+        )
+        conn = duckdb.connect(str(lake_root / "catalog.duckdb"))
+        conn.execute(
+            "CREATE TABLE partitions (dataset VARCHAR, symbol VARCHAR, start_time_ms BIGINT, "
+            "end_time_ms BIGINT, row_count BIGINT, sha256 VARCHAR, source VARCHAR, "
+            "is_final BOOLEAN, path VARCHAR, PRIMARY KEY (dataset, symbol, start_time_ms))"
+        )
+        conn.execute(
+            "INSERT INTO partitions VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            ["funding_event", "BTCUSDT", 1704412800000, 1704412800000, 1, "old", "local_reconciliation", True, str(parquet_path)],
+        )
+        conn.close()
+
+        reconcile_local_catalog(root=lake_root, cutoff_exclusive_ns=1735689600_000_000_000)
+
+        conn = duckdb.connect(str(lake_root / "catalog.duckdb"), read_only=True)
+        manifests = conn.execute(
+            "SELECT start_time_ms, path FROM partitions WHERE dataset = 'funding_event'"
+        ).fetchall()
+        conn.close()
+        assert manifests == [(1704067200000, str(parquet_path))]
 
     def test_reconcile_atomic_failure_preserves_old_catalog(self, lake_root: Path) -> None:
         import pandas as pd
