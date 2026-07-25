@@ -1,12 +1,16 @@
 from __future__ import annotations
 
 import logging
+import math
 import time
-from concurrent.futures import ThreadPoolExecutor
+from typing import cast
 
 import numpy as np
+import psutil
+from numba import get_num_threads as _numba_get_num_threads
+from numba import njit, prange
+from numba import set_num_threads as _numba_set_num_threads
 from numpy.typing import NDArray
-from threadpoolctl import threadpool_limits
 
 from src.domain.futures.compound.contracts import (
     InsufficientCoverageError,
@@ -18,6 +22,48 @@ from src.domain.futures.compound.contracts import (
 _logger = logging.getLogger(__name__)
 
 # P3 wiring: bars = build_multi_timeframe_bars(market); panel = build_raw_signal_panel(bars, eligible_2d=eligible_4h)
+
+_numba_fallback_count: int = 0
+
+
+@njit(cache=True, parallel=True)  # type: ignore[untyped-decorator]
+def _rolling_mad_z_numba_kernel(
+    arr: NDArray[np.float64],
+    window: int,
+    min_periods: int,
+) -> NDArray[np.float64]:
+    n_t, n_s = arr.shape
+    z = np.full((n_t, n_s), np.nan, dtype=np.float64)
+    for s in prange(n_s):
+        for t in range(min_periods - 1, n_t):
+            start = max(0, t - window + 1)
+            wlen = t - start + 1
+            buf = np.empty(wlen, dtype=np.float64)
+            n_valid = 0
+            for i in range(start, t + 1):
+                v = arr[i, s]
+                if np.isfinite(v):
+                    buf[n_valid] = v
+                    n_valid += 1
+            if n_valid == 0:
+                continue
+            valid_sorted = np.sort(buf[:n_valid])
+            if n_valid % 2 == 1:
+                med = valid_sorted[n_valid // 2]
+            else:
+                med = (valid_sorted[n_valid // 2 - 1] + valid_sorted[n_valid // 2]) / 2.0
+            for i in range(n_valid):
+                buf[i] = np.abs(buf[i] - med)
+            dev_sorted = np.sort(buf[:n_valid])
+            if n_valid % 2 == 1:
+                mad = dev_sorted[n_valid // 2]
+            else:
+                mad = (dev_sorted[n_valid // 2 - 1] + dev_sorted[n_valid // 2]) / 2.0
+            if mad < 1e-12:
+                continue
+            z[t, s] = (arr[t, s] - med) / (1.4826 * mad)
+    return z
+
 
 SPEED_LADDER: tuple[tuple[str, int], ...] = (
     ("fast", 24),
@@ -63,7 +109,7 @@ def _log_return(close: NDArray[np.float32], lb_bars: int) -> NDArray[np.float64]
     return ret
 
 
-def _rolling_mad_z(arr: NDArray[np.float64], window: int, min_periods: int) -> NDArray[np.float64]:
+def _rolling_mad_z_numpy(arr: NDArray[np.float64], window: int, min_periods: int) -> NDArray[np.float64]:
     n_t, _ = arr.shape
     z = np.full_like(arr, np.nan, dtype=np.float64)
     for t in range(min_periods - 1, n_t):
@@ -74,6 +120,20 @@ def _rolling_mad_z(arr: NDArray[np.float64], window: int, min_periods: int) -> N
         mad = np.where(mad < 1e-12, np.nan, mad)
         z[t] = (arr[t] - med) / (1.4826 * mad)
     return z
+
+
+def _rolling_mad_z(arr: NDArray[np.float64], window: int, min_periods: int) -> NDArray[np.float64]:
+    global _numba_fallback_count
+    try:
+        arr_contig = np.ascontiguousarray(arr, dtype=np.float64)
+        return cast(
+            NDArray[np.float64],
+            _rolling_mad_z_numba_kernel(arr_contig, window, min_periods),
+        )
+    except Exception:
+        _numba_fallback_count += 1
+        _logger.warning("[SYS] _rolling_mad_z numba kernel failed, falling back to numpy")
+        return _rolling_mad_z_numpy(arr, window, min_periods)
 
 
 def _compute_trend_ema(
@@ -405,18 +465,44 @@ def _compute_raw_signal(
     return None
 
 
+def estimate_signal_panel_peak_bytes(
+    *,
+    current_rss_bytes: int,
+    n_bars: int,
+    n_symbols: int,
+    n_recipes: int,
+    max_native_rows: int,
+    numba_threads: int,
+    mad_window: int = 540,
+) -> int:
+    if current_rss_bytes < 0 or n_bars < 0 or n_symbols < 0 or n_recipes < 0 or max_native_rows < 0:
+        raise ValueError("dimensions must be non-negative")
+    if numba_threads < 1 or mad_window < 1:
+        raise ValueError("numba_threads and mad_window must be positive")
+
+    panel_bytes = n_bars * n_symbols * n_recipes * (4 + 1)
+    sigma_bytes = n_bars * n_symbols * 8 * 3
+    max_recipe_rows = max(n_bars, max_native_rows)
+    recipe_bytes = max_recipe_rows * n_symbols * 8
+    numba_bytes = numba_threads * mad_window * n_symbols * 8 * 2
+
+    total = current_rss_bytes + panel_bytes + sigma_bytes + recipe_bytes + numba_bytes
+    return math.ceil(1.15 * total)
+
+
 def build_raw_signal_panel(
     bars: MultiTimeframeBars,
     eligible_2d: NDArray[np.bool_],
     catalog: tuple[SignalDescriptor, ...] | None = None,
     *,
-    max_workers: int = 4,
+    numba_threads: int = 6,
+    max_rss_mb: int = 12_000,
 ) -> RawSignalPanel:
     if catalog is None:
         catalog = _default_catalog()
 
-    if max_workers < 1 or max_workers > 4:
-        raise ValueError(f"max_workers must be 1..4, got {max_workers}")
+    if numba_threads < 1 or numba_threads > 6:
+        raise ValueError(f"numba_threads must be 1..6, got {numba_threads}")
 
     n_cat = len(catalog)
     n_t = bars.decision_timestamps_ns.size
@@ -425,6 +511,25 @@ def build_raw_signal_panel(
 
     if eligible_2d.shape != (n_t, n_syms):
         raise ValueError(f"eligible_2d shape {eligible_2d.shape} != ({n_t}, {n_syms})")
+
+    max_native_rows = max(
+        (v.shape[0] for v in bars.aux_1h_fields.values()),
+        default=n_t * 4,
+    )
+    max_rss_bytes = max_rss_mb * 1024 * 1024
+    current_rss = psutil.Process().memory_info().rss
+    estimated_peak = estimate_signal_panel_peak_bytes(
+        current_rss_bytes=current_rss,
+        n_bars=n_t,
+        n_symbols=n_syms,
+        n_recipes=n_cat,
+        max_native_rows=max_native_rows,
+        numba_threads=numba_threads,
+    )
+    if estimated_peak >= max_rss_bytes:
+        raise MemoryError(
+            f"preflight RSS estimate {estimated_peak} >= max {max_rss_bytes}"
+        )
 
     cube_4h = bars.cubes["4h"]
     complete_4h = cube_4h.complete_2d
@@ -436,29 +541,41 @@ def build_raw_signal_panel(
     z_3d = np.full((n_t, n_syms, n_cat), np.nan, dtype=np.float32)
     valid_3d = np.zeros((n_t, n_syms, n_cat), dtype=np.bool_)
 
+    global _numba_fallback_count
+    _numba_fallback_count = 0
+    prior_numba_threads = _numba_get_num_threads()
+    effective_threads = min(numba_threads, _numba_get_num_threads())
+    _numba_set_num_threads(effective_threads)
+
     started = time.perf_counter()
+    observed_peak_rss = current_rss
 
-    effective_workers = min(max_workers, n_cat)
-
-    if effective_workers <= 1:
+    try:
         for k, desc in enumerate(catalog):
             raw = _compute_raw_signal(desc, bars, eligible_2d)
             _write_recipe_result(z_3d, valid_3d, k, raw, eligible_2d, complete_4h)
-    else:
-        with threadpool_limits(limits=1), ThreadPoolExecutor(max_workers=effective_workers) as pool:
-            futures = [pool.submit(_compute_raw_signal, desc, bars, eligible_2d) for desc in catalog]
-            for k, future in enumerate(futures):
-                raw = future.result()
-                _write_recipe_result(z_3d, valid_3d, k, raw, eligible_2d, complete_4h)
+            del raw
+            obs = psutil.Process().memory_info().rss
+            if obs > observed_peak_rss:
+                observed_peak_rss = obs
+            if obs >= max_rss_bytes:
+                _logger.error(
+                    "[SYS][L1] RSS exceeded limit: observed_rss_mb=%.1f max_rss_mb=%d",
+                    obs / 1048576, max_rss_mb,
+                )
+                raise MemoryError(f"runtime RSS {obs} >= max {max_rss_bytes}")
+    finally:
+        _numba_set_num_threads(prior_numba_threads)
 
     elapsed = time.perf_counter() - started
     total_valid = int(np.sum(valid_3d))
     total_cells = valid_3d.size
     valid_ratio = total_valid / max(total_cells, 1)
-    mad_recipes = sum(1 for d in catalog if d.family in ("breakout_donchian", "basis_gap", "smart_money_divergence", "carry_funding", "flow_taker"))
+    executed_mad_recipes = sum(1 for d in catalog if d.family in ("breakout_donchian", "basis_gap", "smart_money_divergence", "carry_funding", "flow_taker"))
     _logger.info(
-        "[PERF][L1] signal_panel elapsed_s=%.4f recipes=%d mad_recipes=%d max_workers=%d valid_ratio=%.4f",
-        elapsed, n_cat, mad_recipes, effective_workers, valid_ratio,
+        "[PERF][L1] signal_panel elapsed_s=%.4f recipes=%d executed_mad_recipes=%d numba_threads=%d numba_fallbacks=%d valid_ratio=%.4f signal_count=%d field_count=%d estimated_peak_mb=%.0f observed_peak_mb=%.0f max_rss_mb=%d",
+        elapsed, n_cat, executed_mad_recipes, effective_threads, _numba_fallback_count,
+        valid_ratio, n_cat, n_syms, estimated_peak / 1048576, observed_peak_rss / 1048576, max_rss_mb,
     )
 
     if valid_ratio < 0.05:
