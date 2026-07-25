@@ -2,6 +2,11 @@
 
 This file holds historical architecture decision records (ADRs) that have been pruned from the active window.
 
+## [2026-07-24] [TASK_SIGNAL_BANK_V3] [ADR_20260724_SIGNAL_BANK_V3]
+- **Context/Why:** 실측(4380개 4h bar × 120종목, 다중 horizon 스윕)에서 xs_momentum 216h(t=-19.01)/648h(t=-17.79)의 강력한 장기 모멘텀 발견. 기존 고정 4h 타깃으로는 이 신호를 전혀 감지할 수 없어 signal descriptor별 target_horizon_hours 필드 도입이 필요했음. 또한 단일 horizon 구조에서 다중 horizon(4h/216h/648h) calibration 아키텍처로 확장.
+- **Resolution/What:** SignalDescriptor.target_horizon_hours 필드 추가 + __post_init__ 검증. _compute_xs_rank_signal(sign) 공용 헬퍼 생성, xs_reversal/새 xs_momentum_slow family가 공유. build_multi_horizon_targets, signal별 target 조회 calibrate_signals/evaluate_signal_admission, purge_bars/block_size 동적 하한 적용. admission에 low_effective_sample soft-flag 추가. 기본 카탈로그: 5 families×4 + reversal_st + 2 xs_reversal + 2 xs_momentum_slow = 25개, flow_taker 제외(데이터 버그 별도 이슈). lean_check PASS (Cov 96%). --phase ladder 결과 8/8 ok, 0 promoted — 기존 L1 edge 부재 결론 유지.
+- **Impact:** 신규 xs_momentum_slow family가 기본 카탈로그에 포함돼 P2 admission 평가를 받게 됨. purge_bars/block_size 동적 계산으로 648h 타겟의 look-ahead 방지. 인터페이스 변경(calibrate_signals/evaluate_signal_admission의 target→targets dict)으로 기존 호출자(engine.py/ladder.py) 전부 업데이트 완료. 기존 25개(target_horizon_hours=4) 신호 admission 결과는 1비트도 변경되지 않음(회귀 테스트 확인). flow_taker 기본 카탈로그 제외는 v2 결정 승계.
+
 ## [2026-07-24] [TASK_SIGNAL_BANK_V2] [ADR_20260724_SIGNAL_BANK_V2]
 - **Context/Why:** IC 스크리닝(4380 bar x 120종목)에서 basis_gap 4speed 동일출력(dead-lookback), xs_reversal(24h) 유의성 발견. flow_taker는 taker_buy_quote 상수(-1.0000)로 무의미 판정돼 제외 예정이었으나, 재조사 결과 compound_data.py가 존재하지 않는 컬럼명(taker_quote_volume)을 요청하는 read-layer 버그였고 실제 데이터(taker_buy_quote)는 100% finite로 정상.
 - **Resolution/What:** basis_gap에 lookback_hours 인자 추가해 EWM 스무딩(speed별 실제 구분). xs_reversal:fast(24h) family 신규 추가. compound_data.py/data_lake/query.py 컬럼명 버그 수정(taker_quote_volume -> taker_buy_quote, 저장 컨벤션 통일). flow_taker는 제외하지 않고 카탈로그 유지(25->26개). 버그 수정 후 재스크리닝: flow_taker:fast t=-3.50 유의미한 역추세 신호로 확인. 실제 P2 admission 파이프라인(--phase ladder) 재실행 결과 flow_taker:fast/trend_ema:fast/breakout_donchian:slow가 개별 유의성 통과했으나 26개 pooled BH-FDR 보정 후 최종 admitted=0/26, L1-3 zero-mu fallback.

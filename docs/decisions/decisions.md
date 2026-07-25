@@ -1,5 +1,10 @@
 # Active Decisions Log (Sliding Window)
 
+## [2026-07-25] [quarterly-data-runtime-check] [ADR_20260725_quarterly-data-runtime-check]
+- **Context/Why:** 2026-07-25 실행에서 cost_calibration coverage 부족과 parquet schema 인식 오류를 확인
+- **Resolution/What:** coverage 시간축 정렬과 effective_time_ns parquet reconciliation을 보강하고 실행 결과 및 후속 검증 항목을 docs/results/result.md에 기록
+- **Impact:** 필수 비용 데이터가 확보되기 전 L2/L3 성과 산출을 차단하며, 데이터 확보 후 분기 cutoff 기반 백테스트를 재검증
+
 ## [2026-07-25] [TASK_L1_L2_CAUSAL_GROWTH] [ADR_20260725_L1_L2_CAUSAL_GROWTH]
 - **Context/Why:** 2026년 7월 실행에서 parquet와 manifest 불일치 및 월말 기준일 경계가 전체 파이프라인을 signal 계산 전에 차단함
 - **Resolution/What:** L1 군집 causal fold와 L2 benchmark-relative 다중 gate를 적용하고, active signal 데이터와 shadow 데이터 coverage를 분리하며, 기준일은 완결 월말/OOS 경계로 해석한다
@@ -69,8 +74,3 @@
 - **Context/Why:** L1-3 ladder backtest zero-admissible alpha failure due to 4h target horizon mismatch and single-element BH-FDR bug
 - **Resolution/What:** Matched target_horizon_hours to lookback periods (24h-432h), fixed BH-FDR array scope in admission.py, added sqrt(H/4) scale-normalized forecast combining
 - **Impact:** L1-3 stage successfully admitted 4 signals across 3 families (trend_ema, xs_reversal, xs_momentum) with sign consistency up to 1.00 and positive LCB90
-
-## [2026-07-24] [TASK_SIGNAL_BANK_V3] [ADR_20260724_SIGNAL_BANK_V3]
-- **Context/Why:** 실측(4380개 4h bar × 120종목, 다중 horizon 스윕)에서 xs_momentum 216h(t=-19.01)/648h(t=-17.79)의 강력한 장기 모멘텀 발견. 기존 고정 4h 타깃으로는 이 신호를 전혀 감지할 수 없어 signal descriptor별 target_horizon_hours 필드 도입이 필요했음. 또한 단일 horizon 구조에서 다중 horizon(4h/216h/648h) calibration 아키텍처로 확장.
-- **Resolution/What:** SignalDescriptor.target_horizon_hours 필드 추가 + __post_init__ 검증. _compute_xs_rank_signal(sign) 공용 헬퍼 생성, xs_reversal/새 xs_momentum_slow family가 공유. build_multi_horizon_targets, signal별 target 조회 calibrate_signals/evaluate_signal_admission, purge_bars/block_size 동적 하한 적용. admission에 low_effective_sample soft-flag 추가. 기본 카탈로그: 5 families×4 + reversal_st + 2 xs_reversal + 2 xs_momentum_slow = 25개, flow_taker 제외(데이터 버그 별도 이슈). lean_check PASS (Cov 96%). --phase ladder 결과 8/8 ok, 0 promoted — 기존 L1 edge 부재 결론 유지.
-- **Impact:** 신규 xs_momentum_slow family가 기본 카탈로그에 포함돼 P2 admission 평가를 받게 됨. purge_bars/block_size 동적 계산으로 648h 타겟의 look-ahead 방지. 인터페이스 변경(calibrate_signals/evaluate_signal_admission의 target→targets dict)으로 기존 호출자(engine.py/ladder.py) 전부 업데이트 완료. 기존 25개(target_horizon_hours=4) 신호 admission 결과는 1비트도 변경되지 않음(회귀 테스트 확인). flow_taker 기본 카탈로그 제외는 v2 결정 승계.
