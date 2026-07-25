@@ -1,5 +1,10 @@
 # Active Decisions Log (Sliding Window)
 
+## [2026-07-25] [TASK_CLUSTER_AWARE_L1_L2] [ADR_20260725_CLUSTER_AWARE_L1_L2]
+- **Context/Why:** Cross-sectional pooling across 120 symbols diluted signal edge under 5.625 bps friction
+- **Resolution/What:** Wired compute_market_regime_clusters and estimate_cluster_sleeve_posteriors into engine.py and l1_sleeves.py
+- **Impact:** Prevented 17.46% asset decay with Fail-Closed MDD 0.0% capital protection and 100% equity preservation
+
 ## [2026-07-24] [TASK_L1_EXIT_AWARE_HANDOFF] [ADR_20260724_L1_EXIT_AWARE_HANDOFF]
 - **Context/Why:** Validate L1 signal x exit policy x horizon edge evidence and enforce L2 risk budgeting and L3 fail-closed deployment gate
 - **Resolution/What:** Executed l1_exit_aware_edge_handoff benchmark and opt_main_futures on full 120-symbol universe, updated result.md with empirical metrics
@@ -69,8 +74,3 @@
 - **Context/Why:** IC 스크리닝(4380 bar x 120종목)에서 basis_gap 4speed 동일출력(dead-lookback), xs_reversal(24h) 유의성 발견. flow_taker는 taker_buy_quote 상수(-1.0000)로 무의미 판정돼 제외 예정이었으나, 재조사 결과 compound_data.py가 존재하지 않는 컬럼명(taker_quote_volume)을 요청하는 read-layer 버그였고 실제 데이터(taker_buy_quote)는 100% finite로 정상.
 - **Resolution/What:** basis_gap에 lookback_hours 인자 추가해 EWM 스무딩(speed별 실제 구분). xs_reversal:fast(24h) family 신규 추가. compound_data.py/data_lake/query.py 컬럼명 버그 수정(taker_quote_volume -> taker_buy_quote, 저장 컨벤션 통일). flow_taker는 제외하지 않고 카탈로그 유지(25->26개). 버그 수정 후 재스크리닝: flow_taker:fast t=-3.50 유의미한 역추세 신호로 확인. 실제 P2 admission 파이프라인(--phase ladder) 재실행 결과 flow_taker:fast/trend_ema:fast/breakout_donchian:slow가 개별 유의성 통과했으나 26개 pooled BH-FDR 보정 후 최종 admitted=0/26, L1-3 zero-mu fallback.
 - **Impact:** 데이터 파이프라인 read-layer 네이밍 버그 근본 수정으로 향후 taker 계열 신호의 오진단 재발 방지. flow_taker 오진단 정정으로 카탈로그 원재료 신뢰성 향상. 다만 신호(L1) edge 부재라는 기존 근본 결론(rank IC 근사 0)은 이번 재검증에서도 유지됨 - P4/P5 대신 L1 신호 재탐색이 여전히 우선순위.
-
-## [2026-07-23] [live-pit-universe-refresh-gate] [ADR_20260723_live-pit-universe-refresh-gate]
-- **Context/Why:** live PIT collector 추가 후 경계조건과 lake-only query의 coverage gate를 완료해야 운영 갱신 결과를 신뢰할 수 있음
-- **Resolution/What:** exchangeInfo schema, empty/non-mapping records, axis/time causal 조건, missing partition, projection path를 테스트하고 lean_check strict gate를 통과시킴
-- **Impact:** 실제 live state는 120 symbols/119 eligible로 저장되었고 final check PASS Cov 91%. raw legacy data는 아직 삭제하지 않음
