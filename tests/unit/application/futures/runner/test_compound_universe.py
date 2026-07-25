@@ -10,6 +10,7 @@ from src.application.futures.runner.compound_universe import (
 from src.domain.futures.data_lake.contracts import (
     DataSnapshot,
     LakeUniverse,
+    SyncMode,
 )
 from src.domain.futures.universe.contracts import UniverseStateCube
 
@@ -47,7 +48,7 @@ def test_build_daily_pit_universe_delegates_to_lake(mocker) -> None:
     )
     from src.application.futures.runner.compound_config import CompoundRunConfig
     config = CompoundRunConfig(
-        reference_date="2026-07-08", sync="skip", refresh_universe=False,
+        reference_date="2026-07-08", sync=SyncMode.LOCAL, refresh_universe=False,
         max_axis_symbols=240,
     )
     result = build_daily_pit_universe(
@@ -68,7 +69,7 @@ def test_build_daily_pit_universe_raises_on_empty(mocker) -> None:
     )
     from src.application.futures.runner.compound_config import CompoundRunConfig
     config = CompoundRunConfig(
-        reference_date="2026-07-08", sync="skip", refresh_universe=False,
+        reference_date="2026-07-08", sync=SyncMode.LOCAL, refresh_universe=False,
     )
     with pytest.raises(EmptyPITUniverseError, match="no eligible symbols"):
         build_daily_pit_universe(

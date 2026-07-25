@@ -9,6 +9,7 @@ from src.application.futures.runner.compound_config import (
     build_compound_run_config,
 )
 from src.domain.futures.compound.validation import slice_execution_ledger
+from src.domain.futures.data_lake.contracts import SyncMode
 
 
 def _make_ledger() -> object:
@@ -51,10 +52,10 @@ class TestBuildCompoundRunConfig:
         assert config.max_rss_mb == 12_000
 
     def test_with_date_and_skip_sync(self) -> None:
-        args = argparse.Namespace(date="2026-07-08", sync="skip", refresh_universe=True, seed=99, max_rss_mb=6000)
+        args = argparse.Namespace(date="2026-07-08", sync=SyncMode.LOCAL, refresh_universe=True, seed=99, max_rss_mb=6000)
         config = build_compound_run_config(args)
         assert config.reference_date == "2026-07-08"
-        assert config.sync == "skip"
+        assert config.sync == SyncMode.LOCAL
         assert config.refresh_universe is True
         assert config.seed == 99
         assert config.max_rss_mb == 6000
@@ -70,7 +71,7 @@ class TestBuildCompoundRunConfig:
             build_compound_run_config(args)
 
     def test_missing_date_is_optional(self) -> None:
-        args = argparse.Namespace(date=None, sync="skip", refresh_universe=False, seed=42, max_rss_mb=12_000)
+        args = argparse.Namespace(date=None, sync=SyncMode.LOCAL, refresh_universe=False, seed=42, max_rss_mb=12_000)
         config = build_compound_run_config(args)
         assert config.reference_date is None
 
@@ -81,13 +82,13 @@ class TestBuildCompoundRunConfig:
 class TestCliCompoundOnly:
     def test_build_arg_parser_accepts_only_allowed_flags(self) -> None:
         parser = build_arg_parser()
-        args = parser.parse_args(["--date", "2026-07-08", "--sync", "skip", "--seed", "42"])
+        args = parser.parse_args(["--date", "2026-07-08", "--sync", "local", "--seed", "42"])
         assert args.date == "2026-07-08"
-        assert args.sync == "skip"
+        assert args.sync == "local"
         assert args.seed == 42
 
     def test_check_removed_flags_does_not_raise_for_allowed(self) -> None:
-        args = argparse.Namespace(date="2026-07-08", sync="skip", phase=None, trials=None, timeframe=None)
+        args = argparse.Namespace(date="2026-07-08", sync=SyncMode.LOCAL, phase=None, trials=None, timeframe=None)
         check_removed_flags(args)
 
     def test_check_removed_flags_raises_for_trials(self) -> None:

@@ -13,6 +13,7 @@ from src.domain.futures.compound.config import DataPlaneConfig
 from src.domain.futures.compound.contracts import ExecutionLedger, MarketFeatureCube
 from src.domain.futures.compound.data_plane import build_compound_market_feature_cube
 from src.domain.futures.compound.validation import slice_execution_ledger
+from src.domain.futures.compound.engine import resolve_engine_holdout_id, resolve_quarterly_indices
 
 
 def _cube(n: int = 8) -> MarketFeatureCube:
@@ -29,6 +30,20 @@ def _cube(n: int = 8) -> MarketFeatureCube:
     )
 
 
+def test_resolve_engine_holdout_id_prefers_explicit_and_quarterly() -> None:
+    assert resolve_engine_holdout_id("explicit", None) == "explicit"
+    window = type("Window", (), {"cutoff_date": "2026-06-30"})()
+    assert resolve_engine_holdout_id(None, window) == "quarterly-2026-06-30"
+    with pytest.raises(ValueError, match="holdout_id required"):
+        resolve_engine_holdout_id(None, None)
+
+
+def test_resolve_quarterly_indices_is_causal() -> None:
+    window = type("Window", (), {"l2_start_ns": 3, "l3_start_ns": 5})()
+    l2, l3 = resolve_quarterly_indices(np.arange(8, dtype=np.int64), window)
+    assert (l2, l3) == (3, 5)
+
+
 def _ledger() -> ExecutionLedger:
     n = 8
     returns = np.zeros(n, dtype=np.float64)
@@ -42,7 +57,7 @@ def _ledger() -> ExecutionLedger:
 
 
 def test_compound_cli_config_accepts_single_run_arguments() -> None:
-    args = build_arg_parser().parse_args(["--date", "2026-07-08", "--sync", "skip"])
+    args = build_arg_parser().parse_args(["--date", "2026-07-08", "--sync", "local"])
     config = build_compound_run_config(args)
     assert config.base_timeframe == "1h" and config.reference_date == "2026-07-08"
 

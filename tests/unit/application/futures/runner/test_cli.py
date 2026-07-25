@@ -11,7 +11,7 @@ class TestRunFromCli:
     def test_run_from_cli_accepts_only_allowed_flags(self, mocker: MockerFixture) -> None:
         mocker.patch("src.application.futures.runner.compound_main.run_multiscale_compound_main",
                       return_value=RunnerResult(0, "ok"))
-        result = run_from_cli(["--date", "2026-07-08", "--sync", "skip", "--seed", "42"])
+        result = run_from_cli(["--date", "2026-07-08", "--sync", "local", "--seed", "42"])
         assert result == 0
 
     def test_run_from_cli_without_any_args_returns_ok(self, mocker: MockerFixture) -> None:
@@ -50,10 +50,10 @@ class TestRunFromCli:
     def test_seed_flag_preserved(self, mocker: MockerFixture) -> None:
         mock_main = mocker.patch("src.application.futures.runner.compound_main.run_multiscale_compound_main",
                                   return_value=RunnerResult(0, "ok"))
-        run_from_cli(["--seed", "99", "--sync", "skip"])
+        run_from_cli(["--seed", "99", "--sync", "local"])
         config = mock_main.call_args[0][0]
         assert config.seed == 99
-        assert config.sync == "skip"
+        assert config.sync.value == "local"
 
 
 def test_main_function_runs(mocker: MockerFixture) -> None:
@@ -63,6 +63,6 @@ def test_main_function_runs(mocker: MockerFixture) -> None:
 
     mocker.patch("src.application.futures.runner.compound_main.run_multiscale_compound_main",
                   return_value=RunnerResult(0, "ok"))
-    mocker.patch.object(sys, "argv", ["prog", "--sync", "skip"])
+    mocker.patch.object(sys, "argv", ["prog", "--sync", "local"])
     result = main()
     assert result == 0
