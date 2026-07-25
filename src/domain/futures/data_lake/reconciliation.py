@@ -5,6 +5,7 @@ import logging
 import os
 import time
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 
 import duckdb
@@ -89,11 +90,11 @@ def _partition_manifest_from_path(
         time_column = "timestamp" if "timestamp" in schema else "effective_time_ns"
         df = pd.read_parquet(path, columns=[time_column])
         ts = df[time_column]
-        _start_ms = int(ts.min()) if not ts.empty else 0
+        _start_ms = int(datetime(year, month, 1, tzinfo=UTC).timestamp() * 1000)
         _end_ms = int(ts.max()) if not ts.empty else 0
         _row_count = len(df)
     except Exception:
-        _start_ms = int(pd.Timestamp(year, month, 1).timestamp() * 1000)
+        _start_ms = int(datetime(year, month, 1, tzinfo=UTC).timestamp() * 1000)
         _end_ms = _start_ms
         _row_count = 0
 
