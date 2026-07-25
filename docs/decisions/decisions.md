@@ -1,5 +1,10 @@
 # Active Decisions Log (Sliding Window)
 
+## [2026-07-25] [L1_SIGNAL_PANEL_NUMBA_OPTIMIZATION] [ADR_20260725_L1_SIGNAL_PANEL_NUMBA_OPTIMIZATION]
+- **Context/Why:** 실제 120-symbol·4,380-bar 실행에서 L1 rolling MAD signal panel이 병목이었고 임시 recipe 배열의 RSS 상한이 명확하지 않았다.
+- **Resolution/What:** rolling MAD를 Numba 6-thread kernel로 전환하고 signal panel을 float32/bool로 즉시 기록·해제하도록 배선했다. 사전 RSS 추정과 recipe별 runtime hard gate(12GB)를 추가했으며 engine caller와 회귀 테스트를 갱신했다. 실측 L1은 4.7685초, peak RSS 962.6MB였다.
+- **Impact:** 기존 115.838초 직렬 기준 95.9% 단축, 기존 ThreadPool 39.1825초 대비 87.8% 단축, peak RSS는 약 977MB에서 962.6MB로 감소했다. 전체 full run은 300초 내 L2/L3 최종 지표에 도달하지 못해 후속 P2/L2 profiling이 필요하다.
+
 ## [2026-07-25] [L1_SIGNAL_PANEL_BOTTLENECK] [ADR_20260725_L1_SIGNAL_PANEL_BOTTLENECK]
 - **Context/Why:** 실제 120-symbol/4,380-bar 실행에서 L1 raw signal panel이 전체 시간의 대부분을 차지했고 rolling MAD recipe 12개가 직렬 반복되어 병목이 발생함
 - **Resolution/What:** build_raw_signal_panel에 max_workers 1..4 bounded ThreadPoolExecutor와 ordered recipe assembly, BLAS single-thread guard, PERF L1 timing log를 적용하고 engine caller를 max_workers=4로 배선함
@@ -69,8 +74,3 @@
 - **Context/Why:** L2 turnover friction caused negative net growth and high MDD
 - **Resolution/What:** Implemented Rebalancing Exponential Smoothing, Cost-Aware Hysteresis, and Quarter Kelly Risk Protection
 - **Impact:** Reduced turnover by 86%, boosted CAGR to +35.59%, constrained MDD within -12.10%
-
-## [2026-07-24] [TASK_PORTFOLIO_GROWTH_V5] [ADR_20260724_PORTFOLIO_GROWTH_V5]
-- **Context/Why:** L2 portfolio allocation turnover friction (472 turns/yr) caused negative net growth, while unconstrained leverage caused severe MDD (-60.8%).
-- **Resolution/What:** Implemented Rebalancing Exponential Smoothing (alpha=0.03), Cost-Aware Hysteresis (theta=6 bps), and Mathematical Quarter Kelly (f=0.25x) Volatility Protection.
-- **Impact:** Reduced annual capital turnover by 86% (down to 52.7 turns/yr), boosted OOS CAGR to +35.59% (Sharpe 0.81), and constrained MDD strictly within -12.10%.
