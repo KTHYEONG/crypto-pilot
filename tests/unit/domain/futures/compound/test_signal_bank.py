@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import logging
-from concurrent.futures import ThreadPoolExecutor
+from typing import TYPE_CHECKING
 
 import numpy as np
 from numpy.typing import NDArray
@@ -25,8 +25,14 @@ from src.domain.futures.compound.signal_bank import (
     _compute_xs_reversal,
     _default_catalog,
     _rolling_mad_z,
+    _rolling_mad_z_numba_kernel,
+    _rolling_mad_z_numpy,
     build_raw_signal_panel,
+    estimate_signal_panel_peak_bytes,
 )
+
+if TYPE_CHECKING:
+    pass
 
 HOUR_NS = 3_600_000_000_000
 
@@ -189,6 +195,44 @@ def test_rolling_mad_z_differs_from_global(synthetic_market: MarketFeatureCube) 
     assert non_nan_mask.any()
     diff = np.abs(rolling_z[non_nan_mask] - global_z[non_nan_mask])
     assert np.any(diff > 0.01)
+
+
+def test_rolling_mad_numba_matches_numpy_exactly() -> None:
+    rng = np.random.default_rng(42)
+    n_t, n_s = 438, 5
+    window, min_per = 120, 60
+
+    arr = rng.standard_normal((n_t, n_s)).astype(np.float64)
+    numba_z = _rolling_mad_z_numba_kernel(np.ascontiguousarray(arr), window, min_per)
+    numpy_z = _rolling_mad_z_numpy(arr, window, min_per)
+    mask = np.isfinite(numpy_z)
+    assert np.allclose(numba_z[mask], numpy_z[mask], atol=1e-12)
+    assert np.array_equal(np.isnan(numba_z), np.isnan(numpy_z))
+
+    arr_nan = arr.copy()
+    arr_nan[50:80, 2] = np.nan
+    nz = _rolling_mad_z_numba_kernel(np.ascontiguousarray(arr_nan), window, min_per)
+    npz = _rolling_mad_z_numpy(arr_nan, window, min_per)
+    m = np.isfinite(npz)
+    assert np.allclose(nz[m], npz[m], atol=1e-12)
+    assert np.array_equal(np.isnan(nz), np.isnan(npz))
+
+    const = np.full((n_t, n_s), 42.0, dtype=np.float64)
+    const_z = _rolling_mad_z_numba_kernel(np.ascontiguousarray(const), window, min_per)
+    assert np.all(np.isnan(const_z))
+
+    future = arr.copy()
+    future[400:] += 999.0
+    fz = _rolling_mad_z_numba_kernel(np.ascontiguousarray(future), window, min_per)
+    fpz = _rolling_mad_z_numpy(future, window, min_per)
+    pre = 395
+    assert np.allclose(fz[:pre], fpz[:pre], atol=1e-12, equal_nan=True)
+
+    wrapper_z = _rolling_mad_z(arr, window, min_per)
+    assert np.allclose(wrapper_z, numpy_z, atol=1e-12, equal_nan=True)
+
+    wrap_nan = _rolling_mad_z(arr_nan, window, min_per)
+    assert np.allclose(wrap_nan, npz, atol=1e-12, equal_nan=True)
 
 
 def test_non_monotonic_timestamps_raises_causality_error() -> None:
@@ -467,56 +511,40 @@ def test_p2_pipeline_handles_updated_catalog_size_without_hardcoded_25(synthetic
         assert np.all(panel.z_3d[finite_mask] <= 3.0 + 1e-6)
 
 
-def test_signal_panel_parallel_matches_serial_exactly(synthetic_market: MarketFeatureCube) -> None:
+def test_signal_panel_numba_identity_over_two_calls(synthetic_market: MarketFeatureCube) -> None:
     bars = build_multi_timeframe_bars(synthetic_market)
     T = bars.decision_timestamps_ns.size
     N = len(bars.cubes["4h"].symbols)
     eligible = np.ones((T, N), np.bool_)
 
-    serial = build_raw_signal_panel(bars, eligible_2d=eligible, max_workers=1)
-    parallel = build_raw_signal_panel(bars, eligible_2d=eligible, max_workers=4)
+    a = build_raw_signal_panel(bars, eligible_2d=eligible, numba_threads=1)
+    b = build_raw_signal_panel(bars, eligible_2d=eligible, numba_threads=1)
 
-    assert serial.descriptors == parallel.descriptors
-    finite = np.isfinite(serial.z_3d) & np.isfinite(parallel.z_3d)
+    assert a.descriptors == b.descriptors
+    finite = np.isfinite(a.z_3d) & np.isfinite(b.z_3d)
     if np.any(finite):
-        np.testing.assert_array_equal(serial.z_3d[finite], parallel.z_3d[finite])
-    np.testing.assert_array_equal(np.isnan(serial.z_3d), np.isnan(parallel.z_3d))
-    np.testing.assert_array_equal(serial.valid_3d, parallel.valid_3d)
-    np.testing.assert_array_equal(serial.sigma_2d, parallel.sigma_2d)
+        np.testing.assert_array_equal(a.z_3d[finite], b.z_3d[finite])
+    np.testing.assert_array_equal(np.isnan(a.z_3d), np.isnan(b.z_3d))
+    np.testing.assert_array_equal(a.valid_3d, b.valid_3d)
+    np.testing.assert_array_equal(a.sigma_2d, b.sigma_2d)
 
 
-def test_signal_panel_worker_bounds_and_single_recipe_path(synthetic_market: MarketFeatureCube) -> None:
+def test_signal_panel_numba_thread_bounds(synthetic_market: MarketFeatureCube) -> None:
     bars = build_multi_timeframe_bars(synthetic_market)
     T = bars.decision_timestamps_ns.size
     N = len(bars.cubes["4h"].symbols)
     eligible = np.ones((T, N), np.bool_)
 
-    with pytest.raises(ValueError, match="max_workers"):
-        build_raw_signal_panel(bars, eligible_2d=eligible, max_workers=0)
-    with pytest.raises(ValueError, match="max_workers"):
-        build_raw_signal_panel(bars, eligible_2d=eligible, max_workers=5)
+    with pytest.raises(ValueError, match="numba_threads"):
+        build_raw_signal_panel(bars, eligible_2d=eligible, numba_threads=0)
+    with pytest.raises(ValueError, match="numba_threads"):
+        build_raw_signal_panel(bars, eligible_2d=eligible, numba_threads=7)
 
-    single = build_raw_signal_panel(bars, eligible_2d=eligible, max_workers=1)
-    assert isinstance(single, RawSignalPanel)
-
-    created: list[int] = []
-    original_init = ThreadPoolExecutor.__init__
-
-    def recording_init(self, max_workers: int = 1) -> None:
-        created.append(max_workers)
-        original_init(self, max_workers=max_workers)
-
-    import src.domain.futures.compound.signal_bank as sb_mod
-    orig_executor = sb_mod.ThreadPoolExecutor
-    sb_mod.ThreadPoolExecutor = type('MockExecutor', (ThreadPoolExecutor,), {'__init__': recording_init})
-    try:
-        panel = build_raw_signal_panel(bars, eligible_2d=eligible, max_workers=1)
-        assert isinstance(panel, RawSignalPanel)
-    finally:
-        sb_mod.ThreadPoolExecutor = orig_executor
+    panel = build_raw_signal_panel(bars, eligible_2d=eligible, numba_threads=1)
+    assert isinstance(panel, RawSignalPanel)
 
 
-def test_signal_panel_parallel_recipe_failure_is_isolated(synthetic_market: MarketFeatureCube, caplog: pytest.LogCaptureFixture) -> None:
+def test_recipe_failure_is_isolated(synthetic_market: MarketFeatureCube, caplog: pytest.LogCaptureFixture) -> None:
     caplog.set_level(logging.WARNING)
 
     bars = build_multi_timeframe_bars(synthetic_market)
@@ -538,7 +566,7 @@ def test_signal_panel_parallel_recipe_failure_is_isolated(synthetic_market: Mark
     orig = sb_mod._compute_raw_signal
     sb_mod._compute_raw_signal = failing_raw_signal
     try:
-        panel = build_raw_signal_panel(bars, eligible_2d=eligible, max_workers=2)
+        panel = build_raw_signal_panel(bars, eligible_2d=eligible)
     finally:
         sb_mod._compute_raw_signal = orig
 
@@ -549,7 +577,7 @@ def test_signal_panel_parallel_recipe_failure_is_isolated(synthetic_market: Mark
     assert failing_id in caplog.text
 
 
-def test_engine_invokes_bounded_signal_panel_and_logs_timing(synthetic_market: MarketFeatureCube, caplog: pytest.LogCaptureFixture) -> None:
+def test_engine_invokes_signal_panel_and_logs(synthetic_market: MarketFeatureCube, caplog: pytest.LogCaptureFixture) -> None:
     caplog.set_level(logging.INFO)
 
     bars = build_multi_timeframe_bars(synthetic_market)
@@ -557,7 +585,118 @@ def test_engine_invokes_bounded_signal_panel_and_logs_timing(synthetic_market: M
     N = len(bars.cubes["4h"].symbols)
     eligible = np.ones((T, N), np.bool_)
 
-    panel = build_raw_signal_panel(bars, eligible_2d=eligible, max_workers=4)
+    panel = build_raw_signal_panel(bars, eligible_2d=eligible)
     assert isinstance(panel, RawSignalPanel)
     assert panel.descriptors == _default_catalog()
     assert "[PERF][L1] signal_panel elapsed_s=" in caplog.text
+    assert "numba_threads=" in caplog.text
+    assert "numba_fallbacks=" in caplog.text
+
+
+def test_signal_panel_resource_bounds_and_restoration(synthetic_market: MarketFeatureCube) -> None:
+    from numba import get_num_threads
+
+    bars = build_multi_timeframe_bars(synthetic_market)
+    T = bars.decision_timestamps_ns.size
+    N = len(bars.cubes["4h"].symbols)
+    eligible = np.ones((T, N), np.bool_)
+
+    prior = get_num_threads()
+    _ = build_raw_signal_panel(bars, eligible_2d=eligible, numba_threads=1)
+    assert get_num_threads() == prior
+
+    estimate = estimate_signal_panel_peak_bytes(
+        current_rss_bytes=500_000_000,
+        n_bars=4380,
+        n_symbols=120,
+        n_recipes=27,
+        max_native_rows=17520,
+        numba_threads=4,
+    )
+    assert estimate > 500_000_000
+
+    base = {
+        "current_rss_bytes": 500_000_000,
+        "n_bars": 4380, "n_symbols": 120, "n_recipes": 27,
+        "max_native_rows": 17520, "numba_threads": 4,
+    }
+    monotonic_keys = ("n_recipes", "n_symbols", "n_bars", "max_native_rows", "numba_threads")
+    for key in monotonic_keys:
+        overrides = base.copy()
+        overrides[key] = overrides[key] * 2
+        higher = estimate_signal_panel_peak_bytes(**overrides)
+        assert higher >= estimate, f"monotonic failed for {key}"
+
+    with pytest.raises(ValueError, match="positive"):
+        estimate_signal_panel_peak_bytes(
+            current_rss_bytes=500_000_000,
+            n_bars=4380, n_symbols=120, n_recipes=27,
+            max_native_rows=17520, numba_threads=0,
+        )
+    with pytest.raises(ValueError, match="non-negative"):
+        estimate_signal_panel_peak_bytes(
+            current_rss_bytes=-1,
+            n_bars=4380, n_symbols=120, n_recipes=27,
+            max_native_rows=17520, numba_threads=4,
+        )
+    with pytest.raises(ValueError, match="non-negative"):
+        estimate_signal_panel_peak_bytes(
+            current_rss_bytes=500_000_000,
+            n_bars=-1, n_symbols=120, n_recipes=27,
+            max_native_rows=17520, numba_threads=4,
+        )
+
+
+def test_signal_panel_fallback_and_memory_guards_fail_closed(
+    synthetic_market: MarketFeatureCube, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import src.domain.futures.compound.signal_bank as sb_mod
+
+    def fail_kernel(*_args: object) -> NDArray[np.float64]:
+        raise RuntimeError("injected numba failure")
+
+    monkeypatch.setattr(sb_mod, "_rolling_mad_z_numba_kernel", fail_kernel)
+    bars = build_multi_timeframe_bars(synthetic_market)
+    T = bars.decision_timestamps_ns.size
+    N = len(bars.cubes["4h"].symbols)
+    eligible = np.ones((T, N), np.bool_)
+
+    panel = build_raw_signal_panel(bars, eligible_2d=eligible)
+    assert isinstance(panel, RawSignalPanel)
+
+    with pytest.raises(MemoryError, match="preflight"):
+        build_raw_signal_panel(bars, eligible_2d=eligible, max_rss_mb=1)
+
+    call_count: list[int] = [0]
+
+    class MockProcess:
+        @staticmethod
+        def memory_info() -> object:
+            call_count[0] += 1
+            if call_count[0] == 1:
+                return type("MI", (), {"rss": 500_000_000})()
+            return type("MI", (), {"rss": 100 * 1024 * 1024 * 1024})()
+
+    monkeypatch.setattr(sb_mod.psutil, "Process", lambda: MockProcess())
+    with pytest.raises(MemoryError, match="runtime RSS"):
+        build_raw_signal_panel(bars, eligible_2d=eligible, max_rss_mb=12_000)
+
+
+def test_engine_wires_guarded_six_thread_l1_panel(synthetic_market: MarketFeatureCube) -> None:
+
+    bars = build_multi_timeframe_bars(synthetic_market)
+    T = bars.decision_timestamps_ns.size
+    N = len(bars.cubes["4h"].symbols)
+    eligible = np.ones((T, N), np.bool_)
+
+    panel = build_raw_signal_panel(bars, eligible_2d=eligible, numba_threads=6, max_rss_mb=12_000)
+    assert isinstance(panel, RawSignalPanel)
+    assert panel.z_3d.shape[0] == T
+    assert panel.z_3d.shape[1] == N
+    assert panel.z_3d.shape[2] == 27
+    assert panel.valid_3d.shape == (T, N, 27)
+    assert panel.sigma_2d.shape == (T, N)
+    finite_sigma = np.isfinite(panel.sigma_2d)
+    assert np.all(finite_sigma)
+    assert np.all(panel.sigma_2d > 0)
+    assert panel.sigma_2d.dtype == np.float32

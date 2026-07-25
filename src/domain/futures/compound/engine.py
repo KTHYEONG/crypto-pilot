@@ -116,7 +116,7 @@ def run_multiscale_compound_engine(
         usable_funding_bars = min(expected_funding_bars, raw_funding.shape[0])
         funding_1h[:usable_funding_bars] = raw_funding[:usable_funding_bars].astype(np.float32)
     eligible_4h = _subsample_to_4h(market.eligible_2d)
-    panel = build_raw_signal_panel(bars, eligible_4h, max_workers=4)
+    panel = build_raw_signal_panel(bars, eligible_4h, numba_threads=6, max_rss_mb=12_000)
 
     handoff_result: HandoffResult | None = None
     try:
