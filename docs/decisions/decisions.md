@@ -1,5 +1,10 @@
 # Active Decisions Log (Sliding Window)
 
+## [2026-07-25] [L1_SIGNAL_PANEL_BOTTLENECK] [ADR_20260725_L1_SIGNAL_PANEL_BOTTLENECK]
+- **Context/Why:** 실제 120-symbol/4,380-bar 실행에서 L1 raw signal panel이 전체 시간의 대부분을 차지했고 rolling MAD recipe 12개가 직렬 반복되어 병목이 발생함
+- **Resolution/What:** build_raw_signal_panel에 max_workers 1..4 bounded ThreadPoolExecutor와 ordered recipe assembly, BLAS single-thread guard, PERF L1 timing log를 적용하고 engine caller를 max_workers=4로 배선함
+- **Impact:** L1 panel 시간이 115.838초에서 39.1825초로 66.2% 감소했으나 실제 full run은 P2 exit-policy calibration에서 16분 이상 정체되어 L2/L3 metrics는 미산출; 후속 P2 profiling 필요
+
 ## [2026-07-25] [quarterly-data-runtime-check] [ADR_20260725_quarterly-data-runtime-check]
 - **Context/Why:** 2026-07-25 실행에서 cost_calibration coverage 부족과 parquet schema 인식 오류를 확인
 - **Resolution/What:** coverage 시간축 정렬과 effective_time_ns parquet reconciliation을 보강하고 실행 결과 및 후속 검증 항목을 docs/results/result.md에 기록
@@ -69,8 +74,3 @@
 - **Context/Why:** L2 portfolio allocation turnover friction (472 turns/yr) caused negative net growth, while unconstrained leverage caused severe MDD (-60.8%).
 - **Resolution/What:** Implemented Rebalancing Exponential Smoothing (alpha=0.03), Cost-Aware Hysteresis (theta=6 bps), and Mathematical Quarter Kelly (f=0.25x) Volatility Protection.
 - **Impact:** Reduced annual capital turnover by 86% (down to 52.7 turns/yr), boosted OOS CAGR to +35.59% (Sharpe 0.81), and constrained MDD strictly within -12.10%.
-
-## [2026-07-24] [TASK_SIGNAL_BANK_V4] [ADR_20260724_SIGNAL_BANK_V4]
-- **Context/Why:** L1-3 ladder backtest zero-admissible alpha failure due to 4h target horizon mismatch and single-element BH-FDR bug
-- **Resolution/What:** Matched target_horizon_hours to lookback periods (24h-432h), fixed BH-FDR array scope in admission.py, added sqrt(H/4) scale-normalized forecast combining
-- **Impact:** L1-3 stage successfully admitted 4 signals across 3 families (trend_ema, xs_reversal, xs_momentum) with sign consistency up to 1.00 and positive LCB90

@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import logging
+import time
+from concurrent.futures import ThreadPoolExecutor
 
 import numpy as np
 from numpy.typing import NDArray
+from threadpoolctl import threadpool_limits
 
 from src.domain.futures.compound.contracts import (
     InsufficientCoverageError,
@@ -299,13 +302,121 @@ def _normalize_mad_z(raw: NDArray[np.float64]) -> NDArray[np.float64]:
     return _rolling_mad_z(raw, window=540, min_periods=180)
 
 
+def _compute_raw_signal(
+    desc: SignalDescriptor,
+    bars: MultiTimeframeBars,
+    eligible_2d: NDArray[np.bool_],
+) -> NDArray[np.float64] | None:
+    family = desc.family
+    cube_4h = bars.cubes["4h"]
+    close_4h = cube_4h.close_2d
+    high_4h = cube_4h.high_2d
+    low_4h = cube_4h.low_2d
+
+    try:
+        if family == "trend_ema":
+            if desc.native_timeframe != "4h":
+                return None
+            lb_bars_4h = desc.lookback_hours // 4
+            raw = _compute_trend_ema(close_4h, high_4h, low_4h, lb_bars_4h)
+            return _normalize_return_type(raw, lb_bars_4h)
+
+        if family == "momentum_ts":
+            if desc.native_timeframe != "4h":
+                return None
+            lb_bars_4h = desc.lookback_hours // 4
+            return _compute_momentum_ts(close_4h, lb_bars_4h)
+
+        if family == "breakout_donchian":
+            if desc.native_timeframe != "4h":
+                return None
+            lb_bars_4h = desc.lookback_hours // 4
+            raw = _compute_breakout_donchian(high_4h, low_4h, close_4h, lb_bars_4h)
+            return _normalize_mad_z(raw)
+
+        if family == "reversal_st":
+            if desc.native_timeframe != "4h":
+                return None
+            lb_bars_4h = desc.lookback_hours // 4
+            return _compute_reversal_st(close_4h, lb_bars_4h)
+
+        if family == "carry_funding":
+            funding = bars.aux_1h_fields.get("funding")
+            premium = bars.aux_1h_fields.get("premium")
+            if funding is None or premium is None:
+                _logger.warning("[DATA] carry_funding: missing funding/premium in aux_1h_fields")
+                return None
+            raw_1h = _compute_carry_funding(funding, premium, desc.lookback_hours)
+            n_t = bars.decision_timestamps_ns.size
+            raw = _subsample_to_4h(raw_1h, n_t)
+            return _normalize_mad_z(raw)
+
+        if family == "basis_gap":
+            mark = bars.aux_1h_fields.get("mark")
+            index_arr = bars.aux_1h_fields.get("index")
+            if mark is None or index_arr is None:
+                _logger.warning("[DATA] basis_gap: missing mark/index in aux_1h_fields")
+                return None
+            raw_1h = _compute_basis_gap(mark, index_arr, desc.lookback_hours)
+            n_t = bars.decision_timestamps_ns.size
+            raw = _subsample_to_4h(raw_1h, n_t)
+            return _normalize_mad_z(raw)
+
+        if family == "flow_taker":
+            taker_buy = bars.aux_1h_fields.get("taker_buy_quote")
+            volume = bars.aux_1h_fields.get("quote_volume")
+            if taker_buy is None or volume is None:
+                _logger.warning("[DATA] flow_taker: missing taker_buy_quote/quote_volume in aux_1h_fields")
+                return None
+            raw_1h = _compute_flow_taker(taker_buy, volume, desc.lookback_hours)
+            n_t = bars.decision_timestamps_ns.size
+            raw = _subsample_to_4h(raw_1h, n_t)
+            return _normalize_mad_z(raw)
+
+        if family == "xs_reversal":
+            if desc.native_timeframe != "4h":
+                return None
+            lb_bars_xs = desc.lookback_hours // 4
+            return _compute_xs_reversal(close_4h, lb_bars_xs, eligible_2d)
+
+        if family == "xs_momentum_slow":
+            if desc.native_timeframe != "4h":
+                return None
+            lb_bars_xs = desc.lookback_hours // 4
+            return _compute_xs_rank_signal(close_4h, lb_bars_xs, eligible_2d, sign=+1.0)
+
+        if family == "smart_money_divergence":
+            top_trader = bars.aux_1h_fields.get("top_trader_long_short_ratio")
+            retail = bars.aux_1h_fields.get("long_short_ratio")
+            if top_trader is None or retail is None:
+                _logger.warning(
+                    "[DATA] smart_money_divergence: missing top_trader_long_short_ratio"
+                    "/long_short_ratio in aux_1h_fields",
+                )
+                return None
+            raw_1h = _compute_smart_money_divergence(top_trader, retail, desc.lookback_hours)
+            n_t = bars.decision_timestamps_ns.size
+            raw = _subsample_to_4h(raw_1h, n_t)
+            return _normalize_mad_z(raw)
+    except Exception:
+        _logger.exception("[DATA] failed computing family=%s signal_id=%s", family, desc.signal_id)
+        return None
+
+    return None
+
+
 def build_raw_signal_panel(
     bars: MultiTimeframeBars,
     eligible_2d: NDArray[np.bool_],
     catalog: tuple[SignalDescriptor, ...] | None = None,
+    *,
+    max_workers: int = 4,
 ) -> RawSignalPanel:
     if catalog is None:
         catalog = _default_catalog()
+
+    if max_workers < 1 or max_workers > 4:
+        raise ValueError(f"max_workers must be 1..4, got {max_workers}")
 
     n_cat = len(catalog)
     n_t = bars.decision_timestamps_ns.size
@@ -316,121 +427,40 @@ def build_raw_signal_panel(
         raise ValueError(f"eligible_2d shape {eligible_2d.shape} != ({n_t}, {n_syms})")
 
     cube_4h = bars.cubes["4h"]
-    close_4h = cube_4h.close_2d
-    high_4h = cube_4h.high_2d
-    low_4h = cube_4h.low_2d
     complete_4h = cube_4h.complete_2d
 
-    log_ret_4h = _log_return(close_4h, 1)
+    log_ret_4h = _log_return(cube_4h.close_2d, 1)
     sigma_2d = _ewm_vol(log_ret_4h, span=42)
     sigma_2d = np.where(sigma_2d < 1e-6, 1e-6, sigma_2d).astype(np.float32)
 
     z_3d = np.full((n_t, n_syms, n_cat), np.nan, dtype=np.float32)
     valid_3d = np.zeros((n_t, n_syms, n_cat), dtype=np.bool_)
 
-    for k, desc in enumerate(catalog):
-        recipe_ok = True
-        family = desc.family
-        lb_bars_4h = desc.lookback_hours // 4 if desc.native_timeframe == "4h" else 0
+    started = time.perf_counter()
 
-        try:
-            if family == "trend_ema":
-                if desc.native_timeframe != "4h":
-                    recipe_ok = False
-                else:
-                    raw = _compute_trend_ema(close_4h, high_4h, low_4h, lb_bars_4h)
-                    raw = _normalize_return_type(raw, lb_bars_4h)
-            elif family == "momentum_ts":
-                if desc.native_timeframe != "4h":
-                    recipe_ok = False
-                else:
-                    raw = _compute_momentum_ts(close_4h, lb_bars_4h)
-            elif family == "breakout_donchian":
-                if desc.native_timeframe != "4h":
-                    recipe_ok = False
-                else:
-                    raw = _compute_breakout_donchian(high_4h, low_4h, close_4h, lb_bars_4h)
-                    raw = _normalize_mad_z(raw)
-            elif family == "reversal_st":
-                if desc.native_timeframe != "4h":
-                    recipe_ok = False
-                else:
-                    raw = _compute_reversal_st(close_4h, lb_bars_4h)
-            elif family == "carry_funding":
-                funding = bars.aux_1h_fields.get("funding")
-                premium = bars.aux_1h_fields.get("premium")
-                if funding is None or premium is None:
-                    _logger.warning("[DATA] carry_funding: missing funding/premium in aux_1h_fields")
-                    recipe_ok = False
-                else:
-                    raw_1h = _compute_carry_funding(funding, premium, desc.lookback_hours)
-                    raw = _subsample_to_4h(raw_1h, n_t)
-                    raw = _normalize_mad_z(raw)
-            elif family == "basis_gap":
-                mark = bars.aux_1h_fields.get("mark")
-                index_arr = bars.aux_1h_fields.get("index")
-                if mark is None or index_arr is None:
-                    _logger.warning("[DATA] basis_gap: missing mark/index in aux_1h_fields")
-                    recipe_ok = False
-                else:
-                    raw_1h = _compute_basis_gap(mark, index_arr, desc.lookback_hours)
-                    raw = _subsample_to_4h(raw_1h, n_t)
-                    raw = _normalize_mad_z(raw)
-            elif family == "flow_taker":
-                taker_buy = bars.aux_1h_fields.get("taker_buy_quote")
-                volume = bars.aux_1h_fields.get("quote_volume")
-                if taker_buy is None or volume is None:
-                    _logger.warning("[DATA] flow_taker: missing taker_buy_quote/quote_volume in aux_1h_fields")
-                    recipe_ok = False
-                else:
-                    raw_1h = _compute_flow_taker(taker_buy, volume, desc.lookback_hours)
-                    raw = _subsample_to_4h(raw_1h, n_t)
-                    raw = _normalize_mad_z(raw)
-            elif family == "xs_reversal":
-                if desc.native_timeframe != "4h":
-                    recipe_ok = False
-                else:
-                    lb_bars_xs = desc.lookback_hours // 4
-                    raw = _compute_xs_reversal(close_4h, lb_bars_xs, eligible_2d)
-            elif family == "xs_momentum_slow":
-                if desc.native_timeframe != "4h":
-                    recipe_ok = False
-                else:
-                    lb_bars_xs = desc.lookback_hours // 4
-                    raw = _compute_xs_rank_signal(close_4h, lb_bars_xs, eligible_2d, sign=+1.0)
-            elif family == "smart_money_divergence":
-                top_trader = bars.aux_1h_fields.get("top_trader_long_short_ratio")
-                retail = bars.aux_1h_fields.get("long_short_ratio")
-                if top_trader is None or retail is None:
-                    _logger.warning(
-                        "[DATA] smart_money_divergence: missing top_trader_long_short_ratio"
-                        "/long_short_ratio in aux_1h_fields",
-                    )
-                    recipe_ok = False
-                else:
-                    raw_1h = _compute_smart_money_divergence(top_trader, retail, desc.lookback_hours)
-                    raw = _subsample_to_4h(raw_1h, n_t)
-                    raw = _normalize_mad_z(raw)
-            else:
-                recipe_ok = False
-        except Exception:
-            _logger.exception("[DATA] failed computing family=%s signal_id=%s", family, desc.signal_id)
-            recipe_ok = False
+    effective_workers = min(max_workers, n_cat)
 
-        if not recipe_ok:
-            valid_3d[:, :, k] = False
-            z_3d[:, :, k] = np.nan
-            continue
+    if effective_workers <= 1:
+        for k, desc in enumerate(catalog):
+            raw = _compute_raw_signal(desc, bars, eligible_2d)
+            _write_recipe_result(z_3d, valid_3d, k, raw, eligible_2d, complete_4h)
+    else:
+        with threadpool_limits(limits=1), ThreadPoolExecutor(max_workers=effective_workers) as pool:
+            futures = [pool.submit(_compute_raw_signal, desc, bars, eligible_2d) for desc in catalog]
+            for k, future in enumerate(futures):
+                raw = future.result()
+                _write_recipe_result(z_3d, valid_3d, k, raw, eligible_2d, complete_4h)
 
-        z_slice = np.clip(raw, -3.0, 3.0)
-        valid = eligible_2d & complete_4h & np.isfinite(z_slice)
-
-        z_3d[:, :, k] = z_slice.astype(np.float32)
-        valid_3d[:, :, k] = valid
-
-    total_valid = np.sum(valid_3d)
+    elapsed = time.perf_counter() - started
+    total_valid = int(np.sum(valid_3d))
     total_cells = valid_3d.size
     valid_ratio = total_valid / max(total_cells, 1)
+    mad_recipes = sum(1 for d in catalog if d.family in ("breakout_donchian", "basis_gap", "smart_money_divergence", "carry_funding", "flow_taker"))
+    _logger.info(
+        "[PERF][L1] signal_panel elapsed_s=%.4f recipes=%d mad_recipes=%d max_workers=%d valid_ratio=%.4f",
+        elapsed, n_cat, mad_recipes, effective_workers, valid_ratio,
+    )
+
     if valid_ratio < 0.05:
         raise InsufficientCoverageError(
             f"valid ratio {valid_ratio:.4f} < 0.05",
@@ -444,3 +474,21 @@ def build_raw_signal_panel(
         valid_3d=valid_3d,
         sigma_2d=sigma_2d.astype(np.float32),
     )
+
+
+def _write_recipe_result(
+    z_3d: NDArray[np.float32],
+    valid_3d: NDArray[np.bool_],
+    k: int,
+    raw: NDArray[np.float64] | None,
+    eligible_2d: NDArray[np.bool_],
+    complete_4h: NDArray[np.bool_],
+) -> None:
+    if raw is None:
+        valid_3d[:, :, k] = False
+        z_3d[:, :, k] = np.nan
+        return
+    z_slice = np.clip(raw, -3.0, 3.0)
+    valid = eligible_2d & complete_4h & np.isfinite(z_slice)
+    z_3d[:, :, k] = z_slice.astype(np.float32)
+    valid_3d[:, :, k] = valid
