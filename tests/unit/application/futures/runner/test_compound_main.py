@@ -118,6 +118,43 @@ class TestRunMultiscaleCompoundMain:
         result = run_multiscale_compound_main(config)
         assert result.exit_code == 0
 
+    def test_main_builds_universe_on_market_history_calendar(self, mocker) -> None:
+        _setup_mocks(mocker)
+        lake_universe = self._lake_universe_mock(mocker)
+        captured: dict[str, object] = {}
+
+        def _build_universe(**kwargs):
+            captured.update(kwargs)
+            return lake_universe
+
+        mocker.patch(
+            "src.application.futures.runner.compound_main.build_daily_pit_universe",
+            side_effect=_build_universe,
+        )
+        mock_cube = mocker.Mock(spec=MarketFeatureCube)
+        mock_cube.timestamps_ns = np.array([0, 1, 2], dtype=np.int64)
+        mock_cube.data_manifest_hash = "h1"
+        mock_cube.symbols = ("BTCUSDT", "ETHUSDT")
+        mocker.patch(
+            "src.application.futures.runner.compound_main.build_multiscale_market_cube",
+            return_value=mock_cube,
+        )
+        mocker.patch(
+            "src.application.futures.runner.compound_main.run_multiscale_compound_engine",
+            return_value=_make_mock_engine_result(mocker),
+        )
+
+        config = CompoundRunConfig(
+            reference_date="2026-07-08", sync=SyncMode.LOCAL, refresh_universe=False,
+            history_days=2,
+        )
+        result = run_multiscale_compound_main(config)
+
+        calendar = captured["execution_calendar"]
+        assert result.exit_code == 0
+        assert len(calendar) == 48
+        assert calendar[0].isoformat() == "2026-07-06T00:00:00+00:00"
+
     def test_integrity_failure_returns_one(self, mocker) -> None:
         _setup_mocks(mocker)
         mocker.patch(
@@ -192,6 +229,10 @@ def _setup_mocks(mocker) -> None:
     mocker.patch(
         "src.application.futures.runner.compound_main.finalize_quarterly_signal_data",
         return_value=mocker.Mock(field_plan=("open",), recipe_plan=()),
+    )
+    mocker.patch(
+        "src.application.futures.runner.compound_main.exclude_symbols_with_funding_gaps",
+        side_effect=lambda *, universe, **_: (universe, ()),
     )
 
 
