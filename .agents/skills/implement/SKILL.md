@@ -27,37 +27,25 @@ Optimize for **low-cost models (Doer)** by enforcing strict mechanical execution
   - Write both the source logic (`src/...`) and the corresponding unit/scenario tests (`tests/...`) simultaneously, adhering strictly to the contract.json spec.
   - **Do NOT copy-paste dummy mock templates or return static dummy values (e.g. `return {}`, `return True`, or logger-only calls). Full concrete business logic must be implemented.**
   - **Strict Value Assertions**: Write test cases targeting the exact `assertions` defined in `contract.json`. Loose assertions like `assert result is not None` are strictly prohibited.
-  - Wire the new logic into the parent calling module as defined in the `wiring` section of `contract.json`, ensuring both `import_symbol` and `invocation_symbol` (actual call/instantiation) are implemented in the caller module context.
+  - Wire the new logic into the caller module as defined in the `wiring` section of `contract.json`. The caller module specified in `wiring.target_file` MUST be included in the modified files list, ensuring both `import_symbol` and `invocation_symbol` (actual call/instantiation) are implemented in the caller module context.
   - Limit high-level scenario tests strictly to the 3-4 scenarios defined in the spec.
 - **Step 3: Local Verification & Green Enforcement**
   - Run pytest locally (`uv run pytest -k [target_name]`) to verify that the synthesized code is functional.
   - Ensure that unit tests include strict assertions (verifying exact values, mathematical outputs, and exception types, not just `is not None`) to guarantee semantic correctness.
   - **Do NOT perform design refactoring.** Keep code changes minimal. Refactoring is restricted to basic syntax cleanups and lint compliance.
-- **Step 4: L1.5 Gate & Auto-Chain to L2 Check**
-  - Once local tests pass, perform local mechanical checks:
-    - Run `uv run ruff check --fix [modified_files]` to ensure format/style compliance.
-    - Check for and remove any temporary `print()` debugging statements.
-  - **[Auto-Chain Execution]**: Immediately trigger the **Check** (L2) gate. Do NOT stop or ask for user permission.
-    `uv run python scripts/lean_check.py --files [modified_files] --spec docs/specs/[feature]_contract.json --skip-lint`
-  - **Note: Do NOT pass `--skip-mypy` during auto-chaining. Let the Check gate perform strict Mypy and Spec integrity checks.** 
+- **Step 4: L1.5 Local Verification & Clean Handshake**
+  - Run pytest locally (`uv run pytest -k [target_name] --cov`) to ensure tests pass and coverage targets (Core >=85%, Adapter >=65%) are met.
+  - Run `uv run ruff check --fix [modified_files]` to ensure format/style compliance.
+  - Remove any temporary `print()` debugging statements.
+  - **STOP execution and output the concise Implementation summary.** Do NOT auto-trigger check skill.
 
 ### 3. Self-Healing Budget (Max 3 Loops)
-- If the integration check (`lean_check.py`) fails, the low-cost model is allowed a maximum of **3 consecutive auto-correction attempts** to fix the errors.
-- If it still fails after the 3rd attempt, **STOP execution immediately** and report the error logs to the user for human triage or escalation to the high-reasoning model.
+- If local tests or linting fail, the low-cost model is allowed a maximum of **3 consecutive auto-correction attempts** to fix the errors.
+- If it still fails after the 3rd attempt, **STOP execution immediately** and report the error logs to the user for human triage.
 
-## Output Format (Only output when the entire Pipeline is Green)
+## Output Format
 ```md
-### 🏗️ TDD Implementation Pipeline: [Blueprint Name]
-
-#### [IMPLEMENT PHASE]
-- **Target Files:** `[src/...]`, `[tests/...]`
-- **TDD Cycle (Red-Green-Refactor):**
-  - [x] Stub Registration & Verification (ruff/mypy)
-  - [x] TDD Test Implementation (Skeleton Mock)
-  - [x] Local Tests Passing (Green)
-
-#### [CHECK PHASE]
-- **Gatekeeper Validation (lean_check.py):**
-  - [x] Passed Auto-Chained L2 Gate (🟢 PASS)
-  - [x] Coverage Metric: Cov [value]%
+🛠️ **[IMPLEMENT COMPLETE]** `[Blueprint Name]`
+- **Modified**: `[src/...]`, `[tests/...]`
+- **Status**: Pytest Green ✅ | Cov [value]% | Ruff Fixed ✅
 ```
