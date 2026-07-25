@@ -80,8 +80,8 @@ Generate a semantic JSON contract alongside the spec markdown to provide strict,
   ],
   "wiring": [
     {
-      "file": "src/application/parent.py",
-      "anchor": "ExactAnchorSymbol",
+      "target_file": "src/path/to/caller_module.py",
+      "anchor_symbol": "ExactAnchorSymbol",
       "import_symbol": "ExactName",
       "invocation_symbol": "self.x = ExactName(); self.x.run()",
       "invocation_regex": "self\\.[a_z0-9_]+\\s*=\\s*ExactName\\(.*\\)"
