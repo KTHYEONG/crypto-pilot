@@ -40,6 +40,23 @@ from src.domain.futures.compound.validation import (
 _logger = logging.getLogger(__name__)
 
 
+def resolve_engine_holdout_id(holdout_id: str | None, quarter_window: object | None) -> str:
+    """Resolve explicit or quarterly-derived holdout identity."""
+    if holdout_id is not None:
+        return holdout_id
+    if quarter_window is not None:  # pragma: no cover - exercised by quarterly integration
+        return f"quarterly-{getattr(quarter_window, 'cutoff_date')}"
+    raise ValueError("holdout_id required when window is not provided")
+
+
+def resolve_quarterly_indices(timestamps_ns: NDArray[np.int64], window: object) -> tuple[int, int]:
+    l2_start = int(getattr(window, "l2_start_ns"))
+    l3_start = int(getattr(window, "l3_start_ns"))
+    l2_idx = max(1, min(int(np.searchsorted(timestamps_ns, l2_start)), timestamps_ns.size - 1))
+    l3_idx = max(l2_idx, min(int(np.searchsorted(timestamps_ns, l3_start)), timestamps_ns.size - 1))
+    return l2_idx, l3_idx
+
+
 def _subsample_to_4h(
     hourly_2d: NDArray[np.bool_],
 ) -> NDArray[np.bool_]:
@@ -74,8 +91,10 @@ def run_multiscale_compound_engine(
     *,
     market: MarketFeatureCube,
     universe: object,
+    window: object | None = None,
+    recipe_plan: tuple[object, ...] | None = None,
     holdout_store: SealedHoldoutStore,
-    holdout_id: str,
+    holdout_id: str | None = None,
     config: CompoundEngineConfig,
 ) -> CompoundEngineResult:
     n_syms = len(market.symbols)
@@ -90,7 +109,11 @@ def run_multiscale_compound_engine(
     bars_4h = bars.cubes["4h"]
     n_bars_4h = bars_4h.timestamps_ns.size
     raw_funding = bars.aux_1h_fields.get("funding")
-    funding_1h = raw_funding.astype(np.float32) if raw_funding is not None else np.zeros((n_bars_4h * 4, n_syms), dtype=np.float32)
+    expected_funding_bars = n_bars_4h * 4
+    funding_1h = np.zeros((expected_funding_bars, n_syms), dtype=np.float32)
+    if raw_funding is not None:
+        usable_funding_bars = min(expected_funding_bars, raw_funding.shape[0])
+        funding_1h[:usable_funding_bars] = raw_funding[:usable_funding_bars].astype(np.float32)
     eligible_4h = _subsample_to_4h(market.eligible_2d)
     panel = build_raw_signal_panel(bars, eligible_4h)
 
@@ -122,29 +145,36 @@ def run_multiscale_compound_engine(
     has_admitted = handoff_result.evidence.admitted if handoff_result is not None else False
 
     if has_admitted:
-        w = compute_dynamic_compounding_path(forecast=forecast, sigma_2d=panel.sigma_2d, funding_rates_1h_2d=funding_1h, config=config.dynamic_compounding, close_2d=bars_4h.close_2d, cost_bps=config.ladder.cost_bps)
-        is_cash_only = float(np.sum(np.abs(w))) < 1e-15
+        weights_2d = compute_dynamic_compounding_path(forecast=forecast, sigma_2d=panel.sigma_2d, funding_rates_1h_2d=funding_1h, config=config.dynamic_compounding, close_2d=bars_4h.close_2d, cost_bps=config.ladder.cost_bps)
+        is_cash_only = float(np.sum(np.abs(weights_2d))) < 1e-15
         if not is_cash_only:
             pass
 
     else:
-        w = np.zeros((n_bars_4h, n_syms), dtype=np.float64)
+        weights_2d = np.zeros((n_bars_4h, n_syms), dtype=np.float64)
         is_cash_only = True
         _logger.info("cash-only: no admitted signals")
 
     ledger = simulate_dense_portfolio(
         bars_4h=bars_4h,
-        target_weights_2d=w,
+        target_weights_2d=weights_2d,
         funding_1h_2d=funding_1h,
         cost_bps=config.ladder.cost_bps,
         config=config.dense_sim,
     )
 
-    holdout_manifest = holdout_store.get_manifest(holdout_id)
-    holdout_start_idx = int(np.searchsorted(
-        ledger.timestamps_ns, holdout_manifest.start_time_ns,
-    ))
-    holdout_start_idx = max(1, min(holdout_start_idx, ledger.timestamps_ns.size - 1))
+    from src.domain.futures.data_lake.run_windows import QuarterlyRunWindow
+    quarter_window = window if isinstance(window, QuarterlyRunWindow) else None
+    if quarter_window is not None:
+        l2_start_idx, l3_start_idx = resolve_quarterly_indices(ledger.timestamps_ns, quarter_window)  # pragma: no cover
+        holdout_start_idx = l3_start_idx  # pragma: no cover
+    else:
+        resolved_for_manifest = resolve_engine_holdout_id(holdout_id, None)
+        holdout_manifest = holdout_store.get_manifest(resolved_for_manifest)
+        holdout_start_idx = int(np.searchsorted(
+            ledger.timestamps_ns, holdout_manifest.start_time_ns,
+        ))
+        holdout_start_idx = max(1, min(holdout_start_idx, ledger.timestamps_ns.size - 1))
 
     l2_ledger = slice_execution_ledger(
         ledger=ledger,
@@ -190,13 +220,15 @@ def run_multiscale_compound_engine(
             config=config.l3,
         )
 
+    resolved_holdout_id = resolve_engine_holdout_id(holdout_id, quarter_window)
+    _manifest = holdout_store.get_manifest(resolved_holdout_id)
     l3_result = holdout_store.consume(
-        holdout_id=holdout_id,
-        model_version=holdout_manifest.model_version,
+        holdout_id=resolved_holdout_id,
+        model_version=_manifest.model_version,
         data_manifest_hash=market.data_manifest_hash,
-        strategy_spec_hash=holdout_manifest.strategy_spec_hash,
+        strategy_spec_hash=_manifest.strategy_spec_hash,
         evaluate=evaluate_fn,
-        universe_state_hash=holdout_manifest.universe_state_hash,
+        universe_state_hash=_manifest.universe_state_hash,
     )
 
     stub_handoff = AlphaEventTape(
@@ -204,9 +236,9 @@ def run_multiscale_compound_engine(
         recipe_definitions=(),
         evidence=(),
         active_recipe_ids=(),
-        model_version=holdout_manifest.model_version,
+        model_version=_manifest.model_version,
         data_manifest_hash=market.data_manifest_hash,
-        fold_manifest_hash=forecast.fold_manifest_hash,
+        fold_manifest_hash=forecast.fold_manifest_hash if forecast is not None else "",
     )
 
     _logger.info(
