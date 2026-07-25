@@ -6,7 +6,8 @@ from pathlib import Path
 from typing import Any, Literal
 
 from src.application.futures.runner.models import RunnerResult
-from src.domain.futures.data_lake.contracts import DataLakeConfig
+from src.domain.futures.data_lake.contracts import DataLakeConfig, SyncMode
+from src.domain.futures.data_lake.run_windows import QuarterlyWindowConfig
 from src.domain.futures.universe.config import PITUniverseConfig
 
 
@@ -20,7 +21,7 @@ class UniverseConfig:
 @dataclass(slots=True, frozen=True)
 class CompoundRunConfig:
     reference_date: str | None
-    sync: Literal["auto", "skip"]
+    sync: SyncMode
     refresh_universe: bool
     seed: int = 42
     base_timeframe: Literal["1h"] = "1h"
@@ -31,7 +32,7 @@ class CompoundRunConfig:
     max_axis_symbols: int = 240
     data_lake: DataLakeConfig = field(default_factory=lambda: DataLakeConfig(root=Path("data/futures/lake")))
     universe: PITUniverseConfig = field(default_factory=PITUniverseConfig)
-    allow_network_sync: bool = False
+    window: QuarterlyWindowConfig = field(default_factory=QuarterlyWindowConfig)
 
 
 @dataclass(slots=True, frozen=True)
@@ -53,13 +54,15 @@ def build_compound_run_config(args: object) -> CompoundRunConfig:
     args_dict = _to_mapping(args)
     reference_date: str | None = args_dict.get("date")
     sync_raw = args_dict.get("sync", "auto")
-    sync: Literal["auto", "skip"]
     if sync_raw == "auto":
-        sync = "auto"
+        sync = SyncMode.AUTO
+    elif sync_raw == "local":
+        sync = SyncMode.LOCAL
     elif sync_raw == "skip":
-        sync = "skip"
+        msg = "use --sync local (--sync skip removed)"
+        raise SystemExit(msg)
     else:
-        raise ValueError(f"invalid sync mode: {sync_raw!r}, expected 'auto' or 'skip'")
+        raise ValueError(f"invalid sync mode: {sync_raw!r}, expected 'auto' or 'local'")
     refresh_universe = bool(args_dict.get("refresh_universe", False))
     seed = int(args_dict.get("seed", 42))
     max_rss_mb = int(args_dict.get("max_rss_mb", 12_000))
@@ -67,7 +70,6 @@ def build_compound_run_config(args: object) -> CompoundRunConfig:
     portfolio_nav_usdt = float(args_dict.get("portfolio_nav_usdt", 100_000.0))
     max_daily_symbols = int(args_dict.get("max_daily_symbols", 120))
     max_axis_symbols = int(args_dict.get("max_axis_symbols", 240))
-    allow_network_sync = bool(args_dict.get("allow_network_sync", False))
     if max_rss_mb <= 0:
         raise ValueError(f"max_rss_mb must be positive, got {max_rss_mb}")
     if not (0 <= seed <= 2**31 - 1):
@@ -90,7 +92,6 @@ def build_compound_run_config(args: object) -> CompoundRunConfig:
         portfolio_nav_usdt=portfolio_nav_usdt,
         max_daily_symbols=max_daily_symbols,
         max_axis_symbols=max_axis_symbols,
-        allow_network_sync=allow_network_sync,
     )
 
 

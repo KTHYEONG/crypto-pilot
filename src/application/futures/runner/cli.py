@@ -41,10 +41,9 @@ def build_arg_parser() -> argparse.ArgumentParser:
                         choices=["full", "verify-migration", "retire-legacy", "ladder"],
                         help="Execution phase (full, verify-migration, retire-legacy, ladder)")
     parser.add_argument("--date", type=str, default=None, help="Reference date (YYYY-MM-DD)")
-    parser.add_argument("--sync", type=str, default="auto", choices=["auto", "skip"],
-                        help="Sync mode (auto, skip)")
+    parser.add_argument("--sync", type=str, default="auto", choices=["auto", "local"],
+                        help="Sync mode (auto=download, local=local-only)")
     parser.add_argument("--refresh-universe", action="store_true", help="Force universe refresh")
-    parser.add_argument("--allow-network-sync", action="store_true", help="Allow network sync if local snapshot incomplete")
     parser.add_argument("--seed", type=int, default=42, help="Random seed")
     for flag in _REMOVED_FLAGS:
         parser.add_argument(f"--{flag.replace('_', '-')}", action="store_true", default=None,
