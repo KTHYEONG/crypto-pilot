@@ -115,7 +115,6 @@ def build_ingestion_plan(
             DatasetKind.MARK_1M,
             DatasetKind.INDEX_1M,
             DatasetKind.METRICS_5M,
-            DatasetKind.COST_CALIBRATION,
             DatasetKind.UNIVERSE_STATE,
         ),
         config=config,
