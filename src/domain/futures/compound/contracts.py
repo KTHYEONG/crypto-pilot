@@ -9,6 +9,27 @@ import numpy as np
 import pyarrow as pa
 from numpy.typing import NDArray
 
+
+class ClusteringAlgorithm(StrEnum):
+    ROBUST_KMEANS = "robust_kmeans"
+    HIERARCHICAL_WARD = "hierarchical_ward"
+    DBSCAN = "dbscan"
+
+
+@dataclass(slots=True, frozen=True)
+class ClusterPanel:
+    symbols: tuple[str, ...]
+    cluster_labels: NDArray[np.int32]
+    cluster_centroids: NDArray[np.float64]
+    k_clusters: int
+
+    def __post_init__(self) -> None:
+        if self.cluster_labels.ndim != 1 or self.cluster_labels.shape[0] != len(self.symbols):
+            raise ValueError("cluster_labels must be 1-D with length equal to symbols")
+        if self.cluster_centroids.ndim != 2 or self.cluster_centroids.shape[0] != self.k_clusters:
+            raise ValueError("cluster_centroids must be 2-D with k_clusters rows")
+
+
 from src.domain.futures.universe.contracts import UniverseStateCube
 from src.domain.futures.universe.models import UniverseSnapshot
 
@@ -557,6 +578,8 @@ __all__ = [
     "CausalAlphaFold",
     "CausalFold",
     "CausalityError",
+    "ClusterPanel",
+    "ClusteringAlgorithm",
     "CombinedForecast",
     "CompoundEngineResult",
     "CompoundPipelineOutcome",

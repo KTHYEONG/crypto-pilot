@@ -253,3 +253,93 @@ def test_growth_allocator_respects_all_caps() -> None:
     assert np.sum(np.abs(decision.target_weights_1d)) <= config.gross_cap * 1.01
     assert abs(np.sum(decision.target_weights_1d)) <= config.net_cap * 1.01
     assert np.all(np.abs(decision.target_weights_1d) <= config.per_symbol_cap * 1.01)
+
+
+def test_top_n_allocation_cutoff() -> None:
+    from src.domain.futures.compound.allocator import compute_top_n_compounding_weights
+    from src.domain.futures.compound.config import DynamicCompoundingConfig
+    n_syms = 30
+    mu = np.zeros(n_syms, dtype=np.float64)
+    mu[:10] = np.linspace(0.02, 0.005, 10)
+    forecast = CombinedForecast(mu_robust_1d=mu, variance_1d=np.ones(n_syms, dtype=np.float64), support_1d=mu > 0)
+    sigma_2d = np.full((1, n_syms), 0.02, dtype=np.float32)
+    funding = np.zeros((4, n_syms), dtype=np.float32)
+    config = DynamicCompoundingConfig()
+    weights = compute_top_n_compounding_weights(forecast, sigma_2d, funding, config, top_n=5)
+    assert weights.shape == (1, n_syms)
+    assert np.sum(weights[0] != 0) <= 5
+
+
+class TestTopNCompoundingWeights:
+    def test_top_n_cutoff_zeroes_lower_ranked(self) -> None:
+        from src.domain.futures.compound.allocator import compute_top_n_compounding_weights
+        from src.domain.futures.compound.config import DynamicCompoundingConfig
+        n_syms = 50
+        mu = np.zeros(n_syms, dtype=np.float64)
+        mu[:25] = 0.01
+        mu[25:] = 0.001
+        forecast = CombinedForecast(mu_robust_1d=mu, variance_1d=np.ones(n_syms, dtype=np.float64), support_1d=mu > 0)
+        sigma_2d = np.full((10, n_syms), 0.02, dtype=np.float32)
+        funding = np.zeros((40, n_syms), dtype=np.float32)
+        config = DynamicCompoundingConfig()
+        weights = compute_top_n_compounding_weights(forecast, sigma_2d, funding, config, top_n=20)
+        assert weights.shape == (10, n_syms)
+        any_beyond_top20 = False
+        for t in range(weights.shape[0]):
+            nonzero = np.where(weights[t] != 0)[0]
+            if len(nonzero) > 0:
+                max_rank = int(np.max(nonzero))
+                if max_rank >= 20:
+                    any_beyond_top20 = True
+        assert not any_beyond_top20, "symbols beyond top-20 should have zero weight"
+
+    def test_zero_forecast_returns_all_zeros(self) -> None:
+        from src.domain.futures.compound.allocator import compute_top_n_compounding_weights
+        from src.domain.futures.compound.config import DynamicCompoundingConfig
+        n_syms = 50
+        mu = np.zeros(n_syms, dtype=np.float64)
+        forecast = CombinedForecast(mu_robust_1d=mu, variance_1d=np.ones(n_syms, dtype=np.float64), support_1d=np.zeros(n_syms, dtype=bool))
+        sigma_2d = np.full((5, n_syms), 0.02, dtype=np.float32)
+        funding = np.zeros((20, n_syms), dtype=np.float32)
+        config = DynamicCompoundingConfig()
+        weights = compute_top_n_compounding_weights(forecast, sigma_2d, funding, config, top_n=20)
+        assert np.all(weights == 0.0)
+
+    def test_only_top_n_have_nonzero_weight(self) -> None:
+        from src.domain.futures.compound.allocator import compute_top_n_compounding_weights
+        from src.domain.futures.compound.config import DynamicCompoundingConfig
+        n_syms = 30
+        mu = np.zeros(n_syms, dtype=np.float64)
+        mu[:10] = np.linspace(0.02, 0.005, 10)
+        forecast = CombinedForecast(mu_robust_1d=mu, variance_1d=np.ones(n_syms, dtype=np.float64), support_1d=mu > 0)
+        sigma_2d = np.full((1, n_syms), 0.02, dtype=np.float32)
+        funding = np.zeros((4, n_syms), dtype=np.float32)
+        config = DynamicCompoundingConfig()
+        weights = compute_top_n_compounding_weights(forecast, sigma_2d, funding, config, top_n=5)
+        row = weights[0]
+        nonzero = np.sum(row != 0)
+        assert nonzero <= 5
+
+    def test_non_1d_mu_raises_value_error(self) -> None:
+        from src.domain.futures.compound.allocator import compute_top_n_compounding_weights
+        from src.domain.futures.compound.config import DynamicCompoundingConfig
+        mu_2d = np.ones((5, 2), dtype=np.float64)
+        forecast = CombinedForecast(mu_robust_1d=mu_2d, variance_1d=np.ones(2, dtype=np.float64), support_1d=np.ones(2, dtype=bool))
+        sigma_2d = np.full((5, 2), 0.02, dtype=np.float32)
+        funding = np.zeros((4, 2), dtype=np.float32)
+        config = DynamicCompoundingConfig()
+        with pytest.raises(ValueError, match="1-D"):
+            compute_top_n_compounding_weights(forecast, sigma_2d, funding, config, top_n=5)
+
+    def test_wrong_sigma_shape_raises_value_error(self) -> None:
+        from src.domain.futures.compound.allocator import compute_top_n_compounding_weights
+        from src.domain.futures.compound.config import DynamicCompoundingConfig
+        n_syms = 30
+        mu = np.zeros(n_syms, dtype=np.float64)
+        mu[:5] = 0.01
+        forecast = CombinedForecast(mu_robust_1d=mu, variance_1d=np.ones(n_syms, dtype=np.float64), support_1d=mu > 0)
+        sigma_2d = np.full((5, n_syms + 1), 0.02, dtype=np.float32)
+        funding = np.zeros((4, n_syms), dtype=np.float32)
+        config = DynamicCompoundingConfig()
+        with pytest.raises(ValueError, match="sigma_2d"):
+            compute_top_n_compounding_weights(forecast, sigma_2d, funding, config, top_n=5)

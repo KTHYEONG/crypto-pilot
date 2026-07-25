@@ -491,3 +491,53 @@ def compute_dynamic_compounding_weights(
     w = _apply_portfolio_level_caps(w, config.max_long_leverage, config.max_short_leverage, config.max_gross_leverage)
 
     return w
+
+
+def compute_top_n_compounding_weights(
+    forecast: CombinedForecast,
+    sigma_2d: NDArray[np.float32],
+    funding_rates_1h_2d: NDArray[np.float32],
+    config: DynamicCompoundingConfig,
+    top_n: int = 20,
+) -> NDArray[np.float64]:
+    if forecast.mu_robust_1d.ndim != 1:
+        raise ValueError("forecast.mu_robust_1d must be 1-D")
+    n_syms = forecast.mu_robust_1d.shape[0]
+    if sigma_2d.ndim != 2 or sigma_2d.shape[1] != n_syms:
+        raise ValueError("sigma_2d must be 2-D with n_syms columns")
+    t_total = sigma_2d.shape[0]
+
+    mu = forecast.mu_robust_1d
+    support = forecast.support_1d
+
+    ranked_idx = np.argsort(-np.abs(mu))
+    top_mask = np.zeros(n_syms, dtype=bool)
+    top_mask[ranked_idx[:top_n]] = True
+    active = support & top_mask & (mu > 0)
+
+    weights = np.zeros((t_total, n_syms), dtype=np.float64)
+    for t in range(t_total):
+        sigma_t = sigma_2d[t].astype(np.float64)
+
+        if t == 0:
+            fr = np.zeros(n_syms, dtype=np.float64)
+        else:
+            idx = (t - 1) * 4
+            fr_raw = funding_rates_1h_2d[idx].astype(np.float64) if idx < funding_rates_1h_2d.shape[0] else np.zeros(n_syms, dtype=np.float64)
+            fr = np.nan_to_num(fr_raw, nan=0.0, posinf=0.0, neginf=0.0)
+
+        prev_w = weights[t - 1] if t > 0 else np.zeros(n_syms, dtype=np.float64)
+
+        per_bar_forecast = CombinedForecast(mu_robust_1d=mu, variance_1d=np.ones(n_syms, dtype=np.float64), support_1d=active)
+        raw_w = compute_dynamic_compounding_weights(
+            forecast=per_bar_forecast,
+            sigma_1d=sigma_t,
+            funding_rates_1d=fr,
+            previous_weights_1d=prev_w,
+            config=config,
+            vol_scale=1.0,
+        )
+
+        weights[t] = raw_w
+
+    return weights
