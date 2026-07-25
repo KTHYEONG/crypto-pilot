@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -34,7 +35,10 @@ from src.domain.futures.compound.contracts import (
 )
 from src.domain.futures.compound.engine import run_multiscale_compound_engine
 from src.domain.futures.compound.holdout_store import SealedHoldoutStore
-from src.domain.futures.data_lake.coverage_policy import DataCoverageError
+from src.domain.futures.data_lake.coverage_policy import (
+    DataCoverageError,
+    exclude_symbols_with_funding_gaps,
+)
 from src.domain.futures.data_lake.ingestion import StorageBudgetError
 from src.domain.futures.data_lake.run_windows import (
     QuarterlyWindowConfig,
@@ -154,9 +158,8 @@ def run_multiscale_compound_main(config: CompoundRunConfig) -> RunnerResult:
         snapshot = bootstrap.snapshot
         ref_dt = pd.Timestamp(ref_date_str, tz="UTC")
         ns_per_hour = 3_600_000_000_000
-        n_hours = (window.cutoff_exclusive_ns - window.acquisition_start_ns) // ns_per_hour
-        n_bars = n_hours * 24
-        start_dt = ref_dt - pd.Timedelta(days=n_hours)
+        n_bars = config.history_days * 24
+        start_dt = ref_dt - pd.Timedelta(days=config.history_days)
         execution_calendar = pd.date_range(start=start_dt, periods=n_bars, freq="h", tz="UTC")
 
         universe = build_daily_pit_universe(
@@ -170,6 +173,21 @@ def run_multiscale_compound_main(config: CompoundRunConfig) -> RunnerResult:
 
         from src.domain.futures.compound.alpha_catalog import build_multiscale_alpha_catalog
         alpha_catalog = build_multiscale_alpha_catalog()
+
+        filtered_cube, excluded_symbols = exclude_symbols_with_funding_gaps(
+            snapshot=snapshot,
+            universe=universe.state_cube,
+            start_time_ns=window.l1_start_ns,
+            end_time_ns=window.cutoff_exclusive_ns,
+            max_gap_ns=86_400_000_000_000,
+        )
+        if excluded_symbols:
+            _logger.warning(
+                "excluded %d symbols with funding gaps: %s",
+                len(excluded_symbols),
+                ", ".join(excluded_symbols),
+            )
+            universe = replace(universe, state_cube=filtered_cube)
 
         prepared = finalize_quarterly_signal_data(
             config=config, runtime=runtime, bootstrap=bootstrap,
