@@ -739,8 +739,13 @@ def audit_compound_market_window(
             dataset_status=(), reasons=("missing_core_availability",),
         )
 
+    required_core = np.asarray(market.eligible_2d, dtype=np.bool_).copy()
+    for benchmark_symbol in ("BTCUSDT", "ETHUSDT"):
+        if benchmark_symbol in market.symbols:
+            required_core[:, market.symbols.index(benchmark_symbol)] = True
+    required_core_available = np.where(required_core, core_available, True)
     core_ratio, leading_gaps, trailing_gaps = _check_coverage_gaps(
-        core_available[acquisition_idx:cutoff_idx],
+        required_core_available[acquisition_idx:cutoff_idx],
         timestamps_ns[acquisition_idx:cutoff_idx],
     )
 
