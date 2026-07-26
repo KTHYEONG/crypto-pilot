@@ -311,6 +311,12 @@ class DynamicCompoundingConfig:
     funding_carry_enabled: bool = True
     soft_drawdown_limit: float = 0.10
     hard_drawdown_limit: float = 0.18
+    alpha_smooth: float = 0.15
+    band_frac: float = 0.30
+    dd_scale_floor: float = 0.25
+    dd_cooldown_bars: int = 60
+    min_vol_samples: int = 60
+    use_rank_conviction: bool = True
 
     def __post_init__(self) -> None:
         assert 0 < self.kelly_fraction <= 1
@@ -322,6 +328,11 @@ class DynamicCompoundingConfig:
         assert self.max_gross_leverage >= self.max_long_leverage + self.max_short_leverage
         assert self.sigma_floor > 0
         assert 0 < self.soft_drawdown_limit < self.hard_drawdown_limit <= 1
+        assert 0 < self.alpha_smooth <= 1
+        assert self.band_frac >= 0
+        assert self.dd_scale_floor > 0, "[LIMIT-01] dd_scale_floor must be > 0"
+        assert self.dd_cooldown_bars > 0
+        assert self.min_vol_samples > 0
 
 
 @dataclass(slots=True, frozen=True)
@@ -333,6 +344,8 @@ class HandoffConfig:
     max_drawdown: float = 0.20
     cost_stress_multiplier: float = 2.0
     n_bootstrap: int = 1_000
+    dedup_rho_threshold: float = 0.90
+    min_dedup_observations: int = 1_000
 
     def __post_init__(self) -> None:
         assert 0 < self.max_pairwise_correlation <= 1
@@ -342,6 +355,8 @@ class HandoffConfig:
         assert self.max_drawdown > 0
         assert self.cost_stress_multiplier >= 1
         assert self.n_bootstrap > 0
+        assert 0 < self.dedup_rho_threshold <= 1
+        assert self.min_dedup_observations >= 1
 
 
 @dataclass(slots=True, frozen=True)

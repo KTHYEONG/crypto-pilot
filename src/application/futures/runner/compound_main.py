@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
@@ -86,6 +87,7 @@ def _write_artifacts(
             "verdict": engine_result.l2.verdict.value,
             "annualized_log_growth": engine_result.l2.annualized_log_growth,
             "cagr": engine_result.l2.cagr,
+            "absolute_cagr": engine_result.l2.absolute_cagr,
             "excess_growth_lcb90": engine_result.l2.excess_growth_lcb90,
             "excess_growth_probability": engine_result.l2.excess_growth_probability,
             "stressed_excess_growth_lcb90": engine_result.l2.stressed_excess_growth_lcb90,
@@ -110,6 +112,7 @@ def _write_artifacts(
             "daily_cvar95": engine_result.l3.daily_cvar95,
             "reasons": list(engine_result.l3.reasons),
         },
+        "dry_run": os.environ.get("L2_DRY_RUN", "0") == "1",
     }
     with open(paths.result_path, "w", encoding="utf-8") as f:
         json.dump(result_data, f, indent=2)

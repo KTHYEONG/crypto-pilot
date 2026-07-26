@@ -124,14 +124,15 @@ def test_sleeve_shape_and_short_fit_fail_closed() -> None:
     assert estimate_sleeve_posteriors(nan_panel, bars, _folds(), np.ones((40, 2), dtype=np.float32), np.zeros((40, 2), dtype=np.float32), HandoffConfig())[0].effective_events == 0
 
 
-def test_zero_novelty_active_sleeve_returns_cash() -> None:
+def test_zero_novelty_active_sleeve_produces_mu() -> None:
     panel = _panel()
     policy = ExitPolicySpec("p", ExitPolicyKind.TIME, None, None, None, 0, 4, -1, "hash")
     from src.domain.futures.compound.contracts import L1SleevePosterior
     mask = np.ones(2, dtype=np.bool_)
     sleeve = L1SleevePosterior("s", "trend:fast", "trend", 0, 0, mask, "test_hash", policy, 0.1, 0.1, 0.9, 0.0, (0.1,), 1, True, ())
     forecast = combine_posterior_sleeves(panel, (sleeve,), (), _folds(), HandoffConfig())
-    assert np.all(forecast.mu_2d == 0.0)
+    expected = panel.z_3d[:, :, 0]
+    np.testing.assert_allclose(forecast.mu_2d, expected, atol=1e-6)
 
 
 def test_candidate_and_compound_paths_share_exit_kernel() -> None:
