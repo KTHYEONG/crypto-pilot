@@ -587,5 +587,15 @@
   },
   "src/application/futures/runner/compound_universe.py": {
     "testing": "tests/unit/application/futures/runner/test_compound_universe.py"
-  }
+  },
+  "src/domain/futures/compound/benchmark.py": {
+    "testing": "tests/unit/domain/futures/compound/test_benchmark.py"
+  },
+  "src/domain/futures/compound/multiplicity.py": {
+    "testing": "tests/unit/domain/futures/compound/test_multiplicity.py"
+  },
+  "src/domain/futures/compound/validation.py": {
+    "testing": "tests/unit/domain/futures/compound/test_validation.py"
+  },
+  "src/domain/futures/compound/config.py": {}
 }

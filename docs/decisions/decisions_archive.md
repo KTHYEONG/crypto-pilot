@@ -2,6 +2,11 @@
 
 This file holds historical architecture decision records (ADRs) that have been pruned from the active window.
 
+## [2026-07-24] [L1L2_PRICE_RISK_SIZING] [ADR_20260724_L1L2_PRICE_RISK_SIZING]
+- **Context/Why:** v6 Dynamic Kelly(epistemic-var sizing)가 실측 -68% 파산(MDD -71.6%, L3 REJECT). 유저 가설은 signal SNR 부족이었으나 진단 결과 진짜 주범은 사이징 분모(가격리스크 아닌 family간 forecast 분산)와 182일 admission 창의 검정력 부족
+- **Resolution/What:** allocator.py 사이징을 f=0.20·mu/sigma_price + causal 15% vol target으로 교체, admission.py에 pre-OOS look-ahead 마스킹 추가, config.py DynamicCompoundingConfig 재정의, engine.py에 sigma_2d 전달 wiring. 730d 실측: 앙상블 확장/SNR-조건부 f 가설 전량 기각, 사이징 교체만으로 dev log growth -6.90→+0.265 확인 후 프로덕션 파이프라인 실행(730d, holdout 신선 소비)
+- **Impact:** L2 MDD -71.6%→-16.5%, 연변동성 89.8%→16.0%, L3 REJECT→SHADOW(promote 0.635 vs 문턱 0.65). 단 L2 dev log growth 여전히 음수(-0.384)로 알파 자체는 미해결 — 다음 우선순위는 L1 신호원 재탐색
+
 ## [2026-07-24] [TASK_CLEANUP_SPECS] [ADR_20260724_CLEANUP_SPECS]
 - **Context/Why:** Remove implemented and evaluated spec artifacts from docs/specs
 - **Resolution/What:** Executed sync_task without --keep-all-specs to wipe specs directory
