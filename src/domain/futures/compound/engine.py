@@ -12,6 +12,11 @@ from src.domain.futures.compound.allocator import (
     compute_dynamic_compounding_weights,
 )
 from src.domain.futures.compound.bar_engine import align_costs_to_decision_grid, build_multi_timeframe_bars
+from src.domain.futures.compound.benchmark import (
+    aggregate_1h_close_to_daily_last,
+    build_causal_l2_benchmark,
+    build_daily_market_returns,
+)
 from src.domain.futures.compound.calibration import (
     build_folds_4h,
     build_multi_horizon_targets,  # noqa: F401 - compatibility patch target for legacy tests
@@ -35,10 +40,12 @@ from src.domain.futures.compound.dense_simulator import simulate_dense_portfolio
 from src.domain.futures.compound.handoff import _build_cash_only_forecast
 from src.domain.futures.compound.holdout_store import HoldoutReuseError, SealedHoldoutStore
 from src.domain.futures.compound.l1_sleeves import build_exit_aware_handoff
+from src.domain.futures.compound.multiplicity import (
+    build_candidate_trial_returns,
+    compute_trial_multiplicity,
+)
 from src.domain.futures.compound.signal_bank import build_raw_signal_panel
 from src.domain.futures.compound.validation import (
-    build_causal_l2_benchmark,
-    count_effective_candidates,
     evaluate_l2_walk_forward,
     evaluate_l3_sealed_holdout,
     slice_execution_ledger,
@@ -269,20 +276,29 @@ def run_multiscale_compound_engine(
     )
 
     _logger.info("building causal L2 benchmark")
-    daily_market_returns: dict[str, NDArray[np.float64]] = {}
-    daily_timestamps_ns = _daily_timestamps_from_4h(l2_ledger.timestamps_ns)
-    if "close" in market.fields_2d:
-        close = np.asarray(market.fields_2d["close"], dtype=np.float64)
-        daily_close = _aggregate_1h_to_daily(market.timestamps_ns, close)
-        for sym_idx, sym in enumerate(market.symbols):
-            daily_ret = np.diff(daily_close[:, sym_idx]) / np.maximum(daily_close[:-1, sym_idx], 1e-12)
-            daily_market_returns[sym] = daily_ret[:len(daily_timestamps_ns)]
-
+    l2_daily_ts = _daily_timestamps_from_4h(l2_ledger.timestamps_ns)
+    close = np.asarray(market.fields_2d["close"], dtype=np.float64)
+    daily_ts, daily_close = aggregate_1h_close_to_daily_last(market.timestamps_ns, close)
+    daily_market = build_daily_market_returns(
+        timestamps_ns=daily_ts, close_2d=daily_close, symbols=market.symbols,
+    )
     benchmark = build_causal_l2_benchmark(
-        daily_market_returns=daily_market_returns,
-        timestamps_ns=daily_timestamps_ns,
+        daily_market_returns=daily_market,
+        window_timestamps_ns=l2_daily_ts,
         config=config.l2_benchmark,
     )
+
+    _logger.info("building trial multiplicity from L2 window")
+    l2_4h_start = int(np.searchsorted(bars_4h.timestamps_ns, l2_ledger.timestamps_ns[0], side="left"))
+    l2_4h_end = l2_4h_start + l2_ledger.timestamps_ns.shape[0]
+    trial_returns = build_candidate_trial_returns(
+        z_3d=panel.z_3d, valid_3d=panel.valid_3d,
+        close_2d=bars_4h.close_2d.astype(np.float32),
+        timestamps_ns=bars_4h.timestamps_ns,
+        start_idx=l2_4h_start, end_idx=l2_4h_end,
+    )
+    trial_daily = _aggregate_trial_4h_to_daily(trial_returns)
+    trial_multiplicity = compute_trial_multiplicity(trial_daily)
 
     _logger.info("evaluating L2 walk-forward")
     n_l2 = l2_ledger.timestamps_ns.shape[0]
@@ -295,7 +311,7 @@ def run_multiscale_compound_engine(
         fold_ids_1d[start:end] = i
     l2_eval = evaluate_l2_walk_forward(
         ledger=l2_ledger, fold_ids_1d=fold_ids_1d,
-        benchmark=benchmark, candidate_count=count_effective_candidates(panel.valid_3d),
+        benchmark=benchmark, trial_multiplicity=trial_multiplicity,
         config=config.l2_gate, bootstrap_seed=42,
     )
 
@@ -414,20 +430,21 @@ def _daily_timestamps_from_4h(timestamps_ns_4h: NDArray[np.int64]) -> NDArray[np
     unique_days: NDArray[np.int64] = np.unique(day_start_ns).astype(np.int64)
     counts: NDArray[np.int64] = np.array([int(np.sum(day_start_ns == d)) for d in unique_days], dtype=np.int64)
     complete: NDArray[np.int64] = unique_days[counts == 6].astype(np.int64)
-    return complete + np.int64(6 * ns_per_4h - 1)
+    return complete + np.int64(6 * ns_per_4h)
 
 
-def _aggregate_1h_to_daily(
-    timestamps_ns: NDArray[np.int64],
-    values_2d: NDArray[np.float64],
+def _aggregate_trial_4h_to_daily(
+    trial_returns_2d: NDArray[np.float64],
 ) -> NDArray[np.float64]:
-    ns_per_1h = 3600 * 10**9
-    day_start_ns = timestamps_ns - (timestamps_ns % (24 * ns_per_1h))
-    unique_days = np.unique(day_start_ns)
-    daily = np.zeros((len(unique_days), values_2d.shape[1]), dtype=np.float64)
-    for i, day_start in enumerate(unique_days):
-        mask = day_start_ns == day_start
-        daily[i] = np.nanmean(values_2d[mask], axis=0)
+    n_trial, n_step = trial_returns_2d.shape
+    n_days = n_step // 6
+    if n_days == 0:
+        return np.zeros((n_trial, 0), dtype=np.float64)
+    usable = n_days * 6
+    daily = np.empty((n_trial, n_days), dtype=np.float64)
+    for k in range(n_trial):
+        block = trial_returns_2d[k, :usable].reshape(n_days, 6)
+        daily[k] = np.expm1(np.sum(np.log1p(block), axis=1))
     return daily
 
 

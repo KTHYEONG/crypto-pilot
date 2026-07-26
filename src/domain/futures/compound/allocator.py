@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Sequence
 
 import numpy as np
 from numpy.typing import NDArray
@@ -405,6 +406,30 @@ def build_rank_conviction_targets(
     return result
 
 
+def derive_causal_vol_target(
+    equity_history: Sequence[float], return_history: Sequence[float],
+    config: DynamicCompoundingConfig,
+) -> float:
+    if len(equity_history) < config.min_vol_samples:
+        return config.target_ann_vol
+    eq = np.array(equity_history, dtype=np.float64)
+    peak = np.maximum.accumulate(eq)
+    dd = 1.0 - eq / np.maximum(peak, 1e-15)
+    mdd = float(np.max(dd))
+    r = np.array(return_history[-config.vol_lookback_bars:], dtype=np.float64)
+    r = r[np.isfinite(r)]
+    if len(r) < 10:
+        return config.target_ann_vol
+    vol = float(np.std(r, ddof=1)) * np.sqrt(2190.0)
+    if vol < 1e-12:
+        return config.target_ann_vol
+    mdd_vol_ratio = mdd / vol
+    target = config.mdd_risk_budget * config.risk_safety_factor / max(mdd_vol_ratio, config.min_mdd_vol_ratio)
+    target = min(max(target, config.target_ann_vol), config.max_ann_vol_budget * config.risk_safety_factor)
+    _logger.debug("[ALGO] causal_vol_target=%.4f mdd=%.4f vol=%.4f ratio=%.4f", target, mdd, vol, mdd_vol_ratio)
+    return float(target)
+
+
 def compute_dynamic_compounding_path(
     forecast: CalibratedForecastPanel,
     sigma_2d: NDArray[np.float32],
@@ -420,6 +445,7 @@ def compute_dynamic_compounding_path(
 
     equity = 1.0
     peak_equity = 1.0
+    equity_history: list[float] = [1.0]
     return_history: list[float] = []
     state = np.zeros(n_syms, dtype=np.float64)
     cooldown_counter = 0
@@ -454,9 +480,10 @@ def compute_dynamic_compounding_path(
 
         if len(return_history) >= config.min_vol_samples:
             rv_ann = float(np.std(return_history[-config.vol_lookback_bars:], ddof=1)) * np.sqrt(2190.0)
-            leverage = min(config.target_ann_vol / max(rv_ann, 1e-15), config.max_gross_leverage)
+            vol_target = derive_causal_vol_target(equity_history, return_history, config)
+            leverage = min(vol_target / max(rv_ann, 1e-15), config.vol_scale_max)
         else:
-            leverage = min(0.5, config.max_gross_leverage)
+            leverage = min(0.5, config.vol_scale_max)
 
         desired = desired * leverage
 
@@ -502,6 +529,7 @@ def compute_dynamic_compounding_path(
             equity = equity * (1.0 + portfolio_ret)
             peak_equity = max(peak_equity, equity)
             return_history.append(portfolio_ret)
+            equity_history.append(equity)
 
     return weights
 

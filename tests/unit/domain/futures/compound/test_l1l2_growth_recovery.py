@@ -23,7 +23,7 @@ from src.domain.futures.compound.contracts import (
     TimeframeBarCube,
 )
 from src.domain.futures.compound.l1_sleeves import estimate_cluster_sleeve_posteriors
-from src.domain.futures.compound.validation import _deflated_sharpe_probability
+from src.domain.futures.compound.multiplicity import TrialMultiplicity, deflated_sharpe_probability
 
 
 def test_build_rank_conviction_targets_balanced_mu_returns_zero_net_unit_gross() -> None:
@@ -141,26 +141,29 @@ def test_dynamic_compounding_config_zero_dd_scale_floor_raises_assertion_error()
         DynamicCompoundingConfig(dd_scale_floor=0.0)
 
 
-def test_deflated_sharpe_probability_scales_null_with_sample_length() -> None:
-    strong = _deflated_sharpe_probability(
-        observed_sharpe=1.85, candidate_count=27,
-        n_obs=615, periods_per_year=365.25,
-        n_bootstrap=2000, seed=42,
+def test_deflated_sharpe_probability_scales_with_effective_trials() -> None:
+    rng = np.random.default_rng(42)
+    excess_rets = rng.normal(0.001, 0.01, 365).astype(np.float64)
+    low_m = TrialMultiplicity(5, 2.0, 1.0)
+    high_m = TrialMultiplicity(5, 5.0, 1.0)
+    p_low = deflated_sharpe_probability(
+        observed_sharpe=1.85, multiplicity=low_m,
+        excess_returns=excess_rets,
     )
-    weak = _deflated_sharpe_probability(
-        observed_sharpe=0.24, candidate_count=27,
-        n_obs=615, periods_per_year=365.25,
-        n_bootstrap=2000, seed=42,
+    p_high = deflated_sharpe_probability(
+        observed_sharpe=1.85, multiplicity=high_m,
+        excess_returns=excess_rets,
     )
-    assert strong > 0.5
-    assert weak < 0.2
+    assert p_low >= p_high
 
 
 def test_deflated_sharpe_probability_short_sample_returns_half() -> None:
-    prob = _deflated_sharpe_probability(
-        observed_sharpe=5.0, candidate_count=27,
-        n_obs=20, periods_per_year=365.25,
-        n_bootstrap=2000, seed=42,
+    rng = np.random.default_rng(42)
+    excess_rets = rng.normal(0.001, 0.01, 20).astype(np.float64)
+    mult = TrialMultiplicity(27, 5.0, 1.0)
+    prob = deflated_sharpe_probability(
+        observed_sharpe=5.0, multiplicity=mult,
+        excess_returns=excess_rets,
     )
     assert prob == 0.5
 
@@ -297,11 +300,11 @@ def test_run_multiscale_compound_engine_passes_five_time_ordered_folds_to_l2(
     captured: dict[str, np.ndarray] = {}
     real_evaluate = validation_module.evaluate_l2_walk_forward
 
-    def _spy_evaluate(*, ledger, fold_ids_1d, benchmark, candidate_count, config, bootstrap_seed):
+    def _spy_evaluate(*, ledger, fold_ids_1d, benchmark, trial_multiplicity, config, bootstrap_seed):
         captured["fold_ids_1d"] = fold_ids_1d.copy()
         return real_evaluate(
             ledger=ledger, fold_ids_1d=fold_ids_1d, benchmark=benchmark,
-            candidate_count=candidate_count, config=config, bootstrap_seed=bootstrap_seed,
+            trial_multiplicity=trial_multiplicity, config=config, bootstrap_seed=bootstrap_seed,
         )
 
     monkeypatch.setattr(engine_module, "evaluate_l2_walk_forward", _spy_evaluate)

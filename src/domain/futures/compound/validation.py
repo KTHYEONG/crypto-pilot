@@ -2,12 +2,16 @@ from __future__ import annotations
 
 import logging
 import math
-from collections.abc import Mapping
 
 import numpy as np
 from numpy.typing import NDArray
 
-from src.domain.futures.compound.config import DataPlaneConfig, L2BenchmarkConfig, L2GateConfig, L3ValidationConfig
+from src.domain.futures.compound.benchmark import (  # noqa: F401
+    DailyMarketReturns,
+    _causal_volatility_scale,
+    build_causal_l2_benchmark,
+)
+from src.domain.futures.compound.config import DataPlaneConfig, L2GateConfig, L3ValidationConfig
 from src.domain.futures.compound.contracts import (
     CausalityError,
     CompoundWindowAudit,
@@ -25,6 +29,7 @@ from src.domain.futures.compound.contracts import (
     SignalDescriptor,
     StrategyDataCoverageEntry,
 )
+from src.domain.futures.compound.multiplicity import TrialMultiplicity, deflated_sharpe_probability
 
 _logger = logging.getLogger(__name__)
 
@@ -84,57 +89,7 @@ def aggregate_returns_to_utc_days(
     return daily_returns
 
 
-def _causal_volatility_scale(
-    basket_returns: NDArray[np.float64],
-    lookback: int,
-    target_ann_vol: float,
-) -> NDArray[np.float64]:
-    n = len(basket_returns)
-    scale = np.ones(n, dtype=np.float64)
-    for d in range(n):
-        if d < lookback:
-            continue
-        window = basket_returns[max(0, d - lookback):d]
-        valid = window[np.isfinite(window)]
-        if len(valid) < 10:
-            continue
-        realized_vol = float(np.std(valid, ddof=1)) * math.sqrt(365.25)
-        if realized_vol > 1e-12:
-            scale[d] = min(target_ann_vol / realized_vol, 3.0)
-    return scale
 
-
-def build_causal_l2_benchmark(
-    *,
-    daily_market_returns: Mapping[str, NDArray[np.float64]],
-    timestamps_ns: NDArray[np.int64],
-    config: L2BenchmarkConfig,
-) -> L2BenchmarkSeries:
-    if config.mode == "cash_collateral":
-        raise NotImplementedError("cash_collateral benchmark mode not yet implemented")
-
-    for sym in config.crypto_symbols:
-        if sym not in daily_market_returns:
-            raise ValueError(f"missing benchmark symbol: {sym}")
-
-    n = len(timestamps_ns)
-    basket_returns = np.zeros(n, dtype=np.float64)
-    for sym, w in zip(config.crypto_symbols, config.crypto_weights, strict=True):
-        sym_ret = np.asarray(daily_market_returns[sym], dtype=np.float64)
-        if sym_ret.shape != (n,):
-            raise ValueError(f"benchmark symbol {sym} shape mismatch: expected ({n},), got {sym_ret.shape}")
-        basket_returns += w * sym_ret
-
-    causal_scale = _causal_volatility_scale(basket_returns, config.volatility_lookback_days, config.target_ann_vol)
-    scaled_returns = basket_returns * causal_scale
-
-    benchmark_id = f"{config.mode}_{'_'.join(config.crypto_symbols)}_{config.volatility_lookback_days}d"
-    return L2BenchmarkSeries(
-        benchmark_id=benchmark_id,
-        timestamps_ns=timestamps_ns,
-        daily_returns_1d=scaled_returns,
-        causal_scale_1d=causal_scale,
-    )
 
 
 def _annualized_log_growth(returns: NDArray[np.float64], periods_per_year: float) -> float:
@@ -215,28 +170,6 @@ def _stationary_bootstrap_sharpe_probability(
     return obs_sharpe, prob
 
 
-def _deflated_sharpe_probability(
-    observed_sharpe: float,
-    candidate_count: int,
-    n_obs: int,
-    periods_per_year: float = 365.25,
-    n_bootstrap: int = 5000,
-    seed: int = 42,
-) -> float:
-    if n_obs < 30:
-        return 0.5
-    if candidate_count <= 1 or observed_sharpe <= 0:
-        return 0.5
-    sigma = math.sqrt(periods_per_year / n_obs)
-    rng = np.random.default_rng(seed)
-    e_max_samples = np.empty(n_bootstrap)
-    for i in range(n_bootstrap):
-        sharpe_null = rng.standard_t(df=10, size=candidate_count) * sigma
-        e_max_samples[i] = float(np.max(sharpe_null))
-    prob = float(np.mean(e_max_samples < float(observed_sharpe)))
-    return prob
-
-
 def count_effective_candidates(valid_3d: NDArray[np.bool_]) -> int:
     if valid_3d.ndim != 3:
         raise ValueError(f"valid_3d must be 3-D, got shape {valid_3d.shape}")
@@ -298,10 +231,12 @@ def evaluate_l2_walk_forward(
     ledger: ExecutionLedger,
     fold_ids_1d: NDArray[np.int16],
     benchmark: L2BenchmarkSeries,
-    candidate_count: int,
+    trial_multiplicity: TrialMultiplicity,
     config: L2GateConfig,
     bootstrap_seed: int,
 ) -> L2Evaluation:
+    candidate_count = trial_multiplicity.n_trials
+
     # Structural validation before aggregation (fail-closed)
     pre_agg_reasons = validate_ledger_before_aggregation(ledger)
     if pre_agg_reasons:
@@ -405,7 +340,10 @@ def evaluate_l2_walk_forward(
     obs_sharpe, sharpe_prob = _stationary_bootstrap_sharpe_probability(
         excess_returns, n_bootstrap=2000, block_size=5, seed=bootstrap_seed,
     )
-    dsr = _deflated_sharpe_probability(obs_sharpe, candidate_count, n_obs=oos_days, periods_per_year=365.25, seed=bootstrap_seed)
+    dsr = deflated_sharpe_probability(
+        observed_sharpe=obs_sharpe, multiplicity=trial_multiplicity,
+        excess_returns=excess_returns, periods_per_year=365.25,
+    )
 
     # Growth bootstrap
     excess_lcb90, _, excess_prob = _stationary_bootstrap_lcb90(
@@ -567,8 +505,8 @@ def _daily_timestamps_from_4h(timestamps_ns_4h: NDArray[np.int64]) -> NDArray[np
     day_start_ns = timestamps_ns_4h - (timestamps_ns_4h % (6 * ns_per_4h))
     unique_days, counts = np.unique(day_start_ns, return_counts=True)
     complete = unique_days[counts == 6]
-    day_end_ns: NDArray[np.int64] = complete.astype(np.int64) + np.int64(6 * ns_per_4h - 1)
-    return day_end_ns
+    result: NDArray[np.int64] = complete.astype(np.int64) + np.int64(6 * ns_per_4h)
+    return result
 
 
 def _align_fold_ids(

@@ -20,9 +20,11 @@ from src.domain.futures.compound.l1_sleeves import (
     combine_posterior_sleeves,
     select_non_redundant_signals,
 )
+from src.domain.futures.compound.multiplicity import TrialMultiplicity
 from src.domain.futures.compound.validation import (
     count_effective_candidates,
     evaluate_l2_walk_forward,
+    slice_execution_ledger,
 )
 
 
@@ -244,7 +246,7 @@ class TestCostDragAndAbsoluteCagr:
         ledger, benchmark = _l2_fixture(n, fee_bps_per_bar=1.0)
         result = evaluate_l2_walk_forward(
             ledger=ledger, fold_ids_1d=np.zeros(n, dtype=np.int16),
-            benchmark=benchmark, candidate_count=10,
+            benchmark=benchmark, trial_multiplicity=TrialMultiplicity(10, 10.0, 1.0),
             config=L2GateConfig(), bootstrap_seed=42,
         )
         assert 0.0 < result.cost_drag_ratio < 1.0
@@ -255,7 +257,7 @@ class TestCostDragAndAbsoluteCagr:
         ledger, benchmark = _l2_fixture(n, fee_bps_per_bar=0.0)
         result = evaluate_l2_walk_forward(
             ledger=ledger, fold_ids_1d=np.zeros(n, dtype=np.int16),
-            benchmark=benchmark, candidate_count=10,
+            benchmark=benchmark, trial_multiplicity=TrialMultiplicity(10, 10.0, 1.0),
             config=L2GateConfig(), bootstrap_seed=42,
         )
         assert result.cost_drag_ratio == pytest.approx(0.0, abs=1e-9)
