@@ -317,6 +317,10 @@ class DynamicCompoundingConfig:
     dd_cooldown_bars: int = 60
     min_vol_samples: int = 60
     use_rank_conviction: bool = True
+    mdd_risk_budget: float = 0.20
+    max_ann_vol_budget: float = 0.25
+    risk_safety_factor: float = 0.75
+    min_mdd_vol_ratio: float = 0.50
 
     def __post_init__(self) -> None:
         assert 0 < self.kelly_fraction <= 1
@@ -333,6 +337,10 @@ class DynamicCompoundingConfig:
         assert self.dd_scale_floor > 0, "[LIMIT-01] dd_scale_floor must be > 0"
         assert self.dd_cooldown_bars > 0
         assert self.min_vol_samples > 0
+        assert self.mdd_risk_budget > 0
+        assert self.max_ann_vol_budget > 0
+        assert self.risk_safety_factor > 0
+        assert self.min_mdd_vol_ratio > 0
 
 
 @dataclass(slots=True, frozen=True)
