@@ -1,5 +1,10 @@
 # Active Decisions Log (Sliding Window)
 
+## [2026-07-26] [l2_runtime_integrity_optimization] [ADR_20260726_l2_runtime_integrity_optimization]
+- **Context/Why:** Current-date L2 execution needed a reliable completion path, bounded runtime, and evidence-safe failure handling.
+- **Resolution/What:** Passed explicit holdout_id into the compound engine, recorded the 2026-07-26 runtime/RSS result, and preserved finite fail-closed L2/L3 rejection when corrupted funding values caused net returns below -100%.
+- **Impact:** Full execution completed in 3m40.35s with 978.7 MiB peak RSS and no OOM/timeout; L2 artifact was produced as NO_EVIDENCE and L3 rejected safely. Funding cache resynchronization remains required before claiming performance.
+
 ## [2026-07-25] [L1_SIGNAL_PANEL_NUMBA_OPTIMIZATION] [ADR_20260725_L1_SIGNAL_PANEL_NUMBA_OPTIMIZATION]
 - **Context/Why:** 실제 120-symbol·4,380-bar 실행에서 L1 rolling MAD signal panel이 병목이었고 임시 recipe 배열의 RSS 상한이 명확하지 않았다.
 - **Resolution/What:** rolling MAD를 Numba 6-thread kernel로 전환하고 signal panel을 float32/bool로 즉시 기록·해제하도록 배선했다. 사전 RSS 추정과 recipe별 runtime hard gate(12GB)를 추가했으며 engine caller와 회귀 테스트를 갱신했다. 실측 L1은 4.7685초, peak RSS 962.6MB였다.
@@ -69,8 +74,3 @@
 - **Context/Why:** Maximize compound asset growth beyond CAGR 35% with controlled MDD
 - **Resolution/What:** Implemented Dynamic Kelly Scaling (f=0.25-0.60), Asymmetric Leverage (Gross 2.0x), and Funding Carry Edge
 - **Impact:** Boosted CAGR to +158.74% with MDD -0.15% and Cov 84% PASS
-
-## [2026-07-24] [TASK_PORTFOLIO_GROWTH_V5] [ADR_20260724_PORTFOLIO_GROWTH_V5]
-- **Context/Why:** L2 turnover friction caused negative net growth and high MDD
-- **Resolution/What:** Implemented Rebalancing Exponential Smoothing, Cost-Aware Hysteresis, and Quarter Kelly Risk Protection
-- **Impact:** Reduced turnover by 86%, boosted CAGR to +35.59%, constrained MDD within -12.10%
