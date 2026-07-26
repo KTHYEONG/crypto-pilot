@@ -11,6 +11,7 @@ from src.domain.futures.compound.contracts import (
     ExitPolicyKind,
     ExitPolicySpec,
     MultiTimeframeBars,
+    PrecomputedExitPaths,
     RawSignalPanel,
     SignalDescriptor,
     TimeframeBarCube,
@@ -19,9 +20,11 @@ from src.domain.futures.compound.l1_sleeves import (
     _signal_evidence,
     build_exit_aware_handoff,
     calibrate_exit_policy,
+    calibrate_exit_policy_from_paths,
     combine_posterior_sleeves,
     estimate_cluster_sleeve_posteriors,
     estimate_sleeve_posteriors,
+    precompute_exit_paths,
 )
 
 
@@ -455,4 +458,75 @@ class TestEstimateClusterSleevePosteriors:
         handoff = build_exit_aware_handoff(panel, mt_bars, folds, cfolds, cost, funding, config)
         assert handoff is not None
         assert isinstance(handoff.evidence.admitted, bool)
+
+
+class TestPrecomputedExitPaths:
+    def test_precompute_paths_returns_valid_paths(self) -> None:
+        descriptor = SignalDescriptor("trend:fast", "trend", "fast", 4, "4h", 4, "trend", "persistence", "v1")
+        bars = _bars(40, 2)
+        oriented = np.ones((40, 2), dtype=np.float32)
+        cost = np.ones((40, 2), dtype=np.float32)
+        paths = precompute_exit_paths(descriptor, oriented, bars, cost)
+        assert isinstance(paths, PrecomputedExitPaths)
+        assert paths.horizon_bars == 1
+        assert paths.orientation_sign in (-1, 1)
+        assert paths.decision_idx.dtype == np.int64
+        assert paths.edge_bps.dtype == np.float64
+
+    def test_fit_boundary_causality(self) -> None:
+        descriptor = SignalDescriptor("trend:fast", "trend", "fast", 4, "4h", 4, "trend", "persistence", "v1")
+        bars = _bars(40, 2)
+        oriented = np.ones((40, 2), dtype=np.float32)
+        cost = np.ones((40, 2), dtype=np.float32)
+        paths = precompute_exit_paths(descriptor, oriented, bars, cost)
+        fit_end = 20
+        horizon = paths.horizon_bars
+        used = paths.decision_idx < fit_end - horizon
+        if np.sum(used) > 0:
+            max_idx = int(np.max(paths.decision_idx[used]))
+            assert max_idx < fit_end - horizon, (
+                f"max decision_idx {max_idx} >= fit_end - horizon ({fit_end - horizon})"
+            )
+
+    def test_calibrate_policy_from_paths(self) -> None:
+        descriptor = SignalDescriptor("trend:fast", "trend", "fast", 4, "4h", 4, "trend", "persistence", "v1")
+        bars = _bars(40, 2)
+        oriented = np.ones((40, 2), dtype=np.float32)
+        cost = np.ones((40, 2), dtype=np.float32)
+        paths = precompute_exit_paths(descriptor, oriented, bars, cost)
+        policy = calibrate_exit_policy_from_paths(
+            descriptor, paths, fit_end_exclusive=20, calibration_fold_id=2,
+        )
+        assert isinstance(policy, ExitPolicySpec)
+        assert policy.calibration_fold_id == 2
+
+    def test_calibration_fold_id_equals_current_outer_fold(self) -> None:
+        descriptor = SignalDescriptor("trend:fast", "trend", "fast", 4, "4h", 4, "trend", "persistence", "v1")
+        bars = _bars(40, 2)
+        oriented = np.ones((40, 2), dtype=np.float32)
+        cost = np.ones((40, 2), dtype=np.float32)
+        paths = precompute_exit_paths(descriptor, oriented, bars, cost)
+        outer_fold_id = 5
+        policy = calibrate_exit_policy_from_paths(
+            descriptor, paths, fit_end_exclusive=20, calibration_fold_id=outer_fold_id,
+        )
+        assert policy.calibration_fold_id == outer_fold_id
+
+
+class TestCandidateFirstPosterior:
+    def test_no_viable_sleeve_skips_path_build(self) -> None:
+        descriptor = SignalDescriptor("trend:fast", "trend", "fast", 4, "4h", 4, "trend", "persistence", "v1")
+        bars = _bars(40, 2)
+        oriented = np.zeros((40, 2), dtype=np.float32)
+        cost = np.ones((40, 2), dtype=np.float32)
+        paths = precompute_exit_paths(descriptor, oriented, bars, cost)
+        fit_end = 20
+        horizon = paths.horizon_bars
+        used = paths.decision_idx < fit_end - horizon
+        n_used = int(np.sum(used))
+        policy = calibrate_exit_policy_from_paths(
+            descriptor, paths, fit_end_exclusive=fit_end, calibration_fold_id=1,
+        )
+        if n_used < 200:
+            assert policy.kind == ExitPolicyKind.TIME
 

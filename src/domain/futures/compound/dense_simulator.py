@@ -51,7 +51,7 @@ def simulate_dense_portfolio(
 
         sym_ret = np.where(
             (close_prev > 0) & (close_t > 0),
-            np.log(close_t / close_prev),
+            close_t / close_prev - 1.0,
             0.0,
         )
         bar_return = float(np.nansum(prev_w * sym_ret))

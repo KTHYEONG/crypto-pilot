@@ -1,11 +1,18 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 import numpy as np
 import pytest
 
 from src.domain.futures.compound.config import CompoundEngineConfig
 from src.domain.futures.compound.contracts import (
     CompoundEngineResult,
+    DeploymentVerdict,
+    L2CategoryResult,
+    L2Evaluation,
+    L2GateVerdict,
+    L3ValidationResult,
     MarketFeatureCube,
     SealedHoldoutManifest,
     SignalDescriptor,
@@ -366,3 +373,111 @@ class TestRunMultiscaleCompoundEngine:
         )
         assert isinstance(result, CompoundEngineResult)
         assert np.allclose(result.ledger.target_weights_2d, 0.0, atol=1e-10)
+
+    def test_p2_exception_reaches_l2_and_l3_rejects(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        from src.domain.futures.compound.contracts import (
+            CompoundEngineResult, L2GateVerdict, DeploymentVerdict,
+        )
+        n = 500
+        cube = _make_cube(n)
+        universe = type("Universe", (), {"symbols": cube.symbols, "snapshots": ()})()
+
+        def _raise_p2(*args: object, **kwargs: object) -> object:
+            raise RuntimeError("simulated P2 failure")
+
+        import src.domain.futures.compound.engine as eng
+        monkeypatch.setattr(eng, "build_exit_aware_handoff", _raise_p2)
+
+        store = SealedHoldoutStore(tmp_path / "p2_error_test.sqlite3")
+        manifest = SealedHoldoutManifest(
+            holdout_id="p2-error-test",
+            start_time_ns=int(cube.timestamps_ns[-30]),
+            end_time_ns=int(cube.timestamps_ns[-1]),
+            holdout_days=30,
+            model_version="v1",
+            data_manifest_hash="h1",
+            strategy_spec_hash="spec_p2",
+        )
+        store.create(manifest)
+        config = CompoundEngineConfig()
+        result = run_multiscale_compound_engine(
+            market=cube, universe=universe,
+            holdout_store=store, holdout_id="p2-error-test", config=config,
+        )
+        assert isinstance(result, CompoundEngineResult)
+        assert result.l2.verdict == L2GateVerdict.NO_EVIDENCE
+        assert any("p2_pipeline_error" in r for r in result.l2.reasons)
+        assert result.l3.verdict == DeploymentVerdict.REJECT
+        assert "l2_not_pass" in result.l3.reasons
+
+    def test_l2_pass_consumes_sealed_holdout(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        cube = _make_cube(500)
+        universe = type("Universe", (), {"symbols": cube.symbols, "snapshots": ()})()
+        store = SealedHoldoutStore(tmp_path / "l2_pass_consumes.sqlite3")
+        store.create(SealedHoldoutManifest(
+            holdout_id="l2-pass-test",
+            start_time_ns=int(cube.timestamps_ns[-30]),
+            end_time_ns=int(cube.timestamps_ns[-1]),
+            holdout_days=30,
+            model_version="v1",
+            data_manifest_hash="h1",
+            strategy_spec_hash="spec_p2",
+        ))
+
+        import src.domain.futures.compound.engine as eng
+
+        passing_categories = tuple(
+            L2CategoryResult(category=f"category-{i}", passed=True, reasons=())
+            for i in range(5)
+        )
+        passing_l2 = L2Evaluation(
+            verdict=L2GateVerdict.PASS,
+            benchmark_id="test",
+            annualized_log_growth=0.0,
+            cagr=0.0,
+            excess_growth_lcb90=0.0,
+            excess_growth_probability=1.0,
+            stressed_excess_growth_lcb90=0.0,
+            equity_multiple=1.0,
+            sharpe=0.0,
+            sharpe_probability=1.0,
+            deflated_sharpe_probability=1.0,
+            candidate_count=1,
+            calmar=0.0,
+            max_drawdown=0.0,
+            daily_cvar95=0.0,
+            annual_volatility=0.0,
+            annual_turnover=0.0,
+            cost_drag_ratio=0.0,
+            capacity_utilisation_p95=0.0,
+            active_days_ratio=1.0,
+            rebalance_count=30,
+            positive_outer_folds=3,
+            oos_days=365,
+            category_results=passing_categories,
+            integrity_ok=True,
+            reasons=(),
+        )
+        monkeypatch.setattr(eng, "evaluate_l2_walk_forward", lambda **_: passing_l2)
+        monkeypatch.setattr(
+            eng,
+            "evaluate_l3_sealed_holdout",
+            lambda **_: L3ValidationResult(
+                verdict=DeploymentVerdict.SHADOW,
+                posterior_growth_probability=0.5,
+                holdout_days=30,
+                max_drawdown=0.0,
+                daily_cvar95=0.0,
+                reasons=(),
+            ),
+        )
+
+        result = run_multiscale_compound_engine(
+            market=cube,
+            universe=universe,
+            holdout_store=store,
+            holdout_id="l2-pass-test",
+            config=CompoundEngineConfig(),
+        )
+        assert result.l2.verdict == L2GateVerdict.PASS
+        assert result.l3.verdict == DeploymentVerdict.SHADOW

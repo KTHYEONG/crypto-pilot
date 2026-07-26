@@ -23,6 +23,25 @@ from src.domain.futures.compound.contracts import (
 _logger = logging.getLogger(__name__)
 
 
+def validate_ledger_before_aggregation(ledger: ExecutionLedger) -> tuple[str, ...]:
+    """Return stable integrity reasons; empty tuple means valid."""
+    reasons: list[str] = []
+    if not ledger.integrity_ok:
+        reasons.extend(ledger.integrity_reasons)
+    if np.any(~np.isfinite(ledger.net_returns_1d)):
+        reasons.append("non_finite_returns")
+    if np.any(ledger.net_returns_1d <= -1.0):
+        reasons.append("net_return_le_minus_one")
+    if np.any(~np.isfinite(ledger.target_weights_2d)):
+        reasons.append("non_finite_weights")
+    dups = len(ledger.timestamps_ns) - len(np.unique(ledger.timestamps_ns))
+    if dups > 0:
+        reasons.append(f"duplicate_timestamps:{dups}")
+    if not np.all(ledger.timestamps_ns[1:] >= ledger.timestamps_ns[:-1]):
+        reasons.append("non_monotonic_timestamps")
+    return tuple(reasons)
+
+
 def aggregate_returns_to_utc_days(
     timestamps_ns: NDArray[np.int64],
     returns_1d: NDArray[np.float64],
@@ -263,6 +282,24 @@ def evaluate_l2_walk_forward(
     config: L2GateConfig,
     bootstrap_seed: int,
 ) -> L2Evaluation:
+    # Structural validation before aggregation (fail-closed)
+    pre_agg_reasons = validate_ledger_before_aggregation(ledger)
+    if pre_agg_reasons:
+        oos_days = max(int(np.sum(np.isfinite(ledger.net_returns_1d))), 0)
+        return L2Evaluation(
+            verdict=L2GateVerdict.NO_EVIDENCE,
+            benchmark_id=benchmark.benchmark_id,
+            annualized_log_growth=0.0, cagr=0.0, excess_growth_lcb90=0.0,
+            excess_growth_probability=0.5, stressed_excess_growth_lcb90=0.0,
+            equity_multiple=1.0, sharpe=0.0, sharpe_probability=0.5,
+            deflated_sharpe_probability=0.5, candidate_count=candidate_count,
+            calmar=0.0, max_drawdown=0.0, daily_cvar95=0.0,
+            annual_volatility=0.0, annual_turnover=0.0, cost_drag_ratio=0.0,
+            capacity_utilisation_p95=0.0, active_days_ratio=0.0,
+            rebalance_count=0, positive_outer_folds=0, oos_days=oos_days,
+            category_results=(), integrity_ok=False, reasons=pre_agg_reasons,
+        )
+
     # Daily aggregation from 4h bars
     daily_returns = aggregate_returns_to_utc_days(ledger.timestamps_ns, ledger.net_returns_1d)
     oos_days = len(daily_returns)
