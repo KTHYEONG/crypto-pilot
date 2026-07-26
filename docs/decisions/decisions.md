@@ -1,5 +1,10 @@
 # Active Decisions Log (Sliding Window)
 
+## [2026-07-26] [funding_partition_integrity_repair] [ADR_20260726_funding_partition_integrity_repair]
+- **Context/Why:** Funding interval hours were persisted as rates, causing invalid L2 returns and unsafe local backtests.
+- **Resolution/What:** Added canonical two/three-column funding normalization, strict finite/range/timestamp validation, funding-v3 provenance, LOCAL read-only fail-closed audit, AUTO targeted quarantine and source repair, and catalog reuse optimization. Recorded the repaired 2026-07-26 L2 run.
+- **Impact:** All 299021 funding events across 2292 partitions are valid. Full L2 completed with finite metrics in 3m54.52s at 996.9 MiB RSS and no swap/OOM; L2 FAIL and L3 REJECT remain correctly enforced by statistical gates. Specs and scratch artifacts are cleaned.
+
 ## [2026-07-26] [l2_runtime_integrity_optimization] [ADR_20260726_l2_runtime_integrity_optimization]
 - **Context/Why:** Current-date L2 execution needed a reliable completion path, bounded runtime, and evidence-safe failure handling.
 - **Resolution/What:** Passed explicit holdout_id into the compound engine, recorded the 2026-07-26 runtime/RSS result, and preserved finite fail-closed L2/L3 rejection when corrupted funding values caused net returns below -100%.
@@ -69,8 +74,3 @@
 - **Context/Why:** Evaluate v6 Dynamic Compounding Engine on real Binance 120 futures data
 - **Resolution/What:** Executed full engine pipeline on real data, exposed L1 signal SNR decay under 2.0x leverage, L3 rejected deployment
 - **Impact:** Prevented live capital deployment of unverified leverage scaling; result.md updated with real metrics (Log Growth -3.05, Verdict REJECT)
-
-## [2026-07-24] [TASK_PORTFOLIO_COMPOUNDING_V6] [ADR_20260724_PORTFOLIO_COMPOUNDING_V6]
-- **Context/Why:** Maximize compound asset growth beyond CAGR 35% with controlled MDD
-- **Resolution/What:** Implemented Dynamic Kelly Scaling (f=0.25-0.60), Asymmetric Leverage (Gross 2.0x), and Funding Carry Edge
-- **Impact:** Boosted CAGR to +158.74% with MDD -0.15% and Cov 84% PASS
