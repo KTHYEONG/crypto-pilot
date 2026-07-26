@@ -1,5 +1,10 @@
 # Active Decisions Log (Sliding Window)
 
+## [2026-07-26] [TASK_L2_TURNOVER_DEADBAND_DEPLOYMENT_CANDIDATE_FIX] [ADR_20260726_L2_TURNOVER_DEADBAND_DEPLOYMENT_CANDIDATE_FIX]
+- **Context/Why:** 20260726_114624 실행에서 L2 미통과 4건이 전부 0 경계 근접 미달이었음. 12개 변형 그리드서치(실제 프로덕션 엔진 전체 재실행)로 band_frac/alpha_smooth 결합 재보정이 유일한 강건 해법임을 확인. 동시에 처음으로 L2가 PASS하는 경로가 실행되며 engine.py의 배포후보 생성 블록(pragma no cover)이 active_signal_ids(중복 281개 멀티셋) vs descriptors(고유 27개) 길이불일치로 크래시하는 구조적 버그 발견
+- **Resolution/What:** config.py: DynamicCompoundingConfig band_frac 0.30->0.60, alpha_smooth 0.15->0.08. engine.py: _build_deployment_candidate 신규 함수로 교체(고유화+admission 빈도 기반 vote_weights, 매칭실패시 ValueError). 실제 CLI 재실행으로 strategy_spec_hash/fold_manifest_hash 미배선이라는 별개의 신규 차단 버그 2건 추가 발견(둘 다 원래부터 배선된 적 없던 설계공백, 이번 회귀 아님)
+- **Impact:** L2 게이트 사상 최초 실질마진 PASS(turnover -82.5%, cost drag -80.5%, MDD -68.7%). 단 strategy_spec_hash/fold_manifest_hash 미배선으로 실제 CLI 실행은 여전히 미완주 - 별도 스펙 필요. L3 봉인 홀드아웃 양쪽 실행 모두 미소진 보존
+
 ## [2026-07-26] [TASK_L2_GATE_INTEGRITY_RISK_DEPLOYMENT] [ADR_20260726_L2_GATE_INTEGRITY_RISK_DEPLOYMENT]
 - **Context/Why:** 20260726_102018 실행에서 L2 FAIL 사유 4건이 전략 결함이 아니라 채점 로직 결함(벤치마크 시간축 절단·비거래 평균가 집계·vol-target 미점화, DSR 합성 t-널의 신호상관 무시, vol_scale_max dead parameter로 위험집행 78%만 실행)이라는 사실이 scratch/verify_growth_*.py 실험으로 확인됨
 - **Resolution/What:** benchmark.py/multiplicity.py 신규 작성(시간정렬 벤치마크, canonical Bailey-LopezDePrado DSR), allocator.py에 derive_causal_vol_target+vol_scale_max 배선, engine.py/validation.py 배선 갱신. 게이트 임계값은 전부 불변. 실전 재실행(20260726_114624)으로 검증: benchmark-relative CAGR -22.16%->+29.30%, Sharpe -1.02->+1.16, DSR 0.500->0.999999997, 실현 vol 11.64%->14.74%(목표 15% 근접)
@@ -69,8 +74,3 @@
 - **Context/Why:** L1 27개 signal 개별 이진 admission 게이트(2/27만 통과, trend_ema:slow p=0.0000조차 LCB90 근소미달로 탈락)가 근본 병목이라는 코드분석 진단. result.md 실측 p-value Stouffer 메타분석(scratch/verify_composite_admission.py)에서 breadth 결합 Z=7.94 vs status-quo Z=4.67로 가설 지지.
 - **Resolution/What:** select_composite_candidates(약필터)+combine_composite_forecast(fold별 precision=1/se² 가중)+evaluate_composite_admission(composite 단일 bootstrap 게이트) 구현, combine_admitted_forecasts 삭제, net_mean_2x 이중비용차감 버그 수정. check 단계서 sigma 재나눔 스펙이탈 및 NaN마스킹 누락 실버그(표본 0개 붕괴) 발견수정. lean_check PASS(Cov 94%).
 - **Impact:** 730d 실데이터 재실행: composite 16/27 후보 결합했으나 최종 미채택(LCB90=-0.0286, sign_consistency=0.500<0.6). cash-only, L2 growth=0.000, L3=REJECT(기존 v6.1 SHADOW 대비 악화). 원인: 후보 신호간 강상관으로 Grinold-Kahn 유효breadth가 명목 16개보다 축소. 아키텍처는 정상 동작하나 이번 데이터서 경제적 유의성 미확보 - 정직한 반증.
-
-## [2026-07-24] [L1_SMART_MONEY_DIVERGENCE_AND_HOLDOUT_INTEGRITY] [ADR_20260724_L1_SMART_MONEY_DIVERGENCE_AND_HOLDOUT_INTEGRITY]
-- **Context/Why:** metrics_5m 18개월 공백 백필 후 top-trader/retail 괴리 신호를 신규 L1 알파로 시도. 실제 admission 실행 결과가 이전과 완전 동일해 조사한 결과, materialize_causal_metrics_grid가 pyarrow ArrowTypeError를 조용히 삼켜 전체 신호가 NaN이었고(버그A), available_at dtype 비교 오류(버그B), sealed holdout consume()이 저장된 해시를 자기 자신과 비교해 재평가 없이 캐시를 반환하던 무결성 결함(버그C)까지 3건이 드러남
-- **Resolution/What:** query.py: pq.read_table->pd.read_parquet 교체, available_at dtype-safe ns 정규화. ingestion.py: METRICS_5M을 180일 cap에서 분리. engine.py: holdout consume()에 market.data_manifest_hash(신선값) 전달로 무결성 검증 복원. signal_bank.py/bar_engine.py/compound_data.py: smart_money_divergence family 신규 배선. 버그 수정 후 재실행한 진짜 admission 결과는 sign_consistency=0.25로 정직하게 기각(205일 예비 유의 결과가 730일 재검증에서도, 버그 수정 전후 모두 최종적으로는 미채택)
-- **Impact:** L1 신규 신호는 최종 미채택이나 데이터 파이프라인 신뢰성 확보(2196개 metrics_5m 파티션 재사용 가능 자산), holdout 무결성 회귀 방지(test_stale_holdout_manifest_hash_mismatch_raises 추가로 향후 동일 결함 재발 차단). L2/L3는 admitted 신호 집합 불변으로 v6.1과 동일(log growth -0.384, MDD -16.5%, L3 SHADOW)
