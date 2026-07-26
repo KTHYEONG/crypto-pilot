@@ -566,8 +566,11 @@
     "testing": "tests/unit/domain/futures/compound/test_handoff.py"
   },
   "src/domain/futures/compound/l1_sleeves.py": {
-    "architecture": "docs/results/result.md",
-    "testing": "tests/unit/domain/futures/compound/test_l1_sleeves.py"
+    "architecture": "docs/architecture/layer1.md",
+    "testing": [
+      "tests/unit/domain/futures/compound/test_l1_sleeves.py",
+      "tests/unit/domain/futures/compound/test_l1_combination_redesign.py"
+    ]
   },
   "src/application/futures/runner/data_lake_runtime.py": {
     "testing": "tests/unit/domain/futures/data_lake/test_reconciliation.py"
