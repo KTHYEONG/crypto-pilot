@@ -150,6 +150,7 @@ class TestRunMultiscaleCompoundEngine:
 
         mock_panel = mocker.Mock(spec=RawSignalPanel)
         mock_panel.z_3d = np.zeros((256, 5, 3))
+        mock_panel.valid_3d = np.ones((256, 5, 3), dtype=bool)
         mock_panel.sigma_2d = np.full((256, 5), 0.01, dtype=np.float32)
         mock_panel.descriptors = (mocker.Mock(spec=SignalDescriptor, target_horizon_hours=4),)
         mocker.patch(
@@ -216,6 +217,7 @@ class TestRunMultiscaleCompoundEngine:
         distinct_sigma = np.full((256, 5), 0.037, dtype=np.float32)
         mock_panel = mocker.Mock(spec=RawSignalPanel)
         mock_panel.z_3d = np.zeros((256, 5, 3))
+        mock_panel.valid_3d = np.ones((256, 5, 3), dtype=bool)
         mock_panel.sigma_2d = distinct_sigma
         mock_panel.descriptors = (mocker.Mock(spec=SignalDescriptor, target_horizon_hours=4),)
         mocker.patch(
@@ -481,3 +483,94 @@ class TestRunMultiscaleCompoundEngine:
         )
         assert result.l2.verdict == L2GateVerdict.PASS
         assert result.l3.verdict == DeploymentVerdict.SHADOW
+
+    def test_engine_passes_per_symbol_cost_array_to_simulator(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        cube = _make_cube(500)
+        universe = type("Universe", (), {"symbols": cube.symbols, "snapshots": ()})()
+        store = SealedHoldoutStore(tmp_path / "cost_array_wiring.sqlite3")
+        store.create(SealedHoldoutManifest(
+            holdout_id="cost-array-test",
+            start_time_ns=int(cube.timestamps_ns[-30]),
+            end_time_ns=int(cube.timestamps_ns[-1]),
+            holdout_days=30,
+            model_version="v1",
+            data_manifest_hash="h1",
+            strategy_spec_hash="spec_cost",
+        ))
+
+        import src.domain.futures.compound.engine as eng
+        real_sim = eng.simulate_dense_portfolio
+        captured: dict[str, object] = {}
+
+        def _spy_sim(*, bars_4h, target_weights_2d, funding_1h_2d, cost_bps, config):
+            captured["cost_bps"] = cost_bps
+            return real_sim(
+                bars_4h=bars_4h, target_weights_2d=target_weights_2d,
+                funding_1h_2d=funding_1h_2d, cost_bps=cost_bps, config=config,
+            )
+
+        monkeypatch.setattr(eng, "simulate_dense_portfolio", _spy_sim)
+
+        run_multiscale_compound_engine(
+            market=cube, universe=universe, holdout_store=store,
+            holdout_id="cost-array-test", config=CompoundEngineConfig(),
+        )
+
+        assert "cost_bps" in captured
+        cost_arg = captured["cost_bps"]
+        assert isinstance(cost_arg, np.ndarray)
+        n_bars_4h = 500 // 4
+        assert cost_arg.shape == (n_bars_4h, len(cube.symbols))
+
+    def test_engine_dry_run_does_not_consume_sealed_holdout(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        cube = _make_cube(500)
+        universe = type("Universe", (), {"symbols": cube.symbols, "snapshots": ()})()
+        store = SealedHoldoutStore(tmp_path / "dry_run_guard.sqlite3")
+        store.create(SealedHoldoutManifest(
+            holdout_id="dry-run-test",
+            start_time_ns=int(cube.timestamps_ns[-30]),
+            end_time_ns=int(cube.timestamps_ns[-1]),
+            holdout_days=30,
+            model_version="v1",
+            data_manifest_hash="h1",
+            strategy_spec_hash="spec_dry_run",
+        ))
+
+        import src.domain.futures.compound.engine as eng
+
+        passing_categories = tuple(
+            L2CategoryResult(category=f"category-{i}", passed=True, reasons=())
+            for i in range(5)
+        )
+        passing_l2 = L2Evaluation(
+            verdict=L2GateVerdict.PASS, benchmark_id="test",
+            annualized_log_growth=0.0, cagr=0.0, excess_growth_lcb90=0.0,
+            excess_growth_probability=1.0, stressed_excess_growth_lcb90=0.0,
+            equity_multiple=1.0, sharpe=0.0, sharpe_probability=1.0,
+            deflated_sharpe_probability=1.0, candidate_count=1, calmar=0.0,
+            max_drawdown=0.0, daily_cvar95=0.0, annual_volatility=0.0,
+            annual_turnover=0.0, cost_drag_ratio=0.0, capacity_utilisation_p95=0.0,
+            active_days_ratio=1.0, rebalance_count=30, positive_outer_folds=3,
+            oos_days=365, category_results=passing_categories, integrity_ok=True,
+            reasons=(),
+        )
+        monkeypatch.setattr(eng, "evaluate_l2_walk_forward", lambda **_: passing_l2)
+
+        def _fail_if_consumed(**_kwargs: object) -> None:
+            raise AssertionError("consume() must not be called in L2_DRY_RUN mode")
+
+        monkeypatch.setattr(store, "consume", _fail_if_consumed)
+        monkeypatch.setenv("L2_DRY_RUN", "1")
+
+        result = run_multiscale_compound_engine(
+            market=cube, universe=universe, holdout_store=store,
+            holdout_id="dry-run-test", config=CompoundEngineConfig(),
+        )
+
+        assert result.l2.verdict == L2GateVerdict.PASS
+        assert result.l3.verdict == DeploymentVerdict.SHADOW
+        assert result.l3.reasons == ("dry_run_holdout_not_consumed",)
