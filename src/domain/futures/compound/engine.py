@@ -21,13 +21,16 @@ from src.domain.futures.compound.contracts import (
     AlphaEventTape,
     CombinedForecast,
     CompoundEngineResult,
+    DeploymentVerdict,
+    ExecutionLedger,
     HandoffResult,
+    L2GateVerdict,
     L3ValidationResult,
     MarketFeatureCube,
 )
 from src.domain.futures.compound.dense_simulator import simulate_dense_portfolio
 from src.domain.futures.compound.handoff import _build_cash_only_forecast
-from src.domain.futures.compound.holdout_store import SealedHoldoutStore
+from src.domain.futures.compound.holdout_store import HoldoutReuseError, SealedHoldoutStore
 from src.domain.futures.compound.l1_sleeves import build_exit_aware_handoff
 from src.domain.futures.compound.signal_bank import build_raw_signal_panel
 from src.domain.futures.compound.validation import (
@@ -119,6 +122,7 @@ def run_multiscale_compound_engine(
     panel = build_raw_signal_panel(bars, eligible_4h, numba_threads=6, max_rss_mb=12_000)
 
     handoff_result: HandoffResult | None = None
+    p2_error_reason: str | None = None
     try:
         _logger.info("P2: building causal cluster folds and handoff")
         horizons = tuple(sorted({d.target_horizon_hours for d in panel.descriptors}))
@@ -137,8 +141,9 @@ def run_multiscale_compound_engine(
             "P2 complete: admitted=%s active=%s",
             handoff_result.evidence.admitted, handoff_result.evidence.active_signal_ids,
         )
-    except Exception:
+    except Exception as exc:
         _logger.warning("P2 pipeline failed, using cash-only fallback", exc_info=True)
+        p2_error_reason = f"p2_pipeline_error:{type(exc).__name__}"
         forecast = _build_cash_only_forecast(bars_4h.timestamps_ns, bars_4h.symbols)
 
     _logger.info("P3: dynamic compounding allocation, dense simulation")
@@ -164,10 +169,24 @@ def run_multiscale_compound_engine(
         config=config.dense_sim,
     )
 
+    if p2_error_reason is not None:
+        ledger = ExecutionLedger(
+            timestamps_ns=ledger.timestamps_ns,
+            net_returns_1d=ledger.net_returns_1d,
+            equity_1d=ledger.equity_1d,
+            target_weights_2d=ledger.target_weights_2d,
+            fee_returns_1d=ledger.fee_returns_1d,
+            slippage_returns_1d=ledger.slippage_returns_1d,
+            impact_returns_1d=ledger.impact_returns_1d,
+            funding_returns_1d=ledger.funding_returns_1d,
+            integrity_ok=False,
+            integrity_reasons=(p2_error_reason,),
+        )
+
     from src.domain.futures.data_lake.run_windows import QuarterlyRunWindow
     quarter_window = window if isinstance(window, QuarterlyRunWindow) else None
     if quarter_window is not None:
-        l2_start_idx, l3_start_idx = resolve_quarterly_indices(ledger.timestamps_ns, quarter_window)  # pragma: no cover
+        _, l3_start_idx = resolve_quarterly_indices(ledger.timestamps_ns, quarter_window)  # pragma: no cover
         holdout_start_idx = l3_start_idx  # pragma: no cover
     else:
         resolved_for_manifest = resolve_engine_holdout_id(holdout_id, None)
@@ -223,14 +242,39 @@ def run_multiscale_compound_engine(
 
     resolved_holdout_id = resolve_engine_holdout_id(holdout_id, quarter_window)
     _manifest = holdout_store.get_manifest(resolved_holdout_id)
-    l3_result = holdout_store.consume(
-        holdout_id=resolved_holdout_id,
-        model_version=_manifest.model_version,
-        data_manifest_hash=market.data_manifest_hash,
-        strategy_spec_hash=_manifest.strategy_spec_hash,
-        evaluate=evaluate_fn,
-        universe_state_hash=_manifest.universe_state_hash,
-    )
+
+    if _manifest.data_manifest_hash != market.data_manifest_hash:
+        raise HoldoutReuseError(
+            f"holdout {resolved_holdout_id} hash mismatch: "
+            f"data_hash={_manifest.data_manifest_hash}!={market.data_manifest_hash}"
+        )
+
+    if l2_eval.verdict != L2GateVerdict.PASS:
+        l3_result = evaluate_l3_sealed_holdout(
+            l2_prior_returns=prior_returns,
+            holdout_ledger=holdout_ledger,
+            holdout_manifest=_manifest,
+            config=config.l3,
+        )
+        l3_reasons = list(l3_result.reasons)
+        l3_reasons.append("l2_not_pass")
+        l3_result = L3ValidationResult(
+            verdict=DeploymentVerdict.REJECT,
+            posterior_growth_probability=l3_result.posterior_growth_probability,
+            holdout_days=l3_result.holdout_days,
+            max_drawdown=l3_result.max_drawdown,
+            daily_cvar95=l3_result.daily_cvar95,
+            reasons=tuple(l3_reasons),
+        )
+    else:
+        l3_result = holdout_store.consume(
+            holdout_id=resolved_holdout_id,
+            model_version=_manifest.model_version,
+            data_manifest_hash=market.data_manifest_hash,
+            strategy_spec_hash=_manifest.strategy_spec_hash,
+            evaluate=evaluate_fn,
+            universe_state_hash=_manifest.universe_state_hash,
+        )
 
     stub_handoff = AlphaEventTape(
         events=pa.table({}),

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from src.domain.futures.compound.config import L2BenchmarkConfig, L2GateConfig, L3ValidationConfig
+from src.domain.futures.compound.config import L2GateConfig, L3ValidationConfig
 from src.domain.futures.compound.contracts import (
     DeploymentVerdict,
     ExecutionLedger,
@@ -12,10 +12,9 @@ from src.domain.futures.compound.contracts import (
     SealedHoldoutManifest,
 )
 from src.domain.futures.compound.validation import (
-    aggregate_returns_to_utc_days,
-    build_causal_l2_benchmark,
     evaluate_l2_walk_forward,
     evaluate_l3_sealed_holdout,
+    validate_ledger_before_aggregation,
 )
 
 
@@ -159,3 +158,73 @@ def test_l3_when_liquidated_returns_reject() -> None:
         l2_prior_returns=prior, holdout_ledger=holdout, holdout_manifest=manifest, config=config,
     )
     assert result.verdict is DeploymentVerdict.REJECT
+
+
+class TestValidateLedgerBeforeAggregation:
+    def test_valid_ledger_returns_empty(self) -> None:
+        n = 100
+        ledger = _ledger(np.random.randn(n).astype(np.float64) * 0.001)
+        reasons = validate_ledger_before_aggregation(ledger)
+        assert reasons == ()
+
+    def test_net_return_le_minus_one(self) -> None:
+        returns = np.array([0.0, -1.01, 0.0], dtype=np.float64)
+        ledger = _ledger(returns)
+        reasons = validate_ledger_before_aggregation(ledger)
+        assert "net_return_le_minus_one" in reasons
+
+    def test_non_finite_returns(self) -> None:
+        returns = np.array([0.0, np.nan, 0.0], dtype=np.float64)
+        ledger = _ledger(returns)
+        reasons = validate_ledger_before_aggregation(ledger)
+        assert "non_finite_returns" in reasons
+
+    def test_integrity_ok_false_propagates_reasons(self) -> None:
+        n = 100
+        ledger = _ledger(np.random.randn(n).astype(np.float64) * 0.001, integrity_ok=False)
+        reasons = validate_ledger_before_aggregation(ledger)
+        assert "execution_integrity" in reasons
+
+    def test_non_finite_weights_detected(self) -> None:
+        n = 10
+        returns = np.zeros(n, dtype=np.float64)
+        weights = np.ones((n, 2), dtype=np.float32)
+        weights[5, 0] = np.nan
+        ledger = ExecutionLedger(
+            timestamps_ns=np.arange(n, dtype=np.int64) * (4 * 3_600_000_000_000),
+            net_returns_1d=returns,
+            equity_1d=np.ones(n, dtype=np.float64),
+            target_weights_2d=weights,
+            fee_returns_1d=np.zeros(n, dtype=np.float64),
+            slippage_returns_1d=np.zeros(n, dtype=np.float64),
+            impact_returns_1d=np.zeros(n, dtype=np.float64),
+            funding_returns_1d=np.zeros(n, dtype=np.float64),
+            integrity_ok=True,
+            integrity_reasons=(),
+        )
+        reasons = validate_ledger_before_aggregation(ledger)
+        assert "non_finite_weights" in reasons
+
+
+class TestL2NoEvidenceOnInvalidLedger:
+    def test_net_return_le_minus_one_returns_no_evidence(self) -> None:
+        n = 200
+        returns = np.zeros(n, dtype=np.float64)
+        returns[100] = -1.01
+        ledger = _ledger(returns)
+        daily_timestamps = np.arange(n // 6, dtype=np.int64) * (6 * 4 * 3_600_000_000_000) + (6 * 4 * 3_600_000_000_000 - 1)
+        benchmark = L2BenchmarkSeries(
+            benchmark_id="test",
+            timestamps_ns=daily_timestamps[:n // 6],
+            daily_returns_1d=np.zeros(n // 6, dtype=np.float64),
+            causal_scale_1d=np.ones(n // 6, dtype=np.float64),
+        )
+        result = evaluate_l2_walk_forward(
+            ledger=ledger, fold_ids_1d=np.zeros(n, dtype=np.int16),
+            benchmark=benchmark, candidate_count=5,
+            config=L2GateConfig(), bootstrap_seed=42,
+        )
+        assert result.verdict == L2GateVerdict.NO_EVIDENCE
+        assert result.integrity_ok is False
+        assert "net_return_le_minus_one" in result.reasons
+        assert np.isfinite(result.annualized_log_growth)
