@@ -6,6 +6,7 @@ import pytest
 from src.domain.futures.compound.multiplicity import (
     TrialMultiplicity,
     build_candidate_trial_returns,
+    charge_config_search_multiplicity,
     compute_trial_multiplicity,
     deflated_sharpe_probability,
 )
@@ -66,6 +67,59 @@ class TestComputeTrialMultiplicity:
     def test_not_2d_raises_value_error(self) -> None:
         with pytest.raises(ValueError):
             compute_trial_multiplicity(np.zeros(10))
+
+
+class TestComputeTrialMultiplicityBUG03:
+    def test_compute_trial_multiplicity_single_trial_returns_degenerate_instead_of_raising(self) -> None:
+        daily = np.random.default_rng(42).normal(0.001, 0.01, (1, 365))
+        mult = compute_trial_multiplicity(daily)
+        assert mult.effective_trials == pytest.approx(1.0, abs=1e-9)
+        assert mult.sigma_sharpe == pytest.approx(0.0, abs=1e-9)
+        assert mult.n_trials == 1
+
+
+class TestChargeConfigSearchMultiplicity:
+    def test_charge_config_search_multiplicity_empty_block_returns_base_unchanged(self) -> None:
+        base = TrialMultiplicity(27, 9.0, 0.5)
+        result = charge_config_search_multiplicity(base, np.zeros((0, 100), dtype=np.float64))
+        assert result == base
+
+    def test_single_config_trial_returns_base(self) -> None:
+        base = TrialMultiplicity(27, 9.0, 0.5)
+        result = charge_config_search_multiplicity(base, np.zeros((1, 100), dtype=np.float64))
+        assert result == base
+
+    def test_charge_config_search_multiplicity_duplicates_do_not_lower_effective_trials(self) -> None:
+        rng = np.random.default_rng(42)
+        base_returns = rng.normal(0.001, 0.01, (27, 365))
+        base = compute_trial_multiplicity(base_returns)
+        same_stream = base_returns[:5]
+        config_returns = np.tile(same_stream[0], (5, 1))
+        charged = charge_config_search_multiplicity(base, config_returns)
+        delta = charged.effective_trials - base.effective_trials
+        assert delta < 1e-9
+
+    def test_distinct_configs_increase_effective_trials(self) -> None:
+        rng = np.random.default_rng(42)
+        base_returns = rng.normal(0.001, 0.01, (27, 365))
+        base = compute_trial_multiplicity(base_returns)
+        distinct = rng.normal(0.001, 0.01, (5, 365))
+        charged = charge_config_search_multiplicity(base, distinct)
+        assert charged.effective_trials > base.effective_trials
+
+    def test_monotonic_increasing_with_more_configs(self) -> None:
+        rng = np.random.default_rng(42)
+        base = TrialMultiplicity(27, 9.0, 0.5)
+        c1 = rng.normal(0.001, 0.01, (3, 365))
+        c2 = rng.normal(0.001, 0.01, (10, 365))
+        r1 = charge_config_search_multiplicity(base, c1)
+        r2 = charge_config_search_multiplicity(base, c2)
+        assert r2.effective_trials >= r1.effective_trials
+
+    def test_backwards_compatible_m0(self) -> None:
+        base = TrialMultiplicity(27, 9.2277, 0.5)
+        result = charge_config_search_multiplicity(base, np.zeros((0, 100), dtype=np.float64))
+        assert result.effective_trials == pytest.approx(base.effective_trials, rel=1e-9)
 
 
 class TestDeflatedSharpeProbability:
