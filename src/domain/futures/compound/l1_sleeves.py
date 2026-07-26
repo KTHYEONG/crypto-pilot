@@ -275,6 +275,78 @@ def estimate_sleeve_posteriors(
     return tuple(output)
 
 
+def select_non_redundant_signals(
+    panel: RawSignalPanel,
+    signal_ids: tuple[str, ...],
+    *,
+    fit_end_exclusive: int,
+    rho_threshold: float = 0.90,
+    min_observations: int = 1_000,
+) -> tuple[str, ...]:
+    if fit_end_exclusive <= 0 or fit_end_exclusive > panel.z_3d.shape[0]:
+        raise ValueError(
+            f"fit_end_exclusive={fit_end_exclusive} out of range [1, {panel.z_3d.shape[0]}]"
+        )
+    if not signal_ids:
+        return ()
+
+    desc_map = {d.signal_id: d for d in panel.descriptors}
+    idx_map: dict[str, int] = {}
+    for i, d in enumerate(panel.descriptors):
+        idx_map[d.signal_id] = i
+
+    survivor = list(signal_ids)
+    z_fit = panel.z_3d[:fit_end_exclusive]
+    valid_fit = panel.valid_3d[:fit_end_exclusive]
+
+    removed: set[str] = set()
+    i = 0
+    while i < len(survivor):
+        if survivor[i] in removed:
+            i += 1
+            continue
+        j = i + 1
+        while j < len(survivor):
+            if survivor[j] in removed or survivor[i] not in idx_map or survivor[j] not in idx_map:
+                j += 1
+                continue
+            zi = z_fit[:, :, idx_map[survivor[i]]].ravel().astype(np.float64)
+            zj = z_fit[:, :, idx_map[survivor[j]]].ravel().astype(np.float64)
+            vi = valid_fit[:, :, idx_map[survivor[i]]].ravel()
+            vj = valid_fit[:, :, idx_map[survivor[j]]].ravel()
+            valid = vi & vj & np.isfinite(zi) & np.isfinite(zj)
+            n_valid = int(valid.sum())
+            if n_valid < min_observations:
+                j += 1
+                continue
+            rho = float(np.corrcoef(zi[valid], zj[valid])[0, 1])
+            if abs(rho) >= rho_threshold:
+                hi_a = desc_map[survivor[i]].target_horizon_hours
+                hi_b = desc_map[survivor[j]].target_horizon_hours
+                if hi_a < hi_b:
+                    removed.add(survivor[i])
+                    break
+                elif hi_b < hi_a:
+                    removed.add(survivor[j])
+                    j += 1
+                else:
+                    if survivor[i] > survivor[j]:
+                        removed.add(survivor[i])
+                        break
+                    else:
+                        removed.add(survivor[j])
+                        j += 1
+            else:
+                j += 1
+        if survivor[i] in removed:
+            survivor = [s for s in survivor if s not in removed]
+            i = 0
+            continue
+        i += 1
+
+    return tuple(s for s in signal_ids if s not in removed)
+
+
 def combine_posterior_sleeves(
     panel: RawSignalPanel,
     sleeves: tuple[L1SleevePosterior, ...],
@@ -282,7 +354,6 @@ def combine_posterior_sleeves(
     folds: tuple[CausalFold, ...],
     config: HandoffConfig,
 ) -> CalibratedForecastPanel:
-    del folds, config
     t_total, n_symbols, _ = panel.z_3d.shape
 
     def empty() -> CalibratedForecastPanel:
@@ -293,43 +364,59 @@ def combine_posterior_sleeves(
             np.zeros((t_total, n_symbols, 1), dtype=np.float32), (), (), "",
         )
 
-    active = [sleeve for sleeve in sleeves if sleeve.admitted]
+    active = [s for s in sleeves if s.admitted]
     if not active:
         return empty()
 
-    families = sorted({sleeve.family for sleeve in active})
-    ids: list[str] = []
-    family_mu: list[NDArray[np.float32]] = []
-    for family in families:
-        selected = [sleeve for sleeve in active if sleeve.family == family]
-        quality = np.asarray([
-            max(sleeve.posterior_positive_probability - 0.5, 0.0) ** 2
-            / (sleeve.standard_error ** 2 + 1e-6) * sleeve.residual_novelty
-            for sleeve in selected
-        ], dtype=np.float64)
-        if float(quality.sum()) <= 0.0:
-            continue
-        quality /= quality.sum()
-        mu_combined = np.zeros((t_total, n_symbols), dtype=np.float64)
-        for q, sleeve in zip(quality, selected, strict=True):
-            signal_idx = next(i for i, d in enumerate(panel.descriptors) if d.signal_id == sleeve.signal_id)
-            sleeve_mu = q * panel.z_3d[:, :, signal_idx].astype(np.float64)
-            mask_2d = sleeve.member_mask_1d.reshape(1, -1)
-            sleeve_mu = np.where(mask_2d, sleeve_mu, 0.0)
-            mu_combined += sleeve_mu
-        family_mu.append(mu_combined.astype(np.float32))
-        ids.extend(sleeve.signal_id for sleeve in selected)
+    dedup_ids = select_non_redundant_signals(
+        panel,
+        tuple(sorted({s.signal_id for s in active})),
+        fit_end_exclusive=folds[0].fit_end_exclusive,
+        rho_threshold=config.dedup_rho_threshold,
+        min_observations=config.min_dedup_observations,
+    )
 
-    if not family_mu:
+    if not dedup_ids:
         return empty()
 
-    mu = np.sum(np.stack(family_mu, axis=2), axis=2)
-    gross = np.sum(np.abs(mu), axis=1, keepdims=True)
-    mu = np.clip(mu / np.where(gross > 1e-12, gross, 1.0), -0.10, 0.10).astype(np.float32)
+    families = sorted({s.family for s in active if s.signal_id in dedup_ids})
+    all_mu_3d: list[NDArray[np.float32]] = []
+    mu_sum = np.zeros((t_total, n_symbols), dtype=np.float64)
+
+    for sig_id in dedup_ids:
+        sig_sleeves = [s for s in active if s.signal_id == sig_id]
+        signal_idx = next(i for i, d in enumerate(panel.descriptors) if d.signal_id == sig_id)
+        member_mask = np.zeros(n_symbols, dtype=bool)
+        for s in sig_sleeves:
+            member_mask |= s.member_mask_1d
+        sig_mu = panel.z_3d[:, :, signal_idx].astype(np.float64)
+        sig_mu = np.where(member_mask.reshape(1, -1), sig_mu, 0.0)
+        mu_sum += sig_mu
+
+    n_surviving = len(dedup_ids)
+    mu = (mu_sum / n_surviving).astype(np.float32)
+
+    for family in families:
+        fam_sigs = [s for s in dedup_ids if any(
+            a.family == family for a in active if a.signal_id == s
+        )]
+        fam_mu = np.zeros((t_total, n_symbols), dtype=np.float64)
+        for sig_id in fam_sigs:
+            sig_sleeves = [s for s in active if s.signal_id == sig_id]
+            signal_idx = next(i for i, d in enumerate(panel.descriptors) if d.signal_id == sig_id)
+            member_mask = np.zeros(n_symbols, dtype=bool)
+            for s in sig_sleeves:
+                member_mask |= s.member_mask_1d
+            s_mu = panel.z_3d[:, :, signal_idx].astype(np.float64)
+            s_mu = np.where(member_mask.reshape(1, -1), s_mu, 0.0)
+            fam_mu += s_mu / n_surviving
+        all_mu_3d.append(fam_mu.astype(np.float32))
+
+    mu_3d = np.stack(all_mu_3d, axis=2) if all_mu_3d else np.zeros((t_total, n_symbols, 0), dtype=np.float32)
     return CalibratedForecastPanel(
         panel.decision_timestamps_ns, panel.symbols,
         mu, np.full((t_total, n_symbols), np.nan, dtype=np.float32),
-        np.stack(family_mu, axis=2), tuple(families), tuple(ids), "",
+        mu_3d, tuple(families), tuple(dedup_ids), "",
     )
 
 
@@ -487,7 +574,7 @@ def estimate_cluster_sleeve_posteriors(
                 aggregated = aggregated[np.isfinite(aggregated)]
                 fold_return = float(np.mean(aggregated)) if aggregated.size else 0.0
 
-                admitted = probability >= 0.65 and fold_return > 0.0
+                admitted = probability >= 0.65
                 preliminary_viable.append({
                     "cf": cf, "fold": fold, "cluster_id": cluster_id,
                     "sym_mask": sym_mask, "sym_indices": sym_indices,
