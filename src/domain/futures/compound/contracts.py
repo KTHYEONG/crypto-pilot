@@ -448,6 +448,7 @@ class SealedHoldoutManifest:
     strategy_spec_hash: str = ""
     universe_state_hash: str = ""
     first_consumed_at_ns: int | None = None
+    consumed_spec_hash: str = ""
 
 
 @dataclass(slots=True, frozen=True)
@@ -789,27 +790,41 @@ class CandidateTrialLedger:
                     risk_policy_hash TEXT NOT NULL,
                     cutoff_time_ns INTEGER NOT NULL,
                     created_at_ns INTEGER NOT NULL,
+                    l2_daily_returns BLOB,
                     PRIMARY KEY (candidate_hash, cutoff_time_ns)
                 )
             """)
+            columns = {
+                str(row[1]) for row in self._conn.execute("PRAGMA table_info(candidate_trials)")
+            }
+            if "l2_daily_returns" not in columns:
+                self._conn.execute(
+                    "ALTER TABLE candidate_trials ADD COLUMN l2_daily_returns BLOB"
+                )
             self._conn.commit()
         return self._conn
 
-    def register(self, trial: CandidateTrial) -> int:
+    def register(
+        self, trial: CandidateTrial, *,
+        l2_daily_returns: NDArray[np.float64] | None = None,
+    ) -> int:
         conn = self._ensure_db()
         now_ns = int(time.time_ns())
+        blob: bytes | None = l2_daily_returns.tobytes() if l2_daily_returns is not None else None
         try:
             conn.execute(
                 """
                 INSERT INTO candidate_trials
                     (candidate_hash, strategy_spec_hash, descriptor_ids,
-                     risk_policy_hash, cutoff_time_ns, created_at_ns)
-                VALUES (?, ?, ?, ?, ?, ?)
+                     risk_policy_hash, cutoff_time_ns, created_at_ns,
+                     l2_daily_returns)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     trial.candidate_hash, trial.strategy_spec_hash,
                     json.dumps(list(trial.descriptor_ids)),
                     trial.risk_policy_hash, trial.cutoff_time_ns, now_ns,
+                    blob,
                 ),
             )
             conn.commit()
@@ -818,10 +833,10 @@ class CandidateTrialLedger:
             conn.execute(
                 """
                 UPDATE candidate_trials
-                SET created_at_ns = ?
+                SET created_at_ns = ?, l2_daily_returns = ?
                 WHERE candidate_hash = ? AND cutoff_time_ns = ?
                 """,
-                (now_ns, trial.candidate_hash, trial.cutoff_time_ns),
+                (now_ns, blob, trial.candidate_hash, trial.cutoff_time_ns),
             )
             conn.commit()
             return 0
@@ -834,6 +849,35 @@ class CandidateTrialLedger:
         ).fetchone()
         count = int(row[0]) if row is not None else 0
         return max(count, floor)
+
+    def load_trial_returns(
+        self, *, cutoff_time_ns: int, exclude_candidate_hash: str = "",
+        min_days: int = 30,
+    ) -> NDArray[np.float64]:
+        conn = self._ensure_db()
+        if exclude_candidate_hash:
+            rows = conn.execute(
+                "SELECT l2_daily_returns FROM candidate_trials WHERE cutoff_time_ns = ? AND candidate_hash != ?",
+                (cutoff_time_ns, exclude_candidate_hash),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT l2_daily_returns FROM candidate_trials WHERE cutoff_time_ns = ?",
+                (cutoff_time_ns,),
+            ).fetchall()
+        arrays: list[NDArray[np.float64]] = []
+        for (blob,) in rows:
+            if blob is None:
+                continue
+            arr = np.frombuffer(blob, dtype=np.float64)
+            if arr.shape[0] < min_days:
+                continue
+            arrays.append(arr)
+        if not arrays:
+            return np.zeros((0, 0), dtype=np.float64)
+        min_len = min(a.shape[0] for a in arrays)
+        stacked = np.stack([a[:min_len] for a in arrays], axis=0)
+        return stacked
 
 
 @dataclass(slots=True, frozen=True)
