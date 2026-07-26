@@ -1,9 +1,14 @@
 from __future__ import annotations
 
+import json
+import sqlite3
+import time
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import date
 from enum import StrEnum
-from typing import Literal
+from pathlib import Path
+from typing import Literal, Protocol
 
 import numpy as np
 import pyarrow as pa
@@ -471,6 +476,7 @@ class CompoundEngineResult:
     ledger: ExecutionLedger
     l2: L2Evaluation
     l3: L3ValidationResult
+    deployment_candidate: DeploymentCandidate | None = None
 
 
 @dataclass(slots=True, frozen=True)
@@ -710,6 +716,177 @@ class HandoffAdmissionEvidence:
 class HandoffResult:
     forecast: CalibratedForecastPanel
     evidence: HandoffAdmissionEvidence
+    admitted_sleeves: tuple[L1SleevePosterior, ...] = ()
+
+
+@dataclass(slots=True, frozen=True)
+class QuarterlyBarBoundaries:
+    acquisition_start: int
+    l1_start: int
+    l2_start: int
+    l3_start: int
+    cutoff_exclusive: int
+
+    def __post_init__(self) -> None:
+        if not (self.acquisition_start < self.l1_start < self.l2_start < self.l3_start < self.cutoff_exclusive):
+            raise ValueError(
+                f"boundaries must be strictly increasing: "
+                f"acq={self.acquisition_start} < l1={self.l1_start} "
+                f"< l2={self.l2_start} < l3={self.l3_start} "
+                f"< cutoff={self.cutoff_exclusive}"
+            )
+
+
+@dataclass(slots=True, frozen=True)
+class CompoundWindowAudit:
+    passed: bool
+    core_coverage_ratio: float
+    dataset_status: tuple[StrategyDataCoverageEntry, ...]
+    reasons: tuple[str, ...]
+
+    def __post_init__(self) -> None:
+        if self.passed and self.reasons:
+            raise ValueError("passed audit must have empty reasons")
+        if not self.passed and not self.reasons:
+            raise ValueError("failed audit must have at least one reason")
+
+
+class TrialIntegrityError(RuntimeError):
+    ...
+
+
+@dataclass(slots=True, frozen=True)
+class CandidateTrial:
+    candidate_hash: str
+    strategy_spec_hash: str
+    descriptor_ids: tuple[str, ...]
+    risk_policy_hash: str
+    cutoff_time_ns: int
+
+    def __post_init__(self) -> None:
+        if not self.candidate_hash:
+            raise ValueError("candidate_hash is required")
+        if not self.strategy_spec_hash:
+            raise ValueError("strategy_spec_hash is required")
+
+
+class CandidateTrialLedger:
+    def __init__(self, db_path: str | Path) -> None:
+        self._db_path = Path(db_path)
+        self._conn: sqlite3.Connection | None = None
+
+    def _ensure_db(self) -> sqlite3.Connection:
+        if self._conn is None:
+            self._db_path.parent.mkdir(parents=True, exist_ok=True)
+            self._conn = sqlite3.connect(str(self._db_path))
+            self._conn.execute("PRAGMA journal_mode=WAL")
+            self._conn.execute("PRAGMA synchronous=EXTRA")
+            self._conn.execute("""
+                CREATE TABLE IF NOT EXISTS candidate_trials (
+                    candidate_hash TEXT NOT NULL,
+                    strategy_spec_hash TEXT NOT NULL,
+                    descriptor_ids TEXT NOT NULL,
+                    risk_policy_hash TEXT NOT NULL,
+                    cutoff_time_ns INTEGER NOT NULL,
+                    created_at_ns INTEGER NOT NULL,
+                    PRIMARY KEY (candidate_hash, cutoff_time_ns)
+                )
+            """)
+            self._conn.commit()
+        return self._conn
+
+    def register(self, trial: CandidateTrial) -> int:
+        conn = self._ensure_db()
+        now_ns = int(time.time_ns())
+        try:
+            conn.execute(
+                """
+                INSERT INTO candidate_trials
+                    (candidate_hash, strategy_spec_hash, descriptor_ids,
+                     risk_policy_hash, cutoff_time_ns, created_at_ns)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    trial.candidate_hash, trial.strategy_spec_hash,
+                    json.dumps(list(trial.descriptor_ids)),
+                    trial.risk_policy_hash, trial.cutoff_time_ns, now_ns,
+                ),
+            )
+            conn.commit()
+            return 1
+        except sqlite3.IntegrityError:
+            conn.execute(
+                """
+                UPDATE candidate_trials
+                SET created_at_ns = ?
+                WHERE candidate_hash = ? AND cutoff_time_ns = ?
+                """,
+                (now_ns, trial.candidate_hash, trial.cutoff_time_ns),
+            )
+            conn.commit()
+            return 0
+
+    def distinct_count(self, *, cutoff_time_ns: int, floor: int = 27) -> int:
+        conn = self._ensure_db()
+        row = conn.execute(
+            "SELECT COUNT(DISTINCT candidate_hash) FROM candidate_trials WHERE cutoff_time_ns = ?",
+            (cutoff_time_ns,),
+        ).fetchone()
+        count = int(row[0]) if row is not None else 0
+        return max(count, floor)
+
+
+@dataclass(slots=True, frozen=True)
+class DeploymentCandidate:
+    active_signal_ids: tuple[str, ...]
+    descriptors: tuple[SignalDescriptor, ...]
+    orientation_signs: tuple[int, ...]
+    vote_weights: tuple[float, ...]
+    model_version: str
+    strategy_spec_hash: str
+    fold_manifest_hash: str
+    trial_count: int
+
+    def __post_init__(self) -> None:
+        if not self.active_signal_ids:
+            raise ValueError("active_signal_ids must be non-empty")
+        if len(self.active_signal_ids) != len(self.descriptors):
+            raise ValueError("active_signal_ids and descriptors must match")
+        if len(self.orientation_signs) != len(self.descriptors):
+            raise ValueError("orientation_signs must match descriptors")
+        if len(self.vote_weights) != len(self.descriptors):
+            raise ValueError("vote_weights must match descriptors")
+        if not self.model_version:
+            raise ValueError("model_version is required")
+        if not self.strategy_spec_hash:
+            raise ValueError("strategy_spec_hash is required")
+        if not self.fold_manifest_hash:
+            raise ValueError("fold_manifest_hash is required")
+        if self.trial_count < 0:
+            raise ValueError("trial_count must be >= 0")
+
+
+@dataclass(slots=True, frozen=True)
+class DeploymentBundle:
+    schema_version: int
+    promotion_id: str
+    candidate: DeploymentCandidate
+    data_manifest_hash: str
+    universe_state_hash: str
+    config_payload: dict[str, object]
+    l2_payload: dict[str, object]
+    l3_payload: dict[str, object]
+    sha256: str = ""
+
+    def __post_init__(self) -> None:
+        if not self.promotion_id:
+            raise ValueError("promotion_id is required")
+
+
+class TargetWeightSink(Protocol):
+    def rebalance(
+        self, *, target_weights: Mapping[str, float], idempotency_key: str
+    ) -> None: ...
 
 
 __all__ = [
@@ -724,6 +901,8 @@ __all__ = [
     "AlphaLifecycleEvidence",
     "CalibratedForecastPanel",
     "CalibrationTarget",
+    "CandidateTrial",
+    "CandidateTrialLedger",
     "CausalAlphaFold",
     "CausalClusterFold",
     "CausalFold",
@@ -734,7 +913,10 @@ __all__ = [
     "CompoundEngineResult",
     "CompoundPipelineOutcome",
     "CompoundUniverseResult",
+    "CompoundWindowAudit",
     "CovariancePath",
+    "DeploymentBundle",
+    "DeploymentCandidate",
     "DeploymentVerdict",
     "EdgeEvidence",
     "ExecutionCostFrame",
@@ -756,6 +938,7 @@ __all__ = [
     "MultiTimeframeBars",
     "MultiscaleAlphaDefinition",
     "PortfolioDecision",
+    "QuarterlyBarBoundaries",
     "RawAlphaTape",
     "RawSignalPanel",
     "RiskOverlayResult",
@@ -765,6 +948,8 @@ __all__ = [
     "SignalDescriptor",
     "StrategyDataCoverage",
     "StrategyDataCoverageEntry",
+    "TargetWeightSink",
     "TimeframeBarCube",
+    "TrialIntegrityError",
     "UniverseLedgerCoverage",
 ]

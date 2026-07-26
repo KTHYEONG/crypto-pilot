@@ -20,28 +20,30 @@ _logger = logging.getLogger(__name__)
 
 
 def build_folds_4h(
-    n_bars: int, config: CalibrationConfig, max_target_horizon_bars: int = 0,
+    n_bars: int, config: CalibrationConfig, max_target_horizon_bars: int = 0, *, start_offset: int = 0,
 ) -> tuple[CausalFold, ...]:
     n_folds = config.n_folds
     purge = max(config.purge_bars, max_target_horizon_bars)
     embargo = config.embargo_bars
     n_sections = n_folds + 1
-    if n_bars < n_sections * (purge + embargo + 2):
+    available_bars = n_bars - start_offset
+    if available_bars < n_sections * (purge + embargo + 2):
         raise CausalityError(
-            f"n_bars={n_bars} insufficient for {n_folds} folds with purge={purge}, embargo={embargo}",
+            f"n_bars={n_bars} start_offset={start_offset} insufficient for "
+            f"{n_folds} folds with purge={purge}, embargo={embargo}",
         )
-    fold_size = (n_bars - purge - embargo) // n_sections
+    fold_size = (available_bars - purge - embargo) // n_sections
     folds: list[CausalFold] = []
     for i in range(n_folds):
-        fit_end = (i + 1) * fold_size
-        cal_start = max(0, fit_end - purge)
+        fit_end = start_offset + (i + 1) * fold_size
+        cal_start = max(start_offset, fit_end - purge)
         oos_start = fit_end + purge
         oos_end = min(oos_start + fold_size, n_bars)
         if i == n_folds - 1:
             oos_end = n_bars - embargo
         folds.append(CausalFold(
             fold_id=i,
-            fit_start=0,
+            fit_start=start_offset,
             fit_end_exclusive=fit_end,
             calibration_start=cal_start,
             calibration_end_exclusive=fit_end,
