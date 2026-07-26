@@ -61,7 +61,7 @@ class TestSimulateDensePortfolio:
         )
 
         expected_cost = 0.5 * 8.0 * 1e-4
-        gross_101 = 0.5 * np.log(1.001)
+        gross_101 = 0.5 * 0.001
         assert ledger.net_returns_1d[101] == pytest.approx(gross_101 - expected_cost, abs=1e-6)
 
     def test_funding_cost_applied(self, two_asset_bars):
@@ -117,5 +117,23 @@ class TestSimulateDensePortfolio:
         )
 
         expected_cost = 0.5 * 8.0 * 1e-4
-        gross_101 = 0.5 * np.log(1.001)
+        gross_101 = 0.5 * 0.001
         assert ledger.net_returns_1d[101] == pytest.approx(gross_101 - expected_cost, abs=1e-6)
+
+    def test_simple_return_accounting(self, two_asset_bars):
+        n_bars = len(two_asset_bars.timestamps_ns)
+        n_syms = len(two_asset_bars.symbols)
+        w = np.zeros((n_bars, n_syms), dtype=np.float64)
+        w[100:, 0] = 0.5
+
+        ledger = simulate_dense_portfolio(
+            two_asset_bars, w,
+            funding_1h_2d=np.zeros((n_bars * 4, n_syms), dtype=np.float32),
+            cost_bps=0.0, config=self._cfg(),
+        )
+
+        close_t = two_asset_bars.close_2d[101, 0]
+        close_prev = two_asset_bars.close_2d[100, 0]
+        simple_ret = float(close_t / close_prev - 1.0)
+        expected = 0.5 * simple_ret
+        assert ledger.net_returns_1d[101] == pytest.approx(expected, abs=1e-7)
