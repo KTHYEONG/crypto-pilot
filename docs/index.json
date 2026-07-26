@@ -584,5 +584,8 @@
   },
   "src/domain/futures/compound/deployment.py": {
     "testing": "tests/unit/domain/futures/compound/test_deployment.py"
+  },
+  "src/application/futures/runner/compound_universe.py": {
+    "testing": "tests/unit/application/futures/runner/test_compound_universe.py"
   }
 }
