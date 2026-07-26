@@ -233,26 +233,43 @@ def _check_spec_compliance(spec_path: str) -> tuple[int, list[JsonDiag]]:
                     d = {"file": fh, "line": 0, "error": msg, "fix_hint": f"Implement {kind} {name} in {fh}"}
                     diagnostics.append(d)
             else:
-                pat = rf"^(?:class|def)\s+{re.escape(name)}\b"
-                if not re.search(pat, sf_content, re.MULTILINE):
+                # Support dotted "ClassName.method_name" contract names by
+                # locating the method AST node inside the named class body.
+                owner, _, leaf = name.rpartition(".")
+                target_node: ast.AST | None = None
+                found_impl = False
+                try:
+                    tree = ast.parse(sf_content, filename=fh)
+                    if owner:
+                        for node in ast.walk(tree):
+                            if isinstance(node, ast.ClassDef) and node.name == owner:
+                                for member in node.body:
+                                    if (
+                                        isinstance(member, (ast.FunctionDef, ast.AsyncFunctionDef))
+                                        and member.name == leaf
+                                    ):
+                                        target_node = member
+                                        found_impl = True
+                    else:
+                        for node in ast.walk(tree):
+                            if (
+                                isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
+                                and node.name == name
+                            ):
+                                target_node = node
+                                found_impl = True
+                except Exception:  # noqa: S110
+                    pat = rf"^(?:class|def)\s+{re.escape(name)}\b"
+                    found_impl = bool(re.search(pat, sf_content, re.MULTILINE))
+
+                if not found_impl:
                     msg = f"Spec: {kind} '{name}' not implemented"
                     d = {"file": fh, "line": 0, "error": msg, "fix_hint": f"Implement {kind} {name} in {fh}"}
                     diagnostics.append(d)
-                else:
-                    # AST Stub Check
-                    try:
-                        tree = ast.parse(sf_content, filename=fh)
-                        for node in ast.walk(tree):
-                            if (
-                                isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
-                                and node.name == name
-                                and _is_stub_node(node)
-                            ):
-                                msg = f"Spec: {kind} '{name}' is a stub or dummy implementation (pass / Ellipsis / NotImplementedError / logger+dummy return)"
-                                d = {"file": fh, "line": node.lineno, "error": msg, "fix_hint": f"Implement real logic in {name}"}
-                                diagnostics.append(d)
-                    except Exception:  # noqa: S110
-                        pass
+                elif target_node is not None and _is_stub_node(target_node):
+                    msg = f"Spec: {kind} '{name}' is a stub or dummy implementation (pass / Ellipsis / NotImplementedError / logger+dummy return)"
+                    d = {"file": fh, "line": target_node.lineno, "error": msg, "fix_hint": f"Implement real logic in {name}"}
+                    diagnostics.append(d)
 
     for s in contract.get("scenarios", []):
         test_name: str = s.get("name", "")
