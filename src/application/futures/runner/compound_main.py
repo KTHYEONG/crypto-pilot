@@ -227,6 +227,7 @@ def run_multiscale_compound_main(config: CompoundRunConfig) -> RunnerResult:
             window=window,
             recipe_plan=prepared.recipe_plan,
             holdout_store=holdout_store,
+            holdout_id=holdout_id,
             config=engine_config,
         )
 
