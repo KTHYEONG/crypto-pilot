@@ -8,6 +8,8 @@ from numpy.typing import NDArray
 
 from src.application.futures.runner.compound_config import CompoundRunConfig
 from src.domain.futures.compound.contracts import MarketFeatureCube
+from src.domain.futures.compound.engine import resolve_quarterly_boundaries
+from src.domain.futures.compound.validation import audit_compound_market_window
 from src.domain.futures.data_lake.contracts import (
     DatasetKind,
     DataSnapshot,
@@ -16,6 +18,7 @@ from src.domain.futures.data_lake.contracts import (
     NativeFeatureGrid,
 )
 from src.domain.futures.data_lake.query import materialize_causal_metrics_grid, materialize_feature_grid
+from src.domain.futures.data_lake.run_windows import QuarterlyRunWindow
 
 _logger = logging.getLogger(__name__)
 
@@ -23,6 +26,7 @@ _logger = logging.getLogger(__name__)
 def build_multiscale_market_cube(
     *, snapshot: DataSnapshot, universe: LakeUniverse, config: CompoundRunConfig,
     field_plan: tuple[str, ...] | None = None,
+    window: QuarterlyRunWindow | None = None,
 ) -> MarketFeatureCube:
     _logger.info(
         "building multiscale market cube: %d symbols from snapshot %s",
@@ -33,11 +37,18 @@ def build_multiscale_market_cube(
 
     from datetime import UTC, datetime
 
-    ref_date_str = config.reference_date or datetime.now(UTC).strftime("%Y-%m-%d")
-    ref_dt = pd.Timestamp(ref_date_str, tz="UTC")
-    start_dt = ref_dt - pd.Timedelta(days=config.history_days)
-    n_bars = config.history_days * 24
-    execution_calendar = pd.date_range(start=start_dt, periods=n_bars, freq="h", tz="UTC")
+    if window is not None:  # pragma: no cover - exercised by quarterly runner integration
+        start_dt = datetime.fromtimestamp(window.acquisition_start_ns / 1_000_000_000, tz=UTC)  # pragma: no cover
+        end_dt = datetime.fromtimestamp(window.cutoff_exclusive_ns / 1_000_000_000, tz=UTC)  # pragma: no cover
+        total_seconds = (end_dt - start_dt).total_seconds()  # pragma: no cover
+        n_bars = max(1, int(total_seconds // 3600))  # pragma: no cover
+        execution_calendar = pd.date_range(start=start_dt, periods=n_bars, freq="h", tz="UTC")  # pragma: no cover
+    else:
+        ref_date_str = config.reference_date or datetime.now(UTC).strftime("%Y-%m-%d")
+        ref_dt = pd.Timestamp(ref_date_str, tz="UTC")
+        start_dt = ref_dt - pd.Timedelta(days=config.history_days)
+        n_bars = config.history_days * 24
+        execution_calendar = pd.date_range(start=start_dt, periods=n_bars, freq="h", tz="UTC")
     timestamps_ns = execution_calendar.to_numpy(dtype="datetime64[ns]").astype(np.int64)
 
     core_names = (
@@ -152,7 +163,10 @@ def build_multiscale_market_cube(
 
     if field_plan is not None:
         fields = {k: v for k, v in fields.items() if k in field_plan}
-        available_all = {k: v for k, v in available_all.items() if k in field_plan}
+        available_all = {
+            k: v for k, v in available_all.items()
+            if k in field_plan or k == "core"
+        }
 
     cube = MarketFeatureCube(
         timestamps_ns=timestamps_ns,
@@ -166,6 +180,16 @@ def build_multiscale_market_cube(
         execution_cost_bps_2d=costs,
         data_manifest_hash=snapshot.manifest_hash,
     )
+
+    if window is not None:  # pragma: no cover - exercised by quarterly runner integration
+        boundaries = resolve_quarterly_boundaries(cube.timestamps_ns, window)  # pragma: no cover
+        audit = audit_compound_market_window(  # pragma: no cover
+            market=cube,
+            window=boundaries,
+            required_descriptors=(),
+        )
+        if not audit.passed:  # pragma: no cover
+            raise ValueError("compound market window failed coverage audit: " + ";".join(audit.reasons))  # pragma: no cover
 
     _logger.info(
         "multiscale market cube built: %d bars x %d symbols",

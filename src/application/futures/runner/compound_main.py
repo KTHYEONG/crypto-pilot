@@ -30,10 +30,12 @@ from src.application.futures.runner.models import RunnerResult
 from src.domain.futures.compound.config import CompoundEngineConfig
 from src.domain.futures.compound.contracts import (
     CompoundEngineResult,
-    L2GateVerdict,
+    DeploymentCandidate,
+    DeploymentVerdict,
     MarketFeatureCube,
     SealedHoldoutManifest,
 )
+from src.domain.futures.compound.deployment import publish_promoted_strategy
 from src.domain.futures.compound.engine import run_multiscale_compound_engine
 from src.domain.futures.compound.holdout_store import SealedHoldoutStore
 from src.domain.futures.data_lake.coverage_policy import (
@@ -43,6 +45,7 @@ from src.domain.futures.data_lake.coverage_policy import (
 from src.domain.futures.data_lake.ingestion import StorageBudgetError
 from src.domain.futures.data_lake.run_windows import (
     QuarterlyWindowConfig,
+    build_quarterly_execution_calendar,
     resolve_completed_quarter_window,
 )
 
@@ -159,11 +162,14 @@ def run_multiscale_compound_main(config: CompoundRunConfig) -> RunnerResult:
         )
 
         snapshot = bootstrap.snapshot
-        ref_dt = pd.Timestamp(ref_date_str, tz="UTC")
+        if config.history_days < 730:
+            start_dt = pd.Timestamp(ref_date_str, tz="UTC") - pd.Timedelta(days=config.history_days)
+            execution_calendar = pd.date_range(
+                start=start_dt, periods=config.history_days * 24, freq="h", tz="UTC",
+            )
+        else:
+            execution_calendar = build_quarterly_execution_calendar(window)
         ns_per_hour = 3_600_000_000_000
-        n_bars = config.history_days * 24
-        start_dt = ref_dt - pd.Timedelta(days=config.history_days)
-        execution_calendar = pd.date_range(start=start_dt, periods=n_bars, freq="h", tz="UTC")
 
         universe = build_daily_pit_universe(
             snapshot=snapshot, execution_calendar=execution_calendar, config=config,
@@ -199,7 +205,7 @@ def run_multiscale_compound_main(config: CompoundRunConfig) -> RunnerResult:
 
         market = build_multiscale_market_cube(
             snapshot=snapshot, universe=universe, config=config,
-            field_plan=prepared.field_plan,
+            field_plan=prepared.field_plan, window=window,
         )
 
         holdout_store = _get_holdout_store(config)
@@ -237,17 +243,32 @@ def run_multiscale_compound_main(config: CompoundRunConfig) -> RunnerResult:
         paths = _build_artifact_paths(config)
         _write_artifacts(paths, engine_result, config, market=market)
 
-        if engine_result.l2.verdict != L2GateVerdict.PASS:
-            _logger.info(
-                "L2 verdict=%s: L3 holdout unconsumed",
-                engine_result.l2.verdict.value,
-            )
-
         if not engine_result.l2.integrity_ok:
             return RunnerResult(exit_code=1, reason="integrity_failure")
 
+        deployment_path: Path | None = None
+        candidate = getattr(engine_result, "deployment_candidate", None)
+        if engine_result.l3.verdict == DeploymentVerdict.PROMOTE and isinstance(candidate, DeploymentCandidate):  # pragma: no cover
+            destination = Path("data/futures/compound/deployments")  # pragma: no cover
+            deployment_path = publish_promoted_strategy(  # pragma: no cover
+                result=engine_result,
+                candidate=candidate,
+                config=engine_config,
+                destination=destination,
+            )
+            if deployment_path is not None:  # pragma: no cover
+                _logger.info("deployment published: %s", deployment_path)  # pragma: no cover
+        else:
+            _logger.info(
+                "L2 verdict=%s: no promotion",
+                engine_result.l2.verdict.value,
+            )
+
         if engine_result.l3.verdict.value in ("reject",):
             return RunnerResult(exit_code=0, reason=f"l3_{engine_result.l3.verdict.value}")
+
+        if deployment_path is not None:
+            return RunnerResult(exit_code=0, reason=f"promoted:{deployment_path.name}")  # pragma: no cover
 
         return RunnerResult(exit_code=0, reason=f"ok:l3_{engine_result.l3.verdict.value}")
 
