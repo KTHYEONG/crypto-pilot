@@ -24,6 +24,8 @@ from src.domain.futures.data_lake.coverage_policy import (
 )
 from src.domain.futures.data_lake.ingestion import (
     build_ingestion_plan,
+    restrict_to_complete_core_symbols,
+    restrict_to_historically_available_core_symbols,
     sync_futures_data_lake,
 )
 from src.domain.futures.data_lake.reconciliation import (
@@ -56,7 +58,9 @@ def build_data_lake_runtime(config: CompoundRunConfig) -> DataLakeRuntime:
 
 
 def prepare_data_snapshot(
-    *, config: CompoundRunConfig, runtime: DataLakeRuntime
+    *, config: CompoundRunConfig, runtime: DataLakeRuntime,
+    acquisition_start: date | None = None,
+    coverage_end: date | None = None,
 ) -> DataSnapshot:
     _logger.info("preparing data snapshot for reference_date=%s", config.reference_date)
     reference_time_ms: int = 0
@@ -70,12 +74,37 @@ def prepare_data_snapshot(
 
     ingestion_plan = build_ingestion_plan(
         config=config.data_lake,
-        reference_date=date.fromtimestamp(reference_time_ms // 1000),
+        reference_date=coverage_end or date.fromtimestamp(reference_time_ms // 1000),
+        start_date=acquisition_start,
     )
 
     if runtime.catalog.has_complete_coverage(snapshot=snapshot, plan=ingestion_plan):
         _logger.info("local snapshot complete: %s", snapshot.snapshot_id)
         return snapshot
+
+    if ingestion_plan.broad_symbols:
+        ingestion_plan = restrict_to_historically_available_core_symbols(
+            plan=ingestion_plan,
+            client=runtime.client if config.sync == SyncMode.AUTO else None,
+            catalog=runtime.catalog,
+        )
+
+    if runtime.catalog.has_complete_coverage(snapshot=snapshot, plan=ingestion_plan):
+        _logger.info("local snapshot complete: %s", snapshot.snapshot_id)
+        return snapshot
+
+    if ingestion_plan.broad_symbols:
+        try:
+            complete_plan = restrict_to_complete_core_symbols(
+                plan=ingestion_plan, catalog=runtime.catalog,
+            )
+        except DataCoverageError:
+            complete_plan = None
+        if complete_plan is not None and runtime.catalog.has_complete_coverage(
+            snapshot=snapshot, plan=complete_plan,
+        ):
+            _logger.info("local CORE snapshot complete: %s", snapshot.snapshot_id)
+            return snapshot
 
     if config.sync == SyncMode.LOCAL:
         raise DataCoverageError(
@@ -90,7 +119,15 @@ def prepare_data_snapshot(
         catalog=runtime.catalog,
     )
 
-    if not runtime.catalog.has_complete_coverage(snapshot=synced_snapshot, plan=ingestion_plan):
+    try:
+        complete_plan = restrict_to_complete_core_symbols(
+            plan=ingestion_plan, catalog=runtime.catalog,
+        )
+    except DataCoverageError as exc:
+        raise DataCoverageError(
+            f"snapshot still incomplete after sync: {synced_snapshot.snapshot_id}",
+        ) from exc
+    if not runtime.catalog.has_complete_coverage(snapshot=synced_snapshot, plan=complete_plan):
         raise DataCoverageError(
             f"snapshot still incomplete after sync: {synced_snapshot.snapshot_id}"
         )
@@ -159,7 +196,15 @@ def prepare_quarterly_bootstrap(
             )
         reconcile_report = None
 
-    snapshot = prepare_data_snapshot(config=config, runtime=runtime)
+    acquisition_start = datetime.fromtimestamp(
+        window.acquisition_start_ns / 1_000_000_000, tz=UTC,
+    ).date()
+    snapshot = prepare_data_snapshot(
+        config=config,
+        runtime=runtime,
+        acquisition_start=acquisition_start,
+        coverage_end=window.cutoff_date,
+    )
 
     _logger.info("bootstrap snapshot ready: %s", snapshot.snapshot_id)
     return PreparedBootstrap(

@@ -5,7 +5,7 @@ import io
 import json
 import logging
 import urllib.request
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Any
 
@@ -276,8 +276,24 @@ class LocalDataCatalog:
         }
         if DatasetKind.UNIVERSE_STATE in required_datasets:
             required.add((DatasetKind.UNIVERSE_STATE, "__all__"))
-        present = {(p.dataset, p.symbol) for p in snapshot.partitions if p.row_count > 0}
-        return required.issubset(present)
+        present = {(p.dataset, p.symbol, p.start_time_ms) for p in snapshot.partitions if p.row_count > 0}
+
+        month = plan.start_date.replace(day=1) if plan.start_date is not None else plan.reference_date.replace(day=1)
+        terminal = plan.reference_date.replace(day=1)
+        expected_months: list[date] = []
+        while month <= terminal:
+            expected_months.append(month)
+            month = (
+                month.replace(year=month.year + 1, month=1)
+                if month.month == 12
+                else month.replace(month=month.month + 1)
+            )
+        for dataset, symbol in required:
+            for month_start in expected_months:
+                start_ms = int(datetime(month_start.year, month_start.month, 1, tzinfo=UTC).timestamp() * 1000)
+                if (dataset, symbol, start_ms) not in present:
+                    return False
+        return True
 
 
 def materialize_native_grid(*, request: GridRequest, snapshot: DataSnapshot) -> NativeFeatureGrid:
@@ -330,7 +346,15 @@ def _load_partition_data(
     start_time_ms = start_time_ns // 1_000_000
     end_time_ms = end_time_ns // 1_000_000
     filters = [("timestamp", ">=", start_time_ms), ("timestamp", "<", end_time_ms)]
-    columns = list(dict.fromkeys(("timestamp", *fields)))
+    fallback_columns = {
+        "taker_buy_base": "taker_buy_base_volume",
+        "taker_buy_quote": "taker_buy_quote_volume",
+    }
+    columns = list(dict.fromkeys((
+        "timestamp",
+        *fields,
+        *(fallback_columns[field] for field in fields if field in fallback_columns),
+    )))
     import pyarrow.parquet as pq
 
     frames: list[pd.DataFrame] = []
@@ -340,7 +364,17 @@ def _load_partition_data(
         if "timestamp" not in projected_columns:
             continue  # pragma: no cover - schema validation rejects this upstream
         frames.append(pd.read_parquet(path, columns=projected_columns, filters=filters))
-    return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
+    if not frames:
+        return pd.DataFrame()
+    frame = pd.concat(frames, ignore_index=True)
+    for canonical, alias in fallback_columns.items():
+        if canonical not in fields or alias not in frame.columns:
+            continue
+        if canonical not in frame.columns:
+            frame[canonical] = frame[alias]
+        else:
+            frame[canonical] = frame[canonical].where(frame[canonical].notna(), frame[alias])
+    return frame
 
 
 def _universe_state_rows(snapshot: DataSnapshot) -> list[UniverseStateRow]:
