@@ -555,8 +555,8 @@ def test_return_le_minus_one_raises() -> None:
 
 def test_deflated_sharpe_probability_penalizes_candidate_count() -> None:
     from src.domain.futures.compound.validation import _deflated_sharpe_probability
-    p1 = _deflated_sharpe_probability(2.0, 1, seed=42)
-    p100 = _deflated_sharpe_probability(2.0, 100, seed=42)
+    p1 = _deflated_sharpe_probability(2.0, 1, n_obs=500, seed=42)
+    p100 = _deflated_sharpe_probability(2.0, 100, n_obs=500, seed=42)
     assert p100 <= p1 + 1e-10
 
 
@@ -596,6 +596,6 @@ def test_causal_benchmark_scale_ignores_future_returns() -> None:
 
 def test_dsr_declines_with_more_candidates() -> None:
     from src.domain.futures.compound.validation import _deflated_sharpe_probability
-    p1 = _deflated_sharpe_probability(1.5, 1, seed=42)
-    p100 = _deflated_sharpe_probability(1.5, 100, seed=42)
+    p1 = _deflated_sharpe_probability(1.5, 1, n_obs=500, seed=42)
+    p100 = _deflated_sharpe_probability(1.5, 100, n_obs=500, seed=42)
     assert p100 <= p1 + 1e-10
