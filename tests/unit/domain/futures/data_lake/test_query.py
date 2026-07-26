@@ -481,3 +481,29 @@ class TestMaterializeCausalMetricsGrid:
         assert result.timestamps_ns.shape[0] == 3
         assert np.all(np.isnan(result.fields["top_trader_long_short_ratio"]))
         assert not np.any(result.available["top_trader_long_short_ratio"])
+
+
+class TestNormalizeVisionFunding:
+    def test_two_column_preserves_funding_rate(self) -> None:
+        df = pd.DataFrame([[1_782_864_000_000, -0.0002]], columns=["timestamp", "funding_rate"])
+        result = BinanceQueryClient._normalize_vision_funding(df)
+        assert "timestamp" in result.columns
+        assert "funding_rate" in result.columns
+        assert result["funding_rate"].iloc[0] == -0.0002
+
+    def test_three_column_selects_last_column(self) -> None:
+        df = pd.DataFrame([[1_782_864_000_000, 8, 0.0001]], columns=["calc_time", "funding_interval_hours", "last_funding_rate"])
+        result = BinanceQueryClient._normalize_vision_funding(df)
+        assert "timestamp" in result.columns
+        assert "funding_rate" in result.columns
+        assert result["funding_rate"].iloc[0] == 0.0001
+
+    def test_three_column_interval_hour_rejected(self) -> None:
+        from src.domain.futures.data_lake.reconciliation import validate_funding_rates
+        df = pd.DataFrame([[1_782_864_000_000, 8, 8.0]], columns=["calc_time", "funding_interval_hours", "last_funding_rate"])
+        from src.domain.futures.compound.contracts import FundingDataIntegrityError, MAX_ABS_FUNDING_RATE
+        rate = df.iloc[:, 2].iloc[0]
+        assert abs(rate) > MAX_ABS_FUNDING_RATE
+        rates = np.array([rate], dtype=np.float64)
+        with pytest.raises(FundingDataIntegrityError, match="exceed"):
+            validate_funding_rates(rates, source="test")
