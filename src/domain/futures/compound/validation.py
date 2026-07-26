@@ -212,18 +212,32 @@ def _stationary_bootstrap_sharpe_probability(
 def _deflated_sharpe_probability(
     observed_sharpe: float,
     candidate_count: int,
+    n_obs: int,
+    periods_per_year: float = 365.25,
     n_bootstrap: int = 5000,
     seed: int = 42,
 ) -> float:
+    if n_obs < 30:
+        return 0.5
     if candidate_count <= 1 or observed_sharpe <= 0:
         return 0.5
+    sigma = math.sqrt(periods_per_year / n_obs)
     rng = np.random.default_rng(seed)
     e_max_samples = np.empty(n_bootstrap)
     for i in range(n_bootstrap):
-        sharpe_null = rng.standard_t(df=10, size=candidate_count)
+        sharpe_null = rng.standard_t(df=10, size=candidate_count) * sigma
         e_max_samples[i] = float(np.max(sharpe_null))
     prob = float(np.mean(e_max_samples < float(observed_sharpe)))
     return prob
+
+
+def count_effective_candidates(valid_3d: NDArray[np.bool_]) -> int:
+    if valid_3d.ndim != 3:
+        raise ValueError(f"valid_3d must be 3-D, got shape {valid_3d.shape}")
+    n_desc = valid_3d.shape[2]
+    if n_desc == 0:
+        return 0
+    return int(np.sum(np.any(valid_3d, axis=(0, 1))))
 
 
 def _compute_turnover(ledger: ExecutionLedger) -> float:
@@ -295,7 +309,7 @@ def evaluate_l2_walk_forward(
             deflated_sharpe_probability=0.5, candidate_count=candidate_count,
             calmar=0.0, max_drawdown=0.0, daily_cvar95=0.0,
             annual_volatility=0.0, annual_turnover=0.0, cost_drag_ratio=0.0,
-            capacity_utilisation_p95=0.0, active_days_ratio=0.0,
+            absolute_cagr=0.0, capacity_utilisation_p95=0.0, active_days_ratio=0.0,
             rebalance_count=0, positive_outer_folds=0, oos_days=oos_days,
             category_results=(), integrity_ok=False, reasons=pre_agg_reasons,
         )
@@ -317,7 +331,7 @@ def evaluate_l2_walk_forward(
             deflated_sharpe_probability=0.5, candidate_count=candidate_count,
             calmar=0.0, max_drawdown=0.0, daily_cvar95=0.0,
             annual_volatility=0.0, annual_turnover=0.0, cost_drag_ratio=0.0,
-            capacity_utilisation_p95=0.0, active_days_ratio=0.0,
+            absolute_cagr=0.0, capacity_utilisation_p95=0.0, active_days_ratio=0.0,
             rebalance_count=0, positive_outer_folds=0, oos_days=oos_days,
             category_results=(), integrity_ok=False, reasons=reasons,
         )
@@ -334,7 +348,7 @@ def evaluate_l2_walk_forward(
             deflated_sharpe_probability=0.5, candidate_count=candidate_count,
             calmar=0.0, max_drawdown=0.0, daily_cvar95=0.0,
             annual_volatility=0.0, annual_turnover=0.0, cost_drag_ratio=0.0,
-            capacity_utilisation_p95=0.0, active_days_ratio=0.0,
+            absolute_cagr=0.0, capacity_utilisation_p95=0.0, active_days_ratio=0.0,
             rebalance_count=0, positive_outer_folds=0, oos_days=0,
             category_results=(), integrity_ok=True, reasons=("no_complete_utc_days",),
         )
@@ -349,7 +363,7 @@ def evaluate_l2_walk_forward(
             deflated_sharpe_probability=0.5, candidate_count=candidate_count,
             calmar=0.0, max_drawdown=0.0, daily_cvar95=0.0,
             annual_volatility=0.0, annual_turnover=0.0, cost_drag_ratio=0.0,
-            capacity_utilisation_p95=0.0, active_days_ratio=0.0,
+            absolute_cagr=0.0, capacity_utilisation_p95=0.0, active_days_ratio=0.0,
             rebalance_count=0, positive_outer_folds=0, oos_days=oos_days,
             category_results=(), integrity_ok=True, reasons=("benchmark_not_aligned",),
         )
@@ -376,6 +390,8 @@ def evaluate_l2_walk_forward(
     # CAGR and equity multiple
     log_growth = _annualized_log_growth(np.expm1(excess_returns), 365.25)
     cagr = float(math.expm1(log_growth))
+    absolute_log_growth = _annualized_log_growth(np.expm1(daily_returns), 365.25)
+    absolute_cagr_val = float(math.expm1(absolute_log_growth))
     equity: NDArray[np.float64] = np.asarray(np.cumprod(1.0 + daily_returns), dtype=np.float64)
     equity_multiple = float(equity[-1]) if equity.size > 0 else 1.0
 
@@ -383,7 +399,7 @@ def evaluate_l2_walk_forward(
     obs_sharpe, sharpe_prob = _stationary_bootstrap_sharpe_probability(
         excess_returns, n_bootstrap=2000, block_size=5, seed=bootstrap_seed,
     )
-    dsr = _deflated_sharpe_probability(obs_sharpe, candidate_count, seed=bootstrap_seed)
+    dsr = _deflated_sharpe_probability(obs_sharpe, candidate_count, n_obs=oos_days, periods_per_year=365.25, seed=bootstrap_seed)
 
     # Growth bootstrap
     excess_lcb90, _, excess_prob = _stationary_bootstrap_lcb90(
@@ -409,9 +425,11 @@ def evaluate_l2_walk_forward(
     ann_turnover = _compute_turnover(ledger) * 2191.5
     rebalance_count = _compute_rebalance_count(ledger.target_weights_2d)
 
-    # Cost drag ratio
-    pre_fee_growth = _annualized_log_growth(np.expm1(pre_fee_daily), 365.25)
-    cost_drag = 1.0 - cagr / max(pre_fee_growth, 1e-12) if pre_fee_growth > 0 else float("inf")
+    # Cost drag ratio: compare absolute (not excess) pre-fee vs post-fee CAGR,
+    # both in the same expm1 (compounded) space [LIMIT-10]
+    pre_fee_log_growth = _annualized_log_growth(np.expm1(pre_fee_daily), 365.25)
+    pre_fee_cagr = float(math.expm1(pre_fee_log_growth))
+    cost_drag = 1.0 - absolute_cagr_val / max(pre_fee_cagr, 1e-12) if pre_fee_cagr > 0 else 0.0
 
     # Capacity utilisation (p95 of max absolute weight)
     capacity_p95 = 0.0
@@ -526,6 +544,7 @@ def evaluate_l2_walk_forward(
         annual_volatility=ann_vol,
         annual_turnover=ann_turnover,
         cost_drag_ratio=cost_drag if np.isfinite(cost_drag) else 0.0,
+        absolute_cagr=absolute_cagr_val,
         capacity_utilisation_p95=capacity_p95,
         active_days_ratio=active_days_ratio,
         rebalance_count=rebalance_count,

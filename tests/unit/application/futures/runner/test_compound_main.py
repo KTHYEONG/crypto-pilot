@@ -39,6 +39,7 @@ def _make_mock_engine_result(mocker) -> object:
     mock_l2.verdict = L2GateVerdict.PASS
     mock_l2.annualized_log_growth = 0.05
     mock_l2.cagr = 0.051
+    mock_l2.absolute_cagr = 0.052
     mock_l2.excess_growth_lcb90 = 0.01
     mock_l2.excess_growth_probability = 0.95
     mock_l2.stressed_excess_growth_lcb90 = 0.005
@@ -307,6 +308,7 @@ def test_cash_only_engine_returns_normally(mocker) -> None:
         verdict = L2GateVerdict.PASS
         annualized_log_growth = 0.0
         cagr = 0.0
+        absolute_cagr = 0.0
         excess_growth_lcb90 = 0.0
         excess_growth_probability = 0.0
         stressed_excess_growth_lcb90 = 0.0
