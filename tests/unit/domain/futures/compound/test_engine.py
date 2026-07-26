@@ -574,3 +574,70 @@ class TestRunMultiscaleCompoundEngine:
         assert result.l2.verdict == L2GateVerdict.PASS
         assert result.l3.verdict == DeploymentVerdict.SHADOW
         assert result.l3.reasons == ("dry_run_holdout_not_consumed",)
+
+    def test_engine_wires_aligned_benchmark_and_trial_multiplicity(
+        self, tmp_path: Path, mocker, small_cube: MarketFeatureCube,
+    ) -> None:
+        import src.domain.futures.compound.engine as eng
+
+        spy_benchmark = mocker.spy(eng, "build_causal_l2_benchmark")
+        spy_daily_market = mocker.spy(eng, "build_daily_market_returns")
+        spy_trial_returns = mocker.spy(eng, "build_candidate_trial_returns")
+        spy_multiplicity = mocker.spy(eng, "compute_trial_multiplicity")
+        spy_l2_eval = mocker.spy(eng, "evaluate_l2_walk_forward")
+
+        universe = type("Universe", (), {
+            "symbols": small_cube.symbols, "snapshots": (),
+        })()
+        store = SealedHoldoutStore(tmp_path / "engine_wiring_test.sqlite3")
+        manifest = SealedHoldoutManifest(
+            holdout_id="wiring-test",
+            start_time_ns=int(small_cube.timestamps_ns[-180]),
+            end_time_ns=int(small_cube.timestamps_ns[-1]),
+            holdout_days=90,
+            model_version="v1",
+            data_manifest_hash="h1",
+            strategy_spec_hash="spec1",
+        )
+        store.create(manifest)
+
+        result = run_multiscale_compound_engine(
+            market=small_cube,
+            universe=universe,
+            holdout_store=store,
+            holdout_id="wiring-test",
+            config=CompoundEngineConfig(),
+        )
+
+        assert isinstance(result, CompoundEngineResult)
+        spy_daily_market.assert_called_once()
+        spy_benchmark.assert_called_once()
+        spy_trial_returns.assert_called_once()
+        spy_multiplicity.assert_called_once()
+        spy_l2_eval.assert_called_once()
+
+        benchmark_arg = spy_benchmark.call_args.kwargs["window_timestamps_ns"]
+        l2_ledger_arg = spy_l2_eval.call_args.kwargs["ledger"]
+        l2_daily_ts = eng._daily_timestamps_from_4h(l2_ledger_arg.timestamps_ns)
+        np.testing.assert_array_equal(benchmark_arg, l2_daily_ts)
+
+        trial_multiplicity_arg = spy_l2_eval.call_args.kwargs["trial_multiplicity"]
+        assert trial_multiplicity_arg is spy_multiplicity.spy_return
+
+
+class TestAggregateTrial4hToDaily:
+    def test_zero_complete_days_returns_empty_daily_array(self) -> None:
+        import src.domain.futures.compound.engine as eng
+
+        trial_returns = np.zeros((3, 5), dtype=np.float64)
+        result = eng._aggregate_trial_4h_to_daily(trial_returns)
+        assert result.shape == (3, 0)
+
+    def test_one_complete_day_compounds_log_returns(self) -> None:
+        import src.domain.futures.compound.engine as eng
+
+        trial_returns = np.full((1, 6), 0.01, dtype=np.float64)
+        result = eng._aggregate_trial_4h_to_daily(trial_returns)
+        expected = float(np.expm1(6 * np.log1p(0.01)))
+        assert result.shape == (1, 1)
+        assert result[0, 0] == pytest.approx(expected, rel=1e-10)
