@@ -9,11 +9,15 @@ import numpy as np
 
 from src.domain.futures.data_lake.reconciliation import (
     ManifestReconciliationReport,
+    FundingRepairRequest,
     _partition_key,
     _read_sidecar,
     _scan_parquet_files,
     _write_sidecar,
+    audit_funding_partitions,
+    quarantine_funding_partitions,
     reconcile_local_catalog,
+    validate_funding_frame,
     validate_funding_rates,
 )
 
@@ -190,7 +194,7 @@ class TestFundingPartitionReconciliation:
         yield tmp
         shutil.rmtree(tmp, ignore_errors=True)
 
-    def test_funding_partition_sidecar_v2(self, lake_root: Path) -> None:
+    def test_funding_partition_sidecar_v3(self, lake_root: Path) -> None:
         import pandas as pd
         parquet_dir = lake_root / "funding_event" / "symbol=BTCUSDT" / "year=2024" / "month=01"
         parquet_dir.mkdir(parents=True, exist_ok=True)
@@ -204,7 +208,8 @@ class TestFundingPartitionReconciliation:
         assert sidecar.exists()
         import json
         meta = json.loads(sidecar.read_text())
-        assert meta.get("schema_version") == "funding-v2"
+        assert meta.get("schema_version") == "funding-v3"
+        assert meta.get("validator_version") == "funding-integrity-v1"
 
     def test_corrupt_funding_partition_quarantined(self, lake_root: Path) -> None:
         import pandas as pd
@@ -216,3 +221,87 @@ class TestFundingPartitionReconciliation:
 
         report = reconcile_local_catalog(root=lake_root, cutoff_exclusive_ns=1735689600_000_000_000)
         assert len(report.quarantined_files) > 0
+
+    def test_audit_funding_partitions_revalidates_v2_without_mutation(self, lake_root: Path) -> None:
+        import pandas as pd
+
+        parquet_dir = lake_root / "funding_event" / "symbol=BTCUSDT" / "year=2024" / "month=01"
+        parquet_dir.mkdir(parents=True, exist_ok=True)
+        path = parquet_dir / "part.parquet"
+        pd.DataFrame({"timestamp": [1704412800000], "funding_rate": [8.0]}).to_parquet(path, index=False)
+        _write_sidecar(
+            parquet_dir / "part.sidecar.json",
+            {"schema_version": "funding-v2", "size": path.stat().st_size, "mtime_ns": path.stat().st_mtime_ns},
+        )
+
+        audit = audit_funding_partitions(
+            root=lake_root,
+            cutoff_exclusive_ns=1735689600_000_000_000,
+        )
+
+        assert audit.checked_files == 1
+        assert len(audit.invalid_requests) == 1
+        assert path.exists()
+
+    def test_validate_funding_frame_rejects_interval_as_rate_and_invalid_timestamps(self) -> None:
+        import pandas as pd
+        from src.domain.futures.compound.contracts import FundingDataIntegrityError
+
+        with pytest.raises(FundingDataIntegrityError, match="exceed"):
+            validate_funding_frame(
+                pd.DataFrame({"timestamp": [1704412800000], "funding_rate": [8.0]}),
+                source="test",
+            )
+        with pytest.raises(FundingDataIntegrityError, match="invalid funding timestamps"):
+            validate_funding_frame(
+                pd.DataFrame({"timestamp": [float("nan")], "funding_rate": [0.0]}),
+                source="test",
+            )
+        with pytest.raises(FundingDataIntegrityError, match="missing funding columns"):
+            validate_funding_frame(pd.DataFrame({"timestamp": [1704412800000]}), source="test")
+        with pytest.raises(FundingDataIntegrityError, match="timestamps"):
+            validate_funding_frame(
+                pd.DataFrame({"timestamp": [1704412800000, 1704412800000], "funding_rate": [0.0, 0.0]}),
+                source="test",
+            )
+        with pytest.raises(FundingDataIntegrityError, match="outside partition month"):
+            validate_funding_frame(
+                pd.DataFrame({"timestamp": [1706745600000], "funding_rate": [0.0]}),
+                source="test",
+                month_start_ms=1704067200000,
+            )
+
+    def test_audit_ignores_unpartitioned_funding_path(self, lake_root: Path) -> None:
+        import pandas as pd
+
+        path = lake_root / "funding_event" / "part.parquet"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        pd.DataFrame({"timestamp": [1704412800000], "funding_rate": [0.0]}).to_parquet(path, index=False)
+        kline_path = lake_root / "klines_1h" / "symbol=BTCUSDT" / "year=2024" / "month=01" / "part.parquet"
+        kline_path.parent.mkdir(parents=True, exist_ok=True)
+        pd.DataFrame({"timestamp": [1704412800000], "close": [100.0]}).to_parquet(kline_path, index=False)
+
+        audit = audit_funding_partitions(
+            root=lake_root,
+            cutoff_exclusive_ns=1735689600_000_000_000,
+        )
+
+        assert audit.checked_files == 0
+        assert audit.invalid_requests == ()
+
+    def test_quarantine_funding_partitions_moves_sidecar_recoverably(self, lake_root: Path) -> None:
+        import pandas as pd
+
+        path = lake_root / "funding_event" / "symbol=BTCUSDT" / "year=2024" / "month=01" / "part.parquet"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        pd.DataFrame({"timestamp": [1704412800000], "funding_rate": [8.0]}).to_parquet(path, index=False)
+        sidecar = path.with_suffix(".sidecar.json")
+        sidecar.write_text("{}")
+        request = FundingRepairRequest("BTCUSDT", 1704067200000, path)
+
+        moved = quarantine_funding_partitions(requests=(request,), root=lake_root)
+
+        assert moved == (str(path),)
+        assert not path.exists()
+        assert (lake_root / "quarantine" / "funding_event" / "symbol=BTCUSDT" / "year=2024" / "month=01" / "part.parquet").exists()
+        assert (lake_root / "quarantine" / "funding_event" / "symbol=BTCUSDT" / "year=2024" / "month=01" / "part.sidecar.json").exists()
