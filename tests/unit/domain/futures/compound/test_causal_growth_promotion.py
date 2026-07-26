@@ -375,9 +375,10 @@ class TestNegativeSharpe:
             daily_returns_1d=np.zeros(n_daily, dtype=np.float64),
             causal_scale_1d=np.ones(n_daily, dtype=np.float64),
         )
+        from src.domain.futures.compound.multiplicity import TrialMultiplicity
         result = evaluate_l2_walk_forward(
             ledger=ledger, fold_ids_1d=np.zeros(n, dtype=np.int16),
-            benchmark=benchmark, candidate_count=27,
+            benchmark=benchmark, trial_multiplicity=TrialMultiplicity(27, 27.0, 1.0),
             config=L2GateConfig(), bootstrap_seed=42,
         )
         assert result.sharpe < 0

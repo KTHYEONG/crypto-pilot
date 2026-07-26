@@ -32,6 +32,8 @@ from src.domain.futures.compound.contracts import (
     SignalDescriptor,
     TimeframeBarCube,
 )
+from src.domain.futures.compound.benchmark import DailyMarketReturns
+from src.domain.futures.compound.multiplicity import TrialMultiplicity
 from src.domain.futures.compound.validation import (
     aggregate_returns_to_utc_days,
     build_causal_l2_benchmark,
@@ -422,7 +424,7 @@ def test_second_cost_charge_fails_efficiency_gate() -> None:
     )
     result = evaluate_l2_walk_forward(
         ledger=ledger, fold_ids_1d=np.zeros(n, dtype=np.int16),
-        benchmark=benchmark, candidate_count=10,
+        benchmark=benchmark, trial_multiplicity=TrialMultiplicity(10, 10.0, 1.0),
         config=L2GateConfig(), bootstrap_seed=42,
     )
     assert result.verdict in (L2GateVerdict.FAIL, L2GateVerdict.NO_EVIDENCE)
@@ -455,7 +457,7 @@ def test_positive_stressed_excess_growth_profile_passes_all_categories() -> None
     )
     result = evaluate_l2_walk_forward(
         ledger=ledger, fold_ids_1d=np.zeros(n, dtype=np.int16),
-        benchmark=benchmark, candidate_count=10,
+        benchmark=benchmark, trial_multiplicity=TrialMultiplicity(10, 10.0, 1.0),
         config=L2GateConfig(), bootstrap_seed=42,
     )
     if result.verdict == L2GateVerdict.PASS:
@@ -490,7 +492,7 @@ def test_zero_weights_is_no_evidence() -> None:
     )
     result = evaluate_l2_walk_forward(
         ledger=ledger, fold_ids_1d=np.zeros(n, dtype=np.int16),
-        benchmark=benchmark, candidate_count=10,
+        benchmark=benchmark, trial_multiplicity=TrialMultiplicity(10, 10.0, 1.0),
         config=L2GateConfig(min_rebalances=30), bootstrap_seed=42,
     )
     assert result.verdict == L2GateVerdict.NO_EVIDENCE
@@ -524,7 +526,7 @@ def test_positive_fold_count_gate() -> None:
     config = L2GateConfig(min_positive_outer_folds=3)
     result = evaluate_l2_walk_forward(
         ledger=ledger, fold_ids_1d=np.zeros(n, dtype=np.int16),
-        benchmark=benchmark, candidate_count=10,
+        benchmark=benchmark, trial_multiplicity=TrialMultiplicity(10, 10.0, 1.0),
         config=config, bootstrap_seed=42,
     )
     assert result.verdict in (L2GateVerdict.PASS, L2GateVerdict.FAIL, L2GateVerdict.NO_EVIDENCE)
@@ -554,10 +556,18 @@ def test_return_le_minus_one_raises() -> None:
 # ---------------------------------------------------------------------------
 
 def test_deflated_sharpe_probability_penalizes_candidate_count() -> None:
-    from src.domain.futures.compound.validation import _deflated_sharpe_probability
-    p1 = _deflated_sharpe_probability(2.0, 1, n_obs=500, seed=42)
-    p100 = _deflated_sharpe_probability(2.0, 100, n_obs=500, seed=42)
-    assert p100 <= p1 + 1e-10
+    from src.domain.futures.compound.multiplicity import deflated_sharpe_probability
+    rng = np.random.default_rng(42)
+    excess_rets = rng.normal(0.001, 0.01, 500).astype(np.float64)
+    low_var = TrialMultiplicity(50, 25.0, 0.1)
+    high_var = TrialMultiplicity(50, 25.0, 2.0)
+    p_low = deflated_sharpe_probability(
+        observed_sharpe=2.0, multiplicity=low_var, excess_returns=excess_rets,
+    )
+    p_high = deflated_sharpe_probability(
+        observed_sharpe=2.0, multiplicity=high_var, excess_returns=excess_rets,
+    )
+    assert p_low >= p_high
 
 
 # ---------------------------------------------------------------------------
@@ -568,34 +578,45 @@ def test_causal_benchmark_scale_ignores_future_returns() -> None:
     daily_returns = np.zeros(200, dtype=np.float64)
     daily_returns[:100] = 0.001
     daily_returns[100:] = 0.1
-    daily_market = {"BTCUSDT": daily_returns.copy(), "ETHUSDT": daily_returns.copy()}
-    timestamps = np.arange(200, dtype=np.int64) * np.int64(24 * 3600 * 10**9)
+    returns_2d = np.column_stack([daily_returns, daily_returns])
+    ns_per_day = np.int64(24 * 3600 * 10**9)
+    timestamps = np.arange(200, dtype=np.int64) * ns_per_day
+    dmr = DailyMarketReturns(timestamps_ns=timestamps, returns_2d=returns_2d, symbols=("BTCUSDT", "ETHUSDT"))
     config = L2BenchmarkConfig(volatility_lookback_days=60, target_ann_vol=0.15)
     benchmark = build_causal_l2_benchmark(
-        daily_market_returns=daily_market,
-        timestamps_ns=timestamps,
+        daily_market_returns=dmr,
+        window_timestamps_ns=timestamps,
         config=config,
     )
     scale_at_100 = benchmark.causal_scale_1d[100]
 
-    daily_market_mutated = {"BTCUSDT": daily_returns.copy(), "ETHUSDT": daily_returns.copy()}
-    daily_returns_mut = daily_returns.copy()
-    daily_returns_mut[101:] *= 100.0
-    daily_market_mutated["BTCUSDT"] = daily_returns_mut
+    returns_2d_mut = returns_2d.copy()
+    returns_2d_mut[101:, 0] *= 100.0
+    dmr_mut = DailyMarketReturns(timestamps_ns=timestamps, returns_2d=returns_2d_mut, symbols=("BTCUSDT", "ETHUSDT"))
     benchmark_mut = build_causal_l2_benchmark(
-        daily_market_returns=daily_market_mutated,
-        timestamps_ns=timestamps,
+        daily_market_returns=dmr_mut,
+        window_timestamps_ns=timestamps,
         config=config,
     )
     assert abs(benchmark_mut.causal_scale_1d[100] - scale_at_100) < 1e-10
 
 
 # ---------------------------------------------------------------------------
-# Scenario 17: same returns, candidate count 1 vs 100
+# Scenario 17: canonical DSR with effective_trials sensitivity
 # ---------------------------------------------------------------------------
 
 def test_dsr_declines_with_more_candidates() -> None:
-    from src.domain.futures.compound.validation import _deflated_sharpe_probability
-    p1 = _deflated_sharpe_probability(1.5, 1, n_obs=500, seed=42)
-    p100 = _deflated_sharpe_probability(1.5, 100, n_obs=500, seed=42)
-    assert p100 <= p1 + 1e-10
+    from src.domain.futures.compound.multiplicity import deflated_sharpe_probability
+    rng = np.random.default_rng(42)
+    excess_rets_365 = rng.normal(0.001, 0.01, 365).astype(np.float64)
+    low_var = TrialMultiplicity(50, 25.0, 0.1)
+    high_var = TrialMultiplicity(50, 25.0, 3.0)
+    p_low = deflated_sharpe_probability(
+        observed_sharpe=1.5, multiplicity=low_var,
+        excess_returns=excess_rets_365,
+    )
+    p_high = deflated_sharpe_probability(
+        observed_sharpe=1.5, multiplicity=high_var,
+        excess_returns=excess_rets_365,
+    )
+    assert p_low >= p_high
