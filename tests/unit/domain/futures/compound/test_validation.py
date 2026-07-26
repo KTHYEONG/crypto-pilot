@@ -11,6 +11,7 @@ from src.domain.futures.compound.contracts import (
     L2GateVerdict,
     SealedHoldoutManifest,
 )
+from src.domain.futures.compound.multiplicity import TrialMultiplicity
 from src.domain.futures.compound.validation import (
     evaluate_l2_walk_forward,
     evaluate_l3_sealed_holdout,
@@ -61,7 +62,7 @@ class TestEvaluateL2WalkForward:
         )
         result = evaluate_l2_walk_forward(
             ledger=ledger, fold_ids_1d=np.zeros(n, dtype=np.int16),
-            benchmark=benchmark, candidate_count=10,
+            benchmark=benchmark, trial_multiplicity=TrialMultiplicity(10, 10.0, 1.0),
             config=L2GateConfig(), bootstrap_seed=42,
         )
         assert isinstance(result, L2Evaluation)
@@ -221,7 +222,7 @@ class TestL2NoEvidenceOnInvalidLedger:
         )
         result = evaluate_l2_walk_forward(
             ledger=ledger, fold_ids_1d=np.zeros(n, dtype=np.int16),
-            benchmark=benchmark, candidate_count=5,
+            benchmark=benchmark, trial_multiplicity=TrialMultiplicity(5, 5.0, 1.0),
             config=L2GateConfig(), bootstrap_seed=42,
         )
         assert result.verdict == L2GateVerdict.NO_EVIDENCE
