@@ -311,8 +311,8 @@ class DynamicCompoundingConfig:
     funding_carry_enabled: bool = True
     soft_drawdown_limit: float = 0.10
     hard_drawdown_limit: float = 0.18
-    alpha_smooth: float = 0.15
-    band_frac: float = 0.30
+    alpha_smooth: float = 0.08
+    band_frac: float = 0.60
     dd_scale_floor: float = 0.25
     dd_cooldown_bars: int = 60
     min_vol_samples: int = 60
