@@ -1,5 +1,10 @@
 # Active Decisions Log (Sliding Window)
 
+## [2026-07-26] [causal_growth_live_promotion] [ADR_20260726_causal_growth_live_promotion]
+- **Context/Why:** Quarterly causal growth promotion requires strict L1/L2/L3 windows, coverage fail-closed behavior, and deployment gating.
+- **Resolution/What:** Added quarterly execution windows, strict holdout slicing, coverage auditing, append-only candidate trial accounting, PROMOTE-only deployment bundles, and live target-weight validation.
+- **Impact:** L2/L3 now reject incomplete local data and prevent live deployment until the full quarterly market window is available.
+
 ## [2026-07-26] [TASK_L1L2_GROWTH_RECOVERY_AND_COMBINATION_REDESIGN] [ADR_20260726_L1L2_GROWTH_RECOVERY_AND_COMBINATION_REDESIGN]
 - **Context/Why:** 실전 등가 backtest에서 equity_multiple 0.97(손실)이 확인됨. 원인 3층: (1) drawdown overlay가 EWMA 스무더 상태값을 곱셈 오염시키는 래칫, (2) L1 fold가 봉인 홀드아웃과 겹치고 L2 fold_ids가 전부 0으로 배선된 게이트 결함, (3) combine_posterior_sleeves가 신호 속도(=admitted sleeve 개수)에 비례 가중해 최악 신호가 최대 가중을 받는 결합층 결함
 - **Resolution/What:** allocator.py: 출력 전용 회복 가능 drawdown 오버레이(EWMA state 미오염)+rank-conviction 사이징. engine.py: L1 fold를 L1 윈도우로 절단, L2 fold_ids 시간 5분할, cost_bps_4h 종목별 배선, count_effective_candidates로 DSR 후보 정정, L2_DRY_RUN 안전가드. l1_sleeves.py: OOS fold_return 채택조건 제거(fit-only), select_non_redundant_signals(fit-window 상관 기반 구조적 중복 제거)+신호당 1표 등가중으로 combine_posterior_sleeves 재작성. validation.py: DSR null 표본길이 스케일링, cost_drag_ratio 차원 버그(로그공간/지수공간 혼용) 수정, absolute_cagr 필드 추가
@@ -69,8 +74,3 @@
 - **Context/Why:** Remove implemented and evaluated spec artifacts from docs/specs
 - **Resolution/What:** Executed sync_task without --keep-all-specs to wipe specs directory
 - **Impact:** Maintains clean repository state without obsolete specification draft files
-
-## [2026-07-24] [TASK_DETAILED_L1_L2_EVALUATION] [ADR_20260724_DETAILED_L1_L2_EVALUATION]
-- **Context/Why:** Document detailed L1 and L2 breakdown of v6 pipeline evaluation on real 120 futures data
-- **Resolution/What:** Recorded L1 low-SNR findings, L2 volatility drag mechanics (-3.05 log growth, 71.6% MDD), and L3 REJECT verdict in result.md
-- **Impact:** Provides detailed architectural failure analysis and ADR record preventing unhedged leverage deployment
