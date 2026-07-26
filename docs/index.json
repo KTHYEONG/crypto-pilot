@@ -597,5 +597,7 @@
   "src/domain/futures/compound/validation.py": {
     "testing": "tests/unit/domain/futures/compound/test_validation.py"
   },
-  "src/domain/futures/compound/config.py": {}
+  "src/domain/futures/compound/config.py": {
+    "testing": "tests/unit/domain/futures/compound/test_config.py"
+  }
 }
