@@ -369,6 +369,7 @@ class HandoffConfig:
 
 @dataclass(slots=True, frozen=True)
 class CompoundEngineConfig:
+    strategy_code_version: str = "compound-2026-07-26"
     data: DataPlaneConfig = field(default_factory=DataPlaneConfig)
     cluster: ClusterConfig = field(default_factory=ClusterConfig)
     l1: L1EstimatorConfig = field(default_factory=L1EstimatorConfig)
