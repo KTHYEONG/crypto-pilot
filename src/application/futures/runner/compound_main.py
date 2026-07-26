@@ -20,6 +20,7 @@ from src.application.futures.runner.compound_data import (
 from src.application.futures.runner.compound_universe import (
     EmptyPITUniverseError,
     build_daily_pit_universe,
+    restrict_pit_universe_to_symbols,
 )
 from src.application.futures.runner.data_lake_runtime import (
     build_data_lake_runtime,
@@ -42,7 +43,11 @@ from src.domain.futures.data_lake.coverage_policy import (
     DataCoverageError,
     exclude_symbols_with_funding_gaps,
 )
-from src.domain.futures.data_lake.ingestion import StorageBudgetError
+from src.domain.futures.data_lake.ingestion import (
+    StorageBudgetError,
+    build_ingestion_plan,
+    restrict_to_complete_core_symbols,
+)
 from src.domain.futures.data_lake.run_windows import (
     QuarterlyWindowConfig,
     build_quarterly_execution_calendar,
@@ -173,6 +178,21 @@ def run_multiscale_compound_main(config: CompoundRunConfig) -> RunnerResult:
 
         universe = build_daily_pit_universe(
             snapshot=snapshot, execution_calendar=execution_calendar, config=config,
+        )
+        acquisition_start = datetime.fromtimestamp(
+            window.acquisition_start_ns / 1_000_000_000, tz=UTC,
+        ).date()
+        core_plan = restrict_to_complete_core_symbols(
+            plan=build_ingestion_plan(
+                config=config.data_lake,
+                reference_date=window.cutoff_date,
+                start_date=acquisition_start,
+            ),
+            catalog=runtime.catalog,
+        )
+        universe = restrict_pit_universe_to_symbols(
+            universe=universe,
+            allowed_symbols=core_plan.selected_symbols,
         )
 
         _logger.info(
