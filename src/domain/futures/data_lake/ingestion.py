@@ -21,6 +21,14 @@ from src.domain.futures.data_lake.contracts import (
     IngestionPlan,
     PartitionManifest,
 )
+from src.domain.futures.data_lake.reconciliation import (
+    _FUNDING_SCHEMA_VERSION,
+    _FUNDING_VALIDATOR_VERSION,
+    FundingRepairRequest,
+    _compute_sidecar_path,
+    _write_sidecar,
+    validate_funding_frame,
+)
 
 _logger = logging.getLogger(__name__)
 _MAX_PLAN_SYMBOLS = 120
@@ -160,6 +168,19 @@ def _payload_manifest(
             f"invalid parquet payload for {dataset.value}/{symbol}/{month}: {type(exc).__name__}"
         ) from exc
 
+    if dataset is DatasetKind.FUNDING_EVENT:
+        month_start_ms = int(datetime(month.year, month.month, 1, tzinfo=UTC).timestamp() * 1000)
+        try:
+            validate_funding_frame(
+                frame,
+                source=f"{dataset.value}/{symbol}/{month}",
+                month_start_ms=month_start_ms,
+            )
+        except Exception as exc:  # noqa: BLE001
+            raise DataCoverageError(
+                f"funding integrity failure for {dataset.value}/{symbol}/{month}: {exc}"
+            ) from exc
+
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_suffix(".tmp.parquet")
     temporary.write_bytes(payload)
@@ -180,6 +201,73 @@ def _payload_manifest(
         is_final=True,
         path=path,
     )
+
+
+def repair_funding_partitions(
+    *,
+    requests: tuple[FundingRepairRequest, ...],
+    client: BinanceDataClient,
+    catalog: DataCatalog,
+    root: Path,
+    max_workers: int,
+) -> tuple[PartitionManifest, ...]:
+    """Re-download only funding partitions rejected by reconciliation."""
+    pending = tuple(
+        (
+            DatasetKind.FUNDING_EVENT,
+            request.symbol,
+            datetime.fromtimestamp(request.start_time_ms / 1000, tz=UTC).date(),
+            request.start_time_ms,
+        )
+        for request in requests
+    )
+    repaired: list[PartitionManifest] = []
+    for (dataset, symbol, month, start_time_ms), payload in _download_pending_partitions(
+        client=client,
+        pending=pending,
+        max_workers=max_workers,
+    ):
+        if not payload:
+            raise DataCoverageError(
+                f"empty funding repair payload for {symbol}/{start_time_ms}"
+            )
+        expected_checksum = client.download_checksum(dataset, symbol, start_time_ms)
+        actual_checksum = hashlib.sha256(payload).hexdigest()
+        if actual_checksum != expected_checksum:
+            raise ChecksumMismatchError(
+                f"checksum mismatch for funding repair {symbol}/{start_time_ms}"
+            )
+        manifest = _payload_manifest(
+            dataset=dataset,
+            symbol=symbol,
+            month=month,
+            payload=payload,
+            root=root,
+        )
+        stat = manifest.path.stat()
+        frame = pd.read_parquet(manifest.path, engine="pyarrow")
+        _write_sidecar(
+            _compute_sidecar_path(manifest.path),
+            {
+                "size": stat.st_size,
+                "mtime_ns": int(stat.st_mtime_ns),
+                "sha256": manifest.sha256,
+                "schema_version": _FUNDING_SCHEMA_VERSION,
+                "validator_version": _FUNDING_VALIDATOR_VERSION,
+                "row_count": len(frame),
+                "min_timestamp": int(frame["timestamp"].min()),
+                "max_timestamp": int(frame["timestamp"].max()),
+                "min_rate": float(pd.to_numeric(frame["funding_rate"]).min()),
+                "max_rate": float(pd.to_numeric(frame["funding_rate"]).max()),
+            },
+        )
+        catalog.commit_partition(manifest)
+        repaired.append(manifest)
+    if len(repaired) != len(requests):
+        raise DataCoverageError(
+            f"funding repair incomplete: expected {len(requests)}, got {len(repaired)}"
+        )
+    return tuple(repaired)
 
 
 def _download_pending_partitions(
