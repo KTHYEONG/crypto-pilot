@@ -5,6 +5,7 @@ import logging
 import sqlite3
 import time
 from collections.abc import Callable
+from dataclasses import replace
 from pathlib import Path
 
 from src.domain.futures.compound.contracts import (
@@ -53,6 +54,7 @@ class SealedHoldoutStore:
                     first_consumed_at_ns INTEGER,
                     result_json TEXT,
                     created_at_ns INTEGER NOT NULL,
+                    consumed_spec_hash TEXT NOT NULL DEFAULT '',
                     PRIMARY KEY (holdout_id)
                 )
             """)
@@ -62,6 +64,10 @@ class SealedHoldoutStore:
             if "universe_state_hash" not in columns:
                 self._conn.execute(
                     "ALTER TABLE sealed_holdouts ADD COLUMN universe_state_hash TEXT NOT NULL DEFAULT ''"
+                )
+            if "consumed_spec_hash" not in columns:
+                self._conn.execute(
+                    "ALTER TABLE sealed_holdouts ADD COLUMN consumed_spec_hash TEXT NOT NULL DEFAULT ''"
                 )
             self._conn.commit()
         return self._conn
@@ -101,7 +107,8 @@ class SealedHoldoutStore:
         conn = self._ensure_db()
         row = conn.execute(
             """SELECT holdout_id, start_time_ns, end_time_ns, holdout_days,
-                      model_version, data_manifest_hash, strategy_spec_hash, universe_state_hash
+                      model_version, data_manifest_hash, strategy_spec_hash, universe_state_hash,
+                      first_consumed_at_ns, consumed_spec_hash
                FROM sealed_holdouts WHERE holdout_id = ?""",
             (holdout_id,),
         ).fetchone()
@@ -116,7 +123,41 @@ class SealedHoldoutStore:
             data_manifest_hash=row[5],
             strategy_spec_hash=row[6] or "",
             universe_state_hash=row[7] or "",
+            first_consumed_at_ns=row[8],
+            consumed_spec_hash=row[9] or "",
         )
+
+    def ensure_sealed(self, manifest: SealedHoldoutManifest) -> SealedHoldoutManifest:
+        conn = self._ensure_db()
+        row = conn.execute(
+            """SELECT holdout_id, data_manifest_hash, model_version,
+                      strategy_spec_hash, first_consumed_at_ns, consumed_spec_hash
+               FROM sealed_holdouts WHERE holdout_id = ?""",
+            (manifest.holdout_id,),
+        ).fetchone()
+        if row is None:
+            return self.create(manifest)
+        (_hid, stored_data_hash, _stored_model,
+         stored_spec_hash, consumed_at_ns, _consumed_spec) = row
+
+        if stored_data_hash != manifest.data_manifest_hash:
+            raise HoldoutReuseError(
+                f"holdout {manifest.holdout_id} data_manifest_hash mismatch: "
+                f"{stored_data_hash} != {manifest.data_manifest_hash}"
+            )
+        if stored_spec_hash == "" and consumed_at_ns is None:
+            _logger.warning("holdout %s: backfilling empty spec_hash", manifest.holdout_id)
+            conn.execute(
+                "UPDATE sealed_holdouts SET strategy_spec_hash = ? WHERE holdout_id = ?",
+                (manifest.strategy_spec_hash, manifest.holdout_id),
+            )
+            conn.commit()
+            return replace(manifest, strategy_spec_hash=manifest.strategy_spec_hash)
+        if stored_spec_hash == "" and consumed_at_ns is not None:
+            raise HoldoutReuseError(
+                f"holdout {manifest.holdout_id} empty spec_hash already consumed, permanently invalid"
+            )
+        return self.get_manifest(manifest.holdout_id)
 
     def consume(
         self,
@@ -133,7 +174,7 @@ class SealedHoldoutStore:
             """
             SELECT start_time_ns, end_time_ns, holdout_days, model_version,
                    data_manifest_hash, strategy_spec_hash, universe_state_hash, first_consumed_at_ns,
-                   result_json
+                   result_json, consumed_spec_hash
             FROM sealed_holdouts WHERE holdout_id = ?
             """,
             (holdout_id,),
@@ -144,23 +185,31 @@ class SealedHoldoutStore:
             raise HoldoutNotFoundError(msg)
 
         (stored_start, stored_end, stored_days, stored_model,
-         stored_data_hash, stored_spec_hash, stored_universe_hash, consumed_at_ns, result_json) = row
+         stored_data_hash, _stored_spec_hash, stored_universe_hash, consumed_at_ns,
+         result_json, stored_consumed_spec) = row
 
-        if (stored_data_hash != data_manifest_hash
-                or stored_spec_hash != strategy_spec_hash
-                or (stored_universe_hash != "" and stored_universe_hash != universe_state_hash)
-                or stored_model != model_version):
+        if (
+            stored_data_hash != data_manifest_hash
+            or stored_model != model_version
+            or (stored_universe_hash != "" and stored_universe_hash != universe_state_hash)
+        ):
             msg = (
                 f"holdout {holdout_id} hash mismatch: "
                 f"model={stored_model}!={model_version} "
                 f"data_hash={stored_data_hash}!={data_manifest_hash} "
-                f"spec_hash={stored_spec_hash}!={strategy_spec_hash}"
+                f"universe_hash={stored_universe_hash}!={universe_state_hash}"
             )
             raise HoldoutReuseError(msg)
 
         if consumed_at_ns is not None and result_json is not None:
-            _logger.info("holdout %s already consumed, returning cached result", holdout_id)
-            return _deserialize_result(result_json)
+            if stored_consumed_spec == strategy_spec_hash:
+                _logger.info("holdout %s already consumed with same spec, returning cached result", holdout_id)
+                return _deserialize_result(result_json)
+            msg = (
+                f"holdout {holdout_id} already consumed with spec_hash={stored_consumed_spec}, "
+                f"cannot reuse with {strategy_spec_hash}"
+            )
+            raise HoldoutReuseError(msg)
 
         now_ns = int(time.time_ns())
         manifest = SealedHoldoutManifest(
@@ -170,9 +219,10 @@ class SealedHoldoutStore:
             holdout_days=stored_days,
             model_version=stored_model,
             data_manifest_hash=stored_data_hash,
-            strategy_spec_hash=stored_spec_hash,
+            strategy_spec_hash=strategy_spec_hash,
             universe_state_hash=stored_universe_hash,
             first_consumed_at_ns=now_ns,
+            consumed_spec_hash=strategy_spec_hash,
         )
 
         result = evaluate(manifest)
@@ -180,10 +230,11 @@ class SealedHoldoutStore:
         conn.execute(
             """
             UPDATE sealed_holdouts
-            SET first_consumed_at_ns = ?, result_json = ?
+            SET first_consumed_at_ns = ?, result_json = ?, strategy_spec_hash = ?,
+                consumed_spec_hash = ?
             WHERE holdout_id = ? AND first_consumed_at_ns IS NULL
             """,
-            (now_ns, _serialize_result(result), holdout_id),
+            (now_ns, _serialize_result(result), strategy_spec_hash, strategy_spec_hash, holdout_id),
         )
         conn.commit()
 
