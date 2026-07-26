@@ -4,6 +4,8 @@ import logging
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 
+import pandas as pd
+
 _logger = logging.getLogger(__name__)
 
 
@@ -95,8 +97,17 @@ def resolve_completed_quarter_window(
     )
 
 
+def build_quarterly_execution_calendar(window: QuarterlyRunWindow) -> pd.DatetimeIndex:
+    cutoff_dt = datetime.fromtimestamp(window.cutoff_exclusive_ns / 1_000_000_000, tz=UTC)
+    acq_dt = datetime.fromtimestamp(window.acquisition_start_ns / 1_000_000_000, tz=UTC)
+    total_hours = int((cutoff_dt - acq_dt).total_seconds() // 3600)
+    calendar = pd.date_range(start=acq_dt, periods=total_hours, freq="h", tz="UTC")
+    return calendar
+
+
 __all__ = [
     "QuarterlyRunWindow",
     "QuarterlyWindowConfig",
+    "build_quarterly_execution_calendar",
     "resolve_completed_quarter_window",
 ]
