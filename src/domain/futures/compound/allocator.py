@@ -365,6 +365,46 @@ def _apply_portfolio_level_caps(
     return w
 
 
+def _rankdata_abs_avg(values: NDArray[np.float64]) -> NDArray[np.float64]:
+    n = values.shape[0]
+    sorter = np.argsort(values, kind="stable")
+    ranks = np.empty(n, dtype=np.float64)
+    i = 0
+    while i < n:
+        j = i
+        while j < n and values[sorter[j]] == values[sorter[i]]:
+            j += 1
+        avg = float(i + 1 + j) / 2.0
+        for k in range(i, j):
+            ranks[sorter[k]] = avg
+        i = j
+    return ranks
+
+
+def build_rank_conviction_targets(
+    mu_1d: NDArray[np.float64],
+    eligible_1d: NDArray[np.bool_],
+    *,
+    min_breadth: int = 10,
+) -> NDArray[np.float64]:
+    if mu_1d.shape != eligible_1d.shape:
+        raise ValueError(f"mu_1d shape {mu_1d.shape} != eligible_1d shape {eligible_1d.shape}")
+    n = mu_1d.shape[0]
+    eligible_count = int(np.sum(eligible_1d))
+    if eligible_count < min_breadth:
+        return np.zeros(n, dtype=np.float64)
+    eligible_mu = mu_1d[eligible_1d]
+    abs_ranks = _rankdata_abs_avg(np.abs(eligible_mu))
+    raw = np.sign(eligible_mu) * abs_ranks
+    raw = raw - np.mean(raw)
+    abs_sum = float(np.sum(np.abs(raw)))
+    if abs_sum > 0.0:
+        raw = raw / abs_sum
+    result = np.zeros(n, dtype=np.float64)
+    result[eligible_1d] = raw
+    return result
+
+
 def compute_dynamic_compounding_path(
     forecast: CalibratedForecastPanel,
     sigma_2d: NDArray[np.float32],
@@ -380,14 +420,15 @@ def compute_dynamic_compounding_path(
 
     equity = 1.0
     peak_equity = 1.0
-    cooldown_bars = 0
     return_history: list[float] = []
+    state = np.zeros(n_syms, dtype=np.float64)
+    cooldown_counter = 0
 
     for t in range(n_bars):
         mu = np.nan_to_num(forecast.mu_2d[t], nan=0.0, posinf=0.0, neginf=0.0)
         sigma_t = np.nan_to_num(sigma_2d[t], nan=1e-4, posinf=1e-4, neginf=1e-4)
-        support = (np.abs(mu) > 0)
-        combined = CombinedForecast(mu_robust_1d=mu.astype(np.float64), variance_1d=np.ones(n_syms, dtype=np.float64), support_1d=support)
+
+        eligible = np.abs(mu) > 0
 
         if t == 0:
             fr = np.zeros(n_syms, dtype=np.float64)
@@ -396,48 +437,68 @@ def compute_dynamic_compounding_path(
             fr_raw = funding_rates_1h_2d[idx].astype(np.float64) if idx < funding_rates_1h_2d.shape[0] else np.zeros(n_syms, dtype=np.float64)
             fr = np.nan_to_num(fr_raw, nan=0.0, posinf=0.0, neginf=0.0)
 
-        prev_w = weights[t - 1] if t > 0 else np.zeros(n_syms, dtype=np.float64)
+        mu_f64 = mu.astype(np.float64)
 
-        if len(return_history) >= 42:
-            rv_ann = float(np.std(return_history[-config.vol_lookback_bars:], ddof=1)) * np.sqrt(2190.0)
-            vol_scale = min(config.target_ann_vol / max(rv_ann, 1e-15), config.vol_scale_max)
+        if config.funding_carry_enabled:
+            carry = np.where(mu_f64 > 0, 1.0, np.where(mu_f64 < 0, -1.0, 0.0)) * fr
+            mu_f64 = mu_f64 + carry
+
+        if config.use_rank_conviction:
+            desired = build_rank_conviction_targets(mu_f64, eligible)
+            if float(np.sum(np.abs(desired))) == 0.0:
+                sigma_safe = np.maximum(sigma_t.astype(np.float64), config.sigma_floor)
+                desired = np.where(eligible, config.kelly_fraction * mu_f64 / sigma_safe, 0.0)
         else:
-            vol_scale = 1.0
+            sigma_safe = np.maximum(sigma_t.astype(np.float64), config.sigma_floor)
+            desired = np.where(eligible, config.kelly_fraction * mu_f64 / sigma_safe, 0.0)
 
-        raw_w = compute_dynamic_compounding_weights(
-            forecast=combined,
-            sigma_1d=sigma_t.astype(np.float64),
-            funding_rates_1d=fr,
-            previous_weights_1d=prev_w,
-            config=config,
-            vol_scale=vol_scale,
-        )
+        if len(return_history) >= config.min_vol_samples:
+            rv_ann = float(np.std(return_history[-config.vol_lookback_bars:], ddof=1)) * np.sqrt(2190.0)
+            leverage = min(config.target_ann_vol / max(rv_ann, 1e-15), config.max_gross_leverage)
+        else:
+            leverage = min(0.5, config.max_gross_leverage)
 
-        scale = 1.0
-        if cooldown_bars > 0:
-            scale = 0.0
-            cooldown_bars -= 1
+        desired = desired * leverage
+
+        smoothed = config.alpha_smooth * desired + (1.0 - config.alpha_smooth) * state
+
+        if config.band_frac > 0:
+            band = config.band_frac * float(np.mean(np.abs(smoothed)))
+            delta = np.abs(smoothed - state)
+            state = np.where(delta > band, smoothed, state)
+        else:
+            state = smoothed
+
+        if not np.any(eligible):
+            state = np.zeros(n_syms, dtype=np.float64)
+
+        if cooldown_counter > 0:
+            cooldown_counter -= 1
+            dd_scale = config.dd_scale_floor
         else:
             dd = 1.0 - equity / max(peak_equity, 1e-15)
             if dd >= config.hard_drawdown_limit:
-                scale = 0.0
-                cooldown_bars = 168
-                equity = peak_equity
+                cooldown_counter = config.dd_cooldown_bars
+                dd_scale = config.dd_scale_floor
             elif dd >= config.soft_drawdown_limit:
                 frac = (dd - config.soft_drawdown_limit) / max(
                     config.hard_drawdown_limit - config.soft_drawdown_limit, 1e-15
                 )
-                scale = max(0.0, min(1.0, 1.0 - frac))
+                dd_scale = max(config.dd_scale_floor, 1.0 - frac)
+            else:
+                dd_scale = 1.0
 
-        w_scaled = raw_w * scale
-        weights[t] = w_scaled
+        w_exec = state * dd_scale
+        w_exec = _apply_portfolio_level_caps(w_exec, config.max_long_leverage, config.max_short_leverage, config.max_gross_leverage)
+        weights[t] = w_exec
 
         if t < n_bars - 1:
+            prev_w = weights[t - 1] if t > 0 else np.zeros(n_syms, dtype=np.float64)
             close_t = close_2d[t].astype(np.float64)
             close_next = close_2d[t + 1].astype(np.float64)
             valid = (close_t > 0) & np.isfinite(close_t) & (close_next > 0) & np.isfinite(close_next)
             ret = np.where(valid, close_next / close_t - 1.0, 0.0)
-            portfolio_ret = np.dot(w_scaled, ret) - cost_bps * 1e-4 * np.sum(np.abs(w_scaled - prev_w))
+            portfolio_ret = np.dot(w_exec, ret) - cost_bps * 1e-4 * np.sum(np.abs(w_exec - prev_w))
             equity = equity * (1.0 + portfolio_ret)
             peak_equity = max(peak_equity, equity)
             return_history.append(portfolio_ret)
@@ -478,13 +539,15 @@ def compute_dynamic_compounding_weights(
 
     raw_weights = raw_weights * vol_scale
 
-    alpha_smooth = 0.03
-    smoothed = alpha_smooth * raw_weights + (1.0 - alpha_smooth) * previous_weights_1d
+    smoothed = config.alpha_smooth * raw_weights + (1.0 - config.alpha_smooth) * previous_weights_1d
 
-    theta = 0.0006
-    delta = np.abs(smoothed - previous_weights_1d)
-    hysteresis_mask = delta > theta
-    w = np.where(hysteresis_mask, smoothed, previous_weights_1d)
+    if config.band_frac > 0:
+        band = config.band_frac * float(np.mean(np.abs(smoothed)))
+        delta = np.abs(smoothed - previous_weights_1d)
+        hysteresis_mask = delta > band
+        w = np.where(hysteresis_mask, smoothed, previous_weights_1d)
+    else:
+        w = smoothed
 
     w = np.where(support, w, 0.0)
 
