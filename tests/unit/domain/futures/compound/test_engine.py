@@ -641,3 +641,278 @@ class TestAggregateTrial4hToDaily:
         expected = float(np.expm1(6 * np.log1p(0.01)))
         assert result.shape == (1, 1)
         assert result[0, 0] == pytest.approx(expected, rel=1e-10)
+
+
+class TestBuildDeploymentCandidate:
+    """Tests 1-4: _build_deployment_candidate unit tests per L2 turnover spec."""
+
+    @pytest.fixture
+    def valid_args(self) -> dict:
+        from src.domain.futures.compound.contracts import (
+            CalibratedForecastPanel,
+            HandoffAdmissionEvidence,
+            HandoffResult,
+            L2Evaluation,
+            L2GateVerdict,
+            L2CategoryResult,
+            RawSignalPanel,
+            SealedHoldoutManifest,
+            SignalDescriptor,
+        )
+        import numpy as np
+
+        desc_a = SignalDescriptor(signal_id="trend_ema:fast", family="trend", speed="fast", lookback_hours=48, native_timeframe="1h")
+        desc_b = SignalDescriptor(signal_id="momentum_ts:slow", family="momentum", speed="slow", lookback_hours=168, native_timeframe="4h")
+        desc_c = SignalDescriptor(signal_id="mean_rev:mean", family="mean_rev", speed="mean", lookback_hours=72, native_timeframe="1h")
+        unique_ids = ("trend_ema:fast", "momentum_ts:slow", "mean_rev:mean")
+        # 18x fast + 10x slow + 5x mean = 33 total, 3 unique
+        ids_multiset = ("trend_ema:fast",) * 18 + ("momentum_ts:slow",) * 10 + ("mean_rev:mean",) * 5
+
+        evidence = HandoffAdmissionEvidence(
+            annualized_log_growth=0.1, growth_lcb90=0.05, growth_2x_cost=0.05,
+            max_drawdown=0.1, annual_volatility=0.15, positive_outer_folds=5,
+            effective_breadth=3.0, active_signal_ids=ids_multiset,
+            admitted=True, reasons=(),
+        )
+        handoff_result = HandoffResult(
+            forecast=CalibratedForecastPanel(
+                decision_timestamps_ns=np.array([0], dtype=np.int64),
+                symbols=("A",),
+                mu_2d=np.zeros((1, 1), dtype=np.float32),
+                se_2d=np.zeros((1, 1), dtype=np.float32),
+                family_mu_3d=np.zeros((1, 1, 1), dtype=np.float32),
+                family_ids=("f",),
+                admitted_signal_ids=unique_ids,
+                fold_manifest_hash="h1",
+            ),
+            evidence=evidence,
+        )
+        panel = RawSignalPanel(
+            decision_timestamps_ns=np.array([0], dtype=np.int64),
+            symbols=("A",),
+            descriptors=(desc_a, desc_b, desc_c),
+            z_3d=np.zeros((1, 1, 3), dtype=np.float32),
+            valid_3d=np.ones((1, 1, 3), dtype=np.bool_),
+            sigma_2d=np.ones((1, 1), dtype=np.float32),
+        )
+        passing_categories = tuple(
+            L2CategoryResult(category=f"cat-{i}", passed=True, reasons=())
+            for i in range(3)
+        )
+        l2_eval = L2Evaluation(
+            verdict=L2GateVerdict.PASS, benchmark_id="b1",
+            annualized_log_growth=0.1, cagr=0.05, excess_growth_lcb90=0.05,
+            excess_growth_probability=0.95, stressed_excess_growth_lcb90=0.03,
+            equity_multiple=1.2, sharpe=1.5, sharpe_probability=0.95,
+            deflated_sharpe_probability=0.95, candidate_count=42, calmar=0.5,
+            max_drawdown=0.05, daily_cvar95=-0.01, annual_volatility=0.15,
+            annual_turnover=6.63, cost_drag_ratio=0.03, capacity_utilisation_p95=0.05,
+            active_days_ratio=1.0, rebalance_count=30, positive_outer_folds=5,
+            oos_days=365, category_results=passing_categories, integrity_ok=True,
+            reasons=(),
+        )
+        manifest = SealedHoldoutManifest(
+            holdout_id="test", start_time_ns=0, end_time_ns=1,
+            holdout_days=90, model_version="v2", data_manifest_hash="dh1",
+            strategy_spec_hash="sh1",
+        )
+        forecast = CalibratedForecastPanel(
+            decision_timestamps_ns=np.array([0], dtype=np.int64),
+            symbols=("A",),
+            mu_2d=np.zeros((1, 1), dtype=np.float32),
+            se_2d=np.zeros((1, 1), dtype=np.float32),
+            family_mu_3d=np.zeros((1, 1, 1), dtype=np.float32),
+            family_ids=("f",),
+            admitted_signal_ids=unique_ids,
+            fold_manifest_hash="fh1",
+        )
+        return {
+            "handoff_result": handoff_result,
+            "panel": panel,
+            "l2_eval": l2_eval,
+            "manifest": manifest,
+            "forecast": forecast,
+        }
+
+    def test_build_deployment_candidate_deduplicates_and_frequency_weights(self, valid_args: dict) -> None:
+        from src.domain.futures.compound.engine import _build_deployment_candidate
+        result = _build_deployment_candidate(**valid_args)
+        assert result is not None
+        assert len(result.active_signal_ids) == 3
+        assert sum(result.vote_weights) == pytest.approx(1.0)
+        assert result.vote_weights[0] == pytest.approx(18 / 33)
+        assert result.vote_weights[1] == pytest.approx(10 / 33)
+        assert result.vote_weights[2] == pytest.approx(5 / 33)
+
+    def test_build_deployment_candidate_returns_none_when_not_admitted_or_not_pass(self, valid_args: dict) -> None:
+        from src.domain.futures.compound.engine import _build_deployment_candidate
+        from src.domain.futures.compound.contracts import (
+            HandoffAdmissionEvidence, HandoffResult,
+        )
+        ev = valid_args["handoff_result"].evidence
+        not_admitted = HandoffAdmissionEvidence(
+            annualized_log_growth=ev.annualized_log_growth,
+            growth_lcb90=ev.growth_lcb90, growth_2x_cost=ev.growth_2x_cost,
+            max_drawdown=ev.max_drawdown, annual_volatility=ev.annual_volatility,
+            positive_outer_folds=ev.positive_outer_folds,
+            effective_breadth=ev.effective_breadth,
+            active_signal_ids=ev.active_signal_ids,
+            admitted=False, reasons=("test",),
+        )
+        args = dict(valid_args)
+        args["handoff_result"] = HandoffResult(
+            forecast=valid_args["handoff_result"].forecast,
+            evidence=not_admitted,
+        )
+        assert _build_deployment_candidate(**args) is None
+
+    def test_l2_not_pass_returns_none(self, valid_args: dict) -> None:
+        from src.domain.futures.compound.engine import _build_deployment_candidate
+        from src.domain.futures.compound.contracts import L2CategoryResult, L2Evaluation, L2GateVerdict
+        fail_categories = (
+            L2CategoryResult(category="cat-0", passed=False, reasons=("fail",)),
+            L2CategoryResult(category="cat-1", passed=True, reasons=()),
+        )
+        fail_eval = L2Evaluation(
+            verdict=L2GateVerdict.FAIL, benchmark_id="b1",
+            annualized_log_growth=0.0, cagr=0.0, excess_growth_lcb90=0.0,
+            excess_growth_probability=0.0, stressed_excess_growth_lcb90=0.0,
+            equity_multiple=1.0, sharpe=0.0, sharpe_probability=0.0,
+            deflated_sharpe_probability=0.0, candidate_count=0, calmar=0.0,
+            max_drawdown=0.0, daily_cvar95=0.0, annual_volatility=0.0,
+            annual_turnover=0.0, cost_drag_ratio=0.0, capacity_utilisation_p95=0.0,
+            active_days_ratio=1.0, rebalance_count=30, positive_outer_folds=3,
+            oos_days=365, category_results=fail_categories,
+            integrity_ok=True, reasons=("test_fail",),
+        )
+        args = dict(valid_args)
+        args["l2_eval"] = fail_eval
+        assert _build_deployment_candidate(**args) is None
+
+    def test_build_deployment_candidate_unmatched_signal_id_raises_value_error(self, valid_args: dict) -> None:
+        from src.domain.futures.compound.engine import _build_deployment_candidate
+        from src.domain.futures.compound.contracts import (
+            HandoffAdmissionEvidence, HandoffResult,
+        )
+        bad_evidence = HandoffAdmissionEvidence(
+            annualized_log_growth=0.1, growth_lcb90=0.05, growth_2x_cost=0.05,
+            max_drawdown=0.1, annual_volatility=0.15, positive_outer_folds=5,
+            effective_breadth=1.0,
+            active_signal_ids=("trend_ema:fast", "nonexistent:sig"),
+            admitted=True, reasons=(),
+        )
+        bad_handoff = HandoffResult(
+            forecast=valid_args["handoff_result"].forecast,
+            evidence=bad_evidence,
+        )
+        args = dict(valid_args)
+        args["handoff_result"] = bad_handoff
+        with pytest.raises(ValueError, match="unmatched signal ids"):
+            _build_deployment_candidate(**args)
+
+
+class TestEngineL2PassBuildsDeploymentCandidate:
+    def test_engine_l2_pass_builds_deployment_candidate_without_crash(
+        self, tmp_path, mocker, small_cube: MarketFeatureCube,
+    ) -> None:
+        from src.domain.futures.compound.contracts import (
+            CalibratedForecastPanel,
+            CausalFold,
+            HandoffResult,
+            HandoffAdmissionEvidence,
+            L2CategoryResult,
+            L2Evaluation,
+            L2GateVerdict,
+            RawSignalPanel,
+        )
+
+        desc_a = mocker.Mock(spec=SignalDescriptor, signal_id="trend_ema:fast", target_horizon_hours=4)
+        desc_b = mocker.Mock(spec=SignalDescriptor, signal_id="momentum_ts:slow", target_horizon_hours=4)
+        mock_panel = mocker.Mock(spec=RawSignalPanel)
+        mock_panel.z_3d = np.zeros((256, 5, 3))
+        mock_panel.valid_3d = np.ones((256, 5, 3), dtype=bool)
+        mock_panel.sigma_2d = np.full((256, 5), 0.01, dtype=np.float32)
+        mock_panel.descriptors = (desc_a, desc_b)
+        mocker.patch(
+            "src.domain.futures.compound.engine.build_raw_signal_panel",
+            return_value=mock_panel,
+        )
+        mock_folds = (CausalFold(0, 0, 50, 48, 50, 52, 102, 2, 42),)
+        mocker.patch("src.domain.futures.compound.engine.build_folds_4h", return_value=mock_folds)
+        mocker.patch("src.domain.futures.compound.engine.build_multi_horizon_targets", return_value={4: mocker.Mock()})
+        mocker.patch("src.domain.futures.compound.engine.align_costs_to_decision_grid", return_value=np.full((256, 5), 8.0, dtype=np.float32))
+
+        forecast_panel = CalibratedForecastPanel(
+            decision_timestamps_ns=np.arange(256, dtype=np.int64),
+            symbols=small_cube.symbols,
+            mu_2d=np.ones((256, len(small_cube.symbols)), dtype=np.float32) * 0.001,
+            se_2d=np.full((256, len(small_cube.symbols)), 0.01, dtype=np.float32),
+            family_mu_3d=np.zeros((256, len(small_cube.symbols), 1), dtype=np.float32),
+            family_ids=(),
+            admitted_signal_ids=("trend_ema:fast", "momentum_ts:slow"),
+            fold_manifest_hash="test",
+        )
+        # duplicated multiset: 3x fast, 1x slow (mirrors the real cluster/fold sleeve fan-out)
+        ids_multiset = ("trend_ema:fast",) * 3 + ("momentum_ts:slow",) * 1
+        evidence = HandoffAdmissionEvidence(
+            annualized_log_growth=0.1, growth_lcb90=0.05, growth_2x_cost=0.05,
+            max_drawdown=0.1, annual_volatility=0.15, positive_outer_folds=5,
+            effective_breadth=2.0, active_signal_ids=ids_multiset,
+            admitted=True, reasons=(),
+        )
+        handoff_result = HandoffResult(forecast=forecast_panel, evidence=evidence)
+        mocker.patch(
+            "src.domain.futures.compound.engine.build_exit_aware_handoff",
+            return_value=handoff_result,
+        )
+
+        passing_categories = tuple(
+            L2CategoryResult(category=f"category-{i}", passed=True, reasons=())
+            for i in range(5)
+        )
+        passing_l2 = L2Evaluation(
+            verdict=L2GateVerdict.PASS, benchmark_id="test",
+            annualized_log_growth=0.0, cagr=0.0, excess_growth_lcb90=0.0,
+            excess_growth_probability=1.0, stressed_excess_growth_lcb90=0.0,
+            equity_multiple=1.0, sharpe=0.0, sharpe_probability=1.0,
+            deflated_sharpe_probability=1.0, candidate_count=1, calmar=0.0,
+            max_drawdown=0.0, daily_cvar95=0.0, annual_volatility=0.0,
+            annual_turnover=0.0, cost_drag_ratio=0.0, capacity_utilisation_p95=0.0,
+            active_days_ratio=1.0, rebalance_count=30, positive_outer_folds=3,
+            oos_days=365, category_results=passing_categories, integrity_ok=True,
+            reasons=(),
+        )
+        import src.domain.futures.compound.engine as eng
+        mocker.patch.object(eng, "evaluate_l2_walk_forward", return_value=passing_l2)
+        mocker.patch.object(
+            eng, "evaluate_l3_sealed_holdout",
+            return_value=L3ValidationResult(
+                verdict=DeploymentVerdict.SHADOW, posterior_growth_probability=0.5,
+                holdout_days=90, max_drawdown=0.0, daily_cvar95=0.0, reasons=(),
+            ),
+        )
+
+        universe = type("Universe", (), {"symbols": small_cube.symbols, "snapshots": ()})()
+        store = SealedHoldoutStore(tmp_path / "l2_pass_deployment_candidate.sqlite3")
+        manifest = SealedHoldoutManifest(
+            holdout_id="l2-pass-deploy-test",
+            start_time_ns=int(small_cube.timestamps_ns[-180]),
+            end_time_ns=int(small_cube.timestamps_ns[-1]),
+            holdout_days=90,
+            model_version="v1",
+            data_manifest_hash="h1",
+            strategy_spec_hash="spec1",
+        )
+        store.create(manifest)
+
+        result = run_multiscale_compound_engine(
+            market=small_cube, universe=universe,
+            holdout_store=store, holdout_id="l2-pass-deploy-test",
+            config=CompoundEngineConfig(),
+        )
+
+        assert result.l2.verdict == L2GateVerdict.PASS
+        assert result.deployment_candidate is not None
+        assert result.deployment_candidate.active_signal_ids == ("trend_ema:fast", "momentum_ts:slow")
+        assert result.deployment_candidate.vote_weights[0] == pytest.approx(3 / 4)
+        assert result.deployment_candidate.vote_weights[1] == pytest.approx(1 / 4)
