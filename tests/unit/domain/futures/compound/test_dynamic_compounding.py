@@ -9,6 +9,7 @@ from src.domain.futures.compound.allocator import (
     _apply_portfolio_level_caps,
     compute_dynamic_compounding_path,
     compute_dynamic_compounding_weights,
+    derive_causal_vol_target,
 )
 from src.domain.futures.compound.config import DynamicCompoundingConfig
 from src.domain.futures.compound.contracts import CalibratedForecastPanel, CombinedForecast
@@ -651,3 +652,61 @@ class TestDynamicCompounding:
             previous_weights_1d=prev, config=default_config, vol_scale=0.5,
         )
         assert abs(float(w2[0]) - 0.5 * float(w1[0])) < 1e-10
+
+
+class TestDeriveCausalVolTarget:
+    def test_derive_causal_vol_target_from_drawdown_budget_and_fallback(self) -> None:
+        config = DynamicCompoundingConfig(min_vol_samples=10)
+        eq = np.linspace(1.0, 0.85, 60).tolist() + [0.85] * 40
+        vol_4h = 0.006
+        ret = [vol_4h] * 100
+        target = derive_causal_vol_target(eq, ret, config)
+        assert target >= config.target_ann_vol
+        assert target <= config.max_ann_vol_budget * config.risk_safety_factor
+
+    def test_insufficient_samples_falls_back(self) -> None:
+        config = DynamicCompoundingConfig(min_vol_samples=200)
+        target = derive_causal_vol_target([1.0], [], config)
+        assert target == config.target_ann_vol
+
+    def test_return_history_shorter_than_ten_falls_back(self) -> None:
+        config = DynamicCompoundingConfig(min_vol_samples=10)
+        eq = np.linspace(1.0, 0.9, 60).tolist()
+        ret = [0.001] * 5
+        target = derive_causal_vol_target(eq, ret, config)
+        assert target == config.target_ann_vol
+
+
+class TestVolScaleMaxWiring:
+    def test_compute_dynamic_compounding_path_leverage_exceeds_one_under_vol_scale_max(self) -> None:
+        n_bars, n_syms = 70, 5
+        mu_2d = np.ones((n_bars, n_syms), dtype=np.float32) * 0.01
+        sigma_2d = np.full((n_bars, n_syms), 0.001, dtype=np.float32)
+        forecast = CalibratedForecastPanel(
+            decision_timestamps_ns=np.arange(n_bars, dtype=np.int64) * 3_600_000_000_000,
+            symbols=tuple(f"S{i}" for i in range(n_syms)),
+            mu_2d=mu_2d,
+            se_2d=np.full((n_bars, n_syms), 0.001, dtype=np.float32),
+            family_mu_3d=np.zeros((n_bars, n_syms, 1), dtype=np.float32),
+            family_ids=("f1",),
+            admitted_signal_ids=("s1",),
+            fold_manifest_hash="fh",
+        )
+        funding = np.zeros((n_bars * 4, n_syms), dtype=np.float32)
+        close = np.ones((n_bars, n_syms), dtype=np.float32)
+        config = DynamicCompoundingConfig(
+            use_rank_conviction=False, vol_scale_max=1.5, max_gross_leverage=1.0,
+            max_long_leverage=0.7, max_short_leverage=0.3,
+        )
+        result = compute_dynamic_compounding_path(
+            forecast=forecast, sigma_2d=sigma_2d, funding_rates_1h_2d=funding,
+            config=config, close_2d=close, cost_bps=8.0,
+        )
+        gross_last = float(np.sum(np.abs(result[-1])))
+        assert gross_last > 0.5
+        total_long = float(np.sum(np.maximum(result[-1], 0.0)))
+        total_short = float(np.sum(np.maximum(-result[-1], 0.0)))
+        total_gross = total_long + total_short
+        assert total_long <= 0.7 + 1e-10
+        assert total_short <= 0.3 + 1e-10
+        assert total_gross <= 1.0 + 1e-10
