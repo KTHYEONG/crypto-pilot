@@ -1,4 +1,4 @@
-## L2 게이트 최초 PASS 달성 및 배포후보 생성 차단 버그 — 2026-07-26
+## 배포 provenance·탐색 다중성 스펙 구현 및 파이프라인 사상 최초 완주 — 2026-07-26
 
 - 실행일: `2026-07-26`
 - 실행 명령: `L2_DRY_RUN=1 uv run python src/execution/opt_main_futures.py --phase full --sync local --date 2026-07-26`
@@ -6,205 +6,70 @@
 - 데이터 축: **51개 CORE 완전 이력 심볼 × 5,460개 1시간 봉**
 - 데이터 무결성: `true`
 - 드라이런: `true` — 봉인 홀드아웃은 소모하지 않음
-- 스펙: `docs/specs/l2-turnover-deadband-and-deployment-candidate-fix.md` (아래 `L2 게이트 무결성 수정` 항목의 후속)
+- 스펙: `docs/specs/deployment-provenance-and-search-multiplicity.md`
+- exit_code: **0** (이전 두 차례 실행 모두 크래시로 미완주였던 것과 대비되는 사상 최초 완주)
 
 ### 배경
 
-직전 항목(`20260726_114624`)에서 L2 미통과 사유 4건이 전부 0 경계 근접 미달로 좁혀졌다. 12개 변형에 대한 실제 프로덕션 엔진 전체 재실행(P1 신호패널→P2 handoff→P3 배분→L2 게이트) 그리드서치로 원인과 해법을 확정했다.
+직전 항목(`20260726_114624`)에서 L2 게이트가 실질 마진으로 최초 PASS했으나, 실제 CLI 실행은 두 가지 크래시(`strategy_spec_hash is required`, `fold_manifest_hash is required`)로 미완주였다. 원인 조사 결과 표면적 크래시 아래에 구조적 결함 3건이 추가로 발견됐다.
 
-- **P4 원인**: 위험집행 파라미터(`band_frac=0.30`, `alpha_smooth=0.15`)가 지나치게 민감해 노이즈성 재조정이 잦았다(연 회전율 37.97x, 비용 14.07%). `band_frac`·`alpha_smooth` 각각 단독 완화는 비선형·비단조로 전부 미달이었고, **결합 재보정만** 4개 게이트를 실질 마진으로 통과시켰다.
-- **P4 수정**: `DynamicCompoundingConfig.band_frac 0.30→0.60`, `alpha_smooth 0.15→0.08`.
-- **BUG-01 원인**: `engine.py`의 배포후보 생성 블록(`# pragma: no cover`)이 L2가 한 번도 PASS한 적이 없어 실행된 적이 없었다. cluster×fold별로 독립 추정된 sleeve 인스턴스의 `signal_id` 멀티셋(중복 281개)을 고유 descriptor 27개와 길이 비교해 `ValueError`가 나는 구조적 결함이었다.
-- **BUG-01 수정**: `_build_deployment_candidate` 신규 함수로 교체 — `active_signal_ids` 고유화(`dict.fromkeys`) 후 admission 빈도로 `vote_weights` 산정(균등가중보다 의미론적으로 정확), 매칭 실패 시 `ValueError`로 fail-closed.
+- **DEF-01 (무결성)**: `engine.py`가 봉인 홀드아웃 `consume()` 호출 시 저장된 manifest 값을 그대로 되먹여, 홀드아웃 재사용 방지 검사가 항상 참(동어반복)이었다.
+- **DEF-02 (무결성)**: 설정 탐색 다중성을 회계하는 `CandidateTrialLedger`가 `src/` 어디서도 호출되지 않는 dead code였다. 이전 12변형 그리드서치의 탐색 자유도가 DSR(deflated Sharpe probability)에 전혀 반영되지 않았다.
+- **BUG-03 (잠복 크래시)**: `compute_trial_multiplicity`가 trial 1개일 때 NumPy 2.4에서 `ValueError`(corrcoef의 0-d 배열 처리 실패)를 던짐. 재현 확인.
 
-### L2 결과 (그리드서치 승자 실측, 실제 프로덕션 엔진)
+### 설계 결정 (실측 기반)
 
-| 지표 | 직전(`20260726_114624`, band=0.30/alpha=0.15) | 금일(band=0.60/alpha=0.08) |
-|---|---:|---:|
-| verdict | `FAIL` | **`PASS`** |
-| absolute CAGR | 30.97% | 31.05% |
-| benchmark-relative CAGR | 29.30% | 30.11% |
-| Sharpe | 1.1632 | **1.352** |
-| Sharpe probability | 0.892 | **0.941** |
-| deflated Sharpe probability | 0.999999997 | 1.000000 |
-| excess growth probability | 0.896 | **0.940** |
-| excess growth LCB90 | -0.0048 | **+0.0527** |
-| stressed excess growth LCB90 | -0.0229 | **+0.1284** |
-| max drawdown | 13.53% | **4.23%** |
-| annual volatility | 14.74% | 10.06% |
-| annual turnover | 37.97x | **6.63x** (-82.5%) |
-| cost drag ratio | 14.07% | **2.74%** (-80.5%) |
-| capacity utilisation p95 | 7.85% | 5.62% |
+다중성 과금 방식을 3개 가설로 실험 비교했다(`scratch/verify_*.py`, 프로덕션 `deflated_sharpe_probability` 함수 그대로 호출):
 
-L2 미통과 사유: **없음** — 전 항목 통과.
+| 가설 | 방식 | 결과 |
+|---|---|---|
+| B (곱셈형) | `k_signal × K_eff_config(M,ρ)` | ρ 가정 필요, ρ=0.99에서도 DSR 0.000004로 과잉 처벌 → 기각 |
+| C (행 추가) | trial 행렬에 config 스트림 row-append | 중복 50개 추가 시 k_eff 9.23→**3.74로 감소** — 탐색할수록 게이트가 쉬워지는 역인센티브 → 기각 |
+| **D (가산형, 채택)** | `k_total = k_signal + (k_config−1)`, 참여비 실측 | 단조성(중복 padding에도 k_eff 불변)·하위호환(M=0=현행과 exact match)·비-게임성(고유 5개 > 중복 50개) 4개 속성 전부 통과 |
 
-L3 결과: `L2_DRY_RUN=1`로 강제 `SHADOW`(`dry_run_holdout_not_consumed`). 봉인 홀드아웃 미소진 보존.
+봉인 홀드아웃 재봉인 정책: 미소진 `spec_hash=''` seal만 1회 자동 backfill 허용, 이미 소진된 seal은 영구 무효(Q3 결정).
 
-### 실제 CLI 실행에서 발견된 신규 차단 버그 2건 (미해결)
+### 구현 및 검증 (`/implement` → `/check`)
 
-`_build_deployment_candidate` 수정 자체는 정상 동작했으나, **L2가 실제로 PASS한 것이 사상 처음**이라 그 뒤에 숨어있던 완전히 별개의 결함 2건이 연쇄로 드러나 실제 CLI 실행(`opt_main_futures.py --phase full`)은 여전히 예외로 실패한다(exit_code=1, artifact 미생성):
+- 신규: `src/domain/futures/compound/provenance.py` (해시 유도 4함수)
+- 수정: `multiplicity.py`(BUG-03 가드 + `charge_config_search_multiplicity`), `contracts.py`(`CandidateTrialLedger.register/load_trial_returns`), `holdout_store.py`(`ensure_sealed`, `consume` 강화), `l1_sleeves.py`(fold_hash 배선), `engine.py`(해시 유도·ledger 배선·과금 순서), `compound_main.py`(전체 배선)
+- `/check` 1차 실행에서 스펙 준수 도구 자체의 한계 2건 발견(점 표기 `Class.method` 계약명 미매칭, `contract.json` 키 스키마 불일치로 wiring 검증이 조용히 스킵됨) → `lean_check.py` 보정 후 wiring 8개 수동 재검증
+- `/check` 과정에서 **실질 결함 2건 추가 발견 및 수정**:
+  1. `trial_ledger.register()`가 `engine.py`에 전혀 호출되지 않고 있었음(다중성 회계의 핵심 축이 죽어있었음) → `candidate_hash`/`risk_policy_hash` 유도 및 자기제외(`exclude_candidate_hash`) 로직과 함께 배선
+  2. `universe_state_hash` 사전검증이 DEF-01 동어반복 제거 과정에서 실수로 함께 삭제되어 `test_holdout_rejects_changed_universe_hash` 회귀 → 복원
+- 최종 판정: 🟢 PASS — Wiring ✅ | Non-dummy AST ✅ | Mypy Strict ✅ | Regression Test ✅ | Coverage 94%
 
-1. **`strategy_spec_hash is required`**: `DeploymentCandidate.__post_init__`(`contracts.py:862`)이 non-empty를 요구하지만, `compound_main.py:237`의 `SealedHoldoutManifest(...)` 생성 시 `strategy_spec_hash` 인자 자체를 넘기지 않아 기본값 `""`가 그대로 전달됨.
-2. **`fold_manifest_hash is required`**: 동일 계약(`contracts.py:864`)이 non-empty를 요구하지만, `l1_sleeves.py`의 `combine_posterior_sleeves`가 만드는 `CalibratedForecastPanel`에는 이 필드를 채우는 코드가 처음부터 존재하지 않아 항상 `""`.
+### 실제 CLI 재실행 결과 (구현 후 최초 완주, `logs/futures/compound/20260726_142427/`)
 
-두 필드 모두 "무엇을 해싱해야 하는가"(전략 설정 전체? 신호 카탈로그 버전? fold 구성?)가 미결정된 설계 공백이며, 오늘 새로 생긴 회귀가 아니라 애초에 배선된 적이 없던 부분이다. 임의로 값을 채우지 않고 별도 스펙 사이클로 넘긴다.
-
-크래시 지점만 연구용으로 우회해(`DeploymentCandidate`를 검증 없는 스텁으로 임시 대체, 프로덕션 코드 무수정) 실제 프로덕션 데이터로 L2 지표를 재확인한 결과 위 표의 수치와 **완전히 동일**했다 — 그리드서치 결과가 실전 조건과 정확히 일치함을 검증했다.
-
-### 최종 판정
-
-- L2 게이트가 사상 최초로 실질 마진을 두고 PASS했다. MDD·회전율·비용이 동시에 큰 폭으로 개선됐다(MDD -68.7%, turnover -82.5%, cost drag -80.5%).
-- 그러나 `strategy_spec_hash`/`fold_manifest_hash` 미배선으로 실제 CLI 실행은 여전히 완주하지 못한다. **현재 전략은 실전 매매에 사용할 수 없다** — L2 통과 여부와 무관하게 파이프라인 자체가 완결되지 않는다.
-- L3 봉인 홀드아웃은 두 차례 실행 모두에서 미소진 상태로 안전하게 보존됐다.
-- 후속 방향(우선순위 순): (1) `strategy_spec_hash`/`fold_manifest_hash` 배선 설계 및 구현 — 별도 `/spec` 필요, (2) 파이프라인 완주 확인, (3) 그 이후에만 `L2_DRY_RUN=0` 홀드아웃 실소비 여부를 사용자가 별도로 결정.
-
----
-
-## L2 게이트 무결성 수정(벤치마크·다중성·위험집행) 후 분기 백테스트 결과 — 2026-07-26
-
-- 실행일: `2026-07-26`
-- 실행 명령: `L2_DRY_RUN=1 uv run python src/execution/opt_main_futures.py --phase full --sync local --date 2026-07-26`
-- 결과 artifact: `logs/futures/compound/20260726_114624/`
-- 검증 창: 2024-01-03 ~ 2026-07-01 (워밍업 90일 / L1 365일 / L2 365일 / L3 봉인 홀드아웃 90일)
-- 데이터 축: **51개 CORE 완전 이력 심볼 × 5,460개 1시간 봉** (아래 `20260726_102018` 실행과 동일 축)
-- 데이터 무결성: `true`
-- 드라이런: `true` — 봉인 홀드아웃은 소모하지 않음
-- 스펙: `docs/specs/l2-growth-gate-integrity-and-risk-deployment.md`
-
-### 배경
-
-`20260726_102018` 실행에서 L2 미통과 사유 4건이 전략 결함이 아니라 채점 로직의 결함이라는 사실이 실험적으로 확인됐다(`scratch/verify_growth_strategy.py`, `verify_growth_variants.py`, `verify_dsr_and_scaling.py`).
-
-- **D1** `engine.py` 벤치마크 구간이 전체 이력 앞부분으로 절단되어 L2 창(2025-04~2026-04)이 엉뚱한 시기(2024-01~2025-01)와 비교됨
-- **D2** 벤치마크 일간 가격을 `nanmean`(일중 평균가)으로 집계해 실제 변동성을 24% 과소평가
-- **D3** 벤치마크 vol-target 스케일이 사전 점화 없이 시작해 첫 60일간 무레버 원본 변동성으로 노출
-- **P3** `DynamicCompoundingConfig.vol_scale_max=1.5`가 선언만 되고 실제로 참조되지 않아(dead parameter) `max_gross_leverage=1.0`가 위험 컨트롤러의 상한으로 잘못 사용되며 목표변동성(15%) 대비 78%만 집행
-- **P2** DSR(deflated Sharpe probability) 추정량이 신호 간 상관을 무시한 합성 `t(df=10)` 널을 사용해 통과가 구조적으로 불가능(요구 Sharpe 3.30 vs 관측 1.45)
-
-수정 내용: `src/domain/futures/compound/benchmark.py`(신규, 벤치마크 시간정렬·종가집계·사전점화), `multiplicity.py`(신규, canonical Bailey–López de Prado DSR), `allocator.py`(`derive_causal_vol_target`+`vol_scale_max` 배선), `engine.py`/`validation.py`(배선 갱신). 게이트 임계값은 전부 불변.
-
-### L2 결과
-
-| 지표 | 수정 전 (`20260726_102018`) | 수정 후 (`20260726_114624`) |
-|---|---:|---:|
-| verdict | `FAIL` | `FAIL` |
-| equity multiple | 1.2581 | 1.2954 |
-| absolute CAGR | 26.69% | 30.97% |
-| benchmark-relative CAGR | -22.16% | **+29.30%** |
-| annualized log growth | -25.05% | 25.70% |
-| Sharpe | -1.0172 | **+1.1632** |
-| Sharpe probability | 0.245 | 0.892 |
-| deflated Sharpe probability | 0.500 | **0.999999997** |
-| excess growth probability | 0.261 | 0.896 |
-| excess growth LCB90 | -0.6752 | -0.0048 |
-| stressed excess growth LCB90 | +0.0094 (당시 통과) | **-0.0229 (신규 미통과)** |
-| max drawdown | 10.10% | 13.53% |
-| daily CVaR95 | -1.05% | -1.47% |
-| annual volatility | 11.64% | 14.74% |
-| annual turnover | 28.75x | 37.97x |
-| cost drag ratio | 12.16% | 14.07% |
-| capacity utilisation p95 | 6.35% | 7.85% |
-| integrity | `true` | `true` |
-
-L2 미통과 사유 (수정 후, 4건 — 전부 경계 근접):
-
-- `excess_growth_lcb90=-0.004807 not strictly positive`
-- `stressed_excess_growth_lcb90=-0.022897 not strictly positive`
-- `excess_growth_probability=0.8960<0.9`
-- `sharpe_probability=0.8920<0.9`
-
-### L3 결과
-
-| 지표 | 결과 |
+| 지표 | 값 |
 |---|---:|
-| verdict | `REJECT` |
-| posterior growth probability | 0.7293 |
-| holdout days | 90 |
-| max drawdown | 5.97% |
-| daily CVaR95 | -0.79% |
-| reason | `l2_not_pass` |
-
-### 최종 판정
-
-- 벤치마크 결함 수정만으로 benchmark-relative CAGR 부호가 반전됐다(-22.16% → +29.30%). 이전 FAIL 사유 4건 전부가 채점 로직 아티팩트였음이 실측으로 확인됐다.
-- DSR은 예측(0.10 내외)을 크게 상회해 사실상 완전 통과(0.9999999997)했다. 실제 25개 신호의 횡단면 상관이 가정보다 높아 유효 시행 수(K_eff)가 작게 추정된 결과이며, canonical 추정량이 정직하게 반영했다.
-- 위험집행 배선 수정으로 실현 연변동성이 11.64%→14.74%로 상승해 선언된 목표(15%)에 근접 도달했다(78%→98% 집행률).
-- 잔존 미통과 4건은 전부 0 경계 근접 미달이며, 그중 `stressed_excess_growth_lcb90`은 위험집행 확대로 turnover(38x)·비용이 늘며 **새로 구속된 게이트**다. 임계값은 낮추지 않았다.
-- 따라서 현재 전략은 여전히 실전 매매에 사용하지 않는다. L3 봉인 홀드아웃은 미소진 상태로 보존됐다.
-- 후속 방향: 비용 스트레스(2x)와 목표변동성 사이의 결합 최적화 가설 검증이 필요하다. 게이트 완화나 재시도로 통과시키지 않는다.
-
----
-
-## CORE 축 정합성 수정 후 분기 백테스트 결과 — 2026-07-26
-
-- 실행일: `2026-07-26`
-- 실행 명령: `L2_DRY_RUN=1 uv run python src/execution/opt_main_futures.py --phase full --sync local --date 2026-07-26`
-- 결과 artifact: `logs/futures/compound/20260726_102018/`
-- 검증 창: 2024-01-03 ~ 2026-07-01
-  - 워밍업 90일
-  - L1 365일
-  - L2 365일
-  - L3 봉인 홀드아웃 90일
-- 데이터 축: **51개 CORE 완전 이력 심볼 × 5,460개 1시간 봉**
-- 데이터 무결성: `true`
-- 드라이런: `true` — 봉인 홀드아웃은 소모하지 않음
-
-### 치명적 오류와 수정
-
-CORE 데이터 커버리지 검증은 51개 심볼만 통과했지만 PIT 유니버스 축은 120개를 유지했다. 이 불일치로 누락 심볼이 L1 클러스터·신호 승인 입력에 남았고, 결과가 전 기간 cash-only(`target_weights=0`)가 됐다.
-
-수정 내용:
-
-- CORE 완전 이력 심볼만 PIT 유니버스에 유지
-- `eligible`, `entry_block`, `exit_required`, `capacity`, `risk_scale`, `cost_bps`의 열 축을 동일하게 축소
-- 누락 심볼을 0 가격·비적격 행렬로 후단에 전달하지 않도록 차단
-
-수정 후 목표 비중은 `(5,460, 51)` 배열에서 비영 셀 **228,117개**로 생성됐고, `weight_abs_sum=2705.5249`, `max_abs_weight=0.0764`였다.
-
-### L2 결과
-
-| 지표 | 결과 |
-|---|---:|
-| verdict | `FAIL` |
-| equity multiple | 1.2581 |
-| absolute CAGR | 26.69% |
-| benchmark-relative CAGR | -22.16% |
-| annualized log growth | -25.05% |
-| Sharpe | -1.0172 |
-| Sharpe probability | 0.245 |
-| deflated Sharpe probability | 0.500 |
-| excess growth probability | 0.261 |
-| excess growth LCB90 | -0.6752 |
-| max drawdown | 10.10% |
-| daily CVaR95 | -1.05% |
-| annual volatility | 11.64% |
-| annual turnover | 28.75x |
-| cost drag ratio | 12.16% |
-| capacity utilisation p95 | 6.35% |
+| verdict | **PASS** |
+| absolute CAGR | 31.05% |
+| benchmark-relative CAGR | 30.11% |
+| Sharpe / probability | 1.352 / 0.9405 |
+| deflated Sharpe probability | 1.000000 |
+| excess growth LCB90 | +0.0527 |
+| stressed excess growth LCB90 | +0.1284 |
+| max drawdown | 4.23% |
+| annual volatility | 10.06% |
+| annual turnover | 6.63x |
+| cost drag ratio | 2.74% |
+| capacity utilisation p95 | 5.62% |
 | integrity | `true` |
 
-L2 미통과 사유:
+`20260726_114624`(수정 전, 크래시로 미완주)와 **완전히 동일한 수치** — 이번 수정이 전략 로직·성과에 어떠한 영향도 주지 않고 배관(provenance·다중성 회계)만 고쳤음을 실측으로 확인했다.
 
-- `excess_growth_lcb90=-0.675205 not strictly positive`
-- `excess_growth_probability=0.2610<0.9`
-- `deflated_sharpe_probability=0.5000<0.9`
-- `sharpe_probability=0.2450<0.9`
+L3 결과: `verdict=shadow`, `reason=dry_run_holdout_not_consumed`. 봉인 홀드아웃 미소진 보존.
 
-### L3 결과
+### 신규 로직 실측 동작 확인
 
-| 지표 | 결과 |
-|---|---:|
-| verdict | `REJECT` |
-| posterior growth probability | 0.8242 |
-| holdout days | 90 |
-| max drawdown | 5.23% |
-| daily CVaR95 | -0.74% |
-| reason | `l2_not_pass` |
+- **봉인 홀드아웃 1회 backfill**: 로그에 `holdout quarterly-2026-06-30-0048c160d459: backfilling empty spec_hash` 기록. DB 확인 결과 해당 seal은 `strategy_spec_hash`가 빈 값에서 채워졌고 미소진 상태 유지(L2_DRY_RUN=1이라 `consume()` 미호출). 과거 이미 소진된 3개 seal(`multiscale-live`, `-07-24`, `-07-23`)은 예정대로 backfill되지 않고 영구 무효 유지(`[LIMIT-04]`).
+- **다중성 ledger 최초 가동**: `data/futures/lake/candidate_trials.db`에 최초 행 1건 등록 확인(`l2_daily_returns` 365일치). 다음 실행부터 이 행이 "이전 탐색"으로 인식되어 다중성 회계에 반영된다. 이번 실행 자체는 사상 최초 등록이라 소급 과금 대상이 없다(`[LIMIT-03]`, 12변형 그리드서치는 ledger 도입 이전이라 소급 불가).
 
 ### 최종 판정
 
-- cash-only 및 0 비중 버그는 해소됐다.
-- 현재 결과는 실행·원장 관점에서는 정상이며, L2가 실제 거래 포지션을 평가했다.
-- 그러나 벤치마크 대비 성장성과 위험조정 성과가 부족해 L2/L3 모두 배포 기준을 통과하지 못했다.
-- 따라서 현재 전략은 실전 매매에 사용하지 않는다.
-- 이전 문서의 120심볼·4,380봉·absolute CAGR 41.01% 결과는 현재의 51심볼·5,460봉 분기 검증 창과 동일 조건이 아니므로 직접적인 성과 우열 비교에 사용하지 않는다.
+- 파이프라인이 사상 최초로 크래시 없이 완주했다. L2 PASS·L3 SHADOW·무결성 정상.
+- 봉인 홀드아웃 결속과 탐색 다중성 회계가 실측으로 정상 동작함을 확인했다(더 이상 동어반복 검증·dead ledger가 아님).
+- 전략 성과 수치는 수정 전후 완전히 동일 — 이번 작업은 순수 배관 결함 수정이며 알파 로직 변경이 아니다.
+- **여전히 실전 매매에 사용하지 않는다.** `L2_DRY_RUN=0`(봉인 홀드아웃 실소비)은 사용자가 별도로 결정할 사안이며, 이번 실행에서 임의로 전환하지 않았다.
+- 다음 실행부터는 설정을 바꿔 재탐색할 때마다 다중성이 정직하게 누적 과금되므로, 이후 그리드서치는 이번처럼 무비용이 아니라는 점을 인지해야 한다.

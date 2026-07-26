@@ -599,5 +599,8 @@
   },
   "src/domain/futures/compound/config.py": {
     "testing": "tests/unit/domain/futures/compound/test_config.py"
+  },
+  "src/domain/futures/compound/provenance.py": {
+    "testing": "tests/unit/domain/futures/compound/test_provenance.py"
   }
 }
