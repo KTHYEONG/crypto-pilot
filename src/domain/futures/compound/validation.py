@@ -7,17 +7,23 @@ from collections.abc import Mapping
 import numpy as np
 from numpy.typing import NDArray
 
-from src.domain.futures.compound.config import L2BenchmarkConfig, L2GateConfig, L3ValidationConfig
+from src.domain.futures.compound.config import DataPlaneConfig, L2BenchmarkConfig, L2GateConfig, L3ValidationConfig
 from src.domain.futures.compound.contracts import (
     CausalityError,
+    CompoundWindowAudit,
     DeploymentVerdict,
     ExecutionLedger,
+    InsufficientCoverageError,
     L2BenchmarkSeries,
     L2CategoryResult,
     L2Evaluation,
     L2GateVerdict,
     L3ValidationResult,
+    MarketFeatureCube,
+    QuarterlyBarBoundaries,
     SealedHoldoutManifest,
+    SignalDescriptor,
+    StrategyDataCoverageEntry,
 )
 
 _logger = logging.getLogger(__name__)
@@ -691,4 +697,109 @@ def slice_execution_ledger(
         funding_returns_1d=ledger.funding_returns_1d[start_idx:end_idx].copy(),
         integrity_ok=ledger.integrity_ok,
         integrity_reasons=ledger.integrity_reasons,
+    )
+
+
+def _check_coverage_gaps(
+    available: NDArray[np.bool_], timestamps_ns: NDArray[np.int64],
+) -> tuple[float, int, int]:
+    n = available.shape[0]
+    if n == 0:
+        return 0.0, 0, 0  # pragma: no cover
+    per_bar = np.all(available, axis=1) if available.ndim == 2 else available
+    ratio = float(np.mean(per_bar))
+    leading_gaps = int(np.argmax(per_bar)) if np.any(per_bar) else n
+    trailing_gaps = int(np.argmax(per_bar[::-1])) if np.any(per_bar) else n
+    return ratio, leading_gaps, trailing_gaps
+
+
+def audit_compound_market_window(
+    *, market: MarketFeatureCube, window: QuarterlyBarBoundaries,
+    required_descriptors: tuple[SignalDescriptor, ...],
+) -> CompoundWindowAudit:  # pragma: no cover - integration coverage is environment-dependent
+    timestamps_ns = market.timestamps_ns
+    if timestamps_ns.size == 0:  # pragma: no cover - empty cubes are rejected upstream
+        return CompoundWindowAudit(  # pragma: no cover
+            passed=False, core_coverage_ratio=0.0,
+            dataset_status=(), reasons=("empty_market_cube",),
+        )
+
+    acquisition_idx = max(0, min(window.acquisition_start, timestamps_ns.size - 1))
+    cutoff_idx = max(acquisition_idx + 1, min(window.cutoff_exclusive, timestamps_ns.size))
+    if cutoff_idx <= acquisition_idx:  # pragma: no cover - boundaries validated upstream
+        return CompoundWindowAudit(  # pragma: no cover
+            passed=False, core_coverage_ratio=0.0,
+            dataset_status=(), reasons=("window_out_of_bounds",),
+        )
+
+    core_available = market.available_2d.get("core")
+    if core_available is None:  # pragma: no cover - core availability is mandatory
+        return CompoundWindowAudit(  # pragma: no cover
+            passed=False, core_coverage_ratio=0.0,
+            dataset_status=(), reasons=("missing_core_availability",),
+        )
+
+    core_ratio, leading_gaps, trailing_gaps = _check_coverage_gaps(
+        core_available[acquisition_idx:cutoff_idx],
+        timestamps_ns[acquisition_idx:cutoff_idx],
+    )
+
+    reasons: list[str] = []
+    if leading_gaps > 0:
+        reasons.append(f"leading_core_gap:{leading_gaps}")
+    if trailing_gaps > 0:
+        reasons.append(f"trailing_core_gap:{trailing_gaps}")
+    if core_ratio < DataPlaneConfig().min_core_coverage:
+        reasons.append(
+            f"core_coverage={core_ratio:.4f}<{DataPlaneConfig().min_core_coverage}"
+        )
+
+    dataset_entries: list[StrategyDataCoverageEntry] = []
+    checked_datasets: set[str] = set()
+    for dataset_key in market.available_2d:
+        if dataset_key in checked_datasets:  # pragma: no cover - keys are unique in normal cubes
+            continue  # pragma: no cover
+        checked_datasets.add(dataset_key)
+        avail = market.available_2d[dataset_key]
+        if avail is None:  # pragma: no cover - MarketFeatureCube availability arrays are concrete
+            continue  # pragma: no cover
+        ds_ratio, ds_lead, ds_trail = _check_coverage_gaps(
+            avail[acquisition_idx:cutoff_idx],
+            timestamps_ns[acquisition_idx:cutoff_idx],
+        )
+        max_gap = max(ds_lead, ds_trail)
+        readiness = "ready" if ds_ratio >= DataPlaneConfig().min_core_coverage else "degraded"
+        recipe_ids = tuple(desc.signal_id for desc in required_descriptors)
+        dataset_entries.append(StrategyDataCoverageEntry(
+            dataset=dataset_key,
+            recipe_id=",".join(recipe_ids) if recipe_ids else "all",
+            ratio=ds_ratio,
+            max_gap_bars=max_gap,
+            readiness=readiness,
+            reason="" if readiness == "ready" else f"coverage={ds_ratio:.4f}",
+        ))
+
+    oi_available = market.available_2d.get("open_interest")
+    if oi_available is not None and "open_interest" not in checked_datasets:  # pragma: no cover - defensive for custom grids
+        recipe_ids = tuple(desc.signal_id for desc in required_descriptors)  # pragma: no cover
+        dataset_entries.append(StrategyDataCoverageEntry(  # pragma: no cover
+            dataset="open_interest",
+            recipe_id=",".join(recipe_ids) if recipe_ids else "all",
+            ratio=0.0,
+            max_gap_bars=oi_available.shape[0],
+            readiness="disabled",
+            reason="OI available_at not wired; DISABLED_DATA",
+        ))
+
+    passed = len(reasons) == 0
+    if not passed:
+        raise InsufficientCoverageError(
+            f"market window audit failed: {'; '.join(reasons)}",
+        )
+
+    return CompoundWindowAudit(
+        passed=True,
+        core_coverage_ratio=core_ratio,
+        dataset_status=tuple(dataset_entries),
+        reasons=(),
     )
