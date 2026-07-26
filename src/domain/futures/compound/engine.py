@@ -27,6 +27,9 @@ from src.domain.futures.compound.config import CompoundEngineConfig, DynamicComp
 from src.domain.futures.compound.contracts import (
     AlphaEventTape,
     CalibratedForecastPanel,
+    CandidateTrial,
+    CandidateTrialLedger,
+    CausalFold,
     CombinedForecast,
     CompoundEngineResult,
     DeploymentCandidate,
@@ -47,10 +50,18 @@ from src.domain.futures.compound.holdout_store import HoldoutReuseError, SealedH
 from src.domain.futures.compound.l1_sleeves import build_exit_aware_handoff
 from src.domain.futures.compound.multiplicity import (
     build_candidate_trial_returns,
+    charge_config_search_multiplicity,
     compute_trial_multiplicity,
+)
+from src.domain.futures.compound.provenance import (
+    compute_candidate_hash,
+    compute_fold_manifest_hash,
+    compute_risk_policy_hash,
+    compute_strategy_spec_hash,
 )
 from src.domain.futures.compound.signal_bank import build_raw_signal_panel
 from src.domain.futures.compound.validation import (
+    aggregate_returns_to_utc_days,
     evaluate_l2_walk_forward,
     evaluate_l3_sealed_holdout,
     slice_execution_ledger,
@@ -163,7 +174,10 @@ def run_multiscale_compound_engine(
     holdout_store: SealedHoldoutStore,
     holdout_id: str | None = None,
     config: CompoundEngineConfig,
+    strategy_spec_hash: str = "",
+    trial_ledger: CandidateTrialLedger | None = None,
 ) -> CompoundEngineResult:
+    spec_hash = strategy_spec_hash or compute_strategy_spec_hash(config=config)
     n_syms = len(market.symbols)
 
     close_raw = market.fields_2d.get("close")
@@ -186,6 +200,8 @@ def run_multiscale_compound_engine(
 
     handoff_result: HandoffResult | None = None
     p2_error_reason: str | None = None
+    folds: tuple[CausalFold, ...] = ()
+    max_horizon_bars: int = 0
     cost_bps_4h: NDArray[np.float32] = np.full(
         (bars_4h.timestamps_ns.size, n_syms), config.ladder.cost_bps, dtype=np.float32,
     )
@@ -303,7 +319,43 @@ def run_multiscale_compound_engine(
         start_idx=l2_4h_start, end_idx=l2_4h_end,
     )
     trial_daily = _aggregate_trial_4h_to_daily(trial_returns)
-    trial_multiplicity = compute_trial_multiplicity(trial_daily)
+    base_multiplicity = compute_trial_multiplicity(trial_daily)
+
+    risk_policy_hash = compute_risk_policy_hash(config=config)
+    candidate_descriptor_ids = (
+        tuple(dict.fromkeys(handoff_result.evidence.active_signal_ids))
+        if handoff_result is not None
+        else ()
+    )
+    candidate_fold_hash = (
+        compute_fold_manifest_hash(folds, max_target_horizon_bars=max_horizon_bars)
+        if folds
+        else "no_folds"
+    )
+    candidate_hash = compute_candidate_hash(
+        strategy_spec_hash=spec_hash,
+        fold_manifest_hash=candidate_fold_hash,
+        descriptor_ids=candidate_descriptor_ids,
+        risk_policy_hash=risk_policy_hash,
+    )
+    cutoff_time_ns = (
+        quarter_window.cutoff_exclusive_ns
+        if quarter_window is not None
+        else int(ledger.timestamps_ns[-1])
+    )
+
+    if trial_ledger is not None:
+        prior_returns = trial_ledger.load_trial_returns(
+            cutoff_time_ns=cutoff_time_ns,
+            exclude_candidate_hash=candidate_hash,
+            min_days=30,
+        )
+        if prior_returns.shape[0] > 0:
+            trial_multiplicity = charge_config_search_multiplicity(base_multiplicity, prior_returns)
+        else:
+            trial_multiplicity = base_multiplicity
+    else:
+        trial_multiplicity = base_multiplicity
 
     _logger.info("evaluating L2 walk-forward")
     n_l2 = l2_ledger.timestamps_ns.shape[0]
@@ -319,6 +371,19 @@ def run_multiscale_compound_engine(
         benchmark=benchmark, trial_multiplicity=trial_multiplicity,
         config=config.l2_gate, bootstrap_seed=42,
     )
+
+    if trial_ledger is not None:
+        l2_daily_returns = aggregate_returns_to_utc_days(l2_ledger.timestamps_ns, l2_ledger.net_returns_1d)
+        trial_ledger.register(
+            CandidateTrial(
+                candidate_hash=candidate_hash,
+                strategy_spec_hash=spec_hash,
+                descriptor_ids=candidate_descriptor_ids,
+                risk_policy_hash=risk_policy_hash,
+                cutoff_time_ns=cutoff_time_ns,
+            ),
+            l2_daily_returns=l2_daily_returns,
+        )
 
     holdout_ledger = slice_execution_ledger(
         ledger=ledger,
@@ -375,11 +440,16 @@ def run_multiscale_compound_engine(
             holdout_id=resolved_holdout_id,
             model_version=_manifest.model_version,
             data_manifest_hash=market.data_manifest_hash,
-            strategy_spec_hash=_manifest.strategy_spec_hash,
+            strategy_spec_hash=spec_hash,
             evaluate=evaluate_fn,
             universe_state_hash=_manifest.universe_state_hash,
         )
 
+    runtime_fold_hash: str = (
+        compute_fold_manifest_hash(folds, max_target_horizon_bars=max_horizon_bars)
+        if folds
+        else ""
+    )
     stub_handoff = AlphaEventTape(
         events=pa.table({}),
         recipe_definitions=(),
@@ -387,11 +457,15 @@ def run_multiscale_compound_engine(
         active_recipe_ids=(),
         model_version=_manifest.model_version,
         data_manifest_hash=market.data_manifest_hash,
-        fold_manifest_hash=forecast.fold_manifest_hash if forecast is not None else "",
+        fold_manifest_hash=runtime_fold_hash,
     )
 
     deployment_candidate: DeploymentCandidate | None = (
-        _build_deployment_candidate(handoff_result, panel, l2_eval, _manifest, forecast)
+        _build_deployment_candidate(
+            handoff_result, panel, l2_eval, _manifest, forecast,
+            strategy_spec_hash=spec_hash,
+            fold_manifest_hash=runtime_fold_hash,
+        )
         if handoff_result is not None
         else None
     )
@@ -417,6 +491,9 @@ def _build_deployment_candidate(
     l2_eval: L2Evaluation,
     manifest: SealedHoldoutManifest,
     forecast: CalibratedForecastPanel | None,
+    *,
+    strategy_spec_hash: str = "",
+    fold_manifest_hash: str = "",
 ) -> DeploymentCandidate | None:
     if not handoff_result.evidence.admitted or l2_eval.verdict != L2GateVerdict.PASS:
         return None
@@ -437,8 +514,8 @@ def _build_deployment_candidate(
         orientation_signs=orientation_signs,
         vote_weights=vote_weights,
         model_version=manifest.model_version,
-        strategy_spec_hash=manifest.strategy_spec_hash,
-        fold_manifest_hash=forecast.fold_manifest_hash if forecast is not None else "",
+        strategy_spec_hash=strategy_spec_hash,
+        fold_manifest_hash=fold_manifest_hash or (forecast.fold_manifest_hash if forecast is not None else ""),
         trial_count=l2_eval.candidate_count,
     )
 

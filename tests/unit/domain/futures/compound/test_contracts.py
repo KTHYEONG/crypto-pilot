@@ -1,11 +1,18 @@
 from __future__ import annotations
 
+import time
+
 import pytest
 
 import numpy as np
 
-from src.domain.futures.compound.contracts import ExitPolicyKind, ExitPolicySpec
-from src.domain.futures.compound.contracts import L1SleevePosterior
+from src.domain.futures.compound.contracts import (
+    CandidateTrial,
+    CandidateTrialLedger,
+    ExitPolicyKind,
+    ExitPolicySpec,
+    L1SleevePosterior,
+)
 
 
 def _mask(n: int = 2) -> np.ndarray:
@@ -23,6 +30,42 @@ def test_exit_policy_spec_requires_calibration_hash() -> None:
         ExitPolicySpec("bad", ExitPolicyKind.ASYMMETRIC_ATR, -1.0, 2.0, None, 0, 4, -1, "hash")
     with pytest.raises(ValueError, match="holding"):
         ExitPolicySpec("bad_hold", ExitPolicyKind.TIME, None, None, None, -1, 0, -1, "hash")
+
+
+def _dummy_trial(candidate_hash: str = "ch1", cutoff: int = 1000) -> CandidateTrial:
+    return CandidateTrial(
+        candidate_hash=candidate_hash,
+        strategy_spec_hash="spec1",
+        descriptor_ids=("sig1",),
+        risk_policy_hash="risk1",
+        cutoff_time_ns=cutoff,
+    )
+
+
+class TestCandidateTrialLedger:
+    def test_register_same_candidate_twice_is_idempotent(self, tmp_path) -> None:
+        ledger = CandidateTrialLedger(tmp_path / "ledger.sqlite3")
+        trial = _dummy_trial()
+        assert ledger.register(trial) == 1
+        assert ledger.register(trial) == 0
+        assert ledger.distinct_count(cutoff_time_ns=1000) >= 1
+
+    def test_load_trial_returns_drops_short_rows_and_truncates_to_common_length(self, tmp_path) -> None:
+        ledger = CandidateTrialLedger(tmp_path / "load_test.sqlite3")
+        rng = np.random.default_rng(42)
+        now_ns = int(time.time_ns())
+        for i in range(3):
+            n_days = [400, 365, 20][i]
+            rets = rng.normal(0.001, 0.01, n_days).astype(np.float64)
+            trial = _dummy_trial(candidate_hash=f"ch{i}", cutoff=now_ns)
+            ledger.register(trial, l2_daily_returns=rets)
+        result = ledger.load_trial_returns(cutoff_time_ns=now_ns, min_days=30)
+        assert result.shape == (2, 365)
+
+    def test_distinct_count_floor(self, tmp_path) -> None:
+        ledger = CandidateTrialLedger(tmp_path / "floor.sqlite3")
+        count = ledger.distinct_count(cutoff_time_ns=9999, floor=27)
+        assert count == 27
 
 
 def test_l1_sleeve_posterior_rejects_invalid_range() -> None:
