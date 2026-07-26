@@ -9,6 +9,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 import duckdb
+import numpy as np
+from numpy.typing import NDArray
 
 from src.domain.futures.data_lake.contracts import DatasetKind, PartitionManifest
 
@@ -18,6 +20,8 @@ _SIDECAR_SUFFIX = ".sidecar.json"
 _CATALOG_DB = "catalog.duckdb"
 _CATALOG_NEXT_DB = "catalog.duckdb.next"
 _QUARANTINE_DIR = "quarantine"
+_MAX_ABS_FUNDING_RATE = 0.05
+_FUNDING_SCHEMA_VERSION = "funding-v2"
 
 
 class CatalogLockError(RuntimeError):
@@ -143,6 +147,26 @@ def _scan_parquet_files(root: Path, cutoff_exclusive_ns: int) -> list[Path]:
     return filtered
 
 
+def validate_funding_rates(
+    rates: NDArray[np.float64],
+    *,
+    source: str,
+    max_abs_rate: float = _MAX_ABS_FUNDING_RATE,
+) -> None:
+    """Raise FundingDataIntegrityError on non-finite or implausible event rates."""
+    from src.domain.futures.compound.contracts import FundingDataIntegrityError
+    if not np.all(np.isfinite(rates)):
+        non_finite = int(np.sum(~np.isfinite(rates)))
+        raise FundingDataIntegrityError(
+            f"{source}: {non_finite} non-finite funding rate values"
+        )
+    if np.any(np.abs(rates) > max_abs_rate):
+        outliers = int(np.sum(np.abs(rates) > max_abs_rate))
+        raise FundingDataIntegrityError(
+            f"{source}: {outliers} funding rate values exceed |{max_abs_rate}|"
+        )
+
+
 def _compute_sidecar_path(parquet_path: Path) -> Path:
     return parquet_path.with_suffix(_SIDECAR_SUFFIX)
 
@@ -152,12 +176,14 @@ def reconcile_local_catalog(
     root: Path,
     cutoff_exclusive_ns: int,
     lock_timeout_seconds: int = 60,
+    sync_mode: str = "auto",
 ) -> ManifestReconciliationReport:  # pragma: no cover - filesystem integration exercised separately
     import pandas as pd
     root = Path(root)
     catalog_path = root / _CATALOG_DB
     catalog_next_path = root / _CATALOG_NEXT_DB
     quarantine_dir = root / _QUARANTINE_DIR
+    from src.domain.futures.compound.contracts import FundingDataIntegrityError
 
     start_time = time.monotonic()
     lock_acquired = False
@@ -209,12 +235,15 @@ def reconcile_local_catalog(
     reused = 0
     added = 0
     quarantined: list[str] = []
+    funding_integrity_errors: list[str] = []
 
     for fpath in parquet_files:
         sidecar_path = _compute_sidecar_path(fpath)
         stat = fpath.stat()
         size = stat.st_size
         mtime_ns = int(stat.st_mtime_ns)
+
+        is_funding = "funding_event" in fpath.parts
 
         sidecar_valid = False
         if sidecar_path.exists():
@@ -223,19 +252,38 @@ def reconcile_local_catalog(
                 cached_size = sidecar_data.get("size")
                 cached_mtime = sidecar_data.get("mtime_ns")
                 if cached_size == size and cached_mtime == mtime_ns:
-                    reused += 1
-                    sha256_val = sidecar_data.get("sha256", "")
-                    sha256 = str(sha256_val) if sha256_val is not None else ""
-                    manifest = _partition_manifest_from_path(fpath, root, sha256, size, mtime_ns)
-                    if manifest is not None:
-                        conn.execute(
-                            "INSERT OR REPLACE INTO partitions VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                            [manifest.dataset.value, manifest.symbol, manifest.start_time_ms,
-                             manifest.end_time_ms, manifest.row_count, manifest.sha256,
-                             manifest.source, manifest.is_final, str(manifest.path)],
-                        )
-                        added += 1
-                    sidecar_valid = True
+                    if is_funding:
+                        sv = sidecar_data.get("schema_version", "")
+                        if sv != _FUNDING_SCHEMA_VERSION:
+                            sidecar_valid = False
+                        else:
+                            reused += 1
+                            sha256_val = sidecar_data.get("sha256", "")
+                            sha256 = str(sha256_val) if sha256_val is not None else ""
+                            manifest = _partition_manifest_from_path(fpath, root, sha256, size, mtime_ns)
+                            if manifest is not None:
+                                conn.execute(
+                                    "INSERT OR REPLACE INTO partitions VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                                    [manifest.dataset.value, manifest.symbol, manifest.start_time_ms,
+                                     manifest.end_time_ms, manifest.row_count, manifest.sha256,
+                                     manifest.source, manifest.is_final, str(manifest.path)],
+                                )
+                                added += 1
+                            sidecar_valid = True
+                    else:
+                        reused += 1
+                        sha256_val = sidecar_data.get("sha256", "")
+                        sha256 = str(sha256_val) if sha256_val is not None else ""
+                        manifest = _partition_manifest_from_path(fpath, root, sha256, size, mtime_ns)
+                        if manifest is not None:
+                            conn.execute(
+                                "INSERT OR REPLACE INTO partitions VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                                [manifest.dataset.value, manifest.symbol, manifest.start_time_ms,
+                                 manifest.end_time_ms, manifest.row_count, manifest.sha256,
+                                 manifest.source, manifest.is_final, str(manifest.path)],
+                            )
+                            added += 1
+                        sidecar_valid = True
 
         if not sidecar_valid:
             try:
@@ -249,11 +297,12 @@ def reconcile_local_catalog(
                 quarantined.append(str(fpath))
                 continue
 
-            _write_sidecar(sidecar_path, {"size": size, "mtime_ns": mtime_ns, "sha256": sha256})
+            sidecar_meta: dict[str, object] = {"size": size, "mtime_ns": mtime_ns, "sha256": sha256}
 
             import pandas as pd
             try:
-                columns = pd.read_parquet(fpath, engine="pyarrow").columns
+                df_check = pd.read_parquet(fpath, engine="pyarrow")
+                columns = df_check.columns
                 time_column = "timestamp" if "timestamp" in columns else "effective_time_ns"
                 _ = pd.read_parquet(fpath, columns=[time_column])
             except Exception:
@@ -264,6 +313,24 @@ def reconcile_local_catalog(
                 quarantined.append(str(fpath))
                 continue
 
+            if is_funding:
+                if "funding_rate" in df_check.columns:
+                    try:
+                        rates = df_check["funding_rate"].to_numpy(dtype=np.float64)
+                        validate_funding_rates(rates, source=str(fpath))
+                    except FundingDataIntegrityError:
+                        _logger.warning("funding integrity %s, quarantining", fpath)
+                        if sync_mode == "local":
+                            funding_integrity_errors.append(str(fpath))
+                        qpath = quarantine_dir / fpath.relative_to(root)
+                        qpath.parent.mkdir(parents=True, exist_ok=True)
+                        os.rename(fpath, qpath)
+                        quarantined.append(str(fpath))
+                        continue
+                sidecar_meta["schema_version"] = _FUNDING_SCHEMA_VERSION
+
+            _write_sidecar(sidecar_path, sidecar_meta)
+
             manifest = _partition_manifest_from_path(fpath, root, sha256, size, mtime_ns)
             if manifest is not None:
                 conn.execute(
@@ -273,6 +340,11 @@ def reconcile_local_catalog(
                      manifest.source, manifest.is_final, str(manifest.path)],
                 )
                 added += 1
+
+    if sync_mode == "local" and funding_integrity_errors:
+        raise FundingDataIntegrityError(
+            f"local sync: {len(funding_integrity_errors)} funding partitions failed integrity check"
+        )
 
     path_rows = conn.execute("SELECT path FROM partitions").fetchall()
     new_paths = {str(row[0]) for row in path_rows if len(row) > 0}
@@ -313,4 +385,5 @@ __all__ = [
     "CatalogLockError",
     "ManifestReconciliationReport",
     "reconcile_local_catalog",
+    "validate_funding_rates",
 ]

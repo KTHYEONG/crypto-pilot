@@ -89,8 +89,13 @@ class BinanceQueryClient:
     def _normalize_vision_funding(frame: pd.DataFrame) -> pd.DataFrame:
         if frame.empty:
             return frame
-        data = frame.iloc[:, :2].copy()
-        data.columns = ("timestamp", "funding_rate")[: len(data.columns)]
+        n_cols = frame.shape[1]
+        if n_cols >= 3:
+            data = frame.iloc[:, [0, 2]].copy()
+            data.columns = ("timestamp", "funding_rate")
+        else:
+            data = frame.iloc[:, :2].copy()
+            data.columns = ("timestamp", "funding_rate")[: len(data.columns)]
         return BinanceQueryClient._normalize_timestamp(data)
 
     @staticmethod
