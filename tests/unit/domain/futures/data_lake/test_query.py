@@ -146,6 +146,20 @@ class TestBinanceQueryClient:
         payload = client.download_partition(DatasetKind.FUNDING_EVENT, "BTCUSDT", 1_783_440_000_000)
         assert pd.read_parquet(__import__("io").BytesIO(payload))["funding_rate"].tolist() == [0.0001]
 
+    def test_normalize_vision_funding_uses_last_column_for_three_column_archive(self) -> None:
+        normalized = BinanceQueryClient._normalize_vision_funding(
+            pd.DataFrame([[1_783_440_000_000, 4, -0.00033019]])
+        )
+        assert normalized["funding_rate"].tolist() == [-0.00033019]
+
+    def test_rejects_interval_value_in_two_column_funding(self) -> None:
+        from src.domain.futures.compound.contracts import FundingDataIntegrityError
+
+        with pytest.raises(FundingDataIntegrityError, match="exceed"):
+            BinanceQueryClient._normalize_vision_funding(
+                pd.DataFrame([[1_783_440_000_000, 8.0]])
+            )
+
     def test_empty_dataframe_functions_return_empty(self) -> None:
         assert BinanceQueryClient._normalize_vision_funding(pd.DataFrame()).empty
         assert BinanceQueryClient._normalize_vision_klines(pd.DataFrame()).empty

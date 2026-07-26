@@ -27,7 +27,7 @@ from src.domain.futures.data_lake.contracts import (
     UniverseStateRow,
 )
 from src.domain.futures.data_lake.ingestion import DataCoverageError
-from src.domain.futures.data_lake.reconciliation import CatalogLockError
+from src.domain.futures.data_lake.reconciliation import CatalogLockError, validate_funding_frame
 from src.domain.futures.universe.contracts import UniverseStateCube
 
 _logger = logging.getLogger(__name__)
@@ -39,6 +39,25 @@ class UniverseCoverageError(RuntimeError):
 
 class HoldoutReuseError(RuntimeError):
     ...
+
+
+def _normalize_vision_funding(frame: pd.DataFrame) -> pd.DataFrame:
+    """Normalize Binance Vision's two supported funding archive layouts."""
+    if frame.empty:
+        return frame
+    n_cols = frame.shape[1]
+    if n_cols == 3:
+        data = frame.iloc[:, [0, 2]].copy()
+        data.columns = ("timestamp", "funding_rate")
+    elif n_cols == 2:
+        data = frame.iloc[:, :2].copy()
+        data.columns = ("timestamp", "funding_rate")
+    else:
+        raise DataCoverageError(
+            f"funding archive must contain 2 or 3 columns, got {n_cols}"
+        )
+    validate_funding_frame(data, source="binance_vision_funding")
+    return BinanceQueryClient._normalize_timestamp(data)
 
 
 class BinanceQueryClient:
@@ -87,16 +106,7 @@ class BinanceQueryClient:
 
     @staticmethod
     def _normalize_vision_funding(frame: pd.DataFrame) -> pd.DataFrame:
-        if frame.empty:
-            return frame
-        n_cols = frame.shape[1]
-        if n_cols >= 3:
-            data = frame.iloc[:, [0, 2]].copy()
-            data.columns = ("timestamp", "funding_rate")
-        else:
-            data = frame.iloc[:, :2].copy()
-            data.columns = ("timestamp", "funding_rate")[: len(data.columns)]
-        return BinanceQueryClient._normalize_timestamp(data)
+        return _normalize_vision_funding(frame)
 
     @staticmethod
     def _to_parquet_bytes(frame: pd.DataFrame) -> bytes:
