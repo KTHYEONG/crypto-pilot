@@ -81,7 +81,7 @@ def test_candidate_contract_validation_errors_are_covered() -> None:
     for key, value in invalid:
         payload = dict(base)
         payload[key] = value
-        with pytest.raises(ValueError):
+        with pytest.raises(ValueError, match=r"required|match|non-empty|>= 0"):
             DeploymentCandidate(**payload)
 
     candidate = DeploymentCandidate(**base)
@@ -239,6 +239,31 @@ class TestOffsetCausalFolds:
 # ---------------------------------------------------------------------------
 
 class TestWindowAuditCoreCoverage:
+    def test_noneligible_symbol_gap_does_not_fail_core_audit(self, market_cube_2sym) -> None:
+        n = market_cube_2sym.timestamps_ns.size
+        core = np.column_stack((
+            market_cube_2sym.available_2d["core"],
+            np.zeros(n, dtype=np.bool_),
+        ))
+        market = MarketFeatureCube(
+            timestamps_ns=market_cube_2sym.timestamps_ns,
+            symbols=("BTCUSDT", "ETHUSDT", "NEWUSDT"),
+            fields_2d=market_cube_2sym.fields_2d,
+            available_2d={"core": core},
+            eligible_2d=np.column_stack((market_cube_2sym.eligible_2d, np.zeros(n, dtype=np.bool_))),
+            entry_block_2d=np.column_stack((market_cube_2sym.entry_block_2d, np.zeros(n, dtype=np.bool_))),
+            exit_required_2d=np.column_stack((market_cube_2sym.exit_required_2d, np.zeros(n, dtype=np.bool_))),
+            capacity_usdt_2d=np.column_stack((market_cube_2sym.capacity_usdt_2d, np.zeros(n))),
+            execution_cost_bps_2d=np.column_stack((market_cube_2sym.execution_cost_bps_2d, np.zeros(n, dtype=np.float32))),
+            data_manifest_hash=market_cube_2sym.data_manifest_hash,
+        )
+        result = audit_compound_market_window(
+            market=market,
+            window=QuarterlyBarBoundaries(0, 200, 500, 800, n),
+            required_descriptors=(),
+        )
+        assert result.core_coverage_ratio == 1.0
+
     def test_leading_core_gap_raises(self, market_cube_2sym) -> None:
         n = market_cube_2sym.available_2d["core"].shape[0]
         market_cube_2sym.available_2d["core"][:100] = False
