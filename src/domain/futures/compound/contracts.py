@@ -12,6 +12,12 @@ from numpy.typing import NDArray
 from src.domain.futures.universe.contracts import UniverseStateCube
 from src.domain.futures.universe.models import UniverseSnapshot
 
+MAX_ABS_FUNDING_RATE: float = 0.05
+
+
+class FundingDataIntegrityError(ValueError):
+    """Funding partition schema or value integrity failure."""
+
 
 class ClusteringAlgorithm(StrEnum):
     ROBUST_KMEANS = "robust_kmeans"
@@ -588,6 +594,16 @@ class ExitPolicySpec:
                 raise ValueError("exit multipliers must be positive")
         if not self.calibration_hash:
             raise ValueError("calibration_hash is required")
+
+
+@dataclass(slots=True, frozen=True)
+class PrecomputedExitPaths:
+    decision_idx: NDArray[np.int64]
+    edge_bps: NDArray[np.float64]
+    mae_bps: NDArray[np.float64]
+    mfe_bps: NDArray[np.float64]
+    horizon_bars: int
+    orientation_sign: int
 
 
 @dataclass(slots=True, frozen=True)
