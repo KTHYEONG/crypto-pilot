@@ -27,7 +27,8 @@ from src.domain.futures.data_lake.ingestion import (
     sync_futures_data_lake,
 )
 from src.domain.futures.data_lake.reconciliation import (
-    reconcile_local_catalog,
+    audit_funding_partitions,
+    quarantine_funding_partitions,
 )
 from src.domain.futures.data_lake.run_windows import (
     QuarterlyRunWindow,
@@ -110,17 +111,52 @@ def prepare_quarterly_bootstrap(
     )
 
     if config.sync == SyncMode.AUTO:
-        reconcile_report = reconcile_local_catalog(
+        funding_audit = audit_funding_partitions(
             root=config.data_lake.root,
             cutoff_exclusive_ns=window.cutoff_exclusive_ns,
         )
         _logger.info(
-            "reconciliation: scanned=%d added=%d quarantined=%d",
-            reconcile_report.scanned_files,
-            reconcile_report.added_rows,
-            len(reconcile_report.quarantined_files),
+            "funding audit: checked=%d invalid=%d",
+            funding_audit.checked_files,
+            len(funding_audit.invalid_requests),
         )
+        repair_requests = funding_audit.invalid_requests
+        if repair_requests:
+            from src.domain.futures.data_lake.ingestion import repair_funding_partitions
+
+            quarantine_funding_partitions(
+                requests=repair_requests,
+                root=config.data_lake.root,
+            )
+            repair_funding_partitions(
+                requests=repair_requests,
+                client=runtime.client,
+                catalog=runtime.catalog,
+                root=config.data_lake.root,
+                max_workers=config.data_lake.max_workers,
+            )
+            verification = audit_funding_partitions(
+                root=config.data_lake.root,
+                cutoff_exclusive_ns=window.cutoff_exclusive_ns,
+            )
+            if verification.invalid_requests:
+                raise DataCoverageError(
+                    "funding repair left invalid partitions: "
+                    f"{len(verification.invalid_requests)}"
+                )
+        reconcile_report = funding_audit
     else:
+        funding_audit = audit_funding_partitions(
+            root=config.data_lake.root,
+            cutoff_exclusive_ns=window.cutoff_exclusive_ns,
+        )
+        if funding_audit.invalid_requests:
+            from src.domain.futures.compound.contracts import FundingDataIntegrityError
+
+            paths = ", ".join(str(request.parquet_path) for request in funding_audit.invalid_requests[:3])
+            raise FundingDataIntegrityError(
+                f"local funding audit failed for {len(funding_audit.invalid_requests)} partitions: {paths}"
+            )
         reconcile_report = None
 
     snapshot = prepare_data_snapshot(config=config, runtime=runtime)

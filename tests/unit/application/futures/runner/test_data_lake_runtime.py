@@ -156,6 +156,11 @@ def test_prepare_quarterly_bootstrap_returns_window_bound_snapshot(monkeypatch: 
 
     snapshot = _snap(snapshot_id="bootstrap")
     monkeypatch.setattr(runtime_module, "prepare_data_snapshot", lambda **_: snapshot)
+    monkeypatch.setattr(
+        runtime_module,
+        "audit_funding_partitions",
+        lambda **_: type("Audit", (), {"invalid_requests": ()})(),
+    )
     config = CompoundRunConfig(reference_date="2026-07-25", sync=SyncMode.LOCAL, refresh_universe=False)
     window = resolve_completed_quarter_window(date(2026, 7, 25), QuarterlyWindowConfig())
     prepared = prepare_quarterly_bootstrap(
@@ -172,8 +177,12 @@ def test_prepare_quarterly_bootstrap_auto_reconciles(monkeypatch: pytest.MonkeyP
 
     snapshot = _snap(snapshot_id="auto-bootstrap")
     monkeypatch.setattr(runtime_module, "prepare_data_snapshot", lambda **_: snapshot)
-    report = type("Report", (), {"scanned_files": 1, "added_rows": 1, "quarantined_files": ()})()
-    monkeypatch.setattr(runtime_module, "reconcile_local_catalog", lambda **_: report)
+    report = type(
+        "Report",
+        (),
+        {"checked_files": 1, "invalid_requests": ()},
+    )()
+    monkeypatch.setattr(runtime_module, "audit_funding_partitions", lambda **_: report)
     config = CompoundRunConfig(
         reference_date="2026-07-25", sync=SyncMode.AUTO, refresh_universe=False,
         data_lake=DataLakeConfig(root=tmp_path / "lake"),
@@ -185,6 +194,100 @@ def test_prepare_quarterly_bootstrap_auto_reconciles(monkeypatch: pytest.MonkeyP
         window=window,
     )
     assert prepared.reconciliation_report is report
+
+
+def test_auto_bootstrap_repairs_exact_corrupt_funding_partition(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    import src.application.futures.runner.data_lake_runtime as runtime_module
+    import src.domain.futures.data_lake.ingestion as ingestion_module
+    from src.domain.futures.data_lake.reconciliation import FundingRepairRequest
+
+    snapshot = _snap(snapshot_id="auto-repaired")
+    request = FundingRepairRequest("BTCUSDT", 1714521600000, tmp_path / "quarantine" / "part.parquet")
+    audit = type(
+        "Report", (), {
+            "checked_files": 1,
+            "invalid_requests": (request,),
+        },
+    )()
+    calls: list[tuple[FundingRepairRequest, ...]] = []
+    monkeypatch.setattr(runtime_module, "prepare_data_snapshot", lambda **_: snapshot)
+    monkeypatch.setattr(
+        runtime_module,
+        "audit_funding_partitions",
+        lambda **_: audit if not calls else type("Audit", (), {"invalid_requests": ()})(),
+    )
+    monkeypatch.setattr(
+        ingestion_module,
+        "repair_funding_partitions",
+        lambda **kwargs: calls.append(kwargs["requests"]) or (),
+    )
+    config = CompoundRunConfig(
+        reference_date="2026-07-25", sync=SyncMode.AUTO, refresh_universe=False,
+        data_lake=DataLakeConfig(root=tmp_path / "lake"),
+    )
+    window = resolve_completed_quarter_window(date(2026, 7, 25), QuarterlyWindowConfig())
+
+    prepare_quarterly_bootstrap(
+        config=config,
+        runtime=DataLakeRuntime(client=FakeClient(), catalog=FakeCatalog(snapshot, complete=True)),
+        window=window,
+    )
+
+    assert calls == [(request,)]
+
+
+def test_auto_bootstrap_fails_closed_when_funding_repair_is_invalid(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    import src.application.futures.runner.data_lake_runtime as runtime_module
+    from src.domain.futures.compound.contracts import FundingDataIntegrityError
+    from src.domain.futures.data_lake.reconciliation import FundingRepairRequest
+
+    request = FundingRepairRequest("BTCUSDT", 1714521600000, tmp_path / "part.parquet")
+    monkeypatch.setattr(
+        runtime_module,
+        "audit_funding_partitions",
+        lambda **_: type("Audit", (), {"checked_files": 1, "invalid_requests": (request,)})(),
+    )
+    config = CompoundRunConfig(reference_date="2026-07-25", sync=SyncMode.LOCAL, refresh_universe=False)
+    window = resolve_completed_quarter_window(date(2026, 7, 25), QuarterlyWindowConfig())
+
+    with pytest.raises(FundingDataIntegrityError, match="local funding audit failed"):
+        prepare_quarterly_bootstrap(
+            config=config,
+            runtime=DataLakeRuntime(client=FakeClient(), catalog=FakeCatalog(_snap(), complete=True)),
+            window=window,
+        )
+
+
+def test_auto_bootstrap_rejects_unresolved_post_repair_audit(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    import src.application.futures.runner.data_lake_runtime as runtime_module
+    import src.domain.futures.data_lake.ingestion as ingestion_module
+    from src.domain.futures.data_lake.reconciliation import FundingRepairRequest
+
+    request = FundingRepairRequest("BTCUSDT", 1714521600000, tmp_path / "part.parquet")
+    monkeypatch.setattr(ingestion_module, "repair_funding_partitions", lambda **_: ())
+    monkeypatch.setattr(
+        runtime_module,
+        "audit_funding_partitions",
+        lambda **_: type("Audit", (), {"checked_files": 1, "invalid_requests": (request,)})(),
+    )
+    config = CompoundRunConfig(
+        reference_date="2026-07-25", sync=SyncMode.AUTO, refresh_universe=False,
+        data_lake=DataLakeConfig(root=tmp_path / "lake"),
+    )
+    window = resolve_completed_quarter_window(date(2026, 7, 25), QuarterlyWindowConfig())
+
+    with pytest.raises(DataCoverageError, match="funding repair left invalid"):
+        prepare_quarterly_bootstrap(
+            config=config,
+            runtime=DataLakeRuntime(client=FakeClient(), catalog=FakeCatalog(_snap(), complete=True)),
+            window=window,
+        )
 
 
 class TestApprovedSync:
