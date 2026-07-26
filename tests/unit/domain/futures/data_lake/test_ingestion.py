@@ -22,10 +22,12 @@ from src.domain.futures.data_lake.ingestion import (
     StorageBudgetError,
     build_ingestion_plan,
     migrate_legacy_universe_state,
+    repair_funding_partitions,
     refresh_live_universe_state,
     sync_futures_data_lake,
 )
 from src.domain.futures.data_lake.query import LocalDataCatalog
+from src.domain.futures.data_lake.reconciliation import FundingRepairRequest
 
 
 class FakeClient:
@@ -158,6 +160,51 @@ class TestChecksumFailure:
         with pytest.raises(ChecksumMismatchError):
             sync_futures_data_lake(plan=plan, client=BadClient(), catalog=cat)
         assert len(cat.committed) == 0
+
+
+def test_repair_funding_partitions_downloads_only_requested_months(tmp_path: Path) -> None:
+    root = tmp_path / "lake"
+    payload_buffer = io.BytesIO()
+    payload_frame = pd.DataFrame(
+        {"timestamp": [1714521600000], "funding_rate": [-0.00033019]}
+    )
+    payload_frame.to_parquet(payload_buffer, index=False)
+    payload = payload_buffer.getvalue()
+
+    class FundingClient:
+        def __init__(self) -> None:
+            self.calls: list[tuple[DatasetKind, str, int]] = []
+
+        def download_partition(self, dataset: DatasetKind, symbol: str, start_time_ms: int) -> bytes:
+            self.calls.append((dataset, symbol, start_time_ms))
+            return payload
+
+        def download_checksum(self, dataset: DatasetKind, symbol: str, start_time_ms: int) -> str:
+            _ = (dataset, symbol, start_time_ms)
+            return hashlib.sha256(payload).hexdigest()
+
+    client = FundingClient()
+    catalog = LocalDataCatalog(root)
+    requests = (
+        FundingRepairRequest(
+            symbol="BTCUSDT",
+            start_time_ms=1714521600000,
+            parquet_path=root / "quarantine" / "old.parquet",
+        ),
+    )
+
+    manifests = repair_funding_partitions(
+        requests=requests,
+        client=client,
+        catalog=catalog,
+        root=root,
+        max_workers=1,
+    )
+
+    assert len(manifests) == 1
+    assert client.calls == [(DatasetKind.FUNDING_EVENT, "BTCUSDT", 1714521600000)]
+    assert manifests[0].path.exists()
+    assert pd.read_parquet(manifests[0].path)["funding_rate"].tolist() == [-0.00033019]
 
 
 class TestHardCap:
