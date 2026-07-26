@@ -732,6 +732,8 @@ class TestBuildDeploymentCandidate:
             "l2_eval": l2_eval,
             "manifest": manifest,
             "forecast": forecast,
+            "strategy_spec_hash": "sh1",
+            "fold_manifest_hash": "fh1",
         }
 
     def test_build_deployment_candidate_deduplicates_and_frequency_weights(self, valid_args: dict) -> None:

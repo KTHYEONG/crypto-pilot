@@ -30,6 +30,7 @@ from src.application.futures.runner.data_lake_runtime import (
 from src.application.futures.runner.models import RunnerResult
 from src.domain.futures.compound.config import CompoundEngineConfig
 from src.domain.futures.compound.contracts import (
+    CandidateTrialLedger,
     CompoundEngineResult,
     DeploymentCandidate,
     DeploymentVerdict,
@@ -39,6 +40,7 @@ from src.domain.futures.compound.contracts import (
 from src.domain.futures.compound.deployment import publish_promoted_strategy
 from src.domain.futures.compound.engine import run_multiscale_compound_engine
 from src.domain.futures.compound.holdout_store import SealedHoldoutStore
+from src.domain.futures.compound.provenance import compute_strategy_spec_hash
 from src.domain.futures.data_lake.coverage_policy import (
     DataCoverageError,
     exclude_symbols_with_funding_gaps,
@@ -57,6 +59,7 @@ from src.domain.futures.data_lake.run_windows import (
 _logger = logging.getLogger(__name__)
 
 _holdout_store_instance: SealedHoldoutStore | None = None
+_trial_ledger_instance: CandidateTrialLedger | None = None
 
 
 def _get_holdout_store(config: CompoundRunConfig) -> SealedHoldoutStore:
@@ -65,6 +68,14 @@ def _get_holdout_store(config: CompoundRunConfig) -> SealedHoldoutStore:
         holdout_path = Path("data/futures/lake/holdout_store.db")
         _holdout_store_instance = SealedHoldoutStore(holdout_path)
     return _holdout_store_instance
+
+
+def _get_trial_ledger(config: CompoundRunConfig) -> CandidateTrialLedger:
+    global _trial_ledger_instance
+    if _trial_ledger_instance is None:
+        ledger_path = Path("data/futures/lake/candidate_trials.db")
+        _trial_ledger_instance = CandidateTrialLedger(ledger_path)
+    return _trial_ledger_instance
 
 
 def _build_artifact_paths(config: CompoundRunConfig) -> CompoundRunArtifacts:
@@ -228,7 +239,9 @@ def run_multiscale_compound_main(config: CompoundRunConfig) -> RunnerResult:
             field_plan=prepared.field_plan, window=window,
         )
 
+        strategy_spec_hash = compute_strategy_spec_hash(config=engine_config)
         holdout_store = _get_holdout_store(config)
+        trial_ledger = _get_trial_ledger(config)
         holdout_id = (
             f"quarterly-{window.cutoff_date.isoformat()}-"
             f"{snapshot.manifest_hash[:12]}"
@@ -241,13 +254,12 @@ def run_multiscale_compound_main(config: CompoundRunConfig) -> RunnerResult:
             holdout_days=(window.cutoff_exclusive_ns - window.l3_start_ns) // (24 * ns_per_hour),
             model_version="quarterly-v1",
             data_manifest_hash=market.data_manifest_hash,
+            strategy_spec_hash=strategy_spec_hash,
             universe_state_hash=snapshot.universe_state_hash,
         )
 
-        try:
-            holdout_store.create(holdout_manifest)
-        except Exception:
-            _logger.info("holdout %s already exists, reusing", holdout_id)
+        sealed = holdout_store.ensure_sealed(holdout_manifest)
+        _logger.info("holdout %s sealed: spec_hash=%s", holdout_id, sealed.strategy_spec_hash)
 
         _logger.info("running multiscale compound engine with quarterly window")
         engine_result = run_multiscale_compound_engine(
@@ -258,6 +270,8 @@ def run_multiscale_compound_main(config: CompoundRunConfig) -> RunnerResult:
             holdout_store=holdout_store,
             holdout_id=holdout_id,
             config=engine_config,
+            strategy_spec_hash=strategy_spec_hash,
+            trial_ledger=trial_ledger,
         )
 
         paths = _build_artifact_paths(config)

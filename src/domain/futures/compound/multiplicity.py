@@ -80,12 +80,17 @@ def _aggregate_4h_to_daily_compound(
 
 
 def compute_trial_multiplicity(trial_daily_returns_2d: NDArray[np.float64]) -> TrialMultiplicity:
+    if trial_daily_returns_2d.ndim != 2:
+        raise ValueError(f"expected 2-D array, got shape {trial_daily_returns_2d.shape}")
     n_trial, n_day = trial_daily_returns_2d.shape
     if n_trial == 0 or n_day < 10:
         return TrialMultiplicity(n_trials=n_trial, effective_trials=1.0, sigma_sharpe=0.0)
 
+    if n_trial == 1:
+        return TrialMultiplicity(n_trials=1, effective_trials=1.0, sigma_sharpe=0.0)
+
     corr = np.corrcoef(trial_daily_returns_2d)
-    np.nan_to_num(corr, nan=0.0, copy=False)
+    corr = np.where(np.isnan(corr), 0.0, corr)
     eigenvalues = linalg.eigh(corr, eigvals_only=True)
     eigenvalues = np.maximum(eigenvalues, 0.0)
     sum_eig = float(np.sum(eigenvalues))
@@ -107,6 +112,33 @@ def compute_trial_multiplicity(trial_daily_returns_2d: NDArray[np.float64]) -> T
 
     return TrialMultiplicity(
         n_trials=n_trial,
+        effective_trials=k_eff,
+        sigma_sharpe=sigma_sharpe,
+    )
+
+
+def charge_config_search_multiplicity(
+    base: TrialMultiplicity, config_trial_daily_2d: NDArray[np.float64],
+) -> TrialMultiplicity:
+    n_config = config_trial_daily_2d.shape[0]
+    if n_config < 2:
+        return base
+    corr = np.corrcoef(config_trial_daily_2d)
+    corr = np.where(np.isnan(corr), 0.0, corr)
+    eigenvalues = linalg.eigh(corr, eigvals_only=True)
+    eigenvalues = np.maximum(eigenvalues, 0.0)
+    sum_eig = float(np.sum(eigenvalues))
+    sum_eig2 = float(np.sum(eigenvalues ** 2))
+    k_config = sum_eig ** 2 / max(sum_eig2, 1e-15)
+    k_config = min(max(k_config, 1.0), float(n_config))
+
+    config_sigma = max(float(np.nanstd(config_trial_daily_2d, ddof=1)), 0.0)
+    sigma_sharpe = max(base.sigma_sharpe, config_sigma)
+    k_eff = base.effective_trials + (k_config - 1.0)
+    k_eff = min(max(k_eff, 1.0), float(base.n_trials + n_config))
+
+    return TrialMultiplicity(
+        n_trials=base.n_trials + n_config,
         effective_trials=k_eff,
         sigma_sharpe=sigma_sharpe,
     )

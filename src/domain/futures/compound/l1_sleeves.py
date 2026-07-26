@@ -27,6 +27,7 @@ from src.domain.futures.compound.contracts import (
     SignalDescriptor,
     TimeframeBarCube,
 )
+from src.domain.futures.compound.provenance import compute_fold_manifest_hash
 from src.domain.futures.forecast.contracts import ExitPathRequest
 from src.domain.futures.forecast.exit_path import label_exit_paths
 
@@ -356,12 +357,25 @@ def combine_posterior_sleeves(
 ) -> CalibratedForecastPanel:
     t_total, n_symbols, _ = panel.z_3d.shape
 
+    max_target_horizon_bars = max(
+        (d.target_horizon_hours for d in panel.descriptors), default=0
+    ) // 4
+    fold_manifest_hash: str = ""
+    if folds:
+        try:
+            fold_manifest_hash = compute_fold_manifest_hash(
+                folds, max_target_horizon_bars=max_target_horizon_bars,
+            )
+        except ValueError:
+            fold_manifest_hash = ""
+
     def empty() -> CalibratedForecastPanel:
         return CalibratedForecastPanel(
             panel.decision_timestamps_ns, panel.symbols,
             np.zeros((t_total, n_symbols), dtype=np.float32),
             np.full((t_total, n_symbols), np.nan, dtype=np.float32),
-            np.zeros((t_total, n_symbols, 1), dtype=np.float32), (), (), "",
+            np.zeros((t_total, n_symbols, 1), dtype=np.float32), (), (),
+            fold_manifest_hash,
         )
 
     active = [s for s in sleeves if s.admitted]
@@ -416,7 +430,8 @@ def combine_posterior_sleeves(
     return CalibratedForecastPanel(
         panel.decision_timestamps_ns, panel.symbols,
         mu, np.full((t_total, n_symbols), np.nan, dtype=np.float32),
-        mu_3d, tuple(families), tuple(dedup_ids), "",
+        mu_3d, tuple(families), tuple(dedup_ids),
+        fold_manifest_hash,
     )
 
 
