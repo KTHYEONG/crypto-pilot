@@ -130,9 +130,10 @@ def build_multiscale_market_cube(
     )
 
     state_cube = universe.state_cube
-    eligible = state_cube.eligible
-    entry_block = state_cube.entry_block
-    exit_required = state_cube.exit_required
+    eligible = state_cube.eligible & available_core
+    entry_block = state_cube.entry_block | ~available_core
+    exit_required = state_cube.exit_required.copy()
+    exit_required[1:] |= state_cube.eligible[:-1] & ~available_core[1:]
     capacity = state_cube.capacity_usdt
     costs = state_cube.cost_bps.astype(np.float32)
 

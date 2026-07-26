@@ -23,6 +23,7 @@ from src.domain.futures.data_lake.ingestion import (
     build_ingestion_plan,
     migrate_legacy_universe_state,
     repair_funding_partitions,
+    restrict_to_historically_available_core_symbols,
     refresh_live_universe_state,
     sync_futures_data_lake,
 )
@@ -68,6 +69,14 @@ class FakeCatalog:
 
 
 class TestIngestionPlan:
+    def test_plan_uses_explicit_acquisition_start(self, tmp_path: Path) -> None:
+        plan = build_ingestion_plan(
+            config=DataLakeConfig(root=tmp_path),
+            reference_date=date(2026, 7, 26),
+            start_date=date(2024, 1, 3),
+        )
+        assert plan.start_date == date(2024, 1, 3)
+
     def test_future_date_raises(self) -> None:
         from datetime import date, timedelta
 
@@ -115,6 +124,33 @@ class TestIngestionPlan:
         )
 
         assert "cost_calibration" not in {dataset.value for dataset in plan.datasets}
+
+
+def test_core_history_filter_excludes_symbols_without_start_month() -> None:
+    start_time_ms = 1_704_067_200_000
+
+    class Catalog:
+        def partition_exists(self, dataset: DatasetKind, symbol: str, value: int) -> bool:
+            return value == start_time_ms and symbol == "BTCUSDT" and dataset in {
+                DatasetKind.KLINES_1H, DatasetKind.FUNDING_EVENT,
+            }
+
+    plan = IngestionPlan(
+        reference_date=date(2026, 7, 26),
+        broad_symbols=("BTCUSDT", "NEWUSDT"),
+        selected_symbols=("BTCUSDT", "NEWUSDT"),
+        datasets=(DatasetKind.KLINES_1H, DatasetKind.FUNDING_EVENT),
+        config=DataLakeConfig(root=Path("/tmp")),  # noqa: S108
+        start_date=date(2024, 1, 3),
+    )
+
+    filtered = restrict_to_historically_available_core_symbols(
+        plan=plan, client=None, catalog=Catalog(),  # type: ignore[arg-type]
+    )
+
+    assert filtered.broad_symbols == ("BTCUSDT",)
+    assert filtered.selected_symbols == ("BTCUSDT",)
+    assert filtered.datasets == (DatasetKind.KLINES_1H, DatasetKind.FUNDING_EVENT)
 
 
 def test_universe_state_request_rejects_invalid_axes() -> None:
