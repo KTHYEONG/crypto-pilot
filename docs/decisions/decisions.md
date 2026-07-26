@@ -1,5 +1,10 @@
 # Active Decisions Log (Sliding Window)
 
+## [2026-07-26] [TASK_L1L2_GROWTH_RECOVERY_AND_COMBINATION_REDESIGN] [ADR_20260726_L1L2_GROWTH_RECOVERY_AND_COMBINATION_REDESIGN]
+- **Context/Why:** 실전 등가 backtest에서 equity_multiple 0.97(손실)이 확인됨. 원인 3층: (1) drawdown overlay가 EWMA 스무더 상태값을 곱셈 오염시키는 래칫, (2) L1 fold가 봉인 홀드아웃과 겹치고 L2 fold_ids가 전부 0으로 배선된 게이트 결함, (3) combine_posterior_sleeves가 신호 속도(=admitted sleeve 개수)에 비례 가중해 최악 신호가 최대 가중을 받는 결합층 결함
+- **Resolution/What:** allocator.py: 출력 전용 회복 가능 drawdown 오버레이(EWMA state 미오염)+rank-conviction 사이징. engine.py: L1 fold를 L1 윈도우로 절단, L2 fold_ids 시간 5분할, cost_bps_4h 종목별 배선, count_effective_candidates로 DSR 후보 정정, L2_DRY_RUN 안전가드. l1_sleeves.py: OOS fold_return 채택조건 제거(fit-only), select_non_redundant_signals(fit-window 상관 기반 구조적 중복 제거)+신호당 1표 등가중으로 combine_posterior_sleeves 재작성. validation.py: DSR null 표본길이 스케일링, cost_drag_ratio 차원 버그(로그공간/지수공간 혼용) 수정, absolute_cagr 필드 추가
+- **Impact:** 실제 프로덕션 파이프라인 드라이런 재실행(홀드아웃 미소진 확인): equity_multiple 0.97→1.76, Sharpe 0.24→1.66, 연회전율 108.7→50.2, L2 미통과 사유 6개→1개(deflated_sharpe_probability=0.553<0.9만 잔존), L3 posterior_growth_probability 0.35→0.90. 여전히 L2 FAIL/L3 REJECT로 미배포이나 원인이 구조적 버그에서 순수 통계적 유의성 부족으로 좁혀짐
+
 ## [2026-07-26] [funding_partition_integrity_repair] [ADR_20260726_funding_partition_integrity_repair]
 - **Context/Why:** Funding interval hours were persisted as rates, causing invalid L2 returns and unsafe local backtests.
 - **Resolution/What:** Added canonical two/three-column funding normalization, strict finite/range/timestamp validation, funding-v3 provenance, LOCAL read-only fail-closed audit, AUTO targeted quarantine and source repair, and catalog reuse optimization. Recorded the repaired 2026-07-26 L2 run.
@@ -69,8 +74,3 @@
 - **Context/Why:** Document detailed L1 and L2 breakdown of v6 pipeline evaluation on real 120 futures data
 - **Resolution/What:** Recorded L1 low-SNR findings, L2 volatility drag mechanics (-3.05 log growth, 71.6% MDD), and L3 REJECT verdict in result.md
 - **Impact:** Provides detailed architectural failure analysis and ADR record preventing unhedged leverage deployment
-
-## [2026-07-24] [TASK_REAL_DATA_V6_EVALUATION] [ADR_20260724_REAL_DATA_V6_EVALUATION]
-- **Context/Why:** Evaluate v6 Dynamic Compounding Engine on real Binance 120 futures data
-- **Resolution/What:** Executed full engine pipeline on real data, exposed L1 signal SNR decay under 2.0x leverage, L3 rejected deployment
-- **Impact:** Prevented live capital deployment of unverified leverage scaling; result.md updated with real metrics (Log Growth -3.05, Verdict REJECT)
