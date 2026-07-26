@@ -10,6 +10,7 @@ from src.domain.futures.compound.config import (
     CompoundEngineConfig,
     DataPlaneConfig,
     DenseSimConfig,
+    DynamicCompoundingConfig,
     FactorRiskConfig,
     L1EstimatorConfig,
     L1Config,
@@ -202,3 +203,11 @@ class TestCompoundEngineConfig:
             CompoundEngineConfig(
                 data=DataPlaneConfig(max_symbols=0)
             )
+
+
+class TestDynamicCompoundingConfig:
+    def test_dynamic_compounding_config_default_band_and_smoothing(self) -> None:
+        cfg = DynamicCompoundingConfig()
+        assert cfg.band_frac == 0.60
+        assert cfg.alpha_smooth == 0.08
+        assert cfg.target_ann_vol == 0.15
