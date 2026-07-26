@@ -574,6 +574,9 @@
   },
   "src/domain/futures/data_lake/reconciliation.py": {
     "architecture": "docs/results/result.md",
-    "testing": "tests/unit/application/futures/runner/test_compound_main.py"
+    "testing": [
+      "tests/unit/application/futures/runner/test_compound_main.py",
+      "tests/unit/domain/futures/data_lake/test_reconciliation.py"
+    ]
   }
 }
