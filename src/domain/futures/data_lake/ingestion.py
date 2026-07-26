@@ -6,6 +6,7 @@ import logging
 import os
 from collections.abc import Iterator
 from concurrent.futures import Future, ThreadPoolExecutor, as_completed
+from dataclasses import replace
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 
@@ -32,6 +33,7 @@ from src.domain.futures.data_lake.reconciliation import (
 
 _logger = logging.getLogger(__name__)
 _MAX_PLAN_SYMBOLS = 120
+_DEFAULT_LOOKBACK_DAYS = 730
 
 
 class ChecksumMismatchError(RuntimeError):
@@ -47,7 +49,7 @@ class DataCoverageError(RuntimeError):
 
 
 def build_ingestion_plan(
-    *, config: DataLakeConfig, reference_date: date
+    *, config: DataLakeConfig, reference_date: date, start_date: date | None = None,
 ) -> IngestionPlan:
     if reference_date > date.today():
         msg = f"reference_date {reference_date} cannot be in the future"
@@ -126,7 +128,7 @@ def build_ingestion_plan(
             DatasetKind.UNIVERSE_STATE,
         ),
         config=config,
-        start_date=reference_date - timedelta(days=730),
+        start_date=start_date or reference_date - timedelta(days=_DEFAULT_LOOKBACK_DAYS),
     )
 
 
@@ -142,6 +144,84 @@ def _month_starts(start: date, end: date) -> tuple[date, ...]:
             else current.replace(month=current.month + 1)
         )
     return tuple(months)
+
+
+def restrict_to_historically_available_core_symbols(
+    *, plan: IngestionPlan, client: BinanceDataClient | None, catalog: DataCatalog,
+) -> IngestionPlan:
+    """Return a CORE-only plan limited to symbols with data at the required start month.
+
+    A zero-byte Vision archive is an expected consequence of listing after the
+    requested historical start.  It is not retried for every later month.
+    """
+    start_date = plan.start_date or plan.reference_date
+    month = start_date.replace(day=1)
+    start_time_ms = int(datetime(month.year, month.month, 1, tzinfo=UTC).timestamp() * 1000)
+    core_datasets = (DatasetKind.KLINES_1H, DatasetKind.FUNDING_EVENT)
+    eligible_symbols: list[str] = []
+
+    for symbol in plan.broad_symbols:
+        symbol_complete = True
+        for dataset in core_datasets:
+            if catalog.partition_exists(dataset, symbol, start_time_ms):
+                continue
+            if client is None:
+                symbol_complete = False
+                break
+            payload = client.download_partition(dataset, symbol, start_time_ms)
+            if not payload:
+                symbol_complete = False
+                break
+            expected_checksum = client.download_checksum(dataset, symbol, start_time_ms)
+            if hashlib.sha256(payload).hexdigest() != expected_checksum:
+                raise ChecksumMismatchError(
+                    f"checksum mismatch for {dataset}/{symbol} at {month}",
+                )
+            manifest = _payload_manifest(
+                dataset=dataset, symbol=symbol, month=month,
+                payload=payload, root=plan.config.root,
+            )
+            catalog.commit_partition(manifest)
+        if symbol_complete:
+            eligible_symbols.append(symbol)
+
+    if not eligible_symbols:
+        raise DataCoverageError(
+            f"no symbols have both CORE datasets at required start month {month}",
+        )
+    return replace(
+        plan,
+        broad_symbols=tuple(eligible_symbols),
+        selected_symbols=tuple(eligible_symbols),
+        datasets=core_datasets,
+    )
+
+
+def restrict_to_complete_core_symbols(
+    *, plan: IngestionPlan, catalog: DataCatalog,
+) -> IngestionPlan:
+    """Exclude symbols with a missing CORE partition in the requested history."""
+    start_date = plan.start_date or plan.reference_date
+    complete_symbols: list[str] = []
+    for symbol in plan.broad_symbols:
+        complete = all(
+            catalog.partition_exists(
+                dataset,
+                symbol,
+                int(datetime(month.year, month.month, 1, tzinfo=UTC).timestamp() * 1000),
+            )
+            for dataset in (DatasetKind.KLINES_1H, DatasetKind.FUNDING_EVENT)
+            for month in _month_starts(start_date, plan.reference_date)
+        )
+        if complete:
+            complete_symbols.append(symbol)
+    if not complete_symbols:
+        raise DataCoverageError("no symbols have complete CORE history")
+    return replace(
+        plan,
+        broad_symbols=tuple(complete_symbols),
+        selected_symbols=tuple(complete_symbols),
+    )
 
 
 def _partition_path(root: Path, dataset: DatasetKind, symbol: str, month: date) -> Path:

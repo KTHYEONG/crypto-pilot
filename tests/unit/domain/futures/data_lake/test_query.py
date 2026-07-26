@@ -14,6 +14,7 @@ from src.domain.futures.data_lake.contracts import (
     NativeFeatureGrid,
 )
 from src.domain.futures.data_lake.query import (
+    _load_partition_data,
     BinanceQueryClient,
     LocalDataCatalog,
     materialize_causal_metrics_grid,
@@ -36,6 +37,24 @@ def _snap(
         universe_state_hash="",
         total_bytes=total_bytes,
     )
+
+
+def test_partition_loader_normalizes_taker_buy_volume_alias(tmp_path: Path) -> None:
+    path = tmp_path / "part.parquet"
+    pd.DataFrame({
+        "timestamp": [1_704_067_200_000],
+        "taker_buy_quote": [float("nan")],
+        "taker_buy_quote_volume": [123.45],
+    }).to_parquet(path, index=False)
+
+    frame = _load_partition_data(
+        [path],
+        start_time_ns=1_704_067_200_000_000_000,
+        end_time_ns=1_704_070_800_000_000_000,
+        fields=("taker_buy_quote",),
+    )
+
+    assert frame["taker_buy_quote"].tolist() == [123.45]
 
 
 class TestMaterializeNativeGrid:
