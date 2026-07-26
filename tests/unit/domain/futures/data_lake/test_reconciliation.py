@@ -5,6 +5,8 @@ from pathlib import Path
 
 import pytest
 
+import numpy as np
+
 from src.domain.futures.data_lake.reconciliation import (
     ManifestReconciliationReport,
     _partition_key,
@@ -12,6 +14,7 @@ from src.domain.futures.data_lake.reconciliation import (
     _scan_parquet_files,
     _write_sidecar,
     reconcile_local_catalog,
+    validate_funding_rates,
 )
 
 
@@ -158,3 +161,58 @@ def test_reconciliation_helpers_cover_sidecars_and_path_filters(tmp_path: Path) 
     assert _partition_key(tmp_path / "klines_1h" / "symbol=BTC" / "year=2024" / "month=01" / "x.parquet") is None
     assert _partition_key(tmp_path / "bad") is None
     assert _scan_parquet_files(tmp_path, cutoff_exclusive_ns=9_999_999_999_999_999) == []
+
+
+class TestValidateFundingRates:
+    def test_accepts_valid_rates(self) -> None:
+        rates = np.array([0.0001, -0.0002, 0.0], dtype=np.float64)
+        validate_funding_rates(rates, source="test")
+
+    def test_rejects_non_finite(self) -> None:
+        from src.domain.futures.compound.contracts import FundingDataIntegrityError
+        rates = np.array([0.0001, np.nan, 0.0], dtype=np.float64)
+        with pytest.raises(FundingDataIntegrityError, match="non-finite"):
+            validate_funding_rates(rates, source="test")
+
+    def test_rejects_excessive_rate(self) -> None:
+        from src.domain.futures.compound.contracts import FundingDataIntegrityError
+        rates = np.array([0.1], dtype=np.float64)
+        with pytest.raises(FundingDataIntegrityError, match="exceed"):
+            validate_funding_rates(rates, source="test")
+
+
+class TestFundingPartitionReconciliation:
+    @pytest.fixture
+    def lake_root(self) -> Path:
+        import tempfile
+        import shutil
+        tmp = Path(tempfile.mkdtemp(prefix="test_fund_lake_"))
+        yield tmp
+        shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_funding_partition_sidecar_v2(self, lake_root: Path) -> None:
+        import pandas as pd
+        parquet_dir = lake_root / "funding_event" / "symbol=BTCUSDT" / "year=2024" / "month=01"
+        parquet_dir.mkdir(parents=True, exist_ok=True)
+        df = pd.DataFrame({"timestamp": [1704412800000], "funding_rate": [0.0001]})
+        pf = parquet_dir / "part.parquet"
+        df.to_parquet(pf, index=False)
+
+        report = reconcile_local_catalog(root=lake_root, cutoff_exclusive_ns=1735689600_000_000_000)
+        assert report.added_rows >= 1
+        sidecar = parquet_dir / "part.sidecar.json"
+        assert sidecar.exists()
+        import json
+        meta = json.loads(sidecar.read_text())
+        assert meta.get("schema_version") == "funding-v2"
+
+    def test_corrupt_funding_partition_quarantined(self, lake_root: Path) -> None:
+        import pandas as pd
+        parquet_dir = lake_root / "funding_event" / "symbol=BTCUSDT" / "year=2024" / "month=01"
+        parquet_dir.mkdir(parents=True, exist_ok=True)
+        df = pd.DataFrame({"timestamp": [1704412800000], "funding_rate": [0.5]})
+        pf = parquet_dir / "part.parquet"
+        df.to_parquet(pf, index=False)
+
+        report = reconcile_local_catalog(root=lake_root, cutoff_exclusive_ns=1735689600_000_000_000)
+        assert len(report.quarantined_files) > 0
