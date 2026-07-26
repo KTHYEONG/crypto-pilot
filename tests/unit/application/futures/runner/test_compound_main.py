@@ -86,6 +86,7 @@ class TestRunMultiscaleCompoundMain:
         state_cube.entry_block = np.zeros((n_bars, n_syms), dtype=np.bool_)
         state_cube.exit_required = np.zeros((n_bars, n_syms), dtype=np.bool_)
         state_cube.capacity_usdt = np.full((n_bars, n_syms), 1_000_000.0, dtype=np.float64)
+        state_cube.risk_scale = np.ones((n_bars, n_syms), dtype=np.float64)
         state_cube.cost_bps = np.full((n_bars, n_syms), 12.0, dtype=np.float64)
         lake = mocker.Mock()
         lake.symbols = symbols
