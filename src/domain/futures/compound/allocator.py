@@ -436,7 +436,7 @@ def compute_dynamic_compounding_path(
             close_t = close_2d[t].astype(np.float64)
             close_next = close_2d[t + 1].astype(np.float64)
             valid = (close_t > 0) & np.isfinite(close_t) & (close_next > 0) & np.isfinite(close_next)
-            ret = np.where(valid, np.log(close_next / close_t), 0.0)
+            ret = np.where(valid, close_next / close_t - 1.0, 0.0)
             portfolio_ret = np.dot(w_scaled, ret) - cost_bps * 1e-4 * np.sum(np.abs(w_scaled - prev_w))
             equity = equity * (1.0 + portfolio_ret)
             peak_equity = max(peak_equity, equity)

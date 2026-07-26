@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import gc
 import hashlib
 import logging
 import math
+from typing import Any
 
 import numpy as np
 from numpy.typing import NDArray
@@ -20,6 +22,7 @@ from src.domain.futures.compound.contracts import (
     HandoffResult,
     L1SleevePosterior,
     MultiTimeframeBars,
+    PrecomputedExitPaths,
     RawSignalPanel,
     SignalDescriptor,
     TimeframeBarCube,
@@ -104,6 +107,96 @@ def calibrate_exit_policy(
         target = float(np.clip(max(np.quantile(mfe_r, 0.50), 1.25 * stop), 1.00, 5.00))
         kind = ExitPolicyKind.ASYMMETRIC_ATR
     return ExitPolicySpec(f"{descriptor.signal_id}:{kind.value}", kind, stop, target, None, 0, horizon, inner_folds[-1].fold_id, _policy_hash(descriptor, stop, target, horizon))
+
+
+def precompute_exit_paths(
+    descriptor: SignalDescriptor,
+    oriented_score_2d: NDArray[np.float32],
+    bars_4h: TimeframeBarCube,
+    cost_bps_4h: NDArray[np.float32],
+) -> PrecomputedExitPaths:
+    """Label all causal paths once for one signal orientation."""
+    horizon = max(int(descriptor.target_horizon_hours // 4), 1)
+    n_bars = bars_4h.timestamps_ns.size
+    score = oriented_score_2d[: max(n_bars - horizon, 0)]
+    events = np.argwhere(np.isfinite(score) & (np.abs(score) >= 1.0))
+    decisions = events[:, 0].astype(np.int64) if events.size > 0 else np.zeros(0, dtype=np.int64)
+    symbols = events[:, 1].astype(np.int64) if events.size > 0 else np.zeros(0, dtype=np.int64)
+    orientation_sign = int(np.sign(np.nanmean(oriented_score_2d)) or 1)
+
+    if events.shape[0] == 0:
+        return PrecomputedExitPaths(
+            decision_idx=np.zeros(0, dtype=np.int64),
+            edge_bps=np.zeros(0, dtype=np.float64),
+            mae_bps=np.zeros(0, dtype=np.float64),
+            mfe_bps=np.zeros(0, dtype=np.float64),
+            horizon_bars=horizon,
+            orientation_sign=orientation_sign,
+        )
+
+    atr = _atr(bars_4h)
+    request = ExitPathRequest(
+        decision_idx=decisions, entry_idx=decisions + 1,
+        side=np.where(oriented_score_2d[decisions, symbols] >= 0.0, 1, -1).astype(np.int8),
+        horizon_bars=np.full(events.shape[0], horizon, dtype=np.int64),
+        stop_atr_mult=np.ones(events.shape[0], dtype=np.float64),
+        target_atr_mult=np.full(events.shape[0], 2.0, dtype=np.float64),
+        min_hold_bars=np.ones(events.shape[0], dtype=np.int64), symbol_idx=symbols,
+        open_2d=bars_4h.open_2d.astype(np.float64), high_2d=bars_4h.high_2d.astype(np.float64),
+        low_2d=bars_4h.low_2d.astype(np.float64), close_2d=bars_4h.close_2d.astype(np.float64),
+        atr_2d=atr, cost_bps_2d=cost_bps_4h.astype(np.float64),
+        funding_2d=np.zeros_like(bars_4h.close_2d, dtype=np.float64),
+        cost_floor_bps=np.full(events.shape[0], np.nan, dtype=np.float64),
+        hurdle_bps=np.zeros(events.shape[0], dtype=np.float64), taker_round_trip_bps=0.0,
+    )
+    labels = label_exit_paths(request)
+
+    return PrecomputedExitPaths(
+        decision_idx=decisions,
+        edge_bps=labels.edge_bps.astype(np.float64),
+        mae_bps=labels.mae_bps.astype(np.float64),
+        mfe_bps=labels.mfe_bps.astype(np.float64),
+        horizon_bars=horizon,
+        orientation_sign=orientation_sign,
+    )
+
+
+def calibrate_exit_policy_from_paths(
+    descriptor: SignalDescriptor,
+    paths: PrecomputedExitPaths,
+    *,
+    fit_end_exclusive: int,
+    calibration_fold_id: int,
+) -> ExitPolicySpec:
+    """Select a fit-only policy by causal event slicing."""
+    horizon = paths.horizon_bars
+    causal_boundary = fit_end_exclusive - horizon
+    used = paths.decision_idx < causal_boundary
+    n_used = int(np.sum(used))
+    max_idx = int(np.max(paths.decision_idx[used])) if n_used > 0 else -1
+    if max_idx >= 0:
+        assert max_idx < causal_boundary, (
+            f"max decision_idx {max_idx} >= fit_end_exclusive - horizon ({causal_boundary})"
+        )
+
+    if n_used < 200:
+        return ExitPolicySpec(f"{descriptor.signal_id}:time", ExitPolicyKind.TIME, None, None, None, 0, horizon, calibration_fold_id, _policy_hash(descriptor, None, None, horizon))
+
+    edges = paths.edge_bps[used]
+    maes = paths.mae_bps[used]
+    mfes = paths.mfe_bps[used]
+    winners = np.isfinite(edges) & (edges > 0.0)
+    n_winners = int(np.sum(winners))
+
+    if n_winners < 200:
+        return ExitPolicySpec(f"{descriptor.signal_id}:time", ExitPolicyKind.TIME, None, None, None, 0, horizon, calibration_fold_id, _policy_hash(descriptor, None, None, horizon))
+
+    mae_r = np.maximum(-maes[winners] / 100.0, 0.0)
+    mfe_r = np.maximum(mfes[winners] / 100.0, 0.0)
+    stop = float(np.clip(np.quantile(mae_r, 0.80), 0.75, 2.50))
+    target = float(np.clip(max(np.quantile(mfe_r, 0.50), 1.25 * stop), 1.00, 5.00))
+    kind = ExitPolicyKind.ASYMMETRIC_ATR
+    return ExitPolicySpec(f"{descriptor.signal_id}:{kind.value}", kind, stop, target, None, 0, horizon, calibration_fold_id, _policy_hash(descriptor, stop, target, horizon))
 
 
 def _signal_evidence(
@@ -365,6 +458,8 @@ def estimate_cluster_sleeve_posteriors(
         signal_idx = panel.descriptors.index(descriptor)
         signal_z = panel.z_3d[:, :, signal_idx]
 
+        # Step 1: Cheap candidate-first posterior gate
+        preliminary_viable: list[Any] = []
         for cf in cluster_folds:
             fold = next(f for f in folds if f.fold_id == cf.fold_id)
             cluster_panel = cf.panel
@@ -392,43 +487,68 @@ def estimate_cluster_sleeve_posteriors(
                 aggregated = aggregated[np.isfinite(aggregated)]
                 fold_return = float(np.mean(aggregated)) if aggregated.size else 0.0
 
-                sleeve_id = f"{descriptor.signal_id}:fold{cf.fold_id}:cluster_{cluster_id}"
-                member_mask = np.zeros(n_symbols, dtype=np.bool_)
-                member_mask[sym_indices] = True
+                admitted = probability >= 0.65 and fold_return > 0.0
+                preliminary_viable.append({
+                    "cf": cf, "fold": fold, "cluster_id": cluster_id,
+                    "sym_mask": sym_mask, "sym_indices": sym_indices,
+                    "beta": beta, "se": se, "probability": probability,
+                    "observations": observations, "fold_return": fold_return,
+                    "admitted": admitted,
+                })
 
-                exit_policy = calibrate_exit_policy(
-                    descriptor,
-                    (np.sign(beta) * signal_z).astype(np.float32),
-                    bars_4h,
-                    slice(0, fold.fit_end_exclusive),
-                    folds,
-                    cost_bps_4h,
-                    funding_1h_2d,
-                    config,
+        # Step 2: Precompute exit paths once per descriptor if any viable cluster
+        oriented = (np.sign(np.mean([p["beta"] for p in preliminary_viable if p["admitted"]])) * signal_z
+                    if any(p["admitted"] for p in preliminary_viable) else signal_z).astype(np.float32)
+        paths: PrecomputedExitPaths | None = None
+        if any(p["admitted"] for p in preliminary_viable):
+            paths = precompute_exit_paths(descriptor, oriented, bars_4h, cost_bps_4h)
+
+        # Step 3: Build sleeves with exit policy
+        for p in preliminary_viable:
+            sleeve_id = f"{descriptor.signal_id}:fold{p['cf'].fold_id}:cluster_{p['cluster_id']}"
+            member_mask = np.zeros(n_symbols, dtype=np.bool_)
+            member_mask[p["sym_indices"]] = True
+
+            if p["admitted"] and paths is not None:
+                exit_policy = calibrate_exit_policy_from_paths(
+                    descriptor, paths,
+                    fit_end_exclusive=p["fold"].fit_end_exclusive,
+                    calibration_fold_id=p["cf"].fold_id,
+                )
+            else:
+                exit_policy = ExitPolicySpec(
+                    f"{descriptor.signal_id}:time", ExitPolicyKind.TIME,
+                    None, None, None, 0,
+                    max(int(descriptor.target_horizon_hours // 4), 1),
+                    p["cf"].fold_id,
+                    _policy_hash(descriptor, None, None, max(int(descriptor.target_horizon_hours // 4), 1)),
                 )
 
-                admitted = probability >= 0.65 and fold_return > 0.0
-                reasons: tuple[str, ...] = ()
-                if not admitted:
-                    reasons = ("posterior_below_floor",)
+            reasons: tuple[str, ...] = ()
+            if not p["admitted"]:
+                reasons = ("posterior_below_floor",)
 
-                output.append(L1SleevePosterior(
-                    sleeve_id=sleeve_id,
-                    signal_id=descriptor.signal_id,
-                    family=descriptor.family,
-                    outer_fold_id=cf.fold_id,
-                    cluster_id=cluster_id,
-                    member_mask_1d=member_mask,
-                    member_hash=cf.member_hash,
-                    exit_policy=exit_policy,
-                    mean_net_return=fold_return,
-                    standard_error=max(se, 1e-8),
-                    posterior_positive_probability=probability,
-                    residual_novelty=1.0,
-                    fold_net_returns=(fold_return,),
-                    effective_events=observations,
-                    admitted=admitted,
-                    reasons=reasons,
-                ))
+            output.append(L1SleevePosterior(
+                sleeve_id=sleeve_id,
+                signal_id=descriptor.signal_id,
+                family=descriptor.family,
+                outer_fold_id=p["cf"].fold_id,
+                cluster_id=p["cluster_id"],
+                member_mask_1d=member_mask,
+                member_hash=p["cf"].member_hash,
+                exit_policy=exit_policy,
+                mean_net_return=p["fold_return"],
+                standard_error=max(p["se"], 1e-8),
+                posterior_positive_probability=p["probability"],
+                residual_novelty=1.0,
+                fold_net_returns=(p["fold_return"],),
+                effective_events=p["observations"],
+                admitted=p["admitted"],
+                reasons=reasons,
+            ))
+
+        # Step 4: Release descriptor-scoped path arrays
+        paths = None
+        gc.collect()
 
     return tuple(output)
