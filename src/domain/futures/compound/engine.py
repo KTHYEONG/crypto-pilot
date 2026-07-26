@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import collections
 import logging
 import os
 
@@ -25,16 +26,20 @@ from src.domain.futures.compound.clustering import build_causal_cluster_folds
 from src.domain.futures.compound.config import CompoundEngineConfig, DynamicCompoundingConfig
 from src.domain.futures.compound.contracts import (
     AlphaEventTape,
+    CalibratedForecastPanel,
     CombinedForecast,
     CompoundEngineResult,
     DeploymentCandidate,
     DeploymentVerdict,
     ExecutionLedger,
     HandoffResult,
+    L2Evaluation,
     L2GateVerdict,
     L3ValidationResult,
     MarketFeatureCube,
     QuarterlyBarBoundaries,
+    RawSignalPanel,
+    SealedHoldoutManifest,
 )
 from src.domain.futures.compound.dense_simulator import simulate_dense_portfolio
 from src.domain.futures.compound.handoff import _build_cash_only_forecast
@@ -385,29 +390,11 @@ def run_multiscale_compound_engine(
         fold_manifest_hash=forecast.fold_manifest_hash if forecast is not None else "",
     )
 
-    deployment_candidate: DeploymentCandidate | None = None
-    if (
-        handoff_result is not None
-        and handoff_result.evidence.admitted
-        and l2_eval.verdict == L2GateVerdict.PASS
-    ):
-        active_ids = handoff_result.evidence.active_signal_ids  # pragma: no cover
-        matched_descriptors = tuple(  # pragma: no cover
-            d for d in panel.descriptors if d.signal_id in active_ids
-        )
-        if matched_descriptors:  # pragma: no cover
-            orientation_signs = tuple(1 for _ in matched_descriptors)  # pragma: no cover
-            vote_weights = tuple(1.0 / len(matched_descriptors) for _ in matched_descriptors)  # pragma: no cover
-            deployment_candidate = DeploymentCandidate(  # pragma: no cover
-                active_signal_ids=active_ids,  # pragma: no cover
-                descriptors=matched_descriptors,  # pragma: no cover
-                orientation_signs=orientation_signs,  # pragma: no cover
-                vote_weights=vote_weights,  # pragma: no cover
-                model_version=_manifest.model_version,  # pragma: no cover
-                strategy_spec_hash=_manifest.strategy_spec_hash,
-                fold_manifest_hash=forecast.fold_manifest_hash if forecast is not None else "",
-                trial_count=l2_eval.candidate_count,
-            )
+    deployment_candidate: DeploymentCandidate | None = (
+        _build_deployment_candidate(handoff_result, panel, l2_eval, _manifest, forecast)
+        if handoff_result is not None
+        else None
+    )
 
     _logger.info(
         "engine complete: l2_growth=%.6f l3_verdict=%s cash_only=%s deploy_candidate=%s",
@@ -421,6 +408,38 @@ def run_multiscale_compound_engine(
         l2=l2_eval,
         l3=l3_result,
         deployment_candidate=deployment_candidate,
+    )
+
+
+def _build_deployment_candidate(
+    handoff_result: HandoffResult,
+    panel: RawSignalPanel,
+    l2_eval: L2Evaluation,
+    manifest: SealedHoldoutManifest,
+    forecast: CalibratedForecastPanel | None,
+) -> DeploymentCandidate | None:
+    if not handoff_result.evidence.admitted or l2_eval.verdict != L2GateVerdict.PASS:
+        return None
+    unique_ids = tuple(dict.fromkeys(handoff_result.evidence.active_signal_ids))
+    counts = collections.Counter(handoff_result.evidence.active_signal_ids)
+    matched_descriptors = tuple(
+        d for d in panel.descriptors if d.signal_id in unique_ids
+    )
+    if len(matched_descriptors) != len(unique_ids):
+        unmatched = set(unique_ids) - {d.signal_id for d in matched_descriptors}
+        raise ValueError(f"unmatched signal ids: {unmatched}")
+    total = sum(counts[d.signal_id] for d in matched_descriptors)
+    vote_weights = tuple(counts[d.signal_id] / total for d in matched_descriptors)
+    orientation_signs = tuple(1 for _ in matched_descriptors)
+    return DeploymentCandidate(
+        active_signal_ids=unique_ids,
+        descriptors=matched_descriptors,
+        orientation_signs=orientation_signs,
+        vote_weights=vote_weights,
+        model_version=manifest.model_version,
+        strategy_spec_hash=manifest.strategy_spec_hash,
+        fold_manifest_hash=forecast.fold_manifest_hash if forecast is not None else "",
+        trial_count=l2_eval.candidate_count,
     )
 
 
