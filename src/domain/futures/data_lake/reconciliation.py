@@ -10,6 +10,7 @@ from pathlib import Path
 
 import duckdb
 import numpy as np
+import pandas as pd
 from numpy.typing import NDArray
 
 from src.domain.futures.data_lake.contracts import DatasetKind, PartitionManifest
@@ -21,7 +22,8 @@ _CATALOG_DB = "catalog.duckdb"
 _CATALOG_NEXT_DB = "catalog.duckdb.next"
 _QUARANTINE_DIR = "quarantine"
 _MAX_ABS_FUNDING_RATE = 0.05
-_FUNDING_SCHEMA_VERSION = "funding-v2"
+_FUNDING_SCHEMA_VERSION = "funding-v3"
+_FUNDING_VALIDATOR_VERSION = "funding-integrity-v1"
 
 
 class CatalogLockError(RuntimeError):
@@ -36,6 +38,20 @@ class ManifestReconciliationReport:
     removed_stale_rows: int
     quarantined_files: tuple[str, ...]
     catalog_hash: str
+    funding_repair_requests: tuple[FundingRepairRequest, ...] = ()
+
+
+@dataclass(slots=True, frozen=True)
+class FundingRepairRequest:
+    symbol: str
+    start_time_ms: int
+    parquet_path: Path
+
+
+@dataclass(slots=True, frozen=True)
+class FundingPartitionAudit:
+    checked_files: int
+    invalid_requests: tuple[FundingRepairRequest, ...]
 
 
 def _read_sidecar(sidecar_path: Path) -> dict[str, object] | None:
@@ -167,6 +183,94 @@ def validate_funding_rates(
         )
 
 
+def validate_funding_frame(
+    frame: pd.DataFrame,
+    *,
+    source: str,
+    month_start_ms: int | None = None,
+) -> None:
+    """Validate canonical funding timestamps and rates without altering values."""
+    from src.domain.futures.compound.contracts import FundingDataIntegrityError
+
+    required = {"timestamp", "funding_rate"}
+    if not required.issubset(frame.columns):
+        raise FundingDataIntegrityError(f"{source}: missing funding columns")
+    timestamps = pd.to_numeric(frame["timestamp"], errors="coerce").to_numpy(dtype=np.float64)
+    if not np.all(np.isfinite(timestamps)) or np.any(timestamps != np.floor(timestamps)):
+        raise FundingDataIntegrityError(f"{source}: invalid funding timestamps")
+    if timestamps.size > 1 and np.any(np.diff(timestamps) <= 0):
+        raise FundingDataIntegrityError(f"{source}: timestamps must be strictly increasing")
+    rates = pd.to_numeric(frame["funding_rate"], errors="coerce").to_numpy(dtype=np.float64)
+    validate_funding_rates(rates, source=source)
+    if month_start_ms is not None and timestamps.size:
+        start = pd.Timestamp(month_start_ms, unit="ms", tz="UTC")
+        end = start + pd.offsets.MonthBegin(1)
+        if np.any(timestamps < month_start_ms) or np.any(
+            timestamps >= int(end.timestamp() * 1000)
+        ):
+            raise FundingDataIntegrityError(f"{source}: timestamp outside partition month")
+
+
+def _funding_repair_request(path: Path, root: Path) -> FundingRepairRequest | None:
+    try:
+        relative = path.relative_to(root)
+        symbol = relative.parts[1].removeprefix("symbol=")
+        year = int(relative.parts[2].removeprefix("year="))
+        month = int(relative.parts[3].removeprefix("month=").split(".")[0])
+    except (ValueError, IndexError):
+        return None
+    start_time_ms = int(datetime(year, month, 1, tzinfo=UTC).timestamp() * 1000)
+    return FundingRepairRequest(symbol=symbol, start_time_ms=start_time_ms, parquet_path=path)
+
+
+def audit_funding_partitions(
+    *, root: Path, cutoff_exclusive_ns: int,
+) -> FundingPartitionAudit:
+    """Read-only audit used to prevent LOCAL runs from consuming corrupt funding."""
+    import pandas as pd
+
+    requests: list[FundingRepairRequest] = []
+    checked = 0
+    for path in _scan_parquet_files(Path(root), cutoff_exclusive_ns):
+        if "funding_event" not in path.parts:
+            continue
+        request = _funding_repair_request(path, Path(root))
+        if request is None:
+            continue
+        checked += 1
+        try:
+            frame = pd.read_parquet(path, engine="pyarrow")
+            validate_funding_frame(
+                frame,
+                source=str(path),
+                month_start_ms=request.start_time_ms,
+            )
+        except Exception as exc:  # noqa: BLE001
+            _logger.warning("funding audit failed for %s: %s", path, exc)
+            requests.append(request)
+    return FundingPartitionAudit(checked_files=checked, invalid_requests=tuple(requests))
+
+
+def quarantine_funding_partitions(
+    *, requests: tuple[FundingRepairRequest, ...], root: Path,
+) -> tuple[str, ...]:
+    """Move only invalid funding files and sidecars to recoverable quarantine."""
+    quarantine_dir = Path(root) / _QUARANTINE_DIR
+    moved: list[str] = []
+    for request in requests:
+        path = request.parquet_path
+        if not path.exists():
+            continue
+        target = quarantine_dir / path.relative_to(root)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        os.replace(path, target)
+        sidecar = _compute_sidecar_path(path)
+        if sidecar.exists():
+            os.replace(sidecar, target.with_suffix(_SIDECAR_SUFFIX))
+        moved.append(str(path))
+    return tuple(moved)
+
+
 def _compute_sidecar_path(parquet_path: Path) -> Path:
     return parquet_path.with_suffix(_SIDECAR_SUFFIX)
 
@@ -236,6 +340,7 @@ def reconcile_local_catalog(
     added = 0
     quarantined: list[str] = []
     funding_integrity_errors: list[str] = []
+    funding_repair_requests: list[FundingRepairRequest] = []
 
     for fpath in parquet_files:
         sidecar_path = _compute_sidecar_path(fpath)
@@ -254,12 +359,41 @@ def reconcile_local_catalog(
                 if cached_size == size and cached_mtime == mtime_ns:
                     if is_funding:
                         sv = sidecar_data.get("schema_version", "")
-                        if sv != _FUNDING_SCHEMA_VERSION:
+                        cached_sha = str(sidecar_data.get("sha256", ""))
+                        if sv != _FUNDING_SCHEMA_VERSION or not cached_sha:
                             sidecar_valid = False
                         else:
-                            reused += 1
-                            sha256_val = sidecar_data.get("sha256", "")
-                            sha256 = str(sha256_val) if sha256_val is not None else ""
+                            try:
+                                current_sha = hashlib.sha256(fpath.read_bytes()).hexdigest()
+                            except OSError:
+                                current_sha = ""
+                            if current_sha == cached_sha:
+                                reused += 1
+                                sha256 = cached_sha
+                                existing = existing_by_path.get(str(fpath))
+                                if existing is not None:
+                                    conn.execute("INSERT OR REPLACE INTO partitions VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)", existing)
+                                    added += 1
+                                else:
+                                    manifest = _partition_manifest_from_path(fpath, root, sha256, size, mtime_ns)
+                                    if manifest is not None:
+                                        conn.execute(
+                                            "INSERT OR REPLACE INTO partitions VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                                            [manifest.dataset.value, manifest.symbol, manifest.start_time_ms,
+                                             manifest.end_time_ms, manifest.row_count, manifest.sha256,
+                                             manifest.source, manifest.is_final, str(manifest.path)],
+                                        )
+                                        added += 1
+                                sidecar_valid = True
+                    else:
+                        reused += 1
+                        sha256_val = sidecar_data.get("sha256", "")
+                        sha256 = str(sha256_val) if sha256_val is not None else ""
+                        existing = existing_by_path.get(str(fpath))
+                        if existing is not None:
+                            conn.execute("INSERT OR REPLACE INTO partitions VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)", existing)
+                            added += 1
+                        else:
                             manifest = _partition_manifest_from_path(fpath, root, sha256, size, mtime_ns)
                             if manifest is not None:
                                 conn.execute(
@@ -269,20 +403,6 @@ def reconcile_local_catalog(
                                      manifest.source, manifest.is_final, str(manifest.path)],
                                 )
                                 added += 1
-                            sidecar_valid = True
-                    else:
-                        reused += 1
-                        sha256_val = sidecar_data.get("sha256", "")
-                        sha256 = str(sha256_val) if sha256_val is not None else ""
-                        manifest = _partition_manifest_from_path(fpath, root, sha256, size, mtime_ns)
-                        if manifest is not None:
-                            conn.execute(
-                                "INSERT OR REPLACE INTO partitions VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                                [manifest.dataset.value, manifest.symbol, manifest.start_time_ms,
-                                 manifest.end_time_ms, manifest.row_count, manifest.sha256,
-                                 manifest.source, manifest.is_final, str(manifest.path)],
-                            )
-                            added += 1
                         sidecar_valid = True
 
         if not sidecar_valid:
@@ -314,20 +434,38 @@ def reconcile_local_catalog(
                 continue
 
             if is_funding:
-                if "funding_rate" in df_check.columns:
-                    try:
-                        rates = df_check["funding_rate"].to_numpy(dtype=np.float64)
-                        validate_funding_rates(rates, source=str(fpath))
-                    except FundingDataIntegrityError:
-                        _logger.warning("funding integrity %s, quarantining", fpath)
-                        if sync_mode == "local":
-                            funding_integrity_errors.append(str(fpath))
-                        qpath = quarantine_dir / fpath.relative_to(root)
-                        qpath.parent.mkdir(parents=True, exist_ok=True)
-                        os.rename(fpath, qpath)
-                        quarantined.append(str(fpath))
-                        continue
-                sidecar_meta["schema_version"] = _FUNDING_SCHEMA_VERSION
+                request = _funding_repair_request(fpath, root)
+                try:
+                    validate_funding_frame(
+                        df_check,
+                        source=str(fpath),
+                        month_start_ms=request.start_time_ms if request is not None else None,
+                    )
+                except FundingDataIntegrityError:
+                    _logger.warning("funding integrity %s, quarantining", fpath)
+                    if sync_mode == "local":
+                        funding_integrity_errors.append(str(fpath))
+                    if request is not None:
+                        funding_repair_requests.append(request)
+                    qpath = quarantine_dir / fpath.relative_to(root)
+                    qpath.parent.mkdir(parents=True, exist_ok=True)
+                    os.rename(fpath, qpath)
+                    sidecar_path = _compute_sidecar_path(fpath)
+                    if sidecar_path.exists():
+                        os.rename(sidecar_path, qpath.with_suffix(_SIDECAR_SUFFIX))
+                    quarantined.append(str(fpath))
+                    continue
+                sidecar_meta.update(
+                    {
+                        "schema_version": _FUNDING_SCHEMA_VERSION,
+                        "validator_version": _FUNDING_VALIDATOR_VERSION,
+                        "row_count": len(df_check),
+                        "min_timestamp": int(df_check["timestamp"].min()),
+                        "max_timestamp": int(df_check["timestamp"].max()),
+                        "min_rate": float(pd.to_numeric(df_check["funding_rate"]).min()),
+                        "max_rate": float(pd.to_numeric(df_check["funding_rate"]).max()),
+                    }
+                )
 
             _write_sidecar(sidecar_path, sidecar_meta)
 
@@ -378,12 +516,18 @@ def reconcile_local_catalog(
         removed_stale_rows=removed_stale,
         quarantined_files=tuple(quarantined),
         catalog_hash=catalog_hash,
+        funding_repair_requests=tuple(funding_repair_requests),
     )
 
 
 __all__ = [
     "CatalogLockError",
+    "FundingPartitionAudit",
+    "FundingRepairRequest",
     "ManifestReconciliationReport",
+    "audit_funding_partitions",
+    "quarantine_funding_partitions",
     "reconcile_local_catalog",
+    "validate_funding_frame",
     "validate_funding_rates",
 ]
