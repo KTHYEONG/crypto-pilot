@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import os
 
 import numpy as np
 import pyarrow as pa
@@ -35,6 +36,7 @@ from src.domain.futures.compound.l1_sleeves import build_exit_aware_handoff
 from src.domain.futures.compound.signal_bank import build_raw_signal_panel
 from src.domain.futures.compound.validation import (
     build_causal_l2_benchmark,
+    count_effective_candidates,
     evaluate_l2_walk_forward,
     evaluate_l3_sealed_holdout,
     slice_execution_ledger,
@@ -42,6 +44,7 @@ from src.domain.futures.compound.validation import (
 from src.domain.futures.data_lake.run_windows import QuarterlyRunWindow
 
 _logger = logging.getLogger(__name__)
+_BARS_PER_YEAR_4H: float = 2190.0
 
 
 def resolve_engine_holdout_id(holdout_id: str | None, quarter_window: QuarterlyRunWindow | None) -> str:
@@ -51,6 +54,21 @@ def resolve_engine_holdout_id(holdout_id: str | None, quarter_window: QuarterlyR
     if quarter_window is not None:  # pragma: no cover - exercised by quarterly integration
         return f"quarterly-{quarter_window.cutoff_date}"
     raise ValueError("holdout_id required when window is not provided")
+
+
+def _compute_l1_window_end_idx(timestamps_ns: NDArray[np.int64], window: object | None, holdout_id: str | None, holdout_store: object) -> int:
+    quarter_window = window if isinstance(window, QuarterlyRunWindow) else None
+    if quarter_window is not None:
+        l2_start_ns = int(quarter_window.l2_start_ns)
+        idx = int(np.searchsorted(timestamps_ns, l2_start_ns, side="left"))
+        return max(1, min(idx, timestamps_ns.size))
+    if holdout_id is not None:
+        from src.domain.futures.compound.holdout_store import SealedHoldoutStore
+        assert isinstance(holdout_store, SealedHoldoutStore)
+        manifest = holdout_store.get_manifest(holdout_id)
+        idx = int(np.searchsorted(timestamps_ns, manifest.start_time_ns, side="left"))
+        return max(1, min(idx, timestamps_ns.size))
+    return timestamps_ns.size
 
 
 def resolve_quarterly_indices(timestamps_ns: NDArray[np.int64], window: QuarterlyRunWindow) -> tuple[int, int]:
@@ -123,11 +141,15 @@ def run_multiscale_compound_engine(
 
     handoff_result: HandoffResult | None = None
     p2_error_reason: str | None = None
+    cost_bps_4h: NDArray[np.float32] = np.full(
+        (bars_4h.timestamps_ns.size, n_syms), config.ladder.cost_bps, dtype=np.float32,
+    )
     try:
         _logger.info("P2: building causal cluster folds and handoff")
         horizons = tuple(sorted({d.target_horizon_hours for d in panel.descriptors}))
         max_horizon_bars = max(horizons) // 4 if horizons else 0
-        folds = build_folds_4h(panel.z_3d.shape[0], config.calibration, max_target_horizon_bars=max_horizon_bars)
+        l1_window_end = _compute_l1_window_end_idx(bars_4h.timestamps_ns, window, holdout_id, holdout_store)
+        folds = build_folds_4h(l1_window_end, config.calibration, max_target_horizon_bars=max_horizon_bars)
         cost_bps_4h = align_costs_to_decision_grid(
             market.timestamps_ns, bars_4h.timestamps_ns, market.execution_cost_bps_2d,
         )
@@ -165,7 +187,7 @@ def run_multiscale_compound_engine(
         bars_4h=bars_4h,
         target_weights_2d=weights_2d,
         funding_1h_2d=funding_1h,
-        cost_bps=config.ladder.cost_bps,
+        cost_bps=cost_bps_4h,
         config=config.dense_sim,
     )
 
@@ -219,9 +241,17 @@ def run_multiscale_compound_engine(
     )
 
     _logger.info("evaluating L2 walk-forward")
+    n_l2 = l2_ledger.timestamps_ns.shape[0]
+    fold_ids_1d = np.full(n_l2, -1, dtype=np.int16)
+    n_folds = 5
+    fold_size = n_l2 // n_folds
+    for i in range(n_folds):
+        start = i * fold_size
+        end = n_l2 if i == n_folds - 1 else (i + 1) * fold_size
+        fold_ids_1d[start:end] = i
     l2_eval = evaluate_l2_walk_forward(
-        ledger=l2_ledger, fold_ids_1d=np.zeros(l2_ledger.timestamps_ns.shape[0], dtype=np.int16),
-        benchmark=benchmark, candidate_count=len(panel.descriptors),
+        ledger=l2_ledger, fold_ids_1d=fold_ids_1d,
+        benchmark=benchmark, candidate_count=count_effective_candidates(panel.valid_3d),
         config=config.l2_gate, bootstrap_seed=42,
     )
 
@@ -265,6 +295,15 @@ def run_multiscale_compound_engine(
             max_drawdown=l3_result.max_drawdown,
             daily_cvar95=l3_result.daily_cvar95,
             reasons=tuple(l3_reasons),
+        )
+    elif os.environ.get("L2_DRY_RUN", "0") == "1":
+        l3_result = L3ValidationResult(
+            verdict=DeploymentVerdict.SHADOW,
+            posterior_growth_probability=0.0,
+            holdout_days=_manifest.holdout_days,
+            max_drawdown=0.0,
+            daily_cvar95=0.0,
+            reasons=("dry_run_holdout_not_consumed",),
         )
     else:
         l3_result = holdout_store.consume(

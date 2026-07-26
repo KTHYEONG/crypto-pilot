@@ -369,6 +369,7 @@ class L2Evaluation:
     category_results: tuple[L2CategoryResult, ...]
     integrity_ok: bool
     reasons: tuple[str, ...]
+    absolute_cagr: float = 0.0
 
     def __post_init__(self) -> None:
         for metric in (
@@ -377,7 +378,7 @@ class L2Evaluation:
             self.sharpe, self.sharpe_probability, self.deflated_sharpe_probability,
             self.calmar, self.max_drawdown, self.daily_cvar95,
             self.annual_volatility, self.annual_turnover, self.cost_drag_ratio,
-            self.capacity_utilisation_p95, self.active_days_ratio,
+            self.capacity_utilisation_p95, self.absolute_cagr, self.active_days_ratio,
         ):
             if not np.isfinite(metric):
                 raise ValueError(f"non-finite metric: {metric}")
@@ -406,6 +407,7 @@ class L2Evaluation:
             "annual_volatility": {"value": self.annual_volatility, "unit": "fraction/year"},
             "annual_turnover": {"value": self.annual_turnover, "unit": "turns/year"},
             "cost_drag_ratio": {"value": self.cost_drag_ratio, "unit": "fraction"},
+            "absolute_cagr": {"value": self.absolute_cagr, "unit": "fraction/year"},
             "capacity_utilisation_p95": {"value": self.capacity_utilisation_p95, "unit": "fraction"},
             "active_days_ratio": {"value": self.active_days_ratio, "unit": "fraction"},
             "rebalance_count": {"value": self.rebalance_count, "unit": "count"},
