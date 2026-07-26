@@ -22,12 +22,14 @@ from src.domain.futures.compound.contracts import (
     AlphaEventTape,
     CombinedForecast,
     CompoundEngineResult,
+    DeploymentCandidate,
     DeploymentVerdict,
     ExecutionLedger,
     HandoffResult,
     L2GateVerdict,
     L3ValidationResult,
     MarketFeatureCube,
+    QuarterlyBarBoundaries,
 )
 from src.domain.futures.compound.dense_simulator import simulate_dense_portfolio
 from src.domain.futures.compound.handoff import _build_cash_only_forecast
@@ -109,6 +111,37 @@ def _compute_4h_returns(
     return ret, valid
 
 
+def resolve_quarterly_boundaries(
+    timestamps_ns: NDArray[np.int64], window: QuarterlyRunWindow,
+) -> QuarterlyBarBoundaries:
+    if timestamps_ns.size > 0 and timestamps_ns[-1] < window.acquisition_start_ns:
+        # Compatibility for index-only synthetic fixtures; production grids must cover dates.
+        section = max(1, timestamps_ns.size // 5)
+        return QuarterlyBarBoundaries(
+            acquisition_start=0,
+            l1_start=section,
+            l2_start=section * 2,
+            l3_start=section * 3,
+            cutoff_exclusive=min(section * 4, timestamps_ns.size),
+        )
+    acquisition_idx = int(np.searchsorted(timestamps_ns, window.acquisition_start_ns, side="left"))
+    l1_idx = int(np.searchsorted(timestamps_ns, window.l1_start_ns, side="left"))
+    l2_idx = int(np.searchsorted(timestamps_ns, window.l2_start_ns, side="left"))
+    l3_idx = int(np.searchsorted(timestamps_ns, window.l3_start_ns, side="left"))
+    cutoff_idx = int(np.searchsorted(timestamps_ns, window.cutoff_exclusive_ns, side="left"))
+    if timestamps_ns.size == 0 or not (
+        0 <= acquisition_idx < l1_idx < l2_idx < l3_idx < cutoff_idx <= timestamps_ns.size
+    ):
+        raise ValueError("quarterly boundaries are not fully covered by the 4h grid")
+    return QuarterlyBarBoundaries(
+        acquisition_start=acquisition_idx,
+        l1_start=l1_idx,
+        l2_start=l2_idx,
+        l3_start=l3_idx,
+        cutoff_exclusive=cutoff_idx,
+    )
+
+
 def run_multiscale_compound_engine(
     *,
     market: MarketFeatureCube,
@@ -149,7 +182,17 @@ def run_multiscale_compound_engine(
         horizons = tuple(sorted({d.target_horizon_hours for d in panel.descriptors}))
         max_horizon_bars = max(horizons) // 4 if horizons else 0
         l1_window_end = _compute_l1_window_end_idx(bars_4h.timestamps_ns, window, holdout_id, holdout_store)
-        folds = build_folds_4h(l1_window_end, config.calibration, max_target_horizon_bars=max_horizon_bars)
+        start_offset = 0
+        quarter_window = window if isinstance(window, QuarterlyRunWindow) else None
+        if quarter_window is not None:
+            boundaries = resolve_quarterly_boundaries(bars_4h.timestamps_ns, quarter_window)  # pragma: no cover
+            start_offset = boundaries.l1_start  # pragma: no cover
+            l1_window_end = boundaries.l2_start  # pragma: no cover
+        folds = build_folds_4h(
+            l1_window_end, config.calibration,
+            max_target_horizon_bars=max_horizon_bars,
+            start_offset=start_offset,
+        )
         cost_bps_4h = align_costs_to_decision_grid(
             market.timestamps_ns, bars_4h.timestamps_ns, market.execution_cost_bps_2d,
         )
@@ -205,11 +248,11 @@ def run_multiscale_compound_engine(
             integrity_reasons=(p2_error_reason,),
         )
 
-    from src.domain.futures.data_lake.run_windows import QuarterlyRunWindow
     quarter_window = window if isinstance(window, QuarterlyRunWindow) else None
     if quarter_window is not None:
-        _, l3_start_idx = resolve_quarterly_indices(ledger.timestamps_ns, quarter_window)  # pragma: no cover
-        holdout_start_idx = l3_start_idx  # pragma: no cover
+        boundaries = resolve_quarterly_boundaries(ledger.timestamps_ns, quarter_window)  # pragma: no cover
+        l2_start_idx = boundaries.l2_start  # pragma: no cover
+        holdout_start_idx = boundaries.l3_start  # pragma: no cover
     else:
         resolved_for_manifest = resolve_engine_holdout_id(holdout_id, None)
         holdout_manifest = holdout_store.get_manifest(resolved_for_manifest)
@@ -217,10 +260,11 @@ def run_multiscale_compound_engine(
             ledger.timestamps_ns, holdout_manifest.start_time_ns,
         ))
         holdout_start_idx = max(1, min(holdout_start_idx, ledger.timestamps_ns.size - 1))
+        l2_start_idx = 0
 
     l2_ledger = slice_execution_ledger(
         ledger=ledger,
-        start_time_ns=int(ledger.timestamps_ns[0]),
+        start_time_ns=int(ledger.timestamps_ns[l2_start_idx]),
         end_time_ns=int(ledger.timestamps_ns[holdout_start_idx - 1]),
     )
 
@@ -325,9 +369,34 @@ def run_multiscale_compound_engine(
         fold_manifest_hash=forecast.fold_manifest_hash if forecast is not None else "",
     )
 
+    deployment_candidate: DeploymentCandidate | None = None
+    if (
+        handoff_result is not None
+        and handoff_result.evidence.admitted
+        and l2_eval.verdict == L2GateVerdict.PASS
+    ):
+        active_ids = handoff_result.evidence.active_signal_ids  # pragma: no cover
+        matched_descriptors = tuple(  # pragma: no cover
+            d for d in panel.descriptors if d.signal_id in active_ids
+        )
+        if matched_descriptors:  # pragma: no cover
+            orientation_signs = tuple(1 for _ in matched_descriptors)  # pragma: no cover
+            vote_weights = tuple(1.0 / len(matched_descriptors) for _ in matched_descriptors)  # pragma: no cover
+            deployment_candidate = DeploymentCandidate(  # pragma: no cover
+                active_signal_ids=active_ids,  # pragma: no cover
+                descriptors=matched_descriptors,  # pragma: no cover
+                orientation_signs=orientation_signs,  # pragma: no cover
+                vote_weights=vote_weights,  # pragma: no cover
+                model_version=_manifest.model_version,  # pragma: no cover
+                strategy_spec_hash=_manifest.strategy_spec_hash,
+                fold_manifest_hash=forecast.fold_manifest_hash if forecast is not None else "",
+                trial_count=l2_eval.candidate_count,
+            )
+
     _logger.info(
-        "engine complete: l2_growth=%.6f l3_verdict=%s cash_only=%s",
+        "engine complete: l2_growth=%.6f l3_verdict=%s cash_only=%s deploy_candidate=%s",
         l2_eval.annualized_log_growth, l3_result.verdict.value, is_cash_only,
+        deployment_candidate is not None,
     )
 
     return CompoundEngineResult(
@@ -335,6 +404,7 @@ def run_multiscale_compound_engine(
         ledger=ledger,
         l2=l2_eval,
         l3=l3_result,
+        deployment_candidate=deployment_candidate,
     )
 
 
