@@ -166,7 +166,13 @@ class TestRunMultiscaleCompoundEngine:
         forecast_panel = CalibratedForecastPanel(
             decision_timestamps_ns=np.arange(256, dtype=np.int64),
             symbols=small_cube.symbols,
-            mu_2d=np.ones((256, len(small_cube.symbols)), dtype=np.float32) * 0.001,
+            mu_2d=np.column_stack([
+                np.full(256, 0.020, dtype=np.float32),
+                np.full(256, 0.010, dtype=np.float32),
+                np.full(256, 0.005, dtype=np.float32),
+                np.full(256, 0.003, dtype=np.float32),
+                np.full(256, -0.002, dtype=np.float32),
+            ]).astype(np.float32),
             se_2d=np.full((256, len(small_cube.symbols)), 0.01, dtype=np.float32),
             family_mu_3d=np.zeros((256, len(small_cube.symbols), 1), dtype=np.float32),
             family_ids=(),
@@ -918,3 +924,152 @@ class TestEngineL2PassBuildsDeploymentCandidate:
         assert result.deployment_candidate.active_signal_ids == ("trend_ema:fast", "momentum_ts:slow")
         assert result.deployment_candidate.vote_weights[0] == pytest.approx(3 / 4)
         assert result.deployment_candidate.vote_weights[1] == pytest.approx(1 / 4)
+
+
+    def test_window_none_without_holdout_id_raises(self) -> None:
+        from src.domain.futures.compound.config import CompoundEngineConfig
+        from src.domain.futures.compound.contracts import MarketFeatureCube
+
+        n_bars, n_syms = 10, 2
+        cube = MarketFeatureCube(
+            timestamps_ns=np.arange(n_bars, dtype=np.int64) * _NS_PER_HOUR,
+            symbols=("A", "B"),
+            fields_2d={"close": np.ones((n_bars, n_syms), dtype=np.float32) * 100.0},
+            available_2d={"core": np.ones((n_bars, n_syms), dtype=np.bool_)},
+            eligible_2d=np.ones((n_bars, n_syms), dtype=np.bool_),
+            entry_block_2d=np.zeros((n_bars, n_syms), dtype=np.bool_),
+            exit_required_2d=np.zeros((n_bars, n_syms), dtype=np.bool_),
+            capacity_usdt_2d=np.zeros((n_bars, n_syms), dtype=np.float64),
+            execution_cost_bps_2d=np.zeros((n_bars, n_syms), dtype=np.float32),
+            data_manifest_hash="h",
+        )
+        universe = type("Universe", (), {"symbols": cube.symbols, "snapshots": ()})()
+        from unittest.mock import MagicMock
+        store = MagicMock()
+        with pytest.raises(ValueError, match="window=None requires holdout_id"):
+            run_multiscale_compound_engine(
+                market=cube, universe=universe,
+                window=None, holdout_id=None,
+                holdout_store=store, config=CompoundEngineConfig(),
+            )
+
+
+    def test_run_multiscale_compound_engine_requires_window_or_holdout_id(self) -> None:
+        self.test_window_none_without_holdout_id_raises()
+
+
+    def test_l3_prior_slices_to_most_recent_cap_days(self, tmp_path, mocker, small_cube) -> None:
+        from src.domain.futures.compound.contracts import (
+            CalibratedForecastPanel, HandoffResult, HandoffAdmissionEvidence, CausalFold,
+            L2CategoryResult, L2Evaluation, L2GateVerdict, L3ValidationResult, DeploymentVerdict,
+            RawSignalPanel, SignalDescriptor,
+        )
+        import src.domain.futures.compound.engine as eng
+
+        desc = mocker.Mock(spec=SignalDescriptor, signal_id="sig1", target_horizon_hours=4)
+        mock_panel = mocker.Mock(spec=RawSignalPanel)
+        mock_panel.z_3d = np.zeros((256, 5, 1))
+        mock_panel.valid_3d = np.ones((256, 5, 1), dtype=bool)
+        mock_panel.sigma_2d = np.full((256, 5), 0.01, dtype=np.float32)
+        mock_panel.descriptors = (desc,)
+        mocker.patch("src.domain.futures.compound.engine.build_raw_signal_panel", return_value=mock_panel)
+        mock_folds = (CausalFold(0, 0, 50, 48, 50, 52, 102, 2, 42),)
+        mocker.patch("src.domain.futures.compound.engine.build_folds_4h", return_value=mock_folds)
+        mocker.patch("src.domain.futures.compound.engine.build_multi_horizon_targets", return_value={})
+        mocker.patch("src.domain.futures.compound.engine.align_costs_to_decision_grid", return_value=np.full((256, 5), 8.0, dtype=np.float32))
+
+        forecast_panel = CalibratedForecastPanel(
+            decision_timestamps_ns=np.arange(256, dtype=np.int64),
+            symbols=small_cube.symbols,
+            mu_2d=np.zeros((256, 5), dtype=np.float32),
+            se_2d=np.full((256, 5), 0.01, dtype=np.float32),
+            family_mu_3d=np.zeros((256, 5, 1), dtype=np.float32),
+            family_ids=(), admitted_signal_ids=("sig1",), fold_manifest_hash="test",
+        )
+        evidence = HandoffAdmissionEvidence(
+            annualized_log_growth=0.1, growth_lcb90=0.05, growth_2x_cost=0.05,
+            max_drawdown=0.1, annual_volatility=0.15, positive_outer_folds=5,
+            effective_breadth=1.0, active_signal_ids=("sig1",), admitted=False, reasons=("test",),
+        )
+        hidden = HandoffResult(forecast=forecast_panel, evidence=evidence)
+        mocker.patch("src.domain.futures.compound.engine.build_exit_aware_handoff", return_value=hidden)
+
+        # A real quarterly L2 window (365 days) always exceeds l2_prior_effective_days_cap
+        # (60 by default): the cap bounds how much recent history feeds the L3 posterior,
+        # it is not a maximum-plausible-length sanity check. A prior implementation wrongly
+        # raised whenever daily_len > cap, which crashed every production run (engine.py).
+        from dataclasses import replace
+        config = replace(
+            CompoundEngineConfig(),
+            l3=replace(CompoundEngineConfig().l3, l2_prior_effective_days_cap=5),
+        )
+        universe = type("Universe", (), {"symbols": small_cube.symbols, "snapshots": ()})()
+        store = SealedHoldoutStore(tmp_path / "l3_prior_check.sqlite3")
+        store.create(SealedHoldoutManifest(
+            holdout_id="prior-check", start_time_ns=int(small_cube.timestamps_ns[-30]),
+            end_time_ns=int(small_cube.timestamps_ns[-1]), holdout_days=30,
+            model_version="v1", data_manifest_hash="h1", strategy_spec_hash="spec",
+        ))
+        daily_prior = np.arange(100, dtype=np.float64) * 0.001
+        spy = mocker.patch.object(eng, "evaluate_l3_sealed_holdout", wraps=eng.evaluate_l3_sealed_holdout)
+        with mocker.patch.object(eng, "aggregate_returns_to_utc_days", return_value=daily_prior):
+            run_multiscale_compound_engine(
+                market=small_cube, universe=universe, holdout_store=store,
+                holdout_id="prior-check", config=config,
+            )
+        passed_prior = spy.call_args.kwargs["l2_prior_returns"]
+        assert passed_prior.shape == (5,)
+        np.testing.assert_array_equal(passed_prior, daily_prior[-5:])
+
+    def test_l3_prior_empty_daily_aggregation_falls_back_to_zero(self, tmp_path, mocker, small_cube) -> None:
+        from src.domain.futures.compound.contracts import (
+            CalibratedForecastPanel, HandoffResult, HandoffAdmissionEvidence, CausalFold,
+            RawSignalPanel, SignalDescriptor,
+        )
+        import src.domain.futures.compound.engine as eng
+
+        desc = mocker.Mock(spec=SignalDescriptor, signal_id="sig1", target_horizon_hours=4)
+        mock_panel = mocker.Mock(spec=RawSignalPanel)
+        mock_panel.z_3d = np.zeros((256, 5, 1))
+        mock_panel.valid_3d = np.ones((256, 5, 1), dtype=bool)
+        mock_panel.sigma_2d = np.full((256, 5), 0.01, dtype=np.float32)
+        mock_panel.descriptors = (desc,)
+        mocker.patch("src.domain.futures.compound.engine.build_raw_signal_panel", return_value=mock_panel)
+        mock_folds = (CausalFold(0, 0, 50, 48, 50, 52, 102, 2, 42),)
+        mocker.patch("src.domain.futures.compound.engine.build_folds_4h", return_value=mock_folds)
+        mocker.patch("src.domain.futures.compound.engine.build_multi_horizon_targets", return_value={})
+        mocker.patch("src.domain.futures.compound.engine.align_costs_to_decision_grid", return_value=np.full((256, 5), 8.0, dtype=np.float32))
+
+        forecast_panel = CalibratedForecastPanel(
+            decision_timestamps_ns=np.arange(256, dtype=np.int64),
+            symbols=small_cube.symbols,
+            mu_2d=np.zeros((256, 5), dtype=np.float32),
+            se_2d=np.full((256, 5), 0.01, dtype=np.float32),
+            family_mu_3d=np.zeros((256, 5, 1), dtype=np.float32),
+            family_ids=(), admitted_signal_ids=("sig1",), fold_manifest_hash="test",
+        )
+        evidence = HandoffAdmissionEvidence(
+            annualized_log_growth=0.1, growth_lcb90=0.05, growth_2x_cost=0.05,
+            max_drawdown=0.1, annual_volatility=0.15, positive_outer_folds=5,
+            effective_breadth=1.0, active_signal_ids=("sig1",), admitted=False, reasons=("test",),
+        )
+        hidden = HandoffResult(forecast=forecast_panel, evidence=evidence)
+        mocker.patch("src.domain.futures.compound.engine.build_exit_aware_handoff", return_value=hidden)
+
+        universe = type("Universe", (), {"symbols": small_cube.symbols, "snapshots": ()})()
+        store = SealedHoldoutStore(tmp_path / "l3_prior_empty.sqlite3")
+        store.create(SealedHoldoutManifest(
+            holdout_id="prior-empty", start_time_ns=int(small_cube.timestamps_ns[-30]),
+            end_time_ns=int(small_cube.timestamps_ns[-1]), holdout_days=30,
+            model_version="v1", data_manifest_hash="h1", strategy_spec_hash="spec",
+        ))
+        with mocker.patch.object(eng, "aggregate_returns_to_utc_days", return_value=np.zeros(0, dtype=np.float64)):
+            result = run_multiscale_compound_engine(
+                market=small_cube, universe=universe, holdout_store=store,
+                holdout_id="prior-empty", config=CompoundEngineConfig(),
+            )
+        # empty daily aggregation must fall back to a zero-length-1 prior (engine.py L425)
+        # instead of raising or leaving prior_returns undefined; the run completes and
+        # l2_not_pass (cash-only, admitted=False) drives a deterministic REJECT.
+        assert result.l3.verdict == DeploymentVerdict.REJECT
+        assert result.l3.reasons == ("l2_not_pass",)

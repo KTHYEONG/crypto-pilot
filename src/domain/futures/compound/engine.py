@@ -62,6 +62,7 @@ from src.domain.futures.compound.provenance import (
 from src.domain.futures.compound.signal_bank import build_raw_signal_panel
 from src.domain.futures.compound.validation import (
     aggregate_returns_to_utc_days,
+    build_frozen_control_weights,
     evaluate_l2_walk_forward,
     evaluate_l3_sealed_holdout,
     slice_execution_ledger,
@@ -177,6 +178,9 @@ def run_multiscale_compound_engine(
     strategy_spec_hash: str = "",
     trial_ledger: CandidateTrialLedger | None = None,
 ) -> CompoundEngineResult:
+    if window is None and holdout_id is None:
+        raise ValueError("window=None requires holdout_id to be set")
+
     spec_hash = strategy_spec_hash or compute_strategy_spec_hash(config=config)
     n_syms = len(market.symbols)
 
@@ -366,10 +370,36 @@ def run_multiscale_compound_engine(
         start = i * fold_size
         end = n_l2 if i == n_folds - 1 else (i + 1) * fold_size
         fold_ids_1d[start:end] = i
+    frozen_control_daily_1d: NDArray[np.float64] = np.array([], dtype=np.float64)
+    if weights_2d.shape[0] > 0:
+        l2_start_idx = int(np.searchsorted(
+            bars_4h.timestamps_ns, l2_ledger.timestamps_ns[0], side="left",
+        ))
+        frozen_weights_2d = build_frozen_control_weights(weights_2d, l2_start_idx)
+        frozen_ledger = simulate_dense_portfolio(
+            bars_4h=bars_4h,
+            target_weights_2d=frozen_weights_2d,
+            funding_1h_2d=funding_1h,
+            cost_bps=cost_bps_4h,
+            config=config.dense_sim,
+        )
+        frozen_l2_end = l2_start_idx + l2_ledger.timestamps_ns.shape[0]
+        frozen_l2_slice = slice_execution_ledger(
+            ledger=frozen_ledger,
+            start_time_ns=int(bars_4h.timestamps_ns[l2_start_idx]),
+            end_time_ns=int(bars_4h.timestamps_ns[min(frozen_l2_end - 1, len(bars_4h.timestamps_ns) - 1)]),
+        )
+        frozen_daily_ret = aggregate_returns_to_utc_days(
+            frozen_l2_slice.timestamps_ns, frozen_l2_slice.net_returns_1d,
+        )
+        if frozen_daily_ret.size > 0:
+            frozen_control_daily_1d = np.log1p(frozen_daily_ret)
+
     l2_eval = evaluate_l2_walk_forward(
         ledger=l2_ledger, fold_ids_1d=fold_ids_1d,
         benchmark=benchmark, trial_multiplicity=trial_multiplicity,
         config=config.l2_gate, bootstrap_seed=42,
+        frozen_control_daily_1d=frozen_control_daily_1d,
     )
 
     if trial_ledger is not None:
@@ -390,7 +420,10 @@ def run_multiscale_compound_engine(
         start_time_ns=int(ledger.timestamps_ns[holdout_start_idx]),
         end_time_ns=int(ledger.timestamps_ns[-1]),
     )
-    prior_returns = l2_ledger.net_returns_1d[-config.l3.l2_prior_effective_days_cap:]
+    l2_daily_prior = aggregate_returns_to_utc_days(l2_ledger.timestamps_ns, l2_ledger.net_returns_1d)
+    if len(l2_daily_prior) == 0:
+        l2_daily_prior = np.zeros(1, dtype=np.float64)
+    prior_returns = l2_daily_prior[-config.l3.l2_prior_effective_days_cap:]
 
     def evaluate_fn(manifest: object) -> L3ValidationResult:
         return evaluate_l3_sealed_holdout(

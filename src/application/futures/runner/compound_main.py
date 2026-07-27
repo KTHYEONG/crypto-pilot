@@ -34,6 +34,8 @@ from src.domain.futures.compound.contracts import (
     CompoundEngineResult,
     DeploymentCandidate,
     DeploymentVerdict,
+    L2Evaluation,
+    L2GateVerdict,
     MarketFeatureCube,
     SealedHoldoutManifest,
 )
@@ -150,6 +152,23 @@ def _write_artifacts(
 
     _logger.info("artifacts written: result=%s weights=%s manifest=%s",
                  paths.result_path, paths.target_weights_path, paths.manifest_path)
+
+
+def write_l2_gate_inputs(run_dir: Path, evaluation: L2Evaluation) -> Path:
+    out_path = run_dir / "l2_gate_inputs.npz"
+    if evaluation.daily_strategy_returns_1d.size == 0:
+        _logger.warning("[P0] l2_gate_inputs skipped: empty gate-input series (verdict=%s)", evaluation.verdict)
+        out_path.write_text("")
+        return out_path
+    np.savez_compressed(str(out_path),
+                        daily_strategy_returns_1d=evaluation.daily_strategy_returns_1d,
+                        daily_benchmark_returns_1d=evaluation.daily_benchmark_returns_1d,
+                        daily_excess_returns_1d=evaluation.daily_excess_returns_1d,
+                        daily_fee_returns_1d=evaluation.daily_fee_returns_1d,
+                        daily_day_start_ns=evaluation.daily_day_start_ns)
+    _logger.info("[P0] l2_gate_inputs written: %s (oos_days=%d)",
+                 out_path, evaluation.oos_days)
+    return out_path
 
 
 def run_multiscale_compound_main(config: CompoundRunConfig) -> RunnerResult:
@@ -276,6 +295,8 @@ def run_multiscale_compound_main(config: CompoundRunConfig) -> RunnerResult:
 
         paths = _build_artifact_paths(config)
         _write_artifacts(paths, engine_result, config, market=market)
+
+        write_l2_gate_inputs(Path(paths.result_path).parent, engine_result.l2)
 
         if not engine_result.l2.integrity_ok:
             return RunnerResult(exit_code=1, reason="integrity_failure")
