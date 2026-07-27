@@ -19,8 +19,12 @@ from src.domain.futures.compound.contracts import (
 )
 from src.domain.futures.compound.signal_bank import (
     _compute_basis_gap,
+    _compute_flow_imbalance_taker,
+    _compute_funding_carry_reversion,
+    _compute_open_interest_confirmation,
     _compute_raw_signal,
     _compute_smart_money_divergence,
+    _compute_volatility_squeeze_keltner,
     _compute_xs_rank_signal,
     _compute_xs_reversal,
     _default_catalog,
@@ -312,12 +316,13 @@ def test_trend_ema_fast_positive_in_uptrend() -> None:
     assert np.mean(late_scores) > 0.1
 
 
-def test_reversal_st_only_fast_speed() -> None:
+def test_reversal_st_has_eight_speeds() -> None:
     catalog = _default_catalog()
     rev_st = [d for d in catalog if d.family == "reversal_st"]
-    assert len(rev_st) == 1
-    assert rev_st[0].speed == "fast"
-    assert rev_st[0].lookback_hours == 24
+    assert len(rev_st) == 8
+    speeds = [d.speed for d in rev_st]
+    assert "fast" in speeds
+    assert "extreme_slow" in speeds
 
 def test_compute_basis_gap_speed_dependent_smoothing() -> None:
     n_t, n_s = 1000, 5
@@ -375,43 +380,51 @@ def test_compute_xs_reversal_exactly_10_eligible() -> None:
     assert np.any(np.isfinite(result[1]))
 
 
-def test_default_catalog_xs_reversal_has_fast_and_medium() -> None:
+def test_default_catalog_has_eight_families_sixty_recipes() -> None:
     catalog = _default_catalog()
-    xs = [d for d in catalog if d.family == "xs_reversal"]
-    assert len(xs) == 2
-    speeds = {d.speed for d in xs}
-    assert speeds == {"fast", "medium"}
+    assert len(catalog) == 60
+    families = {d.family for d in catalog}
+    assert families == {
+        "trend_ema", "momentum_ts", "breakout_donchian", "reversal_st",
+        "funding_carry_reversion", "flow_imbalance_taker",
+        "volatility_squeeze_keltner", "open_interest_confirmation",
+    }
 
 
-def test_default_catalog_flow_taker_excluded() -> None:
+def test_default_catalog_flow_imbalance_taker_included() -> None:
     catalog = _default_catalog()
-    ft = [d for d in catalog if d.family == "flow_taker"]
-    assert len(ft) == 0
+    ft = [d for d in catalog if d.family == "flow_imbalance_taker"]
+    assert len(ft) == 8
+    ft_old = [d for d in catalog if d.family == "flow_taker"]
+    assert len(ft_old) == 0
 
 
-def test_build_raw_signal_panel_default_catalog_has_25_signals_with_new_families(synthetic_market: MarketFeatureCube) -> None:
+def test_build_raw_signal_panel_default_catalog_has_60_signals_with_eight_families(synthetic_market: MarketFeatureCube) -> None:
     bars = build_multi_timeframe_bars(synthetic_market)
     T = bars.decision_timestamps_ns.size
     N = len(bars.cubes["4h"].symbols)
     eligible = np.ones((T, N), np.bool_)
     panel = build_raw_signal_panel(bars, eligible_2d=eligible)
-    assert len(panel.descriptors) == 27
+    assert len(panel.descriptors) == 60
     families = {d.family for d in panel.descriptors}
-    assert "xs_reversal" in families
-    assert "xs_momentum_slow" in families
-    assert "smart_money_divergence" in families
-    assert "flow_taker" not in families
-    xs = [d for d in panel.descriptors if d.family == "xs_reversal"]
-    assert len(xs) == 2
-    msm = [d for d in panel.descriptors if d.family == "xs_momentum_slow"]
-    assert len(msm) == 2
-    smd = [d for d in panel.descriptors if d.family == "smart_money_divergence"]
-    assert len(smd) == 2
+    assert families == {
+        "trend_ema", "momentum_ts", "breakout_donchian", "reversal_st",
+        "funding_carry_reversion", "flow_imbalance_taker",
+        "volatility_squeeze_keltner", "open_interest_confirmation",
+    }
+    trend = [d for d in panel.descriptors if d.family == "trend_ema"]
+    assert len(trend) == 8
+    rev_st = [d for d in panel.descriptors if d.family == "reversal_st"]
+    assert len(rev_st) == 8
+    vol_sq = [d for d in panel.descriptors if d.family == "volatility_squeeze_keltner"]
+    assert len(vol_sq) == 6
+    oi = [d for d in panel.descriptors if d.family == "open_interest_confirmation"]
+    assert len(oi) == 6
 
 
-def test_signal_bank_v4_default_catalog_matched_horizons() -> None:
+def test_default_catalog_60_recipes_matched_horizons() -> None:
     catalog = _default_catalog()
-    assert len(catalog) == 27
+    assert len(catalog) == 60
     for desc in catalog:
         assert desc.target_horizon_hours > 0
         assert desc.target_horizon_hours == desc.lookback_hours, (
@@ -436,7 +449,7 @@ def test_compute_smart_money_divergence_sign_and_nan_handling() -> None:
     _compute_smart_money_divergence(top_trader_invalid, retail, 24)
 
 
-def test_build_raw_signal_panel_smart_money_divergence_wiring() -> None:
+def test_build_raw_signal_panel_funding_carry_reversion_wiring() -> None:
     n_bars = 24 * 90
     t = np.arange(n_bars, dtype=np.float64)[:, None]
     close = (100.0 + 10.0 * np.sin(t / 96.0) + 0.01 * t).astype(np.float32)
@@ -444,10 +457,9 @@ def test_build_raw_signal_panel_smart_money_divergence_wiring() -> None:
     ts = np.arange(n_bars, dtype=np.int64) * HOUR_NS + 1_700_000_000_000_000_000
 
     rng = np.random.default_rng(42)
-    top_trader_ratio = 1.0 + 0.5 * rng.random((n_bars, 3)).astype(np.float32)
-    retail_ratio = 1.0 + 0.3 * rng.random((n_bars, 3)).astype(np.float32)
-
     n_syms = 3
+    funding = 2e-4 * rng.random((n_bars, n_syms)).astype(np.float32)
+
     market = MarketFeatureCube(
         timestamps_ns=ts,
         symbols=tuple(f"SYM{i}USDT" for i in range(n_syms)),
@@ -457,18 +469,15 @@ def test_build_raw_signal_panel_smart_money_divergence_wiring() -> None:
             "low": close * 0.999,
             "close": close,
             "quote_volume": np.full((n_bars, n_syms), 1e6, np.float32),
-            "funding": np.full((n_bars, n_syms), 1e-4, np.float32),
+            "funding": funding,
             "premium": np.zeros((n_bars, n_syms), np.float32),
             "mark": close,
             "index": close,
             "taker_buy_quote": np.full((n_bars, n_syms), 6e5, np.float32),
-            "top_trader_long_short_ratio": top_trader_ratio,
-            "long_short_ratio": retail_ratio,
         },
         available_2d={k: np.ones((n_bars, n_syms), np.bool_) for k in
                       ("open", "high", "low", "close", "quote_volume", "funding",
-                       "premium", "mark", "index", "taker_buy_quote",
-                       "top_trader_long_short_ratio", "long_short_ratio")},
+                       "premium", "mark", "index", "taker_buy_quote")},
         eligible_2d=np.ones((n_bars, n_syms), np.bool_),
         entry_block_2d=np.zeros((n_bars, n_syms), np.bool_),
         exit_required_2d=np.zeros((n_bars, n_syms), np.bool_),
@@ -482,28 +491,28 @@ def test_build_raw_signal_panel_smart_money_divergence_wiring() -> None:
     eligible = np.ones((T, n_syms), np.bool_)
     panel = build_raw_signal_panel(bars, eligible_2d=eligible)
 
-    smd_fast_idx = next(i for i, d in enumerate(panel.descriptors)
-                        if d.signal_id == "smart_money_divergence:fast")
-    smd_medium_idx = next(i for i, d in enumerate(panel.descriptors)
-                         if d.signal_id == "smart_money_divergence:medium")
-    assert np.any(panel.valid_3d[:, :, smd_fast_idx])
-    assert np.any(panel.valid_3d[:, :, smd_medium_idx])
-    fast_scores = panel.z_3d[:, :, smd_fast_idx]
-    medium_scores = panel.z_3d[:, :, smd_medium_idx]
+    fcr_fast_idx = next(i for i, d in enumerate(panel.descriptors)
+                        if d.signal_id == "funding_carry_reversion:fast")
+    fcr_medium_idx = next(i for i, d in enumerate(panel.descriptors)
+                          if d.signal_id == "funding_carry_reversion:medium")
+    assert np.any(panel.valid_3d[:, :, fcr_fast_idx])
+    assert np.any(panel.valid_3d[:, :, fcr_medium_idx])
+    fast_scores = panel.z_3d[:, :, fcr_fast_idx]
+    medium_scores = panel.z_3d[:, :, fcr_medium_idx]
     assert np.any(np.isfinite(fast_scores))
     assert np.any(np.isfinite(medium_scores))
-    assert panel.descriptors[smd_fast_idx].native_timeframe == "1h"
-    assert panel.descriptors[smd_medium_idx].native_timeframe == "1h"
+    assert panel.descriptors[fcr_fast_idx].native_timeframe == "1h"
+    assert panel.descriptors[fcr_medium_idx].native_timeframe == "1h"
 
 
-def test_p2_pipeline_handles_updated_catalog_size_without_hardcoded_25(synthetic_market: MarketFeatureCube) -> None:
+def test_p2_pipeline_60_signals_120_symbols_supported(synthetic_market: MarketFeatureCube) -> None:
     bars = build_multi_timeframe_bars(synthetic_market)
     T = bars.decision_timestamps_ns.size
     N = len(bars.cubes["4h"].symbols)
     eligible = np.ones((T, N), np.bool_)
     panel = build_raw_signal_panel(bars, eligible_2d=eligible)
     assert isinstance(panel, RawSignalPanel)
-    assert panel.z_3d.shape[-1] == 27
+    assert panel.z_3d.shape[-1] == 60
     assert panel.z_3d.dtype == np.float32
     finite_mask = np.isfinite(panel.z_3d)
     if np.any(finite_mask):
@@ -693,10 +702,115 @@ def test_engine_wires_guarded_six_thread_l1_panel(synthetic_market: MarketFeatur
     assert isinstance(panel, RawSignalPanel)
     assert panel.z_3d.shape[0] == T
     assert panel.z_3d.shape[1] == N
-    assert panel.z_3d.shape[2] == 27
-    assert panel.valid_3d.shape == (T, N, 27)
+    assert panel.z_3d.shape[2] == 60
+    assert panel.valid_3d.shape == (T, N, 60)
     assert panel.sigma_2d.shape == (T, N)
     finite_sigma = np.isfinite(panel.sigma_2d)
     assert np.all(finite_sigma)
     assert np.all(panel.sigma_2d > 0)
     assert panel.sigma_2d.dtype == np.float32
+
+
+def test_volatility_squeeze_keltner_tight_range_gives_negative_squeeze() -> None:
+    n_t, n_s = 400, 3
+    rng = np.random.default_rng(42)
+    close = 100.0 + 0.1 * rng.standard_normal((n_t, n_s)).cumsum(axis=0)
+    high = close + np.abs(rng.normal(0, 0.2, (n_t, n_s)))
+    low = close - np.abs(rng.normal(0, 0.2, (n_t, n_s)))
+    close = close.astype(np.float32)
+    high = high.astype(np.float32)
+    low = low.astype(np.float32)
+    result = _compute_volatility_squeeze_keltner(high, low, close, 20)
+    assert result.shape == (n_t, n_s)
+    assert np.any(np.isfinite(result))
+
+
+def test_funding_carry_reversion_high_funding_gives_negative_signal() -> None:
+    n_t, n_s = 400, 3
+    rng = np.random.default_rng(42)
+    base = 0.0001
+    funding = np.full((n_t, n_s), base, dtype=np.float32)
+    funding[:n_t // 2] = base + 2e-5 * rng.standard_normal((n_t // 2, n_s)).astype(np.float32)
+    funding[n_t // 2:] = 3 * base + 2e-5 * rng.standard_normal((n_t - n_t // 2, n_s)).astype(np.float32)
+    premium = np.zeros((n_t, n_s), dtype=np.float32)
+    result = _compute_funding_carry_reversion(funding, premium, 24)
+    assert result.shape == (n_t, n_s)
+    valid = result[200:]
+    assert np.any(np.isfinite(valid))
+
+
+def test_flow_imbalance_taker_buy_pressure_gives_positive_signal() -> None:
+    n_t, n_s = 400, 3
+    rng = np.random.default_rng(42)
+    taker_buy = (500_000 + 400_000 * rng.random((n_t, n_s))).astype(np.float32)
+    volume = np.full((n_t, n_s), 1_000_000, dtype=np.float32)
+    result = _compute_flow_imbalance_taker(taker_buy, volume, 24)
+    assert result.shape == (n_t, n_s)
+    valid = result[200:]
+    assert np.any(np.isfinite(valid))
+
+
+def test_open_interest_confirmation_rising_oi_gives_positive_signal() -> None:
+    n_t, n_s = 400, 3
+    rng = np.random.default_rng(42)
+    ramp = 1000.0 + np.arange(n_t, dtype=np.float32) * 0.5
+    oi = np.column_stack([ramp + rng.normal(0, 1.0, n_t) for _ in range(n_s)]).astype(np.float32)
+    volume = np.full((n_t, n_s), 1_000_000, dtype=np.float32)
+    result = _compute_open_interest_confirmation(oi, volume, 24)
+    assert result.shape == (n_t, n_s)
+    valid = result[200:]
+    assert np.any(np.isfinite(valid))
+
+
+def test_open_interest_confirmation_missing_data_does_not_crash_pipeline(synthetic_market: MarketFeatureCube) -> None:
+    bars = build_multi_timeframe_bars(synthetic_market)
+    T = bars.decision_timestamps_ns.size
+    N = len(bars.cubes["4h"].symbols)
+    eligible = np.ones((T, N), np.bool_)
+    panel = build_raw_signal_panel(bars, eligible_2d=eligible)
+    oi_sigs = [i for i, d in enumerate(panel.descriptors) if d.family == "open_interest_confirmation"]
+    for idx in oi_sigs:
+        assert not np.any(panel.valid_3d[:, :, idx]), "open_interest not in test data, should be all invalid"
+
+
+def test_default_catalog_60_recipes_unique_ids() -> None:
+    catalog = _default_catalog()
+    assert len(catalog) == 60
+    ids = {d.signal_id for d in catalog}
+    assert len(ids) == 60, "all signal_ids must be unique"
+
+
+def test_default_catalog_all_speeds_have_expected_signal_ids() -> None:
+    catalog = _default_catalog()
+    expected = set()
+    for family in ("trend_ema", "momentum_ts", "breakout_donchian", "reversal_st", "funding_carry_reversion", "flow_imbalance_taker"):
+        for speed in ("fast", "medium", "moderate", "slow", "very_slow", "ultra_slow", "super_slow", "extreme_slow"):
+            expected.add(f"{family}:{speed}")
+    for family in ("volatility_squeeze_keltner", "open_interest_confirmation"):
+        for speed in ("fast", "medium", "moderate", "slow", "very_slow", "ultra_slow"):
+            expected.add(f"{family}:{speed}")
+    actual = {d.signal_id for d in catalog}
+    assert actual == expected
+
+
+def test_build_raw_signal_panel_120_universe_symbols(synthetic_market: MarketFeatureCube) -> None:
+    bars = build_multi_timeframe_bars(synthetic_market)
+    T = bars.decision_timestamps_ns.size
+    symbols = bars.cubes["4h"].symbols
+    eligible = np.ones((T, len(symbols)), np.bool_)
+    panel = build_raw_signal_panel(bars, eligible_2d=eligible)
+    assert panel.z_3d.shape[1] == len(symbols)
+    assert panel.z_3d.shape[2] == 60
+    assert len(panel.symbols) == len(symbols)
+
+
+def test_signal_bank_dynamic_masking_coverage(synthetic_market: MarketFeatureCube) -> None:
+    bars = build_multi_timeframe_bars(synthetic_market)
+    T = bars.decision_timestamps_ns.size
+    N = len(bars.cubes["4h"].symbols)
+    eligible = np.ones((T, N), np.bool_)
+    eligible[T // 2:, :N // 2] = False
+    panel = build_raw_signal_panel(bars, eligible_2d=eligible)
+    assert panel.valid_3d.shape == (T, N, 60)
+    late_none = ~panel.valid_3d[T // 2:, :N // 2, :].any(axis=(0, 2))
+    assert late_none.any(), "masked symbols should have no valid entries in later bars"
