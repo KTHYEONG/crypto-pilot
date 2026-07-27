@@ -39,6 +39,9 @@ def simulate_dense_portfolio(
     pending_turnover_cost = 0.0
     integrity_failures: list[str] = []
 
+    reshaped = funding_1h_2d.reshape(n_bars, 4, n_syms)
+    funding_4h = np.where(np.isfinite(reshaped), reshaped.astype(np.float64), 0.0).sum(axis=1)
+
     for t in range(n_bars):
         if t == 0:
             prev_w = target_weights_2d[0].copy()
@@ -56,11 +59,7 @@ def simulate_dense_portfolio(
         )
         bar_return = float(np.nansum(prev_w * sym_ret))
 
-        funding_sum = np.zeros(n_syms, dtype=np.float64)
-        for h in range(4):
-            fh = funding_1h_2d[t * 4 + h]
-            funding_sum += np.where(np.isfinite(fh), fh, 0.0)
-        funding_ret = -float(np.nansum(prev_w * funding_sum))
+        funding_ret = -float(np.sum(prev_w * funding_4h[t]))
         funding_returns[t] = funding_ret
 
         fee_returns[t] = -pending_turnover_cost
