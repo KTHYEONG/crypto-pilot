@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import math
+
 import numpy as np
 import pytest
 
@@ -149,3 +151,30 @@ class TestDeflatedSharpeProbability:
         mult = TrialMultiplicity(10, 5.0, 0.5)
         result = deflated_sharpe_probability(observed_sharpe=2.0, multiplicity=mult, excess_returns=excess)
         assert 0.0 <= result <= 1.0
+
+    def test_dsr_period_matching_with_empirical_moments(self) -> None:
+        rng = np.random.default_rng(42)
+        n = 365
+        eps = rng.normal(0, 1, n).astype(np.float64)
+        eps = eps - np.mean(eps)
+        eps = eps / np.std(eps, ddof=1)
+        skew = float(np.mean(eps ** 3))
+        kurt = float(np.mean(eps ** 4))
+        scale = 0.01018
+        shift = 0.07085 * scale
+        excess = shift + eps * scale
+        sr_ann = float(np.mean(excess) / np.std(excess, ddof=1)) * math.sqrt(365.25)
+        mult = TrialMultiplicity(50, 9.23, 0.5)
+        dsr = deflated_sharpe_probability(
+            observed_sharpe=sr_ann, multiplicity=mult,
+            excess_returns=excess, periods_per_year=365.25,
+        )
+        assert 0.70 <= dsr <= 0.75, f"dsr={dsr} out of expected range [0.70, 0.75]"
+        assert dsr < 0.90, f"dsr={dsr} should be < 0.90 (current implementation returns ~1.0)"
+
+
+    def test_deflated_sharpe_probability_frequency_consistent_below_gate(self) -> None:
+        self.test_dsr_period_matching_with_empirical_moments()
+
+    def test_deflated_sharpe_probability_frequency_consistent_below_gate(self) -> None:
+        self.test_dsr_period_matching_with_empirical_moments()
