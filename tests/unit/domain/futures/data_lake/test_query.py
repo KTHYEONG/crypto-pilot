@@ -12,12 +12,15 @@ from src.domain.futures.data_lake.contracts import (
     DatasetKind,
     GridRequest,
     NativeFeatureGrid,
+    PartitionManifest,
 )
 from src.domain.futures.data_lake.query import (
     _load_partition_data,
     BinanceQueryClient,
     LocalDataCatalog,
     materialize_causal_metrics_grid,
+    materialize_feature_grid,
+    materialize_feature_grid_parallel,
     materialize_native_grid,
 )
 
@@ -540,3 +543,81 @@ class TestNormalizeVisionFunding:
         rates = np.array([rate], dtype=np.float64)
         with pytest.raises(FundingDataIntegrityError, match="exceed"):
             validate_funding_rates(rates, source="test")
+
+
+def test_parallel_feature_grid_correctness(tmp_path: Path) -> None:
+    symbols = ("BTCUSDT", "ETHUSDT", "SOLUSDT")
+    ts_base_ms = 1_783_440_000_000
+    n_hours = 6
+    partitions: list[PartitionManifest] = []
+    for sym_idx, sym in enumerate(symbols):
+        rows = []
+        for h in range(n_hours):
+            ts_ms = ts_base_ms + h * 3_600_000
+            rows.append({
+                "timestamp": ts_ms,
+                "open": float(100 + sym_idx * 10 + h),
+                "high": float(100 + sym_idx * 10 + h + 2),
+                "low": float(100 + sym_idx * 10 + h - 1),
+                "close": float(100 + sym_idx * 10 + h + 1),
+                "quote_volume": float(1_000_000 + sym_idx * 100_000),
+            })
+        part = tmp_path / f"{sym}.parquet"
+        pd.DataFrame(rows).to_parquet(part, index=False)
+        partitions.append(PartitionManifest(
+            DatasetKind.KLINES_1H, sym,
+            ts_base_ms, ts_base_ms + (n_hours - 1) * 3_600_000,
+            n_hours, "test", "cache", True, part,
+        ))
+
+    snap = DataSnapshot("s1", ts_base_ms + n_hours * 3_600_000,
+                         tuple(partitions), "h1", "", 0)
+    request = GridRequest(
+        symbols=symbols, timeframe="1h", source_timeframe="1h",
+        fields=("open", "high", "low", "close", "quote_volume"),
+        start_time_ns=ts_base_ms * 1_000_000,
+        end_time_ns=(ts_base_ms + n_hours * 3_600_000) * 1_000_000,
+    )
+
+    seq_grid = materialize_feature_grid(request=request, snapshot=snap, dataset=DatasetKind.KLINES_1H)
+    par_grid = materialize_feature_grid_parallel(request=request, snapshot=snap, dataset=DatasetKind.KLINES_1H)
+
+    assert seq_grid.symbols == par_grid.symbols
+    assert np.array_equal(seq_grid.timestamps_ns, par_grid.timestamps_ns)
+    for field in request.fields:
+        assert field in seq_grid.fields, f"missing {field} in sequential"
+        assert field in par_grid.fields, f"missing {field} in parallel"
+        np.testing.assert_array_equal(seq_grid.fields[field], par_grid.fields[field],
+                                       err_msg=f"field {field} mismatch")
+        np.testing.assert_array_equal(seq_grid.available[field], par_grid.available[field],
+                                       err_msg=f"available {field} mismatch")
+
+
+def test_parallel_feature_grid_rejects_empty_symbols() -> None:
+    snap = DataSnapshot("s1", 1_000_000, (), "h1", "", 0)
+    request = GridRequest(
+        symbols=(), timeframe="1h", source_timeframe="1h",
+        fields=("close",), start_time_ns=0, end_time_ns=3_600_000_000_000,
+    )
+    with pytest.raises(ValueError, match="at least one symbol"):
+        materialize_feature_grid_parallel(request=request, snapshot=snap, dataset=DatasetKind.KLINES_1H)
+
+
+def test_parallel_feature_grid_rejects_empty_fields() -> None:
+    snap = DataSnapshot("s1", 1_000_000, (), "h1", "", 0)
+    request = GridRequest(
+        symbols=("BTCUSDT",), timeframe="1h", source_timeframe="1h",
+        fields=(), start_time_ns=0, end_time_ns=3_600_000_000_000,
+    )
+    with pytest.raises(ValueError, match="at least one field"):
+        materialize_feature_grid_parallel(request=request, snapshot=snap, dataset=DatasetKind.KLINES_1H)
+
+
+def test_parallel_feature_grid_rejects_timeframe_mismatch() -> None:
+    snap = DataSnapshot("s1", 1_000_000, (), "h1", "", 0)
+    request = GridRequest(
+        symbols=("BTCUSDT",), timeframe="1h", source_timeframe="5m",
+        fields=("close",), start_time_ns=0, end_time_ns=3_600_000_000_000,
+    )
+    with pytest.raises(ValueError, match="matching request and source"):
+        materialize_feature_grid_parallel(request=request, snapshot=snap, dataset=DatasetKind.KLINES_1H)
