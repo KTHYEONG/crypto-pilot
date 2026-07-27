@@ -12,6 +12,7 @@ from numba import njit, prange
 from numba import set_num_threads as _numba_set_num_threads
 from numpy.typing import NDArray
 
+from src.domain.futures.compound.alpha_catalog import build_canonical_alpha_catalog
 from src.domain.futures.compound.contracts import (
     InsufficientCoverageError,
     MultiTimeframeBars,
@@ -65,12 +66,24 @@ def _rolling_mad_z_numba_kernel(
     return z
 
 
-SPEED_LADDER: tuple[tuple[str, int], ...] = (
+_SPEED_LADDER_8: tuple[tuple[str, int], ...] = (
     ("fast", 24),
     ("medium", 72),
     ("moderate", 144),
     ("slow", 216),
     ("very_slow", 432),
+    ("ultra_slow", 864),
+    ("super_slow", 1728),
+    ("extreme_slow", 3456),
+)
+
+_SPEED_LADDER_6: tuple[tuple[str, int], ...] = (
+    ("fast", 24),
+    ("medium", 72),
+    ("moderate", 144),
+    ("slow", 216),
+    ("very_slow", 432),
+    ("ultra_slow", 864),
 )
 
 
@@ -245,6 +258,64 @@ def _compute_flow_taker(
     ewm_imb = _ewm_2d(imbalance, max(lookback_hours, 42))
     return ewm_imb
 
+def _compute_volatility_squeeze_keltner(
+    high: NDArray[np.float32], low: NDArray[np.float32], close: NDArray[np.float32],
+    lb_bars: int,
+) -> NDArray[np.float64]:
+    close_f64 = close.astype(np.float64)
+    high_f64 = high.astype(np.float64)
+    low_f64 = low.astype(np.float64)
+    sma = _ewm_2d(close_f64, lb_bars)
+    std = np.sqrt(_ewm_2d(close_f64 ** 2, lb_bars) - sma ** 2)
+    std = np.maximum(std, 1e-12)
+    bb_width = 4.0 * std / np.maximum(sma, 1e-12)
+    prev_close = np.roll(close_f64, 1, axis=0)
+    prev_close[0] = close_f64[0]
+    tr = np.maximum(
+        high_f64 - low_f64,
+        np.maximum(np.abs(high_f64 - prev_close), np.abs(low_f64 - prev_close)),
+    )
+    atr = _ewm_2d(tr, lb_bars)
+    atr = np.maximum(atr, 1e-12)
+    kc_width = 2.0 * atr / np.maximum(sma, 1e-12)
+    return bb_width / kc_width - 1.0
+
+
+def _compute_funding_carry_reversion(
+    funding: NDArray[np.float32], premium: NDArray[np.float32],
+    lookback_hours: int,
+) -> NDArray[np.float64]:
+    combined = (funding + premium).astype(np.float64)
+    ewm_combined = _ewm_2d(combined, max(lookback_hours, 42))
+    span = max(lookback_hours * 2, 84)
+    z = _rolling_mad_z(ewm_combined, window=span, min_periods=max(lookback_hours, 42))
+    return -z
+
+
+def _compute_flow_imbalance_taker(
+    taker_buy_quote: NDArray[np.float32], quote_volume: NDArray[np.float32],
+    lookback_hours: int,
+) -> NDArray[np.float64]:
+    vol_safe = np.where(quote_volume > 0, quote_volume.astype(np.float64), 1.0)
+    imbalance = (2.0 * taker_buy_quote.astype(np.float64) - quote_volume.astype(np.float64)) / vol_safe
+    ewm_imb = _ewm_2d(imbalance, max(lookback_hours, 42))
+    span = max(lookback_hours * 2, 84)
+    return _rolling_mad_z(ewm_imb, window=span, min_periods=max(lookback_hours, 42))
+
+
+def _compute_open_interest_confirmation(
+    open_interest: NDArray[np.float32], quote_volume: NDArray[np.float32],
+    lookback_hours: int,
+) -> NDArray[np.float64]:
+    oi_f64 = open_interest.astype(np.float64)
+    vol_safe = np.where(quote_volume > 0, quote_volume.astype(np.float64), 1.0)
+    oi_change = np.zeros_like(oi_f64)
+    oi_change[1:] = np.diff(oi_f64, axis=0) / vol_safe[1:]
+    ewm_oi = _ewm_2d(oi_change, max(lookback_hours, 42))
+    span = max(lookback_hours * 2, 84)
+    return _rolling_mad_z(ewm_oi, window=span, min_periods=max(lookback_hours, 42))
+
+
 def _compute_xs_rank_signal(
     close: NDArray[np.float32], lb_bars: int, eligible_2d: NDArray[np.bool_], sign: float,
 ) -> NDArray[np.float64]:
@@ -282,13 +353,19 @@ _FAMILY_NATIVE_TF: dict[str, str] = {
     "xs_reversal": "4h",
     "xs_momentum_slow": "4h",
     "smart_money_divergence": "1h",
+    "funding_carry_reversion": "1h",
+    "flow_imbalance_taker": "1h",
+    "volatility_squeeze_keltner": "4h",
+    "open_interest_confirmation": "1h",
 }
 
 
 def _default_catalog() -> tuple[SignalDescriptor, ...]:
+    catalog = build_canonical_alpha_catalog()  # noqa: F841
+    _ = catalog
     descriptors: list[SignalDescriptor] = []
-    for family in ("trend_ema", "momentum_ts", "breakout_donchian", "basis_gap"):
-        for speed, lb_hours in SPEED_LADDER:
+    for family in ("trend_ema", "momentum_ts", "breakout_donchian", "reversal_st", "funding_carry_reversion", "flow_imbalance_taker"):
+        for speed, lb_hours in _SPEED_LADDER_8:
             descriptors.append(SignalDescriptor(
                 signal_id=f"{family}:{speed}",
                 family=family,
@@ -297,55 +374,16 @@ def _default_catalog() -> tuple[SignalDescriptor, ...]:
                 native_timeframe=_FAMILY_NATIVE_TF[family],
                 target_horizon_hours=lb_hours,
             ))
-    descriptors.append(SignalDescriptor(
-        signal_id="reversal_st:fast",
-        family="reversal_st",
-        speed="fast",
-        lookback_hours=24,
-        native_timeframe="4h",
-        target_horizon_hours=24,
-    ))
-    descriptors.append(SignalDescriptor(
-        signal_id="xs_reversal:fast",
-        family="xs_reversal",
-        speed="fast",
-        lookback_hours=24,
-        native_timeframe="4h",
-        target_horizon_hours=24,
-    ))
-    descriptors.append(SignalDescriptor(
-        signal_id="xs_reversal:medium",
-        family="xs_reversal",
-        speed="medium",
-        lookback_hours=72,
-        native_timeframe="4h",
-        target_horizon_hours=72,
-    ))
-    descriptors.append(SignalDescriptor(
-        signal_id="xs_momentum_slow:slow",
-        family="xs_momentum_slow",
-        speed="slow",
-        lookback_hours=216,
-        native_timeframe="4h",
-        target_horizon_hours=216,
-    ))
-    descriptors.append(SignalDescriptor(
-        signal_id="xs_momentum_slow:very_slow",
-        family="xs_momentum_slow",
-        speed="very_slow",
-        lookback_hours=432,
-        native_timeframe="4h",
-        target_horizon_hours=432,
-    ))
-    for speed, lb_hours in (("fast", 24), ("medium", 72)):
-        descriptors.append(SignalDescriptor(
-            signal_id=f"smart_money_divergence:{speed}",
-            family="smart_money_divergence",
-            speed=speed,
-            lookback_hours=lb_hours,
-            native_timeframe="1h",
-            target_horizon_hours=lb_hours,
-        ))
+    for family in ("volatility_squeeze_keltner", "open_interest_confirmation"):
+        for speed, lb_hours in _SPEED_LADDER_6:
+            descriptors.append(SignalDescriptor(
+                signal_id=f"{family}:{speed}",
+                family=family,
+                speed=speed,
+                lookback_hours=lb_hours,
+                native_timeframe=_FAMILY_NATIVE_TF[family],
+                target_horizon_hours=lb_hours,
+            ))
     return tuple(descriptors)
 
 
@@ -455,6 +493,48 @@ def _compute_raw_signal(
                 )
                 return None
             raw_1h = _compute_smart_money_divergence(top_trader, retail, desc.lookback_hours)
+            n_t = bars.decision_timestamps_ns.size
+            raw = _subsample_to_4h(raw_1h, n_t)
+            return _normalize_mad_z(raw)
+
+        if family == "volatility_squeeze_keltner":
+            if desc.native_timeframe != "4h":
+                return None
+            lb_bars_4h = desc.lookback_hours // 4
+            raw = _compute_volatility_squeeze_keltner(high_4h, low_4h, close_4h, lb_bars_4h)
+            return _normalize_mad_z(raw)
+
+        if family == "funding_carry_reversion":
+            funding = bars.aux_1h_fields.get("funding")
+            premium = bars.aux_1h_fields.get("premium")
+            if funding is None or premium is None:
+                _logger.warning("[DATA] funding_carry_reversion: missing funding/premium in aux_1h_fields")
+                return None
+            raw_1h = _compute_funding_carry_reversion(funding, premium, desc.lookback_hours)
+            n_t = bars.decision_timestamps_ns.size
+            raw = _subsample_to_4h(raw_1h, n_t)
+            return _normalize_mad_z(raw)
+
+        if family == "flow_imbalance_taker":
+            taker_buy = bars.aux_1h_fields.get("taker_buy_quote")
+            volume = bars.aux_1h_fields.get("quote_volume")
+            if taker_buy is None or volume is None:
+                _logger.warning("[DATA] flow_imbalance_taker: missing taker_buy_quote/quote_volume in aux_1h_fields")
+                return None
+            raw_1h = _compute_flow_imbalance_taker(taker_buy, volume, desc.lookback_hours)
+            n_t = bars.decision_timestamps_ns.size
+            raw = _subsample_to_4h(raw_1h, n_t)
+            return _normalize_mad_z(raw)
+
+        if family == "open_interest_confirmation":
+            open_interest = bars.aux_1h_fields.get("open_interest")
+            volume = bars.aux_1h_fields.get("quote_volume")
+            if volume is None and "1h" in bars.cubes:
+                volume = bars.cubes["1h"].quote_volume_2d
+            if open_interest is None or volume is None:
+                _logger.warning("[DATA] open_interest_confirmation: missing open_interest/quote_volume in aux_1h_fields")
+                return None
+            raw_1h = _compute_open_interest_confirmation(open_interest, volume, desc.lookback_hours)
             n_t = bars.decision_timestamps_ns.size
             raw = _subsample_to_4h(raw_1h, n_t)
             return _normalize_mad_z(raw)
@@ -571,7 +651,7 @@ def build_raw_signal_panel(
     total_valid = int(np.sum(valid_3d))
     total_cells = valid_3d.size
     valid_ratio = total_valid / max(total_cells, 1)
-    executed_mad_recipes = sum(1 for d in catalog if d.family in ("breakout_donchian", "basis_gap", "smart_money_divergence", "carry_funding", "flow_taker"))
+    executed_mad_recipes = sum(1 for d in catalog if d.family in ("breakout_donchian", "basis_gap", "smart_money_divergence", "carry_funding", "flow_taker", "volatility_squeeze_keltner", "funding_carry_reversion", "flow_imbalance_taker", "open_interest_confirmation"))
     _logger.info(
         "[PERF][L1] signal_panel elapsed_s=%.4f recipes=%d executed_mad_recipes=%d numba_threads=%d numba_fallbacks=%d valid_ratio=%.4f signal_count=%d field_count=%d estimated_peak_mb=%.0f observed_peak_mb=%.0f max_rss_mb=%d",
         elapsed, n_cat, executed_mad_recipes, effective_threads, _numba_fallback_count,
