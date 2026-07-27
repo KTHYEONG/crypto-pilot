@@ -313,7 +313,7 @@ class LadderConfig:
 @dataclass(slots=True, frozen=True)
 class DynamicCompoundingConfig:
     kelly_fraction: float = 0.20
-    target_ann_vol: float = 0.15
+    target_ann_vol: float = 0.12
     vol_lookback_bars: int = 180
     vol_scale_max: float = 1.5
     max_gross_leverage: float = 1.00

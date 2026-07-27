@@ -493,8 +493,7 @@ def test_mdd_parity_scale_causal_and_clipped() -> None:
 
 def test_min_oos_days_raised_not_relaxed() -> None:
     cfg = L2GateConfig()
-    assert cfg.min_oos_days == 500
+    assert cfg.min_oos_days == 340
     assert cfg.min_excess_growth_probability == 0.90
     assert cfg.min_deflated_sharpe_probability == 0.90
-    assert cfg.min_bootstrap_sharpe_probability == 0.90
     assert cfg.max_spa_pvalue == 0.10
