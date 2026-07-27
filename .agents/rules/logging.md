@@ -21,11 +21,13 @@ This document defines the strict logging rules and tag-based format requirements
 
 ---
 
-## 1.5 Execution Log File Path & Directory Directives
+## 1.5 Log Directory Hygiene & Path Scoping
 
-- **Strict Path Scoping**: All execution logs, test outputs, and diagnostic logs generated during code execution MUST be written to the `logs/` directory in the **current project workspace** (e.g., `logs/*.log` or `logs/*.jsonl`).
-- **Prohibition of `/tmp`**: **Writing log files to `/tmp/` is strictly prohibited.**
-- **Log Directory Management**: Ensure the `logs/` directory is automatically created if it does not exist before writing log files. Clean up temporary execution log files after diagnosis unless persistent storage is required.
+- **Strict Path Scoping**: All operational logs MUST reside within the project's `logs/` directory. Writing to `/tmp` is strictly prohibited.
+- **Log Isolation Strategy**:
+  - **Persistent System Logs**: Main operational/service logs MUST be written to `logs/` root (e.g., `logs/sys.log`, `logs/algo.log`).
+  - **Transient / Diagnostic Logs**: All temporary scripts, one-off verification outputs, scratch runs, and test logs MUST be written to `logs/scratch/` (e.g., `logs/scratch/scratch_verify.log`).
+- **Transient Cleanup Directive**: Logs under `logs/scratch/` are considered ephemeral. The AI must purge old diagnostic logs in `logs/scratch/` or run `python scripts/clean_logs.py` when concluding diagnostic tasks.
 
 ---
 
