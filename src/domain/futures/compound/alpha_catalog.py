@@ -17,29 +17,39 @@ from src.domain.futures.compound.contracts import (
 
 _logger = logging.getLogger(__name__)
 
-_FAMILIES: tuple[str, ...] = (
+_EXPANDED_FAMILIES: tuple[str, ...] = (
     "time_series_trend",
     "breakout",
     "cross_sectional_momentum",
     "short_term_reversal",
     "carry_basis",
     "flow_positioning",
+    "volatility_squeeze_keltner",
+    "funding_carry_reversion",
+    "flow_imbalance_taker",
+    "open_interest_confirmation",
 )
 
-_HORIZONS: tuple[int, ...] = (4, 12, 24)
+_EXPANDED_HORIZONS: tuple[int, ...] = (4, 8, 12, 24, 48, 96)
 
 
 def build_canonical_alpha_catalog() -> tuple[AlphaDefinition, ...]:
     catalog: list[AlphaDefinition] = []
-    for family in _FAMILIES:
-        for h in _HORIZONS:
+    for family in _EXPANDED_FAMILIES:
+        for h in _EXPANDED_HORIZONS:
             recipe_id = f"{family}_h{h}"
-            if family == "flow_positioning":
+            if family in ("flow_positioning",):
                 required: tuple[str, ...] = ("taker_buy_quote", "quote_volume", "funding", "premium")
                 data_tier: Literal["core", "conditional"] = "conditional"
-            elif family == "carry_basis":
+            elif family in ("carry_basis", "funding_carry_reversion"):
                 required = ("funding", "premium")
                 data_tier = "core"
+            elif family == "flow_imbalance_taker":
+                required = ("taker_buy_quote", "quote_volume")
+                data_tier = "conditional"
+            elif family == "open_interest_confirmation":
+                required = ("open_interest", "quote_volume")
+                data_tier = "conditional"
             else:
                 required = ("open", "high", "low", "close", "quote_volume")
                 data_tier = "core"
@@ -253,6 +263,47 @@ def compute_raw_alpha_tape(
             lsr = cube.fields_2d.get("lsr", None)
             lsr_z = _robust_z_score(lsr) if lsr is not None else np.zeros_like(taker_z)
             scores[:, :, k] = taker_z * np.sign(oi_delta_z) - 0.25 * lsr_z
+            valid[:, :, k] = cube.eligible_2d & np.isfinite(scores[:, :, k])
+
+        elif recipe.family == "volatility_squeeze_keltner":
+            high_arr = cube.fields_2d["high"]
+            low_arr = cube.fields_2d["low"]
+            close_arr = cube.fields_2d["close"]
+            mid = (high_arr + low_arr) / 2.0
+            roll_mid = _ewm(mid, span_12h)
+            atr_val = _atr(high_arr, low_arr, close_arr, span_6h)
+            atr_val = np.where(atr_val < 1e-12, 1e-12, atr_val)
+            scores[:, :, k] = (close_arr.astype(np.float32) - roll_mid) / atr_val
+            valid[:, :, k] = cube.eligible_2d & np.isfinite(scores[:, :, k])
+
+        elif recipe.family == "funding_carry_reversion":
+            funding_arr = cube.fields_2d["funding"]
+            premium_arr = cube.fields_2d["premium"]
+            combined = funding_arr + premium_arr
+            ewm_combined = _ewm(combined, span_6h)
+            z = _robust_z_score(ewm_combined)
+            scores[:, :, k] = -z
+            valid[:, :, k] = cube.eligible_2d & np.isfinite(scores[:, :, k])
+
+        elif recipe.family == "flow_imbalance_taker":
+            taker_arr = cube.fields_2d["taker_buy_quote"]
+            vol_arr = cube.fields_2d["quote_volume"]
+            vol_safe = np.where(vol_arr > 0, vol_arr, np.float32(1.0))
+            taker_buy_f32 = taker_arr.astype(np.float32)
+            imbalance = ((taker_buy_f32 * 2.0 - vol_arr) / vol_safe).astype(np.float32)
+            z = _robust_z_score(imbalance)
+            scores[:, :, k] = z
+            valid[:, :, k] = cube.eligible_2d & np.isfinite(scores[:, :, k])
+
+        elif recipe.family == "open_interest_confirmation":
+            oi_arr = cube.fields_2d["open_interest"]
+            vol_arr = cube.fields_2d["quote_volume"]
+            oi_change = np.zeros_like(oi_arr)
+            oi_change[1:] = np.diff(oi_arr, axis=0)
+            vol_safe = np.where(vol_arr > 0, vol_arr, np.float32(1.0))
+            oi_norm = (oi_change / vol_safe).astype(np.float32)
+            z = _robust_z_score(oi_norm)
+            scores[:, :, k] = z
             valid[:, :, k] = cube.eligible_2d & np.isfinite(scores[:, :, k])
 
     return RawAlphaTape(
