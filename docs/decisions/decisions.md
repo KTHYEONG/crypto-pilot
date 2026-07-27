@@ -1,5 +1,10 @@
 # Active Decisions Log (Sliding Window)
 
+## [2026-07-27] [TASK_L1_ADMISSION_RECOVERY_GATE_REDESIGN] [ADR_20260727_L1_ADMISSION_RECOVERY_GATE_REDESIGN]
+- **Context/Why:** 직전 NO_EVIDENCE 진단(min_effective_days=180)이 오진단이었음을 확인(코드에서 미참조 죽은 필드). 실전 그리드서치 8회로 진짜 원인 확정: 개별 신호 게이트는 정상, 집계 게이트(pooled OOS 평균>0 체크)가 L1<350일에서 부호 반전. growth_lcb90 필드가 평균값을 대입하는 결함도 발견
+- **Resolution/What:** run_windows.py(clamp_window_to_available_data 신규: L1 길이 고정+L2 동적계산+fail-closed), config.py(l1_days 365 복원, min_oos_days 340, min_bootstrap_sharpe_probability 제거, l1_prior_effective_days_cap 신규), l1_sleeves.py(집계게이트를 admission.py::_block_bootstrap_lcb(block_size=1) 재사용 i.i.d. 부트스트랩으로 교체), validation.py(L2->L3 패턴 재사용한 blend_l1_prior_growth_probability, sharpe_probability 게이트 제외), engine.py 배선. /check PASS(Cov 91%)
+- **Impact:** 실전 CLI 재실행 결과 여전히 NO_EVIDENCE. growth_lcb90 버그 수정(평균->진짜 i.i.d. 부트스트랩 LCB90) 적용 후 실측: annualized_log_growth=+7.37%(평균, 이전엔 이걸로 통과) vs growth_lcb90=-40.58%(진짜 하한, 통과 못함). 스펙 자체가 명시했던 [LIMIT-03] 리스크가 실현. 정직화가 정직한 결과를 낸 것으로 판단, 임계값 추가 완화 없이 NO_EVIDENCE 그대로 기록. 유효표본 상관구조 조사는 후속 스펙 범위
+
 ## [2026-07-27] [TASK_L2_COMPOUNDING_LEAP] [ADR_20260727_L2_COMPOUNDING_LEAP]
 - **Context/Why:** 20260727_013707 FAIL이 여전히 1일 라벨 오정렬(A-4 미해소)로 오염됨을 원시 레이크 대조(ρ=0.846 vs -0.003)로 확정. 정렬 정정 후 causal β=0.643으로 시장중립이 아닌 베타 롱임이 드러났고, β-헤지 잔차가 성장·변동성·regime 정상성 전부에서 우월함을 실측(scratch/verify_l2_growth_leap.py)
 - **Resolution/What:** validation.py(라벨정렬정정·fail-closed 정렬불변식·beta-adj excess), benchmark.py(causal_beta_series/assert_contemporaneous_alignment 신규), allocator.py(apply_beta_hedge_overlay/derive_mdd_parity_scale 신규), config.py(beta lookback/clip, min_oos_days 365->500 상향, mdd_budget), engine.py(2-pass 무헤지/헤지 시뮬 배선), run_windows.py(l1_days 365->180, l2_days 365->547). /check PASS(Cov 85%, 임계값 완화 0건)
@@ -69,8 +74,3 @@
 - **Context/Why:** 2026년 7월 실행에서 parquet와 manifest 불일치 및 월말 기준일 경계가 전체 파이프라인을 signal 계산 전에 차단함
 - **Resolution/What:** L1 군집 causal fold와 L2 benchmark-relative 다중 gate를 적용하고, active signal 데이터와 shadow 데이터 coverage를 분리하며, 기준일은 완결 월말/OOS 경계로 해석한다
 - **Impact:** L2가 거래 없음과 데이터 차단을 구분하고, catalog manifest 검증 및 월말 cutoff 이후에만 성과 gate를 평가한다
-
-## [2026-07-25] [TASK_CLUSTER_AWARE_L1_L2] [ADR_20260725_CLUSTER_AWARE_L1_L2]
-- **Context/Why:** Cross-sectional pooling across 120 symbols diluted signal edge under 5.625 bps friction
-- **Resolution/What:** Wired compute_market_regime_clusters and estimate_cluster_sleeve_posteriors into engine.py and l1_sleeves.py
-- **Impact:** Prevented 17.46% asset decay with Fail-Closed MDD 0.0% capital protection and 100% equity preservation
