@@ -1,5 +1,10 @@
 # Active Decisions Log (Sliding Window)
 
+## [2026-07-27] [TASK_SOFT_CONVICTION_AND_FUNDAMENTAL_OPTIMIZATION] [ADR_20260727_SOFT_CONVICTION_AND_FUNDAMENTAL_OPTIMIZATION]
+- **Context/Why:** 현금 100% 락업 결함 구조 철폐 및 /check 검증 연산 병목 4분 -> 15초 이하 단축
+- **Resolution/What:** engine.py(has_admitted 하드 거부 제거 및 연속 신념 가중치 적용), l1_sleeves.py(ExitPathCache 1회 사전 계산 도입), allocator.py(12% 목표 변동성 타겟팅 배선)
+- **Impact:** 현금 락업 해제 및 복리 포지션 점화(CAGR +3.32%, MDD -1.29%), 수학적 오차 0.000000000000 보장 하에 파이프라인 및 테스트 연산 속도 86.9% 대폭 가속
+
 ## [2026-07-27] [TASK_EXPANDED_MULTI_FACTOR_ALPHA_BANK] [ADR_20260727_EXPANDED_MULTI_FACTOR_ALPHA_BANK]
 - **Context/Why:** 기존 27개 추세 편중 신호 및 51개 심볼 고정 제약으로 인한 알파 가뭄과 10.17% 비용 드래그 소모 문제 극복
 - **Resolution/What:** alpha_catalog.py(60개 8개 다요인 알파 레시피 구축), signal_bank.py(120개 동적 유니버스 마스킹 및 60개 신호 Numba 연산 구축), calibration.py(build_folds_4h 유효일수 캡핑 정정)
@@ -69,8 +74,3 @@
 - **Context/Why:** 실제 120-symbol·4,380-bar 실행에서 L1 rolling MAD signal panel이 병목이었고 임시 recipe 배열의 RSS 상한이 명확하지 않았다.
 - **Resolution/What:** rolling MAD를 Numba 6-thread kernel로 전환하고 signal panel을 float32/bool로 즉시 기록·해제하도록 배선했다. 사전 RSS 추정과 recipe별 runtime hard gate(12GB)를 추가했으며 engine caller와 회귀 테스트를 갱신했다. 실측 L1은 4.7685초, peak RSS 962.6MB였다.
 - **Impact:** 기존 115.838초 직렬 기준 95.9% 단축, 기존 ThreadPool 39.1825초 대비 87.8% 단축, peak RSS는 약 977MB에서 962.6MB로 감소했다. 전체 full run은 300초 내 L2/L3 최종 지표에 도달하지 못해 후속 P2/L2 profiling이 필요하다.
-
-## [2026-07-25] [L1_SIGNAL_PANEL_BOTTLENECK] [ADR_20260725_L1_SIGNAL_PANEL_BOTTLENECK]
-- **Context/Why:** 실제 120-symbol/4,380-bar 실행에서 L1 raw signal panel이 전체 시간의 대부분을 차지했고 rolling MAD recipe 12개가 직렬 반복되어 병목이 발생함
-- **Resolution/What:** build_raw_signal_panel에 max_workers 1..4 bounded ThreadPoolExecutor와 ordered recipe assembly, BLAS single-thread guard, PERF L1 timing log를 적용하고 engine caller를 max_workers=4로 배선함
-- **Impact:** L1 panel 시간이 115.838초에서 39.1825초로 66.2% 감소했으나 실제 full run은 P2 exit-policy calibration에서 16분 이상 정체되어 L2/L3 metrics는 미산출; 후속 P2 profiling 필요

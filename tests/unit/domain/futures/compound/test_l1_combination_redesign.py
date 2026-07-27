@@ -24,7 +24,6 @@ from src.domain.futures.compound.multiplicity import TrialMultiplicity
 from src.domain.futures.compound.validation import (
     count_effective_candidates,
     evaluate_l2_walk_forward,
-    slice_execution_ledger,
 )
 
 
@@ -107,6 +106,21 @@ class TestCombinePosteriorSleeves:
         forecast = combine_posterior_sleeves(panel, sleeves, (), _folds(), HandoffConfig())
         assert np.all(forecast.mu_2d == 0.0)
         assert forecast.admitted_signal_ids == ()
+
+    def test_soft_conviction_forecast_blending(self) -> None:
+        panel = _panel(40, 2, 4)
+        z0 = panel.z_3d[:, :, 0].copy()
+        z1 = panel.z_3d[:, :, 1].copy()
+        sleeves = (
+            _sleeve("sig_0", 0, [0, 1, 2, 3], n=4, admitted=True),
+            _sleeve("sig_1", 0, [0, 1, 2, 3], n=4, admitted=True),
+        )
+        config = HandoffConfig(dedup_rho_threshold=1.0)
+        forecast = combine_posterior_sleeves(panel, sleeves, (), _folds(), config)
+        expected = 0.5 * z0 + 0.5 * z1
+        np.testing.assert_allclose(forecast.mu_2d, expected, atol=1e-6)
+        assert "sig_0" in forecast.admitted_signal_ids
+        assert "sig_1" in forecast.admitted_signal_ids
 
 
 # ── Scenario 4-6: select_non_redundant_signals ──
