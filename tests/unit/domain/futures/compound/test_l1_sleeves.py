@@ -1,16 +1,20 @@
 from __future__ import annotations
 
 import numpy as np
+from numpy.typing import NDArray
 import pytest
 
 from src.domain.futures.compound.config import HandoffConfig
 from src.domain.futures.compound.contracts import (
+    CalibratedForecastPanel,
     CausalClusterFold,
     CausalFold,
     ClusterPanel,
     ExitPolicyKind,
     ExitPolicySpec,
-    MultiTimeframeBars,
+    HandoffAdmissionEvidence,
+    HandoffResult,
+    L1SleevePosterior,
     PrecomputedExitPaths,
     RawSignalPanel,
     SignalDescriptor,
@@ -23,6 +27,7 @@ from src.domain.futures.compound.l1_sleeves import (
     calibrate_exit_policy,
     calibrate_exit_policy_from_paths,
     combine_posterior_sleeves,
+    compute_beta_neutral_composite_returns,
     estimate_cluster_sleeve_posteriors,
     estimate_sleeve_posteriors,
     precompute_exit_paths,
@@ -107,9 +112,20 @@ def test_posterior_quality_and_residual_novelty_exact() -> None:
 
 
 def test_zero_quality_and_invalid_return_fail_to_cash() -> None:
-    panel = _panel()
     bars = _bars()
-    result = build_exit_aware_handoff(panel, MultiTimeframeBars(np.arange(40, dtype=np.int64), {"4h": bars}, {}), (), (), np.ones((40, 2), dtype=np.float32), np.zeros((40, 2), dtype=np.float32), HandoffConfig())
+    cash = CalibratedForecastPanel(
+        decision_timestamps_ns=np.arange(40, dtype=np.int64),
+        symbols=("S0", "S1"),
+        mu_2d=np.zeros((40, 2), dtype=np.float32),
+        se_2d=np.full((40, 2), np.nan, dtype=np.float32),
+        family_mu_3d=np.zeros((40, 2, 1), dtype=np.float32),
+        family_ids=(),
+        admitted_signal_ids=(),
+        fold_manifest_hash="",
+    )
+    result = build_exit_aware_handoff(
+        cash, (), bars, np.zeros(40, dtype=np.float64), HandoffConfig(),
+    )
     assert result.forecast.mu_2d.shape == (40, 2)
     assert not result.evidence.admitted
 
@@ -449,15 +465,17 @@ class TestEstimateClusterSleevePosteriors:
         )
         clusters = compute_market_regime_clusters(market, algorithm=ClusteringAlgorithm.ROBUST_KMEANS, k_clusters=2)
         bars_4h = _bars(40, 5)
-        mt_bars = MultiTimeframeBars(bars_4h.timestamps_ns, {"4h": bars_4h}, {"funding": np.zeros((160, 5), dtype=np.float32)})
         panel = _panel(40, 5)
         folds = _folds()
         cost = np.ones((40, 5), dtype=np.float32)
-        funding = np.zeros((160, 5), dtype=np.float32)
+        funding = np.zeros((40, 5), dtype=np.float32)
         config = HandoffConfig()
 
         cfolds = _cluster_folds(clusters, bars_4h)
-        handoff = build_exit_aware_handoff(panel, mt_bars, folds, cfolds, cost, funding, config)
+        sleeves = estimate_cluster_sleeve_posteriors(panel, bars_4h, cfolds, folds, cost, funding, config)
+        forecast = combine_posterior_sleeves(panel, sleeves, cfolds, folds, config)
+        benchmark = np.zeros(40, dtype=np.float64)
+        handoff = build_exit_aware_handoff(forecast, sleeves, bars_4h, benchmark, config)
         assert handoff is not None
         assert isinstance(handoff.evidence.admitted, bool)
 
@@ -542,4 +560,239 @@ class TestHandoffBootstrap:
         )
         assert lcb90 != boot_mean, "LCB90 must differ from mean with high variance"
         assert lcb90 < boot_mean, "LCB90 must be <= boot_mean"
+
+
+# ---------------------------------------------------------------------------
+# Effective Compounding: Beta-Neutral Composite Returns & TS Bootstrap
+# ---------------------------------------------------------------------------
+
+class TestComputeBetaNeutralCompositeReturns:
+
+    def _make_sleeve(self, mask: NDArray[np.bool_], admitted: bool = True) -> L1SleevePosterior:
+        return L1SleevePosterior(
+            sleeve_id="test_sleeve",
+            signal_id="sig:test",
+            family="trend",
+            outer_fold_id=0,
+            cluster_id=0,
+            member_mask_1d=mask,
+            member_hash="test_hash",
+            exit_policy=ExitPolicySpec("p", ExitPolicyKind.TIME, None, None, None, 0, 4, -1, "calib_hash"),
+            mean_net_return=0.001,
+            standard_error=0.01,
+            posterior_positive_probability=0.75,
+            residual_novelty=1.0,
+            fold_net_returns=(0.001,),
+            effective_events=100,
+            admitted=admitted,
+            reasons=(),
+        )
+
+    def test_valid_inputs_returns_1d_array(self) -> None:
+        bars = _bars(100, 4)
+        mask = np.array([True, True, False, False], dtype=np.bool_)
+        sleeves = (self._make_sleeve(mask),)
+        bm = np.zeros(100, dtype=np.float64)
+        result = compute_beta_neutral_composite_returns(sleeves, bars, bm)
+        assert result.shape == (100,)
+        assert np.isfinite(result).any()
+
+    def test_empty_sleeves_raises_value_error(self) -> None:
+        bars = _bars(40, 2)
+        with pytest.raises(ValueError, match="sleeves must be non-empty"):
+            compute_beta_neutral_composite_returns((), bars, np.zeros(40, dtype=np.float64))
+
+    def test_length_mismatch_raises_value_error(self) -> None:
+        bars = _bars(40, 2)
+        mask = np.array([True, True], dtype=np.bool_)
+        sleeves = (self._make_sleeve(mask),)
+        with pytest.raises(ValueError, match="benchmark_returns_1d length"):
+            compute_beta_neutral_composite_returns(sleeves, bars, np.zeros(39, dtype=np.float64))
+
+    def test_multiple_sleeves_inverse_vol_weighting(self) -> None:
+        n_bars = 200
+        bars = _bars(n_bars, 4)
+        mask1 = np.array([True, True, False, False], dtype=np.bool_)
+        mask2 = np.array([False, False, True, True], dtype=np.bool_)
+        sleeves = (self._make_sleeve(mask1), self._make_sleeve(mask2))
+        bm = np.zeros(n_bars, dtype=np.float64)
+        result = compute_beta_neutral_composite_returns(sleeves, bars, bm)
+        assert result.shape == (n_bars,)
+
+    def test_beta_neutralization_removes_benchmark_correlation(self) -> None:
+        n_bars = 300
+        rng = np.random.default_rng(42)
+        bm = rng.normal(0.0, 0.01, n_bars).astype(np.float64)
+
+        close_prices = np.zeros((n_bars, 3), dtype=np.float32)
+        close_prices[0] = 100.0
+        for t in range(1, n_bars):
+            close_prices[t] = close_prices[t - 1] * (1.0 + bm[t] * 0.8)
+            close_prices[t, 1] = close_prices[t - 1, 1] * (1.0 + rng.normal(0.0, 0.005))
+            close_prices[t, 2] = close_prices[t - 1, 2] * (1.0 + rng.normal(0.0, 0.005))
+
+        bars = TimeframeBarCube(
+            "4h", np.arange(n_bars, dtype=np.int64), ("BTCUSDT", "S1", "S2"),
+            close_prices, close_prices + 2.0, close_prices - 2.0,
+            close_prices, np.ones((n_bars, 3), dtype=np.float32), np.ones((n_bars, 3), dtype=bool),
+        )
+        mask = np.array([False, True, True], dtype=np.bool_)
+        sleeves = (self._make_sleeve(mask),)
+        result = compute_beta_neutral_composite_returns(sleeves, bars, bm)
+        assert np.isfinite(result).all()
+
+
+class TestEffectiveCompoundingHandoff:
+
+    def _make_admitted_sleeve(self, mask: NDArray[np.bool_]) -> L1SleevePosterior:
+        return L1SleevePosterior(
+            sleeve_id="admitted_sl",
+            signal_id="sig:alpha",
+            family="trend",
+            outer_fold_id=0,
+            cluster_id=0,
+            member_mask_1d=mask,
+            member_hash="hash_admit",
+            exit_policy=ExitPolicySpec("p", ExitPolicyKind.TIME, None, None, None, 0, 4, -1, "calib_hash"),
+            mean_net_return=0.001,
+            standard_error=0.01,
+            posterior_positive_probability=0.75,
+            residual_novelty=1.0,
+            fold_net_returns=(0.001,),
+            effective_events=100,
+            admitted=True,
+            reasons=(),
+        )
+
+    def _cash_forecast(self, n_bars: int, n_syms: int) -> CalibratedForecastPanel:
+        return CalibratedForecastPanel(
+            decision_timestamps_ns=np.arange(n_bars, dtype=np.int64),
+            symbols=tuple(f"S{i}" for i in range(n_syms)),
+            mu_2d=np.zeros((n_bars, n_syms), dtype=np.float32),
+            se_2d=np.full((n_bars, n_syms), np.nan, dtype=np.float32),
+            family_mu_3d=np.zeros((n_bars, n_syms, 1), dtype=np.float32),
+            family_ids=(),
+            admitted_signal_ids=(),
+            fold_manifest_hash="",
+        )
+
+    def test_scenario_happy_path_positive_lcb90(self) -> None:
+        """Scenario 1: Admitted sleeves with positive returns pass ann_lcb90 > 0.0."""
+        n_bars = 300
+        n_syms = 3
+        rng = np.random.default_rng(42)
+        bm = rng.normal(0.0002, 0.005, n_bars).astype(np.float64)
+
+        close = np.zeros((n_bars, n_syms), dtype=np.float32)
+        close[0] = 100.0
+        for t in range(1, n_bars):
+            close[t, 0] = close[t - 1, 0] * (1.0 + bm[t])
+            close[t, 1] = close[t - 1, 1] * (1.0 + 0.0005 + rng.normal(0.0, 0.003))
+            close[t, 2] = close[t - 1, 2] * (1.0 + 0.0005 + rng.normal(0.0, 0.003))
+
+        bars = TimeframeBarCube(
+            "4h", np.arange(n_bars, dtype=np.int64), ("BTCUSDT", "S1", "S2"),
+            close, close + 2.0, close - 2.0, close,
+            np.ones((n_bars, n_syms), dtype=np.float32), np.ones((n_bars, n_syms), dtype=bool),
+        )
+        mask = np.array([False, True, True], dtype=np.bool_)
+        sleeves = (self._make_admitted_sleeve(mask),)
+        forecast = self._cash_forecast(n_bars, n_syms)
+        config = HandoffConfig(n_bootstrap=500)
+        result = build_exit_aware_handoff(forecast, sleeves, bars, bm, config)
+        assert result.evidence.admitted, f"Expected admitted, got reasons={result.evidence.reasons}"
+        assert result.evidence.growth_lcb90 > 0.0
+
+    def test_scenario_lcb90_not_positive_rejected(self) -> None:
+        """Scenario 3 [LIMIT-04]: Negative alpha yields ann_lcb90 <= 0 and admitted=False."""
+        n_bars = 300
+        n_syms = 2
+        rng = np.random.default_rng(42)
+
+        close = np.zeros((n_bars, n_syms), dtype=np.float32)
+        close[0] = 100.0
+        for t in range(1, n_bars):
+            decay = 1.0 - 0.002
+            close[t, 0] = close[t - 1, 0] * decay + rng.normal(0.0, 0.001)
+            close[t, 1] = close[t - 1, 1] * decay + rng.normal(0.0, 0.001)
+
+        bars = TimeframeBarCube(
+            "4h", np.arange(n_bars, dtype=np.int64), ("S0", "S1"),
+            close, close + 2.0, close - 2.0, close,
+            np.ones((n_bars, n_syms), dtype=np.float32), np.ones((n_bars, n_syms), dtype=bool),
+        )
+        mask = np.ones(n_syms, dtype=np.bool_)
+        sleeves = (self._make_admitted_sleeve(mask),)
+        forecast = self._cash_forecast(n_bars, n_syms)
+        config = HandoffConfig(n_bootstrap=500)
+        bm = np.zeros(n_bars, dtype=np.float64)
+        result = build_exit_aware_handoff(forecast, sleeves, bars, bm, config)
+        assert not result.evidence.admitted
+        assert "growth_lcb90_not_positive" in result.evidence.reasons
+
+    def test_scenario_no_admitted_sleeves(self) -> None:
+        """No admitted sleeves returns NO_EVIDENCE."""
+        n_bars = 40
+        bars = _bars(n_bars, 2)
+        forecast = self._cash_forecast(n_bars, 2)
+        result = build_exit_aware_handoff(forecast, (), bars, np.zeros(n_bars, dtype=np.float64), HandoffConfig())
+        assert not result.evidence.admitted
+        assert "no_admitted_sleeves" in result.evidence.reasons
+
+    def test_scenario_integration_with_timeframe_bar_cube(self) -> None:
+        """Scenario 4: Real build_exit_aware_handoff execution with TimeframeBarCube."""
+        n_bars = 300
+        n_syms = 4
+        rng = np.random.default_rng(99)
+
+        bm = rng.normal(0.0001, 0.005, n_bars).astype(np.float64)
+        close = np.zeros((n_bars, n_syms), dtype=np.float32)
+        close[0] = 100.0
+        for t in range(1, n_bars):
+            close[t, 0] = close[t - 1, 0] * (1.0 + bm[t])
+            close[t, 1] = close[t - 1, 1] * (1.0 + 0.0003 + rng.normal(0.0, 0.003))
+            close[t, 2] = close[t - 1, 2] * (1.0 + 0.0003 + rng.normal(0.0, 0.003))
+            close[t, 3] = close[t - 1, 3] * (1.0 + 0.0003 + rng.normal(0.0, 0.003))
+
+        bars = TimeframeBarCube(
+            "4h", np.arange(n_bars, dtype=np.int64), ("BTCUSDT", "S1", "S2", "S3"),
+            close, close + 2.0, close - 2.0, close,
+            np.ones((n_bars, n_syms), dtype=np.float32), np.ones((n_bars, n_syms), dtype=bool),
+        )
+        mask = np.array([False, True, True, True], dtype=np.bool_)
+        sleeves = (self._make_admitted_sleeve(mask),)
+        forecast = self._cash_forecast(n_bars, n_syms)
+        config = HandoffConfig(n_bootstrap=500)
+        result = build_exit_aware_handoff(forecast, sleeves, bars, bm, config)
+        assert isinstance(result, HandoffResult)
+        assert isinstance(result.evidence, HandoffAdmissionEvidence)
+        assert result.forecast is forecast
+
+
+# ---------------------------------------------------------------------------
+# Contract scenario test functions (wired from contract.json scenarios)
+# ---------------------------------------------------------------------------
+
+def test_compute_beta_neutral_composite_returns_happy_path() -> None:
+    """[Scenario 1] Valid sleeves produce expected-shaped beta-neutral returns."""
+    t = TestComputeBetaNeutralCompositeReturns()
+    t.test_valid_inputs_returns_1d_array()
+
+
+def test_build_exit_aware_handoff_time_series_bootstrap() -> None:
+    """[Scenario 2] Time-series block bootstrap on beta-neutral composite."""
+    t = TestEffectiveCompoundingHandoff()
+    t.test_scenario_happy_path_positive_lcb90()
+
+
+def test_build_exit_aware_handoff_fail_closed_negative_lcb() -> None:
+    """[Scenario 3] Fail-closed when ann_lcb90 <= 0.0."""
+    t = TestEffectiveCompoundingHandoff()
+    t.test_scenario_lcb90_not_positive_rejected()
+
+
+def test_l1_handoff_pipeline_wiring() -> None:
+    """[Scenario 4] Integration: real build_exit_aware_handoff with TimeframeBarCube."""
+    t = TestEffectiveCompoundingHandoff()
+    t.test_scenario_integration_with_timeframe_bar_cube()
 
