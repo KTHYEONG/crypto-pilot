@@ -17,4 +17,4 @@ Script handles: ADR append to decisions.md, archive pruning, index.json update, 
 ## Manual
 - **Architecture docs** (`docs/architecture/`): surgically edit existing sections only. Format rules in AGENTS.md §12.
 - **In-code ADR tag**: Insert `[ADR_YYYYMMDD_TaskID]` into modified class/fn docstrings.
-- **Verify clean state & Temp cleanup**: Run `git status`. Ensure clean up of temporary files under `scratch/`. Do NOT delete files in `docs/specs/` manually unless explicitly instructed by user. No untracked temp files should remain.
+- **Verify clean state & Log/Temp cleanup**: Run `git status`. Ensure clean up of temporary files under `scratch/` and run `uv run python scripts/clean_logs.py` to auto-purge transient logs. Do NOT delete files in `docs/specs/` manually unless explicitly instructed by user. No untracked temp files should remain.
