@@ -814,3 +814,36 @@ def test_signal_bank_dynamic_masking_coverage(synthetic_market: MarketFeatureCub
     assert panel.valid_3d.shape == (T, N, 60)
     late_none = ~panel.valid_3d[T // 2:, :N // 2, :].any(axis=(0, 2))
     assert late_none.any(), "masked symbols should have no valid entries in later bars"
+
+
+def test_deep_optimization_mad_zero_allocation_identity() -> None:
+    rng = np.random.default_rng(42)
+    n_t, n_s = 1000, 10
+    window, min_per = 252, 126
+    arr = rng.standard_normal((n_t, n_s)).astype(np.float64)
+    arr[50:80, 2] = np.nan
+    arr[200:250, 5] = np.nan
+
+    numba_z = _rolling_mad_z_numba_kernel(np.ascontiguousarray(arr), window, min_per)
+    numpy_z = _rolling_mad_z_numpy(arr, window, min_per)
+
+    mask = np.isfinite(numpy_z)
+    assert np.allclose(numba_z[mask], numpy_z[mask], atol=1e-12)
+    assert np.array_equal(np.isnan(numba_z), np.isnan(numpy_z))
+
+    const = np.full((n_t, n_s), 42.0, dtype=np.float64)
+    const_z = _rolling_mad_z_numba_kernel(np.ascontiguousarray(const), window, min_per)
+    assert np.all(np.isnan(const_z))
+
+
+def test_signal_bank_thread_safety(synthetic_market: MarketFeatureCube) -> None:
+    bars = build_multi_timeframe_bars(synthetic_market)
+    T = bars.decision_timestamps_ns.size
+    N = len(bars.cubes["4h"].symbols)
+    eligible = np.ones((T, N), np.bool_)
+
+    panel = build_raw_signal_panel(bars, eligible_2d=eligible, numba_threads=6)
+    assert isinstance(panel, RawSignalPanel)
+    assert panel.z_3d.shape == (T, N, 60)
+    assert panel.valid_3d.shape == (T, N, 60)
+    assert panel.sigma_2d.shape == (T, N)
