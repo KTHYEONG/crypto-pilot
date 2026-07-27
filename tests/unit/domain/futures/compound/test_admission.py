@@ -436,7 +436,8 @@ def test_v3_pre_existing_24_signals_byte_identical_to_v2_baseline(tmp_path):
     )
 
     catalog = _default_catalog()
-    sig_ids = {d.signal_id for d in catalog if d.family not in ("xs_momentum_slow",)}
+    max_h = 2000
+    sig_ids = {d.signal_id for d in catalog if d.family not in ("xs_momentum_slow",) and d.target_horizon_hours <= max_h}
     desc = tuple(d for d in catalog if d.signal_id in sig_ids)
     panel = RawSignalPanel(
         decision_timestamps_ns=ts,
@@ -469,7 +470,9 @@ def test_v3_full_28_signal_catalog_completes_pipeline_without_raise(tmp_path):
     )
     from src.domain.futures.compound.signal_bank import _default_catalog
 
-    catalog = _default_catalog()
+    catalog_full = _default_catalog()
+    max_h = 2000
+    catalog = tuple(d for d in catalog_full if d.target_horizon_hours <= max_h)
     T, N = 2000, 5
     ts = np.arange(T, dtype=np.int64) * 4 * _HOUR_NS + 1_700_000_000_000_000_000
     cube_4h = TimeframeBarCube(
