@@ -68,9 +68,15 @@ def simulate_dense_portfolio(
         net_returns[t] = bar_return + funding_ret - pending_turnover_cost
         equity[t] = equity[t - 1] * max(1.0 + net_returns[t], 1e-12)
 
-        turnover = float(np.sum(np.abs(target_weights_2d[t] - prev_w)))
-        taker_bps = float(np.mean(cost_bps[t])) if isinstance(cost_bps, np.ndarray) else float(cost_bps)
-        pending_turnover_cost = turnover * taker_bps * 1e-4
+        delta_w = target_weights_2d[t] - prev_w
+        if isinstance(cost_bps, np.ndarray) and cost_bps.ndim == 2 and cost_bps.shape[1] > 1:
+            sym_cost = cost_bps[t].astype(np.float64) if t < cost_bps.shape[0] else np.full(n_syms, float(cost_bps))
+            sym_cost = np.maximum(sym_cost, 1e-8)
+            turnover_cost = float(np.sum(np.abs(delta_w) * sym_cost)) * 1e-4
+        else:
+            taker_bps = float(np.mean(cost_bps[t])) if isinstance(cost_bps, np.ndarray) else float(cost_bps)
+            turnover_cost = float(np.sum(np.abs(delta_w))) * taker_bps * 1e-4
+        pending_turnover_cost = turnover_cost
 
         prev_w = target_weights_2d[t].copy()
 
