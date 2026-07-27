@@ -9,7 +9,9 @@ from numpy.typing import NDArray
 from src.domain.futures.compound.benchmark import (  # noqa: F401
     DailyMarketReturns,
     _causal_volatility_scale,
+    assert_contemporaneous_alignment,
     build_causal_l2_benchmark,
+    causal_beta_series,
 )
 from src.domain.futures.compound.bootstrap import (
     circular_stationary_bootstrap_growth,
@@ -252,6 +254,26 @@ def _compute_rebalance_count(weights_2d: NDArray[np.float32]) -> int:
     return int(np.sum(np.max(diffs, axis=1) > 1e-8))
 
 
+def evaluate_l2_gate(
+    *,
+    ledger: ExecutionLedger,
+    fold_ids_1d: NDArray[np.int16],
+    benchmark: L2BenchmarkSeries,
+    trial_multiplicity: TrialMultiplicity,
+    config: L2GateConfig,
+    bootstrap_seed: int,
+    frozen_control_daily_1d: NDArray[np.float64] | None = None,
+    beta_1d: NDArray[np.float64] | None = None,
+) -> L2Evaluation:
+    return evaluate_l2_walk_forward(
+        ledger=ledger, fold_ids_1d=fold_ids_1d,
+        benchmark=benchmark, trial_multiplicity=trial_multiplicity,
+        config=config, bootstrap_seed=bootstrap_seed,
+        frozen_control_daily_1d=frozen_control_daily_1d,
+        beta_1d=beta_1d,
+    )
+
+
 def evaluate_l2_walk_forward(
     *,
     ledger: ExecutionLedger,
@@ -261,6 +283,7 @@ def evaluate_l2_walk_forward(
     config: L2GateConfig,
     bootstrap_seed: int,
     frozen_control_daily_1d: NDArray[np.float64] | None = None,
+    beta_1d: NDArray[np.float64] | None = None,
 ) -> L2Evaluation:
     candidate_count = trial_multiplicity.n_trials
 
@@ -342,7 +365,18 @@ def evaluate_l2_walk_forward(
     daily_timestamps = daily_timestamps[:aligned_end]
     oos_days = len(daily_returns)
 
-    excess_returns = np.log1p(daily_returns) - np.log1p(benchmark_returns)
+    # R2: fail-closed contemporaneous alignment invariant (when beta adjustment is active)
+    if beta_1d is not None:
+        assert_contemporaneous_alignment(daily_returns, benchmark_returns, max_lag=1)
+
+    # R5: beta-adjusted excess
+    if beta_1d is not None:
+        if len(beta_1d) < aligned_end:
+            beta_1d = np.pad(beta_1d, (0, aligned_end - len(beta_1d)), constant_values=0.0)[:aligned_end]
+        beta_slice = beta_1d[:aligned_end]
+    else:
+        beta_slice = np.ones(aligned_end, dtype=np.float64)
+    excess_returns = np.log1p(daily_returns) - beta_slice * np.log1p(benchmark_returns)
 
     # Pre-fee and 2x-cost daily returns
     fee_4h = ledger.fee_returns_1d
@@ -353,7 +387,8 @@ def evaluate_l2_walk_forward(
         fee_daily = np.pad(fee_daily, (0, aligned_end - len(fee_daily)), constant_values=0.0)
 
     pre_fee_daily = daily_returns - fee_daily
-    stressed_daily = daily_returns + config.stressed_cost_multiplier * fee_daily
+    stressed_strategy_ret = daily_returns + (config.stressed_cost_multiplier - 1.0) * fee_daily
+    stressed_excess_returns = np.log1p(stressed_strategy_ret) - beta_slice * np.log1p(benchmark_returns)
 
     # CAGR and equity multiple
     log_growth = _annualized_log_growth(np.expm1(excess_returns), 365.25)
@@ -380,13 +415,13 @@ def evaluate_l2_walk_forward(
         np.expm1(excess_returns), 365.25, n_bootstrap=1000, block_size=pw_block, seed=bootstrap_seed,
     )
     stressed_lcb90, _, _ = circular_stationary_bootstrap_growth(
-        np.expm1(stressed_daily), 365.25, n_bootstrap=1000, block_size=pw_block, seed=bootstrap_seed + 1,
+        np.expm1(stressed_excess_returns), 365.25, n_bootstrap=1000, block_size=pw_block, seed=bootstrap_seed + 1,
     )
 
     # Stressed positive fold count
     fold_ids_aligned = _align_fold_ids(fold_ids_1d, ledger.timestamps_ns, daily_timestamps, aligned_end)
     positive_folds = int(np.sum([
-        _annualized_log_growth(np.expm1(stressed_daily[fold_ids_aligned == f]), 365.25) > 0
+        _annualized_log_growth(np.expm1(stressed_excess_returns[fold_ids_aligned == f]), 365.25) > 0
         for f in np.unique(fold_ids_aligned) if f >= 0
     ]))
 
@@ -559,7 +594,7 @@ def _daily_timestamps_from_4h(timestamps_ns_4h: NDArray[np.int64]) -> NDArray[np
     day_start_ns = timestamps_ns_4h - (timestamps_ns_4h % (6 * ns_per_4h))
     unique_days, counts = np.unique(day_start_ns, return_counts=True)
     complete = unique_days[counts == 6]
-    result: NDArray[np.int64] = complete.astype(np.int64) + np.int64(6 * ns_per_4h)
+    result: NDArray[np.int64] = complete.astype(np.int64)
     return result
 
 

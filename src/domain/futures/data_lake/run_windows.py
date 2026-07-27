@@ -12,8 +12,8 @@ _logger = logging.getLogger(__name__)
 @dataclass(slots=True, frozen=True)
 class QuarterlyWindowConfig:
     warmup_days: int = 90
-    l1_days: int = 365
-    l2_days: int = 365
+    l1_days: int = 180
+    l2_days: int = 547
     l3_days: int = 90
 
     def __post_init__(self) -> None:
@@ -25,6 +25,12 @@ class QuarterlyWindowConfig:
             raise ValueError(f"l2_days must be positive, got {self.l2_days}")
         if self.l3_days <= 0:
             raise ValueError(f"l3_days must be positive, got {self.l3_days}")
+        total = self.warmup_days + self.l1_days + self.l2_days + self.l3_days
+        if total > 910:
+            raise ValueError(
+                f"total window days {total} exceeds axis budget of 910 "
+                f"(warmup={self.warmup_days} l1={self.l1_days} l2={self.l2_days} l3={self.l3_days})"
+            )
 
 
 @dataclass(slots=True, frozen=True)

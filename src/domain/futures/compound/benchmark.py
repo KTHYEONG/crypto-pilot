@@ -56,13 +56,14 @@ def build_daily_market_returns(
     n_syms = len(symbols)
     if n_days < 2:
         raise ValueError("need at least 2 daily timestamps to compute returns")
-    returns_2d = np.empty((n_days - 1, n_syms), dtype=np.float64)
+    returns_2d = np.empty((n_days, n_syms), dtype=np.float64)
+    returns_2d[0, :] = 0.0
     prev = close_2d[:-1]
     curr = close_2d[1:]
     mask = (prev > 0) & np.isfinite(prev) & (curr > 0) & np.isfinite(curr)
-    returns_2d[:, :] = np.where(mask, curr / prev - 1.0, 0.0)
+    returns_2d[1:, :] = np.where(mask, curr / prev - 1.0, 0.0)
     return DailyMarketReturns(
-        timestamps_ns=timestamps_ns[1:],
+        timestamps_ns=timestamps_ns,
         returns_2d=returns_2d,
         symbols=symbols,
     )
@@ -86,6 +87,76 @@ def _causal_volatility_scale(
         if realized_vol > 1e-12:
             scale[d] = min(target_ann_vol / realized_vol, 3.0)
     return scale
+
+
+def causal_beta_series(
+    strategy_daily_1d: NDArray[np.float64],
+    benchmark_daily_1d: NDArray[np.float64],
+    *, lookback_days: int, min_obs: int, beta_clip: tuple[float, float],
+) -> NDArray[np.float64]:
+    if strategy_daily_1d.shape != benchmark_daily_1d.shape:
+        raise ValueError("strategy and benchmark must have same length")
+    n = len(strategy_daily_1d)
+    beta = np.zeros(n, dtype=np.float64)
+    for d in range(n):
+        if d < lookback_days:
+            continue
+        start = max(0, d - lookback_days)
+        s_win = np.log1p(strategy_daily_1d[start:d])
+        b_win = np.log1p(benchmark_daily_1d[start:d])
+        valid = np.isfinite(s_win) & np.isfinite(b_win)
+        if np.sum(valid) < min_obs:
+            continue
+        s_valid = s_win[valid]
+        b_valid = b_win[valid]
+        b_var = np.var(b_valid, ddof=1)
+        if b_var < 1e-12:
+            continue
+        cov = np.cov(b_valid, s_valid, ddof=1)[0, 1]
+        raw_beta = cov / b_var
+        beta[d] = np.clip(raw_beta, beta_clip[0], beta_clip[1])
+        if raw_beta != beta[d]:
+            _logger.info("[EVAL] beta_clipped= day=%d raw=%.4f clipped=%.4f", d, raw_beta, beta[d])
+    return beta
+
+
+def assert_contemporaneous_alignment(
+    strategy_daily_1d: NDArray[np.float64],
+    benchmark_daily_1d: NDArray[np.float64],
+    *, max_lag: int = 1,
+) -> None:
+    if strategy_daily_1d.shape != benchmark_daily_1d.shape:
+        raise ValueError("strategy and benchmark must have same length")
+    n = len(strategy_daily_1d)
+    if n < max_lag + 2:
+        return
+    s = np.log1p(strategy_daily_1d)
+    b = np.log1p(benchmark_daily_1d)
+    valid = np.isfinite(s) & np.isfinite(b)
+    s = s[valid]
+    b = b[valid]
+    if len(s) < max_lag + 2:
+        return
+    s_var = float(np.var(s, ddof=1))
+    b_var = float(np.var(b, ddof=1))
+    if s_var < 1e-12 or b_var < 1e-12:
+        return
+    lag0 = np.corrcoef(s, b)[0, 1]
+    lags: list[float] = []
+    for lag in range(1, max_lag + 1):
+        r = np.corrcoef(s[lag:], b[:-lag])[0, 1]
+        lags.append(r)
+    max_lag_corr = max(abs(r) for r in lags) if lags else 0.0
+    _logger.info(
+        "[DATA] alignment lag0=%.4f lag±1=%s status=%s",
+        lag0, [f"{r:.4f}" for r in lags],
+        "ok" if abs(lag0) >= max_lag_corr else "shift_detected",
+    )
+    if max_lag_corr > abs(lag0) + 0.1:
+        raise CausalityError(
+            f"contemporaneous correlation {lag0:.4f} < max lag-{max_lag} correlation {max_lag_corr:.4f}: "
+            f"series are not contemporaneously aligned"
+        )
 
 
 def build_causal_l2_benchmark(
