@@ -16,6 +16,7 @@ from src.domain.futures.compound.contracts import (
     SignalDescriptor,
     TimeframeBarCube,
 )
+from src.domain.futures.compound.admission import _block_bootstrap_lcb
 from src.domain.futures.compound.l1_sleeves import (
     _signal_evidence,
     build_exit_aware_handoff,
@@ -530,4 +531,15 @@ class TestCandidateFirstPosterior:
         )
         if n_used < 200:
             assert policy.kind == ExitPolicyKind.TIME
+
+
+class TestHandoffBootstrap:
+    def test_handoff_aggregate_uses_iid_bootstrap_not_mean(self) -> None:
+        rng = np.random.default_rng(7)
+        fold_returns = rng.normal(0.0001, 0.01, 274)
+        lcb90, boot_mean, _ = _block_bootstrap_lcb(
+            fold_returns, n_bootstrap=1000, block_size=1, rng=np.random.default_rng(42),
+        )
+        assert lcb90 != boot_mean, "LCB90 must differ from mean with high variance"
+        assert lcb90 < boot_mean, "LCB90 must be <= boot_mean"
 
