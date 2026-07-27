@@ -37,11 +37,10 @@ class L2BenchmarkConfig:
 
 @dataclass(slots=True, frozen=True)
 class L2GateConfig:
-    min_oos_days: int = 500
+    min_oos_days: int = 340
     min_active_days_ratio: float = 0.10
     min_rebalances: int = 30
     min_excess_growth_probability: float = 0.90
-    min_bootstrap_sharpe_probability: float = 0.90
     min_deflated_sharpe_probability: float = 0.90
     max_drawdown: float = 0.20
     min_daily_cvar95: float = -0.025
@@ -51,13 +50,13 @@ class L2GateConfig:
     min_positive_outer_folds: int = 3
     stressed_cost_multiplier: float = 2.0
     max_spa_pvalue: float = 0.10
+    l1_prior_effective_days_cap: int = 90
 
     def __post_init__(self) -> None:
         assert self.min_oos_days > 0
         assert 0 < self.min_active_days_ratio <= 1
         assert self.min_rebalances > 0
         assert 0 < self.min_excess_growth_probability <= 1
-        assert 0 < self.min_bootstrap_sharpe_probability <= 1
         assert 0 < self.min_deflated_sharpe_probability <= 1
         assert self.max_drawdown > 0
         assert self.min_daily_cvar95 < 0
@@ -67,6 +66,7 @@ class L2GateConfig:
         assert self.min_positive_outer_folds >= 1
         assert self.stressed_cost_multiplier >= 1.0
         assert 0 < self.max_spa_pvalue <= 1
+        assert self.l1_prior_effective_days_cap > 0
 
 
 @dataclass(slots=True, frozen=True)

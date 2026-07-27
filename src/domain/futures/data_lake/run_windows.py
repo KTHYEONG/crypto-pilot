@@ -6,14 +6,18 @@ from datetime import UTC, date, datetime, timedelta
 
 import pandas as pd
 
+from src.domain.futures.compound.contracts import CausalityError
+
 _logger = logging.getLogger(__name__)
+
+_DAY_NS: int = 86_400 * 1_000_000_000
 
 
 @dataclass(slots=True, frozen=True)
 class QuarterlyWindowConfig:
     warmup_days: int = 90
-    l1_days: int = 180
-    l2_days: int = 547
+    l1_days: int = 365
+    l2_days: int = 362
     l3_days: int = 90
 
     def __post_init__(self) -> None:
@@ -51,6 +55,40 @@ class QuarterlyRunWindow:
                 f"< l2={self.l2_start_ns} < l3={self.l3_start_ns} "
                 f"< cutoff={self.cutoff_exclusive_ns}"
             )
+
+
+def clamp_window_to_available_data(
+    window: QuarterlyRunWindow, *, actual_data_start_ns: int, min_l2_days: int,
+) -> QuarterlyRunWindow:
+    if actual_data_start_ns <= window.acquisition_start_ns:
+        return window
+
+    new_acquisition_start_ns = actual_data_start_ns
+    warmup_days_ns = (window.l1_start_ns - window.acquisition_start_ns)
+    new_l1_start_ns = new_acquisition_start_ns + warmup_days_ns
+    l1_days_ns = window.l2_start_ns - window.l1_start_ns
+    new_l2_start_ns = new_l1_start_ns + l1_days_ns
+
+    resulting_l2_days = (window.l3_start_ns - new_l2_start_ns) // _DAY_NS
+    if resulting_l2_days < min_l2_days:
+        raise CausalityError(
+            f"clamp_window_to_available_data: resulting l2_days={resulting_l2_days} "
+            f"< min_l2_days={min_l2_days}"
+        )
+
+    _logger.info(
+        "[DATA] window_clamped l2_days=%d min=%d", resulting_l2_days, min_l2_days,
+    )
+
+    return QuarterlyRunWindow(
+        requested_date=window.requested_date,
+        cutoff_date=window.cutoff_date,
+        acquisition_start_ns=new_acquisition_start_ns,
+        l1_start_ns=new_l1_start_ns,
+        l2_start_ns=new_l2_start_ns,
+        l3_start_ns=window.l3_start_ns,
+        cutoff_exclusive_ns=window.cutoff_exclusive_ns,
+    )
 
 
 def _quarter_end(requested: date) -> date:
@@ -115,5 +153,6 @@ __all__ = [
     "QuarterlyRunWindow",
     "QuarterlyWindowConfig",
     "build_quarterly_execution_calendar",
+    "clamp_window_to_available_data",
     "resolve_completed_quarter_window",
 ]

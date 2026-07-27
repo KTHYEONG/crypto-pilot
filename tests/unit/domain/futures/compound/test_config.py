@@ -14,6 +14,7 @@ from src.domain.futures.compound.config import (
     FactorRiskConfig,
     L1EstimatorConfig,
     L1Config,
+    L2GateConfig,
     L3ValidationConfig,
     LadderConfig,
     RiskModelConfig,
@@ -211,3 +212,11 @@ class TestDynamicCompoundingConfig:
         assert cfg.band_frac == 0.60
         assert cfg.alpha_smooth == 0.08
         assert cfg.target_ann_vol == 0.15
+
+
+class TestL2GateConfig:
+    def test_l2_gate_config_no_dead_sharpe_threshold(self) -> None:
+        cfg = L2GateConfig()
+        assert not hasattr(cfg, "min_bootstrap_sharpe_probability")
+        assert cfg.min_oos_days == 340
+        assert cfg.l1_prior_effective_days_cap == 90
