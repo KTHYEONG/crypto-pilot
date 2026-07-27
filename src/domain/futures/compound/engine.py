@@ -50,7 +50,11 @@ from src.domain.futures.compound.contracts import (
 from src.domain.futures.compound.dense_simulator import simulate_dense_portfolio
 from src.domain.futures.compound.handoff import _build_cash_only_forecast
 from src.domain.futures.compound.holdout_store import HoldoutReuseError, SealedHoldoutStore
-from src.domain.futures.compound.l1_sleeves import build_exit_aware_handoff
+from src.domain.futures.compound.l1_sleeves import (
+    build_exit_aware_handoff,
+    combine_posterior_sleeves,
+    estimate_cluster_sleeve_posteriors,
+)
 from src.domain.futures.compound.multiplicity import (
     build_candidate_trial_returns,
     charge_config_search_multiplicity,
@@ -245,7 +249,26 @@ def run_multiscale_compound_engine(
             market=market, bars_4h=bars_4h, folds=folds, config=config.cluster,
         )
         _logger.info("[P2] computed %d causal cluster folds", len(cluster_folds))
-        handoff_result = build_exit_aware_handoff(panel, bars, folds, cluster_folds, cost_bps_4h, funding_1h, config.handoff)
+        sleeves = estimate_cluster_sleeve_posteriors(
+            panel, bars_4h, cluster_folds, folds, cost_bps_4h, funding_1h, config.handoff,
+        )
+        forecast = combine_posterior_sleeves(panel, sleeves, cluster_folds, folds, config.handoff)
+        btc_idx = bars_4h.symbols.index("BTCUSDT") if "BTCUSDT" in bars_4h.symbols else -1
+        eth_idx = bars_4h.symbols.index("ETHUSDT") if "ETHUSDT" in bars_4h.symbols else -1
+        close = bars_4h.close_2d.astype(np.float64)
+        log_ret = np.zeros(close.shape[0], dtype=np.float64)
+        if btc_idx >= 0 and eth_idx >= 0:
+            prev = close[:-1, [btc_idx, eth_idx]]
+            curr = close[1:, [btc_idx, eth_idx]]
+            mask = (prev > 0) & np.isfinite(prev) & (curr > 0) & np.isfinite(curr)
+            w = np.array([0.5, 0.5], dtype=np.float64)
+            with np.errstate(divide="ignore", invalid="ignore"):
+                weighted = np.where(mask, np.log(curr / prev), 0.0) @ w
+            log_ret[1:] = weighted
+        benchmark_returns_1d = log_ret
+        handoff_result = build_exit_aware_handoff(
+            forecast, sleeves, bars_4h, benchmark_returns_1d, config.handoff,
+        )
         forecast = handoff_result.forecast
         _logger.info(
             "P2 complete: admitted=%s active=%s",
