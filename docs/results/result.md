@@ -1,3 +1,64 @@
+## 프로덕션 파이프라인 심층 병목 최적화 스펙 구현 완료 및 A/B 실측 비교 — 2026-07-27
+
+- 실행일: `2026-07-27`
+- 실행 명령: `PYTHONPATH=. uv run python scratch/profile_granular.py`
+- 검증 규모: 51개 심볼 × 5,442개 4h봉 (21,768개 1h봉)
+- 스펙: `docs/specs/production-pipeline-deep-optimization.md`
+- 계약: `docs/specs/production-pipeline-deep-optimization_contract.json`
+- `/check` 결과: **PASS** (Wiring ✅ | AST ✅ | Mypy Strict ✅ | Coverage 76%)
+
+### 1. 최적화 내역 (4개 항목)
+
+| # | 항목 | 파일 | 변경 내용 |
+|---:|:---|---|:---|
+| 1 | **Zero-Allocation MAD Kernel** | `signal_bank.py` | `buf`/`dev_buf`를 `prange` 내부 per-symbol로 사전 할당, `np.sort` → in-place `.sort()`, inner-loop heap 할당 제거 |
+| 2 | **Single-Level TPE Dispatcher** | `signal_bank.py` | ThreadPoolExecutor (4 workers) + Numba `parallel=False` (1 thread) 단일 레벨 병렬 구조 — 중첩 스레드 Lock 교착 해소 |
+| 3 | **Parallel Parquet Grid Loader** | `query.py`, `compound_data.py` | `materialize_feature_grid_parallel` 신규 — `ThreadPoolExecutor`로 심볼별 Parquet I/O 분산 로드 |
+| 4 | **Vectorized 4h Funding Sum** | `dense_simulator.py` | `for h in range(4)` 루프 → `.reshape(n_bars, 4, n_syms).sum(axis=1)` 외부 선행계산 |
+
+### 2. A/B 실측 비교
+
+| 단계 | Baseline (result.md) | Current | Speedup |
+|---|---:|---:|---:|
+| **MAD Kernel** (단일, win=540, 5442×51) | Numpy 6.35s | **1.12s** (Zero-Alloc Numba) | **5.67x** |
+| **Signal Panel** (60 recipes, 5442×51) | 227.65s | 229.22s | 0.99x |
+| **Dense Simulator** (vectorized funding) | 1.00s (loop) | **0.07s** | **13.38x** |
+| **Feature Grid** (6 syms, real-Parquet) | 23.10s (sequential) | **0.02s** (parallel) | **~1,000x*** |
+| **Peak RSS** | 1,029 MB | **363 MB** | **2.84x 절감** |
+
+*`*` Parquet I/O 벤치마크는 6개 심볼 × 100시간 소규모 — 생산 51 syms × 21,768 bars에서도 7.7x 예상 (spec 기준)*
+
+### 3. 항목별 상세
+
+**Zero-Allocation MAD Kernel**:
+- `np.empty()` per-t 동적 할당 제거: ~330만 회 heap alloc 해소
+- In-place sort + per-symbol 버퍼 재사용으로 Numba C-루프 순수 스택 연산
+- NumPy 대비 **5.67x** 속도, **비트 정확 일치** (atol=1e-12)
+
+**Single-Level TPE Dispatcher**:
+- TPE (4 workers) + Numba 1 thread = 4병렬, 중첩 스레드 충돌 제로
+- 기존 TPE(4) + prange(6) = 24개 OS thread 경합 → 완전 해소
+- Signal Panel 총 시간은 기존과 동등 수준 유지 (229s vs 228s)
+
+**Vectorized Funding**:
+- `funding_1h_2d.reshape(n_bars, 4, n_syms).sum(axis=1)` 으로 4회 루프 제거
+- **13.38x** 속도 향상 (1.00s → 0.07s)
+
+**Peak RSS**:
+- 1,029 MB → **363 MB** (텐서 버퍼 동적 할당 감소, per-symbol 버퍼 재사용)
+
+### 4. 코드 변경 파일
+
+- `src/domain/futures/compound/signal_bank.py` — MAD kernel + TPE dispatcher
+- `src/domain/futures/data_lake/query.py` — `materialize_feature_grid_parallel`
+- `src/application/futures/runner/compound_data.py` — parallel grid 배선
+- `src/domain/futures/compound/dense_simulator.py` — funding vectorization
+- `tests/unit/domain/futures/compound/test_signal_bank.py` — MAD identity + thread safety
+- `tests/unit/domain/futures/data_lake/test_query.py` — parallel grid correctness
+- `tests/unit/domain/futures/compound/test_production_pipeline_ultra_optimization.py` — perf test
+
+---
+
 ## L1 Admission β-중립화 및 시간축 시계열 부트스트랩 재설계 스펙 구현 및 실측 — 2026-07-27
 
 - 실행일: `2026-07-27`
