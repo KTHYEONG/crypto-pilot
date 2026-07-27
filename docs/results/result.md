@@ -1,3 +1,45 @@
+## L1 admission 복구 스펙(창 복원·게이트 재설계·L1→L2 사전분포) 구현 및 실측 — 정직화가 admission을 재차 전멸시킴 — 2026-07-27
+
+- 실행일: `2026-07-27`
+- 실행 명령: `L2_DRY_RUN=1 uv run python src/execution/opt_main_futures.py --phase full --sync local --date 2026-07-26`
+- 검증 창: 워밍업 90일 / **L1 365일**(180→복원) / **L2 362일**(데이터 축 동적 계산) / L3 봉인 홀드아웃 90일
+- 스펙: `docs/specs/l2-admission-recovery-and-gate-redesign.md`
+- exit_code: **1** (`integrity_failure`)
+- 산출물: `logs/futures/compound/20260727_065237/`
+
+### 배경 — 이전 진단 정정
+
+직전 항목(`20260727_041859`, NO_EVIDENCE)이 원인을 `config.py`의 `min_effective_days=180.0`으로 지목했으나, 이는 **오진단**이었다 — 실측 확인 결과 그 필드는 코드 어디에서도 참조되지 않는 죽은 파라미터. 실제 원인은 실전 그리드서치 8회(`scratch/grid_admission_fix.py`, `scratch/diagnose_admission_collapse.py`)로 확정: 개별 신호 게이트(`probability>=0.65`)는 정상 작동(274~290/407~486개 통과, 관측치 10,000+)하나, 상위 집계 게이트(`l1_sleeves.py::build_exit_aware_handoff`)가 admit된 신호들의 pooled OOS 수익률 **평균**을 `growth<=0`으로 판정하는데, **L1 창을 180~340일로 줄이면 이 pooled 평균의 부호가 마이너스로 뒤집힌다** (350일에서 회복, 365일에서 안전마진 확보). 부수로 `growth_lcb90` 필드가 이름과 달리 실제 하한신뢰구간 계산 없이 **평균값을 그대로 대입**하는 결함도 발견.
+
+### 구현 (`/implement` → `/check`)
+
+- 수정: `run_windows.py`(`clamp_window_to_available_data` 신규 — L1 길이 절대 고정, L2를 데이터 축에서 동적 계산, fail-closed), `config.py`(`QuarterlyWindowConfig.l1_days` 180→365 복원, `L2GateConfig.min_oos_days` 500→340, `min_bootstrap_sharpe_probability` 필드 제거, `l1_prior_effective_days_cap=90` 신규), `l1_sleeves.py`(집계 게이트를 기존 `admission.py::_block_bootstrap_lcb(block_size=1)` 재사용한 i.i.d. 부트스트랩 LCB90으로 교체 — 평균 기반 판정 대체), `validation.py`(`blend_l1_prior_growth_probability` 신규 — L2→L3 사전분포 혼합 패턴을 L1→L2에 재사용, `sharpe_probability` 게이트 제외), `engine.py`(클램프·L1 사전분포 배선)
+- `/check` PASS: Wiring ✅ | Non-dummy AST ✅ | Mypy Strict ✅ | Regression Test ✅ | Coverage 91%
+
+### 실전 CLI 재실행 결과 — 스펙이 예견한 `[LIMIT-03]`이 그대로 실현됨
+
+L1=365/L2=362로 admission이 복구될 것으로 설계했으나, 실전 재실행 결과 **다시 NO_EVIDENCE**로 귀결됐다(`target_weights` 전량 0, `active_days_ratio=0`, `rebalances=0`).
+
+계측 결과(`scratch/probe_default_admission.py`, 실제 프로덕션 `HandoffAdmissionEvidence` 직접 확인):
+
+| 지표 | 값 |
+|---|---:|
+| `annualized_log_growth`(평균) | **+7.37%** |
+| `growth_lcb90`(신규 i.i.d. 부트스트랩 하한) | **−40.58%** |
+| `positive_outer_folds` | 135/278 |
+| `admitted` | **False**(`growth_lcb90_not_positive`) |
+
+이전(결함 있는) 코드는 평균값(+7.4%)만 보고 통과시켰다. 이번에 "이름은 하한신뢰구간(lcb90)인데 실제로는 평균"이라는 결함을 수정해 **진짜 i.i.d. 부트스트랩 10% 하한신뢰구간**을 계산하게 하자, 그 값이 −40.6%로 크게 마이너스임이 드러났다 — 평균은 근소하게 양수이나 분산이 매우 커서 "10% 최악의 경우를 가정해도 흑자"라는 기준을 충족하지 못한다. 이는 스펙 작성 시점에 `[LIMIT-03]`("R2의 부트스트랩 강화가 L1=365 케이스의 admission 결과 자체를 뒤집을 가능성이 있다")으로 명시적으로 예견한 리스크가 실측으로 확인된 것이다.
+
+### 판정
+
+- **정직화가 정직한 결과를 냈다.** 버그가 아니라, 잘못된 계산(평균)으로 통과되던 admission이 올바른 계산(하한신뢰구간)으로는 통과하지 못한다는 사실이 드러난 것 — 이는 278개 admit 신호가 소수의 fold/family를 공유해 실제로는 유효 표본 수가 훨씬 적을 가능성을 시사한다.
+- **창 크기 복구(L1=365)와 게이트 재설계(min_oos_days 재보정·중복 게이트 제거·L1→L2 사전분포 혼합)는 설계·구현·`/check` 기준 전부 정직하게 완료됐다.** 그러나 최종 산출물은 여전히 NO_EVIDENCE — 임계값을 추가로 조정하지 않고 이 결과를 그대로 기록한다(사용자 결정).
+- 유효 표본 상관구조(family/fold 단위 클러스터링) 조사는 범위 밖으로 남긴다 — 후속 스펙 후보.
+- `L2_DRY_RUN=0`은 여전히 미전환.
+
+---
+
 ## L2 복리 도약 스펙(β-헤지·정렬정정·창재분할) 구현 및 실측 — NO_EVIDENCE(L1 admission 전멸) — 2026-07-27
 
 - 실행일: `2026-07-27`
