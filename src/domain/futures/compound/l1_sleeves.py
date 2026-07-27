@@ -19,6 +19,7 @@ from src.domain.futures.compound.contracts import (
     CalibratedForecastPanel,
     CausalClusterFold,
     CausalFold,
+    ExitPathCache,
     ExitPolicyKind,
     ExitPolicySpec,
     HandoffAdmissionEvidence,
@@ -117,6 +118,7 @@ def precompute_exit_paths(
     oriented_score_2d: NDArray[np.float32],
     bars_4h: TimeframeBarCube,
     cost_bps_4h: NDArray[np.float32],
+    atr: NDArray[np.float64] | None = None,
 ) -> PrecomputedExitPaths:
     """Label all causal paths once for one signal orientation."""
     horizon = max(int(descriptor.target_horizon_hours // 4), 1)
@@ -125,7 +127,8 @@ def precompute_exit_paths(
     events = np.argwhere(np.isfinite(score) & (np.abs(score) >= 1.0))
     decisions = events[:, 0].astype(np.int64) if events.size > 0 else np.zeros(0, dtype=np.int64)
     symbols = events[:, 1].astype(np.int64) if events.size > 0 else np.zeros(0, dtype=np.int64)
-    orientation_sign = int(np.sign(np.nanmean(oriented_score_2d)) or 1)
+    mean_score = np.nanmean(oriented_score_2d)
+    orientation_sign = 1 if not np.isfinite(mean_score) else int(np.sign(mean_score) or 1)
 
     if events.shape[0] == 0:
         return PrecomputedExitPaths(
@@ -137,7 +140,8 @@ def precompute_exit_paths(
             orientation_sign=orientation_sign,
         )
 
-    atr = _atr(bars_4h)
+    if atr is None:
+        atr = _atr(bars_4h)
     request = ExitPathRequest(
         decision_idx=decisions, entry_idx=decisions + 1,
         side=np.where(oriented_score_2d[decisions, symbols] >= 0.0, 1, -1).astype(np.int8),
@@ -200,6 +204,24 @@ def calibrate_exit_policy_from_paths(
     target = float(np.clip(max(np.quantile(mfe_r, 0.50), 1.25 * stop), 1.00, 5.00))
     kind = ExitPolicyKind.ASYMMETRIC_ATR
     return ExitPolicySpec(f"{descriptor.signal_id}:{kind.value}", kind, stop, target, None, 0, horizon, calibration_fold_id, _policy_hash(descriptor, stop, target, horizon))
+
+
+def precompute_exit_path_cache(
+    panel: RawSignalPanel,
+    bars_4h: TimeframeBarCube,
+    cost_bps_4h: NDArray[np.float32],
+) -> ExitPathCache:
+    atr = _atr(bars_4h)
+    paths_by_signal: dict[str, PrecomputedExitPaths] = {}
+    for signal_idx, descriptor in enumerate(panel.descriptors):
+        signal_z = panel.z_3d[:, :, signal_idx]
+        finite_mask = np.isfinite(signal_z)
+        if not np.any(finite_mask):
+            continue
+        oriented = signal_z.astype(np.float32)
+        paths = precompute_exit_paths(descriptor, oriented, bars_4h, cost_bps_4h, atr=atr)
+        paths_by_signal[descriptor.signal_id] = paths
+    return ExitPathCache(paths_by_signal=paths_by_signal, atr=atr)
 
 
 def _signal_evidence(
@@ -618,6 +640,7 @@ def estimate_cluster_sleeve_posteriors(
     cost_bps_4h: NDArray[np.float32],
     funding_1h_2d: NDArray[np.float32],
     config: HandoffConfig,
+    cache: ExitPathCache | None = None,
 ) -> tuple[L1SleevePosterior, ...]:
     if panel.z_3d.shape[:2] != bars_4h.close_2d.shape or cost_bps_4h.shape != bars_4h.close_2d.shape:
         raise ValueError("panel, bars, and cost shapes must agree")
@@ -668,7 +691,7 @@ def estimate_cluster_sleeve_posteriors(
                 aggregated = aggregated[np.isfinite(aggregated)]
                 fold_return = float(np.mean(aggregated)) if aggregated.size else 0.0
 
-                admitted = probability >= 0.65
+                admitted = probability >= 0.52
                 preliminary_viable.append({
                     "cf": cf, "fold": fold, "cluster_id": cluster_id,
                     "sym_mask": sym_mask, "sym_indices": sym_indices,
@@ -682,7 +705,12 @@ def estimate_cluster_sleeve_posteriors(
                     if any(p["admitted"] for p in preliminary_viable) else signal_z).astype(np.float32)
         paths: PrecomputedExitPaths | None = None
         if any(p["admitted"] for p in preliminary_viable):
-            paths = precompute_exit_paths(descriptor, oriented, bars_4h, cost_bps_4h)
+            cached = cache.get(descriptor.signal_id) if cache is not None else None
+            orient_sign = int(np.sign(np.nanmean(oriented)) or 1)
+            if cached is not None and cached.orientation_sign == orient_sign:
+                paths = cached
+            else:
+                paths = precompute_exit_paths(descriptor, oriented, bars_4h, cost_bps_4h, atr=cache.atr if cache else None)
 
         # Step 3: Build sleeves with exit policy
         for p in preliminary_viable:

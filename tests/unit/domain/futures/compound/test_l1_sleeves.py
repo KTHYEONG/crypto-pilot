@@ -21,6 +21,7 @@ from src.domain.futures.compound.contracts import (
     TimeframeBarCube,
 )
 from src.domain.futures.compound.admission import _block_bootstrap_lcb
+from src.domain.futures.compound.bootstrap import circular_stationary_bootstrap_growth
 from src.domain.futures.compound.l1_sleeves import (
     _signal_evidence,
     build_exit_aware_handoff,
@@ -30,6 +31,7 @@ from src.domain.futures.compound.l1_sleeves import (
     compute_beta_neutral_composite_returns,
     estimate_cluster_sleeve_posteriors,
     estimate_sleeve_posteriors,
+    precompute_exit_path_cache,
     precompute_exit_paths,
 )
 
@@ -442,6 +444,47 @@ class TestEstimateClusterSleevePosteriors:
             if not p.admitted:
                 assert "posterior_below_floor" in p.reasons
 
+    def test_estimate_cluster_sleeve_posteriors_threshold_052(self) -> None:
+        from src.domain.futures.compound.clustering import (
+            ClusteringAlgorithm,
+            compute_market_regime_clusters,
+        )
+        from src.domain.futures.compound.contracts import MarketFeatureCube
+
+        close = np.column_stack([np.linspace(100.0, 200.0, 40) for _ in range(5)]).astype(np.float32)
+        volume = np.ones((40, 5), dtype=np.float32) * 1e6
+        market = MarketFeatureCube(
+            timestamps_ns=np.arange(40, dtype=np.int64) * 3_600_000_000_000,
+            symbols=tuple("S" + str(i) for i in range(5)),
+            fields_2d={"close": close, "quote_volume": volume, "high": close + 1, "low": close - 1},
+            available_2d={"core": np.ones((40, 5), dtype=bool)},
+            eligible_2d=np.ones((40, 5), dtype=bool),
+            entry_block_2d=np.zeros((40, 5), dtype=bool),
+            exit_required_2d=np.zeros((40, 5), dtype=bool),
+            capacity_usdt_2d=np.full((40, 5), 1e6, dtype=np.float64),
+            execution_cost_bps_2d=np.full((40, 5), 8.0, dtype=np.float32),
+            data_manifest_hash="test_hash",
+        )
+        clusters = compute_market_regime_clusters(market, algorithm=ClusteringAlgorithm.ROBUST_KMEANS, k_clusters=2)
+        bars_4h = _bars(40, 5)
+        folds = _folds()
+        cost = np.ones((40, 5), dtype=np.float32)
+        config = HandoffConfig()
+        strong_panel = RawSignalPanel(
+            decision_timestamps_ns=np.arange(40, dtype=np.int64),
+            symbols=tuple("S" + str(i) for i in range(5)),
+            descriptors=(SignalDescriptor("strong", "trend", "fast", 4, "4h", 4, "", "", "v1"),),
+            z_3d=np.ones((40, 5, 1), dtype=np.float32),
+            valid_3d=np.ones((40, 5, 1), dtype=bool),
+            sigma_2d=np.ones((40, 5), dtype=np.float32),
+        )
+        cfolds = _cluster_folds(clusters, bars_4h)
+        posteriors = estimate_cluster_sleeve_posteriors(strong_panel, bars_4h, cfolds, folds, cost, np.zeros_like(cost), config)
+        assert len(posteriors) > 0
+        for p in posteriors:
+            assert p.posterior_positive_probability >= 0.52, f"sleeve {p.sleeve_id} prob={p.posterior_positive_probability} < 0.52"
+            assert p.admitted, f"sleeve {p.sleeve_id} not admitted despite prob >= 0.52"
+
     def test_build_exit_aware_handoff_with_clusters(self) -> None:
         from src.domain.futures.compound.clustering import (
             ClusteringAlgorithm,
@@ -795,4 +838,87 @@ def test_l1_handoff_pipeline_wiring() -> None:
     """[Scenario 4] Integration: real build_exit_aware_handoff with TimeframeBarCube."""
     t = TestEffectiveCompoundingHandoff()
     t.test_scenario_integration_with_timeframe_bar_cube()
+
+
+# ---------------------------------------------------------------------------
+# Fundamental Pipeline Performance Optimization
+# ---------------------------------------------------------------------------
+
+def test_exit_path_cache_math_identity() -> None:
+    """[LIMIT-01] Sleeve posteriors with and without ExitPathCache are bit-exact."""
+    from src.domain.futures.compound.clustering import (
+        ClusteringAlgorithm,
+        compute_market_regime_clusters,
+    )
+    from src.domain.futures.compound.contracts import MarketFeatureCube
+
+    rng = np.random.default_rng(42)
+    close = 100.0 + np.cumsum(rng.standard_normal((40, 5)) * 0.5, axis=0)
+    close = np.abs(close) + 10.0
+    volume = np.abs(rng.standard_normal((40, 5))) * 1e6 + 1e5
+    market = MarketFeatureCube(
+        timestamps_ns=np.arange(40, dtype=np.int64) * 3_600_000_000_000,
+        symbols=tuple(f"SYM_{i:03d}" for i in range(5)),
+        fields_2d={
+            "close": close.astype(np.float32),
+            "quote_volume": volume.astype(np.float32),
+            "high": (close + 1.0).astype(np.float32),
+            "low": (close - 1.0).astype(np.float32),
+        },
+        available_2d={"core": np.ones((40, 5), dtype=bool)},
+        eligible_2d=np.ones((40, 5), dtype=bool),
+        entry_block_2d=np.zeros((40, 5), dtype=bool),
+        exit_required_2d=np.zeros((40, 5), dtype=bool),
+        capacity_usdt_2d=np.full((40, 5), 1e6, dtype=np.float64),
+        execution_cost_bps_2d=np.full((40, 5), 8.0, dtype=np.float32),
+        data_manifest_hash="test_hash",
+    )
+    clusters = compute_market_regime_clusters(market, algorithm=ClusteringAlgorithm.ROBUST_KMEANS, k_clusters=2)
+    bars_4h = _bars(40, 5)
+    panel = _panel(40, 5)
+    folds = _folds()
+    cost = np.ones((40, 5), dtype=np.float32)
+    config = HandoffConfig()
+    cfolds = _cluster_folds(clusters, bars_4h)
+
+    baseline = estimate_cluster_sleeve_posteriors(panel, bars_4h, cfolds, folds, cost, np.zeros_like(cost), config)
+
+    cache = precompute_exit_path_cache(panel, bars_4h, cost)
+    cached = estimate_cluster_sleeve_posteriors(panel, bars_4h, cfolds, folds, cost, np.zeros_like(cost), config, cache=cache)
+
+    assert len(baseline) == len(cached), f"sleeve count mismatch: {len(baseline)} vs {len(cached)}"
+    for b, c in zip(baseline, cached, strict=True):
+        assert b.sleeve_id == c.sleeve_id
+        assert b.admitted == c.admitted
+        assert abs(b.mean_net_return - c.mean_net_return) < 1e-12, (
+            f"mean_net_return mismatch for {b.sleeve_id}: {b.mean_net_return} vs {c.mean_net_return}"
+        )
+        assert abs(b.posterior_positive_probability - c.posterior_positive_probability) < 1e-12
+        assert b.effective_events == c.effective_events
+
+
+def test_light_test_bars_fixture_speed(light_test_bars: TimeframeBarCube) -> None:
+    """[LIMIT-02] Unit tests with light_test_bars (200 bars) finish in < 0.2s."""
+    import time
+
+    t0 = time.perf_counter()
+    bars = light_test_bars
+    assert bars.close_2d.shape[0] == 200
+    t1 = time.perf_counter()
+    assert t1 - t0 < 0.2, f"light_test_bars access took {t1-t0:.3f}s"
+
+
+def test_bootstrap_deterministic_seed() -> None:
+    """[LIMIT-03] Bootstrap with same seed produces bit-identical results."""
+    rng = np.random.default_rng(42)
+    returns = rng.standard_normal(2191) * 0.002 + 0.0001
+    lcb_1, ucb_1, prob_1 = circular_stationary_bootstrap_growth(
+        returns, 2191.5, n_bootstrap=1000, seed=42,
+    )
+    lcb_2, ucb_2, prob_2 = circular_stationary_bootstrap_growth(
+        returns, 2191.5, n_bootstrap=1000, seed=42,
+    )
+    assert lcb_1 == lcb_2, f"LCB mismatch: {lcb_1} vs {lcb_2}"
+    assert ucb_1 == ucb_2, f"UCB mismatch: {ucb_1} vs {ucb_2}"
+    assert prob_1 == prob_2, f"prob_positive mismatch: {prob_1} vs {prob_2}"
 

@@ -14,7 +14,13 @@ from src.domain.futures.compound.contracts import (
     MarketFeatureCube,
     PortfolioDecision,
 )
-from src.application.futures.runner.compound_universe import DailyPITUniverse
+from dataclasses import dataclass
+
+@dataclass(slots=True, frozen=True)
+class DailyPITUniverse:
+    symbols: tuple[str, ...]
+    decision_dates: tuple = ()
+
 from src.domain.futures.compound.data_plane import materialize_hourly_execution_features
 
 

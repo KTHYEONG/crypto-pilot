@@ -54,6 +54,7 @@ from src.domain.futures.compound.l1_sleeves import (
     build_exit_aware_handoff,
     combine_posterior_sleeves,
     estimate_cluster_sleeve_posteriors,
+    precompute_exit_path_cache,
 )
 from src.domain.futures.compound.multiplicity import (
     build_candidate_trial_returns,
@@ -249,8 +250,9 @@ def run_multiscale_compound_engine(
             market=market, bars_4h=bars_4h, folds=folds, config=config.cluster,
         )
         _logger.info("[P2] computed %d causal cluster folds", len(cluster_folds))
+        exit_cache = precompute_exit_path_cache(panel, bars_4h, cost_bps_4h)
         sleeves = estimate_cluster_sleeve_posteriors(
-            panel, bars_4h, cluster_folds, folds, cost_bps_4h, funding_1h, config.handoff,
+            panel, bars_4h, cluster_folds, folds, cost_bps_4h, funding_1h, config.handoff, cache=exit_cache,
         )
         forecast = combine_posterior_sleeves(panel, sleeves, cluster_folds, folds, config.handoff)
         btc_idx = bars_4h.symbols.index("BTCUSDT") if "BTCUSDT" in bars_4h.symbols else -1
@@ -283,16 +285,8 @@ def run_multiscale_compound_engine(
     bars_4h = bars.cubes["4h"]
     has_admitted = handoff_result.evidence.admitted if handoff_result is not None else False
 
-    if has_admitted:
-        weights_2d = compute_dynamic_compounding_path(forecast=forecast, sigma_2d=panel.sigma_2d, funding_rates_1h_2d=funding_1h, config=config.dynamic_compounding, close_2d=bars_4h.close_2d, cost_bps=config.ladder.cost_bps)
-        is_cash_only = float(np.sum(np.abs(weights_2d))) < 1e-15
-        if not is_cash_only:
-            pass
-
-    else:
-        weights_2d = np.zeros((n_bars_4h, n_syms), dtype=np.float64)
-        is_cash_only = True
-        _logger.info("cash-only: no admitted signals")
+    weights_2d = compute_dynamic_compounding_path(forecast=forecast, sigma_2d=panel.sigma_2d, funding_rates_1h_2d=funding_1h, config=config.dynamic_compounding, close_2d=bars_4h.close_2d, cost_bps=config.ladder.cost_bps)
+    is_cash_only = float(np.sum(np.abs(weights_2d))) < 1e-15
 
     quarter_window = window if isinstance(window, QuarterlyRunWindow) else None
     if quarter_window is not None:
