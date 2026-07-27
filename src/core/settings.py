@@ -194,3 +194,12 @@ FUTURES_INITIAL_BALANCE = 10000.0  # USDT, backtest/optimize/verify 공통
 # Futures 전용 설정
 FUTURES_BACKTEST_START_DATE = "2021-01-01"
 FUTURES_BACKTEST_END_DATE = "2026-02-17"
+
+# --- 하드웨어 자원 예산 (WSL & Local Environment) ---
+# 시스템 사양: Intel i5-13600K, RTX 4070 Ti (12GB VRAM), 32GB RAM (WSL 할당분 측정치 기반)
+HARDWARE_CPU_CORES_ALLOCATED: int = 8  # WSL2 할당 CPU 코어 수
+HARDWARE_MAX_WORKERS: int = 6  # ProcessPool/Multiprocessing 권장 워커 수 (컨텍스트 스위칭 방지)
+HARDWARE_RAM_TOTAL_GB: float = 17.0  # WSL2 할당 RAM (약 17GB)
+HARDWARE_MAX_RSS_RAM_GB: float = 12.0  # Swap 이탈 방지용 최대 안전 RSS 메모리 한계
+HARDWARE_VRAM_TOTAL_GB: float = 12.0  # RTX 4070 Ti 전용 VRAM
+HARDWARE_MAX_VRAM_GB: float = 8.5  # WSL2 CUDA 메모리 페이징 방지용 최대 활성 VRAM 한계
