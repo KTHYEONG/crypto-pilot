@@ -50,6 +50,7 @@ class L2GateConfig:
     max_capacity_utilisation_p95: float = 0.10
     min_positive_outer_folds: int = 3
     stressed_cost_multiplier: float = 2.0
+    max_spa_pvalue: float = 0.10
 
     def __post_init__(self) -> None:
         assert self.min_oos_days > 0
@@ -65,6 +66,7 @@ class L2GateConfig:
         assert self.max_capacity_utilisation_p95 > 0
         assert self.min_positive_outer_folds >= 1
         assert self.stressed_cost_multiplier >= 1.0
+        assert 0 < self.max_spa_pvalue <= 1
 
 
 @dataclass(slots=True, frozen=True)
@@ -198,6 +200,7 @@ class L3ValidationConfig:
     reject_probability: float = 0.20
     max_drawdown: float = 0.20
     max_daily_cvar95: float = 0.04
+    min_holdout_growth_probability: float = 0.50
 
     def __post_init__(self) -> None:
         assert self.holdout_days >= self.min_holdout_days > 0
@@ -205,6 +208,7 @@ class L3ValidationConfig:
         assert 0 < self.reject_probability < self.promote_probability <= 1
         assert 0 < self.max_drawdown <= 1
         assert 0 < self.max_daily_cvar95 <= 1
+        assert 0 < self.min_holdout_growth_probability <= 1
 
 
 @dataclass(slots=True, frozen=True)
@@ -283,9 +287,17 @@ class BaselineAllocConfig:
 @dataclass(slots=True, frozen=True)
 class DenseSimConfig:
     bars_per_year: float = 2190.0
+    spread_bps: float = 2.0
+    impact_coeff: float = 0.10
+    nav_usdt: float = 100_000.0
+    min_quote_volume_usdt: float = 1_000.0
 
     def __post_init__(self) -> None:
         assert self.bars_per_year > 0
+        assert self.spread_bps >= 0
+        assert self.impact_coeff >= 0
+        assert self.nav_usdt > 0
+        assert self.min_quote_volume_usdt > 0
 
 
 @dataclass(slots=True, frozen=True)
