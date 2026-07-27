@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 import numpy as np
 from datetime import date
 
@@ -55,6 +57,14 @@ def _make_mock_engine_result(mocker) -> object:
     mock_l2.capacity_utilisation_p95 = 0.05
     mock_l2.integrity_ok = True
     mock_l2.reasons = ()
+    mock_l2.oos_days = 10
+    mock_l2.spa_pvalue = 1.0
+    mock_l2.bootstrap_block_days = 0.0
+    mock_l2.daily_strategy_returns_1d = np.array([0.0], dtype=np.float64)
+    mock_l2.daily_benchmark_returns_1d = np.array([0.0], dtype=np.float64)
+    mock_l2.daily_excess_returns_1d = np.array([0.0], dtype=np.float64)
+    mock_l2.daily_fee_returns_1d = np.array([0.0], dtype=np.float64)
+    mock_l2.daily_day_start_ns = np.array([0], dtype=np.int64)
 
     mock_l3 = mocker.Mock(spec=L3ValidationResult)
     mock_l3.verdict = DeploymentVerdict.PROMOTE
@@ -325,6 +335,14 @@ def test_cash_only_engine_returns_normally(mocker) -> None:
         capacity_utilisation_p95 = 0.0
         integrity_ok = True
         reasons = ()
+        spa_pvalue = 1.0
+        bootstrap_block_days = 0.0
+        oos_days = 0
+        daily_strategy_returns_1d = np.array([], dtype=np.float64)
+        daily_benchmark_returns_1d = np.array([], dtype=np.float64)
+        daily_excess_returns_1d = np.array([], dtype=np.float64)
+        daily_fee_returns_1d = np.array([], dtype=np.float64)
+        daily_day_start_ns = np.array([], dtype=np.int64)
 
     class FakeL3:
         verdict = DeploymentVerdict.PROMOTE
@@ -372,3 +390,36 @@ def test_generic_exception_returns_one(mocker) -> None:
     )
     result = run_multiscale_compound_main(config)
     assert result.exit_code == 1
+
+
+
+def test_compound_main_writes_l2_gate_inputs_npz(tmp_path: Path) -> None:
+    from src.application.futures.runner.compound_main import write_l2_gate_inputs
+    from src.domain.futures.compound.contracts import L2CategoryResult, L2GateVerdict
+
+    passing = (L2CategoryResult(category="test", passed=True, reasons=()),)
+    eval = L2Evaluation(
+        verdict=L2GateVerdict.PASS, benchmark_id="b1",
+        annualized_log_growth=0.0, cagr=0.0, excess_growth_lcb90=0.0,
+        excess_growth_probability=1.0, stressed_excess_growth_lcb90=0.0,
+        equity_multiple=1.0, sharpe=0.0, sharpe_probability=1.0,
+        deflated_sharpe_probability=1.0, candidate_count=1, calmar=0.0,
+        max_drawdown=0.0, daily_cvar95=0.0, annual_volatility=0.0,
+        annual_turnover=0.0, cost_drag_ratio=0.0, capacity_utilisation_p95=0.0,
+        active_days_ratio=1.0, rebalance_count=1, positive_outer_folds=1,
+        oos_days=10, category_results=passing, integrity_ok=True, reasons=(),
+        daily_strategy_returns_1d=np.ones(10, dtype=np.float64),
+        daily_benchmark_returns_1d=np.ones(10, dtype=np.float64),
+        daily_excess_returns_1d=np.ones(10, dtype=np.float64),
+        daily_fee_returns_1d=np.ones(10, dtype=np.float64),
+        daily_day_start_ns=np.arange(10, dtype=np.int64) * 86_400_000_000_000,
+    )
+    out = write_l2_gate_inputs(tmp_path, eval)
+    assert out.exists()
+    data = np.load(str(out))
+    assert "daily_strategy_returns_1d" in data
+    assert "daily_benchmark_returns_1d" in data
+    assert "daily_excess_returns_1d" in data
+    assert "daily_fee_returns_1d" in data
+    assert "daily_day_start_ns" in data
+    assert data["daily_excess_returns_1d"].size == 10

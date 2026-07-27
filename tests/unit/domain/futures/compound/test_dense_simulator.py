@@ -137,3 +137,35 @@ class TestSimulateDensePortfolio:
         simple_ret = float(close_t / close_prev - 1.0)
         expected = 0.5 * simple_ret
         assert ledger.net_returns_1d[101] == pytest.approx(expected, abs=1e-7)
+
+
+    def test_per_symbol_cost_differs_from_mean(self, two_asset_bars):
+        n_bars = 500
+        n_syms = 2
+        w = np.zeros((n_bars, n_syms), dtype=np.float64)
+        w[100:, 0] = 0.5
+        w[100:, 1] = -0.3
+        cost_arr = np.full((n_bars, n_syms), 8.0, dtype=np.float32)
+        cost_arr[:, 0] = 100.0
+        cost_arr[:, 1] = 1.0
+
+        ledger = simulate_dense_portfolio(
+            two_asset_bars, w,
+            funding_1h_2d=np.zeros((n_bars * 4, n_syms), dtype=np.float32),
+            cost_bps=cost_arr, config=self._cfg(),
+        )
+
+        delta_w_0 = 0.5
+        delta_w_1 = -0.3
+        expected_cost = (abs(delta_w_0) * 100.0 + abs(delta_w_1) * 1.0) * 1e-4
+        mean_cost = (abs(delta_w_0) + abs(delta_w_1)) * np.mean([100.0, 1.0]) * 1e-4
+        assert ledger.net_returns_1d[101] != pytest.approx(
+            0.5 * 0.001 + (-0.3) * (-0.0005) - mean_cost, abs=1e-10,
+        )
+        assert ledger.net_returns_1d[101] == pytest.approx(
+            0.5 * 0.001 + (-0.3) * (-0.0005) - expected_cost, abs=1e-6,
+        )
+
+
+    def test_simulate_dense_portfolio_charges_per_symbol_cost(self, two_asset_bars) -> None:
+        self.test_per_symbol_cost_differs_from_mean(two_asset_bars)
