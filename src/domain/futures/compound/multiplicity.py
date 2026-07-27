@@ -170,10 +170,13 @@ def deflated_sharpe_probability(
     z2 = norm.ppf(1.0 - inv_ke)
     sr_0 = sigma_sr * ((1.0 - _EULER_GAMMA) * z1 + _EULER_GAMMA * z2)
 
-    denominator = math.sqrt(max(1.0 - gamma3 * observed_sharpe + (gamma4 - 1.0) / 4.0 * observed_sharpe ** 2, 0.0))
-    if denominator <= 0.0:
+    daily_sharpe = observed_sharpe / math.sqrt(periods_per_year)
+    daily_sr_0 = sr_0 / math.sqrt(periods_per_year)
+    daily_denom = math.sqrt(max(
+        1.0 - gamma3 * daily_sharpe + (gamma4 - 1.0) / 4.0 * daily_sharpe ** 2, 0.0,
+    ))
+    if daily_denom <= 0.0:
         return 0.5
-
-    z_stat = (observed_sharpe - sr_0) * math.sqrt(n_obs - 1) / denominator
+    z_stat = (daily_sharpe - daily_sr_0) * math.sqrt(n_obs - 1) / daily_denom
     dsr = float(norm.cdf(z_stat))
     return min(max(dsr, 0.0), 1.0)
