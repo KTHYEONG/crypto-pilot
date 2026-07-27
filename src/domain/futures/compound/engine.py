@@ -9,14 +9,17 @@ import pyarrow as pa
 from numpy.typing import NDArray
 
 from src.domain.futures.compound.allocator import (
+    apply_beta_hedge_overlay,
     compute_dynamic_compounding_path,
     compute_dynamic_compounding_weights,
+    derive_mdd_parity_scale,
 )
 from src.domain.futures.compound.bar_engine import align_costs_to_decision_grid, build_multi_timeframe_bars
 from src.domain.futures.compound.benchmark import (
     aggregate_1h_close_to_daily_last,
     build_causal_l2_benchmark,
     build_daily_market_returns,
+    causal_beta_series,
 )
 from src.domain.futures.compound.calibration import (
     build_folds_4h,
@@ -258,9 +261,102 @@ def run_multiscale_compound_engine(
         is_cash_only = True
         _logger.info("cash-only: no admitted signals")
 
-    ledger = simulate_dense_portfolio(
+    quarter_window = window if isinstance(window, QuarterlyRunWindow) else None
+    if quarter_window is not None:
+        boundaries = resolve_quarterly_boundaries(bars_4h.timestamps_ns, quarter_window)
+        l2_start_idx = boundaries.l2_start
+        holdout_start_idx = boundaries.l3_start
+    else:
+        resolved_for_manifest = resolve_engine_holdout_id(holdout_id, None)
+        holdout_manifest = holdout_store.get_manifest(resolved_for_manifest)
+        holdout_start_idx = int(np.searchsorted(
+            bars_4h.timestamps_ns, holdout_manifest.start_time_ns,
+        ))
+        holdout_start_idx = max(1, min(holdout_start_idx, bars_4h.timestamps_ns.size - 1))
+        l2_start_idx = 0
+
+    # ── PASS-1: unhedged simulation ──────────────────────────────────────────
+    ledger_1 = simulate_dense_portfolio(
         bars_4h=bars_4h,
         target_weights_2d=weights_2d,
+        funding_1h_2d=funding_1h,
+        cost_bps=cost_bps_4h,
+        config=config.dense_sim,
+    )
+
+    n_l2_4h = holdout_start_idx - l2_start_idx
+    if has_admitted and n_l2_4h >= 60 and p2_error_reason is None:
+        l2_ledger_1 = slice_execution_ledger(
+            ledger=ledger_1,
+            start_time_ns=int(bars_4h.timestamps_ns[l2_start_idx]),
+            end_time_ns=int(bars_4h.timestamps_ns[holdout_start_idx - 1]),
+        )
+        l2_daily_ts = _daily_timestamps_from_4h(l2_ledger_1.timestamps_ns)
+        l2_daily_ret = aggregate_returns_to_utc_days(
+            l2_ledger_1.timestamps_ns, l2_ledger_1.net_returns_1d,
+        )
+
+        close = np.asarray(market.fields_2d["close"], dtype=np.float64)
+        daily_ts, daily_close = aggregate_1h_close_to_daily_last(market.timestamps_ns, close)
+        daily_market = build_daily_market_returns(
+            timestamps_ns=daily_ts, close_2d=daily_close, symbols=market.symbols,
+        )
+        benchmark = build_causal_l2_benchmark(
+            daily_market_returns=daily_market,
+            window_timestamps_ns=l2_daily_ts,
+            config=config.l2_benchmark,
+        )
+
+        bench_start = int(np.searchsorted(benchmark.timestamps_ns, l2_daily_ts[0], side="left"))
+        aligned_n = min(len(l2_daily_ret), len(benchmark.daily_returns_1d) - bench_start)
+        unhedged_daily = l2_daily_ret[:aligned_n]
+        bench_daily = benchmark.daily_returns_1d[bench_start:bench_start + aligned_n]
+
+        beta_l2_daily = causal_beta_series(
+            strategy_daily_1d=unhedged_daily.astype(np.float64),
+            benchmark_daily_1d=bench_daily.astype(np.float64),
+            lookback_days=config.l2_benchmark.volatility_lookback_days,
+            min_obs=30,
+            beta_clip=(-1.0, 3.0),
+        )
+
+        beta_4h_l2 = np.repeat(beta_l2_daily, 6)[:n_l2_4h]
+        beta_4h_full = np.zeros(weights_2d.shape[0], dtype=np.float64)
+        l2_end_4h = min(l2_start_idx + len(beta_4h_l2), weights_2d.shape[0])
+        beta_4h_full[l2_start_idx:l2_end_4h] = beta_4h_l2[:l2_end_4h - l2_start_idx]
+
+        hedged_weights = apply_beta_hedge_overlay(
+            weights_2d,
+            symbols=bars_4h.symbols,
+            beta_per_bar_1d=beta_4h_full,
+            benchmark_symbols=config.l2_benchmark.crypto_symbols,
+            benchmark_weights=config.l2_benchmark.crypto_weights,
+            benchmark_scale_1d=np.ones(weights_2d.shape[0], dtype=np.float64),
+            gross_cap=config.allocator.gross_cap,
+        )
+
+        hedged_excess_log = np.log1p(unhedged_daily) - beta_l2_daily * np.log1p(bench_daily)
+        mdd_scale = derive_mdd_parity_scale(
+            np.expm1(hedged_excess_log),
+            mdd_budget=config.dynamic_compounding.mdd_budget,
+            max_scale=config.dynamic_compounding.mdd_parity_max_scale,
+        )
+        final_weights = hedged_weights * mdd_scale
+        _logger.info(
+            "[P2/P4] beta_hedge applied, mdd_scale=%.4f, hedged_excess_mdd=%.4f",
+            mdd_scale, float(np.max(1.0 - np.cumprod(1.0 + np.expm1(hedged_excess_log)) /
+            np.maximum.accumulate(np.cumprod(1.0 + np.expm1(hedged_excess_log))))),
+        )
+
+        beta_1d_eval = beta_l2_daily
+    else:
+        final_weights = weights_2d
+        beta_1d_eval = None
+
+    # ── PASS-2: final simulation (hedged + levered) ─────────────────────────
+    ledger = simulate_dense_portfolio(
+        bars_4h=bars_4h,
+        target_weights_2d=final_weights,
         funding_1h_2d=funding_1h,
         cost_bps=cost_bps_4h,
         config=config.dense_sim,
@@ -280,11 +376,10 @@ def run_multiscale_compound_engine(
             integrity_reasons=(p2_error_reason,),
         )
 
-    quarter_window = window if isinstance(window, QuarterlyRunWindow) else None
     if quarter_window is not None:
-        boundaries = resolve_quarterly_boundaries(ledger.timestamps_ns, quarter_window)  # pragma: no cover
-        l2_start_idx = boundaries.l2_start  # pragma: no cover
-        holdout_start_idx = boundaries.l3_start  # pragma: no cover
+        boundaries = resolve_quarterly_boundaries(ledger.timestamps_ns, quarter_window)
+        l2_start_idx = boundaries.l2_start
+        holdout_start_idx = boundaries.l3_start
     else:
         resolved_for_manifest = resolve_engine_holdout_id(holdout_id, None)
         holdout_manifest = holdout_store.get_manifest(resolved_for_manifest)
@@ -371,11 +466,12 @@ def run_multiscale_compound_engine(
         end = n_l2 if i == n_folds - 1 else (i + 1) * fold_size
         fold_ids_1d[start:end] = i
     frozen_control_daily_1d: NDArray[np.float64] = np.array([], dtype=np.float64)
-    if weights_2d.shape[0] > 0:
+    frozen_weight_source = final_weights if has_admitted and p2_error_reason is None else weights_2d
+    if frozen_weight_source.shape[0] > 0:
         l2_start_idx = int(np.searchsorted(
             bars_4h.timestamps_ns, l2_ledger.timestamps_ns[0], side="left",
         ))
-        frozen_weights_2d = build_frozen_control_weights(weights_2d, l2_start_idx)
+        frozen_weights_2d = build_frozen_control_weights(frozen_weight_source, l2_start_idx)
         frozen_ledger = simulate_dense_portfolio(
             bars_4h=bars_4h,
             target_weights_2d=frozen_weights_2d,
@@ -400,6 +496,7 @@ def run_multiscale_compound_engine(
         benchmark=benchmark, trial_multiplicity=trial_multiplicity,
         config=config.l2_gate, bootstrap_seed=42,
         frozen_control_daily_1d=frozen_control_daily_1d,
+        beta_1d=beta_1d_eval,
     )
 
     if trial_ledger is not None:
@@ -559,7 +656,7 @@ def _daily_timestamps_from_4h(timestamps_ns_4h: NDArray[np.int64]) -> NDArray[np
     unique_days: NDArray[np.int64] = np.unique(day_start_ns).astype(np.int64)
     counts: NDArray[np.int64] = np.array([int(np.sum(day_start_ns == d)) for d in unique_days], dtype=np.int64)
     complete: NDArray[np.int64] = unique_days[counts == 6].astype(np.int64)
-    return complete + np.int64(6 * ns_per_4h)
+    return complete
 
 
 def _aggregate_trial_4h_to_daily(
