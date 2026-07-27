@@ -1,5 +1,15 @@
 # Active Decisions Log (Sliding Window)
 
+## [2026-07-27] [TASK_PIPELINE_OPT] [ADR_20260727_PIPELINE_OPT]
+- **Context/Why:** Severe latency bottleneck in production pipeline: 258.4s runtime, 1,029MB RSS, 3.3M heap allocations in MAD kernel, nested thread contention
+- **Resolution/What:** Implemented zero-allocation Numba MAD kernel (buf/dev_buf per-symbol, in-place sort), single-level TPE dispatcher (4 workers + Numba 1 thread), parallel PyArrow grid materializer, vectorized 4h funding sum
+- **Impact:** MAD kernel 5.67x vs Numpy, dense sim 13.38x, RSS 363MB (2.84x reduction), bit-exact identity maintained
+
+## [2026-07-27] [TASK_20260727_PRODUCTION_PIPELINE_DEEP_OPTIMIZATION] [ADR_20260727_20260727_PRODUCTION_PIPELINE_DEEP_OPTIMIZATION]
+- **Context/Why:** Pipeline latency of 258s (4.3min) caused by Signal Bank MAD kernel dynamic heap allocations, nested thread pool lock thrashing, and sequential Parquet feature grid materialization
+- **Resolution/What:** Profiled 6 pipeline stages, identified exact 227s Signal Bank and 23s Market Cube bottlenecks, drafted zero-allocation MAD kernel spec, parallel grid loader, and verified with lean_check
+- **Impact:** Paves way for pipeline acceleration from 258s to <15s with 0.000000000000 math discrepancy and <50MB tensor memory
+
 ## [2026-07-27] [TASK_PRODUCTION_PIPELINE_ULTRA_OPTIMIZATION] [ADR_20260727_PRODUCTION_PIPELINE_ULTRA_OPTIMIZATION]
 - **Context/Why:** 프로덕션 파이프라인(opt_main_futures.py) 연산 병목 사멸 및 OOM 차단/비트단위 수치 동일성 보장
 - **Resolution/What:** l1_sleeves.py 2D Matrix Vectorized Bootstrap 적용, signal_bank.py ProcessPool 알파신호 병렬화, test_production_pipeline_ultra_optimization.py 검증 시나리오 구축
@@ -64,13 +74,3 @@
 - **Context/Why:** 실전 등가 backtest에서 equity_multiple 0.97(손실)이 확인됨. 원인 3층: (1) drawdown overlay가 EWMA 스무더 상태값을 곱셈 오염시키는 래칫, (2) L1 fold가 봉인 홀드아웃과 겹치고 L2 fold_ids가 전부 0으로 배선된 게이트 결함, (3) combine_posterior_sleeves가 신호 속도(=admitted sleeve 개수)에 비례 가중해 최악 신호가 최대 가중을 받는 결합층 결함
 - **Resolution/What:** allocator.py: 출력 전용 회복 가능 drawdown 오버레이(EWMA state 미오염)+rank-conviction 사이징. engine.py: L1 fold를 L1 윈도우로 절단, L2 fold_ids 시간 5분할, cost_bps_4h 종목별 배선, count_effective_candidates로 DSR 후보 정정, L2_DRY_RUN 안전가드. l1_sleeves.py: OOS fold_return 채택조건 제거(fit-only), select_non_redundant_signals(fit-window 상관 기반 구조적 중복 제거)+신호당 1표 등가중으로 combine_posterior_sleeves 재작성. validation.py: DSR null 표본길이 스케일링, cost_drag_ratio 차원 버그(로그공간/지수공간 혼용) 수정, absolute_cagr 필드 추가
 - **Impact:** 실제 프로덕션 파이프라인 드라이런 재실행(홀드아웃 미소진 확인): equity_multiple 0.97→1.76, Sharpe 0.24→1.66, 연회전율 108.7→50.2, L2 미통과 사유 6개→1개(deflated_sharpe_probability=0.553<0.9만 잔존), L3 posterior_growth_probability 0.35→0.90. 여전히 L2 FAIL/L3 REJECT로 미배포이나 원인이 구조적 버그에서 순수 통계적 유의성 부족으로 좁혀짐
-
-## [2026-07-26] [funding_partition_integrity_repair] [ADR_20260726_funding_partition_integrity_repair]
-- **Context/Why:** Funding interval hours were persisted as rates, causing invalid L2 returns and unsafe local backtests.
-- **Resolution/What:** Added canonical two/three-column funding normalization, strict finite/range/timestamp validation, funding-v3 provenance, LOCAL read-only fail-closed audit, AUTO targeted quarantine and source repair, and catalog reuse optimization. Recorded the repaired 2026-07-26 L2 run.
-- **Impact:** All 299021 funding events across 2292 partitions are valid. Full L2 completed with finite metrics in 3m54.52s at 996.9 MiB RSS and no swap/OOM; L2 FAIL and L3 REJECT remain correctly enforced by statistical gates. Specs and scratch artifacts are cleaned.
-
-## [2026-07-26] [l2_runtime_integrity_optimization] [ADR_20260726_l2_runtime_integrity_optimization]
-- **Context/Why:** Current-date L2 execution needed a reliable completion path, bounded runtime, and evidence-safe failure handling.
-- **Resolution/What:** Passed explicit holdout_id into the compound engine, recorded the 2026-07-26 runtime/RSS result, and preserved finite fail-closed L2/L3 rejection when corrupted funding values caused net returns below -100%.
-- **Impact:** Full execution completed in 3m40.35s with 978.7 MiB peak RSS and no OOM/timeout; L2 artifact was produced as NO_EVIDENCE and L3 rejected safely. Funding cache resynchronization remains required before claiming performance.
