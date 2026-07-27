@@ -12,6 +12,7 @@ from src.domain.futures.compound.config import (
     L2GateConfig,
 )
 from src.domain.futures.compound.contracts import (
+    CalibratedForecastPanel,
     CausalClusterFold,
     CausalFold,
     CausalityError,
@@ -23,8 +24,6 @@ from src.domain.futures.compound.contracts import (
     HandoffResult,
     InsufficientCoverageError,
     L2BenchmarkSeries,
-    L2CategoryResult,
-    L2Evaluation,
     L2GateVerdict,
     L1SleevePosterior,
     MarketFeatureCube,
@@ -327,13 +326,6 @@ def test_rejected_sleeves_do_not_affect_handoff_gate() -> None:
 # ---------------------------------------------------------------------------
 
 def test_cash_only_is_no_evidence() -> None:
-    panel = RawSignalPanel(
-        np.arange(40, dtype=np.int64), ("S0", "S1"),
-        (SignalDescriptor("s", "trend", "fast", 4, "4h", 4, "", "", "v1"),),
-        np.ones((40, 2, 1), dtype=np.float32),
-        np.ones((40, 2, 1), dtype=bool),
-        np.ones((40, 2), dtype=np.float32),
-    )
     bars_4h = TimeframeBarCube(
         "4h", np.arange(40, dtype=np.int64), ("S0", "S1"),
         np.ones((40, 2), dtype=np.float32) * 100.0,
@@ -343,16 +335,19 @@ def test_cash_only_is_no_evidence() -> None:
         np.ones((40, 2), dtype=np.float32),
         np.ones((40, 2), dtype=bool),
     )
-    from src.domain.futures.compound.contracts import MultiTimeframeBars
-    mtbars = MultiTimeframeBars(np.arange(40, dtype=np.int64), {"4h": bars_4h}, {})
-    result = build_exit_aware_handoff(
-        panel, mtbars, (), (),
-        np.ones((40, 2), dtype=np.float32),
-        np.zeros((40, 2), dtype=np.float32),
-        HandoffConfig(),
+    cash = CalibratedForecastPanel(
+        decision_timestamps_ns=np.arange(40, dtype=np.int64),
+        symbols=("S0", "S1"),
+        mu_2d=np.zeros((40, 2), dtype=np.float32),
+        se_2d=np.full((40, 2), np.nan, dtype=np.float32),
+        family_mu_3d=np.zeros((40, 2, 1), dtype=np.float32),
+        family_ids=(),
+        admitted_signal_ids=(),
+        fold_manifest_hash="",
     )
-    if result.evidence.admitted:
-        pytest.skip("handoff admitted - not cash-only scenario")
+    result = build_exit_aware_handoff(
+        cash, (), bars_4h, np.zeros(40, dtype=np.float64), HandoffConfig(),
+    )
     assert not result.evidence.admitted
 
 

@@ -155,6 +155,7 @@ class TestRunMultiscaleCompoundEngine:
         mock_panel.valid_3d = np.ones((256, 5, 3), dtype=bool)
         mock_panel.sigma_2d = np.full((256, 5), 0.01, dtype=np.float32)
         mock_panel.descriptors = (mocker.Mock(spec=SignalDescriptor, target_horizon_hours=4),)
+        mock_panel.symbols = small_cube.symbols
         mocker.patch(
             "src.domain.futures.compound.engine.build_raw_signal_panel",
             return_value=mock_panel,
@@ -228,6 +229,7 @@ class TestRunMultiscaleCompoundEngine:
         mock_panel.valid_3d = np.ones((256, 5, 3), dtype=bool)
         mock_panel.sigma_2d = distinct_sigma
         mock_panel.descriptors = (mocker.Mock(spec=SignalDescriptor, target_horizon_hours=4),)
+        mock_panel.symbols = small_cube.symbols
         mocker.patch(
             "src.domain.futures.compound.engine.build_raw_signal_panel",
             return_value=mock_panel,
@@ -843,6 +845,7 @@ class TestEngineL2PassBuildsDeploymentCandidate:
         mock_panel.valid_3d = np.ones((256, 5, 3), dtype=bool)
         mock_panel.sigma_2d = np.full((256, 5), 0.01, dtype=np.float32)
         mock_panel.descriptors = (desc_a, desc_b)
+        mock_panel.symbols = small_cube.symbols
         mocker.patch(
             "src.domain.futures.compound.engine.build_raw_signal_panel",
             return_value=mock_panel,
@@ -972,6 +975,7 @@ class TestEngineL2PassBuildsDeploymentCandidate:
         mock_panel.valid_3d = np.ones((256, 5, 1), dtype=bool)
         mock_panel.sigma_2d = np.full((256, 5), 0.01, dtype=np.float32)
         mock_panel.descriptors = (desc,)
+        mock_panel.symbols = small_cube.symbols
         mocker.patch("src.domain.futures.compound.engine.build_raw_signal_panel", return_value=mock_panel)
         mock_folds = (CausalFold(0, 0, 50, 48, 50, 52, 102, 2, 42),)
         mocker.patch("src.domain.futures.compound.engine.build_folds_4h", return_value=mock_folds)
@@ -1034,6 +1038,7 @@ class TestEngineL2PassBuildsDeploymentCandidate:
         mock_panel.valid_3d = np.ones((256, 5, 1), dtype=bool)
         mock_panel.sigma_2d = np.full((256, 5), 0.01, dtype=np.float32)
         mock_panel.descriptors = (desc,)
+        mock_panel.symbols = small_cube.symbols
         mocker.patch("src.domain.futures.compound.engine.build_raw_signal_panel", return_value=mock_panel)
         mock_folds = (CausalFold(0, 0, 50, 48, 50, 52, 102, 2, 42),)
         mocker.patch("src.domain.futures.compound.engine.build_folds_4h", return_value=mock_folds)
