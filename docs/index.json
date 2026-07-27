@@ -548,7 +548,7 @@
     ]
   },
   "src/domain/futures/compound/engine.py": {
-    "architecture": "docs/results/result.md",
+    "architecture": "docs/architecture/layer2.md",
     "testing": [
       "tests/unit/domain/futures/compound/test_engine.py",
       "tests/unit/domain/futures/compound/test_l2_growth_gate.py",
