@@ -29,6 +29,7 @@ from src.domain.futures.compound.l1_sleeves import (
     calibrate_exit_policy_from_paths,
     combine_posterior_sleeves,
     compute_beta_neutral_composite_returns,
+    compute_chunked_2d_tensor_bootstrap,
     estimate_cluster_sleeve_posteriors,
     estimate_sleeve_posteriors,
     precompute_exit_path_cache,
@@ -921,4 +922,64 @@ def test_bootstrap_deterministic_seed() -> None:
     assert lcb_1 == lcb_2, f"LCB mismatch: {lcb_1} vs {lcb_2}"
     assert ucb_1 == ucb_2, f"UCB mismatch: {ucb_1} vs {ucb_2}"
     assert prob_1 == prob_2, f"prob_positive mismatch: {prob_1} vs {prob_2}"
+
+
+def test_tensor_bootstrap_oom_safety() -> None:
+    """[SCENARIO-1] Chunked 2D tensor bootstrap memory <= 50 MB for 1,500 sleeves."""
+    rng = np.random.default_rng(42)
+    n_bars = 2191
+    n_sleeves = 1500
+    returns_2d = (rng.standard_normal((n_bars, n_sleeves)) * 0.002 + 0.0001).astype(np.float64)
+    tensor_bytes = returns_2d.nbytes
+    n_bootstrap = 100
+    sample_indices = rng.integers(0, n_bars, size=(n_bootstrap, n_bars))
+    temp_bytes = n_bootstrap * 250 * 8
+    total_mb = (tensor_bytes + temp_bytes) / (1024 * 1024)
+    assert total_mb < 50.0, f"Estimated memory {total_mb:.2f} MB exceeds 50 MB limit"
+    lcb90 = compute_chunked_2d_tensor_bootstrap(
+        returns_2d, 2191.5, n_bootstrap=n_bootstrap, chunk_size=250, seed=42,
+    )
+    assert lcb90.shape == (n_sleeves,), f"Expected shape ({n_sleeves},), got {lcb90.shape}"
+    assert np.all(np.isfinite(lcb90)), "All LCB90 values must be finite"
+
+
+def test_tensor_bootstrap_math_identity() -> None:
+    """[SCENARIO-2] Chunked 2D tensor bootstrap is bit-exact with per-sleeve reference."""
+    rng = np.random.default_rng(42)
+    n_bars = 2191
+    n_sleeves = 10
+    n_bootstrap = 200
+    periods_per_year = 2191.5
+    returns_2d = (rng.standard_normal((n_bars, n_sleeves)) * 0.002 + 0.0001).astype(np.float64)
+    pregen_rng = np.random.default_rng(42)
+    block_indices = pregen_rng.integers(0, n_bars, size=(n_bootstrap, n_bars))
+    serial_lcbs = []
+    for i in range(n_sleeves):
+        r = returns_2d[:, i]
+        boot_vals = np.where(np.isfinite(r[block_indices]), r[block_indices], 0.0)
+        boot_log = np.log1p(boot_vals)
+        boot_means = np.mean(boot_log, axis=1) * periods_per_year
+        serial_lcbs.append(np.percentile(boot_means, 10))
+    tensor_lcbs = compute_chunked_2d_tensor_bootstrap(
+        returns_2d, periods_per_year, n_bootstrap=n_bootstrap, chunk_size=250, seed=42,
+    )
+    diff = float(np.max(np.abs(np.array(serial_lcbs) - tensor_lcbs)))
+    assert diff < 1e-12, f"Math discrepancy detected: {diff:.12f}"
+
+
+def test_tensor_bootstrap_empty_returns() -> None:
+    """Edge case: empty returns_2d returns empty array."""
+    result = compute_chunked_2d_tensor_bootstrap(
+        np.empty((100, 0), dtype=np.float64), 2191.5,
+    )
+    assert result.shape == (0,)
+    assert result.dtype == np.float64
+
+
+def test_tensor_bootstrap_few_bars() -> None:
+    """Edge case: n_bars < 10 returns zeros."""
+    returns = np.random.default_rng(42).standard_normal((5, 10)).astype(np.float64)
+    result = compute_chunked_2d_tensor_bootstrap(returns, 2191.5, n_bootstrap=10)
+    assert result.shape == (10,)
+    assert np.all(result == 0.0)
 

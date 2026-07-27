@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import logging
 import math
+import os
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import cast
 
 import numpy as np
@@ -570,6 +572,22 @@ def estimate_signal_panel_peak_bytes(
     return math.ceil(1.15 * total)
 
 
+def _compute_recipe_batch(
+    batch: tuple[tuple[int, SignalDescriptor], ...],
+    bars: MultiTimeframeBars,
+    eligible_2d: NDArray[np.bool_],
+) -> list[tuple[int, NDArray[np.float64] | None]]:
+    results: list[tuple[int, NDArray[np.float64] | None]] = []
+    for k, desc in batch:
+        try:
+            raw = _compute_raw_signal(desc, bars, eligible_2d)
+        except Exception:
+            _logger.exception("[SYS] recipe %d failed in worker", k)
+            raw = None
+        results.append((k, raw))
+    return results
+
+
 def build_raw_signal_panel(
     bars: MultiTimeframeBars,
     eligible_2d: NDArray[np.bool_],
@@ -630,22 +648,49 @@ def build_raw_signal_panel(
     started = time.perf_counter()
     observed_peak_rss = current_rss
 
-    try:
-        for k, desc in enumerate(catalog):
-            raw = _compute_raw_signal(desc, bars, eligible_2d)
-            _write_recipe_result(z_3d, valid_3d, k, raw, eligible_2d, complete_4h)
-            del raw
-            obs = psutil.Process().memory_info().rss
-            if obs > observed_peak_rss:
-                observed_peak_rss = obs
-            if obs >= max_rss_bytes:
-                _logger.error(
-                    "[SYS][L1] RSS exceeded limit: observed_rss_mb=%.1f max_rss_mb=%d",
-                    obs / 1048576, max_rss_mb,
-                )
-                raise MemoryError(f"runtime RSS {obs} >= max {max_rss_bytes}")
-    finally:
-        _numba_set_num_threads(prior_numba_threads)
+    n_workers = min(4, os.cpu_count() or 1)
+    if n_workers > 1 and n_cat >= n_workers:
+        batch_size = max(1, n_cat // n_workers)
+        batches: list[tuple[tuple[int, SignalDescriptor], ...]] = []
+        for batch_start in range(0, n_cat, batch_size):
+            batch_end = min(batch_start + batch_size, n_cat)
+            batch = tuple((k, catalog[k]) for k in range(batch_start, batch_end))
+            batches.append(batch)
+
+        try:
+            with ThreadPoolExecutor(max_workers=n_workers) as executor:
+                futures = [executor.submit(_compute_recipe_batch, batch, bars, eligible_2d) for batch in batches]
+                for future in as_completed(futures):
+                    for k, raw in future.result():
+                        _write_recipe_result(z_3d, valid_3d, k, raw, eligible_2d, complete_4h)
+                        obs = psutil.Process().memory_info().rss
+                        if obs > observed_peak_rss:
+                            observed_peak_rss = obs
+                        if obs >= max_rss_bytes:
+                            _logger.error(
+                                "[SYS][L1] RSS exceeded limit: observed_rss_mb=%.1f max_rss_mb=%d",
+                                obs / 1048576, max_rss_mb,
+                            )
+                            raise MemoryError(f"runtime RSS {obs} >= max {max_rss_bytes}")
+        finally:
+            _numba_set_num_threads(prior_numba_threads)
+    else:
+        try:
+            for k, desc in enumerate(catalog):
+                raw = _compute_raw_signal(desc, bars, eligible_2d)
+                _write_recipe_result(z_3d, valid_3d, k, raw, eligible_2d, complete_4h)
+                del raw
+                obs = psutil.Process().memory_info().rss
+                if obs > observed_peak_rss:
+                    observed_peak_rss = obs
+                if obs >= max_rss_bytes:
+                    _logger.error(
+                        "[SYS][L1] RSS exceeded limit: observed_rss_mb=%.1f max_rss_mb=%d",
+                        obs / 1048576, max_rss_mb,
+                    )
+                    raise MemoryError(f"runtime RSS {obs} >= max {max_rss_bytes}")
+        finally:
+            _numba_set_num_threads(prior_numba_threads)
 
     elapsed = time.perf_counter() - started
     total_valid = int(np.sum(valid_3d))

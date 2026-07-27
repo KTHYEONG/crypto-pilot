@@ -11,9 +11,6 @@ from typing import Any
 import numpy as np
 from numpy.typing import NDArray
 
-from src.domain.futures.compound.bootstrap import (
-    circular_stationary_bootstrap_growth,
-)
 from src.domain.futures.compound.config import HandoffConfig
 from src.domain.futures.compound.contracts import (
     CalibratedForecastPanel,
@@ -459,19 +456,11 @@ def combine_posterior_sleeves(
     )
 
 
-def compute_beta_neutral_composite_returns(
+def _compute_sleeve_returns_2d(
     sleeves: tuple[L1SleevePosterior, ...],
     bars_4h: TimeframeBarCube,
-    benchmark_returns_1d: NDArray[np.float64],
 ) -> NDArray[np.float64]:
-    if not sleeves:
-        raise ValueError("sleeves must be non-empty")
     n_bars = bars_4h.close_2d.shape[0]
-    if len(benchmark_returns_1d) != n_bars:
-        raise ValueError(
-            f"benchmark_returns_1d length {len(benchmark_returns_1d)} != bars_4h bars {n_bars}"
-        )
-
     n_syms = bars_4h.close_2d.shape[1]
     close = bars_4h.close_2d.astype(np.float64)
     log_ret = np.zeros((n_bars, n_syms), dtype=np.float64)
@@ -487,12 +476,30 @@ def compute_beta_neutral_composite_returns(
     sleeve_raw = np.zeros((n_bars, n_sleeves), dtype=np.float64)
     for i, sleeve in enumerate(sleeves):
         sym_idx = np.where(sleeve.member_mask_1d)[0]
-        if len(sym_idx) == 0:  # pragma: no cover - guarded by L1SleevePosterior.__post_init__
+        if len(sym_idx) == 0:
             continue
         member = log_ret[:, sym_idx]
         finite = np.isfinite(member)
         count = np.sum(finite, axis=1)
         sleeve_raw[:, i] = np.where(count > 0, np.nansum(member, axis=1) / count, 0.0)
+    return sleeve_raw
+
+
+def compute_beta_neutral_composite_returns(
+    sleeves: tuple[L1SleevePosterior, ...],
+    bars_4h: TimeframeBarCube,
+    benchmark_returns_1d: NDArray[np.float64],
+) -> NDArray[np.float64]:
+    if not sleeves:
+        raise ValueError("sleeves must be non-empty")
+    n_bars = bars_4h.close_2d.shape[0]
+    if len(benchmark_returns_1d) != n_bars:
+        raise ValueError(
+            f"benchmark_returns_1d length {len(benchmark_returns_1d)} != bars_4h bars {n_bars}"
+        )
+
+    n_sleeves = len(sleeves)
+    sleeve_raw = _compute_sleeve_returns_2d(sleeves, bars_4h)
 
     bm = benchmark_returns_1d
     beta_resid = np.zeros((n_bars, n_sleeves), dtype=np.float64)
@@ -553,13 +560,17 @@ def build_exit_aware_handoff(
         _LOGGER.info("[L1] exit-aware handoff: no admitted sleeves, NO_EVIDENCE")
         return HandoffResult(forecast, no_evidence)
 
+    sleeve_returns_2d = _compute_sleeve_returns_2d(
+        tuple(admitted_sleeves), bars_4h,
+    )
+    lcb90_1d = compute_chunked_2d_tensor_bootstrap(
+        sleeve_returns_2d, 2191.5, n_bootstrap=config.n_bootstrap, chunk_size=250,
+    )
+    ann_lcb90 = float(np.median(lcb90_1d))
+
     composite_ts = compute_beta_neutral_composite_returns(
         tuple(admitted_sleeves), bars_4h, benchmark_returns_1d,
     )
-
-    ann_lcb90, ann_ucb90, prob = circular_stationary_bootstrap_growth(composite_ts, 2191.5, n_bootstrap=config.n_bootstrap)
-    del ann_ucb90, prob
-
     log_ret = np.log1p(np.where(np.isfinite(composite_ts), composite_ts, 0.0))
     ann_growth = float(np.mean(log_ret)) * 2191.5
 
@@ -606,6 +617,41 @@ def aggregate_cluster_group_returns(
         if w_sum > 0:
             result[i] = float(np.sum(weights * values)) / w_sum
     return result
+
+
+def compute_chunked_2d_tensor_bootstrap(
+    returns_2d: NDArray[np.float64],
+    periods_per_year: float,
+    n_bootstrap: int = 1000,
+    chunk_size: int = 250,
+    seed: int = 42,
+) -> NDArray[np.float64]:
+    n_bars, n_sleeves = returns_2d.shape
+    if n_sleeves == 0:
+        return np.empty(0, dtype=np.float64)
+    if n_bars < 10:
+        return np.full(n_sleeves, 0.0, dtype=np.float64)
+
+    rng = np.random.default_rng(seed)
+    all_indices = rng.integers(0, n_bars, size=(n_bootstrap, n_bars))
+    lcb90 = np.empty(n_sleeves, dtype=np.float64)
+    log_buffer = np.empty((n_bars, min(chunk_size, n_sleeves)), dtype=np.float64)
+
+    for start in range(0, n_sleeves, chunk_size):
+        end = min(start + chunk_size, n_sleeves)
+        chunk = returns_2d[:, start:end]
+        n_chunk = end - start
+        growth = np.empty((n_bootstrap, n_chunk), dtype=np.float64)
+
+        for i in range(n_bootstrap):
+            idx = all_indices[i]
+            np.take(chunk, idx, axis=0, out=log_buffer[:, :n_chunk])
+            np.log1p(np.where(np.isfinite(log_buffer[:, :n_chunk]), log_buffer[:, :n_chunk], 0.0), out=log_buffer[:, :n_chunk])
+            growth[i] = periods_per_year * np.mean(log_buffer[:, :n_chunk], axis=0)
+
+        lcb90[start:end] = np.percentile(growth, 10, axis=0)
+
+    return lcb90
 
 
 def _cluster_masked_beta(
@@ -761,3 +807,4 @@ def estimate_cluster_sleeve_posteriors(
         gc.collect()
 
     return tuple(output)
+
