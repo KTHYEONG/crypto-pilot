@@ -631,6 +631,15 @@ class PrecomputedExitPaths:
 
 
 @dataclass(slots=True, frozen=True)
+class ExitPathCache:
+    paths_by_signal: dict[str, PrecomputedExitPaths]
+    atr: NDArray[np.float64]
+
+    def get(self, signal_id: str) -> PrecomputedExitPaths | None:
+        return self.paths_by_signal.get(signal_id)
+
+
+@dataclass(slots=True, frozen=True)
 class L1SleevePosterior:
     sleeve_id: str
     signal_id: str
