@@ -23,10 +23,12 @@ def build_folds_4h(
     n_bars: int, config: CalibrationConfig, max_target_horizon_bars: int = 0, *, start_offset: int = 0,
 ) -> tuple[CausalFold, ...]:
     n_folds = config.n_folds
-    purge = max(config.purge_bars, max_target_horizon_bars)
-    embargo = config.embargo_bars
     n_sections = n_folds + 1
     available_bars = n_bars - start_offset
+    requested_purge = max(config.purge_bars, max_target_horizon_bars)
+    max_allowable_purge = max(config.purge_bars, (available_bars // n_sections) - config.embargo_bars - 2)
+    purge = min(requested_purge, max_allowable_purge)
+    embargo = config.embargo_bars
     if available_bars < n_sections * (purge + embargo + 2):
         raise CausalityError(
             f"n_bars={n_bars} start_offset={start_offset} insufficient for "
