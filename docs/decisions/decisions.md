@@ -1,5 +1,10 @@
 # Active Decisions Log (Sliding Window)
 
+## [2026-07-27] [TASK_L2_GATE_HONESTY_AND_RISK_BUDGET] [ADR_20260727_L2_GATE_HONESTY_AND_RISK_BUDGET]
+- **Context/Why:** L2 PASS(CAGR 31.05%, DSR 1.000000)가 얇은 마진이 아니라 결함(DSR 주기불일치·확률게이트 중복·블록길이 오지정·벤치마크 일자오정렬·실행북 동결·funding 부호역전·종목별 비용무력화·L3 holdout이 PROMOTE를 못막음·CAGR 연율화 버그) 9건의 산물임을 실측(재구성+E1~E8 다중가설)으로 확인
+- **Resolution/What:** bootstrap.py 신규(Politis-White 블록길이·circular bootstrap·SPA 3대조군). multiplicity.py(DSR 주기정합), validation.py(일자정렬·복리연율화·SPA 편입·frozen control), allocator.py(support 재적용·심볼별 band·carry 부호·폐루프 vol), dense_simulator.py(종목별 비용·slippage/impact), engine.py(frozen control 배선·L3 prior 일봉화). 실전 실행에서 L3 prior 가드 결함(스펙 계약 자체의 오류로 모든 정상실행 크래시) 추가 발견, 가드 제거 및 테스트 교체로 수정
+- **Impact:** 실제 CLI 재실행(20260727_013707): verdict PASS→FAIL, CAGR 31.05%(산술오류)→6.75%(복리정합), DSR 1.000000(포화)→0.4266, excess_growth_probability 0.9400→0.712, 신규 SPA p=0.362(기준 0.10 초과). L3가 l2_not_pass로 즉시 reject(이전엔 dry_run으로 shadow 방치). 임계값 완화 0건. A-8(PIT 유니버스 breadth)은 범위 외 후속 스펙
+
 ## [2026-07-26] [TASK_DEPLOYMENT_PROVENANCE_AND_SEARCH_MULTIPLICITY] [ADR_20260726_DEPLOYMENT_PROVENANCE_AND_SEARCH_MULTIPLICITY]
 - **Context/Why:** L2 게이트 최초 PASS 후 CLI 실행이 strategy_spec_hash/fold_manifest_hash 미배선으로 크래시. 조사 결과 표면 버그 아래 봉인 홀드아웃 동어반복 검증(DEF-01)과 dead CandidateTrialLedger로 인한 탐색 다중성 미회계(DEF-02), NumPy 2.4 단일-trial 크래시(BUG-03) 발견
 - **Resolution/What:** provenance.py 신규(해시 유도 4함수). multiplicity.py에 BUG-03 가드+charge_config_search_multiplicity(가산형 참여비, 3개 가설 실측 비교 후 채택) 추가. contracts.py CandidateTrialLedger.register/load_trial_returns 구현. holdout_store.py ensure_sealed(미소진 seal 1회 backfill)+consume 강화(런타임 해시 사용, universe_state_hash 검증 유지). l1_sleeves.py/engine.py/compound_main.py 전체 배선 및 trial_ledger.register 호출 연결
@@ -69,8 +74,3 @@
 - **Context/Why:** Validate L1 signal x exit policy x horizon edge evidence and enforce L2 risk budgeting and L3 fail-closed deployment gate
 - **Resolution/What:** Executed l1_exit_aware_edge_handoff benchmark and opt_main_futures on full 120-symbol universe, updated result.md with empirical metrics
 - **Impact:** Guaranteed capital preservation (Cash-only) under zero alpha and validated L2 volatility/MDD control (<20%)
-
-## [2026-07-24] [TASK_HORIZON_COHERENT_L1_L2_HANDOFF] [ADR_20260724_HORIZON_COHERENT_L1_L2_HANDOFF]
-- **Context/Why:** 실제 730일 120종목 데이터에서 기존 L1 composite가 horizon 계약과 L2 실행주기를 혼합했고, 중앙값·winsorized 평균도 손실을 개선하지 못했습니다. 구현 후 dev-only 실행에서 후보는 있었지만 최종 admission은 실패했습니다.
-- **Resolution/What:** horizon holding kernel, causal 4h cost alignment, family/correlation 중복 제거, prequential handoff와 경제성 게이트를 배선했습니다. 실제 full run은 신호를 거래하지 않고 cash-only로 차단했으며, dev diagnostic은 5개 fold에서 positive fold 0/5를 기록했습니다.
-- **Impact:** L2 실거래 노출은 0으로 안전 차단되었습니다. 다만 handoff weight gross cap 누락으로 log1p invalid와 NaN MDD가 발생했고 engine의 holdout dev 경계 및 전체시계열 상관 계산은 후속 수정이 필요합니다. sealed holdout은 dev diagnostic에서 사용하지 않았습니다.
