@@ -1,3 +1,44 @@
+## L1 Admission β-중립화 및 시간축 시계열 부트스트랩 재설계 스펙 구현 및 실측 — 2026-07-27
+
+- 실행일: `2026-07-27`
+- 실행 명령: `L2_DRY_RUN=1 uv run python src/execution/opt_main_futures.py --phase full --sync local --date 2026-07-26`
+- 검증 창: 워밍업 90일 / **L1 365일** / **L2 361일** / L3 봉인 홀드아웃 90일
+- 스펙: `docs/specs/effective-compounding-l1l2-rearchitecture.md`
+- exit_code: **1** (`no_evidence`)
+- 산출물: `logs/futures/compound/20260727_074041/`
+
+### 배경 — 표본 독립성 위반 및 스칼라 부트스트랩 하한 붕괴 해소
+
+직전 항목(`20260727_065237`)에서 278개 sleeve의 OOS 성과 스칼라값을 독립 i.i.d 부트스트랩하여 `growth_lcb90 = -40.58%`로 폭락했던 근본 원인을 규명:
+1. 278개 sleeve는 단 10여 개 신호(Descriptor)와 5개 Fold에서 생겨나 서로 높은 상관관계(Correlation > 0.8)를 지닌 **중복 표본**이었다.
+2. 상호 상관된 278개 스칼라를 i.i.d 부트스트랩함에 따라 표본 독립성 위반 및 분산 폭발로 LCB90이 마이너스로 붕괴됨.
+3. 이에 Causal Beta Neutralization + 4시간 타임시리즈 포트폴리오 합성 시계열($R_{p,t}$) 복원 + Politis-White 4h 시간축 블록 부트스트랩(`pw_block=3.37`) 융합 아키텍처로 완전 재설계함.
+
+### 구현 및 검증 (`/implement` → `/check`)
+
+- 수정: `l1_sleeves.py` (`compute_beta_neutral_composite_returns` 신규 — Causal rolling beta regression 및 inverse volatility weighting 기반 합성 시계열 생성, `build_exit_aware_handoff`에 `circular_stationary_bootstrap_growth` 시간축 블록 부트스트랩 연결), `engine.py` (파이프라인 배선)
+- `/check` PASS: Wiring ✅ | Non-dummy AST ✅ | Mypy Strict ✅ | Regression Test ✅ | Coverage 93%
+
+### 실전 CLI 재실행 결과 — 측정계 정직화 완성 및 자산 안전 보호
+
+실전 CLI 파이프라인 재실행 결과 **NO_EVIDENCE** (`active_days_ratio=0.0`, `rebalances=0`, 현금 100% 보존):
+
+| 지표 | 값 |
+|---|---:|
+| `pw_block` (Politis-White 자동 추정 블록 길이) | **3.37 (4h bars)** |
+| `admitted_sleeves` | 278개 |
+| `annualized_log_growth` | -3.12% |
+| `ann_lcb90` (시간축 시계열 10% 하한) | **-14.85%** |
+| `admitted` | **False** (`growth_lcb90_not_positive`) |
+
+### 판정
+
+1. **측정계 정직화 완결**: 기존 결함 있는 스칼라 i.i.d 부트스트랩 대신, Causal Beta Neutralization 및 시간축 블록 부트스트랩을 적용하자 278개 신호의 10.17% 비용 드래그(Cost Drag) 포함 실질 성과가 차단되었습니다.
+2. **Fail-Closed 안전장치 동작**: 알파 마진이 부족한 신호를 억지로 통과시키지 않고 `admitted=False`로 거부하여, 원금을 현금 100%(`cash-only`) 상태로 완전 안전하게 보호했습니다.
+3. 후속 과제: 10.17% 비용 드래그를 능가하는 순수 알파 레시피(Mean Reversion, Funding Arbitrage 등) 보강 및 PIT 유니버스 확장.
+
+---
+
 ## L1 admission 복구 스펙(창 복원·게이트 재설계·L1→L2 사전분포) 구현 및 실측 — 정직화가 admission을 재차 전멸시킴 — 2026-07-27
 
 - 실행일: `2026-07-27`

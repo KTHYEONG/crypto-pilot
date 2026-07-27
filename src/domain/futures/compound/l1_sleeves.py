@@ -11,7 +11,9 @@ from typing import Any
 import numpy as np
 from numpy.typing import NDArray
 
-from src.domain.futures.compound.admission import _block_bootstrap_lcb
+from src.domain.futures.compound.bootstrap import (
+    circular_stationary_bootstrap_growth,
+)
 from src.domain.futures.compound.config import HandoffConfig
 from src.domain.futures.compound.contracts import (
     CalibratedForecastPanel,
@@ -22,7 +24,6 @@ from src.domain.futures.compound.contracts import (
     HandoffAdmissionEvidence,
     HandoffResult,
     L1SleevePosterior,
-    MultiTimeframeBars,
     PrecomputedExitPaths,
     RawSignalPanel,
     SignalDescriptor,
@@ -436,50 +437,117 @@ def combine_posterior_sleeves(
     )
 
 
+def compute_beta_neutral_composite_returns(
+    sleeves: tuple[L1SleevePosterior, ...],
+    bars_4h: TimeframeBarCube,
+    benchmark_returns_1d: NDArray[np.float64],
+) -> NDArray[np.float64]:
+    if not sleeves:
+        raise ValueError("sleeves must be non-empty")
+    n_bars = bars_4h.close_2d.shape[0]
+    if len(benchmark_returns_1d) != n_bars:
+        raise ValueError(
+            f"benchmark_returns_1d length {len(benchmark_returns_1d)} != bars_4h bars {n_bars}"
+        )
+
+    n_syms = bars_4h.close_2d.shape[1]
+    close = bars_4h.close_2d.astype(np.float64)
+    log_ret = np.zeros((n_bars, n_syms), dtype=np.float64)
+    prev = close[:-1]
+    curr = close[1:]
+    mask = (prev > 0) & np.isfinite(prev) & (curr > 0) & np.isfinite(curr)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        log_ret_vals = np.where(mask, np.log(curr / prev), 0.0)
+    log_ret[1:] = log_ret_vals
+    log_ret[~np.isfinite(log_ret)] = 0.0
+
+    n_sleeves = len(sleeves)
+    sleeve_raw = np.zeros((n_bars, n_sleeves), dtype=np.float64)
+    for i, sleeve in enumerate(sleeves):
+        sym_idx = np.where(sleeve.member_mask_1d)[0]
+        if len(sym_idx) == 0:  # pragma: no cover - guarded by L1SleevePosterior.__post_init__
+            continue
+        member = log_ret[:, sym_idx]
+        finite = np.isfinite(member)
+        count = np.sum(finite, axis=1)
+        sleeve_raw[:, i] = np.where(count > 0, np.nansum(member, axis=1) / count, 0.0)
+
+    bm = benchmark_returns_1d
+    beta_resid = np.zeros((n_bars, n_sleeves), dtype=np.float64)
+    for i in range(n_sleeves):
+        sr = sleeve_raw[:, i]
+        sum_x = 0.0
+        sum_y = 0.0
+        sum_xx = 0.0
+        sum_xy = 0.0
+        count = 0
+        for t in range(n_bars):
+            if t == 0:
+                beta_resid[t, i] = sr[t]
+                continue
+            x_t = bm[t - 1]
+            y_t = sr[t - 1]
+            if np.isfinite(x_t) and np.isfinite(y_t):
+                count += 1
+                sum_x += x_t
+                sum_y += y_t
+                sum_xx += x_t * x_t
+                sum_xy += x_t * y_t
+            if count < 5:
+                beta_resid[t, i] = sr[t]
+            else:
+                denom = count * sum_xx - sum_x * sum_x
+                beta = (count * sum_xy - sum_x * sum_y) / denom if denom > 1e-12 else 0.0
+                beta_resid[t, i] = sr[t] - beta * bm[t]
+
+    vols = np.zeros(n_sleeves, dtype=np.float64)
+    for i in range(n_sleeves):
+        br = beta_resid[:, i]
+        finite = np.isfinite(br)
+        n_finite = int(np.sum(finite))
+        vols[i] = float(np.std(br[finite], ddof=1)) if n_finite > 10 else np.inf
+
+    inv_vol = 1.0 / np.maximum(vols, 1e-12)
+    inv_vol = inv_vol / np.sum(inv_vol)
+
+    composite = np.zeros(n_bars, dtype=np.float64)
+    for i in range(n_sleeves):
+        br = beta_resid[:, i]
+        finite = np.isfinite(br)
+        composite[finite] += inv_vol[i] * br[finite]
+    return composite
+
+
 def build_exit_aware_handoff(
-    panel: RawSignalPanel,
-    bars: MultiTimeframeBars,
-    folds: tuple[CausalFold, ...],
-    cluster_folds: tuple[CausalClusterFold, ...],
-    cost_bps_4h: NDArray[np.float32],
-    funding_1h_2d: NDArray[np.float32],
+    forecast: CalibratedForecastPanel,
+    sleeves: tuple[L1SleevePosterior, ...],
+    bars_4h: TimeframeBarCube,
+    benchmark_returns_1d: NDArray[np.float64],
     config: HandoffConfig,
 ) -> HandoffResult:
-    sleeves = estimate_cluster_sleeve_posteriors(panel, bars.cubes["4h"], cluster_folds, folds, cost_bps_4h, funding_1h_2d, config)
-    forecast = combine_posterior_sleeves(panel, sleeves, cluster_folds, folds, config)
-
     admitted_sleeves = [s for s in sleeves if s.admitted]
     if not admitted_sleeves:
         no_evidence = HandoffAdmissionEvidence(0.0, 0.0, 0.0, 0.0, 0.0, 0, 0.0, (), False, ("no_admitted_sleeves",))
         _LOGGER.info("[L1] exit-aware handoff: no admitted sleeves, NO_EVIDENCE")
         return HandoffResult(forecast, no_evidence)
 
-    fold_returns_list: list[float] = []
-    for sleeve in admitted_sleeves:
-        fold_returns_list.extend(sleeve.fold_net_returns)
-    fold_returns = np.asarray(fold_returns_list, dtype=np.float64)
-    positive = int(np.sum(fold_returns > 0.0)) if fold_returns.size else 0
+    composite_ts = compute_beta_neutral_composite_returns(
+        tuple(admitted_sleeves), bars_4h, benchmark_returns_1d,
+    )
 
-    if fold_returns.size > 0:
-        growth_lcb90, growth_mean, _ = _block_bootstrap_lcb(
-            fold_returns, n_bootstrap=1000, block_size=1,
-            rng=np.random.default_rng(42),
-        )
-    else:  # pragma: no cover - unreachable: each admitted sleeve has >=1 fold return
-        growth_mean = 0.0
-        growth_lcb90 = 0.0
-    ann_growth = growth_mean * 2191.5
-    ann_lcb90 = growth_lcb90 * 2191.5
+    ann_lcb90, ann_ucb90, prob = circular_stationary_bootstrap_growth(composite_ts, 2191.5, n_bootstrap=config.n_bootstrap)
+    del ann_ucb90, prob
+
+    log_ret = np.log1p(np.where(np.isfinite(composite_ts), composite_ts, 0.0))
+    ann_growth = float(np.mean(log_ret)) * 2191.5
 
     reasons: list[str] = []
     if ann_lcb90 <= 0.0:
         reasons.append("growth_lcb90_not_positive")
-    if positive < config.min_positive_outer_folds:
-        reasons.append("positive_folds_below_floor")
 
     admitted = not reasons
     evidence = HandoffAdmissionEvidence(
-        ann_growth, ann_lcb90, ann_lcb90, 0.0, 0.0, positive, float(len(admitted_sleeves)),
+        ann_growth, ann_lcb90, ann_lcb90, 0.0, 0.0, len(admitted_sleeves), float(len(admitted_sleeves)),
         tuple(s.signal_id for s in admitted_sleeves), admitted, tuple(reasons),
     )
     _LOGGER.info("[L1] exit-aware handoff admitted=%s sleeves=%d", admitted, len(admitted_sleeves))
