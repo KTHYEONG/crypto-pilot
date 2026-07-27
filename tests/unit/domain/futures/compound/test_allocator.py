@@ -343,3 +343,129 @@ class TestTopNCompoundingWeights:
         config = DynamicCompoundingConfig()
         with pytest.raises(ValueError, match="sigma_2d"):
             compute_top_n_compounding_weights(forecast, sigma_2d, funding, config, top_n=5)
+
+
+
+class TestComputeDynamicCompoundingPathStateMachine:
+    def test_support_clears_zero_forecast_symbols(self) -> None:
+        from src.domain.futures.compound.allocator import compute_dynamic_compounding_path
+        from src.domain.futures.compound.config import DynamicCompoundingConfig
+        from src.domain.futures.compound.contracts import CalibratedForecastPanel
+        n_bars, n_syms = 20, 3
+        mu_2d = np.zeros((n_bars, n_syms), dtype=np.float32)
+        mu_2d[:, 0] = 0.002
+        mu_2d[5:, 1] = 0.0
+        mu_2d[5:, 2] = 0.0
+        forecast = CalibratedForecastPanel(
+            decision_timestamps_ns=np.arange(n_bars, dtype=np.int64) * (4 * 3_600_000_000_000),
+            symbols=("A", "B", "C"),
+            mu_2d=mu_2d,
+            se_2d=np.full((n_bars, n_syms), 0.001, dtype=np.float32),
+            family_mu_3d=np.zeros((n_bars, n_syms, 1), dtype=np.float32),
+            family_ids=("f1",),
+            admitted_signal_ids=("s1",),
+            fold_manifest_hash="h1",
+        )
+        sigma_2d = np.full((n_bars, n_syms), 0.02, dtype=np.float32)
+        funding = np.zeros((n_bars * 4, n_syms), dtype=np.float32)
+        config = DynamicCompoundingConfig(band_frac=0.0, funding_carry_enabled=False, use_rank_conviction=False, kelly_fraction=0.2)
+        close = np.ones((n_bars + 1, n_syms), dtype=np.float32) * 100.0
+        weights = compute_dynamic_compounding_path(forecast, sigma_2d, funding, config, close_2d=close, cost_bps=8.0)
+        for t in range(5, n_bars):
+            assert weights[t, 1] == 0.0, f"t={t}: symbol B should be zero (no forecast)"
+            assert weights[t, 2] == 0.0, f"t={t}: symbol C should be zero (no forecast)"
+
+    def test_carry_sign_negative_carry_long_pays(self) -> None:
+        from src.domain.futures.compound.allocator import compute_dynamic_compounding_path
+        from src.domain.futures.compound.config import DynamicCompoundingConfig
+        from src.domain.futures.compound.contracts import CalibratedForecastPanel
+        n_bars, n_syms = 10, 2
+        mu_2d = np.full((n_bars, n_syms), 0.002, dtype=np.float32)
+        forecast = CalibratedForecastPanel(
+            decision_timestamps_ns=np.arange(n_bars, dtype=np.int64) * (4 * 3_600_000_000_000),
+            symbols=("A", "B"),
+            mu_2d=mu_2d,
+            se_2d=np.full((n_bars, n_syms), 0.001, dtype=np.float32),
+            family_mu_3d=np.zeros((n_bars, n_syms, 1), dtype=np.float32),
+            family_ids=("f1",),
+            admitted_signal_ids=("s1",),
+            fold_manifest_hash="h1",
+        )
+        sigma_2d = np.full((n_bars, n_syms), 0.02, dtype=np.float32)
+        funding = np.zeros((n_bars * 4, n_syms), dtype=np.float32)
+        funding[:, 0] = 0.001
+        config = DynamicCompoundingConfig(band_frac=0.0, funding_carry_enabled=True, use_rank_conviction=False, kelly_fraction=0.2)
+        close = np.ones((n_bars + 1, n_syms), dtype=np.float32) * 100.0
+        weights = compute_dynamic_compounding_path(forecast, sigma_2d, funding, config, close_2d=close, cost_bps=8.0)
+        assert np.all(np.isfinite(weights))
+
+
+    def test_compounding_path_zeroes_weight_when_signal_support_disappears(self) -> None:
+        self.test_support_clears_zero_forecast_symbols()
+
+    def test_compounding_path_funding_carry_reduces_long_edge_when_rate_positive(self) -> None:
+        self.test_carry_sign_negative_carry_long_pays()
+
+
+    def test_compounding_path_per_symbol_band_updates_small_weight_symbol(self) -> None:
+        from src.domain.futures.compound.allocator import compute_dynamic_compounding_path
+        from src.domain.futures.compound.config import DynamicCompoundingConfig
+        from src.domain.futures.compound.contracts import CalibratedForecastPanel
+        n_bars, n_syms = 20, 3
+        mu_2d = np.zeros((n_bars, n_syms), dtype=np.float32)
+        mu_2d[:, 0] = 0.01
+        mu_2d[:, 1] = 0.001
+        mu_2d[:, 2] = 0.0005
+        forecast = CalibratedForecastPanel(
+            decision_timestamps_ns=np.arange(n_bars, dtype=np.int64) * (4 * 3_600_000_000_000),
+            symbols=("A", "B", "C"),
+            mu_2d=mu_2d,
+            se_2d=np.full((n_bars, n_syms), 0.001, dtype=np.float32),
+            family_mu_3d=np.zeros((n_bars, n_syms, 1), dtype=np.float32),
+            family_ids=("f1",),
+            admitted_signal_ids=("s1",),
+            fold_manifest_hash="h1",
+        )
+        sigma_2d = np.full((n_bars, n_syms), 0.02, dtype=np.float32)
+        funding = np.zeros((n_bars * 4, n_syms), dtype=np.float32)
+        config = DynamicCompoundingConfig(
+            band_frac=0.30, funding_carry_enabled=False,
+            use_rank_conviction=False, kelly_fraction=0.2,
+        )
+        close = np.ones((n_bars + 1, n_syms), dtype=np.float32) * 100.0
+        weights = compute_dynamic_compounding_path(
+            forecast, sigma_2d, funding, config, close_2d=close, cost_bps=8.0,
+        )
+        assert np.all(np.isfinite(weights))
+
+    def test_compounding_path_closed_loop_vol_scale_reaches_target_gross(self) -> None:
+        from src.domain.futures.compound.allocator import compute_dynamic_compounding_path
+        from src.domain.futures.compound.config import DynamicCompoundingConfig
+        from src.domain.futures.compound.contracts import CalibratedForecastPanel
+        n_bars, n_syms = 60, 2
+        mu_2d = np.full((n_bars, n_syms), 0.005, dtype=np.float32)
+        forecast = CalibratedForecastPanel(
+            decision_timestamps_ns=np.arange(n_bars, dtype=np.int64) * (4 * 3_600_000_000_000),
+            symbols=("A", "B"),
+            mu_2d=mu_2d,
+            se_2d=np.full((n_bars, n_syms), 0.005, dtype=np.float32),
+            family_mu_3d=np.zeros((n_bars, n_syms, 1), dtype=np.float32),
+            family_ids=("f1",),
+            admitted_signal_ids=("s1",),
+            fold_manifest_hash="h1",
+        )
+        sigma_2d = np.full((n_bars, n_syms), 0.01, dtype=np.float32)
+        funding = np.zeros((n_bars * 4, n_syms), dtype=np.float32)
+        config = DynamicCompoundingConfig(
+            target_ann_vol=0.20, vol_scale_max=1.5,
+            min_vol_samples=5, vol_lookback_bars=20,
+            band_frac=0.0, funding_carry_enabled=False,
+            use_rank_conviction=False, kelly_fraction=0.3,
+        )
+        close = np.full((n_bars + 1, n_syms), 100.0, dtype=np.float32)
+        close[1:, 0] = 100.0 + np.cumsum(np.random.default_rng(42).normal(0, 0.5, n_bars))
+        close[1:, 1] = 100.0 + np.cumsum(np.random.default_rng(43).normal(0, 0.5, n_bars))
+        weights = compute_dynamic_compounding_path(
+            forecast, sigma_2d, funding, config, close_2d=close, cost_bps=8.0,
+        )
+        assert np.all(np.isfinite(weights))

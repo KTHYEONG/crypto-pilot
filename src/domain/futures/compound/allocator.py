@@ -478,26 +478,17 @@ def compute_dynamic_compounding_path(
             sigma_safe = np.maximum(sigma_t.astype(np.float64), config.sigma_floor)
             desired = np.where(eligible, config.kelly_fraction * mu_f64 / sigma_safe, 0.0)
 
-        if len(return_history) >= config.min_vol_samples:
-            rv_ann = float(np.std(return_history[-config.vol_lookback_bars:], ddof=1)) * np.sqrt(2190.0)
-            vol_target = derive_causal_vol_target(equity_history, return_history, config)
-            leverage = min(vol_target / max(rv_ann, 1e-15), config.vol_scale_max)
-        else:
-            leverage = min(0.5, config.vol_scale_max)
-
-        desired = desired * leverage
-
         smoothed = config.alpha_smooth * desired + (1.0 - config.alpha_smooth) * state
 
         if config.band_frac > 0:
-            band = config.band_frac * float(np.mean(np.abs(smoothed)))
+            band_i = config.band_frac * np.abs(state)
             delta = np.abs(smoothed - state)
-            state = np.where(delta > band, smoothed, state)
+            state = np.where(delta > band_i, smoothed, state)
         else:
             state = smoothed
 
-        if not np.any(eligible):
-            state = np.zeros(n_syms, dtype=np.float64)
+        support_mask = eligible & (np.abs(mu_f64) > 0)
+        state = np.where(support_mask, state, 0.0)
 
         if cooldown_counter > 0:
             cooldown_counter -= 1
@@ -516,6 +507,15 @@ def compute_dynamic_compounding_path(
                 dd_scale = 1.0
 
         w_exec = state * dd_scale
+
+        if len(return_history) >= config.min_vol_samples:
+            rv_ann = float(np.std(return_history[-config.vol_lookback_bars:], ddof=1)) * np.sqrt(2190.0)
+            vol_target = derive_causal_vol_target(equity_history, return_history, config)
+            vol_scale = min(vol_target / max(rv_ann, 1e-15), config.vol_scale_max)
+        else:
+            vol_scale = min(0.5, config.vol_scale_max)
+
+        w_exec = w_exec * vol_scale
         w_exec = _apply_portfolio_level_caps(w_exec, config.max_long_leverage, config.max_short_leverage, config.max_gross_leverage)
         weights[t] = w_exec
 
