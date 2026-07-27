@@ -4,7 +4,9 @@ import hashlib
 import io
 import json
 import logging
+import os
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Any
@@ -530,6 +532,85 @@ def materialize_feature_grid(
     return NativeFeatureGrid(
         timestamps_ns=timestamps, symbols=request.symbols,
         fields=fields, available=available,
+        data_manifest_hash=snapshot.manifest_hash,
+    )
+
+
+def materialize_feature_grid_parallel(
+    *, request: GridRequest, snapshot: DataSnapshot, dataset: DatasetKind, max_workers: int = 8,
+) -> NativeFeatureGrid:
+    if not request.symbols:
+        raise ValueError("grid request must specify at least one symbol")
+    if not request.fields:
+        raise ValueError("grid request must specify at least one field")
+    if request.timeframe != request.source_timeframe:
+        raise ValueError("feature grid requires matching request and source timeframe")
+
+    timestamps = np.arange(request.start_time_ns, request.end_time_ns, 3_600_000_000_000, dtype=np.int64)
+    fields: dict[str, NDArray[np.float64]] = {
+        field: np.full((len(timestamps), len(request.symbols)), np.nan, dtype=np.float64)
+        for field in request.fields
+    }
+    available: dict[str, NDArray[np.bool_]] = {
+        field: np.zeros((len(timestamps), len(request.symbols)), dtype=np.bool_)
+        for field in request.fields
+    }
+
+    selected: dict[str, list[Path]] = {}
+    for partition in snapshot.partitions:
+        overlaps = (
+            partition.start_time_ms * 1_000_000 < request.end_time_ns
+            and partition.end_time_ms * 1_000_000 >= request.start_time_ns
+        )
+        if partition.dataset is dataset and partition.symbol in request.symbols and overlaps:
+            selected.setdefault(partition.symbol, []).append(partition.path)
+
+    n_workers = min(max_workers, os.cpu_count() or 1)
+
+    def _load_symbol(column: int, symbol: str) -> dict[str, dict[str, NDArray[np.float64] | NDArray[np.bool_]]]:
+        paths = selected.get(symbol, [])
+        result: dict[str, dict[str, NDArray[np.float64] | NDArray[np.bool_]]] = {}
+        if not paths:
+            return result
+        frame = _load_partition_data(
+            paths,
+            start_time_ns=request.start_time_ns,
+            end_time_ns=request.end_time_ns,
+            fields=request.fields,
+        )
+        frame = BinanceQueryClient._normalize_timestamp(frame)
+        source_ns = frame["timestamp"].to_numpy(dtype=np.int64) * 1_000_000
+        positions = np.searchsorted(source_ns, timestamps)
+        exact = (positions < len(source_ns)) & (source_ns[np.minimum(positions, len(source_ns) - 1)] == timestamps)
+        for field in request.fields:
+            if field not in frame.columns:
+                continue
+            values = pd.to_numeric(frame[field], errors="coerce").to_numpy(dtype=np.float64)
+            valid = exact & np.isfinite(values[np.minimum(positions, len(values) - 1)])
+            col_values = np.full(len(timestamps), np.nan, dtype=np.float64)
+            col_avail = np.zeros(len(timestamps), dtype=np.bool_)
+            col_values[valid] = values[positions[valid]]
+            col_avail[valid] = True
+            result[field] = {"values": col_values, "available": col_avail}
+        return result
+
+    symbol_list = list(request.symbols)
+    with ThreadPoolExecutor(max_workers=n_workers) as executor:
+        future_map = {
+            executor.submit(_load_symbol, col, sym): col
+            for col, sym in enumerate(symbol_list)
+        }
+        for future in as_completed(future_map):
+            col = future_map[future]
+            col_result = future.result()
+            for field, data in col_result.items():
+                fields[field][:, col] = data["values"]
+                available[field][:, col] = data["available"]
+
+    return NativeFeatureGrid(
+        timestamps_ns=timestamps, symbols=request.symbols,
+        fields=fields,  # type: ignore[arg-type]
+        available=available,
         data_manifest_hash=snapshot.manifest_hash,
     )
 

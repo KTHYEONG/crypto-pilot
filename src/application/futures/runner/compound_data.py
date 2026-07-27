@@ -17,7 +17,10 @@ from src.domain.futures.data_lake.contracts import (
     LakeUniverse,
     NativeFeatureGrid,
 )
-from src.domain.futures.data_lake.query import materialize_causal_metrics_grid, materialize_feature_grid
+from src.domain.futures.data_lake.query import (
+    materialize_causal_metrics_grid,
+    materialize_feature_grid_parallel,
+)
 from src.domain.futures.data_lake.run_windows import QuarterlyRunWindow
 
 _logger = logging.getLogger(__name__)
@@ -54,7 +57,7 @@ def build_multiscale_market_cube(
     core_names = (
         "open", "high", "low", "close", "quote_volume", "taker_buy_quote",
     )
-    grid = materialize_feature_grid(
+    grid = materialize_feature_grid_parallel(
         request=GridRequest(
             symbols=symbols,
             timeframe="1h",
@@ -77,7 +80,7 @@ def build_multiscale_market_cube(
             start_time_ns=int(timestamps_ns[0]),
             end_time_ns=int(timestamps_ns[-1] + 3_600_000_000_000),
         )
-    funding_grid = materialize_feature_grid(request=funding_request, snapshot=snapshot, dataset=DatasetKind.FUNDING_EVENT)
+    funding_grid = materialize_feature_grid_parallel(request=funding_request, snapshot=snapshot, dataset=DatasetKind.FUNDING_EVENT)
     funding = np.asarray(funding_grid.fields.get("funding_rate", np.full((n_bars, n_syms), np.nan, dtype=np.float64)), dtype=np.float32)
     funding_available = funding_grid.available.get("funding_rate", np.zeros((n_bars, n_syms), dtype=np.bool_))
 
@@ -89,13 +92,13 @@ def build_multiscale_market_cube(
         start_time_ns=int(timestamps_ns[0]),
         end_time_ns=int(timestamps_ns[-1] + 3_600_000_000_000),
     )
-    premium_grid = materialize_feature_grid(
+    premium_grid = materialize_feature_grid_parallel(
         request=feature_request, snapshot=snapshot, dataset=DatasetKind.PREMIUM_5M,
     )
-    mark_grid = materialize_feature_grid(
+    mark_grid = materialize_feature_grid_parallel(
         request=feature_request, snapshot=snapshot, dataset=DatasetKind.MARK_1M,
     )
-    index_grid = materialize_feature_grid(
+    index_grid = materialize_feature_grid_parallel(
         request=feature_request, snapshot=snapshot, dataset=DatasetKind.INDEX_1M,
     )
     metrics_request = GridRequest(
@@ -106,7 +109,7 @@ def build_multiscale_market_cube(
         start_time_ns=int(timestamps_ns[0]),
         end_time_ns=int(timestamps_ns[-1] + 3_600_000_000_000),
     )
-    metrics_grid = materialize_feature_grid(
+    metrics_grid = materialize_feature_grid_parallel(
         request=metrics_request, snapshot=snapshot, dataset=DatasetKind.METRICS_5M,
     )
 
