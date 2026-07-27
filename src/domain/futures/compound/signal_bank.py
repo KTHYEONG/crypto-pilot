@@ -38,10 +38,11 @@ def _rolling_mad_z_numba_kernel(
     n_t, n_s = arr.shape
     z = np.full((n_t, n_s), np.nan, dtype=np.float64)
     for s in prange(n_s):
+        max_window = min(window, n_t)
+        buf = np.empty(max_window, dtype=np.float64)
+        dev_buf = np.empty(max_window, dtype=np.float64)
         for t in range(min_periods - 1, n_t):
             start = max(0, t - window + 1)
-            wlen = t - start + 1
-            buf = np.empty(wlen, dtype=np.float64)
             n_valid = 0
             for i in range(start, t + 1):
                 v = arr[i, s]
@@ -50,18 +51,20 @@ def _rolling_mad_z_numba_kernel(
                     n_valid += 1
             if n_valid == 0:
                 continue
-            valid_sorted = np.sort(buf[:n_valid])
+            buf_view = buf[:n_valid]
+            buf_view.sort()
             if n_valid % 2 == 1:
-                med = valid_sorted[n_valid // 2]
+                med = buf_view[n_valid // 2]
             else:
-                med = (valid_sorted[n_valid // 2 - 1] + valid_sorted[n_valid // 2]) / 2.0
+                med = (buf_view[n_valid // 2 - 1] + buf_view[n_valid // 2]) / 2.0
             for i in range(n_valid):
-                buf[i] = np.abs(buf[i] - med)
-            dev_sorted = np.sort(buf[:n_valid])
+                dev_buf[i] = np.abs(buf_view[i] - med)
+            dev_view = dev_buf[:n_valid]
+            dev_view.sort()
             if n_valid % 2 == 1:
-                mad = dev_sorted[n_valid // 2]
+                mad = dev_view[n_valid // 2]
             else:
-                mad = (dev_sorted[n_valid // 2 - 1] + dev_sorted[n_valid // 2]) / 2.0
+                mad = (dev_view[n_valid // 2 - 1] + dev_view[n_valid // 2]) / 2.0
             if mad < 1e-12:
                 continue
             z[t, s] = (arr[t, s] - med) / (1.4826 * mad)
@@ -572,22 +575,6 @@ def estimate_signal_panel_peak_bytes(
     return math.ceil(1.15 * total)
 
 
-def _compute_recipe_batch(
-    batch: tuple[tuple[int, SignalDescriptor], ...],
-    bars: MultiTimeframeBars,
-    eligible_2d: NDArray[np.bool_],
-) -> list[tuple[int, NDArray[np.float64] | None]]:
-    results: list[tuple[int, NDArray[np.float64] | None]] = []
-    for k, desc in batch:
-        try:
-            raw = _compute_raw_signal(desc, bars, eligible_2d)
-        except Exception:
-            _logger.exception("[SYS] recipe %d failed in worker", k)
-            raw = None
-        results.append((k, raw))
-    return results
-
-
 def build_raw_signal_panel(
     bars: MultiTimeframeBars,
     eligible_2d: NDArray[np.bool_],
@@ -649,35 +636,40 @@ def build_raw_signal_panel(
     observed_peak_rss = current_rss
 
     n_workers = min(4, os.cpu_count() or 1)
-    if n_workers > 1 and n_cat >= n_workers:
-        batch_size = max(1, n_cat // n_workers)
-        batches: list[tuple[tuple[int, SignalDescriptor], ...]] = []
-        for batch_start in range(0, n_cat, batch_size):
-            batch_end = min(batch_start + batch_size, n_cat)
-            batch = tuple((k, catalog[k]) for k in range(batch_start, batch_end))
-            batches.append(batch)
+    use_tpe = n_workers > 1 and n_cat >= n_workers
 
+    if use_tpe:
+        _numba_set_num_threads(1)
+
+    def _run_one(k: int, desc: SignalDescriptor) -> tuple[int, NDArray[np.float64] | None]:
         try:
+            raw = _compute_raw_signal(desc, bars, eligible_2d)
+        except Exception:
+            _logger.exception("[SYS] recipe %d failed", k)
+            raw = None
+        return k, raw
+
+    try:
+        if use_tpe:
+            catalog_list = list(enumerate(catalog))
             with ThreadPoolExecutor(max_workers=n_workers) as executor:
-                futures = [executor.submit(_compute_recipe_batch, batch, bars, eligible_2d) for batch in batches]
+                futures = {executor.submit(_run_one, k, desc): k for k, desc in catalog_list}
                 for future in as_completed(futures):
-                    for k, raw in future.result():
-                        _write_recipe_result(z_3d, valid_3d, k, raw, eligible_2d, complete_4h)
-                        obs = psutil.Process().memory_info().rss
-                        if obs > observed_peak_rss:
-                            observed_peak_rss = obs
-                        if obs >= max_rss_bytes:
-                            _logger.error(
-                                "[SYS][L1] RSS exceeded limit: observed_rss_mb=%.1f max_rss_mb=%d",
-                                obs / 1048576, max_rss_mb,
-                            )
-                            raise MemoryError(f"runtime RSS {obs} >= max {max_rss_bytes}")
-        finally:
-            _numba_set_num_threads(prior_numba_threads)
-    else:
-        try:
+                    k, raw = future.result()
+                    _write_recipe_result(z_3d, valid_3d, k, raw, eligible_2d, complete_4h)
+                    del raw
+                    obs = psutil.Process().memory_info().rss
+                    if obs > observed_peak_rss:
+                        observed_peak_rss = obs
+                    if obs >= max_rss_bytes:
+                        _logger.error(
+                            "[SYS][L1] RSS exceeded limit: observed_rss_mb=%.1f max_rss_mb=%d",
+                            obs / 1048576, max_rss_mb,
+                        )
+                        raise MemoryError(f"runtime RSS {obs} >= max {max_rss_bytes}")
+        else:
             for k, desc in enumerate(catalog):
-                raw = _compute_raw_signal(desc, bars, eligible_2d)
+                k, raw = _run_one(k, desc)
                 _write_recipe_result(z_3d, valid_3d, k, raw, eligible_2d, complete_4h)
                 del raw
                 obs = psutil.Process().memory_info().rss
@@ -689,8 +681,8 @@ def build_raw_signal_panel(
                         obs / 1048576, max_rss_mb,
                     )
                     raise MemoryError(f"runtime RSS {obs} >= max {max_rss_bytes}")
-        finally:
-            _numba_set_num_threads(prior_numba_threads)
+    finally:
+        _numba_set_num_threads(prior_numba_threads)
 
     elapsed = time.perf_counter() - started
     total_valid = int(np.sum(valid_3d))
