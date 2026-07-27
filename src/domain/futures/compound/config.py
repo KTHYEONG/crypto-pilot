@@ -37,7 +37,7 @@ class L2BenchmarkConfig:
 
 @dataclass(slots=True, frozen=True)
 class L2GateConfig:
-    min_oos_days: int = 365
+    min_oos_days: int = 500
     min_active_days_ratio: float = 0.10
     min_rebalances: int = 30
     min_excess_growth_probability: float = 0.90
@@ -333,6 +333,9 @@ class DynamicCompoundingConfig:
     max_ann_vol_budget: float = 0.25
     risk_safety_factor: float = 0.75
     min_mdd_vol_ratio: float = 0.50
+    mdd_budget: float = 0.107
+    mdd_parity_lookback_days: int = 180
+    mdd_parity_max_scale: float = 3.0
 
     def __post_init__(self) -> None:
         assert 0 < self.kelly_fraction <= 1
@@ -353,6 +356,9 @@ class DynamicCompoundingConfig:
         assert self.max_ann_vol_budget > 0
         assert self.risk_safety_factor > 0
         assert self.min_mdd_vol_ratio > 0
+        assert self.mdd_budget > 0
+        assert self.mdd_parity_lookback_days > 0
+        assert self.mdd_parity_max_scale >= 1.0
 
 
 @dataclass(slots=True, frozen=True)

@@ -345,6 +345,62 @@ def solve_growth_optimal_weights(
     )
 
 
+def apply_beta_hedge_overlay(
+    weights_2d: NDArray[np.float64],
+    *, symbols: tuple[str, ...], beta_per_bar_1d: NDArray[np.float64],
+    benchmark_symbols: tuple[str, ...], benchmark_weights: tuple[float, ...],
+    benchmark_scale_1d: NDArray[np.float64], gross_cap: float,
+) -> NDArray[np.float64]:
+    if len(beta_per_bar_1d) != weights_2d.shape[0]:
+        raise ValueError(
+            f"beta_per_bar_1d length {len(beta_per_bar_1d)} != weights_2d rows {weights_2d.shape[0]}"
+        )
+    if len(benchmark_scale_1d) != weights_2d.shape[0]:
+        raise ValueError(
+            f"benchmark_scale_1d length {len(benchmark_scale_1d)} != weights_2d rows {weights_2d.shape[0]}"
+        )
+    if len(benchmark_symbols) != len(benchmark_weights):
+        raise ValueError("benchmark_symbols and benchmark_weights must have same length")
+    sym_indices: list[int] = []
+    for sym in benchmark_symbols:
+        try:
+            sym_indices.append(symbols.index(sym))
+        except ValueError as err:
+            raise ValueError(f"missing benchmark symbol in universe: {sym}") from err
+    result = weights_2d.copy().astype(np.float64)
+    n_bars = result.shape[0]
+    for i, sym_idx in enumerate(sym_indices):
+        w = benchmark_weights[i]
+        hedge_amount = -beta_per_bar_1d * benchmark_scale_1d * w
+        result[:, sym_idx] = result[:, sym_idx] + hedge_amount
+    gross = np.sum(np.abs(result), axis=1)
+    scale = np.ones(n_bars, dtype=np.float64)
+    mask = gross > gross_cap
+    if np.any(mask):
+        scale[mask] = gross_cap / gross[mask]
+    result = result * scale[:, np.newaxis]
+    return result
+
+
+def derive_mdd_parity_scale(
+    past_daily_returns_1d: NDArray[np.float64],
+    *, mdd_budget: float, max_scale: float,
+) -> float:
+    if mdd_budget <= 0:
+        raise ValueError(f"mdd_budget must be positive, got {mdd_budget}")
+    r = past_daily_returns_1d[np.isfinite(past_daily_returns_1d)]
+    if len(r) < 10:
+        return max_scale
+    equity = np.cumprod(1.0 + r)
+    peak = np.maximum.accumulate(equity)
+    dd = 1.0 - equity / np.maximum(peak, 1e-15)
+    realized_mdd = float(np.max(dd))
+    if realized_mdd < 1e-12:
+        return max_scale
+    scale = mdd_budget / realized_mdd
+    return float(np.clip(scale, 1.0, max_scale))
+
+
 def _apply_portfolio_level_caps(
     w: NDArray[np.float64],
     max_long: float,
