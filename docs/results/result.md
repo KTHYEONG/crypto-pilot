@@ -1,3 +1,37 @@
+## L2 복리 도약 스펙(β-헤지·정렬정정·창재분할) 구현 및 실측 — NO_EVIDENCE(L1 admission 전멸) — 2026-07-27
+
+- 실행일: `2026-07-27`
+- 실행 명령: `L2_DRY_RUN=1 uv run python src/execution/opt_main_futures.py --phase full --sync local --date 2026-07-26`
+- 검증 창: 워밍업 90일 / **L1 180일**(365→축소) / **L2 547일**(365→확장) / L3 봉인 홀드아웃 90일 (합 907일 ≤ 축 910일)
+- 데이터 축: 51개 CORE 완전 이력 심볼 × 5,442개 4h봉
+- 스펙: `docs/specs/l2-compounding-leap.md`
+- exit_code: **1** (`integrity_failure`)
+- 산출물: `logs/futures/compound/20260727_041859/`
+
+### 배경 — 정렬 결함의 실측 확정과 β-분리 설계
+
+직전 항목(`20260727_013707`, FAIL)이 "진짜 정직한 실력"이라 기록됐으나, 영속 `l2_gate_inputs.npz`를 원시 레이크(`data/futures/lake/klines_1h`)와 직접 대조한 결과 **여전히 1일 라벨 오정렬이 남아 있었다**: `corr(strategy[t], benchmark[t])=-0.003` vs `corr(strategy[t], benchmark[t-1])=+0.846`. 원인은 `validation.py::_daily_timestamps_from_4h`가 라벨에만 24h를 가산(`complete_days + 6*ns_per_4h`)하고 값은 가산 없는 그리드에 남아있던 구조적 버그(A-4 미해소). 정렬 정정 후 causal β(60일 후행 회귀)로 재추정한 결과 전략의 진짜 β=0.643 — 시장중립이 아니라 64% 베타 롱이었음을 확인. β-헤지 잔차는 절대수익 대비 성장(8.10%→8.44%)·변동성(12.0%→7.3%)·regime 정상성(분기별 SR 붕괴 +1.99→-1.44가 헤지 후 소멸) 전부에서 우월함을 `scratch/verify_l2_growth_leap.py`로 실측 확정. 레버리지는 `p_growth`를 사실상 불변시켜(x1→x3: 0.882→0.867) 게이트 무해성이 입증됐으므로, 동일 MDD 예산(10.7%)에서 x2.50 성장 레버(g≈20.1%)를 P4로 설계했다.
+
+### 구현 (`/implement` → `/check`)
+
+- 수정: `validation.py`(라벨 정렬 정정·fail-closed 정렬 불변식·β-조정 excess), `benchmark.py`(`causal_beta_series`·`assert_contemporaneous_alignment`), `allocator.py`(`apply_beta_hedge_overlay`·`derive_mdd_parity_scale`), `config.py`(β lookback/clip·`min_oos_days` 365→500 상향·`mdd_budget`), `engine.py`(PASS-1 무헤지 시뮬 → causal β 추정 → 헤지 오버레이 → PASS-2 최종 시뮬 배선), `run_windows.py`(`l1_days` 365→180, `l2_days` 365→547)
+- `/check` PASS: Wiring ✅ | Non-dummy AST ✅ | Mypy Strict ✅ | Regression Test ✅ | Coverage 85%. 임계값 완화 0건(확률 게이트 4종 0.90/0.10 불변, `min_oos_days`는 상향).
+
+### 실전 CLI 재실행 결과 — 유닛테스트 PASS와 프로덕션 실행의 괴리
+
+`/check` PASS 이후 실제 CLI 전체 파이프라인 재실행에서 **북이 완전히 텅 빈(전량 현금) NO_EVIDENCE**로 귀결됐다. `target_weights.npy` 직접 확인: 5,442봉 × 51종목 전부 0.
+
+원인(INFO 로그로 확정): `[L1] exit-aware handoff admitted=False sleeves=274` — 274개 신호 후보 중 **단 1개도 admission 통과 못함**. 기계적 원인은 `config.py`의 기존 admission 게이트 `min_effective_days=180.0`이 L1 윈도우 축소(365→180일)와 정면 충돌: `build_folds_4h`가 180일 윈도우를 5개 fold로 분할하면 fold당 유효일수가 180일에 크게 미달해 거의 모든 신호가 걸러진다. 스펙 `[LIMIT-07]`("L1 축소가 admission 통과 신호 수를 감소시킬 수 있다")이 예견한 위험이 **감소가 아니라 전멸**로 실현됐다.
+
+### 판정
+
+- 정렬 결함 실측 확인·β-헤지 설계·구현 자체는 `/check` 기준으로 정직하게 PASS다(코드 계약 준수, 회귀 테스트 통과).
+- 그러나 **실전 CLI 결과는 이전 FAIL(6.75% CAGR)보다 악화된 NO_EVIDENCE(0% 활동)** 다. P3(창 재분할)가 기존 admission 게이트와의 상호작용을 사전에 실측하지 않은 채 설계된 것이 원인 — 유닛테스트 계약(`test_quarterly_window_fits_available_axis` 등)은 날짜 산술만 검증했고 실제 L1 신호 admission 통과율에 대한 통합 검증이 스펙 범위에 없었다.
+- **L1 창 크기 vs admission 게이트 재정의**는 사용자 결정 대기 중(질문 제시됨, 미응답). P0(정렬 정정)·P1(β 측정)·P2(헤지 집행) 자체는 유효하되, P3(창 재분할) 파라미터는 **미검증 상태로 보류**한다.
+- `L2_DRY_RUN=0`은 여전히 미전환.
+
+---
+
 ## L2 게이트 정직화·리스크예산 스펙 구현 및 실측 — 진짜 첫 정직한 판정(FAIL) — 2026-07-27
 
 - 실행일: `2026-07-27`
