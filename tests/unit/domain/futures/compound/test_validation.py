@@ -416,3 +416,14 @@ class TestL2EvaluationNewFields:
 
     def test_evaluate_l2_walk_forward_wires_spa_and_block_length(self) -> None:
         self.test_evaluate_l2_walk_forward_sets_spa_and_block_fields()
+
+
+def test_excess_degenerates_to_absolute_when_beta_zero() -> None:
+    rng = np.random.default_rng(42)
+    n = 100
+    strat = rng.normal(0.0, 0.01, n).astype(np.float64)
+    bench = rng.normal(0.0, 0.01, n).astype(np.float64)
+    excess_zero = np.log1p(strat) - np.zeros(n) * np.log1p(bench)
+    np.testing.assert_array_almost_equal(excess_zero, np.log1p(strat))
+    excess_one = np.log1p(strat) - np.ones(n) * np.log1p(bench)
+    np.testing.assert_array_almost_equal(excess_one, np.log1p(strat) - np.log1p(bench))

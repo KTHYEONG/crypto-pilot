@@ -6,9 +6,10 @@ import pytest
 from src.domain.futures.compound.allocator import (
     apply_cost_aware_net_edge,
     combine_alpha_forecasts,
+    derive_mdd_parity_scale,
     solve_growth_optimal_weights,
 )
-from src.domain.futures.compound.config import AllocatorConfig
+from src.domain.futures.compound.config import AllocatorConfig, L2GateConfig
 from src.domain.futures.compound.contracts import (
     AllocationConstraints,
     AlphaForecastTape,
@@ -469,3 +470,31 @@ class TestComputeDynamicCompoundingPathStateMachine:
             forecast, sigma_2d, funding, config, close_2d=close, cost_bps=8.0,
         )
         assert np.all(np.isfinite(weights))
+
+
+def test_mdd_parity_scale_causal_and_clipped() -> None:
+    rng = np.random.default_rng(42)
+    n = 500
+    returns = rng.normal(0.0, 0.01, n).astype(np.float64)
+    scale = derive_mdd_parity_scale(returns, mdd_budget=0.10, max_scale=3.0)
+    assert 1.0 <= scale <= 3.0
+
+    high_dd = np.full(n, -0.01, dtype=np.float64)
+    high_dd[100:120] = -0.05
+    high_dd[200:220] = -0.03
+    scale_high = derive_mdd_parity_scale(high_dd, mdd_budget=0.10, max_scale=3.0)
+
+    low_dd = np.full(n, 0.001, dtype=np.float64)
+    low_dd[100:120] = -0.005
+    low_dd[200:220] = -0.003
+    scale_low = derive_mdd_parity_scale(low_dd, mdd_budget=0.10, max_scale=3.0)
+    assert scale_high < scale_low
+
+
+def test_min_oos_days_raised_not_relaxed() -> None:
+    cfg = L2GateConfig()
+    assert cfg.min_oos_days == 500
+    assert cfg.min_excess_growth_probability == 0.90
+    assert cfg.min_deflated_sharpe_probability == 0.90
+    assert cfg.min_bootstrap_sharpe_probability == 0.90
+    assert cfg.max_spa_pvalue == 0.10
