@@ -4,7 +4,7 @@ import json
 import sqlite3
 import time
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date
 from enum import StrEnum
 from pathlib import Path
@@ -346,6 +346,14 @@ class ExecutionLedger:
     integrity_reasons: tuple[str, ...]
 
 
+def _empty_f64() -> NDArray[np.float64]:
+    return np.array([], dtype=np.float64)
+
+
+def _empty_i64() -> NDArray[np.int64]:
+    return np.array([], dtype=np.int64)
+
+
 @dataclass(slots=True, frozen=True)
 class L2Evaluation:
     verdict: L2GateVerdict
@@ -375,6 +383,13 @@ class L2Evaluation:
     integrity_ok: bool
     reasons: tuple[str, ...]
     absolute_cagr: float = 0.0
+    spa_pvalue: float = 1.0
+    bootstrap_block_days: float = 0.0
+    daily_strategy_returns_1d: NDArray[np.float64] = field(default_factory=_empty_f64)
+    daily_benchmark_returns_1d: NDArray[np.float64] = field(default_factory=_empty_f64)
+    daily_excess_returns_1d: NDArray[np.float64] = field(default_factory=_empty_f64)
+    daily_fee_returns_1d: NDArray[np.float64] = field(default_factory=_empty_f64)
+    daily_day_start_ns: NDArray[np.int64] = field(default_factory=_empty_i64)
 
     def __post_init__(self) -> None:
         for metric in (

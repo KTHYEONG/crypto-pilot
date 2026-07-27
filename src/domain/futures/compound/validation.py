@@ -11,6 +11,12 @@ from src.domain.futures.compound.benchmark import (  # noqa: F401
     _causal_volatility_scale,
     build_causal_l2_benchmark,
 )
+from src.domain.futures.compound.bootstrap import (
+    circular_stationary_bootstrap_growth,
+    circular_stationary_bootstrap_sharpe,
+    politis_white_block_length,
+    stepwise_spa_pvalue,
+)
 from src.domain.futures.compound.config import DataPlaneConfig, L2GateConfig, L3ValidationConfig
 from src.domain.futures.compound.contracts import (
     CausalityError,
@@ -95,6 +101,26 @@ def aggregate_returns_to_utc_days(
 def _annualized_log_growth(returns: NDArray[np.float64], periods_per_year: float) -> float:
     log_returns = np.log1p(np.where(np.isfinite(returns), returns, 0.0))
     return float(periods_per_year * np.mean(log_returns))
+
+def annualized_compound_growth(
+    simple_returns: NDArray[np.float64], periods_per_year: float,
+) -> float:
+    if np.any(simple_returns <= -1.0):
+        raise ValueError("simple_returns contains values <= -1.0")
+    r = simple_returns[np.isfinite(simple_returns)]
+    if len(r) == 0:
+        return 0.0
+    log_growth = float(np.mean(np.log1p(r)))
+    return float(periods_per_year * log_growth)
+
+
+def build_frozen_control_weights(
+    weights_2d: NDArray[np.float64], freeze_idx: int,
+) -> NDArray[np.float64]:
+    if freeze_idx < 0 or freeze_idx >= weights_2d.shape[0]:
+        raise ValueError(f"freeze_idx={freeze_idx} out of range [0, {weights_2d.shape[0]})")
+    frozen = weights_2d[freeze_idx].copy()
+    return np.broadcast_to(frozen, weights_2d.shape).copy()
 
 
 def _max_drawdown(equity: NDArray[np.float64]) -> float:
@@ -234,6 +260,7 @@ def evaluate_l2_walk_forward(
     trial_multiplicity: TrialMultiplicity,
     config: L2GateConfig,
     bootstrap_seed: int,
+    frozen_control_daily_1d: NDArray[np.float64] | None = None,
 ) -> L2Evaluation:
     candidate_count = trial_multiplicity.n_trials
 
@@ -331,14 +358,17 @@ def evaluate_l2_walk_forward(
     # CAGR and equity multiple
     log_growth = _annualized_log_growth(np.expm1(excess_returns), 365.25)
     cagr = float(math.expm1(log_growth))
-    absolute_log_growth = _annualized_log_growth(np.expm1(daily_returns), 365.25)
+    absolute_log_growth = annualized_compound_growth(daily_returns, 365.25)
     absolute_cagr_val = float(math.expm1(absolute_log_growth))
     equity: NDArray[np.float64] = np.asarray(np.cumprod(1.0 + daily_returns), dtype=np.float64)
     equity_multiple = float(equity[-1]) if equity.size > 0 else 1.0
 
+    # Bootstrap block size via Politis-White
+    pw_block = politis_white_block_length(excess_returns)
+
     # Sharpe ratio
-    obs_sharpe, sharpe_prob = _stationary_bootstrap_sharpe_probability(
-        excess_returns, n_bootstrap=2000, block_size=5, seed=bootstrap_seed,
+    obs_sharpe, sharpe_prob = circular_stationary_bootstrap_sharpe(
+        excess_returns, 365.25, n_bootstrap=2000, block_size=pw_block, seed=bootstrap_seed,
     )
     dsr = deflated_sharpe_probability(
         observed_sharpe=obs_sharpe, multiplicity=trial_multiplicity,
@@ -346,11 +376,11 @@ def evaluate_l2_walk_forward(
     )
 
     # Growth bootstrap
-    excess_lcb90, _, excess_prob = _stationary_bootstrap_lcb90(
-        np.expm1(excess_returns), 365.25, n_bootstrap=1000, block_size=5, seed=bootstrap_seed,
+    excess_lcb90, _, excess_prob = circular_stationary_bootstrap_growth(
+        np.expm1(excess_returns), 365.25, n_bootstrap=1000, block_size=pw_block, seed=bootstrap_seed,
     )
-    stressed_lcb90, _, _ = _stationary_bootstrap_lcb90(
-        np.expm1(stressed_daily), 365.25, n_bootstrap=1000, block_size=5, seed=bootstrap_seed + 1,
+    stressed_lcb90, _, _ = circular_stationary_bootstrap_growth(
+        np.expm1(stressed_daily), 365.25, n_bootstrap=1000, block_size=pw_block, seed=bootstrap_seed + 1,
     )
 
     # Stressed positive fold count
@@ -371,7 +401,7 @@ def evaluate_l2_walk_forward(
 
     # Cost drag ratio: compare absolute (not excess) pre-fee vs post-fee CAGR,
     # both in the same expm1 (compounded) space [LIMIT-10]
-    pre_fee_log_growth = _annualized_log_growth(np.expm1(pre_fee_daily), 365.25)
+    pre_fee_log_growth = annualized_compound_growth(pre_fee_daily, 365.25)
     pre_fee_cagr = float(math.expm1(pre_fee_log_growth))
     cost_drag = 1.0 - absolute_cagr_val / max(pre_fee_cagr, 1e-12) if pre_fee_cagr > 0 else 0.0
 
@@ -383,6 +413,20 @@ def evaluate_l2_walk_forward(
 
     active_days_ratio = int(np.sum(np.abs(ledger.net_returns_1d) > 1e-15)) / max(len(ledger.net_returns_1d), 1)
     calmar = cagr / max(mdd, 1e-12)
+
+    spa_pvalue = 1.0
+    if frozen_control_daily_1d is not None and frozen_control_daily_1d.size == oos_days:
+        controls = [benchmark_returns, np.zeros(oos_days, dtype=np.float64), frozen_control_daily_1d]
+        controls_2d = np.stack(controls, axis=0)
+        spa_pvalue = stepwise_spa_pvalue(
+            np.expm1(excess_returns), controls_2d,
+            block_size=pw_block, n_bootstrap=1000, seed=bootstrap_seed,
+        )
+    elif frozen_control_daily_1d is not None and frozen_control_daily_1d.size > 0 and frozen_control_daily_1d.size != oos_days:
+        _logger.warning(
+            "[EVAL] frozen_control_daily_1d size mismatch: %d != %d, skipping SPA",
+            frozen_control_daily_1d.size, oos_days,
+        )
 
     # Five category gates
     categories: list[L2CategoryResult] = []
@@ -428,6 +472,9 @@ def evaluate_l2_walk_forward(
         skill_pass = False
     if sharpe_prob < config.min_bootstrap_sharpe_probability:
         skill_reasons.append(f"sharpe_probability={sharpe_prob:.4f}<{config.min_bootstrap_sharpe_probability}")
+        skill_pass = False
+    if spa_pvalue > config.max_spa_pvalue:
+        skill_reasons.append(f"spa_pvalue={spa_pvalue:.4f}>{config.max_spa_pvalue}")
         skill_pass = False
     categories.append(L2CategoryResult("statistical_skill", skill_pass, tuple(skill_reasons)))
 
@@ -497,6 +544,13 @@ def evaluate_l2_walk_forward(
         category_results=tuple(categories),
         integrity_ok=True,
         reasons=tuple(fail_reasons),
+        spa_pvalue=spa_pvalue,
+        bootstrap_block_days=pw_block,
+        daily_strategy_returns_1d=daily_returns.copy(),
+        daily_benchmark_returns_1d=benchmark_returns.copy(),
+        daily_excess_returns_1d=excess_returns.copy(),
+        daily_fee_returns_1d=fee_daily.copy(),
+        daily_day_start_ns=daily_timestamps.copy(),
     )
 
 
@@ -531,6 +585,13 @@ def evaluate_l3_sealed_holdout(
     holdout_manifest: SealedHoldoutManifest,
     config: L3ValidationConfig,
 ) -> L3ValidationResult:
+    cap = config.l2_prior_effective_days_cap
+    if len(l2_prior_returns) > cap * 2:
+        raise ValueError(
+            f"l2_prior_returns length {len(l2_prior_returns)} exceeds {cap * 2} "
+            f"(2 * l2_prior_effective_days_cap); 4h bars must not be passed as daily"
+        )
+
     reasons: list[str] = []
 
     if not holdout_ledger.integrity_ok:
