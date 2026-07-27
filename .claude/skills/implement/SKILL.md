@@ -36,8 +36,9 @@ Optimize for **low-cost models (Doer)** by enforcing strict mechanical execution
 - **Step 4: L1.5 Local Verification & Clean Handshake**
   - Run pytest locally (`uv run pytest -k [target_name] --cov`) to ensure tests pass and coverage targets (Core >=85%, Adapter >=65%) are met.
   - Run `uv run ruff check --fix [modified_files]` to ensure format/style compliance.
+  - **Do NOT run `mypy` during the implement phase.** (Static type audit with `mypy` is strictly reserved for the subsequent `check` phase).
   - Remove any temporary `print()` debugging statements.
-  - **STOP execution and output the concise Implementation summary.** Do NOT auto-trigger check skill.
+  - **STOP execution and output the concise Implementation summary.** Do NOT include `mypy` status in the output format. Do NOT auto-trigger check skill.
 
 ### 3. Self-Healing Budget (Max 3 Loops)
 - If local tests or linting fail, the low-cost model is allowed a maximum of **3 consecutive auto-correction attempts** to fix the errors.
