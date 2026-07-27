@@ -17,6 +17,7 @@ from src.domain.futures.compound.contracts import (
 from src.domain.futures.compound.multiplicity import TrialMultiplicity
 from src.domain.futures.compound.validation import (
     annualized_compound_growth,
+    blend_l1_prior_growth_probability,
     build_frozen_control_weights,
     evaluate_l2_walk_forward,
     evaluate_l3_sealed_holdout,
@@ -427,3 +428,53 @@ def test_excess_degenerates_to_absolute_when_beta_zero() -> None:
     np.testing.assert_array_almost_equal(excess_zero, np.log1p(strat))
     excess_one = np.log1p(strat) - np.ones(n) * np.log1p(bench)
     np.testing.assert_array_almost_equal(excess_one, np.log1p(strat) - np.log1p(bench))
+
+
+class TestBlendL1Prior:
+    def test_blend_l1_prior_returns_l2_only_when_prior_empty(self) -> None:
+        result = blend_l1_prior_growth_probability(
+            np.array([], dtype=np.float64), 0.75, cap_days=90,
+        )
+        assert result == 0.75
+
+    def test_blend_l1_prior_weight_capped(self) -> None:
+        rng = np.random.default_rng(42)
+        prior = rng.normal(0.0, 0.01, 200).astype(np.float64)
+        result = blend_l1_prior_growth_probability(prior, 0.5, cap_days=90)
+        assert 0.0 < result < 1.0
+
+
+class TestL2GateSkillCategory:
+    def test_l2_gate_skill_category_ignores_sharpe_probability(self) -> None:
+        n = 2196
+        rng = np.random.default_rng(42)
+        returns = rng.normal(0.001, 0.01, n).astype(np.float64)
+        ledger = _ledger_with_rebalances(returns)
+        daily_timestamps = np.arange(n // 6, dtype=np.int64) * (6 * 4 * 3_600_000_000_000)
+        n_daily = len(daily_timestamps)
+        benchmark = L2BenchmarkSeries(
+            benchmark_id="test",
+            timestamps_ns=daily_timestamps,
+            daily_returns_1d=np.zeros(n_daily, dtype=np.float64),
+            causal_scale_1d=np.ones(n_daily, dtype=np.float64),
+        )
+        config = L2GateConfig(
+            min_oos_days=30, min_rebalances=1,
+            min_deflated_sharpe_probability=0.001,
+        )
+        result = evaluate_l2_walk_forward(
+            ledger=ledger, fold_ids_1d=np.zeros(n, dtype=np.int16),
+            benchmark=benchmark, trial_multiplicity=TrialMultiplicity(5, 5.0, 1.0),
+            config=config, bootstrap_seed=42,
+        )
+        for cat in result.category_results:
+            if cat.category == "statistical_skill":
+                sharpe_mentioned = any(
+                    "sharpe_probability" in r for r in cat.reasons
+                )
+                assert not sharpe_mentioned, (
+                    f"sharpe_probability should not gate skill: {cat.reasons}"
+                )
+                break
+        else:
+            pytest.fail("statistical_skill category not found")
