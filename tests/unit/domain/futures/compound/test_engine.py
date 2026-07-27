@@ -1,11 +1,12 @@
 from __future__ import annotations
 
+import contextlib
 from pathlib import Path
 
 import numpy as np
 import pytest
 
-from src.domain.futures.compound.config import CompoundEngineConfig
+from src.domain.futures.compound.config import CompoundEngineConfig, L2GateConfig
 from src.domain.futures.compound.contracts import (
     CompoundEngineResult,
     DeploymentVerdict,
@@ -18,6 +19,7 @@ from src.domain.futures.compound.contracts import (
     SignalDescriptor,
 )
 from src.domain.futures.compound.engine import run_multiscale_compound_engine
+from src.domain.futures.data_lake.run_windows import QuarterlyRunWindow
 from src.domain.futures.compound.holdout_store import HoldoutReuseError, SealedHoldoutStore
 
 _NS_PER_HOUR = 3_600_000_000_000
@@ -927,7 +929,6 @@ class TestEngineL2PassBuildsDeploymentCandidate:
 
 
     def test_window_none_without_holdout_id_raises(self) -> None:
-        from src.domain.futures.compound.config import CompoundEngineConfig
         from src.domain.futures.compound.contracts import MarketFeatureCube
 
         n_bars, n_syms = 10, 2
@@ -961,7 +962,6 @@ class TestEngineL2PassBuildsDeploymentCandidate:
     def test_l3_prior_slices_to_most_recent_cap_days(self, tmp_path, mocker, small_cube) -> None:
         from src.domain.futures.compound.contracts import (
             CalibratedForecastPanel, HandoffResult, HandoffAdmissionEvidence, CausalFold,
-            L2CategoryResult, L2Evaluation, L2GateVerdict, L3ValidationResult, DeploymentVerdict,
             RawSignalPanel, SignalDescriptor,
         )
         import src.domain.futures.compound.engine as eng
@@ -1073,3 +1073,101 @@ class TestEngineL2PassBuildsDeploymentCandidate:
         # l2_not_pass (cash-only, admitted=False) drives a deterministic REJECT.
         assert result.l3.verdict == DeploymentVerdict.REJECT
         assert result.l3.reasons == ("l2_not_pass",)
+
+
+class TestEngineWindowIntegration:
+    def test_engine_wires_dynamic_window_clamp(
+        self, tmp_path, mocker, small_cube: MarketFeatureCube,
+    ) -> None:
+        from datetime import UTC, datetime
+
+        cube = _make_cube(16384, 5)
+        universe = type("Universe", (), {"symbols": cube.symbols, "snapshots": ()})()
+        n = len(cube.timestamps_ns)
+        first_ts = cube.timestamps_ns[0]
+        q = n // 8
+        window = QuarterlyRunWindow(
+            requested_date=datetime.fromtimestamp(first_ts / 1_000_000_000, tz=UTC).date(),
+            cutoff_date=datetime.fromtimestamp(cube.timestamps_ns[-1] / 1_000_000_000, tz=UTC).date(),
+            acquisition_start_ns=first_ts - 86_400_000_000_000,
+            l1_start_ns=cube.timestamps_ns[q],
+            l2_start_ns=cube.timestamps_ns[q * 3],
+            l3_start_ns=cube.timestamps_ns[q * 6],
+            cutoff_exclusive_ns=cube.timestamps_ns[-1],
+        )
+
+        store = SealedHoldoutStore(tmp_path / "engine_clamp.sqlite3")
+        manifest = SealedHoldoutManifest(
+            holdout_id="clamp-test", start_time_ns=window.l3_start_ns,
+            end_time_ns=window.cutoff_exclusive_ns, holdout_days=90,
+            model_version="v1", data_manifest_hash=cube.data_manifest_hash,
+            strategy_spec_hash="spec", universe_state_hash="u1",
+        )
+        store.create(manifest)
+
+        import src.domain.futures.compound.engine as eng_module
+        clamp_spy = mocker.spy(eng_module, "clamp_window_to_available_data")
+
+        config = CompoundEngineConfig()
+        with contextlib.suppress(Exception):
+            run_multiscale_compound_engine(
+                market=cube, universe=universe, holdout_store=store,
+                window=window, config=config,
+            )
+        assert clamp_spy.call_count >= 1
+
+    def test_engine_wires_l1_prior_into_l2_gate(
+        self, tmp_path, mocker, small_cube: MarketFeatureCube,
+    ) -> None:
+        from datetime import UTC, datetime
+
+        cube = _make_cube(16384, 5)
+        universe = type("Universe", (), {"symbols": cube.symbols, "snapshots": ()})()
+        n = len(cube.timestamps_ns)
+        q = n // 8
+
+        window = QuarterlyRunWindow(
+            requested_date=datetime.fromtimestamp(cube.timestamps_ns[-1] / 1_000_000_000, tz=UTC).date(),
+            cutoff_date=datetime.fromtimestamp(cube.timestamps_ns[-1] / 1_000_000_000, tz=UTC).date(),
+            acquisition_start_ns=cube.timestamps_ns[0],
+            l1_start_ns=cube.timestamps_ns[q],
+            l2_start_ns=cube.timestamps_ns[q * 3],
+            l3_start_ns=cube.timestamps_ns[q * 6],
+            cutoff_exclusive_ns=cube.timestamps_ns[-1],
+        )
+
+        store = SealedHoldoutStore(tmp_path / "engine_prior.sqlite3")
+        manifest = SealedHoldoutManifest(
+            holdout_id="prior-test", start_time_ns=window.l3_start_ns,
+            end_time_ns=window.cutoff_exclusive_ns, holdout_days=90,
+            model_version="v1", data_manifest_hash=cube.data_manifest_hash,
+            strategy_spec_hash="spec", universe_state_hash="u1",
+        )
+        store.create(manifest)
+
+        import src.domain.futures.compound.engine as eng_mod
+        original_eval = eng_mod.evaluate_l2_walk_forward
+
+        captured_kwargs: dict[str, object] = {}
+
+        def capturing_eval(**kwargs: object) -> object:
+            captured_kwargs.update(kwargs)
+            return original_eval(**kwargs)
+
+        mocker.patch.object(eng_mod, "evaluate_l2_walk_forward", side_effect=capturing_eval)
+
+        config = CompoundEngineConfig(
+            l2_gate=L2GateConfig(
+                min_oos_days=1, min_rebalances=1,
+                min_excess_growth_probability=0.001,
+                min_deflated_sharpe_probability=0.001,
+            ),
+        )
+
+        run_multiscale_compound_engine(
+            market=cube, universe=universe, holdout_store=store,
+            window=window, holdout_id="prior-test", config=config,
+        )
+        l1_prior = captured_kwargs.get("l1_prior_returns_1d")
+        assert l1_prior is not None, "l1_prior_returns_1d should not be None"
+        assert len(l1_prior) > 0, "l1_prior_returns_1d should have data"
