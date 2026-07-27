@@ -11,6 +11,7 @@ from typing import Any
 import numpy as np
 from numpy.typing import NDArray
 
+from src.domain.futures.compound.admission import _block_bootstrap_lcb
 from src.domain.futures.compound.config import HandoffConfig
 from src.domain.futures.compound.contracts import (
     CalibratedForecastPanel,
@@ -457,22 +458,32 @@ def build_exit_aware_handoff(
     for sleeve in admitted_sleeves:
         fold_returns_list.extend(sleeve.fold_net_returns)
     fold_returns = np.asarray(fold_returns_list, dtype=np.float64)
-    growth = float(np.mean(fold_returns) * 2191.5) if fold_returns.size else 0.0
     positive = int(np.sum(fold_returns > 0.0)) if fold_returns.size else 0
 
+    if fold_returns.size > 0:
+        growth_lcb90, growth_mean, _ = _block_bootstrap_lcb(
+            fold_returns, n_bootstrap=1000, block_size=1,
+            rng=np.random.default_rng(42),
+        )
+    else:  # pragma: no cover - unreachable: each admitted sleeve has >=1 fold return
+        growth_mean = 0.0
+        growth_lcb90 = 0.0
+    ann_growth = growth_mean * 2191.5
+    ann_lcb90 = growth_lcb90 * 2191.5
+
     reasons: list[str] = []
-    if growth <= 0.0:
+    if ann_lcb90 <= 0.0:
         reasons.append("growth_lcb90_not_positive")
     if positive < config.min_positive_outer_folds:
         reasons.append("positive_folds_below_floor")
 
     admitted = not reasons
     evidence = HandoffAdmissionEvidence(
-        growth, growth, growth, 0.0, 0.0, positive, float(len(admitted_sleeves)),
+        ann_growth, ann_lcb90, ann_lcb90, 0.0, 0.0, positive, float(len(admitted_sleeves)),
         tuple(s.signal_id for s in admitted_sleeves), admitted, tuple(reasons),
     )
     _LOGGER.info("[L1] exit-aware handoff admitted=%s sleeves=%d", admitted, len(admitted_sleeves))
-    return HandoffResult(forecast, evidence)
+    return HandoffResult(forecast, evidence, tuple(admitted_sleeves))
 
 
 def aggregate_cluster_group_returns(

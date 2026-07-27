@@ -70,7 +70,10 @@ from src.domain.futures.compound.validation import (
     evaluate_l3_sealed_holdout,
     slice_execution_ledger,
 )
-from src.domain.futures.data_lake.run_windows import QuarterlyRunWindow
+from src.domain.futures.data_lake.run_windows import (
+    QuarterlyRunWindow,
+    clamp_window_to_available_data,
+)
 
 _logger = logging.getLogger(__name__)
 _BARS_PER_YEAR_4H: float = 2190.0
@@ -204,6 +207,13 @@ def run_multiscale_compound_engine(
         funding_1h[:usable_funding_bars] = raw_funding[:usable_funding_bars].astype(np.float32)
     eligible_4h = _subsample_to_4h(market.eligible_2d)
     panel = build_raw_signal_panel(bars, eligible_4h, numba_threads=6, max_rss_mb=12_000)
+
+    if isinstance(window, QuarterlyRunWindow):
+        window = clamp_window_to_available_data(
+            window,
+            actual_data_start_ns=bars_4h.timestamps_ns[0],
+            min_l2_days=config.l2_gate.min_oos_days,
+        )
 
     handoff_result: HandoffResult | None = None
     p2_error_reason: str | None = None
@@ -491,12 +501,27 @@ def run_multiscale_compound_engine(
         if frozen_daily_ret.size > 0:
             frozen_control_daily_1d = np.log1p(frozen_daily_ret)
 
+    l1_prior_returns_1d: NDArray[np.float64] | None = None
+    if quarter_window is not None and ledger_1.timestamps_ns.size > 0:
+        try:
+            l1_prior_ledger = slice_execution_ledger(
+                ledger=ledger_1,
+                start_time_ns=int(quarter_window.l1_start_ns),
+                end_time_ns=int(quarter_window.l2_start_ns),
+            )
+            l1_prior_returns_1d = aggregate_returns_to_utc_days(
+                l1_prior_ledger.timestamps_ns, l1_prior_ledger.net_returns_1d,
+            )
+        except (ValueError, IndexError):
+            pass
+
     l2_eval = evaluate_l2_walk_forward(
         ledger=l2_ledger, fold_ids_1d=fold_ids_1d,
         benchmark=benchmark, trial_multiplicity=trial_multiplicity,
         config=config.l2_gate, bootstrap_seed=42,
         frozen_control_daily_1d=frozen_control_daily_1d,
         beta_1d=beta_1d_eval,
+        l1_prior_returns_1d=l1_prior_returns_1d,
     )
 
     if trial_ledger is not None:
