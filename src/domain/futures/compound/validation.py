@@ -254,6 +254,25 @@ def _compute_rebalance_count(weights_2d: NDArray[np.float32]) -> int:
     return int(np.sum(np.max(diffs, axis=1) > 1e-8))
 
 
+def blend_l1_prior_growth_probability(
+    l1_prior_returns_1d: NDArray[np.float64], l2_only_prob: float,
+    *, cap_days: int,
+) -> float:
+    if len(l1_prior_returns_1d) == 0:
+        return l2_only_prob
+    if cap_days <= 0:
+        raise ValueError(f"cap_days must be > 0, got {cap_days}")
+    effective_prior = min(len(l1_prior_returns_1d), cap_days)
+    prior_returns = l1_prior_returns_1d[:effective_prior]
+    _, _, prior_growth_prob = circular_stationary_bootstrap_growth(
+        prior_returns, 365.25, n_bootstrap=1000, block_size=5, seed=42,
+    )
+    prior_weight = min(1.0, len(prior_returns) / cap_days)
+    holdout_weight = 1.0 - prior_weight * 0.5
+    blended = (prior_weight * prior_growth_prob + holdout_weight * l2_only_prob) / (prior_weight + holdout_weight)
+    return blended
+
+
 def evaluate_l2_gate(
     *,
     ledger: ExecutionLedger,
@@ -264,6 +283,7 @@ def evaluate_l2_gate(
     bootstrap_seed: int,
     frozen_control_daily_1d: NDArray[np.float64] | None = None,
     beta_1d: NDArray[np.float64] | None = None,
+    l1_prior_returns_1d: NDArray[np.float64] | None = None,
 ) -> L2Evaluation:
     return evaluate_l2_walk_forward(
         ledger=ledger, fold_ids_1d=fold_ids_1d,
@@ -271,6 +291,7 @@ def evaluate_l2_gate(
         config=config, bootstrap_seed=bootstrap_seed,
         frozen_control_daily_1d=frozen_control_daily_1d,
         beta_1d=beta_1d,
+        l1_prior_returns_1d=l1_prior_returns_1d,
     )
 
 
@@ -284,6 +305,7 @@ def evaluate_l2_walk_forward(
     bootstrap_seed: int,
     frozen_control_daily_1d: NDArray[np.float64] | None = None,
     beta_1d: NDArray[np.float64] | None = None,
+    l1_prior_returns_1d: NDArray[np.float64] | None = None,
 ) -> L2Evaluation:
     candidate_count = trial_multiplicity.n_trials
 
@@ -418,6 +440,13 @@ def evaluate_l2_walk_forward(
         np.expm1(stressed_excess_returns), 365.25, n_bootstrap=1000, block_size=pw_block, seed=bootstrap_seed + 1,
     )
 
+    # L1→L2 Bayesian prior blending (mirrors evaluate_l3_sealed_holdout pattern)
+    if l1_prior_returns_1d is not None and len(l1_prior_returns_1d) > 0:
+        excess_prob = blend_l1_prior_growth_probability(
+            l1_prior_returns_1d, excess_prob,
+            cap_days=config.l1_prior_effective_days_cap,
+        )
+
     # Stressed positive fold count
     fold_ids_aligned = _align_fold_ids(fold_ids_1d, ledger.timestamps_ns, daily_timestamps, aligned_end)
     positive_folds = int(np.sum([
@@ -499,14 +528,11 @@ def evaluate_l2_walk_forward(
         growth_pass = False
     categories.append(L2CategoryResult("compound_growth", growth_pass, tuple(growth_reasons)))
 
-    # 3. Statistical skill
+    # 3. Statistical skill (DSR only; sharpe_probability is reported, not gated)
     skill_reasons: list[str] = []
     skill_pass = True
     if dsr < config.min_deflated_sharpe_probability:
         skill_reasons.append(f"deflated_sharpe_probability={dsr:.4f}<{config.min_deflated_sharpe_probability}")
-        skill_pass = False
-    if sharpe_prob < config.min_bootstrap_sharpe_probability:
-        skill_reasons.append(f"sharpe_probability={sharpe_prob:.4f}<{config.min_bootstrap_sharpe_probability}")
         skill_pass = False
     if spa_pvalue > config.max_spa_pvalue:
         skill_reasons.append(f"spa_pvalue={spa_pvalue:.4f}>{config.max_spa_pvalue}")

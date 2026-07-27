@@ -1,12 +1,14 @@
 from __future__ import annotations
 
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 
 import pytest
 
+from src.domain.futures.compound.contracts import CausalityError
 from src.domain.futures.data_lake.run_windows import (
     QuarterlyWindowConfig,
     QuarterlyRunWindow,
+    clamp_window_to_available_data,
     resolve_completed_quarter_window,
 )
 
@@ -15,8 +17,8 @@ class TestQuarterlyWindowConfig:
     def test_default_config_valid(self) -> None:
         cfg = QuarterlyWindowConfig()
         assert cfg.warmup_days == 90
-        assert cfg.l1_days == 180
-        assert cfg.l2_days == 547
+        assert cfg.l1_days == 365
+        assert cfg.l2_days == 362
         assert cfg.l3_days == 90
         assert cfg.warmup_days + cfg.l1_days + cfg.l2_days + cfg.l3_days == 907
         assert cfg.warmup_days + cfg.l1_days + cfg.l2_days + cfg.l3_days <= 910
@@ -107,8 +109,8 @@ class TestResolveCompletedQuarterWindow:
         ns_per_day = 86_400_000_000_000
 
         l3_start_ns = cutoff_ns - 90 * ns_per_day
-        l2_start_ns = l3_start_ns - 547 * ns_per_day
-        l1_start_ns = l2_start_ns - 180 * ns_per_day
+        l2_start_ns = l3_start_ns - 362 * ns_per_day
+        l1_start_ns = l2_start_ns - 365 * ns_per_day
         acq_start_ns = l1_start_ns - 90 * ns_per_day
 
         assert abs(window.l3_start_ns - l3_start_ns) <= ns_per_day
@@ -122,3 +124,53 @@ class TestResolveCompletedQuarterWindow:
             QuarterlyWindowConfig(),
         )
         assert window.cutoff_date == date(2025, 12, 31)
+
+
+class TestClampWindowToAvailableData:
+    _DAY_NS = 86_400 * 1_000_000_000
+
+    def _window(self, acquisition_offset_days: int = 900) -> QuarterlyRunWindow:
+        base = date(2026, 6, 30)
+        cutoff_exclusive_ns = (datetime(base.year, base.month, base.day, tzinfo=UTC) + timedelta(days=1)).timestamp() * 1_000_000_000
+        l3_start_ns = int(cutoff_exclusive_ns - 90 * self._DAY_NS)
+        l2_start_ns = int(l3_start_ns - 362 * self._DAY_NS)
+        l1_start_ns = int(l2_start_ns - 365 * self._DAY_NS)
+        acq_start_ns = int(l1_start_ns - acquisition_offset_days * self._DAY_NS)
+        return QuarterlyRunWindow(
+            requested_date=base,
+            cutoff_date=base,
+            acquisition_start_ns=acq_start_ns,
+            l1_start_ns=l1_start_ns,
+            l2_start_ns=l2_start_ns,
+            l3_start_ns=l3_start_ns,
+            cutoff_exclusive_ns=int(cutoff_exclusive_ns),
+        )
+
+    def test_clamp_window_noop_when_data_sufficient(self) -> None:
+        window = self._window(900)
+        result = clamp_window_to_available_data(
+            window, actual_data_start_ns=window.acquisition_start_ns, min_l2_days=300,
+        )
+        assert result == window
+
+    def test_clamp_window_shrinks_l2_preserves_l1(self) -> None:
+        window = self._window(900)
+        l3_start = window.l3_start_ns
+        cutoff = window.cutoff_exclusive_ns
+        late_start_ns = window.acquisition_start_ns + 10 * self._DAY_NS
+        result = clamp_window_to_available_data(
+            window, actual_data_start_ns=late_start_ns, min_l2_days=300,
+        )
+        assert result.l3_start_ns == l3_start
+        assert result.cutoff_exclusive_ns == cutoff
+        assert result.l2_start_ns > window.l2_start_ns
+        l1_duration = result.l2_start_ns - result.l1_start_ns
+        assert l1_duration == window.l2_start_ns - window.l1_start_ns
+
+    def test_clamp_window_raises_below_floor(self) -> None:
+        window = self._window(900)
+        late_start_ns = window.acquisition_start_ns + 200 * self._DAY_NS
+        with pytest.raises(CausalityError):
+            clamp_window_to_available_data(
+                window, actual_data_start_ns=late_start_ns, min_l2_days=300,
+            )
