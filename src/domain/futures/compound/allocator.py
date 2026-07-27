@@ -568,6 +568,8 @@ def compute_dynamic_compounding_path(
             rv_ann = float(np.std(return_history[-config.vol_lookback_bars:], ddof=1)) * np.sqrt(2190.0)
             vol_target = derive_causal_vol_target(equity_history, return_history, config)
             vol_scale = min(vol_target / max(rv_ann, 1e-15), config.vol_scale_max)
+            if abs(vol_scale - 1.0) < 0.05:
+                vol_scale = 1.0
         else:
             vol_scale = min(0.5, config.vol_scale_max)
 
