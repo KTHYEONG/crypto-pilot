@@ -15,9 +15,11 @@ class TestQuarterlyWindowConfig:
     def test_default_config_valid(self) -> None:
         cfg = QuarterlyWindowConfig()
         assert cfg.warmup_days == 90
-        assert cfg.l1_days == 365
-        assert cfg.l2_days == 365
+        assert cfg.l1_days == 180
+        assert cfg.l2_days == 547
         assert cfg.l3_days == 90
+        assert cfg.warmup_days + cfg.l1_days + cfg.l2_days + cfg.l3_days == 907
+        assert cfg.warmup_days + cfg.l1_days + cfg.l2_days + cfg.l3_days <= 910
 
     def test_non_positive_l3_raises(self) -> None:
         with pytest.raises(ValueError, match="l3_days must be positive"):
@@ -105,8 +107,8 @@ class TestResolveCompletedQuarterWindow:
         ns_per_day = 86_400_000_000_000
 
         l3_start_ns = cutoff_ns - 90 * ns_per_day
-        l2_start_ns = l3_start_ns - 365 * ns_per_day
-        l1_start_ns = l2_start_ns - 365 * ns_per_day
+        l2_start_ns = l3_start_ns - 547 * ns_per_day
+        l1_start_ns = l2_start_ns - 180 * ns_per_day
         acq_start_ns = l1_start_ns - 90 * ns_per_day
 
         assert abs(window.l3_start_ns - l3_start_ns) <= ns_per_day
