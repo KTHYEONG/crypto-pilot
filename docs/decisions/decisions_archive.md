@@ -2,6 +2,11 @@
 
 This file holds historical architecture decision records (ADRs) that have been pruned from the active window.
 
+## [2026-07-26] [TASK_DEPLOYMENT_PROVENANCE_AND_SEARCH_MULTIPLICITY] [ADR_20260726_DEPLOYMENT_PROVENANCE_AND_SEARCH_MULTIPLICITY]
+- **Context/Why:** L2 게이트 최초 PASS 후 CLI 실행이 strategy_spec_hash/fold_manifest_hash 미배선으로 크래시. 조사 결과 표면 버그 아래 봉인 홀드아웃 동어반복 검증(DEF-01)과 dead CandidateTrialLedger로 인한 탐색 다중성 미회계(DEF-02), NumPy 2.4 단일-trial 크래시(BUG-03) 발견
+- **Resolution/What:** provenance.py 신규(해시 유도 4함수). multiplicity.py에 BUG-03 가드+charge_config_search_multiplicity(가산형 참여비, 3개 가설 실측 비교 후 채택) 추가. contracts.py CandidateTrialLedger.register/load_trial_returns 구현. holdout_store.py ensure_sealed(미소진 seal 1회 backfill)+consume 강화(런타임 해시 사용, universe_state_hash 검증 유지). l1_sleeves.py/engine.py/compound_main.py 전체 배선 및 trial_ledger.register 호출 연결
+- **Impact:** L2_DRY_RUN=1 실전 CLI 재실행 exit_code=0으로 사상 최초 완주(logs/futures/compound/20260726_142427). L2 PASS 수치는 수정 전과 완전 동일(CAGR 31.05%, Sharpe 1.352)하여 알파 로직 무변경 확인. 봉인 홀드아웃 1회 backfill 실측 확인, 다중성 ledger 최초 가동(1행 등록). 12변형 그리드서치는 ledger 도입 이전이라 소급 과금 불가
+
 ## [2026-07-26] [TASK_L2_TURNOVER_DEADBAND_DEPLOYMENT_CANDIDATE_FIX] [ADR_20260726_L2_TURNOVER_DEADBAND_DEPLOYMENT_CANDIDATE_FIX]
 - **Context/Why:** 20260726_114624 실행에서 L2 미통과 4건이 전부 0 경계 근접 미달이었음. 12개 변형 그리드서치(실제 프로덕션 엔진 전체 재실행)로 band_frac/alpha_smooth 결합 재보정이 유일한 강건 해법임을 확인. 동시에 처음으로 L2가 PASS하는 경로가 실행되며 engine.py의 배포후보 생성 블록(pragma no cover)이 active_signal_ids(중복 281개 멀티셋) vs descriptors(고유 27개) 길이불일치로 크래시하는 구조적 버그 발견
 - **Resolution/What:** config.py: DynamicCompoundingConfig band_frac 0.30->0.60, alpha_smooth 0.15->0.08. engine.py: _build_deployment_candidate 신규 함수로 교체(고유화+admission 빈도 기반 vote_weights, 매칭실패시 ValueError). 실제 CLI 재실행으로 strategy_spec_hash/fold_manifest_hash 미배선이라는 별개의 신규 차단 버그 2건 추가 발견(둘 다 원래부터 배선된 적 없던 설계공백, 이번 회귀 아님)
