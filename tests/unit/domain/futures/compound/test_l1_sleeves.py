@@ -162,7 +162,7 @@ def test_zero_novelty_active_sleeve_produces_mu() -> None:
     policy = ExitPolicySpec("p", ExitPolicyKind.TIME, None, None, None, 0, 4, -1, "hash")
     from src.domain.futures.compound.contracts import L1SleevePosterior
     mask = np.ones(2, dtype=np.bool_)
-    sleeve = L1SleevePosterior("s", "trend:fast", "trend", 0, 0, mask, "test_hash", policy, 0.1, 0.1, 0.9, 0.0, (0.1,), 1, True, ())
+    sleeve = L1SleevePosterior("s", "trend:fast", "trend", 0, 0, mask, "test_hash", policy, 0.0, 0.1, 0.1, 0.9, 0.0, (0.1,), 1, True, ())
     forecast = combine_posterior_sleeves(panel, (sleeve,), (), _folds(), HandoffConfig())
     expected = panel.z_3d[:, :, 0]
     np.testing.assert_allclose(forecast.mu_2d, expected, atol=1e-6)
@@ -639,6 +639,7 @@ class TestComputeBetaNeutralCompositeReturns:
             member_mask_1d=mask,
             member_hash="test_hash",
             exit_policy=ExitPolicySpec("p", ExitPolicyKind.TIME, None, None, None, 0, 4, -1, "calib_hash"),
+            fitted_beta=0.0,
             mean_net_return=0.001,
             standard_error=0.01,
             posterior_positive_probability=0.75,
@@ -715,6 +716,7 @@ class TestEffectiveCompoundingHandoff:
             member_mask_1d=mask,
             member_hash="hash_admit",
             exit_policy=ExitPolicySpec("p", ExitPolicyKind.TIME, None, None, None, 0, 4, -1, "calib_hash"),
+            fitted_beta=0.0,
             mean_net_return=0.001,
             standard_error=0.01,
             posterior_positive_probability=0.75,
@@ -888,7 +890,7 @@ def _default_sleeve(mask: NDArray[np.bool_] | None = None) -> L1SleevePosterior:
         sleeve_id="test", signal_id="sig:test", family="test",
         outer_fold_id=0, cluster_id=0, member_mask_1d=mask,
         member_hash="h", exit_policy=ExitPolicySpec("p", ExitPolicyKind.TIME, None, None, None, 0, 4, -1, "cal"),
-        mean_net_return=0.0, standard_error=0.1, posterior_positive_probability=0.96,
+        fitted_beta=0.0, mean_net_return=0.0, standard_error=0.1, posterior_positive_probability=0.96,
         residual_novelty=1.0, fold_net_returns=(0.0,), effective_events=100,
         admitted=True, reasons=(),
     )
