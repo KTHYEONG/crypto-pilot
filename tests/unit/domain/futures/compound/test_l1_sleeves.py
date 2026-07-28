@@ -37,6 +37,7 @@ from src.domain.futures.compound.l1_sleeves import (
     combine_posterior_sleeves,
     compute_beta_neutral_composite_returns,
     compute_chunked_2d_tensor_bootstrap,
+    compute_fold_growths,
     compute_l1_oos_portfolio_returns,
     estimate_cluster_sleeve_posteriors,
     estimate_sleeve_posteriors,
@@ -135,11 +136,11 @@ def test_zero_quality_and_invalid_return_fail_to_cash() -> None:
         fold_manifest_hash="",
     )
     folds = (CausalFold(0, 0, 20, 20, 25, 25, 30, 1, 1),)
-    sigma = np.ones((40, 2), dtype=np.float32)
     cost = np.ones((40, 2), dtype=np.float32)
+    weights_2d = np.zeros((40, 2), dtype=np.float64)
     result = build_exit_aware_handoff(
         cash, (), bars, np.zeros(40, dtype=np.float64), HandoffConfig(),
-        folds=folds, sigma_2d=sigma, cost_bps_4h=cost,
+        folds=folds, weights_2d=weights_2d, cost_bps_4h=cost,
     )
     assert result.forecast.mu_2d.shape == (40, 2)
     assert not result.evidence.admitted
@@ -531,10 +532,10 @@ class TestEstimateClusterSleevePosteriors:
         sleeves = estimate_cluster_sleeve_posteriors(panel, bars_4h, cfolds, folds, cost, funding, config)
         forecast = combine_posterior_sleeves(panel, sleeves, cfolds, folds, config)
         benchmark = np.zeros(40, dtype=np.float64)
-        sigma = np.ones((40, 5), dtype=np.float32)
+        weights_2d = np.zeros((40, 5), dtype=np.float64)
         handoff = build_exit_aware_handoff(
             forecast, sleeves, bars_4h, benchmark, config,
-            folds=folds, sigma_2d=sigma, cost_bps_4h=cost,
+            folds=folds, weights_2d=weights_2d, cost_bps_4h=cost,
         )
         assert handoff is not None
         assert isinstance(handoff.evidence.admitted, bool)
@@ -772,13 +773,14 @@ class TestEffectiveCompoundingHandoff:
         mask = np.array([False, True, True], dtype=np.bool_)
         sleeves = (self._make_admitted_sleeve(mask),)
         forecast = self._signal_forecast(n_bars, n_syms, oos_start=120, oos_end=300)
-        config = HandoffConfig(n_bootstrap=500)
+        config = HandoffConfig(n_bootstrap=500, min_positive_outer_folds=1)
         folds = (CausalFold(0, 0, 120, 100, 120, 120, n_bars, 1, 1),)
-        sigma = np.ones((n_bars, n_syms), dtype=np.float32)
         cost = np.zeros((n_bars, n_syms), dtype=np.float32)
+        weights_2d = np.zeros((n_bars, n_syms), dtype=np.float64)
+        weights_2d[120:n_bars] = np.tile(np.array([0.0, 0.5, 0.5]), (n_bars - 120, 1))
         result = build_exit_aware_handoff(
             forecast, sleeves, bars, bm, config,
-            folds=folds, sigma_2d=sigma, cost_bps_4h=cost,
+            folds=folds, weights_2d=weights_2d, cost_bps_4h=cost,
         )
         assert result.evidence.admitted, f"Expected admitted, got reasons={result.evidence.reasons}"
         assert result.evidence.growth_lcb90 > 0.0
@@ -804,14 +806,14 @@ class TestEffectiveCompoundingHandoff:
         mask = np.ones(n_syms, dtype=np.bool_)
         sleeves = (self._make_admitted_sleeve(mask),)
         forecast = self._cash_forecast(n_bars, n_syms)
-        sigma = np.ones((n_bars, n_syms), dtype=np.float32)
         cost = np.ones((n_bars, n_syms), dtype=np.float32)
         config = HandoffConfig(n_bootstrap=500)
         bm = np.zeros(n_bars, dtype=np.float64)
         folds = (CausalFold(0, 0, 120, 100, 120, 120, n_bars, 1, 1),)
+        weights_2d = np.zeros((n_bars, n_syms), dtype=np.float64)
         result = build_exit_aware_handoff(
             forecast, sleeves, bars, bm, config,
-            folds=folds, sigma_2d=sigma, cost_bps_4h=cost,
+            folds=folds, weights_2d=weights_2d, cost_bps_4h=cost,
         )
         assert not result.evidence.admitted
         assert "growth_lcb90_not_positive" in result.evidence.reasons
@@ -824,11 +826,11 @@ class TestEffectiveCompoundingHandoff:
         forecast = self._cash_forecast(n_bars, n_syms)
         config = HandoffConfig()
         folds = (CausalFold(0, 0, 20, 20, 25, 25, 30, 1, 1),)
-        sigma = np.ones((n_bars, n_syms), dtype=np.float32)
         cost = np.ones((n_bars, n_syms), dtype=np.float32)
+        weights_2d = np.zeros((n_bars, n_syms), dtype=np.float64)
         result = build_exit_aware_handoff(
             forecast, (), bars, np.zeros(n_bars, dtype=np.float64), config,
-            folds=folds, sigma_2d=sigma, cost_bps_4h=cost,
+            folds=folds, weights_2d=weights_2d, cost_bps_4h=cost,
         )
         assert not result.evidence.admitted
         assert "no_admitted_sleeves" in result.evidence.reasons
@@ -856,13 +858,14 @@ class TestEffectiveCompoundingHandoff:
         mask = np.array([False, True, True, True], dtype=np.bool_)
         sleeves = (self._make_admitted_sleeve(mask),)
         forecast = self._signal_forecast(n_bars, n_syms, oos_start=120, oos_end=300)
-        config = HandoffConfig(n_bootstrap=500)
+        config = HandoffConfig(n_bootstrap=500, min_positive_outer_folds=1)
         folds = (CausalFold(0, 0, 120, 100, 120, 120, n_bars, 1, 1),)
-        sigma = np.ones((n_bars, n_syms), dtype=np.float32)
         cost = np.zeros((n_bars, n_syms), dtype=np.float32)
+        weights_2d = np.zeros((n_bars, n_syms), dtype=np.float64)
+        weights_2d[120:n_bars] = np.tile(np.array([0.0, 1.0 / 3.0, 1.0 / 3.0, 1.0 / 3.0]), (n_bars - 120, 1))
         result = build_exit_aware_handoff(
             forecast, sleeves, bars, bm, config,
-            folds=folds, sigma_2d=sigma, cost_bps_4h=cost,
+            folds=folds, weights_2d=weights_2d, cost_bps_4h=cost,
         )
         assert isinstance(result, HandoffResult)
         assert isinstance(result.evidence, HandoffAdmissionEvidence)
@@ -891,38 +894,22 @@ def _default_sleeve(mask: NDArray[np.bool_] | None = None) -> L1SleevePosterior:
     )
 
 def test_l1_portfolio_returns_is_signal_dependent() -> None:
-    """D-1 regression: flipping mu_2d sign flips portfolio returns sign."""
+    """D-1 regression: flipping weights_2d sign flips portfolio returns sign."""
     n_bars, n_syms = 200, 3
     bars = _bars(n_bars, n_syms)
     folds = (CausalFold(0, 0, 120, 100, 120, 120, n_bars, 1, 1),)
-    sigma = np.ones((n_bars, n_syms), dtype=np.float32)
     cost = np.zeros((n_bars, n_syms), dtype=np.float32)
-    mask = np.array([True, True, True], dtype=np.bool_)
-    sleeves = (_default_sleeve(mask),)
 
-    mu_pos = np.zeros((n_bars, n_syms), dtype=np.float32)
-    mu_pos[120:200, :] = 0.02
-    forecast_pos = CalibratedForecastPanel(
-        decision_timestamps_ns=np.arange(n_bars, dtype=np.int64),
-        symbols=bars.symbols, mu_2d=mu_pos,
-        se_2d=np.full((n_bars, n_syms), np.nan, dtype=np.float32),
-        family_mu_3d=np.zeros((n_bars, n_syms, 0), dtype=np.float32),
-        family_ids=(), admitted_signal_ids=("sig:test",), fold_manifest_hash="",
-    )
-    r_pos = compute_l1_oos_portfolio_returns(forecast_pos, sleeves, bars, folds, sigma, cost)
+    w_pos = np.zeros((n_bars, n_syms), dtype=np.float64)
+    w_pos[120:200] = 1.0 / 3.0
+    r_pos = compute_l1_oos_portfolio_returns(w_pos, bars, folds, cost)
 
-    mu_neg = mu_pos.copy() * -1.0
-    forecast_neg = CalibratedForecastPanel(
-        decision_timestamps_ns=np.arange(n_bars, dtype=np.int64),
-        symbols=bars.symbols, mu_2d=mu_neg,
-        se_2d=np.full((n_bars, n_syms), np.nan, dtype=np.float32),
-        family_mu_3d=np.zeros((n_bars, n_syms, 0), dtype=np.float32),
-        family_ids=(), admitted_signal_ids=("sig:test",), fold_manifest_hash="",
-    )
-    r_neg = compute_l1_oos_portfolio_returns(forecast_neg, sleeves, bars, folds, sigma, cost)
+    w_neg = np.zeros((n_bars, n_syms), dtype=np.float64)
+    w_neg[120:200] = -1.0 / 3.0
+    r_neg = compute_l1_oos_portfolio_returns(w_neg, bars, folds, cost)
 
     assert len(r_pos) == len(r_neg) > 0
-    assert np.allclose(r_pos, -r_neg, atol=1e-12), "D-1 violation: flipping mu sign did not flip return series"
+    assert np.allclose(r_pos, -r_neg, atol=1e-12), "D-1 violation: flipping weight sign did not flip return series"
 
 
 def test_l1_portfolio_returns_uses_only_oos_windows() -> None:
@@ -930,21 +917,11 @@ def test_l1_portfolio_returns_uses_only_oos_windows() -> None:
     n_bars, n_syms = 200, 3
     bars = _bars(n_bars, n_syms)
     folds = (CausalFold(0, 0, 120, 100, 120, 120, n_bars, 1, 1),)
-    sigma = np.ones((n_bars, n_syms), dtype=np.float32)
     cost = np.zeros((n_bars, n_syms), dtype=np.float32)
-    mask = np.array([True, True, True], dtype=np.bool_)
-    sleeves = (_default_sleeve(mask),)
 
-    mu_fit_only = np.zeros((n_bars, n_syms), dtype=np.float32)
-    mu_fit_only[50:120, :] = 0.02  # signal only in fit window
-    forecast = CalibratedForecastPanel(
-        decision_timestamps_ns=np.arange(n_bars, dtype=np.int64),
-        symbols=bars.symbols, mu_2d=mu_fit_only,
-        se_2d=np.full((n_bars, n_syms), np.nan, dtype=np.float32),
-        family_mu_3d=np.zeros((n_bars, n_syms, 0), dtype=np.float32),
-        family_ids=(), admitted_signal_ids=("sig:test",), fold_manifest_hash="",
-    )
-    r = compute_l1_oos_portfolio_returns(forecast, sleeves, bars, folds, sigma, cost)
+    w_fit_only = np.zeros((n_bars, n_syms), dtype=np.float64)
+    w_fit_only[50:120] = 1.0 / 3.0  # signal only in fit window
+    r = compute_l1_oos_portfolio_returns(w_fit_only, bars, folds, cost)
     assert np.all(r == 0.0), "Causality violation: fit-only signal produced non-zero OOS returns"
 
 
@@ -953,21 +930,11 @@ def test_l1_portfolio_series_is_single_column() -> None:
     n_bars, n_syms = 200, 4
     bars = _bars(n_bars, n_syms)
     folds = (CausalFold(0, 0, 120, 100, 120, 120, n_bars, 1, 1),)
-    sigma = np.ones((n_bars, n_syms), dtype=np.float32)
     cost = np.zeros((n_bars, n_syms), dtype=np.float32)
-    mask = np.array([True, True, True, True], dtype=np.bool_)
-    sleeves = (_default_sleeve(mask),)
 
-    mu = np.zeros((n_bars, n_syms), dtype=np.float32)
-    mu[120:200, :] = 0.01
-    forecast = CalibratedForecastPanel(
-        decision_timestamps_ns=np.arange(n_bars, dtype=np.int64),
-        symbols=bars.symbols, mu_2d=mu,
-        se_2d=np.full((n_bars, n_syms), np.nan, dtype=np.float32),
-        family_mu_3d=np.zeros((n_bars, n_syms, 0), dtype=np.float32),
-        family_ids=(), admitted_signal_ids=("sig:test",), fold_manifest_hash="",
-    )
-    r = compute_l1_oos_portfolio_returns(forecast, sleeves, bars, folds, sigma, cost)
+    weights_2d = np.zeros((n_bars, n_syms), dtype=np.float64)
+    weights_2d[120:200] = 0.25
+    r = compute_l1_oos_portfolio_returns(weights_2d, bars, folds, cost)
     assert r.ndim == 1, f"D-2 violation: expected 1-D, got {r.ndim}-D"
 
 
@@ -1011,7 +978,6 @@ def test_build_exit_aware_handoff_uses_block_bootstrap() -> None:
     n_bars, n_syms = 120, 2
     bars = _bars(n_bars, n_syms)
     folds = (CausalFold(0, 0, 60, 50, 60, 60, n_bars, 1, 1),)
-    sigma = np.ones((n_bars, n_syms), dtype=np.float32)
     cost = np.zeros((n_bars, n_syms), dtype=np.float32)
     mask = np.array([True, True], dtype=np.bool_)
     sleeve = _default_sleeve(mask)
@@ -1022,9 +988,10 @@ def test_build_exit_aware_handoff_uses_block_bootstrap() -> None:
         family_mu_3d=np.zeros((n_bars, n_syms, 0), dtype=np.float32),
         family_ids=(), admitted_signal_ids=("sig:test",), fold_manifest_hash="",
     )
+    weights_2d = np.zeros((n_bars, n_syms), dtype=np.float64)
     result = build_exit_aware_handoff(
-        forecast, (sleeve,), bars, np.zeros(n_bars, dtype=np.float64), HandoffConfig(),
-        folds=folds, sigma_2d=sigma, cost_bps_4h=cost,
+        forecast, (sleeve,), bars, np.zeros(n_bars, dtype=np.float64), HandoffConfig(min_positive_outer_folds=1),
+        folds=folds, weights_2d=weights_2d, cost_bps_4h=cost,
     )
     assert isinstance(result, HandoffResult)
 
@@ -1040,7 +1007,6 @@ def test_build_exit_aware_handoff_records_resolved_pw_block(
     n_bars, n_syms = 120, 2
     bars = _bars(n_bars, n_syms)
     folds = (CausalFold(0, 0, 60, 50, 60, 60, n_bars, 1, 1),)
-    sigma = np.ones((n_bars, n_syms), dtype=np.float32)
     cost = np.zeros((n_bars, n_syms), dtype=np.float32)
     mask = np.array([True, True], dtype=np.bool_)
     sleeve = _default_sleeve(mask)
@@ -1063,9 +1029,10 @@ def test_build_exit_aware_handoff_records_resolved_pw_block(
     old = os.environ.get("L1_DEBUG")
     os.environ["L1_DEBUG"] = "1"
     try:
+        weights_2d = np.zeros((n_bars, n_syms), dtype=np.float64)
         build_exit_aware_handoff(
-            forecast, (sleeve,), bars, np.zeros(n_bars, dtype=np.float64), HandoffConfig(),
-            folds=folds, sigma_2d=sigma, cost_bps_4h=cost,
+            forecast, (sleeve,), bars, np.zeros(n_bars, dtype=np.float64), HandoffConfig(min_positive_outer_folds=1),
+            folds=folds, weights_2d=weights_2d, cost_bps_4h=cost,
         )
     finally:
         if old is None:
@@ -1316,4 +1283,53 @@ def test_aggregate_cluster_group_returns_nan_robustness() -> None:
     result = aggregate_cluster_group_returns(returns, sigma, winsorize_pct=0.10)
     assert result.shape == (60,)
     np.testing.assert_allclose(result, np.zeros(60), atol=1e-15)
+
+
+def test_l1_portfolio_returns_scores_given_weights_without_rebuilding() -> None:
+    n_bars, n_syms = 200, 3
+    bars = _bars(n_bars, n_syms)
+    folds = (CausalFold(0, 0, 120, 100, 120, 120, n_bars, 1, 1),)
+    cost = np.zeros((n_bars, n_syms), dtype=np.float32)
+    weights_2d = np.ones((n_bars, n_syms), dtype=np.float64) * (1.0 / 3.0)
+    result = compute_l1_oos_portfolio_returns(weights_2d, bars, folds, cost)
+    assert result.ndim == 1
+    assert len(result) > 0
+
+
+def test_compute_fold_growths_skips_empty_folds() -> None:
+    n_bars, n_syms = 60, 2
+    bars = _bars(n_bars, n_syms)
+    short_fold = CausalFold(0, 0, 50, 48, 50, 52, 55, 1, 1)
+    empty_fold = CausalFold(1, 0, 50, 48, 50, 55, 55, 1, 1)
+    cost = np.ones((n_bars, n_syms), dtype=np.float32)
+    weights_2d = np.zeros((n_bars, n_syms), dtype=np.float64)
+    growths = compute_fold_growths(weights_2d, bars, (short_fold, empty_fold), cost)
+    assert len(growths) == 1
+
+
+def test_insufficient_positive_folds_blocks_admission() -> None:
+    n_bars, n_syms = 120, 2
+    bars = _bars(n_bars, n_syms)
+    mask = np.ones(n_syms, dtype=np.bool_)
+    sleeve = _default_sleeve(mask)
+    forecast = CalibratedForecastPanel(
+        decision_timestamps_ns=np.arange(n_bars, dtype=np.int64),
+        symbols=bars.symbols, mu_2d=np.zeros((n_bars, n_syms), dtype=np.float32),
+        se_2d=np.full((n_bars, n_syms), np.nan, dtype=np.float32),
+        family_mu_3d=np.zeros((n_bars, n_syms, 0), dtype=np.float32),
+        family_ids=(), admitted_signal_ids=("sig:test",), fold_manifest_hash="",
+    )
+    folds = tuple(
+        CausalFold(i, 0, 60, 50, 60 + i * 10, 60 + i * 10, 60 + (i + 1) * 10, 1, 1)
+        for i in range(5)
+    )
+    cost = np.zeros((n_bars, n_syms), dtype=np.float32)
+    weights_2d = np.zeros((n_bars, n_syms), dtype=np.float64)
+    config = HandoffConfig(n_bootstrap=200, min_positive_outer_folds=4)
+    result = build_exit_aware_handoff(
+        forecast, (sleeve,), bars, np.zeros(n_bars, dtype=np.float64), config,
+        folds=folds, weights_2d=weights_2d, cost_bps_4h=cost,
+    )
+    assert not result.evidence.admitted
+    assert "insufficient_positive_folds" in result.evidence.reasons
 
