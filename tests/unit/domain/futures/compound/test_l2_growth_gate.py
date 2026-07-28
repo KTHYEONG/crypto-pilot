@@ -283,7 +283,7 @@ def test_cluster_sleeve_forecast_zero_outside_members() -> None:
     sleeve = L1SleevePosterior(
         "s:fold0:cluster_0", "s", "trend",
         0, 0, mask, mem_hash,
-        policy, 0.1, 0.05, 0.95, 1.0, (0.1,), 10, True, (),
+        policy, 0.0, 0.1, 0.05, 0.95, 1.0, (0.1,), 10, True, (),
     )
     cf = _causal_cluster_fold()
     forecast = combine_posterior_sleeves(panel, (sleeve,), (cf,), (_fold(),), HandoffConfig())
@@ -301,13 +301,13 @@ def test_rejected_sleeves_do_not_affect_handoff_gate() -> None:
         "g:fold0:c0", "g", "trend", 0, 0,
         np.ones(5, dtype=bool), "h",
         ExitPolicySpec("p", ExitPolicyKind.TIME, None, None, None, 0, 4, -1, "hash"),
-        0.05, 0.01, 0.95, 1.0, (0.05, 0.05, 0.05), 10, True, (),
+        0.0, 0.05, 0.01, 0.95, 1.0, (0.05, 0.05, 0.05), 10, True, (),
     )
     bad = L1SleevePosterior(
         "b:fold0:c1", "b", "momentum", 0, 1,
         np.ones(5, dtype=bool), "h",
         ExitPolicySpec("p", ExitPolicyKind.TIME, None, None, None, 0, 4, -1, "hash"),
-        -100.0, 0.01, 0.01, 1.0, (-100.0,), 10, False, ("rejected",),
+        0.0, -100.0, 0.01, 0.01, 1.0, (-100.0,), 10, False, ("rejected",),
     )
     result = HandoffResult(
         forecast=None,  # type: ignore[arg-type]

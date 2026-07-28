@@ -154,12 +154,11 @@ def _write_artifacts(
                  paths.result_path, paths.target_weights_path, paths.manifest_path)
 
 
-def write_l2_gate_inputs(run_dir: Path, evaluation: L2Evaluation) -> Path:
-    out_path = run_dir / "l2_gate_inputs.npz"
+def write_l2_gate_inputs(run_dir: Path, evaluation: L2Evaluation) -> Path | None:
     if evaluation.daily_strategy_returns_1d.size == 0:
         _logger.warning("[P0] l2_gate_inputs skipped: empty gate-input series (verdict=%s)", evaluation.verdict)
-        out_path.write_text("")
-        return out_path
+        return None
+    out_path = run_dir / "l2_gate_inputs.npz"
     np.savez_compressed(str(out_path),
                         daily_strategy_returns_1d=evaluation.daily_strategy_returns_1d,
                         daily_benchmark_returns_1d=evaluation.daily_benchmark_returns_1d,
@@ -300,6 +299,10 @@ def run_multiscale_compound_main(config: CompoundRunConfig) -> RunnerResult:
 
         if not engine_result.l2.integrity_ok:
             return RunnerResult(exit_code=1, reason="integrity_failure")
+
+        if engine_result.l2.verdict == L2GateVerdict.NO_EVIDENCE:
+            _logger.info("L2 verdict=NO_EVIDENCE: cash-only, exit 0")
+            return RunnerResult(exit_code=0, reason="cash_no_evidence")
 
         deployment_path: Path | None = None
         candidate = getattr(engine_result, "deployment_candidate", None)
