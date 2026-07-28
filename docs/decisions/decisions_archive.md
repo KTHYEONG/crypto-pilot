@@ -2,6 +2,11 @@
 
 This file holds historical architecture decision records (ADRs) that have been pruned from the active window.
 
+## [2026-07-26] [20260726_CORE_AXIS_FIX] [ADR_20260726_20260726_CORE_AXIS_FIX]
+- **Context/Why:** CORE 완전 이력 심볼은 51개인데 PIT 유니버스 축이 120개로 유지되어 cash-only 결과가 발생함
+- **Resolution/What:** CORE 완전 이력 심볼로 PIT 유니버스와 상태 행렬 축을 정렬하고 최신 분기 백테스트 결과를 기록함
+- **Impact:** cash-only 오류 해소; 51심볼 실제 포지션 원장 생성; L2 FAIL/L3 REJECT 유지
+
 ## [2026-07-26] [causal_growth_live_promotion] [ADR_20260726_causal_growth_live_promotion]
 - **Context/Why:** Quarterly causal growth promotion requires strict L1/L2/L3 windows, coverage fail-closed behavior, and deployment gating.
 - **Resolution/What:** Added quarterly execution windows, strict holdout slicing, coverage auditing, append-only candidate trial accounting, PROMOTE-only deployment bundles, and live target-weight validation.
