@@ -50,15 +50,19 @@ from src.domain.futures.compound.contracts import (
 from src.domain.futures.compound.dense_simulator import simulate_dense_portfolio
 from src.domain.futures.compound.handoff import _build_cash_only_forecast
 from src.domain.futures.compound.holdout_store import HoldoutReuseError, SealedHoldoutStore
+from src.domain.futures.compound.l1_regime_routing import (
+    build_causal_regime_panel,
+    build_fold_local_regime_forecast,
+)
 from src.domain.futures.compound.l1_sleeves import (
     build_exit_aware_handoff,
-    combine_posterior_sleeves,
     estimate_cluster_sleeve_posteriors,
     precompute_exit_path_cache,
 )
 from src.domain.futures.compound.multiplicity import (
     build_candidate_trial_returns,
     charge_config_search_multiplicity,
+    charge_discrete_hypothesis_count,
     compute_trial_multiplicity,
 )
 from src.domain.futures.compound.provenance import (
@@ -225,6 +229,7 @@ def run_multiscale_compound_engine(
     weights_2d: NDArray[np.float64] | None = None
     folds: tuple[CausalFold, ...] = ()
     max_horizon_bars: int = 0
+    routed: object | None = None
     cost_bps_4h: NDArray[np.float32] = np.full(
         (bars_4h.timestamps_ns.size, n_syms), config.ladder.cost_bps, dtype=np.float32,
     )
@@ -255,7 +260,6 @@ def run_multiscale_compound_engine(
         sleeves = estimate_cluster_sleeve_posteriors(
             panel, bars_4h, cluster_folds, folds, cost_bps_4h, funding_1h, config.handoff, cache=exit_cache,
         )
-        forecast = combine_posterior_sleeves(panel, sleeves, cluster_folds, folds, config.handoff)
         btc_idx = bars_4h.symbols.index("BTCUSDT") if "BTCUSDT" in bars_4h.symbols else -1
         eth_idx = bars_4h.symbols.index("ETHUSDT") if "ETHUSDT" in bars_4h.symbols else -1
         close = bars_4h.close_2d.astype(np.float64)
@@ -269,6 +273,15 @@ def run_multiscale_compound_engine(
                 weighted = np.where(mask, np.log(curr / prev), 0.0) @ w
             log_ret[1:] = weighted
         benchmark_returns_1d = log_ret
+
+        regime_panel = build_causal_regime_panel(
+            benchmark_returns_1d, bars_4h.timestamps_ns, config.regime_router,
+        )
+        routed = build_fold_local_regime_forecast(
+            panel, sleeves, cluster_folds, folds, bars_4h, cost_bps_4h, funding_1h,
+            regime_panel, config.regime_router, config.dynamic_compounding,
+        )
+        forecast = routed.forecast
         weights_2d = compute_dynamic_compounding_path(
             forecast=forecast, sigma_2d=panel.sigma_2d,
             funding_rates_1h_2d=funding_1h,
@@ -278,11 +291,13 @@ def run_multiscale_compound_engine(
         handoff_result = build_exit_aware_handoff(
             forecast, sleeves, bars_4h, benchmark_returns_1d, config.handoff,
             folds=folds, weights_2d=weights_2d, cost_bps_4h=cost_bps_4h,
+            funding_1h_2d=funding_1h,
         )
         forecast = handoff_result.forecast
         _logger.info(
-            "P2 complete: admitted=%s active=%s",
+            "P2 complete: admitted=%s active=%s hypotheses=%d",
             handoff_result.evidence.admitted, handoff_result.evidence.active_signal_ids,
+            routed.tested_hypotheses,
         )
     except Exception as exc:
         _logger.warning("P2 pipeline failed, using cash-only fallback", exc_info=True)
@@ -482,6 +497,12 @@ def run_multiscale_compound_engine(
         else int(ledger.timestamps_ns[-1])
     )
 
+    regime_hypothesis_count = (
+        routed.tested_hypotheses
+        if routed is not None and hasattr(routed, "tested_hypotheses")
+        else 0
+    )
+
     if trial_ledger is not None:
         prior_returns = trial_ledger.load_trial_returns(
             cutoff_time_ns=cutoff_time_ns,
@@ -494,6 +515,11 @@ def run_multiscale_compound_engine(
             trial_multiplicity = base_multiplicity
     else:
         trial_multiplicity = base_multiplicity
+
+    if regime_hypothesis_count > 0:
+        trial_multiplicity = charge_discrete_hypothesis_count(
+            trial_multiplicity, regime_hypothesis_count,
+        )
 
     _logger.info("evaluating L2 walk-forward")
     n_l2 = l2_ledger.timestamps_ns.shape[0]
