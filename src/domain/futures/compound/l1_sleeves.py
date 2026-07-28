@@ -548,24 +548,17 @@ def compute_beta_neutral_composite_returns(
 
 
 def compute_l1_oos_portfolio_returns(
-    forecast: CalibratedForecastPanel,
-    sleeves: tuple[L1SleevePosterior, ...],
+    weights_2d: NDArray[np.float64],
     bars_4h: TimeframeBarCube,
     folds: tuple[CausalFold, ...],
-    sigma_2d: NDArray[np.float32],
     cost_bps_4h: NDArray[np.float32],
 ) -> NDArray[np.float64]:
-    mu_2d = forecast.mu_2d
     close_2d = bars_4h.close_2d
     t_total, n_sym = close_2d.shape
-    if mu_2d.shape != (t_total, n_sym) or sigma_2d.shape != (t_total, n_sym) or cost_bps_4h.shape != (t_total, n_sym):
-        raise ValueError("shape mismatch among forecast.mu_2d, sigma_2d, cost_bps_4h, and bars_4h.close_2d")
+    if weights_2d.shape != (t_total, n_sym) or cost_bps_4h.shape != (t_total, n_sym):
+        raise ValueError("shape mismatch among weights_2d, cost_bps_4h, and bars_4h.close_2d")
     if not folds:
         return np.zeros(0, dtype=np.float64)
-
-    membership = np.zeros(n_sym, dtype=np.bool_)
-    for s in sleeves:
-        membership |= s.member_mask_1d
 
     oos_mask = np.zeros(t_total, dtype=np.bool_)
     for f in folds:
@@ -578,8 +571,6 @@ def compute_l1_oos_portfolio_returns(
     if n_oos < 10:
         return np.zeros(0, dtype=np.float64)
 
-    mu = mu_2d.astype(np.float64)
-    sigma = np.maximum(sigma_2d.astype(np.float64), 1e-12)
     log_ret = np.zeros((t_total, n_sym), dtype=np.float64)
     prev = close_2d[:-1].astype(np.float64)
     curr = close_2d[1:].astype(np.float64)
@@ -592,12 +583,51 @@ def compute_l1_oos_portfolio_returns(
     r_p = np.zeros(n_oos, dtype=np.float64)
     prev_pos = np.zeros(n_sym, dtype=np.float64)
     for k, t in enumerate(oos_indices):
-        raw = np.where(membership, mu[t] / sigma[t], 0.0)
-        abs_sum = float(np.sum(np.abs(raw)))
-        pos = raw / abs_sum if abs_sum > 0 else np.zeros(n_sym, dtype=np.float64)
+        pos = weights_2d[t]
         r_p[k] = float(np.dot(pos, log_ret[t + 1])) - float(np.dot(cost[t], np.abs(pos - prev_pos))) * 1e-4
         prev_pos = pos
     return r_p
+
+
+def compute_fold_growths(
+    weights_2d: NDArray[np.float64],
+    bars_4h: TimeframeBarCube,
+    folds: tuple[CausalFold, ...],
+    cost_bps_4h: NDArray[np.float32],
+) -> tuple[float, ...]:
+    close_2d = bars_4h.close_2d
+    t_total, n_sym = close_2d.shape
+    if weights_2d.shape != (t_total, n_sym) or cost_bps_4h.shape != (t_total, n_sym):
+        raise ValueError("shape mismatch")
+
+    log_ret = np.zeros((t_total, n_sym), dtype=np.float64)
+    prev = close_2d[:-1].astype(np.float64)
+    curr = close_2d[1:].astype(np.float64)
+    valid = (prev > 0) & np.isfinite(prev) & (curr > 0) & np.isfinite(curr)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        log_ret[1:] = np.where(valid, np.log(curr / prev), 0.0)
+    log_ret[~np.isfinite(log_ret)] = 0.0
+    cost = cost_bps_4h.astype(np.float64)
+
+    growths: list[float] = []
+    for f in folds:
+        oos_start = f.oos_start
+        oos_end = min(f.oos_end_exclusive, t_total)
+        if oos_end - oos_start < 2:
+            continue
+        fold_rets = np.zeros(oos_end - oos_start, dtype=np.float64)
+        prev_pos = np.zeros(n_sym, dtype=np.float64)
+        for k, t in enumerate(range(oos_start, oos_end)):
+            if t < t_total - 1:
+                pos = weights_2d[t]
+                fold_rets[k] = float(np.dot(pos, log_ret[t + 1])) - float(np.dot(cost[t], np.abs(pos - prev_pos))) * 1e-4
+                prev_pos = pos
+        finite_rets = fold_rets[np.isfinite(fold_rets)]
+        if len(finite_rets) < 2:
+            continue
+        log_growth = float(np.mean(np.log1p(finite_rets))) * 2191.5
+        growths.append(log_growth)
+    return tuple(growths)
 
 
 def build_exit_aware_handoff(
@@ -608,7 +638,7 @@ def build_exit_aware_handoff(
     config: HandoffConfig,
     *,
     folds: tuple[CausalFold, ...],
-    sigma_2d: NDArray[np.float32],
+    weights_2d: NDArray[np.float64],
     cost_bps_4h: NDArray[np.float32],
 ) -> HandoffResult:
     from src.domain.futures.compound.bootstrap import (
@@ -622,13 +652,11 @@ def build_exit_aware_handoff(
     admitted_sleeves = [s for s in sleeves if s.admitted]
     if not admitted_sleeves:
         no_evidence = HandoffAdmissionEvidence(0.0, 0.0, 0.0, 0.0, 0.0, 0, 0.0, (), False, ("no_admitted_sleeves",))
-        recorder.record_gate(admitted_sleeves=0, distinct_series=0, oos_bars=0, ann_growth=0.0, ann_lcb90=0.0, pw_block=0.0, turnover=0.0, cost_drag=0.0, admitted=False)
+        recorder.record_gate(admitted_sleeves=0, distinct_series=0, oos_bars=0, ann_growth=0.0, ann_lcb90=0.0, pw_block=0.0, turnover=0.0, cost_drag=0.0, positive_folds=0, fold_growths=(), mean_abs_net=0.0, admitted=False)
         _LOGGER.info("[L1] exit-aware handoff: no admitted sleeves, NO_EVIDENCE")
         return HandoffResult(forecast, no_evidence)
 
-    portfolio_returns = compute_l1_oos_portfolio_returns(
-        forecast, tuple(admitted_sleeves), bars_4h, folds, sigma_2d, cost_bps_4h,
-    )
+    portfolio_returns = compute_l1_oos_portfolio_returns(weights_2d, bars_4h, folds, cost_bps_4h)
     if len(portfolio_returns) == 0:
         no_evidence = HandoffAdmissionEvidence(0.0, 0.0, 0.0, 0.0, 0.0, 0, 0.0, (), False, ("no_admitted_sleeves",))
         _LOGGER.info("[L1] exit-aware handoff: empty OOS portfolio, NO_EVIDENCE")
@@ -647,21 +675,20 @@ def build_exit_aware_handoff(
     log_ret = np.log1p(np.where(np.isfinite(portfolio_returns), portfolio_returns, 0.0))
     ann_growth = float(np.mean(log_ret)) * 2191.5
 
+    fold_growths = compute_fold_growths(weights_2d, bars_4h, folds, cost_bps_4h)
+    positive_outer_folds = sum(1 for g in fold_growths if g > 0.0)
+
     reasons: list[str] = []
     if ann_lcb90 <= 0.0:
         reasons.append("growth_lcb90_not_positive")
+    if positive_outer_folds < config.min_positive_outer_folds:
+        reasons.append("insufficient_positive_folds")
 
     distinct_series = 1
     admitted = not reasons
 
-    # compute turnover and cost drag for diagnostics
     close_2d = bars_4h.close_2d
     t_total, n_sym = close_2d.shape
-    mu = forecast.mu_2d.astype(np.float64)
-    sigma = np.maximum(sigma_2d.astype(np.float64), 1e-12)
-    membership = np.zeros(n_sym, dtype=np.bool_)
-    for s in admitted_sleeves:
-        membership |= s.member_mask_1d
     oos_mask = np.zeros(t_total, dtype=np.bool_)
     for f in folds:
         oos_start = f.oos_start
@@ -671,25 +698,28 @@ def build_exit_aware_handoff(
     oos_indices = np.where(oos_mask)[0]
     total_turnover = 0.0
     total_cost_drag = 0.0
+    total_abs_net = 0.0
     prev_pos = np.zeros(n_sym, dtype=np.float64)
     cost = cost_bps_4h.astype(np.float64)
     for t in oos_indices:
-        raw = np.where(membership, mu[t] / sigma[t], 0.0)
-        abs_sum = float(np.sum(np.abs(raw)))
-        pos = raw / abs_sum if abs_sum > 0 else np.zeros(n_sym, dtype=np.float64)
+        pos = weights_2d[t]
         total_turnover += float(np.sum(np.abs(pos - prev_pos)))
         total_cost_drag += float(np.dot(cost[t], np.abs(pos - prev_pos))) * 1e-4
+        total_abs_net += float(np.abs(np.sum(pos)))
         prev_pos = pos
+    mean_abs_net = total_abs_net / len(oos_indices) if len(oos_indices) > 0 else 0.0
 
     evidence = HandoffAdmissionEvidence(
-        ann_growth, ann_lcb90, ann_lcb90, 0.0, 0.0, len(admitted_sleeves),
+        ann_growth, ann_lcb90, ann_lcb90, 0.0, 0.0, positive_outer_folds,
         1.0, tuple(s.signal_id for s in admitted_sleeves), admitted, tuple(reasons),
     )
-    _LOGGER.info("[L1] exit-aware handoff admitted=%s sleeves=%d distinct_series=%d oos_bars=%d ann_growth=%.4f ann_lcb90=%.4f",
-                 admitted, len(admitted_sleeves), distinct_series, len(portfolio_returns), ann_growth, ann_lcb90)
+    _LOGGER.info("[L1] exit-aware handoff admitted=%s sleeves=%d distinct_series=%d oos_bars=%d ann_growth=%.4f ann_lcb90=%.4f positive_folds=%d/%d",
+                 admitted, len(admitted_sleeves), distinct_series, len(portfolio_returns), ann_growth, ann_lcb90,
+                 positive_outer_folds, len(fold_growths))
     recorder.record_gate(admitted_sleeves=len(admitted_sleeves), distinct_series=distinct_series,
                          oos_bars=len(portfolio_returns), ann_growth=ann_growth, ann_lcb90=ann_lcb90,
                          pw_block=resolved_pw_block, turnover=float(total_turnover), cost_drag=float(total_cost_drag),
+                         positive_folds=positive_outer_folds, fold_growths=fold_growths, mean_abs_net=mean_abs_net,
                          admitted=admitted)
     return HandoffResult(forecast, evidence, tuple(admitted_sleeves))
 

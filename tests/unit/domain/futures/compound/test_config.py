@@ -211,7 +211,15 @@ class TestDynamicCompoundingConfig:
         cfg = DynamicCompoundingConfig()
         assert cfg.band_frac == 0.60
         assert cfg.alpha_smooth == 0.08
-        assert cfg.target_ann_vol == 0.15
+        assert cfg.target_ann_vol == 0.12
+
+    def test_dynamic_compounding_config_rejects_invalid_max_net_exposure(self) -> None:
+        with pytest.raises((AssertionError, ValueError)):
+            DynamicCompoundingConfig(max_net_exposure=1.5)
+        with pytest.raises((AssertionError, ValueError)):
+            DynamicCompoundingConfig(max_net_exposure=-0.1)
+        cfg = DynamicCompoundingConfig()
+        assert cfg.max_net_exposure == 0.10
 
 
 class TestL2GateConfig:
