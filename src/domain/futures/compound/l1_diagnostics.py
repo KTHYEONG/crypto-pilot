@@ -58,17 +58,19 @@ class L1AdmissionRecorder:
         self, *,
         admitted_sleeves: int, distinct_series: int, oos_bars: int,
         ann_growth: float, ann_lcb90: float, pw_block: float,
-        turnover: float, cost_drag: float, admitted: bool,
+        turnover: float, cost_drag: float,
+        positive_folds: int = 0, fold_growths: tuple[float, ...] = (),
+        mean_abs_net: float = 0.0, admitted: bool,
     ) -> None:
         if not self._enabled:
             return
         _LOGGER.info(
             "[EVAL] admitted_sleeves=%d distinct_series=%d oos_bars=%d "
             "ann_growth=%.4f ann_lcb90=%.4f pw_block=%.2f "
-            "turnover=%.4f cost_drag=%.6f admitted=%s",
+            "turnover=%.4f cost_drag=%.6f positive_folds=%d mean_abs_net=%.4f admitted=%s",
             admitted_sleeves, distinct_series, oos_bars,
             ann_growth, ann_lcb90, pw_block,
-            turnover, cost_drag, admitted,
+            turnover, cost_drag, positive_folds, mean_abs_net, admitted,
         )
         self._append_jsonl({
             "tag": "EVAL", "admitted_sleeves": admitted_sleeves,
@@ -78,5 +80,8 @@ class L1AdmissionRecorder:
             "pw_block": round(pw_block, 2),
             "turnover": round(turnover, 4),
             "cost_drag": round(cost_drag, 6),
+            "positive_folds": positive_folds,
+            "fold_growths": [round(g, 6) for g in fold_growths],
+            "mean_abs_net": round(mean_abs_net, 4),
             "admitted": admitted,
         })

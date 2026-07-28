@@ -345,8 +345,12 @@ def test_cash_only_is_no_evidence() -> None:
         admitted_signal_ids=(),
         fold_manifest_hash="",
     )
+    folds = (CausalFold(0, 0, 20, 20, 25, 25, 30, 1, 1),)
+    cost = np.ones((40, 2), dtype=np.float32)
+    weights_2d = np.zeros((40, 2), dtype=np.float64)
     result = build_exit_aware_handoff(
         cash, (), bars_4h, np.zeros(40, dtype=np.float64), HandoffConfig(),
+        folds=folds, weights_2d=weights_2d, cost_bps_4h=cost,
     )
     assert not result.evidence.admitted
 

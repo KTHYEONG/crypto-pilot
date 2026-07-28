@@ -405,6 +405,7 @@ class TestDynamicCompounding:
             max_gross_leverage=1.0, max_long_leverage=0.7, max_short_leverage=0.3,
             dd_scale_floor=1e-10, dd_cooldown_bars=5,
             use_rank_conviction=False, alpha_smooth=0.03, band_frac=0.0,
+            max_net_exposure=1.0,
         )
         result = compute_dynamic_compounding_path(
             forecast=forecast,
@@ -440,6 +441,7 @@ class TestDynamicCompounding:
             soft_drawdown_limit=0.05, hard_drawdown_limit=0.40,
             use_rank_conviction=False, alpha_smooth=0.15, band_frac=0.0,
             dd_scale_floor=0.25, min_vol_samples=10,
+            max_net_exposure=1.0,
         )
         result = compute_dynamic_compounding_path(
             forecast=forecast,
@@ -697,6 +699,7 @@ class TestVolScaleMaxWiring:
         config = DynamicCompoundingConfig(
             use_rank_conviction=False, vol_scale_max=1.5, max_gross_leverage=1.0,
             max_long_leverage=0.7, max_short_leverage=0.3,
+            max_net_exposure=1.0,
         )
         result = compute_dynamic_compounding_path(
             forecast=forecast, sigma_2d=sigma_2d, funding_rates_1h_2d=funding,

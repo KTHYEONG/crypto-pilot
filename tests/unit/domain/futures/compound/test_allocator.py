@@ -497,3 +497,62 @@ def test_min_oos_days_raised_not_relaxed() -> None:
     assert cfg.min_excess_growth_probability == 0.90
     assert cfg.min_deflated_sharpe_probability == 0.90
     assert cfg.max_spa_pvalue == 0.10
+
+
+def test_net_exposure_cap_does_not_mutate_input() -> None:
+    import copy
+    from src.domain.futures.compound.allocator import apply_net_exposure_cap
+    w = np.array([0.6, 0.3, 0.1], dtype=np.float64)
+    w_copy = copy.deepcopy(w)
+    _ = apply_net_exposure_cap(w, 0.1)
+    np.testing.assert_array_equal(w, w_copy)
+
+
+def test_net_exposure_cap_clamps_and_preserves_gross_sign() -> None:
+    from src.domain.futures.compound.allocator import apply_net_exposure_cap
+    w = np.array([0.6, 0.3, 0.1], dtype=np.float64)
+    result = apply_net_exposure_cap(w, 0.1)
+    assert abs(float(np.sum(result)) - 0.1) < 1e-9
+    assert result[0] > result[1] > result[2], "relative ordering preserved"
+
+
+def test_cap_is_noop_when_within_limit() -> None:
+    from src.domain.futures.compound.allocator import apply_net_exposure_cap
+    w = np.array([0.5, -0.5], dtype=np.float64)
+    result = apply_net_exposure_cap(w, 0.1)
+    np.testing.assert_array_equal(w, result)
+
+
+def test_max_net_exposure_one_reproduces_legacy_weights() -> None:
+    from src.domain.futures.compound.allocator import apply_net_exposure_cap
+    w = np.array([0.6, 0.3, 0.1], dtype=np.float64)
+    result = apply_net_exposure_cap(w, 1.0)
+    np.testing.assert_array_equal(w, result)
+
+
+def test_net_exposure_cap_is_scale_invariant() -> None:
+    from src.domain.futures.compound.allocator import apply_net_exposure_cap
+    w = np.array([0.6, 0.3, 0.1], dtype=np.float64)
+    k = 2.5
+    direct = apply_net_exposure_cap(k * w, 0.1)
+    scaled = k * apply_net_exposure_cap(w, 0.1)
+    np.testing.assert_allclose(direct, scaled, atol=1e-12)
+
+
+def test_apply_net_exposure_cap_rejects_out_of_range() -> None:
+    from src.domain.futures.compound.allocator import apply_net_exposure_cap
+    w = np.array([0.1], dtype=np.float64)
+    with pytest.raises(ValueError, match="max_net_exposure"):
+        apply_net_exposure_cap(w, 1.5)
+    with pytest.raises(ValueError, match="max_net_exposure"):
+        apply_net_exposure_cap(w, -0.1)
+
+
+def test_cap_handles_zero_gross_and_empty_active() -> None:
+    from src.domain.futures.compound.allocator import apply_net_exposure_cap
+    w_zero = np.zeros(3, dtype=np.float64)
+    result = apply_net_exposure_cap(w_zero, 0.1)
+    np.testing.assert_array_equal(w_zero, result)
+    w_single_nonzero = np.array([0.0, 0.0, 0.0], dtype=np.float64)
+    result = apply_net_exposure_cap(w_single_nonzero, 0.1)
+    np.testing.assert_array_equal(w_single_nonzero, result)
