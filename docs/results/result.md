@@ -1,3 +1,53 @@
+## 최신 DEBUG 실행 — P2 ExpertReturnTape 항등식 예외로 cash-only fallback — 2026-07-29
+
+- 실행일(KST): `2026-07-29`
+- 실행 명령: `UV_CACHE_DIR=/tmp/uv-cache MPLCONFIGDIR=/tmp/mpl PYTHONPATH=. L2_DRY_RUN=1 L1_DEBUG=1 LOG_LEVEL=DEBUG timeout 1800 uv run python src/execution/opt_main_futures.py --phase full --sync local --date 2026-07-15 --seed 42`
+- 프로세스: `exit_code=1` (P2 예외가 `integrity_ok=false`로 전파됨)
+- 결과 artifact: `logs/futures/compound/20260728_232739/`
+- DEBUG 원본: `logs/futures/compound/debug_20260729.log` (25 lines, 1,808 bytes)
+- 검증 규모: `51` symbols × `5,442` 1h bars (내부 L1 4h), `L2_DRY_RUN=1`, sealed L3 holdout 미소비
+
+### 결과 데이터
+
+| 항목 | 값 |
+|---|---:|
+| `l2.verdict` | `no_evidence` |
+| `l2.integrity_ok` | **false** |
+| `l2.reasons` | `p2_pipeline_error:ValueError` |
+| `l3.verdict` | `reject` |
+| `l3.reasons` | `p2_pipeline_error:ValueError`, `l2_not_pass` |
+| CAGR / annualized log growth | `0.00% / 0.00%` |
+| Sharpe / MDD / volatility | `0.00 / 0.00% / 0.00%` |
+| equity multiple | `1.00x` |
+| target weights shape | `(5442, 51)` |
+| non-zero target weight ratio | `0.0000%` |
+| max `abs(target_weight)` | `0.0` |
+
+### DEBUG 예외 trace 및 원인 후보
+
+```text
+P2 pipeline failed, using cash-only fallback
+... l1_regime_routing.py:276 -> ExpertReturnTape(...)
+contracts.py:801: ValueError: net != gross + execution_cost + funding
+```
+
+- 실패 지점: `build_fold_local_shadow_tape()`가 `ExpertReturnTape`를 생성하는 시점.
+- 계약: `net_return_1d == gross_return_1d + execution_cost_return_1d + funding_return_1d` (`np.isclose` 검증).
+- 이번 실행은 전략 성과가 음수라서 거부된 것이 아니라 **수익 분해 배열의 수치/정렬 불일치로 L1 라우팅 자체가 중단**된 결과다.
+- 따라서 이번 `no_evidence`는 정상적인 통계적 현금 대기가 아니라 `integrity_failure` 성격의 보호 동작으로 분류해야 한다.
+- 동반 DEBUG 경고: `smart_money_divergence`에 `top_trader_long_short_ratio/long_short_ratio` 필드가 없어 해당 데이터가 fallback 처리됨(2회).
+- 추가 런타임 경고: `numpy` 상관계수 계산 중 zero-variance 입력으로 `invalid value encountered in divide` 발생(2건).
+
+### 다음 분석용 원자료
+
+- 전체 stdout/stderr: `logs/futures/compound/debug_20260729.log`
+- 구조화 결과: `logs/futures/compound/20260728_232739/result.json`
+- 현금 결과 weights: `logs/futures/compound/20260728_232739/target_weights.npy`
+- L1 admission 누적 JSONL: `logs/l1_admission.jsonl` (실행 후 총 `2,073` lines; 이번 DEBUG 로그에는 REGIME tape 완료 행이 없음)
+- 우선 점검: gross/cost/funding/net 배열의 동일 인덱스 정렬, float32→float64 변환 시점, `NaN/inf` 전파, 마지막 bar의 `prev_pos`/funding slice 경계.
+
+---
+
 ## 최신 실행 — causal regime expert routing 적용 후 fail-closed 현금 상태 — 2026-07-28
 
 - 실행일: `2026-07-28`
