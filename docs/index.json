@@ -596,7 +596,10 @@
     "testing": "tests/unit/domain/futures/compound/test_multiplicity.py"
   },
   "src/domain/futures/compound/validation.py": {
-    "testing": "tests/unit/domain/futures/compound/test_validation.py"
+    "testing": [
+      "tests/unit/domain/futures/compound/test_validation.py",
+      "tests/unit/domain/futures/compound/test_l2_growth_gate.py"
+    ]
   },
   "src/domain/futures/compound/config.py": {
     "testing": "tests/unit/domain/futures/compound/test_config.py"

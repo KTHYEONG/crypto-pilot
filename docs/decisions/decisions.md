@@ -1,5 +1,10 @@
 # Active Decisions Log (Sliding Window)
 
+## [2026-07-29] [TASK_L1_CASH_ONLY_DEBUG_AUDIT] [ADR_20260729_L1_CASH_ONLY_DEBUG_AUDIT]
+- **Context/Why:** 최신 full dry-run에서 전략 성과 게이트 이전에 L1 prequential routing이 net 수익 항등식 검증 예외로 중단되어 cash-only fallback 원인과 원자료를 보존해야 함
+- **Resolution/What:** docs/results/result.md에 실행 조건·artifact·DEBUG trace·정량 결과·후속 점검 포인트를 추가하고, 결과를 ADR 및 인덱스에 동기화
+- **Impact:** 이번 no_evidence는 통계적 알파 부재가 아닌 integrity failure 보호 동작으로 분류; ExpertReturnTape gross/cost/funding/net 정렬·NaN·dtype·funding 경계 계측이 다음 구현의 선행 조건
+
 ## [2026-07-28] [TASK_L1_CAUSAL_REGIME_ROUTING_EXECUTION] [ADR_20260728_L1_CAUSAL_REGIME_ROUTING_EXECUTION]
 - **Context/Why:** 최신 full 실행에서 fold-local regime expert routing 적용 후 증거 부족 상태를 검증하고, 배포 북이 음수 성과를 내지 않도록 fail-closed 결과를 기록함
 - **Resolution/What:** docs/results/result.md에 20260728_131507 실행 결과와 0-weight no_evidence 상태를 반영하고, sync 자동화로 ADR/index/spec/scratch 정리를 수행함
@@ -69,8 +74,3 @@
 - **Context/Why:** 20260727_013707 FAIL이 여전히 1일 라벨 오정렬(A-4 미해소)로 오염됨을 원시 레이크 대조(ρ=0.846 vs -0.003)로 확정. 정렬 정정 후 causal β=0.643으로 시장중립이 아닌 베타 롱임이 드러났고, β-헤지 잔차가 성장·변동성·regime 정상성 전부에서 우월함을 실측(scratch/verify_l2_growth_leap.py)
 - **Resolution/What:** validation.py(라벨정렬정정·fail-closed 정렬불변식·beta-adj excess), benchmark.py(causal_beta_series/assert_contemporaneous_alignment 신규), allocator.py(apply_beta_hedge_overlay/derive_mdd_parity_scale 신규), config.py(beta lookback/clip, min_oos_days 365->500 상향, mdd_budget), engine.py(2-pass 무헤지/헤지 시뮬 배선), run_windows.py(l1_days 365->180, l2_days 365->547). /check PASS(Cov 85%, 임계값 완화 0건)
 - **Impact:** 실전 CLI 재실행 결과 target_weights 전량 0(NO_EVIDENCE) - L1 exit-aware handoff admitted=False sleeves=274(전멸). 원인=L1 윈도우 축소(365->180d)가 기존 admission 게이트 min_effective_days=180.0과 충돌, fold분할 후 유효일수 미달로 전신호 탈락. [LIMIT-07]이 예견한 위험이 감소 아닌 전멸로 실현. P0/P1/P2(정렬·베타·헤지)는 유효, P3(창 재분할)는 admission 게이트 재설계 결정 대기로 보류
-
-## [2026-07-27] [TASK_L2_GATE_HONESTY_AND_RISK_BUDGET] [ADR_20260727_L2_GATE_HONESTY_AND_RISK_BUDGET]
-- **Context/Why:** L2 PASS(CAGR 31.05%, DSR 1.000000)가 얇은 마진이 아니라 결함(DSR 주기불일치·확률게이트 중복·블록길이 오지정·벤치마크 일자오정렬·실행북 동결·funding 부호역전·종목별 비용무력화·L3 holdout이 PROMOTE를 못막음·CAGR 연율화 버그) 9건의 산물임을 실측(재구성+E1~E8 다중가설)으로 확인
-- **Resolution/What:** bootstrap.py 신규(Politis-White 블록길이·circular bootstrap·SPA 3대조군). multiplicity.py(DSR 주기정합), validation.py(일자정렬·복리연율화·SPA 편입·frozen control), allocator.py(support 재적용·심볼별 band·carry 부호·폐루프 vol), dense_simulator.py(종목별 비용·slippage/impact), engine.py(frozen control 배선·L3 prior 일봉화). 실전 실행에서 L3 prior 가드 결함(스펙 계약 자체의 오류로 모든 정상실행 크래시) 추가 발견, 가드 제거 및 테스트 교체로 수정
-- **Impact:** 실제 CLI 재실행(20260727_013707): verdict PASS→FAIL, CAGR 31.05%(산술오류)→6.75%(복리정합), DSR 1.000000(포화)→0.4266, excess_growth_probability 0.9400→0.712, 신규 SPA p=0.362(기준 0.10 초과). L3가 l2_not_pass로 즉시 reject(이전엔 dry_run으로 shadow 방치). 임계값 완화 0건. A-8(PIT 유니버스 breadth)은 범위 외 후속 스펙
