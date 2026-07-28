@@ -410,7 +410,7 @@ class TestRunMultiscaleCompoundEngine:
             return_value=(),
         )
         mocker.patch(
-            "src.domain.futures.compound.engine.combine_posterior_sleeves",
+            "src.domain.futures.compound.engine.build_causal_regime_panel",
             return_value=mocker.Mock(),
         )
 
@@ -431,6 +431,13 @@ class TestRunMultiscaleCompoundEngine:
             admitted_signal_ids=("sig1",),
             fold_manifest_hash="test",
         )
+        from src.domain.futures.compound.contracts import RegimeRoutedForecast
+        _f_routed = RegimeRoutedForecast(
+            forecast=forecast_panel, evidence=(),
+            active_expert_count_1d=np.ones(n_4h_bars, dtype=np.int16),
+            tested_hypotheses=0,
+        )
+        mocker.patch("src.domain.futures.compound.engine.build_fold_local_regime_forecast", return_value=_f_routed)
         evidence = HandoffAdmissionEvidence(
             annualized_log_growth=0.1, growth_lcb90=0.05, growth_2x_cost=0.05,
             max_drawdown=0.1, annual_volatility=0.15, positive_outer_folds=5,
@@ -501,8 +508,10 @@ class TestRunMultiscaleCompoundEngine:
             "src.domain.futures.compound.engine.build_folds_4h",
             return_value=(CausalFold(0, 0, 50, 48, 50, 52, 102, 2, 42),),
         )
+        from src.domain.futures.compound.contracts import RegimeRoutedForecast
         mocker.patch("src.domain.futures.compound.engine.estimate_cluster_sleeve_posteriors", return_value=())
-        mocker.patch("src.domain.futures.compound.engine.combine_posterior_sleeves", return_value=mocker.Mock())
+        mocker.patch("src.domain.futures.compound.engine.build_causal_regime_panel", return_value=mocker.Mock())
+        mocker.patch("src.domain.futures.compound.engine.build_fold_local_regime_forecast", return_value=mocker.Mock())
 
         n_4h_bars = 125
         forecast_panel = CalibratedForecastPanel(
@@ -519,7 +528,11 @@ class TestRunMultiscaleCompoundEngine:
             family_mu_3d=np.zeros((n_4h_bars, 5, 1), dtype=np.float32),
             family_ids=(), admitted_signal_ids=("sig1",), fold_manifest_hash="test",
         )
-        mocker.patch("src.domain.futures.compound.engine.combine_posterior_sleeves", return_value=forecast_panel)
+        f_routed = RegimeRoutedForecast(
+            forecast=forecast_panel, evidence=(), active_expert_count_1d=np.ones(n_4h_bars, dtype=np.int16),
+            tested_hypotheses=0,
+        )
+        mocker.patch("src.domain.futures.compound.engine.build_fold_local_regime_forecast", return_value=f_routed)
         evidence = HandoffAdmissionEvidence(
             annualized_log_growth=0.1, growth_lcb90=0.05, growth_2x_cost=0.05,
             max_drawdown=0.1, annual_volatility=0.15, positive_outer_folds=5,
@@ -583,7 +596,7 @@ class TestRunMultiscaleCompoundEngine:
             return_value=(CausalFold(0, 0, 50, 48, 50, 52, 102, 2, 42),),
         )
         mocker.patch("src.domain.futures.compound.engine.estimate_cluster_sleeve_posteriors", return_value=())
-        mocker.patch("src.domain.futures.compound.engine.combine_posterior_sleeves", return_value=mocker.Mock())
+        mocker.patch("src.domain.futures.compound.engine.build_causal_regime_panel", return_value=mocker.Mock())
 
         n_4h_bars = 125
         forecast_panel = CalibratedForecastPanel(
@@ -600,6 +613,13 @@ class TestRunMultiscaleCompoundEngine:
             family_mu_3d=np.zeros((n_4h_bars, 5, 1), dtype=np.float32),
             family_ids=(), admitted_signal_ids=("sig1",), fold_manifest_hash="test",
         )
+        from src.domain.futures.compound.contracts import RegimeRoutedForecast
+        f_routed3 = RegimeRoutedForecast(
+            forecast=forecast_panel, evidence=(),
+            active_expert_count_1d=np.ones(n_4h_bars, dtype=np.int16),
+            tested_hypotheses=0,
+        )
+        mocker.patch("src.domain.futures.compound.engine.build_fold_local_regime_forecast", return_value=f_routed3)
         evidence = HandoffAdmissionEvidence(
             annualized_log_growth=0.1, growth_lcb90=0.05, growth_2x_cost=0.05,
             max_drawdown=0.1, annual_volatility=0.15, positive_outer_folds=5,
@@ -1181,6 +1201,14 @@ class TestEngineL2PassBuildsDeploymentCandidate:
             "src.domain.futures.compound.engine.build_exit_aware_handoff",
             return_value=handoff_result,
         )
+        from src.domain.futures.compound.contracts import RegimeRoutedForecast
+        _mock_routed_dc = RegimeRoutedForecast(
+            forecast=forecast_panel, evidence=(),
+            active_expert_count_1d=np.ones(256, dtype=np.int16),
+            tested_hypotheses=0,
+        )
+        mocker.patch("src.domain.futures.compound.engine.build_causal_regime_panel", return_value=mocker.Mock())
+        mocker.patch("src.domain.futures.compound.engine.build_fold_local_regime_forecast", return_value=_mock_routed_dc)
         mocker.patch(
             "src.domain.futures.compound.engine.compute_dynamic_compounding_path",
             return_value=np.full((256, len(small_cube.symbols)), 0.02, dtype=np.float64),
@@ -1390,8 +1418,13 @@ class TestEngineL2PassBuildsDeploymentCandidate:
         assert result.l3.verdict == DeploymentVerdict.REJECT
         assert result.l3.reasons == ("l2_not_pass",)
 
-    def test_end_to_end_soft_compounding_pipeline(self, tmp_path) -> None:
+    def test_end_to_end_soft_compounding_pipeline(self, tmp_path, mocker) -> None:
+        from src.domain.futures.compound.contracts import (
+            CalibratedForecastPanel, HandoffAdmissionEvidence,
+            HandoffResult, RegimeRoutedForecast,
+        )
         n_bars, n_syms = 2400, 20
+        n_bars_4h = n_bars // 4
         symbols = ("BTCUSDT", "ETHUSDT", *tuple(f"SYM_{i:03d}" for i in range(18)))
         close = np.column_stack(tuple(
             np.linspace(100, 130 + i * 10, n_bars) for i in range(n_syms)
@@ -1430,6 +1463,34 @@ class TestEngineL2PassBuildsDeploymentCandidate:
         )
         store.create(manifest)
         config = CompoundEngineConfig()
+
+        e2e_ts_4h = np.arange(n_bars_4h, dtype=np.int64) * _NS_PER_HOUR * 4
+        rng_e2e = np.random.default_rng(42)
+        e2e_mu = rng_e2e.normal(0, 0.01, size=(n_bars_4h, n_syms)).astype(np.float32)
+        e2e_forecast_panel = CalibratedForecastPanel(
+            decision_timestamps_ns=e2e_ts_4h,
+            symbols=symbols,
+            mu_2d=e2e_mu,
+            se_2d=np.full((n_bars_4h, n_syms), np.nan, dtype=np.float32),
+            family_mu_3d=np.zeros((n_bars_4h, n_syms, 1), dtype=np.float32),
+            family_ids=(), admitted_signal_ids=(), fold_manifest_hash="e2e",
+        )
+        e2e_routed = RegimeRoutedForecast(
+            forecast=e2e_forecast_panel, evidence=(),
+            active_expert_count_1d=np.ones(n_bars_4h, dtype=np.int16),
+            tested_hypotheses=0,
+        )
+        mocker.patch("src.domain.futures.compound.engine.build_fold_local_regime_forecast", return_value=e2e_routed)
+        e2e_evidence = HandoffAdmissionEvidence(
+            annualized_log_growth=0.1, growth_lcb90=0.05, growth_2x_cost=0.05,
+            max_drawdown=0.1, annual_volatility=0.11, positive_outer_folds=5,
+            effective_breadth=1.0, active_signal_ids=("sig1",),
+            admitted=True, reasons=(),
+            robust_fold_growth=0.03, fold_growths=(0.1, 0.05, 0.03, 0.04, 0.02),
+        )
+        e2e_handoff = HandoffResult(forecast=e2e_forecast_panel, evidence=e2e_evidence)
+        mocker.patch("src.domain.futures.compound.engine.build_exit_aware_handoff", return_value=e2e_handoff)
+
         result = run_multiscale_compound_engine(
             market=cube, universe=universe,
             holdout_store=store, holdout_id="e2e-soft", config=config,
