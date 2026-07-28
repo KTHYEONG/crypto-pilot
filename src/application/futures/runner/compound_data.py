@@ -72,15 +72,18 @@ def build_multiscale_market_cube(
     arrays: dict[str, NDArray[np.float64]] = {
         name: np.asarray(grid.fields[name], dtype=np.float64) for name in core_names
     }
-    funding_request = GridRequest(
+    funding_grid = materialize_feature_grid_parallel(
+        request=GridRequest(
             symbols=symbols,
             timeframe="1h",
             source_timeframe="1h",
             fields=("funding_rate",),
             start_time_ns=int(timestamps_ns[0]),
             end_time_ns=int(timestamps_ns[-1] + 3_600_000_000_000),
-        )
-    funding_grid = materialize_feature_grid_parallel(request=funding_request, snapshot=snapshot, dataset=DatasetKind.FUNDING_EVENT)
+        ),
+        snapshot=snapshot,
+        dataset=DatasetKind.FUNDING_EVENT,
+    )
     funding = np.asarray(funding_grid.fields.get("funding_rate", np.full((n_bars, n_syms), np.nan, dtype=np.float64)), dtype=np.float32)
     funding_available = funding_grid.available.get("funding_rate", np.zeros((n_bars, n_syms), dtype=np.bool_))
 
@@ -101,16 +104,17 @@ def build_multiscale_market_cube(
     index_grid = materialize_feature_grid_parallel(
         request=feature_request, snapshot=snapshot, dataset=DatasetKind.INDEX_1M,
     )
-    metrics_request = GridRequest(
-        symbols=symbols,
-        timeframe="1h",
-        source_timeframe="1h",
-        fields=("sum_open_interest_value",),
-        start_time_ns=int(timestamps_ns[0]),
-        end_time_ns=int(timestamps_ns[-1] + 3_600_000_000_000),
-    )
     metrics_grid = materialize_feature_grid_parallel(
-        request=metrics_request, snapshot=snapshot, dataset=DatasetKind.METRICS_5M,
+        request=GridRequest(
+            symbols=symbols,
+            timeframe="1h",
+            source_timeframe="1h",
+            fields=("sum_open_interest_value",),
+            start_time_ns=int(timestamps_ns[0]),
+            end_time_ns=int(timestamps_ns[-1] + 3_600_000_000_000),
+        ),
+        snapshot=snapshot,
+        dataset=DatasetKind.METRICS_5M,
     )
 
     causal_grids: dict[str, NativeFeatureGrid] = {}
