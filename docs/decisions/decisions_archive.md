@@ -2,6 +2,11 @@
 
 This file holds historical architecture decision records (ADRs) that have been pruned from the active window.
 
+## [2026-07-26] [TASK_L2_TURNOVER_DEADBAND_DEPLOYMENT_CANDIDATE_FIX] [ADR_20260726_L2_TURNOVER_DEADBAND_DEPLOYMENT_CANDIDATE_FIX]
+- **Context/Why:** 20260726_114624 실행에서 L2 미통과 4건이 전부 0 경계 근접 미달이었음. 12개 변형 그리드서치(실제 프로덕션 엔진 전체 재실행)로 band_frac/alpha_smooth 결합 재보정이 유일한 강건 해법임을 확인. 동시에 처음으로 L2가 PASS하는 경로가 실행되며 engine.py의 배포후보 생성 블록(pragma no cover)이 active_signal_ids(중복 281개 멀티셋) vs descriptors(고유 27개) 길이불일치로 크래시하는 구조적 버그 발견
+- **Resolution/What:** config.py: DynamicCompoundingConfig band_frac 0.30->0.60, alpha_smooth 0.15->0.08. engine.py: _build_deployment_candidate 신규 함수로 교체(고유화+admission 빈도 기반 vote_weights, 매칭실패시 ValueError). 실제 CLI 재실행으로 strategy_spec_hash/fold_manifest_hash 미배선이라는 별개의 신규 차단 버그 2건 추가 발견(둘 다 원래부터 배선된 적 없던 설계공백, 이번 회귀 아님)
+- **Impact:** L2 게이트 사상 최초 실질마진 PASS(turnover -82.5%, cost drag -80.5%, MDD -68.7%). 단 strategy_spec_hash/fold_manifest_hash 미배선으로 실제 CLI 실행은 여전히 미완주 - 별도 스펙 필요. L3 봉인 홀드아웃 양쪽 실행 모두 미소진 보존
+
 ## [2026-07-26] [TASK_L2_GATE_INTEGRITY_RISK_DEPLOYMENT] [ADR_20260726_L2_GATE_INTEGRITY_RISK_DEPLOYMENT]
 - **Context/Why:** 20260726_102018 실행에서 L2 FAIL 사유 4건이 전략 결함이 아니라 채점 로직 결함(벤치마크 시간축 절단·비거래 평균가 집계·vol-target 미점화, DSR 합성 t-널의 신호상관 무시, vol_scale_max dead parameter로 위험집행 78%만 실행)이라는 사실이 scratch/verify_growth_*.py 실험으로 확인됨
 - **Resolution/What:** benchmark.py/multiplicity.py 신규 작성(시간정렬 벤치마크, canonical Bailey-LopezDePrado DSR), allocator.py에 derive_causal_vol_target+vol_scale_max 배선, engine.py/validation.py 배선 갱신. 게이트 임계값은 전부 불변. 실전 재실행(20260726_114624)으로 검증: benchmark-relative CAGR -22.16%->+29.30%, Sharpe -1.02->+1.16, DSR 0.500->0.999999997, 실현 vol 11.64%->14.74%(목표 15% 근접)
