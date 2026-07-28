@@ -556,7 +556,7 @@
     ]
   },
   "src/application/futures/runner/compound_data.py": {
-    "architecture": "docs/results/result.md",
+    "architecture": "docs/specs/phase_full_bottleneck_contract.json",
     "testing": "tests/unit/domain/futures/compound/test_signal_bank.py"
   },
   "src/domain/futures/compound/admission.py": {
