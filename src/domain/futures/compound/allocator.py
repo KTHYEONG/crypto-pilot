@@ -486,6 +486,29 @@ def derive_causal_vol_target(
     return float(target)
 
 
+
+def apply_net_exposure_cap(
+    weights_1d: NDArray[np.float64], max_net_exposure: float,
+) -> NDArray[np.float64]:
+    if not 0.0 <= max_net_exposure <= 1.0:
+        raise ValueError(f"max_net_exposure must be in [0, 1], got {max_net_exposure}")
+    gross = float(np.sum(np.abs(weights_1d)))
+    if gross == 0.0:
+        return weights_1d
+    net = float(np.sum(weights_1d))
+    limit = max_net_exposure * gross
+    if abs(net) > limit:
+        active = weights_1d != 0.0
+        n_active = int(np.sum(active))
+        if n_active == 0:
+            return weights_1d
+        adjustment = (net - np.sign(net) * limit) / n_active
+        result = weights_1d.copy()
+        result[active] -= adjustment
+        return result
+    return weights_1d
+
+
 def compute_dynamic_compounding_path(
     forecast: CalibratedForecastPanel,
     sigma_2d: NDArray[np.float32],
@@ -545,6 +568,7 @@ def compute_dynamic_compounding_path(
 
         support_mask = eligible & (np.abs(mu_f64) > 0)
         state = np.where(support_mask, state, 0.0)
+        state = apply_net_exposure_cap(state, config.max_net_exposure)
 
         if cooldown_counter > 0:
             cooldown_counter -= 1
