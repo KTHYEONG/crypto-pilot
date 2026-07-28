@@ -1,5 +1,10 @@
 # Active Decisions Log (Sliding Window)
 
+## [2026-07-28] [CAPITAL_DEPLOYMENT_FAILCLOSED_RESTORE] [ADR_20260728_CAPITAL_DEPLOYMENT_FAILCLOSED_RESTORE]
+- **Context/Why:** phase full 실측(20260728_072617)에서 L2 FAIL 전체탈락(CAGR -15.8%, MDD 39.9%, turnover 27.6x) 확인. git-diff로 근본원인 확정: 01a209e1(SOFT_CONVICTION)이 engine.py의 has_admitted 이진 게이트를 제거해 집계 LCB90 부트스트랩 검정과 무관하게 항상 실거래하도록 변경됨. 같은 날 da72a053이 alpha 27->60 확장하며 검증된 basis_gap/xs_reversal 등을 제거하고 미검증 신규 4패밀리로 대체
+- **Resolution/What:** engine.py: has_admitted=False시 weights_2d 강제 0(현금) 이진분기 복원. signal_bank.py: _default_catalog()를 legacy 27레시피로 복원(신규 4패밀리 volatility_squeeze_keltner/funding_carry_reversion/flow_imbalance_taker/open_interest_confirmation 격리, basis_gap/xs_reversal/xs_momentum_slow/smart_money_divergence 복원), 죽은 build_canonical_alpha_catalog() 호출 제거
+- **Impact:** 실측 A/B(scratch/verify_alpha_family_ablation.py, 동일 프로덕션 엔진 재사용): baseline(60레시피,fail-open) CAGR -15.8%/MDD39.9% -> legacy27 CAGR +7.4%/MDD11.4%로 반전, 신규4패밀리 단독실행도 MDD41.5%/cost_drag293%로 파괴적임을 확인해 원인 확정. /check PASS(Cov 74%). 수정후 실전 phase full 재실행 결과 NO_EVIDENCE(현금100%, rebalances=0)로 안전 상태 복원 확인 - 집계게이트 통과할 알파는 아직 없으나 파괴적 거래는 완전 차단됨
+
 ## [2026-07-28] [SIGNAL_PANEL_MAD_KERNEL_H2] [ADR_20260728_SIGNAL_PANEL_MAD_KERNEL_H2]
 - **Context/Why:** signal_panel 206s E2E 병목의 95.7%를 점유하는 MAD-z kernel의 2회 sort를 1회 sort+3-way merge로 대체
 - **Resolution/What:** _rolling_mad_z_single_sort_kernel 신규 @njit; _rolling_mad_z 3단계 fallback 체인(H2→old kernel→numpy); 7개 TDD 단위테스트 추가
@@ -69,8 +74,3 @@
 - **Context/Why:** 20260726_102018 실행에서 L2 FAIL 사유 4건이 전략 결함이 아니라 채점 로직 결함(벤치마크 시간축 절단·비거래 평균가 집계·vol-target 미점화, DSR 합성 t-널의 신호상관 무시, vol_scale_max dead parameter로 위험집행 78%만 실행)이라는 사실이 scratch/verify_growth_*.py 실험으로 확인됨
 - **Resolution/What:** benchmark.py/multiplicity.py 신규 작성(시간정렬 벤치마크, canonical Bailey-LopezDePrado DSR), allocator.py에 derive_causal_vol_target+vol_scale_max 배선, engine.py/validation.py 배선 갱신. 게이트 임계값은 전부 불변. 실전 재실행(20260726_114624)으로 검증: benchmark-relative CAGR -22.16%->+29.30%, Sharpe -1.02->+1.16, DSR 0.500->0.999999997, 실현 vol 11.64%->14.74%(목표 15% 근접)
 - **Impact:** L2 미통과 사유가 4건에서 4건으로 동일 개수이나 전부 0 경계 근접 미달로 축소됨(이전엔 구조적 미달). stressed_excess_growth_lcb90이 위험집행 확대로 turnover/비용 증가하며 신규 구속. 임계값 완화 없이 게이트 신뢰성 회복. L3 봉인 홀드아웃 미소진 보존
-
-## [2026-07-26] [20260726_CORE_AXIS_FIX] [ADR_20260726_20260726_CORE_AXIS_FIX]
-- **Context/Why:** CORE 완전 이력 심볼은 51개인데 PIT 유니버스 축이 120개로 유지되어 cash-only 결과가 발생함
-- **Resolution/What:** CORE 완전 이력 심볼로 PIT 유니버스와 상태 행렬 축을 정렬하고 최신 분기 백테스트 결과를 기록함
-- **Impact:** cash-only 오류 해소; 51심볼 실제 포지션 원장 생성; L2 FAIL/L3 REJECT 유지
