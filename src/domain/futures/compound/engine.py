@@ -222,6 +222,7 @@ def run_multiscale_compound_engine(
 
     handoff_result: HandoffResult | None = None
     p2_error_reason: str | None = None
+    weights_2d: NDArray[np.float64] | None = None
     folds: tuple[CausalFold, ...] = ()
     max_horizon_bars: int = 0
     cost_bps_4h: NDArray[np.float32] = np.full(
@@ -268,9 +269,15 @@ def run_multiscale_compound_engine(
                 weighted = np.where(mask, np.log(curr / prev), 0.0) @ w
             log_ret[1:] = weighted
         benchmark_returns_1d = log_ret
+        weights_2d = compute_dynamic_compounding_path(
+            forecast=forecast, sigma_2d=panel.sigma_2d,
+            funding_rates_1h_2d=funding_1h,
+            config=config.dynamic_compounding,
+            close_2d=bars_4h.close_2d, cost_bps=config.ladder.cost_bps,
+        )
         handoff_result = build_exit_aware_handoff(
             forecast, sleeves, bars_4h, benchmark_returns_1d, config.handoff,
-            folds=folds, sigma_2d=panel.sigma_2d, cost_bps_4h=cost_bps_4h,
+            folds=folds, weights_2d=weights_2d, cost_bps_4h=cost_bps_4h,
         )
         forecast = handoff_result.forecast
         _logger.info(
@@ -286,8 +293,7 @@ def run_multiscale_compound_engine(
     bars_4h = bars.cubes["4h"]
     has_admitted = handoff_result.evidence.admitted if handoff_result is not None else False
 
-    if has_admitted:
-        weights_2d = compute_dynamic_compounding_path(forecast=forecast, sigma_2d=panel.sigma_2d, funding_rates_1h_2d=funding_1h, config=config.dynamic_compounding, close_2d=bars_4h.close_2d, cost_bps=config.ladder.cost_bps)
+    if has_admitted and weights_2d is not None:
         is_cash_only = float(np.sum(np.abs(weights_2d))) < 1e-15
     else:
         weights_2d = np.zeros((n_bars_4h, n_syms), dtype=np.float64)

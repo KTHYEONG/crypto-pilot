@@ -196,6 +196,10 @@ class TestRunMultiscaleCompoundEngine:
             "src.domain.futures.compound.engine.build_exit_aware_handoff",
             return_value=handoff_result,
         )
+        mocker.patch(
+            "src.domain.futures.compound.engine.compute_dynamic_compounding_path",
+            return_value=np.full((256, len(small_cube.symbols)), 0.02, dtype=np.float64),
+        )
 
         n_syms = len(small_cube.symbols)
         universe = type("Universe", (), {"symbols": small_cube.symbols, "snapshots": ()})()
@@ -438,7 +442,12 @@ class TestRunMultiscaleCompoundEngine:
             "src.domain.futures.compound.engine.build_exit_aware_handoff",
             return_value=handoff_result,
         )
-
+        import src.domain.futures.compound.engine as _eng
+        assert hasattr(_eng, "compute_dynamic_compounding_path"), "engine module missing attr"
+        mocker.patch.object(
+            _eng, "compute_dynamic_compounding_path",
+            return_value=np.full((n_4h_bars, 5), 0.02, dtype=np.float64),
+        )
         universe = type("Universe", (), {"symbols": ("BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT", "ADAUSDT"), "snapshots": ()})()
         n_bars, n_syms = 500, 5
         close = np.column_stack(tuple(
@@ -510,6 +519,7 @@ class TestRunMultiscaleCompoundEngine:
             family_mu_3d=np.zeros((n_4h_bars, 5, 1), dtype=np.float32),
             family_ids=(), admitted_signal_ids=("sig1",), fold_manifest_hash="test",
         )
+        mocker.patch("src.domain.futures.compound.engine.combine_posterior_sleeves", return_value=forecast_panel)
         evidence = HandoffAdmissionEvidence(
             annualized_log_growth=0.1, growth_lcb90=0.05, growth_2x_cost=0.05,
             max_drawdown=0.1, annual_volatility=0.15, positive_outer_folds=5,
@@ -520,6 +530,10 @@ class TestRunMultiscaleCompoundEngine:
         mocker.patch(
             "src.domain.futures.compound.engine.build_exit_aware_handoff",
             return_value=handoff_result,
+        )
+        mocker.patch(
+            "src.domain.futures.compound.engine.compute_dynamic_compounding_path",
+            return_value=np.full((n_4h_bars, 5), 0.02, dtype=np.float64),
         )
         universe = type("Universe", (), {"symbols": ("BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT", "ADAUSDT"), "snapshots": ()})()
         n_bars, n_syms = 500, 5
@@ -1167,6 +1181,10 @@ class TestEngineL2PassBuildsDeploymentCandidate:
             "src.domain.futures.compound.engine.build_exit_aware_handoff",
             return_value=handoff_result,
         )
+        mocker.patch(
+            "src.domain.futures.compound.engine.compute_dynamic_compounding_path",
+            return_value=np.full((256, len(small_cube.symbols)), 0.02, dtype=np.float64),
+        )
 
         passing_categories = tuple(
             L2CategoryResult(category=f"category-{i}", passed=True, reasons=())
@@ -1349,6 +1367,10 @@ class TestEngineL2PassBuildsDeploymentCandidate:
         )
         hidden = HandoffResult(forecast=forecast_panel, evidence=evidence)
         mocker.patch("src.domain.futures.compound.engine.build_exit_aware_handoff", return_value=hidden)
+        mocker.patch(
+            "src.domain.futures.compound.engine.compute_dynamic_compounding_path",
+            return_value=np.zeros((256, len(small_cube.symbols)), dtype=np.float64),
+        )
 
         universe = type("Universe", (), {"symbols": small_cube.symbols, "snapshots": ()})()
         store = SealedHoldoutStore(tmp_path / "l3_prior_empty.sqlite3")
@@ -1594,8 +1616,80 @@ def test_engine_wires_portfolio_gate_end_to_end(tmp_path: Path, mocker) -> None:
 
     assert isinstance(result, CompoundEngineResult)
     assert "folds" in call_kwargs, "build_exit_aware_handoff missing folds kwarg"
-    assert "sigma_2d" in call_kwargs, "build_exit_aware_handoff missing sigma_2d kwarg"
+    assert "weights_2d" in call_kwargs, "build_exit_aware_handoff missing weights_2d kwarg"
     assert "cost_bps_4h" in call_kwargs, "build_exit_aware_handoff missing cost_bps_4h kwarg"
-    assert call_kwargs["sigma_2d"].ndim == 2
-    assert call_kwargs["sigma_2d"].shape[1] == n_syms
+    assert call_kwargs["weights_2d"].ndim == 2
+    assert call_kwargs["weights_2d"].shape[1] == n_syms
     assert call_kwargs["cost_bps_4h"].ndim == 2
+
+
+def test_gate_scores_the_same_weights_array_that_is_deployed(
+    tmp_path: Path, mocker, small_cube: MarketFeatureCube,
+) -> None:
+    """C-1 regression: build_exit_aware_handoff receives the same weights_2d
+    that compute_dynamic_compounding_path produces, which is then used for deployment."""
+    import src.domain.futures.compound.engine as eng
+    from src.domain.futures.compound.contracts import (
+        CalibratedForecastPanel, CausalFold,
+        HandoffResult, HandoffAdmissionEvidence,
+    )
+    from src.domain.futures.compound.holdout_store import SealedHoldoutManifest
+
+    n_syms = len(small_cube.symbols)
+    universe = type("Universe", (), {"symbols": small_cube.symbols, "snapshots": ()})()
+
+    mocker.patch.object(eng, "build_folds_4h", return_value=(
+        CausalFold(0, 0, 120, 100, 120, 130, 200, 2, 42),
+    ))
+    mocker.patch.object(eng, "estimate_cluster_sleeve_posteriors", return_value=())
+    mocker.patch.object(eng, "precompute_exit_path_cache", return_value={})
+    mocker.patch.object(eng, "build_causal_cluster_folds", return_value=())
+
+    gate_weights_captured = []
+    deploy_weights_captured = []
+
+    real_path = eng.compute_dynamic_compounding_path
+    def capturing_path(*args, **kwargs):
+        result = real_path(*args, **kwargs)
+        deploy_weights_captured.append(result.copy())
+        return result
+
+    mocker.patch.object(eng, "compute_dynamic_compounding_path", side_effect=capturing_path)
+
+    def capturing_handoff(*args, **kwargs):
+        gate_weights_captured.append(kwargs.get("weights_2d").copy())
+        forecast_panel = CalibratedForecastPanel(
+            decision_timestamps_ns=np.arange(256, dtype=np.int64),
+            symbols=small_cube.symbols,
+            mu_2d=np.zeros((256, n_syms), dtype=np.float32),
+            se_2d=np.full((256, n_syms), np.nan, dtype=np.float32),
+            family_mu_3d=np.zeros((256, n_syms, 0), dtype=np.float32),
+            family_ids=(), admitted_signal_ids=(), fold_manifest_hash="",
+        )
+        return HandoffResult(
+            forecast_panel,
+            HandoffAdmissionEvidence(0.0, 0.0, 0.0, 0.0, 0.0, 1, 0.0, (), False, ("no_admitted_sleeves",)),
+        )
+    mocker.patch.object(eng, "build_exit_aware_handoff", side_effect=capturing_handoff)
+
+    store = SealedHoldoutStore(tmp_path / "gate_same_weights.sqlite3")
+    store.create(SealedHoldoutManifest(
+        holdout_id="gate-same-weights",
+        start_time_ns=int(small_cube.timestamps_ns[-180]),
+        end_time_ns=int(small_cube.timestamps_ns[-1]),
+        holdout_days=90, model_version="v1",
+        data_manifest_hash="h1", strategy_spec_hash="spec1",
+    ))
+
+    _ = run_multiscale_compound_engine(
+        market=small_cube, universe=universe,
+        holdout_store=store, holdout_id="gate-same-weights",
+        config=CompoundEngineConfig(),
+    )
+
+    assert len(gate_weights_captured) == 1
+    assert len(deploy_weights_captured) == 1
+    np.testing.assert_array_equal(
+        gate_weights_captured[0], deploy_weights_captured[0],
+        err_msg="gate and deployment MUST use the same weights_2d array values",
+    )
