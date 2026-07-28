@@ -547,43 +547,150 @@ def compute_beta_neutral_composite_returns(
     return composite
 
 
+def compute_l1_oos_portfolio_returns(
+    forecast: CalibratedForecastPanel,
+    sleeves: tuple[L1SleevePosterior, ...],
+    bars_4h: TimeframeBarCube,
+    folds: tuple[CausalFold, ...],
+    sigma_2d: NDArray[np.float32],
+    cost_bps_4h: NDArray[np.float32],
+) -> NDArray[np.float64]:
+    mu_2d = forecast.mu_2d
+    close_2d = bars_4h.close_2d
+    t_total, n_sym = close_2d.shape
+    if mu_2d.shape != (t_total, n_sym) or sigma_2d.shape != (t_total, n_sym) or cost_bps_4h.shape != (t_total, n_sym):
+        raise ValueError("shape mismatch among forecast.mu_2d, sigma_2d, cost_bps_4h, and bars_4h.close_2d")
+    if not folds:
+        return np.zeros(0, dtype=np.float64)
+
+    membership = np.zeros(n_sym, dtype=np.bool_)
+    for s in sleeves:
+        membership |= s.member_mask_1d
+
+    oos_mask = np.zeros(t_total, dtype=np.bool_)
+    for f in folds:
+        oos_start = f.oos_start
+        oos_end = min(f.oos_end_exclusive, t_total - 1)
+        if oos_start < oos_end:
+            oos_mask[oos_start:oos_end] = True
+    oos_indices = np.where(oos_mask)[0]
+    n_oos = len(oos_indices)
+    if n_oos < 10:
+        return np.zeros(0, dtype=np.float64)
+
+    mu = mu_2d.astype(np.float64)
+    sigma = np.maximum(sigma_2d.astype(np.float64), 1e-12)
+    log_ret = np.zeros((t_total, n_sym), dtype=np.float64)
+    prev = close_2d[:-1].astype(np.float64)
+    curr = close_2d[1:].astype(np.float64)
+    valid = (prev > 0) & np.isfinite(prev) & (curr > 0) & np.isfinite(curr)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        log_ret[1:] = np.where(valid, np.log(curr / prev), 0.0)
+    log_ret[~np.isfinite(log_ret)] = 0.0
+    cost = cost_bps_4h.astype(np.float64)
+
+    r_p = np.zeros(n_oos, dtype=np.float64)
+    prev_pos = np.zeros(n_sym, dtype=np.float64)
+    for k, t in enumerate(oos_indices):
+        raw = np.where(membership, mu[t] / sigma[t], 0.0)
+        abs_sum = float(np.sum(np.abs(raw)))
+        pos = raw / abs_sum if abs_sum > 0 else np.zeros(n_sym, dtype=np.float64)
+        r_p[k] = float(np.dot(pos, log_ret[t + 1])) - float(np.dot(cost[t], np.abs(pos - prev_pos))) * 1e-4
+        prev_pos = pos
+    return r_p
+
+
 def build_exit_aware_handoff(
     forecast: CalibratedForecastPanel,
     sleeves: tuple[L1SleevePosterior, ...],
     bars_4h: TimeframeBarCube,
     benchmark_returns_1d: NDArray[np.float64],
     config: HandoffConfig,
+    *,
+    folds: tuple[CausalFold, ...],
+    sigma_2d: NDArray[np.float32],
+    cost_bps_4h: NDArray[np.float32],
 ) -> HandoffResult:
+    from src.domain.futures.compound.bootstrap import (
+        circular_stationary_bootstrap_growth,
+        politis_white_block_length,
+    )
+    from src.domain.futures.compound.l1_diagnostics import L1AdmissionRecorder
+
+    recorder = L1AdmissionRecorder()
+
     admitted_sleeves = [s for s in sleeves if s.admitted]
     if not admitted_sleeves:
         no_evidence = HandoffAdmissionEvidence(0.0, 0.0, 0.0, 0.0, 0.0, 0, 0.0, (), False, ("no_admitted_sleeves",))
+        recorder.record_gate(admitted_sleeves=0, distinct_series=0, oos_bars=0, ann_growth=0.0, ann_lcb90=0.0, pw_block=0.0, turnover=0.0, cost_drag=0.0, admitted=False)
         _LOGGER.info("[L1] exit-aware handoff: no admitted sleeves, NO_EVIDENCE")
         return HandoffResult(forecast, no_evidence)
 
-    sleeve_returns_2d = _compute_sleeve_returns_2d(
-        tuple(admitted_sleeves), bars_4h,
+    portfolio_returns = compute_l1_oos_portfolio_returns(
+        forecast, tuple(admitted_sleeves), bars_4h, folds, sigma_2d, cost_bps_4h,
     )
-    lcb90_1d = compute_chunked_2d_tensor_bootstrap(
-        sleeve_returns_2d, 2191.5, n_bootstrap=config.n_bootstrap, chunk_size=250,
-    )
-    ann_lcb90 = float(np.median(lcb90_1d))
+    if len(portfolio_returns) == 0:
+        no_evidence = HandoffAdmissionEvidence(0.0, 0.0, 0.0, 0.0, 0.0, 0, 0.0, (), False, ("no_admitted_sleeves",))
+        _LOGGER.info("[L1] exit-aware handoff: empty OOS portfolio, NO_EVIDENCE")
+        return HandoffResult(forecast, no_evidence)
 
-    composite_ts = compute_beta_neutral_composite_returns(
-        tuple(admitted_sleeves), bars_4h, benchmark_returns_1d,
+    finite_returns = portfolio_returns[np.isfinite(portfolio_returns)]
+    try:
+        resolved_pw_block = politis_white_block_length(finite_returns)
+    except ValueError:
+        resolved_pw_block = 0.0
+
+    ann_lcb90, _, _ = circular_stationary_bootstrap_growth(
+        portfolio_returns, 2191.5, n_bootstrap=config.n_bootstrap, block_size=resolved_pw_block or None,
     )
-    log_ret = np.log1p(np.where(np.isfinite(composite_ts), composite_ts, 0.0))
+
+    log_ret = np.log1p(np.where(np.isfinite(portfolio_returns), portfolio_returns, 0.0))
     ann_growth = float(np.mean(log_ret)) * 2191.5
 
     reasons: list[str] = []
     if ann_lcb90 <= 0.0:
         reasons.append("growth_lcb90_not_positive")
 
+    distinct_series = 1
     admitted = not reasons
+
+    # compute turnover and cost drag for diagnostics
+    close_2d = bars_4h.close_2d
+    t_total, n_sym = close_2d.shape
+    mu = forecast.mu_2d.astype(np.float64)
+    sigma = np.maximum(sigma_2d.astype(np.float64), 1e-12)
+    membership = np.zeros(n_sym, dtype=np.bool_)
+    for s in admitted_sleeves:
+        membership |= s.member_mask_1d
+    oos_mask = np.zeros(t_total, dtype=np.bool_)
+    for f in folds:
+        oos_start = f.oos_start
+        oos_end = min(f.oos_end_exclusive, t_total - 1)
+        if oos_start < oos_end:
+            oos_mask[oos_start:oos_end] = True
+    oos_indices = np.where(oos_mask)[0]
+    total_turnover = 0.0
+    total_cost_drag = 0.0
+    prev_pos = np.zeros(n_sym, dtype=np.float64)
+    cost = cost_bps_4h.astype(np.float64)
+    for t in oos_indices:
+        raw = np.where(membership, mu[t] / sigma[t], 0.0)
+        abs_sum = float(np.sum(np.abs(raw)))
+        pos = raw / abs_sum if abs_sum > 0 else np.zeros(n_sym, dtype=np.float64)
+        total_turnover += float(np.sum(np.abs(pos - prev_pos)))
+        total_cost_drag += float(np.dot(cost[t], np.abs(pos - prev_pos))) * 1e-4
+        prev_pos = pos
+
     evidence = HandoffAdmissionEvidence(
-        ann_growth, ann_lcb90, ann_lcb90, 0.0, 0.0, len(admitted_sleeves), float(len(admitted_sleeves)),
-        tuple(s.signal_id for s in admitted_sleeves), admitted, tuple(reasons),
+        ann_growth, ann_lcb90, ann_lcb90, 0.0, 0.0, len(admitted_sleeves),
+        1.0, tuple(s.signal_id for s in admitted_sleeves), admitted, tuple(reasons),
     )
-    _LOGGER.info("[L1] exit-aware handoff admitted=%s sleeves=%d", admitted, len(admitted_sleeves))
+    _LOGGER.info("[L1] exit-aware handoff admitted=%s sleeves=%d distinct_series=%d oos_bars=%d ann_growth=%.4f ann_lcb90=%.4f",
+                 admitted, len(admitted_sleeves), distinct_series, len(portfolio_returns), ann_growth, ann_lcb90)
+    recorder.record_gate(admitted_sleeves=len(admitted_sleeves), distinct_series=distinct_series,
+                         oos_bars=len(portfolio_returns), ann_growth=ann_growth, ann_lcb90=ann_lcb90,
+                         pw_block=resolved_pw_block, turnover=float(total_turnover), cost_drag=float(total_cost_drag),
+                         admitted=admitted)
     return HandoffResult(forecast, evidence, tuple(admitted_sleeves))
 
 
@@ -661,10 +768,11 @@ def _cluster_masked_beta(
     descriptor: SignalDescriptor,
     fit_end: int,
     sym_indices: NDArray[np.int64],
-) -> tuple[float, float, float, int]:
+    hac_lag_cap: int = 120,
+) -> tuple[float, float, float, int, float]:
     horizon = max(descriptor.target_horizon_hours // 4, 1)
     if fit_end <= horizon + 2:
-        return 0.0, 1.0, 0.5, 0
+        return 0.0, 1.0, 0.5, 0, 1.0
     future = np.roll(close.astype(np.float64), -horizon, axis=0) / np.maximum(close, 1e-12) - 1.0
     future[-horizon:] = np.nan
     x = feature[: fit_end - horizon, sym_indices].astype(np.float64)
@@ -673,10 +781,31 @@ def _cluster_masked_beta(
     x_valid, y_valid = x[mask], y[mask]
     denom = float(np.dot(x_valid, x_valid)) + 1e-8
     beta = float(np.dot(x_valid, y_valid) / denom) if x_valid.size else 0.0
-    residual = y_valid - beta * x_valid
-    se = float(np.std(residual, ddof=1) / math.sqrt(denom)) if residual.size > 1 else 1.0
+
+    # Driscoll-Kraay HAC standard error
+    n_time = x.shape[0]
+    residual_2d = y - beta * x
+    g = np.zeros(n_time, dtype=np.float64)
+    for t in range(n_time):
+        mask_t = mask[t]
+        g[t] = float(np.sum(x[t, mask_t] * residual_2d[t, mask_t]))
+    se_ols = float(np.std(residual_2d[mask], ddof=1) / math.sqrt(denom)) if np.sum(mask) > 1 else 1.0
+    hac_lag = min(horizon - 1, hac_lag_cap)
+    if n_time <= hac_lag + 1 or n_time < 3:
+        se = 1.0
+    else:
+        s_0 = float(np.mean(g * g))
+        s_hac = s_0
+        for l in range(1, hac_lag + 1):
+            w = 1.0 - l / (hac_lag + 1.0)
+            gamma_l = float(np.mean(g[l:] * g[:-l]))
+            s_hac += 2.0 * w * gamma_l
+        s_hac = max(s_hac, 1e-15)
+        se = math.sqrt(s_hac / max(denom, 1e-15))
+        se = max(se, se_ols * 1e-4)
+
     probability = float(0.5 * (1.0 + math.erf(beta / max(se, 1e-12) / math.sqrt(2.0))))
-    return beta, max(se, 1e-8), probability, int(x_valid.size)
+    return beta, max(se, 1e-8), probability, int(x_valid.size), se_ols
 
 
 def estimate_cluster_sleeve_posteriors(
@@ -689,6 +818,8 @@ def estimate_cluster_sleeve_posteriors(
     config: HandoffConfig,
     cache: ExitPathCache | None = None,
 ) -> tuple[L1SleevePosterior, ...]:
+    from src.domain.futures.compound.l1_diagnostics import L1AdmissionRecorder
+
     if panel.z_3d.shape[:2] != bars_4h.close_2d.shape or cost_bps_4h.shape != bars_4h.close_2d.shape:
         raise ValueError("panel, bars, and cost shapes must agree")
     if not folds or not panel.descriptors:
@@ -696,6 +827,7 @@ def estimate_cluster_sleeve_posteriors(
     n_symbols = len(panel.symbols)
     output: list[L1SleevePosterior] = []
     future_cache: dict[int, NDArray[np.float64]] = {}
+    recorder = L1AdmissionRecorder()
 
     for descriptor in panel.descriptors:
         horizon = max(descriptor.target_horizon_hours // 4, 1)
@@ -722,9 +854,10 @@ def estimate_cluster_sleeve_posteriors(
                 if len(sym_indices) < 2:
                     continue
 
-                beta, se, probability, observations = _cluster_masked_beta(
+                beta, se, probability, observations, se_ols = _cluster_masked_beta(
                     signal_z, bars_4h.close_2d, descriptor,
                     fold.fit_end_exclusive, sym_indices,
+                    hac_lag_cap=config.hac_lag_cap,
                 )
                 if observations == 0:
                     continue
@@ -738,7 +871,13 @@ def estimate_cluster_sleeve_posteriors(
                 aggregated = aggregated[np.isfinite(aggregated)]
                 fold_return = float(np.mean(aggregated)) if aggregated.size else 0.0
 
-                admitted = probability >= 0.52
+                admitted = probability >= config.min_sleeve_posterior_probability
+                n_blocks = max(1, fold.fit_end_exclusive // horizon)
+                recorder.record_sleeve(
+                    signal_id=descriptor.signal_id, fold=cf.fold_id, cluster=cluster_id,
+                    beta=beta, se_hac=se, se_ols_ratio=(se / se_ols) if se_ols > 1e-12 else 1.0,
+                    prob=probability, n_obs=observations, n_blocks=n_blocks, admitted=admitted,
+                )
                 preliminary_viable.append({
                     "cf": cf, "fold": fold, "cluster_id": cluster_id,
                     "sym_mask": sym_mask, "sym_indices": sym_indices,
