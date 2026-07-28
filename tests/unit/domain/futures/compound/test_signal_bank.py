@@ -31,6 +31,7 @@ from src.domain.futures.compound.signal_bank import (
     _rolling_mad_z,
     _rolling_mad_z_numba_kernel,
     _rolling_mad_z_numpy,
+    _rolling_mad_z_single_sort_kernel,
     build_raw_signal_panel,
     estimate_signal_panel_peak_bytes,
 )
@@ -860,3 +861,94 @@ def test_signal_bank_large_universe_tpe_off(synthetic_market: MarketFeatureCube)
     assert isinstance(panel, RawSignalPanel)
     assert panel.z_3d.shape == (T, N, 60)
     assert panel.valid_3d.shape == (T, N, 60)
+
+
+# ── H2-SINGLE-SORT-MERGE: bit-exact MAD-z kernel equivalence ──────────
+
+
+def test_single_sort_vs_numba_bit_exact() -> None:
+    rng = np.random.default_rng(42)
+    n_t, n_s = 100, 5
+    window, min_per = 20, 10
+    arr = rng.standard_normal((n_t, n_s)).astype(np.float64)
+
+    ref = _rolling_mad_z_numba_kernel(np.ascontiguousarray(arr), window, min_per)
+    h2 = _rolling_mad_z_single_sort_kernel(np.ascontiguousarray(arr), window, min_per)
+
+    mask = np.isfinite(ref) & np.isfinite(h2)
+    assert np.allclose(ref[mask], h2[mask], atol=1e-15)
+    assert np.array_equal(np.isnan(ref), np.isnan(h2))
+
+    arr_nan = arr.copy()
+    arr_nan[30:50, 2] = np.nan
+    ref_n = _rolling_mad_z_numba_kernel(np.ascontiguousarray(arr_nan), window, min_per)
+    h2_n = _rolling_mad_z_single_sort_kernel(np.ascontiguousarray(arr_nan), window, min_per)
+    m = np.isfinite(ref_n) & np.isfinite(h2_n)
+    assert np.allclose(ref_n[m], h2_n[m], atol=1e-15)
+    assert np.array_equal(np.isnan(ref_n), np.isnan(h2_n))
+
+    const = np.full((n_t, n_s), 42.0, dtype=np.float64)
+    cz = _rolling_mad_z_single_sort_kernel(np.ascontiguousarray(const), window, min_per)
+    assert np.all(np.isnan(cz))
+
+
+def test_single_sort_small_window_manual() -> None:
+    arr = np.array([[1.0, np.nan, 3.0, 4.0, 5.0]], dtype=np.float64).T
+    window, min_per = 3, 2
+    h2 = _rolling_mad_z_single_sort_kernel(np.ascontiguousarray(arr), window, min_per)
+    ref = _rolling_mad_z_numba_kernel(np.ascontiguousarray(arr), window, min_per)
+    assert np.allclose(ref, h2, atol=1e-15, equal_nan=True)
+    mask = np.isfinite(ref) & np.isfinite(h2)
+    assert np.all(np.abs(ref[mask] - h2[mask]) < 1e-15)
+
+
+def test_single_sort_all_nan() -> None:
+    arr = np.full((50, 10), np.nan, dtype=np.float64)
+    h2 = _rolling_mad_z_single_sort_kernel(arr, 20, 10)
+    assert np.all(np.isnan(h2))
+
+
+def test_single_sort_single_valid() -> None:
+    arr = np.full((50, 10), np.nan, dtype=np.float64)
+    arr[5, 2] = 42.0
+    h2 = _rolling_mad_z_single_sort_kernel(arr, 20, 10)
+    assert np.all(np.isnan(h2))
+
+
+def test_single_sort_numerical_precision() -> None:
+    rng = np.random.default_rng(42)
+    n_t, n_s = 200, 8
+    window, min_per = 60, 30
+    arr = rng.standard_normal((n_t, n_s)).astype(np.float64)
+    h2 = _rolling_mad_z_single_sort_kernel(np.ascontiguousarray(arr), window, min_per)
+    ref = _rolling_mad_z_numba_kernel(np.ascontiguousarray(arr), window, min_per)
+    mask = np.isfinite(ref) & np.isfinite(h2)
+    assert np.allclose(ref[mask], h2[mask], atol=1e-14)
+
+
+def test_single_sort_1h_data() -> None:
+    rng = np.random.default_rng(42)
+    n_t, n_s = 21768, 51
+    arr = rng.standard_normal((n_t, n_s)).astype(np.float64)
+    arr[rng.random((n_t, n_s)) < 0.03] = np.nan
+    window, min_per = 540, 180
+    h2 = _rolling_mad_z_single_sort_kernel(np.ascontiguousarray(arr), window, min_per)
+    ref = _rolling_mad_z_numba_kernel(np.ascontiguousarray(arr), window, min_per)
+    mask = np.isfinite(ref) & np.isfinite(h2)
+    assert np.allclose(ref[mask], h2[mask], atol=1e-14)
+    assert np.array_equal(np.isnan(ref), np.isnan(h2))
+
+
+def test_signal_panel_output_identity(synthetic_market: MarketFeatureCube) -> None:
+    bars = build_multi_timeframe_bars(synthetic_market)
+    T = bars.decision_timestamps_ns.size
+    N = len(bars.cubes["4h"].symbols)
+    eligible = np.ones((T, N), np.bool_)
+    panel = build_raw_signal_panel(bars, eligible_2d=eligible, numba_threads=1)
+    assert isinstance(panel, RawSignalPanel)
+    assert panel.z_3d.shape == (T, N, 60)
+    assert panel.valid_3d.shape == (T, N, 60)
+    finite = np.isfinite(panel.z_3d)
+    if np.any(finite):
+        assert np.all(panel.z_3d[finite] >= -3.0)
+        assert np.all(panel.z_3d[finite] <= 3.0 + 1e-6)
