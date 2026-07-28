@@ -1,5 +1,10 @@
 # Active Decisions Log (Sliding Window)
 
+## [2026-07-28] [PHASE_FULL_BOTTLENECK_OPT] [ADR_20260728_PHASE_FULL_BOTTLENECK_OPT]
+- **Context/Why:** phase full 실행 시 E2E 385s+의 병목 식별 및 최적화. Signal panel 179.6s(50%), market cube 27s(7.5%), exit_cache+cluster_posteriors 20-30s(8%) 가 주 병목
+- **Resolution/What:** 1) exit_path.py _label_kernel에 @njit(cache=True) 적용 (순수 Python 삼중 루프 → 컴파일). 2) l1_sleeves.py aggregate_cluster_group_returns에 @njit 적용 + gc.collect() 제거. 3) H1(TPE 비활성화)과 H5(동시 I/O)는 실증 결과 역효과/무효로 롤백. 4) 7개 단위 테스트 추가 (numba-Python 동등성, zero-event, aggregate 수렴). 5) docs/specs/phase_full_bottleneck.md + contract.json 작성
+- **Impact:** P2 구간(exit_cache+posteriors) 30s 이내 유지. 전체 E2E 385s→285s(-100s, 26%↓). 단 signal panel MAD 커널(T=5442×S=51×recipe=60, sorting 기반)이 여전히 206s로 최대 병목 — TPE/스레드 배분만으로는 해결 불가, MAD 커널 자체 알고리즘 개선(H2) 필요
+
 ## [2026-07-27] [TASK_PIPELINE_OPT] [ADR_20260727_PIPELINE_OPT]
 - **Context/Why:** Severe latency bottleneck in production pipeline: 258.4s runtime, 1,029MB RSS, 3.3M heap allocations in MAD kernel, nested thread contention
 - **Resolution/What:** Implemented zero-allocation Numba MAD kernel (buf/dev_buf per-symbol, in-place sort), single-level TPE dispatcher (4 workers + Numba 1 thread), parallel PyArrow grid materializer, vectorized 4h funding sum
@@ -69,8 +74,3 @@
 - **Context/Why:** Quarterly causal growth promotion requires strict L1/L2/L3 windows, coverage fail-closed behavior, and deployment gating.
 - **Resolution/What:** Added quarterly execution windows, strict holdout slicing, coverage auditing, append-only candidate trial accounting, PROMOTE-only deployment bundles, and live target-weight validation.
 - **Impact:** L2/L3 now reject incomplete local data and prevent live deployment until the full quarterly market window is available.
-
-## [2026-07-26] [TASK_L1L2_GROWTH_RECOVERY_AND_COMBINATION_REDESIGN] [ADR_20260726_L1L2_GROWTH_RECOVERY_AND_COMBINATION_REDESIGN]
-- **Context/Why:** 실전 등가 backtest에서 equity_multiple 0.97(손실)이 확인됨. 원인 3층: (1) drawdown overlay가 EWMA 스무더 상태값을 곱셈 오염시키는 래칫, (2) L1 fold가 봉인 홀드아웃과 겹치고 L2 fold_ids가 전부 0으로 배선된 게이트 결함, (3) combine_posterior_sleeves가 신호 속도(=admitted sleeve 개수)에 비례 가중해 최악 신호가 최대 가중을 받는 결합층 결함
-- **Resolution/What:** allocator.py: 출력 전용 회복 가능 drawdown 오버레이(EWMA state 미오염)+rank-conviction 사이징. engine.py: L1 fold를 L1 윈도우로 절단, L2 fold_ids 시간 5분할, cost_bps_4h 종목별 배선, count_effective_candidates로 DSR 후보 정정, L2_DRY_RUN 안전가드. l1_sleeves.py: OOS fold_return 채택조건 제거(fit-only), select_non_redundant_signals(fit-window 상관 기반 구조적 중복 제거)+신호당 1표 등가중으로 combine_posterior_sleeves 재작성. validation.py: DSR null 표본길이 스케일링, cost_drag_ratio 차원 버그(로그공간/지수공간 혼용) 수정, absolute_cagr 필드 추가
-- **Impact:** 실제 프로덕션 파이프라인 드라이런 재실행(홀드아웃 미소진 확인): equity_multiple 0.97→1.76, Sharpe 0.24→1.66, 연회전율 108.7→50.2, L2 미통과 사유 6개→1개(deflated_sharpe_probability=0.553<0.9만 잔존), L3 posterior_growth_probability 0.35→0.90. 여전히 L2 FAIL/L3 REJECT로 미배포이나 원인이 구조적 버그에서 순수 통계적 유의성 부족으로 좁혀짐

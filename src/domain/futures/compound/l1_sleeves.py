@@ -2,13 +2,13 @@
 
 from __future__ import annotations
 
-import gc
 import hashlib
 import logging
 import math
 from typing import Any
 
 import numpy as np
+from numba import njit
 from numpy.typing import NDArray
 
 from src.domain.futures.compound.config import HandoffConfig
@@ -587,11 +587,12 @@ def build_exit_aware_handoff(
     return HandoffResult(forecast, evidence, tuple(admitted_sleeves))
 
 
+@njit(cache=True)  # type: ignore[untyped-decorator]
 def aggregate_cluster_group_returns(
-    returns_2d: NDArray[np.float64],
-    sigma_2d: NDArray[np.float64],
+    returns_2d: np.ndarray,
+    sigma_2d: np.ndarray,
     winsorize_pct: float = 0.10,
-) -> NDArray[np.float64]:
+) -> np.ndarray:
     if returns_2d.shape[0] == 0 or returns_2d.shape[1] == 0:
         return np.zeros(returns_2d.shape[0], dtype=np.float64)
 
@@ -804,7 +805,7 @@ def estimate_cluster_sleeve_posteriors(
 
         # Step 4: Release descriptor-scoped path arrays
         paths = None
-        gc.collect()
+        pass
 
     return tuple(output)
 

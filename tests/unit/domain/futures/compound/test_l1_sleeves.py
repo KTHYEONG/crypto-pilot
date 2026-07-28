@@ -24,6 +24,7 @@ from src.domain.futures.compound.admission import _block_bootstrap_lcb
 from src.domain.futures.compound.bootstrap import circular_stationary_bootstrap_growth
 from src.domain.futures.compound.l1_sleeves import (
     _signal_evidence,
+    aggregate_cluster_group_returns,
     build_exit_aware_handoff,
     calibrate_exit_policy,
     calibrate_exit_policy_from_paths,
@@ -982,4 +983,30 @@ def test_tensor_bootstrap_few_bars() -> None:
     result = compute_chunked_2d_tensor_bootstrap(returns, 2191.5, n_bootstrap=10)
     assert result.shape == (10,)
     assert np.all(result == 0.0)
+
+
+def test_aggregate_cluster_group_returns_all_finite() -> None:
+    rng = np.random.default_rng(42)
+    returns = rng.standard_normal((60, 5)).astype(np.float64)
+    sigma = np.abs(rng.standard_normal((60, 5))).astype(np.float64) + 0.1
+    result = aggregate_cluster_group_returns(returns, sigma, winsorize_pct=0.10)
+    assert result.shape == (60,)
+    assert result.dtype == np.float64
+    assert np.all(np.isfinite(result))
+
+
+def test_aggregate_cluster_group_returns_zero_input() -> None:
+    returns = np.zeros((60, 5), dtype=np.float64)
+    sigma = np.ones((60, 5), dtype=np.float64)
+    result = aggregate_cluster_group_returns(returns, sigma, winsorize_pct=0.10)
+    assert result.shape == (60,)
+    np.testing.assert_allclose(result, np.zeros(60), atol=1e-15)
+
+
+def test_aggregate_cluster_group_returns_nan_robustness() -> None:
+    returns = np.full((60, 5), np.nan, dtype=np.float64)
+    sigma = np.ones((60, 5), dtype=np.float64)
+    result = aggregate_cluster_group_returns(returns, sigma, winsorize_pct=0.10)
+    assert result.shape == (60,)
+    np.testing.assert_allclose(result, np.zeros(60), atol=1e-15)
 
