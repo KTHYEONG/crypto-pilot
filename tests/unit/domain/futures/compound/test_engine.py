@@ -8,6 +8,9 @@ import pytest
 
 from src.domain.futures.compound.config import CompoundEngineConfig, L2GateConfig
 from src.domain.futures.compound.contracts import (
+    CausalClusterFold,
+    CausalFold,
+    ClusterPanel,
     CompoundEngineResult,
     DeploymentVerdict,
     L2CategoryResult,
@@ -1512,3 +1515,87 @@ class TestEngineWindowIntegration:
         l1_prior = captured_kwargs.get("l1_prior_returns_1d")
         assert l1_prior is not None, "l1_prior_returns_1d should not be None"
         assert len(l1_prior) > 0, "l1_prior_returns_1d should have data"
+
+
+def test_engine_wires_portfolio_gate_end_to_end(tmp_path: Path, mocker) -> None:
+    """Integration: engine wires new kwargs and produces JSONL when L1_DEBUG=1."""
+    import os as _os
+
+    n_bars = 1024
+    n_syms = 5
+    cube = _make_cube(n_bars, n_syms)
+    universe = type("Universe", (), {"symbols": cube.symbols, "snapshots": ()})()
+
+    store = SealedHoldoutStore(tmp_path / "gate_e2e.sqlite3")
+    manifest = SealedHoldoutManifest(
+        holdout_id="gate-e2e",
+        start_time_ns=int(cube.timestamps_ns[-180]),
+        end_time_ns=int(cube.timestamps_ns[-1]),
+        holdout_days=90, model_version="v1",
+        data_manifest_hash="h1", strategy_spec_hash="spec1",
+    )
+    store.create(manifest)
+    config = CompoundEngineConfig()
+
+    # Mock pipeline dependencies to reach handoff
+    mock_fold = CausalFold(0, 0, 120, 100, 120, 120, 200, 1, 1)
+    mock_folds = (mock_fold,)
+    mocker.patch("src.domain.futures.compound.engine.build_folds_4h", return_value=mock_folds)
+
+    mock_cluster_panel = ClusterPanel(
+        symbols=cube.symbols,
+        cluster_labels=np.zeros(n_syms, dtype=np.int32),
+        cluster_centroids=np.zeros((1, 4), dtype=np.float64),
+        k_clusters=1,
+    )
+    mock_cluster_fold = CausalClusterFold(
+        fold_id=0, fit_end_exclusive_4h=120, fit_end_time_ns=int(cube.timestamps_ns[119]),
+        panel=mock_cluster_panel, member_hash="test_hash",
+    )
+    mocker.patch("src.domain.futures.compound.engine.build_causal_cluster_folds", return_value=(mock_cluster_fold,))
+
+    # Capture build_exit_aware_handoff kwargs
+    call_kwargs = {}
+
+    def capture_handoff(*args, **kwargs):
+        call_kwargs.update(kwargs)
+        from src.domain.futures.compound.contracts import (
+            CalibratedForecastPanel,
+            HandoffAdmissionEvidence,
+            HandoffResult,
+        )
+        cash = CalibratedForecastPanel(
+            decision_timestamps_ns=np.arange(n_bars, dtype=np.int64),
+            symbols=cube.symbols,
+            mu_2d=np.zeros((n_bars, n_syms), dtype=np.float32),
+            se_2d=np.full((n_bars, n_syms), np.nan, dtype=np.float32),
+            family_mu_3d=np.zeros((n_bars, n_syms, 0), dtype=np.float32),
+            family_ids=(), admitted_signal_ids=(), fold_manifest_hash="",
+        )
+        return HandoffResult(
+            cash,
+            HandoffAdmissionEvidence(0.0, 0.0, 0.0, 0.0, 0.0, 0, 0.0, (), False, ("no_admitted_sleeves",)),
+        )
+
+    mocker.patch("src.domain.futures.compound.engine.build_exit_aware_handoff", side_effect=capture_handoff)
+
+    old_debug = _os.environ.get("L1_DEBUG")
+    _os.environ["L1_DEBUG"] = "1"
+    try:
+        result = run_multiscale_compound_engine(
+            market=cube, universe=universe,
+            holdout_store=store, holdout_id="gate-e2e", config=config,
+        )
+    finally:
+        if old_debug is not None:
+            _os.environ["L1_DEBUG"] = old_debug
+        else:
+            _os.environ.pop("L1_DEBUG", None)
+
+    assert isinstance(result, CompoundEngineResult)
+    assert "folds" in call_kwargs, "build_exit_aware_handoff missing folds kwarg"
+    assert "sigma_2d" in call_kwargs, "build_exit_aware_handoff missing sigma_2d kwarg"
+    assert "cost_bps_4h" in call_kwargs, "build_exit_aware_handoff missing cost_bps_4h kwarg"
+    assert call_kwargs["sigma_2d"].ndim == 2
+    assert call_kwargs["sigma_2d"].shape[1] == n_syms
+    assert call_kwargs["cost_bps_4h"].ndim == 2
