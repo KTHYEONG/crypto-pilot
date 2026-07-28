@@ -270,6 +270,7 @@ def run_multiscale_compound_engine(
         benchmark_returns_1d = log_ret
         handoff_result = build_exit_aware_handoff(
             forecast, sleeves, bars_4h, benchmark_returns_1d, config.handoff,
+            folds=folds, sigma_2d=panel.sigma_2d, cost_bps_4h=cost_bps_4h,
         )
         forecast = handoff_result.forecast
         _logger.info(
