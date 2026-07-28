@@ -735,6 +735,41 @@ class HandoffAdmissionEvidence:
     active_signal_ids: tuple[str, ...]
     admitted: bool
     reasons: tuple[str, ...]
+    robust_fold_growth: float = 0.0
+    fold_growths: tuple[float, ...] = ()
+
+
+@dataclass(slots=True, frozen=True)
+class CausalRegimePanel:
+    decision_timestamps_ns: NDArray[np.int64]
+    code_1d: NDArray[np.int8]
+    available_at_ns_1d: NDArray[np.int64]
+    names: tuple[str, ...]
+
+
+@dataclass(slots=True, frozen=True)
+class RegimeExpertEvidence:
+    signal_id: str
+    outer_fold_id: int
+    regime_code: int
+    effective_blocks: int
+    posterior_positive_probability: float
+    growth_lcb90: float
+    growth_2x_cost: float
+    robust_inner_growth: float
+    positive_inner_folds: int
+    scale: float
+    admitted: bool
+    reasons: tuple[str, ...]
+    annual_volatility: float = 0.0
+
+
+@dataclass(slots=True, frozen=True)
+class RegimeRoutedForecast:
+    forecast: CalibratedForecastPanel
+    evidence: tuple[RegimeExpertEvidence, ...]
+    active_expert_count_1d: NDArray[np.int16]
+    tested_hypotheses: int
 
 
 @dataclass(slots=True, frozen=True)
@@ -974,6 +1009,7 @@ __all__ = [
     "CausalAlphaFold",
     "CausalClusterFold",
     "CausalFold",
+    "CausalRegimePanel",
     "CausalityError",
     "ClusterPanel",
     "ClusteringAlgorithm",
@@ -1009,6 +1045,8 @@ __all__ = [
     "QuarterlyBarBoundaries",
     "RawAlphaTape",
     "RawSignalPanel",
+    "RegimeExpertEvidence",
+    "RegimeRoutedForecast",
     "RiskOverlayResult",
     "SealedHoldoutManifest",
     "SignalAdmissionEvidence",

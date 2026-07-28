@@ -630,6 +630,91 @@ def compute_fold_growths(
     return tuple(growths)
 
 
+def compute_compounding_stability(
+    weights_2d: NDArray[np.float64],
+    bars_4h: TimeframeBarCube,
+    folds: tuple[CausalFold, ...],
+    cost_bps_4h: NDArray[np.float32],
+    funding_1h_2d: NDArray[np.float32],
+    config: HandoffConfig,
+) -> HandoffAdmissionEvidence:
+    from src.domain.futures.compound.bootstrap import (
+        circular_stationary_bootstrap_growth,
+        politis_white_block_length,
+    )
+
+    portfolio_returns = compute_l1_oos_portfolio_returns(weights_2d, bars_4h, folds, cost_bps_4h)
+    if len(portfolio_returns) == 0:
+        return HandoffAdmissionEvidence(0.0, 0.0, 0.0, 0.0, 0.0, 0, 0.0, (), False, ("no_oos_returns",), 0.0, ())
+
+    finite_returns = portfolio_returns[np.isfinite(portfolio_returns)]
+    try:
+        resolved_pw_block = politis_white_block_length(finite_returns)
+    except ValueError:
+        resolved_pw_block = 0.0
+
+    ann_lcb90, _, _ = circular_stationary_bootstrap_growth(
+        portfolio_returns, 2191.5,
+        n_bootstrap=config.n_bootstrap,
+        block_size=resolved_pw_block or None,
+    )
+
+    log_ret = np.log1p(np.where(np.isfinite(portfolio_returns), portfolio_returns, 0.0))
+    ann_growth = float(np.mean(log_ret)) * 2191.5
+
+    fold_growths = compute_fold_growths(weights_2d, bars_4h, folds, cost_bps_4h)
+    positive_outer_folds = sum(1 for g in fold_growths if g > 0.0)
+
+    robust_fold_growth = 0.0
+    if fold_growths:
+        g_array = np.array(fold_growths, dtype=np.float64)
+        median_g = float(np.median(g_array))
+        mad = float(np.median(np.abs(g_array - median_g)))
+        robust_fold_growth = median_g - 1.4826 * mad
+
+    ann_vol = float(np.std(portfolio_returns, ddof=1)) * math.sqrt(2191.5) if len(portfolio_returns) > 1 else 0.0
+
+    cum_returns = np.cumprod(1.0 + portfolio_returns)
+    peak = np.maximum.accumulate(cum_returns)
+    dd = 1.0 - cum_returns / peak
+    max_dd = float(np.max(dd)) if len(dd) > 0 else 0.0
+
+    stressed_returns = portfolio_returns * 2.0
+    stressed_growth = float(np.mean(np.log1p(np.where(np.isfinite(stressed_returns), stressed_returns, 0.0)))) * 2191.5
+    growth_2x_cost = stressed_growth
+
+    growth_lcb90_check = ann_lcb90 > 0
+    growth_2x_check = growth_2x_cost > 0
+    positive_folds_check = positive_outer_folds >= max(1, len(folds) * 4 // 5)
+    robust_check = robust_fold_growth > 0
+    vol_check = ann_vol <= config.max_ann_vol if config.max_ann_vol > 0 else True
+    dd_check = max_dd <= config.max_drawdown if config.max_drawdown > 0 else True
+
+    reasons: list[str] = []
+    if not growth_lcb90_check:
+        reasons.append("growth_lcb90_not_positive")
+    if not growth_2x_check:
+        reasons.append("growth_2x_cost_not_positive")
+    if not positive_folds_check:
+        reasons.append("insufficient_positive_folds")
+    if not robust_check:
+        reasons.append("robust_fold_growth_not_positive")
+    if not vol_check:
+        reasons.append("annual_volatility_exceeded")
+    if not dd_check:
+        reasons.append("max_drawdown_exceeded")
+
+    admitted = not reasons
+
+    return HandoffAdmissionEvidence(
+        ann_growth, ann_lcb90, growth_2x_cost,
+        max_dd, ann_vol, positive_outer_folds,
+        1.0, (), admitted, tuple(reasons),
+        robust_fold_growth=robust_fold_growth,
+        fold_growths=fold_growths,
+    )
+
+
 def build_exit_aware_handoff(
     forecast: CalibratedForecastPanel,
     sleeves: tuple[L1SleevePosterior, ...],
@@ -640,87 +725,62 @@ def build_exit_aware_handoff(
     folds: tuple[CausalFold, ...],
     weights_2d: NDArray[np.float64],
     cost_bps_4h: NDArray[np.float32],
+    funding_1h_2d: NDArray[np.float32] | None = None,
 ) -> HandoffResult:
-    from src.domain.futures.compound.bootstrap import (
-        circular_stationary_bootstrap_growth,
-        politis_white_block_length,
-    )
     from src.domain.futures.compound.l1_diagnostics import L1AdmissionRecorder
 
     recorder = L1AdmissionRecorder()
 
     admitted_sleeves = [s for s in sleeves if s.admitted]
     if not admitted_sleeves:
-        no_evidence = HandoffAdmissionEvidence(0.0, 0.0, 0.0, 0.0, 0.0, 0, 0.0, (), False, ("no_admitted_sleeves",))
+        no_evidence = HandoffAdmissionEvidence(0.0, 0.0, 0.0, 0.0, 0.0, 0, 0.0, (), False, ("no_admitted_sleeves",), 0.0, ())
         recorder.record_gate(admitted_sleeves=0, distinct_series=0, oos_bars=0, ann_growth=0.0, ann_lcb90=0.0, pw_block=0.0, turnover=0.0, cost_drag=0.0, positive_folds=0, fold_growths=(), mean_abs_net=0.0, admitted=False)
         _LOGGER.info("[L1] exit-aware handoff: no admitted sleeves, NO_EVIDENCE")
         return HandoffResult(forecast, no_evidence)
 
-    portfolio_returns = compute_l1_oos_portfolio_returns(weights_2d, bars_4h, folds, cost_bps_4h)
-    if len(portfolio_returns) == 0:
-        no_evidence = HandoffAdmissionEvidence(0.0, 0.0, 0.0, 0.0, 0.0, 0, 0.0, (), False, ("no_admitted_sleeves",))
-        _LOGGER.info("[L1] exit-aware handoff: empty OOS portfolio, NO_EVIDENCE")
-        return HandoffResult(forecast, no_evidence)
+    from src.domain.futures.compound.bootstrap import politis_white_block_length
 
-    finite_returns = portfolio_returns[np.isfinite(portfolio_returns)]
-    try:
-        resolved_pw_block = politis_white_block_length(finite_returns)
-    except ValueError:
-        resolved_pw_block = 0.0
+    funding = funding_1h_2d if funding_1h_2d is not None else np.zeros((bars_4h.close_2d.shape[0] * 4, bars_4h.close_2d.shape[1]), dtype=np.float32)
 
-    ann_lcb90, _, _ = circular_stationary_bootstrap_growth(
-        portfolio_returns, 2191.5, n_bootstrap=config.n_bootstrap, block_size=resolved_pw_block or None,
+    evidence = compute_compounding_stability(
+        weights_2d, bars_4h, folds, cost_bps_4h, funding, config,
     )
-
-    log_ret = np.log1p(np.where(np.isfinite(portfolio_returns), portfolio_returns, 0.0))
-    ann_growth = float(np.mean(log_ret)) * 2191.5
-
-    fold_growths = compute_fold_growths(weights_2d, bars_4h, folds, cost_bps_4h)
-    positive_outer_folds = sum(1 for g in fold_growths if g > 0.0)
-
-    reasons: list[str] = []
-    if ann_lcb90 <= 0.0:
-        reasons.append("growth_lcb90_not_positive")
-    if positive_outer_folds < config.min_positive_outer_folds:
-        reasons.append("insufficient_positive_folds")
-
-    distinct_series = 1
-    admitted = not reasons
-
-    close_2d = bars_4h.close_2d
-    t_total, n_sym = close_2d.shape
-    oos_mask = np.zeros(t_total, dtype=np.bool_)
-    for f in folds:
-        oos_start = f.oos_start
-        oos_end = min(f.oos_end_exclusive, t_total - 1)
-        if oos_start < oos_end:
-            oos_mask[oos_start:oos_end] = True
-    oos_indices = np.where(oos_mask)[0]
-    total_turnover = 0.0
-    total_cost_drag = 0.0
-    total_abs_net = 0.0
-    prev_pos = np.zeros(n_sym, dtype=np.float64)
-    cost = cost_bps_4h.astype(np.float64)
-    for t in oos_indices:
-        pos = weights_2d[t]
-        total_turnover += float(np.sum(np.abs(pos - prev_pos)))
-        total_cost_drag += float(np.dot(cost[t], np.abs(pos - prev_pos))) * 1e-4
-        total_abs_net += float(np.abs(np.sum(pos)))
-        prev_pos = pos
-    mean_abs_net = total_abs_net / len(oos_indices) if len(oos_indices) > 0 else 0.0
-
     evidence = HandoffAdmissionEvidence(
-        ann_growth, ann_lcb90, ann_lcb90, 0.0, 0.0, positive_outer_folds,
-        1.0, tuple(s.signal_id for s in admitted_sleeves), admitted, tuple(reasons),
+        evidence.annualized_log_growth,
+        evidence.growth_lcb90,
+        evidence.growth_2x_cost,
+        evidence.max_drawdown,
+        evidence.annual_volatility,
+        evidence.positive_outer_folds,
+        1.0,
+        tuple(s.signal_id for s in admitted_sleeves),
+        evidence.admitted,
+        evidence.reasons,
+        robust_fold_growth=evidence.robust_fold_growth,
+        fold_growths=evidence.fold_growths,
     )
-    _LOGGER.info("[L1] exit-aware handoff admitted=%s sleeves=%d distinct_series=%d oos_bars=%d ann_growth=%.4f ann_lcb90=%.4f positive_folds=%d/%d",
-                 admitted, len(admitted_sleeves), distinct_series, len(portfolio_returns), ann_growth, ann_lcb90,
-                 positive_outer_folds, len(fold_growths))
-    recorder.record_gate(admitted_sleeves=len(admitted_sleeves), distinct_series=distinct_series,
-                         oos_bars=len(portfolio_returns), ann_growth=ann_growth, ann_lcb90=ann_lcb90,
-                         pw_block=resolved_pw_block, turnover=float(total_turnover), cost_drag=float(total_cost_drag),
-                         positive_folds=positive_outer_folds, fold_growths=fold_growths, mean_abs_net=mean_abs_net,
-                         admitted=admitted)
+
+    portfolio_returns = compute_l1_oos_portfolio_returns(weights_2d, bars_4h, folds, cost_bps_4h)
+    pw_block = 0.0
+    if len(portfolio_returns) > 0:
+        finite_returns = portfolio_returns[np.isfinite(portfolio_returns)]
+        try:
+            pw_block = politis_white_block_length(finite_returns)
+        except ValueError:
+            pw_block = 0.0
+
+    _LOGGER.info("[L1] exit-aware handoff admitted=%s sleeves=%d distinct_series=%d oos_bars=%d ann_growth=%.4f ann_lcb90=%.4f robust_g=%.4f positive_folds=%d/%d",
+                 evidence.admitted, len(admitted_sleeves), 1, len(portfolio_returns),
+                 evidence.annualized_log_growth, evidence.growth_lcb90,
+                 evidence.robust_fold_growth,
+                 evidence.positive_outer_folds, len(evidence.fold_growths))
+    recorder.record_gate(admitted_sleeves=len(admitted_sleeves), distinct_series=1,
+                         oos_bars=len(portfolio_returns), ann_growth=evidence.annualized_log_growth,
+                         ann_lcb90=evidence.growth_lcb90,
+                         pw_block=pw_block, turnover=0.0, cost_drag=0.0,
+                         positive_folds=evidence.positive_outer_folds,
+                         fold_growths=evidence.fold_growths, mean_abs_net=0.0,
+                         admitted=evidence.admitted)
     return HandoffResult(forecast, evidence, tuple(admitted_sleeves))
 
 

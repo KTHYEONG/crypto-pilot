@@ -98,3 +98,46 @@ class TestL1AdmissionRecorder:
                 os.environ["L1_DEBUG"] = old
             else:
                 os.environ.pop("L1_DEBUG", None)
+
+    def test_record_regime_evidence_writes_jsonl(self, tmp_path: Path) -> None:
+        old = os.environ.get("L1_DEBUG")
+        os.environ["L1_DEBUG"] = "1"
+        try:
+            log_path = tmp_path / "regime_test.jsonl"
+            rec = L1AdmissionRecorder(path=log_path)
+            rec.record_regime_evidence(
+                signal_id="mom:fast", outer_fold_id=0, regime_code=2,
+                effective_blocks=25, posterior_probability=0.95,
+                growth_lcb90=0.05, growth_2x_cost=0.03,
+                robust_inner_growth=0.02, positive_inner_folds=3,
+                scale=0.8, admitted=True, reasons=(),
+            )
+            lines = log_path.read_text().strip().splitlines()
+            assert len(lines) == 1
+            row = json.loads(lines[0])
+            assert row["tag"] == "REGIME"
+            assert row["signal_id"] == "mom:fast"
+            assert row["admitted"] is True
+            assert row["scale"] == 0.8
+        finally:
+            if old is not None:
+                os.environ["L1_DEBUG"] = old
+            else:
+                os.environ.pop("L1_DEBUG", None)
+
+    def test_record_regime_evidence_disabled_when_no_debug(self, tmp_path: Path) -> None:
+        old = os.environ.pop("L1_DEBUG", None)
+        try:
+            log_path = tmp_path / "disabled_regime.jsonl"
+            rec = L1AdmissionRecorder(path=log_path)
+            rec.record_regime_evidence(
+                signal_id="mom:fast", outer_fold_id=0, regime_code=2,
+                effective_blocks=25, posterior_probability=0.95,
+                growth_lcb90=0.05, growth_2x_cost=0.03,
+                robust_inner_growth=0.02, positive_inner_folds=3,
+                scale=0.8, admitted=True, reasons=(),
+            )
+            assert not log_path.exists()
+        finally:
+            if old is not None:
+                os.environ["L1_DEBUG"] = old
