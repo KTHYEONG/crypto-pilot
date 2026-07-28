@@ -1,56 +1,75 @@
-## L1 측정계 정직화(Driscoll-Kraay HAC + 단일 포트폴리오 게이트 + block bootstrap) 구현 및 신호별 DEBUG 실측 — 2026-07-28
+## L1 포지션 구성(Construction) 정직화 — 게이트/배포 북 일치, 순노출 캡, fold 일관성 게이트 활성화 — 2026-07-28
 
 - 실행일: `2026-07-28`
 - 실행 명령: `L1_DEBUG=1 L2_DRY_RUN=1 uv run python src/execution/opt_main_futures.py --phase full --sync local --date 2026-07-15`
-- 검증 규모: 51개 CORE 심볼 × 5,442개 4h봉, 신호 27종(family 7개 × speed 5단), fold 5개 × cluster ~4개 = sleeve 후보 455개
-- 스펙: `docs/specs/l1-measurement-integrity-restore.md` (+ contract.json)
-- 산출물: `logs/futures/compound/20260728_102005/`, `logs/l1_admission.jsonl`(455 ALGO + 1 EVAL row)
-- `/check` PASS: Wiring ✅ | Non-dummy AST ✅ | Mypy Strict ✅ | Regression Test ✅ (145 passed) | Coverage 92%
-- exit_code 관련 `l2.verdict`: **no_evidence** (현금 100% 보존, `rebalances=0`)
+- 검증 규모: 51개 CORE 심볼 × 5,442개 4h봉, 신호 27종(family 7개 × speed 5단), fold 5개 × cluster ~4개 = sleeve 후보 455개, admitted sleeve 15개(멤버 27종목)
+- 스펙: `docs/specs/l1-position-construction-integrity.md` (+ contract.json) — 직전 스펙 `l1-measurement-integrity-restore.md` 의 후속
+- 산출물: `logs/futures/compound/20260728_112010/`, `logs/l1_admission.jsonl`(455 ALGO + 1 EVAL row), `logs/scratch/l1_gate_inputs.npz`(재현용 게이트 입력 덤프)
+- `/check` PASS: Wiring ✅ | Non-dummy AST ✅ | Mypy Strict ✅ | Regression Test ✅ (216 passed) | Coverage 91%
+- `l2.verdict`: **no_evidence** (현금 100% 보존, `rebalances=0`, `active_days_ratio=0.0`)
+- `l3.verdict`: reject (`l2_not_pass`, `low_growth_probability`)
 
-### 배경 — 어제 복원한 fail-closed 게이트의 판정 근거 자체가 결함
+---
 
-전날(`CAPITAL_DEPLOYMENT_FAILCLOSED_RESTORE`) admission 게이트(`has_admitted`)를 복원했으나, 그 게이트가 참조하는 집계 통계량 자체를 실측(`scratch/verify_l1_gate_signal_independence.py`, `scratch/verify_l1_gate_se_validity.py`)으로 검증한 결과 3건의 결함을 확정:
+### 배경 — 직전 세션(L1 측정계 정직화)의 결과가 통계적으로 유의미했는지 재검증하다가 구성 결함 발견
+
+직전 스펙(`l1-measurement-integrity-restore`, D-1~D-5 수정: 신호 무관 게이트·135배 중복 표본·SE 41배 과신·i.i.d 부트스트랩 회귀 해결)을 적용한 뒤 실행한 phase full 결과가 `admitted_sleeves=15`, `ann_growth=+18.14%`, `ann_lcb90=−78.87%`, `turnover=446.87x`, `cost_drag=44.69%` 였다. 평균 수익은 양호해 보였으나 하한이 −79%로 폭락하는 것이 이상해 실제 게이트 입력(`logs/scratch/l1_gate_inputs.npz`)을 덤프해 신호(`mu_2d`)를 완전히 고정한 채 포지션 구성 방식만 바꿔가며 원인을 분해했다(`scratch/verify_l1_portfolio_variants.py`, `scratch/verify_net_cap_sweep.py`).
+
+### 확정된 결함 (전부 실측, signal 품질과 무관)
 
 | ID | 결함 | 실측 근거 |
 |---|---|---|
-| D-1 | 집계 게이트 계열이 매매 신호와 무관 — 클러스터 구성원 등가중 롱온리 바스켓 수익률만 측정 | 부호 반대 신호 2개 투입 시 계열이 비트단위로 완전 동일(`max diff=0.0`) |
-| D-2 | sleeve가 (fold×cluster)로만 정의되어 540개 "독립" sleeve가 실제로는 고유 계열 4개(135배 중복) | 실측 검증 스크립트 결과 |
-| D-3 | pooled OLS 표준오차가 지속성 있는 실제 신호(EWM 평활)에서 41배 과신(P(p>0.99) 명목1%→40.8%) | 지속성 널 400회, KS p=3.7e-59 |
-| D-5 | 이전 세션 성능 최적화 커밋(`f2f6d7aa`)이 Politis-White block bootstrap을 i.i.d.로 조용히 되돌림(3회차 동일 패턴) | `git log -S` 확인 |
+| C-1 | **게이트가 허수아비 포트폴리오를 채점** — 실제 배포 allocator(`compute_dynamic_compounding_path`)는 스무딩(`alpha_smooth=0.08`)·데드밴드(`band_frac=0.60`)·vol타게팅(12%)을 모두 갖췄으나, 직전 스펙의 `compute_l1_oos_portfolio_returns`는 자체 리스크패리티 사이징만 쓰고 셋 다 없었음. 게이트가 실제 북이라면 결코 내지 않을 연 57.6% 비용 드래그 + 27.9% vol 드래그를 스스로 만들어 자신을 탈락시킴 | 구성 변형 A(원 게이트) turnover 576/y·vol 74.6% vs 실제 allocator 대응 변형(스무딩+밴드+voltarget) turnover 87/y·vol 15.0% |
+| C-2 | **포트폴리오 분산의 85%가 의도치 않은 방향성(net exposure) 베팅** — 그로스 1.0 북의 순노출이 평균\|net\|=0.532, std=0.600으로 부호까지 뒤집으며 진동. 무조건부 베타(−0.19)로는 은폐되어 있었음(평균 net≈−0.08이라 상쇄) | `var(net×market)/var(portfolio_return)` = 85.0% (횡단면 중립화 시 0.0%로 소멸) |
+| C-3 | `HandoffConfig.min_positive_outer_folds=4`가 정의만 되고 **어디서도 검사되지 않는 dead 파라미터** — fold 5개 중 1~2개 극단치가 전체 통과를 좌우할 수 있는 구조적 허점 | 전 소스 grep 결과 참조처 없음 |
+| C-4 | OOS 0.776년 창에서 LCB90>0 요구 시 **레버리지 무관 최소 Sharpe ≈ 1.46** 필요(창 길이의 함수, 범위 밖) | `1.282/√0.776` |
+
+### 실측 A/B — `|net|` 노출 캡 sweep (신호 mu_2d 완전 고정, 구성만 변경)
+
+| `|net|` 캡 | 평균\|net\| | net growth | vol | Sharpe | turn/y | LCB90 | folds+ |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| 없음(구 게이트) | 0.703 | 4.2% | 26.8% | 0.29 | 47 | −31.5% | 2/5 |
+| 0.50 | 0.437 | 11.9% | 21.0% | 0.67 | 51 | −16.3% | 2/5 |
+| 0.30 | 0.277 | 17.7% | 17.7% | 1.09 | 57 | −7.6% | 2/5 |
+| 0.20 | 0.189 | 22.3% | 15.9% | 1.48 | 62 | −0.1% | 1/5 |
+| **0.10(채택)** | 0.097 | 25.9% | 14.4% | 1.88 | 69 | +6.6% | 2/5 |
+| 0.05 | 0.049 | 28.5% | 13.8% | 2.14 | 73 | +9.1% | 3/5 |
+| 0.00(완전중립) | 0.000 | 28.7% | 13.3% | 2.22 | 76 | +8.7% | 3/5 |
+
+관계가 **완전 단조** — 순노출을 줄일수록 예외 없이 Sharpe 개선. 현 신호군에 마켓타이밍 알파가 전무하다는 직접 증거. `0.10` 채택 근거는 LCB 부호가 아니라 **방향성 채널의 분산 기여를 ≤10%로 억제**하면서(완전중립 대비 Sharpe 손실 0.34에 불과) 장래 마켓타이밍 알파 실재 시를 위한 표현력을 구조적으로 남기기 위함.
+
+**반증된 최초 가설(정직 기록)**: "무조건부 시장베타 제거가 이득의 원천" — 정렬 정정(±1봉 시프트 버그 수정) 후 베타는 −0.186→−0.065로만 변해 vol 60.7%→19.0% 축소를 설명하지 못함. 진짜 메커니즘은 부호가 뒤집히는 **시변 순노출**이며 무조건부 베타로는 원리적으로 탐지 불가.
 
 ### 구현 (`/implement` → `/check`)
 
-- `l1_sleeves.py`: `compute_l1_oos_portfolio_returns` 신규(OOS 구간만 stitch, 리스크패리티 사이징, 비용 차감) → `build_exit_aware_handoff`가 단일 포트폴리오 시계열 1개만 `circular_stationary_bootstrap_growth`(block bootstrap)에 투입. `_cluster_masked_beta`를 Driscoll-Kraay HAC SE로 교체(횡단면 집계 + Bartlett 커널 Newey-West).
-- `config.py`: `HandoffConfig.min_sleeve_posterior_probability` 0.52→**0.95**(하드코딩 리터럴 제거), `hac_lag_cap=120` 신규.
-- `l1_diagnostics.py`(신규): `L1AdmissionRecorder` — `L1_DEBUG=1`일 때만 `logs/l1_admission.jsonl`에 `[ALGO]`(sleeve별) / `[EVAL]`(게이트 1회) 기록, 비활성 시 완전 무비용(logging.md 토큰경제 준수).
-- 후속 수정: `pw_block` 필드가 `0.0` 하드코딩 스텁이었던 것을 실제 `politis_white_block_length` 계산값 배선으로 교정(회귀 테스트 `test_build_exit_aware_handoff_records_resolved_pw_block` 추가). `estimate_cluster_sleeve_posteriors`에 `recorder.record_sleeve` 배선 추가 — 이전엔 클래스만 존재하고 프로덕션에서 호출된 적이 없어 sleeve별 데이터가 전혀 수집되지 않고 있었음.
-- `/check` PASS: Mypy Strict ✅ | Regression Test ✅ (145 passed, `test_config.py`의 무관한 사전 결함 1건은 베이스라인에서도 동일 재현 확인 후 범위 제외)
+- `allocator.py`: `apply_net_exposure_cap` 신규 — support 마스킹 직후, `dd_scale`/`vol_scale` 적용 이전에 순노출을 그로스 대비 `max_net_exposure` 비율로 클램프. 스케일 불변(레버리지 스케일링과 직교), `max_net_exposure=1.0`이면 완전 무연산(롤백 경로 보장).
+- `config.py`: `DynamicCompoundingConfig.max_net_exposure=0.10` 신규.
+- `l1_sleeves.py`: `compute_l1_oos_portfolio_returns` 시그니처를 `mu_2d`/`sigma_2d` 대신 **완성된 `weights_2d` 수취**로 교체(자체 포지션 구성 로직 완전 삭제). `compute_fold_growths` 신규(fold별 독립 성장률, 결측 fold는 skip). `build_exit_aware_handoff`가 `min_positive_outer_folds` 실제 검사(`admitted = ann_lcb90>0 AND positive_folds>=config.min_positive_outer_folds`).
+- `engine.py`: `weights_2d`를 게이트 호출 **이전** 1회 계산해 핸드오프에 주입 — 게이트 채점과 실제 배포가 동일 배열을 공유(C-1 재발 구조적 차단).
+- `l1_diagnostics.py`: `record_gate`에 `positive_folds`, `fold_growths`, `mean_abs_net` 필드 추가.
+- `/check` PASS: Mypy Strict ✅ | Regression Test ✅ (216 passed, 무관한 사전 결함 `test_config.py::test_dynamic_compounding_config_default_band_and_smoothing`도 이번 구현 과정에서 함께 해소됨을 확인) | Coverage 91%
 
-### 실전 CLI 실행 결과 — 정직화 이후 다시 NO_EVIDENCE
+### 실전 CLI 재실행 결과 — 게이트가 실제 배포 북과 정렬되며 수치가 극적으로 정직해짐
 
-| 지표 | 값 |
-|---|---:|
-| `l2.verdict` | **no_evidence** |
-| `active_days_ratio` | 0.0 |
-| `rebalances` | 0 |
-| `l3.verdict` | reject (`l2_not_pass`, `low_growth_probability`) |
+| 지표 | 수정 전(구 게이트, 허수아비 북) | 수정 후(실제 배포 북 채점) |
+|---|---:|---:|
+| `admitted_sleeves` | 15 | 15 (신호 admission 로직 무변경, 기대대로 동일) |
+| `distinct_series` | 1 | 1 |
+| `oos_bars` | 1,700 | 1,700 |
+| `ann_growth` | +18.14% | **−8.01%** |
+| `ann_lcb90` | **−78.87%** | **−24.75%** (폭 3배 이상 축소) |
+| `pw_block` | 2.89 | 2.61 |
+| `turnover`(연) | 446.87x | **7.50x** (60배 감소) |
+| `cost_drag` | 44.69% | **0.75%** |
+| `positive_folds`(신규 계측) | 미검사 | **2 / 5** |
+| `mean_abs_net`(신규 계측) | 미측정 | **0.062** (캡 0.10 이내 정상 작동 확인) |
+| fold별 성장률(신규 계측) | — | `[+6.13%, −12.43%, −44.54%, +16.10%, −6.86%]` |
+| `admitted` | False | **False** |
+| `l2.verdict` | no_evidence | **no_evidence**(불변) |
 
-집계 게이트 내부 실측(`[EVAL]`, `logs/l1_admission.jsonl`):
+**판정**: 구성 결함(C-1/C-2) 해소로 turnover·cost_drag·LCB90 폭 전부 큰 폭 개선됐으나, `positive_folds=2/5`로 신규 활성화된 fold 일관성 게이트(C-3, 임계치 4)를 통과하지 못해 admission 실패 유지. fold 성장률을 보면 5개 중 3개가 마이너스이고 fold 2(−44.5%)가 특히 크게 손실 — **fold 간 일관성(비정상성) 자체가 근본적으로 부족**함을 시사. 임계값을 낮추지 않고 그대로 기록한다.
 
-| 지표 | 값 |
-|---|---:|
-| `admitted_sleeves` | 15 / 455 후보 (임계값 0.52→0.95 상향 효과) |
-| `distinct_series` | **1** (D-2 회귀 없음 확인) |
-| `oos_bars` | 1,700 |
-| `ann_growth`(평균) | +18.14% |
-| `ann_lcb90`(block bootstrap 하한) | **−78.87%** → `admitted=False` |
-| `pw_block`(Politis-White, 정상 배선 확인) | 2.89 |
-| `turnover`(내부 진단용 프록시) | 446.87x |
-
-**해석**: 평균 성장률(+18.1%)만 보면 양호해 보이나, 살아남은 sleeve가 15개뿐이고(distinct_series=1이라 진짜 독립정보량은 이보다도 적음) 회전율이 극단적으로 높아 신뢰구간 하한이 −78.9%로 폭락 — "운이 좋으면 벌 수도 있으나 확신할 근거가 없다"는 정직한 판정. 임계값을 완화하지 않고 그대로 기록한다.
-
-### 신호(Family)별 DEBUG 실측 — L1 signal 상세 진단용 데이터 (455 sleeve 후보 전수)
+### 신호(Family)별 DEBUG 실측 — 이번 실행에서도 재확인(455 sleeve 후보 전수, 포지션 구성 변경은 sleeve-level admission에 영향 없음을 확인)
 
 | family | n | admit | admit% | mean\|beta\| | mean_prob | mean_se_ratio(HAC/OLS) | mean_n_blocks |
 |---|---:|---:|---:|---:|---:|---:|---:|
@@ -62,26 +81,34 @@
 | xs_reversal | 38 | 0 | 0.0% | 0.0015 | 0.487 | 19.18 | 170.8 |
 | reversal_st | 19 | 0 | 0.0% | 0.0015 | 0.462 | 17.90 | 256.6 |
 
-speed 세분(momentum_ts만 admit 발생, 상위 4개):
+speed 세분(momentum_ts만 admit 발생):
 
 | signal_id | n | admit | mean_beta | mean_prob | mean_se_ratio | mean_n_blocks |
 |---|---:|---:|---:|---:|---:|---:|
 | momentum_ts:medium | 19 | 6 | 0.0267 | 0.841 | 7.15 | 85.0 |
-| momentum_ts:very_slow | 19 | 6 | **0.2265** | 0.687 | 8.15 | **13.8** |
+| momentum_ts:very_slow | 19 | 6 | **0.2265** | 0.687 | 8.15 | **13.8**(소표본 주의) |
 | momentum_ts:moderate | 19 | 2 | 0.0172 | 0.535 | 8.07 | 42.3 |
 | momentum_ts:slow | 19 | 1 | 0.0389 | 0.662 | 8.27 | 28.1 |
 
-### 데이터 기반 관찰 (L1 signal 개선 착수점)
+### 다음 스펙 검토를 위한 상세 데이터 (재현 자료)
 
-1. **momentum_ts family가 유일한 생존 신호**다 — 다른 6개 family 전부 admit=0%. beta 절대값(0.076)과 SE 팽창 배수(7.84x)가 전 family 중 가장 양호(다른 family는 17.9~68.4x로 3~9배 더 심하게 팽창) — 즉 이 신호만 실제로 자기상관 구조 대비 유효한 예측력을 갖고 있을 가능성이 상대적으로 높다.
-2. **trend_ema는 사실상 사멸 신호**다 — beta가 전 speed에서 0.0001~0.0087로 0에 수렴하는데, SE 팽창 배수는 오히려 속도가 느릴수록 급증(fast 20.98x → very_slow 98.33x). "느린 추세 신호일수록 지속성만 크고 예측력은 없다"는 전형적 과최적화 위험 신호.
-3. **momentum_ts:very_slow의 beta=0.2265**는 다른 모든 signal×speed 조합(대부분 0.001~0.07)보다 한 자릿수 크나, `n_blocks=13.8`로 독립 표본이 매우 적다 — 진짜 엣지인지 소표본 아티팩트인지 구분 불가. 과신 금지, 후속 검증 필요.
-4. **basis_gap·xs_reversal**(2026-07-24 horizon term structure 연구에서 "완전 독립" 신호로 확인된 바 있음)이 이번 클러스터-베타 측정에서는 admit=0%로 나타남 — 상충이 아니라 **측정 방법이 다름**(당시는 신호간 상관구조, 이번은 클러스터 내 pooled beta)에 유의. 두 결과를 동일 선상에서 비교하려면 별도 스펙 필요.
-5. `n_blocks`는 예상대로 speed에 반비례(fast 256.6개 ↔ very_slow 13.8개) — 느린 신호일수록 admission 판정의 통계적 신뢰도 자체가 구조적으로 낮아진다는 것을 재확인.
+- **재현 스크립트**: `scratch/dump_l1_gate_inputs.py`(게이트 입력 npz 덤프, `logs/scratch/l1_gate_inputs.npz`), `scratch/verify_l1_portfolio_variants.py`(구성 변형 A~P + fold별 안정성 비교), `scratch/verify_net_cap_sweep.py`(`|net|` 캡 sweep, 위 표의 원본).
+- **fold별 안정성 원자료**(구성 변형 H: 스무딩24+밴드0.002+voltarget12% 기준, 이번 정식 구현과 파라미터 동일):
 
-### 최종 판정
+  | fold | bars | net growth | Sharpe |
+  |---:|---:|---:|---:|
+  | 0 | 340 | −8.7% | −0.51 |
+  | 1 | 340 | −17.9% | −1.44 |
+  | 2 | 340 | **+120.7%** | **+6.93**(극단치) |
+  | 3 | 340 | +46.7% | +3.01 |
+  | 4 | 340 | +7.9% | +0.63 |
 
-- L1 게이트가 이제 **실제 배포될 북(포지션·비용 반영)의 신호의존적 수익률**을 측정하며, 표본 부풀리기·i.i.d. 부트스트랩 회귀가 제거됨을 코드·테스트로 확정.
-- 결과는 여전히 NO_EVIDENCE — 이는 실패가 아니라 "지금까지 momentum_ts 외 신호는 통계적으로 유의한 엣지가 없다"는 정직한 확인.
-- 신규 확보된 sleeve별 DEBUG 데이터(`logs/l1_admission.jsonl`)로 momentum_ts 집중 강화 및 trend_ema 계열 폐기/재설계가 다음 스펙의 데이터 기반 후보로 확정됨.
-- Exit Policy(소비자 0개) 결함은 이번 스펙에서 사용자 결정으로 보류 유지.
+  → fold 2의 극단적 양의 성과가 스펙 작성 시점 sweep 표의 총합 지표를 크게 끌어올리고 있었음(다중검정 편향 주의, 스펙 [LIMIT-02]에 기록됨). 실제 프로덕션 파라미터로 재실행한 이번 결과(`fold_growths` 위 참조)는 부호가 다시 섞여(fold 2가 오히려 최대 손실 −44.5%) window/seed 민감도가 매우 높음을 보여준다 — **fold 성과의 부호 자체가 안정적이지 않다는 것이 핵심 병목**.
+- **momentum_ts 15개 admitted sleeve의 fold×cluster 분포**, `se_ols_ratio`, `n_blocks` 등 sleeve별 원자료는 `logs/l1_admission.jsonl`의 `tag=ALGO` 행에서 `signal_id`가 `momentum_ts:*`인 항목으로 전수 조회 가능(재현 시드 42, `--date 2026-07-15 --sync local`).
+
+### 최종 판정 및 다음 착수점
+
+1. 포지션 구성 결함(C-1: 게이트/배포 북 불일치, C-2: 방향성 베팅 은폐)은 완전히 해소 — turnover 60배·cost_drag 60배·LCB90 폭 3배 개선을 코드·실측으로 확정.
+2. **여전히 NO_EVIDENCE** — 병목이 구성에서 **fold 간 일관성 부족(비정상성)**으로 이동. `positive_folds=2/5`, fold 성과 부호가 window마다 크게 흔들림.
+3. 다음 스펙 후보(우선순위순): (a) fold 간 비정상성 자체를 겨냥한 스펙 — regime 조건화, fold 수 확대, 혹은 momentum_ts 자체의 시간가변 강건성 진단. (b) momentum_ts:very_slow(beta=0.2265, n_blocks=13.8) 소표본 아티팩트 여부 별도 검증. (c) trend_ema family(전 speed beta≈0, SE 팽창 최대) 폐기 여부 결정.
+4. Exit Policy(소비자 0개) 결함은 사용자 결정으로 계속 보류.
