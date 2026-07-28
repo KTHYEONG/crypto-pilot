@@ -847,3 +847,16 @@ def test_signal_bank_thread_safety(synthetic_market: MarketFeatureCube) -> None:
     assert panel.z_3d.shape == (T, N, 60)
     assert panel.valid_3d.shape == (T, N, 60)
     assert panel.sigma_2d.shape == (T, N)
+
+
+def test_signal_bank_large_universe_tpe_off(synthetic_market: MarketFeatureCube) -> None:
+    market_30 = _make_market(24 * 30, 30)
+    bars = build_multi_timeframe_bars(market_30)
+    T = bars.decision_timestamps_ns.size
+    N = len(bars.cubes["4h"].symbols)
+    assert N >= 30
+    eligible = np.ones((T, N), np.bool_)
+    panel = build_raw_signal_panel(bars, eligible_2d=eligible, numba_threads=6)
+    assert isinstance(panel, RawSignalPanel)
+    assert panel.z_3d.shape == (T, N, 60)
+    assert panel.valid_3d.shape == (T, N, 60)
