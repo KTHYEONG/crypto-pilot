@@ -285,8 +285,13 @@ def run_multiscale_compound_engine(
     bars_4h = bars.cubes["4h"]
     has_admitted = handoff_result.evidence.admitted if handoff_result is not None else False
 
-    weights_2d = compute_dynamic_compounding_path(forecast=forecast, sigma_2d=panel.sigma_2d, funding_rates_1h_2d=funding_1h, config=config.dynamic_compounding, close_2d=bars_4h.close_2d, cost_bps=config.ladder.cost_bps)
-    is_cash_only = float(np.sum(np.abs(weights_2d))) < 1e-15
+    if has_admitted:
+        weights_2d = compute_dynamic_compounding_path(forecast=forecast, sigma_2d=panel.sigma_2d, funding_rates_1h_2d=funding_1h, config=config.dynamic_compounding, close_2d=bars_4h.close_2d, cost_bps=config.ladder.cost_bps)
+        is_cash_only = float(np.sum(np.abs(weights_2d))) < 1e-15
+    else:
+        weights_2d = np.zeros((n_bars_4h, n_syms), dtype=np.float64)
+        is_cash_only = True
+        _logger.info("cash-only: no admitted signals")
 
     quarter_window = window if isinstance(window, QuarterlyRunWindow) else None
     if quarter_window is not None:
