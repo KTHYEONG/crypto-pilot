@@ -144,6 +144,19 @@ def charge_config_search_multiplicity(
     )
 
 
+def charge_discrete_hypothesis_count(
+    base: TrialMultiplicity,
+    n_hypotheses: int,
+) -> TrialMultiplicity:
+    if n_hypotheses < 0:
+        raise ValueError(f"n_hypotheses must be >= 0, got {n_hypotheses}")
+    return TrialMultiplicity(
+        n_trials=base.n_trials + n_hypotheses,
+        effective_trials=base.effective_trials + n_hypotheses,
+        sigma_sharpe=base.sigma_sharpe,
+    )
+
+
 def deflated_sharpe_probability(
     *, observed_sharpe: float, multiplicity: TrialMultiplicity,
     excess_returns: NDArray[np.float64], periods_per_year: float = 365.25,
