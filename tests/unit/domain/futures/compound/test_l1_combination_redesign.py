@@ -38,7 +38,7 @@ def _sleeve(
     p = ExitPolicySpec("p", ExitPolicyKind.TIME, None, None, None, 0, 4, fold, "h")
     return L1SleevePosterior(
         f"{sig}:f{fold}", sig, family, fold, 0, m, "h",
-        p, 0.01, 0.05, 0.9, 1.0, (0.01,), 100, admitted, (),
+        p, 0.0, 0.01, 0.05, 0.9, 1.0, (0.01,), 100, admitted, (),
     )
 
 
