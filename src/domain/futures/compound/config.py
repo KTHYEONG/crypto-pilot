@@ -367,9 +367,9 @@ class DynamicCompoundingConfig:
 class HandoffConfig:
     max_pairwise_correlation: float = 0.80
     min_positive_outer_folds: int = 4
-    target_ann_vol: float = 0.15
-    max_ann_vol: float = 0.20
-    max_drawdown: float = 0.20
+    target_ann_vol: float = 0.12
+    max_ann_vol: float = 0.12
+    max_drawdown: float = 0.15
     cost_stress_multiplier: float = 2.0
     n_bootstrap: int = 1_000
     dedup_rho_threshold: float = 0.90
@@ -389,6 +389,40 @@ class HandoffConfig:
         assert self.min_dedup_observations >= 1
         assert 0.5 < self.min_sleeve_posterior_probability < 1.0
         assert self.hac_lag_cap >= 1
+
+
+@dataclass(slots=True, frozen=True)
+class RegimeRouterConfig:
+    trend_lookback_bars: int = 42
+    regime_history_bars: int = 126
+    min_dwell_bars: int = 12
+    stress_enter_quantile: float = 0.80
+    stress_exit_quantile: float = 0.70
+    trend_enter_tstat: float = 1.25
+    trend_exit_tstat: float = 0.75
+    n_inner_folds: int = 3
+    min_positive_inner_folds: int = 2
+    min_effective_blocks: int = 20
+    prior_effective_blocks: int = 20
+    min_posterior_probability: float = 0.90
+    max_expert_weight: float = 0.50
+    max_expert_correlation: float = 0.80
+    n_bootstrap: int = 1_000
+
+    def __post_init__(self) -> None:
+        assert self.trend_lookback_bars > 0
+        assert self.regime_history_bars > self.trend_lookback_bars
+        assert self.min_dwell_bars > 0
+        assert 0 < self.stress_exit_quantile < self.stress_enter_quantile < 1
+        assert self.trend_enter_tstat > self.trend_exit_tstat > 0
+        assert self.n_inner_folds >= 2
+        assert 0 < self.min_positive_inner_folds <= self.n_inner_folds
+        assert self.min_effective_blocks > 0
+        assert self.prior_effective_blocks > 0
+        assert 0.5 < self.min_posterior_probability < 1
+        assert 0 < self.max_expert_weight <= 1
+        assert 0 < self.max_expert_correlation <= 1
+        assert self.n_bootstrap > 0
 
 
 @dataclass(slots=True, frozen=True)
@@ -412,6 +446,7 @@ class CompoundEngineConfig:
     admission: AdmissionConfig = field(default_factory=AdmissionConfig)
     handoff: HandoffConfig = field(default_factory=HandoffConfig)
     dynamic_compounding: DynamicCompoundingConfig = field(default_factory=DynamicCompoundingConfig)
+    regime_router: RegimeRouterConfig = field(default_factory=RegimeRouterConfig)
 
     def __post_init__(self) -> None:
         assert isinstance(self.data, DataPlaneConfig)
@@ -432,3 +467,4 @@ class CompoundEngineConfig:
         assert isinstance(self.admission, AdmissionConfig)
         assert isinstance(self.handoff, HandoffConfig)
         assert isinstance(self.dynamic_compounding, DynamicCompoundingConfig)
+        assert isinstance(self.regime_router, RegimeRouterConfig)

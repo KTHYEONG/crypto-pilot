@@ -85,3 +85,36 @@ class L1AdmissionRecorder:
             "mean_abs_net": round(mean_abs_net, 4),
             "admitted": admitted,
         })
+
+    def record_regime_evidence(
+        self, *,
+        signal_id: str, outer_fold_id: int, regime_code: int,
+        effective_blocks: int, posterior_probability: float,
+        growth_lcb90: float, growth_2x_cost: float,
+        robust_inner_growth: float, positive_inner_folds: int,
+        scale: float, admitted: bool, reasons: tuple[str, ...],
+    ) -> None:
+        if not self._enabled:
+            return
+        _LOGGER.debug(
+            "[REGIME] signal_id=%s fold=%d regime=%d eff_blocks=%d prob=%.3f "
+            "lcb90=%.4f g2x=%.4f robust_g=%.4f pos_inner=%d scale=%.3f admitted=%s",
+            signal_id, outer_fold_id, regime_code, effective_blocks,
+            posterior_probability, growth_lcb90, growth_2x_cost,
+            robust_inner_growth, positive_inner_folds, scale, admitted,
+        )
+        self._append_jsonl({
+            "tag": "REGIME",
+            "signal_id": signal_id,
+            "outer_fold_id": outer_fold_id,
+            "regime_code": regime_code,
+            "effective_blocks": effective_blocks,
+            "posterior_probability": round(posterior_probability, 3),
+            "growth_lcb90": round(growth_lcb90, 4),
+            "growth_2x_cost": round(growth_2x_cost, 4),
+            "robust_inner_growth": round(robust_inner_growth, 4),
+            "positive_inner_folds": positive_inner_folds,
+            "scale": round(scale, 3),
+            "admitted": admitted,
+            "reasons": list(reasons),
+        })
