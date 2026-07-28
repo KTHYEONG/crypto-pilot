@@ -231,6 +231,16 @@ def _check_integrity_and_evidence(
     if np.any(~np.isfinite(ledger.target_weights_2d)):
         reasons.append("non_finite_weights")
 
+    return len(reasons) == 0, reasons
+
+
+def _check_evidence_sufficiency(
+    ledger: ExecutionLedger,
+    daily_returns_4h: NDArray[np.float64],
+    config: L2GateConfig,
+) -> list[str]:
+    reasons: list[str] = []
+
     oos_days = len(daily_returns_4h)
     if oos_days < config.min_oos_days:
         reasons.append(f"oos_days={oos_days}<{config.min_oos_days}")
@@ -244,7 +254,7 @@ def _check_integrity_and_evidence(
     if rebalances < config.min_rebalances:
         reasons.append(f"rebalances={rebalances}<{config.min_rebalances}")
 
-    return len(reasons) == 0, reasons
+    return reasons
 
 
 def _compute_rebalance_count(weights_2d: NDArray[np.float32]) -> int:
@@ -295,6 +305,17 @@ def evaluate_l2_gate(
     )
 
 
+def classify_l2_evidence(
+    ledger: ExecutionLedger,
+    daily_returns_1d: NDArray[np.float64],
+    config: L2GateConfig,
+) -> tuple[bool, tuple[str, ...]]:
+    reasons = _check_evidence_sufficiency(ledger, daily_returns_1d, config)
+    if reasons:
+        return False, tuple(reasons)
+    return True, ()
+
+
 def evaluate_l2_walk_forward(
     *,
     ledger: ExecutionLedger,
@@ -331,7 +352,7 @@ def evaluate_l2_walk_forward(
     daily_returns = aggregate_returns_to_utc_days(ledger.timestamps_ns, ledger.net_returns_1d)
     oos_days = len(daily_returns)
 
-    # Integrity & evidence gate
+    # Integrity gate (structural data issues → integrity failure)
     integrity_ok, integrity_reasons = _check_integrity_and_evidence(ledger, daily_returns, config)
     if not integrity_ok:
         reasons = tuple(integrity_reasons)
@@ -347,6 +368,25 @@ def evaluate_l2_walk_forward(
             absolute_cagr=0.0, capacity_utilisation_p95=0.0, active_days_ratio=0.0,
             rebalance_count=0, positive_outer_folds=0, oos_days=oos_days,
             category_results=(), integrity_ok=False, reasons=reasons,
+        )
+
+    # Evidence sufficiency gate (normal cash/no-evidence → integrity_ok=True)
+    evidence_reasons = _check_evidence_sufficiency(ledger, daily_returns, config)
+    no_evidence = len(evidence_reasons) > 0
+    if no_evidence:
+        return L2Evaluation(
+            verdict=L2GateVerdict.NO_EVIDENCE,
+            benchmark_id=benchmark.benchmark_id,
+            annualized_log_growth=0.0, cagr=0.0, excess_growth_lcb90=0.0,
+            excess_growth_probability=0.5, stressed_excess_growth_lcb90=0.0,
+            equity_multiple=1.0, sharpe=0.0, sharpe_probability=0.5,
+            deflated_sharpe_probability=0.5, candidate_count=candidate_count,
+            calmar=0.0, max_drawdown=0.0, daily_cvar95=0.0,
+            annual_volatility=0.0, annual_turnover=0.0, cost_drag_ratio=0.0,
+            absolute_cagr=0.0, capacity_utilisation_p95=0.0, active_days_ratio=0.0,
+            rebalance_count=0, positive_outer_folds=0, oos_days=oos_days,
+            category_results=(L2CategoryResult("integrity_and_evidence", False, tuple(evidence_reasons)),),
+            integrity_ok=True, reasons=tuple(evidence_reasons),
         )
 
     # Align benchmark to same daily grid
@@ -421,7 +461,13 @@ def evaluate_l2_walk_forward(
     equity_multiple = float(equity[-1]) if equity.size > 0 else 1.0
 
     # Bootstrap block size via Politis-White
-    pw_block = politis_white_block_length(excess_returns)
+    pw_block = 5.0
+    n_excess = len(excess_returns)
+    if n_excess >= 30:
+        try:
+            pw_block = politis_white_block_length(excess_returns)
+        except ValueError:
+            pw_block = 5.0
 
     # Sharpe ratio
     obs_sharpe, sharpe_prob = circular_stationary_bootstrap_sharpe(
@@ -496,19 +542,8 @@ def evaluate_l2_walk_forward(
     categories: list[L2CategoryResult] = []
 
     # 1. Integrity & evidence
-    int_reasons: list[str] = []
-    no_evidence = False
-    if oos_days < config.min_oos_days:
-        int_reasons.append(f"oos_days={oos_days}<{config.min_oos_days}")
-        no_evidence = True
-    if active_days_ratio < config.min_active_days_ratio:
-        int_reasons.append(f"active_days_ratio={active_days_ratio:.4f}<{config.min_active_days_ratio}")
-        no_evidence = True
-    if rebalance_count < config.min_rebalances:
-        int_reasons.append(f"rebalances={rebalance_count}<{config.min_rebalances}")
-        no_evidence = True
     categories.append(L2CategoryResult(
-        "integrity_and_evidence", not no_evidence, tuple(int_reasons),
+        "integrity_and_evidence", not no_evidence, tuple(evidence_reasons),
     ))
 
     # 2. Compound growth

@@ -290,7 +290,7 @@ def estimate_sleeve_posteriors(
         output.append(L1SleevePosterior(
             f"{descriptor.signal_id}:{policy.policy_id}", descriptor.signal_id, descriptor.family,
             -1, -1, member_mask, member_hash,
-            policy, mean, se, probability, 1.0, tuple(fold_returns), len(fold_returns),
+            policy, 0.0, mean, se, probability, 1.0, tuple(fold_returns), len(fold_returns),
             probability >= 0.65 and sum(value > 0.0 for value in fold_returns) >= 4,
             () if probability >= 0.65 else ("posterior_below_floor",),
         ))
@@ -630,6 +630,116 @@ def compute_fold_growths(
     return tuple(growths)
 
 
+def _compute_oos_returns_decomposed(
+    weights_2d: NDArray[np.float64],
+    bars_4h: TimeframeBarCube,
+    folds: tuple[CausalFold, ...],
+    cost_bps_4h: NDArray[np.float32],
+) -> tuple[NDArray[np.float64], NDArray[np.float64], NDArray[np.float64]]:
+    close_2d = bars_4h.close_2d
+    t_total, n_sym = close_2d.shape
+    if weights_2d.shape != (t_total, n_sym):
+        raise ValueError("shape mismatch")
+    if not folds:
+        return np.zeros(0, dtype=np.float64), np.zeros(0, dtype=np.float64), np.zeros(0, dtype=np.float64)
+
+    log_ret = np.zeros((t_total, n_sym), dtype=np.float64)
+    prev = close_2d[:-1].astype(np.float64)
+    curr = close_2d[1:].astype(np.float64)
+    valid = (prev > 0) & np.isfinite(prev) & (curr > 0) & np.isfinite(curr)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        log_ret[1:] = np.where(valid, np.log(curr / prev), 0.0)
+    log_ret[~np.isfinite(log_ret)] = 0.0
+    cost = cost_bps_4h.astype(np.float64)
+
+    oos_mask = np.zeros(t_total, dtype=np.bool_)
+    for f in folds:
+        oos_start = f.oos_start
+        oos_end = min(f.oos_end_exclusive, t_total - 1)
+        if oos_start < oos_end:
+            oos_mask[oos_start:oos_end] = True
+    oos_indices = np.where(oos_mask)[0]
+    n_oos = len(oos_indices)
+    if n_oos < 10:
+        return np.zeros(0, dtype=np.float64), np.zeros(0, dtype=np.float64), np.zeros(0, dtype=np.float64)
+
+    gross = np.zeros(n_oos, dtype=np.float64)
+    cost_ret = np.zeros(n_oos, dtype=np.float64)
+    net = np.zeros(n_oos, dtype=np.float64)
+    prev_pos = np.zeros(n_sym, dtype=np.float64)
+    for k, t in enumerate(oos_indices):
+        pos = weights_2d[t]
+        gross[k] = float(np.dot(pos, log_ret[t + 1]))
+        turnover = np.abs(pos - prev_pos)
+        cost_ret[k] = -float(np.dot(cost[t], turnover)) * 1e-4
+        net[k] = gross[k] + cost_ret[k]
+        prev_pos = pos
+    return net, gross, cost_ret
+
+
+def _compute_fold_growths_decomposed(
+    weights_2d: NDArray[np.float64],
+    bars_4h: TimeframeBarCube,
+    folds: tuple[CausalFold, ...],
+    cost_bps_4h: NDArray[np.float32],
+) -> tuple[tuple[float, ...], tuple[float, ...], tuple[float, ...]]:
+    close_2d = bars_4h.close_2d
+    t_total, n_sym = close_2d.shape
+    if weights_2d.shape != (t_total, n_sym):
+        raise ValueError("shape mismatch")
+
+    log_ret = np.zeros((t_total, n_sym), dtype=np.float64)
+    prev = close_2d[:-1].astype(np.float64)
+    curr = close_2d[1:].astype(np.float64)
+    valid = (prev > 0) & np.isfinite(prev) & (curr > 0) & np.isfinite(curr)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        log_ret[1:] = np.where(valid, np.log(curr / prev), 0.0)
+    log_ret[~np.isfinite(log_ret)] = 0.0
+    cost = cost_bps_4h.astype(np.float64)
+
+    net_growths: list[float] = []
+    gross_growths: list[float] = []
+    cost_growths: list[float] = []
+    for f in folds:
+        oos_start = f.oos_start
+        oos_end = min(f.oos_end_exclusive, t_total)
+        if oos_end - oos_start < 2:
+            continue
+        fold_gross = np.zeros(oos_end - oos_start, dtype=np.float64)
+        fold_cost = np.zeros(oos_end - oos_start, dtype=np.float64)
+        fold_net = np.zeros(oos_end - oos_start, dtype=np.float64)
+        prev_pos = np.zeros(n_sym, dtype=np.float64)
+        for k, t in enumerate(range(oos_start, oos_end)):
+            if t < t_total - 1:
+                pos = weights_2d[t]
+                fold_gross[k] = float(np.dot(pos, log_ret[t + 1]))
+                turnover = np.abs(pos - prev_pos)
+                fold_cost[k] = -float(np.dot(cost[t], turnover)) * 1e-4
+                fold_net[k] = fold_gross[k] + fold_cost[k]
+                prev_pos = pos
+        finite = fold_net[np.isfinite(fold_net)]
+        if len(finite) < 2:
+            continue
+        net_log = float(np.mean(np.log1p(finite))) * 2191.5
+        net_growths.append(net_log)
+        gross_log = float(np.mean(np.log1p(fold_gross[np.isfinite(fold_gross)]))) * 2191.5
+        gross_growths.append(gross_log)
+        cost_log = float(np.mean(np.log1p(-fold_cost[np.isfinite(fold_cost)]))) * 2191.5 if np.any(fold_cost < 0) else 0.0
+        cost_growths.append(cost_log)
+    return tuple(net_growths), tuple(gross_growths), tuple(cost_growths)
+
+
+def stress_execution_costs(
+    gross_return_1d: NDArray[np.float64],
+    execution_cost_return_1d: NDArray[np.float64],
+    funding_return_1d: NDArray[np.float64],
+    multiplier: float,
+) -> NDArray[np.float64]:
+    if multiplier < 0.0:
+        raise ValueError(f"multiplier must be >= 0, got {multiplier}")
+    return gross_return_1d + multiplier * execution_cost_return_1d + funding_return_1d
+
+
 def compute_compounding_stability(
     weights_2d: NDArray[np.float64],
     bars_4h: TimeframeBarCube,
@@ -643,7 +753,9 @@ def compute_compounding_stability(
         politis_white_block_length,
     )
 
-    portfolio_returns = compute_l1_oos_portfolio_returns(weights_2d, bars_4h, folds, cost_bps_4h)
+    portfolio_returns, gross_returns, cost_returns = _compute_oos_returns_decomposed(
+        weights_2d, bars_4h, folds, cost_bps_4h,
+    )
     if len(portfolio_returns) == 0:
         return HandoffAdmissionEvidence(0.0, 0.0, 0.0, 0.0, 0.0, 0, 0.0, (), False, ("no_oos_returns",), 0.0, ())
 
@@ -662,7 +774,7 @@ def compute_compounding_stability(
     log_ret = np.log1p(np.where(np.isfinite(portfolio_returns), portfolio_returns, 0.0))
     ann_growth = float(np.mean(log_ret)) * 2191.5
 
-    fold_growths = compute_fold_growths(weights_2d, bars_4h, folds, cost_bps_4h)
+    fold_growths, _, _ = _compute_fold_growths_decomposed(weights_2d, bars_4h, folds, cost_bps_4h)
     positive_outer_folds = sum(1 for g in fold_growths if g > 0.0)
 
     robust_fold_growth = 0.0
@@ -679,8 +791,8 @@ def compute_compounding_stability(
     dd = 1.0 - cum_returns / peak
     max_dd = float(np.max(dd)) if len(dd) > 0 else 0.0
 
-    stressed_returns = portfolio_returns * 2.0
-    stressed_growth = float(np.mean(np.log1p(np.where(np.isfinite(stressed_returns), stressed_returns, 0.0)))) * 2191.5
+    stressed = stress_execution_costs(gross_returns, cost_returns, np.zeros_like(gross_returns), config.cost_stress_multiplier)
+    stressed_growth = float(np.mean(np.log1p(np.where(np.isfinite(stressed), stressed, 0.0)))) * 2191.5
     growth_2x_cost = stressed_growth
 
     growth_lcb90_check = ann_lcb90 > 0
@@ -1022,6 +1134,7 @@ def estimate_cluster_sleeve_posteriors(
                 member_mask_1d=member_mask,
                 member_hash=p["cf"].member_hash,
                 exit_policy=exit_policy,
+                fitted_beta=p["beta"],
                 mean_net_return=p["fold_return"],
                 standard_error=max(p["se"], 1e-8),
                 posterior_positive_probability=p["probability"],

@@ -316,7 +316,7 @@ def test_cash_only_engine_returns_normally(mocker) -> None:
     from src.domain.futures.compound.contracts import DeploymentVerdict
 
     class FakeL2:
-        verdict = L2GateVerdict.PASS
+        verdict = L2GateVerdict.NO_EVIDENCE
         annualized_log_growth = 0.0
         cagr = 0.0
         absolute_cagr = 0.0
@@ -377,6 +377,7 @@ def test_cash_only_engine_returns_normally(mocker) -> None:
     )
 
     assert result.exit_code == 0
+    assert result.reason == "cash_no_evidence"
 
 
 def test_generic_exception_returns_one(mocker) -> None:
