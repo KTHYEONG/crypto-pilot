@@ -14,7 +14,6 @@ from numba import njit, prange
 from numba import set_num_threads as _numba_set_num_threads
 from numpy.typing import NDArray
 
-from src.domain.futures.compound.alpha_catalog import build_canonical_alpha_catalog
 from src.domain.futures.compound.contracts import (
     InsufficientCoverageError,
     MultiTimeframeBars,
@@ -149,6 +148,14 @@ _SPEED_LADDER_8: tuple[tuple[str, int], ...] = (
     ("ultra_slow", 864),
     ("super_slow", 1728),
     ("extreme_slow", 3456),
+)
+
+_SPEED_LADDER_5: tuple[tuple[str, int], ...] = (
+    ("fast", 24),
+    ("medium", 72),
+    ("moderate", 144),
+    ("slow", 216),
+    ("very_slow", 432),
 )
 
 _SPEED_LADDER_6: tuple[tuple[str, int], ...] = (
@@ -443,29 +450,46 @@ _FAMILY_NATIVE_TF: dict[str, str] = {
 
 
 def _default_catalog() -> tuple[SignalDescriptor, ...]:
-    catalog = build_canonical_alpha_catalog()  # noqa: F841
-    _ = catalog
     descriptors: list[SignalDescriptor] = []
-    for family in ("trend_ema", "momentum_ts", "breakout_donchian", "reversal_st", "funding_carry_reversion", "flow_imbalance_taker"):
-        for speed, lb_hours in _SPEED_LADDER_8:
+    for family in ("trend_ema", "momentum_ts", "breakout_donchian", "basis_gap"):
+        for speed, lb_hours in _SPEED_LADDER_5:
             descriptors.append(SignalDescriptor(
-                signal_id=f"{family}:{speed}",
-                family=family,
-                speed=speed,
-                lookback_hours=lb_hours,
-                native_timeframe=_FAMILY_NATIVE_TF[family],
+                signal_id=f"{family}:{speed}", family=family, speed=speed,
+                lookback_hours=lb_hours, native_timeframe=_FAMILY_NATIVE_TF[family],
                 target_horizon_hours=lb_hours,
             ))
-    for family in ("volatility_squeeze_keltner", "open_interest_confirmation"):
-        for speed, lb_hours in _SPEED_LADDER_6:
-            descriptors.append(SignalDescriptor(
-                signal_id=f"{family}:{speed}",
-                family=family,
-                speed=speed,
-                lookback_hours=lb_hours,
-                native_timeframe=_FAMILY_NATIVE_TF[family],
-                target_horizon_hours=lb_hours,
-            ))
+    descriptors.append(SignalDescriptor(
+        signal_id="reversal_st:fast", family="reversal_st", speed="fast",
+        lookback_hours=24, native_timeframe=_FAMILY_NATIVE_TF["reversal_st"],
+        target_horizon_hours=24,
+    ))
+    descriptors.append(SignalDescriptor(
+        signal_id="xs_reversal:fast", family="xs_reversal", speed="fast",
+        lookback_hours=24, native_timeframe=_FAMILY_NATIVE_TF["xs_reversal"],
+        target_horizon_hours=24,
+    ))
+    descriptors.append(SignalDescriptor(
+        signal_id="xs_reversal:medium", family="xs_reversal", speed="medium",
+        lookback_hours=72, native_timeframe=_FAMILY_NATIVE_TF["xs_reversal"],
+        target_horizon_hours=72,
+    ))
+    descriptors.append(SignalDescriptor(
+        signal_id="xs_momentum_slow:slow", family="xs_momentum_slow", speed="slow",
+        lookback_hours=216, native_timeframe=_FAMILY_NATIVE_TF["xs_momentum_slow"],
+        target_horizon_hours=216,
+    ))
+    descriptors.append(SignalDescriptor(
+        signal_id="xs_momentum_slow:very_slow", family="xs_momentum_slow", speed="very_slow",
+        lookback_hours=432, native_timeframe=_FAMILY_NATIVE_TF["xs_momentum_slow"],
+        target_horizon_hours=432,
+    ))
+    for speed, lb_hours in (("fast", 24), ("medium", 72)):
+        descriptors.append(SignalDescriptor(
+            signal_id=f"smart_money_divergence:{speed}", family="smart_money_divergence",
+            speed=speed, lookback_hours=lb_hours,
+            native_timeframe=_FAMILY_NATIVE_TF["smart_money_divergence"],
+            target_horizon_hours=lb_hours,
+        ))
     return tuple(descriptors)
 
 

@@ -479,7 +479,198 @@ class TestRunMultiscaleCompoundEngine:
             holdout_store=store, holdout_id="unlock-cash-test", config=config,
         )
         assert isinstance(result, CompoundEngineResult)
-        assert not np.allclose(result.ledger.target_weights_2d, 0.0), "weights should be non-zero despite admitted=False"
+        assert np.allclose(result.ledger.target_weights_2d, 0.0), "weights should be zero when admitted=False (fail-closed)"
+
+    def test_engine_weights_nonzero_when_admitted_true_unchanged(self, tmp_path, mocker) -> None:
+        from src.domain.futures.compound.contracts import (
+            CalibratedForecastPanel, CausalFold, HandoffResult, HandoffAdmissionEvidence,
+        )
+        mocker.patch(
+            "src.domain.futures.compound.engine.build_folds_4h",
+            return_value=(CausalFold(0, 0, 50, 48, 50, 52, 102, 2, 42),),
+        )
+        mocker.patch("src.domain.futures.compound.engine.estimate_cluster_sleeve_posteriors", return_value=())
+        mocker.patch("src.domain.futures.compound.engine.combine_posterior_sleeves", return_value=mocker.Mock())
+
+        n_4h_bars = 125
+        forecast_panel = CalibratedForecastPanel(
+            decision_timestamps_ns=np.arange(n_4h_bars, dtype=np.int64) * _NS_PER_HOUR * 4,
+            symbols=("BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT", "ADAUSDT"),
+            mu_2d=np.column_stack([
+                np.full(n_4h_bars, 0.020, dtype=np.float32),
+                np.full(n_4h_bars, 0.010, dtype=np.float32),
+                np.full(n_4h_bars, 0.005, dtype=np.float32),
+                np.full(n_4h_bars, 0.003, dtype=np.float32),
+                np.full(n_4h_bars, -0.002, dtype=np.float32),
+            ]).astype(np.float32),
+            se_2d=np.full((n_4h_bars, 5), 0.01, dtype=np.float32),
+            family_mu_3d=np.zeros((n_4h_bars, 5, 1), dtype=np.float32),
+            family_ids=(), admitted_signal_ids=("sig1",), fold_manifest_hash="test",
+        )
+        evidence = HandoffAdmissionEvidence(
+            annualized_log_growth=0.1, growth_lcb90=0.05, growth_2x_cost=0.05,
+            max_drawdown=0.1, annual_volatility=0.15, positive_outer_folds=5,
+            effective_breadth=1.0, active_signal_ids=("sig1",),
+            admitted=True, reasons=(),
+        )
+        handoff_result = HandoffResult(forecast=forecast_panel, evidence=evidence)
+        mocker.patch(
+            "src.domain.futures.compound.engine.build_exit_aware_handoff",
+            return_value=handoff_result,
+        )
+        universe = type("Universe", (), {"symbols": ("BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT", "ADAUSDT"), "snapshots": ()})()
+        n_bars, n_syms = 500, 5
+        close = np.column_stack(tuple(np.linspace(100, 110 + i, n_bars) for i in range(n_syms))).astype(np.float64)
+        arr_f32 = close.astype(np.float32)
+        cube = MarketFeatureCube(
+            timestamps_ns=np.arange(n_bars, dtype=np.int64) * _NS_PER_HOUR,
+            symbols=("BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT", "ADAUSDT"),
+            fields_2d={
+                "open": arr_f32 * 0.9995, "high": arr_f32 * 1.005,
+                "low": arr_f32 * 0.995, "close": arr_f32,
+                "quote_volume": np.ones((n_bars, n_syms), dtype=np.float32) * 50_000_000,
+                "funding": np.zeros((n_bars, n_syms), dtype=np.float32),
+                "premium": np.zeros((n_bars, n_syms), dtype=np.float32),
+                "mark": arr_f32.copy(), "index": arr_f32.copy(),
+                "taker_buy_quote": np.ones((n_bars, n_syms), dtype=np.float32) * 25_000_000,
+            },
+            available_2d={"core": np.ones((n_bars, n_syms), dtype=np.bool_)},
+            eligible_2d=np.ones((n_bars, n_syms), dtype=np.bool_),
+            entry_block_2d=np.zeros((n_bars, n_syms), dtype=np.bool_),
+            exit_required_2d=np.zeros((n_bars, n_syms), dtype=np.bool_),
+            capacity_usdt_2d=np.full((n_bars, n_syms), 1_000_000.0, dtype=np.float64),
+            execution_cost_bps_2d=np.full((n_bars, n_syms), 12.0, dtype=np.float32),
+            data_manifest_hash="h1",
+        )
+        store = SealedHoldoutStore(tmp_path / "weights_nonzero.sqlite3")
+        store.create(SealedHoldoutManifest(
+            holdout_id="weights-nonzero-test",
+            start_time_ns=int(cube.timestamps_ns[-180]),
+            end_time_ns=int(cube.timestamps_ns[-1]),
+            holdout_days=90, model_version="v1",
+            data_manifest_hash="h1", strategy_spec_hash="spec1",
+        ))
+        result = run_multiscale_compound_engine(
+            market=cube, universe=universe,
+            holdout_store=store, holdout_id="weights-nonzero-test", config=CompoundEngineConfig(),
+        )
+        assert isinstance(result, CompoundEngineResult)
+        assert not np.allclose(result.ledger.target_weights_2d, 0.0), "weights should be non-zero when admitted=True"
+
+    def test_engine_weights_forced_zero_when_admitted_false(self, tmp_path, mocker) -> None:
+        from src.domain.futures.compound.contracts import (
+            CalibratedForecastPanel, CausalFold, HandoffResult, HandoffAdmissionEvidence,
+        )
+        mocker.patch(
+            "src.domain.futures.compound.engine.build_folds_4h",
+            return_value=(CausalFold(0, 0, 50, 48, 50, 52, 102, 2, 42),),
+        )
+        mocker.patch("src.domain.futures.compound.engine.estimate_cluster_sleeve_posteriors", return_value=())
+        mocker.patch("src.domain.futures.compound.engine.combine_posterior_sleeves", return_value=mocker.Mock())
+
+        n_4h_bars = 125
+        forecast_panel = CalibratedForecastPanel(
+            decision_timestamps_ns=np.arange(n_4h_bars, dtype=np.int64) * _NS_PER_HOUR * 4,
+            symbols=("BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT", "ADAUSDT"),
+            mu_2d=np.column_stack([
+                np.full(n_4h_bars, 0.020, dtype=np.float32),
+                np.full(n_4h_bars, 0.010, dtype=np.float32),
+                np.full(n_4h_bars, 0.005, dtype=np.float32),
+                np.full(n_4h_bars, 0.003, dtype=np.float32),
+                np.full(n_4h_bars, -0.002, dtype=np.float32),
+            ]).astype(np.float32),
+            se_2d=np.full((n_4h_bars, 5), 0.01, dtype=np.float32),
+            family_mu_3d=np.zeros((n_4h_bars, 5, 1), dtype=np.float32),
+            family_ids=(), admitted_signal_ids=("sig1",), fold_manifest_hash="test",
+        )
+        evidence = HandoffAdmissionEvidence(
+            annualized_log_growth=0.1, growth_lcb90=0.05, growth_2x_cost=0.05,
+            max_drawdown=0.1, annual_volatility=0.15, positive_outer_folds=5,
+            effective_breadth=1.0, active_signal_ids=("sig1",),
+            admitted=False, reasons=(),
+        )
+        handoff_result = HandoffResult(forecast=forecast_panel, evidence=evidence)
+        mocker.patch(
+            "src.domain.futures.compound.engine.build_exit_aware_handoff",
+            return_value=handoff_result,
+        )
+        universe = type("Universe", (), {"symbols": ("BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT", "ADAUSDT"), "snapshots": ()})()
+        n_bars, n_syms = 500, 5
+        close = np.column_stack(tuple(np.linspace(100, 110 + i, n_bars) for i in range(n_syms))).astype(np.float64)
+        arr_f32 = close.astype(np.float32)
+        cube = MarketFeatureCube(
+            timestamps_ns=np.arange(n_bars, dtype=np.int64) * _NS_PER_HOUR,
+            symbols=("BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT", "ADAUSDT"),
+            fields_2d={
+                "open": arr_f32 * 0.9995, "high": arr_f32 * 1.005,
+                "low": arr_f32 * 0.995, "close": arr_f32,
+                "quote_volume": np.ones((n_bars, n_syms), dtype=np.float32) * 50_000_000,
+                "funding": np.zeros((n_bars, n_syms), dtype=np.float32),
+                "premium": np.zeros((n_bars, n_syms), dtype=np.float32),
+                "mark": arr_f32.copy(), "index": arr_f32.copy(),
+                "taker_buy_quote": np.ones((n_bars, n_syms), dtype=np.float32) * 25_000_000,
+            },
+            available_2d={"core": np.ones((n_bars, n_syms), dtype=np.bool_)},
+            eligible_2d=np.ones((n_bars, n_syms), dtype=np.bool_),
+            entry_block_2d=np.zeros((n_bars, n_syms), dtype=np.bool_),
+            exit_required_2d=np.zeros((n_bars, n_syms), dtype=np.bool_),
+            capacity_usdt_2d=np.full((n_bars, n_syms), 1_000_000.0, dtype=np.float64),
+            execution_cost_bps_2d=np.full((n_bars, n_syms), 12.0, dtype=np.float32),
+            data_manifest_hash="h1",
+        )
+        store = SealedHoldoutStore(tmp_path / "weights_zero.sqlite3")
+        store.create(SealedHoldoutManifest(
+            holdout_id="weights-zero-test",
+            start_time_ns=int(cube.timestamps_ns[-180]),
+            end_time_ns=int(cube.timestamps_ns[-1]),
+            holdout_days=90, model_version="v1",
+            data_manifest_hash="h1", strategy_spec_hash="spec1",
+        ))
+        result = run_multiscale_compound_engine(
+            market=cube, universe=universe,
+            holdout_store=store, holdout_id="weights-zero-test", config=CompoundEngineConfig(),
+        )
+        assert isinstance(result, CompoundEngineResult)
+        assert np.allclose(result.ledger.target_weights_2d, 0.0), "weights should be zero when admitted=False (fail-closed)"
+
+    def test_engine_end_to_end_no_admitted_sleeves_yields_cash_only_no_evidence(self, tmp_path) -> None:
+        n_bars, n_syms = 500, 3
+        close = np.ones((n_bars, n_syms), dtype=np.float32) * 100.0
+        cube = MarketFeatureCube(
+            timestamps_ns=np.arange(n_bars, dtype=np.int64) * _NS_PER_HOUR,
+            symbols=("BTCUSDT", "ETHUSDT", "SOLUSDT"),
+            fields_2d={
+                "close": close, "open": close * 0.9995, "high": close * 1.005,
+                "low": close * 0.995,
+                "quote_volume": np.ones((n_bars, n_syms), dtype=np.float32) * 1_000_000,
+                "funding": np.zeros((n_bars, n_syms), dtype=np.float32),
+                "premium": np.zeros((n_bars, n_syms), dtype=np.float32),
+                "mark": close.copy(), "index": close.copy(),
+                "taker_buy_quote": np.ones((n_bars, n_syms), dtype=np.float32) * 500_000,
+            },
+            available_2d={"core": np.ones((n_bars, n_syms), dtype=np.bool_)},
+            eligible_2d=np.ones((n_bars, n_syms), dtype=np.bool_),
+            entry_block_2d=np.zeros((n_bars, n_syms), dtype=np.bool_),
+            exit_required_2d=np.zeros((n_bars, n_syms), dtype=np.bool_),
+            capacity_usdt_2d=np.full((n_bars, n_syms), 1_000_000.0, dtype=np.float64),
+            execution_cost_bps_2d=np.full((n_bars, n_syms), 8.0, dtype=np.float32),
+            data_manifest_hash="e2e_cash_test",
+        )
+        universe = type("Universe", (), {"symbols": cube.symbols, "snapshots": ()})()
+        store = SealedHoldoutStore(tmp_path / "e2e_cash.sqlite3")
+        store.create(SealedHoldoutManifest(
+            holdout_id="e2e-cash-test",
+            start_time_ns=int(cube.timestamps_ns[-30]),
+            end_time_ns=int(cube.timestamps_ns[-1]),
+            holdout_days=30, model_version="v1",
+            data_manifest_hash="e2e_cash_test", strategy_spec_hash="spec_e2e",
+        ))
+        result = run_multiscale_compound_engine(
+            market=cube, universe=universe,
+            holdout_store=store, holdout_id="e2e-cash-test", config=CompoundEngineConfig(),
+        )
+        assert isinstance(result, CompoundEngineResult)
+        assert np.allclose(result.ledger.target_weights_2d, 0.0, atol=1e-10)
 
     def test_p2_exception_reaches_l2_and_l3_rejects(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         from src.domain.futures.compound.contracts import (
