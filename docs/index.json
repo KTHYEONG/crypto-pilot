@@ -606,5 +606,8 @@
   },
   "src/domain/futures/compound/alpha_catalog.py": {
     "testing": "tests/unit/domain/futures/compound/test_alpha_catalog.py"
+  },
+  "src/domain/futures/compound/l1_diagnostics.py": {
+    "testing": "tests/unit/domain/futures/compound/test_engine.py"
   }
 }

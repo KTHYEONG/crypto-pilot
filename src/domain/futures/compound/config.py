@@ -372,6 +372,8 @@ class HandoffConfig:
     n_bootstrap: int = 1_000
     dedup_rho_threshold: float = 0.90
     min_dedup_observations: int = 1_000
+    min_sleeve_posterior_probability: float = 0.95
+    hac_lag_cap: int = 120
 
     def __post_init__(self) -> None:
         assert 0 < self.max_pairwise_correlation <= 1
@@ -383,6 +385,8 @@ class HandoffConfig:
         assert self.n_bootstrap > 0
         assert 0 < self.dedup_rho_threshold <= 1
         assert self.min_dedup_observations >= 1
+        assert 0.5 < self.min_sleeve_posterior_probability < 1.0
+        assert self.hac_lag_cap >= 1
 
 
 @dataclass(slots=True, frozen=True)
