@@ -649,6 +649,7 @@ class L1SleevePosterior:
     member_mask_1d: NDArray[np.bool_]
     member_hash: str
     exit_policy: ExitPolicySpec
+    fitted_beta: float
     mean_net_return: float
     standard_error: float
     posterior_positive_probability: float
@@ -659,7 +660,7 @@ class L1SleevePosterior:
     reasons: tuple[str, ...]
 
     def __post_init__(self) -> None:
-        values = (self.mean_net_return, self.standard_error, self.posterior_positive_probability, self.residual_novelty)
+        values = (self.fitted_beta, self.mean_net_return, self.standard_error, self.posterior_positive_probability, self.residual_novelty)
         if not all(np.isfinite(value) for value in values):
             raise ValueError("posterior fields must be finite")
         if self.standard_error <= 0.0 or not 0.0 <= self.posterior_positive_probability <= 1.0:
@@ -769,6 +770,53 @@ class RegimeRoutedForecast:
     forecast: CalibratedForecastPanel
     evidence: tuple[RegimeExpertEvidence, ...]
     active_expert_count_1d: NDArray[np.int16]
+    tested_hypotheses: int
+
+
+@dataclass(slots=True, frozen=True)
+class ExpertReturnTape:
+    decision_time_ns_1d: NDArray[np.int64]
+    execution_time_ns_1d: NDArray[np.int64]
+    available_time_ns_1d: NDArray[np.int64]
+    signal_id_1d: NDArray[np.str_]
+    outer_fold_id_1d: NDArray[np.int16]
+    regime_code_1d: NDArray[np.int8]
+    gross_return_1d: NDArray[np.float64]
+    execution_cost_return_1d: NDArray[np.float64]
+    funding_return_1d: NDArray[np.float64]
+    net_return_1d: NDArray[np.float64]
+
+    def __post_init__(self) -> None:
+        n = self.decision_time_ns_1d.shape[0]
+        for arr in (self.execution_time_ns_1d, self.available_time_ns_1d,
+                     self.signal_id_1d, self.outer_fold_id_1d, self.regime_code_1d,
+                     self.gross_return_1d, self.execution_cost_return_1d,
+                     self.funding_return_1d, self.net_return_1d):
+            if arr.shape[0] != n:
+                raise ValueError(f"all tape arrays must have length {n}, got {arr.shape[0]}")
+        if not np.all(self.execution_time_ns_1d <= self.available_time_ns_1d):
+            raise CausalityError("execution_time must be <= available_time")
+        if not np.all(np.isclose(self.net_return_1d,
+                                 self.gross_return_1d + self.execution_cost_return_1d + self.funding_return_1d)):
+            raise ValueError("net != gross + execution_cost + funding")
+
+
+@dataclass(slots=True, frozen=True)
+class RouteAttribution:
+    candidate_experts: int
+    unconditional_pass: int
+    temporal_pass: int
+    regime_pass: int
+    active_experts: int
+    reason_counts: dict[str, int]
+
+
+@dataclass(slots=True, frozen=True)
+class PrequentialExpertRoute:
+    forecast: CalibratedForecastPanel
+    tape: ExpertReturnTape
+    evidence: tuple[RegimeExpertEvidence, ...]
+    attribution: RouteAttribution
     tested_hypotheses: int
 
 
@@ -1027,6 +1075,7 @@ __all__ = [
     "ExecutionLedger",
     "ExitPolicyKind",
     "ExitPolicySpec",
+    "ExpertReturnTape",
     "ForecastFrame",
     "HandoffAdmissionEvidence",
     "HandoffResult",
@@ -1042,12 +1091,14 @@ __all__ = [
     "MultiTimeframeBars",
     "MultiscaleAlphaDefinition",
     "PortfolioDecision",
+    "PrequentialExpertRoute",
     "QuarterlyBarBoundaries",
     "RawAlphaTape",
     "RawSignalPanel",
     "RegimeExpertEvidence",
     "RegimeRoutedForecast",
     "RiskOverlayResult",
+    "RouteAttribution",
     "SealedHoldoutManifest",
     "SignalAdmissionEvidence",
     "SignalCalibration",

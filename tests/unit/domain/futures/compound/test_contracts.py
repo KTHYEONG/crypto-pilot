@@ -71,12 +71,12 @@ class TestCandidateTrialLedger:
 def test_l1_sleeve_posterior_rejects_invalid_range() -> None:
     policy = ExitPolicySpec("time", ExitPolicyKind.TIME, None, None, None, 0, 4, -1, "hash")
     with pytest.raises(ValueError, match="posterior range"):
-        L1SleevePosterior("s", "sig", "trend", 0, 0, _mask(), "h", policy, 0.0, -1.0, 0.5, 1.0, (), 0, False, ())
+        L1SleevePosterior("s", "sig", "trend", 0, 0, _mask(), "h", policy, 0.0, 0.0, -1.0, 0.5, 1.0, (), 0, False, ())
     with pytest.raises(ValueError, match="finite"):
-        L1SleevePosterior("s", "sig", "trend", 0, 0, _mask(), "h", policy, float("nan"), 1.0, 0.5, 1.0, (), 0, False, ())
+        L1SleevePosterior("s", "sig", "trend", 0, 0, _mask(), "h", policy, 0.0, float("nan"), 1.0, 0.5, 1.0, (), 0, False, ())
     with pytest.raises(ValueError, match="member_hash is required"):
-        L1SleevePosterior("s", "sig", "trend", 0, 0, _mask(), "", policy, 0.0, 1.0, 0.5, 1.0, (), 0, False, ())
+        L1SleevePosterior("s", "sig", "trend", 0, 0, _mask(), "", policy, 0.0, 0.0, 1.0, 0.5, 1.0, (), 0, False, ())
     with pytest.raises(ValueError, match="at least one True"):
-        L1SleevePosterior("s", "sig", "trend", 0, 0, np.zeros(2, dtype=bool), "h", policy, 0.0, 1.0, 0.5, 1.0, (), 0, False, ())
+        L1SleevePosterior("s", "sig", "trend", 0, 0, np.zeros(2, dtype=bool), "h", policy, 0.0, 0.0, 1.0, 0.5, 1.0, (), 0, False, ())
     with pytest.raises(ValueError, match="member_mask_1d must be 1-D"):
-        L1SleevePosterior("s", "sig", "trend", 0, 0, np.ones((1, 2), dtype=bool), "h", policy, 0.0, 1.0, 0.5, 1.0, (), 0, False, ())
+        L1SleevePosterior("s", "sig", "trend", 0, 0, np.ones((1, 2), dtype=bool), "h", policy, 0.0, 0.0, 1.0, 0.5, 1.0, (), 0, False, ())
