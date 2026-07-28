@@ -536,7 +536,8 @@
     "testing": "tests/unit/application/futures/runner/test_lake_only_cutover.py"
   },
   "src/domain/futures/compound/signal_bank.py": {
-    "testing": "tests/unit/domain/futures/compound/test_signal_bank.py"
+    "testing": "tests/unit/domain/futures/compound/test_signal_bank.py",
+    "architecture": "docs/specs/signal_panel_mad_kernel_contract.json"
   },
   "src/domain/futures/compound/ladder.py": {
     "testing": "tests/unit/domain/futures/compound/test_admission.py"
