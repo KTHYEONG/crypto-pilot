@@ -1,3 +1,40 @@
+## 최신 실행 — causal regime expert routing 적용 후 fail-closed 현금 상태 — 2026-07-28
+
+- 실행일: `2026-07-28`
+- 실행 명령: `L2_DRY_RUN=1 L1_DEBUG=1 uv run python src/execution/opt_main_futures.py --phase full --sync local --date 2026-07-15 --seed 42`
+- 실행 산출물: `logs/futures/compound/20260728_131507/`
+- 검증 규모: 51개 심볼 × 5,442개 1h 기준봉(내부 L1 4h), L2 dry-run, 봉인 L3 holdout 미소비
+- 실행 상태: 데이터 준비·신호 계산 완료 후 `l2_gate_inputs`가 빈 상태로 `no_evidence`; 프로세스 `exit_code=1`은 성과 게이트 실패 반환
+
+### 성과
+
+| 지표 | 최신 결과 |
+|---|---:|
+| `l2.verdict` | **no_evidence** |
+| `l3.verdict` | **reject** |
+| 연환산 log growth / CAGR | 0.00% |
+| Sharpe | 0.00 |
+| MDD | 0.00% |
+| 연 변동성 | 0.00% |
+| 연 turnover | 0.00 |
+| cost drag | 0.00% |
+| equity multiple | 1.00x |
+| active days ratio | 0.0000 |
+| rebalances | 0 |
+| fold 성장률 | `[0.00%, 0.00%, 0.00%, 0.00%, 0.00%]` |
+
+### 해석
+
+- `admitted_sleeves=15` 후보는 존재했지만 causal regime/expert routing 후 실제 배포 `weights_2d`가 전부 0이 됐다.
+- `target_weights.npy` shape은 `(5442, 51)`, 비영 weight 비율은 `0.0%`; 따라서 이번 실행은 손실도 수익도 발생시키지 않은 현금 보존 결과다.
+- L2 거부 사유는 `active_days_ratio=0.0000<0.1`, `rebalances=0<30`; L3는 `low_growth_probability`, `l2_not_pass`로 거부됐다.
+- 직전 활성 북 실행(`20260728_112010`)의 `ann_growth=-8.01%`, `ann_lcb90=-24.75%`, `positive_folds=2/5`와 달리, 이번 결과는 성과 개선을 의미하지 않는다. 새 라우터가 증거 부족 시 거래를 차단한 안전 상태다.
+- 현재 `logs/l1_admission.jsonl`에는 최종 EVAL은 기록되지만 regime-level rejection 원인이 충분히 분해되지 않는다. 다음 실행 전에는 expert×regime별 `effective_blocks`, `growth_lcb90`, `growth_2x_cost`, `positive_inner_folds`, `scale` 계측을 확인해야 한다.
+
+- 결과 원본: `logs/futures/compound/20260728_131507/result.json`, `target_weights.npy`
+
+---
+
 ## L1 포지션 구성(Construction) 정직화 — 게이트/배포 북 일치, 순노출 캡, fold 일관성 게이트 활성화 — 2026-07-28
 
 - 실행일: `2026-07-28`

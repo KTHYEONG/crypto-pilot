@@ -612,5 +612,8 @@
       "tests/unit/domain/futures/compound/test_engine.py",
       "tests/unit/domain/futures/compound/test_l2_growth_gate.py"
     ]
+  },
+  "src/domain/futures/compound/l1_regime_routing.py": {
+    "testing": "tests/unit/domain/futures/compound/test_l1_regime_routing.py"
   }
 }

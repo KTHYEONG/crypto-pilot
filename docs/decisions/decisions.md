@@ -1,5 +1,10 @@
 # Active Decisions Log (Sliding Window)
 
+## [2026-07-28] [TASK_L1_CAUSAL_REGIME_ROUTING_EXECUTION] [ADR_20260728_L1_CAUSAL_REGIME_ROUTING_EXECUTION]
+- **Context/Why:** 최신 full 실행에서 fold-local regime expert routing 적용 후 증거 부족 상태를 검증하고, 배포 북이 음수 성과를 내지 않도록 fail-closed 결과를 기록함
+- **Resolution/What:** docs/results/result.md에 20260728_131507 실행 결과와 0-weight no_evidence 상태를 반영하고, sync 자동화로 ADR/index/spec/scratch 정리를 수행함
+- **Impact:** 실제 거래 weight 비영 비율 0%, CAGR/Sharpe/MDD/turnover 모두 0이며 L2 no_evidence·L3 reject. 봉인 holdout은 dry-run으로 보존됨
+
 ## [2026-07-28] [L1_POSITION_CONSTRUCTION_INTEGRITY] [ADR_20260728_L1_POSITION_CONSTRUCTION_INTEGRITY]
 - **Context/Why:** 직전 스펙(측정계 정직화) 적용 후 ann_lcb90=-78.87%로 여전히 실패했으나, 게이트 입력을 덤프해 신호(mu_2d) 고정한 채 구성만 바꿔 분해한 결과 병목이 signal이 아니라 구성(construction)임을 확인: C-1 게이트가 실제 allocator(스무딩/밴드/voltarget)를 안 쓴 허수아비 북을 채점(turnover 447x, cost_drag 44.7%), C-2 방향성(net exposure) 베팅이 분산의 85% 차지(무조건부 베타로는 은폐), C-3 min_positive_outer_folds=4가 정의만 되고 미검사인 dead 파라미터
 - **Resolution/What:** allocator.py: apply_net_exposure_cap 신규(support마스킹 직후, 스케일불변, max_net_exposure=1.0시 완전무연산 롤백보장). config.py: max_net_exposure=0.10 추가. l1_sleeves.py: compute_l1_oos_portfolio_returns를 mu_2d/sigma_2d 대신 완성된 weights_2d 수취로 교체(자체 포지션구성 로직 삭제), compute_fold_growths 신규, build_exit_aware_handoff가 min_positive_outer_folds 실제 검사. engine.py: weights_2d를 게이트 호출 이전 1회 계산해 게이트/배포가 동일 배열 공유(C-1 재발 구조적 차단). l1_diagnostics.py: positive_folds/fold_growths/mean_abs_net 계측 추가
@@ -69,8 +74,3 @@
 - **Context/Why:** L2 PASS(CAGR 31.05%, DSR 1.000000)가 얇은 마진이 아니라 결함(DSR 주기불일치·확률게이트 중복·블록길이 오지정·벤치마크 일자오정렬·실행북 동결·funding 부호역전·종목별 비용무력화·L3 holdout이 PROMOTE를 못막음·CAGR 연율화 버그) 9건의 산물임을 실측(재구성+E1~E8 다중가설)으로 확인
 - **Resolution/What:** bootstrap.py 신규(Politis-White 블록길이·circular bootstrap·SPA 3대조군). multiplicity.py(DSR 주기정합), validation.py(일자정렬·복리연율화·SPA 편입·frozen control), allocator.py(support 재적용·심볼별 band·carry 부호·폐루프 vol), dense_simulator.py(종목별 비용·slippage/impact), engine.py(frozen control 배선·L3 prior 일봉화). 실전 실행에서 L3 prior 가드 결함(스펙 계약 자체의 오류로 모든 정상실행 크래시) 추가 발견, 가드 제거 및 테스트 교체로 수정
 - **Impact:** 실제 CLI 재실행(20260727_013707): verdict PASS→FAIL, CAGR 31.05%(산술오류)→6.75%(복리정합), DSR 1.000000(포화)→0.4266, excess_growth_probability 0.9400→0.712, 신규 SPA p=0.362(기준 0.10 초과). L3가 l2_not_pass로 즉시 reject(이전엔 dry_run으로 shadow 방치). 임계값 완화 0건. A-8(PIT 유니버스 breadth)은 범위 외 후속 스펙
-
-## [2026-07-26] [TASK_DEPLOYMENT_PROVENANCE_AND_SEARCH_MULTIPLICITY] [ADR_20260726_DEPLOYMENT_PROVENANCE_AND_SEARCH_MULTIPLICITY]
-- **Context/Why:** L2 게이트 최초 PASS 후 CLI 실행이 strategy_spec_hash/fold_manifest_hash 미배선으로 크래시. 조사 결과 표면 버그 아래 봉인 홀드아웃 동어반복 검증(DEF-01)과 dead CandidateTrialLedger로 인한 탐색 다중성 미회계(DEF-02), NumPy 2.4 단일-trial 크래시(BUG-03) 발견
-- **Resolution/What:** provenance.py 신규(해시 유도 4함수). multiplicity.py에 BUG-03 가드+charge_config_search_multiplicity(가산형 참여비, 3개 가설 실측 비교 후 채택) 추가. contracts.py CandidateTrialLedger.register/load_trial_returns 구현. holdout_store.py ensure_sealed(미소진 seal 1회 backfill)+consume 강화(런타임 해시 사용, universe_state_hash 검증 유지). l1_sleeves.py/engine.py/compound_main.py 전체 배선 및 trial_ledger.register 호출 연결
-- **Impact:** L2_DRY_RUN=1 실전 CLI 재실행 exit_code=0으로 사상 최초 완주(logs/futures/compound/20260726_142427). L2 PASS 수치는 수정 전과 완전 동일(CAGR 31.05%, Sharpe 1.352)하여 알파 로직 무변경 확인. 봉인 홀드아웃 1회 backfill 실측 확인, 다중성 ledger 최초 가동(1행 등록). 12변형 그리드서치는 ledger 도입 이전이라 소급 과금 불가
