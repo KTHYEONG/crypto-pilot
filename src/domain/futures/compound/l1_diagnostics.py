@@ -128,3 +128,33 @@ class L1AdmissionRecorder:
             "regime_mean_net": round(regime_mean_net, 6),
             "carry_applied": carry_applied,
         })
+
+    def record_family_screen(
+        self, *,
+        family: str, n_signals: int, n_ic_bars: int,
+        mean_ic: float, t_newey_west: float, sidak_alpha: float,
+        declared_orientation: int, admitted: bool,
+        reasons: tuple[str, ...] = (),
+    ) -> None:
+        if not self._enabled:
+            return
+        _LOGGER.info(
+            "[ALGO] tag=SCREEN family=%s n_signals=%d n_ic_bars=%d "
+            "mean_ic=%.4f t_nw=%.3f sidak_alpha=%.4f "
+            "declared_orientation=%d admitted=%s reasons=%s",
+            family, n_signals, n_ic_bars,
+            mean_ic, t_newey_west, sidak_alpha,
+            declared_orientation, admitted, reasons,
+        )
+        self._append_jsonl({
+            "tag": "SCREEN",
+            "family": family,
+            "n_signals": n_signals,
+            "n_ic_bars": n_ic_bars,
+            "mean_ic": round(mean_ic, 4),
+            "t_newey_west": round(t_newey_west, 3),
+            "sidak_alpha": round(sidak_alpha, 4),
+            "declared_orientation": declared_orientation,
+            "admitted": admitted,
+            "reasons": list(reasons),
+        })

@@ -378,6 +378,8 @@ class HandoffConfig:
     min_oos_posterior_probability: float = 0.55
     min_oos_effective_blocks: int = 5
     hac_lag_cap: int = 120
+    family_screen_alpha: float = 0.05
+    min_family_ic_samples: int = 30
 
     def __post_init__(self) -> None:
         assert 0 < self.max_pairwise_correlation <= 1
@@ -391,6 +393,8 @@ class HandoffConfig:
         assert self.min_dedup_observations >= 1
         assert 0.5 < self.min_sleeve_posterior_probability < 1.0
         assert self.hac_lag_cap >= 1
+        assert 0 < self.family_screen_alpha <= 1
+        assert self.min_family_ic_samples >= 1
 
 
 @dataclass(slots=True, frozen=True)
