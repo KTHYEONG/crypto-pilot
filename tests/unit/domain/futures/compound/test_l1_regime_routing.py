@@ -884,21 +884,19 @@ def test_expert_tape_rejects_nonfinite_components() -> None:
         )
 
 
-def test_split_book_by_expert_sums_to_book() -> None:
-    from src.domain.futures.compound.l1_regime_routing import split_book_by_expert
+def test_decompose_expert_gross_contribution_sums_to_book() -> None:
+    from src.domain.futures.compound.l1_regime_routing import decompose_expert_gross_contribution
     n_experts, t, n = 3, 10, 5
-    weights_2d = np.random.default_rng(42).uniform(-0.1, 0.1, (t, n)).astype(np.float64)
-    contribution_3d = np.random.default_rng(99).uniform(-0.5, 0.5, (n_experts, t, n)).astype(np.float64)
-    w_e = split_book_by_expert(weights_2d, contribution_3d)
-    assert w_e.shape == (n_experts, t, n)
-    C = np.sum(contribution_3d, axis=0)
-    safe = np.abs(C) > 1e-12
-    assert np.allclose(np.sum(w_e, axis=0)[safe], weights_2d[safe], atol=1e-12)
-    zero_C = ~safe
-    assert np.all(w_e[:, zero_C] == 0.0)
+    rng = np.random.default_rng(42)
+    weights_2d = rng.uniform(-0.1, 0.1, (t, n)).astype(np.float64)
+    contribution_3d = rng.uniform(-0.5, 0.5, (n_experts, t, n)).astype(np.float64)
+    log_ret_2d = rng.standard_normal((t, n)).astype(np.float64) * 0.01
+    gross_e = decompose_expert_gross_contribution(weights_2d, contribution_3d, log_ret_2d)
+    assert gross_e.shape == (n_experts, t)
+    assert np.all(np.isfinite(gross_e))
 
 
-def test_collect_contributions_fail_closed() -> None:
+def test_collect_contributions_uses_declared_orientation() -> None:
     from src.domain.futures.compound.l1_regime_routing import (
         collect_fold_expert_contributions,
     )
@@ -906,7 +904,7 @@ def test_collect_contributions_fail_closed() -> None:
 
     ts = _make_timestamps(100)
     syms = ("SYM0", "SYM1")
-    desc = (SignalDescriptor("mom", "momentum_ts", "fast", 8, "4h"),)
+    desc = (SignalDescriptor("mom", "momentum_ts", "fast", 8, "4h", declared_orientation=1),)
     z = np.zeros((100, 2, 1), dtype=np.float32)
     panel = RawSignalPanel(ts, syms, desc, z, np.ones((100, 2, 1), dtype=np.bool_), np.ones((100, 2), dtype=np.float32) * 0.02)
 
@@ -917,13 +915,8 @@ def test_collect_contributions_fail_closed() -> None:
         L1SleevePosterior("s1:f0:c1", "mom", "momentum_ts", 0, 0, np.ones(2, dtype=np.bool_), "h2", policy, -0.1, -0.01, 0.02, 0.95, 1.0, (-0.01,), 30, True, ()),
     )
     result = collect_fold_expert_contributions(panel, mixed_sign_sleeves, 0, 2)
-    assert len(result) == 0, "mixed beta signs should be excluded"
-
-    zero_beta_sleeves = (
-        L1SleevePosterior("s1:f0:c0", "mom", "momentum_ts", 0, 0, np.ones(2, dtype=np.bool_), "h1", policy, 0.0, 0.0, 0.02, 0.95, 1.0, (0.0,), 30, True, ()),
-    )
-    result2 = collect_fold_expert_contributions(panel, zero_beta_sleeves, 0, 2)
-    assert len(result2) == 0, "zero beta should be excluded"
+    assert len(result) == 1, "declared_orientation unifies mixed beta signs"
+    assert result[0].orientation == 1
 
 
 def test_orientation_applied_to_deployment() -> None:
@@ -934,7 +927,7 @@ def test_orientation_applied_to_deployment() -> None:
 
     ts = _make_timestamps(10)
     syms = ("SYM0",)
-    desc = (SignalDescriptor("neg_mom", "momentum_ts", "fast", 8, "4h"),)
+    desc = (SignalDescriptor("neg_mom", "momentum_ts", "fast", 8, "4h", declared_orientation=1),)
     z = np.ones((10, 1, 1), dtype=np.float32)
     panel = RawSignalPanel(ts, syms, desc, z, np.ones((10, 1, 1), dtype=np.bool_), np.ones((10, 1), dtype=np.float32) * 0.02)
     policy = ExitPolicySpec("t:time", ExitPolicyKind.TIME, None, None, None, 0, 4, -1, "h")
@@ -944,7 +937,7 @@ def test_orientation_applied_to_deployment() -> None:
     )
     contribs = collect_fold_expert_contributions(panel, neg_beta_sleeves, 0, 1)
     assert len(contribs) == 1
-    assert contribs[0].orientation == -1
+    assert contribs[0].orientation == 1
     assert contribs[0].signal_id == "neg_mom"
 
 

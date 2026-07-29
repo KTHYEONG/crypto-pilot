@@ -166,10 +166,12 @@ def collect_fold_expert_contributions(
         ]
         if not sig_sleeves:
             continue
-        signs = {int(np.sign(s.fitted_beta)) for s in sig_sleeves}
-        if 0 in signs or len(signs) != 1:
+        descriptor = next(
+            (d for d in panel.descriptors if d.signal_id == signal_id), None
+        )
+        if descriptor is None:
             continue
-        orientation = signs.pop()
+        orientation = descriptor.declared_orientation
         member_mask = _expert_member_mask(sleeves, signal_id, fold_id, n_symbols)
         if not np.any(member_mask):
             continue
@@ -184,17 +186,58 @@ def collect_fold_expert_contributions(
     return tuple(contributions)
 
 
-def split_book_by_expert(
+def decompose_expert_gross_contribution(
     weights_2d: NDArray[np.float64],
     contribution_3d: NDArray[np.float64],
+    log_ret_2d: NDArray[np.float64],
 ) -> NDArray[np.float64]:
-    total_c = np.sum(contribution_3d, axis=0)
-    safe = np.abs(total_c) > 1e-12
-    w_e = np.zeros_like(contribution_3d)
-    numer = weights_2d * contribution_3d
-    for e in range(contribution_3d.shape[0]):
-        np.divide(numer[e], total_c, out=w_e[e], where=safe)
-    return w_e
+    n_experts, t_total, n_symbols = contribution_3d.shape
+    gross_e = np.zeros((n_experts, t_total), dtype=np.float64)
+    abs_contrib = np.abs(contribution_3d)
+    total_abs = np.sum(abs_contrib, axis=0).astype(np.float64)
+    safe = total_abs > 1e-12
+    share = np.zeros((n_experts, t_total, n_symbols), dtype=np.float64)
+    for e in range(n_experts):
+        share[e] = np.where(safe, abs_contrib[e] / np.maximum(total_abs, 1e-12), 0.0)
+
+    for t in range(1, t_total):
+        w_t = weights_2d[t]
+        logret_t = log_ret_2d[t]
+        book_t = float(np.dot(w_t, logret_t))
+        if np.any(safe[t]):
+            for e in range(n_experts):
+                gross_e[e, t] = book_t * float(np.mean(share[e, t, safe[t]]))
+    return gross_e
+
+
+def blend_expert_contributions(
+    z_3d: NDArray[np.float32],
+    valid_3d: NDArray[np.bool_],
+    signal_weights_1d: NDArray[np.float64],
+) -> NDArray[np.float64]:
+    if z_3d.ndim != 3 or valid_3d.ndim != 3 or signal_weights_1d.ndim != 1:
+        raise ValueError(
+            f"shape mismatch: z_3d {z_3d.shape}, valid_3d {valid_3d.shape}, "
+            f"weights {signal_weights_1d.shape}"
+        )
+    if z_3d.shape != valid_3d.shape:
+        raise ValueError(f"z_3d shape {z_3d.shape} != valid_3d shape {valid_3d.shape}")
+    if z_3d.shape[2] != signal_weights_1d.shape[0]:
+        raise ValueError(f"n_signals {z_3d.shape[2]} != weights {signal_weights_1d.shape[0]}")
+    n_sigs = z_3d.shape[2]
+    numer = np.zeros_like(z_3d[:, :, 0], dtype=np.float64)
+    denom = np.zeros_like(z_3d[:, :, 0], dtype=np.float64)
+    for k in range(n_sigs):
+        w_k = signal_weights_1d[k]
+        v_k = valid_3d[:, :, k]
+        z_k = z_3d[:, :, k]
+        z_safe = np.where(v_k, z_k, 0.0)
+        numer += w_k * z_safe
+        denom += np.abs(w_k) * v_k
+    safe = denom > 0.0
+    mu = np.zeros_like(numer)
+    np.divide(numer, denom, out=mu, where=safe)
+    return mu
 
 
 def build_fold_candidate_book(
@@ -214,7 +257,12 @@ def build_fold_candidate_book(
             * panel.z_3d[:, :, c.signal_index].astype(np.float64)
         )
 
-    mu_2d = np.sum(contribution_3d, axis=0)
+    sig_indices = [c.signal_index for c in contributions]
+    mu_2d = blend_expert_contributions(
+        panel.z_3d[:, :, sig_indices],
+        panel.valid_3d[:, :, sig_indices],
+        np.array([c.orientation * 1.0 for c in contributions], dtype=np.float64),
+    )
     mini_panel = CalibratedForecastPanel(
         decision_timestamps_ns=panel.decision_timestamps_ns,
         symbols=panel.symbols,
@@ -233,8 +281,7 @@ def build_fold_candidate_book(
         close_2d=bars_4h.close_2d,
         cost_bps=cost_bps,
     )
-    w_e_3d = split_book_by_expert(weights_2d, contribution_3d)
-    return weights_2d, w_e_3d
+    return weights_2d, contribution_3d
 
 
 def score_expert_returns(
@@ -386,10 +433,6 @@ def _build_prequential_expert_route_impl(
         oos_start = fold.oos_start
         oos_end = fold.oos_end_exclusive
         if oos_end - oos_start < 2:
-            fold_route_scales[fold_id] = {}
-            continue
-
-        if fold_id == 0:
             fold_route_scales[fold_id] = {}
             continue
 
@@ -749,7 +792,12 @@ def build_prequential_expert_route(
     config: RegimeRouterConfig,
     allocator_config: DynamicCompoundingConfig,
     cost_bps: float = 8.0,
+    *,
+    family_screen_admitted_ids: tuple[str, ...] | None = None,
 ) -> PrequentialExpertRoute:
+    if family_screen_admitted_ids is not None:
+        admitted_set = set(family_screen_admitted_ids)
+        sleeves = tuple(s for s in sleeves if s.signal_id in admitted_set)
     return _build_prequential_expert_route_impl(
         panel, sleeves, folds, bars_4h, cost_bps_4h, funding_1h_2d,
         regime_panel, config, allocator_config, cost_bps,
