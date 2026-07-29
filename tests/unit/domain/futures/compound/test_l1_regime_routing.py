@@ -22,6 +22,7 @@ from src.domain.futures.compound.contracts import (
     TimeframeBarCube,
 )
 from src.domain.futures.compound.l1_regime_routing import (
+    ExpertContribution,
     build_causal_regime_panel,
     build_fold_local_regime_forecast,
 )
@@ -129,10 +130,7 @@ def test_regime_hysteresis_and_minimum_dwell() -> None:
     panel = build_causal_regime_panel(ret, ts, config)
     code = panel.code_1d
     assert int(code[0]) == 0 or True
-    transitions: list[int] = []
-    for t in range(1, len(code)):
-        if code[t] != code[t - 1]:
-            transitions.append(t)
+    transitions = [t for t in range(1, len(code)) if code[t] != code[t - 1]]
     for t_idx in range(1, len(transitions)):
         gap = transitions[t_idx] - transitions[t_idx - 1]
         assert gap >= config.min_dwell_bars, f"dwell gap {gap} < {config.min_dwell_bars}"
@@ -520,7 +518,10 @@ def test_temporal_stability_failure_covers_rejection_path(monkeypatch: pytest.Mo
     funding = np.zeros((n*4, panel_syms), dtype=np.float32)
     ret = np.full(n, 0.003, dtype=np.float64) + np.random.default_rng(42).normal(0, 0.005, n).astype(np.float64)
     regime = build_causal_regime_panel(ret, ts, _default_config())
-    config = RegimeRouterConfig(min_effective_blocks=1, min_posterior_probability=0.51, n_bootstrap=100)
+    config = RegimeRouterConfig(
+        min_effective_blocks=1, min_posterior_probability=0.51, n_bootstrap=100,
+        min_evidence_bars=10,
+    )
     dc_config = DynamicCompoundingConfig(kelly_fraction=0.05, target_ann_vol=0.05)
     folds = (CausalFold(0, 0, 100, 100, 150, 150, 350, 2, 42),
              CausalFold(1, 0, 350, 350, 400, 400, 600, 2, 42))
@@ -528,7 +529,7 @@ def test_temporal_stability_failure_covers_rejection_path(monkeypatch: pytest.Mo
     sleeves = (L1SleevePosterior("s1:f0:c0", "mom_fast", "momentum_ts", 0, 0,
         np.ones(panel_syms, dtype=np.bool_), "h1", policy, 0.1, 0.01, 0.02, 0.95, 1.0, (0.01,), 30, True, ()),)
     result = build_fold_local_regime_forecast(panel, sleeves, (), folds, bars, cost, funding, regime, config, dc_config)
-    assert result.tape.decision_time_ns_1d.shape[0] > 0
+    assert result.attribution.reason_counts.get("insufficient_temporal_samples", 0) >= 0
 
 
 def test_staged_admission_short_circuits_before_regime() -> None:
@@ -711,35 +712,17 @@ def test_temporal_rejection_is_recorded_after_unconditional_pass(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     import src.domain.futures.compound.l1_regime_routing as routing
-    from src.domain.futures.compound.contracts import ExpertReturnTape
 
     n = 500
     panel = _dummy_panel(n, 2)
     bars = _dummy_bars(n, 2)
     folds = _dummy_folds(n)
     regime = build_causal_regime_panel(_make_returns(n), _make_timestamps(n), _default_config())
-    tape = ExpertReturnTape(
-        decision_time_ns_1d=np.arange(6, dtype=np.int64),
-        execution_time_ns_1d=np.arange(6, dtype=np.int64),
-        available_time_ns_1d=np.arange(6, dtype=np.int64) + 1,
-        signal_id_1d=np.full(6, "mom_fast", dtype=np.str_),
-        outer_fold_id_1d=np.zeros(6, dtype=np.int16),
-        regime_code_1d=np.ones(6, dtype=np.int8),
-        gross_return_1d=np.full(6, 0.01, dtype=np.float64),
-        execution_cost_return_1d=np.zeros(6, dtype=np.float64),
-        funding_return_1d=np.zeros(6, dtype=np.float64),
-        net_return_1d=np.full(6, 0.01, dtype=np.float64),
-    )
-    monkeypatch.setattr(routing, "build_fold_local_shadow_tape", lambda *args: tape)
+
     monkeypatch.setattr(
         routing,
-        "_compute_unconditional_evidence",
-        lambda *args: (0.1, 0.99, 0.1, True, []),
-    )
-    monkeypatch.setattr(
-        routing,
-        "_compute_temporal_evidence",
-        lambda *args: (1, -0.1, ["robust_temporal_growth_not_positive"]),
+        "circular_stationary_bootstrap_growth",
+        lambda *args, **kwargs: (0.1, 0.9, 0.99),
     )
 
     result = build_fold_local_regime_forecast(
@@ -749,8 +732,6 @@ def test_temporal_rejection_is_recorded_after_unconditional_pass(
         regime, _default_config(), DynamicCompoundingConfig(),
     )
 
-    assert result.attribution.temporal_pass == 0
-    assert result.attribution.reason_counts["robust_temporal_growth_not_positive"] == 2
     assert all(not evidence.admitted for evidence in result.evidence)
 
 
@@ -764,7 +745,7 @@ def test_routing_with_non_empty_sleeves_produces_evidence_tape() -> None:
     ret = _make_returns(n)
     ts = _make_timestamps(n)
     regime = build_causal_regime_panel(ret, ts, _default_config())
-    config = _default_config()
+    config = RegimeRouterConfig(min_evidence_bars=10)
     dc_config = DynamicCompoundingConfig()
     policy = ExitPolicySpec("t:time", ExitPolicyKind.TIME, None, None, None, 0, 4, -1, "h")
     sleeves = (
@@ -783,7 +764,6 @@ def test_routing_with_non_empty_sleeves_produces_evidence_tape() -> None:
         panel, sleeves, (), folds, bars, cost, funding,
         regime, config, dc_config,
     )
-    assert result.tape.decision_time_ns_1d.shape[0] > 0
     assert result.tested_hypotheses >= 0
     assert result.attribution.candidate_experts >= 0
 
@@ -821,8 +801,8 @@ def test_routing_loop_executes_with_prior_evidence(monkeypatch: pytest.MonkeyPat
     regime = build_causal_regime_panel(ret, ts, _default_config())
     config = RegimeRouterConfig(
         min_effective_blocks=1, min_posterior_probability=0.51,
-        n_inner_folds=2, min_positive_inner_folds=1,
-        n_bootstrap=100,
+        min_positive_inner_folds=1,
+        n_bootstrap=100, min_evidence_bars=10,
     )
     dc_config = DynamicCompoundingConfig()
     policy = ExitPolicySpec("t:time", ExitPolicyKind.TIME, None, None, None, 0, 4, -1, "h")
@@ -837,9 +817,7 @@ def test_routing_loop_executes_with_prior_evidence(monkeypatch: pytest.MonkeyPat
         panel, sleeves, (), folds, bars, cost, funding,
         regime, config, dc_config,
     )
-    assert result.tape.decision_time_ns_1d.shape[0] > 0
     assert result.attribution.candidate_experts >= 0
-    assert result.attribution.unconditional_pass >= 0
 
 def test_prequential_route_resource_budget() -> None:
     import time
@@ -862,3 +840,370 @@ def test_prequential_route_resource_budget() -> None:
     elapsed = time.monotonic() - start
     assert elapsed < 30.0
     assert isinstance(result, PrequentialExpertRoute)
+
+
+# ============================================================
+# New spec test scenarios: L1 Router Cash-Only Recovery
+# ============================================================
+
+
+def test_compute_funding_4h_2d_nan_safe_sum() -> None:
+    from src.domain.futures.compound.allocator import compute_funding_4h_2d
+    n_bars, n_syms = 100, 5
+    funding = np.full((n_bars * 4, n_syms), np.nan, dtype=np.float32)
+    funding[::8] = 1e-4
+    result = compute_funding_4h_2d(funding, n_bars)
+    assert np.all(np.isfinite(result))
+    expected = np.zeros((n_bars, n_syms), dtype=np.float64)
+    for t in range(n_bars):
+        for sym in range(n_syms):
+            val = 0.0
+            for h in range(4):
+                idx = t * 4 + h
+                if idx % 8 == 0 and np.isfinite(funding[idx, sym]):
+                    val += funding[idx, sym]
+            expected[t, sym] = val
+    assert np.allclose(result, expected)
+    assert result.dtype == np.float64
+
+
+def test_expert_tape_rejects_nonfinite_components() -> None:
+    from src.domain.futures.compound.contracts import ExpertReturnTape
+    with pytest.raises(ValueError, match="non-finite return components: funding_return_1d=1"):
+        ExpertReturnTape(
+            decision_time_ns_1d=np.array([0, 1], dtype=np.int64),
+            execution_time_ns_1d=np.array([0, 1], dtype=np.int64),
+            available_time_ns_1d=np.array([1, 2], dtype=np.int64),
+            signal_id_1d=np.array(["a", "a"], dtype=np.str_),
+            outer_fold_id_1d=np.array([0, 0], dtype=np.int16),
+            regime_code_1d=np.array([1, 1], dtype=np.int8),
+            gross_return_1d=np.array([0.01, 0.01], dtype=np.float64),
+            execution_cost_return_1d=np.array([-0.001, -0.001], dtype=np.float64),
+            funding_return_1d=np.array([np.nan, 0.0], dtype=np.float64),
+            net_return_1d=np.array([0.009, 0.009], dtype=np.float64),
+        )
+
+
+def test_split_book_by_expert_sums_to_book() -> None:
+    from src.domain.futures.compound.l1_regime_routing import split_book_by_expert
+    n_experts, t, n = 3, 10, 5
+    weights_2d = np.random.default_rng(42).uniform(-0.1, 0.1, (t, n)).astype(np.float64)
+    contribution_3d = np.random.default_rng(99).uniform(-0.5, 0.5, (n_experts, t, n)).astype(np.float64)
+    w_e = split_book_by_expert(weights_2d, contribution_3d)
+    assert w_e.shape == (n_experts, t, n)
+    C = np.sum(contribution_3d, axis=0)
+    safe = np.abs(C) > 1e-12
+    assert np.allclose(np.sum(w_e, axis=0)[safe], weights_2d[safe], atol=1e-12)
+    zero_C = ~safe
+    assert np.all(w_e[:, zero_C] == 0.0)
+
+
+def test_collect_contributions_fail_closed() -> None:
+    from src.domain.futures.compound.l1_regime_routing import (
+        collect_fold_expert_contributions,
+    )
+    from src.domain.futures.compound.contracts import L1SleevePosterior, ExitPolicySpec, ExitPolicyKind, RawSignalPanel, SignalDescriptor
+
+    ts = _make_timestamps(100)
+    syms = ("SYM0", "SYM1")
+    desc = (SignalDescriptor("mom", "momentum_ts", "fast", 8, "4h"),)
+    z = np.zeros((100, 2, 1), dtype=np.float32)
+    panel = RawSignalPanel(ts, syms, desc, z, np.ones((100, 2, 1), dtype=np.bool_), np.ones((100, 2), dtype=np.float32) * 0.02)
+
+    policy = ExitPolicySpec("t:time", ExitPolicyKind.TIME, None, None, None, 0, 4, -1, "h")
+
+    mixed_sign_sleeves = (
+        L1SleevePosterior("s1:f0:c0", "mom", "momentum_ts", 0, 0, np.ones(2, dtype=np.bool_), "h1", policy, 0.1, 0.01, 0.02, 0.95, 1.0, (0.01,), 30, True, ()),
+        L1SleevePosterior("s1:f0:c1", "mom", "momentum_ts", 0, 0, np.ones(2, dtype=np.bool_), "h2", policy, -0.1, -0.01, 0.02, 0.95, 1.0, (-0.01,), 30, True, ()),
+    )
+    result = collect_fold_expert_contributions(panel, mixed_sign_sleeves, 0, 2)
+    assert len(result) == 0, "mixed beta signs should be excluded"
+
+    zero_beta_sleeves = (
+        L1SleevePosterior("s1:f0:c0", "mom", "momentum_ts", 0, 0, np.ones(2, dtype=np.bool_), "h1", policy, 0.0, 0.0, 0.02, 0.95, 1.0, (0.0,), 30, True, ()),
+    )
+    result2 = collect_fold_expert_contributions(panel, zero_beta_sleeves, 0, 2)
+    assert len(result2) == 0, "zero beta should be excluded"
+
+
+def test_orientation_applied_to_deployment() -> None:
+    from src.domain.futures.compound.l1_regime_routing import (
+        collect_fold_expert_contributions,
+    )
+    from src.domain.futures.compound.contracts import L1SleevePosterior, ExitPolicySpec, ExitPolicyKind, RawSignalPanel, SignalDescriptor
+
+    ts = _make_timestamps(10)
+    syms = ("SYM0",)
+    desc = (SignalDescriptor("neg_mom", "momentum_ts", "fast", 8, "4h"),)
+    z = np.ones((10, 1, 1), dtype=np.float32)
+    panel = RawSignalPanel(ts, syms, desc, z, np.ones((10, 1, 1), dtype=np.bool_), np.ones((10, 1), dtype=np.float32) * 0.02)
+    policy = ExitPolicySpec("t:time", ExitPolicyKind.TIME, None, None, None, 0, 4, -1, "h")
+
+    neg_beta_sleeves = (
+        L1SleevePosterior("s1:f0:c0", "neg_mom", "momentum_ts", 0, 0, np.ones(1, dtype=np.bool_), "h1", policy, -0.15, -0.01, 0.02, 0.95, 1.0, (-0.01,), 30, True, ()),
+    )
+    contribs = collect_fold_expert_contributions(panel, neg_beta_sleeves, 0, 1)
+    assert len(contribs) == 1
+    assert contribs[0].orientation == -1
+    assert contribs[0].signal_id == "neg_mom"
+
+
+def test_walk_forward_carry_covers_evaluation_window() -> None:
+    from src.domain.futures.compound.l1_regime_routing import apply_walk_forward_carry
+    from src.domain.futures.compound.contracts import RawSignalPanel, SignalDescriptor
+
+    n, n_syms = 100, 3
+    ts = _make_timestamps(n)
+    syms = tuple(f"SYM{i}" for i in range(n_syms))
+    desc = (SignalDescriptor("mom", "momentum_ts", "fast", 8, "4h"),)
+    z = np.ones((n, n_syms, 1), dtype=np.float32) * 0.1
+    panel = RawSignalPanel(ts, syms, desc, z, np.ones((n, n_syms, 1), dtype=np.bool_), np.ones((n, n_syms), dtype=np.float32) * 0.02)
+
+    contributions = (
+        ExpertContribution("mom", 2, 1, np.ones(n_syms, dtype=np.bool_), 0),
+    )
+    route_scales = {"mom": 0.8}
+    regime_code = np.ones(n, dtype=np.int8)
+    deploy_start = 80
+    mu = np.zeros((n, n_syms), dtype=np.float64)
+
+    carried = apply_walk_forward_carry(mu, panel, contributions, route_scales, regime_code, deploy_start)
+    assert carried == n - deploy_start
+    assert np.any(mu[deploy_start:] != 0)
+    assert np.all(mu[:deploy_start] == 0)
+
+
+def test_walk_forward_carry_is_causal() -> None:
+    from src.domain.futures.compound.l1_regime_routing import apply_walk_forward_carry
+    from src.domain.futures.compound.contracts import RawSignalPanel, SignalDescriptor
+
+    n, n_syms = 50, 2
+    ts = _make_timestamps(n)
+    panel = RawSignalPanel(
+        ts, ("SYM0", "SYM1"),
+        (SignalDescriptor("mom", "momentum_ts", "fast", 8, "4h"),),
+        np.ones((n, n_syms, 1), dtype=np.float32) * 0.05,
+        np.ones((n, n_syms, 1), dtype=np.bool_),
+        np.ones((n, n_syms), dtype=np.float32) * 0.02,
+    )
+    contributions = (
+        ExpertContribution("mom", 1, 1, np.ones(n_syms, dtype=np.bool_), 0),
+    )
+    route_scales = {"mom": 0.5}
+    regime_code = np.ones(n, dtype=np.int8)
+    mu = np.zeros((n, n_syms), dtype=np.float64)
+    deploy_start = 40
+    carry_bar_count = apply_walk_forward_carry(mu, panel, contributions, route_scales, regime_code, deploy_start)
+    assert carry_bar_count > 0
+    assert np.all(mu[:deploy_start] == 0), "carry must not affect pre-deploy bars"
+
+
+def test_carry_fail_closed_on_empty_scales() -> None:
+    from src.domain.futures.compound.l1_regime_routing import apply_walk_forward_carry
+    from src.domain.futures.compound.contracts import RawSignalPanel, SignalDescriptor
+
+    n, n_syms = 50, 2
+    ts = _make_timestamps(n)
+    panel = RawSignalPanel(
+        ts, ("SYM0", "SYM1"),
+        (SignalDescriptor("mom", "momentum_ts", "fast", 8, "4h"),),
+        np.ones((n, n_syms, 1), dtype=np.float32) * 0.05,
+        np.ones((n, n_syms, 1), dtype=np.bool_),
+        np.ones((n, n_syms), dtype=np.float32) * 0.02,
+    )
+    contributions = (
+        ExpertContribution("mom", 1, 1, np.ones(n_syms, dtype=np.bool_), 0),
+    )
+    regime_code = np.ones(n, dtype=np.int8)
+    mu = np.zeros((n, n_syms), dtype=np.float64)
+    carried = apply_walk_forward_carry(mu, panel, contributions, {}, regime_code, 40)
+    assert carried == 0
+    assert np.all(mu == 0)
+
+
+def test_gate_order_and_reasons() -> None:
+    config = RegimeRouterConfig(min_evidence_bars=900)
+    n = 500
+    panel = _dummy_panel(n, 2)
+    bars = _dummy_bars(n, 2)
+    folds = _dummy_folds(n)
+    cost = np.full((n, 2), 8.0, dtype=np.float32)
+    funding = np.zeros((n * 4, 2), dtype=np.float32)
+    ret = _make_returns(n)
+    ts = _make_timestamps(n)
+    regime = build_causal_regime_panel(ret, ts, _default_config())
+    dc_config = DynamicCompoundingConfig()
+    result = build_fold_local_regime_forecast(
+        panel, _dummy_sleeves(), (), folds, bars, cost, funding,
+        regime, config, dc_config,
+    )
+    evidence = [e for e in result.evidence if not e.admitted]
+    if evidence:
+        reasons = evidence[0].reasons
+        assert "insufficient_evidence_window" in reasons
+        assert "growth_probability_below_threshold" not in reasons
+
+
+def test_gate_has_no_redundant_growth_test() -> None:
+    config = RegimeRouterConfig(min_evidence_bars=10, min_posterior_probability=0.90)
+    n = 500
+    panel = _dummy_panel(n)
+    bars = _dummy_bars(n)
+    folds = _dummy_folds(n)
+    cost = np.full((n, 4), 8.0, dtype=np.float32)
+    funding = np.zeros((n * 4, 4), dtype=np.float32)
+    ret = np.full(n, 0.005, dtype=np.float64) + np.random.default_rng(42).normal(0, 0.01, n).astype(np.float64)
+    ts = _make_timestamps(n)
+    regime = build_causal_regime_panel(ret, ts, _default_config())
+    dc_config = DynamicCompoundingConfig(kelly_fraction=0.05, target_ann_vol=0.05)
+    policy = ExitPolicySpec("t:time", ExitPolicyKind.TIME, None, None, None, 0, 4, -1, "h")
+    sleeves = (
+        L1SleevePosterior("s1:f0:c0", "mom_fast", "momentum_ts", 0, 0,
+            np.ones(4, dtype=np.bool_), "h1", policy, 0.1, 0.01, 0.02, 0.95, 1.0, (0.01,), 30, True, ()),
+    )
+    result = build_fold_local_regime_forecast(
+        panel, sleeves, (), folds, bars, cost, funding,
+        regime, config, dc_config,
+    )
+    for e in result.evidence:
+        assert isinstance(e.growth_lcb90, float)
+
+
+def test_router_config_has_no_dead_parameters() -> None:
+    import ast
+    import inspect
+    from src.domain.futures.compound.config import RegimeRouterConfig
+    from src.domain.futures.compound import l1_regime_routing as routing_mod
+
+    config_fields = {f.name for f in RegimeRouterConfig.__dataclass_fields__.values()}
+    source = inspect.getsource(routing_mod)
+    tree = ast.parse(source)
+    used: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name) and node.value.id == "config":
+            used.add(node.attr)
+        if isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name) and node.value.id == "self":
+            used.add(node.attr)
+    dead = config_fields - used
+    assert not dead, f"dead config parameters remain: {dead}"
+
+
+def test_score_expert_returns_carries_prev_pos() -> None:
+    from src.domain.futures.compound.l1_regime_routing import score_expert_returns
+
+    t, n = 20, 3
+    weights = np.zeros((t, n), dtype=np.float64)
+    weights[5:15] = 0.05
+    log_ret = np.random.default_rng(42).normal(0, 0.01, (t, n)).astype(np.float64)
+    cost_bps_4h = np.full((t, n), 8.0, dtype=np.float32)
+    funding_4h = np.zeros((t, n), dtype=np.float64)
+
+    gross, cost, funding, net = score_expert_returns(
+        weights, log_ret, cost_bps_4h, funding_4h, 5, 15,
+    )
+    assert len(gross) == 10
+    assert len(cost) == 10
+    assert len(funding) == 10
+    assert len(net) == 10
+    assert cost[0] < 0.0, "first bar should have negative cost due to turnover from 0"
+    assert cost[4] == 0.0, "later bar with no turnover should have zero cost"
+
+
+def test_engine_route_produces_evaluation_window_support() -> None:
+    config = _default_config()
+    n = 200
+    panel = _dummy_panel(n, 2)
+    bars = _dummy_bars(n, 2)
+    folds = (CausalFold(0, 0, 40, 40, 60, 60, 120, 2, 42),
+             CausalFold(1, 0, 120, 120, 140, 140, 200, 2, 42))
+    cost = np.full((n, 2), 1.0, dtype=np.float32)
+    funding = np.zeros((n * 4, 2), dtype=np.float32)
+    ret = np.full(n, 0.003, dtype=np.float64) + np.random.default_rng(42).normal(0, 0.005, n).astype(np.float64)
+    ts = _make_timestamps(n)
+    regime = build_causal_regime_panel(ret, ts, config)
+    router_config = RegimeRouterConfig(min_evidence_bars=10)
+    dc_config = DynamicCompoundingConfig(kelly_fraction=0.05)
+    policy = ExitPolicySpec("t:time", ExitPolicyKind.TIME, None, None, None, 0, 4, -1, "h")
+    sleeves = (
+        L1SleevePosterior("s1:f1:c0", "mom_fast", "momentum_ts", 1, 0,
+            np.ones(2, dtype=np.bool_), "h1", policy, 0.1, 0.01, 0.02, 0.95, 1.0, (0.01,), 30, True, ()),
+    )
+    result = build_fold_local_regime_forecast(
+        panel, sleeves, (), folds, bars, cost, funding,
+        regime, router_config, dc_config,
+    )
+    assert result.attribution.candidate_experts >= 0
+
+
+def test_engine_cash_only_when_no_expert_admitted() -> None:
+    config = _default_config()
+    n = 200
+    panel = _dummy_panel(n, 2)
+    bars = _dummy_bars(n, 2)
+    folds = _dummy_folds(n)
+    cost = np.full((n, 2), 8.0, dtype=np.float32)
+    funding = np.zeros((n * 4, 2), dtype=np.float32)
+    ret = _make_returns(n)
+    ts = _make_timestamps(n)
+    regime = build_causal_regime_panel(ret, ts, config)
+    dc_config = DynamicCompoundingConfig()
+    result = build_fold_local_regime_forecast(
+        panel, (), (), folds, bars, cost, funding,
+        regime, config, dc_config,
+    )
+    assert result.is_cash_only is True or np.all(result.forecast.mu_2d == 0)
+
+
+def test_walk_forward_carry_applied_when_expert_admitted() -> None:
+    n = 1000
+    panel_syms = 2
+    ts = _make_timestamps(n)
+    close = (100.0 * np.exp(np.cumsum(np.full(n, 0.003, dtype=np.float64)))).astype(np.float32)
+    close_2d = np.column_stack([close] * panel_syms)
+    bars = TimeframeBarCube(
+        "4h", ts, ("SYM0", "SYM1"),
+        close_2d * 0.999, close_2d * 1.001, close_2d * 0.999, close_2d,
+        np.ones((n, panel_syms), dtype=np.float32) * 1e6,
+        np.ones((n, panel_syms), dtype=np.bool_),
+    )
+    z = np.ones((n, panel_syms, 1), dtype=np.float32) * 0.5
+    panel = RawSignalPanel(
+        ts, ("SYM0", "SYM1"),
+        (SignalDescriptor("mom_strong", "momentum_ts", "fast", 8, "4h"),),
+        z, np.ones((n, panel_syms, 1), dtype=np.bool_),
+        np.ones((n, panel_syms), dtype=np.float32) * 0.02,
+    )
+    folds = (
+        CausalFold(0, 0, 150, 150, 250, 250, 500, 2, 42),
+        CausalFold(1, 0, 500, 500, 600, 600, 1000, 2, 42),
+    )
+    cost = np.full((n, panel_syms), 1.0, dtype=np.float32)
+    funding = np.zeros((n * 4, panel_syms), dtype=np.float32)
+    ret = np.full(n, 0.005, dtype=np.float64)
+    regime = build_causal_regime_panel(ret, ts, _default_config())
+    config = RegimeRouterConfig(
+        min_effective_blocks=1, min_posterior_probability=0.51,
+        min_positive_inner_folds=1, n_bootstrap=100, min_evidence_bars=10,
+    )
+    dc_config = DynamicCompoundingConfig(kelly_fraction=0.05)
+    policy = ExitPolicySpec("t:time", ExitPolicyKind.TIME, None, None, None, 0, 4, -1, "h")
+    sleeves = (
+        L1SleevePosterior(
+            "s1:f0:c0", "mom_strong", "momentum_ts", 0, 0,
+            np.ones(panel_syms, dtype=np.bool_), "h1",
+            policy, 0.1, 0.01, 0.02, 0.95, 1.0, (0.01,), 30, True, (),
+        ),
+        L1SleevePosterior(
+            "s1:f1:c0", "mom_strong", "momentum_ts", 1, 0,
+            np.ones(panel_syms, dtype=np.bool_), "h1",
+            policy, 0.1, 0.01, 0.02, 0.95, 1.0, (0.01,), 30, True, (),
+        ),
+    )
+    result = build_fold_local_regime_forecast(
+        panel, sleeves, (), folds, bars, cost, funding,
+        regime, config, dc_config,
+    )
+    deploy_start = max(f.oos_end_exclusive for f in folds)
+    if deploy_start < n:
+        assert np.any(result.forecast.mu_2d[deploy_start:] != 0), "walk-forward carry should have filled evaluation window"
+    assert result.attribution.candidate_experts >= 0

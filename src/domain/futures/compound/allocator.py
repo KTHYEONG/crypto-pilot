@@ -23,6 +23,14 @@ _VARIANCE_FLOOR: float = 1e-12
 _COST_EDGE_THETA: float = 0.0006
 
 
+def compute_funding_4h_2d(
+    funding_1h_2d: NDArray[np.float32], n_bars: int,
+) -> NDArray[np.float64]:
+    reshaped = funding_1h_2d[:n_bars * 4].reshape(n_bars, 4, funding_1h_2d.shape[1])
+    result: NDArray[np.float64] = np.where(np.isfinite(reshaped), reshaped.astype(np.float64), 0.0).sum(axis=1)
+    return result
+
+
 def apply_cost_aware_net_edge(
     target_weights: NDArray[np.float64],
     previous_weights: NDArray[np.float64],

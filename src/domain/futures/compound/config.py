@@ -400,13 +400,11 @@ class RegimeRouterConfig:
     stress_exit_quantile: float = 0.70
     trend_enter_tstat: float = 1.25
     trend_exit_tstat: float = 0.75
-    n_inner_folds: int = 3
     min_positive_inner_folds: int = 2
     min_effective_blocks: int = 20
-    prior_effective_blocks: int = 20
+    min_evidence_bars: int = 900
     min_posterior_probability: float = 0.90
     max_expert_weight: float = 0.50
-    max_expert_correlation: float = 0.80
     n_bootstrap: int = 1_000
 
     def __post_init__(self) -> None:
@@ -415,13 +413,11 @@ class RegimeRouterConfig:
         assert self.min_dwell_bars > 0
         assert 0 < self.stress_exit_quantile < self.stress_enter_quantile < 1
         assert self.trend_enter_tstat > self.trend_exit_tstat > 0
-        assert self.n_inner_folds >= 2
-        assert 0 < self.min_positive_inner_folds <= self.n_inner_folds
+        assert self.min_positive_inner_folds > 0
         assert self.min_effective_blocks > 0
-        assert self.prior_effective_blocks > 0
+        assert self.min_evidence_bars > 0
         assert 0.5 < self.min_posterior_probability < 1
         assert 0 < self.max_expert_weight <= 1
-        assert 0 < self.max_expert_correlation <= 1
         assert self.n_bootstrap > 0
 
 

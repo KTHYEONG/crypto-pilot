@@ -5,6 +5,7 @@ import logging
 import numpy as np
 from numpy.typing import NDArray
 
+from src.domain.futures.compound.allocator import compute_funding_4h_2d
 from src.domain.futures.compound.config import DenseSimConfig
 from src.domain.futures.compound.contracts import ExecutionLedger, TimeframeBarCube
 
@@ -39,8 +40,7 @@ def simulate_dense_portfolio(
     pending_turnover_cost = 0.0
     integrity_failures: list[str] = []
 
-    reshaped = funding_1h_2d.reshape(n_bars, 4, n_syms)
-    funding_4h = np.where(np.isfinite(reshaped), reshaped.astype(np.float64), 0.0).sum(axis=1)
+    funding_4h = compute_funding_4h_2d(funding_1h_2d, n_bars)
 
     for t in range(n_bars):
         if t == 0:
