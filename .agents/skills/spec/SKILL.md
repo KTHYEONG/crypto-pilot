@@ -48,6 +48,7 @@ To ensure low-reasoning models can build and integrate the code mechanically:
     - **Scenario 2 (Edge Cases)**: `[LIMIT-xx]` boundary conditions.
     - **Scenario 3 (Error Handling)**: Expected Exceptions and Error logs.
     - **Scenario 4 (Integration Verification)**: Asserting the correct trigger inside the parent module without over-mocking. Must instantiate Real Objects (no top-level MagicMock masking) to verify caller-callee pipeline integration.
+  - Every scenario entry in `_contract.json` MUST carry a `target_test_file` (exact path, resolved via the co-modification convention: `tests/<category>/<module_dir>/test_<module>.py`). This lets `/check`'s fix_hint point directly at the file to edit instead of forcing a re-read of the whole spec.
 
 ### 4. Machine-Readable Compliance Contract (`docs/specs/[feature]_contract.json`)
 *(Mandatory for Tier 2 and Tier 3)*
@@ -73,10 +74,10 @@ Generate a semantic JSON contract alongside the spec markdown to provide strict,
     }
   ],
   "scenarios": [
-    {"id": 1, "scope": "unit", "name": "test_exact_name_happy_path"},
-    {"id": 2, "scope": "unit", "name": "test_exact_name_edge_case"},
-    {"id": 3, "scope": "unit", "name": "test_exact_name_error"},
-    {"id": 4, "scope": "integration", "name": "test_parent_module_wiring"}
+    {"id": 1, "scope": "unit", "name": "test_exact_name_happy_path", "target_test_file": "tests/unit/domain/x/test_x.py"},
+    {"id": 2, "scope": "unit", "name": "test_exact_name_edge_case", "target_test_file": "tests/unit/domain/x/test_x.py"},
+    {"id": 3, "scope": "unit", "name": "test_exact_name_error", "target_test_file": "tests/unit/domain/x/test_x.py"},
+    {"id": 4, "scope": "integration", "name": "test_parent_module_wiring", "target_test_file": "tests/unit/domain/x/test_caller_module.py"}
   ],
   "wiring": [
     {
