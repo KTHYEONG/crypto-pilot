@@ -1,5 +1,10 @@
 # Active Decisions Log (Sliding Window)
 
+## [2026-07-29] [TASK_L1_SIGNAL_EDGE_MEASUREMENT_REDESIGN] [ADR_20260729_L1_SIGNAL_EDGE_MEASUREMENT_REDESIGN]
+- **Context/Why:** no_evidence 원인을 재조사한 결과 signal 엣지 부재가 아니라 측정 구조 결함(tested_hypotheses=0, IS beta 방향성 일치율 0.290 z=-2.42로 반정보, split_book_by_expert가 max|w|=3622로 발산, family 다중검정 미통제)임을 실측 확정. family 단위 엣지 스크리너 도입 스펙 작성 후 /check PASS(Cov 88%) 거쳐 실전 CLI 2회 재검증
+- **Resolution/What:** l1_screening.py 신규(screen_family_edge/compute_cross_sectional_ic/newey_west_tstat/estimate_effective_independence), SignalDescriptor.declared_orientation 필드 추가, l1_regime_routing.py의 split_book_by_expert를 decompose_expert_gross_contribution(절대값 분모로 |share|<=1 구조적 보장)+blend_expert_contributions(NaN-safe)로 교체, fold 0 skip 제거. /check 감사 중 estimate_effective_independence가 실사용 조건에서 n_eff=1.0으로 항상 붕괴하는 결함을 발견해 즉시 수정(IC 시계열의 전역 비어있는 행을 컬럼 판정 전에 제거). 1차 실전 실행에서 signal_bank.py의 reversal_st/xs_reversal 원시 z 계산이 이미 부호를 내장했는데 _family_orientation()이 이름만 보고 또 반전시키는 이중부호반전 버그 발견, 전 family +1로 통일해 수정
+- **Impact:** family screen 자체는 실전 데이터로 정상 동작 확인(xs_reversal t=+2.942, reversal_st t=+2.753 admit 성공). 그러나 라우터가 family screen과 구식 estimate_cluster_sleeve_posteriors(HAC-beta 0.95) admission의 AND 교집합만 사용해, 두 게이트가 admit한 신호 집합(momentum_ts vs xs_reversal/reversal_st)이 완전히 disjoint하여 교집합이 공집합 - no_evidence 지속(REGIME tag=0행). 다음 착수점은 구식 게이트를 라우팅 경로에서 제거하고 family screen을 유일 게이트로 배선하는 것
+
 ## [2026-07-29] [TASK_L1_SIGNAL_EVALUATION_ARCHITECTURE_FIX] [ADR_20260729_L1_SIGNAL_EVALUATION_ARCHITECTURE_FIX]
 - **Context/Why:** 선행 스펙(l1-router-cash-only-recovery) 적용 후 실전 CLI 재실행 결과 R-4(증거창 게이트)가 회귀(현재 fold 자신의 OOS 폭을 측정해 min_evidence_bars=900을 영구 통과불가)로 재확인. 조사 과정에서 더 근본적인 결함 2건 발견: L1 sleeve admission이 순수 in-sample 유의성만으로 게이트해 OOS 실현치를 전혀 사용하지 않음(IS→OOS rank IC ρ=-0.60을 직접 설명), regime 하드게이트가 2026-06-12 결정(regime→risk overlay 강등)과 충돌
 - **Resolution/What:** l1_regime_routing.py: signal_evidence_history 기반 신호별 누적 증거 이력 도입(concatenate_signal_evidence, SignalFoldRecord)으로 n_evidence_bars를 진짜 prequential 누적값으로 복원. regime 하드게이트를 compute_regime_overlay(확증된 악재일 때만 floor=0.5 감쇠, 그 외 1.0)로 대체해 admission을 막지 않음. apply_walk_forward_carry가 regime_overlay 파라미터 수용. 완전 죽은 코드 3개(build_fold_local_shadow_tape, _compute_unconditional_evidence, _compute_temporal_evidence, 호출처 0건 확인) 제거. l1_sleeves.py: estimate_cluster_sleeve_posteriors에 OOS 부트스트랩 AND-게이트 추가(HandoffConfig.min_oos_posterior_probability=0.55/min_oos_effective_blocks=5, in-sample 통과자에만 단락평가로 적용해 성능 영향 없음). config.py: RegimeRouterConfig.regime_overlay_floor 신규. /check 과정에서 회귀 검증 통합테스트 2개가 total==0 시 무조건 통과하는 공허한 단언(escape hatch)이었음을 발견해 결정론적 fixture로 전면 교체(fold1 n_evidence_bars==0 강제 확인 등 회귀 판별력 있는 단언으로 교정), 그 결과 l1_regime_routing.py 커버리지 51%->87%(죽은 코드 제거 포함)
@@ -69,8 +74,3 @@
 - **Context/Why:** 기존 27개 추세 편중 신호 및 51개 심볼 고정 제약으로 인한 알파 가뭄과 10.17% 비용 드래그 소모 문제 극복
 - **Resolution/What:** alpha_catalog.py(60개 8개 다요인 알파 레시피 구축), signal_bank.py(120개 동적 유니버스 마스킹 및 60개 신호 Numba 연산 구축), calibration.py(build_folds_4h 유효일수 캡핑 정정)
 - **Impact:** 60개 다요인 알파 신호와 120개 PIT 유니버스로 알파 표현력 및 독립 표본 수(Breadth) 2배 이상 확보. 측정계 정직화로 미달 신호 fail-closed 거부 및 cash-only 원금 100% 보존
-
-## [2026-07-27] [TASK_L1_ADMISSION_BETA_NEUTRAL_TS_BOOTSTRAP] [ADR_20260727_L1_ADMISSION_BETA_NEUTRAL_TS_BOOTSTRAP]
-- **Context/Why:** 278개 중복 sleeve OOS 평균 스칼라 i.i.d 부트스트랩으로 인한 표본 독립성 위반 및 분산 폭발(growth_lcb90 = -40.58%) 결함 해결
-- **Resolution/What:** l1_sleeves.py(compute_beta_neutral_composite_returns 신규, Causal Beta Neutral & Inverse Volatility 가중 4h 시계열 생성, build_exit_aware_handoff에 circular_stationary_bootstrap_growth 시간축 블록 부트스트랩 연결), engine.py(파이프라인 배선)
-- **Impact:** 표본 독립성 위반 오추정을 전면 제거하고 정직한 시간축 시계열 부트스트랩 적용. 10.17% 비용 드래그 및 마이너스 알파 신호를 정직하게 fail-closed 차단하여 cash-only로 원금 보호

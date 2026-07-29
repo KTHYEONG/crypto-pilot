@@ -141,3 +141,44 @@ class TestL1AdmissionRecorder:
         finally:
             if old is not None:
                 os.environ["L1_DEBUG"] = old
+            else:
+                os.environ.pop("L1_DEBUG", None)
+
+    def test_record_family_screen_writes_jsonl(self, tmp_path: Path) -> None:
+        old = os.environ.get("L1_DEBUG")
+        os.environ["L1_DEBUG"] = "1"
+        try:
+            log_path = tmp_path / "family_screen.jsonl"
+            rec = L1AdmissionRecorder(path=log_path)
+            rec.record_family_screen(
+                family="xs_reversal", n_signals=2, n_ic_bars=1360,
+                mean_ic=0.0384, t_newey_west=3.53, sidak_alpha=0.0073,
+                declared_orientation=-1, admitted=True, reasons=(),
+            )
+            lines = log_path.read_text().strip().splitlines()
+            assert len(lines) == 1
+            row = json.loads(lines[0])
+            assert row["tag"] == "SCREEN"
+            assert row["family"] == "xs_reversal"
+            assert row["admitted"] is True
+        finally:
+            if old is not None:
+                os.environ["L1_DEBUG"] = old
+            else:
+                os.environ.pop("L1_DEBUG", None)
+
+    def test_record_family_screen_disabled_when_no_debug(self, tmp_path: Path) -> None:
+        old = os.environ.pop("L1_DEBUG", None)
+        try:
+            log_path = tmp_path / "disabled_family_screen.jsonl"
+            rec = L1AdmissionRecorder(path=log_path)
+            rec.record_family_screen(
+                family="momentum_ts", n_signals=5, n_ic_bars=1360,
+                mean_ic=-0.0062, t_newey_west=-0.37, sidak_alpha=0.0073,
+                declared_orientation=1, admitted=False,
+                reasons=("insufficient_edge",),
+            )
+            assert not log_path.exists()
+        finally:
+            if old is not None:
+                os.environ["L1_DEBUG"] = old
