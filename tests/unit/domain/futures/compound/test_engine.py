@@ -1755,7 +1755,7 @@ def test_gate_scores_the_same_weights_array_that_is_deployed(
     )
 
 
-def test_engine_wires_signal_screen_before_sleeves(tmp_path: Path, mocker) -> None:
+def test_engine_wires_allocator_config_into_signal_screen(tmp_path: Path, mocker) -> None:
     """Integration: screen_signal_edge runs on the real panel and build_family_routing_sleeves
     consumes the signal screen to create structural sleeves."""
     n_bars = 1024
@@ -1795,8 +1795,8 @@ def test_engine_wires_signal_screen_before_sleeves(tmp_path: Path, mocker) -> No
 
     screen_calls: list[object] = []
 
-    def capturing_screen(panel, bars_4h, folds, config_):
-        result = real_screen_signal_edge(panel, bars_4h, folds, config_)
+    def capturing_screen(panel, bars_4h, folds, config_, **kwargs):
+        result = real_screen_signal_edge(panel, bars_4h, folds, config_, **kwargs)
         screen_calls.append(result)
         return result
 
