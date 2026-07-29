@@ -2,6 +2,11 @@
 
 This file holds historical architecture decision records (ADRs) that have been pruned from the active window.
 
+## [2026-07-27] [TASK_EXPANDED_MULTI_FACTOR_ALPHA_BANK] [ADR_20260727_EXPANDED_MULTI_FACTOR_ALPHA_BANK]
+- **Context/Why:** 기존 27개 추세 편중 신호 및 51개 심볼 고정 제약으로 인한 알파 가뭄과 10.17% 비용 드래그 소모 문제 극복
+- **Resolution/What:** alpha_catalog.py(60개 8개 다요인 알파 레시피 구축), signal_bank.py(120개 동적 유니버스 마스킹 및 60개 신호 Numba 연산 구축), calibration.py(build_folds_4h 유효일수 캡핑 정정)
+- **Impact:** 60개 다요인 알파 신호와 120개 PIT 유니버스로 알파 표현력 및 독립 표본 수(Breadth) 2배 이상 확보. 측정계 정직화로 미달 신호 fail-closed 거부 및 cash-only 원금 100% 보존
+
 ## [2026-07-27] [TASK_L1_ADMISSION_BETA_NEUTRAL_TS_BOOTSTRAP] [ADR_20260727_L1_ADMISSION_BETA_NEUTRAL_TS_BOOTSTRAP]
 - **Context/Why:** 278개 중복 sleeve OOS 평균 스칼라 i.i.d 부트스트랩으로 인한 표본 독립성 위반 및 분산 폭발(growth_lcb90 = -40.58%) 결함 해결
 - **Resolution/What:** l1_sleeves.py(compute_beta_neutral_composite_returns 신규, Causal Beta Neutral & Inverse Volatility 가중 4h 시계열 생성, build_exit_aware_handoff에 circular_stationary_bootstrap_growth 시간축 블록 부트스트랩 연결), engine.py(파이프라인 배선)
