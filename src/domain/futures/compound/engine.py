@@ -54,6 +54,7 @@ from src.domain.futures.compound.l1_regime_routing import (
     build_causal_regime_panel,
     build_fold_local_regime_forecast,
 )
+from src.domain.futures.compound.l1_screening import screen_family_edge
 from src.domain.futures.compound.l1_sleeves import (
     build_exit_aware_handoff,
     estimate_cluster_sleeve_posteriors,
@@ -256,6 +257,11 @@ def run_multiscale_compound_engine(
             market=market, bars_4h=bars_4h, folds=folds, config=config.cluster,
         )
         _logger.info("[P2] computed %d causal cluster folds", len(cluster_folds))
+        family_screen = screen_family_edge(panel, bars_4h, folds, config.handoff)
+        _logger.info(
+            "[P2] family_screen: n_eff=%.2f admitted_families=%s",
+            family_screen.n_effective_independent, family_screen.admitted_families,
+        )
         exit_cache = precompute_exit_path_cache(panel, bars_4h, cost_bps_4h)
         sleeves = estimate_cluster_sleeve_posteriors(
             panel, bars_4h, cluster_folds, folds, cost_bps_4h, funding_1h, config.handoff, cache=exit_cache,
@@ -281,6 +287,7 @@ def run_multiscale_compound_engine(
             panel, sleeves, cluster_folds, folds, bars_4h, cost_bps_4h, funding_1h,
             regime_panel, config.regime_router, config.dynamic_compounding,
             cost_bps=config.ladder.cost_bps,
+            family_screen_admitted_ids=family_screen.admitted_signal_ids,
         )
         forecast = routed.forecast
         weights_2d = compute_dynamic_compounding_path(

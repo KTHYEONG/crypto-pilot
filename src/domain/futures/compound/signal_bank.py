@@ -449,39 +449,59 @@ _FAMILY_NATIVE_TF: dict[str, str] = {
 }
 
 
+def _family_orientation(family: str) -> int:
+    # reversal_st (_compute_reversal_st returns -log_ret/vol) and xs_reversal
+    # (_compute_xs_rank_signal(..., sign=-1.0)) already bake the mean-reversion
+    # flip into the raw feature itself, so "buy high z" is the correct trade
+    # for every family here. declared_orientation must match that convention;
+    # returning -1 for these two double-negates and rejects the one edge that
+    # actually clears the family screen (measured t=+2.94 xs_reversal,
+    # t=+2.75 reversal_st on the production panel, both killed by the
+    # declared_orientation_contradicted branch before this fix).
+    del family
+    return 1
+
+
 def _default_catalog() -> tuple[SignalDescriptor, ...]:
     descriptors: list[SignalDescriptor] = []
     for family in ("trend_ema", "momentum_ts", "breakout_donchian", "basis_gap"):
+        orientation = _family_orientation(family)
         for speed, lb_hours in _SPEED_LADDER_5:
             descriptors.append(SignalDescriptor(
                 signal_id=f"{family}:{speed}", family=family, speed=speed,
                 lookback_hours=lb_hours, native_timeframe=_FAMILY_NATIVE_TF[family],
                 target_horizon_hours=lb_hours,
+                declared_orientation=orientation,
             ))
     descriptors.append(SignalDescriptor(
         signal_id="reversal_st:fast", family="reversal_st", speed="fast",
         lookback_hours=24, native_timeframe=_FAMILY_NATIVE_TF["reversal_st"],
         target_horizon_hours=24,
+        declared_orientation=_family_orientation("reversal_st"),
     ))
     descriptors.append(SignalDescriptor(
         signal_id="xs_reversal:fast", family="xs_reversal", speed="fast",
         lookback_hours=24, native_timeframe=_FAMILY_NATIVE_TF["xs_reversal"],
         target_horizon_hours=24,
+        declared_orientation=_family_orientation("xs_reversal"),
     ))
     descriptors.append(SignalDescriptor(
         signal_id="xs_reversal:medium", family="xs_reversal", speed="medium",
         lookback_hours=72, native_timeframe=_FAMILY_NATIVE_TF["xs_reversal"],
         target_horizon_hours=72,
+        declared_orientation=_family_orientation("xs_reversal"),
     ))
     descriptors.append(SignalDescriptor(
         signal_id="xs_momentum_slow:slow", family="xs_momentum_slow", speed="slow",
         lookback_hours=216, native_timeframe=_FAMILY_NATIVE_TF["xs_momentum_slow"],
         target_horizon_hours=216,
+        declared_orientation=1,
     ))
     descriptors.append(SignalDescriptor(
         signal_id="xs_momentum_slow:very_slow", family="xs_momentum_slow", speed="very_slow",
         lookback_hours=432, native_timeframe=_FAMILY_NATIVE_TF["xs_momentum_slow"],
         target_horizon_hours=432,
+        declared_orientation=1,
     ))
     for speed, lb_hours in (("fast", 24), ("medium", 72)):
         descriptors.append(SignalDescriptor(
@@ -489,6 +509,7 @@ def _default_catalog() -> tuple[SignalDescriptor, ...]:
             speed=speed, lookback_hours=lb_hours,
             native_timeframe=_FAMILY_NATIVE_TF["smart_money_divergence"],
             target_horizon_hours=lb_hours,
+            declared_orientation=1,
         ))
     return tuple(descriptors)
 
