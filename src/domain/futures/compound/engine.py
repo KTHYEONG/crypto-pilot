@@ -263,7 +263,11 @@ def run_multiscale_compound_engine(
             market=market, bars_4h=bars_4h, folds=folds, config=config.cluster,
         )
         _logger.info("[P2] computed %d causal cluster folds", len(cluster_folds))
-        signal_screen = screen_signal_edge(panel, bars_4h, folds, config.handoff)
+        signal_screen = screen_signal_edge(
+            panel, bars_4h, folds, config.handoff,
+            funding_1h_2d=funding_1h,
+            allocator_config=config.dynamic_compounding,
+        )
         _logger.info(
             "[P2] signal_screen: n_eff=%.2f admitted_signals=%s",
             signal_screen.n_effective_independent, signal_screen.admitted_signal_ids,

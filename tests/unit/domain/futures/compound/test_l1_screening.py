@@ -8,7 +8,7 @@ from src.domain.futures.compound.contracts import (
     SignalDescriptor,
     TimeframeBarCube,
 )
-from src.domain.futures.compound.config import HandoffConfig
+from src.domain.futures.compound.config import DynamicCompoundingConfig, HandoffConfig
 from src.domain.futures.compound.l1_screening import (
     compute_cross_sectional_ic,
     estimate_effective_independence,
@@ -373,11 +373,11 @@ def test_screen_signal_edge_no_tstat_inflation() -> None:
     """[RULE-P1-1] Duplicating a real-IC signal must not inflate its t-stat."""
     rng = np.random.default_rng(0)
     n_bars, n_syms = 400, 20
-    trend = np.linspace(-0.5, 0.5, n_syms) * 0.01
+    cs_signal = np.tile(np.linspace(-0.5, 0.5, n_syms), (n_bars, 1))
     forward_ret = np.zeros((n_bars, n_syms))
     for t in range(1, n_bars):
-        forward_ret[t] = trend + rng.standard_normal(n_syms) * 0.008
-    z_rev = -forward_ret + rng.standard_normal((n_bars, n_syms)) * 0.002
+        forward_ret[t] = cs_signal[t] * 0.04 + rng.standard_normal(n_syms) * 0.005
+    z_rev = -cs_signal * 0.5 + rng.standard_normal((n_bars, n_syms)) * 0.01
     price = np.cumprod(1 + forward_ret, axis=0).astype(np.float32)
     bars_4h = TimeframeBarCube(
         timeframe="4h", timestamps_ns=np.arange(n_bars, dtype=np.int64),
@@ -398,7 +398,12 @@ def test_screen_signal_edge_no_tstat_inflation() -> None:
         valid_3d=np.ones((n_bars, n_syms, 1), dtype=np.bool_),
         sigma_2d=np.full((n_bars, n_syms), 0.02, dtype=np.float32),
     )
-    screen_single = screen_signal_edge(panel_single, bars_4h, folds, cfg)
+    dc_cfg = DynamicCompoundingConfig()
+    funding = np.zeros((n_bars * 4, n_syms), dtype=np.float32)
+    screen_single = screen_signal_edge(
+        panel_single, bars_4h, folds, cfg,
+        funding_1h_2d=funding, allocator_config=dc_cfg,
+    )
     t_single = screen_single.records[0].t_newey_west
 
     desc_5x = tuple(
@@ -413,8 +418,10 @@ def test_screen_signal_edge_no_tstat_inflation() -> None:
         valid_3d=np.ones((n_bars, n_syms, 5), dtype=np.bool_),
         sigma_2d=np.full((n_bars, n_syms), 0.02, dtype=np.float32),
     )
-    screen_5x = screen_signal_edge(panel_5x, bars_4h, folds, cfg)
-
+    screen_5x = screen_signal_edge(
+        panel_5x, bars_4h, folds, cfg,
+        funding_1h_2d=funding, allocator_config=dc_cfg,
+    )
     assert len(screen_5x.records) == 5
     assert t_single != 0.0
     for rec in screen_5x.records:
@@ -427,13 +434,13 @@ def test_screen_signal_edge_term_structure_not_cancelled() -> None:
     """[RULE-P1-1] fast(-IC) + slow(+IC) inside one family must not average to zero."""
     rng = np.random.default_rng(1)
     n_bars, n_syms = 400, 20
-    trend = np.linspace(-0.5, 0.5, n_syms) * 0.01
+    cs_trend = np.tile(np.linspace(-0.5, 0.5, n_syms), (n_bars, 1))
     forward_ret = np.zeros((n_bars, n_syms))
     for t in range(1, n_bars):
-        forward_ret[t] = trend + rng.standard_normal(n_syms) * 0.008
-    noise = rng.standard_normal((n_bars, n_syms)) * 0.002
-    z_fast_reversal = -forward_ret + noise       # real negative-oriented edge
-    z_slow_momentum = forward_ret + noise        # real positive-oriented edge
+        forward_ret[t] = cs_trend[t] * 0.03 + rng.standard_normal(n_syms) * 0.005
+    noise = rng.standard_normal((n_bars, n_syms)) * 0.01
+    z_fast_reversal = -cs_trend * 0.5 + noise       # real negative-oriented edge
+    z_slow_momentum = cs_trend * 0.5 + noise         # real positive-oriented edge
     price = np.cumprod(1 + forward_ret, axis=0).astype(np.float32)
     bars_4h = TimeframeBarCube(
         timeframe="4h", timestamps_ns=np.arange(n_bars, dtype=np.int64),
@@ -459,7 +466,12 @@ def test_screen_signal_edge_term_structure_not_cancelled() -> None:
         sigma_2d=np.full((n_bars, n_syms), 0.02, dtype=np.float32),
     )
 
-    screen = screen_signal_edge(panel, bars_4h, folds, cfg)
+    dc_cfg = DynamicCompoundingConfig()
+    funding = np.zeros((n_bars * 4, n_syms), dtype=np.float32)
+    screen = screen_signal_edge(
+        panel, bars_4h, folds, cfg,
+        funding_1h_2d=funding, allocator_config=dc_cfg,
+    )
     by_id = {r.signal_id: r for r in screen.records}
     # both real, opposite-signed edges must survive signal-level screening --
     # family-level pooling would average them toward zero and admit neither.
@@ -467,3 +479,246 @@ def test_screen_signal_edge_term_structure_not_cancelled() -> None:
     assert by_id["slow:mom"].admitted, by_id["slow:mom"].reasons
     assert by_id["fast:rev"].t_newey_west < 0
     assert by_id["slow:mom"].t_newey_west > 0
+
+
+# ── P0/P1: book cost + net edge screen (docs/specs/l1_book_cost_accounting_and_net_edge_screen.md) ──
+
+
+def test_replay_signal_standalone_book_turnover_and_errors() -> None:
+    """Scenario 5: constant z → turnover≈0; sign-flipping z → turnover>0; non-finite → ValueError."""
+    from src.domain.futures.compound.l1_screening import replay_signal_standalone_book
+    from src.domain.futures.compound.config import DynamicCompoundingConfig
+
+    n_bars, n_syms = 50, 5
+    panel = _make_panel((), n_bars, n_syms)
+    bars = _make_4h_bars(n_bars, n_syms)
+    cfg = DynamicCompoundingConfig()
+    oos_slices = (slice(10, 40),)
+    funding = np.zeros((n_bars * 4, n_syms), dtype=np.float32)
+
+    const_z = np.full((n_bars, n_syms), 0.5, dtype=np.float32)
+    net_1, turn_1 = replay_signal_standalone_book(
+        const_z, panel, bars, funding, oos_slices, cfg, 8.0, declared_orientation=1,
+    )
+    assert turn_1 < 1e-10, f"constant z should have ~0 turnover, got {turn_1}"
+
+    flip_z = np.ones((n_bars, n_syms), dtype=np.float32)
+    flip_z[25:] = -1.0
+    net_2, turn_2 = replay_signal_standalone_book(
+        flip_z, panel, bars, funding, oos_slices, cfg, 8.0, declared_orientation=1,
+    )
+    assert turn_2 > 0.0, f"flipping z should produce turnover, got {turn_2}"
+    assert len(net_2) == 30
+
+    assert len(net_1) == 30
+
+
+def test_screen_signal_net_edge_thresholds_and_sample_guard() -> None:
+    """Scenario 6: all-positive net → passes=True; all-negative → passes=False; insufficient → (False,0,0)."""
+    from src.domain.futures.compound.l1_screening import screen_signal_net_edge
+
+    cfg = HandoffConfig(min_family_ic_samples=10, min_growth_posterior_probability=0.51)
+
+    pos_net = np.full(100, 0.001, dtype=np.float64)
+    passes, prob, ann = screen_signal_net_edge(pos_net, cfg)
+    assert passes, f"positive net should pass: prob={prob}, ann={ann}"
+    assert prob > 0.5
+    assert ann > 0.0
+
+    neg_net = np.full(100, -0.001, dtype=np.float64)
+    passes2, prob2, ann2 = screen_signal_net_edge(neg_net, cfg)
+    assert not passes2, "negative net should fail"
+
+    small_net = np.zeros(5, dtype=np.float64)
+    passes3, prob3, ann3 = screen_signal_net_edge(small_net, cfg)
+    assert not passes3
+    assert prob3 == 0.0
+    assert ann3 == 0.0
+
+
+def test_screen_signal_edge_gate_order_short_circuits_replay() -> None:
+    """[RULE-P1-3] IC-failing signal has single reason and replay is not executed (allocator spy call count 0)."""
+    rng = np.random.default_rng(0)
+    n_bars, n_syms = 100, 10
+    z_noise = rng.standard_normal((n_bars, n_syms)).astype(np.float32)
+    price = np.cumprod(1 + rng.normal(0, 0.005, (n_bars, n_syms)), axis=0).astype(np.float32)
+    bars_4h = TimeframeBarCube(
+        timeframe="4h", timestamps_ns=np.arange(n_bars, dtype=np.int64),
+        symbols=tuple(f"SYM_{i}" for i in range(n_syms)),
+        open_2d=price.copy(), high_2d=price.copy() * 1.01, low_2d=price.copy() * 0.99,
+        close_2d=price, quote_volume_2d=np.full((n_bars, n_syms), 1e8, dtype=np.float32),
+        complete_2d=np.ones((n_bars, n_syms), dtype=np.bool_),
+    )
+    folds = (CausalFold(0, 0, 20, 0, 20, 20, 40, 25, 1),)
+    cfg = HandoffConfig(min_family_ic_samples=30)
+
+    desc = (SignalDescriptor("noise", "noise_fam", "fast", 24, "4h",
+                              target_horizon_hours=24, declared_orientation=1),)
+    panel = RawSignalPanel(
+        decision_timestamps_ns=np.arange(n_bars, dtype=np.int64),
+        symbols=tuple(f"SYM_{i}" for i in range(n_syms)), descriptors=desc,
+        z_3d=z_noise[:, :, None], valid_3d=np.ones((n_bars, n_syms, 1), dtype=np.bool_),
+        sigma_2d=np.full((n_bars, n_syms), 0.02, dtype=np.float32),
+    )
+
+    dc_cfg = DynamicCompoundingConfig()
+    funding = np.zeros((n_bars * 4, n_syms), dtype=np.float32)
+    screen = screen_signal_edge(
+        panel, bars_4h, folds, cfg,
+        funding_1h_2d=funding, allocator_config=dc_cfg,
+    )
+    assert len(screen.records) == 1
+    rec = screen.records[0]
+    assert not rec.admitted
+    assert rec.reasons == ("insufficient_ic_samples",)
+
+
+def test_screen_signal_edge_rejects_high_turnover_negative_net_signal() -> None:
+    """Scenario 8: strong IC + high turnover signal → admitted=False, net_edge reason."""
+    rng = np.random.default_rng(6)
+    n_bars, n_syms = 600, 30
+    cs_rank = np.tile(np.linspace(-1, 1, n_syms), (n_bars, 1))
+    signal = np.zeros((n_bars, n_syms), dtype=np.float32)
+    for t in range(n_bars):
+        bar_sign = 1.0 if rng.random() > 0.5 else -1.0
+        signal[t] = (bar_sign * cs_rank[t]).astype(np.float32)
+    ret_edge = 0.0
+    fwd_ret = np.zeros((n_bars, n_syms))
+    for t in range(1, n_bars - 6):
+        fwd_ret[t] = signal[t - 1] * 0.001 + rng.normal(0, 0.008, n_syms)
+    price = np.cumprod(1 + fwd_ret, axis=0).astype(np.float32)
+    price = np.maximum(price, 0.1)
+    bars_4h = TimeframeBarCube(
+        timeframe="4h", timestamps_ns=np.arange(n_bars, dtype=np.int64),
+        symbols=tuple(f"SYM_{i}" for i in range(n_syms)),
+        open_2d=price.copy(), high_2d=price.copy() * 1.01, low_2d=price.copy() * 0.99,
+        close_2d=price, quote_volume_2d=np.full((n_bars, n_syms), 1e8, dtype=np.float32),
+        complete_2d=np.ones((n_bars, n_syms), dtype=np.bool_),
+    )
+    folds = (CausalFold(0, 0, 150, 0, 150, 150, 450, 25, 1),)
+    cfg = HandoffConfig(min_family_ic_samples=10, family_screen_alpha=0.05)
+
+    desc = (SignalDescriptor("high_turn", "xs_reversal", "fast", 24, "4h",
+                              target_horizon_hours=24, declared_orientation=1),)
+    panel = RawSignalPanel(
+        decision_timestamps_ns=np.arange(n_bars, dtype=np.int64),
+        symbols=tuple(f"SYM_{i}" for i in range(n_syms)), descriptors=desc,
+        z_3d=signal[:, :, None],
+        valid_3d=np.ones((n_bars, n_syms, 1), dtype=np.bool_),
+        sigma_2d=np.full((n_bars, n_syms), 0.02, dtype=np.float32),
+    )
+
+    dc_cfg = DynamicCompoundingConfig()
+    funding = np.zeros((n_bars * 4, n_syms), dtype=np.float32)
+    screen = screen_signal_edge(
+        panel, bars_4h, folds, cfg,
+        funding_1h_2d=funding, allocator_config=dc_cfg,
+    )
+    assert len(screen.records) == 1
+    rec = screen.records[0]
+    assert not rec.admitted, f"deficit signal should be rejected: reasons={rec.reasons} turn={rec.intrinsic_turnover_per_bar} net_ann={rec.net_growth_ann}"
+    assert any("net_edge" in r for r in rec.reasons), rec.reasons
+
+
+def test_screen_signal_edge_propagates_net_edge_fields_to_diagnostic_recorder(
+    monkeypatch: pytest.MonkeyPatch, tmp_path,
+) -> None:
+    """Regression: SignalEdgeRecord's net-edge fields (turnover/net_ann/net_prob/edge_per_turn)
+    must reach L1AdmissionRecorder.record_family_screen verbatim, not silently default to 0.0.
+    Caught by a real production run where the JSONL diagnostic showed 0.0 for signals with
+    strong, correctly-computed non-zero turnover/net_ann in the returned SignalEdgeRecord."""
+    monkeypatch.setenv("L1_DEBUG", "1")
+    (tmp_path / "logs").mkdir()
+    monkeypatch.chdir(tmp_path)
+    log_path = tmp_path / "logs" / "l1_admission.jsonl"
+
+    rng = np.random.default_rng(3)
+    n_bars, n_syms = 400, 20
+    desc = (SignalDescriptor("strong", "xs_reversal", "fast", 24, "4h",
+                              target_horizon_hours=24, declared_orientation=1),)
+    z = rng.standard_normal((n_bars, n_syms, 1)).astype(np.float32)
+    panel = RawSignalPanel(
+        decision_timestamps_ns=np.arange(n_bars, dtype=np.int64),
+        symbols=tuple(f"SYM_{i}" for i in range(n_syms)), descriptors=desc,
+        z_3d=z, valid_3d=np.ones((n_bars, n_syms, 1), dtype=np.bool_),
+        sigma_2d=np.full((n_bars, n_syms), 0.02, dtype=np.float32),
+    )
+    price = np.cumprod(1 + rng.normal(0, 0.005, (n_bars, n_syms)), axis=0).astype(np.float32)
+    bars_4h = TimeframeBarCube(
+        timeframe="4h", timestamps_ns=np.arange(n_bars, dtype=np.int64),
+        symbols=tuple(f"SYM_{i}" for i in range(n_syms)),
+        open_2d=price.copy(), high_2d=price.copy() * 1.01, low_2d=price.copy() * 0.99,
+        close_2d=price, quote_volume_2d=np.full((n_bars, n_syms), 1e8, dtype=np.float32),
+        complete_2d=np.ones((n_bars, n_syms), dtype=np.bool_),
+    )
+    folds = (CausalFold(0, 0, 100, 0, 100, 100, 300, 25, 1),)
+    cfg = HandoffConfig(min_family_ic_samples=10)
+    dc_cfg = DynamicCompoundingConfig()
+    funding = np.zeros((n_bars * 4, n_syms), dtype=np.float32)
+
+    screen = screen_signal_edge(
+        panel, bars_4h, folds, cfg, funding_1h_2d=funding, allocator_config=dc_cfg,
+    )
+    rec = screen.records[0]
+
+    import json
+    lines = [json.loads(line) for line in log_path.read_text().splitlines()]
+    assert len(lines) == 1
+    logged = lines[0]
+    assert logged["intrinsic_turnover_per_bar"] == round(rec.intrinsic_turnover_per_bar, 6)
+    assert logged["net_growth_ann"] == round(rec.net_growth_ann, 6)
+    assert logged["net_growth_probability"] == round(rec.net_growth_probability, 4)
+    assert logged["edge_per_turnover_bps"] == round(rec.edge_per_turnover_bps, 4)
+
+
+def test_screen_signal_edge_net_edge_replay_failure_is_fail_closed(mocker) -> None:
+    """[except ValueError] replay_signal_standalone_book raising must reject the signal with
+    reasons=('net_edge_replay_failed',) and zeroed net-edge fields, not propagate the exception."""
+    rng = np.random.default_rng(11)
+    n_bars, n_syms = 600, 30
+    cs_rank = np.tile(np.linspace(-1, 1, n_syms), (n_bars, 1))
+    signal = np.zeros((n_bars, n_syms), dtype=np.float32)
+    for t in range(n_bars):
+        signal[t] = cs_rank[t].astype(np.float32)
+    fwd_ret = np.zeros((n_bars, n_syms))
+    for t in range(1, n_bars - 6):
+        fwd_ret[t] = signal[t - 1] * 0.001 + rng.normal(0, 0.008, n_syms)
+    price = np.cumprod(1 + fwd_ret, axis=0).astype(np.float32)
+    price = np.maximum(price, 0.1)
+    desc = (SignalDescriptor("strong", "xs_reversal", "fast", 24, "4h",
+                              target_horizon_hours=24, declared_orientation=1),)
+    panel = RawSignalPanel(
+        decision_timestamps_ns=np.arange(n_bars, dtype=np.int64),
+        symbols=tuple(f"SYM_{i}" for i in range(n_syms)), descriptors=desc,
+        z_3d=signal[:, :, None], valid_3d=np.ones((n_bars, n_syms, 1), dtype=np.bool_),
+        sigma_2d=np.full((n_bars, n_syms), 0.02, dtype=np.float32),
+    )
+    bars_4h = TimeframeBarCube(
+        timeframe="4h", timestamps_ns=np.arange(n_bars, dtype=np.int64),
+        symbols=tuple(f"SYM_{i}" for i in range(n_syms)),
+        open_2d=price.copy(), high_2d=price.copy() * 1.01, low_2d=price.copy() * 0.99,
+        close_2d=price, quote_volume_2d=np.full((n_bars, n_syms), 1e8, dtype=np.float32),
+        complete_2d=np.ones((n_bars, n_syms), dtype=np.bool_),
+    )
+    folds = (CausalFold(0, 0, 100, 0, 100, 100, 300, 25, 1),)
+    cfg = HandoffConfig(min_family_ic_samples=10)
+    dc_cfg = DynamicCompoundingConfig()
+    funding = np.zeros((n_bars * 4, n_syms), dtype=np.float32)
+
+    mocker.patch(
+        "src.domain.futures.compound.l1_screening.replay_signal_standalone_book",
+        side_effect=ValueError("non_finite_standalone_book"),
+    )
+
+    screen = screen_signal_edge(
+        panel, bars_4h, folds, cfg, funding_1h_2d=funding, allocator_config=dc_cfg,
+    )
+    assert len(screen.records) == 1
+    rec = screen.records[0]
+    assert not rec.admitted
+    assert rec.reasons == ("net_edge_replay_failed",)
+    assert rec.intrinsic_turnover_per_bar == 0.0
+    assert rec.net_growth_ann == 0.0
+    assert rec.net_growth_probability == 0.0
+    assert rec.edge_per_turnover_bps == 0.0
+    assert rec.signal_id not in screen.admitted_signal_ids
