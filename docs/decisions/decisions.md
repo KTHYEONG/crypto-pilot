@@ -1,5 +1,15 @@
 # Active Decisions Log (Sliding Window)
 
+## [2026-07-29] [TASK_L1_EFFECTIVE_HORIZON_SCREENING] [ADR_20260729_L1_EFFECTIVE_HORIZON_SCREENING]
+- **Context/Why:** 직전 세션에서 reversal_st/xs_reversal 8종 킬 확정 후 사용자 요청으로 37종 전수census+1분봉 실측 수행. momentum_ts:fast(declared 24h, raw z t=-5.93)의 실제 배포되는 스무딩북(alpha_smooth=0.08, EMA~50h)이 같은 24h에서는 t=+0.24(무상관)이나 horizon을 648h까지 넓히면 t=+2.65로 단조증가함을 발견 - 게이트가 배포되는 신호가 아니라 원시 신호를 검정하는 구조적 불일치 확정. 빠른 타임프레임(1m~1h) 20회 실측은 명확히 반증(전부 단조악화).
+- **Resolution/What:** l1_screening.py: discover_effective_horizon 신규(declared 게이트 탈락 신호에 한해 스무딩 배포북을 7개 horizon 후보(24~648h)에 Sidak 보정 재검정), screen_signal_edge에 5번째 게이트로 배선. contracts.py: SignalEdgeRecord에 effective_horizon_hours/effective_orientation/effective_horizon_t_stat 3필드+검증 추가. l1_diagnostics.py: 신규 필드 JSONL 기록. /check 과정에서 declared_orientation_contradicted 탈락자가 반대방향에서 유효horizon을 찾아도 net-of-cost 재검증이 원래 declared_orientation을 쓰던 배선버그 발견수정(비대칭 long/short 레버리지 캡 때문에 부호오류=다른포트폴리오), spec-compliance 시나리오 7개 중 6개 이름불일치+1개(purge/embargo) 공허테스트 발견, 결정론적 재작성. 실전 CLI 재검증 완료(logs/futures/compound/20260729_122330/).
+- **Impact:** admitted=0/37 유지(cash-only). 단 P5 인프라 정상작동 확인: trend_ema:very_slow가 declared 432h 대신 24h에서 유효 t=+3.278 발견(통계적 발견 성공, net-of-cost는 탈락 - 2단계 게이트 독립작동 확인). 직전 세션 '유망 3종'(momentum_ts:very_slow, xs_momentum_slow:slow/ultra_slow, P=0.90~0.96)이 Sidak 보정 하에서 정당하게 탈락 - 다중검정 우려가 실측으로 확인됨, 즉시admit 보류가 옳았음. momentum_ts:fast에서 스펙설계 갭 발견: [LIMIT-02] 규칙(방향모순시 반대방향만 재탐색)이 실제 메커니즘(스무딩이 신호를 반대아닌 다른horizon으로 변환)과 불일치 - 다음 스펙 후보로 문서화. /check PASS(Cov 91%).
+
+## [2026-07-29] [TASK_L1_REVERSAL_SIGNAL_DEFICIT_EXHAUSTIVE_DIAGNOSIS] [ADR_20260729_L1_REVERSAL_SIGNAL_DEFICIT_EXHAUSTIVE_DIAGNOSIS]
+- **Context/Why:** P0/P1 적용 후 net-of-cost 게이트가 gross IC 유의(t up to+8.70) 8종을 전량 탈락시켰다. 8bps 비용이 진짜 병목인지 평가/활용 로직 결함인지 사용자 요청으로 전수 재검토 수행.
+- **Resolution/What:** 실프로덕션 데이터 캡처(scratch/capture_l1_panel.py, screen_signal_edge 호출부 스파이) 기반 12개 실측 스크립트 실행. 포지션구성 8종(연속리밸런싱 2속도/raw Kelly/band=0/분위수집중 2강도/신호별calibration/개별종목이벤트보유/horizon-matched랭크북) 전수 실패. 평가수식 감사 4종: NW대역폭 강건(기각), universe breadth 51/51 안정(기각), reversal_st-xs_reversal IC시계열상관 0.80~0.84(8개가 사실상 1~2개 현상 중복측정), 부호충실도 51.6~66.4%(reversal_st는 동전던지기)가 결정적 근본원인 - alpha_smooth=0.08 시간상수(~50h)가 신호horizon(8~48h)보다 6~25배 길어 포지션이 원시신호를 구조적으로 놓침.
+- **Impact:** 8종을 '통계적으로 실재하나 경제적으로 비활성(statistically significant, economically inert)'로 최종분류. net-of-cost 게이트 탈락판정 정확함 확인 - 임계값완화/파라미터튜닝 근거 없음. 코드변경 없음(12개 실측 전부 부정적결과). 다음 착수점: 완전히 다른 신호패밀리 탐색, 부호충실 추종 신규메커니즘 설계(고위험 미검증), 스프레드/유동성 조건부 필터링.
+
 ## [2026-07-29] [TASK_L1_BOOK_COST_ACCOUNTING_AND_NET_EDGE_SCREEN] [ADR_20260729_L1_BOOK_COST_ACCOUNTING_AND_NET_EDGE_SCREEN]
 - **Context/Why:** 직전 result.md의 gross vs cost 워터퍼(gross +9~31%, cost -68~70%)가 경제현실이 아니라 앙상블 게이트의 cost 이중청구(102배)임을 scratch/verify_signal_cost_accounting.py로 실측 확정. build_fold_expert_books의 share 기반 서브북 분해가 gross/funding은 telescoping하나 cost는 삼각부등식으로 telescoping하지 않음. 또한 기존 gross rank-IC t-stat 게이트가 실현 net과 음의 상관(-0.157)임을 확인, net-of-cost 축 부재가 별도 결함으로 확정.
 - **Resolution/What:** l1_regime_routing.py: allocate_book_turnover_cost 신규(배포북 실제비용을 turnover 책임비율로 배분, Sigma_e cost_e == book_cost 항등식 구조적 보장), build_fold_expert_books가 (expert_weights_3d, book_weights_2d) 2-튜플 반환하도록 변경, score_expert_returns가 비용을 재계산하지 않고 주입값 사용. l1_screening.py: replay_signal_standalone_book(signal 단독을 프로덕션 allocator에 실전 replay) + screen_signal_net_edge(bootstrap P(net>0) AND ann_net>0, 기존 min_growth_posterior_probability 재사용) 신규, screen_signal_edge에 4번째 게이트로 배선. config.py: HandoffConfig.screen_cost_bps 신규. engine.py: screen_signal_edge 호출에 funding_1h_2d/allocator_config 전달. contracts.py: SignalEdgeRecord에 net-edge 필드 4개 추가. /check 과정에서 unit-scope 시나리오 9개가 구현은 됐으나 spec 리터럴 함수명과 달라 spec-compliance FAIL 발견, 이름만 정정(로직 불변) 후 PASS. 프로덕션 재실행 검증 중 record_family_screen 호출에 net-edge 4개 키워드 인자가 누락되어 JSONL 진단이 항상 0.0을 기록하던 배선결함을 추가 발견, 수정 및 회귀테스트 2건(정상전파 + fail-closed) 추가.
@@ -64,13 +74,3 @@
 - **Context/Why:** phase full 실행 시 E2E 385s+의 병목 식별 및 최적화. Signal panel 179.6s(50%), market cube 27s(7.5%), exit_cache+cluster_posteriors 20-30s(8%) 가 주 병목
 - **Resolution/What:** 1) exit_path.py _label_kernel에 @njit(cache=True) 적용 (순수 Python 삼중 루프 → 컴파일). 2) l1_sleeves.py aggregate_cluster_group_returns에 @njit 적용 + gc.collect() 제거. 3) H1(TPE 비활성화)과 H5(동시 I/O)는 실증 결과 역효과/무효로 롤백. 4) 7개 단위 테스트 추가 (numba-Python 동등성, zero-event, aggregate 수렴). 5) docs/specs/phase_full_bottleneck.md + contract.json 작성
 - **Impact:** P2 구간(exit_cache+posteriors) 30s 이내 유지. 전체 E2E 385s→285s(-100s, 26%↓). 단 signal panel MAD 커널(T=5442×S=51×recipe=60, sorting 기반)이 여전히 206s로 최대 병목 — TPE/스레드 배분만으로는 해결 불가, MAD 커널 자체 알고리즘 개선(H2) 필요
-
-## [2026-07-27] [TASK_PIPELINE_OPT] [ADR_20260727_PIPELINE_OPT]
-- **Context/Why:** Severe latency bottleneck in production pipeline: 258.4s runtime, 1,029MB RSS, 3.3M heap allocations in MAD kernel, nested thread contention
-- **Resolution/What:** Implemented zero-allocation Numba MAD kernel (buf/dev_buf per-symbol, in-place sort), single-level TPE dispatcher (4 workers + Numba 1 thread), parallel PyArrow grid materializer, vectorized 4h funding sum
-- **Impact:** MAD kernel 5.67x vs Numpy, dense sim 13.38x, RSS 363MB (2.84x reduction), bit-exact identity maintained
-
-## [2026-07-27] [TASK_20260727_PRODUCTION_PIPELINE_DEEP_OPTIMIZATION] [ADR_20260727_20260727_PRODUCTION_PIPELINE_DEEP_OPTIMIZATION]
-- **Context/Why:** Pipeline latency of 258s (4.3min) caused by Signal Bank MAD kernel dynamic heap allocations, nested thread pool lock thrashing, and sequential Parquet feature grid materialization
-- **Resolution/What:** Profiled 6 pipeline stages, identified exact 227s Signal Bank and 23s Market Cube bottlenecks, drafted zero-allocation MAD kernel spec, parallel grid loader, and verified with lean_check
-- **Impact:** Paves way for pipeline acceleration from 258s to <15s with 0.000000000000 math discrepancy and <50MB tensor memory
