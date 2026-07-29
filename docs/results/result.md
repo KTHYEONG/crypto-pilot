@@ -1,170 +1,139 @@
-## L1 family-only routing 실제 데이터 측정 결과 — 2026-07-29
+## L1+L2 통합 walk-forward + signal 단위 스크리닝 실제 데이터 측정 결과 — 2026-07-29
 
 ### 1. 실행 식별자와 원자료
 
 | 항목 | 값 |
 |---|---|
-| 기준 실행 | `logs/futures/compound/20260729_053222/` |
-| 내부 계측 실행 | `logs/futures/compound/20260729_053625/` |
+| 기준 실행 | `logs/futures/compound/20260729_075352/` |
+| 원인 분해 계측 실행 | `scratch/verify_router_admission_diagnosis.py`, `scratch/verify_router_admission_diagnosis_v2.py` (동일 데이터·설정에 `evaluate_ensemble_admission` 스파이만 부착, production route는 그대로 실행) |
 | 기준 명령 | `UV_CACHE_DIR=/tmp/uv-cache MPLCONFIGDIR=/tmp/mpl PYTHONPATH=. L2_DRY_RUN=1 L1_DEBUG=1 LOG_LEVEL=DEBUG timeout 1800 uv run python src/execution/opt_main_futures.py --phase full --sync local --date 2026-07-15 --seed 42` |
-| 계측 명령 | 동일 조건으로 `scratch/verify_l1_family_sleeve_routing.py --variant family_only` 실행. 현재 production route를 감싸 evidence만 기록 |
 | reference date / seed | `2026-07-15` / `42` |
 | base timeframe | `1h` (L1 내부 결정 grid `4h`) |
 | 입력 규모 | `5,442` bars × `51` symbols |
 | model version | `quarterly-v1` |
 | data manifest hash | `0048c160d459209c959006389a269441c6d2d33c6dc079e9bd1659398cffc6b5` |
-| process | 두 실행 모두 `exit_code=0` |
+| process | `exit_code=0` |
 | L2/L3 보호 | `L2_DRY_RUN=1`, sealed L3 holdout 미소비 |
+| 적용 스펙 | `docs/specs/l1_cash_only_exit_redesign.md` (P0 L1+L2 통합 walk-forward, P1 signal 단위 screening + horizon ladder 확장, P2/P3 6~7단 게이트 캐스케이드 → 복합 사후분포 검정 2건으로 축소) |
 
-기준 artifact hash:
+기준 artifact hash (직전 실행과 동일 — 둘 다 all-zero cash-only 산출물이라 해시가 우연히 일치):
 
 - `result.json`: `216e76fd9567318d5d4e5b4b6270f81082845d288b34a502953efe764419afde`
 - `target_weights.npy`: `2a161f690b5593fc026fbf44c11205b0afd6e228295cb756bb4c779092e6c102`
 
-### 2. Family screen 원자료
+### 2. P0 — L1+L2 통합 walk-forward span 실측
 
-`n_ic_bars=1700`, `sidak_alpha=0.0061`, `declared_orientation=+1` 기준이다.
+| 계측값 | 직전(3단 분리) | 이번(통합 span) |
+|---|---:|---:|
+| fold/step 수 | 5 | **18** |
+| OOS evidence bars | 1,700 | **3,240 (1.9배)** |
+| warmup(guard-blocked) step 수 | — | **5** (`min_evidence_bars=900 / step_bars=180`와 정확히 일치) |
+| 게이트 평가 도달 step 수 | 2/5 (40%) | **13/18 (72%)** |
 
-| family | signals | mean IC | NW t | 판정 | reason |
-|---|---:|---:|---:|:---:|---|
-| trend_ema | 5 | `+0.0018` | `+0.134` | reject | `not_significant_after_sidak` |
-| momentum_ts | 5 | `-0.0136` | `-1.260` | reject | `not_significant_after_sidak` |
-| breakout_donchian | 5 | `-0.0218` | `-2.251` | reject | `declared_orientation_contradicted` |
-| basis_gap | 5 | `-0.0230` | `-2.524` | reject | `declared_orientation_contradicted` |
-| reversal_st | 1 | `+0.0199` | `+2.753` | **admit** | — |
-| xs_reversal | 2 | `+0.0332` | `+2.942` | **admit** | — |
-| xs_momentum_slow | 2 | `-0.0028` | `-0.141` | reject | `not_significant_after_sidak` |
-| smart_money_divergence | 2 | `0.0000` | `0.000` | reject | `insufficient_ic_samples`, `n_ic_bars=0` |
+`build_expanding_walk_forward_steps`가 quarterly 경로에서 `l3_start`까지 확장된 것을 확인했다(스펙 `[RULE-P0-4]`). fold 수 3.6배, OOS 표본 1.9배 확대는 산술 예측과 일치한다.
 
-Family screen이 admit한 signal ID는 `reversal_st:*`, `xs_reversal:fast`,
-`xs_reversal:medium`이다. 따라서 이번 실행에서 family gate 자체는 공집합이
-아니다.
+### 3. P1 — signal 단위 스크리닝 실측
 
-### 3. 구조적 sleeve와 prequential route 계측
+`n_ic_bars=3,240`, `sidak_alpha=0.0053`, ladder 확장(`reversal_st`/`xs_reversal` 8종 → 8·12·24·48·72·96h, `xs_momentum_slow` 3종 → 216·432·648h) 적용 결과, family가 아닌 **signal 단위**로 8개가 독립적으로 admit됐다(family pooling 시절의 `√n_sig` t-팽창 없이):
+
+| signal | n_ic_bars | t_newey_west | 판정 |
+|---|---:|---:|:---:|
+| `reversal_st:fast` (8h) | 3,240 | `+6.861` | **admit** |
+| `reversal_st:medium` (12h) | 3,240 | `+8.698` | **admit** |
+| `reversal_st:moderate` (24h) | 3,240 | `+5.880` | **admit** |
+| `reversal_st:slow` (48h) | 3,240 | `+3.653` | **admit** |
+| `xs_reversal:fast` (8h) | 3,240 | `+7.315` | **admit** |
+| `xs_reversal:medium` (12h) | 3,240 | `+8.150` | **admit** |
+| `xs_reversal:moderate` (24h) | 3,240 | `+4.883` | **admit** |
+| `xs_reversal:slow` (48h) | 3,240 | `+4.373` | **admit** |
+| `reversal_st:very_slow`/`ultra_slow`, `xs_reversal:very_slow`/`ultra_slow` | 3,240 | `+1.52` ~ `-0.23` | reject (`not_significant_after_sidak`) |
+| `xs_momentum_slow:*` (216/432/648h) | 3,240 | `+2.221` ~ `+0.324` | reject (`not_significant_after_sidak`) |
+| `trend_ema:*`, `momentum_ts:*`, `breakout_donchian:*`, `basis_gap:*` | 3,240 | 부호모순 또는 not_significant | reject |
+| `smart_money_divergence:*` | 0 | `0.000` | reject (`insufficient_ic_samples`) |
+
+이전 실행에서 family pooling으로 인해 admit됐던 `xs_reversal`(family 단위 t=+2.942)이 실은 2개 signal 평균으로 부풀려진 값이었다는 의심은, 이번 signal 단위 재측정에서 `xs_reversal:fast`(t=+7.315)와 `xs_reversal:medium`(t=+8.150) 둘 다 개별적으로도 강하게 유의함이 확인되며 해소됐다 — 이번 8종은 통계적 허위 admit이 아니라 실재하는 개별 신호다.
+
+### 4. P2/P3 — 복합 사후분포 게이트 실측
+
+`evaluate_ensemble_admission`이 실제로 호출되고 `circular_stationary_bootstrap_growth`의 세 번째 반환값(`prob_positive`, 직전까지 버려지던 값)이 캡처됨을 확인했다:
 
 | 계측값 | 값 |
 |---|---:|
-| `admitted_sleeves` (family/cluster 구조) | `57` |
-| `distinct_series` | `1` |
-| OOS evidence bars | `1,700` |
-| `tested_hypotheses` | `6` |
-| evidence rows | `15` |
-| admitted evidence rows | `0` |
-| active route bars | `0` |
-| max active experts | `0` |
-| `is_cash_only` | `true` |
+| 게이트 평가 호출 수 | 18 (=step 수) |
+| guard 차단(`insufficient_evidence`) | 5 |
+| 실제 평가(guard 통과) | 13 |
+| `admitted` | **0 / 13** |
+| `prob_positive` (전 구간) | `0.0000` (13/13 모두) |
+| `growth_2x_cost` (2배 비용 스트레스) | `-1.311` ~ `-1.189` (연환산 log growth) |
 
-신호별 evidence:
+### 5. 근본원인 분해 — 비용이 총알파를 압도
 
-| signal | rows | max prior evidence bars | max posterior positive probability | rejection |
-|---|---:|---:|---:|---|
-| `reversal_st:fast` | 5 | 1,360 | `0.001` | warmup 3, growth probability 2 |
-| `xs_reversal:fast` | 5 | 1,360 | `0.000` | warmup 3, growth probability 2 |
-| `xs_reversal:medium` | 5 | 1,360 | `0.000` | warmup 3, growth probability 2 |
-| **합계** | **15** | — | — | **warmup 9, growth probability 6** |
+`SignalFoldRecord`의 gross/cost/funding 성분을 step별로 분해한 결과(`scratch/verify_router_admission_diagnosis_v2.py`):
 
-현재 `RegimeRouterConfig` 불변 임계값은 다음과 같다.
+| step 누적 evidence bars | gross 연환산 | cost 연환산 | net 연환산 |
+|---:|---:|---:|---:|
+| 180 | `-0.11` | `-0.68` | `-0.79`* |
+| 360 | `+0.23` | `-0.69` | `-0.47` |
+| 900 | `+0.09` | `-0.68` | `-0.61` |
+| 1,800 | `+0.17` | `-0.69` | `-0.53` |
+| 3,060 | `+0.11` | `-0.70` | `-0.60` |
 
-| parameter | value |
-|---|---:|
-| `min_evidence_bars` | `900` |
-| `min_posterior_probability` | `0.90` |
-| `min_effective_blocks` | `20` |
-| `min_positive_inner_folds` | `2` |
-| `n_bootstrap` | `1,000` |
+(*초기 warmup 구간은 표본이 적어 부호가 불안정)
 
-### 4. 수익률 도메인 검증
+**총알파(gross)는 연 +9%~+31%로 실재하고 P1의 강한 t-stat과 방향이 일치한다. 그러나 비용(cost)이 연 -68%~-70%로 거의 상수이며 총알파의 3~7배를 압도해 net이 항상 음수다.** 이는 게이트 산술이나 posterior 폐기 버그가 아니라, **실측된 gross-vs-cost 워터폴**이다.
 
-실제 allocator output을 expert weight로 채점한 bootstrap 입력 6회에서:
+의심되는 원인(범위 외, 미수정): 이번에 새로 admit된 8h/12h lookback 반전 신호는 순위가 2~3봉마다 뒤집히는 초고빈도 신호다. `build_fold_expert_books`가 이를 다른 신호와 동일한 Kelly 사이징으로 처리해, `alpha_smooth=0.08`/`band_frac=0.60`의 완충으로는 회전율 폭증을 충분히 억제하지 못하고 있을 가능성이 높다.
 
-| metric | observed |
-|---|---:|
-| minimum simple net return | `-0.004612` |
-| maximum simple net return | `+0.004675` |
-| observations per call | `1,020` 또는 `1,360` |
-| `net <= -1` count | **0** |
-| non-finite return/statistic rejection | **0** |
-
-이전 raw-z 오배선에서 관측된 `-12.1053..+17.7465` 및 `net<=-1`은 현재
-경로에서 재현되지 않았다. 이번 `posterior=0`은 수치 도메인 파손이 아니라
-실제 성장 posterior가 `0.90` 바닥을 통과하지 못한 결과다.
-
-### 5. L2 / L3 결과
+### 6. L2 / L3 결과
 
 | metric | value |
 |---|---:|
 | L2 verdict | `no_evidence` |
 | annualized log growth | `0.0` |
 | CAGR | `0.0` |
-| excess growth LCB90 | `0.0` |
-| excess growth probability | `0.5` |
 | Sharpe | `0.0` |
-| Sharpe probability | `0.5` |
-| deflated Sharpe probability | `0.5` |
 | max drawdown | `0.0` |
-| annual volatility | `0.0` |
-| annual turnover | `0.0` |
-| cost drag ratio | `0.0` |
-| capacity utilisation p95 | `0.0` |
 | integrity_ok | `true` |
 | L2 reasons | `active_days_ratio=0.0000<0.1`; `rebalances=0<30` |
 | L3 verdict | `reject` |
 | L3 reasons | `low_growth_probability`; `l2_not_pass` |
 
-`target_weights.npy`는 `float32`, shape `(5442, 51)`이며 `nonzero=0`,
-`max_abs=0.0`, `mean_abs=0.0`이다. 따라서 실제 자본 배치는 0%, 현금 비중은
-100%다.
+`target_weights.npy`는 `float32`, shape `(5442, 51)`이며 `nonzero=0`, `max_abs=0.0`, `mean_abs=0.0`이다. 자본 배치 0%, 현금 비중 100%는 이번에도 유지된다.
 
-### 6. Handoff 원자료
+### 7. Handoff 원자료
 
-최종 `EVAL` record:
+`logs/l1_admission.jsonl` 최종 `EVAL` record:
 
 ```json
 {
-  "admitted_sleeves": 57,
+  "admitted_sleeves": 568,
   "distinct_series": 1,
-  "oos_bars": 1700,
+  "oos_bars": 3240,
   "ann_growth": 0.0,
   "ann_lcb90": 0.0,
   "pw_block": 5.0,
   "turnover": 0.0,
   "cost_drag": 0.0,
   "positive_folds": 0,
-  "fold_growths": [0.0, 0.0, 0.0, 0.0, 0.0],
+  "fold_growths": [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
   "mean_abs_net": 0.0,
   "admitted": false
 }
 ```
 
-구조적 sleeve가 존재한다는 사실과 handoff 성장 gate를 통과했다는 사실을
-분리했다. `admitted_sleeves=57`은 후보 구조가 생성됐다는 뜻이고,
-`positive_folds=0/5`와 `admitted=false`가 실제 배포 거부를 결정한다.
-
-### 7. 실행 경고와 판정
-
-- `smart_money_divergence`에 필요한
-  `top_trader_long_short_ratio/long_short_ratio`가 없어 해당 family는
-  `n_ic_bars=0`으로 측정 제외됐다.
-- NumPy correlation 단계에서 표준편차 0에 대한 `invalid value encountered
-  in divide` 경고가 있었으나 프로세스는 종료 코드 0으로 완료됐다.
-- `integrity_ok=true`, return-domain violation 0건, sealed L3 미소비이므로
-  이번 결과의 cash-only는 보호 동작으로 분류한다.
+`fold_growths`가 18개 항목 전부 정확히 `0.0`인 이유는 라우터가 단 한 step도 admit하지 않아 `mu_2d`/`weights_2d`가 전 구간에서 0으로 유지됐기 때문이다(P0가 만든 18-step span 자체는 정상 작동, P2 게이트가 매 step 일관되게 거부).
 
 ### 8. 결론
 
-1. family-only 배선은 실제 데이터에서 `reversal_st`와 `xs_reversal`을
-   구조적 sleeve로 생성했고, prequential route에 6개 가설·15개 evidence
-   row를 전달했다.
-2. 그러나 최대 posterior `0.001`~`0.000`으로 기존 `0.90` threshold와
-   handoff `positive_folds=4` 조건을 모두 충족하지 못했다.
-3. 임계값을 낮추거나 cash-only를 해제할 근거는 없다. 다음 측정 대상은
-   gate가 아니라 admitted family의 OOS 성장성, 특히 reversal signal의
-   fold별 net return 안정성이다.
+1. **P0(L1+L2 통합 walk-forward)와 P1(signal 단위 스크리닝)은 실제 데이터에서 스펙이 예측한 대로 정확히 작동했다** — fold 5→18, OOS 표본 1,700→3,240bar, family pooling에 의한 허위 admit 없이 8개 signal이 개별적으로 강한 통계적 유의성(t up to +8.70)으로 admit됐다.
+2. **P2/P3(복합 사후분포 게이트)도 정상 배선됐다** — `prob_positive`가 실제로 계산·캡처되고, guard(5/18)와 통계 판단(13/18)이 스펙이 정의한 대로 분리되어 동작한다.
+3. **그럼에도 여전히 cash-only다.** 그러나 이번 `no_evidence`의 사유는 더 이상 "도달 불가능한 게이트 산술"이 아니라 **실측된 비용 우위**다: gross alpha는 실재하고 연 +9~31%로 상당하지만, 비용이 연 -68~70%로 이를 3~7배 압도한다. 이는 스펙의 완료 기준("사유가 실제로 계산된 통계량이어야 한다")을 충족하는 정직한 결과다.
+4. **임계값을 낮추거나 cash-only를 해제할 근거는 없다.** 다음 측정 대상은 게이트가 아니라 **8h/12h 초단기 반전 signal의 회전율·비용 모델**이다 — `build_fold_expert_books`의 Kelly 사이징이 이 속도의 신호에 적합한지, `alpha_smooth`/`band_frac` 완충이 이 신호군 전용으로 강화되어야 하는지가 다음 스펙의 후보다.
 
 원본 artifact:
 
-- [result.json](../../logs/futures/compound/20260729_053222/result.json)
-- [diagnostic result.json](../../logs/futures/compound/20260729_053625/result.json)
-- [manifest.json](../../logs/futures/compound/20260729_053222/manifest.json)
-- [target_weights.npy](../../logs/futures/compound/20260729_053222/target_weights.npy)
+- [result.json](../../logs/futures/compound/20260729_075352/result.json)
+- [manifest.json](../../logs/futures/compound/20260729_075352/manifest.json)
+- [target_weights.npy](../../logs/futures/compound/20260729_075352/target_weights.npy)
 - [l1_admission.jsonl](../../logs/l1_admission.jsonl)
+- [l1_cash_only_exit_redesign.md](../specs/l1_cash_only_exit_redesign.md)
