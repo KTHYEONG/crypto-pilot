@@ -763,6 +763,8 @@ class RegimeExpertEvidence:
     admitted: bool
     reasons: tuple[str, ...]
     annual_volatility: float = 0.0
+    regime_mean_net: float = 0.0
+    n_evidence_bars: int = 0
 
 
 @dataclass(slots=True, frozen=True)
@@ -796,6 +798,12 @@ class ExpertReturnTape:
                 raise ValueError(f"all tape arrays must have length {n}, got {arr.shape[0]}")
         if not np.all(self.execution_time_ns_1d <= self.available_time_ns_1d):
             raise CausalityError("execution_time must be <= available_time")
+        names = ("gross_return_1d", "execution_cost_return_1d", "funding_return_1d", "net_return_1d")
+        for name in names:
+            arr = getattr(self, name)
+            bad = int(np.sum(~np.isfinite(arr)))
+            if bad > 0:
+                raise ValueError(f"non-finite return components: {name}={bad}")
         if not np.all(np.isclose(self.net_return_1d,
                                  self.gross_return_1d + self.execution_cost_return_1d + self.funding_return_1d)):
             raise ValueError("net != gross + execution_cost + funding")
@@ -818,6 +826,9 @@ class PrequentialExpertRoute:
     evidence: tuple[RegimeExpertEvidence, ...]
     attribution: RouteAttribution
     tested_hypotheses: int
+    active_expert_count_1d: NDArray[np.int16] | None = None
+    is_cash_only: bool = False
+    fold_route_scales: dict[int, dict[str, float]] | None = None
 
 
 @dataclass(slots=True, frozen=True)
