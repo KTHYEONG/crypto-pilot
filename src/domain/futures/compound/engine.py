@@ -57,8 +57,7 @@ from src.domain.futures.compound.l1_regime_routing import (
 from src.domain.futures.compound.l1_screening import screen_family_edge
 from src.domain.futures.compound.l1_sleeves import (
     build_exit_aware_handoff,
-    estimate_cluster_sleeve_posteriors,
-    precompute_exit_path_cache,
+    build_family_routing_sleeves,
 )
 from src.domain.futures.compound.multiplicity import (
     build_candidate_trial_returns,
@@ -262,9 +261,8 @@ def run_multiscale_compound_engine(
             "[P2] family_screen: n_eff=%.2f admitted_families=%s",
             family_screen.n_effective_independent, family_screen.admitted_families,
         )
-        exit_cache = precompute_exit_path_cache(panel, bars_4h, cost_bps_4h)
-        sleeves = estimate_cluster_sleeve_posteriors(
-            panel, bars_4h, cluster_folds, folds, cost_bps_4h, funding_1h, config.handoff, cache=exit_cache,
+        routing_sleeves = build_family_routing_sleeves(
+            panel, family_screen, cluster_folds, folds,
         )
         btc_idx = bars_4h.symbols.index("BTCUSDT") if "BTCUSDT" in bars_4h.symbols else -1
         eth_idx = bars_4h.symbols.index("ETHUSDT") if "ETHUSDT" in bars_4h.symbols else -1
@@ -284,10 +282,9 @@ def run_multiscale_compound_engine(
             benchmark_returns_1d, bars_4h.timestamps_ns, config.regime_router,
         )
         routed = build_fold_local_regime_forecast(
-            panel, sleeves, cluster_folds, folds, bars_4h, cost_bps_4h, funding_1h,
+            panel, routing_sleeves, folds, bars_4h, cost_bps_4h, funding_1h,
             regime_panel, config.regime_router, config.dynamic_compounding,
             cost_bps=config.ladder.cost_bps,
-            family_screen_admitted_ids=family_screen.admitted_signal_ids,
         )
         forecast = routed.forecast
         weights_2d = compute_dynamic_compounding_path(
@@ -297,7 +294,7 @@ def run_multiscale_compound_engine(
             close_2d=bars_4h.close_2d, cost_bps=config.ladder.cost_bps,
         )
         handoff_result = build_exit_aware_handoff(
-            forecast, sleeves, bars_4h, benchmark_returns_1d, config.handoff,
+            forecast, routing_sleeves, bars_4h, benchmark_returns_1d, config.handoff,
             folds=folds, weights_2d=weights_2d, cost_bps_4h=cost_bps_4h,
             funding_1h_2d=funding_1h,
         )
