@@ -287,7 +287,9 @@ def _check_spec_compliance(spec_path: str) -> tuple[int, list[JsonDiag]]:
             if found:
                 break
         if not found:
-            d = {"file": "", "line": 0, "error": f"Spec: missing test '{test_name}'", "fix_hint": f"Write {test_name}"}
+            target_test_file = s.get("target_test_file", "")
+            fix_hint = f"Write {test_name} in {target_test_file}" if target_test_file else f"Write {test_name}"
+            d = {"file": target_test_file, "line": 0, "error": f"Spec: missing test '{test_name}'", "fix_hint": fix_hint}
             diagnostics.append(d)
 
     wirings = contract.get("wiring", [])
