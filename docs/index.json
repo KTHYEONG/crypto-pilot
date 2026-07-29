@@ -621,5 +621,8 @@
       "tests/unit/domain/futures/compound/test_l1_regime_routing.py",
       "tests/unit/domain/futures/compound/test_l1_signal_evaluation_fix.py"
     ]
+  },
+  "src/domain/futures/compound/l1_screening.py": {
+    "testing": "tests/unit/domain/futures/compound/test_l1_screening.py"
   }
 }
