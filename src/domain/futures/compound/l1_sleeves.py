@@ -1073,7 +1073,23 @@ def estimate_cluster_sleeve_posteriors(
                 aggregated = aggregated[np.isfinite(aggregated)]
                 fold_return = float(np.mean(aggregated)) if aggregated.size else 0.0
 
-                admitted = probability >= config.min_sleeve_posterior_probability
+                is_pass = probability >= config.min_sleeve_posterior_probability
+                oos_pass = False
+                if is_pass and aggregated.size >= config.min_oos_effective_blocks:
+                    from src.domain.futures.compound.bootstrap import (
+                        circular_stationary_bootstrap_growth,
+                        politis_white_block_length,
+                    )
+                    try:
+                        pw_block = politis_white_block_length(aggregated)
+                    except ValueError:
+                        pw_block = 5.0
+                    _, _, oos_prob = circular_stationary_bootstrap_growth(
+                        aggregated, 2191.5, n_bootstrap=config.n_bootstrap,
+                        block_size=pw_block, seed=42,
+                    )
+                    oos_pass = oos_prob >= config.min_oos_posterior_probability
+                admitted = is_pass and oos_pass
                 n_blocks = max(1, fold.fit_end_exclusive // horizon)
                 recorder.record_sleeve(
                     signal_id=descriptor.signal_id, fold=cf.fold_id, cluster=cluster_id,
@@ -1123,7 +1139,10 @@ def estimate_cluster_sleeve_posteriors(
 
             reasons: tuple[str, ...] = ()
             if not p["admitted"]:
-                reasons = ("posterior_below_floor",)
+                if p["probability"] < config.min_sleeve_posterior_probability:
+                    reasons = ("posterior_below_floor",)
+                else:
+                    reasons = ("oos_confirmation_failed",)
 
             output.append(L1SleevePosterior(
                 sleeve_id=sleeve_id,

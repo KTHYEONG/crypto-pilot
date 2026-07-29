@@ -465,35 +465,36 @@ class TestEstimateClusterSleevePosteriors:
         )
         from src.domain.futures.compound.contracts import MarketFeatureCube
 
-        close = np.column_stack([np.linspace(100.0, 200.0, 40) for _ in range(5)]).astype(np.float32)
-        volume = np.ones((40, 5), dtype=np.float32) * 1e6
+        t = 60
+        close = np.column_stack([np.linspace(100.0, 200.0, t) for _ in range(5)]).astype(np.float32)
+        volume = np.ones((t, 5), dtype=np.float32) * 1e6
         market = MarketFeatureCube(
-            timestamps_ns=np.arange(40, dtype=np.int64) * 3_600_000_000_000,
+            timestamps_ns=np.arange(t, dtype=np.int64) * 3_600_000_000_000,
             symbols=tuple("S" + str(i) for i in range(5)),
             fields_2d={"close": close, "quote_volume": volume, "high": close + 1, "low": close - 1},
-            available_2d={"core": np.ones((40, 5), dtype=bool)},
-            eligible_2d=np.ones((40, 5), dtype=bool),
-            entry_block_2d=np.zeros((40, 5), dtype=bool),
-            exit_required_2d=np.zeros((40, 5), dtype=bool),
-            capacity_usdt_2d=np.full((40, 5), 1e6, dtype=np.float64),
-            execution_cost_bps_2d=np.full((40, 5), 8.0, dtype=np.float32),
+            available_2d={"core": np.ones((t, 5), dtype=bool)},
+            eligible_2d=np.ones((t, 5), dtype=bool),
+            entry_block_2d=np.zeros((t, 5), dtype=bool),
+            exit_required_2d=np.zeros((t, 5), dtype=bool),
+            capacity_usdt_2d=np.full((t, 5), 1e6, dtype=np.float64),
+            execution_cost_bps_2d=np.full((t, 5), 8.0, dtype=np.float32),
             data_manifest_hash="test_hash",
         )
         clusters = compute_market_regime_clusters(market, algorithm=ClusteringAlgorithm.ROBUST_KMEANS, k_clusters=2)
-        bars_4h = _bars(40, 5)
-        folds = _folds()
-        cost = np.ones((40, 5), dtype=np.float32)
+        bars_4h = _bars(t, 5)
+        folds_long_oos = tuple(CausalFold(i, 0, 20, 20, 25, 25, 50, 1, 1) for i in range(4))
+        cost = np.ones((t, 5), dtype=np.float32)
         config = HandoffConfig()
         strong_panel = RawSignalPanel(
-            decision_timestamps_ns=np.arange(40, dtype=np.int64),
+            decision_timestamps_ns=np.arange(t, dtype=np.int64),
             symbols=tuple("S" + str(i) for i in range(5)),
             descriptors=(SignalDescriptor("strong", "trend", "fast", 4, "4h", 4, "", "", "v1"),),
-            z_3d=np.ones((40, 5, 1), dtype=np.float32),
-            valid_3d=np.ones((40, 5, 1), dtype=bool),
-            sigma_2d=np.ones((40, 5), dtype=np.float32),
+            z_3d=np.ones((t, 5, 1), dtype=np.float32),
+            valid_3d=np.ones((t, 5, 1), dtype=bool),
+            sigma_2d=np.ones((t, 5), dtype=np.float32),
         )
         cfolds = _cluster_folds(clusters, bars_4h)
-        posteriors = estimate_cluster_sleeve_posteriors(strong_panel, bars_4h, cfolds, folds, cost, np.zeros_like(cost), config)
+        posteriors = estimate_cluster_sleeve_posteriors(strong_panel, bars_4h, cfolds, folds_long_oos, cost, np.zeros_like(cost), config)
         assert len(posteriors) > 0
         for p in posteriors:
             assert p.posterior_positive_probability >= 0.95, f"sleeve {p.sleeve_id} prob={p.posterior_positive_probability} < 0.95"
