@@ -280,6 +280,7 @@ def run_multiscale_compound_engine(
         routed = build_fold_local_regime_forecast(
             panel, sleeves, cluster_folds, folds, bars_4h, cost_bps_4h, funding_1h,
             regime_panel, config.regime_router, config.dynamic_compounding,
+            cost_bps=config.ladder.cost_bps,
         )
         forecast = routed.forecast
         weights_2d = compute_dynamic_compounding_path(
