@@ -8,8 +8,19 @@ from numpy.typing import NDArray
 from scipy import linalg
 from scipy.stats import norm, rankdata
 
-from src.domain.futures.compound.config import HandoffConfig
+from src.domain.futures.compound.allocator import (
+    compute_dynamic_compounding_path,
+)
+from src.domain.futures.compound.bootstrap import (
+    circular_stationary_bootstrap_growth,
+    politis_white_block_length,
+)
+from src.domain.futures.compound.config import (
+    DynamicCompoundingConfig,
+    HandoffConfig,
+)
 from src.domain.futures.compound.contracts import (
+    CalibratedForecastPanel,
     CausalFold,
     FamilyEdgeRecord,
     FamilyEdgeScreen,
@@ -265,11 +276,97 @@ def screen_family_edge(
     )
 
 
+_BARS_PER_YEAR_4H_SCREEN: float = 2190.0
+
+
+def replay_signal_standalone_book(
+    z_2d: NDArray[np.float32], panel: RawSignalPanel, bars_4h: TimeframeBarCube,
+    funding_1h_2d: NDArray[np.float32], oos_slices: tuple[slice, ...],
+    allocator_config: DynamicCompoundingConfig, cost_bps: float,
+    *,
+    declared_orientation: int = 1,
+) -> tuple[NDArray[np.float64], float]:
+    n_bars, n_syms = z_2d.shape
+    mu_2d = (z_2d * declared_orientation).astype(np.float64)
+    mini_panel = CalibratedForecastPanel(
+        decision_timestamps_ns=panel.decision_timestamps_ns,
+        symbols=panel.symbols,
+        mu_2d=mu_2d.astype(np.float32),
+        se_2d=np.full((n_bars, n_syms), np.nan, dtype=np.float32),
+        family_mu_3d=np.zeros((n_bars, n_syms, 1), dtype=np.float32),
+        family_ids=("standalone",),
+        admitted_signal_ids=("standalone",),
+        fold_manifest_hash="",
+    )
+    weights_2d = compute_dynamic_compounding_path(
+        forecast=mini_panel,
+        sigma_2d=panel.sigma_2d,
+        funding_rates_1h_2d=funding_1h_2d,
+        config=allocator_config,
+        close_2d=bars_4h.close_2d,
+        cost_bps=cost_bps,
+    )
+    if not np.all(np.isfinite(weights_2d)):
+        raise ValueError("non_finite_standalone_book")
+
+    close_px = bars_4h.close_2d.astype(np.float64)
+    asset_return_2d = np.zeros((n_bars, n_syms), dtype=np.float64)
+    for t in range(1, n_bars):
+        prev = close_px[t - 1]
+        curr = close_px[t]
+        mask = (prev > 0) & np.isfinite(prev) & (curr > 0) & np.isfinite(curr)
+        asset_return_2d[t, mask] = curr[mask] / prev[mask] - 1.0
+
+    oos_net_list: list[float] = []
+    total_turnover = 0.0
+    n_oos_bars = 0
+    for oos_sl in oos_slices:
+        for t in range(oos_sl.start, oos_sl.stop):
+            w = weights_2d[t]
+            prev_w = weights_2d[t - 1] if t > 0 else np.zeros(n_syms, dtype=np.float64)
+            ret_t = asset_return_2d[t + 1] if t + 1 < n_bars else np.zeros(n_syms, dtype=np.float64)
+            port_ret = float(np.dot(w, ret_t))
+            turnover = float(np.sum(np.abs(w - prev_w)))
+            cost_t = cost_bps * 1e-4 * turnover
+            oos_net_list.append(port_ret - cost_t)
+            total_turnover += turnover
+            n_oos_bars += 1
+
+    net_1d = np.array(oos_net_list, dtype=np.float64)
+    mean_turnover = total_turnover / max(n_oos_bars, 1)
+    return net_1d, mean_turnover
+
+
+def screen_signal_net_edge(
+    net_1d: NDArray[np.float64], config: HandoffConfig,
+) -> tuple[bool, float, float]:
+    finite = net_1d[np.isfinite(net_1d)]
+    n = int(finite.shape[0])
+    if n < config.min_family_ic_samples:
+        return False, 0.0, 0.0
+    ann_net = float(np.mean(finite)) * _BARS_PER_YEAR_4H_SCREEN
+    try:
+        block_length = politis_white_block_length(finite)
+    except ValueError:
+        block_length = 5.0
+    _, _, prob_positive = circular_stationary_bootstrap_growth(
+        finite, _BARS_PER_YEAR_4H_SCREEN,
+        n_bootstrap=config.n_bootstrap,
+        block_size=block_length,
+        seed=42,
+    )
+    passes = bool(prob_positive >= config.min_growth_posterior_probability and ann_net > 0)
+    return passes, prob_positive, ann_net
+
+
 def screen_signal_edge(
     panel: RawSignalPanel,
     bars_4h: TimeframeBarCube,
     folds: tuple[CausalFold, ...],
     config: HandoffConfig,
+    *,
+    funding_1h_2d: NDArray[np.float32],
+    allocator_config: DynamicCompoundingConfig,
 ) -> SignalEdgeScreen:
     oos_slices: list[slice] = []
     for fold in folds:
@@ -363,6 +460,32 @@ def screen_signal_edge(
         else:
             final_admitted = True
 
+        # P1: 4th gate — net edge screen (C3 replay)
+        if final_admitted:
+            try:
+                z_2d_signal = panel.z_3d[:, :, desc_idx].astype(np.float32)
+                net_1d, turnover = replay_signal_standalone_book(
+                    z_2d_signal, panel, bars_4h, funding_1h_2d,
+                    tuple(oos_slices), allocator_config, config.screen_cost_bps,
+                    declared_orientation=declared_orientation,
+                )
+                net_passes, net_prob, net_ann = screen_signal_net_edge(net_1d, config)
+                if not net_passes:
+                    final_admitted = False
+                    reasons_list.append("net_edge_not_significant_after_cost")
+            except ValueError:
+                final_admitted = False
+                reasons_list.append("net_edge_replay_failed")
+                net_prob = 0.0
+                net_ann = 0.0
+                turnover = 0.0
+        else:
+            net_prob = 0.0
+            net_ann = 0.0
+            turnover = 0.0
+
+        edge_per_turn = (net_ann / max(turnover * _BARS_PER_YEAR_4H_SCREEN, 1e-12)) * 1e4 if turnover > 0 else 0.0
+
         records.append(SignalEdgeRecord(
             signal_id=signal_id, family=family, speed=speed,
             target_horizon_hours=target_horizon_hours,
@@ -372,6 +495,10 @@ def screen_signal_edge(
             declared_orientation=declared_orientation,
             admitted=final_admitted,
             reasons=tuple(reasons_list),
+            intrinsic_turnover_per_bar=turnover,
+            net_growth_ann=net_ann,
+            net_growth_probability=net_prob,
+            edge_per_turnover_bps=edge_per_turn,
         ))
 
         if recorder.enabled:
@@ -382,6 +509,10 @@ def screen_signal_edge(
                 declared_orientation=declared_orientation,
                 admitted=final_admitted,
                 reasons=tuple(reasons_list),
+                intrinsic_turnover_per_bar=turnover,
+                net_growth_ann=net_ann,
+                net_growth_probability=net_prob,
+                edge_per_turnover_bps=edge_per_turn,
             )
 
         if final_admitted:

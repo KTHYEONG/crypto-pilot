@@ -246,11 +246,11 @@ def build_fold_expert_books(
     panel: RawSignalPanel, contributions: tuple[ExpertContribution, ...],
     bars_4h: TimeframeBarCube, funding_1h_2d: NDArray[np.float32],
     allocator_config: DynamicCompoundingConfig, cost_bps: float,
-) -> NDArray[np.float64]:
+) -> tuple[NDArray[np.float64], NDArray[np.float64]]:
     t_total, n_symbols = panel.z_3d.shape[0], panel.z_3d.shape[1]
     n_experts = len(contributions)
     if n_experts == 0:
-        return np.zeros((0, t_total, n_symbols), dtype=np.float64)
+        return np.zeros((0, t_total, n_symbols), dtype=np.float64), np.zeros((t_total, n_symbols), dtype=np.float64)
 
     contribution_3d = np.zeros((n_experts, t_total, n_symbols), dtype=np.float64)
     for e, c in enumerate(contributions):
@@ -275,7 +275,7 @@ def build_fold_expert_books(
         admitted_signal_ids=tuple(c.signal_id for c in contributions),
         fold_manifest_hash="",
     )
-    weights_2d = compute_dynamic_compounding_path(
+    book_weights_2d = compute_dynamic_compounding_path(
         forecast=mini_panel,
         sigma_2d=panel.sigma_2d,
         funding_rates_1h_2d=funding_1h_2d,
@@ -284,7 +284,7 @@ def build_fold_expert_books(
         cost_bps=cost_bps,
     )
 
-    if not np.all(np.isfinite(weights_2d)):
+    if not np.all(np.isfinite(book_weights_2d)):
         raise ValueError("non-finite allocator output in build_fold_expert_books")
 
     abs_contrib = np.abs(contribution_3d)
@@ -293,20 +293,65 @@ def build_fold_expert_books(
     expert_weights_3d = np.zeros((n_experts, t_total, n_symbols), dtype=np.float64)
     for e in range(n_experts):
         share = np.where(safe, abs_contrib[e] / np.maximum(total_abs, 1e-12), 0.0)
-        expert_weights_3d[e] = share * weights_2d
+        expert_weights_3d[e] = share * book_weights_2d
 
-    return expert_weights_3d
+    return expert_weights_3d, book_weights_2d
+
+
+def allocate_book_turnover_cost(
+    book_weights_2d: NDArray[np.float64],
+    expert_weights_3d: NDArray[np.float64],
+    cost_bps_4h: NDArray[np.float32],
+    oos_start: int,
+    oos_end: int,
+) -> NDArray[np.float64]:
+    n_experts = expert_weights_3d.shape[0]
+    n_oos = oos_end - oos_start
+    if n_experts == 0:
+        return np.zeros((0, n_oos), dtype=np.float64)
+
+    d_2d = np.zeros((n_oos, expert_weights_3d.shape[2]), dtype=np.float64)
+    book_cost_1d = np.zeros(n_oos, dtype=np.float64)
+    for k, t in enumerate(range(oos_start, oos_end)):
+        book_t = book_weights_2d[t]
+        prev_book = book_weights_2d[t - 1] if t > oos_start else np.zeros_like(book_t)
+        d = np.abs(book_t - prev_book)
+        d_2d[k] = d
+        book_cost_1d[k] = -float(np.dot(cost_bps_4h[t], d) * 1e-4)
+
+    expert_cost = np.zeros((n_experts, n_oos), dtype=np.float64)
+    abs_contrib = np.abs(expert_weights_3d)
+    for k, t in enumerate(range(oos_start, oos_end)):
+        d = d_2d[k]
+        total_d = float(np.sum(d))
+        sum_abs = np.sum(abs_contrib[:, t, :], axis=0)
+        safe_sum = sum_abs > 1e-12
+        share = np.where(safe_sum, abs_contrib[:, t, :] / np.maximum(sum_abs, 1e-12), 0.0)
+        for e in range(n_experts):
+            phi = float(np.dot(share[e], d)) / total_d if total_d > 1e-12 and np.any(safe_sum) else 1.0 / n_experts
+            expert_cost[e, k] = phi * book_cost_1d[k]
+
+    if np.any(book_cost_1d < -1e-12):
+        for t_idx in range(n_oos):
+            allocated_sum = float(np.sum(expert_cost[:, t_idx]))
+            tol = 1e-12 * max(1.0, abs(book_cost_1d[t_idx]))
+            if abs(allocated_sum - book_cost_1d[t_idx]) > tol:
+                raise ValueError("book_cost_allocation_identity_violated")
+
+    return expert_cost
 
 
 def score_expert_returns(
     expert_weights_2d: NDArray[np.float64], asset_return_2d: NDArray[np.float64],
-    cost_bps_4h: NDArray[np.float32], funding_4h_2d: NDArray[np.float64],
+    expert_cost_1d: NDArray[np.float64], funding_4h_2d: NDArray[np.float64],
     oos_start: int, oos_end: int,
 ) -> tuple[NDArray[np.float64], NDArray[np.float64], NDArray[np.float64], NDArray[np.float64]]:
     n_oos = oos_end - oos_start
-    n_symbols = expert_weights_2d.shape[1]
+    if expert_cost_1d.shape[0] != n_oos:
+        raise ValueError(
+            f"expert_cost_1d length {expert_cost_1d.shape[0]} != n_oos {n_oos}"
+        )
     gross = np.zeros(n_oos, dtype=np.float64)
-    cost = np.zeros(n_oos, dtype=np.float64)
     funding = np.zeros(n_oos, dtype=np.float64)
     net = np.zeros(n_oos, dtype=np.float64)
 
@@ -314,18 +359,15 @@ def score_expert_returns(
         pos = expert_weights_2d[t]
         if t + 1 < expert_weights_2d.shape[0]:
             gross[k] = float(np.dot(pos, asset_return_2d[t + 1]))
-        prev_pos = expert_weights_2d[t - 1] if t > oos_start else np.zeros(n_symbols, dtype=np.float64)
-        turnover = np.abs(pos - prev_pos)
-        cost[k] = -float(np.dot(cost_bps_4h[t], turnover) * 1e-4)
         funding[k] = -float(np.dot(pos, funding_4h_2d[t]))
-        net[k] = gross[k] + cost[k] + funding[k]
+        net[k] = gross[k] + expert_cost_1d[k] + funding[k]
 
-    if not np.all(np.isfinite(gross)) or not np.all(np.isfinite(cost)) or not np.all(np.isfinite(funding)) or not np.all(np.isfinite(net)):
+    if not np.all(np.isfinite(gross)) or not np.all(np.isfinite(expert_cost_1d)) or not np.all(np.isfinite(funding)) or not np.all(np.isfinite(net)):
         raise ValueError("non-finite return components")
     if np.any(net <= -1.0):
         raise ValueError("invalid_expert_return_domain: net return <= -1")
 
-    return gross, cost, funding, net
+    return gross, expert_cost_1d, funding, net
 
 
 def apply_walk_forward_carry(
@@ -463,7 +505,7 @@ def _build_prequential_expert_route_impl(
             fold_route_scales[fold_id] = {}
             continue
 
-        expert_weights_3d = build_fold_expert_books(
+        expert_weights_3d, book_weights_2d = build_fold_expert_books(
             panel, contributions, bars_4h, funding_1h_2d,
             allocator_config, cost_bps,
         )
@@ -471,6 +513,12 @@ def _build_prequential_expert_route_impl(
         n_experts = len(contributions)
         active_this_fold: dict[str, float] = {}
         fold_regime_overlay: dict[int, float] = {}
+
+        # P0: allocate book turnover cost to experts before scoring
+        expert_cost_per_expert_2d = allocate_book_turnover_cost(
+            book_weights_2d, expert_weights_3d, cost_bps_4h,
+            oos_start, oos_end,
+        )
 
         # P2: score every expert first (unchanged), deferring the admission
         # decision to a single ensemble-level composite test instead of a
@@ -480,10 +528,11 @@ def _build_prequential_expert_route_impl(
             c = contributions[e]
             signal_id = c.signal_id
             expert_w = expert_weights_3d[e]
+            expert_cost_1d = expert_cost_per_expert_2d[e]
 
             try:
                 gross, expert_cost, funding_cost, net = score_expert_returns(
-                    expert_w, asset_return, cost_bps_4h, funding_4h_2d,
+                    expert_w, asset_return, expert_cost_1d, funding_4h_2d,
                     oos_start, oos_end,
                 )
             except ValueError:
