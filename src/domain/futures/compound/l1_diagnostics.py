@@ -135,16 +135,23 @@ class L1AdmissionRecorder:
         mean_ic: float, t_newey_west: float, sidak_alpha: float,
         declared_orientation: int, admitted: bool,
         reasons: tuple[str, ...] = (),
+        intrinsic_turnover_per_bar: float = 0.0,
+        net_growth_ann: float = 0.0,
+        net_growth_probability: float = 0.0,
+        edge_per_turnover_bps: float = 0.0,
     ) -> None:
         if not self._enabled:
             return
         _LOGGER.info(
             "[ALGO] tag=SCREEN family=%s n_signals=%d n_ic_bars=%d "
             "mean_ic=%.4f t_nw=%.3f sidak_alpha=%.4f "
-            "declared_orientation=%d admitted=%s reasons=%s",
+            "declared_orientation=%d admitted=%s reasons=%s "
+            "turn=%.6f net_ann=%.6f net_prob=%.4f edge_turn=%.4f",
             family, n_signals, n_ic_bars,
             mean_ic, t_newey_west, sidak_alpha,
             declared_orientation, admitted, reasons,
+            intrinsic_turnover_per_bar, net_growth_ann, net_growth_probability,
+            edge_per_turnover_bps,
         )
         self._append_jsonl({
             "tag": "SCREEN",
@@ -157,4 +164,8 @@ class L1AdmissionRecorder:
             "declared_orientation": declared_orientation,
             "admitted": admitted,
             "reasons": list(reasons),
+            "intrinsic_turnover_per_bar": round(intrinsic_turnover_per_bar, 6),
+            "net_growth_ann": round(net_growth_ann, 6),
+            "net_growth_probability": round(net_growth_probability, 4),
+            "edge_per_turnover_bps": round(edge_per_turnover_bps, 4),
         })

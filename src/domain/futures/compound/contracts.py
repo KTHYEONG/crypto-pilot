@@ -649,6 +649,10 @@ class SignalEdgeRecord:
     declared_orientation: int
     admitted: bool
     reasons: tuple[str, ...]
+    intrinsic_turnover_per_bar: float = 0.0
+    net_growth_ann: float = 0.0
+    net_growth_probability: float = 0.0
+    edge_per_turnover_bps: float = 0.0
 
     def __post_init__(self) -> None:
         if not self.signal_id:
