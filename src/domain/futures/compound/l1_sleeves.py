@@ -19,8 +19,10 @@ from src.domain.futures.compound.contracts import (
     ExitPathCache,
     ExitPolicyKind,
     ExitPolicySpec,
+    FamilyEdgeScreen,
     HandoffAdmissionEvidence,
     HandoffResult,
+    L1RoutingSleeve,
     L1SleevePosterior,
     PrecomputedExitPaths,
     RawSignalPanel,
@@ -829,7 +831,7 @@ def compute_compounding_stability(
 
 def build_exit_aware_handoff(
     forecast: CalibratedForecastPanel,
-    sleeves: tuple[L1SleevePosterior, ...],
+    sleeves: tuple[L1RoutingSleeve | L1SleevePosterior, ...],
     bars_4h: TimeframeBarCube,
     benchmark_returns_1d: NDArray[np.float64],
     config: HandoffConfig,
@@ -843,7 +845,7 @@ def build_exit_aware_handoff(
 
     recorder = L1AdmissionRecorder()
 
-    admitted_sleeves = [s for s in sleeves if s.admitted]
+    admitted_sleeves = [s for s in sleeves if getattr(s, 'admitted', True)]
     if not admitted_sleeves:
         no_evidence = HandoffAdmissionEvidence(0.0, 0.0, 0.0, 0.0, 0.0, 0, 0.0, (), False, ("no_admitted_sleeves",), 0.0, ())
         recorder.record_gate(admitted_sleeves=0, distinct_series=0, oos_bars=0, ann_growth=0.0, ann_lcb90=0.0, pw_block=0.0, turnover=0.0, cost_drag=0.0, positive_folds=0, fold_growths=(), mean_abs_net=0.0, admitted=False)
@@ -1167,6 +1169,66 @@ def estimate_cluster_sleeve_posteriors(
         # Step 4: Release descriptor-scoped path arrays
         paths = None
         pass
+
+    return tuple(output)
+
+
+def build_family_routing_sleeves(
+    panel: RawSignalPanel,
+    family_screen: FamilyEdgeScreen,
+    cluster_folds: tuple[CausalClusterFold, ...],
+    folds: tuple[CausalFold, ...],
+) -> tuple[L1RoutingSleeve, ...]:
+    panel_signal_ids = {d.signal_id for d in panel.descriptors}
+    for sid in family_screen.admitted_signal_ids:
+        if sid not in panel_signal_ids:
+            raise ValueError(f"admitted signal id {sid} not found in panel")
+
+    desc_map = {d.signal_id: d for d in panel.descriptors}
+    admitted_set = set(family_screen.admitted_signal_ids)
+    output: list[L1RoutingSleeve] = []
+    n_symbols = len(panel.symbols)
+    fold_map = {f.fold_id: f for f in folds}
+
+    for cf in cluster_folds:
+        if cf.fold_id not in fold_map:
+            raise ValueError(f"fold {cf.fold_id} from cluster_folds not found in folds")
+
+        cluster_panel = cf.panel
+        unique_clusters = sorted(int(x) for x in np.unique(cluster_panel.cluster_labels))
+
+        for cluster_id in unique_clusters:
+            sym_mask = cluster_panel.cluster_labels == cluster_id
+            sym_indices = np.where(sym_mask)[0]
+            if len(sym_indices) < 2:
+                continue
+
+            for signal_id in sorted(admitted_set):
+                descriptor = desc_map[signal_id]
+                member_mask = np.zeros(n_symbols, dtype=np.bool_)
+                member_mask[sym_indices] = True
+                sleeve_id = f"{signal_id}:fold{cf.fold_id}:cluster_{cluster_id}"
+                output.append(L1RoutingSleeve(
+                    sleeve_id=sleeve_id,
+                    signal_id=signal_id,
+                    family=descriptor.family,
+                    outer_fold_id=cf.fold_id,
+                    cluster_id=cluster_id,
+                    member_mask_1d=member_mask,
+                    member_hash=cf.member_hash,
+                    declared_orientation=descriptor.declared_orientation,
+                ))
+
+    for sleeve in output:
+        desc = desc_map[sleeve.signal_id]
+        if sleeve.declared_orientation != desc.declared_orientation:
+            raise ValueError(
+                f"orientation mismatch for {sleeve.signal_id}: "
+                f"sleeve={sleeve.declared_orientation} vs descriptor={desc.declared_orientation}"
+            )
+
+    _LOGGER.info("[ALGO] build_family_routing_sleeves: %d sleeves from %d admitted signals",
+                 len(output), len(admitted_set))
 
     return tuple(output)
 

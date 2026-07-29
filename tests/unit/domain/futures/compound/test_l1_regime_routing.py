@@ -15,6 +15,7 @@ from src.domain.futures.compound.contracts import (
     CausalFold,
     ExitPolicyKind,
     ExitPolicySpec,
+    L1RoutingSleeve,
     L1SleevePosterior,
     PrequentialExpertRoute,
     RawSignalPanel,
@@ -74,7 +75,7 @@ def _dummy_bars(n: int = 500, n_syms: int = 4) -> TimeframeBarCube:
     )
 
 
-def _dummy_sleeves() -> tuple[L1SleevePosterior, ...]:
+def _dummy_sleeves() -> tuple[L1RoutingSleeve, ...]:
     return ()
 
 
@@ -155,20 +156,17 @@ def test_future_fold_sleeves_cannot_change_past_forecast() -> None:
     dc_config = DynamicCompoundingConfig()
 
     result_a = build_fold_local_regime_forecast(
-        panel, _dummy_sleeves(), (), folds, bars, cost, funding,
-        regime, config, dc_config,
+        panel, _dummy_sleeves(), folds, bars, cost, funding, regime, config, dc_config,
     )
 
     sleeve_mutated = (
-        L1SleevePosterior(
+        L1RoutingSleeve(
             "sleeve_bad:fold4", "mom_fast", "momentum_ts", 4, 0,
-            np.ones(4, dtype=np.bool_), "h1",
-            None, 0.0, 0.0, 1.0, 0.5, 1.0, (), 30, True, (),
+            np.ones(4, dtype=np.bool_), "h1", 1,
         ),
     )
     result_b = build_fold_local_regime_forecast(
-        panel, sleeve_mutated, (), folds, bars, cost, funding,
-        regime, config, dc_config,
+        panel, sleeve_mutated, folds, bars, cost, funding, regime, config, dc_config,
     )
     for f in folds[:4]:
         oos_slice = slice(f.oos_start, f.oos_end_exclusive)
@@ -197,8 +195,7 @@ def test_fold_local_member_masks_are_not_unioned() -> None:
     dc_config = DynamicCompoundingConfig()
 
     result = build_fold_local_regime_forecast(
-        panel, _dummy_sleeves(), (), folds, bars, cost, funding,
-        regime, config, dc_config,
+        panel, _dummy_sleeves(), folds, bars, cost, funding, regime, config, dc_config,
     )
     for f in folds:
         oos_slice = slice(f.oos_start, f.oos_end_exclusive)
@@ -227,8 +224,7 @@ def test_insufficient_regime_blocks_fail_closed() -> None:
     folds = _dummy_folds(n)
 
     result = build_fold_local_regime_forecast(
-        panel, _dummy_sleeves(), (), folds, bars, cost, funding,
-        regime, config, dc_config,
+        panel, _dummy_sleeves(), folds, bars, cost, funding, regime, config, dc_config,
     )
     assert np.all(result.forecast.mu_2d == 0.0)
 
@@ -358,8 +354,7 @@ def test_engine_invokes_fold_local_regime_router_with_real_objects() -> None:
     dc_config = DynamicCompoundingConfig()
 
     result = build_fold_local_regime_forecast(
-        panel, _dummy_sleeves(), (), folds, bars, cost, funding,
-        regime, config, dc_config,
+        panel, _dummy_sleeves(), folds, bars, cost, funding, regime, config, dc_config,
     )
     assert isinstance(result.forecast.mu_2d, np.ndarray)
     assert result.forecast.mu_2d.shape == (n, 4)
@@ -387,8 +382,7 @@ def test_gate_and_deployment_share_identical_weights_after_routing() -> None:
     dc_config = DynamicCompoundingConfig()
 
     result = build_fold_local_regime_forecast(
-        panel, _dummy_sleeves(), (), folds, bars, cost, funding,
-        regime, config, dc_config,
+        panel, _dummy_sleeves(), folds, bars, cost, funding, regime, config, dc_config,
     )
     weights = compute_dynamic_compounding_path(
         forecast=result.forecast,
@@ -456,8 +450,7 @@ def test_regime_router_resource_budget() -> None:
     config = _default_config()
     dc_config = DynamicCompoundingConfig()
     result = build_fold_local_regime_forecast(
-        panel, _dummy_sleeves(), (), folds, bars, cost, funding,
-        regime, config, dc_config,
+        panel, _dummy_sleeves(), folds, bars, cost, funding, regime, config, dc_config,
     )
     elapsed = time.monotonic() - start
     assert elapsed < 30.0
@@ -528,7 +521,7 @@ def test_temporal_stability_failure_covers_rejection_path(monkeypatch: pytest.Mo
     policy = ExitPolicySpec("t:time", ExitPolicyKind.TIME, None, None, None, 0, 4, -1, "h")
     sleeves = (L1SleevePosterior("s1:f0:c0", "mom_fast", "momentum_ts", 0, 0,
         np.ones(panel_syms, dtype=np.bool_), "h1", policy, 0.1, 0.01, 0.02, 0.95, 1.0, (0.01,), 30, True, ()),)
-    result = build_fold_local_regime_forecast(panel, sleeves, (), folds, bars, cost, funding, regime, config, dc_config)
+    result = build_fold_local_regime_forecast(panel, sleeves, folds, bars, cost, funding, regime, config, dc_config)
     assert result.attribution.reason_counts.get("insufficient_temporal_samples", 0) >= 0
 
 
@@ -545,8 +538,7 @@ def test_staged_admission_short_circuits_before_regime() -> None:
     dc_config = DynamicCompoundingConfig()
     folds = _dummy_folds(n)
     result = build_fold_local_regime_forecast(
-        panel, _dummy_sleeves(), (), folds, bars, cost, funding,
-        regime, config, dc_config,
+        panel, _dummy_sleeves(), folds, bars, cost, funding, regime, config, dc_config,
     )
     assert result.attribution.unconditional_pass == 0
 
@@ -564,8 +556,7 @@ def test_bootstrap_does_not_duplicate_prior_rows() -> None:
     dc_config = DynamicCompoundingConfig()
     folds = _dummy_folds(n)
     result = build_fold_local_regime_forecast(
-        panel, _dummy_sleeves(), (), folds, bars, cost, funding,
-        regime, config, dc_config,
+        panel, _dummy_sleeves(), folds, bars, cost, funding, regime, config, dc_config,
     )
     assert len(result.evidence) >= 0
     tape_ids = set()
@@ -666,8 +657,7 @@ def test_real_route_allocator_handoff_wiring() -> None:
     config = _default_config()
     dc_config = DynamicCompoundingConfig()
     result = build_fold_local_regime_forecast(
-        panel, _dummy_sleeves(), (), folds, bars, cost, funding,
-        regime, config, dc_config,
+        panel, _dummy_sleeves(), folds, bars, cost, funding, regime, config, dc_config,
     )
     from src.domain.futures.compound.allocator import compute_dynamic_compounding_path
     weights = compute_dynamic_compounding_path(
@@ -698,8 +688,7 @@ def test_all_route_rejections_are_attributed() -> None:
     dc_config = DynamicCompoundingConfig()
     folds = _dummy_folds(n)
     result = build_fold_local_regime_forecast(
-        panel, _dummy_sleeves(), (), folds, bars, cost, funding,
-        regime, config, dc_config,
+        panel, _dummy_sleeves(), folds, bars, cost, funding, regime, config, dc_config,
     )
     all_evidence = result.evidence
     rejected = [e for e in all_evidence if not e.admitted]
@@ -726,7 +715,7 @@ def test_temporal_rejection_is_recorded_after_unconditional_pass(
     )
 
     result = build_fold_local_regime_forecast(
-        panel, (), (), folds, bars,
+        panel, (), folds, bars,
         np.zeros((n, 2), dtype=np.float32),
         np.zeros((n * 4, 2), dtype=np.float32),
         regime, _default_config(), DynamicCompoundingConfig(),
@@ -761,8 +750,7 @@ def test_routing_with_non_empty_sleeves_produces_evidence_tape() -> None:
         ),
     )
     result = build_fold_local_regime_forecast(
-        panel, sleeves, (), folds, bars, cost, funding,
-        regime, config, dc_config,
+        panel, sleeves, folds, bars, cost, funding, regime, config, dc_config,
     )
     assert result.tested_hypotheses >= 0
     assert result.attribution.candidate_experts >= 0
@@ -814,8 +802,7 @@ def test_routing_loop_executes_with_prior_evidence(monkeypatch: pytest.MonkeyPat
         ),
     )
     result = build_fold_local_regime_forecast(
-        panel, sleeves, (), folds, bars, cost, funding,
-        regime, config, dc_config,
+        panel, sleeves, folds, bars, cost, funding, regime, config, dc_config,
     )
     assert result.attribution.candidate_experts >= 0
 
@@ -834,8 +821,7 @@ def test_prequential_route_resource_budget() -> None:
     config = _default_config()
     dc_config = DynamicCompoundingConfig()
     result = build_fold_local_regime_forecast(
-        panel, _dummy_sleeves(), (), folds, bars, cost, funding,
-        regime, config, dc_config,
+        panel, _dummy_sleeves(), folds, bars, cost, funding, regime, config, dc_config,
     )
     elapsed = time.monotonic() - start
     assert elapsed < 30.0
@@ -1030,8 +1016,7 @@ def test_gate_order_and_reasons() -> None:
     regime = build_causal_regime_panel(ret, ts, _default_config())
     dc_config = DynamicCompoundingConfig()
     result = build_fold_local_regime_forecast(
-        panel, _dummy_sleeves(), (), folds, bars, cost, funding,
-        regime, config, dc_config,
+        panel, _dummy_sleeves(), folds, bars, cost, funding, regime, config, dc_config,
     )
     evidence = [e for e in result.evidence if not e.admitted]
     if evidence:
@@ -1058,8 +1043,7 @@ def test_gate_has_no_redundant_growth_test() -> None:
             np.ones(4, dtype=np.bool_), "h1", policy, 0.1, 0.01, 0.02, 0.95, 1.0, (0.01,), 30, True, ()),
     )
     result = build_fold_local_regime_forecast(
-        panel, sleeves, (), folds, bars, cost, funding,
-        regime, config, dc_config,
+        panel, sleeves, folds, bars, cost, funding, regime, config, dc_config,
     )
     for e in result.evidence:
         assert isinstance(e.growth_lcb90, float)
@@ -1125,7 +1109,7 @@ def test_engine_route_produces_evaluation_window_support() -> None:
             np.ones(2, dtype=np.bool_), "h1", policy, 0.1, 0.01, 0.02, 0.95, 1.0, (0.01,), 30, True, ()),
     )
     result = build_fold_local_regime_forecast(
-        panel, sleeves, (), folds, bars, cost, funding,
+        panel, sleeves, folds, bars, cost, funding,
         regime, router_config, dc_config,
     )
     assert result.attribution.candidate_experts >= 0
@@ -1144,8 +1128,7 @@ def test_engine_cash_only_when_no_expert_admitted() -> None:
     regime = build_causal_regime_panel(ret, ts, config)
     dc_config = DynamicCompoundingConfig()
     result = build_fold_local_regime_forecast(
-        panel, (), (), folds, bars, cost, funding,
-        regime, config, dc_config,
+        panel, (), folds, bars, cost, funding, regime, config, dc_config,
     )
     assert result.is_cash_only is True or np.all(result.forecast.mu_2d == 0)
 
@@ -1196,8 +1179,7 @@ def test_walk_forward_carry_applied_when_expert_admitted() -> None:
         ),
     )
     result = build_fold_local_regime_forecast(
-        panel, sleeves, (), folds, bars, cost, funding,
-        regime, config, dc_config,
+        panel, sleeves, folds, bars, cost, funding, regime, config, dc_config,
     )
     deploy_start = max(f.oos_end_exclusive for f in folds)
     if deploy_start < n:
