@@ -183,10 +183,11 @@ def test_engine_folds_do_not_overlap_sealed_holdout_window() -> None:
         )
 
 
-def test_estimate_cluster_sleeve_posteriors_admits_on_fit_probability_only() -> None:
+def test_estimate_cluster_sleeve_posteriors_rejects_is_strong_oos_reversed() -> None:
     """Fit-window correlation is strongly positive (high posterior probability)
-    while the OOS window deliberately reverses sign, forcing a negative
-    fold_return. Admission must still succeed on probability alone."""
+    while the OOS window deliberately reverses sign. The P1 OOS AND-gate must
+    reject this sleeve (oos_confirmation_failed), fixing the old bug where
+    in-sample significance alone granted admission."""
     n_syms, n_bars = 2, 40
     symbols = ("S0", "S1")
 
@@ -236,15 +237,16 @@ def test_estimate_cluster_sleeve_posteriors_admits_on_fit_probability_only() -> 
         panel, bars_4h, (cf,), (fold,), cost, funding, config,
     )
 
-    admitted_negative = [
+    rejected_negative = [
         s for s in result
-        if s.admitted and s.posterior_positive_probability >= 0.65 and s.mean_net_return < 0.0
+        if not s.admitted
+        and s.posterior_positive_probability >= 0.95
+        and s.mean_net_return < 0.0
+        and "oos_confirmation_failed" in s.reasons
     ]
-    assert admitted_negative, (
-        f"expected an admitted sleeve with negative fold return; got {result}"
+    assert rejected_negative, (
+        f"expected a sleeve rejected by OOS confirmation; got {result}"
     )
-    for s in admitted_negative:
-        assert s.reasons == ()
 
 
 def test_run_multiscale_compound_engine_passes_five_time_ordered_folds_to_l2(
