@@ -472,6 +472,10 @@ def _build_prequential_expert_route_impl(
         active_this_fold: dict[str, float] = {}
         fold_regime_overlay: dict[int, float] = {}
 
+        # P2: score every expert first (unchanged), deferring the admission
+        # decision to a single ensemble-level composite test instead of a
+        # per-expert 7-reason sequential cascade.
+        expert_fold_data: list[tuple[str, SignalFoldRecord, SignalFoldRecord]] = []
         for e in range(n_experts):
             c = contributions[e]
             signal_id = c.signal_id
@@ -505,223 +509,86 @@ def _build_prequential_expert_route_impl(
                 regime_code_1d=regime_panel.code_1d[oos_start:oos_end].astype(np.int8),
             )
             prior = concatenate_signal_evidence(signal_evidence_history, signal_id)
-            n_evidence_bars = prior.net_1d.size
+            expert_fold_data.append((signal_id, record, prior))
+
+        if expert_fold_data:
+            ensemble_signal_ids = tuple(d[0] for d in expert_fold_data)
+            ensemble_prior = aggregate_ensemble_evidence(
+                signal_evidence_history, ensemble_signal_ids,
+            )
+            admitted, prob_positive, growth_2x_val, guard_reason = evaluate_ensemble_admission(
+                ensemble_prior, config,
+            )
+            n_evidence_bars = ensemble_prior.net_1d.size
+
+            if guard_reason is None:
+                n_hypotheses += 1
 
             gate_reasons: list[str] = []
+            if guard_reason is not None:
+                gate_reasons.append(guard_reason)
+            elif not admitted:
+                if prob_positive < config.min_posterior_probability:
+                    gate_reasons.append("growth_probability_below_threshold")
+                if growth_2x_val <= 0.0:
+                    gate_reasons.append("growth_2x_cost_not_positive")
 
-            if n_evidence_bars < config.min_evidence_bars:
-                gate_reasons.append("insufficient_evidence_window")
-                all_evidence.append(RegimeExpertEvidence(
-                    signal_id=signal_id, outer_fold_id=fold_id,
-                    regime_code=0, effective_blocks=0,
-                    posterior_positive_probability=0.0,
-                    growth_lcb90=0.0, growth_2x_cost=0.0,
-                    robust_inner_growth=0.0, positive_inner_folds=0,
-                    scale=0.0, admitted=False,
-                    reasons=tuple(gate_reasons),
-                    n_evidence_bars=n_evidence_bars,
-                ))
-                reason_counts["insufficient_evidence_window"] = (
-                    reason_counts.get("insufficient_evidence_window", 0) + 1
-                )
-                signal_evidence_history.setdefault(signal_id, []).append(record)
-                continue
+            for reason in gate_reasons:
+                reason_counts[reason] = reason_counts.get(reason, 0) + 1
 
-            n_hypotheses += 1
+            for signal_id, record, prior in expert_fold_data:
+                if admitted:
+                    # P2: regime overlay (no longer gates admission)
+                    regime_overlay = compute_regime_overlay(prior, regime_codes_present, config)
+                    for code, overlay in regime_overlay.items():
+                        fold_regime_overlay[code] = overlay
+                        if overlay < 1.0:
+                            regime_pass_count += 1
+                        all_evidence.append(RegimeExpertEvidence(
+                            signal_id=signal_id, outer_fold_id=fold_id,
+                            regime_code=code,
+                            effective_blocks=int(np.sum(prior.regime_code_1d == code)),
+                            posterior_positive_probability=prob_positive,
+                            growth_lcb90=0.0, growth_2x_cost=growth_2x_val,
+                            robust_inner_growth=0.0,
+                            positive_inner_folds=0,
+                            scale=overlay,
+                            admitted=True,
+                            reasons=(),
+                            regime_mean_net=float(np.mean(prior.net_1d[prior.regime_code_1d == code])) if np.any(prior.regime_code_1d == code) else 0.0,
+                            n_evidence_bars=n_evidence_bars,
+                        ))
 
-            finite = np.isfinite(prior.net_1d)
-            n_finite = int(np.sum(finite))
+                    active_this_fold[signal_id] = 1.0
 
-            if n_finite < config.min_effective_blocks:
-                gate_reasons.append("insufficient_effective_blocks")
-                all_evidence.append(RegimeExpertEvidence(
-                    signal_id=signal_id, outer_fold_id=fold_id,
-                    regime_code=0, effective_blocks=n_finite,
-                    posterior_positive_probability=0.0,
-                    growth_lcb90=0.0, growth_2x_cost=0.0,
-                    robust_inner_growth=0.0, positive_inner_folds=0,
-                    scale=0.0, admitted=False,
-                    reasons=tuple(gate_reasons),
-                    n_evidence_bars=n_evidence_bars,
-                ))
-                reason_counts["insufficient_effective_blocks"] = (
-                    reason_counts.get("insufficient_effective_blocks", 0) + 1
-                )
-                signal_evidence_history.setdefault(signal_id, []).append(record)
-                continue
-
-            try:
-                block_length = politis_white_block_length(prior.net_1d[finite])
-            except ValueError:
-                block_length = 5.0
-            effective_blocks = int(np.floor(n_finite / max(block_length, 1.0)))
-
-            lcb90, _, prob_positive = circular_stationary_bootstrap_growth(
-                prior.net_1d[finite], _BARS_PER_YEAR_4H,
-                n_bootstrap=config.n_bootstrap,
-                block_size=block_length,
-                seed=42,
-            )
-
-            if prob_positive < config.min_posterior_probability:
-                gate_reasons.append("growth_probability_below_threshold")
-                all_evidence.append(RegimeExpertEvidence(
-                    signal_id=signal_id, outer_fold_id=fold_id,
-                    regime_code=0, effective_blocks=effective_blocks,
-                    posterior_positive_probability=prob_positive,
-                    growth_lcb90=lcb90, growth_2x_cost=0.0,
-                    robust_inner_growth=0.0, positive_inner_folds=0,
-                    scale=0.0, admitted=False,
-                    reasons=tuple(gate_reasons),
-                    n_evidence_bars=n_evidence_bars,
-                ))
-                reason_counts["growth_probability_below_threshold"] = (
-                    reason_counts.get("growth_probability_below_threshold", 0) + 1
-                )
-                signal_evidence_history.setdefault(signal_id, []).append(record)
-                continue
-
-            stressed = stress_execution_costs(prior.gross_1d, prior.cost_1d, prior.funding_1d, 2.0)
-            stressed_finite = stressed[np.isfinite(stressed)]
-            if len(stressed_finite) > 0:
-                growth_2x_val = float(np.mean(np.log1p(stressed_finite))) * _BARS_PER_YEAR_4H
-            else:
-                growth_2x_val = -1e6
-
-            if growth_2x_val <= 0.0:
-                gate_reasons.append("growth_2x_cost_not_positive")
-                all_evidence.append(RegimeExpertEvidence(
-                    signal_id=signal_id, outer_fold_id=fold_id,
-                    regime_code=0, effective_blocks=effective_blocks,
-                    posterior_positive_probability=prob_positive,
-                    growth_lcb90=lcb90, growth_2x_cost=growth_2x_val,
-                    robust_inner_growth=0.0, positive_inner_folds=0,
-                    scale=0.0, admitted=False,
-                    reasons=tuple(gate_reasons),
-                    n_evidence_bars=n_evidence_bars,
-                ))
-                reason_counts["growth_2x_cost_not_positive"] = (
-                    reason_counts.get("growth_2x_cost_not_positive", 0) + 1
-                )
-                signal_evidence_history.setdefault(signal_id, []).append(record)
-                continue
-
-            n_obs_prior = prior.net_1d.size
-            if n_obs_prior < 6:
-                gate_reasons.append("insufficient_temporal_samples")
-                all_evidence.append(RegimeExpertEvidence(
-                    signal_id=signal_id, outer_fold_id=fold_id,
-                    regime_code=0, effective_blocks=effective_blocks,
-                    posterior_positive_probability=prob_positive,
-                    growth_lcb90=lcb90, growth_2x_cost=growth_2x_val,
-                    robust_inner_growth=0.0, positive_inner_folds=0,
-                    scale=0.0, admitted=False,
-                    reasons=tuple(gate_reasons),
-                    n_evidence_bars=n_evidence_bars,
-                ))
-                reason_counts["insufficient_temporal_samples"] = (
-                    reason_counts.get("insufficient_temporal_samples", 0) + 1
-                )
-                signal_evidence_history.setdefault(signal_id, []).append(record)
-                continue
-
-            block_size_t = n_obs_prior // 3
-            block_growths: list[float] = []
-            prior_net_finite = prior.net_1d[np.isfinite(prior.net_1d)]
-            for b in range(3):
-                b_start = b * block_size_t
-                b_end = n_obs_prior if b == 2 else (b + 1) * block_size_t
-                b_net = prior_net_finite[b_start:b_end]
-                b_n_finite = b_net[np.isfinite(b_net)]
-                if len(b_n_finite) < 2:
-                    block_growths.append(-1e6)
+                    if recorder.enabled:
+                        recorder.record_regime_evidence(
+                            signal_id=signal_id, outer_fold_id=fold_id,
+                            regime_code=0, effective_blocks=0,
+                            posterior_probability=prob_positive,
+                            growth_lcb90=0.0, growth_2x_cost=growth_2x_val,
+                            robust_inner_growth=0.0,
+                            positive_inner_folds=0,
+                            scale=1.0,
+                            admitted=True,
+                            reasons=(),
+                            n_evidence_bars=n_evidence_bars,
+                            regime_mean_net=0.0,
+                        )
                 else:
-                    g = float(np.mean(np.log1p(b_n_finite))) * _BARS_PER_YEAR_4H
-                    block_growths.append(g)
-            positive_blocks = sum(1 for g in block_growths if g > 0.0)
+                    all_evidence.append(RegimeExpertEvidence(
+                        signal_id=signal_id, outer_fold_id=fold_id,
+                        regime_code=0, effective_blocks=0,
+                        posterior_positive_probability=prob_positive,
+                        growth_lcb90=0.0, growth_2x_cost=growth_2x_val,
+                        robust_inner_growth=0.0, positive_inner_folds=0,
+                        scale=0.0, admitted=False,
+                        reasons=tuple(gate_reasons),
+                        n_evidence_bars=n_evidence_bars,
+                    ))
 
-            if positive_blocks < config.min_positive_inner_folds:
-                gate_reasons.append("insufficient_positive_temporal_blocks")
-                all_evidence.append(RegimeExpertEvidence(
-                    signal_id=signal_id, outer_fold_id=fold_id,
-                    regime_code=0, effective_blocks=effective_blocks,
-                    posterior_positive_probability=prob_positive,
-                    growth_lcb90=lcb90, growth_2x_cost=growth_2x_val,
-                    robust_inner_growth=0.0, positive_inner_folds=positive_blocks,
-                    scale=0.0, admitted=False,
-                    reasons=tuple(gate_reasons),
-                    n_evidence_bars=n_evidence_bars,
-                ))
-                reason_counts["insufficient_positive_temporal_blocks"] = (
-                    reason_counts.get("insufficient_positive_temporal_blocks", 0) + 1
-                )
+                # Always record fold evidence (regardless of gate result)
                 signal_evidence_history.setdefault(signal_id, []).append(record)
-                continue
-
-            flat = np.array(block_growths, dtype=np.float64)
-            median_g = float(np.median(flat))
-            mad = float(np.median(np.abs(flat - median_g)))
-            robust_growth = median_g - 1.4826 * mad
-            if robust_growth <= 0.0:
-                gate_reasons.append("robust_temporal_growth_not_positive")
-                all_evidence.append(RegimeExpertEvidence(
-                    signal_id=signal_id, outer_fold_id=fold_id,
-                    regime_code=0, effective_blocks=effective_blocks,
-                    posterior_positive_probability=prob_positive,
-                    growth_lcb90=lcb90, growth_2x_cost=growth_2x_val,
-                    robust_inner_growth=robust_growth,
-                    positive_inner_folds=positive_blocks,
-                    scale=0.0, admitted=False,
-                    reasons=tuple(gate_reasons),
-                    n_evidence_bars=n_evidence_bars,
-                ))
-                reason_counts["robust_temporal_growth_not_positive"] = (
-                    reason_counts.get("robust_temporal_growth_not_positive", 0) + 1
-                )
-                signal_evidence_history.setdefault(signal_id, []).append(record)
-                continue
-
-            # P2: regime overlay (no longer gates admission)
-            regime_overlay = compute_regime_overlay(prior, regime_codes_present, config)
-            for code, overlay in regime_overlay.items():
-                fold_regime_overlay[code] = overlay
-                if overlay < 1.0:
-                    regime_pass_count += 1
-                all_evidence.append(RegimeExpertEvidence(
-                    signal_id=signal_id, outer_fold_id=fold_id,
-                    regime_code=code,
-                    effective_blocks=int(np.sum(prior.regime_code_1d == code)),
-                    posterior_positive_probability=prob_positive,
-                    growth_lcb90=lcb90, growth_2x_cost=growth_2x_val,
-                    robust_inner_growth=robust_growth,
-                    positive_inner_folds=positive_blocks,
-                    scale=overlay,
-                    admitted=True,
-                    reasons=(),
-                    regime_mean_net=float(np.mean(prior.net_1d[prior.regime_code_1d == code])) if np.any(prior.regime_code_1d == code) else 0.0,
-                    n_evidence_bars=n_evidence_bars,
-                ))
-
-            # Unconditional + temporal gates passed → admit with base scale 1.0
-            active_this_fold[signal_id] = 1.0
-
-            if recorder.enabled:
-                recorder.record_regime_evidence(
-                    signal_id=signal_id, outer_fold_id=fold_id,
-                    regime_code=0, effective_blocks=effective_blocks,
-                    posterior_probability=prob_positive,
-                    growth_lcb90=lcb90, growth_2x_cost=growth_2x_val,
-                    robust_inner_growth=robust_growth,
-                    positive_inner_folds=positive_blocks,
-                    scale=1.0,
-                    admitted=True,
-                    reasons=(),
-                    n_evidence_bars=n_evidence_bars,
-                    regime_mean_net=0.0,
-                )
-
-            # Always record fold evidence (regardless of gate result)
-            signal_evidence_history.setdefault(signal_id, []).append(record)
 
         n_active = len(active_this_fold)
         active_expert_count += n_active
@@ -832,6 +699,92 @@ def build_prequential_expert_route(
         panel, sleeves, folds, bars_4h, cost_bps_4h, funding_1h_2d,
         regime_panel, config, allocator_config, cost_bps,
     )
+
+
+def aggregate_ensemble_evidence(
+    history: dict[str, list[SignalFoldRecord]],
+    signal_ids: tuple[str, ...],
+) -> SignalFoldRecord:
+    if not signal_ids:
+        return SignalFoldRecord(
+            gross_1d=np.array([], dtype=np.float64),
+            cost_1d=np.array([], dtype=np.float64),
+            funding_1d=np.array([], dtype=np.float64),
+            net_1d=np.array([], dtype=np.float64),
+            regime_code_1d=np.array([], dtype=np.int8),
+        )
+    records: list[SignalFoldRecord] = []
+    for sid in signal_ids:
+        rec_list = history.get(sid, [])
+        if rec_list:
+            records.append(concatenate_signal_evidence(history, sid))
+    if not records:
+        return SignalFoldRecord(
+            gross_1d=np.array([], dtype=np.float64),
+            cost_1d=np.array([], dtype=np.float64),
+            funding_1d=np.array([], dtype=np.float64),
+            net_1d=np.array([], dtype=np.float64),
+            regime_code_1d=np.array([], dtype=np.int8),
+        )
+    ref_len = records[0].net_1d.shape[0]
+    for r in records[1:]:
+        if r.net_1d.shape[0] != ref_len:
+            raise ValueError("ensemble_record_length_mismatch")
+    summed_net = np.sum([r.net_1d for r in records], axis=0)
+    summed_gross = np.sum([r.gross_1d for r in records], axis=0)
+    summed_cost = np.sum([r.cost_1d for r in records], axis=0)
+    summed_funding = np.sum([r.funding_1d for r in records], axis=0)
+    return SignalFoldRecord(
+        gross_1d=summed_gross,
+        cost_1d=summed_cost,
+        funding_1d=summed_funding,
+        net_1d=summed_net,
+        regime_code_1d=records[0].regime_code_1d.copy(),
+    )
+
+
+def evaluate_ensemble_admission(
+    prior: SignalFoldRecord,
+    config: RegimeRouterConfig,
+) -> tuple[bool, float, float, str | None]:
+    finite = prior.net_1d[np.isfinite(prior.net_1d)]
+    n_evidence_bars = int(finite.shape[0])
+    guard_reason: str | None = None
+
+    if n_evidence_bars < config.min_evidence_bars:
+        guard_reason = "insufficient_evidence"
+        return False, 0.0, 0.0, guard_reason
+
+    try:
+        block_length = politis_white_block_length(finite)
+    except ValueError:
+        block_length = 5.0
+    n_finite_blocks = int(np.floor(n_evidence_bars / max(block_length, 1.0)))
+
+    if n_finite_blocks < config.min_effective_blocks:
+        guard_reason = "insufficient_evidence"
+        return False, 0.0, 0.0, guard_reason
+
+    _, _, prob_positive = circular_stationary_bootstrap_growth(
+        finite, _BARS_PER_YEAR_4H,
+        n_bootstrap=config.n_bootstrap,
+        block_size=block_length,
+        seed=42,
+    )
+
+    growth_significant = prob_positive >= config.min_posterior_probability
+
+    stressed = stress_execution_costs(prior.gross_1d, prior.cost_1d, prior.funding_1d, 2.0)
+    stressed_finite = stressed[np.isfinite(stressed)]
+    if len(stressed_finite) > 0:
+        growth_2x_cost_val = float(np.mean(np.log1p(stressed_finite))) * _BARS_PER_YEAR_4H
+    else:
+        growth_2x_cost_val = -1e6
+
+    cost_robust = growth_2x_cost_val > 0
+
+    admitted = growth_significant and cost_robust
+    return admitted, prob_positive, growth_2x_cost_val, guard_reason
 
 
 build_fold_local_regime_forecast = build_prequential_expert_route

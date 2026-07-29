@@ -5,6 +5,7 @@ import pytest
 
 from src.domain.futures.compound.calibration import (
     build_calibration_target,
+    build_expanding_walk_forward_steps,
     build_folds_4h,
     build_multi_horizon_targets,
     calibrate_signals,
@@ -13,6 +14,7 @@ from src.domain.futures.compound.config import CalibrationConfig
 from src.domain.futures.compound.contracts import (
     CalibrationTarget,
     CausalFold,
+    CausalityError,
     MultiTimeframeBars,
     RawSignalPanel,
     SignalDescriptor,
@@ -215,3 +217,45 @@ def test_calibrate_signals_raises_on_missing_target_horizon_key(planted_panel_an
     import pytest
     with pytest.raises(ValueError, match="missing target for horizon"):
         calibrate_signals(panel, {216: target}, folds, _cfg())
+
+
+# ── P0: build_expanding_walk_forward_steps (docs/specs/l1_cash_only_exit_redesign.md) ──
+
+
+def test_expanding_walk_forward_step_count_and_geometry():
+    config = CalibrationConfig(purge_bars=2, embargo_bars=42, n_folds=5)
+    steps = build_expanding_walk_forward_steps(
+        0, 4902, config, step_bars=180, initial_fit_bars=900, max_target_horizon_bars=162,
+    )
+    assert len(steps) == 21
+    assert steps[0].oos_start == 1062
+    assert steps[0].oos_end_exclusive == 1242
+    assert steps[-1].oos_end_exclusive <= 4860
+    for s in steps:
+        assert s.oos_start == s.fit_end_exclusive + s.purge_bars
+        assert s.calibration_start == max(s.fit_start, s.fit_end_exclusive - s.purge_bars)
+        assert s.calibration_end_exclusive == s.fit_end_exclusive
+    # oos ranges are contiguous and non-overlapping in step order
+    for a, b in zip(steps, steps[1:]):
+        assert a.oos_end_exclusive == b.oos_start
+
+
+def test_expanding_walk_forward_insufficient_span_raises():
+    config = CalibrationConfig(purge_bars=2, embargo_bars=42, n_folds=5)
+    with pytest.raises(CausalityError):
+        build_expanding_walk_forward_steps(
+            0, 500, config, step_bars=180, initial_fit_bars=900, max_target_horizon_bars=162,
+        )
+
+
+def test_expanding_walk_forward_matches_build_folds_4h_invariants():
+    config = CalibrationConfig(purge_bars=2, embargo_bars=42, n_folds=5)
+    steps = build_expanding_walk_forward_steps(
+        0, 4902, config, step_bars=180, initial_fit_bars=900, max_target_horizon_bars=162,
+    )
+    purge = max(config.purge_bars, 162)
+    for s in steps:
+        assert s.oos_start == s.fit_end_exclusive + purge
+        assert s.calibration_start == max(s.fit_start, s.fit_end_exclusive - purge)
+        assert s.purge_bars == purge
+        assert s.embargo_bars == config.embargo_bars

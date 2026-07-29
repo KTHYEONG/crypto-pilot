@@ -37,6 +37,7 @@ from src.domain.futures.compound.l1_sleeves import (
     combine_posterior_sleeves,
     compute_beta_neutral_composite_returns,
     compute_chunked_2d_tensor_bootstrap,
+    compute_compounding_stability,
     compute_fold_growths,
     compute_l1_oos_portfolio_returns,
     estimate_cluster_sleeve_posteriors,
@@ -819,7 +820,7 @@ class TestEffectiveCompoundingHandoff:
             folds=folds, weights_2d=weights_2d, cost_bps_4h=cost,
         )
         assert not result.evidence.admitted
-        assert "growth_lcb90_not_positive" in result.evidence.reasons
+        assert "growth_posterior_below_threshold" in result.evidence.reasons
 
     def test_scenario_no_admitted_sleeves(self) -> None:
         """No admitted sleeves returns NO_EVIDENCE."""
@@ -1310,7 +1311,13 @@ def test_compute_fold_growths_skips_empty_folds() -> None:
     assert len(growths) == 1
 
 
-def test_insufficient_positive_folds_blocks_admission() -> None:
+def test_zero_weights_blocks_admission_on_growth_significance() -> None:
+    # P2/P3 redesign: positive_folds_check/robust_check were removed from
+    # compute_compounding_stability, replaced by a single bootstrap posterior
+    # test (docs/specs/l1_cash_only_exit_redesign.md, RULE-P3-1). Zero weights
+    # produce zero net return everywhere, so growth_significant and cost_robust
+    # both fail -- this is the current (correct) reason, not the retired
+    # insufficient_positive_folds string.
     n_bars, n_syms = 120, 2
     bars = _bars(n_bars, n_syms)
     mask = np.ones(n_syms, dtype=np.bool_)
@@ -1334,5 +1341,101 @@ def test_insufficient_positive_folds_blocks_admission() -> None:
         folds=folds, weights_2d=weights_2d, cost_bps_4h=cost,
     )
     assert not result.evidence.admitted
-    assert "insufficient_positive_folds" in result.evidence.reasons
+    assert "growth_posterior_below_threshold" in result.evidence.reasons
 
+
+
+# ── P3: compute_compounding_stability composite gate ────────────────────────
+# (docs/specs/l1_cash_only_exit_redesign.md)
+
+
+def _drift_bars(n: int, n_sym: int, drift: float, vol: float, seed: int) -> TimeframeBarCube:
+    rng = np.random.default_rng(seed)
+    close = np.zeros((n, n_sym), dtype=np.float32)
+    close[0] = 100.0
+    for t in range(1, n):
+        close[t] = close[t - 1] * (1.0 + rng.normal(drift, vol, n_sym))
+    return TimeframeBarCube(
+        timeframe="4h", timestamps_ns=np.arange(n, dtype=np.int64) * 14_400_000_000_000,
+        symbols=tuple(f"S{i}" for i in range(n_sym)),
+        open_2d=close, high_2d=close * 1.01, low_2d=close * 0.99, close_2d=close,
+        quote_volume_2d=np.full((n, n_sym), 1e6, dtype=np.float32),
+        complete_2d=np.ones((n, n_sym), dtype=np.bool_),
+    )
+
+
+def test_compounding_stability_uses_prob_positive_not_fold_growths() -> None:
+    """[RULE-P3-1,3] The old positive_folds_check (>=4/5 folds) fails here
+    (only 3/5 folds individually positive), but the bootstrap posterior over
+    the pooled OOS series is significant -> the new gate admits.
+    This is the exact shape of the real diagnosed regression
+    (docs/results/result.md: 2/5 deployable folds, prob_positive discarded)."""
+    n, n_sym = 2000, 3
+    bars = _drift_bars(n, n_sym, drift=0.0006, vol=0.006, seed=0)
+    fold_size = (n - 100) // 5
+    folds = tuple(
+        CausalFold(i, 0, 100, 0, 100, 100 + i * fold_size, 100 + (i + 1) * fold_size, 2, 1)
+        for i in range(5)
+    )
+    weights_2d = np.zeros((n, n_sym), dtype=np.float64)
+    weights_2d[100:] = np.array([0.3, -0.2, 0.15])
+    cost_bps = np.full((n, n_sym), 1.0, dtype=np.float32)
+    funding = np.zeros((n * 4, n_sym), dtype=np.float32)
+    config = HandoffConfig(
+        min_growth_posterior_probability=0.55, n_bootstrap=300,
+        max_ann_vol=5.0, max_drawdown=5.0,
+    )
+    evidence = compute_compounding_stability(weights_2d, bars, folds, cost_bps, funding, config)
+
+    old_positive_folds_check = evidence.positive_outer_folds >= max(1, len(folds) * 4 // 5)
+    assert evidence.positive_outer_folds == 3
+    assert not old_positive_folds_check, "fixture must reproduce the old gate's failure mode"
+    assert evidence.admitted, (
+        f"new composite gate should admit despite 3/5 positive folds: {evidence.reasons}"
+    )
+
+
+def test_compounding_stability_independent_risk_gates_still_block() -> None:
+    """[RULE-P3-2] growth_significant=True but excessive volatility must still block."""
+    n, n_sym = 2000, 3
+    bars = _drift_bars(n, n_sym, drift=0.0006, vol=0.006, seed=1)
+    fold_size = (n - 100) // 5
+    folds = tuple(
+        CausalFold(i, 0, 100, 0, 100, 100 + i * fold_size, 100 + (i + 1) * fold_size, 2, 1)
+        for i in range(5)
+    )
+    weights_2d = np.zeros((n, n_sym), dtype=np.float64)
+    weights_2d[100:] = np.array([0.3, -0.2, 0.15])
+    cost_bps = np.full((n, n_sym), 1.0, dtype=np.float32)
+    funding = np.zeros((n * 4, n_sym), dtype=np.float32)
+
+    lenient_config = HandoffConfig(
+        min_growth_posterior_probability=0.55, n_bootstrap=300,
+        max_ann_vol=5.0, max_drawdown=5.0,
+    )
+    baseline = compute_compounding_stability(weights_2d, bars, folds, cost_bps, funding, lenient_config)
+    assert baseline.admitted, "fixture must be admissible under a lenient vol cap"
+    assert "growth_posterior_below_threshold" not in baseline.reasons
+
+    strict_config = HandoffConfig(
+        min_growth_posterior_probability=0.55, n_bootstrap=300,
+        max_ann_vol=0.01, max_drawdown=5.0,
+    )
+    strict = compute_compounding_stability(weights_2d, bars, folds, cost_bps, funding, strict_config)
+    assert "growth_posterior_below_threshold" not in strict.reasons, (
+        "vol gate must block independently of growth significance, not by suppressing it"
+    )
+    assert "annual_volatility_exceeded" in strict.reasons
+    assert not strict.admitted
+
+
+def test_compounding_stability_no_deployable_folds_fail_closed() -> None:
+    n, n_sym = 200, 3
+    bars = _drift_bars(n, n_sym, drift=0.0, vol=0.001, seed=2)
+    weights = np.zeros((n, n_sym), dtype=np.float64)
+    cost_bps = np.full((n, n_sym), 8.0, dtype=np.float32)
+    funding = np.zeros((n * 4, n_sym), dtype=np.float32)
+    config = HandoffConfig()
+    evidence = compute_compounding_stability(weights, bars, (), cost_bps, funding, config)
+    assert not evidence.admitted
+    assert "no_deployable_folds" in evidence.reasons or "no_oos_returns" in evidence.reasons

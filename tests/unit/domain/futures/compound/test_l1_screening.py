@@ -14,6 +14,7 @@ from src.domain.futures.compound.l1_screening import (
     estimate_effective_independence,
     newey_west_tstat,
     screen_family_edge,
+    screen_signal_edge,
 )
 from src.domain.futures.compound.l1_regime_routing import (
     decompose_expert_gross_contribution,
@@ -309,7 +310,7 @@ def test_prequential_route_accumulates_from_fold_zero() -> None:
     )
     rr_config = RegimeRouterConfig(
         min_evidence_bars=5, min_posterior_probability=0.51,
-        min_effective_blocks=1, min_positive_inner_folds=1,
+        min_effective_blocks=1,
     )
     dc_config = DynamicCompoundingConfig()
     cost_bps_4h = np.full((n_bars, n_syms), 8.0, dtype=np.float32)
@@ -363,3 +364,106 @@ def test_screen_family_edge_empty_folds() -> None:
     assert isinstance(result, FamilyEdgeScreen)
     assert len(result.records) == 0
     assert len(result.admitted_families) == 0
+
+
+# ── P1: screen_signal_edge (docs/specs/l1_cash_only_exit_redesign.md) ──────
+
+
+def test_screen_signal_edge_no_tstat_inflation() -> None:
+    """[RULE-P1-1] Duplicating a real-IC signal must not inflate its t-stat."""
+    rng = np.random.default_rng(0)
+    n_bars, n_syms = 400, 20
+    trend = np.linspace(-0.5, 0.5, n_syms) * 0.01
+    forward_ret = np.zeros((n_bars, n_syms))
+    for t in range(1, n_bars):
+        forward_ret[t] = trend + rng.standard_normal(n_syms) * 0.008
+    z_rev = -forward_ret + rng.standard_normal((n_bars, n_syms)) * 0.002
+    price = np.cumprod(1 + forward_ret, axis=0).astype(np.float32)
+    bars_4h = TimeframeBarCube(
+        timeframe="4h", timestamps_ns=np.arange(n_bars, dtype=np.int64),
+        symbols=tuple(f"SYM_{i}" for i in range(n_syms)),
+        open_2d=price.copy(), high_2d=price.copy() * 1.01, low_2d=price.copy() * 0.99,
+        close_2d=price, quote_volume_2d=np.full((n_bars, n_syms), 1e8, dtype=np.float32),
+        complete_2d=np.ones((n_bars, n_syms), dtype=np.bool_),
+    )
+    folds = (CausalFold(0, 0, 100, 0, 100, 100, 200, 25, 1),)
+    cfg = HandoffConfig(min_family_ic_samples=10, family_screen_alpha=0.05)
+
+    desc_single = (SignalDescriptor("rev:fast", "xs_reversal", "fast", 24, "4h",
+                                     target_horizon_hours=24, declared_orientation=-1),)
+    panel_single = RawSignalPanel(
+        decision_timestamps_ns=np.arange(n_bars, dtype=np.int64),
+        symbols=tuple(f"SYM_{i}" for i in range(n_syms)), descriptors=desc_single,
+        z_3d=z_rev[:, :, None].astype(np.float32),
+        valid_3d=np.ones((n_bars, n_syms, 1), dtype=np.bool_),
+        sigma_2d=np.full((n_bars, n_syms), 0.02, dtype=np.float32),
+    )
+    screen_single = screen_signal_edge(panel_single, bars_4h, folds, cfg)
+    t_single = screen_single.records[0].t_newey_west
+
+    desc_5x = tuple(
+        SignalDescriptor(f"rev:fast_{i}", "xs_reversal", "fast", 24, "4h",
+                          target_horizon_hours=24, declared_orientation=-1)
+        for i in range(5)
+    )
+    panel_5x = RawSignalPanel(
+        decision_timestamps_ns=np.arange(n_bars, dtype=np.int64),
+        symbols=tuple(f"SYM_{i}" for i in range(n_syms)), descriptors=desc_5x,
+        z_3d=np.repeat(z_rev[:, :, None], 5, axis=2).astype(np.float32),
+        valid_3d=np.ones((n_bars, n_syms, 5), dtype=np.bool_),
+        sigma_2d=np.full((n_bars, n_syms), 0.02, dtype=np.float32),
+    )
+    screen_5x = screen_signal_edge(panel_5x, bars_4h, folds, cfg)
+
+    assert len(screen_5x.records) == 5
+    assert t_single != 0.0
+    for rec in screen_5x.records:
+        assert abs(rec.t_newey_west - t_single) < 1e-9, (
+            f"duplicated signal inflated t-stat: single={t_single} dup={rec.t_newey_west}"
+        )
+
+
+def test_screen_signal_edge_term_structure_not_cancelled() -> None:
+    """[RULE-P1-1] fast(-IC) + slow(+IC) inside one family must not average to zero."""
+    rng = np.random.default_rng(1)
+    n_bars, n_syms = 400, 20
+    trend = np.linspace(-0.5, 0.5, n_syms) * 0.01
+    forward_ret = np.zeros((n_bars, n_syms))
+    for t in range(1, n_bars):
+        forward_ret[t] = trend + rng.standard_normal(n_syms) * 0.008
+    noise = rng.standard_normal((n_bars, n_syms)) * 0.002
+    z_fast_reversal = -forward_ret + noise       # real negative-oriented edge
+    z_slow_momentum = forward_ret + noise        # real positive-oriented edge
+    price = np.cumprod(1 + forward_ret, axis=0).astype(np.float32)
+    bars_4h = TimeframeBarCube(
+        timeframe="4h", timestamps_ns=np.arange(n_bars, dtype=np.int64),
+        symbols=tuple(f"SYM_{i}" for i in range(n_syms)),
+        open_2d=price.copy(), high_2d=price.copy() * 1.01, low_2d=price.copy() * 0.99,
+        close_2d=price, quote_volume_2d=np.full((n_bars, n_syms), 1e8, dtype=np.float32),
+        complete_2d=np.ones((n_bars, n_syms), dtype=np.bool_),
+    )
+    folds = (CausalFold(0, 0, 100, 0, 100, 100, 200, 25, 1),)
+    cfg = HandoffConfig(min_family_ic_samples=10, family_screen_alpha=0.05)
+
+    desc = (
+        SignalDescriptor("fast:rev", "term_structure", "fast", 24, "4h",
+                          target_horizon_hours=24, declared_orientation=-1),
+        SignalDescriptor("slow:mom", "term_structure", "slow", 24, "4h",
+                          target_horizon_hours=24, declared_orientation=1),
+    )
+    z_3d = np.stack([z_fast_reversal, z_slow_momentum], axis=2).astype(np.float32)
+    panel = RawSignalPanel(
+        decision_timestamps_ns=np.arange(n_bars, dtype=np.int64),
+        symbols=tuple(f"SYM_{i}" for i in range(n_syms)), descriptors=desc,
+        z_3d=z_3d, valid_3d=np.ones((n_bars, n_syms, 2), dtype=np.bool_),
+        sigma_2d=np.full((n_bars, n_syms), 0.02, dtype=np.float32),
+    )
+
+    screen = screen_signal_edge(panel, bars_4h, folds, cfg)
+    by_id = {r.signal_id: r for r in screen.records}
+    # both real, opposite-signed edges must survive signal-level screening --
+    # family-level pooling would average them toward zero and admit neither.
+    assert by_id["fast:rev"].admitted, by_id["fast:rev"].reasons
+    assert by_id["slow:mom"].admitted, by_id["slow:mom"].reasons
+    assert by_id["fast:rev"].t_newey_west < 0
+    assert by_id["slow:mom"].t_newey_west > 0

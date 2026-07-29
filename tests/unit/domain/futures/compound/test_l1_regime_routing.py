@@ -20,12 +20,15 @@ from src.domain.futures.compound.contracts import (
     PrequentialExpertRoute,
     RawSignalPanel,
     SignalDescriptor,
+    SignalFoldRecord,
     TimeframeBarCube,
 )
 from src.domain.futures.compound.l1_regime_routing import (
     ExpertContribution,
+    aggregate_ensemble_evidence,
     build_causal_regime_panel,
     build_fold_local_regime_forecast,
+    evaluate_ensemble_admission,
 )
 from src.domain.futures.compound.multiplicity import (
     TrialMultiplicity,
@@ -235,44 +238,39 @@ def test_insufficient_regime_blocks_fail_closed() -> None:
 
 
 def test_regime_evidence_requires_all_growth_constraints() -> None:
+    # P2 redesign: the per-expert growth_lcb90/positive_inner_folds/robust_growth
+    # cascade collapsed into the single ensemble posterior test in
+    # evaluate_ensemble_admission (see docs/specs/l1_cash_only_exit_redesign.md).
     config = _default_config()
     scale, admitted, reasons = _mock_regime_evidence_to_scale(
-        lcb90=0.01, prob=0.94, growth_2x=0.01,
-        pos_inner=config.min_positive_inner_folds,
+        prob=0.94, growth_2x=0.01,
         eff_blocks=config.min_effective_blocks,
-        robust_g=0.01, config=config,
+        config=config,
     )
     assert scale > 0.0
     assert admitted
 
     scale2, admitted2, _ = _mock_regime_evidence_to_scale(
-        lcb90=-0.01, prob=0.94, growth_2x=0.01,
-        pos_inner=config.min_positive_inner_folds,
+        prob=0.40, growth_2x=0.01,
         eff_blocks=config.min_effective_blocks,
-        robust_g=0.01, config=config,
+        config=config,
     )
     assert scale2 == 0.0
     assert not admitted2
 
 
 def _mock_regime_evidence_to_scale(
-    lcb90: float, prob: float, growth_2x: float,
-    pos_inner: int, eff_blocks: int, robust_g: float,
+    prob: float, growth_2x: float,
+    eff_blocks: int,
     config: RegimeRouterConfig,
 ) -> tuple[float, bool, tuple[str, ...]]:
     reasons: list[str] = []
     if eff_blocks < config.min_effective_blocks:
         reasons.append("insufficient_regime_blocks")
-    if lcb90 <= 0.0:
-        reasons.append("growth_lcb90_not_positive")
     if prob < config.min_posterior_probability:
         reasons.append("posterior_probability_below_threshold")
     if growth_2x <= 0.0:
         reasons.append("growth_2x_cost_not_positive")
-    if pos_inner < config.min_positive_inner_folds:
-        reasons.append("insufficient_positive_inner_folds")
-    if robust_g <= 0.0:
-        reasons.append("robust_inner_growth_not_positive")
 
     if eff_blocks < config.min_effective_blocks:
         return (0.0, False, tuple(reasons))
@@ -789,7 +787,6 @@ def test_routing_loop_executes_with_prior_evidence(monkeypatch: pytest.MonkeyPat
     regime = build_causal_regime_panel(ret, ts, _default_config())
     config = RegimeRouterConfig(
         min_effective_blocks=1, min_posterior_probability=0.51,
-        min_positive_inner_folds=1,
         n_bootstrap=100, min_evidence_bars=10,
     )
     dc_config = DynamicCompoundingConfig()
@@ -1162,7 +1159,7 @@ def test_walk_forward_carry_applied_when_expert_admitted() -> None:
     regime = build_causal_regime_panel(ret, ts, _default_config())
     config = RegimeRouterConfig(
         min_effective_blocks=1, min_posterior_probability=0.51,
-        min_positive_inner_folds=1, n_bootstrap=100, min_evidence_bars=10,
+        n_bootstrap=100, min_evidence_bars=10,
     )
     dc_config = DynamicCompoundingConfig(kelly_fraction=0.05)
     policy = ExitPolicySpec("t:time", ExitPolicyKind.TIME, None, None, None, 0, 4, -1, "h")
@@ -1185,3 +1182,94 @@ def test_walk_forward_carry_applied_when_expert_admitted() -> None:
     if deploy_start < n:
         assert np.any(result.forecast.mu_2d[deploy_start:] != 0), "walk-forward carry should have filled evaluation window"
     assert result.attribution.candidate_experts >= 0
+
+
+# ── P2: aggregate_ensemble_evidence + evaluate_ensemble_admission ───────────
+# (docs/specs/l1_cash_only_exit_redesign.md)
+
+
+def _fold_record(n: int, seed: int) -> SignalFoldRecord:
+    rng = np.random.default_rng(seed)
+    return SignalFoldRecord(
+        gross_1d=rng.normal(0.001, 0.01, n).astype(np.float64),
+        cost_1d=rng.normal(-0.0001, 1e-5, n).astype(np.float64),
+        funding_1d=np.zeros(n, dtype=np.float64),
+        net_1d=rng.normal(0.001, 0.01, n).astype(np.float64),
+        regime_code_1d=np.zeros(n, dtype=np.int8),
+    )
+
+
+def test_aggregate_ensemble_evidence_sums_barwise() -> None:
+    history: dict[str, list[SignalFoldRecord]] = {
+        "sig_a": [_fold_record(10, seed=1)],
+        "sig_b": [_fold_record(10, seed=2)],
+    }
+    result = aggregate_ensemble_evidence(history, ("sig_a", "sig_b"))
+    expected_net = history["sig_a"][0].net_1d + history["sig_b"][0].net_1d
+    np.testing.assert_array_almost_equal(result.net_1d, expected_net)
+    expected_gross = history["sig_a"][0].gross_1d + history["sig_b"][0].gross_1d
+    np.testing.assert_array_almost_equal(result.gross_1d, expected_gross)
+
+
+def test_aggregate_ensemble_evidence_length_mismatch_raises() -> None:
+    history: dict[str, list[SignalFoldRecord]] = {
+        "sig_a": [_fold_record(10, seed=1)],
+        "sig_b": [_fold_record(15, seed=2)],
+    }
+    with pytest.raises(ValueError, match="ensemble_record_length_mismatch"):
+        aggregate_ensemble_evidence(history, ("sig_a", "sig_b"))
+
+
+def test_evaluate_ensemble_admission_guard_before_bootstrap(monkeypatch: pytest.MonkeyPatch) -> None:
+    """[RULE-P2-2] Insufficient evidence must short-circuit before the bootstrap runs."""
+    calls: list[int] = []
+    monkeypatch.setattr(
+        "src.domain.futures.compound.l1_regime_routing.circular_stationary_bootstrap_growth",
+        lambda *a, **k: (calls.append(1), (0.0, 0.0, 0.5))[1],
+    )
+    sparse_prior = _fold_record(10, seed=0)
+    config = RegimeRouterConfig(min_evidence_bars=900, min_effective_blocks=20)
+    admitted, prob, cost, guard = evaluate_ensemble_admission(sparse_prior, config)
+    assert not admitted
+    assert guard == "insufficient_evidence"
+    assert calls == [], "bootstrap must not run when the evidence guard fails"
+
+
+def test_evaluate_ensemble_admission_composite_pass() -> None:
+    """[RULE-P2-3] prob_positive>=theta AND growth_2x_cost>0 -> admitted=True."""
+    n = 1000
+    rng = np.random.default_rng(0)
+    net = rng.normal(0.005, 0.01, n).astype(np.float64)
+    gross = net + rng.normal(0.0001, 1e-6, n)
+    cost = rng.normal(-0.00001, 1e-6, n)
+    prior = SignalFoldRecord(
+        gross_1d=gross, cost_1d=cost,
+        funding_1d=np.zeros(n, dtype=np.float64),
+        net_1d=net, regime_code_1d=np.zeros(n, dtype=np.int8),
+    )
+    config = RegimeRouterConfig(min_evidence_bars=100, min_effective_blocks=5, min_posterior_probability=0.51)
+    admitted, prob, cost_val, guard = evaluate_ensemble_admission(prior, config)
+    assert guard is None
+    assert prob >= 0.51
+    assert cost_val > 0.0
+    assert admitted, f"expected admission with prob={prob}, cost_val={cost_val}"
+
+
+def test_evaluate_ensemble_admission_cost_stress_blocks_despite_significance() -> None:
+    """[RULE-P2-3] cost_robust independently blocks even when growth is significant."""
+    n = 1000
+    rng = np.random.default_rng(0)
+    net = rng.normal(0.005, 0.01, n).astype(np.float64)
+    high_cost = np.full(n, -0.01, dtype=np.float64)
+    prior = SignalFoldRecord(
+        gross_1d=np.full(n, 0.001, dtype=np.float64),
+        cost_1d=high_cost,
+        funding_1d=np.zeros(n, dtype=np.float64),
+        net_1d=net, regime_code_1d=np.zeros(n, dtype=np.int8),
+    )
+    config = RegimeRouterConfig(min_evidence_bars=100, min_effective_blocks=5, min_posterior_probability=0.51)
+    admitted, prob, cost_val, guard = evaluate_ensemble_admission(prior, config)
+    assert guard is None
+    assert prob >= 0.51, "growth must be significant despite the cost stress test failing"
+    assert cost_val <= 0.0
+    assert not admitted

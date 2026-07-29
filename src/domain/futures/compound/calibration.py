@@ -192,3 +192,50 @@ def calibrate_signals(
         ))
 
     return tuple(calibrations)
+
+
+def build_expanding_walk_forward_steps(
+    l1_start: int,
+    l3_start: int,
+    config: CalibrationConfig,
+    *,
+    step_bars: int,
+    initial_fit_bars: int,
+    max_target_horizon_bars: int = 0,
+) -> tuple[CausalFold, ...]:
+    if step_bars <= 0:
+        raise ValueError(f"step_bars must be > 0, got {step_bars}")
+    if initial_fit_bars <= 0:
+        raise ValueError(f"initial_fit_bars must be > 0, got {initial_fit_bars}")
+    purge = max(config.purge_bars, max_target_horizon_bars)
+    embargo = config.embargo_bars
+    embargo_boundary = l3_start - embargo
+    available = l3_start - l1_start
+    if available < initial_fit_bars + purge + step_bars:
+        raise CausalityError(
+            f"span l3_start={l3_start} - l1_start={l1_start} = {available} "
+            f"insufficient for initial_fit_bars={initial_fit_bars} + purge={purge} + step_bars={step_bars}"
+        )
+    n_steps = (available - initial_fit_bars - purge) // step_bars
+    if n_steps < 1:
+        raise CausalityError(
+            f"span {available} yields {n_steps} steps, need at least 1"
+        )
+    steps: list[CausalFold] = []
+    for i in range(n_steps):
+        fit_end = l1_start + initial_fit_bars + i * step_bars
+        oos_start = fit_end + purge
+        oos_end = min(oos_start + step_bars, embargo_boundary)
+        cal_start = max(l1_start, fit_end - purge)
+        steps.append(CausalFold(
+            fold_id=i,
+            fit_start=l1_start,
+            fit_end_exclusive=fit_end,
+            calibration_start=cal_start,
+            calibration_end_exclusive=fit_end,
+            oos_start=oos_start,
+            oos_end_exclusive=oos_end,
+            purge_bars=purge,
+            embargo_bars=embargo,
+        ))
+    return tuple(steps)
