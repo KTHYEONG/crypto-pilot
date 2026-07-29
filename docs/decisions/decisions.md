@@ -1,5 +1,10 @@
 # Active Decisions Log (Sliding Window)
 
+## [2026-07-29] [TASK_L1_FAMILY_ONLY_ROUTING_MEASUREMENT] [ADR_20260729_L1_FAMILY_ONLY_ROUTING_MEASUREMENT]
+- **Context/Why:** 구식 HAC posterior 게이트를 제거한 family-only sleeve 라우팅이 실제 데이터에서 evidence와 성과를 생성하는지 검증했다.
+- **Resolution/What:** docs/results/result.md를 최신 production dry-run과 내부 계측 artifact 중심으로 전면 재작성하고 family screen, sleeve 구성, evidence, return-domain, L2/L3 판정을 기록했다.
+- **Impact:** reversal_st와 xs_reversal만 family admit; sleeves 57개·가설 6개·evidence 15개를 생성했으나 admitted 0, active route 0, target weights 전부 0이다. L2 no_evidence/L3 reject를 유지하며 임계값 완화 근거는 없다.
+
 ## [2026-07-29] [TASK_L1_SIGNAL_EDGE_MEASUREMENT_REDESIGN] [ADR_20260729_L1_SIGNAL_EDGE_MEASUREMENT_REDESIGN]
 - **Context/Why:** no_evidence 원인을 재조사한 결과 signal 엣지 부재가 아니라 측정 구조 결함(tested_hypotheses=0, IS beta 방향성 일치율 0.290 z=-2.42로 반정보, split_book_by_expert가 max|w|=3622로 발산, family 다중검정 미통제)임을 실측 확정. family 단위 엣지 스크리너 도입 스펙 작성 후 /check PASS(Cov 88%) 거쳐 실전 CLI 2회 재검증
 - **Resolution/What:** l1_screening.py 신규(screen_family_edge/compute_cross_sectional_ic/newey_west_tstat/estimate_effective_independence), SignalDescriptor.declared_orientation 필드 추가, l1_regime_routing.py의 split_book_by_expert를 decompose_expert_gross_contribution(절대값 분모로 |share|<=1 구조적 보장)+blend_expert_contributions(NaN-safe)로 교체, fold 0 skip 제거. /check 감사 중 estimate_effective_independence가 실사용 조건에서 n_eff=1.0으로 항상 붕괴하는 결함을 발견해 즉시 수정(IC 시계열의 전역 비어있는 행을 컬럼 판정 전에 제거). 1차 실전 실행에서 signal_bank.py의 reversal_st/xs_reversal 원시 z 계산이 이미 부호를 내장했는데 _family_orientation()이 이름만 보고 또 반전시키는 이중부호반전 버그 발견, 전 family +1로 통일해 수정
@@ -69,8 +74,3 @@
 - **Context/Why:** 현금 100% 락업 결함 구조 철폐 및 /check 검증 연산 병목 4분 -> 15초 이하 단축
 - **Resolution/What:** engine.py(has_admitted 하드 거부 제거 및 연속 신념 가중치 적용), l1_sleeves.py(ExitPathCache 1회 사전 계산 도입), allocator.py(12% 목표 변동성 타겟팅 배선)
 - **Impact:** 현금 락업 해제 및 복리 포지션 점화(CAGR +3.32%, MDD -1.29%), 수학적 오차 0.000000000000 보장 하에 파이프라인 및 테스트 연산 속도 86.9% 대폭 가속
-
-## [2026-07-27] [TASK_EXPANDED_MULTI_FACTOR_ALPHA_BANK] [ADR_20260727_EXPANDED_MULTI_FACTOR_ALPHA_BANK]
-- **Context/Why:** 기존 27개 추세 편중 신호 및 51개 심볼 고정 제약으로 인한 알파 가뭄과 10.17% 비용 드래그 소모 문제 극복
-- **Resolution/What:** alpha_catalog.py(60개 8개 다요인 알파 레시피 구축), signal_bank.py(120개 동적 유니버스 마스킹 및 60개 신호 Numba 연산 구축), calibration.py(build_folds_4h 유효일수 캡핑 정정)
-- **Impact:** 60개 다요인 알파 신호와 120개 PIT 유니버스로 알파 표현력 및 독립 표본 수(Breadth) 2배 이상 확보. 측정계 정직화로 미달 신호 fail-closed 거부 및 cash-only 원금 100% 보존

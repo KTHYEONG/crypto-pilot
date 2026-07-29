@@ -549,11 +549,12 @@
     ]
   },
   "src/domain/futures/compound/engine.py": {
-    "architecture": "docs/architecture/layer2.md",
+    "architecture": "docs/results/result.md",
     "testing": [
       "tests/unit/domain/futures/compound/test_engine.py",
       "tests/unit/domain/futures/compound/test_l2_growth_gate.py",
-      "tests/unit/domain/futures/compound/test_signal_bank.py"
+      "tests/unit/domain/futures/compound/test_signal_bank.py",
+      "tests/unit/domain/futures/compound/test_l1_routing_sleeves.py"
     ]
   },
   "src/application/futures/runner/compound_data.py": {
