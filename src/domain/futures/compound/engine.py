@@ -22,6 +22,7 @@ from src.domain.futures.compound.benchmark import (
     causal_beta_series,
 )
 from src.domain.futures.compound.calibration import (
+    build_expanding_walk_forward_steps,
     build_folds_4h,
     build_multi_horizon_targets,  # noqa: F401 - compatibility patch target for legacy tests
 )
@@ -54,7 +55,7 @@ from src.domain.futures.compound.l1_regime_routing import (
     build_causal_regime_panel,
     build_fold_local_regime_forecast,
 )
-from src.domain.futures.compound.l1_screening import screen_family_edge
+from src.domain.futures.compound.l1_screening import screen_signal_edge
 from src.domain.futures.compound.l1_sleeves import (
     build_exit_aware_handoff,
     build_family_routing_sleeves,
@@ -243,12 +244,18 @@ def run_multiscale_compound_engine(
         if quarter_window is not None:
             boundaries = resolve_quarterly_boundaries(bars_4h.timestamps_ns, quarter_window)  # pragma: no cover
             start_offset = boundaries.l1_start  # pragma: no cover
-            l1_window_end = boundaries.l2_start  # pragma: no cover
-        folds = build_folds_4h(
-            l1_window_end, config.calibration,
-            max_target_horizon_bars=max_horizon_bars,
-            start_offset=start_offset,
-        )
+            l1_window_end = boundaries.l3_start  # pragma: no cover
+            folds = build_expanding_walk_forward_steps(
+                start_offset, l1_window_end, config.calibration,
+                step_bars=180, initial_fit_bars=900,
+                max_target_horizon_bars=max_horizon_bars,
+            )
+        else:
+            folds = build_folds_4h(
+                l1_window_end, config.calibration,
+                max_target_horizon_bars=max_horizon_bars,
+                start_offset=start_offset,
+            )
         cost_bps_4h = align_costs_to_decision_grid(
             market.timestamps_ns, bars_4h.timestamps_ns, market.execution_cost_bps_2d,
         )
@@ -256,13 +263,13 @@ def run_multiscale_compound_engine(
             market=market, bars_4h=bars_4h, folds=folds, config=config.cluster,
         )
         _logger.info("[P2] computed %d causal cluster folds", len(cluster_folds))
-        family_screen = screen_family_edge(panel, bars_4h, folds, config.handoff)
+        signal_screen = screen_signal_edge(panel, bars_4h, folds, config.handoff)
         _logger.info(
-            "[P2] family_screen: n_eff=%.2f admitted_families=%s",
-            family_screen.n_effective_independent, family_screen.admitted_families,
+            "[P2] signal_screen: n_eff=%.2f admitted_signals=%s",
+            signal_screen.n_effective_independent, signal_screen.admitted_signal_ids,
         )
         routing_sleeves = build_family_routing_sleeves(
-            panel, family_screen, cluster_folds, folds,
+            panel, signal_screen, cluster_folds, folds,
         )
         btc_idx = bars_4h.symbols.index("BTCUSDT") if "BTCUSDT" in bars_4h.symbols else -1
         eth_idx = bars_4h.symbols.index("ETHUSDT") if "ETHUSDT" in bars_4h.symbols else -1

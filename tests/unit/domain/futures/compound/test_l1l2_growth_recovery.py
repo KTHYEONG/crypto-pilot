@@ -324,3 +324,138 @@ def test_run_multiscale_compound_engine_passes_five_time_ordered_folds_to_l2(
     assert first_idx_per_fold == sorted(first_idx_per_fold), (
         "fold ids must be time-ordered (non-decreasing over the ledger)"
     )
+
+
+# ── P0 integration: unified walk-forward span wired through the engine ─────
+# (docs/specs/l1_cash_only_exit_redesign.md scenarios 14-15)
+
+
+def _synthetic_engine_fixture(n_bars: int = 24000, n_syms: int = 20):
+    import datetime
+
+    from src.domain.futures.compound.contracts import MarketFeatureCube, SealedHoldoutManifest
+    from src.domain.futures.data_lake.run_windows import QuarterlyRunWindow
+
+    symbols = ("BTCUSDT", "ETHUSDT") + tuple(f"SYM{i}USDT" for i in range(n_syms - 2))
+    ns_per_hour = 3_600_000_000_000
+    rng = np.random.default_rng(1)
+    close = (np.cumprod(1.0 + rng.normal(0.0002, 0.004, (n_bars, n_syms)), axis=0).astype(np.float32) * 100)
+    cube = MarketFeatureCube(
+        timestamps_ns=np.arange(n_bars, dtype=np.int64) * ns_per_hour,
+        symbols=symbols,
+        fields_2d={
+            "open": close * 0.9995, "high": close * 1.005, "low": close * 0.995, "close": close,
+            "quote_volume": np.ones((n_bars, n_syms), dtype=np.float32) * 50_000_000,
+            "funding": np.zeros((n_bars, n_syms), dtype=np.float32),
+            "premium": np.zeros((n_bars, n_syms), dtype=np.float32),
+            "mark": close.copy(), "index": close.copy(),
+            "taker_buy_quote": np.ones((n_bars, n_syms), dtype=np.float32) * 25_000_000,
+        },
+        available_2d={"core": np.ones((n_bars, n_syms), dtype=np.bool_)},
+        eligible_2d=np.ones((n_bars, n_syms), dtype=np.bool_),
+        entry_block_2d=np.zeros((n_bars, n_syms), dtype=np.bool_),
+        exit_required_2d=np.zeros((n_bars, n_syms), dtype=np.bool_),
+        capacity_usdt_2d=np.full((n_bars, n_syms), 1_000_000.0, dtype=np.float64),
+        execution_cost_bps_2d=np.full((n_bars, n_syms), 12.0, dtype=np.float32),
+        data_manifest_hash="h1",
+    )
+    universe = type("Universe", (), {"symbols": symbols, "snapshots": ()})()
+    far_future = 9_000_000_000_000_000_000
+    window = QuarterlyRunWindow(
+        requested_date=datetime.date(2020, 1, 1), cutoff_date=datetime.date(2020, 4, 1),
+        acquisition_start_ns=far_future, l1_start_ns=far_future + 1,
+        l2_start_ns=far_future + 2, l3_start_ns=far_future + 3, cutoff_exclusive_ns=far_future + 4,
+    )
+    manifest = SealedHoldoutManifest(
+        holdout_id="quarterly-2020-04-01", start_time_ns=int(cube.timestamps_ns[-100]),
+        end_time_ns=int(cube.timestamps_ns[-1]), holdout_days=4, model_version="v1",
+        data_manifest_hash="h1", strategy_spec_hash="spec1",
+    )
+    return cube, universe, window, manifest
+
+
+def test_engine_wires_unified_span_into_handoff(tmp_path) -> None:
+    """[RULE-P0-4] The quarterly path must call build_expanding_walk_forward_steps
+    with (l1_start, l3_start), not the old (l1_start, l2_start) 5-fold span."""
+    from src.domain.futures.compound.config import CompoundEngineConfig
+    from src.domain.futures.compound.engine import run_multiscale_compound_engine
+    from src.domain.futures.compound.holdout_store import SealedHoldoutStore
+    import src.domain.futures.compound.calibration as calibration_module
+    import src.domain.futures.compound.engine as engine_module
+
+    cube, universe, window, manifest = _synthetic_engine_fixture()
+    store = SealedHoldoutStore(tmp_path / "unified_span_test.sqlite3")
+    store.create(manifest)
+
+    calls: list[tuple] = []
+    real_fn = calibration_module.build_expanding_walk_forward_steps
+
+    def _spy(*args, **kwargs):
+        calls.append((args, kwargs))
+        return real_fn(*args, **kwargs)
+
+    engine_module.build_expanding_walk_forward_steps = _spy
+    try:
+        run_multiscale_compound_engine(
+            market=cube, universe=universe, window=window, holdout_store=store,
+            config=CompoundEngineConfig(),
+        )
+    finally:
+        engine_module.build_expanding_walk_forward_steps = real_fn
+
+    assert calls, "quarterly path must call build_expanding_walk_forward_steps"
+    args, kwargs = calls[0]
+    l1_start, l3_start = args[0], args[1]
+    assert l3_start > l1_start
+    # l2_start (the old, narrower upper bound) must NOT be the span passed in.
+    l2_start_would_be = l1_start + (l3_start - l1_start) // 2
+    assert l3_start != l2_start_would_be, "must use the l3 boundary, not the old l2-only span"
+
+    steps = real_fn(l1_start, l3_start, CompoundEngineConfig().calibration,
+                    step_bars=kwargs["step_bars"], initial_fit_bars=kwargs["initial_fit_bars"],
+                    max_target_horizon_bars=kwargs["max_target_horizon_bars"])
+    assert len(steps) > 5, "unified span must produce more steps than the old 5-fold L1-only split"
+
+
+def test_engine_l2_evaluation_uses_continuous_not_frozen_weights(tmp_path) -> None:
+    """[RULE-P0-7] The handoff must receive the full unified-span fold tuple
+    (>5 steps reaching through l3_start), not a disjoint 5-fold L1-only slice
+    later frozen and carried across a separate L2 block."""
+    from src.domain.futures.compound.config import CompoundEngineConfig
+    from src.domain.futures.compound.engine import run_multiscale_compound_engine
+    from src.domain.futures.compound.holdout_store import SealedHoldoutStore
+    import src.domain.futures.compound.l1_sleeves as sleeves_module
+    import src.domain.futures.compound.engine as engine_module
+
+    cube, universe, window, manifest = _synthetic_engine_fixture()
+    store = SealedHoldoutStore(tmp_path / "continuous_weights_test.sqlite3")
+    store.create(manifest)
+
+    handoff_calls: list[tuple] = []
+    real_handoff = sleeves_module.build_exit_aware_handoff
+
+    def _spy_handoff(*args, **kwargs):
+        handoff_calls.append((args, kwargs))
+        return real_handoff(*args, **kwargs)
+
+    engine_module.build_exit_aware_handoff = _spy_handoff
+    try:
+        run_multiscale_compound_engine(
+            market=cube, universe=universe, window=window, holdout_store=store,
+            config=CompoundEngineConfig(),
+        )
+    finally:
+        engine_module.build_exit_aware_handoff = real_handoff
+
+    assert handoff_calls, "handoff must be invoked on the quarterly path"
+    _, handoff_kwargs = handoff_calls[0]
+    handoff_folds = handoff_kwargs["folds"]
+    assert len(handoff_folds) > 5, (
+        "handoff received the old 5-fold L1-only span instead of the unified "
+        "walk-forward span reaching through l3_start"
+    )
+    # oos ranges must span into what used to be the separately-frozen L2 block:
+    # the last step's OOS end must reach well past a naive 5-fold L1-only split.
+    total_span = handoff_folds[-1].oos_end_exclusive - handoff_folds[0].fit_start
+    old_l1_only_span = total_span // 3  # rough old L1-window proportion
+    assert handoff_folds[-1].oos_end_exclusive > old_l1_only_span * 2

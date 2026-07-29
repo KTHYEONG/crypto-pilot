@@ -3,7 +3,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from src.domain.futures.compound.config import DynamicCompoundingConfig
+from src.domain.futures.compound.config import DynamicCompoundingConfig, HandoffConfig
 from src.domain.futures.compound.contracts import (
     CausalClusterFold,
     CausalFold,
@@ -19,6 +19,7 @@ from src.domain.futures.compound.l1_regime_routing import (
     build_fold_expert_books,
     score_expert_returns,
 )
+from src.domain.futures.compound.l1_screening import screen_signal_edge
 from src.domain.futures.compound.l1_sleeves import build_family_routing_sleeves
 
 
@@ -354,3 +355,54 @@ def _fake_forecast(panel: RawSignalPanel, bars: TimeframeBarCube) -> object:
 
 
 import unittest.mock
+
+
+# ---- P1/Integration: real screen_signal_edge output wires into sleeves ----
+# (docs/specs/l1_cash_only_exit_redesign.md scenario 16)
+
+
+def test_engine_wires_signal_screen_into_sleeves() -> None:
+    rng = np.random.default_rng(0)
+    n_bars, n_syms = 400, 20
+    trend = np.linspace(-0.5, 0.5, n_syms) * 0.01
+    forward_ret = np.zeros((n_bars, n_syms))
+    for t in range(1, n_bars):
+        forward_ret[t] = trend + rng.standard_normal(n_syms) * 0.008
+    z_rev = -forward_ret + rng.standard_normal((n_bars, n_syms)) * 0.002
+    price = np.cumprod(1 + forward_ret, axis=0).astype(np.float32)
+    bars_4h = TimeframeBarCube(
+        "4h", np.arange(n_bars, dtype=np.int64), tuple(f"S{i}" for i in range(n_syms)),
+        price.copy(), price.copy() * 1.01, price.copy() * 0.99, price,
+        np.full((n_bars, n_syms), 1e8, dtype=np.float32), np.ones((n_bars, n_syms), dtype=np.bool_),
+    )
+    desc = (SignalDescriptor("rev:fast", "xs_reversal", "fast", 24, "4h",
+                              target_horizon_hours=24, declared_orientation=-1),)
+    panel = RawSignalPanel(
+        np.arange(n_bars, dtype=np.int64), tuple(f"S{i}" for i in range(n_syms)), desc,
+        z_rev[:, :, None].astype(np.float32), np.ones((n_bars, n_syms, 1), dtype=np.bool_),
+        np.full((n_bars, n_syms), 0.02, dtype=np.float32),
+    )
+    ic_folds = (CausalFold(0, 0, 100, 0, 100, 100, 200, 25, 1),)
+    cfg = HandoffConfig(min_family_ic_samples=10, family_screen_alpha=0.05)
+
+    screen = screen_signal_edge(panel, bars_4h, ic_folds, cfg)
+    assert screen.admitted_signal_ids == ("rev:fast",), (
+        "fixture must produce a real (non-noise) admission for the wiring to mean anything"
+    )
+
+    cluster_panel = ClusterPanel(
+        symbols=tuple(f"S{i}" for i in range(n_syms)),
+        cluster_labels=np.array([0] * (n_syms // 2) + [1] * (n_syms - n_syms // 2), dtype=np.int32),
+        cluster_centroids=np.zeros((2, 4), dtype=np.float64),
+        k_clusters=2,
+    )
+    cluster_folds = (
+        CausalClusterFold(fold_id=0, fit_end_exclusive_4h=100,
+                           fit_end_time_ns=100 * 14_400_000_000_000, panel=cluster_panel, member_hash="h0"),
+    )
+
+    sleeves = build_family_routing_sleeves(panel, screen, cluster_folds, ic_folds)
+
+    assert sleeves, "screen admission must produce at least one routing sleeve"
+    assert {s.signal_id for s in sleeves} <= set(screen.admitted_signal_ids)
+    assert all(s.family == "xs_reversal" for s in sleeves)

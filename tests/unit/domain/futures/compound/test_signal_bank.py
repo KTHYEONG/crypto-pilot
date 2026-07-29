@@ -317,11 +317,12 @@ def test_trend_ema_fast_positive_in_uptrend() -> None:
     assert np.mean(late_scores) > 0.1
 
 
-def test_reversal_st_has_one_speed_in_legacy_catalog() -> None:
+def test_reversal_st_has_six_speeds_in_expanded_catalog() -> None:
     catalog = _default_catalog()
     rev_st = [d for d in catalog if d.family == "reversal_st"]
-    assert len(rev_st) == 1
-    assert rev_st[0].speed == "fast"
+    assert len(rev_st) == 6
+    speeds = {d.speed for d in rev_st}
+    assert speeds == {"fast", "medium", "moderate", "slow", "very_slow", "ultra_slow"}
 
 def test_compute_basis_gap_speed_dependent_smoothing() -> None:
     n_t, n_s = 1000, 5
@@ -379,9 +380,9 @@ def test_compute_xs_reversal_exactly_10_eligible() -> None:
     assert np.any(np.isfinite(result[1]))
 
 
-def test_default_catalog_has_legacy_families_27_recipes() -> None:
+def test_default_catalog_has_legacy_families_37_recipes() -> None:
     catalog = _default_catalog()
-    assert len(catalog) == 27
+    assert len(catalog) == 37
     families = {d.family for d in catalog}
     assert families == {
         "trend_ema", "momentum_ts", "breakout_donchian", "basis_gap",
@@ -391,7 +392,7 @@ def test_default_catalog_has_legacy_families_27_recipes() -> None:
 
 def test_default_catalog_matches_legacy_27_and_excludes_new4_families() -> None:
     catalog = _default_catalog()
-    assert len(catalog) == 27
+    assert len(catalog) == 37
     families = {d.family for d in catalog}
     new4 = {"volatility_squeeze_keltner", "funding_carry_reversion", "flow_imbalance_taker", "open_interest_confirmation"}
     assert families.isdisjoint(new4), f"legacy catalog must not contain any of {new4}"
@@ -402,20 +403,20 @@ def test_default_catalog_legacy_extra_families_included() -> None:
     basis_gap = [d for d in catalog if d.family == "basis_gap"]
     assert len(basis_gap) == 5
     xs_rev = [d for d in catalog if d.family == "xs_reversal"]
-    assert len(xs_rev) == 2
+    assert len(xs_rev) == 6
     xs_mom = [d for d in catalog if d.family == "xs_momentum_slow"]
-    assert len(xs_mom) == 2
+    assert len(xs_mom) == 3
     sm_div = [d for d in catalog if d.family == "smart_money_divergence"]
     assert len(sm_div) == 2
 
 
-def test_build_raw_signal_panel_default_catalog_has_27_signals_with_legacy_families(synthetic_market: MarketFeatureCube) -> None:
+def test_build_raw_signal_panel_default_catalog_has_37_signals_with_legacy_families(synthetic_market: MarketFeatureCube) -> None:
     bars = build_multi_timeframe_bars(synthetic_market)
     T = bars.decision_timestamps_ns.size
     N = len(bars.cubes["4h"].symbols)
     eligible = np.ones((T, N), np.bool_)
     panel = build_raw_signal_panel(bars, eligible_2d=eligible)
-    assert len(panel.descriptors) == 27
+    assert len(panel.descriptors) == 37
     families = {d.family for d in panel.descriptors}
     assert families == {
         "trend_ema", "momentum_ts", "breakout_donchian", "basis_gap",
@@ -427,9 +428,9 @@ def test_build_raw_signal_panel_default_catalog_has_27_signals_with_legacy_famil
     assert len(basis_gap) == 5
 
 
-def test_default_catalog_27_recipes_matched_horizons() -> None:
+def test_default_catalog_37_recipes_matched_horizons() -> None:
     catalog = _default_catalog()
-    assert len(catalog) == 27
+    assert len(catalog) == 37
     for desc in catalog:
         assert desc.target_horizon_hours > 0
         assert desc.target_horizon_hours == desc.lookback_hours, (
@@ -502,14 +503,14 @@ def test_build_raw_signal_panel_trend_ema_wiring() -> None:
     assert panel.descriptors[te_medium_idx].native_timeframe == "4h"
 
 
-def test_p2_pipeline_27_signals_120_symbols_supported(synthetic_market: MarketFeatureCube) -> None:
+def test_p2_pipeline_37_signals_120_symbols_supported(synthetic_market: MarketFeatureCube) -> None:
     bars = build_multi_timeframe_bars(synthetic_market)
     T = bars.decision_timestamps_ns.size
     N = len(bars.cubes["4h"].symbols)
     eligible = np.ones((T, N), np.bool_)
     panel = build_raw_signal_panel(bars, eligible_2d=eligible)
     assert isinstance(panel, RawSignalPanel)
-    assert panel.z_3d.shape[-1] == 27
+    assert panel.z_3d.shape[-1] == 37
     assert panel.z_3d.dtype == np.float32
     finite_mask = np.isfinite(panel.z_3d)
     if np.any(finite_mask):
@@ -699,8 +700,8 @@ def test_engine_wires_guarded_six_thread_l1_panel(synthetic_market: MarketFeatur
     assert isinstance(panel, RawSignalPanel)
     assert panel.z_3d.shape[0] == T
     assert panel.z_3d.shape[1] == N
-    assert panel.z_3d.shape[2] == 27
-    assert panel.valid_3d.shape == (T, N, 27)
+    assert panel.z_3d.shape[2] == 37
+    assert panel.valid_3d.shape == (T, N, 37)
     assert panel.sigma_2d.shape == (T, N)
     finite_sigma = np.isfinite(panel.sigma_2d)
     assert np.all(finite_sigma)
@@ -772,11 +773,11 @@ def test_missing_1h_data_does_not_crash_pipeline(synthetic_market: MarketFeature
         assert not np.any(panel.valid_3d[:, :, idx]), "basis_gap not in test data, should be all invalid"
 
 
-def test_default_catalog_27_recipes_unique_ids() -> None:
+def test_default_catalog_37_recipes_unique_ids() -> None:
     catalog = _default_catalog()
-    assert len(catalog) == 27
+    assert len(catalog) == 37
     ids = {d.signal_id for d in catalog}
-    assert len(ids) == 27, "all signal_ids must be unique"
+    assert len(ids) == 37, "all signal_ids must be unique"
 
 
 def test_default_catalog_legacy_signal_ids() -> None:
@@ -785,11 +786,11 @@ def test_default_catalog_legacy_signal_ids() -> None:
     for family in ("trend_ema", "momentum_ts", "breakout_donchian", "basis_gap"):
         for speed in ("fast", "medium", "moderate", "slow", "very_slow"):
             expected.add(f"{family}:{speed}")
-    expected.add("reversal_st:fast")
-    expected.add("xs_reversal:fast")
-    expected.add("xs_reversal:medium")
-    expected.add("xs_momentum_slow:slow")
-    expected.add("xs_momentum_slow:very_slow")
+    for speed in ("fast", "medium", "moderate", "slow", "very_slow", "ultra_slow"):
+        expected.add(f"reversal_st:{speed}")
+        expected.add(f"xs_reversal:{speed}")
+    for speed in ("slow", "very_slow", "ultra_slow"):
+        expected.add(f"xs_momentum_slow:{speed}")
     expected.add("smart_money_divergence:fast")
     expected.add("smart_money_divergence:medium")
     actual = {d.signal_id for d in catalog}
@@ -803,7 +804,7 @@ def test_build_raw_signal_panel_120_universe_symbols(synthetic_market: MarketFea
     eligible = np.ones((T, len(symbols)), np.bool_)
     panel = build_raw_signal_panel(bars, eligible_2d=eligible)
     assert panel.z_3d.shape[1] == len(symbols)
-    assert panel.z_3d.shape[2] == 27
+    assert panel.z_3d.shape[2] == 37
     assert len(panel.symbols) == len(symbols)
 
 
@@ -814,7 +815,7 @@ def test_signal_bank_dynamic_masking_coverage(synthetic_market: MarketFeatureCub
     eligible = np.ones((T, N), np.bool_)
     eligible[T // 2:, :N // 2] = False
     panel = build_raw_signal_panel(bars, eligible_2d=eligible)
-    assert panel.valid_3d.shape == (T, N, 27)
+    assert panel.valid_3d.shape == (T, N, 37)
     late_none = ~panel.valid_3d[T // 2:, :N // 2, :].any(axis=(0, 2))
     assert late_none.any(), "masked symbols should have no valid entries in later bars"
 
@@ -847,8 +848,8 @@ def test_signal_bank_thread_safety(synthetic_market: MarketFeatureCube) -> None:
 
     panel = build_raw_signal_panel(bars, eligible_2d=eligible, numba_threads=6)
     assert isinstance(panel, RawSignalPanel)
-    assert panel.z_3d.shape == (T, N, 27)
-    assert panel.valid_3d.shape == (T, N, 27)
+    assert panel.z_3d.shape == (T, N, 37)
+    assert panel.valid_3d.shape == (T, N, 37)
     assert panel.sigma_2d.shape == (T, N)
 
 
@@ -861,8 +862,8 @@ def test_signal_bank_large_universe_tpe_off(synthetic_market: MarketFeatureCube)
     eligible = np.ones((T, N), np.bool_)
     panel = build_raw_signal_panel(bars, eligible_2d=eligible, numba_threads=6)
     assert isinstance(panel, RawSignalPanel)
-    assert panel.z_3d.shape == (T, N, 27)
-    assert panel.valid_3d.shape == (T, N, 27)
+    assert panel.z_3d.shape == (T, N, 37)
+    assert panel.valid_3d.shape == (T, N, 37)
 
 
 # ── H2-SINGLE-SORT-MERGE: bit-exact MAD-z kernel equivalence ──────────
@@ -948,9 +949,32 @@ def test_signal_panel_output_identity(synthetic_market: MarketFeatureCube) -> No
     eligible = np.ones((T, N), np.bool_)
     panel = build_raw_signal_panel(bars, eligible_2d=eligible, numba_threads=1)
     assert isinstance(panel, RawSignalPanel)
-    assert panel.z_3d.shape == (T, N, 27)
-    assert panel.valid_3d.shape == (T, N, 27)
+    assert panel.z_3d.shape == (T, N, 37)
+    assert panel.valid_3d.shape == (T, N, 37)
     finite = np.isfinite(panel.z_3d)
     if np.any(finite):
         assert np.all(panel.z_3d[finite] >= -3.0)
         assert np.all(panel.z_3d[finite] <= 3.0 + 1e-6)
+
+
+# ── P1: horizon ladder expansion (docs/specs/l1_cash_only_exit_redesign.md) ──
+
+
+def test_default_catalog_horizon_ladder() -> None:
+    """[RULE-P1-5] reversal_st/xs_reversal expand to 8..96h, xs_momentum_slow to 216..648h."""
+    catalog = _default_catalog()
+    reversal_st = [d for d in catalog if d.family == "reversal_st"]
+    xs_reversal = [d for d in catalog if d.family == "xs_reversal"]
+    xs_momentum = [d for d in catalog if d.family == "xs_momentum_slow"]
+
+    assert len(reversal_st) == 6
+    assert len(xs_reversal) == 6
+    assert len(xs_momentum) == 3
+
+    assert {d.lookback_hours for d in reversal_st} == {8, 12, 24, 48, 72, 96}
+    assert {d.lookback_hours for d in xs_reversal} == {8, 12, 24, 48, 72, 96}
+    assert {d.lookback_hours for d in xs_momentum} == {216, 432, 648}
+
+    for d in reversal_st + xs_reversal + xs_momentum:
+        assert d.target_horizon_hours % 4 == 0
+        assert d.target_horizon_hours == d.lookback_hours

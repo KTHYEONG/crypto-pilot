@@ -380,6 +380,7 @@ class HandoffConfig:
     hac_lag_cap: int = 120
     family_screen_alpha: float = 0.05
     min_family_ic_samples: int = 30
+    min_growth_posterior_probability: float = 0.90
 
     def __post_init__(self) -> None:
         assert 0 < self.max_pairwise_correlation <= 1
@@ -395,6 +396,7 @@ class HandoffConfig:
         assert self.hac_lag_cap >= 1
         assert 0 < self.family_screen_alpha <= 1
         assert self.min_family_ic_samples >= 1
+        assert 0.5 < self.min_growth_posterior_probability < 1.0
 
 
 @dataclass(slots=True, frozen=True)
@@ -406,7 +408,6 @@ class RegimeRouterConfig:
     stress_exit_quantile: float = 0.70
     trend_enter_tstat: float = 1.25
     trend_exit_tstat: float = 0.75
-    min_positive_inner_folds: int = 2
     min_effective_blocks: int = 20
     min_evidence_bars: int = 900
     min_posterior_probability: float = 0.90
@@ -420,7 +421,6 @@ class RegimeRouterConfig:
         assert self.min_dwell_bars > 0
         assert 0 < self.stress_exit_quantile < self.stress_enter_quantile < 1
         assert self.trend_enter_tstat > self.trend_exit_tstat > 0
-        assert self.min_positive_inner_folds > 0
         assert self.min_effective_blocks > 0
         assert self.min_evidence_bars > 0
         assert 0.5 < self.min_posterior_probability < 1
