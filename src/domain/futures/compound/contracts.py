@@ -635,6 +635,46 @@ class FamilyEdgeScreen:
             )
 
 
+@dataclass(slots=True, frozen=True)
+class SignalEdgeRecord:
+    signal_id: str
+    family: str
+    speed: str
+    target_horizon_hours: int
+    n_ic_bars: int
+    mean_ic: float
+    t_newey_west: float
+    p_two_sided: float
+    sidak_alpha: float
+    declared_orientation: int
+    admitted: bool
+    reasons: tuple[str, ...]
+
+    def __post_init__(self) -> None:
+        if not self.signal_id:
+            raise ValueError("signal_id must be non-empty")
+        if not np.isfinite(self.mean_ic):
+            raise ValueError(f"mean_ic must be finite, got {self.mean_ic}")
+        if self.declared_orientation not in (-1, 1):
+            raise ValueError(
+                f"declared_orientation must be -1 or 1, got {self.declared_orientation}"
+            )
+
+
+@dataclass(slots=True, frozen=True)
+class SignalEdgeScreen:
+    records: tuple[SignalEdgeRecord, ...]
+    n_effective_independent: float
+    admitted_signal_ids: tuple[str, ...]
+    admitted_families: tuple[str, ...]
+
+    def __post_init__(self) -> None:
+        if self.n_effective_independent <= 0:
+            raise ValueError(
+                f"n_effective_independent must be > 0, got {self.n_effective_independent}"
+            )
+
+
 class ExitPolicyKind(StrEnum):
     TIME = "time"
     ASYMMETRIC_ATR = "asymmetric_atr"
@@ -1200,6 +1240,8 @@ __all__ = [
     "SignalAdmissionEvidence",
     "SignalCalibration",
     "SignalDescriptor",
+    "SignalEdgeRecord",
+    "SignalEdgeScreen",
     "SignalFoldRecord",
     "StrategyDataCoverage",
     "StrategyDataCoverageEntry",
