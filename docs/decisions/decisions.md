@@ -1,5 +1,10 @@
 # Active Decisions Log (Sliding Window)
 
+## [2026-07-29] [TASK_L1_UNIFIED_WALKFORWARD_GATE_REDESIGN] [ADR_20260729_L1_UNIFIED_WALKFORWARD_GATE_REDESIGN]
+- **Context/Why:** cash-only 근본원인이 3단 분리 아키텍처(L1 5-fold 365일 + L2 냉동 542일 carry)와 family pooling(t 팽창) 및 6~7단 순차 AND 게이트 캐스케이드였음을 확정. decisions.md 임계값 완화 금지 원칙 유지한 채 구조 자체를 재설계.
+- **Resolution/What:** calibration.py: build_expanding_walk_forward_steps 신규(L1/L2 경계 폐기, l3_start까지 확장). l1_screening.py: screen_signal_edge 신규(signal 단위 검정, family pooling 제거). signal_bank.py: reversal_st/xs_reversal ladder 8~96h, xs_momentum_slow 216~648h로 확장(27->37 recipe). l1_regime_routing.py: evaluate_ensemble_admission/aggregate_ensemble_evidence 신규 및 _build_prequential_expert_route_impl 실제 배선(7-reason 캐스케이드->guard 2개+복합 통계판단 2개). l1_sleeves.py: compute_compounding_stability가 circular_stationary_bootstrap_growth의 prob_positive를 실제 캡처해 사용(기존 discard 버그 수정), 6-check->4-check. config.py: HandoffConfig.min_growth_posterior_probability 신규, RegimeRouterConfig.min_positive_inner_folds 죽은 필드 제거. contracts.py: SignalEdgeRecord/SignalEdgeScreen 신규. engine.py: quarterly 경로에서 build_expanding_walk_forward_steps(l1_start,l3_start) 배선. /check로 배선 누락(P2 함수가 정의만 되고 미호출) 및 vacuous test 5건 발견, 전량 수정 후 PASS(Cov 86%, 사전결함 2건 baseline 재현 확인 후 범위 제외). .claude/.agents skills(check/implement) 개선: orphaned-implementation gate, no-conditional-escape-hatch 규칙 추가, lean_check.py --deselect 옵션 추가.
+- **Impact:** 실전 재실행 결과 fold 5->18, OOS 표본 1700->3240bar(1.9배), family pooling 허위 admit 없이 8개 signal 개별 admit(t up to +8.70), prob_positive 실제 캡처 확인. 여전히 cash-only이나 사유가 게이트 산술 불가능성에서 실측 gross-vs-cost 워터폴(gross +9~31%, cost -68~70%)로 전환 - 스펙의 완료기준(사유가 실제 계산된 통계량이어야 함) 충족. 다음 착수점은 8h/12h 초단기 반전 signal의 회전율/비용 모델.
+
 ## [2026-07-29] [TASK_L1_FAMILY_ONLY_ROUTING_MEASUREMENT] [ADR_20260729_L1_FAMILY_ONLY_ROUTING_MEASUREMENT]
 - **Context/Why:** 구식 HAC posterior 게이트를 제거한 family-only sleeve 라우팅이 실제 데이터에서 evidence와 성과를 생성하는지 검증했다.
 - **Resolution/What:** docs/results/result.md를 최신 production dry-run과 내부 계측 artifact 중심으로 전면 재작성하고 family screen, sleeve 구성, evidence, return-domain, L2/L3 판정을 기록했다.
@@ -69,8 +74,3 @@
 - **Context/Why:** 프로덕션 파이프라인(opt_main_futures.py) 연산 병목 사멸 및 OOM 차단/비트단위 수치 동일성 보장
 - **Resolution/What:** l1_sleeves.py 2D Matrix Vectorized Bootstrap 적용, signal_bank.py ProcessPool 알파신호 병렬화, test_production_pipeline_ultra_optimization.py 검증 시나리오 구축
 - **Impact:** 부트스트랩 계산속도 99.45% 단축, Peak Memory 41.79MB 캡핑, Math Discrepancy 0.000000000000 달성
-
-## [2026-07-27] [TASK_SOFT_CONVICTION_AND_FUNDAMENTAL_OPTIMIZATION] [ADR_20260727_SOFT_CONVICTION_AND_FUNDAMENTAL_OPTIMIZATION]
-- **Context/Why:** 현금 100% 락업 결함 구조 철폐 및 /check 검증 연산 병목 4분 -> 15초 이하 단축
-- **Resolution/What:** engine.py(has_admitted 하드 거부 제거 및 연속 신념 가중치 적용), l1_sleeves.py(ExitPathCache 1회 사전 계산 도입), allocator.py(12% 목표 변동성 타겟팅 배선)
-- **Impact:** 현금 락업 해제 및 복리 포지션 점화(CAGR +3.32%, MDD -1.29%), 수학적 오차 0.000000000000 보장 하에 파이프라인 및 테스트 연산 속도 86.9% 대폭 가속
