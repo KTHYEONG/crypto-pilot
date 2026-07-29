@@ -1,5 +1,10 @@
 # Active Decisions Log (Sliding Window)
 
+## [2026-07-29] [TASK_L1_ROUTER_CASH_ONLY_RECOVERY] [ADR_20260729_L1_ROUTER_CASH_ONLY_RECOVERY]
+- **Context/Why:** 실측 확정된 6개 결함(R-1 funding NaN 크래시, R-2 평가창 mu 지지 부재, R-3 evidence/배포 북 불일치, R-4 도달불가 게이트 중복, R-5 orientation 잠복 유실, R-6 엣지 부재) 중 R-1~R-5 측정계 복원. R-6은 후속 스펙 범위 외
+- **Resolution/What:** allocator.py: compute_funding_4h_2d(NaN-safe SUM) 신규, dense_simulator SSOT 통일. contracts.py: ExpertReturnTape 성분별 유한성 사전검사, PrequentialExpertRoute.active_expert_count_1d 및 RegimeExpertEvidence.regime_mean_net/n_evidence_bars 필드 추가. l1_regime_routing.py: collect_fold_expert_contributions/build_fold_candidate_book/split_book_by_expert(배포북 단일 SSOT, orientation 구조적 보장)/apply_walk_forward_carry(평가창 support 연장)/score_expert_returns 신규, 게이트 lcb90 중복 제거+단일화, RegimeRouterConfig dead param(max_expert_correlation, prior_effective_blocks) 제거+min_evidence_bars 신규. l1_diagnostics.py 계측 확장. /check PASS(Mypy strict, Cov 86%, 사전결함 2건 baseline 재현 확인 후 범위 제외)
+- **Impact:** 실전 CLI 재실행: exit_code 1->0, integrity_ok true, p2_pipeline_error 소멸(R-1 해소 확인). 그러나 target_weights 여전히 100% 현금 - 진단 결과 R-4 게이트가 '현재 fold 자신의 OOS 폭(oos_end-oos_start, 고정 340bar)'을 n_evidence_bars로 오산정해 min_evidence_bars=900을 구조적으로 영원히 통과 불가(fold 진행에 따른 누적 증거 로직 누락, 원래 evidence_mask=tape.outer_fold_id_1d<fold_id 패턴 미이식). 엣지 유무와 무관하게 항상 no_evidence 고착되는 회귀이며 완료 판정 기준 3번(원인 구분) 미달. 다음 세션에서 누적 증거창 로직 재이식 필요, 임계값 완화 금지
+
 ## [2026-07-29] [TASK_L1_CASH_ONLY_DEBUG_AUDIT] [ADR_20260729_L1_CASH_ONLY_DEBUG_AUDIT]
 - **Context/Why:** 최신 full dry-run에서 전략 성과 게이트 이전에 L1 prequential routing이 net 수익 항등식 검증 예외로 중단되어 cash-only fallback 원인과 원자료를 보존해야 함
 - **Resolution/What:** docs/results/result.md에 실행 조건·artifact·DEBUG trace·정량 결과·후속 점검 포인트를 추가하고, 결과를 ADR 및 인덱스에 동기화
@@ -69,8 +74,3 @@
 - **Context/Why:** 직전 NO_EVIDENCE 진단(min_effective_days=180)이 오진단이었음을 확인(코드에서 미참조 죽은 필드). 실전 그리드서치 8회로 진짜 원인 확정: 개별 신호 게이트는 정상, 집계 게이트(pooled OOS 평균>0 체크)가 L1<350일에서 부호 반전. growth_lcb90 필드가 평균값을 대입하는 결함도 발견
 - **Resolution/What:** run_windows.py(clamp_window_to_available_data 신규: L1 길이 고정+L2 동적계산+fail-closed), config.py(l1_days 365 복원, min_oos_days 340, min_bootstrap_sharpe_probability 제거, l1_prior_effective_days_cap 신규), l1_sleeves.py(집계게이트를 admission.py::_block_bootstrap_lcb(block_size=1) 재사용 i.i.d. 부트스트랩으로 교체), validation.py(L2->L3 패턴 재사용한 blend_l1_prior_growth_probability, sharpe_probability 게이트 제외), engine.py 배선. /check PASS(Cov 91%)
 - **Impact:** 실전 CLI 재실행 결과 여전히 NO_EVIDENCE. growth_lcb90 버그 수정(평균->진짜 i.i.d. 부트스트랩 LCB90) 적용 후 실측: annualized_log_growth=+7.37%(평균, 이전엔 이걸로 통과) vs growth_lcb90=-40.58%(진짜 하한, 통과 못함). 스펙 자체가 명시했던 [LIMIT-03] 리스크가 실현. 정직화가 정직한 결과를 낸 것으로 판단, 임계값 추가 완화 없이 NO_EVIDENCE 그대로 기록. 유효표본 상관구조 조사는 후속 스펙 범위
-
-## [2026-07-27] [TASK_L2_COMPOUNDING_LEAP] [ADR_20260727_L2_COMPOUNDING_LEAP]
-- **Context/Why:** 20260727_013707 FAIL이 여전히 1일 라벨 오정렬(A-4 미해소)로 오염됨을 원시 레이크 대조(ρ=0.846 vs -0.003)로 확정. 정렬 정정 후 causal β=0.643으로 시장중립이 아닌 베타 롱임이 드러났고, β-헤지 잔차가 성장·변동성·regime 정상성 전부에서 우월함을 실측(scratch/verify_l2_growth_leap.py)
-- **Resolution/What:** validation.py(라벨정렬정정·fail-closed 정렬불변식·beta-adj excess), benchmark.py(causal_beta_series/assert_contemporaneous_alignment 신규), allocator.py(apply_beta_hedge_overlay/derive_mdd_parity_scale 신규), config.py(beta lookback/clip, min_oos_days 365->500 상향, mdd_budget), engine.py(2-pass 무헤지/헤지 시뮬 배선), run_windows.py(l1_days 365->180, l2_days 365->547). /check PASS(Cov 85%, 임계값 완화 0건)
-- **Impact:** 실전 CLI 재실행 결과 target_weights 전량 0(NO_EVIDENCE) - L1 exit-aware handoff admitted=False sleeves=274(전멸). 원인=L1 윈도우 축소(365->180d)가 기존 admission 게이트 min_effective_days=180.0과 충돌, fold분할 후 유효일수 미달로 전신호 탈락. [LIMIT-07]이 예견한 위험이 감소 아닌 전멸로 실현. P0/P1/P2(정렬·베타·헤지)는 유효, P3(창 재분할)는 admission 게이트 재설계 결정 대기로 보류
