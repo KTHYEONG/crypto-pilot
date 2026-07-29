@@ -375,6 +375,8 @@ class HandoffConfig:
     dedup_rho_threshold: float = 0.90
     min_dedup_observations: int = 1_000
     min_sleeve_posterior_probability: float = 0.95
+    min_oos_posterior_probability: float = 0.55
+    min_oos_effective_blocks: int = 5
     hac_lag_cap: int = 120
 
     def __post_init__(self) -> None:
@@ -406,6 +408,7 @@ class RegimeRouterConfig:
     min_posterior_probability: float = 0.90
     max_expert_weight: float = 0.50
     n_bootstrap: int = 1_000
+    regime_overlay_floor: float = 0.5
 
     def __post_init__(self) -> None:
         assert self.trend_lookback_bars > 0
@@ -419,6 +422,7 @@ class RegimeRouterConfig:
         assert 0.5 < self.min_posterior_probability < 1
         assert 0 < self.max_expert_weight <= 1
         assert self.n_bootstrap > 0
+        assert 0 < self.regime_overlay_floor <= 1.0
 
 
 @dataclass(slots=True, frozen=True)
