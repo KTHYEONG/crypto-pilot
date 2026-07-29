@@ -640,6 +640,21 @@ class ExitPathCache:
 
 
 @dataclass(slots=True, frozen=True)
+class SignalFoldRecord:
+    gross_1d: NDArray[np.float64]
+    cost_1d: NDArray[np.float64]
+    funding_1d: NDArray[np.float64]
+    net_1d: NDArray[np.float64]
+    regime_code_1d: NDArray[np.int8]
+
+    def __post_init__(self) -> None:
+        n = self.net_1d.shape[0]
+        for arr in (self.gross_1d, self.cost_1d, self.funding_1d, self.regime_code_1d):
+            if arr.shape[0] != n:
+                raise ValueError(f"all arrays must have length {n}, got {arr.shape[0]}")
+
+
+@dataclass(slots=True, frozen=True)
 class L1SleevePosterior:
     sleeve_id: str
     signal_id: str
@@ -1114,6 +1129,7 @@ __all__ = [
     "SignalAdmissionEvidence",
     "SignalCalibration",
     "SignalDescriptor",
+    "SignalFoldRecord",
     "StrategyDataCoverage",
     "StrategyDataCoverageEntry",
     "TargetWeightSink",

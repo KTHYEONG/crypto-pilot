@@ -1,3 +1,50 @@
+## R-4 실전 CLI 재검증 — 증거창 누적 로직 수정 확인, no_evidence는 데이터 부족으로 재분류 — 2026-07-29
+
+- 실행일(KST): `2026-07-29`
+- 실행 명령: `UV_CACHE_DIR=/tmp/uv-cache MPLCONFIGDIR=/tmp/mpl PYTHONPATH=. L2_DRY_RUN=1 L1_DEBUG=1 LOG_LEVEL=DEBUG timeout 1800 uv run python src/execution/opt_main_futures.py --phase full --sync local --date 2026-07-15 --seed 42`
+- 프로세스: `exit_code=0`, `integrity_ok=true` (크래시 없음)
+- 결과 artifact: `logs/futures/compound/20260729_030134/`
+- 라우터 attribution 재검증: `scratch/reverify_r4_attribution.py`(`_build_prequential_expert_route_impl` 논인베이시브 패치, `logs/scratch/r4_reverify_attribution.json`)
+- 검증 규모: `51` symbols × `5,442` 1h bars(내부 L1 4h), `L2_DRY_RUN=1`, sealed L3 holdout 미소비
+
+### 배경 — 선행 스펙(`l1-signal-evaluation-architecture-fix`) 적용 후 정직한 실전 확인
+
+직전 스펙에서 P0(증거창 누적 로직), P1(sleeve OOS 확증 AND-게이트), P2(regime 하드게이트→overlay 강등)를 구현하고 `/check` PASS(Mypy strict, Cov 94%)까지 마쳤으나, `/check` 자체는 mypy/wiring/pytest만 검증하고 "실제로 프로덕션 데이터에서 게이트가 도달 가능해졌는지"는 증명하지 않는다. 이번 실행은 그 실전 확인이다.
+
+### 결과 데이터
+
+| 항목 | 값 |
+|---|---:|
+| `l2.verdict` | `no_evidence`(불변) |
+| `l2.integrity_ok` | **true** |
+| `l2.reasons` | `active_days_ratio=0.0000<0.1`, `rebalances=0<30` |
+| `l3.verdict` | `reject` |
+| `admitted_sleeves`(L1, `logs/l1_admission.jsonl` EVAL) | **5** (직전 세션 15 → P1 OOS 확증 게이트로 정직하게 축소) |
+| target weights 비영 비율 | `0.0%` |
+
+### R-4 수정의 직접 증거 — fold 3 `momentum_ts:very_slow`
+
+```json
+{"fold": 3, "signal_id": "momentum_ts:very_slow", "n_evidence_bars": 0, "reasons": ["insufficient_evidence_window"]}
+```
+
+이 신호가 라우터에 **처음** 등장하는 시점(fold 1~2엔 L1 admission 자체가 없었음)에 `n_evidence_bars=0`이 기록됐다. 회귀 버그(2026-07-29 앞선 실행, "P0 ExpertReturnTape" 절 참조) 상태였다면 이 값은 fold 자신의 OOS 폭(340)으로 나왔을 것이다 — 실측 0은 "누적 이력이 아직 없다"는 정직한 반영이며 누적 로직이 실제로 작동함을 직접 증명한다. fold 4에서 같은 신호는 `n_evidence_bars=340`(fold3 1개 record 누적)으로 정확히 이어졌다.
+
+### 잔여 no_evidence의 재해석
+
+fold 4 시점 누적치(340) < `min_evidence_bars=900`으로 게이트 미통과가 지속되나, 이는 게이트 버그가 아니라 **이 신호가 5-fold 창의 후반(fold 3)에야 처음 admit돼 누적 시간이 구조적으로 부족**한 정직한 데이터 부족 사유다(`[LIMIT-01]`/`[LIMIT-11]` 기대대로). `admitted_sleeves`가 15→5로 준 것도 P1의 sleeve OOS 확증 게이트가 실제로 과적합 후보를 걸러내고 있다는 정합적 증거다.
+
+### 판정
+
+1. R-1(크래시)·R-4(증거창 누적)는 실전 CLI로 재확인 완료 — `exit_code=0`, `integrity_ok=true`, `n_evidence_bars`가 신호 첫 등장 시 0으로 정직하게 기록됨.
+2. P1(sleeve OOS AND-게이트) 실전 효과 확인 — admitted sleeves 15→5.
+3. `no_evidence`는 이번 실행에서도 유지되나 원인이 "게이트 계산 버그"에서 "R-6(엣지 부재) + 신호별 fold 내 등장 시점에 따른 누적 이력 부족"으로 완전히 재분류됨. 임계값 완화 없이 기록.
+4. 다음 착수점: R-6(엣지 자체 부재, 선행 세션 실측 pooled rank IC t=0.31) 재설계, 혹은 신호가 fold 0~1부터 꾸준히 admit되도록 L1 sleeve 안정성 자체를 다루는 후속 스펙.
+
+- 결과 원본: `logs/futures/compound/20260729_030134/result.json`, `logs/scratch/r4_reverify_attribution.json`, `logs/l1_admission.jsonl`
+
+---
+
 ## 최신 DEBUG 실행 — P2 ExpertReturnTape 항등식 예외로 cash-only fallback — 2026-07-29
 
 - 실행일(KST): `2026-07-29`
