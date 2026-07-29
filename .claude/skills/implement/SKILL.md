@@ -16,33 +16,65 @@ Optimize for **low-cost models (Doer)** by enforcing strict mechanical execution
   - Exact file locations and target function/class contracts (signatures).
   - The **Skeleton Mock Boilerplate** and scenario descriptions.
 
-### 2. Strict Mechanical TDD Cycle (NO ARCHITECTURAL REFACTORING)
-- **Step 1: Stub Registration & Locked Signature Guard**
-  - Read `contract.json` to identify public APIs and classes. These are **LOCKED** contracts.
-  - Create only the stub matching the signature in the source file (`src/...`).
-  - Do **NOT** modify any locked method/class signature. If a design change is required, **STOP execution immediately** and escalate to the human or high-reasoning model.
-- **Step 2: Single-Pass Contract & Test Synthesis (Combined Red-Green)**
-  - Do **NOT** waste token cycles executing failing tests just to prove a Red phase.
-  - Read `contract.json` to extract `contracts`, `assertions`, and `wiring`.
-  - Write both the source logic (`src/...`) and the corresponding unit/scenario tests (`tests/...`) simultaneously, adhering strictly to the contract.json spec.
-  - **Do NOT copy-paste dummy mock templates or return static dummy values (e.g. `return {}`, `return True`, or logger-only calls). Full concrete business logic must be implemented.**
-  - **Strict Value Assertions**: Write test cases targeting the exact `assertions` defined in `contract.json`. Loose assertions like `assert result is not None` are strictly prohibited.
-  - Wire the new logic into the caller module as defined in the `wiring` section of `contract.json`. The caller module specified in `wiring.target_file` MUST be included in the modified files list, ensuring both `import_symbol` and `invocation_symbol` (actual call/instantiation) are implemented in the caller module context.
-  - Limit high-level scenario tests strictly to the 3-4 scenarios defined in the spec.
-- **Step 3: Local Verification & Green Enforcement**
-  - Run pytest locally (`uv run pytest -k [target_name]`) to verify that the synthesized code is functional.
-  - Ensure that unit tests include strict assertions (verifying exact values, mathematical outputs, and exception types, not just `is not None`) to guarantee semantic correctness.
-  - **Do NOT perform design refactoring.** Keep code changes minimal. Refactoring is restricted to basic syntax cleanups and lint compliance.
-- **Step 4: L1.5 Local Verification & Clean Handshake**
-  - Run pytest locally (`uv run pytest -k [target_name] --cov`) to ensure tests pass and coverage targets (Core >=85%, Adapter >=65%) are met.
-  - Run `uv run ruff check --fix [modified_files]` to ensure format/style compliance.
-  - **Do NOT run `mypy` during the implement phase.** (Static type audit with `mypy` is strictly reserved for the subsequent `check` phase).
-  - Remove any temporary `print()` debugging statements.
-  - **STOP execution and output the concise Implementation summary.** Do NOT include `mypy` status in the output format. Do NOT auto-trigger check skill.
+### 2. Three-Phase Implementation Cycle
+Phase boundaries are defined by goals, not by pass/fail of tests. Do NOT skip directly to a later phase.
 
-### 3. Self-Healing Budget (Max 3 Loops)
-- If local tests or linting fail, the low-cost model is allowed a maximum of **3 consecutive auto-correction attempts** to fix the errors.
-- If it still fails after the 3rd attempt, **STOP execution immediately** and report the error logs to the user for human triage.
+#### Phase A — Contract
+Goal: source code compiles (importable, no SyntaxError) and the new public API is minimally callable.
+
+1. Write new dataclasses/classes/functions in `src/...` with **full signature, docstring, `__post_init__` validation, and error_policy** from the spec.
+2. Write 1-2 minimal tests that verify the contract:
+   - Constructor succeeds with valid args (if applicable).
+   - Constructor raises `ValueError` for each invalid arg (if applicable).
+   - Function returns correct type on empty/trivial input.
+3. Run `uv run pytest -k [target] --no-header -q` — it MUST pass before proceeding.
+4. If contract changes (adds/removes fields, renames, changes signature):
+   - Annotate with `# CONTRACT:` in the source.
+   - **Propagate**: grep all callers and `mocker.Mock(spec=...)` references → update them.
+   - Existing tests MUST remain green after propagation.
+
+#### Phase B — Core Logic
+Goal: each new function produces correct output for its primary algorithm.
+
+1. Implement the core algorithm in pure functions (no I/O, no global state).
+2. Write tests:
+   - **P0** (2-3 tests): Regression guard — covers the specific bugs/symptoms the spec aims to fix. Use realistic fixtures, strict value assertions.
+   - **P1** (2-3 tests): Happy path + error path for each new function. One test per distinct failure mode.
+   - Write tests and source **in the same pass**. Do NOT run tests until both are ready.
+3. Run `uv run pytest -k [target] --no-header -q`. If a test fails:
+   - Classify the root cause into one of:
+     - **Logic bug** → fix source, counts as 1 self-healing attempt.
+     - **Test data / fixture problem** → fix test data only, does NOT count toward self-healing budget.
+     - **Environment / non‑deterministic** (floating‑point tolerance, numpy version, import caching) → loosen tolerance or skip that check, does NOT count.
+4. Run `uv run ruff check [modified_files]` — fix any errors.
+
+#### Phase C — Wiring & Integration
+Goal: the new code is called by existing pipeline code, and existing tests for caller modules still pass.
+
+1. Wire into caller modules per the spec's `Integration & Connection Plan`.
+2. Run `uv run pytest -k [caller_module] --no-header -q` — existing caller tests MUST pass.
+3. If caller uses `mocker.Mock(spec=...)` for the new contract, ensure the mock includes all new default fields.
+4. Add **1 integration test** that the wiring is correct (real or near‑real objects, avoid top‑level MagicMock for critical path).
+
+### 3. Coding Conventions
+
+- **No static dummies**: Every function body must contain real business logic. `return {}`, `return True`, `return None` stubs are forbidden unless the spec explicitly requires that value for an empty/error case.
+- **Strict value assertions**: Test assertions must target exact numerical values, exception messages, or shape contracts. `assert result is not None` alone is prohibited.
+- **No unsolicited refactoring**: Do not rename, restructure, or extract shared utilities unless the spec explicitly calls for it.
+- **Type discipline**: `NDArray` annotation dtype MUST match the actual array dtype passed at runtime.
+
+### 4. Local Verification
+
+- Run `uv run ruff check --fix [modified_files]` before running pytest.
+- Run `uv run pytest -k [target_name] --no-header -q`.
+- Run `uv run mypy --strict --no-error-summary [modified_files]` in **advisory mode** before Phase C close. Treat errors as warnings; fix only those that indicate a real contract violation (wrong argument count, missing attribute). Cosmetic type issues (e.g., `Any` vs `float`) are low-priority and can be deferred.
+- Remove `print()` / logging debug statements before final output.
+
+### 5. Self-Healing Budget
+
+- If local tests or linting fail after all three phases, the model is allowed a maximum of **3 consecutive auto-correction attempts** to fix the errors.
+- **Exception — classified non‑logic failures do not count**: failures whose root cause is identified as test data error or environment/non‑deterministic mismatch (floating-point tolerance, import caching, numpy version differences) are excluded from the 3-attempt budget. In such cases, fix the fixture or loosen the tolerance and continue.
+- If it still fails after 3 counted attempts, **STOP execution immediately** and report the error logs to the user for human triage. Include the failure classification in the report.
 
 ## Output Format
 ```md
