@@ -52,14 +52,18 @@ Goal: each new function produces correct output for its primary algorithm.
 Goal: the new code is called by existing pipeline code, and existing tests for caller modules still pass.
 
 1. Wire into caller modules per the spec's `Integration & Connection Plan`.
-2. Run `uv run pytest -k [caller_module] --no-header -q` — existing caller tests MUST pass.
-3. If caller uses `mocker.Mock(spec=...)` for the new contract, ensure the mock includes all new default fields.
-4. Add **1 integration test** that the wiring is correct (real or near‑real objects, avoid top‑level MagicMock for critical path).
+2. **Orphaned-implementation self-check (do this before running any test):** for every new function/class the spec's `contracts` list names, run
+   `grep -rn "\bName\b" src/ | grep -v "/tests/\|def Name"` and confirm at least one hit outside its own definition and outside `tests/`. A function that only appears in its own `def` line and in a test file is not wired — go back and call it from the anchor the spec's `wiring[].invocation_symbol` describes. This is the highest-cost defect to leave for `/check` to find (it means the entire behavioral change did nothing in production), so catch it here, not later.
+   - If this rewrite retires an old branch/cascade, grep the old branch's config fields too (`\bold_field_name\b` across `src/`, excluding its own dataclass line) — a field with zero remaining readers must be deleted in this same phase, along with any test fixtures that only exist to pass it in.
+3. Run `uv run pytest -k [caller_module] --no-header -q` — existing caller tests MUST pass.
+4. If caller uses `mocker.Mock(spec=...)` for the new contract, ensure the mock includes all new default fields.
+5. Add **1 integration test per `scenarios[]` entry marked `"scope": "integration"`** in the spec's contract, written in the exact `target_test_file` with the exact `name` given — not an ad-hoc new file. `/check`'s spec-compliance phase matches these literally; a renamed function in a different file reads as a missing test even when it passes.
 
 ### 3. Coding Conventions
 
 - **No static dummies**: Every function body must contain real business logic. `return {}`, `return True`, `return None` stubs are forbidden unless the spec explicitly requires that value for an empty/error case.
 - **Strict value assertions**: Test assertions must target exact numerical values, exception messages, or shape contracts. `assert result is not None` alone is prohibited.
+- **No conditional escape hatches**: Never write `assert real_condition or fallback_condition_that_is_almost_always_true` (e.g. `... or total == 0`, `... or guard is not None`) or a bare `assert x >= 0` on a value that can't be negative. Before locking in an assertion for a regression/gate-reachability test, run the fixture standalone (`uv run python -c "..."`) and print the value the assertion depends on — assert the value you actually observed, not a shape that would also pass if the code path never ran.
 - **No unsolicited refactoring**: Do not rename, restructure, or extract shared utilities unless the spec explicitly calls for it.
 - **Type discipline**: `NDArray` annotation dtype MUST match the actual array dtype passed at runtime.
 
