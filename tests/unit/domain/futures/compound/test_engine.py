@@ -1755,17 +1755,17 @@ def test_gate_scores_the_same_weights_array_that_is_deployed(
     )
 
 
-def test_engine_wires_family_screen_before_sleeves(tmp_path: Path, mocker) -> None:
-    """Integration: screen_family_edge runs on the real panel and build_family_routing_sleeves
-    consumes the family screen to create structural sleeves."""
+def test_engine_wires_signal_screen_before_sleeves(tmp_path: Path, mocker) -> None:
+    """Integration: screen_signal_edge runs on the real panel and build_family_routing_sleeves
+    consumes the signal screen to create structural sleeves."""
     n_bars = 1024
     n_syms = 5
     cube = _make_cube(n_bars, n_syms)
     universe = type("Universe", (), {"symbols": cube.symbols, "snapshots": ()})()
 
-    store = SealedHoldoutStore(tmp_path / "family_screen_e2e.sqlite3")
+    store = SealedHoldoutStore(tmp_path / "signal_screen_e2e.sqlite3")
     manifest = SealedHoldoutManifest(
-        holdout_id="family-screen-e2e",
+        holdout_id="signal-screen-e2e",
         start_time_ns=int(cube.timestamps_ns[-180]),
         end_time_ns=int(cube.timestamps_ns[-1]),
         holdout_days=90, model_version="v1",
@@ -1791,16 +1791,16 @@ def test_engine_wires_family_screen_before_sleeves(tmp_path: Path, mocker) -> No
     mocker.patch("src.domain.futures.compound.engine.build_causal_cluster_folds", return_value=(mock_cluster_fold,))
 
     import src.domain.futures.compound.engine as eng_mod
-    from src.domain.futures.compound.l1_screening import screen_family_edge as real_screen_family_edge
+    from src.domain.futures.compound.l1_screening import screen_signal_edge as real_screen_signal_edge
 
     screen_calls: list[object] = []
 
     def capturing_screen(panel, bars_4h, folds, config_):
-        result = real_screen_family_edge(panel, bars_4h, folds, config_)
+        result = real_screen_signal_edge(panel, bars_4h, folds, config_)
         screen_calls.append(result)
         return result
 
-    mocker.patch.object(eng_mod, "screen_family_edge", side_effect=capturing_screen)
+    mocker.patch.object(eng_mod, "screen_signal_edge", side_effect=capturing_screen)
 
     sleeve_build_calls: list[tuple[object, ...]] = []
 
@@ -1812,13 +1812,13 @@ def test_engine_wires_family_screen_before_sleeves(tmp_path: Path, mocker) -> No
 
     result = run_multiscale_compound_engine(
         market=cube, universe=universe,
-        holdout_store=store, holdout_id="family-screen-e2e", config=config,
+        holdout_store=store, holdout_id="signal-screen-e2e", config=config,
     )
 
     assert isinstance(result, CompoundEngineResult)
-    assert len(screen_calls) == 1, "screen_family_edge must be invoked exactly once per P2 pass"
+    assert len(screen_calls) == 1, "screen_signal_edge must be invoked exactly once per P2 pass"
     assert len(sleeve_build_calls) == 1, "build_family_routing_sleeves must be invoked exactly once per P2 pass"
-    _, family_screen_arg, _, _ = sleeve_build_calls[0]
-    assert family_screen_arg.admitted_signal_ids == screen_calls[0].admitted_signal_ids, (
-        "build_family_routing_sleeves must receive the exact family_screen produced by screen_family_edge"
+    _, signal_screen_arg, _, _ = sleeve_build_calls[0]
+    assert signal_screen_arg.admitted_signal_ids == screen_calls[0].admitted_signal_ids, (
+        "build_family_routing_sleeves must receive the exact signal_screen produced by screen_signal_edge"
     )
