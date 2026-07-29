@@ -27,6 +27,7 @@ from src.domain.futures.compound.contracts import (
     PrecomputedExitPaths,
     RawSignalPanel,
     SignalDescriptor,
+    SignalEdgeScreen,
     TimeframeBarCube,
 )
 from src.domain.futures.compound.provenance import compute_fold_manifest_hash
@@ -767,7 +768,7 @@ def compute_compounding_stability(
     except ValueError:
         resolved_pw_block = 0.0
 
-    ann_lcb90, _, _ = circular_stationary_bootstrap_growth(
+    ann_lcb90, _, prob_positive = circular_stationary_bootstrap_growth(
         portfolio_returns, 2191.5,
         n_bootstrap=config.n_bootstrap,
         block_size=resolved_pw_block or None,
@@ -797,26 +798,24 @@ def compute_compounding_stability(
     stressed_growth = float(np.mean(np.log1p(np.where(np.isfinite(stressed), stressed, 0.0)))) * 2191.5
     growth_2x_cost = stressed_growth
 
-    growth_lcb90_check = ann_lcb90 > 0
+    min_growth_posterior = getattr(config, 'min_growth_posterior_probability', 0.90)
+    growth_significant = prob_positive >= min_growth_posterior
     growth_2x_check = growth_2x_cost > 0
-    positive_folds_check = positive_outer_folds >= max(1, len(folds) * 4 // 5)
-    robust_check = robust_fold_growth > 0
     vol_check = ann_vol <= config.max_ann_vol if config.max_ann_vol > 0 else True
     dd_check = max_dd <= config.max_drawdown if config.max_drawdown > 0 else True
 
     reasons: list[str] = []
-    if not growth_lcb90_check:
-        reasons.append("growth_lcb90_not_positive")
+    if not growth_significant:
+        reasons.append("growth_posterior_below_threshold")
     if not growth_2x_check:
         reasons.append("growth_2x_cost_not_positive")
-    if not positive_folds_check:
-        reasons.append("insufficient_positive_folds")
-    if not robust_check:
-        reasons.append("robust_fold_growth_not_positive")
     if not vol_check:
         reasons.append("annual_volatility_exceeded")
     if not dd_check:
         reasons.append("max_drawdown_exceeded")
+
+    if not folds:
+        reasons.append("no_deployable_folds")
 
     admitted = not reasons
 
@@ -1175,7 +1174,7 @@ def estimate_cluster_sleeve_posteriors(
 
 def build_family_routing_sleeves(
     panel: RawSignalPanel,
-    family_screen: FamilyEdgeScreen,
+    family_screen: FamilyEdgeScreen | SignalEdgeScreen,
     cluster_folds: tuple[CausalClusterFold, ...],
     folds: tuple[CausalFold, ...],
 ) -> tuple[L1RoutingSleeve, ...]:

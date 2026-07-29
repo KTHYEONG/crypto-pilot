@@ -402,14 +402,14 @@ class TestP0RouterIntegration:
         fold1_evidence = [e for e in result.evidence if e.outer_fold_id == 1]
         assert fold1_evidence, "expected evidence recorded for fold 1"
         assert all(e.n_evidence_bars == 0 for e in fold1_evidence)
-        assert all(e.reasons == ("insufficient_evidence_window",) for e in fold1_evidence)
+        assert all(e.reasons == ("insufficient_evidence",) for e in fold1_evidence)
 
         # Folds 2+ accumulate strictly-prior fold history and must reach a
         # gate decision beyond the evidence-window check (real regression fix).
         later_evidence = [e for e in result.evidence if e.outer_fold_id >= 2]
         assert later_evidence, "expected evidence recorded for folds >= 2"
-        assert any(e.reasons != ("insufficient_evidence_window",) for e in later_evidence), (
-            f"all later-fold candidates still stuck at insufficient_evidence_window: "
+        assert any(e.reasons != ("insufficient_evidence",) for e in later_evidence), (
+            f"all later-fold candidates still stuck at insufficient_evidence: "
             f"{result.attribution.reason_counts}"
         )
         assert any(e.admitted for e in later_evidence), (
