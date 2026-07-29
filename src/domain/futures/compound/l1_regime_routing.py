@@ -21,10 +21,10 @@ from src.domain.futures.compound.config import (
 )
 from src.domain.futures.compound.contracts import (
     CalibratedForecastPanel,
-    CausalClusterFold,
     CausalFold,
     CausalRegimePanel,
     ExpertReturnTape,
+    L1RoutingSleeve,
     L1SleevePosterior,
     PrequentialExpertRoute,
     RawSignalPanel,
@@ -39,6 +39,8 @@ from src.domain.futures.compound.provenance import compute_fold_manifest_hash
 
 _LOGGER = logging.getLogger(__name__)
 _BARS_PER_YEAR_4H: float = 2190.0
+
+_SleeveT = L1RoutingSleeve | L1SleevePosterior
 
 
 @dataclass(slots=True, frozen=True)
@@ -133,14 +135,14 @@ def build_causal_regime_panel(
 
 
 def _expert_member_mask(
-    sleeves: tuple[L1SleevePosterior, ...],
+    sleeves: tuple[_SleeveT, ...],
     signal_id: str,
     fold_id: int,
     n_symbols: int,
 ) -> NDArray[np.bool_]:
     sig_sleeves = [
         s for s in sleeves
-        if s.signal_id == signal_id and s.outer_fold_id == fold_id and s.admitted
+        if s.signal_id == signal_id and s.outer_fold_id == fold_id
     ]
     if not sig_sleeves:
         return np.zeros(n_symbols, dtype=np.bool_)
@@ -151,18 +153,18 @@ def _expert_member_mask(
 
 
 def collect_fold_expert_contributions(
-    panel: RawSignalPanel, sleeves: tuple[L1SleevePosterior, ...],
+    panel: RawSignalPanel, sleeves: tuple[_SleeveT, ...],
     fold_id: int, n_symbols: int,
 ) -> tuple[ExpertContribution, ...]:
     contributions: list[ExpertContribution] = []
     signal_ids = sorted({
         s.signal_id for s in sleeves
-        if s.outer_fold_id == fold_id and s.admitted
+        if s.outer_fold_id == fold_id
     })
     for signal_id in signal_ids:
         sig_sleeves = [
             s for s in sleeves
-            if s.signal_id == signal_id and s.outer_fold_id == fold_id and s.admitted
+            if s.signal_id == signal_id and s.outer_fold_id == fold_id
         ]
         if not sig_sleeves:
             continue
@@ -240,15 +242,15 @@ def blend_expert_contributions(
     return mu
 
 
-def build_fold_candidate_book(
+def build_fold_expert_books(
     panel: RawSignalPanel, contributions: tuple[ExpertContribution, ...],
     bars_4h: TimeframeBarCube, funding_1h_2d: NDArray[np.float32],
     allocator_config: DynamicCompoundingConfig, cost_bps: float,
-) -> tuple[NDArray[np.float64], NDArray[np.float64]]:
+) -> NDArray[np.float64]:
     t_total, n_symbols = panel.z_3d.shape[0], panel.z_3d.shape[1]
     n_experts = len(contributions)
     if n_experts == 0:
-        return np.zeros((t_total, n_symbols), dtype=np.float64), np.zeros((0, t_total, n_symbols), dtype=np.float64)
+        return np.zeros((0, t_total, n_symbols), dtype=np.float64)
 
     contribution_3d = np.zeros((n_experts, t_total, n_symbols), dtype=np.float64)
     for e, c in enumerate(contributions):
@@ -281,11 +283,23 @@ def build_fold_candidate_book(
         close_2d=bars_4h.close_2d,
         cost_bps=cost_bps,
     )
-    return weights_2d, contribution_3d
+
+    if not np.all(np.isfinite(weights_2d)):
+        raise ValueError("non-finite allocator output in build_fold_expert_books")
+
+    abs_contrib = np.abs(contribution_3d)
+    total_abs = np.sum(abs_contrib, axis=0)
+    safe = total_abs > 1e-12
+    expert_weights_3d = np.zeros((n_experts, t_total, n_symbols), dtype=np.float64)
+    for e in range(n_experts):
+        share = np.where(safe, abs_contrib[e] / np.maximum(total_abs, 1e-12), 0.0)
+        expert_weights_3d[e] = share * weights_2d
+
+    return expert_weights_3d
 
 
 def score_expert_returns(
-    expert_weights_2d: NDArray[np.float64], log_ret_2d: NDArray[np.float64],
+    expert_weights_2d: NDArray[np.float64], asset_return_2d: NDArray[np.float64],
     cost_bps_4h: NDArray[np.float32], funding_4h_2d: NDArray[np.float64],
     oos_start: int, oos_end: int,
 ) -> tuple[NDArray[np.float64], NDArray[np.float64], NDArray[np.float64], NDArray[np.float64]]:
@@ -299,12 +313,18 @@ def score_expert_returns(
     for k, t in enumerate(range(oos_start, oos_end)):
         pos = expert_weights_2d[t]
         if t + 1 < expert_weights_2d.shape[0]:
-            gross[k] = float(np.dot(pos, log_ret_2d[t + 1]))
+            gross[k] = float(np.dot(pos, asset_return_2d[t + 1]))
         prev_pos = expert_weights_2d[t - 1] if t > oos_start else np.zeros(n_symbols, dtype=np.float64)
         turnover = np.abs(pos - prev_pos)
         cost[k] = -float(np.dot(cost_bps_4h[t], turnover) * 1e-4)
         funding[k] = -float(np.dot(pos, funding_4h_2d[t]))
         net[k] = gross[k] + cost[k] + funding[k]
+
+    if not np.all(np.isfinite(gross)) or not np.all(np.isfinite(cost)) or not np.all(np.isfinite(funding)) or not np.all(np.isfinite(net)):
+        raise ValueError("non-finite return components")
+    if np.any(net <= -1.0):
+        raise ValueError("invalid_expert_return_domain: net return <= -1")
+
     return gross, cost, funding, net
 
 
@@ -375,7 +395,7 @@ def compute_regime_overlay(
 
 def _build_prequential_expert_route_impl(
     panel: RawSignalPanel,
-    sleeves: tuple[L1SleevePosterior, ...],
+    sleeves: tuple[_SleeveT, ...],
     folds: tuple[CausalFold, ...],
     bars_4h: TimeframeBarCube,
     cost_bps_4h: NDArray[np.float32],
@@ -388,12 +408,12 @@ def _build_prequential_expert_route_impl(
     t_total, n_symbols = panel.z_3d.shape[0], panel.z_3d.shape[1]
 
     close = bars_4h.close_2d.astype(np.float64)
-    log_ret = np.zeros((t_total, n_symbols), dtype=np.float64)
+    asset_return = np.zeros((t_total, n_symbols), dtype=np.float64)
     for t in range(1, t_total):
-        prev = close[t - 1, :n_symbols]
-        curr = close[t, :n_symbols]
+        prev = close[t - 1]
+        curr = close[t]
         mask = (prev > 0) & np.isfinite(prev) & (curr > 0) & np.isfinite(curr)
-        log_ret[t, mask] = np.log(curr[mask] / prev[mask])
+        asset_return[t, mask] = curr[mask] / prev[mask] - 1.0
 
     funding_4h_2d = compute_funding_4h_2d(funding_1h_2d, t_total)
 
@@ -443,7 +463,7 @@ def _build_prequential_expert_route_impl(
             fold_route_scales[fold_id] = {}
             continue
 
-        _, w_e_3d = build_fold_candidate_book(
+        expert_weights_3d = build_fold_expert_books(
             panel, contributions, bars_4h, funding_1h_2d,
             allocator_config, cost_bps,
         )
@@ -455,12 +475,28 @@ def _build_prequential_expert_route_impl(
         for e in range(n_experts):
             c = contributions[e]
             signal_id = c.signal_id
-            expert_w = w_e_3d[e]
+            expert_w = expert_weights_3d[e]
 
-            gross, expert_cost, funding_cost, net = score_expert_returns(
-                expert_w, log_ret, cost_bps_4h, funding_4h_2d,
-                oos_start, oos_end,
-            )
+            try:
+                gross, expert_cost, funding_cost, net = score_expert_returns(
+                    expert_w, asset_return, cost_bps_4h, funding_4h_2d,
+                    oos_start, oos_end,
+                )
+            except ValueError:
+                all_evidence.append(RegimeExpertEvidence(
+                    signal_id=signal_id, outer_fold_id=fold_id,
+                    regime_code=0, effective_blocks=0,
+                    posterior_positive_probability=0.0,
+                    growth_lcb90=0.0, growth_2x_cost=0.0,
+                    robust_inner_growth=0.0, positive_inner_folds=0,
+                    scale=0.0, admitted=False,
+                    reasons=("invalid_expert_return_domain",),
+                    n_evidence_bars=0,
+                ))
+                reason_counts["invalid_expert_return_domain"] = (
+                    reason_counts.get("invalid_expert_return_domain", 0) + 1
+                )
+                continue
 
             # P0: prior from previous folds only
             record = SignalFoldRecord(
@@ -736,7 +772,7 @@ def _build_prequential_expert_route_impl(
         family_mu_3d=np.zeros((t_total, n_symbols, max(len({d.family for d in panel.descriptors}), 1)), dtype=np.float32),
         family_ids=tuple(sorted({d.family for d in panel.descriptors})),
         admitted_signal_ids=tuple(sorted({
-            s.signal_id for s in sleeves if s.admitted
+            s.signal_id for s in sleeves
         })),
         fold_manifest_hash=fold_manifest_hash,
     )
@@ -782,8 +818,7 @@ def _build_prequential_expert_route_impl(
 
 def build_prequential_expert_route(
     panel: RawSignalPanel,
-    sleeves: tuple[L1SleevePosterior, ...],
-    cluster_folds: tuple[CausalClusterFold, ...],
+    sleeves: tuple[_SleeveT, ...],
     folds: tuple[CausalFold, ...],
     bars_4h: TimeframeBarCube,
     cost_bps_4h: NDArray[np.float32],
@@ -792,12 +827,7 @@ def build_prequential_expert_route(
     config: RegimeRouterConfig,
     allocator_config: DynamicCompoundingConfig,
     cost_bps: float = 8.0,
-    *,
-    family_screen_admitted_ids: tuple[str, ...] | None = None,
 ) -> PrequentialExpertRoute:
-    if family_screen_admitted_ids is not None:
-        admitted_set = set(family_screen_admitted_ids)
-        sleeves = tuple(s for s in sleeves if s.signal_id in admitted_set)
     return _build_prequential_expert_route_impl(
         panel, sleeves, folds, bars_4h, cost_bps_4h, funding_1h_2d,
         regime_panel, config, allocator_config, cost_bps,

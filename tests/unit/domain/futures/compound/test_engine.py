@@ -406,7 +406,7 @@ class TestRunMultiscaleCompoundEngine:
             return_value=(CausalFold(0, 0, 50, 48, 50, 52, 102, 2, 42),),
         )
         mocker.patch(
-            "src.domain.futures.compound.engine.estimate_cluster_sleeve_posteriors",
+            "src.domain.futures.compound.engine.build_family_routing_sleeves",
             return_value=(),
         )
         mocker.patch(
@@ -509,7 +509,7 @@ class TestRunMultiscaleCompoundEngine:
             return_value=(CausalFold(0, 0, 50, 48, 50, 52, 102, 2, 42),),
         )
         from src.domain.futures.compound.contracts import RegimeRoutedForecast
-        mocker.patch("src.domain.futures.compound.engine.estimate_cluster_sleeve_posteriors", return_value=())
+        mocker.patch("src.domain.futures.compound.engine.build_family_routing_sleeves", return_value=())
         mocker.patch("src.domain.futures.compound.engine.build_causal_regime_panel", return_value=mocker.Mock())
         mocker.patch("src.domain.futures.compound.engine.build_fold_local_regime_forecast", return_value=mocker.Mock())
 
@@ -595,7 +595,7 @@ class TestRunMultiscaleCompoundEngine:
             "src.domain.futures.compound.engine.build_folds_4h",
             return_value=(CausalFold(0, 0, 50, 48, 50, 52, 102, 2, 42),),
         )
-        mocker.patch("src.domain.futures.compound.engine.estimate_cluster_sleeve_posteriors", return_value=())
+        mocker.patch("src.domain.futures.compound.engine.build_family_routing_sleeves", return_value=())
         mocker.patch("src.domain.futures.compound.engine.build_causal_regime_panel", return_value=mocker.Mock())
 
         n_4h_bars = 125
@@ -1702,8 +1702,7 @@ def test_gate_scores_the_same_weights_array_that_is_deployed(
     mocker.patch.object(eng, "build_folds_4h", return_value=(
         CausalFold(0, 0, 120, 100, 120, 130, 200, 2, 42),
     ))
-    mocker.patch.object(eng, "estimate_cluster_sleeve_posteriors", return_value=())
-    mocker.patch.object(eng, "precompute_exit_path_cache", return_value={})
+    mocker.patch.object(eng, "build_family_routing_sleeves", return_value=())
     mocker.patch.object(eng, "build_causal_cluster_folds", return_value=())
 
     gate_weights_captured = []
@@ -1757,10 +1756,8 @@ def test_gate_scores_the_same_weights_array_that_is_deployed(
 
 
 def test_engine_wires_family_screen_before_sleeves(tmp_path: Path, mocker) -> None:
-    """Integration: screen_family_edge runs on the real panel and its
-    admitted_signal_ids are forwarded into build_fold_local_regime_forecast
-    before sleeve estimation is consumed by the router (no top-level mocking
-    of screen_family_edge or the panel itself)."""
+    """Integration: screen_family_edge runs on the real panel and build_family_routing_sleeves
+    consumes the family screen to create structural sleeves."""
     n_bars = 1024
     n_syms = 5
     cube = _make_cube(n_bars, n_syms)
@@ -1805,14 +1802,13 @@ def test_engine_wires_family_screen_before_sleeves(tmp_path: Path, mocker) -> No
 
     mocker.patch.object(eng_mod, "screen_family_edge", side_effect=capturing_screen)
 
-    route_kwargs: dict[str, object] = {}
-    original_route = eng_mod.build_fold_local_regime_forecast
+    sleeve_build_calls: list[tuple[object, ...]] = []
 
-    def capturing_route(*args, **kwargs):
-        route_kwargs.update(kwargs)
-        return original_route(*args, **kwargs)
+    def capturing_build(*args):
+        sleeve_build_calls.append(args)
+        return ()
 
-    mocker.patch.object(eng_mod, "build_fold_local_regime_forecast", side_effect=capturing_route)
+    mocker.patch.object(eng_mod, "build_family_routing_sleeves", side_effect=capturing_build)
 
     result = run_multiscale_compound_engine(
         market=cube, universe=universe,
@@ -1821,10 +1817,8 @@ def test_engine_wires_family_screen_before_sleeves(tmp_path: Path, mocker) -> No
 
     assert isinstance(result, CompoundEngineResult)
     assert len(screen_calls) == 1, "screen_family_edge must be invoked exactly once per P2 pass"
-    assert "family_screen_admitted_ids" in route_kwargs, (
-        "build_fold_local_regime_forecast missing family_screen_admitted_ids kwarg"
-    )
-    assert route_kwargs["family_screen_admitted_ids"] == screen_calls[0].admitted_signal_ids, (
-        "router must receive the exact admitted_signal_ids produced by screen_family_edge, "
-        "not a re-derived or hardcoded value"
+    assert len(sleeve_build_calls) == 1, "build_family_routing_sleeves must be invoked exactly once per P2 pass"
+    _, family_screen_arg, _, _ = sleeve_build_calls[0]
+    assert family_screen_arg.admitted_signal_ids == screen_calls[0].admitted_signal_ids, (
+        "build_family_routing_sleeves must receive the exact family_screen produced by screen_family_edge"
     )

@@ -732,6 +732,32 @@ class L1SleevePosterior:
 
 
 @dataclass(slots=True, frozen=True)
+class L1RoutingSleeve:
+    sleeve_id: str
+    signal_id: str
+    family: str
+    outer_fold_id: int
+    cluster_id: int
+    member_mask_1d: NDArray[np.bool_]
+    member_hash: str
+    declared_orientation: int
+
+    def __post_init__(self) -> None:
+        if not self.sleeve_id or not self.signal_id or not self.family:
+            raise ValueError("sleeve_id, signal_id, and family must be non-empty")
+        if not self.member_hash:
+            raise ValueError("member_hash must be non-empty")
+        if self.outer_fold_id < 0 or self.cluster_id < 0:
+            raise ValueError("outer_fold_id and cluster_id must be >= 0")
+        if self.member_mask_1d.ndim != 1 or self.member_mask_1d.dtype != np.bool_:
+            raise ValueError("member_mask_1d must be 1-D bool array")
+        if int(np.sum(self.member_mask_1d)) < 2:
+            raise ValueError("member_mask_1d must have at least two members")
+        if self.declared_orientation not in (-1, 1):
+            raise ValueError("declared_orientation must be -1 or 1")
+
+
+@dataclass(slots=True, frozen=True)
 class CalibrationTarget:
     decision_timestamps_ns: NDArray[np.int64]
     y_2d: NDArray[np.float32]
@@ -893,7 +919,7 @@ class PrequentialExpertRoute:
 class HandoffResult:
     forecast: CalibratedForecastPanel
     evidence: HandoffAdmissionEvidence
-    admitted_sleeves: tuple[L1SleevePosterior, ...] = ()
+    admitted_sleeves: tuple[L1SleevePosterior | L1RoutingSleeve, ...] = ()
 
 
 @dataclass(slots=True, frozen=True)
@@ -1150,6 +1176,7 @@ __all__ = [
     "HandoffAdmissionEvidence",
     "HandoffResult",
     "InsufficientCoverageError",
+    "L1RoutingSleeve",
     "L1SleevePosterior",
     "L2BenchmarkSeries",
     "L2CategoryResult",
