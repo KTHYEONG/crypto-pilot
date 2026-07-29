@@ -158,6 +158,21 @@ _SPEED_LADDER_5: tuple[tuple[str, int], ...] = (
     ("very_slow", 432),
 )
 
+_SPEED_LADDER_REVERSAL: tuple[tuple[str, int], ...] = (
+    ("fast", 8),
+    ("medium", 12),
+    ("moderate", 24),
+    ("slow", 48),
+    ("very_slow", 72),
+    ("ultra_slow", 96),
+)
+
+_SPEED_LADDER_MOMENTUM_SLOW: tuple[tuple[str, int], ...] = (
+    ("slow", 216),
+    ("very_slow", 432),
+    ("ultra_slow", 648),
+)
+
 _SPEED_LADDER_6: tuple[tuple[str, int], ...] = (
     ("fast", 24),
     ("medium", 72),
@@ -473,36 +488,27 @@ def _default_catalog() -> tuple[SignalDescriptor, ...]:
                 target_horizon_hours=lb_hours,
                 declared_orientation=orientation,
             ))
-    descriptors.append(SignalDescriptor(
-        signal_id="reversal_st:fast", family="reversal_st", speed="fast",
-        lookback_hours=24, native_timeframe=_FAMILY_NATIVE_TF["reversal_st"],
-        target_horizon_hours=24,
-        declared_orientation=_family_orientation("reversal_st"),
-    ))
-    descriptors.append(SignalDescriptor(
-        signal_id="xs_reversal:fast", family="xs_reversal", speed="fast",
-        lookback_hours=24, native_timeframe=_FAMILY_NATIVE_TF["xs_reversal"],
-        target_horizon_hours=24,
-        declared_orientation=_family_orientation("xs_reversal"),
-    ))
-    descriptors.append(SignalDescriptor(
-        signal_id="xs_reversal:medium", family="xs_reversal", speed="medium",
-        lookback_hours=72, native_timeframe=_FAMILY_NATIVE_TF["xs_reversal"],
-        target_horizon_hours=72,
-        declared_orientation=_family_orientation("xs_reversal"),
-    ))
-    descriptors.append(SignalDescriptor(
-        signal_id="xs_momentum_slow:slow", family="xs_momentum_slow", speed="slow",
-        lookback_hours=216, native_timeframe=_FAMILY_NATIVE_TF["xs_momentum_slow"],
-        target_horizon_hours=216,
-        declared_orientation=1,
-    ))
-    descriptors.append(SignalDescriptor(
-        signal_id="xs_momentum_slow:very_slow", family="xs_momentum_slow", speed="very_slow",
-        lookback_hours=432, native_timeframe=_FAMILY_NATIVE_TF["xs_momentum_slow"],
-        target_horizon_hours=432,
-        declared_orientation=1,
-    ))
+    for speed, lb_hours in _SPEED_LADDER_REVERSAL:
+        descriptors.append(SignalDescriptor(
+            signal_id=f"reversal_st:{speed}", family="reversal_st", speed=speed,
+            lookback_hours=lb_hours, native_timeframe=_FAMILY_NATIVE_TF["reversal_st"],
+            target_horizon_hours=lb_hours,
+            declared_orientation=_family_orientation("reversal_st"),
+        ))
+    for speed, lb_hours in _SPEED_LADDER_REVERSAL:
+        descriptors.append(SignalDescriptor(
+            signal_id=f"xs_reversal:{speed}", family="xs_reversal", speed=speed,
+            lookback_hours=lb_hours, native_timeframe=_FAMILY_NATIVE_TF["xs_reversal"],
+            target_horizon_hours=lb_hours,
+            declared_orientation=_family_orientation("xs_reversal"),
+        ))
+    for speed, lb_hours in _SPEED_LADDER_MOMENTUM_SLOW:
+        descriptors.append(SignalDescriptor(
+            signal_id=f"xs_momentum_slow:{speed}", family="xs_momentum_slow", speed=speed,
+            lookback_hours=lb_hours, native_timeframe=_FAMILY_NATIVE_TF["xs_momentum_slow"],
+            target_horizon_hours=lb_hours,
+            declared_orientation=1,
+        ))
     for speed, lb_hours in (("fast", 24), ("medium", 72)):
         descriptors.append(SignalDescriptor(
             signal_id=f"smart_money_divergence:{speed}", family="smart_money_divergence",

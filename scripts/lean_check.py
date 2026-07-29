@@ -337,6 +337,11 @@ def main() -> None:
     parser.add_argument("--spec", default=None, help="Path to spec contract JSON for compliance verification")
     parser.add_argument("--skip-lint", action="store_true", help="Skip Ruff linting")
     parser.add_argument("--skip-mypy", action="store_true", help="Skip Mypy static check")
+    parser.add_argument(
+        "--deselect", nargs="*", default=[],
+        help="Pytest node ids to deselect (use for pre-existing baseline failures "
+             "confirmed via git-stash reproduction, never for failures introduced this session)",
+    )
     args = parser.parse_args()
 
     py_files = [f for f in args.files if f.endswith(".py")]
@@ -416,7 +421,8 @@ def main() -> None:
         [f"--cov={sf.replace('.py', '').replace('/', '.')}" for sf in source_files] if source_files else ["--cov=src"]
     )
 
-    core_cmd = ["uv", "run", "pytest", *cov_args, *test_files, "-q", "--tb=line", "--cov-report=term-missing"]
+    deselect_args = [f"--deselect={node}" for node in args.deselect]
+    core_cmd = ["uv", "run", "pytest", *cov_args, *test_files, *deselect_args, "-q", "--tb=line", "--cov-report=term-missing"]
     pt_res = run_cmd(core_cmd, timeout=180)
 
     cov_val: int | None = None
