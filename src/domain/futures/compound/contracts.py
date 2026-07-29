@@ -583,12 +583,55 @@ class SignalDescriptor:
     archetype: str = ""
     economic_hypothesis: str = ""
     candidate_version: str = "v1"
+    declared_orientation: int = 1
 
     def __post_init__(self) -> None:
         if self.native_timeframe == "4h" and self.target_horizon_hours % 4 != 0:
             raise ValueError(
                 f"target_horizon_hours must be a multiple of 4 for 4h-native signals, "
                 f"got {self.target_horizon_hours}"
+            )
+        if self.declared_orientation not in (-1, 1):
+            raise ValueError(
+                f"declared_orientation must be -1 or 1, got {self.declared_orientation}"
+            )
+
+
+@dataclass(slots=True, frozen=True)
+class FamilyEdgeRecord:
+    family: str
+    n_signals: int
+    n_ic_bars: int
+    mean_ic: float
+    t_newey_west: float
+    p_two_sided: float
+    sidak_alpha: float
+    declared_orientation: int
+    admitted: bool
+    reasons: tuple[str, ...]
+
+    def __post_init__(self) -> None:
+        if not self.family:
+            raise ValueError("family must be non-empty")
+        if not np.isfinite(self.mean_ic):
+            raise ValueError(f"mean_ic must be finite, got {self.mean_ic}")
+        if self.declared_orientation not in (-1, 1):
+            raise ValueError(
+                f"declared_orientation must be -1 or 1, got {self.declared_orientation}"
+            )
+
+
+@dataclass(slots=True, frozen=True)
+class FamilyEdgeScreen:
+    records: tuple[FamilyEdgeRecord, ...]
+    n_effective_independent: float
+    admitted_families: tuple[str, ...]
+    admitted_signal_ids: tuple[str, ...]
+
+    def __post_init__(self) -> None:
+        if self.n_effective_independent <= 0:
+            raise ValueError(
+                f"n_effective_independent must be > 0, got {self.n_effective_independent}"
             )
 
 
@@ -1102,7 +1145,8 @@ __all__ = [
     "ExitPolicyKind",
     "ExitPolicySpec",
     "ExpertReturnTape",
-    "ForecastFrame",
+    "FamilyEdgeRecord",
+    "FamilyEdgeScreen",
     "HandoffAdmissionEvidence",
     "HandoffResult",
     "InsufficientCoverageError",
