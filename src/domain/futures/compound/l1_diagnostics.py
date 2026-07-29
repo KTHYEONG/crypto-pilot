@@ -94,17 +94,19 @@ class L1AdmissionRecorder:
         robust_inner_growth: float, positive_inner_folds: int,
         scale: float, admitted: bool, reasons: tuple[str, ...],
         turnover: float = 0.0, cost_drag: float = 0.0,
+        n_evidence_bars: int = 0, regime_mean_net: float = 0.0,
+        carry_applied: bool = False,
     ) -> None:
         if not self._enabled:
             return
         _LOGGER.debug(
             "[REGIME] signal_id=%s fold=%d regime=%d eff_blocks=%d prob=%.3f "
             "lcb90=%.4f g2x=%.4f robust_g=%.4f pos_inner=%d scale=%.3f admitted=%s "
-            "turnover=%.4f cost_drag=%.6f",
+            "turnover=%.4f cost_drag=%.6f n_evidence_bars=%d regime_mean_net=%.6f carry=%s",
             signal_id, outer_fold_id, regime_code, effective_blocks,
             posterior_probability, growth_lcb90, growth_2x_cost,
             robust_inner_growth, positive_inner_folds, scale, admitted,
-            turnover, cost_drag,
+            turnover, cost_drag, n_evidence_bars, regime_mean_net, carry_applied,
         )
         self._append_jsonl({
             "tag": "REGIME",
@@ -122,4 +124,7 @@ class L1AdmissionRecorder:
             "reasons": list(reasons),
             "turnover": round(turnover, 4),
             "cost_drag": round(cost_drag, 6),
+            "n_evidence_bars": n_evidence_bars,
+            "regime_mean_net": round(regime_mean_net, 6),
+            "carry_applied": carry_applied,
         })
