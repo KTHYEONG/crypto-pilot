@@ -2,11 +2,15 @@ from __future__ import annotations
 
 import logging
 import math
+from dataclasses import dataclass
 
 import numpy as np
 from numpy.typing import NDArray
 
-from src.domain.futures.compound.allocator import compute_dynamic_compounding_path
+from src.domain.futures.compound.allocator import (
+    compute_dynamic_compounding_path,
+    compute_funding_4h_2d,
+)
 from src.domain.futures.compound.bootstrap import (
     circular_stationary_bootstrap_growth,
     politis_white_block_length,
@@ -34,6 +38,15 @@ from src.domain.futures.compound.provenance import compute_fold_manifest_hash
 
 _LOGGER = logging.getLogger(__name__)
 _BARS_PER_YEAR_4H: float = 2190.0
+
+
+@dataclass(slots=True, frozen=True)
+class ExpertContribution:
+    signal_id: str
+    outer_fold_id: int
+    orientation: int
+    member_mask_1d: NDArray[np.bool_]
+    signal_index: int
 
 
 def build_causal_regime_panel(
@@ -134,6 +147,140 @@ def _expert_member_mask(
     for s in sig_sleeves:
         mask |= s.member_mask_1d
     return mask
+
+
+def collect_fold_expert_contributions(
+    panel: RawSignalPanel, sleeves: tuple[L1SleevePosterior, ...],
+    fold_id: int, n_symbols: int,
+) -> tuple[ExpertContribution, ...]:
+    contributions: list[ExpertContribution] = []
+    signal_ids = sorted({
+        s.signal_id for s in sleeves
+        if s.outer_fold_id == fold_id and s.admitted
+    })
+    for signal_id in signal_ids:
+        sig_sleeves = [
+            s for s in sleeves
+            if s.signal_id == signal_id and s.outer_fold_id == fold_id and s.admitted
+        ]
+        if not sig_sleeves:
+            continue
+        signs = {int(np.sign(s.fitted_beta)) for s in sig_sleeves}
+        if 0 in signs or len(signs) != 1:
+            continue
+        orientation = signs.pop()
+        member_mask = _expert_member_mask(sleeves, signal_id, fold_id, n_symbols)
+        if not np.any(member_mask):
+            continue
+        signal_idx = next(
+            i for i, d in enumerate(panel.descriptors) if d.signal_id == signal_id
+        )
+        contributions.append(ExpertContribution(
+            signal_id=signal_id, outer_fold_id=fold_id,
+            orientation=orientation, member_mask_1d=member_mask,
+            signal_index=signal_idx,
+        ))
+    return tuple(contributions)
+
+
+def split_book_by_expert(
+    weights_2d: NDArray[np.float64],
+    contribution_3d: NDArray[np.float64],
+) -> NDArray[np.float64]:
+    total_c = np.sum(contribution_3d, axis=0)
+    safe = np.abs(total_c) > 1e-12
+    w_e = np.zeros_like(contribution_3d)
+    numer = weights_2d * contribution_3d
+    for e in range(contribution_3d.shape[0]):
+        np.divide(numer[e], total_c, out=w_e[e], where=safe)
+    return w_e
+
+
+def build_fold_candidate_book(
+    panel: RawSignalPanel, contributions: tuple[ExpertContribution, ...],
+    bars_4h: TimeframeBarCube, funding_1h_2d: NDArray[np.float32],
+    allocator_config: DynamicCompoundingConfig, cost_bps: float,
+) -> tuple[NDArray[np.float64], NDArray[np.float64]]:
+    t_total, n_symbols = panel.z_3d.shape[0], panel.z_3d.shape[1]
+    n_experts = len(contributions)
+    if n_experts == 0:
+        return np.zeros((t_total, n_symbols), dtype=np.float64), np.zeros((0, t_total, n_symbols), dtype=np.float64)
+
+    contribution_3d = np.zeros((n_experts, t_total, n_symbols), dtype=np.float64)
+    for e, c in enumerate(contributions):
+        contribution_3d[e] = (
+            c.member_mask_1d.astype(np.float64) * c.orientation
+            * panel.z_3d[:, :, c.signal_index].astype(np.float64)
+        )
+
+    mu_2d = np.sum(contribution_3d, axis=0)
+    mini_panel = CalibratedForecastPanel(
+        decision_timestamps_ns=panel.decision_timestamps_ns,
+        symbols=panel.symbols,
+        mu_2d=mu_2d.astype(np.float32),
+        se_2d=np.full((t_total, n_symbols), np.nan, dtype=np.float32),
+        family_mu_3d=np.zeros((t_total, n_symbols, 1), dtype=np.float32),
+        family_ids=("expert",),
+        admitted_signal_ids=tuple(c.signal_id for c in contributions),
+        fold_manifest_hash="",
+    )
+    weights_2d = compute_dynamic_compounding_path(
+        forecast=mini_panel,
+        sigma_2d=panel.sigma_2d,
+        funding_rates_1h_2d=funding_1h_2d,
+        config=allocator_config,
+        close_2d=bars_4h.close_2d,
+        cost_bps=cost_bps,
+    )
+    w_e_3d = split_book_by_expert(weights_2d, contribution_3d)
+    return weights_2d, w_e_3d
+
+
+def score_expert_returns(
+    expert_weights_2d: NDArray[np.float64], log_ret_2d: NDArray[np.float64],
+    cost_bps_4h: NDArray[np.float32], funding_4h_2d: NDArray[np.float64],
+    oos_start: int, oos_end: int,
+) -> tuple[NDArray[np.float64], NDArray[np.float64], NDArray[np.float64], NDArray[np.float64]]:
+    n_oos = oos_end - oos_start
+    n_symbols = expert_weights_2d.shape[1]
+    gross = np.zeros(n_oos, dtype=np.float64)
+    cost = np.zeros(n_oos, dtype=np.float64)
+    funding = np.zeros(n_oos, dtype=np.float64)
+    net = np.zeros(n_oos, dtype=np.float64)
+
+    for k, t in enumerate(range(oos_start, oos_end)):
+        pos = expert_weights_2d[t]
+        if t + 1 < expert_weights_2d.shape[0]:
+            gross[k] = float(np.dot(pos, log_ret_2d[t + 1]))
+        prev_pos = expert_weights_2d[t - 1] if t > oos_start else np.zeros(n_symbols, dtype=np.float64)
+        turnover = np.abs(pos - prev_pos)
+        cost[k] = -float(np.dot(cost_bps_4h[t], turnover) * 1e-4)
+        funding[k] = -float(np.dot(pos, funding_4h_2d[t]))
+        net[k] = gross[k] + cost[k] + funding[k]
+    return gross, cost, funding, net
+
+
+def apply_walk_forward_carry(
+    mu_2d: NDArray[np.float64], panel: RawSignalPanel,
+    contributions: tuple[ExpertContribution, ...],
+    route_scales: dict[str, float], regime_code_1d: NDArray[np.int8],
+    deploy_start: int,
+) -> int:
+    if not route_scales or deploy_start >= mu_2d.shape[0]:
+        return 0
+    carried = int(mu_2d.shape[0]) - deploy_start
+    for t_idx in range(deploy_start, mu_2d.shape[0]):
+        if int(regime_code_1d[t_idx]) != 0:
+            for c in contributions:
+                scale = route_scales.get(c.signal_id, 0.0)
+                if scale > 0:
+                    mu_2d[t_idx] += (
+                        scale
+                        * c.member_mask_1d.astype(np.float64)
+                        * c.orientation
+                        * panel.z_3d[t_idx, :, c.signal_index].astype(np.float64)
+                    )
+    return carried
 
 
 def build_fold_local_shadow_tape(
@@ -388,13 +535,19 @@ def _build_prequential_expert_route_impl(
     regime_panel: CausalRegimePanel,
     config: RegimeRouterConfig,
     allocator_config: DynamicCompoundingConfig,
+    cost_bps: float,
 ) -> PrequentialExpertRoute:
-    tape = build_fold_local_shadow_tape(
-        panel, sleeves, folds, bars_4h, cost_bps_4h, funding_1h_2d, allocator_config,
-        regime_panel,
-    )
-
     t_total, n_symbols = panel.z_3d.shape[0], panel.z_3d.shape[1]
+
+    close = bars_4h.close_2d.astype(np.float64)
+    log_ret = np.zeros((t_total, n_symbols), dtype=np.float64)
+    for t in range(1, t_total):
+        prev = close[t - 1, :n_symbols]
+        curr = close[t, :n_symbols]
+        mask = (prev > 0) & np.isfinite(prev) & (curr > 0) & np.isfinite(curr)
+        log_ret[t, mask] = np.log(curr[mask] / prev[mask])
+
+    funding_4h_2d = compute_funding_4h_2d(funding_1h_2d, t_total)
 
     max_target_horizon_bars = max(
         (d.target_horizon_hours for d in panel.descriptors), default=0
@@ -412,16 +565,16 @@ def _build_prequential_expert_route_impl(
     regime_codes_present = {int(c) for c in np.unique(regime_panel.code_1d)} - {0}
     n_hypotheses: int = 0
 
-    mu_2d = np.zeros((t_total, n_symbols), dtype=np.float32)
+    mu_2d = np.zeros((t_total, n_symbols), dtype=np.float64)
     active_expert_count_1d = np.zeros(t_total, dtype=np.int16)
 
     fold_route_scales: dict[int, dict[str, float]] = {}
 
-    unconditional_pass_count = 0
-    temporal_pass_count = 0
     regime_pass_count = 0
     active_expert_count = 0
     reason_counts: dict[str, int] = {}
+    carry_contributions: tuple[ExpertContribution, ...] = ()
+    final_fold_id: int = 0
 
     recorder = L1AdmissionRecorder()
 
@@ -437,90 +590,223 @@ def _build_prequential_expert_route_impl(
             fold_route_scales[fold_id] = {}
             continue
 
-        evidence_mask = tape.outer_fold_id_1d < fold_id
-        if not np.any(evidence_mask):
+        contributions = collect_fold_expert_contributions(
+            panel, sleeves, fold_id, n_symbols,
+        )
+        if not contributions:
             fold_route_scales[fold_id] = {}
             continue
 
-        unique_signal_ids = np.unique(tape.signal_id_1d[evidence_mask])
+        _, w_e_3d = build_fold_candidate_book(
+            panel, contributions, bars_4h, funding_1h_2d,
+            allocator_config, cost_bps,
+        )
+
+        n_experts = len(contributions)
         active_this_fold: dict[str, float] = {}
 
-        for signal_id in unique_signal_ids:
-            sig_mask = evidence_mask & (tape.signal_id_1d == signal_id)
-            sig_indices = np.where(sig_mask)[0]
-            if len(sig_indices) < 3:
-                continue
+        for e in range(n_experts):
+            c = contributions[e]
+            signal_id = c.signal_id
+            expert_w = w_e_3d[e]
 
-            sig_gross = tape.gross_return_1d[sig_mask]
-            sig_cost = tape.execution_cost_return_1d[sig_mask]
-            sig_funding = tape.funding_return_1d[sig_mask]
-            sig_net = tape.net_return_1d[sig_mask]
-
-            lcb90, prob_positive, growth_2x, unconditional_pass, unconditional_reasons = (
-                _compute_unconditional_evidence(
-                    sig_net, sig_gross, sig_cost, sig_funding, config,
-                )
+            gross, expert_cost, funding_cost, net = score_expert_returns(
+                expert_w, log_ret, cost_bps_4h, funding_4h_2d,
+                oos_start, oos_end,
             )
-            n_hypotheses += 1
 
-            if not unconditional_pass:
-                for r in unconditional_reasons:
-                    reason_counts[r] = reason_counts.get(r, 0) + 1
+            gate_reasons: list[str] = []
+
+            n_evidence_bars = oos_end - oos_start
+            if n_evidence_bars < config.min_evidence_bars:
+                gate_reasons.append("insufficient_evidence_window")
                 all_evidence.append(RegimeExpertEvidence(
                     signal_id=signal_id, outer_fold_id=fold_id,
                     regime_code=0, effective_blocks=0,
-                    posterior_positive_probability=prob_positive,
-                    growth_lcb90=lcb90, growth_2x_cost=growth_2x,
+                    posterior_positive_probability=0.0,
+                    growth_lcb90=0.0, growth_2x_cost=0.0,
                     robust_inner_growth=0.0, positive_inner_folds=0,
                     scale=0.0, admitted=False,
-                    reasons=tuple(unconditional_reasons),
+                    reasons=tuple(gate_reasons),
+                    n_evidence_bars=n_evidence_bars,
                 ))
+                reason_counts["insufficient_evidence_window"] = (
+                    reason_counts.get("insufficient_evidence_window", 0) + 1
+                )
                 continue
 
-            unconditional_pass_count += 1
+            finite = np.isfinite(net)
+            n_finite = int(np.sum(finite))
+            n_hypotheses += 1
 
-            positive_blocks, robust_growth, temporal_reasons = _compute_temporal_evidence(
-                sig_indices, sig_net,
-            )
-            if not temporal_reasons:
-                temporal_pass_count += 1
-
-            if temporal_reasons:
-                for r in temporal_reasons:
-                    reason_counts[r] = reason_counts.get(r, 0) + 1
+            if n_finite < config.min_effective_blocks:
+                gate_reasons.append("insufficient_effective_blocks")
                 all_evidence.append(RegimeExpertEvidence(
                     signal_id=signal_id, outer_fold_id=fold_id,
-                    regime_code=0, effective_blocks=0,
+                    regime_code=0, effective_blocks=n_finite,
+                    posterior_positive_probability=0.0,
+                    growth_lcb90=0.0, growth_2x_cost=0.0,
+                    robust_inner_growth=0.0, positive_inner_folds=0,
+                    scale=0.0, admitted=False,
+                    reasons=tuple(gate_reasons),
+                    n_evidence_bars=n_evidence_bars,
+                ))
+                reason_counts["insufficient_effective_blocks"] = (
+                    reason_counts.get("insufficient_effective_blocks", 0) + 1
+                )
+                continue
+
+            try:
+                block_length = politis_white_block_length(net[finite])
+            except ValueError:
+                block_length = 5.0
+            effective_blocks = int(np.floor(n_finite / max(block_length, 1.0)))
+
+            lcb90, _, prob_positive = circular_stationary_bootstrap_growth(
+                net[finite], _BARS_PER_YEAR_4H,
+                n_bootstrap=config.n_bootstrap,
+                block_size=block_length,
+                seed=42,
+            )
+
+            if prob_positive < config.min_posterior_probability:
+                gate_reasons.append("growth_probability_below_threshold")
+                all_evidence.append(RegimeExpertEvidence(
+                    signal_id=signal_id, outer_fold_id=fold_id,
+                    regime_code=0, effective_blocks=effective_blocks,
                     posterior_positive_probability=prob_positive,
-                    growth_lcb90=lcb90, growth_2x_cost=growth_2x,
+                    growth_lcb90=lcb90, growth_2x_cost=0.0,
+                    robust_inner_growth=0.0, positive_inner_folds=0,
+                    scale=0.0, admitted=False,
+                    reasons=tuple(gate_reasons),
+                    n_evidence_bars=n_evidence_bars,
+                ))
+                reason_counts["growth_probability_below_threshold"] = (
+                    reason_counts.get("growth_probability_below_threshold", 0) + 1
+                )
+                continue
+
+            stressed = stress_execution_costs(gross, expert_cost, funding_cost, 2.0)
+            stressed_finite = stressed[np.isfinite(stressed)]
+            if len(stressed_finite) > 0:
+                growth_2x_val = float(np.mean(np.log1p(stressed_finite))) * _BARS_PER_YEAR_4H
+            else:
+                growth_2x_val = -1e6
+
+            if growth_2x_val <= 0.0:
+                gate_reasons.append("growth_2x_cost_not_positive")
+                all_evidence.append(RegimeExpertEvidence(
+                    signal_id=signal_id, outer_fold_id=fold_id,
+                    regime_code=0, effective_blocks=effective_blocks,
+                    posterior_positive_probability=prob_positive,
+                    growth_lcb90=lcb90, growth_2x_cost=growth_2x_val,
+                    robust_inner_growth=0.0, positive_inner_folds=0,
+                    scale=0.0, admitted=False,
+                    reasons=tuple(gate_reasons),
+                    n_evidence_bars=n_evidence_bars,
+                ))
+                reason_counts["growth_2x_cost_not_positive"] = (
+                    reason_counts.get("growth_2x_cost_not_positive", 0) + 1
+                )
+                continue
+
+            n_obs = oos_end - oos_start
+            if n_obs < 6:
+                gate_reasons.append("insufficient_temporal_samples")
+                all_evidence.append(RegimeExpertEvidence(
+                    signal_id=signal_id, outer_fold_id=fold_id,
+                    regime_code=0, effective_blocks=effective_blocks,
+                    posterior_positive_probability=prob_positive,
+                    growth_lcb90=lcb90, growth_2x_cost=growth_2x_val,
+                    robust_inner_growth=0.0, positive_inner_folds=0,
+                    scale=0.0, admitted=False,
+                    reasons=tuple(gate_reasons),
+                    n_evidence_bars=n_evidence_bars,
+                ))
+                reason_counts["insufficient_temporal_samples"] = (
+                    reason_counts.get("insufficient_temporal_samples", 0) + 1
+                )
+                continue
+
+            block_size_t = n_obs // 3
+            block_growths: list[float] = []
+            for b in range(3):
+                b_start = b * block_size_t
+                b_end = n_obs if b == 2 else (b + 1) * block_size_t
+                b_net = net[b_start:b_end]
+                b_finite = b_net[np.isfinite(b_net)]
+                if len(b_finite) < 2:
+                    block_growths.append(-1e6)
+                else:
+                    g = float(np.mean(np.log1p(b_finite))) * _BARS_PER_YEAR_4H
+                    block_growths.append(g)
+            positive_blocks = sum(1 for g in block_growths if g > 0.0)
+
+            if positive_blocks < config.min_positive_inner_folds:
+                gate_reasons.append("insufficient_positive_temporal_blocks")
+                all_evidence.append(RegimeExpertEvidence(
+                    signal_id=signal_id, outer_fold_id=fold_id,
+                    regime_code=0, effective_blocks=effective_blocks,
+                    posterior_positive_probability=prob_positive,
+                    growth_lcb90=lcb90, growth_2x_cost=growth_2x_val,
+                    robust_inner_growth=0.0, positive_inner_folds=positive_blocks,
+                    scale=0.0, admitted=False,
+                    reasons=tuple(gate_reasons),
+                    n_evidence_bars=n_evidence_bars,
+                ))
+                reason_counts["insufficient_positive_temporal_blocks"] = (
+                    reason_counts.get("insufficient_positive_temporal_blocks", 0) + 1
+                )
+                continue
+
+            flat = np.array(block_growths, dtype=np.float64)
+            median_g = float(np.median(flat))
+            mad = float(np.median(np.abs(flat - median_g)))
+            robust_growth = median_g - 1.4826 * mad
+            if robust_growth <= 0.0:
+                gate_reasons.append("robust_temporal_growth_not_positive")
+                all_evidence.append(RegimeExpertEvidence(
+                    signal_id=signal_id, outer_fold_id=fold_id,
+                    regime_code=0, effective_blocks=effective_blocks,
+                    posterior_positive_probability=prob_positive,
+                    growth_lcb90=lcb90, growth_2x_cost=growth_2x_val,
                     robust_inner_growth=robust_growth,
                     positive_inner_folds=positive_blocks,
                     scale=0.0, admitted=False,
-                    reasons=tuple(temporal_reasons),
+                    reasons=tuple(gate_reasons),
+                    n_evidence_bars=n_evidence_bars,
                 ))
+                reason_counts["robust_temporal_growth_not_positive"] = (
+                    reason_counts.get("robust_temporal_growth_not_positive", 0) + 1
+                )
                 continue
 
             for regime_code in regime_codes_present:
-                reg_mask = sig_mask & (tape.regime_code_1d == regime_code)
+                reg_mask = regime_panel.code_1d[oos_start:oos_end] == regime_code
                 reg_indices = np.where(reg_mask)[0]
                 if len(reg_indices) < 3:
                     all_evidence.append(RegimeExpertEvidence(
                         signal_id=signal_id, outer_fold_id=fold_id,
                         regime_code=regime_code, effective_blocks=0,
                         posterior_positive_probability=prob_positive,
-                        growth_lcb90=lcb90, growth_2x_cost=growth_2x,
+                        growth_lcb90=lcb90, growth_2x_cost=growth_2x_val,
                         robust_inner_growth=robust_growth,
                         positive_inner_folds=positive_blocks,
                         scale=0.0, admitted=False,
                         reasons=("insufficient_regime_samples",),
+                        n_evidence_bars=n_evidence_bars,
                     ))
                     continue
 
-                reg_net = tape.net_return_1d[reg_mask]
+                reg_net = net[reg_mask]
                 reg_finite = reg_net[np.isfinite(reg_net)]
                 reg_blocks = len(reg_finite)
+                reg_mean_net = float(np.mean(reg_finite)) if len(reg_finite) > 0 else 0.0
 
-                regime_admitted = reg_blocks >= config.min_effective_blocks
+                regime_admitted = (
+                    reg_blocks >= config.min_effective_blocks
+                    and reg_mean_net > 0.0
+                )
                 reg_scale = 1.0 if regime_admitted else 0.0
 
                 if regime_admitted:
@@ -531,12 +817,14 @@ def _build_prequential_expert_route_impl(
                     regime_code=regime_code,
                     effective_blocks=reg_blocks,
                     posterior_positive_probability=prob_positive,
-                    growth_lcb90=lcb90, growth_2x_cost=growth_2x,
+                    growth_lcb90=lcb90, growth_2x_cost=growth_2x_val,
                     robust_inner_growth=robust_growth,
                     positive_inner_folds=positive_blocks,
                     scale=reg_scale,
                     admitted=regime_admitted,
                     reasons=() if regime_admitted else ("insufficient_regime_blocks",),
+                    regime_mean_net=reg_mean_net,
+                    n_evidence_bars=n_evidence_bars,
                 ))
 
                 if regime_admitted:
@@ -546,20 +834,22 @@ def _build_prequential_expert_route_impl(
             if recorder.enabled:
                 recorder.record_regime_evidence(
                     signal_id=signal_id, outer_fold_id=fold_id,
-                    regime_code=0, effective_blocks=0,
+                    regime_code=0, effective_blocks=effective_blocks,
                     posterior_probability=prob_positive,
-                    growth_lcb90=lcb90, growth_2x_cost=growth_2x,
+                    growth_lcb90=lcb90, growth_2x_cost=growth_2x_val,
                     robust_inner_growth=robust_growth,
                     positive_inner_folds=positive_blocks,
                     scale=max(active_this_fold.get(signal_id, 0.0), 0.0),
                     admitted=signal_id in active_this_fold,
                     reasons=(),
+                    n_evidence_bars=n_evidence_bars,
+                    regime_mean_net=0.0,
                 )
 
         n_active = len(active_this_fold)
         active_expert_count += n_active
 
-        max_cap = 0.50 if n_active <= 1 else 0.50 * n_active
+        max_cap = config.max_expert_weight if n_active <= 1 else config.max_expert_weight * n_active
         cap = min(1.0, max_cap)
         total_w = sum(active_this_fold.values())
         if total_w > cap and total_w > 0:
@@ -570,28 +860,34 @@ def _build_prequential_expert_route_impl(
         fold_route_scales[fold_id] = active_this_fold
 
         if n_active > 0:
-            for signal_id, scale in active_this_fold.items():
-                signal_idx = next(
-                    (i for i, d in enumerate(panel.descriptors) if d.signal_id == signal_id),
-                    None,
-                )
-                if signal_idx is not None:
-                    member_mask = _expert_member_mask(sleeves, signal_id, fold_id, n_symbols)
-                    if not np.any(member_mask):
-                        member_mask = np.ones(n_symbols, dtype=np.bool_)
+            for c in contributions:
+                scale = active_this_fold.get(c.signal_id, 0.0)
+                if scale > 0:
                     for t_idx in range(oos_start, oos_end):
                         if int(regime_panel.code_1d[t_idx]) != 0:
                             mu_2d[t_idx] += (
                                 scale
-                                * member_mask.astype(np.float32)
-                                * panel.z_3d[t_idx, :, signal_idx].astype(np.float32)
+                                * c.member_mask_1d.astype(np.float64)
+                                * c.orientation
+                                * panel.z_3d[t_idx, :, c.signal_index].astype(np.float64)
                             )
             active_expert_count_1d[oos_start:oos_end] = n_active
+            carry_contributions = contributions
+            final_fold_id = fold_id
+
+    deploy_start = max(f.oos_end_exclusive for f in folds) if folds else 0
+
+    if fold_route_scales.get(final_fold_id):
+        apply_walk_forward_carry(
+            mu_2d, panel, carry_contributions,
+            fold_route_scales[final_fold_id], regime_panel.code_1d,
+            deploy_start,
+        )
 
     forecast = CalibratedForecastPanel(
         decision_timestamps_ns=panel.decision_timestamps_ns,
         symbols=panel.symbols,
-        mu_2d=mu_2d,
+        mu_2d=mu_2d.astype(np.float32),
         se_2d=np.full((t_total, n_symbols), np.nan, dtype=np.float32),
         family_mu_3d=np.zeros((t_total, n_symbols, max(len({d.family for d in panel.descriptors}), 1)), dtype=np.float32),
         family_ids=tuple(sorted({d.family for d in panel.descriptors})),
@@ -601,10 +897,17 @@ def _build_prequential_expert_route_impl(
         fold_manifest_hash=fold_manifest_hash,
     )
 
+    is_cash_only = bool(
+        not any(
+            v for fd in fold_route_scales.values()
+            for v in fd.values()
+        )
+    )
+
     attribution = RouteAttribution(
-        candidate_experts=len(np.unique(tape.signal_id_1d)) if tape.signal_id_1d.shape[0] > 0 else 0,
-        unconditional_pass=unconditional_pass_count,
-        temporal_pass=temporal_pass_count,
+        candidate_experts=n_hypotheses,
+        unconditional_pass=0,
+        temporal_pass=0,
         regime_pass=regime_pass_count,
         active_experts=active_expert_count,
         reason_counts=reason_counts,
@@ -612,10 +915,24 @@ def _build_prequential_expert_route_impl(
 
     return PrequentialExpertRoute(
         forecast=forecast,
-        tape=tape,
+        tape=ExpertReturnTape(
+            decision_time_ns_1d=np.zeros(0, dtype=np.int64),
+            execution_time_ns_1d=np.zeros(0, dtype=np.int64),
+            available_time_ns_1d=np.zeros(0, dtype=np.int64),
+            signal_id_1d=np.array([], dtype=str),
+            outer_fold_id_1d=np.zeros(0, dtype=np.int16),
+            regime_code_1d=np.zeros(0, dtype=np.int8),
+            gross_return_1d=np.zeros(0, dtype=np.float64),
+            execution_cost_return_1d=np.zeros(0, dtype=np.float64),
+            funding_return_1d=np.zeros(0, dtype=np.float64),
+            net_return_1d=np.zeros(0, dtype=np.float64),
+        ),
         evidence=tuple(all_evidence),
         attribution=attribution,
         tested_hypotheses=n_hypotheses,
+        active_expert_count_1d=active_expert_count_1d,
+        is_cash_only=is_cash_only,
+        fold_route_scales=fold_route_scales,
     )
 
 
@@ -630,10 +947,11 @@ def build_prequential_expert_route(
     regime_panel: CausalRegimePanel,
     config: RegimeRouterConfig,
     allocator_config: DynamicCompoundingConfig,
+    cost_bps: float = 8.0,
 ) -> PrequentialExpertRoute:
     return _build_prequential_expert_route_impl(
         panel, sleeves, folds, bars_4h, cost_bps_4h, funding_1h_2d,
-        regime_panel, config, allocator_config,
+        regime_panel, config, allocator_config, cost_bps,
     )
 
 
