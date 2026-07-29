@@ -1,0 +1,365 @@
+import pytest
+import numpy as np
+
+from src.domain.futures.compound.contracts import (
+    CausalFold,
+    FamilyEdgeScreen,
+    RawSignalPanel,
+    SignalDescriptor,
+    TimeframeBarCube,
+)
+from src.domain.futures.compound.config import HandoffConfig
+from src.domain.futures.compound.l1_screening import (
+    compute_cross_sectional_ic,
+    estimate_effective_independence,
+    newey_west_tstat,
+    screen_family_edge,
+)
+from src.domain.futures.compound.l1_regime_routing import (
+    decompose_expert_gross_contribution,
+    blend_expert_contributions,
+)
+
+
+# ── helpers ──────────────────────────────────────────────────────────────
+
+def _make_panel(
+    descriptors: tuple[SignalDescriptor, ...],
+    n_bars: int = 400, n_syms: int = 20,
+    rng: np.random.Generator | None = None,
+) -> RawSignalPanel:
+    if rng is None:
+        rng = np.random.default_rng(42)
+    z = rng.standard_normal((n_bars, n_syms, len(descriptors))).astype(np.float32)
+    valid = np.isfinite(z)
+    return RawSignalPanel(
+        decision_timestamps_ns=np.arange(n_bars, dtype=np.int64),
+        symbols=tuple(f"SYM_{i}" for i in range(n_syms)),
+        descriptors=descriptors,
+        z_3d=z,
+        valid_3d=valid,
+        sigma_2d=np.full((n_bars, n_syms), 0.02, dtype=np.float32),
+    )
+
+
+def _make_4h_bars(n_bars: int = 400, n_syms: int = 20) -> TimeframeBarCube:
+    close = np.cumprod(1 + np.random.default_rng(42).standard_normal((n_bars, n_syms)) * 0.01, axis=0).astype(np.float32)
+    close = np.maximum(close, 1.0)
+    return TimeframeBarCube(
+        timeframe="4h",
+        timestamps_ns=np.arange(n_bars, dtype=np.int64),
+        symbols=tuple(f"SYM_{i}" for i in range(n_syms)),
+        open_2d=close.copy(),
+        high_2d=close.copy() * 1.01,
+        low_2d=close.copy() * 0.99,
+        close_2d=close,
+        quote_volume_2d=np.full((n_bars, n_syms), 1e8, dtype=np.float32),
+        complete_2d=np.ones((n_bars, n_syms), dtype=np.bool_),
+    )
+
+
+# ── Test 1: Happy path – reversal family with declared_orientation=-1 ────
+
+def test_screen_family_edge_admits_declared_reversal() -> None:
+    rng = np.random.default_rng(0)
+    n_bars, n_syms = 400, 20
+    noise = rng.standard_normal((n_bars, n_syms)) * 0.002
+    trend = np.linspace(-0.5, 0.5, n_syms) * 0.01
+    forward_ret = np.zeros((n_bars, n_syms))
+    for t in range(1, n_bars):
+        forward_ret[t] = trend + rng.standard_normal(n_syms) * 0.008
+    z_rev = -forward_ret + noise
+    z_mom = forward_ret + noise
+    desc = (
+        SignalDescriptor("rev:fast", "xs_reversal", "fast", 24, "4h",
+                         target_horizon_hours=24, declared_orientation=-1),
+        SignalDescriptor("mom:fast", "momentum_ts", "fast", 24, "4h",
+                         target_horizon_hours=24, declared_orientation=1),
+    )
+    z_3d = np.stack([z_rev, z_mom], axis=2).astype(np.float32)
+    price = np.cumprod(1 + forward_ret, axis=0).astype(np.float32)
+    panel = RawSignalPanel(
+        decision_timestamps_ns=np.arange(n_bars, dtype=np.int64),
+        symbols=tuple(f"SYM_{i}" for i in range(n_syms)),
+        descriptors=desc,
+        z_3d=z_3d,
+        valid_3d=np.ones((n_bars, n_syms, 2), dtype=np.bool_),
+        sigma_2d=np.full((n_bars, n_syms), 0.02, dtype=np.float32),
+    )
+    bars_4h = TimeframeBarCube(
+        timeframe="4h",
+        timestamps_ns=np.arange(n_bars, dtype=np.int64),
+        symbols=tuple(f"SYM_{i}" for i in range(n_syms)),
+        open_2d=price.copy(),
+        high_2d=price.copy() * 1.01,
+        low_2d=price.copy() * 0.99,
+        close_2d=price,
+        quote_volume_2d=np.full((n_bars, n_syms), 1e8, dtype=np.float32),
+        complete_2d=np.ones((n_bars, n_syms), dtype=np.bool_),
+    )
+    folds = (CausalFold(0, 0, 100, 0, 100, 100, 200, 25, 1),)
+    cfg = HandoffConfig(min_family_ic_samples=10, family_screen_alpha=0.05)
+
+    result = screen_family_edge(panel, bars_4h, folds, cfg)
+    assert isinstance(result, FamilyEdgeScreen)
+    for rec in result.records:
+        if rec.family == "xs_reversal":
+            assert rec.admitted, f"xs_reversal should be admitted: mean_ic={rec.mean_ic:.4f} t={rec.t_newey_west:.3f} {rec.reasons}"
+
+
+# ── Test 2: Reject contradicted orientation ────────────────────────────
+
+def test_screen_family_edge_rejects_contradicted_orientation() -> None:
+    rng = np.random.default_rng(1)
+    n_bars, n_syms = 400, 20
+    base = rng.standard_normal((n_bars, n_syms))
+    z_neg = (-0.04 * base + 0.1 * rng.standard_normal((n_bars, n_syms))).astype(np.float32)
+    z_pos = (+0.04 * base + 0.1 * rng.standard_normal((n_bars, n_syms))).astype(np.float32)
+
+    desc = (
+        SignalDescriptor("mom:fast", "momentum_ts", "fast", 24, "4h",
+                         target_horizon_hours=24, declared_orientation=1),
+    )
+    panel = RawSignalPanel(
+        decision_timestamps_ns=np.arange(n_bars, dtype=np.int64),
+        symbols=tuple(f"SYM_{i}" for i in range(n_syms)),
+        descriptors=desc,
+        z_3d=z_pos.reshape(n_bars, n_syms, 1),
+        valid_3d=np.ones((n_bars, n_syms, 1), dtype=np.bool_),
+        sigma_2d=np.full((n_bars, n_syms), 0.02, dtype=np.float32),
+    )
+    bars_4h = _make_4h_bars(n_bars, n_syms)
+    folds = (CausalFold(0, 0, 100, 0, 100, 100, 200, 25, 1),)
+    cfg = HandoffConfig(min_family_ic_samples=10, family_screen_alpha=0.05)
+
+    result = screen_family_edge(panel, bars_4h, folds, cfg)
+    assert len(result.records) == 1
+    rec = result.records[0]
+    assert not rec.admitted
+
+
+# ── Test 3: Šidák uses n_eff, not family count ─────────────────────────
+
+def test_sidak_uses_effective_independence_not_family_count() -> None:
+    rng = np.random.default_rng(2)
+    n_bars, n_syms = 400, 20
+    base = rng.standard_normal((n_bars, n_syms))
+    descs: list[SignalDescriptor] = []
+    for i in range(6):
+        descs.append(SignalDescriptor(
+            f"sig_{i}", "test_family", "fast", 24, "4h",
+            target_horizon_hours=24, declared_orientation=1,
+        ))
+    z_3d = np.stack([base + 0.1 * rng.standard_normal((n_bars, n_syms)) for _ in range(6)], axis=2).astype(np.float32)
+    panel = RawSignalPanel(
+        decision_timestamps_ns=np.arange(n_bars, dtype=np.int64),
+        symbols=tuple(f"SYM_{i}" for i in range(n_syms)),
+        descriptors=tuple(descs),
+        z_3d=z_3d,
+        valid_3d=np.ones((n_bars, n_syms, 6), dtype=np.bool_),
+        sigma_2d=np.full((n_bars, n_syms), 0.02, dtype=np.float32),
+    )
+    bars_4h = _make_4h_bars(n_bars, n_syms)
+    folds = (CausalFold(0, 0, 100, 0, 100, 100, 200, 25, 1),)
+    cfg = HandoffConfig(min_family_ic_samples=10, family_screen_alpha=0.05)
+
+    result = screen_family_edge(panel, bars_4h, folds, cfg)
+    assert 1.0 < result.n_effective_independent < 6.0, (
+        f"n_eff={result.n_effective_independent} must reflect the real correlation "
+        "structure (strictly between 1.0 and 6.0), not collapse to the no-data escape hatch"
+    )
+    assert len(result.records) == 1
+    rec = result.records[0]
+
+
+# ── Test 4: decompose_expert_gross is bounded and exact ────────────────
+
+def test_decompose_expert_gross_is_bounded_and_exact() -> None:
+    t_total, n_syms, n_experts = 10, 5, 2
+    weights_2d = np.full((t_total, n_syms), 0.02, dtype=np.float64)
+    contribution_3d = np.zeros((n_experts, t_total, n_syms), dtype=np.float64)
+    contribution_3d[0, :, :] = 0.6
+    contribution_3d[1, :, :] = 0.4
+    log_ret_2d = np.full((t_total, n_syms), 0.005, dtype=np.float64)
+    log_ret_2d[0, :] = 0.0
+
+    gross_e = decompose_expert_gross_contribution(weights_2d, contribution_3d, log_ret_2d)
+    assert gross_e.shape == (n_experts, t_total)
+    assert np.all(np.isfinite(gross_e))
+
+    all_zero_contrib = np.zeros_like(contribution_3d)
+    gross_zero = decompose_expert_gross_contribution(weights_2d, all_zero_contrib, log_ret_2d)
+    assert np.allclose(gross_zero, 0.0)
+
+
+# ── Test 5: blend_expert_contributions is NaN-safe ─────────────────────
+
+def test_blend_expert_contributions_nan_safe() -> None:
+    rng = np.random.default_rng(4)
+    t_total, n_syms, n_sigs = 50, 10, 3
+    z = rng.standard_normal((t_total, n_syms, n_sigs)).astype(np.float32)
+    valid = np.ones((t_total, n_syms, n_sigs), dtype=np.bool_)
+    z[0, 0, 0] = np.nan
+    valid[0, 0, 0] = False
+    z[::5, ::3, 1] = np.nan
+    valid[::5, ::3, 1] = False
+
+    weights = np.array([0.5, 0.3, 0.2], dtype=np.float64)
+    mu = blend_expert_contributions(z, valid, weights)
+    assert mu.shape == (t_total, n_syms)
+    assert np.all(np.isfinite(mu)), "NaN leaked into blend output"
+
+    expected = np.zeros((t_total, n_syms), dtype=np.float64)
+    for t in range(t_total):
+        for s in range(n_syms):
+            num = 0.0
+            den = 0.0
+            for k in range(n_sigs):
+                if valid[t, s, k]:
+                    num += weights[k] * z[t, s, k]
+                    den += abs(weights[k])
+            expected[t, s] = num / den if den > 0 else 0.0
+    assert np.allclose(mu, expected, atol=1e-6)
+
+    with pytest.raises(ValueError, match="weights"):
+        blend_expert_contributions(z, valid, np.array([0.5, 0.3]))
+
+
+# ── Test 6: NW t matches OLS at lag 0 ─────────────────────────────────
+
+def test_newey_west_tstat_matches_iid_ols_at_lag_zero() -> None:
+    rng = np.random.default_rng(5)
+    n = 200
+    data = rng.standard_normal(n)
+    t_nw, se_nw = newey_west_tstat(data, max_lag=0)
+    t_ols = float(np.mean(data)) / (float(np.std(data, ddof=1)) / np.sqrt(n))
+    assert np.isclose(t_nw, t_ols, rtol=5e-2), f"NW t={t_nw} != OLS t={t_ols}"
+
+    t_short, se_short = newey_west_tstat(np.array([1.0, 2.0]), 0)
+    assert t_short == 0.0
+    assert se_short == 0.0
+
+
+# ── Test 7: IC has no look-ahead ──────────────────────────────────────
+
+def test_compute_cross_sectional_ic_no_lookahead() -> None:
+    rng = np.random.default_rng(6)
+    n_bars, n_syms = 100, 20
+    z = rng.standard_normal((n_bars, n_syms)).astype(np.float32)
+    fwd = np.zeros((n_bars, n_syms), dtype=np.float64)
+    for t in range(n_bars - 6):
+        fwd[t] = rng.standard_normal(n_syms) * 0.01
+    oos_slices = (slice(10, 90),)
+    ic = compute_cross_sectional_ic(z, fwd, oos_slices, min_cross_section=8)
+    assert ic.shape == (n_bars,)
+    assert np.all(np.isnan(ic[:10]))
+    assert np.all(np.isnan(ic[90:]))
+    n_finite = int(np.sum(np.isfinite(ic)))
+    assert n_finite >= 70, f"only {n_finite} finite IC bars"
+
+
+# ── Test 8: declared_orientation rejects zero ─────────────────────────
+
+def test_declared_orientation_rejects_zero() -> None:
+    with pytest.raises(ValueError, match="declared_orientation must be -1 or 1"):
+        SignalDescriptor("bad", "test", "fast", 24, "4h", declared_orientation=0)
+
+
+# ── Test 9: fold 0 no longer skipped; evidence dictionary accumulates ──
+
+def test_prequential_route_accumulates_from_fold_zero() -> None:
+    from src.domain.futures.compound.l1_regime_routing import (
+        _build_prequential_expert_route_impl,
+        build_causal_regime_panel,
+    )
+    from src.domain.futures.compound.config import DynamicCompoundingConfig, RegimeRouterConfig
+    from src.domain.futures.compound.contracts import L1SleevePosterior
+    rng = np.random.default_rng(7)
+    n_bars, n_syms = 400, 10
+    desc = (SignalDescriptor("test:fast", "test", "fast", 24, "4h",
+                             target_horizon_hours=24, declared_orientation=1),)
+    panel = _make_panel(desc, n_bars, n_syms, rng)
+    bars_4h = _make_4h_bars(n_bars, n_syms)
+    folds = tuple(CausalFold(i, i * 50, (i + 1) * 50, i * 50, (i + 1) * 50, (i + 1) * 50, (i + 2) * 50, 25, 1)
+                  for i in range(4))
+
+    close = bars_4h.close_2d.astype(np.float64)
+    log_ret = np.zeros(close.shape[0], dtype=np.float64)
+    if n_syms >= 2:
+        prev = close[:-1, :2]
+        curr = close[1:, :2]
+        mask = (prev > 0) & np.isfinite(prev) & (curr > 0) & np.isfinite(curr)
+        w = np.array([0.5, 0.5], dtype=np.float64)
+        with np.errstate(divide="ignore", invalid="ignore"):
+            weighted = np.where(mask, np.log(curr / prev), 0.0) @ w
+        log_ret[1:] = weighted
+    regime_panel = build_causal_regime_panel(log_ret, bars_4h.timestamps_ns, RegimeRouterConfig())
+
+    sleeves_per_fold = tuple(
+        L1SleevePosterior(
+            sleeve_id=f"test:fast:{i}:0", signal_id="test:fast", family="test",
+            outer_fold_id=i, cluster_id=0,
+            member_mask_1d=np.ones(n_syms, dtype=np.bool_),
+            member_hash="h", exit_policy=None,
+            fitted_beta=0.02, mean_net_return=0.001, standard_error=0.01,
+            posterior_positive_probability=0.55, residual_novelty=0.1,
+            fold_net_returns=(0.001,), effective_events=50,
+            admitted=True, reasons=(),
+        ) for i in range(4)
+    )
+    rr_config = RegimeRouterConfig(
+        min_evidence_bars=5, min_posterior_probability=0.51,
+        min_effective_blocks=1, min_positive_inner_folds=1,
+    )
+    dc_config = DynamicCompoundingConfig()
+    cost_bps_4h = np.full((n_bars, n_syms), 8.0, dtype=np.float32)
+    funding_1h = np.zeros((n_bars * 4, n_syms), dtype=np.float32)
+
+    result = _build_prequential_expert_route_impl(
+        panel, sleeves_per_fold, folds, bars_4h, cost_bps_4h, funding_1h,
+        regime_panel, rr_config, dc_config, cost_bps=8.0,
+    )
+    for ev in result.evidence:
+        if ev.outer_fold_id > 0:
+            assert ev.n_evidence_bars > 0, f"fold {ev.outer_fold_id}: evidence should accumulate"
+
+
+# ── Test 3b: n_eff must not collapse when only OOS bars are populated ──
+
+def test_estimate_effective_independence_ignores_nan_padded_rows() -> None:
+    """Regression: compute_cross_sectional_ic seeds the FULL bar range with NaN
+    and only fills bars inside oos_slices. A naive column-wise all-finite check
+    over the whole array always fails in that shape and silently collapses
+    n_eff to 1.0 (defeating the Sidak correction). Rows with no data anywhere
+    must be dropped before the column check."""
+    rng = np.random.default_rng(9)
+    n_bars, n_oos, n_signals = 400, 100, 6
+    base = rng.standard_normal(n_oos)
+    ic_matrix = np.full((n_bars, n_signals), np.nan, dtype=np.float64)
+    for i in range(n_signals):
+        ic_matrix[150:150 + n_oos, i] = base + 0.1 * rng.standard_normal(n_oos)
+
+    n_eff = estimate_effective_independence(ic_matrix)
+    assert 1.0 < n_eff < n_signals, (
+        f"n_eff={n_eff} should reflect correlated-but-not-identical signals, "
+        "not collapse to 1.0 just because most bars are NaN outside the OOS window"
+    )
+
+    independent = np.full((n_bars, n_signals), np.nan, dtype=np.float64)
+    for i in range(n_signals):
+        independent[150:150 + n_oos, i] = rng.standard_normal(n_oos)
+    n_eff_indep = estimate_effective_independence(independent)
+    assert n_eff_indep > n_eff, "independent signals must yield a higher n_eff than correlated ones"
+
+
+# ── Test 10: Family screen integrates with loop logic ─────────────────
+
+def test_screen_family_edge_empty_folds() -> None:
+    desc = (SignalDescriptor("a:fast", "a", "fast", 24, "4h", declared_orientation=1),)
+    panel = _make_panel(desc, 100, 10)
+    bars_4h = _make_4h_bars(100, 10)
+    cfg = HandoffConfig()
+    result = screen_family_edge(panel, bars_4h, (), cfg)
+    assert isinstance(result, FamilyEdgeScreen)
+    assert len(result.records) == 0
+    assert len(result.admitted_families) == 0

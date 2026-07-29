@@ -157,7 +157,7 @@ class TestRunMultiscaleCompoundEngine:
         mock_panel.z_3d = np.zeros((256, 5, 3))
         mock_panel.valid_3d = np.ones((256, 5, 3), dtype=bool)
         mock_panel.sigma_2d = np.full((256, 5), 0.01, dtype=np.float32)
-        mock_panel.descriptors = (mocker.Mock(spec=SignalDescriptor, target_horizon_hours=4),)
+        mock_panel.descriptors = (mocker.Mock(spec=SignalDescriptor, target_horizon_hours=4, declared_orientation=1),)
         mock_panel.symbols = small_cube.symbols
         mocker.patch(
             "src.domain.futures.compound.engine.build_raw_signal_panel",
@@ -235,7 +235,7 @@ class TestRunMultiscaleCompoundEngine:
         mock_panel.z_3d = np.zeros((256, 5, 3))
         mock_panel.valid_3d = np.ones((256, 5, 3), dtype=bool)
         mock_panel.sigma_2d = distinct_sigma
-        mock_panel.descriptors = (mocker.Mock(spec=SignalDescriptor, target_horizon_hours=4),)
+        mock_panel.descriptors = (mocker.Mock(spec=SignalDescriptor, target_horizon_hours=4, declared_orientation=1),)
         mock_panel.symbols = small_cube.symbols
         mocker.patch(
             "src.domain.futures.compound.engine.build_raw_signal_panel",
@@ -1161,8 +1161,8 @@ class TestEngineL2PassBuildsDeploymentCandidate:
             RawSignalPanel,
         )
 
-        desc_a = mocker.Mock(spec=SignalDescriptor, signal_id="trend_ema:fast", target_horizon_hours=4)
-        desc_b = mocker.Mock(spec=SignalDescriptor, signal_id="momentum_ts:slow", target_horizon_hours=4)
+        desc_a = mocker.Mock(spec=SignalDescriptor, signal_id="trend_ema:fast", target_horizon_hours=4, declared_orientation=1)
+        desc_b = mocker.Mock(spec=SignalDescriptor, signal_id="momentum_ts:slow", target_horizon_hours=4, declared_orientation=1)
         mock_panel = mocker.Mock(spec=RawSignalPanel)
         mock_panel.z_3d = np.zeros((256, 5, 3))
         mock_panel.valid_3d = np.ones((256, 5, 3), dtype=bool)
@@ -1304,7 +1304,7 @@ class TestEngineL2PassBuildsDeploymentCandidate:
         )
         import src.domain.futures.compound.engine as eng
 
-        desc = mocker.Mock(spec=SignalDescriptor, signal_id="sig1", target_horizon_hours=4)
+        desc = mocker.Mock(spec=SignalDescriptor, signal_id="sig1", target_horizon_hours=4, declared_orientation=1)
         mock_panel = mocker.Mock(spec=RawSignalPanel)
         mock_panel.z_3d = np.zeros((256, 5, 1))
         mock_panel.valid_3d = np.ones((256, 5, 1), dtype=bool)
@@ -1367,7 +1367,7 @@ class TestEngineL2PassBuildsDeploymentCandidate:
         )
         import src.domain.futures.compound.engine as eng
 
-        desc = mocker.Mock(spec=SignalDescriptor, signal_id="sig1", target_horizon_hours=4)
+        desc = mocker.Mock(spec=SignalDescriptor, signal_id="sig1", target_horizon_hours=4, declared_orientation=1)
         mock_panel = mocker.Mock(spec=RawSignalPanel)
         mock_panel.z_3d = np.zeros((256, 5, 1))
         mock_panel.valid_3d = np.ones((256, 5, 1), dtype=bool)
@@ -1753,4 +1753,78 @@ def test_gate_scores_the_same_weights_array_that_is_deployed(
     np.testing.assert_array_equal(
         gate_weights_captured[0], deploy_weights_captured[0],
         err_msg="gate and deployment MUST use the same weights_2d array values",
+    )
+
+
+def test_engine_wires_family_screen_before_sleeves(tmp_path: Path, mocker) -> None:
+    """Integration: screen_family_edge runs on the real panel and its
+    admitted_signal_ids are forwarded into build_fold_local_regime_forecast
+    before sleeve estimation is consumed by the router (no top-level mocking
+    of screen_family_edge or the panel itself)."""
+    n_bars = 1024
+    n_syms = 5
+    cube = _make_cube(n_bars, n_syms)
+    universe = type("Universe", (), {"symbols": cube.symbols, "snapshots": ()})()
+
+    store = SealedHoldoutStore(tmp_path / "family_screen_e2e.sqlite3")
+    manifest = SealedHoldoutManifest(
+        holdout_id="family-screen-e2e",
+        start_time_ns=int(cube.timestamps_ns[-180]),
+        end_time_ns=int(cube.timestamps_ns[-1]),
+        holdout_days=90, model_version="v1",
+        data_manifest_hash="h1", strategy_spec_hash="spec1",
+    )
+    store.create(manifest)
+    config = CompoundEngineConfig()
+
+    mock_fold = CausalFold(0, 0, 120, 100, 120, 120, 200, 1, 1)
+    mock_folds = (mock_fold,)
+    mocker.patch("src.domain.futures.compound.engine.build_folds_4h", return_value=mock_folds)
+
+    mock_cluster_panel = ClusterPanel(
+        symbols=cube.symbols,
+        cluster_labels=np.zeros(n_syms, dtype=np.int32),
+        cluster_centroids=np.zeros((1, 4), dtype=np.float64),
+        k_clusters=1,
+    )
+    mock_cluster_fold = CausalClusterFold(
+        fold_id=0, fit_end_exclusive_4h=120, fit_end_time_ns=int(cube.timestamps_ns[119]),
+        panel=mock_cluster_panel, member_hash="test_hash",
+    )
+    mocker.patch("src.domain.futures.compound.engine.build_causal_cluster_folds", return_value=(mock_cluster_fold,))
+
+    import src.domain.futures.compound.engine as eng_mod
+    from src.domain.futures.compound.l1_screening import screen_family_edge as real_screen_family_edge
+
+    screen_calls: list[object] = []
+
+    def capturing_screen(panel, bars_4h, folds, config_):
+        result = real_screen_family_edge(panel, bars_4h, folds, config_)
+        screen_calls.append(result)
+        return result
+
+    mocker.patch.object(eng_mod, "screen_family_edge", side_effect=capturing_screen)
+
+    route_kwargs: dict[str, object] = {}
+    original_route = eng_mod.build_fold_local_regime_forecast
+
+    def capturing_route(*args, **kwargs):
+        route_kwargs.update(kwargs)
+        return original_route(*args, **kwargs)
+
+    mocker.patch.object(eng_mod, "build_fold_local_regime_forecast", side_effect=capturing_route)
+
+    result = run_multiscale_compound_engine(
+        market=cube, universe=universe,
+        holdout_store=store, holdout_id="family-screen-e2e", config=config,
+    )
+
+    assert isinstance(result, CompoundEngineResult)
+    assert len(screen_calls) == 1, "screen_family_edge must be invoked exactly once per P2 pass"
+    assert "family_screen_admitted_ids" in route_kwargs, (
+        "build_fold_local_regime_forecast missing family_screen_admitted_ids kwarg"
+    )
+    assert route_kwargs["family_screen_admitted_ids"] == screen_calls[0].admitted_signal_ids, (
+        "router must receive the exact admitted_signal_ids produced by screen_family_edge, "
+        "not a re-derived or hardcoded value"
     )

@@ -2,6 +2,11 @@
 
 This file holds historical architecture decision records (ADRs) that have been pruned from the active window.
 
+## [2026-07-27] [TASK_L1_ADMISSION_BETA_NEUTRAL_TS_BOOTSTRAP] [ADR_20260727_L1_ADMISSION_BETA_NEUTRAL_TS_BOOTSTRAP]
+- **Context/Why:** 278개 중복 sleeve OOS 평균 스칼라 i.i.d 부트스트랩으로 인한 표본 독립성 위반 및 분산 폭발(growth_lcb90 = -40.58%) 결함 해결
+- **Resolution/What:** l1_sleeves.py(compute_beta_neutral_composite_returns 신규, Causal Beta Neutral & Inverse Volatility 가중 4h 시계열 생성, build_exit_aware_handoff에 circular_stationary_bootstrap_growth 시간축 블록 부트스트랩 연결), engine.py(파이프라인 배선)
+- **Impact:** 표본 독립성 위반 오추정을 전면 제거하고 정직한 시간축 시계열 부트스트랩 적용. 10.17% 비용 드래그 및 마이너스 알파 신호를 정직하게 fail-closed 차단하여 cash-only로 원금 보호
+
 ## [2026-07-27] [TASK_L1_ADMISSION_RECOVERY_GATE_REDESIGN] [ADR_20260727_L1_ADMISSION_RECOVERY_GATE_REDESIGN]
 - **Context/Why:** 직전 NO_EVIDENCE 진단(min_effective_days=180)이 오진단이었음을 확인(코드에서 미참조 죽은 필드). 실전 그리드서치 8회로 진짜 원인 확정: 개별 신호 게이트는 정상, 집계 게이트(pooled OOS 평균>0 체크)가 L1<350일에서 부호 반전. growth_lcb90 필드가 평균값을 대입하는 결함도 발견
 - **Resolution/What:** run_windows.py(clamp_window_to_available_data 신규: L1 길이 고정+L2 동적계산+fail-closed), config.py(l1_days 365 복원, min_oos_days 340, min_bootstrap_sharpe_probability 제거, l1_prior_effective_days_cap 신규), l1_sleeves.py(집계게이트를 admission.py::_block_bootstrap_lcb(block_size=1) 재사용 i.i.d. 부트스트랩으로 교체), validation.py(L2->L3 패턴 재사용한 blend_l1_prior_growth_probability, sharpe_probability 게이트 제외), engine.py 배선. /check PASS(Cov 91%)
