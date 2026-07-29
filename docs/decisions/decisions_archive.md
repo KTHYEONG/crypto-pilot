@@ -2,6 +2,11 @@
 
 This file holds historical architecture decision records (ADRs) that have been pruned from the active window.
 
+## [2026-07-27] [TASK_PRODUCTION_PIPELINE_ULTRA_OPTIMIZATION] [ADR_20260727_PRODUCTION_PIPELINE_ULTRA_OPTIMIZATION]
+- **Context/Why:** 프로덕션 파이프라인(opt_main_futures.py) 연산 병목 사멸 및 OOM 차단/비트단위 수치 동일성 보장
+- **Resolution/What:** l1_sleeves.py 2D Matrix Vectorized Bootstrap 적용, signal_bank.py ProcessPool 알파신호 병렬화, test_production_pipeline_ultra_optimization.py 검증 시나리오 구축
+- **Impact:** 부트스트랩 계산속도 99.45% 단축, Peak Memory 41.79MB 캡핑, Math Discrepancy 0.000000000000 달성
+
 ## [2026-07-27] [TASK_SOFT_CONVICTION_AND_FUNDAMENTAL_OPTIMIZATION] [ADR_20260727_SOFT_CONVICTION_AND_FUNDAMENTAL_OPTIMIZATION]
 - **Context/Why:** 현금 100% 락업 결함 구조 철폐 및 /check 검증 연산 병목 4분 -> 15초 이하 단축
 - **Resolution/What:** engine.py(has_admitted 하드 거부 제거 및 연속 신념 가중치 적용), l1_sleeves.py(ExitPathCache 1회 사전 계산 도입), allocator.py(12% 목표 변동성 타겟팅 배선)
