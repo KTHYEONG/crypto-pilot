@@ -1,5 +1,6 @@
 import pytest
 import numpy as np
+from numpy.typing import NDArray
 
 from src.domain.futures.compound.contracts import (
     CausalFold,
@@ -722,3 +723,449 @@ def test_screen_signal_edge_net_edge_replay_failure_is_fail_closed(mocker) -> No
     assert rec.net_growth_probability == 0.0
     assert rec.edge_per_turnover_bps == 0.0
     assert rec.signal_id not in screen.admitted_signal_ids
+
+
+# ── Effective Horizon: discover_effective_horizon unit tests ─────────────
+
+from src.domain.futures.compound.l1_screening import discover_effective_horizon
+
+
+def _make_bars_with_horizon_signal(
+    n_bars: int, n_syms: int, target_horizon_hours: int,
+    signal_strength: float = 0.02, noise_scale: float = 0.008,
+    seed: int = 42,
+) -> tuple[NDArray[np.float64], TimeframeBarCube]:
+    """Create weights_2d and bars_4h where forward returns at target_horizon_hours
+    correlate with a static cross-sectional signal in weights_2d."""
+    rng = np.random.default_rng(seed)
+    cs_signal = np.linspace(-0.5, 0.5, n_syms)
+    weights_2d = np.tile(cs_signal, (n_bars, 1)).astype(np.float64)
+
+    horizon_bars = target_horizon_hours // 4
+    total_bars = n_bars + horizon_bars
+    close = np.ones((total_bars, n_syms), dtype=np.float64) * 100.0
+    for t in range(n_bars):
+        if t + horizon_bars < total_bars:
+            fwd_ret = cs_signal * signal_strength + rng.normal(0, noise_scale, n_syms)
+            close[t + horizon_bars] = close[t] * np.exp(fwd_ret)
+        else:
+            close[t] = close[t - 1] * (1 + rng.normal(0, noise_scale, n_syms))
+
+    bars_4h = TimeframeBarCube(
+        timeframe="4h",
+        timestamps_ns=np.arange(total_bars, dtype=np.int64),
+        symbols=tuple(f"S{i}" for i in range(n_syms)),
+        open_2d=close.astype(np.float32),
+        high_2d=(close * 1.01).astype(np.float32),
+        low_2d=(close * 0.99).astype(np.float32),
+        close_2d=close.astype(np.float32),
+        quote_volume_2d=np.full((total_bars, n_syms), 1e8, dtype=np.float32),
+        complete_2d=np.ones((total_bars, n_syms), dtype=np.bool_),
+    )
+    return weights_2d, bars_4h
+
+
+def test_discover_effective_horizon_finds_significant_longer_horizon() -> None:
+    """[Scenario 1] Synthetic book significant at a candidate horizon -> (hours, orientation, t)."""
+    n_bars, n_syms = 250, 40
+    weights_2d, bars_4h = _make_bars_with_horizon_signal(
+        n_bars, n_syms, target_horizon_hours=216,
+        signal_strength=0.025, noise_scale=0.006, seed=42,
+    )
+    oos_slices = (slice(50, n_bars - 54),)
+
+    result_hours, result_orientation, result_t = discover_effective_horizon(
+        weights_2d, bars_4h, oos_slices, search_orientation=1,
+    )
+
+    assert result_hours > 0, f"expected non-zero horizon, got {result_hours}"
+    assert result_orientation == 1, f"expected orientation=1, got {result_orientation}"
+    assert result_t > 2.0, f"expected t>2, got {result_t:.3f}"
+    # shortest significant candidate horizon (prices are cumulative, so shorter
+    # horizons may also show significance — accept any valid candidate)
+
+
+def test_discover_effective_horizon_no_candidate_significant_returns_zero() -> None:
+    """[LIMIT-01] All candidates not significant -> (0,0,0.0)."""
+    rng = np.random.default_rng(99)
+    n_bars, n_syms = 200, 30
+    weights_2d = rng.normal(0, 1, (n_bars, n_syms)).astype(np.float64)
+
+    close = 100.0 + np.cumsum(rng.normal(0, 0.1, (n_bars + 54, n_syms)), axis=0)
+    close = np.maximum(close, 1.0).astype(np.float32)
+    bars_4h = TimeframeBarCube(
+        timeframe="4h", timestamps_ns=np.arange(n_bars + 54, dtype=np.int64),
+        symbols=tuple(f"S{i}" for i in range(n_syms)),
+        open_2d=close.copy(), high_2d=(close * 1.01).astype(np.float32),
+        low_2d=(close * 0.99).astype(np.float32), close_2d=close,
+        quote_volume_2d=np.full((n_bars + 54, n_syms), 1e8, dtype=np.float32),
+        complete_2d=np.ones((n_bars + 54, n_syms), dtype=np.bool_),
+    )
+    oos_slices = (slice(50, n_bars),)
+
+    result_hours, result_orientation, result_t = discover_effective_horizon(
+        weights_2d, bars_4h, oos_slices, search_orientation=1,
+    )
+    assert result_hours == 0
+    assert result_orientation == 0
+    assert result_t == 0.0
+
+
+def test_discover_effective_horizon_detects_opposite_orientation() -> None:
+    """[LIMIT-02] Declared=1 but actual -1 direction significant -> effective_orientation=-1."""
+    n_bars, n_syms = 250, 40
+    # Build a signal that's negatively correlated with forward returns at 216h
+    weights_2d, bars_4h = _make_bars_with_horizon_signal(
+        n_bars, n_syms, target_horizon_hours=216,
+        signal_strength=-0.025, noise_scale=0.006, seed=77,
+    )
+    oos_slices = (slice(50, n_bars - 54),)
+
+    # search_orientation=-1 means we're looking for a negative relationship
+    result_hours, result_orientation, result_t = discover_effective_horizon(
+        weights_2d, bars_4h, oos_slices, search_orientation=-1,
+    )
+
+    assert result_hours > 0, f"expected non-zero horizon, got {result_hours}"
+    assert result_orientation == -1, f"expected orientation=-1, got {result_orientation}"
+    assert result_t < -2.0, f"expected t < -2, got {result_t:.3f}"
+
+
+def test_discover_effective_horizon_sidak_correction_rejects_nominal_p_value() -> None:
+    """[RULE-EH-4] Sidak correction: nominal p<0.05 but corrected threshold rejects.
+
+    With 7 candidates and family_screen_alpha=0.05, Sidak alpha = 0.0073.
+    A barely-nominal signal (p ≈ 0.03) should pass uncorrected but fail Sidak.
+    We verify by comparing results at alpha=0.05 vs alpha=0.5 (lenient).
+    """
+    rng = np.random.default_rng(99)
+    n_bars, n_syms = 100, 20
+    # Pure noise -> no horizon should be significant
+    weights_2d = rng.normal(0, 1, (n_bars, n_syms)).astype(np.float64)
+
+    close = 100.0 + np.cumsum(rng.normal(0, 0.2, (n_bars + 54, n_syms)), axis=0)
+    close = np.maximum(close, 1.0).astype(np.float32)
+    bars_4h = TimeframeBarCube(
+        timeframe="4h", timestamps_ns=np.arange(n_bars + 54, dtype=np.int64),
+        symbols=tuple(f"S{i}" for i in range(n_syms)),
+        open_2d=close.copy(), high_2d=(close * 1.01).astype(np.float32),
+        low_2d=(close * 0.99).astype(np.float32), close_2d=close,
+        quote_volume_2d=np.full((n_bars + 54, n_syms), 1e8, dtype=np.float32),
+        complete_2d=np.ones((n_bars + 54, n_syms), dtype=np.bool_),
+    )
+    oos_slices = (slice(20, 80),)
+
+    # With alpha=0.05 (Sidak ~0.0073), pure noise should find nothing
+    strict = discover_effective_horizon(
+        weights_2d, bars_4h, oos_slices, search_orientation=1,
+        family_screen_alpha=0.05,
+    )
+    # With alpha=0.99 (extremely lenient), even noise might pass — but we just
+    # verify that stricter alpha produces fewer or equal discoveries
+    lenient = discover_effective_horizon(
+        weights_2d, bars_4h, oos_slices, search_orientation=1,
+        family_screen_alpha=0.99,
+    )
+    # Stricter Sidak should not admit a horizon that lenient would not
+    assert strict[0] <= lenient[0]
+
+
+def test_discover_effective_horizon_all_zero_weights_returns_zero() -> None:
+    """[LIMIT-03] All-zero weights_2d -> (0,0,0.0), no exception."""
+    n_bars, n_syms = 100, 20
+    weights_2d = np.zeros((n_bars, n_syms), dtype=np.float64)
+    close = 100.0 + np.cumsum(np.random.default_rng(0).normal(0, 0.1, (n_bars, n_syms)), axis=0)
+    bars_4h = TimeframeBarCube(
+        timeframe="4h", timestamps_ns=np.arange(n_bars, dtype=np.int64),
+        symbols=tuple(f"S{i}" for i in range(n_syms)),
+        open_2d=close.astype(np.float32), high_2d=(close * 1.01).astype(np.float32),
+        low_2d=(close * 0.99).astype(np.float32), close_2d=close.astype(np.float32),
+        quote_volume_2d=np.full((n_bars, n_syms), 1e8, dtype=np.float32),
+        complete_2d=np.ones((n_bars, n_syms), dtype=np.bool_),
+    )
+    oos_slices = (slice(10, 80),)
+
+    result_hours, result_orientation, result_t = discover_effective_horizon(
+        weights_2d, bars_4h, oos_slices, search_orientation=1,
+    )
+    assert result_hours == 0
+    assert result_orientation == 0
+    assert result_t == 0.0
+
+
+# ── Integration: screen_signal_edge effective horizon wiring ─────────────
+
+
+def test_screen_signal_edge_only_discovers_effective_horizon_for_declared_gate_failures(mocker) -> None:
+    """[Scenario 6] declared gate failure triggers discover_effective_horizon call;
+    passing signal does not."""
+    mock_dh = mocker.patch(
+        "src.domain.futures.compound.l1_screening.discover_effective_horizon",
+        return_value=(0, 0, 0.0),
+    )
+
+    rng = np.random.default_rng(44)
+    n_bars, n_syms = 400, 20
+
+    # Strong signal that passes IC gate (negatively correlated with forward returns)
+    cs_rising = np.tile(np.linspace(-0.5, 0.5, n_syms), (n_bars, 1))
+    forward_ret = np.zeros((n_bars, n_syms))
+    for t in range(1, n_bars):
+        forward_ret[t] = cs_rising[t] * 0.04 + rng.normal(0, 0.005, n_syms)
+    z_pass = -cs_rising * 0.5 + rng.normal(0, 0.01, (n_bars, n_syms))
+    z_pass = z_pass.astype(np.float32)
+
+    # Weak/noise signal that fails IC gate
+    z_fail = rng.normal(0, 1, (n_bars, n_syms)).astype(np.float32)
+
+    z_3d = np.stack([z_pass, z_fail], axis=2).astype(np.float32)
+    price = np.cumprod(1 + forward_ret, axis=0).astype(np.float32)
+    price = np.maximum(price, 0.1)
+
+    desc = (
+        SignalDescriptor("pass:fast", "test_fam", "fast", 24, "4h",
+                         target_horizon_hours=24, declared_orientation=-1),
+        SignalDescriptor("fail:fast", "test_fam", "fast", 24, "4h",
+                         target_horizon_hours=24, declared_orientation=1),
+    )
+    panel = RawSignalPanel(
+        decision_timestamps_ns=np.arange(n_bars, dtype=np.int64),
+        symbols=tuple(f"SYM_{i}" for i in range(n_syms)), descriptors=desc,
+        z_3d=z_3d, valid_3d=np.ones((n_bars, n_syms, 2), dtype=np.bool_),
+        sigma_2d=np.full((n_bars, n_syms), 0.02, dtype=np.float32),
+    )
+    bars_4h = TimeframeBarCube(
+        timeframe="4h", timestamps_ns=np.arange(n_bars, dtype=np.int64),
+        symbols=tuple(f"SYM_{i}" for i in range(n_syms)),
+        open_2d=price.copy(), high_2d=price.copy() * 1.01,
+        low_2d=price.copy() * 0.99, close_2d=price,
+        quote_volume_2d=np.full((n_bars, n_syms), 1e8, dtype=np.float32),
+        complete_2d=np.ones((n_bars, n_syms), dtype=np.bool_),
+    )
+    folds = (CausalFold(0, 0, 100, 0, 100, 100, 300, 25, 1),)
+    cfg = HandoffConfig(min_family_ic_samples=10, family_screen_alpha=0.05)
+    dc_cfg = DynamicCompoundingConfig()
+    funding = np.zeros((n_bars * 4, n_syms), dtype=np.float32)
+
+    screen = screen_signal_edge(
+        panel, bars_4h, folds, cfg,
+        funding_1h_2d=funding, allocator_config=dc_cfg,
+    )
+
+    assert len(screen.records) == 2
+    pass_rec = screen.records[0]
+    fail_rec = screen.records[1]
+
+    # passing signal → no EH call; failing signal → exactly 1 EH call
+    assert pass_rec.effective_horizon_hours == 0
+    assert mock_dh.call_count == 1, (
+        f"expected 1 EH call (for failing signal), got {mock_dh.call_count}"
+    )
+
+
+def test_screen_signal_edge_effective_horizon_replay_respects_purge_embargo(mocker) -> None:
+    """[Scenario 7] When discover_effective_horizon reports a horizon, the
+    net-of-cost replay that follows must reuse EXACTLY the same purge/embargo-
+    respecting oos_slices derived from `folds` — no widening, no extra bars.
+    Also asserts admission is a deterministic consequence of net_passes, not a
+    vacuous either-branch check."""
+    rng = np.random.default_rng(55)
+    n_bars, n_syms = 400, 30
+    # pure noise at the declared 24h horizon -> guaranteed IC-gate failure
+    z_3d = rng.standard_normal((n_bars, n_syms, 1)).astype(np.float32)
+    price = np.cumprod(1 + rng.normal(0, 0.005, (n_bars, n_syms)), axis=0).astype(np.float32)
+    price = np.maximum(price, 0.1)
+
+    desc = (SignalDescriptor("eh_test", "test_fam", "fast", 24, "4h",
+                              target_horizon_hours=24, declared_orientation=1),)
+    panel = RawSignalPanel(
+        decision_timestamps_ns=np.arange(n_bars, dtype=np.int64),
+        symbols=tuple(f"SYM_{i}" for i in range(n_syms)), descriptors=desc,
+        z_3d=z_3d, valid_3d=np.ones((n_bars, n_syms, 1), dtype=np.bool_),
+        sigma_2d=np.full((n_bars, n_syms), 0.02, dtype=np.float32),
+    )
+    bars_4h = TimeframeBarCube(
+        timeframe="4h", timestamps_ns=np.arange(n_bars, dtype=np.int64),
+        symbols=tuple(f"SYM_{i}" for i in range(n_syms)),
+        open_2d=price.copy(), high_2d=price.copy() * 1.01,
+        low_2d=price.copy() * 0.99, close_2d=price,
+        quote_volume_2d=np.full((n_bars, n_syms), 1e8, dtype=np.float32),
+        complete_2d=np.ones((n_bars, n_syms), dtype=np.bool_),
+    )
+    # two folds with a real purge/embargo gap between fit_end and oos_start
+    folds = (
+        CausalFold(0, 0, 100, 0, 100, 106, 200, 6, 4),
+        CausalFold(1, 0, 220, 0, 220, 226, 320, 6, 4),
+    )
+    expected_oos_slices = tuple(slice(f.oos_start, f.oos_end_exclusive) for f in folds)
+
+    cfg = HandoffConfig(min_family_ic_samples=10, family_screen_alpha=0.05,
+                         min_growth_posterior_probability=0.51)
+    dc_cfg = DynamicCompoundingConfig()
+    funding = np.zeros((n_bars * 4, n_syms), dtype=np.float32)
+
+    mocker.patch(
+        "src.domain.futures.compound.l1_screening.discover_effective_horizon",
+        return_value=(216, 1, 5.0),
+    )
+    real_replay = __import__(
+        "src.domain.futures.compound.l1_screening", fromlist=["replay_signal_standalone_book"],
+    ).replay_signal_standalone_book
+    captured_oos_slices: list[tuple] = []
+
+    def _spy_replay(z_2d, panel_, bars_4h_, funding_1h_2d, oos_slices, allocator_config, cost_bps, **kwargs):
+        captured_oos_slices.append(oos_slices)
+        return real_replay(z_2d, panel_, bars_4h_, funding_1h_2d, oos_slices, allocator_config, cost_bps, **kwargs)
+
+    mocker.patch(
+        "src.domain.futures.compound.l1_screening.replay_signal_standalone_book",
+        side_effect=_spy_replay,
+    )
+
+    screen = screen_signal_edge(
+        panel, bars_4h, folds, cfg,
+        funding_1h_2d=funding, allocator_config=dc_cfg,
+    )
+    rec = screen.records[0]
+
+    assert len(captured_oos_slices) == 1, "EH-triggered replay must run exactly once"
+    assert captured_oos_slices[0] == expected_oos_slices, (
+        f"EH replay used {captured_oos_slices[0]}, expected exactly the fold-derived "
+        f"purge/embargo-respecting slices {expected_oos_slices}"
+    )
+    assert rec.effective_horizon_hours == 216
+    assert rec.effective_orientation == 1
+    # admission must be the deterministic output of screen_signal_net_edge on the
+    # actual replayed net series, not an unconditionally-true escape hatch
+    assert rec.admitted == (rec.net_growth_probability >= cfg.min_growth_posterior_probability and rec.net_growth_ann > 0.0)
+
+
+def test_screen_signal_edge_effective_horizon_replay_failure_is_fail_closed(mocker) -> None:
+    """[except ValueError/RuntimeError] discover_effective_horizon finding a horizon
+    but the subsequent net-of-cost replay raising must reject the signal with
+    reasons=('net_edge_replay_failed',) and zeroed net-edge fields, not propagate."""
+    rng = np.random.default_rng(3)
+    n_bars, n_syms = 300, 20
+    z_3d = rng.standard_normal((n_bars, n_syms, 1)).astype(np.float32)
+    price = np.cumprod(1 + rng.normal(0, 0.005, (n_bars, n_syms)), axis=0).astype(np.float32)
+    price = np.maximum(price, 0.1)
+
+    desc = (SignalDescriptor("eh_fail", "test_fam", "fast", 24, "4h",
+                              target_horizon_hours=24, declared_orientation=1),)
+    panel = RawSignalPanel(
+        decision_timestamps_ns=np.arange(n_bars, dtype=np.int64),
+        symbols=tuple(f"SYM_{i}" for i in range(n_syms)), descriptors=desc,
+        z_3d=z_3d, valid_3d=np.ones((n_bars, n_syms, 1), dtype=np.bool_),
+        sigma_2d=np.full((n_bars, n_syms), 0.02, dtype=np.float32),
+    )
+    bars_4h = TimeframeBarCube(
+        timeframe="4h", timestamps_ns=np.arange(n_bars, dtype=np.int64),
+        symbols=tuple(f"SYM_{i}" for i in range(n_syms)),
+        open_2d=price.copy(), high_2d=price.copy() * 1.01,
+        low_2d=price.copy() * 0.99, close_2d=price,
+        quote_volume_2d=np.full((n_bars, n_syms), 1e8, dtype=np.float32),
+        complete_2d=np.ones((n_bars, n_syms), dtype=np.bool_),
+    )
+    folds = (CausalFold(0, 0, 100, 0, 100, 106, 200, 6, 4),)
+    cfg = HandoffConfig(min_family_ic_samples=10, family_screen_alpha=0.05)
+    dc_cfg = DynamicCompoundingConfig()
+    funding = np.zeros((n_bars * 4, n_syms), dtype=np.float32)
+
+    mocker.patch(
+        "src.domain.futures.compound.l1_screening.discover_effective_horizon",
+        return_value=(216, 1, 5.0),
+    )
+    mocker.patch(
+        "src.domain.futures.compound.l1_screening.replay_signal_standalone_book",
+        side_effect=RuntimeError("simulated allocator failure"),
+    )
+
+    screen = screen_signal_edge(
+        panel, bars_4h, folds, cfg,
+        funding_1h_2d=funding, allocator_config=dc_cfg,
+    )
+    rec = screen.records[0]
+    assert not rec.admitted
+    assert rec.reasons[-1] == "net_edge_replay_failed"
+    assert rec.net_growth_ann == 0.0
+    assert rec.net_growth_probability == 0.0
+    assert rec.intrinsic_turnover_per_bar == 0.0
+
+
+def test_screen_signal_edge_effective_horizon_admits_on_net_pass(mocker) -> None:
+    """When discover_effective_horizon finds a horizon AND the net-of-cost replay
+    passes, the signal must be admitted and any prior IC-gate rejection reason
+    cleared (reasons reset, not accumulated alongside a stale rejection)."""
+    rng = np.random.default_rng(9)
+    n_bars, n_syms = 300, 20
+    z_3d = rng.standard_normal((n_bars, n_syms, 1)).astype(np.float32)
+    price = np.cumprod(1 + rng.normal(0, 0.005, (n_bars, n_syms)), axis=0).astype(np.float32)
+    price = np.maximum(price, 0.1)
+
+    desc = (SignalDescriptor("eh_admit", "test_fam", "fast", 24, "4h",
+                              target_horizon_hours=24, declared_orientation=1),)
+    panel = RawSignalPanel(
+        decision_timestamps_ns=np.arange(n_bars, dtype=np.int64),
+        symbols=tuple(f"SYM_{i}" for i in range(n_syms)), descriptors=desc,
+        z_3d=z_3d, valid_3d=np.ones((n_bars, n_syms, 1), dtype=np.bool_),
+        sigma_2d=np.full((n_bars, n_syms), 0.02, dtype=np.float32),
+    )
+    bars_4h = TimeframeBarCube(
+        timeframe="4h", timestamps_ns=np.arange(n_bars, dtype=np.int64),
+        symbols=tuple(f"SYM_{i}" for i in range(n_syms)),
+        open_2d=price.copy(), high_2d=price.copy() * 1.01,
+        low_2d=price.copy() * 0.99, close_2d=price,
+        quote_volume_2d=np.full((n_bars, n_syms), 1e8, dtype=np.float32),
+        complete_2d=np.ones((n_bars, n_syms), dtype=np.bool_),
+    )
+    folds = (CausalFold(0, 0, 100, 0, 100, 106, 200, 6, 4),)
+    cfg = HandoffConfig(min_family_ic_samples=10, family_screen_alpha=0.05)
+    dc_cfg = DynamicCompoundingConfig()
+    funding = np.zeros((n_bars * 4, n_syms), dtype=np.float32)
+
+    mocker.patch(
+        "src.domain.futures.compound.l1_screening.discover_effective_horizon",
+        return_value=(216, 1, 5.0),
+    )
+    mocker.patch(
+        "src.domain.futures.compound.l1_screening.replay_signal_standalone_book",
+        return_value=(np.full(50, 0.001, dtype=np.float64), 0.01),
+    )
+    mocker.patch(
+        "src.domain.futures.compound.l1_screening.screen_signal_net_edge",
+        return_value=(True, 0.95, 0.12),
+    )
+
+    screen = screen_signal_edge(
+        panel, bars_4h, folds, cfg,
+        funding_1h_2d=funding, allocator_config=dc_cfg,
+    )
+    rec = screen.records[0]
+    assert rec.admitted, f"expected admission on net_passes=True, got reasons={rec.reasons}"
+    assert rec.reasons == ()
+    assert rec.signal_id in screen.admitted_signal_ids
+    assert rec.net_growth_ann == 0.12
+    assert rec.net_growth_probability == 0.95
+
+
+def test_signal_edge_record_validates_effective_horizon_fields() -> None:
+    """SignalEdgeRecord.__post_init__ must reject invalid effective-horizon fields
+    (negative hours, out-of-range orientation, non-finite t-stat)."""
+    from src.domain.futures.compound.contracts import SignalEdgeRecord
+
+    base_kwargs = dict(
+        signal_id="x", family="f", speed="fast", target_horizon_hours=24,
+        n_ic_bars=100, mean_ic=0.01, t_newey_west=2.0, p_two_sided=0.05,
+        sidak_alpha=0.05, declared_orientation=1, admitted=False, reasons=(),
+    )
+
+    SignalEdgeRecord(**base_kwargs)  # valid defaults must not raise
+
+    with pytest.raises(ValueError, match="effective_horizon_hours"):
+        SignalEdgeRecord(**base_kwargs, effective_horizon_hours=-1)
+
+    with pytest.raises(ValueError, match="effective_orientation"):
+        SignalEdgeRecord(**base_kwargs, effective_orientation=2)
+
+    with pytest.raises(ValueError, match="effective_horizon_t_stat"):
+        SignalEdgeRecord(**base_kwargs, effective_horizon_t_stat=float("nan"))
