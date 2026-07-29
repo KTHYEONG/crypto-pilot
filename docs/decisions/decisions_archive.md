@@ -2,6 +2,11 @@
 
 This file holds historical architecture decision records (ADRs) that have been pruned from the active window.
 
+## [2026-07-27] [TASK_L2_COMPOUNDING_LEAP] [ADR_20260727_L2_COMPOUNDING_LEAP]
+- **Context/Why:** 20260727_013707 FAIL이 여전히 1일 라벨 오정렬(A-4 미해소)로 오염됨을 원시 레이크 대조(ρ=0.846 vs -0.003)로 확정. 정렬 정정 후 causal β=0.643으로 시장중립이 아닌 베타 롱임이 드러났고, β-헤지 잔차가 성장·변동성·regime 정상성 전부에서 우월함을 실측(scratch/verify_l2_growth_leap.py)
+- **Resolution/What:** validation.py(라벨정렬정정·fail-closed 정렬불변식·beta-adj excess), benchmark.py(causal_beta_series/assert_contemporaneous_alignment 신규), allocator.py(apply_beta_hedge_overlay/derive_mdd_parity_scale 신규), config.py(beta lookback/clip, min_oos_days 365->500 상향, mdd_budget), engine.py(2-pass 무헤지/헤지 시뮬 배선), run_windows.py(l1_days 365->180, l2_days 365->547). /check PASS(Cov 85%, 임계값 완화 0건)
+- **Impact:** 실전 CLI 재실행 결과 target_weights 전량 0(NO_EVIDENCE) - L1 exit-aware handoff admitted=False sleeves=274(전멸). 원인=L1 윈도우 축소(365->180d)가 기존 admission 게이트 min_effective_days=180.0과 충돌, fold분할 후 유효일수 미달로 전신호 탈락. [LIMIT-07]이 예견한 위험이 감소 아닌 전멸로 실현. P0/P1/P2(정렬·베타·헤지)는 유효, P3(창 재분할)는 admission 게이트 재설계 결정 대기로 보류
+
 ## [2026-07-27] [TASK_L2_GATE_HONESTY_AND_RISK_BUDGET] [ADR_20260727_L2_GATE_HONESTY_AND_RISK_BUDGET]
 - **Context/Why:** L2 PASS(CAGR 31.05%, DSR 1.000000)가 얇은 마진이 아니라 결함(DSR 주기불일치·확률게이트 중복·블록길이 오지정·벤치마크 일자오정렬·실행북 동결·funding 부호역전·종목별 비용무력화·L3 holdout이 PROMOTE를 못막음·CAGR 연율화 버그) 9건의 산물임을 실측(재구성+E1~E8 다중가설)으로 확인
 - **Resolution/What:** bootstrap.py 신규(Politis-White 블록길이·circular bootstrap·SPA 3대조군). multiplicity.py(DSR 주기정합), validation.py(일자정렬·복리연율화·SPA 편입·frozen control), allocator.py(support 재적용·심볼별 band·carry 부호·폐루프 vol), dense_simulator.py(종목별 비용·slippage/impact), engine.py(frozen control 배선·L3 prior 일봉화). 실전 실행에서 L3 prior 가드 결함(스펙 계약 자체의 오류로 모든 정상실행 크래시) 추가 발견, 가드 제거 및 테스트 교체로 수정
