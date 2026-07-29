@@ -653,6 +653,9 @@ class SignalEdgeRecord:
     net_growth_ann: float = 0.0
     net_growth_probability: float = 0.0
     edge_per_turnover_bps: float = 0.0
+    effective_horizon_hours: int = 0
+    effective_orientation: int = 0
+    effective_horizon_t_stat: float = 0.0
 
     def __post_init__(self) -> None:
         if not self.signal_id:
@@ -662,6 +665,18 @@ class SignalEdgeRecord:
         if self.declared_orientation not in (-1, 1):
             raise ValueError(
                 f"declared_orientation must be -1 or 1, got {self.declared_orientation}"
+            )
+        if self.effective_horizon_hours < 0:
+            raise ValueError(
+                f"effective_horizon_hours must be >= 0, got {self.effective_horizon_hours}"
+            )
+        if self.effective_orientation not in (-1, 0, 1):
+            raise ValueError(
+                f"effective_orientation must be -1, 0, or 1, got {self.effective_orientation}"
+            )
+        if not np.isfinite(self.effective_horizon_t_stat):
+            raise ValueError(
+                f"effective_horizon_t_stat must be finite, got {self.effective_horizon_t_stat}"
             )
 
 

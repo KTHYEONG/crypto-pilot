@@ -2,6 +2,16 @@
 
 This file holds historical architecture decision records (ADRs) that have been pruned from the active window.
 
+## [2026-07-27] [TASK_PIPELINE_OPT] [ADR_20260727_PIPELINE_OPT]
+- **Context/Why:** Severe latency bottleneck in production pipeline: 258.4s runtime, 1,029MB RSS, 3.3M heap allocations in MAD kernel, nested thread contention
+- **Resolution/What:** Implemented zero-allocation Numba MAD kernel (buf/dev_buf per-symbol, in-place sort), single-level TPE dispatcher (4 workers + Numba 1 thread), parallel PyArrow grid materializer, vectorized 4h funding sum
+- **Impact:** MAD kernel 5.67x vs Numpy, dense sim 13.38x, RSS 363MB (2.84x reduction), bit-exact identity maintained
+
+## [2026-07-27] [TASK_20260727_PRODUCTION_PIPELINE_DEEP_OPTIMIZATION] [ADR_20260727_20260727_PRODUCTION_PIPELINE_DEEP_OPTIMIZATION]
+- **Context/Why:** Pipeline latency of 258s (4.3min) caused by Signal Bank MAD kernel dynamic heap allocations, nested thread pool lock thrashing, and sequential Parquet feature grid materialization
+- **Resolution/What:** Profiled 6 pipeline stages, identified exact 227s Signal Bank and 23s Market Cube bottlenecks, drafted zero-allocation MAD kernel spec, parallel grid loader, and verified with lean_check
+- **Impact:** Paves way for pipeline acceleration from 258s to <15s with 0.000000000000 math discrepancy and <50MB tensor memory
+
 ## [2026-07-27] [TASK_PRODUCTION_PIPELINE_ULTRA_OPTIMIZATION] [ADR_20260727_PRODUCTION_PIPELINE_ULTRA_OPTIMIZATION]
 - **Context/Why:** 프로덕션 파이프라인(opt_main_futures.py) 연산 병목 사멸 및 OOM 차단/비트단위 수치 동일성 보장
 - **Resolution/What:** l1_sleeves.py 2D Matrix Vectorized Bootstrap 적용, signal_bank.py ProcessPool 알파신호 병렬화, test_production_pipeline_ultra_optimization.py 검증 시나리오 구축
