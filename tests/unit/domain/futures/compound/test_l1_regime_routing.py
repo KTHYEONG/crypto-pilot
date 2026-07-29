@@ -1065,25 +1065,25 @@ def test_router_config_has_no_dead_parameters() -> None:
     assert not dead, f"dead config parameters remain: {dead}"
 
 
-def test_score_expert_returns_carries_prev_pos() -> None:
+def test_score_expert_returns_uses_injected_cost_verbatim() -> None:
     from src.domain.futures.compound.l1_regime_routing import score_expert_returns
 
     t, n = 20, 3
     weights = np.zeros((t, n), dtype=np.float64)
     weights[5:15] = 0.05
     log_ret = np.random.default_rng(42).normal(0, 0.01, (t, n)).astype(np.float64)
-    cost_bps_4h = np.full((t, n), 8.0, dtype=np.float32)
+    expert_cost_1d = np.full(10, -0.000032, dtype=np.float64)
     funding_4h = np.zeros((t, n), dtype=np.float64)
 
     gross, cost, funding, net = score_expert_returns(
-        weights, log_ret, cost_bps_4h, funding_4h, 5, 15,
+        weights, log_ret, expert_cost_1d, funding_4h, 5, 15,
     )
     assert len(gross) == 10
     assert len(cost) == 10
     assert len(funding) == 10
     assert len(net) == 10
-    assert cost[0] < 0.0, "first bar should have negative cost due to turnover from 0"
-    assert cost[4] == 0.0, "later bar with no turnover should have zero cost"
+    np.testing.assert_array_equal(cost, expert_cost_1d)
+    assert gross[0] != 0.0
 
 
 def test_engine_route_produces_evaluation_window_support() -> None:
@@ -1273,3 +1273,104 @@ def test_evaluate_ensemble_admission_cost_stress_blocks_despite_significance() -
     assert prob >= 0.51, "growth must be significant despite the cost stress test failing"
     assert cost_val <= 0.0
     assert not admitted
+
+
+# ── P0: allocation identity integration test ────────────────────────────────
+
+
+def test_prequential_route_charges_only_deployed_book_cost() -> None:
+    """Scenario 9: build_fold_expert_books returns 2-tuple + allocate_book_turnover_cost
+    real cost identity. Users the spec's shared fixture (seed=7, 8 experts, 60x5)."""
+    rng = np.random.default_rng(7)
+    T, N, n_exp = 60, 5, 8
+    book = np.cumsum(rng.normal(0, 0.01, (T, N)), axis=0)
+    expert_w = rng.normal(0, 1, (n_exp, T, N))
+    expert_w *= book / np.maximum(np.abs(expert_w).sum(0), 1e-12)
+    cost_bps_4h = np.full((T, N), 8.0, dtype=np.float32)
+    oos_start, oos_end = 10, 50
+
+    from src.domain.futures.compound.l1_regime_routing import allocate_book_turnover_cost
+
+    expert_cost = allocate_book_turnover_cost(
+        book.astype(np.float64), expert_w.astype(np.float64),
+        cost_bps_4h, oos_start, oos_end,
+    )
+    assert expert_cost.shape == (n_exp, oos_end - oos_start)
+    assert np.all(expert_cost <= 0.0)
+    for k, t in enumerate(range(oos_start, oos_end)):
+        prev = np.zeros(N) if t == oos_start else book[t - 1]
+        d_t = np.abs(book[t] - prev)
+        book_c = -float(np.dot(cost_bps_4h[t], d_t) * 1e-4)
+        summed = float(np.sum(expert_cost[:, k]))
+        assert abs(summed - book_c) < 1e-12 * max(1.0, abs(book_c)), (
+            f"t={t}: cost identity violated: {summed} != {book_c}"
+        )
+
+
+# ── P0: allocate_book_turnover_cost (docs/specs/l1_book_cost_accounting_and_net_edge_screen.md) ──
+
+
+def test_allocate_book_turnover_cost_happy_path() -> None:
+    """Scenario 1: 2 experts, known book → hand-calculated cost matches, all elements <= 0."""
+    from src.domain.futures.compound.l1_regime_routing import allocate_book_turnover_cost
+
+    T, N, n_exp = 10, 3, 2
+    oos_start, oos_end = 2, 8
+    n_oos = oos_end - oos_start
+    rng = np.random.default_rng(42)
+    book = np.cumsum(rng.normal(0, 0.01, (T, N)), axis=0).astype(np.float64)
+    expert_w = np.zeros((n_exp, T, N), dtype=np.float64)
+    expert_w[0, :, 0] = 0.3
+    expert_w[0, :, 1] = 0.2
+    expert_w[1, :, 1] = 0.1
+    expert_w[1, :, 2] = 0.4
+    cost_bps = np.full((T, N), 8.0, dtype=np.float32)
+
+    result = allocate_book_turnover_cost(book, expert_w, cost_bps, oos_start, oos_end)
+    assert result.shape == (n_exp, n_oos)
+    assert np.all(result <= 0.0)
+
+
+def test_allocate_book_turnover_cost_sums_to_book_cost_identity() -> None:
+    """[RULE-P0-4] Σ_e cost_e == book_cost for random z (seed=7) with 8 experts."""
+    from src.domain.futures.compound.l1_regime_routing import allocate_book_turnover_cost
+
+    rng = np.random.default_rng(7)
+    T, N, n_exp = 60, 5, 8
+    oos_start, oos_end = 10, 50
+    book = np.cumsum(rng.normal(0, 0.01, (T, N)), axis=0)
+    expert_w = rng.normal(0, 1, (n_exp, T, N))
+    expert_w *= book / np.maximum(np.abs(expert_w).sum(0), 1e-12)
+    cost_bps_4h = np.full((T, N), 8.0, dtype=np.float32)
+
+    result = allocate_book_turnover_cost(book, expert_w, cost_bps_4h, oos_start, oos_end)
+
+    for k, t in enumerate(range(oos_start, oos_end)):
+        prev = np.zeros(N) if t == oos_start else book[t - 1]
+        d_t = np.abs(book[t] - prev)
+        book_c = -float(np.dot(cost_bps_4h[t], d_t) * 1e-4)
+        allocated_sum = float(np.sum(result[:, k]))
+        tol = 1e-12 * max(1.0, abs(book_c))
+        assert abs(allocated_sum - book_c) < tol, (
+            f"t={t}: Σ_e cost_e={allocated_sum} != book_cost={book_c}"
+        )
+
+
+def test_allocate_book_turnover_cost_empty_and_static_book_edges() -> None:
+    """[LIMIT-01] n_experts==0 → shape (0, n_oos); [LIMIT-02] static book → all zeros."""
+    from src.domain.futures.compound.l1_regime_routing import allocate_book_turnover_cost
+
+    T, N = 10, 3
+    oos_start, oos_end = 2, 8
+    n_oos = oos_end - oos_start
+    book = np.zeros((T, N), dtype=np.float64)
+    expert_w = np.zeros((0, T, N), dtype=np.float64)
+    cost_bps = np.full((T, N), 8.0, dtype=np.float32)
+
+    result = allocate_book_turnover_cost(book, expert_w, cost_bps, oos_start, oos_end)
+    assert result.shape == (0, n_oos)
+
+    expert_w_2 = np.ones((3, T, N), dtype=np.float64) * 0.1
+    result2 = allocate_book_turnover_cost(book, expert_w_2, cost_bps, oos_start, oos_end)
+    assert result2.shape == (3, n_oos)
+    assert np.all(result2 == 0.0)

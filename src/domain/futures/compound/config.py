@@ -381,6 +381,7 @@ class HandoffConfig:
     family_screen_alpha: float = 0.05
     min_family_ic_samples: int = 30
     min_growth_posterior_probability: float = 0.90
+    screen_cost_bps: float = 8.0
 
     def __post_init__(self) -> None:
         assert 0 < self.max_pairwise_correlation <= 1
@@ -397,6 +398,7 @@ class HandoffConfig:
         assert 0 < self.family_screen_alpha <= 1
         assert self.min_family_ic_samples >= 1
         assert 0.5 < self.min_growth_posterior_probability < 1.0
+        assert self.screen_cost_bps >= 0
 
 
 @dataclass(slots=True, frozen=True)
