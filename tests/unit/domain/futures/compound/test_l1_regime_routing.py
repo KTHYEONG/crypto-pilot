@@ -967,7 +967,8 @@ def test_walk_forward_carry_covers_evaluation_window() -> None:
     deploy_start = 80
     mu = np.zeros((n, n_syms), dtype=np.float64)
 
-    carried = apply_walk_forward_carry(mu, panel, contributions, route_scales, regime_code, deploy_start)
+    regime_overlay = {1: 1.0, 2: 1.0}
+    carried = apply_walk_forward_carry(mu, panel, contributions, route_scales, regime_overlay, regime_code, deploy_start)
     assert carried == n - deploy_start
     assert np.any(mu[deploy_start:] != 0)
     assert np.all(mu[:deploy_start] == 0)
@@ -993,7 +994,8 @@ def test_walk_forward_carry_is_causal() -> None:
     regime_code = np.ones(n, dtype=np.int8)
     mu = np.zeros((n, n_syms), dtype=np.float64)
     deploy_start = 40
-    carry_bar_count = apply_walk_forward_carry(mu, panel, contributions, route_scales, regime_code, deploy_start)
+    regime_overlay = {1: 1.0}
+    carry_bar_count = apply_walk_forward_carry(mu, panel, contributions, route_scales, regime_overlay, regime_code, deploy_start)
     assert carry_bar_count > 0
     assert np.all(mu[:deploy_start] == 0), "carry must not affect pre-deploy bars"
 
@@ -1016,7 +1018,8 @@ def test_carry_fail_closed_on_empty_scales() -> None:
     )
     regime_code = np.ones(n, dtype=np.int8)
     mu = np.zeros((n, n_syms), dtype=np.float64)
-    carried = apply_walk_forward_carry(mu, panel, contributions, {}, regime_code, 40)
+    regime_overlay = {1: 1.0}
+    carried = apply_walk_forward_carry(mu, panel, contributions, {}, regime_overlay, regime_code, 40)
     assert carried == 0
     assert np.all(mu == 0)
 
