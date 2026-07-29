@@ -14,6 +14,8 @@ from src.domain.futures.compound.contracts import (
     FamilyEdgeRecord,
     FamilyEdgeScreen,
     RawSignalPanel,
+    SignalEdgeRecord,
+    SignalEdgeScreen,
     TimeframeBarCube,
 )
 from src.domain.futures.compound.l1_diagnostics import L1AdmissionRecorder
@@ -260,4 +262,135 @@ def screen_family_edge(
         n_effective_independent=n_eff,
         admitted_families=tuple(admitted_families_list),
         admitted_signal_ids=tuple(admitted_signal_ids_list),
+    )
+
+
+def screen_signal_edge(
+    panel: RawSignalPanel,
+    bars_4h: TimeframeBarCube,
+    folds: tuple[CausalFold, ...],
+    config: HandoffConfig,
+) -> SignalEdgeScreen:
+    oos_slices: list[slice] = []
+    for fold in folds:
+        oos_start = fold.oos_start
+        oos_end = fold.oos_end_exclusive
+        if oos_end - oos_start > 0:
+            oos_slices.append(slice(oos_start, oos_end))
+
+    if not oos_slices:
+        return SignalEdgeScreen(
+            records=(),
+            n_effective_independent=1.0,
+            admitted_signal_ids=(),
+            admitted_families=(),
+        )
+
+    n_bars = panel.z_3d.shape[0]
+    n_syms = panel.z_3d.shape[1]
+    close_px = bars_4h.close_2d.astype(np.float64)
+
+    signal_ic_list: list[NDArray[np.float64]] = []
+    for desc_idx, desc in enumerate(panel.descriptors):
+        horizon_bars = desc.target_horizon_hours // 4
+        z_2d = panel.z_3d[:, :, desc_idx].astype(np.float32)
+        fwd = np.full((n_bars, n_syms), np.nan, dtype=np.float64)
+        for t in range(n_bars - horizon_bars):
+            prev_px = close_px[t]
+            fut_px = close_px[t + horizon_bars]
+            mask = (prev_px > 0) & np.isfinite(prev_px) & (fut_px > 0) & np.isfinite(fut_px)
+            fwd[t, mask] = np.log(fut_px[mask] / prev_px[mask])
+        ic_1d = compute_cross_sectional_ic(
+            z_2d, fwd, tuple(oos_slices), min_cross_section=8,
+        )
+        signal_ic_list.append(ic_1d)
+
+    ic_matrix = np.column_stack(signal_ic_list) if signal_ic_list else np.zeros((n_bars, 0), dtype=np.float64)
+
+    n_eff = estimate_effective_independence(ic_matrix)
+
+    alpha = config.family_screen_alpha
+    n_signals = len(panel.descriptors)
+    sidak_alpha = 1.0 - (1.0 - alpha) ** (1.0 / max(n_eff, 1.0)) if n_eff > 0 else alpha / max(n_signals, 1)
+
+    recorder = L1AdmissionRecorder()
+    records: list[SignalEdgeRecord] = []
+    admitted_signal_ids_list: list[str] = []
+    admitted_families_set: set[str] = set()
+
+    for desc_idx, desc in enumerate(panel.descriptors):
+        signal_id = desc.signal_id
+        family = desc.family
+        speed = desc.speed
+        target_horizon_hours = desc.target_horizon_hours
+        declared_orientation = desc.declared_orientation
+        max_lag = target_horizon_hours // 4
+
+        ic_1d = signal_ic_list[desc_idx]
+        valid_ic = ic_1d[np.isfinite(ic_1d)]
+        n_ic_bars = int(valid_ic.shape[0])
+
+        if n_ic_bars < config.min_family_ic_samples:
+            records.append(SignalEdgeRecord(
+                signal_id=signal_id, family=family, speed=speed,
+                target_horizon_hours=target_horizon_hours,
+                n_ic_bars=n_ic_bars, mean_ic=0.0, t_newey_west=0.0,
+                p_two_sided=1.0, sidak_alpha=float(sidak_alpha),
+                declared_orientation=declared_orientation,
+                admitted=False, reasons=("insufficient_ic_samples",),
+            ))
+            if recorder.enabled:
+                recorder.record_family_screen(
+                    family=signal_id, n_signals=1, n_ic_bars=n_ic_bars,
+                    mean_ic=0.0, t_newey_west=0.0, sidak_alpha=float(sidak_alpha),
+                    declared_orientation=declared_orientation, admitted=False,
+                    reasons=("insufficient_ic_samples",),
+                )
+            continue
+
+        mean_ic = float(np.mean(valid_ic))
+        t_stat, _ = newey_west_tstat(valid_ic, max(1, max_lag))
+        p_two_sided = 2.0 * norm.sf(abs(t_stat))
+
+        reasons_list: list[str] = []
+
+        if p_two_sided >= sidak_alpha:
+            final_admitted = False
+            reasons_list.append("not_significant_after_sidak")
+        elif t_stat * declared_orientation < 0:
+            final_admitted = False
+            reasons_list.append("declared_orientation_contradicted")
+        else:
+            final_admitted = True
+
+        records.append(SignalEdgeRecord(
+            signal_id=signal_id, family=family, speed=speed,
+            target_horizon_hours=target_horizon_hours,
+            n_ic_bars=n_ic_bars, mean_ic=mean_ic,
+            t_newey_west=t_stat, p_two_sided=p_two_sided,
+            sidak_alpha=float(sidak_alpha),
+            declared_orientation=declared_orientation,
+            admitted=final_admitted,
+            reasons=tuple(reasons_list),
+        ))
+
+        if recorder.enabled:
+            recorder.record_family_screen(
+                family=signal_id, n_signals=1, n_ic_bars=n_ic_bars,
+                mean_ic=mean_ic, t_newey_west=t_stat,
+                sidak_alpha=float(sidak_alpha),
+                declared_orientation=declared_orientation,
+                admitted=final_admitted,
+                reasons=tuple(reasons_list),
+            )
+
+        if final_admitted:
+            admitted_signal_ids_list.append(signal_id)
+            admitted_families_set.add(family)
+
+    return SignalEdgeScreen(
+        records=tuple(records),
+        n_effective_independent=n_eff,
+        admitted_signal_ids=tuple(admitted_signal_ids_list),
+        admitted_families=tuple(sorted(admitted_families_set)),
     )
