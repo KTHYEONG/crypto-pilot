@@ -359,6 +359,66 @@ def screen_signal_net_edge(
     return passes, prob_positive, ann_net
 
 
+def discover_effective_horizon(
+    weights_2d: NDArray[np.float64],
+    bars_4h: TimeframeBarCube,
+    oos_slices: tuple[slice, ...],
+    search_orientation: int,
+    candidate_horizons_hours: tuple[int, ...] = (24, 48, 96, 144, 216, 432, 648),
+    family_screen_alpha: float = 0.05,
+) -> tuple[int, int, float]:
+    """Returns (effective_horizon_hours, effective_orientation, t_stat).
+    (0, 0, 0.0) when no candidate clears the Sidak-corrected threshold.
+
+    [RULE-EH-3] Uses weights_2d (smoothed distribution book, not raw z).
+    [RULE-EH-4] Sidak correction across candidate_horizons_hours.
+    [LIMIT-03] All-zero weights_2d -> (0,0,0.0).
+    """
+    if not np.any(np.isfinite(weights_2d)):
+        return (0, 0, 0.0)
+    finite_weights = weights_2d[np.isfinite(weights_2d)]
+    if finite_weights.shape[0] == 0 or float(np.max(np.abs(finite_weights))) < 1e-12:
+        return (0, 0, 0.0)
+
+    n_horizons = len(candidate_horizons_hours)
+    sidak_alpha_eh = 1.0 - (1.0 - family_screen_alpha) ** (1.0 / max(n_horizons, 1))
+
+    n_bars, n_syms = weights_2d.shape
+    close_px = bars_4h.close_2d.astype(np.float64)
+
+    best_horizon = 0
+    best_t_stat = 0.0
+    best_orientation = 0
+
+    for horizon_hours in candidate_horizons_hours:
+        horizon_bars = horizon_hours // 4
+        if horizon_bars < 1 or horizon_bars >= n_bars:
+            continue
+        fwd = np.full((n_bars, n_syms), np.nan, dtype=np.float64)
+        for t in range(n_bars - horizon_bars):
+            prev_px = close_px[t]
+            fut_px = close_px[t + horizon_bars]
+            mask = (prev_px > 0) & np.isfinite(prev_px) & (fut_px > 0) & np.isfinite(fut_px)
+            fwd[t, mask] = np.log(fut_px[mask] / prev_px[mask])
+
+        ic_1d = compute_cross_sectional_ic(
+            weights_2d.astype(np.float32), fwd, oos_slices, min_cross_section=8,
+        )
+        valid_ic = ic_1d[np.isfinite(ic_1d)]
+        if valid_ic.shape[0] < 8:
+            continue
+
+        t_stat, _ = newey_west_tstat(valid_ic, max(1, horizon_bars))
+        p_val = 2.0 * norm.sf(abs(t_stat))
+
+        if t_stat * search_orientation > 0 and p_val < sidak_alpha_eh and (best_horizon == 0 or horizon_hours < best_horizon):
+            best_horizon = horizon_hours
+            best_t_stat = t_stat
+            best_orientation = search_orientation
+
+    return (best_horizon, best_orientation, best_t_stat)
+
+
 def screen_signal_edge(
     panel: RawSignalPanel,
     bars_4h: TimeframeBarCube,
@@ -461,6 +521,10 @@ def screen_signal_edge(
             final_admitted = True
 
         # P1: 4th gate — net edge screen (C3 replay)
+        eh_hours = 0
+        eh_orientation = 0
+        eh_t_stat_val = 0.0
+
         if final_admitted:
             try:
                 z_2d_signal = panel.z_3d[:, :, desc_idx].astype(np.float32)
@@ -484,6 +548,66 @@ def screen_signal_edge(
             net_ann = 0.0
             turnover = 0.0
 
+            # P5: effective horizon search for eligible IC-failing signals
+            if reasons_list and reasons_list[0] in (
+                "not_significant_after_sidak", "declared_orientation_contradicted",
+            ):
+                search_orientation = (
+                    declared_orientation
+                    if reasons_list[0] == "not_significant_after_sidak"
+                    else -declared_orientation
+                )
+                try:
+                    z_2d_signal = panel.z_3d[:, :, desc_idx].astype(np.float32)
+                    mu_2d = z_2d_signal.astype(np.float64) * search_orientation
+                    mini_panel = CalibratedForecastPanel(
+                        decision_timestamps_ns=panel.decision_timestamps_ns,
+                        symbols=panel.symbols,
+                        mu_2d=mu_2d.astype(np.float32),
+                        se_2d=np.full((n_bars, n_syms), np.nan, dtype=np.float32),
+                        family_mu_3d=np.zeros((n_bars, n_syms, 1), dtype=np.float32),
+                        family_ids=("standalone",),
+                        admitted_signal_ids=("standalone",),
+                        fold_manifest_hash="",
+                    )
+                    weights_2d = compute_dynamic_compounding_path(
+                        forecast=mini_panel,
+                        sigma_2d=panel.sigma_2d,
+                        funding_rates_1h_2d=funding_1h_2d,
+                        config=allocator_config,
+                        close_2d=bars_4h.close_2d,
+                        cost_bps=config.screen_cost_bps,
+                    )
+                    eh_hours, eh_orientation, eh_t_stat_val = discover_effective_horizon(
+                        weights_2d, bars_4h, tuple(oos_slices),
+                        search_orientation,
+                    )
+                    if eh_hours > 0:
+                        net_1d_eh, turnover_eh = replay_signal_standalone_book(
+                            z_2d_signal, panel, bars_4h, funding_1h_2d,
+                            tuple(oos_slices), allocator_config,
+                            config.screen_cost_bps,
+                            declared_orientation=eh_orientation,
+                        )
+                        net_passes, net_prob, net_ann = screen_signal_net_edge(
+                            net_1d_eh, config,
+                        )
+                        if net_passes:
+                            final_admitted = True
+                            reasons_list = []
+                        else:
+                            reasons_list.append(
+                                "net_edge_not_significant_after_cost",
+                            )
+                        turnover = turnover_eh
+                    else:
+                        reasons_list.append("no_effective_horizon_found")
+                except (ValueError, RuntimeError):
+                    reasons_list.append("net_edge_replay_failed")
+                    net_prob = 0.0
+                    net_ann = 0.0
+                    turnover = 0.0
+
         edge_per_turn = (net_ann / max(turnover * _BARS_PER_YEAR_4H_SCREEN, 1e-12)) * 1e4 if turnover > 0 else 0.0
 
         records.append(SignalEdgeRecord(
@@ -499,6 +623,9 @@ def screen_signal_edge(
             net_growth_ann=net_ann,
             net_growth_probability=net_prob,
             edge_per_turnover_bps=edge_per_turn,
+            effective_horizon_hours=eh_hours,
+            effective_orientation=eh_orientation,
+            effective_horizon_t_stat=eh_t_stat_val,
         ))
 
         if recorder.enabled:
@@ -513,6 +640,9 @@ def screen_signal_edge(
                 net_growth_ann=net_ann,
                 net_growth_probability=net_prob,
                 edge_per_turnover_bps=edge_per_turn,
+                effective_horizon_hours=eh_hours,
+                effective_orientation=eh_orientation,
+                effective_horizon_t_stat=eh_t_stat_val,
             )
 
         if final_admitted:
