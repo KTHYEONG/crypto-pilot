@@ -371,6 +371,7 @@ class L1LegConfig:
     cost_safety_margin: float = 1.5
     min_positive_fold_ratio: float = 0.50
     max_leg_weight: float = 0.50
+    max_name_weight: float = 0.10
     warmup_folds: int = 3
     min_cross_section: int = 10
     bars_per_year: float = 2190.0
@@ -387,6 +388,7 @@ class L1LegConfig:
         assert self.cost_safety_margin >= 1.0
         assert 0 < self.min_positive_fold_ratio <= 1
         assert 0 < self.max_leg_weight <= 1
+        assert 0 < self.max_name_weight <= 1
         assert self.warmup_folds >= 0
         assert self.min_cross_section > 0
         assert self.bars_per_year > 0
