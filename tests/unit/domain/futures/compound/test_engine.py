@@ -1482,3 +1482,18 @@ class TestEngineWindowIntegration:
         assert l1_prior is not None, "l1_prior_returns_1d should not be None"
         assert len(l1_prior) > 0, "l1_prior_returns_1d should have data"
 
+
+class TestCciQuarantineWiring:
+    def test_engine_uses_registry_without_member_autoselection(self) -> None:
+        import ast
+        import inspect
+        from src.domain.futures.compound import engine
+        source = inspect.getsource(engine)
+        tree = ast.parse(source)
+        import_count = 0
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Call) and getattr(node.func, "id", None) == "build_concept_registry":
+                import_count += 1
+        assert import_count == 1
+        assert "scratch" not in source
+
