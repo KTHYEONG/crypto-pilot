@@ -381,6 +381,10 @@ class L1LegConfig:
     n_bootstrap: int = 2000
     min_growth_posterior_probability: float = 0.90
     stress_cost_multiplier: float = 2.0
+    shrinkage_prior_obs: float = 2000.0
+    leg_prior_lookback_bars: int = 1080
+    handoff_posterior_floor: float = 0.50
+    prior_only_folds: int = 1
 
     def __post_init__(self) -> None:
         for h in self.horizon_band_bars:
@@ -399,6 +403,13 @@ class L1LegConfig:
         assert 0 < self.min_growth_posterior_probability <= 1
         assert self.stress_cost_multiplier >= 1.0
         assert 0 < self.familywise_error_rate < 1, f"familywise_error_rate must be in (0,1), got {self.familywise_error_rate}"
+        assert self.shrinkage_prior_obs > 0, f"shrinkage_prior_obs must be > 0, got {self.shrinkage_prior_obs}"
+        assert self.leg_prior_lookback_bars > 0, f"leg_prior_lookback_bars must be > 0, got {self.leg_prior_lookback_bars}"
+        assert 0 <= self.handoff_posterior_floor < self.min_growth_posterior_probability, (
+            f"handoff_posterior_floor={self.handoff_posterior_floor} must be in "
+            f"[0, {self.min_growth_posterior_probability})"
+        )
+        assert self.prior_only_folds >= 1, f"prior_only_folds must be >= 1, got {self.prior_only_folds}"
 
 
 @dataclass(slots=True, frozen=True)
