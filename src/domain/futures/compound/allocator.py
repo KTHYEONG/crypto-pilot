@@ -732,7 +732,7 @@ def project_terminal_portfolio_caps(
     max_long_leverage: float,
     max_short_leverage: float,
     gross_cap: float,
-    max_iterations: int = 64,
+    max_iterations: int = 256,
     tolerance: float = 1e-12,
 ) -> NDArray[np.float64]:
     if not isinstance(weights_2d, np.ndarray) or weights_2d.ndim != 2:
@@ -835,6 +835,8 @@ def apply_portfolio_risk_overlay(
     close_2d: NDArray[np.float32],
     cost_bps: float,
     config: DynamicCompoundingConfig,
+    *,
+    asset_return_2d: NDArray[np.float64] | None = None,
 ) -> NDArray[np.float64]:
     if not np.all(np.isfinite(weights_2d)):
         raise ValueError("non-finite weights_2d")
@@ -843,29 +845,30 @@ def apply_portfolio_risk_overlay(
     result = weights_2d.copy()
     n_bars = result.shape[0]
 
-    # RULE-08 order, step 1: net-exposure cap first, reusing the existing
-    # per-symbol-adjustment implementation rather than a fresh proportional
-    # scale (which would also shrink gross disproportionately).
+    # RULE-08 order, step 1: net-exposure cap first
     for t in range(n_bars):
         result[t] = apply_net_exposure_cap(result[t], config.max_net_exposure)
 
-    log_ret = np.zeros(n_bars, dtype=np.float64)
-    for t in range(1, n_bars):
-        prev = close_2d[t - 1].astype(np.float64)
-        curr = close_2d[t].astype(np.float64)
-        mask = (prev > 0) & np.isfinite(prev) & (curr > 0) & np.isfinite(curr)
-        with np.errstate(divide="ignore", invalid="ignore"):
-            log_ret[t] = np.nanmean(np.where(mask, np.log(curr / prev), 0.0))
+    if asset_return_2d is not None:
+        book_ret_1d = np.zeros(n_bars, dtype=np.float64)
+        for t in range(1, n_bars):
+            book_ret_1d[t] = float(np.dot(result[t - 1], asset_return_2d[t]))
+        driver_ret = book_ret_1d
+    else:
+        driver_ret = np.zeros(n_bars, dtype=np.float64)
+        for t in range(1, n_bars):
+            prev = close_2d[t - 1].astype(np.float64)
+            curr = close_2d[t].astype(np.float64)
+            mask = (prev > 0) & np.isfinite(prev) & (curr > 0) & np.isfinite(curr)
+            with np.errstate(divide="ignore", invalid="ignore"):
+                driver_ret[t] = np.nanmean(np.where(mask, np.log(curr / prev), 0.0))
 
-    # step 2: realised-vol targeting
+    # step 2: realised-vol targeting on the driver series
     trailing_vol = np.zeros(n_bars, dtype=np.float64)
     vol_lb = config.vol_lookback_bars
     for t in range(n_bars):
         start = max(0, t - vol_lb + 1)
-        window = log_ret[start:t + 1]
-        # ddof=1 on a single-sample window (e.g. bar 0) divides by zero
-        # degrees of freedom and produces NaN, which then corrupts every
-        # downstream weight via `result[t] *= vol_scale[t]`.
+        window = driver_ret[start:t + 1]
         trailing_vol[t] = np.nanstd(window, ddof=1) if window.shape[0] > 1 else 0.0
     trailing_vol = np.maximum(trailing_vol, 1e-6)
     vol_target = config.target_ann_vol / np.sqrt(2190.0)
@@ -874,8 +877,8 @@ def apply_portfolio_risk_overlay(
     for t in range(n_bars):
         result[t] *= vol_scale[t]
 
-    # step 3: drawdown scaling
-    cum_equity = np.cumprod(1.0 + log_ret * vol_scale, axis=0)
+    # step 3: drawdown scaling on the book's own equity
+    cum_equity = np.cumprod(1.0 + driver_ret * vol_scale, axis=0)
     running_max = np.maximum.accumulate(cum_equity)
     drawdown = 1.0 - cum_equity / np.maximum(running_max, 1e-12)
     dd_scale = np.ones(n_bars, dtype=np.float64)
@@ -890,7 +893,7 @@ def apply_portfolio_risk_overlay(
     for t in range(n_bars):
         result[t] *= dd_scale[t]
 
-    # step 4: portfolio leverage caps, reusing the existing helper
+    # step 4: portfolio leverage caps
     for t in range(n_bars):
         result[t] = _apply_portfolio_level_caps(
             result[t], config.max_long_leverage, config.max_short_leverage, config.max_gross_leverage,
