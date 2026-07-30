@@ -220,7 +220,7 @@ class TestBuildConceptRegistry:
         panel = _make_panel(T, S, families=_DEFAULT_REGISTRY_FAMILIES)
         eligible = np.ones((T, S), dtype=np.bool_)
         close = _make_close(T, S)
-        cfg = L1LegConfig(min_cross_section=2, warmup_folds=0)
+        cfg = L1LegConfig(min_cross_section=2, warmup_folds=4)
         registry = build_concept_registry(panel.descriptors, cfg)
         legs = build_leg_books(panel, eligible, close, registry, cfg)
         assert len(legs) == 11
