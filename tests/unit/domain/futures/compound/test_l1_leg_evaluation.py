@@ -67,9 +67,13 @@ class TestEvaluateLegAlpha:
 
         log_path = tmp_path / "l1_admission.jsonl"
         monkeypatch.setenv("L1_DEBUG", "1")
+        def _mock_init(self, path=None):
+            self._enabled = True
+            self._path = log_path
+
         monkeypatch.setattr(
             "src.domain.futures.compound.l1_diagnostics.L1AdmissionRecorder.__init__",
-            lambda self, path=None: None,
+            _mock_init,
         )
         T, S = 50, 3
         rng = np.random.default_rng(1)
