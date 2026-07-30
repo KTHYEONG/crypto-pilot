@@ -54,7 +54,7 @@ def test_update_decisions_json(tmp_path, monkeypatch):
         failure_reason="Failed test",
     )
 
-    tasks_path = tmp_path / "docs" / "decisions" / "tasks.json"
+    tasks_path = tmp_path / "docs" / "decisions" / "task_index.json"
     anti_path = tmp_path / "docs" / "decisions" / "anti_patterns.json"
 
     assert tasks_path.exists()
