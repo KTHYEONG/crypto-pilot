@@ -173,6 +173,12 @@ _SPEED_LADDER_MOMENTUM_SLOW: tuple[tuple[str, int], ...] = (
     ("ultra_slow", 648),
 )
 
+_SPEED_LADDER_INDICATOR: tuple[tuple[str, int], ...] = (
+    ("fast", 24),
+    ("medium", 72),
+    ("slow", 216),
+)
+
 _SPEED_LADDER_6: tuple[tuple[str, int], ...] = (
     ("fast", 24),
     ("medium", 72),
@@ -446,6 +452,153 @@ def _compute_xs_reversal(
     return _compute_xs_rank_signal(close, lb_bars, eligible_2d, sign=-1.0)
 
 
+def _compute_rsi(close: NDArray[np.float32], lb_bars: int) -> NDArray[np.float64]:
+    delta = np.diff(close, axis=0, prepend=close[:1])
+    gain = np.maximum(delta, 0.0).astype(np.float64)
+    loss = np.maximum(-delta, 0.0).astype(np.float64)
+    # _ewm_2d takes a bar-count span (alpha=2/(span+1) internally), not a
+    # pre-computed alpha -- pass lb_bars directly, matching every other
+    # _compute_* function in this file (e.g. _compute_trend_ema).
+    avg_gain = _ewm_2d(gain, lb_bars)
+    avg_loss = _ewm_2d(loss, lb_bars)
+    avg_loss = np.maximum(avg_loss, 1e-12)
+    rs = avg_gain / avg_loss
+    rsi_v = 100.0 - 100.0 / (1.0 + rs)
+    return (rsi_v - 50.0) / 50.0
+
+
+def _compute_cci(high: NDArray[np.float32], low: NDArray[np.float32], close: NDArray[np.float32],
+                 lb_bars: int) -> NDArray[np.float64]:
+    tp = (high.astype(np.float64) + low.astype(np.float64) + close.astype(np.float64)) / 3.0
+    sma_tp = _ewm_2d(tp, lb_bars)
+    # EWM of the absolute deviation instead of an explicit rolling-window
+    # mean: _ewm_2d is defined for every bar from t=0, so this avoids the
+    # mad[t]==0 (then floored to 1e-12) blow-up during warm-up that an
+    # explicit window starting at t=lb_bars-1 would produce.
+    mad = _ewm_2d(np.abs(tp - sma_tp), lb_bars)
+    mad = np.maximum(mad, 1e-12)
+    return (tp - sma_tp) / (0.015 * mad)
+
+
+def _compute_mfi(high: NDArray[np.float32], low: NDArray[np.float32], close: NDArray[np.float32],
+                 quote_volume: NDArray[np.float32], lb_bars: int) -> NDArray[np.float64]:
+    tp = (high.astype(np.float64) + low.astype(np.float64) + close.astype(np.float64)) / 3.0
+    vol = quote_volume.astype(np.float64)
+    raw_flow = tp * vol
+    prev_tp = np.roll(tp, 1, axis=0)
+    prev_tp[0] = tp[0]
+    pos_flow = np.where(tp > prev_tp, raw_flow, 0.0)
+    neg_flow = np.where(tp < prev_tp, raw_flow, 0.0)
+    pos_sum = _ewm_2d(pos_flow, lb_bars)
+    neg_sum = _ewm_2d(neg_flow, lb_bars)
+    neg_sum = np.maximum(neg_sum, 1e-12)
+    mr = pos_sum / neg_sum
+    mfi_v = 100.0 - 100.0 / (1.0 + mr)
+    return (mfi_v - 50.0) / 50.0
+
+
+def _compute_aroon_oscillator(high: NDArray[np.float32], low: NDArray[np.float32],
+                              lb_bars: int) -> NDArray[np.float64]:
+    n_t, n_s = high.shape
+    result = np.zeros((n_t, n_s), dtype=np.float64)
+    for s in range(n_s):
+        for t in range(lb_bars - 1, n_t):
+            window_high = high[t - lb_bars + 1:t + 1, s]
+            window_low = low[t - lb_bars + 1:t + 1, s]
+            hh_idx = int(np.argmax(window_high))
+            ll_idx = int(np.argmin(window_low))
+            aroon_up = (lb_bars - hh_idx) * 100.0 / lb_bars
+            aroon_down = (lb_bars - ll_idx) * 100.0 / lb_bars
+            result[t, s] = (aroon_up - aroon_down) / 100.0
+    return result
+
+
+def _compute_adx_directional(high: NDArray[np.float32], low: NDArray[np.float32],
+                              close: NDArray[np.float32], lb_bars: int) -> NDArray[np.float64]:
+    n_t, n_s = high.shape
+    up_move = np.zeros((n_t, n_s), dtype=np.float64)
+    down_move = np.zeros((n_t, n_s), dtype=np.float64)
+    tr_arr = np.zeros((n_t, n_s), dtype=np.float64)
+    h_f64 = high.astype(np.float64)
+    l_f64 = low.astype(np.float64)
+    c_f64 = close.astype(np.float64)
+    prev_c = np.roll(c_f64, 1, axis=0)
+    prev_c[0] = c_f64[0]
+    for t in range(1, n_t):
+        up_move[t] = np.maximum(0.0, h_f64[t] - h_f64[t - 1])
+        down_move[t] = np.maximum(0.0, l_f64[t - 1] - l_f64[t])
+        tr_arr[t] = np.maximum(
+            h_f64[t] - l_f64[t],
+            np.maximum(np.abs(h_f64[t] - prev_c[t]), np.abs(l_f64[t] - prev_c[t])),
+        )
+    smoothed_up = _ewm_2d(up_move, lb_bars)
+    smoothed_down = _ewm_2d(down_move, lb_bars)
+    smoothed_tr = _ewm_2d(tr_arr, lb_bars)
+    smoothed_tr = np.maximum(smoothed_tr, 1e-12)
+    pdi = 100.0 * smoothed_up / smoothed_tr
+    ndi = 100.0 * smoothed_down / smoothed_tr
+    dx = 100.0 * np.abs(pdi - ndi) / np.maximum(pdi + ndi, 1e-12)
+    adx = _ewm_2d(dx, lb_bars)
+    return (adx - 25.0) / 25.0
+
+
+def _compute_obv_trend(close: NDArray[np.float32], quote_volume: NDArray[np.float32],
+                        lb_bars: int) -> NDArray[np.float64]:
+    delta = np.diff(close, axis=0, prepend=close[:1]).astype(np.float64)
+    vol = quote_volume.astype(np.float64)
+    direction = np.where(delta > 0, 1.0, np.where(delta < 0, -1.0, 0.0))
+    obv = np.cumsum(direction * vol, axis=0)
+    obv_ema = _ewm_2d(obv, lb_bars)
+    # normalize by the deviation's OWN volatility rather than the level of
+    # obv_ema: OBV is a cumulative signed-volume series that legitimately
+    # crosses zero, so dividing by abs(obv_ema) explodes near every
+    # zero-crossing instead of being scale-stable.
+    deviation = obv - obv_ema
+    dev_vol = _ewm_vol(deviation, lb_bars)
+    dev_vol = np.maximum(dev_vol, 1e-6)
+    return deviation / dev_vol
+
+
+def _compute_keltner_breakout(high: NDArray[np.float32], low: NDArray[np.float32],
+                               close: NDArray[np.float32], lb_bars: int) -> NDArray[np.float64]:
+    h_f64 = high.astype(np.float64)
+    l_f64 = low.astype(np.float64)
+    c_f64 = close.astype(np.float64)
+    prev_c = np.roll(c_f64, 1, axis=0)
+    prev_c[0] = c_f64[0]
+    tr = np.maximum(
+        h_f64 - l_f64,
+        np.maximum(np.abs(h_f64 - prev_c), np.abs(l_f64 - prev_c)),
+    )
+    mid = _ewm_2d(c_f64, lb_bars)
+    atr = _ewm_2d(tr, lb_bars)
+    atr = np.maximum(atr, 1e-12)
+    upper = mid + 2.0 * atr
+    lower = mid - 2.0 * atr
+    result = np.where(c_f64 > upper, 1.0, np.where(c_f64 < lower, -1.0, 0.0))
+    return result
+
+
+def _compute_volume_zscore(quote_volume: NDArray[np.float32], lb_bars: int) -> NDArray[np.float64]:
+    vol = quote_volume.astype(np.float64)
+    vol_mean = _ewm_2d(vol, lb_bars)
+    vol_var = _ewm_2d((vol - vol_mean) ** 2, lb_bars)
+    vol_std = np.sqrt(np.maximum(vol_var, 1e-12))
+    return (vol - vol_mean) / vol_std
+
+
+def _compute_bollinger_bandwidth(close: NDArray[np.float32], lb_bars: int) -> NDArray[np.float64]:
+    c = close.astype(np.float64)
+    mid = _ewm_2d(c, lb_bars)
+    var = _ewm_2d((c - mid) ** 2, lb_bars)
+    sd = np.sqrt(np.maximum(var, 1e-12))
+    bw = 4.0 * sd / np.maximum(np.abs(mid), 1e-12)
+    # causal rolling z-score (window=540/min_periods=180), matching the
+    # production _normalize_mad_z convention -- a whole-series nanmean/nanstd
+    # would leak future bars into every bar's normalization.
+    return _rolling_mad_z(bw, window=540, min_periods=180)
+
+
 _FAMILY_NATIVE_TF: dict[str, str] = {
     "trend_ema": "4h",
     "momentum_ts": "4h",
@@ -461,6 +614,15 @@ _FAMILY_NATIVE_TF: dict[str, str] = {
     "flow_imbalance_taker": "1h",
     "volatility_squeeze_keltner": "4h",
     "open_interest_confirmation": "1h",
+    "rsi": "4h",
+    "cci": "4h",
+    "mfi": "4h",
+    "aroon_oscillator": "4h",
+    "adx_directional": "4h",
+    "obv_trend": "4h",
+    "keltner_breakout": "4h",
+    "volume_zscore": "4h",
+    "bollinger_bandwidth": "4h",
 }
 
 
@@ -514,6 +676,23 @@ def _default_catalog() -> tuple[SignalDescriptor, ...]:
             signal_id=f"smart_money_divergence:{speed}", family="smart_money_divergence",
             speed=speed, lookback_hours=lb_hours,
             native_timeframe=_FAMILY_NATIVE_TF["smart_money_divergence"],
+            target_horizon_hours=lb_hours,
+            declared_orientation=1,
+        ))
+    new_indicator_families = ("rsi", "cci", "aroon_oscillator", "adx_directional",
+                              "obv_trend", "keltner_breakout", "volume_zscore", "bollinger_bandwidth")
+    for family in new_indicator_families:
+        for speed, lb_hours in _SPEED_LADDER_INDICATOR:
+            descriptors.append(SignalDescriptor(
+                signal_id=f"{family}:{speed}", family=family, speed=speed,
+                lookback_hours=lb_hours, native_timeframe=_FAMILY_NATIVE_TF[family],
+                target_horizon_hours=lb_hours,
+                declared_orientation=1,
+            ))
+    for speed, lb_hours in _SPEED_LADDER_INDICATOR:
+        descriptors.append(SignalDescriptor(
+            signal_id=f"mfi:{speed}", family="mfi", speed=speed,
+            lookback_hours=lb_hours, native_timeframe=_FAMILY_NATIVE_TF["mfi"],
             target_horizon_hours=lb_hours,
             declared_orientation=1,
         ))
@@ -671,6 +850,63 @@ def _compute_raw_signal(
             n_t = bars.decision_timestamps_ns.size
             raw = _subsample_to_4h(raw_1h, n_t)
             return _normalize_mad_z(raw)
+
+        if family == "rsi":
+            if desc.native_timeframe != "4h":
+                return None
+            lb_bars_4h = desc.lookback_hours // 4
+            return _compute_rsi(close_4h, lb_bars_4h)
+
+        if family == "cci":
+            if desc.native_timeframe != "4h":
+                return None
+            lb_bars_4h = desc.lookback_hours // 4
+            return _compute_cci(high_4h, low_4h, close_4h, lb_bars_4h)
+
+        if family == "mfi":
+            if desc.native_timeframe != "4h":
+                return None
+            lb_bars_4h = desc.lookback_hours // 4
+            quote_volume_4h = cube_4h.quote_volume_2d
+            return _compute_mfi(high_4h, low_4h, close_4h, quote_volume_4h, lb_bars_4h)
+
+        if family == "aroon_oscillator":
+            if desc.native_timeframe != "4h":
+                return None
+            lb_bars_4h = desc.lookback_hours // 4
+            return _compute_aroon_oscillator(high_4h, low_4h, lb_bars_4h)
+
+        if family == "adx_directional":
+            if desc.native_timeframe != "4h":
+                return None
+            lb_bars_4h = desc.lookback_hours // 4
+            return _compute_adx_directional(high_4h, low_4h, close_4h, lb_bars_4h)
+
+        if family == "obv_trend":
+            if desc.native_timeframe != "4h":
+                return None
+            lb_bars_4h = desc.lookback_hours // 4
+            quote_volume_4h = cube_4h.quote_volume_2d
+            return _compute_obv_trend(close_4h, quote_volume_4h, lb_bars_4h)
+
+        if family == "keltner_breakout":
+            if desc.native_timeframe != "4h":
+                return None
+            lb_bars_4h = desc.lookback_hours // 4
+            return _compute_keltner_breakout(high_4h, low_4h, close_4h, lb_bars_4h)
+
+        if family == "volume_zscore":
+            if desc.native_timeframe != "4h":
+                return None
+            lb_bars_4h = desc.lookback_hours // 4
+            quote_volume_4h = cube_4h.quote_volume_2d
+            return _compute_volume_zscore(quote_volume_4h, lb_bars_4h)
+
+        if family == "bollinger_bandwidth":
+            if desc.native_timeframe != "4h":
+                return None
+            lb_bars_4h = desc.lookback_hours // 4
+            return _compute_bollinger_bandwidth(close_4h, lb_bars_4h)
     except Exception:
         _logger.exception("[DATA] failed computing family=%s signal_id=%s", family, desc.signal_id)
         return None

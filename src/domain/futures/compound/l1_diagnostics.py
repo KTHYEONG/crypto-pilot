@@ -129,6 +129,43 @@ class L1AdmissionRecorder:
             "carry_applied": carry_applied,
         })
 
+    def record_leg(
+        self, *,
+        concept_id: str, mode: str,
+        alpha_ann: float, beta_market: float,
+        alpha_sharpe: float, t_alpha: float,
+        breakeven_cost_bps: float, mean_turnover_per_bar: float,
+        positive_folds: int, n_folds: int,
+        posterior_positive: float, evidence_weight: float,
+        reasons: tuple[str, ...],
+    ) -> None:
+        if not self._enabled:
+            return
+        _LOGGER.info(
+            "[LEG] concept_id=%s mode=%s alpha_ann=%.4f beta=%.3f "
+            "aSR=%.3f t_alpha=%.3f be_bps=%.1f turnover=%.6f "
+            "pos_folds=%d/%d posterior=%.3f weight=%.4f reasons=%s",
+            concept_id, mode, alpha_ann, beta_market,
+            alpha_sharpe, t_alpha, breakeven_cost_bps, mean_turnover_per_bar,
+            positive_folds, n_folds, posterior_positive, evidence_weight, reasons,
+        )
+        self._append_jsonl({
+            "tag": "LEG",
+            "concept_id": concept_id,
+            "mode": mode,
+            "alpha_ann": round(alpha_ann, 4),
+            "beta_market": round(beta_market, 3),
+            "alpha_sharpe": round(alpha_sharpe, 3),
+            "t_alpha": round(t_alpha, 3),
+            "breakeven_cost_bps": round(breakeven_cost_bps, 1),
+            "mean_turnover_per_bar": round(mean_turnover_per_bar, 6),
+            "positive_folds": positive_folds,
+            "n_folds": n_folds,
+            "posterior_positive": round(posterior_positive, 3),
+            "evidence_weight": round(evidence_weight, 4),
+            "reasons": list(reasons),
+        })
+
     def record_family_screen(
         self, *,
         family: str, n_signals: int, n_ic_bars: int,
