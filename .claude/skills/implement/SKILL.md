@@ -5,57 +5,44 @@ description: Implement an approved spec mechanically with focused TDD and integr
 
 # Implement
 
-The contract is frozen input. Do not redesign, rename, move public symbols, relax thresholds, or edit the
-contract to accommodate an implementation choice. Escalate an actual contract conflict to the Spec model.
+Fast-execution model protocol (GPT-5.6 Luna, Sonnet 5, etc.). Execute frozen contract mechanically with zero architectural redesign.
 
-## Before coding
+## Rigid Rules & Constraints
 
-1. Read the spec, contract, rules, and existing caller/tests.
-2. Copy the exact scenario names and target files into a local checklist.
-3. Confirm every `file_hint`, symbol, and wiring edge with `rg`.
-4. If any item disagrees with the repository, stop with a precise conflict report.
+- **STRICT BOUNDARY**: Contract is frozen input. Do NOT rename symbols, alter thresholds, or edit contract JSON.
+- **ESCALATION GATE**: If contract disagrees with codebase or explicit `python_assertion` fails, STOP immediately and report precise conflict.
+- **CLI PREFIX**: Execute ALL verification commands using `uv run`.
 
-## Three phases
+## Deterministic 3-Phase Checklist
 
-### A. Contract surface
+### Phase 1: Contract Surface & Assertions
+- [ ] Read spec, contract, and caller/test files.
+- [ ] Confirm symbols/paths with `rg`.
+- [ ] Add/update signatures, dataclasses, and validation.
+- [ ] Implement contract tests using exact scenario names and verify `python_assertion` expressions.
+- [ ] Run verification: `uv run ruff check .` and `uv run pytest <target_test_file>`.
 
-- Add or update signatures, dataclasses, validation, and imports.
-- Add minimal contract tests using the frozen scenario names.
-- Run the affected tests and ruff with `uv run`.
+### Phase 2: Core Logic
+- [ ] Implement pure logic preserving numerical & causal rules specified in spec.
+- [ ] Write concrete assertions for boundaries, failures, and regressions (No vacuous/dummy tests allowed).
+- [ ] Run verification: `uv run ruff check .`, `uv run mypy <file>`, and `uv run pytest <target_test_file>`.
 
-### B. Logic
+### Phase 3: Wiring & Integration
+- [ ] Wire production caller at specified anchor.
+- [ ] Add integration scenarios with exact names/files.
+- [ ] Run full checks: `uv run ruff check .`, `uv run mypy <file>`, and `uv run pytest`.
 
-- Implement pure logic first; preserve the stated causal and numerical rules.
-- Cover the selected hypothesis, boundaries, failures, and regression symptom with concrete assertions.
-- Run affected tests, strict mypy on touched interfaces, and `--spec-only` when literal assertions are
-  ready.
+## Failure Escalation Matrix
 
-### C. Wiring
+- `Contract / Signature / Assertion Conflict` -> **STOP & ESCALATE** (Do not edit spec/contract).
+- `Logic Failure` -> Fix source code, rerun smallest affected test.
+- `Coverage Miss` -> Add missing edge-case test, rerun once.
 
-- Connect the production caller at the specified anchor.
-- Add every integration scenario using its exact name and target file.
-- Check production callers, stale fields, and retired branches.
-- Run ruff, strict mypy, affected tests, and final `--spec-only` before requesting `/check`.
+## Output Format
 
-## Failure routing
+Return ONLY this 2-line status summary:
 
-- Contract/file/name/signature conflict: stop and report; do not edit the spec.
-- Logic failure: fix source and rerun the smallest affected test.
-- Fixture failure: correct only the fixture while preserving expected properties.
-- Coverage failure: collect all changed-line misses, add the complete edge-test set, then rerun once.
-- Vacuous assertion or shape-only computation test: replace it with a concrete numerical or structural
-  property.
+🛠️ `[IMPLEMENT COMPLETE] <Blueprint>`
+`Files: <modified_count> | Tests: <PASS_count>/<FAIL_count> | Ruff: <PASS/FAIL> | Mypy: <PASS/FAIL> | Conflicts: <None/Brief Description>`
 
-Keep the change within the manifest. Architecture, public API, and threshold decisions belong to the Spec
-model. Use the normal project command prefix (`uv run`) for all execution.
 
-## Handoff
-
-Report modified files, focused test result, ruff/mypy status, spec-only status, and any unresolved conflict.
-
-## Output
-
-Use a short handoff only:
-
-`🛠️ [IMPLEMENT COMPLETE] <Blueprint>`
-`Modified | Tests | Ruff | Mypy | Spec-only | Unresolved`
