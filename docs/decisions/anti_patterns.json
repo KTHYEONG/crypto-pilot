@@ -1,0 +1,30 @@
+[
+  {
+    "domain": "signal",
+    "failed_hypothesis": "reversal_st / xs_reversal 8종 신호 단독 배포",
+    "failure_reason": "gross IC는 유의(t up to +8.70)하나, 회계 수정 후 turnover 대량 발생으로 net-of-cost 수익률이 모두 음수(-3.9%~-14.5%)로 탈락됨",
+    "falsified_date": "2026-07-29",
+    "source_adr": "ADR_20260729_L1_BOOK_COST_ACCOUNTING_AND_NET_EDGE_SCREEN"
+  },
+  {
+    "domain": "signal",
+    "failed_hypothesis": "단기 타임프레임(1m~1h) 20회 실측을 통한 momentum_ts:fast 스무딩 개선",
+    "failure_reason": "빠른 타임프레임 20회 실측 결과 전수 단조 악화(t=+0.24 무상관), 스무딩 시간상수(~50h)가 원시신호보다 길어 무효화됨",
+    "falsified_date": "2026-07-29",
+    "source_adr": "ADR_20260729_L1_EFFECTIVE_HORIZON_SCREENING"
+  },
+  {
+    "domain": "risk",
+    "failed_hypothesis": "무조건부 베타 제거 가설 (C-2 방향성 베팅 제거)",
+    "failure_reason": "무조건부 베타는 -0.19->-0.07로만 변하고 진짜 원인은 시변 순노출 85%임이 반증됨",
+    "falsified_date": "2026-07-28",
+    "source_adr": "ADR_20260728_L1_POSITION_CONSTRUCTION_INTEGRITY"
+  },
+  {
+    "domain": "execution",
+    "failed_hypothesis": "book[t]*ret[t] 형태의 1-bar look-ahead 산출",
+    "failure_reason": "ret[t]가 close[t]를 이미 포함하여 t_alpha가 7.19로 허위 부풀려짐 (book[t-1]*ret[t]로 통일 필수)",
+    "falsified_date": "2026-07-30",
+    "source_adr": "ADR_20260730_L1_SIGNAL_STAGE_INTEGRITY"
+  }
+]

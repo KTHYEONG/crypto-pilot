@@ -15,7 +15,14 @@ Frontier reasoning model protocol (Specification Engineering & Empirical Validat
   - Do not relax thresholds or public contracts merely to make a test pass.
   - Keep main spec under 500 lines. Move large domain details to linked reference files.
 
+## Memory & Anti-Pattern Check (Mandatory Pre-Spec Phase)
+
+Before formulating architecture or hypotheses:
+1. **Anti-Pattern Check**: Read `docs/decisions/anti_patterns.json`. Filter by task domain (`signal`, `risk`, `execution`). Instantly DISCARD any hypothesis, parameter range, or logic that previously failed.
+2. **Context Lookup**: Inspect `docs/decisions/index.json` to review recent ADR resolutions for the relevant domain without reading monolithic logs.
+
 ## Empirical Sandbox Protocol (Mandatory Before Spec Freeze)
+
 
 Do NOT rely solely on theoretical hypothesis or unverified context assumptions.
 1. **Scratch Experimentation**: For any non-trivial algorithm, signal, risk model, or performance-critical logic, write a temporary Python script in `<appDataDir>/brain/<conversation-id>/scratch/test_<topic>.py`.
