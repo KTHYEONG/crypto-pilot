@@ -51,6 +51,7 @@ class L2GateConfig:
     stressed_cost_multiplier: float = 2.0
     max_spa_pvalue: float = 0.10
     l1_prior_effective_days_cap: int = 90
+    l1_prior_min_active_days: int = 30
 
     def __post_init__(self) -> None:
         assert self.min_oos_days > 0
@@ -67,6 +68,7 @@ class L2GateConfig:
         assert self.stressed_cost_multiplier >= 1.0
         assert 0 < self.max_spa_pvalue <= 1
         assert self.l1_prior_effective_days_cap > 0
+        assert self.l1_prior_min_active_days >= 0
 
 
 @dataclass(slots=True, frozen=True)
@@ -370,9 +372,9 @@ class L1LegConfig:
     min_turnover_per_bar: float = 0.005
     cost_safety_margin: float = 1.5
     min_positive_fold_ratio: float = 0.50
-    max_leg_weight: float = 0.50
+    max_leg_weight: float = 0.70
     max_name_weight: float = 0.10
-    warmup_folds: int = 3
+    warmup_folds: int = 2
     min_cross_section: int = 10
     bars_per_year: float = 2190.0
     n_bootstrap: int = 2000

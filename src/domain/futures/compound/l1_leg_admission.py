@@ -4,7 +4,6 @@ import logging
 
 import numpy as np
 from numpy.typing import NDArray
-from scipy import stats as _stats
 
 from src.domain.futures.compound.config import L1LegConfig
 from src.domain.futures.compound.contracts import (
@@ -17,6 +16,19 @@ from src.domain.futures.compound.l1_concept_bank import compute_lagged_gross_ret
 _logger = logging.getLogger(__name__)
 
 
+def compute_leg_sizing_score(
+    evidence: LegEvidence, cost_bps: float, config: L1LegConfig,
+) -> float:
+    if config.bars_per_year <= 0:
+        raise ValueError(f"bars_per_year must be > 0, got {config.bars_per_year}")
+    if evidence.evidence_weight <= 0.0:
+        return 0.0
+    alpha_net = evidence.alpha_ann - cost_bps * 1e-4 * evidence.mean_turnover_per_bar * config.bars_per_year
+    alpha_net = max(alpha_net, 0.0)
+    var_ann = (evidence.alpha_ann / max(evidence.alpha_sharpe, 1e-12)) ** 2
+    fold_consistency = evidence.positive_folds / max(evidence.n_folds, 1)
+    return alpha_net / max(var_ann, 1e-12) * fold_consistency
+
 def compute_evidence_weight(
     evidence: LegEvidence,
     cost_bps: float,
@@ -28,9 +40,7 @@ def compute_evidence_weight(
         return 0.0
     if evidence.n_folds > 0 and evidence.positive_folds / evidence.n_folds < config.min_positive_fold_ratio:
         return 0.0
-    prob = float(_stats.norm.cdf(evidence.t_alpha_newey_west))
-    raw = 2.0 * max(prob - 0.5, 0.0)
-    return min(raw, config.max_leg_weight)
+    return 1.0
 
 
 def normalise_leg_weights(
@@ -38,6 +48,12 @@ def normalise_leg_weights(
 ) -> NDArray[np.float64]:
     if not (0.0 < max_leg_weight <= 1.0):
         raise ValueError(f"max_leg_weight must be in (0, 1], got {max_leg_weight}")
+    k = len(raw_weights_1d)
+    if k > 0 and max_leg_weight <= 1.0 / k:
+        raise ValueError(
+            f"degenerate cap: max_leg_weight={max_leg_weight} <= 1/K={1.0/k} "
+            f"for K={k}; caps must exceed 1/K (RULE-06)"
+        )
     w = raw_weights_1d.copy()
     w_sum = float(np.sum(w))
     if w_sum <= 1e-12:
@@ -79,11 +95,7 @@ def accumulate_prequential_leg_weights(
             prev_evidence.append(ev)
         w = np.zeros(k_, dtype=np.float64)
         for k in range(k_):
-            # evaluate_leg_alpha already computed and stamped the real
-            # evidence_weight (needed so record_leg logs a genuine value,
-            # not the 0.0 placeholder) -- reuse it as the single source of
-            # truth instead of recomputing here.
-            w[k] = prev_evidence[k].evidence_weight
+            w[k] = compute_leg_sizing_score(prev_evidence[k], cost_bps, config)
         w = normalise_leg_weights(w, config.max_leg_weight)
         sl = oos_slices[i]
         weights[sl] = w[np.newaxis, :]
@@ -123,7 +135,11 @@ def evaluate_portfolio_admission(
     folds: tuple[CausalFold, ...],
     cost_bps: float,
     config: L1LegConfig,
+    *,
+    admission_end_exclusive: int,
 ) -> tuple[bool, tuple[str, ...], float]:
+    if admission_end_exclusive <= 0:
+        raise ValueError(f"admission_end_exclusive must be > 0, got {admission_end_exclusive}")
     n_t, _ = combined_2d.shape
     gross_returns = compute_lagged_gross_returns(combined_2d, asset_return_2d)
     turnovers = np.zeros(n_t, dtype=np.float64)
@@ -136,20 +152,20 @@ def evaluate_portfolio_admission(
     stressed_returns = gross_returns - stressed_cost_bps * 1e-4 * turnovers
 
     oos_slices = [slice(f.oos_start, f.oos_end_exclusive) for f in folds]
-    traded_slices = oos_slices[config.warmup_folds:]
+    traded_slices = [
+        sl for f, sl in zip(folds, oos_slices, strict=False)
+        if f.oos_end_exclusive <= admission_end_exclusive
+    ][config.warmup_folds:]
     traded_parts = [net_returns[sl] for sl in traded_slices]
     traded_parts = [p for p in traded_parts if p.shape[0] > 0]
     if not traded_parts:
-        return False, ("no_traded_bars",), 0.0
+        return False, ("no_prequential_admission_folds",), 0.0
     traded_returns = np.concatenate(traded_parts)
     traded_stressed = np.concatenate([stressed_returns[sl] for sl in traded_slices if stressed_returns[sl].shape[0] > 0])
     n_traded = len(traded_returns)
     if n_traded < 10:
         return False, ("insufficient_traded_bars",), 0.0
     net_ann = float(np.mean(traded_returns)) * config.bars_per_year
-    # stressed_ann must be annualized the same way as net_ann (mean-per-bar *
-    # bars_per_year); subtracting a raw per-bar cost delta from an already-
-    # annualized net_ann understates the stress penalty by ~bars_per_year.
     stressed_ann = float(np.mean(traded_stressed)) * config.bars_per_year
     rng = np.random.default_rng(42)
     boot = rng.choice(traded_returns, size=(config.n_bootstrap, n_traded), replace=True)

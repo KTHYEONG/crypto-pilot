@@ -128,8 +128,8 @@ def evaluate_leg_alpha(
     nw_var_total = _newey_west_variance(alpha_resid, nw_lag_total)
     se_total = np.sqrt(nw_var_total / n_total) if n_total > 0 else 0.0
     t_alpha = pooled_alpha / max(se_total, 1e-12)
-    alpha_vol = float(np.std(alpha_resid, ddof=1)) * np.sqrt(config.bars_per_year)
-    alpha_sharpe = pooled_alpha / max(alpha_vol / np.sqrt(config.bars_per_year), 1e-12)
+    alpha_vol = float(np.std(alpha_resid, ddof=1))
+    alpha_sharpe = pooled_alpha / max(alpha_vol, 1e-12) * np.sqrt(config.bars_per_year)
     alpha_ann = pooled_alpha * config.bars_per_year
     mean_turn = float(np.mean(all_t))
     be_cost = compute_breakeven_cost_bps(alpha_ann, mean_turn, config.bars_per_year)
