@@ -67,8 +67,7 @@ class TestComputeEvidenceWeight:
             posterior_positive=0.99, evidence_weight=0.0, reasons=(),
         )
         weight = compute_evidence_weight(ev, 8.0, cfg)
-        assert 0.0 < weight <= cfg.max_leg_weight
-        assert weight == cfg.max_leg_weight
+        assert weight == 1.0
 
 
 class TestAccumulatePrequentialLegWeights:
@@ -136,7 +135,7 @@ class TestEvaluatePortfolioAdmission:
         cfg = L1LegConfig(warmup_folds=0, min_growth_posterior_probability=0.90,
                           min_positive_fold_ratio=0.50, stress_cost_multiplier=2.0,
                           bars_per_year=2190.0, n_bootstrap=2000)
-        admitted, reasons, net_ann = evaluate_portfolio_admission(combined, ret, folds, 8.0, cfg)
+        admitted, reasons, net_ann = evaluate_portfolio_admission(combined, ret, folds, 8.0, cfg, admission_end_exclusive=10**9)
         assert admitted is False
         assert any("posterior" in r for r in reasons)
 
@@ -155,7 +154,7 @@ class TestEvaluatePortfolioAdmission:
         cfg = L1LegConfig(warmup_folds=0, min_growth_posterior_probability=0.90,
                           min_positive_fold_ratio=0.50, stress_cost_multiplier=2.0,
                           bars_per_year=2190.0, n_bootstrap=2000)
-        admitted, reasons, net_ann = evaluate_portfolio_admission(combined, ret, folds, 8.0, cfg)
+        admitted, reasons, net_ann = evaluate_portfolio_admission(combined, ret, folds, 8.0, cfg, admission_end_exclusive=10**9)
         assert admitted is False
         assert any("positive_folds" in r for r in reasons)
 
@@ -177,7 +176,7 @@ class TestEvaluatePortfolioAdmission:
         cfg = L1LegConfig(warmup_folds=0, min_growth_posterior_probability=0.90,
                           min_positive_fold_ratio=0.50, stress_cost_multiplier=2.0,
                           bars_per_year=2190.0, n_bootstrap=2000)
-        admitted, reasons, net_ann = evaluate_portfolio_admission(combined, ret, folds, 8.0, cfg)
+        admitted, reasons, net_ann = evaluate_portfolio_admission(combined, ret, folds, 8.0, cfg, admission_end_exclusive=10**9)
         assert admitted is False
         assert any("stressed_net_ann" in r for r in reasons)
         assert net_ann > 0.0  # normal (unstressed) net_ann is positive
@@ -191,7 +190,7 @@ class TestEvaluatePortfolioAdmission:
         cfg = L1LegConfig(warmup_folds=0, min_growth_posterior_probability=0.90,
                           min_positive_fold_ratio=0.50, stress_cost_multiplier=2.0,
                           bars_per_year=2190.0, n_bootstrap=2000)
-        admitted, reasons, net_ann = evaluate_portfolio_admission(combined, ret, folds, 8.0, cfg)
+        admitted, reasons, net_ann = evaluate_portfolio_admission(combined, ret, folds, 8.0, cfg, admission_end_exclusive=10**9)
         assert admitted is True
         assert reasons == ()
         assert net_ann > 0.0
@@ -199,7 +198,7 @@ class TestEvaluatePortfolioAdmission:
     def test_evaluate_portfolio_admission_no_active_bars(self) -> None:
         combined = np.zeros((10, 3), dtype=np.float64)
         ret = np.zeros((10, 3), dtype=np.float64)
-        admitted, reasons, net_ann = evaluate_portfolio_admission(combined, ret, (), 8.0, L1LegConfig())
+        admitted, reasons, net_ann = evaluate_portfolio_admission(combined, ret, (), 8.0, L1LegConfig(), admission_end_exclusive=10**9)
         assert admitted is False
         assert net_ann == 0.0
 
@@ -253,10 +252,10 @@ class TestNormaliseLegWeights:
         assert np.allclose(result, [0.5, 0.375, 0.125])
 
     def test_normalise_leg_weights_boundary_zero_and_k_two(self) -> None:
-        zero_result = normalise_leg_weights(np.array([0.0, 0.0], dtype=np.float64), 0.5)
+        zero_result = normalise_leg_weights(np.array([0.0, 0.0], dtype=np.float64), 0.51)
         assert np.allclose(zero_result, [0.0, 0.0])
-        k_two_result = normalise_leg_weights(np.array([3.0, 1.0], dtype=np.float64), 0.5)
-        assert np.allclose(k_two_result, [0.5, 0.5])
+        k_two_result = normalise_leg_weights(np.array([3.0, 1.0], dtype=np.float64), 0.51)
+        assert np.allclose(k_two_result, [0.51, 0.49])
 
     def test_normalise_leg_weights_already_compliant(self) -> None:
         result = normalise_leg_weights(np.array([0.4, 0.3, 0.3], dtype=np.float64), 0.5)

@@ -385,6 +385,7 @@ class L2Evaluation:
     absolute_cagr: float = 0.0
     spa_pvalue: float = 1.0
     bootstrap_block_days: float = 0.0
+    l1_prior_active_days: int = 0
     daily_strategy_returns_1d: NDArray[np.float64] = field(default_factory=_empty_f64)
     daily_benchmark_returns_1d: NDArray[np.float64] = field(default_factory=_empty_f64)
     daily_excess_returns_1d: NDArray[np.float64] = field(default_factory=_empty_f64)
@@ -402,6 +403,8 @@ class L2Evaluation:
         ):
             if not np.isfinite(metric):
                 raise ValueError(f"non-finite metric: {metric}")
+        if self.l1_prior_active_days < 0:
+            raise ValueError(f"l1_prior_active_days must be >= 0, got {self.l1_prior_active_days}")
         if self.verdict == L2GateVerdict.PASS and (not self.category_results or not all(r.passed for r in self.category_results)):
             raise ValueError("PASS verdict requires non-empty category results with all passed")
         if self.verdict != L2GateVerdict.PASS and self.category_results and all(r.passed for r in self.category_results):
@@ -434,6 +437,7 @@ class L2Evaluation:
             "positive_outer_folds": {"value": self.positive_outer_folds, "unit": "count"},
             "oos_days": {"value": self.oos_days, "unit": "days"},
             "integrity_ok": self.integrity_ok,
+            "l1_prior_active_days": {"value": self.l1_prior_active_days, "unit": "days"},
             "category_results": [
                 {"category": r.category, "passed": r.passed, "reasons": list(r.reasons)}
                 for r in self.category_results

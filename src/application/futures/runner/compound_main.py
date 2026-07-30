@@ -169,17 +169,33 @@ def _write_artifacts(
                  paths.result_path, paths.target_weights_path, paths.manifest_path)
 
 
-def write_l2_gate_inputs(run_dir: Path, evaluation: L2Evaluation) -> Path | None:
+def write_l2_gate_inputs(
+    run_dir: Path, evaluation: L2Evaluation,
+    l1_prior_excess_1d: np.ndarray | None = None,
+) -> Path | None:
     if evaluation.daily_strategy_returns_1d.size == 0:
         _logger.warning("[P0] l2_gate_inputs skipped: empty gate-input series (verdict=%s)", evaluation.verdict)
         return None
     out_path = run_dir / "l2_gate_inputs.npz"
-    np.savez_compressed(str(out_path),
-                        daily_strategy_returns_1d=evaluation.daily_strategy_returns_1d,
-                        daily_benchmark_returns_1d=evaluation.daily_benchmark_returns_1d,
-                        daily_excess_returns_1d=evaluation.daily_excess_returns_1d,
-                        daily_fee_returns_1d=evaluation.daily_fee_returns_1d,
-                        daily_day_start_ns=evaluation.daily_day_start_ns)
+    if l1_prior_excess_1d is not None:
+        np.savez_compressed(
+            str(out_path),
+            daily_strategy_returns_1d=evaluation.daily_strategy_returns_1d,
+            daily_benchmark_returns_1d=evaluation.daily_benchmark_returns_1d,
+            daily_excess_returns_1d=evaluation.daily_excess_returns_1d,
+            daily_fee_returns_1d=evaluation.daily_fee_returns_1d,
+            daily_day_start_ns=evaluation.daily_day_start_ns,
+            l1_prior_excess_1d=l1_prior_excess_1d,
+        )
+    else:
+        np.savez_compressed(
+            str(out_path),
+            daily_strategy_returns_1d=evaluation.daily_strategy_returns_1d,
+            daily_benchmark_returns_1d=evaluation.daily_benchmark_returns_1d,
+            daily_excess_returns_1d=evaluation.daily_excess_returns_1d,
+            daily_fee_returns_1d=evaluation.daily_fee_returns_1d,
+            daily_day_start_ns=evaluation.daily_day_start_ns,
+        )
     _logger.info("[P0] l2_gate_inputs written: %s (oos_days=%d)",
                  out_path, evaluation.oos_days)
     return out_path
