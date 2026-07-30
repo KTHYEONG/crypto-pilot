@@ -64,6 +64,21 @@ _holdout_store_instance: SealedHoldoutStore | None = None
 _trial_ledger_instance: CandidateTrialLedger | None = None
 
 
+def build_compound_engine_config(
+    run_config: CompoundRunConfig,
+) -> CompoundEngineConfig:
+    nav = run_config.portfolio_nav_usdt
+    if not np.isfinite(nav) or nav <= 0:
+        raise ValueError(f"portfolio_nav_usdt must be finite positive, got {nav}")
+    engine_config = CompoundEngineConfig()
+    engine_config = replace(
+        engine_config,
+        allocator=replace(engine_config.allocator, portfolio_nav_usdt=nav),
+        dense_sim=replace(engine_config.dense_sim, nav_usdt=nav),
+    )
+    return engine_config
+
+
 def _get_holdout_store(config: CompoundRunConfig) -> SealedHoldoutStore:
     global _holdout_store_instance
     if _holdout_store_instance is None:
@@ -121,7 +136,7 @@ def _write_artifacts(
             "annual_volatility": engine_result.l2.annual_volatility,
             "annual_turnover": engine_result.l2.annual_turnover,
             "cost_drag_ratio": engine_result.l2.cost_drag_ratio,
-            "capacity_utilisation_p95": engine_result.l2.capacity_utilisation_p95,
+            "max_name_weight_p95": engine_result.l2.max_name_weight_p95,
             "integrity_ok": engine_result.l2.integrity_ok,
             "reasons": list(engine_result.l2.reasons),
         },
@@ -175,7 +190,7 @@ def run_multiscale_compound_main(config: CompoundRunConfig) -> RunnerResult:
         _logger.info("multiscale compound run: date=%s sync=%s",
                      config.reference_date, config.sync)
 
-        engine_config = CompoundEngineConfig()
+        engine_config = build_compound_engine_config(config)
         runtime = build_data_lake_runtime(config)
 
         ref_date_str = config.reference_date or datetime.now(UTC).strftime("%Y-%m-%d")

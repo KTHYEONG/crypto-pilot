@@ -3,10 +3,14 @@ from __future__ import annotations
 from pathlib import Path
 
 import numpy as np
+import pytest
 from datetime import date
 
 from src.application.futures.runner.compound_config import CompoundRunConfig
-from src.application.futures.runner.compound_main import run_multiscale_compound_main
+from src.application.futures.runner.compound_main import (
+    build_compound_engine_config,
+    run_multiscale_compound_main,
+)
 from src.domain.futures.data_lake.contracts import SyncMode
 from src.domain.futures.data_lake.run_windows import QuarterlyWindowConfig, resolve_completed_quarter_window
 from src.domain.futures.compound.contracts import (
@@ -54,7 +58,7 @@ def _make_mock_engine_result(mocker) -> object:
     mock_l2.annual_volatility = 0.15
     mock_l2.annual_turnover = 0.5
     mock_l2.cost_drag_ratio = 0.1
-    mock_l2.capacity_utilisation_p95 = 0.05
+    mock_l2.max_name_weight_p95 = 0.05
     mock_l2.integrity_ok = True
     mock_l2.reasons = ()
     mock_l2.oos_days = 10
@@ -332,7 +336,7 @@ def test_cash_only_engine_returns_normally(mocker) -> None:
         annual_volatility = 0.0
         annual_turnover = 0.0
         cost_drag_ratio = 0.0
-        capacity_utilisation_p95 = 0.0
+        max_name_weight_p95 = 0.0
         integrity_ok = True
         reasons = ()
         spa_pvalue = 1.0
@@ -406,7 +410,7 @@ def test_compound_main_writes_l2_gate_inputs_npz(tmp_path: Path) -> None:
         equity_multiple=1.0, sharpe=0.0, sharpe_probability=1.0,
         deflated_sharpe_probability=1.0, candidate_count=1, calmar=0.0,
         max_drawdown=0.0, daily_cvar95=0.0, annual_volatility=0.0,
-        annual_turnover=0.0, cost_drag_ratio=0.0, capacity_utilisation_p95=0.0,
+        annual_turnover=0.0, cost_drag_ratio=0.0, max_name_weight_p95=0.0,
         active_days_ratio=1.0, rebalance_count=1, positive_outer_folds=1,
         oos_days=10, category_results=passing, integrity_ok=True, reasons=(),
         daily_strategy_returns_1d=np.ones(10, dtype=np.float64),
@@ -424,3 +428,30 @@ def test_compound_main_writes_l2_gate_inputs_npz(tmp_path: Path) -> None:
     assert "daily_fee_returns_1d" in data
     assert "daily_day_start_ns" in data
     assert data["daily_excess_returns_1d"].size == 10
+
+
+class TestBuildCompoundEngineConfig:
+    def test_nav_propagated(self) -> None:
+        config = CompoundRunConfig(
+            reference_date="2026-07-15", sync=SyncMode.AUTO,
+            refresh_universe=False, portfolio_nav_usdt=700.0,
+        )
+        engine_config = build_compound_engine_config(config)
+        assert engine_config.allocator.portfolio_nav_usdt == 700.0
+        assert engine_config.dense_sim.nav_usdt == 700.0
+
+    def test_non_finite_nav_raises(self) -> None:
+        config = CompoundRunConfig(
+            reference_date="2026-07-15", sync=SyncMode.AUTO,
+            refresh_universe=False, portfolio_nav_usdt=float('nan'),
+        )
+        with pytest.raises(ValueError, match="finite positive"):
+            build_compound_engine_config(config)
+
+    def test_zero_nav_raises(self) -> None:
+        config = CompoundRunConfig(
+            reference_date="2026-07-15", sync=SyncMode.AUTO,
+            refresh_universe=False, portfolio_nav_usdt=0.0,
+        )
+        with pytest.raises(ValueError, match="finite positive"):
+            build_compound_engine_config(config)

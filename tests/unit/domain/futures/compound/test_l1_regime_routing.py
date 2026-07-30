@@ -631,7 +631,7 @@ def test_empty_l2_series_does_not_create_npz() -> None:
         deflated_sharpe_probability=0.5, candidate_count=1,
         calmar=0.0, max_drawdown=0.0, daily_cvar95=0.0,
         annual_volatility=0.0, annual_turnover=0.0, cost_drag_ratio=0.0,
-        absolute_cagr=0.0, capacity_utilisation_p95=0.0, active_days_ratio=0.0,
+        absolute_cagr=0.0, max_name_weight_p95=0.0, active_days_ratio=0.0,
         rebalance_count=0, positive_outer_folds=0, oos_days=0,
         category_results=(), integrity_ok=True, reasons=("no_evidence",),
     )
