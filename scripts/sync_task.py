@@ -120,6 +120,67 @@ def _prune_archive(max_entries: int = 15) -> tuple[int, int]:
     return (len(excess), len(new_entries))
 
 
+def _update_decisions_json(
+    task: str,
+    title: str,
+    why: str,
+    what: str,
+    impact: str,
+    domain: str,
+    adr_id: str,
+    failed_hypothesis: str | None = None,
+    failure_reason: str | None = None,
+) -> None:
+    date_str = datetime.now().strftime("%Y-%m-%d")
+    index_json_path = "docs/decisions/index.json"
+    anti_patterns_path = "docs/decisions/anti_patterns.json"
+
+    # 1. Update index.json
+    index_data: dict[str, list[dict[str, str]]] = {"tasks": []}
+    if _path_exists(index_json_path):
+        with contextlib.suppress(Exception):
+            parsed = json.loads(_read_file(index_json_path))
+            if isinstance(parsed, dict) and "tasks" in parsed and isinstance(parsed["tasks"], list):
+                index_data = parsed
+
+    new_task_entry = {
+        "task_id": task,
+        "date": date_str,
+        "adr_id": adr_id,
+        "domain": domain,
+        "title": title,
+        "why": why,
+        "resolution": what,
+        "impact": impact,
+    }
+
+    # Prepend new task entry
+    index_data["tasks"] = [new_task_entry] + [t for t in index_data.get("tasks", []) if t.get("task_id") != task]
+    # Keep sliding window of max 50 entries
+    index_data["tasks"] = index_data["tasks"][:50]
+    _write_file(index_json_path, json.dumps(index_data, indent=2, ensure_ascii=False) + "\n")
+
+    # 2. Update anti_patterns.json if failure hypothesis provided
+    if failed_hypothesis and failure_reason:
+        anti_data: list[dict[str, str]] = []
+        if _path_exists(anti_patterns_path):
+            with contextlib.suppress(Exception):
+                parsed_anti = json.loads(_read_file(anti_patterns_path))
+                if isinstance(parsed_anti, list):
+                    anti_data = parsed_anti
+
+        new_anti_entry = {
+            "domain": domain,
+            "failed_hypothesis": failed_hypothesis,
+            "failure_reason": failure_reason,
+            "falsified_date": date_str,
+            "source_adr": adr_id,
+        }
+        anti_data = [new_anti_entry] + [a for a in anti_data if a.get("failed_hypothesis") != failed_hypothesis]
+        anti_data = anti_data[:30]  # Max 30 anti-patterns
+        _write_file(anti_patterns_path, json.dumps(anti_data, indent=2, ensure_ascii=False) + "\n")
+
+
 def _update_index(source_file: str, test_file: str | None, doc_file: str | None) -> None:
     index_path = "docs/index.json"
     data: dict[str, dict[str, str | list[str]]] = {}
@@ -234,50 +295,27 @@ def _clean_specs(
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Sync: ADR + Index + Cleanup in one command.")
+    parser = argparse.ArgumentParser(description="Sync: ADR + Index + Anti-Pattern Registry + Cleanup.")
     parser.add_argument("--task", required=True, help="Task ID (e.g. TASK_L0_MTF_FUSION)")
     parser.add_argument("--title", required=True, help="Decision title")
     parser.add_argument("--why", required=True, help="Context/Why")
     parser.add_argument("--what", required=True, help="Resolution/What")
     parser.add_argument("--impact", required=True, help="Impact")
     parser.add_argument("--source", required=True, help="Modified source file path")
-    parser.add_argument("--test", default=None, help="Test file path (auto-resolved if omitted)")
+    parser.add_argument("--domain", default="general", help="Domain category (e.g. signal, risk, execution)")
+    parser.add_argument("--failed-hypothesis", default=None, help="Failed hypothesis if applicable")
+    parser.add_argument("--failure-reason", default=None, help="Reason why hypothesis failed")
+    parser.add_argument("--test", default=None, help="Test file path")
     parser.add_argument("--doc", default=None, help="Architecture doc path")
-    parser.add_argument(
-        "--remove-specs",
-        nargs="*",
-        default=[],
-        help="Specific spec files or prefixes to remove (e.g. --remove-specs signal_bank_v4)",
-    )
-    parser.add_argument(
-        "--keep-specs",
-        nargs="*",
-        default=[],
-        help="Spec files or filenames to preserve in docs/specs",
-    )
-    parser.add_argument(
-        "--keep-all-specs",
-        action="store_true",
-        help="Preserve all files in docs/specs during sync cleanup",
-    )
+    parser.add_argument("--remove-specs", nargs="*", default=[], help="Spec files to remove")
+    parser.add_argument("--keep-specs", nargs="*", default=[], help="Spec files to preserve")
+    parser.add_argument("--keep-all-specs", action="store_true", help="Preserve all spec files")
     args = parser.parse_args()
 
     logs: list[str] = []
     errors: list[str] = []
 
-    # 1. Read context (top 3 decisions)
-    decisions_path = "docs/decisions/decisions.md"
-    if _path_exists(decisions_path):
-        content = _read_file(decisions_path)
-        entries = re.split(r"(?=^##\s+\[\d{4}-\d{2}-\d{2}\])", content, flags=re.MULTILINE)
-        recent = [e.strip() for e in entries[-3:]] if len(entries) > 1 else []
-        if recent:
-            print("# Recent Decisions (context)")
-            for e in recent:
-                print(e[:200] + ("..." if len(e) > 200 else ""))
-            print()
-
-    # 2. ADR Append
+    # 1. ADR Append to decisions.md
     try:
         adr_id = _append_adr(args.task, args.title, args.why, args.what, args.impact)
         logs.append(f"ADR added: {adr_id}")
@@ -285,34 +323,49 @@ def main() -> None:
         errors.append(f"ADR append failed: {e}")
         adr_id = "N/A"
 
-    # 3. Archive Pruning
+    # 2. Update Smart JSON Registries (index.json & anti_patterns.json)
     try:
-        pruned, archived = _prune_archive(15)
+        _update_decisions_json(
+            task=args.task,
+            title=args.title,
+            why=args.why,
+            what=args.what,
+            impact=args.impact,
+            domain=args.domain,
+            adr_id=adr_id,
+            failed_hypothesis=args.failed_hypothesis,
+            failure_reason=args.failure_reason,
+        )
+        logs.append("JSON Index & Anti-Pattern DB updated")
+    except Exception as e:
+        errors.append(f"JSON Registry update failed: {e}")
+
+    # 3. Archive Pruning (Keep max 5 entries in decisions.md sliding window)
+    try:
+        pruned, archived = _prune_archive(5)
         if pruned > 0:
-            logs.append(f"Pruned {pruned} entries ({archived} new to archive)")
-        else:
-            logs.append("No pruning needed")
+            logs.append(f"Pruned {pruned} entries ({archived} to archive)")
     except Exception as e:
         errors.append(f"Archive prune failed: {e}")
 
-    # 4. Index Update
+    # 4. Index Update for files
     test_file = args.test or _resolve_test_path(args.source)
     try:
         _update_index(args.source, test_file, args.doc)
-        logs.append(f"Index updated for {args.source}")
+        logs.append(f"Source index updated for {args.source}")
     except Exception as e:
         errors.append(f"Index update failed: {e}")
 
-    # 5. Temp Artifact Wipe (.tmp, .bak, .pyc) & Scratch Cleanup
+    # 5. Temp & Scratch Wipe
     try:
         wiped = _wipe_temp_artifacts()
         scratch_wiped = _clean_scratch_dir()
         if wiped > 0 or scratch_wiped > 0:
-            logs.append(f"Wiped {wiped} temp artifacts, {scratch_wiped} scratch files")
+            logs.append(f"Wiped {wiped} temp, {scratch_wiped} scratch files")
     except Exception as e:
         errors.append(f"Temp wipe failed: {e}")
 
-    # 6. Spec Cleanup (Default: remove all specs, or remove specified targets/prefixes)
+    # 6. Spec Cleanup
     try:
         cleaned = _clean_specs(
             remove_specs=args.remove_specs,
@@ -321,20 +374,14 @@ def main() -> None:
         )
         if cleaned > 0:
             logs.append(f"Cleaned {cleaned} spec files")
-        else:
-            logs.append("No spec files to clean")
     except Exception as e:
         errors.append(f"Spec cleanup failed: {e}")
 
     # 7. Summary
     status = "OK" if not errors else "PARTIAL"
     summary = f"### 🏁 [SYNC:{status}] [{adr_id}] | {' | '.join(logs)}"
-    if errors:
-        summary += f" | ERRORS: {'; '.join(errors)}"
-
     print(summary)
     if errors:
-        print(json.dumps({"status": "PARTIAL", "adr_id": adr_id, "logs": logs, "errors": errors}), file=sys.stderr)
         sys.exit(1)
 
 
