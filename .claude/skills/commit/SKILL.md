@@ -32,16 +32,11 @@ Automated git execution protocol. Partitions modifications into clean logical un
 
 ## Output Format
 
-Return ONLY the structured card below:
+Return ONLY the structured card below (do NOT list individual files):
 
 ### 📌 [COMMIT] <Task / Scope Title>
 
-**1. Overview**
-- **Objective**: Git commit execution
-- **Status**: <COMPLETE>
-
-**2. Commit Summary**
-- **Total Commits**: <count>
-- **Details**:
-  - `[<short_hash>]` <subject> (<file_count> files)
+- **Status**: COMPLETE
+- **Commit**: `[<short_hash>]` <subject>
+- **Summary**: <commit_count> commit(s) | <total_files_changed> file(s) changed
 
