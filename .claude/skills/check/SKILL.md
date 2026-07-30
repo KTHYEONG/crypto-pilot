@@ -31,15 +31,20 @@ uv run python scripts/lean_check.py --files <modified .py files> --spec <contrac
 
 ## Output Format
 
-### PASS Output
-Return ONLY this 2-line summary:
+Do NOT dump raw error logs or test suites in chat. Return ONLY the structured card below:
 
-🟢 `[CHECK AUDIT PASS] <Blueprint>`
-`Spec/Wiring: <PASS> | Mypy: <PASS> | Regression: <PASS> | Cov: <FinalCov%> | Files: <FileCoverageTable>`
+### 📌 [CHECK] <Audit Target / Task Title>
 
-### FAIL Output
-On failure, report ONLY:
-🔴 `[CHECK AUDIT FAIL] <Blueprint>`
-`Phase: <Contract/Static/Tests/Coverage> | Root Cause: <Cause> | Action: <Smallest next action>`
+**1. Overview**
+- **Objective**: Independent contract, typing, coverage, and regression audit
+- **Status**: <PASS | FAIL>
+
+**2. Audit Metrics**
+- **Checks**: Spec/Wiring: <PASS/FAIL> | Mypy: <PASS/FAIL> | Regression: <PASS/FAIL>
+- **Coverage**: Total: <FinalCov%> | Modified Files: <FileCoverageTable>
+
+**3. Action Items** (Only on FAIL)
+- **Root Cause**: <1-line root cause of failure>
+- **Fix Plan**: <1-line focused remedy>
 
 
