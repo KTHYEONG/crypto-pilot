@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import argparse
 import ast
+import importlib
+import inspect
 import json
 import os
 import re
@@ -11,6 +13,9 @@ import sys
 from typing import Any
 
 JsonDiag = dict[str, Any]
+
+if os.getcwd() not in sys.path:
+    sys.path.insert(0, os.getcwd())
 
 
 def _emit_json(
@@ -28,6 +33,16 @@ def _emit_json(
             "diagnostics": diagnostics,
         }
     )
+
+
+def _fail_exit_many(phase: str, header: str, diags: list[JsonDiag]) -> None:
+    """Like _fail_exit but reports every diagnostic in one pass instead of
+    just the first, so a single run surfaces the full remediation list."""
+    print(header)
+    for d in diags:
+        print(f"FAIL | {d.get('error', '')}")
+    print(_emit_json("FAIL", phase, diags), file=sys.stderr)
+    sys.exit(1)
 
 
 def run_cmd(cmd: list[str], timeout: int = 120) -> subprocess.CompletedProcess[str]:
@@ -197,6 +212,224 @@ def _is_stub_node(node: ast.AST) -> bool:
     return False
 
 
+def _is_json_primitive(v: Any) -> bool:
+    if v is None or isinstance(v, (bool, int, float, str)):
+        return True
+    if isinstance(v, list):
+        return all(_is_json_primitive(x) for x in v)
+    if isinstance(v, dict):
+        return all(isinstance(k, str) and _is_json_primitive(x) for k, x in v.items())
+    return False
+
+
+def _looks_like_prose(v: Any) -> bool:
+    """Spec authors write two kinds of string values: real short scalar
+    arguments ("xs", "rsi") and descriptive placeholders for fixtures/objects
+    ("300-bar synthetic fixture", "(8,3) finite"). Real arguments never
+    contain whitespace; descriptions almost always do. This single heuristic
+    is what actually distinguishes them in practice."""
+    if isinstance(v, str):
+        return " " in v.strip() or len(v) > 40
+    if isinstance(v, list):
+        return any(_looks_like_prose(x) for x in v)
+    if isinstance(v, dict):
+        return any(_looks_like_prose(x) for x in v.values())
+    return False
+
+
+def _is_concretely_callable(fn: Any, inp: dict[str, Any]) -> bool:
+    """True only when every input key is a real parameter of fn, every value
+    is a JSON primitive with no prose-like strings, and binding those kwargs
+    against fn's signature would not raise (i.e. no missing required args)."""
+    if not all(_is_json_primitive(v) and not _looks_like_prose(v) for v in inp.values()):
+        return False
+    try:
+        sig = inspect.signature(fn)
+    except (TypeError, ValueError):
+        return False
+    valid_params = set(sig.parameters.keys())
+    if not set(inp.keys()) <= valid_params:
+        return False
+    try:
+        sig.bind(**inp)
+    except TypeError:
+        return False
+    return True
+
+
+def _values_match(actual: Any, expected: Any) -> bool:
+    try:
+        import numpy as np
+        if isinstance(actual, np.ndarray):
+            actual = actual.tolist()
+        if isinstance(expected, bool) or isinstance(actual, bool):
+            return bool(actual) == bool(expected)
+        if isinstance(expected, (int, float)) and isinstance(actual, (int, float)):
+            return abs(float(actual) - float(expected)) < 1e-6
+        if isinstance(expected, list) and isinstance(actual, list):
+            return len(expected) == len(actual) and all(
+                _values_match(a, e) for a, e in zip(actual, expected, strict=True)
+            )
+        return bool(actual == expected)
+    except Exception:
+        return False
+
+
+def _coerce_list_args(inp: dict[str, Any]) -> dict[str, Any]:
+    """This codebase's contract functions overwhelmingly take NDArray
+    parameters. A JSON list value ([[1.0],[2.0]]) is coerced to a numpy array
+    (float64, or bool if every leaf is a bool) so real array-taking functions
+    become executable instead of only ever matching scalar-only signatures."""
+    import numpy as np
+
+    def is_bool_only(v: Any) -> bool:
+        if isinstance(v, bool):
+            return True
+        if isinstance(v, list):
+            return all(is_bool_only(x) for x in v)
+        return False
+
+    out: dict[str, Any] = {}
+    for k, v in inp.items():
+        if isinstance(v, list):
+            out[k] = np.array(v, dtype=np.bool_ if is_bool_only(v) else np.float64)
+        else:
+            out[k] = v
+    return out
+
+
+def _file_to_module(file_hint: str) -> str:
+    return file_hint[:-3].replace("/", ".") if file_hint.endswith(".py") else file_hint.replace("/", ".")
+
+
+def _execute_assertions(
+    fh: str, kind: str, name: str, assertions: list[Any],
+) -> list[JsonDiag]:
+    """Best-effort dynamic verification: actually calls the contract's target
+    function with each assertion's 'input' and compares to 'output'/'exception'.
+
+    Only attempts execution when kind=='function' (no dotted owner -- methods
+    need an instance the contract doesn't describe) and every input/output
+    value is a JSON primitive (numbers/strings/bools/lists/dicts thereof).
+    Descriptive assertions ("output": "tuple of 4 LegBook in registry order")
+    or fixture-based inputs ("input": {"close": "300-bar synthetic fixture"})
+    are silently skipped, not failed -- they still require a human/implement
+    step, but a skip must never be reported as a pass.
+    """
+    diags: list[JsonDiag] = []
+    if kind != "function" or "." in name:
+        return diags
+    module_name = _file_to_module(fh)
+    try:
+        module = importlib.import_module(module_name)
+    except Exception as e:
+        diags.append({
+            "file": fh, "line": 0,
+            "error": f"Spec: could not import {module_name} to verify assertions for '{name}': {type(e).__name__}: {e}",
+            "fix_hint": f"Fix the ImportError in {fh} so assertion verification can run",
+        })
+        return diags
+    fn = getattr(module, name, None)
+    if fn is None or not callable(fn):
+        return diags
+
+    for idx, assertion in enumerate(assertions):
+        inp = assertion.get("input")
+        if not isinstance(inp, dict) or not _is_concretely_callable(fn, inp):
+            continue  # not machine-callable (fixture/object/prose input) -- skip, don't fail
+
+        expects_exception = "exception" in assertion
+        expects_output = (
+            "output" in assertion
+            and _is_json_primitive(assertion["output"])
+            and not _looks_like_prose(assertion["output"])
+        )
+        if not expects_exception and not expects_output:
+            continue  # descriptive-only assertion -- skip, don't fail
+
+        try:
+            result = fn(**_coerce_list_args(inp))
+        except Exception as e:  # noqa: BLE001
+            if expects_exception:
+                expected_exc = assertion["exception"]
+                if type(e).__name__ != expected_exc:
+                    diags.append({
+                        "file": fh, "line": 0,
+                        "error": (
+                            f"Spec assertion #{idx} for '{name}': expected exception "
+                            f"{expected_exc!r} but got {type(e).__name__}: {e}"
+                        ),
+                        "fix_hint": f"Fix {name} in {fh} to raise {expected_exc} for input {inp}",
+                    })
+            else:
+                diags.append({
+                    "file": fh, "line": 0,
+                    "error": f"Spec assertion #{idx} for '{name}': unexpected {type(e).__name__} for input {inp}: {e}",
+                    "fix_hint": f"Fix {name} in {fh} so it does not raise for input {inp}",
+                })
+            continue
+
+        if expects_exception:
+            diags.append({
+                "file": fh, "line": 0,
+                "error": (
+                    f"Spec assertion #{idx} for '{name}': expected exception "
+                    f"{assertion['exception']!r} but got return value {result!r} for input {inp}"
+                ),
+                "fix_hint": f"Fix {name} in {fh} to raise {assertion['exception']} for input {inp}",
+            })
+        elif expects_output and not _values_match(result, assertion["output"]):
+            diags.append({
+                "file": fh, "line": 0,
+                "error": (
+                    f"Spec assertion #{idx} for '{name}': input {inp} produced {result!r}, "
+                    f"expected {assertion['output']!r}"
+                ),
+                "fix_hint": f"Fix {name} in {fh} so input {inp} returns {assertion['output']!r}",
+            })
+    return diags
+
+
+def _check_orphaned_implementations(fh: str, kind: str, name: str) -> list[JsonDiag]:
+    """A function/class that only appears in its own def line and in tests/
+    is dead in production -- it compiles, may even be unit-tested, and does
+    nothing when the pipeline runs. Grep src/ (excluding tests/) for any
+    reference outside the definition itself."""
+    if kind == "field":
+        return []
+    leaf = name.rpartition(".")[2] if "." in name else name
+    if not leaf:
+        return []
+    ref_pat = re.compile(rf"\b{re.escape(leaf)}\b")
+    def_pat = re.compile(rf"^\s*(?:def|class)\s+{re.escape(leaf)}\b")
+    found_caller = False
+    for root, dirs, files in os.walk("src"):
+        dirs[:] = [d for d in dirs if d != "__pycache__"]
+        for fn_name in files:
+            if not fn_name.endswith(".py"):
+                continue
+            fp = os.path.join(root, fn_name)
+            try:
+                with open(fp, encoding="utf-8", errors="ignore") as f:
+                    for line in f:
+                        if ref_pat.search(line) and not def_pat.match(line):
+                            found_caller = True
+                            break
+            except OSError:
+                continue
+            if found_caller:
+                break
+        if found_caller:
+            break
+    if found_caller:
+        return []
+    return [{
+        "file": fh, "line": 0,
+        "error": f"Spec: {kind} '{name}' has no callers in src/ outside its own definition (orphaned implementation)",
+        "fix_hint": f"Wire {name} into its caller per the spec's wiring plan -- it currently does nothing in production",
+    }]
+
+
 def _check_spec_compliance(spec_path: str) -> tuple[int, list[JsonDiag]]:
     diagnostics: list[JsonDiag] = []
     try:
@@ -270,6 +503,12 @@ def _check_spec_compliance(spec_path: str) -> tuple[int, list[JsonDiag]]:
                     msg = f"Spec: {kind} '{name}' is a stub or dummy implementation (pass / Ellipsis / NotImplementedError / logger+dummy return)"
                     d = {"file": fh, "line": target_node.lineno, "error": msg, "fix_hint": f"Implement real logic in {name}"}
                     diagnostics.append(d)
+                else:
+                    # Implementation exists and isn't a stub -- now verify it
+                    # actually behaves per the contract's assertions, and that
+                    # it has a real production caller (not an orphan).
+                    diagnostics.extend(_execute_assertions(fh, kind, name, assertions))
+                    diagnostics.extend(_check_orphaned_implementations(fh, kind, name))
 
     for s in contract.get("scenarios", []):
         test_name: str = s.get("name", "")
@@ -333,16 +572,43 @@ def _check_spec_compliance(spec_path: str) -> tuple[int, list[JsonDiag]]:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Lean Check with JSON diagnostics.")
-    parser.add_argument("--files", nargs="+", required=True)
+    parser.add_argument("--files", nargs="*", default=[])
     parser.add_argument("--spec", default=None, help="Path to spec contract JSON for compliance verification")
     parser.add_argument("--skip-lint", action="store_true", help="Skip Ruff linting")
     parser.add_argument("--skip-mypy", action="store_true", help="Skip Mypy static check")
+    parser.add_argument(
+        "--spec-only", action="store_true",
+        help="Run ONLY spec-compliance (AST non-dummy check, dynamic assertion execution, "
+             "orphaned-implementation gate, wiring text-match) and exit -- no ruff/mypy/pytest/"
+             "coverage. Seconds, not minutes. Intended as an /implement inner-loop check: run it "
+             "after Phase B (core logic) and again after Phase C (wiring), before ever invoking "
+             "the full /check pass. A green --spec-only run is necessary but not sufficient for "
+             "/check PASS -- mypy/pytest/coverage still run separately and can still fail.",
+    )
     parser.add_argument(
         "--deselect", nargs="*", default=[],
         help="Pytest node ids to deselect (use for pre-existing baseline failures "
              "confirmed via git-stash reproduction, never for failures introduced this session)",
     )
     args = parser.parse_args()
+
+    if args.spec_only:
+        if not args.spec:
+            print("FAIL | --spec-only requires --spec")
+            sys.exit(2)
+        ec, diags = _check_spec_compliance(args.spec)
+        if ec != 0:
+            for d in diags:
+                print(f"FAIL | {d.get('error', '')}")
+            print(_emit_json("FAIL", "spec-compliance", diags), file=sys.stderr)
+            sys.exit(1)
+        print("PASS | Spec compliance verified (assertions executed, orphaned-implementation gate clear)")
+        print(_emit_json("PASS", "spec-compliance", []), file=sys.stderr)
+        sys.exit(0)
+
+    if not args.files:
+        print("FAIL | --files is required unless --spec-only is set")
+        sys.exit(2)
 
     py_files = [f for f in args.files if f.endswith(".py")]
     if not py_files and not args.spec:
@@ -496,11 +762,11 @@ def main() -> None:
                         missing_infos.append(f"{sf.split('/')[-1]}:{parts[-1]}")
 
         if coverage_violations:
-            first_fail = coverage_violations[0]
-            _fail_exit(
+            n = len(coverage_violations)
+            _fail_exit_many(
                 "coverage-target",
-                f"FAIL | Coverage target missed: {first_fail['file']} ({first_fail['error']})",
-                first_fail,
+                f"FAIL | {n} coverage target violation(s) across {len({d['file'] for d in coverage_violations})} file(s)",
+                coverage_violations,
             )
 
         suffix = f", Missing: [{', '.join(missing_infos)}]" if missing_infos else ""
