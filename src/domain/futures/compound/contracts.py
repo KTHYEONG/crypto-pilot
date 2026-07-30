@@ -491,12 +491,83 @@ class LadderStageResult:
 
 
 @dataclass(slots=True, frozen=True)
+class LegScreenDecision:
+    economic_eligible: bool
+    familywise_supported: bool
+    capital_eligible: bool
+    economic_reasons: tuple[str, ...]
+    familywise_reasons: tuple[str, ...]
+    critical_t: float
+    n_tested_hypotheses: int
+
+    def __post_init__(self) -> None:
+        if self.capital_eligible != (self.economic_eligible and self.familywise_supported):
+            raise ValueError(
+                f"capital_eligible must equal economic_eligible and familywise_supported, "
+                f"got economic={self.economic_eligible} familywise={self.familywise_supported} "
+                f"capital={self.capital_eligible}"
+            )
+        if not np.isfinite(self.critical_t):
+            raise ValueError(f"critical_t must be finite, got {self.critical_t}")
+        if self.n_tested_hypotheses < 1:
+            raise ValueError(f"n_tested_hypotheses must be >= 1, got {self.n_tested_hypotheses}")
+
+
+@dataclass(slots=True, frozen=True)
+class PortfolioAdmissionEvidence:
+    admitted: bool
+    reasons: tuple[str, ...]
+    net_alpha_ann: float
+    stressed_net_alpha_ann: float
+    posterior_positive: float
+    positive_folds: int
+    n_folds: int
+    n_traded_bars: int
+
+    def __post_init__(self) -> None:
+        if self.admitted and self.reasons:
+            raise ValueError("admitted must have empty reasons")
+        if not self.admitted and not self.reasons:
+            raise ValueError("not-admitted must have at least one reason")
+        if not np.all(np.isfinite([self.net_alpha_ann, self.stressed_net_alpha_ann, self.posterior_positive])):
+            raise ValueError("net_alpha_ann, stressed_net_alpha_ann, posterior_positive must be finite")
+        if not 0.0 <= self.posterior_positive <= 1.0:
+            raise ValueError(f"posterior_positive must be in [0, 1], got {self.posterior_positive}")
+        if self.positive_folds < 0 or self.positive_folds > self.n_folds:
+            raise ValueError(f"positive_folds {self.positive_folds} must be in [0, {self.n_folds}]")
+        if self.n_traded_bars < 0:
+            raise ValueError(f"n_traded_bars must be >= 0, got {self.n_traded_bars}")
+
+
+@dataclass(slots=True, frozen=True)
+class L1AttributionReport:
+    production: PortfolioAdmissionEvidence
+    shadow: PortfolioAdmissionEvidence
+    economic_candidate_count: int
+    capital_candidate_count: int
+    bottleneck_code: str
+    shadow_available: bool
+    production_weights_unchanged: bool
+
+    def __post_init__(self) -> None:
+        valid_codes = ("deployable", "familywise_power_limited", "signal_economics_absent",
+                       "signal_generalization_failed", "diagnostic_unavailable")
+        if self.bottleneck_code not in valid_codes:
+            raise ValueError(f"bottleneck_code must be one of {valid_codes}, got {self.bottleneck_code}")
+        if self.economic_candidate_count < 0:
+            raise ValueError(f"economic_candidate_count must be >= 0, got {self.economic_candidate_count}")
+        if self.capital_candidate_count < 0:
+            raise ValueError(f"capital_candidate_count must be >= 0, got {self.capital_candidate_count}")
+
+
+@dataclass(slots=True, frozen=True)
 class CompoundEngineResult:
     handoff: AlphaEventTape
     ledger: ExecutionLedger
     l2: L2Evaluation
     l3: L3ValidationResult
     deployment_candidate: DeploymentCandidate | None = None
+    l1_attribution: L1AttributionReport | None = None
 
 
 @dataclass(slots=True, frozen=True)
@@ -1385,20 +1456,34 @@ __all__ = [
     "HandoffAdmissionEvidence",
     "HandoffResult",
     "InsufficientCoverageError",
+    "L1AttributionReport",
     "L1LegPanel",
     "L1RoutingSleeve",
+    "L1RoutingSleeve",
+    "L1SleevePosterior",
     "L1SleevePosterior",
     "L2BenchmarkSeries",
+    "L2BenchmarkSeries",
+    "L2CategoryResult",
     "L2CategoryResult",
     "L2Evaluation",
+    "L2Evaluation",
+    "L2GateVerdict",
     "L2GateVerdict",
     "L3ValidationResult",
+    "L3ValidationResult",
+    "LadderStageResult",
     "LadderStageResult",
     "LegBook",
+    "LegBook",
     "LegEvidence",
+    "LegEvidence",
+    "LegScreenDecision",
+    "LegScreenDecision",
     "MarketFeatureCube",
     "MultiTimeframeBars",
     "MultiscaleAlphaDefinition",
+    "PortfolioAdmissionEvidence",
     "PortfolioDecision",
     "PrequentialExpertRoute",
     "QuarterlyBarBoundaries",
