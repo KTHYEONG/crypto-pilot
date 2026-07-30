@@ -374,7 +374,7 @@ class L2Evaluation:
     annual_volatility: float
     annual_turnover: float
     cost_drag_ratio: float
-    capacity_utilisation_p95: float
+    max_name_weight_p95: float
     active_days_ratio: float
     rebalance_count: int
     positive_outer_folds: int
@@ -398,7 +398,7 @@ class L2Evaluation:
             self.sharpe, self.sharpe_probability, self.deflated_sharpe_probability,
             self.calmar, self.max_drawdown, self.daily_cvar95,
             self.annual_volatility, self.annual_turnover, self.cost_drag_ratio,
-            self.capacity_utilisation_p95, self.absolute_cagr, self.active_days_ratio,
+            self.max_name_weight_p95, self.absolute_cagr, self.active_days_ratio,
         ):
             if not np.isfinite(metric):
                 raise ValueError(f"non-finite metric: {metric}")
@@ -428,7 +428,7 @@ class L2Evaluation:
             "annual_turnover": {"value": self.annual_turnover, "unit": "turns/year"},
             "cost_drag_ratio": {"value": self.cost_drag_ratio, "unit": "fraction"},
             "absolute_cagr": {"value": self.absolute_cagr, "unit": "fraction/year"},
-            "capacity_utilisation_p95": {"value": self.capacity_utilisation_p95, "unit": "fraction"},
+            "max_name_weight_p95": {"value": self.max_name_weight_p95, "unit": "fraction"},
             "active_days_ratio": {"value": self.active_days_ratio, "unit": "fraction"},
             "rebalance_count": {"value": self.rebalance_count, "unit": "count"},
             "positive_outer_folds": {"value": self.positive_outer_folds, "unit": "count"},
