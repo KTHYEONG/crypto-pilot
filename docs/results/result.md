@@ -155,3 +155,47 @@ positive folds 1/3으로 자본화에 실패했다.
 - [result.json](../../logs/futures/compound/20260730_122624/result.json)
 - [manifest.json](../../logs/futures/compound/20260730_122624/manifest.json)
 - [target weights](../../logs/futures/compound/20260730_122624/target_weights.npy)
+
+## 8. 2026-07-30 L1 Capital Formation Redesign — 실배포 후 재실행
+
+`docs/specs/l1_capital_formation_redesign.md` (C1 연속 shrinkage 레그 가중,
+C2 fold0부터 prior 배포, C4 posterior 연속 handoff `φ`, C5 오버레이 북-구동
+전환)를 구현하고 `/check` PASS(mypy 0 issue, 대상 테스트 전체 그린, lean_check
+spec-compliance PASS) 후 `full/local` 재실행했다. 임계값
+(`min_growth_posterior_probability=0.90`, `min_positive_fold_ratio=0.50`,
+`L2GateConfig`, `L3ValidationConfig`)은 모두 무변경.
+
+| Metric | 이전 (`20260730_122624`, 구조 수정 전) | 최신 (`20260730_134512`) |
+|---|---:|---:|
+| L1 verdict | `signal_generalization_failed` | `partial_evidence_sized` |
+| L1 posterior | 0.405 (shadow) / n/a (production=0) | **0.7435** |
+| handoff scale `φ` | 0 (배포 자체가 없음) | **0.609** |
+| 배포된 book | 전 구간(5,442 bars) 0 | **4,020 / 5,442 bars 비영(非零)** |
+| L2 verdict | `no_evidence` (평가 대상 book 자체가 없음) | `fail` (실체 book을 평가했으나 초과성장 기준 미달) |
+| CAGR | 0.00% | **+22.30%** |
+| Sharpe | 0.000 | **1.429** |
+| annual turnover | 0.00 | 124.37 |
+| max drawdown | 0.00% | 8.04% |
+| L3 verdict | `reject` (`l2_not_pass`) | `reject` (`l2_not_pass`, posterior 0.456) |
+
+**핵심 확인**: 이전 실행의 `target_weights.npy`는 5,442개 bar 전 구간에서
+문자 그대로 전부 0이었다(`np.sum(np.abs(w).sum(axis=1) > 1e-9) == 0`). L1이
+단 한 번도 실제 book을 만든 적이 없었다는 뜻이다. 재설계 후 처음으로 L1이
+`φ=0.609`로 스케일된 실체 book을 만들었고, L2가 그 book을 실제로 평가해
+CAGR +22.3%/Sharpe 1.43을 관측했다. 다만 `excess_growth_probability=0.737<0.9`,
+`stressed_excess_growth_lcb90=-0.121`로 **초과성장(벤치마크 대비) 기준은
+여전히 미달**이라 배포는 `fail`로 정직하게 차단됐다 — 임계값을 건드리지
+않고도 진단이 "신호 없음"에서 "신호는 있으나 벤치마크 초과분 검증 미달"로
+정확해졌다.
+
+**부수 발견 (스펙 범위 밖 버그)**: 재실행 중 `project_terminal_portfolio_caps`
+(`src/domain/futures/compound/allocator.py`)가 `max_iterations=64`로 수렴
+실패했다. 실측 추적 결과 발산이 아니라 반복당 비율 ≈0.877의 정상 기하수렴이며
+`1e-12` 허용오차 도달에 약 192회가 필요했다. 이 함수는 L1이 항상 0-book만
+생성해 실제로 한 번도 0이 아닌 입력을 받아본 적이 없어 잠재해 있던 결함이다.
+`max_iterations`를 64→256으로만 상향(캡·레버리지 임계값은 무변경)해 해결.
+
+### artifact
+
+- [result.json](../../logs/futures/compound/20260730_134512/result.json)
+- [target weights](../../logs/futures/compound/20260730_134512/target_weights.npy)
