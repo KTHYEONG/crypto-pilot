@@ -5,6 +5,7 @@ import logging
 import numpy as np
 from numpy.typing import NDArray
 
+from src.domain.futures.compound.bootstrap import circular_stationary_bootstrap_growth, politis_white_block_length
 from src.domain.futures.compound.config import L1LegConfig
 from src.domain.futures.compound.contracts import (
     CausalFold,
@@ -167,10 +168,16 @@ def evaluate_portfolio_admission(
         return False, ("insufficient_traded_bars",), 0.0
     net_ann = float(np.mean(traded_returns)) * config.bars_per_year
     stressed_ann = float(np.mean(traded_stressed)) * config.bars_per_year
-    rng = np.random.default_rng(42)
-    boot = rng.choice(traded_returns, size=(config.n_bootstrap, n_traded), replace=True)
-    boot_mean = np.mean(boot, axis=1)
-    posterior = float(np.mean(boot_mean > 0.0))
+    pw_block = 5.0
+    if n_traded >= 30:
+        try:
+            pw_block = politis_white_block_length(traded_returns)
+        except ValueError:
+            pw_block = 5.0
+    _, _, posterior = circular_stationary_bootstrap_growth(
+        traded_returns, config.bars_per_year,
+        n_bootstrap=config.n_bootstrap, block_size=pw_block, seed=42,
+    )
     if n_traded > 0:
         fold_returns = []
         for sl in traded_slices:
