@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import dataclasses
 import logging
 
 import numpy as np
 from numpy.typing import NDArray
+from scipy.stats import norm as sp_norm
 
 from src.domain.futures.compound.bootstrap import circular_stationary_bootstrap_growth, politis_white_block_length
 from src.domain.futures.compound.config import L1LegConfig
@@ -24,11 +26,11 @@ def compute_leg_sizing_score(
         raise ValueError(f"bars_per_year must be > 0, got {config.bars_per_year}")
     if evidence.evidence_weight <= 0.0:
         return 0.0
-    alpha_net = evidence.alpha_ann - cost_bps * 1e-4 * evidence.mean_turnover_per_bar * config.bars_per_year
-    alpha_net = max(alpha_net, 0.0)
-    var_ann = (evidence.alpha_ann / max(evidence.alpha_sharpe, 1e-12)) ** 2
+    net_ann = max(evidence.net_alpha_ann, 0.0)
+    net_var_ann = (evidence.net_alpha_ann / max(evidence.net_alpha_sharpe, 1e-12)) ** 2 if evidence.net_alpha_sharpe > 0 else 1.0
     fold_consistency = evidence.positive_folds / max(evidence.n_folds, 1)
-    return alpha_net / max(var_ann, 1e-12) * fold_consistency
+    return net_ann / max(net_var_ann, 1e-12) * fold_consistency
+
 
 def compute_evidence_weight(
     evidence: LegEvidence,
@@ -42,6 +44,45 @@ def compute_evidence_weight(
     if evidence.n_folds > 0 and evidence.positive_folds / evidence.n_folds < config.min_positive_fold_ratio:
         return 0.0
     return 1.0
+
+
+def screen_leg_evidence(
+    evidence: LegEvidence,
+    cost_bps: float,
+    config: L1LegConfig,
+    n_tested_hypotheses: int,
+) -> LegEvidence:
+    if n_tested_hypotheses < 1:
+        raise ValueError(f"n_tested_hypotheses must be >= 1, got {n_tested_hypotheses}")
+    if not np.isfinite(cost_bps) or cost_bps < 0:
+        raise ValueError(f"cost_bps must be finite and non-negative, got {cost_bps}")
+    reasons: list[str] = []
+    if evidence.n_folds < config.warmup_folds:
+        reasons.append(f"insufficient_folds:{evidence.n_folds}_below_{config.warmup_folds}")
+    if n_tested_hypotheses > 1:
+        critical_t = float(sp_norm.isf(config.familywise_error_rate / n_tested_hypotheses))
+    else:
+        critical_t = 0.0
+    if evidence.t_net_alpha_newey_west < critical_t:
+        reasons.append(
+            f"net_t_below_familywise_threshold:"
+            f"{evidence.t_net_alpha_newey_west:.3f}_below_{critical_t:.3f}_K={n_tested_hypotheses}"
+        )
+    if evidence.mean_turnover_per_bar <= config.min_turnover_per_bar:
+        reasons.append(
+            f"turnover_below_floor:{evidence.mean_turnover_per_bar:.6f}_below_{config.min_turnover_per_bar}"
+        )
+    if evidence.breakeven_cost_bps <= cost_bps * config.cost_safety_margin:
+        reasons.append(
+            f"cost_headroom:BE_{evidence.breakeven_cost_bps:.2f}bps_<={cost_bps * config.cost_safety_margin:.2f}bps"
+        )
+    if evidence.n_folds > 0 and evidence.positive_folds / evidence.n_folds < config.min_positive_fold_ratio:
+        reasons.append(
+            f"fold_instability:{evidence.positive_folds}/{evidence.n_folds}_"
+            f"below_{config.min_positive_fold_ratio}"
+        )
+    evidence_weight = 0.0 if reasons else 1.0
+    return dataclasses.replace(evidence, evidence_weight=evidence_weight, reasons=tuple(reasons))
 
 
 def normalise_leg_weights(
@@ -59,20 +100,11 @@ def normalise_leg_weights(
     w_sum = float(np.sum(w))
     if w_sum <= 1e-12:
         return np.zeros_like(w)
+    w = np.clip(w, 0.0, None)
     w = w / w_sum
-    for _ in range(8):
-        exceed = w > max_leg_weight
-        if not np.any(exceed):
-            break
-        excess = float(np.sum(w[exceed] - max_leg_weight))
-        n_exceed = int(np.sum(exceed))
-        w[exceed] = max_leg_weight
-        unsaturated = ~exceed
-        unsaturated_sum = float(np.sum(w[unsaturated]))
-        if unsaturated_sum <= 1e-12:
-            w[exceed] = max_leg_weight + excess / n_exceed
-            break
-        w[unsaturated] = w[unsaturated] + excess * w[unsaturated] / unsaturated_sum
+    w = np.minimum(w, max_leg_weight)
+    if np.any(~np.isfinite(w)):
+        return np.zeros_like(w)
     return w
 
 
@@ -92,6 +124,7 @@ def accumulate_prequential_leg_weights(
         for k in range(k_):
             ev = evaluate_leg_alpha_on_slices(
                 legs[k], market_1d, tuple(oos_slices[:i]), cost_bps, config,
+                n_tested_hypotheses=k_,
             )
             prev_evidence.append(ev)
         w = np.zeros(k_, dtype=np.float64)
@@ -112,9 +145,11 @@ def evaluate_leg_alpha_on_slices(
     oos_slices: tuple[slice, ...],
     cost_bps: float,
     config: L1LegConfig,
+    *,
+    n_tested_hypotheses: int = 1,
 ) -> LegEvidence:
     from src.domain.futures.compound.l1_leg_evaluation import evaluate_leg_alpha
-    return evaluate_leg_alpha(leg, market_1d, oos_slices, cost_bps, config)
+    return evaluate_leg_alpha(leg, market_1d, oos_slices, cost_bps, config, n_tested_hypotheses=n_tested_hypotheses)
 
 
 def combine_leg_books(
