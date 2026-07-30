@@ -29,7 +29,7 @@ _DEFAULT_REGISTRY: tuple[SignalConceptSpec, ...] = (
     SignalConceptSpec(
         concept_id="vol_regime", mode="ts", horizon_band_bars=(6, 12, 24),
         declared_orientation=1,
-        member_signal_ids=("volume_zscore", "bollinger_bandwidth", "volatility_squeeze_keltner"),
+        member_signal_ids=("volume_zscore", "bollinger_bandwidth"),
     ),
 )
 
@@ -38,6 +38,14 @@ def build_concept_registry(
     descriptors: tuple[SignalDescriptor, ...],
     config: L1LegConfig,
 ) -> tuple[SignalConceptSpec, ...]:
+    known_families = {d.family for d in descriptors}
+    for spec in _DEFAULT_REGISTRY:
+        for fam in spec.member_signal_ids:
+            if fam not in known_families:
+                raise ValueError(
+                    f"concept {spec.concept_id!r} references member family {fam!r} "
+                    f"which does not exist in descriptors"
+                )
     return _DEFAULT_REGISTRY
 
 
@@ -86,6 +94,46 @@ def build_tranche_book(
     return book
 
 
+def compute_lagged_gross_returns(
+    book_2d: NDArray[np.float64], asset_return_2d: NDArray[np.float64],
+) -> NDArray[np.float64]:
+    if book_2d.shape != asset_return_2d.shape:
+        raise ValueError(
+            f"book_2d shape {book_2d.shape} != asset_return_2d shape {asset_return_2d.shape}",
+        )
+    n_t = book_2d.shape[0]
+    g = np.zeros(n_t, dtype=np.float64)
+    g[1:] = np.einsum("ts,ts->t", book_2d[:-1], asset_return_2d[1:])
+    return g
+
+
+def cap_per_name_weights(
+    book_2d: NDArray[np.float64], max_name_weight: float, max_iter: int = 8,
+) -> NDArray[np.float64]:
+    if not (0.0 < max_name_weight <= 1.0):
+        raise ValueError(f"max_name_weight must be in (0, 1], got {max_name_weight}")
+    result = book_2d.copy()
+    abs_w = np.abs(result)
+    gross = np.sum(abs_w, axis=1, keepdims=True)
+    gross = np.where(gross > 1e-12, gross, 1.0)
+    abs_w = abs_w / gross
+    result = result / gross
+    for _ in range(max_iter):
+        exceed = abs_w > max_name_weight
+        if not np.any(exceed):
+            break
+        clamped = np.where(exceed, max_name_weight, abs_w)
+        surplus = np.sum(np.where(exceed, abs_w - max_name_weight, 0.0), axis=1, keepdims=True)
+        unsaturated = ~exceed
+        unsaturated_sum = np.sum(abs_w * unsaturated, axis=1, keepdims=True)
+        unsaturated_sum = np.where(unsaturated_sum > 1e-12, unsaturated_sum, 1.0)
+        redistribution = surplus * (abs_w * unsaturated) / unsaturated_sum
+        abs_w = clamped + redistribution
+    sign = np.sign(result)
+    result = sign * abs_w
+    return result
+
+
 def build_leg_books(
     panel: RawSignalPanel,
     eligible_2d: NDArray[np.bool_],
@@ -119,7 +167,9 @@ def build_leg_books(
             v = np.zeros((n_t, n_s), dtype=np.float64)
         else:
             stacked = np.stack(member_scores, axis=-1).astype(np.float64)
-            grid_avg = np.nanmean(stacked, axis=-1)
+            nan_cnt = np.sum(~np.isnan(stacked), axis=-1)
+            nan_sum = np.nansum(stacked, axis=-1)
+            grid_avg = np.divide(nan_sum, nan_cnt, out=np.zeros_like(nan_sum), where=nan_cnt > 0)
             for t in range(n_t):
                 row = grid_avg[t]
                 abs_sum = float(np.sum(np.abs(row)))
@@ -138,12 +188,11 @@ def build_leg_books(
         for t in range(n_t):
             abs_sum = float(np.sum(np.abs(band_avg[t])))
             book[t] = band_avg[t] / abs_sum if abs_sum > 1e-12 else 0.0
+        book = cap_per_name_weights(book, config.max_name_weight)
         turnover = np.zeros(n_t, dtype=np.float64)
         for t in range(1, n_t):
             turnover[t] = float(np.sum(np.abs(book[t] - book[t - 1])))
-        gross_return = np.zeros(n_t, dtype=np.float64)
-        for t in range(1, n_t):
-            gross_return[t] = float(np.dot(book[t], ret_2d[t]))
+        gross_return = compute_lagged_gross_returns(book, ret_2d)
         legs.append(LegBook(
             spec=spec,
             book_2d=book,
