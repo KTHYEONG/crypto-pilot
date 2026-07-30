@@ -1,112 +1,61 @@
 ---
 name: implement
-description: Translate logic and test blueprints into working Python code following TDD with L1 validation.
+description: Implement an approved spec mechanically with focused TDD and integration verification.
 ---
 
-# Skill: Implement (TDD Executor & Auto-Chaining)
+# Implement
 
-## Purpose
-Translate the logical Blueprint (`docs/specs/*.md`) into working Python code using a **TDD (Test-Driven Development)** cycle. Adhere strictly to the defined contract and test matrix in the spec.
-Optimize for **low-cost models (Doer)** by enforcing strict mechanical execution and automatic pipeline triggering.
+The contract is frozen input. Do not redesign, rename, move public symbols, relax thresholds, or edit the
+contract to accommodate an implementation choice. Escalate an actual contract conflict to the Spec model.
 
-## Execution Rules
+## Before coding
 
-### 1. Read the Blueprint
-- Read `docs/specs/*.md` to extract:
-  - Exact file locations and target function/class contracts (signatures).
-  - The **Skeleton Mock Boilerplate** and scenario descriptions.
-- If a `[feature]_contract.json` exists, load its `scenarios[]` list now. Every `scenarios[].name` is the literal test function name to use — unit scope included, not just integration. Do not invent a more descriptive name; `/check`'s spec-compliance phase matches these as exact strings, and a semantically-equivalent rename reads as a missing test.
+1. Read the spec, contract, rules, and existing caller/tests.
+2. Copy the exact scenario names and target files into a local checklist.
+3. Confirm every `file_hint`, symbol, and wiring edge with `rg`.
+4. If any item disagrees with the repository, stop with a precise conflict report.
 
-### 2. Three-Phase Implementation Cycle
-Phase boundaries are defined by goals, not by pass/fail of tests. Do NOT skip directly to a later phase.
+## Three phases
 
-#### Phase A — Contract
-Goal: source code compiles (importable, no SyntaxError) and the new public API is minimally callable.
+### A. Contract surface
 
-1. Write new dataclasses/classes/functions in `src/...` with **full signature, docstring, `__post_init__` validation, and error_policy** from the spec.
-2. Write 1-2 minimal tests that verify the contract:
-   - Constructor succeeds with valid args (if applicable).
-   - Constructor raises `ValueError` for each invalid arg (if applicable).
-   - Function returns correct type on empty/trivial input.
-3. Run `uv run pytest -k [target] --no-header -q` — it MUST pass before proceeding.
-4. If contract changes (adds/removes fields, renames, changes signature):
-   - Annotate with `# CONTRACT:` in the source.
-   - **Propagate**: grep all callers and `mocker.Mock(spec=...)` references → update them.
-   - Existing tests MUST remain green after propagation.
+- Add or update signatures, dataclasses, validation, and imports.
+- Add minimal contract tests using the frozen scenario names.
+- Run the affected tests and ruff with `uv run`.
 
-#### Phase B — Core Logic
-Goal: each new function produces correct output for its primary algorithm.
+### B. Logic
 
-1. Implement the core algorithm in pure functions (no I/O, no global state).
-2. Write tests:
-   - **P0** (2-3 tests): Regression guard — covers the specific bugs/symptoms the spec aims to fix. Use realistic fixtures, strict value assertions.
-   - **P1** (2-3 tests): Happy path + error path for each new function. One test per distinct failure mode.
-   - **Naming**: if a scenario in the contract's `scenarios[]` covers what a P0/P1 test would otherwise cover, use that scenario's exact `name` and `target_test_file` instead of writing an ad-hoc name — even for `"scope": "unit"` entries. Only free-name a test when no contract scenario matches its intent.
-   - Write tests and source **in the same pass**. Do NOT run tests until both are ready.
-3. Run `uv run pytest -k [target] --no-header -q`. If a test fails:
-   - Classify the root cause into one of:
-     - **Logic bug** → fix source, counts as 1 self-healing attempt.
-     - **Test data / fixture problem** → fix test data only, does NOT count toward self-healing budget.
-     - **Environment / non‑deterministic** (floating‑point tolerance, numpy version, import caching) → loosen tolerance or skip that check, does NOT count.
-3b. If `[feature]_contract.json` exists, run
-    `uv run python scripts/lean_check.py --spec-only --spec docs/specs/[feature]_contract.json`
-    (seconds, no ruff/mypy/pytest/coverage). This actually imports every `contracts[]` function this
-    phase touched and calls it with each assertion's literal `input`, comparing the real return
-    value/exception against `output`/`exception` — the same class of bug `/check` would eventually
-    catch, caught here without writing a throwaway `python -c` repro script. A FAIL here is a logic
-    bug — classify and fix per the rule above, same self-healing budget. A skip (no diagnostic for
-    that assertion) means the assertion isn't machine-executable (fixture/object input or descriptive
-    output) — that's expected for many entries and is not itself a signal of anything wrong.
-4. Run `uv run ruff check [modified_files]` — fix any errors.
+- Implement pure logic first; preserve the stated causal and numerical rules.
+- Cover the selected hypothesis, boundaries, failures, and regression symptom with concrete assertions.
+- Run affected tests, strict mypy on touched interfaces, and `--spec-only` when literal assertions are
+  ready.
 
-#### Phase C — Wiring & Integration
-Goal: the new code is called by existing pipeline code, and existing tests for caller modules still pass.
+### C. Wiring
 
-1. Wire into caller modules per the spec's `Integration & Connection Plan`.
-2. **Orphaned-implementation self-check (do this before running any test):** run
-   `uv run python scripts/lean_check.py --spec-only --spec docs/specs/[feature]_contract.json`.
-   This automatically greps `src/` (excluding `tests/` and the symbol's own `def`/`class` line) for
-   every `contracts[].name` and FAILs if none has a production caller — a function that only appears
-   in its own definition and in a test file is not wired. Go back and call it from the anchor the
-   spec's `wiring[].invocation_symbol` describes. This is the highest-cost defect to leave for
-   `/check` to find (it means the entire behavioral change did nothing in production), so catch it
-   here, not later — do not skip this step because Phase B's tests were green; a passing unit test on
-   an uncalled function proves nothing about production behavior.
-   - If this rewrite retires an old branch/cascade, grep the old branch's config fields too (`\bold_field_name\b` across `src/`, excluding its own dataclass line) — a field with zero remaining readers must be deleted in this same phase, along with any test fixtures that only exist to pass it in. (The tool does not infer "this branch was retired" — that judgment stays manual.)
-3. Run `uv run pytest -k [caller_module] --no-header -q` — existing caller tests MUST pass.
-4. If caller uses `mocker.Mock(spec=...)` for the new contract, ensure the mock includes all new default fields.
-5. Add **1 test per `scenarios[]` entry marked `"scope": "integration"`** in the spec's contract, written in the exact `target_test_file` with the exact `name` given — not an ad-hoc new file. This is the same literal-naming rule from step 1 and Phase B, restated here because integration scenarios are the ones most often deferred to this phase and forgotten. `/check`'s spec-compliance phase matches every scenario's name literally regardless of scope; a renamed function in a different file reads as a missing test even when it passes.
-6. Re-run `--spec-only` once more after step 5 — new integration tests sometimes reveal that a scenario name drifted during writing. Cheaper to catch here than at the full `/check` pass.
+- Connect the production caller at the specified anchor.
+- Add every integration scenario using its exact name and target file.
+- Check production callers, stale fields, and retired branches.
+- Run ruff, strict mypy, affected tests, and final `--spec-only` before requesting `/check`.
 
-### 3. Coding Conventions
+## Failure routing
 
-- **No static dummies**: Every function body must contain real business logic. `return {}`, `return True`, `return None` stubs are forbidden unless the spec explicitly requires that value for an empty/error case.
-- **Content-over-Shape Rule**: Every test that involves a computation MUST assert at least one concrete numerical or structural property of the output on a deterministic fixture. Shape-only assertions (e.g. `isinstance`, `.shape`, `is not None`) are **prohibited as the sole check** for any Scenario in the TDD matrix. The spec's assert column names the concrete property — use it. If the spec is vague on the assertion value, **ask for clarification** rather than falling back to shape-only (this counts toward the self-healing budget if it later produces a false-green result). Exceptions:
-  - Phase A (Contract) tests may use shape-only assertions since the goal is importability, not behavioral correctness.
-  - Error-path tests where no valid output exists may assert only the exception type and message.
-  - Rationale: a test that passes without ever exercising the computation path it claims to guard is worse than no test — it creates a false sense of coverage while masking the very bugs this pipeline exists to catch.
-- **No conditional escape hatches**: Never write `assert real_condition or fallback_condition_that_is_almost_always_true` (e.g. `... or total == 0`, `... or guard is not None`) or a bare `assert x >= 0` on a value that can't be negative. Before locking in an assertion for a regression/gate-reachability test, run the fixture standalone (`uv run python -c "..."`) and print the value the assertion depends on — assert the value you actually observed, not a shape that would also pass if the code path never ran. If the assertion is against a contract entry with literal `input`/`output`, `--spec-only` (step 3b above) already executed it for you — reserve the manual repro script for fixtures/gates too complex for a contract assertion to express (multi-branch admission logic, deterministic time-series constructions), where you still have to work out by hand which branch a given fixture exercises.
-- **No unsolicited refactoring**: Do not rename, restructure, or extract shared utilities unless the spec explicitly calls for it.
-- **Type discipline**: `NDArray` annotation dtype MUST match the actual array dtype passed at runtime.
+- Contract/file/name/signature conflict: stop and report; do not edit the spec.
+- Logic failure: fix source and rerun the smallest affected test.
+- Fixture failure: correct only the fixture while preserving expected properties.
+- Coverage failure: collect all changed-line misses, add the complete edge-test set, then rerun once.
+- Vacuous assertion or shape-only computation test: replace it with a concrete numerical or structural
+  property.
 
-### 4. Local Verification
+Keep the change within the manifest. Architecture, public API, and threshold decisions belong to the Spec
+model. Use the normal project command prefix (`uv run`) for all execution.
 
-- Run `uv run ruff check --fix [modified_files]` before running pytest.
-- Run `uv run pytest -k [target_name] --no-header -q`.
-- Run `uv run mypy --strict --no-error-summary [modified_files]` in **advisory mode** before Phase C close. Treat errors as warnings; fix only those that indicate a real contract violation (wrong argument count, missing attribute). Cosmetic type issues (e.g., `Any` vs `float`) are low-priority and can be deferred.
-- If `[feature]_contract.json` exists, run `uv run python scripts/lean_check.py --spec-only --spec docs/specs/[feature]_contract.json` one last time as a pre-flight for `/check`'s spec-compliance phase — it is the exact same check `/check` runs first, so a FAIL here means `/check` will FAIL on the same phase. Getting to green here before ending the session turns the eventual `/check` call into a confirmation instead of a discovery pass.
-- Remove `print()` / logging debug statements before final output.
+## Handoff
 
-### 5. Self-Healing Budget
+Report modified files, focused test result, ruff/mypy status, spec-only status, and any unresolved conflict.
 
-- If local tests, linting, or `--spec-only` fail after all three phases, the model is allowed a maximum of **3 consecutive auto-correction attempts** to fix the errors.
-- **Exception — classified non‑logic failures do not count**: failures whose root cause is identified as test data error or environment/non‑deterministic mismatch (floating-point tolerance, import caching, numpy version differences) are excluded from the 3-attempt budget. In such cases, fix the fixture or loosen the tolerance and continue.
-- A `--spec-only` orphaned-implementation FAIL always counts as a logic bug (the wiring step was skipped or missed its anchor), never as environment/fixture noise.
-- If it still fails after 3 counted attempts, **STOP execution immediately** and report the error logs to the user for human triage. Include the failure classification in the report.
+## Output
 
-## Output Format
-```md
-🛠️ **[IMPLEMENT COMPLETE]** `[Blueprint Name]`
-- **Modified**: `[src/...]`, `[tests/...]`
-- **Status**: Pytest Green ✅ | Cov [value]% | Ruff Fixed ✅ | Spec-Only Pre-flight ✅
-```
+Use a short handoff only:
+
+`🛠️ [IMPLEMENT COMPLETE] <Blueprint>`
+`Modified | Tests | Ruff | Mypy | Spec-only | Unresolved`
