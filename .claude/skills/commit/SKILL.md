@@ -32,8 +32,16 @@ Automated git execution protocol. Partitions modifications into clean logical un
 
 ## Output Format
 
-Return ONLY this 2-line summary card:
+Return ONLY the structured card below:
 
-📌 `[COMMIT COMPLETE] Total: <commit_count> commit(s)`
-`• [<short_hash>] <subject> (<file_count> files)`
+### 📌 [COMMIT] <Task / Scope Title>
+
+**1. Overview**
+- **Objective**: Git commit execution
+- **Status**: <COMPLETE>
+
+**2. Commit Summary**
+- **Total Commits**: <count>
+- **Details**:
+  - `[<short_hash>]` <subject> (<file_count> files)
 
