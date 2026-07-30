@@ -7,7 +7,9 @@ from src.domain.futures.compound.allocator import (
     apply_cost_aware_net_edge,
     apply_portfolio_risk_overlay,
     combine_alpha_forecasts,
+    compute_max_name_weight_p95,
     derive_mdd_parity_scale,
+    project_terminal_portfolio_caps,
     solve_growth_optimal_weights,
 )
 from src.domain.futures.compound.config import AllocatorConfig, DynamicCompoundingConfig, L2GateConfig
@@ -663,3 +665,123 @@ class TestApplyPortfolioRiskOverlayDrawdownScaling:
         result = apply_portfolio_risk_overlay(w.copy(), close, 8.0, cfg)
         gross = np.sum(np.abs(result), axis=1)
         assert np.any(gross == 0.0), "hard-drawdown zeroing never engaged"
+
+
+class TestProjectTerminalPortfolioCaps:
+    def test_happy_path_clips_excessive_long(self) -> None:
+        weights = np.array([[0.20, -0.05, -0.05]], dtype=np.float64)
+        projected = project_terminal_portfolio_caps(
+            weights, per_symbol_cap=0.10, net_cap=0.10,
+            max_long_leverage=0.70, max_short_leverage=0.30, gross_cap=1.00,
+        )
+        assert projected[0, 0] == 0.10
+        assert projected[0, 1] == -0.05
+        assert projected[0, 2] == -0.05
+
+    def test_idempotent_and_sign_preserving(self) -> None:
+        rng = np.random.default_rng(42)
+        weights = rng.uniform(-0.15, 0.15, (100, 10)).astype(np.float64)
+        p1 = project_terminal_portfolio_caps(
+            weights, per_symbol_cap=0.10, net_cap=0.10,
+            max_long_leverage=0.70, max_short_leverage=0.30, gross_cap=1.00,
+        )
+        p2 = project_terminal_portfolio_caps(
+            p1, per_symbol_cap=0.10, net_cap=0.10,
+            max_long_leverage=0.70, max_short_leverage=0.30, gross_cap=1.00,
+        )
+        assert float(np.max(np.abs(p2 - p1))) <= 1e-12
+        assert np.all((p1 > 0) == (weights > 0)) or np.all(p1[np.abs(weights) > 0] != 0)
+
+    def test_invalid_inputs_raise(self) -> None:
+        with pytest.raises(ValueError, match="non-finite"):
+            project_terminal_portfolio_caps(
+                np.array([[np.nan, 0.05]], dtype=np.float64),
+                per_symbol_cap=0.10, net_cap=0.10,
+                max_long_leverage=0.70, max_short_leverage=0.30, gross_cap=1.00,
+            )
+        with pytest.raises(ValueError, match="must be finite positive"):
+            project_terminal_portfolio_caps(
+                np.array([[0.05, 0.05]], dtype=np.float64),
+                per_symbol_cap=0.0, net_cap=0.10,
+                max_long_leverage=0.70, max_short_leverage=0.30, gross_cap=1.00,
+            )
+        with pytest.raises(ValueError, match="max_long_leverage \+ max_short_leverage"):
+            project_terminal_portfolio_caps(
+                np.array([[0.05, 0.05]], dtype=np.float64),
+                per_symbol_cap=0.10, net_cap=0.10,
+                max_long_leverage=0.70, max_short_leverage=0.40, gross_cap=1.00,
+            )
+
+        with pytest.raises(ValueError, match="net_cap=.*must be <= gross_cap"):
+            project_terminal_portfolio_caps(
+                np.array([[0.05, 0.05]], dtype=np.float64),
+                per_symbol_cap=0.10, net_cap=1.10,
+                max_long_leverage=0.70, max_short_leverage=0.30, gross_cap=1.00,
+            )
+        with pytest.raises(ValueError, match="must be non-empty"):
+            project_terminal_portfolio_caps(
+                np.zeros((0, 2), dtype=np.float64),
+                per_symbol_cap=0.10, net_cap=0.10,
+                max_long_leverage=0.70, max_short_leverage=0.30, gross_cap=1.00,
+            )
+        with pytest.raises(ValueError, match="2-D ndarray"):
+            project_terminal_portfolio_caps(
+                np.zeros(2, dtype=np.float64),
+                per_symbol_cap=0.10, net_cap=0.10,
+                max_long_leverage=0.70, max_short_leverage=0.30, gross_cap=1.00,
+            )
+
+        with pytest.raises(RuntimeError, match="did not converge"):
+            project_terminal_portfolio_caps(
+                np.array([[1.0, 1.0, -1.0, -1.0]], dtype=np.float64),
+                per_symbol_cap=0.10, net_cap=0.01,
+                max_long_leverage=0.70, max_short_leverage=0.30,
+                gross_cap=1.00, max_iterations=1,
+            )
+
+    def test_all_caps_satisfied(self) -> None:
+        rng = np.random.default_rng(42)
+        n_rows, n_syms = 200, 10
+        weights = rng.uniform(-0.25, 0.25, (n_rows, n_syms)).astype(np.float64)
+        projected = project_terminal_portfolio_caps(
+            weights, per_symbol_cap=0.10, net_cap=0.10,
+            max_long_leverage=0.70, max_short_leverage=0.30, gross_cap=1.00,
+        )
+        assert float(np.max(np.abs(projected))) <= 0.10 + 1e-12
+        assert float(np.max(np.abs(np.sum(projected, axis=1)))) <= 0.10 + 1e-12
+        assert float(np.max(np.sum(np.maximum(projected, 0.0), axis=1))) <= 0.70 + 1e-12
+        assert float(np.max(np.sum(np.maximum(-projected, 0.0), axis=1))) <= 0.30 + 1e-12
+        assert float(np.max(np.sum(np.abs(projected), axis=1))) <= 1.00 + 1e-12
+
+    def test_performance_5442x51_under_2s(self) -> None:
+        rng = np.random.default_rng(42)
+        weights = rng.uniform(-0.15, 0.15, (5442, 51)).astype(np.float64)
+        import hashlib
+        pre_hash = hashlib.sha256(weights.tobytes()).hexdigest()
+        projected = project_terminal_portfolio_caps(
+            weights, per_symbol_cap=0.10, net_cap=0.10,
+            max_long_leverage=0.70, max_short_leverage=0.30, gross_cap=1.00,
+        )
+        post_hash = hashlib.sha256(weights.tobytes()).hexdigest()
+        assert pre_hash == post_hash, "input was mutated"
+        assert projected.shape == (5442, 51)
+
+
+class TestComputeMaxNameWeightP95:
+    def test_known_values(self) -> None:
+        rng = np.random.default_rng(42)
+        weights = rng.uniform(-0.10, 0.10, (200, 10)).astype(np.float64)
+        result = compute_max_name_weight_p95(weights)
+        assert 0.08 < result < 0.12
+
+    def test_non_finite_raises(self) -> None:
+        with pytest.raises(ValueError, match="non-finite"):
+            compute_max_name_weight_p95(np.array([[np.nan]], dtype=np.float64))
+
+    def test_non_array_or_wrong_dimension_raises(self) -> None:
+        with pytest.raises(ValueError, match="2-D ndarray"):
+            compute_max_name_weight_p95([[0.1]])  # type: ignore[arg-type]
+
+    def test_empty_raises(self) -> None:
+        with pytest.raises(ValueError, match="non-empty"):
+            compute_max_name_weight_p95(np.zeros((0, 3), dtype=np.float64))

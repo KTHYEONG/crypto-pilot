@@ -478,3 +478,37 @@ class TestL2GateSkillCategory:
                 break
         else:
             pytest.fail("statistical_skill category not found")
+
+
+class TestComputeMaxNameWeightP95:
+    def test_metric_rename_and_value(self) -> None:
+        from src.domain.futures.compound.allocator import compute_max_name_weight_p95
+        rng = np.random.default_rng(42)
+        weights = rng.uniform(-0.10, 0.10, (200, 10)).astype(np.float64)
+        result = compute_max_name_weight_p95(weights)
+        assert 0.08 < result < 0.12
+
+    def test_old_json_key_absent(self) -> None:
+        from src.domain.futures.compound.contracts import (
+            L2CategoryResult, L2Evaluation, L2GateVerdict,
+        )
+        from src.domain.futures.compound.config import L2GateConfig
+        cat = (L2CategoryResult("test", True, ()),)
+        eval = L2Evaluation(
+            verdict=L2GateVerdict.PASS, benchmark_id="b1",
+            annualized_log_growth=0.0, cagr=0.0, excess_growth_lcb90=0.0,
+            excess_growth_probability=1.0, stressed_excess_growth_lcb90=0.0,
+            equity_multiple=1.0, sharpe=1.0, sharpe_probability=1.0,
+            deflated_sharpe_probability=1.0, candidate_count=1, calmar=0.0,
+            max_drawdown=0.0, daily_cvar95=0.0, annual_volatility=0.0,
+            annual_turnover=0.0, cost_drag_ratio=0.0, max_name_weight_p95=0.05,
+            active_days_ratio=1.0, rebalance_count=1, positive_outer_folds=1,
+            oos_days=10, category_results=cat, integrity_ok=True, reasons=(),
+        )
+        d = eval.to_dict()
+        assert "max_name_weight_p95" in d
+        assert "capacity_utilisation_p95" not in d
+        assert d["max_name_weight_p95"]["value"] == 0.05
+        cfg = L2GateConfig()
+        assert hasattr(cfg, "max_name_weight_p95")
+        assert not hasattr(cfg, "max_capacity_utilisation_p95")

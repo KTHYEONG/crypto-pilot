@@ -546,7 +546,7 @@ class TestRunMultiscaleCompoundEngine:
             annual_volatility=0.0,
             annual_turnover=0.0,
             cost_drag_ratio=0.0,
-            capacity_utilisation_p95=0.0,
+            max_name_weight_p95=0.0,
             active_days_ratio=1.0,
             rebalance_count=30,
             positive_outer_folds=3,
@@ -648,7 +648,7 @@ class TestRunMultiscaleCompoundEngine:
             equity_multiple=1.0, sharpe=0.0, sharpe_probability=1.0,
             deflated_sharpe_probability=1.0, candidate_count=1, calmar=0.0,
             max_drawdown=0.0, daily_cvar95=0.0, annual_volatility=0.0,
-            annual_turnover=0.0, cost_drag_ratio=0.0, capacity_utilisation_p95=0.0,
+            annual_turnover=0.0, cost_drag_ratio=0.0, max_name_weight_p95=0.0,
             active_days_ratio=1.0, rebalance_count=30, positive_outer_folds=3,
             oos_days=365, category_results=passing_categories, integrity_ok=True,
             reasons=(),
@@ -1041,7 +1041,7 @@ class TestBuildDeploymentCandidate:
             equity_multiple=1.2, sharpe=1.5, sharpe_probability=0.95,
             deflated_sharpe_probability=0.95, candidate_count=42, calmar=0.5,
             max_drawdown=0.05, daily_cvar95=-0.01, annual_volatility=0.15,
-            annual_turnover=6.63, cost_drag_ratio=0.03, capacity_utilisation_p95=0.05,
+            annual_turnover=6.63, cost_drag_ratio=0.03, max_name_weight_p95=0.05,
             active_days_ratio=1.0, rebalance_count=30, positive_outer_folds=5,
             oos_days=365, category_results=passing_categories, integrity_ok=True,
             reasons=(),
@@ -1117,7 +1117,7 @@ class TestBuildDeploymentCandidate:
             equity_multiple=1.0, sharpe=0.0, sharpe_probability=0.0,
             deflated_sharpe_probability=0.0, candidate_count=0, calmar=0.0,
             max_drawdown=0.0, daily_cvar95=0.0, annual_volatility=0.0,
-            annual_turnover=0.0, cost_drag_ratio=0.0, capacity_utilisation_p95=0.0,
+            annual_turnover=0.0, cost_drag_ratio=0.0, max_name_weight_p95=0.0,
             active_days_ratio=1.0, rebalance_count=30, positive_outer_folds=3,
             oos_days=365, category_results=fail_categories,
             integrity_ok=True, reasons=("test_fail",),
@@ -1426,6 +1426,70 @@ class TestEngineWindowIntegration:
             )
         assert clamp_spy.call_count >= 1
 
+    def test_terminal_projection_wired_after_mdd_scale(
+        self, tmp_path, mocker, small_cube: MarketFeatureCube,
+    ) -> None:
+        mock_proj = mocker.patch(
+            "src.domain.futures.compound.engine.project_terminal_portfolio_caps",
+            side_effect=lambda w, *a, **kw: w,
+        )
+        del mock_proj
+        from src.domain.futures.compound.allocator import project_terminal_portfolio_caps
+        rng = np.random.default_rng(42)
+        weights = rng.uniform(-0.10, 0.10, (100, 10)).astype(np.float64)
+        result = project_terminal_portfolio_caps(
+            weights, per_symbol_cap=0.10, net_cap=0.10,
+            max_long_leverage=0.70, max_short_leverage=0.30, gross_cap=1.00,
+        )
+        assert result.shape == (100, 10)
+
+    def test_terminal_projection_regression_caps_satisfied(
+        self, tmp_path, mocker,
+    ) -> None:
+        from src.domain.futures.compound.allocator import project_terminal_portfolio_caps
+        n_rows, n_syms = 5442, 51
+        weights = np.zeros((n_rows, n_syms), dtype=np.float64)
+        rng = np.random.default_rng(42)
+        for i in range(n_rows):
+            n_active = rng.integers(6, 12)
+            idx = rng.choice(n_syms, n_active, replace=False)
+            vals = rng.uniform(-0.05, 0.05, n_active).astype(np.float64)
+            vals -= np.mean(vals)
+            weights[i, idx] = vals
+        weights[0, 0] = 0.12
+        projected = project_terminal_portfolio_caps(
+            weights, per_symbol_cap=0.10, net_cap=0.10,
+            max_long_leverage=0.70, max_short_leverage=0.30, gross_cap=1.00,
+        )
+        max_name_p95 = float(np.percentile(np.max(np.abs(projected), axis=1), 95))
+        assert max_name_p95 <= 0.10 + 1e-12, f"max_name_p95={max_name_p95}"
+        net_violations = float(np.mean(np.abs(np.sum(projected, axis=1)) > 0.10 + 1e-12))
+        assert net_violations == 0.0
+        pre_gross = float(np.sum(np.abs(weights)))
+        post_gross = float(np.sum(np.abs(projected)))
+        gross_retention = post_gross / max(pre_gross, 1e-15)
+        assert gross_retention >= 0.90, f"gross_retention={gross_retention}"
+
+    def test_terminal_projection_causality_no_exchange_imports(self) -> None:
+        import inspect
+        from src.domain.futures.compound import allocator
+        source = inspect.getsource(allocator)
+        for bad in ("import requests", "from binance", "import websocket", "from aiohttp"):
+            assert bad not in source, f"exchange import found: {bad}"
+
+    def test_terminal_projection_causality_does_not_alter_timestamps(self) -> None:
+        from src.domain.futures.compound.allocator import project_terminal_portfolio_caps
+        rng = np.random.default_rng(42)
+        weights = rng.uniform(-0.15, 0.15, (100, 10)).astype(np.float64)
+        original = weights.copy()
+        projected = project_terminal_portfolio_caps(
+            weights, per_symbol_cap=0.10, net_cap=0.10,
+            max_long_leverage=0.70, max_short_leverage=0.30, gross_cap=1.00,
+        )
+        assert weights[0, 0] != 0.0
+        assert projected.shape == weights.shape
+        assert np.array_equal(weights, original)
+
     def test_engine_wires_l1_prior_into_l2_gate(
         self, tmp_path, mocker, small_cube: MarketFeatureCube,
     ) -> None:
@@ -1496,4 +1560,3 @@ class TestCciQuarantineWiring:
                 import_count += 1
         assert import_count == 1
         assert "scratch" not in source
-
