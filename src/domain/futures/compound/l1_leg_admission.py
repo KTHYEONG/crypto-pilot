@@ -12,6 +12,7 @@ from src.domain.futures.compound.contracts import (
     LegBook,
     LegEvidence,
 )
+from src.domain.futures.compound.l1_concept_bank import compute_lagged_gross_returns
 
 _logger = logging.getLogger(__name__)
 
@@ -30,6 +31,32 @@ def compute_evidence_weight(
     prob = float(_stats.norm.cdf(evidence.t_alpha_newey_west))
     raw = 2.0 * max(prob - 0.5, 0.0)
     return min(raw, config.max_leg_weight)
+
+
+def normalise_leg_weights(
+    raw_weights_1d: NDArray[np.float64], max_leg_weight: float,
+) -> NDArray[np.float64]:
+    if not (0.0 < max_leg_weight <= 1.0):
+        raise ValueError(f"max_leg_weight must be in (0, 1], got {max_leg_weight}")
+    w = raw_weights_1d.copy()
+    w_sum = float(np.sum(w))
+    if w_sum <= 1e-12:
+        return np.zeros_like(w)
+    w = w / w_sum
+    for _ in range(8):
+        exceed = w > max_leg_weight
+        if not np.any(exceed):
+            break
+        excess = float(np.sum(w[exceed] - max_leg_weight))
+        n_exceed = int(np.sum(exceed))
+        w[exceed] = max_leg_weight
+        unsaturated = ~exceed
+        unsaturated_sum = float(np.sum(w[unsaturated]))
+        if unsaturated_sum <= 1e-12:
+            w[exceed] = max_leg_weight + excess / n_exceed
+            break
+        w[unsaturated] = w[unsaturated] + excess * w[unsaturated] / unsaturated_sum
+    return w
 
 
 def accumulate_prequential_leg_weights(
@@ -57,10 +84,12 @@ def accumulate_prequential_leg_weights(
             # not the 0.0 placeholder) -- reuse it as the single source of
             # truth instead of recomputing here.
             w[k] = prev_evidence[k].evidence_weight
-        w_sum = float(np.sum(w))
-        w = w / w_sum if w_sum > 1e-12 else np.zeros(k_, dtype=np.float64)
+        w = normalise_leg_weights(w, config.max_leg_weight)
         sl = oos_slices[i]
         weights[sl] = w[np.newaxis, :]
+    last_stop = oos_slices[-1].stop if oos_slices else 0
+    if last_stop < n_t and last_stop > 0:
+        weights[last_stop:] = weights[last_stop - 1:last_stop]
     return weights
 
 
@@ -96,13 +125,12 @@ def evaluate_portfolio_admission(
     config: L1LegConfig,
 ) -> tuple[bool, tuple[str, ...], float]:
     n_t, _ = combined_2d.shape
-    gross_returns = np.zeros(n_t, dtype=np.float64)
+    gross_returns = compute_lagged_gross_returns(combined_2d, asset_return_2d)
     turnovers = np.zeros(n_t, dtype=np.float64)
     for t in range(1, n_t):
         prev_w = combined_2d[t - 1]
         curr_w = combined_2d[t]
         turnovers[t] = float(np.sum(np.abs(curr_w - prev_w)))
-        gross_returns[t] = float(np.dot(curr_w, asset_return_2d[t]))
     net_returns = gross_returns - cost_bps * 1e-4 * turnovers
     stressed_cost_bps = cost_bps * config.stress_cost_multiplier
     stressed_returns = gross_returns - stressed_cost_bps * 1e-4 * turnovers

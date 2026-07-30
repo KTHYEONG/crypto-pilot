@@ -864,6 +864,102 @@ class TestEngineLegPipelineWiring:
             err_msg="admission gate scored a different array than what apply_portfolio_risk_overlay deployed",
         )
 
+    def test_engine_deploys_nonzero_weights_into_holdout_with_matched_convention(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """RULE-14: accumulate_prequential_leg_weights carries the last fold's
+        weight vector into the sealed holdout tail, so weights_2d must have
+        nonzero rows there whenever any fold produced nonzero evidence.
+        RULE-11: the gross return actually scored for admission must be
+        computed with the lag-1 (previous-bar) convention, matching what
+        simulate_dense_portfolio pays -- not the same-bar look-ahead."""
+        import src.domain.futures.compound.engine as eng
+        from src.domain.futures.compound.contracts import LegBook
+        from src.domain.futures.compound.l1_concept_bank import compute_lagged_gross_returns
+        from src.domain.futures.compound.l1_leg_admission import (
+            evaluate_portfolio_admission as real_evaluate_admission,
+        )
+
+        # _make_cube's flat, perfectly-correlated synthetic close/volume
+        # produces exactly-zero leg books (no cross-sectional or time-series
+        # dispersion for any formula to key on), so a plain E2E run here would
+        # make every downstream assertion vacuously true (0 == 0). Replace
+        # build_leg_books with real LegBook objects carrying a deterministic,
+        # statistically strong alpha so admission genuinely fires and the
+        # RULE-11/RULE-14 assertions below exercise the real branch.
+        def _fake_build_leg_books(panel, eligible_2d, close_2d, registry, config):
+            # book_2d is deliberately time-invariant: the property under test
+            # is whether the FOLD-DRIVEN LEG WEIGHT (which does vary and is
+            # zero before evidence exists) is carried into the holdout tail --
+            # keeping the book itself constant isolates that from unrelated
+            # book-level drift and makes the post-fix/pre-fix contrast crisp
+            # (pre-fix: weights[holdout] == 0 while weights[last_fold] != 0).
+            n_t, n_s = eligible_2d.shape
+            rng = np.random.default_rng(7)
+            book = np.zeros((n_t, n_s), dtype=np.float64)
+            book[:, 0] = 0.6
+            book[:, 1] = -0.6
+            legs = []
+            for spec in registry:
+                turnover = np.full(n_t, 0.06, dtype=np.float64)
+                turnover[0] = 0.0
+                gross = 0.003 + rng.normal(0, 0.0004, size=n_t)
+                gross[0] = 0.0
+                legs.append(LegBook(spec=spec, book_2d=book.copy(), gross_return_1d=gross, turnover_1d=turnover))
+            return tuple(legs)
+
+        monkeypatch.setattr(eng, "build_leg_books", _fake_build_leg_books)
+
+        captured: list[object] = []
+
+        def _spy_admission(combined_2d, asset_return_2d, folds, cost_bps, config):
+            captured.append((combined_2d.copy(), asset_return_2d.copy(), folds, cost_bps, config))
+            return real_evaluate_admission(combined_2d, asset_return_2d, folds, cost_bps, config)
+
+        monkeypatch.setattr(eng, "evaluate_portfolio_admission", _spy_admission)
+
+        cube = _make_cube(4096, 5)
+        universe = type("Universe", (), {"symbols": cube.symbols, "snapshots": ()})()
+        store = SealedHoldoutStore(tmp_path / "holdout_carry_test.sqlite3")
+        manifest = SealedHoldoutManifest(
+            holdout_id="holdout-carry-test",
+            start_time_ns=int(cube.timestamps_ns[-30]),
+            end_time_ns=int(cube.timestamps_ns[-1]),
+            holdout_days=30,
+            model_version="v1",
+            data_manifest_hash="h1",
+            strategy_spec_hash="spec_holdout_carry",
+        )
+        store.create(manifest)
+        result = run_multiscale_compound_engine(
+            market=cube, universe=universe,
+            holdout_store=store, holdout_id="holdout-carry-test", config=CompoundEngineConfig(),
+        )
+        assert isinstance(result, CompoundEngineResult)
+        assert len(captured) == 1
+        combined_2d, asset_return_2d, folds, cost_bps, config = captured[0]
+
+        # Sanity: the fixture actually produced signal -- otherwise every
+        # assertion below would be trivially true (0 == 0) and prove nothing.
+        assert np.any(np.abs(combined_2d).sum(axis=1) > 0), "fixture produced an all-zero book; test is vacuous"
+
+        # RULE-11: reproduce the gate's net_ann with the lag-1 convention and
+        # confirm it differs from a same-bar (look-ahead) recomputation.
+        lagged = compute_lagged_gross_returns(combined_2d, asset_return_2d)
+        same_bar = np.zeros(combined_2d.shape[0], dtype=np.float64)
+        for t in range(1, combined_2d.shape[0]):
+            same_bar[t] = float(np.dot(combined_2d[t], asset_return_2d[t]))
+        assert not np.allclose(lagged, same_bar)
+
+        # RULE-14: the sealed holdout tail must carry the last fold's nonzero
+        # weight vector forward, not sit flat at zero.
+        oos_ends = [f.oos_end_exclusive for f in folds]
+        assert oos_ends
+        last_stop = max(oos_ends)
+        assert last_stop < combined_2d.shape[0]
+        assert np.all(combined_2d[last_stop:] == combined_2d[last_stop - 1:last_stop])
+        assert float(np.abs(combined_2d[last_stop:]).sum()) > 0.0, "holdout tail carried a zero vector, not real evidence"
+
 
 class TestAggregateTrial4hToDaily:
     def test_zero_complete_days_returns_empty_daily_array(self) -> None:
@@ -1192,6 +1288,8 @@ class TestEngineL2PassBuildsDeploymentCandidate:
             end_time_ns=int(small_cube.timestamps_ns[-1]), holdout_days=30,
             model_version="v1", data_manifest_hash="h1", strategy_spec_hash="spec",
         ))
+        from src.domain.futures.compound.l1_concept_bank import _DEFAULT_REGISTRY
+        mocker.patch("src.domain.futures.compound.engine.build_concept_registry", return_value=_DEFAULT_REGISTRY)
         with mocker.patch.object(eng, "aggregate_returns_to_utc_days", return_value=np.zeros(0, dtype=np.float64)):
             result = run_multiscale_compound_engine(
                 market=small_cube, universe=universe, holdout_store=store,
