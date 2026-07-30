@@ -374,7 +374,8 @@ class L1LegConfig:
     min_positive_fold_ratio: float = 0.50
     max_leg_weight: float = 0.25
     max_name_weight: float = 0.10
-    warmup_folds: int = 2
+    warmup_folds: int = 4
+    familywise_error_rate: float = 0.10
     min_cross_section: int = 10
     bars_per_year: float = 2190.0
     n_bootstrap: int = 2000
@@ -391,12 +392,13 @@ class L1LegConfig:
         assert 0 < self.min_positive_fold_ratio <= 1
         assert 0 < self.max_leg_weight <= 1
         assert 0 < self.max_name_weight <= 1
-        assert self.warmup_folds >= 0
+        assert self.warmup_folds >= 4, f"warmup_folds must be >= 4, got {self.warmup_folds}"
         assert self.min_cross_section > 0
         assert self.bars_per_year > 0
         assert self.n_bootstrap > 0
         assert 0 < self.min_growth_posterior_probability <= 1
         assert self.stress_cost_multiplier >= 1.0
+        assert 0 < self.familywise_error_rate < 1, f"familywise_error_rate must be in (0,1), got {self.familywise_error_rate}"
 
 
 @dataclass(slots=True, frozen=True)

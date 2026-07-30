@@ -1,6 +1,13 @@
 [
   {
     "domain": "signal",
+    "failed_hypothesis": "개별 signal alpha가 존재하면 복리 자본 배치도 개선될 것이다.",
+    "failure_reason": "개별 alpha는 남아도 net 비용·fold 안정성·다중검정 조건을 통과한 leg가 없어 L2가 no_evidence로 종료됐다.",
+    "falsified_date": "2026-07-30",
+    "source_adr": "ADR_20260730_L1_NET_EVIDENCE_MULTIPLICITY_AND_CASH_PRESERVATION"
+  },
+  {
+    "domain": "signal",
     "failed_hypothesis": "F1+F2+F3(breadth 해체+bootstrap 통일+cap 재조정)만으로 admission posterior가 0.90에 근접하거나 개선될 것이라는 가설",
     "failure_reason": "등가중 진단(Sharpe 1.729, posterior 0.854)은 breadth의 '존재'만 증명했을 뿐, 기존 compute_evidence_weight/compute_leg_sizing_score가 그 breadth를 '안전하게' 자본화한다는 것은 보장하지 못함 -- K가 11로 늘면서 후보 다중검정 문제가 생겨 초기 fold 노이즈로 이미 확인된 음의 알파 family(aroon_oscillator)가 스크리닝을 통과, 실측 net_ann이 -4.67%로 기존보다 악화됨",
     "falsified_date": "2026-07-30",
