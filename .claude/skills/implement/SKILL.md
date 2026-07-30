@@ -40,9 +40,20 @@ Fast-execution model protocol (GPT-5.6 Luna, Sonnet 5, etc.). Execute frozen con
 
 ## Output Format
 
-Return ONLY this 2-line status summary:
+Return ONLY the structured card below:
 
-🛠️ `[IMPLEMENT COMPLETE] <Blueprint>`
-`Files: <modified_count> | Tests: <PASS_count>/<FAIL_count> | Ruff: <PASS/FAIL> | Mypy: <PASS/FAIL> | Conflicts: <None/Brief Description>`
+### 📌 [IMPLEMENT] <Feature / Task Title>
+
+**1. Overview**
+- **Objective**: Mechanical implementation of frozen spec and contract
+- **Status**: <COMPLETE | INCOMPLETE>
+
+**2. Execution Metrics**
+- **Changes**: Modified Files: <count> | Tests Passed: <passed>/<total>
+- **Quality**: Ruff: <PASS/FAIL> | Mypy: <PASS/FAIL> | Conflicts: <None | Brief summary>
+
+**3. Modified Files**
+- **<File 1>**: <Summary of changes>
+- **<File 2>**: <Summary of changes>
 
 
