@@ -18,18 +18,48 @@ _logger = logging.getLogger(__name__)
 
 _DEFAULT_REGISTRY: tuple[SignalConceptSpec, ...] = (
     SignalConceptSpec(
-        concept_id="trend_momentum", mode="xs", horizon_band_bars=(6, 12, 24),
-        declared_orientation=1,
-        member_signal_ids=(
-            "trend_ema", "momentum_ts", "breakout_donchian",
-            "rsi", "mfi", "aroon_oscillator",
-            "adx_directional", "obv_trend", "keltner_breakout",
-        ),
+        concept_id="trend_ema", mode="xs", horizon_band_bars=(6, 12, 24),
+        declared_orientation=1, member_signal_ids=("trend_ema",),
     ),
     SignalConceptSpec(
-        concept_id="vol_regime", mode="ts", horizon_band_bars=(6, 12, 24),
-        declared_orientation=1,
-        member_signal_ids=("volume_zscore", "bollinger_bandwidth"),
+        concept_id="momentum_ts", mode="xs", horizon_band_bars=(6, 12, 24),
+        declared_orientation=1, member_signal_ids=("momentum_ts",),
+    ),
+    SignalConceptSpec(
+        concept_id="breakout_donchian", mode="xs", horizon_band_bars=(6, 12, 24),
+        declared_orientation=1, member_signal_ids=("breakout_donchian",),
+    ),
+    SignalConceptSpec(
+        concept_id="rsi", mode="xs", horizon_band_bars=(6, 12, 24),
+        declared_orientation=1, member_signal_ids=("rsi",),
+    ),
+    SignalConceptSpec(
+        concept_id="mfi", mode="xs", horizon_band_bars=(6, 12, 24),
+        declared_orientation=1, member_signal_ids=("mfi",),
+    ),
+    SignalConceptSpec(
+        concept_id="aroon_oscillator", mode="xs", horizon_band_bars=(6, 12, 24),
+        declared_orientation=1, member_signal_ids=("aroon_oscillator",),
+    ),
+    SignalConceptSpec(
+        concept_id="adx_directional", mode="xs", horizon_band_bars=(6, 12, 24),
+        declared_orientation=1, member_signal_ids=("adx_directional",),
+    ),
+    SignalConceptSpec(
+        concept_id="obv_trend", mode="xs", horizon_band_bars=(6, 12, 24),
+        declared_orientation=1, member_signal_ids=("obv_trend",),
+    ),
+    SignalConceptSpec(
+        concept_id="keltner_breakout", mode="xs", horizon_band_bars=(6, 12, 24),
+        declared_orientation=1, member_signal_ids=("keltner_breakout",),
+    ),
+    SignalConceptSpec(
+        concept_id="volume_zscore", mode="ts", horizon_band_bars=(6, 12, 24),
+        declared_orientation=1, member_signal_ids=("volume_zscore",),
+    ),
+    SignalConceptSpec(
+        concept_id="bollinger_bandwidth", mode="ts", horizon_band_bars=(6, 12, 24),
+        declared_orientation=1, member_signal_ids=("bollinger_bandwidth",),
     ),
 )
 

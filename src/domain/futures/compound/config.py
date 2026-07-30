@@ -372,7 +372,7 @@ class L1LegConfig:
     min_turnover_per_bar: float = 0.005
     cost_safety_margin: float = 1.5
     min_positive_fold_ratio: float = 0.50
-    max_leg_weight: float = 0.70
+    max_leg_weight: float = 0.25
     max_name_weight: float = 0.10
     warmup_folds: int = 2
     min_cross_section: int = 10

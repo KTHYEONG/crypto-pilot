@@ -1,10 +1,10 @@
-## L2 growth-evidence & L1 sizing integrity — production replay
+## L1 breadth-collapse fix — production replay reveals a new regression
 
 ### 1. 실행 조건
 
 | 항목 | 값 |
 |---|---|
-| 실행 디렉터리 | `logs/futures/compound/20260730_085150/` |
+| 실행 디렉터리 | `logs/futures/compound/20260730_095358/` |
 | reference date / seed | `2026-07-15 / 42` |
 | data manifest | `0048c160d459209c959006389a269441c6d2d33c6dc079e9bd1659398cffc6b5` |
 | 입력 | 5,442 bars × 51 symbols |
@@ -12,61 +12,83 @@
 | integrity / dry-run | `true / true` |
 | L2 / L3 | `no_evidence / reject` |
 
-`docs/specs/l2_growth_evidence_and_l1_sizing_integrity.md` 스펙을 적용한 재실행이다.
-P0(단일 posterior 성장 게이트, degenerate cash prior 제거)와 P2(L1 admission이
-L2 평가창을 미리 보지 못하도록 인과성 경계 적용)를 함께 배선했다.
+`docs/specs/l1_admission_bootstrap_consistency_and_growth_lever_survey.md` (F1 bootstrap
+통일, F2 concept-layer 해체 2→11 family별 leg, F3 `max_leg_weight` 0.70→0.25)를 적용한
+재실행이다. `/check` PASS(mypy/pytest/coverage 전체 그린, Cov 98%) 이후 실행했다.
 
-검증 결과:
+### 2. 무엇이 바뀌었나 — 그리고 무엇이 더 나빠졌나
 
-- `lean_check.py` (mypy/pytest/coverage 전체): **PASS** (Cov 89%)
-- 관련 allocator/engine/validation/runner 테스트 135건: **전부 PASS**
-- 실행 로그: optional `smart_money_divergence` 필드 경고와 NumPy 상관행렬 warning만 존재
+**F2 breadth 진단 자체는 재확인됐다.** 등가중(스크래치) 측정과 무관하게, family별
+개별 t-stat이 이번 실행에서도 다수 유의했다(`trend_ema t=1.49~1.73`,
+`volume_zscore t=2.11`, `bollinger_bandwidth t=2.16~2.19` 등, 11개 중 5개가
+`evidence_weight=1.0` 스크린 통과). 2-concept 구조가 breadth를 grid-average로 뭉갰다는
+진단은 유효하다.
 
-### 2. 무엇이 바뀌었나
+**그러나 실제 프로덕션 결과는 개선이 아니라 악화됐다.**
 
-- **측정 버그 제거 확인.** `logs/l1_admission.jsonl` 최신 leg 기록: `evidence_weight`가
-  순수 스크린 `{0.0, 1.0}`으로 복원(과거 모든 leg가 `0.5/0.5`로 강제 동률이었음),
-  `alpha_sharpe`가 정상 연율화(1.698~2.257; 과거 0.037~0.044는 연율/bar 단위 혼동 오기재).
-  두 leg(`trend_momentum:xs`, `vol_regime:ts`) 모두 개별 통계는 여전히 유의(`t≈2.0~2.6`,
-  breakeven 대비 3~5배 비용 헤드룸).
-- **인과성 경계가 실제로 결과를 뒤집었다.** 과거 admission은 15개 traded fold를
-  사용했고 그중 79%가 L2 평가창과 겹쳤다(=자기가 채점할 데이터를 미리 보고 admit).
-  경계를 `l2_start` 이전으로 제한하자 깨끗한 pre-L2 증거는 **5 fold/150일**뿐이며,
-  그 창에서 포트폴리오 posterior가 `0.795`로 0.90 문턱을 넘지 못했다.
+| Metric | 수정 전 (K=2) | 수정 후 (K=11, 프로덕션) |
+|---|---:|---:|
+| posterior | 0.795 | **0.049** |
+| net_ann | +2.73% | **−4.67%** |
+| positive_folds | — | 2/5 (<0.5) |
+| stressed_net_ann | — | −6.25% (음수) |
+| admitted | False | False (3개 사유 동시 발생) |
+
+원인을 admission 창의 fold별 실제 배치로 추적했다:
+
+```
+fold0 net_ann=-22.24%  top_legs=[aroon_oscillator:xs 0.75, volume_zscore:ts 0.25]
+fold1 net_ann=+1.58%   전량 미배치
+fold2 net_ann=-1.31%
+fold3 net_ann=+6.69%
+fold4 net_ann=-8.08%
+```
+
+`aroon_oscillator`는 이전 spec의 전체 기간 측정에서 `alpha_ann=-16.2%`로 이미 **음의
+엣지가 확인된 family**다. `fold0` 시점에는 누적 prequential 증거가
+`config.l1_leg.warmup_folds=2`개 fold뿐이라 추정이 극도로 불안정했고, 그 상태에서
+우연히 좋아 보인 `aroon_oscillator`가 스크리닝을 통과해 자본의 75%를 배정받았다.
+
+**근본 원인: K를 2→11로 늘리면서 다중검정 문제가 새로 생겼다.** 후보가 많아질수록
+"초기에 우연히 좋아 보이는" 나쁜 family가 하나라도 걸릴 확률이 커지는데,
+`compute_evidence_weight`의 스크리닝에는 K에 비례한 보정(Šidák/Bonferroni 등)이나
+최소 증거 fold 수 스케일링이 전혀 없다. 등가중 진단(Sharpe 1.729)은 breadth가
+"존재한다"는 것만 증명했지, 기존 sizing 메커니즘이 그 breadth를 "안전하게 자본화할
+수 있다"는 것은 증명하지 못했다 — 이번 프로덕션 실행이 그 차이를 실측으로 드러냈다.
 
 ### 3. L2 / L3 결과
 
 | Metric | 값 |
 |---|---|
 | verdict | `no_evidence` |
-| L1 admitted | `False` — `posterior_0.795_below_0.9` |
+| L1 admitted | `False` — `posterior_0.049_below_0.9`, `positive_folds_2/5_below_0.5`, `stressed_net_ann_-0.0625_not_positive` |
 | active_days_ratio | 0.0000 (<0.10) |
 | rebalances | 0 (<30) |
 | target_weights | 전 구간 0 (cash-only) |
 | L3 verdict | `reject` — `low_growth_probability`, `l2_not_pass` |
 
-이전 실행(`20260730_041009`)이 보고했던 CAGR 27.29% / excess growth probability 32.90%는
-LCB90(+0.0919)과 확률(0.3290)이 동일 분포에서 산술적으로 양립 불가능한 measurement
-결함(전액 cash인 L1 prior window를 `[:90]`으로 오래된 구간부터 슬라이스해 확률 0으로
-채점 후 2배 가중치로 블렌딩)과, 자기 평가창을 미리 본 admission의 결합 산물이었다.
-두 결함을 제거하자 그 수치들은 재현되지 않는다 — 임계값은 그대로(`min_excess_growth_probability=0.90`
-유지)이며, 실제로 통과 가능한 근거 자체가 없었다.
+결과적으로 verdict는 이전과 동일하게 `no_evidence`/cash-only이지만, 내부 판정 사유가
+"증거 부족(0.795, 표본 150일)"에서 "적극적으로 나쁜 배치(0.049, 3개 사유 동시 발생)"로
+바뀌었다 — 겉보기엔 같은 cash-only이나 근본 원인이 달라졌다.
 
 ### 4. 결론
 
-1. **signal 자체는 여전히 방어 가능하다.** leg 단위 t-stat, 비용 헤드룸은 유효하며
-   0.795는 0.90에 근접했다 — edge 부재가 아니라 얇은 깨끗한 증거 창(150일)이 원인이다.
-2. **배포 승인은 아니다.** 이전 27.29% CAGR / cash-only가 아니라는 판단은 모두 측정
-   결함에서 나온 허위 신호였다. 현재 정직한 상태는 `no_evidence` cash-only이다.
-3. **다음 단일 개선 후보**는 두 갈래: (a) 더 이른 L1 시작점 또는 fold 재조정으로
-   pre-L2 증거 기간을 150일보다 늘리는 것, (b) 0.795→0.90 격차의 부트스트랩 신뢰구간
-   폭을 확인해 표본 부족 대 진짜 약한 edge를 구분하는 것. 임계값 완화는 여전히 금지.
-4. `target_weights.npy`의 `float32` 저장 정밀도 이슈(과거 short-cap 반올림 초과)는
-   이번 실행이 cash-only라 관측 불가 — 별도 실행에서 재확인 필요.
+1. **F2(breadth 해체) 진단은 유효하나, F1~F3만으로는 배포 가능한 개선이 아니다.**
+   구조적 breadth는 실재하지만, 이를 안전하게 자본화하려면 sizing/screening 레이어에
+   K-스케일 다중검정 보정이 별도로 필요하다.
+2. **다음 단일 개선 후보**: `compute_evidence_weight` 또는 그 상위 게이트에 (a) K에
+   비례한 최소 누적 증거 fold 수 요구, (b) family-wise 다중검정 보정(Šidák) 중 하나를
+   추가하는 후속 spec. 이는 사용자 확인 없이 임의로 끼워넣지 않고 별도 spec 사이클로
+   분리해야 한다(설계 결정 포함).
+3. 임계값(`min_growth_posterior_probability=0.90`, `L2GateConfig` 전체) 완화는
+   여전히 금지 — 이번에도 적용하지 않았다.
+4. F1(부트스트랩 방법론 통일)은 그대로 유효한 정합성 수정이다. F2/F3는 "breadth가
+   존재한다"는 진단으로서는 유효하지만, 코드가 그 breadth를 안전하게 쓰도록 만드는
+   후속 수정 없이는 프로덕션에 그대로 둘 수 없다.
 
 ### 5. Artifact
 
-- [result.json](../../logs/futures/compound/20260730_085150/result.json)
-- [spec](../specs/l2_growth_evidence_and_l1_sizing_integrity.md)
-- [contract](../specs/l2_growth_evidence_and_l1_sizing_integrity_contract.json)
+- [result.json](../../logs/futures/compound/20260730_095358/result.json)
+- [spec](../specs/l1_admission_bootstrap_consistency_and_growth_lever_survey.md)
+- [contract](../specs/l1_admission_bootstrap_consistency_and_growth_lever_survey_contract.json)
 - [L1 leg evidence](../../logs/l1_admission.jsonl)
