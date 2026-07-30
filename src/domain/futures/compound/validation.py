@@ -5,6 +5,7 @@ import math
 
 import numpy as np
 from numpy.typing import NDArray
+from scipy import stats as _stats
 
 from src.domain.futures.compound.allocator import compute_max_name_weight_p95
 from src.domain.futures.compound.benchmark import (  # noqa: F401
@@ -265,6 +266,84 @@ def _compute_rebalance_count(weights_2d: NDArray[np.float32]) -> int:
     return int(np.sum(np.max(diffs, axis=1) > 1e-8))
 
 
+def combine_growth_evidence(
+    prior_excess_1d: NDArray[np.float64] | None,
+    holdout_excess_1d: NDArray[np.float64],
+    *,
+    periods_per_year: float,
+    cap_days: int,
+    min_active_days: int,
+    block_size: float,
+    seed: int,
+    n_bootstrap: int = 1000,
+) -> tuple[float, float, int]:
+    if cap_days <= 0:
+        raise ValueError(f"cap_days must be > 0, got {cap_days}")
+    if min_active_days < 0:
+        raise ValueError(f"min_active_days must be >= 0, got {min_active_days}")
+    if len(holdout_excess_1d) == 0:
+        raise ValueError("holdout_excess_1d must not be empty")
+
+    holdout_lcb, holdout_ucb, holdout_prob = circular_stationary_bootstrap_growth(
+        holdout_excess_1d, periods_per_year,
+        n_bootstrap=n_bootstrap, block_size=block_size, seed=seed,
+    )
+
+    prior_active_days = 0
+    if prior_excess_1d is not None and len(prior_excess_1d) > 0:
+        prior_slice = prior_excess_1d[-cap_days:]
+        prior_active_days = int(np.sum(np.abs(prior_slice) > 1e-15))
+    else:
+        prior_slice = np.zeros(0, dtype=np.float64)
+        prior_active_days = 0
+
+    if prior_active_days < min_active_days:
+        _logger.info(
+            "[EVAL] growth_pool prior_days=%d prior_active=%d prior_w=0.000 holdout_w=1.000 prob=%.4f",
+            len(prior_slice) if prior_excess_1d is not None else 0,
+            prior_active_days,
+            holdout_prob,
+        )
+        if not np.isfinite(holdout_lcb) or not np.isfinite(holdout_prob):
+            raise ValueError("non-finite pooled statistic")
+        return holdout_lcb, holdout_prob, prior_active_days
+
+    prior_lcb, prior_ucb, _prior_prob = circular_stationary_bootstrap_growth(
+        prior_slice, periods_per_year,
+        n_bootstrap=n_bootstrap, block_size=block_size, seed=seed + 1,
+    )
+
+    z_90 = 1.2815515655446004
+    holdout_mean = (holdout_lcb + holdout_ucb) / 2.0
+    holdout_std = (holdout_ucb - holdout_lcb) / (2.0 * z_90)
+    holdout_precision = 1.0 / max(holdout_std * holdout_std, 1e-12)
+
+    prior_mean = (prior_lcb + prior_ucb) / 2.0
+    prior_std = (prior_ucb - prior_lcb) / (2.0 * z_90)
+    prior_precision = 1.0 / max(prior_std * prior_std, 1e-12)
+
+    prior_precision = min(prior_precision, holdout_precision)
+
+    pooled_precision = holdout_precision + prior_precision
+    pooled_mean = (holdout_mean * holdout_precision + prior_mean * prior_precision) / pooled_precision
+    pooled_var = 1.0 / pooled_precision
+
+    pooled_lcb = float(_stats.norm.ppf(0.1, pooled_mean, math.sqrt(pooled_var)))
+    pooled_prob = float(1.0 - _stats.norm.cdf(0.0, pooled_mean, math.sqrt(pooled_var)))
+
+    if not np.isfinite(pooled_lcb) or not np.isfinite(pooled_prob):
+        raise ValueError("non-finite pooled statistic")
+
+    _logger.info(
+        "[EVAL] growth_pool prior_days=%d prior_active=%d prior_w=%.3f holdout_w=%.3f prob=%.4f",
+        len(prior_slice), prior_active_days,
+        prior_precision / pooled_precision,
+        holdout_precision / pooled_precision,
+        pooled_prob,
+    )
+
+    return pooled_lcb, pooled_prob, prior_active_days
+
 def blend_l1_prior_growth_probability(
     l1_prior_returns_1d: NDArray[np.float64], l2_only_prob: float,
     *, cap_days: int,
@@ -294,7 +373,7 @@ def evaluate_l2_gate(
     bootstrap_seed: int,
     frozen_control_daily_1d: NDArray[np.float64] | None = None,
     beta_1d: NDArray[np.float64] | None = None,
-    l1_prior_returns_1d: NDArray[np.float64] | None = None,
+    l1_prior_excess_1d: NDArray[np.float64] | None = None,
 ) -> L2Evaluation:
     return evaluate_l2_walk_forward(
         ledger=ledger, fold_ids_1d=fold_ids_1d,
@@ -302,7 +381,7 @@ def evaluate_l2_gate(
         config=config, bootstrap_seed=bootstrap_seed,
         frozen_control_daily_1d=frozen_control_daily_1d,
         beta_1d=beta_1d,
-        l1_prior_returns_1d=l1_prior_returns_1d,
+        l1_prior_excess_1d=l1_prior_excess_1d,
     )
 
 
@@ -327,7 +406,7 @@ def evaluate_l2_walk_forward(
     bootstrap_seed: int,
     frozen_control_daily_1d: NDArray[np.float64] | None = None,
     beta_1d: NDArray[np.float64] | None = None,
-    l1_prior_returns_1d: NDArray[np.float64] | None = None,
+    l1_prior_excess_1d: NDArray[np.float64] | None = None,
 ) -> L2Evaluation:
     candidate_count = trial_multiplicity.n_trials
 
@@ -487,11 +566,20 @@ def evaluate_l2_walk_forward(
         np.expm1(stressed_excess_returns), 365.25, n_bootstrap=1000, block_size=pw_block, seed=bootstrap_seed + 1,
     )
 
-    # L1→L2 Bayesian prior blending (mirrors evaluate_l3_sealed_holdout pattern)
-    if l1_prior_returns_1d is not None and len(l1_prior_returns_1d) > 0:
-        excess_prob = blend_l1_prior_growth_probability(
-            l1_prior_returns_1d, excess_prob,
-            cap_days=config.l1_prior_effective_days_cap,
+    # L1→L2 precision-weighted prior pooling (replaces degenerate blend)
+    excess_lcb90, excess_prob, l1_prior_active_days = combine_growth_evidence(
+        l1_prior_excess_1d, np.expm1(excess_returns),
+        periods_per_year=365.25,
+        cap_days=config.l1_prior_effective_days_cap,
+        min_active_days=config.l1_prior_min_active_days,
+        block_size=pw_block, seed=bootstrap_seed,
+    )
+
+    # RULE-01: LCB and probability must be consistent
+    if excess_lcb90 > 0.0 and excess_prob < config.min_excess_growth_probability:
+        raise ValueError(
+            f"growth_report_inconsistent: lcb90={excess_lcb90:.6f}>0 "
+            f"but prob={excess_prob:.4f}<{config.min_excess_growth_probability}"
         )
 
     # Stressed positive fold count
@@ -642,6 +730,7 @@ def evaluate_l2_walk_forward(
         reasons=tuple(fail_reasons),
         spa_pvalue=spa_pvalue,
         bootstrap_block_days=pw_block,
+        l1_prior_active_days=l1_prior_active_days,
         daily_strategy_returns_1d=daily_returns.copy(),
         daily_benchmark_returns_1d=benchmark_returns.copy(),
         daily_excess_returns_1d=excess_returns.copy(),

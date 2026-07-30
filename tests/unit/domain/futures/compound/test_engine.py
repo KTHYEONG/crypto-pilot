@@ -6,7 +6,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from src.domain.futures.compound.config import CompoundEngineConfig, L2GateConfig
+from src.domain.futures.compound.config import CompoundEngineConfig, L1LegConfig, L2GateConfig
 from src.domain.futures.compound.contracts import (
     CausalFold,
     CompoundEngineResult,
@@ -832,9 +832,9 @@ class TestEngineLegPipelineWiring:
             deploy_arrays.append(result.copy())
             return result
 
-        def _spy_admission(combined_2d, asset_return_2d, folds, cost_bps, config):
+        def _spy_admission(combined_2d, asset_return_2d, folds, cost_bps, config, **kwargs):
             gate_arrays.append(combined_2d.copy())
-            return real_evaluate_admission(combined_2d, asset_return_2d, folds, cost_bps, config)
+            return real_evaluate_admission(combined_2d, asset_return_2d, folds, cost_bps, config, **kwargs)
 
         monkeypatch.setattr(eng, "apply_portfolio_risk_overlay", _spy_overlay)
         monkeypatch.setattr(eng, "evaluate_portfolio_admission", _spy_admission)
@@ -912,9 +912,9 @@ class TestEngineLegPipelineWiring:
 
         captured: list[object] = []
 
-        def _spy_admission(combined_2d, asset_return_2d, folds, cost_bps, config):
+        def _spy_admission(combined_2d, asset_return_2d, folds, cost_bps, config, **kwargs):
             captured.append((combined_2d.copy(), asset_return_2d.copy(), folds, cost_bps, config))
-            return real_evaluate_admission(combined_2d, asset_return_2d, folds, cost_bps, config)
+            return real_evaluate_admission(combined_2d, asset_return_2d, folds, cost_bps, config, **kwargs)
 
         monkeypatch.setattr(eng, "evaluate_portfolio_admission", _spy_admission)
 
@@ -1345,7 +1345,9 @@ class TestEngineL2PassBuildsDeploymentCandidate:
             strategy_spec_hash="spec_e2e",
         )
         store.create(manifest)
-        config = CompoundEngineConfig()
+        config = CompoundEngineConfig(
+            l1_leg=L1LegConfig(min_positive_fold_ratio=0.30),
+        )
 
         e2e_ts_4h = np.arange(n_bars_4h, dtype=np.int64) * _NS_PER_HOUR * 4
         rng_e2e = np.random.default_rng(42)
@@ -1542,9 +1544,9 @@ class TestEngineWindowIntegration:
             market=cube, universe=universe, holdout_store=store,
             window=window, holdout_id="prior-test", config=config,
         )
-        l1_prior = captured_kwargs.get("l1_prior_returns_1d")
-        assert l1_prior is not None, "l1_prior_returns_1d should not be None"
-        assert len(l1_prior) > 0, "l1_prior_returns_1d should have data"
+        l1_prior = captured_kwargs.get("l1_prior_excess_1d")
+        assert l1_prior is not None, "l1_prior_excess_1d should not be None"
+        assert len(l1_prior) > 0, "l1_prior_excess_1d should have data"
 
 
 class TestCciQuarantineWiring:
