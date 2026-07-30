@@ -1188,6 +1188,145 @@ class DeploymentBundle:
             raise ValueError("promotion_id is required")
 
 
+@dataclass(slots=True, frozen=True)
+class SignalConceptSpec:
+    concept_id: str
+    member_signal_ids: tuple[str, ...]
+    mode: Literal["xs", "ts"]
+    horizon_band_bars: tuple[int, ...]
+    declared_orientation: int
+
+    def __post_init__(self) -> None:
+        if not self.concept_id:
+            raise ValueError("concept_id must be non-empty")
+        if not self.member_signal_ids:
+            raise ValueError("member_signal_ids must be non-empty")
+        if self.mode not in ("xs", "ts"):
+            raise ValueError(f"mode must be 'xs' or 'ts', got {self.mode}")
+        if not self.horizon_band_bars:
+            raise ValueError("horizon_band_bars must be non-empty")
+        for h in self.horizon_band_bars:
+            if h <= 0:
+                raise ValueError(f"horizon_band_bars entries must be > 0, got {h}")
+        if self.declared_orientation not in (-1, 1):
+            raise ValueError(
+                f"declared_orientation must be -1 or 1, got {self.declared_orientation}"
+            )
+
+
+@dataclass(slots=True, frozen=True)
+class LegBook:
+    spec: SignalConceptSpec
+    book_2d: NDArray[np.float64]       # (T, S) unit-gross tranche book
+    gross_return_1d: NDArray[np.float64]  # (T,) book_t . asset_return_{t+1}
+    turnover_1d: NDArray[np.float64]   # (T,) sum |w_t - w_{t-1}|
+
+    def __post_init__(self) -> None:
+        if self.book_2d.ndim != 2:
+            raise ValueError(f"book_2d must be 2-D, got {self.book_2d.ndim}")
+        t_, _ = self.book_2d.shape
+        if self.gross_return_1d.ndim != 1 or self.gross_return_1d.shape[0] != t_:
+            raise ValueError(f"gross_return_1d must be 1-D with length {t_}")
+        if self.turnover_1d.ndim != 1 or self.turnover_1d.shape[0] != t_:
+            raise ValueError(f"turnover_1d must be 1-D with length {t_}")
+        if not np.all(np.isfinite(self.book_2d)):
+            raise ValueError("book_2d must be finite")
+        if not np.all(np.isfinite(self.gross_return_1d)):
+            raise ValueError("gross_return_1d must be finite")
+        if not np.all(np.isfinite(self.turnover_1d)):
+            raise ValueError("turnover_1d must be finite")
+
+
+@dataclass(slots=True, frozen=True)
+class LegEvidence:
+    concept_id: str
+    mode: str
+    n_oos_bars: int
+    alpha_ann: float
+    beta_market: float
+    alpha_sharpe: float
+    t_alpha_newey_west: float
+    breakeven_cost_bps: float
+    mean_turnover_per_bar: float
+    positive_folds: int
+    n_folds: int
+    posterior_positive: float
+    evidence_weight: float
+    reasons: tuple[str, ...]
+
+    def __post_init__(self) -> None:
+        if not self.concept_id:
+            raise ValueError("concept_id must be non-empty")
+        if self.mode not in ("xs", "ts"):
+            raise ValueError(f"mode must be 'xs' or 'ts', got {self.mode}")
+        if self.n_oos_bars < 0:
+            raise ValueError(f"n_oos_bars must be >= 0, got {self.n_oos_bars}")
+        if not np.isfinite(self.alpha_ann):
+            raise ValueError(f"alpha_ann must be finite, got {self.alpha_ann}")
+        if not np.isfinite(self.beta_market):
+            raise ValueError(f"beta_market must be finite, got {self.beta_market}")
+        if not np.isfinite(self.alpha_sharpe):
+            raise ValueError(f"alpha_sharpe must be finite, got {self.alpha_sharpe}")
+        if not np.isfinite(self.t_alpha_newey_west):
+            raise ValueError(f"t_alpha_newey_west must be finite, got {self.t_alpha_newey_west}")
+        if not np.isfinite(self.breakeven_cost_bps):
+            raise ValueError(f"breakeven_cost_bps must be finite, got {self.breakeven_cost_bps}")
+        if not np.isfinite(self.mean_turnover_per_bar):
+            raise ValueError(f"mean_turnover_per_bar must be finite, got {self.mean_turnover_per_bar}")
+        if self.positive_folds < 0 or self.positive_folds > self.n_folds:
+            # also structurally rejects n_folds < 0: positive_folds >= 0
+            # can never satisfy positive_folds <= n_folds < 0.
+            raise ValueError(f"positive_folds {self.positive_folds} must be in [0, {self.n_folds}]")
+        if not 0.0 <= self.posterior_positive <= 1.0:
+            raise ValueError(f"posterior_positive must be in [0, 1], got {self.posterior_positive}")
+        if not np.isfinite(self.evidence_weight):
+            raise ValueError(f"evidence_weight must be finite, got {self.evidence_weight}")
+        if self.evidence_weight < 0.0:
+            raise ValueError(f"evidence_weight must be >= 0, got {self.evidence_weight}")
+
+
+@dataclass(slots=True, frozen=True)
+class L1LegPanel:
+    decision_timestamps_ns: NDArray[np.int64]
+    symbols: tuple[str, ...]
+    leg_specs: tuple[SignalConceptSpec, ...]
+    books_3d: NDArray[np.float32]           # (T, S, K)
+    leg_weights_2d: NDArray[np.float64]     # (T, K) causal prequential weights
+    combined_weights_2d: NDArray[np.float64]  # (T, S)
+    evidence: tuple[LegEvidence, ...]
+    admitted: bool
+    reasons: tuple[str, ...]
+
+    def __post_init__(self) -> None:
+        t_ = self.decision_timestamps_ns.shape[0]
+        s_ = len(self.symbols)
+        k_ = len(self.leg_specs)
+        if self.decision_timestamps_ns.ndim != 1:
+            raise ValueError("decision_timestamps_ns must be 1-D")
+        if not self.symbols:
+            raise ValueError("symbols must be non-empty")
+        if not self.leg_specs:
+            raise ValueError("leg_specs must be non-empty")
+        if self.books_3d.shape != (t_, s_, k_):
+            raise ValueError(
+                f"books_3d shape {self.books_3d.shape} != ({t_}, {s_}, {k_})"
+            )
+        if self.leg_weights_2d.shape != (t_, k_):
+            raise ValueError(
+                f"leg_weights_2d shape {self.leg_weights_2d.shape} != ({t_}, {k_})"
+            )
+        if self.combined_weights_2d.shape != (t_, s_):
+            raise ValueError(
+                f"combined_weights_2d shape {self.combined_weights_2d.shape} != ({t_}, {s_})"
+            )
+        if len(self.evidence) != k_:
+            raise ValueError(f"evidence length {len(self.evidence)} != {k_}")
+        if self.admitted and self.reasons:
+            raise ValueError("admitted panel must have empty reasons")
+        if not self.admitted and not self.reasons:
+            raise ValueError("not-admitted panel must have at least one reason")
+
+
 class TargetWeightSink(Protocol):
     def rebalance(
         self, *, target_weights: Mapping[str, float], idempotency_key: str
@@ -1235,6 +1374,7 @@ __all__ = [
     "HandoffAdmissionEvidence",
     "HandoffResult",
     "InsufficientCoverageError",
+    "L1LegPanel",
     "L1RoutingSleeve",
     "L1SleevePosterior",
     "L2BenchmarkSeries",
@@ -1243,6 +1383,8 @@ __all__ = [
     "L2GateVerdict",
     "L3ValidationResult",
     "LadderStageResult",
+    "LegBook",
+    "LegEvidence",
     "MarketFeatureCube",
     "MultiTimeframeBars",
     "MultiscaleAlphaDefinition",
@@ -1258,6 +1400,7 @@ __all__ = [
     "SealedHoldoutManifest",
     "SignalAdmissionEvidence",
     "SignalCalibration",
+    "SignalConceptSpec",
     "SignalDescriptor",
     "SignalEdgeRecord",
     "SignalEdgeScreen",

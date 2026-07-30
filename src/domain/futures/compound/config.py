@@ -364,6 +364,38 @@ class DynamicCompoundingConfig:
 
 
 @dataclass(slots=True, frozen=True)
+class L1LegConfig:
+    horizon_band_bars: tuple[int, ...] = (6, 12, 24)
+    modes: tuple[str, ...] = ("xs", "ts")
+    min_turnover_per_bar: float = 0.005
+    cost_safety_margin: float = 1.5
+    min_positive_fold_ratio: float = 0.50
+    max_leg_weight: float = 0.50
+    warmup_folds: int = 3
+    min_cross_section: int = 10
+    bars_per_year: float = 2190.0
+    n_bootstrap: int = 2000
+    min_growth_posterior_probability: float = 0.90
+    stress_cost_multiplier: float = 2.0
+
+    def __post_init__(self) -> None:
+        for h in self.horizon_band_bars:
+            assert h > 0, f"horizon_band_bars entries must be > 0, got {h}"
+        for m in self.modes:
+            assert m in ("xs", "ts"), f"mode must be 'xs' or 'ts', got {m}"
+        assert self.min_turnover_per_bar > 0
+        assert self.cost_safety_margin >= 1.0
+        assert 0 < self.min_positive_fold_ratio <= 1
+        assert 0 < self.max_leg_weight <= 1
+        assert self.warmup_folds >= 0
+        assert self.min_cross_section > 0
+        assert self.bars_per_year > 0
+        assert self.n_bootstrap > 0
+        assert 0 < self.min_growth_posterior_probability <= 1
+        assert self.stress_cost_multiplier >= 1.0
+
+
+@dataclass(slots=True, frozen=True)
 class HandoffConfig:
     max_pairwise_correlation: float = 0.80
     min_positive_outer_folds: int = 4
@@ -451,6 +483,7 @@ class CompoundEngineConfig:
     calibration: CalibrationConfig = field(default_factory=CalibrationConfig)
     admission: AdmissionConfig = field(default_factory=AdmissionConfig)
     handoff: HandoffConfig = field(default_factory=HandoffConfig)
+    l1_leg: L1LegConfig = field(default_factory=L1LegConfig)
     dynamic_compounding: DynamicCompoundingConfig = field(default_factory=DynamicCompoundingConfig)
     regime_router: RegimeRouterConfig = field(default_factory=RegimeRouterConfig)
 
@@ -472,5 +505,6 @@ class CompoundEngineConfig:
         assert isinstance(self.calibration, CalibrationConfig)
         assert isinstance(self.admission, AdmissionConfig)
         assert isinstance(self.handoff, HandoffConfig)
+        assert isinstance(self.l1_leg, L1LegConfig)
         assert isinstance(self.dynamic_compounding, DynamicCompoundingConfig)
         assert isinstance(self.regime_router, RegimeRouterConfig)
