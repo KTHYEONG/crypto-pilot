@@ -5,11 +5,12 @@ import pytest
 
 from src.domain.futures.compound.allocator import (
     apply_cost_aware_net_edge,
+    apply_portfolio_risk_overlay,
     combine_alpha_forecasts,
     derive_mdd_parity_scale,
     solve_growth_optimal_weights,
 )
-from src.domain.futures.compound.config import AllocatorConfig, L2GateConfig
+from src.domain.futures.compound.config import AllocatorConfig, DynamicCompoundingConfig, L2GateConfig
 from src.domain.futures.compound.contracts import (
     AllocationConstraints,
     AlphaForecastTape,
@@ -556,3 +557,109 @@ def test_cap_handles_zero_gross_and_empty_active() -> None:
     w_single_nonzero = np.array([0.0, 0.0, 0.0], dtype=np.float64)
     result = apply_net_exposure_cap(w_single_nonzero, 0.1)
     np.testing.assert_array_equal(w_single_nonzero, result)
+
+
+class TestApplyPortfolioRiskOverlay:
+    def test_apply_portfolio_risk_overlay_neutral_rollback(self) -> None:
+        T, S = 200, 5
+        rng = np.random.default_rng(42)
+        w = rng.standard_normal((T, S)).astype(np.float64)
+        w = w / np.maximum(np.sum(np.abs(w), axis=1, keepdims=True), 1e-12)
+        c = np.full((T, S), 100.0, dtype=np.float32)
+        for t in range(1, T):
+            c[t] = c[t - 1] * (1.0 + rng.standard_normal(S).astype(np.float32) * 0.01)
+        cfg = DynamicCompoundingConfig(
+            max_gross_leverage=10.0, max_net_exposure=1.0,
+            soft_drawdown_limit=0.5, hard_drawdown_limit=0.9,
+            target_ann_vol=1.0, vol_scale_max=1.0, vol_lookback_bars=180,
+            dd_scale_floor=1.0, max_long_leverage=5.0, max_short_leverage=5.0,
+        )
+        result = apply_portfolio_risk_overlay(w.copy(), c, 8.0, cfg)
+        # early bars are excluded: vol targeting needs a warm-up window before
+        # trailing_vol stabilises near the (already-neutral) target.
+        late_rows = result[T // 2:]
+        late_orig = w[T // 2:]
+        assert np.allclose(late_rows, late_orig, atol=1e-4)
+
+    def test_apply_portfolio_risk_overlay_rejects_non_finite(self) -> None:
+        w = np.full((5, 3), np.nan, dtype=np.float64)
+        c = np.full((5, 3), 100.0, dtype=np.float32)
+        cfg = DynamicCompoundingConfig()
+        with pytest.raises(ValueError, match="non-finite"):
+            apply_portfolio_risk_overlay(w, c, 8.0, cfg)
+
+    def test_apply_portfolio_risk_overlay_rejects_bar_count_mismatch(self) -> None:
+        w = np.zeros((5, 3), dtype=np.float64)
+        c = np.full((7, 3), 100.0, dtype=np.float32)
+        cfg = DynamicCompoundingConfig()
+        with pytest.raises(ValueError, match="bars"):
+            apply_portfolio_risk_overlay(w, c, 8.0, cfg)
+
+    def test_apply_portfolio_risk_overlay_net_cap_applied_first(self) -> None:
+        """Regression guard: net-exposure cap must be applied via the existing
+        apply_net_exposure_cap helper (per-symbol adjustment), not a fresh
+        proportional scale that would also shrink gross disproportionately."""
+        T, S = 5, 3
+        w = np.array([[0.8, 0.1, 0.1]] * T, dtype=np.float64)  # net=1.0, gross=1.0
+        c = np.full((T, S), 100.0, dtype=np.float32)
+        cfg = DynamicCompoundingConfig(
+            max_gross_leverage=10.0, max_net_exposure=0.2,
+            soft_drawdown_limit=0.5, hard_drawdown_limit=0.9,
+            target_ann_vol=10.0, vol_scale_max=10.0, vol_lookback_bars=180,
+            dd_scale_floor=1.0, max_long_leverage=5.0, max_short_leverage=5.0,
+        )
+        result = apply_portfolio_risk_overlay(w.copy(), c, 8.0, cfg)
+        net = np.abs(np.sum(result, axis=1))
+        gross = np.sum(np.abs(result), axis=1)
+        # apply_net_exposure_cap caps net at max_net_exposure * gross-BEFORE
+        # (0.2 * 1.0 = 0.2) via a per-symbol additive adjustment, not a fresh
+        # proportional scale that would shrink gross toward 0.2 as well.
+        assert np.all(net <= 0.2 + 1e-6)
+        assert np.all(gross > 0.5)
+
+
+class TestApplyPortfolioRiskOverlayDrawdownScaling:
+    def test_apply_portfolio_risk_overlay_soft_drawdown_scales_down(self) -> None:
+        """Covers the soft-drawdown interpolation branch: a realised drawdown
+        strictly between soft and hard limits must scale weights down toward
+        (but not to) dd_scale_floor."""
+        T, S = 60, 2
+        w = np.full((T, S), 0.5, dtype=np.float64)
+        # a sharp drop then a partial recovery keeps drawdown in the
+        # soft<dd<hard band for a stretch of bars.
+        close = np.zeros((T, S), dtype=np.float32)
+        close[0] = 100.0
+        for t in range(1, T):
+            if t < 10:
+                close[t] = close[t - 1] * 0.98  # steady decline into drawdown
+            else:
+                close[t] = close[t - 1] * 1.001  # slow partial recovery
+        cfg = DynamicCompoundingConfig(
+            max_gross_leverage=10.0, max_net_exposure=1.0,
+            soft_drawdown_limit=0.05, hard_drawdown_limit=0.30,
+            target_ann_vol=10.0, vol_scale_max=10.0, vol_lookback_bars=180,
+            dd_scale_floor=0.25, max_long_leverage=5.0, max_short_leverage=5.0,
+        )
+        result = apply_portfolio_risk_overlay(w.copy(), close, 8.0, cfg)
+        gross = np.sum(np.abs(result), axis=1)
+        assert np.any(gross < 0.99), "soft-drawdown scaling never engaged"
+        assert np.all(gross >= 0.25 * 0.99), "scaled below dd_scale_floor"
+
+    def test_apply_portfolio_risk_overlay_hard_drawdown_zeroes_weights(self) -> None:
+        """Covers the hard-drawdown branch: a realised drawdown beyond the
+        hard limit must fully zero out that bar's weights."""
+        T, S = 40, 2
+        w = np.full((T, S), 0.5, dtype=np.float64)
+        close = np.zeros((T, S), dtype=np.float32)
+        close[0] = 100.0
+        for t in range(1, T):
+            close[t] = close[t - 1] * 0.95  # steep, sustained decline
+        cfg = DynamicCompoundingConfig(
+            max_gross_leverage=10.0, max_net_exposure=1.0,
+            soft_drawdown_limit=0.05, hard_drawdown_limit=0.10,
+            target_ann_vol=10.0, vol_scale_max=10.0, vol_lookback_bars=180,
+            dd_scale_floor=0.25, max_long_leverage=5.0, max_short_leverage=5.0,
+        )
+        result = apply_portfolio_risk_overlay(w.copy(), close, 8.0, cfg)
+        gross = np.sum(np.abs(result), axis=1)
+        assert np.any(gross == 0.0), "hard-drawdown zeroing never engaged"
