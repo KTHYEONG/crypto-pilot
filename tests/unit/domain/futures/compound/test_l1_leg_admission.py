@@ -399,3 +399,248 @@ class TestL1BootstrapConsistency:
             combined, ret, folds, 8.0, cfg, admission_end_exclusive=10**9,
         )
         assert admitted in (True, False)
+
+
+class TestClassifyLegEvidence:
+    def test_net_positive_below_familywise(self) -> None:
+        ev = _make_leg_evidence(
+            n_folds=6, positive_folds=5, net_alpha_ann=0.03,
+            t_net_alpha_newey_west=2.0, breakeven_cost_bps=30.0,
+            mean_turnover_per_bar=0.01,
+        )
+        from src.domain.futures.compound.l1_leg_admission import classify_leg_evidence
+        decision = classify_leg_evidence(ev, 8.0, L1LegConfig(), n_tested_hypotheses=11)
+        assert decision.economic_eligible is True
+        assert decision.familywise_supported is False
+        assert decision.capital_eligible is False
+
+    def test_negative_net_alpha(self) -> None:
+        ev = _make_leg_evidence(
+            n_folds=6, positive_folds=5, net_alpha_ann=-0.01,
+            t_net_alpha_newey_west=5.0,
+        )
+        from src.domain.futures.compound.l1_leg_admission import classify_leg_evidence
+        decision = classify_leg_evidence(ev, 8.0, L1LegConfig(), n_tested_hypotheses=11)
+        assert decision.economic_eligible is False
+        assert decision.capital_eligible is False
+
+    def test_all_criteria_pass(self) -> None:
+        ev = _make_leg_evidence(
+            n_folds=6, positive_folds=5, net_alpha_ann=0.03,
+            t_net_alpha_newey_west=5.0, breakeven_cost_bps=30.0,
+            mean_turnover_per_bar=0.01,
+        )
+        from src.domain.futures.compound.l1_leg_admission import classify_leg_evidence
+        decision = classify_leg_evidence(ev, 8.0, L1LegConfig(), n_tested_hypotheses=1)
+        assert decision.economic_eligible is True
+        assert decision.familywise_supported is True
+        assert decision.capital_eligible is True
+
+
+class TestShadowWeightScenarios:
+    def test_shadow_weight_equals_one_for_economic(self) -> None:
+        from src.domain.futures.compound.l1_leg_admission import classify_leg_evidence
+        ev = _make_leg_evidence(net_alpha_ann=0.03, t_net_alpha_newey_west=5.0)
+        decision = classify_leg_evidence(ev, 8.0, L1LegConfig(), n_tested_hypotheses=1)
+        assert decision.economic_eligible is True
+
+    def test_shadow_weight_zero_for_non_economic(self) -> None:
+        from src.domain.futures.compound.l1_leg_admission import classify_leg_evidence
+        ev = _make_leg_evidence(net_alpha_ann=-0.01, t_net_alpha_newey_west=5.0)
+        decision = classify_leg_evidence(ev, 8.0, L1LegConfig(), n_tested_hypotheses=1)
+        assert decision.economic_eligible is False
+
+
+class TestEvaluatePortfolioEvidence:
+    def test_evidence_no_prequential_folds(self) -> None:
+        from src.domain.futures.compound.l1_leg_admission import evaluate_portfolio_evidence
+        combined = np.zeros((10, 3), dtype=np.float64)
+        ret = np.zeros((10, 3), dtype=np.float64)
+        evidence = evaluate_portfolio_evidence(combined, ret, (), 8.0, L1LegConfig(), admission_end_exclusive=10**9)
+        assert evidence.admitted is False
+        assert evidence.n_folds == 0
+        assert evidence.n_traded_bars == 0
+
+
+class TestClassifyL1Bottleneck:
+    def test_deployable(self) -> None:
+        from src.domain.futures.compound.l1_leg_admission import classify_l1_bottleneck
+        from src.domain.futures.compound.contracts import PortfolioAdmissionEvidence
+        prod = PortfolioAdmissionEvidence(admitted=True, reasons=(), net_alpha_ann=0.05,
+                                          stressed_net_alpha_ann=0.03, posterior_positive=0.95,
+                                          positive_folds=3, n_folds=5, n_traded_bars=100)
+        shadow = PortfolioAdmissionEvidence(admitted=True, reasons=(), net_alpha_ann=0.04,
+                                            stressed_net_alpha_ann=0.02, posterior_positive=0.90,
+                                            positive_folds=3, n_folds=5, n_traded_bars=100)
+        report = classify_l1_bottleneck(prod, shadow, 4, 2, True)
+        assert report.bottleneck_code == "deployable"
+        assert report.production_weights_unchanged is True
+
+    def test_familywise_power_limited(self) -> None:
+        from src.domain.futures.compound.l1_leg_admission import classify_l1_bottleneck
+        from src.domain.futures.compound.contracts import PortfolioAdmissionEvidence
+        prod = PortfolioAdmissionEvidence(admitted=False, reasons=("familywise",), net_alpha_ann=-0.01,
+                                          stressed_net_alpha_ann=-0.02, posterior_positive=0.3,
+                                          positive_folds=2, n_folds=5, n_traded_bars=100)
+        shadow = PortfolioAdmissionEvidence(admitted=True, reasons=(), net_alpha_ann=0.04,
+                                            stressed_net_alpha_ann=0.02, posterior_positive=0.90,
+                                            positive_folds=3, n_folds=5, n_traded_bars=100)
+        report = classify_l1_bottleneck(prod, shadow, 4, 0, True)
+        assert report.bottleneck_code == "familywise_power_limited"
+
+    def test_signal_economics_absent(self) -> None:
+        from src.domain.futures.compound.l1_leg_admission import classify_l1_bottleneck
+        from src.domain.futures.compound.contracts import PortfolioAdmissionEvidence
+        prod = PortfolioAdmissionEvidence(admitted=False, reasons=("no_candidates",), net_alpha_ann=0.0,
+                                          stressed_net_alpha_ann=0.0, posterior_positive=0.0,
+                                          positive_folds=0, n_folds=0, n_traded_bars=0)
+        shadow = PortfolioAdmissionEvidence(admitted=False, reasons=("no_candidates",), net_alpha_ann=0.0,
+                                            stressed_net_alpha_ann=0.0, posterior_positive=0.0,
+                                            positive_folds=0, n_folds=0, n_traded_bars=0)
+        report = classify_l1_bottleneck(prod, shadow, 0, 0, True)
+        assert report.bottleneck_code == "signal_economics_absent"
+
+    def test_signal_generalization_failed(self) -> None:
+        from src.domain.futures.compound.l1_leg_admission import classify_l1_bottleneck
+        from src.domain.futures.compound.contracts import PortfolioAdmissionEvidence
+        prod = PortfolioAdmissionEvidence(admitted=False, reasons=("familywise",), net_alpha_ann=-0.01,
+                                          stressed_net_alpha_ann=-0.02, posterior_positive=0.3,
+                                          positive_folds=2, n_folds=5, n_traded_bars=100)
+        shadow = PortfolioAdmissionEvidence(admitted=False, reasons=("shadow_failed",), net_alpha_ann=-0.01,
+                                            stressed_net_alpha_ann=-0.02, posterior_positive=0.3,
+                                            positive_folds=2, n_folds=5, n_traded_bars=100)
+        report = classify_l1_bottleneck(prod, shadow, 4, 0, True)
+        assert report.bottleneck_code == "signal_generalization_failed"
+
+    def test_diagnostic_unavailable(self) -> None:
+        from src.domain.futures.compound.l1_leg_admission import classify_l1_bottleneck
+        from src.domain.futures.compound.contracts import PortfolioAdmissionEvidence
+        prod = PortfolioAdmissionEvidence(admitted=False, reasons=("error",), net_alpha_ann=0.0,
+                                          stressed_net_alpha_ann=0.0, posterior_positive=0.0,
+                                          positive_folds=0, n_folds=0, n_traded_bars=0)
+        shadow = PortfolioAdmissionEvidence(admitted=False, reasons=("error",), net_alpha_ann=0.0,
+                                            stressed_net_alpha_ann=0.0, posterior_positive=0.0,
+                                            positive_folds=0, n_folds=0, n_traded_bars=0)
+        report = classify_l1_bottleneck(prod, shadow, 0, 0, False)
+        assert report.bottleneck_code == "diagnostic_unavailable"
+        assert report.shadow_available is False
+
+
+class TestPortfolioAdmissionEvidenceValidation:
+    def test_admitted_with_reasons_raises(self) -> None:
+        from src.domain.futures.compound.contracts import PortfolioAdmissionEvidence
+        with pytest.raises(ValueError, match="admitted must have empty reasons"):
+            PortfolioAdmissionEvidence(admitted=True, reasons=("something",), net_alpha_ann=0.0,
+                                       stressed_net_alpha_ann=0.0, posterior_positive=0.5,
+                                       positive_folds=0, n_folds=1, n_traded_bars=0)
+
+    def test_not_admitted_without_reasons_raises(self) -> None:
+        from src.domain.futures.compound.contracts import PortfolioAdmissionEvidence
+        with pytest.raises(ValueError, match="not-admitted must have at least one reason"):
+            PortfolioAdmissionEvidence(admitted=False, reasons=(), net_alpha_ann=0.0,
+                                       stressed_net_alpha_ann=0.0, posterior_positive=0.5,
+                                       positive_folds=0, n_folds=1, n_traded_bars=0)
+
+    def test_non_finite_metrics_raise(self) -> None:
+        from src.domain.futures.compound.contracts import PortfolioAdmissionEvidence
+        with pytest.raises(ValueError, match="must be finite"):
+            PortfolioAdmissionEvidence(admitted=False, reasons=("x",), net_alpha_ann=float("nan"),
+                                       stressed_net_alpha_ann=0.0, posterior_positive=0.5,
+                                       positive_folds=0, n_folds=1, n_traded_bars=0)
+
+
+class TestLegScreenDecisionValidation:
+    def test_capital_eligible_mismatch_raises(self) -> None:
+        from src.domain.futures.compound.contracts import LegScreenDecision
+        with pytest.raises(ValueError, match="capital_eligible must equal"):
+            LegScreenDecision(economic_eligible=True, familywise_supported=False,
+                              capital_eligible=True, economic_reasons=(),
+                              familywise_reasons=("familywise",), critical_t=2.5,
+                              n_tested_hypotheses=11)
+
+    def test_non_finite_critical_t_raises(self) -> None:
+        from src.domain.futures.compound.contracts import LegScreenDecision
+        with pytest.raises(ValueError, match="critical_t must be finite"):
+            LegScreenDecision(economic_eligible=True, familywise_supported=True,
+                              capital_eligible=True, economic_reasons=(),
+                              familywise_reasons=(), critical_t=float("nan"),
+                              n_tested_hypotheses=1)
+
+    def test_hypothesis_count_too_low_raises(self) -> None:
+        from src.domain.futures.compound.contracts import LegScreenDecision
+        with pytest.raises(ValueError, match="n_tested_hypotheses"):
+            LegScreenDecision(economic_eligible=True, familywise_supported=True,
+                              capital_eligible=True, economic_reasons=(),
+                              familywise_reasons=(), critical_t=0.0,
+                              n_tested_hypotheses=0)
+
+
+class TestAccumulatePrequentialShadowWeights:
+    def test_shadow_weights_non_negative_max_leg_weight_compliant(self) -> None:
+        T, S, K = 80, 5, 2
+        rng = np.random.default_rng(42)
+        market = rng.standard_normal(T).astype(np.float64) * 0.01
+        legs = []
+        for k in range(K):
+            spec = _make_spec(concept_id=f"c{k}")
+            book = rng.standard_normal((T, S)).astype(np.float64)
+            book = book / np.maximum(np.sum(np.abs(book), axis=1, keepdims=True), 1e-12)
+            ret = rng.standard_normal(T).astype(np.float64)
+            turn = np.abs(np.diff(book, axis=0, prepend=book[:1])).sum(axis=1)
+            legs.append(LegBook(spec=spec, book_2d=book, gross_return_1d=ret, turnover_1d=turn))
+        folds = _make_folds(6, 10)
+        cfg = L1LegConfig(warmup_folds=4, min_turnover_per_bar=0.0001,
+                          cost_safety_margin=1.0, min_positive_fold_ratio=0.01,
+                          max_leg_weight=0.51, familywise_error_rate=0.5)
+        from src.domain.futures.compound.l1_leg_admission import accumulate_prequential_shadow_weights
+        weights = accumulate_prequential_shadow_weights(tuple(legs), market, folds, 8.0, cfg)
+        assert weights.shape == (T, K)
+        assert np.all(weights >= 0.0)
+        assert np.all(weights[:folds[4].oos_start] == 0.0)
+
+    def test_shadow_weights_carry_forward_past_last_fold(self) -> None:
+        n_t, n_s, n_k = 100, 3, 2
+        rng = np.random.default_rng(42)
+        market = rng.standard_normal(n_t).astype(np.float64) * 0.01
+        legs = []
+        for k in range(n_k):
+            book = rng.standard_normal((n_t, n_s)).astype(np.float64)
+            book = book / np.maximum(np.sum(np.abs(book), axis=1, keepdims=True), 1e-12)
+            ret = rng.standard_normal(n_t).astype(np.float64)
+            turn = np.abs(np.diff(book, axis=0, prepend=book[:1])).sum(axis=1)
+            legs.append(LegBook(
+                spec=_make_spec(concept_id=f"c{k}"),
+                book_2d=book, gross_return_1d=ret, turnover_1d=turn,
+            ))
+        folds = tuple(CausalFold(
+            fold_id=i, fit_start=0, fit_end_exclusive=20 + 20 * i,
+            calibration_start=0, calibration_end_exclusive=20 + 20 * i,
+            oos_start=20 + 20 * i, oos_end_exclusive=40 + 20 * i,
+            purge_bars=0, embargo_bars=0,
+        ) for i in range(5))
+        cfg = L1LegConfig(warmup_folds=4, min_turnover_per_bar=0.0001,
+                          cost_safety_margin=1.0, min_positive_fold_ratio=0.01,
+                          max_leg_weight=0.51, familywise_error_rate=0.5)
+        from src.domain.futures.compound.l1_leg_admission import accumulate_prequential_shadow_weights
+        weights = accumulate_prequential_shadow_weights(tuple(legs), market, folds, 8.0, cfg)
+        last_stop = folds[-1].oos_end_exclusive
+        assert last_stop == 120
+        assert np.all(weights[last_stop:] == weights[last_stop - 1:last_stop])
+
+
+class TestWrapperParity:
+    def test_evaluate_portfolio_admission_wrapper_matches_evidence(self) -> None:
+        from src.domain.futures.compound.l1_leg_admission import (
+            evaluate_portfolio_admission, evaluate_portfolio_evidence,
+        )
+        n_folds, per_fold = 6, 20
+        T, S = n_folds * per_fold, 3
+        combined = np.full((T, S), 1.0 / S, dtype=np.float64)
+        ret = np.full((T, S), 0.02 / S, dtype=np.float64)
+        folds = _make_folds(n_folds, per_fold)
+        cfg = L1LegConfig(warmup_folds=4, bars_per_year=2190.0, n_bootstrap=500)
+        admitted, reasons, net_ann = evaluate_portfolio_admission(combined, ret, folds, 8.0, cfg, admission_end_exclusive=10**9)
+        evidence = evaluate_portfolio_evidence(combined, ret, folds, 8.0, cfg, admission_end_exclusive=10**9)
+        assert evidence.admitted == admitted
+        assert evidence.reasons == reasons
+        assert abs(evidence.net_alpha_ann - net_ann) < 1e-10

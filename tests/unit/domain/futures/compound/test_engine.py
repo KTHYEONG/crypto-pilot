@@ -813,13 +813,9 @@ class TestEngineLegPipelineWiring:
     def test_admission_gate_scores_the_same_array_that_is_deployed(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """C-1 regression, re-applied to the new pipeline: evaluate_portfolio_admission
-        must be called with the post-overlay weights_2d (what simulate_dense_portfolio
-        actually deploys), not the pre-overlay combined_2d -- scoring a different
-        object than what is deployed is the historical C-1 defect class."""
         import src.domain.futures.compound.engine as eng
         from src.domain.futures.compound.l1_leg_admission import (
-            evaluate_portfolio_admission as real_evaluate_admission,
+            evaluate_portfolio_evidence as real_evaluate_evidence,
         )
 
         gate_arrays: list[object] = []
@@ -832,12 +828,12 @@ class TestEngineLegPipelineWiring:
             deploy_arrays.append(result.copy())
             return result
 
-        def _spy_admission(combined_2d, asset_return_2d, folds, cost_bps, config, **kwargs):
+        def _spy_evidence(combined_2d, asset_return_2d, folds, cost_bps, config, **kwargs):
             gate_arrays.append(combined_2d.copy())
-            return real_evaluate_admission(combined_2d, asset_return_2d, folds, cost_bps, config, **kwargs)
+            return real_evaluate_evidence(combined_2d, asset_return_2d, folds, cost_bps, config, **kwargs)
 
         monkeypatch.setattr(eng, "apply_portfolio_risk_overlay", _spy_overlay)
-        monkeypatch.setattr(eng, "evaluate_portfolio_admission", _spy_admission)
+        monkeypatch.setattr(eng, "evaluate_portfolio_evidence", _spy_evidence)
 
         cube = _make_cube(4096, 5)
         universe = type("Universe", (), {"symbols": cube.symbols, "snapshots": ()})()
@@ -857,43 +853,51 @@ class TestEngineLegPipelineWiring:
             holdout_store=store, holdout_id="gate-same-array-test", config=CompoundEngineConfig(),
         )
         assert isinstance(result, CompoundEngineResult)
-        assert len(gate_arrays) == 1
-        assert len(deploy_arrays) == 1
+        assert len(gate_arrays) == 2
+        assert len(deploy_arrays) == 2
         np.testing.assert_array_equal(
             gate_arrays[0], deploy_arrays[0],
-            err_msg="admission gate scored a different array than what apply_portfolio_risk_overlay deployed",
+            err_msg="production admission gate scored a different array than what apply_portfolio_risk_overlay deployed",
         )
+
+
+    def test_l1_attribution_report_present_in_result(
+        self, tmp_path: Path,
+    ) -> None:
+        from src.domain.futures.compound.contracts import L1AttributionReport
+        cube = _make_cube(4096, 5)
+        universe = type("Universe", (), {"symbols": cube.symbols, "snapshots": ()})()
+        store = SealedHoldoutStore(tmp_path / "l1_attribution_test.sqlite3")
+        manifest = SealedHoldoutManifest(
+            holdout_id="l1-attr-test",
+            start_time_ns=int(cube.timestamps_ns[-30]),
+            end_time_ns=int(cube.timestamps_ns[-1]),
+            holdout_days=30,
+            model_version="v1",
+            data_manifest_hash="h1",
+            strategy_spec_hash="spec_l1_attr",
+        )
+        store.create(manifest)
+        result = run_multiscale_compound_engine(
+            market=cube, universe=universe,
+            holdout_store=store, holdout_id="l1-attr-test", config=CompoundEngineConfig(),
+        )
+        assert isinstance(result, CompoundEngineResult)
+        assert result.l1_attribution is not None
+        assert isinstance(result.l1_attribution, L1AttributionReport)
+        assert result.l1_attribution.production_weights_unchanged is True
 
     def test_engine_deploys_nonzero_weights_into_holdout_with_matched_convention(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """RULE-14: accumulate_prequential_leg_weights carries the last fold's
-        weight vector into the sealed holdout tail, so weights_2d must have
-        nonzero rows there whenever any fold produced nonzero evidence.
-        RULE-11: the gross return actually scored for admission must be
-        computed with the lag-1 (previous-bar) convention, matching what
-        simulate_dense_portfolio pays -- not the same-bar look-ahead."""
         import src.domain.futures.compound.engine as eng
         from src.domain.futures.compound.contracts import LegBook
         from src.domain.futures.compound.l1_concept_bank import compute_lagged_gross_returns
         from src.domain.futures.compound.l1_leg_admission import (
-            evaluate_portfolio_admission as real_evaluate_admission,
+            evaluate_portfolio_evidence as real_evaluate_evidence,
         )
 
-        # _make_cube's flat, perfectly-correlated synthetic close/volume
-        # produces exactly-zero leg books (no cross-sectional or time-series
-        # dispersion for any formula to key on), so a plain E2E run here would
-        # make every downstream assertion vacuously true (0 == 0). Replace
-        # build_leg_books with real LegBook objects carrying a deterministic,
-        # statistically strong alpha so admission genuinely fires and the
-        # RULE-11/RULE-14 assertions below exercise the real branch.
         def _fake_build_leg_books(panel, eligible_2d, close_2d, registry, config):
-            # book_2d is deliberately time-invariant: the property under test
-            # is whether the FOLD-DRIVEN LEG WEIGHT (which does vary and is
-            # zero before evidence exists) is carried into the holdout tail --
-            # keeping the book itself constant isolates that from unrelated
-            # book-level drift and makes the post-fix/pre-fix contrast crisp
-            # (pre-fix: weights[holdout] == 0 while weights[last_fold] != 0).
             n_t, n_s = eligible_2d.shape
             rng = np.random.default_rng(7)
             book = np.zeros((n_t, n_s), dtype=np.float64)
@@ -912,11 +916,11 @@ class TestEngineLegPipelineWiring:
 
         captured: list[object] = []
 
-        def _spy_admission(combined_2d, asset_return_2d, folds, cost_bps, config, **kwargs):
+        def _spy_evidence(combined_2d, asset_return_2d, folds, cost_bps, config, **kwargs):
             captured.append((combined_2d.copy(), asset_return_2d.copy(), folds, cost_bps, config))
-            return real_evaluate_admission(combined_2d, asset_return_2d, folds, cost_bps, config, **kwargs)
+            return real_evaluate_evidence(combined_2d, asset_return_2d, folds, cost_bps, config, **kwargs)
 
-        monkeypatch.setattr(eng, "evaluate_portfolio_admission", _spy_admission)
+        monkeypatch.setattr(eng, "evaluate_portfolio_evidence", _spy_evidence)
 
         cube = _make_cube(4096, 5)
         universe = type("Universe", (), {"symbols": cube.symbols, "snapshots": ()})()
@@ -936,23 +940,17 @@ class TestEngineLegPipelineWiring:
             holdout_store=store, holdout_id="holdout-carry-test", config=CompoundEngineConfig(),
         )
         assert isinstance(result, CompoundEngineResult)
-        assert len(captured) == 1
+        assert len(captured) == 2
         combined_2d, asset_return_2d, folds, cost_bps, config = captured[0]
 
-        # Sanity: the fixture actually produced signal -- otherwise every
-        # assertion below would be trivially true (0 == 0) and prove nothing.
         assert np.any(np.abs(combined_2d).sum(axis=1) > 0), "fixture produced an all-zero book; test is vacuous"
 
-        # RULE-11: reproduce the gate's net_ann with the lag-1 convention and
-        # confirm it differs from a same-bar (look-ahead) recomputation.
         lagged = compute_lagged_gross_returns(combined_2d, asset_return_2d)
         same_bar = np.zeros(combined_2d.shape[0], dtype=np.float64)
         for t in range(1, combined_2d.shape[0]):
             same_bar[t] = float(np.dot(combined_2d[t], asset_return_2d[t]))
         assert not np.allclose(lagged, same_bar)
 
-        # RULE-14: the sealed holdout tail must carry the last fold's nonzero
-        # weight vector forward, not sit flat at zero.
         oos_ends = [f.oos_end_exclusive for f in folds]
         assert oos_ends
         last_stop = max(oos_ends)
