@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
+"""Sync: Task Metadata + Code Map + Anti-Pattern Registry + Cleanup Protocol."""
+
 from __future__ import annotations
 
 import argparse
 import contextlib
 import json
 import os
-import re
 import shutil
 import sys
 from datetime import datetime
@@ -41,85 +42,6 @@ def _resolve_test_path(source_file: str) -> str | None:
     return None
 
 
-def _append_adr(task: str, title: str, why: str, what: str, impact: str) -> str:
-    date_str = datetime.now().strftime("%Y-%m-%d")
-    adr_date = datetime.now().strftime("%Y%m%d")
-    adr_id = f"ADR_{adr_date}_{task.replace('TASK_', '')}"
-
-    decisions_path = "docs/decisions/decisions.md"
-    if not _path_exists(decisions_path):
-        return f"ERROR: {decisions_path} not found"
-
-    new_entry = (
-        f"## [{date_str}] [{task}] [{adr_id}]\n"
-        f"- **Context/Why:** {why}\n"
-        f"- **Resolution/What:** {what}\n"
-        f"- **Impact:** {impact}\n\n"
-    )
-
-    content = _read_file(decisions_path)
-    header_re = re.compile(
-        r"^#\s*Active\s*Decisions\s*Log\s*\(\s*Sliding\s*Window\s*\)",
-        re.IGNORECASE | re.MULTILINE,
-    )
-    m = header_re.search(content)
-    if m:
-        end = m.end()
-        nl = content.find("\n", end)
-        if nl == -1:
-            nl = end
-        before = content[: nl + 1]
-        after = content[nl + 1 :].lstrip()
-        updated = f"{before}\n{new_entry}{after}"
-    else:
-        updated = f"{new_entry}{content}"
-
-    _write_file(decisions_path, updated)
-    return adr_id
-
-
-def _prune_archive(max_entries: int = 15) -> tuple[int, int]:
-    decisions_path = "docs/decisions/decisions.md"
-    archive_path = "docs/decisions/decisions_archive.md"
-
-    if not _path_exists(decisions_path):
-        return (0, 0)
-
-    content = _read_file(decisions_path)
-    parts = re.split(r"(?=^##\s+\[\d{4}-\d{2}-\d{2}\])", content, flags=re.MULTILINE)
-    if len(parts) <= 1:
-        return (0, 0)
-
-    pre_header = parts[0]
-    entries = [e.strip() + "\n\n" for e in parts[1:]]
-
-    if len(entries) <= max_entries:
-        return (0, 0)
-
-    active = entries[:max_entries]
-    excess = entries[max_entries:]
-
-    _write_file(decisions_path, pre_header.rstrip() + "\n\n" + "".join(active).rstrip() + "\n")
-
-    archive_header = "# Decisions Archive (Permanent Log)\n\n"
-    existing = ""
-    if _path_exists(archive_path):
-        existing = _read_file(archive_path)
-        ap = re.split(r"(?=^##\s+\[\d{4}-\d{2}-\d{2}\])", existing, flags=re.MULTILINE)
-        if len(ap) > 1:
-            archive_header = ap[0]
-            existing = "".join(ap[1:])
-
-    archived_ids = set(re.findall(r"\[ADR_\w+\]", existing))
-    new_entries = [e for e in excess if not all(eid in archived_ids for eid in re.findall(r"\[ADR_\w+\]", e))]
-
-    if new_entries:
-        updated = archive_header.rstrip() + "\n\n" + "".join(new_entries) + existing.lstrip()
-        _write_file(archive_path, updated.rstrip() + "\n")
-
-    return (len(excess), len(new_entries))
-
-
 def _update_decisions_json(
     task: str,
     title: str,
@@ -127,11 +49,13 @@ def _update_decisions_json(
     what: str,
     impact: str,
     domain: str,
-    adr_id: str,
     failed_hypothesis: str | None = None,
     failure_reason: str | None = None,
-) -> None:
+) -> str:
     date_str = datetime.now().strftime("%Y-%m-%d")
+    adr_date = datetime.now().strftime("%Y%m%d")
+    adr_id = f"ADR_{adr_date}_{task.replace('TASK_', '')}"
+
     tasks_json_path = "docs/decisions/task_index.json"
     anti_patterns_path = "docs/decisions/anti_patterns.json"
 
@@ -156,7 +80,7 @@ def _update_decisions_json(
 
     # Prepend new task entry
     index_data["tasks"] = [new_task_entry] + [t for t in index_data.get("tasks", []) if t.get("task_id") != task]
-    # Keep sliding window of max 100 entries in task_index.json
+    # Keep max 100 entries in task_index.json
     index_data["tasks"] = index_data["tasks"][:100]
     _write_file(tasks_json_path, json.dumps(index_data, indent=2, ensure_ascii=False) + "\n")
 
@@ -179,6 +103,8 @@ def _update_decisions_json(
         anti_data = [new_anti_entry] + [a for a in anti_data if a.get("failed_hypothesis") != failed_hypothesis]
         anti_data = anti_data[:50]  # Max 50 anti-patterns
         _write_file(anti_patterns_path, json.dumps(anti_data, indent=2, ensure_ascii=False) + "\n")
+
+    return adr_id
 
 
 def _update_index(source_file: str, test_file: str | None, doc_file: str | None) -> None:
@@ -265,7 +191,6 @@ def _clean_specs(
 
     keep_set = set(keep_specs) if keep_specs else set()
 
-    # Expand remove_specs to include matching .md and _contract.json files
     target_prefixes: set[str] = set()
     if remove_specs:
         for item in remove_specs:
@@ -279,7 +204,6 @@ def _clean_specs(
             if fname in keep_set or fname.lower() in keep_set:
                 continue
 
-            # If user specified target files/prefixes, check if fname matches
             if target_prefixes:
                 fname_base = fname.replace(".md", "").replace("_contract.json", "").lower()
                 if fname_base not in target_prefixes and fname.lower() not in target_prefixes:
@@ -295,7 +219,7 @@ def _clean_specs(
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Sync: ADR + Index + Anti-Pattern Registry + Cleanup.")
+    parser = argparse.ArgumentParser(description="Sync: Task Registry + Code Map + Anti-Pattern Registry + Cleanup.")
     parser.add_argument("--task", required=True, help="Task ID (e.g. TASK_L0_MTF_FUSION)")
     parser.add_argument("--title", required=True, help="Decision title")
     parser.add_argument("--why", required=True, help="Context/Why")
@@ -315,48 +239,32 @@ def main() -> None:
     logs: list[str] = []
     errors: list[str] = []
 
-    # 1. ADR Append to decisions.md
+    # 1. Update Smart JSON Registries (task_index.json & anti_patterns.json)
     try:
-        adr_id = _append_adr(args.task, args.title, args.why, args.what, args.impact)
-        logs.append(f"ADR added: {adr_id}")
-    except Exception as e:
-        errors.append(f"ADR append failed: {e}")
-        adr_id = "N/A"
-
-    # 2. Update Smart JSON Registries (index.json & anti_patterns.json)
-    try:
-        _update_decisions_json(
+        adr_id = _update_decisions_json(
             task=args.task,
             title=args.title,
             why=args.why,
             what=args.what,
             impact=args.impact,
             domain=args.domain,
-            adr_id=adr_id,
             failed_hypothesis=args.failed_hypothesis,
             failure_reason=args.failure_reason,
         )
-        logs.append("JSON Index & Anti-Pattern DB updated")
+        logs.append(f"Task Registry & Anti-Pattern DB updated ({adr_id})")
     except Exception as e:
         errors.append(f"JSON Registry update failed: {e}")
+        adr_id = "N/A"
 
-    # 3. Archive Pruning (Keep max 5 entries in decisions.md sliding window)
-    try:
-        pruned, archived = _prune_archive(5)
-        if pruned > 0:
-            logs.append(f"Pruned {pruned} entries ({archived} to archive)")
-    except Exception as e:
-        errors.append(f"Archive prune failed: {e}")
-
-    # 4. Index Update for files
+    # 2. Code Map Update for files
     test_file = args.test or _resolve_test_path(args.source)
     try:
         _update_index(args.source, test_file, args.doc)
-        logs.append(f"Source index updated for {args.source}")
+        logs.append(f"Code map updated for {args.source}")
     except Exception as e:
-        errors.append(f"Index update failed: {e}")
+        errors.append(f"Code map update failed: {e}")
 
-    # 5. Temp & Scratch Wipe
+    # 3. Temp & Scratch Wipe
     try:
         wiped = _wipe_temp_artifacts()
         scratch_wiped = _clean_scratch_dir()
@@ -365,7 +273,7 @@ def main() -> None:
     except Exception as e:
         errors.append(f"Temp wipe failed: {e}")
 
-    # 6. Spec Cleanup
+    # 4. Spec Cleanup
     try:
         cleaned = _clean_specs(
             remove_specs=args.remove_specs,
@@ -377,7 +285,7 @@ def main() -> None:
     except Exception as e:
         errors.append(f"Spec cleanup failed: {e}")
 
-    # 7. Summary
+    # 5. Summary
     status = "OK" if not errors else "PARTIAL"
     summary = f"### 🏁 [SYNC:{status}] [{adr_id}] | {' | '.join(logs)}"
     print(summary)
