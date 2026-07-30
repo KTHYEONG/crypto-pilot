@@ -35,10 +35,6 @@ class TestComputeBreakevenCostBps:
 
 class TestEvaluateLegAlpha:
     def test_evaluate_leg_alpha_strips_market_beta(self) -> None:
-        # evaluate_leg_alpha consumes leg.gross_return_1d/turnover_1d directly,
-        # not book_2d -- construct gross_return_1d as exactly 2*market plus
-        # small noise so beta_market must recover close to 2 and alpha_ann
-        # close to 0 once that beta is stripped out.
         T, S = 300, 5
         rng = np.random.default_rng(42)
         market = rng.standard_normal(T).astype(np.float64) * 0.02
@@ -57,12 +53,31 @@ class TestEvaluateLegAlpha:
         assert abs(evidence.beta_market - 2.0) < 0.2
         assert abs(evidence.alpha_ann) < 0.5
 
+    def test_evaluate_leg_alpha_uses_net_returns_for_fold_and_tstat_evidence(self) -> None:
+        T, S = 120, 3
+        rng = np.random.default_rng(42)
+        gross_return = rng.standard_normal(T).astype(np.float64) * 0.001 + 0.002
+        turnover = np.full(T, 0.5, dtype=np.float64)
+        book = np.full((T, S), 1.0 / S, dtype=np.float64)
+        leg = LegBook(
+            spec=_make_spec(), book_2d=book,
+            gross_return_1d=gross_return, turnover_1d=turnover,
+        )
+        market = np.zeros(T, dtype=np.float64)
+        oos = (slice(0, T),)
+        evidence = evaluate_leg_alpha(
+            leg, market, oos, 8.0, L1LegConfig(n_bootstrap=100),
+            n_tested_hypotheses=1,
+        )
+        cost_per_bar = 8.0 * 1e-4 * 0.5
+        expected_net_ann = float(np.mean(gross_return - cost_per_bar)) * 2190.0
+        assert evidence.net_alpha_ann < evidence.alpha_ann
+        assert abs(evidence.net_alpha_ann - expected_net_ann) < 0.1
+        assert evidence.n_folds == 1
+
     def test_evaluate_leg_alpha_emits_leg_diagnostics_under_l1_debug(
         self, tmp_path, monkeypatch,
     ) -> None:
-        """[LIMIT] regression guard: L1AdmissionRecorder.record_leg was defined
-        but never called from anywhere in src/ -- an orphaned implementation
-        that silently defeated the diagnostics contract."""
         import json
 
         log_path = tmp_path / "l1_admission.jsonl"
@@ -116,3 +131,22 @@ class TestEvaluateLegAlpha:
         )
         assert evidence.reasons == ("no_oos_folds",)
         assert evidence.evidence_weight == 0.0
+
+    def test_evaluate_leg_alpha_gross_positive_net_negative(self) -> None:
+        T, S = 120, 3
+        rng = np.random.default_rng(42)
+        gross_return = rng.standard_normal(T).astype(np.float64) * 0.001 + 0.005
+        turnover = np.full(T, 1.0, dtype=np.float64)
+        book = np.full((T, S), 1.0 / S, dtype=np.float64)
+        leg = LegBook(
+            spec=_make_spec(), book_2d=book,
+            gross_return_1d=gross_return, turnover_1d=turnover,
+        )
+        market = np.zeros(T, dtype=np.float64)
+        oos = (slice(0, T),)
+        evidence = evaluate_leg_alpha(
+            leg, market, oos, 8.0, L1LegConfig(n_bootstrap=100),
+            n_tested_hypotheses=1,
+        )
+        assert evidence.alpha_ann > 0
+        assert evidence.net_alpha_ann < evidence.alpha_ann
