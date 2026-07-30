@@ -724,6 +724,112 @@ def compute_top_n_compounding_weights(
     return weights
 
 
+def project_terminal_portfolio_caps(
+    weights_2d: NDArray[np.float64],
+    *,
+    per_symbol_cap: float,
+    net_cap: float,
+    max_long_leverage: float,
+    max_short_leverage: float,
+    gross_cap: float,
+    max_iterations: int = 64,
+    tolerance: float = 1e-12,
+) -> NDArray[np.float64]:
+    if not isinstance(weights_2d, np.ndarray) or weights_2d.ndim != 2:
+        raise ValueError(f"weights_2d must be a 2-D ndarray, got shape {getattr(weights_2d, 'shape', 'unknown')}")
+    if not np.all(np.isfinite(weights_2d)):
+        raise ValueError("weights_2d contains non-finite values")
+    if weights_2d.shape[0] == 0 or weights_2d.shape[1] == 0:
+        raise ValueError(f"weights_2d must be non-empty, got shape {weights_2d.shape}")
+    for name, val in [
+        ("per_symbol_cap", per_symbol_cap), ("net_cap", net_cap),
+        ("max_long_leverage", max_long_leverage), ("max_short_leverage", max_short_leverage),
+        ("gross_cap", gross_cap),
+    ]:
+        if not np.isfinite(val) or val <= 0:
+            raise ValueError(f"{name} must be finite positive, got {val}")
+    if not net_cap <= gross_cap:
+        raise ValueError(f"net_cap={net_cap} must be <= gross_cap={gross_cap}")
+    if not max_long_leverage + max_short_leverage <= gross_cap:
+        raise ValueError(f"max_long_leverage + max_short_leverage ({max_long_leverage + max_short_leverage}) must be <= gross_cap={gross_cap}")
+
+    result = weights_2d.copy()
+    n_rows = result.shape[0]
+
+    for i in range(n_rows):
+        w = result[i]
+        best_w = w.copy()
+        best_delta = float(np.inf)
+        for _ in range(max_iterations):
+            w_old = w.copy()
+
+            w = np.clip(w, -per_symbol_cap, per_symbol_cap)
+
+            gross = float(np.sum(np.abs(w)))
+            if gross > 0:
+                net = float(np.sum(w))
+                limit = net_cap * gross
+                if abs(net) > limit:
+                    active = w != 0.0
+                    n_active = int(np.sum(active))
+                    if n_active > 0:
+                        adjustment = (net - np.sign(net) * limit) / n_active
+                        w = w.copy()
+                        w[active] -= adjustment
+
+            long_sum = float(np.sum(np.maximum(w, 0.0)))
+            if long_sum > max_long_leverage:
+                w = np.where(w > 0, w * (max_long_leverage / max(long_sum, 1e-15)), w)
+
+            short_sum = float(np.sum(np.maximum(-w, 0.0)))
+            if short_sum > max_short_leverage:
+                w = np.where(w < 0, w * (max_short_leverage / max(short_sum, 1e-15)), w)
+
+            gross_sum = float(np.sum(np.abs(w)))
+            if gross_sum > gross_cap:
+                w = w * (gross_cap / max(gross_sum, 1e-15))
+
+            w = np.clip(w, -per_symbol_cap, per_symbol_cap)
+
+            delta = float(np.max(np.abs(w - w_old)))
+            if delta <= tolerance:
+                break
+            if delta < best_delta:
+                best_w = w.copy()
+                best_delta = delta
+        else:
+            if best_delta <= max(tolerance, 1e-6):
+                w = best_w
+            else:
+                raise RuntimeError(
+                    f"terminal projection did not converge in {max_iterations} iterations "
+                    f"at row {i}; max delta={best_delta:.6e}"
+                )
+
+        result[i] = w
+
+    _logger.debug(
+        "terminal projection: rows=%d, pre max|w|=%.6f, post max|w|=%.6f",
+        n_rows,
+        float(np.max(np.abs(weights_2d))),
+        float(np.max(np.abs(result))),
+    )
+    return result
+
+
+def compute_max_name_weight_p95(
+    weights_2d: NDArray[np.float64],
+) -> float:
+    if not isinstance(weights_2d, np.ndarray) or weights_2d.ndim != 2:
+        raise ValueError(f"weights_2d must be a 2-D ndarray, got shape {getattr(weights_2d, 'shape', 'unknown')}")
+    if not np.all(np.isfinite(weights_2d)):
+        raise ValueError("weights_2d contains non-finite values")
+    if weights_2d.shape[0] == 0:
+        raise ValueError("weights_2d must be non-empty")
+    max_abs_w = np.max(np.abs(weights_2d), axis=1)
+    return float(np.percentile(max_abs_w, 95))
+
+
 def apply_portfolio_risk_overlay(
     weights_2d: NDArray[np.float64],
     close_2d: NDArray[np.float32],
