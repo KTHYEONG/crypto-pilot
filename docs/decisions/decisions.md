@@ -1,5 +1,10 @@
 # Active Decisions Log (Sliding Window)
 
+## [2026-07-30] [TASK_L1_SIGNAL_STAGE_REDESIGN] [ADR_20260730_L1_SIGNAL_STAGE_REDESIGN]
+- **Context/Why:** L1이 admitted=0/37로 영구 cash-only(배포 EMA 46h 지연이 8h 반전신호를 구조적으로 놓침, D-1). 사용자 지시로 RSI/MACD/Bollinger 등 30+ 신호 census + 구조 재설계 spec 작성 후 /implement, /check에서 치명적 결함 16건(build_leg_books key mismatch로 전체 파이프라인 영구 0값, _ewm_2d 오용으로 RSI 등 지표 발산, C-1 재발, evidence_weight 로깅 항상 0 등) 발견
+- **Resolution/What:** l1_concept_bank/l1_leg_evaluation/l1_leg_admission 신규 3모듈로 2-concept(trend_momentum 10-formula, vol_regime 3-formula) leg 파이프라인 구현, engine.py P2 전면 재배선(screen_signal_edge 등 구식 경로 폐기), lean_check.py에 assertion 동적 실행기+orphaned-implementation 게이트 자동화+coverage 전체반환+--spec-only 조기검증 모드 추가, implement 스킬에 Phase B/C 훅 배선. 실전 CLI 2회 재실행으로 검증
+- **Impact:** L1이 프로젝트 사상 최초로 admitted>0, target_weights nonzero 50.7% 실배포(CAGR 23.4%, Sharpe 1.56, MDD 7.7%). L2 fail/L3 reject 유지하나 사유가 구조적 봉쇄에서 통계적 게이트 미달(capacity_utilisation_p95 초과 등, [LIMIT-04] 사전예견과 일치)로 전환 — 실패모드가 질적으로 개선. /check green(mypy strict, Cov 86%). docs/results/result.md 전면 갱신
+
 ## [2026-07-29] [TASK_L1_EFFECTIVE_HORIZON_SCREENING] [ADR_20260729_L1_EFFECTIVE_HORIZON_SCREENING]
 - **Context/Why:** 직전 세션에서 reversal_st/xs_reversal 8종 킬 확정 후 사용자 요청으로 37종 전수census+1분봉 실측 수행. momentum_ts:fast(declared 24h, raw z t=-5.93)의 실제 배포되는 스무딩북(alpha_smooth=0.08, EMA~50h)이 같은 24h에서는 t=+0.24(무상관)이나 horizon을 648h까지 넓히면 t=+2.65로 단조증가함을 발견 - 게이트가 배포되는 신호가 아니라 원시 신호를 검정하는 구조적 불일치 확정. 빠른 타임프레임(1m~1h) 20회 실측은 명확히 반증(전부 단조악화).
 - **Resolution/What:** l1_screening.py: discover_effective_horizon 신규(declared 게이트 탈락 신호에 한해 스무딩 배포북을 7개 horizon 후보(24~648h)에 Sidak 보정 재검정), screen_signal_edge에 5번째 게이트로 배선. contracts.py: SignalEdgeRecord에 effective_horizon_hours/effective_orientation/effective_horizon_t_stat 3필드+검증 추가. l1_diagnostics.py: 신규 필드 JSONL 기록. /check 과정에서 declared_orientation_contradicted 탈락자가 반대방향에서 유효horizon을 찾아도 net-of-cost 재검증이 원래 declared_orientation을 쓰던 배선버그 발견수정(비대칭 long/short 레버리지 캡 때문에 부호오류=다른포트폴리오), spec-compliance 시나리오 7개 중 6개 이름불일치+1개(purge/embargo) 공허테스트 발견, 결정론적 재작성. 실전 CLI 재검증 완료(logs/futures/compound/20260729_122330/).
@@ -69,8 +74,3 @@
 - **Context/Why:** signal_panel 206s E2E 병목의 95.7%를 점유하는 MAD-z kernel의 2회 sort를 1회 sort+3-way merge로 대체
 - **Resolution/What:** _rolling_mad_z_single_sort_kernel 신규 @njit; _rolling_mad_z 3단계 fallback 체인(H2→old kernel→numpy); 7개 TDD 단위테스트 추가
 - **Impact:** 4h kernel 5.46s→3.54s(1.54×), 1h kernel 23.61s→15.28s(1.55×). Bit-exact 유지(diff=0.0). Panel 추정 206s→~156s
-
-## [2026-07-28] [PHASE_FULL_BOTTLENECK_OPT] [ADR_20260728_PHASE_FULL_BOTTLENECK_OPT]
-- **Context/Why:** phase full 실행 시 E2E 385s+의 병목 식별 및 최적화. Signal panel 179.6s(50%), market cube 27s(7.5%), exit_cache+cluster_posteriors 20-30s(8%) 가 주 병목
-- **Resolution/What:** 1) exit_path.py _label_kernel에 @njit(cache=True) 적용 (순수 Python 삼중 루프 → 컴파일). 2) l1_sleeves.py aggregate_cluster_group_returns에 @njit 적용 + gc.collect() 제거. 3) H1(TPE 비활성화)과 H5(동시 I/O)는 실증 결과 역효과/무효로 롤백. 4) 7개 단위 테스트 추가 (numba-Python 동등성, zero-event, aggregate 수렴). 5) docs/specs/phase_full_bottleneck.md + contract.json 작성
-- **Impact:** P2 구간(exit_cache+posteriors) 30s 이내 유지. 전체 E2E 385s→285s(-100s, 26%↓). 단 signal panel MAD 커널(T=5442×S=51×recipe=60, sorting 기반)이 여전히 206s로 최대 병목 — TPE/스레드 배분만으로는 해결 불가, MAD 커널 자체 알고리즘 개선(H2) 필요
