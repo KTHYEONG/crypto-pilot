@@ -258,7 +258,7 @@ def run_multiscale_compound_engine(
             l1_window_end = boundaries.l3_start  # pragma: no cover
             folds = build_expanding_walk_forward_steps(
                 start_offset, l1_window_end, config.calibration,
-                step_bars=180, initial_fit_bars=900,
+                step_bars=180, initial_fit_bars=720,
                 max_target_horizon_bars=max_horizon_bars,
             )
         else:
@@ -292,8 +292,10 @@ def run_multiscale_compound_engine(
         # gate the SAME array that gets deployed (post risk-overlay), not the
         # pre-overlay combined book -- scoring a different object than what
         # is actually deployed is the historical C-1 defect class.
+        p2_admission_end = boundaries.l2_start if quarter_window is not None else 10**9
         admitted, p_reasons, net_ann = evaluate_portfolio_admission(
             weights_2d, asset_ret_4h, folds, config.ladder.cost_bps, config.l1_leg,
+            admission_end_exclusive=p2_admission_end,
         )
         handoff_result = None
         forecast = None
@@ -566,7 +568,7 @@ def run_multiscale_compound_engine(
         if frozen_daily_ret.size > 0:
             frozen_control_daily_1d = np.log1p(frozen_daily_ret)
 
-    l1_prior_returns_1d: NDArray[np.float64] | None = None
+    l1_prior_excess_1d: NDArray[np.float64] | None = None
     if quarter_window is not None and ledger_1.timestamps_ns.size > 0:
         try:
             l1_prior_ledger = slice_execution_ledger(
@@ -574,9 +576,30 @@ def run_multiscale_compound_engine(
                 start_time_ns=int(quarter_window.l1_start_ns),
                 end_time_ns=int(quarter_window.l2_start_ns),
             )
-            l1_prior_returns_1d = aggregate_returns_to_utc_days(
+            l1_strategy_daily = aggregate_returns_to_utc_days(
                 l1_prior_ledger.timestamps_ns, l1_prior_ledger.net_returns_1d,
             )
+            l1_daily_ts = _daily_timestamps_from_4h(l1_prior_ledger.timestamps_ns)
+            l1_benchmark = build_causal_l2_benchmark(
+                daily_market_returns=daily_market,
+                window_timestamps_ns=l1_daily_ts,
+                config=config.l2_benchmark,
+            )
+            bench_start = int(np.searchsorted(l1_benchmark.timestamps_ns, l1_daily_ts[0], side="left"))
+            aligned_n = min(len(l1_strategy_daily), len(l1_benchmark.daily_returns_1d) - bench_start)
+            l1_strat = l1_strategy_daily[:aligned_n]
+            l1_bench = l1_benchmark.daily_returns_1d[bench_start:bench_start + aligned_n]
+            if aligned_n >= 30:
+                l1_beta = causal_beta_series(
+                    strategy_daily_1d=l1_strat.astype(np.float64),
+                    benchmark_daily_1d=l1_bench.astype(np.float64),
+                    lookback_days=config.l2_benchmark.volatility_lookback_days,
+                    min_obs=30,
+                    beta_clip=(-1.0, 3.0),
+                )
+                l1_prior_excess_1d = np.log1p(l1_strat) - l1_beta * np.log1p(l1_bench)
+            else:
+                l1_prior_excess_1d = np.log1p(l1_strat) - np.log1p(l1_bench)
         except (ValueError, IndexError):
             pass
 
@@ -586,7 +609,7 @@ def run_multiscale_compound_engine(
         config=config.l2_gate, bootstrap_seed=42,
         frozen_control_daily_1d=frozen_control_daily_1d,
         beta_1d=beta_1d_eval,
-        l1_prior_returns_1d=l1_prior_returns_1d,
+        l1_prior_excess_1d=l1_prior_excess_1d,
     )
 
     if trial_ledger is not None:

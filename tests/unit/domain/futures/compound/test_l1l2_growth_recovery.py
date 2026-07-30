@@ -302,11 +302,12 @@ def test_run_multiscale_compound_engine_passes_five_time_ordered_folds_to_l2(
     captured: dict[str, np.ndarray] = {}
     real_evaluate = validation_module.evaluate_l2_walk_forward
 
-    def _spy_evaluate(*, ledger, fold_ids_1d, benchmark, trial_multiplicity, config, bootstrap_seed):
+    def _spy_evaluate(*, ledger, fold_ids_1d, benchmark, trial_multiplicity, config, bootstrap_seed, **kwargs):
         captured["fold_ids_1d"] = fold_ids_1d.copy()
         return real_evaluate(
             ledger=ledger, fold_ids_1d=fold_ids_1d, benchmark=benchmark,
             trial_multiplicity=trial_multiplicity, config=config, bootstrap_seed=bootstrap_seed,
+            **kwargs,
         )
 
     monkeypatch.setattr(engine_module, "evaluate_l2_walk_forward", _spy_evaluate)
