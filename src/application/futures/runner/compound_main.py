@@ -150,6 +150,36 @@ def _write_artifacts(
         },
         "dry_run": os.environ.get("L2_DRY_RUN", "0") == "1",
     }
+    if engine_result.l1_attribution is not None:
+        attr = engine_result.l1_attribution
+        l1_attr: dict[str, object] = {
+            "bottleneck_code": attr.bottleneck_code,
+            "economic_candidate_count": attr.economic_candidate_count,
+            "capital_candidate_count": attr.capital_candidate_count,
+            "shadow_available": attr.shadow_available,
+            "production_weights_unchanged": attr.production_weights_unchanged,
+            "production": {
+                "admitted": attr.production.admitted,
+                "reasons": list(attr.production.reasons),
+                "net_alpha_ann": attr.production.net_alpha_ann,
+                "stressed_net_alpha_ann": attr.production.stressed_net_alpha_ann,
+                "posterior_positive": attr.production.posterior_positive,
+                "positive_folds": attr.production.positive_folds,
+                "n_folds": attr.production.n_folds,
+                "n_traded_bars": attr.production.n_traded_bars,
+            },
+            "shadow": {
+                "admitted": attr.shadow.admitted,
+                "reasons": list(attr.shadow.reasons),
+                "net_alpha_ann": attr.shadow.net_alpha_ann,
+                "stressed_net_alpha_ann": attr.shadow.stressed_net_alpha_ann,
+                "posterior_positive": attr.shadow.posterior_positive,
+                "positive_folds": attr.shadow.positive_folds,
+                "n_folds": attr.shadow.n_folds,
+                "n_traded_bars": attr.shadow.n_traded_bars,
+            },
+        }
+        result_data["l1_attribution"] = l1_attr  # type: ignore[assignment]
     with open(paths.result_path, "w", encoding="utf-8") as f:
         json.dump(result_data, f, indent=2)
 

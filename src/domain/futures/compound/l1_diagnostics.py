@@ -221,3 +221,37 @@ class L1AdmissionRecorder:
             "effective_orientation": effective_orientation,
             "effective_horizon_t_stat": round(effective_horizon_t_stat, 3),
         })
+
+
+    def record_attribution(
+        self, *,
+        bottleneck_code: str,
+        economic_candidate_count: int,
+        capital_candidate_count: int,
+        production_admitted: bool,
+        shadow_admitted: bool,
+        production_net_alpha_ann: float,
+        shadow_net_alpha_ann: float,
+        shadow_available: bool,
+    ) -> None:
+        if not self._enabled:
+            return
+        _LOGGER.info(
+            "[ATTR] bottleneck=%s economic=%d capital=%d "
+            "prod_admitted=%s shadow_admitted=%s "
+            "prod_net_ann=%.4f shadow_net_ann=%.4f shadow_avail=%s",
+            bottleneck_code, economic_candidate_count, capital_candidate_count,
+            production_admitted, shadow_admitted,
+            production_net_alpha_ann, shadow_net_alpha_ann, shadow_available,
+        )
+        self._append_jsonl({
+            "tag": "ATTR",
+            "bottleneck_code": bottleneck_code,
+            "economic_candidate_count": economic_candidate_count,
+            "capital_candidate_count": capital_candidate_count,
+            "production_admitted": production_admitted,
+            "shadow_admitted": shadow_admitted,
+            "production_net_alpha_ann": round(production_net_alpha_ann, 4),
+            "shadow_net_alpha_ann": round(shadow_net_alpha_ann, 4),
+            "shadow_available": shadow_available,
+        })
