@@ -293,6 +293,7 @@ def run_multiscale_compound_engine(
         combined_2d = combine_leg_books(legs, leg_weights_2d)
         weights_2d = apply_portfolio_risk_overlay(
             combined_2d, close_4h, config.ladder.cost_bps, config.dynamic_compounding,
+            asset_return_2d=asset_ret_4h,
         )
         # gate the SAME array that gets deployed (post risk-overlay), not the
         # pre-overlay combined book -- scoring a different object than what
@@ -302,7 +303,8 @@ def run_multiscale_compound_engine(
             weights_2d, asset_ret_4h, folds, config.ladder.cost_bps, config.l1_leg,
             admission_end_exclusive=p2_admission_end,
         )
-        admitted = capital_evidence.admitted
+        weights_2d = weights_2d * capital_evidence.handoff_scale
+        admitted = capital_evidence.handoff_scale > 0.0
         p_reasons = capital_evidence.reasons
         net_ann = capital_evidence.net_alpha_ann
         handoff_result = None
@@ -318,6 +320,7 @@ def run_multiscale_compound_engine(
         shadow_combined_2d = combine_leg_books(legs, shadow_leg_weights_2d)
         shadow_weights_2d = apply_portfolio_risk_overlay(
             shadow_combined_2d, close_4h, config.ladder.cost_bps, config.dynamic_compounding,
+            asset_return_2d=asset_ret_4h,
         )
 
         shadow_evidence = evaluate_portfolio_evidence(
