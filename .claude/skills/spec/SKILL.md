@@ -37,11 +37,12 @@ Leverage **high-reasoning models (Thinker)** for creative architectural design, 
 ### 3. Low-Reasoning Implementation Specifications (Deterministic Constraints)
 To ensure low-reasoning models can build and integrate the code mechanically:
 - **Exact Contract changes**: Define class/function signatures with Python 3.11+ type hints, including 1-line `error_policy` (Raise vs Fallback) and explicit `side_effects` (state mutations, logging).
-- **Mandatory Assertions**: Define exact input/output mathematical or structural mappings in `assertions` to prevent dummy/stub implementations.
+- **Mandatory Assertions**: Define exact input/output mathematical or structural mappings in `assertions` to prevent dummy/stub implementations. **`/check` actually executes these** whenever `input`/`output` are JSON primitives (numbers/bools/strings-without-spaces/arrays thereof) whose keys match the target function's real parameters — it imports the module and calls the function for real, not just checking the array is non-empty. Prefer a literal computable value ("output": 100.0) over a description ("output": "breakeven cost in bps") whenever the value is actually computable by hand; a description is silently skipped (still useful as an implementor hint, but it earns no automatic verification). Array-valued inputs may be written as real nested JSON arrays (`[[1.0, 2.0]]`) — they are auto-coerced to `NDArray[np.float64]` (or `np.bool_` if every leaf is a Python bool) before the call.
 - **Wiring & Connection Plan**: Define the exact file path, class, method, local context anchor line, and mandatory `invocation_symbol` (the exact 1-line invocation statement to guarantee pipeline integration).
 - **Minimal Mock / Fixture Hints (Token Efficient)**:
   - Do **NOT** generate full 100+ line copy-paste test files in the markdown spec (saves 40%+ tokens).
   - Provide only a **3~5 line fixture/mock snippet** if complex setup or API mocking is required.
+- **Content-over-Shape Assertions for the Assert Column**: Every assert cell in the Scenario Matrix MUST name at least one concrete numerical or structural property the implementor can pin a value assertion on. Behavioral descriptions alone are prohibited as the sole assert. Rationale: the spec (high-reasoning model) bears the small token cost of writing concrete values so the implement (low-reasoning model) can assert without re-deriving the correct answer. A spec whose assert column cannot be mechanically translated into `assert actual == expected` by a low-cost model is under-specified.
 - **TDD Scenario Matrix**:
   - Map each LIMIT and PERF tag directly to a concrete test scenario:
     - **Scenario 1 (Happy Path)**: Unit input/output.
