@@ -11,6 +11,7 @@ from numpy.typing import NDArray
 from src.domain.futures.compound.allocator import (
     apply_beta_hedge_overlay,
     apply_portfolio_risk_overlay,
+    compute_dynamic_compounding_path,  # noqa: F401 - legacy test mock compat
     compute_dynamic_compounding_weights,
     derive_mdd_parity_scale,
 )
