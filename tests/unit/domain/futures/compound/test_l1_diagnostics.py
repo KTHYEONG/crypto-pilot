@@ -4,7 +4,10 @@ import json
 import os
 from pathlib import Path
 
+import numpy as np
 
+
+from src.domain.futures.compound.config import L1LegConfig
 from src.domain.futures.compound.l1_diagnostics import L1AdmissionRecorder
 
 
@@ -181,3 +184,49 @@ class TestL1AdmissionRecorder:
         finally:
             if old is not None:
                 os.environ["L1_DEBUG"] = old
+
+    def test_record_leg_emits_net_familywise_gate_diagnostics(self, tmp_path: Path, monkeypatch) -> None:
+        import json
+
+        from src.domain.futures.compound.contracts import LegBook, SignalConceptSpec
+        from src.domain.futures.compound.l1_leg_evaluation import evaluate_leg_alpha
+
+        log_path = tmp_path / "l1_admission.jsonl"
+        monkeypatch.setenv("L1_DEBUG", "1")
+
+        def _mock_init(self, path=None):
+            self._enabled = True
+            self._path = log_path
+
+        monkeypatch.setattr(
+            "src.domain.futures.compound.l1_diagnostics.L1AdmissionRecorder.__init__",
+            _mock_init,
+        )
+
+        T, S = 60, 3
+        rng = np.random.default_rng(1)
+        market = rng.standard_normal(T).astype(np.float64) * 0.01
+        book = np.full((T, S), 1.0 / S, dtype=np.float64)
+        spec = SignalConceptSpec(
+            concept_id="test_c", member_signal_ids=("sig_a",),
+            mode="xs", horizon_band_bars=(6,), declared_orientation=1,
+        )
+        leg = LegBook(
+            spec=spec, book_2d=book,
+            gross_return_1d=rng.standard_normal(T).astype(np.float64) * 0.01,
+            turnover_1d=np.zeros(T, dtype=np.float64),
+        )
+        evaluate_leg_alpha(
+            leg, market, (slice(0, T),), 8.0,
+            L1LegConfig(n_bootstrap=100),
+            n_tested_hypotheses=11,
+        )
+
+        assert log_path.exists()
+        records = [json.loads(line) for line in log_path.read_text().splitlines() if line.strip()]
+        leg_records = [r for r in records if r.get("tag") == "LEG"]
+        assert len(leg_records) >= 1
+        last = leg_records[-1]
+        required = {"net_alpha_ann", "t_net_alpha", "critical_t", "n_tested_hypotheses", "reasons"}
+        assert required <= set(last), f"missing keys: {required - set(last)}"
+        assert last["n_tested_hypotheses"] == 11
