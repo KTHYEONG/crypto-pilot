@@ -85,6 +85,7 @@ def _make_mock_engine_result(mocker) -> object:
     result.l2 = mock_l2
     result.l3 = mock_l3
     result.symbols = ("BTCUSDT", "ETHUSDT")
+    result.l1_attribution = None
     return result
 
 
@@ -372,7 +373,8 @@ def test_cash_only_engine_returns_normally(mocker) -> None:
             l2=FakeL2(),
             l3=FakeL3(),
             handoff=FakeHandoff(),
-            spec=["ledger", "l2", "l3", "handoff"],
+            l1_attribution=None,
+            spec=["ledger", "l2", "l3", "handoff", "l1_attribution"],
         ),
     )
 
