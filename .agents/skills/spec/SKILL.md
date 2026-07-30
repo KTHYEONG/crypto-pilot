@@ -19,7 +19,7 @@ Frontier reasoning model protocol (Specification Engineering & Empirical Validat
 
 Before formulating architecture or hypotheses:
 1. **Anti-Pattern Check**: Read `docs/decisions/anti_patterns.json`. Filter by task domain (`signal`, `risk`, `execution`). Instantly DISCARD any hypothesis, parameter range, or logic that previously failed.
-2. **Context Lookup**: Inspect `docs/decisions/tasks.json` to review recent ADR resolutions for the relevant domain without reading monolithic logs.
+2. **Context Lookup**: Inspect `docs/decisions/task_index.json` to review recent ADR resolutions for the relevant domain without reading monolithic logs.
 
 ## Empirical Sandbox Protocol (Mandatory Before Spec Freeze)
 
