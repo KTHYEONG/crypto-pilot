@@ -823,8 +823,8 @@ class TestEngineLegPipelineWiring:
 
         real_overlay = eng.apply_portfolio_risk_overlay
 
-        def _spy_overlay(combined_2d, close_2d, cost_bps, config):
-            result = real_overlay(combined_2d, close_2d, cost_bps, config)
+        def _spy_overlay(combined_2d, close_2d, cost_bps, config, **kwargs):
+            result = real_overlay(combined_2d, close_2d, cost_bps, config, **kwargs)
             deploy_arrays.append(result.copy())
             return result
 
@@ -1347,6 +1347,7 @@ class TestEngineL2PassBuildsDeploymentCandidate:
             l1_leg=L1LegConfig(
                 min_positive_fold_ratio=0.30,
                 min_growth_posterior_probability=0.50,
+                handoff_posterior_floor=0.30,
             ),
         )
 
