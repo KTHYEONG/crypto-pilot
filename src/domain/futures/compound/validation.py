@@ -6,6 +6,7 @@ import math
 import numpy as np
 from numpy.typing import NDArray
 
+from src.domain.futures.compound.allocator import compute_max_name_weight_p95
 from src.domain.futures.compound.benchmark import (  # noqa: F401
     DailyMarketReturns,
     _causal_volatility_scale,
@@ -343,7 +344,7 @@ def evaluate_l2_walk_forward(
             deflated_sharpe_probability=0.5, candidate_count=candidate_count,
             calmar=0.0, max_drawdown=0.0, daily_cvar95=0.0,
             annual_volatility=0.0, annual_turnover=0.0, cost_drag_ratio=0.0,
-            absolute_cagr=0.0, capacity_utilisation_p95=0.0, active_days_ratio=0.0,
+            absolute_cagr=0.0, max_name_weight_p95=0.0, active_days_ratio=0.0,
             rebalance_count=0, positive_outer_folds=0, oos_days=oos_days,
             category_results=(), integrity_ok=False, reasons=pre_agg_reasons,
         )
@@ -365,7 +366,7 @@ def evaluate_l2_walk_forward(
             deflated_sharpe_probability=0.5, candidate_count=candidate_count,
             calmar=0.0, max_drawdown=0.0, daily_cvar95=0.0,
             annual_volatility=0.0, annual_turnover=0.0, cost_drag_ratio=0.0,
-            absolute_cagr=0.0, capacity_utilisation_p95=0.0, active_days_ratio=0.0,
+            absolute_cagr=0.0, max_name_weight_p95=0.0, active_days_ratio=0.0,
             rebalance_count=0, positive_outer_folds=0, oos_days=oos_days,
             category_results=(), integrity_ok=False, reasons=reasons,
         )
@@ -383,7 +384,7 @@ def evaluate_l2_walk_forward(
             deflated_sharpe_probability=0.5, candidate_count=candidate_count,
             calmar=0.0, max_drawdown=0.0, daily_cvar95=0.0,
             annual_volatility=0.0, annual_turnover=0.0, cost_drag_ratio=0.0,
-            absolute_cagr=0.0, capacity_utilisation_p95=0.0, active_days_ratio=0.0,
+            absolute_cagr=0.0, max_name_weight_p95=0.0, active_days_ratio=0.0,
             rebalance_count=0, positive_outer_folds=0, oos_days=oos_days,
             category_results=(L2CategoryResult("integrity_and_evidence", False, tuple(evidence_reasons)),),
             integrity_ok=True, reasons=tuple(evidence_reasons),
@@ -401,7 +402,7 @@ def evaluate_l2_walk_forward(
             deflated_sharpe_probability=0.5, candidate_count=candidate_count,
             calmar=0.0, max_drawdown=0.0, daily_cvar95=0.0,
             annual_volatility=0.0, annual_turnover=0.0, cost_drag_ratio=0.0,
-            absolute_cagr=0.0, capacity_utilisation_p95=0.0, active_days_ratio=0.0,
+            absolute_cagr=0.0, max_name_weight_p95=0.0, active_days_ratio=0.0,
             rebalance_count=0, positive_outer_folds=0, oos_days=0,
             category_results=(), integrity_ok=True, reasons=("no_complete_utc_days",),
         )
@@ -416,7 +417,7 @@ def evaluate_l2_walk_forward(
             deflated_sharpe_probability=0.5, candidate_count=candidate_count,
             calmar=0.0, max_drawdown=0.0, daily_cvar95=0.0,
             annual_volatility=0.0, annual_turnover=0.0, cost_drag_ratio=0.0,
-            absolute_cagr=0.0, capacity_utilisation_p95=0.0, active_days_ratio=0.0,
+            absolute_cagr=0.0, max_name_weight_p95=0.0, active_days_ratio=0.0,
             rebalance_count=0, positive_outer_folds=0, oos_days=oos_days,
             category_results=(), integrity_ok=True, reasons=("benchmark_not_aligned",),
         )
@@ -516,10 +517,9 @@ def evaluate_l2_walk_forward(
     cost_drag = 1.0 - absolute_cagr_val / max(pre_fee_cagr, 1e-12) if pre_fee_cagr > 0 else 0.0
 
     # Capacity utilisation (p95 of max absolute weight)
-    capacity_p95 = 0.0
-    if ledger.target_weights_2d.shape[0] > 0:
-        max_abs_w = np.max(np.abs(ledger.target_weights_2d), axis=1)
-        capacity_p95 = float(np.percentile(max_abs_w, 95))
+    max_name_weight_p95 = compute_max_name_weight_p95(
+        ledger.target_weights_2d.astype(np.float64, copy=False),
+    )
 
     active_days_ratio = int(np.sum(np.abs(ledger.net_returns_1d) > 1e-15)) / max(len(ledger.net_returns_1d), 1)
     calmar = cagr / max(mdd, 1e-12)
@@ -594,8 +594,8 @@ def evaluate_l2_walk_forward(
     if cost_drag > config.max_cost_drag_ratio:
         efficiency_reasons.append(f"cost_drag_ratio={cost_drag:.4f}>{config.max_cost_drag_ratio}")
         efficiency_pass = False
-    if capacity_p95 > config.max_capacity_utilisation_p95:
-        efficiency_reasons.append(f"capacity_utilisation_p95={capacity_p95:.4f}>{config.max_capacity_utilisation_p95}")
+    if max_name_weight_p95 > config.max_name_weight_p95:
+        efficiency_reasons.append(f"max_name_weight_p95={max_name_weight_p95:.4f}>{config.max_name_weight_p95}")
         efficiency_pass = False
     categories.append(L2CategoryResult("trading_efficiency", efficiency_pass, tuple(efficiency_reasons)))
 
@@ -632,7 +632,7 @@ def evaluate_l2_walk_forward(
         annual_turnover=ann_turnover,
         cost_drag_ratio=cost_drag if np.isfinite(cost_drag) else 0.0,
         absolute_cagr=absolute_cagr_val,
-        capacity_utilisation_p95=capacity_p95,
+        max_name_weight_p95=max_name_weight_p95,
         active_days_ratio=active_days_ratio,
         rebalance_count=rebalance_count,
         positive_outer_folds=positive_folds,
