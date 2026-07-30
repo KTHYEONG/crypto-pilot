@@ -171,7 +171,54 @@ class TestBuildLegBooks:
         )
 
 
+TREND_MOMENTUM_9: tuple[str, ...] = (
+    "trend_ema", "momentum_ts", "breakout_donchian",
+    "rsi", "mfi", "aroon_oscillator",
+    "adx_directional", "obv_trend", "keltner_breakout",
+)
+
+VOL_REGIME_2: tuple[str, ...] = ("volume_zscore", "bollinger_bandwidth")
+
+TREND_MOMENTUM_10: tuple[str, ...] = (
+    "trend_ema", "momentum_ts", "breakout_donchian",
+    "rsi", "cci", "mfi", "aroon_oscillator",
+    "adx_directional", "obv_trend", "keltner_breakout",
+)
+
+
 class TestBuildConceptRegistry:
+    def test_build_concept_registry_quarantines_only_cci(self) -> None:
+        cfg = L1LegConfig()
+        descriptors = _make_panel(families=_DEFAULT_REGISTRY_FAMILIES).descriptors
+        registry = build_concept_registry(descriptors, cfg)
+        ids = tuple(s.concept_id for s in registry)
+        assert ids == ("trend_momentum", "vol_regime")
+        tm = next(s for s in registry if s.concept_id == "trend_momentum")
+        assert tm.member_signal_ids == TREND_MOMENTUM_9
+        vr = next(s for s in registry if s.concept_id == "vol_regime")
+        assert vr.member_signal_ids == VOL_REGIME_2
+
+    def test_cci_descriptor_remains_available_but_unrouted(self) -> None:
+        cfg = L1LegConfig()
+        descriptors = _make_panel(families=_DEFAULT_REGISTRY_FAMILIES).descriptors
+        assert any(d.family == "cci" for d in descriptors)
+        registry = build_concept_registry(descriptors, cfg)
+        all_member_ids = set()
+        for spec in registry:
+            all_member_ids.update(spec.member_signal_ids)
+        assert "cci" not in all_member_ids
+
+    def test_registry_allows_missing_cci_but_rejects_required_family(self) -> None:
+        cfg = L1LegConfig()
+        descriptors_no_cci = _make_panel(
+            families=tuple(f for f in _DEFAULT_REGISTRY_FAMILIES if f != "cci"),
+        ).descriptors
+        registry = build_concept_registry(descriptors_no_cci, cfg)
+        assert len(registry) == 2
+        descriptors_no_mtm = _make_panel(families=("rsi", "trend_ema")).descriptors
+        with pytest.raises(ValueError, match="momentum_ts"):
+            build_concept_registry(descriptors_no_mtm, cfg)
+
     def test_build_concept_registry_matches_frozen_spec(self) -> None:
         cfg = L1LegConfig()
         descriptors = _make_panel(families=_DEFAULT_REGISTRY_FAMILIES).descriptors
@@ -182,7 +229,7 @@ class TestBuildConceptRegistry:
         assert "vol_regime" in ids
         tm = next(s for s in registry if s.concept_id == "trend_momentum")
         assert tm.mode == "xs"
-        assert len(tm.member_signal_ids) == 10
+        assert len(tm.member_signal_ids) == 9
         assert "rsi" in tm.member_signal_ids
         vr = next(s for s in registry if s.concept_id == "vol_regime")
         assert vr.mode == "ts"
@@ -194,6 +241,40 @@ class TestBuildConceptRegistry:
         descriptors = _make_panel(families=("rsi", "trend_ema")).descriptors
         with pytest.raises(ValueError, match="momentum_ts"):
             build_concept_registry(descriptors, cfg)
+
+    def test_cci_values_cannot_change_real_trend_book(self) -> None:
+        T, S = 60, 8
+        base_panel = _make_panel(T, S, families=_DEFAULT_REGISTRY_FAMILIES)
+        eligible = np.ones((T, S), dtype=np.bool_)
+        close = _make_close(T, S)
+        cfg = L1LegConfig(min_cross_section=2)
+        registry = build_concept_registry(base_panel.descriptors, cfg)
+        base_legs = build_leg_books(base_panel, eligible, close, registry, cfg)
+        trend_base = next(leg for leg in base_legs if leg.spec.concept_id == "trend_momentum")
+        rng = np.random.default_rng(99)
+        cci_indices = [i for i, d in enumerate(base_panel.descriptors) if d.family == "cci"]
+        z_altered = base_panel.z_3d.copy()
+        for idx in cci_indices:
+            z_altered[:, :, idx] = rng.standard_normal((T, S)).astype(np.float32)
+        altered_panel = RawSignalPanel(
+            decision_timestamps_ns=base_panel.decision_timestamps_ns,
+            symbols=base_panel.symbols,
+            descriptors=base_panel.descriptors,
+            z_3d=z_altered, valid_3d=base_panel.valid_3d,
+            sigma_2d=base_panel.sigma_2d,
+        )
+        altered_legs = build_leg_books(altered_panel, eligible, close, registry, cfg)
+        trend_altered = next(leg for leg in altered_legs if leg.spec.concept_id == "trend_momentum")
+        assert np.any(trend_base.book_2d != 0.0)
+        assert np.array_equal(trend_base.book_2d, trend_altered.book_2d)
+
+    def test_registry_delta_is_exactly_one_member(self) -> None:
+        TREND_10 = TREND_MOMENTUM_10
+        TREND_9 = TREND_MOMENTUM_9
+        assert set(TREND_10) - set(TREND_9) == {"cci"}
+        assert set(TREND_9) - set(TREND_10) == set()
+
+
 
 
 class TestL1LegPanel:
