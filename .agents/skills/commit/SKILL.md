@@ -3,37 +3,37 @@ name: commit
 description: Analyze modifications and execute git commits directly.
 ---
 
-# Skill: Commit (Automated Git Executer)
+# Commit
 
-## 🎯 Purpose
-Analyze unstaged modifications, automatically partition them into clean logical units, and execute git commits directly using a standardized, highly readable message format optimized for low-reasoning models.
+Automated git execution protocol. Partitions modifications into clean logical units and executes commits with strict Why/What context.
 
-## 🛠 Operational Mandate
-- **Direct Execution:** Immediately run `git add` and `git commit` commands to persist changes, rather than outputting markdown drafts for user approval.
-- **Auto-Splitting Criteria:**
-  - **Single Commit:** Triggered if modifications are within 10 files, 300 lines of change, and belong to the same logical layer.
-  - **Multi-Commit:** Triggered if modifications exceed 10 files, 300 lines, or cross layer boundaries (e.g. config vs src). Automatically split file groups and execute consecutive commits.
-- **Security First:** If secrets are detected, ABORT immediately and output: `🚨 SECURITY ALERT: Secrets detected in diff.`
-- **Language & Standards:** Subject/Body must be in Korean. Maximum 50 characters for Subject. No AI attribution.
+## Rigid Operational Directives
 
-## 🧠 Message Formatting Standards (Strict Why/What Separation)
-All generated commit messages MUST strictly adhere to the following layout to ensure detailed, structured logs:
-1. **Subject:** Use standard conventional commit types (e.g., `feat`, `fix`, `refactor`, `chore`, `docs`) followed by a concise, 50-character Korean summary. No trailing period.
-2. **Double-Bulleted Body (Mandatory):** The body MUST contain exactly two bullet points formatted with bold headers:
-   - `- **Why:** <Explain the root cause or quantitative hypothesis in a complete Korean sentence ending with the Korean verb suffix "~함." (noun-form termination).>`
-   - `- **What:** <Explain the exact logic or structural changes applied in a complete Korean sentence ending with the Korean verb suffix "~함." (noun-form termination).>`
-3. **Precise Language:** End sentences with the Korean verb suffix "~함." and describe specific actions; avoid vague terms like "버그 수정" or "코드 개선".
+- **Direct Execution**: Immediately run `git add` and `git commit` commands to persist changes. Do NOT output markdown drafts for user approval.
+- **Security First**: If secrets/API keys are detected in diff, STOP immediately and report: `🚨 SECURITY ALERT: Secrets detected in diff.`
+- **Auto-Splitting Criteria**:
+  - **Single Commit**: Triggered if changes are <= 10 files, <= 300 lines, and in the same logical layer.
+  - **Multi-Commit**: Triggered if changes > 10 files, > 300 lines, or cross layer boundaries (e.g. config vs src). Execute consecutive split commits.
+
+## Deterministic 3-Step Execution Pipeline
+
+- [ ] **Step 1 (Pre-check)**: Run `git status --short` to inspect untracked/modified files and check for secret leaks.
+- [ ] **Step 2 (Staging)**: Stage files by logical unit (`git add <files>`).
+- [ ] **Step 3 (Commit)**: Execute `git commit -m "<Subject>" -m "- **Why:** <Reason>" -m "- **What:** <Details>"`.
+
+## Message Formatting Standard (Strict Why/What Context)
+
+1. **Subject**: Standard conventional commit type (`feat`, `fix`, `refactor`, `chore`, `docs`) + concise Korean summary (<= 50 chars, no trailing period).
+2. **Double-Bulleted Body**:
+   - `- **Why:** <Include Task_ID/ADR reference or concrete metric/bug cause ending with "~함." (e.g. TASK-0730 ADR 설계 규격에 맞춰 변동성 지표 오차를 해결함.)>`
+   - `- **What:** <Explain exact logic/structure changes in Korean ending with "~함." (e.g. MAD-Z 동적 스케일링 알고리즘 추가함.)>`
+3. **Language**: Subject/Body MUST be in Korean with noun-form termination (`~함.`). No AI attribution.
 
 
-## 🧠 Internal Logic (Grouping & Structuring)
-1. **Logical Grouping:**
-   - **Build Integrity:** DO NOT split commits if it breaks the build or tests. Interface changes and their implementations MUST stay together.
-   - **Dependency Coupling:** Keep logic changes and their direct dependency updates (e.g., `uv.lock`, `pyproject.toml`) in the same commit.
-   - **By Type/Layer:** Group by feat/fix/refactor or layer, only if they are truly independent.
+## Output Format
 
-## 📋 Output Format (Minimalist Manifest)
-```markdown
-### 🏁 [COMMIT:OK]
-- **Commit 1:** [hash] | [subject] (Target: [files])
-- **Commit 2:** [hash] | [subject] (Target: [files])
-```
+Return ONLY this 2-line summary card:
+
+📌 `[COMMIT COMPLETE] Total: <commit_count> commit(s)`
+`• [<short_hash>] <subject> (<file_count> files)`
+
