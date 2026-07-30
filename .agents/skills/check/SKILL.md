@@ -5,47 +5,41 @@ description: Independently audit contract compliance, typing, regressions, cover
 
 # Check
 
-`/check` audits the implementation; it is not an architecture repair loop. Use:
+Fast-execution model audit protocol (GPT-5.6 Luna, Sonnet 5, etc.). Independent verification of contract compliance, typing, regressions, and changed-line coverage.
 
-```text
+## Core Rule
+
+`/check` is an audit pass, NOT an architectural repair loop.
+Execute audit command:
+```bash
 uv run python scripts/lean_check.py --files <modified .py files> --spec <contract.json> --skip-lint
 ```
 
-## Fast preflight
+## Deterministic Audit Pipeline
 
-Before the full command, use the cheapest relevant checks:
+### Step 1: Preflight Search
+- [ ] `rg` all contract symbols, callers, wiring expressions, and scenario names.
+- [ ] Run `uv run ruff check <modified_files>`.
+- [ ] Run `uv run pytest <touched_tests>`.
+- [ ] *Exit Gate*: If contract drift is found, STOP and return to `/implement` or `/spec`. Do NOT modify contract/test names.
 
-1. `rg` every contract symbol, caller, wiring expression, and scenario name.
-2. Run ruff on touched files.
-3. Run touched tests only.
-4. Run `--spec-only` once after wiring.
+### Step 2: Full Audit Order
+- [ ] Verify literal assertions and non-dummy implementation.
+- [ ] Run `uv run mypy <modified_files>` in strict mode.
+- [ ] Run test suite and inspect changed-line coverage.
+- [ ] Perform vacuous-test & stale-field review.
 
-If this finds contract drift, return it to Implement/Spec. Do not silently rename tests or modify the
-contract during audit.
+## Output Format
 
-## Full audit order
+### PASS Output
+Return ONLY this 2-line summary:
 
-1. Contract: literal assertions, non-dummy implementation, scenario/file mapping, and production callers.
-2. Static: strict mypy.
-3. Tests and changed-line coverage.
-4. Manual per-file coverage, caller search, stale-field search, and vacuous-test review.
+🟢 `[CHECK AUDIT PASS] <Blueprint>`
+`Spec/Wiring: <PASS> | Mypy: <PASS> | Regression: <PASS> | Cov: <FinalCov%> | Files: <FileCoverageTable>`
 
-Batch coverage misses into one test-writing pass. Distinguish contract drift, logic defects, fixture issues,
-and environment failures in the report. A pre-existing failure may be deselected only after reproducing it
-against the baseline as required by the project rules.
+### FAIL Output
+On failure, report ONLY:
+🔴 `[CHECK AUDIT FAIL] <Blueprint>`
+`Phase: <Contract/Static/Tests/Coverage> | Root Cause: <Cause> | Action: <Smallest next action>`
 
-## PASS report
 
-Report the blueprint name, contract/wiring status, strict mypy, regression result, final total coverage, and
-the per-file coverage table. Mention meaningful warnings or pre-existing exclusions; do not claim that
-coverage alone proves the behavior is economically valid.
-
-## Output
-
-Keep the result compact:
-
-`🟢 [CHECK AUDIT PASS] <Blueprint>`
-`Spec/Wiring | Mypy | Regression | Final Cov | File coverage`
-
-On PASS, do not repeat command logs or implementation details. On FAIL, report only phase, root cause,
-impact, and the smallest next action.
