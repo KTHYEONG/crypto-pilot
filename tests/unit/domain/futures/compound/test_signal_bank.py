@@ -382,17 +382,23 @@ def test_compute_xs_reversal_exactly_10_eligible() -> None:
 
 def test_default_catalog_has_legacy_families_37_recipes() -> None:
     catalog = _default_catalog()
-    assert len(catalog) == 37
+    assert len(catalog) == 64
     families = {d.family for d in catalog}
-    assert families == {
+    legacy = {
         "trend_ema", "momentum_ts", "breakout_donchian", "basis_gap",
         "reversal_st", "xs_reversal", "xs_momentum_slow", "smart_money_divergence",
     }
+    assert legacy <= families, "legacy families must still be present after the indicator expansion"
+    new_indicators = {
+        "rsi", "cci", "mfi", "aroon_oscillator", "adx_directional",
+        "obv_trend", "keltner_breakout", "volume_zscore", "bollinger_bandwidth",
+    }
+    assert families == legacy | new_indicators
 
 
 def test_default_catalog_matches_legacy_27_and_excludes_new4_families() -> None:
     catalog = _default_catalog()
-    assert len(catalog) == 37
+    assert len(catalog) == 64
     families = {d.family for d in catalog}
     new4 = {"volatility_squeeze_keltner", "funding_carry_reversion", "flow_imbalance_taker", "open_interest_confirmation"}
     assert families.isdisjoint(new4), f"legacy catalog must not contain any of {new4}"
@@ -416,12 +422,13 @@ def test_build_raw_signal_panel_default_catalog_has_37_signals_with_legacy_famil
     N = len(bars.cubes["4h"].symbols)
     eligible = np.ones((T, N), np.bool_)
     panel = build_raw_signal_panel(bars, eligible_2d=eligible)
-    assert len(panel.descriptors) == 37
+    assert len(panel.descriptors) == 64
     families = {d.family for d in panel.descriptors}
-    assert families == {
+    legacy = {
         "trend_ema", "momentum_ts", "breakout_donchian", "basis_gap",
         "reversal_st", "xs_reversal", "xs_momentum_slow", "smart_money_divergence",
     }
+    assert legacy <= families
     trend = [d for d in panel.descriptors if d.family == "trend_ema"]
     assert len(trend) == 5
     basis_gap = [d for d in panel.descriptors if d.family == "basis_gap"]
@@ -430,7 +437,7 @@ def test_build_raw_signal_panel_default_catalog_has_37_signals_with_legacy_famil
 
 def test_default_catalog_37_recipes_matched_horizons() -> None:
     catalog = _default_catalog()
-    assert len(catalog) == 37
+    assert len(catalog) == 64
     for desc in catalog:
         assert desc.target_horizon_hours > 0
         assert desc.target_horizon_hours == desc.lookback_hours, (
@@ -510,7 +517,7 @@ def test_p2_pipeline_37_signals_120_symbols_supported(synthetic_market: MarketFe
     eligible = np.ones((T, N), np.bool_)
     panel = build_raw_signal_panel(bars, eligible_2d=eligible)
     assert isinstance(panel, RawSignalPanel)
-    assert panel.z_3d.shape[-1] == 37
+    assert panel.z_3d.shape[-1] == 64
     assert panel.z_3d.dtype == np.float32
     finite_mask = np.isfinite(panel.z_3d)
     if np.any(finite_mask):
@@ -700,8 +707,8 @@ def test_engine_wires_guarded_six_thread_l1_panel(synthetic_market: MarketFeatur
     assert isinstance(panel, RawSignalPanel)
     assert panel.z_3d.shape[0] == T
     assert panel.z_3d.shape[1] == N
-    assert panel.z_3d.shape[2] == 37
-    assert panel.valid_3d.shape == (T, N, 37)
+    assert panel.z_3d.shape[2] == 64
+    assert panel.valid_3d.shape == (T, N, 64)
     assert panel.sigma_2d.shape == (T, N)
     finite_sigma = np.isfinite(panel.sigma_2d)
     assert np.all(finite_sigma)
@@ -775,9 +782,9 @@ def test_missing_1h_data_does_not_crash_pipeline(synthetic_market: MarketFeature
 
 def test_default_catalog_37_recipes_unique_ids() -> None:
     catalog = _default_catalog()
-    assert len(catalog) == 37
+    assert len(catalog) == 64
     ids = {d.signal_id for d in catalog}
-    assert len(ids) == 37, "all signal_ids must be unique"
+    assert len(ids) == 64, "all signal_ids must be unique"
 
 
 def test_default_catalog_legacy_signal_ids() -> None:
@@ -794,7 +801,7 @@ def test_default_catalog_legacy_signal_ids() -> None:
     expected.add("smart_money_divergence:fast")
     expected.add("smart_money_divergence:medium")
     actual = {d.signal_id for d in catalog}
-    assert actual == expected
+    assert expected <= actual, "legacy signal_ids must still be present after the indicator expansion"
 
 
 def test_build_raw_signal_panel_120_universe_symbols(synthetic_market: MarketFeatureCube) -> None:
@@ -804,7 +811,7 @@ def test_build_raw_signal_panel_120_universe_symbols(synthetic_market: MarketFea
     eligible = np.ones((T, len(symbols)), np.bool_)
     panel = build_raw_signal_panel(bars, eligible_2d=eligible)
     assert panel.z_3d.shape[1] == len(symbols)
-    assert panel.z_3d.shape[2] == 37
+    assert panel.z_3d.shape[2] == 64
     assert len(panel.symbols) == len(symbols)
 
 
@@ -815,7 +822,7 @@ def test_signal_bank_dynamic_masking_coverage(synthetic_market: MarketFeatureCub
     eligible = np.ones((T, N), np.bool_)
     eligible[T // 2:, :N // 2] = False
     panel = build_raw_signal_panel(bars, eligible_2d=eligible)
-    assert panel.valid_3d.shape == (T, N, 37)
+    assert panel.valid_3d.shape == (T, N, 64)
     late_none = ~panel.valid_3d[T // 2:, :N // 2, :].any(axis=(0, 2))
     assert late_none.any(), "masked symbols should have no valid entries in later bars"
 
@@ -848,8 +855,8 @@ def test_signal_bank_thread_safety(synthetic_market: MarketFeatureCube) -> None:
 
     panel = build_raw_signal_panel(bars, eligible_2d=eligible, numba_threads=6)
     assert isinstance(panel, RawSignalPanel)
-    assert panel.z_3d.shape == (T, N, 37)
-    assert panel.valid_3d.shape == (T, N, 37)
+    assert panel.z_3d.shape == (T, N, 64)
+    assert panel.valid_3d.shape == (T, N, 64)
     assert panel.sigma_2d.shape == (T, N)
 
 
@@ -862,8 +869,8 @@ def test_signal_bank_large_universe_tpe_off(synthetic_market: MarketFeatureCube)
     eligible = np.ones((T, N), np.bool_)
     panel = build_raw_signal_panel(bars, eligible_2d=eligible, numba_threads=6)
     assert isinstance(panel, RawSignalPanel)
-    assert panel.z_3d.shape == (T, N, 37)
-    assert panel.valid_3d.shape == (T, N, 37)
+    assert panel.z_3d.shape == (T, N, 64)
+    assert panel.valid_3d.shape == (T, N, 64)
 
 
 # ── H2-SINGLE-SORT-MERGE: bit-exact MAD-z kernel equivalence ──────────
@@ -949,8 +956,8 @@ def test_signal_panel_output_identity(synthetic_market: MarketFeatureCube) -> No
     eligible = np.ones((T, N), np.bool_)
     panel = build_raw_signal_panel(bars, eligible_2d=eligible, numba_threads=1)
     assert isinstance(panel, RawSignalPanel)
-    assert panel.z_3d.shape == (T, N, 37)
-    assert panel.valid_3d.shape == (T, N, 37)
+    assert panel.z_3d.shape == (T, N, 64)
+    assert panel.valid_3d.shape == (T, N, 64)
     finite = np.isfinite(panel.z_3d)
     if np.any(finite):
         assert np.all(panel.z_3d[finite] >= -3.0)
@@ -978,3 +985,89 @@ def test_default_catalog_horizon_ladder() -> None:
     for d in reversal_st + xs_reversal + xs_momentum:
         assert d.target_horizon_hours % 4 == 0
         assert d.target_horizon_hours == d.lookback_hours
+
+
+class TestNewIndicatorKernels:
+    """[LIMIT-09] regression guard: every new indicator must pass lb_bars
+    directly to _ewm_2d as span, never a pre-computed alpha -- the latter
+    double-applies _ewm_2d's own alpha=2/(span+1) conversion and produces an
+    out-of-range, divergent series (confirmed empirically: RSI reached
+    [-1098, 150] before this was fixed, far outside its [-1,1] range)."""
+
+    @staticmethod
+    def _fixture(T: int = 300, S: int = 3):
+        rng = np.random.default_rng(0)
+        close = (np.cumsum(rng.normal(0, 1, (T, S)), axis=0) + 100).astype(np.float32)
+        high = close + 1.0
+        low = close - 1.0
+        volume = rng.uniform(100, 1000, (T, S)).astype(np.float32)
+        return close, high, low, volume
+
+    def test_new_indicator_kernels_match_scratch_prototype(self) -> None:
+        """Every kernel must be finite and within its documented bound, and
+        no kernel may reference undefined names (regression guard for the
+        adx_directional T/S NameError found in review)."""
+        from src.domain.futures.compound.signal_bank import (
+            _compute_adx_directional,
+            _compute_aroon_oscillator,
+            _compute_bollinger_bandwidth,
+            _compute_cci,
+            _compute_keltner_breakout,
+            _compute_mfi,
+            _compute_obv_trend,
+            _compute_rsi,
+            _compute_volume_zscore,
+        )
+        close, high, low, volume = self._fixture()
+
+        rsi = _compute_rsi(close, 12)
+        assert np.all(np.isfinite(rsi))
+        assert np.all((rsi >= -1.0) & (rsi <= 1.0))
+
+        mfi = _compute_mfi(high, low, close, volume, 12)
+        assert np.all(np.isfinite(mfi))
+        assert np.all((mfi >= -1.0) & (mfi <= 1.0))
+
+        aroon = _compute_aroon_oscillator(high, low, 12)
+        assert np.all(np.isfinite(aroon))
+        assert np.all((aroon >= -1.0) & (aroon <= 1.0))
+
+        adx = _compute_adx_directional(high, low, close, 12)
+        assert np.all(np.isfinite(adx))
+        assert np.all((adx >= -1.0) & (adx <= 3.0))
+
+        keltner = _compute_keltner_breakout(high, low, close, 12)
+        assert np.all(np.isin(keltner, [-1.0, 0.0, 1.0]))
+
+        cci = _compute_cci(high, low, close, 12)
+        assert np.all(np.isfinite(cci))
+        assert np.all(np.abs(cci) < 1e6), "CCI warm-up blow-up regression (mad-floor bug)"
+
+        obv = _compute_obv_trend(close, volume, 12)
+        assert np.all(np.isfinite(obv))
+        assert np.all(np.abs(obv) < 50.0), "OBV near-zero-EMA division blow-up regression"
+
+        volz = _compute_volume_zscore(volume, 12)
+        assert np.all(np.isfinite(volz))
+
+        bbw = _compute_bollinger_bandwidth(close, 12)
+        finite_bbw = bbw[np.isfinite(bbw)]
+        assert finite_bbw.size > 0
+        assert np.all(np.abs(finite_bbw) < 50.0)
+
+    def test_bollinger_bandwidth_is_causal_not_whole_series(self) -> None:
+        """[quant.md information-availability] bars before the causal z-score
+        window warms up must be NaN, and truncating the array after bar t
+        must not change bar t's value -- proves no whole-series dependency."""
+        from src.domain.futures.compound.signal_bank import _compute_bollinger_bandwidth
+        close, _, _, _ = self._fixture(T=700, S=2)
+        full = _compute_bollinger_bandwidth(close, 12)
+        assert np.all(np.isnan(full[:179]))
+        truncated = _compute_bollinger_bandwidth(close[:400], 12)
+        np.testing.assert_allclose(full[300:400], truncated[300:400], equal_nan=True)
+
+    def test_adx_directional_no_undefined_names(self) -> None:
+        from src.domain.futures.compound.signal_bank import _compute_adx_directional
+        close, high, low, _ = self._fixture(T=50, S=2)
+        result = _compute_adx_directional(high, low, close, 12)
+        assert result.shape == (50, 2)

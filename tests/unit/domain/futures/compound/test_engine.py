@@ -8,9 +8,7 @@ import pytest
 
 from src.domain.futures.compound.config import CompoundEngineConfig, L2GateConfig
 from src.domain.futures.compound.contracts import (
-    CausalClusterFold,
     CausalFold,
-    ClusterPanel,
     CompoundEngineResult,
     DeploymentVerdict,
     L2CategoryResult,
@@ -145,154 +143,6 @@ class TestRunMultiscaleCompoundEngine:
                 holdout_store=store, holdout_id="hash-mismatch-test", config=config,
             )
 
-    def test_admitted_signals_path_produces_weights(self, tmp_path, mocker, small_cube: MarketFeatureCube) -> None:
-        from src.domain.futures.compound.contracts import (
-            CalibratedForecastPanel,
-            HandoffResult,
-            HandoffAdmissionEvidence,
-            RawSignalPanel,
-        )
-
-        mock_panel = mocker.Mock(spec=RawSignalPanel)
-        mock_panel.z_3d = np.zeros((256, 5, 3))
-        mock_panel.valid_3d = np.ones((256, 5, 3), dtype=bool)
-        mock_panel.sigma_2d = np.full((256, 5), 0.01, dtype=np.float32)
-        mock_panel.descriptors = (mocker.Mock(spec=SignalDescriptor, target_horizon_hours=4, declared_orientation=1),)
-        mock_panel.symbols = small_cube.symbols
-        mocker.patch(
-            "src.domain.futures.compound.engine.build_raw_signal_panel",
-            return_value=mock_panel,
-        )
-        from src.domain.futures.compound.contracts import CausalFold
-        mock_folds = (CausalFold(0, 0, 50, 48, 50, 52, 102, 2, 42),)
-        mocker.patch("src.domain.futures.compound.engine.build_folds_4h", return_value=mock_folds)
-        mocker.patch("src.domain.futures.compound.engine.build_multi_horizon_targets", return_value={4: mocker.Mock()})
-        mocker.patch("src.domain.futures.compound.engine.align_costs_to_decision_grid", return_value=np.full((256, 5), 8.0, dtype=np.float32))
-
-        forecast_panel = CalibratedForecastPanel(
-            decision_timestamps_ns=np.arange(256, dtype=np.int64),
-            symbols=small_cube.symbols,
-            mu_2d=np.column_stack([
-                np.full(256, 0.020, dtype=np.float32),
-                np.full(256, 0.010, dtype=np.float32),
-                np.full(256, 0.005, dtype=np.float32),
-                np.full(256, 0.003, dtype=np.float32),
-                np.full(256, -0.002, dtype=np.float32),
-            ]).astype(np.float32),
-            se_2d=np.full((256, len(small_cube.symbols)), 0.01, dtype=np.float32),
-            family_mu_3d=np.zeros((256, len(small_cube.symbols), 1), dtype=np.float32),
-            family_ids=(),
-            admitted_signal_ids=("sig1",),
-            fold_manifest_hash="test",
-        )
-        evidence = HandoffAdmissionEvidence(
-            annualized_log_growth=0.1, growth_lcb90=0.05, growth_2x_cost=0.05,
-            max_drawdown=0.1, annual_volatility=0.15, positive_outer_folds=5,
-            effective_breadth=1.0, active_signal_ids=("sig1",),
-            admitted=True, reasons=(),
-        )
-        handoff_result = HandoffResult(forecast=forecast_panel, evidence=evidence)
-        mocker.patch(
-            "src.domain.futures.compound.engine.build_exit_aware_handoff",
-            return_value=handoff_result,
-        )
-        mocker.patch(
-            "src.domain.futures.compound.engine.compute_dynamic_compounding_path",
-            return_value=np.full((256, len(small_cube.symbols)), 0.02, dtype=np.float64),
-        )
-
-        n_syms = len(small_cube.symbols)
-        universe = type("Universe", (), {"symbols": small_cube.symbols, "snapshots": ()})()
-        store = SealedHoldoutStore(tmp_path / "admitted_test.sqlite3")
-        manifest = SealedHoldoutManifest(
-            holdout_id="admitted-test",
-            start_time_ns=int(small_cube.timestamps_ns[-180]),
-            end_time_ns=int(small_cube.timestamps_ns[-1]),
-            holdout_days=90,
-            model_version="v1",
-            data_manifest_hash="h1",
-            strategy_spec_hash="spec1",
-        )
-        store.create(manifest)
-        config = CompoundEngineConfig()
-        result = run_multiscale_compound_engine(
-            market=small_cube, universe=universe,
-            holdout_store=store, holdout_id="admitted-test", config=config,
-        )
-        assert isinstance(result, CompoundEngineResult)
-        assert not np.allclose(result.ledger.target_weights_2d, 0.0)
-
-    def test_engine_passes_sigma_to_path(self, tmp_path, mocker, small_cube: MarketFeatureCube) -> None:
-        from src.domain.futures.compound.contracts import (
-            CalibratedForecastPanel,
-            HandoffResult,
-            HandoffAdmissionEvidence,
-            RawSignalPanel,
-        )
-
-        distinct_sigma = np.full((256, 5), 0.037, dtype=np.float32)
-        mock_panel = mocker.Mock(spec=RawSignalPanel)
-        mock_panel.z_3d = np.zeros((256, 5, 3))
-        mock_panel.valid_3d = np.ones((256, 5, 3), dtype=bool)
-        mock_panel.sigma_2d = distinct_sigma
-        mock_panel.descriptors = (mocker.Mock(spec=SignalDescriptor, target_horizon_hours=4, declared_orientation=1),)
-        mock_panel.symbols = small_cube.symbols
-        mocker.patch(
-            "src.domain.futures.compound.engine.build_raw_signal_panel",
-            return_value=mock_panel,
-        )
-        from src.domain.futures.compound.contracts import CausalFold
-        mock_folds = (CausalFold(0, 0, 50, 48, 50, 52, 102, 2, 42),)
-        mocker.patch("src.domain.futures.compound.engine.build_folds_4h", return_value=mock_folds)
-        mocker.patch("src.domain.futures.compound.engine.build_multi_horizon_targets", return_value={4: mocker.Mock()})
-        mocker.patch("src.domain.futures.compound.engine.align_costs_to_decision_grid", return_value=np.full((256, 5), 8.0, dtype=np.float32))
-
-        forecast_panel = CalibratedForecastPanel(
-            decision_timestamps_ns=np.arange(256, dtype=np.int64),
-            symbols=small_cube.symbols,
-            mu_2d=np.ones((256, len(small_cube.symbols)), dtype=np.float32) * 0.001,
-            se_2d=np.full((256, len(small_cube.symbols)), 0.01, dtype=np.float32),
-            family_mu_3d=np.zeros((256, len(small_cube.symbols), 1), dtype=np.float32),
-            family_ids=(),
-            admitted_signal_ids=("sig1",),
-            fold_manifest_hash="test",
-        )
-        evidence = HandoffAdmissionEvidence(
-            annualized_log_growth=0.1, growth_lcb90=0.05, growth_2x_cost=0.05,
-            max_drawdown=0.1, annual_volatility=0.15, positive_outer_folds=5,
-            effective_breadth=1.0, active_signal_ids=("sig1",),
-            admitted=True, reasons=(),
-        )
-        handoff_result = HandoffResult(forecast=forecast_panel, evidence=evidence)
-        mocker.patch(
-            "src.domain.futures.compound.engine.build_exit_aware_handoff",
-            return_value=handoff_result,
-        )
-        path_spy = mocker.patch(
-            "src.domain.futures.compound.engine.compute_dynamic_compounding_path",
-            return_value=np.zeros((256, len(small_cube.symbols)), dtype=np.float64),
-        )
-
-        universe = type("Universe", (), {"symbols": small_cube.symbols, "snapshots": ()})()
-        store = SealedHoldoutStore(tmp_path / "sigma_wiring_test.sqlite3")
-        manifest = SealedHoldoutManifest(
-            holdout_id="sigma-test",
-            start_time_ns=int(small_cube.timestamps_ns[-180]),
-            end_time_ns=int(small_cube.timestamps_ns[-1]),
-            holdout_days=90,
-            model_version="v1",
-            data_manifest_hash="h1",
-            strategy_spec_hash="spec1",
-        )
-        store.create(manifest)
-        run_multiscale_compound_engine(
-            market=small_cube, universe=universe,
-            holdout_store=store, holdout_id="sigma-test", config=CompoundEngineConfig(),
-        )
-
-        assert path_spy.call_count == 1
-        np.testing.assert_array_equal(path_spy.call_args.kwargs["sigma_2d"], distinct_sigma)
-
     def test_missing_close_field_raises(self, tmp_path) -> None:
         n_bars, n_syms = 10, 2
         cube = MarketFeatureCube(
@@ -400,7 +250,6 @@ class TestRunMultiscaleCompoundEngine:
             HandoffAdmissionEvidence,
         )
 
-        from src.domain.futures.compound.contracts import CausalFold
         mocker.patch(
             "src.domain.futures.compound.engine.build_folds_4h",
             return_value=(CausalFold(0, 0, 50, 48, 50, 52, 102, 2, 42),),
@@ -500,96 +349,9 @@ class TestRunMultiscaleCompoundEngine:
         assert isinstance(result, CompoundEngineResult)
         assert np.allclose(result.ledger.target_weights_2d, 0.0), "weights should be zero when admitted=False (fail-closed)"
 
-    def test_engine_weights_nonzero_when_admitted_true_unchanged(self, tmp_path, mocker) -> None:
-        from src.domain.futures.compound.contracts import (
-            CalibratedForecastPanel, CausalFold, HandoffResult, HandoffAdmissionEvidence,
-        )
-        mocker.patch(
-            "src.domain.futures.compound.engine.build_folds_4h",
-            return_value=(CausalFold(0, 0, 50, 48, 50, 52, 102, 2, 42),),
-        )
-        from src.domain.futures.compound.contracts import RegimeRoutedForecast
-        mocker.patch("src.domain.futures.compound.engine.build_family_routing_sleeves", return_value=())
-        mocker.patch("src.domain.futures.compound.engine.build_causal_regime_panel", return_value=mocker.Mock())
-        mocker.patch("src.domain.futures.compound.engine.build_fold_local_regime_forecast", return_value=mocker.Mock())
-
-        n_4h_bars = 125
-        forecast_panel = CalibratedForecastPanel(
-            decision_timestamps_ns=np.arange(n_4h_bars, dtype=np.int64) * _NS_PER_HOUR * 4,
-            symbols=("BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT", "ADAUSDT"),
-            mu_2d=np.column_stack([
-                np.full(n_4h_bars, 0.020, dtype=np.float32),
-                np.full(n_4h_bars, 0.010, dtype=np.float32),
-                np.full(n_4h_bars, 0.005, dtype=np.float32),
-                np.full(n_4h_bars, 0.003, dtype=np.float32),
-                np.full(n_4h_bars, -0.002, dtype=np.float32),
-            ]).astype(np.float32),
-            se_2d=np.full((n_4h_bars, 5), 0.01, dtype=np.float32),
-            family_mu_3d=np.zeros((n_4h_bars, 5, 1), dtype=np.float32),
-            family_ids=(), admitted_signal_ids=("sig1",), fold_manifest_hash="test",
-        )
-        f_routed = RegimeRoutedForecast(
-            forecast=forecast_panel, evidence=(), active_expert_count_1d=np.ones(n_4h_bars, dtype=np.int16),
-            tested_hypotheses=0,
-        )
-        mocker.patch("src.domain.futures.compound.engine.build_fold_local_regime_forecast", return_value=f_routed)
-        evidence = HandoffAdmissionEvidence(
-            annualized_log_growth=0.1, growth_lcb90=0.05, growth_2x_cost=0.05,
-            max_drawdown=0.1, annual_volatility=0.15, positive_outer_folds=5,
-            effective_breadth=1.0, active_signal_ids=("sig1",),
-            admitted=True, reasons=(),
-        )
-        handoff_result = HandoffResult(forecast=forecast_panel, evidence=evidence)
-        mocker.patch(
-            "src.domain.futures.compound.engine.build_exit_aware_handoff",
-            return_value=handoff_result,
-        )
-        mocker.patch(
-            "src.domain.futures.compound.engine.compute_dynamic_compounding_path",
-            return_value=np.full((n_4h_bars, 5), 0.02, dtype=np.float64),
-        )
-        universe = type("Universe", (), {"symbols": ("BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT", "ADAUSDT"), "snapshots": ()})()
-        n_bars, n_syms = 500, 5
-        close = np.column_stack(tuple(np.linspace(100, 110 + i, n_bars) for i in range(n_syms))).astype(np.float64)
-        arr_f32 = close.astype(np.float32)
-        cube = MarketFeatureCube(
-            timestamps_ns=np.arange(n_bars, dtype=np.int64) * _NS_PER_HOUR,
-            symbols=("BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT", "ADAUSDT"),
-            fields_2d={
-                "open": arr_f32 * 0.9995, "high": arr_f32 * 1.005,
-                "low": arr_f32 * 0.995, "close": arr_f32,
-                "quote_volume": np.ones((n_bars, n_syms), dtype=np.float32) * 50_000_000,
-                "funding": np.zeros((n_bars, n_syms), dtype=np.float32),
-                "premium": np.zeros((n_bars, n_syms), dtype=np.float32),
-                "mark": arr_f32.copy(), "index": arr_f32.copy(),
-                "taker_buy_quote": np.ones((n_bars, n_syms), dtype=np.float32) * 25_000_000,
-            },
-            available_2d={"core": np.ones((n_bars, n_syms), dtype=np.bool_)},
-            eligible_2d=np.ones((n_bars, n_syms), dtype=np.bool_),
-            entry_block_2d=np.zeros((n_bars, n_syms), dtype=np.bool_),
-            exit_required_2d=np.zeros((n_bars, n_syms), dtype=np.bool_),
-            capacity_usdt_2d=np.full((n_bars, n_syms), 1_000_000.0, dtype=np.float64),
-            execution_cost_bps_2d=np.full((n_bars, n_syms), 12.0, dtype=np.float32),
-            data_manifest_hash="h1",
-        )
-        store = SealedHoldoutStore(tmp_path / "weights_nonzero.sqlite3")
-        store.create(SealedHoldoutManifest(
-            holdout_id="weights-nonzero-test",
-            start_time_ns=int(cube.timestamps_ns[-180]),
-            end_time_ns=int(cube.timestamps_ns[-1]),
-            holdout_days=90, model_version="v1",
-            data_manifest_hash="h1", strategy_spec_hash="spec1",
-        ))
-        result = run_multiscale_compound_engine(
-            market=cube, universe=universe,
-            holdout_store=store, holdout_id="weights-nonzero-test", config=CompoundEngineConfig(),
-        )
-        assert isinstance(result, CompoundEngineResult)
-        assert not np.allclose(result.ledger.target_weights_2d, 0.0), "weights should be non-zero when admitted=True"
-
     def test_engine_weights_forced_zero_when_admitted_false(self, tmp_path, mocker) -> None:
         from src.domain.futures.compound.contracts import (
-            CalibratedForecastPanel, CausalFold, HandoffResult, HandoffAdmissionEvidence,
+            CalibratedForecastPanel, HandoffResult, HandoffAdmissionEvidence,
         )
         mocker.patch(
             "src.domain.futures.compound.engine.build_folds_4h",
@@ -958,6 +720,151 @@ class TestRunMultiscaleCompoundEngine:
         assert trial_multiplicity_arg is spy_multiplicity.spy_return
 
 
+class TestEngineLegPipelineWiring:
+    def test_engine_wires_leg_pipeline_with_real_objects(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        import src.domain.futures.compound.engine as eng
+        from src.domain.futures.compound.l1_concept_bank import build_leg_books as real_build_leg_books
+
+        calls: list[object] = []
+
+        def _spy_build_leg_books(panel, eligible_2d, close_2d, registry, config):
+            legs = real_build_leg_books(panel, eligible_2d, close_2d, registry, config)
+            calls.append((registry, legs))
+            return legs
+
+        def _fail_if_called(*args: object, **kwargs: object) -> object:
+            raise AssertionError("retired screen_signal_edge must not be called by the leg pipeline")
+
+        monkeypatch.setattr(eng, "build_leg_books", _spy_build_leg_books)
+        monkeypatch.setattr(eng, "screen_signal_edge", _fail_if_called)
+
+        cube = _make_cube(4096, 5)
+        universe = type("Universe", (), {"symbols": cube.symbols, "snapshots": ()})()
+        store = SealedHoldoutStore(tmp_path / "leg_wiring_test.sqlite3")
+        manifest = SealedHoldoutManifest(
+            holdout_id="leg-wiring-test",
+            start_time_ns=int(cube.timestamps_ns[-30]),
+            end_time_ns=int(cube.timestamps_ns[-1]),
+            holdout_days=30,
+            model_version="v1",
+            data_manifest_hash="h1",
+            strategy_spec_hash="spec_leg_wiring",
+        )
+        store.create(manifest)
+        result = run_multiscale_compound_engine(
+            market=cube, universe=universe,
+            holdout_store=store, holdout_id="leg-wiring-test", config=CompoundEngineConfig(),
+        )
+        assert isinstance(result, CompoundEngineResult)
+        assert len(calls) == 1, "build_leg_books must be called exactly once via real wiring"
+        registry_used, legs_used = calls[0]
+        assert len(registry_used) == 2
+        assert {s.concept_id for s in registry_used} == {"trend_momentum", "vol_regime"}
+        assert len(legs_used) == len(registry_used)
+
+    def test_l1_leg_panel_reaches_l2_without_scalar_collapse(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The K legs built by build_leg_books stay separable (a tuple of K
+        LegBook objects plus a (T,K) weight array) all the way through
+        accumulate_prequential_leg_weights/combine_leg_books -- nothing
+        collapses them to a single scalar signal before the portfolio-level
+        weights_2d handed to simulate_dense_portfolio, unlike the retired
+        family_mu_3d field which was always zeros((...,1))."""
+        import src.domain.futures.compound.engine as eng
+        from src.domain.futures.compound.l1_leg_admission import (
+            accumulate_prequential_leg_weights as real_accumulate,
+        )
+
+        captured: list[object] = []
+
+        def _spy_accumulate(legs, market_1d, folds, cost_bps, config):
+            weights = real_accumulate(legs, market_1d, folds, cost_bps, config)
+            captured.append((len(legs), weights.shape))
+            return weights
+
+        monkeypatch.setattr(eng, "accumulate_prequential_leg_weights", _spy_accumulate)
+
+        cube = _make_cube(4096, 5)
+        universe = type("Universe", (), {"symbols": cube.symbols, "snapshots": ()})()
+        store = SealedHoldoutStore(tmp_path / "leg_panel_test.sqlite3")
+        manifest = SealedHoldoutManifest(
+            holdout_id="leg-panel-test",
+            start_time_ns=int(cube.timestamps_ns[-30]),
+            end_time_ns=int(cube.timestamps_ns[-1]),
+            holdout_days=30,
+            model_version="v1",
+            data_manifest_hash="h1",
+            strategy_spec_hash="spec_leg_panel",
+        )
+        store.create(manifest)
+        result = run_multiscale_compound_engine(
+            market=cube, universe=universe,
+            holdout_store=store, holdout_id="leg-panel-test", config=CompoundEngineConfig(),
+        )
+        assert isinstance(result, CompoundEngineResult)
+        assert len(captured) == 1
+        n_legs, weights_shape = captured[0]
+        assert n_legs == 2
+        assert weights_shape[1] == 2, "leg weights collapsed to fewer than K columns before L2"
+
+    def test_admission_gate_scores_the_same_array_that_is_deployed(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """C-1 regression, re-applied to the new pipeline: evaluate_portfolio_admission
+        must be called with the post-overlay weights_2d (what simulate_dense_portfolio
+        actually deploys), not the pre-overlay combined_2d -- scoring a different
+        object than what is deployed is the historical C-1 defect class."""
+        import src.domain.futures.compound.engine as eng
+        from src.domain.futures.compound.l1_leg_admission import (
+            evaluate_portfolio_admission as real_evaluate_admission,
+        )
+
+        gate_arrays: list[object] = []
+        deploy_arrays: list[object] = []
+
+        real_overlay = eng.apply_portfolio_risk_overlay
+
+        def _spy_overlay(combined_2d, close_2d, cost_bps, config):
+            result = real_overlay(combined_2d, close_2d, cost_bps, config)
+            deploy_arrays.append(result.copy())
+            return result
+
+        def _spy_admission(combined_2d, asset_return_2d, folds, cost_bps, config):
+            gate_arrays.append(combined_2d.copy())
+            return real_evaluate_admission(combined_2d, asset_return_2d, folds, cost_bps, config)
+
+        monkeypatch.setattr(eng, "apply_portfolio_risk_overlay", _spy_overlay)
+        monkeypatch.setattr(eng, "evaluate_portfolio_admission", _spy_admission)
+
+        cube = _make_cube(4096, 5)
+        universe = type("Universe", (), {"symbols": cube.symbols, "snapshots": ()})()
+        store = SealedHoldoutStore(tmp_path / "gate_same_array_test.sqlite3")
+        manifest = SealedHoldoutManifest(
+            holdout_id="gate-same-array-test",
+            start_time_ns=int(cube.timestamps_ns[-30]),
+            end_time_ns=int(cube.timestamps_ns[-1]),
+            holdout_days=30,
+            model_version="v1",
+            data_manifest_hash="h1",
+            strategy_spec_hash="spec_gate_same_array",
+        )
+        store.create(manifest)
+        result = run_multiscale_compound_engine(
+            market=cube, universe=universe,
+            holdout_store=store, holdout_id="gate-same-array-test", config=CompoundEngineConfig(),
+        )
+        assert isinstance(result, CompoundEngineResult)
+        assert len(gate_arrays) == 1
+        assert len(deploy_arrays) == 1
+        np.testing.assert_array_equal(
+            gate_arrays[0], deploy_arrays[0],
+            err_msg="admission gate scored a different array than what apply_portfolio_risk_overlay deployed",
+        )
+
+
 class TestAggregateTrial4hToDaily:
     def test_zero_complete_days_returns_empty_daily_array(self) -> None:
         import src.domain.futures.compound.engine as eng
@@ -990,7 +897,6 @@ class TestBuildDeploymentCandidate:
             L2CategoryResult,
             RawSignalPanel,
             SealedHoldoutManifest,
-            SignalDescriptor,
         )
         import numpy as np
 
@@ -1147,125 +1053,6 @@ class TestBuildDeploymentCandidate:
 
 
 class TestEngineL2PassBuildsDeploymentCandidate:
-    def test_engine_l2_pass_builds_deployment_candidate_without_crash(
-        self, tmp_path, mocker, small_cube: MarketFeatureCube,
-    ) -> None:
-        from src.domain.futures.compound.contracts import (
-            CalibratedForecastPanel,
-            CausalFold,
-            HandoffResult,
-            HandoffAdmissionEvidence,
-            L2CategoryResult,
-            L2Evaluation,
-            L2GateVerdict,
-            RawSignalPanel,
-        )
-
-        desc_a = mocker.Mock(spec=SignalDescriptor, signal_id="trend_ema:fast", target_horizon_hours=4, declared_orientation=1)
-        desc_b = mocker.Mock(spec=SignalDescriptor, signal_id="momentum_ts:slow", target_horizon_hours=4, declared_orientation=1)
-        mock_panel = mocker.Mock(spec=RawSignalPanel)
-        mock_panel.z_3d = np.zeros((256, 5, 3))
-        mock_panel.valid_3d = np.ones((256, 5, 3), dtype=bool)
-        mock_panel.sigma_2d = np.full((256, 5), 0.01, dtype=np.float32)
-        mock_panel.descriptors = (desc_a, desc_b)
-        mock_panel.symbols = small_cube.symbols
-        mocker.patch(
-            "src.domain.futures.compound.engine.build_raw_signal_panel",
-            return_value=mock_panel,
-        )
-        mock_folds = (CausalFold(0, 0, 50, 48, 50, 52, 102, 2, 42),)
-        mocker.patch("src.domain.futures.compound.engine.build_folds_4h", return_value=mock_folds)
-        mocker.patch("src.domain.futures.compound.engine.build_multi_horizon_targets", return_value={4: mocker.Mock()})
-        mocker.patch("src.domain.futures.compound.engine.align_costs_to_decision_grid", return_value=np.full((256, 5), 8.0, dtype=np.float32))
-
-        forecast_panel = CalibratedForecastPanel(
-            decision_timestamps_ns=np.arange(256, dtype=np.int64),
-            symbols=small_cube.symbols,
-            mu_2d=np.ones((256, len(small_cube.symbols)), dtype=np.float32) * 0.001,
-            se_2d=np.full((256, len(small_cube.symbols)), 0.01, dtype=np.float32),
-            family_mu_3d=np.zeros((256, len(small_cube.symbols), 1), dtype=np.float32),
-            family_ids=(),
-            admitted_signal_ids=("trend_ema:fast", "momentum_ts:slow"),
-            fold_manifest_hash="test",
-        )
-        # duplicated multiset: 3x fast, 1x slow (mirrors the real cluster/fold sleeve fan-out)
-        ids_multiset = ("trend_ema:fast",) * 3 + ("momentum_ts:slow",) * 1
-        evidence = HandoffAdmissionEvidence(
-            annualized_log_growth=0.1, growth_lcb90=0.05, growth_2x_cost=0.05,
-            max_drawdown=0.1, annual_volatility=0.15, positive_outer_folds=5,
-            effective_breadth=2.0, active_signal_ids=ids_multiset,
-            admitted=True, reasons=(),
-        )
-        handoff_result = HandoffResult(forecast=forecast_panel, evidence=evidence)
-        mocker.patch(
-            "src.domain.futures.compound.engine.build_exit_aware_handoff",
-            return_value=handoff_result,
-        )
-        from src.domain.futures.compound.contracts import RegimeRoutedForecast
-        _mock_routed_dc = RegimeRoutedForecast(
-            forecast=forecast_panel, evidence=(),
-            active_expert_count_1d=np.ones(256, dtype=np.int16),
-            tested_hypotheses=0,
-        )
-        mocker.patch("src.domain.futures.compound.engine.build_causal_regime_panel", return_value=mocker.Mock())
-        mocker.patch("src.domain.futures.compound.engine.build_fold_local_regime_forecast", return_value=_mock_routed_dc)
-        mocker.patch(
-            "src.domain.futures.compound.engine.compute_dynamic_compounding_path",
-            return_value=np.full((256, len(small_cube.symbols)), 0.02, dtype=np.float64),
-        )
-
-        passing_categories = tuple(
-            L2CategoryResult(category=f"category-{i}", passed=True, reasons=())
-            for i in range(5)
-        )
-        passing_l2 = L2Evaluation(
-            verdict=L2GateVerdict.PASS, benchmark_id="test",
-            annualized_log_growth=0.0, cagr=0.0, excess_growth_lcb90=0.0,
-            excess_growth_probability=1.0, stressed_excess_growth_lcb90=0.0,
-            equity_multiple=1.0, sharpe=0.0, sharpe_probability=1.0,
-            deflated_sharpe_probability=1.0, candidate_count=1, calmar=0.0,
-            max_drawdown=0.0, daily_cvar95=0.0, annual_volatility=0.0,
-            annual_turnover=0.0, cost_drag_ratio=0.0, capacity_utilisation_p95=0.0,
-            active_days_ratio=1.0, rebalance_count=30, positive_outer_folds=3,
-            oos_days=365, category_results=passing_categories, integrity_ok=True,
-            reasons=(),
-        )
-        import src.domain.futures.compound.engine as eng
-        mocker.patch.object(eng, "evaluate_l2_walk_forward", return_value=passing_l2)
-        mocker.patch.object(
-            eng, "evaluate_l3_sealed_holdout",
-            return_value=L3ValidationResult(
-                verdict=DeploymentVerdict.SHADOW, posterior_growth_probability=0.5,
-                holdout_days=90, max_drawdown=0.0, daily_cvar95=0.0, reasons=(),
-            ),
-        )
-
-        universe = type("Universe", (), {"symbols": small_cube.symbols, "snapshots": ()})()
-        store = SealedHoldoutStore(tmp_path / "l2_pass_deployment_candidate.sqlite3")
-        manifest = SealedHoldoutManifest(
-            holdout_id="l2-pass-deploy-test",
-            start_time_ns=int(small_cube.timestamps_ns[-180]),
-            end_time_ns=int(small_cube.timestamps_ns[-1]),
-            holdout_days=90,
-            model_version="v1",
-            data_manifest_hash="h1",
-            strategy_spec_hash="spec1",
-        )
-        store.create(manifest)
-
-        result = run_multiscale_compound_engine(
-            market=small_cube, universe=universe,
-            holdout_store=store, holdout_id="l2-pass-deploy-test",
-            config=CompoundEngineConfig(),
-        )
-
-        assert result.l2.verdict == L2GateVerdict.PASS
-        assert result.deployment_candidate is not None
-        assert result.deployment_candidate.active_signal_ids == ("trend_ema:fast", "momentum_ts:slow")
-        assert result.deployment_candidate.vote_weights[0] == pytest.approx(3 / 4)
-        assert result.deployment_candidate.vote_weights[1] == pytest.approx(1 / 4)
-
-
     def test_window_none_without_holdout_id_raises(self) -> None:
         from src.domain.futures.compound.contracts import MarketFeatureCube
 
@@ -1299,8 +1086,7 @@ class TestEngineL2PassBuildsDeploymentCandidate:
 
     def test_l3_prior_slices_to_most_recent_cap_days(self, tmp_path, mocker, small_cube) -> None:
         from src.domain.futures.compound.contracts import (
-            CalibratedForecastPanel, HandoffResult, HandoffAdmissionEvidence, CausalFold,
-            RawSignalPanel, SignalDescriptor,
+            CalibratedForecastPanel, HandoffResult, HandoffAdmissionEvidence, RawSignalPanel,
         )
         import src.domain.futures.compound.engine as eng
 
@@ -1362,8 +1148,7 @@ class TestEngineL2PassBuildsDeploymentCandidate:
 
     def test_l3_prior_empty_daily_aggregation_falls_back_to_zero(self, tmp_path, mocker, small_cube) -> None:
         from src.domain.futures.compound.contracts import (
-            CalibratedForecastPanel, HandoffResult, HandoffAdmissionEvidence, CausalFold,
-            RawSignalPanel, SignalDescriptor,
+            CalibratedForecastPanel, HandoffResult, HandoffAdmissionEvidence, RawSignalPanel,
         )
         import src.domain.futures.compound.engine as eng
 
@@ -1599,226 +1384,3 @@ class TestEngineWindowIntegration:
         assert l1_prior is not None, "l1_prior_returns_1d should not be None"
         assert len(l1_prior) > 0, "l1_prior_returns_1d should have data"
 
-
-def test_engine_wires_portfolio_gate_end_to_end(tmp_path: Path, mocker) -> None:
-    """Integration: engine wires new kwargs and produces JSONL when L1_DEBUG=1."""
-    import os as _os
-
-    n_bars = 1024
-    n_syms = 5
-    cube = _make_cube(n_bars, n_syms)
-    universe = type("Universe", (), {"symbols": cube.symbols, "snapshots": ()})()
-
-    store = SealedHoldoutStore(tmp_path / "gate_e2e.sqlite3")
-    manifest = SealedHoldoutManifest(
-        holdout_id="gate-e2e",
-        start_time_ns=int(cube.timestamps_ns[-180]),
-        end_time_ns=int(cube.timestamps_ns[-1]),
-        holdout_days=90, model_version="v1",
-        data_manifest_hash="h1", strategy_spec_hash="spec1",
-    )
-    store.create(manifest)
-    config = CompoundEngineConfig()
-
-    # Mock pipeline dependencies to reach handoff
-    mock_fold = CausalFold(0, 0, 120, 100, 120, 120, 200, 1, 1)
-    mock_folds = (mock_fold,)
-    mocker.patch("src.domain.futures.compound.engine.build_folds_4h", return_value=mock_folds)
-
-    mock_cluster_panel = ClusterPanel(
-        symbols=cube.symbols,
-        cluster_labels=np.zeros(n_syms, dtype=np.int32),
-        cluster_centroids=np.zeros((1, 4), dtype=np.float64),
-        k_clusters=1,
-    )
-    mock_cluster_fold = CausalClusterFold(
-        fold_id=0, fit_end_exclusive_4h=120, fit_end_time_ns=int(cube.timestamps_ns[119]),
-        panel=mock_cluster_panel, member_hash="test_hash",
-    )
-    mocker.patch("src.domain.futures.compound.engine.build_causal_cluster_folds", return_value=(mock_cluster_fold,))
-
-    # Capture build_exit_aware_handoff kwargs
-    call_kwargs = {}
-
-    def capture_handoff(*args, **kwargs):
-        call_kwargs.update(kwargs)
-        from src.domain.futures.compound.contracts import (
-            CalibratedForecastPanel,
-            HandoffAdmissionEvidence,
-            HandoffResult,
-        )
-        cash = CalibratedForecastPanel(
-            decision_timestamps_ns=np.arange(n_bars, dtype=np.int64),
-            symbols=cube.symbols,
-            mu_2d=np.zeros((n_bars, n_syms), dtype=np.float32),
-            se_2d=np.full((n_bars, n_syms), np.nan, dtype=np.float32),
-            family_mu_3d=np.zeros((n_bars, n_syms, 0), dtype=np.float32),
-            family_ids=(), admitted_signal_ids=(), fold_manifest_hash="",
-        )
-        return HandoffResult(
-            cash,
-            HandoffAdmissionEvidence(0.0, 0.0, 0.0, 0.0, 0.0, 0, 0.0, (), False, ("no_admitted_sleeves",)),
-        )
-
-    mocker.patch("src.domain.futures.compound.engine.build_exit_aware_handoff", side_effect=capture_handoff)
-
-    old_debug = _os.environ.get("L1_DEBUG")
-    _os.environ["L1_DEBUG"] = "1"
-    try:
-        result = run_multiscale_compound_engine(
-            market=cube, universe=universe,
-            holdout_store=store, holdout_id="gate-e2e", config=config,
-        )
-    finally:
-        if old_debug is not None:
-            _os.environ["L1_DEBUG"] = old_debug
-        else:
-            _os.environ.pop("L1_DEBUG", None)
-
-    assert isinstance(result, CompoundEngineResult)
-    assert "folds" in call_kwargs, "build_exit_aware_handoff missing folds kwarg"
-    assert "weights_2d" in call_kwargs, "build_exit_aware_handoff missing weights_2d kwarg"
-    assert "cost_bps_4h" in call_kwargs, "build_exit_aware_handoff missing cost_bps_4h kwarg"
-    assert call_kwargs["weights_2d"].ndim == 2
-    assert call_kwargs["weights_2d"].shape[1] == n_syms
-    assert call_kwargs["cost_bps_4h"].ndim == 2
-
-
-def test_gate_scores_the_same_weights_array_that_is_deployed(
-    tmp_path: Path, mocker, small_cube: MarketFeatureCube,
-) -> None:
-    """C-1 regression: build_exit_aware_handoff receives the same weights_2d
-    that compute_dynamic_compounding_path produces, which is then used for deployment."""
-    import src.domain.futures.compound.engine as eng
-    from src.domain.futures.compound.contracts import (
-        CalibratedForecastPanel, CausalFold,
-        HandoffResult, HandoffAdmissionEvidence,
-    )
-    from src.domain.futures.compound.holdout_store import SealedHoldoutManifest
-
-    n_syms = len(small_cube.symbols)
-    universe = type("Universe", (), {"symbols": small_cube.symbols, "snapshots": ()})()
-
-    mocker.patch.object(eng, "build_folds_4h", return_value=(
-        CausalFold(0, 0, 120, 100, 120, 130, 200, 2, 42),
-    ))
-    mocker.patch.object(eng, "build_family_routing_sleeves", return_value=())
-    mocker.patch.object(eng, "build_causal_cluster_folds", return_value=())
-
-    gate_weights_captured = []
-    deploy_weights_captured = []
-
-    real_path = eng.compute_dynamic_compounding_path
-    def capturing_path(*args, **kwargs):
-        result = real_path(*args, **kwargs)
-        deploy_weights_captured.append(result.copy())
-        return result
-
-    mocker.patch.object(eng, "compute_dynamic_compounding_path", side_effect=capturing_path)
-
-    def capturing_handoff(*args, **kwargs):
-        gate_weights_captured.append(kwargs.get("weights_2d").copy())
-        forecast_panel = CalibratedForecastPanel(
-            decision_timestamps_ns=np.arange(256, dtype=np.int64),
-            symbols=small_cube.symbols,
-            mu_2d=np.zeros((256, n_syms), dtype=np.float32),
-            se_2d=np.full((256, n_syms), np.nan, dtype=np.float32),
-            family_mu_3d=np.zeros((256, n_syms, 0), dtype=np.float32),
-            family_ids=(), admitted_signal_ids=(), fold_manifest_hash="",
-        )
-        return HandoffResult(
-            forecast_panel,
-            HandoffAdmissionEvidence(0.0, 0.0, 0.0, 0.0, 0.0, 1, 0.0, (), False, ("no_admitted_sleeves",)),
-        )
-    mocker.patch.object(eng, "build_exit_aware_handoff", side_effect=capturing_handoff)
-
-    store = SealedHoldoutStore(tmp_path / "gate_same_weights.sqlite3")
-    store.create(SealedHoldoutManifest(
-        holdout_id="gate-same-weights",
-        start_time_ns=int(small_cube.timestamps_ns[-180]),
-        end_time_ns=int(small_cube.timestamps_ns[-1]),
-        holdout_days=90, model_version="v1",
-        data_manifest_hash="h1", strategy_spec_hash="spec1",
-    ))
-
-    _ = run_multiscale_compound_engine(
-        market=small_cube, universe=universe,
-        holdout_store=store, holdout_id="gate-same-weights",
-        config=CompoundEngineConfig(),
-    )
-
-    assert len(gate_weights_captured) == 1
-    assert len(deploy_weights_captured) == 1
-    np.testing.assert_array_equal(
-        gate_weights_captured[0], deploy_weights_captured[0],
-        err_msg="gate and deployment MUST use the same weights_2d array values",
-    )
-
-
-def test_engine_wires_allocator_config_into_signal_screen(tmp_path: Path, mocker) -> None:
-    """Integration: screen_signal_edge runs on the real panel and build_family_routing_sleeves
-    consumes the signal screen to create structural sleeves."""
-    n_bars = 1024
-    n_syms = 5
-    cube = _make_cube(n_bars, n_syms)
-    universe = type("Universe", (), {"symbols": cube.symbols, "snapshots": ()})()
-
-    store = SealedHoldoutStore(tmp_path / "signal_screen_e2e.sqlite3")
-    manifest = SealedHoldoutManifest(
-        holdout_id="signal-screen-e2e",
-        start_time_ns=int(cube.timestamps_ns[-180]),
-        end_time_ns=int(cube.timestamps_ns[-1]),
-        holdout_days=90, model_version="v1",
-        data_manifest_hash="h1", strategy_spec_hash="spec1",
-    )
-    store.create(manifest)
-    config = CompoundEngineConfig()
-
-    mock_fold = CausalFold(0, 0, 120, 100, 120, 120, 200, 1, 1)
-    mock_folds = (mock_fold,)
-    mocker.patch("src.domain.futures.compound.engine.build_folds_4h", return_value=mock_folds)
-
-    mock_cluster_panel = ClusterPanel(
-        symbols=cube.symbols,
-        cluster_labels=np.zeros(n_syms, dtype=np.int32),
-        cluster_centroids=np.zeros((1, 4), dtype=np.float64),
-        k_clusters=1,
-    )
-    mock_cluster_fold = CausalClusterFold(
-        fold_id=0, fit_end_exclusive_4h=120, fit_end_time_ns=int(cube.timestamps_ns[119]),
-        panel=mock_cluster_panel, member_hash="test_hash",
-    )
-    mocker.patch("src.domain.futures.compound.engine.build_causal_cluster_folds", return_value=(mock_cluster_fold,))
-
-    import src.domain.futures.compound.engine as eng_mod
-    from src.domain.futures.compound.l1_screening import screen_signal_edge as real_screen_signal_edge
-
-    screen_calls: list[object] = []
-
-    def capturing_screen(panel, bars_4h, folds, config_, **kwargs):
-        result = real_screen_signal_edge(panel, bars_4h, folds, config_, **kwargs)
-        screen_calls.append(result)
-        return result
-
-    mocker.patch.object(eng_mod, "screen_signal_edge", side_effect=capturing_screen)
-
-    sleeve_build_calls: list[tuple[object, ...]] = []
-
-    def capturing_build(*args):
-        sleeve_build_calls.append(args)
-        return ()
-
-    mocker.patch.object(eng_mod, "build_family_routing_sleeves", side_effect=capturing_build)
-
-    result = run_multiscale_compound_engine(
-        market=cube, universe=universe,
-        holdout_store=store, holdout_id="signal-screen-e2e", config=config,
-    )
-
-    assert isinstance(result, CompoundEngineResult)
-    assert len(screen_calls) == 1, "screen_signal_edge must be invoked exactly once per P2 pass"
-    assert len(sleeve_build_calls) == 1, "build_family_routing_sleeves must be invoked exactly once per P2 pass"
-    _, signal_screen_arg, _, _ = sleeve_build_calls[0]
-    assert signal_screen_arg.admitted_signal_ids == screen_calls[0].admitted_signal_ids, (
-        "build_family_routing_sleeves must receive the exact signal_screen produced by screen_signal_edge"
-    )
