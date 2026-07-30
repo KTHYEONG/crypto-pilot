@@ -248,3 +248,24 @@ class TestL1LegConfig:
             L1LegConfig(familywise_error_rate=1.0)
         with pytest.raises(AssertionError):
             L1LegConfig(familywise_error_rate=-0.1)
+
+    def test_handoff_ramp_defaults(self) -> None:
+        cfg = L1LegConfig()
+        assert cfg.shrinkage_prior_obs == 2000.0
+        assert cfg.handoff_posterior_floor < cfg.min_growth_posterior_probability == 0.90
+        assert cfg.leg_prior_lookback_bars == 1080
+        assert cfg.prior_only_folds == 1
+
+    def test_invalid_handoff_floor_raises(self) -> None:
+        with pytest.raises(AssertionError):
+            L1LegConfig(handoff_posterior_floor=0.95)
+        with pytest.raises(AssertionError):
+            L1LegConfig(handoff_posterior_floor=-0.1)
+
+    def test_invalid_shrinkage_prior_obs_raises(self) -> None:
+        with pytest.raises(AssertionError):
+            L1LegConfig(shrinkage_prior_obs=0.0)
+
+    def test_invalid_prior_lookback_raises(self) -> None:
+        with pytest.raises(AssertionError):
+            L1LegConfig(leg_prior_lookback_bars=0)
