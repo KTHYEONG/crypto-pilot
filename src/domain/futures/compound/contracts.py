@@ -1257,6 +1257,9 @@ class LegEvidence:
     posterior_positive: float
     evidence_weight: float
     reasons: tuple[str, ...]
+    net_alpha_ann: float = 0.0
+    net_alpha_sharpe: float = 0.0
+    t_net_alpha_newey_west: float = 0.0
 
     def __post_init__(self) -> None:
         if not self.concept_id:
@@ -1278,8 +1281,6 @@ class LegEvidence:
         if not np.isfinite(self.mean_turnover_per_bar):
             raise ValueError(f"mean_turnover_per_bar must be finite, got {self.mean_turnover_per_bar}")
         if self.positive_folds < 0 or self.positive_folds > self.n_folds:
-            # also structurally rejects n_folds < 0: positive_folds >= 0
-            # can never satisfy positive_folds <= n_folds < 0.
             raise ValueError(f"positive_folds {self.positive_folds} must be in [0, {self.n_folds}]")
         if not 0.0 <= self.posterior_positive <= 1.0:
             raise ValueError(f"posterior_positive must be in [0, 1], got {self.posterior_positive}")
@@ -1287,6 +1288,12 @@ class LegEvidence:
             raise ValueError(f"evidence_weight must be finite, got {self.evidence_weight}")
         if self.evidence_weight < 0.0:
             raise ValueError(f"evidence_weight must be >= 0, got {self.evidence_weight}")
+        if not np.isfinite(self.net_alpha_ann):
+            raise ValueError(f"net_alpha_ann must be finite, got {self.net_alpha_ann}")
+        if not np.isfinite(self.net_alpha_sharpe):
+            raise ValueError(f"net_alpha_sharpe must be finite, got {self.net_alpha_sharpe}")
+        if not np.isfinite(self.t_net_alpha_newey_west):
+            raise ValueError(f"t_net_alpha_newey_west must be finite, got {self.t_net_alpha_newey_west}")
 
 
 @dataclass(slots=True, frozen=True)
