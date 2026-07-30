@@ -5,70 +5,56 @@ description: Produce a concise, evidence-based implementation blueprint and mach
 
 # Spec
 
-Use for architectural, trading, allocation, risk, data-contract, or multi-file changes. The Spec model
-owns the decision; the Implement model should be able to execute the result without redesigning it.
+Frontier reasoning model protocol (Specification Engineering & Empirical Validation). Owns architectural decisions, trade-offs, and machine-readable contracts.
 
-## Workflow
+## Core Directives & Constraints (KISS Principle)
 
-1. Read `docs/decisions/decisions.md`, applicable `.agents/rules/`, and the relevant source/tests.
-2. Choose a tier: Tier 1 skips this skill; Tier 2 produces a short spec and contract; Tier 3 adds an
-   interview, experiments, and full integration design.
-3. For Tier 3, ask only questions whose answers materially change the design (at most three), then wait
-   when the work cannot proceed safely without them.
-4. Inspect existing symbols with `rg`. Decide `reuse`, `extend`, `new`, or `retire` for each affected
-   symbol before choosing an API.
-5. Where the change affects signal, portfolio, risk, performance, or runtime data, compare at least two
-   plausible approaches on the available data. Record the metric that selected the approach.
-6. Before freezing the design, state the objective/acceptance measure, key assumptions, failure modes,
-   and evidence that would falsify the selected approach.
-7. Write `docs/specs/<feature>.md` and `docs/specs/<feature>_contract.json`.
+- **Goal**: Define the single optimal architecture and frozen contract so implementation requires zero redesign.
+- **Constraints**:
+  - Preserve causal timestamps, cost/funding accounting, numerical stability, and fail-closed behavior.
+  - Do not relax thresholds or public contracts merely to make a test pass.
+  - Keep main spec under 500 lines. Move large domain details to linked reference files.
 
-## Design standard
+## Empirical Sandbox Protocol (Mandatory Before Spec Freeze)
 
-- State one selected design; keep rejected alternatives brief.
-- Preserve causal timestamps, cost/funding accounting, numerical stability, and fail-closed behavior.
-- Do not change thresholds or public contracts merely to make a result pass.
-- Keep the main spec under 500 lines. Move domain detail to a directly linked reference only when it is
-  reused or too large for the main blueprint.
+Do NOT rely solely on theoretical hypothesis or unverified context assumptions.
+1. **Scratch Experimentation**: For any non-trivial algorithm, signal, risk model, or performance-critical logic, write a temporary Python script in `<appDataDir>/brain/<conversation-id>/scratch/test_<topic>.py`.
+2. **Empirical Execution**: Execute the script via `uv run python <scratch_script>` to collect actual data metrics, execution logs, or runtime behavior.
+3. **Evidence Requirement**: Record the verified console output metric in Section 2 (Evidence & Alternatives) of the spec artifact. Unverified hypotheses MUST NOT be frozen.
 
-## Contract standard
+## Symbol Audit & Contract Standard
 
-Every contract item declares:
+- **Symbol Audit**: Use `rg` and `view_file` to classify affected symbols: `reuse`, `extend`, `new`, or `retire`.
+- **Contract Deliverables**:
+  - `docs/specs/<feature>.md`
+  - `docs/specs/<feature>_contract.json`
 
-- exact symbol, file, signature, error policy, side effects, and semantic rules;
-- literal executable assertions when an input/output can be computed without a fixture;
-- a fixture reference and concrete expected property when execution requires real objects or data;
-- scenario id, scope, exact test name, and exact target test file;
-- wiring target, anchor, callee, and invocation expression for production integration.
+### `contract.json` Executable Schema
+Every contract item MUST declare:
+- `symbol`, `file`, `signature`, `error_policy`, `side_effects`, `semantic_rules`
+- `python_assertion`: A single executable Python expression (e.g. `assert calc_fee(100.0) == 0.05`) for immediate deterministic testing.
+- `fixture_reference` & `expected_property`
+- `scenario_id`, `scope`, `test_name`, `target_test_file`
+- `wiring` (`target`, `anchor`, `callee`, `invocation_expression`)
 
-Do not make prose fixture labels look like callable parameters. Freeze scenario names and file paths in the
-contract; an implementation rename is a handoff conflict.
+## Blueprint Artifact Sections
 
-## Blueprint sections
-
-Use only the sections needed by the tier:
-
-1. Goal and selected architecture
-2. Evidence and alternatives (required when experimentation is triggered)
-3. Rules, limits, resilience, and resource budget
-4. Integration/wiring plan
-5. Contract changes
-6. TDD scenario matrix and minimal fixtures
-7. Implementation manifest
-
-The manifest lists source ownership, test ownership, wiring edges, reuse/retire decisions, and explicit
-non-goals. It is the Implement model's checklist, not another explanation of the design.
-
-The TDD matrix should cover, as applicable, a happy path, boundary/error behavior, and a real caller
-integration; add a performance or causality case when the change affects either.
-
-## Handoff
-
-After creating the artifacts, report only a short Korean summary: goal, flow, selected decision, and
-`Proceed` as the next action. Do not repeat the full blueprint in the response.
+1. Goal & Selected Architecture
+2. Evidence & Alternatives (Contains Empirical Sandbox execution logs)
+3. Rules, Limits, Resilience, & Resource Budget
+4. Integration/Wiring Plan
+5. Contract Changes & Executable Assertions
+6. TDD Scenario Matrix & Minimal Fixtures
+7. Implementation Manifest
 
 ## Output
 
-Keep the first response within eight Korean lines:
+Do NOT repeat the full blueprint in the response. Return ONLY this 4-line summary card:
 
-`🎯 핵심 목표` · `🔄 로직 흐름` · `⚖️ 설계 핵심 결정`
+📐 `[SPEC CREATED] <Feature/Blueprint Name> (Tier <1/2/3>)`
+• `Goal`: `<1-line core objective>`
+• `Empirical Evidence`: `<1-line verified log/metric from scratch execution>`
+• `Artifacts`: [spec.md](file:///docs/specs/<feature>.md) | [contract.json](file:///docs/specs/<feature>_contract.json)
+• `Next`: Proceed to `/implement`
+
+
