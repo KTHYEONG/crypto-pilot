@@ -10,6 +10,7 @@ from src.domain.futures.compound.l1_leg_admission import (
     accumulate_prequential_leg_weights,
     compute_evidence_weight,
     evaluate_portfolio_admission,
+    normalise_leg_weights,
 )
 
 
@@ -168,10 +169,10 @@ class TestEvaluatePortfolioAdmission:
         combined = np.zeros((T, S), dtype=np.float64)
         for t in range(T):
             combined[t] = [0.5, -0.5] if t % 2 == 0 else [-0.5, 0.5]
-        # ret co-moves with the weight vector itself (dot(w, k*w) = k*sum(w^2)
-        # is sign-invariant), giving a constant +0.0025 port_ret every bar
-        # regardless of which alternating weight pattern is active.
-        ret = combined * 0.005
+        # ret[t] = combined[t-1] * 0.005 so that dot(combined[t-1], ret[t])
+        # = 0.005 * sum(combined[t-1]^2) = 0.0025 (always positive, lag-correct).
+        ret = np.zeros((T, S), dtype=np.float64)
+        ret[1:] = combined[:-1] * 0.005
         folds = _make_folds(n_folds, per_fold, start=1)
         cfg = L1LegConfig(warmup_folds=0, min_growth_posterior_probability=0.90,
                           min_positive_fold_ratio=0.50, stress_cost_multiplier=2.0,
@@ -242,3 +243,56 @@ class TestLegEvidenceValidation:
         kwargs = {**self._valid_kwargs(), "n_folds": 2, "positive_folds": 5}
         with pytest.raises(ValueError, match="positive_folds"):
             LegEvidence(**kwargs)
+
+
+class TestNormaliseLegWeights:
+    def test_normalise_leg_weights_differentiates_when_k_at_least_three(self) -> None:
+        result = normalise_leg_weights(np.array([6.0, 3.0, 1.0], dtype=np.float64), 0.5)
+        assert abs(float(np.sum(result)) - 1.0) < 1e-10
+        assert float(np.max(result)) == 0.5
+        assert np.allclose(result, [0.5, 0.375, 0.125])
+
+    def test_normalise_leg_weights_boundary_zero_and_k_two(self) -> None:
+        zero_result = normalise_leg_weights(np.array([0.0, 0.0], dtype=np.float64), 0.5)
+        assert np.allclose(zero_result, [0.0, 0.0])
+        k_two_result = normalise_leg_weights(np.array([3.0, 1.0], dtype=np.float64), 0.5)
+        assert np.allclose(k_two_result, [0.5, 0.5])
+
+    def test_normalise_leg_weights_already_compliant(self) -> None:
+        result = normalise_leg_weights(np.array([0.4, 0.3, 0.3], dtype=np.float64), 0.5)
+        assert abs(float(np.sum(result)) - 1.0) < 1e-10
+        assert float(np.max(result)) <= 0.5
+        assert np.allclose(result, [0.4, 0.3, 0.3])
+
+
+class TestAccumulatePrequentialCarryForward:
+    def test_accumulate_prequential_leg_weights_carries_forward_past_last_fold(self) -> None:
+        from src.domain.futures.compound.contracts import LegBook
+        n_t, n_s, n_k = 100, 3, 2
+        rng = np.random.default_rng(42)
+        market = rng.standard_normal(n_t).astype(np.float64) * 0.01
+        legs = []
+        for k in range(n_k):
+            book = rng.standard_normal((n_t, n_s)).astype(np.float64)
+            book = book / np.maximum(np.sum(np.abs(book), axis=1, keepdims=True), 1e-12)
+            ret = rng.standard_normal(n_t).astype(np.float64)
+            turn = np.abs(np.diff(book, axis=0, prepend=book[:1])).sum(axis=1)
+            legs.append(LegBook(
+                spec=_make_spec(concept_id=f"c{k}"),
+                book_2d=book, gross_return_1d=ret, turnover_1d=turn,
+            ))
+        folds = tuple(CausalFold(
+            fold_id=i, fit_start=0, fit_end_exclusive=20 + 20 * i,
+            calibration_start=0, calibration_end_exclusive=20 + 20 * i,
+            oos_start=20 + 20 * i, oos_end_exclusive=40 + 20 * i,
+            purge_bars=0, embargo_bars=0,
+        ) for i in range(3))
+        cfg = L1LegConfig(warmup_folds=1, min_turnover_per_bar=0.001,
+                          cost_safety_margin=1.0, min_positive_fold_ratio=0.1)
+        weights = accumulate_prequential_leg_weights(
+            tuple(legs), market, folds, 8.0, cfg,
+        )
+        last_stop = folds[-1].oos_end_exclusive
+        assert last_stop == 80
+        assert np.all(weights[last_stop:] == weights[last_stop - 1:last_stop])
+        assert np.all(weights[:folds[1].oos_start] == 0.0)

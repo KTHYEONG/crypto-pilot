@@ -87,7 +87,6 @@ def evaluate_leg_alpha(
         var_m = float(np.var(m_oos, ddof=1))
         beta = 0.0 if var_m < 1e-12 else float(np.cov(m_oos, g_oos, ddof=1)[0, 1]) / var_m
         alpha = float(np.mean(g_oos)) - beta * float(np.mean(m_oos))
-        g_oos - beta * m_oos - alpha
         if alpha > 0:
             positive_folds += 1
         all_alpha.append(alpha)
