@@ -132,14 +132,14 @@ def _update_decisions_json(
     failure_reason: str | None = None,
 ) -> None:
     date_str = datetime.now().strftime("%Y-%m-%d")
-    index_json_path = "docs/decisions/index.json"
+    tasks_json_path = "docs/decisions/tasks.json"
     anti_patterns_path = "docs/decisions/anti_patterns.json"
 
-    # 1. Update index.json
+    # 1. Update tasks.json
     index_data: dict[str, list[dict[str, str]]] = {"tasks": []}
-    if _path_exists(index_json_path):
+    if _path_exists(tasks_json_path):
         with contextlib.suppress(Exception):
-            parsed = json.loads(_read_file(index_json_path))
+            parsed = json.loads(_read_file(tasks_json_path))
             if isinstance(parsed, dict) and "tasks" in parsed and isinstance(parsed["tasks"], list):
                 index_data = parsed
 
@@ -156,9 +156,9 @@ def _update_decisions_json(
 
     # Prepend new task entry
     index_data["tasks"] = [new_task_entry] + [t for t in index_data.get("tasks", []) if t.get("task_id") != task]
-    # Keep sliding window of max 50 entries
-    index_data["tasks"] = index_data["tasks"][:50]
-    _write_file(index_json_path, json.dumps(index_data, indent=2, ensure_ascii=False) + "\n")
+    # Keep sliding window of max 100 entries in tasks.json
+    index_data["tasks"] = index_data["tasks"][:100]
+    _write_file(tasks_json_path, json.dumps(index_data, indent=2, ensure_ascii=False) + "\n")
 
     # 2. Update anti_patterns.json if failure hypothesis provided
     if failed_hypothesis and failure_reason:
@@ -177,21 +177,21 @@ def _update_decisions_json(
             "source_adr": adr_id,
         }
         anti_data = [new_anti_entry] + [a for a in anti_data if a.get("failed_hypothesis") != failed_hypothesis]
-        anti_data = anti_data[:30]  # Max 30 anti-patterns
+        anti_data = anti_data[:50]  # Max 50 anti-patterns
         _write_file(anti_patterns_path, json.dumps(anti_data, indent=2, ensure_ascii=False) + "\n")
 
 
 def _update_index(source_file: str, test_file: str | None, doc_file: str | None) -> None:
-    index_path = "docs/index.json"
+    code_map_path = "docs/code_map.json"
     data: dict[str, dict[str, str | list[str]]] = {}
 
-    if _path_exists(index_path):
+    if _path_exists(code_map_path):
         try:
-            data = json.loads(_read_file(index_path))
+            data = json.loads(_read_file(code_map_path))
             if not isinstance(data, dict):
                 data = {}
         except (json.JSONDecodeError, ValueError):
-            shutil.copyfile(index_path, f"{index_path}.bak")
+            shutil.copyfile(code_map_path, f"{code_map_path}.bak")
             data = {}
 
     if source_file not in data:
@@ -209,7 +209,7 @@ def _update_index(source_file: str, test_file: str | None, doc_file: str | None)
         elif isinstance(cur, list) and test_file not in cur:
             cur.append(test_file)
 
-    _write_file(index_path, json.dumps(data, indent=2, ensure_ascii=False) + "\n")
+    _write_file(code_map_path, json.dumps(data, indent=2, ensure_ascii=False) + "\n")
 
 
 EXCLUDED_DIRS = frozenset({".git", ".venv", ".mypy_cache", ".ruff_cache", "__pycache__", "node_modules"})
