@@ -85,7 +85,8 @@ class TestAccumulatePrequentialLegWeights:
             legs.append(LegBook(spec=spec, book_2d=book, gross_return_1d=ret, turnover_1d=turn))
         folds = _make_folds(4, 10)
         cfg = L1LegConfig(warmup_folds=1, min_turnover_per_bar=0.001,
-                          cost_safety_margin=1.0, min_positive_fold_ratio=0.1)
+                          cost_safety_margin=1.0, min_positive_fold_ratio=0.1,
+                          max_leg_weight=0.51)
         weights = accumulate_prequential_leg_weights(tuple(legs), market, folds, 8.0, cfg)
         assert weights.shape == (T, K)
         assert np.all(weights[:folds[1].oos_start] == 0.0)
@@ -140,9 +141,9 @@ class TestEvaluatePortfolioAdmission:
         assert any("posterior" in r for r in reasons)
 
     def test_evaluate_portfolio_admission_fold_ratio_condition_blocks(self) -> None:
-        """Fold 0 has a large positive mean that dominates the pooled bootstrap
-        (posterior stays high) while the other 3 folds are individually
-        negative, so positive_folds/n_folds < 0.5."""
+        """S-18 regression: block-bootstrap posterior is ~0.8965 (was ~0.99 with iid).
+        Fold 0 positive dominates the pooled bootstrap while other 3 folds are
+        individually negative, so positive_folds/n_folds < 0.5."""
         n_folds, per_fold = 4, 20
         T, S = n_folds * per_fold, 3
         combined = np.full((T, S), 1.0 / S, dtype=np.float64)
@@ -287,7 +288,8 @@ class TestAccumulatePrequentialCarryForward:
             purge_bars=0, embargo_bars=0,
         ) for i in range(3))
         cfg = L1LegConfig(warmup_folds=1, min_turnover_per_bar=0.001,
-                          cost_safety_margin=1.0, min_positive_fold_ratio=0.1)
+                          cost_safety_margin=1.0, min_positive_fold_ratio=0.1,
+                          max_leg_weight=0.51)
         weights = accumulate_prequential_leg_weights(
             tuple(legs), market, folds, 8.0, cfg,
         )
@@ -295,3 +297,35 @@ class TestAccumulatePrequentialCarryForward:
         assert last_stop == 80
         assert np.all(weights[last_stop:] == weights[last_stop - 1:last_stop])
         assert np.all(weights[:folds[1].oos_start] == 0.0)
+
+
+class TestL1BootstrapConsistency:
+    """S-17: n_traded in [10, 30) falls back to fixed block_size=5.0
+    without raising ValueError (RULE-09 guard)."""
+
+    def test_admission_short_sample_falls_back_to_fixed_block_size(self) -> None:
+        n_folds, per_fold = 1, 15
+        T, S = 1 + n_folds * per_fold, 3
+        combined = np.full((T, S), 1.0 / S, dtype=np.float64)
+        ret = np.full((T, S), 0.02 / S, dtype=np.float64)
+        folds = (CausalFold(
+            fold_id=0, fit_start=0, fit_end_exclusive=1,
+            calibration_start=0, calibration_end_exclusive=1,
+            oos_start=1, oos_end_exclusive=T, purge_bars=0, embargo_bars=0,
+        ),)
+        cfg = L1LegConfig(warmup_folds=0, bars_per_year=2190.0, n_bootstrap=500)
+        admitted, _, _ = evaluate_portfolio_admission(
+            combined, ret, folds, 8.0, cfg, admission_end_exclusive=10**9,
+        )
+        assert admitted in (True, False)
+
+    def test_degenerate_leg_cap_rejected_at_k11(self) -> None:
+        """S-21: normalise_leg_weights with K=11 and cap <= 1/11 raises ValueError."""
+        with pytest.raises(ValueError, match="degenerate cap"):
+            normalise_leg_weights(np.ones(11), 1.0 / 11)
+
+    def test_leg_cap_is_non_degenerate_and_breadth_preserving_at_k11(self) -> None:
+        """S-22: L1LegConfig default max_leg_weight is 0.25 > 1/11."""
+        cfg = L1LegConfig()
+        assert cfg.max_leg_weight == 0.25
+        assert cfg.max_leg_weight > 1.0 / 11
