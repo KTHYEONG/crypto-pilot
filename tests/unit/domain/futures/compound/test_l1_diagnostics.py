@@ -51,6 +51,28 @@ class TestL1AdmissionRecorder:
             if old is not None:
                 os.environ["L1_DEBUG"] = old
 
+    def test_record_attribution_noop_when_disabled(self, tmp_path: Path) -> None:
+        old = os.environ.pop("L1_DEBUG", None)
+        try:
+            log_path = tmp_path / "disabled_attribution.jsonl"
+            rec = L1AdmissionRecorder(path=log_path)
+            rec.record_attribution(
+                bottleneck_code="signal_generalization_failed",
+                economic_candidate_count=4,
+                capital_candidate_count=0,
+                production_admitted=False,
+                shadow_admitted=False,
+                production_net_alpha_ann=0.0,
+                shadow_net_alpha_ann=-0.0083,
+                shadow_available=True,
+            )
+            assert not log_path.exists()
+        finally:
+            if old is not None:
+                os.environ["L1_DEBUG"] = old
+            else:
+                os.environ.pop("L1_DEBUG", None)
+
     def test_record_gate_writes_jsonl(self, tmp_path: Path) -> None:
         path = tmp_path / "l1_admission.jsonl"
         old = os.environ.get("L1_DEBUG")
@@ -230,3 +252,33 @@ class TestL1AdmissionRecorder:
         required = {"net_alpha_ann", "t_net_alpha", "critical_t", "n_tested_hypotheses", "reasons"}
         assert required <= set(last), f"missing keys: {required - set(last)}"
         assert last["n_tested_hypotheses"] == 11
+
+
+    def test_record_attribution_writes_jsonl(self, tmp_path: Path) -> None:
+        old = os.environ.get("L1_DEBUG")
+        os.environ["L1_DEBUG"] = "1"
+        try:
+            log_path = tmp_path / "attribution.jsonl"
+            rec = L1AdmissionRecorder(path=log_path)
+            rec.record_attribution(
+                bottleneck_code="signal_generalization_failed",
+                economic_candidate_count=4,
+                capital_candidate_count=0,
+                production_admitted=False,
+                shadow_admitted=False,
+                production_net_alpha_ann=-0.01,
+                shadow_net_alpha_ann=-0.008,
+                shadow_available=True,
+            )
+            lines = log_path.read_text().strip().splitlines()
+            assert len(lines) == 1
+            row = json.loads(lines[0])
+            assert row["tag"] == "ATTR"
+            assert row["bottleneck_code"] == "signal_generalization_failed"
+            assert row["economic_candidate_count"] == 4
+            assert row["production_admitted"] is False
+        finally:
+            if old is not None:
+                os.environ["L1_DEBUG"] = old
+            else:
+                os.environ.pop("L1_DEBUG", None)
