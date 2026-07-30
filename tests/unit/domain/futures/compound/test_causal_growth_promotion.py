@@ -401,7 +401,7 @@ class TestDryRunAndShadow:
         result = CompoundEngineResult(
             handoff=type("AlphaEventTape", (), {"data_manifest_hash": "h1", "model_version": "v1"})(),
             ledger=type("ExecutionLedger", (), {"timestamps_ns": np.array([0]), "net_returns_1d": np.array([0.0]), "equity_1d": np.array([1.0]), "target_weights_2d": np.zeros((1, 1), dtype=np.float32), "fee_returns_1d": np.array([0.0]), "slippage_returns_1d": np.array([0.0]), "impact_returns_1d": np.array([0.0]), "funding_returns_1d": np.array([0.0]), "integrity_ok": True, "integrity_reasons": ()})(),
-            l2=type("L2Evaluation", (), {"verdict": L2GateVerdict.PASS, "annualized_log_growth": 0.0, "cagr": 0.0, "excess_growth_lcb90": 0.0, "excess_growth_probability": 1.0, "stressed_excess_growth_lcb90": 0.0, "equity_multiple": 1.0, "sharpe": 1.0, "sharpe_probability": 1.0, "deflated_sharpe_probability": 1.0, "candidate_count": 27, "calmar": 0.0, "max_drawdown": 0.0, "daily_cvar95": 0.0, "annual_volatility": 0.0, "annual_turnover": 0.0, "cost_drag_ratio": 0.0, "capacity_utilisation_p95": 0.0, "active_days_ratio": 1.0, "rebalance_count": 30, "positive_outer_folds": 5, "oos_days": 365, "category_results": (), "integrity_ok": True, "reasons": (), "absolute_cagr": 0.0})(),
+            l2=type("L2Evaluation", (), {"verdict": L2GateVerdict.PASS, "annualized_log_growth": 0.0, "cagr": 0.0, "excess_growth_lcb90": 0.0, "excess_growth_probability": 1.0, "stressed_excess_growth_lcb90": 0.0, "equity_multiple": 1.0, "sharpe": 1.0, "sharpe_probability": 1.0, "deflated_sharpe_probability": 1.0, "candidate_count": 27, "calmar": 0.0, "max_drawdown": 0.0, "daily_cvar95": 0.0, "annual_volatility": 0.0, "annual_turnover": 0.0, "cost_drag_ratio": 0.0, "max_name_weight_p95": 0.0, "active_days_ratio": 1.0, "rebalance_count": 30, "positive_outer_folds": 5, "oos_days": 365, "category_results": (), "integrity_ok": True, "reasons": (), "absolute_cagr": 0.0})(),
             l3=L3ValidationResult(
                 verdict=DeploymentVerdict.SHADOW, posterior_growth_probability=0.0,
                 holdout_days=90, max_drawdown=0.0, daily_cvar95=0.0,
@@ -465,7 +465,7 @@ class TestPromoteBundleRoundTrip:
             equity_multiple=1.1, sharpe=1.5, sharpe_probability=1.0,
             deflated_sharpe_probability=1.0, candidate_count=27, calmar=0.5,
             max_drawdown=0.05, daily_cvar95=-0.01, annual_volatility=0.15,
-            annual_turnover=2.0, cost_drag_ratio=0.1, capacity_utilisation_p95=0.05,
+            annual_turnover=2.0, cost_drag_ratio=0.1, max_name_weight_p95=0.05,
             active_days_ratio=1.0, rebalance_count=30, positive_outer_folds=5,
             oos_days=365, category_results=passing_categories, integrity_ok=True,
             reasons=(), absolute_cagr=0.1,
@@ -499,7 +499,7 @@ class TestPromoteBundleRoundTrip:
         result = CompoundEngineResult(
             handoff=type("AlphaEventTape", (), {"data_manifest_hash": "", "model_version": ""})(),
             ledger=type("ExecutionLedger", (), {"timestamps_ns": np.array([0]), "net_returns_1d": np.array([0.0]), "equity_1d": np.array([1.0]), "target_weights_2d": np.zeros((1, 1), dtype=np.float32), "fee_returns_1d": np.array([0.0]), "slippage_returns_1d": np.array([0.0]), "impact_returns_1d": np.array([0.0]), "funding_returns_1d": np.array([0.0]), "integrity_ok": True, "integrity_reasons": ()})(),
-            l2=type("L2Evaluation", (), {"verdict": L2GateVerdict.FAIL, "annualized_log_growth": 0.0, "cagr": 0.0, "excess_growth_lcb90": 0.0, "excess_growth_probability": 0.0, "stressed_excess_growth_lcb90": 0.0, "equity_multiple": 1.0, "sharpe": 0.0, "sharpe_probability": 0.0, "deflated_sharpe_probability": 0.0, "candidate_count": 0, "calmar": 0.0, "max_drawdown": 0.0, "daily_cvar95": 0.0, "annual_volatility": 0.0, "annual_turnover": 0.0, "cost_drag_ratio": 0.0, "capacity_utilisation_p95": 0.0, "active_days_ratio": 0.0, "rebalance_count": 0, "positive_outer_folds": 0, "oos_days": 0, "category_results": (), "integrity_ok": True, "reasons": ("l2_fail",), "absolute_cagr": 0.0})(),
+            l2=type("L2Evaluation", (), {"verdict": L2GateVerdict.FAIL, "annualized_log_growth": 0.0, "cagr": 0.0, "excess_growth_lcb90": 0.0, "excess_growth_probability": 0.0, "stressed_excess_growth_lcb90": 0.0, "equity_multiple": 1.0, "sharpe": 0.0, "sharpe_probability": 0.0, "deflated_sharpe_probability": 0.0, "candidate_count": 0, "calmar": 0.0, "max_drawdown": 0.0, "daily_cvar95": 0.0, "annual_volatility": 0.0, "annual_turnover": 0.0, "cost_drag_ratio": 0.0, "max_name_weight_p95": 0.0, "active_days_ratio": 0.0, "rebalance_count": 0, "positive_outer_folds": 0, "oos_days": 0, "category_results": (), "integrity_ok": True, "reasons": ("l2_fail",), "absolute_cagr": 0.0})(),
             l3=L3ValidationResult(verdict=DeploymentVerdict.REJECT, posterior_growth_probability=0.0, holdout_days=0, max_drawdown=0.0, daily_cvar95=0.0, reasons=("l2_not_pass",)),
         )
         path = publish_promoted_strategy(
@@ -643,7 +643,7 @@ class TestPublishWiring:
             equity_multiple=1.1, sharpe=1.5, sharpe_probability=1.0,
             deflated_sharpe_probability=1.0, candidate_count=27, calmar=0.5,
             max_drawdown=0.03, daily_cvar95=-0.005, annual_volatility=0.12,
-            annual_turnover=1.5, cost_drag_ratio=0.05, capacity_utilisation_p95=0.03,
+            annual_turnover=1.5, cost_drag_ratio=0.05, max_name_weight_p95=0.03,
             active_days_ratio=1.0, rebalance_count=30, positive_outer_folds=5,
             oos_days=365, category_results=passing_categories, integrity_ok=True,
             reasons=(), absolute_cagr=0.1,
@@ -691,7 +691,7 @@ class TestPublishWiring:
             equity_multiple=1.0, sharpe=0.0, sharpe_probability=0.0,
             deflated_sharpe_probability=0.0, candidate_count=0, calmar=0.0,
             max_drawdown=0.0, daily_cvar95=0.0, annual_volatility=0.0,
-            annual_turnover=0.0, cost_drag_ratio=0.0, capacity_utilisation_p95=0.0,
+            annual_turnover=0.0, cost_drag_ratio=0.0, max_name_weight_p95=0.0,
             active_days_ratio=0.0, rebalance_count=0, positive_outer_folds=0,
             oos_days=0, category_results=(), integrity_ok=True,
             reasons=("l2_fail",), absolute_cagr=0.0,
