@@ -15,6 +15,13 @@ Frontier reasoning model protocol (Specification Engineering & Empirical Validat
   - Do not relax thresholds or public contracts merely to make a test pass.
   - Keep main spec under 500 lines. Move large domain details to linked reference files.
 
+## Ambiguity & Alignment Interrogation (Pre-Spec Gate)
+
+Before formulating architecture or hypotheses:
+- **Blind Spot & Trade-off Check**: Assess if requirements contain ambiguous business/quant trade-offs, unspecified boundary conditions, or open design choices.
+- **Concise Interrogation (Grill-Me)**: If ambiguity exists, present 1–3 high-impact questions directly to the user before proceeding. Always list the recommended choice as option 1 `(Recommended)`.
+- **Pass Through**: If requirements are already fully clear and unambiguous, skip questioning and proceed immediately to Memory Check.
+
 ## Memory & Anti-Pattern Check (Mandatory Pre-Spec Phase)
 
 Before formulating architecture or hypotheses:
@@ -31,7 +38,7 @@ Do NOT rely solely on theoretical hypothesis or unverified context assumptions.
 
 ## Symbol Audit & Contract Standard
 
-- **Symbol Audit**: Use `rg` and `view_file` to classify affected symbols: `reuse`, `extend`, `new`, or `retire`.
+- **Symbol Audit & Wiring Inspection**: Use `rg` and `view_file` to classify affected symbols (`reuse`, `extend`, `new`, `retire`) and inspect exact file paths, signatures, line numbers, and call sites before freezing the wiring specification.
 - **Contract Deliverables**:
   - `docs/specs/<feature>.md`
   - `docs/specs/<feature>_contract.json`
