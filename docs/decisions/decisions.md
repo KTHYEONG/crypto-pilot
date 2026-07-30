@@ -1,5 +1,10 @@
 # Active Decisions Log (Sliding Window)
 
+## [2026-07-30] [TERMINAL_FUTURES_RISK_PROJECTION] [ADR_20260730_TERMINAL_FUTURES_RISK_PROJECTION]
+- **Context/Why:** 최종 위험 캡이 beta hedge와 MDD scale 이후 다시 우회될 수 있었고, .agents의 개선된 spec/implement/check 지침을 .claude에도 동일하게 반영할 필요가 있었다.
+- **Resolution/What:** mdd scale 이후 terminal iterative cap projection을 적용하고 NAV를 allocator와 dense simulator에 동일 전달했으며, capacity_utilisation_p95를 max_name_weight_p95로 교정했다. spec/implement/check SKILL.md를 .agents와 .claude에서 동일한 간결 구조로 동기화했다.
+- **Impact:** 동일 replay에서 name/net cap 위반을 제거하고 max-name p95를 0.190617에서 0.096732로 낮췄다. L2는 여전히 excess growth probability 게이트로 fail하므로 배포는 shadow/cash-only이며, 완료된 spec과 scratch 산출물은 정리된다.
+
 ## [2026-07-30] [TASK_L1_CCI_MEMBER_QUARANTINE] [ADR_20260730_L1_CCI_MEMBER_QUARANTINE]
 - **Context/Why:** 동일 manifest·reference date·seed의 production replay로 CCI 단일 격리 효과를 이전 실행과 비교하고, 결과 문서를 최신 수치로 동기화해야 함
 - **Resolution/What:** trend_momentum에서 cci만 제거한 production replay를 수행하고 L1/L2/L3/target_weights 전후 수치를 docs/results/result.md에 단일 최신 기록으로 갱신
@@ -69,8 +74,3 @@
 - **Context/Why:** 직전 스펙(측정계 정직화) 적용 후 ann_lcb90=-78.87%로 여전히 실패했으나, 게이트 입력을 덤프해 신호(mu_2d) 고정한 채 구성만 바꿔 분해한 결과 병목이 signal이 아니라 구성(construction)임을 확인: C-1 게이트가 실제 allocator(스무딩/밴드/voltarget)를 안 쓴 허수아비 북을 채점(turnover 447x, cost_drag 44.7%), C-2 방향성(net exposure) 베팅이 분산의 85% 차지(무조건부 베타로는 은폐), C-3 min_positive_outer_folds=4가 정의만 되고 미검사인 dead 파라미터
 - **Resolution/What:** allocator.py: apply_net_exposure_cap 신규(support마스킹 직후, 스케일불변, max_net_exposure=1.0시 완전무연산 롤백보장). config.py: max_net_exposure=0.10 추가. l1_sleeves.py: compute_l1_oos_portfolio_returns를 mu_2d/sigma_2d 대신 완성된 weights_2d 수취로 교체(자체 포지션구성 로직 삭제), compute_fold_growths 신규, build_exit_aware_handoff가 min_positive_outer_folds 실제 검사. engine.py: weights_2d를 게이트 호출 이전 1회 계산해 게이트/배포가 동일 배열 공유(C-1 재발 구조적 차단). l1_diagnostics.py: positive_folds/fold_growths/mean_abs_net 계측 추가
 - **Impact:** |net| 캡 sweep 실측(신호 고정): 완전단조 관계로 캡 0(완전중립)까지 Sharpe 0.29->2.22, LCB90 -31.5%->+8.7%. 반증기록: 무조건부 베타 제거 가설은 틀림(beta -0.19->-0.07로만 변화, 진짜원인은 시변 순노출 85%). /check PASS(216 tests, Cov91%, 무관한 사전결함 test_config.py도 해소). 실전 재실행: turnover 447x->7.5x(60배감소), cost_drag 44.7%->0.75%, ann_lcb90 -78.87%->-24.75%(3배 축소), 그러나 positive_folds=2/5로 신규활성화 게이트 미달->NO_EVIDENCE 유지. fold 성과 부호[+6%,-12%,-45%,+16%,-7%] 불안정 확인 - 병목이 구성에서 fold간 비정상성으로 이동. docs/results/result.md 전체 재작성(재현 스크립트+원자료 포함)
-
-## [2026-07-28] [L1_MEASUREMENT_INTEGRITY_RESTORE] [ADR_20260728_L1_MEASUREMENT_INTEGRITY_RESTORE]
-- **Context/Why:** 전날 복원한 fail-closed 게이트(has_admitted)가 참조하는 집계 통계량 자체가 결함 3건: D-1 계열이 매매신호와 무관(클러스터 등가중 롱온리 바스켓과 비트단위 동일), D-2 540 sleeve가 실제론 고유계열 4개(135배 중복), D-3 pooled OLS SE가 지속성신호에서 41배 과신(D-5 i.i.d 부트스트랩 회귀는 3회차 동일 패턴). 실측 스크립트로 확정
-- **Resolution/What:** l1_sleeves.py: compute_l1_oos_portfolio_returns 신규(OOS만 stitch, 리스크패리티 사이징, 비용차감)로 단일 포트폴리오 시계열 게이트 복원, _cluster_masked_beta를 Driscoll-Kraay HAC SE로 교체. config.py: min_sleeve_posterior_probability 0.52->0.95, hac_lag_cap=120 신규. l1_diagnostics.py 신규: L1AdmissionRecorder(L1_DEBUG=1 게이트). 후속 수정 2건: pw_block 0.0 하드코딩 스텁을 실제 politis_white_block_length 계산값 배선으로 교정, estimate_cluster_sleeve_posteriors에 record_sleeve 호출 배선(기존엔 클래스만 존재하고 프로덕션 미호출로 sleeve별 데이터 전혀 미수집)
-- **Impact:** /check PASS(Mypy strict, 145 tests, Cov 92%, test_config.py 무관 사전결함 1건은 베이스라인 동일재현 확인 후 범위제외). 실전 재실행 결과 여전히 NO_EVIDENCE(admitted_sleeves=15/455, distinct_series=1 확인, ann_lcb90=-78.87%). 신규 확보 sleeve별 DEBUG 데이터(455건)로 momentum_ts family만 유일 admit(15.8%, SE팽창 7.84x)하고 trend_ema는 beta~0 수렴+SE팽창 최대(68x, 느릴수록 악화)인 사멸신호임을 실측 확정 - 다음 L1 신호 개선의 데이터 기반 착수점. docs/results/result.md에 전체 family/speed별 표 기록
