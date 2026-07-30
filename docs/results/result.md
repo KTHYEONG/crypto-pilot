@@ -92,3 +92,33 @@ fold4 net_ann=-8.08%
 - [spec](../specs/l1_admission_bootstrap_consistency_and_growth_lever_survey.md)
 - [contract](../specs/l1_admission_bootstrap_consistency_and_growth_lever_survey_contract.json)
 - [L1 leg evidence](../../logs/l1_admission.jsonl)
+
+## 6. 2026-07-30 최신 재실행 및 net-evidence 비교
+
+`2026-07-30` 기준으로 최신 구현을 `full/local` 모드에서 재실행했다.
+
+| Metric | 이전 기준 실행 (`20260730_041009`) | 최신 실행 (`20260730_113351`) |
+|---|---:|---:|
+| reference date | 2026-07-15 | 2026-07-30 |
+| 입력 | 5,442 bars × 51 symbols | 5,442 bars × 51 symbols |
+| L2 verdict | `fail` | `no_evidence` |
+| CAGR | +27.29% | 0.00% |
+| Sharpe | 2.399 | 0.000 |
+| annual turnover | 54.87 | 0.00 |
+| active days / rebalances | 충족 시도 | 0 / 0 |
+| L3 verdict | `reject` | `reject` |
+
+최신 결과는 수익성 기준으로 개선되지 않았다. 개별 leg evidence에는 양의 alpha가 남아
+있지만(`volume_zscore`, `bollinger_bandwidth`, `momentum_ts` 등), net 비용·fold
+안정성·registry multiplicity 조건을 통과해 실제 자본 배치로 이어진 leg가 없어
+cash-only로 종료됐다. 따라서 현재 병목은 signal 생성량보다
+`signal → net evidence → admission → sizing` 경로에 있다.
+
+두 실행 모두 5,442 bars × 51 symbols를 사용했으므로 최신 cash-only 결과는 데이터 기간
+축소로 설명되지 않는다. 이전 실행의 +27.29% CAGR 역시 L2 excess-growth probability
+`0.329`로 최종 게이트를 통과하지 못한 비배포 결과였다.
+
+### 최신 artifact
+
+- [latest result.json](../../logs/futures/compound/20260730_113351/result.json)
+- [latest target weights](../../logs/futures/compound/20260730_113351/target_weights.npy)
