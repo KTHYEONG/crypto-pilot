@@ -4,7 +4,6 @@ import json
 import os
 from pathlib import Path
 
-import pytest
 
 from src.domain.futures.compound.l1_diagnostics import L1AdmissionRecorder
 

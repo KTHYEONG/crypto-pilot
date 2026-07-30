@@ -10,7 +10,7 @@ from numpy.typing import NDArray
 
 from src.domain.futures.compound.allocator import (
     apply_beta_hedge_overlay,
-    compute_dynamic_compounding_path,
+    apply_portfolio_risk_overlay,
     compute_dynamic_compounding_weights,
     derive_mdd_parity_scale,
 )
@@ -26,7 +26,6 @@ from src.domain.futures.compound.calibration import (
     build_folds_4h,
     build_multi_horizon_targets,  # noqa: F401 - compatibility patch target for legacy tests
 )
-from src.domain.futures.compound.clustering import build_causal_cluster_folds
 from src.domain.futures.compound.config import CompoundEngineConfig, DynamicCompoundingConfig
 from src.domain.futures.compound.contracts import (
     AlphaEventTape,
@@ -51,12 +50,21 @@ from src.domain.futures.compound.contracts import (
 from src.domain.futures.compound.dense_simulator import simulate_dense_portfolio
 from src.domain.futures.compound.handoff import _build_cash_only_forecast
 from src.domain.futures.compound.holdout_store import HoldoutReuseError, SealedHoldoutStore
-from src.domain.futures.compound.l1_regime_routing import (
+from src.domain.futures.compound.l1_concept_bank import build_concept_registry, build_leg_books
+from src.domain.futures.compound.l1_leg_admission import (  # noqa: F811
+    accumulate_prequential_leg_weights,
+    combine_leg_books,
+    evaluate_portfolio_admission,
+)
+from src.domain.futures.compound.l1_leg_evaluation import compute_equal_weight_market_returns
+
+# Legacy imports — retained for legacy test mock compatibility; removed once /check confirms green
+from src.domain.futures.compound.l1_regime_routing import (  # noqa: F401,F811
     build_causal_regime_panel,
     build_fold_local_regime_forecast,
 )
-from src.domain.futures.compound.l1_screening import screen_signal_edge
-from src.domain.futures.compound.l1_sleeves import (
+from src.domain.futures.compound.l1_screening import screen_signal_edge  # noqa: F401
+from src.domain.futures.compound.l1_sleeves import (  # noqa: F401
     build_exit_aware_handoff,
     build_family_routing_sleeves,
 )
@@ -231,6 +239,7 @@ def run_multiscale_compound_engine(
     folds: tuple[CausalFold, ...] = ()
     max_horizon_bars: int = 0
     routed: object | None = None
+    admitted: bool = False
     cost_bps_4h: NDArray[np.float32] = np.full(
         (bars_4h.timestamps_ns.size, n_syms), config.ladder.cost_bps, dtype=np.float32,
     )
@@ -259,70 +268,44 @@ def run_multiscale_compound_engine(
         cost_bps_4h = align_costs_to_decision_grid(
             market.timestamps_ns, bars_4h.timestamps_ns, market.execution_cost_bps_2d,
         )
-        cluster_folds = build_causal_cluster_folds(
-            market=market, bars_4h=bars_4h, folds=folds, config=config.cluster,
-        )
-        _logger.info("[P2] computed %d causal cluster folds", len(cluster_folds))
-        signal_screen = screen_signal_edge(
-            panel, bars_4h, folds, config.handoff,
-            funding_1h_2d=funding_1h,
-            allocator_config=config.dynamic_compounding,
-        )
-        _logger.info(
-            "[P2] signal_screen: n_eff=%.2f admitted_signals=%s",
-            signal_screen.n_effective_independent, signal_screen.admitted_signal_ids,
-        )
-        routing_sleeves = build_family_routing_sleeves(
-            panel, signal_screen, cluster_folds, folds,
-        )
-        btc_idx = bars_4h.symbols.index("BTCUSDT") if "BTCUSDT" in bars_4h.symbols else -1
-        eth_idx = bars_4h.symbols.index("ETHUSDT") if "ETHUSDT" in bars_4h.symbols else -1
-        close = bars_4h.close_2d.astype(np.float64)
-        log_ret = np.zeros(close.shape[0], dtype=np.float64)
-        if btc_idx >= 0 and eth_idx >= 0:
-            prev = close[:-1, [btc_idx, eth_idx]]
-            curr = close[1:, [btc_idx, eth_idx]]
+        registry = build_concept_registry(panel.descriptors, config.l1_leg)
+        close_4h = bars_4h.close_2d
+        legs = build_leg_books(panel, eligible_4h, close_4h, registry, config.l1_leg)
+        asset_ret_4h = np.zeros((bars_4h.close_2d.shape[0], n_syms), dtype=np.float64)
+        close_f64 = close_4h.astype(np.float64)
+        for t in range(1, bars_4h.close_2d.shape[0]):
+            prev = close_f64[t - 1]
+            curr = close_f64[t]
             mask = (prev > 0) & np.isfinite(prev) & (curr > 0) & np.isfinite(curr)
-            w = np.array([0.5, 0.5], dtype=np.float64)
             with np.errstate(divide="ignore", invalid="ignore"):
-                weighted = np.where(mask, np.log(curr / prev), 0.0) @ w
-            log_ret[1:] = weighted
-        benchmark_returns_1d = log_ret
-
-        regime_panel = build_causal_regime_panel(
-            benchmark_returns_1d, bars_4h.timestamps_ns, config.regime_router,
+                asset_ret_4h[t, mask] = np.log(curr[mask] / prev[mask])
+        market_1d = compute_equal_weight_market_returns(close_4h, eligible_4h)
+        leg_weights_2d = accumulate_prequential_leg_weights(
+            legs, market_1d, folds, config.ladder.cost_bps, config.l1_leg,
         )
-        routed = build_fold_local_regime_forecast(
-            panel, routing_sleeves, folds, bars_4h, cost_bps_4h, funding_1h,
-            regime_panel, config.regime_router, config.dynamic_compounding,
-            cost_bps=config.ladder.cost_bps,
+        combined_2d = combine_leg_books(legs, leg_weights_2d)
+        weights_2d = apply_portfolio_risk_overlay(
+            combined_2d, close_4h, config.ladder.cost_bps, config.dynamic_compounding,
         )
-        forecast = routed.forecast
-        weights_2d = compute_dynamic_compounding_path(
-            forecast=forecast, sigma_2d=panel.sigma_2d,
-            funding_rates_1h_2d=funding_1h,
-            config=config.dynamic_compounding,
-            close_2d=bars_4h.close_2d, cost_bps=config.ladder.cost_bps,
+        # gate the SAME array that gets deployed (post risk-overlay), not the
+        # pre-overlay combined book -- scoring a different object than what
+        # is actually deployed is the historical C-1 defect class.
+        admitted, p_reasons, net_ann = evaluate_portfolio_admission(
+            weights_2d, asset_ret_4h, folds, config.ladder.cost_bps, config.l1_leg,
         )
-        handoff_result = build_exit_aware_handoff(
-            forecast, routing_sleeves, bars_4h, benchmark_returns_1d, config.handoff,
-            folds=folds, weights_2d=weights_2d, cost_bps_4h=cost_bps_4h,
-            funding_1h_2d=funding_1h,
-        )
-        forecast = handoff_result.forecast
+        handoff_result = None
+        forecast = None
         _logger.info(
-            "P2 complete: admitted=%s active=%s hypotheses=%d",
-            handoff_result.evidence.admitted, handoff_result.evidence.active_signal_ids,
-            routed.tested_hypotheses,
+            "P2 complete: leg_pipeline admitted=%s reasons=%s net_ann=%.4f",
+            admitted, p_reasons, net_ann,
         )
     except Exception as exc:
         _logger.warning("P2 pipeline failed, using cash-only fallback", exc_info=True)
         p2_error_reason = f"p2_pipeline_error:{type(exc).__name__}"
         forecast = _build_cash_only_forecast(bars_4h.timestamps_ns, bars_4h.symbols)
 
-    _logger.info("P3: dynamic compounding allocation, dense simulation")
-    bars_4h = bars.cubes["4h"]
-    has_admitted = handoff_result.evidence.admitted if handoff_result is not None else False
+    _logger.info("P3: portfolio risk overlay and dense simulation")
+    has_admitted = admitted if p2_error_reason is None else False
 
     if has_admitted and weights_2d is not None:
         is_cash_only = float(np.sum(np.abs(weights_2d))) < 1e-15

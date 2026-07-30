@@ -1,0 +1,148 @@
+from __future__ import annotations
+
+import logging
+
+import numpy as np
+from numpy.typing import NDArray
+from scipy import stats as _stats
+
+from src.domain.futures.compound.config import L1LegConfig
+from src.domain.futures.compound.contracts import (
+    CausalFold,
+    LegBook,
+    LegEvidence,
+)
+
+_logger = logging.getLogger(__name__)
+
+
+def compute_evidence_weight(
+    evidence: LegEvidence,
+    cost_bps: float,
+    config: L1LegConfig,
+) -> float:
+    if evidence.mean_turnover_per_bar <= config.min_turnover_per_bar:
+        return 0.0
+    if evidence.breakeven_cost_bps <= cost_bps * config.cost_safety_margin:
+        return 0.0
+    if evidence.n_folds > 0 and evidence.positive_folds / evidence.n_folds < config.min_positive_fold_ratio:
+        return 0.0
+    prob = float(_stats.norm.cdf(evidence.t_alpha_newey_west))
+    raw = 2.0 * max(prob - 0.5, 0.0)
+    return min(raw, config.max_leg_weight)
+
+
+def accumulate_prequential_leg_weights(
+    legs: tuple[LegBook, ...],
+    market_1d: NDArray[np.float64],
+    folds: tuple[CausalFold, ...],
+    cost_bps: float,
+    config: L1LegConfig,
+) -> NDArray[np.float64]:
+    k_ = len(legs)
+    n_t = legs[0].book_2d.shape[0]
+    weights = np.zeros((n_t, k_), dtype=np.float64)
+    oos_slices = [slice(f.oos_start, f.oos_end_exclusive) for f in folds]
+    for i in range(config.warmup_folds, len(folds)):
+        prev_evidence: list[LegEvidence] = []
+        for k in range(k_):
+            ev = evaluate_leg_alpha_on_slices(
+                legs[k], market_1d, tuple(oos_slices[:i]), cost_bps, config,
+            )
+            prev_evidence.append(ev)
+        w = np.zeros(k_, dtype=np.float64)
+        for k in range(k_):
+            # evaluate_leg_alpha already computed and stamped the real
+            # evidence_weight (needed so record_leg logs a genuine value,
+            # not the 0.0 placeholder) -- reuse it as the single source of
+            # truth instead of recomputing here.
+            w[k] = prev_evidence[k].evidence_weight
+        w_sum = float(np.sum(w))
+        w = w / w_sum if w_sum > 1e-12 else np.zeros(k_, dtype=np.float64)
+        sl = oos_slices[i]
+        weights[sl] = w[np.newaxis, :]
+    return weights
+
+
+def evaluate_leg_alpha_on_slices(
+    leg: LegBook,
+    market_1d: NDArray[np.float64],
+    oos_slices: tuple[slice, ...],
+    cost_bps: float,
+    config: L1LegConfig,
+) -> LegEvidence:
+    from src.domain.futures.compound.l1_leg_evaluation import evaluate_leg_alpha
+    return evaluate_leg_alpha(leg, market_1d, oos_slices, cost_bps, config)
+
+
+def combine_leg_books(
+    legs: tuple[LegBook, ...],
+    leg_weights_2d: NDArray[np.float64],
+) -> NDArray[np.float64]:
+    k_ = len(legs)
+    n_t, n_s = legs[0].book_2d.shape
+    combined = np.zeros((n_t, n_s), dtype=np.float64)
+    for k in range(k_):
+        w = leg_weights_2d[:, k:k + 1]
+        combined += w * legs[k].book_2d
+    return combined
+
+
+def evaluate_portfolio_admission(
+    combined_2d: NDArray[np.float64],
+    asset_return_2d: NDArray[np.float64],
+    folds: tuple[CausalFold, ...],
+    cost_bps: float,
+    config: L1LegConfig,
+) -> tuple[bool, tuple[str, ...], float]:
+    n_t, _ = combined_2d.shape
+    gross_returns = np.zeros(n_t, dtype=np.float64)
+    turnovers = np.zeros(n_t, dtype=np.float64)
+    for t in range(1, n_t):
+        prev_w = combined_2d[t - 1]
+        curr_w = combined_2d[t]
+        turnovers[t] = float(np.sum(np.abs(curr_w - prev_w)))
+        gross_returns[t] = float(np.dot(curr_w, asset_return_2d[t]))
+    net_returns = gross_returns - cost_bps * 1e-4 * turnovers
+    stressed_cost_bps = cost_bps * config.stress_cost_multiplier
+    stressed_returns = gross_returns - stressed_cost_bps * 1e-4 * turnovers
+
+    oos_slices = [slice(f.oos_start, f.oos_end_exclusive) for f in folds]
+    traded_slices = oos_slices[config.warmup_folds:]
+    traded_parts = [net_returns[sl] for sl in traded_slices]
+    traded_parts = [p for p in traded_parts if p.shape[0] > 0]
+    if not traded_parts:
+        return False, ("no_traded_bars",), 0.0
+    traded_returns = np.concatenate(traded_parts)
+    traded_stressed = np.concatenate([stressed_returns[sl] for sl in traded_slices if stressed_returns[sl].shape[0] > 0])
+    n_traded = len(traded_returns)
+    if n_traded < 10:
+        return False, ("insufficient_traded_bars",), 0.0
+    net_ann = float(np.mean(traded_returns)) * config.bars_per_year
+    # stressed_ann must be annualized the same way as net_ann (mean-per-bar *
+    # bars_per_year); subtracting a raw per-bar cost delta from an already-
+    # annualized net_ann understates the stress penalty by ~bars_per_year.
+    stressed_ann = float(np.mean(traded_stressed)) * config.bars_per_year
+    rng = np.random.default_rng(42)
+    boot = rng.choice(traded_returns, size=(config.n_bootstrap, n_traded), replace=True)
+    boot_mean = np.mean(boot, axis=1)
+    posterior = float(np.mean(boot_mean > 0.0))
+    if n_traded > 0:
+        fold_returns = []
+        for sl in traded_slices:
+            fr = net_returns[sl]
+            fold_returns.append(float(np.mean(fr)))
+        positive_folds = sum(1 for fv in fold_returns if fv > 0)
+        n_traded_folds = len(fold_returns)
+    else:
+        positive_folds = 0
+        n_traded_folds = 0
+    reasons: list[str] = []
+    if posterior < config.min_growth_posterior_probability:
+        reasons.append(f"posterior_{posterior:.3f}_below_{config.min_growth_posterior_probability}")
+    if n_traded_folds > 0 and positive_folds / n_traded_folds < config.min_positive_fold_ratio:
+        reasons.append(f"positive_folds_{positive_folds}/{n_traded_folds}_below_{config.min_positive_fold_ratio}")
+    if stressed_ann <= 0:
+        reasons.append(f"stressed_net_ann_{stressed_ann:.4f}_not_positive")
+    admitted = len(reasons) == 0
+    return admitted, tuple(reasons), net_ann
