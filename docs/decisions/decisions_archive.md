@@ -2,6 +2,11 @@
 
 This file holds historical architecture decision records (ADRs) that have been pruned from the active window.
 
+## [2026-07-28] [CAPITAL_DEPLOYMENT_FAILCLOSED_RESTORE] [ADR_20260728_CAPITAL_DEPLOYMENT_FAILCLOSED_RESTORE]
+- **Context/Why:** phase full 실측(20260728_072617)에서 L2 FAIL 전체탈락(CAGR -15.8%, MDD 39.9%, turnover 27.6x) 확인. git-diff로 근본원인 확정: 01a209e1(SOFT_CONVICTION)이 engine.py의 has_admitted 이진 게이트를 제거해 집계 LCB90 부트스트랩 검정과 무관하게 항상 실거래하도록 변경됨. 같은 날 da72a053이 alpha 27->60 확장하며 검증된 basis_gap/xs_reversal 등을 제거하고 미검증 신규 4패밀리로 대체
+- **Resolution/What:** engine.py: has_admitted=False시 weights_2d 강제 0(현금) 이진분기 복원. signal_bank.py: _default_catalog()를 legacy 27레시피로 복원(신규 4패밀리 volatility_squeeze_keltner/funding_carry_reversion/flow_imbalance_taker/open_interest_confirmation 격리, basis_gap/xs_reversal/xs_momentum_slow/smart_money_divergence 복원), 죽은 build_canonical_alpha_catalog() 호출 제거
+- **Impact:** 실측 A/B(scratch/verify_alpha_family_ablation.py, 동일 프로덕션 엔진 재사용): baseline(60레시피,fail-open) CAGR -15.8%/MDD39.9% -> legacy27 CAGR +7.4%/MDD11.4%로 반전, 신규4패밀리 단독실행도 MDD41.5%/cost_drag293%로 파괴적임을 확인해 원인 확정. /check PASS(Cov 74%). 수정후 실전 phase full 재실행 결과 NO_EVIDENCE(현금100%, rebalances=0)로 안전 상태 복원 확인 - 집계게이트 통과할 알파는 아직 없으나 파괴적 거래는 완전 차단됨
+
 ## [2026-07-28] [SIGNAL_PANEL_MAD_KERNEL_H2] [ADR_20260728_SIGNAL_PANEL_MAD_KERNEL_H2]
 - **Context/Why:** signal_panel 206s E2E 병목의 95.7%를 점유하는 MAD-z kernel의 2회 sort를 1회 sort+3-way merge로 대체
 - **Resolution/What:** _rolling_mad_z_single_sort_kernel 신규 @njit; _rolling_mad_z 3단계 fallback 체인(H2→old kernel→numpy); 7개 TDD 단위테스트 추가
