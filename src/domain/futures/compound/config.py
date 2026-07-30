@@ -46,7 +46,7 @@ class L2GateConfig:
     min_daily_cvar95: float = -0.025
     max_annual_volatility: float = 0.25
     max_cost_drag_ratio: float = 0.50
-    max_capacity_utilisation_p95: float = 0.10
+    max_name_weight_p95: float = 0.10
     min_positive_outer_folds: int = 3
     stressed_cost_multiplier: float = 2.0
     max_spa_pvalue: float = 0.10
@@ -62,7 +62,7 @@ class L2GateConfig:
         assert self.min_daily_cvar95 < 0
         assert self.max_annual_volatility > 0
         assert self.max_cost_drag_ratio > 0
-        assert self.max_capacity_utilisation_p95 > 0
+        assert self.max_name_weight_p95 > 0
         assert self.min_positive_outer_folds >= 1
         assert self.stressed_cost_multiplier >= 1.0
         assert 0 < self.max_spa_pvalue <= 1

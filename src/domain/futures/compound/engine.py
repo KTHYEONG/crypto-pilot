@@ -14,6 +14,7 @@ from src.domain.futures.compound.allocator import (
     compute_dynamic_compounding_path,  # noqa: F401 - legacy test mock compat
     compute_dynamic_compounding_weights,
     derive_mdd_parity_scale,
+    project_terminal_portfolio_caps,
 )
 from src.domain.futures.compound.bar_engine import align_costs_to_decision_grid, build_multi_timeframe_bars
 from src.domain.futures.compound.benchmark import (
@@ -406,6 +407,15 @@ def run_multiscale_compound_engine(
     else:
         final_weights = weights_2d
         beta_1d_eval = None
+
+    final_weights = project_terminal_portfolio_caps(
+        final_weights,
+        per_symbol_cap=config.allocator.per_symbol_cap,
+        net_cap=config.dynamic_compounding.max_net_exposure,
+        max_long_leverage=config.dynamic_compounding.max_long_leverage,
+        max_short_leverage=config.dynamic_compounding.max_short_leverage,
+        gross_cap=config.dynamic_compounding.max_gross_leverage,
+    )
 
     # ── PASS-2: final simulation (hedged + levered) ─────────────────────────
     ledger = simulate_dense_portfolio(
