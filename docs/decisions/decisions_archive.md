@@ -2,6 +2,11 @@
 
 This file holds historical architecture decision records (ADRs) that have been pruned from the active window.
 
+## [2026-07-28] [L1_MEASUREMENT_INTEGRITY_RESTORE] [ADR_20260728_L1_MEASUREMENT_INTEGRITY_RESTORE]
+- **Context/Why:** 전날 복원한 fail-closed 게이트(has_admitted)가 참조하는 집계 통계량 자체가 결함 3건: D-1 계열이 매매신호와 무관(클러스터 등가중 롱온리 바스켓과 비트단위 동일), D-2 540 sleeve가 실제론 고유계열 4개(135배 중복), D-3 pooled OLS SE가 지속성신호에서 41배 과신(D-5 i.i.d 부트스트랩 회귀는 3회차 동일 패턴). 실측 스크립트로 확정
+- **Resolution/What:** l1_sleeves.py: compute_l1_oos_portfolio_returns 신규(OOS만 stitch, 리스크패리티 사이징, 비용차감)로 단일 포트폴리오 시계열 게이트 복원, _cluster_masked_beta를 Driscoll-Kraay HAC SE로 교체. config.py: min_sleeve_posterior_probability 0.52->0.95, hac_lag_cap=120 신규. l1_diagnostics.py 신규: L1AdmissionRecorder(L1_DEBUG=1 게이트). 후속 수정 2건: pw_block 0.0 하드코딩 스텁을 실제 politis_white_block_length 계산값 배선으로 교정, estimate_cluster_sleeve_posteriors에 record_sleeve 호출 배선(기존엔 클래스만 존재하고 프로덕션 미호출로 sleeve별 데이터 전혀 미수집)
+- **Impact:** /check PASS(Mypy strict, 145 tests, Cov 92%, test_config.py 무관 사전결함 1건은 베이스라인 동일재현 확인 후 범위제외). 실전 재실행 결과 여전히 NO_EVIDENCE(admitted_sleeves=15/455, distinct_series=1 확인, ann_lcb90=-78.87%). 신규 확보 sleeve별 DEBUG 데이터(455건)로 momentum_ts family만 유일 admit(15.8%, SE팽창 7.84x)하고 trend_ema는 beta~0 수렴+SE팽창 최대(68x, 느릴수록 악화)인 사멸신호임을 실측 확정 - 다음 L1 신호 개선의 데이터 기반 착수점. docs/results/result.md에 전체 family/speed별 표 기록
+
 ## [2026-07-28] [CAPITAL_DEPLOYMENT_FAILCLOSED_RESTORE] [ADR_20260728_CAPITAL_DEPLOYMENT_FAILCLOSED_RESTORE]
 - **Context/Why:** phase full 실측(20260728_072617)에서 L2 FAIL 전체탈락(CAGR -15.8%, MDD 39.9%, turnover 27.6x) 확인. git-diff로 근본원인 확정: 01a209e1(SOFT_CONVICTION)이 engine.py의 has_admitted 이진 게이트를 제거해 집계 LCB90 부트스트랩 검정과 무관하게 항상 실거래하도록 변경됨. 같은 날 da72a053이 alpha 27->60 확장하며 검증된 basis_gap/xs_reversal 등을 제거하고 미검증 신규 4패밀리로 대체
 - **Resolution/What:** engine.py: has_admitted=False시 weights_2d 강제 0(현금) 이진분기 복원. signal_bank.py: _default_catalog()를 legacy 27레시피로 복원(신규 4패밀리 volatility_squeeze_keltner/funding_carry_reversion/flow_imbalance_taker/open_interest_confirmation 격리, basis_gap/xs_reversal/xs_momentum_slow/smart_money_divergence 복원), 죽은 build_canonical_alpha_catalog() 호출 제거
