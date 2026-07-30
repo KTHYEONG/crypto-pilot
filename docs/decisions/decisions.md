@@ -1,5 +1,10 @@
 # Active Decisions Log (Sliding Window)
 
+## [2026-07-30] [TASK_L1_SIGNAL_STAGE_INTEGRITY] [ADR_20260730_L1_SIGNAL_STAGE_INTEGRITY]
+- **Context/Why:** 직전 세션(l1_signal_stage_redesign)의 최초 admit>0 성공이 1-bar look-ahead(book[t]*ret[t], ret[t]가 book[t]의 close[t]를 이미 포함)로 부풀려진 수치임을 캡처된 프로덕션 패널 재실행 실측으로 확인. 동시에 L3 holdout이 마지막 fold 이후 가중치 미충전으로 구조적 항상-0(비검정), leg 증거가중이 cap-before-normalise로 t>=0.674면 무조건 50/50 붕괴(무효), 단일종목이 봉당 gross 74%까지 집중 가능한 결함 3건을 추가 발견
+- **Resolution/What:** l1_concept_bank.py: compute_lagged_gross_returns(RULE-11, book[t-1]*ret[t] 통일)/cap_per_name_weights(RULE-13, water-filling 0.10캡)/build_concept_registry의 descriptors 실검증(RULE-15, ValueError fail-fast)/nanmean empty-slice 안전화(RULE-16) 신규. l1_leg_admission.py: normalise_leg_weights(RULE-12, 정규화 후 cap)/accumulate_prequential_leg_weights에 holdout carry-forward(RULE-14)/evaluate_portfolio_admission의 동일 look-ahead 제거. config.py: L1LegConfig.max_name_weight=0.10 신규. /check 1차 FAIL(신규 함수 3개 자체 경계검증 누락, 계약 시나리오 6개 이름불일치, 커버리지 갭 2줄, 통합테스트가 flat 합성픽스처에서 공허 통과) 발견수정 후 PASS(Cov 99%). 실전 CLI 재검증(logs/futures/compound/20260730_022430/) 완료, docs/results/result.md 전면 갱신
+- **Impact:** trend_momentum t_alpha 7.19->1.88(3.8배 축소, look-ahead 산물 확인), breakeven 72.1->19.1bps. cash-only 회귀 없음(admitted 2/2 유지, t문턱 부재 때문 - LIMIT-02 정책결정 보류). L3가 holdout 첫 실검정(MDD 1.04e-06 평탄->0.00562 실곡선), reject 사유 2개->1개(low_growth_probability 소멸). L2/L3 최종판정(fail/reject)은 불변 - 병목은 capacity_utilisation_p95=0.179(게이트 0.10), excess_growth_probability=0.287(게이트 0.90). 부수관측: 스펙 사전측정 holdout net_ann -36.75%(leg단독) vs 실배포 MDD 0.56%(리스크오버레이 drawdown브레이커가 실제 억제 확인, 결함아님). concept 2개+max_leg_weight=0.50 조합은 수학적으로 이진(0/0.5)만 가능(LIMIT-07), 연속 차등가중은 concept 3개+ 필요.
+
 ## [2026-07-30] [TASK_L1_SIGNAL_STAGE_REDESIGN] [ADR_20260730_L1_SIGNAL_STAGE_REDESIGN]
 - **Context/Why:** L1이 admitted=0/37로 영구 cash-only(배포 EMA 46h 지연이 8h 반전신호를 구조적으로 놓침, D-1). 사용자 지시로 RSI/MACD/Bollinger 등 30+ 신호 census + 구조 재설계 spec 작성 후 /implement, /check에서 치명적 결함 16건(build_leg_books key mismatch로 전체 파이프라인 영구 0값, _ewm_2d 오용으로 RSI 등 지표 발산, C-1 재발, evidence_weight 로깅 항상 0 등) 발견
 - **Resolution/What:** l1_concept_bank/l1_leg_evaluation/l1_leg_admission 신규 3모듈로 2-concept(trend_momentum 10-formula, vol_regime 3-formula) leg 파이프라인 구현, engine.py P2 전면 재배선(screen_signal_edge 등 구식 경로 폐기), lean_check.py에 assertion 동적 실행기+orphaned-implementation 게이트 자동화+coverage 전체반환+--spec-only 조기검증 모드 추가, implement 스킬에 Phase B/C 훅 배선. 실전 CLI 2회 재실행으로 검증
@@ -69,8 +74,3 @@
 - **Context/Why:** phase full 실측(20260728_072617)에서 L2 FAIL 전체탈락(CAGR -15.8%, MDD 39.9%, turnover 27.6x) 확인. git-diff로 근본원인 확정: 01a209e1(SOFT_CONVICTION)이 engine.py의 has_admitted 이진 게이트를 제거해 집계 LCB90 부트스트랩 검정과 무관하게 항상 실거래하도록 변경됨. 같은 날 da72a053이 alpha 27->60 확장하며 검증된 basis_gap/xs_reversal 등을 제거하고 미검증 신규 4패밀리로 대체
 - **Resolution/What:** engine.py: has_admitted=False시 weights_2d 강제 0(현금) 이진분기 복원. signal_bank.py: _default_catalog()를 legacy 27레시피로 복원(신규 4패밀리 volatility_squeeze_keltner/funding_carry_reversion/flow_imbalance_taker/open_interest_confirmation 격리, basis_gap/xs_reversal/xs_momentum_slow/smart_money_divergence 복원), 죽은 build_canonical_alpha_catalog() 호출 제거
 - **Impact:** 실측 A/B(scratch/verify_alpha_family_ablation.py, 동일 프로덕션 엔진 재사용): baseline(60레시피,fail-open) CAGR -15.8%/MDD39.9% -> legacy27 CAGR +7.4%/MDD11.4%로 반전, 신규4패밀리 단독실행도 MDD41.5%/cost_drag293%로 파괴적임을 확인해 원인 확정. /check PASS(Cov 74%). 수정후 실전 phase full 재실행 결과 NO_EVIDENCE(현금100%, rebalances=0)로 안전 상태 복원 확인 - 집계게이트 통과할 알파는 아직 없으나 파괴적 거래는 완전 차단됨
-
-## [2026-07-28] [SIGNAL_PANEL_MAD_KERNEL_H2] [ADR_20260728_SIGNAL_PANEL_MAD_KERNEL_H2]
-- **Context/Why:** signal_panel 206s E2E 병목의 95.7%를 점유하는 MAD-z kernel의 2회 sort를 1회 sort+3-way merge로 대체
-- **Resolution/What:** _rolling_mad_z_single_sort_kernel 신규 @njit; _rolling_mad_z 3단계 fallback 체인(H2→old kernel→numpy); 7개 TDD 단위테스트 추가
-- **Impact:** 4h kernel 5.46s→3.54s(1.54×), 1h kernel 23.61s→15.28s(1.55×). Bit-exact 유지(diff=0.0). Panel 추정 206s→~156s
