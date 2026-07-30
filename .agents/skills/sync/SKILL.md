@@ -23,9 +23,17 @@ uv run python scripts/sync_task.py --task TASK_ID --title "<Title>" --why "<Cont
 
 ## Output Format
 
-Do NOT repeat logs or document text in response. Return ONLY this 2-line status summary:
+Do NOT repeat logs or document text in response. Return ONLY the structured card below:
 
-🔄 `[SYNC COMPLETE] Task: <TASK_ID> - <Title>`
-`ADR: <Logged> | JSON Index/AntiPattern: <Updated> | Specs Cleared: <Count/All> | Scratch: <Cleared>`
+### 📌 [SYNC] <Task / ADR Title>
+
+**1. Overview**
+- **Objective**: Documentation synchronization, ADR logging, and cleanup
+- **Status**: <COMPLETE>
+
+**2. Sync Details**
+- **ADR Logged**: <ADR_ID | None>
+- **Indexes Updated**: JSON Index / AntiPattern Registry
+- **Cleanups**: Specs cleared (<Count>), Scratch directory cleaned
 
 
