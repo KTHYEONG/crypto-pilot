@@ -48,24 +48,44 @@ Goal: each new function produces correct output for its primary algorithm.
      - **Logic bug** → fix source, counts as 1 self-healing attempt.
      - **Test data / fixture problem** → fix test data only, does NOT count toward self-healing budget.
      - **Environment / non‑deterministic** (floating‑point tolerance, numpy version, import caching) → loosen tolerance or skip that check, does NOT count.
+3b. If `[feature]_contract.json` exists, run
+    `uv run python scripts/lean_check.py --spec-only --spec docs/specs/[feature]_contract.json`
+    (seconds, no ruff/mypy/pytest/coverage). This actually imports every `contracts[]` function this
+    phase touched and calls it with each assertion's literal `input`, comparing the real return
+    value/exception against `output`/`exception` — the same class of bug `/check` would eventually
+    catch, caught here without writing a throwaway `python -c` repro script. A FAIL here is a logic
+    bug — classify and fix per the rule above, same self-healing budget. A skip (no diagnostic for
+    that assertion) means the assertion isn't machine-executable (fixture/object input or descriptive
+    output) — that's expected for many entries and is not itself a signal of anything wrong.
 4. Run `uv run ruff check [modified_files]` — fix any errors.
 
 #### Phase C — Wiring & Integration
 Goal: the new code is called by existing pipeline code, and existing tests for caller modules still pass.
 
 1. Wire into caller modules per the spec's `Integration & Connection Plan`.
-2. **Orphaned-implementation self-check (do this before running any test):** for every new function/class the spec's `contracts` list names, run
-   `grep -rn "\bName\b" src/ | grep -v "/tests/\|def Name"` and confirm at least one hit outside its own definition and outside `tests/`. A function that only appears in its own `def` line and in a test file is not wired — go back and call it from the anchor the spec's `wiring[].invocation_symbol` describes. This is the highest-cost defect to leave for `/check` to find (it means the entire behavioral change did nothing in production), so catch it here, not later.
-   - If this rewrite retires an old branch/cascade, grep the old branch's config fields too (`\bold_field_name\b` across `src/`, excluding its own dataclass line) — a field with zero remaining readers must be deleted in this same phase, along with any test fixtures that only exist to pass it in.
+2. **Orphaned-implementation self-check (do this before running any test):** run
+   `uv run python scripts/lean_check.py --spec-only --spec docs/specs/[feature]_contract.json`.
+   This automatically greps `src/` (excluding `tests/` and the symbol's own `def`/`class` line) for
+   every `contracts[].name` and FAILs if none has a production caller — a function that only appears
+   in its own definition and in a test file is not wired. Go back and call it from the anchor the
+   spec's `wiring[].invocation_symbol` describes. This is the highest-cost defect to leave for
+   `/check` to find (it means the entire behavioral change did nothing in production), so catch it
+   here, not later — do not skip this step because Phase B's tests were green; a passing unit test on
+   an uncalled function proves nothing about production behavior.
+   - If this rewrite retires an old branch/cascade, grep the old branch's config fields too (`\bold_field_name\b` across `src/`, excluding its own dataclass line) — a field with zero remaining readers must be deleted in this same phase, along with any test fixtures that only exist to pass it in. (The tool does not infer "this branch was retired" — that judgment stays manual.)
 3. Run `uv run pytest -k [caller_module] --no-header -q` — existing caller tests MUST pass.
 4. If caller uses `mocker.Mock(spec=...)` for the new contract, ensure the mock includes all new default fields.
 5. Add **1 test per `scenarios[]` entry marked `"scope": "integration"`** in the spec's contract, written in the exact `target_test_file` with the exact `name` given — not an ad-hoc new file. This is the same literal-naming rule from step 1 and Phase B, restated here because integration scenarios are the ones most often deferred to this phase and forgotten. `/check`'s spec-compliance phase matches every scenario's name literally regardless of scope; a renamed function in a different file reads as a missing test even when it passes.
+6. Re-run `--spec-only` once more after step 5 — new integration tests sometimes reveal that a scenario name drifted during writing. Cheaper to catch here than at the full `/check` pass.
 
 ### 3. Coding Conventions
 
 - **No static dummies**: Every function body must contain real business logic. `return {}`, `return True`, `return None` stubs are forbidden unless the spec explicitly requires that value for an empty/error case.
-- **Strict value assertions**: Test assertions must target exact numerical values, exception messages, or shape contracts. `assert result is not None` alone is prohibited.
-- **No conditional escape hatches**: Never write `assert real_condition or fallback_condition_that_is_almost_always_true` (e.g. `... or total == 0`, `... or guard is not None`) or a bare `assert x >= 0` on a value that can't be negative. Before locking in an assertion for a regression/gate-reachability test, run the fixture standalone (`uv run python -c "..."`) and print the value the assertion depends on — assert the value you actually observed, not a shape that would also pass if the code path never ran.
+- **Content-over-Shape Rule**: Every test that involves a computation MUST assert at least one concrete numerical or structural property of the output on a deterministic fixture. Shape-only assertions (e.g. `isinstance`, `.shape`, `is not None`) are **prohibited as the sole check** for any Scenario in the TDD matrix. The spec's assert column names the concrete property — use it. If the spec is vague on the assertion value, **ask for clarification** rather than falling back to shape-only (this counts toward the self-healing budget if it later produces a false-green result). Exceptions:
+  - Phase A (Contract) tests may use shape-only assertions since the goal is importability, not behavioral correctness.
+  - Error-path tests where no valid output exists may assert only the exception type and message.
+  - Rationale: a test that passes without ever exercising the computation path it claims to guard is worse than no test — it creates a false sense of coverage while masking the very bugs this pipeline exists to catch.
+- **No conditional escape hatches**: Never write `assert real_condition or fallback_condition_that_is_almost_always_true` (e.g. `... or total == 0`, `... or guard is not None`) or a bare `assert x >= 0` on a value that can't be negative. Before locking in an assertion for a regression/gate-reachability test, run the fixture standalone (`uv run python -c "..."`) and print the value the assertion depends on — assert the value you actually observed, not a shape that would also pass if the code path never ran. If the assertion is against a contract entry with literal `input`/`output`, `--spec-only` (step 3b above) already executed it for you — reserve the manual repro script for fixtures/gates too complex for a contract assertion to express (multi-branch admission logic, deterministic time-series constructions), where you still have to work out by hand which branch a given fixture exercises.
 - **No unsolicited refactoring**: Do not rename, restructure, or extract shared utilities unless the spec explicitly calls for it.
 - **Type discipline**: `NDArray` annotation dtype MUST match the actual array dtype passed at runtime.
 
@@ -74,17 +94,19 @@ Goal: the new code is called by existing pipeline code, and existing tests for c
 - Run `uv run ruff check --fix [modified_files]` before running pytest.
 - Run `uv run pytest -k [target_name] --no-header -q`.
 - Run `uv run mypy --strict --no-error-summary [modified_files]` in **advisory mode** before Phase C close. Treat errors as warnings; fix only those that indicate a real contract violation (wrong argument count, missing attribute). Cosmetic type issues (e.g., `Any` vs `float`) are low-priority and can be deferred.
+- If `[feature]_contract.json` exists, run `uv run python scripts/lean_check.py --spec-only --spec docs/specs/[feature]_contract.json` one last time as a pre-flight for `/check`'s spec-compliance phase — it is the exact same check `/check` runs first, so a FAIL here means `/check` will FAIL on the same phase. Getting to green here before ending the session turns the eventual `/check` call into a confirmation instead of a discovery pass.
 - Remove `print()` / logging debug statements before final output.
 
 ### 5. Self-Healing Budget
 
-- If local tests or linting fail after all three phases, the model is allowed a maximum of **3 consecutive auto-correction attempts** to fix the errors.
+- If local tests, linting, or `--spec-only` fail after all three phases, the model is allowed a maximum of **3 consecutive auto-correction attempts** to fix the errors.
 - **Exception — classified non‑logic failures do not count**: failures whose root cause is identified as test data error or environment/non‑deterministic mismatch (floating-point tolerance, import caching, numpy version differences) are excluded from the 3-attempt budget. In such cases, fix the fixture or loosen the tolerance and continue.
+- A `--spec-only` orphaned-implementation FAIL always counts as a logic bug (the wiring step was skipped or missed its anchor), never as environment/fixture noise.
 - If it still fails after 3 counted attempts, **STOP execution immediately** and report the error logs to the user for human triage. Include the failure classification in the report.
 
 ## Output Format
 ```md
 🛠️ **[IMPLEMENT COMPLETE]** `[Blueprint Name]`
 - **Modified**: `[src/...]`, `[tests/...]`
-- **Status**: Pytest Green ✅ | Cov [value]% | Ruff Fixed ✅
+- **Status**: Pytest Green ✅ | Cov [value]% | Ruff Fixed ✅ | Spec-Only Pre-flight ✅
 ```
