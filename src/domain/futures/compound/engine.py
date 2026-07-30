@@ -45,6 +45,7 @@ from src.domain.futures.compound.contracts import (
     L2GateVerdict,
     L3ValidationResult,
     MarketFeatureCube,
+    PortfolioAdmissionEvidence,
     QuarterlyBarBoundaries,
     RawSignalPanel,
     SealedHoldoutManifest,
@@ -55,8 +56,12 @@ from src.domain.futures.compound.holdout_store import HoldoutReuseError, SealedH
 from src.domain.futures.compound.l1_concept_bank import build_concept_registry, build_leg_books
 from src.domain.futures.compound.l1_leg_admission import (  # noqa: F811
     accumulate_prequential_leg_weights,
+    accumulate_prequential_shadow_weights,
+    classify_l1_bottleneck,
+    classify_leg_evidence,
     combine_leg_books,
-    evaluate_portfolio_admission,
+    evaluate_leg_alpha_on_slices,
+    evaluate_portfolio_evidence,
 )
 from src.domain.futures.compound.l1_leg_evaluation import compute_equal_weight_market_returns
 
@@ -293,20 +298,77 @@ def run_multiscale_compound_engine(
         # pre-overlay combined book -- scoring a different object than what
         # is actually deployed is the historical C-1 defect class.
         p2_admission_end = boundaries.l2_start if quarter_window is not None else 10**9
-        admitted, p_reasons, net_ann = evaluate_portfolio_admission(
+        capital_evidence = evaluate_portfolio_evidence(
             weights_2d, asset_ret_4h, folds, config.ladder.cost_bps, config.l1_leg,
             admission_end_exclusive=p2_admission_end,
         )
+        admitted = capital_evidence.admitted
+        p_reasons = capital_evidence.reasons
+        net_ann = capital_evidence.net_alpha_ann
         handoff_result = None
         forecast = None
         _logger.info(
             "P2 complete: leg_pipeline admitted=%s reasons=%s net_ann=%.4f",
             admitted, p_reasons, net_ann,
         )
+
+        shadow_leg_weights_2d = accumulate_prequential_shadow_weights(
+            legs, market_1d, folds, config.ladder.cost_bps, config.l1_leg,
+        )
+        shadow_combined_2d = combine_leg_books(legs, shadow_leg_weights_2d)
+        shadow_weights_2d = apply_portfolio_risk_overlay(
+            shadow_combined_2d, close_4h, config.ladder.cost_bps, config.dynamic_compounding,
+        )
+
+        shadow_evidence = evaluate_portfolio_evidence(
+            shadow_weights_2d, asset_ret_4h, folds, config.ladder.cost_bps, config.l1_leg,
+            admission_end_exclusive=p2_admission_end,
+        )
+
+        economic_leg_count = 0
+        capital_leg_count = 0
+        for k_idx in range(len(legs)):
+            final_ev = evaluate_leg_alpha_on_slices(
+                legs[k_idx], market_1d,
+                tuple(slice(f.oos_start, f.oos_end_exclusive) for f in folds),
+                config.ladder.cost_bps, config.l1_leg,
+                n_tested_hypotheses=len(legs),
+            )
+            decision = classify_leg_evidence(
+                final_ev, config.ladder.cost_bps, config.l1_leg,
+                n_tested_hypotheses=len(legs),
+            )
+            if decision.economic_eligible:
+                economic_leg_count += 1
+            if decision.capital_eligible:
+                capital_leg_count += 1
+        l1_attribution = classify_l1_bottleneck(
+            capital_evidence, shadow_evidence,
+            economic_leg_count, capital_leg_count,
+            shadow_available=True,
+        )
+        _logger.info(
+            "L1 attribution: bottleneck=%s economic=%d capital=%d",
+            l1_attribution.bottleneck_code, economic_leg_count, capital_leg_count,
+        )
     except Exception as exc:
         _logger.warning("P2 pipeline failed, using cash-only fallback", exc_info=True)
         p2_error_reason = f"p2_pipeline_error:{type(exc).__name__}"
         forecast = _build_cash_only_forecast(bars_4h.timestamps_ns, bars_4h.symbols)
+        l1_attribution = classify_l1_bottleneck(
+            PortfolioAdmissionEvidence(
+                admitted=False, reasons=(p2_error_reason,),
+                net_alpha_ann=0.0, stressed_net_alpha_ann=0.0,
+                posterior_positive=0.0, positive_folds=0, n_folds=0, n_traded_bars=0,
+            ),
+            PortfolioAdmissionEvidence(
+                admitted=False, reasons=(p2_error_reason,),
+                net_alpha_ann=0.0, stressed_net_alpha_ann=0.0,
+                posterior_positive=0.0, positive_folds=0, n_folds=0, n_traded_bars=0,
+            ),
+            economic_candidate_count=0, capital_candidate_count=0,
+            shadow_available=False,
+        )
 
     _logger.info("P3: portfolio risk overlay and dense simulation")
     has_admitted = admitted if p2_error_reason is None else False
@@ -725,6 +787,7 @@ def run_multiscale_compound_engine(
         l2=l2_eval,
         l3=l3_result,
         deployment_candidate=deployment_candidate,
+        l1_attribution=l1_attribution,
     )
 
 
