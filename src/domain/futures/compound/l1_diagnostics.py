@@ -138,25 +138,32 @@ class L1AdmissionRecorder:
         positive_folds: int, n_folds: int,
         posterior_positive: float, evidence_weight: float,
         reasons: tuple[str, ...],
+        net_alpha_ann: float = 0.0, net_alpha_sharpe: float = 0.0,
+        t_net_alpha: float = 0.0, critical_t: float = 0.0,
+        n_tested_hypotheses: int = 1,
     ) -> None:
         if not self._enabled:
             return
         _LOGGER.info(
-            "[LEG] concept_id=%s mode=%s alpha_ann=%.4f beta=%.3f "
-            "aSR=%.3f t_alpha=%.3f be_bps=%.1f turnover=%.6f "
-            "pos_folds=%d/%d posterior=%.3f weight=%.4f reasons=%s",
-            concept_id, mode, alpha_ann, beta_market,
-            alpha_sharpe, t_alpha, breakeven_cost_bps, mean_turnover_per_bar,
-            positive_folds, n_folds, posterior_positive, evidence_weight, reasons,
+            "[LEG] concept_id=%s mode=%s alpha_ann=%.4f net_alpha_ann=%.4f "
+            "t_alpha=%.3f t_net_alpha=%.3f critical_t=%.3f K=%d "
+            "be_bps=%.1f pos_folds=%d/%d weight=%.4f reasons=%s",
+            concept_id, mode, alpha_ann, net_alpha_ann,
+            t_alpha, t_net_alpha, critical_t, n_tested_hypotheses,
+            breakeven_cost_bps, positive_folds, n_folds, evidence_weight, reasons,
         )
         self._append_jsonl({
             "tag": "LEG",
             "concept_id": concept_id,
             "mode": mode,
             "alpha_ann": round(alpha_ann, 4),
-            "beta_market": round(beta_market, 3),
+            "net_alpha_ann": round(net_alpha_ann, 4),
             "alpha_sharpe": round(alpha_sharpe, 3),
+            "net_alpha_sharpe": round(net_alpha_sharpe, 3),
             "t_alpha": round(t_alpha, 3),
+            "t_net_alpha": round(t_net_alpha, 3),
+            "critical_t": round(critical_t, 3),
+            "n_tested_hypotheses": n_tested_hypotheses,
             "breakeven_cost_bps": round(breakeven_cost_bps, 1),
             "mean_turnover_per_bar": round(mean_turnover_per_bar, 6),
             "positive_folds": positive_folds,
