@@ -22,7 +22,7 @@ _DEFAULT_REGISTRY: tuple[SignalConceptSpec, ...] = (
         declared_orientation=1,
         member_signal_ids=(
             "trend_ema", "momentum_ts", "breakout_donchian",
-            "rsi", "cci", "mfi", "aroon_oscillator",
+            "rsi", "mfi", "aroon_oscillator",
             "adx_directional", "obv_trend", "keltner_breakout",
         ),
     ),
