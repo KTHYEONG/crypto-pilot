@@ -14,6 +14,7 @@ from src.domain.futures.compound.config import (
     FactorRiskConfig,
     L1EstimatorConfig,
     L1Config,
+    L1LegConfig,
     L2GateConfig,
     L3ValidationConfig,
     LadderConfig,
@@ -228,3 +229,22 @@ class TestL2GateConfig:
         assert not hasattr(cfg, "min_bootstrap_sharpe_probability")
         assert cfg.min_oos_days == 340
         assert cfg.l1_prior_effective_days_cap == 90
+
+
+class TestL1LegConfig:
+    def test_default_warmup_is_4_and_fwer_is_0_10(self) -> None:
+        cfg = L1LegConfig()
+        assert cfg.warmup_folds == 4
+        assert cfg.familywise_error_rate == 0.10
+
+    def test_warmup_below_min_raises(self) -> None:
+        with pytest.raises(AssertionError):
+            L1LegConfig(warmup_folds=3)
+
+    def test_invalid_fwer_raises(self) -> None:
+        with pytest.raises(AssertionError):
+            L1LegConfig(familywise_error_rate=0.0)
+        with pytest.raises(AssertionError):
+            L1LegConfig(familywise_error_rate=1.0)
+        with pytest.raises(AssertionError):
+            L1LegConfig(familywise_error_rate=-0.1)
