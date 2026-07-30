@@ -31,20 +31,13 @@ uv run python scripts/lean_check.py --files <modified .py files> --spec <contrac
 
 ## Output Format
 
-Do NOT dump raw error logs or test suites in chat. Return ONLY the structured card below:
+Do NOT dump raw error logs or test suites in chat. Return ONLY this compact card:
 
 ### 📌 [CHECK] <Audit Target / Task Title>
 
-**1. Overview**
-- **Objective**: Independent contract, typing, coverage, and regression audit
 - **Status**: <PASS | FAIL>
-
-**2. Audit Metrics**
 - **Checks**: Spec/Wiring: <PASS/FAIL> | Mypy: <PASS/FAIL> | Regression: <PASS/FAIL>
-- **Coverage**: Total: <FinalCov%> | Modified Files: <FileCoverageTable>
-
-**3. Action Items** (Only on FAIL)
-- **Root Cause**: <1-line root cause of failure>
-- **Fix Plan**: <1-line focused remedy>
+- **Coverage**: Total: <FinalCov%> | Modified Files: <FileCovSummary>
+- **Issue**: <1-line root cause and fix plan (Only on FAIL)>
 
 
