@@ -11,6 +11,16 @@ from src.domain.futures.compound.l1_concept_bank import (
     build_leg_books,
     build_tranche_book,
     build_tranche_target,
+    cap_per_name_weights,
+    compute_lagged_gross_returns,
+)
+
+
+_DEFAULT_REGISTRY_FAMILIES: tuple[str, ...] = (
+    "trend_ema", "momentum_ts", "breakout_donchian",
+    "rsi", "cci", "mfi", "aroon_oscillator",
+    "adx_directional", "obv_trend", "keltner_breakout",
+    "volume_zscore", "bollinger_bandwidth",
 )
 
 
@@ -119,7 +129,7 @@ class TestBuildLegBooks:
         silently zeros every leg forever -- this must be caught by content,
         not shape, assertions."""
         T, S = 60, 8
-        panel = _make_panel(T, S, families=("rsi", "trend_ema", "volume_zscore"))
+        panel = _make_panel(T, S, families=_DEFAULT_REGISTRY_FAMILIES)
         eligible = np.ones((T, S), dtype=np.bool_)
         close = _make_close(T, S)
         cfg = L1LegConfig(min_cross_section=2)
@@ -164,7 +174,8 @@ class TestBuildLegBooks:
 class TestBuildConceptRegistry:
     def test_build_concept_registry_matches_frozen_spec(self) -> None:
         cfg = L1LegConfig()
-        registry = build_concept_registry((), cfg)
+        descriptors = _make_panel(families=_DEFAULT_REGISTRY_FAMILIES).descriptors
+        registry = build_concept_registry(descriptors, cfg)
         assert len(registry) == 2
         ids = tuple(s.concept_id for s in registry)
         assert "trend_momentum" in ids
@@ -175,8 +186,14 @@ class TestBuildConceptRegistry:
         assert "rsi" in tm.member_signal_ids
         vr = next(s for s in registry if s.concept_id == "vol_regime")
         assert vr.mode == "ts"
-        assert len(vr.member_signal_ids) == 3
+        assert len(vr.member_signal_ids) == 2
         assert "volume_zscore" in vr.member_signal_ids
+
+    def test_build_concept_registry_raises_on_missing_member_family(self) -> None:
+        cfg = L1LegConfig()
+        descriptors = _make_panel(families=("rsi", "trend_ema")).descriptors
+        with pytest.raises(ValueError, match="momentum_ts"):
+            build_concept_registry(descriptors, cfg)
 
 
 class TestL1LegPanel:
@@ -356,3 +373,102 @@ class TestSignalConceptSpecValidation:
         kwargs = {**self._valid_kwargs(), field: bad_value}
         with pytest.raises(ValueError, match=match):
             SignalConceptSpec(**kwargs)
+
+
+class TestComputeLaggedGrossReturns:
+    def test_compute_lagged_gross_returns_rejects_shape_mismatch(self) -> None:
+        book = np.array([[1.0, 1.0]], dtype=np.float64)
+        ret = np.array([[0.1, 0.1], [0.2, 0.2]], dtype=np.float64)
+        with pytest.raises(ValueError, match="shape"):
+            compute_lagged_gross_returns(book, ret)
+
+    def test_compute_lagged_gross_returns_uses_previous_bar_weights(self) -> None:
+        book = np.array([[1.0, 0.0], [0.0, 1.0], [1.0, 0.0]], dtype=np.float64)
+        ret = np.array([[0.0, 0.0], [0.1, 0.2], [0.3, 0.4]], dtype=np.float64)
+        g = compute_lagged_gross_returns(book, ret)
+        assert g[0] == 0.0
+        assert abs(g[1] - 0.1) < 1e-12
+        assert abs(g[2] - 0.4) < 1e-12
+        assert g.shape == (3,)
+
+    def test_lagged_gross_returns_matches_dense_simulator_convention(self) -> None:
+        n_t, n_s = 20, 5
+        rng = np.random.default_rng(42)
+        book = rng.standard_normal((n_t, n_s)).astype(np.float64)
+        book = book / np.maximum(np.sum(np.abs(book), axis=1, keepdims=True), 1e-12)
+        ret = rng.standard_normal((n_t, n_s)).astype(np.float64) * 0.01
+        lagged = compute_lagged_gross_returns(book, ret)
+        sim = np.zeros(n_t, dtype=np.float64)
+        for t in range(1, n_t):
+            sim[t] = float(np.dot(book[t - 1], ret[t]))
+        assert np.allclose(lagged, sim)
+        same_bar = np.zeros(n_t, dtype=np.float64)
+        for t in range(1, n_t):
+            same_bar[t] = float(np.dot(book[t], ret[t]))
+        assert not np.allclose(lagged, same_bar)
+
+    def test_lagged_gross_returns_first_is_zero(self) -> None:
+        book = np.ones((5, 3), dtype=np.float64)
+        ret = np.ones((5, 3), dtype=np.float64)
+        g = compute_lagged_gross_returns(book, ret)
+        assert g[0] == 0.0
+
+
+class TestCapPerNameWeights:
+    def test_cap_per_name_weights_rejects_invalid_max_name_weight(self) -> None:
+        book = np.array([[0.8, 0.2]], dtype=np.float64)
+        with pytest.raises(ValueError, match="max_name_weight"):
+            cap_per_name_weights(book, 0.0)
+        with pytest.raises(ValueError, match="max_name_weight"):
+            cap_per_name_weights(book, 1.5)
+
+    def test_cap_per_name_weights_redistributes_and_preserves_gross(self) -> None:
+        book = np.array([[0.8, 0.1, 0.1]], dtype=np.float64)
+        capped = cap_per_name_weights(book, 0.5)
+        assert abs(np.sum(np.abs(capped[0])) - 1.0) < 1e-10
+        assert float(np.max(np.abs(capped[0]))) == 0.5
+        assert np.allclose(capped[0], [0.5, 0.25, 0.25])
+
+    def test_cap_per_name_weights_is_noop_below_cap(self) -> None:
+        book = np.array([[0.5, 0.3, 0.2]], dtype=np.float64)
+        capped = cap_per_name_weights(book, 0.5)
+        assert np.allclose(capped, book)
+
+    def test_cap_preserves_gross_multi_row(self) -> None:
+        book = np.array([[0.8, 0.1, 0.1], [0.6, 0.2, 0.2]], dtype=np.float64)
+        capped = cap_per_name_weights(book, 0.5)
+        for t in range(2):
+            assert abs(float(np.sum(np.abs(capped[t]))) - 1.0) < 1e-10
+
+    def test_cap_per_name_weights_zero_row(self) -> None:
+        book = np.zeros((2, 3), dtype=np.float64)
+        capped = cap_per_name_weights(book, 0.5)
+        assert np.allclose(capped, 0.0)
+
+
+class TestBuildLegBooksRule16:
+    def test_build_leg_books_emits_no_empty_slice_warning(self) -> None:
+        import warnings
+        T, S = 10, 5
+        panel = _make_panel(T, S, families=("rsi",))
+        eligible = np.ones((T, S), dtype=np.bool_)
+        close = _make_close(T, S)
+        spec = SignalConceptSpec(
+            concept_id="c", mode="xs", horizon_band_bars=(6,),
+            declared_orientation=1, member_signal_ids=("rsi",),
+        )
+        panel = RawSignalPanel(
+            decision_timestamps_ns=panel.decision_timestamps_ns,
+            symbols=panel.symbols,
+            descriptors=panel.descriptors,
+            z_3d=np.full((T, S, 1), np.nan, dtype=np.float32),
+            valid_3d=panel.valid_3d,
+            sigma_2d=panel.sigma_2d,
+        )
+        cfg = L1LegConfig(min_cross_section=2)
+        with warnings.catch_warnings(record=True) as w:
+            warnings.simplefilter("always")
+            legs = build_leg_books(panel, eligible, close, (spec,), cfg)
+        runtime_warnings = [x for x in w if issubclass(x.category, RuntimeWarning)]
+        assert len(runtime_warnings) == 0, f"got RuntimeWarning: {runtime_warnings}"
+        assert np.all(np.isfinite(legs[0].book_2d))
