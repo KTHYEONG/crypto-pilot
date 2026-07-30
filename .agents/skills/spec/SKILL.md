@@ -54,14 +54,23 @@ Every contract item MUST declare:
 6. TDD Scenario Matrix & Minimal Fixtures
 7. Implementation Manifest
 
-## Output
+## Output Format
 
-Do NOT repeat the full blueprint in the response. Return ONLY this 4-line summary card:
+Do NOT repeat full blueprint, code, or logs in the response. Offload long details into artifact files and return ONLY the structured card below:
 
-📐 `[SPEC CREATED] <Feature/Blueprint Name> (Tier <1/2/3>)`
-• `Goal`: `<1-line core objective>`
-• `Empirical Evidence`: `<1-line verified log/metric from scratch execution>`
-• `Artifacts`: [spec.md](file:///docs/specs/<feature>.md) | [contract.json](file:///docs/specs/<feature>_contract.json)
-• `Next`: Proceed to `/implement`
+### 📌 [SPEC] <Feature / Task Title>
 
+**1. Overview**
+- **Objective**: <1-line core goal>
+- **Status**: <1-line status/result>
 
+**2. Key Findings & Empirical Evidence**
+- **Phenomenon**: <1-line observed behavior or numerical discrepancy>
+- **Root Cause**: <1-line mechanism/logic root cause>
+  > <Optional 1-line formula, condition, or data flow>
+
+**3. Action Items**
+- **<Target 1>**: <Short description of planned change>
+- **<Target 2>**: <Short description of planned change>
+
+📄 **Artifacts**: [<spec.md>](file:///docs/specs/<feature>.md) | [<contract.json>](file:///docs/specs/<feature>_contract.json)
