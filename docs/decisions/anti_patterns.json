@@ -1,6 +1,13 @@
 [
   {
     "domain": "signal",
+    "failed_hypothesis": "terminal projection이 excess_growth_probability를 0.3097->0.3290으로 개선해 배포에 근접시켰다는 판정",
+    "failure_reason": "LCB90>0은 정의상 P(growth>0)>=0.90을 함의하므로 (+0.0919, 0.3290) 쌍은 단일 분포에서 불가능 -- 실체는 전액-cash L1 prior window를 오래된 구간부터 슬라이스해 확률 0으로 채점 후 실증거의 2배 가중치로 블렌딩한 결함이었음",
+    "falsified_date": "2026-07-30",
+    "source_adr": "ADR_20260730_L1_SIZING_AND_L2_GROWTH_EVIDENCE_INTEGRITY"
+  },
+  {
+    "domain": "signal",
     "failed_hypothesis": "reversal_st / xs_reversal 8종 신호 단독 배포",
     "failure_reason": "gross IC는 유의(t up to +8.70)하나, 회계 수정 후 turnover 대량 발생으로 net-of-cost 수익률이 모두 음수(-3.9%~-14.5%)로 탈락됨",
     "falsified_date": "2026-07-29",
