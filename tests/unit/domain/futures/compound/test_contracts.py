@@ -12,6 +12,7 @@ from src.domain.futures.compound.contracts import (
     ExitPolicyKind,
     ExitPolicySpec,
     L1SleevePosterior,
+    PortfolioAdmissionEvidence,
 )
 
 
@@ -80,3 +81,14 @@ def test_l1_sleeve_posterior_rejects_invalid_range() -> None:
         L1SleevePosterior("s", "sig", "trend", 0, 0, np.zeros(2, dtype=bool), "h", policy, 0.0, 0.0, 1.0, 0.5, 1.0, (), 0, False, ())
     with pytest.raises(ValueError, match="member_mask_1d must be 1-D"):
         L1SleevePosterior("s", "sig", "trend", 0, 0, np.ones((1, 2), dtype=bool), "h", policy, 0.0, 0.0, 1.0, 0.5, 1.0, (), 0, False, ())
+
+
+def test_portfolio_admission_evidence_handoff_scale_bounds() -> None:
+    ev = PortfolioAdmissionEvidence(
+        admitted=False, reasons=("posterior_0.793_below_0.9",),
+        net_alpha_ann=0.1229, stressed_net_alpha_ann=0.0322,
+        posterior_positive=0.793, positive_folds=4, n_folds=7,
+        n_traded_bars=1260, handoff_scale=0.7325,
+    )
+    assert ev.handoff_scale > 0.0
+    assert ev.handoff_scale < 1.0

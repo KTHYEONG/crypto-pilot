@@ -501,9 +501,9 @@ class LegScreenDecision:
     n_tested_hypotheses: int
 
     def __post_init__(self) -> None:
-        if self.capital_eligible != (self.economic_eligible and self.familywise_supported):
+        if self.capital_eligible != self.economic_eligible:
             raise ValueError(
-                f"capital_eligible must equal economic_eligible and familywise_supported, "
+                f"capital_eligible must equal economic_eligible (familywise is diagnostic only), "
                 f"got economic={self.economic_eligible} familywise={self.familywise_supported} "
                 f"capital={self.capital_eligible}"
             )
@@ -523,6 +523,7 @@ class PortfolioAdmissionEvidence:
     positive_folds: int
     n_folds: int
     n_traded_bars: int
+    handoff_scale: float = 0.0
 
     def __post_init__(self) -> None:
         if self.admitted and self.reasons:
@@ -537,6 +538,10 @@ class PortfolioAdmissionEvidence:
             raise ValueError(f"positive_folds {self.positive_folds} must be in [0, {self.n_folds}]")
         if self.n_traded_bars < 0:
             raise ValueError(f"n_traded_bars must be >= 0, got {self.n_traded_bars}")
+        if not np.isfinite(self.handoff_scale) or not (0.0 <= self.handoff_scale <= 1.0):
+            raise ValueError(f"handoff_scale must be in [0, 1], got {self.handoff_scale}")
+        if self.admitted and self.handoff_scale != 1.0:
+            raise ValueError(f"admitted implies handoff_scale == 1.0, got {self.handoff_scale}")
 
 
 @dataclass(slots=True, frozen=True)
@@ -550,8 +555,9 @@ class L1AttributionReport:
     production_weights_unchanged: bool
 
     def __post_init__(self) -> None:
-        valid_codes = ("deployable", "familywise_power_limited", "signal_economics_absent",
-                       "signal_generalization_failed", "diagnostic_unavailable")
+        valid_codes = ("deployable", "partial_evidence_sized", "familywise_power_limited",
+                       "signal_economics_absent", "signal_generalization_failed",
+                       "diagnostic_unavailable")
         if self.bottleneck_code not in valid_codes:
             raise ValueError(f"bottleneck_code must be one of {valid_codes}, got {self.bottleneck_code}")
         if self.economic_candidate_count < 0:
