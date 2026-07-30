@@ -122,3 +122,36 @@ cash-only로 종료됐다. 따라서 현재 병목은 signal 생성량보다
 
 - [latest result.json](../../logs/futures/compound/20260730_113351/result.json)
 - [latest target weights](../../logs/futures/compound/20260730_113351/target_weights.npy)
+
+## 7. 2026-07-30 최신 구현 재실행 — L1 attribution
+
+최신 `L1 Signal Deficit Attribution & Shadow Incubation` 구현을 2026-07-30 기준으로
+`full/local` replay했다.
+
+| 항목 | 결과 |
+|---|---:|
+| artifact | `20260730_122624` |
+| 입력 | 5,442 bars × 51 symbols |
+| L1 bottleneck | `signal_generalization_failed` |
+| economic / capital candidates | 2 / 0 |
+| L2 / L3 | `no_evidence` / `reject` |
+| CAGR / Sharpe | 0.00% / 0.000 |
+| active days / rebalances | 0 / 0 |
+| target weights | 전부 0 (cash-only) |
+
+신호가 완전히 부족한 것은 아니다. `bollinger_bandwidth`(net alpha +91.64%, posterior
+0.982), `volume_zscore`(+41.78%, 0.878), `keltner_breakout`(+12.86%, 0.685) 등
+양의 net alpha leg가 확인됐다. 그러나 production admission은 posterior 0.000,
+positive folds 0/3, stressed net alpha 0.0000 조건으로 실패했다. 동일 신호의
+prequential shadow도 net alpha -0.83%, stressed -2.16%, posterior 0.405,
+positive folds 1/3으로 자본화에 실패했다.
+
+결론적으로 현 병목은 signal 생성량보다 signal의 시간적 일반화·비용 후 안정성 및
+`signal → evidence → admission → sizing` 평가 경로다. 데이터 기간 축소는 없었고,
+이전 실행과 동일한 5,442 × 51 입력을 사용했다.
+
+### 최신 artifact
+
+- [result.json](../../logs/futures/compound/20260730_122624/result.json)
+- [manifest.json](../../logs/futures/compound/20260730_122624/manifest.json)
+- [target weights](../../logs/futures/compound/20260730_122624/target_weights.npy)
