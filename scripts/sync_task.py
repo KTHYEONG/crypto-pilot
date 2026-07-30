@@ -132,10 +132,10 @@ def _update_decisions_json(
     failure_reason: str | None = None,
 ) -> None:
     date_str = datetime.now().strftime("%Y-%m-%d")
-    tasks_json_path = "docs/decisions/tasks.json"
+    tasks_json_path = "docs/decisions/task_index.json"
     anti_patterns_path = "docs/decisions/anti_patterns.json"
 
-    # 1. Update tasks.json
+    # 1. Update task_index.json
     index_data: dict[str, list[dict[str, str]]] = {"tasks": []}
     if _path_exists(tasks_json_path):
         with contextlib.suppress(Exception):
@@ -156,7 +156,7 @@ def _update_decisions_json(
 
     # Prepend new task entry
     index_data["tasks"] = [new_task_entry] + [t for t in index_data.get("tasks", []) if t.get("task_id") != task]
-    # Keep sliding window of max 100 entries in tasks.json
+    # Keep sliding window of max 100 entries in task_index.json
     index_data["tasks"] = index_data["tasks"][:100]
     _write_file(tasks_json_path, json.dumps(index_data, indent=2, ensure_ascii=False) + "\n")
 

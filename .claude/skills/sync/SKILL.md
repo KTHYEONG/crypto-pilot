@@ -15,7 +15,7 @@ uv run python scripts/sync_task.py --task TASK_ID --title "<Title>" --why "<Cont
 ```
 
 - **Spec Cleanup Execution Rule**: `docs/specs/` files MUST be automatically removed by default. Do NOT pass `--keep-all-specs` unless explicitly requested by the user in prompt.
-- **Smart Registry Auto-Update**: Script automatically updates `docs/decisions/tasks.json`, `docs/code_map.json`, and `docs/decisions/anti_patterns.json`.
+- **Smart Registry Auto-Update**: Script automatically updates `docs/decisions/task_index.json`, `docs/code_map.json`, and `docs/decisions/anti_patterns.json`.
 
 ## Manual Steps (Only if applicable)
 - Surgically update `docs/architecture/` if architectural contracts changed.
