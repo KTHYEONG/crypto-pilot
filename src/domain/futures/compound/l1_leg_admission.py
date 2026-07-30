@@ -11,8 +11,11 @@ from src.domain.futures.compound.bootstrap import circular_stationary_bootstrap_
 from src.domain.futures.compound.config import L1LegConfig
 from src.domain.futures.compound.contracts import (
     CausalFold,
+    L1AttributionReport,
     LegBook,
     LegEvidence,
+    LegScreenDecision,
+    PortfolioAdmissionEvidence,
 )
 from src.domain.futures.compound.l1_concept_bank import compute_lagged_gross_returns
 
@@ -46,42 +49,72 @@ def compute_evidence_weight(
     return 1.0
 
 
+def classify_leg_evidence(
+    evidence: LegEvidence,
+    cost_bps: float,
+    config: L1LegConfig,
+    *,
+    n_tested_hypotheses: int = 1,
+) -> LegScreenDecision:
+    if n_tested_hypotheses < 1:
+        raise ValueError(f"n_tested_hypotheses must be >= 1, got {n_tested_hypotheses}")
+    if not np.isfinite(cost_bps) or cost_bps < 0:
+        raise ValueError(f"cost_bps must be finite and non-negative, got {cost_bps}")
+
+    economic_reasons: list[str] = []
+    if evidence.n_folds < config.warmup_folds:
+        economic_reasons.append(f"insufficient_folds:{evidence.n_folds}_below_{config.warmup_folds}")
+    if evidence.net_alpha_ann <= 0:
+        economic_reasons.append(f"net_alpha_ann_not_positive:{evidence.net_alpha_ann:.6f}")
+    if evidence.mean_turnover_per_bar <= config.min_turnover_per_bar:
+        economic_reasons.append(
+            f"turnover_below_floor:{evidence.mean_turnover_per_bar:.6f}_below_{config.min_turnover_per_bar}"
+        )
+    if evidence.breakeven_cost_bps <= cost_bps * config.cost_safety_margin:
+        economic_reasons.append(
+            f"cost_headroom:BE_{evidence.breakeven_cost_bps:.2f}bps_<={cost_bps * config.cost_safety_margin:.2f}bps"
+        )
+    if evidence.n_folds > 0 and evidence.positive_folds / evidence.n_folds < config.min_positive_fold_ratio:
+        economic_reasons.append(
+            f"fold_instability:{evidence.positive_folds}/{evidence.n_folds}_"
+            f"below_{config.min_positive_fold_ratio}"
+        )
+    economic_eligible = len(economic_reasons) == 0
+
+    familywise_reasons: list[str] = []
+    if n_tested_hypotheses > 1:
+        critical_t = float(sp_norm.isf(config.familywise_error_rate / n_tested_hypotheses))
+    else:
+        critical_t = 0.0
+    if evidence.t_net_alpha_newey_west < critical_t:
+        familywise_reasons.append(
+            f"net_t_below_familywise_threshold:"
+            f"{evidence.t_net_alpha_newey_west:.3f}_below_{critical_t:.3f}_K={n_tested_hypotheses}"
+        )
+    familywise_supported = len(familywise_reasons) == 0
+
+    capital_eligible = economic_eligible and familywise_supported
+
+    return LegScreenDecision(
+        economic_eligible=economic_eligible,
+        familywise_supported=familywise_supported,
+        capital_eligible=capital_eligible,
+        economic_reasons=tuple(economic_reasons),
+        familywise_reasons=tuple(familywise_reasons),
+        critical_t=critical_t,
+        n_tested_hypotheses=n_tested_hypotheses,
+   )
+
+
 def screen_leg_evidence(
     evidence: LegEvidence,
     cost_bps: float,
     config: L1LegConfig,
     n_tested_hypotheses: int,
 ) -> LegEvidence:
-    if n_tested_hypotheses < 1:
-        raise ValueError(f"n_tested_hypotheses must be >= 1, got {n_tested_hypotheses}")
-    if not np.isfinite(cost_bps) or cost_bps < 0:
-        raise ValueError(f"cost_bps must be finite and non-negative, got {cost_bps}")
-    reasons: list[str] = []
-    if evidence.n_folds < config.warmup_folds:
-        reasons.append(f"insufficient_folds:{evidence.n_folds}_below_{config.warmup_folds}")
-    if n_tested_hypotheses > 1:
-        critical_t = float(sp_norm.isf(config.familywise_error_rate / n_tested_hypotheses))
-    else:
-        critical_t = 0.0
-    if evidence.t_net_alpha_newey_west < critical_t:
-        reasons.append(
-            f"net_t_below_familywise_threshold:"
-            f"{evidence.t_net_alpha_newey_west:.3f}_below_{critical_t:.3f}_K={n_tested_hypotheses}"
-        )
-    if evidence.mean_turnover_per_bar <= config.min_turnover_per_bar:
-        reasons.append(
-            f"turnover_below_floor:{evidence.mean_turnover_per_bar:.6f}_below_{config.min_turnover_per_bar}"
-        )
-    if evidence.breakeven_cost_bps <= cost_bps * config.cost_safety_margin:
-        reasons.append(
-            f"cost_headroom:BE_{evidence.breakeven_cost_bps:.2f}bps_<={cost_bps * config.cost_safety_margin:.2f}bps"
-        )
-    if evidence.n_folds > 0 and evidence.positive_folds / evidence.n_folds < config.min_positive_fold_ratio:
-        reasons.append(
-            f"fold_instability:{evidence.positive_folds}/{evidence.n_folds}_"
-            f"below_{config.min_positive_fold_ratio}"
-        )
-    evidence_weight = 0.0 if reasons else 1.0
+    decision = classify_leg_evidence(evidence, cost_bps, config, n_tested_hypotheses=n_tested_hypotheses)
+    reasons = list(decision.economic_reasons) + list(decision.familywise_reasons)
+    evidence_weight = 1.0 if decision.capital_eligible else 0.0
     return dataclasses.replace(evidence, evidence_weight=evidence_weight, reasons=tuple(reasons))
 
 
@@ -174,6 +207,52 @@ def evaluate_portfolio_admission(
     *,
     admission_end_exclusive: int,
 ) -> tuple[bool, tuple[str, ...], float]:
+    evidence = evaluate_portfolio_evidence(
+        combined_2d, asset_return_2d, folds, cost_bps, config,
+        admission_end_exclusive=admission_end_exclusive,
+    )
+    return evidence.admitted, evidence.reasons, evidence.net_alpha_ann
+
+
+def accumulate_prequential_shadow_weights(
+    legs: tuple[LegBook, ...],
+    market_1d: NDArray[np.float64],
+    folds: tuple[CausalFold, ...],
+    cost_bps: float,
+    config: L1LegConfig,
+) -> NDArray[np.float64]:
+    k_ = len(legs)
+    n_t = legs[0].book_2d.shape[0]
+    weights = np.zeros((n_t, k_), dtype=np.float64)
+    oos_slices = [slice(f.oos_start, f.oos_end_exclusive) for f in folds]
+    for i in range(config.warmup_folds, len(folds)):
+        raw_scores = np.zeros(k_, dtype=np.float64)
+        for k in range(k_):
+            ev = evaluate_leg_alpha_on_slices(
+                legs[k], market_1d, tuple(oos_slices[:i]), cost_bps, config,
+                n_tested_hypotheses=1,
+            )
+            decision = classify_leg_evidence(ev, cost_bps, config, n_tested_hypotheses=1)
+            if decision.economic_eligible:
+                raw_scores[k] = 1.0
+        w = normalise_leg_weights(raw_scores, config.max_leg_weight)
+        sl = oos_slices[i]
+        weights[sl] = w[np.newaxis, :]
+    last_stop = oos_slices[-1].stop if oos_slices else 0
+    if last_stop < n_t and last_stop > 0:
+        weights[last_stop:] = weights[last_stop - 1:last_stop]
+    return weights
+
+
+def evaluate_portfolio_evidence(
+    combined_2d: NDArray[np.float64],
+    asset_return_2d: NDArray[np.float64],
+    folds: tuple[CausalFold, ...],
+    cost_bps: float,
+    config: L1LegConfig,
+    *,
+    admission_end_exclusive: int,
+) -> PortfolioAdmissionEvidence:
     if admission_end_exclusive <= 0:
         raise ValueError(f"admission_end_exclusive must be > 0, got {admission_end_exclusive}")
     n_t, _ = combined_2d.shape
@@ -195,12 +274,20 @@ def evaluate_portfolio_admission(
     traded_parts = [net_returns[sl] for sl in traded_slices]
     traded_parts = [p for p in traded_parts if p.shape[0] > 0]
     if not traded_parts:
-        return False, ("no_prequential_admission_folds",), 0.0
+        return PortfolioAdmissionEvidence(
+            admitted=False, reasons=("no_prequential_admission_folds",),
+            net_alpha_ann=0.0, stressed_net_alpha_ann=0.0,
+            posterior_positive=0.0, positive_folds=0, n_folds=0, n_traded_bars=0,
+        )
     traded_returns = np.concatenate(traded_parts)
     traded_stressed = np.concatenate([stressed_returns[sl] for sl in traded_slices if stressed_returns[sl].shape[0] > 0])
     n_traded = len(traded_returns)
     if n_traded < 10:
-        return False, ("insufficient_traded_bars",), 0.0
+        return PortfolioAdmissionEvidence(
+            admitted=False, reasons=("insufficient_traded_bars",),
+            net_alpha_ann=0.0, stressed_net_alpha_ann=0.0,
+            posterior_positive=0.0, positive_folds=0, n_folds=0, n_traded_bars=n_traded,
+        )
     net_ann = float(np.mean(traded_returns)) * config.bars_per_year
     stressed_ann = float(np.mean(traded_stressed)) * config.bars_per_year
     pw_block = 5.0
@@ -231,4 +318,44 @@ def evaluate_portfolio_admission(
     if stressed_ann <= 0:
         reasons.append(f"stressed_net_ann_{stressed_ann:.4f}_not_positive")
     admitted = len(reasons) == 0
-    return admitted, tuple(reasons), net_ann
+    return PortfolioAdmissionEvidence(
+        admitted=admitted, reasons=tuple(reasons),
+        net_alpha_ann=net_ann, stressed_net_alpha_ann=stressed_ann,
+        posterior_positive=float(posterior),
+        positive_folds=positive_folds, n_folds=n_traded_folds,
+        n_traded_bars=n_traded,
+    )
+
+
+def classify_l1_bottleneck(
+    production: PortfolioAdmissionEvidence,
+    shadow: PortfolioAdmissionEvidence,
+    economic_candidate_count: int,
+    capital_candidate_count: int,
+    shadow_available: bool,
+) -> L1AttributionReport:
+    if not shadow_available:
+        return L1AttributionReport(
+            production=production, shadow=shadow,
+            economic_candidate_count=economic_candidate_count,
+            capital_candidate_count=capital_candidate_count,
+            bottleneck_code="diagnostic_unavailable",
+            shadow_available=False,
+            production_weights_unchanged=True,
+        )
+    if production.admitted:
+        code = "deployable"
+    elif economic_candidate_count == 0:
+        code = "signal_economics_absent"
+    elif shadow.admitted:
+        code = "familywise_power_limited"
+    else:
+        code = "signal_generalization_failed"
+    return L1AttributionReport(
+        production=production, shadow=shadow,
+        economic_candidate_count=economic_candidate_count,
+        capital_candidate_count=capital_candidate_count,
+        bottleneck_code=code,
+        shadow_available=True,
+        production_weights_unchanged=True,
+    )
