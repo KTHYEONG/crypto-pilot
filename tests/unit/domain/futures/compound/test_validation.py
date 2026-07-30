@@ -17,8 +17,8 @@ from src.domain.futures.compound.contracts import (
 from src.domain.futures.compound.multiplicity import TrialMultiplicity
 from src.domain.futures.compound.validation import (
     annualized_compound_growth,
-    blend_l1_prior_growth_probability,
     build_frozen_control_weights,
+    combine_growth_evidence,
     evaluate_l2_walk_forward,
     evaluate_l3_sealed_holdout,
     validate_ledger_before_aggregation,
@@ -430,18 +430,39 @@ def test_excess_degenerates_to_absolute_when_beta_zero() -> None:
     np.testing.assert_array_almost_equal(excess_one, np.log1p(strat) - np.log1p(bench))
 
 
-class TestBlendL1Prior:
-    def test_blend_l1_prior_returns_l2_only_when_prior_empty(self) -> None:
-        result = blend_l1_prior_growth_probability(
-            np.array([], dtype=np.float64), 0.75, cap_days=90,
+class TestCombineGrowthEvidence:
+    def test_cash_prior_contributes_no_precision(self) -> None:
+        holdout = np.load("tests/fixtures/growth_holdout_excess_362d.npy")
+        cash = np.zeros(90, dtype=np.float64)
+        result_cash = combine_growth_evidence(
+            cash, holdout, periods_per_year=365.25, cap_days=90,
+            min_active_days=30, block_size=3.811, seed=42,
         )
-        assert result == 0.75
+        result_none = combine_growth_evidence(
+            None, holdout, periods_per_year=365.25, cap_days=90,
+            min_active_days=30, block_size=3.811, seed=42,
+        )
+        assert result_cash[1] == result_none[1]
+        assert result_cash[2] == 0
 
-    def test_blend_l1_prior_weight_capped(self) -> None:
-        rng = np.random.default_rng(42)
-        prior = rng.normal(0.0, 0.01, 200).astype(np.float64)
-        result = blend_l1_prior_growth_probability(prior, 0.5, cap_days=90)
-        assert 0.0 < result < 1.0
+    def test_active_prior_never_outweighs_holdout(self) -> None:
+        holdout = np.load("tests/fixtures/growth_holdout_excess_362d.npy")
+        prior = np.load("tests/fixtures/growth_prior_active_45d.npy")
+        prob = combine_growth_evidence(
+            prior, holdout, periods_per_year=365.25, cap_days=90,
+            min_active_days=30, block_size=3.811, seed=42,
+        )[1]
+        assert 0.0 < prob <= 1.0
+
+    def test_prior_slicing_is_recency(self) -> None:
+        holdout = np.load("tests/fixtures/growth_holdout_excess_362d.npy")
+        ramp = np.arange(200, dtype=np.float64) * 1e-4
+        _, _, active = combine_growth_evidence(
+            ramp, holdout, periods_per_year=365.25, cap_days=90,
+            min_active_days=1, block_size=3.811, seed=42,
+        )
+        assert active == 90
+        assert np.all(np.abs(ramp[-90:]) > 1e-15)
 
 
 class TestL2GateSkillCategory:
