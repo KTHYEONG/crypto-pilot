@@ -1,6 +1,16 @@
 {
   "tasks": [
     {
+      "task_id": "L1_BREADTH_COLLAPSE_FIX_MULTIPLICITY_REGRESSION",
+      "date": "2026-07-30",
+      "adr_id": "ADR_20260730_L1_BREADTH_COLLAPSE_FIX_MULTIPLICITY_REGRESSION",
+      "domain": "signal",
+      "title": "L1 Breadth Collapse Fix Exposes Sizing Multiplicity Regression",
+      "why": "posterior=0.795<0.90 병목의 근본성격(구조적 결함 vs 미시도 이론)을 규명한 결과, 2-concept grid-average가 11-family breadth를 파괴하는 구조적 결함으로 확정(등가중 측정 Sharpe 1.337->1.729, posterior 0.766->0.854)",
+      "resolution": "F1(L1 admission bootstrap을 L2와 동일한 block-bootstrap으로 통일), F2(_DEFAULT_REGISTRY를 2-concept grid-average에서 11-family별 leg로 해체, book-level 결합), F3(max_leg_weight 0.70->0.25, K=11에서 1/K 초과 유지)를 배선",
+      "impact": "프로덕션 재실행 결과 posterior 0.795->0.049, net_ann +2.73%->-4.67%로 오히려 악화 -- fold0에서 전체기간 alpha_ann=-16.2%로 이미 확인된 aroon_oscillator가 초기 2-fold 노이즈로 스크리닝을 통과해 자본 75% 배정받음. breadth 진단(F2)은 유효하나 K=2->11 확장이 compute_evidence_weight에 다중검정 보정 없이 새로운 overfitting 취약점을 노출시킴(no_evidence 유지, 근본원인만 전환)"
+    },
+    {
       "task_id": "L1_SIZING_AND_L2_GROWTH_EVIDENCE_INTEGRITY",
       "date": "2026-07-30",
       "adr_id": "ADR_20260730_L1_SIZING_AND_L2_GROWTH_EVIDENCE_INTEGRITY",
@@ -989,16 +999,6 @@
       "why": "실측(optuna.db 4개 200-trial study): promotion_blocker의 90~94%가 cagr 단일 원인, growth_lcb_weight objective 블렌드는 realized CAGR과 상관계수 r=0.09~0.18로 사실상 무관. 근본원인은 calibrate_deployment_leverage의 mdd_margin(기본 0.30, 비탐색)이 전 trial 공통으로 MDD 예산의 70%(0.21)만 타겟팅해 레버리지를 구조적으로 억제. 동일 필드가 crisis 캘리브레이션(l_crisis)에도 재사용돼 그대로 풀면 크라이시스 방어가 침식되는 문제 확인.",
       "resolution": "l2_deploy_mdd_margin을 정상장 한정 L2_SEARCH_SPACE에 편입(0.05~0.30)하고, l2_deploy_crisis_mdd_margin(고정 0.30, 비탐색)으로 crisis 캘리브레이션을 완전 분리(_resolve_safety_ceiling에 crisis_mdd_target 파라미터 추가). oos_budget_blend/oos_floor_cap 하드코딩을 config 필드화. select_layer2_champion의 gate-passed replay 검증을 top-3 고정에서 fallback_limit(24)까지 확장, replay_mismatch로 인한 promotion 플립을 [EVAL] WARNING으로 승격.",
       "impact": "실측 재검증(동일 seed=42, n=120 재실행): margin decouple 배선 정상 확인(MDD/CVaR/PSR 전부 예산 내, crisis 회귀 없음), Sortino/Calmar/PSR 3개 게이트가 이전 실행 대비 신규 통과. 다만 CAGR은 여전히 BLOCKED(13.3%, 이전 20.9%보다 낮은 국소해로 수렴) — Optuna stochastic 특성상 단일 seed로는 개선 검증 불가 확인, fold_pass_ratio(2/4=50%)가 이번 spec과 무관한 별개 잔여 병목으로 확정. /check PASS(Cov 66%)."
-    },
-    {
-      "task_id": "TASK_CACHE_FINGERPRINT_STABILIZATION",
-      "date": "2026-07-18",
-      "adr_id": "ADR_20260718_CACHE_FINGERPRINT_STABILIZATION",
-      "domain": "general",
-      "title": "Migrated TASK_CACHE_FINGERPRINT_STABILIZATION",
-      "why": "L1 result cache가 pd.util.hash_pandas_object로 인해 프로세스 간 비결정적 fingerprint를 생성 — 모든 cold start에서 cache miss(211s 재연산). Peak RSS 13.1GB로 12GB threshold 초과.",
-      "resolution": "_deterministic_df_fingerprint(sha256 content-based)로 대체해 cross-process 결정성 확보. _should_load_cache(RSS 11.5GB threshold)로 cache deserialize gating. gc.collect()를 cache 경계에 추가해 RSS 회수.",
-      "impact": "Cross-process fingerprint 결정성 확인(c9c941f154b3e3d5 동일). L1 cache hit 정상 작동(mock 검증: run_l1_nested_swf 호출 2→1). RSS guard 정상 gating 확인. Production replay(L2 120 trials): L1 7/7 PASS, L2 BLOCKED(cagr CAGR+20.9%) — cache 변경으로 인한 연산 변화 0. /check PASS(Cov 38%)."
     }
   ]
 }
