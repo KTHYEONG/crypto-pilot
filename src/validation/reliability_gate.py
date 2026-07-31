@@ -189,18 +189,20 @@ def compute_reliability_gate(
     return result
 
 
-def compute_portfolio_reliability_gate(
+def compute_equity_reliability_gate(
     equity: pd.Series,
     closed_trade_count: int,
     config: ReliabilityGateConfig = ReliabilityGateConfig(),  # noqa: B008
 ) -> ReliabilityGateResult:
-    """Block-bootstrap the marked total-equity 4h return stream of a portfolio.
+    """Canonical promotion gate on the causal marked total-equity return stream.
 
-    The sampled return stream is the single portfolio ledger, never independent
-    sleeve returns compounded separately, so concurrent positions cannot inflate
-    the LCB by multiplying per-sleeve paths. All numerical gate limits are the
-    frozen ones from ``ReliabilityGateConfig`` (15% LCB90, -25% MDD, 2.0 t-stat,
-    30 closes); the block size is derived from the return autocorrelation.
+    The sampled return stream is the single marked ledger, never independent
+    trade/sleeve returns compounded separately, so concurrent positions cannot
+    inflate the LCB by multiplying per-sleeve paths. All numerical gate limits
+    are the frozen ones from ``ReliabilityGateConfig`` (15% LCB90, -25% MDD,
+    2.0 t-stat, 30 closes); the block size is derived from the return
+    autocorrelation. ``closed_trade_count`` is only a sample-size guard and
+    never supplies returns.
     """
     if not isinstance(equity.index, pd.DatetimeIndex) or len(equity) < 2:
         raise ValueError("equity must be a DatetimeIndex series with at least 2 points")
@@ -272,15 +274,41 @@ def compute_portfolio_reliability_gate(
     return result
 
 
-def _trade_entry_timestamps(trades: pd.DataFrame, equity: pd.Series) -> pd.Series:
-    """Entry timestamps for fold attribution.
+def compute_portfolio_reliability_gate(
+    equity: pd.Series,
+    closed_trade_count: int,
+    config: ReliabilityGateConfig = ReliabilityGateConfig(),  # noqa: B008
+) -> ReliabilityGateResult:
+    """Compatibility delegator for promotion: portfolio evidence uses the canonical equity gate."""
+    return compute_equity_reliability_gate(equity, closed_trade_count, config)
 
-    Portfolio trades carry an explicit ``entry_time``; single-symbol trades are
-    mapped through their ``entry_bar`` into the equity index as before.
+
+def _year_log_return_contributions(equity: pd.Series) -> dict[int, float]:
+    """Annual marked log-return contributions.
+
+    Groups ``log(E_t / E_{t-1})`` by the timestamp of the observed mark ``E_t``,
+    so cross-year open positions contribute to every year containing their marked
+    return. Exact under compounding because the per-year sums telescope to the
+    total log growth.
     """
-    if "entry_time" in trades.columns and len(trades) > 0:
-        return pd.to_datetime(trades["entry_time"], utc=True, errors="raise")
-    return equity.index[trades["entry_bar"].astype(int).to_numpy()]
+    if not isinstance(equity.index, pd.DatetimeIndex):
+        raise ValueError("equity must have a DatetimeIndex")
+    if len(equity) < 2:
+        raise ValueError("equity must contain at least 2 points")
+    if not equity.index.is_monotonic_increasing:
+        raise ValueError("equity index must be monotonic increasing")
+    values = equity.to_numpy(dtype=np.float64)
+    if not np.isfinite(values).all():
+        raise ValueError("equity must contain only finite values")
+    if (values <= 0).any():
+        raise ValueError("equity must be strictly positive")
+
+    log_returns = np.log(values[1:] / values[:-1])
+    years = equity.index[1:].year
+    contributions: dict[int, float] = {}
+    for year, log_ret in zip(years, log_returns, strict=True):
+        contributions[year] = contributions.get(year, 0.0) + float(log_ret)
+    return contributions
 
 
 def split_holdout_segment(result: BacktestResult, cutoff: pd.Timestamp) -> HoldoutSegment:
@@ -295,12 +323,19 @@ def split_holdout_segment(result: BacktestResult, cutoff: pd.Timestamp) -> Holdo
         )
 
     cutoff_idx = int(equity.index.searchsorted(cutoff, side="right")) - 1
-    entry_ts = (
-        equity.index[result.trades["entry_bar"].astype(int).to_numpy()]
-        if len(result.trades)
-        else equity.index[:0]
-    )
-    holdout_mask = entry_ts > cutoff
+    if len(result.trades) > 0:
+        if "exit_time" in result.trades.columns:
+            exit_ts = pd.to_datetime(result.trades["exit_time"], utc=True, errors="raise")
+        elif "exit_bar" in result.trades.columns:
+            exit_ts = equity.index[result.trades["exit_bar"].astype(int).to_numpy()]
+        else:
+            raise ValueError(
+                "trades must carry 'exit_bar' (single symbol) or 'exit_time' "
+                "(portfolio) for holdout attribution"
+            )
+        holdout_mask = exit_ts > cutoff
+    else:
+        holdout_mask = pd.Series(False, index=result.trades.index)
     holdout_trades = result.trades[holdout_mask]
     observation_trades = result.trades[~holdout_mask]
 
@@ -346,14 +381,10 @@ def compute_fold_distribution(
             median_fold_calmar=0.0, max_period_contribution=0.0, gate_pass=True,
         )
 
-    entry_ts = _trade_entry_timestamps(result.trades, equity)
-    fold_pnl: dict[int, float] = {}
-    for ts, pnl in zip(entry_ts, result.trades["pnl"].to_numpy(dtype=np.float64), strict=False):
-        fold_pnl[ts.year] = fold_pnl.get(ts.year, 0.0) + float(pnl)
-
-    net_total = abs(sum(fold_pnl.values()))
+    year_log_returns = _year_log_return_contributions(equity)
+    net_total = abs(sum(year_log_returns.values()))
     max_period_contribution = (
-        max(abs(v) for v in fold_pnl.values()) / net_total if net_total > 0 else 0.0
+        max(abs(v) for v in year_log_returns.values()) / net_total if net_total > 0 else 0.0
     )
     gate_pass = max_period_contribution <= config.max_period_contribution
 
@@ -403,16 +434,9 @@ def compute_stress_test_gate(
     stressed_result = run_backtest(
         df, spec, stressed_costs, signal_delay_bars=delay_bars, funding_rates=funding_rates,
     )
-    stressed_metrics = compute_metrics(stressed_result.equity, stressed_result.trades)
-    years = (
-        (stressed_result.equity.index[-1] - stressed_result.equity.index[0])
-        .total_seconds() / _SECONDS_PER_YEAR
-    )
     gate_config = dataclasses.replace(config, hurdle_rate=0.0)
-    return compute_reliability_gate(
-        stressed_result.trades, years=years,
-        sharpe=stressed_metrics.sharpe, mdd=stressed_metrics.mdd,
-        config=gate_config,
+    return compute_equity_reliability_gate(
+        stressed_result.equity, len(stressed_result.trades), config=gate_config,
     )
 
 
@@ -430,6 +454,7 @@ def _check_contract() -> None:
         "n_folds", "median_fold_cagr", "worst_fold_cagr",
         "median_fold_calmar", "max_period_contribution", "gate_pass",
     }
+    assert compute_equity_reliability_gate.__name__ == "compute_equity_reliability_gate"
     assert compute_portfolio_reliability_gate.__name__ == "compute_portfolio_reliability_gate"
 
 
