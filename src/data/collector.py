@@ -1,13 +1,13 @@
 from __future__ import annotations
 
 import concurrent.futures
+import contextlib
 import logging
-from datetime import datetime
 from pathlib import Path
 
 import pandas as pd
 
-from src.core.config import FUTURES_DATA_DIR, funding_path, ohlcv_path
+from src.core.config import funding_path, ohlcv_path
 from src.data.binance import BinanceClient, BinanceKlinePermanentError
 from src.data.vision import BinanceVisionDownloader
 
@@ -28,6 +28,11 @@ _METRICS_NUMERIC_COLUMNS: tuple[str, ...] = (
 
 _METRICS_RELEASE_LAG = pd.Timedelta(minutes=5)
 _METRICS_MERGE_TOLERANCE = pd.Timedelta(hours=6)
+
+_OHLCV_1M_COLUMNS: tuple[str, ...] = (
+    "timestamp", "open", "high", "low", "close", "volume",
+    "taker_buy_base_volume", "taker_buy_quote_volume", "quote_vol",
+)
 
 
 def _empty_metrics_frame() -> pd.DataFrame:
@@ -139,10 +144,8 @@ class DataCollector:
                 df = df.drop(columns=_baggage)
             return self._normalize_df(df)
         except Exception as exc:
-            try:
+            with contextlib.suppress(Exception):
                 path.unlink()
-            except Exception:
-                pass
             self.logger.debug("Failed to load cache %s: %s", path, exc)
             return pd.DataFrame()
 
@@ -150,6 +153,23 @@ class DataCollector:
         if df.empty:
             return
         df = self._normalize_df(df)
+        if timeframe == "1m":
+            df = df.rename(columns={
+                "quote_volume": "quote_vol",
+                "taker_buy_base": "taker_buy_base_volume",
+                "taker_buy_quote": "taker_buy_quote_volume",
+            })
+            for column in _OHLCV_1M_COLUMNS:
+                if column not in df.columns:
+                    df[column] = float("nan")
+            df = df[list(_OHLCV_1M_COLUMNS)]
+            for column in _OHLCV_1M_COLUMNS:
+                df[column] = pd.to_numeric(df[column], errors="coerce")
+            df = (
+                df.dropna(subset=["timestamp", "open", "high", "low", "close", "volume"])
+                .drop_duplicates("timestamp", keep="last")
+                .sort_values("timestamp")
+            )
         path = self._cache_path(symbol, timeframe)
         temp_path = path.with_suffix(".tmp.parquet")
         df_to_save = df.copy()
