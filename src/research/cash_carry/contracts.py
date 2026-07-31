@@ -15,8 +15,8 @@ class CashCarrySpec:
     """
 
     symbol: str
-    initial_margin_rate: float = 0.10
-    maintenance_margin_rate: float = 0.05
+    initial_margin_rate: float = 0.30
+    maintenance_margin_rate: float = 0.15
 
     def __post_init__(self) -> None:
         if not self.symbol:
@@ -29,6 +29,39 @@ class CashCarrySpec:
             raise ValueError(
                 "maintenance_margin_rate must be in (0, initial_margin_rate), got "
                 f"{self.maintenance_margin_rate}"
+            )
+
+
+@dataclass(frozen=True, slots=True)
+class CarryHysteresisConfig:
+    """Cost-derived hysteresis band for the cash-and-carry signal.
+
+    ``lookback_settlements`` is the trailing settlement window over which the
+    net-carry rate is averaged and over which the round-trip cost is amortized
+    into a breakeven rate; ``min_hold_settlements`` is the minimum number of
+    fresh-settlement bars a position must survive before any CLOSE is
+    considered; ``confirm_settlements`` is the number of consecutive negative
+    readings required to close a matured position. Defaults are structurally
+    derived ratios (min_hold == lookback, confirm == ceil(lookback/3)), not
+    independently fitted constants.
+    """
+
+    lookback_settlements: int = 21
+    min_hold_settlements: int = 21
+    confirm_settlements: int = 7
+
+    def __post_init__(self) -> None:
+        if self.lookback_settlements < 1:
+            raise ValueError(
+                f"lookback_settlements must be >= 1, got {self.lookback_settlements}"
+            )
+        if self.min_hold_settlements < 1:
+            raise ValueError(
+                f"min_hold_settlements must be >= 1, got {self.min_hold_settlements}"
+            )
+        if self.confirm_settlements < 1:
+            raise ValueError(
+                f"confirm_settlements must be >= 1, got {self.confirm_settlements}"
             )
 
 
