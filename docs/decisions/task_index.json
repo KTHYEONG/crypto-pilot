@@ -1,6 +1,16 @@
 {
   "tasks": [
     {
+      "task_id": "TASK_L1_SYMBOL_CONDITIONAL_ROUTING",
+      "date": "2026-07-31",
+      "adr_id": "ADR_20260731_L1_SYMBOL_CONDITIONAL_ROUTING",
+      "domain": "signal",
+      "title": "L1 Symbol-Conditional Routing (family top-K × symbol top-N causal)",
+      "why": "재설계된 자본형성 경로가 CAGR +22.30%/Sharpe 1.429는 달성했으나 L2 excess_growth_probability=0.737<0.90에서 정체. 신호층이 11개 family/51개 symbol에 균등 배분되지만 측정된 엣지는 2개 family, 소수 symbol에 집중됨(RAW corr+0.635→1.56 effective bets, RESIDUAL 51 effective bets)이 근본원인.",
+      "resolution": "l1_symbol_routing.py 신규(build_per_symbol_leg_books/compute_causal_scale/rank_families_causal/select_symbols_causal/accumulate_symbol_routed_book), L1RoutingConfig(family_top_k=2, symbol_top_n=10) 추가, SymbolLegBook 계약 추가, engine.py P2 블록에 causal top-K family × top-N symbol 라우팅 배선(폴드<i 데이터만 사용, market-neutral 유지, per-name cap 유지).",
+      "impact": "/check PASS(spec 준수/mypy/ruff/coverage 90%, 커버리지 갭 1건 신규 테스트로 해소). 유닛+통합 스위트(S-01~S-17) 전부 통과, 기존 8건 실패는 stash 대조로 무관계 사전 존재 확인. 실 데이터 replay(excess_growth_probability 재측정)는 캐시 패널(2026-07-29)이 구 레지스트리를 담고 있어 미실행 — 후속 세션에서 opt_main_futures.py --phase full 라이브 실행 필요."
+    },
+    {
       "task_id": "L1_CAPITAL_FORMATION_REDESIGN",
       "date": "2026-07-30",
       "adr_id": "ADR_20260730_L1_CAPITAL_FORMATION_REDESIGN",
@@ -989,16 +999,6 @@
       "why": "직전 spec(optuna constraint cagr/uplift alignment) 재검증에서 16개 promotion blocker 전부 통과했으나 별도 안전장치 worst_fold_cagr(-5% 플로어)에서 BLOCKED. Fold #2(2025-05-30~08-09)가 오늘 4개의 서로 다른 champion 전부에서 반복 실패(CAGR -20.2% 등). 코드 확인: calibrate_deployment_leverage의 OOS 교차검증(_resolve_oos_adaptive_leverage)이 레버리지를 올리는 방향으로만 비대칭 작동 — OOS worst fold가 fit-leg보다 위험해도 낮추는 대칭 로직이 없었음. worst_fold_cagr를 Optuna 탐색 제약으로 직접 승격하는 대안은 단일 과거 구간에 대한 과최적화 위험(quant.md #1 위배)으로 기각, 대신 사이징(레버리지)만 조정하는 방향 선택.",
       "resolution": "risk_deployment.py에 _neg_cagr_at_leverage 헬퍼 추가(기존 _bisect_max_leverage 인프라 재사용). calibrate_deployment_leverage에 oos_fold_rets/oos_worst_fold_cagr_floor/bars_per_year 파라미터 추가 — Stage 2(OOS Adaptive) 이후 Stage 3(Concentration Haircut) 이전에 worst OOS fold의 CAGR이 플로어 미달이면 [l_floor, l_final] 구간에서 하향 이분탐색. evaluate_l2_trial에서 sim.fold_rets_hybrid와 config.l2_min_worst_fold_cagr를 배선. l_floor=1.0 하한(부분 자본 배치 미지원)이 unit-leverage CAGR 자체가 플로어 미달인 경우 완전 해결을 막을 수 있음을 [LIMIT-01]로 사전 명시, 후속 spec 대상으로 스코프 아웃.",
       "impact": "실측 재검증(seed=42, n=120): 새 fallback champion은 4개 폴드 전부 PASS(fold_pass_ratio 100%, worst_fold_cagr 블로커 소멸)했으나 이는 clamp 발동이 아니라 champion-to-champion stochastic variance(이번 champion은 애초에 worst fold가 없었음)로 인한 것 — clamp 메커니즘 자체는 이번 실행에서 검증되지 않음(InMemoryStorage 휘발성으로 특정 시나리오 재현 어려움). CAGR은 다시 +12.0%로 BLOCKED, L*=1.0(바닥값)으로 회귀 — 여전히 champion selection의 근본적 비일관성이 최대 병목. 후속: 고정 파라미터로 clamp 전/후 직접 비교하는 격리 스크립트 필요. /check PASS(Cov 48%)."
-    },
-    {
-      "task_id": "TASK_L2_OPTUNA_CONSTRAINT_CAGR_UPLIFT_ALIGNMENT",
-      "date": "2026-07-18",
-      "adr_id": "ADR_20260718_L2_OPTUNA_CONSTRAINT_CAGR_UPLIFT_ALIGNMENT",
-      "domain": "general",
-      "title": "Migrated TASK_L2_OPTUNA_CONSTRAINT_CAGR_UPLIFT_ALIGNMENT",
-      "why": "오늘 3개 spec(margin decouple/fold 세분화/regime searchability) 누적 후에도 CAGR(+17.5%<30%)·Sharpe Uplift(-0.63<+0.05) 두 지표만 반복 실패, feasible trials 없음 재현. 근본원인: evaluate_layer2_gate가 promotion_constraint_values(16-tuple)에 cagr·sharpe_uplift를 이미 계산하지만 TPESampler에 실제 전달되는 optuna_constraint_values(10-tuple)에는 미포함 — TPE가 CAGR을 직접 겨냥하지 못하고 objective 블렌드(growth_lcb_weight)로만 간접 유도됨. 과거 200-trial 참조 데이터: cagr>=0.30 만족 trial의 75~83%가 sharpe_uplift도 동시 만족(교집합 손실 미미) — 두 제약 추가가 탐색공간을 유의미하게 좁히지 않음을 사전 확인.",
-      "resolution": "evaluate_layer2_gate의 optuna_constraint_values를 10→12-tuple로 확장(cagr, sharpe_uplift 제약 추가 — promotion_constraint_values의 기존 표현식 그대로 재사용, 신규 계산 없음). layer2_constraints_from_trial의 패딩 길이를 10→12로 동기화. ADR_20260718_L2_CRISIS_AWARE_OPTUNA_CONSTRAINT와 동일 기법(promotion-only 제약을 optuna 슬롯으로 승격) 재사용.",
-      "impact": "실측 재검증(동일 seed=42, n=120): CAGR +17.5%→+30.4%(gate 통과), Sharpe Uplift -0.63→+0.65(gate 통과) — 목표한 두 지표 모두 예측대로 개선. 16개 promotion blocker 전원 통과, 오늘 세션 최초로 CAGR·Sharpe/Sortino/Calmar/PSR/MDD/CVaR/Fold 전체 동시 통과. 잔여 블로커는 별도 안전장치 worst_fold_cagr 단 하나로 좁혀짐 — Fold #2(2025-05-30~08-09, CAGR -20.2%)가 오늘 4번의 서로 다른 champion에서 반복 실패, 레버리지 상승(L*=1.85)으로 손실 폭 확대돼 -5% 플로어 최초 위반. L1 signal 품질이 아닌 특정 역사적 구간에 대한 tail-risk 노출로 병목이 극도로 좁혀짐. /check PASS(Cov 39%)."
     }
   ]
 }
