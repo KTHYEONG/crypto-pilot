@@ -80,11 +80,73 @@ def _find_test_files(py_files: list[str]) -> list[str]:
                 if os.path.exists(tp) and tp not in test_files:
                     test_files.append(tp)
                     break
+            for tp in _repository_test_files():
+                if tp not in test_files and _test_references_source(tp, sf):
+                    test_files.append(tp)
     return test_files
 
 
+def _repository_test_files() -> list[str]:
+    """Return test modules in deterministic order for semantic source matching."""
+    test_files: list[str] = []
+    for root, _dirs, files in os.walk("tests"):
+        test_files.extend(
+            os.path.join(root, filename)
+            for filename in sorted(files)
+            if filename.startswith("test_") and filename.endswith(".py")
+        )
+    return sorted(test_files)
+
+
+def _test_references_source(test_file: str, source_file: str) -> bool:
+    """Match tests by imported source symbol when filenames are feature-oriented.
+
+    Exact mirrored ``test_<module>.py`` paths remain the fast path. AST matching
+    covers valid names such as ``test_candidate_promotion_cli.py`` without
+    relying on brittle substring searches.
+    """
+    source_module = source_file[:-3].replace("/", ".")
+    try:
+        with open(test_file, encoding="utf-8") as handle:
+            tree = ast.parse(handle.read(), filename=test_file)
+    except (OSError, SyntaxError):
+        return False
+
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            if any(alias.name == source_module for alias in node.names):
+                return True
+        elif isinstance(node, ast.ImportFrom) and node.module:
+            imported_module = node.module
+            if any(
+                f"{imported_module}.{alias.name}" == source_module
+                for alias in node.names
+                if alias.name != "*"
+            ):
+                return True
+            if imported_module == source_module:
+                return True
+    return False
+
+
+def _source_has_matching_test(source_file: str, test_files: list[str]) -> bool:
+    """Check exact mirrored paths first, then semantic AST references."""
+    parts = source_file.split("/")
+    module_name = parts[-1]
+    test_name = f"test_{module_name}"
+    exact = {
+        f"tests/{category}/{'/'.join(parts[1:-1])}/{test_name}" if parts[1:-1]
+        else f"tests/{category}/{test_name}"
+        for category in ("unit", "integration", "e2e")
+    }
+    return any(test in exact or _test_references_source(test, source_file) for test in test_files)
+
+
 def _get_source_files(py_files: list[str]) -> list[str]:
-    return [f for f in py_files if not (f.startswith("tests/") or "test_" in f)]
+    return [
+        f for f in py_files
+        if not (f.startswith("tests/") or f.startswith("scripts/") or "test_" in f)
+    ]
 
 
 def _get_target_coverage(file_path: str) -> int:
@@ -530,7 +592,7 @@ def _check_spec_compliance(spec_path: str) -> tuple[int, list[JsonDiag]]:
                     diagnostics.append(d)
                 elif target_node is not None and _is_stub_node(target_node):
                     msg = f"Spec: {kind} '{name}' is a stub or dummy implementation (pass / Ellipsis / NotImplementedError / logger+dummy return)"
-                    d = {"file": fh, "line": target_node.lineno, "error": msg, "fix_hint": f"Implement real logic in {name}"}
+                    d = {"file": fh, "line": getattr(target_node, "lineno", 0), "error": msg, "fix_hint": f"Implement real logic in {name}"}
                     diagnostics.append(d)
                 else:
                     if assertions:
@@ -681,19 +743,11 @@ def main() -> None:
         print("PASS | Spec compliance verified")
 
     # 1. Co-modification Mapping Verification (scripts/ excluded)
+    test_files = _find_test_files(py_files)
     for pf in py_files:
         if not pf.startswith("src/") or pf.endswith("__init__.py") or pf.startswith("scripts/"):
             continue
-        parts = pf.split("/")
-        module_name = parts[-1]
-        test_name = f"test_{module_name}"
-        found = any(
-            os.path.exists(
-                f"tests/{cat}/{'/'.join(parts[1:-1])}/{test_name}" if parts[1:-1] else f"tests/{cat}/{test_name}"
-            )
-            for cat in ["unit", "integration", "e2e"]
-        )
-        if not found:
+        if not _source_has_matching_test(pf, test_files):
             d = {"file": pf, "line": 0, "error": f"No matching test for {pf}", "fix_hint": ""}
             _fail_exit("co-modification", f"FAIL | {pf}: test file missing", d)
 
@@ -738,9 +792,11 @@ def main() -> None:
         print(_emit_json("PASS", "all", [], None), file=sys.stderr)
         return
 
-    cov_args = (
-        [f"--cov={sf.replace('.py', '').replace('/', '.')}" for sf in source_files] if source_files else ["--cov=src"]
-    )
+    # Collect at package scope. Leaf-module coverage targets can import a
+    # package before pytest's conftest, which is unsafe for native dependencies
+    # such as NumPy. The report still contains every source file, so the
+    # per-file and changed-line checks below remain effective.
+    cov_args = ["--cov=src"]
 
     deselect_args = [f"--deselect={node}" for node in args.deselect]
     core_cmd = ["uv", "run", "pytest", *cov_args, *test_files, *deselect_args, "-q", "--tb=line", "--cov-report=term-missing"]

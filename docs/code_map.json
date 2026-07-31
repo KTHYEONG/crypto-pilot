@@ -4,7 +4,9 @@
     "testing": "tests/test_baseline.py"
   },
   "src/reliability_gate.py": {},
-  "scripts/lean_check.py": {},
+  "scripts/lean_check.py": {
+    "testing": "tests/unit/test_lean_check.py"
+  },
   "src/core/config.py": {
     "testing": "tests/unit/core/test_config.py"
   }

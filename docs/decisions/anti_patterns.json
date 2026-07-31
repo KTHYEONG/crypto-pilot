@@ -1,1 +1,9 @@
-[]
+[
+  {
+    "domain": "execution",
+    "failed_hypothesis": "Basename-only test mapping and per-file dotted coverage targets are reliable.",
+    "failure_reason": "Feature-named tests were rejected and pytest-cov triggered a NumPy import-order failure for leaf-module targets.",
+    "falsified_date": "2026-07-31",
+    "source_adr": "ADR_20260731_LEAN_CHECK_HARDENING"
+  }
+]
