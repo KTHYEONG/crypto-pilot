@@ -92,3 +92,62 @@ def test_portfolio_admission_evidence_handoff_scale_bounds() -> None:
     )
     assert ev.handoff_scale > 0.0
     assert ev.handoff_scale < 1.0
+
+
+class TestSymbolLegBook:
+    def test_shape_and_finiteness(self) -> None:
+        from src.domain.futures.compound.contracts import SymbolLegBook
+        bk = np.zeros((4, 3), dtype=np.float64)
+        net = np.zeros((4, 3), dtype=np.float64)
+        book = SymbolLegBook(concept_id="x", book_2d=bk, per_symbol_net_2d=net)
+        assert book.book_2d.shape == (4, 3)
+        assert book.per_symbol_net_2d.shape == (4, 3)
+
+    def test_empty_concept_id_raises(self) -> None:
+        from src.domain.futures.compound.contracts import SymbolLegBook
+        bk = np.zeros((4, 3), dtype=np.float64)
+        net = np.zeros((4, 3), dtype=np.float64)
+        with pytest.raises(ValueError, match="concept_id must be non-empty"):
+            SymbolLegBook(concept_id="", book_2d=bk, per_symbol_net_2d=net)
+
+    def test_shape_mismatch_raises(self) -> None:
+        from src.domain.futures.compound.contracts import SymbolLegBook
+        with pytest.raises(ValueError, match="shape"):
+            SymbolLegBook(
+                concept_id="x",
+                book_2d=np.zeros((4, 3), dtype=np.float64),
+                per_symbol_net_2d=np.zeros((4, 2), dtype=np.float64),
+            )
+
+    def test_book_2d_not_2d_raises(self) -> None:
+        from src.domain.futures.compound.contracts import SymbolLegBook
+        with pytest.raises(ValueError, match="book_2d must be 2-D"):
+            SymbolLegBook(
+                concept_id="x",
+                book_2d=np.zeros((4,), dtype=np.float64),
+                per_symbol_net_2d=np.zeros((4, 3), dtype=np.float64),
+            )
+
+    def test_per_symbol_net_2d_not_2d_raises(self) -> None:
+        from src.domain.futures.compound.contracts import SymbolLegBook
+        with pytest.raises(ValueError, match="per_symbol_net_2d must be 2-D"):
+            SymbolLegBook(
+                concept_id="x",
+                book_2d=np.zeros((4, 3), dtype=np.float64),
+                per_symbol_net_2d=np.zeros((4,), dtype=np.float64),
+            )
+
+    def test_non_finite_raises(self) -> None:
+        from src.domain.futures.compound.contracts import SymbolLegBook
+        with pytest.raises(ValueError, match="finite"):
+            SymbolLegBook(
+                concept_id="x",
+                book_2d=np.full((4, 3), np.nan, dtype=np.float64),
+                per_symbol_net_2d=np.zeros((4, 3), dtype=np.float64),
+            )
+        with pytest.raises(ValueError, match="finite"):
+            SymbolLegBook(
+                concept_id="x",
+                book_2d=np.zeros((4, 3), dtype=np.float64),
+                per_symbol_net_2d=np.full((4, 3), np.inf, dtype=np.float64),
+            )
