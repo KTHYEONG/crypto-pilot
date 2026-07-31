@@ -25,6 +25,7 @@ def test_sealed_portfolio_cli_composes_all_required_gates(
         cli.main()
 
     assert "[EVAL] portfolio universe as_of=" in caplog.text
+    assert "selected=[]" not in caplog.text
     assert "[EVAL] reliability observation=" in caplog.text
     assert "[EVAL] reliability fold max_period_contribution=" in caplog.text
     assert "[EVAL] reliability stress_test=" in caplog.text

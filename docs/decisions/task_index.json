@@ -1,6 +1,16 @@
 {
   "tasks": [
     {
+      "task_id": "TASK_PORTFOLIO_INITIAL_UNIVERSE_DIAGNOSTIC",
+      "date": "2026-07-31",
+      "adr_id": "ADR_20260731_PORTFOLIO_INITIAL_UNIVERSE_DIAGNOSTIC",
+      "domain": "execution",
+      "title": "Fix portfolio initial liquidity diagnostic",
+      "why": "The CLI logged an empty initial universe because it queried the first bar before a complete trailing liquidity window existed.",
+      "resolution": "Moved the diagnostic as-of timestamp to the first common 30-day eligible window and added a regression assertion rejecting selected=[] logs.",
+      "impact": "Initial universe logs now show a causal non-empty selection while the engine's daily selection and promotion gates remain unchanged."
+    },
+    {
       "task_id": "TASK_PORTFOLIO_V2_EVALUATION",
       "date": "2026-07-31",
       "adr_id": "ADR_20260731_PORTFOLIO_V2_EVALUATION",
