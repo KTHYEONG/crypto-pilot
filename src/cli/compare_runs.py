@@ -4,7 +4,7 @@ import argparse
 
 import pandas as pd
 
-from src.engine.results_log import RUNS_LOG_PATH, load_runs
+from src.research.provenance.results import RUNS_LOG_PATH, load_runs
 
 _SUMMARY_COLS = [
     "ts", "git_sha", "git_dirty", "symbol", "end",
