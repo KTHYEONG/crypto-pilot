@@ -76,7 +76,7 @@ class TestCostModel:
 class TestCashCarrySpec:
     def test_defaults_are_frozen(self) -> None:
         s = CashCarrySpec(symbol="BTCUSDT")
-        assert (s.initial_margin_rate, s.maintenance_margin_rate) == (0.10, 0.05)
+        assert (s.initial_margin_rate, s.maintenance_margin_rate) == (0.30, 0.15)
         with pytest.raises(AttributeError):
             s.initial_margin_rate = 0.2  # type: ignore[misc]
 
@@ -90,7 +90,7 @@ class TestCashCarrySpec:
         with pytest.raises(ValueError, match="maintenance_margin_rate"):
             CashCarrySpec(symbol="BTCUSDT", maintenance_margin_rate=0.0)
         with pytest.raises(ValueError, match="maintenance_margin_rate"):
-            CashCarrySpec(symbol="BTCUSDT", maintenance_margin_rate=0.15)
+            CashCarrySpec(symbol="BTCUSDT", maintenance_margin_rate=0.35)
 
 
 class TestCarryCostModel:
