@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 
 _logger = logging.getLogger("DataLoader")
@@ -10,6 +11,23 @@ _logger = logging.getLogger("DataLoader")
 
 class DataIntegrityError(ValueError):
     pass
+
+
+def _taker_buy_quote_series(df: pd.DataFrame) -> pd.Series:
+    """Quote-notional taker-buy flow per source bar.
+
+    Prefers ``taker_buy_quote``; falls back to ``taker_buy_quote_volume`` only
+    where the former is null. Returns NaN where no flow is available.
+    """
+    if "taker_buy_quote" in df.columns:
+        primary = pd.to_numeric(df["taker_buy_quote"], errors="coerce").astype("float64")
+        if "taker_buy_quote_volume" in df.columns:
+            fallback = pd.to_numeric(df["taker_buy_quote_volume"], errors="coerce").astype("float64")
+            return primary.where(primary.notna(), fallback)
+        return primary
+    if "taker_buy_quote_volume" in df.columns:
+        return pd.to_numeric(df["taker_buy_quote_volume"], errors="coerce").astype("float64")
+    return pd.Series(np.nan, index=df.index, dtype="float64")
 
 
 def load_ohlcv_4h(
@@ -55,17 +73,31 @@ def load_ohlcv_4h(
         if col in df.columns:
             df[col] = df[col].astype("float64")
 
-    resampled = df.resample("4h", label="left", closed="left").agg({
+    working = df.copy()
+    if "quote_vol" in working.columns:
+        working["quote_vol"] = pd.to_numeric(working["quote_vol"], errors="coerce").astype("float64")
+    else:
+        working["quote_vol"] = np.nan
+    working["taker_buy_quote"] = _taker_buy_quote_series(working)
+
+    agg = {
         "open": "first",
         "high": "max",
         "low": "min",
         "close": "last",
         "volume": "sum",
-    })
+        "quote_vol": "sum",
+        "taker_buy_quote": "sum",
+    }
+    resampled = working.resample("4h", label="left", closed="left").agg(agg)
 
-    source_counts = df.resample("4h", label="left", closed="left").size()
+    source_counts = working.resample("4h", label="left", closed="left").size()
     full_buckets = source_counts[source_counts == 4].index
     resampled = resampled.loc[full_buckets].copy()
+
+    with np.errstate(divide="ignore", invalid="ignore"):
+        ratio = resampled["taker_buy_quote"] / resampled["quote_vol"]
+    resampled["taker_buy_ratio"] = ratio.where(resampled["quote_vol"] > 0)
 
     if start is not None:
         start_ts = pd.to_datetime(start, utc=True) if isinstance(start, str) else start
@@ -74,7 +106,7 @@ def load_ohlcv_4h(
         end_ts = pd.to_datetime(end, utc=True) if isinstance(end, str) else end
         resampled = resampled[resampled.index <= end_ts]
 
-    resampled.columns = ["open", "high", "low", "close", "volume"]
+    resampled = resampled[["open", "high", "low", "close", "volume", "quote_vol", "taker_buy_quote", "taker_buy_ratio"]]
     resampled.index.name = "ts"
 
     _logger.info(
