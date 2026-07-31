@@ -62,6 +62,7 @@ ignore = [
 "tests/*" = ["S101", "E402", "N803", "N806", "ARG", "I001", "RUF059", "F841"]
 "scripts/*" = ["T20"]
 "src/data/vision.py" = ["E501"]
+"src/cli/compare_runs.py" = ["T20"]  # human-readable tabular stdout, not structured logging
 
 [tool.ruff.lint.mccabe]
 max-complexity = 15

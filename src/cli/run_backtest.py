@@ -9,6 +9,7 @@ from src.config import CostModel, StrategySpec, ohlcv_path
 from src.data.loader import load_ohlcv_4h
 from src.engine import run_backtest
 from src.metrics import compute_metrics
+from src.results_log import record_run
 
 _logger = logging.getLogger("BacktestRunner")
 
@@ -25,6 +26,10 @@ def main() -> None:
     parser.add_argument("--end", default=None)
     parser.add_argument("--initial-equity", type=float, default=10_000.0)
     parser.add_argument("--unseal-holdout", action="store_true", default=False)
+    parser.add_argument(
+        "--no-log-run", action="store_true", default=False,
+        help="Skip appending this run to docs/results/runs.jsonl",
+    )
     args = parser.parse_args()
 
     end: str | pd.Timestamp | None
@@ -63,6 +68,14 @@ def main() -> None:
     )
     _logger.info("[EVAL] exposure=%.3f", metrics.exposure)
     _logger.info("[EVAL] trades_per_year=%s", metrics.trades_per_year)
+
+    if not args.no_log_run:
+        rec = record_run(
+            spec=spec, costs=costs, result=result, metrics=metrics,
+            start=args.start, end=str(end) if end is not None else None,
+            initial_equity=args.initial_equity,
+        )
+        _logger.info("[EVAL] run logged: git_sha=%s dirty=%s", rec["git_sha"], rec["git_dirty"])
 
 
 if __name__ == "__main__":
