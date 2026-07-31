@@ -24,7 +24,7 @@ def test_engine_run_backtest() -> None:
     assert result.equity.index.equals(df.index)
     assert result.equity.notna().all()
     assert set(result.trades.columns) == {
-        "entry_bar", "entry_price", "exit_price", "qty", "reason", "pnl",
+        "entry_bar", "exit_bar", "entry_price", "exit_price", "qty", "reason", "pnl",
         "return_pct", "funding_pnl",
     }
     assert "entry_signal" in result.signals.columns
@@ -93,6 +93,32 @@ class TestExecution:
             next_entry = result.trades["entry_bar"].values[1:]
             for e, n in zip(exit_bars, next_entry, strict=False):
                 assert n > e, "same-bar reentry detected"
+
+
+class TestExitBarSurface:
+    """SC-ENGINE-EXIT-01: every closed trade exposes its actual exit bar."""
+
+    def test_run_backtest_trades_expose_exit_bar(self, btc_4h_slice: pd.DataFrame) -> None:
+        spec = StrategySpec()
+        costs = CostModel()
+        result = run_backtest(btc_4h_slice, spec, costs)
+        assert {"entry_bar", "exit_bar"}.issubset(result.trades.columns)
+        assert len(result.trades) > 0, "fixture must produce at least one closed trade"
+        for _, t in result.trades.iterrows():
+            eb, xb = int(t["entry_bar"]), int(t["exit_bar"])
+            assert xb < len(btc_4h_slice), "exit_bar must index the backtest bar window"
+            assert 0 <= eb <= xb, "a trade must exit no earlier than its entry bar"
+            if t["reason"] != "stop_entrybar":
+                assert xb > eb, "a held trade must exit strictly after its entry bar"
+
+    def test_entry_bar_stop_exit_bar_equals_entry_bar(self, bars_stop_gap: pd.DataFrame) -> None:
+        spec = StrategySpec(risk_per_trade=0.01, ema_period=2, entry_period=2, atr_period=2)
+        costs = CostModel()
+        result = run_backtest(bars_stop_gap, spec, costs)
+        if len(result.trades) > 0:
+            entrybar_stops = result.trades[result.trades["reason"] == "stop_entrybar"]
+            for _, t in entrybar_stops.iterrows():
+                assert int(t["exit_bar"]) == int(t["entry_bar"])
 
 
 @pytest.mark.slow
