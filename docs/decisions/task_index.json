@@ -1,6 +1,16 @@
 {
   "tasks": [
     {
+      "task_id": "TASK_PORTFOLIO_V2_EVALUATION",
+      "date": "2026-07-31",
+      "adr_id": "ADR_20260731_PORTFOLIO_V2_EVALUATION",
+      "domain": "risk",
+      "title": "Causal liquidity portfolio v2 evaluation",
+      "why": "Compare the implemented five-slot liquidity portfolio against the frozen BTC reliability gates.",
+      "resolution": "Recorded the latest portfolio run as rejected because observation LCB90, t-stat, fold concentration, and stress gates failed.",
+      "impact": "CAGR rose to 16.41% but LCB90 fell to 1.84%, MDD widened to -20.83%, and promotion remains fail-closed."
+    },
+    {
       "task_id": "TASK_TAKER_FLOW_CONFIRMATION",
       "date": "2026-07-31",
       "adr_id": "ADR_20260731_TAKER_FLOW_CONFIRMATION",
