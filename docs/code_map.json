@@ -19,5 +19,40 @@
   "src/cli/run_portfolio_backtest.py": {
     "testing": "tests/integration/test_portfolio_promotion.py"
   },
-  "src/cli/run_cash_carry_backtest.py": {}
+  "src/data/ohlcv_store.py": {
+    "testing": [
+      "tests/unit/data/test_ohlcv_store.py",
+      "tests/unit/data/test_collector.py"
+    ]
+  },
+  "src/data/spot_collector.py": {
+    "testing": "tests/unit/data/test_spot_collector.py"
+  },
+  "src/data/carry_data.py": {
+    "testing": "tests/unit/data/test_carry_data.py"
+  },
+  "src/data/binance.py": {
+    "testing": [
+      "tests/unit/data/test_spot_collector.py",
+      "tests/unit/data/test_binance.py"
+    ]
+  },
+  "src/data/loader.py": {
+    "testing": "tests/unit/data/test_loader.py"
+  },
+  "src/strategy/cash_carry.py": {
+    "testing": "tests/unit/strategy/test_cash_carry.py"
+  },
+  "src/engine/cash_carry_backtest.py": {
+    "testing": "tests/unit/engine/test_cash_carry_backtest.py"
+  },
+  "src/validation/candidate_registry.py": {
+    "testing": "tests/unit/validation/test_candidate_registry.py"
+  },
+  "src/validation/research_memory.py": {
+    "testing": "tests/unit/validation/test_research_memory.py"
+  },
+  "src/cli/run_cash_carry_backtest.py": {
+    "testing": "tests/integration/test_cash_carry_cli.py"
+  }
 }

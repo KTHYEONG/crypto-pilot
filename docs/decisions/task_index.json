@@ -1,6 +1,26 @@
 {
   "tasks": [
     {
+      "task_id": "TASK_BINANCE_MARGIN_BORROW_COLLECTION",
+      "date": "2026-07-31",
+      "adr_id": "ADR_20260731_BINANCE_MARGIN_BORROW_COLLECTION",
+      "domain": "risk",
+      "title": "Binance Margin borrow history collection",
+      "why": "Cash-carry evaluation was blocked because Binance quote-borrow history was not persisted in the canonical spot lake.",
+      "resolution": "Added signed Binance Margin interest-rate collection, interval-cost conversion, canonical borrow persistence, CLI wiring, tests, and synchronized all spec artifacts.",
+      "impact": "Borrow collection now succeeds for the sealed window, while carry remains pending until existing funding timestamp jitter is normalized."
+    },
+    {
+      "task_id": "TASK_CARRY_PHASE_B_DATA_EVALUATION",
+      "date": "2026-07-31",
+      "adr_id": "ADR_20260731_CARRY_PHASE_B_DATA_EVALUATION",
+      "domain": "risk",
+      "title": "Cash-carry Phase B independent data and sealed evaluation",
+      "why": "Phase B was blocked because the independent spot OHLCV and quote-borrow history inputs were absent, and the carry CLI mixed IO, hashing, and gate execution.",
+      "resolution": "Implemented the canonical spot lake and ohlcv_store atomic write path, the Binance spot collector, canonical borrow import with explicit accrual cadence, explicit 1h-to-4h carry loading, funding/borrow interval-aligned target, append-only candidate pre-registration, idempotent anti-pattern evidence, and split the CLI into register/run commands.",
+      "impact": "All 198 tests pass with strict mypy and ruff; the sealed run reports PENDING until a reproducible historical quote-borrow export covering the observation window is supplied, and the borrowed data pipeline now fail-closes on any unit ambiguity or coverage gap."
+    },
+    {
       "task_id": "gate_pass_basis_carry_research",
       "date": "2026-07-31",
       "adr_id": "ADR_20260731_gate_pass_basis_carry_research",
