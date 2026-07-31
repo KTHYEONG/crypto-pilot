@@ -13,6 +13,7 @@ from src.data.loader import DataIntegrityError, load_funding_rates, load_ohlcv_1
 _logger = setup_logger("CarryData")
 
 _OHLCV_COLUMNS = ("open", "high", "low", "close")
+_FUNDING_GAP_JITTER_TOLERANCE = pd.Timedelta(milliseconds=50)
 
 
 @dataclass(frozen=True, slots=True)
@@ -110,9 +111,10 @@ def validate_carry_market_data(
     if not ((fts >= grid[0]) & (fts < window_end)).all():
         raise DataIntegrityError("funding events outside the bar window")
     event_gaps = fts.to_series().diff().dropna()
-    if len(event_gaps) > 0 and event_gaps.max() > max_funding_gap:
+    allowed_funding_gap = max_funding_gap + _FUNDING_GAP_JITTER_TOLERANCE
+    if len(event_gaps) > 0 and event_gaps.max() > allowed_funding_gap:
         raise DataIntegrityError(
-            f"funding gap > {max_funding_gap} detected between events"
+            f"funding gap > {allowed_funding_gap} detected between events"
         )
     if fts[0] > grid[0] + max_funding_gap:
         raise DataIntegrityError("funding coverage missing at window start")
