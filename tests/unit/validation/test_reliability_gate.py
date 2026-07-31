@@ -7,10 +7,10 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from src.config import CostModel, StrategySpec
+from src.core.types import CostModel, StrategySpec
 from src.data.loader import load_ohlcv_4h
-from src.engine import BacktestResult
-from src.reliability_gate import (
+from src.engine.backtest import BacktestResult
+from src.validation.reliability_gate import (
     FoldDistributionResult,
     ReliabilityGateConfig,
     ReliabilityGateResult,
@@ -86,6 +86,15 @@ def _strongly_positive_trades(n: int = 50, mean: float = 0.02, seed: int = 1) ->
     rng = np.random.default_rng(seed)
     rets = np.abs(rng.normal(mean, 0.01, n))
     return pd.DataFrame({"return_pct": rets})
+
+
+def test_reliability_gate_execution() -> None:
+    trades = _strongly_positive_trades(seed=2)
+    result = compute_reliability_gate(trades, years=2.0, sharpe=1.5, mdd=-0.05)
+    assert isinstance(result, ReliabilityGateResult)
+    assert result.verdict == "PASS"
+    assert result.trade_count == len(trades)
+    assert result.lcb90_cagr > 0.15
 
 
 class TestComputeReliabilityGate:
@@ -217,7 +226,7 @@ class TestComputeFoldDistribution:
 
     def test_compute_fold_distribution_matches_measured_v1_concentration(self) -> None:
         df = load_ohlcv_4h(BTC_PATH, end="2025-12-31 23:59:59")
-        from src.engine import run_backtest
+        from src.engine.backtest import run_backtest
 
         spec, costs = StrategySpec(), CostModel()
         result = run_backtest(df, spec, costs)

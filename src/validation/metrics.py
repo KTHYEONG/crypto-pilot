@@ -5,7 +5,7 @@ from dataclasses import dataclass
 import numpy as np
 import pandas as pd
 
-from src.logging_setup import setup_logger
+from src.core.logging_setup import setup_logger
 
 _logger = setup_logger("Metrics")
 

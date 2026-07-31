@@ -2,7 +2,19 @@ from __future__ import annotations
 
 import pytest
 
-from src.config import CostModel, StrategySpec
+from src.core.types import CostModel, StrategySpec
+
+
+def test_strategy_spec_contract() -> None:
+    spec = StrategySpec()
+    assert spec.symbol == "BTCUSDT"
+    assert spec.entry_period == 20
+    assert spec.timeframe == "4h"
+
+
+def test_cost_model_round_trip_bps() -> None:
+    cm = CostModel()
+    assert abs(cm.round_trip_bps() - 16.0) < 1e-6
 
 
 class TestStrategySpec:
