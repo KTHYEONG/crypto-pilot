@@ -30,12 +30,18 @@ def _taker_buy_quote_series(df: pd.DataFrame) -> pd.Series:
     return pd.Series(np.nan, index=df.index, dtype="float64")
 
 
-def load_ohlcv_4h(
+def load_ohlcv_1h_as_4h(
     path: Path,
     *,
     start: str | pd.Timestamp | None = None,
     end: str | pd.Timestamp | None = None,
 ) -> pd.DataFrame:
+    """Load a canonical 1h kline parquet and explicitly resample to an exact 4h grid.
+
+    The 1h source is fail-closed validated (tz-aware UTC, strictly monotonic,
+    no gaps) before resampling; only 4h buckets with exactly four source bars
+    are retained. ``start``/``end`` bound the returned grid.
+    """
     df = pd.read_parquet(path)
 
     if "datetime" in df.columns and "timestamp" not in df.columns:
@@ -110,10 +116,32 @@ def load_ohlcv_4h(
     resampled.index.name = "ts"
 
     _logger.info(
-        "load_ohlcv_4h path=%s rows=%d start=%s end=%s",
+        "load_ohlcv_1h_as_4h path=%s rows=%d start=%s end=%s",
         path, len(resampled),
         resampled.index[0] if not resampled.empty else "N/A",
         resampled.index[-1] if not resampled.empty else "N/A",
     )
 
     return resampled
+
+
+load_ohlcv_4h = load_ohlcv_1h_as_4h  # compatibility alias for non-carry callers
+
+
+def load_funding_rates(path: str | Path) -> pd.Series:
+    """Load a published-funding parquet into a monotonic UTC rate Series."""
+    p = Path(path)
+    if not p.exists():
+        raise DataIntegrityError(f"funding path does not exist: {path}")
+    df = pd.read_parquet(p)
+    if "datetime" in df.columns:
+        ts = pd.to_datetime(df["datetime"], utc=True, errors="coerce")
+    elif "timestamp" in df.columns:
+        ts = pd.to_datetime(pd.to_numeric(df["timestamp"], errors="coerce"), unit="ms", utc=True)
+    else:
+        raise DataIntegrityError("funding parquet must contain a 'datetime' or 'timestamp' column")
+    if "funding_rate" not in df.columns:
+        raise DataIntegrityError("funding parquet must contain a 'funding_rate' column")
+    rates = pd.to_numeric(df["funding_rate"], errors="coerce")
+    series = pd.Series(rates.to_numpy(dtype="float64"), index=pd.DatetimeIndex(ts))
+    return series[series.index.notna()].sort_index()
