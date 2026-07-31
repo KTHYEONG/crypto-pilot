@@ -4,16 +4,8 @@ import argparse
 import logging
 
 import pandas as pd
-from dotenv import load_dotenv
 
-from src.core.config import BASE_DIR
-from src.data.collector import DataCollector
-from src.data.spot_collector import (
-    SpotDataCollector,
-    collect_binance_quote_borrow_history,
-    import_quote_borrow_history,
-    repair_spot_ohlcv_gap,
-)
+from src.application import collection
 
 _logger = logging.getLogger(__name__)
 
@@ -23,32 +15,30 @@ def _ohlcv(args: argparse.Namespace) -> None:
     # string parses to NaT, which makes every range comparison False and the
     # whole fetch silently no-ops. Default explicitly to "now" instead.
     end = args.end or str(pd.Timestamp.now(tz="UTC"))
-    collector = DataCollector()
-    collector.ensure_ohlcv_data(args.symbol, args.timeframe, args.start, end)
+    collection.collect_ohlcv(args.symbol, args.timeframe, args.start, end)
     _logger.info("Data collection complete for %s %s (through %s)", args.symbol, args.timeframe, end)
 
 
 def _spot_ohlcv(args: argparse.Namespace) -> None:
     end = args.end or str(pd.Timestamp.now(tz="UTC"))
-    SpotDataCollector().ensure_spot_ohlcv(args.symbol, args.timeframe, args.start, end)
+    collection.collect_spot_ohlcv(args.symbol, args.timeframe, args.start, end)
     _logger.info("Spot data collection complete for %s %s (through %s)", args.symbol, args.timeframe, end)
 
 
 def _import_borrow(args: argparse.Namespace) -> None:
-    import_quote_borrow_history(args.symbol, args.source, args.source_id, args.rate_period)
+    collection.import_borrow(args.symbol, args.source, args.source_id, args.rate_period)
     _logger.info("Borrow history imported for %s from %s", args.symbol, args.source)
 
 
 def _collect_borrow(args: argparse.Namespace) -> None:
-    load_dotenv(BASE_DIR / ".env")
-    collect_binance_quote_borrow_history(args.symbol, args.asset, args.start, args.end)
+    collection.collect_borrow(args.symbol, args.asset, args.start, args.end)
     _logger.info(
         "Binance Margin borrow history collected for %s (%s)", args.symbol, args.asset,
     )
 
 
 def _repair_spot_gap(args: argparse.Namespace) -> None:
-    repair_spot_ohlcv_gap(args.symbol, args.timeframe, args.timestamp)
+    collection.repair_spot_gap(args.symbol, args.timeframe, args.timestamp)
     _logger.info(
         "Spot OHLCV gap repaired for %s %s at %s",
         args.symbol, args.timeframe, args.timestamp,
