@@ -9,6 +9,12 @@ from src.config import CostModel, StrategySpec, ohlcv_path
 from src.data.loader import load_ohlcv_4h
 from src.engine import run_backtest
 from src.metrics import compute_metrics
+from src.reliability_gate import (
+    compute_fold_distribution,
+    compute_reliability_gate,
+    compute_stress_test_gate,
+    split_holdout_segment,
+)
 from src.results_log import record_run
 
 _logger = logging.getLogger("BacktestRunner")
@@ -69,11 +75,64 @@ def main() -> None:
     _logger.info("[EVAL] exposure=%.3f", metrics.exposure)
     _logger.info("[EVAL] trades_per_year=%s", metrics.trades_per_year)
 
+    years = (result.equity.index[-1] - result.equity.index[0]).total_seconds() / (365.25 * 86400)
+    observation_gate = compute_reliability_gate(
+        result.trades, years=years, sharpe=metrics.sharpe, mdd=metrics.mdd,
+    )
+    fold_distribution = compute_fold_distribution(result)
+    stress_gate = compute_stress_test_gate(df, spec, costs)
+
+    holdout_gate = None
+    if args.unseal_holdout and result.equity.index[-1] > HOLDOUT_CUTOFF:
+        segment = split_holdout_segment(result, HOLDOUT_CUTOFF)
+        obs_metrics = compute_metrics(segment.observation_equity, segment.observation_trades)
+        obs_years = (
+            (segment.observation_equity.index[-1] - segment.observation_equity.index[0])
+            .total_seconds() / (365.25 * 86400)
+        )
+        observation_gate = compute_reliability_gate(
+            segment.observation_trades, years=obs_years,
+            sharpe=obs_metrics.sharpe, mdd=obs_metrics.mdd,
+        )
+        holdout_metrics = compute_metrics(
+            segment.holdout_equity,
+            segment.holdout_trades.drop(columns=["entry_bar"], errors="ignore"),
+        )
+        holdout_gate = compute_reliability_gate(
+            segment.holdout_trades, years=segment.holdout_years,
+            sharpe=holdout_metrics.sharpe, mdd=holdout_metrics.mdd,
+        )
+
+    _logger.info(
+        "[EVAL] reliability observation=%s lcb90=%.4f block=%d trades=%d",
+        observation_gate.verdict, observation_gate.lcb90_cagr,
+        observation_gate.block_size_used, observation_gate.trade_count,
+    )
+    _logger.info(
+        "[EVAL] reliability fold max_period_contribution=%.4f gate_pass=%s n_folds=%d",
+        fold_distribution.max_period_contribution, fold_distribution.gate_pass,
+        fold_distribution.n_folds,
+    )
+    _logger.info(
+        "[EVAL] reliability stress_test=%s stressed_cagr=%.4f",
+        stress_gate.verdict, stress_gate.point_cagr,
+    )
+    if holdout_gate is not None:
+        _logger.info(
+            "[EVAL] reliability holdout=%s trades=%d holdout_mdd=%.4f holdout_cagr_sign=%.4f",
+            holdout_gate.verdict, holdout_gate.trade_count,
+            segment.holdout_mdd, segment.holdout_cagr_sign,
+        )
+
     if not args.no_log_run:
         rec = record_run(
             spec=spec, costs=costs, result=result, metrics=metrics,
             start=args.start, end=str(end) if end is not None else None,
             initial_equity=args.initial_equity,
+            observation_gate=observation_gate,
+            fold_distribution=fold_distribution,
+            stress_gate=stress_gate,
+            holdout_gate=holdout_gate,
         )
         _logger.info("[EVAL] run logged: git_sha=%s dirty=%s", rec["git_sha"], rec["git_dirty"])
 
