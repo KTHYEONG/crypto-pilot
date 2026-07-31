@@ -190,12 +190,11 @@ class TestResultsLog:
         assert rec["promotion"]["fold_gate_pass"] is True
         assert rec["promotion"]["stress_verdict"] == "PASS"
         assert rec["promotion"]["holdout_verdict"] is None
-        assert rec["promotion"]["candidate"]["hypothesis_id"] == "hyp-001"
-        assert rec["promotion"]["candidate"]["return_source"] == "breakout"
+        assert "candidate" not in rec["promotion"]
+        assert rec["promotion"]["status"] == "OBSERVATION_PASS"
 
         df = load_runs(log_path)
         assert df.loc[0, "promotion.status"] == "OBSERVATION_PASS"
-        assert df.loc[0, "promotion.candidate.hypothesis_id"] == "hyp-001"
 
     def test_record_run_without_promotion_keeps_field_null_and_backward_compat(
         self, tmp_path: Path, spec: StrategySpec, costs: CostModel, bars_ramp: pd.DataFrame,
@@ -215,7 +214,7 @@ class TestResultsLog:
         assert rec["reliability"]["observation"]["verdict"] == "PASS"
         assert rec["window"] == "observation"
 
-    def test_record_cash_carry_run_persists_spec_costs_and_candidate(
+    def test_record_cash_carry_run_persists_comparison_summary(
         self, tmp_path: Path, make_carry_data,
     ) -> None:
         from src.engine.cash_carry_backtest import run_cash_carry_backtest
@@ -258,7 +257,9 @@ class TestResultsLog:
         assert rec["cash_carry_spec"]["initial_margin_rate"] == 0.10
         assert rec["costs"]["spot_fee_rate"] == 0.001
         assert rec["costs"]["perp_fee_rate"] == 0.0005
-        assert rec["candidate"]["hypothesis_id"] == "cash_and_carry_basis"
+        assert "candidate" not in rec
+        assert rec["promotion"]["status"] == promotion.status
+        assert rec["reliability"]["observation"]["verdict"] == observation.verdict
         df = load_runs(log_path)
         assert df.loc[0, "cash_carry_spec.symbol"] == "BTCUSDT"
-        assert df.loc[0, "candidate.return_source"] == "funding_carry"
+        assert df.loc[0, "promotion.status"] == promotion.status
