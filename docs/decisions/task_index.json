@@ -1,6 +1,16 @@
 {
   "tasks": [
     {
+      "task_id": "TASK_DIRECTORY_REORGANIZATION",
+      "date": "2026-07-31",
+      "adr_id": "ADR_20260731_DIRECTORY_REORGANIZATION",
+      "domain": "execution",
+      "title": "Codebase Directory Reorganization and Config Centralization",
+      "why": "Flat module structure in src root caused scattered config variables and circular import risks as features expanded.",
+      "resolution": "Reorganized codebase into layered subpackages (core, data, strategy, engine, validation, cli) and synchronized unit and integration tests.",
+      "impact": "Eliminated duplicate variable definitions, enforced unidirectional layer architecture, and established clean maintainability for scaling."
+    },
+    {
       "task_id": "TASK_LEAN_CHECK_SCHEMA_ALIGNMENT",
       "date": "2026-07-31",
       "adr_id": "ADR_20260731_LEAN_CHECK_SCHEMA_ALIGNMENT",
