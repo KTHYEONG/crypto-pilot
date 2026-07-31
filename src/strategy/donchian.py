@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pandas as pd
 
-from src.config import StrategySpec
+from src.core.types import StrategySpec
 
 
 def donchian_upper(high: pd.Series, period: int) -> pd.Series:
