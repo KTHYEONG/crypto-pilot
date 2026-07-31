@@ -7,10 +7,10 @@ from typing import Literal
 import numpy as np
 import pandas as pd
 
-from src.config import CostModel, StrategySpec
-from src.engine import BacktestResult, run_backtest
-from src.logging_setup import setup_logger
-from src.metrics import compute_metrics
+from src.core.logging_setup import setup_logger
+from src.core.types import CostModel, StrategySpec
+from src.engine.backtest import BacktestResult, run_backtest
+from src.validation.metrics import compute_metrics
 
 _logger = setup_logger("ReliabilityGate")
 
