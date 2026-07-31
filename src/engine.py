@@ -57,12 +57,19 @@ def run_backtest(
     spec: StrategySpec,
     costs: CostModel,
     initial_equity: float = 10_000.0,
+    signal_delay_bars: int = 0,
 ) -> BacktestResult:
     from src.strategy import generate_signals
 
-    feat = generate_signals(df, spec)
+    if signal_delay_bars < 0:
+        raise ValueError(f"signal_delay_bars must be >= 0, got {signal_delay_bars}")
 
-    warmup = max(spec.ema_period, spec.entry_period, spec.atr_period) + 1
+    feat = generate_signals(df, spec)
+    if signal_delay_bars > 0:
+        feat["entry_signal"] = feat["entry_signal"].shift(signal_delay_bars).fillna(False).astype(bool)
+        feat["exit_lower"] = feat["exit_lower"].shift(signal_delay_bars)
+
+    warmup = max(spec.ema_period, spec.entry_period, spec.atr_period) + 1 + signal_delay_bars
     atr_arr = feat["atr"].to_numpy(dtype=np.float64)
 
     equity_arr = np.full(len(feat), np.nan, dtype=np.float64)
@@ -70,6 +77,7 @@ def run_backtest(
     position_qty = 0.0
     entry_price = 0.0
     stop_price = 0.0
+    entry_bar_idx = -1
     pending_entry = False
     pending_exit = False
     exited_this_bar = False
@@ -103,7 +111,7 @@ def run_backtest(
             cash += position_qty * exit_price - exit_fee
             pnl -= exit_fee
             trades.append(TradeRecord(
-                entry_bar=t, entry_price=entry_price,
+                entry_bar=entry_bar_idx, entry_price=entry_price,
                 exit_price=exit_price, qty=position_qty,
                 reason=reason, pnl=pnl,
                 return_pct=pnl / (cash - pnl) if cash != pnl else 0.0,
@@ -141,6 +149,7 @@ def run_backtest(
                 position_qty = qty
                 entry_price = fill
                 stop_price = fill - stop_distance
+                entry_bar_idx = t
 
                 # 7b. entry-bar stop check
                 if l_ <= stop_price:
@@ -150,7 +159,7 @@ def run_backtest(
                     cash += position_qty * exit_price - exit_fee
                     pnl -= exit_fee
                     trades.append(TradeRecord(
-                        entry_bar=t, entry_price=entry_price,
+                        entry_bar=entry_bar_idx, entry_price=entry_price,
                         exit_price=exit_price, qty=qty,
                         reason="stop_entrybar", pnl=pnl,
                         return_pct=pnl / (cash - pnl) if cash != pnl else 0.0,
