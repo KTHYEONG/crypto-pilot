@@ -109,3 +109,41 @@ class TestCashCarryTarget:
             )
         with pytest.raises(ValueError, match="Timestamp"):
             generate_cash_carry_target(data, "not-a-timestamp", is_open=False)
+
+    def test_accumulates_borrow_since_prior_funding_settlement(
+        self,
+        make_carry_data,
+    ) -> None:
+        # SC-CARRY-SIGNAL-02: the target compares funding against the borrow
+        # accrued over the whole elapsed interval since the prior settlement,
+        # not a single arbitrary bar: an 8h funding gap means two bars of
+        # borrow are weighed against one funding settlement.
+        data = make_carry_data(
+            n_bars=6,
+            funding={
+                "2024-01-01 00:00": 0.0,
+                "2024-01-01 04:00": 0.001,
+                "2024-01-01 12:00": 0.001,
+                "2024-01-01 16:00": 0.0,
+                "2024-01-01 20:00": 0.0,
+            },
+            borrow=[0.0, 0.0, 0.0007, 0.0004, 0.0, 0.0],
+        )
+        grid = data.spot.index
+        # At bar 3 the elapsed interval since the bar-1 settlement carries
+        # bar2 + bar3 borrow (0.0011 > 0.001 funding) -> close.
+        assert generate_cash_carry_target(data, grid[3], is_open=True) == "CLOSE"
+
+    def test_borrow_from_first_valid_event_boundary_without_prior_funding(
+        self,
+        make_carry_data,
+    ) -> None:
+        # The first funding settlement accrues borrow from the window start.
+        data = make_carry_data(
+            n_bars=3,
+            funding={"2024-01-01 04:00": 0.001},
+            borrow=[0.001, 0.0, 0.0],
+        )
+        grid = data.spot.index
+        assert generate_cash_carry_target(data, grid[1], is_open=False) == "HOLD"
+        assert generate_cash_carry_target(data, grid[1], is_open=True) == "CLOSE"
