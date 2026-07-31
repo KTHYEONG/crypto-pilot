@@ -1,0 +1,643 @@
+{
+  "src/domain/futures/optimization/portfolio_constructor.py": {
+    "architecture": "docs/architecture/layer2.md",
+    "testing": "tests/unit/optimization/test_portfolio_constructor.py"
+  },
+  "src/domain/futures/alpha_foundry/contracts.py": {
+    "architecture": "docs/architecture/layer0.md",
+    "testing": [
+      "tests/unit/domain/futures/alpha_foundry/test_contracts.py",
+      "tests/unit/domain/futures/alpha_foundry/test_evidence_rows.py",
+      "tests/unit/domain/futures/alpha_foundry/test_alpha_search_contracts.py",
+      "tests/unit/domain/futures/alpha_foundry/test_gate_v2.py",
+      "tests/unit/domain/futures/alpha_foundry/test_alpha_family_registration.py",
+      "tests/unit/domain/futures/alpha_foundry/test_entry_timing.py",
+      "tests/unit/domain/futures/alpha_foundry/test_causal_l1_feedback.py",
+      "tests/unit/domain/futures/alpha_foundry/test_timeframe_scaled_gate_policy.py"
+    ]
+  },
+  "src/domain/futures/alpha_foundry/recipes.py": {
+    "architecture": "docs/architecture/layer0.md",
+    "testing": [
+      "tests/unit/domain/futures/alpha_foundry/test_recipes.py",
+      "tests/unit/domain/futures/alpha_foundry/test_synthetic_recipe_binding.py",
+      "tests/unit/domain/futures/alpha_foundry/test_alpha_family_registration.py"
+    ]
+  },
+  "src/domain/futures/alpha_foundry/cheap_gate.py": {
+    "architecture": "docs/results/result.md",
+    "testing": [
+      "tests/unit/domain/futures/alpha_foundry/test_cheap_gate.py",
+      "tests/unit/domain/futures/alpha_foundry/test_gate_v2.py",
+      "tests/unit/domain/futures/alpha_foundry/test_bridge_helpers_multi_tf.py",
+      "tests/unit/domain/futures/alpha_foundry/test_timeframe_scaled_gate_policy.py"
+    ]
+  },
+  "src/domain/futures/alpha_foundry/forward_returns.py": {
+    "architecture": "docs/architecture/layer1.md",
+    "testing": "tests/unit/domain/futures/alpha_foundry/test_forward_returns.py"
+  },
+  "src/domain/futures/alpha_foundry/search_space.py": {
+    "architecture": "docs/architecture/layer1.md",
+    "testing": "tests/unit/domain/futures/alpha_foundry/test_alpha_search_contracts.py"
+  },
+  "src/domain/futures/alpha_foundry/diversity.py": {
+    "architecture": "docs/decisions/decisions.md",
+    "testing": [
+      "tests/unit/domain/futures/alpha_foundry/test_diversity.py",
+      "tests/unit/domain/futures/alpha_foundry/test_diversity_selection.py"
+    ]
+  },
+  "src/domain/futures/alpha_foundry/budget.py": {
+    "architecture": "docs/architecture/layer1.md",
+    "testing": [
+      "tests/unit/domain/futures/alpha_foundry/test_budget.py",
+      "tests/unit/domain/futures/alpha_foundry/test_l1_budget_allocation.py"
+    ]
+  },
+  "src/domain/futures/alpha_foundry/multi_tf_fusion.py": {
+    "architecture": "docs/architecture/layer0.md",
+    "testing": [
+      "tests/unit/domain/futures/alpha_foundry/test_multi_tf_fusion.py",
+      "tests/unit/domain/futures/alpha_foundry/test_multi_tf_fusion_weighted.py"
+    ]
+  },
+  "src/domain/futures/alpha_foundry/discovery_units.py": {
+    "architecture": "docs/architecture/layer1.md",
+    "testing": "tests/unit/domain/futures/alpha_foundry/test_discovery_units.py"
+  },
+  "src/domain/futures/alpha_foundry/entry_timing.py": {
+    "architecture": "docs/architecture/layer1.md",
+    "testing": "tests/unit/domain/futures/alpha_foundry/test_entry_timing.py"
+  },
+  "src/domain/futures/alpha_foundry/posterior.py": {
+    "architecture": "docs/architecture/layer1.md",
+    "testing": "tests/unit/domain/futures/alpha_foundry/test_posterior.py"
+  },
+  "src/domain/futures/alpha_foundry/l2_policy.py": {
+    "architecture": "docs/architecture/layer2.md",
+    "testing": "tests/unit/domain/futures/alpha_foundry/test_l2_policy.py"
+  },
+  "src/domain/futures/alpha_foundry/pipeline.py": {
+    "architecture": "docs/architecture/layer0.md",
+    "testing": [
+      "tests/unit/domain/futures/alpha_foundry/test_pipeline.py",
+      "tests/unit/domain/futures/alpha_foundry/test_cheap_gate.py",
+      "tests/unit/domain/futures/alpha_foundry/test_timeframe_scaled_gate_policy.py"
+    ]
+  },
+  "src/domain/futures/alpha_foundry/bridge_helpers.py": {
+    "architecture": "docs/architecture/layer0.md",
+    "testing": [
+      "tests/unit/domain/futures/alpha_foundry/test_panel_binding.py",
+      "tests/unit/domain/futures/alpha_foundry/test_evidence_rows.py",
+      "tests/unit/domain/futures/alpha_foundry/test_synthetic_recipe_binding.py",
+      "tests/unit/application/futures/runner/test_alpha_foundry_wiring.py",
+      "tests/unit/domain/futures/strategy_runtime/test_bridge_alpha_foundry.py",
+      "tests/unit/domain/futures/alpha_foundry/test_bridge_helpers_multi_tf.py",
+      "tests/unit/domain/futures/alpha_foundry/test_bridge_helpers.py",
+      "tests/unit/domain/futures/alpha_foundry/test_assemble_l0_strategy_delivery_manifest.py",
+      "tests/unit/domain/futures/alpha_foundry/test_l0_manifest_route_consistency.py"
+    ]
+  },
+  "src/domain/futures/optimization/risk_deployment.py": {
+    "architecture": "docs/architecture/layer2.md",
+    "testing": "tests/unit/optimization/test_risk_deployment.py"
+  },
+  "src/domain/futures/strategy/market_regime.py": {
+    "architecture": "docs/architecture/layer2.md",
+    "testing": [
+      "tests/unit/domain/futures/strategy/test_positioning_crowding.py",
+      "tests/unit/domain/futures/strategy/test_market_regime.py"
+    ]
+  },
+  "src/domain/futures/strategy/tiered_workflow/awf_sim.py": {
+    "architecture": "docs/architecture/layer2.md",
+    "testing": [
+      "tests/unit/domain/futures/strategy/tiered_workflow/test_directional_veto.py",
+      "tests/unit/domain/futures/strategy/tiered_workflow/test_l2_tf_inclusion.py",
+      "tests/unit/domain/futures/optimization/test_workflow.py",
+      "tests/unit/domain/futures/strategy/tiered_workflow/test_l2_per_tf_edge_hoisting.py",
+      "tests/unit/domain/futures/strategy/tiered_workflow/test_portfolio_handoff.py"
+    ]
+  },
+  "src/domain/futures/strategy/tiered_workflow/dataclasses.py": {
+    "architecture": "docs/results/result.md",
+    "testing": [
+      "tests/unit/domain/futures/strategy/test_tiered_workflow.py",
+      "tests/unit/domain/futures/optimization/test_workflow.py",
+      "tests/unit/domain/futures/strategy/tiered_workflow/test_regime_policy.py",
+      "tests/unit/domain/futures/strategy/test_market_regime.py"
+    ]
+  },
+  "src/domain/futures/strategy/tiered_logging.py": {
+    "architecture": "docs/architecture/layer3.md",
+    "testing": "tests/unit/domain/futures/strategy/test_tiered_logging.py"
+  },
+  "src/application/futures/runner/active_pipeline.py": {
+    "architecture": "docs/results/result.md",
+    "testing": [
+      "tests/unit/application/futures/runner/test_pipeline.py",
+      "tests/unit/execution/test_opt_main_futures_strategy_mode.py",
+      "tests/unit/application/futures/runner/test_active_pipeline.py",
+      "tests/unit/domain/futures/optimization/test_l2_feasibility_first.py",
+      "tests/unit/domain/futures/optimization/observability/test_l2_runtime_probe.py",
+      "tests/unit/domain/futures/l2_crisis_replay_parity_test.py"
+    ]
+  },
+  "src/application/futures/runner/tf_probe_scoped.py": {
+    "architecture": "docs/architecture/layer3.md",
+    "testing": "tests/unit/application/futures/runner/test_tf_probe_scoped.py"
+  },
+  "src/domain/futures/strategy/tiered_workflow/tf_validation_repair.py": {
+    "architecture": "docs/architecture/layer3.md",
+    "testing": "tests/unit/domain/futures/strategy/tiered_workflow/test_tf_validation_repair.py"
+  },
+  "src/application/futures/runner/cli.py": {
+    "architecture": "docs/architecture/layer3.md",
+    "testing": "tests/e2e/test_cli_modes.py"
+  },
+  "src/application/futures/runner/config.py": {
+    "architecture": "docs/architecture/layer0.md",
+    "testing": [
+      "tests/unit/application/futures/runner/test_config.py",
+      "tests/unit/execution/test_opt_main_futures_strategy_mode.py",
+      "tests/unit/domain/futures/strategy/tiered_workflow/test_l0_readiness_hardening.py"
+    ]
+  },
+  "src/domain/futures/strategy/tiered_workflow/signal_selection.py": {
+    "architecture": "docs/results/result.md",
+    "testing": [
+      "tests/unit/domain/futures/strategy/tiered_workflow/test_l1_xs_alpha_admission.py",
+      "tests/unit/domain/futures/strategy/test_layer1_nested_followup.py",
+      "tests/unit/domain/futures/strategy/tiered_workflow/test_l1_readiness_gate_redesign.py",
+      "tests/unit/domain/futures/strategy/test_signal_selection_evidence.py",
+      "tests/unit/domain/futures/strategy/tiered_workflow/test_signal_selection.py",
+      "tests/domain/futures/strategy/tiered_workflow/test_l0_l1_improvements.py",
+      "tests/unit/domain/futures/strategy/tiered_workflow/test_c2_effective_n_fdr.py"
+    ]
+  },
+  "src/domain/futures/strategy/tiered_workflow/pipeline.py": {
+    "architecture": "docs/specs/crisis-replay-strategy-match-fix.md",
+    "testing": [
+      "tests/unit/domain/futures/strategy/test_tiered_workflow.py",
+      "tests/unit/domain/futures/strategy/tiered_workflow/test_l0_readiness_hardening.py",
+      "tests/unit/domain/futures/strategy/tiered_workflow/test_l1_readiness_gate_redesign.py",
+      "tests/unit/domain/futures/strategy/test_signal_selection_evidence.py",
+      "tests/unit/domain/futures/strategy/tiered_workflow/test_pipeline.py",
+      "tests/unit/domain/futures/strategy/tiered_workflow/test_l0_delivery_routing.py",
+      "tests/unit/domain/futures/strategy/tiered_workflow/test_per_tf_architecture.py",
+      "tests/unit/domain/futures/strategy/tiered_workflow/test_atomization_diagnostics.py",
+      "tests/unit/domain/futures/strategy/tiered_workflow/test_l2_crisis_reliability.py",
+      "tests/unit/domain/futures/strategy/tiered_workflow/test_pipeline_child_rss.py"
+    ]
+  },
+  "src/domain/futures/strategy/config.py": {
+    "architecture": "docs/results/result.md",
+    "testing": [
+      "tests/unit/domain/futures/strategy/test_config.py",
+      "tests/unit/domain/futures/strategy/test_family_lifecycle.py",
+      "tests/unit/domain/futures/strategy/tiered_workflow/test_per_tf_architecture.py",
+      "tests/unit/domain/futures/strategy/test_rule_signals.py",
+      "tests/unit/domain/futures/strategy/tiered_workflow/test_l0_readiness_hardening.py",
+      "tests/unit/domain/futures/strategy/tiered_workflow/test_l1_readiness_gate_redesign.py"
+    ]
+  },
+  "src/domain/futures/strategy/tiered_workflow/l2_meta.py": {
+    "architecture": "docs/architecture/layer2.md",
+    "testing": "tests/unit/domain/futures/strategy/tiered_workflow/test_l2_meta.py"
+  },
+  "src/domain/futures/strategy/tiered_workflow/replay_parity.py": {
+    "architecture": "docs/architecture/layer2.md",
+    "testing": "tests/unit/domain/futures/strategy/tiered_workflow/test_directional_veto_replay.py"
+  },
+  "src/domain/futures/strategy/tiered_workflow/major_symbol_registry_replay.py": {
+    "architecture": "docs/architecture/layer3.md",
+    "testing": "tests/unit/domain/futures/strategy/tiered_workflow/test_major_symbol_registry_replay.py"
+  },
+  "src/domain/futures/strategy/candidate_contracts.py": {
+    "architecture": "docs/architecture/",
+    "testing": [
+      "tests/unit/domain/futures/strategy/test_adverse_regime_evidence.py",
+      "tests/unit/domain/futures/strategy/tiered_workflow/test_l1_readiness_gate_redesign.py",
+      "tests/domain/futures/strategy/tiered_workflow/test_l0_l1_improvements.py",
+      "tests/unit/domain/futures/strategy/test_candidate_contracts.py"
+    ]
+  },
+  "src/domain/futures/optimization/observability/run_tracker.py": {
+    "architecture": "docs/architecture/layer2.md",
+    "testing": "tests/unit/domain/futures/optimization/observability/test_run_tracker.py"
+  },
+  "src/domain/futures/observability/artifact_logging.py": {
+    "architecture": "docs/architecture/layer3.md",
+    "testing": "tests/unit/domain/futures/test_l0_naming_and_debug_observability.py"
+  },
+  "src/domain/futures/observability/__init__.py": {
+    "architecture": "docs/architecture/layer3.md",
+    "testing": "tests/unit/domain/futures/test_l0_naming_and_debug_observability.py"
+  },
+  "src/domain/futures/optimization/opt_config.py": {
+    "architecture": "docs/specs/pipeline_cache_fingerprint_stabilization.md",
+    "testing": [
+      "tests/unit/domain/futures/optimization/test_data_window_floor_consistency.py",
+      "tests/unit/domain/futures/optimization/test_opt_config.py",
+      "tests/unit/domain/futures/strategy/tiered_workflow/test_l1_result_cache.py",
+      "tests/unit/domain/futures/strategy/tiered_workflow/test_cache_fingerprint_stabilization.py"
+    ]
+  },
+  "src/domain/futures/validation/gates.py": {
+    "architecture": "docs/architecture/layer3.md",
+    "testing": "tests/unit/domain/futures/validation/test_rolling_holdout_panel.py"
+  },
+  "src/domain/futures/optimization/metrics.py": {
+    "architecture": "docs/architecture/layer2.md",
+    "testing": [
+      "tests/unit/domain/futures/optimization/observability/test_run_tracker.py",
+      "tests/unit/domain/futures/optimization/test_phase_metrics.py"
+    ]
+  },
+  "src/domain/futures/optimization/l2_search_space.py": {
+    "architecture": "docs/architecture/layer2.md",
+    "testing": [
+      "tests/unit/domain/futures/optimization/test_param_spaces.py",
+      "tests/unit/domain/futures/optimization/test_l2_search_space.py"
+    ]
+  },
+  "src/domain/futures/optimization/opt_data_utils.py": {
+    "architecture": "docs/architecture/layer2.md",
+    "testing": [
+      "tests/unit/domain/futures/optimization/test_data_window_floor_consistency.py",
+      "tests/unit/domain/futures/optimization/test_opt_data_utils.py",
+      "tests/unit/domain/futures/alpha_foundry/test_memory_dataflow.py"
+    ]
+  },
+  "src/domain/futures/optimization/final_evaluator.py": {
+    "architecture": "docs/architecture/layer3.md",
+    "testing": "tests/unit/execution/test_opt_main_futures_strategy_mode.py"
+  },
+  "src/application/futures/optimization/config.py": {
+    "architecture": "docs/architecture/layer0.md",
+    "testing": [
+      "tests/unit/application/futures/runner/test_config.py",
+      "tests/unit/execution/test_opt_main_futures_strategy_mode.py",
+      "tests/unit/application/futures/optimization/test_config.py"
+    ]
+  },
+  "src/application/futures/optimization/strategy_service.py": {
+    "architecture": "docs/architecture/layer0.md",
+    "testing": "tests/unit/application/futures/optimization/test_strategy_service.py"
+  },
+  "src/application/futures/optimization/optimization_service.py": {
+    "architecture": "docs/architecture/layer3.md",
+    "testing": "tests/unit/execution/test_opt_main_futures_strategy_mode.py"
+  },
+  "src/execution/probe_timeframes.py": {
+    "architecture": "docs/architecture/layer3.md",
+    "testing": "tests/unit/execution/test_opt_main_futures_probe_wiring.py"
+  },
+  "src/domain/futures/signals/rules.py": {
+    "architecture": "docs/architecture/layer0.md",
+    "testing": [
+      "tests/unit/domain/futures/strategy/test_rule_signals.py",
+      "tests/unit/domain/futures/alpha_foundry/test_alpha_family_registration.py",
+      "tests/unit/domain/futures/signals/test_rules.py"
+    ]
+  },
+  "src/domain/futures/strategy/rule_signals.py": {
+    "architecture": "docs/architecture/layer0.md",
+    "testing": [
+      "tests/unit/domain/futures/strategy/test_rule_signals.py",
+      "tests/unit/domain/futures/alpha_foundry/test_alpha_family_registration.py",
+      "tests/unit/domain/futures/signals/test_rules.py"
+    ]
+  },
+  "src/domain/futures/strategy/timeframe_probe.py": {
+    "architecture": "docs/architecture/layer1.md",
+    "testing": "tests/unit/domain/futures/strategy/test_timeframe_probe.py"
+  },
+  "src/domain/futures/strategy/family_lifecycle.py": {
+    "architecture": "docs/architecture/layer0.md",
+    "testing": "tests/unit/domain/futures/strategy/test_family_lifecycle.py"
+  },
+  "src/domain/futures/strategy/candidate_evaluation.py": {
+    "architecture": "docs/architecture/layer1.md",
+    "testing": "tests/unit/domain/futures/strategy/test_candidate_evaluation.py"
+  },
+  "src/domain/futures/strategy/candidate_portfolio.py": {
+    "architecture": "docs/architecture/layer1.md",
+    "testing": "tests/unit/domain/futures/strategy/test_candidate_portfolio.py"
+  },
+  "src/domain/futures/signals/ltf_alpha.py": {
+    "architecture": "docs/architecture/layer0.md",
+    "testing": "tests/unit/domain/futures/signals/test_ltf_alpha.py"
+  },
+  "src/domain/futures/signals/causal_diversified_candidates.py": {
+    "architecture": "docs/architecture/layer1.md",
+    "testing": "tests/unit/domain/futures/signals/test_causal_diversified_candidates.py"
+  },
+  "src/domain/futures/strategy/builder.py": {
+    "architecture": "docs/architecture/layer1.md",
+    "testing": "tests/unit/domain/futures/strategy_runtime/test_bridge.py"
+  },
+  "src/domain/futures/strategy_runtime/bridge.py": {
+    "architecture": "docs/specs/cold_path_runtime_bottleneck_elimination.md",
+    "testing": [
+      "tests/unit/domain/futures/strategy_runtime/test_bridge.py",
+      "tests/unit/domain/futures/strategy_runtime/test_bridge_alpha_foundry.py",
+      "tests/unit/domain/futures/strategy_runtime/test_bridge_multi_tf_gate.py",
+      "tests/unit/domain/futures/signals/test_ltf_alpha.py",
+      "tests/unit/domain/futures/strategy/tiered_workflow/test_per_tf_architecture.py",
+      "tests/unit/domain/futures/strategy_runtime/test_bridge_cross_tf_labeled_events.py",
+      "tests/unit/domain/futures/strategy_runtime/test_bridge_projection.py",
+      "tests/unit/domain/futures/strategy/tiered_workflow/test_snapshot_executor.py",
+      "tests/unit/domain/futures/strategy/tiered_workflow/test_l2_runtime_integrity_hot_cache.py"
+    ]
+  },
+  "src/domain/futures/alpha_foundry/edge_failure.py": {
+    "architecture": "docs/architecture/layer1.md",
+    "testing": "tests/unit/domain/futures/alpha_foundry/test_edge_failure.py"
+  },
+  "src/domain/futures/alpha_foundry/conditional_cells.py": {
+    "architecture": "docs/architecture/layer1.md",
+    "testing": "tests/unit/domain/futures/alpha_foundry/test_conditional_cells.py"
+  },
+  "src/domain/futures/alpha_foundry/execution_arms.py": {
+    "architecture": "docs/architecture/layer1.md",
+    "testing": "tests/unit/domain/futures/alpha_foundry/test_execution_arms.py"
+  },
+  "src/domain/futures/alpha_foundry/l0_diagnostics.py": {
+    "architecture": "docs/architecture/layer1.md",
+    "testing": "tests/unit/domain/futures/alpha_foundry/test_l0_diagnostics.py"
+  },
+  "scripts/archive_decisions.py": {
+    "testing": "tests/unit/scripts/test_archive_decisions.py"
+  },
+  "scripts/update_index.py": {
+    "testing": "tests/unit/scripts/test_update_index.py"
+  },
+  "src/domain/futures/strategy/candidate_labels.py": {
+    "architecture": "docs/architecture/layer0.md",
+    "testing": "tests/unit/domain/futures/strategy/test_candidate_labels.py"
+  },
+  "src/domain/futures/strategy/tiered_workflow/atomization_diagnostics.py": {
+    "architecture": "docs/architecture/layer1.md",
+    "testing": "tests/unit/domain/futures/strategy/tiered_workflow/test_atomization_diagnostics.py"
+  },
+  "src/domain/futures/strategy/timeframe_contracts.py": {
+    "architecture": "docs/architecture/layer0.md",
+    "testing": [
+      "tests/unit/domain/futures/strategy/test_timeframe_probe.py",
+      "tests/unit/domain/futures/strategy/test_timeframe_contracts.py"
+    ]
+  },
+  "src/domain/futures/strategy/common/alignment.py": {
+    "architecture": "docs/architecture/layer0.md",
+    "testing": "tests/unit/domain/futures/strategy/common/test_alignment.py"
+  },
+  "src/domain/futures/alpha_foundry/memory.py": {
+    "testing": "tests/unit/domain/futures/alpha_foundry/test_memory.py",
+    "architecture": "docs/architecture/layer0.md"
+  },
+  "src/domain/futures/backtest/data_loader.py": {
+    "testing": "tests/unit/domain/futures/backtest/test_data_loader.py"
+  },
+  "src/core/settings.py": {
+    "testing": "tests/unit/core/test_settings.py"
+  },
+  "src/domain/futures/universe/storage.py": {},
+  "src/domain/futures/universe/models.py": {},
+  "src/application/futures/runner/tiered_handoff.py": {
+    "testing": "tests/unit/application/futures/runner/test_tiered_handoff.py"
+  },
+  "src/domain/futures/strategy/tiered_workflow/memory.py": {
+    "testing": [
+      "tests/unit/domain/futures/strategy/tiered_workflow/test_memory.py",
+      "tests/unit/domain/futures/strategy/tiered_workflow/test_memory_plan.py"
+    ]
+  },
+  "src/application/futures/run_contracts.py": {
+    "architecture": "docs/architecture/layer1.md",
+    "testing": "tests/unit/application/futures/test_run_contracts.py"
+  },
+  "src/domain/futures/strategy/event_grid_contracts.py": {
+    "architecture": "docs/architecture/layer1.md",
+    "testing": "tests/unit/domain/futures/strategy/test_event_grid_contracts.py"
+  },
+  "src/domain/futures/strategy/tiered_workflow/cross_tf_diagnostics.py": {
+    "architecture": "docs/architecture/layer1.md",
+    "testing": "tests/unit/domain/futures/strategy/tiered_workflow/test_cross_tf_diagnostics.py"
+  },
+  "src/domain/futures/strategy/tiered_workflow/l0_l1_outcome.py": {
+    "architecture": "docs/architecture/layer1.md",
+    "testing": "tests/unit/domain/futures/strategy/tiered_workflow/test_l0_l1_outcome.py"
+  },
+  "src/domain/futures/strategy/run_l1_cross_tf_replay.py": {
+    "architecture": "docs/architecture/layer1.md",
+    "testing": "tests/unit/domain/futures/strategy/test_run_l1_cross_tf_replay.py"
+  },
+  "src/application/futures/run_policy.py": {
+    "architecture": "docs/architecture/layer0.md",
+    "testing": "tests/unit/application/futures/test_run_policy.py"
+  },
+  "src/domain/futures/strategy/tiered_workflow/outcomes.py": {
+    "architecture": "docs/architecture/layer1.md",
+    "testing": "tests/unit/domain/futures/strategy/tiered_workflow/test_outcomes.py"
+  },
+  "src/domain/futures/strategy/run_l1_cross_tf_diagnosis.py": {
+    "architecture": "docs/architecture/layer1.md",
+    "testing": "tests/unit/domain/futures/strategy/test_run_l1_cross_tf_diagnosis.py"
+  },
+  "src/application/futures/runner/pipeline.py": {
+    "testing": "tests/unit/application/futures/runner/test_pipeline.py"
+  },
+  "src/domain/futures/strategy/calibrate_l1_pair_gate.py": {
+    "architecture": "docs/architecture/layer1.md",
+    "testing": "tests/unit/domain/futures/strategy/test_calibrate_l1_pair_gate.py"
+  },
+  "src/domain/futures/strategy/tiered_workflow/evidence_policy.py": {
+    "testing": "tests/unit/domain/futures/strategy/tiered_workflow/test_evidence_policy.py",
+    "architecture": "docs/results/result.md"
+  },
+  "src/domain/futures/strategy/tiered_workflow/metrics.py": {
+    "architecture": "docs/results/result.md",
+    "testing": "tests/unit/domain/futures/strategy/tiered_workflow/test_metrics.py"
+  },
+  "src/domain/futures/strategy/calibrate_l1_symbol_breadth_gate.py": {
+    "architecture": "docs/results/result.md",
+    "testing": "tests/unit/domain/futures/strategy/test_calibrate_l1_symbol_breadth_gate.py"
+  },
+  "scripts/lean_check.py": {},
+  "scripts/sync_task.py": {},
+  "src/domain/futures/strategy/tiered_workflow/crisis_policy.py": {
+    "architecture": "docs/architecture/layer2.md",
+    "testing": "tests/unit/domain/futures/strategy/tiered_workflow/test_crisis_policy.py"
+  },
+  "src/domain/futures/strategy/tiered_workflow/risk_deployment.py": {
+    "architecture": "docs/architecture/layer2.md",
+    "testing": "tests/unit/domain/futures/strategy/tiered_workflow/test_risk_deployment.py"
+  },
+  "src/domain/futures/strategy/tiered_workflow/l2_gate.py": {
+    "testing": "tests/unit/domain/futures/strategy/tiered_workflow/test_l2_gate.py",
+    "architecture": "docs/architecture/layer2.md"
+  },
+  "src/domain/futures/strategy/tiered_workflow/selection.py": {
+    "architecture": "docs/architecture/layer2.md",
+    "testing": "tests/unit/domain/futures/strategy/tiered_workflow/test_selection.py"
+  },
+  "src/domain/futures/strategy/walk_forward.py": {
+    "architecture": "docs/architecture/layer2.md",
+    "testing": "tests/unit/domain/futures/strategy/test_walk_forward.py"
+  },
+  "src/domain/futures/optimization/workflow.py": {
+    "architecture": "docs/architecture/layer2.md",
+    "testing": "tests/unit/domain/futures/optimization/test_workflow.py"
+  },
+  "src/domain/futures/backtest/jax_batch_engine.py": {
+    "testing": "tests/unit/domain/futures/backtest/test_jax_batch_engine.py"
+  },
+  "src/domain/futures/strategy/causal_statistics.py": {
+    "architecture": "docs/specs/shape_adaptive_runtime_optimization.md",
+    "testing": "tests/unit/domain/futures/strategy/test_shape_adaptive_optimization.py"
+  },
+  "src/domain/futures/optimization/robust_compounding.py": {
+    "architecture": "docs/results/result.md",
+    "testing": "tests/unit/domain/futures/strategy/tiered_workflow/test_portfolio_handoff.py"
+  },
+  "src/domain/futures/strategy/tiered_workflow/portfolio_handoff.py": {
+    "testing": "tests/unit/domain/futures/optimization/test_portfolio_causal_robust_compounding.py"
+  },
+  "src/domain/futures/portfolio/portfolio_constructor.py": {
+    "testing": "tests/unit/domain/futures/portfolio/test_diagonal_kelly.py"
+  },
+  "src/domain/futures/portfolio/allocation_policy.py": {
+    "testing": "tests/unit/domain/futures/portfolio/test_allocation_policy.py"
+  },
+  "src/domain/futures/portfolio/policy_shadow_book.py": {
+    "testing": "tests/unit/domain/futures/portfolio/test_policy_shadow_book.py"
+  },
+  "src/domain/futures/strategy/tiered_workflow/causal_alpha_tape.py": {
+    "architecture": "docs/results/result.md",
+    "testing": "tests/unit/domain/futures/strategy/tiered_workflow/test_causal_alpha_tape.py"
+  },
+  "src/domain/futures/compound/data_plane.py": {
+    "architecture": "docs/results/explain.md",
+    "testing": "tests/unit/domain/futures/compound/test_data_plane.py"
+  },
+  "src/application/futures/runner/compound_main.py": {
+    "testing": "tests/unit/application/futures/runner/test_compound_main.py"
+  },
+  "src/core/exchange/binance_vision.py": {
+    "testing": "tests/unit/core/exchange/test_binance_vision.py"
+  },
+  "src/domain/futures/data_lake/contracts.py": {
+    "testing": "tests/unit/domain/futures/data_lake/test_ingestion.py"
+  },
+  "src/domain/futures/data_lake/query.py": {
+    "testing": "tests/unit/application/futures/runner/test_lake_only_cutover.py"
+  },
+  "src/domain/futures/compound/signal_bank.py": {
+    "testing": "tests/unit/domain/futures/compound/test_signal_bank.py",
+    "architecture": "docs/specs/signal_panel_mad_kernel_contract.json"
+  },
+  "src/domain/futures/compound/ladder.py": {
+    "testing": "tests/unit/domain/futures/compound/test_admission.py"
+  },
+  "src/domain/futures/compound/allocator.py": {
+    "testing": [
+      "tests/unit/domain/futures/compound/test_allocator.py",
+      "tests/unit/domain/futures/compound/test_dynamic_compounding.py"
+    ],
+    "architecture": "docs/results/result.md"
+  },
+  "src/domain/futures/compound/engine.py": {
+    "architecture": "docs/results/result.md",
+    "testing": [
+      "tests/unit/domain/futures/compound/test_engine.py",
+      "tests/unit/domain/futures/compound/test_l2_growth_gate.py",
+      "tests/unit/domain/futures/compound/test_signal_bank.py",
+      "tests/unit/domain/futures/compound/test_l1_routing_sleeves.py",
+      "tests/unit/domain/futures/compound/test_l1_diagnostics.py"
+    ]
+  },
+  "src/application/futures/runner/compound_data.py": {
+    "architecture": "docs/specs/phase_full_bottleneck_contract.json",
+    "testing": "tests/unit/domain/futures/compound/test_signal_bank.py"
+  },
+  "src/domain/futures/compound/admission.py": {
+    "testing": "tests/unit/domain/futures/compound/test_admission.py"
+  },
+  "src/domain/futures/compound/handoff.py": {
+    "testing": "tests/unit/domain/futures/compound/test_handoff.py"
+  },
+  "src/domain/futures/compound/l1_sleeves.py": {
+    "architecture": "docs/architecture/layer2.md",
+    "testing": [
+      "tests/unit/domain/futures/compound/test_l1_sleeves.py",
+      "tests/unit/domain/futures/compound/test_l1_combination_redesign.py"
+    ]
+  },
+  "src/application/futures/runner/data_lake_runtime.py": {
+    "testing": "tests/unit/domain/futures/data_lake/test_reconciliation.py"
+  },
+  "src/domain/futures/data_lake/reconciliation.py": {
+    "architecture": "docs/results/result.md",
+    "testing": [
+      "tests/unit/application/futures/runner/test_compound_main.py",
+      "tests/unit/domain/futures/data_lake/test_reconciliation.py"
+    ]
+  },
+  "src/domain/futures/compound/deployment.py": {
+    "testing": "tests/unit/domain/futures/compound/test_deployment.py"
+  },
+  "src/application/futures/runner/compound_universe.py": {
+    "testing": "tests/unit/application/futures/runner/test_compound_universe.py"
+  },
+  "src/domain/futures/compound/benchmark.py": {
+    "testing": "tests/unit/domain/futures/compound/test_benchmark.py"
+  },
+  "src/domain/futures/compound/multiplicity.py": {
+    "testing": "tests/unit/domain/futures/compound/test_multiplicity.py"
+  },
+  "src/domain/futures/compound/validation.py": {
+    "testing": [
+      "tests/unit/domain/futures/compound/test_validation.py",
+      "tests/unit/domain/futures/compound/test_l2_growth_gate.py"
+    ]
+  },
+  "src/domain/futures/compound/config.py": {
+    "testing": "tests/unit/domain/futures/compound/test_config.py"
+  },
+  "src/domain/futures/compound/provenance.py": {
+    "testing": "tests/unit/domain/futures/compound/test_provenance.py"
+  },
+  "src/domain/futures/compound/alpha_catalog.py": {
+    "testing": "tests/unit/domain/futures/compound/test_alpha_catalog.py"
+  },
+  "src/domain/futures/compound/l1_diagnostics.py": {
+    "testing": [
+      "tests/unit/domain/futures/compound/test_engine.py",
+      "tests/unit/domain/futures/compound/test_l2_growth_gate.py"
+    ]
+  },
+  "src/domain/futures/compound/l1_regime_routing.py": {
+    "testing": [
+      "tests/unit/domain/futures/compound/test_l1_regime_routing.py",
+      "tests/unit/domain/futures/compound/test_l1_signal_evaluation_fix.py"
+    ]
+  },
+  "src/domain/futures/compound/l1_screening.py": {
+    "testing": "tests/unit/domain/futures/compound/test_l1_screening.py"
+  },
+  "src/domain/futures/compound/l1_concept_bank.py": {
+    "testing": [
+      "tests/unit/domain/futures/compound/test_l1_concept_bank.py",
+      "tests/unit/domain/futures/compound/test_engine.py"
+    ]
+  },
+  "src/domain/futures/compound/l1_leg_admission.py": {
+    "testing": "tests/unit/domain/futures/compound/test_l1_leg_admission.py"
+  },
+  "src/domain/futures/compound/l1_symbol_routing.py": {
+    "testing": "tests/unit/domain/futures/compound/test_l1_symbol_routing.py"
+  }
+}
