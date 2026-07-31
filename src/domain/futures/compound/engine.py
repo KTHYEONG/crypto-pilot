@@ -75,6 +75,10 @@ from src.domain.futures.compound.l1_sleeves import (  # noqa: F401
     build_exit_aware_handoff,
     build_family_routing_sleeves,
 )
+from src.domain.futures.compound.l1_symbol_routing import (
+    accumulate_symbol_routed_book,
+    build_per_symbol_leg_books,
+)
 from src.domain.futures.compound.multiplicity import (
     build_candidate_trial_returns,
     charge_config_search_multiplicity,
@@ -290,7 +294,15 @@ def run_multiscale_compound_engine(
         leg_weights_2d = accumulate_prequential_leg_weights(
             legs, market_1d, folds, config.ladder.cost_bps, config.l1_leg,
         )
-        combined_2d = combine_leg_books(legs, leg_weights_2d)
+        sym_legs = build_per_symbol_leg_books(
+            panel, eligible_4h, registry, asset_ret_4h,
+            config.ladder.cost_bps, config.l1_routing,
+        )
+        combined_2d = accumulate_symbol_routed_book(
+            legs, sym_legs, folds, config.ladder.cost_bps,
+            config.l1_leg, config.l1_routing,
+            fallback_2d=combine_leg_books(legs, leg_weights_2d),
+        )
         weights_2d = apply_portfolio_risk_overlay(
             combined_2d, close_4h, config.ladder.cost_bps, config.dynamic_compounding,
             asset_return_2d=asset_ret_4h,
