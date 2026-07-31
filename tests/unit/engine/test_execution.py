@@ -2,11 +2,12 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 import pytest
 
 from src.core.types import CostModel, StrategySpec
-from src.data.loader import load_ohlcv_4h
+from src.data.loader import DataIntegrityError, load_ohlcv_4h
 from src.engine.backtest import run_backtest
 
 BTC_PATH = Path("data/futures/ohlcv/1h/BTCUSDT.parquet")
@@ -23,7 +24,8 @@ def test_engine_run_backtest() -> None:
     assert result.equity.index.equals(df.index)
     assert result.equity.notna().all()
     assert set(result.trades.columns) == {
-        "entry_bar", "entry_price", "exit_price", "qty", "reason", "pnl", "return_pct",
+        "entry_bar", "entry_price", "exit_price", "qty", "reason", "pnl",
+        "return_pct", "funding_pnl",
     }
     assert "entry_signal" in result.signals.columns
 
@@ -140,3 +142,110 @@ class TestSignalDelayBars:
                 f"entry_bar={eb} does not reconstruct entry_price "
                 f"({t['entry_price']} != {expected_fill}) -- entry_bar likely points at the exit bar"
             )
+
+
+def _ramp_then_crash() -> pd.DataFrame:
+    """A monotonic ramp that opens one long early, then a crash that closes it
+    via the channel exit -- a single completed trade spanning any mid-run bar."""
+    n = 300
+    idx = pd.date_range("2024-01-01", periods=n, freq="4h", tz="UTC")
+    opens = np.arange(100.0, 100.0 + n, dtype=np.float64)
+    o = opens.copy()
+    h = opens + 1.0
+    l_ = opens - 1.0
+    c = opens + 0.5
+    o[150:] = opens[149] - 30.0
+    h[150:] = opens[149] - 29.0
+    l_[150:] = opens[149] - 31.0
+    c[150:] = opens[149] - 29.5
+    return pd.DataFrame({
+        "open": o, "high": h, "low": l_, "close": c, "volume": 1000.0,
+    }, index=idx)
+
+
+class TestFundingLedger:
+    """SC-FUND-01/02: published funding accrues while a long is open, and a
+    candidate without funding data is a validation failure, never zero-cost."""
+
+    def _held_long_result(self, funding_rates: pd.Series | None):
+        df = _ramp_then_crash()
+        spec = StrategySpec(risk_per_trade=0.01, ema_period=5, entry_period=5, atr_period=5)
+        costs = CostModel()
+        return df, run_backtest(df, spec, costs, funding_rates=funding_rates)
+
+    def test_positive_funding_debits_open_long_position(self) -> None:
+        df = _ramp_then_crash()
+        funding_bar = 50
+        ts = df.index[funding_bar]
+        _, base = self._held_long_result(None)
+        _, funded = self._held_long_result(pd.Series([0.001], index=[ts]))
+        assert len(funded.trades) == 1, "fixture must hold one position across the funding bar"
+        qty = float(funded.trades["qty"].iloc[0])
+        expected = qty * float(df["open"].iloc[funding_bar]) * 0.001
+        diff = base.equity.iloc[-1] - funded.equity.iloc[-1]
+        assert diff == pytest.approx(expected, rel=1e-9), (
+            f"positive funding must reduce final equity by notional x rate, got {diff} vs {expected}"
+        )
+        assert funded.trades["funding_pnl"].iloc[0] == pytest.approx(-expected, rel=1e-9)
+
+    def test_negative_funding_credits_open_long_position(self) -> None:
+        df = _ramp_then_crash()
+        funding_bar = 50
+        ts = df.index[funding_bar]
+        _, base = self._held_long_result(None)
+        _, funded = self._held_long_result(pd.Series([-0.001], index=[ts]))
+        qty = float(funded.trades["qty"].iloc[0])
+        expected = qty * float(df["open"].iloc[funding_bar]) * 0.001
+        diff = funded.equity.iloc[-1] - base.equity.iloc[-1]
+        assert diff == pytest.approx(expected, rel=1e-9)
+        assert funded.trades["funding_pnl"].iloc[0] == pytest.approx(expected, rel=1e-9)
+
+    def test_boundary_funding_timestamp_accrues(self) -> None:
+        # A funding timestamp exactly at a bar boundary is charged to a position
+        # held into it; a mid-bar timestamp maps to the containing bar.
+        df = _ramp_then_crash()
+        spec = StrategySpec(risk_per_trade=0.01, ema_period=5, entry_period=5, atr_period=5)
+        costs = CostModel()
+        base = run_backtest(df, spec, costs)
+
+        funding_bar = 50
+        expected = None
+        for offset in (pd.Timedelta(0), pd.Timedelta(hours=1)):
+            ts = df.index[funding_bar] + offset
+            funded = run_backtest(
+                df, spec, costs, funding_rates=pd.Series([0.001], index=[ts]),
+            )
+            qty = float(funded.trades["qty"].iloc[0])
+            debit = qty * float(df["open"].iloc[funding_bar]) * 0.001
+            if expected is None:
+                expected = debit
+            assert (base.equity - funded.equity).max() == pytest.approx(debit, rel=1e-9)
+        assert expected is not None
+
+    def test_candidate_without_funding_raises(self, bars_ramp: pd.DataFrame) -> None:
+        # SC-FUND-02: absent candidate funding is a validation failure.
+        spec = StrategySpec(
+            risk_per_trade=0.01, ema_period=5, entry_period=5, atr_period=5,
+            min_taker_buy_ratio=0.52,
+        )
+        with pytest.raises(DataIntegrityError, match="funding"):
+            run_backtest(bars_ramp, spec, CostModel())
+
+    def test_non_monotonic_funding_raises(self) -> None:
+        df = _ramp_then_crash()
+        ts = df.index[[1, 0]]
+        funding_rates = pd.Series([0.001, 0.001], index=ts)
+        with pytest.raises(DataIntegrityError, match="monotonic"):
+            self._held_long_result(funding_rates)
+
+    def test_out_of_window_funding_raises(self) -> None:
+        df = _ramp_then_crash()
+        ts = df.index[0] - pd.Timedelta(hours=4)
+        with pytest.raises(DataIntegrityError, match="aligned"):
+            self._held_long_result(pd.Series([0.001], index=[ts]))
+
+    def test_non_finite_funding_raises(self) -> None:
+        df = _ramp_then_crash()
+        ts = df.index[50]
+        with pytest.raises(DataIntegrityError, match="finite"):
+            self._held_long_result(pd.Series([np.nan], index=[ts]))

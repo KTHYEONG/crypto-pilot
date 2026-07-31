@@ -55,4 +55,16 @@ def generate_signals(df: pd.DataFrame, spec: StrategySpec) -> pd.DataFrame:
         & out["atr"].notna()
         & (out["atr"] > 0)
     )
+    if spec.min_taker_buy_ratio is not None:
+        if "taker_buy_ratio" not in out.columns:
+            raise ValueError(
+                "min_taker_buy_ratio set but df lacks 'taker_buy_ratio' column"
+            )
+        ratio = out["taker_buy_ratio"]
+        ratio_ok = (
+            ratio.notna()
+            & ratio.between(0.0, 1.0)
+            & (ratio >= spec.min_taker_buy_ratio)
+        )
+        out["entry_signal"] = out["entry_signal"] & ratio_ok
     return out
