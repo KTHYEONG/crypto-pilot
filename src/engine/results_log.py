@@ -13,6 +13,7 @@ from src.core.types import CostModel, StrategySpec
 from src.engine.backtest import BacktestResult
 
 if TYPE_CHECKING:
+    from src.validation.candidate_promotion import PromotionResult
     from src.validation.metrics import Metrics
     from src.validation.reliability_gate import FoldDistributionResult, ReliabilityGateResult
 
@@ -49,14 +50,15 @@ def record_run(
     fold_distribution: FoldDistributionResult,
     stress_gate: ReliabilityGateResult,
     holdout_gate: ReliabilityGateResult | None = None,
+    promotion: PromotionResult | None = None,
     log_path: Path = RUNS_LOG_PATH,
 ) -> dict[str, object]:
     """Append one backtest run as a JSONL record for longitudinal comparison.
 
     Never overwrites prior rows; each call appends exactly one line. Captures
     the frozen StrategySpec/CostModel (what changed) alongside Metrics (the
-    outcome), the reliability gate verdicts, and the git commit (whether the
-    code that produced it is reproducible from history).
+    outcome), the reliability gate verdicts, the promotion result, and the git
+    commit (whether the code that produced it is reproducible from history).
     """
     git_sha, git_dirty = _git_head()
     record: dict[str, object] = {
@@ -76,6 +78,7 @@ def record_run(
             "fold_distribution": asdict(fold_distribution),
             "stress_test": asdict(stress_gate),
         },
+        "promotion": asdict(promotion) if promotion is not None else None,
         "window": "observation+holdout" if holdout_gate is not None else "observation",
     }
     log_path.parent.mkdir(parents=True, exist_ok=True)

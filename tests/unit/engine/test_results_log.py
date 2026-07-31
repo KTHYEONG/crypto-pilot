@@ -1,17 +1,22 @@
 from __future__ import annotations
 
+import dataclasses
 from pathlib import Path
 
 import pandas as pd
 
 from src.core.types import CostModel, StrategySpec
 from src.engine.backtest import run_backtest
+from src.engine.results_log import load_runs, record_run
+from src.validation.candidate_promotion import (
+    CandidateIdentity,
+    compose_promotion_verdict,
+)
 from src.validation.metrics import compute_metrics
 from src.validation.reliability_gate import (
     FoldDistributionResult,
     ReliabilityGateResult,
 )
-from src.engine.results_log import load_runs, record_run
 
 
 def _gate_fixture() -> tuple[ReliabilityGateResult, FoldDistributionResult, ReliabilityGateResult]:
@@ -153,3 +158,59 @@ class TestResultsLog:
         legacy_df = load_runs(legacy)
         assert len(legacy_df) == 1
         assert legacy_df.loc[0, "metrics.cagr"] == 0.05
+
+    def test_record_run_persists_promotion_field(
+        self, tmp_path: Path, spec: StrategySpec, costs: CostModel, bars_ramp: pd.DataFrame,
+    ) -> None:
+        # SC-LOG-03: one append-only JSONL row includes candidate identity, status,
+        # and individual gate evidence in the promotion field.
+        log_path = tmp_path / "runs.jsonl"
+        result = run_backtest(bars_ramp, spec, costs)
+        metrics = compute_metrics(result.equity, result.trades)
+        observation, fold, stress = _gate_fixture()
+
+        promotion = compose_promotion_verdict(observation, fold, stress, None)
+        identity = CandidateIdentity(
+            hypothesis_id="hyp-001", code_hash="sha-abc", parameters={"period": 20},
+            data_start="2019-01-01", data_end="2025-12-31", return_source="breakout",
+        )
+        promotion = dataclasses.replace(promotion, candidate=identity)
+
+        rec = record_run(
+            spec=spec, costs=costs, result=result, metrics=metrics,
+            start=None, end="2025-12-31", initial_equity=10_000.0,
+            observation_gate=observation, fold_distribution=fold, stress_gate=stress,
+            promotion=promotion, log_path=log_path,
+        )
+
+        lines = log_path.read_text(encoding="utf-8").splitlines()
+        assert len(lines) == 1
+        assert rec["promotion"]["status"] == "OBSERVATION_PASS"
+        assert rec["promotion"]["observation_verdict"] == "PASS"
+        assert rec["promotion"]["fold_gate_pass"] is True
+        assert rec["promotion"]["stress_verdict"] == "PASS"
+        assert rec["promotion"]["holdout_verdict"] is None
+        assert rec["promotion"]["candidate"]["hypothesis_id"] == "hyp-001"
+        assert rec["promotion"]["candidate"]["return_source"] == "breakout"
+
+        df = load_runs(log_path)
+        assert df.loc[0, "promotion.status"] == "OBSERVATION_PASS"
+        assert df.loc[0, "promotion.candidate.hypothesis_id"] == "hyp-001"
+
+    def test_record_run_without_promotion_keeps_field_null_and_backward_compat(
+        self, tmp_path: Path, spec: StrategySpec, costs: CostModel, bars_ramp: pd.DataFrame,
+    ) -> None:
+        log_path = tmp_path / "runs.jsonl"
+        result = run_backtest(bars_ramp, spec, costs)
+        metrics = compute_metrics(result.equity, result.trades)
+        observation, fold, stress = _gate_fixture()
+
+        rec = record_run(
+            spec=spec, costs=costs, result=result, metrics=metrics,
+            start=None, end="2025-12-31", initial_equity=10_000.0,
+            observation_gate=observation, fold_distribution=fold, stress_gate=stress,
+            log_path=log_path,
+        )
+        assert rec["promotion"] is None
+        assert rec["reliability"]["observation"]["verdict"] == "PASS"
+        assert rec["window"] == "observation"
