@@ -1,7 +1,8 @@
 [project]
-name = "quant-trading-system"
+name = "my-coin-traider"
 version = "0.1.0"
 requires-python = ">=3.11"
+
 dependencies = [
     "numpy>=2.0.0",
     "pandas>=2.2.0",
