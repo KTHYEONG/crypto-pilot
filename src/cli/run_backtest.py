@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+from pathlib import Path
 
 import pandas as pd
 
@@ -21,6 +22,25 @@ from src.validation.reliability_gate import (
 
 _logger = logging.getLogger("BacktestRunner")
 
+
+def _load_funding_rates(path: str) -> pd.Series:
+    """Load a published-funding parquet into a monotonic rate Series."""
+    p = Path(path)
+    if not p.exists():
+        raise RuntimeError(f"funding path does not exist: {path}")
+    df = pd.read_parquet(p)
+    if "datetime" in df.columns:
+        ts = pd.to_datetime(df["datetime"], utc=True, errors="coerce")
+    elif "timestamp" in df.columns:
+        ts = pd.to_datetime(pd.to_numeric(df["timestamp"], errors="coerce"), unit="ms", utc=True)
+    else:
+        raise RuntimeError("funding parquet must contain a 'datetime' or 'timestamp' column")
+    if "funding_rate" not in df.columns:
+        raise RuntimeError("funding parquet must contain a 'funding_rate' column")
+    rates = pd.to_numeric(df["funding_rate"], errors="coerce")
+    series = pd.Series(rates.to_numpy(dtype="float64"), index=pd.DatetimeIndex(ts))
+    return series[series.index.notna()].sort_index()
+
 # End of the observation window (spec section 3.2). Note the 23:59:59 boundary:
 # load_ohlcv_4h filters "index <= end", and a bare "2025-12-31" parses to
 # 00:00:00, which would drop the last 5 bars of that day.
@@ -33,6 +53,8 @@ def main() -> None:
     parser.add_argument("--start", default=None)
     parser.add_argument("--end", default=None)
     parser.add_argument("--initial-equity", type=float, default=10_000.0)
+    parser.add_argument("--min-taker-buy-ratio", type=float, default=None)
+    parser.add_argument("--funding-path", default=None)
     parser.add_argument("--unseal-holdout", action="store_true", default=False)
     parser.add_argument(
         "--no-log-run", action="store_true", default=False,
@@ -56,12 +78,37 @@ def main() -> None:
             )
         end = args.end
 
-    spec = StrategySpec(symbol=args.symbol)
+    spec = StrategySpec(symbol=args.symbol, min_taker_buy_ratio=args.min_taker_buy_ratio)
     costs = CostModel()
     path = ohlcv_path(args.symbol, "1h")
 
     df = load_ohlcv_4h(path, start=args.start, end=end)
-    result = run_backtest(df, spec, costs, initial_equity=args.initial_equity)
+
+    funding_rates = None
+    if args.funding_path is not None:
+        funding_rates = _load_funding_rates(args.funding_path)
+        _logger.info(
+            "[EVAL] funding loaded: path=%s rows=%d", args.funding_path, len(funding_rates),
+        )
+        if len(df) > 0:
+            bar_period = df.index[1] - df.index[0]
+            window_end = df.index[-1] + bar_period
+            funding_rates = funding_rates[
+                (funding_rates.index >= df.index[0]) & (funding_rates.index < window_end)
+            ]
+            _logger.info(
+                "[EVAL] funding aligned to bar window: rows=%d", len(funding_rates),
+            )
+    if spec.min_taker_buy_ratio is not None:
+        _logger.info(
+            "[EVAL] candidate identity: taker_flow_confirmation "
+            "min_taker_buy_ratio=%.3f funding_path=%s",
+            spec.min_taker_buy_ratio, args.funding_path or "(none)",
+        )
+
+    result = run_backtest(
+        df, spec, costs, initial_equity=args.initial_equity, funding_rates=funding_rates,
+    )
     metrics = compute_metrics(result.equity, result.trades)
 
     _logger.info(
@@ -82,7 +129,7 @@ def main() -> None:
         result.trades, years=years, sharpe=metrics.sharpe, mdd=metrics.mdd,
     )
     fold_distribution = compute_fold_distribution(result)
-    stress_gate = compute_stress_test_gate(df, spec, costs)
+    stress_gate = compute_stress_test_gate(df, spec, costs, funding_rates=funding_rates)
 
     holdout_gate = None
     if args.unseal_holdout and result.equity.index[-1] > HOLDOUT_CUTOFF:
