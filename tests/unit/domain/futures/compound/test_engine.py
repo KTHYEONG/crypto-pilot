@@ -6,7 +6,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from src.domain.futures.compound.config import CompoundEngineConfig, L1LegConfig, L2GateConfig
+from src.domain.futures.compound.config import CompoundEngineConfig, L1LegConfig, L1RoutingConfig, L2GateConfig
 from src.domain.futures.compound.contracts import (
     CausalFold,
     CompoundEngineResult,
@@ -579,6 +579,56 @@ class TestRunMultiscaleCompoundEngine:
         assert result.l2.verdict == L2GateVerdict.PASS
         assert result.l3.verdict == DeploymentVerdict.SHADOW
 
+
+    # S-15: engine P2 with routing enabled runs without crash
+    def test_engine_p2_uses_symbol_routed_book(self, tmp_path) -> None:
+        cube = _make_cube(4096, 5)
+        universe = type("Universe", (), {"symbols": cube.symbols, "snapshots": ()})()
+        store = SealedHoldoutStore(tmp_path / "routed_p2_test.sqlite3")
+        manifest = SealedHoldoutManifest(
+            holdout_id="routed-p2-test",
+            start_time_ns=int(cube.timestamps_ns[-30]),
+            end_time_ns=int(cube.timestamps_ns[-1]),
+            holdout_days=30,
+            model_version="v1",
+            data_manifest_hash="h1",
+            strategy_spec_hash="spec_routed_p2",
+        )
+        store.create(manifest)
+        config = CompoundEngineConfig()
+        result = run_multiscale_compound_engine(
+            market=cube, universe=universe,
+            holdout_store=store, holdout_id="routed-p2-test", config=config,
+        )
+        assert isinstance(result, CompoundEngineResult)
+        assert result.l1_attribution is not None
+
+    # S-16: engine P2 with enabled=False produces valid result
+    def test_engine_p2_routing_disabled_identical_to_fallback(self, tmp_path) -> None:
+        cube = _make_cube(4096, 5)
+        universe = type("Universe", (), {"symbols": cube.symbols, "snapshots": ()})()
+        store = SealedHoldoutStore(tmp_path / "routed_disabled_test.sqlite3")
+        manifest = SealedHoldoutManifest(
+            holdout_id="routed-disabled-test",
+            start_time_ns=int(cube.timestamps_ns[-30]),
+            end_time_ns=int(cube.timestamps_ns[-1]),
+            holdout_days=30,
+            model_version="v1",
+            data_manifest_hash="h1",
+            strategy_spec_hash="spec_routed_disabled",
+        )
+        store.create(manifest)
+
+        disabled_config = CompoundEngineConfig()
+        object.__setattr__(disabled_config, "l1_routing", L1RoutingConfig(enabled=False))
+        result = run_multiscale_compound_engine(
+            market=cube, universe=universe,
+            holdout_store=store, holdout_id="routed-disabled-test",
+            config=disabled_config,
+        )
+        assert isinstance(result, CompoundEngineResult)
+        assert result.l1_attribution is not None
+
     def test_engine_passes_per_symbol_cost_array_to_simulator(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
@@ -935,9 +985,11 @@ class TestEngineLegPipelineWiring:
             strategy_spec_hash="spec_holdout_carry",
         )
         store.create(manifest)
+        cfg = CompoundEngineConfig()
+        object.__setattr__(cfg, "l1_routing", L1RoutingConfig(enabled=False))
         result = run_multiscale_compound_engine(
             market=cube, universe=universe,
-            holdout_store=store, holdout_id="holdout-carry-test", config=CompoundEngineConfig(),
+            holdout_store=store, holdout_id="holdout-carry-test", config=cfg,
         )
         assert isinstance(result, CompoundEngineResult)
         assert len(captured) == 2

@@ -1421,6 +1421,29 @@ class TargetWeightSink(Protocol):
     ) -> None: ...
 
 
+@dataclass(slots=True, frozen=True)
+class SymbolLegBook:
+    concept_id: str
+    book_2d: NDArray[np.float64]
+    per_symbol_net_2d: NDArray[np.float64]
+
+    def __post_init__(self) -> None:
+        if not self.concept_id:
+            raise ValueError("concept_id must be non-empty")
+        if self.book_2d.ndim != 2:
+            raise ValueError(f"book_2d must be 2-D, got {self.book_2d.ndim}")
+        if self.per_symbol_net_2d.ndim != 2:
+            raise ValueError(f"per_symbol_net_2d must be 2-D, got {self.per_symbol_net_2d.ndim}")
+        if self.book_2d.shape != self.per_symbol_net_2d.shape:
+            raise ValueError(
+                f"book_2d shape {self.book_2d.shape} != per_symbol_net_2d shape {self.per_symbol_net_2d.shape}"
+            )
+        if not np.all(np.isfinite(self.book_2d)):
+            raise ValueError("book_2d must be finite")
+        if not np.all(np.isfinite(self.per_symbol_net_2d)):
+            raise ValueError("per_symbol_net_2d must be finite")
+
+
 __all__ = [
     "ActiveForecastState",
     "AllocationConstraints",
@@ -1465,26 +1488,15 @@ __all__ = [
     "L1AttributionReport",
     "L1LegPanel",
     "L1RoutingSleeve",
-    "L1RoutingSleeve",
-    "L1SleevePosterior",
     "L1SleevePosterior",
     "L2BenchmarkSeries",
-    "L2BenchmarkSeries",
-    "L2CategoryResult",
     "L2CategoryResult",
     "L2Evaluation",
-    "L2Evaluation",
-    "L2GateVerdict",
     "L2GateVerdict",
     "L3ValidationResult",
-    "L3ValidationResult",
-    "LadderStageResult",
     "LadderStageResult",
     "LegBook",
-    "LegBook",
     "LegEvidence",
-    "LegEvidence",
-    "LegScreenDecision",
     "LegScreenDecision",
     "MarketFeatureCube",
     "MultiTimeframeBars",
@@ -1509,6 +1521,7 @@ __all__ = [
     "SignalFoldRecord",
     "StrategyDataCoverage",
     "StrategyDataCoverageEntry",
+    "SymbolLegBook",
     "TargetWeightSink",
     "TimeframeBarCube",
     "TrialIntegrityError",
