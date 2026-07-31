@@ -1,5 +1,12 @@
 [
   {
+    "domain": "signal",
+    "failed_hypothesis": "The 0.52 taker-flow candidate would pass the unchanged observation and fold gates after funding accrual.",
+    "failure_reason": "Funding-net execution still produced observation FAIL and fold gate_pass=false, so promotion remains rejected.",
+    "falsified_date": "2026-07-31",
+    "source_adr": "ADR_20260731_TAKER_FLOW_CONFIRMATION"
+  },
+  {
     "domain": "execution",
     "failed_hypothesis": "Basename-only test mapping and per-file dotted coverage targets are reliable.",
     "failure_reason": "Feature-named tests were rejected and pytest-cov triggered a NumPy import-order failure for leaf-module targets.",
