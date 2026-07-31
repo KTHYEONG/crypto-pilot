@@ -15,5 +15,8 @@
   },
   "src/engine/portfolio_backtest.py": {
     "testing": "tests/unit/engine/test_portfolio_execution.py"
+  },
+  "src/cli/run_portfolio_backtest.py": {
+    "testing": "tests/integration/test_portfolio_promotion.py"
   }
 }
