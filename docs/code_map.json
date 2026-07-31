@@ -12,5 +12,8 @@
   },
   "src/engine/backtest.py": {
     "testing": "tests/integration/test_taker_flow_candidate.py"
+  },
+  "src/engine/portfolio_backtest.py": {
+    "testing": "tests/unit/engine/test_portfolio_execution.py"
   }
 }
