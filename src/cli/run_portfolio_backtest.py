@@ -17,8 +17,8 @@ from src.validation.candidate_promotion import compose_promotion_verdict
 from src.validation.metrics import compute_metrics
 from src.validation.reliability_gate import (
     ReliabilityGateConfig,
+    compute_equity_reliability_gate,
     compute_fold_distribution,
-    compute_portfolio_reliability_gate,
     split_holdout_segment,
 )
 
@@ -131,7 +131,7 @@ def main() -> None:
         metrics.cagr, metrics.mdd, metrics.sharpe, metrics.trade_count,
     )
 
-    observation_gate = compute_portfolio_reliability_gate(result.equity, len(result.trades))
+    observation_gate = compute_equity_reliability_gate(result.equity, len(result.trades))
     fold_distribution = compute_fold_distribution(result)
 
     stressed_costs = CostModel(
@@ -143,7 +143,7 @@ def main() -> None:
         initial_equity=args.initial_equity, signal_delay_bars=1,
     )
     stress_metrics = compute_metrics(stress_result.equity, stress_result.trades)
-    stress_gate = compute_portfolio_reliability_gate(
+    stress_gate = compute_equity_reliability_gate(
         stress_result.equity,
         len(stress_result.trades),
         dataclasses.replace(ReliabilityGateConfig(), hurdle_rate=0.0),
@@ -152,10 +152,10 @@ def main() -> None:
     holdout_gate = None
     if args.unseal_holdout and result.equity.index[-1] > HOLDOUT_CUTOFF:
         segment = split_holdout_segment(result, HOLDOUT_CUTOFF)
-        observation_gate = compute_portfolio_reliability_gate(
+        observation_gate = compute_equity_reliability_gate(
             segment.observation_equity, len(segment.observation_trades),
         )
-        holdout_gate = compute_portfolio_reliability_gate(
+        holdout_gate = compute_equity_reliability_gate(
             segment.holdout_equity, len(segment.holdout_trades),
         )
         _logger.info(

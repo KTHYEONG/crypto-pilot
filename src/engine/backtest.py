@@ -15,6 +15,7 @@ _logger = setup_logger("Backtest")
 @dataclass
 class TradeRecord:
     entry_bar: int
+    exit_bar: int
     entry_price: float
     exit_price: float
     qty: float
@@ -178,7 +179,7 @@ def run_backtest(
             pnl -= exit_fee
             pnl += trade_funding_pnl
             trades.append(TradeRecord(
-                entry_bar=entry_bar_idx, entry_price=entry_price,
+                entry_bar=entry_bar_idx, exit_bar=t, entry_price=entry_price,
                 exit_price=exit_price, qty=position_qty,
                 reason=reason, pnl=pnl,
                 return_pct=pnl / (cash - pnl) if cash != pnl else 0.0,
@@ -229,7 +230,7 @@ def run_backtest(
                     pnl -= exit_fee
                     pnl += trade_funding_pnl
                     trades.append(TradeRecord(
-                        entry_bar=entry_bar_idx, entry_price=entry_price,
+                        entry_bar=entry_bar_idx, exit_bar=t, entry_price=entry_price,
                         exit_price=exit_price, qty=qty,
                         reason="stop_entrybar", pnl=pnl,
                         return_pct=pnl / (cash - pnl) if cash != pnl else 0.0,
@@ -265,6 +266,7 @@ def run_backtest(
     )
     trades_df = pd.DataFrame([{
         "entry_bar": t.entry_bar,
+        "exit_bar": t.exit_bar,
         "entry_price": t.entry_price,
         "exit_price": t.exit_price,
         "qty": t.qty,
@@ -273,7 +275,7 @@ def run_backtest(
         "return_pct": t.return_pct,
         "funding_pnl": t.funding_pnl,
     } for t in trades]) if trades else pd.DataFrame(columns=[
-        "entry_bar", "entry_price", "exit_price", "qty", "reason", "pnl",
+        "entry_bar", "exit_bar", "entry_price", "exit_price", "qty", "reason", "pnl",
         "return_pct", "funding_pnl",
     ])
 

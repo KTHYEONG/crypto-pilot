@@ -14,8 +14,8 @@ from src.engine.results_log import record_run
 from src.validation.candidate_promotion import compose_promotion_verdict
 from src.validation.metrics import compute_metrics
 from src.validation.reliability_gate import (
+    compute_equity_reliability_gate,
     compute_fold_distribution,
-    compute_reliability_gate,
     compute_stress_test_gate,
     split_holdout_segment,
 )
@@ -124,32 +124,18 @@ def main() -> None:
     _logger.info("[EVAL] exposure=%.3f", metrics.exposure)
     _logger.info("[EVAL] trades_per_year=%s", metrics.trades_per_year)
 
-    years = (result.equity.index[-1] - result.equity.index[0]).total_seconds() / (365.25 * 86400)
-    observation_gate = compute_reliability_gate(
-        result.trades, years=years, sharpe=metrics.sharpe, mdd=metrics.mdd,
-    )
+    observation_gate = compute_equity_reliability_gate(result.equity, len(result.trades))
     fold_distribution = compute_fold_distribution(result)
     stress_gate = compute_stress_test_gate(df, spec, costs, funding_rates=funding_rates)
 
     holdout_gate = None
     if args.unseal_holdout and result.equity.index[-1] > HOLDOUT_CUTOFF:
         segment = split_holdout_segment(result, HOLDOUT_CUTOFF)
-        obs_metrics = compute_metrics(segment.observation_equity, segment.observation_trades)
-        obs_years = (
-            (segment.observation_equity.index[-1] - segment.observation_equity.index[0])
-            .total_seconds() / (365.25 * 86400)
+        observation_gate = compute_equity_reliability_gate(
+            segment.observation_equity, len(segment.observation_trades),
         )
-        observation_gate = compute_reliability_gate(
-            segment.observation_trades, years=obs_years,
-            sharpe=obs_metrics.sharpe, mdd=obs_metrics.mdd,
-        )
-        holdout_metrics = compute_metrics(
-            segment.holdout_equity,
-            segment.holdout_trades.drop(columns=["entry_bar"], errors="ignore"),
-        )
-        holdout_gate = compute_reliability_gate(
-            segment.holdout_trades, years=segment.holdout_years,
-            sharpe=holdout_metrics.sharpe, mdd=holdout_metrics.mdd,
+        holdout_gate = compute_equity_reliability_gate(
+            segment.holdout_equity, len(segment.holdout_trades),
         )
 
     _logger.info(
