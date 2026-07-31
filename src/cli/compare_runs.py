@@ -10,6 +10,9 @@ _SUMMARY_COLS = [
     "ts", "git_sha", "git_dirty", "symbol", "end",
     "metrics.trade_count", "metrics.cagr", "metrics.mdd",
     "metrics.sharpe", "metrics.profit_factor", "metrics.win_rate",
+    "reliability.observation.verdict", "reliability.observation.lcb90_cagr",
+    "reliability.fold_distribution.max_period_contribution",
+    "reliability.stress_test.verdict",
 ]
 
 
