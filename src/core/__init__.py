@@ -2,7 +2,6 @@ from src.core.config import (
     BASE_DIR,
     DATA_DIR,
     FUTURES_DATA_DIR,
-    FUTURES_RAW_DIR,
     funding_path,
     ohlcv_path,
 )
@@ -13,7 +12,6 @@ __all__ = [
     "BASE_DIR",
     "DATA_DIR",
     "FUTURES_DATA_DIR",
-    "FUTURES_RAW_DIR",
     "SLIPPAGE_BPS",
     "TAKER_FEE_BPS",
     "CostModel",
