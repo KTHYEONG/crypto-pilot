@@ -2,9 +2,10 @@ from __future__ import annotations
 
 import logging
 import sys
-from pathlib import Path
 
-LOG_DIR = Path(__file__).resolve().parent.parent / "logs"
+from src.core.config import BASE_DIR
+
+LOG_DIR = BASE_DIR / "logs"
 LOG_DIR.mkdir(parents=True, exist_ok=True)
 
 _FORMAT = "%(asctime)s [%(levelname)s] [%(tag)s] %(message)s"
