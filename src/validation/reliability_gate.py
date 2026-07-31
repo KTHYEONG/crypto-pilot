@@ -300,12 +300,15 @@ def compute_stress_test_gate(
     cost_fee_mult: float = 1.5,
     cost_slip_mult: float = 2.0,
     delay_bars: int = 1,
+    funding_rates: pd.Series | None = None,
 ) -> ReliabilityGateResult:
     stressed_costs = CostModel(
         fee_rate=costs.fee_rate * cost_fee_mult,
         slippage_rate=costs.slippage_rate * cost_slip_mult,
     )
-    stressed_result = run_backtest(df, spec, stressed_costs, signal_delay_bars=delay_bars)
+    stressed_result = run_backtest(
+        df, spec, stressed_costs, signal_delay_bars=delay_bars, funding_rates=funding_rates,
+    )
     stressed_metrics = compute_metrics(stressed_result.equity, stressed_result.trades)
     years = (
         (stressed_result.equity.index[-1] - stressed_result.equity.index[0])
