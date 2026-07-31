@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
 
+from src.core.config import borrow_path, funding_path, ohlcv_path, spot_ohlcv_path
 from src.core.logging_setup import setup_logger
-from src.data.loader import DataIntegrityError
+from src.data.loader import DataIntegrityError, load_funding_rates, load_ohlcv_1h_as_4h
 
 _logger = setup_logger("CarryData")
 
@@ -132,6 +134,131 @@ def validate_carry_market_data(
     )
 
 
+def _load_borrow_events(path: str | Path) -> pd.DataFrame:
+    """Load canonical quote-borrow events (``timestamp``, ``borrow_rate``, ``accrual_seconds``).
+
+    ``borrow_rate`` is a decimal cost accruing over exactly ``accrual_seconds``
+    beginning at ``timestamp``. Ambiguous-unit exports (no ``accrual_seconds``)
+    are rejected rather than inferred.
+    """
+    p = Path(path)
+    if not p.exists():
+        raise DataIntegrityError(f"borrow path does not exist: {path}")
+    df = pd.read_parquet(p)
+    if "datetime" in df.columns:
+        ts = pd.to_datetime(df["datetime"], utc=True, errors="coerce")
+    elif "timestamp" in df.columns:
+        ts = pd.to_datetime(pd.to_numeric(df["timestamp"], errors="coerce"), unit="ms", utc=True)
+    else:
+        raise DataIntegrityError("borrow parquet must contain a 'timestamp' or 'datetime' column")
+    if "borrow_rate" not in df.columns:
+        raise DataIntegrityError("borrow parquet must contain a 'borrow_rate' column")
+    if "accrual_seconds" not in df.columns:
+        raise DataIntegrityError(
+            "borrow parquet must contain an 'accrual_seconds' column; the source cadence "
+            "cannot be inferred from an ambiguous export"
+        )
+    if ts.dt.tz is None or ts.dt.tz.utcoffset(None) is None:
+        raise DataIntegrityError("borrow timestamps must be tz-aware UTC")
+    rates = pd.to_numeric(df["borrow_rate"], errors="coerce").astype("float64")
+    accrual = pd.to_numeric(df["accrual_seconds"], errors="coerce").astype("float64")
+    events = pd.DataFrame({"ts": ts, "borrow_rate": rates, "accrual_seconds": accrual})
+    events = events[events["ts"].notna()]
+    events = events.sort_values("ts").reset_index(drop=True)
+    return events
+
+
+def _borrow_events_to_per_bar(
+    events: pd.DataFrame,
+    grid: pd.DatetimeIndex,
+    bar_period: pd.Timedelta,
+) -> pd.Series:
+    """Convert borrow events into a finite per-4h-bar rate on the exact grid.
+
+    Each bar receives the overlap-weighted share of every event covering it, so
+    an event accruing over ``accrual_seconds`` never forward-fills beyond its
+    declared interval. Rejects duplicate, overlapping, non-positive-duration,
+    uncovered, non-finite, and ambiguous rows fail-closed.
+    """
+    if len(grid) == 0:
+        raise DataIntegrityError("borrow conversion requires a non-empty bar grid")
+    ts = events["ts"]
+    rates = events["borrow_rate"].to_numpy(dtype=np.float64)
+    accrual = events["accrual_seconds"].to_numpy(dtype=np.float64)
+    if not np.isfinite(rates).all() or not np.isfinite(accrual).all():
+        raise DataIntegrityError("borrow events must be finite")
+    if (accrual <= 0).any():
+        raise DataIntegrityError("borrow accrual_seconds must be > 0")
+    if ts.duplicated().any():
+        raise DataIntegrityError("borrow events must not contain duplicates")
+    if not ts.is_monotonic_increasing:
+        raise DataIntegrityError("borrow events must be monotonic in time")
+    ends = ts + pd.to_timedelta(accrual, unit="s")
+    if len(ts) > 1 and (ts.iloc[1:].to_numpy() < ends.iloc[:-1].to_numpy()).any():
+        raise DataIntegrityError("borrow events must not overlap")
+
+    bar_ns = int(bar_period / pd.Timedelta("1ns"))
+    bar_starts = grid.to_numpy(dtype="datetime64[ns]")
+    bar_ends = bar_starts + bar_ns
+    ev_starts = ts.to_numpy(dtype="datetime64[ns]")
+    ev_ends = ends.to_numpy(dtype="datetime64[ns]")
+    ev_ns = accrual * 1_000_000_000.0
+
+    per_bar = np.zeros(len(grid), dtype=np.float64)
+    for i in range(len(grid)):
+        overlap_ns = np.minimum(bar_ends[i], ev_ends) - np.maximum(bar_starts[i], ev_starts)
+        overlap_ns = np.maximum(overlap_ns, 0).astype(np.float64)
+        covered = float(overlap_ns.sum())
+        if not np.isclose(covered, float(bar_ns)):
+            raise DataIntegrityError(
+                f"borrow coverage incomplete at {pd.Timestamp(bar_starts[i])}: "
+                f"covered {covered} of {bar_ns} ns"
+            )
+        per_bar[i] = float(np.sum(rates * overlap_ns / ev_ns))
+    return pd.Series(per_bar, index=grid, name="borrow_rate")
+
+
+def _load_borrow_rates(path: str | Path, grid: pd.DatetimeIndex, bar_period: pd.Timedelta) -> pd.Series:
+    """Load canonical borrow events and convert them to per-bar rates on ``grid``."""
+    events = _load_borrow_events(path)
+    return _borrow_events_to_per_bar(events, grid, bar_period)
+
+
+def load_carry_market_data(
+    symbol: str,
+    start: str | None,
+    end: str | pd.Timestamp | None,
+) -> CarryMarketData:
+    """Load and fail-closed validate the four cash-and-carry inputs for one symbol.
+
+    Loads exact spot/perp 1h coverage, resamples to an identical 4h grid,
+    aligns the actual funding settlement events (gap at most eight hours), and
+    converts quote-borrow events to per-4h-bar rates. Every missing input or
+    uncovered borrow bar raises ``DataIntegrityError``; nothing is zero-filled.
+    """
+    spot_p = spot_ohlcv_path(symbol, "1h")
+    perp_p = ohlcv_path(symbol, "1h")
+    fund_p = funding_path(symbol)
+    borrow_p = borrow_path(symbol)
+    for path, name in [(spot_p, "spot"), (perp_p, "perp"), (fund_p, "funding"), (borrow_p, "borrow")]:
+        if not path.exists():
+            raise DataIntegrityError(f"{name} data missing for {symbol}: {path}")
+
+    spot = load_ohlcv_1h_as_4h(spot_p, start=start, end=end)
+    perp = load_ohlcv_1h_as_4h(perp_p, start=start, end=end)
+    if len(spot) < 2:
+        raise DataIntegrityError(f"spot data has fewer than 2 bars for {symbol}")
+    period = spot.index[1] - spot.index[0]
+    window_end = spot.index[-1] + period
+    funding = load_funding_rates(str(fund_p))
+    funding = funding[(funding.index >= spot.index[0]) & (funding.index < window_end)]
+    borrow = _load_borrow_rates(str(borrow_p), spot.index, period)
+
+    market_data = CarryMarketData(symbol=symbol, spot=spot, perp=perp, funding=funding, borrow=borrow)
+    validate_carry_market_data(market_data)
+    return market_data
+
+
 def _check_contract() -> None:
     """Executable assertions locking the frozen carry data surface."""
     assert validate_carry_market_data.__name__ == "validate_carry_market_data"
@@ -139,6 +266,7 @@ def _check_contract() -> None:
         "symbol", "spot", "perp", "funding", "borrow",
     }
     assert validate_carry_market_data.__defaults__ == (pd.Timedelta(hours=8),)
+    assert load_carry_market_data.__name__ == "load_carry_market_data"
 
 
 _check_contract()
