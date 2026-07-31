@@ -48,6 +48,29 @@ class TestCarryMarketDataValidation:
         with pytest.raises(DataIntegrityError, match="funding gap"):
             validate_carry_market_data(data)
 
+    def test_accepts_funding_timestamp_jitter_within_tolerance(self, make_carry_data) -> None:
+        data = make_carry_data(
+            n_bars=4,
+            funding={
+                "2024-01-01 00:00:00": 0.001,
+                "2024-01-01 08:00:00.026": 0.001,
+            },
+            borrow=[0.0, 0.0, 0.0, 0.0],
+        )
+        validate_carry_market_data(data)
+
+    def test_rejects_funding_gap_beyond_jitter_tolerance(self, make_carry_data) -> None:
+        data = make_carry_data(
+            n_bars=4,
+            funding={
+                "2024-01-01 00:00:00": 0.001,
+                "2024-01-01 08:00:00.051": 0.001,
+            },
+            borrow=[0.0, 0.0, 0.0, 0.0],
+        )
+        with pytest.raises(DataIntegrityError, match="funding gap"):
+            validate_carry_market_data(data)
+
     def test_rejects_nan_borrow(self, make_carry_data) -> None:
         # SC-CARRY-DATA-02: NaN borrow is never replaced with a zero cost.
         data = make_carry_data(
