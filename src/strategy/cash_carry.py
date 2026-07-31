@@ -20,10 +20,14 @@ def generate_cash_carry_target(
     are used. A decision is only evaluated on a bar that contains a fresh
     funding settlement: on bars without one the current state is preserved
     (``HOLD``), so an open pair is never dropped on an empty settlement bar.
-    Positive net carry (settled funding minus the decision bar's quote-cash
-    borrow rate) targets ``OPEN`` when flat and ``HOLD`` when open; non-positive
-    observed net carry targets ``CLOSE`` when open. The returned target is
-    executable no earlier than the next bar, never for the same event.
+    Positive net carry targets ``OPEN`` when flat and ``HOLD`` when open;
+    non-positive observed net carry targets ``CLOSE`` when open.
+
+    Net carry compares the funding settled since the prior funding settlement
+    against the quote-cash borrow accrued over the same elapsed interval (or
+    from the first valid event boundary), never a single arbitrary model bar.
+    The returned target is executable no earlier than the next bar, never for
+    the same event.
     """
     grid = data.spot.index
     if not isinstance(decision_time, pd.Timestamp):
@@ -42,16 +46,24 @@ def generate_cash_carry_target(
     t = int(grid.get_loc(dt))
 
     funding = pd.to_numeric(data.funding, errors="coerce").astype("float64")
-    fresh = (
-        funding.index <= grid[t]
-        if t == 0
-        else (funding.index > grid[t - 1]) & (funding.index <= grid[t])
-    )
+    if t == 0:
+        fresh = funding.index <= grid[t]
+        prior = pd.DatetimeIndex([])
+    else:
+        fresh = (funding.index > grid[t - 1]) & (funding.index <= grid[t])
+        prior = funding.index[funding.index <= grid[t - 1]]
     if not bool(fresh.any()):
         return "HOLD"
 
     settled_funding = float(funding.loc[fresh].sum())
-    borrow_cost = float(pd.to_numeric(data.borrow, errors="coerce").loc[dt])
+    borrow = pd.to_numeric(data.borrow, errors="coerce")
+    if len(prior) == 0:
+        borrow_cost = float(borrow.iloc[: t + 1].sum())
+    else:
+        interval_start = prior[-1]
+        borrow_cost = float(
+            borrow[(borrow.index > interval_start) & (borrow.index <= grid[t])].sum()
+        )
     net_carry = settled_funding - borrow_cost
 
     if is_open:

@@ -2,13 +2,12 @@ from __future__ import annotations
 
 import argparse
 import logging
-from pathlib import Path
 
 import pandas as pd
 
 from src.core.config import ohlcv_path
 from src.core.types import CostModel, StrategySpec
-from src.data.loader import load_ohlcv_4h
+from src.data.loader import load_funding_rates, load_ohlcv_4h
 from src.engine.backtest import run_backtest
 from src.engine.results_log import record_run
 from src.validation.candidate_promotion import compose_promotion_verdict
@@ -24,22 +23,8 @@ _logger = logging.getLogger("BacktestRunner")
 
 
 def _load_funding_rates(path: str) -> pd.Series:
-    """Load a published-funding parquet into a monotonic rate Series."""
-    p = Path(path)
-    if not p.exists():
-        raise RuntimeError(f"funding path does not exist: {path}")
-    df = pd.read_parquet(p)
-    if "datetime" in df.columns:
-        ts = pd.to_datetime(df["datetime"], utc=True, errors="coerce")
-    elif "timestamp" in df.columns:
-        ts = pd.to_datetime(pd.to_numeric(df["timestamp"], errors="coerce"), unit="ms", utc=True)
-    else:
-        raise RuntimeError("funding parquet must contain a 'datetime' or 'timestamp' column")
-    if "funding_rate" not in df.columns:
-        raise RuntimeError("funding parquet must contain a 'funding_rate' column")
-    rates = pd.to_numeric(df["funding_rate"], errors="coerce")
-    series = pd.Series(rates.to_numpy(dtype="float64"), index=pd.DatetimeIndex(ts))
-    return series[series.index.notna()].sort_index()
+    """Backward-compatible alias delegating to the shared data loader."""
+    return load_funding_rates(path)
 
 # End of the observation window (spec section 3.2). Note the 23:59:59 boundary:
 # load_ohlcv_4h filters "index <= end", and a bare "2025-12-31" parses to
