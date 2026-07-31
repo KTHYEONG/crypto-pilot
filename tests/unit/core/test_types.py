@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from src.core.types import CostModel, StrategySpec
+from src.core.types import CashCarrySpec, CarryCostModel, CostModel, StrategySpec
 
 
 def test_strategy_spec_contract() -> None:
@@ -70,3 +70,35 @@ class TestCostModel:
             c.buy_fill(0)
         with pytest.raises(ValueError, match="price must be > 0"):
             c.sell_fill(-1.0)
+
+
+class TestCashCarrySpec:
+    def test_defaults_are_frozen(self) -> None:
+        s = CashCarrySpec(symbol="BTCUSDT")
+        assert (s.initial_margin_rate, s.maintenance_margin_rate) == (0.10, 0.05)
+        with pytest.raises(AttributeError):
+            s.initial_margin_rate = 0.2  # type: ignore[misc]
+
+    def test_validation_raises(self) -> None:
+        with pytest.raises(ValueError, match="symbol"):
+            CashCarrySpec(symbol="")
+        with pytest.raises(ValueError, match="initial_margin_rate"):
+            CashCarrySpec(symbol="BTCUSDT", initial_margin_rate=0.0)
+        with pytest.raises(ValueError, match="initial_margin_rate"):
+            CashCarrySpec(symbol="BTCUSDT", initial_margin_rate=1.5)
+        with pytest.raises(ValueError, match="maintenance_margin_rate"):
+            CashCarrySpec(symbol="BTCUSDT", maintenance_margin_rate=0.0)
+        with pytest.raises(ValueError, match="maintenance_margin_rate"):
+            CashCarrySpec(symbol="BTCUSDT", maintenance_margin_rate=0.15)
+
+
+class TestCarryCostModel:
+    def test_two_leg_cost_surface(self) -> None:
+        c = CarryCostModel()
+        assert (c.spot_fee_rate, c.perp_fee_rate, c.slippage_rate) == (0.001, 0.0005, 0.0003)
+        with pytest.raises(ValueError, match="spot_fee_rate"):
+            CarryCostModel(spot_fee_rate=-0.01)
+        with pytest.raises(ValueError, match="perp_fee_rate"):
+            CarryCostModel(perp_fee_rate=-0.01)
+        with pytest.raises(ValueError, match="slippage_rate"):
+            CarryCostModel(slippage_rate=-0.01)
