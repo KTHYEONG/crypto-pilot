@@ -5,6 +5,7 @@
 - **Prefer Existing Implementation:** Reuse existing utilities when fit is natural. When introducing new code, briefly justify why reuse is inadequate.
 - **Prefer Deterministic Logic:** Prioritize strict, reproducible, and verifiable logic over speculative abstraction.
 - **Contract First:** Signature and contract specifications in code types or contracts are absolute sources of truth.
+- **Invariant Logic Over Magic Numbers:** Logic and criteria must model structural invariants (ratios, contracts, dynamics) rather than static values or overfitted sample metrics.
 
 ## 2. Confidence & Safety Policy
 - **Risk-Based Clarification:** Proceed with reversible assumptions when risk is low and state assumptions explicitly. Clarify only when ambiguity affects public contracts, financial correctness, destructive actions, or architectural decisions.
