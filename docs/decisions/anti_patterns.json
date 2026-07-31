@@ -19,5 +19,101 @@
     "failure_reason": "Feature-named tests were rejected and pytest-cov triggered a NumPy import-order failure for leaf-module targets.",
     "falsified_date": "2026-07-31",
     "source_adr": "ADR_20260731_LEAN_CHECK_HARDENING"
+  },
+  {
+    "candidate_id": "2579130a56fc2a0a339f842a0ccb6cffdfd9da186681233b4e13f8912deb816c",
+    "code_hash": "eb0fe88a217bb112b4d6fcd587dcb2e42b242486611fe2927411d150a18801f6",
+    "data_hash": "f59143b943bd10410ba3603361bb7a3955d9a2a2936dafb4f70bdc53127d80db",
+    "domain": "cash_carry",
+    "failed_gates": [
+      "observation",
+      "fold",
+      "stress"
+    ],
+    "failed_hypothesis": "cash_and_carry_basis",
+    "failure_reason": "promotion status=REJECTED",
+    "falsified_date": "2026-07-31",
+    "metrics": {
+      "cagr": -0.413726,
+      "fold_max_contribution": 0.405402,
+      "mdd": -0.798512,
+      "observation_lcb90": -0.430896,
+      "sharpe": -15.995233,
+      "stress_verdict": "FAIL",
+      "trade_count": 426
+    },
+    "run_log_reference": "2026-07-31T11:50:56.636772+00:00"
+  },
+  {
+    "candidate_id": "851b4a1b3f95cca6fb76434224454649ed57af32cc143c88658f0c6d2d9d83da",
+    "code_hash": "669655f5cce39862934e3b664779856be101fded24a020bed655ff85fa787db1",
+    "data_hash": "f59143b943bd10410ba3603361bb7a3955d9a2a2936dafb4f70bdc53127d80db",
+    "domain": "cash_carry",
+    "failed_gates": [
+      "observation",
+      "fold",
+      "stress"
+    ],
+    "failed_hypothesis": "cash_and_carry_basis",
+    "failure_reason": "promotion status=REJECTED",
+    "falsified_date": "2026-07-31",
+    "metrics": {
+      "cagr": -0.413726,
+      "fold_max_contribution": 0.405402,
+      "mdd": -0.798512,
+      "observation_lcb90": -0.430896,
+      "sharpe": -15.995233,
+      "stress_verdict": "FAIL",
+      "trade_count": 426
+    },
+    "run_log_reference": "2026-07-31T11:51:52.372231+00:00"
+  },
+  {
+    "candidate_id": "cbf24605ff57b7914778aa1565f8a10540b021e903dcb5aa85aed5771ea57428",
+    "code_hash": "fd59b9455818ac0410ff7c2b392a35675d8346a2192e926131e67ac82cf74a20",
+    "data_hash": "f59143b943bd10410ba3603361bb7a3955d9a2a2936dafb4f70bdc53127d80db",
+    "domain": "cash_carry",
+    "failed_gates": [
+      "observation",
+      "fold",
+      "stress"
+    ],
+    "failed_hypothesis": "cash_and_carry_basis",
+    "failure_reason": "promotion status=REJECTED",
+    "falsified_date": "2026-07-31",
+    "metrics": {
+      "cagr": -0.413726,
+      "fold_max_contribution": 0.405402,
+      "mdd": -0.798512,
+      "observation_lcb90": -0.430896,
+      "sharpe": -15.995233,
+      "stress_verdict": "FAIL",
+      "trade_count": 426
+    },
+    "run_log_reference": "(not logged)"
+  },
+  {
+    "candidate_id": "c385ecc70d1571136ca9640eeecdde379829675b8850542195b233b67c12f73e",
+    "code_hash": "a3a9b3cf7c8b9ca71b597289299c030d3778b21d6db5380e6a38ef82f89bc76c",
+    "data_hash": "f59143b943bd10410ba3603361bb7a3955d9a2a2936dafb4f70bdc53127d80db",
+    "domain": "cash_carry",
+    "failed_gates": [
+      "observation",
+      "fold",
+      "stress"
+    ],
+    "failed_hypothesis": "cash_and_carry_basis",
+    "failure_reason": "promotion status=REJECTED",
+    "falsified_date": "2026-07-31",
+    "metrics": {
+      "cagr": -0.413726,
+      "fold_max_contribution": 0.405402,
+      "mdd": -0.798512,
+      "observation_lcb90": -0.430896,
+      "sharpe": -15.995233,
+      "stress_verdict": "FAIL",
+      "trade_count": 426
+    },
+    "run_log_reference": "2026-07-31T12:07:04.689309+00:00"
   }
 ]
