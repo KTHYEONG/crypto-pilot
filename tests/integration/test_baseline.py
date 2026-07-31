@@ -7,6 +7,7 @@ import pytest
 from src.core.types import CostModel, StrategySpec
 from src.data.loader import load_ohlcv_4h
 from src.engine.backtest import run_backtest
+from src.strategy.donchian import generate_signals
 from src.validation.metrics import compute_metrics
 from src.validation.reliability_gate import compute_reliability_gate
 
@@ -56,3 +57,16 @@ class TestBaselineReplication:
         assert abs(m.profit_factor - 2.337) < 1e-1, f"pf={m.profit_factor}"
         assert abs(m.win_rate - 0.341) < 1e-2, f"win_rate={m.win_rate}"
         assert abs(m.exposure - 0.268) < 1e-2, f"exposure={m.exposure}"
+
+    @pytest.mark.slow
+    def test_default_signals_unchanged_by_flow_columns(self) -> None:
+        # SC-FLOW-06: the default v1 entry surface is byte-for-byte identical with
+        # or without the resampled quote-flow columns.
+        df = load_ohlcv_4h(BTC_PATH, end="2025-12-31 23:59:59")
+        spec = StrategySpec()
+        with_flow = generate_signals(df, spec)
+        plain = generate_signals(
+            df.drop(columns=["quote_vol", "taker_buy_quote", "taker_buy_ratio"]), spec,
+        )
+        assert with_flow["entry_signal"].equals(plain["entry_signal"])
+        assert int(with_flow["entry_signal"].sum()) == int(plain["entry_signal"].sum())
