@@ -1,5 +1,12 @@
 [
   {
+    "domain": "risk",
+    "failed_hypothesis": "A five-slot daily-liquidity portfolio would convert the BTC observation edge into a promotion-passing total-equity ledger.",
+    "failure_reason": "The latest total-ledger run reached CAGR 16.41% but observation LCB90 1.84%, t-stat 1.70, fold concentration 63.03%, and stress FAIL, so promotion stayed REJECTED.",
+    "falsified_date": "2026-07-31",
+    "source_adr": "ADR_20260731_PORTFOLIO_V2_EVALUATION"
+  },
+  {
     "domain": "signal",
     "failed_hypothesis": "The 0.52 taker-flow candidate would pass the unchanged observation and fold gates after funding accrual.",
     "failure_reason": "Funding-net execution still produced observation FAIL and fold gate_pass=false, so promotion remains rejected.",
