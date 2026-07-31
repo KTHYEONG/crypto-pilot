@@ -4,6 +4,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from src.core.types import StrategySpec
 from src.strategy.donchian import atr, donchian_lower, donchian_upper, generate_signals
 
 
@@ -50,3 +51,89 @@ class TestGenerateSignals:
         e = pd.Series([100.0, 110.0]).ewm(span=3, adjust=False).mean()
         assert e.iloc[0] == 100.0
         assert e.iloc[1] == 105.0
+
+
+def _ramp_with_ratio(ratio: float = 0.52) -> pd.DataFrame:
+    n = 300
+    index = pd.date_range("2024-01-01", periods=n, freq="4h", tz="UTC")
+    opens = np.arange(100.0, 100.0 + n, dtype=np.float64)
+    return pd.DataFrame({
+        "open": opens,
+        "high": opens + 1.0,
+        "low": opens - 1.0,
+        "close": opens + 0.5,
+        "volume": 1000.0,
+        "taker_buy_ratio": ratio,
+    }, index=index)
+
+
+class TestTakerFlowFilter:
+    def test_output_carries_taker_buy_ratio_column(self) -> None:
+        n = 201
+        df = pd.DataFrame({
+            "open": [1.0] * n, "high": [1.0] * n,
+            "low": [1.0] * n, "close": [1.0] * n,
+            "taker_buy_ratio": [0.52] * n,
+        })
+        out = generate_signals(df, StrategySpec(min_taker_buy_ratio=0.52))
+        assert "taker_buy_ratio" in out.columns
+
+    def test_taker_flow_filter_is_causal_and_fail_closed(self) -> None:
+        # SC-FLOW-03: at a completed signal bar, only ratio >= threshold may signal.
+        df = _ramp_with_ratio()
+        spec_base = StrategySpec(ema_period=5, entry_period=5, atr_period=5)
+        base = generate_signals(df, spec_base)
+        signal_bars = base.index[base["entry_signal"]].tolist()
+        assert len(signal_bars) >= 2, "fixture must produce multiple signal bars"
+
+        bar_low = signal_bars[len(signal_bars) // 2]
+        bar_high = signal_bars[len(signal_bars) // 2 + 1]
+        df2 = df.copy()
+        df2.loc[bar_low, "taker_buy_ratio"] = 0.51
+        df2.loc[bar_high, "taker_buy_ratio"] = 0.52
+
+        opt_in = generate_signals(
+            df2, StrategySpec(ema_period=5, entry_period=5, atr_period=5,
+                              min_taker_buy_ratio=0.52),
+        )
+        assert not opt_in.loc[bar_low, "entry_signal"]
+        assert opt_in.loc[bar_high, "entry_signal"]
+
+    def test_missing_or_invalid_ratio_fails_closed(self) -> None:
+        # SC-FLOW-02: NaN or out-of-[0,1] ratio can never emit an opt-in entry.
+        df = _ramp_with_ratio()
+        spec_base = StrategySpec(ema_period=5, entry_period=5, atr_period=5)
+        base = generate_signals(df, spec_base)
+        signal_bars = base.index[base["entry_signal"]].tolist()
+        assert len(signal_bars) >= 3, "fixture must produce multiple signal bars"
+
+        df2 = df.copy()
+        df2.loc[signal_bars[0], "taker_buy_ratio"] = np.nan
+        df2.loc[signal_bars[1], "taker_buy_ratio"] = 1.5
+        df2.loc[signal_bars[2], "taker_buy_ratio"] = -0.1
+
+        opt_in = generate_signals(
+            df2, StrategySpec(ema_period=5, entry_period=5, atr_period=5,
+                              min_taker_buy_ratio=0.52),
+        )
+        assert not opt_in.loc[signal_bars[0], "entry_signal"]
+        assert not opt_in.loc[signal_bars[1], "entry_signal"]
+        assert not opt_in.loc[signal_bars[2], "entry_signal"]
+
+    def test_default_mode_matches_v1_baseline(self) -> None:
+        # SC-FLOW-04: with the filter disabled, presence of the flow column
+        # cannot alter the frozen v1 signal surface.
+        df = _ramp_with_ratio()
+        plain = df.drop(columns=["taker_buy_ratio"])
+        spec = StrategySpec(ema_period=5, entry_period=5, atr_period=5)
+        with_flow = generate_signals(df, spec)
+        without_flow = generate_signals(plain, spec)
+        assert with_flow["entry_signal"].equals(without_flow["entry_signal"])
+
+    def test_enabled_filter_requires_ratio_column(self) -> None:
+        df = _ramp_with_ratio().drop(columns=["taker_buy_ratio"])
+        with pytest.raises(ValueError, match="taker_buy_ratio"):
+            generate_signals(
+                df, StrategySpec(ema_period=5, entry_period=5, atr_period=5,
+                                 min_taker_buy_ratio=0.52),
+            )
