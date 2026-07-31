@@ -1,6 +1,16 @@
 {
   "tasks": [
     {
+      "task_id": "TASK_CARRY_SIGNAL_HYSTERESIS",
+      "date": "2026-07-31",
+      "adr_id": "ADR_20260731_CARRY_SIGNAL_HYSTERESIS",
+      "domain": "signal",
+      "title": "Cash-carry 신호 히스테리시스 및 마진 현실화",
+      "why": "BTCUSDT carry가 매 funding 정산 단발부호로 열고닫혀 왕복비용(0.42%)이 funding 캡처분(0.01~0.05%)의 10~40배를 반복 지불(CAGR -41.37%, win_rate 0%)",
+      "resolution": "비용기반 히스테리시스 밴드(CarryHysteresisConfig)와 마진 버퍼 현실화(0.10/0.05→0.30/0.15)를 도입, 재실행 결과 trade_count 0으로 무비용 net carry 자체가 부재함을 확인",
+      "impact": "426건 REJECTED(전 게이트 FAIL)가 0건 PENDING(표본부족, gate_pass=True on fold)으로 전환되어 손실이 정직한 무엣지 보고로 교정됨; BTCUSDT 후보는 은퇴하고 alt 심볼 spot+borrow 데이터 확보가 다음 과제"
+    },
+    {
       "task_id": "TASK_INCREMENTAL_SRC_TESTS_REFACTOR",
       "date": "2026-07-31",
       "adr_id": "ADR_20260731_INCREMENTAL_SRC_TESTS_REFACTOR",
