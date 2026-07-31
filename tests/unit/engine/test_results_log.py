@@ -5,9 +5,9 @@ from pathlib import Path
 
 import pandas as pd
 
-from src.core.types import CostModel, StrategySpec
+from src.core.types import CashCarrySpec, CarryCostModel, CostModel, StrategySpec
 from src.engine.backtest import run_backtest
-from src.engine.results_log import load_runs, record_run
+from src.engine.results_log import load_runs, record_cash_carry_run, record_run
 from src.validation.candidate_promotion import (
     CandidateIdentity,
     compose_promotion_verdict,
@@ -214,3 +214,51 @@ class TestResultsLog:
         assert rec["promotion"] is None
         assert rec["reliability"]["observation"]["verdict"] == "PASS"
         assert rec["window"] == "observation"
+
+    def test_record_cash_carry_run_persists_spec_costs_and_candidate(
+        self, tmp_path: Path, make_carry_data,
+    ) -> None:
+        from src.engine.cash_carry_backtest import run_cash_carry_backtest
+
+        log_path = tmp_path / "runs.jsonl"
+        data = make_carry_data(
+            n_bars=4,
+            funding={
+                "2024-01-01 00:00": 0.0,
+                "2024-01-01 04:00": 0.001,
+                "2024-01-01 08:00": 0.0,
+                "2024-01-01 12:00": 0.0,
+            },
+            borrow=[0.0, 0.0, 0.0, 0.0],
+        )
+        spec = CashCarrySpec(symbol="BTCUSDT")
+        costs = CarryCostModel()
+        result = run_cash_carry_backtest(data, spec, costs)
+        metrics = compute_metrics(result.equity, result.trades)
+        observation, fold, stress = _gate_fixture()
+        identity = CandidateIdentity(
+            hypothesis_id="cash_and_carry_basis", code_hash="sha-carry",
+            parameters={"margin_model": {"initial_margin_rate": 0.10}},
+            data_start="2024-01-01", data_end="2024-01-01", return_source="funding_carry",
+        )
+        promotion = compose_promotion_verdict(observation, fold, stress, None)
+        promotion = dataclasses.replace(promotion, candidate=identity)
+
+        rec = record_cash_carry_run(
+            symbol="BTCUSDT", cash_carry_spec=spec, costs=costs,
+            result=result, metrics=metrics, start=None, end="2024-01-01",
+            initial_equity=10_000.0, observation_gate=observation,
+            fold_distribution=fold, stress_gate=stress, promotion=promotion,
+            candidate=identity, log_path=log_path,
+        )
+
+        lines = log_path.read_text(encoding="utf-8").splitlines()
+        assert len(lines) == 1
+        assert rec["kind"] == "cash_carry"
+        assert rec["cash_carry_spec"]["initial_margin_rate"] == 0.10
+        assert rec["costs"]["spot_fee_rate"] == 0.001
+        assert rec["costs"]["perp_fee_rate"] == 0.0005
+        assert rec["candidate"]["hypothesis_id"] == "cash_and_carry_basis"
+        df = load_runs(log_path)
+        assert df.loc[0, "cash_carry_spec.symbol"] == "BTCUSDT"
+        assert df.loc[0, "candidate.return_source"] == "funding_carry"
