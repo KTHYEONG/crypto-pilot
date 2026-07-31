@@ -269,3 +269,46 @@ class TestL1LegConfig:
     def test_invalid_prior_lookback_raises(self) -> None:
         with pytest.raises(AssertionError):
             L1LegConfig(leg_prior_lookback_bars=0)
+
+class TestL1RoutingConfig:
+    def test_defaults_are_valid(self) -> None:
+        from src.domain.futures.compound.config import L1RoutingConfig
+        cfg = L1RoutingConfig()
+        assert cfg.enabled is True
+        assert cfg.family_top_k == 2
+        assert cfg.symbol_top_n == 10
+        assert cfg.normalization_warmup_bars == 500
+        assert cfg.signal_clip == 3.0
+        assert cfg.min_rank_folds == 1
+
+    def test_validation_family_top_k(self) -> None:
+        from src.domain.futures.compound.config import L1RoutingConfig
+        with pytest.raises(AssertionError):
+            L1RoutingConfig(family_top_k=0)
+
+    def test_validation_symbol_top_n(self) -> None:
+        from src.domain.futures.compound.config import L1RoutingConfig
+        with pytest.raises(AssertionError):
+            L1RoutingConfig(symbol_top_n=0)
+
+    def test_validation_warmup_bars(self) -> None:
+        from src.domain.futures.compound.config import L1RoutingConfig
+        with pytest.raises(AssertionError):
+            L1RoutingConfig(normalization_warmup_bars=0)
+
+    def test_validation_signal_clip(self) -> None:
+        from src.domain.futures.compound.config import L1RoutingConfig
+        with pytest.raises(AssertionError):
+            L1RoutingConfig(signal_clip=0.0)
+
+    def test_validation_min_rank_folds(self) -> None:
+        from src.domain.futures.compound.config import L1RoutingConfig
+        with pytest.raises(AssertionError):
+            L1RoutingConfig(min_rank_folds=0)
+
+    def test_wired_onto_engine_config(self) -> None:
+        from src.domain.futures.compound.config import L1RoutingConfig, CompoundEngineConfig
+        cfg = CompoundEngineConfig()
+        assert isinstance(cfg.l1_routing, L1RoutingConfig)
+        assert cfg.l1_routing.family_top_k == 2
+        assert cfg.l1_routing.symbol_top_n == 10
