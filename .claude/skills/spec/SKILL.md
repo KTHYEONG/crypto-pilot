@@ -33,7 +33,7 @@ Before formulating architecture or hypotheses:
 
 
 Do NOT rely solely on theoretical hypothesis or unverified context assumptions.
-1. **Scratch Experimentation**: For any non-trivial algorithm, signal, risk model, or performance-critical logic, write a temporary Python script in `<appDataDir>/brain/<conversation-id>/scratch/test_<topic>.py`.
+1. **Scratch Experimentation**: For any non-trivial algorithm, signal, risk model, or performance-critical logic, write a temporary Python script in `scratch/test_<topic>.py` (project root). Never use OS `/tmp` or external directories.
 2. **Empirical Execution**: Execute the script via `uv run python <scratch_script>` to collect actual data metrics, execution logs, or runtime behavior.
 3. **Evidence Requirement**: Record the verified console output metric in Section 2 (Evidence & Alternatives) of the spec artifact. Unverified hypotheses MUST NOT be frozen.
 
