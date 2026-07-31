@@ -2,5 +2,7 @@
   "src/engine.py": {
     "architecture": "docs/specs/reset_v1_donchian_baseline.md",
     "testing": "tests/test_baseline.py"
-  }
+  },
+  "src/reliability_gate.py": {},
+  "scripts/lean_check.py": {}
 }
