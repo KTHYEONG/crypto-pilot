@@ -5,15 +5,18 @@ import subprocess
 from dataclasses import asdict
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import pandas as pd
 
-from src.config import CostModel, StrategySpec
-from src.engine import BacktestResult
-from src.metrics import Metrics
-from src.reliability_gate import FoldDistributionResult, ReliabilityGateResult
+from src.core.types import CostModel, StrategySpec
+from src.engine.backtest import BacktestResult
 
-RUNS_LOG_PATH = Path(__file__).resolve().parent.parent / "docs" / "results" / "runs.jsonl"
+if TYPE_CHECKING:
+    from src.validation.metrics import Metrics
+    from src.validation.reliability_gate import FoldDistributionResult, ReliabilityGateResult
+
+RUNS_LOG_PATH = Path(__file__).resolve().parent.parent.parent / "docs" / "results" / "runs.jsonl"
 
 
 def _git_head() -> tuple[str | None, bool]:

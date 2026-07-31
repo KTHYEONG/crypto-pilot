@@ -4,14 +4,14 @@ from pathlib import Path
 
 import pandas as pd
 
-from src.config import CostModel, StrategySpec
-from src.engine import run_backtest
-from src.metrics import compute_metrics
-from src.reliability_gate import (
+from src.core.types import CostModel, StrategySpec
+from src.engine.backtest import run_backtest
+from src.validation.metrics import compute_metrics
+from src.validation.reliability_gate import (
     FoldDistributionResult,
     ReliabilityGateResult,
 )
-from src.results_log import load_runs, record_run
+from src.engine.results_log import load_runs, record_run
 
 
 def _gate_fixture() -> tuple[ReliabilityGateResult, FoldDistributionResult, ReliabilityGateResult]:
