@@ -1,6 +1,13 @@
 [
   {
     "domain": "signal",
+    "failed_hypothesis": "family별 fitted exit(ATR/TP-SL/reversal) 선택이 성과를 개선한다",
+    "failure_reason": "Walk-forward 검증에서 mean Sharpe -0.138(현재 +0.284 대비 -0.422) — in-sample 개선(+0.418)은 순수 selection bias였음. l1_sleeves.py의 exit 인프라는 engine.py에서 호출되지 않는 dead code로 확정, 신규 스펙에서도 미채택.",
+    "falsified_date": "2026-07-31",
+    "source_adr": "ADR_20260731_L1_SYMBOL_CONDITIONAL_ROUTING"
+  },
+  {
+    "domain": "signal",
     "failed_hypothesis": "개별 signal alpha가 존재하면 복리 자본 배치도 개선될 것이다.",
     "failure_reason": "개별 alpha는 남아도 net 비용·fold 안정성·다중검정 조건을 통과한 leg가 없어 L2가 no_evidence로 종료됐다.",
     "falsified_date": "2026-07-30",
