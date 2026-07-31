@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from typing import Literal
 
@@ -18,6 +19,7 @@ class StrategySpec:
     max_positions: int = 1
     allow_same_bar_reentry: bool = False
     ambiguous_bar_policy: Literal["stop_first"] = "stop_first"
+    min_taker_buy_ratio: float | None = None
 
     def __post_init__(self) -> None:
         for name, val in [
@@ -34,6 +36,15 @@ class StrategySpec:
             raise ValueError(f"risk_per_trade must be in (0, 1], got {self.risk_per_trade}")
         if self.max_leverage <= 0:
             raise ValueError(f"max_leverage must be > 0, got {self.max_leverage}")
+        if (
+            self.min_taker_buy_ratio is not None
+            and (not math.isfinite(self.min_taker_buy_ratio)
+                 or not 0 < self.min_taker_buy_ratio <= 1)
+        ):
+            raise ValueError(
+                f"min_taker_buy_ratio must be finite and in (0, 1] when set, "
+                f"got {self.min_taker_buy_ratio}"
+            )
 
 
 @dataclass(frozen=True, slots=True)
