@@ -1,5 +1,5 @@
 # data
-data/
+/data/
 
 # antigravity cli
 .antigravitycli/
@@ -11,9 +11,7 @@ data/
 .spot_signal_cache/
 
 # legacy
-legacy/
-!src/domain/futures/strategy/legacy/
-!src/domain/futures/strategy/legacy/**
+/legacy/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
