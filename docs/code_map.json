@@ -18,5 +18,6 @@
   },
   "src/cli/run_portfolio_backtest.py": {
     "testing": "tests/integration/test_portfolio_promotion.py"
-  }
+  },
+  "src/cli/run_cash_carry_backtest.py": {}
 }
