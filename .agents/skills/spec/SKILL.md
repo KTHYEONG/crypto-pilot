@@ -14,6 +14,7 @@ Frontier reasoning model protocol (Specification Engineering & Empirical Validat
   - Preserve causal timestamps, cost/funding accounting, numerical stability, and fail-closed behavior.
   - Do not relax thresholds or public contracts merely to make a test pass.
   - Keep main spec under 500 lines. Move large domain details to linked reference files.
+  - **Mandatory Concrete Plan**: Every spec artifact MUST define an actionable implementation plan (target code/file changes, new contract, or concrete next step). Even if current hypotheses fail, do NOT end as a mere status report—specify the exact next architecture/hypothesis to attempt and its required codebase modifications.
 
 ## Ambiguity & Alignment Interrogation (Pre-Spec Gate)
 
