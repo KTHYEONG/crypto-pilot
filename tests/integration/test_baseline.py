@@ -4,12 +4,27 @@ from pathlib import Path
 
 import pytest
 
-from src.config import CostModel, StrategySpec
+from src.core.types import CostModel, StrategySpec
 from src.data.loader import load_ohlcv_4h
-from src.engine import run_backtest
-from src.metrics import compute_metrics
+from src.engine.backtest import run_backtest
+from src.validation.metrics import compute_metrics
+from src.validation.reliability_gate import compute_reliability_gate
 
 BTC_PATH = Path("data/futures/ohlcv/1h/BTCUSDT.parquet")
+
+
+@pytest.mark.slow
+def test_baseline_end_to_end() -> None:
+    df = load_ohlcv_4h(BTC_PATH, end="2025-12-31 23:59:59")
+    spec = StrategySpec()
+    costs = CostModel()
+    result = run_backtest(df, spec, costs, initial_equity=10_000.0)
+    m = compute_metrics(result.equity, result.trades)
+    years = (result.equity.index[-1] - result.equity.index[0]).total_seconds() / (365.25 * 86400)
+    gate = compute_reliability_gate(result.trades, years=years, sharpe=m.sharpe, mdd=m.mdd)
+    assert len(result.trades) == m.trade_count
+    assert gate.trade_count == len(result.trades)
+    assert gate.verdict in {"PASS", "FAIL", "PENDING"}
 
 
 @pytest.mark.slow

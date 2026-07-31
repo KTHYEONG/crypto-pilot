@@ -12,7 +12,7 @@ from datetime import datetime
 import ccxt
 import pandas as pd
 
-from src.config import FUTURES_DATA_DIR
+from src.core.config import FUTURES_DATA_DIR
 
 _logger = logging.getLogger("BinanceClient")
 

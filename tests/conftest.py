@@ -6,7 +6,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from src.config import CostModel, StrategySpec
+from src.core.types import CostModel, StrategySpec
 
 
 @pytest.fixture

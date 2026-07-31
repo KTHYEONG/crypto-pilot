@@ -5,8 +5,8 @@ from dataclasses import dataclass
 import numpy as np
 import pandas as pd
 
-from src.config import CostModel, StrategySpec
-from src.logging_setup import setup_logger
+from src.core.logging_setup import setup_logger
+from src.core.types import CostModel, StrategySpec
 
 _logger = setup_logger("Backtest")
 
@@ -59,7 +59,7 @@ def run_backtest(
     initial_equity: float = 10_000.0,
     signal_delay_bars: int = 0,
 ) -> BacktestResult:
-    from src.strategy import generate_signals
+    from src.strategy.donchian import generate_signals
 
     if signal_delay_bars < 0:
         raise ValueError(f"signal_delay_bars must be >= 0, got {signal_delay_bars}")

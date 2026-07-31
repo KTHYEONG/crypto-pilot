@@ -5,17 +5,18 @@ import logging
 
 import pandas as pd
 
-from src.config import CostModel, StrategySpec, ohlcv_path
+from src.core.config import ohlcv_path
+from src.core.types import CostModel, StrategySpec
 from src.data.loader import load_ohlcv_4h
-from src.engine import run_backtest
-from src.metrics import compute_metrics
-from src.reliability_gate import (
+from src.engine.backtest import run_backtest
+from src.engine.results_log import record_run
+from src.validation.metrics import compute_metrics
+from src.validation.reliability_gate import (
     compute_fold_distribution,
     compute_reliability_gate,
     compute_stress_test_gate,
     split_holdout_segment,
 )
-from src.results_log import record_run
 
 _logger = logging.getLogger("BacktestRunner")
 

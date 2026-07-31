@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from src.config import FUTURES_DATA_DIR, ohlcv_path, funding_path
+from src.core.config import FUTURES_DATA_DIR, funding_path, ohlcv_path
 from src.data.binance import BinanceClient, BinanceKlinePermanentError
 from src.data.vision import BinanceVisionDownloader
 

@@ -5,11 +5,27 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
-from src.config import CostModel, StrategySpec
+from src.core.types import CostModel, StrategySpec
 from src.data.loader import load_ohlcv_4h
-from src.engine import run_backtest
+from src.engine.backtest import run_backtest
 
 BTC_PATH = Path("data/futures/ohlcv/1h/BTCUSDT.parquet")
+
+
+def test_engine_run_backtest() -> None:
+    idx = pd.date_range("2024-01-01", periods=300, freq="4h", tz="UTC")
+    df = pd.DataFrame({
+        "open": 100.0, "high": 101.0, "low": 99.0, "close": 100.0, "volume": 1000.0,
+    }, index=idx)
+    spec = StrategySpec(risk_per_trade=0.01, ema_period=5, entry_period=5, atr_period=5)
+    costs = CostModel()
+    result = run_backtest(df, spec, costs)
+    assert result.equity.index.equals(df.index)
+    assert result.equity.notna().all()
+    assert set(result.trades.columns) == {
+        "entry_bar", "entry_price", "exit_price", "qty", "reason", "pnl", "return_pct",
+    }
+    assert "entry_signal" in result.signals.columns
 
 
 class TestExecution:
