@@ -12,10 +12,11 @@ BTC_PATH = Path("data/futures/ohlcv/1h/BTCUSDT.parquet")
 
 class TestLoadOhlcv4h:
     def test_integrity_and_dtype(self) -> None:
+        # BTC_PATH is a live cache that grows as scripts/collect_data.py runs, so this
+        # asserts structural properties rather than an exact row count / end timestamp.
         df = load_ohlcv_4h(BTC_PATH)
-        assert len(df) == 9354
+        assert len(df) >= 9354, f"expected at least the 2022-04..2026-07 baseline, got {len(df)}"
         assert str(df.index[0]) == "2022-04-01 00:00:00+00:00"
-        assert str(df.index[-1]) == "2026-07-07 20:00:00+00:00"
         for c in ("open", "high", "low", "close"):
             assert df[c].dtype == "float64", f"{c} dtype is {df[c].dtype}"
         assert df.index.is_monotonic_increasing
