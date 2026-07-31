@@ -1,9 +1,15 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 import pandas as pd
+import pytest
 
 from src.config import CostModel, StrategySpec
+from src.data.loader import load_ohlcv_4h
 from src.engine import run_backtest
+
+BTC_PATH = Path("data/futures/ohlcv/1h/BTCUSDT.parquet")
 
 
 class TestExecution:
@@ -69,3 +75,52 @@ class TestExecution:
             next_entry = result.trades["entry_bar"].values[1:]
             for e, n in zip(exit_bars, next_entry, strict=False):
                 assert n > e, "same-bar reentry detected"
+
+
+@pytest.mark.slow
+class TestSignalDelayBars:
+    def test_signal_delay_bars_zero_is_byte_identical(self) -> None:
+        df = load_ohlcv_4h(BTC_PATH, end="2025-12-31 23:59:59")
+        spec = StrategySpec()
+        costs = CostModel()
+        r0 = run_backtest(df, spec, costs)
+        r0b = run_backtest(df, spec, costs, signal_delay_bars=0)
+        assert r0.equity.equals(r0b.equity)
+        assert r0.trades.equals(r0b.trades)
+
+    def test_signal_delay_bars_one_shifts_fills(self, bars_breakout_sparse: pd.DataFrame) -> None:
+        spec = StrategySpec(risk_per_trade=0.01, ema_period=5, entry_period=5, atr_period=5)
+        costs = CostModel()
+        base = run_backtest(bars_breakout_sparse, spec, costs)
+        delayed = run_backtest(bars_breakout_sparse, spec, costs, signal_delay_bars=1)
+
+        assert len(base.trades) > 0, "fixture must produce at least one trade"
+        assert len(delayed.trades) == len(base.trades)
+        assert [int(b) for b in delayed.trades["entry_bar"]] == [
+            int(b) + 1 for b in base.trades["entry_bar"]
+        ]
+
+    def test_signal_delay_bars_negative_raises(self, bars_ramp: pd.DataFrame) -> None:
+        spec = StrategySpec()
+        costs = CostModel()
+        with pytest.raises(ValueError, match="signal_delay_bars"):
+            run_backtest(bars_ramp, spec, costs, signal_delay_bars=-1)
+
+    def test_entry_bar_is_entry_not_exit(self, btc_4h_slice: pd.DataFrame) -> None:
+        """entry_bar must index the bar where the position was OPENED, not where it
+        was closed -- verified independently of internal state by reconstructing the
+        fill price from df['open'] at entry_bar and comparing to the recorded
+        entry_price. A trade held for multiple bars (channel/stop exit, not
+        stop_entrybar) would fail this if entry_bar pointed at the exit bar instead."""
+        spec = StrategySpec()
+        costs = CostModel()
+        result = run_backtest(btc_4h_slice, spec, costs)
+        held_trades = result.trades[result.trades["reason"] != "stop_entrybar"]
+        assert len(held_trades) > 0, "fixture must produce at least one held (non-entry-bar) trade"
+        for _, t in held_trades.iterrows():
+            eb = int(t["entry_bar"])
+            expected_fill = btc_4h_slice["open"].iloc[eb] * (1 + costs.slippage_rate)
+            assert abs(t["entry_price"] - expected_fill) < 1e-6, (
+                f"entry_bar={eb} does not reconstruct entry_price "
+                f"({t['entry_price']} != {expected_fill}) -- entry_bar likely points at the exit bar"
+            )
