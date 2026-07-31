@@ -9,6 +9,7 @@ import pandas as pd
 
 from src.core.config import funding_path, ohlcv_path
 from src.data.binance import BinanceClient, BinanceKlinePermanentError
+from src.data.ohlcv_store import write_ohlcv
 from src.data.vision import BinanceVisionDownloader
 
 _logger = logging.getLogger("DataCollector")
@@ -28,12 +29,6 @@ _METRICS_NUMERIC_COLUMNS: tuple[str, ...] = (
 
 _METRICS_RELEASE_LAG = pd.Timedelta(minutes=5)
 _METRICS_MERGE_TOLERANCE = pd.Timedelta(hours=6)
-
-_OHLCV_1M_COLUMNS: tuple[str, ...] = (
-    "timestamp", "open", "high", "low", "close", "volume",
-    "taker_buy_base_volume", "taker_buy_quote_volume", "quote_vol",
-)
-
 
 def _empty_metrics_frame() -> pd.DataFrame:
     return pd.DataFrame(columns=list(_METRICS_CANONICAL_COLUMNS))
@@ -150,37 +145,7 @@ class DataCollector:
             return pd.DataFrame()
 
     def _save_cache(self, symbol: str, timeframe: str, df: pd.DataFrame) -> None:
-        if df.empty:
-            return
-        df = self._normalize_df(df)
-        if timeframe == "1m":
-            df = df.rename(columns={
-                "quote_volume": "quote_vol",
-                "taker_buy_base": "taker_buy_base_volume",
-                "taker_buy_quote": "taker_buy_quote_volume",
-            })
-            for column in _OHLCV_1M_COLUMNS:
-                if column not in df.columns:
-                    df[column] = float("nan")
-            df = df[list(_OHLCV_1M_COLUMNS)]
-            for column in _OHLCV_1M_COLUMNS:
-                df[column] = pd.to_numeric(df[column], errors="coerce")
-            df = (
-                df.dropna(subset=["timestamp", "open", "high", "low", "close", "volume"])
-                .drop_duplicates("timestamp", keep="last")
-                .sort_values("timestamp")
-            )
-        path = self._cache_path(symbol, timeframe)
-        temp_path = path.with_suffix(".tmp.parquet")
-        df_to_save = df.copy()
-        if "datetime" in df_to_save.columns:
-            df_to_save = df_to_save.drop(columns=["datetime"])
-        price_cols = ["open", "high", "low", "close"]
-        for col in price_cols:
-            if col in df_to_save.columns:
-                df_to_save[col] = df_to_save[col].astype("float32")
-        df_to_save.to_parquet(temp_path, index=False, compression="zstd")
-        temp_path.replace(path)
+        write_ohlcv(self._cache_path(symbol, timeframe), df, timeframe=timeframe)
 
     def ensure_ohlcv_data(self, symbol: str, timeframe: str, start_date: str, end_date: str) -> None:
         req_start = pd.to_datetime(start_date, utc=True)

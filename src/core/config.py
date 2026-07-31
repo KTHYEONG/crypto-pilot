@@ -5,7 +5,6 @@ from pathlib import Path
 BASE_DIR = Path(__file__).resolve().parent.parent.parent
 DATA_DIR = BASE_DIR / "data"
 FUTURES_DATA_DIR = DATA_DIR / "futures"
-FUTURES_RAW_DIR = FUTURES_DATA_DIR / "raw"
 SPOT_DATA_DIR = DATA_DIR / "spot"
 
 
