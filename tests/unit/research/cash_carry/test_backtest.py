@@ -4,10 +4,12 @@ import dataclasses
 
 import numpy as np
 import pandas as pd
+import pytest
 
-from src.research.cash_carry.contracts import CashCarrySpec, CarryCostModel
-from src.research.cash_carry.contracts import CarryMarketData
+from src.research.cash_carry.contracts import CarryCostModel, CashCarrySpec
+from src.research.cash_carry.contracts import CarryHysteresisConfig, CarryMarketData
 from src.research.cash_carry.backtest import run_cash_carry_backtest
+from src.research.cash_carry.market_data import load_carry_market_data
 from src.research.evaluation.promotion import compose_promotion_verdict
 from src.research.evaluation.reliability import (
     ReliabilityGateConfig,
@@ -17,10 +19,24 @@ from src.research.evaluation.reliability import (
 
 SPEC = CashCarrySpec(symbol="BTCUSDT")
 ZERO_COSTS = CarryCostModel(spot_fee_rate=0.0, perp_fee_rate=0.0, slippage_rate=0.0)
+# Short-fixture band for the ledger mechanics tests: a two-settlement history
+# can decide OPEN and a single negative reading closes, so the 6-bar fixtures
+# keep exercising the ledger rather than the hysteresis gate itself.
+HYST = CarryHysteresisConfig(
+    lookback_settlements=2, min_hold_settlements=1, confirm_settlements=1,
+)
 
 
-def _run(data, *, costs: CarryCostModel = ZERO_COSTS, delay: int = 0):
-    return run_cash_carry_backtest(data, SPEC, costs, signal_delay_bars=delay)
+def _run(
+    data,
+    *,
+    costs: CarryCostModel = ZERO_COSTS,
+    delay: int = 0,
+    hysteresis: CarryHysteresisConfig = HYST,
+):
+    return run_cash_carry_backtest(
+        data, SPEC, costs, signal_delay_bars=delay, hysteresis=hysteresis,
+    )
 
 
 class TestCashCarryLedger:
@@ -58,7 +74,10 @@ class TestCashCarryLedger:
         assert len(result.trades) == 1
         trade = result.trades.iloc[0]
         assert trade["reason"] == "carry_close"
-        expected_funding = (10_000.0 / 114.4) * 106.0 * 0.001
+        # qty = equity / (fill_spot * (1 + initial_margin)) with zero costs;
+        # the only funding credited is the 12:00 settlement at bar 3.
+        qty = 10_000.0 / (104.0 * (1 + SPEC.initial_margin_rate))
+        expected_funding = qty * 106.0 * 0.001
         assert np.isclose(trade["funding_pnl"], expected_funding)
         assert np.isclose(trade["pnl"], trade["funding_pnl"])
 
@@ -68,21 +87,23 @@ class TestCashCarryLedger:
     ) -> None:
         # SC-CARRY-LEDGER-02: positive funding credits the short leg and both
         # legs incur fees and slippage, so the costed ledger trails the
-        # zero-cost ledger by the full round-trip cost.
-        ramp = [100.0, 102.0, 104.0, 106.0, 108.0, 110.0]
+        # zero-cost ledger by the full round-trip cost. Funding is set above
+        # the costed breakeven (0.0042/2) so both ledgers actually open.
+        ramp = [100.0, 102.0, 104.0, 106.0, 108.0, 110.0, 112.0]
         data = make_carry_data(
-            n_bars=6,
+            n_bars=7,
             spot_open=ramp, spot_close=ramp,
             perp_open=ramp, perp_close=ramp,
             funding={
                 "2024-01-01 00:00": 0.0,
-                "2024-01-01 04:00": 0.001,
-                "2024-01-01 08:00": 0.001,
-                "2024-01-01 12:00": 0.001,
-                "2024-01-01 16:00": 0.0,
+                "2024-01-01 04:00": 0.003,
+                "2024-01-01 08:00": 0.003,
+                "2024-01-01 12:00": 0.003,
+                "2024-01-01 16:00": 0.003,
                 "2024-01-01 20:00": 0.0,
+                "2024-01-02 00:00": 0.0,
             },
-            borrow=[0.0] * 6,
+            borrow=[0.0] * 7,
         )
         zero = _run(data)
         costed = _run(data, costs=CarryCostModel())
@@ -98,21 +119,20 @@ class TestCashCarryLedger:
     ) -> None:
         # SC-CARRY-LEDGER-03: an adverse basis that exhausts the maintenance
         # buffer force-closes at the adverse executable mark and records
-        # margin_liquidation while equity stays finite.
+        # margin_liquidation while equity stays finite. The window ends on the
+        # liquidation bar so the re-entry signal has no bar to execute on.
         data = make_carry_data(
-            n_bars=6,
-            spot_open=[100.0] * 6, spot_close=[100.0] * 6,
-            perp_open=[100.0] * 6,
-            perp_close=[100.0, 100.0, 100.0, 115.0, 115.0, 115.0],
+            n_bars=4,
+            spot_open=[100.0] * 4, spot_close=[100.0] * 4,
+            perp_open=[100.0] * 4,
+            perp_close=[100.0, 100.0, 100.0, 115.0],
             funding={
                 "2024-01-01 00:00": 0.0,
                 "2024-01-01 04:00": 0.001,
                 "2024-01-01 08:00": 0.001,
                 "2024-01-01 12:00": 0.0,
-                "2024-01-01 16:00": 0.0,
-                "2024-01-01 20:00": 0.0,
             },
-            borrow=[0.0] * 6,
+            borrow=[0.0] * 4,
         )
         result = _run(data)
         assert len(result.trades) == 1
@@ -140,6 +160,88 @@ class TestCashCarryLedger:
         delayed = _run(data, delay=1)
         assert base.trades.iloc[0]["entry_bar"] == 2
         assert delayed.trades.iloc[0]["entry_bar"] == 3
+
+
+class TestHysteresisWiring:
+    def test_backtest_tracks_settlements_since_open(self, make_carry_data) -> None:
+        # The backtest counts only fresh-settlement bars toward min_hold: the
+        # position enters at bar 1, survives negative readings at bars 2 and 4,
+        # and closes only once three settlements have elapsed at bar 6.
+        hc = CarryHysteresisConfig(
+            lookback_settlements=1, min_hold_settlements=3, confirm_settlements=1,
+        )
+        data = make_carry_data(
+            n_bars=8,
+            funding={
+                "2024-01-01 00:00": 0.001,
+                "2024-01-01 08:00": -0.001,
+                "2024-01-01 16:00": -0.001,
+                "2024-01-02 00:00": -0.001,
+            },
+            borrow=[0.0] * 8,
+        )
+        result = _run(data, hysteresis=hc)
+        assert len(result.trades) == 1
+        trade = result.trades.iloc[0]
+        assert trade["entry_bar"] == 1
+        assert trade["exit_bar"] == 7
+        assert trade["reason"] == "carry_close"
+
+    def test_backtest_default_hysteresis_matches_frozen_config(self) -> None:
+        # Calling run_cash_carry_backtest without hysteresis must wire the
+        # frozen CarryHysteresisConfig() defaults (regression-lock of the
+        # default-arg wiring), while an explicitly different band must diverge.
+        data = _two_year_carry_data()
+        result = run_cash_carry_backtest(data, SPEC, ZERO_COSTS)
+        explicit = run_cash_carry_backtest(
+            data, SPEC, ZERO_COSTS, hysteresis=CarryHysteresisConfig(),
+        )
+        permissive = run_cash_carry_backtest(
+            data, SPEC, ZERO_COSTS,
+            hysteresis=CarryHysteresisConfig(
+                lookback_settlements=2, min_hold_settlements=1, confirm_settlements=1,
+            ),
+        )
+        assert result.trades.equals(explicit.trades)
+        assert result.equity.equals(explicit.equity)
+        assert not result.trades.equals(permissive.trades)
+
+    def test_margin_liquidation_threshold_widened(self, make_carry_data) -> None:
+        # SC-CARRY-02: with the widened margin defaults a 6% adverse perp move
+        # (previously a forced close at 4.76%) no longer liquidates, while a 14%
+        # adverse move still does. The window ends on the liquidation bar so the
+        # (still profitable) signal has no bar left on which to re-enter.
+        n = 34
+        grid = pd.date_range("2024-01-01", periods=n, freq="4h", tz="UTC")
+        funding = {ts.strftime("%Y-%m-%d %H:%M"): 0.001 for ts in grid}
+        perp_close = [100.0] * n
+        for i in range(25, 33):
+            perp_close[i] = 106.0
+        perp_close[33] = 114.0
+        data = make_carry_data(
+            n_bars=n,
+            funding=funding,
+            perp_close=perp_close,
+            borrow=[0.0] * n,
+        )
+        result = run_cash_carry_backtest(data, SPEC, ZERO_COSTS)
+        assert len(result.trades) == 1
+        trade = result.trades.iloc[0]
+        assert trade["reason"] == "margin_liquidation"
+        assert trade["exit_bar"] == 33
+
+    @pytest.mark.slow
+    def test_btcusdt_hysteresis_yields_near_zero_trades_2023_2025(self) -> None:
+        # Regression lock for the documented near-zero-edge finding (§2.3):
+        # the cost-derived band must not silently regress into the 426-trade
+        # churn artifact, and no trade may be a pure round-trip cost-drag on a
+        # near-zero funding capture.
+        data = load_carry_market_data("BTCUSDT", "2023-01-01", "2025-12-31 20:00:00+00:00")
+        result = run_cash_carry_backtest(data, SPEC, CarryCostModel())
+        assert len(result.trades) < 30
+        for _, trade in result.trades.iterrows():
+            if abs(trade["funding_pnl"]) <= 1e-9:
+                assert trade["pnl"] >= -0.004 * trade["equity_before_entry"]
 
 
 def _two_year_carry_data() -> CarryMarketData:

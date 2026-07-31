@@ -8,7 +8,12 @@ import pandas as pd
 from src.common.errors import DataIntegrityError
 from src.common.logging import setup_logger
 from src.research.baseline.backtest import BacktestResult, _align_funding_rates
-from src.research.cash_carry.contracts import CarryCostModel, CarryMarketData, CashCarrySpec
+from src.research.cash_carry.contracts import (
+    CarryCostModel,
+    CarryHysteresisConfig,
+    CarryMarketData,
+    CashCarrySpec,
+)
 from src.research.cash_carry.market_data import validate_carry_market_data
 from src.research.cash_carry.signal import generate_cash_carry_target
 
@@ -54,6 +59,7 @@ def run_cash_carry_backtest(
     costs: CarryCostModel,
     initial_equity: float = 10000.0,
     signal_delay_bars: int = 0,
+    hysteresis: CarryHysteresisConfig = CarryHysteresisConfig(),  # noqa: B008
 ) -> BacktestResult:
     """Same-asset cash-and-carry total-equity ledger.
 
@@ -64,9 +70,13 @@ def run_cash_carry_backtest(
     actual settlement event; the per-bar quote-cash borrow rate finances the
     spot leg; both legs incur their fees and slippage on entry and exit.
     ``signal_delay_bars`` pushes every target execution one bar later for the
-    frozen stress perturbation. A maintenance-buffer violation force-closes at
-    the adverse executable mark and records ``margin_liquidation``; the returned
-    equity stays finite. Inputs are never mutated.
+    frozen stress perturbation. ``hysteresis`` configures the cost-derived
+    open/min-hold/confirm band applied by ``generate_cash_carry_target``; the
+    internal ``settlements_since_open`` state counts only bars with a fresh
+    funding settlement and is reset to flat on any close or liquidation. A
+    maintenance-buffer violation force-closes at the adverse executable mark and
+    records ``margin_liquidation``; the returned equity stays finite. Inputs are
+    never mutated.
     """
     validate_carry_market_data(data)
     if spec.symbol != data.symbol:
@@ -88,6 +98,11 @@ def run_cash_carry_backtest(
     bar_funding = _align_funding_rates(funding_scope, grid)
     borrow_arr = pd.to_numeric(data.borrow, errors="coerce").to_numpy(dtype=np.float64)
 
+    settlement_mask = np.zeros(n, dtype=bool)
+    if len(funding_scope) > 0:
+        pos = grid.searchsorted(funding_scope.index, side="right") - 1
+        settlement_mask[pos] = True
+
     spot_open = spot["open"].to_numpy(dtype=np.float64)
     spot_close = spot["close"].to_numpy(dtype=np.float64)
     perp_open = perp["open"].to_numpy(dtype=np.float64)
@@ -107,11 +122,13 @@ def run_cash_carry_backtest(
     entry_bar_idx = -1
     pending_target = "HOLD"
     pending_bar = -1
+    settlements_since_open: int | None = None
     trades: list[_CarryTrade] = []
     target_log: list[str] = []
 
     def record_close(t: int, spot_exit: float, perp_exit: float, reason: str) -> None:
         nonlocal cash, spot_qty, perp_qty, margin_reserved, trade_funding_pnl
+        nonlocal settlements_since_open
         spot_xfee = costs.spot_fee_rate * spot_qty * spot_exit
         perp_xfee = costs.perp_fee_rate * perp_qty * perp_exit
         spot_leg = spot_qty * (spot_exit - spot_entry)
@@ -137,6 +154,7 @@ def run_cash_carry_backtest(
         perp_qty = 0.0
         margin_reserved = 0.0
         trade_funding_pnl = 0.0
+        settlements_since_open = None
 
     for t in range(n):
         # 0. funding and borrow accrual for a position held into this bar.
@@ -170,6 +188,7 @@ def run_cash_carry_backtest(
                 perp_entry = fill_perp
                 entry_bar_idx = t
                 trade_funding_pnl = 0.0
+                settlements_since_open = 0
                 _logger.info(
                     "bar=%d OPEN fill_spot=%.4f fill_perp=%.4f qty=%.6f margin=%.4f",
                     t, fill_spot, fill_perp, qty, margin_reserved, extra={"tag": "ALGO"},
@@ -206,8 +225,14 @@ def run_cash_carry_backtest(
         # 4. form the next target from the completed decision timestamp. A
         # pending OPEN/CLOSE is locked once scheduled so ``signal_delay_bars``
         # delays that exact decision; only an idle or HOLD slot is refreshed.
+        # ``settlements_since_open`` counts only fresh-settlement bars while a
+        # position is open, matching the funding-settlement cadence.
+        if perp_qty > 0 and settlement_mask[t]:
+            settlements_since_open = (settlements_since_open or 0) + 1
         if pending_bar == -1 or pending_target == "HOLD":
-            target = generate_cash_carry_target(data, grid[t], is_open=spot_qty > 0)
+            target = generate_cash_carry_target(
+                data, grid[t], settlements_since_open, costs, hysteresis,
+            )
             apply_bar = t + 1 + signal_delay_bars
             if apply_bar < n:
                 pending_target = target
@@ -246,7 +271,7 @@ def _check_contract() -> None:
 
     params = signature(run_cash_carry_backtest).parameters
     assert list(params) == [
-        "data", "spec", "costs", "initial_equity", "signal_delay_bars",
+        "data", "spec", "costs", "initial_equity", "signal_delay_bars", "hysteresis",
     ]
 
 

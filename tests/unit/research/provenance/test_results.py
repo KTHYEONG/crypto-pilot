@@ -255,7 +255,7 @@ class TestResultsLog:
         lines = log_path.read_text(encoding="utf-8").splitlines()
         assert len(lines) == 1
         assert rec["kind"] == "cash_carry"
-        assert rec["cash_carry_spec"]["initial_margin_rate"] == 0.10
+        assert rec["cash_carry_spec"]["initial_margin_rate"] == 0.30
         assert rec["costs"]["spot_fee_rate"] == 0.001
         assert rec["costs"]["perp_fee_rate"] == 0.0005
         assert "candidate" not in rec
