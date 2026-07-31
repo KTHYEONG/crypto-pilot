@@ -37,6 +37,19 @@ class TestStrategySpec:
         with pytest.raises(ValueError, match="max_leverage"):
             StrategySpec(max_leverage=0)
 
+    def test_taker_flow_threshold_validation_and_default(self) -> None:
+        # SC-FLOW-04: default is None (v1 baseline); candidate activation must be explicit.
+        assert StrategySpec().min_taker_buy_ratio is None
+        assert StrategySpec(min_taker_buy_ratio=0.52).min_taker_buy_ratio == 0.52
+        with pytest.raises(ValueError, match="min_taker_buy_ratio"):
+            StrategySpec(min_taker_buy_ratio=0)
+        with pytest.raises(ValueError, match="min_taker_buy_ratio"):
+            StrategySpec(min_taker_buy_ratio=1.5)
+        with pytest.raises(ValueError, match="min_taker_buy_ratio"):
+            StrategySpec(min_taker_buy_ratio=float("nan"))
+        with pytest.raises(ValueError, match="min_taker_buy_ratio"):
+            StrategySpec(min_taker_buy_ratio=float("inf"))
+
 
 class TestCostModel:
     def test_round_trip_and_adverse_slippage(self) -> None:
