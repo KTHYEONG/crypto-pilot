@@ -189,6 +189,100 @@ def compute_reliability_gate(
     return result
 
 
+def compute_portfolio_reliability_gate(
+    equity: pd.Series,
+    closed_trade_count: int,
+    config: ReliabilityGateConfig = ReliabilityGateConfig(),  # noqa: B008
+) -> ReliabilityGateResult:
+    """Block-bootstrap the marked total-equity 4h return stream of a portfolio.
+
+    The sampled return stream is the single portfolio ledger, never independent
+    sleeve returns compounded separately, so concurrent positions cannot inflate
+    the LCB by multiplying per-sleeve paths. All numerical gate limits are the
+    frozen ones from ``ReliabilityGateConfig`` (15% LCB90, -25% MDD, 2.0 t-stat,
+    30 closes); the block size is derived from the return autocorrelation.
+    """
+    if not isinstance(equity.index, pd.DatetimeIndex) or len(equity) < 2:
+        raise ValueError("equity must be a DatetimeIndex series with at least 2 points")
+    if not equity.index.is_monotonic_increasing:
+        raise ValueError("equity index must be monotonic increasing")
+    values = equity.to_numpy(dtype=np.float64)
+    if not np.isfinite(values).all():
+        raise ValueError("equity must contain only finite values")
+    if (values <= 0).any():
+        raise ValueError("equity must be strictly positive")
+    if closed_trade_count < 0:
+        raise ValueError(f"closed_trade_count must be >= 0, got {closed_trade_count}")
+
+    years = (equity.index[-1] - equity.index[0]).total_seconds() / _SECONDS_PER_YEAR
+    if years <= 0:
+        raise ValueError("equity must span a positive time range")
+
+    returns = equity.pct_change().dropna().to_numpy(dtype=np.float64)
+    if len(returns) == 0:
+        result = ReliabilityGateResult(
+            lcb90_cagr=0.0, lcb95_cagr=0.0, p_negative=0.0,
+            point_cagr=0.0, t_stat=0.0, trade_count=closed_trade_count,
+            block_size_used=1, verdict="PENDING",
+        )
+        _logger.info(
+            "lcb90=%.4f lcb95=%.4f p_neg=%.3f point_cagr=%.4f t_stat=%.3f trades=%d block=%d verdict=%s",
+            result.lcb90_cagr, result.lcb95_cagr, result.p_negative,
+            result.point_cagr, result.t_stat, result.trade_count,
+            result.block_size_used, result.verdict, extra={"tag": "EVAL"},
+        )
+        return result
+
+    block_size = config.block_size if config.block_size is not None else derive_block_size(returns)
+    cagr_b = _block_bootstrap_cagr(
+        returns, years=years, block_size=block_size,
+        n_bootstrap=config.n_bootstrap, seed=config.seed,
+    )
+    lcb90_cagr = float(np.percentile(cagr_b, 100.0 * (1.0 - config.lcb_confidence)))
+    lcb95_cagr = float(np.percentile(cagr_b, 5.0))
+    p_negative = float(np.mean(cagr_b < 0.0))
+    point_cagr = float(np.prod(1.0 + returns) ** (1.0 / years) - 1.0)
+
+    std_ret = float(np.std(returns))
+    sharpe = float(np.mean(returns) / std_ret * np.sqrt(2190.0)) if std_ret > 0 else 0.0
+    t_stat = sharpe * np.sqrt(years)
+    mdd = float((equity / equity.cummax() - 1.0).min())
+
+    if closed_trade_count < config.min_trades:
+        verdict: Literal["PASS", "FAIL", "PENDING"] = "PENDING"
+    elif (
+        mdd > config.mdd_floor
+        and t_stat > config.t_stat_floor
+        and lcb90_cagr > config.hurdle_rate
+    ):
+        verdict = "PASS"
+    else:
+        verdict = "FAIL"
+
+    result = ReliabilityGateResult(
+        lcb90_cagr=lcb90_cagr, lcb95_cagr=lcb95_cagr, p_negative=p_negative,
+        point_cagr=point_cagr, t_stat=float(t_stat), trade_count=closed_trade_count,
+        block_size_used=block_size, verdict=verdict,
+    )
+    _logger.info(
+        "lcb90=%.4f lcb95=%.4f p_neg=%.3f point_cagr=%.4f t_stat=%.3f trades=%d block=%d verdict=%s",
+        lcb90_cagr, lcb95_cagr, p_negative, point_cagr, t_stat,
+        closed_trade_count, block_size, verdict, extra={"tag": "EVAL"},
+    )
+    return result
+
+
+def _trade_entry_timestamps(trades: pd.DataFrame, equity: pd.Series) -> pd.Series:
+    """Entry timestamps for fold attribution.
+
+    Portfolio trades carry an explicit ``entry_time``; single-symbol trades are
+    mapped through their ``entry_bar`` into the equity index as before.
+    """
+    if "entry_time" in trades.columns and len(trades) > 0:
+        return pd.to_datetime(trades["entry_time"], utc=True, errors="raise")
+    return equity.index[trades["entry_bar"].astype(int).to_numpy()]
+
+
 def split_holdout_segment(result: BacktestResult, cutoff: pd.Timestamp) -> HoldoutSegment:
     equity = result.equity
     if equity.index.tz is not None and cutoff.tzinfo is None:
@@ -252,7 +346,7 @@ def compute_fold_distribution(
             median_fold_calmar=0.0, max_period_contribution=0.0, gate_pass=True,
         )
 
-    entry_ts = equity.index[result.trades["entry_bar"].astype(int).to_numpy()]
+    entry_ts = _trade_entry_timestamps(result.trades, equity)
     fold_pnl: dict[int, float] = {}
     for ts, pnl in zip(entry_ts, result.trades["pnl"].to_numpy(dtype=np.float64), strict=False):
         fold_pnl[ts.year] = fold_pnl.get(ts.year, 0.0) + float(pnl)
@@ -336,6 +430,7 @@ def _check_contract() -> None:
         "n_folds", "median_fold_cagr", "worst_fold_cagr",
         "median_fold_calmar", "max_period_contribution", "gate_pass",
     }
+    assert compute_portfolio_reliability_gate.__name__ == "compute_portfolio_reliability_gate"
 
 
 _check_contract()

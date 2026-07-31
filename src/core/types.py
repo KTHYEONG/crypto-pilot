@@ -48,6 +48,31 @@ class StrategySpec:
 
 
 @dataclass(frozen=True, slots=True)
+class PortfolioSpec:
+    """Immutable portfolio-execution configuration, separate from StrategySpec.
+
+    Deliberately carries no signal or performance parameters: it only fixes the
+    number of liquidity slots, the maximum concurrent positions, and the trailing
+    liquidity lookback. Single-symbol StrategySpec defaults are never modified.
+    """
+
+    universe_size: int = 5
+    max_positions: int = 5
+    liquidity_lookback_days: int = 30
+
+    def __post_init__(self) -> None:
+        if not self.universe_size >= self.max_positions >= 1:
+            raise ValueError(
+                f"universe_size >= max_positions >= 1 required, got "
+                f"universe_size={self.universe_size} max_positions={self.max_positions}"
+            )
+        if self.liquidity_lookback_days < 1:
+            raise ValueError(
+                f"liquidity_lookback_days must be >= 1, got {self.liquidity_lookback_days}"
+            )
+
+
+@dataclass(frozen=True, slots=True)
 class CostModel:
     fee_rate: float = 0.0005
     slippage_rate: float = 0.0003
