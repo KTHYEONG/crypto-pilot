@@ -106,7 +106,15 @@ def main() -> None:
         "[EVAL] portfolio candidates=%d symbols=%s", len(frames), sorted(frames),
     )
 
-    rebalance_time = pd.Timestamp(min(frame.index[0] for frame in frames.values())).tz_convert("UTC")
+    # The first bar cannot have a completed trailing liquidity window.  Use the
+    # first timestamp at which every loaded symbol has the declared lookback;
+    # the engine itself performs the same causal selection at each UTC day
+    # boundary, so this log now describes a real eligible rebalance rather than
+    # an intentionally empty warm-up selection.
+    first_available = max(frame.index[0] for frame in frames.values())
+    rebalance_time = pd.Timestamp(
+        first_available + pd.Timedelta(days=portfolio_spec.liquidity_lookback_days),
+    ).tz_convert("UTC")
     initial_universe = select_liquid_universe(frames, as_of=rebalance_time, spec=portfolio_spec)
     _logger.info(
         "[EVAL] portfolio universe as_of=%s selected=%s",
