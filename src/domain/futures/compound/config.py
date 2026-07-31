@@ -366,6 +366,23 @@ class DynamicCompoundingConfig:
 
 
 @dataclass(slots=True, frozen=True)
+class L1RoutingConfig:
+    enabled: bool = True
+    family_top_k: int = 2
+    symbol_top_n: int = 10
+    normalization_warmup_bars: int = 500
+    signal_clip: float = 3.0
+    min_rank_folds: int = 1
+
+    def __post_init__(self) -> None:
+        assert self.family_top_k >= 1, f"family_top_k must be >= 1, got {self.family_top_k}"
+        assert self.symbol_top_n >= 1, f"symbol_top_n must be >= 1, got {self.symbol_top_n}"
+        assert self.normalization_warmup_bars > 0, f"normalization_warmup_bars must be > 0, got {self.normalization_warmup_bars}"
+        assert self.signal_clip > 0, f"signal_clip must be > 0, got {self.signal_clip}"
+        assert self.min_rank_folds >= 1, f"min_rank_folds must be >= 1, got {self.min_rank_folds}"
+
+
+@dataclass(slots=True, frozen=True)
 class L1LegConfig:
     horizon_band_bars: tuple[int, ...] = (6, 12, 24)
     modes: tuple[str, ...] = ("xs", "ts")
@@ -503,6 +520,7 @@ class CompoundEngineConfig:
     l1_leg: L1LegConfig = field(default_factory=L1LegConfig)
     dynamic_compounding: DynamicCompoundingConfig = field(default_factory=DynamicCompoundingConfig)
     regime_router: RegimeRouterConfig = field(default_factory=RegimeRouterConfig)
+    l1_routing: L1RoutingConfig = field(default_factory=L1RoutingConfig)
 
     def __post_init__(self) -> None:
         assert isinstance(self.data, DataPlaneConfig)
@@ -525,3 +543,4 @@ class CompoundEngineConfig:
         assert isinstance(self.l1_leg, L1LegConfig)
         assert isinstance(self.dynamic_compounding, DynamicCompoundingConfig)
         assert isinstance(self.regime_router, RegimeRouterConfig)
+        assert isinstance(self.l1_routing, L1RoutingConfig)
