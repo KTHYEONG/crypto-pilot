@@ -14,7 +14,10 @@ from src.validation.reliability_gate import (
     FoldDistributionResult,
     ReliabilityGateConfig,
     ReliabilityGateResult,
+    _year_log_return_contributions,
+    compute_equity_reliability_gate,
     compute_fold_distribution,
+    compute_portfolio_reliability_gate,
     compute_reliability_gate,
     compute_stress_test_gate,
     derive_block_size,
@@ -157,72 +160,211 @@ class TestComputeReliabilityGate:
             )
 
 
+class TestComputeEquityReliabilityGate:
+    """SC-GATE-EQ-01/02: the canonical promotion gate on the marked equity stream."""
+
+    def test_equity_reliability_gate_is_canonical_for_single_and_portfolio_ledgers(self) -> None:
+        # SC-GATE-EQ-01: a valid but zero-return ledger cannot pass a 15% LCB and
+        # the canonical gate is byte-identical to the former portfolio gate.
+        flat = pd.Series(
+            [100.0, 100.0],
+            index=pd.date_range("2025-01-01", periods=2, freq="4h", tz="UTC"),
+        )
+        assert compute_equity_reliability_gate(flat, 30).verdict == "FAIL"
+        assert compute_equity_reliability_gate(flat, 30).lcb90_cagr == 0.0
+
+        idx = pd.date_range("2024-01-01", periods=4, freq="4h", tz="UTC")
+        rising = pd.Series([100.0, 110.0, 121.0, 133.1], index=idx)
+        canonical = compute_equity_reliability_gate(rising, closed_trade_count=50)
+        delegator = compute_portfolio_reliability_gate(rising, closed_trade_count=50)
+        assert canonical == delegator, "the portfolio delegator must reuse the canonical gate"
+        assert canonical.verdict == "PASS"
+
+    def test_equity_gate_pending_below_min_closed_trades(self) -> None:
+        idx = pd.date_range("2024-01-01", periods=4, freq="4h", tz="UTC")
+        rising = pd.Series([100.0, 110.0, 121.0, 133.1], index=idx)
+        assert compute_equity_reliability_gate(rising, closed_trade_count=10).verdict == "PENDING"
+
+    def test_equity_gate_determinism(self) -> None:
+        idx = pd.date_range("2024-01-01", periods=6, freq="4h", tz="UTC")
+        equity = pd.Series([100.0, 103.0, 101.5, 106.0, 109.0, 111.0], index=idx)
+        a = compute_equity_reliability_gate(equity, closed_trade_count=40)
+        b = compute_equity_reliability_gate(equity, closed_trade_count=40)
+        assert a == b
+
+    def test_equity_gate_rejects_malformed_ledger(self) -> None:
+        # SC-GATE-EQ-02: no malformed ledger can be silently promoted.
+        base_idx = pd.date_range("2025-01-01", periods=3, freq="4h", tz="UTC")
+        with pytest.raises(ValueError, match="monotonic"):
+            compute_equity_reliability_gate(
+                pd.Series([100.0, 110.0, 90.0], index=base_idx[::-1]), 30,
+            )
+        with pytest.raises(ValueError, match="strictly positive"):
+            compute_equity_reliability_gate(
+                pd.Series([100.0, 0.0, 110.0], index=base_idx), 30,
+            )
+        with pytest.raises(ValueError, match="finite"):
+            compute_equity_reliability_gate(
+                pd.Series([100.0, np.nan], index=base_idx[:2]), 30,
+            )
+        with pytest.raises(ValueError, match="at least 2"):
+            compute_equity_reliability_gate(
+                pd.Series([100.0], index=base_idx[:1]), 30,
+            )
+        with pytest.raises(ValueError, match="closed_trade_count"):
+            compute_equity_reliability_gate(
+                pd.Series([100.0, 110.0, 90.0], index=base_idx), -1,
+            )
+
+
 class TestSplitHoldoutSegment:
-    def _result(self, entry_bars: list[int]) -> BacktestResult:
+    def _result(self, entry_bars: list[int], exit_bars: list[int]) -> BacktestResult:
         idx = pd.date_range("2025-06-01", periods=20, freq="4D", tz="UTC")
         equity = pd.Series(np.linspace(10000, 12000, 20), index=idx)
         trades = pd.DataFrame({
             "entry_bar": entry_bars,
+            "exit_bar": exit_bars,
             "pnl": [10.0] * len(entry_bars),
             "return_pct": [0.01] * len(entry_bars),
         })
         return BacktestResult(equity=equity, trades=trades, signals=pd.DataFrame(index=idx))
 
-    def test_split_holdout_segment_rebasing_and_entry_classification(self) -> None:
+    def test_split_holdout_segment_rebasing_and_exit_classification(self) -> None:
         cutoff = pd.Timestamp("2025-07-01", tz="UTC")
-        # bar 5 -> 2025-06-21 (pre-cutoff), bar 12 -> 2025-07-17 (post-cutoff)
-        seg = self._result([5, 12])
-        seg = split_holdout_segment(seg, cutoff)
+        # exits at bar 5 -> 2025-06-21 (pre-cutoff) and bar 12 -> 2025-07-17 (post-cutoff)
+        seg = split_holdout_segment(self._result([2, 8], [5, 12]), cutoff)
 
         assert abs(seg.holdout_equity.iloc[0] - 1.0) < 1e-9
-        assert seg.observation_trades["entry_bar"].tolist() == [5]
-        assert seg.holdout_trades["entry_bar"].tolist() == [12]
+        assert seg.observation_trades["exit_bar"].tolist() == [5]
+        assert seg.holdout_trades["exit_bar"].tolist() == [12]
         assert seg.holdout_mdd <= 0.0
         assert seg.holdout_years > 0
 
-    def test_trade_opened_pre_cutoff_classified_as_observation(self) -> None:
+    def test_split_holdout_counts_crossing_trade_at_exit_not_entry(self) -> None:
+        # SC-HOLDOUT-EXIT-01: a trade entered before the cutoff but closed after it
+        # must leave observation evidence and be counted in the holdout.
         cutoff = pd.Timestamp("2025-07-01", tz="UTC")
-        # a trade entered at bar 5 (pre-cutoff) that exits far later is observation
-        seg = split_holdout_segment(self._result([5]), cutoff)
+        seg = split_holdout_segment(self._result([2], [12]), cutoff)
+        assert len(seg.observation_trades) == 0
+        assert len(seg.holdout_trades) == 1
+
+        closed_pre_cutoff = split_holdout_segment(self._result([2], [5]), cutoff)
+        assert len(closed_pre_cutoff.observation_trades) == 1
+        assert len(closed_pre_cutoff.holdout_trades) == 0
+
+    def test_split_holdout_empty_trades_has_empty_segments(self) -> None:
+        cutoff = pd.Timestamp("2025-07-01", tz="UTC")
+        seg = split_holdout_segment(self._result([], []), cutoff)
+        assert seg.observation_trades.empty
+        assert seg.holdout_trades.empty
+
+    def test_split_holdout_uses_portfolio_exit_time_when_present(self) -> None:
+        cutoff = pd.Timestamp("2025-07-01", tz="UTC")
+        result = self._result([2], [5])
+        result.trades["exit_time"] = [pd.Timestamp("2025-06-21", tz="UTC")]
+        seg = split_holdout_segment(result, cutoff)
         assert len(seg.observation_trades) == 1
-        assert len(seg.holdout_trades) == 0
+        assert seg.holdout_trades.empty
+
+    def test_split_holdout_segment_requires_exit_timing(self) -> None:
+        idx = pd.date_range("2025-06-01", periods=20, freq="4D", tz="UTC")
+        equity = pd.Series(np.linspace(10000, 12000, 20), index=idx)
+        trades = pd.DataFrame({
+            "entry_bar": [5],
+            "pnl": [10.0],
+            "return_pct": [0.01],
+        })
+        result = BacktestResult(equity=equity, trades=trades, signals=pd.DataFrame(index=idx))
+        with pytest.raises(ValueError, match="exit_bar"):
+            split_holdout_segment(result, pd.Timestamp("2025-07-01", tz="UTC"))
 
     def test_split_holdout_segment_validation(self) -> None:
         with pytest.raises(ValueError, match="outside"):
             split_holdout_segment(
-                self._result([5]), pd.Timestamp("2030-01-01", tz="UTC"),
+                self._result([2], [5]), pd.Timestamp("2030-01-01", tz="UTC"),
             )
         with pytest.raises(ValueError, match="tz-naive"):
             split_holdout_segment(
-                self._result([5]), pd.Timestamp("2025-07-01"),
+                self._result([2], [5]), pd.Timestamp("2025-07-01"),
             )
 
 
-def _fold_fixture(pnls: list[float]) -> BacktestResult:
-    idx = pd.date_range("2022-01-01", periods=4, freq="YS", tz="UTC")
+def _fold_equity_fixture(equity_values: list[float], n_trades: int = 4) -> BacktestResult:
+    idx = pd.date_range("2022-01-01", periods=len(equity_values), freq="YS", tz="UTC")
+    equity = pd.Series(equity_values, index=idx)
     trades = pd.DataFrame({
-        "entry_bar": [0, 1, 2, 3],
-        "pnl": pnls,
-        "return_pct": [0.0] * 4,
+        "entry_bar": list(range(n_trades)),
+        "exit_bar": list(range(1, n_trades + 1)),
+        "pnl": [0.0] * n_trades,
+        "return_pct": [0.0] * n_trades,
     })
-    equity = pd.Series(
-        [10000, 10000, 13000, 14000, 14200],
-        index=pd.date_range("2022-01-01", periods=5, freq="YS", tz="UTC"),
-    )
     return BacktestResult(equity=equity, trades=trades, signals=pd.DataFrame(index=idx))
 
 
-class TestComputeFoldDistribution:
-    def test_fold_distribution_concentration_gates(self) -> None:
-        # SC-FOLD-01: one fold carrying ~76% of net pnl -> hard gate fails
-        concentrated = compute_fold_distribution(_fold_fixture([-100.0, 1000.0, 200.0, 200.0]))
-        assert abs(concentrated.max_period_contribution - (1000.0 / 1300.0)) < 1e-9
-        assert concentrated.gate_pass is False
+class TestYearLogReturnContributions:
+    """SC-FOLD-MTM-01: marked log returns are attributed by mark timestamp, not entry."""
 
-        # SC-FOLD-02: pnl evenly split -> 25% concentration -> gate passes
-        even = compute_fold_distribution(_fold_fixture([250.0, 250.0, 250.0, 250.0]))
-        assert abs(even.max_period_contribution - 0.25) < 1e-9
-        assert even.gate_pass is True
+    def test_year_log_return_contributions_attributes_by_mark_timestamp(self) -> None:
+        equity = pd.Series(
+            [100.0, 110.0, 121.0],
+            index=pd.DatetimeIndex([
+                "2024-12-31 20:00:00+00:00",
+                "2025-01-01 00:00:00+00:00",
+                "2025-01-01 04:00:00+00:00",
+            ]),
+        )
+        contrib = _year_log_return_contributions(equity)
+        # the entire two-bar gain is attributed to 2025 marks even though the
+        # first mark's predecessor was in 2024
+        assert abs(contrib[2025] - np.log(1.21)) < 1e-12
+
+    def test_year_log_return_contributions_validation(self) -> None:
+        idx = pd.DatetimeIndex(["2025-01-01 00:00:00+00:00", "2025-01-01 04:00:00+00:00"])
+        with pytest.raises(ValueError, match="monotonic"):
+            _year_log_return_contributions(pd.Series([100.0, 110.0], index=idx[::-1]))
+        with pytest.raises(ValueError, match="strictly positive"):
+            _year_log_return_contributions(pd.Series([100.0, -1.0], index=idx))
+        with pytest.raises(ValueError, match="finite"):
+            _year_log_return_contributions(pd.Series([100.0, np.nan], index=idx))
+        with pytest.raises(ValueError, match="at least 2"):
+            _year_log_return_contributions(pd.Series([100.0], index=idx[:1]))
+        with pytest.raises(ValueError, match="DatetimeIndex"):
+            _year_log_return_contributions(pd.Series([100.0, 110.0], index=[1, 2]))
+
+
+class TestComputeFoldDistribution:
+    def test_fold_distribution_uses_marked_cross_year_log_returns(self) -> None:
+        # a trade entered in 2024 and spanning the year boundary contributes its
+        # post-cutoff marked gains entirely to 2025
+        equity = pd.Series(
+            [100.0, 110.0, 121.0],
+            index=pd.DatetimeIndex([
+                "2024-12-31 20:00:00+00:00",
+                "2025-01-01 00:00:00+00:00",
+                "2025-01-01 04:00:00+00:00",
+            ]),
+        )
+        trades = pd.DataFrame({
+            "entry_bar": [0],
+            "exit_bar": [2],
+            "pnl": [100.0],
+            "return_pct": [1.0],
+        })
+        result = BacktestResult(equity=equity, trades=trades, signals=pd.DataFrame(index=equity.index))
+        r = compute_fold_distribution(result)
+        assert abs(r.max_period_contribution - 1.0) < 1e-12
+        assert r.gate_pass is False
+
+    def test_fold_concentration_boundary_passes_at_or_below_limit(self) -> None:
+        # SC-FOLD-MTM-02: balanced multi-year growth -> <= .40 passes
+        balanced = compute_fold_distribution(_fold_equity_fixture([100.0, 200.0, 400.0, 800.0]))
+        assert abs(balanced.max_period_contribution - (1.0 / 3.0)) < 1e-9
+        assert balanced.gate_pass is True
+
+        # one dominant year -> > .40 fails
+        dominant = compute_fold_distribution(_fold_equity_fixture([100.0, 100.0, 100.0, 1000.0]))
+        assert abs(dominant.max_period_contribution - 1.0) < 1e-9
+        assert dominant.gate_pass is False
 
     def test_compute_fold_distribution_matches_measured_v1_concentration(self) -> None:
         df = load_ohlcv_4h(BTC_PATH, end="2025-12-31 23:59:59")
@@ -232,7 +374,7 @@ class TestComputeFoldDistribution:
         result = run_backtest(df, spec, costs)
         r = compute_fold_distribution(result)
         assert r.n_folds == 4
-        assert abs(r.max_period_contribution - 0.7586) < 1e-3
+        assert abs(r.max_period_contribution - 0.8179) < 1e-3
         assert r.gate_pass is False
 
     def test_fold_distribution_empty_trades_and_short_equity(self) -> None:
