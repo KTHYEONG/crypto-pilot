@@ -1,6 +1,26 @@
 {
   "tasks": [
     {
+      "task_id": "TASK_LEAN_CHECK_SCHEMA_ALIGNMENT",
+      "date": "2026-07-31",
+      "adr_id": "ADR_20260731_LEAN_CHECK_SCHEMA_ALIGNMENT",
+      "domain": "execution",
+      "title": "Align lean_check.py with Spec Contract Schema",
+      "why": "lean_check.py failed spec-compliance validation due to schema mismatch.",
+      "resolution": "Updated _check_spec_compliance in lean_check.py to support file/symbol keys, python_assertion exec evaluation, and flexible wiring matching.",
+      "impact": "Restores automated spec-compliance gate verification without breaking legacy contract formats."
+    },
+    {
+      "task_id": "TASK_RELIABILITY_GATE",
+      "date": "2026-07-31",
+      "adr_id": "ADR_20260731_RELIABILITY_GATE",
+      "domain": "risk",
+      "title": "Reliability Gate Protocol Implementation",
+      "why": "Evaluates strategy robustness via block bootstrap LCB90 CAGR, fold distribution concentration, and cost/delay execution stress test.",
+      "resolution": "Implemented compute_reliability_gate, split_holdout_segment, compute_fold_distribution, compute_stress_test_gate, and recorded metrics in runs.jsonl.",
+      "impact": "Provides robust, data-driven gate criteria preventing overfitted or regime-dependent strategies from passing into production."
+    },
+    {
       "task_id": "TASK_RESET_V1_DONCHIAN_BASELINE",
       "date": "2026-07-31",
       "adr_id": "ADR_20260731_RESET_V1_DONCHIAN_BASELINE",
