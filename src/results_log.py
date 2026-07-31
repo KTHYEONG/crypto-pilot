@@ -11,6 +11,7 @@ import pandas as pd
 from src.config import CostModel, StrategySpec
 from src.engine import BacktestResult
 from src.metrics import Metrics
+from src.reliability_gate import FoldDistributionResult, ReliabilityGateResult
 
 RUNS_LOG_PATH = Path(__file__).resolve().parent.parent / "docs" / "results" / "runs.jsonl"
 
@@ -41,14 +42,18 @@ def record_run(
     start: str | None,
     end: str | None,
     initial_equity: float,
+    observation_gate: ReliabilityGateResult,
+    fold_distribution: FoldDistributionResult,
+    stress_gate: ReliabilityGateResult,
+    holdout_gate: ReliabilityGateResult | None = None,
     log_path: Path = RUNS_LOG_PATH,
 ) -> dict[str, object]:
     """Append one backtest run as a JSONL record for longitudinal comparison.
 
     Never overwrites prior rows; each call appends exactly one line. Captures
     the frozen StrategySpec/CostModel (what changed) alongside Metrics (the
-    outcome) and the git commit (whether the code that produced it is
-    reproducible from history).
+    outcome), the reliability gate verdicts, and the git commit (whether the
+    code that produced it is reproducible from history).
     """
     git_sha, git_dirty = _git_head()
     record: dict[str, object] = {
@@ -62,6 +67,13 @@ def record_run(
         "spec": asdict(spec),
         "costs": asdict(costs),
         "metrics": asdict(metrics),
+        "reliability": {
+            "observation": asdict(observation_gate),
+            "holdout": asdict(holdout_gate) if holdout_gate is not None else None,
+            "fold_distribution": asdict(fold_distribution),
+            "stress_test": asdict(stress_gate),
+        },
+        "window": "observation+holdout" if holdout_gate is not None else "observation",
     }
     log_path.parent.mkdir(parents=True, exist_ok=True)
     with log_path.open("a", encoding="utf-8") as f:
