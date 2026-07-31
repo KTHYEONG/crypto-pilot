@@ -9,5 +9,8 @@
   },
   "src/core/config.py": {
     "testing": "tests/unit/core/test_config.py"
+  },
+  "src/engine/backtest.py": {
+    "testing": "tests/integration/test_taker_flow_candidate.py"
   }
 }

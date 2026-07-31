@@ -1,6 +1,16 @@
 {
   "tasks": [
     {
+      "task_id": "TASK_TAKER_FLOW_CONFIRMATION",
+      "date": "2026-07-31",
+      "adr_id": "ADR_20260731_TAKER_FLOW_CONFIRMATION",
+      "domain": "signal",
+      "title": "Taker-flow confirmation candidate evaluation",
+      "why": "Evaluate the opt-in quote-notional taker-flow filter with funding-net accounting against frozen reliability gates.",
+      "resolution": "Recorded the sealed BTCUSDT candidate CLI run and retained it as rejected because observation and fold gates still fail.",
+      "impact": "Candidate improved CAGR to 10.45% and Sharpe to 1.571 with MDD -7.00% while preserving the v1 default and promotion safeguards."
+    },
+    {
       "task_id": "TASK_LEAN_CHECK_HARDENING",
       "date": "2026-07-31",
       "adr_id": "ADR_20260731_LEAN_CHECK_HARDENING",
