@@ -5,6 +5,7 @@ import dataclasses
 import hashlib
 import json
 import logging
+import os
 from pathlib import Path
 from typing import cast
 
@@ -25,8 +26,7 @@ from src.validation.candidate_promotion import (
 )
 from src.validation.candidate_registry import (
     CandidateRegistration,
-    load_registered_candidate,
-    register_candidate,
+    compute_candidate_id,
 )
 from src.validation.metrics import compute_metrics
 from src.validation.reliability_gate import (
@@ -46,6 +46,7 @@ _HYPOTHESIS_ID = "cash_and_carry_basis"
 _RETURN_SOURCE = "spot_perp_funding_carry"
 
 _CARRY_MODULE_PATHS = (
+    Path("src/cli/run_cash_carry_backtest.py"),
     Path("src/data/carry_data.py"),
     Path("src/data/loader.py"),
     Path("src/strategy/cash_carry.py"),
@@ -105,6 +106,24 @@ def _manifest_snapshot(symbol: str) -> dict[str, object]:
             if isinstance(records, dict) and symbol in records:
                 relevant[dataset] = records[symbol]
     return relevant
+
+
+def _borrow_start(symbol: str) -> pd.Timestamp:
+    path = borrow_path(symbol)
+    frame = pd.read_parquet(path)
+    if "datetime" in frame.columns:
+        timestamps = pd.to_datetime(frame["datetime"], utc=True, errors="coerce")
+    elif "timestamp" in frame.columns:
+        timestamps = pd.to_datetime(
+            pd.to_numeric(frame["timestamp"], errors="coerce"),
+            unit="ms", utc=True, errors="coerce",
+        )
+    else:
+        raise DataIntegrityError("borrow parquet must contain a 'timestamp' or 'datetime' column")
+    timestamps = timestamps.dropna()
+    if timestamps.empty:
+        raise DataIntegrityError("borrow parquet must contain at least one valid timestamp")
+    return pd.Timestamp(timestamps.min())
 
 
 def _resolve_end(end: str | None, unseal_holdout: bool) -> pd.Timestamp | None:
@@ -235,7 +254,7 @@ def _run_evaluation(
             costs=costs,
             result=result,
             metrics=metrics,
-            start=None,
+            start=str(market_data.spot.index[0]),
             end=str(market_data.spot.index[-1]),
             initial_equity=initial_equity,
             observation_gate=observation_gate,
@@ -277,89 +296,84 @@ def _record_anti_pattern(
     )
 
 
-def _register(args: argparse.Namespace) -> None:
+def _ephemeral_registration(
+    *,
+    symbol: str,
+    observation_end: str,
+    spec: CashCarrySpec,
+    costs: CarryCostModel,
+    data_hashes: dict[str, str],
+    manifest: dict[str, object],
+    code_hash: str,
+) -> CandidateRegistration:
+    candidate_id = compute_candidate_id(
+        hypothesis_id=_HYPOTHESIS_ID,
+        symbol=symbol,
+        observation_end=observation_end,
+        spec=spec,
+        costs=costs,
+        data_hashes=data_hashes,
+        manifest=manifest,
+        code_hash=code_hash,
+    )
+    return CandidateRegistration(
+        candidate_id=candidate_id,
+        hypothesis_id=_HYPOTHESIS_ID,
+        symbol=symbol,
+        observation_end=observation_end,
+        spec=dataclasses.asdict(spec),
+        costs=dataclasses.asdict(costs),
+        source_paths=_source_paths(symbol),
+        data_hashes=data_hashes,
+        manifest=manifest,
+        code_hash=code_hash,
+        return_source=_RETURN_SOURCE,
+        registration_ts="",
+        status="EPHEMERAL",
+    )
+
+
+def _run(args: argparse.Namespace) -> None:
     try:
         end = _resolve_end(args.end, args.unseal_holdout)
     except RuntimeError as exc:
-        _logger.info("[EVAL] register status=PENDING symbol=%s reason=%s", args.symbol, exc)
+        _logger.info("[EVAL] run status=PENDING symbol=%s reason=%s", args.symbol, exc)
         return
     try:
-        market_data = load_carry_market_data(args.symbol, args.start, end)
+        start = args.start if args.start is not None else _borrow_start(args.symbol)
+        market_data = load_carry_market_data(args.symbol, start, end)
     except (DataIntegrityError, FileNotFoundError) as exc:
         _logger.info(
-            "[EVAL] register status=PENDING symbol=%s reason=%s",
+            "[EVAL] run status=PENDING symbol=%s reason=%s",
             args.symbol, exc,
         )
         return
     try:
         hashes = _data_hashes(args.symbol)
     except DataIntegrityError as exc:
-        _logger.info("[EVAL] register status=PENDING symbol=%s reason=%s", args.symbol, exc)
+        _logger.info("[EVAL] run status=PENDING symbol=%s reason=%s", args.symbol, exc)
         return
     if end is None:
         period = market_data.spot.index[1] - market_data.spot.index[0]
         end = market_data.spot.index[-1] + period
-
     spec = CashCarrySpec(symbol=args.symbol)
     costs = CarryCostModel()
-    registration = register_candidate(
-        hypothesis_id=_HYPOTHESIS_ID,
+    current_code_hash = _code_hash()
+    registration = _ephemeral_registration(
         symbol=args.symbol,
         observation_end=str(end),
         spec=spec,
         costs=costs,
-        source_paths=_source_paths(args.symbol),
         data_hashes=hashes,
         manifest=_manifest_snapshot(args.symbol),
-        code_hash=_code_hash(),
-        return_source=_RETURN_SOURCE,
+        code_hash=current_code_hash,
     )
     _logger.info(
-        "[EVAL] candidate registered id=%s symbol=%s window_start=%s window_end=%s status=%s",
+        "[EVAL] candidate identity id=%s symbol=%s window_start=%s window_end=%s status=%s",
         registration.candidate_id, registration.symbol,
         market_data.spot.index[0], market_data.spot.index[-1],
         registration.status,
     )
-
-
-def _run(args: argparse.Namespace) -> None:
-    registration = load_registered_candidate(args.candidate_id)
-    if registration is None:
-        _logger.info(
-            "[EVAL] run status=PENDING candidate_id=%s reason=not_registered", args.candidate_id,
-        )
-        return
-    try:
-        current_hashes = _data_hashes(registration.symbol)
-    except DataIntegrityError as exc:
-        _logger.info("[EVAL] run status=PENDING candidate_id=%s reason=%s", args.candidate_id, exc)
-        return
-    current_code_hash = _code_hash()
-    current_manifest = _manifest_snapshot(registration.symbol)
-    if (
-        current_hashes != registration.data_hashes
-        or current_code_hash != registration.code_hash
-        or current_manifest != registration.manifest
-    ):
-        _logger.info(
-            "[EVAL] run status=REJECTED candidate_id=%s reason=fingerprint_mismatch",
-            args.candidate_id,
-        )
-        return
-    obs_end = pd.Timestamp(registration.observation_end, tz="UTC")
-    if not args.unseal_holdout and obs_end > HOLDOUT_CUTOFF:
-        _logger.info(
-            "[EVAL] run status=PENDING candidate_id=%s reason=holdout_sealed window_end=%s",
-            args.candidate_id, registration.observation_end,
-        )
-        return
-    try:
-        market_data = load_carry_market_data(registration.symbol, None, obs_end)
-    except (DataIntegrityError, FileNotFoundError) as exc:
-        _logger.info(
-            "[EVAL] run status=PENDING candidate_id=%s reason=%s", args.candidate_id, exc,
-        )
-        return
     _logger.info(
         "[EVAL] carry data status=PASS symbol=%s bars=%d window_end=%s funding_events=%d",
         registration.symbol, len(market_data.spot),
@@ -389,7 +403,7 @@ def _run(args: argparse.Namespace) -> None:
         run_ref = str(rec["ts"]) if rec is not None else "(not logged)"
         _record_anti_pattern(
             candidate_id=registration.candidate_id,
-            data_hash=_combined_data_hash(current_hashes),
+            data_hash=_combined_data_hash(hashes),
             code_hash=current_code_hash,
             promotion=promotion,
             metrics_snapshot=metrics_snapshot,
@@ -401,15 +415,10 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Sealed cash-and-carry research runner")
     sub = parser.add_subparsers(dest="command", required=True)
 
-    register_p = sub.add_parser("register", help="Pre-register a sealed candidate identity")
-    register_p.add_argument("--symbol", default="BTCUSDT")
-    register_p.add_argument("--start", default=None)
-    register_p.add_argument("--end", default=None)
-    register_p.add_argument("--unseal-holdout", action="store_true", default=False)
-    register_p.set_defaults(func=_register)
-
-    run_p = sub.add_parser("run", help="Run the exactly registered candidate")
-    run_p.add_argument("--candidate-id", required=True)
+    run_p = sub.add_parser("run", help="Run a sealed cash-and-carry evaluation")
+    run_p.add_argument("--symbol", default="BTCUSDT")
+    run_p.add_argument("--start", default=None)
+    run_p.add_argument("--end", default=None)
     run_p.add_argument("--initial-equity", type=float, default=10_000.0)
     run_p.add_argument("--unseal-holdout", action="store_true", default=False)
     run_p.add_argument("--no-log-run", action="store_true", default=False)
@@ -420,5 +429,8 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    logging.basicConfig(level=logging.INFO)
+    configured_level = getattr(
+        logging, os.getenv("LOG_LEVEL", "INFO").upper(), logging.INFO,
+    )
+    logging.basicConfig(level=configured_level)
     main()
