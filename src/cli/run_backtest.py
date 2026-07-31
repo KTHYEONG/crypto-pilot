@@ -10,6 +10,7 @@ from src.core.types import CostModel, StrategySpec
 from src.data.loader import load_ohlcv_4h
 from src.engine.backtest import run_backtest
 from src.engine.results_log import record_run
+from src.validation.candidate_promotion import compose_promotion_verdict
 from src.validation.metrics import compute_metrics
 from src.validation.reliability_gate import (
     compute_fold_distribution,
@@ -125,6 +126,13 @@ def main() -> None:
             segment.holdout_mdd, segment.holdout_cagr_sign,
         )
 
+    promotion = compose_promotion_verdict(observation_gate, fold_distribution, stress_gate, holdout_gate)
+    _logger.info(
+        "[EVAL] promotion status=%s observation=%s fold_gate=%s stress=%s holdout=%s",
+        promotion.status, promotion.observation_verdict, promotion.fold_gate_pass,
+        promotion.stress_verdict, promotion.holdout_verdict,
+    )
+
     if not args.no_log_run:
         rec = record_run(
             spec=spec, costs=costs, result=result, metrics=metrics,
@@ -134,6 +142,7 @@ def main() -> None:
             fold_distribution=fold_distribution,
             stress_gate=stress_gate,
             holdout_gate=holdout_gate,
+            promotion=promotion,
         )
         _logger.info("[EVAL] run logged: git_sha=%s dirty=%s", rec["git_sha"], rec["git_dirty"])
 
