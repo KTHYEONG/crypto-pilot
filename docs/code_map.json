@@ -636,5 +636,8 @@
   },
   "src/domain/futures/compound/l1_leg_admission.py": {
     "testing": "tests/unit/domain/futures/compound/test_l1_leg_admission.py"
+  },
+  "src/domain/futures/compound/l1_symbol_routing.py": {
+    "testing": "tests/unit/domain/futures/compound/test_l1_symbol_routing.py"
   }
 }
