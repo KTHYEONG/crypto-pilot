@@ -1,5 +1,12 @@
 [
   {
+    "domain": "signal",
+    "failed_hypothesis": "cash_and_carry_basis (BTCUSDT, 2023-2025)",
+    "failure_reason": "무비용 기준 funding-borrow 스프레드가 관측기간 전체 및 모든 14D/30D 롤링윈도우에서 손익분기 이하; 신호 개선으로 회전율 손실은 제거했으나 원천 엣지 부재는 해결 불가",
+    "falsified_date": "2026-07-31",
+    "source_adr": "ADR_20260731_CARRY_SIGNAL_HYSTERESIS"
+  },
+  {
     "domain": "risk",
     "failed_hypothesis": "A five-slot daily-liquidity portfolio would convert the BTC observation edge into a promotion-passing total-equity ledger.",
     "failure_reason": "The latest total-ledger run reached CAGR 16.41% but observation LCB90 1.84%, t-stat 1.70, fold concentration 63.03%, and stress FAIL, so promotion stayed REJECTED.",
@@ -115,5 +122,28 @@
       "trade_count": 426
     },
     "run_log_reference": "2026-07-31T12:07:04.689309+00:00"
+  },
+  {
+    "candidate_id": "2fa797c7f17be92fa226e7528c36c854eaa4337f4cca5d4fdae0eb991390508a",
+    "code_hash": "b72005dac19a9e485a0e8fa8c7bd53c59923987908ab5a950d6a26398ebd398d",
+    "data_hash": "f59143b943bd10410ba3603361bb7a3955d9a2a2936dafb4f70bdc53127d80db",
+    "domain": "cash_carry",
+    "failed_gates": [
+      "observation",
+      "stress"
+    ],
+    "failed_hypothesis": "cash_and_carry_basis",
+    "failure_reason": "promotion status=REJECTED",
+    "falsified_date": "2026-07-31",
+    "metrics": {
+      "cagr": 0.0,
+      "fold_max_contribution": 0.0,
+      "mdd": 0.0,
+      "observation_lcb90": 0.0,
+      "sharpe": 0.0,
+      "stress_verdict": "PENDING",
+      "trade_count": 0
+    },
+    "run_log_reference": "(not logged)"
   }
 ]
