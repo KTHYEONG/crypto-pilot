@@ -2,10 +2,6 @@
 name = "quant-trading-system"
 version = "0.1.0"
 requires-python = ">=3.11"
-
-[tool.setuptools.packages.find]
-where = ["src"]
-
 dependencies = [
     "numpy>=2.0.0",
     "pandas>=2.2.0",
@@ -16,7 +12,20 @@ dependencies = [
     "tenacity>=8.5.0",
     "psutil>=6.0.0",
     "tqdm>=4.67.0",
+    "pydantic>=2.0.0",
+    "pydantic-settings>=2.0.0",
 ]
+
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["src*"]
+
+
+
 
 [tool.ruff]
 line-length = 120
@@ -91,9 +100,6 @@ exclude = [
 module = "tests.*"
 ignore_errors = true
 
-[[tool.mypy.overrides]]
-module = "scripts.*"
-ignore_errors = true
 
 
 
