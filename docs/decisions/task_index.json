@@ -1,6 +1,16 @@
 {
   "tasks": [
     {
+      "task_id": "TASK_INCREMENTAL_SRC_TESTS_REFACTOR",
+      "date": "2026-07-31",
+      "adr_id": "ADR_20260731_INCREMENTAL_SRC_TESTS_REFACTOR",
+      "domain": "execution",
+      "title": "Incremental source and test architecture refactor",
+      "why": "Flat layer modules and cross-layer imports made feature changes and test ownership difficult to locate.",
+      "resolution": "Reorganized canonical code into common, market_data, research, application, and behavior-aligned tests while retaining legacy import façades and CLI contracts.",
+      "impact": "Three backtest workflows and their stored performance semantics remain reproducible while task indexes and code maps become canonical-path based."
+    },
+    {
       "task_id": "TASK_BINANCE_MARGIN_BORROW_COLLECTION",
       "date": "2026-07-31",
       "adr_id": "ADR_20260731_BINANCE_MARGIN_BORROW_COLLECTION",
