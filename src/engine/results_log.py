@@ -9,11 +9,11 @@ from typing import TYPE_CHECKING
 
 import pandas as pd
 
-from src.core.types import CostModel, PortfolioSpec, StrategySpec
+from src.core.types import CarryCostModel, CashCarrySpec, CostModel, PortfolioSpec, StrategySpec
 from src.engine.backtest import BacktestResult
 
 if TYPE_CHECKING:
-    from src.validation.candidate_promotion import PromotionResult
+    from src.validation.candidate_promotion import CandidateIdentity, PromotionResult
     from src.validation.metrics import Metrics
     from src.validation.reliability_gate import FoldDistributionResult, ReliabilityGateResult
 
@@ -130,6 +130,59 @@ def record_portfolio_run(
             "stress_test": asdict(stress_gate),
         },
         "promotion": asdict(promotion) if promotion is not None else None,
+        "window": "observation+holdout" if holdout_gate is not None else "observation",
+    }
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    with log_path.open("a", encoding="utf-8") as f:
+        f.write(json.dumps(record, ensure_ascii=False) + "\n")
+    return record
+
+
+def record_cash_carry_run(
+    *,
+    symbol: str,
+    cash_carry_spec: CashCarrySpec,
+    costs: CarryCostModel,
+    result: BacktestResult,
+    metrics: Metrics,
+    start: str | None,
+    end: str | None,
+    initial_equity: float,
+    observation_gate: ReliabilityGateResult,
+    fold_distribution: FoldDistributionResult,
+    stress_gate: ReliabilityGateResult,
+    holdout_gate: ReliabilityGateResult | None = None,
+    promotion: PromotionResult | None = None,
+    candidate: CandidateIdentity | None = None,
+    log_path: Path = RUNS_LOG_PATH,
+) -> dict[str, object]:
+    """Append one cash-and-carry research run as a JSONL record.
+
+    Logs the frozen ``CashCarrySpec``/``CarryCostModel``, the total-ledger
+    ``Metrics``, the canonical reliability gates, the candidate identity, and
+    the git commit. Never overwrites prior rows.
+    """
+    git_sha, git_dirty = _git_head()
+    record: dict[str, object] = {
+        "ts": datetime.now(UTC).isoformat(),
+        "git_sha": git_sha,
+        "git_dirty": git_dirty,
+        "kind": "cash_carry",
+        "symbol": symbol,
+        "start": start,
+        "end": end,
+        "initial_equity": initial_equity,
+        "cash_carry_spec": asdict(cash_carry_spec),
+        "costs": asdict(costs),
+        "metrics": asdict(metrics),
+        "reliability": {
+            "observation": asdict(observation_gate),
+            "holdout": asdict(holdout_gate) if holdout_gate is not None else None,
+            "fold_distribution": asdict(fold_distribution),
+            "stress_test": asdict(stress_gate),
+        },
+        "promotion": asdict(promotion) if promotion is not None else None,
+        "candidate": asdict(candidate) if candidate is not None else None,
         "window": "observation+holdout" if holdout_gate is not None else "observation",
     }
     log_path.parent.mkdir(parents=True, exist_ok=True)
