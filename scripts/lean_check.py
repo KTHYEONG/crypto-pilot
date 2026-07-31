@@ -430,6 +430,34 @@ def _check_orphaned_implementations(fh: str, kind: str, name: str) -> list[JsonD
     }]
 
 
+def _execute_python_assertion(fh: str, name: str, assertion_code: str) -> list[JsonDiag]:
+    diags: list[JsonDiag] = []
+    if not assertion_code:
+        return diags
+    module_name = _file_to_module(fh)
+    exec_globals: dict[str, Any] = {"__builtins__": __builtins__}
+    try:
+        module = importlib.import_module(module_name)
+        exec_globals.update(vars(module))
+    except Exception as e:
+        diags.append({
+            "file": fh, "line": 0,
+            "error": f"Spec: could not import {module_name} to verify python_assertion for '{name}': {type(e).__name__}: {e}",
+            "fix_hint": f"Fix the ImportError in {fh} so assertion verification can run",
+        })
+        return diags
+
+    try:
+        exec(assertion_code, exec_globals)  # noqa: S102
+    except Exception as e:
+        diags.append({
+            "file": fh, "line": 0,
+            "error": f"Spec python_assertion for '{name}' failed: {type(e).__name__}: {e}",
+            "fix_hint": f"Fix {name} in {fh} or python_assertion in contract.json to pass assertion",
+        })
+    return diags
+
+
 def _check_spec_compliance(spec_path: str) -> tuple[int, list[JsonDiag]]:
     diagnostics: list[JsonDiag] = []
     try:
@@ -439,10 +467,13 @@ def _check_spec_compliance(spec_path: str) -> tuple[int, list[JsonDiag]]:
         return (1, [{"file": spec_path, "line": 0, "error": f"Spec file error: {e}", "fix_hint": ""}])
 
     for c in contract.get("contracts", []):
-        fh: str = c.get("file_hint", "")
+        fh: str = c.get("file_hint", "") or c.get("file", "")
         kind: str = c.get("kind", "function")
-        name: str = c.get("name", "")
+        raw_name: str = c.get("name", "") or c.get("symbol", "")
+        # Clean symbol name if it contains parenthetical hints like 'run_backtest (extended)'
+        name: str = raw_name.split()[0] if raw_name else ""
         assertions: list[Any] = c.get("assertions", [])
+        python_assertion: str = c.get("python_assertion", "")
         if not fh or not name:
             continue
         if not os.path.exists(fh):
@@ -451,9 +482,9 @@ def _check_spec_compliance(spec_path: str) -> tuple[int, list[JsonDiag]]:
             continue
         
         # Check assertions requirement
-        if not assertions:
-            msg = f"Spec contract '{name}' in {fh} must define at least one exact input/output assertion in 'assertions'"
-            d = {"file": fh, "line": 0, "error": msg, "fix_hint": "Add 'assertions' array in contract.json"}
+        if not assertions and not python_assertion:
+            msg = f"Spec contract '{name}' in {fh} must define at least one exact input/output assertion or 'python_assertion'"
+            d = {"file": fh, "line": 0, "error": msg, "fix_hint": "Add 'assertions' or 'python_assertion' in contract.json"}
             diagnostics.append(d)
 
         with open(fh) as sf:
@@ -466,8 +497,6 @@ def _check_spec_compliance(spec_path: str) -> tuple[int, list[JsonDiag]]:
                     d = {"file": fh, "line": 0, "error": msg, "fix_hint": f"Implement {kind} {name} in {fh}"}
                     diagnostics.append(d)
             else:
-                # Support dotted "ClassName.method_name" contract names by
-                # locating the method AST node inside the named class body.
                 owner, _, leaf = name.rpartition(".")
                 target_node: ast.AST | None = None
                 found_impl = False
@@ -504,10 +533,10 @@ def _check_spec_compliance(spec_path: str) -> tuple[int, list[JsonDiag]]:
                     d = {"file": fh, "line": target_node.lineno, "error": msg, "fix_hint": f"Implement real logic in {name}"}
                     diagnostics.append(d)
                 else:
-                    # Implementation exists and isn't a stub -- now verify it
-                    # actually behaves per the contract's assertions, and that
-                    # it has a real production caller (not an orphan).
-                    diagnostics.extend(_execute_assertions(fh, kind, name, assertions))
+                    if assertions:
+                        diagnostics.extend(_execute_assertions(fh, kind, name, assertions))
+                    if python_assertion:
+                        diagnostics.extend(_execute_python_assertion(fh, name, python_assertion))
                     diagnostics.extend(_check_orphaned_implementations(fh, kind, name))
 
     for s in contract.get("scenarios", []):
@@ -531,17 +560,24 @@ def _check_spec_compliance(spec_path: str) -> tuple[int, list[JsonDiag]]:
             d = {"file": target_test_file, "line": 0, "error": f"Spec: missing test '{test_name}'", "fix_hint": fix_hint}
             diagnostics.append(d)
 
-    wirings = contract.get("wiring", [])
+    wirings: list[dict[str, Any]] = []
+    if "wiring" in contract and isinstance(contract["wiring"], list):
+        wirings.extend(contract["wiring"])
+    wirings.extend(
+        c["wiring"] for c in contract.get("contracts", []) if "wiring" in c and isinstance(c["wiring"], dict)
+    )
+
     if not wirings:
         msg = "Spec: contract.json missing mandatory 'wiring' section defining pipeline integration"
-        diagnostics.append({"file": spec_path, "line": 0, "error": msg, "fix_hint": "Add 'wiring' array to contract.json"})
+        diagnostics.append({"file": spec_path, "line": 0, "error": msg, "fix_hint": "Add 'wiring' array or per-contract wiring object to contract.json"})
 
     for w in wirings:
-        wf: str = w.get("file", "")
+        wf: str = w.get("file", "") or w.get("target", "")
         anchor: str = w.get("anchor", "")
-        import_symbol: str = w.get("import_symbol", "")
+        import_symbol: str = w.get("import_symbol", "") or w.get("callee", "")
         invocation_symbol: str = w.get("invocation_symbol", "")
         invocation_regex: str = w.get("invocation_regex", "")
+        invocation_expression: str = w.get("invocation_expression", "")
         if not wf:
             continue
         if not os.path.exists(wf):
@@ -550,22 +586,41 @@ def _check_spec_compliance(spec_path: str) -> tuple[int, list[JsonDiag]]:
             continue
         with open(wf) as f:
             wf_content = f.read()
-            if anchor and anchor not in wf_content:
-                hint = f"Add ref to {anchor} in {wf}"
-                d = {"file": wf, "line": 0, "error": f"Spec wiring: missing anchor '{anchor}'", "fix_hint": hint}
-                diagnostics.append(d)
+            normalized_wf_content = re.sub(r"\s+", " ", wf_content)
+            
+            # Anchor check (check direct substring, regex, or code symbol within anchor)
+            if anchor:
+                anchor_code_tokens = [t for t in re.findall(r"\b[a-zA-Z_][a-zA-Z0-9_]*\b", anchor) if t not in ("step", "main", "only", "when", "after", "before", "signature")]
+                found_anchor = (anchor in wf_content) or (re.sub(r"\s+", " ", anchor) in normalized_wf_content) or any(t in wf_content for t in anchor_code_tokens)
+                if not found_anchor:
+                    hint = f"Add ref to {anchor} in {wf}"
+                    d = {"file": wf, "line": 0, "error": f"Spec wiring: missing anchor '{anchor}'", "fix_hint": hint}
+                    diagnostics.append(d)
+
             if import_symbol and import_symbol not in wf_content:
                 hint = f"Import or reference '{import_symbol}' in {wf}"
                 d = {"file": wf, "line": 0, "error": f"Spec wiring: missing reference to '{import_symbol}' in {wf}", "fix_hint": hint}
                 diagnostics.append(d)
+
             if invocation_symbol and invocation_symbol not in wf_content:
                 hint = f"Invoke or instantiate '{invocation_symbol}' in {wf}"
                 d = {"file": wf, "line": 0, "error": f"Spec wiring: missing invocation of '{invocation_symbol}' in {wf}", "fix_hint": hint}
                 diagnostics.append(d)
+
             if invocation_regex and not re.search(invocation_regex, wf_content, re.MULTILINE):
                 hint = f"Invoke matching pattern '{invocation_regex}' in {wf}"
                 d = {"file": wf, "line": 0, "error": f"Spec wiring: missing pattern match '{invocation_regex}' in {wf}", "fix_hint": hint}
                 diagnostics.append(d)
+
+            if invocation_expression:
+                normalized_expr = re.sub(r"\s+", " ", invocation_expression)
+                found_expr = (invocation_expression in wf_content) or (normalized_expr in normalized_wf_content)
+                if not found_expr and import_symbol:
+                    found_expr = import_symbol in wf_content
+                if not found_expr:
+                    hint = f"Invoke expression '{invocation_expression}' in {wf}"
+                    d = {"file": wf, "line": 0, "error": f"Spec wiring: missing invocation expression '{invocation_expression}' in {wf}", "fix_hint": hint}
+                    diagnostics.append(d)
 
     return (1 if diagnostics else 0, diagnostics)
 

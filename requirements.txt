@@ -1,49 +1,22 @@
-# Exchange & API
+# Exchange & Data Processing
 ccxt>=4.5.0
-cryptography>=42.0.0
 python-dotenv>=1.0.0
-
-# Data Processing & Analysis
 numpy>=2.0.0
 pandas>=2.2.0
 scipy>=1.13.0
 pyarrow>=15.0.0
-openpyxl>=3.1.2
-numba>=0.60.0
-TA-Lib>=0.4.32
 
-# Machine Learning & Alpha Mining
-scikit-learn>=1.6.0
-lightgbm>=4.5.0
-gplearn>=0.4.3
-
-# Optimization
-optuna>=4.1.0
-cmaes>=0.11.0
-
-# Statistical Modeling
-statsmodels>=0.14.0
-arch>=7.0.0
-
-# Database & Storage
-SQLAlchemy>=2.0.0
-pymysql>=1.1.0
-
-# Visualization
-matplotlib>=3.9.0
-plotly>=6.1.0
-
-# Utilities
+# Core Utilities
 tenacity>=8.5.0
 psutil>=6.0.0
 tqdm>=4.67.0
-filelock>=3.16.0
-joblib>=1.4.0
 
-# Testing
+# Config & Validation
+pydantic>=2.0.0
+pydantic-settings>=2.0.0
+
+# Testing & Dev Tools
 pytest>=8.0.0
-jax
-jaxlib
-dynamax
-optax
-tensorflow-probability
+pytest-cov>=6.0.0
+mypy>=1.10.0
+ruff>=0.5.0
