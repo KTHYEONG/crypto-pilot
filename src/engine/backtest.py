@@ -7,6 +7,7 @@ import pandas as pd
 
 from src.core.logging_setup import setup_logger
 from src.core.types import CostModel, StrategySpec
+from src.data.loader import DataIntegrityError
 
 _logger = setup_logger("Backtest")
 
@@ -20,6 +21,7 @@ class TradeRecord:
     reason: str
     pnl: float
     return_pct: float
+    funding_pnl: float = 0.0
 
 
 @dataclass
@@ -52,17 +54,65 @@ def calculate_position_size(
     return min(risk_qty, leverage_qty)
 
 
+def _align_funding_rates(
+    funding_rates: pd.Series,
+    bar_index: pd.DatetimeIndex,
+) -> np.ndarray:
+    """Map a published-funding series onto per-bar accrued rates.
+
+    Returns an array aligned to ``bar_index`` where each entry is the sum of
+    funding rates published inside that bar's window. Raises
+    ``DataIntegrityError`` for non-finite rates, a non-monotonic index, or
+    timestamps outside the bar window: missing funding is never a zero-cost
+    assumption.
+    """
+    if not isinstance(bar_index, pd.DatetimeIndex) or len(bar_index) < 2:
+        raise DataIntegrityError("bar index must be a DatetimeIndex of length >= 2")
+    ts = pd.DatetimeIndex(pd.to_datetime(funding_rates.index, utc=True, errors="coerce"))
+    if ts.hasnans:
+        raise DataIntegrityError("funding_rates index must contain datetimes")
+    rates = pd.to_numeric(funding_rates, errors="coerce").to_numpy(dtype=np.float64)
+    if not np.isfinite(rates).all():
+        raise DataIntegrityError("funding_rates must be finite")
+    if not ts.is_monotonic_increasing:
+        raise DataIntegrityError("funding_rates must be monotonic in time")
+
+    series = pd.Series(rates, index=ts)
+    series = series[~series.index.duplicated(keep="last")].sort_index()
+
+    bar_period = bar_index[1] - bar_index[0]
+    window_end = bar_index[-1] + bar_period
+    inside = (series.index >= bar_index[0]) & (series.index < window_end)
+    if not inside.all():
+        raise DataIntegrityError(
+            "funding_rates timestamps are not aligned with the bar window"
+        )
+
+    pos = bar_index.searchsorted(series.index, side="right") - 1
+    bar_funding = np.zeros(len(bar_index), dtype=np.float64)
+    np.add.at(bar_funding, pos, series.to_numpy(dtype=np.float64))
+    return bar_funding
+
+
 def run_backtest(
     df: pd.DataFrame,
     spec: StrategySpec,
     costs: CostModel,
     initial_equity: float = 10_000.0,
     signal_delay_bars: int = 0,
+    funding_rates: pd.Series | None = None,
 ) -> BacktestResult:
     from src.strategy.donchian import generate_signals
 
     if signal_delay_bars < 0:
         raise ValueError(f"signal_delay_bars must be >= 0, got {signal_delay_bars}")
+    if spec.min_taker_buy_ratio is not None and (
+        funding_rates is None or len(funding_rates) == 0
+    ):
+        raise DataIntegrityError(
+            "candidate mode (min_taker_buy_ratio set) requires a non-empty, "
+            "aligned funding_rates series"
+        )
 
     feat = generate_signals(df, spec)
     if signal_delay_bars > 0:
@@ -71,6 +121,12 @@ def run_backtest(
 
     warmup = max(spec.ema_period, spec.entry_period, spec.atr_period) + 1 + signal_delay_bars
     atr_arr = feat["atr"].to_numpy(dtype=np.float64)
+
+    bar_funding = (
+        _align_funding_rates(funding_rates, feat.index)
+        if funding_rates is not None
+        else np.zeros(len(feat), dtype=np.float64)
+    )
 
     equity_arr = np.full(len(feat), np.nan, dtype=np.float64)
     cash = initial_equity
@@ -81,6 +137,7 @@ def run_backtest(
     pending_entry = False
     pending_exit = False
     exited_this_bar = False
+    trade_funding_pnl = 0.0
     trades: list[TradeRecord] = []
 
     for t in range(len(feat)):
@@ -92,6 +149,15 @@ def run_backtest(
             pending_entry = bool(row["entry_signal"])
             pending_exit = False
             continue
+
+        # 0. funding accrual at this bar's published timestamp (bar-open aligned).
+        # A long held into the timestamp pays notional x rate for positive funding
+        # and is credited for negative funding. Positions opened later in this same
+        # bar are not charged for a timestamp that precedes their entry.
+        if position_qty > 0 and bar_funding[t] != 0.0:
+            funding_pnl = -position_qty * o * bar_funding[t]
+            cash += funding_pnl
+            trade_funding_pnl += funding_pnl
 
         # 1. stop check (intrabar)
         if position_qty > 0 and l_ <= stop_price:
@@ -110,11 +176,13 @@ def run_backtest(
             exit_fee = costs.fee_rate * abs(position_qty * exit_price)
             cash += position_qty * exit_price - exit_fee
             pnl -= exit_fee
+            pnl += trade_funding_pnl
             trades.append(TradeRecord(
                 entry_bar=entry_bar_idx, entry_price=entry_price,
                 exit_price=exit_price, qty=position_qty,
                 reason=reason, pnl=pnl,
                 return_pct=pnl / (cash - pnl) if cash != pnl else 0.0,
+                funding_pnl=trade_funding_pnl,
             ))
             _logger.info(
                 "bar=%d reason=%s entry=%.4f exit=%.4f qty=%.6f pnl=%.4f",
@@ -150,6 +218,7 @@ def run_backtest(
                 entry_price = fill
                 stop_price = fill - stop_distance
                 entry_bar_idx = t
+                trade_funding_pnl = 0.0
 
                 # 7b. entry-bar stop check
                 if l_ <= stop_price:
@@ -158,11 +227,13 @@ def run_backtest(
                     exit_fee = costs.fee_rate * abs(position_qty * exit_price)
                     cash += position_qty * exit_price - exit_fee
                     pnl -= exit_fee
+                    pnl += trade_funding_pnl
                     trades.append(TradeRecord(
                         entry_bar=entry_bar_idx, entry_price=entry_price,
                         exit_price=exit_price, qty=qty,
                         reason="stop_entrybar", pnl=pnl,
                         return_pct=pnl / (cash - pnl) if cash != pnl else 0.0,
+                        funding_pnl=trade_funding_pnl,
                     ))
                     _logger.info(
                         "bar=%d reason=stop_entrybar entry=%.4f exit=%.4f qty=%.6f pnl=%.4f",
@@ -200,8 +271,10 @@ def run_backtest(
         "reason": t.reason,
         "pnl": t.pnl,
         "return_pct": t.return_pct,
+        "funding_pnl": t.funding_pnl,
     } for t in trades]) if trades else pd.DataFrame(columns=[
-        "entry_bar", "entry_price", "exit_price", "qty", "reason", "pnl", "return_pct",
+        "entry_bar", "entry_price", "exit_price", "qty", "reason", "pnl",
+        "return_pct", "funding_pnl",
     ])
 
     return BacktestResult(equity=equity_series, trades=trades_df, signals=feat)
