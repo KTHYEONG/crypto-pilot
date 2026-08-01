@@ -742,20 +742,20 @@ def main() -> None:
             sys.exit(1)
         print("PASS | Spec compliance verified")
 
-    # 1. Co-modification Mapping Verification (scripts/ excluded)
+    # 1. Co-modification Mapping Verification (tools/ excluded)
     test_files = _find_test_files(py_files)
     for pf in py_files:
-        if not pf.startswith("src/") or pf.endswith("__init__.py") or pf.startswith("scripts/"):
+        if not pf.startswith("src/") or pf.endswith("__init__.py") or pf.startswith("tools/"):
             continue
         if not _source_has_matching_test(pf, test_files):
             d = {"file": pf, "line": 0, "error": f"No matching test for {pf}", "fix_hint": ""}
             _fail_exit("co-modification", f"FAIL | {pf}: test file missing", d)
 
-    # 2. print() Detection (scripts/ excluded)
+    # 2. print() Detection (tools/ excluded)
     if not args.skip_lint:
         print_re = re.compile(r"(?<!#)\bprint\s*\(")
         for pf in py_files:
-            if pf.startswith("scripts/"):
+            if pf.startswith("tools/"):
                 continue
             with open(pf, encoding="utf-8") as f:
                 for idx, line in enumerate(f, 1):

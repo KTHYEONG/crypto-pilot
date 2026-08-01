@@ -12,7 +12,7 @@ Fast-execution model audit protocol (GPT-5.6 Luna, Sonnet 5, etc.). Independent 
 `/check` is an audit pass, NOT an architectural repair loop.
 Execute audit command:
 ```bash
-uv run python scripts/lean_check.py --files <modified .py files> --spec <contract.json> --skip-lint
+uv run python tools/agent_skills/lean_check.py --files <modified .py files> --spec <contract.json> --skip-lint
 ```
 
 ## Deterministic Audit Pipeline

@@ -1,9 +1,6 @@
 {
   "src/application/baseline_evaluation.py": {
-    "testing": [
-      "tests/unit/application/test_baseline_evaluation.py",
-      "tests/contract/test_legacy_imports.py"
-    ]
+    "testing": "tests/unit/application/test_baseline_evaluation.py"
   },
   "src/application/cash_carry_evaluation.py": {
     "testing": "tests/unit/application/test_cash_carry_evaluation.py"
@@ -14,12 +11,16 @@
   "src/application/portfolio_evaluation.py": {
     "testing": "tests/unit/application/test_portfolio_evaluation.py"
   },
+  "src/application/sleeve_blend_evaluation.py": {
+    "testing": "tests/unit/application/test_sleeve_blend_evaluation.py"
+  },
   "src/cli/collect_data.py": {
-    "testing": "tests/contract/test_cli_surface.py"
+    "testing": "tests/unit/cli/test_collect_data.py"
   },
   "src/cli/compare_runs.py": {
     "testing": "tests/contract/test_cli_surface.py"
   },
+  "src/cli/register_directional_candidate.py": {},
   "src/cli/run_backtest.py": {
     "testing": [
       "tests/contract/test_cli_surface.py",
@@ -39,6 +40,9 @@
       "tests/integration/cli/test_portfolio_promotion.py"
     ]
   },
+  "src/cli/run_sleeve_blend_backtest.py": {
+    "testing": "tests/unit/cli/test_run_sleeve_blend_backtest.py"
+  },
   "src/common/config.py": {
     "testing": "tests/unit/common/test_config.py"
   },
@@ -53,8 +57,11 @@
       "tests/unit/market_data/services/test_spot_collection.py",
       "tests/unit/market_data/storage/test_loaders.py",
       "tests/unit/research/baseline/test_backtest.py",
+      "tests/unit/research/baseline/test_directional_funding_signal.py",
       "tests/unit/research/cash_carry/test_market_data.py",
-      "tests/unit/research/portfolio/test_backtest.py"
+      "tests/unit/research/portfolio/test_backtest.py",
+      "tests/unit/research/sleeve_blend/test_backtest.py",
+      "tests/unit/research/sleeve_blend/test_directional_backtest.py"
     ]
   },
   "src/common/logging.py": {
@@ -145,10 +152,7 @@
     "testing": "tests/unit/market_data/storage/test_ohlcv.py"
   },
   "src/research/baseline/backtest.py": {
-    "testing": [
-      "tests/unit/research/baseline/test_backtest.py",
-      "tests/integration/workflows/test_baseline.py"
-    ]
+    "testing": "tests/unit/research/baseline/test_backtest.py"
   },
   "src/research/baseline/signal.py": {
     "testing": "tests/unit/research/baseline/test_signal.py"
@@ -210,6 +214,12 @@
   "src/research/provenance/results.py": {
     "testing": "tests/unit/research/provenance/test_results.py"
   },
+  "src/research/sleeve_blend/backtest.py": {
+    "testing": "tests/unit/research/sleeve_blend/test_backtest.py"
+  },
+  "src/research/sleeve_blend/contracts.py": {
+    "testing": "tests/unit/research/sleeve_blend/test_contracts.py"
+  },
   "src/strategy/cash_carry.py": {
     "testing": "tests/contract/test_legacy_imports.py"
   },
@@ -230,8 +240,5 @@
   },
   "src/validation/research_memory.py": {
     "testing": "tests/contract/test_legacy_imports.py"
-  },
-  "src/research/sleeve_blend/backtest.py": {
-    "testing": "tests/unit/research/sleeve_blend/test_backtest.py"
   }
 }

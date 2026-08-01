@@ -11,7 +11,7 @@ Automated task synchronization, ADR logging, Smart JSON index/Anti-pattern regis
 
 Execute task sync via script (keep `--why`, `--what`, `--impact` strictly to 1 concise sentence each):
 ```bash
-uv run python scripts/sync_task.py --task TASK_ID --title "<Title>" --why "<Context>" --what "<Resolution>" --impact "<Impact>" --source src/x.py --domain <signal/risk/execution> [--failed-hypothesis "<Hypothesis>" --failure-reason "<Reason>"]
+uv run python tools/agent_skills/sync_task.py --task TASK_ID --title "<Title>" --why "<Context>" --what "<Resolution>" --impact "<Impact>" --source src/x.py --domain <signal/risk/execution> [--failed-hypothesis "<Hypothesis>" --failure-reason "<Reason>"]
 ```
 
 - **Spec Cleanup Execution Rule**: `docs/specs/` files MUST be automatically removed by default. Do NOT pass `--keep-all-specs` unless explicitly requested by the user in prompt.

@@ -27,7 +27,7 @@ This document defines the strict logging rules and tag-based format requirements
 - **Log Isolation Strategy**:
   - **Persistent System Logs**: Main operational/service logs MUST be written to `logs/` root (e.g., `logs/sys.log`, `logs/algo.log`).
   - **Transient / Diagnostic Logs**: All temporary scripts, one-off verification outputs, scratch runs, and test logs MUST be written to `logs/scratch/` (e.g., `logs/scratch/scratch_verify.log`).
-- **Transient Cleanup Directive**: Logs under `logs/scratch/` are considered ephemeral. The AI must purge old diagnostic logs in `logs/scratch/` or run `python scripts/clean_logs.py` when concluding diagnostic tasks.
+- **Transient Cleanup Directive**: Logs under `logs/scratch/` are considered ephemeral. The AI must purge old diagnostic logs in `logs/scratch/` or run `python tools/devops/clean_logs.py` when concluding diagnostic tasks.
 
 ---
 
