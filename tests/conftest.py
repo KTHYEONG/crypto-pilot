@@ -7,6 +7,7 @@ from src.research.contracts import CostModel, StrategySpec
 pytest_plugins = [
     "tests.fixtures.bars",
     "tests.fixtures.cash_carry",
+    "tests.fixtures.catalog",
     "tests.fixtures.market_data",
 ]
 

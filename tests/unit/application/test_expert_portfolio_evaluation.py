@@ -86,7 +86,27 @@ def _patch_backend(monkeypatch: pytest.MonkeyPatch, spec: ExpertPortfolioSpec):
             stress_delay.append(signal_delay_bars)
         return result
 
-    monkeypatch.setattr(f"{_APPLICATION_MODULE}.load_expert_library", lambda library_id: spec)
+    from src.research.expert_portfolio.registry import RegisteredExpertLibrary
+    from src.research.provenance.registration import RegistrationRecord
+
+    def fake_resolve(_library_id, *, catalog=None, ledger_path=None):
+        return RegisteredExpertLibrary(
+            library_id="lib-a",
+            registration_id="reg-1",
+            spec=spec,
+            registration=RegistrationRecord(
+                registration_id="reg-1",
+                library_id="lib-a",
+                status="ACTIVE",
+                fingerprint={"experts": []},
+                registered_at="2026-01-01T00:00:00+00:00",
+                record={"registration_id": "reg-1"},
+            ),
+        )
+
+    monkeypatch.setattr(
+        f"{_APPLICATION_MODULE}.resolve_registered_library", fake_resolve,
+    )
     monkeypatch.setattr(
         f"{_APPLICATION_MODULE}.build_component_panel",
         lambda library, start, end, costs, *, signal_delay_bars=0: (panel, trades),
@@ -109,11 +129,11 @@ def test_fold_failure_remains_rejected(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_unregistered_library_raises(monkeypatch: pytest.MonkeyPatch) -> None:
-    def reject(_library_id: str) -> ExpertPortfolioSpec:
-        raise ValueError("library 'nope' is not registered")
+    def reject(_library_id: str, *, catalog=None, ledger_path=None) -> ExpertPortfolioSpec:
+        raise ValueError("library 'nope' is not in the catalog")
 
-    monkeypatch.setattr(f"{_APPLICATION_MODULE}.load_expert_library", reject)
-    with pytest.raises(ValueError, match="not registered"):
+    monkeypatch.setattr(f"{_APPLICATION_MODULE}.resolve_registered_library", reject)
+    with pytest.raises(ValueError, match="not in the catalog"):
         run_expert_portfolio_evaluation(
             ExpertPortfolioEvaluationRequest(library_id="nope", log_run=False),
         )
@@ -195,7 +215,7 @@ def test_run_component_dispatch_single_symbol_runner(monkeypatch: pytest.MonkeyP
         lambda path, start=None, end=None: frame,
     )
     monkeypatch.setattr(
-        f"{_APPLICATION_MODULE}.run_backtest",
+        "src.research.expert_portfolio.runners.run_backtest",
         lambda df, spec, costs, signal_delay_bars=0: calls.append((df, spec.symbol, costs, signal_delay_bars)) or expected,
     )
     definition = ExpertDefinition("e1", "src", "f1", ("BTCUSDT",), "run_backtest", "hash")
@@ -224,7 +244,7 @@ def test_run_component_dispatch_directional_runner(monkeypatch: pytest.MonkeyPat
     )
     monkeypatch.setattr(f"{_APPLICATION_MODULE}.load_funding_rates", lambda path: funding)
     monkeypatch.setattr(
-        f"{_APPLICATION_MODULE}.run_directional_backtest",
+        "src.research.expert_portfolio.runners.run_directional_backtest",
         lambda df, spec, costs, rates, signal_delay_bars=0: calls.append((df, spec.symbol, rates)) or expected,
     )
     definition = ExpertDefinition(
@@ -243,7 +263,7 @@ def test_run_component_rejects_unsupported_runner() -> None:
     from src.research.expert_portfolio.contracts import ExpertDefinition
 
     definition = ExpertDefinition(
-        "e1", "src", "f1", ("A", "B"), "run_pair_residual", "hash",
+        "e1", "src", "f1", ("A",), "run_pair_residual", "hash",
     )
     with pytest.raises(ValueError, match="not registered"):
         _run_component(definition, None, None, CostModel(), 0)
