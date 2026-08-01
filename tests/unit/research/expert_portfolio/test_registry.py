@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 
 from src.research.expert_portfolio.catalog import ExpertLibraryCatalog
-from src.research.expert_portfolio.contracts import ExpertPortfolioSpec
+from src.research.expert_portfolio.models import ExpertPortfolioSpec
 from src.research.expert_portfolio.registry import (
     FORBIDDEN_RETURN_SOURCES,
     is_registered_library,
