@@ -10,7 +10,7 @@ from src.research.expert_portfolio.catalog import (
     build_technical_price_v1_blueprint,
     default_catalog,
 )
-from src.research.expert_portfolio.contracts import ExpertDefinition
+from src.research.expert_portfolio.models import ExpertDefinition
 from src.research.provenance.ledger import (
     append_event,
     build_evaluation_event,
@@ -145,10 +145,10 @@ def test_contextual_library_promotion_uses_only_composite_master_ledger(
     # reports remain recorded admission diagnostics and can never act as
     # independent promotion gates, so a failing fold on the routed master ledger
     # keeps the library REJECTED even though per-expert evidence is HOLDOUT_PASS.
-    from src.application.expert_portfolio_evaluation import run_expert_portfolio_evaluation
+    from src.application.library_evaluation import run_expert_portfolio_evaluation
     from src.research.baseline.backtest import BacktestResult
     from src.research.expert_portfolio.backtest import ExpertPortfolioBacktestResult
-    from src.research.expert_portfolio.contracts import (
+    from src.research.expert_portfolio.models import (
         ContextualRouterSpec,
         ExpertPortfolioEvaluationRequest,
         ExpertPortfolioSpec,
@@ -234,19 +234,19 @@ def test_contextual_library_promotion_uses_only_composite_master_ledger(
         return result
 
     monkeypatch.setattr(
-        "src.application.expert_portfolio_evaluation.resolve_registered_library",
+        "src.application.library_evaluation.resolve_registered_library",
         fake_resolve,
     )
     monkeypatch.setattr(
-        "src.application.expert_portfolio_evaluation.build_component_panel",
+        "src.application.library_evaluation.build_component_panel",
         lambda spec, start, end, costs, *, signal_delay_bars=0: (panel, trades),
     )
     monkeypatch.setattr(
-        "src.application.expert_portfolio_evaluation.build_library_decision_context",
+        "src.application.library_evaluation.build_library_decision_context",
         lambda spec, index, start, end: context,
     )
     monkeypatch.setattr(
-        "src.application.expert_portfolio_evaluation.run_expert_portfolio", fake_run,
+        "src.application.library_evaluation.run_expert_portfolio", fake_run,
     )
 
     report = run_expert_portfolio_evaluation(
