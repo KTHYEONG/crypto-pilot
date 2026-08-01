@@ -1,6 +1,16 @@
 {
   "tasks": [
     {
+      "task_id": "TASK_DONCHIAN_EXTENDED_HISTORY_BASELINE",
+      "date": "2026-08-01",
+      "adr_id": "ADR_20260801_DONCHIAN_EXTENDED_HISTORY_BASELINE",
+      "domain": "signal",
+      "title": "Donchian 과거 데이터 확장 및 신규 전략/다심볼 알파 탐색 마감",
+      "why": "BTCUSDT Donchian이 fold 집중도(2023년 76~82% 독점) 및 LCB90 hurdle 미달로 REJECTED; 다심볼/신규전략이 대안인지 실측 필요",
+      "resolution": "BTC+8알트 과거데이터 실백필(2019/2020~), 13심볼 재검증(BTC 최선 확인), mean-reversion/횡단면모멘텀 파일럿 반증, taker-flow 재검증(불충분), collect_funding CLI 서브커맨드 신설. fold_max 0.7585→0.4599, stress PASS 전환",
+      "impact": "BTCUSDT REJECTED 유지되나 gate 품질 대폭 개선(observation FAIL만 잔존, hurdle 정책은 사용자 결정으로 유지); 다심볼·평균회귀·횡단면모멘텀 경로는 반증되어 재탐색 불필요; 다음 가설=funding-rate 레짐 확인 필터"
+    },
+    {
       "task_id": "TASK_CARRY_SIGNAL_HYSTERESIS",
       "date": "2026-07-31",
       "adr_id": "ADR_20260731_CARRY_SIGNAL_HYSTERESIS",

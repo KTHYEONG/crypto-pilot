@@ -145,7 +145,10 @@
     "testing": "tests/unit/market_data/storage/test_ohlcv.py"
   },
   "src/research/baseline/backtest.py": {
-    "testing": "tests/unit/research/baseline/test_backtest.py"
+    "testing": [
+      "tests/unit/research/baseline/test_backtest.py",
+      "tests/integration/workflows/test_baseline.py"
+    ]
   },
   "src/research/baseline/signal.py": {
     "testing": "tests/unit/research/baseline/test_signal.py"
