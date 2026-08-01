@@ -32,6 +32,18 @@ def collect_funding(symbol: str, start: str, end: str) -> None:
     _logger.info("Funding collection complete for %s (through %s)", symbol, end)
 
 
+def collect_metrics(symbol: str, start: str, end: str) -> None:
+    """Collect one symbol's daily futures metrics (open interest) into the canonical lake.
+
+    Collects exactly one requested symbol; an orchestration caller must report
+    each unavailable symbol explicitly rather than silently reducing the fixed
+    universe.
+    """
+    collector = DataCollector()
+    collector.ensure_metrics_data(symbol, start, end)
+    _logger.info("Metrics collection complete for %s (through %s)", symbol, end)
+
+
 def collect_spot_ohlcv(symbol: str, timeframe: str, start: str, end: str) -> None:
     """Incrementally collect spot OHLCV and persist it to the canonical spot lake."""
     SpotDataCollector().ensure_spot_ohlcv(symbol, timeframe, start, end)
