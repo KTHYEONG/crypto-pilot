@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from src.application import collection
+from src.application.data import collection
 
 
 def test_spot_ohlcv_command_wires_collector(monkeypatch) -> None:

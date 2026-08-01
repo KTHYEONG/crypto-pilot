@@ -5,7 +5,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from src.application.expert_evaluation import run_technical_expert_evaluation
+from src.application.research.technical_experts.evaluation import run_technical_expert_evaluation
 from src.research.contracts import TechnicalExpertEvaluationRequest
 from src.research.evaluation.promotion import PromotionResult
 from src.research.expert_portfolio.catalog import default_catalog
@@ -41,11 +41,11 @@ def test_rejected_candidate_is_not_registered(
     funding = pd.Series(0.0, index=frame.index, dtype=float)
 
     monkeypatch.setattr(
-        "src.application.expert_evaluation._load_technical_market_data",
+        "src.application.research.technical_experts.evaluation._load_technical_market_data",
         lambda symbol, start, end: (frame, funding),
     )
     monkeypatch.setattr(
-        "src.application.expert_evaluation.technical_data_hashes",
+        "src.application.research.technical_experts.evaluation.technical_data_hashes",
         lambda symbol: {"perp_ohlcv": "a" * 64, "funding": "b" * 64},
     )
     request = TechnicalExpertEvaluationRequest(
@@ -72,7 +72,7 @@ def test_technical_expert_missing_data_returns_pending(monkeypatch) -> None:
         raise DataIntegrityError("bars data missing for BTCUSDT")
 
     monkeypatch.setattr(
-        "src.application.expert_evaluation._load_technical_market_data",
+        "src.application.research.technical_experts.evaluation._load_technical_market_data",
         _missing,
     )
     report = run_technical_expert_evaluation(
@@ -94,19 +94,19 @@ def test_technical_expert_equity_exhaustion_returns_pending(monkeypatch) -> None
     frame = _two_year_frame()
     funding = pd.Series(0.0, index=frame.index, dtype=float)
     monkeypatch.setattr(
-        "src.application.expert_evaluation._load_technical_market_data",
+        "src.application.research.technical_experts.evaluation._load_technical_market_data",
         lambda symbol, start, end: (frame, funding),
     )
     monkeypatch.setattr(
-        "src.application.expert_evaluation.technical_data_hashes",
+        "src.application.research.technical_experts.evaluation.technical_data_hashes",
         lambda symbol: {"perp_ohlcv": "a" * 64, "funding": "b" * 64},
     )
     monkeypatch.setattr(
-        "src.application.expert_evaluation.compute_code_hash",
+        "src.application.research.technical_experts.evaluation.compute_code_hash",
         lambda *args, **kwargs: "c" * 64,
     )
     monkeypatch.setattr(
-        "src.application.expert_evaluation._run_evaluation",
+        "src.application.research.technical_experts.evaluation._run_evaluation",
         lambda *args, **kwargs: (_ for _ in ()).throw(DataIntegrityError("equity exhausted")),
     )
 
@@ -145,7 +145,7 @@ def test_technical_expert_unknown_candidate_rejected_before_running(monkeypatch)
         raise AssertionError("data loading must not run for an unknown candidate")
 
     monkeypatch.setattr(
-        "src.application.expert_evaluation._load_technical_market_data",
+        "src.application.research.technical_experts.evaluation._load_technical_market_data",
         _missing,
     )
     with pytest.raises(ValueError, match="unknown or retired"):
