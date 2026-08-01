@@ -6,11 +6,11 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from src.application.sleeve_blend_evaluation import run_sleeve_blend_evaluation
+from src.application.research.sleeve_blend.evaluation import run_sleeve_blend_evaluation
 from src.research.baseline.backtest import BacktestResult
 from src.research.contracts import SleeveBlendEvaluationRequest
 
-_APPLICATION_MODULE = "src.application.sleeve_blend_evaluation"
+_APPLICATION_MODULE = "src.application.research.sleeve_blend.evaluation"
 _BACKTEST_MODULE = "src.research.sleeve_blend.fixed"
 
 

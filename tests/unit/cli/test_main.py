@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from src.application import collection
+from src.application.data import collection
 from src.cli.main import build_root_parser, main
 
 

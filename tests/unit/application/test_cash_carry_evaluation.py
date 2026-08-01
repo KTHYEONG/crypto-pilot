@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 
-from src.application.cash_carry_evaluation import run_cash_carry_evaluation
+from src.application.research.cash_carry.evaluation import run_cash_carry_evaluation
 from src.research.cash_carry.backtest import run_cash_carry_backtest
 from src.research.contracts import CashCarryEvaluationRequest
 from src.research.evaluation.promotion import PromotionResult
@@ -26,10 +26,10 @@ def test_cash_carry_evaluation_preserves_ledger_and_provenance(
     """
     data = _two_year_carry_data(make_carry_data)
 
-    monkeypatch.setattr("src.application.cash_carry_evaluation.load_carry_market_data",
+    monkeypatch.setattr("src.application.research.cash_carry.evaluation.load_carry_market_data",
                         lambda symbol, start, end: data)
     monkeypatch.setattr(
-        "src.application.cash_carry_evaluation.cash_carry_data_hashes",
+        "src.application.research.cash_carry.evaluation.cash_carry_data_hashes",
         lambda symbol: {
             "spot_ohlcv": "a" * 64,
             "perp_ohlcv": "b" * 64,
@@ -38,7 +38,7 @@ def test_cash_carry_evaluation_preserves_ledger_and_provenance(
         },
     )
     monkeypatch.setattr(
-        "src.application.cash_carry_evaluation.compute_code_hash",
+        "src.application.research.cash_carry.evaluation.compute_code_hash",
         lambda: "e" * 64,
     )
     request = CashCarryEvaluationRequest(
@@ -68,7 +68,7 @@ def test_cash_carry_evaluation_missing_data_returns_pending(make_carry_data, mon
     def _missing_borrow(symbol, start, end):
         raise DataIntegrityError("borrow data missing for BTCUSDT")
 
-    monkeypatch.setattr("src.application.cash_carry_evaluation.load_carry_market_data",
+    monkeypatch.setattr("src.application.research.cash_carry.evaluation.load_carry_market_data",
                         _missing_borrow)
     report = run_cash_carry_evaluation(
         CashCarryEvaluationRequest(symbol="BTCUSDT", start="2024-01-01", log_run=False),

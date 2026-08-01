@@ -10,18 +10,26 @@ import pytest
 from src.cli.main import main as root_main
 
 
-def _dispatch_legacy(monkeypatch, module: str, symbol: str, argv: list[str]):
-    """Run a legacy module and capture the typed request it produces."""
+def _dispatch_legacy(monkeypatch, canonical_target: str, argv: list[str]):
+    """Run a legacy module and capture the typed request it produces.
+
+    ``canonical_target`` is the canonical application module attribute that the
+    delegated handler calls (e.g. ``src.application.research.baseline.evaluation.
+    run_baseline_evaluation``), so the patch is observable through the leaf
+    command modules.
+    """
     calls: list[object] = []
-    monkeypatch.setattr(f"src.cli.commands.{module}.{symbol}", calls.append)
+    monkeypatch.setattr(canonical_target, calls.append)
     monkeypatch.setattr(sys, "argv", argv)
     return calls
 
 
 def test_legacy_run_backtest_equivalent_to_research_run_baseline(monkeypatch) -> None:
-    legacy = _dispatch_legacy(monkeypatch, "research", "run_baseline_evaluation", [
-        "run_backtest", "--symbol", "ETHUSDT", "--no-log-run",
-    ])
+    legacy = _dispatch_legacy(
+        monkeypatch,
+        "src.application.research.baseline.evaluation.run_baseline_evaluation",
+        ["run_backtest", "--symbol", "ETHUSDT", "--no-log-run"],
+    )
     from src.cli import run_backtest
 
     run_backtest.main()
@@ -32,16 +40,18 @@ def test_legacy_run_backtest_equivalent_to_research_run_baseline(monkeypatch) ->
 
     grouped: list[object] = []
     monkeypatch.setattr(
-        "src.cli.commands.research.run_baseline_evaluation", grouped.append,
+        "src.application.research.baseline.evaluation.run_baseline_evaluation", grouped.append,
     )
     root_main(["research", "run", "baseline", "--symbol", "ETHUSDT", "--no-log-run"])
     assert grouped == legacy
 
 
 def test_legacy_portfolio_equivalent_to_research_run_portfolio(monkeypatch) -> None:
-    legacy = _dispatch_legacy(monkeypatch, "research", "run_portfolio_evaluation", [
-        "run_portfolio_backtest", "--symbols", "BTCUSDT", "ETHUSDT", "--no-log-run",
-    ])
+    legacy = _dispatch_legacy(
+        monkeypatch,
+        "src.application.research.portfolio.evaluation.run_portfolio_evaluation",
+        ["run_portfolio_backtest", "--symbols", "BTCUSDT", "ETHUSDT", "--no-log-run"],
+    )
     from src.cli import run_portfolio_backtest
 
     run_portfolio_backtest.main()
@@ -50,9 +60,11 @@ def test_legacy_portfolio_equivalent_to_research_run_portfolio(monkeypatch) -> N
 
 
 def test_legacy_cash_carry_equivalent_to_research_run_cash_carry(monkeypatch) -> None:
-    legacy = _dispatch_legacy(monkeypatch, "research", "run_cash_carry_evaluation", [
-        "run_cash_carry_backtest", "run", "--symbol", "BTCUSDT", "--no-log-run",
-    ])
+    legacy = _dispatch_legacy(
+        monkeypatch,
+        "src.application.research.cash_carry.evaluation.run_cash_carry_evaluation",
+        ["run_cash_carry_backtest", "run", "--symbol", "BTCUSDT", "--no-log-run"],
+    )
     from src.cli import run_cash_carry_backtest
 
     run_cash_carry_backtest.main()
@@ -63,9 +75,11 @@ def test_legacy_cash_carry_equivalent_to_research_run_cash_carry(monkeypatch) ->
 def test_legacy_expert_portfolio_equivalent_to_research_run_expert_portfolio(
     monkeypatch,
 ) -> None:
-    legacy = _dispatch_legacy(monkeypatch, "research", "run_expert_portfolio_evaluation", [
-        "run_expert_portfolio_backtest", "--library-id", "pair_residual_v1", "--no-log-run",
-    ])
+    legacy = _dispatch_legacy(
+        monkeypatch,
+        "src.application.research.expert_portfolio.evaluation.run_expert_portfolio_evaluation",
+        ["run_expert_portfolio_backtest", "--library-id", "pair_residual_v1", "--no-log-run"],
+    )
     from src.cli import run_expert_portfolio_backtest
 
     run_expert_portfolio_backtest.main()
@@ -74,7 +88,8 @@ def test_legacy_expert_portfolio_equivalent_to_research_run_expert_portfolio(
 
     grouped: list[object] = []
     monkeypatch.setattr(
-        "src.cli.commands.research.run_expert_portfolio_evaluation", grouped.append,
+        "src.application.research.expert_portfolio.evaluation.run_expert_portfolio_evaluation",
+        grouped.append,
     )
     root_main([
         "research", "run", "expert-portfolio",
@@ -84,10 +99,12 @@ def test_legacy_expert_portfolio_equivalent_to_research_run_expert_portfolio(
 
 
 def test_legacy_sleeve_blend_equivalent_to_research_run_sleeve_blend(monkeypatch) -> None:
-    legacy = _dispatch_legacy(monkeypatch, "research", "run_sleeve_blend_evaluation", [
-        "run_sleeve_blend_backtest", "--candidate-kind", "funding_signed_directional_v1",
-        "--no-log-run",
-    ])
+    legacy = _dispatch_legacy(
+        monkeypatch,
+        "src.application.research.sleeve_blend.evaluation.run_sleeve_blend_evaluation",
+        ["run_sleeve_blend_backtest", "--candidate-kind", "funding_signed_directional_v1",
+         "--no-log-run"],
+    )
     from src.cli import run_sleeve_blend_backtest
 
     run_sleeve_blend_backtest.main()
@@ -95,7 +112,7 @@ def test_legacy_sleeve_blend_equivalent_to_research_run_sleeve_blend(monkeypatch
 
 
 def test_legacy_collect_data_equivalent_to_data_collect(monkeypatch) -> None:
-    from src.application import collection
+    from src.application.data import collection
 
     calls: list[str] = []
     monkeypatch.setattr(
