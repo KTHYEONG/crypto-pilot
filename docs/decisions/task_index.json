@@ -1,6 +1,16 @@
 {
   "tasks": [
     {
+      "task_id": "TASK_FIXED_SLEEVE_PORTFOLIO_BLEND",
+      "date": "2026-08-01",
+      "adr_id": "ADR_20260801_FIXED_SLEEVE_PORTFOLIO_BLEND",
+      "domain": "risk",
+      "title": "고정 슬리브 멀티심볼 Donchian 블렌드 + MDD-예산 레버리지 구현",
+      "why": "단일전략 의존과 보수적 사이징이 gate 실패의 원인이라는 사용자 지적에 따라, 분산투자+원칙적 레버리지가 observation gate를 통과시킬 수 있는지 검증 필요",
+      "resolution": "BTC+ETH+AVAX+BNB+DOGE 동일가중 블렌드(src/research/sleeve_blend/) 구현, MDD 예산(게이트 플로어의 85%) 기반 정적 레버리지 산출(Kelly 아님, v6 파산 사례 반영). 실행 결과 observation PASS(LCB90 15.12%), stress PASS, fold_gate만 FAIL(0.4899)",
+      "impact": "promotion은 여전히 REJECTED이나 병목이 observation hurdle에서 fold-concentration 단일 게이트로 좁혀짐; 5가지 독립 구성(단일심볼/알트/횡단면모멘텀/유동성포트폴리오/이번블렌드) 전부 fold<0.40 미달로 구조적 병목 확정, 기술적 레버 소진 - fold-gate 방법론 정책 결정이 다음 필수 단계"
+    },
+    {
       "task_id": "TASK_DONCHIAN_EXTENDED_HISTORY_BASELINE",
       "date": "2026-08-01",
       "adr_id": "ADR_20260801_DONCHIAN_EXTENDED_HISTORY_BASELINE",
