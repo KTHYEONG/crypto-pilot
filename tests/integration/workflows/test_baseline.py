@@ -31,7 +31,11 @@ def test_baseline_end_to_end() -> None:
 @pytest.mark.slow
 class TestBaselineReplication:
     def test_reproduces_prototype_figures(self) -> None:
-        df = load_ohlcv_4h(BTC_PATH, end="2025-12-31 23:59:59")
+        # Pinned to the original 2022-04-01 data floor: these structural
+        # figures lock in a specific historical regression fix (ATR t-1
+        # causality) and must stay stable regardless of how far back the
+        # shared local data lake is later backfilled for other research.
+        df = load_ohlcv_4h(BTC_PATH, start="2022-04-01", end="2025-12-31 23:59:59")
         spec = StrategySpec()
         costs = CostModel()
         result = run_backtest(df, spec, costs, initial_equity=10_000.0)
