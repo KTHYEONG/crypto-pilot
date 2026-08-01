@@ -1,0 +1,200 @@
+from __future__ import annotations
+
+from pathlib import Path
+
+import numpy as np
+import pandas as pd
+import pytest
+
+from src.common.errors import DataIntegrityError
+from src.research.baseline.backtest import run_backtest
+from src.research.contracts import CostModel, StrategySpec
+from src.research.evaluation.reliability import (
+    ReliabilityGateConfig,
+    compute_equity_reliability_gate,
+    compute_fold_distribution,
+)
+from src.research.sleeve_blend.backtest import (
+    run_fixed_sleeve_portfolio,
+    run_fixed_sleeve_portfolio_calibrated,
+    run_fixed_sleeve_portfolio_with_leverage,
+)
+
+_BACKTEST_MODULE = "src.research.sleeve_blend.backtest"
+
+
+def _breakout_frame(signal_bar: int, crash_bar: int, n: int = 4400) -> pd.DataFrame:
+    """Flat base that breaks out at ``signal_bar``, holds, then crashes at ``crash_bar``.
+
+    Offset ``signal_bar``/``crash_bar`` across symbols produces imperfectly
+    correlated returns for blend testing.
+    """
+    idx = pd.date_range("2024-01-01", periods=n, freq="4h", tz="UTC")
+    o = np.full(n, 100.0)
+    h = np.full(n, 101.0)
+    l_ = np.full(n, 99.0)
+    c = np.full(n, 100.0)
+    c[signal_bar] = 106.0
+    h[signal_bar] = 107.0
+    l_[signal_bar] = 105.0
+    o[signal_bar + 1 : crash_bar] = 106.0
+    h[signal_bar + 1 : crash_bar] = 107.0
+    l_[signal_bar + 1 : crash_bar] = 105.0
+    c[signal_bar + 1 : crash_bar] = 106.0
+    o[crash_bar:] = 90.0
+    h[crash_bar:] = 91.0
+    l_[crash_bar:] = 89.0
+    c[crash_bar:] = 90.0
+    return pd.DataFrame({
+        "open": o, "high": h, "low": l_, "close": c, "volume": 1000.0,
+    }, index=idx)
+
+
+def _ramp_frame(n: int = 4400) -> pd.DataFrame:
+    """Strictly rising price that never triggers a stop or channel exit.
+
+    Produces a monotone non-decreasing equity curve with MDD == 0.
+    """
+    idx = pd.date_range("2024-01-01", periods=n, freq="4h", tz="UTC")
+    opens = 100.0 + 0.01 * np.arange(n, dtype=np.float64)
+    return pd.DataFrame({
+        "open": opens,
+        "high": opens + 0.5,
+        "low": opens - 0.5,
+        "close": opens + 0.25,
+        "volume": 1000.0,
+    }, index=idx)
+
+
+def _trend_drop_frame(drop_bar: int, n: int = 4400) -> pd.DataFrame:
+    """Profitable trend with a permanent marked drawdown at ``drop_bar``.
+
+    One breakout long rides a sustained rise (equity peaks well above entry),
+    then the price drops permanently below the prior lows at ``drop_bar``, which
+    triggers a profitable channel exit while marking a real drawdown. The
+    position never stops out, so the sleeve is net profitable with MDD < 0.
+    Offset ``drop_bar`` across sleeves yields imperfectly correlated returns.
+    """
+    idx = pd.date_range("2024-01-01", periods=n, freq="4h", tz="UTC")
+    o = np.full(n, 100.0)
+    h = np.full(n, 101.0)
+    l_ = np.full(n, 99.0)
+    c = np.full(n, 100.0)
+    c[260] = 110.0
+    h[260] = 111.0
+    l_[260] = 109.0
+    o[261:301] = 110.0
+    h[261:301] = 111.0
+    l_[261:301] = 109.0
+    c[261:301] = 110.0
+    o[301:361] = 118.0
+    h[301:361] = 119.0
+    l_[301:361] = 117.0
+    c[301:361] = 118.0
+    o[361:421] = 125.0
+    h[361:421] = 126.0
+    l_[361:421] = 124.0
+    c[361:421] = 125.0
+    o[421:481] = 130.0
+    h[421:481] = 131.0
+    l_[421:481] = 129.0
+    c[421:481] = 130.0
+    o[481:] = 130.0
+    h[481:] = 131.0
+    l_[481:] = 129.0
+    c[481:] = 130.0
+    o[drop_bar:] = 115.0
+    h[drop_bar:] = 116.0
+    l_[drop_bar:] = 114.0
+    c[drop_bar:] = 115.0
+    return pd.DataFrame({
+        "open": o, "high": h, "low": l_, "close": c, "volume": 1000.0,
+    }, index=idx)
+
+
+def _install_frames(monkeypatch: pytest.MonkeyPatch, frames: dict[str, pd.DataFrame]) -> None:
+    monkeypatch.setattr(
+        f"{_BACKTEST_MODULE}.ohlcv_path", lambda symbol, timeframe: Path(f"{symbol}.parquet"),
+    )
+    monkeypatch.setattr(
+        f"{_BACKTEST_MODULE}.load_ohlcv_4h",
+        lambda path, start=None, end=None: frames[Path(str(path)).stem],
+    )
+
+
+def _mdd(equity: pd.Series) -> float:
+    return float((equity / equity.cummax() - 1.0).min())
+
+
+def test_blend_is_lower_mdd_than_worst_sleeve(monkeypatch) -> None:
+    frames = {
+        "A": _breakout_frame(signal_bar=260, crash_bar=275),
+        "B": _breakout_frame(signal_bar=60, crash_bar=90),
+    }
+    _install_frames(monkeypatch, frames)
+    costs = CostModel()
+
+    sleeve_mdds = {
+        symbol: _mdd(run_backtest(df, StrategySpec(symbol=symbol), costs).equity)
+        for symbol, df in frames.items()
+    }
+    avg_mdd = float(np.mean(list(sleeve_mdds.values())))
+
+    blend = run_fixed_sleeve_portfolio_with_leverage(("A", "B"), None, None, costs, lev=1.0)
+    blend_mdd = _mdd(blend.equity)
+
+    assert blend_mdd >= avg_mdd
+
+
+def test_leverage_scales_cagr_mdd_lcb90_but_not_fold_or_tstat(monkeypatch) -> None:
+    frames = {
+        "A": _trend_drop_frame(drop_bar=481),
+        "B": _trend_drop_frame(drop_bar=1201),
+    }
+    _install_frames(monkeypatch, frames)
+    costs = CostModel()
+
+    low = run_fixed_sleeve_portfolio_with_leverage(("A", "B"), None, None, costs, lev=1.0)
+    high = run_fixed_sleeve_portfolio_with_leverage(("A", "B"), None, None, costs, lev=2.0)
+
+    low_gate = compute_equity_reliability_gate(low.equity, len(low.trades))
+    high_gate = compute_equity_reliability_gate(high.equity, len(high.trades))
+    low_fold = compute_fold_distribution(low)
+    high_fold = compute_fold_distribution(high)
+
+    assert high_gate.t_stat == pytest.approx(low_gate.t_stat, rel=1e-9)
+    assert high_fold.max_period_contribution == pytest.approx(
+        low_fold.max_period_contribution, rel=1e-2,
+    )
+    assert _mdd(high.equity) == pytest.approx(2.0 * _mdd(low.equity), rel=1e-2)
+    assert high_gate.point_cagr == pytest.approx(2.0 * low_gate.point_cagr, rel=5e-2)
+    assert abs(high_gate.lcb90_cagr) > abs(low_gate.lcb90_cagr)
+
+
+def test_zero_or_positive_unlevered_mdd_raises(monkeypatch) -> None:
+    frames = {"A": _ramp_frame(), "B": _ramp_frame()}
+    _install_frames(monkeypatch, frames)
+    costs = CostModel()
+    with pytest.raises(DataIntegrityError, match="unlevered blended MDD"):
+        run_fixed_sleeve_portfolio(("A", "B"), None, None, costs, mdd_budget_fraction=0.85)
+
+
+def test_calibrated_leverage_matches_target_mdd_budget(monkeypatch) -> None:
+    frames = {
+        "A": _breakout_frame(signal_bar=260, crash_bar=275),
+        "B": _breakout_frame(signal_bar=60, crash_bar=90),
+    }
+    _install_frames(monkeypatch, frames)
+    costs = CostModel()
+    _result, lev = run_fixed_sleeve_portfolio_calibrated(
+        ("A", "B"), None, None, costs, mdd_budget_fraction=0.85,
+    )
+    target_mdd = ReliabilityGateConfig().mdd_floor * 0.85
+    assert lev == pytest.approx(target_mdd / _mdd(_unlevered_blend(frames, costs)), rel=1e-9)
+
+
+def _unlevered_blend(frames: dict[str, pd.DataFrame], costs: CostModel) -> pd.Series:
+    blend = run_fixed_sleeve_portfolio_with_leverage(
+        tuple(frames), None, None, costs, lev=1.0,
+    )
+    return blend.equity
