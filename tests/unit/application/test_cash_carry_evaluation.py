@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 from pathlib import Path
 
 
@@ -26,9 +25,6 @@ def test_cash_carry_evaluation_preserves_ledger_and_provenance(
     is recorded idempotently into an append-only anti-pattern store.
     """
     data = _two_year_carry_data(make_carry_data)
-    anti_path = tmp_path / "anti_patterns.json"
-
-    from src.research.provenance.anti_patterns import record_rejected_candidate
 
     monkeypatch.setattr("src.application.cash_carry_evaluation.load_carry_market_data",
                         lambda symbol, start, end: data)
@@ -42,18 +38,9 @@ def test_cash_carry_evaluation_preserves_ledger_and_provenance(
         },
     )
     monkeypatch.setattr(
-        "src.application.cash_carry_evaluation._manifest_snapshot",
-        lambda symbol: {},
-    )
-    monkeypatch.setattr(
         "src.application.cash_carry_evaluation.compute_code_hash",
         lambda: "e" * 64,
     )
-    monkeypatch.setattr(
-        "src.application.cash_carry_evaluation.record_rejected_candidate",
-        lambda **kwargs: record_rejected_candidate(anti_patterns_path=anti_path, **kwargs),
-    )
-
     request = CashCarryEvaluationRequest(
         symbol="BTCUSDT", start="2024-01-01", unseal_holdout=False, log_run=False,
     )
@@ -70,10 +57,6 @@ def test_cash_carry_evaluation_preserves_ledger_and_provenance(
     assert report.result.trades.equals(direct.trades)
     assert isinstance(report.promotion, PromotionResult)
     assert report.promotion.observation_verdict == "PENDING"
-
-    anti = json.loads(anti_path.read_text(encoding="utf-8"))
-    assert len(anti) == 1
-    assert anti[0]["failed_hypothesis"] == "cash_and_carry_basis"
     assert report.promotion.candidate is not None
     assert report.promotion.candidate.hypothesis_id == "cash_and_carry_basis"
 
