@@ -5,7 +5,7 @@ import logging
 
 import pandas as pd
 
-from src.application import collection
+from src.application.data import collection
 
 _logger = logging.getLogger(__name__)
 
