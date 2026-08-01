@@ -10,7 +10,7 @@ from src.research.contracts import (
     SleeveBlendEvaluationRequest,
     TechnicalExpertEvaluationRequest,
 )
-from src.research.expert_portfolio.contracts import ExpertPortfolioEvaluationRequest
+from src.research.expert_portfolio.models import ExpertPortfolioEvaluationRequest
 
 
 def test_expert_portfolio_cli_parses_args_and_dispatches(monkeypatch) -> None:

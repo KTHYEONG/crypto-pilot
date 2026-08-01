@@ -199,3 +199,36 @@ def test_no_canonical_module_imports_a_facade() -> None:
             if _imports_facade(tree):
                 offending.append(str(path))
     assert not offending, f"canonical modules import façades: {offending}"
+
+
+def test_application_facades_reexport_canonical_evaluation_functions() -> None:
+    """Legacy application module names resolve to the canonical evaluation objects."""
+    from src.application.admission_backtest import (
+        run_technical_library_admission_backtest as canonical_admission_backtest,
+    )
+    from src.application.expert_evaluation import (
+        run_technical_expert_evaluation as canonical_expert_evaluation,
+    )
+    from src.application.expert_portfolio_evaluation import (
+        run_expert_portfolio_evaluation as legacy_expert_portfolio,
+    )
+    from src.application.library_admission import (
+        run_technical_library_admission as canonical_library_admission,
+    )
+    from src.application.library_evaluation import (
+        run_expert_portfolio_evaluation as canonical_expert_portfolio,
+    )
+    from src.application.technical_expert_evaluation import (
+        run_technical_expert_evaluation as legacy_expert_evaluation,
+    )
+    from src.application.technical_library_admission import (
+        run_technical_library_admission as legacy_library_admission,
+    )
+    from src.application.technical_library_admission_backtest import (
+        run_technical_library_admission_backtest as legacy_admission_backtest,
+    )
+
+    assert legacy_expert_portfolio is canonical_expert_portfolio
+    assert legacy_expert_evaluation is canonical_expert_evaluation
+    assert legacy_library_admission is canonical_library_admission
+    assert legacy_admission_backtest is canonical_admission_backtest
