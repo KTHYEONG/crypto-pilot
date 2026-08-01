@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import pytest
+
 from src.cli.main import build_root_parser
 from src.research.contracts import (
     BaselineEvaluationRequest,
     CashCarryEvaluationRequest,
     PortfolioEvaluationRequest,
     SleeveBlendEvaluationRequest,
+    TechnicalExpertEvaluationRequest,
 )
 from src.research.expert_portfolio.contracts import ExpertPortfolioEvaluationRequest
 
@@ -54,10 +57,50 @@ def test_expert_portfolio_cli_defaults_keep_holdout_sealed(monkeypatch) -> None:
 
 
 def test_expert_portfolio_cli_requires_library_id() -> None:
-    import pytest
-
     with pytest.raises(SystemExit):
         build_root_parser().parse_args(["research", "run", "expert-portfolio", "--no-log-run"])
+
+
+def test_technical_expert_cli_parses_and_dispatches(monkeypatch) -> None:
+    calls: list[TechnicalExpertEvaluationRequest] = []
+    monkeypatch.setattr(
+        "src.cli.commands.research.run_technical_expert_evaluation", calls.append,
+    )
+    args = build_root_parser().parse_args([
+        "research", "run", "technical-expert",
+        "--candidate-id", "technical_macd_histogram_regime_long_v1",
+        "--symbol", "BTCUSDT",
+        "--start", "2022-04-01",
+        "--end", "2025-12-31",
+        "--initial-equity", "5000",
+        "--no-log-run",
+    ])
+    args.handler(args)
+    assert calls == [TechnicalExpertEvaluationRequest(
+        candidate_id="technical_macd_histogram_regime_long_v1",
+        symbol="BTCUSDT",
+        start="2022-04-01",
+        end="2025-12-31",
+        initial_equity=5000.0,
+        unseal_holdout=False,
+        log_run=False,
+    )]
+
+
+def test_technical_expert_cli_accepts_candidate_and_symbol_only() -> None:
+    # TE-CLI: the frozen screen takes only a candidate and symbol; any
+    # indicator/threshold flag is rejected at the parser boundary.
+    with pytest.raises(SystemExit):
+        build_root_parser().parse_args([
+            "research", "run", "technical-expert",
+            "--candidate-id", "technical_macd_histogram_regime_long_v1",
+            "--rsi-period", "14",
+        ])
+
+
+def test_technical_expert_cli_requires_candidate_id() -> None:
+    with pytest.raises(SystemExit):
+        build_root_parser().parse_args(["research", "run", "technical-expert", "--symbol", "BTCUSDT"])
 
 
 def test_baseline_cli_parses_and_dispatches(monkeypatch) -> None:
