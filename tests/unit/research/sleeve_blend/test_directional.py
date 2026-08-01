@@ -10,7 +10,7 @@ import pytest
 from src.common.errors import DataIntegrityError
 from src.research.baseline.backtest import _run_directional_engine, run_directional_backtest
 from src.research.contracts import CostModel, StrategySpec
-from src.research.sleeve_blend import backtest as sleeve_backtest
+from src.research.sleeve_blend import directional as sleeve_backtest
 from src.research.sleeve_blend.contracts import FIXED_DIRECTIONAL_SYMBOLS
 
 _SPEC = StrategySpec(entry_period=5, exit_period=3, ema_period=5, atr_period=5)

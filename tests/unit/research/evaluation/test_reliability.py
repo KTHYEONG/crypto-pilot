@@ -410,7 +410,7 @@ class TestFixedSleeveFoldThreshold:
         # remains a fold FAIL. The candidate cannot pass through a changed
         # threshold, only through genuinely distributed annual returns.
         from src.research.contracts import CostModel
-        from src.research.sleeve_blend.backtest import (
+        from src.research.sleeve_blend.fixed import (
             run_fixed_sleeve_portfolio_calibrated,
         )
 

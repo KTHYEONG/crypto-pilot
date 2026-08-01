@@ -11,7 +11,7 @@ from src.research.baseline.backtest import BacktestResult
 from src.research.contracts import SleeveBlendEvaluationRequest
 
 _APPLICATION_MODULE = "src.application.sleeve_blend_evaluation"
-_BACKTEST_MODULE = "src.research.sleeve_blend.backtest"
+_BACKTEST_MODULE = "src.research.sleeve_blend.fixed"
 
 
 def _breakout_frame(signal_bar: int, crash_bar: int, n: int = 4400) -> pd.DataFrame:
