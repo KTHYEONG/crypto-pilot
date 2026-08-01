@@ -19,9 +19,13 @@ from src.research.evaluation.reliability import (
 )
 from src.research.provenance.results import record_sleeve_blend_run
 from src.research.sleeve_blend.backtest import (
+    run_directional_sleeve_portfolio_fixed_weights,
+    run_directional_sleeve_portfolio_with_weights,
     run_fixed_sleeve_portfolio_calibrated,
     run_fixed_sleeve_portfolio_with_leverage,
 )
+
+_FUNDING_SIGNED_DIRECTIONAL_V1 = "funding_signed_directional_v1"
 
 _logger = logging.getLogger("SleeveBlendBacktestRunner")
 
@@ -30,32 +34,46 @@ _STRESS_SLIPPAGE_MULT = 2.0
 
 
 def run_sleeve_blend_evaluation(request: SleeveBlendEvaluationRequest) -> EvaluationReport:
-    """Execute one sealed fixed-sleeve equal-weight Donchian blend evaluation.
+    """Execute one sealed sleeve blend evaluation.
 
-    Applies the shared holdout policy, runs each sleeve with the unchanged
-    baseline backtest, equal-weight-blends the equity curves, calibrates one
-    MDD-budget leverage scalar from the base-cost run, and re-runs the blend
-    under stressed costs with that *same* frozen scalar (never re-calibrated
-    under stress). Appends a JSONL result only when ``request.log_run`` is true.
+    The default ``candidate_kind`` runs the fixed equal-weight long-only blend:
+    equal-weight-blend the equity curves, calibrate one MDD-budget leverage
+    scalar from the base-cost run, and re-run under stressed costs with that
+    *same* frozen scalar. ``funding_signed_directional_v1`` instead runs the
+    funding-gated long/short sleeve unlevered (leverage 1.0) with causal
+    inverse-vol risk weights; its stress re-run reuses the *base* weight series
+    verbatim and never re-calibrates around stressed costs. Both connect to the
+    existing reliability gates and fail-closed promotion.
     """
     end = resolve_evaluation_end(request.end, unseal_holdout=request.unseal_holdout)
     if request.unseal_holdout:
         _logger.info("[EVAL] holdout unsealed: --end=%s", end or "(latest available)")
 
     costs = CostModel()
-    result, leverage = run_fixed_sleeve_portfolio_calibrated(
-        request.symbols,
-        request.start,
-        end,
-        costs,
-        request.mdd_budget_fraction,
-        initial_equity=request.initial_equity,
-        signal_delay_bars=0,
-    )
+    if request.candidate_kind == _FUNDING_SIGNED_DIRECTIONAL_V1:
+        result, weights = run_directional_sleeve_portfolio_with_weights(
+            request.symbols,
+            request.start,
+            end,
+            costs,
+            initial_equity=request.initial_equity,
+        )
+        leverage = 1.0
+    else:
+        result, leverage = run_fixed_sleeve_portfolio_calibrated(
+            request.symbols,
+            request.start,
+            end,
+            costs,
+            request.mdd_budget_fraction,
+            initial_equity=request.initial_equity,
+            signal_delay_bars=0,
+        )
     metrics = compute_metrics(result.equity, result.trades)
     _logger.info(
-        "[EVAL] sleeve_blend lev=%.4f cagr=%.4f mdd=%.4f sharpe=%.3f trades=%d",
-        leverage, metrics.cagr, metrics.mdd, metrics.sharpe, metrics.trade_count,
+        "[EVAL] sleeve_blend candidate=%s lev=%.4f cagr=%.4f mdd=%.4f sharpe=%.3f trades=%d",
+        request.candidate_kind, leverage, metrics.cagr, metrics.mdd,
+        metrics.sharpe, metrics.trade_count,
     )
 
     observation_gate = compute_equity_reliability_gate(result.equity, len(result.trades))
@@ -65,15 +83,26 @@ def run_sleeve_blend_evaluation(request: SleeveBlendEvaluationRequest) -> Evalua
         fee_rate=costs.fee_rate * _STRESS_FEE_MULT,
         slippage_rate=costs.slippage_rate * _STRESS_SLIPPAGE_MULT,
     )
-    stress_result = run_fixed_sleeve_portfolio_with_leverage(
-        request.symbols,
-        request.start,
-        end,
-        stressed_costs,
-        leverage,
-        initial_equity=request.initial_equity,
-        signal_delay_bars=1,
-    )
+    if request.candidate_kind == _FUNDING_SIGNED_DIRECTIONAL_V1:
+        stress_result = run_directional_sleeve_portfolio_fixed_weights(
+            request.symbols,
+            request.start,
+            end,
+            stressed_costs,
+            weights,
+            initial_equity=request.initial_equity,
+            signal_delay_bars=1,
+        )
+    else:
+        stress_result = run_fixed_sleeve_portfolio_with_leverage(
+            request.symbols,
+            request.start,
+            end,
+            stressed_costs,
+            leverage,
+            initial_equity=request.initial_equity,
+            signal_delay_bars=1,
+        )
     stress_metrics = compute_metrics(stress_result.equity, stress_result.trades)
     stress_gate = compute_equity_reliability_gate(
         stress_result.equity,
@@ -120,9 +149,13 @@ def run_sleeve_blend_evaluation(request: SleeveBlendEvaluationRequest) -> Evalua
 
     record = None
     if request.log_run:
+        mdd_budget_fraction: float | None = request.mdd_budget_fraction
+        if request.candidate_kind == _FUNDING_SIGNED_DIRECTIONAL_V1:
+            mdd_budget_fraction = None
         record = record_sleeve_blend_run(
             symbols=tuple(request.symbols),
-            mdd_budget_fraction=request.mdd_budget_fraction,
+            candidate_kind=request.candidate_kind,
+            mdd_budget_fraction=mdd_budget_fraction,
             leverage=leverage,
             costs=costs,
             result=result,

@@ -149,15 +149,36 @@ class CashCarryEvaluationRequest:
 
 @dataclass(frozen=True, slots=True)
 class SleeveBlendEvaluationRequest:
-    """Immutable request for a fixed-sleeve equal-weight Donchian blend evaluation."""
+    """Immutable request for a fixed-sleeve or directional-sleeve evaluation.
+
+    ``candidate_kind`` selects the sealed candidate: ``"fixed_long_only_v1"`` is
+    the existing MDD-budget equal-weight long-only blend, while
+    ``"funding_signed_directional_v1"`` is the funding-gated long/short sleeve
+    evaluated unlevered at ``leverage=1.0`` with causal inverse-vol risk
+    weights.
+    """
 
     symbols: tuple[str, ...] = ("BTCUSDT", "ETHUSDT", "AVAXUSDT", "BNBUSDT", "DOGEUSDT")
     mdd_budget_fraction: float = 0.85
+    candidate_kind: Literal["fixed_long_only_v1", "funding_signed_directional_v1"] = (
+        "fixed_long_only_v1"
+    )
     start: str | None = None
     end: str | pd.Timestamp | None = None
     initial_equity: float = 10_000.0
     unseal_holdout: bool = False
     log_run: bool = True
+
+    def __post_init__(self) -> None:
+        if self.candidate_kind not in (
+            "fixed_long_only_v1",
+            "funding_signed_directional_v1",
+        ):
+            raise ValueError(
+                f"candidate_kind must be one of "
+                f"'fixed_long_only_v1'/'funding_signed_directional_v1', "
+                f"got {self.candidate_kind}"
+            )
 
 
 @dataclass(frozen=True)

@@ -280,3 +280,222 @@ def run_backtest(
     ])
 
     return BacktestResult(equity=equity_series, trades=trades_df, signals=feat)
+
+def run_directional_backtest(
+    df: pd.DataFrame,
+    spec: StrategySpec,
+    costs: CostModel,
+    funding_rates: pd.Series,
+    initial_equity: float = 10_000.0,
+    signal_delay_bars: int = 0,
+) -> BacktestResult:
+    """Run one signed long/short Donchian ledger with funding cashflow.
+
+    Builds the funding-gated directional signals, aligns published funding onto
+    the bar grid, and executes long and short trades with adverse-price
+    symmetric stops. A long pays positive funding and a short receives it. The
+    output is a single marked total-equity ledger plus signed closed-trade
+    records; independent component returns are never netted.
+    """
+    return _run_directional_engine(
+        df, spec, costs, funding_rates,
+        initial_equity=initial_equity, signal_delay_bars=signal_delay_bars,
+    )
+
+
+def _run_directional_engine(
+    df: pd.DataFrame,
+    spec: StrategySpec,
+    costs: CostModel,
+    funding_rates: pd.Series,
+    *,
+    side: str | None = None,
+    initial_equity: float = 10_000.0,
+    signal_delay_bars: int = 0,
+) -> BacktestResult:
+    """Directional long/short Donchian ledger engine.
+
+    ``side`` restricts the engine to ``"long"``, ``"short"``, or both when
+    ``None``. Long and short stops are adverse-price symmetric and each charge
+    fee/slippage; a long pays positive funding while a short receives it. The
+    combined ledger never nets independent component returns and never re-enters
+    on the same bar.
+    """
+    from src.research.baseline.signal import generate_directional_funding_signals
+
+    if side not in (None, "long", "short"):
+        raise ValueError(f"side must be one of None/'long'/'short', got {side}")
+    if signal_delay_bars < 0:
+        raise ValueError(f"signal_delay_bars must be >= 0, got {signal_delay_bars}")
+    if initial_equity <= 0:
+        raise ValueError(f"initial_equity must be > 0, got {initial_equity}")
+    if funding_rates is None or len(funding_rates) == 0:
+        raise DataIntegrityError("directional mode requires a non-empty funding_rates series")
+
+    feat = generate_directional_funding_signals(df, spec, funding_rates)
+    if signal_delay_bars > 0:
+        feat["long_entry_signal"] = (
+            feat["long_entry_signal"].shift(signal_delay_bars).fillna(False).astype(bool)
+        )
+        feat["short_entry_signal"] = (
+            feat["short_entry_signal"].shift(signal_delay_bars).fillna(False).astype(bool)
+        )
+        feat["exit_lower"] = feat["exit_lower"].shift(signal_delay_bars)
+        feat["exit_upper"] = feat["exit_upper"].shift(signal_delay_bars)
+
+    warmup = max(spec.ema_period, spec.entry_period, spec.atr_period) + 1 + signal_delay_bars
+    atr_arr = feat["atr"].to_numpy(dtype=np.float64)
+    bar_funding = _align_funding_rates(funding_rates, feat.index)
+
+    equity_arr = np.full(len(feat), np.nan, dtype=np.float64)
+    cash = initial_equity
+    position_qty = 0.0
+    side_sign = 0  # 1 long, -1 short, 0 flat
+    entry_price = 0.0
+    stop_price = 0.0
+    entry_bar_idx = -1
+    pending_long = False
+    pending_short = False
+    pending_exit = False
+    exited_this_bar = False
+    trade_funding_pnl = 0.0
+    trade_rows: list[dict[str, object]] = []
+
+    def _close(side_sign_local: int, reason: str, exit_price_local: float) -> None:
+        nonlocal cash, position_qty, side_sign, exited_this_bar, trade_funding_pnl
+        pnl = position_qty * side_sign_local * (exit_price_local - entry_price)
+        exit_fee = costs.fee_rate * abs(position_qty * exit_price_local)
+        if side_sign_local == 1:
+            cash += position_qty * exit_price_local - exit_fee
+        else:
+            cash -= position_qty * exit_price_local + exit_fee
+        pnl -= exit_fee
+        pnl += trade_funding_pnl
+        trade_rows.append({
+            "entry_bar": entry_bar_idx,
+            "exit_bar": t,
+            "entry_price": entry_price,
+            "exit_price": exit_price_local,
+            "qty": position_qty,
+            "reason": reason,
+            "pnl": pnl,
+            "return_pct": pnl / (cash - pnl) if cash != pnl else 0.0,
+            "funding_pnl": trade_funding_pnl,
+            "side": "long" if side_sign_local == 1 else "short",
+        })
+        _logger.info(
+            "bar=%d side=%d reason=%s entry=%.4f exit=%.4f qty=%.6f pnl=%.4f",
+            t, side_sign_local, reason, entry_price, exit_price_local,
+            position_qty, pnl, extra={"tag": "ALGO"},
+        )
+        position_qty = 0.0
+        side_sign = 0
+        exited_this_bar = True
+
+    for t in range(len(feat)):
+        row = feat.iloc[t]
+        o, h, l_, c = row["open"], row["high"], row["low"], row["close"]
+
+        if t < warmup:
+            equity_arr[t] = cash
+            pending_long = bool(row["long_entry_signal"])
+            pending_short = bool(row["short_entry_signal"])
+            pending_exit = False
+            continue
+
+        # 0. funding accrual at this bar's published timestamp. A long pays
+        # positive funding (negative cashflow); a short receives it.
+        if position_qty > 0 and bar_funding[t] != 0.0:
+            funding_pnl = -side_sign * position_qty * o * bar_funding[t]
+            cash += funding_pnl
+            trade_funding_pnl += funding_pnl
+
+        # 1. adverse stop check (intrabar), then channel exit
+        if position_qty > 0:
+            if side_sign == 1 and l_ <= stop_price:
+                _close(1, "stop", min(o, stop_price) * (1 - costs.slippage_rate))
+            elif side_sign == -1 and h >= stop_price:
+                _close(-1, "stop", max(o, stop_price) * (1 + costs.slippage_rate))
+            elif pending_exit:
+                if side_sign == 1:
+                    _close(1, "channel", o * (1 - costs.slippage_rate))
+                else:
+                    _close(-1, "channel", o * (1 + costs.slippage_rate))
+
+        # 2. entry at next open from a previously formed signal
+        if position_qty == 0 and not exited_this_bar:
+            entry_sign = 0
+            if side in (None, "long") and pending_long:
+                entry_sign = 1
+            elif side in (None, "short") and pending_short:
+                entry_sign = -1
+            if entry_sign != 0:
+                stop_distance = spec.stop_atr_mult * atr_arr[t - 1]
+                if stop_distance <= 0:
+                    raise ValueError(f"stop_distance <= 0 at bar {t}: {stop_distance}")
+                if entry_sign == 1:
+                    fill = o * (1 + costs.slippage_rate)
+                    stop_price = fill - stop_distance
+                else:
+                    fill = o * (1 - costs.slippage_rate)
+                    stop_price = fill + stop_distance
+                qty = calculate_position_size(
+                    equity=cash,
+                    risk_fraction=spec.risk_per_trade,
+                    entry_price=fill,
+                    stop_price=stop_price,
+                    max_leverage=spec.max_leverage,
+                )
+                notional = qty * fill
+                if notional >= 5.0:
+                    entry_fee = costs.fee_rate * notional
+                    cash = (
+                        cash - notional - entry_fee
+                        if entry_sign == 1
+                        else cash + notional - entry_fee
+                    )
+                    position_qty = qty
+                    side_sign = entry_sign
+                    entry_price = fill
+                    entry_bar_idx = t
+                    trade_funding_pnl = 0.0
+
+                    # 2b. entry-bar adverse stop
+                    if side_sign == 1 and l_ <= stop_price:
+                        _close(1, "stop_entrybar", min(o, stop_price) * (1 - costs.slippage_rate))
+                    elif side_sign == -1 and h >= stop_price:
+                        _close(-1, "stop_entrybar", max(o, stop_price) * (1 + costs.slippage_rate))
+
+        # 3. mark equity = cash + signed market value of the position
+        equity_arr[t] = cash + side_sign * position_qty * c if position_qty > 0 else cash
+
+        # 4. form pending signals for the next bar
+        pending_long = (
+            position_qty == 0
+            and not exited_this_bar
+            and bool(row["long_entry_signal"])
+        )
+        pending_short = (
+            position_qty == 0
+            and not exited_this_bar
+            and bool(row["short_entry_signal"])
+        )
+        if side_sign == 1:
+            pending_exit = bool(c < row["exit_lower"])
+        elif side_sign == -1:
+            pending_exit = bool(c > row["exit_upper"])
+        else:
+            pending_exit = False
+        if exited_this_bar and position_qty == 0:
+            pending_long = False
+            pending_short = False
+        exited_this_bar = False
+
+    equity_series = pd.Series(
+        equity_arr, index=feat.index, name="equity", dtype=np.float64,
+    )
+    trades_df = pd.DataFrame(trade_rows) if trade_rows else pd.DataFrame(columns=[
+        "entry_bar", "exit_bar", "entry_price", "exit_price", "qty", "reason", "pnl",
+        "return_pct", "funding_pnl", "side",
+    ])
+    return BacktestResult(equity=equity_series, trades=trades_df, signals=feat)
