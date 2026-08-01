@@ -148,6 +148,23 @@ class CashCarryEvaluationRequest:
 
 
 @dataclass(frozen=True, slots=True)
+class OIDeleveragingEvaluationRequest:
+    """Immutable request for the sealed open-interest deleveraging screen.
+
+    ``symbol`` is the single fixed-universe symbol evaluated with the immutable
+    one-day deleveraging hypothesis; ``unseal_holdout`` is the only way to
+    extend past the sealed observation end, and ``log_run`` controls the single
+    provenance record.
+    """
+
+    symbol: str
+    start: str | None = None
+    end: str | pd.Timestamp | None = None
+    unseal_holdout: bool = False
+    log_run: bool = True
+
+
+@dataclass(frozen=True, slots=True)
 class SleeveBlendEvaluationRequest:
     """Immutable request for a fixed-sleeve or directional-sleeve evaluation.
 
