@@ -3,72 +3,49 @@ name: spec
 description: Produce a concise, evidence-based implementation blueprint and machine-readable contract.
 ---
 
-# Spec
+# Spec Protocol
 
-Frontier reasoning model protocol (Specification Engineering & Empirical Validation). Owns architectural decisions, trade-offs, and machine-readable contracts.
+Frontier reasoning model protocol for specification engineering and architecture design. Uses high-reasoning autonomy to solve design ambiguities, establish empirical proofs, and produce **precision contracts executable by low-reasoning models without architectural guesswork**.
 
-## Core Directives & Constraints (KISS Principle)
+## Core Directives
 
-- **Goal**: Define the single optimal architecture and frozen contract so implementation requires zero redesign.
-- **Constraints**:
-  - Preserve causal timestamps, cost/funding accounting, numerical stability, and fail-closed behavior.
-  - Do not relax thresholds or public contracts merely to make a test pass.
-  - Keep main spec under 500 lines. Move large domain details to linked reference files.
-  - **Mandatory Concrete Plan**: Every spec artifact MUST define an actionable implementation plan (target code/file changes, new contract, or concrete next step). Even if current hypotheses fail, do NOT end as a mere status report—specify the exact next architecture/hypothesis to attempt and its required codebase modifications.
+1. **Context Aggregation & Initial Inspection**:
+   - Run context aggregator helper to quickly collect domain ADRs and code map references:
+     ```bash
+     uv run python tools/agent_skills/spec_init.py --feature <feature_name> --domain <domain> --query <keyword>
+     ```
+   - **MANDATORY DEEP INSPECTION**: Do NOT rely solely on the aggregated summary. Perform direct codebase searches (`rg`) and file inspections (`view_file`) on target sources, callers, and tests to verify actual signatures, line numbers, and behavior.
 
-## Ambiguity & Alignment Interrogation (Pre-Spec Gate)
+2. **Ambiguity & Alignment Check**:
+   - Assess if requirements contain open design choices, ambiguous quant trade-offs, or unstated boundary conditions.
+   - If ambiguity exists, ask concise clarification questions. Proceed immediately if clear.
 
-Before formulating architecture or hypotheses:
-- **Blind Spot & Trade-off Check**: Assess if requirements contain ambiguous business/quant trade-offs, unspecified boundary conditions, or open design choices.
-- **Concise Interrogation (Grill-Me)**: If ambiguity exists, present 1–3 high-impact questions directly to the user before proceeding. Always list the recommended choice as option 1 `(Recommended)`.
-- **Pass Through**: If requirements are already fully clear and unambiguous, skip questioning and proceed immediately to Memory Check.
+3. **Selective Empirical Sandbox**:
+   - For complex algorithms, novel quantitative models, or uncertain performance-critical logic, write temporary scripts in `scratch/test_<topic>.py` and verify metrics via `uv run`.
+   - Skip sandbox experimentation for straightforward refactoring, simple bug fixes, or minor API additions.
 
-## Memory Check (Mandatory Pre-Spec Phase)
+4. **Precision Contract Specification (`contract.json`)**:
+   - High-reasoning model MUST produce a precise, deterministic contract so low-reasoning execution models can implement it mechanically.
+   - Emit `docs/specs/<feature>_contract.json` with explicit declarations:
+     - `target_file`: Absolute path to modify or create.
+     - `symbol` & `signature`: Full Python type-hinted signature.
+     - `python_assertion`: Directly executable Python assertion expression (e.g. `assert fee_calc(100) == 0.05`).
+     - `scenarios`: Array of `{ scenario_id, target_test_file, expected_behavior }`.
+     - `wiring`: Exact caller file, anchor location, and invocation snippet.
+   - Create main design blueprint in `docs/specs/<feature>.md`.
 
-Before formulating architecture or hypotheses:
-1. **Context Lookup**: Inspect `docs/decisions/task_index.json` to review recent ADR resolutions for the relevant domain without reading monolithic logs.
+## Output
 
-## Empirical Sandbox Protocol (Mandatory Before Spec Freeze)
+Provide a clear, concise summary with emojis. Example:
+
+### 📐 [SPEC] <Task Title>
+
+- **Goal**: <Core objective>
+- **Diagnosis**: <Root cause summary>
+- **Artifacts**:
+  - 📄 Specification: [`<feature>.md`](file:///docs/specs/<feature>.md)
+  - ⚙️ Contract: [`<feature>_contract.json`](file:///docs/specs/<feature>_contract.json)
 
 
-Do NOT rely solely on theoretical hypothesis or unverified context assumptions.
-1. **Scratch Experimentation**: For any non-trivial algorithm, signal, risk model, or performance-critical logic, write a temporary Python script in `scratch/test_<topic>.py` (project root). Never use OS `/tmp` or external directories.
-2. **Empirical Execution**: Execute the script via `uv run python <scratch_script>` to collect actual data metrics, execution logs, or runtime behavior.
-3. **Evidence Requirement**: Record the verified console output metric in Section 2 (Evidence & Alternatives) of the spec artifact. Unverified hypotheses MUST NOT be frozen.
 
-## Symbol Audit & Contract Standard
 
-- **Symbol Audit & Wiring Inspection**: Use `rg` and `view_file` to classify affected symbols (`reuse`, `extend`, `new`, `retire`) and inspect exact file paths, signatures, line numbers, and call sites before freezing the wiring specification.
-- **Contract Deliverables**:
-  - `docs/specs/<feature>.md`
-  - `docs/specs/<feature>_contract.json`
-
-### `contract.json` Executable Schema
-Every contract item MUST declare:
-- `symbol`, `file`, `signature`, `error_policy`, `side_effects`, `semantic_rules`
-- `python_assertion`: A single executable Python expression (e.g. `assert calc_fee(100.0) == 0.05`) for immediate deterministic testing.
-- `fixture_reference` & `expected_property`
-- `scenario_id`, `scope`, `test_name`, `target_test_file`
-- `wiring` (`target`, `anchor`, `callee`, `invocation_expression`)
-
-## Blueprint Artifact Sections
-
-1. Goal & Selected Architecture
-2. Evidence & Alternatives (Contains Empirical Sandbox execution logs)
-3. Rules, Limits, Resilience, & Resource Budget
-4. Integration/Wiring Plan
-5. Contract Changes & Executable Assertions
-6. TDD Scenario Matrix & Minimal Fixtures
-7. Implementation Manifest
-
-## Output Format
-
-Do NOT repeat full blueprint, code, or logs in the response. Offload details into artifact files and return ONLY this compact card:
-
-### 📌 [SPEC] <Feature / Task Title>
-
-- **Objective**: <1-line core goal>
-- **Diagnosis**: <1-line phenomenon & root cause summary>
-  > <Optional 1-line key formula or condition>
-- **Action**: <1-line planned changes summary>
-📄 **Artifacts**: [<spec.md>](file:///docs/specs/<feature>.md) | [<contract.json>](file:///docs/specs/<feature>_contract.json)

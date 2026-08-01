@@ -3,33 +3,28 @@ name: sync
 description: Documentation Synchronization, ADR Logging, Cleanup.
 ---
 
-# Sync
+# Sync Protocol
 
-Automated task synchronization, ADR logging, Smart JSON index registration, and artifact cleanup protocol.
+Post-development protocol for task finalization, ADR registration, index updating, and temporary artifact cleanup.
 
-## Execution Rules
+## Directives
 
-Execute task sync via script (keep `--why`, `--what`, `--impact` strictly to 1 concise sentence each):
-```bash
-uv run python tools/agent_skills/sync_task.py --task TASK_ID --title "<Title>" --why "<Context>" --what "<Resolution>" --impact "<Impact>" --source src/x.py --domain <signal/risk/execution>
-```
+1. **Task Sync & Index Registration**:
+   - Run task sync script:
+     ```bash
+     uv run python tools/agent_skills/sync_task.py --task TASK_ID --title "<Title>" --why "<Context>" --what "<Resolution>" --impact "<Impact>" --source src/x.py --domain <domain>
+     ```
+   - Automatically updates `docs/decisions/task_index.json` and `docs/code_map.json`.
 
-- **Spec Cleanup Execution Rule**: `docs/specs/` files MUST be automatically removed by default. Do NOT pass `--keep-all-specs` unless explicitly requested by the user in prompt.
-- **Scratch Cleanup Execution Rule**: All temporary files under `scratch/` directory MUST be automatically removed during task sync.
-- **Smart Registry Auto-Update**: Script automatically updates `docs/decisions/task_index.json` and `docs/code_map.json`.
+2. **Artifact Cleanup**:
+   - Purge temporary `docs/specs/` files and `scratch/` test scripts by default, unless requested otherwise.
 
-## Manual Steps (Only if applicable)
-- Surgically update `docs/architecture/` if architectural contracts changed.
-- Insert `[ADR_YYYYMMDD_TaskID]` tag in modified class/fn docstrings.
+## Output
 
-## Output Format
+Provide a clear, concise summary with emojis. Example:
 
-Do NOT repeat logs or document text in response. Return ONLY this compact card:
+### 🧹 [SYNC] <Task Title>
 
-### 📌 [SYNC] <Task / ADR Title>
-
-- **Status**: COMPLETE
-- **ADR**: <ADR_ID | None>
-- **Details**: Indexes updated | Specs & Scratch cleared
-
+- **Status**: 🎉 COMPLETE
+- **ADR Index**: <Registered ADR_ID>
 
