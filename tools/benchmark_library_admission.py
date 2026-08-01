@@ -18,7 +18,7 @@ import time
 
 import numpy as np
 
-from src.application.technical_library_admission import (
+from src.application.library_admission import (
     _assemble_panel,
     _materialize_definitions,
     _run_symbol_tasks,
@@ -26,11 +26,11 @@ from src.application.technical_library_admission import (
 )
 from src.core.settings import HARDWARE_MAX_WORKERS, effective_worker_count
 from src.research.evaluation.policy import resolve_evaluation_end
-from src.research.expert_portfolio.contracts import (
-    ContextualRouterSpec,
+from src.research.expert_portfolio.admission_types import (
     LibraryAdmissionConfig,
     TechnicalLibraryAdmissionRequest,
 )
+from src.research.expert_portfolio.models import ContextualRouterSpec
 from src.research.provenance.code_manifest import TECHNICAL_CODE_UNITS, compute_code_hash
 
 _ITERATIONS = 3
