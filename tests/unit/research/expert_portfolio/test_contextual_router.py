@@ -10,7 +10,7 @@ from src.research.expert_portfolio.contextual_router import (
     compute_causal_contextual_winner_weights,
     state_labels,
 )
-from src.research.expert_portfolio.contracts import (
+from src.research.expert_portfolio.models import (
     ContextualRouterSpec,
     ExpertDefinition,
     ExpertPortfolioSpec,

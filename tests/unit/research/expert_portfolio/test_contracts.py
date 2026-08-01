@@ -2,13 +2,15 @@ from __future__ import annotations
 
 import pytest
 
-from src.research.expert_portfolio.contracts import (
+from src.research.expert_portfolio.admission_types import (
+    LibraryAdmissionConfig,
+    TechnicalLibraryAdmissionRequest,
+)
+from src.research.expert_portfolio.models import (
     ContextualRouterSpec,
     ExpertDefinition,
     ExpertPortfolioEvaluationRequest,
     ExpertPortfolioSpec,
-    LibraryAdmissionConfig,
-    TechnicalLibraryAdmissionRequest,
     lcb_z_score,
 )
 
@@ -235,3 +237,31 @@ def test_library_admission_request_rejects_invalid_universe_and_sealed_end() -> 
             ("technical_macd_histogram_regime_long_v1",),
             ("BTCUSDT",), router, base, end="2026-06-01",
         )
+
+
+def test_contracts_facade_preserves_canonical_object_identity() -> None:
+    """The compatibility facade re-exports the canonical module objects."""
+    from src.research.expert_portfolio import admission_reports, admission_types
+    from src.research.expert_portfolio import contracts as facade
+    from src.research.expert_portfolio import models
+
+    assert facade.ExpertDefinition is models.ExpertDefinition
+    assert facade.ContextualRouterSpec is models.ContextualRouterSpec
+    assert facade.ExpertPortfolioSpec is models.ExpertPortfolioSpec
+    assert facade.ExpertPortfolioEvaluationRequest is models.ExpertPortfolioEvaluationRequest
+    assert facade.lcb_z_score is models.lcb_z_score
+    assert facade.LibraryAdmissionConfig is admission_types.LibraryAdmissionConfig
+    assert facade.TechnicalLibraryAdmissionRequest is admission_types.TechnicalLibraryAdmissionRequest
+    assert facade.TechnicalLibraryAdmissionBacktestRequest is (
+        admission_types.TechnicalLibraryAdmissionBacktestRequest
+    )
+    assert facade.admission_proposal_id is admission_types.admission_proposal_id
+    assert facade.expert_ids_from_admission_proposal_id is (
+        admission_types.expert_ids_from_admission_proposal_id
+    )
+    assert facade.CandidateAdmissionResult is admission_types.CandidateAdmissionResult
+    assert facade.AdmissionProposal is admission_types.AdmissionProposal
+    assert facade.LibraryAdmissionReport is admission_reports.LibraryAdmissionReport
+    assert facade.LibraryAdmissionBacktestReport is (
+        admission_reports.LibraryAdmissionBacktestReport
+    )

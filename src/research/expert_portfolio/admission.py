@@ -18,15 +18,14 @@ import numpy as np
 import pandas as pd
 
 from src.common.errors import DataIntegrityError
-from src.research.expert_portfolio.contextual_router import state_labels
-from src.research.expert_portfolio.contracts import (
+from src.research.expert_portfolio.admission_reports import LibraryAdmissionReport
+from src.research.expert_portfolio.admission_types import (
     AdmissionProposal,
     CandidateAdmissionResult,
-    ContextualRouterSpec,
-    ExpertDefinition,
     LibraryAdmissionConfig,
-    LibraryAdmissionReport,
 )
+from src.research.expert_portfolio.contextual_router import state_labels
+from src.research.expert_portfolio.models import ContextualRouterSpec, ExpertDefinition
 
 _UNAVAILABLE = "unavailable"
 
