@@ -1,25 +1,24 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Mapping
+from dataclasses import dataclass
 from pathlib import Path
+from typing import cast
 
+from src.research.expert_portfolio.catalog import (
+    ExpertLibraryCatalog,
+    compute_blueprint_fingerprint,
+)
 from src.research.expert_portfolio.contracts import ExpertDefinition, ExpertPortfolioSpec
+from src.research.expert_portfolio.sources import FORBIDDEN_RETURN_SOURCES
+from src.research.provenance.ledger import RUNS_LOG_PATH, load_events
+from src.research.provenance.registration import RegistrationRecord, _to_registration_record
 
 LIBRARY_REGISTRY_PATH = (
     Path(__file__).resolve().parent.parent.parent.parent
     / "docs" / "results" / "expert_library_registry.json"
 )
-
-# Pre-registered anti-pattern return sources: previously rejected hypotheses must
-# never be re-labelled as new experts and re-enter promotion by renaming.
-FORBIDDEN_RETURN_SOURCES: frozenset[str] = frozenset({
-    "donchian_multi_symbol_diversification",
-    "bollinger_mean_reversion",
-    "cross_sectional_momentum",
-    "cash_carry",
-    "taker_flow",
-    "funding_signed_directional",
-})
 
 
 def _load_registry(path: Path) -> list[dict[str, object]]:
@@ -96,3 +95,63 @@ def _numeric_field(record: dict[str, object], name: str, default: float) -> floa
     if isinstance(value, (int, float)) and not isinstance(value, bool):
         return float(value)
     raise ValueError(f"library registry field '{name}' must be numeric, got {value!r}")
+
+
+@dataclass(frozen=True, slots=True)
+class RegisteredExpertLibrary:
+    """One ACTIVE, fingerprint-verified library resolved to its evaluation spec."""
+
+    library_id: str
+    registration_id: str
+    spec: ExpertPortfolioSpec
+    registration: RegistrationRecord
+
+
+def resolve_registered_library(
+    library_id: str,
+    *,
+    catalog: ExpertLibraryCatalog,
+    ledger_path: Path = RUNS_LOG_PATH,
+) -> RegisteredExpertLibrary:
+    """Resolve an ACTIVE registration whose fingerprint still matches the catalog.
+
+    An unregistered library, a RETIRED registration, or any fingerprint drift
+    between the registered fingerprint and the current blueprint fails closed
+    with ``ValueError`` so component evaluation never begins under stale
+    evidence.  The forbidden-return-source policy is checked again at
+    resolution.
+    """
+    blueprint = catalog[library_id]
+    for expert in blueprint.experts:
+        if expert.return_source in FORBIDDEN_RETURN_SOURCES:
+            raise ValueError(
+                f"expert {expert.expert_id} uses forbidden return source "
+                f"'{expert.return_source}' and cannot be evaluated"
+            )
+    active_record: Mapping[str, object] | None = None
+    for event in load_events(ledger_path):
+        if event.record_type not in ("registration", "retirement"):
+            continue
+        if event.payload.get("library_id") != library_id:
+            continue
+        status = event.payload.get("status")
+        if status == "RETIRED":
+            raise ValueError(f"library '{library_id}' is RETIRED and cannot be evaluated")
+        if status == "ACTIVE":
+            active_record = event.payload
+            break
+    if active_record is None:
+        raise ValueError(f"library '{library_id}' has no ACTIVE registration in the ledger")
+    registered_fingerprint = cast(Mapping[str, object], active_record["fingerprint"])
+    current_fingerprint = compute_blueprint_fingerprint(blueprint)
+    if registered_fingerprint != current_fingerprint:
+        raise ValueError(
+            f"library '{library_id}' fingerprint drift: re-register and re-evaluate, "
+            "never run under old evidence"
+        )
+    return RegisteredExpertLibrary(
+        library_id=library_id,
+        registration_id=str(active_record["registration_id"]),
+        spec=blueprint.to_spec(),
+        registration=_to_registration_record(active_record),
+    )
