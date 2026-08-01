@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Sync: Task Metadata + Code Map + Anti-Pattern Registry + Cleanup Protocol."""
+"""Sync: Task Metadata + Code Map + Cleanup Protocol."""
 
 from __future__ import annotations
 
@@ -57,7 +57,6 @@ def _update_decisions_json(
     adr_id = f"ADR_{adr_date}_{task.replace('TASK_', '')}"
 
     tasks_json_path = "docs/decisions/task_index.json"
-    anti_patterns_path = "docs/decisions/anti_patterns.json"
 
     # 1. Update task_index.json
     index_data: dict[str, list[dict[str, str]]] = {"tasks": []}
@@ -83,26 +82,6 @@ def _update_decisions_json(
     # Keep max 100 entries in task_index.json
     index_data["tasks"] = index_data["tasks"][:100]
     _write_file(tasks_json_path, json.dumps(index_data, indent=2, ensure_ascii=False) + "\n")
-
-    # 2. Update anti_patterns.json if failure hypothesis provided
-    if failed_hypothesis and failure_reason:
-        anti_data: list[dict[str, str]] = []
-        if _path_exists(anti_patterns_path):
-            with contextlib.suppress(Exception):
-                parsed_anti = json.loads(_read_file(anti_patterns_path))
-                if isinstance(parsed_anti, list):
-                    anti_data = parsed_anti
-
-        new_anti_entry = {
-            "domain": domain,
-            "failed_hypothesis": failed_hypothesis,
-            "failure_reason": failure_reason,
-            "falsified_date": date_str,
-            "source_adr": adr_id,
-        }
-        anti_data = [new_anti_entry] + [a for a in anti_data if a.get("failed_hypothesis") != failed_hypothesis]
-        anti_data = anti_data[:50]  # Max 50 anti-patterns
-        _write_file(anti_patterns_path, json.dumps(anti_data, indent=2, ensure_ascii=False) + "\n")
 
     return adr_id
 
