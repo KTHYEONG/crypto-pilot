@@ -1,6 +1,16 @@
 {
   "tasks": [
     {
+      "task_id": "TASK_TECHNICAL_EXPERT_EQUITY_EXHAUSTION",
+      "date": "2026-08-01",
+      "adr_id": "ADR_20260801_TECHNICAL_EXPERT_EQUITY_EXHAUSTION",
+      "domain": "execution",
+      "title": "Technical expert short equity exhaustion fail-closed handling",
+      "why": "Short backtests could produce non-positive marked equity and crash the reliability gate.",
+      "resolution": "Raised DataIntegrityError at equity exhaustion and converted evaluation failures into pending reports.",
+      "impact": "Previously crashing short CLI runs now terminate safely as PENDING without invalid reliability metrics."
+    },
+    {
       "task_id": "TASK_OI_DELEVERAGING_GATE_SCREEN",
       "date": "2026-08-01",
       "adr_id": "ADR_20260801_OI_DELEVERAGING_GATE_SCREEN",
