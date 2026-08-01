@@ -1,6 +1,16 @@
 {
   "tasks": [
     {
+      "task_id": "TASK_OI_DELEVERAGING_GATE_SCREEN",
+      "date": "2026-08-01",
+      "adr_id": "ADR_20260801_OI_DELEVERAGING_GATE_SCREEN",
+      "domain": "signal",
+      "title": "OI deleveraging sealed multi-symbol gate evaluation",
+      "why": "The fixed sleeve needed an independent return source to reduce fold concentration.",
+      "resolution": "Collected causal daily metrics and evaluated open_interest_deleveraging_v1 across BTC, ETH, AVAX, BNB, and DOGE under unchanged gates.",
+      "impact": "All five symbols were rejected and the candidate remains excluded from the expert catalog."
+    },
+    {
       "task_id": "TASK_PROVENANCE_LEDGER_CLI_CONSOLIDATION",
       "date": "2026-08-01",
       "adr_id": "ADR_20260801_PROVENANCE_LEDGER_CLI_CONSOLIDATION",

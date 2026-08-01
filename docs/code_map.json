@@ -11,6 +11,9 @@
   "src/application/expert_portfolio_evaluation.py": {
     "testing": "tests/unit/application/test_expert_portfolio_evaluation.py"
   },
+  "src/application/oi_deleveraging_evaluation.py": {
+    "testing": "tests/unit/application/test_oi_deleveraging_evaluation.py"
+  },
   "src/application/portfolio_evaluation.py": {
     "testing": "tests/unit/application/test_portfolio_evaluation.py"
   },
@@ -213,6 +216,16 @@
   },
   "src/research/evaluation/reliability.py": {
     "testing": "tests/unit/research/evaluation/test_reliability.py"
+  },
+  "src/research/oi_deleveraging/__init__.py": {},
+  "src/research/oi_deleveraging/backtest.py": {
+    "testing": "tests/unit/research/oi_deleveraging/test_backtest.py"
+  },
+  "src/research/oi_deleveraging/contracts.py": {
+    "testing": "tests/unit/research/oi_deleveraging/test_market_data.py"
+  },
+  "src/research/oi_deleveraging/market_data.py": {
+    "testing": "tests/unit/research/oi_deleveraging/test_market_data.py"
   },
   "src/research/expert_portfolio/__init__.py": {},
   "src/research/expert_portfolio/allocator.py": {
