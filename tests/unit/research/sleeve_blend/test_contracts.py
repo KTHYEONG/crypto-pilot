@@ -47,3 +47,29 @@ def test_directional_sleeve_spec_freezes_symbols_and_limits_settings() -> None:
         DirectionalSleeveSpec(history_days=0)
     with pytest.raises(ValueError, match="max_symbol_weight"):
         DirectionalSleeveSpec(max_symbol_weight=0.0)
+
+
+def test_backtest_facade_preserves_canonical_object_identity() -> None:
+    """The backtest facade re-exports the canonical module objects."""
+    from src.research.sleeve_blend import backtest as facade
+    from src.research.sleeve_blend import directional, fixed, weights
+
+    assert facade.run_fixed_sleeve_portfolio is fixed.run_fixed_sleeve_portfolio
+    assert facade.run_fixed_sleeve_portfolio_calibrated is (
+        fixed.run_fixed_sleeve_portfolio_calibrated
+    )
+    assert facade.run_fixed_sleeve_portfolio_with_leverage is (
+        fixed.run_fixed_sleeve_portfolio_with_leverage
+    )
+    assert facade.compute_causal_risk_weights is weights.compute_causal_risk_weights
+    assert facade.component_labels is weights.component_labels
+    assert facade.symbol_of_component is weights.symbol_of_component
+    assert facade.run_directional_sleeve_portfolio is (
+        directional.run_directional_sleeve_portfolio
+    )
+    assert facade.run_directional_sleeve_portfolio_with_weights is (
+        directional.run_directional_sleeve_portfolio_with_weights
+    )
+    assert facade.run_directional_sleeve_portfolio_fixed_weights is (
+        directional.run_directional_sleeve_portfolio_fixed_weights
+    )
