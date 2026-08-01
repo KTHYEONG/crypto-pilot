@@ -1,5 +1,12 @@
 [
   {
+    "domain": "execution",
+    "failed_hypothesis": "A full-notional short can always produce a valid positive equity series.",
+    "failure_reason": "A sharp adverse price move makes marked short equity non-positive before evaluation gates run.",
+    "falsified_date": "2026-08-01",
+    "source_adr": "ADR_20260801_TECHNICAL_EXPERT_EQUITY_EXHAUSTION"
+  },
+  {
     "domain": "signal",
     "failed_hypothesis": "open_interest_deleveraging_v1",
     "failure_reason": "All five sealed symbol runs failed observation and stress gates despite sufficient trade counts.",
@@ -260,5 +267,795 @@
       "trade_count": 2
     },
     "run_log_reference": "(not logged)"
+  },
+  {
+    "candidate_id": "4a70167d5c371801cd93d9ad675fb9de55a5e31563a73e1448b543e35ad3b93f",
+    "code_hash": "2ac409d28229e657b913bd8b7b1b6ee476ed876421920afc47c9f6462a728c6b",
+    "data_hash": "c8c67ee33da6d75fbcc21972a79971bb6fae75ba7aca5734624628d37fb9627e",
+    "domain": "technical_ema_alignment_long_v1",
+    "failed_gates": [
+      "observation",
+      "fold",
+      "stress"
+    ],
+    "failed_hypothesis": "technical_ema_alignment_long_v1",
+    "failure_reason": "promotion status=REJECTED",
+    "falsified_date": "2026-08-01",
+    "metrics": {
+      "cagr": 0.320033,
+      "fold_max_contribution": 0.61301,
+      "mdd": -0.466767,
+      "observation_lcb90": 0.096588,
+      "sharpe": 1.002151,
+      "stress_verdict": "FAIL",
+      "trade_count": 165
+    },
+    "run_log_reference": "2026-08-01T09:15:04.508663+00:00"
+  },
+  {
+    "candidate_id": "739395de59c3101f1b148b59427f52cdecef06d7271b9837293a74b3b42c6519",
+    "code_hash": "2ac409d28229e657b913bd8b7b1b6ee476ed876421920afc47c9f6462a728c6b",
+    "data_hash": "7083e92c41af15c2a74e0b259a643eb4511184d5f777c90b686ce5f982bc4a78",
+    "domain": "technical_ema_alignment_long_v1",
+    "failed_gates": [
+      "observation",
+      "fold",
+      "stress"
+    ],
+    "failed_hypothesis": "technical_ema_alignment_long_v1",
+    "failure_reason": "promotion status=REJECTED",
+    "falsified_date": "2026-08-01",
+    "metrics": {
+      "cagr": 0.410727,
+      "fold_max_contribution": 0.491654,
+      "mdd": -0.543552,
+      "observation_lcb90": 0.09391,
+      "sharpe": 0.993254,
+      "stress_verdict": "FAIL",
+      "trade_count": 186
+    },
+    "run_log_reference": "2026-08-01T09:15:06.686365+00:00"
+  },
+  {
+    "candidate_id": "4c9bd1cc2635f7460a4aad4ff4a98809b2a59028c7e988561a08451d69dd8062",
+    "code_hash": "2ac409d28229e657b913bd8b7b1b6ee476ed876421920afc47c9f6462a728c6b",
+    "data_hash": "b5d5eb100a4cbfb79cc8979d943a58392bec3aa9a6a4ca88007c3f61faf369f3",
+    "domain": "technical_ema_alignment_long_v1",
+    "failed_gates": [
+      "observation",
+      "fold",
+      "stress"
+    ],
+    "failed_hypothesis": "technical_ema_alignment_long_v1",
+    "failure_reason": "promotion status=REJECTED",
+    "falsified_date": "2026-08-01",
+    "metrics": {
+      "cagr": 0.830319,
+      "fold_max_contribution": 0.98603,
+      "mdd": -0.599196,
+      "observation_lcb90": 0.200122,
+      "sharpe": 1.192458,
+      "stress_verdict": "FAIL",
+      "trade_count": 143
+    },
+    "run_log_reference": "2026-08-01T09:15:08.734352+00:00"
+  },
+  {
+    "candidate_id": "db153a33714e1706b5565705745d7c5727c107205cfd08434965e158cf35b7ac",
+    "code_hash": "2ac409d28229e657b913bd8b7b1b6ee476ed876421920afc47c9f6462a728c6b",
+    "data_hash": "a4e2e8048858824c469488a5e5a90b1914e0ebd99358cf8721f14af771ad9fec",
+    "domain": "technical_ema_alignment_long_v1",
+    "failed_gates": [
+      "observation",
+      "fold",
+      "stress"
+    ],
+    "failed_hypothesis": "technical_ema_alignment_long_v1",
+    "failure_reason": "promotion status=REJECTED",
+    "falsified_date": "2026-08-01",
+    "metrics": {
+      "cagr": 0.462053,
+      "fold_max_contribution": 0.908363,
+      "mdd": -0.467657,
+      "observation_lcb90": 0.075474,
+      "sharpe": 1.006806,
+      "stress_verdict": "FAIL",
+      "trade_count": 206
+    },
+    "run_log_reference": "2026-08-01T09:15:10.963905+00:00"
+  },
+  {
+    "candidate_id": "257d3a2099fb2bc900496d1bc04b2861cf37763f41ffbb21cb602a3bce9c7a50",
+    "code_hash": "2ac409d28229e657b913bd8b7b1b6ee476ed876421920afc47c9f6462a728c6b",
+    "data_hash": "2a6582e8e771488e2f93e3c347bf662f127794c6df13b0efbd7f394e8d42f475",
+    "domain": "technical_ema_alignment_long_v1",
+    "failed_gates": [
+      "observation",
+      "fold",
+      "stress"
+    ],
+    "failed_hypothesis": "technical_ema_alignment_long_v1",
+    "failure_reason": "promotion status=REJECTED",
+    "falsified_date": "2026-08-01",
+    "metrics": {
+      "cagr": 1.601055,
+      "fold_max_contribution": 0.652695,
+      "mdd": -0.700035,
+      "observation_lcb90": 0.535102,
+      "sharpe": 1.354212,
+      "stress_verdict": "FAIL",
+      "trade_count": 138
+    },
+    "run_log_reference": "2026-08-01T09:15:12.944917+00:00"
+  },
+  {
+    "candidate_id": "898068b43ac7a6e651fe49f47f07c5b7f90ff5a76181536019dee4866bcaf736",
+    "code_hash": "2ac409d28229e657b913bd8b7b1b6ee476ed876421920afc47c9f6462a728c6b",
+    "data_hash": "c8c67ee33da6d75fbcc21972a79971bb6fae75ba7aca5734624628d37fb9627e",
+    "domain": "technical_ema_alignment_short_v1",
+    "failed_gates": [
+      "observation",
+      "stress"
+    ],
+    "failed_hypothesis": "technical_ema_alignment_short_v1",
+    "failure_reason": "promotion status=REJECTED",
+    "falsified_date": "2026-08-01",
+    "metrics": {
+      "cagr": -0.157546,
+      "fold_max_contribution": 0.311289,
+      "mdd": -0.747642,
+      "observation_lcb90": -0.277682,
+      "sharpe": -0.412639,
+      "stress_verdict": "FAIL",
+      "trade_count": 165
+    },
+    "run_log_reference": "2026-08-01T09:15:15.374045+00:00"
+  },
+  {
+    "candidate_id": "1ec6aa4e2cd8396a312a477007cba3d4fb53aafb418d3995ce20f2656cb8770a",
+    "code_hash": "2ac409d28229e657b913bd8b7b1b6ee476ed876421920afc47c9f6462a728c6b",
+    "data_hash": "7083e92c41af15c2a74e0b259a643eb4511184d5f777c90b686ce5f982bc4a78",
+    "domain": "technical_ema_alignment_short_v1",
+    "failed_gates": [
+      "observation",
+      "stress"
+    ],
+    "failed_hypothesis": "technical_ema_alignment_short_v1",
+    "failure_reason": "promotion status=REJECTED",
+    "falsified_date": "2026-08-01",
+    "metrics": {
+      "cagr": -0.285172,
+      "fold_max_contribution": 0.279159,
+      "mdd": -0.908879,
+      "observation_lcb90": -0.411236,
+      "sharpe": -0.676828,
+      "stress_verdict": "FAIL",
+      "trade_count": 185
+    },
+    "run_log_reference": "2026-08-01T09:15:17.720858+00:00"
+  },
+  {
+    "candidate_id": "1a7398ba8a1023288bcb18297b18e33d4e7de8c2e302e99225753357de5db89a",
+    "code_hash": "2ac409d28229e657b913bd8b7b1b6ee476ed876421920afc47c9f6462a728c6b",
+    "data_hash": "b5d5eb100a4cbfb79cc8979d943a58392bec3aa9a6a4ca88007c3f61faf369f3",
+    "domain": "technical_ema_alignment_short_v1",
+    "failed_gates": [
+      "observation",
+      "fold",
+      "stress"
+    ],
+    "failed_hypothesis": "technical_ema_alignment_short_v1",
+    "failure_reason": "promotion status=REJECTED",
+    "falsified_date": "2026-08-01",
+    "metrics": {
+      "cagr": -0.082999,
+      "fold_max_contribution": 0.72601,
+      "mdd": -0.551491,
+      "observation_lcb90": -0.303639,
+      "sharpe": 0.098608,
+      "stress_verdict": "FAIL",
+      "trade_count": 161
+    },
+    "run_log_reference": "2026-08-01T09:15:19.802612+00:00"
+  },
+  {
+    "candidate_id": "edc37e7b65ddace2bfdbbd28ff694766806acaa3c57b63ca2c04cb310bb21ad9",
+    "code_hash": "2ac409d28229e657b913bd8b7b1b6ee476ed876421920afc47c9f6462a728c6b",
+    "data_hash": "a4e2e8048858824c469488a5e5a90b1914e0ebd99358cf8721f14af771ad9fec",
+    "domain": "technical_ema_alignment_short_v1",
+    "failed_gates": [
+      "observation",
+      "fold",
+      "stress"
+    ],
+    "failed_hypothesis": "technical_ema_alignment_short_v1",
+    "failure_reason": "promotion status=REJECTED",
+    "falsified_date": "2026-08-01",
+    "metrics": {
+      "cagr": 0.030226,
+      "fold_max_contribution": 0.84767,
+      "mdd": -0.520743,
+      "observation_lcb90": -0.133872,
+      "sharpe": 0.256978,
+      "stress_verdict": "FAIL",
+      "trade_count": 141
+    },
+    "run_log_reference": "2026-08-01T09:15:22.189842+00:00"
+  },
+  {
+    "candidate_id": "c87c95cd3738d6876d3654b2dc345b96383175d8801a3772d991a0b64ca1629b",
+    "code_hash": "2ac409d28229e657b913bd8b7b1b6ee476ed876421920afc47c9f6462a728c6b",
+    "data_hash": "2a6582e8e771488e2f93e3c347bf662f127794c6df13b0efbd7f394e8d42f475",
+    "domain": "technical_ema_alignment_short_v1",
+    "failed_gates": [
+      "observation",
+      "fold",
+      "stress"
+    ],
+    "failed_hypothesis": "technical_ema_alignment_short_v1",
+    "failure_reason": "promotion status=REJECTED",
+    "falsified_date": "2026-08-01",
+    "metrics": {
+      "cagr": -0.019687,
+      "fold_max_contribution": 5.009893,
+      "mdd": -0.68206,
+      "observation_lcb90": -0.229697,
+      "sharpe": 0.186324,
+      "stress_verdict": "FAIL",
+      "trade_count": 189
+    },
+    "run_log_reference": "2026-08-01T09:15:24.431236+00:00"
+  },
+  {
+    "candidate_id": "76c26c40cc0de2e3bb2d1f36ad35c3226dd077ab93e2dc310333513f7c7abdf6",
+    "code_hash": "2ac409d28229e657b913bd8b7b1b6ee476ed876421920afc47c9f6462a728c6b",
+    "data_hash": "c8c67ee33da6d75fbcc21972a79971bb6fae75ba7aca5734624628d37fb9627e",
+    "domain": "technical_macd_histogram_regime_long_v1",
+    "failed_gates": [
+      "observation",
+      "fold",
+      "stress"
+    ],
+    "failed_hypothesis": "technical_macd_histogram_regime_long_v1",
+    "failure_reason": "promotion status=REJECTED",
+    "falsified_date": "2026-08-01",
+    "metrics": {
+      "cagr": 0.171596,
+      "fold_max_contribution": 0.603678,
+      "mdd": -0.307631,
+      "observation_lcb90": 0.004102,
+      "sharpe": 0.721957,
+      "stress_verdict": "FAIL",
+      "trade_count": 278
+    },
+    "run_log_reference": "2026-08-01T09:15:26.824244+00:00"
+  },
+  {
+    "candidate_id": "4070794092f235f52340575e27a1836c5e5b3fc948cb9c417579cae973995932",
+    "code_hash": "2ac409d28229e657b913bd8b7b1b6ee476ed876421920afc47c9f6462a728c6b",
+    "data_hash": "7083e92c41af15c2a74e0b259a643eb4511184d5f777c90b686ce5f982bc4a78",
+    "domain": "technical_macd_histogram_regime_long_v1",
+    "failed_gates": [
+      "observation",
+      "fold",
+      "stress"
+    ],
+    "failed_hypothesis": "technical_macd_histogram_regime_long_v1",
+    "failure_reason": "promotion status=REJECTED",
+    "falsified_date": "2026-08-01",
+    "metrics": {
+      "cagr": 0.425292,
+      "fold_max_contribution": 0.480722,
+      "mdd": -0.431718,
+      "observation_lcb90": 0.165568,
+      "sharpe": 1.161175,
+      "stress_verdict": "FAIL",
+      "trade_count": 259
+    },
+    "run_log_reference": "2026-08-01T09:15:29.188067+00:00"
+  },
+  {
+    "candidate_id": "767381806eef6acfbbe284b2d46df3161583b6683ae0786be04f0e77fcdb724d",
+    "code_hash": "2ac409d28229e657b913bd8b7b1b6ee476ed876421920afc47c9f6462a728c6b",
+    "data_hash": "b5d5eb100a4cbfb79cc8979d943a58392bec3aa9a6a4ca88007c3f61faf369f3",
+    "domain": "technical_macd_histogram_regime_long_v1",
+    "failed_gates": [
+      "observation",
+      "fold",
+      "stress"
+    ],
+    "failed_hypothesis": "technical_macd_histogram_regime_long_v1",
+    "failure_reason": "promotion status=REJECTED",
+    "falsified_date": "2026-08-01",
+    "metrics": {
+      "cagr": 0.754767,
+      "fold_max_contribution": 0.958786,
+      "mdd": -0.469062,
+      "observation_lcb90": 0.232704,
+      "sharpe": 1.218883,
+      "stress_verdict": "FAIL",
+      "trade_count": 183
+    },
+    "run_log_reference": "2026-08-01T09:15:31.300102+00:00"
+  },
+  {
+    "candidate_id": "ce140f62081079705c4cf97ad1fc7931d4b4be55e4664933c47006587f1ba1e3",
+    "code_hash": "2ac409d28229e657b913bd8b7b1b6ee476ed876421920afc47c9f6462a728c6b",
+    "data_hash": "a4e2e8048858824c469488a5e5a90b1914e0ebd99358cf8721f14af771ad9fec",
+    "domain": "technical_macd_histogram_regime_long_v1",
+    "failed_gates": [
+      "observation",
+      "fold",
+      "stress"
+    ],
+    "failed_hypothesis": "technical_macd_histogram_regime_long_v1",
+    "failure_reason": "promotion status=REJECTED",
+    "falsified_date": "2026-08-01",
+    "metrics": {
+      "cagr": 0.344824,
+      "fold_max_contribution": 0.934072,
+      "mdd": -0.465977,
+      "observation_lcb90": 0.076595,
+      "sharpe": 0.908259,
+      "stress_verdict": "FAIL",
+      "trade_count": 287
+    },
+    "run_log_reference": "2026-08-01T09:15:33.594117+00:00"
+  },
+  {
+    "candidate_id": "dab4b8773652962c85adf9abe1e4a7eff60914e35efc014836cf8bb05adad1bd",
+    "code_hash": "2ac409d28229e657b913bd8b7b1b6ee476ed876421920afc47c9f6462a728c6b",
+    "data_hash": "2a6582e8e771488e2f93e3c347bf662f127794c6df13b0efbd7f394e8d42f475",
+    "domain": "technical_macd_histogram_regime_long_v1",
+    "failed_gates": [
+      "observation",
+      "fold",
+      "stress"
+    ],
+    "failed_hypothesis": "technical_macd_histogram_regime_long_v1",
+    "failure_reason": "promotion status=REJECTED",
+    "falsified_date": "2026-08-01",
+    "metrics": {
+      "cagr": 0.893187,
+      "fold_max_contribution": 0.835534,
+      "mdd": -0.671554,
+      "observation_lcb90": 0.180874,
+      "sharpe": 1.058143,
+      "stress_verdict": "FAIL",
+      "trade_count": 189
+    },
+    "run_log_reference": "2026-08-01T09:15:35.781764+00:00"
+  },
+  {
+    "candidate_id": "b04f5f537b1cd1547a7f696df3cdeedd81e3f51ce09f802d4c9ca9bca7821fb3",
+    "code_hash": "2ac409d28229e657b913bd8b7b1b6ee476ed876421920afc47c9f6462a728c6b",
+    "data_hash": "c8c67ee33da6d75fbcc21972a79971bb6fae75ba7aca5734624628d37fb9627e",
+    "domain": "technical_macd_histogram_regime_short_v1",
+    "failed_gates": [
+      "observation",
+      "fold",
+      "stress"
+    ],
+    "failed_hypothesis": "technical_macd_histogram_regime_short_v1",
+    "failure_reason": "promotion status=REJECTED",
+    "falsified_date": "2026-08-01",
+    "metrics": {
+      "cagr": -0.224557,
+      "fold_max_contribution": 0.505247,
+      "mdd": -0.849983,
+      "observation_lcb90": -0.322277,
+      "sharpe": -0.843544,
+      "stress_verdict": "FAIL",
+      "trade_count": 224
+    },
+    "run_log_reference": "2026-08-01T09:15:38.262691+00:00"
+  },
+  {
+    "candidate_id": "ef135fac78e59c664bffac8eb756b9c4e544e0449e8e78e2b263505ea7fbd40a",
+    "code_hash": "2ac409d28229e657b913bd8b7b1b6ee476ed876421920afc47c9f6462a728c6b",
+    "data_hash": "7083e92c41af15c2a74e0b259a643eb4511184d5f777c90b686ce5f982bc4a78",
+    "domain": "technical_macd_histogram_regime_short_v1",
+    "failed_gates": [
+      "observation",
+      "fold",
+      "stress"
+    ],
+    "failed_hypothesis": "technical_macd_histogram_regime_short_v1",
+    "failure_reason": "promotion status=REJECTED",
+    "falsified_date": "2026-08-01",
+    "metrics": {
+      "cagr": -0.17996,
+      "fold_max_contribution": 0.540585,
+      "mdd": -0.806227,
+      "observation_lcb90": -0.314904,
+      "sharpe": -0.407626,
+      "stress_verdict": "FAIL",
+      "trade_count": 235
+    },
+    "run_log_reference": "2026-08-01T09:15:40.675046+00:00"
+  },
+  {
+    "candidate_id": "4b7b030bf40052c498c0304dfe15854a69d4fbc4e60676ada6b97e8afb880da0",
+    "code_hash": "2ac409d28229e657b913bd8b7b1b6ee476ed876421920afc47c9f6462a728c6b",
+    "data_hash": "b5d5eb100a4cbfb79cc8979d943a58392bec3aa9a6a4ca88007c3f61faf369f3",
+    "domain": "technical_macd_histogram_regime_short_v1",
+    "failed_gates": [
+      "observation",
+      "fold",
+      "stress"
+    ],
+    "failed_hypothesis": "technical_macd_histogram_regime_short_v1",
+    "failure_reason": "promotion status=REJECTED",
+    "falsified_date": "2026-08-01",
+    "metrics": {
+      "cagr": 0.082472,
+      "fold_max_contribution": 1.105027,
+      "mdd": -0.777915,
+      "observation_lcb90": -0.168053,
+      "sharpe": 0.403094,
+      "stress_verdict": "FAIL",
+      "trade_count": 235
+    },
+    "run_log_reference": "2026-08-01T09:15:42.856199+00:00"
+  },
+  {
+    "candidate_id": "51c1bfbb9e9da68b2b31f5c1011e5f733cfee4a7281b53f1c42a27d3d54753ae",
+    "code_hash": "2ac409d28229e657b913bd8b7b1b6ee476ed876421920afc47c9f6462a728c6b",
+    "data_hash": "a4e2e8048858824c469488a5e5a90b1914e0ebd99358cf8721f14af771ad9fec",
+    "domain": "technical_macd_histogram_regime_short_v1",
+    "failed_gates": [
+      "observation",
+      "fold",
+      "stress"
+    ],
+    "failed_hypothesis": "technical_macd_histogram_regime_short_v1",
+    "failure_reason": "promotion status=REJECTED",
+    "falsified_date": "2026-08-01",
+    "metrics": {
+      "cagr": -0.067707,
+      "fold_max_contribution": 0.853386,
+      "mdd": -0.653857,
+      "observation_lcb90": -0.210804,
+      "sharpe": -0.03967,
+      "stress_verdict": "FAIL",
+      "trade_count": 238
+    },
+    "run_log_reference": "2026-08-01T09:15:45.297795+00:00"
+  },
+  {
+    "candidate_id": "e820829e8c1e05e17d30f68547c3821fd754ca2cf731fe03938741405a52c146",
+    "code_hash": "2ac409d28229e657b913bd8b7b1b6ee476ed876421920afc47c9f6462a728c6b",
+    "data_hash": "2a6582e8e771488e2f93e3c347bf662f127794c6df13b0efbd7f394e8d42f475",
+    "domain": "technical_macd_histogram_regime_short_v1",
+    "failed_gates": [
+      "observation",
+      "fold",
+      "stress"
+    ],
+    "failed_hypothesis": "technical_macd_histogram_regime_short_v1",
+    "failure_reason": "promotion status=REJECTED",
+    "falsified_date": "2026-08-01",
+    "metrics": {
+      "cagr": -0.031433,
+      "fold_max_contribution": 2.444965,
+      "mdd": -0.553429,
+      "observation_lcb90": -0.221506,
+      "sharpe": 0.153244,
+      "stress_verdict": "FAIL",
+      "trade_count": 268
+    },
+    "run_log_reference": "2026-08-01T09:15:47.675318+00:00"
+  },
+  {
+    "candidate_id": "37f708706f63f3923d881031577a33c4964d23e0f05673a2f34ac7826f0f9004",
+    "code_hash": "2ac409d28229e657b913bd8b7b1b6ee476ed876421920afc47c9f6462a728c6b",
+    "data_hash": "c8c67ee33da6d75fbcc21972a79971bb6fae75ba7aca5734624628d37fb9627e",
+    "domain": "technical_adx_di_regime_long_v1",
+    "failed_gates": [
+      "observation",
+      "fold",
+      "stress"
+    ],
+    "failed_hypothesis": "technical_adx_di_regime_long_v1",
+    "failure_reason": "promotion status=REJECTED",
+    "falsified_date": "2026-08-01",
+    "metrics": {
+      "cagr": -0.016463,
+      "fold_max_contribution": 2.798292,
+      "mdd": -0.319509,
+      "observation_lcb90": -0.105316,
+      "sharpe": -0.005285,
+      "stress_verdict": "FAIL",
+      "trade_count": 122
+    },
+    "run_log_reference": "2026-08-01T09:15:49.931029+00:00"
+  },
+  {
+    "candidate_id": "57c43619bfe395d20788e40d4fc04c782c2153b8e84a5b9565a04014e8556a49",
+    "code_hash": "2ac409d28229e657b913bd8b7b1b6ee476ed876421920afc47c9f6462a728c6b",
+    "data_hash": "7083e92c41af15c2a74e0b259a643eb4511184d5f777c90b686ce5f982bc4a78",
+    "domain": "technical_adx_di_regime_long_v1",
+    "failed_gates": [
+      "observation",
+      "fold",
+      "stress"
+    ],
+    "failed_hypothesis": "technical_adx_di_regime_long_v1",
+    "failure_reason": "promotion status=REJECTED",
+    "falsified_date": "2026-08-01",
+    "metrics": {
+      "cagr": -0.068739,
+      "fold_max_contribution": 0.850912,
+      "mdd": -0.510665,
+      "observation_lcb90": -0.163312,
+      "sharpe": -0.236696,
+      "stress_verdict": "FAIL",
+      "trade_count": 113
+    },
+    "run_log_reference": "2026-08-01T09:15:52.348490+00:00"
+  },
+  {
+    "candidate_id": "4b68bef8e7238b8e48fe3397d942c4b029bd5fb92fbad0a3fba4076c200c9d2b",
+    "code_hash": "2ac409d28229e657b913bd8b7b1b6ee476ed876421920afc47c9f6462a728c6b",
+    "data_hash": "b5d5eb100a4cbfb79cc8979d943a58392bec3aa9a6a4ca88007c3f61faf369f3",
+    "domain": "technical_adx_di_regime_long_v1",
+    "failed_gates": [
+      "observation",
+      "fold",
+      "stress"
+    ],
+    "failed_hypothesis": "technical_adx_di_regime_long_v1",
+    "failure_reason": "promotion status=REJECTED",
+    "falsified_date": "2026-08-01",
+    "metrics": {
+      "cagr": 0.202969,
+      "fold_max_contribution": 1.309959,
+      "mdd": -0.51226,
+      "observation_lcb90": -0.008794,
+      "sharpe": 0.692339,
+      "stress_verdict": "FAIL",
+      "trade_count": 101
+    },
+    "run_log_reference": "2026-08-01T09:15:54.367960+00:00"
+  },
+  {
+    "candidate_id": "931d6121f28a77a4fc92fa12fbdddab7927459f1fadb7c8ea46b9bddbaaf9e4c",
+    "code_hash": "2ac409d28229e657b913bd8b7b1b6ee476ed876421920afc47c9f6462a728c6b",
+    "data_hash": "a4e2e8048858824c469488a5e5a90b1914e0ebd99358cf8721f14af771ad9fec",
+    "domain": "technical_adx_di_regime_long_v1",
+    "failed_gates": [
+      "observation",
+      "fold",
+      "stress"
+    ],
+    "failed_hypothesis": "technical_adx_di_regime_long_v1",
+    "failure_reason": "promotion status=REJECTED",
+    "falsified_date": "2026-08-01",
+    "metrics": {
+      "cagr": -0.045559,
+      "fold_max_contribution": 1.001213,
+      "mdd": -0.327154,
+      "observation_lcb90": -0.128643,
+      "sharpe": -0.15617,
+      "stress_verdict": "FAIL",
+      "trade_count": 103
+    },
+    "run_log_reference": "2026-08-01T09:15:56.662232+00:00"
+  },
+  {
+    "candidate_id": "dfa2f6dff2daf094ea5823d73b4e7eb3a6a65398cec8795eedc133a7a80d9fc7",
+    "code_hash": "2ac409d28229e657b913bd8b7b1b6ee476ed876421920afc47c9f6462a728c6b",
+    "data_hash": "2a6582e8e771488e2f93e3c347bf662f127794c6df13b0efbd7f394e8d42f475",
+    "domain": "technical_adx_di_regime_long_v1",
+    "failed_gates": [
+      "observation",
+      "fold",
+      "stress"
+    ],
+    "failed_hypothesis": "technical_adx_di_regime_long_v1",
+    "failure_reason": "promotion status=REJECTED",
+    "falsified_date": "2026-08-01",
+    "metrics": {
+      "cagr": 0.098088,
+      "fold_max_contribution": 2.163466,
+      "mdd": -0.751383,
+      "observation_lcb90": -0.181816,
+      "sharpe": 0.416291,
+      "stress_verdict": "FAIL",
+      "trade_count": 105
+    },
+    "run_log_reference": "2026-08-01T09:15:58.785026+00:00"
+  },
+  {
+    "candidate_id": "6ab50ad6aef76ec52f691becaff9ab0769e6ac460a82c6b837ecd4841b8d5b64",
+    "code_hash": "2ac409d28229e657b913bd8b7b1b6ee476ed876421920afc47c9f6462a728c6b",
+    "data_hash": "c8c67ee33da6d75fbcc21972a79971bb6fae75ba7aca5734624628d37fb9627e",
+    "domain": "technical_adx_di_regime_short_v1",
+    "failed_gates": [
+      "observation",
+      "fold",
+      "stress"
+    ],
+    "failed_hypothesis": "technical_adx_di_regime_short_v1",
+    "failure_reason": "promotion status=REJECTED",
+    "falsified_date": "2026-08-01",
+    "metrics": {
+      "cagr": -0.080583,
+      "fold_max_contribution": 0.846842,
+      "mdd": -0.458707,
+      "observation_lcb90": -0.14978,
+      "sharpe": -0.41882,
+      "stress_verdict": "FAIL",
+      "trade_count": 120
+    },
+    "run_log_reference": "2026-08-01T09:16:01.191940+00:00"
+  },
+  {
+    "candidate_id": "7c49ed9ee1ed6d6f4a2757d395eaffd059b6fc549ff4ba1f6ff484582f2cc2f5",
+    "code_hash": "2ac409d28229e657b913bd8b7b1b6ee476ed876421920afc47c9f6462a728c6b",
+    "data_hash": "7083e92c41af15c2a74e0b259a643eb4511184d5f777c90b686ce5f982bc4a78",
+    "domain": "technical_adx_di_regime_short_v1",
+    "failed_gates": [
+      "observation",
+      "fold",
+      "stress"
+    ],
+    "failed_hypothesis": "technical_adx_di_regime_short_v1",
+    "failure_reason": "promotion status=REJECTED",
+    "falsified_date": "2026-08-01",
+    "metrics": {
+      "cagr": 0.005112,
+      "fold_max_contribution": 11.331267,
+      "mdd": -0.260628,
+      "observation_lcb90": -0.098955,
+      "sharpe": 0.131038,
+      "stress_verdict": "FAIL",
+      "trade_count": 117
+    },
+    "run_log_reference": "2026-08-01T09:16:03.654372+00:00"
+  },
+  {
+    "candidate_id": "a68810f2bd7349e26d1b0d1b2062e38f04f476be273f996b0868d28bde9a38a5",
+    "code_hash": "2ac409d28229e657b913bd8b7b1b6ee476ed876421920afc47c9f6462a728c6b",
+    "data_hash": "b5d5eb100a4cbfb79cc8979d943a58392bec3aa9a6a4ca88007c3f61faf369f3",
+    "domain": "technical_adx_di_regime_short_v1",
+    "failed_gates": [
+      "observation",
+      "fold",
+      "stress"
+    ],
+    "failed_hypothesis": "technical_adx_di_regime_short_v1",
+    "failure_reason": "promotion status=REJECTED",
+    "falsified_date": "2026-08-01",
+    "metrics": {
+      "cagr": -0.101212,
+      "fold_max_contribution": 0.63384,
+      "mdd": -0.471888,
+      "observation_lcb90": -0.220383,
+      "sharpe": -0.277228,
+      "stress_verdict": "FAIL",
+      "trade_count": 99
+    },
+    "run_log_reference": "2026-08-01T09:16:05.889878+00:00"
+  },
+  {
+    "candidate_id": "8a7155760b79c43513fb0455a0a2f340afe07f32fe26aa939b317c16630c1444",
+    "code_hash": "2ac409d28229e657b913bd8b7b1b6ee476ed876421920afc47c9f6462a728c6b",
+    "data_hash": "a4e2e8048858824c469488a5e5a90b1914e0ebd99358cf8721f14af771ad9fec",
+    "domain": "technical_adx_di_regime_short_v1",
+    "failed_gates": [
+      "observation",
+      "fold",
+      "stress"
+    ],
+    "failed_hypothesis": "technical_adx_di_regime_short_v1",
+    "failure_reason": "promotion status=REJECTED",
+    "falsified_date": "2026-08-01",
+    "metrics": {
+      "cagr": -0.075256,
+      "fold_max_contribution": 0.551485,
+      "mdd": -0.61352,
+      "observation_lcb90": -0.157304,
+      "sharpe": -0.28194,
+      "stress_verdict": "FAIL",
+      "trade_count": 104
+    },
+    "run_log_reference": "2026-08-01T09:16:08.363979+00:00"
+  },
+  {
+    "candidate_id": "a218831ab4b565aa0964d9ae0b99492ec1b0afe79a5e0e9de9c7ec342f77ea2c",
+    "code_hash": "2ac409d28229e657b913bd8b7b1b6ee476ed876421920afc47c9f6462a728c6b",
+    "data_hash": "2a6582e8e771488e2f93e3c347bf662f127794c6df13b0efbd7f394e8d42f475",
+    "domain": "technical_adx_di_regime_short_v1",
+    "failed_gates": [
+      "observation",
+      "fold",
+      "stress"
+    ],
+    "failed_hypothesis": "technical_adx_di_regime_short_v1",
+    "failure_reason": "promotion status=REJECTED",
+    "falsified_date": "2026-08-01",
+    "metrics": {
+      "cagr": -0.081827,
+      "fold_max_contribution": 0.649966,
+      "mdd": -0.511979,
+      "observation_lcb90": -0.200464,
+      "sharpe": -0.06654,
+      "stress_verdict": "FAIL",
+      "trade_count": 110
+    },
+    "run_log_reference": "2026-08-01T09:16:10.726003+00:00"
+  },
+  {
+    "candidate_id": "9a24c0d6240dbcd08e549ca29c10d58fc4853acf201c261e9cd2998bfe269a55",
+    "code_hash": "2ac409d28229e657b913bd8b7b1b6ee476ed876421920afc47c9f6462a728c6b",
+    "data_hash": "c8c67ee33da6d75fbcc21972a79971bb6fae75ba7aca5734624628d37fb9627e",
+    "domain": "technical_ichimoku_cloud_long_v1",
+    "failed_gates": [
+      "observation",
+      "fold",
+      "stress"
+    ],
+    "failed_hypothesis": "technical_ichimoku_cloud_long_v1",
+    "failure_reason": "promotion status=REJECTED",
+    "falsified_date": "2026-08-01",
+    "metrics": {
+      "cagr": 0.016426,
+      "fold_max_contribution": 5.735461,
+      "mdd": -0.694148,
+      "observation_lcb90": -0.168052,
+      "sharpe": 0.228468,
+      "stress_verdict": "FAIL",
+      "trade_count": 309
+    },
+    "run_log_reference": "2026-08-01T09:16:12.939910+00:00"
+  },
+  {
+    "candidate_id": "e2a764487600544e1a6d82c3bb8ee4b76dd6645a5209618148fbebea55fd94c9",
+    "code_hash": "2ac409d28229e657b913bd8b7b1b6ee476ed876421920afc47c9f6462a728c6b",
+    "data_hash": "7083e92c41af15c2a74e0b259a643eb4511184d5f777c90b686ce5f982bc4a78",
+    "domain": "technical_ichimoku_cloud_long_v1",
+    "failed_gates": [
+      "observation",
+      "fold",
+      "stress"
+    ],
+    "failed_hypothesis": "technical_ichimoku_cloud_long_v1",
+    "failure_reason": "promotion status=REJECTED",
+    "falsified_date": "2026-08-01",
+    "metrics": {
+      "cagr": 0.435306,
+      "fold_max_contribution": 0.535236,
+      "mdd": -0.560105,
+      "observation_lcb90": 0.09222,
+      "sharpe": 0.986659,
+      "stress_verdict": "FAIL",
+      "trade_count": 290
+    },
+    "run_log_reference": "2026-08-01T09:16:15.055615+00:00"
+  },
+  {
+    "candidate_id": "c304690972c5721ef63de531abfb1267da5f6adef014376ec4ce0ab68825cae1",
+    "code_hash": "2ac409d28229e657b913bd8b7b1b6ee476ed876421920afc47c9f6462a728c6b",
+    "data_hash": "b5d5eb100a4cbfb79cc8979d943a58392bec3aa9a6a4ca88007c3f61faf369f3",
+    "domain": "technical_ichimoku_cloud_long_v1",
+    "failed_gates": [
+      "observation",
+      "fold",
+      "stress"
+    ],
+    "failed_hypothesis": "technical_ichimoku_cloud_long_v1",
+    "failure_reason": "promotion status=REJECTED",
+    "falsified_date": "2026-08-01",
+    "metrics": {
+      "cagr": 0.499393,
+      "fold_max_contribution": 1.596005,
+      "mdd": -0.791301,
+      "observation_lcb90": -0.046082,
+      "sharpe": 0.906404,
+      "stress_verdict": "FAIL",
+      "trade_count": 231
+    },
+    "run_log_reference": "2026-08-01T09:16:17.022355+00:00"
   }
 ]
