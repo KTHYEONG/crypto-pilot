@@ -25,6 +25,12 @@ def collect_ohlcv(symbol: str, timeframe: str, start: str, end: str) -> None:
     collector.ensure_ohlcv_data(symbol, timeframe, start, end)
     _logger.info("Data collection complete for %s %s (through %s)", symbol, timeframe, end)
 
+def collect_funding(symbol: str, start: str, end: str) -> None:
+    """Incrementally collect futures funding history and persist it to the canonical lake."""
+    collector = DataCollector()
+    collector.ensure_funding_data(symbol, start, end)
+    _logger.info("Funding collection complete for %s (through %s)", symbol, end)
+
 
 def collect_spot_ohlcv(symbol: str, timeframe: str, start: str, end: str) -> None:
     """Incrementally collect spot OHLCV and persist it to the canonical spot lake."""
