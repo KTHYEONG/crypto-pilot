@@ -4,11 +4,9 @@ import dataclasses
 import hashlib
 import json
 import logging
-from pathlib import Path
 
 import pandas as pd
 
-from src.common.config import funding_path, metrics_path, ohlcv_path
 from src.common.errors import DataIntegrityError
 from src.research.baseline.backtest import BacktestResult
 from src.research.contracts import (
@@ -34,6 +32,7 @@ from src.research.evaluation.reliability import (
 from src.research.oi_deleveraging.backtest import run_open_interest_deleveraging_screen
 from src.research.oi_deleveraging.contracts import OIDeleveragingMarketData
 from src.research.oi_deleveraging.market_data import load_oi_deleveraging_market_data
+from src.research.oi_deleveraging.provenance import oi_deleveraging_data_hashes
 from src.research.provenance.code_manifest import compute_code_hash
 from src.research.provenance.results import record_oi_deleveraging_run
 
@@ -45,42 +44,8 @@ _STRESS_SLIPPAGE_MULT = 2.0
 _HYPOTHESIS_ID = "open_interest_deleveraging_v1"
 _RETURN_SOURCE = "open_interest_deleveraging_v1"
 
-_SOURCE_FILES = ("perp_ohlcv", "funding", "metrics")
-
 _BASE_DELAY_BARS = 1
 _STRESS_DELAY_BARS = 2
-
-
-def _source_paths(symbol: str) -> dict[str, str]:
-    return {
-        "perp_ohlcv": str(ohlcv_path(symbol, "1h")),
-        "funding": str(funding_path(symbol)),
-        "metrics": str(metrics_path(symbol)),
-    }
-
-
-def _file_sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1 << 20), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
-
-
-def _data_hashes(symbol: str) -> dict[str, str]:
-    hashes: dict[str, str] = {}
-    for name, path in _source_paths(symbol).items():
-        p = Path(path)
-        if not p.exists():
-            raise DataIntegrityError(f"{name} data missing for {symbol}: {p}")
-        hashes[name] = _file_sha256(p)
-    return hashes
-
-
-def _combined_data_hash(data_hashes: dict[str, str]) -> str:
-    return hashlib.sha256(
-        json.dumps(data_hashes, sort_keys=True).encode("utf-8")
-    ).hexdigest()
 
 
 def _candidate_id(
@@ -266,7 +231,7 @@ def run_oi_deleveraging_evaluation(
         _logger.info("[EVAL] run status=PENDING symbol=%s reason=%s", request.symbol, exc)
         return _pending_report(request)
     try:
-        hashes = _data_hashes(request.symbol)
+        hashes = oi_deleveraging_data_hashes(request.symbol)
     except DataIntegrityError as exc:
         _logger.info("[EVAL] run status=PENDING symbol=%s reason=%s", request.symbol, exc)
         return _pending_report(request)
