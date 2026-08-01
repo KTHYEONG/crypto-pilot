@@ -15,6 +15,7 @@ from src.research.provenance.results import (
     record_expert_portfolio_run,
     record_run,
 )
+
 from src.research.evaluation.promotion import (
     CandidateIdentity,
     compose_promotion_verdict,
@@ -269,6 +270,47 @@ class TestResultsLog:
         assert rec["reliability"]["observation"]["verdict"] == observation.verdict
         df = load_runs(log_path)
         assert df.loc[0, "cash_carry_spec.symbol"] == "BTCUSDT"
+        assert df.loc[0, "promotion.status"] == promotion.status
+
+    def test_record_oi_deleveraging_run_persists_screen_summary(
+        self, tmp_path: Path, make_oi_market_data,
+    ) -> None:
+        from src.research.oi_deleveraging.backtest import run_open_interest_deleveraging_screen
+        from src.research.provenance.results import record_oi_deleveraging_run
+
+        log_path = tmp_path / "runs.jsonl"
+        data = make_oi_market_data(
+            n_bars=8,
+            mark_return_24h=[-0.01, -0.01, 0.02, 0.02, 0.02, 0.02, 0.02, 0.02],
+            oi_change=[-1.0] * 8,
+        )
+        costs = CostModel()
+        result = run_open_interest_deleveraging_screen(data, costs, signal_delay_bars=1)
+        metrics = compute_metrics(result.equity, result.trades)
+        observation, fold, stress = _gate_fixture()
+        identity = CandidateIdentity(
+            hypothesis_id="open_interest_deleveraging_v1", code_hash="sha-oi",
+            parameters={"signal_delay_bars": 1}, data_start="2024-01-01",
+            data_end="2024-01-01", return_source="open_interest_deleveraging_v1",
+        )
+        promotion = compose_promotion_verdict(observation, fold, stress, None)
+        promotion = dataclasses.replace(promotion, candidate=identity)
+
+        rec = record_oi_deleveraging_run(
+            symbol="BTCUSDT", signal_delay_bars=1, costs=costs,
+            result=result, metrics=metrics, start=None, end="2024-01-01",
+            observation_gate=observation, fold_distribution=fold, stress_gate=stress,
+            promotion=promotion, candidate=identity, log_path=log_path,
+        )
+
+        lines = log_path.read_text(encoding="utf-8").splitlines()
+        assert len(lines) == 1
+        assert rec["kind"] == "oi_deleveraging"
+        assert rec["signal_delay_bars"] == 1
+        assert rec["initial_equity"] == 10_000.0
+        assert rec["promotion"]["status"] == promotion.status
+        df = load_runs(log_path)
+        assert df.loc[0, "kind"] == "oi_deleveraging"
         assert df.loc[0, "promotion.status"] == promotion.status
 
     def test_record_expert_portfolio_run_is_append_only(

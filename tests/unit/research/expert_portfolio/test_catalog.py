@@ -8,6 +8,7 @@ from src.research.expert_portfolio.catalog import (
     ExpertLibraryCatalog,
     ExpertLibraryBlueprint,
     compute_blueprint_fingerprint,
+    default_catalog,
     registration_id_from_fingerprint,
 )
 from src.research.expert_portfolio.contracts import ExpertDefinition
@@ -65,3 +66,19 @@ class TestCatalog:
         assert registration_id_from_fingerprint(base) != registration_id_from_fingerprint(
             {**base, "data_hashes": {"ohlcv": "b" * 64}}
         )
+
+
+class TestDefaultCatalog:
+    def test_default_catalog_excludes_unmeasured_oi_candidate(self) -> None:
+        # FD-07: the unmeasured OI candidate and the retired carry return
+        # sources are absent; data intake and a rejected screen leave the
+        # deployed expert set unchanged.
+        catalog = default_catalog()
+        assert "open_interest_deleveraging_v1" not in catalog.blueprints
+        retired = {
+            "cash_and_carry_basis",
+            "altcoin_spot_perp_funding_carry",
+            "funding_dispersion_carry",
+            "funding_dispersion_reverse",
+        }
+        assert not set(catalog.blueprints).intersection(retired)

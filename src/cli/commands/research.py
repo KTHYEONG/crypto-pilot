@@ -5,11 +5,13 @@ import argparse
 from src.application.baseline_evaluation import run_baseline_evaluation
 from src.application.cash_carry_evaluation import run_cash_carry_evaluation
 from src.application.expert_portfolio_evaluation import run_expert_portfolio_evaluation
+from src.application.oi_deleveraging_evaluation import run_oi_deleveraging_evaluation
 from src.application.portfolio_evaluation import run_portfolio_evaluation
 from src.application.sleeve_blend_evaluation import run_sleeve_blend_evaluation
 from src.research.contracts import (
     BaselineEvaluationRequest,
     CashCarryEvaluationRequest,
+    OIDeleveragingEvaluationRequest,
     PortfolioEvaluationRequest,
     SleeveBlendEvaluationRequest,
 )
@@ -83,6 +85,17 @@ def _run_expert_portfolio(args: argparse.Namespace) -> None:
     run_expert_portfolio_evaluation(request)
 
 
+def _run_oi_deleveraging(args: argparse.Namespace) -> None:
+    request = OIDeleveragingEvaluationRequest(
+        symbol=args.symbol,
+        start=args.start,
+        end=args.end,
+        unseal_holdout=args.unseal_holdout,
+        log_run=not args.no_log_run,
+    )
+    run_oi_deleveraging_evaluation(request)
+
+
 def add_research_commands(research_parser: argparse.ArgumentParser) -> None:
     """Attach the ``research run <evaluation>`` group to the root parser."""
     sub = research_parser.add_subparsers(dest="research_command", required=True)
@@ -146,3 +159,13 @@ def add_research_commands(research_parser: argparse.ArgumentParser) -> None:
     expert.add_argument("--unseal-holdout", action="store_true", default=False)
     expert.add_argument("--no-log-run", action="store_true", default=False)
     expert.set_defaults(handler=_run_expert_portfolio)
+
+    oi = run_sub.add_parser(
+        "oi-deleveraging", help="Run the sealed open-interest deleveraging screen",
+    )
+    oi.add_argument("--symbol", default="BTCUSDT")
+    oi.add_argument("--start", default=None)
+    oi.add_argument("--end", default=None)
+    oi.add_argument("--unseal-holdout", action="store_true", default=False)
+    oi.add_argument("--no-log-run", action="store_true", default=False)
+    oi.set_defaults(handler=_run_oi_deleveraging)
