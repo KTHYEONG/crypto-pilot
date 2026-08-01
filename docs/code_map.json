@@ -1,4 +1,7 @@
 {
+  "src/application/admission_backtest.py": {
+    "testing": "tests/unit/application/test_admission_backtest.py"
+  },
   "src/application/baseline_evaluation.py": {
     "testing": "tests/unit/application/test_baseline_evaluation.py"
   },
@@ -8,8 +11,17 @@
   "src/application/collection.py": {
     "testing": "tests/unit/application/test_collection.py"
   },
+  "src/application/expert_evaluation.py": {
+    "testing": "tests/unit/application/test_expert_evaluation.py"
+  },
   "src/application/expert_portfolio_evaluation.py": {
-    "testing": "tests/unit/application/test_expert_portfolio_evaluation.py"
+    "testing": "tests/contract/test_legacy_imports.py"
+  },
+  "src/application/library_admission.py": {
+    "testing": "tests/unit/application/test_library_admission.py"
+  },
+  "src/application/library_evaluation.py": {
+    "testing": "tests/unit/application/test_library_evaluation.py"
   },
   "src/application/oi_deleveraging_evaluation.py": {
     "testing": "tests/unit/application/test_oi_deleveraging_evaluation.py"
@@ -20,17 +32,33 @@
   "src/application/sleeve_blend_evaluation.py": {
     "testing": "tests/unit/application/test_sleeve_blend_evaluation.py"
   },
+  "src/application/technical_expert_evaluation.py": {
+    "testing": "tests/contract/test_legacy_imports.py"
+  },
+  "src/application/technical_library_admission.py": {
+    "testing": "tests/contract/test_legacy_imports.py"
+  },
+  "src/application/technical_library_admission_backtest.py": {
+    "testing": "tests/contract/test_legacy_imports.py"
+  },
   "src/cli/collect_data.py": {
-    "testing": [
-      "tests/unit/cli/test_main.py",
-      "tests/contract/test_cli_compatibility.py"
-    ]
+    "testing": "tests/contract/test_cli_compatibility.py"
+  },
+  "src/cli/commands/data.py": {
+    "testing": "tests/unit/cli/commands/test_data.py"
+  },
+  "src/cli/commands/provenance.py": {
+    "testing": "tests/unit/cli/test_provenance_commands.py"
+  },
+  "src/cli/commands/research.py": {
+    "testing": "tests/unit/cli/commands/test_research.py"
   },
   "src/cli/compare_runs.py": {
-    "testing": [
-      "tests/unit/cli/test_provenance_commands.py",
-      "tests/contract/test_cli_compatibility.py"
-    ]
+    "testing": "tests/contract/test_cli_compatibility.py"
+  },
+  "src/cli/compat.py": {},
+  "src/cli/main.py": {
+    "testing": "tests/unit/cli/test_main.py"
   },
   "src/cli/register_directional_candidate.py": {},
   "src/cli/run_backtest.py": {
@@ -48,7 +76,6 @@
   },
   "src/cli/run_expert_portfolio_backtest.py": {
     "testing": [
-      "tests/unit/cli/test_research_commands.py",
       "tests/contract/test_cli_compatibility.py",
       "tests/integration/cli/test_expert_portfolio_promotion.py"
     ]
@@ -60,10 +87,7 @@
     ]
   },
   "src/cli/run_sleeve_blend_backtest.py": {
-    "testing": [
-      "tests/unit/cli/test_research_commands.py",
-      "tests/contract/test_cli_compatibility.py"
-    ]
+    "testing": "tests/contract/test_cli_compatibility.py"
   },
   "src/common/config.py": {
     "testing": "tests/unit/common/test_config.py"
@@ -76,14 +100,27 @@
       "tests/contract/test_legacy_imports.py",
       "tests/integration/workflows/test_taker_flow_candidate.py",
       "tests/unit/application/test_cash_carry_evaluation.py",
+      "tests/unit/application/test_expert_evaluation.py",
+      "tests/unit/application/test_library_evaluation.py",
+      "tests/unit/application/test_oi_deleveraging_evaluation.py",
+      "tests/unit/market_data/services/test_futures_collection.py",
       "tests/unit/market_data/services/test_spot_collection.py",
       "tests/unit/market_data/storage/test_loaders.py",
       "tests/unit/research/baseline/test_backtest.py",
       "tests/unit/research/baseline/test_directional_funding_signal.py",
       "tests/unit/research/cash_carry/test_market_data.py",
+      "tests/unit/research/cash_carry/test_provenance.py",
+      "tests/unit/research/expert_portfolio/test_admission.py",
+      "tests/unit/research/expert_portfolio/test_backtest.py",
+      "tests/unit/research/oi_deleveraging/test_market_data.py",
+      "tests/unit/research/oi_deleveraging/test_provenance.py",
       "tests/unit/research/portfolio/test_backtest.py",
-      "tests/unit/research/sleeve_blend/test_backtest.py",
-      "tests/unit/research/sleeve_blend/test_directional_backtest.py"
+      "tests/unit/research/provenance/test_fingerprints.py",
+      "tests/unit/research/sleeve_blend/test_directional.py",
+      "tests/unit/research/sleeve_blend/test_fixed.py",
+      "tests/unit/research/technical_experts/test_backtest.py",
+      "tests/unit/research/technical_experts/test_provenance.py",
+      "tests/unit/research/technical_experts/test_signals.py"
     ]
   },
   "src/common/logging.py": {
@@ -97,6 +134,9 @@
   },
   "src/core/logging_setup.py": {
     "testing": "tests/contract/test_legacy_imports.py"
+  },
+  "src/core/settings.py": {
+    "testing": "tests/unit/core/test_settings.py"
   },
   "src/core/types.py": {
     "testing": "tests/contract/test_legacy_imports.py"
@@ -211,7 +251,8 @@
   },
   "src/research/evaluation/policy.py": {
     "testing": [
-      "tests/contract/test_cli_compatibility.py"
+      "tests/contract/test_cli_compatibility.py",
+      "tests/integration/cli/test_expert_portfolio_promotion.py"
     ]
   },
   "src/research/evaluation/promotion.py": {
@@ -220,33 +261,74 @@
   "src/research/evaluation/reliability.py": {
     "testing": "tests/unit/research/evaluation/test_reliability.py"
   },
-  "src/research/oi_deleveraging/__init__.py": {},
-  "src/research/oi_deleveraging/backtest.py": {
-    "testing": "tests/unit/research/oi_deleveraging/test_backtest.py"
+  "src/research/expert_portfolio/admission.py": {
+    "testing": "tests/unit/research/expert_portfolio/test_admission.py"
   },
-  "src/research/oi_deleveraging/contracts.py": {
-    "testing": "tests/unit/research/oi_deleveraging/test_market_data.py"
+  "src/research/expert_portfolio/admission_reports.py": {
+    "testing": [
+      "tests/integration/cli/test_library_admission.py",
+      "tests/unit/research/expert_portfolio/test_contracts.py"
+    ]
   },
-  "src/research/oi_deleveraging/market_data.py": {
-    "testing": "tests/unit/research/oi_deleveraging/test_market_data.py"
+  "src/research/expert_portfolio/admission_types.py": {
+    "testing": [
+      "tests/integration/cli/test_library_admission.py",
+      "tests/unit/application/test_admission_backtest.py",
+      "tests/unit/application/test_library_admission.py",
+      "tests/unit/research/expert_portfolio/test_admission.py",
+      "tests/unit/research/expert_portfolio/test_contracts.py"
+    ]
   },
-  "src/research/oi_deleveraging/provenance.py": {
-    "testing": "tests/unit/research/oi_deleveraging/test_provenance.py"
-  },
-  "src/research/expert_portfolio/__init__.py": {},
   "src/research/expert_portfolio/allocator.py": {
     "testing": "tests/unit/research/expert_portfolio/test_allocator.py"
   },
   "src/research/expert_portfolio/backtest.py": {
     "testing": "tests/unit/research/expert_portfolio/test_backtest.py"
   },
+  "src/research/expert_portfolio/catalog.py": {
+    "testing": "tests/unit/research/expert_portfolio/test_catalog.py"
+  },
+  "src/research/expert_portfolio/contextual_router.py": {
+    "testing": "tests/unit/research/expert_portfolio/test_contextual_router.py"
+  },
   "src/research/expert_portfolio/contracts.py": {
     "testing": "tests/unit/research/expert_portfolio/test_contracts.py"
   },
-  "src/research/expert_portfolio/registry.py": {
+  "src/research/expert_portfolio/models.py": {
     "testing": [
-      "tests/unit/research/expert_portfolio/test_registry.py"
+      "tests/integration/cli/test_expert_library_registration.py",
+      "tests/integration/cli/test_library_admission.py",
+      "tests/integration/cli/test_technical_expert_library_registration.py",
+      "tests/unit/application/test_admission_backtest.py",
+      "tests/unit/application/test_library_admission.py",
+      "tests/unit/application/test_library_evaluation.py",
+      "tests/unit/cli/test_research_commands.py",
+      "tests/unit/research/expert_portfolio/test_admission.py",
+      "tests/unit/research/expert_portfolio/test_allocator.py",
+      "tests/unit/research/expert_portfolio/test_backtest.py",
+      "tests/unit/research/expert_portfolio/test_catalog.py",
+      "tests/unit/research/expert_portfolio/test_contextual_router.py",
+      "tests/unit/research/expert_portfolio/test_contracts.py",
+      "tests/unit/research/expert_portfolio/test_registry.py",
+      "tests/unit/research/provenance/test_registration.py"
     ]
+  },
+  "src/research/expert_portfolio/registry.py": {
+    "testing": "tests/unit/research/expert_portfolio/test_registry.py"
+  },
+  "src/research/expert_portfolio/runners.py": {
+    "testing": "tests/unit/research/expert_portfolio/test_catalog.py"
+  },
+  "src/research/expert_portfolio/sources.py": {},
+  "src/research/oi_deleveraging/backtest.py": {
+    "testing": "tests/unit/research/oi_deleveraging/test_backtest.py"
+  },
+  "src/research/oi_deleveraging/contracts.py": {},
+  "src/research/oi_deleveraging/market_data.py": {
+    "testing": "tests/unit/research/oi_deleveraging/test_market_data.py"
+  },
+  "src/research/oi_deleveraging/provenance.py": {
+    "testing": "tests/unit/research/oi_deleveraging/test_provenance.py"
   },
   "src/research/portfolio/backtest.py": {
     "testing": "tests/unit/research/portfolio/test_backtest.py"
@@ -258,9 +340,7 @@
     "testing": "tests/unit/research/portfolio/test_universe.py"
   },
   "src/research/provenance/candidates.py": {
-    "testing": [
-      "tests/unit/research/provenance/test_candidates.py"
-    ]
+    "testing": "tests/unit/research/provenance/test_candidates.py"
   },
   "src/research/provenance/code_manifest.py": {
     "testing": "tests/unit/research/provenance/test_code_manifest.py"
@@ -268,16 +348,48 @@
   "src/research/provenance/fingerprints.py": {
     "testing": "tests/unit/research/provenance/test_fingerprints.py"
   },
+  "src/research/provenance/ledger.py": {
+    "testing": "tests/unit/research/provenance/test_ledger.py"
+  },
+  "src/research/provenance/registration.py": {
+    "testing": "tests/unit/research/provenance/test_registration.py"
+  },
   "src/research/provenance/results.py": {
-    "testing": [
-      "tests/unit/research/provenance/test_results.py"
-    ]
+    "testing": "tests/unit/research/provenance/test_results.py"
   },
   "src/research/sleeve_blend/backtest.py": {
-    "testing": "tests/unit/research/sleeve_blend/test_backtest.py"
+    "testing": "tests/unit/research/sleeve_blend/test_contracts.py"
   },
+  "src/research/sleeve_blend/common.py": {},
   "src/research/sleeve_blend/contracts.py": {
     "testing": "tests/unit/research/sleeve_blend/test_contracts.py"
+  },
+  "src/research/sleeve_blend/directional.py": {
+    "testing": "tests/unit/research/sleeve_blend/test_directional.py"
+  },
+  "src/research/sleeve_blend/fixed.py": {
+    "testing": "tests/unit/research/sleeve_blend/test_fixed.py"
+  },
+  "src/research/sleeve_blend/weights.py": {
+    "testing": "tests/unit/research/sleeve_blend/test_weights.py"
+  },
+  "src/research/technical_experts/backtest.py": {
+    "testing": "tests/unit/research/technical_experts/test_backtest.py"
+  },
+  "src/research/technical_experts/catalog.py": {
+    "testing": "tests/unit/research/technical_experts/test_catalog.py"
+  },
+  "src/research/technical_experts/contracts.py": {
+    "testing": "tests/unit/research/technical_experts/test_contracts.py"
+  },
+  "src/research/technical_experts/indicators.py": {
+    "testing": "tests/unit/research/technical_experts/test_indicators.py"
+  },
+  "src/research/technical_experts/provenance.py": {
+    "testing": "tests/unit/research/technical_experts/test_provenance.py"
+  },
+  "src/research/technical_experts/signals.py": {
+    "testing": "tests/unit/research/technical_experts/test_signals.py"
   },
   "src/strategy/cash_carry.py": {
     "testing": "tests/contract/test_legacy_imports.py"
@@ -297,98 +409,5 @@
   "src/validation/reliability_gate.py": {
     "testing": "tests/contract/test_legacy_imports.py"
   },
-  "src/validation/research_memory.py": {
-    "testing": "tests/contract/test_legacy_imports.py"
-  },
-  "src/cli/main.py": {
-    "testing": "tests/unit/cli/test_main.py"
-  },
-  "src/cli/commands/data.py": {
-    "testing": "tests/unit/cli/test_main.py"
-  },
-  "src/cli/commands/research.py": {
-    "testing": [
-      "tests/integration/cli/test_library_admission.py",
-      "tests/unit/cli/commands/test_research.py"
-    ]
-  },
-  "src/cli/commands/provenance.py": {
-    "testing": "tests/unit/cli/test_provenance_commands.py"
-  },
-  "src/cli/compat.py": {
-    "testing": "tests/contract/test_cli_compatibility.py"
-  },
-  "src/research/provenance/ledger.py": {
-    "testing": "tests/unit/research/provenance/test_ledger.py"
-  },
-  "src/research/provenance/registration.py": {
-    "testing": [
-      "tests/unit/research/provenance/test_registration.py",
-      "tests/unit/research/provenance/test_migration.py"
-    ]
-  },
-  "src/research/expert_portfolio/catalog.py": {
-    "testing": [
-      "tests/unit/research/expert_portfolio/test_catalog.py",
-      "tests/unit/research/expert_portfolio/test_registry.py"
-    ]
-  },
-  "src/research/expert_portfolio/runners.py": {
-    "testing": [
-      "tests/unit/research/expert_portfolio/test_catalog.py",
-      "tests/unit/application/test_expert_portfolio_evaluation.py"
-    ]
-  },
-  "src/research/expert_portfolio/sources.py": {
-    "testing": [
-      "tests/unit/research/expert_portfolio/test_registry.py",
-      "tests/unit/research/provenance/test_registration.py"
-    ]
-  },
-  "tests/integration/cli/test_expert_library_registration.py": {},
-  "src/application/technical_expert_evaluation.py": {
-    "testing": "tests/unit/application/test_technical_expert_evaluation.py"
-  },
-  "src/research/technical_experts/backtest.py": {
-    "testing": "tests/unit/research/technical_experts/test_backtest.py"
-  },
-  "src/research/technical_experts/catalog.py": {
-    "testing": [
-      "tests/unit/research/technical_experts/test_catalog.py",
-      "tests/integration/cli/test_technical_expert_library_registration.py"
-    ]
-  },
-  "src/research/technical_experts/contracts.py": {
-    "testing": "tests/unit/research/technical_experts/test_contracts.py"
-  },
-  "src/research/technical_experts/indicators.py": {
-    "testing": "tests/unit/research/technical_experts/test_signals.py"
-  },
-  "src/research/technical_experts/signals.py": {
-    "testing": [
-      "tests/unit/research/technical_experts/test_signals.py",
-      "tests/unit/research/technical_experts/test_backtest.py"
-    ]
-  },
-  "src/research/expert_portfolio/contextual_router.py": {
-    "testing": "tests/unit/research/expert_portfolio/test_contextual_router.py"
-  },
-  "src/core/settings.py": {
-    "testing": "tests/unit/core/test_settings.py"
-  },
-  "src/research/technical_experts/provenance.py": {
-    "testing": "tests/unit/application/test_technical_expert_evaluation.py"
-  },
-  "src/research/expert_portfolio/admission.py": {
-    "testing": "tests/unit/research/expert_portfolio/test_admission.py"
-  },
-  "src/application/technical_library_admission.py": {
-    "testing": "tests/unit/application/test_technical_library_admission.py"
-  },
-  "src/application/technical_library_admission_backtest.py": {
-    "testing": "tests/unit/application/test_technical_library_admission_backtest.py"
-  },
-  "tools/benchmark_library_admission.py": {
-    "testing": "tests/unit/tools/test_benchmark_library_admission.py"
-  }
+  "src/validation/research_memory.py": {}
 }
