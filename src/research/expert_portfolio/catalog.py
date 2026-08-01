@@ -16,7 +16,11 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import cast
 
-from src.research.expert_portfolio.contracts import ExpertDefinition, ExpertPortfolioSpec
+from src.research.expert_portfolio.contracts import (
+    ContextualRouterSpec,
+    ExpertDefinition,
+    ExpertPortfolioSpec,
+)
 from src.research.technical_experts.catalog import resolve_technical_candidate
 
 
@@ -35,6 +39,7 @@ class ExpertLibraryBlueprint:
     symbol_exposure_limit: float = 1.0
     min_history_bars: int = 30
     confidence: float = 0.90
+    router: ContextualRouterSpec | None = None
 
     def __post_init__(self) -> None:
         if not self.library_id:
@@ -64,6 +69,7 @@ class ExpertLibraryBlueprint:
             symbol_exposure_limit=self.symbol_exposure_limit,
             min_history_bars=self.min_history_bars,
             confidence=self.confidence,
+            router=self.router,
         )
 
 
@@ -120,6 +126,7 @@ def compute_blueprint_fingerprint(blueprint: ExpertLibraryBlueprint) -> dict[str
         "symbol_exposure_limit": blueprint.symbol_exposure_limit,
         "min_history_bars": blueprint.min_history_bars,
         "confidence": blueprint.confidence,
+        "router": asdict(blueprint.router) if blueprint.router is not None else None,
         "observation_end": blueprint.observation_end,
         "code_hash": code_digest.hexdigest(),
         "data_hashes": {
@@ -143,6 +150,8 @@ def build_technical_price_v1_blueprint(
     code_units: Mapping[str, Path],
     data_files: Mapping[str, Path],
     observation_end: str = "2025-12-31",
+    *,
+    router: ContextualRouterSpec | None = None,
 ) -> ExpertLibraryBlueprint:
     """Declarative blueprint for the conditional ``technical_price_v1`` library.
 
@@ -188,6 +197,7 @@ def build_technical_price_v1_blueprint(
         code_units=code_units,
         data_files=data_files,
         observation_end=observation_end,
+        router=router,
     )
 
 
