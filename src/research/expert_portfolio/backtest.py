@@ -12,7 +12,7 @@ from src.research.expert_portfolio.allocator import _causal_lcb_weight_series, _
 from src.research.expert_portfolio.contextual_router import (
     compute_causal_contextual_winner_weights,
 )
-from src.research.expert_portfolio.contracts import (
+from src.research.expert_portfolio.models import (
     ContextualRouterSpec,
     ExpertDefinition,
     ExpertPortfolioSpec,

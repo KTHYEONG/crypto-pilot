@@ -18,7 +18,7 @@ from src.research.expert_portfolio.allocator import (
     _causal_block_aware_inflation,
     _validate_panel,
 )
-from src.research.expert_portfolio.contracts import (
+from src.research.expert_portfolio.models import (
     ContextualRouterSpec,
     ExpertDefinition,
     ExpertPortfolioSpec,

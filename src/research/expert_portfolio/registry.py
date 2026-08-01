@@ -10,7 +10,7 @@ from src.research.expert_portfolio.catalog import (
     ExpertLibraryCatalog,
     compute_blueprint_fingerprint,
 )
-from src.research.expert_portfolio.contracts import (
+from src.research.expert_portfolio.models import (
     ContextualRouterSpec,
     ExpertDefinition,
     ExpertPortfolioSpec,
