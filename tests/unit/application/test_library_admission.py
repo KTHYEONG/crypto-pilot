@@ -5,8 +5,8 @@ import json
 import numpy as np
 import pandas as pd
 
-from src.application import library_admission as app
-from src.application.library_admission import run_technical_library_admission
+from src.application.research.expert_portfolio import admission as app
+from src.application.research.expert_portfolio.admission import run_technical_library_admission
 from src.research.expert_portfolio.catalog import default_catalog
 from src.research.expert_portfolio.admission_types import (
     LibraryAdmissionConfig,

@@ -65,7 +65,7 @@ def test_backtest_cli_emits_report_without_registry_calls(
         return _Report()
 
     monkeypatch.setattr(
-        "src.cli.commands.research.run_technical_library_admission_backtest",
+        "src.application.research.expert_portfolio.admission_backtest.run_technical_library_admission_backtest",
         fake_run,
     )
     args = build_root_parser().parse_args([
@@ -99,7 +99,7 @@ def test_backtest_cli_decodes_proposal_id(
         return _Report()
 
     monkeypatch.setattr(
-        "src.cli.commands.research.run_technical_library_admission_backtest",
+        "src.application.research.expert_portfolio.admission_backtest.run_technical_library_admission_backtest",
         fake_run,
     )
     args = build_root_parser().parse_args([
