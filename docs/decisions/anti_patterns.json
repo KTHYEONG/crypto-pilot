@@ -166,5 +166,99 @@
       "trade_count": 0
     },
     "run_log_reference": "(not logged)"
+  },
+  {
+    "candidate_id": "7ed1c3cc1b36c7c2a8bc860a01da697fd2d7139d718d3ad8e41cc0c654dceebc",
+    "code_hash": "b72005dac19a9e485a0e8fa8c7bd53c59923987908ab5a950d6a26398ebd398d",
+    "data_hash": "3f8f4682932019545d3c635c966a793aad7c993dfab0ac3a0d794d3fa61bbb67",
+    "domain": "cash_carry",
+    "failed_gates": [
+      "observation",
+      "stress"
+    ],
+    "failed_hypothesis": "cash_and_carry_basis",
+    "failure_reason": "promotion status=REJECTED",
+    "falsified_date": "2026-08-01",
+    "metrics": {
+      "cagr": 0.0,
+      "fold_max_contribution": 0.0,
+      "mdd": 0.0,
+      "observation_lcb90": 0.0,
+      "sharpe": 0.0,
+      "stress_verdict": "PENDING",
+      "trade_count": 0
+    },
+    "run_log_reference": "(not logged)"
+  },
+  {
+    "candidate_id": "8a51410a0be1c1f81c1ae41655687c2ea1a64a7f16cc775c4159121b23c7401e",
+    "code_hash": "b72005dac19a9e485a0e8fa8c7bd53c59923987908ab5a950d6a26398ebd398d",
+    "data_hash": "30156909d0554b6f02caee8ac90a3d6768b2b68c10f42a713611bfed4e2fad2a",
+    "domain": "cash_carry",
+    "failed_gates": [
+      "observation",
+      "stress"
+    ],
+    "failed_hypothesis": "cash_and_carry_basis",
+    "failure_reason": "promotion status=REJECTED",
+    "falsified_date": "2026-08-01",
+    "metrics": {
+      "cagr": 0.0,
+      "fold_max_contribution": 0.0,
+      "mdd": 0.0,
+      "observation_lcb90": 0.0,
+      "sharpe": 0.0,
+      "stress_verdict": "PENDING",
+      "trade_count": 0
+    },
+    "run_log_reference": "(not logged)"
+  },
+  {
+    "candidate_id": "8726194161dffee995e27dbd8736e820450f9a8a2662db98daf3174d83f68d71",
+    "code_hash": "b72005dac19a9e485a0e8fa8c7bd53c59923987908ab5a950d6a26398ebd398d",
+    "data_hash": "318053a3bda8940c30c3e83683112c2c260d7158f0e4f6021a1c1e24257ab979",
+    "domain": "cash_carry",
+    "failed_gates": [
+      "observation",
+      "fold",
+      "stress"
+    ],
+    "failed_hypothesis": "cash_and_carry_basis",
+    "failure_reason": "promotion status=REJECTED",
+    "falsified_date": "2026-08-01",
+    "metrics": {
+      "cagr": -0.000649,
+      "fold_max_contribution": 1.0,
+      "mdd": -0.004698,
+      "observation_lcb90": -0.001883,
+      "sharpe": -0.250488,
+      "stress_verdict": "PENDING",
+      "trade_count": 2
+    },
+    "run_log_reference": "(not logged)"
+  },
+  {
+    "candidate_id": "4e6af883fe5fe1d5fe13b5d65ba12c63a0edebffce155642cc0ff32869246265",
+    "code_hash": "b72005dac19a9e485a0e8fa8c7bd53c59923987908ab5a950d6a26398ebd398d",
+    "data_hash": "fb5e63de75ed539676205f6ea2396b67e13580be94d129fcc97ec7f6e967ac2c",
+    "domain": "cash_carry",
+    "failed_gates": [
+      "observation",
+      "fold",
+      "stress"
+    ],
+    "failed_hypothesis": "cash_and_carry_basis",
+    "failure_reason": "promotion status=REJECTED",
+    "falsified_date": "2026-08-01",
+    "metrics": {
+      "cagr": 0.000379,
+      "fold_max_contribution": 1.0,
+      "mdd": -0.003676,
+      "observation_lcb90": -0.000912,
+      "sharpe": 0.146786,
+      "stress_verdict": "PENDING",
+      "trade_count": 2
+    },
+    "run_log_reference": "(not logged)"
   }
 ]
