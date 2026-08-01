@@ -169,6 +169,64 @@ def record_portfolio_run(
     return record
 
 
+def record_sleeve_blend_run(
+    *,
+    symbols: tuple[str, ...],
+    mdd_budget_fraction: float,
+    leverage: float,
+    costs: CostModel,
+    result: BacktestResult,
+    metrics: Metrics,
+    start: str | None,
+    end: str | None,
+    initial_equity: float,
+    observation_gate: ReliabilityGateResult,
+    fold_distribution: FoldDistributionResult,
+    stress_gate: ReliabilityGateResult,
+    holdout_gate: ReliabilityGateResult | None = None,
+    promotion: PromotionResult | None = None,
+    log_path: Path = RUNS_LOG_PATH,
+) -> dict[str, object]:
+    """Append one fixed-sleeve blend run as a JSONL record.
+
+    Logs the frozen sleeve set, the MDD-budget fraction, the single calibrated
+    leverage scalar (what changed), the leveraged total-ledger ``Metrics``, the
+    reliability gates, the promotion result, and the git commit. Never overwrites
+    prior rows.
+    """
+    git_sha, git_dirty = _git_head()
+    record: dict[str, object] = {
+        "ts": datetime.now(UTC).isoformat(),
+        "git_sha": git_sha,
+        "git_dirty": git_dirty,
+        "kind": "sleeve_blend",
+        "symbols": list(symbols),
+        "mdd_budget_fraction": mdd_budget_fraction,
+        "leverage": leverage,
+        "start": start,
+        "end": end,
+        "initial_equity": initial_equity,
+        "costs": asdict(costs),
+        "metrics": asdict(metrics),
+        "reliability": {
+            "observation": _reliability_summary(observation_gate),
+            "holdout": _reliability_summary(holdout_gate) if holdout_gate is not None else None,
+            "fold_distribution": {
+                "gate_pass": fold_distribution.gate_pass,
+                "max_period_contribution": fold_distribution.max_period_contribution,
+                "n_folds": fold_distribution.n_folds,
+            },
+            "stress_test": _reliability_summary(stress_gate),
+        },
+        "promotion": _promotion_summary(promotion),
+        "window": "observation+holdout" if holdout_gate is not None else "observation",
+    }
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    with log_path.open("a", encoding="utf-8") as f:
+        f.write(json.dumps(record, ensure_ascii=False) + "\n")
+    return record
+
+
 def record_cash_carry_run(
     *,
     symbol: str,

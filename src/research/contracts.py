@@ -147,6 +147,19 @@ class CashCarryEvaluationRequest:
     log_run: bool = True
 
 
+@dataclass(frozen=True, slots=True)
+class SleeveBlendEvaluationRequest:
+    """Immutable request for a fixed-sleeve equal-weight Donchian blend evaluation."""
+
+    symbols: tuple[str, ...] = ("BTCUSDT", "ETHUSDT", "AVAXUSDT", "BNBUSDT", "DOGEUSDT")
+    mdd_budget_fraction: float = 0.85
+    start: str | None = None
+    end: str | pd.Timestamp | None = None
+    initial_equity: float = 10_000.0
+    unseal_holdout: bool = False
+    log_run: bool = True
+
+
 @dataclass(frozen=True)
 class EvaluationReport:
     """Composed result of a sealed evaluation executed by an application service.
