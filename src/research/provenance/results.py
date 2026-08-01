@@ -14,13 +14,19 @@ import pandas as pd
 from src.research.baseline.backtest import BacktestResult
 from src.research.cash_carry.contracts import CarryCostModel, CashCarrySpec
 from src.research.contracts import CostModel, PortfolioSpec, StrategySpec
+from src.research.provenance.ledger import (
+    RUNS_LOG_PATH,
+    LedgerEvent,
+    append_event,
+    build_evaluation_event,
+    load_events,
+)
 
 if TYPE_CHECKING:
     from src.research.evaluation.metrics import Metrics
     from src.research.evaluation.promotion import CandidateIdentity, PromotionResult
     from src.research.evaluation.reliability import FoldDistributionResult, ReliabilityGateResult
 
-RUNS_LOG_PATH = Path(__file__).resolve().parent.parent.parent.parent / "docs" / "results" / "runs.jsonl"
 _logger = logging.getLogger("ResultsLog")
 
 
@@ -61,6 +67,65 @@ def _git_head() -> tuple[str | None, bool]:
     return sha, dirty
 
 
+def _reliability_block(
+    *,
+    observation_gate: ReliabilityGateResult,
+    fold_distribution: FoldDistributionResult,
+    stress_gate: ReliabilityGateResult,
+    holdout_gate: ReliabilityGateResult | None,
+) -> dict[str, object]:
+    return {
+        "observation": _reliability_summary(observation_gate),
+        "holdout": _reliability_summary(holdout_gate) if holdout_gate is not None else None,
+        "fold_distribution": {
+            "gate_pass": fold_distribution.gate_pass,
+            "max_period_contribution": fold_distribution.max_period_contribution,
+            "n_folds": fold_distribution.n_folds,
+        },
+        "stress_test": _reliability_summary(stress_gate),
+    }
+
+
+def _append_evaluation(event: LedgerEvent, log_path: Path) -> dict[str, object]:
+    """Append one evaluation event via the ledger and return its flattened record."""
+    appended = append_event(event, ledger_path=log_path)
+    return {
+        **dict(appended.payload),
+        "record_type": appended.record_type,
+        "schema_version": appended.schema_version,
+    }
+
+
+def _normalized_fingerprint(value: object) -> object:
+    """JSON-normalise a fingerprint so tuples and ordering never block equality."""
+    return json.loads(
+        json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False, default=str)
+    )
+
+
+def _resolve_active_parent(
+    parent_registration_id: str,
+    library_fingerprint: dict[str, object],
+    log_path: Path,
+) -> None:
+    """Fail closed unless the parent registration is ACTIVE and fingerprint-matched."""
+    for event in load_events(log_path):
+        if event.record_type not in ("registration", "retirement"):
+            continue
+        if event.payload.get("registration_id") != parent_registration_id:
+            continue
+        if event.payload.get("status") != "ACTIVE":
+            raise ValueError(f"parent registration {parent_registration_id} is not ACTIVE")
+        spec_fingerprint = event.payload.get("spec_fingerprint")
+        if _normalized_fingerprint(library_fingerprint) != spec_fingerprint:
+            raise ValueError(
+                f"parent registration {parent_registration_id} fingerprint does not match "
+                "the evaluation library fingerprint"
+            )
+        return
+    raise ValueError(f"parent registration {parent_registration_id} is absent from the ledger")
+
+
 def record_run(
     *,
     spec: StrategySpec,
@@ -77,42 +142,35 @@ def record_run(
     promotion: PromotionResult | None = None,
     log_path: Path = RUNS_LOG_PATH,
 ) -> dict[str, object]:
-    """Append one backtest run as a JSONL record for longitudinal comparison.
+    """Append one baseline run as a ledger evaluation event.
 
-    Never overwrites prior rows; each call appends exactly one line. Captures
-    the frozen StrategySpec/CostModel (what changed) alongside Metrics (the
-    outcome), the reliability gate verdicts, the promotion result, and the git
-    commit (whether the code that produced it is reproducible from history).
+    Never overwrites prior rows; each call appends exactly one immutable line
+    capturing the frozen ``StrategySpec``/``CostModel``, the ``Metrics``
+    outcome, the reliability gates, promotion, and the git commit.
     """
     git_sha, git_dirty = _git_head()
-    record: dict[str, object] = {
-        "ts": datetime.now(UTC).isoformat(),
-        "git_sha": git_sha,
-        "git_dirty": git_dirty,
-        "symbol": spec.symbol,
-        "start": start,
-        "end": end,
-        "initial_equity": initial_equity,
-        "spec": asdict(spec),
-        "costs": asdict(costs),
-        "metrics": asdict(metrics),
-        "reliability": {
-            "observation": _reliability_summary(observation_gate),
-            "holdout": _reliability_summary(holdout_gate) if holdout_gate is not None else None,
-            "fold_distribution": {
-                "gate_pass": fold_distribution.gate_pass,
-                "max_period_contribution": fold_distribution.max_period_contribution,
-                "n_folds": fold_distribution.n_folds,
-            },
-            "stress_test": _reliability_summary(stress_gate),
-        },
-        "promotion": _promotion_summary(promotion),
-        "window": "observation+holdout" if holdout_gate is not None else "observation",
-    }
-    log_path.parent.mkdir(parents=True, exist_ok=True)
-    with log_path.open("a", encoding="utf-8") as f:
-        f.write(json.dumps(record, ensure_ascii=False) + "\n")
-    return record
+    event = build_evaluation_event(
+        workflow="baseline",
+        ts=datetime.now(UTC).isoformat(),
+        git_sha=git_sha,
+        git_dirty=git_dirty,
+        metrics=asdict(metrics),
+        reliability=_reliability_block(
+            observation_gate=observation_gate,
+            fold_distribution=fold_distribution,
+            stress_gate=stress_gate,
+            holdout_gate=holdout_gate,
+        ),
+        promotion=_promotion_summary(promotion),
+        symbol=spec.symbol,
+        start=start,
+        end=end,
+        initial_equity=initial_equity,
+        spec=asdict(spec),
+        costs=asdict(costs),
+        window="observation+holdout" if holdout_gate is not None else "observation",
+    )
+    return _append_evaluation(event, log_path)
 
 
 def record_portfolio_run(
@@ -132,42 +190,31 @@ def record_portfolio_run(
     promotion: PromotionResult | None = None,
     log_path: Path = RUNS_LOG_PATH,
 ) -> dict[str, object]:
-    """Append one portfolio run as a JSONL record for longitudinal comparison.
-
-    Logs the daily-liquid candidate pool, the frozen ``PortfolioSpec`` (what
-    changed), the total-ledger ``Metrics``, the portfolio reliability gates, the
-    promotion result, and the git commit. Never overwrites prior rows.
-    """
+    """Append one portfolio run as a ledger evaluation event."""
     git_sha, git_dirty = _git_head()
-    record: dict[str, object] = {
-        "ts": datetime.now(UTC).isoformat(),
-        "git_sha": git_sha,
-        "git_dirty": git_dirty,
-        "kind": "portfolio",
-        "symbols": list(symbols),
-        "start": start,
-        "end": end,
-        "initial_equity": initial_equity,
-        "portfolio_spec": asdict(portfolio_spec),
-        "costs": asdict(costs),
-        "metrics": asdict(metrics),
-        "reliability": {
-            "observation": _reliability_summary(observation_gate),
-            "holdout": _reliability_summary(holdout_gate) if holdout_gate is not None else None,
-            "fold_distribution": {
-                "gate_pass": fold_distribution.gate_pass,
-                "max_period_contribution": fold_distribution.max_period_contribution,
-                "n_folds": fold_distribution.n_folds,
-            },
-            "stress_test": _reliability_summary(stress_gate),
-        },
-        "promotion": _promotion_summary(promotion),
-        "window": "observation+holdout" if holdout_gate is not None else "observation",
-    }
-    log_path.parent.mkdir(parents=True, exist_ok=True)
-    with log_path.open("a", encoding="utf-8") as f:
-        f.write(json.dumps(record, ensure_ascii=False) + "\n")
-    return record
+    event = build_evaluation_event(
+        workflow="portfolio",
+        ts=datetime.now(UTC).isoformat(),
+        git_sha=git_sha,
+        git_dirty=git_dirty,
+        metrics=asdict(metrics),
+        reliability=_reliability_block(
+            observation_gate=observation_gate,
+            fold_distribution=fold_distribution,
+            stress_gate=stress_gate,
+            holdout_gate=holdout_gate,
+        ),
+        promotion=_promotion_summary(promotion),
+        kind="portfolio",
+        symbols=list(symbols),
+        start=start,
+        end=end,
+        initial_equity=initial_equity,
+        portfolio_spec=asdict(portfolio_spec),
+        costs=asdict(costs),
+        window="observation+holdout" if holdout_gate is not None else "observation",
+    )
+    return _append_evaluation(event, log_path)
 
 
 def record_sleeve_blend_run(
@@ -189,47 +236,33 @@ def record_sleeve_blend_run(
     promotion: PromotionResult | None = None,
     log_path: Path = RUNS_LOG_PATH,
 ) -> dict[str, object]:
-    """Append one sleeve-blend run as a JSONL record.
-
-    Logs the executed candidate kind (the foreign key into
-    ``docs/results/candidate_registry.json``), the frozen sleeve set, the
-    MDD-budget fraction (``None`` for candidates that do not calibrate
-    leverage), the leverage scalar (what changed), the total-ledger
-    ``Metrics``, the reliability gates, the promotion result, and the git
-    commit. Never overwrites prior rows.
-    """
+    """Append one sleeve-blend run as a ledger evaluation event."""
     git_sha, git_dirty = _git_head()
-    record: dict[str, object] = {
-        "ts": datetime.now(UTC).isoformat(),
-        "git_sha": git_sha,
-        "git_dirty": git_dirty,
-        "kind": "sleeve_blend",
-        "candidate_kind": candidate_kind,
-        "symbols": list(symbols),
-        "mdd_budget_fraction": mdd_budget_fraction,
-        "leverage": leverage,
-        "start": start,
-        "end": end,
-        "initial_equity": initial_equity,
-        "costs": asdict(costs),
-        "metrics": asdict(metrics),
-        "reliability": {
-            "observation": _reliability_summary(observation_gate),
-            "holdout": _reliability_summary(holdout_gate) if holdout_gate is not None else None,
-            "fold_distribution": {
-                "gate_pass": fold_distribution.gate_pass,
-                "max_period_contribution": fold_distribution.max_period_contribution,
-                "n_folds": fold_distribution.n_folds,
-            },
-            "stress_test": _reliability_summary(stress_gate),
-        },
-        "promotion": _promotion_summary(promotion),
-        "window": "observation+holdout" if holdout_gate is not None else "observation",
-    }
-    log_path.parent.mkdir(parents=True, exist_ok=True)
-    with log_path.open("a", encoding="utf-8") as f:
-        f.write(json.dumps(record, ensure_ascii=False) + "\n")
-    return record
+    event = build_evaluation_event(
+        workflow="sleeve_blend",
+        ts=datetime.now(UTC).isoformat(),
+        git_sha=git_sha,
+        git_dirty=git_dirty,
+        metrics=asdict(metrics),
+        reliability=_reliability_block(
+            observation_gate=observation_gate,
+            fold_distribution=fold_distribution,
+            stress_gate=stress_gate,
+            holdout_gate=holdout_gate,
+        ),
+        promotion=_promotion_summary(promotion),
+        kind="sleeve_blend",
+        candidate_kind=candidate_kind,
+        symbols=list(symbols),
+        mdd_budget_fraction=mdd_budget_fraction,
+        leverage=leverage,
+        start=start,
+        end=end,
+        initial_equity=initial_equity,
+        costs=asdict(costs),
+        window="observation+holdout" if holdout_gate is not None else "observation",
+    )
+    return _append_evaluation(event, log_path)
 
 
 def record_cash_carry_run(
@@ -250,44 +283,33 @@ def record_cash_carry_run(
     candidate: CandidateIdentity | None = None,
     log_path: Path = RUNS_LOG_PATH,
 ) -> dict[str, object]:
-    """Append one cash-and-carry research run as a JSONL record.
-
-    Logs only comparison-oriented outcomes and frozen strategy parameters.
-    Detailed candidate/provenance data is emitted at DEBUG level instead of
-    being persisted in the longitudinal comparison log.
-    """
+    """Append one cash-and-carry run as a ledger evaluation event."""
     git_sha, git_dirty = _git_head()
     if candidate is not None:
         _logger.debug("cash_carry candidate provenance=%s", asdict(candidate))
-    record: dict[str, object] = {
-        "ts": datetime.now(UTC).isoformat(),
-        "git_sha": git_sha,
-        "git_dirty": git_dirty,
-        "kind": "cash_carry",
-        "symbol": symbol,
-        "start": start,
-        "end": end,
-        "initial_equity": initial_equity,
-        "cash_carry_spec": asdict(cash_carry_spec),
-        "costs": asdict(costs),
-        "metrics": asdict(metrics),
-        "reliability": {
-            "observation": _reliability_summary(observation_gate),
-            "holdout": _reliability_summary(holdout_gate) if holdout_gate is not None else None,
-            "fold_distribution": {
-                "gate_pass": fold_distribution.gate_pass,
-                "max_period_contribution": fold_distribution.max_period_contribution,
-                "n_folds": fold_distribution.n_folds,
-            },
-            "stress_test": _reliability_summary(stress_gate),
-        },
-        "promotion": _promotion_summary(promotion),
-        "window": "observation+holdout" if holdout_gate is not None else "observation",
-    }
-    log_path.parent.mkdir(parents=True, exist_ok=True)
-    with log_path.open("a", encoding="utf-8") as f:
-        f.write(json.dumps(record, ensure_ascii=False) + "\n")
-    return record
+    event = build_evaluation_event(
+        workflow="cash_carry",
+        ts=datetime.now(UTC).isoformat(),
+        git_sha=git_sha,
+        git_dirty=git_dirty,
+        metrics=asdict(metrics),
+        reliability=_reliability_block(
+            observation_gate=observation_gate,
+            fold_distribution=fold_distribution,
+            stress_gate=stress_gate,
+            holdout_gate=holdout_gate,
+        ),
+        promotion=_promotion_summary(promotion),
+        kind="cash_carry",
+        symbol=symbol,
+        start=start,
+        end=end,
+        initial_equity=initial_equity,
+        cash_carry_spec=asdict(cash_carry_spec),
+        costs=asdict(costs),
+        window="observation+holdout" if holdout_gate is not None else "observation",
+    )
+    return _append_evaluation(event, log_path)
 
 
 def record_expert_portfolio_run(
@@ -301,16 +323,16 @@ def record_expert_portfolio_run(
     stress_gate: ReliabilityGateResult,
     holdout_gate: ReliabilityGateResult | None = None,
     promotion: PromotionResult | None = None,
+    parent_registration_id: str | None = None,
     log_path: Path = RUNS_LOG_PATH,
 ) -> dict[str, object]:
-    """Append one pre-registered expert-portfolio run as a JSONL record.
+    """Append one expert-portfolio evaluation event linked to its registration.
 
-    The record binds the run to its immutable library fingerprint (definitions,
-    allocator configuration, and component code hashes), the realised allocation
-    turnover cost, the marked total-equity metrics, every gate output, and the
-    promotion verdict. Logging is strictly append-only: a library fingerprint
-    changed after registration is a distinct candidate, and an incomplete
-    fingerprint or non-finite realised cost appends no row.
+    The evaluation binds to the immutable ``library_fingerprint``, the realised
+    allocation turnover cost, the marked metrics, every gate output, and the
+    promotion verdict.  When ``parent_registration_id`` is supplied it must
+    resolve to an ACTIVE registration whose fingerprint matches the evaluation,
+    otherwise no row is appended.  Logging is strictly append-only.
     """
     if not isinstance(library_fingerprint, dict) or not library_fingerprint:
         raise ValueError("library_fingerprint must be a non-empty dict")
@@ -318,40 +340,54 @@ def record_expert_portfolio_run(
         raise ValueError("library_fingerprint must include the 'experts' library definitions")
     if not np.isfinite(float(allocation_cost_total)):
         raise ValueError(f"allocation_cost_total must be finite, got {allocation_cost_total}")
+    if parent_registration_id:
+        _resolve_active_parent(parent_registration_id, library_fingerprint, log_path)
 
     git_sha, git_dirty = _git_head()
-    record: dict[str, object] = {
-        "ts": datetime.now(UTC).isoformat(),
-        "git_sha": git_sha,
-        "git_dirty": git_dirty,
-        "kind": "expert_portfolio",
-        "library_fingerprint": library_fingerprint,
-        "allocation_cost_total": float(allocation_cost_total),
-        "metrics": asdict(metrics),
-        "reliability": {
-            "observation": _reliability_summary(observation_gate),
-            "holdout": _reliability_summary(holdout_gate) if holdout_gate is not None else None,
-            "fold_distribution": {
-                "gate_pass": fold_distribution.gate_pass,
-                "max_period_contribution": fold_distribution.max_period_contribution,
-                "n_folds": fold_distribution.n_folds,
-            },
-            "stress_test": _reliability_summary(stress_gate),
-        },
-        "promotion": _promotion_summary(promotion),
-        "window": "observation+holdout" if holdout_gate is not None else "observation",
-    }
-    log_path.parent.mkdir(parents=True, exist_ok=True)
-    with log_path.open("a", encoding="utf-8") as f:
-        f.write(json.dumps(record, ensure_ascii=False) + "\n")
-    return record
+    event = build_evaluation_event(
+        workflow="expert_portfolio",
+        ts=datetime.now(UTC).isoformat(),
+        git_sha=git_sha,
+        git_dirty=git_dirty,
+        metrics=asdict(metrics),
+        reliability=_reliability_block(
+            observation_gate=observation_gate,
+            fold_distribution=fold_distribution,
+            stress_gate=stress_gate,
+            holdout_gate=holdout_gate,
+        ),
+        promotion=_promotion_summary(promotion),
+        parent_registration_id=parent_registration_id,
+        kind="expert_portfolio",
+        library_fingerprint=library_fingerprint,
+        allocation_cost_total=float(allocation_cost_total),
+        window="observation+holdout" if holdout_gate is not None else "observation",
+    )
+    return _append_evaluation(event, log_path)
 
 
 def load_runs(log_path: Path = RUNS_LOG_PATH) -> pd.DataFrame:
-    """Load all recorded runs as a flat DataFrame, one row per run, newest last."""
+    """Load all recorded rows as a flat DataFrame, one row per run, newest last.
+
+    Legacy no-version rows are returned as-is; v1 events are flattened by
+    merging their payload up beside the ``record_type``/``schema_version``
+    markers so existing comparison columns stay available.
+    """
     if not log_path.exists():
         return pd.DataFrame()
-    records = [json.loads(line) for line in log_path.read_text(encoding="utf-8").splitlines() if line.strip()]
+    records: list[dict[str, object]] = []
+    for line in log_path.read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        data = json.loads(line)
+        if isinstance(data, dict) and isinstance(data.get("payload"), dict):
+            records.append({
+                **data["payload"],
+                "record_type": data.get("record_type"),
+                "schema_version": data.get("schema_version"),
+            })
+        else:
+            records.append(data)
     if not records:
         return pd.DataFrame()
     return pd.json_normalize(records)
