@@ -27,6 +27,11 @@ def _funding(args: argparse.Namespace) -> None:
     _logger.info("Funding collection complete for %s (through %s)", args.symbol, args.end)
 
 
+def _metrics(args: argparse.Namespace) -> None:
+    collection.collect_metrics(args.symbol, args.start, args.end)
+    _logger.info("Metrics collection complete for %s (through %s)", args.symbol, args.end)
+
+
 def _import_borrow(args: argparse.Namespace) -> None:
     collection.import_borrow(args.symbol, args.source, args.source_id, args.rate_period)
     _logger.info("Borrow history imported for %s from %s", args.symbol, args.source)
@@ -72,6 +77,14 @@ def add_data_commands(data_parser: argparse.ArgumentParser) -> None:
     funding.add_argument("--start", default="2022-04-01")
     funding.add_argument("--end", required=True)
     funding.set_defaults(handler=_funding)
+
+    metrics = collect_sub.add_parser(
+        "metrics", help="Collect daily futures metrics (open interest) for one symbol",
+    )
+    metrics.add_argument("symbol", type=str)
+    metrics.add_argument("--start", default="2022-04-01")
+    metrics.add_argument("--end", required=True)
+    metrics.set_defaults(handler=_metrics)
 
     import_borrow = collect_sub.add_parser(
         "import-borrow", help="Import a versioned quote-borrow export",

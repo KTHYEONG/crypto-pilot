@@ -7,9 +7,10 @@ from pathlib import Path
 
 import pandas as pd
 
-from src.common.config import funding_path, ohlcv_path
+from src.common.config import funding_path, metrics_path, ohlcv_path
+from src.common.errors import DataIntegrityError
 from src.market_data.binance.futures import BinanceClient, BinanceKlinePermanentError
-from src.market_data.binance.vision import BinanceVisionDownloader
+from src.market_data.binance.vision import BinanceVisionDownloader, fetch_metrics_bulk
 from src.market_data.storage.ohlcv import write_ohlcv
 
 _logger = logging.getLogger("DataCollector")
@@ -229,6 +230,123 @@ class DataCollector:
                 .sort_values("timestamp")
             )
             self._save_cache(symbol, timeframe, combined)
+
+    def _load_metrics_cache(self, symbol: str) -> pd.DataFrame:
+        path = metrics_path(symbol)
+        if not path.exists():
+            return _empty_metrics_frame()
+        try:
+            frame = pd.read_parquet(path)
+        except Exception as exc:
+            self.logger.debug("Failed to load metrics cache %s: %s", path, exc)
+            return _empty_metrics_frame()
+        if frame.empty or not set(_METRICS_CANONICAL_COLUMNS).issubset(frame.columns):
+            return _empty_metrics_frame()
+        frame = frame.loc[:, list(_METRICS_CANONICAL_COLUMNS)]
+        frame["datetime"] = pd.to_datetime(frame["datetime"], utc=True, errors="coerce")
+        frame["available_at"] = pd.to_datetime(frame["available_at"], utc=True, errors="coerce")
+        return frame.dropna(subset=["datetime", "available_at"]).sort_values("timestamp")
+
+    def _save_metrics_cache(self, symbol: str, frame: pd.DataFrame) -> None:
+        path = metrics_path(symbol)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        frame.loc[:, list(_METRICS_CANONICAL_COLUMNS)].to_parquet(
+            path, index=False, compression="zstd",
+        )
+
+    @staticmethod
+    def _validate_metrics_frame(frame: pd.DataFrame, symbol: str) -> None:
+        missing = set(_METRICS_CANONICAL_COLUMNS) - set(frame.columns)
+        if missing:
+            raise DataIntegrityError(
+                f"metrics frame for {symbol} missing canonical columns: {sorted(missing)}"
+            )
+        if not frame["timestamp"].is_monotonic_increasing:
+            raise DataIntegrityError(f"metrics timestamps for {symbol} are not monotonic")
+        if frame["timestamp"].duplicated().any():
+            raise DataIntegrityError(f"metrics timestamps for {symbol} contain duplicates")
+        if frame["datetime"].dt.tz is None:
+            raise DataIntegrityError(f"metrics datetimes for {symbol} must be tz-aware UTC")
+        lag = (frame["available_at"] - frame["datetime"]).abs()
+        if lag.gt(pd.Timedelta(minutes=5)).any():
+            raise DataIntegrityError(
+                f"metrics available_at for {symbol} must equal datetime + 5 minutes"
+            )
+
+    def _metrics_coverage_report(
+        self,
+        symbol: str,
+        req_start: pd.Timestamp,
+        req_end: pd.Timestamp,
+        frame: pd.DataFrame,
+    ) -> dict[str, list[str]]:
+        """Compute requested dates absent from the collected metrics frame."""
+        if frame.empty:
+            covered: set[pd.Timestamp] = set()
+        else:
+            covered = set(pd.DatetimeIndex(frame["datetime"]).date)
+        dates = pd.date_range(req_start.normalize(), req_end.normalize(), freq="1D")
+        missing = [
+            d.date().isoformat() for d in dates if d.date() not in covered
+        ]
+        report = {"missing_dates": missing}
+        for day in missing:
+            self.logger.warning(
+                "metrics unavailable symbol=%s date=%s (reported, no forward-fill)",
+                symbol, day,
+            )
+        return report
+
+    def ensure_metrics_data(self, symbol: str, start_date: str, end_date: str) -> None:
+        """Collect and persist canonical daily Vision metrics for one symbol.
+
+        Fetches Vision daily archives via ``fetch_metrics_bulk``, normalizes
+        them through ``_normalize_metrics_frame``, merges with the canonical
+        cache (deduplicated by timestamp, keep=last, ascending), validates the
+        canonical schema and monotonic timestamps, and persists. Missing archive
+        dates are surfaced explicitly in the coverage report and are never
+        forward-filled; an interior coverage gap raises ``DataIntegrityError``.
+        """
+        req_start = pd.to_datetime(start_date, utc=True)
+        req_end = pd.to_datetime(end_date, utc=True)
+        cache_df = self._load_metrics_cache(symbol)
+        if (
+            not cache_df.empty
+            and cache_df["datetime"].min() <= req_start.normalize()
+            and cache_df["datetime"].max() >= req_end.normalize()
+        ):
+            return
+
+        vision = BinanceVisionDownloader()
+        raw = fetch_metrics_bulk(symbol, start_date, end_date)
+        fetched = vision._normalize_metrics_frame(symbol, raw)  # noqa: SLF001
+        parts: list[pd.DataFrame] = []
+        if not cache_df.empty:
+            parts.append(cache_df)
+        if not fetched.empty:
+            parts.append(fetched)
+        if not parts:
+            return
+        combined = (
+            pd.concat(parts, ignore_index=True)
+            .drop_duplicates(subset=["timestamp"], keep="last")
+            .sort_values("timestamp")
+            .reset_index(drop=True)
+        )
+        self._validate_metrics_frame(combined, symbol)
+        coverage = self._metrics_coverage_report(symbol, req_start, req_end, combined)
+        self._save_metrics_cache(symbol, combined)
+        interior_missing = [
+            day for day in coverage["missing_dates"]
+            if not combined.empty
+            and pd.Timestamp(day, tz="UTC") > combined["datetime"].min()
+            and pd.Timestamp(day, tz="UTC") < combined["datetime"].max()
+        ]
+        if interior_missing:
+            raise DataIntegrityError(
+                f"requested coverage gap for {symbol}: missing interior dates "
+                f"{interior_missing}; never forward-filled"
+            )
 
     def ensure_funding_data(self, symbol: str, start_date: str, end_date: str) -> None:
         path = funding_path(symbol)
