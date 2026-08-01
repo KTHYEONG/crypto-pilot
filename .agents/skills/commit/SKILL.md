@@ -35,5 +35,3 @@ Return ONLY the summary card below:
 - **Status**: COMPLETE
 - **Commit**: `[<short_hash>]` <subject>
 - **Summary**: <commit_count> commit(s) | <total_files_changed> file(s) changed
-
-
