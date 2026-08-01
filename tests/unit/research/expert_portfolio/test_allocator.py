@@ -9,7 +9,7 @@ from src.research.expert_portfolio.allocator import (
     _causal_lcb_weight_series,
     compute_causal_lcb_weights,
 )
-from src.research.expert_portfolio.contracts import ExpertDefinition, ExpertPortfolioSpec
+from src.research.expert_portfolio.models import ExpertDefinition, ExpertPortfolioSpec
 
 
 def _expert(

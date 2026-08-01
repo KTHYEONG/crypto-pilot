@@ -15,7 +15,7 @@ import pandas as pd
 
 from src.research.baseline.backtest import BacktestResult, run_backtest, run_directional_backtest
 from src.research.contracts import CostModel, StrategySpec
-from src.research.expert_portfolio.contracts import ExpertDefinition
+from src.research.expert_portfolio.models import ExpertDefinition
 from src.research.technical_experts.backtest import run_technical_expert_backtest
 from src.research.technical_experts.catalog import resolve_technical_candidate
 
