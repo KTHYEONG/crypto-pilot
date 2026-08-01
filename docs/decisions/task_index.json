@@ -1,6 +1,16 @@
 {
   "tasks": [
     {
+      "task_id": "TASK_APPLICATION_CLI_REORGANIZATION",
+      "date": "2026-08-01",
+      "adr_id": "ADR_20260801_APPLICATION_CLI_REORGANIZATION",
+      "domain": "architecture",
+      "title": "Feature-owned application and CLI package layout",
+      "why": "Flat application modules and one monolithic research CLI command module made feature ownership unclear and increased the cost and conflict risk of future additions.",
+      "resolution": "Moved application implementations under data and research feature packages, split research CLI registration into feature-owned leaf modules, retained flat application and legacy CLI facades, and updated compatibility tests and code-map coverage.",
+      "impact": "Existing typed application imports and documented CLI invocations remain compatible; future features can add one application package and one CLI leaf without editing an unrelated monolith."
+    },
+    {
       "task_id": "TASK_RESEARCH_MODULE_DECOMPOSITION",
       "date": "2026-08-01",
       "adr_id": "ADR_20260801_RESEARCH_MODULE_DECOMPOSITION",
