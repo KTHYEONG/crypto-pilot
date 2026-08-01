@@ -10,7 +10,11 @@ from src.research.expert_portfolio.catalog import (
     ExpertLibraryCatalog,
     compute_blueprint_fingerprint,
 )
-from src.research.expert_portfolio.contracts import ExpertDefinition, ExpertPortfolioSpec
+from src.research.expert_portfolio.contracts import (
+    ContextualRouterSpec,
+    ExpertDefinition,
+    ExpertPortfolioSpec,
+)
 from src.research.expert_portfolio.sources import FORBIDDEN_RETURN_SOURCES
 from src.research.provenance.ledger import RUNS_LOG_PATH, load_events
 from src.research.provenance.registration import RegistrationRecord, _to_registration_record
@@ -78,6 +82,18 @@ def load_expert_library(
                 runner=str(raw.get("runner", "")),
                 code_hash=str(raw.get("code_hash", "")),
             ))
+        raw_router = record.get("router")
+        router: ContextualRouterSpec | None = None
+        if raw_router is not None:
+            if not isinstance(raw_router, dict):
+                raise ValueError(f"library {library_id} has a malformed router record")
+            router = ContextualRouterSpec(
+                context_symbol=str(raw_router.get("context_symbol", "")),
+                trend_lookback_bars=int(raw_router.get("trend_lookback_bars", 0)),
+                volatility_lookback_bars=int(raw_router.get("volatility_lookback_bars", 0)),
+                min_context_history_bars=int(raw_router.get("min_context_history_bars", 0)),
+                confidence=float(raw_router.get("confidence", 0.90)),
+            )
         return ExpertPortfolioSpec(
             experts=tuple(definitions),
             gross_exposure=_numeric_field(record, "gross_exposure", 1.0),
@@ -85,6 +101,7 @@ def load_expert_library(
             symbol_exposure_limit=_numeric_field(record, "symbol_exposure_limit", 1.0),
             min_history_bars=int(_numeric_field(record, "min_history_bars", 30.0)),
             confidence=_numeric_field(record, "confidence", 0.90),
+            router=router,
         )
     raise ValueError(f"library '{library_id}' is not registered")
 

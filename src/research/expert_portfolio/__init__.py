@@ -6,12 +6,14 @@ from src.research.expert_portfolio.backtest import (
     run_expert_portfolio,
 )
 from src.research.expert_portfolio.contracts import (
+    ContextualRouterSpec,
     ExpertDefinition,
     ExpertPortfolioEvaluationRequest,
     ExpertPortfolioSpec,
 )
 
 __all__ = [
+    "ContextualRouterSpec",
     "ExpertDefinition",
     "ExpertPortfolioBacktestResult",
     "ExpertPortfolioEvaluationRequest",

@@ -13,7 +13,7 @@ from src.research.expert_portfolio.catalog import (
     default_catalog,
     registration_id_from_fingerprint,
 )
-from src.research.expert_portfolio.contracts import ExpertDefinition
+from src.research.expert_portfolio.contracts import ContextualRouterSpec, ExpertDefinition
 from src.research.expert_portfolio.runners import (
     ComponentRunRequest,
     _run_technical_expert,
@@ -76,6 +76,28 @@ class TestComponentRunnerRegistry:
 
 
 class TestCatalog:
+    def test_blueprint_preserves_router_in_spec_and_fingerprint(
+        self, expert_library_blueprint: ExpertLibraryBlueprint,
+    ) -> None:
+        router = ContextualRouterSpec("BTCUSDT", 60, 20, 30)
+        routed = ExpertLibraryBlueprint(
+            library_id=expert_library_blueprint.library_id,
+            experts=expert_library_blueprint.experts,
+            supported_runners=expert_library_blueprint.supported_runners,
+            code_units=expert_library_blueprint.code_units,
+            data_files=expert_library_blueprint.data_files,
+            observation_end=expert_library_blueprint.observation_end,
+            router=router,
+        )
+        assert routed.to_spec().router == router
+        assert compute_blueprint_fingerprint(routed)["router"] == {
+            "context_symbol": "BTCUSDT",
+            "trend_lookback_bars": 60,
+            "volatility_lookback_bars": 20,
+            "min_context_history_bars": 30,
+            "confidence": 0.90,
+        }
+
     def test_technical_blueprint_requires_approved_expert(self, expert_library_blueprint: ExpertLibraryBlueprint) -> None:
         with pytest.raises(ValueError, match="at least one approved expert"):
             build_technical_price_v1_blueprint(
