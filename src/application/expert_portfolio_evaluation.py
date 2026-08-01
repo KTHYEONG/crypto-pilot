@@ -2,14 +2,15 @@ from __future__ import annotations
 
 import dataclasses
 import logging
+from pathlib import Path
 
 import pandas as pd
 
 from src.common.config import funding_path, ohlcv_path
 from src.common.errors import DataIntegrityError
 from src.market_data.storage.loaders import load_funding_rates, load_ohlcv_4h
-from src.research.baseline.backtest import BacktestResult, run_backtest, run_directional_backtest
-from src.research.contracts import CostModel, EvaluationReport, StrategySpec
+from src.research.baseline.backtest import BacktestResult
+from src.research.contracts import CostModel, EvaluationReport
 from src.research.evaluation.metrics import compute_metrics
 from src.research.evaluation.policy import HOLDOUT_CUTOFF, resolve_evaluation_end
 from src.research.evaluation.promotion import compose_promotion_verdict
@@ -23,12 +24,19 @@ from src.research.expert_portfolio.backtest import (
     ExpertPortfolioBacktestResult,
     run_expert_portfolio,
 )
+from src.research.expert_portfolio.catalog import ExpertLibraryCatalog, default_catalog
 from src.research.expert_portfolio.contracts import (
     ExpertDefinition,
     ExpertPortfolioEvaluationRequest,
     ExpertPortfolioSpec,
 )
-from src.research.expert_portfolio.registry import load_expert_library
+from src.research.expert_portfolio.registry import resolve_registered_library
+from src.research.expert_portfolio.runners import (
+    ComponentRunRequest,
+    component_data_requirements,
+    resolve_component_runner,
+)
+from src.research.provenance.ledger import RUNS_LOG_PATH
 from src.research.provenance.results import record_expert_portfolio_run
 
 _STRESS_FEE_MULT = 1.5
@@ -60,33 +68,30 @@ def _run_component(
     costs: CostModel,
     signal_delay_bars: int,
 ) -> BacktestResult:
-    """Execute one expert's causal return series via its registered runner."""
-    if definition.runner == "run_backtest":
-        if len(definition.symbols) != 1:
-            raise ValueError(
-                f"runner run_backtest requires exactly one symbol for {definition.expert_id}"
-            )
-        symbol = definition.symbols[0]
-        df = load_ohlcv_4h(ohlcv_path(symbol, "1h"), start=start, end=end)
-        return run_backtest(
-            df, StrategySpec(symbol=symbol), costs, signal_delay_bars=signal_delay_bars,
+    """Execute one expert's causal return series via its registered runner.
+
+    The application loads only the causal data slots the runner declares and
+    resolves the runner through the central dispatch table; it never branches
+    on a runner key itself.
+    """
+    if len(definition.symbols) != 1:
+        raise ValueError(
+            f"{definition.runner} requires exactly one symbol for {definition.expert_id}"
         )
-    if definition.runner == "run_directional_backtest":
-        if len(definition.symbols) != 1:
-            raise ValueError(
-                f"runner run_directional_backtest requires exactly one symbol for "
-                f"{definition.expert_id}"
-            )
-        symbol = definition.symbols[0]
-        df = load_ohlcv_4h(ohlcv_path(symbol, "1h"), start=start, end=end)
-        funding = load_funding_rates(funding_path(symbol))
-        return run_directional_backtest(
-            df, StrategySpec(symbol=symbol), costs, funding,
-            signal_delay_bars=signal_delay_bars,
-        )
-    raise ValueError(
-        f"runner '{definition.runner}' for expert {definition.expert_id} is not registered"
+    symbol = definition.symbols[0]
+    data: dict[str, pd.DataFrame] = {}
+    for slot in component_data_requirements(definition.runner):
+        if slot == "ohlcv":
+            data[slot] = load_ohlcv_4h(ohlcv_path(symbol, "1h"), start=start, end=end)
+        elif slot == "funding":
+            data[slot] = load_funding_rates(funding_path(symbol))
+        else:
+            raise ValueError(f"runner '{definition.runner}' requires unknown data slot '{slot}'")
+    runner = resolve_component_runner(definition.runner)
+    request = ComponentRunRequest(
+        costs=costs, signal_delay_bars=signal_delay_bars, start=start, end=end,
     )
+    return runner(definition, data, request)
 
 
 def _concat_component_trades(
@@ -169,14 +174,18 @@ def _assemble_result(
 
 def run_expert_portfolio_evaluation(
     request: ExpertPortfolioEvaluationRequest,
+    *,
+    catalog: ExpertLibraryCatalog | None = None,
+    ledger_path: Path = RUNS_LOG_PATH,
 ) -> EvaluationReport:
     """Execute one sealed pre-registered expert portfolio evaluation.
 
-    An unregistered library raises ``ValueError``. The base run computes the
-    causal LCB targets; the stress run reuses the base target weights verbatim
-    under stressed costs with the existing one-bar delay and never recomputes
-    targets. Observation, fold, stress, and holdout reuse the existing canonical
-    functions unchanged and promotion is composed only by
+    An unregistered library, a RETIRED registration, or any fingerprint drift
+    raises ``ValueError`` before any component execution. The base run computes
+    the causal LCB targets; the stress run reuses the base target weights
+    verbatim under stressed costs with the existing one-bar delay and never
+    recomputes targets. Observation, fold, stress, and holdout reuse the
+    existing canonical functions unchanged and promotion is composed only by
     ``compose_promotion_verdict``, so no allocation result can bypass a failing
     gate.
     """
@@ -184,7 +193,10 @@ def run_expert_portfolio_evaluation(
     if request.unseal_holdout:
         _logger.info("[EVAL] holdout unsealed: --end=%s", end or "(latest available)")
 
-    library = load_expert_library(request.library_id)
+    registered = resolve_registered_library(
+        request.library_id, catalog=catalog or default_catalog(), ledger_path=ledger_path,
+    )
+    library = registered.spec
     costs = CostModel()
 
     component_returns, component_trades = build_component_panel(
@@ -274,6 +286,8 @@ def run_expert_portfolio_evaluation(
             stress_gate=stress_gate,
             holdout_gate=holdout_gate,
             promotion=promotion,
+            parent_registration_id=registered.registration_id,
+            log_path=ledger_path,
         )
         _logger.info("[EVAL] run logged: git_sha=%s dirty=%s", record["git_sha"], record["git_dirty"])
 
