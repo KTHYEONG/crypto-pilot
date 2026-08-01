@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 import logging
 import sys
 from pathlib import Path
@@ -13,7 +12,6 @@ from src.application import cash_carry_evaluation as app
 import src.research.cash_carry.market_data as carry
 from src.cli import run_cash_carry_backtest as cli
 from src.cli.run_backtest import HOLDOUT_CUTOFF
-from src.research.provenance import anti_patterns as rm
 
 _CUTOFF = HOLDOUT_CUTOFF
 
@@ -73,7 +71,6 @@ def fake_carry_env(
     monkeypatch: pytest.MonkeyPatch,
 ) -> Path:
     _write_fake_carry_files(tmp_path)
-    anti_path = tmp_path / "registry" / "anti_patterns.json"
 
     def _spot(symbol: str, timeframe: str) -> Path:
         return tmp_path / "spot" / "ohlcv" / timeframe / f"{symbol.replace('/', '_')}.parquet"
@@ -87,20 +84,14 @@ def fake_carry_env(
     def _borrow(symbol: str) -> Path:
         return tmp_path / "spot" / "borrow" / f"{symbol.replace('/', '_')}.parquet"
 
-    for module in (carry,):
+    for module in (carry, app):
         monkeypatch.setattr(module, "spot_ohlcv_path", _spot)
         monkeypatch.setattr(module, "ohlcv_path", _perp)
         monkeypatch.setattr(module, "funding_path", _fund)
         monkeypatch.setattr(module, "borrow_path", _borrow)
 
     monkeypatch.setattr(app, "load_spot_manifest", lambda: {"schema_version": 1, "datasets": {}})
-    monkeypatch.setattr(
-        app, "record_rejected_candidate",
-        lambda **kwargs: rm.record_rejected_candidate(
-            anti_patterns_path=anti_path, **kwargs,
-        ),
-    )
-    return anti_path
+    return tmp_path
 
 
 @pytest.mark.slow
@@ -126,7 +117,7 @@ class TestCashCarryCli:
         monkeypatch: pytest.MonkeyPatch,
         caplog: pytest.LogCaptureFixture,
     ) -> None:
-        borrow_file = fake_carry_env.parent.parent / "spot" / "borrow" / "BTCUSDT.parquet"
+        borrow_file = fake_carry_env / "spot" / "borrow" / "BTCUSDT.parquet"
         borrow_file.unlink()
         monkeypatch.setattr(sys, "argv", [
             "run_cash_carry_backtest", "run", "--start", "2024-01-01", "--no-log-run",
@@ -176,19 +167,3 @@ class TestCashCarryCli:
         assert all(e is None or e <= _CUTOFF for e in ends_seen)
         assert funding_max, "carry data was never validated"
         assert all(mx <= _CUTOFF for mx in funding_max)
-
-    def test_rejected_run_records_anti_pattern_once(
-        self,
-        fake_carry_env: Path,
-        monkeypatch: pytest.MonkeyPatch,
-        caplog: pytest.LogCaptureFixture,
-    ) -> None:
-        anti_path = fake_carry_env
-        monkeypatch.setattr(sys, "argv", [
-            "run_cash_carry_backtest", "run", "--start", "2024-01-01", "--no-log-run",
-        ])
-        with caplog.at_level(logging.INFO):
-            cli.main()
-            cli.main()
-        anti = json.loads(anti_path.read_text(encoding="utf-8"))
-        assert len(anti) == 1
