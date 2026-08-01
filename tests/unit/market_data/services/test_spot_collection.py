@@ -179,6 +179,40 @@ class TestEnsureSpotOhlcv:
         assert record["imputations"][0]["method"] == "bridge_unknown_volume"
         assert record["data_quality"]["volume_quality"] == "unknown"
 
+    def test_ensure_auto_repairs_isolated_gap_when_fetch_cannot_fill(
+        self, spot_paths: Path,
+    ) -> None:
+        idx = pd.DatetimeIndex(
+            ["2024-01-01 00:00", "2024-01-01 01:00", "2024-01-01 03:00"], tz="UTC",
+        )
+        frame = pd.DataFrame({
+            "timestamp": _ms(idx), "open": [100.0, 101.0, 99.0],
+            "high": [101.0, 102.0, 100.0], "low": [99.0, 100.0, 98.0],
+            "close": [100.5, 101.5, 99.5], "volume": [10.0, 11.0, 12.0],
+        })
+        path = spot.spot_ohlcv_path("ETHUSDT", "1h")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        frame.to_parquet(path)
+
+        class EmptyClient:
+            def fetch_spot_ohlcv(self, symbol, timeframe, start, end):
+                return pd.DataFrame()
+
+        spot.ensure_spot_ohlcv(
+            "ETHUSDT", "1h", "2024-01-01", "2024-01-01 04:00",
+            client=EmptyClient(),  # type: ignore[arg-type]
+        )
+
+        out = pd.read_parquet(path)
+        timestamps = pd.to_datetime(out["timestamp"], unit="ms", utc=True)
+        assert len(out) == 4
+        assert timestamps.diff().dropna().eq(pd.Timedelta(hours=1)).all()
+        record = json.loads(manifest.MANIFEST_PATH.read_text(encoding="utf-8"))[
+            "datasets"
+        ]["ohlcv/1h"]["ETHUSDT"]
+        assert record["data_quality"]["volume_quality"] == "unknown"
+        assert record["imputations"][0]["timestamp"] == "2024-01-01T02:00:00+00:00"
+
 
 class TestImportQuoteBorrowHistory:
     def test_imports_hourly_export_to_canonical_columns(self, spot_paths: Path) -> None:
