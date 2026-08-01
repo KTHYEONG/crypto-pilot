@@ -6,13 +6,12 @@ import json
 import pytest
 
 from src.cli.main import build_root_parser
-from src.research.expert_portfolio.contracts import (
+from src.research.expert_portfolio.admission_reports import LibraryAdmissionReport
+from src.research.expert_portfolio.admission_types import (
     CandidateAdmissionResult,
-    ContextualRouterSpec,
-    ExpertDefinition,
     LibraryAdmissionConfig,
-    LibraryAdmissionReport,
 )
+from src.research.expert_portfolio.models import ContextualRouterSpec, ExpertDefinition
 
 
 def _find_parser(root: argparse.ArgumentParser, path: list[str]) -> argparse.ArgumentParser:

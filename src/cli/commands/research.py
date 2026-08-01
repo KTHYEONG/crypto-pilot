@@ -4,17 +4,15 @@ import argparse
 import json
 import sys
 
+from src.application.admission_backtest import run_technical_library_admission_backtest
 from src.application.baseline_evaluation import run_baseline_evaluation
 from src.application.cash_carry_evaluation import run_cash_carry_evaluation
-from src.application.expert_portfolio_evaluation import run_expert_portfolio_evaluation
+from src.application.expert_evaluation import run_technical_expert_evaluation
+from src.application.library_admission import run_technical_library_admission
+from src.application.library_evaluation import run_expert_portfolio_evaluation
 from src.application.oi_deleveraging_evaluation import run_oi_deleveraging_evaluation
 from src.application.portfolio_evaluation import run_portfolio_evaluation
 from src.application.sleeve_blend_evaluation import run_sleeve_blend_evaluation
-from src.application.technical_expert_evaluation import run_technical_expert_evaluation
-from src.application.technical_library_admission import run_technical_library_admission
-from src.application.technical_library_admission_backtest import (
-    run_technical_library_admission_backtest,
-)
 from src.research.contracts import (
     BaselineEvaluationRequest,
     CashCarryEvaluationRequest,
@@ -23,13 +21,15 @@ from src.research.contracts import (
     SleeveBlendEvaluationRequest,
     TechnicalExpertEvaluationRequest,
 )
-from src.research.expert_portfolio.contracts import (
-    ContextualRouterSpec,
-    ExpertPortfolioEvaluationRequest,
+from src.research.expert_portfolio.admission_types import (
     LibraryAdmissionConfig,
     TechnicalLibraryAdmissionBacktestRequest,
     TechnicalLibraryAdmissionRequest,
     expert_ids_from_admission_proposal_id,
+)
+from src.research.expert_portfolio.models import (
+    ContextualRouterSpec,
+    ExpertPortfolioEvaluationRequest,
 )
 from src.research.portfolio.defaults import DEFAULT_SYMBOLS
 
