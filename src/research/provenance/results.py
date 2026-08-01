@@ -30,6 +30,7 @@ if TYPE_CHECKING:
 _logger = logging.getLogger("ResultsLog")
 
 _INITIAL_EQUITY_OI = 10_000.0
+_INITIAL_EQUITY_TECHNICAL = 10_000.0
 
 
 def _reliability_summary(gate: ReliabilityGateResult) -> dict[str, object]:
@@ -355,6 +356,63 @@ def record_oi_deleveraging_run(
         end=end,
         initial_equity=_INITIAL_EQUITY_OI,
         costs=asdict(costs),
+        window="observation+holdout" if holdout_gate is not None else "observation",
+    )
+    return _append_evaluation(event, log_path)
+
+
+def record_technical_expert_run(
+    *,
+    symbol: str,
+    candidate_id: str,
+    return_source: str,
+    signal_delay_bars: int,
+    costs: CostModel,
+    result: BacktestResult,
+    metrics: Metrics,
+    start: str | None,
+    end: str | None,
+    observation_gate: ReliabilityGateResult,
+    fold_distribution: FoldDistributionResult,
+    stress_gate: ReliabilityGateResult,
+    holdout_gate: ReliabilityGateResult | None = None,
+    promotion: PromotionResult | None = None,
+    candidate: CandidateIdentity | None = None,
+    log_path: Path = RUNS_LOG_PATH,
+) -> dict[str, object]:
+    """Append one technical-expert candidate screen as a ledger evaluation event.
+
+    The record binds the frozen candidate's return source, its immutable
+    fingerprint (data hashes, costs, delay, and the catalog configuration), every
+    gate outcome, and the promotion verdict. No mutable indicator parameter map
+    is ever serialised.
+    """
+    git_sha, git_dirty = _git_head()
+    if candidate is not None:
+        _logger.debug("technical_expert candidate provenance=%s", asdict(candidate))
+    event = build_evaluation_event(
+        workflow="technical_expert",
+        ts=datetime.now(UTC).isoformat(),
+        git_sha=git_sha,
+        git_dirty=git_dirty,
+        metrics=asdict(metrics),
+        reliability=_reliability_block(
+            observation_gate=observation_gate,
+            fold_distribution=fold_distribution,
+            stress_gate=stress_gate,
+            holdout_gate=holdout_gate,
+        ),
+        promotion=_promotion_summary(promotion),
+        kind="technical_expert",
+        symbol=symbol,
+        candidate_id=candidate_id,
+        return_source=return_source,
+        signal_delay_bars=signal_delay_bars,
+        start=start,
+        end=end,
+        initial_equity=_INITIAL_EQUITY_TECHNICAL,
+        costs=asdict(costs),
+        candidate_identity=asdict(candidate) if candidate is not None else None,
         window="observation+holdout" if holdout_gate is not None else "observation",
     )
     return _append_evaluation(event, log_path)
