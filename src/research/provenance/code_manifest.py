@@ -15,6 +15,21 @@ CANONICAL_CARRY_CODE_UNITS: Mapping[str, Path] = {
     "market_data.storage.loaders": Path("src/market_data/storage/loaders.py"),
 }
 
+# Canonical technical-expert semantic units hashed for candidate provenance.
+# Only the real implementation files participate in the code fingerprint; the
+# application dispatch layer never does.
+TECHNICAL_CODE_UNITS: Mapping[str, Path] = {
+    "application.technical_expert_evaluation": Path(
+        "src/application/technical_expert_evaluation.py"
+    ),
+    "technical_experts.backtest": Path("src/research/technical_experts/backtest.py"),
+    "technical_experts.catalog": Path("src/research/technical_experts/catalog.py"),
+    "technical_experts.contracts": Path("src/research/technical_experts/contracts.py"),
+    "technical_experts.indicators": Path("src/research/technical_experts/indicators.py"),
+    "technical_experts.signals": Path("src/research/technical_experts/signals.py"),
+    "market_data.storage.loaders": Path("src/market_data/storage/loaders.py"),
+}
+
 
 def compute_code_hash(
     logical_units: Mapping[str, Path] = CANONICAL_CARRY_CODE_UNITS,  # noqa: B008
