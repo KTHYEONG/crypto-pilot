@@ -367,7 +367,10 @@ class TestComputeFoldDistribution:
         assert dominant.gate_pass is False
 
     def test_compute_fold_distribution_matches_measured_v1_concentration(self) -> None:
-        df = load_ohlcv_4h(BTC_PATH, end="2025-12-31 23:59:59")
+        # Pinned to the original 2022-04-01 data floor: this locks in the v1
+        # measured concentration figure and must stay stable regardless of
+        # how far back the shared local data lake is later backfilled.
+        df = load_ohlcv_4h(BTC_PATH, start="2022-04-01", end="2025-12-31 23:59:59")
         from src.research.baseline.backtest import run_backtest
 
         spec, costs = StrategySpec(), CostModel()
