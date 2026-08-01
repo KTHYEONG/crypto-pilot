@@ -8,6 +8,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+import numpy as np
 import pandas as pd
 
 from src.research.baseline.backtest import BacktestResult
@@ -269,6 +270,63 @@ def record_cash_carry_run(
         "initial_equity": initial_equity,
         "cash_carry_spec": asdict(cash_carry_spec),
         "costs": asdict(costs),
+        "metrics": asdict(metrics),
+        "reliability": {
+            "observation": _reliability_summary(observation_gate),
+            "holdout": _reliability_summary(holdout_gate) if holdout_gate is not None else None,
+            "fold_distribution": {
+                "gate_pass": fold_distribution.gate_pass,
+                "max_period_contribution": fold_distribution.max_period_contribution,
+                "n_folds": fold_distribution.n_folds,
+            },
+            "stress_test": _reliability_summary(stress_gate),
+        },
+        "promotion": _promotion_summary(promotion),
+        "window": "observation+holdout" if holdout_gate is not None else "observation",
+    }
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    with log_path.open("a", encoding="utf-8") as f:
+        f.write(json.dumps(record, ensure_ascii=False) + "\n")
+    return record
+
+
+def record_expert_portfolio_run(
+    *,
+    library_fingerprint: dict[str, object],
+    allocation_cost_total: float,
+    result: BacktestResult,
+    metrics: Metrics,
+    observation_gate: ReliabilityGateResult,
+    fold_distribution: FoldDistributionResult,
+    stress_gate: ReliabilityGateResult,
+    holdout_gate: ReliabilityGateResult | None = None,
+    promotion: PromotionResult | None = None,
+    log_path: Path = RUNS_LOG_PATH,
+) -> dict[str, object]:
+    """Append one pre-registered expert-portfolio run as a JSONL record.
+
+    The record binds the run to its immutable library fingerprint (definitions,
+    allocator configuration, and component code hashes), the realised allocation
+    turnover cost, the marked total-equity metrics, every gate output, and the
+    promotion verdict. Logging is strictly append-only: a library fingerprint
+    changed after registration is a distinct candidate, and an incomplete
+    fingerprint or non-finite realised cost appends no row.
+    """
+    if not isinstance(library_fingerprint, dict) or not library_fingerprint:
+        raise ValueError("library_fingerprint must be a non-empty dict")
+    if "experts" not in library_fingerprint:
+        raise ValueError("library_fingerprint must include the 'experts' library definitions")
+    if not np.isfinite(float(allocation_cost_total)):
+        raise ValueError(f"allocation_cost_total must be finite, got {allocation_cost_total}")
+
+    git_sha, git_dirty = _git_head()
+    record: dict[str, object] = {
+        "ts": datetime.now(UTC).isoformat(),
+        "git_sha": git_sha,
+        "git_dirty": git_dirty,
+        "kind": "expert_portfolio",
+        "library_fingerprint": library_fingerprint,
+        "allocation_cost_total": float(allocation_cost_total),
         "metrics": asdict(metrics),
         "reliability": {
             "observation": _reliability_summary(observation_gate),
