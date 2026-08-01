@@ -34,8 +34,3 @@ Provide a clear, concise summary with emojis. Example:
 - **Verification**:
   - 🧪 Pytest: <Passed>/<Total> passed
   - 🧹 Ruff / Mypy: <PASS/FAIL>
-
-
-
-
-
