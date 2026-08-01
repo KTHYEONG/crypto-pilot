@@ -3,7 +3,7 @@ from __future__ import annotations
 import pytest
 
 from src.research.cash_carry.contracts import CashCarrySpec, CarryCostModel
-from src.research.contracts import CostModel, StrategySpec
+from src.research.contracts import CostModel, StrategySpec, TechnicalExpertEvaluationRequest
 
 
 def test_strategy_spec_contract() -> None:
@@ -71,6 +71,28 @@ class TestCostModel:
             c.buy_fill(0)
         with pytest.raises(ValueError, match="price must be > 0"):
             c.sell_fill(-1.0)
+
+
+def test_technical_expert_request_rejects_non_positive_equity() -> None:
+    with pytest.raises(ValueError, match="initial_equity"):
+        TechnicalExpertEvaluationRequest(
+            candidate_id="technical_macd_histogram_regime_long_v1",
+            symbol="BTCUSDT",
+            initial_equity=0.0,
+        )
+
+
+def test_technical_expert_request_rejects_empty_symbol() -> None:
+    with pytest.raises(ValueError, match="symbol"):
+        TechnicalExpertEvaluationRequest(
+            candidate_id="technical_macd_histogram_regime_long_v1",
+            symbol="",
+        )
+
+
+def test_technical_expert_request_rejects_empty_candidate_id() -> None:
+    with pytest.raises(ValueError, match="candidate_id"):
+        TechnicalExpertEvaluationRequest(candidate_id="", symbol="BTCUSDT")
 
 
 class TestCashCarrySpec:
