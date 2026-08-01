@@ -70,6 +70,27 @@ def _missing_bar_timestamps(
     return expected.difference(observed)
 
 
+def _isolated_missing_bar_timestamps(
+    frame: pd.DataFrame,
+    missing: pd.DatetimeIndex,
+    period: pd.Timedelta,
+) -> pd.DatetimeIndex:
+    """Select only one-bar holes with observed bars on both boundaries.
+
+    The bridge repair is deliberately limited to isolated holes.  Adjacent
+    missing bars remain pending because chaining synthetic bars would invent a
+    longer price path and weaken the data-integrity contract.
+    """
+    if missing.empty:
+        return missing
+    observed = set(pd.to_datetime(frame["timestamp"], unit="ms", utc=True))
+    isolated = [
+        timestamp for timestamp in missing
+        if timestamp - period in observed and timestamp + period in observed
+    ]
+    return pd.DatetimeIndex(isolated, tz="UTC")
+
+
 def repair_spot_ohlcv_gap(
     symbol: str,
     timeframe: str,
@@ -288,6 +309,18 @@ def ensure_spot_ohlcv(
     record.update(_prior_quality_metadata(f"ohlcv/{timeframe}", symbol))
     _update_manifest_record(f"ohlcv/{timeframe}", symbol, record)
     missing = _missing_bar_timestamps(combined, req_start, req_end, period)
+    isolated = _isolated_missing_bar_timestamps(combined, missing, period)
+    for target in isolated:
+        # ``repair_spot_ohlcv_gap`` accepts a naive timestamp and localizes it
+        # explicitly, avoiding ambiguous timezone handling at this boundary.
+        repair_spot_ohlcv_gap(
+            symbol,
+            timeframe,
+            target.tz_convert(None).isoformat(),
+        )
+    if len(isolated) > 0:
+        combined = _read_spot_cache(path)
+        missing = _missing_bar_timestamps(combined, req_start, req_end, period)
     if len(missing) > 0:
         _logger.info(
             "[DATA] spot_ohlcv symbol=%s timeframe=%s status=PENDING rows=%d "
@@ -297,8 +330,10 @@ def ensure_spot_ohlcv(
         )
         return
     _logger.info(
-        "[DATA] spot_ohlcv symbol=%s timeframe=%s status=PASS rows=%d start=%s end=%s",
+        "[DATA] spot_ohlcv symbol=%s timeframe=%s status=PASS rows=%d start=%s end=%s "
+        "imputed_isolated=%d",
         symbol, timeframe, len(combined), ts.min().isoformat(), ts.max().isoformat(),
+        len(isolated),
         extra={"tag": "DATA"},
     )
 
