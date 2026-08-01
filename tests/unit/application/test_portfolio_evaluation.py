@@ -3,7 +3,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from src.application.portfolio_evaluation import run_portfolio_evaluation
+from src.application.research.portfolio.evaluation import run_portfolio_evaluation
 from src.research.contracts import (
     CostModel,
     PortfolioEvaluationRequest,
@@ -22,11 +22,11 @@ def test_portfolio_evaluation_preserves_execution_invariants(
     frames, funding_rates = portfolio_frames
     symbols = tuple(sorted(frames))
     monkeypatch.setattr(
-        "src.application.portfolio_evaluation._load_symbol_frame",
+        "src.application.research.portfolio.evaluation._load_symbol_frame",
         lambda symbol, start, end: frames.get(symbol),
     )
     monkeypatch.setattr(
-        "src.application.portfolio_evaluation._load_symbol_funding",
+        "src.application.research.portfolio.evaluation._load_symbol_funding",
         lambda symbol, frame: funding_rates.get(symbol),
     )
 
@@ -65,11 +65,11 @@ def test_portfolio_evaluation_preserves_2_5_percent_aggregate_risk(
     frames, funding_rates = portfolio_frames
     symbols = tuple(sorted(frames))
     monkeypatch.setattr(
-        "src.application.portfolio_evaluation._load_symbol_frame",
+        "src.application.research.portfolio.evaluation._load_symbol_frame",
         lambda symbol, start, end: frames.get(symbol),
     )
     monkeypatch.setattr(
-        "src.application.portfolio_evaluation._load_symbol_funding",
+        "src.application.research.portfolio.evaluation._load_symbol_funding",
         lambda symbol, frame: funding_rates.get(symbol),
     )
     report = run_portfolio_evaluation(
@@ -92,11 +92,11 @@ def test_portfolio_evaluation_stress_uses_frozen_multipliers(
     frames, funding_rates = portfolio_frames
     symbols = tuple(sorted(frames))
     monkeypatch.setattr(
-        "src.application.portfolio_evaluation._load_symbol_frame",
+        "src.application.research.portfolio.evaluation._load_symbol_frame",
         lambda symbol, start, end: frames.get(symbol),
     )
     monkeypatch.setattr(
-        "src.application.portfolio_evaluation._load_symbol_funding",
+        "src.application.research.portfolio.evaluation._load_symbol_funding",
         lambda symbol, frame: funding_rates.get(symbol),
     )
     report = run_portfolio_evaluation(
