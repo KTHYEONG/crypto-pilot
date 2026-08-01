@@ -16,7 +16,7 @@ def test_cli_refuses_unregistered_library_fail_closed(
     monkeypatch.setattr(sys, "argv", [
         "run_expert_portfolio_backtest", "--library-id", "no_such_library", "--no-log-run",
     ])
-    with pytest.raises(ValueError, match="not registered"):
+    with pytest.raises(ValueError, match="not in the catalog"):
         cli.main()
 
 
