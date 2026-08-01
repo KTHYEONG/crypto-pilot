@@ -10,6 +10,7 @@ import pytest
 
 from src.application import cash_carry_evaluation as app
 import src.research.cash_carry.market_data as carry
+import src.research.cash_carry.provenance as carry_provenance
 from src.cli import run_cash_carry_backtest as cli
 from src.cli.run_backtest import HOLDOUT_CUTOFF
 
@@ -84,12 +85,13 @@ def fake_carry_env(
     def _borrow(symbol: str) -> Path:
         return tmp_path / "spot" / "borrow" / f"{symbol.replace('/', '_')}.parquet"
 
-    for module in (carry, app):
+    for module in (carry, carry_provenance):
         monkeypatch.setattr(module, "spot_ohlcv_path", _spot)
         monkeypatch.setattr(module, "ohlcv_path", _perp)
         monkeypatch.setattr(module, "funding_path", _fund)
         monkeypatch.setattr(module, "borrow_path", _borrow)
 
+    monkeypatch.setattr(app, "borrow_path", _borrow)
     monkeypatch.setattr(app, "load_spot_manifest", lambda: {"schema_version": 1, "datasets": {}})
     return tmp_path
 

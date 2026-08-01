@@ -45,7 +45,7 @@ def test_rejected_candidate_is_not_registered(
         lambda symbol, start, end: (frame, funding),
     )
     monkeypatch.setattr(
-        "src.application.technical_expert_evaluation._data_hashes",
+        "src.application.technical_expert_evaluation.technical_data_hashes",
         lambda symbol: {"perp_ohlcv": "a" * 64, "funding": "b" * 64},
     )
     request = TechnicalExpertEvaluationRequest(
@@ -98,7 +98,7 @@ def test_technical_expert_equity_exhaustion_returns_pending(monkeypatch) -> None
         lambda symbol, start, end: (frame, funding),
     )
     monkeypatch.setattr(
-        "src.application.technical_expert_evaluation._data_hashes",
+        "src.application.technical_expert_evaluation.technical_data_hashes",
         lambda symbol: {"perp_ohlcv": "a" * 64, "funding": "b" * 64},
     )
     monkeypatch.setattr(

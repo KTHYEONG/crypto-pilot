@@ -29,7 +29,7 @@ def test_cash_carry_evaluation_preserves_ledger_and_provenance(
     monkeypatch.setattr("src.application.cash_carry_evaluation.load_carry_market_data",
                         lambda symbol, start, end: data)
     monkeypatch.setattr(
-        "src.application.cash_carry_evaluation._data_hashes",
+        "src.application.cash_carry_evaluation.cash_carry_data_hashes",
         lambda symbol: {
             "spot_ohlcv": "a" * 64,
             "perp_ohlcv": "b" * 64,
