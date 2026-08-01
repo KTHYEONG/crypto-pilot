@@ -11,7 +11,7 @@ from src.research.expert_portfolio.backtest import (
     ExpertPortfolioBacktestResult,
     run_expert_portfolio,
 )
-from src.research.expert_portfolio.contracts import (
+from src.research.expert_portfolio.models import (
     ContextualRouterSpec,
     ExpertDefinition,
     ExpertPortfolioSpec,

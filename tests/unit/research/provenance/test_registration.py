@@ -5,7 +5,7 @@ from pathlib import Path
 import pytest
 
 from src.research.expert_portfolio.catalog import ExpertLibraryCatalog
-from src.research.expert_portfolio.contracts import ExpertDefinition
+from src.research.expert_portfolio.models import ExpertDefinition
 from src.research.provenance.ledger import load_events
 from src.research.provenance.registration import register_expert_library, register_registration
 
@@ -121,7 +121,7 @@ class TestRegisterExpertLibrary:
 
     def test_unsupported_runner_key_fails_closed(self, tmp_path: Path, expert_library_blueprint) -> None:
         from src.research.expert_portfolio.catalog import ExpertLibraryBlueprint
-        from src.research.expert_portfolio.contracts import ExpertDefinition
+        from src.research.expert_portfolio.models import ExpertDefinition
 
         # A blueprint whose expert uses a runner outside the supported set is
         # rejected at construction; no registration can ever proceed.
