@@ -30,9 +30,11 @@ Frontier reasoning model protocol for specification engineering and architecture
      - `target_file`: Absolute path to modify or create.
      - `symbol` & `signature`: Full Python type-hinted signature.
      - `python_assertion`: Directly executable Python assertion expression (e.g. `assert fee_calc(100) == 0.05`).
+     - `requirements`: Explicit fail-closed exception types (e.g., raise `ValueError` on bad inputs) and performance/vectorization constraints (e.g., vectorized NumPy without `pd.apply`).
      - `scenarios`: Array of `{ scenario_id, target_test_file, expected_behavior }`.
      - `wiring`: Exact caller file, anchor location, and invocation snippet.
    - Create main design blueprint in `docs/specs/<feature>.md`.
+
 
 ## Output
 
