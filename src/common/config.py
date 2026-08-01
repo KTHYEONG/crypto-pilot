@@ -20,6 +20,10 @@ def funding_path(symbol: str) -> Path:
     return FUTURES_DATA_DIR / "funding" / f"{_safe_symbol(symbol)}.parquet"
 
 
+def metrics_path(symbol: str) -> Path:
+    return FUTURES_DATA_DIR / "metrics" / "1d" / f"{_safe_symbol(symbol)}.parquet"
+
+
 def spot_ohlcv_path(symbol: str, timeframe: str) -> Path:
     safe = _safe_symbol(symbol)
     return SPOT_DATA_DIR / "ohlcv" / timeframe / f"{safe}.parquet"
