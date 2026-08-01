@@ -1,21 +1,19 @@
 from __future__ import annotations
 
 import dataclasses
-import hashlib
-import json
 import logging
-from pathlib import Path
 from typing import cast
 
 import pandas as pd
 
-from src.common.config import borrow_path, funding_path, ohlcv_path, spot_ohlcv_path
+from src.common.config import borrow_path
 from src.common.errors import DataIntegrityError
 from src.market_data.storage.manifest import load_spot_manifest
 from src.research.baseline.backtest import BacktestResult
 from src.research.cash_carry.backtest import run_cash_carry_backtest
 from src.research.cash_carry.contracts import CarryCostModel, CarryMarketData, CashCarrySpec
 from src.research.cash_carry.market_data import load_carry_market_data
+from src.research.cash_carry.provenance import cash_carry_data_hashes, source_paths
 from src.research.contracts import (
     CashCarryEvaluationRequest,
     EvaluationReport,
@@ -49,41 +47,6 @@ _STRESS_SLIPPAGE_MULT = 2.0
 
 _HYPOTHESIS_ID = "cash_and_carry_basis"
 _RETURN_SOURCE = "spot_perp_funding_carry"
-
-_SOURCE_FILES = ("spot_ohlcv", "perp_ohlcv", "funding", "borrow")
-
-
-def _source_paths(symbol: str) -> dict[str, str]:
-    return {
-        "spot_ohlcv": str(spot_ohlcv_path(symbol, "1h")),
-        "perp_ohlcv": str(ohlcv_path(symbol, "1h")),
-        "funding": str(funding_path(symbol)),
-        "borrow": str(borrow_path(symbol)),
-    }
-
-
-def _file_sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1 << 20), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
-
-
-def _data_hashes(symbol: str) -> dict[str, str]:
-    hashes: dict[str, str] = {}
-    for name, path in _source_paths(symbol).items():
-        p = Path(path)
-        if not p.exists():
-            raise DataIntegrityError(f"{name} data missing for {symbol}: {p}")
-        hashes[name] = _file_sha256(p)
-    return hashes
-
-
-def _combined_data_hash(data_hashes: dict[str, str]) -> str:
-    return hashlib.sha256(
-        json.dumps(data_hashes, sort_keys=True).encode("utf-8")
-    ).hexdigest()
 
 
 def _manifest_snapshot(symbol: str) -> dict[str, object]:
@@ -279,7 +242,7 @@ def _ephemeral_registration(
         observation_end=observation_end,
         spec=dataclasses.asdict(spec),
         costs=dataclasses.asdict(costs),
-        source_paths=_source_paths(symbol),
+        source_paths={k: str(v) for k, v in source_paths(symbol).items()},
         data_hashes=data_hashes,
         manifest=manifest,
         code_hash=code_hash,
@@ -315,7 +278,7 @@ def run_cash_carry_evaluation(request: CashCarryEvaluationRequest) -> Evaluation
         )
         return _pending_report(request)
     try:
-        hashes = _data_hashes(request.symbol)
+        hashes = cash_carry_data_hashes(request.symbol)
     except DataIntegrityError as exc:
         _logger.info("[EVAL] run status=PENDING symbol=%s reason=%s", request.symbol, exc)
         return _pending_report(request)
