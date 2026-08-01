@@ -145,7 +145,7 @@ def test_contextual_library_promotion_uses_only_composite_master_ledger(
     # reports remain recorded admission diagnostics and can never act as
     # independent promotion gates, so a failing fold on the routed master ledger
     # keeps the library REJECTED even though per-expert evidence is HOLDOUT_PASS.
-    from src.application.library_evaluation import run_expert_portfolio_evaluation
+    from src.application.research.expert_portfolio.evaluation import run_expert_portfolio_evaluation
     from src.research.baseline.backtest import BacktestResult
     from src.research.expert_portfolio.backtest import ExpertPortfolioBacktestResult
     from src.research.expert_portfolio.models import (
@@ -234,19 +234,19 @@ def test_contextual_library_promotion_uses_only_composite_master_ledger(
         return result
 
     monkeypatch.setattr(
-        "src.application.library_evaluation.resolve_registered_library",
+        "src.application.research.expert_portfolio.evaluation.resolve_registered_library",
         fake_resolve,
     )
     monkeypatch.setattr(
-        "src.application.library_evaluation.build_component_panel",
+        "src.application.research.expert_portfolio.evaluation.build_component_panel",
         lambda spec, start, end, costs, *, signal_delay_bars=0: (panel, trades),
     )
     monkeypatch.setattr(
-        "src.application.library_evaluation.build_library_decision_context",
+        "src.application.research.expert_portfolio.evaluation.build_library_decision_context",
         lambda spec, index, start, end: context,
     )
     monkeypatch.setattr(
-        "src.application.library_evaluation.run_expert_portfolio", fake_run,
+        "src.application.research.expert_portfolio.evaluation.run_expert_portfolio", fake_run,
     )
 
     report = run_expert_portfolio_evaluation(

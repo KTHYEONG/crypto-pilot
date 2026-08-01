@@ -4,7 +4,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from src.application.baseline_evaluation import run_baseline_evaluation
+from src.application.research.baseline.evaluation import run_baseline_evaluation
 from src.research.baseline.backtest import run_backtest
 from src.research.contracts import BaselineEvaluationRequest, CostModel, StrategySpec
 from src.research.evaluation.metrics import compute_metrics
@@ -48,9 +48,9 @@ def _two_year_breakout_frame() -> pd.DataFrame:
 def test_baseline_evaluation_preserves_frozen_result(monkeypatch) -> None:
     """RF-BASE-01: the canonical application path equals the direct baseline path."""
     df = _two_year_breakout_frame()
-    monkeypatch.setattr("src.application.baseline_evaluation.ohlcv_path", lambda *a: df.index[0])
+    monkeypatch.setattr("src.application.research.baseline.evaluation.ohlcv_path", lambda *a: df.index[0])
     monkeypatch.setattr(
-        "src.application.baseline_evaluation.load_ohlcv_4h",
+        "src.application.research.baseline.evaluation.load_ohlcv_4h",
         lambda path, start=None, end=None: df,
     )
 
@@ -86,9 +86,9 @@ def test_baseline_evaluation_rejects_end_past_sealed_cutoff() -> None:
 
 def test_baseline_evaluation_unseals_holdout(monkeypatch) -> None:
     df = _two_year_breakout_frame()
-    monkeypatch.setattr("src.application.baseline_evaluation.ohlcv_path", lambda *a: df.index[0])
+    monkeypatch.setattr("src.application.research.baseline.evaluation.ohlcv_path", lambda *a: df.index[0])
     monkeypatch.setattr(
-        "src.application.baseline_evaluation.load_ohlcv_4h",
+        "src.application.research.baseline.evaluation.load_ohlcv_4h",
         lambda path, start=None, end=None: df,
     )
     report = run_baseline_evaluation(

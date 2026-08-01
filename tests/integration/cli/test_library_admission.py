@@ -128,7 +128,7 @@ def test_library_admission_cli_emits_deterministic_json(
         "--max-combinations", "10",
     ])
     monkeypatch.setattr(
-        "src.cli.commands.research.run_technical_library_admission",
+        "src.application.research.expert_portfolio.admission.run_technical_library_admission",
         lambda request: _canned_report(),
     )
 
