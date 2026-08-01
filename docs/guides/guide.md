@@ -1,0 +1,135 @@
+# 백테스팅 및 시그널 심사 실행 가이드 (Backtest & Admission Execution Guide)
+
+본 문서는 프로젝트 내에 존재하는 다양한 백테스팅 실행 엔트리포인트(CLI 명령어), 시그널 조합 및 심사(Admission) 로직, 각 백테스트의 목적 및 측정 지표를 안내합니다.
+
+---
+
+## 1. 백테스트 개요 및 선택 매트릭스
+
+| 백테스트 / 심사 구분 | CLI 실행 명령어 (독립 실행 / 서브커맨드) | 핵심 측정 목적 및 평가 로직 |
+| :--- | :--- | :--- |
+| **단일 시그널 (Baseline)** | `run-backtest` <br>`research baseline run` | 단일 시그널/지표의 PnL, Sharpe/Sortino 비율, 낙폭(MDD) 평가 |
+| **현선물 차익거래 (Cash & Carry)** | `run-cash-carry-backtest` <br>`research cash-carry run` | 현선물 베이시스 차익 PnL, 펀딩비 수익률, 청산 리스크 측정 |
+| **다중 자산 포트폴리오 (Portfolio)** | `run-portfolio-backtest` <br>`research portfolio run` | 다중 자산/시그널 비중 배분, 리스크 분산(MDD 감소), 회전율 비용 측정 |
+| **슬리브 혼합 (Sleeve Blend)** | `run-sleeve-blend-backtest` <br>`research sleeve-blend run` | 이종 전략(방향성 + 델타뉴트럴) 혼합 시 시너지 및 상호 헷지 효과 측정 |
+| **시그널 조합 & 심사 (Library Admission)** | `research expert-portfolio library-admission` | 전문가 시그널들의 상호 상관관계, 동시 손실률, 국면 커버리지 검증 및 통과 조합(`proposal_id`) 도출 |
+| **조합 제안 백테스트 (Admission Backtest)** | `research expert-portfolio library-admission-backtest` | 심사 통과 조합(`proposal_id`)을 등록 전 가상으로 미리 백테스팅하여 성능 사전 검증 |
+| **전문가 포트폴리오 (Expert Portfolio)** | `run-expert-portfolio-backtest` <br>`research expert-portfolio run` | 검증 완료 및 등록된 전문가 포트폴리오 동적 앙상블 백테스트 |
+| **미결제약정 디레버리징 (OI Deleveraging)** | `research oi-deleveraging run` | 선물 미결제약정 급감 및 청산 이벤트 발생 시 알파 성능 측정 |
+
+---
+
+## 2. CLI 명령어 및 상세 설명
+
+### 2.1 시그널 조합 검증 및 심사 (`library-admission`)
+후보 시그널(Candidate Source)들을 다각도로 조합하고 상관관계 및 동시 손실률 등의 제약조건을 적용하여 합격 조합을 필터링합니다.
+
+- **서브커맨드 실행 명령어**:
+  ```bash
+  uv run python -m src.cli.main research expert-portfolio library-admission \
+    --candidate-source <소스1> --candidate-source <소스2> \
+    --symbols BTCUSDT ETHUSDT --min-experts 2 --max-experts 5 \
+    --max-abs-pairwise-log-return-correlation 0.7 \
+    --max-joint-negative-return-rate 0.2 \
+    --min-context-covered-states 4 \
+    --max-combinations 10000 \
+    --router-context-symbol BTCUSDT --router-trend-lookback-bars 48 \
+    --router-volatility-lookback-bars 48 --router-min-context-history-bars 96
+  ```
+- **주요 검증 항목**:
+  - **시그널 간 상관관계**: 쌍별 로그 수익률 상관계수가 임계값(예: 0.7) 이하인지 확인
+  - **동시 손실 비율**: 두 시그널이 동시에 손실을 기록하는 비율이 임계값(예: 0.2) 이하인지 확인
+  - **시장 국면 커버리지**: 상승/하강/변동성 등 국면(Context State)을 충분히 커버하는지 확인
+
+---
+
+### 2.2 심사 조합 사전 백테스트 (`library-admission-backtest`)
+`library-admission`에서 생성된 합격 조합(`proposal_id`)을 시스템 등록 전 가상 백테스트하여 검증합니다.
+
+- **서브커맨드 실행 명령어**:
+  ```bash
+  uv run python -m src.cli.main research expert-portfolio library-admission-backtest \
+    --proposal-id <생성된_proposal_id> \
+    --router-context-symbol BTCUSDT --router-trend-lookback-bars 48 \
+    --router-volatility-lookback-bars 48 --router-min-context-history-bars 96
+  ```
+
+---
+
+### 2.3 등록된 전문가 포트폴리오 백테스트 (`expert-portfolio`)
+심사를 마치고 카탈로그에 최종 등록된 전문가(Expert) 라이브러리를 동적 앙상블하여 백테스트를 실행합니다.
+
+- **독립 실행 명령어**:
+  ```bash
+  uv run run-expert-portfolio-backtest --config <설정파일_경로.json>
+  ```
+- **서브커맨드 실행 명령어**:
+  ```bash
+  uv run python -m src.cli.main research expert-portfolio run --config <설정파일_경로.json>
+  ```
+
+---
+
+### 2.4 단일 시그널 백테스트 (`baseline`)
+단일 기술적 지표 또는 개별 방향성 알파 시그널의 단독 수익성과 리스크를 측정합니다.
+
+- **독립 실행 명령어**:
+  ```bash
+  uv run run-backtest --config <설정파일_경로.json>
+  ```
+- **서브커맨드 실행 명령어**:
+  ```bash
+  uv run python -m src.cli.main research baseline run --config <설정파일_경로.json>
+  ```
+
+---
+
+### 2.5 현선물 차익거래 백테스트 (`cash-carry`)
+현물 매수 + 선물 매도(델타 뉴트럴) 포지션을 바탕으로 한 베이시스 차익 및 펀딩비 수취 성과를 측정합니다.
+
+- **독립 실행 명령어**:
+  ```bash
+  uv run run-cash-carry-backtest --config <설정파일_경로.json>
+  ```
+- **서브커맨드 실행 명령어**:
+  ```bash
+  uv run python -m src.cli.main research cash-carry run --config <설정파일_경로.json>
+  ```
+
+---
+
+### 2.6 다중 자산 포트폴리오 백테스트 (`portfolio`)
+여러 코인 자산 또는 시그널에 자금을 분산 배분(Risk Parity, Mean-Variance 등)할 때의 성과를 측정합니다.
+
+- **독립 실행 명령어**:
+  ```bash
+  uv run run-portfolio-backtest --config <설정파일_경로.json>
+  ```
+- **서브커맨드 실행 명령어**:
+  ```bash
+  uv run python -m src.cli.main research portfolio run --config <설정파일_경로.json>
+  ```
+
+---
+
+### 2.7 슬리브 혼합 백테스트 (`sleeve-blend`)
+방향성 전략 슬리브와 비방향성/차익거래 전략 슬리브 등 성격이 다른 하위 전략들을 복합 구성했을 때의 방어력을 측정합니다.
+
+- **독립 실행 명령어**:
+  ```bash
+  uv run run-sleeve-blend-backtest --config <설정파일_경로.json>
+  ```
+- **서브커맨드 실행 명령어**:
+  ```bash
+  uv run python -m src.cli.main research sleeve-blend run --config <설정파일_경로.json>
+  ```
+
+---
+
+### 2.8 미결제약정 디레버리징 백테스트 (`oi-deleveraging`)
+선물 시장의 미결제약정(OI) 급감 또는 청산 빔 발생 시 유동성 불균형을 활용하는 이벤트 기반 전략 성과를 측정합니다.
+
+- **서브커맨드 실행 명령어**:
+  ```bash
+  uv run python -m src.cli.main research oi-deleveraging run --config <설정파일_경로.json>
+  ```
