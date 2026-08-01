@@ -4,6 +4,7 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
+import pytest
 
 from src.application.sleeve_blend_evaluation import run_sleeve_blend_evaluation
 from src.research.baseline.backtest import BacktestResult
@@ -74,6 +75,46 @@ def test_stress_reuses_base_leverage_not_recalibrated(monkeypatch) -> None:
     )
     assert stress_leverage == [base_lev]
     assert report.status == "PASS"
+
+
+def test_directional_stress_reuses_base_weights_not_recalibrated(monkeypatch) -> None:
+    # SC-SGV2-07: the directional candidate's stress run must receive the base
+    # causal weight series verbatim (never re-calibrated around stressed costs).
+    base_weights = pd.DataFrame(
+        {"A:long": [0.25], "B:long": [0.75]},
+        index=pd.date_range("2024-01-01", periods=1, freq="4h", tz="UTC"),
+    )
+    stress_weights: list[pd.DataFrame] = []
+
+    def fake_with_weights(symbols, start, end, costs, initial_equity=...):
+        return _synthetic_result(), base_weights
+
+    def fake_fixed_weights(symbols, start, end, costs, weights, initial_equity=..., signal_delay_bars=...):
+        stress_weights.append(weights)
+        return _synthetic_result()
+
+    monkeypatch.setattr(
+        f"{_APPLICATION_MODULE}.run_directional_sleeve_portfolio_with_weights",
+        fake_with_weights,
+    )
+    monkeypatch.setattr(
+        f"{_APPLICATION_MODULE}.run_directional_sleeve_portfolio_fixed_weights",
+        fake_fixed_weights,
+    )
+
+    report = run_sleeve_blend_evaluation(
+        SleeveBlendEvaluationRequest(
+            candidate_kind="funding_signed_directional_v1", log_run=False,
+        ),
+    )
+    assert len(stress_weights) == 1
+    pd.testing.assert_frame_equal(stress_weights[0], base_weights)
+    assert report.status == "PASS"
+
+
+def test_invalid_candidate_kind_rejected() -> None:
+    with pytest.raises(ValueError, match="candidate_kind"):
+        SleeveBlendEvaluationRequest(candidate_kind="unknown_kind")  # type: ignore[arg-type]
 
 
 def test_sleeve_blend_evaluation_composes_promotion_like_baseline(monkeypatch) -> None:

@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import numpy as np
 import pandas as pd
 
+from src.common.errors import DataIntegrityError
 from src.research.contracts import StrategySpec
 
 
@@ -67,4 +69,83 @@ def generate_signals(df: pd.DataFrame, spec: StrategySpec) -> pd.DataFrame:
             & (ratio >= spec.min_taker_buy_ratio)
         )
         out["entry_signal"] = out["entry_signal"] & ratio_ok
+    return out
+
+
+def _settled_funding_rates(
+    funding_rates: pd.Series,
+    bar_index: pd.DatetimeIndex,
+) -> pd.Series:
+    """Last funding rate settled at or before each completed decision bar.
+
+    A bar with no settled funding event at or before it is ``NaN``, so the
+    directional components are disabled there and are never zero-filled. The
+    event stream must be UTC, monotonic, finite, and duplicate-free; anything
+    else raises ``DataIntegrityError``. A future funding event cannot veto an
+    earlier decision because only events at or before the bar close are read.
+    """
+    if not isinstance(bar_index, pd.DatetimeIndex) or len(bar_index) < 1:
+        raise DataIntegrityError("bar index must be a non-empty DatetimeIndex")
+    if funding_rates is None or len(funding_rates) == 0:
+        raise DataIntegrityError("funding_rates must be a non-empty series")
+    ts = pd.DatetimeIndex(
+        pd.to_datetime(funding_rates.index, utc=True, errors="coerce")
+    )
+    if ts.hasnans:
+        raise DataIntegrityError("funding_rates index must contain datetimes")
+    rates = pd.to_numeric(funding_rates, errors="coerce")
+    if rates.isna().any():
+        raise DataIntegrityError("funding_rates must be finite")
+    if not ts.is_monotonic_increasing:
+        raise DataIntegrityError("funding_rates must be monotonic in time")
+    if ts.has_duplicates:
+        raise DataIntegrityError("funding_rates must be duplicate-free in time")
+
+    series = pd.Series(rates.to_numpy(dtype=np.float64), index=ts).sort_index()
+    pos = series.index.searchsorted(bar_index, side="right") - 1
+    settled = pd.Series(np.nan, index=bar_index, dtype=np.float64)
+    valid = pos >= 0
+    if valid.any():
+        settled.iloc[np.flatnonzero(valid)] = series.to_numpy(dtype=np.float64)[
+            pos[valid]
+        ]
+    return settled
+
+
+def generate_directional_funding_signals(
+    df: pd.DataFrame,
+    spec: StrategySpec,
+    funding_rates: pd.Series,
+) -> pd.DataFrame:
+    """Build mutually exclusive long/short Donchian signals gated by funding.
+
+    ``long_entry_signal`` requires the baseline long breakout with a settled
+    funding rate ``<= 0``; ``short_entry_signal`` requires the mirror breakdown
+    (``close < entry-period lower Donchian`` and ``close < EMA``) with a settled
+    funding rate ``>= 0``. Only the last funding event settled at or before the
+    completed decision bar may be read; a missing settled event disables the
+    components for that bar and never creates an entry. The existing
+    ``generate_signals`` surface is preserved unchanged.
+    """
+    out = generate_signals(df, spec).copy()
+    out["entry_lower"] = donchian_lower(out["low"], spec.entry_period)
+    out["exit_upper"] = donchian_upper(out["high"], spec.exit_period)
+    settled = _settled_funding_rates(funding_rates, out.index)
+    out["settled_funding"] = settled
+    mirror_breakdown = (
+        (out["close"] < out["entry_lower"])
+        & (out["close"] < out["ema"])
+        & out["atr"].notna()
+        & (out["atr"] > 0)
+    )
+    out["long_entry_signal"] = (
+        out["entry_signal"].astype(bool)
+        & settled.notna()
+        & (settled <= 0.0)
+    )
+    out["short_entry_signal"] = (
+        mirror_breakdown
+        & settled.notna()
+        & (settled >= 0.0)
+    )
     return out

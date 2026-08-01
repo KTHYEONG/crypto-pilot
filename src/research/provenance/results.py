@@ -172,7 +172,8 @@ def record_portfolio_run(
 def record_sleeve_blend_run(
     *,
     symbols: tuple[str, ...],
-    mdd_budget_fraction: float,
+    candidate_kind: str,
+    mdd_budget_fraction: float | None,
     leverage: float,
     costs: CostModel,
     result: BacktestResult,
@@ -187,12 +188,14 @@ def record_sleeve_blend_run(
     promotion: PromotionResult | None = None,
     log_path: Path = RUNS_LOG_PATH,
 ) -> dict[str, object]:
-    """Append one fixed-sleeve blend run as a JSONL record.
+    """Append one sleeve-blend run as a JSONL record.
 
-    Logs the frozen sleeve set, the MDD-budget fraction, the single calibrated
-    leverage scalar (what changed), the leveraged total-ledger ``Metrics``, the
-    reliability gates, the promotion result, and the git commit. Never overwrites
-    prior rows.
+    Logs the executed candidate kind (the foreign key into
+    ``docs/results/candidate_registry.json``), the frozen sleeve set, the
+    MDD-budget fraction (``None`` for candidates that do not calibrate
+    leverage), the leverage scalar (what changed), the total-ledger
+    ``Metrics``, the reliability gates, the promotion result, and the git
+    commit. Never overwrites prior rows.
     """
     git_sha, git_dirty = _git_head()
     record: dict[str, object] = {
@@ -200,6 +203,7 @@ def record_sleeve_blend_run(
         "git_sha": git_sha,
         "git_dirty": git_dirty,
         "kind": "sleeve_blend",
+        "candidate_kind": candidate_kind,
         "symbols": list(symbols),
         "mdd_budget_fraction": mdd_budget_fraction,
         "leverage": leverage,

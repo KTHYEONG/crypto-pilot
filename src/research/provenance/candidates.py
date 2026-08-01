@@ -9,7 +9,7 @@ from typing import cast
 
 from src.research.cash_carry.contracts import CarryCostModel, CashCarrySpec
 
-REGISTRY_PATH = Path(__file__).resolve().parent.parent.parent.parent / "docs" / "decisions" / "candidate_registry.json"
+REGISTRY_PATH = Path(__file__).resolve().parent.parent.parent.parent / "docs" / "results" / "candidate_registry.json"
 
 _REQUIRED_DATA_HASHES = ("spot_ohlcv", "perp_ohlcv", "funding", "borrow")
 

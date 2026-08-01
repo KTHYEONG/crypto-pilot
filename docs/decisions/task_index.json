@@ -1,6 +1,16 @@
 {
   "tasks": [
     {
+      "task_id": "TASK_SLEEVE_GATE_PASS_V2_DIRECTIONAL",
+      "date": "2026-08-01",
+      "adr_id": "ADR_20260801_SLEEVE_GATE_PASS_V2_DIRECTIONAL",
+      "domain": "signal",
+      "title": "Funding signed directional sleeve 구현 및 sealed gate 검증",
+      "why": "고정 5심볼 롱 전용 sleeve의 fold 집중을 완화할 인과적 방향·펀딩 레짐 후보를 검증하기 위해 구현했다.",
+      "resolution": "funding_signed_directional_v1과 causal inverse-volatility sizing을 연결하고 351개 테스트·ruff·mypy·lean_check를 통과시켰으며 sealed CLI 실행 결과를 확인했다.",
+      "impact": "CAGR 1.44%, observation LCB90 0.04%, fold 0.4056, stress FAIL로 promotion은 REJECTED이며 기존 fold threshold 완화 근거는 없다."
+    },
+    {
       "task_id": "TASK_FIXED_SLEEVE_PORTFOLIO_BLEND",
       "date": "2026-08-01",
       "adr_id": "ADR_20260801_FIXED_SLEEVE_PORTFOLIO_BLEND",
