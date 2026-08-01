@@ -298,7 +298,10 @@
     "testing": "tests/unit/cli/test_main.py"
   },
   "src/cli/commands/research.py": {
-    "testing": "tests/unit/cli/test_research_commands.py"
+    "testing": [
+      "tests/integration/cli/test_library_admission.py",
+      "tests/unit/cli/commands/test_research.py"
+    ]
   },
   "src/cli/commands/provenance.py": {
     "testing": "tests/unit/cli/test_provenance_commands.py"
@@ -360,5 +363,20 @@
   },
   "src/research/expert_portfolio/contextual_router.py": {
     "testing": "tests/unit/research/expert_portfolio/test_contextual_router.py"
+  },
+  "src/core/settings.py": {
+    "testing": "tests/unit/core/test_settings.py"
+  },
+  "src/research/technical_experts/provenance.py": {
+    "testing": "tests/unit/application/test_technical_expert_evaluation.py"
+  },
+  "src/research/expert_portfolio/admission.py": {
+    "testing": "tests/unit/research/expert_portfolio/test_admission.py"
+  },
+  "src/application/technical_library_admission.py": {
+    "testing": "tests/unit/application/test_technical_library_admission.py"
+  },
+  "tools/benchmark_library_admission.py": {
+    "testing": "tests/unit/tools/test_benchmark_library_admission.py"
   }
 }
