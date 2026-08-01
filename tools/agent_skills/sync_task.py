@@ -204,7 +204,7 @@ def main() -> None:
     parser.add_argument("--why", required=True, help="Context/Why")
     parser.add_argument("--what", required=True, help="Resolution/What")
     parser.add_argument("--impact", required=True, help="Impact")
-    parser.add_argument("--source", required=True, help="Modified source file path")
+    parser.add_argument("--source", default=None, help="Modified source file path (auto-detected if omitted)")
     parser.add_argument("--domain", default="general", help="Domain category (e.g. signal, risk, execution)")
     parser.add_argument("--failed-hypothesis", default=None, help="Failed hypothesis if applicable")
     parser.add_argument("--failure-reason", default=None, help="Reason why hypothesis failed")
@@ -218,6 +218,25 @@ def main() -> None:
     logs: list[str] = []
     errors: list[str] = []
 
+    # Auto-detect source file if omitted
+    source_file = args.source
+    if not source_file:
+        try:
+            import subprocess
+            diff_res = subprocess.run(
+                ["git", "status", "--porcelain"],
+                capture_output=True, text=True, timeout=10, check=False
+            )
+            for line in diff_res.stdout.splitlines():
+                fp = line[3:].strip()
+                if fp.startswith("src/") and fp.endswith(".py"):
+                    source_file = fp
+                    break
+        except Exception:
+            pass
+    if not source_file:
+        source_file = "src/main.py"
+
     # 1. Update Smart JSON Registries (task_index.json & anti_patterns.json)
     try:
         adr_id = _update_decisions_json(
@@ -230,18 +249,24 @@ def main() -> None:
             failed_hypothesis=args.failed_hypothesis,
             failure_reason=args.failure_reason,
         )
-        logs.append(f"Task Registry & Anti-Pattern DB updated ({adr_id})")
+        logs.append(f"Task Registry updated ({adr_id})")
     except Exception as e:
         errors.append(f"JSON Registry update failed: {e}")
         adr_id = "N/A"
 
     # 2. Code Map Update for files
-    test_file = args.test or _resolve_test_path(args.source)
+    test_file = args.test or _resolve_test_path(source_file)
     try:
-        _update_index(args.source, test_file, args.doc)
-        logs.append(f"Code map updated for {args.source}")
+        _update_index(source_file, test_file, args.doc)
+        logs.append(f"Code map updated for {source_file}")
     except Exception as e:
         errors.append(f"Code map update failed: {e}")
+
+    # Auto-regenerate code map
+    with contextlib.suppress(Exception):
+        from tools.agent_skills import gen_code_map
+        gen_code_map.main()
+
 
     # 3. Temp & Scratch Wipe
     try:
