@@ -251,9 +251,6 @@
   "src/research/portfolio/universe.py": {
     "testing": "tests/unit/research/portfolio/test_universe.py"
   },
-  "src/research/provenance/anti_patterns.py": {
-    "testing": "tests/unit/research/provenance/test_anti_patterns.py"
-  },
   "src/research/provenance/candidates.py": {
     "testing": [
       "tests/unit/research/provenance/test_candidates.py"
