@@ -27,4 +27,3 @@ Provide a clear, concise summary with emojis. Example:
 
 - **Status**: 🎉 COMPLETE
 - **ADR Index**: <Registered ADR_ID>
-
