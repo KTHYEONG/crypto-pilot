@@ -197,6 +197,9 @@
   "src/research/cash_carry/market_data.py": {
     "testing": "tests/unit/research/cash_carry/test_market_data.py"
   },
+  "src/research/cash_carry/provenance.py": {
+    "testing": "tests/unit/research/cash_carry/test_provenance.py"
+  },
   "src/research/cash_carry/signal.py": {
     "testing": "tests/unit/research/cash_carry/test_signal.py"
   },
@@ -226,6 +229,9 @@
   },
   "src/research/oi_deleveraging/market_data.py": {
     "testing": "tests/unit/research/oi_deleveraging/test_market_data.py"
+  },
+  "src/research/oi_deleveraging/provenance.py": {
+    "testing": "tests/unit/research/oi_deleveraging/test_provenance.py"
   },
   "src/research/expert_portfolio/__init__.py": {},
   "src/research/expert_portfolio/allocator.py": {
@@ -258,6 +264,9 @@
   },
   "src/research/provenance/code_manifest.py": {
     "testing": "tests/unit/research/provenance/test_code_manifest.py"
+  },
+  "src/research/provenance/fingerprints.py": {
+    "testing": "tests/unit/research/provenance/test_fingerprints.py"
   },
   "src/research/provenance/results.py": {
     "testing": [
@@ -375,6 +384,9 @@
   },
   "src/application/technical_library_admission.py": {
     "testing": "tests/unit/application/test_technical_library_admission.py"
+  },
+  "src/application/technical_library_admission_backtest.py": {
+    "testing": "tests/unit/application/test_technical_library_admission_backtest.py"
   },
   "tools/benchmark_library_admission.py": {
     "testing": "tests/unit/tools/test_benchmark_library_admission.py"
