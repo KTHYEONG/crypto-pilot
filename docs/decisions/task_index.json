@@ -1,6 +1,16 @@
 {
   "tasks": [
     {
+      "task_id": "TASK_PROVENANCE_LEDGER_CLI_CONSOLIDATION",
+      "date": "2026-08-01",
+      "adr_id": "ADR_20260801_PROVENANCE_LEDGER_CLI_CONSOLIDATION",
+      "domain": "execution",
+      "title": "Provenance ledger and grouped CLI consolidation",
+      "why": "Expert registration and CLI entrypoints had divergent schemas and duplicated workflow files.",
+      "resolution": "Consolidated registration, evaluation, and retirement provenance into a typed runs ledger with grouped CLI adapters and fingerprint-verified expert catalogs.",
+      "impact": "Future strategies add catalog and command entries without new run scripts or registry files while legacy provenance remains queryable."
+    },
+    {
       "task_id": "TASK_EXPERT_PORTFOLIO_RUNTIME_EXECUTION",
       "date": "2026-08-01",
       "adr_id": "ADR_20260801_EXPERT_PORTFOLIO_RUNTIME_EXECUTION",
