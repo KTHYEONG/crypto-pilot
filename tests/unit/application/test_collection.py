@@ -53,3 +53,15 @@ def test_futures_ohlcv_command_wires_collector(monkeypatch) -> None:
     collection.collect_ohlcv("BTCUSDT", "1h", "2024-01-01", "2024-01-02")
 
     assert calls == [("BTCUSDT", "1h", "2024-01-01", "2024-01-02")]
+
+def test_funding_command_wires_collector(monkeypatch) -> None:
+    calls: list[tuple[str, str, str]] = []
+
+    class FakeCollector:
+        def ensure_funding_data(self, symbol: str, start: str, end: str) -> None:
+            calls.append((symbol, start, end))
+
+    monkeypatch.setattr(collection, "DataCollector", FakeCollector)
+    collection.collect_funding("BTCUSDT", "2022-04-01", "2025-01-01")
+
+    assert calls == [("BTCUSDT", "2022-04-01", "2025-01-01")]
