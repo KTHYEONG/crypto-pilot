@@ -31,7 +31,7 @@ _METRICS_CANONICAL_COLUMNS: tuple[str, ...] = (
 
 
 class BinanceVisionDownloader:
-    """Binance Vision(data.binance.vision)에서 과거 통계 데이터를 수집하는 유틸리티."""
+    """Utility for collecting historical statistical data from Binance Vision (data.binance.vision)."""
 
     BASE_URL = "https://data.binance.vision/data/futures/um"
     S3_LISTING_URL = "https://s3-ap-northeast-1.amazonaws.com/data.binance.vision"
@@ -45,7 +45,7 @@ class BinanceVisionDownloader:
     DEFAULT_MAX_RETRIES = 4
 
     def __init__(self) -> None:
-        """Binance Vision 다운로더 초기화."""
+        """Initializes Binance Vision downloader."""
         self.logger = logging.getLogger("BinanceVision")
         self.max_concurrency = self._env_int(
             "BINANCE_VISION_MAX_CONCURRENCY",
@@ -103,7 +103,7 @@ class BinanceVisionDownloader:
             return default
 
     def _wait_for_turn(self) -> None:
-        """전역 최소 요청 간격을 보장한다."""
+        """Ensures global minimum request interval."""
         with self._request_lock:
             now = time.monotonic()
             wait_seconds = max(0.0, self._next_request_monotonic - now)
@@ -220,7 +220,7 @@ class BinanceVisionDownloader:
             return pd.DataFrame()
 
     def fetch_daily_metrics(self, symbol: str, date: datetime) -> pd.DataFrame:
-        """특정 날짜의 metrics ZIP 파일을 다운로드하여 DataFrame으로 반환합니다."""
+        """Downloads metrics ZIP file for a specific date and returns it as DataFrame."""
         date_str = date.strftime("%Y-%m-%d")
         url = self._vision_path_url(
             "daily",
@@ -254,7 +254,7 @@ class BinanceVisionDownloader:
             return pd.DataFrame(columns=list(_METRICS_CANONICAL_COLUMNS))
 
     def fetch_range_metrics(self, symbol: str, start_date: datetime, end_date: datetime) -> pd.DataFrame:
-        """지정된 기간 전체의 metrics 수집 및 병합합니다."""
+        """Fetches and merges metrics for the entire specified date range."""
         dates: list[datetime] = []
         current = start_date
         while current <= end_date:
@@ -284,7 +284,7 @@ class BinanceVisionDownloader:
         year: int,
         month: int,
     ) -> pd.DataFrame:
-        """월간 klines archive ZIP을 내려받아 DataFrame으로 반환합니다."""
+        """Downloads monthly klines archive ZIP and returns it as DataFrame."""
         month_str = f"{month:02d}"
         filename = f"{symbol}-{interval}-{year}-{month_str}.zip"
         return self._fetch_zip_by_path("monthly", "klines", symbol, interval, filename)
@@ -320,7 +320,7 @@ class BinanceVisionDownloader:
         )
 
     def fetch_funding_rate_monthly(self, symbol: str, year: int, month: int) -> pd.DataFrame:
-        """월간 fundingRate archive ZIP을 내려받아 DataFrame으로 반환합니다."""
+        """Downloads monthly fundingRate archive ZIP and returns it as DataFrame."""
         month_str = f"{month:02d}"
         filename = f"{symbol}-fundingRate-{year}-{month_str}.zip"
         return self._fetch_zip_by_path("monthly", "fundingRate", symbol, filename)
@@ -330,13 +330,13 @@ class BinanceVisionDownloader:
         return self.fetch_funding_rate_monthly(symbol=symbol, year=year, month=month)
 
     def fetch_bookdepth_daily(self, symbol: str, date: datetime, level: str = "5") -> pd.DataFrame:
-        """일간 bookDepth archive ZIP을 내려받아 DataFrame으로 반환합니다."""
+        """Downloads daily bookDepth archive ZIP and returns it as DataFrame."""
         date_str = date.strftime("%Y-%m-%d")
         filename = f"{symbol}-bookDepth-{level}-{date_str}.zip"
         return self._fetch_zip_by_path("daily", "bookDepth", symbol, filename)
 
     def fetch_premiumindex_daily(self, symbol: str, date: datetime) -> pd.DataFrame:
-        """일간 premiumIndexKlines archive ZIP을 내려받아 DataFrame으로 반환합니다."""
+        """Downloads daily premiumIndexKlines archive ZIP and returns it as DataFrame."""
         date_str = date.strftime("%Y-%m-%d")
         filename = f"{symbol}-premiumIndexKlines-5m-{date_str}.zip"
         return self._fetch_zip_by_path("daily", "premiumIndexKlines", symbol, filename)
@@ -347,7 +347,7 @@ class BinanceVisionDownloader:
         dataset_prefix: str = "data/futures/um/daily/klines/",
         timeout: int | None = None,
     ) -> list[str]:
-        """S3 XML listing을 파싱하여 데이터셋 디렉토리 내 심볼 목록을 반환합니다."""
+        """Parses S3 XML listing and returns symbol list within dataset directory."""
         query = urllib.parse.urlencode({"prefix": dataset_prefix, "delimiter": "/"})
         url = f"{self.S3_LISTING_URL}?{query}"
         try:
@@ -385,7 +385,7 @@ class BinanceVisionDownloader:
         expected_hex_digest: str,
         algorithm: str = "sha256",
     ) -> bool:
-        """다운로드 payload의 checksum(hex)이 예상값과 일치하는지 검증합니다."""
+        """Verifies if downloaded payload's checksum (hex) matches expected value."""
         algo = algorithm.lower()
         if algo not in {"sha256", "md5"}:
             raise ValueError(f"Unsupported checksum algorithm: {algorithm}")
@@ -394,24 +394,24 @@ class BinanceVisionDownloader:
         return digest == expected
 
     def fetch_metrics_daily(self, symbol: str, date: datetime) -> pd.DataFrame:
-        """일간 metrics archive ZIP을 내려받아 DataFrame으로 반환합니다.
+        """Downloads daily metrics archive ZIP and returns it as DataFrame.
 
         Args:
-            symbol: 선물 심볼 (e.g. 'BTCUSDT').
-            date: 수집 날짜 (datetime 오브젝트).
+            symbol: Futures symbol (e.g. 'BTCUSDT').
+            date: Target date (datetime object).
 
         Returns:
-            columns에 sum_open_interest, count_toptrader_long_short_ratio 등을 포함한 DataFrame.
-            데이터가 없으면 빈 DataFrame.
+            DataFrame containing sum_open_interest, count_toptrader_long_short_ratio, etc.
+            Empty DataFrame if data is unavailable.
 
         Notes:
-            Binance Vision daily/metrics 경로: SYMBOL-metrics-YYYY-MM-DD.zip
+            Binance Vision daily metrics path: SYMBOL-metrics-YYYY-MM-DD.zip
 
         """
         return self.fetch_daily_metrics(symbol, date)
 
     def _normalize_metrics_frame(self, symbol: str, frame: pd.DataFrame) -> pd.DataFrame:
-        """Vision metrics를 canonical schema로 정규화한다."""
+        """Normalizes Vision metrics frame to canonical schema."""
         if frame is None or frame.empty:
             return pd.DataFrame(columns=list(_METRICS_CANONICAL_COLUMNS))
 
@@ -500,19 +500,18 @@ def fetch_metrics_bulk(
     end_date: "str | datetime",
     cache_dir: "str | None" = None,
 ) -> pd.DataFrame:
-    """일간 metrics를 날짜 범위로 일괄 수집한다.
+    """Fetches daily metrics in bulk for a date range.
 
-    2020-09-01 이전 구간은 Binance Vision에 데이터가 없으므로 빈 DataFrame을 반환한다.
+    Returns empty DataFrame for dates before 2020-09-01 as Binance Vision lacks metrics prior to this.
 
     Args:
-        symbol: 선물 심볼 (e.g. 'BTCUSDT').
-        start_date: 수집 시작일 (date 또는 'YYYY-MM-DD' str).
-        end_date: 수집 종료일.
-        cache_dir: 로컬 캐시 디렉토리 (None이면 캐싱 안 함).
+        symbol: Futures symbol (e.g. 'BTCUSDT').
+        start_date: Start date string or datetime.
+        end_date: End date string or datetime.
+        cache_dir: Optional cache directory path.
 
     Returns:
-        columns=[open_time, sum_open_interest, ...] 형태의 DataFrame.
-        시작일이 2020-09-01 이전이면 빈 DataFrame.
+        Concatenated daily metrics DataFrame.
 
     Time Complexity: O(n_days)
     Space Complexity: O(n_days * n_cols)
