@@ -1,6 +1,16 @@
 {
   "tasks": [
     {
+      "task_id": "TASK_RESEARCH_MODULE_DECOMPOSITION",
+      "date": "2026-08-01",
+      "adr_id": "ADR_20260801_RESEARCH_MODULE_DECOMPOSITION",
+      "domain": "execution",
+      "title": "Decompose research modules and simplify canonical filenames",
+      "why": "Expert-portfolio contracts and sleeve-blend backtest mixed multiple behavioral responsibilities across large files, while application filenames repeated technical qualifiers and obscured workflow ownership.",
+      "resolution": "Split expert-portfolio models, admission types, and reports; split sleeve-blend common, fixed, weights, and directional execution; retained old import paths as compatibility facades; promoted concise application module names; updated callers, tests, and code-map coverage.",
+      "impact": "Public imports, CLI commands, dataclass contracts, fingerprints, causal no-lookahead weights, leverage calibration, stress reuse, and full regression behavior remain unchanged. Canonical modules are easier to locate for maintainers and AI agents."
+    },
+    {
       "task_id": "TASK_PROVENANCE_FINGERPRINT_REFACTOR",
       "date": "2026-08-01",
       "adr_id": "ADR_20260801_PROVENANCE_FINGERPRINT_REFACTOR",
