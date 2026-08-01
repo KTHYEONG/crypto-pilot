@@ -75,6 +75,8 @@ ignore = [
 "src/data/vision.py" = ["E501"]
 "src/cli/compare_runs.py" = ["T20"]  # human-readable tabular stdout, not structured logging
 "src/cli/commands/provenance.py" = ["T20"]  # human-readable registration id / tabular stdout
+"src/cli/commands/research.py" = ["T20"]  # deterministic JSON diagnostic stdout
+"tools/benchmark_library_admission.py" = ["T20"]  # deterministic JSON benchmark stdout
 
 [tool.ruff.lint.mccabe]
 max-complexity = 15
