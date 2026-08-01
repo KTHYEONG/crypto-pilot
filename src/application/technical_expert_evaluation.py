@@ -4,7 +4,6 @@ import dataclasses
 import hashlib
 import json
 import logging
-from pathlib import Path
 
 import pandas as pd
 
@@ -37,13 +36,12 @@ from src.research.provenance.results import record_technical_expert_run
 from src.research.technical_experts.backtest import run_technical_expert_backtest
 from src.research.technical_experts.catalog import resolve_technical_candidate
 from src.research.technical_experts.contracts import TechnicalCandidate
+from src.research.technical_experts.provenance import technical_data_hashes
 
 _logger = logging.getLogger("TechnicalExpertBacktestRunner")
 
 _STRESS_FEE_MULT = 1.5
 _STRESS_SLIPPAGE_MULT = 2.0
-
-_SOURCE_FILES = ("perp_ohlcv", "funding")
 
 _BASE_DELAY_BARS = 1
 _STRESS_DELAY_BARS = 2
@@ -51,35 +49,19 @@ _STRESS_DELAY_BARS = 2
 _INITIAL_EQUITY = 10_000.0
 
 
-def _source_paths(symbol: str) -> dict[str, str]:
-    return {
-        "perp_ohlcv": str(ohlcv_path(symbol, "1h")),
-        "funding": str(funding_path(symbol)),
-    }
-
-
-def _file_sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1 << 20), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
-
-
-def _data_hashes(symbol: str) -> dict[str, str]:
-    hashes: dict[str, str] = {}
-    for name, path in _source_paths(symbol).items():
-        p = Path(path)
-        if not p.exists():
-            raise DataIntegrityError(f"{name} data missing for {symbol}: {p}")
-        hashes[name] = _file_sha256(p)
-    return hashes
-
-
 def _combined_data_hash(data_hashes: dict[str, str]) -> str:
     return hashlib.sha256(
         json.dumps(data_hashes, sort_keys=True).encode("utf-8")
     ).hexdigest()
+
+
+def _data_hashes(symbol: str) -> dict[str, str]:
+    """Shared data fingerprint helper kept as the module-local entry point.
+
+    ``technical_data_hashes`` is the single provenance source shared with the
+    library admission evaluator so both fingerprint identical bytes.
+    """
+    return technical_data_hashes(symbol)
 
 
 def _candidate_id(

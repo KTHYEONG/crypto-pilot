@@ -7,6 +7,8 @@ from src.research.expert_portfolio.contracts import (
     ExpertDefinition,
     ExpertPortfolioEvaluationRequest,
     ExpertPortfolioSpec,
+    LibraryAdmissionConfig,
+    TechnicalLibraryAdmissionRequest,
     lcb_z_score,
 )
 
@@ -141,3 +143,95 @@ def test_evaluation_request_requires_library_id() -> None:
     assert request.unseal_holdout is False
     with pytest.raises(ValueError, match="library_id"):
         ExpertPortfolioEvaluationRequest(library_id="")
+
+
+def _admission_config(**overrides: object) -> LibraryAdmissionConfig:
+    base: dict[str, object] = {
+        "min_experts": 2,
+        "max_experts": 4,
+        "min_closed_trades": 1,
+        "min_active_return_bars": 1,
+        "max_abs_pairwise_log_return_correlation": 0.8,
+        "max_joint_negative_return_rate": 0.5,
+        "min_context_covered_states": 1,
+        "max_combinations": 100,
+    }
+    base.update(overrides)
+    return LibraryAdmissionConfig(**base)  # type: ignore[arg-type]
+
+
+def test_library_admission_config_preserves_identity_and_telemetry_exclusion() -> None:
+    # LAE-01: the admission config is immutable and max_workers is execution
+    # telemetry that never participates in the admission fingerprint.
+    config = _admission_config(max_workers=1)
+    assert config.max_workers == 1
+    with pytest.raises(AttributeError):
+        config.min_experts = 3  # type: ignore[misc]
+    assert "max_workers" not in config.fingerprint()
+    assert config.fingerprint() == _admission_config().fingerprint()
+
+
+def test_library_admission_config_rejects_invalid_bounds() -> None:
+    with pytest.raises(ValueError, match="min_experts"):
+        _admission_config(min_experts=0)
+    with pytest.raises(ValueError, match="max_experts"):
+        _admission_config(min_experts=3, max_experts=2)
+    with pytest.raises(ValueError, match="min_closed_trades"):
+        _admission_config(min_closed_trades=-1)
+    with pytest.raises(ValueError, match="min_active_return_bars"):
+        _admission_config(min_active_return_bars=-1)
+    with pytest.raises(ValueError, match="max_abs_pairwise"):
+        _admission_config(max_abs_pairwise_log_return_correlation=1.5)
+    with pytest.raises(ValueError, match="max_joint_negative"):
+        _admission_config(max_joint_negative_return_rate=-0.1)
+    with pytest.raises(ValueError, match="min_context_covered_states"):
+        _admission_config(min_context_covered_states=7)
+    with pytest.raises(ValueError, match="max_combinations"):
+        _admission_config(max_combinations=0)
+    with pytest.raises(ValueError, match="max_workers"):
+        _admission_config(max_workers=0)
+
+
+def test_library_admission_request_preserves_identity() -> None:
+    request = TechnicalLibraryAdmissionRequest(
+        candidate_sources=("technical_macd_histogram_regime_long_v1",),
+        symbols=("BTCUSDT",),
+        router=ContextualRouterSpec("BTCUSDT", 60, 20, 30),
+        admission=_admission_config(max_experts=1, min_experts=1, max_combinations=1),
+    )
+    assert request.symbols == ("BTCUSDT",)
+    assert request.admission.max_experts == 1
+    with pytest.raises(AttributeError):
+        request.symbols = ("ETHUSDT",)  # type: ignore[misc]
+
+
+def test_library_admission_request_rejects_invalid_universe_and_sealed_end() -> None:
+    # LAE-01: duplicate sources/symbols, an unknown candidate source, empty
+    # universes, and any end past the sealed holdout cutoff fail closed.
+    router = ContextualRouterSpec("BTCUSDT", 60, 20, 30)
+    base = _admission_config(max_experts=1, min_experts=1, max_combinations=1)
+    with pytest.raises(ValueError, match="duplicates"):
+        TechnicalLibraryAdmissionRequest(
+            ("technical_macd_histogram_regime_long_v1",) * 2,
+            ("BTCUSDT",), router, base,
+        )
+    with pytest.raises(ValueError, match="duplicates"):
+        TechnicalLibraryAdmissionRequest(
+            ("technical_macd_histogram_regime_long_v1",),
+            ("BTCUSDT", "BTCUSDT"), router, base,
+        )
+    with pytest.raises(ValueError, match="candidate_sources must not be empty"):
+        TechnicalLibraryAdmissionRequest((), ("BTCUSDT",), router, base)
+    with pytest.raises(ValueError, match="symbols must not be empty"):
+        TechnicalLibraryAdmissionRequest(
+            ("technical_macd_histogram_regime_long_v1",), (), router, base,
+        )
+    with pytest.raises(ValueError, match="unknown or retired"):
+        TechnicalLibraryAdmissionRequest(
+            ("technical_naive_nope_long_v1",), ("BTCUSDT",), router, base,
+        )
+    with pytest.raises(RuntimeError, match="Holdout sealed"):
+        TechnicalLibraryAdmissionRequest(
+            ("technical_macd_histogram_regime_long_v1",),
+            ("BTCUSDT",), router, base, end="2026-06-01",
+        )
