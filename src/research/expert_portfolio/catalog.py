@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import cast
 
 from src.research.expert_portfolio.contracts import ExpertDefinition, ExpertPortfolioSpec
+from src.research.technical_experts.catalog import resolve_technical_candidate
 
 
 @dataclass(frozen=True, slots=True)
@@ -135,6 +136,59 @@ def compute_blueprint_fingerprint(blueprint: ExpertLibraryBlueprint) -> dict[str
 def registration_id_from_fingerprint(fingerprint: Mapping[str, object]) -> str:
     """Deterministic identity of a registration over its canonical fingerprint."""
     return hashlib.sha256(_canonical_bytes(dict(fingerprint))).hexdigest()
+
+
+def build_technical_price_v1_blueprint(
+    experts: tuple[ExpertDefinition, ...],
+    code_units: Mapping[str, Path],
+    data_files: Mapping[str, Path],
+    observation_end: str = "2025-12-31",
+) -> ExpertLibraryBlueprint:
+    """Declarative blueprint for the conditional ``technical_price_v1`` library.
+
+    Admission is deliberately narrow: every expert must run the technical
+    runner and resolve to a frozen candidate, no family and no underlying
+    symbol may appear more than once, and the blueprint requires at least one
+    expert. ``default_catalog`` never emits this library: it becomes
+    source-controlled only after recorded ``HOLDOUT_PASS`` evidence and a
+    human correlation review.
+    """
+    if not experts:
+        raise ValueError("technical_price_v1 requires at least one approved expert")
+    families: set[str] = set()
+    symbols: set[str] = set()
+    for expert in experts:
+        if expert.runner != "run_technical_expert":
+            raise ValueError(
+                f"technical_price_v1 expert {expert.expert_id} must use runner "
+                "'run_technical_expert'"
+            )
+        resolve_technical_candidate(expert.return_source)
+        if expert.family in families:
+            raise ValueError(
+                f"technical_price_v1 admits at most one candidate per family, "
+                f"duplicate family '{expert.family}'"
+            )
+        families.add(expert.family)
+        if len(expert.symbols) != 1:
+            raise ValueError(
+                f"technical_price_v1 experts must hold exactly one symbol, got "
+                f"{expert.symbols}"
+            )
+        if expert.symbols[0] in symbols:
+            raise ValueError(
+                f"technical_price_v1 admits at most one candidate per symbol, "
+                f"duplicate symbol '{expert.symbols[0]}'"
+            )
+        symbols.add(expert.symbols[0])
+    return ExpertLibraryBlueprint(
+        library_id="technical_price_v1",
+        experts=experts,
+        supported_runners=frozenset({"run_technical_expert"}),
+        code_units=code_units,
+        data_files=data_files,
+        observation_end=observation_end,
+    )
 
 
 def default_catalog() -> ExpertLibraryCatalog:
