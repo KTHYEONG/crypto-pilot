@@ -16,7 +16,7 @@ from src.research.expert_portfolio.models import ExpertPortfolioEvaluationReques
 def test_expert_portfolio_cli_parses_args_and_dispatches(monkeypatch) -> None:
     calls: list[ExpertPortfolioEvaluationRequest] = []
     monkeypatch.setattr(
-        "src.cli.commands.research.run_expert_portfolio_evaluation", calls.append,
+        "src.application.research.expert_portfolio.evaluation.run_expert_portfolio_evaluation", calls.append,
     )
     args = build_root_parser().parse_args([
         "research", "run", "expert-portfolio",
@@ -40,7 +40,7 @@ def test_expert_portfolio_cli_parses_args_and_dispatches(monkeypatch) -> None:
 def test_expert_portfolio_cli_defaults_keep_holdout_sealed(monkeypatch) -> None:
     calls: list[ExpertPortfolioEvaluationRequest] = []
     monkeypatch.setattr(
-        "src.cli.commands.research.run_expert_portfolio_evaluation", calls.append,
+        "src.application.research.expert_portfolio.evaluation.run_expert_portfolio_evaluation", calls.append,
     )
     args = build_root_parser().parse_args([
         "research", "run", "expert-portfolio", "--library-id", "pair_residual_v1", "--no-log-run",
@@ -64,7 +64,7 @@ def test_expert_portfolio_cli_requires_library_id() -> None:
 def test_technical_expert_cli_parses_and_dispatches(monkeypatch) -> None:
     calls: list[TechnicalExpertEvaluationRequest] = []
     monkeypatch.setattr(
-        "src.cli.commands.research.run_technical_expert_evaluation", calls.append,
+        "src.application.research.technical_experts.evaluation.run_technical_expert_evaluation", calls.append,
     )
     args = build_root_parser().parse_args([
         "research", "run", "technical-expert",
@@ -105,7 +105,7 @@ def test_technical_expert_cli_requires_candidate_id() -> None:
 
 def test_baseline_cli_parses_and_dispatches(monkeypatch) -> None:
     calls: list[BaselineEvaluationRequest] = []
-    monkeypatch.setattr("src.cli.commands.research.run_baseline_evaluation", calls.append)
+    monkeypatch.setattr("src.application.research.baseline.evaluation.run_baseline_evaluation", calls.append)
     args = build_root_parser().parse_args([
         "research", "run", "baseline", "--symbol", "ETHUSDT", "--no-log-run",
     ])
@@ -117,7 +117,7 @@ def test_baseline_cli_parses_and_dispatches(monkeypatch) -> None:
 
 def test_portfolio_cli_parses_symbols_and_dispatches(monkeypatch) -> None:
     calls: list[PortfolioEvaluationRequest] = []
-    monkeypatch.setattr("src.cli.commands.research.run_portfolio_evaluation", calls.append)
+    monkeypatch.setattr("src.application.research.portfolio.evaluation.run_portfolio_evaluation", calls.append)
     args = build_root_parser().parse_args([
         "research", "run", "portfolio", "--symbols", "BTCUSDT", "ETHUSDT", "--no-log-run",
     ])
@@ -129,7 +129,7 @@ def test_portfolio_cli_parses_symbols_and_dispatches(monkeypatch) -> None:
 
 def test_cash_carry_cli_parses_and_dispatches(monkeypatch) -> None:
     calls: list[CashCarryEvaluationRequest] = []
-    monkeypatch.setattr("src.cli.commands.research.run_cash_carry_evaluation", calls.append)
+    monkeypatch.setattr("src.application.research.cash_carry.evaluation.run_cash_carry_evaluation", calls.append)
     args = build_root_parser().parse_args([
         "research", "run", "cash-carry", "--symbol", "BTCUSDT", "--no-log-run",
     ])
@@ -139,7 +139,7 @@ def test_cash_carry_cli_parses_and_dispatches(monkeypatch) -> None:
 
 def test_sleeve_blend_cli_parses_args_and_dispatches(monkeypatch) -> None:
     calls: list[SleeveBlendEvaluationRequest] = []
-    monkeypatch.setattr("src.cli.commands.research.run_sleeve_blend_evaluation", calls.append)
+    monkeypatch.setattr("src.application.research.sleeve_blend.evaluation.run_sleeve_blend_evaluation", calls.append)
     args = build_root_parser().parse_args([
         "research", "run", "sleeve-blend",
         "--symbols", "BTCUSDT", "ETHUSDT",
@@ -164,7 +164,7 @@ def test_sleeve_blend_cli_parses_args_and_dispatches(monkeypatch) -> None:
 
 def test_sleeve_blend_cli_directional_candidate_kind(monkeypatch) -> None:
     calls: list[SleeveBlendEvaluationRequest] = []
-    monkeypatch.setattr("src.cli.commands.research.run_sleeve_blend_evaluation", calls.append)
+    monkeypatch.setattr("src.application.research.sleeve_blend.evaluation.run_sleeve_blend_evaluation", calls.append)
     args = build_root_parser().parse_args([
         "research", "run", "sleeve-blend",
         "--candidate-kind", "funding_signed_directional_v1", "--no-log-run",

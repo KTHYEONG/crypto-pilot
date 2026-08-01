@@ -7,7 +7,7 @@ from src.research.contracts import OIDeleveragingEvaluationRequest
 def test_oi_deleveraging_cli_dispatches_fixed_request(monkeypatch) -> None:
     calls: list[OIDeleveragingEvaluationRequest] = []
     monkeypatch.setattr(
-        "src.cli.commands.research.run_oi_deleveraging_evaluation", calls.append,
+        "src.application.research.oi_deleveraging.evaluation.run_oi_deleveraging_evaluation", calls.append,
     )
     args = build_root_parser().parse_args([
         "research", "run", "oi-deleveraging",

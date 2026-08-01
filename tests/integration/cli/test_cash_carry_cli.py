@@ -8,7 +8,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from src.application import cash_carry_evaluation as app
+from src.application.research.cash_carry import evaluation as app
 import src.research.cash_carry.market_data as carry
 import src.research.cash_carry.provenance as carry_provenance
 from src.cli import run_cash_carry_backtest as cli

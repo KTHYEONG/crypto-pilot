@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ast
+import importlib
 from pathlib import Path
 
 """Compatibility contract tests for the src/ -> feature-canonical refactor.
@@ -232,3 +233,88 @@ def test_application_facades_reexport_canonical_evaluation_functions() -> None:
     assert legacy_expert_evaluation is canonical_expert_evaluation
     assert legacy_library_admission is canonical_library_admission
     assert legacy_admission_backtest is canonical_admission_backtest
+
+
+_APPLICATION_FACADE_TARGETS = {
+    "collection.py": "src.application.data.collection",
+    "baseline_evaluation.py": "src.application.research.baseline.evaluation",
+    "portfolio_evaluation.py": "src.application.research.portfolio.evaluation",
+    "cash_carry_evaluation.py": "src.application.research.cash_carry.evaluation",
+    "sleeve_blend_evaluation.py": "src.application.research.sleeve_blend.evaluation",
+    "oi_deleveraging_evaluation.py": "src.application.research.oi_deleveraging.evaluation",
+    "expert_evaluation.py": "src.application.research.technical_experts.evaluation",
+    "library_evaluation.py": "src.application.research.expert_portfolio.evaluation",
+    "library_admission.py": "src.application.research.expert_portfolio.admission",
+    "admission_backtest.py": "src.application.research.expert_portfolio.admission_backtest",
+    "technical_expert_evaluation.py": "src.application.research.technical_experts.evaluation",
+    "expert_portfolio_evaluation.py": "src.application.research.expert_portfolio.evaluation",
+    "technical_library_admission.py": "src.application.research.expert_portfolio.admission",
+    "technical_library_admission_backtest.py": (
+        "src.application.research.expert_portfolio.admission_backtest"
+    ),
+}
+_CANONICAL_APPLICATION_PREFIXES = ("src.application.data.", "src.application.research.")
+
+
+def _iter_flat_application_facades() -> list[Path]:
+    return sorted(
+        path for path in Path("src/application").glob("*.py") if path.name != "__init__.py"
+    )
+
+
+def _facade_exports(tree: ast.Module) -> list[str]:
+    for node in tree.body:
+        if not isinstance(node, ast.Assign):
+            continue
+        for target in node.targets:
+            if isinstance(target, ast.Name) and target.id == "__all__":
+                assert isinstance(node.value, (ast.List, ast.Tuple))
+                return [elt.value for elt in node.value.elts if isinstance(elt, ast.Constant)]
+    return []
+
+
+def test_flat_application_facade_map_is_complete() -> None:
+    """RF-COMPAT-01: the facade map covers every flat application module."""
+    flat = {path.name for path in _iter_flat_application_facades()}
+    assert flat == set(_APPLICATION_FACADE_TARGETS), (
+        "facade map drift: "
+        f"unmapped={sorted(flat - set(_APPLICATION_FACADE_TARGETS))}, "
+        f"stale={sorted(set(_APPLICATION_FACADE_TARGETS) - flat)}"
+    )
+
+
+def test_flat_application_modules_are_import_only_facades() -> None:
+    """RF-COMPAT-01: a facade imports only its canonical target(s) and ``__all__``."""
+    for path in _iter_flat_application_facades():
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        exports = _facade_exports(tree)
+        assert exports, f"{path}: facade must define a non-empty __all__"
+        for node in tree.body:
+            if isinstance(node, ast.Expr) and isinstance(node.value, ast.Constant):
+                continue  # module docstring
+            if isinstance(node, ast.Import):
+                raise AssertionError(f"{path}: facade must not use `import`")
+            if isinstance(node, ast.ImportFrom) and node.module == "__future__":
+                continue
+            if isinstance(node, ast.ImportFrom):
+                assert node.module is not None, f"{path}: facade uses a relative import"
+                assert node.module.startswith(_CANONICAL_APPLICATION_PREFIXES), (
+                    f"{path}: facade imports non-canonical {node.module}"
+                )
+                continue
+            if isinstance(node, ast.Assign) and any(
+                isinstance(t, ast.Name) and t.id == "__all__" for t in node.targets
+            ):
+                continue
+            raise AssertionError(f"{path}: facade body contains a non-import statement")
+
+
+def test_flat_application_facades_reexport_canonical_objects() -> None:
+    """RF-COMPAT-01: every facade export is the identical canonical object."""
+    for filename, canonical in _APPLICATION_FACADE_TARGETS.items():
+        facade = importlib.import_module(f"src.application.{Path(filename).stem}")
+        canonical_module = importlib.import_module(canonical)
+        for name in facade.__all__:
+            assert getattr(facade, name) is getattr(canonical_module, name), (
+                f"{facade.__name__}.{name} is not canonical {canonical_module.__name__}.{name}"
+            )
