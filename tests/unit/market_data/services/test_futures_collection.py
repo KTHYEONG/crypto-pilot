@@ -1,11 +1,16 @@
 from __future__ import annotations
 
+import logging
+
 import pandas as pd
+import pytest
 
 import src.market_data.services.futures_collection as collector_module
+from src.common.errors import DataIntegrityError
 from src.market_data.services.futures_collection import (
     DataCollector,
     DataValidator,
+    _METRICS_CANONICAL_COLUMNS,
     _normalize_funding_frame,
 )
 
@@ -184,3 +189,104 @@ class TestDataCollectorSaveCache:
             "taker_buy_base_volume", "taker_buy_quote_volume", "quote_vol",
         ]
         assert str(out["open"].dtype) == "float32"
+
+
+def _raw_metrics_frame() -> pd.DataFrame:
+    """Vision-style raw daily metrics with one duplicated create_time."""
+    return pd.DataFrame({
+        "create_time": [
+            "2024-01-01 00:00:00", "2024-01-01 00:00:00", "2024-01-02 00:00:00",
+        ],
+        "symbol": ["BTCUSDT", "BTCUSDT", "BTCUSDT"],
+        "sum_open_interest": [1.0, 2.0, 3.0],
+        "sum_open_interest_value": [1000.0, 2000.0, 3000.0],
+        "count_toptrader_long_short_ratio": [1, 1, 1],
+        "sum_toptrader_long_short_ratio": [1.0, 1.0, 1.0],
+        "count_long_short_ratio": [1.0, 1.0, 1.0],
+        "sum_taker_long_short_vol_ratio": [1.0, 1.0, 1.0],
+    })
+
+
+class TestDataCollectorMetrics:
+    def test_ensure_metrics_data_normalizes_duplicates_and_reports_gap(
+        self, tmp_path, monkeypatch, caplog,
+    ) -> None:
+        # FD-02: canonical persistence normalizes duplicates deterministically
+        # (keep=last) and surfaces the missing archive date in the coverage report.
+        target = tmp_path / "futures" / "metrics" / "1d" / "BTCUSDT.parquet"
+        monkeypatch.setattr(collector_module, "metrics_path", lambda symbol: target)
+        monkeypatch.setattr(
+            collector_module, "fetch_metrics_bulk",
+            lambda symbol, start, end: _raw_metrics_frame(),
+        )
+
+        collector = DataCollector()
+        with caplog.at_level(logging.WARNING, logger="DataCollector"):
+            collector.ensure_metrics_data("BTCUSDT", "2024-01-01", "2024-01-03")
+
+        assert target.exists()
+        out = pd.read_parquet(target)
+        assert set(out.columns) == set(_METRICS_CANONICAL_COLUMNS)
+        assert len(out) == 2
+        assert out["datetime"].dt.tz is not None
+        assert out["datetime"].is_monotonic_increasing
+        # the later duplicate wins deterministically
+        jan1 = out[out["datetime"].dt.day == 1]
+        assert len(jan1) == 1
+        assert jan1["sum_open_interest_value"].iloc[0] == 2000.0
+        assert (out["available_at"] - out["datetime"]).abs().max() <= pd.Timedelta(minutes=5)
+        assert "2024-01-03" in caplog.text
+
+    def test_ensure_metrics_data_raises_on_interior_coverage_gap(
+        self, tmp_path, monkeypatch,
+    ) -> None:
+        # FD-02: a gap strictly inside the collected span is a coverage gap and
+        # is never forward-filled; the collector fails closed.
+        target = tmp_path / "futures" / "metrics" / "1d" / "BTCUSDT.parquet"
+        monkeypatch.setattr(collector_module, "metrics_path", lambda symbol: target)
+        gapped = pd.DataFrame({
+            "create_time": ["2024-01-01 00:00:00", "2024-01-03 00:00:00"],
+            "symbol": ["BTCUSDT", "BTCUSDT"],
+            "sum_open_interest": [1.0, 3.0],
+            "sum_open_interest_value": [1000.0, 3000.0],
+            "count_toptrader_long_short_ratio": [1, 1],
+            "sum_toptrader_long_short_ratio": [1.0, 1.0],
+            "count_long_short_ratio": [1.0, 1.0],
+            "sum_taker_long_short_vol_ratio": [1.0, 1.0],
+        })
+        monkeypatch.setattr(
+            collector_module, "fetch_metrics_bulk",
+            lambda symbol, start, end: gapped,
+        )
+        with pytest.raises(DataIntegrityError, match="coverage gap"):
+            DataCollector().ensure_metrics_data("BTCUSDT", "2024-01-01", "2024-01-03")
+
+    def test_ensure_metrics_data_merges_with_existing_cache(
+        self, tmp_path, monkeypatch,
+    ) -> None:
+        # FD-02: a fetched archive merges with the canonical cache instead of
+        # overwriting it.
+        target = tmp_path / "futures" / "metrics" / "1d" / "BTCUSDT.parquet"
+        monkeypatch.setattr(collector_module, "metrics_path", lambda symbol: target)
+        cached = pd.DataFrame({
+            "timestamp": [1704067200000],
+            "datetime": [pd.Timestamp("2024-01-01", tz="UTC")],
+            "available_at": [pd.Timestamp("2024-01-01", tz="UTC") + pd.Timedelta(minutes=5)],
+            "symbol": ["BTCUSDT"],
+            "sum_open_interest": [1.0],
+            "sum_open_interest_value": [1000.0],
+            "long_short_ratio": [1.0],
+            "top_trader_long_short_ratio": [1.0],
+            "sum_taker_long_short_vol_ratio": [1.0],
+        })
+        DataCollector()._save_metrics_cache("BTCUSDT", cached)
+        jan2 = _raw_metrics_frame().iloc[[2]].reset_index(drop=True)
+        monkeypatch.setattr(
+            collector_module, "fetch_metrics_bulk",
+            lambda symbol, start, end: jan2,
+        )
+        DataCollector().ensure_metrics_data("BTCUSDT", "2024-01-01", "2024-01-02")
+
+        out = pd.read_parquet(target)
+        assert set(out["datetime"].dt.day) == {1, 2}
+        assert out["sum_open_interest_value"].tolist() == [1000.0, 3000.0]
