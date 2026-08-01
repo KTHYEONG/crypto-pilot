@@ -91,7 +91,7 @@ def test_expert_evaluation_links_active_registration(tmp_path: Path, monkeypatch
     monkeypatch.setattr(
         f"{_APPLICATION_MODULE}.run_expert_portfolio",
         lambda component_returns, library, costs, *, initial_equity=10_000.0,
-        fixed_weights=None, signal_delay_bars=0: synthetic,
+        fixed_weights=None, signal_delay_bars=0, decision_context=None: synthetic,
     )
 
     report = run_expert_portfolio_evaluation(

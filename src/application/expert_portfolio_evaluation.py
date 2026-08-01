@@ -25,6 +25,7 @@ from src.research.expert_portfolio.backtest import (
     run_expert_portfolio,
 )
 from src.research.expert_portfolio.catalog import ExpertLibraryCatalog, default_catalog
+from src.research.expert_portfolio.contextual_router import build_causal_context_labels
 from src.research.expert_portfolio.contracts import (
     ExpertDefinition,
     ExpertPortfolioEvaluationRequest,
@@ -154,6 +155,34 @@ def build_component_panel(
     return panel, trades
 
 
+def build_library_decision_context(
+    spec: ExpertPortfolioSpec,
+    index: pd.DatetimeIndex,
+    start: str | None,
+    end: str | pd.Timestamp | None,
+) -> pd.Series | None:
+    """Build the causal decision-context label series for a routed library.
+
+    Returns ``None`` when the library carries no router, preserving the existing
+    causal LCB-mix path exactly.  Otherwise only the router's ``context_symbol``
+    OHLCV is loaded through the existing causal loader and labelled with
+    ``build_causal_context_labels``; the labels must align exactly to the
+    component panel index without any forward-fill or back-fill, so a missing or
+    extended panel timestamp fails closed.
+    """
+    if spec.router is None:
+        return None
+    ohlcv = load_ohlcv_4h(ohlcv_path(spec.router.context_symbol, "1h"), start=start, end=end)
+    labels = build_causal_context_labels(ohlcv["close"], spec.router)
+    if not labels.index.equals(index):
+        raise DataIntegrityError(
+            f"decision-context OHLCV for {spec.router.context_symbol} does not align "
+            "exactly to the component panel index; a recomputed or reindexed "
+            "context series is rejected"
+        )
+    return labels
+
+
 def _assemble_result(
     base: ExpertPortfolioBacktestResult,
     component_trades: pd.DataFrame,
@@ -182,12 +211,13 @@ def run_expert_portfolio_evaluation(
 
     An unregistered library, a RETIRED registration, or any fingerprint drift
     raises ``ValueError`` before any component execution. The base run computes
-    the causal LCB targets; the stress run reuses the base target weights
-    verbatim under stressed costs with the existing one-bar delay and never
-    recomputes targets. Observation, fold, stress, and holdout reuse the
-    existing canonical functions unchanged and promotion is composed only by
-    ``compose_promotion_verdict``, so no allocation result can bypass a failing
-    gate.
+    the causal LCB targets (or the routed contextual winner targets when the
+    library carries a pre-registered router); the stress run reuses the base
+    target weights verbatim under stressed costs with the existing one-bar delay
+    and never recomputes targets or context labels. Observation, fold, stress,
+    and holdout reuse the existing canonical functions unchanged and promotion
+    is composed only by ``compose_promotion_verdict``, so no allocation result
+    can bypass a failing gate.
     """
     end = resolve_evaluation_end(request.end, unseal_holdout=request.unseal_holdout)
     if request.unseal_holdout:
@@ -202,8 +232,13 @@ def run_expert_portfolio_evaluation(
     component_returns, component_trades = build_component_panel(
         library, request.start, end, costs,
     )
+    decision_context = build_library_decision_context(
+        library, component_returns.index, request.start, end,
+    )
     base = run_expert_portfolio(
-        component_returns, library, costs, initial_equity=request.initial_equity,
+        component_returns, library, costs,
+        initial_equity=request.initial_equity,
+        decision_context=decision_context,
     )
     result = _assemble_result(base, component_trades)
     metrics = compute_metrics(result.equity, result.trades)

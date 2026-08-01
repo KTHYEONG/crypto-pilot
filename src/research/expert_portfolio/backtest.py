@@ -9,7 +9,14 @@ from src.common.errors import DataIntegrityError
 from src.research.baseline.backtest import BacktestResult
 from src.research.contracts import CostModel
 from src.research.expert_portfolio.allocator import _causal_lcb_weight_series, _validate_panel
-from src.research.expert_portfolio.contracts import ExpertPortfolioSpec
+from src.research.expert_portfolio.contextual_router import (
+    compute_causal_contextual_winner_weights,
+)
+from src.research.expert_portfolio.contracts import (
+    ContextualRouterSpec,
+    ExpertDefinition,
+    ExpertPortfolioSpec,
+)
 
 _EMPTY_TRADE_COLUMNS = (
     "entry_bar",
@@ -70,6 +77,7 @@ def run_expert_portfolio(
     initial_equity: float = 10_000.0,
     fixed_weights: pd.DataFrame | None = None,
     signal_delay_bars: int = 0,
+    decision_context: pd.Series | None = None,
 ) -> ExpertPortfolioBacktestResult:
     """Execute one master expert-portfolio ledger over a completed component panel.
 
@@ -85,7 +93,11 @@ def run_expert_portfolio(
     The causal target at each decision bar is the block-aware LCB allocation
     from ``compute_causal_lcb_weights``; the batch implementation here uses the
     vectorized ``_causal_lcb_weight_series`` so one time-ordered panel is
-    processed in a single pass with no per-bar DataFrame copies.
+    processed in a single pass with no per-bar DataFrame copies.  When the spec
+    carries a pre-registered ``router`` the targets instead come from
+    ``compute_causal_contextual_winner_weights`` and ``decision_context`` is
+    required; ``fixed_weights`` always stays dominant and is reused verbatim for
+    stress without any recomputation.
     """
     _validate_panel(component_returns)
     if len(component_returns) < 2:
@@ -105,6 +117,14 @@ def run_expert_portfolio(
     if fixed_weights is not None:
         _validate_fixed_weights(fixed_weights, component_returns.index, weight_columns)
         target_weights = fixed_weights
+    elif spec.router is not None:
+        if decision_context is None:
+            raise ValueError(
+                "decision_context is required when spec.router is configured"
+            )
+        target_weights = compute_causal_contextual_winner_weights(
+            component_returns, decision_context, spec, spec.router,
+        )
     else:
         target_weights = _causal_lcb_weight_series(component_returns, spec)
 
@@ -148,8 +168,6 @@ def run_expert_portfolio(
 
 def _check_contract() -> None:
     """Executable assertions locking the frozen master-ledger surface."""
-    from src.research.expert_portfolio.contracts import ExpertDefinition  # noqa: PLC0415
-
     assert {f.name for f in fields(ExpertPortfolioBacktestResult)} == {
         "backtest_result", "target_weights", "allocation_cost", "component_returns",
     }
@@ -168,6 +186,22 @@ def _check_contract() -> None:
     assert result.allocation_cost.iloc[1] == CostModel().fee_rate + CostModel().slippage_rate
     assert result.target_weights.equals(swap_weights)
     assert run_expert_portfolio.__name__ == "run_expert_portfolio"
+
+    routed = ExpertPortfolioSpec(
+        experts=spec.experts,
+        router=ContextualRouterSpec("BTCUSDT", 1, 1, 1),
+    )
+    context = pd.Series(["up_low_vol"] * 2, index=index)
+    missing_error = ""
+    try:
+        run_expert_portfolio(two_bar_panel, routed, CostModel())
+    except ValueError as exc:
+        missing_error = str(exc)
+    assert "decision_context is required" in missing_error
+    routed_result = run_expert_portfolio(
+        two_bar_panel, routed, CostModel(), decision_context=context,
+    )
+    assert list(routed_result.target_weights.columns) == ["A", "B", "CASH"]
 
 
 _check_contract()
