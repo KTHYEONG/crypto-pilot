@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 from pathlib import Path
 
 import numpy as np
@@ -40,9 +39,6 @@ def test_rejected_candidate_is_not_registered(
     """
     frame = _two_year_frame()
     funding = pd.Series(0.0, index=frame.index, dtype=float)
-    anti_path = tmp_path / "anti_patterns.json"
-
-    from src.research.provenance.anti_patterns import record_rejected_candidate
 
     monkeypatch.setattr(
         "src.application.technical_expert_evaluation._load_technical_market_data",
@@ -52,15 +48,6 @@ def test_rejected_candidate_is_not_registered(
         "src.application.technical_expert_evaluation._data_hashes",
         lambda symbol: {"perp_ohlcv": "a" * 64, "funding": "b" * 64},
     )
-    monkeypatch.setattr(
-        "src.application.technical_expert_evaluation.compute_code_hash",
-        lambda *args, **kwargs: "c" * 64,
-    )
-    monkeypatch.setattr(
-        "src.application.technical_expert_evaluation.record_rejected_candidate",
-        lambda **kwargs: record_rejected_candidate(anti_patterns_path=anti_path, **kwargs),
-    )
-
     request = TechnicalExpertEvaluationRequest(
         candidate_id="technical_macd_histogram_regime_long_v1",
         symbol="BTCUSDT",
@@ -76,12 +63,6 @@ def test_rejected_candidate_is_not_registered(
     assert report.promotion.candidate.return_source == "technical_macd_histogram_regime_long_v1"
 
     assert "technical_price_v1" not in default_catalog().blueprints
-
-    anti = json.loads(anti_path.read_text(encoding="utf-8"))
-    assert len(anti) == 1
-    assert anti[0]["failed_hypothesis"] == "technical_macd_histogram_regime_long_v1"
-    assert anti[0]["domain"] == "technical_macd_histogram_regime_long_v1"
-    assert "observation" in anti[0]["failed_gates"]
 
 
 def test_technical_expert_missing_data_returns_pending(monkeypatch) -> None:

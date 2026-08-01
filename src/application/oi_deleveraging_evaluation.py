@@ -34,7 +34,6 @@ from src.research.evaluation.reliability import (
 from src.research.oi_deleveraging.backtest import run_open_interest_deleveraging_screen
 from src.research.oi_deleveraging.contracts import OIDeleveragingMarketData
 from src.research.oi_deleveraging.market_data import load_oi_deleveraging_market_data
-from src.research.provenance.anti_patterns import record_rejected_candidate
 from src.research.provenance.code_manifest import compute_code_hash
 from src.research.provenance.results import record_oi_deleveraging_run
 
@@ -241,37 +240,6 @@ def _run_evaluation(
     return report, metrics_snapshot
 
 
-def _record_anti_pattern(
-    *,
-    candidate_id: str,
-    data_hash: str,
-    code_hash: str,
-    promotion: PromotionResult,
-    metrics_snapshot: dict[str, object],
-    run_log_reference: str,
-) -> None:
-    failed_gates: list[str] = []
-    if promotion.observation_verdict != "PASS":
-        failed_gates.append("observation")
-    if not promotion.fold_gate_pass:
-        failed_gates.append("fold")
-    if promotion.stress_verdict != "PASS":
-        failed_gates.append("stress")
-    if promotion.holdout_verdict is not None and promotion.holdout_verdict != "PASS":
-        failed_gates.append("holdout")
-    record_rejected_candidate(
-        candidate_id=candidate_id,
-        data_hash=data_hash,
-        code_hash=code_hash,
-        hypothesis_id=_HYPOTHESIS_ID,
-        failed_gates=failed_gates,
-        reason=f"promotion status={promotion.status}",
-        metrics=metrics_snapshot,
-        run_log_reference=run_log_reference,
-        domain=_RETURN_SOURCE,
-    )
-
-
 def run_oi_deleveraging_evaluation(
     request: OIDeleveragingEvaluationRequest,
     *,
@@ -332,27 +300,16 @@ def run_oi_deleveraging_evaluation(
     )
 
     should_log = log_run and request.log_run
-    report, metrics_snapshot = _run_evaluation(
+    report, _ = _run_evaluation(
         market_data,
         costs,
         unseal_holdout=request.unseal_holdout,
         candidate=identity,
         log_run=should_log,
     )
-    promotion = report.promotion
     rec = report.record
     if rec is not None:
         _logger.info("[EVAL] run logged: git_sha=%s dirty=%s", rec["git_sha"], rec["git_dirty"])
-    if promotion.status == "REJECTED":
-        run_ref = str(rec["ts"]) if rec is not None else "(not logged)"
-        _record_anti_pattern(
-            candidate_id=candidate_id,
-            data_hash=_combined_data_hash(hashes),
-            code_hash=current_code_hash,
-            promotion=promotion,
-            metrics_snapshot=metrics_snapshot,
-            run_log_reference=run_ref,
-        )
     return report
 
 
