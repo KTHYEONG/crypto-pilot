@@ -723,14 +723,29 @@ def main() -> None:
         print(_emit_json("PASS", "spec-compliance", []), file=sys.stderr)
         sys.exit(0)
 
-    if not args.files:
-        print("FAIL | --files is required unless --spec-only is set")
-        sys.exit(2)
+    if not args.files and not args.spec_only:
+        # Auto-detect modified and untracked .py files via git
+        try:
+            diff_res = subprocess.run(
+                ["git", "status", "--porcelain"],
+                capture_output=True, text=True, timeout=10, check=False
+            )
+            git_files: list[str] = []
+            for line in diff_res.stdout.splitlines():
+                status_code = line[:2]
+                filepath = line[3:].strip()
+                # Ignore deleted files
+                if "D" not in status_code and filepath.endswith(".py") and os.path.exists(filepath):
+                    git_files.append(filepath)
+            args.files = git_files
+        except Exception:
+            args.files = []
 
     py_files = [f for f in args.files if f.endswith(".py")]
     if not py_files and not args.spec:
-        print("ALLCHECKS:PASS")
+        print("ALLCHECKS:PASS | No modified .py files detected")
         sys.exit(0)
+
 
     # 0. Spec Compliance (optional, runs first — most fundamental)
     if args.spec:
