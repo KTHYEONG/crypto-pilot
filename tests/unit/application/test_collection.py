@@ -65,3 +65,16 @@ def test_funding_command_wires_collector(monkeypatch) -> None:
     collection.collect_funding("BTCUSDT", "2022-04-01", "2025-01-01")
 
     assert calls == [("BTCUSDT", "2022-04-01", "2025-01-01")]
+
+
+def test_metrics_command_wires_collector(monkeypatch) -> None:
+    calls: list[tuple[str, str, str]] = []
+
+    class FakeCollector:
+        def ensure_metrics_data(self, symbol: str, start: str, end: str) -> None:
+            calls.append((symbol, start, end))
+
+    monkeypatch.setattr(collection, "DataCollector", FakeCollector)
+    collection.collect_metrics("BTCUSDT", "2022-04-01", "2025-01-01")
+
+    assert calls == [("BTCUSDT", "2022-04-01", "2025-01-01")]
