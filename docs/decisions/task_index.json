@@ -1,6 +1,16 @@
 {
   "tasks": [
     {
+      "task_id": "TASK_PROVENANCE_FINGERPRINT_REFACTOR",
+      "date": "2026-08-01",
+      "adr_id": "ADR_20260801_PROVENANCE_FINGERPRINT_REFACTOR",
+      "domain": "execution",
+      "title": "Centralize research data provenance fingerprints",
+      "why": "Cash-carry, open-interest, and technical-expert evaluators duplicated byte hashing and aggregate data fingerprint logic, while the canonical code map could omit production modules.",
+      "resolution": "Added generic bounded-memory SHA-256 and canonical aggregate helpers, moved source mappings into domain provenance modules, rewired evaluators, added provenance regression coverage, and enforced complete canonical code-map coverage.",
+      "impact": "Candidate data hashes and identifiers remain byte-for-byte compatible; missing inputs still fail closed and application workflows preserve PENDING behavior. Legacy import façades and CLI contracts remain intact."
+    },
+    {
       "task_id": "TASK_LIBRARY_ADMISSION_BACKTEST",
       "date": "2026-08-01",
       "adr_id": "ADR_20260801_LIBRARY_ADMISSION_BACKTEST",
