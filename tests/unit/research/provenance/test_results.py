@@ -4,11 +4,17 @@ import dataclasses
 from pathlib import Path
 
 import pandas as pd
+import pytest
 
 from src.research.cash_carry.contracts import CashCarrySpec, CarryCostModel
 from src.research.contracts import CostModel, StrategySpec
 from src.research.baseline.backtest import run_backtest
-from src.research.provenance.results import load_runs, record_cash_carry_run, record_run
+from src.research.provenance.results import (
+    load_runs,
+    record_cash_carry_run,
+    record_expert_portfolio_run,
+    record_run,
+)
 from src.research.evaluation.promotion import (
     CandidateIdentity,
     compose_promotion_verdict,
@@ -264,3 +270,97 @@ class TestResultsLog:
         df = load_runs(log_path)
         assert df.loc[0, "cash_carry_spec.symbol"] == "BTCUSDT"
         assert df.loc[0, "promotion.status"] == promotion.status
+
+    def test_record_expert_portfolio_run_is_append_only(
+        self, tmp_path: Path, spec: StrategySpec, costs: CostModel, bars_ramp: pd.DataFrame,
+    ) -> None:
+        # EP-08: a valid expert-portfolio run is identifiable, persists the full
+        # library fingerprint and realised allocation cost, and logging is
+        # strictly append-only (never a rewrite of an existing run).
+        log_path = tmp_path / "runs.jsonl"
+        result = run_backtest(bars_ramp, spec, costs)
+        metrics = compute_metrics(result.equity, result.trades)
+        observation, fold, stress = _gate_fixture()
+        fingerprint = {
+            "experts": [{
+                "expert_id": "pair_residual_v1",
+                "return_source": "cointegration_residual",
+                "family": "pair_residual",
+                "symbols": ["A", "B"],
+                "runner": "run_pair_residual",
+                "code_hash": "abc",
+            }],
+            "gross_exposure": 1.0,
+            "family_exposure_limit": 0.5,
+            "symbol_exposure_limit": 0.5,
+            "min_history_bars": 30,
+            "confidence": 0.90,
+        }
+
+        first = record_expert_portfolio_run(
+            library_fingerprint=fingerprint,
+            allocation_cost_total=0.008,
+            result=result,
+            metrics=metrics,
+            observation_gate=observation,
+            fold_distribution=fold,
+            stress_gate=stress,
+            promotion=compose_promotion_verdict(observation, fold, stress, None),
+            log_path=log_path,
+        )
+        second = record_expert_portfolio_run(
+            library_fingerprint=fingerprint,
+            allocation_cost_total=0.008,
+            result=result,
+            metrics=metrics,
+            observation_gate=observation,
+            fold_distribution=fold,
+            stress_gate=stress,
+            promotion=compose_promotion_verdict(observation, fold, stress, None),
+            log_path=log_path,
+        )
+
+        assert first["kind"] == "expert_portfolio"
+        assert second["kind"] == "expert_portfolio"
+        lines = log_path.read_text(encoding="utf-8").splitlines()
+        assert len(lines) == 2
+        assert first["library_fingerprint"]["experts"][0]["expert_id"] == "pair_residual_v1"
+        assert first["allocation_cost_total"] == 0.008
+        assert first["reliability"]["observation"]["verdict"] == "PASS"
+        assert first["promotion"]["status"] == "OBSERVATION_PASS"
+        df = load_runs(log_path)
+        assert len(df) == 2
+        assert df.loc[0, "kind"] == "expert_portfolio"
+        assert df.loc[0, "allocation_cost_total"] == 0.008
+
+    def test_record_expert_portfolio_run_rejects_incomplete_evidence(
+        self, tmp_path: Path, spec: StrategySpec, costs: CostModel, bars_ramp: pd.DataFrame,
+    ) -> None:
+        # an incomplete fingerprint or non-finite realised cost appends no row.
+        log_path = tmp_path / "runs.jsonl"
+        result = run_backtest(bars_ramp, spec, costs)
+        metrics = compute_metrics(result.equity, result.trades)
+        observation, fold, stress = _gate_fixture()
+        with pytest.raises(ValueError, match="experts"):
+            record_expert_portfolio_run(
+                library_fingerprint={"gross_exposure": 1.0},
+                allocation_cost_total=0.001,
+                result=result,
+                metrics=metrics,
+                observation_gate=observation,
+                fold_distribution=fold,
+                stress_gate=stress,
+                log_path=log_path,
+            )
+        with pytest.raises(ValueError, match="finite"):
+            record_expert_portfolio_run(
+                library_fingerprint={"experts": []},
+                allocation_cost_total=float("nan"),
+                result=result,
+                metrics=metrics,
+                observation_gate=observation,
+                fold_distribution=fold,
+                stress_gate=stress,
+                log_path=log_path,
+            )
+        assert not log_path.exists() or log_path.read_text(encoding="utf-8").strip() == ""
