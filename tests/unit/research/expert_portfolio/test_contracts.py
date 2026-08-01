@@ -3,6 +3,7 @@ from __future__ import annotations
 import pytest
 
 from src.research.expert_portfolio.contracts import (
+    ContextualRouterSpec,
     ExpertDefinition,
     ExpertPortfolioEvaluationRequest,
     ExpertPortfolioSpec,
@@ -94,6 +95,37 @@ def test_fingerprint_locks_definitions_and_config() -> None:
 
     changed = ExpertPortfolioSpec(experts=(_expert(code_hash="different"),))
     assert changed.fingerprint() != fp
+
+
+def test_contextual_router_spec_validates_inputs() -> None:
+    # The pre-registered router rejects an empty context symbol and any
+    # non-positive bar count before routing can run, and only the supported
+    # LCB confidence levels are accepted.
+    with pytest.raises(ValueError, match="context_symbol"):
+        ContextualRouterSpec("", 1, 1, 1)
+    with pytest.raises(ValueError, match="trend_lookback_bars"):
+        ContextualRouterSpec("BTCUSDT", 0, 1, 1)
+    with pytest.raises(ValueError, match="volatility_lookback_bars"):
+        ContextualRouterSpec("BTCUSDT", 1, 0, 1)
+    with pytest.raises(ValueError, match="min_context_history_bars"):
+        ContextualRouterSpec("BTCUSDT", 1, 1, 0)
+    with pytest.raises(ValueError, match="confidence"):
+        ContextualRouterSpec("BTCUSDT", 1, 1, 1, confidence=0.70)
+
+
+def test_contextual_router_spec_preserves_identity_and_fingerprint() -> None:
+    router = ContextualRouterSpec("BTCUSDT", 60, 20, 30)
+    assert router.context_symbol == "BTCUSDT"
+    assert router.trend_lookback_bars == 60
+    assert router.volatility_lookback_bars == 20
+    assert router.min_context_history_bars == 30
+    assert router.confidence == 0.90
+    with pytest.raises(AttributeError):
+        router.context_symbol = "ETHUSDT"  # type: ignore[misc]
+
+    routed = ExpertPortfolioSpec(experts=(_expert(),), router=router)
+    assert routed.fingerprint()["router"]["context_symbol"] == "BTCUSDT"
+    assert ExpertPortfolioSpec(experts=(_expert(),)).fingerprint()["router"] is None
 
 
 def test_lcb_z_score_rejects_unsupported_confidence() -> None:

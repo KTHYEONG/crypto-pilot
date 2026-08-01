@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import numpy as np
+import pandas as pd
 import pytest
 
 from src.research.expert_portfolio.catalog import (
@@ -130,3 +132,124 @@ def test_only_holdout_pass_components_are_registerable(tmp_path: Path) -> None:
 
     # No recorded HOLDOUT_PASS evidence exists in the real catalog path yet.
     assert default_catalog().blueprints == {}
+
+
+def test_contextual_library_promotion_uses_only_composite_master_ledger(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # ECR-06: a contextual library is promoted only from its composite
+    # master-ledger observation/fold/stress/holdout evidence. Individual expert
+    # reports remain recorded admission diagnostics and can never act as
+    # independent promotion gates, so a failing fold on the routed master ledger
+    # keeps the library REJECTED even though per-expert evidence is HOLDOUT_PASS.
+    from src.application.expert_portfolio_evaluation import run_expert_portfolio_evaluation
+    from src.research.baseline.backtest import BacktestResult
+    from src.research.expert_portfolio.backtest import ExpertPortfolioBacktestResult
+    from src.research.expert_portfolio.contracts import (
+        ContextualRouterSpec,
+        ExpertPortfolioEvaluationRequest,
+        ExpertPortfolioSpec,
+    )
+    from src.research.expert_portfolio.registry import RegisteredExpertLibrary
+    from src.research.provenance.registration import RegistrationRecord
+
+    macd_long = _candidate("technical_macd_histogram_regime_long_v1")
+    rsi_long = _candidate("technical_rsi_trend_pullback_long_v1")
+    library = ExpertPortfolioSpec(
+        experts=(
+            _technical_definition(macd_long, "BTCUSDT"),
+            _technical_definition(rsi_long, "ETHUSDT"),
+        ),
+        router=ContextualRouterSpec("BTCUSDT", 1, 1, 1),
+    )
+    # Record per-expert admission diagnostics as HOLDOUT_PASS; these must not
+    # gate promotion by themselves.
+    ledger = tmp_path / "runs.jsonl"
+    _fake_technical_evaluation(
+        ledger, "technical_macd_histogram_regime_long_v1", "HOLDOUT_PASS",
+    )
+    _fake_technical_evaluation(
+        ledger, "technical_rsi_trend_pullback_long_v1", "HOLDOUT_PASS",
+    )
+
+    idx = pd.date_range("2023-01-01", "2025-12-31", freq="D", tz="UTC")
+    equity = pd.Series(np.full(len(idx), 10_000.0), index=idx, name="equity")
+    equity.iloc[idx.year == 2024] = 20_000.0  # concentrated growth -> fold failure
+    equity.iloc[idx.year >= 2025] = 20_000.0
+    panel = pd.DataFrame(
+        {e.expert_id: [0.001] * len(idx) for e in library.experts}, index=idx,
+    )
+    trades = pd.DataFrame({
+        "expert_id": [library.experts[0].expert_id] * 40,
+        "symbol": ["BTCUSDT"] * 40,
+        "entry_bar": np.arange(40),
+        "exit_bar": np.arange(40) + 1,
+        "entry_time": idx[:40],
+        "exit_time": idx[1:41],
+        "entry_price": [100.0] * 40,
+        "exit_price": [101.0] * 40,
+        "qty": [1.0] * 40,
+        "reason": ["channel"] * 40,
+        "pnl": [10.0] * 40,
+        "return_pct": [0.01] * 40,
+        "funding_pnl": [0.0] * 40,
+    })
+    result = ExpertPortfolioBacktestResult(
+        backtest_result=BacktestResult(
+            equity=equity, trades=pd.DataFrame(), signals=pd.DataFrame(),
+        ),
+        target_weights=pd.DataFrame(
+            {e.expert_id: 0.0 for e in library.experts} | {"CASH": 1.0}, index=idx,
+        ),
+        allocation_cost=pd.Series(0.0, index=idx),
+        component_returns=panel,
+    )
+    context = pd.Series(["up_low_vol"] * len(idx), index=idx)
+    used_contexts: list[object] = []
+
+    def fake_resolve(_library_id, *, catalog=None, ledger_path=None):
+        return RegisteredExpertLibrary(
+            library_id="lib-ctx",
+            registration_id="reg-1",
+            spec=library,
+            registration=RegistrationRecord(
+                registration_id="reg-1",
+                library_id="lib-ctx",
+                status="ACTIVE",
+                fingerprint={"experts": []},
+                registered_at="2026-01-01T00:00:00+00:00",
+                record={"registration_id": "reg-1"},
+            ),
+        )
+
+    def fake_run(
+        component_returns, spec, costs, *, initial_equity=10_000.0,
+        fixed_weights=None, signal_delay_bars=0, decision_context=None,
+    ):
+        if fixed_weights is None:
+            used_contexts.append(decision_context)
+        return result
+
+    monkeypatch.setattr(
+        "src.application.expert_portfolio_evaluation.resolve_registered_library",
+        fake_resolve,
+    )
+    monkeypatch.setattr(
+        "src.application.expert_portfolio_evaluation.build_component_panel",
+        lambda spec, start, end, costs, *, signal_delay_bars=0: (panel, trades),
+    )
+    monkeypatch.setattr(
+        "src.application.expert_portfolio_evaluation.build_library_decision_context",
+        lambda spec, index, start, end: context,
+    )
+    monkeypatch.setattr(
+        "src.application.expert_portfolio_evaluation.run_expert_portfolio", fake_run,
+    )
+
+    report = run_expert_portfolio_evaluation(
+        ExpertPortfolioEvaluationRequest(library_id="lib-ctx", log_run=False),
+    )
+    assert used_contexts == [context]
+    assert report.fold_distribution.gate_pass is False
+    assert report.promotion.status == "REJECTED"
