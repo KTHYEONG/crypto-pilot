@@ -47,7 +47,3 @@ Provide a clear, concise summary with emojis. Example:
 - **Artifacts**:
   - 📄 Specification: [`<feature>.md`](file:///docs/specs/<feature>.md)
   - ⚙️ Contract: [`<feature>_contract.json`](file:///docs/specs/<feature>_contract.json)
-
-
-
-

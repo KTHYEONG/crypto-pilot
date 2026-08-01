@@ -39,8 +39,3 @@ Provide a clear, concise summary with emojis. Example:
   - ⚙️ Contract Alignment: <PASS/FAIL>
   - 🛡️ Strict Mypy & Ruff: <PASS/FAIL>
   - 🧪 Regression & Tests: <PASS/FAIL>
-
-
-
-
-
