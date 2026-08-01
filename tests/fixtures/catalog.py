@@ -7,7 +7,7 @@ import pandas as pd
 import pytest
 
 from src.research.expert_portfolio.catalog import ExpertLibraryBlueprint, ExpertLibraryCatalog
-from src.research.expert_portfolio.contracts import ExpertDefinition
+from src.research.expert_portfolio.models import ExpertDefinition
 
 
 def write_blueprint_files(base: Path) -> tuple[dict[str, Path], dict[str, Path]]:

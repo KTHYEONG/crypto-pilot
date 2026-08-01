@@ -13,7 +13,7 @@ from src.research.expert_portfolio.catalog import (
     default_catalog,
     registration_id_from_fingerprint,
 )
-from src.research.expert_portfolio.contracts import ContextualRouterSpec, ExpertDefinition
+from src.research.expert_portfolio.models import ContextualRouterSpec, ExpertDefinition
 from src.research.expert_portfolio.runners import (
     ComponentRunRequest,
     _run_technical_expert,

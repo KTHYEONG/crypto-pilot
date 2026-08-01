@@ -26,7 +26,7 @@ if TYPE_CHECKING:
     from src.research.evaluation.metrics import Metrics
     from src.research.evaluation.promotion import CandidateIdentity, PromotionResult
     from src.research.evaluation.reliability import FoldDistributionResult, ReliabilityGateResult
-    from src.research.expert_portfolio.contracts import LibraryAdmissionBacktestReport
+    from src.research.expert_portfolio.admission_reports import LibraryAdmissionBacktestReport
 
 _logger = logging.getLogger("ResultsLog")
 
