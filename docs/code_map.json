@@ -230,5 +230,8 @@
   },
   "src/validation/research_memory.py": {
     "testing": "tests/contract/test_legacy_imports.py"
+  },
+  "src/research/sleeve_blend/backtest.py": {
+    "testing": "tests/unit/research/sleeve_blend/test_backtest.py"
   }
 }
