@@ -19,9 +19,7 @@ CANONICAL_CARRY_CODE_UNITS: Mapping[str, Path] = {
 # Only the real implementation files participate in the code fingerprint; the
 # application dispatch layer never does.
 TECHNICAL_CODE_UNITS: Mapping[str, Path] = {
-    "application.technical_expert_evaluation": Path(
-        "src/application/technical_expert_evaluation.py"
-    ),
+    "application.expert_evaluation": Path("src/application/expert_evaluation.py"),
     "technical_experts.backtest": Path("src/research/technical_experts/backtest.py"),
     "technical_experts.catalog": Path("src/research/technical_experts/catalog.py"),
     "technical_experts.contracts": Path("src/research/technical_experts/contracts.py"),
