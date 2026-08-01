@@ -4,16 +4,16 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from src.application import technical_library_admission_backtest as app
-from src.application.technical_library_admission_backtest import (
+from src.application import admission_backtest as app
+from src.application.admission_backtest import (
     run_technical_library_admission_backtest,
 )
-from src.research.expert_portfolio.contracts import (
-    ContextualRouterSpec,
+from src.research.expert_portfolio.admission_types import (
     TechnicalLibraryAdmissionBacktestRequest,
     admission_proposal_id,
     expert_ids_from_admission_proposal_id,
 )
+from src.research.expert_portfolio.models import ContextualRouterSpec
 
 
 def _request(*expert_ids: str) -> TechnicalLibraryAdmissionBacktestRequest:
