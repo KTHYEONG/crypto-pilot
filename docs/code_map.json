@@ -336,5 +336,29 @@
       "tests/unit/research/provenance/test_registration.py"
     ]
   },
-  "tests/integration/cli/test_expert_library_registration.py": {}
+  "tests/integration/cli/test_expert_library_registration.py": {},
+  "src/application/technical_expert_evaluation.py": {
+    "testing": "tests/unit/application/test_technical_expert_evaluation.py"
+  },
+  "src/research/technical_experts/backtest.py": {
+    "testing": "tests/unit/research/technical_experts/test_backtest.py"
+  },
+  "src/research/technical_experts/catalog.py": {
+    "testing": [
+      "tests/unit/research/technical_experts/test_catalog.py",
+      "tests/integration/cli/test_technical_expert_library_registration.py"
+    ]
+  },
+  "src/research/technical_experts/contracts.py": {
+    "testing": "tests/unit/research/technical_experts/test_contracts.py"
+  },
+  "src/research/technical_experts/indicators.py": {
+    "testing": "tests/unit/research/technical_experts/test_signals.py"
+  },
+  "src/research/technical_experts/signals.py": {
+    "testing": [
+      "tests/unit/research/technical_experts/test_signals.py",
+      "tests/unit/research/technical_experts/test_backtest.py"
+    ]
+  }
 }
