@@ -1,6 +1,13 @@
 [
   {
     "domain": "signal",
+    "failed_hypothesis": "open_interest_deleveraging_v1",
+    "failure_reason": "All five sealed symbol runs failed observation and stress gates despite sufficient trade counts.",
+    "falsified_date": "2026-08-01",
+    "source_adr": "ADR_20260801_OI_DELEVERAGING_GATE_SCREEN"
+  },
+  {
+    "domain": "signal",
     "failed_hypothesis": "funding_signed_directional_v1 would pass the unchanged promotion gates",
     "failure_reason": "The no-log sealed CLI reproduced runs.jsonl exactly but observation LCB90 and t-stat failed, fold concentration was 0.4056, and stress LCB90 was negative.",
     "falsified_date": "2026-08-01",
