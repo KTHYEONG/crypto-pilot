@@ -1,6 +1,13 @@
 [
   {
     "domain": "signal",
+    "failed_hypothesis": "multi_symbol_donchian_diversification, naive_bollinger_mean_reversion, cross_sectional_momentum_narrow_universe",
+    "failure_reason": "다심볼: 알트 전부 BTC보다 fold 집중도 열위. 평균회귀: 20/20 심볼-연도 조합 전부 음수. 횡단면모멘텀: 확장데이터에서 MDD -74.9%(플로어 3배 초과)로 오히려 악화",
+    "falsified_date": "2026-08-01",
+    "source_adr": "ADR_20260801_DONCHIAN_EXTENDED_HISTORY_BASELINE"
+  },
+  {
+    "domain": "signal",
     "failed_hypothesis": "cash_and_carry_basis (BTCUSDT, 2023-2025)",
     "failure_reason": "무비용 기준 funding-borrow 스프레드가 관측기간 전체 및 모든 14D/30D 롤링윈도우에서 손익분기 이하; 신호 개선으로 회전율 손실은 제거했으나 원천 엣지 부재는 해결 불가",
     "falsified_date": "2026-07-31",
