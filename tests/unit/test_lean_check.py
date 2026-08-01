@@ -4,7 +4,7 @@ import importlib.util
 from pathlib import Path
 
 
-_SCRIPT_PATH = Path(__file__).parents[2] / "scripts" / "lean_check.py"
+_SCRIPT_PATH = Path(__file__).parents[2] / "tools" / "agent_skills" / "lean_check.py"
 _MODULE_SPEC = importlib.util.spec_from_file_location("lean_check", _SCRIPT_PATH)
 assert _MODULE_SPEC is not None
 assert _MODULE_SPEC.loader is not None
