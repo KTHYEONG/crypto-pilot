@@ -12,9 +12,14 @@ _DEFAULT_SYMBOLS = ("BTCUSDT", "ETHUSDT", "AVAXUSDT", "BNBUSDT", "DOGEUSDT")
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Run fixed-sleeve Donchian blend backtest")
+    parser = argparse.ArgumentParser(description="Run sleeve blend backtest")
     parser.add_argument("--symbols", nargs="+", default=list(_DEFAULT_SYMBOLS))
     parser.add_argument("--mdd-budget-fraction", type=float, default=0.85)
+    parser.add_argument(
+        "--candidate-kind",
+        default="fixed_long_only_v1",
+        choices=["fixed_long_only_v1", "funding_signed_directional_v1"],
+    )
     parser.add_argument("--start", default=None)
     parser.add_argument("--end", default=None)
     parser.add_argument("--initial-equity", type=float, default=10_000.0)
@@ -25,6 +30,7 @@ def main() -> None:
     request = SleeveBlendEvaluationRequest(
         symbols=tuple(args.symbols),
         mdd_budget_fraction=args.mdd_budget_fraction,
+        candidate_kind=args.candidate_kind,
         start=args.start,
         end=args.end,
         initial_equity=args.initial_equity,
