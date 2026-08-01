@@ -29,6 +29,8 @@ if TYPE_CHECKING:
 
 _logger = logging.getLogger("ResultsLog")
 
+_INITIAL_EQUITY_OI = 10_000.0
+
 
 def _reliability_summary(gate: ReliabilityGateResult) -> dict[str, object]:
     return {
@@ -306,6 +308,52 @@ def record_cash_carry_run(
         end=end,
         initial_equity=initial_equity,
         cash_carry_spec=asdict(cash_carry_spec),
+        costs=asdict(costs),
+        window="observation+holdout" if holdout_gate is not None else "observation",
+    )
+    return _append_evaluation(event, log_path)
+
+
+def record_oi_deleveraging_run(
+    *,
+    symbol: str,
+    signal_delay_bars: int,
+    costs: CostModel,
+    result: BacktestResult,
+    metrics: Metrics,
+    start: str | None,
+    end: str | None,
+    observation_gate: ReliabilityGateResult,
+    fold_distribution: FoldDistributionResult,
+    stress_gate: ReliabilityGateResult,
+    holdout_gate: ReliabilityGateResult | None = None,
+    promotion: PromotionResult | None = None,
+    candidate: CandidateIdentity | None = None,
+    log_path: Path = RUNS_LOG_PATH,
+) -> dict[str, object]:
+    """Append one open-interest deleveraging screen run as a ledger evaluation event."""
+    git_sha, git_dirty = _git_head()
+    if candidate is not None:
+        _logger.debug("oi_deleveraging candidate provenance=%s", asdict(candidate))
+    event = build_evaluation_event(
+        workflow="oi_deleveraging",
+        ts=datetime.now(UTC).isoformat(),
+        git_sha=git_sha,
+        git_dirty=git_dirty,
+        metrics=asdict(metrics),
+        reliability=_reliability_block(
+            observation_gate=observation_gate,
+            fold_distribution=fold_distribution,
+            stress_gate=stress_gate,
+            holdout_gate=holdout_gate,
+        ),
+        promotion=_promotion_summary(promotion),
+        kind="oi_deleveraging",
+        symbol=symbol,
+        signal_delay_bars=signal_delay_bars,
+        start=start,
+        end=end,
+        initial_equity=_INITIAL_EQUITY_OI,
         costs=asdict(costs),
         window="observation+holdout" if holdout_gate is not None else "observation",
     )
