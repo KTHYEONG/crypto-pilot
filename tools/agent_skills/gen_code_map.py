@@ -8,7 +8,7 @@ import sys
 if os.getcwd() not in sys.path:
     sys.path.insert(0, os.getcwd())
 
-from scripts import lean_check  # noqa: E402
+from tools.agent_skills import lean_check  # noqa: E402
 
 
 def _matching_tests(source_file: str, test_files: list[str]) -> list[str]:
