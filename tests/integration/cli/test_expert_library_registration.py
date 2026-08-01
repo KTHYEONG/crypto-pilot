@@ -5,7 +5,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from src.application.library_evaluation import run_expert_portfolio_evaluation
+from src.application.research.expert_portfolio.evaluation import run_expert_portfolio_evaluation
 from src.research.baseline.backtest import BacktestResult
 from src.research.expert_portfolio.backtest import ExpertPortfolioBacktestResult
 from src.research.expert_portfolio.catalog import ExpertLibraryBlueprint, ExpertLibraryCatalog
@@ -15,7 +15,7 @@ from src.research.provenance.ledger import load_evaluation_runs, load_events
 from src.research.provenance.registration import register_expert_library
 from tests.fixtures.catalog import write_blueprint_files
 
-_APPLICATION_MODULE = "src.application.library_evaluation"
+_APPLICATION_MODULE = "src.application.research.expert_portfolio.evaluation"
 
 
 def _concentrated_equity() -> pd.Series:
