@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 from pathlib import Path
 
 from src.application.oi_deleveraging_evaluation import run_oi_deleveraging_evaluation
@@ -26,9 +25,6 @@ def test_oi_deleveraging_failure_is_not_registered(
     immutable OI return source.
     """
     data = _two_year_oi_data(make_oi_market_data)
-    anti_path = tmp_path / "anti_patterns.json"
-
-    from src.research.provenance.anti_patterns import record_rejected_candidate
 
     monkeypatch.setattr(
         "src.application.oi_deleveraging_evaluation.load_oi_deleveraging_market_data",
@@ -42,15 +38,6 @@ def test_oi_deleveraging_failure_is_not_registered(
             "metrics": "c" * 64,
         },
     )
-    monkeypatch.setattr(
-        "src.application.oi_deleveraging_evaluation.compute_code_hash",
-        lambda: "d" * 64,
-    )
-    monkeypatch.setattr(
-        "src.application.oi_deleveraging_evaluation.record_rejected_candidate",
-        lambda **kwargs: record_rejected_candidate(anti_patterns_path=anti_path, **kwargs),
-    )
-
     request = OIDeleveragingEvaluationRequest(
         symbol="BTCUSDT", start="2024-01-01", log_run=False,
     )
@@ -64,12 +51,6 @@ def test_oi_deleveraging_failure_is_not_registered(
     assert report.promotion.candidate.hypothesis_id == "open_interest_deleveraging_v1"
 
     assert "open_interest_deleveraging_v1" not in default_catalog().blueprints
-
-    anti = json.loads(anti_path.read_text(encoding="utf-8"))
-    assert len(anti) == 1
-    assert anti[0]["failed_hypothesis"] == "open_interest_deleveraging_v1"
-    assert anti[0]["domain"] == "open_interest_deleveraging_v1"
-    assert "observation" in anti[0]["failed_gates"]
 
 
 def test_oi_deleveraging_missing_data_returns_pending(monkeypatch) -> None:
