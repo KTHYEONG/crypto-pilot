@@ -31,7 +31,7 @@ def test_oi_deleveraging_failure_is_not_registered(
         lambda symbol, start, end: data,
     )
     monkeypatch.setattr(
-        "src.application.oi_deleveraging_evaluation._data_hashes",
+        "src.application.oi_deleveraging_evaluation.oi_deleveraging_data_hashes",
         lambda symbol: {
             "perp_ohlcv": "a" * 64,
             "funding": "b" * 64,
