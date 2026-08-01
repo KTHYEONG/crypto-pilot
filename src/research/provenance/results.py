@@ -26,6 +26,7 @@ if TYPE_CHECKING:
     from src.research.evaluation.metrics import Metrics
     from src.research.evaluation.promotion import CandidateIdentity, PromotionResult
     from src.research.evaluation.reliability import FoldDistributionResult, ReliabilityGateResult
+    from src.research.expert_portfolio.contracts import LibraryAdmissionBacktestReport
 
 _logger = logging.getLogger("ResultsLog")
 
@@ -172,6 +173,41 @@ def record_run(
         spec=asdict(spec),
         costs=asdict(costs),
         window="observation+holdout" if holdout_gate is not None else "observation",
+    )
+    return _append_evaluation(event, log_path)
+
+
+def record_library_admission_backtest_run(
+    report: LibraryAdmissionBacktestReport,
+    log_path: Path = RUNS_LOG_PATH,
+) -> dict[str, object]:
+    """Append one contextual admission backtest evaluation to the ledger."""
+    git_sha, git_dirty = _git_head()
+    event = build_evaluation_event(
+        workflow="library_admission_backtest",
+        ts=datetime.now(UTC).isoformat(),
+        git_sha=git_sha,
+        git_dirty=git_dirty,
+        metrics=asdict(report.observation_metrics),
+        reliability={
+            "observation": asdict(report.observation_gate),
+            "fold_distribution": asdict(report.observation_folds),
+            "stress_test": asdict(report.stress_gate),
+            "stress_folds": asdict(report.stress_folds),
+        },
+        promotion=asdict(report.promotion),
+        proposal_id=report.proposal_id,
+        expert_ids=list(report.expert_ids),
+        router=asdict(report.router),
+        window_start=report.window_start,
+        window_end=report.window_end,
+        observation_metrics=asdict(report.observation_metrics),
+        stress_metrics=asdict(report.stress_metrics),
+        allocation_cost_observation=report.allocation_cost_total,
+        allocation_cost_stress=report.stress_allocation_cost_total,
+        execution_workers=report.execution_workers,
+        code_hash=report.code_hash,
+        data_hashes={symbol: dict(values) for symbol, values in report.data_hashes.items()},
     )
     return _append_evaluation(event, log_path)
 
