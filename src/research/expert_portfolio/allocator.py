@@ -3,7 +3,7 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
-from src.research.expert_portfolio.contracts import ExpertPortfolioSpec, lcb_z_score
+from src.research.expert_portfolio.models import ExpertPortfolioSpec, lcb_z_score
 
 _MAX_ACF_LAG = 20
 
@@ -248,7 +248,7 @@ def compute_causal_lcb_weights(
 
 def _check_contract() -> None:
     """Executable assertions locking the frozen allocator surface."""
-    from src.research.expert_portfolio.contracts import ExpertDefinition  # noqa: PLC0415
+    from src.research.expert_portfolio.models import ExpertDefinition  # noqa: PLC0415
 
     assert compute_causal_lcb_weights.__name__ == "compute_causal_lcb_weights"
     panel = pd.DataFrame(

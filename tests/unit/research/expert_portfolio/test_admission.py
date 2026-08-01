@@ -10,11 +10,8 @@ from src.research.expert_portfolio.admission import (
     pairwise_joint_negative_rates,
     pairwise_log_return_correlation,
 )
-from src.research.expert_portfolio.contracts import (
-    ContextualRouterSpec,
-    ExpertDefinition,
-    LibraryAdmissionConfig,
-)
+from src.research.expert_portfolio.admission_types import LibraryAdmissionConfig
+from src.research.expert_portfolio.models import ContextualRouterSpec, ExpertDefinition
 
 
 def _expert(expert_id: str, family: str, symbol: str) -> ExpertDefinition:

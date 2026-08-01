@@ -16,7 +16,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import cast
 
-from src.research.expert_portfolio.contracts import (
+from src.research.expert_portfolio.models import (
     ContextualRouterSpec,
     ExpertDefinition,
     ExpertPortfolioSpec,
