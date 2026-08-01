@@ -69,21 +69,27 @@ def _synthetic_result(
     )
 
 
-def _patch_backend(monkeypatch: pytest.MonkeyPatch, spec: ExpertPortfolioSpec):
+def _patch_backend(
+    monkeypatch: pytest.MonkeyPatch,
+    spec: ExpertPortfolioSpec,
+):
     equity = _concentrated_equity()
     panel = pd.DataFrame({"e1": [0.001] * len(equity), "e2": [0.001] * len(equity)}, index=equity.index)
     trades = _component_trades(equity.index)
     result = _synthetic_result(equity, panel)
     stress_fixed_weights: list[object] = []
     stress_delay: list[int] = []
+    base_decision_contexts: list[object] = []
 
     def fake_run(
         component_returns, library, costs, *, initial_equity=10_000.0,
-        fixed_weights=None, signal_delay_bars=0,
+        fixed_weights=None, signal_delay_bars=0, decision_context=None,
     ):
         if fixed_weights is not None:
             stress_fixed_weights.append(fixed_weights)
             stress_delay.append(signal_delay_bars)
+        else:
+            base_decision_contexts.append(decision_context)
         return result
 
     from src.research.expert_portfolio.registry import RegisteredExpertLibrary
@@ -112,7 +118,7 @@ def _patch_backend(monkeypatch: pytest.MonkeyPatch, spec: ExpertPortfolioSpec):
         lambda library, start, end, costs, *, signal_delay_bars=0: (panel, trades),
     )
     monkeypatch.setattr(f"{_APPLICATION_MODULE}.run_expert_portfolio", fake_run)
-    return stress_fixed_weights, stress_delay
+    return stress_fixed_weights, stress_delay, base_decision_contexts
 
 
 def test_fold_failure_remains_rejected(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -142,7 +148,7 @@ def test_unregistered_library_raises(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_stress_reuses_base_target_weights_verbatim(monkeypatch: pytest.MonkeyPatch) -> None:
     # EP-06: the stress run must receive the base target series and the existing
     # one-bar delay; it must never recompute targets around stressed costs.
-    stress_fixed_weights, stress_delay = _patch_backend(monkeypatch, _spec())
+    stress_fixed_weights, stress_delay, _ = _patch_backend(monkeypatch, _spec())
     report = run_expert_portfolio_evaluation(
         ExpertPortfolioEvaluationRequest(library_id="lib-a", log_run=False),
     )
@@ -315,3 +321,86 @@ def test_build_component_panel_fails_closed_on_short_common_index(
     monkeypatch.setattr(f"{_APPLICATION_MODULE}._run_component", fake_run_component)
     with pytest.raises(DataIntegrityError, match="common bars"):
         build_component_panel(_spec(), None, "2025-12-31", CostModel())
+
+
+def _routed_spec() -> ExpertPortfolioSpec:
+    from src.research.expert_portfolio.contracts import ContextualRouterSpec
+
+    return ExpertPortfolioSpec(
+        experts=(
+            ExpertDefinition("e1", "return_source", "f1", ("S1",), "run_backtest", "hash1"),
+            ExpertDefinition("e2", "return_source", "f1", ("S2",), "run_backtest", "hash2"),
+        ),
+        router=ContextualRouterSpec("BTCUSDT", 1, 1, 1),
+    )
+
+
+def test_build_library_decision_context_is_none_without_router() -> None:
+    from src.application.expert_portfolio_evaluation import build_library_decision_context
+
+    assert build_library_decision_context(_spec(), _concentrated_equity().index, None, None) is None
+
+
+def test_build_library_decision_context_requires_exact_alignment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # ECR-05: context labels must align exactly to the component panel index;
+    # a missing panel timestamp fails closed instead of forward-filling.
+    from src.application.expert_portfolio_evaluation import build_library_decision_context
+    from src.common.errors import DataIntegrityError
+
+    panel_idx = _concentrated_equity().index
+    close_idx = panel_idx[: len(panel_idx) - 2]  # two panel timestamps missing
+    ohlcv = pd.DataFrame({"close": 100.0}, index=close_idx)
+    monkeypatch.setattr(
+        f"{_APPLICATION_MODULE}.load_ohlcv_4h",
+        lambda path, start=None, end=None: ohlcv,
+    )
+    with pytest.raises(DataIntegrityError, match="align exactly"):
+        build_library_decision_context(_routed_spec(), panel_idx, None, None)
+
+
+def test_build_library_decision_context_rejects_extra_context_rows(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from src.application.expert_portfolio_evaluation import build_library_decision_context
+    from src.common.errors import DataIntegrityError
+
+    panel_idx = _concentrated_equity().index
+    ohlcv_idx = panel_idx.append(pd.date_range(panel_idx[-1] + pd.Timedelta("4h"), periods=1, freq="4h", tz="UTC"))
+    ohlcv = pd.DataFrame({"close": 100.0}, index=ohlcv_idx)
+    monkeypatch.setattr(
+        f"{_APPLICATION_MODULE}.load_ohlcv_4h",
+        lambda path, start=None, end=None: ohlcv,
+    )
+    with pytest.raises(DataIntegrityError, match="align exactly"):
+        build_library_decision_context(_routed_spec(), panel_idx, None, None)
+
+
+def test_router_context_used_once_and_stress_stays_frozen(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # ECR-05: the base run receives the aligned decision context exactly once;
+    # the stress run receives the exact base target frame and performs no fresh
+    # contextual selection under stressed costs.
+    stress_fixed_weights, stress_delay, base_decision_contexts = _patch_backend(
+        monkeypatch, _routed_spec(),
+    )
+    equity = _concentrated_equity()
+    context = pd.Series(["up_low_vol"] * len(equity), index=equity.index)
+    monkeypatch.setattr(
+        f"{_APPLICATION_MODULE}.build_library_decision_context",
+        lambda spec, index, start, end: context,
+    )
+    report = run_expert_portfolio_evaluation(
+        ExpertPortfolioEvaluationRequest(library_id="lib-a", log_run=False),
+    )
+    assert base_decision_contexts == [context]
+    assert len(stress_fixed_weights) == 1
+    assert stress_delay == [1]
+    base = _synthetic_result(equity, pd.DataFrame())
+    pd.testing.assert_frame_equal(
+        stress_fixed_weights[0],  # type: ignore[arg-type]
+        base.target_weights,
+    )
+    assert report.promotion.status == "REJECTED"

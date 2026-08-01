@@ -65,6 +65,44 @@ class ExpertDefinition:
 
 
 @dataclass(frozen=True, slots=True)
+class ContextualRouterSpec:
+    """Immutable pre-registered contextual winner router specification.
+
+    ``context_symbol`` names the market whose OHLCV defines the decision
+    context, ``trend_lookback_bars`` is the completed trend window,
+    ``volatility_lookback_bars`` is the completed rolling-volatility window,
+    ``min_context_history_bars`` is the minimum number of completed samples of
+    one state before a conditional allocation is permitted, and ``confidence``
+    is the lower-confidence-bound level shared with the LCB allocator. Every
+    bar count and the confidence level are frozen before the holdout is seen;
+    nothing is fitted.
+    """
+
+    context_symbol: str
+    trend_lookback_bars: int
+    volatility_lookback_bars: int
+    min_context_history_bars: int
+    confidence: float = 0.90
+
+    def __post_init__(self) -> None:
+        if not self.context_symbol:
+            raise ValueError("context_symbol must not be empty")
+        if self.trend_lookback_bars < 1:
+            raise ValueError(
+                f"trend_lookback_bars must be >= 1, got {self.trend_lookback_bars}"
+            )
+        if self.volatility_lookback_bars < 1:
+            raise ValueError(
+                f"volatility_lookback_bars must be >= 1, got {self.volatility_lookback_bars}"
+            )
+        if self.min_context_history_bars < 1:
+            raise ValueError(
+                f"min_context_history_bars must be >= 1, got {self.min_context_history_bars}"
+            )
+        lcb_z_score(self.confidence)
+
+
+@dataclass(frozen=True, slots=True)
 class ExpertPortfolioSpec:
     """Immutable pre-registered expert library and allocator constraints.
 
@@ -73,8 +111,10 @@ class ExpertPortfolioSpec:
     ``symbol_exposure_limit`` caps any single underlying symbol: correlated
     parameter variants therefore share an exposure budget and cash is always
     feasible. ``min_history_bars`` is the completed-history requirement before
-    an expert can receive capital and ``confidence`` is the block-aware lower
-    confidence bound level. No constraint is tuned on the sealed result.
+    an expert can receive capital, ``confidence`` is the block-aware lower
+    confidence bound level, and ``router`` is the optional pre-registered
+    contextual winner router; ``None`` preserves the causal LCB-mix behaviour
+    exactly. No constraint is tuned on the sealed result.
     """
 
     experts: tuple[ExpertDefinition, ...]
@@ -83,6 +123,7 @@ class ExpertPortfolioSpec:
     symbol_exposure_limit: float = 1.0
     min_history_bars: int = 30
     confidence: float = 0.90
+    router: ContextualRouterSpec | None = None
 
     def __post_init__(self) -> None:
         if not self.experts:
@@ -121,6 +162,7 @@ class ExpertPortfolioSpec:
             "symbol_exposure_limit": self.symbol_exposure_limit,
             "min_history_bars": self.min_history_bars,
             "confidence": self.confidence,
+            "router": asdict(self.router) if self.router is not None else None,
         }
 
 
@@ -166,6 +208,17 @@ def _check_contract() -> None:
     ))
     assert spec.gross_exposure == 1.0
     assert "experts" in spec.fingerprint()
+    assert spec.fingerprint()["router"] is None
+    router = ContextualRouterSpec("BTCUSDT", 60, 20, 30)
+    assert router.min_context_history_bars == 30
+    assert router.trend_lookback_bars == 60
+    assert {f.name for f in fields(ContextualRouterSpec)} == {
+        "context_symbol", "trend_lookback_bars", "volatility_lookback_bars",
+        "min_context_history_bars", "confidence",
+    }
+    routed = ExpertPortfolioSpec(experts=spec.experts, router=router)
+    assert routed.fingerprint()["router"] == asdict(router)
+    assert routed.fingerprint() != spec.fingerprint()
     assert {f.name for f in fields(ExpertPortfolioEvaluationRequest)} == {
         "library_id", "start", "end", "initial_equity", "unseal_holdout", "log_run",
     }
