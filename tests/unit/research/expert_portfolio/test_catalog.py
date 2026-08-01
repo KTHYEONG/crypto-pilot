@@ -2,17 +2,26 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pandas as pd
 import pytest
 
 from src.research.expert_portfolio.catalog import (
     ExpertLibraryCatalog,
     ExpertLibraryBlueprint,
+    build_technical_price_v1_blueprint,
     compute_blueprint_fingerprint,
     default_catalog,
     registration_id_from_fingerprint,
 )
 from src.research.expert_portfolio.contracts import ExpertDefinition
-from src.research.expert_portfolio.runners import resolve_component_runner
+from src.research.expert_portfolio.runners import (
+    ComponentRunRequest,
+    _run_technical_expert,
+    component_data_requirements,
+    resolve_component_runner,
+)
+from src.research.baseline.backtest import BacktestResult
+from src.research.contracts import CostModel
 
 
 class TestComponentRunnerRegistry:
@@ -23,8 +32,57 @@ class TestComponentRunnerRegistry:
         with pytest.raises(ValueError, match="not registered"):
             resolve_component_runner("run_pair_residual")
 
+    def test_technical_runner_is_registered(self) -> None:
+        # TE-05: the frozen technical runner resolves from the central mapping
+        # and declares exactly the causal ohlcv and funding slots.
+        assert callable(resolve_component_runner("run_technical_expert"))
+        assert component_data_requirements("run_technical_expert") == ("ohlcv", "funding")
+
+    def test_technical_runner_executes_registered_candidate(self, monkeypatch) -> None:
+        index = pd.date_range("2024-01-01", periods=3, freq="4h", tz="UTC")
+        frame = pd.DataFrame({"open": 100.0, "high": 101.0, "low": 99.0, "close": 100.0}, index=index)
+        funding = pd.Series(0.0, index=index)
+        expected = BacktestResult(
+            equity=pd.Series(10_000.0, index=index),
+            trades=pd.DataFrame(),
+            signals=pd.DataFrame(),
+        )
+        calls: list[object] = []
+        monkeypatch.setattr(
+            "src.research.expert_portfolio.runners.run_technical_expert_backtest",
+            lambda bars, candidate, costs, rates, signal_delay_bars=0: calls.append(
+                (bars, candidate.return_source, costs, rates, signal_delay_bars)
+            ) or expected,
+        )
+        definition = ExpertDefinition(
+            "technical_macd", "technical_macd_histogram_regime_long_v1",
+            "macd_histogram_regime", ("BTCUSDT",), "run_technical_expert", "hash",
+        )
+        result = _run_technical_expert(
+            definition,
+            {"ohlcv": frame, "funding": funding},
+            ComponentRunRequest(CostModel(), signal_delay_bars=1),
+        )
+        assert result is expected
+        assert calls[0][1] == "technical_macd_histogram_regime_long_v1"
+
+    def test_technical_runner_requires_one_symbol(self) -> None:
+        definition = ExpertDefinition(
+            "technical_pair", "technical_macd_histogram_regime_long_v1",
+            "macd_histogram_regime", ("BTCUSDT", "ETHUSDT"), "run_technical_expert", "hash",
+        )
+        with pytest.raises(ValueError, match="exactly one symbol"):
+            _run_technical_expert(definition, {}, ComponentRunRequest(CostModel()))
+
 
 class TestCatalog:
+    def test_technical_blueprint_requires_approved_expert(self, expert_library_blueprint: ExpertLibraryBlueprint) -> None:
+        with pytest.raises(ValueError, match="at least one approved expert"):
+            build_technical_price_v1_blueprint(
+                (), code_units=expert_library_blueprint.code_units,
+                data_files=expert_library_blueprint.data_files, observation_end="2025-12-31",
+            )
+
     def test_blueprint_rejects_unsupported_runner(
         self, tmp_path: Path, expert_library_blueprint: ExpertLibraryBlueprint,
     ) -> None:
@@ -39,6 +97,32 @@ class TestCatalog:
                 code_units=expert_library_blueprint.code_units,
                 data_files=expert_library_blueprint.data_files,
                 observation_end="2025-12-31",
+            )
+
+    def test_technical_blueprint_requires_single_symbol(
+        self, expert_library_blueprint: ExpertLibraryBlueprint,
+    ) -> None:
+        expert = ExpertDefinition(
+            "technical_pair", "technical_macd_histogram_regime_long_v1",
+            "macd_histogram_regime", ("BTCUSDT", "ETHUSDT"), "run_technical_expert", "hash",
+        )
+        with pytest.raises(ValueError, match="exactly one symbol"):
+            build_technical_price_v1_blueprint(
+                (expert,), code_units=expert_library_blueprint.code_units,
+                data_files=expert_library_blueprint.data_files, observation_end="2025-12-31",
+            )
+
+    def test_technical_blueprint_requires_technical_runner(
+        self, expert_library_blueprint: ExpertLibraryBlueprint,
+    ) -> None:
+        expert = ExpertDefinition(
+            "technical_wrong_runner", "technical_macd_histogram_regime_long_v1",
+            "macd_histogram_regime", ("BTCUSDT",), "run_backtest", "hash",
+        )
+        with pytest.raises(ValueError, match="must use runner"):
+            build_technical_price_v1_blueprint(
+                (expert,), code_units=expert_library_blueprint.code_units,
+                data_files=expert_library_blueprint.data_files, observation_end="2025-12-31",
             )
 
     def test_catalog_unknown_library_fails_closed(self) -> None:
