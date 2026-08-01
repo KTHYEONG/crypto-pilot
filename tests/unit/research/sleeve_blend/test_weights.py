@@ -4,7 +4,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from src.research.sleeve_blend.backtest import (
+from src.research.sleeve_blend.weights import (
     _cap_symbol_weights_np,
     _causal_weight_series,
     compute_causal_risk_weights,
