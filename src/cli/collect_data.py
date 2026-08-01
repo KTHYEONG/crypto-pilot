@@ -24,6 +24,10 @@ def _spot_ohlcv(args: argparse.Namespace) -> None:
     collection.collect_spot_ohlcv(args.symbol, args.timeframe, args.start, end)
     _logger.info("Spot data collection complete for %s %s (through %s)", args.symbol, args.timeframe, end)
 
+def _funding(args: argparse.Namespace) -> None:
+    collection.collect_funding(args.symbol, args.start, args.end)
+    _logger.info("Funding collection complete for %s (through %s)", args.symbol, args.end)
+
 
 def _import_borrow(args: argparse.Namespace) -> None:
     collection.import_borrow(args.symbol, args.source, args.source_id, args.rate_period)
@@ -62,6 +66,12 @@ def main() -> None:
     spot_p.add_argument("--start", default="2022-04-01")
     spot_p.add_argument("--end", default=None)
     spot_p.set_defaults(func=_spot_ohlcv)
+
+    funding_p = sub.add_parser("funding", help="Collect futures funding history")
+    funding_p.add_argument("symbol", type=str)
+    funding_p.add_argument("--start", default="2022-04-01")
+    funding_p.add_argument("--end", required=True)
+    funding_p.set_defaults(func=_funding)
 
     borrow_p = sub.add_parser("import-borrow", help="Import a versioned quote-borrow export")
     borrow_p.add_argument("symbol", type=str)
