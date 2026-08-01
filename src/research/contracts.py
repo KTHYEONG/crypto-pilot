@@ -198,6 +198,33 @@ class SleeveBlendEvaluationRequest:
             )
 
 
+@dataclass(frozen=True, slots=True)
+class TechnicalExpertEvaluationRequest:
+    """Immutable request for one sealed technical-expert candidate screen.
+
+    ``candidate_id`` names exactly one of the eighteen frozen directional
+    candidates and ``symbol`` one of the five fixed liquid symbols; the sealed
+    window flags and logging option are the only other switches, so no indicator
+    or threshold can be tuned on the command line.
+    """
+
+    candidate_id: str
+    symbol: str
+    start: str | None = None
+    end: str | pd.Timestamp | None = None
+    initial_equity: float = 10_000.0
+    unseal_holdout: bool = False
+    log_run: bool = True
+
+    def __post_init__(self) -> None:
+        if not self.candidate_id:
+            raise ValueError("candidate_id must not be empty")
+        if not self.symbol:
+            raise ValueError("symbol must not be empty")
+        if self.initial_equity <= 0:
+            raise ValueError(f"initial_equity must be > 0, got {self.initial_equity}")
+
+
 @dataclass(frozen=True)
 class EvaluationReport:
     """Composed result of a sealed evaluation executed by an application service.
