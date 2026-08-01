@@ -36,14 +36,16 @@ def record_rejected_candidate(
     reason: str,
     metrics: dict[str, object],
     run_log_reference: str,
+    domain: str = "cash_carry",
     anti_patterns_path: Path = ANTI_PATTERNS_PATH,
 ) -> bool:
     """Append one idempotent anti-pattern record keyed by candidate fingerprint.
 
     The entry is keyed by ``candidate_id + data_hash + code_hash``: recording
     the same rejection twice is a no-op, and a failure is never used to alter
-    inputs or relax a gate threshold. Returns ``True`` when a new record was
-    appended and ``False`` for an idempotent skip.
+    inputs or relax a gate threshold. ``domain`` names the immutable return
+    source under which the failure is recorded. Returns ``True`` when a new
+    record was appended and ``False`` for an idempotent skip.
     """
     if not candidate_id or not data_hash or not code_hash:
         raise ValueError("candidate_id, data_hash and code_hash are required")
@@ -58,7 +60,7 @@ def record_rejected_candidate(
             return False
 
     records.append({
-        "domain": "cash_carry",
+        "domain": domain,
         "candidate_id": candidate_id,
         "data_hash": data_hash,
         "code_hash": code_hash,
