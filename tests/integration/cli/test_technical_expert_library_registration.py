@@ -61,11 +61,13 @@ def _fake_technical_evaluation(ledger: Path, return_source: str, status: str) ->
     append_event(event, ledger_path=ledger)
 
 
-def test_only_holdout_pass_components_are_registerable(tmp_path: Path) -> None:
-    # TE-07: a blueprint for technical_price_v1 admits only holdout-pass
-    # components, one per family and one per symbol; a failed, same-family
-    # duplicate, or unregistered component cannot be registered, and the
-    # default catalog stays empty without recorded HOLDOUT_PASS evidence.
+def test_components_are_admission_diagnostics_only_composite_ledger_promotes(tmp_path: Path) -> None:
+    # TE-07 / LAE-09: a blueprint for technical_price_v1 is a pre-registration
+    # admission result, not a promotion gate: individual candidate results are
+    # admission diagnostics, and only the registered composite master ledger
+    # determines promotion. A failed, same-family duplicate, or unregistered
+    # component cannot be registered, and the default catalog stays empty
+    # without source-controlled admission evidence.
     code_units, data_files = write_blueprint_files(tmp_path)
     macd_long = _candidate("technical_macd_histogram_regime_long_v1")
     macd_short = _candidate("technical_macd_histogram_regime_short_v1")

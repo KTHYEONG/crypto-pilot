@@ -155,12 +155,16 @@ def build_technical_price_v1_blueprint(
 ) -> ExpertLibraryBlueprint:
     """Declarative blueprint for the conditional ``technical_price_v1`` library.
 
-    Admission is deliberately narrow: every expert must run the technical
-    runner and resolve to a frozen candidate, no family and no underlying
-    symbol may appear more than once, and the blueprint requires at least one
-    expert. ``default_catalog`` never emits this library: it becomes
-    source-controlled only after recorded ``HOLDOUT_PASS`` evidence and a
-    human correlation review.
+    A blueprint is a pre-registration admission result, never a promotion gate:
+    individual technical candidate reports are admission diagnostics, and only
+    the registered composite master ledger through the unchanged
+    observation/fold/stress/holdout gates determines promotion. Admission is
+    deliberately narrow: every expert must run the technical runner and resolve
+    to a frozen candidate, no family and no underlying symbol may appear more
+    than once, and the blueprint requires at least one expert.
+    ``default_catalog`` never emits this library: it becomes source-controlled
+    only after a human selects an eligible admission proposal and the routed
+    composite ledger passes its unchanged gates.
     """
     if not experts:
         raise ValueError("technical_price_v1 requires at least one approved expert")
