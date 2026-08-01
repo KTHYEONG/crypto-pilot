@@ -8,12 +8,14 @@ from src.application.expert_portfolio_evaluation import run_expert_portfolio_eva
 from src.application.oi_deleveraging_evaluation import run_oi_deleveraging_evaluation
 from src.application.portfolio_evaluation import run_portfolio_evaluation
 from src.application.sleeve_blend_evaluation import run_sleeve_blend_evaluation
+from src.application.technical_expert_evaluation import run_technical_expert_evaluation
 from src.research.contracts import (
     BaselineEvaluationRequest,
     CashCarryEvaluationRequest,
     OIDeleveragingEvaluationRequest,
     PortfolioEvaluationRequest,
     SleeveBlendEvaluationRequest,
+    TechnicalExpertEvaluationRequest,
 )
 from src.research.expert_portfolio.contracts import ExpertPortfolioEvaluationRequest
 from src.research.portfolio.defaults import DEFAULT_SYMBOLS
@@ -96,6 +98,19 @@ def _run_oi_deleveraging(args: argparse.Namespace) -> None:
     run_oi_deleveraging_evaluation(request)
 
 
+def _run_technical_expert(args: argparse.Namespace) -> None:
+    request = TechnicalExpertEvaluationRequest(
+        candidate_id=args.candidate_id,
+        symbol=args.symbol,
+        start=args.start,
+        end=args.end,
+        initial_equity=args.initial_equity,
+        unseal_holdout=args.unseal_holdout,
+        log_run=not args.no_log_run,
+    )
+    run_technical_expert_evaluation(request)
+
+
 def add_research_commands(research_parser: argparse.ArgumentParser) -> None:
     """Attach the ``research run <evaluation>`` group to the root parser."""
     sub = research_parser.add_subparsers(dest="research_command", required=True)
@@ -169,3 +184,15 @@ def add_research_commands(research_parser: argparse.ArgumentParser) -> None:
     oi.add_argument("--unseal-holdout", action="store_true", default=False)
     oi.add_argument("--no-log-run", action="store_true", default=False)
     oi.set_defaults(handler=_run_oi_deleveraging)
+
+    technical = run_sub.add_parser(
+        "technical-expert", help="Run one sealed technical-expert candidate screen",
+    )
+    technical.add_argument("--candidate-id", required=True)
+    technical.add_argument("--symbol", default="BTCUSDT")
+    technical.add_argument("--start", default=None)
+    technical.add_argument("--end", default=None)
+    technical.add_argument("--initial-equity", type=float, default=10_000.0)
+    technical.add_argument("--unseal-holdout", action="store_true", default=False)
+    technical.add_argument("--no-log-run", action="store_true", default=False)
+    technical.set_defaults(handler=_run_technical_expert)

@@ -16,6 +16,8 @@ import pandas as pd
 from src.research.baseline.backtest import BacktestResult, run_backtest, run_directional_backtest
 from src.research.contracts import CostModel, StrategySpec
 from src.research.expert_portfolio.contracts import ExpertDefinition
+from src.research.technical_experts.backtest import run_technical_expert_backtest
+from src.research.technical_experts.catalog import resolve_technical_candidate
 
 ComponentRunner = Callable[[ExpertDefinition, Mapping[str, pd.DataFrame], "ComponentRunRequest"], BacktestResult]
 
@@ -59,14 +61,41 @@ def _run_single_symbol_directional(
     )
 
 
+def _run_technical_expert(
+    definition: ExpertDefinition,
+    data: Mapping[str, pd.DataFrame],
+    request: ComponentRunRequest,
+) -> BacktestResult:
+    """Resolve a frozen technical candidate from its return source and run it.
+
+    The candidate identity comes exclusively from ``ExpertDefinition.return_source``
+    so the source-controlled registry is the single place a technical expert is
+    named; the runner itself adds no dispatch branches.
+    """
+    if len(definition.symbols) != 1:
+        raise ValueError(
+            f"run_technical_expert requires exactly one symbol for {definition.expert_id}"
+        )
+    candidate = resolve_technical_candidate(definition.return_source)
+    return run_technical_expert_backtest(
+        data["ohlcv"],
+        candidate,
+        request.costs,
+        data["funding"],
+        signal_delay_bars=request.signal_delay_bars,
+    )
+
+
 _RUNNERS: dict[str, ComponentRunner] = {
     "run_backtest": _run_single_symbol_backtest,
     "run_directional_backtest": _run_single_symbol_directional,
+    "run_technical_expert": _run_technical_expert,
 }
 
 _RUNNER_DATA_REQUIREMENTS: dict[str, tuple[str, ...]] = {
     "run_backtest": ("ohlcv",),
     "run_directional_backtest": ("ohlcv", "funding"),
+    "run_technical_expert": ("ohlcv", "funding"),
 }
 
 
