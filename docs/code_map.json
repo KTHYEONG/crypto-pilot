@@ -357,5 +357,8 @@
       "tests/unit/research/technical_experts/test_signals.py",
       "tests/unit/research/technical_experts/test_backtest.py"
     ]
+  },
+  "src/research/expert_portfolio/contextual_router.py": {
+    "testing": "tests/unit/research/expert_portfolio/test_contextual_router.py"
   }
 }

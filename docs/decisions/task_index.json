@@ -1,6 +1,16 @@
 {
   "tasks": [
     {
+      "task_id": "TASK_EXPERT_LIBRARY_CONTEXTUAL_ROUTING",
+      "date": "2026-08-01",
+      "adr_id": "ADR_20260801_EXPERT_LIBRARY_CONTEXTUAL_ROUTING",
+      "domain": "futures",
+      "title": "Deterministic contextual expert-library routing",
+      "why": "Expert 후보별 gate만으로는 상황별 specialist 선택이라는 의도를 구현하지 못했고, library 승격 단위와 router provenance가 명확히 필요했다.",
+      "resolution": "Added a causal six-state contextual winner router with block-aware conditional LCB, CASH fallback, next-bar turnover accounting, router-preserving blueprint fingerprints, strict context alignment, and composite master-ledger promotion tests. Kept ML deferred until a deterministic routed library has sealed evidence.",
+      "impact": "The runtime can now evaluate a pre-registered contextual library as one master equity, while the default catalog remains empty and CLI fails closed until an approved expert combination and router configuration are source-controlled and registered."
+    },
+    {
       "task_id": "TASK_TECHNICAL_EXPERT_EQUITY_EXHAUSTION",
       "date": "2026-08-01",
       "adr_id": "ADR_20260801_TECHNICAL_EXPERT_EQUITY_EXHAUSTION",
