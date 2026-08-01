@@ -1,42 +1,19 @@
+"""Compatibility adapter for the legacy ``compare_runs`` invocation.
+
+New canonical invocation: ``uv run python -m src.cli.main provenance compare-runs ...``.
+"""
+
 from __future__ import annotations
 
-import argparse
+import logging
 
-import pandas as pd
-
-from src.research.provenance.results import RUNS_LOG_PATH, load_runs
-
-_SUMMARY_COLS = [
-    "ts", "git_sha", "git_dirty", "symbol", "end",
-    "metrics.trade_count", "metrics.cagr", "metrics.mdd",
-    "metrics.sharpe", "metrics.profit_factor", "metrics.win_rate",
-    "reliability.observation.verdict", "reliability.observation.lcb90_cagr",
-    "reliability.fold_distribution.max_period_contribution",
-    "reliability.stress_test.verdict",
-]
+from src.cli import compat
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Compare recorded backtest runs")
-    parser.add_argument("--last", type=int, default=10, help="Show only the most recent N runs")
-    parser.add_argument("--sort-by", default="ts", help="Column to sort by, e.g. metrics.sharpe")
-    parser.add_argument("--full", action="store_true", help="Show every column instead of the summary set")
-    args = parser.parse_args()
-
-    df = load_runs()
-    if df.empty:
-        print(f"No runs recorded yet at {RUNS_LOG_PATH}")
-        return
-
-    if not args.full:
-        cols = [c for c in _SUMMARY_COLS if c in df.columns]
-        df = df[cols]
-
-    df = df.sort_values(args.sort_by).tail(args.last)
-
-    with pd.option_context("display.max_columns", None, "display.width", 200):
-        print(df.to_string(index=False))
+    compat.compare_runs()
 
 
 if __name__ == "__main__":
+    logging.basicConfig(level=logging.INFO)
     main()
