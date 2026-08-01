@@ -29,4 +29,4 @@
 - **Testing & Coverage Directives:** [testing.md](file:///.agents/rules/testing.md)
 - **Logging & Traceability Standards:** [logging.md](file:///.agents/rules/logging.md)
 - **Performance & Optimization:** [performance.md](file:///.agents/rules/performance.md)
-- **Documentation & ADR Strategy:** [documentation.md](file:///.agents/rules/documentation.md)
+- **Documentation & Code Commenting:** [documentation.md](file:///.agents/rules/documentation.md)
