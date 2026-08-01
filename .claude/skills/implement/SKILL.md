@@ -3,49 +3,39 @@ name: implement
 description: Implement an approved spec mechanically with focused TDD and integration verification.
 ---
 
-# Implement
+# Implement Protocol
 
-Fast-execution model protocol (GPT-5.6 Luna, Sonnet 5, etc.). Execute frozen contract mechanically with zero architectural redesign.
+Fast-execution model protocol for mechanical feature implementation based on frozen spec contracts.
 
-## Rigid Rules & Constraints
+## Directives
 
-- **STRICT BOUNDARY**: Contract is frozen input. Do NOT rename symbols, alter thresholds, or edit contract JSON.
-- **ESCALATION GATE**: If contract disagrees with codebase or explicit `python_assertion` fails, STOP immediately and report precise conflict.
-- **CLI PREFIX**: Execute ALL verification commands using `uv run`.
+1. **Strict Contract Compliance (Zero Guesswork)**:
+   - Treat `contract.json` as absolute input. Do not invent new parameters, change signatures, or alter thresholds.
 
-## Deterministic 3-Phase Checklist
+2. **Mechanical Scenario Translation**:
+   - Directly translate `scenarios` and `python_assertion` from `contract.json` into concrete `pytest` test cases.
+   - Implement source logic at exact specified `target_file` and `wiring` anchors.
 
-### Phase 1: Contract Surface & Assertions
-- [ ] Read spec, contract, and caller/test files.
-- [ ] Confirm symbols/paths with `rg`.
-- [ ] Add/update signatures, dataclasses, and validation.
-- [ ] Implement contract tests using exact scenario names and verify `python_assertion` expressions.
-- [ ] Run verification: `uv run ruff check .` and `uv run pytest <target_test_file>`.
+3. **Surgical Code Modifications**:
+   - MUST use targeted block/line edits (`replace_file_content` / `multi_replace_file_content`) to prevent code loss or unintended rewrites.
 
-### Phase 2: Core Logic
-- [ ] Implement pure logic preserving numerical & causal rules specified in spec.
-- [ ] Write concrete assertions for boundaries, failures, and regressions (No vacuous/dummy tests allowed).
-- [ ] Run verification: `uv run ruff check .`, `uv run mypy <file>`, and `uv run pytest <target_test_file>`.
+4. **Verification & Escalation Loop**:
+   - Run verification via `uv run ruff check .` and `uv run pytest <target_test_file>`.
+   - If contract conflicts with codebase realities or tests fail due to bad spec logic, STOP and escalate to `/spec`.
 
-### Phase 3: Wiring & Integration
-- [ ] Wire production caller at specified anchor.
-- [ ] Add integration scenarios with exact names/files.
-- [ ] Run full checks: `uv run ruff check .`, `uv run mypy <file>`, and `uv run pytest`.
+## Output
 
-## Failure Escalation Matrix
+Provide a clear, concise summary with emojis. Example:
 
-- `Contract / Signature / Assertion Conflict` -> **STOP & ESCALATE** (Do not edit spec/contract).
-- `Logic Failure` -> Fix source code, rerun smallest affected test.
-- `Coverage Miss` -> Add missing edge-case test, rerun once.
+### 🔨 [IMPLEMENT] <Task Title>
 
-## Output Format
+- **Status**: ✅ COMPLETE (or ❌ INCOMPLETE)
+- **Modified**: <Count> files
+- **Verification**:
+  - 🧪 Pytest: <Passed>/<Total> passed
+  - 🧹 Ruff / Mypy: <PASS/FAIL>
 
-Return ONLY the structured card below (do NOT list individual files):
 
-### 📌 [IMPLEMENT] <Feature / Task Title>
 
-- **Status**: <COMPLETE | INCOMPLETE>
-- **Metrics**: Modified Files: <count> | Tests: <passed>/<total> passed
-- **Quality**: Ruff: <PASS/FAIL> | Mypy: <PASS/FAIL> | Conflicts: <None | Brief summary>
 
 

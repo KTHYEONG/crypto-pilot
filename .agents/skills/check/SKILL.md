@@ -3,41 +3,44 @@ name: check
 description: Independently audit contract compliance, typing, regressions, coverage, and test validity.
 ---
 
-# Check
+# Check Protocol
 
-Fast-execution model audit protocol (GPT-5.6 Luna, Sonnet 5, etc.). Independent verification of contract compliance, typing, regressions, and changed-line coverage.
+Independent audit gate completing the main development loop (`spec` -> `implement` -> `check`). Performs code review, strict quality checks, and regression verification.
 
-## Core Rule
+## Directives
 
-`/check` is an audit pass, NOT an architectural repair loop.
-Execute audit command:
-```bash
-uv run python tools/agent_skills/lean_check.py --files <modified .py files> --spec <contract.json> --skip-lint
-```
+1. **Identify Modified Scope**:
+   - Inspect modified files using `git status` or `git diff --name-only`.
 
-## Deterministic Audit Pipeline
+2. **Standard Audit Execution**:
+   - Run token-efficient audit runner (auto-detects modified `.py` files via git):
+     ```bash
+     uv run python tools/agent_skills/lean_check.py
+     ```
+   - Fallback (if script fails):
+     - Code Style: `uv run ruff check`
+     - Strict Typing: `uv run mypy`
+     - Target Tests: `uv run pytest`
 
-### Step 1: Preflight Search
-- [ ] `rg` all contract symbols, callers, wiring expressions, and scenario names.
-- [ ] Run `uv run ruff check <modified_files>`.
-- [ ] Run `uv run pytest <touched_tests>`.
-- [ ] *Exit Gate*: If contract drift is found, STOP and return to `/implement` or `/spec`. Do NOT modify contract/test names.
 
-### Step 2: Full Audit Order
-- [ ] Verify literal assertions and non-dummy implementation.
-- [ ] Run `uv run mypy <modified_files>` in strict mode.
-- [ ] Run test suite and inspect changed-line coverage.
-- [ ] Perform vacuous-test & stale-field review.
+3. **Strict Audit Gate (No Code Mutation)**:
+   - Perform auditing independently. Do NOT modify source code during the check pass.
+   - Verify non-vacuous tests and contract compliance against `contract.json`.
+   - If audit fails, report the exact failure diagnosis clearly for resolution in `/implement` or `/spec`.
 
-## Output Format
+## Output
 
-Do NOT dump raw error logs or test suites in chat. Return ONLY this compact card:
+Provide a clear, concise summary with emojis. Example:
 
-### 📌 [CHECK] <Audit Target / Task Title>
+### 🔍 [CHECK] <Audit Target>
 
-- **Status**: <PASS | FAIL>
-- **Checks**: Spec/Wiring: <PASS/FAIL> | Mypy: <PASS/FAIL> | Regression: <PASS/FAIL>
-- **Coverage**: Total: <FinalCov%> | Modified Files: <FileCovSummary>
-- **Issue**: <1-line root cause and fix plan (Only on FAIL)>
+- **Status**: ✅ PASS (or ❌ FAIL)
+- **Checks**:
+  - ⚙️ Contract Alignment: <PASS/FAIL>
+  - 🛡️ Strict Mypy & Ruff: <PASS/FAIL>
+  - 🧪 Regression & Tests: <PASS/FAIL>
+
+
+
 
 
