@@ -49,12 +49,6 @@ _STRESS_DELAY_BARS = 2
 _INITIAL_EQUITY = 10_000.0
 
 
-def _combined_data_hash(data_hashes: dict[str, str]) -> str:
-    return hashlib.sha256(
-        json.dumps(data_hashes, sort_keys=True).encode("utf-8")
-    ).hexdigest()
-
-
 def _data_hashes(symbol: str) -> dict[str, str]:
     """Shared data fingerprint helper kept as the module-local entry point.
 
