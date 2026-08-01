@@ -8,6 +8,9 @@
   "src/application/collection.py": {
     "testing": "tests/unit/application/test_collection.py"
   },
+  "src/application/expert_portfolio_evaluation.py": {
+    "testing": "tests/unit/application/test_expert_portfolio_evaluation.py"
+  },
   "src/application/portfolio_evaluation.py": {
     "testing": "tests/unit/application/test_portfolio_evaluation.py"
   },
@@ -32,6 +35,12 @@
     "testing": [
       "tests/contract/test_cli_surface.py",
       "tests/integration/cli/test_cash_carry_cli.py"
+    ]
+  },
+  "src/cli/run_expert_portfolio_backtest.py": {
+    "testing": [
+      "tests/unit/cli/test_run_expert_portfolio_backtest.py",
+      "tests/integration/cli/test_expert_portfolio_promotion.py"
     ]
   },
   "src/cli/run_portfolio_backtest.py": {
@@ -192,6 +201,19 @@
   },
   "src/research/evaluation/reliability.py": {
     "testing": "tests/unit/research/evaluation/test_reliability.py"
+  },
+  "src/research/expert_portfolio/__init__.py": {},
+  "src/research/expert_portfolio/allocator.py": {
+    "testing": "tests/unit/research/expert_portfolio/test_allocator.py"
+  },
+  "src/research/expert_portfolio/backtest.py": {
+    "testing": "tests/unit/research/expert_portfolio/test_backtest.py"
+  },
+  "src/research/expert_portfolio/contracts.py": {
+    "testing": "tests/unit/research/expert_portfolio/test_contracts.py"
+  },
+  "src/research/expert_portfolio/registry.py": {
+    "testing": "tests/unit/research/expert_portfolio/test_registry.py"
   },
   "src/research/portfolio/backtest.py": {
     "testing": "tests/unit/research/portfolio/test_backtest.py"

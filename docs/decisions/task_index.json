@@ -1,6 +1,16 @@
 {
   "tasks": [
     {
+      "task_id": "TASK_EXPERT_PORTFOLIO_RUNTIME_EXECUTION",
+      "date": "2026-08-01",
+      "adr_id": "ADR_20260801_EXPERT_PORTFOLIO_RUNTIME_EXECUTION",
+      "domain": "execution",
+      "title": "Expert portfolio runtime execution and fail-closed diagnosis",
+      "why": "실제 parquet 실행으로 전문가 포트폴리오의 등록·배분 경로와 게이트 결과를 검증해야 했다.",
+      "resolution": "CLI는 미등록 library에서 중단되었고 등록을 우회한 BTC·ETH 코어 실행은 LCB 비양수로 전액 현금에 머문 결과를 ADR과 결정 인덱스에 기록했다.",
+      "impact": "전문가 포트폴리오는 아직 promotion 불가이며 expert_library_registry 등록과 양의 LCB를 생성하는 독립 전략 증거가 다음 필수 작업으로 남았다."
+    },
+    {
       "task_id": "TASK_SLEEVE_GATE_PASS_V2_DIRECTIONAL",
       "date": "2026-08-01",
       "adr_id": "ADR_20260801_SLEEVE_GATE_PASS_V2_DIRECTIONAL",
