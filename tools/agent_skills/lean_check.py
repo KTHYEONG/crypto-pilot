@@ -46,6 +46,9 @@ def _fail_exit_many(phase: str, header: str, diags: list[JsonDiag]) -> None:
 
 
 def run_cmd(cmd: list[str], timeout: int = 120) -> subprocess.CompletedProcess[str]:
+    # Strip unnecessary 'uv run' prefix when already running inside virtualenv to avoid double env setup overhead
+    if len(cmd) >= 3 and cmd[0] == "uv" and cmd[1] == "run" and os.environ.get("VIRTUAL_ENV"):
+        cmd = cmd[2:]
     try:
         return subprocess.run(  # noqa: S603
             cmd, capture_output=True, text=True, shell=False, timeout=timeout
@@ -364,6 +367,21 @@ def _file_to_module(file_hint: str) -> str:
     return file_hint[:-3].replace("/", ".") if file_hint.endswith(".py") else file_hint.replace("/", ".")
 
 
+def _repo_relative(path: str) -> str:
+    """Normalize a contract file path (often absolute) to the repo root.
+
+    Contracts declare absolute ``target_file`` / ``caller_file`` paths; module
+    imports and ``os.path.exists`` checks need repo-relative paths so the tool
+    works regardless of how the contract was authored.
+    """
+    if not os.path.isabs(path):
+        return path
+    try:
+        return os.path.relpath(path, os.getcwd())
+    except ValueError:
+        return path
+
+
 def _execute_assertions(
     fh: str, kind: str, name: str, assertions: list[Any],
 ) -> list[JsonDiag]:
@@ -520,6 +538,27 @@ def _execute_python_assertion(fh: str, name: str, assertion_code: str) -> list[J
     return diags
 
 
+def _iter_contract_entries(contract: dict[str, Any]) -> list[dict[str, Any]]:
+    """Normalize legacy 'contracts' and this repo's 'changes' sections.
+
+    The repo's spec contracts declare their surface under ``changes`` with
+    ``target_file`` / ``symbol`` / ``python_assertion`` keys; the generic
+    schema uses ``contracts`` with ``file_hint`` / ``name``.  Both are reduced
+    to one list of entries so symbol, stub, and assertion checks stay shared.
+    """
+    entries: list[dict[str, Any]] = list(contract.get("contracts", []))
+    for change in contract.get("changes", []):
+        symbol = change.get("symbol", "")
+        entries.append({
+            "file_hint": _repo_relative(change.get("target_file", "")),
+            "kind": "class" if symbol and symbol[0].isupper() else "function",
+            "name": symbol,
+            "assertions": [],
+            "python_assertion": change.get("python_assertion", ""),
+        })
+    return entries
+
+
 def _check_spec_compliance(spec_path: str) -> tuple[int, list[JsonDiag]]:
     diagnostics: list[JsonDiag] = []
     try:
@@ -528,7 +567,7 @@ def _check_spec_compliance(spec_path: str) -> tuple[int, list[JsonDiag]]:
     except (FileNotFoundError, json.JSONDecodeError) as e:
         return (1, [{"file": spec_path, "line": 0, "error": f"Spec file error: {e}", "fix_hint": ""}])
 
-    for c in contract.get("contracts", []):
+    for c in _iter_contract_entries(contract):
         fh: str = c.get("file_hint", "") or c.get("file", "")
         kind: str = c.get("kind", "function")
         raw_name: str = c.get("name", "") or c.get("symbol", "")
@@ -602,29 +641,52 @@ def _check_spec_compliance(spec_path: str) -> tuple[int, list[JsonDiag]]:
                     diagnostics.extend(_check_orphaned_implementations(fh, kind, name))
 
     for s in contract.get("scenarios", []):
-        test_name: str = s.get("name", "")
+        test_name: str = s.get("name", "") or s.get("scenario_id", "")
         if not test_name:
             continue
+        # repo schema: scenario_id like 'ECR-01-CAUSAL-ATTRIBUTION' is referenced
+        # by its stable prefix ('ECR-01') in the target test's docstring.
+        # Use exact word boundary or full prefix (minimum hyphenated prefix like ECR-01) to avoid weak substring matches (e.g. 'ECR' matching ECR-01~06).
+        if s.get("scenario_id"):
+            parts = test_name.split("-")
+            reference = "-".join(parts[:2]) if len(parts) >= 2 else parts[0]
+        else:
+            reference = test_name
+
+        target_test_file: str = _repo_relative(s.get("target_test_file", ""))
         found = False
-        for root, _dirs, fnames in os.walk("tests"):
-            for fn in fnames:
-                if not fn.endswith(".py"):
-                    continue
-                with open(os.path.join(root, fn)) as tf:
-                    if re.search(rf"^[ \t]*def\s+{re.escape(test_name)}\b", tf.read(), re.MULTILINE):
-                        found = True
-                        break
-            if found:
-                break
+        ref_pattern = re.compile(rf"\b{re.escape(reference)}\b")
+        if target_test_file and os.path.exists(target_test_file):
+            with open(target_test_file) as tf:
+                content = tf.read()
+            found = bool(ref_pattern.search(content)) or bool(
+                re.search(rf"^[ \t]*def\s+{re.escape(test_name)}\b", content, re.MULTILINE)
+            )
         if not found:
-            target_test_file = s.get("target_test_file", "")
-            fix_hint = f"Write {test_name} in {target_test_file}" if target_test_file else f"Write {test_name}"
+            for root, _dirs, fnames in os.walk("tests"):
+                for fn in fnames:
+                    if not fn.endswith(".py"):
+                        continue
+                    with open(os.path.join(root, fn)) as tf:
+                        content = tf.read()
+                        if bool(ref_pattern.search(content)) or re.search(
+                            rf"^[ \t]*def\s+{re.escape(test_name)}\b", content, re.MULTILINE
+                        ):
+                            found = True
+                            break
+                if found:
+                    break
+        if not found:
+            fix_hint = f"Write a test referencing {test_name} in {target_test_file}" if target_test_file else f"Write {test_name}"
             d = {"file": target_test_file, "line": 0, "error": f"Spec: missing test '{test_name}'", "fix_hint": fix_hint}
             diagnostics.append(d)
 
     wirings: list[dict[str, Any]] = []
     if "wiring" in contract and isinstance(contract["wiring"], list):
         wirings.extend(contract["wiring"])
+    elif "wiring" in contract and isinstance(contract["wiring"], dict):
+        # repo schema: a single wiring object keyed by caller_file/anchor
+        wirings.append(contract["wiring"])
     wirings.extend(
         c["wiring"] for c in contract.get("contracts", []) if "wiring" in c and isinstance(c["wiring"], dict)
     )
@@ -634,7 +696,9 @@ def _check_spec_compliance(spec_path: str) -> tuple[int, list[JsonDiag]]:
         diagnostics.append({"file": spec_path, "line": 0, "error": msg, "fix_hint": "Add 'wiring' array or per-contract wiring object to contract.json"})
 
     for w in wirings:
-        wf: str = w.get("file", "") or w.get("target", "")
+        wf: str = _repo_relative(
+            w.get("file", "") or w.get("target", "") or w.get("caller_file", "")
+        )
         anchor: str = w.get("anchor", "")
         import_symbol: str = w.get("import_symbol", "") or w.get("callee", "")
         invocation_symbol: str = w.get("invocation_symbol", "")
@@ -735,11 +799,28 @@ def main() -> None:
                 status_code = line[:2]
                 filepath = line[3:].strip()
                 # Ignore deleted files
-                if "D" not in status_code and filepath.endswith(".py") and os.path.exists(filepath):
+                if (
+                    "D" not in status_code
+                    and filepath.endswith(".py")
+                    and not filepath.startswith("tools/")
+                    and os.path.exists(filepath)
+                ):
                     git_files.append(filepath)
             args.files = git_files
         except Exception:
             args.files = []
+
+    # Auto-detect spec file in docs/specs/*_contract.json if not provided
+    if not args.spec and os.path.exists("docs/specs"):
+        spec_candidates = [
+            os.path.join("docs/specs", f)
+            for f in os.listdir("docs/specs")
+            if f.endswith("_contract.json") or f == "contract.json"
+        ]
+        if spec_candidates:
+            # Pick the most recently modified spec file
+            spec_candidates.sort(key=lambda p: os.path.getmtime(p), reverse=True)
+            args.spec = spec_candidates[0]
 
     py_files = [f for f in args.files if f.endswith(".py")]
     if not py_files and not args.spec:

@@ -13,9 +13,13 @@ Independent audit gate completing the main development loop (`spec` -> `implemen
    - Inspect modified files using `git status` or `git diff --name-only`.
 
 2. **Standard Audit Execution**:
-   - Run token-efficient audit runner (auto-detects modified `.py` files via git):
+   - Run token-efficient audit runner (auto-detects modified `.py` files and `docs/specs/*_contract.json` via git/filesystem):
      ```bash
      uv run python tools/agent_skills/lean_check.py
+     ```
+   - If a specific contract is targeted, explicitly pass `--spec`:
+     ```bash
+     uv run python tools/agent_skills/lean_check.py --spec docs/specs/<feature>_contract.json
      ```
    - Fallback (if script fails):
      - Code Style: `uv run ruff check`
