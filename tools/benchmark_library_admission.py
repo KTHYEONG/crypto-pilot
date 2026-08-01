@@ -18,7 +18,7 @@ import time
 
 import numpy as np
 
-from src.application.library_admission import (
+from src.application.research.expert_portfolio.admission import (
     _assemble_panel,
     _materialize_definitions,
     _run_symbol_tasks,
