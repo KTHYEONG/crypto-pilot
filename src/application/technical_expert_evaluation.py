@@ -32,7 +32,6 @@ from src.research.evaluation.reliability import (
     compute_fold_distribution,
     split_holdout_segment,
 )
-from src.research.provenance.anti_patterns import record_rejected_candidate
 from src.research.provenance.code_manifest import TECHNICAL_CODE_UNITS, compute_code_hash
 from src.research.provenance.results import record_technical_expert_run
 from src.research.technical_experts.backtest import run_technical_expert_backtest
@@ -277,38 +276,6 @@ def _run_evaluation(
     return report, metrics_snapshot
 
 
-def _record_anti_pattern(
-    *,
-    candidate_id: str,
-    return_source: str,
-    data_hash: str,
-    code_hash: str,
-    promotion: PromotionResult,
-    metrics_snapshot: dict[str, object],
-    run_log_reference: str,
-) -> None:
-    failed_gates: list[str] = []
-    if promotion.observation_verdict != "PASS":
-        failed_gates.append("observation")
-    if not promotion.fold_gate_pass:
-        failed_gates.append("fold")
-    if promotion.stress_verdict != "PASS":
-        failed_gates.append("stress")
-    if promotion.holdout_verdict is not None and promotion.holdout_verdict != "PASS":
-        failed_gates.append("holdout")
-    record_rejected_candidate(
-        candidate_id=candidate_id,
-        data_hash=data_hash,
-        code_hash=code_hash,
-        hypothesis_id=return_source,
-        failed_gates=failed_gates,
-        reason=f"promotion status={promotion.status}",
-        metrics=metrics_snapshot,
-        run_log_reference=run_log_reference,
-        domain=return_source,
-    )
-
-
 def run_technical_expert_evaluation(
     request: TechnicalExpertEvaluationRequest,
     *,
@@ -374,7 +341,7 @@ def run_technical_expert_evaluation(
 
     should_log = request.log_run if log_run is None else log_run
     try:
-        report, metrics_snapshot = _run_evaluation(
+        report, _ = _run_evaluation(
             frame,
             funding,
             request.symbol,
@@ -387,21 +354,9 @@ def run_technical_expert_evaluation(
     except DataIntegrityError as exc:
         _logger.info("[EVAL] run status=PENDING symbol=%s reason=%s", request.symbol, exc)
         return _pending_report(request)
-    promotion = report.promotion
     rec = report.record
     if rec is not None:
         _logger.info("[EVAL] run logged: git_sha=%s dirty=%s", rec["git_sha"], rec["git_dirty"])
-    if promotion.status == "REJECTED":
-        run_ref = str(rec["ts"]) if rec is not None else "(not logged)"
-        _record_anti_pattern(
-            candidate_id=candidate_id,
-            return_source=candidate.return_source,
-            data_hash=_combined_data_hash(hashes),
-            code_hash=current_code_hash,
-            promotion=promotion,
-            metrics_snapshot=metrics_snapshot,
-            run_log_reference=run_ref,
-        )
     return report
 
 

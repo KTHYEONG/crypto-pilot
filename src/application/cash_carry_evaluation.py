@@ -35,7 +35,6 @@ from src.research.evaluation.reliability import (
     compute_fold_distribution,
     split_holdout_segment,
 )
-from src.research.provenance.anti_patterns import record_rejected_candidate
 from src.research.provenance.candidates import (
     CandidateRegistration,
     compute_candidate_id,
@@ -253,35 +252,6 @@ def _run_evaluation(
     return report, metrics_snapshot
 
 
-def _record_anti_pattern(
-    candidate_id: str,
-    data_hash: str,
-    code_hash: str,
-    promotion: PromotionResult,
-    metrics_snapshot: dict[str, object],
-    run_log_reference: str,
-) -> None:
-    failed_gates: list[str] = []
-    if promotion.observation_verdict != "PASS":
-        failed_gates.append("observation")
-    if not promotion.fold_gate_pass:
-        failed_gates.append("fold")
-    if promotion.stress_verdict != "PASS":
-        failed_gates.append("stress")
-    if promotion.holdout_verdict is not None and promotion.holdout_verdict != "PASS":
-        failed_gates.append("holdout")
-    record_rejected_candidate(
-        candidate_id=candidate_id,
-        data_hash=data_hash,
-        code_hash=code_hash,
-        hypothesis_id=_HYPOTHESIS_ID,
-        failed_gates=failed_gates,
-        reason=f"promotion status={promotion.status}",
-        metrics=metrics_snapshot,
-        run_log_reference=run_log_reference,
-    )
-
-
 def _ephemeral_registration(
     *,
     symbol: str,
@@ -387,26 +357,15 @@ def run_cash_carry_evaluation(request: CashCarryEvaluationRequest) -> Evaluation
         slippage_rate=cast(float, registration.costs["slippage_rate"]),
     )
     identity = _candidate_identity(registration, market_data)
-    report, metrics_snapshot = _run_evaluation(
+    report, _ = _run_evaluation(
         market_data, spec, costs, request.initial_equity,
         unseal_holdout=request.unseal_holdout,
         candidate=identity,
         log_run=request.log_run,
     )
-    promotion = report.promotion
     rec = report.record
     if rec is not None:
         _logger.info("[EVAL] run logged: git_sha=%s dirty=%s", rec["git_sha"], rec["git_dirty"])
-    if promotion.status == "REJECTED":
-        run_ref = str(rec["ts"]) if rec is not None else "(not logged)"
-        _record_anti_pattern(
-            candidate_id=registration.candidate_id,
-            data_hash=_combined_data_hash(hashes),
-            code_hash=current_code_hash,
-            promotion=promotion,
-            metrics_snapshot=metrics_snapshot,
-            run_log_reference=run_ref,
-        )
 
     return report
 

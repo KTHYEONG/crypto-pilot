@@ -125,11 +125,6 @@ def test_legacy_imports_reexport_canonical_symbols() -> None:
 
     assert legacy_register is canonical_register
 
-    from src.validation.research_memory import record_rejected_candidate as legacy_memory
-    from src.research.provenance.anti_patterns import record_rejected_candidate as canonical_memory
-
-    assert legacy_memory is canonical_memory
-
     from src.data.portfolio_universe import select_liquid_universe as legacy_universe
     from src.research.portfolio.universe import select_liquid_universe as canonical_universe
 
