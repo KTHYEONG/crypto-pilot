@@ -7,20 +7,32 @@ import pandas as pd
 import pytest
 
 from src.common.errors import DataIntegrityError
-from src.research.baseline.backtest import run_backtest
+from src.research.baseline.backtest import BacktestResult, run_backtest
 from src.research.contracts import CostModel, StrategySpec
 from src.research.evaluation.reliability import (
     ReliabilityGateConfig,
     compute_equity_reliability_gate,
     compute_fold_distribution,
 )
-from src.research.sleeve_blend.backtest import (
+from src.research.sleeve_blend.common import _common_index
+from src.research.sleeve_blend.fixed import (
     run_fixed_sleeve_portfolio,
     run_fixed_sleeve_portfolio_calibrated,
     run_fixed_sleeve_portfolio_with_leverage,
 )
 
-_BACKTEST_MODULE = "src.research.sleeve_blend.backtest"
+_BACKTEST_MODULE = "src.research.sleeve_blend.fixed"
+
+
+def test_common_index_preserves_shared_equity_window() -> None:
+    idx = pd.date_range("2024-01-01", periods=2, freq="4h", tz="UTC")
+    result = BacktestResult(
+        equity=pd.Series([10_000.0, 10_001.0], index=idx),
+        trades=pd.DataFrame(),
+        signals=pd.DataFrame(),
+    )
+
+    assert _common_index({"A": result, "B": result}).equals(idx)
 
 
 def _breakout_frame(signal_bar: int, crash_bar: int, n: int = 4400) -> pd.DataFrame:
