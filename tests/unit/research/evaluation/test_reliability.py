@@ -403,6 +403,30 @@ class TestComputeFoldDistribution:
 
 
 @pytest.mark.slow
+class TestFixedSleeveFoldThreshold:
+    def test_fixed_sleeve_fold_threshold_is_unchanged(self) -> None:
+        # SC-SGV2-08: the fold threshold stays frozen at 0.40, and the current
+        # 5-sleeve annual ledger (measured max_period_contribution=0.489891)
+        # remains a fold FAIL. The candidate cannot pass through a changed
+        # threshold, only through genuinely distributed annual returns.
+        from src.research.contracts import CostModel
+        from src.research.sleeve_blend.backtest import (
+            run_fixed_sleeve_portfolio_calibrated,
+        )
+
+        assert ReliabilityGateConfig().max_period_contribution == 0.40
+
+        symbols = ("BTCUSDT", "ETHUSDT", "AVAXUSDT", "BNBUSDT", "DOGEUSDT")
+        result, _lev = run_fixed_sleeve_portfolio_calibrated(
+            symbols, None, "2025-12-31 23:59:59", CostModel(), mdd_budget_fraction=0.85,
+        )
+        r = compute_fold_distribution(result)
+        assert r.n_folds == 6
+        assert abs(r.max_period_contribution - 0.489891) < 1e-3
+        assert r.gate_pass is False
+
+
+@pytest.mark.slow
 class TestStressTestGate:
     def test_compute_stress_test_gate_matches_measured_v1_stress_survival(self) -> None:
         df = load_ohlcv_4h(BTC_PATH, end="2025-12-31 23:59:59")
