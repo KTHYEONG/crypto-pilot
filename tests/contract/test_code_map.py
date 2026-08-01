@@ -3,10 +3,27 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+_CANONICAL_ROOTS = (
+    "src/common",
+    "src/market_data",
+    "src/research",
+    "src/application",
+    "src/cli",
+)
+
 
 def _code_map() -> dict[str, object]:
     path = Path("docs/code_map.json")
     return json.loads(path.read_text(encoding="utf-8"))
+
+
+def _canonical_sources() -> set[str]:
+    return {
+        str(path)
+        for root in _CANONICAL_ROOTS
+        for path in Path(root).rglob("*.py")
+        if path.name != "__init__.py"
+    }
 
 
 def test_code_map_canonical_sources_exist() -> None:
@@ -29,6 +46,18 @@ def test_code_map_linked_tests_exist() -> None:
             if not Path(str(test_path)).exists()
         )
     assert not missing, f"code_map.json links missing tests: {missing}"
+
+
+def test_code_map_covers_every_canonical_module() -> None:
+    """RF-MAP-01: every canonical non-package source appears in the code map.
+
+    Derived directly from the canonical package roots so an unlisted production
+    module cannot silently escape test discovery. Explicit façade entries are
+    preserved by the other contract tests because they are compatibility
+    contracts, not derived files.
+    """
+    missing = _canonical_sources() - set(_code_map())
+    assert not missing, f"code_map.json misses canonical sources: {sorted(missing)}"
 
 
 def test_code_map_has_no_stale_legacy_paths() -> None:

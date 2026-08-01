@@ -27,10 +27,11 @@ def test_technical_data_hashes_fingerprints_declared_bytes(
 
     hashes = provenance.technical_data_hashes("BTCUSDT")
 
-    assert set(hashes) == {"perp_ohlcv", "funding"}
-    assert len(hashes["perp_ohlcv"]) == 64
-    assert len(hashes["funding"]) == 64
-    assert hashes["perp_ohlcv"] != hashes["funding"]
+    assert list(hashes) == ["perp_ohlcv", "funding"]
+    assert hashes == {
+        "perp_ohlcv": "276f98ada012eb876472a489a34494a101856a48dc7e837df3c80b820fe71807",
+        "funding": "93a3bf520502d187ee60f4d2eed329495a2f71d622c2a925d51bafd568be6ad4",
+    }
 
 
 def test_technical_data_hashes_fails_closed_on_missing_file(
