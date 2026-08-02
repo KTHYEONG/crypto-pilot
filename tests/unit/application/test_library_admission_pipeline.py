@@ -4,12 +4,12 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from src.application.research.expert_portfolio import admission_pipeline as pipeline_app
-from src.application.research.expert_portfolio import window as window_module
-from src.application.research.expert_portfolio.admission_pipeline import (
+from src.application.research.expert import admission_pipeline as pipeline_app
+from src.application.research.expert import window as window_module
+from src.application.research.expert.admission_pipeline import (
     run_technical_library_admission_pipeline,
 )
-from src.application.research.expert_portfolio.window import (
+from src.application.research.expert.window import (
     ResolvedTechnicalWindow,
     resolve_common_technical_window,
 )

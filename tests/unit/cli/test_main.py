@@ -10,26 +10,28 @@ def test_root_parser_groups_research_commands() -> None:
     # PL-CLI-001: the parser maps expert command arguments to the frozen
     # request defaults.
     args = build_root_parser().parse_args(
-        ["research", "run", "expert-portfolio", "--library-id", "valid_library"],
+        ["research", "run", "expert", "eval", "--library-id", "valid_library"],
     )
     assert args.group == "research"
     assert args.research_command == "run"
-    assert args.run_command == "expert-portfolio"
+    assert args.run_command == "expert"
+    assert args.expert_command == "eval"
     assert args.library_id == "valid_library"
 
 
 def test_root_parser_exposes_the_three_groups() -> None:
     parser = build_root_parser()
     assert parser.parse_args(["data", "collect", "funding", "BTCUSDT", "--end", "2025-01-01"]).group == "data"
-    assert parser.parse_args(["research", "run", "baseline"]).group == "research"
+    assert parser.parse_args(["research", "run", "single", "baseline"]).group == "research"
     assert parser.parse_args(["provenance", "compare-runs"]).group == "provenance"
 
 
 def test_root_parser_exposes_oi_deleveraging_evaluation() -> None:
     args = build_root_parser().parse_args(
-        ["research", "run", "oi-deleveraging", "--symbol", "BTCUSDT"],
+        ["research", "run", "single", "oi", "--symbol", "BTCUSDT"],
     )
-    assert args.run_command == "oi-deleveraging"
+    assert args.run_command == "single"
+    assert args.single_command == "oi"
     assert args.symbol == "BTCUSDT"
 
 
@@ -43,6 +45,8 @@ def test_root_parser_requires_run_command_and_evaluation() -> None:
         build_root_parser().parse_args(["research"])
     with pytest.raises(SystemExit):
         build_root_parser().parse_args(["research", "run"])
+    with pytest.raises(SystemExit):
+        build_root_parser().parse_args(["research", "run", "single"])
 
 
 def test_data_collect_funding_subcommand_parses_and_dispatches(monkeypatch) -> None:

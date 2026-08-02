@@ -6,7 +6,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from src.application.research.expert_portfolio import rolling_admission as ra
+from src.application.research.expert import rolling_admission as ra
 from src.research.expert_portfolio.admission import (
     priority_shortlist_family_unique_proposals,
 )
