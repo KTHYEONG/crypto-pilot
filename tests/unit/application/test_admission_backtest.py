@@ -32,6 +32,8 @@ def _fake_evidence(
     end: str | pd.Timestamp | None,
     costs,
     signal_delay_bars: int,
+    *,
+    timeframe: str = "4h",
 ) -> dict[str, app._SelectedEvidence]:
     index = pd.date_range("2024-01-01", periods=1000, freq="D", tz="UTC")
     values = np.full(len(index), 0.0002, dtype=float)
@@ -62,7 +64,7 @@ def test_proposal_backtest_runs_base_and_stress_without_registration(
     monkeypatch.setattr(
         app,
         "_build_admission_context",
-        lambda router, panel_index, start, end: pd.Series(
+        lambda router, panel_index, start, end, **kwargs: pd.Series(
             ["up_low_vol"] * len(panel_index), index=panel_index,
         ),
     )

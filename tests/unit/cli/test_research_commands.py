@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from src.cli.commands.research import expert_library as expert_library_cli
@@ -66,6 +68,50 @@ def test_expert_portfolio_cli_defaults_keep_holdout_sealed(monkeypatch) -> None:
 def test_expert_portfolio_cli_requires_library_id() -> None:
     with pytest.raises(SystemExit):
         build_root_parser().parse_args(["research", "run", "expert", "eval", "--no-log-run"])
+
+
+def test_library_admission_backtest_cli_threads_timeframe(monkeypatch, capsys) -> None:
+    # The backtest leaf threads --timeframe into the request; default 4h is
+    # applied when the flag is absent.
+    captured: list[object] = []
+
+    class _Report:
+        def to_report_dict(self) -> dict[str, object]:
+            return {"status": "COMPLETE"}
+
+    def _fake_run(request) -> _Report:
+        captured.append(request)
+        return _Report()
+
+    monkeypatch.setattr(
+        "src.application.research.expert.admission_backtest.run_technical_library_admission_backtest",
+        _fake_run,
+    )
+    args = build_root_parser().parse_args([
+        "research", "run", "expert", "backtest",
+        "--expert-id", "technical_ema_alignment_long_v1:BTCUSDT",
+        "--router-context-symbol", "BTCUSDT",
+        "--router-trend-lookback-bars", "48",
+        "--router-volatility-lookback-bars", "48",
+        "--router-min-context-history-bars", "96",
+        "--timeframe", "12h",
+    ])
+    args.handler(args)
+    assert captured
+    assert captured[0].timeframe == "12h"
+    assert json.loads(capsys.readouterr().out)["status"] == "COMPLETE"
+
+    captured.clear()
+    default_args = build_root_parser().parse_args([
+        "research", "run", "expert", "backtest",
+        "--expert-id", "technical_ema_alignment_long_v1:BTCUSDT",
+        "--router-context-symbol", "BTCUSDT",
+        "--router-trend-lookback-bars", "48",
+        "--router-volatility-lookback-bars", "48",
+        "--router-min-context-history-bars", "96",
+    ])
+    default_args.handler(default_args)
+    assert captured[0].timeframe == "4h"
 
 
 def test_library_admission_pipeline_cli_parses_and_dispatches(monkeypatch) -> None:

@@ -68,7 +68,7 @@ def _utc(ts) -> pd.Timestamp:
     return parsed.tz_convert("UTC")
 
 
-def _fake_load_technical_market_data(symbol, start, end):
+def _fake_load_technical_market_data(symbol, start, end, *, timeframe="4h"):
     index = pd.date_range(_utc(start), _utc(end), freq="4h", tz="UTC")
     frame = pd.DataFrame(
         {
@@ -105,7 +105,7 @@ def _fake_technical_backtest(frame, candidate, costs, funding, *, signal_delay_b
     return BacktestResult(equity=equity, trades=trades, signals=pd.DataFrame())
 
 
-def _fake_context(router, index, start, end) -> pd.Series:
+def _fake_context(router, index, start, end, **kwargs) -> pd.Series:
     return pd.Series(["up_low_vol"] * len(index), index=index)
 
 
