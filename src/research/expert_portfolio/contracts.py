@@ -27,7 +27,7 @@ from src.research.expert_portfolio.admission_types import (
     resolve_library_admission_profile,
     resolve_rolling_library_admission_profile,
     technical_5symbol_2022_v1_profile,
-    technical_5symbol_rolling_v1_profile,
+    technical_5symbol_rolling_profile,
 )
 from src.research.expert_portfolio.models import (
     ContextualRouterSpec,
@@ -59,7 +59,7 @@ __all__ = [
     "resolve_library_admission_profile",
     "resolve_rolling_library_admission_profile",
     "technical_5symbol_2022_v1_profile",
-    "technical_5symbol_rolling_v1_profile",
+    "technical_5symbol_rolling_profile",
 ]
 
 
@@ -98,7 +98,7 @@ def _check_contract() -> None:
         resolve_rolling_library_admission_profile.__module__
         == "src.research.expert_portfolio.admission_types"
     )
-    assert technical_5symbol_rolling_v1_profile.__module__ == (
+    assert technical_5symbol_rolling_profile.__module__ == (
         "src.research.expert_portfolio.admission_types"
     )
     assert admission_proposal_id.__module__ == (
