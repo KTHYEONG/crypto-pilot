@@ -13,13 +13,13 @@ from __future__ import annotations
 
 import logging
 
-from src.application.research.expert_portfolio.admission import (
+from src.application.research.expert.admission import (
     run_technical_library_admission,
 )
-from src.application.research.expert_portfolio.admission_backtest import (
+from src.application.research.expert.admission_backtest import (
     run_technical_library_admission_backtest,
 )
-from src.application.research.expert_portfolio.window import (
+from src.application.research.expert.window import (
     resolve_common_technical_window,
 )
 from src.research.expert_portfolio.admission import shortlist_admission_proposals

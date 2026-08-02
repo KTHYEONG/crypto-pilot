@@ -9,8 +9,8 @@ from typing import TypedDict
 
 import pandas as pd
 
-from src.application.research.expert_portfolio.admission import _build_admission_context
-from src.application.research.technical_experts.evaluation import _load_technical_market_data
+from src.application.research.expert.admission import _build_admission_context
+from src.application.research.technical.evaluation import _load_technical_market_data
 from src.common.errors import DataIntegrityError
 from src.core.settings import effective_worker_count
 from src.research.baseline.backtest import BacktestResult
