@@ -21,7 +21,7 @@ def _find_parser(root: argparse.ArgumentParser, path: list[str]) -> argparse.Arg
 
 def test_backtest_cli_accepts_proposal_id_and_has_no_mutation_switches() -> None:
     parser = _find_parser(
-        build_root_parser(), ["research", "run", "library-admission-backtest"],
+        build_root_parser(), ["research", "run", "expert", "backtest"],
     )
     options = {
         option
@@ -36,7 +36,7 @@ def test_backtest_cli_accepts_proposal_id_and_has_no_mutation_switches() -> None
     assert "--no-log-run" in options
 
     args = build_root_parser().parse_args([
-        "research", "run", "library-admission-backtest",
+        "research", "run", "expert", "backtest",
         "--proposal-id",
         "lae-v1:technical_macd_histogram_regime_long_v1:BTCUSDT|technical_rsi_trend_pullback_long_v1:ETHUSDT",
         "--router-context-symbol", "BTCUSDT",
@@ -65,11 +65,11 @@ def test_backtest_cli_emits_report_without_registry_calls(
         return _Report()
 
     monkeypatch.setattr(
-        "src.application.research.expert_portfolio.admission_backtest.run_technical_library_admission_backtest",
+        "src.application.research.expert.admission_backtest.run_technical_library_admission_backtest",
         fake_run,
     )
     args = build_root_parser().parse_args([
-        "research", "run", "library-admission-backtest",
+        "research", "run", "expert", "backtest",
         "--expert-id", "technical_macd_histogram_regime_long_v1:BTCUSDT",
         "--router-context-symbol", "BTCUSDT",
         "--router-trend-lookback-bars", "60",
@@ -99,11 +99,11 @@ def test_backtest_cli_decodes_proposal_id(
         return _Report()
 
     monkeypatch.setattr(
-        "src.application.research.expert_portfolio.admission_backtest.run_technical_library_admission_backtest",
+        "src.application.research.expert.admission_backtest.run_technical_library_admission_backtest",
         fake_run,
     )
     args = build_root_parser().parse_args([
-        "research", "run", "library-admission-backtest",
+        "research", "run", "expert", "backtest",
         "--proposal-id",
         "lae-v1:technical_macd_histogram_regime_long_v1:BTCUSDT|technical_rsi_trend_pullback_long_v1:ETHUSDT",
         "--router-context-symbol", "BTCUSDT",
