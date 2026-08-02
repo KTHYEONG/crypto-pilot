@@ -228,7 +228,7 @@ def add_expert_portfolio_commands(run_sub: argparse._SubParsersAction[argparse.A
     )
     rolling.add_argument(
         "--profile", required=True, choices=sorted(ROLLING_LIBRARY_ADMISSION_PROFILES),
-        help="Frozen rolling library admission profile (e.g. technical-5symbol-rolling-v1)",
+        help="Frozen rolling library admission profile (e.g. technical-5symbol-rolling)",
     )
     rolling.add_argument(
         "--as-of", required=True,

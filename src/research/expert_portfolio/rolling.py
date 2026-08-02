@@ -10,6 +10,7 @@ window is derived purely from ``common_start`` and ``as_of``.
 from __future__ import annotations
 
 import json
+import math
 from collections.abc import Iterator, Mapping
 from dataclasses import dataclass, field
 from typing import Literal
@@ -27,7 +28,6 @@ _GRID_PERIOD = pd.Timedelta(hours=4)
 _SCORING_CALENDAR_MONTHS = 24
 _REBALANCE_MONTHS = (1, 4, 7, 10)
 _WARMUP_BARS = 201
-_SHORTLIST_BUDGET = 24
 _MIN_CONTEXT_SAMPLES = 96
 _SWITCH_COST = CostModel().fee_rate + CostModel().slippage_rate
 
@@ -38,33 +38,37 @@ class RollingAdmissionConfig:
 
     ``scoring_months`` is the trailing completed calendar months of scored
     history, ``warmup_bars`` the completed 4h bars of indicator/router warm-up
-    before the scored start, ``shortlist_budget`` the admission shortlist cap,
-    ``min_context_samples`` the frozen per-state completed router samples,
-    ``rebalance_months`` the UTC quarter-start months, ``switch_cost`` the
-    single-turn fee plus slippage charged when a library changes at a
-    rebalance boundary, and ``initial_equity`` the seed of the stitched master
-    ledger. ``router_kind`` selects the causal winner allocation
-    (``"global_winner_v1"`` or ``"per_symbol_winner_v2"``), ``proposal_search``
-    selects exact legacy admission or the bounded same-symbol family-unique
-    search, and ``base_delay_bars`` is the single base scenario delay shared by
-    the candidate screen and every base proposal. No value is tuned on data.
+    before the scored start, ``min_shortlist_budget`` the structural floor on
+    the shortlist size (2 candidates per structural size 2..5, the minimum
+    needed for a meaningful within-size diversification comparison),
+    ``max_backtest_wall_seconds_per_window`` the per-window backtest wall-clock
+    time budget, ``min_context_samples`` the frozen per-state completed router
+    samples, ``rebalance_months`` the UTC quarter-start months, ``switch_cost``
+    the single-turn fee plus slippage charged when a library changes at a
+    rebalance boundary, ``initial_equity`` the seed of the stitched master
+    ledger, ``hurdle_cost_multiple`` the standard 2x cost-margin trading-system
+    convention (edge must clear cost_multiple times the measured annualized
+    allocation-turnover cost; not data-tuned), and ``base_delay_bars`` the
+    shared one-bar base scenario delay. The rolling path always uses the single
+    validated priority family-unique search with ``per_symbol_winner_v2``
+    routing internally (hardcoded, not user-selectable), so the legacy
+    ``proposal_search``/``router_kind`` selectors are gone. No value is tuned on
+    data.
     """
 
-    profile: str = "technical-5symbol-rolling-v1"
+    profile: str = "technical-5symbol-rolling"
     symbols: tuple[str, ...] = ("BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT")
     scoring_months: int = _SCORING_CALENDAR_MONTHS
     warmup_bars: int = _WARMUP_BARS
-    shortlist_budget: int = _SHORTLIST_BUDGET
+    min_shortlist_budget: int = 8
+    max_backtest_wall_seconds_per_window: float = 120.0
     min_context_samples: int = _MIN_CONTEXT_SAMPLES
     rebalance_months: tuple[int, ...] = _REBALANCE_MONTHS
     switch_cost: float = _SWITCH_COST
     initial_equity: float = 10_000.0
-    router_kind: Literal["global_winner_v1", "per_symbol_winner_v2"] = "global_winner_v1"
-    proposal_search: Literal[
-        "exact_legacy_v1", "bounded_family_unique_v2", "priority_family_unique_v3"
-    ] = "exact_legacy_v1"
-    base_delay_bars: int = 0
+    base_delay_bars: int = 1
     family_symbol_prefilter_top_k: int | None = None
+    hurdle_cost_multiple: float = 2.0
 
     def __post_init__(self) -> None:
         if not self.profile:
@@ -79,9 +83,14 @@ class RollingAdmissionConfig:
             )
         if self.warmup_bars < 1:
             raise ValueError(f"warmup_bars must be >= 1, got {self.warmup_bars}")
-        if self.shortlist_budget < 1:
+        if self.min_shortlist_budget < 1:
             raise ValueError(
-                f"shortlist_budget must be >= 1, got {self.shortlist_budget}"
+                f"min_shortlist_budget must be >= 1, got {self.min_shortlist_budget}"
+            )
+        if self.max_backtest_wall_seconds_per_window <= 0:
+            raise ValueError(
+                "max_backtest_wall_seconds_per_window must be > 0, got "
+                f"{self.max_backtest_wall_seconds_per_window}"
             )
         if self.min_context_samples < 1:
             raise ValueError(
@@ -101,21 +110,10 @@ class RollingAdmissionConfig:
             raise ValueError(
                 f"initial_equity must be > 0, got {self.initial_equity}"
             )
-        if self.router_kind not in ("global_winner_v1", "per_symbol_winner_v2"):
+        if self.base_delay_bars < 1:
             raise ValueError(
-                f"router_kind must be 'global_winner_v1' or 'per_symbol_winner_v2', "
-                f"got {self.router_kind!r}"
-            )
-        if self.proposal_search not in (
-            "exact_legacy_v1", "bounded_family_unique_v2", "priority_family_unique_v3",
-        ):
-            raise ValueError(
-                f"proposal_search must be 'exact_legacy_v1', 'bounded_family_unique_v2', "
-                f"or 'priority_family_unique_v3', got {self.proposal_search!r}"
-            )
-        if self.base_delay_bars < 0:
-            raise ValueError(
-                f"base_delay_bars must be >= 0, got {self.base_delay_bars}"
+                f"base_delay_bars must be >= 1 (the shared base scenario), got "
+                f"{self.base_delay_bars}"
             )
         if self.family_symbol_prefilter_top_k is not None and (
             self.family_symbol_prefilter_top_k < 1
@@ -124,25 +122,10 @@ class RollingAdmissionConfig:
                 "family_symbol_prefilter_top_k must be None or >= 1, got "
                 f"{self.family_symbol_prefilter_top_k}"
             )
-        if (
-            self.family_symbol_prefilter_top_k is not None
-            and self.proposal_search == "exact_legacy_v1"
-        ):
+        if self.hurdle_cost_multiple < 0:
             raise ValueError(
-                "family_symbol_prefilter_top_k is meaningless for proposal_search "
-                "'exact_legacy_v1'"
+                f"hurdle_cost_multiple must be >= 0, got {self.hurdle_cost_multiple}"
             )
-        if self.proposal_search in ("bounded_family_unique_v2", "priority_family_unique_v3"):
-            if self.router_kind != "per_symbol_winner_v2":
-                raise ValueError(
-                    f"proposal_search {self.proposal_search!r} requires "
-                    "router_kind 'per_symbol_winner_v2'"
-                )
-            if self.base_delay_bars < 1:
-                raise ValueError(
-                    f"proposal_search {self.proposal_search!r} requires "
-                    "base_delay_bars >= 1 (the shared base scenario)"
-                )
 
     @property
     def warmup_period(self) -> pd.Timedelta:
@@ -161,15 +144,15 @@ class RollingAdmissionConfig:
             "symbols": list(self.symbols),
             "scoring_months": self.scoring_months,
             "warmup_bars": self.warmup_bars,
-            "shortlist_budget": self.shortlist_budget,
+            "min_shortlist_budget": self.min_shortlist_budget,
+            "max_backtest_wall_seconds_per_window": self.max_backtest_wall_seconds_per_window,
             "min_context_samples": self.min_context_samples,
             "rebalance_months": list(self.rebalance_months),
             "switch_cost": self.switch_cost,
             "initial_equity": self.initial_equity,
-            "router_kind": self.router_kind,
-            "proposal_search": self.proposal_search,
             "base_delay_bars": self.base_delay_bars,
             "family_symbol_prefilter_top_k": self.family_symbol_prefilter_top_k,
+            "hurdle_cost_multiple": self.hurdle_cost_multiple,
         }
 
 
@@ -527,7 +510,9 @@ class RollingCandidateAuditRecord:
             training=tuple(
                 {
                     "proposal_id": report.proposal_id,
+                    "expert_count": len(report.expert_ids),
                     "observation_gate_verdict": report.observation_gate.verdict,
+                    "observation_lcb90": report.observation_gate.lcb90_cagr,
                     "observation_folds_pass": report.observation_folds.gate_pass,
                     "stress_gate_verdict": report.stress_gate.verdict,
                     "stress_folds_pass": report.stress_folds.gate_pass,
@@ -608,48 +593,60 @@ class RollingCandidateAuditRecord:
         ).encode("utf-8")
 
 
+def resolve_dynamic_shortlist_budget(
+    probe_wall_seconds: tuple[float, ...],
+    max_backtest_wall_seconds_per_window: float,
+    min_shortlist_budget: int,
+) -> int:
+    """Resolve the effective per-window shortlist budget from measured probes.
+
+    ``avg = mean(probe_wall_seconds)``; the budget is
+    ``max(min_shortlist_budget, floor(max_backtest_wall_seconds_per_window / avg))``.
+    No upper clamp exists: the time budget itself is the natural ceiling. Pure
+    and deterministic given identical probe measurements; the caller must supply
+    real measured probe wall-times, never a hardcoded stand-in.
+    """
+    if len(probe_wall_seconds) == 0:
+        raise ValueError("probe_wall_seconds must not be empty")
+    if any(sec <= 0.0 for sec in probe_wall_seconds):
+        raise ValueError(
+            f"probe_wall_seconds must all be positive, got {probe_wall_seconds}"
+        )
+    if max_backtest_wall_seconds_per_window <= 0:
+        raise ValueError(
+            f"max_backtest_wall_seconds_per_window must be > 0, got "
+            f"{max_backtest_wall_seconds_per_window}"
+        )
+    if min_shortlist_budget < 1:
+        raise ValueError(
+            f"min_shortlist_budget must be >= 1, got {min_shortlist_budget}"
+        )
+    avg = float(sum(probe_wall_seconds)) / len(probe_wall_seconds)
+    return max(
+        min_shortlist_budget,
+        math.floor(max_backtest_wall_seconds_per_window / avg),
+    )
+
+
 def rolling_admission_config_for_profile(
     profile_name: str,
     symbols: tuple[str, ...],
 ) -> RollingAdmissionConfig:
     """Resolve the rolling config for a frozen profile name.
 
-    ``technical-5symbol-rolling-v1`` keeps the exact global-winner router, the
-    legacy all-combination admission, and its zero-delay base scenario while
-    ``technical-5symbol-rolling-v2`` selects the per-symbol winner router, the
-    bounded same-symbol family-unique search, and the shared one-bar base
-    scenario. ``technical-5symbol-rolling-v3`` keeps the same structural
-    relaxation but replaces the bounded lexical enumeration with the exact
-    best-first search. An unknown profile name fails closed with ``ValueError``.
+    ``technical-5symbol-rolling`` is the single canonical rolling profile: the
+    per-symbol-winner router, the priority family-unique best-first search, and
+    the shared one-bar base scenario are hardcoded internally. An unknown
+    profile name fails closed with ``ValueError``.
     """
-    if profile_name == "technical-5symbol-rolling-v1":
+    if profile_name == "technical-5symbol-rolling":
         return RollingAdmissionConfig(
             profile=profile_name,
             symbols=symbols,
-            router_kind="global_winner_v1",
-            proposal_search="exact_legacy_v1",
-            base_delay_bars=0,
-        )
-    if profile_name == "technical-5symbol-rolling-v2":
-        return RollingAdmissionConfig(
-            profile=profile_name,
-            symbols=symbols,
-            router_kind="per_symbol_winner_v2",
-            proposal_search="bounded_family_unique_v2",
-            base_delay_bars=1,
-        )
-    if profile_name == "technical-5symbol-rolling-v3":
-        return RollingAdmissionConfig(
-            profile=profile_name,
-            symbols=symbols,
-            router_kind="per_symbol_winner_v2",
-            proposal_search="priority_family_unique_v3",
-            base_delay_bars=1,
         )
     raise ValueError(
         f"unknown rolling profile {profile_name!r}; known profiles: "
-        "technical-5symbol-rolling-v1, technical-5symbol-rolling-v2, "
-        "technical-5symbol-rolling-v3"
+        "technical-5symbol-rolling"
     )
 
 
@@ -701,15 +698,15 @@ def _check_contract() -> None:
     assert select_rebalance_proposal.__name__ == "select_rebalance_proposal"
     assert RollingCandidateAuditRecord.from_selection.__name__ == "from_selection"
     assert RollingCandidateAuditRecord.from_failure.__name__ == "from_failure"
-    v1 = rolling_admission_config_for_profile("technical-5symbol-rolling-v1", ("BTCUSDT",))
-    assert v1.router_kind == "global_winner_v1"
-    v2 = rolling_admission_config_for_profile("technical-5symbol-rolling-v2", ("BTCUSDT",))
-    assert v2.router_kind == "per_symbol_winner_v2"
-    assert v2.base_delay_bars == 1
-    v3 = rolling_admission_config_for_profile("technical-5symbol-rolling-v3", ("BTCUSDT",))
-    assert v3.proposal_search == "priority_family_unique_v3"
-    assert v3.base_delay_bars == 1
-    assert v3.fingerprint()["family_symbol_prefilter_top_k"] is None
+    canonical = rolling_admission_config_for_profile(
+        "technical-5symbol-rolling", ("BTCUSDT",),
+    )
+    assert canonical.min_shortlist_budget == 8
+    assert canonical.base_delay_bars == 1
+    assert canonical.hurdle_cost_multiple == 2.0
+    assert canonical.fingerprint()["family_symbol_prefilter_top_k"] is None
+    assert resolve_dynamic_shortlist_budget((1.0, 1.0, 1.0, 1.0), 120.0, 8) == 120
+    assert resolve_dynamic_shortlist_budget((100.0,), 120.0, 8) == 8
 
 
 _check_contract()
@@ -723,6 +720,7 @@ __all__ = [
     "build_rolling_rebalance_schedule",
     "next_quarter_boundary",
     "quarter_boundaries",
+    "resolve_dynamic_shortlist_budget",
     "rolling_admission_config_for_profile",
     "select_rebalance_proposal",
     "selection_key",
