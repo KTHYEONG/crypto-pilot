@@ -59,6 +59,9 @@ class LibraryAdmissionReport:
     execution_workers: int = 0
     wall_seconds: float = 0.0
     structural_combinations: int = 0
+    generated_nodes: int = 0
+    generation_limit: int = 0
+    generation_status: str = "NOT_APPLICABLE"
 
     def fingerprint(self) -> dict[str, object]:
         """Canonical admission/proposal fingerprint excluding execution telemetry."""
@@ -128,6 +131,9 @@ class LibraryAdmissionReport:
             "covered_states": self.covered_states,
             "coverage_sufficient": self.coverage_sufficient,
             "structural_combinations": self.structural_combinations,
+            "generated_nodes": self.generated_nodes,
+            "generation_limit": self.generation_limit,
+            "generation_status": self.generation_status,
             "code_hash": self.code_hash,
             "data_hashes": {
                 symbol: dict(hashes)
