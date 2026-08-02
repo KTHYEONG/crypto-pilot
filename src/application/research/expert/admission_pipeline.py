@@ -58,6 +58,7 @@ def run_technical_library_admission_pipeline(
     """
     window = resolve_common_technical_window(
         request.selection.symbols, request.selection.start, request.selection.end,
+        timeframe=request.selection.timeframe,
     )
     selection = run_technical_library_admission(request.selection)
     if selection.status != "COMPLETE":
@@ -92,6 +93,7 @@ def run_technical_library_admission_pipeline(
             initial_equity=request.initial_equity,
             max_workers=request.selection.admission.max_workers,
             log_run=False,
+            timeframe=request.selection.timeframe,
         )
         backtests.append(run_technical_library_admission_backtest(child))
     _logger.info(

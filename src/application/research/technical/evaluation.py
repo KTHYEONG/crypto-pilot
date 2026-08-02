@@ -9,7 +9,7 @@ import pandas as pd
 
 from src.common.config import funding_path, ohlcv_path
 from src.common.errors import DataIntegrityError
-from src.market_data.storage.loaders import load_funding_rates, load_ohlcv_4h
+from src.market_data.storage.loaders import load_funding_rates, load_ohlcv_1h_as
 from src.research.baseline.backtest import BacktestResult
 from src.research.contracts import (
     CostModel,
@@ -113,15 +113,21 @@ def _load_technical_market_data(
     symbol: str,
     start: str | None,
     end: str | pd.Timestamp | None,
+    *,
+    timeframe: str = "4h",
 ) -> tuple[pd.DataFrame, pd.Series]:
-    """Load and fail-closed validate the causal OHLCV/funding inputs for one symbol."""
+    """Load and fail-closed validate the causal OHLCV/funding inputs for one symbol.
+
+    The 1h source parquet is resampled to ``timeframe``; the default ``"4h"``
+    preserves the legacy research grid for callers that do not opt in.
+    """
     perp_p = ohlcv_path(symbol, "1h")
     fund_p = funding_path(symbol)
     for path, name in [(perp_p, "perp_ohlcv"), (fund_p, "funding")]:
         if not path.exists():
             raise DataIntegrityError(f"{name} data missing for {symbol}: {path}")
 
-    bars = load_ohlcv_4h(perp_p, start=start, end=end)
+    bars = load_ohlcv_1h_as(perp_p, timeframe, start=start, end=end)
     if len(bars) < 2:
         raise DataIntegrityError(f"bars data has fewer than 2 bars for {symbol}")
     period = bars.index[1] - bars.index[0]
