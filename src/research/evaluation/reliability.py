@@ -416,6 +416,85 @@ def compute_fold_distribution(
     return result_out
 
 
+def compute_equal_duration_fold_distribution(
+    equity: pd.Series,
+    config: ReliabilityGateConfig = ReliabilityGateConfig(),  # noqa: B008
+    fold_duration: str = "6MS",
+) -> FoldDistributionResult:
+    """Equal-duration fold distribution over a stitched rolling OOS ledger.
+
+    Splits the stitched deployment equity into folds of exactly ``fold_duration``
+    aligned from the first mark (the calendar 6-month folds required by the
+    rolling admission spec), computes each fold's CAGR and Calmar from the
+    normalized segment, and reports the median/worst folds plus the maximum
+    absolute log-return contribution of any single fold. This is a separate
+    contract from :func:`compute_fold_distribution`; the legacy annual-fold
+    behaviour is never weakened.
+    """
+    if not isinstance(equity.index, pd.DatetimeIndex):
+        raise ValueError("equity must have a DatetimeIndex")
+    if len(equity) < 2:
+        raise ValueError("equity must contain at least 2 points")
+    if not equity.index.is_monotonic_increasing:
+        raise ValueError("equity index must be monotonic increasing")
+    values = equity.to_numpy(dtype=np.float64)
+    if not np.isfinite(values).all():
+        raise ValueError("equity must contain only finite values")
+    if (values <= 0).any():
+        raise ValueError("equity must be strictly positive")
+
+    if not isinstance(fold_duration, str) or not fold_duration.endswith("MS"):
+        raise ValueError(f"fold_duration must be an 'NMS' month-start frequency, got {fold_duration!r}")
+    fold_months = int(fold_duration[:-2])
+    if equity.index[-1] < equity.index[0] + pd.DateOffset(months=fold_months):
+        raise ValueError(
+            f"equity span does not admit an equal-duration fold at {fold_duration}"
+        )
+    boundaries = pd.date_range(
+        start=equity.index[0],
+        end=equity.index[-1] + pd.DateOffset(months=fold_months),
+        freq=fold_duration,
+    )
+    fold_labels = np.asarray(pd.cut(equity.index, bins=boundaries, labels=False), dtype=object)
+    log_returns = np.log(values[1:] / values[:-1])
+    fold_of_log_return = fold_labels[1:]
+    contribution_by_fold: dict[int, float] = {}
+    for fold, log_ret in zip(fold_of_log_return, log_returns, strict=True):
+        if fold is not None and fold == fold:
+            contribution_by_fold[int(fold)] = contribution_by_fold.get(int(fold), 0.0) + float(log_ret)
+    net_total = abs(sum(contribution_by_fold.values()))
+    max_period_contribution = (
+        max(abs(v) for v in contribution_by_fold.values()) / net_total if net_total > 0 else 0.0
+    )
+    gate_pass = max_period_contribution <= config.max_period_contribution
+
+    cagrs: list[float] = []
+    calmars: list[float] = []
+    for fold_id in sorted(contribution_by_fold):
+        mask = fold_labels == fold_id
+        segment = equity.iloc[mask]
+        fold_metrics = _fold_equity_metrics(segment / segment.iloc[0])
+        if fold_metrics is not None:
+            cagrs.append(fold_metrics[0])
+            calmars.append(fold_metrics[1])
+
+    result = FoldDistributionResult(
+        n_folds=len(cagrs),
+        median_fold_cagr=float(np.median(cagrs)) if cagrs else 0.0,
+        worst_fold_cagr=float(np.min(cagrs)) if cagrs else 0.0,
+        median_fold_calmar=float(np.median(calmars)) if calmars else 0.0,
+        max_period_contribution=max_period_contribution,
+        gate_pass=gate_pass,
+    )
+    _logger.info(
+        "stitched_folds n_folds=%d max_period_contribution=%.4f gate_pass=%s "
+        "median_fold_cagr=%.4f worst_fold_cagr=%.4f",
+        result.n_folds, result.max_period_contribution, result.gate_pass,
+        result.median_fold_cagr, result.worst_fold_cagr, extra={"tag": "EVAL"},
+    )
+    return result
+
+
 def compute_stress_test_gate(
     df: pd.DataFrame,
     spec: StrategySpec,
@@ -456,6 +535,10 @@ def _check_contract() -> None:
     }
     assert compute_equity_reliability_gate.__name__ == "compute_equity_reliability_gate"
     assert compute_portfolio_reliability_gate.__name__ == "compute_portfolio_reliability_gate"
+    assert (
+        compute_equal_duration_fold_distribution.__name__
+        == "compute_equal_duration_fold_distribution"
+    )
 
 
 _check_contract()

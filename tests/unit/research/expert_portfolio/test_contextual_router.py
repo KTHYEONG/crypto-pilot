@@ -26,7 +26,9 @@ def _expert(
 
 
 def _router(min_history_bars: int = 2) -> ContextualRouterSpec:
-    return ContextualRouterSpec("BTCUSDT", 1, 1, min_history_bars)
+    # volatility_lookback_bars must be >= 2 so the completed volatility of a
+    # non-constant series is strictly positive and the normalized trend is defined.
+    return ContextualRouterSpec("BTCUSDT", 1, 2, min_history_bars)
 
 
 def _panel(
@@ -45,15 +47,17 @@ def _spec() -> ExpertPortfolioSpec:
 
 class TestContextLabels:
     def test_labels_preserve_index_and_are_causally_classified(self) -> None:
-        # Trend uses only closes no later than t; the first row cannot know a
-        # trend and volatility, so it must be 'unavailable', and every labelled
+        # Trend uses only closes no later than t; the first rows cannot know a
+        # trend and volatility, so they must be 'unavailable', and every labelled
         # row is one of the six pre-registered states.
         idx = pd.date_range("2024-01-01", periods=5, freq="4h", tz="UTC")
         close = pd.Series([100.0, 102.0, 101.0, 101.5, 100.0], index=idx)
         labels = build_causal_context_labels(close, _router())
         assert labels.index.equals(idx)
         assert labels.iloc[0] == _UNAVAILABLE
-        assert set(labels.iloc[1:]).issubset(set(state_labels()))
+        labeled = labels[labels != _UNAVAILABLE]
+        assert not labeled.empty
+        assert set(labeled).issubset(set(state_labels()))
 
     def test_labels_never_use_future_rows(self) -> None:
         # Appending future closes must never change an already-labelled row.
@@ -65,6 +69,45 @@ class TestContextLabels:
         long_close = pd.Series([100.0, 102.0, 101.0, 99.0, 500.0, 1.0], index=idx_long)
         long_labels = build_causal_context_labels(long_close, _router())
         pd.testing.assert_series_equal(short, long_labels.iloc[:4])
+
+    def test_positive_scaling_and_appended_bars_do_not_alter_labels(self) -> None:
+        # LAP-06: the volatility-normalized quantile trend is scale invariant and
+        # strictly causal, so a positive multiplicative rescaling and appended
+        # future bars leave every existing label unchanged.
+        idx = pd.date_range("2024-01-01", periods=8, freq="4h", tz="UTC")
+        close = pd.Series([100.0, 102.0, 101.0, 99.0, 103.0, 100.5, 101.0, 98.0], index=idx)
+        router = _router()
+        base = build_causal_context_labels(close, router)
+        scaled = build_causal_context_labels(close * 1_000.0, router)
+        pd.testing.assert_series_equal(base, scaled)
+
+        longer = pd.Series(
+            [*close.tolist(), 500.0, 1.0, 700.0],
+            index=pd.date_range("2024-01-01", periods=11, freq="4h", tz="UTC"),
+        )
+        pd.testing.assert_series_equal(base, build_causal_context_labels(longer, router).iloc[:8])
+
+    def test_low_movement_high_variation_data_yields_both_flat_states(self) -> None:
+        # LAP-07: causal quantile labeling produces both flat volatility states
+        # after readiness on low-movement/high-variation data while insufficient
+        # history stays unavailable.
+        router = ContextualRouterSpec("BTCUSDT", 1, 4, 1)
+        low_movement = [100.0 + 0.001 * (i % 3) for i in range(40)]
+        volatile = [
+            100.0, 115.0, 90.0, 105.0, 101.0, 95.0, 110.0, 85.0, 103.0, 92.0,
+            108.0, 98.0, 99.0, 104.0, 97.0, 102.0,
+        ]
+        close = pd.Series(
+            [*low_movement, *volatile],
+            index=pd.date_range(
+                "2024-01-01", periods=len(low_movement) + len(volatile), freq="4h", tz="UTC",
+            ),
+        )
+        labels = build_causal_context_labels(close, router)
+        present = set(labels[labels != _UNAVAILABLE])
+        assert "flat_low_vol" in present
+        assert "flat_high_vol" in present
+        assert int((labels == _UNAVAILABLE).sum()) >= router.volatility_lookback_bars
 
 
 class TestCausalAttribution:
