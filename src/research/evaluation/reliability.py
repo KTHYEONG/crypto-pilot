@@ -189,6 +189,49 @@ def compute_reliability_gate(
     return result
 
 
+def equity_span_years(equity: pd.Series) -> float:
+    """Annualized span of a marked equity ledger in fractional years.
+
+    Extracted from ``compute_equity_reliability_gate``'s inline formula so the
+    gate and the cost-multiple hurdle derivation share one source of truth.
+    Raises ``ValueError`` when the ledger is not a DatetimeIndex series, has
+    fewer than 2 points, or spans a non-positive time range.
+    """
+    if not isinstance(equity.index, pd.DatetimeIndex) or len(equity) < 2:
+        raise ValueError("equity must be a DatetimeIndex series with at least 2 points")
+    years = float(
+        (equity.index[-1] - equity.index[0]).total_seconds()
+    ) / _SECONDS_PER_YEAR
+    if years <= 0:
+        raise ValueError("equity must span a positive time range")
+    return years
+
+
+def derive_cost_multiple_hurdle_rate(
+    allocation_cost_total: float,
+    years: float,
+    cost_multiple: float,
+) -> float:
+    """Annualized realized allocation-turnover cost drag scaled by a safety margin.
+
+    ``allocation_cost_total`` is the measured cumulative allocation cost that
+    ``run_expert_portfolio`` already computes per bar (``0.5 * L1(Delta_target) *
+    c_alloc``), so the hurdle reuses a measured quantity rather than an
+    invented flat rate. ``allocation_cost_total == 0.0`` yields ``0.0`` (a
+    zero-turnover proposal has no cost-multiple floor to clear). Raises
+    ``ValueError`` on a non-positive span or negative inputs.
+    """
+    if years <= 0:
+        raise ValueError(f"years must be > 0, got {years}")
+    if allocation_cost_total < 0:
+        raise ValueError(
+            f"allocation_cost_total must be >= 0, got {allocation_cost_total}"
+        )
+    if cost_multiple < 0:
+        raise ValueError(f"cost_multiple must be >= 0, got {cost_multiple}")
+    return cost_multiple * (allocation_cost_total / years)
+
+
 def compute_equity_reliability_gate(
     equity: pd.Series,
     closed_trade_count: int,
@@ -216,9 +259,7 @@ def compute_equity_reliability_gate(
     if closed_trade_count < 0:
         raise ValueError(f"closed_trade_count must be >= 0, got {closed_trade_count}")
 
-    years = (equity.index[-1] - equity.index[0]).total_seconds() / _SECONDS_PER_YEAR
-    if years <= 0:
-        raise ValueError("equity must span a positive time range")
+    years = equity_span_years(equity)
 
     returns = equity.pct_change().dropna().to_numpy(dtype=np.float64)
     if len(returns) == 0:
@@ -534,6 +575,9 @@ def _check_contract() -> None:
         "median_fold_calmar", "max_period_contribution", "gate_pass",
     }
     assert compute_equity_reliability_gate.__name__ == "compute_equity_reliability_gate"
+    assert equity_span_years.__name__ == "equity_span_years"
+    assert derive_cost_multiple_hurdle_rate(0.02, 2.0, 2.0) == 0.02
+    assert derive_cost_multiple_hurdle_rate(0.0, 2.0, 2.0) == 0.0
     assert compute_portfolio_reliability_gate.__name__ == "compute_portfolio_reliability_gate"
     assert (
         compute_equal_duration_fold_distribution.__name__
