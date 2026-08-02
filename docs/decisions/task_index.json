@@ -1,6 +1,16 @@
 {
   "tasks": [
     {
+      "task_id": "TASK_LIBRARY_ADMISSION_PIPELINE_ROLLING",
+      "date": "2026-08-02",
+      "adr_id": "ADR_20260802_LIBRARY_ADMISSION_PIPELINE_ROLLING",
+      "domain": "research",
+      "title": "자동 후보 도출 및 분기별 롤링 라이브러리 갱신",
+      "why": "후보 선정과 백테스트를 여러 명령으로 수행해야 하고 시간이 지나면 전략 효과가 변하므로 재현 가능한 자동 갱신 파이프라인이 필요함",
+      "resolution": "후보군 도출·신뢰성/스트레스 백테스트·분기별 리밸런싱·append-only 원장·현재 프로필 포인터를 하나의 paper CLI 흐름으로 연결하고 공통 데이터 종료시각을 as_of로 제한함",
+      "impact": "분기별 최신 전략 선택과 CASH 폴백을 자동화하고 과거 결정의 멱등성·인과성·추적성을 보장함"
+    },
+    {
       "task_id": "TASK_APPLICATION_CLI_REORGANIZATION",
       "date": "2026-08-01",
       "adr_id": "ADR_20260801_APPLICATION_CLI_REORGANIZATION",
