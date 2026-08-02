@@ -21,30 +21,30 @@ from typing import Literal, cast
 import numpy as np
 import pandas as pd
 
-from src.application.research.expert_portfolio.admission import (
+from src.application.research.expert.admission import (
     _assemble_panel,
     _build_admission_context,
     _symbol_admission_worker,
 )
-from src.application.research.expert_portfolio.admission import (
+from src.application.research.expert.admission import (
     _materialize_definitions as _materialize_universe_definitions,
 )
-from src.application.research.expert_portfolio.admission_backtest import (
+from src.application.research.expert.admission_backtest import (
     _assemble_selected_panel,
     _master_result,
     _run_selected_tasks,
 )
-from src.application.research.expert_portfolio.admission_backtest import (
+from src.application.research.expert.admission_backtest import (
     _materialize_definitions as _materialize_selected_definitions,
 )
-from src.application.research.expert_portfolio.rebalance_ledger import (
+from src.application.research.expert.rebalance_ledger import (
     CURRENT_PROFILE_POINTER_PATH,
     REBALANCE_LEDGER_PATH,
     append_rebalance_record,
     rebalance_snapshot_key,
     write_current_profile,
 )
-from src.application.research.expert_portfolio.window import resolve_common_technical_window
+from src.application.research.expert.window import resolve_common_technical_window
 from src.common.errors import DataIntegrityError
 from src.research.contracts import CostModel
 from src.research.evaluation.metrics import compute_metrics
