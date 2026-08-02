@@ -10,6 +10,48 @@ from src.common.errors import DataIntegrityError
 
 _logger = logging.getLogger("DataLoader")
 
+RESEARCH_TIMEFRAMES = ("1h", "2h", "4h", "6h", "8h", "12h", "1d")
+_TIMEFRAME_BARS: dict[str, int] = {
+    "1h": 1, "2h": 2, "4h": 4, "6h": 6, "8h": 8, "12h": 12, "1d": 24,
+}
+_TIMEFRAME_RULE: dict[str, str] = {
+    "1h": "1h", "2h": "2h", "4h": "4h", "6h": "6h",
+    "8h": "8h", "12h": "12h", "1d": "1D",
+}
+
+
+def validate_timeframe(timeframe: str) -> None:
+    """Fail closed on any timeframe outside the canonical research set.
+
+    Only buckets that divide evenly into whole 1h source bars are admitted;
+    anything else is rejected rather than silently rounded or fallbacked.
+    """
+    if timeframe not in _TIMEFRAME_BARS:
+        raise ValueError(
+            f"timeframe must be one of {RESEARCH_TIMEFRAMES}, got {timeframe!r}"
+        )
+
+
+def timeframe_period(timeframe: str) -> pd.Timedelta:
+    """Return the completed-bar duration of a validated research timeframe."""
+    validate_timeframe(timeframe)
+    return pd.Timedelta(hours=_TIMEFRAME_BARS[timeframe])
+
+def timeframe_scale_factor(
+    target_timeframe: str, reference_timeframe: str = "4h",
+) -> float:
+    """Bar-count ratio that preserves a fixed calendar window across timeframes.
+
+    A bar at ``reference_timeframe`` spans a different calendar duration than a
+    bar at ``target_timeframe``; ``reference / target`` scales a bar count so a
+    fixed calendar window means the same thing on either grid. The 4h reference
+    yields exactly ``1.0`` at ``4h``. Both arguments fail closed through the
+    existing ``validate_timeframe``.
+    """
+    return float(
+        timeframe_period(reference_timeframe) / timeframe_period(target_timeframe)
+    )
+
 
 def _taker_buy_quote_series(df: pd.DataFrame) -> pd.Series:
     """Quote-notional taker-buy flow per source bar.
@@ -28,18 +70,25 @@ def _taker_buy_quote_series(df: pd.DataFrame) -> pd.Series:
     return pd.Series(np.nan, index=df.index, dtype="float64")
 
 
-def load_ohlcv_1h_as_4h(
+def load_ohlcv_1h_as(
     path: Path,
+    timeframe: str,
     *,
     start: str | pd.Timestamp | None = None,
     end: str | pd.Timestamp | None = None,
 ) -> pd.DataFrame:
-    """Load a canonical 1h kline parquet and explicitly resample to an exact 4h grid.
+    """Load a canonical 1h kline parquet and explicitly resample to an exact grid.
 
-    The 1h source is fail-closed validated (tz-aware UTC, strictly monotonic,
-    no gaps) before resampling; only 4h buckets with exactly four source bars
-    are retained. ``start``/``end`` bound the returned grid.
+    ``timeframe`` must be one of ``RESEARCH_TIMEFRAMES`` (buckets that divide
+    evenly into whole 1h source bars); anything else fails closed. The 1h source
+    is fail-closed validated (tz-aware UTC, strictly monotonic, no gaps) before
+    resampling, and only buckets with exactly the bars-per-bucket count of
+    source bars are retained (a trailing partial bucket is dropped).
+    ``start``/``end`` bound the returned grid.
     """
+    validate_timeframe(timeframe)
+    bars_per_bucket = _TIMEFRAME_BARS[timeframe]
+    rule = _TIMEFRAME_RULE[timeframe]
     df = pd.read_parquet(path)
 
     if "datetime" in df.columns and "timestamp" not in df.columns:
@@ -93,10 +142,10 @@ def load_ohlcv_1h_as_4h(
         "quote_vol": "sum",
         "taker_buy_quote": "sum",
     }
-    resampled = working.resample("4h", label="left", closed="left").agg(agg)
+    resampled = working.resample(rule, label="left", closed="left").agg(agg)
 
-    source_counts = working.resample("4h", label="left", closed="left").size()
-    full_buckets = source_counts[source_counts == 4].index
+    source_counts = working.resample(rule, label="left", closed="left").size()
+    full_buckets = source_counts[source_counts == bars_per_bucket].index
     resampled = resampled.loc[full_buckets].copy()
 
     with np.errstate(divide="ignore", invalid="ignore"):
@@ -114,13 +163,28 @@ def load_ohlcv_1h_as_4h(
     resampled.index.name = "ts"
 
     _logger.info(
-        "load_ohlcv_1h_as_4h path=%s rows=%d start=%s end=%s",
-        path, len(resampled),
+        "load_ohlcv_1h_as timeframe=%s path=%s rows=%d start=%s end=%s",
+        timeframe, path, len(resampled),
         resampled.index[0] if not resampled.empty else "N/A",
         resampled.index[-1] if not resampled.empty else "N/A",
     )
 
     return resampled
+
+
+def load_ohlcv_1h_as_4h(
+    path: Path,
+    *,
+    start: str | pd.Timestamp | None = None,
+    end: str | pd.Timestamp | None = None,
+) -> pd.DataFrame:
+    """Load a canonical 1h kline parquet resampled to an exact 4h grid.
+
+    Thin backward-compatible wrapper over :func:`load_ohlcv_1h_as` for the
+    legacy 4h-only callers; the output is byte-identical to the direct
+    ``load_ohlcv_1h_as(path, "4h", ...)`` call.
+    """
+    return load_ohlcv_1h_as(path, "4h", start=start, end=end)
 
 
 load_ohlcv_4h = load_ohlcv_1h_as_4h  # compatibility alias for non-carry callers

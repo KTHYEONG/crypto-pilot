@@ -32,6 +32,7 @@ from src.research.expert_portfolio.backtest import (
     ExpertPortfolioBacktestResult,
     run_expert_portfolio,
 )
+from src.research.expert_portfolio.contextual_router import scale_router_spec
 from src.research.expert_portfolio.models import ExpertDefinition, ExpertPortfolioSpec
 from src.research.provenance.code_manifest import TECHNICAL_CODE_UNITS, compute_code_hash
 from src.research.provenance.results import record_library_admission_backtest_run
@@ -57,15 +58,19 @@ def _selected_symbol_worker(
     end: str | pd.Timestamp | None,
     costs: CostModel,
     signal_delay_bars: int,
+    *,
+    timeframe: str = "4h",
 ) -> dict[str, _SelectedEvidence]:
     """Run all selected candidates for one symbol after one causal data load."""
-    frame, funding = _load_technical_market_data(symbol, start, end)
+    frame, funding = _load_technical_market_data(
+        symbol, start, end, timeframe=timeframe,
+    )
     evidence: dict[str, _SelectedEvidence] = {}
     for source in sources:
         try:
             result = run_technical_expert_backtest(
                 frame,
-                resolve_technical_candidate(source),
+                resolve_technical_candidate(source, timeframe=timeframe),
                 costs,
                 funding,
                 signal_delay_bars=signal_delay_bars,
@@ -132,6 +137,8 @@ def _run_selected_tasks(
     costs: CostModel,
     signal_delay_bars: int,
     max_workers: int | None,
+    *,
+    timeframe: str = "4h",
 ) -> tuple[dict[str, dict[str, _SelectedEvidence]], int]:
     by_symbol: dict[str, list[str]] = {}
     for definition in definitions:
@@ -144,6 +151,7 @@ def _run_selected_tasks(
         return {
             symbol: _selected_symbol_worker(
                 symbol, sources[symbol], start, end, costs, signal_delay_bars,
+                timeframe=timeframe,
             )
             for symbol in symbols
         }, workers
@@ -158,6 +166,7 @@ def _run_selected_tasks(
                 end,
                 costs,
                 signal_delay_bars,
+                timeframe=timeframe,
             )
             for symbol in symbols
         ]
@@ -220,15 +229,17 @@ def run_technical_library_admission_backtest(
     end = resolve_evaluation_end(request.end, unseal_holdout=False)
     code_hash = compute_code_hash(TECHNICAL_CODE_UNITS)
     definitions = _materialize_definitions(request.expert_ids, code_hash)
-    spec = ExpertPortfolioSpec(experts=definitions, router=request.router)
+    scaled_router = scale_router_spec(request.router, request.timeframe)
+    spec = ExpertPortfolioSpec(experts=definitions, router=scaled_router)
     costs = CostModel()
 
     base_evidence, workers = _run_selected_tasks(
         definitions, request.start, end, costs, 0, request.max_workers,
+        timeframe=request.timeframe,
     )
     panel, component_trades = _assemble_selected_panel(base_evidence, definitions)
     context = _build_admission_context(
-        request.router, panel.index, request.start, end,
+        scaled_router, panel.index, request.start, end, timeframe=request.timeframe,
     )
     base = run_expert_portfolio(
         panel,
@@ -250,6 +261,7 @@ def run_technical_library_admission_backtest(
     )
     stress_evidence, stress_workers = _run_selected_tasks(
         definitions, request.start, end, stress_costs, 1, request.max_workers,
+        timeframe=request.timeframe,
     )
     stress_panel, stress_trades = _assemble_selected_panel(
         stress_evidence, definitions,
@@ -283,7 +295,7 @@ def run_technical_library_admission_backtest(
         status="COMPLETE",
         proposal_id=admission_proposal_id(request.expert_ids),
         expert_ids=tuple(definition.expert_id for definition in definitions),
-        router=request.router,
+        router=scaled_router,
         window_start=str(panel.index[0]),
         window_end=str(panel.index[-1]),
         observation_metrics=observation_metrics,
