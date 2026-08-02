@@ -29,6 +29,7 @@ from src.research.expert_portfolio.rolling import (
     resolve_dynamic_shortlist_budget,
     rolling_admission_config_for_profile,
     select_rebalance_proposal,
+    select_symbols_for_window,
 )
 
 
@@ -386,14 +387,18 @@ class TestRollingProfileConfig:
         symbols = ("BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT")
         config = rolling_admission_config_for_profile("technical-5symbol-rolling", symbols)
         expected_keys = {
-            "profile", "symbols", "scoring_months", "warmup_bars",
+            "profile", "timeframe", "symbols", "scoring_months", "warmup_bars",
             "min_shortlist_budget", "max_backtest_wall_seconds_per_window",
             "min_context_samples", "rebalance_months", "switch_cost",
             "initial_equity", "base_delay_bars", "family_symbol_prefilter_top_k",
-            "hurdle_cost_multiple",
+            "hurdle_cost_multiple", "dynamic_symbol_selection",
+            "symbol_universe", "symbol_top_k",
         }
         assert set(config.fingerprint()) == expected_keys
         assert config.fingerprint()["family_symbol_prefilter_top_k"] is None
+        assert config.fingerprint()["timeframe"] == "4h"
+        assert config.fingerprint()["dynamic_symbol_selection"] is False
+        assert config.fingerprint()["symbol_top_k"] == 5
         assert (
             resolve_rolling_library_admission_profile("technical-5symbol-rolling")
             == technical_5symbol_rolling_profile()
@@ -450,3 +455,200 @@ class TestRollingProfileConfig:
             resolve_dynamic_shortlist_budget((1.0,), 0.0, 8)
         with pytest.raises(ValueError, match="must all be positive"):
             resolve_dynamic_shortlist_budget((0.0,), 120.0, 8)
+
+    def test_rolling_admission_config_rejects_invalid_timeframe(self) -> None:
+        # timeframe must be a canonical research bucket; anything else fails closed.
+        with pytest.raises(ValueError, match="timeframe"):
+            RollingAdmissionConfig(timeframe="3h")
+        with pytest.raises(ValueError, match="timeframe"):
+            rolling_admission_config_for_profile(
+                "technical-5symbol-rolling", ("BTCUSDT",), timeframe="5h",
+            )
+
+    def test_rolling_admission_config_rejects_invalid_dynamic_symbol_fields(self) -> None:
+        # symbol_top_k must be >= 1 and symbol_universe non-empty/unique.
+        with pytest.raises(ValueError, match="symbol_top_k"):
+            RollingAdmissionConfig(symbol_top_k=0)
+        with pytest.raises(ValueError, match="symbol_universe must not be empty"):
+            RollingAdmissionConfig(symbol_universe=())
+        with pytest.raises(ValueError, match="duplicates"):
+            RollingAdmissionConfig(symbol_universe=("BTCUSDT", "BTCUSDT"))
+
+
+def _write_1h_volume_parquet(root, symbol: str, n: int, quote_vol: float, start: str) -> None:
+    import pandas as pd
+
+    from pathlib import Path
+
+    index = pd.date_range(start, periods=n, freq="1h", tz="UTC")
+    epoch = pd.Timestamp("1970-01-01", tz="UTC")
+    ms = (index - epoch) // pd.Timedelta(milliseconds=1)
+    df = pd.DataFrame(
+        {
+            "timestamp": ms,
+            "open": 100.0,
+            "high": 101.0,
+            "low": 99.0,
+            "close": 100.5,
+            "volume": 1.0,
+            "quote_vol": quote_vol,
+        }
+    )
+    path = Path(root) / "ohlcv" / "1h" / f"{symbol}.parquet"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    df.to_parquet(path)
+
+
+class TestSelectSymbolsForWindow:
+    def test_top_k_by_trailing_volume(self, tmp_path) -> None:
+        # top_k_by_trailing_volume: the top-5 highest trailing-90d quote-volume
+        # symbols are selected in deterministic order using no bar at/after as_of.
+        universe = (
+            "BTCUSDT", "ETHUSDT", "BNBUSDT", "XRPUSDT", "SOLUSDT",
+            "ADAUSDT", "DOGEUSDT", "LTCUSDT", "LINKUSDT", "AVAXUSDT",
+        )
+        for rank, symbol in enumerate(universe):
+            volume = 1_000_000.0 * (len(universe) - rank)
+            _write_1h_volume_parquet(
+                tmp_path, symbol, n=24 * 700, quote_vol=volume, start="2023-01-01",
+            )
+        as_of = pd.Timestamp("2024-07-01", tz="UTC")
+        selected = select_symbols_for_window(as_of, universe, 5, tmp_path)
+        assert selected == ("BTCUSDT", "ETHUSDT", "BNBUSDT", "XRPUSDT", "SOLUSDT")
+
+    def test_insufficient_history_excluded(self, tmp_path) -> None:
+        # insufficient_history_excluded: a symbol with <90 days of history before
+        # as_of is excluded even when its partial-window volume would top the rank.
+        universe = ("LOWVOL", "HOTNEW")
+        _write_1h_volume_parquet(
+            tmp_path, "LOWVOL", n=24 * 700, quote_vol=10.0, start="2023-01-01",
+        )
+        _write_1h_volume_parquet(
+            tmp_path, "HOTNEW", n=24 * 10, quote_vol=1e12, start="2024-06-01",
+        )
+        as_of = pd.Timestamp("2024-07-01", tz="UTC")
+        selected = select_symbols_for_window(as_of, universe, 1, tmp_path)
+        assert selected == ("LOWVOL",)
+
+    def test_missing_parquet_and_duplicate_universe_fail_closed(self, tmp_path) -> None:
+        # A symbol with no data parquet is treated as insufficient history and
+        # excluded; an empty result is returned, never fabricated.
+        assert select_symbols_for_window(
+            pd.Timestamp("2024-07-01", tz="UTC"), ("NODATAUSDT",), 1, tmp_path,
+        ) == ()
+        with pytest.raises(ValueError, match="duplicates"):
+            select_symbols_for_window(
+                pd.Timestamp("2024-07-01", tz="UTC"), ("A", "A"), 1, tmp_path,
+            )
+        with pytest.raises(ValueError, match="top_k"):
+            select_symbols_for_window(
+                pd.Timestamp("2024-07-01", tz="UTC"), ("A",), 0, tmp_path,
+            )
+        with pytest.raises(ValueError, match="universe must not be empty"):
+            select_symbols_for_window(pd.Timestamp("2024-07-01", tz="UTC"), (), 1, tmp_path)
+        with pytest.raises(ValueError, match="lookback_days"):
+            select_symbols_for_window(
+                pd.Timestamp("2024-07-01", tz="UTC"), ("A",), 1, tmp_path,
+                lookback_days=0,
+            )
+
+    def test_stale_symbol_ending_before_window_is_excluded(self, tmp_path) -> None:
+        # A symbol whose history ends before the trailing window is treated as
+        # insufficiently covered (prior.index[-1] < window_start) and excluded
+        # even though its partial volume would otherwise rank top.
+        _write_1h_volume_parquet(
+            tmp_path, "OLDUSDT", n=24 * 60, quote_vol=1e9, start="2023-01-01",
+        )
+        _write_1h_volume_parquet(
+            tmp_path, "FRESHUSDT", n=24 * 700, quote_vol=10.0, start="2023-01-01",
+        )
+        selected = select_symbols_for_window(
+            pd.Timestamp("2024-07-01", tz="UTC"), ("OLDUSDT", "FRESHUSDT"), 1, tmp_path,
+        )
+        assert selected == ("FRESHUSDT",)
+
+    def test_gappy_parquet_is_excluded_not_crashing(self, tmp_path) -> None:
+        # A parquet whose source has gaps fails the loader's fail-closed
+        # integrity gate and is excluded (insufficient history) rather than
+        # back-filled, zero-substituted, or crashing the selection.
+        good_dir = tmp_path / "ohlcv" / "1h"
+        good_dir.mkdir(parents=True, exist_ok=True)
+        epoch = pd.Timestamp("1970-01-01", tz="UTC")
+
+        index = pd.date_range("2023-01-01", periods=24 * 700, freq="1h", tz="UTC")
+        ms = (index - epoch) // pd.Timedelta(milliseconds=1)
+        pd.DataFrame(
+            {
+                "timestamp": ms, "open": 100.0, "high": 101.0, "low": 99.0,
+                "close": 100.5, "volume": 1.0, "quote_vol": 10.0,
+            }
+        ).to_parquet(good_dir / "GOODUSDT.parquet")
+
+        gappy = pd.DatetimeIndex(
+            [pd.Timestamp("2023-01-01", tz="UTC") + pd.Timedelta(hours=h) for h in range(900)]
+            + [pd.Timestamp("2023-01-01", tz="UTC") + pd.Timedelta(hours=1001)]
+        )
+        ms_gappy = (gappy - epoch) // pd.Timedelta(milliseconds=1)
+        pd.DataFrame(
+            {
+                "timestamp": ms_gappy, "open": 100.0, "high": 101.0, "low": 99.0,
+                "close": 100.5, "volume": 1.0, "quote_vol": 1e9,
+            }
+        ).to_parquet(good_dir / "GAPPYUSDT.parquet")
+
+        selected = select_symbols_for_window(
+            pd.Timestamp("2024-07-01", tz="UTC"), ("GAPPYUSDT", "GOODUSDT"), 1, tmp_path,
+        )
+        assert selected == ("GOODUSDT",)
+
+    def test_dynamic_off_schedule_carries_fixed_symbols(self) -> None:
+        # flag_off_reproduces_fixed_baseline: with dynamic_symbol_selection off
+        # (the default) every window freezes the fixed profile symbols and the
+        # schedule is byte-identical to the pre-dynamic baseline.
+        config = RollingAdmissionConfig()
+        assert config.dynamic_symbol_selection is False
+        windows = build_rolling_rebalance_schedule(
+            pd.Timestamp("2022-04-01", tz="UTC"),
+            pd.Timestamp("2026-07-07 20:00", tz="UTC"),
+            config,
+        )
+        assert windows
+        for window in windows:
+            assert window.symbols == config.symbols
+            assert window.observed_end == window.rebalance_start - pd.Timedelta(hours=4)
+        baseline = build_rolling_rebalance_schedule(
+            pd.Timestamp("2022-04-01", tz="UTC"),
+            pd.Timestamp("2024-10-01", tz="UTC"),
+            config,
+        )
+        assert all(
+            w.rebalance_start == b.rebalance_start
+            for w, b in zip(windows, baseline, strict=False)
+        )
+
+    def test_dynamic_symbol_selection_freezes_top_k_per_window(self, tmp_path) -> None:
+        # dynamic_symbol_selection=True ranks the universe by trailing volume
+        # at each rebalance boundary and freezes the top-k on the window.
+        universe = (
+            "BTCUSDT", "ETHUSDT", "BNBUSDT", "XRPUSDT", "SOLUSDT",
+            "ADAUSDT", "DOGEUSDT", "LTCUSDT", "LINKUSDT", "AVAXUSDT",
+        )
+        for rank, symbol in enumerate(universe):
+            _write_1h_volume_parquet(
+                tmp_path, symbol, n=24 * 1400,
+                quote_vol=1_000_000.0 * (len(universe) - rank), start="2023-01-01",
+            )
+        config = RollingAdmissionConfig(
+            dynamic_symbol_selection=True,
+            symbol_universe=universe,
+            symbol_top_k=5,
+        )
+        windows = build_rolling_rebalance_schedule(
+            pd.Timestamp("2022-04-01", tz="UTC"),
+            pd.Timestamp("2026-07-07 20:00", tz="UTC"),
+            config,
+            data_root=tmp_path,
+        )
+        assert windows
+        for window in windows:
+            assert window.symbols == ("BTCUSDT", "ETHUSDT", "BNBUSDT", "XRPUSDT", "SOLUSDT")

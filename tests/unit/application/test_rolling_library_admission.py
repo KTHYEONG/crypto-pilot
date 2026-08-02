@@ -170,7 +170,7 @@ def _canned_window(
 
 
 def _patch_service(monkeypatch: pytest.MonkeyPatch, *, data_hash: str = "hash") -> None:
-    monkeypatch.setattr(ra, "resolve_common_technical_window", lambda *_: _canned_window())
+    monkeypatch.setattr(ra, "resolve_common_technical_window", lambda *a, **k: _canned_window())
     monkeypatch.setattr(ra, "_select_for_window", _fake_select)
     monkeypatch.setattr(ra, "_deployment_equity", _fake_deployment)
     monkeypatch.setattr(ra, "technical_data_hashes", lambda symbol: {symbol: data_hash})
@@ -194,7 +194,7 @@ class TestCommonWindowResolverEnd:
     ) -> None:
         # RLA-01: the resolver reports the earliest full common end across every
         # symbol and never extends past a settled funding boundary.
-        def fake_ohlcv(path, *, start=None, end=None):
+        def fake_ohlcv(path, timeframe, *, start=None, end=None):
             if "ETHUSDT" in str(path):
                 index = pd.date_range("2020-01-01", "2026-07-05 08:00", freq="4h", tz="UTC")
             else:
@@ -208,7 +208,7 @@ class TestCommonWindowResolverEnd:
                 index = pd.date_range("2020-01-01", "2026-07-07 12:00", freq="4h", tz="UTC")
             return pd.Series(0.0, index=index)
 
-        monkeypatch.setattr(window_module, "load_ohlcv_4h", fake_ohlcv)
+        monkeypatch.setattr(window_module, "load_ohlcv_1h_as", fake_ohlcv)
         monkeypatch.setattr(window_module, "load_funding_rates", fake_funding)
         resolved = resolve_common_technical_window(
             ("BTCUSDT", "ETHUSDT"), None, None,
@@ -222,7 +222,7 @@ class TestCommonWindowResolverEnd:
     ) -> None:
         # RLA-01: a funding timestamp exactly on a 4h boundary settles the
         # preceding bar; the partial current bar is excluded.
-        def fake_ohlcv(path, *, start=None, end=None):
+        def fake_ohlcv(path, timeframe, *, start=None, end=None):
             index = pd.date_range("2020-01-01", "2026-07-07 12:00", freq="4h", tz="UTC")
             return _frame_from_index(index)
 
@@ -230,7 +230,7 @@ class TestCommonWindowResolverEnd:
             index = pd.date_range("2020-01-01", "2026-07-07 12:00", freq="4h", tz="UTC")
             return pd.Series(0.0, index=index)
 
-        monkeypatch.setattr(window_module, "load_ohlcv_4h", fake_ohlcv)
+        monkeypatch.setattr(window_module, "load_ohlcv_1h_as", fake_ohlcv)
         monkeypatch.setattr(window_module, "load_funding_rates", fake_funding)
         resolved = resolve_common_technical_window(("BTCUSDT",), None, None)
         assert resolved.common_end == pd.Timestamp("2026-07-07 08:00", tz="UTC")
@@ -238,7 +238,7 @@ class TestCommonWindowResolverEnd:
     def test_requested_end_caps_common_end_to_the_causal_snapshot(
         self, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        def fake_ohlcv(path, *, start=None, end=None):
+        def fake_ohlcv(path, timeframe, *, start=None, end=None):
             index = pd.date_range("2020-01-01", "2026-07-07 12:00", freq="4h", tz="UTC")
             return _frame_from_index(index)
 
@@ -246,7 +246,7 @@ class TestCommonWindowResolverEnd:
             index = pd.date_range("2020-01-01", "2026-07-07 12:00", freq="4h", tz="UTC")
             return pd.Series(0.0, index=index)
 
-        monkeypatch.setattr(window_module, "load_ohlcv_4h", fake_ohlcv)
+        monkeypatch.setattr(window_module, "load_ohlcv_1h_as", fake_ohlcv)
         monkeypatch.setattr(window_module, "load_funding_rates", fake_funding)
         resolved = resolve_common_technical_window(
             ("BTCUSDT",), None, "2026-01-01 00:00:00+00:00",
@@ -256,7 +256,7 @@ class TestCommonWindowResolverEnd:
     def test_non_overlapping_sources_fail_closed_naming_the_symbol(
         self, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        def fake_ohlcv(path, *, start=None, end=None):
+        def fake_ohlcv(path, timeframe, *, start=None, end=None):
             index = pd.date_range("2020-01-01", "2020-06-01", freq="4h", tz="UTC")
             return _frame_from_index(index)
 
@@ -264,10 +264,33 @@ class TestCommonWindowResolverEnd:
             index = pd.date_range("2021-01-01", "2021-06-01", freq="8h", tz="UTC")
             return pd.Series(0.0, index=index)
 
-        monkeypatch.setattr(window_module, "load_ohlcv_4h", fake_ohlcv)
+        monkeypatch.setattr(window_module, "load_ohlcv_1h_as", fake_ohlcv)
         monkeypatch.setattr(window_module, "load_funding_rates", fake_funding)
         with pytest.raises(DataIntegrityError, match=r"BTCUSDT.*overlap"):
             resolve_common_technical_window(("BTCUSDT",), None, None)
+
+    def test_requested_start_on_or_after_common_start_aligns_forward(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        # A requested start on or after the common boundary aligns forward to
+        # the research grid and then advances past the candidate warm-up.
+        def fake_ohlcv(path, timeframe, *, start=None, end=None):
+            index = pd.date_range("2020-01-01", "2026-07-07 12:00", freq="4h", tz="UTC")
+            return _frame_from_index(index)
+
+        monkeypatch.setattr(window_module, "load_ohlcv_1h_as", fake_ohlcv)
+        monkeypatch.setattr(
+            window_module, "load_funding_rates",
+            lambda path: pd.Series(
+                0.0, index=pd.date_range("2020-01-01", "2026-07-07 12:00", freq="4h", tz="UTC"),
+            ),
+        )
+        requested = "2024-01-02 06:00:00+00:00"
+        resolved = resolve_common_technical_window(("BTCUSDT",), requested, None)
+        assert resolved.requested_start == requested
+        assert resolved.effective_start >= pd.Timestamp("2024-01-02 06:00", tz="UTC")
+        assert resolved.effective_start.minute == 0
+        assert resolved.effective_start.hour % 4 == 0
 
 
 class TestRollingLibraryAdmission:
@@ -483,7 +506,7 @@ class TestRollingInternalPaths:
             np.where(np.arange(len(index)) % 2 == 0, 0.001, -0.001), index=index,
         )
 
-        def fake_worker(symbol, sources, start, end):
+        def fake_worker(symbol, sources, start, end, *, timeframe="4h"):
             return dict.fromkeys(sources, (returns, 30))
 
         monkeypatch.setattr(ra, "_symbol_admission_worker", fake_worker)
@@ -527,7 +550,10 @@ class TestRollingInternalPaths:
 
         monkeypatch.setattr(ra, "_run_selected_tasks", lambda *a, **k: ({}, 1))
         monkeypatch.setattr(ra, "_assemble_selected_panel", lambda ev, defs: (panel, trades))
-        monkeypatch.setattr(ra, "_build_admission_context", lambda router, idx, s, e: context)
+        monkeypatch.setattr(
+            ra, "_build_admission_context",
+            lambda router, idx, s, e, **kwargs: context,
+        )
         monkeypatch.setattr(ra, "run_expert_portfolio", lambda *a, **k: _canned_portfolio(index))
         monkeypatch.setattr(ra, "compute_metrics", lambda eq, tr: _canned_metrics())
 
@@ -767,7 +793,9 @@ class TestRollingInternalPaths:
         )
         monkeypatch.setattr(
             ra, "_build_admission_context",
-            lambda router, idx, s, e: pd.Series(["up_low_vol"] * len(idx), index=idx),
+            lambda router, idx, s, e, **kwargs: pd.Series(
+                ["up_low_vol"] * len(idx), index=idx,
+            ),
         )
         monkeypatch.setattr(
             ra, "run_expert_portfolio",
