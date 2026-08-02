@@ -373,7 +373,11 @@
     "testing": "tests/unit/research/expert_portfolio/test_catalog.py"
   },
   "src/research/expert_portfolio/contextual_router.py": {
-    "testing": "tests/unit/research/expert_portfolio/test_contextual_router.py"
+    "testing": [
+      "tests/unit/research/expert_portfolio/test_contextual_router.py",
+      "tests/unit/research/technical_experts/test_catalog.py"
+    ],
+    "architecture": "docs/results/timeframe-census.md"
   },
   "src/research/expert_portfolio/contracts.py": {
     "testing": "tests/unit/research/expert_portfolio/test_contracts.py"
