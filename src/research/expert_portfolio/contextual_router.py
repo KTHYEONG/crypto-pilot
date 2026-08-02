@@ -16,6 +16,8 @@ import pandas as pd
 
 from src.research.expert_portfolio.allocator import (
     _causal_block_aware_inflation,
+    _group_matrices,
+    _project_weights,
     _validate_panel,
 )
 from src.research.expert_portfolio.models import (
@@ -226,6 +228,136 @@ def compute_causal_contextual_winner_weights(
     )
 
 
+def compute_causal_per_symbol_contextual_weights(
+    component_returns: pd.DataFrame,
+    decision_context: pd.Series,
+    portfolio_spec: ExpertPortfolioSpec,
+    router_spec: ContextualRouterSpec,
+) -> pd.DataFrame:
+    """Causal per-symbol winner target-weight series for one contextual ledger.
+
+    The v2 router picks, in every decision state, at most one strictly-positive
+    conditional LCB winner from each symbol's distinct-family experts using only
+    completed observations strictly before ``t`` (the identical attribution as
+    :func:`compute_causal_contextual_winner_weights`); a symbol without a
+    positive eligible winner is exactly CASH. The surviving symbol winners then
+    receive inverse realized-volatility weight that is projected once onto
+    ``gross_exposure``, ``family_exposure_limit``, and
+    ``symbol_exposure_limit``, so two strategies on the same symbol are never
+    concurrently exposed while different symbols can be held simultaneously.
+    When no symbol has a positive eligible LCB the returned frame is exact
+    all-CASH. Malformed panels, duplicate expert ids, unknown contexts, and
+    misaligned inputs fail closed with ``ValueError``; the existing global
+    single-winner path is never modified.
+    """
+    _validate_panel(component_returns)
+    if not isinstance(decision_context, pd.Series):
+        raise ValueError(
+            f"decision_context must be a pd.Series, got {type(decision_context).__name__}"
+        )
+    if not decision_context.index.equals(component_returns.index):
+        raise ValueError(
+            "decision_context must be aligned to the component_returns index"
+        )
+    if decision_context.isna().any():
+        raise ValueError("decision_context must not contain missing labels")
+    if not all(isinstance(value, str) for value in decision_context.to_numpy()):
+        raise ValueError("decision_context must contain only string labels")
+    known = set(state_labels()) | {_UNAVAILABLE}
+    unknown = sorted({value for value in decision_context.unique() if value not in known})
+    if unknown:
+        raise ValueError(f"decision_context contains unknown labels: {unknown}")
+
+    expert_ids = tuple(e.expert_id for e in portfolio_spec.experts)
+    if component_returns.columns.has_duplicates:
+        raise ValueError("component_returns columns must be unique")
+    missing = [e for e in expert_ids if e not in component_returns.columns]
+    if missing:
+        raise ValueError(f"experts missing from component_returns: {missing}")
+
+    by_symbol: dict[str, list[int]] = {}
+    for index, expert in enumerate(portfolio_spec.experts):
+        if len(expert.symbols) != 1:
+            raise ValueError(
+                f"per-symbol router requires single-symbol experts, got "
+                f"{expert.symbols} for {expert.expert_id}"
+            )
+        by_symbol.setdefault(expert.symbols[0], []).append(index)
+    for symbol, group in by_symbol.items():
+        families = [portfolio_spec.experts[i].family for i in group]
+        if len(families) != len(set(families)):
+            raise ValueError(
+                f"duplicate family within symbol {symbol} for per-symbol router"
+            )
+
+    n = len(component_returns)
+    z_score = lcb_z_score(router_spec.confidence)
+    min_history = router_spec.min_context_history_bars
+    labels = decision_context.to_numpy(dtype=object)
+    returns = component_returns[list(expert_ids)].to_numpy(dtype=np.float64)
+    logret = np.log1p(returns)
+    if not np.isfinite(logret[1:]).all():
+        raise ValueError(
+            "component returns must be finite on every sample row; a missing "
+            "return is never zero-filled"
+        )
+
+    raw = np.zeros((n, len(expert_ids)), dtype=np.float64)
+    for state in state_labels():
+        state_rows = np.flatnonzero(labels == state)
+        state_rows = state_rows[state_rows < n - 1]
+        if state_rows.size == 0:
+            continue
+        sample_rows = state_rows + 1
+        samples = logret[sample_rows, :]
+        csum = np.vstack([np.zeros((1, samples.shape[1])), np.cumsum(samples, axis=0)])
+        csum2 = np.vstack([
+            np.zeros((1, samples.shape[1])), np.cumsum(samples * samples, axis=0),
+        ])
+        eligible = np.searchsorted(state_rows, np.arange(n) - 1)
+        # The block-aware inflation of one expert column is identical for every
+        # decision row of the same state, so it is evaluated once per column and
+        # then indexed by ``j`` instead of being recomputed per row.
+        inflation_by_column = []
+        for column in range(len(expert_ids)):
+            completed = np.concatenate([samples[:, column], np.array([0.0])])
+            inflation_by_column.append(_causal_block_aware_inflation(completed))
+
+        for t in np.flatnonzero(labels == state):
+            j = int(eligible[t])
+            if j < min_history or j < 2:
+                continue
+            for group in by_symbol.values():
+                group_indexes = tuple(group)
+                mean = csum[j, group_indexes] / j
+                inflation = np.array(
+                    [inflation_by_column[column][j] for column in group_indexes],
+                    dtype=np.float64,
+                )
+                with np.errstate(divide="ignore", invalid="ignore"):
+                    variance = (
+                        csum2[j, group_indexes]
+                        - csum[j, group_indexes] * csum[j, group_indexes] / j
+                    ) / (j - 1)
+                    std_error = np.sqrt(np.maximum(variance, 0.0) * inflation / j)
+                    lcb = mean - z_score * std_error
+                best_local = int(np.argmax(lcb))
+                if not np.isfinite(lcb[best_local]) or lcb[best_local] <= 0.0:
+                    continue
+                winner = group_indexes[best_local]
+                vol = np.sqrt(max(float(variance[best_local]), 0.0))
+                if vol > 0.0:
+                    raw[t, winner] = 1.0 / vol
+
+    family_mat, symbol_mat = _group_matrices(portfolio_spec)
+    risky = _project_weights(raw, portfolio_spec, family_mat, symbol_mat)
+    cash = portfolio_spec.gross_exposure - risky.sum(axis=1, keepdims=True)
+    weights = np.concatenate([risky, cash], axis=1)
+    return pd.DataFrame(
+        weights, index=component_returns.index, columns=[*list(expert_ids), "CASH"],
+    )
+
+
 def _check_contract() -> None:
     """Executable assertions locking the frozen contextual-router surface."""
     close = pd.Series(
@@ -241,6 +373,9 @@ def _check_contract() -> None:
     assert set(labeled).issubset(set(state_labels()))
     assert compute_causal_contextual_winner_weights.__name__ == (
         "compute_causal_contextual_winner_weights"
+    )
+    assert compute_causal_per_symbol_contextual_weights.__name__ == (
+        "compute_causal_per_symbol_contextual_weights"
     )
     index = pd.date_range("2024-01-01", periods=6, freq="4h", tz="UTC")
     panel = pd.DataFrame(
