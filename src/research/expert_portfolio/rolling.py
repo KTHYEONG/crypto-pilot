@@ -60,8 +60,11 @@ class RollingAdmissionConfig:
     switch_cost: float = _SWITCH_COST
     initial_equity: float = 10_000.0
     router_kind: Literal["global_winner_v1", "per_symbol_winner_v2"] = "global_winner_v1"
-    proposal_search: Literal["exact_legacy_v1", "bounded_family_unique_v2"] = "exact_legacy_v1"
+    proposal_search: Literal[
+        "exact_legacy_v1", "bounded_family_unique_v2", "priority_family_unique_v3"
+    ] = "exact_legacy_v1"
     base_delay_bars: int = 0
+    family_symbol_prefilter_top_k: int | None = None
 
     def __post_init__(self) -> None:
         if not self.profile:
@@ -103,24 +106,41 @@ class RollingAdmissionConfig:
                 f"router_kind must be 'global_winner_v1' or 'per_symbol_winner_v2', "
                 f"got {self.router_kind!r}"
             )
-        if self.proposal_search not in ("exact_legacy_v1", "bounded_family_unique_v2"):
+        if self.proposal_search not in (
+            "exact_legacy_v1", "bounded_family_unique_v2", "priority_family_unique_v3",
+        ):
             raise ValueError(
-                f"proposal_search must be 'exact_legacy_v1' or "
-                f"'bounded_family_unique_v2', got {self.proposal_search!r}"
+                f"proposal_search must be 'exact_legacy_v1', 'bounded_family_unique_v2', "
+                f"or 'priority_family_unique_v3', got {self.proposal_search!r}"
             )
         if self.base_delay_bars < 0:
             raise ValueError(
                 f"base_delay_bars must be >= 0, got {self.base_delay_bars}"
             )
-        if self.proposal_search == "bounded_family_unique_v2":
+        if self.family_symbol_prefilter_top_k is not None and (
+            self.family_symbol_prefilter_top_k < 1
+        ):
+            raise ValueError(
+                "family_symbol_prefilter_top_k must be None or >= 1, got "
+                f"{self.family_symbol_prefilter_top_k}"
+            )
+        if (
+            self.family_symbol_prefilter_top_k is not None
+            and self.proposal_search == "exact_legacy_v1"
+        ):
+            raise ValueError(
+                "family_symbol_prefilter_top_k is meaningless for proposal_search "
+                "'exact_legacy_v1'"
+            )
+        if self.proposal_search in ("bounded_family_unique_v2", "priority_family_unique_v3"):
             if self.router_kind != "per_symbol_winner_v2":
                 raise ValueError(
-                    "proposal_search 'bounded_family_unique_v2' requires "
+                    f"proposal_search {self.proposal_search!r} requires "
                     "router_kind 'per_symbol_winner_v2'"
                 )
             if self.base_delay_bars < 1:
                 raise ValueError(
-                    "proposal_search 'bounded_family_unique_v2' requires "
+                    f"proposal_search {self.proposal_search!r} requires "
                     "base_delay_bars >= 1 (the shared base scenario)"
                 )
 
@@ -149,6 +169,7 @@ class RollingAdmissionConfig:
             "router_kind": self.router_kind,
             "proposal_search": self.proposal_search,
             "base_delay_bars": self.base_delay_bars,
+            "family_symbol_prefilter_top_k": self.family_symbol_prefilter_top_k,
         }
 
 
@@ -345,6 +366,7 @@ class RollingLibraryAdmissionReport:
     oos_start: str
     oos_end: str
     oos_return: float
+    failure: Mapping[str, object] | None = None
 
     @property
     def closed_quarter_count(self) -> int:
@@ -375,6 +397,7 @@ class RollingLibraryAdmissionReport:
                 "max_period_contribution": self.max_period_contribution,
                 "fold_gate_pass": self.fold_gate_pass,
             },
+            "failure": dict(self.failure) if self.failure else None,
         }
 
 
@@ -527,6 +550,35 @@ class RollingCandidateAuditRecord:
             cash_reason=cash_reason,
         )
 
+    @classmethod
+    def from_failure(
+        cls,
+        window: RebalanceWindow,
+        snapshot_key: str,
+        reason: str,
+    ) -> RollingCandidateAuditRecord:
+        """Minimal audit for a window that failed closed before any selection.
+
+        Records an empty candidate/proposal/shortlist/training state with
+        ``selection_status == "fail_closed"`` and ``cash_reason`` carrying the
+        failure reason, so the failed window still gets one deterministic,
+        append-only audit line and the surviving windows keep theirs.
+        """
+        return cls(
+            profile=window.profile,
+            rebalance_start=str(window.rebalance_start),
+            snapshot_key=snapshot_key,
+            window=window.to_report_dict(),
+            selection={},
+            candidates=(),
+            proposals=(),
+            shortlist=(),
+            training=(),
+            selected=None,
+            selection_status="fail_closed",
+            cash_reason=reason,
+        )
+
     def to_payload(self) -> dict[str, object]:
         """Deterministic JSON-safe payload; never contains wall-clock time."""
         return {
@@ -566,7 +618,9 @@ def rolling_admission_config_for_profile(
     legacy all-combination admission, and its zero-delay base scenario while
     ``technical-5symbol-rolling-v2`` selects the per-symbol winner router, the
     bounded same-symbol family-unique search, and the shared one-bar base
-    scenario. An unknown profile name fails closed with ``ValueError``.
+    scenario. ``technical-5symbol-rolling-v3`` keeps the same structural
+    relaxation but replaces the bounded lexical enumeration with the exact
+    best-first search. An unknown profile name fails closed with ``ValueError``.
     """
     if profile_name == "technical-5symbol-rolling-v1":
         return RollingAdmissionConfig(
@@ -584,9 +638,18 @@ def rolling_admission_config_for_profile(
             proposal_search="bounded_family_unique_v2",
             base_delay_bars=1,
         )
+    if profile_name == "technical-5symbol-rolling-v3":
+        return RollingAdmissionConfig(
+            profile=profile_name,
+            symbols=symbols,
+            router_kind="per_symbol_winner_v2",
+            proposal_search="priority_family_unique_v3",
+            base_delay_bars=1,
+        )
     raise ValueError(
         f"unknown rolling profile {profile_name!r}; known profiles: "
-        "technical-5symbol-rolling-v1, technical-5symbol-rolling-v2"
+        "technical-5symbol-rolling-v1, technical-5symbol-rolling-v2, "
+        "technical-5symbol-rolling-v3"
     )
 
 
@@ -637,11 +700,16 @@ def _check_contract() -> None:
     assert str(first.rebalance_start) == "2024-07-01 00:00:00+00:00"
     assert select_rebalance_proposal.__name__ == "select_rebalance_proposal"
     assert RollingCandidateAuditRecord.from_selection.__name__ == "from_selection"
+    assert RollingCandidateAuditRecord.from_failure.__name__ == "from_failure"
     v1 = rolling_admission_config_for_profile("technical-5symbol-rolling-v1", ("BTCUSDT",))
     assert v1.router_kind == "global_winner_v1"
     v2 = rolling_admission_config_for_profile("technical-5symbol-rolling-v2", ("BTCUSDT",))
     assert v2.router_kind == "per_symbol_winner_v2"
     assert v2.base_delay_bars == 1
+    v3 = rolling_admission_config_for_profile("technical-5symbol-rolling-v3", ("BTCUSDT",))
+    assert v3.proposal_search == "priority_family_unique_v3"
+    assert v3.base_delay_bars == 1
+    assert v3.fingerprint()["family_symbol_prefilter_top_k"] is None
 
 
 _check_contract()

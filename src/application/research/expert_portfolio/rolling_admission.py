@@ -59,12 +59,15 @@ from src.research.evaluation.reliability import (
     compute_fold_distribution,
 )
 from src.research.expert_portfolio.admission import (
+    BoundedProposalSearchResult,
     enrich_proposal_diagnostics,
     evaluate_library_admission,
     generate_bounded_rolling_proposals_result,
     pair_compatibility_matrix,
     pairwise_joint_negative_rates,
     pairwise_log_return_correlation,
+    prefilter_admitted_by_family_symbol,
+    priority_shortlist_family_unique_proposals,
     shortlist_admission_proposals,
 )
 from src.research.expert_portfolio.admission_reports import (
@@ -491,6 +494,8 @@ def _select_for_window(
     """Replay selection for one window using only data through ``observed_end``."""
     if config.proposal_search == "bounded_family_unique_v2":
         return _select_for_window_v2(profile, window, config, incumbent)
+    if config.proposal_search == "priority_family_unique_v3":
+        return _select_for_window_v3(profile, window, config, incumbent)
     panel, trade_counts, definitions, _ = _build_candidate_panel(
         profile, window.load_start, window.observed_end,
     )
@@ -623,6 +628,109 @@ def _select_for_window_v2(
     return selection, tuple(shortlist), training_reports
 
 
+def _select_for_window_v3(
+    profile: TechnicalLibraryAdmissionRequest,
+    window: RebalanceWindow,
+    config: RollingAdmissionConfig,
+    incumbent: AdmissionProposal | None,
+) -> tuple[
+    LibraryAdmissionReport,
+    tuple[AdmissionProposal, ...],
+    tuple[LibraryAdmissionBacktestReport, ...],
+]:
+    """Exact best-first selection for one window over shared evidence.
+
+    Structurally identical to :func:`_select_for_window_v2` except that the
+    final generation call is
+    :func:`priority_shortlist_family_unique_proposals`, which fails closed via
+    ``generation_status='FAIL_CLOSED_NODE_BUDGET'`` instead of raising, and the
+    optional ``family_symbol_prefilter_top_k`` curation is applied to the
+    admitted candidates before the correlation/joint/compatibility matrices are
+    built. A node-budget failure yields an empty shortlist and falls through to
+    CASH exactly like the no-admitted-candidates branch.
+    """
+    evidence = build_window_scenario_evidence(profile, window, config)
+    scored_panel = _slice_scored_panel(evidence.base_panel, window.scored_start)
+    scored_context = evidence.base_context.loc[scored_panel.index]
+    selection = evaluate_library_admission(
+        scored_panel,
+        evidence.base_trade_counts,
+        evidence.definitions,
+        scored_context,
+        profile.router,
+        profile.admission,
+        proposal_search=config.proposal_search,
+    )
+    admitted_indexes = tuple(
+        i for i, candidate in enumerate(selection.candidates) if candidate.admitted
+    )
+    if config.family_symbol_prefilter_top_k is not None:
+        admitted_indexes, _dropped = prefilter_admitted_by_family_symbol(
+            evidence.definitions, admitted_indexes, selection.candidates,
+            config.family_symbol_prefilter_top_k,
+        )
+    admitted = tuple(evidence.definitions[i] for i in admitted_indexes)
+    admitted_ids = {definition.expert_id for definition in admitted}
+    search_result: BoundedProposalSearchResult | None = None
+    correlation = np.empty((0, 0))
+    joint_negative = np.empty((0, 0))
+    if admitted:
+        completed = scored_panel[[d.expert_id for d in admitted]].to_numpy(
+            dtype=np.float64,
+        )[1:]
+        correlation = pairwise_log_return_correlation(completed)
+        joint_negative = pairwise_joint_negative_rates(completed)
+        compatibility = pair_compatibility_matrix(
+            completed, admitted, profile.admission, allow_same_symbol=True,
+        )
+        search_result = priority_shortlist_family_unique_proposals(
+            admitted, correlation, joint_negative, compatibility,
+            profile.admission, config.shortlist_budget,
+        )
+        shortlist = (
+            list(search_result.proposals)
+            if search_result.generation_status == "COMPLETE"
+            else []
+        )
+    else:
+        shortlist = []
+    if (
+        search_result is not None
+        and search_result.generation_status == "COMPLETE"
+        and incumbent is not None
+        and not any(
+            proposal.proposal_id == incumbent.proposal_id for proposal in shortlist
+        )
+        and set(incumbent.expert_ids).issubset(admitted_ids)
+    ):
+        shortlist.append(
+            enrich_proposal_diagnostics(incumbent, correlation, joint_negative, admitted),
+        )
+    selection = dataclasses.replace(
+        selection,
+        proposals=tuple(shortlist),
+        generated_nodes=search_result.generated_nodes if search_result else 0,
+        generation_limit=(
+            search_result.generation_limit
+            if search_result else profile.admission.max_combinations
+        ),
+        generation_status=(
+            search_result.generation_status
+            if search_result else "NO_ADMITTED_CANDIDATES"
+        ),
+    )
+    training_reports = tuple(
+        dataclasses.replace(
+            _run_proposal_from_evidence(
+                proposal, evidence, profile, window, config,
+            ),
+            diversification_rank_key=proposal.rank_key(),
+        )
+        for proposal in shortlist
+    )
+    return selection, tuple(shortlist), training_reports
+
+
 def _deployment_equity(
     selected: AdmissionProposal | None,
     profile: TechnicalLibraryAdmissionRequest,
@@ -643,7 +751,7 @@ def _deployment_equity(
     code_hash = compute_code_hash(TECHNICAL_CODE_UNITS)
     definitions = _materialize_selected_definitions(
         selected.expert_ids, code_hash,
-        allow_same_symbol=config.proposal_search == "bounded_family_unique_v2",
+        allow_same_symbol=config.proposal_search != "exact_legacy_v1",
     )
     spec = ExpertPortfolioSpec(
         experts=definitions, router=profile.router, router_kind=config.router_kind,
@@ -855,12 +963,44 @@ def run_rolling_library_admission(
         )
 
     records: list[RollingSelectionRecord] = []
+    completed_windows: list[RebalanceWindow] = []
     segments: list[pd.Series] = []
     deployment_proposal_ids: list[str | None] = []
     incumbent: AdmissionProposal | None = None
+    failure: dict[str, object] | None = None
+    status = "COMPLETE"
     for w in windows:
-        record, segment, incumbent, audit = _run_one_rebalance(request, w, incumbent)
-        records.append(record)
+        try:
+            record, segment, incumbent, audit = _run_one_rebalance(request, w, incumbent)
+        except DataIntegrityError as exc:
+            code_hash = compute_code_hash(TECHNICAL_CODE_UNITS)
+            data_hashes = {
+                symbol: technical_data_hashes(symbol)
+                for symbol in request.profile.symbols
+            }
+            snapshot_key = rebalance_snapshot_key(
+                _snapshot_inputs(request, w, code_hash, data_hashes),
+            )
+            append_rolling_candidate_audit(
+                RollingCandidateAuditRecord.from_failure(
+                    w, snapshot_key, str(exc),
+                ),
+                audit_path,
+            )
+            _logger.warning(
+                "[EVAL] rolling status=PARTIAL_FAILURE window=%s reason=%s",
+                w.rebalance_start, exc,
+            )
+            failure = {
+                "rebalance_start": str(w.rebalance_start),
+                "reason": str(exc),
+            }
+            status = "PARTIAL_FAILURE"
+            break
+        stored = append_rebalance_record(record, ledger_path)
+        records.append(stored)
+        write_current_profile(stored, pointer_path)
+        completed_windows.append(w)
         _logger.debug(
             "[DATA] rolling_candidate_audit=%s",
             audit.to_canonical_bytes().decode("utf-8"),
@@ -876,24 +1016,18 @@ def run_rolling_library_admission(
 
     stitched = _stitch_segments(segments, deployment_proposal_ids, request.config)
     folds = _fold_summary(stitched)
-    stored_records: list[RollingSelectionRecord] = []
-    for record in records:
-        stored = append_rebalance_record(record, ledger_path)
-        stored_records.append(stored)
-    if stored_records:
-        write_current_profile(stored_records[-1], pointer_path)
     oos_start = str(stitched.index[0]) if len(stitched) else ""
     oos_end = str(stitched.index[-1]) if len(stitched) else ""
     oos_return = float(stitched.iloc[-1] / stitched.iloc[0] - 1.0) if len(stitched) else 0.0
     report = RollingLibraryAdmissionReport(
-        status="COMPLETE",
+        status=status,
         profile=request.config.profile,
         mode=request.mode,
         as_of=str(pd.Timestamp(request.as_of, tz="UTC")),
         common_start=str(window.common_start),
         common_end=str(window.common_end),
-        windows=windows,
-        records=tuple(stored_records),
+        windows=tuple(completed_windows),
+        records=tuple(records),
         n_folds=folds.n_folds,
         median_fold_cagr=folds.median_fold_cagr,
         worst_fold_cagr=folds.worst_fold_cagr,
@@ -903,11 +1037,12 @@ def run_rolling_library_admission(
         oos_start=oos_start,
         oos_end=oos_end,
         oos_return=oos_return,
+        failure=failure,
     )
     _logger.info(
-        "[EVAL] rolling status=COMPLETE profile=%s windows=%d closed=%d folds=%d oos_return=%.4f",
-        request.config.profile, len(windows), report.closed_quarter_count,
-        report.n_folds, report.oos_return,
+        "[EVAL] rolling status=%s profile=%s windows=%d closed=%d folds=%d oos_return=%.4f",
+        report.status, request.config.profile, len(completed_windows),
+        report.closed_quarter_count, report.n_folds, report.oos_return,
     )
     return report
 
