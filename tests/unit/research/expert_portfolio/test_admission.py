@@ -653,7 +653,7 @@ class TestPriorityShortlist:
             AdmissionProposal(
                 expert_ids=tuple(experts[i].expert_id for i in subset),
                 eligible=True,
-                **_proposal_pair_diagnostics(corr, jn, subset),
+                **_proposal_pair_diagnostics(np.abs(corr), jn, subset),
             )
             for subset in enumerated
         )
