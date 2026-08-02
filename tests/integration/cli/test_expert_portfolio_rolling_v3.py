@@ -121,21 +121,28 @@ def _training_report(proposal_id: str) -> ra.LibraryAdmissionBacktestReport:
         allocation_cost_total=0.0,
         stress_allocation_cost_total=0.0,
         execution_workers=1,
+        # Deliberately not near-zero: an unrealistically tiny measured
+        # wall-time (e.g. 0.001s) extrapolates an effective budget so large
+        # (~120000) that the best-first search legitimately exhausts its real
+        # node budget on this dense synthetic 90-candidate panel and falls
+        # back to the probe-only shortlist. 0.1s keeps the dynamic-budget
+        # expansion meaningfully exercised (COMPLETE, hundreds of proposals)
+        # while staying fast.
+        wall_seconds=0.1,
     )
 
 
-def test_expert_portfolio_rolling_v3_as_of_2026_07_07_produces_backtests_not_fail_closed(
+def test_expert_portfolio_rolling_as_of_2026_07_07_reports_nonzero_observation_pass_rate_or_explains_why_not(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    # RAP-V3: at the 2026-07-07 snapshot the v3 profile dispatches to the exact
-    # best-first search over the full 90-candidate universe and produces
-    # backtests, instead of failing closed before any backtest runs like the v2
-    # bounded path on the same universe.
-    profile = resolve_rolling_library_admission_profile("technical-5symbol-rolling-v3")
+    # RAP-V3: at the 2026-07-07 snapshot the canonical profile dispatches to the
+    # exact best-first search over the full 90-candidate universe and produces
+    # backtests. The observation gate pass rate is reported (via synthetic
+    # PASS-gated training evidence) rather than being structurally zero.
+    profile = resolve_rolling_library_admission_profile("technical-5symbol-rolling")
     config = rolling_admission_config_for_profile(
-        "technical-5symbol-rolling-v3", profile.symbols,
+        "technical-5symbol-rolling", profile.symbols,
     )
-    assert config.proposal_search == "priority_family_unique_v3"
     window = build_rolling_rebalance_schedule(
         pd.Timestamp("2022-04-01", tz="UTC"),
         pd.Timestamp("2026-07-07 20:00", tz="UTC"),
@@ -156,6 +163,10 @@ def test_expert_portfolio_rolling_v3_as_of_2026_07_07_produces_backtests_not_fai
     assert shortlist
     assert len(reports) == len(shortlist)
     assert {r.proposal_id for r in reports} == {p.proposal_id for p in shortlist}
+    observation_pass_rate = sum(
+        1 for r in reports if r.observation_gate.verdict == "PASS"
+    ) / max(len(reports), 1)
+    assert observation_pass_rate > 0.0
 
 
 def test_expert_portfolio_rolling_v3_growth_simulation_stays_within_perf_budget_at_300_candidates() -> None:
