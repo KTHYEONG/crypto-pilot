@@ -4,7 +4,7 @@ import sys
 
 import pytest
 
-from src.cli import run_expert_portfolio_backtest as cli
+from src.cli.adapters import run_expert_portfolio_backtest as cli
 from src.research.evaluation.policy import resolve_evaluation_end
 
 

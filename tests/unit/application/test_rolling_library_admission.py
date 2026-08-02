@@ -7,13 +7,13 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from src.application.research.expert_portfolio import rolling_admission as ra
-from src.application.research.expert_portfolio import window as window_module
-from src.application.research.expert_portfolio.rebalance_ledger import (
+from src.application.research.expert import rolling_admission as ra
+from src.application.research.expert import window as window_module
+from src.application.research.expert.rebalance_ledger import (
     load_rebalance_records,
     read_current_profile,
 )
-from src.application.research.expert_portfolio.window import (
+from src.application.research.expert.window import (
     ResolvedTechnicalWindow,
     resolve_common_technical_window,
 )

@@ -2,7 +2,13 @@ from __future__ import annotations
 
 import pytest
 
-from src.cli.commands.research import expert_portfolio as expert_portfolio_cli
+from src.cli.commands.research import expert_library as expert_library_cli
+from src.cli.commands.research.portfolio_blend import add_portfolio_blend_commands
+from src.cli.commands.research.portfolio_multi import add_portfolio_multi_commands
+from src.cli.commands.research.single_baseline import add_single_baseline_commands
+from src.cli.commands.research.single_carry import add_single_carry_commands
+from src.cli.commands.research.single_oi import add_single_oi_commands
+from src.cli.commands.research.single_technical import add_single_technical_commands
 from src.cli.main import build_root_parser
 from src.research.contracts import (
     BaselineEvaluationRequest,
@@ -17,10 +23,10 @@ from src.research.expert_portfolio.models import ExpertPortfolioEvaluationReques
 def test_expert_portfolio_cli_parses_args_and_dispatches(monkeypatch) -> None:
     calls: list[ExpertPortfolioEvaluationRequest] = []
     monkeypatch.setattr(
-        "src.application.research.expert_portfolio.evaluation.run_expert_portfolio_evaluation", calls.append,
+        "src.application.research.expert.evaluation.run_expert_portfolio_evaluation", calls.append,
     )
     args = build_root_parser().parse_args([
-        "research", "run", "expert-portfolio",
+        "research", "run", "expert", "eval",
         "--library-id", "pair_residual_v1",
         "--start", "2022-04-01",
         "--end", "2025-12-31",
@@ -41,10 +47,10 @@ def test_expert_portfolio_cli_parses_args_and_dispatches(monkeypatch) -> None:
 def test_expert_portfolio_cli_defaults_keep_holdout_sealed(monkeypatch) -> None:
     calls: list[ExpertPortfolioEvaluationRequest] = []
     monkeypatch.setattr(
-        "src.application.research.expert_portfolio.evaluation.run_expert_portfolio_evaluation", calls.append,
+        "src.application.research.expert.evaluation.run_expert_portfolio_evaluation", calls.append,
     )
     args = build_root_parser().parse_args([
-        "research", "run", "expert-portfolio", "--library-id", "pair_residual_v1", "--no-log-run",
+        "research", "run", "expert", "eval", "--library-id", "pair_residual_v1", "--no-log-run",
     ])
     args.handler(args)
     assert calls == [ExpertPortfolioEvaluationRequest(
@@ -59,7 +65,7 @@ def test_expert_portfolio_cli_defaults_keep_holdout_sealed(monkeypatch) -> None:
 
 def test_expert_portfolio_cli_requires_library_id() -> None:
     with pytest.raises(SystemExit):
-        build_root_parser().parse_args(["research", "run", "expert-portfolio", "--no-log-run"])
+        build_root_parser().parse_args(["research", "run", "expert", "eval", "--no-log-run"])
 
 
 def test_library_admission_pipeline_cli_parses_and_dispatches(monkeypatch) -> None:
@@ -86,12 +92,12 @@ def test_library_admission_pipeline_cli_parses_and_dispatches(monkeypatch) -> No
         )
 
     monkeypatch.setattr(
-        expert_portfolio_cli.admission_pipeline_module,
+        expert_library_cli.admission_pipeline_module,
         "run_technical_library_admission_pipeline",
         _fake_pipeline,
     )
     args = build_root_parser().parse_args([
-        "research", "run", "library-admission-pipeline",
+        "research", "run", "expert", "pipeline",
         "--profile", "technical-5symbol-2022-v1",
     ])
     args.handler(args)
@@ -134,12 +140,12 @@ def test_rolling_library_admission_cli_parses_and_dispatches(monkeypatch) -> Non
         )
 
     monkeypatch.setattr(
-        expert_portfolio_cli.rolling_admission_module,
+        expert_library_cli.rolling_admission_module,
         "run_rolling_library_admission",
         _fake_rolling,
     )
     args = build_root_parser().parse_args([
-        "research", "run", "expert-portfolio-rolling",
+        "research", "run", "expert", "rolling",
         "--profile", "technical-5symbol-rolling",
         "--as-of", "2026-07-07 20:00:00+00:00",
         "--mode", "paper",
@@ -159,7 +165,7 @@ def test_rolling_library_admission_cli_rejects_retired_profile_names(monkeypatch
     # RAP-RETIRED: the versioned v1/v2/v3 profile names are gone from the CLI
     # choice list; only the canonical name remains selectable.
     choices = sorted(
-        expert_portfolio_cli.ROLLING_LIBRARY_ADMISSION_PROFILES,
+        expert_library_cli.ROLLING_LIBRARY_ADMISSION_PROFILES,
     )
     assert choices == ["technical-5symbol-rolling"]
     for retired in (
@@ -169,7 +175,7 @@ def test_rolling_library_admission_cli_rejects_retired_profile_names(monkeypatch
     ):
         with pytest.raises(SystemExit):
             build_root_parser().parse_args([
-                "research", "run", "expert-portfolio-rolling",
+                "research", "run", "expert", "rolling",
                 "--profile", retired,
                 "--as-of", "2026-07-07 20:00:00+00:00",
             ])
@@ -188,10 +194,10 @@ def test_rolling_library_admission_cli_rejects_unknown_profile() -> None:
 def test_technical_expert_cli_parses_and_dispatches(monkeypatch) -> None:
     calls: list[TechnicalExpertEvaluationRequest] = []
     monkeypatch.setattr(
-        "src.application.research.technical_experts.evaluation.run_technical_expert_evaluation", calls.append,
+        "src.application.research.technical.evaluation.run_technical_expert_evaluation", calls.append,
     )
     args = build_root_parser().parse_args([
-        "research", "run", "technical-expert",
+        "research", "run", "single", "technical",
         "--candidate-id", "technical_macd_histogram_regime_long_v1",
         "--symbol", "BTCUSDT",
         "--start", "2022-04-01",
@@ -216,7 +222,7 @@ def test_technical_expert_cli_accepts_candidate_and_symbol_only() -> None:
     # indicator/threshold flag is rejected at the parser boundary.
     with pytest.raises(SystemExit):
         build_root_parser().parse_args([
-            "research", "run", "technical-expert",
+            "research", "run", "single", "technical",
             "--candidate-id", "technical_macd_histogram_regime_long_v1",
             "--rsi-period", "14",
         ])
@@ -224,14 +230,14 @@ def test_technical_expert_cli_accepts_candidate_and_symbol_only() -> None:
 
 def test_technical_expert_cli_requires_candidate_id() -> None:
     with pytest.raises(SystemExit):
-        build_root_parser().parse_args(["research", "run", "technical-expert", "--symbol", "BTCUSDT"])
+        build_root_parser().parse_args(["research", "run", "single", "technical", "--symbol", "BTCUSDT"])
 
 
 def test_baseline_cli_parses_and_dispatches(monkeypatch) -> None:
     calls: list[BaselineEvaluationRequest] = []
     monkeypatch.setattr("src.application.research.baseline.evaluation.run_baseline_evaluation", calls.append)
     args = build_root_parser().parse_args([
-        "research", "run", "baseline", "--symbol", "ETHUSDT", "--no-log-run",
+        "research", "run", "single", "baseline", "--symbol", "ETHUSDT", "--no-log-run",
     ])
     args.handler(args)
     assert calls == [BaselineEvaluationRequest(
@@ -243,7 +249,7 @@ def test_portfolio_cli_parses_symbols_and_dispatches(monkeypatch) -> None:
     calls: list[PortfolioEvaluationRequest] = []
     monkeypatch.setattr("src.application.research.portfolio.evaluation.run_portfolio_evaluation", calls.append)
     args = build_root_parser().parse_args([
-        "research", "run", "portfolio", "--symbols", "BTCUSDT", "ETHUSDT", "--no-log-run",
+        "research", "run", "portfolio", "multi", "--symbols", "BTCUSDT", "ETHUSDT", "--no-log-run",
     ])
     args.handler(args)
     assert calls == [PortfolioEvaluationRequest(
@@ -253,9 +259,9 @@ def test_portfolio_cli_parses_symbols_and_dispatches(monkeypatch) -> None:
 
 def test_cash_carry_cli_parses_and_dispatches(monkeypatch) -> None:
     calls: list[CashCarryEvaluationRequest] = []
-    monkeypatch.setattr("src.application.research.cash_carry.evaluation.run_cash_carry_evaluation", calls.append)
+    monkeypatch.setattr("src.application.research.carry.evaluation.run_cash_carry_evaluation", calls.append)
     args = build_root_parser().parse_args([
-        "research", "run", "cash-carry", "--symbol", "BTCUSDT", "--no-log-run",
+        "research", "run", "single", "carry", "--symbol", "BTCUSDT", "--no-log-run",
     ])
     args.handler(args)
     assert calls == [CashCarryEvaluationRequest(symbol="BTCUSDT", log_run=False)]
@@ -263,9 +269,9 @@ def test_cash_carry_cli_parses_and_dispatches(monkeypatch) -> None:
 
 def test_sleeve_blend_cli_parses_args_and_dispatches(monkeypatch) -> None:
     calls: list[SleeveBlendEvaluationRequest] = []
-    monkeypatch.setattr("src.application.research.sleeve_blend.evaluation.run_sleeve_blend_evaluation", calls.append)
+    monkeypatch.setattr("src.application.research.blend.evaluation.run_sleeve_blend_evaluation", calls.append)
     args = build_root_parser().parse_args([
-        "research", "run", "sleeve-blend",
+        "research", "run", "portfolio", "blend",
         "--symbols", "BTCUSDT", "ETHUSDT",
         "--mdd-budget-fraction", "0.80",
         "--start", "2022-04-01",
@@ -288,9 +294,9 @@ def test_sleeve_blend_cli_parses_args_and_dispatches(monkeypatch) -> None:
 
 def test_sleeve_blend_cli_directional_candidate_kind(monkeypatch) -> None:
     calls: list[SleeveBlendEvaluationRequest] = []
-    monkeypatch.setattr("src.application.research.sleeve_blend.evaluation.run_sleeve_blend_evaluation", calls.append)
+    monkeypatch.setattr("src.application.research.blend.evaluation.run_sleeve_blend_evaluation", calls.append)
     args = build_root_parser().parse_args([
-        "research", "run", "sleeve-blend",
+        "research", "run", "portfolio", "blend",
         "--candidate-kind", "funding_signed_directional_v1", "--no-log-run",
     ])
     args.handler(args)
@@ -300,3 +306,18 @@ def test_sleeve_blend_cli_directional_candidate_kind(monkeypatch) -> None:
         candidate_kind="funding_signed_directional_v1",
         log_run=False,
     )]
+
+
+def test_every_tiered_command_module_registers_a_handler() -> None:
+    # RF-CLI-01: each tiered leaf module exposes an argparse adder that attaches
+    # a dispatcher handler; static imports keep the modules co-modified with
+    # their semantic tests.
+    for adder in (
+        add_single_baseline_commands,
+        add_single_technical_commands,
+        add_single_carry_commands,
+        add_single_oi_commands,
+        add_portfolio_multi_commands,
+        add_portfolio_blend_commands,
+    ):
+        assert callable(adder)

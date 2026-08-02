@@ -6,10 +6,10 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from src.application.research.expert_portfolio import (
+from src.application.research.expert import (
     admission_backtest as abt,
 )
-from src.application.research.expert_portfolio import rolling_admission as ra
+from src.application.research.expert import rolling_admission as ra
 from src.research.baseline.backtest import BacktestResult
 from src.research.expert_portfolio.admission_types import (
     LibraryAdmissionConfig,
