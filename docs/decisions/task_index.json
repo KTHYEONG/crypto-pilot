@@ -1,6 +1,16 @@
 {
   "tasks": [
     {
+      "task_id": "TASK_TIMEFRAME_SCALING_ZERO_EDGE",
+      "date": "2026-08-02",
+      "adr_id": "ADR_20260802_TIMEFRAME_SCALING_ZERO_EDGE",
+      "domain": "signal",
+      "title": "타임프레임 불변 lookback 스케일링 구현 및 18종 후보 전수 edge 반증",
+      "why": "docs/results/rolling-res.md 기준 4h 외 타임프레임 성과·전략 정리·심볼선정 개선 요청에서 출발. 1차 census(활동성 게이트만 측정)에서 봉-개수 고정 파라미터(EMA/MACD/RSI 등 지표 기간, 라우터 lookback, activity floor)가 --timeframe과 무관하게 동일해 12h/1d 통과율이 봉-개수 왜곡으로 착시 붕괴함을 발견.",
+      "resolution": "timeframe_scale_factor 유틸(4h 기준 캘린더-시간 불변량)을 만들어 resolve_technical_candidate/scale_router_spec/scale_admission_config/RollingAdmissionConfig.warmup_bars에 배선(4h 무회귀 검증). 스케일링 적용 재census 후 18개 후보 x 7개 타임프레임 중 활동성 게이트를 통과한 전체 499개 조합을 research run expert backtest로 전수 실제 P&L 검증 -> 0/499 관측 게이트 통과, 전 후보 마이너스~보합 평균 CAGR 확인. 검증 도중 admission_backtest.py의 동일 스케일링 누락(별도 코드 경로)을 발견해 추가 수정(4h 무회귀 확인). rolling_admission.py의 동일 결함은 범위 밖(6곳 이상, 부분수정 리스크)으로 남김.",
+      "impact": "18개 기술적 전문가 후보 전부 단독 edge 부재 확정 -> rolling-res.md의 양의 블렌드 CAGR은 개별 레그가 아닌 다중 후보 분산·라우팅에서 기인함을 재확인. 카탈로그 삭제 대신 블렌드 구성요소로만 취급, 신규 신호계열(Supertrend 등) 또는 블렌드 자체 개선이 다음 경로. rolling_admission.py 라우터 스케일링 미비는 후속 과제로 명시."
+    },
+    {
       "task_id": "CLI_STRUCTURE_REFACTOR",
       "date": "2026-08-02",
       "adr_id": "ADR_20260802_CLI_STRUCTURE_REFACTOR",
