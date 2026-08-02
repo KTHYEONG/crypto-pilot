@@ -19,7 +19,7 @@ from concurrent.futures import ProcessPoolExecutor
 
 import pandas as pd
 
-from src.application.research.technical_experts.evaluation import _load_technical_market_data
+from src.application.research.technical.evaluation import _load_technical_market_data
 from src.common.config import ohlcv_path
 from src.common.errors import DataIntegrityError
 from src.core.settings import effective_worker_count
