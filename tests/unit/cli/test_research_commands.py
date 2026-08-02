@@ -115,7 +115,7 @@ def test_rolling_library_admission_cli_parses_and_dispatches(monkeypatch) -> Non
         captured.append(request)
         return RollingLibraryAdmissionReport(
             status="COMPLETE",
-            profile="technical-5symbol-rolling-v1",
+            profile="technical-5symbol-rolling",
             mode="paper",
             as_of="2026-07-07 20:00:00+00:00",
             common_start="2022-04-01 00:00:00+00:00",
@@ -140,7 +140,7 @@ def test_rolling_library_admission_cli_parses_and_dispatches(monkeypatch) -> Non
     )
     args = build_root_parser().parse_args([
         "research", "run", "expert-portfolio-rolling",
-        "--profile", "technical-5symbol-rolling-v1",
+        "--profile", "technical-5symbol-rolling",
         "--as-of", "2026-07-07 20:00:00+00:00",
         "--mode", "paper",
     ])
@@ -150,59 +150,29 @@ def test_rolling_library_admission_cli_parses_and_dispatches(monkeypatch) -> Non
     assert request.profile.symbols == ("BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT")
     assert str(request.as_of) == "2026-07-07 20:00:00+00:00"
     assert request.mode == "paper"
-    assert request.config.profile == "technical-5symbol-rolling-v1"
-    assert request.config.router_kind == "global_winner_v1"
-    assert request.config.proposal_search == "exact_legacy_v1"
-
-
-def test_rolling_library_admission_cli_accepts_v2_profile(monkeypatch) -> None:
-    # RAP-09: the rolling CLI accepts the v2 profile and resolves the v2 config
-    # (per-symbol winner router and bounded same-symbol search) while leaving
-    # the v1 config/output contract unchanged.
-    from src.research.expert_portfolio.rolling import RollingLibraryAdmissionReport
-
-    captured: list[object] = []
-
-    def _fake_rolling(request) -> RollingLibraryAdmissionReport:
-        captured.append(request)
-        return RollingLibraryAdmissionReport(
-            status="COMPLETE",
-            profile="technical-5symbol-rolling-v2",
-            mode="paper",
-            as_of="2026-07-07 20:00:00+00:00",
-            common_start="2022-04-01 00:00:00+00:00",
-            common_end="2026-07-07 20:00:00+00:00",
-            windows=(),
-            records=(),
-            n_folds=4,
-            median_fold_cagr=0.02,
-            worst_fold_cagr=0.0,
-            median_fold_calmar=0.5,
-            max_period_contribution=0.2,
-            fold_gate_pass=True,
-            oos_start="2024-07-01 00:00:00+00:00",
-            oos_end="2026-06-30 20:00:00+00:00",
-            oos_return=0.10,
-        )
-
-    monkeypatch.setattr(
-        expert_portfolio_cli.rolling_admission_module,
-        "run_rolling_library_admission",
-        _fake_rolling,
-    )
-    args = build_root_parser().parse_args([
-        "research", "run", "expert-portfolio-rolling",
-        "--profile", "technical-5symbol-rolling-v2",
-        "--as-of", "2026-07-07 20:00:00+00:00",
-    ])
-    args.handler(args)
-    assert len(captured) == 1
-    request = captured[0]
-    assert request.profile.symbols == ("BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT")
-    assert request.config.profile == "technical-5symbol-rolling-v2"
-    assert request.config.router_kind == "per_symbol_winner_v2"
-    assert request.config.proposal_search == "bounded_family_unique_v2"
+    assert request.config.profile == "technical-5symbol-rolling"
     assert request.config.base_delay_bars == 1
+    assert request.config.min_shortlist_budget == 8
+
+
+def test_rolling_library_admission_cli_rejects_retired_profile_names(monkeypatch) -> None:
+    # RAP-RETIRED: the versioned v1/v2/v3 profile names are gone from the CLI
+    # choice list; only the canonical name remains selectable.
+    choices = sorted(
+        expert_portfolio_cli.ROLLING_LIBRARY_ADMISSION_PROFILES,
+    )
+    assert choices == ["technical-5symbol-rolling"]
+    for retired in (
+        "technical-5symbol-rolling-v1",
+        "technical-5symbol-rolling-v2",
+        "technical-5symbol-rolling-v3",
+    ):
+        with pytest.raises(SystemExit):
+            build_root_parser().parse_args([
+                "research", "run", "expert-portfolio-rolling",
+                "--profile", retired,
+                "--as-of", "2026-07-07 20:00:00+00:00",
+            ])
 
 
 def test_rolling_library_admission_cli_rejects_unknown_profile() -> None:

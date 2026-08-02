@@ -26,6 +26,7 @@ from src.research.expert_portfolio.rolling import (
     RollingAdmissionConfig,
     RollingCandidateAuditRecord,
     build_rolling_rebalance_schedule,
+    resolve_dynamic_shortlist_budget,
     rolling_admission_config_for_profile,
     select_rebalance_proposal,
 )
@@ -338,106 +339,114 @@ class TestRollingCandidateAuditRecord:
 
 
 class TestRollingProfileConfig:
-    def test_v1_and_v2_configs_are_distinct_and_stable(self) -> None:
-        # RAP-09: v1 keeps the legacy router/search while v2 selects the
-        # per-symbol winner router and bounded same-symbol search.
+    def test_canonical_config_is_single_priority_path(self) -> None:
+        # The rolling path has exactly one canonical config: the priority
+        # family-unique search with per-symbol-winner routing hardcoded and the
+        # shared one-bar base scenario.
         symbols = ("BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT")
-        v1 = rolling_admission_config_for_profile("technical-5symbol-rolling-v1", symbols)
-        v2 = rolling_admission_config_for_profile("technical-5symbol-rolling-v2", symbols)
-        assert v1.router_kind == "global_winner_v1"
-        assert v1.proposal_search == "exact_legacy_v1"
-        assert v1.base_delay_bars == 0
-        assert v2.router_kind == "per_symbol_winner_v2"
-        assert v2.proposal_search == "bounded_family_unique_v2"
-        assert v2.base_delay_bars == 1
-        assert v1.fingerprint()["proposal_search"] == "exact_legacy_v1"
-        assert v2.fingerprint()["router_kind"] == "per_symbol_winner_v2"
+        config = rolling_admission_config_for_profile("technical-5symbol-rolling", symbols)
+        assert config.profile == "technical-5symbol-rolling"
+        assert config.base_delay_bars == 1
+        assert config.min_shortlist_budget == 8
+        assert config.hurdle_cost_multiple == 2.0
+        assert config.family_symbol_prefilter_top_k is None
+        assert "proposal_search" not in config.fingerprint()
+        assert "router_kind" not in config.fingerprint()
+        assert "shortlist_budget" not in config.fingerprint()
 
     def test_unknown_profile_name_fails_closed(self) -> None:
-        # RAP-09: an unknown rolling profile name raises ValueError.
+        # An unknown rolling profile name raises ValueError.
         with pytest.raises(ValueError, match="unknown rolling profile"):
             rolling_admission_config_for_profile("technical-5symbol-rolling-v9", ("BTCUSDT",))
 
-    def test_rolling_admission_config_rejects_v3_with_global_winner_router(self) -> None:
-        # RAP-V3: priority_family_unique_v3 requires the per-symbol winner router
-        # and the shared one-bar base scenario, exactly like the v2 relaxation.
-        with pytest.raises(ValueError, match="router_kind"):
-            RollingAdmissionConfig(
-                proposal_search="priority_family_unique_v3",
-                router_kind="global_winner_v1",
-                base_delay_bars=1,
-            )
+    def test_rolling_admission_config_rejects_invalid_new_fields(self) -> None:
+        # The new execution-policy knobs fail closed on invalid values.
+        with pytest.raises(ValueError, match="min_shortlist_budget"):
+            RollingAdmissionConfig(min_shortlist_budget=0)
+        with pytest.raises(ValueError, match="max_backtest_wall_seconds_per_window"):
+            RollingAdmissionConfig(max_backtest_wall_seconds_per_window=0.0)
+        with pytest.raises(ValueError, match="hurdle_cost_multiple"):
+            RollingAdmissionConfig(hurdle_cost_multiple=-1.0)
 
-    def test_rolling_admission_config_rejects_prefilter_top_k_on_exact_legacy_v1(self) -> None:
-        # RAP-V3: family_symbol_prefilter_top_k is meaningless for exact_legacy_v1
-        # and must never be silently ignored; values below 1 are rejected too.
-        with pytest.raises(ValueError, match="meaningless"):
-            RollingAdmissionConfig(
-                proposal_search="exact_legacy_v1",
-                family_symbol_prefilter_top_k=1,
-            )
+    def test_rolling_admission_config_rejects_prefilter_top_k_below_one(self) -> None:
+        # family_symbol_prefilter_top_k must be None or >= 1.
         with pytest.raises(ValueError, match="family_symbol_prefilter_top_k"):
-            RollingAdmissionConfig(
-                proposal_search="priority_family_unique_v3",
-                router_kind="per_symbol_winner_v2",
-                base_delay_bars=1,
-                family_symbol_prefilter_top_k=0,
-            )
+            RollingAdmissionConfig(family_symbol_prefilter_top_k=0)
 
-    def test_rolling_v1_and_v2_profiles_byte_identical_output_unaffected_by_v3_addition(
-        self,
-    ) -> None:
-        # RAP-V3: the v3 addition only adds the priority search profile and the
-        # disabled prefilter knob; v1/v2 config values, fingerprints, and profile
-        # builders are unchanged, and serialization stays byte-stable.
+    def test_canonical_profile_fingerprint_and_resolution_are_stable(self) -> None:
+        # The canonical profile's config fingerprint is stable and the resolver
+        # matches the builder exactly; legacy v1/v2 profile names no longer
+        # resolve.
         from src.research.expert_portfolio.admission_types import (
             ROLLING_LIBRARY_ADMISSION_PROFILES,
             resolve_rolling_library_admission_profile,
-            technical_5symbol_rolling_v1_profile,
-            technical_5symbol_rolling_v2_profile,
+            technical_5symbol_rolling_profile,
         )
 
         symbols = ("BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT")
-        v1 = rolling_admission_config_for_profile("technical-5symbol-rolling-v1", symbols)
-        v2 = rolling_admission_config_for_profile("technical-5symbol-rolling-v2", symbols)
-        assert v1.proposal_search == "exact_legacy_v1"
-        assert v1.router_kind == "global_winner_v1"
-        assert v1.base_delay_bars == 0
-        assert v2.proposal_search == "bounded_family_unique_v2"
-        assert v2.router_kind == "per_symbol_winner_v2"
-        assert v2.base_delay_bars == 1
-        assert v1.family_symbol_prefilter_top_k is None
-        assert v2.family_symbol_prefilter_top_k is None
+        config = rolling_admission_config_for_profile("technical-5symbol-rolling", symbols)
         expected_keys = {
-            "profile", "symbols", "scoring_months", "warmup_bars", "shortlist_budget",
-            "min_context_samples", "rebalance_months", "switch_cost", "initial_equity",
-            "router_kind", "proposal_search", "base_delay_bars",
-            "family_symbol_prefilter_top_k",
+            "profile", "symbols", "scoring_months", "warmup_bars",
+            "min_shortlist_budget", "max_backtest_wall_seconds_per_window",
+            "min_context_samples", "rebalance_months", "switch_cost",
+            "initial_equity", "base_delay_bars", "family_symbol_prefilter_top_k",
+            "hurdle_cost_multiple",
         }
-        assert set(v1.fingerprint()) == expected_keys
-        assert set(v2.fingerprint()) == expected_keys
-        assert v1.fingerprint()["family_symbol_prefilter_top_k"] is None
-        assert v2.fingerprint()["family_symbol_prefilter_top_k"] is None
+        assert set(config.fingerprint()) == expected_keys
+        assert config.fingerprint()["family_symbol_prefilter_top_k"] is None
         assert (
-            resolve_rolling_library_admission_profile("technical-5symbol-rolling-v1")
-            == technical_5symbol_rolling_v1_profile()
+            resolve_rolling_library_admission_profile("technical-5symbol-rolling")
+            == technical_5symbol_rolling_profile()
         )
+        assert "technical-5symbol-rolling" in ROLLING_LIBRARY_ADMISSION_PROFILES
+        assert set(ROLLING_LIBRARY_ADMISSION_PROFILES) == {"technical-5symbol-rolling"}
+
+    def test_rolling_profile_v1_v2_names_no_longer_resolve(self) -> None:
+        # Versioned profile names are retired: only the version-less canonical
+        # name resolves, and the legacy v1/v2/v3 builder names are gone.
+        from src.research.expert_portfolio.admission_types import (
+            resolve_rolling_library_admission_profile,
+        )
+        from src.research.expert_portfolio.contracts import (
+            resolve_rolling_library_admission_profile as facade_resolve,
+        )
+
         assert (
-            technical_5symbol_rolling_v1_profile().admission
-            == technical_5symbol_rolling_v2_profile().admission
+            resolve_rolling_library_admission_profile("technical-5symbol-rolling")
+            is not None
         )
-        assert "technical-5symbol-rolling-v3" in ROLLING_LIBRARY_ADMISSION_PROFILES
-        window = _canned_window()
-        selection = _canned_selection_report()
-        proposal = AdmissionProposal(("e0", "e1"), True)
-        training = (
-            _canned_report(PROPOSAL_A, lcb_obs=0.10, lcb_stress=0.10),
-            _canned_report(PROPOSAL_B, lcb_obs=0.12, lcb_stress=0.12),
+        for retired in (
+            "technical-5symbol-rolling-v1",
+            "technical-5symbol-rolling-v2",
+            "technical-5symbol-rolling-v3",
+        ):
+            with pytest.raises(ValueError, match="unknown rolling library admission profile"):
+                resolve_rolling_library_admission_profile(retired)
+            with pytest.raises(ValueError, match="unknown rolling library admission profile"):
+                facade_resolve(retired)
+
+    def test_resolve_dynamic_shortlist_budget_scales_with_measured_wall_time(self) -> None:
+        # The effective budget scales with measured probe wall-times: faster
+        # probes license more backtests within the same time budget.
+        budget = resolve_dynamic_shortlist_budget(
+            (1.0, 1.0, 1.0, 1.0), 120.0, 8,
         )
-        audit1 = RollingCandidateAuditRecord.from_selection(
-            window, selection, (proposal,), training, proposal, "snap-key",
-        )
-        audit2 = RollingCandidateAuditRecord.from_selection(
-            window, selection, (proposal,), training, proposal, "snap-key",
-        )
-        assert audit1.to_canonical_bytes() == audit2.to_canonical_bytes()
+        assert budget == 120
+
+    def test_resolve_dynamic_shortlist_budget_floors_at_min_shortlist_budget(self) -> None:
+        # A slow probe never drops the budget below the structural minimum.
+        budget = resolve_dynamic_shortlist_budget((100.0,), 120.0, 8)
+        assert budget == 8
+
+    def test_resolve_dynamic_shortlist_budget_rejects_empty_probe(self) -> None:
+        # An empty probe cannot extrapolate a budget and fails closed.
+        with pytest.raises(ValueError, match="must not be empty"):
+            resolve_dynamic_shortlist_budget((), 120.0, 8)
+
+    def test_resolve_dynamic_shortlist_budget_rejects_invalid_budget_knobs(self) -> None:
+        with pytest.raises(ValueError, match="min_shortlist_budget"):
+            resolve_dynamic_shortlist_budget((1.0,), 120.0, 0)
+        with pytest.raises(ValueError, match="max_backtest_wall_seconds_per_window"):
+            resolve_dynamic_shortlist_budget((1.0,), 0.0, 8)
+        with pytest.raises(ValueError, match="must all be positive"):
+            resolve_dynamic_shortlist_budget((0.0,), 120.0, 8)
