@@ -186,6 +186,25 @@ class TestStressFreeze:
                 fixed_weights=_cash_weights(spec, index).assign(e1=-0.1),
             )
 
+    def test_float_epsilon_negative_weight_is_tolerated_not_rejected(self) -> None:
+        # A causal residual weight (e.g. CASH = 1 - sum(other weights)) can land
+        # a few float64 epsilons below zero from rounding alone; this must be
+        # tolerated as zero exposure, not rejected as a real negative weight.
+        spec = ExpertPortfolioSpec(experts=(_expert("e1"), _expert("e2", "f2", ("S2",))))
+        index = pd.date_range("2024-01-01", periods=3, freq="4h", tz="UTC")
+        panel = pd.DataFrame({"e1": [0.01, 0.02, 0.03], "e2": [0.01, 0.01, 0.01]}, index=index)
+        weights = _cash_weights(spec, index).assign(e1=-2.220446049250313e-16)
+        result = run_expert_portfolio(
+            panel, spec, CostModel(), initial_equity=10_000.0, fixed_weights=weights,
+        )
+        assert (result.target_weights.to_numpy() == weights.to_numpy()).all()
+
+        with pytest.raises(ValueError, match="non-negative"):
+            run_expert_portfolio(
+                panel, spec, CostModel(), initial_equity=10_000.0,
+                fixed_weights=_cash_weights(spec, index).assign(e1=-1e-6),
+            )
+
 
 class TestIntegrity:
     def test_missing_component_column_raises_data_integrity_error(self) -> None:
