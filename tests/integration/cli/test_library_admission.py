@@ -26,7 +26,7 @@ def _find_parser(root: argparse.ArgumentParser, path: list[str]) -> argparse.Arg
 
 def _admission_parser_options() -> set[str]:
     parser = _find_parser(
-        build_root_parser(), ["research", "run", "library-admission"],
+        build_root_parser(), ["research", "run", "expert", "admission"],
     )
     return {
         option
@@ -46,9 +46,9 @@ def test_library_admission_cli_forbids_promotion_switches() -> None:
 
 def test_library_admission_cli_requires_every_policy_and_router_field() -> None:
     with pytest.raises(SystemExit):
-        build_root_parser().parse_args(["research", "run", "library-admission"])
+        build_root_parser().parse_args(["research", "run", "expert", "admission"])
     args = build_root_parser().parse_args([
-        "research", "run", "library-admission",
+        "research", "run", "expert", "admission",
         "--candidate-source", "technical_macd_histogram_regime_long_v1",
         "--candidate-source", "technical_rsi_trend_pullback_long_v1",
         "--symbols", "BTCUSDT", "ETHUSDT",
@@ -111,7 +111,7 @@ def test_library_admission_cli_emits_deterministic_json(
     # LAE-08: the handler emits deterministic JSON to stdout; a repeated run is
     # byte-identical and no ledger/catalog mutation occurs.
     args = build_root_parser().parse_args([
-        "research", "run", "library-admission",
+        "research", "run", "expert", "admission",
         "--candidate-source", "technical_macd_histogram_regime_long_v1",
         "--symbols", "BTCUSDT",
         "--router-context-symbol", "BTCUSDT",
@@ -128,7 +128,7 @@ def test_library_admission_cli_emits_deterministic_json(
         "--max-combinations", "10",
     ])
     monkeypatch.setattr(
-        "src.application.research.expert_portfolio.admission.run_technical_library_admission",
+        "src.application.research.expert.admission.run_technical_library_admission",
         lambda request: _canned_report(),
     )
 

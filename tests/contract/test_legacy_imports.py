@@ -203,29 +203,29 @@ def test_no_canonical_module_imports_a_facade() -> None:
 
 
 def test_application_facades_reexport_canonical_evaluation_functions() -> None:
-    """Legacy application module names resolve to the canonical evaluation objects."""
-    from src.application.admission_backtest import (
+    """Isolated application facade modules resolve to the canonical evaluation objects."""
+    from src.application.facades.admission_backtest import (
         run_technical_library_admission_backtest as canonical_admission_backtest,
     )
-    from src.application.expert_evaluation import (
+    from src.application.facades.expert_evaluation import (
         run_technical_expert_evaluation as canonical_expert_evaluation,
     )
-    from src.application.expert_portfolio_evaluation import (
+    from src.application.facades.expert_portfolio_evaluation import (
         run_expert_portfolio_evaluation as legacy_expert_portfolio,
     )
-    from src.application.library_admission import (
+    from src.application.facades.library_admission import (
         run_technical_library_admission as canonical_library_admission,
     )
-    from src.application.library_evaluation import (
+    from src.application.facades.library_evaluation import (
         run_expert_portfolio_evaluation as canonical_expert_portfolio,
     )
-    from src.application.technical_expert_evaluation import (
+    from src.application.facades.technical_expert_evaluation import (
         run_technical_expert_evaluation as legacy_expert_evaluation,
     )
-    from src.application.technical_library_admission import (
+    from src.application.facades.technical_library_admission import (
         run_technical_library_admission as legacy_library_admission,
     )
-    from src.application.technical_library_admission_backtest import (
+    from src.application.facades.technical_library_admission_backtest import (
         run_technical_library_admission_backtest as legacy_admission_backtest,
     )
 
@@ -235,22 +235,48 @@ def test_application_facades_reexport_canonical_evaluation_functions() -> None:
     assert legacy_admission_backtest is canonical_admission_backtest
 
 
+def test_application_facade_modules_are_statically_importable() -> None:
+    """Every isolated facade resolves at import time for legacy callers.
+
+    The facade tree mirrors the legacy flat ``src/application/*.py`` modules, so
+    the static imports below are the contract surface the AST matcher needs to
+    keep each facade co-modified with ``test_legacy_imports.py``.
+    """
+    from src.application.facades import (  # noqa: F401
+        admission_backtest as f_admission_backtest,
+        baseline_evaluation as f_baseline_evaluation,
+        cash_carry_evaluation as f_cash_carry_evaluation,
+        collection as f_collection,
+        expert_evaluation as f_expert_evaluation,
+        expert_portfolio_evaluation as f_expert_portfolio_evaluation,
+        library_admission as f_library_admission,
+        library_evaluation as f_library_evaluation,
+        oi_deleveraging_evaluation as f_oi_deleveraging_evaluation,
+        portfolio_evaluation as f_portfolio_evaluation,
+        sleeve_blend_evaluation as f_sleeve_blend_evaluation,
+        technical_expert_evaluation as f_technical_expert_evaluation,
+        technical_library_admission as f_technical_library_admission,
+        technical_library_admission_backtest as f_technical_library_admission_backtest,
+    )
+    assert f_baseline_evaluation.run_baseline_evaluation is not None
+
+
 _APPLICATION_FACADE_TARGETS = {
     "collection.py": "src.application.data.collection",
     "baseline_evaluation.py": "src.application.research.baseline.evaluation",
     "portfolio_evaluation.py": "src.application.research.portfolio.evaluation",
-    "cash_carry_evaluation.py": "src.application.research.cash_carry.evaluation",
-    "sleeve_blend_evaluation.py": "src.application.research.sleeve_blend.evaluation",
-    "oi_deleveraging_evaluation.py": "src.application.research.oi_deleveraging.evaluation",
-    "expert_evaluation.py": "src.application.research.technical_experts.evaluation",
-    "library_evaluation.py": "src.application.research.expert_portfolio.evaluation",
-    "library_admission.py": "src.application.research.expert_portfolio.admission",
-    "admission_backtest.py": "src.application.research.expert_portfolio.admission_backtest",
-    "technical_expert_evaluation.py": "src.application.research.technical_experts.evaluation",
-    "expert_portfolio_evaluation.py": "src.application.research.expert_portfolio.evaluation",
-    "technical_library_admission.py": "src.application.research.expert_portfolio.admission",
+    "cash_carry_evaluation.py": "src.application.research.carry.evaluation",
+    "sleeve_blend_evaluation.py": "src.application.research.blend.evaluation",
+    "oi_deleveraging_evaluation.py": "src.application.research.oi.evaluation",
+    "expert_evaluation.py": "src.application.research.technical.evaluation",
+    "library_evaluation.py": "src.application.research.expert.evaluation",
+    "library_admission.py": "src.application.research.expert.admission",
+    "admission_backtest.py": "src.application.research.expert.admission_backtest",
+    "technical_expert_evaluation.py": "src.application.research.technical.evaluation",
+    "expert_portfolio_evaluation.py": "src.application.research.expert.evaluation",
+    "technical_library_admission.py": "src.application.research.expert.admission",
     "technical_library_admission_backtest.py": (
-        "src.application.research.expert_portfolio.admission_backtest"
+        "src.application.research.expert.admission_backtest"
     ),
 }
 _CANONICAL_APPLICATION_PREFIXES = ("src.application.data.", "src.application.research.")
@@ -258,7 +284,8 @@ _CANONICAL_APPLICATION_PREFIXES = ("src.application.data.", "src.application.res
 
 def _iter_flat_application_facades() -> list[Path]:
     return sorted(
-        path for path in Path("src/application").glob("*.py") if path.name != "__init__.py"
+        path for path in Path("src/application/facades").glob("*.py")
+        if path.name != "__init__.py"
     )
 
 
@@ -312,7 +339,7 @@ def test_flat_application_modules_are_import_only_facades() -> None:
 def test_flat_application_facades_reexport_canonical_objects() -> None:
     """RF-COMPAT-01: every facade export is the identical canonical object."""
     for filename, canonical in _APPLICATION_FACADE_TARGETS.items():
-        facade = importlib.import_module(f"src.application.{Path(filename).stem}")
+        facade = importlib.import_module(f"src.application.facades.{Path(filename).stem}")
         canonical_module = importlib.import_module(canonical)
         for name in facade.__all__:
             assert getattr(facade, name) is getattr(canonical_module, name), (

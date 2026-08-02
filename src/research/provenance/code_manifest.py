@@ -8,7 +8,7 @@ from pathlib import Path
 # Façade modules are deliberately excluded: only the real implementation files
 # participate in the code fingerprint.
 CANONICAL_CARRY_CODE_UNITS: Mapping[str, Path] = {
-    "application.cash_carry_evaluation": Path("src/application/cash_carry_evaluation.py"),
+    "application.cash_carry_evaluation": Path("src/application/facades/cash_carry_evaluation.py"),
     "cash_carry.backtest": Path("src/research/cash_carry/backtest.py"),
     "cash_carry.market_data": Path("src/research/cash_carry/market_data.py"),
     "cash_carry.signal": Path("src/research/cash_carry/signal.py"),
@@ -19,7 +19,7 @@ CANONICAL_CARRY_CODE_UNITS: Mapping[str, Path] = {
 # Only the real implementation files participate in the code fingerprint; the
 # application dispatch layer never does.
 TECHNICAL_CODE_UNITS: Mapping[str, Path] = {
-    "application.expert_evaluation": Path("src/application/expert_evaluation.py"),
+    "application.expert_evaluation": Path("src/application/facades/expert_evaluation.py"),
     "technical_experts.backtest": Path("src/research/technical_experts/backtest.py"),
     "technical_experts.catalog": Path("src/research/technical_experts/catalog.py"),
     "technical_experts.contracts": Path("src/research/technical_experts/contracts.py"),
