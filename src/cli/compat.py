@@ -29,26 +29,26 @@ def run_collect_data(argv: list[str] | None = None) -> None:
 
 
 def run_backtest(argv: list[str] | None = None) -> None:
-    _forward(["research", "run", "baseline", *list(sys.argv[1:] if argv is None else argv)])
+    _forward(["research", "run", "single", "baseline", *list(sys.argv[1:] if argv is None else argv)])
 
 
 def run_cash_carry_backtest(argv: list[str] | None = None) -> None:
     args = list(sys.argv[1:] if argv is None else argv)
     if args and args[0] == "run":
         args = args[1:]
-    _forward(["research", "run", "cash-carry", *args])
+    _forward(["research", "run", "single", "carry", *args])
 
 
 def run_portfolio_backtest(argv: list[str] | None = None) -> None:
-    _forward(["research", "run", "portfolio", *list(sys.argv[1:] if argv is None else argv)])
+    _forward(["research", "run", "portfolio", "multi", *list(sys.argv[1:] if argv is None else argv)])
 
 
 def run_sleeve_blend_backtest(argv: list[str] | None = None) -> None:
-    _forward(["research", "run", "sleeve-blend", *list(sys.argv[1:] if argv is None else argv)])
+    _forward(["research", "run", "portfolio", "blend", *list(sys.argv[1:] if argv is None else argv)])
 
 
 def run_expert_portfolio_backtest(argv: list[str] | None = None) -> None:
-    _forward(["research", "run", "expert-portfolio", *list(sys.argv[1:] if argv is None else argv)])
+    _forward(["research", "run", "expert", "eval", *list(sys.argv[1:] if argv is None else argv)])
 
 
 def compare_runs(argv: list[str] | None = None) -> None:
