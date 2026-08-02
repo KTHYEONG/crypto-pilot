@@ -5,6 +5,15 @@ computed only on completed bars at or before the decision index. Ichimoku's
 cloud is read at its current index, never forward-shifted, and every event is
 stored as one of four boolean columns. A LONG candidate emits only long-side
 events and a SHORT candidate only short-side events.
+
+The frozen family condition functions are `_ema_alignment_conditions`,
+`_macd_histogram_regime_conditions`, `_adx_di_regime_conditions`,
+`_ichimoku_cloud_conditions`, `_bb_squeeze_breakout_conditions`,
+`_rsi_trend_pullback_conditions`, `_stochastic_trend_pullback_conditions`,
+`_cci_trend_pullback_conditions`, `_mfi_trend_pullback_conditions` plus the
+new candidates `_supertrend_conditions, _parabolic_sar_conditions, _keltner_channel_breakout_conditions`;
+every one is dispatched from `generate_signal_events()` through `_FAMILY_SIGNALS`
+exactly the way `_bb_squeeze_breakout_conditions` is.
 """
 
 from __future__ import annotations
@@ -22,10 +31,13 @@ from src.research.technical_experts.indicators import (
     cci,
     ema,
     ichimoku,
+    keltner_channel,
     macd_histogram,
     mfi,
+    parabolic_sar,
     rsi,
     stochastic,
+    supertrend,
 )
 
 _OHLCV_COLUMNS = ("open", "high", "low", "close", "volume")
@@ -241,6 +253,61 @@ def _mfi_trend_pullback_conditions(
     }
 
 
+def _supertrend_conditions(
+    frame: pd.DataFrame, config: Mapping[str, int | float],
+) -> dict[str, pd.Series]:
+    close = frame["close"].astype("float64")
+    slow = ema(close, int(config["regime"]))
+    _line, long_trend = supertrend(
+        frame["high"], frame["low"], close,
+        int(config["period"]), float(config["mult"]),
+    )
+    return {
+        "long_entry": long_trend & ~long_trend.shift(fill_value=False) & (close > slow),
+        "short_entry": (~long_trend) & long_trend.shift(fill_value=False) & (close < slow),
+        "long_exit": ~long_trend,
+        "short_exit": long_trend,
+    }
+
+
+def _parabolic_sar_conditions(
+    frame: pd.DataFrame, config: Mapping[str, int | float],
+) -> dict[str, pd.Series]:
+    close = frame["close"].astype("float64")
+    slow = ema(close, int(config["regime"]))
+    sar = parabolic_sar(
+        frame["high"], frame["low"], float(config["step"]), float(config["max_step"]),
+    )
+    above = close > sar
+    return {
+        "long_entry": above & ~above.shift(fill_value=False) & (close > slow),
+        "short_entry": (~above) & above.shift(fill_value=False) & (close < slow),
+        "long_exit": ~above,
+        "short_exit": above,
+    }
+
+
+def _keltner_channel_breakout_conditions(
+    frame: pd.DataFrame, config: Mapping[str, int | float],
+) -> dict[str, pd.Series]:
+    close = frame["close"].astype("float64")
+    slow = ema(close, int(config["regime"]))
+    middle, upper, lower = keltner_channel(
+        frame["high"], frame["low"], close,
+        int(config["period"]), float(config["mult"]),
+    )
+    return {
+        "long_entry": (
+            (close > upper) & (close.shift() <= upper.shift()) & (close > slow)
+        ),
+        "short_entry": (
+            (close < lower) & (close.shift() >= lower.shift()) & (close < slow)
+        ),
+        "long_exit": close < middle,
+        "short_exit": close > middle,
+    }
+
+
 _FAMILY_SIGNALS: dict[str, Callable[[pd.DataFrame, Mapping[str, int | float]], dict[str, pd.Series]]] = {
     "ema_alignment": _ema_alignment_conditions,
     "macd_histogram_regime": _macd_histogram_regime_conditions,
@@ -251,6 +318,9 @@ _FAMILY_SIGNALS: dict[str, Callable[[pd.DataFrame, Mapping[str, int | float]], d
     "stochastic_trend_pullback": _stochastic_trend_pullback_conditions,
     "cci_trend_pullback": _cci_trend_pullback_conditions,
     "mfi_trend_pullback": _mfi_trend_pullback_conditions,
+    "supertrend": _supertrend_conditions,
+    "parabolic_sar": _parabolic_sar_conditions,
+    "keltner_channel_breakout": _keltner_channel_breakout_conditions,
 }
 
 
@@ -300,6 +370,9 @@ def _check_contract() -> None:
         "stochastic_trend_pullback",
         "cci_trend_pullback",
         "mfi_trend_pullback",
+        "supertrend",
+        "parabolic_sar",
+        "keltner_channel_breakout",
     }
     assert _EVENT_COLUMNS == ("long_entry", "short_entry", "long_exit", "short_exit")
 

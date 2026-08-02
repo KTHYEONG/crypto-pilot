@@ -7,11 +7,13 @@ encode/decode, and the per-candidate/proposal result types. May depend on
 
 from __future__ import annotations
 
+import dataclasses
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 
 import pandas as pd
 
+from src.market_data.storage.loaders import timeframe_scale_factor, validate_timeframe
 from src.research.evaluation.policy import HOLDOUT_CUTOFF
 from src.research.expert_portfolio.models import ContextualRouterSpec
 from src.research.technical_experts.catalog import (
@@ -101,6 +103,22 @@ class LibraryAdmissionConfig:
             "max_combinations": self.max_combinations,
         }
 
+def scale_admission_config(
+    admission: LibraryAdmissionConfig, timeframe: str,
+) -> LibraryAdmissionConfig:
+    """Rescale the admission config's bar-count limit to a fixed calendar window.
+
+    Only ``min_active_return_bars`` is a bar count and is scaled;
+    ``min_closed_trades`` (a trade count) and ``min_context_covered_states`` (a
+    state count) are not bar counts and pass through unchanged along with every
+    structural bound.
+    """
+    scale = timeframe_scale_factor(timeframe)
+    return dataclasses.replace(
+        admission,
+        min_active_return_bars=max(1, round(admission.min_active_return_bars * scale)),
+    )
+
 
 @dataclass(frozen=True, slots=True)
 class TechnicalLibraryAdmissionRequest:
@@ -118,6 +136,7 @@ class TechnicalLibraryAdmissionRequest:
     admission: LibraryAdmissionConfig
     start: str | None = None
     end: str | pd.Timestamp | None = None
+    timeframe: str = "4h"
 
     def __post_init__(self) -> None:
         if not self.candidate_sources:
@@ -135,6 +154,7 @@ class TechnicalLibraryAdmissionRequest:
             )
         for source in self.candidate_sources:
             resolve_technical_candidate(source)
+        validate_timeframe(self.timeframe)
         if self.end is not None and pd.Timestamp(self.end, tz="UTC") > HOLDOUT_CUTOFF:
             raise RuntimeError(
                 f"Holdout sealed: end {self.end} > {HOLDOUT_CUTOFF}. Library "
@@ -182,6 +202,7 @@ class TechnicalLibraryAdmissionBacktestRequest:
     initial_equity: float = 10_000.0
     max_workers: int | None = None
     log_run: bool = False
+    timeframe: str = "4h"
 
     def __post_init__(self) -> None:
         if not self.expert_ids:
@@ -194,6 +215,7 @@ class TechnicalLibraryAdmissionBacktestRequest:
             )
         if self.max_workers is not None and self.max_workers < 1:
             raise ValueError(f"max_workers must be >= 1, got {self.max_workers}")
+        validate_timeframe(self.timeframe)
         if self.end is not None and pd.Timestamp(self.end, tz="UTC") > HOLDOUT_CUTOFF:
             raise RuntimeError(
                 f"Holdout sealed: end {self.end} > {HOLDOUT_CUTOFF}. Proposal "

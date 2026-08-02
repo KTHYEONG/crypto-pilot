@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import dataclasses
 import json
 import sys
 
@@ -70,6 +71,7 @@ def _run_library_admission(args: argparse.Namespace) -> None:
         ),
         start=args.start,
         end=args.end,
+        timeframe=args.timeframe,
     )
     report = admission_module.run_technical_library_admission(request)
     sys.stdout.write(
@@ -96,6 +98,7 @@ def _run_library_admission_backtest(args: argparse.Namespace) -> None:
         initial_equity=args.initial_equity,
         max_workers=args.max_workers,
         log_run=not args.no_log_run,
+        timeframe=args.timeframe,
     )
     report = admission_backtest_module.run_technical_library_admission_backtest(request)
     sys.stdout.write(
@@ -105,7 +108,9 @@ def _run_library_admission_backtest(args: argparse.Namespace) -> None:
 
 
 def _run_library_admission_pipeline(args: argparse.Namespace) -> None:
-    selection_request = resolve_library_admission_profile(args.profile)
+    selection_request = dataclasses.replace(
+        resolve_library_admission_profile(args.profile), timeframe=args.timeframe,
+    )
     request = TechnicalLibraryAdmissionPipelineRequest(
         selection=selection_request,
         evaluation_start=args.evaluation_start,
@@ -122,7 +127,9 @@ def _run_library_admission_pipeline(args: argparse.Namespace) -> None:
 
 def _run_rolling_library_admission(args: argparse.Namespace) -> None:
     profile = resolve_rolling_library_admission_profile(args.profile)
-    config = rolling_admission_config_for_profile(args.profile, profile.symbols)
+    config = rolling_admission_config_for_profile(
+        args.profile, profile.symbols, timeframe=args.timeframe,
+    )
     request = rolling_admission_module.RollingLibraryAdmissionRequest(
         profile=profile,
         as_of=args.as_of,
@@ -177,6 +184,10 @@ def add_expert_library_commands(run_sub: argparse._SubParsersAction[argparse.Arg
     admission.add_argument("--max-workers", type=int, default=None)
     admission.add_argument("--start", default=None)
     admission.add_argument("--end", default=None)
+    admission.add_argument(
+        "--timeframe", default="4h",
+        help="Research timeframe (1h/2h/4h/6h/8h/12h/1d); default 4h preserves existing behavior",
+    )
     admission.set_defaults(handler=_run_library_admission)
 
     admission_backtest = run_sub.add_parser(
@@ -205,6 +216,10 @@ def add_expert_library_commands(run_sub: argparse._SubParsersAction[argparse.Arg
     admission_backtest.add_argument("--max-workers", type=int, default=None)
     admission_backtest.add_argument("--start", default=None)
     admission_backtest.add_argument("--end", default=None)
+    admission_backtest.add_argument(
+        "--timeframe", default="4h",
+        help="Research timeframe (1h/2h/4h/6h/8h/12h/1d); default 4h preserves existing behavior",
+    )
     admission_backtest.add_argument("--no-log-run", action="store_true", default=False)
     admission_backtest.set_defaults(handler=_run_library_admission_backtest)
 
@@ -220,6 +235,10 @@ def add_expert_library_commands(run_sub: argparse._SubParsersAction[argparse.Arg
     pipeline.add_argument("--evaluation-end", default="2025-12-31 20:00")
     pipeline.add_argument("--max-backtest-proposals", type=int, default=24)
     pipeline.add_argument("--initial-equity", type=float, default=10_000.0)
+    pipeline.add_argument(
+        "--timeframe", default="4h",
+        help="Research timeframe (1h/2h/4h/6h/8h/12h/1d); default 4h preserves existing behavior",
+    )
     pipeline.set_defaults(handler=_run_library_admission_pipeline)
 
     rolling = run_sub.add_parser(
@@ -238,6 +257,10 @@ def add_expert_library_commands(run_sub: argparse._SubParsersAction[argparse.Arg
     rolling.add_argument(
         "--require-complete-history", action="store_true", default=False,
         help="Reject the request when the newest deployment quarter is incomplete",
+    )
+    rolling.add_argument(
+        "--timeframe", default="4h",
+        help="Research timeframe (1h/2h/4h/6h/8h/12h/1d); default 4h preserves existing behavior",
     )
     rolling.add_argument("--no-log-run", action="store_true", default=False)
     rolling.set_defaults(handler=_run_rolling_library_admission)

@@ -23,13 +23,19 @@ from src.application.research.technical.evaluation import _load_technical_market
 from src.common.config import ohlcv_path
 from src.common.errors import DataIntegrityError
 from src.core.settings import effective_worker_count
-from src.market_data.storage.loaders import load_ohlcv_4h
+from src.market_data.storage.loaders import load_ohlcv_1h_as
 from src.research.contracts import CostModel
 from src.research.evaluation.policy import resolve_evaluation_end
 from src.research.expert_portfolio.admission import evaluate_library_admission
 from src.research.expert_portfolio.admission_reports import LibraryAdmissionReport
-from src.research.expert_portfolio.admission_types import TechnicalLibraryAdmissionRequest
-from src.research.expert_portfolio.contextual_router import build_causal_context_labels
+from src.research.expert_portfolio.admission_types import (
+    TechnicalLibraryAdmissionRequest,
+    scale_admission_config,
+)
+from src.research.expert_portfolio.contextual_router import (
+    build_causal_context_labels,
+    scale_router_spec,
+)
 from src.research.expert_portfolio.models import ContextualRouterSpec, ExpertDefinition
 from src.research.provenance.code_manifest import TECHNICAL_CODE_UNITS, compute_code_hash
 from src.research.technical_experts.backtest import run_technical_expert_backtest
@@ -46,6 +52,8 @@ def _symbol_admission_worker(
     sources: tuple[str, ...],
     start: str | None,
     end: str | pd.Timestamp | None,
+    *,
+    timeframe: str = "4h",
 ) -> dict[str, tuple[pd.Series, int]]:
     """Load one symbol's causal market data once and run its requested candidates.
 
@@ -55,12 +63,12 @@ def _symbol_admission_worker(
     the ``symbol`` and ``return_source`` note, so a partial panel is never
     returned.
     """
-    frame, funding = _load_technical_market_data(symbol, start, end)
+    frame, funding = _load_technical_market_data(symbol, start, end, timeframe=timeframe)
     costs = CostModel()
     evidence: dict[str, tuple[pd.Series, int]] = {}
     for source in sources:
         try:
-            candidate = resolve_technical_candidate(source)
+            candidate = resolve_technical_candidate(source, timeframe=timeframe)
             result = run_technical_expert_backtest(
                 frame, candidate, costs, funding,
                 signal_delay_bars=_BASE_DELAY_BARS,
@@ -79,7 +87,7 @@ def _materialize_definitions(
     definitions: list[ExpertDefinition] = []
     for symbol in request.symbols:
         for source in request.candidate_sources:
-            candidate = resolve_technical_candidate(source)
+            candidate = resolve_technical_candidate(source, timeframe=request.timeframe)
             definitions.append(
                 ExpertDefinition(
                     expert_id=f"{source}:{symbol}",
@@ -107,13 +115,16 @@ def _run_symbol_tasks(
     """
     if effective_workers == 1:
         return {
-            symbol: _symbol_admission_worker(symbol, sources, request.start, end)
+            symbol: _symbol_admission_worker(
+                symbol, sources, request.start, end, timeframe=request.timeframe,
+            )
             for symbol in request.symbols
         }
     with ProcessPoolExecutor(max_workers=effective_workers) as executor:
         futures = [
             executor.submit(
                 _symbol_admission_worker, symbol, sources, request.start, end,
+                timeframe=request.timeframe,
             )
             for symbol in request.symbols
         ]
@@ -170,9 +181,11 @@ def _build_admission_context(
     index: pd.DatetimeIndex,
     start: str | None,
     end: str | pd.Timestamp | None,
+    *,
+    timeframe: str = "4h",
 ) -> pd.Series:
-    ohlcv = load_ohlcv_4h(
-        ohlcv_path(router.context_symbol, "1h"), start=start, end=end,
+    ohlcv = load_ohlcv_1h_as(
+        ohlcv_path(router.context_symbol, "1h"), timeframe, start=start, end=end,
     )
     labels = build_causal_context_labels(ohlcv["close"], router)
     if not labels.index.equals(index):
@@ -200,10 +213,13 @@ def run_technical_library_admission(
     started = time.perf_counter()
     code_hash = compute_code_hash(TECHNICAL_CODE_UNITS)
 
+    scaled_router = scale_router_spec(request.router, request.timeframe)
+    scaled_admission = scale_admission_config(request.admission, request.timeframe)
+
     definitions = _materialize_definitions(request, code_hash)
     sources = tuple(sorted(request.candidate_sources))
     effective = effective_worker_count(
-        len(request.symbols), requested=request.admission.max_workers,
+        len(request.symbols), requested=scaled_admission.max_workers,
     )
     _logger.info(
         "[SYS] stage=symbol_workers workers=%d symbols=%d",
@@ -211,17 +227,8 @@ def run_technical_library_admission(
     )
     evidence = _run_symbol_tasks(request, end, effective, sources)
     panel, trade_counts = _assemble_panel(evidence, definitions, request.symbols)
-    decision_context = _build_admission_context(
-        request.router, panel.index, request.start, end,
-    )
-    report = evaluate_library_admission(
-        panel,
-        trade_counts,
-        definitions,
-        decision_context,
-        request.router,
-        request.admission,
-    )
+    decision_context = _build_admission_context(scaled_router, panel.index, request.start, end, timeframe=request.timeframe)
+    report = evaluate_library_admission(panel, trade_counts, definitions, decision_context, scaled_router, scaled_admission)
     report = dataclasses.replace(
         report,
         code_hash=code_hash,
