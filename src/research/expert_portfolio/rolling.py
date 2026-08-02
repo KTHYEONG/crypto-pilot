@@ -9,14 +9,18 @@ window is derived purely from ``common_start`` and ``as_of``.
 
 from __future__ import annotations
 
+import json
 from collections.abc import Iterator, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Literal
 
 import pandas as pd
 
 from src.research.contracts import CostModel
-from src.research.expert_portfolio.admission_reports import LibraryAdmissionBacktestReport
+from src.research.expert_portfolio.admission_reports import (
+    LibraryAdmissionBacktestReport,
+    LibraryAdmissionReport,
+)
 from src.research.expert_portfolio.admission_types import AdmissionProposal
 
 _GRID_PERIOD = pd.Timedelta(hours=4)
@@ -39,7 +43,11 @@ class RollingAdmissionConfig:
     ``rebalance_months`` the UTC quarter-start months, ``switch_cost`` the
     single-turn fee plus slippage charged when a library changes at a
     rebalance boundary, and ``initial_equity`` the seed of the stitched master
-    ledger. No value is tuned on data.
+    ledger. ``router_kind`` selects the causal winner allocation
+    (``"global_winner_v1"`` or ``"per_symbol_winner_v2"``), ``proposal_search``
+    selects exact legacy admission or the bounded same-symbol family-unique
+    search, and ``base_delay_bars`` is the single base scenario delay shared by
+    the candidate screen and every base proposal. No value is tuned on data.
     """
 
     profile: str = "technical-5symbol-rolling-v1"
@@ -51,6 +59,9 @@ class RollingAdmissionConfig:
     rebalance_months: tuple[int, ...] = _REBALANCE_MONTHS
     switch_cost: float = _SWITCH_COST
     initial_equity: float = 10_000.0
+    router_kind: Literal["global_winner_v1", "per_symbol_winner_v2"] = "global_winner_v1"
+    proposal_search: Literal["exact_legacy_v1", "bounded_family_unique_v2"] = "exact_legacy_v1"
+    base_delay_bars: int = 0
 
     def __post_init__(self) -> None:
         if not self.profile:
@@ -87,6 +98,31 @@ class RollingAdmissionConfig:
             raise ValueError(
                 f"initial_equity must be > 0, got {self.initial_equity}"
             )
+        if self.router_kind not in ("global_winner_v1", "per_symbol_winner_v2"):
+            raise ValueError(
+                f"router_kind must be 'global_winner_v1' or 'per_symbol_winner_v2', "
+                f"got {self.router_kind!r}"
+            )
+        if self.proposal_search not in ("exact_legacy_v1", "bounded_family_unique_v2"):
+            raise ValueError(
+                f"proposal_search must be 'exact_legacy_v1' or "
+                f"'bounded_family_unique_v2', got {self.proposal_search!r}"
+            )
+        if self.base_delay_bars < 0:
+            raise ValueError(
+                f"base_delay_bars must be >= 0, got {self.base_delay_bars}"
+            )
+        if self.proposal_search == "bounded_family_unique_v2":
+            if self.router_kind != "per_symbol_winner_v2":
+                raise ValueError(
+                    "proposal_search 'bounded_family_unique_v2' requires "
+                    "router_kind 'per_symbol_winner_v2'"
+                )
+            if self.base_delay_bars < 1:
+                raise ValueError(
+                    "proposal_search 'bounded_family_unique_v2' requires "
+                    "base_delay_bars >= 1 (the shared base scenario)"
+                )
 
     @property
     def warmup_period(self) -> pd.Timedelta:
@@ -110,6 +146,9 @@ class RollingAdmissionConfig:
             "rebalance_months": list(self.rebalance_months),
             "switch_cost": self.switch_cost,
             "initial_equity": self.initial_equity,
+            "router_kind": self.router_kind,
+            "proposal_search": self.proposal_search,
+            "base_delay_bars": self.base_delay_bars,
         }
 
 
@@ -368,6 +407,189 @@ def _proposal_from_report(report: LibraryAdmissionBacktestReport) -> AdmissionPr
     return AdmissionProposal(expert_ids=report.expert_ids, eligible=True)
 
 
+@dataclass(frozen=True, slots=True)
+class RollingCandidateAuditRecord:
+    """Immutable, deterministic audit of one rebalance's candidate screen.
+
+    The identity is exactly ``(profile, rebalance_start, snapshot_key)`` and the
+    payload deliberately carries no wall-clock time, so an identical replay
+    yields byte-stable JSON. It records the causal window, every candidate
+    admission outcome, the screen proposal set with pair diagnostics and
+    eligibility, the shortlist order, each shortlisted proposal's
+    base/stress/fold gates plus selection key, the selected proposal, and the
+    CASH/incumbent outcome. Writing an audit never mutates the rebalance ledger,
+    current-profile pointer, catalog, or trading state.
+    """
+
+    profile: str
+    rebalance_start: str
+    snapshot_key: str
+    window: Mapping[str, object]
+    selection: Mapping[str, object]
+    candidates: tuple[Mapping[str, object], ...]
+    proposals: tuple[Mapping[str, object], ...]
+    shortlist: tuple[str, ...]
+    training: tuple[Mapping[str, object], ...]
+    selected: Mapping[str, object] | None
+    selection_status: str
+    execution: Mapping[str, object] = field(default_factory=dict)
+    incumbent_kept: bool = False
+    cash_reason: str | None = None
+
+    @classmethod
+    def from_selection(
+        cls,
+        window: RebalanceWindow,
+        selection: LibraryAdmissionReport,
+        shortlist: tuple[AdmissionProposal, ...],
+        training_reports: tuple[LibraryAdmissionBacktestReport, ...],
+        selected: AdmissionProposal | None,
+        snapshot_key: str,
+    ) -> RollingCandidateAuditRecord:
+        """Build one deterministic audit from a window's frozen screen outputs."""
+        cash_reason: str | None = None
+        if selected is None:
+            cash_reason = (
+                "no_shortlist_or_incumbent" if not training_reports
+                else "no_deployable_proposal"
+            )
+        return cls(
+            profile=window.profile,
+            rebalance_start=str(window.rebalance_start),
+            snapshot_key=snapshot_key,
+            window=window.to_report_dict(),
+            selection={
+                "status": selection.status,
+                "window_start": selection.window_start,
+                "window_end": selection.window_end,
+                "covered_states": selection.covered_states,
+                "coverage_sufficient": selection.coverage_sufficient,
+                "structural_combinations": selection.structural_combinations,
+                "generated_nodes": selection.generated_nodes,
+                "generation_limit": selection.generation_limit,
+                "generation_status": selection.generation_status,
+                "proposal_count": len(selection.proposals),
+            },
+            candidates=tuple(
+                {
+                    "expert_id": candidate.expert_id,
+                    "closed_trades": candidate.closed_trades,
+                    "active_return_bars": candidate.active_return_bars,
+                    "admitted": candidate.admitted,
+                    "reason": candidate.reason,
+                }
+                for candidate in selection.candidates
+            ),
+            proposals=tuple(
+                {
+                    "proposal_id": proposal.proposal_id,
+                    "expert_ids": list(proposal.expert_ids),
+                    "eligible": proposal.eligible,
+                    "pair_diagnostics": {
+                        "max_abs_log_return_correlation": (
+                            proposal.max_abs_pair_log_return_correlation
+                        ),
+                        "max_joint_negative_rate": proposal.max_pair_joint_negative_rate,
+                        "mean_abs_log_return_correlation": (
+                            proposal.mean_abs_pair_log_return_correlation
+                        ),
+                        "mean_joint_negative_rate": (
+                            proposal.mean_pair_joint_negative_rate
+                        ),
+                    },
+                }
+                for proposal in selection.proposals
+            ),
+            shortlist=tuple(proposal.proposal_id for proposal in shortlist),
+            training=tuple(
+                {
+                    "proposal_id": report.proposal_id,
+                    "observation_gate_verdict": report.observation_gate.verdict,
+                    "observation_folds_pass": report.observation_folds.gate_pass,
+                    "stress_gate_verdict": report.stress_gate.verdict,
+                    "stress_folds_pass": report.stress_folds.gate_pass,
+                    "selection_primary": selection_primary_key(report),
+                    "diversification_rank_key": list(report.diversification_rank_key),
+                }
+                for report in training_reports
+            ),
+            selected=(
+                {
+                    "proposal_id": selected.proposal_id,
+                    "expert_ids": list(selected.expert_ids),
+                }
+                if selected is not None
+                else None
+            ),
+            selection_status=(
+                "selected" if selected is not None else "cash"
+            ),
+            cash_reason=cash_reason,
+        )
+
+    def to_payload(self) -> dict[str, object]:
+        """Deterministic JSON-safe payload; never contains wall-clock time."""
+        return {
+            "profile": self.profile,
+            "rebalance_start": self.rebalance_start,
+            "snapshot_key": self.snapshot_key,
+            "window": dict(self.window),
+            "selection": dict(self.selection),
+            "candidates": [dict(entry) for entry in self.candidates],
+            "proposals": [dict(entry) for entry in self.proposals],
+            "shortlist": list(self.shortlist),
+            "training": [dict(entry) for entry in self.training],
+            "selected": (
+                dict(self.selected) if self.selected is not None else None
+            ),
+            "selection_status": self.selection_status,
+            "execution": dict(self.execution),
+            "incumbent_kept": self.incumbent_kept,
+            "cash_reason": self.cash_reason,
+        }
+
+    def to_canonical_bytes(self) -> bytes:
+        """Byte-stable canonical serialization for idempotency and audit tests."""
+        return json.dumps(
+            self.to_payload(), sort_keys=True, separators=(",", ":"),
+            ensure_ascii=False, default=str,
+        ).encode("utf-8")
+
+
+def rolling_admission_config_for_profile(
+    profile_name: str,
+    symbols: tuple[str, ...],
+) -> RollingAdmissionConfig:
+    """Resolve the rolling config for a frozen profile name.
+
+    ``technical-5symbol-rolling-v1`` keeps the exact global-winner router, the
+    legacy all-combination admission, and its zero-delay base scenario while
+    ``technical-5symbol-rolling-v2`` selects the per-symbol winner router, the
+    bounded same-symbol family-unique search, and the shared one-bar base
+    scenario. An unknown profile name fails closed with ``ValueError``.
+    """
+    if profile_name == "technical-5symbol-rolling-v1":
+        return RollingAdmissionConfig(
+            profile=profile_name,
+            symbols=symbols,
+            router_kind="global_winner_v1",
+            proposal_search="exact_legacy_v1",
+            base_delay_bars=0,
+        )
+    if profile_name == "technical-5symbol-rolling-v2":
+        return RollingAdmissionConfig(
+            profile=profile_name,
+            symbols=symbols,
+            router_kind="per_symbol_winner_v2",
+            proposal_search="bounded_family_unique_v2",
+            base_delay_bars=1,
+        )
+    raise ValueError(
+        f"unknown rolling profile {profile_name!r}; known profiles: "
+        "technical-5symbol-rolling-v1, technical-5symbol-rolling-v2"
+    )
+
+
 def select_rebalance_proposal(
     reports: tuple[LibraryAdmissionBacktestReport, ...],
     incumbent: AdmissionProposal | None,
@@ -414,6 +636,12 @@ def _check_contract() -> None:
     )
     assert str(first.rebalance_start) == "2024-07-01 00:00:00+00:00"
     assert select_rebalance_proposal.__name__ == "select_rebalance_proposal"
+    assert RollingCandidateAuditRecord.from_selection.__name__ == "from_selection"
+    v1 = rolling_admission_config_for_profile("technical-5symbol-rolling-v1", ("BTCUSDT",))
+    assert v1.router_kind == "global_winner_v1"
+    v2 = rolling_admission_config_for_profile("technical-5symbol-rolling-v2", ("BTCUSDT",))
+    assert v2.router_kind == "per_symbol_winner_v2"
+    assert v2.base_delay_bars == 1
 
 
 _check_contract()
@@ -421,11 +649,13 @@ _check_contract()
 __all__ = [
     "RebalanceWindow",
     "RollingAdmissionConfig",
+    "RollingCandidateAuditRecord",
     "RollingLibraryAdmissionReport",
     "RollingSelectionRecord",
     "build_rolling_rebalance_schedule",
     "next_quarter_boundary",
     "quarter_boundaries",
+    "rolling_admission_config_for_profile",
     "select_rebalance_proposal",
     "selection_key",
     "selection_primary_key",

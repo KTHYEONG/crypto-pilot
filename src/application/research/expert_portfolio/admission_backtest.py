@@ -86,6 +86,8 @@ def _selected_symbol_worker(
 def _materialize_definitions(
     expert_ids: tuple[str, ...],
     code_hash: str,
+    *,
+    allow_same_symbol: bool = False,
 ) -> tuple[ExpertDefinition, ...]:
     if not expert_ids:
         raise ValueError("expert_ids must not be empty")
@@ -106,7 +108,7 @@ def _materialize_definitions(
             raise ValueError(
                 f"proposal admits duplicate family '{candidate.family}'"
             )
-        if symbol in symbols:
+        if symbol in symbols and not allow_same_symbol:
             raise ValueError(f"proposal admits duplicate symbol '{symbol}'")
         families.add(candidate.family)
         symbols.add(symbol)

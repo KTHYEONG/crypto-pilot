@@ -11,6 +11,7 @@ from src.research.contracts import CostModel
 from src.research.expert_portfolio.allocator import _causal_lcb_weight_series, _validate_panel
 from src.research.expert_portfolio.contextual_router import (
     compute_causal_contextual_winner_weights,
+    compute_causal_per_symbol_contextual_weights,
 )
 from src.research.expert_portfolio.models import (
     ContextualRouterSpec,
@@ -122,9 +123,14 @@ def run_expert_portfolio(
             raise ValueError(
                 "decision_context is required when spec.router is configured"
             )
-        target_weights = compute_causal_contextual_winner_weights(
-            component_returns, decision_context, spec, spec.router,
-        )
+        if spec.router_kind == "per_symbol_winner_v2":
+            target_weights = compute_causal_per_symbol_contextual_weights(
+                component_returns, decision_context, spec, spec.router,
+            )
+        else:
+            target_weights = compute_causal_contextual_winner_weights(
+                component_returns, decision_context, spec, spec.router,
+            )
     else:
         target_weights = _causal_lcb_weight_series(component_returns, spec)
 
