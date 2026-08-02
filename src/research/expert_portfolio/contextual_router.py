@@ -200,18 +200,26 @@ def compute_causal_contextual_winner_weights(
         # j(t): number of state rows strictly before row t-1 that are usable
         eligible = np.searchsorted(state_rows, np.arange(n) - 1)
 
+        # The block-aware inflation of one expert column is identical for every
+        # decision row of the same state, so it is evaluated once per column and
+        # then indexed by ``j`` instead of being recomputed per row. A sentinel
+        # is appended so the existing causal inflation helper evaluates the
+        # variance of all j completed samples at index j; the sentinel itself is
+        # excluded from that calculation.
+        inflation_by_column = []
+        for column in range(len(expert_ids)):
+            completed = np.concatenate([samples[:, column], np.array([0.0])])
+            inflation_by_column.append(_causal_block_aware_inflation(completed))
+
         for t in np.flatnonzero(labels == state):
             j = int(eligible[t])
             if j < min_history or j < 2:
                 continue
             mean = csum[j] / j
-            # Append a sentinel so the existing causal inflation helper can
-            # evaluate the variance of all j completed samples at index j;
-            # the sentinel itself is excluded from that calculation.
-            inflation = np.ones(len(expert_ids), dtype=np.float64)
-            for column in range(len(expert_ids)):
-                completed = np.concatenate([samples[:, column], np.array([0.0])])
-                inflation[column] = _causal_block_aware_inflation(completed)[j]
+            inflation = np.array(
+                [inflation_by_column[column][j] for column in range(len(expert_ids))],
+                dtype=np.float64,
+            )
             with np.errstate(divide="ignore", invalid="ignore"):
                 variance = (csum2[j] - csum[j] * csum[j] / j) / (j - 1)
                 std_error = np.sqrt(np.maximum(variance, 0.0) * inflation / j)
