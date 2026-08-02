@@ -12,6 +12,7 @@ only.
 from __future__ import annotations
 
 import dataclasses
+import functools
 import logging
 import time
 from concurrent.futures import ProcessPoolExecutor
@@ -140,7 +141,10 @@ def _assemble_panel(
             series_by_id[expert_id] = returns
             counts_by_id[expert_id] = count
 
-    common = sorted(set.intersection(*(set(series.index) for series in series_by_id.values())))
+    common = functools.reduce(
+        lambda idx1, idx2: idx1.intersection(idx2),
+        (series.index for series in series_by_id.values()),
+    )
     if len(common) < 2:
         raise DataIntegrityError(
             "library admission components share fewer than 2 common bars, "
