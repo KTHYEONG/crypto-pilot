@@ -11,9 +11,12 @@ no future row ever influences a decision.
 
 from __future__ import annotations
 
+import dataclasses
+
 import numpy as np
 import pandas as pd
 
+from src.market_data.storage.loaders import timeframe_scale_factor
 from src.research.expert_portfolio.allocator import (
     _causal_block_aware_inflation,
     _group_matrices,
@@ -31,6 +34,23 @@ _STATE_TRENDS = ("down", "flat", "up")
 _STATE_VOLS = ("low", "high")
 _UNAVAILABLE = "unavailable"
 _FLAT_TREND_QUANTILE = 0.10  # causal expanding quantile of |z| => flat boundary
+
+
+def scale_router_spec(router: ContextualRouterSpec, timeframe: str) -> ContextualRouterSpec:
+    """Rescale a router's bar-count windows to a fixed calendar duration.
+
+    The trend, volatility, and min-context-history windows are bar counts and
+    are scaled by ``timeframe_scale_factor`` so they cover the same calendar
+    span at any research timeframe; ``context_symbol`` and ``confidence`` pass
+    through unchanged.
+    """
+    scale = timeframe_scale_factor(timeframe)
+    return dataclasses.replace(
+        router,
+        trend_lookback_bars=max(1, round(router.trend_lookback_bars * scale)),
+        volatility_lookback_bars=max(1, round(router.volatility_lookback_bars * scale)),
+        min_context_history_bars=max(1, round(router.min_context_history_bars * scale)),
+    )
 
 
 def state_labels() -> list[str]:

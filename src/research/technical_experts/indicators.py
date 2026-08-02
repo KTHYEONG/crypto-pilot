@@ -143,6 +143,157 @@ def bollinger(
     return middle, upper, lower, bandwidth
 
 
+def atr(
+    high: pd.Series,
+    low: pd.Series,
+    close: pd.Series,
+    period: int = 14,
+) -> pd.Series:
+    """Wilder Average True Range on completed bars."""
+    if period < 1:
+        raise ValueError(f"period must be >= 1, got {period}")
+    tr = pd.concat(
+        (high - low, (high - close.shift()).abs(), (low - close.shift()).abs()),
+        axis=1,
+    ).max(axis=1)
+    return tr.ewm(alpha=1.0 / period, adjust=False).mean().replace(0.0, np.nan)
+
+
+def supertrend(
+    high: pd.Series,
+    low: pd.Series,
+    close: pd.Series,
+    period: int = 10,
+    mult: float = 3.0,
+) -> tuple[pd.Series, pd.Series]:
+    """ATR-based SuperTrend trailing-stop line and its uptrend flag.
+
+    ``long_trend`` is True on bars whose trend state is bullish. The recursive
+    final-band state is evaluated in a sequential loop (the band state is
+    inherently path-dependent); only completed bars at or before the current
+    index are read.
+    """
+    if period < 1:
+        raise ValueError(f"period must be >= 1, got {period}")
+    if mult <= 0.0:
+        raise ValueError(f"mult must be > 0, got {mult}")
+    hl2 = (high + low) / 2.0
+    atr_series = atr(high, low, close, period)
+    basic_upper = hl2 + mult * atr_series
+    basic_lower = hl2 - mult * atr_series
+    n = len(close)
+    if n == 0:
+        return pd.Series(dtype="float64"), pd.Series(dtype=bool)
+    final_upper = np.empty(n, dtype=np.float64)
+    final_lower = np.empty(n, dtype=np.float64)
+    line = np.empty(n, dtype=np.float64)
+    long_trend = np.empty(n, dtype=bool)
+    final_upper[0] = float(basic_upper.iloc[0])
+    final_lower[0] = float(basic_lower.iloc[0])
+    long_trend[0] = True
+    line[0] = float(final_lower[0])
+    for i in range(1, n):
+        price = float(close.iloc[i])
+        if price <= final_upper[i - 1]:
+            final_upper[i] = min(float(basic_upper.iloc[i]), final_upper[i - 1])
+        else:
+            final_upper[i] = float(basic_upper.iloc[i])
+        if price >= final_lower[i - 1]:
+            final_lower[i] = max(float(basic_lower.iloc[i]), final_lower[i - 1])
+        else:
+            final_lower[i] = float(basic_lower.iloc[i])
+        if price > final_upper[i - 1]:
+            long_trend[i] = True
+            line[i] = final_lower[i]
+        else:
+            long_trend[i] = False
+            line[i] = final_upper[i]
+    index = close.index
+    return (
+        pd.Series(line, index=index, dtype="float64"),
+        pd.Series(long_trend, index=index, dtype=bool),
+    )
+
+
+def parabolic_sar(
+    high: pd.Series,
+    low: pd.Series,
+    step: float = 0.02,
+    max_step: float = 0.2,
+) -> pd.Series:
+    """Parabolic Stop-And-Reverse line with Wildered acceleration.
+
+    Sequential state (SAR, extreme point, acceleration factor) is path
+    dependent, so the series is built in a loop over completed bars; the result
+    shares the input index.
+    """
+    if step <= 0.0:
+        raise ValueError(f"step must be > 0, got {step}")
+    if max_step < step:
+        raise ValueError(
+            f"max_step must be >= step, got max_step={max_step} step={step}"
+        )
+    n = len(high)
+    if n == 0:
+        return pd.Series(dtype="float64")
+    sar = np.empty(n, dtype=np.float64)
+    ep = np.empty(n, dtype=np.float64)
+    af = np.empty(n, dtype=np.float64)
+    long_ = np.empty(n, dtype=bool)
+    sar[0] = float(low.iloc[0])
+    ep[0] = float(high.iloc[0])
+    af[0] = step
+    long_[0] = True
+    for i in range(1, n):
+        hi = float(high.iloc[i])
+        lo = float(low.iloc[i])
+        if long_[i - 1]:
+            sar[i] = sar[i - 1] + af[i - 1] * (ep[i - 1] - sar[i - 1])
+            sar[i] = min(sar[i], float(low.iloc[i - 1]))
+            if lo < sar[i]:
+                long_[i] = False
+                sar[i] = ep[i - 1]
+                ep[i] = lo
+                af[i] = step
+            else:
+                long_[i] = True
+                ep[i] = hi if hi > ep[i - 1] else ep[i - 1]
+                af[i] = min(af[i - 1] + step, max_step) if hi > ep[i - 1] else af[i - 1]
+        else:
+            sar[i] = sar[i - 1] + af[i - 1] * (ep[i - 1] - sar[i - 1])
+            sar[i] = max(sar[i], float(high.iloc[i - 1]))
+            if hi > sar[i]:
+                long_[i] = True
+                sar[i] = ep[i - 1]
+                ep[i] = hi
+                af[i] = step
+            else:
+                long_[i] = False
+                ep[i] = lo if lo < ep[i - 1] else ep[i - 1]
+                af[i] = min(af[i - 1] + step, max_step) if lo < ep[i - 1] else af[i - 1]
+    return pd.Series(sar, index=high.index, dtype="float64")
+
+
+def keltner_channel(
+    high: pd.Series,
+    low: pd.Series,
+    close: pd.Series,
+    period: int = 20,
+    mult: float = 2.0,
+) -> tuple[pd.Series, pd.Series, pd.Series]:
+    """Keltner middle/upper/lower channel around an EMA of typical price."""
+    if period < 1:
+        raise ValueError(f"period must be >= 1, got {period}")
+    if mult <= 0.0:
+        raise ValueError(f"mult must be > 0, got {mult}")
+    typical = (high + low + close) / 3.0
+    middle = typical.ewm(span=period, adjust=False).mean()
+    atr_series = atr(high, low, close, period)
+    upper = middle + mult * atr_series
+    lower = middle - mult * atr_series
+    return middle, upper, lower
+
+
 def ichimoku(
     high: pd.Series,
     low: pd.Series,
