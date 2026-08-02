@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import pytest
 
+from src.cli.commands.research import expert_portfolio as expert_portfolio_cli
 from src.cli.main import build_root_parser
 from src.research.contracts import (
     BaselineEvaluationRequest,
@@ -59,6 +60,97 @@ def test_expert_portfolio_cli_defaults_keep_holdout_sealed(monkeypatch) -> None:
 def test_expert_portfolio_cli_requires_library_id() -> None:
     with pytest.raises(SystemExit):
         build_root_parser().parse_args(["research", "run", "expert-portfolio", "--no-log-run"])
+
+
+def test_library_admission_pipeline_cli_parses_and_dispatches(monkeypatch) -> None:
+    # LAP-CLI: the frozen profile leaf requires only a profile name and dispatches
+    # one pipeline request with the OOS defaults frozen by the specification.
+    from src.research.expert_portfolio.admission_reports import LibraryAdmissionPipelineReport
+
+    captured: list[object] = []
+
+    def _fake_pipeline(request) -> LibraryAdmissionPipelineReport:
+        captured.append(request)
+        return LibraryAdmissionPipelineReport(
+            status="COMPLETE",
+            profile="technical-5symbol-2022-v1",
+            requested_start=None,
+            common_start="2022-04-01 00:00:00+00:00",
+            effective_start="2022-05-04 12:00:00+00:00",
+            selection_end="2024-12-31 20:00:00+00:00",
+            evaluation_start="2025-01-01",
+            evaluation_end="2025-12-31 20:00",
+            structural_combinations=1,
+            pair_compatible_count=0,
+            shortlist=(),
+        )
+
+    monkeypatch.setattr(
+        expert_portfolio_cli.admission_pipeline_module,
+        "run_technical_library_admission_pipeline",
+        _fake_pipeline,
+    )
+    args = build_root_parser().parse_args([
+        "research", "run", "library-admission-pipeline",
+        "--profile", "technical-5symbol-2022-v1",
+    ])
+    args.handler(args)
+    assert len(captured) == 1
+    request = captured[0]
+    assert request.selection.symbols == ("BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT")
+    assert request.evaluation_start == "2025-01-01"
+    assert request.evaluation_end == "2025-12-31 20:00"
+    assert request.max_backtest_proposals == 24
+    assert request.initial_equity == 10_000.0
+
+
+def test_rolling_library_admission_cli_parses_and_dispatches(monkeypatch) -> None:
+    # RLA-CLI: the rolling leaf resolves the due R from as_of and dispatches one
+    # paper-mode request without requiring candidate or date selection.
+    from src.research.expert_portfolio.rolling import RollingLibraryAdmissionReport
+
+    captured: list[object] = []
+
+    def _fake_rolling(request) -> RollingLibraryAdmissionReport:
+        captured.append(request)
+        return RollingLibraryAdmissionReport(
+            status="COMPLETE",
+            profile="technical-5symbol-rolling-v1",
+            mode="paper",
+            as_of="2026-07-07 20:00:00+00:00",
+            common_start="2022-04-01 00:00:00+00:00",
+            common_end="2026-07-07 20:00:00+00:00",
+            windows=(),
+            records=(),
+            n_folds=4,
+            median_fold_cagr=0.02,
+            worst_fold_cagr=0.0,
+            median_fold_calmar=0.5,
+            max_period_contribution=0.2,
+            fold_gate_pass=True,
+            oos_start="2024-07-01 00:00:00+00:00",
+            oos_end="2026-06-30 20:00:00+00:00",
+            oos_return=0.10,
+        )
+
+    monkeypatch.setattr(
+        expert_portfolio_cli.rolling_admission_module,
+        "run_rolling_library_admission",
+        _fake_rolling,
+    )
+    args = build_root_parser().parse_args([
+        "research", "run", "expert-portfolio-rolling",
+        "--profile", "technical-5symbol-rolling-v1",
+        "--as-of", "2026-07-07 20:00:00+00:00",
+        "--mode", "paper",
+    ])
+    args.handler(args)
+    assert len(captured) == 1
+    request = captured[0]
+    assert request.profile.symbols == ("BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT")
+    assert str(request.as_of) == "2026-07-07 20:00:00+00:00"
+    assert request.mode == "paper"
+    assert request.config.profile == "technical-5symbol-rolling-v1"
 
 
 def test_technical_expert_cli_parses_and_dispatches(monkeypatch) -> None:

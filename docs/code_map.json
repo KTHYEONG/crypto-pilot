@@ -313,6 +313,9 @@
   "src/research/expert_portfolio/registry.py": {
     "testing": "tests/unit/research/expert_portfolio/test_registry.py"
   },
+  "src/research/expert_portfolio/rolling.py": {
+    "testing": "tests/unit/research/expert_portfolio/test_rolling.py"
+  },
   "src/research/expert_portfolio/runners.py": {
     "testing": "tests/unit/research/expert_portfolio/test_catalog.py"
   },
@@ -436,6 +439,19 @@
   },
   "src/application/research/expert_portfolio/admission_backtest.py": {
     "testing": "tests/unit/application/test_admission_backtest.py"
+  },
+  "src/application/research/expert_portfolio/admission_pipeline.py": {
+    "testing": "tests/unit/application/test_library_admission_pipeline.py"
+  },
+  "src/application/research/expert_portfolio/rebalance_ledger.py": {
+    "testing": "tests/unit/application/test_rolling_library_admission.py"
+  },
+  "src/application/research/expert_portfolio/rolling_admission.py": {
+    "testing": "tests/unit/application/test_rolling_library_admission.py",
+    "architecture": "docs/results/library-admission-5symbols.md"
+  },
+  "src/application/research/expert_portfolio/window.py": {
+    "testing": "tests/unit/application/test_library_admission_pipeline.py"
   },
   "src/cli/commands/research/baseline.py": {
     "testing": "tests/unit/cli/test_research_commands.py"
