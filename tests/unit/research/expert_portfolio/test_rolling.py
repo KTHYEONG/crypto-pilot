@@ -357,3 +357,87 @@ class TestRollingProfileConfig:
         # RAP-09: an unknown rolling profile name raises ValueError.
         with pytest.raises(ValueError, match="unknown rolling profile"):
             rolling_admission_config_for_profile("technical-5symbol-rolling-v9", ("BTCUSDT",))
+
+    def test_rolling_admission_config_rejects_v3_with_global_winner_router(self) -> None:
+        # RAP-V3: priority_family_unique_v3 requires the per-symbol winner router
+        # and the shared one-bar base scenario, exactly like the v2 relaxation.
+        with pytest.raises(ValueError, match="router_kind"):
+            RollingAdmissionConfig(
+                proposal_search="priority_family_unique_v3",
+                router_kind="global_winner_v1",
+                base_delay_bars=1,
+            )
+
+    def test_rolling_admission_config_rejects_prefilter_top_k_on_exact_legacy_v1(self) -> None:
+        # RAP-V3: family_symbol_prefilter_top_k is meaningless for exact_legacy_v1
+        # and must never be silently ignored; values below 1 are rejected too.
+        with pytest.raises(ValueError, match="meaningless"):
+            RollingAdmissionConfig(
+                proposal_search="exact_legacy_v1",
+                family_symbol_prefilter_top_k=1,
+            )
+        with pytest.raises(ValueError, match="family_symbol_prefilter_top_k"):
+            RollingAdmissionConfig(
+                proposal_search="priority_family_unique_v3",
+                router_kind="per_symbol_winner_v2",
+                base_delay_bars=1,
+                family_symbol_prefilter_top_k=0,
+            )
+
+    def test_rolling_v1_and_v2_profiles_byte_identical_output_unaffected_by_v3_addition(
+        self,
+    ) -> None:
+        # RAP-V3: the v3 addition only adds the priority search profile and the
+        # disabled prefilter knob; v1/v2 config values, fingerprints, and profile
+        # builders are unchanged, and serialization stays byte-stable.
+        from src.research.expert_portfolio.admission_types import (
+            ROLLING_LIBRARY_ADMISSION_PROFILES,
+            resolve_rolling_library_admission_profile,
+            technical_5symbol_rolling_v1_profile,
+            technical_5symbol_rolling_v2_profile,
+        )
+
+        symbols = ("BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT")
+        v1 = rolling_admission_config_for_profile("technical-5symbol-rolling-v1", symbols)
+        v2 = rolling_admission_config_for_profile("technical-5symbol-rolling-v2", symbols)
+        assert v1.proposal_search == "exact_legacy_v1"
+        assert v1.router_kind == "global_winner_v1"
+        assert v1.base_delay_bars == 0
+        assert v2.proposal_search == "bounded_family_unique_v2"
+        assert v2.router_kind == "per_symbol_winner_v2"
+        assert v2.base_delay_bars == 1
+        assert v1.family_symbol_prefilter_top_k is None
+        assert v2.family_symbol_prefilter_top_k is None
+        expected_keys = {
+            "profile", "symbols", "scoring_months", "warmup_bars", "shortlist_budget",
+            "min_context_samples", "rebalance_months", "switch_cost", "initial_equity",
+            "router_kind", "proposal_search", "base_delay_bars",
+            "family_symbol_prefilter_top_k",
+        }
+        assert set(v1.fingerprint()) == expected_keys
+        assert set(v2.fingerprint()) == expected_keys
+        assert v1.fingerprint()["family_symbol_prefilter_top_k"] is None
+        assert v2.fingerprint()["family_symbol_prefilter_top_k"] is None
+        assert (
+            resolve_rolling_library_admission_profile("technical-5symbol-rolling-v1")
+            == technical_5symbol_rolling_v1_profile()
+        )
+        assert (
+            technical_5symbol_rolling_v1_profile().admission
+            == technical_5symbol_rolling_v2_profile().admission
+        )
+        assert "technical-5symbol-rolling-v3" in ROLLING_LIBRARY_ADMISSION_PROFILES
+        window = _canned_window()
+        selection = _canned_selection_report()
+        proposal = AdmissionProposal(("e0", "e1"), True)
+        training = (
+            _canned_report(PROPOSAL_A, lcb_obs=0.10, lcb_stress=0.10),
+            _canned_report(PROPOSAL_B, lcb_obs=0.12, lcb_stress=0.12),
+        )
+        audit1 = RollingCandidateAuditRecord.from_selection(
+            window, selection, (proposal,), training, proposal, "snap-key",
+        )
+        audit2 = RollingCandidateAuditRecord.from_selection(
+            window, selection, (proposal,), training, proposal, "snap-key",
+        )
+        assert audit1.to_canonical_bytes() == audit2.to_canonical_bytes()
