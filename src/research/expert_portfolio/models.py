@@ -7,6 +7,7 @@ quantile constant. This module has no admission dependency.
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
+from typing import Literal
 
 import pandas as pd
 
@@ -118,9 +119,13 @@ class ExpertPortfolioSpec:
     parameter variants therefore share an exposure budget and cash is always
     feasible. ``min_history_bars`` is the completed-history requirement before
     an expert can receive capital, ``confidence`` is the block-aware lower
-    confidence bound level, and ``router`` is the optional pre-registered
-    contextual winner router; ``None`` preserves the causal LCB-mix behaviour
-    exactly. No constraint is tuned on the sealed result.
+    confidence bound level, ``router`` is the optional pre-registered
+    contextual winner router, and ``router_kind`` selects the causal winner
+    allocation: ``"global_winner_v1"`` keeps the exact single global winner
+    while ``"per_symbol_winner_v2"`` picks at most one distinct-family winner
+    per symbol and distributes across symbol winners by inverse realized
+    volatility. ``None`` router preserves the causal LCB-mix behaviour exactly.
+    No constraint is tuned on the sealed result.
     """
 
     experts: tuple[ExpertDefinition, ...]
@@ -130,6 +135,7 @@ class ExpertPortfolioSpec:
     min_history_bars: int = 30
     confidence: float = 0.90
     router: ContextualRouterSpec | None = None
+    router_kind: Literal["global_winner_v1", "per_symbol_winner_v2"] = "global_winner_v1"
 
     def __post_init__(self) -> None:
         if not self.experts:
@@ -153,6 +159,15 @@ class ExpertPortfolioSpec:
             raise ValueError(
                 f"min_history_bars must be >= 1, got {self.min_history_bars}"
             )
+        if self.router_kind not in ("global_winner_v1", "per_symbol_winner_v2"):
+            raise ValueError(
+                f"router_kind must be 'global_winner_v1' or 'per_symbol_winner_v2', "
+                f"got {self.router_kind!r}"
+            )
+        if self.router_kind == "per_symbol_winner_v2" and self.router is None:
+            raise ValueError(
+                "router is required when router_kind is 'per_symbol_winner_v2'"
+            )
         lcb_z_score(self.confidence)
 
     def fingerprint(self) -> dict[str, object]:
@@ -169,6 +184,7 @@ class ExpertPortfolioSpec:
             "min_history_bars": self.min_history_bars,
             "confidence": self.confidence,
             "router": asdict(self.router) if self.router is not None else None,
+            "router_kind": self.router_kind,
         }
 
 
