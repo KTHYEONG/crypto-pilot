@@ -264,6 +264,7 @@ class TestRollingLibraryAdmission:
         report1 = ra.run_rolling_library_admission(
             _request("2024-10-01 00:00:00+00:00"),
             ledger_path=ledger, pointer_path=pointer,
+            audit_path=tmp_path / "rolling_candidate_audit.jsonl",
         )
         first_record = next(r for r in report1.records if r.rebalance_start.startswith("2024-07-01"))
         assert first_record.observed_end == "2024-06-30 20:00:00+00:00"
@@ -271,6 +272,7 @@ class TestRollingLibraryAdmission:
         report2 = ra.run_rolling_library_admission(
             _request("2026-07-07 20:00:00+00:00"),
             ledger_path=ledger, pointer_path=pointer,
+            audit_path=tmp_path / "rolling_candidate_audit.jsonl",
         )
         replay_record = next(r for r in report2.records if r.rebalance_start.startswith("2024-07-01"))
         assert replay_record == first_record
@@ -293,10 +295,12 @@ class TestRollingLibraryAdmission:
         report1 = ra.run_rolling_library_admission(
             _request("2026-07-07 20:00:00+00:00"),
             ledger_path=ledger, pointer_path=pointer,
+            audit_path=tmp_path / "rolling_candidate_audit.jsonl",
         )
         report2 = ra.run_rolling_library_admission(
             _request("2026-07-07 20:00:00+00:00"),
             ledger_path=ledger, pointer_path=pointer,
+            audit_path=tmp_path / "rolling_candidate_audit.jsonl",
         )
         lines = [
             line for line in ledger.read_text(encoding="utf-8").splitlines() if line.strip()
@@ -345,7 +349,33 @@ class TestRollingLibraryAdmission:
                 request,
                 ledger_path=tmp_path / "rebalance.jsonl",
                 pointer_path=tmp_path / "current.json",
+                audit_path=tmp_path / "rolling_candidate_audit.jsonl",
             )
+
+    def test_completed_window_audit_is_persisted_before_later_failure(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: pytest.TempPathFactory,
+    ) -> None:
+        _patch_service(monkeypatch)
+        calls = 0
+
+        def fail_on_second(profile, window, config, incumbent):
+            nonlocal calls
+            calls += 1
+            if calls == 2:
+                raise RuntimeError("synthetic later-window failure")
+            return _fake_select(profile, window, config, incumbent)
+
+        monkeypatch.setattr(ra, "_select_for_window", fail_on_second)
+        audit_path = tmp_path / "rolling_candidate_audit.jsonl"
+        with pytest.raises(RuntimeError, match="synthetic later-window failure"):
+            ra.run_rolling_library_admission(
+                _request("2025-01-01 00:00:00+00:00"),
+                ledger_path=tmp_path / "rebalance.jsonl",
+                pointer_path=tmp_path / "current.json",
+                audit_path=audit_path,
+            )
+
+        assert len(audit_path.read_text(encoding="utf-8").splitlines()) == 1
 
     def test_live_mode_fails_closed_without_separate_authorization(self) -> None:
         with pytest.raises(RuntimeError, match="separate authorization"):
@@ -388,6 +418,7 @@ class TestRollingInternalPaths:
             _request("2022-06-01 00:00:00+00:00"),
             ledger_path=tmp_path / "rebalance.jsonl",
             pointer_path=tmp_path / "current.json",
+            audit_path=tmp_path / "rolling_candidate_audit.jsonl",
         )
         assert report.status == "NO_WINDOWS"
         assert report.records == ()
@@ -560,3 +591,59 @@ class TestRollingInternalPaths:
         folds = ra._fold_summary(pd.Series([1.0], dtype="float64"))
         assert folds.n_folds == 0
         assert folds.gate_pass is True
+
+
+class TestRollingCandidateAuditLedger:
+    def test_repeated_audit_append_leaves_one_line_and_returns_original(
+        self, tmp_path: pytest.TempPathFactory,
+    ) -> None:
+        # RAP-02: an identical replay returns the stored record without writing.
+        from src.application.research.expert_portfolio.rebalance_ledger import (
+            append_rolling_candidate_audit,
+        )
+        from src.research.expert_portfolio.rolling import (
+            RollingCandidateAuditRecord,
+        )
+
+        audit_path = tmp_path / "rolling_candidate_audit.jsonl"
+        window = build_rolling_rebalance_schedule(
+            pd.Timestamp("2022-04-01", tz="UTC"),
+            pd.Timestamp("2024-10-01", tz="UTC"),
+            ra.RollingAdmissionConfig(),
+        )[0]
+        selection = _canned_selection_report()
+        proposal = AdmissionProposal(("e0", "e1"), True)
+        audit = RollingCandidateAuditRecord.from_selection(
+            window, selection, (proposal,), (_training_report(proposal.proposal_id),),
+            proposal, "snap-key",
+        )
+        stored1 = append_rolling_candidate_audit(audit, audit_path)
+        stored2 = append_rolling_candidate_audit(audit, audit_path)
+        assert stored2 == stored1
+        assert stored2.snapshot_key == "snap-key"
+        lines = [
+            line for line in audit_path.read_text(encoding="utf-8").splitlines() if line.strip()
+        ]
+        assert len(lines) == 1
+
+    def test_malformed_existing_audit_line_fails_closed(
+        self, tmp_path: pytest.TempPathFactory,
+    ) -> None:
+        # RAP-02: a malformed audit JSONL line raises ValueError, never skipped.
+        from src.application.research.expert_portfolio.rebalance_ledger import (
+            append_rolling_candidate_audit,
+        )
+        from src.research.expert_portfolio.rolling import RollingCandidateAuditRecord
+
+        audit_path = tmp_path / "rolling_candidate_audit.jsonl"
+        audit_path.write_text("not-json\n", encoding="utf-8")
+        window = build_rolling_rebalance_schedule(
+            pd.Timestamp("2022-04-01", tz="UTC"),
+            pd.Timestamp("2024-10-01", tz="UTC"),
+            ra.RollingAdmissionConfig(),
+        )[0]
+        audit = RollingCandidateAuditRecord.from_selection(
+            window, _canned_selection_report(), (), (), None, "snap-key",
+        )
+        with pytest.raises(ValueError, match="malformed rolling candidate audit line"):
+            append_rolling_candidate_audit(audit, audit_path)
