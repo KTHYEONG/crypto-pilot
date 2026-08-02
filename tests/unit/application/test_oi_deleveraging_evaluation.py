@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from src.application.research.oi_deleveraging.evaluation import run_oi_deleveraging_evaluation
+from src.application.research.oi.evaluation import run_oi_deleveraging_evaluation
 from src.research.contracts import OIDeleveragingEvaluationRequest
 from src.research.evaluation.promotion import PromotionResult
 from src.research.expert_portfolio.catalog import default_catalog
@@ -27,11 +27,11 @@ def test_oi_deleveraging_failure_is_not_registered(
     data = _two_year_oi_data(make_oi_market_data)
 
     monkeypatch.setattr(
-        "src.application.research.oi_deleveraging.evaluation.load_oi_deleveraging_market_data",
+        "src.application.research.oi.evaluation.load_oi_deleveraging_market_data",
         lambda symbol, start, end: data,
     )
     monkeypatch.setattr(
-        "src.application.research.oi_deleveraging.evaluation.oi_deleveraging_data_hashes",
+        "src.application.research.oi.evaluation.oi_deleveraging_data_hashes",
         lambda symbol: {
             "perp_ohlcv": "a" * 64,
             "funding": "b" * 64,
@@ -61,7 +61,7 @@ def test_oi_deleveraging_missing_data_returns_pending(monkeypatch) -> None:
         raise DataIntegrityError("metrics data missing for BTCUSDT")
 
     monkeypatch.setattr(
-        "src.application.research.oi_deleveraging.evaluation.load_oi_deleveraging_market_data",
+        "src.application.research.oi.evaluation.load_oi_deleveraging_market_data",
         _missing,
     )
     report = run_oi_deleveraging_evaluation(
