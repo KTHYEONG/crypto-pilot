@@ -221,6 +221,10 @@ class LibraryAdmissionBacktestReport:
     allocation_cost_total: float
     stress_allocation_cost_total: float
     execution_workers: int
+    # Telemetry: measured wall-clock seconds of this proposal's base+stress
+    # backtest. Never part of fingerprint()/promotion semantics, matching
+    # execution_workers' existing treatment.
+    wall_seconds: float = 0.0
     code_hash: str = ""
     data_hashes: Mapping[str, Mapping[str, str]] = field(default_factory=dict)
     # Selection-window diversification rank key of the proposing subset. It is

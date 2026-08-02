@@ -9,14 +9,14 @@ only; their returns never enter scoring or OOS PnL. Paper mode produces no
 trading side effect; live execution requires explicit separate authorization.
 """
 
-from __future__ import annotations
+from __future__ import annotations  # noqa: I001
 
 import dataclasses
 import logging
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Literal
+from typing import Literal, cast
 
 import numpy as np
 import pandas as pd
@@ -40,9 +40,7 @@ from src.application.research.expert_portfolio.admission_backtest import (
 from src.application.research.expert_portfolio.rebalance_ledger import (
     CURRENT_PROFILE_POINTER_PATH,
     REBALANCE_LEDGER_PATH,
-    ROLLING_CANDIDATE_AUDIT_PATH,
     append_rebalance_record,
-    append_rolling_candidate_audit,
     rebalance_snapshot_key,
     write_current_profile,
 )
@@ -51,24 +49,23 @@ from src.common.errors import DataIntegrityError
 from src.research.contracts import CostModel
 from src.research.evaluation.metrics import compute_metrics
 from src.research.evaluation.promotion import compose_promotion_verdict
-from src.research.evaluation.reliability import (
+from src.research.evaluation.reliability import (  # noqa: I001
     FoldDistributionResult,
     ReliabilityGateConfig,
     compute_equal_duration_fold_distribution,
     compute_equity_reliability_gate,
     compute_fold_distribution,
+    derive_cost_multiple_hurdle_rate, equity_span_years,
 )
 from src.research.expert_portfolio.admission import (
     BoundedProposalSearchResult,
     enrich_proposal_diagnostics,
     evaluate_library_admission,
-    generate_bounded_rolling_proposals_result,
     pair_compatibility_matrix,
     pairwise_joint_negative_rates,
     pairwise_log_return_correlation,
     prefilter_admitted_by_family_symbol,
     priority_shortlist_family_unique_proposals,
-    shortlist_admission_proposals,
 )
 from src.research.expert_portfolio.admission_reports import (
     LibraryAdmissionBacktestReport,
@@ -92,6 +89,7 @@ from src.research.expert_portfolio.rolling import (
     RollingLibraryAdmissionReport,
     RollingSelectionRecord,
     build_rolling_rebalance_schedule,
+    resolve_dynamic_shortlist_budget,
     select_rebalance_proposal,
 )
 from src.research.provenance.code_manifest import TECHNICAL_CODE_UNITS, compute_code_hash
@@ -304,9 +302,14 @@ def _run_proposal_from_evidence(
 
     The proposal only slices the evidence base/stress panels, the causal context,
     and the component trades it needs, then computes its master portfolios; it
-    never loads market data or reruns a technical candidate. The selected router
-    kind follows the profile config.
+    never loads market data or reruns a technical candidate. The rolling path
+    always uses the per-symbol-winner router (hardcoded), and the observation
+    gate's hurdle is derived from the proposal's measured annualized
+    allocation-turnover cost scaled by ``config.hurdle_cost_multiple`` rather
+    than a flat rate. ``wall_seconds`` captures the combined base+stress
+    backtest wall-clock time.
     """
+    started = time.perf_counter()
     expert_ids = tuple(proposal.expert_ids)
     definitions = tuple(
         definition
@@ -318,7 +321,7 @@ def _run_proposal_from_evidence(
             f"evidence is missing definitions for proposal {proposal.proposal_id}"
         )
     spec = ExpertPortfolioSpec(
-        experts=definitions, router=profile.router, router_kind=config.router_kind,
+        experts=definitions, router=profile.router, router_kind="per_symbol_winner_v2",
     )
     costs = CostModel()
 
@@ -339,6 +342,10 @@ def _run_proposal_from_evidence(
     observation_metrics = compute_metrics(base_result.equity, base_result.trades)
     observation_gate = compute_equity_reliability_gate(
         base_result.equity, len(base_result.trades),
+        config=dataclasses.replace(
+            ReliabilityGateConfig(),
+            hurdle_rate=derive_cost_multiple_hurdle_rate(base.allocation_cost.sum(), equity_span_years(base_result.equity), config.hurdle_cost_multiple),
+        ),
     )
     observation_folds = compute_fold_distribution(base_result)
 
@@ -368,6 +375,7 @@ def _run_proposal_from_evidence(
         config=dataclasses.replace(ReliabilityGateConfig(), hurdle_rate=0.0),
     )
     stress_folds = compute_fold_distribution(stress_result)
+    wall_seconds = time.perf_counter() - started
     promotion = compose_promotion_verdict(
         observation_gate, observation_folds, stress_gate, None,
     )
@@ -389,6 +397,7 @@ def _run_proposal_from_evidence(
         allocation_cost_total=float(base.allocation_cost.sum()),
         stress_allocation_cost_total=float(stress.allocation_cost.sum()),
         execution_workers=max(evidence.base_workers, evidence.stress_workers),
+        wall_seconds=wall_seconds,
         code_hash=evidence.code_hash,
         data_hashes={symbol: technical_data_hashes(symbol) for symbol in symbols},
     )
@@ -491,163 +500,19 @@ def _select_for_window(
     tuple[AdmissionProposal, ...],
     tuple[LibraryAdmissionBacktestReport, ...],
 ]:
-    """Replay selection for one window using only data through ``observed_end``."""
-    if config.proposal_search == "bounded_family_unique_v2":
-        return _select_for_window_v2(profile, window, config, incumbent)
-    if config.proposal_search == "priority_family_unique_v3":
-        return _select_for_window_v3(profile, window, config, incumbent)
-    panel, trade_counts, definitions, _ = _build_candidate_panel(
-        profile, window.load_start, window.observed_end,
-    )
-    scored_panel = _slice_scored_panel(panel, window.scored_start)
-    context = _build_admission_context(
-        profile.router, panel.index, window.load_start, window.observed_end,
-    )
-    scored_context = context.loc[scored_panel.index]
-    selection = evaluate_library_admission(
-        scored_panel,
-        trade_counts,
-        definitions,
-        scored_context,
-        profile.router,
-        profile.admission,
-    )
-    candidates = list(shortlist_admission_proposals(selection.proposals, config.shortlist_budget))
-    if incumbent is not None:
-        shortlisted_ids = {proposal.proposal_id for proposal in candidates}
-        incumbent_proposal = next(
-            (
-                proposal
-                for proposal in selection.proposals
-                if proposal.proposal_id == incumbent.proposal_id
-            ),
-            None,
-        )
-        if incumbent_proposal is not None and incumbent_proposal.proposal_id not in shortlisted_ids:
-            candidates.append(incumbent_proposal)
-    training_reports = tuple(
-        dataclasses.replace(
-            _run_proposal_backtest(
-                proposal.expert_ids,
-                profile.router,
-                window.scored_start,
-                window.observed_end,
-                config.initial_equity,
-                profile.admission.max_workers,
-            ),
-            diversification_rank_key=proposal.rank_key(),
-        )
-        for proposal in candidates
-    )
-    return selection, tuple(candidates), training_reports
+    """Replay selection for one window using only data through ``observed_end``.
 
-
-def _select_for_window_v2(
-    profile: TechnicalLibraryAdmissionRequest,
-    window: RebalanceWindow,
-    config: RollingAdmissionConfig,
-    incumbent: AdmissionProposal | None,
-) -> tuple[
-    LibraryAdmissionReport,
-    tuple[AdmissionProposal, ...],
-    tuple[LibraryAdmissionBacktestReport, ...],
-]:
-    """Bounded same-symbol selection for one window over shared evidence."""
-    evidence = build_window_scenario_evidence(profile, window, config)
-    scored_panel = _slice_scored_panel(evidence.base_panel, window.scored_start)
-    scored_context = evidence.base_context.loc[scored_panel.index]
-    selection = evaluate_library_admission(
-        scored_panel,
-        evidence.base_trade_counts,
-        evidence.definitions,
-        scored_context,
-        profile.router,
-        profile.admission,
-        proposal_search=config.proposal_search,
-    )
-    admitted = tuple(
-        definition
-        for definition, candidate in zip(
-            evidence.definitions, selection.candidates, strict=True,
-        )
-        if candidate.admitted
-    )
-    admitted_ids = {definition.expert_id for definition in admitted}
-    if admitted:
-        completed = scored_panel[[d.expert_id for d in admitted]].to_numpy(
-            dtype=np.float64,
-        )[1:]
-        correlation = pairwise_log_return_correlation(completed)
-        joint_negative = pairwise_joint_negative_rates(completed)
-        compatibility = pair_compatibility_matrix(
-            completed, admitted, profile.admission, allow_same_symbol=True,
-        )
-        search_result = generate_bounded_rolling_proposals_result(
-                admitted, compatibility, profile.admission, config.shortlist_budget,
-        )
-        shortlist = list(search_result.proposals)
-        shortlist = [
-            enrich_proposal_diagnostics(proposal, correlation, joint_negative, admitted)
-            for proposal in shortlist
-        ]
-    else:
-        shortlist = []
-        search_result = None
-    if (
-        incumbent is not None
-        and not any(
-            proposal.proposal_id == incumbent.proposal_id for proposal in shortlist
-        )
-        and set(incumbent.expert_ids).issubset(admitted_ids)
-    ):
-        shortlist.append(
-            enrich_proposal_diagnostics(incumbent, correlation, joint_negative, admitted),
-        )
-    selection = dataclasses.replace(
-        selection,
-        proposals=tuple(shortlist),
-        generated_nodes=search_result.generated_nodes if search_result else 0,
-        generation_limit=(
-            search_result.generation_limit
-            if search_result else profile.admission.max_combinations
-        ),
-        generation_status=(
-            search_result.generation_status
-            if search_result else "NO_ADMITTED_CANDIDATES"
-        ),
-    )
-    training_reports = tuple(
-        dataclasses.replace(
-            _run_proposal_from_evidence(
-                proposal, evidence, profile, window, config,
-            ),
-            diversification_rank_key=proposal.rank_key(),
-        )
-        for proposal in shortlist
-    )
-    return selection, tuple(shortlist), training_reports
-
-
-def _select_for_window_v3(
-    profile: TechnicalLibraryAdmissionRequest,
-    window: RebalanceWindow,
-    config: RollingAdmissionConfig,
-    incumbent: AdmissionProposal | None,
-) -> tuple[
-    LibraryAdmissionReport,
-    tuple[AdmissionProposal, ...],
-    tuple[LibraryAdmissionBacktestReport, ...],
-]:
-    """Exact best-first selection for one window over shared evidence.
-
-    Structurally identical to :func:`_select_for_window_v2` except that the
-    final generation call is
-    :func:`priority_shortlist_family_unique_proposals`, which fails closed via
-    ``generation_status='FAIL_CLOSED_NODE_BUDGET'`` instead of raising, and the
-    optional ``family_symbol_prefilter_top_k`` curation is applied to the
-    admitted candidates before the correlation/joint/compatibility matrices are
-    built. A node-budget failure yields an empty shortlist and falls through to
-    CASH exactly like the no-admitted-candidates branch.
+    Always runs the sole canonical priority family-unique best-first search over
+    the shared base/stress evidence (per-symbol-winner routing is hardcoded).
+    Backtesting is two-phase: first ``config.min_shortlist_budget`` proposals
+    are generated and backtested as a probe; their measured wall-times
+    extrapolate the window's effective shortlist budget via
+    :func:`resolve_dynamic_shortlist_budget`. Only when that budget exceeds the
+    probe size is the (cheap) best-first search re-run with the larger budget,
+    and only the newly surfaced proposals are backtested — probe results are
+    reused by proposal id rather than re-run. This makes the expansion driven
+    purely by the measured budget, never capped by the probe generation size
+    itself.
     """
     evidence = build_window_scenario_evidence(profile, window, config)
     scored_panel = _slice_scored_panel(evidence.base_panel, window.scored_start)
@@ -659,7 +524,7 @@ def _select_for_window_v3(
         scored_context,
         profile.router,
         profile.admission,
-        proposal_search=config.proposal_search,
+        proposal_search="priority_family_unique_v3",
     )
     admitted_indexes = tuple(
         i for i, candidate in enumerate(selection.candidates) if candidate.admitted
@@ -671,9 +536,11 @@ def _select_for_window_v3(
         )
     admitted = tuple(evidence.definitions[i] for i in admitted_indexes)
     admitted_ids = {definition.expert_id for definition in admitted}
-    search_result: BoundedProposalSearchResult | None = None
     correlation = np.empty((0, 0))
     joint_negative = np.empty((0, 0))
+    compatibility = np.empty((0, 0), dtype=bool)
+    search_result: BoundedProposalSearchResult | None = None
+    probe_shortlist: list[AdmissionProposal] = []
     if admitted:
         completed = scored_panel[[d.expert_id for d in admitted]].to_numpy(
             dtype=np.float64,
@@ -685,15 +552,53 @@ def _select_for_window_v3(
         )
         search_result = priority_shortlist_family_unique_proposals(
             admitted, correlation, joint_negative, compatibility,
-            profile.admission, config.shortlist_budget,
+            profile.admission, config.min_shortlist_budget,
         )
-        shortlist = (
+        probe_shortlist = (
             list(search_result.proposals)
             if search_result.generation_status == "COMPLETE"
             else []
         )
-    else:
-        shortlist = []
+
+    def _backtest(proposal: AdmissionProposal) -> LibraryAdmissionBacktestReport:
+        return dataclasses.replace(
+            _run_proposal_from_evidence(proposal, evidence, profile, window, config),
+            diversification_rank_key=proposal.rank_key(),
+        )
+
+    probe_reports = tuple(_backtest(proposal) for proposal in probe_shortlist)
+    shortlist = list(probe_shortlist)
+    training_reports = probe_reports
+    generated_nodes = search_result.generated_nodes if search_result else 0
+
+    if probe_reports:
+        probe_wall_seconds = tuple(report.wall_seconds for report in probe_reports)
+        effective_budget = resolve_dynamic_shortlist_budget(
+            probe_wall_seconds, config.max_backtest_wall_seconds_per_window,
+            config.min_shortlist_budget,
+        )
+        if effective_budget > len(probe_shortlist):
+            expanded_result = priority_shortlist_family_unique_proposals(
+                admitted, correlation, joint_negative, compatibility,
+                profile.admission, effective_budget,
+            )
+            generated_nodes += expanded_result.generated_nodes
+            if expanded_result.generation_status == "COMPLETE":
+                expanded_shortlist = list(expanded_result.proposals)
+                expanded_ids = {proposal.proposal_id for proposal in expanded_shortlist}
+                kept_probe_reports = tuple(
+                    report for report in probe_reports if report.proposal_id in expanded_ids
+                )
+                covered_ids = {report.proposal_id for report in kept_probe_reports}
+                new_proposals = [
+                    proposal for proposal in expanded_shortlist
+                    if proposal.proposal_id not in covered_ids
+                ]
+                new_reports = tuple(_backtest(proposal) for proposal in new_proposals)
+                shortlist = expanded_shortlist
+                training_reports = kept_probe_reports + new_reports
+                search_result = expanded_result
+
     if (
         search_result is not None
         and search_result.generation_status == "COMPLETE"
@@ -703,13 +608,16 @@ def _select_for_window_v3(
         )
         and set(incumbent.expert_ids).issubset(admitted_ids)
     ):
-        shortlist.append(
-            enrich_proposal_diagnostics(incumbent, correlation, joint_negative, admitted),
+        enriched_incumbent = enrich_proposal_diagnostics(
+            incumbent, correlation, joint_negative, admitted,
         )
+        shortlist.append(enriched_incumbent)
+        training_reports = (*training_reports, _backtest(enriched_incumbent))
+
     selection = dataclasses.replace(
         selection,
         proposals=tuple(shortlist),
-        generated_nodes=search_result.generated_nodes if search_result else 0,
+        generated_nodes=generated_nodes,
         generation_limit=(
             search_result.generation_limit
             if search_result else profile.admission.max_combinations
@@ -718,15 +626,6 @@ def _select_for_window_v3(
             search_result.generation_status
             if search_result else "NO_ADMITTED_CANDIDATES"
         ),
-    )
-    training_reports = tuple(
-        dataclasses.replace(
-            _run_proposal_from_evidence(
-                proposal, evidence, profile, window, config,
-            ),
-            diversification_rank_key=proposal.rank_key(),
-        )
-        for proposal in shortlist
     )
     return selection, tuple(shortlist), training_reports
 
@@ -750,11 +649,10 @@ def _deployment_equity(
         return pd.Series(1.0, index=index, name="equity", dtype="float64")
     code_hash = compute_code_hash(TECHNICAL_CODE_UNITS)
     definitions = _materialize_selected_definitions(
-        selected.expert_ids, code_hash,
-        allow_same_symbol=config.proposal_search != "exact_legacy_v1",
+        selected.expert_ids, code_hash, allow_same_symbol=True,
     )
     spec = ExpertPortfolioSpec(
-        experts=definitions, router=profile.router, router_kind=config.router_kind,
+        experts=definitions, router=profile.router, router_kind="per_symbol_winner_v2",
     )
     costs = CostModel()
     base_evidence, _ = _run_selected_tasks(
@@ -877,8 +775,6 @@ def _run_one_rebalance(
         audit,
         incumbent_kept=incumbent_kept,
         execution={
-            "router_kind": request.config.router_kind,
-            "proposal_search": request.config.proposal_search,
             "base_delay_bars": request.config.base_delay_bars,
             "stress_delay_bars": 1,
             "config_fingerprint": request.config.fingerprint(),
@@ -904,23 +800,74 @@ def _run_one_rebalance(
     return record, segment, selected, audit
 
 
+def log_rolling_candidate_audit(audit: RollingCandidateAuditRecord) -> None:
+    """Emit one window's candidate audit as structured DEBUG log lines.
+
+    Replaces the old append-only ``rolling_candidate_audit.jsonl`` blob with
+    flat ``[DATA]``/``[EVAL]`` tagged key=value lines following
+    ``.claude/rules/logging.md``'s schema: window timing, admission aggregates,
+    generation telemetry, the top-ranked shortlist summary (by
+    ``selection_primary``, truncated to the top 3 with an explicit
+    ``_truncated`` marker), and the final selected/CASH decision. The full
+    candidates/proposals/training arrays are never logged verbatim.
+    """
+    window = audit.window
+    selection = audit.selection
+    _logger.debug(
+        "[DATA] rebalance_start=%s status=%s scored_start=%s observed_end=%s",
+        window.get("rebalance_start", ""), window.get("status", ""),
+        window.get("scored_start", ""), window.get("observed_end", ""),
+    )
+    admitted = sum(1 for candidate in audit.candidates if candidate.get("admitted"))
+    _logger.debug(
+        "[DATA] candidates_total=%d candidates_admitted=%d coverage_states=%s coverage_sufficient=%s",
+        len(audit.candidates), admitted,
+        selection.get("covered_states", 0), selection.get("coverage_sufficient", False),
+    )
+    _logger.debug(
+        "[EVAL] generation_status=%s generated_nodes=%d generation_limit=%d shortlist_size=%d",
+        selection.get("generation_status", ""), selection.get("generated_nodes", 0),
+        selection.get("generation_limit", 0), len(audit.shortlist),
+    )
+    ranked = sorted(
+        audit.training,
+        key=lambda entry: float(cast("float | int | str", entry.get("selection_primary", 0.0))),
+    )
+    max_shown = 3
+    for i, entry in enumerate(ranked[:max_shown], start=1):
+        _logger.debug(
+            "[EVAL] top%d id=%s size=%d obs_verdict=%s stress_verdict=%s obs_lcb90=%.4f fold_pass=%s",
+            i, entry.get("proposal_id", ""), entry.get("expert_count", 0),
+            entry.get("observation_gate_verdict", ""), entry.get("stress_gate_verdict", ""),
+            float(cast("float | int | str", entry.get("observation_lcb90", 0.0))),
+            entry.get("observation_folds_pass", False),
+        )
+    if len(ranked) > max_shown:
+        _logger.debug(
+            "[EVAL] top%d_of_%d_truncated=%d", max_shown, len(ranked), len(ranked),
+        )
+    selected_id = audit.selected.get("proposal_id") if audit.selected else "CASH"
+    _logger.debug(
+        "[EVAL] selected=%s reason=%s", selected_id, audit.cash_reason or "",
+    )
+
+
 def run_rolling_library_admission(
     request: RollingLibraryAdmissionRequest,
     *,
     ledger_path: Path = REBALANCE_LEDGER_PATH,
     pointer_path: Path = CURRENT_PROFILE_POINTER_PATH,
-    audit_path: Path = ROLLING_CANDIDATE_AUDIT_PATH,
 ) -> RollingLibraryAdmissionReport:
     """Replay every eligible rebalance through ``as_of`` and stitch closed quarters.
 
     Each historical window freezes its own ``observed_end`` snapshot, warm-up
     observations never enter scoring or OOS PnL, a switch is charged once at the
     following executable bar, and decisions are written append-only and
-    idempotently. Every window also emits one structured candidate audit to
-    ``audit_path`` (append-only and idempotent); the audit never touches the
-    rebalance ledger, pointer, catalog, or trading state. A request for a
-    complete historical verdict fails closed while the newest deployment
-    quarter is still incomplete.
+    idempotently. Every window also emits one structured candidate audit as
+    DEBUG log lines via :func:`log_rolling_candidate_audit` (no audit file is
+    written); the audit never touches the rebalance ledger, pointer, catalog, or
+    trading state. A request for a complete historical verdict fails closed
+    while the newest deployment quarter is still incomplete.
     """
     window = resolve_common_technical_window(
         request.profile.symbols, None, request.as_of,
@@ -981,11 +928,8 @@ def run_rolling_library_admission(
             snapshot_key = rebalance_snapshot_key(
                 _snapshot_inputs(request, w, code_hash, data_hashes),
             )
-            append_rolling_candidate_audit(
-                RollingCandidateAuditRecord.from_failure(
-                    w, snapshot_key, str(exc),
-                ),
-                audit_path,
+            log_rolling_candidate_audit(
+                RollingCandidateAuditRecord.from_failure(w, snapshot_key, str(exc)),
             )
             _logger.warning(
                 "[EVAL] rolling status=PARTIAL_FAILURE window=%s reason=%s",
@@ -1001,11 +945,7 @@ def run_rolling_library_admission(
         records.append(stored)
         write_current_profile(stored, pointer_path)
         completed_windows.append(w)
-        _logger.debug(
-            "[DATA] rolling_candidate_audit=%s",
-            audit.to_canonical_bytes().decode("utf-8"),
-        )
-        append_rolling_candidate_audit(audit, audit_path)
+        log_rolling_candidate_audit(audit)
         if w.status == "closed":
             segments.append(segment)
             deployment_proposal_ids.append(record.proposal_id)
@@ -1051,6 +991,7 @@ def _check_contract() -> None:
     """Executable assertions locking the rolling application surface."""
     assert run_rolling_library_admission.__name__ == "run_rolling_library_admission"
     assert build_window_scenario_evidence.__name__ == "build_window_scenario_evidence"
+    assert log_rolling_candidate_audit.__name__ == "log_rolling_candidate_audit"
 
 
 _check_contract()
@@ -1059,5 +1000,6 @@ __all__ = [
     "RollingLibraryAdmissionRequest",
     "WindowScenarioEvidence",
     "build_window_scenario_evidence",
+    "log_rolling_candidate_audit",
     "run_rolling_library_admission",
 ]

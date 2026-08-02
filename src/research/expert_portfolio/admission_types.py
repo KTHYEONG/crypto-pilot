@@ -355,78 +355,16 @@ def resolve_library_admission_profile(name: str) -> TechnicalLibraryAdmissionReq
     return builder()
 
 
-def technical_5symbol_rolling_v1_profile() -> TechnicalLibraryAdmissionRequest:
+def technical_5symbol_rolling_profile() -> TechnicalLibraryAdmissionRequest:
     """Return the quarterly rolling walk-forward admission profile.
 
-    The profile freezes the same 18-source, five-symbol candidate universe,
-    router, activity evidence, pair screen, proposal sizes, and combination
-    budget as the first frozen profile, but carries no fixed selection dates:
-    every rebalance decision freezes its own ``as_of`` snapshot and the rolling
-    service resolves each scored window causally. The static 2025 holdout
-    cutoff stays out of this profile's contract.
-    """
-    return TechnicalLibraryAdmissionRequest(
-        candidate_sources=tuple(
-            candidate.return_source for candidate in TECHNICAL_CANDIDATES
-        ),
-        symbols=("BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT"),
-        router=ContextualRouterSpec("BTCUSDT", 48, 48, 96),
-        admission=LibraryAdmissionConfig(
-            min_experts=2,
-            max_experts=5,
-            min_closed_trades=20,
-            min_active_return_bars=200,
-            max_abs_pairwise_log_return_correlation=0.50,
-            max_joint_negative_return_rate=0.15,
-            min_context_covered_states=6,
-            max_combinations=1_000_000,
-            max_workers=None,
-        ),
-        start=None,
-        end=None,
-    )
-
-
-def technical_5symbol_rolling_v2_profile() -> TechnicalLibraryAdmissionRequest:
-    """Return the v2 quarterly rolling walk-forward admission profile.
-
     The universe, router, activity evidence, and pair screen are identical to
-    the v1 rolling profile, but ``max_combinations`` now bounds the explored
-    graph nodes of the deterministic same-symbol family-unique search rather
-    than the exact all-combination count. The v2 router kind, proposal-search
-    mode, and shared base scenario are selected by the rolling config from the
-    profile name; v1 semantics are never changed.
-    """
-    return TechnicalLibraryAdmissionRequest(
-        candidate_sources=tuple(
-            candidate.return_source for candidate in TECHNICAL_CANDIDATES
-        ),
-        symbols=("BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT"),
-        router=ContextualRouterSpec("BTCUSDT", 48, 48, 96),
-        admission=LibraryAdmissionConfig(
-            min_experts=2,
-            max_experts=5,
-            min_closed_trades=20,
-            min_active_return_bars=200,
-            max_abs_pairwise_log_return_correlation=0.50,
-            max_joint_negative_return_rate=0.15,
-            min_context_covered_states=6,
-            max_combinations=1_000_000,
-            max_workers=None,
-        ),
-        start=None,
-        end=None,
-    )
-
-
-def technical_5symbol_rolling_v3_profile() -> TechnicalLibraryAdmissionRequest:
-    """Return the v3 quarterly rolling walk-forward admission profile.
-
-    The universe, router, activity evidence, and pair screen are identical to
-    the v2 rolling profile; only the search algorithm changes, selected by the
-    rolling config as ``priority_family_unique_v3`` (exact best-first per-size
-    top-N) with the prefilter disabled by default so the full admitted universe
-    reaches screening. v1/v2 semantics are never changed.
+    the static 2022 profile; only the search algorithm differs, selected by the
+    rolling config as the exact best-first per-size top-N priority search with
+    the prefilter disabled by default so the full admitted universe reaches
+    screening. The profile carries no fixed selection dates: every rebalance
+    decision freezes its own ``as_of`` snapshot and the rolling service resolves
+    each scored window causally.
     """
     return TechnicalLibraryAdmissionRequest(
         candidate_sources=tuple(
@@ -451,9 +389,7 @@ def technical_5symbol_rolling_v3_profile() -> TechnicalLibraryAdmissionRequest:
 
 
 ROLLING_LIBRARY_ADMISSION_PROFILES: Mapping[str, Callable[[], TechnicalLibraryAdmissionRequest]] = {
-    "technical-5symbol-rolling-v1": technical_5symbol_rolling_v1_profile,
-    "technical-5symbol-rolling-v2": technical_5symbol_rolling_v2_profile,
-    "technical-5symbol-rolling-v3": technical_5symbol_rolling_v3_profile,
+    "technical-5symbol-rolling": technical_5symbol_rolling_profile,
 }
 
 
@@ -483,7 +419,5 @@ __all__ = [
     "resolve_library_admission_profile",
     "resolve_rolling_library_admission_profile",
     "technical_5symbol_2022_v1_profile",
-    "technical_5symbol_rolling_v1_profile",
-    "technical_5symbol_rolling_v2_profile",
-    "technical_5symbol_rolling_v3_profile",
+    "technical_5symbol_rolling_profile",
 ]
