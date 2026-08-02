@@ -4,8 +4,8 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from src.application.research.expert_portfolio import admission_backtest as app
-from src.application.research.expert_portfolio.admission_backtest import (
+from src.application.research.expert import admission_backtest as app
+from src.application.research.expert.admission_backtest import (
     run_technical_library_admission_backtest,
 )
 from src.research.expert_portfolio.admission_types import (

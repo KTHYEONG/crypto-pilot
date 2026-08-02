@@ -4,7 +4,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from src.application.research.expert_portfolio.evaluation import run_expert_portfolio_evaluation
+from src.application.research.expert.evaluation import run_expert_portfolio_evaluation
 from src.research.baseline.backtest import BacktestResult
 from src.research.expert_portfolio.backtest import ExpertPortfolioBacktestResult
 from src.research.expert_portfolio.models import (
@@ -13,7 +13,7 @@ from src.research.expert_portfolio.models import (
     ExpertPortfolioSpec,
 )
 
-_APPLICATION_MODULE = "src.application.research.expert_portfolio.evaluation"
+_APPLICATION_MODULE = "src.application.research.expert.evaluation"
 
 
 def _spec() -> ExpertPortfolioSpec:
@@ -204,7 +204,7 @@ def _component_result(idx: pd.DatetimeIndex, expert_id: str) -> BacktestResult:
 
 
 def test_run_component_dispatch_single_symbol_runner(monkeypatch: pytest.MonkeyPatch) -> None:
-    from src.application.research.expert_portfolio.evaluation import _run_component
+    from src.application.research.expert.evaluation import _run_component
     from src.research.baseline.backtest import BacktestResult
     from src.research.contracts import CostModel
     from src.research.expert_portfolio.models import ExpertDefinition
@@ -231,7 +231,7 @@ def test_run_component_dispatch_single_symbol_runner(monkeypatch: pytest.MonkeyP
 
 
 def test_run_component_dispatch_directional_runner(monkeypatch: pytest.MonkeyPatch) -> None:
-    from src.application.research.expert_portfolio.evaluation import _run_component
+    from src.application.research.expert.evaluation import _run_component
     from src.research.baseline.backtest import BacktestResult
     from src.research.contracts import CostModel
     from src.research.expert_portfolio.models import ExpertDefinition
@@ -264,7 +264,7 @@ def test_run_component_dispatch_directional_runner(monkeypatch: pytest.MonkeyPat
 
 
 def test_run_component_rejects_unsupported_runner() -> None:
-    from src.application.research.expert_portfolio.evaluation import _run_component
+    from src.application.research.expert.evaluation import _run_component
     from src.research.contracts import CostModel
     from src.research.expert_portfolio.models import ExpertDefinition
 
@@ -278,7 +278,7 @@ def test_run_component_rejects_unsupported_runner() -> None:
 def test_build_component_panel_builds_common_index_and_trades(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from src.application.research.expert_portfolio.evaluation import build_component_panel
+    from src.application.research.expert.evaluation import build_component_panel
     from src.research.contracts import CostModel
 
     idx = pd.date_range("2024-01-01", periods=40, freq="4h", tz="UTC")
@@ -304,7 +304,7 @@ def test_build_component_panel_builds_common_index_and_trades(
 def test_build_component_panel_fails_closed_on_short_common_index(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from src.application.research.expert_portfolio.evaluation import build_component_panel
+    from src.application.research.expert.evaluation import build_component_panel
     from src.common.errors import DataIntegrityError
     from src.research.contracts import CostModel
 
@@ -336,7 +336,7 @@ def _routed_spec() -> ExpertPortfolioSpec:
 
 
 def test_build_library_decision_context_is_none_without_router() -> None:
-    from src.application.research.expert_portfolio.evaluation import build_library_decision_context
+    from src.application.research.expert.evaluation import build_library_decision_context
 
     assert build_library_decision_context(_spec(), _concentrated_equity().index, None, None) is None
 
@@ -346,7 +346,7 @@ def test_build_library_decision_context_requires_exact_alignment(
 ) -> None:
     # ECR-05: context labels must align exactly to the component panel index;
     # a missing panel timestamp fails closed instead of forward-filling.
-    from src.application.research.expert_portfolio.evaluation import build_library_decision_context
+    from src.application.research.expert.evaluation import build_library_decision_context
     from src.common.errors import DataIntegrityError
 
     panel_idx = _concentrated_equity().index
@@ -363,7 +363,7 @@ def test_build_library_decision_context_requires_exact_alignment(
 def test_build_library_decision_context_rejects_extra_context_rows(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from src.application.research.expert_portfolio.evaluation import build_library_decision_context
+    from src.application.research.expert.evaluation import build_library_decision_context
     from src.common.errors import DataIntegrityError
 
     panel_idx = _concentrated_equity().index

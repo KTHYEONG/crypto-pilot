@@ -5,7 +5,7 @@ import sys
 
 import pytest
 
-from src.cli import run_backtest as cli
+from src.cli.adapters import run_backtest as cli
 
 
 @pytest.mark.slow
