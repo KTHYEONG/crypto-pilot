@@ -61,10 +61,11 @@ def _patch_environment(monkeypatch) -> pd.DataFrame:
     funding = pd.Series(0.0, index=frame.index, dtype=float)
     monkeypatch.setattr(
         app, "_load_technical_market_data",
-        lambda symbol, start, end: (frame, funding),
+        lambda symbol, start, end, *, timeframe="4h": (frame, funding),
     )
     monkeypatch.setattr(
-        app, "load_ohlcv_4h", lambda path, *, start=None, end=None: frame,
+        app, "load_ohlcv_1h_as",
+        lambda path, timeframe, *, start=None, end=None: frame,
     )
     monkeypatch.setattr(
         app, "compute_code_hash", lambda *args, **kwargs: "c" * 64,
@@ -112,12 +113,13 @@ def test_application_sealed_end_past_cutoff_is_rejected() -> None:
 
 
 class _FakeFuture:
-    def __init__(self, fn, *args):
+    def __init__(self, fn, *args, **kwargs):
         self._fn = fn
         self._args = args
+        self._kwargs = kwargs
 
     def result(self):
-        return self._fn(*self._args)
+        return self._fn(*self._args, **self._kwargs)
 
     def cancel(self) -> bool:
         return True
@@ -134,9 +136,9 @@ class _FakeExecutor:
     def __exit__(self, *exc) -> bool:
         return False
 
-    def submit(self, fn, *args):
-        self.submits.append(args)
-        return _FakeFuture(fn, *args)
+    def submit(self, fn, *args, **kwargs):
+        self.submits.append((args, kwargs))
+        return _FakeFuture(fn, *args, **kwargs)
 
 
 def test_parallel_determinism_and_one_task_per_symbol(monkeypatch) -> None:
@@ -150,13 +152,15 @@ def test_parallel_determinism_and_one_task_per_symbol(monkeypatch) -> None:
         values[0] = np.nan
         return pd.Series(values, index=index)
 
-    def fake_worker(symbol, sources, start, end):
+    def fake_worker(symbol, sources, start, end, *, timeframe="4h"):
         return {source: (_canned_series(symbol, source), 5) for source in sources}
 
     monkeypatch.setattr(app, "_symbol_admission_worker", fake_worker)
     monkeypatch.setattr(
         app, "_build_admission_context",
-        lambda router, idx, start, end: pd.Series(["up_low_vol"] * len(idx), index=idx),
+        lambda router, idx, start, end, **kwargs: pd.Series(
+            ["up_low_vol"] * len(idx), index=idx,
+        ),
     )
     monkeypatch.setattr(app, "compute_code_hash", lambda *args, **kwargs: "c" * 64)
     monkeypatch.setattr(
@@ -171,7 +175,7 @@ def test_parallel_determinism_and_one_task_per_symbol(monkeypatch) -> None:
 
     assert fake_executor.max_workers == 2
     assert len(fake_executor.submits) == 2
-    submitted_symbols = sorted(args[0] for args in fake_executor.submits)
+    submitted_symbols = sorted(submission[0][0] for submission in fake_executor.submits)
     assert submitted_symbols == ["BTCUSDT", "ETHUSDT"]
 
     assert sequential.fingerprint() == parallel.fingerprint()

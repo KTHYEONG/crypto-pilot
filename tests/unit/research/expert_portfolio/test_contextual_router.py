@@ -4,12 +4,18 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from src.market_data.storage.loaders import timeframe_scale_factor
+from src.research.expert_portfolio.admission_types import (
+    LibraryAdmissionConfig,
+    scale_admission_config,
+)
 from src.research.expert_portfolio.allocator import compute_causal_lcb_weights
 from src.research.expert_portfolio.contextual_router import (
     _UNAVAILABLE,
     build_causal_context_labels,
     compute_causal_contextual_winner_weights,
     compute_causal_per_symbol_contextual_weights,
+    scale_router_spec,
     state_labels,
 )
 from src.research.expert_portfolio.models import (
@@ -445,3 +451,46 @@ class TestPerSymbolRouter:
             compute_causal_per_symbol_contextual_weights(
                 panel, context, spec, spec.router,
             )
+
+
+class TestTimeframeScaling:
+    def test_router_scales_bar_counts_and_keeps_context_and_confidence(self) -> None:
+        # TIS-03: at the 4h reference scale_router_spec reproduces the input
+        # exactly; at other timeframes every bar count follows the shared
+        # factor while context_symbol and confidence pass through.
+        router = ContextualRouterSpec("BTCUSDT", 48, 48, 96)
+        assert scale_router_spec(router, "4h") == router
+        for timeframe in ("1h", "2h", "6h", "8h", "12h", "1d"):
+            factor = timeframe_scale_factor(timeframe)
+            scaled = scale_router_spec(router, timeframe)
+            assert scaled.context_symbol == router.context_symbol
+            assert scaled.confidence == router.confidence
+            assert scaled.trend_lookback_bars == max(1, round(48 * factor))
+            assert scaled.volatility_lookback_bars == max(1, round(48 * factor))
+            assert scaled.min_context_history_bars == max(1, round(96 * factor))
+            assert scaled != router or factor == 1.0
+
+    def test_admission_config_scales_only_min_active_return_bars(self) -> None:
+        # TIS-03: min_active_return_bars is the only bar count; trade/state
+        # counts and every structural bound pass through unchanged.
+        admission = LibraryAdmissionConfig(2, 5, 20, 200, 0.5, 0.15, 6, 1_000_000)
+        assert scale_admission_config(admission, "4h") == admission
+        for timeframe in ("1h", "2h", "6h", "8h", "12h", "1d"):
+            factor = timeframe_scale_factor(timeframe)
+            scaled = scale_admission_config(admission, timeframe)
+            assert scaled.min_active_return_bars == max(1, round(200 * factor))
+            assert scaled.min_closed_trades == 20
+            assert scaled.min_context_covered_states == 6
+            assert scaled.min_experts == 2
+            assert scaled.max_experts == 5
+            assert scaled.max_abs_pairwise_log_return_correlation == 0.5
+            assert scaled.max_joint_negative_return_rate == 0.15
+            assert scaled.max_combinations == 1_000_000
+
+    def test_unknown_timeframe_fails_closed(self) -> None:
+        router = ContextualRouterSpec("BTCUSDT", 48, 48, 96)
+        admission = LibraryAdmissionConfig(2, 5, 20, 200, 0.5, 0.15, 6, 1_000_000)
+        with pytest.raises(ValueError, match="timeframe must be one of"):
+            scale_router_spec(router, "90m")
+        with pytest.raises(ValueError, match="timeframe must be one of"):
+            scale_admission_config(admission, "90m")

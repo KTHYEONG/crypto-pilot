@@ -139,7 +139,7 @@ def _patch_pipeline(monkeypatch: pytest.MonkeyPatch) -> list[TechnicalLibraryAdm
         captured.append(req)
         return _canned_backtest_report(admission_proposal_id(req.expert_ids))
 
-    monkeypatch.setattr(pipeline_app, "resolve_common_technical_window", lambda *_: _canned_window())
+    monkeypatch.setattr(pipeline_app, "resolve_common_technical_window", lambda *a, **k: _canned_window())
     monkeypatch.setattr(pipeline_app, "run_technical_library_admission", lambda req: _canned_selection_report())
     monkeypatch.setattr(pipeline_app, "run_technical_library_admission_backtest", _spy_backtest)
     return captured
@@ -157,7 +157,7 @@ class TestCommonWindowResolver:
     ) -> None:
         # LAP-02: the resolver rejects an earlier requested start and identifies
         # the OHLCV or funding blocker; a too-early window is never intersected.
-        def fake_ohlcv(path, *, start=None, end=None):
+        def fake_ohlcv(path, timeframe, *, start=None, end=None):
             return _frame_from_index(
                 pd.date_range("2020-01-01", periods=1000, freq="4h", tz="UTC"),
             )
@@ -169,7 +169,7 @@ class TestCommonWindowResolver:
                 index = pd.date_range("2020-01-01", periods=10, freq="4h", tz="UTC")
             return pd.Series(0.0, index=index)
 
-        monkeypatch.setattr(window_module, "load_ohlcv_4h", fake_ohlcv)
+        monkeypatch.setattr(window_module, "load_ohlcv_1h_as", fake_ohlcv)
         monkeypatch.setattr(window_module, "load_funding_rates", fake_funding)
 
         with pytest.raises(DataIntegrityError, match="SOLUSDT") as excinfo:
@@ -179,12 +179,12 @@ class TestCommonWindowResolver:
     def test_resolver_returns_tz_aware_4h_aligned_effective_start(
         self, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        def fake_ohlcv(path, *, start=None, end=None):
+        def fake_ohlcv(path, timeframe, *, start=None, end=None):
             return _frame_from_index(
                 pd.date_range("2020-01-01", periods=1000, freq="4h", tz="UTC"),
             )
 
-        monkeypatch.setattr(window_module, "load_ohlcv_4h", fake_ohlcv)
+        monkeypatch.setattr(window_module, "load_ohlcv_1h_as", fake_ohlcv)
         monkeypatch.setattr(
             window_module, "load_funding_rates",
             lambda path: pd.Series(0.0, index=pd.date_range("2020-01-01", periods=10, freq="4h", tz="UTC")),
@@ -256,7 +256,7 @@ class TestLibraryAdmissionPipeline:
     ) -> None:
         failed = _canned_selection_report()
         failed = pytest_util_replace(failed, status="FAIL_CLOSED", proposals=())
-        monkeypatch.setattr(pipeline_app, "resolve_common_technical_window", lambda *_: _canned_window())
+        monkeypatch.setattr(pipeline_app, "resolve_common_technical_window", lambda *a, **k: _canned_window())
         monkeypatch.setattr(pipeline_app, "run_technical_library_admission", lambda req: failed)
         request = TechnicalLibraryAdmissionPipelineRequest(
             selection=technical_5symbol_2022_v1_profile(),
