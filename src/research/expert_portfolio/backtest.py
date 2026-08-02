@@ -66,7 +66,10 @@ def _validate_fixed_weights(
     values = fixed_weights.to_numpy(dtype=np.float64)
     if not np.isfinite(values).all():
         raise ValueError("fixed_weights must contain only finite values")
-    if (values < 0.0).any():
+    # A causal residual weight (e.g. CASH = 1 - sum(other weights)) can land a
+    # few float64 epsilons below zero from rounding alone; tolerate that noise
+    # rather than reject a genuinely zero-exposure row.
+    if (values < -1e-9).any():
         raise ValueError("fixed_weights must be non-negative")
 
 
