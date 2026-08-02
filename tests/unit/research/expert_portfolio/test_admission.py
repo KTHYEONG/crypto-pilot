@@ -7,6 +7,9 @@ import pytest
 from src.common.errors import DataIntegrityError
 from src.research.expert_portfolio.admission import (
     evaluate_library_admission,
+    generate_bounded_rolling_proposals,
+    generate_bounded_rolling_proposals_result,
+    pair_compatibility_matrix,
     pairwise_joint_negative_rates,
     pairwise_log_return_correlation,
     shortlist_admission_proposals,
@@ -582,3 +585,123 @@ class TestVectorizedPairwise:
         assert got.ndim == 2
         assert got.shape == (4, 4)
         assert pairwise_log_return_correlation(completed).shape == (4, 4)
+
+
+class TestBoundedRollingProposals:
+    def test_different_family_same_symbol_forms_one_v2_proposal(self) -> None:
+        # RAP-05: distinct families on the same symbol are compatible for the
+        # rolling-v2 path and form a single shared-symbol proposal.
+        experts = (
+            _expert("macd:BTCUSDT", "macd_histogram_regime", "BTCUSDT"),
+            _expert("momentum:BTCUSDT", "rsi_trend_pullback", "BTCUSDT"),
+        )
+        completed = np.array([[0.02, 0.01], [-0.01, 0.03], [0.02, -0.02], [0.01, 0.02]])
+        config = _config(min_experts=2, max_experts=2, **_permissive())
+        compat = pair_compatibility_matrix(
+            completed, experts, config, allow_same_symbol=True,
+        )
+        assert bool(compat[0, 1])
+        proposals = generate_bounded_rolling_proposals(experts, compat, config, 8)
+        assert {p.expert_ids for p in proposals} == {
+            ("macd:BTCUSDT", "momentum:BTCUSDT"),
+        }
+
+    def test_same_family_duplicates_are_rejected(self) -> None:
+        # RAP-05: two experts of one family can never share a v2 proposal.
+        experts = (
+            _expert("macd_long:BTCUSDT", "macd_histogram_regime", "BTCUSDT"),
+            _expert("macd_short:BTCUSDT", "macd_histogram_regime", "BTCUSDT"),
+        )
+        completed = np.array([[0.02, 0.01], [-0.01, 0.03]])
+        config = _config(min_experts=2, max_experts=2, **_permissive())
+        compat = pair_compatibility_matrix(
+            completed, experts, config, allow_same_symbol=True,
+        )
+        assert not bool(compat[0, 1])
+        assert generate_bounded_rolling_proposals(experts, compat, config, 8) == ()
+
+    def test_exact_legacy_matrix_still_requires_distinct_symbols(self) -> None:
+        # RAP-05: without allow_same_symbol the legacy v1 gate stays intact.
+        experts = (
+            _expert("macd:BTCUSDT", "macd_histogram_regime", "BTCUSDT"),
+            _expert("momentum:BTCUSDT", "rsi_trend_pullback", "BTCUSDT"),
+        )
+        completed = np.array([[0.02, 0.01], [-0.01, 0.03]])
+        config = _config(min_experts=2, max_experts=2, **_permissive())
+        compat = pair_compatibility_matrix(completed, experts, config)
+        assert not bool(compat[0, 1])
+
+    def test_graph_exceeding_max_combinations_fails_closed(self) -> None:
+        # RAP-06: when the explored graph nodes exceed max_combinations the
+        # bounded search fails closed with an explicit generation-limit reason
+        # instead of silently omitting candidates.
+        experts = tuple(
+            _expert(f"e{i}", f"f{i % 3}", f"S{i % 2}") for i in range(6)
+        )
+        n = len(experts)
+        compat = np.ones((n, n), dtype=bool)
+        np.fill_diagonal(compat, False)
+        config = _config(
+            min_experts=2, max_experts=3, max_combinations=8, **_permissive(),
+        )
+        with pytest.raises(DataIntegrityError, match="generation limit"):
+            generate_bounded_rolling_proposals(experts, compat, config, 4)
+
+    def test_bounded_shortlist_is_deterministic_and_size_stratified(self) -> None:
+        # RAP-06: the bounded search output is stable and respects the budget.
+        experts = tuple(
+            _expert(f"e{i}", f"f{i % 4}", f"S{i % 3}") for i in range(8)
+        )
+        n = len(experts)
+        compat = np.ones((n, n), dtype=bool)
+        np.fill_diagonal(compat, False)
+        config = _config(
+            min_experts=2, max_experts=3, max_combinations=10_000, **_permissive(),
+        )
+        first = generate_bounded_rolling_proposals(experts, compat, config, 5)
+        second = generate_bounded_rolling_proposals(experts, compat, config, 5)
+        assert first == second
+        assert len(first) <= 5
+
+    def test_bounded_search_exposes_generation_telemetry(self) -> None:
+        experts = tuple(_expert(f"e{i}", f"f{i}", f"S{i}") for i in range(3))
+        compatibility = np.ones((3, 3), dtype=bool)
+        np.fill_diagonal(compatibility, False)
+        config = _config(min_experts=2, max_experts=2, max_combinations=100)
+
+        result = generate_bounded_rolling_proposals_result(
+            experts, compatibility, config, 8,
+        )
+
+        assert result.proposals
+        assert result.generated_nodes > 0
+        assert result.generation_limit == config.max_combinations
+        assert result.generation_status == "COMPLETE"
+
+    def test_bounded_search_prunes_incompatible_pairs(self) -> None:
+        # RAP-06: a pair rejected by the compatibility matrix never enters a
+        # proposal, even when both families are otherwise admissible.
+        experts = (
+            _expert("e0", "f0", "S0"),
+            _expert("e1", "f1", "S0"),
+            _expert("e2", "f2", "S1"),
+        )
+        compat = np.array(
+            [
+                [False, False, True],
+                [False, False, True],
+                [True, True, False],
+            ],
+            dtype=bool,
+        )
+        config = _config(min_experts=2, max_experts=2, **_permissive())
+        proposals = generate_bounded_rolling_proposals(experts, compat, config, 8)
+        assert {p.expert_ids for p in proposals} == {("e0", "e2"), ("e1", "e2")}
+
+    def test_bounded_search_rejects_non_positive_shortlist_budget(self) -> None:
+        # RAP-06: a non-positive shortlist budget fails closed.
+        experts = (_expert("e0", "f0", "S0"), _expert("e1", "f1", "S1"))
+        compat = np.array([[False, True], [True, False]], dtype=bool)
+        config = _config(min_experts=2, max_experts=2, **_permissive())
+        with pytest.raises(ValueError, match="shortlist_budget"):
+            generate_bounded_rolling_proposals(experts, compat, config, 0)
