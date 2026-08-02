@@ -449,7 +449,7 @@
   },
   "src/application/research/expert_portfolio/rolling_admission.py": {
     "testing": "tests/unit/application/test_rolling_library_admission.py",
-    "architecture": "docs/results/library-admission-5symbols.md"
+    "architecture": "docs/specs/rolling_admission_gate_recalibration.md"
   },
   "src/application/research/expert_portfolio/window.py": {
     "testing": "tests/unit/application/test_library_admission_pipeline.py"
