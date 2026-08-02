@@ -132,6 +132,7 @@ def evaluate_library_admission(
     families = np.array([e.family for e in admitted_experts], dtype=object)
     symbols = np.array([e.symbols[0] for e in admitted_experts], dtype=object)
     correlation = pairwise_log_return_correlation(admitted_values)
+    abs_corr = np.abs(correlation)
     joint_negative = pairwise_joint_negative_rates(admitted_values)
     compat = _pair_compatibility_matrix(
         correlation, joint_negative, families, symbols, config,
@@ -144,7 +145,7 @@ def evaluate_library_admission(
         AdmissionProposal(
             expert_ids=tuple(admitted_experts[i].expert_id for i in subset),
             eligible=coverage_sufficient,
-            **_proposal_pair_diagnostics(correlation, joint_negative, subset),
+            **_proposal_pair_diagnostics(abs_corr, joint_negative, subset),
         )
         for subset in enumerated
     )
@@ -353,7 +354,7 @@ def enrich_proposal_diagnostics(
     return AdmissionProposal(
         expert_ids=proposal.expert_ids,
         eligible=proposal.eligible,
-        **_proposal_pair_diagnostics(correlation, joint_negative, indexes),
+        **_proposal_pair_diagnostics(np.abs(correlation), joint_negative, indexes),
     )
 
 
@@ -425,6 +426,7 @@ def _priority_top_n_for_size(
         raise ValueError(f"top_n must be >= 1, got {top_n}")
     if node_budget < 1:
         raise ValueError(f"node_budget must be >= 1, got {node_budget}")
+    abs_corr = np.abs(correlation)
     n = len(experts)
     if size < 1 or size > n:
         return (), 0, False
@@ -446,7 +448,7 @@ def _priority_top_n_for_size(
         if worst is not None and (bound_corr, bound_joint) > (worst[0], worst[1]):
             continue
         if psize == size:
-            diagnostics = _proposal_pair_diagnostics(correlation, joint_negative, partial)
+            diagnostics = _proposal_pair_diagnostics(abs_corr, joint_negative, partial)
             rank = (
                 diagnostics["max_abs_pair_log_return_correlation"],
                 diagnostics["max_pair_joint_negative_rate"],
@@ -465,7 +467,7 @@ def _priority_top_n_for_size(
             if not all(compatibility[i, j] for i in partial):
                 continue
             new_partial = (*partial, j)
-            bound = _proposal_pair_diagnostics(correlation, joint_negative, new_partial)
+            bound = _proposal_pair_diagnostics(abs_corr, joint_negative, new_partial)
             heapq.heappush(
                 heap,
                 (
@@ -508,6 +510,7 @@ def priority_shortlist_family_unique_proposals(
     """
     if shortlist_budget < 1:
         raise ValueError(f"shortlist_budget must be >= 1, got {shortlist_budget}")
+    abs_corr = np.abs(correlation)
     total_nodes = 0
     all_proposals: list[AdmissionProposal] = []
     for size in range(config.min_experts, config.max_experts + 1):
@@ -528,7 +531,7 @@ def priority_shortlist_family_unique_proposals(
             AdmissionProposal(
                 expert_ids=tuple(experts[i].expert_id for i in subset),
                 eligible=True,
-                **_proposal_pair_diagnostics(correlation, joint_negative, subset),
+                **_proposal_pair_diagnostics(abs_corr, joint_negative, subset),
             )
             for subset in leaves
         )
@@ -588,7 +591,7 @@ def prefilter_admitted_by_family_symbol(
 
 
 def _proposal_pair_diagnostics(
-    correlation: np.ndarray,
+    abs_corr: np.ndarray,
     joint_negative: np.ndarray,
     indexes: tuple[int, ...],
 ) -> dict[str, float]:
@@ -605,13 +608,17 @@ def _proposal_pair_diagnostics(
         for a in range(len(indexes))
         for b in range(a + 1, len(indexes))
     ]
-    abs_correlation = [abs(correlation[i, j]) for i, j in pairs]
+    abs_correlation = [abs_corr[i, j] for i, j in pairs]
     joint_negative_rates = [float(joint_negative[i, j]) for i, j in pairs]
     return {
         "max_abs_pair_log_return_correlation": float(max(abs_correlation)),
         "max_pair_joint_negative_rate": float(max(joint_negative_rates)),
-        "mean_abs_pair_log_return_correlation": float(np.mean(abs_correlation)),
-        "mean_pair_joint_negative_rate": float(np.mean(joint_negative_rates)),
+        "mean_abs_pair_log_return_correlation": (
+            sum(abs_correlation) / len(abs_correlation)
+        ),
+        "mean_pair_joint_negative_rate": (
+            sum(joint_negative_rates) / len(joint_negative_rates)
+        ),
     }
 
 
