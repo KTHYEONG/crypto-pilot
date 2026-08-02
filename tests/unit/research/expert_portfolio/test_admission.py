@@ -9,8 +9,12 @@ from src.research.expert_portfolio.admission import (
     evaluate_library_admission,
     pairwise_joint_negative_rates,
     pairwise_log_return_correlation,
+    shortlist_admission_proposals,
 )
-from src.research.expert_portfolio.admission_types import LibraryAdmissionConfig
+from src.research.expert_portfolio.admission_types import (
+    AdmissionProposal,
+    LibraryAdmissionConfig,
+)
 from src.research.expert_portfolio.models import ContextualRouterSpec, ExpertDefinition
 
 
@@ -136,6 +140,36 @@ class TestCandidateDataIntegrity:
                 _router(),
                 _config(min_experts=1, max_experts=2),
             )
+
+    def test_rejected_candidate_is_excluded_from_compatibility_matrix(self) -> None:
+        # A non-admitted candidate (closed-trade shortfall) must not break the
+        # compatibility matrix shape when admitted candidates are a strict
+        # subset of the panel columns.
+        experts = (
+            _expert("a", "f1", "s1"),
+            _expert("b", "f2", "s2"),
+            _expert("c", "f3", "s3"),
+        )
+        panel = _panel(
+            {
+                "a": [0.02, -0.01, 0.03, 0.01],
+                "b": [0.01, 0.02, -0.02, 0.03],
+                "c": [-0.01, 0.02, 0.01, -0.02],
+            }
+        )
+        config = _config(min_experts=2, max_experts=2, **_permissive())
+        report = evaluate_library_admission(
+            panel,
+            {"a": 2, "b": 2, "c": 0},
+            experts,
+            _context(len(panel)),
+            _router(),
+            config,
+        )
+        assert report.status == "COMPLETE"
+        admitted = [c.expert_id for c in report.candidates if c.admitted]
+        assert admitted == ["a", "b"]
+        assert [p.expert_ids for p in report.proposals] == [("a", "b")]
 
 
 def _permissive() -> dict[str, object]:
@@ -389,6 +423,145 @@ class TestBoundedSearch:
         )
         assert report.status == "COMPLETE"
         assert len(report.proposals) == 3
+
+
+class TestProposalShortlist:
+    def test_empty_shortlist_is_empty(self) -> None:
+        # LAP-04: a universe with no pair-compatible proposals shortlists to nothing.
+        assert shortlist_admission_proposals((), 24) == ()
+
+    def test_shortlist_rejects_non_positive_budget(self) -> None:
+        with pytest.raises(ValueError, match="max_backtest_proposals"):
+            shortlist_admission_proposals((), 0)
+
+    def test_shortlist_is_size_stratified_and_ranked_by_diversification(
+        self,
+    ) -> None:
+        # LAP-04: proposals are ordered by ascending size and, within a size, by
+        # the rank_key (max then mean abs correlation, max then mean joint-negative
+        # rate), with no performance metric participating.
+        proposals = (
+            _proposal(("a", "b"), 0.5, 0.3, 0.5, 0.3),
+            _proposal(("a", "c"), 0.4, 0.2, 0.4, 0.2),
+            _proposal(("a", "b", "c"), 0.3, 0.1, 0.2, 0.1),
+            _proposal(("a", "b", "d"), 0.6, 0.4, 0.4, 0.3),
+            _proposal(("a", "c", "d"), 0.2, 0.05, 0.15, 0.05),
+        )
+        shortlist = shortlist_admission_proposals(proposals, 24)
+        assert [p.expert_ids for p in shortlist] == [
+            ("a", "c"), ("a", "b"),
+            ("a", "c", "d"), ("a", "b", "c"), ("a", "b", "d"),
+        ]
+
+    def test_shortlist_selects_six_per_size_then_round_robin_fill(self) -> None:
+        # LAP-04: six proposals per available size are selected first and any
+        # unused budget is assigned one at a time to the remaining sizes in
+        # ascending rank, still capped by the budget.
+        from collections import Counter
+
+        size2 = tuple(
+            _proposal((f"s2_{i}", f"s2_{i + 1}"), float(i), float(i), float(i), float(i))
+            for i in range(8)
+        )
+        size3 = tuple(
+            _proposal((f"s3_{i}", f"s3_{i + 1}", f"s3_{i + 2}"), float(i), float(i), float(i), float(i))
+            for i in range(8)
+        )
+        shortlist = shortlist_admission_proposals((*size2, *size3), 14)
+        assert len(shortlist) == 14
+        # size-stratified: the size-2 block (six phase-1 picks plus one
+        # round-robin fill slot) always precedes the size-3 block
+        assert [p.expert_ids for p in shortlist[:7]] == [p.expert_ids for p in size2[:7]]
+        assert [p.expert_ids for p in shortlist[7:]] == [p.expert_ids for p in size3[:7]]
+        assert Counter(len(p.expert_ids) for p in shortlist) == {2: 7, 3: 7}
+
+    def test_shortlist_size_with_fewer_than_six_contributes_all(self) -> None:
+        # LAP-04: a size with fewer than six proposals contributes all of them
+        # and the unused budget is consumed by the remaining sizes.
+        size2 = tuple(
+            _proposal((f"s2_{i}", f"s2_{i + 1}"), float(i), float(i), float(i), float(i))
+            for i in range(5)
+        )
+        size3 = tuple(
+            _proposal((f"s3_{i}", f"s3_{i + 1}", f"s3_{i + 2}"), float(i), float(i), float(i), float(i))
+            for i in range(8)
+        )
+        shortlist = shortlist_admission_proposals((*size2, *size3), 11)
+        assert len(shortlist) == 11
+        assert [p.expert_ids for p in shortlist[:5]] == [p.expert_ids for p in size2]
+        assert [p.expert_ids for p in shortlist[5:]] == [p.expert_ids for p in size3[:6]]
+
+    def test_shortlist_exhausts_budget_mid_pass_across_sizes(self) -> None:
+        # LAP-04: when the round-robin fill lands exactly on the budget mid-pass,
+        # the later sizes simply receive nothing further.
+        from collections import Counter
+
+        proposals: list[AdmissionProposal] = []
+        for size, tag in ((2, "a"), (3, "b"), (4, "c")):
+            proposals.extend(
+                _proposal(
+                    tuple(f"{tag}_{i + j}" for j in range(size)),
+                    float(i), float(i), float(i), float(i),
+                )
+                for i in range(8)
+            )
+        shortlist = shortlist_admission_proposals(tuple(proposals), 19)
+        assert len(shortlist) == 19
+        assert Counter(len(p.expert_ids) for p in shortlist) == {2: 7, 3: 6, 4: 6}
+
+    def test_shortlist_small_budget_caps_before_six_per_size(self) -> None:
+        # LAP-04: when the budget cannot fund six per size, the round-robin
+        # caps each size fairly and never exceeds the budget.
+        proposals: list[AdmissionProposal] = []
+        for size, tag in ((2, "a"), (3, "b"), (4, "c")):
+            proposals.extend(
+                _proposal(
+                    tuple(f"{tag}_{i + j}" for j in range(size)),
+                    float(i), float(i), float(i), float(i),
+                )
+                for i in range(8)
+            )
+        shortlist = shortlist_admission_proposals(tuple(proposals), 4)
+        assert len(shortlist) == 4
+        assert [p.expert_ids for p in shortlist] == [
+            ("a_0", "a_1"), ("a_1", "a_2"),
+            ("b_0", "b_1", "b_2"),
+            ("c_0", "c_1", "c_2", "c_3"),
+        ]
+
+    def test_shortlist_breaks_exact_score_ties_lexically(self) -> None:
+        # LAP-04: identical rank_keys are ordered by the lexical proposal_id.
+        proposals = (
+            _proposal(("b", "c"), 0.5, 0.5, 0.5, 0.5),
+            _proposal(("a", "d"), 0.5, 0.5, 0.5, 0.5),
+        )
+        shortlist = shortlist_admission_proposals(proposals, 24)
+        assert [p.expert_ids for p in shortlist] == [("a", "d"), ("b", "c")]
+
+    def test_shortlist_never_invents_missing_rank_data(self) -> None:
+        # LAP-04: a proposal with zero pair diagnostics ranks first (no pairs)
+        # and never fabricates scores from portfolio or OOS metrics.
+        singleton = _proposal(("a",), 0.0, 0.0, 0.0, 0.0)
+        pair = _proposal(("a", "b"), 0.9, 0.9, 0.9, 0.9)
+        shortlist = shortlist_admission_proposals((pair, singleton), 24)
+        assert [p.expert_ids for p in shortlist] == [("a",), ("a", "b")]
+
+
+def _proposal(
+    expert_ids: tuple[str, ...],
+    max_abs_corr: float,
+    max_joint_negative: float,
+    mean_abs_corr: float,
+    mean_joint_negative: float,
+) -> AdmissionProposal:
+    return AdmissionProposal(
+        expert_ids=expert_ids,
+        eligible=True,
+        max_abs_pair_log_return_correlation=max_abs_corr,
+        max_pair_joint_negative_rate=max_joint_negative,
+        mean_abs_pair_log_return_correlation=mean_abs_corr,
+        mean_pair_joint_negative_rate=mean_joint_negative,
+    )
 
 
 class TestVectorizedPairwise:

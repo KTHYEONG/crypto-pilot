@@ -58,6 +58,7 @@ class LibraryAdmissionReport:
     data_hashes: Mapping[str, Mapping[str, str]] = field(default_factory=dict)
     execution_workers: int = 0
     wall_seconds: float = 0.0
+    structural_combinations: int = 0
 
     def fingerprint(self) -> dict[str, object]:
         """Canonical admission/proposal fingerprint excluding execution telemetry."""
@@ -126,6 +127,7 @@ class LibraryAdmissionReport:
             "context_coverage": dict(self.context_coverage),
             "covered_states": self.covered_states,
             "coverage_sufficient": self.coverage_sufficient,
+            "structural_combinations": self.structural_combinations,
             "code_hash": self.code_hash,
             "data_hashes": {
                 symbol: dict(hashes)
@@ -134,6 +136,58 @@ class LibraryAdmissionReport:
             "execution_workers": self.execution_workers,
             "wall_seconds": self.wall_seconds,
             "fingerprint": self.fingerprint(),
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class LibraryAdmissionPipelineReport:
+    """Aggregate one-execution result of a frozen admission pipeline profile.
+
+    Carries the resolved window metadata, selection counts, the deterministic
+    size-stratified shortlist, and every child out-of-sample proposal backtest
+    report. It is an exploration artifact: it never registers or promotes a
+    library, and every child run executed with ``log_run=False``.
+    """
+
+    status: str
+    profile: str
+    requested_start: str | None
+    common_start: str
+    effective_start: str
+    selection_end: str
+    evaluation_start: str
+    evaluation_end: str
+    structural_combinations: int
+    pair_compatible_count: int
+    shortlist: tuple[AdmissionProposal, ...]
+    backtests: tuple[LibraryAdmissionBacktestReport, ...] = ()
+
+    @property
+    def shortlist_count(self) -> int:
+        return len(self.shortlist)
+
+    def to_report_dict(self) -> dict[str, object]:
+        """Return deterministic JSON-safe aggregate CLI output."""
+        return {
+            "status": self.status,
+            "profile": self.profile,
+            "window": {
+                "requested_start": self.requested_start,
+                "common_start": self.common_start,
+                "effective_start": self.effective_start,
+                "selection_end": self.selection_end,
+            },
+            "evaluation": {
+                "start": self.evaluation_start,
+                "end": self.evaluation_end,
+            },
+            "selection_counts": {
+                "structural_combinations": self.structural_combinations,
+                "pair_compatible": self.pair_compatible_count,
+                "shortlist": self.shortlist_count,
+            },
+            "shortlist": [proposal.to_report_dict() for proposal in self.shortlist],
+            "backtests": [backtest.to_report_dict() for backtest in self.backtests],
         }
 
 
@@ -163,6 +217,10 @@ class LibraryAdmissionBacktestReport:
     execution_workers: int
     code_hash: str = ""
     data_hashes: Mapping[str, Mapping[str, str]] = field(default_factory=dict)
+    # Selection-window diversification rank key of the proposing subset. It is
+    # advisory provenance supplied by the rolling service and never changes the
+    # report's own gate semantics; legacy callers leave it empty.
+    diversification_rank_key: tuple[float, float, float, float, str] = (0.0, 0.0, 0.0, 0.0, "")
 
     def to_report_dict(self) -> dict[str, object]:
         """Return deterministic JSON-safe CLI output."""
@@ -191,10 +249,12 @@ class LibraryAdmissionBacktestReport:
                 symbol: dict(hashes)
                 for symbol, hashes in sorted(self.data_hashes.items())
             },
+            "diversification_rank_key": list(self.diversification_rank_key),
         }
 
 
 __all__ = [
     "LibraryAdmissionBacktestReport",
+    "LibraryAdmissionPipelineReport",
     "LibraryAdmissionReport",
 ]

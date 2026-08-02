@@ -7,13 +7,17 @@ encode/decode, and the per-candidate/proposal result types. May depend on
 
 from __future__ import annotations
 
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 
 import pandas as pd
 
 from src.research.evaluation.policy import HOLDOUT_CUTOFF
 from src.research.expert_portfolio.models import ContextualRouterSpec
-from src.research.technical_experts.catalog import resolve_technical_candidate
+from src.research.technical_experts.catalog import (
+    TECHNICAL_CANDIDATES,
+    resolve_technical_candidate,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -210,22 +214,209 @@ class CandidateAdmissionResult:
 
 @dataclass(frozen=True, slots=True)
 class AdmissionProposal:
-    """One deterministic expert subset and its admission eligibility verdict."""
+    """One deterministic expert subset, its eligibility, and pair diagnostics.
+
+    The four pair diagnostics are computed strictly from the selection-window
+    member pairs (maximum and mean absolute completed log-return correlation,
+    maximum and mean joint-negative-return rate); no portfolio metric,
+    promotion verdict, or OOS return ever participates.
+    """
 
     expert_ids: tuple[str, ...]
     eligible: bool
+    max_abs_pair_log_return_correlation: float = 0.0
+    max_pair_joint_negative_rate: float = 0.0
+    mean_abs_pair_log_return_correlation: float = 0.0
+    mean_pair_joint_negative_rate: float = 0.0
 
     @property
     def proposal_id(self) -> str:
         return admission_proposal_id(self.expert_ids)
 
+    def rank_key(self) -> tuple[float, float, float, float, str]:
+        """Lower-is-better bounded diversification rank over the member pairs."""
+        return (
+            self.max_abs_pair_log_return_correlation,
+            self.max_pair_joint_negative_rate,
+            self.mean_abs_pair_log_return_correlation,
+            self.mean_pair_joint_negative_rate,
+            self.proposal_id,
+        )
+
+    def to_report_dict(self) -> dict[str, object]:
+        """Deterministic JSON-safe proposal representation for CLI stdout."""
+        return {
+            "proposal_id": self.proposal_id,
+            "expert_ids": list(self.expert_ids),
+            "eligible": self.eligible,
+            "pair_diagnostics": {
+                "max_abs_log_return_correlation": self.max_abs_pair_log_return_correlation,
+                "max_joint_negative_rate": self.max_pair_joint_negative_rate,
+                "mean_abs_log_return_correlation": self.mean_abs_pair_log_return_correlation,
+                "mean_joint_negative_rate": self.mean_pair_joint_negative_rate,
+            },
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class TechnicalLibraryAdmissionPipelineRequest:
+    """Immutable one-execution discovery-plus-OOS-backtest request.
+
+    ``selection`` is the sealed selection request, ``evaluation_start`` is the
+    out-of-sample boundary that must be strictly later than ``selection.end``,
+    ``evaluation_end`` must not exceed the sealed holdout cutoff,
+    ``max_backtest_proposals`` is the positive shortlist budget, and
+    ``initial_equity`` seeds every child OOS proposal backtest.
+    """
+
+    selection: TechnicalLibraryAdmissionRequest
+    evaluation_start: str | pd.Timestamp
+    evaluation_end: str | pd.Timestamp
+    max_backtest_proposals: int
+    initial_equity: float = 10_000.0
+
+    def __post_init__(self) -> None:
+        if self.max_backtest_proposals < 1:
+            raise ValueError(
+                f"max_backtest_proposals must be >= 1, got {self.max_backtest_proposals}"
+            )
+        if self.initial_equity <= 0:
+            raise ValueError(
+                f"initial_equity must be > 0, got {self.initial_equity}"
+            )
+        evaluation_start = pd.Timestamp(self.evaluation_start, tz="UTC")
+        evaluation_end = pd.Timestamp(self.evaluation_end, tz="UTC")
+        selection_end = (
+            pd.Timestamp(self.selection.end, tz="UTC")
+            if self.selection.end is not None
+            else HOLDOUT_CUTOFF
+        )
+        if evaluation_start <= selection_end:
+            raise ValueError(
+                f"evaluation_start {self.evaluation_start} must be strictly later "
+                f"than selection.end {self.selection.end}"
+            )
+        if evaluation_end <= evaluation_start:
+            raise ValueError(
+                "evaluation_end must be strictly later than evaluation_start, got "
+                f"{self.evaluation_start} .. {self.evaluation_end}"
+            )
+        if evaluation_end > HOLDOUT_CUTOFF:
+            raise RuntimeError(
+                f"Holdout sealed: evaluation_end {self.evaluation_end} > "
+                f"{HOLDOUT_CUTOFF}. The pipeline never unseals the holdout."
+            )
+
+
+def technical_5symbol_2022_v1_profile() -> TechnicalLibraryAdmissionRequest:
+    """Return the first frozen admission-pipeline profile.
+
+    The profile freezes the exact universe, dates, router, activity evidence,
+    pair screen, proposal sizes, and combination budget stated in the
+    specification; any future threshold change requires a new profile id and a
+    fresh out-of-sample period.
+    """
+    return TechnicalLibraryAdmissionRequest(
+        candidate_sources=tuple(
+            candidate.return_source for candidate in TECHNICAL_CANDIDATES
+        ),
+        symbols=("BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT"),
+        router=ContextualRouterSpec("BTCUSDT", 48, 48, 96),
+        admission=LibraryAdmissionConfig(
+            min_experts=2,
+            max_experts=5,
+            min_closed_trades=20,
+            min_active_return_bars=200,
+            max_abs_pairwise_log_return_correlation=0.50,
+            max_joint_negative_return_rate=0.15,
+            min_context_covered_states=6,
+            max_combinations=1_000_000,
+            max_workers=None,
+        ),
+        start="2022-04-01 00:00",
+        end="2024-12-31 20:00",
+    )
+
+
+LIBRARY_ADMISSION_PROFILES: Mapping[str, Callable[[], TechnicalLibraryAdmissionRequest]] = {
+    "technical-5symbol-2022-v1": technical_5symbol_2022_v1_profile,
+}
+
+
+def resolve_library_admission_profile(name: str) -> TechnicalLibraryAdmissionRequest:
+    """Resolve a frozen profile by exact name; an unknown name fails closed."""
+    try:
+        builder = LIBRARY_ADMISSION_PROFILES[name]
+    except KeyError:
+        raise ValueError(
+            f"unknown library admission profile {name!r}; known profiles: "
+            f"{sorted(LIBRARY_ADMISSION_PROFILES)}"
+        ) from None
+    return builder()
+
+
+def technical_5symbol_rolling_v1_profile() -> TechnicalLibraryAdmissionRequest:
+    """Return the quarterly rolling walk-forward admission profile.
+
+    The profile freezes the same 18-source, five-symbol candidate universe,
+    router, activity evidence, pair screen, proposal sizes, and combination
+    budget as the first frozen profile, but carries no fixed selection dates:
+    every rebalance decision freezes its own ``as_of`` snapshot and the rolling
+    service resolves each scored window causally. The static 2025 holdout
+    cutoff stays out of this profile's contract.
+    """
+    return TechnicalLibraryAdmissionRequest(
+        candidate_sources=tuple(
+            candidate.return_source for candidate in TECHNICAL_CANDIDATES
+        ),
+        symbols=("BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT"),
+        router=ContextualRouterSpec("BTCUSDT", 48, 48, 96),
+        admission=LibraryAdmissionConfig(
+            min_experts=2,
+            max_experts=5,
+            min_closed_trades=20,
+            min_active_return_bars=200,
+            max_abs_pairwise_log_return_correlation=0.50,
+            max_joint_negative_return_rate=0.15,
+            min_context_covered_states=6,
+            max_combinations=1_000_000,
+            max_workers=None,
+        ),
+        start=None,
+        end=None,
+    )
+
+
+ROLLING_LIBRARY_ADMISSION_PROFILES: Mapping[str, Callable[[], TechnicalLibraryAdmissionRequest]] = {
+    "technical-5symbol-rolling-v1": technical_5symbol_rolling_v1_profile,
+}
+
+
+def resolve_rolling_library_admission_profile(name: str) -> TechnicalLibraryAdmissionRequest:
+    """Resolve a frozen rolling profile by exact name; an unknown name fails closed."""
+    try:
+        builder = ROLLING_LIBRARY_ADMISSION_PROFILES[name]
+    except KeyError:
+        raise ValueError(
+            f"unknown rolling library admission profile {name!r}; known profiles: "
+            f"{sorted(ROLLING_LIBRARY_ADMISSION_PROFILES)}"
+        ) from None
+    return builder()
+
 
 __all__ = [
+    "LIBRARY_ADMISSION_PROFILES",
+    "ROLLING_LIBRARY_ADMISSION_PROFILES",
     "AdmissionProposal",
     "CandidateAdmissionResult",
     "LibraryAdmissionConfig",
     "TechnicalLibraryAdmissionBacktestRequest",
+    "TechnicalLibraryAdmissionPipelineRequest",
     "TechnicalLibraryAdmissionRequest",
     "admission_proposal_id",
     "expert_ids_from_admission_proposal_id",
+    "resolve_library_admission_profile",
+    "resolve_rolling_library_admission_profile",
+    "technical_5symbol_2022_v1_profile",
+    "technical_5symbol_rolling_v1_profile",
 ]
