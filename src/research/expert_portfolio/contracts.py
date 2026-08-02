@@ -10,16 +10,24 @@ from __future__ import annotations
 
 from src.research.expert_portfolio.admission_reports import (
     LibraryAdmissionBacktestReport,
+    LibraryAdmissionPipelineReport,
     LibraryAdmissionReport,
 )
 from src.research.expert_portfolio.admission_types import (
+    LIBRARY_ADMISSION_PROFILES,
+    ROLLING_LIBRARY_ADMISSION_PROFILES,
     AdmissionProposal,
     CandidateAdmissionResult,
     LibraryAdmissionConfig,
     TechnicalLibraryAdmissionBacktestRequest,
+    TechnicalLibraryAdmissionPipelineRequest,
     TechnicalLibraryAdmissionRequest,
     admission_proposal_id,
     expert_ids_from_admission_proposal_id,
+    resolve_library_admission_profile,
+    resolve_rolling_library_admission_profile,
+    technical_5symbol_2022_v1_profile,
+    technical_5symbol_rolling_v1_profile,
 )
 from src.research.expert_portfolio.models import (
     ContextualRouterSpec,
@@ -30,6 +38,8 @@ from src.research.expert_portfolio.models import (
 )
 
 __all__ = [
+    "LIBRARY_ADMISSION_PROFILES",
+    "ROLLING_LIBRARY_ADMISSION_PROFILES",
     "AdmissionProposal",
     "CandidateAdmissionResult",
     "ContextualRouterSpec",
@@ -38,12 +48,18 @@ __all__ = [
     "ExpertPortfolioSpec",
     "LibraryAdmissionBacktestReport",
     "LibraryAdmissionConfig",
+    "LibraryAdmissionPipelineReport",
     "LibraryAdmissionReport",
     "TechnicalLibraryAdmissionBacktestRequest",
+    "TechnicalLibraryAdmissionPipelineRequest",
     "TechnicalLibraryAdmissionRequest",
     "admission_proposal_id",
     "expert_ids_from_admission_proposal_id",
     "lcb_z_score",
+    "resolve_library_admission_profile",
+    "resolve_rolling_library_admission_profile",
+    "technical_5symbol_2022_v1_profile",
+    "technical_5symbol_rolling_v1_profile",
 ]
 
 
@@ -64,6 +80,25 @@ def _check_contract() -> None:
         "src.research.expert_portfolio.admission_types"
     )
     assert TechnicalLibraryAdmissionBacktestRequest.__module__ == (
+        "src.research.expert_portfolio.admission_types"
+    )
+    assert TechnicalLibraryAdmissionPipelineRequest.__module__ == (
+        "src.research.expert_portfolio.admission_types"
+    )
+    assert LibraryAdmissionPipelineReport.__module__ == (
+        "src.research.expert_portfolio.admission_reports"
+    )
+    assert technical_5symbol_2022_v1_profile.__module__ == (
+        "src.research.expert_portfolio.admission_types"
+    )
+    assert resolve_library_admission_profile.__module__ == (
+        "src.research.expert_portfolio.admission_types"
+    )
+    assert (
+        resolve_rolling_library_admission_profile.__module__
+        == "src.research.expert_portfolio.admission_types"
+    )
+    assert technical_5symbol_rolling_v1_profile.__module__ == (
         "src.research.expert_portfolio.admission_types"
     )
     assert admission_proposal_id.__module__ == (
