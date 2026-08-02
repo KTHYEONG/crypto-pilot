@@ -30,7 +30,7 @@ from src.research.expert_portfolio.models import (
     ContextualRouterSpec,
     ExpertPortfolioEvaluationRequest,
 )
-from src.research.expert_portfolio.rolling import RollingAdmissionConfig
+from src.research.expert_portfolio.rolling import rolling_admission_config_for_profile
 
 
 def _run_expert_portfolio(args: argparse.Namespace) -> None:
@@ -122,7 +122,7 @@ def _run_library_admission_pipeline(args: argparse.Namespace) -> None:
 
 def _run_rolling_library_admission(args: argparse.Namespace) -> None:
     profile = resolve_rolling_library_admission_profile(args.profile)
-    config = RollingAdmissionConfig(profile=args.profile, symbols=profile.symbols)
+    config = rolling_admission_config_for_profile(args.profile, profile.symbols)
     request = rolling_admission_module.RollingLibraryAdmissionRequest(
         profile=profile,
         as_of=args.as_of,

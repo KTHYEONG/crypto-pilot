@@ -18,7 +18,10 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import cast
 
-from src.research.expert_portfolio.rolling import RollingSelectionRecord
+from src.research.expert_portfolio.rolling import (
+    RollingCandidateAuditRecord,
+    RollingSelectionRecord,
+)
 
 REBALANCE_LEDGER_PATH = (
     Path(__file__).resolve().parent.parent.parent.parent.parent
@@ -27,6 +30,10 @@ REBALANCE_LEDGER_PATH = (
 CURRENT_PROFILE_POINTER_PATH = (
     Path(__file__).resolve().parent.parent.parent.parent.parent
     / "docs" / "results" / "current_rolling_profile.json"
+)
+ROLLING_CANDIDATE_AUDIT_PATH = (
+    Path(__file__).resolve().parent.parent.parent.parent.parent
+    / "docs" / "results" / "rolling_candidate_audit.jsonl"
 )
 
 
@@ -140,6 +147,100 @@ def _iter_lines(ledger_path: Path) -> Iterator[dict[str, object]]:
                     yield data
 
 
+def _audit_from_payload(payload: Mapping[str, object]) -> RollingCandidateAuditRecord:
+    selected_value = payload.get("selected")
+    cash_reason_value = payload.get("cash_reason")
+    return RollingCandidateAuditRecord(
+        profile=str(payload["profile"]),
+        rebalance_start=str(payload["rebalance_start"]),
+        snapshot_key=str(payload["snapshot_key"]),
+        window=dict(cast("Mapping[str, object]", payload["window"])),
+        selection=dict(cast("Mapping[str, object]", payload["selection"])),
+        candidates=tuple(
+            dict(cast("Mapping[str, object]", entry))
+            for entry in cast("list[object]", payload["candidates"])
+        ),
+        proposals=tuple(
+            dict(cast("Mapping[str, object]", entry))
+            for entry in cast("list[object]", payload["proposals"])
+        ),
+        shortlist=tuple(str(entry) for entry in cast("list[object]", payload["shortlist"])),
+        training=tuple(
+            dict(cast("Mapping[str, object]", entry))
+            for entry in cast("list[object]", payload["training"])
+        ),
+        selected=(
+            dict(cast("Mapping[str, object]", selected_value))
+            if selected_value is not None
+            else None
+        ),
+        selection_status=str(payload["selection_status"]),
+        execution=dict(
+            cast("Mapping[str, object]", payload.get("execution", {})),
+        ),
+        incumbent_kept=bool(payload.get("incumbent_kept", False)),
+        cash_reason=(
+            None if cash_reason_value is None else str(cash_reason_value)
+        ),
+    )
+
+
+def _iter_audit_lines(audit_path: Path) -> Iterator[dict[str, object]]:
+    if not audit_path.exists():
+        return
+    with audit_path.open("r", encoding="utf-8") as handle:
+        for lineno, line in enumerate(handle, start=1):
+            if not line.strip():
+                continue
+            try:
+                data = json.loads(line)
+            except json.JSONDecodeError as exc:
+                raise ValueError(
+                    f"malformed rolling candidate audit line {lineno}: {exc.msg}"
+                ) from exc
+            if not isinstance(data, dict):
+                raise ValueError(
+                    f"rolling candidate audit line {lineno} must be a JSON object"
+                )
+            yield data
+
+
+def append_rolling_candidate_audit(
+    audit: RollingCandidateAuditRecord,
+    audit_path: Path = ROLLING_CANDIDATE_AUDIT_PATH,
+) -> RollingCandidateAuditRecord:
+    """Append one candidate audit idempotently under an exclusive append lock.
+
+    Exactly one canonical JSONL line is written per ``(profile,
+    rebalance_start, snapshot_key)``; an identical replay returns the existing
+    stored record without writing. A malformed existing audit line raises
+    ``ValueError`` and this ledger never mutates the rebalance decision ledger,
+    current-profile pointer, catalog, or runtime trading state.
+    """
+    audit_path.parent.mkdir(parents=True, exist_ok=True)
+    with audit_path.open("a", encoding="utf-8") as handle:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        try:
+            for existing in _iter_audit_lines(audit_path):
+                if (
+                    existing.get("profile") == audit.profile
+                    and existing.get("rebalance_start") == audit.rebalance_start
+                    and existing.get("snapshot_key") == audit.snapshot_key
+                ):
+                    return _audit_from_payload(existing)
+            handle.write(
+                json.dumps(
+                    audit.to_payload(), ensure_ascii=False, sort_keys=True,
+                )
+                + "\n"
+            )
+            handle.flush()
+            os.fsync(handle.fileno())
+            return audit
+        finally:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+
 def read_current_profile(
     pointer_path: Path = CURRENT_PROFILE_POINTER_PATH,
 ) -> RollingSelectionRecord | None:
@@ -169,6 +270,7 @@ def write_current_profile(
 def _check_contract() -> None:
     """Executable assertions locking the ledger surface."""
     assert append_rebalance_record.__name__ == "append_rebalance_record"
+    assert append_rolling_candidate_audit.__name__ == "append_rolling_candidate_audit"
     assert rebalance_snapshot_key({"a": 1}) == rebalance_snapshot_key({"a": 1})
 
 
@@ -177,7 +279,9 @@ _check_contract()
 __all__ = [
     "CURRENT_PROFILE_POINTER_PATH",
     "REBALANCE_LEDGER_PATH",
+    "ROLLING_CANDIDATE_AUDIT_PATH",
     "append_rebalance_record",
+    "append_rolling_candidate_audit",
     "load_rebalance_records",
     "read_current_profile",
     "rebalance_snapshot_key",

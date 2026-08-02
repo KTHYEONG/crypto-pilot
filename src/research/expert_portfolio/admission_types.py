@@ -387,8 +387,41 @@ def technical_5symbol_rolling_v1_profile() -> TechnicalLibraryAdmissionRequest:
     )
 
 
+def technical_5symbol_rolling_v2_profile() -> TechnicalLibraryAdmissionRequest:
+    """Return the v2 quarterly rolling walk-forward admission profile.
+
+    The universe, router, activity evidence, and pair screen are identical to
+    the v1 rolling profile, but ``max_combinations`` now bounds the explored
+    graph nodes of the deterministic same-symbol family-unique search rather
+    than the exact all-combination count. The v2 router kind, proposal-search
+    mode, and shared base scenario are selected by the rolling config from the
+    profile name; v1 semantics are never changed.
+    """
+    return TechnicalLibraryAdmissionRequest(
+        candidate_sources=tuple(
+            candidate.return_source for candidate in TECHNICAL_CANDIDATES
+        ),
+        symbols=("BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT"),
+        router=ContextualRouterSpec("BTCUSDT", 48, 48, 96),
+        admission=LibraryAdmissionConfig(
+            min_experts=2,
+            max_experts=5,
+            min_closed_trades=20,
+            min_active_return_bars=200,
+            max_abs_pairwise_log_return_correlation=0.50,
+            max_joint_negative_return_rate=0.15,
+            min_context_covered_states=6,
+            max_combinations=1_000_000,
+            max_workers=None,
+        ),
+        start=None,
+        end=None,
+    )
+
+
 ROLLING_LIBRARY_ADMISSION_PROFILES: Mapping[str, Callable[[], TechnicalLibraryAdmissionRequest]] = {
     "technical-5symbol-rolling-v1": technical_5symbol_rolling_v1_profile,
+    "technical-5symbol-rolling-v2": technical_5symbol_rolling_v2_profile,
 }
 
 
@@ -419,4 +452,5 @@ __all__ = [
     "resolve_rolling_library_admission_profile",
     "technical_5symbol_2022_v1_profile",
     "technical_5symbol_rolling_v1_profile",
+    "technical_5symbol_rolling_v2_profile",
 ]
