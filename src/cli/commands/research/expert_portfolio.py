@@ -8,17 +8,29 @@ from src.application.research.expert_portfolio import admission as admission_mod
 from src.application.research.expert_portfolio import (
     admission_backtest as admission_backtest_module,
 )
+from src.application.research.expert_portfolio import (
+    admission_pipeline as admission_pipeline_module,
+)
 from src.application.research.expert_portfolio import evaluation as evaluation_module
+from src.application.research.expert_portfolio import (
+    rolling_admission as rolling_admission_module,
+)
 from src.research.expert_portfolio.admission_types import (
+    LIBRARY_ADMISSION_PROFILES,
+    ROLLING_LIBRARY_ADMISSION_PROFILES,
     LibraryAdmissionConfig,
     TechnicalLibraryAdmissionBacktestRequest,
+    TechnicalLibraryAdmissionPipelineRequest,
     TechnicalLibraryAdmissionRequest,
     expert_ids_from_admission_proposal_id,
+    resolve_library_admission_profile,
+    resolve_rolling_library_admission_profile,
 )
 from src.research.expert_portfolio.models import (
     ContextualRouterSpec,
     ExpertPortfolioEvaluationRequest,
 )
+from src.research.expert_portfolio.rolling import RollingAdmissionConfig
 
 
 def _run_expert_portfolio(args: argparse.Namespace) -> None:
@@ -86,6 +98,40 @@ def _run_library_admission_backtest(args: argparse.Namespace) -> None:
         log_run=not args.no_log_run,
     )
     report = admission_backtest_module.run_technical_library_admission_backtest(request)
+    sys.stdout.write(
+        json.dumps(report.to_report_dict(), sort_keys=True, indent=2, default=str)
+        + "\n"
+    )
+
+
+def _run_library_admission_pipeline(args: argparse.Namespace) -> None:
+    selection_request = resolve_library_admission_profile(args.profile)
+    request = TechnicalLibraryAdmissionPipelineRequest(
+        selection=selection_request,
+        evaluation_start=args.evaluation_start,
+        evaluation_end=args.evaluation_end,
+        max_backtest_proposals=args.max_backtest_proposals,
+        initial_equity=args.initial_equity,
+    )
+    report = admission_pipeline_module.run_technical_library_admission_pipeline(request)
+    sys.stdout.write(
+        json.dumps(report.to_report_dict(), sort_keys=True, indent=2, default=str)
+        + "\n"
+    )
+
+
+def _run_rolling_library_admission(args: argparse.Namespace) -> None:
+    profile = resolve_rolling_library_admission_profile(args.profile)
+    config = RollingAdmissionConfig(profile=args.profile, symbols=profile.symbols)
+    request = rolling_admission_module.RollingLibraryAdmissionRequest(
+        profile=profile,
+        as_of=args.as_of,
+        config=config,
+        mode=args.mode,
+        log_run=not args.no_log_run,
+        require_complete_history=args.require_complete_history,
+    )
+    report = rolling_admission_module.run_rolling_library_admission(request)
     sys.stdout.write(
         json.dumps(report.to_report_dict(), sort_keys=True, indent=2, default=str)
         + "\n"
@@ -161,3 +207,37 @@ def add_expert_portfolio_commands(run_sub: argparse._SubParsersAction[argparse.A
     admission_backtest.add_argument("--end", default=None)
     admission_backtest.add_argument("--no-log-run", action="store_true", default=False)
     admission_backtest.set_defaults(handler=_run_library_admission_backtest)
+
+    pipeline = run_sub.add_parser(
+        "library-admission-pipeline",
+        help="Run the frozen profile: candidate discovery plus OOS proposal backtests in one execution",
+    )
+    pipeline.add_argument(
+        "--profile", required=True, choices=sorted(LIBRARY_ADMISSION_PROFILES),
+        help="Frozen library-admission profile (e.g. technical-5symbol-2022-v1)",
+    )
+    pipeline.add_argument("--evaluation-start", default="2025-01-01")
+    pipeline.add_argument("--evaluation-end", default="2025-12-31 20:00")
+    pipeline.add_argument("--max-backtest-proposals", type=int, default=24)
+    pipeline.add_argument("--initial-equity", type=float, default=10_000.0)
+    pipeline.set_defaults(handler=_run_library_admission_pipeline)
+
+    rolling = run_sub.add_parser(
+        "expert-portfolio-rolling",
+        help="Replay the quarterly rolling library admission through as_of and stitch closed quarters",
+    )
+    rolling.add_argument(
+        "--profile", required=True, choices=sorted(ROLLING_LIBRARY_ADMISSION_PROFILES),
+        help="Frozen rolling library admission profile (e.g. technical-5symbol-rolling-v1)",
+    )
+    rolling.add_argument(
+        "--as-of", required=True,
+        help="Frozen data snapshot; the only temporal source, e.g. 2026-07-07 20:00+00:00",
+    )
+    rolling.add_argument("--mode", choices=("paper", "live"), default="paper")
+    rolling.add_argument(
+        "--require-complete-history", action="store_true", default=False,
+        help="Reject the request when the newest deployment quarter is incomplete",
+    )
+    rolling.add_argument("--no-log-run", action="store_true", default=False)
+    rolling.set_defaults(handler=_run_rolling_library_admission)

@@ -28,7 +28,7 @@ from src.research.expert_portfolio.models import (
 _STATE_TRENDS = ("down", "flat", "up")
 _STATE_VOLS = ("low", "high")
 _UNAVAILABLE = "unavailable"
-_FLAT_TREND_BAND = 0.0005  # pre-registered flat band: |log change| <= band => flat
+_FLAT_TREND_QUANTILE = 0.10  # causal expanding quantile of |z| => flat boundary
 
 
 def state_labels() -> list[str]:
@@ -42,14 +42,21 @@ def build_causal_context_labels(
 ) -> pd.Series:
     """Classify every bar into a causal six-state context label.
 
-    At decision bar ``t`` the trend uses closes no later than ``t`` (the log
-    change over ``trend_lookback_bars``) and volatility uses completed returns
-    no later than ``t`` (the rolling standard deviation over
-    ``volatility_lookback_bars`` completed returns), so no future row can
-    influence a label.  A state is ``high`` volatility when the completed
-    rolling volatility is at least its expanding median computed through ``t``.
-    Insufficient history returns the label ``unavailable``.  The returned
-    ``Series`` preserves ``close``'s index exactly.
+    At decision bar ``t`` the trend is the volatility-normalized completed log
+    change over ``trend_lookback_bars``,
+
+        z_t = log(C_t / C_(t-L)) / (sigma_t * sqrt(L))
+
+    where ``sigma_t`` is the completed rolling one-bar log-return standard
+    deviation over ``volatility_lookback_bars`` returns ending at ``t``; no
+    future row influences a label.  ``t`` is ``flat`` when ``abs(z_t)`` is at
+    most its causal expanding ``_FLAT_TREND_QUANTILE`` of all finite ``|z|``
+    values computed through ``t``, otherwise ``up``/``down`` by ``z_t``'s sign.
+    A state is ``high`` volatility when the completed rolling volatility is at
+    least its expanding median computed through ``t``.  The boundary is
+    invariant to a positive scaling of ``close`` and to a proportional
+    volatility change.  Insufficient finite history returns ``unavailable``.
+    The returned ``Series`` preserves ``close``'s index exactly.
     """
     if not isinstance(close, pd.Series):
         raise ValueError(f"close must be a pd.Series, got {type(close).__name__}")
@@ -73,10 +80,6 @@ def build_causal_context_labels(
         log_change[spec.trend_lookback_bars:] = np.log(
             values[spec.trend_lookback_bars:] / values[:-spec.trend_lookback_bars]
         )
-    trend = np.full(n, None, dtype=object)
-    trend[log_change > _FLAT_TREND_BAND] = "up"
-    trend[log_change < -_FLAT_TREND_BAND] = "down"
-    trend[(np.abs(log_change) <= _FLAT_TREND_BAND) & np.isfinite(log_change)] = "flat"
 
     volatility = np.full(n, np.nan, dtype=np.float64)
     if n > spec.volatility_lookback_bars:
@@ -96,7 +99,20 @@ def build_causal_context_labels(
         ]
         median = pd.Series(volatility).expanding(min_periods=1).median().to_numpy()
         high = volatility >= median
-        ready = np.isfinite(volatility) & np.isfinite(log_change)
+
+        with np.errstate(divide="ignore", invalid="ignore"):
+            z = log_change / (volatility * np.sqrt(spec.trend_lookback_bars))
+        abs_z = np.where(np.isfinite(z), np.abs(z), np.nan)
+        flat_boundary = (
+            pd.Series(abs_z).expanding(min_periods=1).quantile(_FLAT_TREND_QUANTILE)
+        )
+        flat = np.isfinite(abs_z) & (abs_z <= flat_boundary.to_numpy())
+        trend = np.full(n, None, dtype=object)
+        trend[flat] = "flat"
+        trend[~flat & (z > 0.0)] = "up"
+        trend[~flat & (z < 0.0)] = "down"
+
+        ready = np.isfinite(volatility) & np.isfinite(z)
         labels[ready] = np.array(
             [
                 f"{t}_{'high' if h else 'low'}_vol"
@@ -213,14 +229,16 @@ def compute_causal_contextual_winner_weights(
 def _check_contract() -> None:
     """Executable assertions locking the frozen contextual-router surface."""
     close = pd.Series(
-        [100.0, 101.0, 102.0],
-        index=pd.date_range("2024-01-01", periods=3, freq="4h", tz="UTC"),
+        [100.0, 101.0, 99.0, 102.0],
+        index=pd.date_range("2024-01-01", periods=4, freq="4h", tz="UTC"),
     )
-    spec = ContextualRouterSpec("BTCUSDT", 1, 1, 1)
+    spec = ContextualRouterSpec("BTCUSDT", 1, 2, 1)
     labels = build_causal_context_labels(close, spec)
     assert labels.index.equals(close.index)
     assert labels.iloc[0] == _UNAVAILABLE
-    assert set(labels.iloc[1:]).issubset(set(state_labels()))
+    labeled = labels[labels != _UNAVAILABLE]
+    assert not labeled.empty
+    assert set(labeled).issubset(set(state_labels()))
     assert compute_causal_contextual_winner_weights.__name__ == (
         "compute_causal_contextual_winner_weights"
     )
