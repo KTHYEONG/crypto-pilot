@@ -101,6 +101,10 @@ TECHNICAL_CANDIDATES: tuple[TechnicalCandidate, ...] = (
     ),
 )
 
+_CANDIDATES_BY_SOURCE: dict[str, TechnicalCandidate] = {
+    candidate.return_source: candidate for candidate in TECHNICAL_CANDIDATES
+}
+
 _FROZEN_FAMILIES = {
     "ema_alignment",
     "macd_histogram_regime",
@@ -120,10 +124,10 @@ def resolve_technical_candidate(return_source: str) -> TechnicalCandidate:
     An unknown or retired return source raises ``ValueError``; aliases are never
     mapped, so a rejected identity cannot be re-entered under another name.
     """
-    for candidate in TECHNICAL_CANDIDATES:
-        if candidate.return_source == return_source:
-            return candidate
-    raise ValueError(f"unknown or retired technical return source '{return_source}'")
+    candidate = _CANDIDATES_BY_SOURCE.get(return_source)
+    if candidate is None:
+        raise ValueError(f"unknown or retired technical return source '{return_source}'")
+    return candidate
 
 
 def _check_contract() -> None:
