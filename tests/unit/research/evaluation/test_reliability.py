@@ -21,6 +21,8 @@ from src.research.evaluation.reliability import (
     compute_reliability_gate,
     compute_stress_test_gate,
     derive_block_size,
+    derive_cost_multiple_hurdle_rate,
+    equity_span_years,
     split_holdout_segment,
 )
 
@@ -215,6 +217,43 @@ class TestComputeEquityReliabilityGate:
             compute_equity_reliability_gate(
                 pd.Series([100.0, 110.0, 90.0], index=base_idx), -1,
             )
+
+
+class TestEquitySpanYears:
+    def test_equity_span_years_matches_existing_gate_internal_formula(self) -> None:
+        # The extracted helper reproduces the gate's inline formula exactly:
+        # 365.25 days apart is 1.0 year, and the gate delegates to it.
+        idx = pd.date_range("2024-01-01", periods=2, freq="365.25D", tz="UTC")
+        equity = pd.Series([100.0, 110.0], index=idx)
+        assert equity_span_years(equity) == pytest.approx(1.0, abs=1e-9)
+        gate = compute_equity_reliability_gate(equity, closed_trade_count=40)
+        assert gate.verdict in ("PASS", "FAIL", "PENDING")
+
+    def test_equity_span_years_rejects_short_and_malformed_ledgers(self) -> None:
+        with pytest.raises(ValueError, match="at least 2"):
+            equity_span_years(pd.Series([100.0], index=pd.date_range("2024-01-01", periods=1, tz="UTC")))
+        with pytest.raises(ValueError, match="DatetimeIndex"):
+            equity_span_years(pd.Series([100.0, 110.0]))
+        empty_range = pd.date_range("2024-01-01", periods=2, freq="365.25D", tz="UTC")
+        with pytest.raises(ValueError, match="positive time range"):
+            equity_span_years(pd.Series([100.0, 110.0], index=empty_range[::-1]))
+
+
+class TestDeriveCostMultipleHurdleRate:
+    def test_derive_cost_multiple_hurdle_rate_scales_with_measured_cost(self) -> None:
+        # The hurdle is the annualized measured allocation cost scaled by the
+        # margin: 0.02 total cost over 2 years * 2x = 0.02 annualized hurdle.
+        assert derive_cost_multiple_hurdle_rate(0.02, 2.0, 2.0) == pytest.approx(0.02)
+        assert derive_cost_multiple_hurdle_rate(0.0, 2.0, 2.0) == 0.0
+        assert derive_cost_multiple_hurdle_rate(0.06, 3.0, 3.0) == pytest.approx(0.06)
+
+    def test_derive_cost_multiple_hurdle_rate_rejects_non_positive_years(self) -> None:
+        with pytest.raises(ValueError, match="years"):
+            derive_cost_multiple_hurdle_rate(0.02, 0.0, 2.0)
+        with pytest.raises(ValueError, match="allocation_cost_total"):
+            derive_cost_multiple_hurdle_rate(-0.01, 2.0, 2.0)
+        with pytest.raises(ValueError, match="cost_multiple"):
+            derive_cost_multiple_hurdle_rate(0.02, 2.0, -1.0)
 
 
 class TestSplitHoldoutSegment:

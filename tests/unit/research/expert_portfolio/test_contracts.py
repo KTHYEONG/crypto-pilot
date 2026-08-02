@@ -348,14 +348,14 @@ def test_pipeline_request_round_trips_the_frozen_profile_identity() -> None:
 def test_rolling_profile_freezes_the_same_universe_without_fixed_dates() -> None:
     # RLA-CLI: the rolling profile reuses the frozen 18-source five-symbol
     # universe and limits, carries no fixed selection dates, and resolves only by
-    # its exact name.
+    # its exact canonical name.
     from src.research.expert_portfolio.admission_types import (
         ROLLING_LIBRARY_ADMISSION_PROFILES,
         resolve_rolling_library_admission_profile,
-        technical_5symbol_rolling_v1_profile,
+        technical_5symbol_rolling_profile,
     )
 
-    profile = technical_5symbol_rolling_v1_profile()
+    profile = technical_5symbol_rolling_profile()
     static = technical_5symbol_2022_v1_profile()
     assert profile.candidate_sources == static.candidate_sources
     assert profile.symbols == static.symbols
@@ -363,8 +363,8 @@ def test_rolling_profile_freezes_the_same_universe_without_fixed_dates() -> None
     assert profile.admission == static.admission
     assert profile.start is None
     assert profile.end is None
-    assert resolve_rolling_library_admission_profile("technical-5symbol-rolling-v1") == profile
-    assert "technical-5symbol-rolling-v1" in ROLLING_LIBRARY_ADMISSION_PROFILES
+    assert resolve_rolling_library_admission_profile("technical-5symbol-rolling") == profile
+    assert "technical-5symbol-rolling" in ROLLING_LIBRARY_ADMISSION_PROFILES
     with pytest.raises(ValueError, match="unknown rolling library admission profile"):
         resolve_rolling_library_admission_profile("technical-4symbol-rolling-v0")
 

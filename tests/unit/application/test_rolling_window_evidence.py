@@ -48,11 +48,8 @@ def _request(symbols: tuple[str, ...] = ("BTCUSDT", "ETHUSDT")) -> TechnicalLibr
 
 def _config(symbols: tuple[str, ...]) -> RollingAdmissionConfig:
     return RollingAdmissionConfig(
-        profile="technical-5symbol-rolling-v2",
+        profile="technical-5symbol-rolling",
         symbols=symbols,
-        router_kind="per_symbol_winner_v2",
-        proposal_search="bounded_family_unique_v2",
-        base_delay_bars=1,
     )
 
 
@@ -160,13 +157,13 @@ class TestWindowScenarioEvidence:
         ]
 
         calls["n"] = 0
-        ra._select_for_window_v2(
-            request, window, dataclasses.replace(config, shortlist_budget=2), None,
+        ra._select_for_window(
+            request, window, dataclasses.replace(config, min_shortlist_budget=4), None,
         )
         small_budget_runs = calls["n"]
         calls["n"] = 0
-        ra._select_for_window_v2(
-            request, window, dataclasses.replace(config, shortlist_budget=20), None,
+        ra._select_for_window(
+            request, window, dataclasses.replace(config, min_shortlist_budget=20), None,
         )
         large_budget_runs = calls["n"]
         # more proposals -> exactly one evidence build per run, no extra candidates
@@ -183,7 +180,7 @@ class TestWindowScenarioEvidence:
         config = _config(request.symbols)
         window = _window(config)
 
-        selection, shortlist, cached_reports = ra._select_for_window_v2(
+        selection, shortlist, cached_reports = ra._select_for_window(
             request, window, config, None,
         )
         assert selection.status == "COMPLETE"
