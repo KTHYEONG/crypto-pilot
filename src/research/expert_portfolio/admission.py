@@ -88,17 +88,27 @@ def evaluate_library_admission(
             coverage_sufficient=coverage_sufficient,
             router=router,
             admission=config,
+            structural_combinations=structural_total,
         )
 
+    admitted_values = completed[:, list(admitted_indexes)]
     families = np.array([e.family for e in admitted_experts], dtype=object)
     symbols = np.array([e.symbols[0] for e in admitted_experts], dtype=object)
-    compat = _pair_compatibility_matrix(completed, families, symbols, config)
+    correlation = pairwise_log_return_correlation(admitted_values)
+    joint_negative = pairwise_joint_negative_rates(admitted_values)
+    compat = _pair_compatibility_matrix(
+        correlation, joint_negative, families, symbols, config,
+    )
 
     enumerated = _enumerate_proposals(
         admitted_experts, compat, config.min_experts, config.max_experts,
     )
     proposals = tuple(
-        AdmissionProposal(expert_ids=subset, eligible=coverage_sufficient)
+        AdmissionProposal(
+            expert_ids=tuple(admitted_experts[i].expert_id for i in subset),
+            eligible=coverage_sufficient,
+            **_proposal_pair_diagnostics(correlation, joint_negative, subset),
+        )
         for subset in enumerated
     )
     return LibraryAdmissionReport(
@@ -113,6 +123,7 @@ def evaluate_library_admission(
         coverage_sufficient=coverage_sufficient,
         router=router,
         admission=config,
+        structural_combinations=structural_total,
     )
 
 
@@ -241,13 +252,12 @@ def _exact_structural_count(
 
 
 def _pair_compatibility_matrix(
-    completed_returns: np.ndarray,
+    correlation: np.ndarray,
+    joint_negative: np.ndarray,
     families: np.ndarray,
     symbols: np.ndarray,
     config: LibraryAdmissionConfig,
 ) -> np.ndarray:
-    correlation = pairwise_log_return_correlation(completed_returns)
-    joint_negative = pairwise_joint_negative_rates(completed_returns)
     finite = np.isfinite(correlation)
     within_correlation = (
         np.abs(correlation) <= config.max_abs_pairwise_log_return_correlation
@@ -260,16 +270,44 @@ def _pair_compatibility_matrix(
     return np.asarray(compat, dtype=bool)
 
 
+def _proposal_pair_diagnostics(
+    correlation: np.ndarray,
+    joint_negative: np.ndarray,
+    indexes: tuple[int, ...],
+) -> dict[str, float]:
+    """Selection-window pair diagnostics for one enumerated expert subset."""
+    if len(indexes) < 2:
+        return {
+            "max_abs_pair_log_return_correlation": 0.0,
+            "max_pair_joint_negative_rate": 0.0,
+            "mean_abs_pair_log_return_correlation": 0.0,
+            "mean_pair_joint_negative_rate": 0.0,
+        }
+    pairs = [
+        (indexes[a], indexes[b])
+        for a in range(len(indexes))
+        for b in range(a + 1, len(indexes))
+    ]
+    abs_correlation = [abs(correlation[i, j]) for i, j in pairs]
+    joint_negative_rates = [float(joint_negative[i, j]) for i, j in pairs]
+    return {
+        "max_abs_pair_log_return_correlation": float(max(abs_correlation)),
+        "max_pair_joint_negative_rate": float(max(joint_negative_rates)),
+        "mean_abs_pair_log_return_correlation": float(np.mean(abs_correlation)),
+        "mean_pair_joint_negative_rate": float(np.mean(joint_negative_rates)),
+    }
+
+
 def _enumerate_proposals(
     experts: tuple[ExpertDefinition, ...],
     compat: np.ndarray,
     min_experts: int,
     max_experts: int,
-) -> tuple[tuple[str, ...], ...]:
+) -> tuple[tuple[int, ...], ...]:
     n = len(experts)
     families = [e.family for e in experts]
     symbols = [e.symbols[0] for e in experts]
-    proposals: list[tuple[str, ...]] = []
+    proposals: list[tuple[int, ...]] = []
 
     def _backtrack(
         start: int,
@@ -279,7 +317,7 @@ def _enumerate_proposals(
     ) -> None:
         size = len(partial)
         if size >= min_experts:
-            proposals.append(tuple(experts[i].expert_id for i in partial))
+            proposals.append(tuple(partial))
         if size >= max_experts:
             return
         for j in range(start, n):
@@ -296,6 +334,63 @@ def _enumerate_proposals(
 
     _backtrack(0, [], set(), set())
     return tuple(proposals)
+
+
+_SHORTLIST_PER_SIZE = 6
+
+
+def shortlist_admission_proposals(
+    proposals: tuple[AdmissionProposal, ...],
+    max_backtest_proposals: int,
+) -> tuple[AdmissionProposal, ...]:
+    """Deterministic size-stratified shortlist capped by the backtest budget.
+
+    Proposals are grouped by expert count and ranked within each size by the
+    ``AdmissionProposal.rank_key``: maximum then mean absolute pairwise
+    correlation, maximum then mean joint-negative rate, and the lexical
+    proposal id. Six proposals per available size are selected first, then any
+    unused budget is assigned one at a time to the remaining sizes in ascending
+    rank order. Only selection-window pair diagnostics participate; portfolio
+    metrics, promotion verdicts, and OOS data never enter.
+    """
+    if max_backtest_proposals < 1:
+        raise ValueError(
+            f"max_backtest_proposals must be >= 1, got {max_backtest_proposals}"
+        )
+    if not proposals:
+        return ()
+    by_size: dict[int, list[AdmissionProposal]] = {}
+    for proposal in proposals:
+        by_size.setdefault(len(proposal.expert_ids), []).append(proposal)
+    sizes = sorted(by_size)
+    for size in sizes:
+        by_size[size].sort(key=lambda p: p.rank_key())
+
+    selected: dict[int, list[AdmissionProposal]] = {size: [] for size in sizes}
+    budget = max_backtest_proposals
+    for _round in range(_SHORTLIST_PER_SIZE):
+        for size in sizes:
+            if budget == 0:
+                break
+            ranked = by_size[size]
+            if len(ranked) > len(selected[size]):
+                selected[size].append(ranked[len(selected[size])])
+                budget -= 1
+        if budget == 0:
+            break
+    while budget > 0:
+        added = False
+        for size in sizes:
+            if budget == 0:
+                break
+            ranked = by_size[size]
+            if len(ranked) > len(selected[size]):
+                selected[size].append(ranked[len(selected[size])])
+                budget -= 1
+                added = True
+        if not added:
+            break
+    return tuple(proposal for size in sizes for proposal in selected[size])
 
 
 def _context_coverage(

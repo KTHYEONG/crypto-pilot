@@ -1,0 +1,565 @@
+"""Quarterly rolling library admission application service.
+
+Replays the sealed selection algorithm at every historical rebalance using only
+its own ``observed_end`` snapshot, stitches only closed deployment quarters into
+one master ledger, charges a single switch cost when the proposal changes, and
+writes each decision to the append-only rebalance ledger plus the atomic
+current-profile pointer. Warm-up observations feed indicators and router state
+only; their returns never enter scoring or OOS PnL. Paper mode produces no
+trading side effect; live execution requires explicit separate authorization.
+"""
+
+from __future__ import annotations
+
+import dataclasses
+import logging
+from dataclasses import dataclass, field
+from pathlib import Path
+
+import numpy as np
+import pandas as pd
+
+from src.application.research.expert_portfolio.admission import (
+    _assemble_panel,
+    _build_admission_context,
+    _symbol_admission_worker,
+)
+from src.application.research.expert_portfolio.admission import (
+    _materialize_definitions as _materialize_universe_definitions,
+)
+from src.application.research.expert_portfolio.admission_backtest import (
+    _assemble_selected_panel,
+    _master_result,
+    _run_selected_tasks,
+)
+from src.application.research.expert_portfolio.admission_backtest import (
+    _materialize_definitions as _materialize_selected_definitions,
+)
+from src.application.research.expert_portfolio.rebalance_ledger import (
+    CURRENT_PROFILE_POINTER_PATH,
+    REBALANCE_LEDGER_PATH,
+    append_rebalance_record,
+    rebalance_snapshot_key,
+    write_current_profile,
+)
+from src.application.research.expert_portfolio.window import resolve_common_technical_window
+from src.common.errors import DataIntegrityError
+from src.research.contracts import CostModel
+from src.research.evaluation.metrics import compute_metrics
+from src.research.evaluation.promotion import compose_promotion_verdict
+from src.research.evaluation.reliability import (
+    FoldDistributionResult,
+    ReliabilityGateConfig,
+    compute_equal_duration_fold_distribution,
+    compute_equity_reliability_gate,
+    compute_fold_distribution,
+)
+from src.research.expert_portfolio.admission import (
+    evaluate_library_admission,
+    shortlist_admission_proposals,
+)
+from src.research.expert_portfolio.admission_reports import (
+    LibraryAdmissionBacktestReport,
+    LibraryAdmissionReport,
+)
+from src.research.expert_portfolio.admission_types import (
+    AdmissionProposal,
+    TechnicalLibraryAdmissionRequest,
+    admission_proposal_id,
+)
+from src.research.expert_portfolio.backtest import run_expert_portfolio
+from src.research.expert_portfolio.models import (
+    ContextualRouterSpec,
+    ExpertDefinition,
+    ExpertPortfolioSpec,
+)
+from src.research.expert_portfolio.rolling import (
+    RebalanceWindow,
+    RollingAdmissionConfig,
+    RollingLibraryAdmissionReport,
+    RollingSelectionRecord,
+    build_rolling_rebalance_schedule,
+    select_rebalance_proposal,
+)
+from src.research.provenance.code_manifest import TECHNICAL_CODE_UNITS, compute_code_hash
+from src.research.technical_experts.provenance import technical_data_hashes
+
+_logger = logging.getLogger("RollingLibraryAdmission")
+
+_STRESS_FEE_MULT = 1.5
+_STRESS_SLIPPAGE_MULT = 2.0
+_FOLD_DURATION = "6MS"
+
+
+@dataclass(frozen=True, slots=True)
+class RollingLibraryAdmissionRequest:
+    """Immutable request for one rolling library admission replay.
+
+    ``profile`` is the frozen rolling candidate universe, ``as_of`` the frozen
+    data snapshot (the only temporal source), ``config`` the quarterly policy,
+    and ``mode`` is ``"paper"`` or ``"live"``. Live mode fails closed unless
+    ``live_authorized``; ``require_complete_history`` rejects a request whose
+    newest deployment quarter is still incomplete.
+    """
+
+    profile: TechnicalLibraryAdmissionRequest
+    as_of: str | pd.Timestamp
+    config: RollingAdmissionConfig = field(default_factory=RollingAdmissionConfig)
+    mode: str = "paper"
+    log_run: bool = False
+    live_authorized: bool = False
+    require_complete_history: bool = False
+
+    def __post_init__(self) -> None:
+        if self.config.symbols != self.profile.symbols:
+            raise ValueError(
+                f"rolling config symbols {self.config.symbols} must match the profile "
+                f"symbols {self.profile.symbols}"
+            )
+        if self.mode not in ("paper", "live"):
+            raise ValueError(f"mode must be 'paper' or 'live', got {self.mode!r}")
+        if self.mode == "live" and not self.live_authorized:
+            raise RuntimeError(
+                "live trading bridge requires explicit separate authorization"
+            )
+        pd.Timestamp(self.as_of, tz="UTC")
+
+
+def _materialize_universe(
+    profile: TechnicalLibraryAdmissionRequest,
+    code_hash: str,
+) -> tuple[ExpertDefinition, ...]:
+    return _materialize_universe_definitions(profile, code_hash)
+
+
+def _build_candidate_panel(
+    profile: TechnicalLibraryAdmissionRequest,
+    start: str | pd.Timestamp,
+    end: str | pd.Timestamp,
+) -> tuple[pd.DataFrame, dict[str, int], tuple[ExpertDefinition, ...], str]:
+    """Run the full frozen candidate universe once over a causal window."""
+    code_hash = compute_code_hash(TECHNICAL_CODE_UNITS)
+    definitions = _materialize_universe(profile, code_hash)
+    sources = tuple(sorted(profile.candidate_sources))
+    evidence = {
+        symbol: _symbol_admission_worker(symbol, sources, str(start), end)
+        for symbol in profile.symbols
+    }
+    panel, trade_counts = _assemble_panel(evidence, definitions, profile.symbols)
+    return panel, trade_counts, definitions, code_hash
+
+
+def _slice_scored_panel(panel: pd.DataFrame, scored_start: pd.Timestamp) -> pd.DataFrame:
+    """Slice the scored window and restore the single initial all-NaN row."""
+    scored = panel.loc[scored_start:].copy()
+    if len(scored) < 2:
+        raise DataIntegrityError(
+            f"scored panel has fewer than 2 bars from {scored_start}"
+        )
+    scored.iloc[0] = np.nan
+    return scored
+
+
+def _run_proposal_backtest(
+    expert_ids: tuple[str, ...],
+    router: ContextualRouterSpec,
+    start: str | pd.Timestamp,
+    end: str | pd.Timestamp,
+    initial_equity: float,
+    max_workers: int | None,
+) -> LibraryAdmissionBacktestReport:
+    """In-memory base/stress backtest over an explicit window, no holdout seal."""
+    code_hash = compute_code_hash(TECHNICAL_CODE_UNITS)
+    definitions = _materialize_selected_definitions(expert_ids, code_hash)
+    spec = ExpertPortfolioSpec(experts=definitions, router=router)
+    costs = CostModel()
+
+    base_evidence, _ = _run_selected_tasks(
+        definitions, str(start), end, costs, 0, max_workers,
+    )
+    panel, component_trades = _assemble_selected_panel(base_evidence, definitions)
+    context = _build_admission_context(router, panel.index, str(start), end)
+    base = run_expert_portfolio(
+        panel, spec, costs, initial_equity=initial_equity, decision_context=context,
+    )
+    base_result = _master_result(base, component_trades)
+    observation_metrics = compute_metrics(base_result.equity, base_result.trades)
+    observation_gate = compute_equity_reliability_gate(
+        base_result.equity, len(base_result.trades),
+    )
+    observation_folds = compute_fold_distribution(base_result)
+
+    stress_costs = CostModel(
+        fee_rate=costs.fee_rate * _STRESS_FEE_MULT,
+        slippage_rate=costs.slippage_rate * _STRESS_SLIPPAGE_MULT,
+    )
+    stress_evidence, _ = _run_selected_tasks(
+        definitions, str(start), end, stress_costs, 1, max_workers,
+    )
+    stress_panel, stress_trades = _assemble_selected_panel(stress_evidence, definitions)
+    stress = run_expert_portfolio(
+        stress_panel,
+        spec,
+        stress_costs,
+        initial_equity=initial_equity,
+        fixed_weights=base.target_weights,
+        signal_delay_bars=1,
+    )
+    stress_result = _master_result(stress, stress_trades)
+    stress_metrics = compute_metrics(stress_result.equity, stress_result.trades)
+    stress_gate = compute_equity_reliability_gate(
+        stress_result.equity,
+        len(stress_result.trades),
+        config=dataclasses.replace(ReliabilityGateConfig(), hurdle_rate=0.0),
+    )
+    stress_folds = compute_fold_distribution(stress_result)
+    promotion = compose_promotion_verdict(
+        observation_gate, observation_folds, stress_gate, None,
+    )
+    symbols = sorted({definition.symbols[0] for definition in definitions})
+    return LibraryAdmissionBacktestReport(
+        status="COMPLETE",
+        proposal_id=admission_proposal_id(expert_ids),
+        expert_ids=tuple(definition.expert_id for definition in definitions),
+        router=router,
+        window_start=str(panel.index[0]),
+        window_end=str(panel.index[-1]),
+        observation_metrics=observation_metrics,
+        observation_gate=observation_gate,
+        observation_folds=observation_folds,
+        stress_metrics=stress_metrics,
+        stress_gate=stress_gate,
+        stress_folds=stress_folds,
+        promotion=promotion,
+        allocation_cost_total=float(base.allocation_cost.sum()),
+        stress_allocation_cost_total=float(stress.allocation_cost.sum()),
+        execution_workers=1,
+        code_hash=code_hash,
+        data_hashes={symbol: technical_data_hashes(symbol) for symbol in symbols},
+    )
+
+
+def _select_for_window(
+    profile: TechnicalLibraryAdmissionRequest,
+    window: RebalanceWindow,
+    config: RollingAdmissionConfig,
+    incumbent: AdmissionProposal | None,
+) -> tuple[
+    LibraryAdmissionReport,
+    tuple[AdmissionProposal, ...],
+    tuple[LibraryAdmissionBacktestReport, ...],
+]:
+    """Replay selection for one window using only data through ``observed_end``."""
+    panel, trade_counts, definitions, _ = _build_candidate_panel(
+        profile, window.load_start, window.observed_end,
+    )
+    scored_panel = _slice_scored_panel(panel, window.scored_start)
+    context = _build_admission_context(
+        profile.router, panel.index, window.load_start, window.observed_end,
+    )
+    scored_context = context.loc[scored_panel.index]
+    selection = evaluate_library_admission(
+        scored_panel,
+        trade_counts,
+        definitions,
+        scored_context,
+        profile.router,
+        profile.admission,
+    )
+    candidates = list(shortlist_admission_proposals(selection.proposals, config.shortlist_budget))
+    if incumbent is not None:
+        shortlisted_ids = {proposal.proposal_id for proposal in candidates}
+        incumbent_proposal = next(
+            (
+                proposal
+                for proposal in selection.proposals
+                if proposal.proposal_id == incumbent.proposal_id
+            ),
+            None,
+        )
+        if incumbent_proposal is not None and incumbent_proposal.proposal_id not in shortlisted_ids:
+            candidates.append(incumbent_proposal)
+    training_reports = tuple(
+        dataclasses.replace(
+            _run_proposal_backtest(
+                proposal.expert_ids,
+                profile.router,
+                window.scored_start,
+                window.observed_end,
+                config.initial_equity,
+                profile.admission.max_workers,
+            ),
+            diversification_rank_key=proposal.rank_key(),
+        )
+        for proposal in candidates
+    )
+    return selection, tuple(candidates), training_reports
+
+
+def _deployment_equity(
+    selected: AdmissionProposal | None,
+    profile: TechnicalLibraryAdmissionRequest,
+    window: RebalanceWindow,
+    config: RollingAdmissionConfig,
+) -> pd.Series:
+    """Normalized base ledger for one deployment quarter, starting at 1.0.
+
+    CASH (``selected is None``) is a flat unit series. A selected proposal is
+    backtested over the full warm-up window so router and indicator state carry
+    into the quarter; only the deployment slice is returned.
+    """
+    if selected is None:
+        index = pd.date_range(
+            window.deploy_start, window.deploy_end, freq="4h", tz="UTC",
+        )
+        return pd.Series(1.0, index=index, name="equity", dtype="float64")
+    code_hash = compute_code_hash(TECHNICAL_CODE_UNITS)
+    definitions = _materialize_selected_definitions(selected.expert_ids, code_hash)
+    spec = ExpertPortfolioSpec(experts=definitions, router=profile.router)
+    costs = CostModel()
+    base_evidence, _ = _run_selected_tasks(
+        definitions, str(window.load_start), window.deploy_end, costs, 0,
+        profile.admission.max_workers,
+    )
+    panel, _component_trades = _assemble_selected_panel(base_evidence, definitions)
+    context = _build_admission_context(
+        profile.router, panel.index, window.load_start, window.deploy_end,
+    )
+    base = run_expert_portfolio(
+        panel, spec, costs, initial_equity=1.0, decision_context=context,
+    )
+    equity = base.backtest_result.equity
+    segment = equity.loc[window.deploy_start:]
+    if len(segment) < 1:
+        raise DataIntegrityError(
+            f"deployment segment is empty for {window.profile} at {window.deploy_start}"
+        )
+    return segment / segment.iloc[0]
+
+
+def _stitch_segments(
+    segments: list[pd.Series],
+    proposal_ids: list[str | None],
+    config: RollingAdmissionConfig,
+) -> pd.Series:
+    """Stitch closed deployment segments into one master ledger with switch costs.
+
+    A switch charges ``switch_cost`` once at the first executable bar of the new
+    deployment quarter; an unchanged proposal id never turns over.
+    """
+    if not segments:
+        return pd.Series(dtype="float64")
+    chunks: list[pd.Series] = []
+    stitched_value = config.initial_equity
+    previous_id: str | None = None
+    for segment, proposal_id in zip(segments, proposal_ids, strict=True):
+        segment_returns = segment.pct_change().fillna(0.0)
+        if previous_id is not None and proposal_id != previous_id:
+            segment_returns = segment_returns.copy()
+            segment_returns.iloc[0] = (
+                (1.0 + segment_returns.iloc[0]) * (1.0 - config.switch_cost) - 1.0
+            )
+        previous_id = proposal_id
+        chunk_values = stitched_value * np.cumprod(
+            1.0 + segment_returns.to_numpy(dtype=np.float64),
+        )
+        stitched_value = float(chunk_values[-1])
+        chunks.append(
+            pd.Series(chunk_values, index=segment.index, name="equity", dtype="float64"),
+        )
+    return pd.concat(chunks)
+
+
+def _fold_summary(stitched: pd.Series) -> FoldDistributionResult:
+    if (
+        len(stitched) < 2
+        or stitched.index[-1] < stitched.index[0] + pd.DateOffset(months=6)
+    ):
+        return FoldDistributionResult(
+            n_folds=0, median_fold_cagr=0.0, worst_fold_cagr=0.0,
+            median_fold_calmar=0.0, max_period_contribution=0.0, gate_pass=True,
+        )
+    return compute_equal_duration_fold_distribution(stitched, fold_duration=_FOLD_DURATION)
+
+
+def _snapshot_inputs(
+    request: RollingLibraryAdmissionRequest,
+    window: RebalanceWindow,
+    code_hash: str,
+    data_hashes: dict[str, dict[str, str]],
+) -> dict[str, object]:
+    return {
+        "profile": request.config.profile,
+        "observed_end": str(window.observed_end),
+        "code_hash": code_hash,
+        "data_hashes": data_hashes,
+        "candidate_sources": list(request.profile.candidate_sources),
+        "router": dataclasses.asdict(request.profile.router),
+        "admission": request.profile.admission.fingerprint(),
+    }
+
+
+def _run_one_rebalance(
+    request: RollingLibraryAdmissionRequest,
+    window: RebalanceWindow,
+    incumbent: AdmissionProposal | None,
+) -> tuple[RollingSelectionRecord, pd.Series | None, AdmissionProposal | None]:
+    """Replay one rebalance and return its record, deployment segment, and next incumbent."""
+    selection, _shortlist, training_reports = _select_for_window(
+        request.profile, window, request.config, incumbent,
+    )
+    selected = select_rebalance_proposal(training_reports, incumbent)
+    segment: pd.Series | None = None
+    if window.status == "closed":
+        segment = _deployment_equity(selected, request.profile, window, request.config)
+    code_hash = compute_code_hash(TECHNICAL_CODE_UNITS)
+    data_hashes = {
+        symbol: technical_data_hashes(symbol) for symbol in request.profile.symbols
+    }
+    snapshot_key = rebalance_snapshot_key(
+        _snapshot_inputs(request, window, code_hash, data_hashes),
+    )
+    incumbent_kept = (
+        incumbent is not None
+        and selected is not None
+        and selected.proposal_id == incumbent.proposal_id
+    )
+    record = RollingSelectionRecord(
+        profile=request.config.profile,
+        rebalance_start=str(window.rebalance_start),
+        scored_start=str(window.scored_start),
+        observed_end=str(window.observed_end),
+        load_start=str(window.load_start),
+        deploy_start=str(window.deploy_start),
+        deploy_end=str(window.deploy_end),
+        status=window.status,
+        selection_status=selection.status,
+        proposal_id=selected.proposal_id if selected is not None else None,
+        expert_ids=selected.expert_ids if selected is not None else (),
+        incumbent_kept=incumbent_kept,
+        code_hash=code_hash,
+        data_hashes=data_hashes,
+        snapshot_key=snapshot_key,
+    )
+    return record, segment, selected
+
+
+def run_rolling_library_admission(
+    request: RollingLibraryAdmissionRequest,
+    *,
+    ledger_path: Path = REBALANCE_LEDGER_PATH,
+    pointer_path: Path = CURRENT_PROFILE_POINTER_PATH,
+) -> RollingLibraryAdmissionReport:
+    """Replay every eligible rebalance through ``as_of`` and stitch closed quarters.
+
+    Each historical window freezes its own ``observed_end`` snapshot, warm-up
+    observations never enter scoring or OOS PnL, a switch is charged once at the
+    following executable bar, and decisions are written append-only and
+    idempotently. A request for a complete historical verdict fails closed while
+    the newest deployment quarter is still incomplete.
+    """
+    window = resolve_common_technical_window(
+        request.profile.symbols, None, request.as_of,
+    )
+    windows = build_rolling_rebalance_schedule(
+        window.common_start, request.as_of, request.config,
+    )
+    if not windows:
+        _logger.info(
+            "[EVAL] rolling status=NO_WINDOWS profile=%s as_of=%s common_start=%s",
+            request.config.profile, request.as_of, window.common_start,
+        )
+        return RollingLibraryAdmissionReport(
+            status="NO_WINDOWS",
+            profile=request.config.profile,
+            mode=request.mode,
+            as_of=str(pd.Timestamp(request.as_of, tz="UTC")),
+            common_start=str(window.common_start),
+            common_end=str(window.common_end),
+            windows=(),
+            records=(),
+            n_folds=0,
+            median_fold_cagr=0.0,
+            worst_fold_cagr=0.0,
+            median_fold_calmar=0.0,
+            max_period_contribution=0.0,
+            fold_gate_pass=True,
+            oos_start="",
+            oos_end="",
+            oos_return=0.0,
+        )
+
+    if request.require_complete_history and any(
+        w.status == "live_or_partial" for w in windows
+    ):
+        raise ValueError(
+            "request targets an incomplete historical segment: the latest "
+            f"deployment quarter {windows[-1].deploy_start} is still open at "
+            f"as_of {request.as_of}"
+        )
+
+    records: list[RollingSelectionRecord] = []
+    segments: list[pd.Series] = []
+    deployment_proposal_ids: list[str | None] = []
+    incumbent: AdmissionProposal | None = None
+    for w in windows:
+        record, segment, incumbent = _run_one_rebalance(request, w, incumbent)
+        records.append(record)
+        if w.status == "closed":
+            segments.append(segment)
+            deployment_proposal_ids.append(record.proposal_id)
+        _logger.info(
+            "[EVAL] rolling window=%s status=%s selection=%s proposal=%s",
+            w.rebalance_start, w.status, record.selection_status, record.proposal_id,
+        )
+
+    stitched = _stitch_segments(segments, deployment_proposal_ids, request.config)
+    folds = _fold_summary(stitched)
+    stored_records: list[RollingSelectionRecord] = []
+    for record in records:
+        stored = append_rebalance_record(record, ledger_path)
+        stored_records.append(stored)
+    if stored_records:
+        write_current_profile(stored_records[-1], pointer_path)
+
+    oos_start = str(stitched.index[0]) if len(stitched) else ""
+    oos_end = str(stitched.index[-1]) if len(stitched) else ""
+    oos_return = float(stitched.iloc[-1] / stitched.iloc[0] - 1.0) if len(stitched) else 0.0
+    report = RollingLibraryAdmissionReport(
+        status="COMPLETE",
+        profile=request.config.profile,
+        mode=request.mode,
+        as_of=str(pd.Timestamp(request.as_of, tz="UTC")),
+        common_start=str(window.common_start),
+        common_end=str(window.common_end),
+        windows=windows,
+        records=tuple(stored_records),
+        n_folds=folds.n_folds,
+        median_fold_cagr=folds.median_fold_cagr,
+        worst_fold_cagr=folds.worst_fold_cagr,
+        median_fold_calmar=folds.median_fold_calmar,
+        max_period_contribution=folds.max_period_contribution,
+        fold_gate_pass=folds.gate_pass,
+        oos_start=oos_start,
+        oos_end=oos_end,
+        oos_return=oos_return,
+    )
+    _logger.info(
+        "[EVAL] rolling status=COMPLETE profile=%s windows=%d closed=%d folds=%d oos_return=%.4f",
+        request.config.profile, len(windows), report.closed_quarter_count,
+        report.n_folds, report.oos_return,
+    )
+    return report
+
+
+def _check_contract() -> None:
+    """Executable assertions locking the rolling application surface."""
+    assert run_rolling_library_admission.__name__ == "run_rolling_library_admission"
+
+
+_check_contract()
+
+__all__ = [
+    "RollingLibraryAdmissionRequest",
+    "run_rolling_library_admission",
+]

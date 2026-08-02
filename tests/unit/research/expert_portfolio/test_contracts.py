@@ -1,10 +1,14 @@
 from __future__ import annotations
 
+import pandas as pd
 import pytest
 
 from src.research.expert_portfolio.admission_types import (
     LibraryAdmissionConfig,
+    TechnicalLibraryAdmissionPipelineRequest,
     TechnicalLibraryAdmissionRequest,
+    resolve_library_admission_profile,
+    technical_5symbol_2022_v1_profile,
 )
 from src.research.expert_portfolio.models import (
     ContextualRouterSpec,
@@ -237,6 +241,132 @@ def test_library_admission_request_rejects_invalid_universe_and_sealed_end() -> 
             ("technical_macd_histogram_regime_long_v1",),
             ("BTCUSDT",), router, base, end="2026-06-01",
         )
+
+
+def test_frozen_profile_carries_the_exact_spec_dates_and_limits() -> None:
+    # LAP-03: the frozen first profile freezes the exact universe, dates, router,
+    # activity, pair screen, sizes, and budget stated in the specification.
+    profile = technical_5symbol_2022_v1_profile()
+    assert profile.candidate_sources == (
+        "technical_ema_alignment_long_v1",
+        "technical_ema_alignment_short_v1",
+        "technical_macd_histogram_regime_long_v1",
+        "technical_macd_histogram_regime_short_v1",
+        "technical_adx_di_regime_long_v1",
+        "technical_adx_di_regime_short_v1",
+        "technical_ichimoku_cloud_long_v1",
+        "technical_ichimoku_cloud_short_v1",
+        "technical_bb_squeeze_breakout_long_v1",
+        "technical_bb_squeeze_breakout_short_v1",
+        "technical_rsi_trend_pullback_long_v1",
+        "technical_rsi_trend_pullback_short_v1",
+        "technical_stochastic_trend_pullback_long_v1",
+        "technical_stochastic_trend_pullback_short_v1",
+        "technical_cci_trend_pullback_long_v1",
+        "technical_cci_trend_pullback_short_v1",
+        "technical_mfi_trend_pullback_long_v1",
+        "technical_mfi_trend_pullback_short_v1",
+    )
+    assert len(profile.candidate_sources) == 18
+    assert profile.symbols == ("BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT")
+    assert profile.start == "2022-04-01 00:00"
+    assert str(pd.Timestamp(profile.end, tz="UTC")) == "2024-12-31 20:00:00+00:00"
+    assert profile.router.context_symbol == "BTCUSDT"
+    assert profile.router.trend_lookback_bars == 48
+    assert profile.router.volatility_lookback_bars == 48
+    assert profile.router.min_context_history_bars == 96
+    assert profile.router.confidence == 0.90
+    admission = profile.admission
+    assert admission.min_experts == 2
+    assert admission.max_experts == 5
+    assert admission.min_closed_trades == 20
+    assert admission.min_active_return_bars == 200
+    assert admission.max_abs_pairwise_log_return_correlation == 0.50
+    assert admission.max_joint_negative_return_rate == 0.15
+    assert admission.min_context_covered_states == 6
+    assert admission.max_combinations == 1_000_000
+
+
+def test_library_admission_pipeline_request_requires_temporal_separation() -> None:
+    # LAP-03: an OOS start not strictly later than selection.end, a non-positive
+    # budget, and an evaluation end past the sealed cutoff all fail closed.
+    selection = technical_5symbol_2022_v1_profile()
+    with pytest.raises(ValueError, match="evaluation_start"):
+        TechnicalLibraryAdmissionPipelineRequest(
+            selection=selection,
+            evaluation_start="2024-12-31 20:00",
+            evaluation_end="2025-12-31 20:00",
+            max_backtest_proposals=24,
+        )
+    with pytest.raises(ValueError, match="max_backtest_proposals"):
+        TechnicalLibraryAdmissionPipelineRequest(
+            selection=selection,
+            evaluation_start="2025-01-01",
+            evaluation_end="2025-12-31 20:00",
+            max_backtest_proposals=0,
+        )
+    with pytest.raises(ValueError, match="initial_equity"):
+        TechnicalLibraryAdmissionPipelineRequest(
+            selection=selection,
+            evaluation_start="2025-01-01",
+            evaluation_end="2025-12-31 20:00",
+            max_backtest_proposals=24,
+            initial_equity=0,
+        )
+    with pytest.raises(ValueError, match="evaluation_end"):
+        TechnicalLibraryAdmissionPipelineRequest(
+            selection=selection,
+            evaluation_start="2025-01-01",
+            evaluation_end="2024-12-31 20:00",
+            max_backtest_proposals=24,
+        )
+    with pytest.raises(RuntimeError, match="Holdout sealed"):
+        TechnicalLibraryAdmissionPipelineRequest(
+            selection=selection,
+            evaluation_start="2025-01-01",
+            evaluation_end="2026-06-01",
+            max_backtest_proposals=24,
+        )
+
+
+def test_pipeline_request_round_trips_the_frozen_profile_identity() -> None:
+    selection = technical_5symbol_2022_v1_profile()
+    request = TechnicalLibraryAdmissionPipelineRequest(
+        selection=selection,
+        evaluation_start="2025-01-01",
+        evaluation_end="2025-12-31 20:00",
+        max_backtest_proposals=24,
+    )
+    assert request.selection is selection
+    assert request.max_backtest_proposals == 24
+    assert request.initial_equity == 10_000.0
+    assert resolve_library_admission_profile("technical-5symbol-2022-v1") == selection
+    with pytest.raises(ValueError, match="unknown library admission profile"):
+        resolve_library_admission_profile("technical-4symbol-2021-v0")
+
+
+def test_rolling_profile_freezes_the_same_universe_without_fixed_dates() -> None:
+    # RLA-CLI: the rolling profile reuses the frozen 18-source five-symbol
+    # universe and limits, carries no fixed selection dates, and resolves only by
+    # its exact name.
+    from src.research.expert_portfolio.admission_types import (
+        ROLLING_LIBRARY_ADMISSION_PROFILES,
+        resolve_rolling_library_admission_profile,
+        technical_5symbol_rolling_v1_profile,
+    )
+
+    profile = technical_5symbol_rolling_v1_profile()
+    static = technical_5symbol_2022_v1_profile()
+    assert profile.candidate_sources == static.candidate_sources
+    assert profile.symbols == static.symbols
+    assert profile.router == static.router
+    assert profile.admission == static.admission
+    assert profile.start is None
+    assert profile.end is None
+    assert resolve_rolling_library_admission_profile("technical-5symbol-rolling-v1") == profile
+    assert "technical-5symbol-rolling-v1" in ROLLING_LIBRARY_ADMISSION_PROFILES
+    with pytest.raises(ValueError, match="unknown rolling library admission profile"):
+        resolve_rolling_library_admission_profile("technical-4symbol-rolling-v0")
 
 
 def test_contracts_facade_preserves_canonical_object_identity() -> None:
