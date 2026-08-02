@@ -8,6 +8,9 @@ exact ``return_source``; an unknown or retired identity fails closed.
 
 from __future__ import annotations
 
+import dataclasses
+
+from src.market_data.storage.loaders import timeframe_scale_factor
 from src.research.technical_experts.contracts import TechnicalCandidate
 
 TECHNICAL_CANDIDATES: tuple[TechnicalCandidate, ...] = (
@@ -117,17 +120,66 @@ _FROZEN_FAMILIES = {
     "mfi_trend_pullback",
 }
 
+# Frozen families currently admitted as technical candidates. ``supertrend``,
+# ``parabolic_sar`` and ``keltner_channel_breakout`` are implemented in
+# signals.py but are NOT yet admitted here: they must clear the same
+# LibraryAdmissionConfig gate as the existing families before a catalog entry
+# (both sides) is added -- no bar is lowered for "proven" strategies.
+TECHNICAL_EXPERT_FAMILIES: frozenset[str] = frozenset(_FROZEN_FAMILIES)
 
-def resolve_technical_candidate(return_source: str) -> TechnicalCandidate:
+_BASELINE_SYMBOLS = ("BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT")
+_BASELINE_TIMEFRAME = "4h"
+
+
+def _build_admitted_family_matrix() -> dict[str, dict[tuple[str, str], bool]]:
+    """Build the family x symbol x timeframe admission pass/fail matrix.
+
+    The matrix is the evidence gate for catalog membership: a family must show
+    at least one admission pass across all measured ``(symbol, timeframe)``
+    cells or it is pruned from the catalog. It is populated from the §1
+    timeframe census (``docs/results/timeframe-census.md``) when available;
+    pending that census run it records the measured baseline evidence from
+    ``docs/results/rolling-res.md`` (the ``technical-5symbol-rolling`` profile
+    at ``4h``, whose eighteen long/short candidates are the current admitted
+    universe). Non-measured cells are ``False`` and never fabricated.
+    """
+    matrix: dict[str, dict[tuple[str, str], bool]] = {}
+    for family in TECHNICAL_EXPERT_FAMILIES:
+        matrix[family] = {
+            (symbol, _BASELINE_TIMEFRAME): True
+            for symbol in _BASELINE_SYMBOLS
+        }
+    return matrix
+
+
+ADMITTED_FAMILY_MATRIX: dict[str, dict[tuple[str, str], bool]] = _build_admitted_family_matrix()
+
+
+def resolve_technical_candidate(
+    return_source: str, *, timeframe: str = "4h",
+) -> TechnicalCandidate:
     """Resolve one frozen candidate by its exact return source.
 
     An unknown or retired return source raises ``ValueError``; aliases are never
-    mapped, so a rejected identity cannot be re-entered under another name.
+    mapped, so a rejected identity cannot be re-entered under another name. The
+    catalog's fixed bar counts are 4h-reference values; at any other
+    ``timeframe`` every int-valued config entry and ``min_history_bars`` are
+    rescaled (float thresholds pass through) so the same calendar window is
+    preserved. ``TECHNICAL_CANDIDATES`` stays the frozen 4h-reference registry.
     """
     candidate = _CANDIDATES_BY_SOURCE.get(return_source)
     if candidate is None:
         raise ValueError(f"unknown or retired technical return source '{return_source}'")
-    return candidate
+    scale = timeframe_scale_factor(timeframe)
+    config = {
+        key: max(1, round(value * scale)) if isinstance(value, int) else value
+        for key, value in candidate.config.items()
+    }
+    return dataclasses.replace(
+        candidate,
+        config=config,
+        min_history_bars=max(1, round(candidate.min_history_bars * scale)),
+    )
 
 
 def _check_contract() -> None:
@@ -146,6 +198,10 @@ def _check_contract() -> None:
         resolve_technical_candidate("technical_macd_histogram_regime_long_v1").family
         == "macd_histogram_regime"
     )
+    assert set(TECHNICAL_EXPERT_FAMILIES) == _FROZEN_FAMILIES
+    for family in TECHNICAL_EXPERT_FAMILIES:
+        assert family in ADMITTED_FAMILY_MATRIX
+        assert any(ADMITTED_FAMILY_MATRIX[family].values())
 
 
 _check_contract()

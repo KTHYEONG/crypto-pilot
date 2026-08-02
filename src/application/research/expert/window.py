@@ -18,12 +18,17 @@ import pandas as pd
 
 from src.common.config import funding_path, ohlcv_path
 from src.common.errors import DataIntegrityError
-from src.market_data.storage.loaders import load_funding_rates, load_ohlcv_4h
+from src.market_data.storage.loaders import (
+    load_funding_rates,
+    load_ohlcv_1h_as,
+    timeframe_period,
+)
 from src.research.technical_experts.catalog import TECHNICAL_CANDIDATES
 
-_GRID_PERIOD = pd.Timedelta(hours=4)
-# The longest frozen candidate requires min_history_bars completed 4h bars
-# before its first decision; reported performance starts only after this warm-up.
+# The longest frozen candidate requires min_history_bars completed bars of the
+# research timeframe before its first decision; reported performance starts
+# only after this warm-up. The count is timeframe-agnostic (bars), so the
+# duration is derived per call from the resolved timeframe period.
 _MAX_CANDIDATE_WARMUP_BARS = max(
     candidate.min_history_bars for candidate in TECHNICAL_CANDIDATES
 )
@@ -50,23 +55,25 @@ class ResolvedTechnicalWindow:
     symbol_sources: Mapping[str, Mapping[str, str]]
 
 
-def _align_to_4h_grid(ts: pd.Timestamp) -> pd.Timestamp:
+def _align_to_grid(ts: pd.Timestamp, period: pd.Timedelta) -> pd.Timestamp:
     minutes = ts.hour * 60 + ts.minute + ts.second / 60.0 + ts.microsecond / 60_000_000.0
-    slot = math.ceil(minutes / 240.0)
-    return ts.normalize() + pd.Timedelta(minutes=slot * 240)
+    bucket_minutes = period.total_seconds() / 60.0
+    slot = math.ceil(minutes / bucket_minutes)
+    return ts.normalize() + pd.Timedelta(minutes=slot * bucket_minutes)
 
 
-def _last_settled_4h_bar(end: pd.Timestamp) -> pd.Timestamp:
-    """Return the latest 4h bar start fully settled by a funding timestamp.
+def _last_settled_bar(end: pd.Timestamp, period: pd.Timedelta) -> pd.Timestamp:
+    """Return the latest completed bar start fully settled by a funding timestamp.
 
-    A bar ``[t, t+4h)`` is settled only when a funding event exists strictly
-    before its close, so a funding timestamp exactly on a 4h boundary settles
-    the preceding bar and is never extended.
+    A bar ``[t, t+period)`` is settled only when a funding event exists strictly
+    before its close, so a funding timestamp exactly on a bucket boundary
+    settles the preceding bar and is never extended.
     """
+    bucket_minutes = int(period.total_seconds() / 60.0)
     minutes = end.hour * 60 + end.minute
-    floored = end.normalize() + pd.Timedelta(minutes=(minutes // 240) * 240)
+    floored = end.normalize() + pd.Timedelta(minutes=(minutes // bucket_minutes) * bucket_minutes)
     if floored == end:
-        return floored - _GRID_PERIOD
+        return floored - period
     return floored
 
 
@@ -85,28 +92,32 @@ def resolve_common_technical_window(
     symbols: tuple[str, ...],
     requested_start: str | None,
     end: str | pd.Timestamp | None,
+    *,
+    timeframe: str = "4h",
 ) -> ResolvedTechnicalWindow:
     """Resolve the latest common OHLCV/funding window for a technical universe.
 
     Every symbol's continuous 1h OHLCV and monotonic settled funding are
-    validated through the existing 1h loader, and the common start is aligned
-    forward to the 4h grid while ``common_end`` is the earliest fully completed
-    common bar, never extended past a settled funding boundary. A requested
-    start earlier than the common boundary fails closed with every blocking
-    symbol and source; a missing, empty, discontinuous, or non-overlapping
-    source fails closed naming the source. A window is never silently truncated
-    or zero-filled.
+    validated through the generalized loader resampled to ``timeframe``, and the
+    common start is aligned forward to that bucket grid while ``common_end`` is
+    the earliest fully completed common bar, never extended past a settled
+    funding boundary. A requested start earlier than the common boundary fails
+    closed with every blocking symbol and source; a missing, empty,
+    discontinuous, or non-overlapping source fails closed naming the source. A
+    window is never silently truncated or zero-filled. The default ``"4h"``
+    preserves existing behavior for legacy callers.
     """
     if not symbols:
         raise ValueError("symbols must not be empty")
     if len(symbols) != len(set(symbols)):
         raise ValueError(f"symbols must not contain duplicates, got {symbols}")
 
+    period = timeframe_period(timeframe)
     symbol_sources: dict[str, dict[str, str]] = {}
     common_start: pd.Timestamp | None = None
     common_end: pd.Timestamp | None = None
     for symbol in symbols:
-        ohlcv = load_ohlcv_4h(ohlcv_path(symbol, "1h"))
+        ohlcv = load_ohlcv_1h_as(ohlcv_path(symbol, "1h"), timeframe)
         if len(ohlcv) == 0:
             raise DataIntegrityError(f"1h OHLCV has no bars for {symbol}")
         funding = load_funding_rates(funding_path(symbol))
@@ -130,7 +141,7 @@ def resolve_common_technical_window(
         required = max(ohlcv_start, funding_start)
         if common_start is None or required > common_start:
             common_start = required
-        usable_end = min(ohlcv_end, _last_settled_4h_bar(funding_end))
+        usable_end = min(ohlcv_end, _last_settled_bar(funding_end, period))
         if common_end is None or usable_end < common_end:
             common_end = usable_end
 
@@ -138,13 +149,13 @@ def resolve_common_technical_window(
     assert common_end is not None
     if end is not None:
         requested_end = pd.Timestamp(end, tz="UTC")
-        common_end = min(common_end, _last_settled_4h_bar(requested_end))
+        common_end = min(common_end, _last_settled_bar(requested_end, period))
     if common_end < common_start:
         raise DataIntegrityError(
             "common availability window is empty after settling: common_end "
             f"{common_end} precedes common_start {common_start}"
         )
-    common_start = _align_to_4h_grid(common_start)
+    common_start = _align_to_grid(common_start, period)
     if requested_start is not None:
         requested = pd.Timestamp(requested_start, tz="UTC")
         if requested < common_start:
@@ -158,10 +169,10 @@ def resolve_common_technical_window(
                 f"requested start {requested_start} precedes the common available "
                 f"start {common_start}; blocking source(s): {', '.join(blockers)}"
             )
-        effective_start = _align_to_4h_grid(requested)
+        effective_start = _align_to_grid(requested, period)
     else:
         effective_start = common_start
-    effective_start = effective_start + _MAX_CANDIDATE_WARMUP_BARS * _GRID_PERIOD
+    effective_start = effective_start + _MAX_CANDIDATE_WARMUP_BARS * period
     return ResolvedTechnicalWindow(
         requested_start=str(requested_start) if requested_start is not None else None,
         common_start=common_start,

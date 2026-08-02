@@ -13,18 +13,27 @@ import json
 import math
 from collections.abc import Iterator, Mapping
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Literal
 
 import pandas as pd
 
+from src.common.config import FUTURES_DATA_DIR
+from src.common.errors import DataIntegrityError
+from src.market_data.storage.loaders import (
+    load_ohlcv_1h_as,
+    timeframe_period,
+    timeframe_scale_factor,
+    validate_timeframe,
+)
 from src.research.contracts import CostModel
 from src.research.expert_portfolio.admission_reports import (
     LibraryAdmissionBacktestReport,
     LibraryAdmissionReport,
 )
 from src.research.expert_portfolio.admission_types import AdmissionProposal
+from src.research.portfolio.defaults import DEFAULT_SYMBOLS
 
-_GRID_PERIOD = pd.Timedelta(hours=4)
 _SCORING_CALENDAR_MONTHS = 24
 _REBALANCE_MONTHS = (1, 4, 7, 10)
 _WARMUP_BARS = 201
@@ -57,6 +66,7 @@ class RollingAdmissionConfig:
     """
 
     profile: str = "technical-5symbol-rolling"
+    timeframe: str = "4h"
     symbols: tuple[str, ...] = ("BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT")
     scoring_months: int = _SCORING_CALENDAR_MONTHS
     warmup_bars: int = _WARMUP_BARS
@@ -69,10 +79,14 @@ class RollingAdmissionConfig:
     base_delay_bars: int = 1
     family_symbol_prefilter_top_k: int | None = None
     hurdle_cost_multiple: float = 2.0
+    dynamic_symbol_selection: bool = False
+    symbol_universe: tuple[str, ...] = DEFAULT_SYMBOLS
+    symbol_top_k: int = 5
 
     def __post_init__(self) -> None:
         if not self.profile:
             raise ValueError("profile must not be empty")
+        validate_timeframe(self.timeframe)
         if not self.symbols:
             raise ValueError("symbols must not be empty")
         if len(self.symbols) != len(set(self.symbols)):
@@ -126,11 +140,26 @@ class RollingAdmissionConfig:
             raise ValueError(
                 f"hurdle_cost_multiple must be >= 0, got {self.hurdle_cost_multiple}"
             )
+        if self.symbol_top_k < 1:
+            raise ValueError(f"symbol_top_k must be >= 1, got {self.symbol_top_k}")
+        if not self.symbol_universe:
+            raise ValueError("symbol_universe must not be empty")
+        if len(self.symbol_universe) != len(set(self.symbol_universe)):
+            raise ValueError(
+                f"symbol_universe must not contain duplicates, got {self.symbol_universe}"
+            )
 
     @property
     def warmup_period(self) -> pd.Timedelta:
-        """Completed 4h warm-up bars as a duration."""
-        return _GRID_PERIOD * self.warmup_bars
+        """Completed bars of warm-up as a duration on the research grid.
+
+        ``warmup_bars`` is a 4h-reference count; it is rescaled to the config
+        timeframe so the loaded warm-up window is a fixed calendar duration
+        instead of shrinking/expanding with the bar grid.
+        """
+        return timeframe_period(self.timeframe) * max(
+            1, round(self.warmup_bars * timeframe_scale_factor(self.timeframe)),
+        )
 
     @property
     def scoring_offset(self) -> pd.DateOffset:
@@ -141,6 +170,7 @@ class RollingAdmissionConfig:
         """JSON-safe policy parameters; the profile name is the version id."""
         return {
             "profile": self.profile,
+            "timeframe": self.timeframe,
             "symbols": list(self.symbols),
             "scoring_months": self.scoring_months,
             "warmup_bars": self.warmup_bars,
@@ -153,6 +183,9 @@ class RollingAdmissionConfig:
             "base_delay_bars": self.base_delay_bars,
             "family_symbol_prefilter_top_k": self.family_symbol_prefilter_top_k,
             "hurdle_cost_multiple": self.hurdle_cost_multiple,
+            "dynamic_symbol_selection": self.dynamic_symbol_selection,
+            "symbol_universe": list(self.symbol_universe),
+            "symbol_top_k": self.symbol_top_k,
         }
 
 
@@ -160,10 +193,13 @@ class RollingAdmissionConfig:
 class RebalanceWindow:
     """One causally resolved quarterly selection and deployment window.
 
-    For a rebalance timestamp ``R``: ``observed_end`` is ``R - 4h``,
-    ``scored_start`` is ``R - 24 calendar months``, ``load_start`` supplies
-    indicator/router history only (``scored_start - warmup``), ``deploy_start``
-    is ``R`` and ``deploy_end`` is the next quarter's start minus one 4h bar.
+    For a rebalance timestamp ``R``: ``observed_end`` is ``R`` minus one
+    research-grid bar, ``scored_start`` is ``R - 24 calendar months``,
+    ``load_start`` supplies indicator/router history only
+    (``scored_start - warmup``), ``deploy_start`` is ``R`` and ``deploy_end`` is
+    the next quarter's start minus one grid bar. ``symbols`` is the frozen
+    per-window universe (the fixed profile symbols by default, or the
+    dynamically selected top-k when ``dynamic_symbol_selection`` is enabled).
     ``status`` is ``"closed"`` when the deployment quarter is fully complete at
     ``as_of`` and ``"live_or_partial"`` otherwise; an ineligible window (raw
     warm-up before ``common_start``) is never constructed.
@@ -177,6 +213,7 @@ class RebalanceWindow:
     deploy_start: pd.Timestamp
     deploy_end: pd.Timestamp
     status: Literal["closed", "live_or_partial"]
+    symbols: tuple[str, ...]
 
     def to_report_dict(self) -> dict[str, object]:
         return {
@@ -187,6 +224,7 @@ class RebalanceWindow:
             "deploy_start": str(self.deploy_start),
             "deploy_end": str(self.deploy_end),
             "status": self.status,
+            "symbols": list(self.symbols),
         }
 
 
@@ -232,28 +270,42 @@ def build_rolling_rebalance_schedule(
     common_start: pd.Timestamp,
     as_of: pd.Timestamp,
     config: RollingAdmissionConfig,
+    *,
+    data_root: Path | None = None,
 ) -> tuple[RebalanceWindow, ...]:
     """Construct every eligible quarterly window up to ``as_of``.
 
     A window is returned only when its raw warm-up history begins on or after
     ``common_start``, and a deployment quarter whose ``deploy_end`` is still
     after ``as_of`` is classified ``live_or_partial`` so it never enters a
-    historical OOS aggregate. ``as_of`` is the only temporal source.
+    historical OOS aggregate. ``as_of`` is the only temporal source. With
+    ``config.dynamic_symbol_selection`` enabled, each window freezes its own
+    top-k symbols ranked by trailing quote-notional volume strictly before
+    ``rebalance_start`` (PIT); otherwise every window carries the fixed profile
+    symbols, byte-identical to the pre-dynamic baseline.
     """
     common_start = _as_utc(common_start)
     as_of = _as_utc(as_of)
+    period = timeframe_period(config.timeframe)
+    root = data_root if data_root is not None else FUTURES_DATA_DIR
     windows: list[RebalanceWindow] = []
     for rebalance_start in quarter_boundaries(common_start, as_of, config.rebalance_months):
-        observed_end = rebalance_start - _GRID_PERIOD
+        observed_end = rebalance_start - period
         scored_start = rebalance_start - config.scoring_offset
         load_start = scored_start - config.warmup_period
         if load_start < common_start:
             continue
         deploy_start = rebalance_start
-        deploy_end = next_quarter_boundary(rebalance_start, config.rebalance_months) - _GRID_PERIOD
+        deploy_end = next_quarter_boundary(rebalance_start, config.rebalance_months) - period
         status: Literal["closed", "live_or_partial"] = (
             "closed" if deploy_end <= as_of else "live_or_partial"
         )
+        if config.dynamic_symbol_selection:
+            window_symbols = select_symbols_for_window(
+                rebalance_start, config.symbol_universe, config.symbol_top_k, root,
+            )
+        else:
+            window_symbols = config.symbols
         windows.append(
             RebalanceWindow(
                 profile=config.profile,
@@ -264,9 +316,65 @@ def build_rolling_rebalance_schedule(
                 deploy_start=deploy_start,
                 deploy_end=deploy_end,
                 status=status,
+                symbols=window_symbols,
             )
         )
     return tuple(windows)
+
+def select_symbols_for_window(
+    as_of: pd.Timestamp,
+    universe: tuple[str, ...],
+    top_k: int,
+    data_root: Path,
+    *,
+    lookback_days: int = 90,
+) -> tuple[str, ...]:
+    """Rank ``universe`` by trailing quote-notional volume and return the top-k.
+
+    Only bars strictly before ``as_of`` enter the ranking (PIT discipline, no
+    lookahead), and the trailing ``lookback_days`` window must be fully covered
+    by continuous history or the symbol is excluded rather than back-filled or
+    zero-substituted. Ties are broken deterministically by ascending symbol
+    name so the result is reproducible for ``fingerprint()``/snapshot keys. A
+    missing or integrity-invalid parquet is treated as insufficient history and
+    excluded.
+    """
+    if top_k < 1:
+        raise ValueError(f"top_k must be >= 1, got {top_k}")
+    if lookback_days < 1:
+        raise ValueError(f"lookback_days must be >= 1, got {lookback_days}")
+    if not universe:
+        raise ValueError("universe must not be empty")
+    if len(universe) != len(set(universe)):
+        raise ValueError(f"universe must not contain duplicates, got {universe}")
+    as_of = _as_utc(as_of)
+    window_start = as_of - pd.Timedelta(days=lookback_days)
+
+    parts: list[pd.DataFrame] = []
+    for symbol in universe:
+        path = data_root / "ohlcv" / "1h" / f"{symbol}.parquet"
+        if not path.exists():
+            continue
+        try:
+            bars = load_ohlcv_1h_as(path, "1h")
+        except DataIntegrityError:
+            continue
+        prior = bars[bars.index < as_of]
+        if prior.empty or prior.index[0] > window_start:
+            continue
+        if "quote_vol" not in prior.columns or prior.index[-1] < window_start:
+            continue
+        window = prior[prior.index >= window_start]
+        part = window[["quote_vol"]].copy()
+        part["symbol"] = symbol
+        parts.append(part)
+
+    if not parts:
+        return ()
+    combined = pd.concat(parts)
+    volume = combined.groupby("symbol")["quote_vol"].sum()
+    ranked = sorted(volume.index, key=lambda symbol: (-volume[symbol], symbol))
+    return tuple(ranked[:top_k])
 
 
 @dataclass(frozen=True, slots=True)
@@ -631,18 +739,22 @@ def resolve_dynamic_shortlist_budget(
 def rolling_admission_config_for_profile(
     profile_name: str,
     symbols: tuple[str, ...],
+    *,
+    timeframe: str = "4h",
 ) -> RollingAdmissionConfig:
     """Resolve the rolling config for a frozen profile name.
 
     ``technical-5symbol-rolling`` is the single canonical rolling profile: the
     per-symbol-winner router, the priority family-unique best-first search, and
     the shared one-bar base scenario are hardcoded internally. An unknown
-    profile name fails closed with ``ValueError``.
+    profile name fails closed with ``ValueError``. ``timeframe`` defaults to
+    ``"4h"`` so legacy callers resolve byte-identical to the baseline.
     """
     if profile_name == "technical-5symbol-rolling":
         return RollingAdmissionConfig(
             profile=profile_name,
             symbols=symbols,
+            timeframe=timeframe,
         )
     raise ValueError(
         f"unknown rolling profile {profile_name!r}; known profiles: "
@@ -684,6 +796,7 @@ def select_rebalance_proposal(
 def _check_contract() -> None:
     """Executable assertions locking the rolling schedule/selection surface."""
     assert build_rolling_rebalance_schedule.__name__ == "build_rolling_rebalance_schedule"
+    assert select_symbols_for_window.__name__ == "select_symbols_for_window"
     assert select_rebalance_proposal((), None) is None
     first = next(
         iter(
@@ -695,6 +808,7 @@ def _check_contract() -> None:
         )
     )
     assert str(first.rebalance_start) == "2024-07-01 00:00:00+00:00"
+    assert first.symbols == RollingAdmissionConfig().symbols
     assert select_rebalance_proposal.__name__ == "select_rebalance_proposal"
     assert RollingCandidateAuditRecord.from_selection.__name__ == "from_selection"
     assert RollingCandidateAuditRecord.from_failure.__name__ == "from_failure"
@@ -704,6 +818,8 @@ def _check_contract() -> None:
     assert canonical.min_shortlist_budget == 8
     assert canonical.base_delay_bars == 1
     assert canonical.hurdle_cost_multiple == 2.0
+    assert canonical.timeframe == "4h"
+    assert canonical.dynamic_symbol_selection is False
     assert canonical.fingerprint()["family_symbol_prefilter_top_k"] is None
     assert resolve_dynamic_shortlist_budget((1.0, 1.0, 1.0, 1.0), 120.0, 8) == 120
     assert resolve_dynamic_shortlist_budget((100.0,), 120.0, 8) == 8
@@ -723,6 +839,7 @@ __all__ = [
     "resolve_dynamic_shortlist_budget",
     "rolling_admission_config_for_profile",
     "select_rebalance_proposal",
+    "select_symbols_for_window",
     "selection_key",
     "selection_primary_key",
 ]
