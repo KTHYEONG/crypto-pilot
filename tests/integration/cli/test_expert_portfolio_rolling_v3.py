@@ -6,15 +6,18 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from src.application.research.expert import admission as app
 from src.application.research.expert import rolling_admission as ra
+from src.application.research.expert.admission import run_technical_library_admission
 from src.research.expert_portfolio.admission import (
     priority_shortlist_family_unique_proposals,
 )
 from src.research.expert_portfolio.admission_types import (
     LibraryAdmissionConfig,
+    TechnicalLibraryAdmissionRequest,
     resolve_rolling_library_admission_profile,
 )
-from src.research.expert_portfolio.models import ExpertDefinition
+from src.research.expert_portfolio.models import ContextualRouterSpec, ExpertDefinition
 from src.research.expert_portfolio.rolling import (
     build_rolling_rebalance_schedule,
     rolling_admission_config_for_profile,
@@ -188,3 +191,96 @@ def test_expert_portfolio_rolling_v3_growth_simulation_stays_within_perf_budget_
     assert result.proposals
     assert result.generated_nodes < config.max_combinations
     assert elapsed < 20.0
+
+
+def test_flag_off_reproduces_fixed_baseline() -> None:
+    # flag_off_reproduces_fixed_baseline: RollingAdmissionConfig with
+    # dynamic_symbol_selection=False (the default) produces byte-identical
+    # rebalance schedules/symbols to the current technical-5symbol-rolling
+    # profile -- zero behavior change unless explicitly opted in.
+    import dataclasses
+
+    from src.research.expert_portfolio.rolling import RollingAdmissionConfig
+
+    common_start = pd.Timestamp("2022-04-01", tz="UTC")
+    as_of = pd.Timestamp("2026-07-07 20:00", tz="UTC")
+    baseline = RollingAdmissionConfig()
+    assert baseline.dynamic_symbol_selection is False
+
+    default_schedule = build_rolling_rebalance_schedule(common_start, as_of, baseline)
+    explicit_off = dataclasses.replace(baseline, dynamic_symbol_selection=False)
+    explicit_schedule = build_rolling_rebalance_schedule(
+        common_start, as_of, explicit_off,
+    )
+    assert len(default_schedule) == len(explicit_schedule)
+    for left, right in zip(default_schedule, explicit_schedule, strict=True):
+        assert left.to_report_dict() == right.to_report_dict()
+        assert right.symbols == baseline.symbols
+    assert default_schedule[0].symbols == ("BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT")
+
+
+def test_library_admission_4h_default_is_byte_identical_to_unscaled_path(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # TIS-04: at the default timeframe='4h' the scaling call sites in
+    # admission.py are no-ops, so the report's router and admission are
+    # byte-identical to the request (the pre-scaling behavior) and the
+    # fingerprint stays stable.
+    index = pd.date_range("2024-01-01", periods=4400, freq="4h", tz="UTC")
+    t = np.arange(len(index), dtype=np.float64)
+    close = 100.0 + 0.01 * t + 5.0 * np.sin(t / 20.0)
+    frame = pd.DataFrame({
+        "open": close - 0.1,
+        "high": close + 0.5,
+        "low": close - 0.5,
+        "close": close,
+        "volume": 1000.0,
+    }, index=index)
+    funding = pd.Series(0.0, index=index, dtype=float)
+    monkeypatch.setattr(
+        app, "_load_technical_market_data",
+        lambda symbol, start, end, *, timeframe="4h": (frame, funding),
+    )
+    monkeypatch.setattr(
+        app, "load_ohlcv_1h_as",
+        lambda path, timeframe, *, start=None, end=None: frame,
+    )
+    monkeypatch.setattr(app, "compute_code_hash", lambda *args, **kwargs: "c" * 64)
+    monkeypatch.setattr(
+        app, "technical_data_hashes",
+        lambda symbol: {"perp_ohlcv": "a" * 64, "funding": "b" * 64},
+    )
+
+    request = TechnicalLibraryAdmissionRequest(
+        candidate_sources=(
+            "technical_macd_histogram_regime_long_v1",
+            "technical_rsi_trend_pullback_long_v1",
+        ),
+        symbols=("BTCUSDT", "ETHUSDT"),
+        router=ContextualRouterSpec("BTCUSDT", 60, 20, 30),
+        admission=LibraryAdmissionConfig(
+            min_experts=1,
+            max_experts=2,
+            min_closed_trades=0,
+            min_active_return_bars=200,
+            max_abs_pairwise_log_return_correlation=0.8,
+            max_joint_negative_return_rate=0.5,
+            min_context_covered_states=1,
+            max_combinations=100,
+            max_workers=1,
+        ),
+        start="2024-01-01",
+    )
+    report = run_technical_library_admission(request)
+
+    assert report.status == "COMPLETE"
+    assert report.router == request.router
+    assert report.admission == request.admission
+    assert report.fingerprint()["router"] == {
+        "context_symbol": "BTCUSDT",
+        "trend_lookback_bars": 60,
+        "volatility_lookback_bars": 20,
+        "min_context_history_bars": 30,
+        "confidence": 0.90,
+    }
+    assert report.fingerprint()["admission"]["min_active_return_bars"] == 200
