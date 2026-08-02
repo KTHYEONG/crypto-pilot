@@ -1,6 +1,16 @@
 {
   "tasks": [
     {
+      "task_id": "EXPERT_CLI_PERF",
+      "date": "2026-08-02",
+      "adr_id": "ADR_20260802_EXPERT_CLI_PERF",
+      "domain": "cli",
+      "title": "Optimize Expert CLI Execution Performance",
+      "why": "Expert CLI commands experienced long execution wall times due to redundant loop calculations, numpy mean overheads, and set intersections",
+      "resolution": "Hoisted block-aware inflation loop outside state bar iteration, optimized pair diagnostics using precomputed abs correlation and pure python sum/len, replaced DatetimeIndex set intersection with pd.Index.intersection, and added candidate dict lookup",
+      "impact": "Reduced total Expert CLI wall-clock runtime by ~25% (29.07s -> 21.90s) and admission evaluation by 51%"
+    },
+    {
       "task_id": "TASK_ROLLING_ADMISSION_GATE_RECALIBRATION",
       "date": "2026-08-02",
       "adr_id": "ADR_20260802_ROLLING_ADMISSION_GATE_RECALIBRATION",
