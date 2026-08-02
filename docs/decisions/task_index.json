@@ -1,6 +1,16 @@
 {
   "tasks": [
     {
+      "task_id": "TASK_ROLLING_ADMISSION_OBSERVABILITY_PERFORMANCE",
+      "date": "2026-08-02",
+      "adr_id": "ADR_20260802_ROLLING_ADMISSION_OBSERVABILITY_PERFORMANCE",
+      "domain": "research",
+      "title": "Rolling admission 관측성·성능 및 후보 탐색 예산",
+      "why": "분기별 후보 필터링 결과를 사후 분석할 수 있어야 하고, 실제 CLI 실행에서 bounded 후보 조합 탐색이 기본 예산을 초과해 백테스트에 도달하지 못했음",
+      "resolution": "분기별 candidate audit을 즉시 append하도록 보장하고 bounded 탐색 통계를 report/audit에 기록했으며, CLI 실측 결과 18개 전략 소스와 5개 심볼 조합이 1,000,000 graph-node 예산을 초과하는 fail-closed 동작을 확인함",
+      "impact": "완료된 분기 감사 로그의 유실을 방지하고 탐색 폭발을 조용히 숨기지 않지만, 운영 가능한 후보 사전축소·심볼별 예산·CLI/profile 예산 조정이 다음 개선 과제로 명확해짐"
+    },
+    {
       "task_id": "TASK_LIBRARY_ADMISSION_PIPELINE_ROLLING",
       "date": "2026-08-02",
       "adr_id": "ADR_20260802_LIBRARY_ADMISSION_PIPELINE_ROLLING",
