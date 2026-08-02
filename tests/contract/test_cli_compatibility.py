@@ -30,7 +30,7 @@ def test_legacy_run_backtest_equivalent_to_research_run_baseline(monkeypatch) ->
         "src.application.research.baseline.evaluation.run_baseline_evaluation",
         ["run_backtest", "--symbol", "ETHUSDT", "--no-log-run"],
     )
-    from src.cli import run_backtest
+    from src.cli.adapters import run_backtest
 
     run_backtest.main()
     assert len(legacy) == 1
@@ -42,7 +42,7 @@ def test_legacy_run_backtest_equivalent_to_research_run_baseline(monkeypatch) ->
     monkeypatch.setattr(
         "src.application.research.baseline.evaluation.run_baseline_evaluation", grouped.append,
     )
-    root_main(["research", "run", "baseline", "--symbol", "ETHUSDT", "--no-log-run"])
+    root_main(["research", "run", "single", "baseline", "--symbol", "ETHUSDT", "--no-log-run"])
     assert grouped == legacy
 
 
@@ -52,7 +52,7 @@ def test_legacy_portfolio_equivalent_to_research_run_portfolio(monkeypatch) -> N
         "src.application.research.portfolio.evaluation.run_portfolio_evaluation",
         ["run_portfolio_backtest", "--symbols", "BTCUSDT", "ETHUSDT", "--no-log-run"],
     )
-    from src.cli import run_portfolio_backtest
+    from src.cli.adapters import run_portfolio_backtest
 
     run_portfolio_backtest.main()
     assert legacy[0].symbols == ("BTCUSDT", "ETHUSDT")
@@ -62,10 +62,10 @@ def test_legacy_portfolio_equivalent_to_research_run_portfolio(monkeypatch) -> N
 def test_legacy_cash_carry_equivalent_to_research_run_cash_carry(monkeypatch) -> None:
     legacy = _dispatch_legacy(
         monkeypatch,
-        "src.application.research.cash_carry.evaluation.run_cash_carry_evaluation",
+        "src.application.research.carry.evaluation.run_cash_carry_evaluation",
         ["run_cash_carry_backtest", "run", "--symbol", "BTCUSDT", "--no-log-run"],
     )
-    from src.cli import run_cash_carry_backtest
+    from src.cli.adapters import run_cash_carry_backtest
 
     run_cash_carry_backtest.main()
     assert legacy[0].symbol == "BTCUSDT"
@@ -77,10 +77,10 @@ def test_legacy_expert_portfolio_equivalent_to_research_run_expert_portfolio(
 ) -> None:
     legacy = _dispatch_legacy(
         monkeypatch,
-        "src.application.research.expert_portfolio.evaluation.run_expert_portfolio_evaluation",
+        "src.application.research.expert.evaluation.run_expert_portfolio_evaluation",
         ["run_expert_portfolio_backtest", "--library-id", "pair_residual_v1", "--no-log-run"],
     )
-    from src.cli import run_expert_portfolio_backtest
+    from src.cli.adapters import run_expert_portfolio_backtest
 
     run_expert_portfolio_backtest.main()
     assert legacy[0].library_id == "pair_residual_v1"
@@ -88,11 +88,11 @@ def test_legacy_expert_portfolio_equivalent_to_research_run_expert_portfolio(
 
     grouped: list[object] = []
     monkeypatch.setattr(
-        "src.application.research.expert_portfolio.evaluation.run_expert_portfolio_evaluation",
+        "src.application.research.expert.evaluation.run_expert_portfolio_evaluation",
         grouped.append,
     )
     root_main([
-        "research", "run", "expert-portfolio",
+        "research", "run", "expert", "eval",
         "--library-id", "pair_residual_v1", "--no-log-run",
     ])
     assert grouped == legacy
@@ -101,11 +101,11 @@ def test_legacy_expert_portfolio_equivalent_to_research_run_expert_portfolio(
 def test_legacy_sleeve_blend_equivalent_to_research_run_sleeve_blend(monkeypatch) -> None:
     legacy = _dispatch_legacy(
         monkeypatch,
-        "src.application.research.sleeve_blend.evaluation.run_sleeve_blend_evaluation",
+        "src.application.research.blend.evaluation.run_sleeve_blend_evaluation",
         ["run_sleeve_blend_backtest", "--candidate-kind", "funding_signed_directional_v1",
          "--no-log-run"],
     )
-    from src.cli import run_sleeve_blend_backtest
+    from src.cli.adapters import run_sleeve_blend_backtest
 
     run_sleeve_blend_backtest.main()
     assert legacy[0].candidate_kind == "funding_signed_directional_v1"
@@ -122,7 +122,7 @@ def test_legacy_collect_data_equivalent_to_data_collect(monkeypatch) -> None:
     monkeypatch.setattr(sys, "argv", [
         "collect_data", "spot-ohlcv", "BTCUSDT", "1h", "--start", "2024-01-01",
     ])
-    from src.cli import collect_data
+    from src.cli.adapters import collect_data
 
     collect_data.main()
     assert calls == ["spot_ohlcv"]
@@ -143,7 +143,7 @@ def test_sealed_holdout_policy_shared_across_clis() -> None:
 
 
 def test_legacy_compare_runs_renders_populated(monkeypatch, capsys) -> None:
-    from src.cli import compare_runs
+    from src.cli.adapters import compare_runs
 
     populated = pd.DataFrame([{
         "ts": "2026-07-31T00:00:00+00:00", "git_sha": "abc", "git_dirty": False,
@@ -181,7 +181,7 @@ _ALLOWED_IMPORTS = ("src.cli.compat", "logging")
 def test_legacy_cli_modules_are_parser_free_adapters() -> None:
     """RF-CLI-01: shims contain no parser or business logic, only forwarding."""
     for name in _LEGACY_MODULES:
-        path = Path("src/cli") / f"{name}.py"
+        path = Path("src/cli/adapters") / f"{name}.py"
         tree = ast.parse(path.read_text(encoding="utf-8"))
         for node in ast.walk(tree):
             if isinstance(node, ast.Import):
@@ -205,3 +205,40 @@ def test_legacy_cli_modules_are_parser_free_adapters() -> None:
                     and c.value.func.value.id == "compat"
                     for c in node.body
                 ), f"{path}: main() must only forward to compat"
+
+
+def test_legacy_register_directional_candidate_is_importable() -> None:
+    """RF-CLI-01: the retired-migration adapter remains importable at its new home."""
+    from src.cli.adapters import register_directional_candidate as adapter
+
+    assert callable(adapter.main)
+
+
+def test_legacy_register_directional_candidate_dispatches_retired_migration(
+    monkeypatch,
+) -> None:
+    """RF-CLI-01: invoking the adapter runs the idempotent RETIRED migration."""
+    from src.cli import compat
+    from src.cli.adapters import register_directional_candidate as adapter
+
+    calls: list[object] = []
+    monkeypatch.setattr(compat, "register_directional_candidate", lambda *a: calls.append(a))
+    adapter.main()
+    assert len(calls) == 1
+
+
+def test_compat_dispatcher_remains_importable() -> None:
+    """RF-CLI-01: the compat dispatcher keeps every legacy forwarder importable."""
+    import src.cli.compat as compat_module
+
+    for name in (
+        "run_collect_data",
+        "run_backtest",
+        "run_cash_carry_backtest",
+        "run_portfolio_backtest",
+        "run_sleeve_blend_backtest",
+        "run_expert_portfolio_backtest",
+        "compare_runs",
+        "register_directional_candidate",
+    ):
+        assert callable(getattr(compat_module, name))
