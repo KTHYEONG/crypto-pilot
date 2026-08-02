@@ -1,6 +1,16 @@
 {
   "tasks": [
     {
+      "task_id": "TASK_ROLLING_ADMISSION_PRIORITY_SEARCH_V3",
+      "date": "2026-08-02",
+      "adr_id": "ADR_20260802_ROLLING_ADMISSION_PRIORITY_SEARCH_V3",
+      "domain": "research",
+      "title": "Rolling Admission v3: exact best-first 후보 탐색 재설계",
+      "why": "18-source x 5-symbol(90 expert) rolling-v2 bounded_family_unique DFS가 exhaustive 전수나열이라 첫 윈도우에서 1,000,001>1,000,000 graph-node 예산 초과로 fail-closed. 사용자가 향후 전략을 지속 추가할 계획이라, 후보를 줄이는 임시방편이 아니라 탐색 알고리즘 자체의 구조적 재검토를 요청함.",
+      "resolution": "family-unique pair-compatible lattice에서 rank_key의 max항이 집합 확장에 대해 단조증가함을 이용한 exact best-first branch-and-bound(_priority_top_n_for_size, priority_shortlist_family_unique_proposals)를 신설. v1/v2는 완전 동결, technical-5symbol-rolling-v3 프로필/priority_family_unique_v3 proposal_search로 추가. 분기 실패 시 이전 분기 ledger/pointer/audit이 유실되던 결함(run_rolling_library_admission)도 함께 수정. 실행 중 발견된 별도 결함(_validate_fixed_weights의 float64 엡실론 CASH 잔여가중치 오탐)도 수정.",
+      "impact": "실측: 90개 후보 전체(prefilter 비활성)로 9개 분기 전체 COMPLETE 완주, 분기당 generated_nodes 52,680~79,606(예산의 5~8%만 사용, 이전엔 즉시 fail-closed). 216건 실백테스트 전부 실행됐으나 전 분기 CASH(no_deployable_proposal) - 인프라 병목 해소 확인, 남은 병목은 기술적 신호 라이브러리의 예측력 부재로 재확인."
+    },
+    {
       "task_id": "TASK_ROLLING_ADMISSION_OBSERVABILITY_PERFORMANCE",
       "date": "2026-08-02",
       "adr_id": "ADR_20260802_ROLLING_ADMISSION_OBSERVABILITY_PERFORMANCE",
