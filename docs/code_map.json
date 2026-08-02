@@ -259,7 +259,8 @@
     "testing": "tests/unit/research/evaluation/test_reliability.py"
   },
   "src/research/expert_portfolio/admission.py": {
-    "testing": "tests/unit/research/expert_portfolio/test_admission.py"
+    "testing": "tests/unit/research/expert_portfolio/test_admission.py",
+    "architecture": "docs/specs/rolling_admission_candidate_prefilter.md"
   },
   "src/research/expert_portfolio/admission_reports.py": {
     "testing": [
