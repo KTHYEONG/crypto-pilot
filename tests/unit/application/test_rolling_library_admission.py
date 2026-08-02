@@ -1,12 +1,18 @@
 from __future__ import annotations
 
+import dataclasses
+import json
+
 import numpy as np
 import pandas as pd
 import pytest
 
 from src.application.research.expert_portfolio import rolling_admission as ra
 from src.application.research.expert_portfolio import window as window_module
-from src.application.research.expert_portfolio.rebalance_ledger import load_rebalance_records
+from src.application.research.expert_portfolio.rebalance_ledger import (
+    load_rebalance_records,
+    read_current_profile,
+)
 from src.application.research.expert_portfolio.window import (
     ResolvedTechnicalWindow,
     resolve_common_technical_window,
@@ -19,6 +25,7 @@ from src.research.evaluation.reliability import (
     FoldDistributionResult,
     ReliabilityGateResult,
 )
+from src.research.expert_portfolio.admission import prefilter_admitted_by_family_symbol
 from src.research.expert_portfolio.admission_reports import (
     LibraryAdmissionBacktestReport,
     LibraryAdmissionReport,
@@ -27,12 +34,19 @@ from src.research.expert_portfolio.admission_types import (
     AdmissionProposal,
     CandidateAdmissionResult,
     LibraryAdmissionConfig,
+    TechnicalLibraryAdmissionRequest,
     admission_proposal_id,
+    resolve_rolling_library_admission_profile,
     technical_5symbol_rolling_v1_profile,
 )
 from src.research.expert_portfolio.backtest import ExpertPortfolioBacktestResult
 from src.research.expert_portfolio.models import ContextualRouterSpec, ExpertDefinition
-from src.research.expert_portfolio.rolling import build_rolling_rebalance_schedule
+from src.research.expert_portfolio.rolling import (
+    RollingCandidateAuditRecord,
+    build_rolling_rebalance_schedule,
+    rolling_admission_config_for_profile,
+)
+from src.research.technical_experts.catalog import TECHNICAL_CANDIDATES
 
 
 def _frame_from_index(index: pd.DatetimeIndex) -> pd.DataFrame:
@@ -647,3 +661,250 @@ class TestRollingCandidateAuditLedger:
         )
         with pytest.raises(ValueError, match="malformed rolling candidate audit line"):
             append_rolling_candidate_audit(audit, audit_path)
+
+
+def _synthetic_v3_evidence(
+    profile: TechnicalLibraryAdmissionRequest,
+    window: object,
+    definitions: tuple[ExpertDefinition, ...],
+    rows: int = 520,
+) -> ra.WindowScenarioEvidence:
+    """Synthetic shared base/stress evidence with a fully admitted universe.
+
+    Returns are clipped-non-negative so the pair screen stays dense while every
+    candidate keeps enough active bars (>= 200 for the real profile) to be
+    admitted.
+    """
+    index = pd.date_range("2022-06-20", periods=rows, freq="4h", tz="UTC")
+    rng = np.random.default_rng(3)
+    panel = pd.DataFrame(np.nan, index=index, columns=[d.expert_id for d in definitions])
+    panel.iloc[1:] = np.clip(
+        rng.normal(0.002, 0.003, (rows - 1, len(definitions))), 0.0, None,
+    )
+    context = pd.Series("up_low_vol", index=index)
+    trades = pd.DataFrame()
+    return ra.WindowScenarioEvidence(
+        profile=profile,
+        window=window,
+        code_hash="h" * 64,
+        definitions=definitions,
+        base_panel=panel,
+        base_trade_counts={d.expert_id: 25 for d in definitions},
+        base_component_trades=trades,
+        base_context=context,
+        stress_panel=panel.copy(),
+        stress_component_trades=trades,
+        base_candidate_runner_calls=0,
+        stress_candidate_runner_calls=0,
+        base_wall_seconds=0.0,
+        stress_wall_seconds=0.0,
+        base_workers=0,
+        stress_workers=0,
+    )
+
+
+class TestSelectForWindowV3:
+    def test_select_for_window_v3_produces_backtests_for_full_90_candidate_universe_no_prefilter(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        # RAP-V3: the v3 selection path with no prefilter runs the best-first
+        # search over the full 90-candidate universe and produces backtests,
+        # where the v2 bounded path fails closed before any backtest runs.
+        profile = resolve_rolling_library_admission_profile(
+            "technical-5symbol-rolling-v3",
+        )
+        config = rolling_admission_config_for_profile(
+            "technical-5symbol-rolling-v3", profile.symbols,
+        )
+        window = build_rolling_rebalance_schedule(
+            pd.Timestamp("2022-04-01", tz="UTC"),
+            pd.Timestamp("2026-07-07 20:00", tz="UTC"),
+            config,
+        )[0]
+        definitions = ra._materialize_universe_definitions(profile, "h" * 64)
+        assert len(definitions) == 90
+        evidence = _synthetic_v3_evidence(profile, window, definitions)
+        monkeypatch.setattr(
+            ra, "build_window_scenario_evidence", lambda *a, **k: evidence,
+        )
+        monkeypatch.setattr(
+            ra, "_run_proposal_from_evidence",
+            lambda proposal, evidence, profile, window, config: _training_report(
+                proposal.proposal_id,
+            ),
+        )
+        selection, shortlist, reports = ra._select_for_window_v3(
+            profile, window, config, None,
+        )
+        assert selection.status == "COMPLETE"
+        assert selection.generation_status == "COMPLETE"
+        assert selection.generated_nodes > 0
+        assert shortlist
+        assert len(reports) == len(shortlist)
+        assert {r.proposal_id for r in reports} == {p.proposal_id for p in shortlist}
+
+    def test_select_for_window_v3_optional_prefilter_reduces_candidate_count_when_configured(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        # RAP-V3: when the optional (symbol, family) prefilter is enabled it
+        # curates the admitted set before screening and every shortlisted
+        # proposal only draws from the kept per-group members.
+        sources = tuple(c.return_source for c in TECHNICAL_CANDIDATES[:3])
+        profile = TechnicalLibraryAdmissionRequest(
+            candidate_sources=sources,
+            symbols=("S1", "S2"),
+            router=ContextualRouterSpec("S1", 1, 1, 1),
+            admission=LibraryAdmissionConfig(2, 3, 1, 1, 1.0, 1.0, 1, 10_000),
+        )
+        definitions = tuple(
+            ExpertDefinition(
+                expert_id=f"f{fam}_var{var}:{sym}",
+                return_source=sources[(fam + var) % 3],
+                family=f"f{fam}",
+                symbols=(sym,),
+                runner="run_technical_expert",
+                code_hash="h",
+            )
+            for fam in range(3)
+            for var in range(2)
+            for sym in ("S1", "S2")
+        )
+        definitions = tuple(sorted(definitions, key=lambda d: d.expert_id))
+        config = dataclasses.replace(
+            rolling_admission_config_for_profile(
+                "technical-5symbol-rolling-v3", ("S1", "S2"),
+            ),
+            family_symbol_prefilter_top_k=1,
+        )
+        window = build_rolling_rebalance_schedule(
+            pd.Timestamp("2022-04-01", tz="UTC"),
+            pd.Timestamp("2026-07-07 20:00", tz="UTC"),
+            config,
+        )[0]
+        evidence = _synthetic_v3_evidence(profile, window, definitions, rows=100)
+        monkeypatch.setattr(
+            ra, "build_window_scenario_evidence", lambda *a, **k: evidence,
+        )
+        monkeypatch.setattr(
+            ra, "_run_proposal_from_evidence",
+            lambda proposal, evidence, profile, window, config: _training_report(
+                proposal.proposal_id,
+            ),
+        )
+        selection, shortlist, _reports = ra._select_for_window_v3(
+            profile, window, config, None,
+        )
+        assert selection.generation_status == "COMPLETE"
+        assert shortlist
+        admitted_indexes = tuple(
+            i for i, candidate in enumerate(selection.candidates) if candidate.admitted
+        )
+        assert len(admitted_indexes) == len(definitions)
+        kept, dropped = prefilter_admitted_by_family_symbol(
+            definitions, admitted_indexes, selection.candidates, 1,
+        )
+        assert len(kept) == 6
+        assert len(dropped) == len(definitions) - 6
+        kept_ids = {definitions[i].expert_id for i in kept}
+        for proposal in shortlist:
+            assert set(proposal.expert_ids) <= kept_ids
+
+
+class TestRunRollingLibraryAdmissionPartialFailure:
+    def _windows(self) -> tuple:
+        config = ra.RollingAdmissionConfig()
+        return build_rolling_rebalance_schedule(
+            pd.Timestamp("2022-04-01", tz="UTC"),
+            pd.Timestamp("2026-07-07 20:00:00+00:00"),
+            config,
+        )
+
+    def test_run_rolling_library_admission_partial_failure_preserves_prior_windows_ledger_and_pointer(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: pytest.TempPathFactory,
+    ) -> None:
+        # RAP-V3: a DataIntegrityError on the 3rd window stops the replay but
+        # keeps the first two windows' ledger records and the pointer.
+        _patch_service(monkeypatch)
+        calls = {"n": 0}
+
+        def fail_on_third(profile, window, config, incumbent):
+            calls["n"] += 1
+            if calls["n"] == 3:
+                raise DataIntegrityError("synthetic window evidence integrity failure")
+            return _fake_select(profile, window, config, incumbent)
+
+        monkeypatch.setattr(ra, "_select_for_window", fail_on_third)
+        windows = self._windows()
+        ledger = tmp_path / "rebalance.jsonl"
+        pointer = tmp_path / "current.json"
+        report = ra.run_rolling_library_admission(
+            _request("2026-07-07 20:00:00+00:00"),
+            ledger_path=ledger, pointer_path=pointer,
+            audit_path=tmp_path / "rolling_candidate_audit.jsonl",
+        )
+        assert report.status == "PARTIAL_FAILURE"
+        assert report.failure is not None
+        assert report.failure["rebalance_start"] == str(windows[2].rebalance_start)
+        assert len(report.records) == 2
+        stored = load_rebalance_records(ledger)
+        assert [r.rebalance_start for r in stored] == [
+            str(w.rebalance_start) for w in windows[:2]
+        ]
+        assert read_current_profile(pointer).rebalance_start == str(
+            windows[1].rebalance_start,
+        )
+
+    def test_run_rolling_library_admission_partial_failure_writes_failure_audit_and_report_status(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: pytest.TempPathFactory,
+    ) -> None:
+        # RAP-V3: the failing window gets a minimal fail_closed audit line and
+        # the report carries the failure reason.
+        _patch_service(monkeypatch)
+        calls = {"n": 0}
+
+        def fail_on_third(profile, window, config, incumbent):
+            calls["n"] += 1
+            if calls["n"] == 3:
+                raise DataIntegrityError("synthetic window evidence integrity failure")
+            return _fake_select(profile, window, config, incumbent)
+
+        monkeypatch.setattr(ra, "_select_for_window", fail_on_third)
+        windows = self._windows()
+        audit_path = tmp_path / "rolling_candidate_audit.jsonl"
+        report = ra.run_rolling_library_admission(
+            _request("2026-07-07 20:00:00+00:00"),
+            ledger_path=tmp_path / "rebalance.jsonl",
+            pointer_path=tmp_path / "current.json",
+            audit_path=audit_path,
+        )
+        lines = [
+            line for line in audit_path.read_text(encoding="utf-8").splitlines() if line.strip()
+        ]
+        assert len(lines) == 3
+        failure_line = json.loads(lines[-1])
+        assert failure_line["selection_status"] == "fail_closed"
+        assert failure_line["cash_reason"] == "synthetic window evidence integrity failure"
+        assert failure_line["rebalance_start"] == str(windows[2].rebalance_start)
+        assert report.status == "PARTIAL_FAILURE"
+        assert report.failure is not None
+        assert report.failure["reason"] == "synthetic window evidence integrity failure"
+
+    def test_from_failure_audit_is_minimal_and_deterministic(self) -> None:
+        # RAP-V3: from_failure records an empty state with fail_closed status.
+        window = build_rolling_rebalance_schedule(
+            pd.Timestamp("2022-04-01", tz="UTC"),
+            pd.Timestamp("2024-10-01", tz="UTC"),
+            ra.RollingAdmissionConfig(),
+        )[0]
+        audit = RollingCandidateAuditRecord.from_failure(
+            window, "snap-key", "example integrity failure",
+        )
+        assert audit.selection_status == "fail_closed"
+        assert audit.cash_reason == "example integrity failure"
+        assert audit.candidates == ()
+        assert audit.proposals == ()
+        assert audit.shortlist == ()
+        assert audit.selected is None
+        payload = audit.to_payload()
+        assert payload["selection_status"] == "fail_closed"
+        assert payload["snapshot_key"] == "snap-key"
