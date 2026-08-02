@@ -129,3 +129,46 @@ class TestSignalEventsIntegrity:
         )
         with pytest.raises(ValueError, match="unknown technical family"):
             generate_signal_events(causal_ohlcv_fixture(n=50), bogus)
+
+
+class TestNewFamilyGatedNotFreebied:
+    def test_new_family_gated_not_freebied(self) -> None:
+        # new_family_gated_not_freebied: Supertrend/Parabolic SAR/Keltner are
+        # implemented as full families -- they generate signal events through
+        # generate_signal_events() with the same event surface and opposite-side
+        # masking -- but they are not yet admitted to the catalog, so they must
+        # pass the same admission gate as existing families before any catalog
+        # entry is added.
+        from src.research.technical_experts.catalog import (
+            TECHNICAL_EXPERT_FAMILIES,
+            resolve_technical_candidate,
+        )
+        from src.research.technical_experts.contracts import TechnicalCandidate
+
+        families = {
+            "supertrend": {"period": 10, "mult": 3.0, "regime": 200},
+            "parabolic_sar": {"step": 0.02, "max_step": 0.2, "regime": 200},
+            "keltner_channel_breakout": {"period": 20, "mult": 2.0, "regime": 200},
+        }
+        frame = causal_ohlcv_fixture(n=400)
+        for family, config in families.items():
+            assert family not in TECHNICAL_EXPERT_FAMILIES
+            for side in ("long", "short"):
+                candidate = TechnicalCandidate(
+                    f"c_{family}_{side}_v1",
+                    f"technical_{family}_{side}_v1",
+                    family,
+                    side.upper(),
+                    config,
+                    201,
+                )
+                events = generate_signal_events(frame, candidate)
+                assert events.index.equals(frame.index)
+                assert set(events.columns) == {
+                    "long_entry", "short_entry", "long_exit", "short_exit",
+                }
+                assert events.dtypes.eq(bool).all()
+                other = "short_entry" if side == "long" else "long_entry"
+                assert not events[other].any(), f"{family} {side}"
+            with pytest.raises(ValueError, match="unknown or retired"):
+                resolve_technical_candidate(f"technical_{family}_long_v1")
