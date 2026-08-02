@@ -305,3 +305,24 @@ def test_result_carries_component_evidence() -> None:
     pd.testing.assert_frame_equal(result.component_returns, panel)
     assert isinstance(result.backtest_result, BacktestResult)
     assert result.backtest_result.trades.empty
+
+
+def test_per_symbol_router_kind_requires_router() -> None:
+    # RAP-07: the v2 per-symbol winner mode is only valid with a router; the
+    # fallback global-winner default stays valid without one.
+    experts = (_expert("A", "f1", ("S1",)), _expert("B", "f2", ("S2",)))
+    with pytest.raises(ValueError, match="router is required"):
+        ExpertPortfolioSpec(experts=experts, router=None, router_kind="per_symbol_winner_v2")
+    spec = ExpertPortfolioSpec(experts=experts, router=None)
+    assert spec.router_kind == "global_winner_v1"
+
+
+def test_unknown_router_kind_fails_closed() -> None:
+    # RAP-07: an unsupported router_kind value is rejected at construction.
+    experts = (_expert("A", "f1", ("S1",)), _expert("B", "f2", ("S2",)))
+    with pytest.raises(ValueError, match="router_kind"):
+        ExpertPortfolioSpec(
+            experts=experts,
+            router=ContextualRouterSpec("BTCUSDT", 1, 1, 1),
+            router_kind="bogus",  # type: ignore[arg-type]
+        )

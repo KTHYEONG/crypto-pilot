@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import numpy as np
 import pandas as pd
+import pytest
 
 from src.research.evaluation.metrics import Metrics
 from src.research.evaluation.promotion import PromotionResult
@@ -10,12 +11,22 @@ from src.research.evaluation.reliability import (
     ReliabilityGateResult,
     compute_equal_duration_fold_distribution,
 )
-from src.research.expert_portfolio.admission_reports import LibraryAdmissionBacktestReport
-from src.research.expert_portfolio.admission_types import AdmissionProposal, admission_proposal_id
-from src.research.expert_portfolio.models import ContextualRouterSpec
+from src.research.expert_portfolio.admission_reports import (
+    LibraryAdmissionBacktestReport,
+    LibraryAdmissionReport,
+)
+from src.research.expert_portfolio.admission_types import (
+    AdmissionProposal,
+    CandidateAdmissionResult,
+    LibraryAdmissionConfig,
+    admission_proposal_id,
+)
+from src.research.expert_portfolio.models import ContextualRouterSpec, ExpertDefinition
 from src.research.expert_portfolio.rolling import (
     RollingAdmissionConfig,
+    RollingCandidateAuditRecord,
     build_rolling_rebalance_schedule,
+    rolling_admission_config_for_profile,
     select_rebalance_proposal,
 )
 
@@ -227,3 +238,122 @@ class TestSelectRebalanceProposal:
         selected = select_rebalance_proposal(reports, None)
         assert selected is not None
         assert selected.proposal_id == PROPOSAL_B
+
+
+def _canned_selection_report() -> LibraryAdmissionReport:
+    experts = tuple(
+        ExpertDefinition(
+            f"e{i}", f"source_{i}", f"f{i}", (f"S{i}",), "run_technical_expert", "h" * 64,
+        )
+        for i in range(3)
+    )
+    candidates = tuple(
+        CandidateAdmissionResult(e.expert_id, 25, 250, True, None) for e in experts
+    )
+    return LibraryAdmissionReport(
+        status="COMPLETE",
+        window_start="2022-07-01 00:00:00+00:00",
+        window_end="2024-06-30 20:00:00+00:00",
+        experts=experts,
+        candidates=candidates,
+        proposals=(),
+        context_coverage=dict.fromkeys(
+            ("up_low_vol", "up_high_vol", "down_low_vol", "down_high_vol", "flat_low_vol", "flat_high_vol"),
+            500,
+        ),
+        covered_states=6,
+        coverage_sufficient=True,
+        router=ContextualRouterSpec("BTCUSDT", 48, 48, 96),
+        admission=LibraryAdmissionConfig(2, 5, 20, 200, 0.50, 0.15, 6, 1_000_000),
+        structural_combinations=100,
+    )
+
+
+def _canned_window() -> object:
+    return build_rolling_rebalance_schedule(
+        pd.Timestamp("2022-04-01", tz="UTC"),
+        pd.Timestamp("2024-10-01", tz="UTC"),
+        RollingAdmissionConfig(),
+    )[0]
+
+
+class TestRollingCandidateAuditRecord:
+    def test_equivalent_inputs_produce_byte_stable_payloads(self) -> None:
+        # RAP-01: identical audit inputs serialize to byte-identical canonical JSON.
+        window = _canned_window()
+        selection = _canned_selection_report()
+        proposal = AdmissionProposal(("e0", "e1"), True)
+        training = (
+            _canned_report(PROPOSAL_A, lcb_obs=0.10, lcb_stress=0.10),
+            _canned_report(PROPOSAL_B, lcb_obs=0.12, lcb_stress=0.12),
+        )
+        audit1 = RollingCandidateAuditRecord.from_selection(
+            window, selection, (proposal,), training, proposal, "snap-key",
+        )
+        audit2 = RollingCandidateAuditRecord.from_selection(
+            window, selection, (proposal,), training, proposal, "snap-key",
+        )
+        assert audit1.to_canonical_bytes() == audit2.to_canonical_bytes()
+        payload = audit1.to_payload()
+        assert payload["profile"] == window.profile
+        assert payload["rebalance_start"] == str(window.rebalance_start)
+        assert payload["snapshot_key"] == "snap-key"
+        assert payload["selected"]["proposal_id"] == proposal.proposal_id
+        assert payload["shortlist"] == [proposal.proposal_id]
+        assert len(payload["candidates"]) == 3
+        assert len(payload["training"]) == 2
+        assert "recorded_at" not in payload
+
+    def test_no_deployable_selection_records_explicit_cash_outcome(self) -> None:
+        # RAP-01: a no-deployable window is serialized as CASH with a reason.
+        audit = RollingCandidateAuditRecord.from_selection(
+            _canned_window(), _canned_selection_report(), (), (), None, "snap-key",
+        )
+        payload = audit.to_payload()
+        assert audit.selection_status == "cash"
+        assert audit.cash_reason == "no_shortlist_or_incumbent"
+        assert payload["selected"] is None
+        assert payload["incumbent_kept"] is False
+
+    def test_from_selection_orders_shortlist_and_records_gates(self) -> None:
+        # RAP-01: shortlist order, per-proposal base/stress gate verdicts, and
+        # the selection key are all captured deterministically.
+        window = _canned_window()
+        selection = _canned_selection_report()
+        proposal_a = AdmissionProposal(("e0", "e1"), True)
+        proposal_b = AdmissionProposal(("e0", "e2"), True)
+        training = (
+            _canned_report(PROPOSAL_B, lcb_obs=0.16, lcb_stress=0.16),
+            _canned_report(PROPOSAL_A, lcb_obs=0.10, lcb_stress=0.10),
+        )
+        audit = RollingCandidateAuditRecord.from_selection(
+            window, selection, (proposal_b, proposal_a), training, proposal_b, "snap-key",
+        )
+        payload = audit.to_payload()
+        assert payload["shortlist"] == [proposal_b.proposal_id, proposal_a.proposal_id]
+        assert payload["training"][0]["proposal_id"] == PROPOSAL_B
+        assert payload["training"][0]["observation_gate_verdict"] == "PASS"
+        assert payload["training"][0]["stress_gate_verdict"] == "PASS"
+        assert payload["selected"]["proposal_id"] == proposal_b.proposal_id
+
+
+class TestRollingProfileConfig:
+    def test_v1_and_v2_configs_are_distinct_and_stable(self) -> None:
+        # RAP-09: v1 keeps the legacy router/search while v2 selects the
+        # per-symbol winner router and bounded same-symbol search.
+        symbols = ("BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT")
+        v1 = rolling_admission_config_for_profile("technical-5symbol-rolling-v1", symbols)
+        v2 = rolling_admission_config_for_profile("technical-5symbol-rolling-v2", symbols)
+        assert v1.router_kind == "global_winner_v1"
+        assert v1.proposal_search == "exact_legacy_v1"
+        assert v1.base_delay_bars == 0
+        assert v2.router_kind == "per_symbol_winner_v2"
+        assert v2.proposal_search == "bounded_family_unique_v2"
+        assert v2.base_delay_bars == 1
+        assert v1.fingerprint()["proposal_search"] == "exact_legacy_v1"
+        assert v2.fingerprint()["router_kind"] == "per_symbol_winner_v2"
+
+    def test_unknown_profile_name_fails_closed(self) -> None:
+        # RAP-09: an unknown rolling profile name raises ValueError.
+        with pytest.raises(ValueError, match="unknown rolling profile"):
+            rolling_admission_config_for_profile("technical-5symbol-rolling-v9", ("BTCUSDT",))

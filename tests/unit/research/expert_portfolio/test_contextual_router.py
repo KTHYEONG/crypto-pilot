@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import numpy as np
 import pandas as pd
 import pytest
 
@@ -8,6 +9,7 @@ from src.research.expert_portfolio.contextual_router import (
     _UNAVAILABLE,
     build_causal_context_labels,
     compute_causal_contextual_winner_weights,
+    compute_causal_per_symbol_contextual_weights,
     state_labels,
 )
 from src.research.expert_portfolio.models import (
@@ -239,3 +241,207 @@ class TestTieAndIntegrity:
             previous_weights=pd.Series({"A": 0.0, "B": 0.0, "CASH": 1.0}),
         )
         pd.testing.assert_series_equal(before, after)
+
+
+class TestPerSymbolRouter:
+    def test_two_same_symbol_specialists_never_concurrent_but_cross_symbols_can(
+        self,
+    ) -> None:
+        # RAP-07: two BTC specialists (A and C on S1) never receive concurrent
+        # weight, while a positive BTC winner and a positive ETH winner (B on
+        # S2) can hold simultaneous non-zero weight within the gross cap.
+        idx = pd.date_range("2024-01-01", periods=20, freq="4h", tz="UTC")
+        panel = pd.DataFrame(
+            {
+                "A": [0.0, 0.02] * 10,
+                "B": [0.0, 0.02] * 10,
+                "C": [0.0, 0.015] * 10,
+            },
+            index=idx,
+        )
+        context = pd.Series(["up_low_vol"] * 20, index=idx)
+        spec = ExpertPortfolioSpec(
+            experts=(
+                _expert("A", "f1", ("S1",)),
+                _expert("B", "f2", ("S2",)),
+                _expert("C", "f3", ("S1",)),
+            ),
+            router=_router(),
+            router_kind="per_symbol_winner_v2",
+        )
+        weights = compute_causal_per_symbol_contextual_weights(
+            panel, context, spec, spec.router,
+        )
+        assert weights.columns.tolist() == ["A", "B", "C", "CASH"]
+        for t in range(3, 20):
+            row = weights.iloc[t]
+            # never both same-symbol specialists at once
+            assert not (row["A"] > 0.0 and row["C"] > 0.0)
+            if t >= 10:
+                # the higher-LCB BTC winner and the ETH winner coexist
+                assert row["A"] > 0.0
+                assert row["B"] > 0.0
+                assert row["C"] == 0.0
+                assert row["A"] + row["B"] == pytest.approx(1.0)
+
+    def test_changing_a_future_return_cannot_alter_prior_weights(self) -> None:
+        # RAP-08: the decision at close t uses only completed round trips
+        # strictly before t; perturbing a future return cannot change weights
+        # at or before that timestamp.
+        idx = pd.date_range("2024-01-01", periods=7, freq="4h", tz="UTC")
+        panel = pd.DataFrame(
+            {"A": [0.0, 0.01, 0.02, 0.01, 0.02, 0.01, 0.02], "B": [0.0] * 7},
+            index=idx,
+        )
+        context = pd.Series(["up_low_vol"] * 7, index=idx)
+        spec = ExpertPortfolioSpec(
+            experts=(_expert("A", "f1", ("S1",)), _expert("B", "f2", ("S2",))),
+            router=_router(),
+            router_kind="per_symbol_winner_v2",
+        )
+        original = compute_causal_per_symbol_contextual_weights(
+            panel, context, spec, spec.router,
+        )
+        perturbed_panel = panel.copy()
+        perturbed_panel.iloc[5, 0] = -0.5
+        perturbed = compute_causal_per_symbol_contextual_weights(
+            perturbed_panel, context, spec, spec.router,
+        )
+        pd.testing.assert_frame_equal(original.iloc[:6], perturbed.iloc[:6])
+        assert original.loc[idx[6], "A"] != perturbed.loc[idx[6], "A"]
+
+    def test_no_positive_lcb_states_are_all_cash(self) -> None:
+        # RAP-08: a state where no symbol has a strictly positive eligible LCB
+        # returns exact all-CASH weights.
+        idx = pd.date_range("2024-01-01", periods=20, freq="4h", tz="UTC")
+        panel = pd.DataFrame(
+            {"A": [0.0, -0.01] * 10, "B": [0.0, -0.01] * 10}, index=idx,
+        )
+        context = pd.Series(["up_low_vol"] * 20, index=idx)
+        spec = ExpertPortfolioSpec(
+            experts=(_expert("A", "f1", ("S1",)), _expert("B", "f2", ("S2",))),
+            router=_router(),
+            router_kind="per_symbol_winner_v2",
+        )
+        weights = compute_causal_per_symbol_contextual_weights(
+            panel, context, spec, spec.router,
+        )
+        for t in range(3, 20):
+            pd.testing.assert_series_equal(
+                weights.iloc[t],
+                pd.Series({"A": 0.0, "B": 0.0, "CASH": 1.0}),
+                check_names=False,
+            )
+
+    def test_malformed_inputs_fail_closed(self) -> None:
+        # RAP-08: duplicate expert ids, unknown contexts, and misalignment fail.
+        idx = pd.date_range("2024-01-01", periods=6, freq="4h", tz="UTC")
+        panel = _panel([0.0, 0.02] * 3, [0.0, 0.02] * 3)
+        spec = ExpertPortfolioSpec(
+            experts=(_expert("A", "f1", ("S1",)), _expert("B", "f2", ("S2",))),
+            router=_router(),
+            router_kind="per_symbol_winner_v2",
+        )
+        unknown = pd.Series(["mystery_state"] * 6, index=idx)
+        with pytest.raises(ValueError, match="unknown"):
+            compute_causal_per_symbol_contextual_weights(
+                panel, unknown, spec, spec.router,
+            )
+        with pytest.raises(ValueError, match=r"pd\.Series"):
+            compute_causal_per_symbol_contextual_weights(
+                panel, ["up_low_vol"] * 6, spec, spec.router,
+            )
+        non_string = pd.Series([1] * 6, index=idx)
+        with pytest.raises(ValueError, match="string"):
+            compute_causal_per_symbol_contextual_weights(
+                panel, non_string, spec, spec.router,
+            )
+        missing_label = pd.Series(["up_low_vol"] * 6, index=idx)
+        missing_label.iloc[2] = None
+        with pytest.raises(ValueError, match="missing labels"):
+            compute_causal_per_symbol_contextual_weights(
+                panel, missing_label, spec, spec.router,
+            )
+        misaligned = pd.Series(["up_low_vol"] * 5, index=idx[:5])
+        with pytest.raises(ValueError, match="aligned"):
+            compute_causal_per_symbol_contextual_weights(
+                panel, misaligned, spec, spec.router,
+            )
+        duplicate = pd.DataFrame(
+            {"A": [0.0, 0.02] * 3, "B": [0.0, 0.02] * 3}, index=idx,
+        )
+        duplicate.columns = ["A", "A"]
+        with pytest.raises(ValueError, match="columns must be unique"):
+            compute_causal_per_symbol_contextual_weights(
+                duplicate,
+                pd.Series(["up_low_vol"] * 6, index=idx),
+                spec,
+                spec.router,
+            )
+
+    def test_non_finite_returns_fail_closed(self) -> None:
+        # RAP-08: a missing completed return is never zero-filled.
+        idx = pd.date_range("2024-01-01", periods=6, freq="4h", tz="UTC")
+        panel = pd.DataFrame(
+            {"A": [0.0, 0.02, np.nan, 0.02, 0.02, 0.02], "B": [0.0] * 6}, index=idx,
+        )
+        spec = ExpertPortfolioSpec(
+            experts=(_expert("A", "f1", ("S1",)), _expert("B", "f2", ("S2",))),
+            router=_router(),
+            router_kind="per_symbol_winner_v2",
+        )
+        context = pd.Series(["up_low_vol"] * 6, index=idx)
+        with pytest.raises(ValueError, match="finite"):
+            compute_causal_per_symbol_contextual_weights(
+                panel, context, spec, spec.router,
+            )
+
+    def test_duplicate_family_within_symbol_fails_closed(self) -> None:
+        # RAP-07: two experts of one family on the same symbol cannot both be
+        # candidates for the per-symbol winner router.
+        idx = pd.date_range("2024-01-01", periods=6, freq="4h", tz="UTC")
+        panel = pd.DataFrame(
+            {"A": [0.0, 0.02] * 3, "B": [0.0, 0.02] * 3}, index=idx,
+        )
+        spec = ExpertPortfolioSpec(
+            experts=(_expert("A", "f1", ("S1",)), _expert("B", "f1", ("S1",))),
+            router=_router(),
+            router_kind="per_symbol_winner_v2",
+        )
+        context = pd.Series(["up_low_vol"] * 6, index=idx)
+        with pytest.raises(ValueError, match="duplicate family within symbol"):
+            compute_causal_per_symbol_contextual_weights(
+                panel, context, spec, spec.router,
+            )
+
+    def test_multi_symbol_expert_fails_closed(self) -> None:
+        # RAP-07: the per-symbol router only admits single-symbol experts.
+        idx = pd.date_range("2024-01-01", periods=6, freq="4h", tz="UTC")
+        panel = pd.DataFrame(
+            {"A": [0.0, 0.02] * 3, "B": [0.0, 0.02] * 3}, index=idx,
+        )
+        spec = ExpertPortfolioSpec(
+            experts=(_expert("A", "f1", ("S1",)), _expert("B", "f2", ("S1", "S2"))),
+            router=_router(),
+            router_kind="per_symbol_winner_v2",
+        )
+        context = pd.Series(["up_low_vol"] * 6, index=idx)
+        with pytest.raises(ValueError, match="single-symbol"):
+            compute_causal_per_symbol_contextual_weights(
+                panel, context, spec, spec.router,
+            )
+
+    def test_missing_expert_column_fails_closed(self) -> None:
+        # RAP-07: an expert absent from the panel is never silently skipped.
+        idx = pd.date_range("2024-01-01", periods=6, freq="4h", tz="UTC")
+        panel = pd.DataFrame({"A": [0.0, 0.02] * 3}, index=idx)
+        spec = ExpertPortfolioSpec(
+            experts=(_expert("A", "f1", ("S1",)), _expert("B", "f2", ("S2",))),
+            router=_router(),
+            router_kind="per_symbol_winner_v2",
+        )
+        context = pd.Series(["up_low_vol"] * 6, index=idx)
+        with pytest.raises(ValueError, match="missing from component_returns"):
+            compute_causal_per_symbol_contextual_weights(
+                panel, context, spec, spec.router,
+            )
