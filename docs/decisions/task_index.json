@@ -1,6 +1,16 @@
 {
   "tasks": [
     {
+      "task_id": "TASK_GROWTH_ENGINE_V3_STRUCTURAL_SEARCH",
+      "date": "2026-08-03",
+      "adr_id": "ADR_20260803_GROWTH_ENGINE_V3_STRUCTURAL_SEARCH",
+      "domain": "risk",
+      "title": "Growth Engine v3 — 재조정 주기 기본값 변경 + 20전략 스크린 + Optuna 구조 하이퍼파라미터 탐색기",
+      "why": "growth_engine_v2 첫 CLI 실행이 매 4h봉 무조건 재조정(rebalance_bars=1) 기본값을 썼고, xs_momentum 5개 룩백만 검정된 상태였다. 사용자가 재조정 주기 재검토, 20개 이상 전략 비교, universe_size/거래 심볼 수 등 구조 변수에 대한 Optuna류 탐색 적용 가능성을 요청했다.",
+      "resolution": "(1) rebalance_bars/no_trade_band 단독 스윕(F4·E8-A)이 bar=1을 유일한 열등점으로 확인해 CLI 기본값을 1→3으로 변경. (2) PIT dev 74종에서 기존 소진 가설(xs_momentum/reversal/carry/low_vol)과 겹치지 않는 20개 신규 횡단면 가설을 Bonferroni(family=20, t floor=3.05) 기준으로 스크린 — 전부 미달, H17(유동성 팩터)만 평탄역·베타중립성 통과했으나 미채택(홀드아웃 의도적 미열람). (3) uv run --with optuna로 실행 가능성 확인 후 tools/research/structural_tuner.py(IS-only 목적함수, 시행 예산 4~50 상한, evaluate_parameter_plateau 재사용 평탄역 검사 강제) 구현, optuna는 pyproject.toml [project.optional-dependencies] tuning 그룹으로만 추가(런타임 의존성 아님). 축별 최선값 조합이 OOS에서 부호 반전(오버피팅)하는 반면 Optuna 결합탐색은 안정적임을 실측·테스트로 고정. CLI 재실행 결과 판정 불변(NO_ADMISSIBLE_ALPHA, plateau) — oos_t_stat 개선(−1.277→−0.510)은 비용 절감이 아니라 realized_weights 타이밍 개선임을 직접 비교로 확인, docs/results/growth_portfoilo.md §9에 기록.",
+      "impact": "재조정 주기 기본값이 F4·E8-A 양쪽에서 독립 재현된 실측 근거로 교체됐고, 20개 가설 소진으로 다음 spec은 H17 단독 사전등록 재제출부터 시작해야 함이 명확해졌다. 구조 변수 탐색에 Optuna를 쓰되 축별 조합 관행의 위험성(OOS 부호반전)과 3대 안전장치(IS-only·예산상한·평탄역 검사)가 코드로 고정됐다."
+    },
+    {
       "task_id": "TASK_GROWTH_ENGINE_V2_FIRST_RUN",
       "date": "2026-08-03",
       "adr_id": "ADR_20260803_GROWTH_ENGINE_V2_FIRST_RUN",
