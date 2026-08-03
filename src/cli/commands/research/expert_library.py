@@ -99,6 +99,7 @@ def _run_library_admission_backtest(args: argparse.Namespace) -> None:
         max_workers=args.max_workers,
         log_run=not args.no_log_run,
         timeframe=args.timeframe,
+        stop_loss_mode=args.stop_loss_mode, stop_loss_value=args.stop_loss_value, atr_period=args.atr_period, trailing_stop=args.trailing_stop,
     )
     report = admission_backtest_module.run_technical_library_admission_backtest(request)
     sys.stdout.write(
@@ -221,6 +222,18 @@ def add_expert_library_commands(run_sub: argparse._SubParsersAction[argparse.Arg
         help="Research timeframe (1h/2h/4h/6h/8h/12h/1d); default 4h preserves existing behavior",
     )
     admission_backtest.add_argument("--no-log-run", action="store_true", default=False)
+    admission_backtest.add_argument(
+        "--stop-loss-mode", choices=["fixed_pct", "atr_multiple"], default=None,
+        help="Opt-in causal stop-loss engine. Flags: --stop-loss-mode, --stop-loss-value, --atr-period, --trailing-stop. None preserves pre-existing behavior",
+    )
+    admission_backtest.add_argument(
+        "--stop-loss-value", type=float, default=None,
+        help="Stop distance: fixed fraction of entry price, or ATR multiple",
+    )
+    admission_backtest.add_argument("--atr-period", type=int, default=14)
+    admission_backtest.add_argument(
+        "--trailing-stop", action="store_true", default=False,
+    )
     admission_backtest.set_defaults(handler=_run_library_admission_backtest)
 
     pipeline = run_sub.add_parser(

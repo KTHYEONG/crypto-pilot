@@ -5,7 +5,7 @@ from __future__ import annotations
 import dataclasses
 import logging
 from concurrent.futures import ProcessPoolExecutor
-from typing import TypedDict
+from typing import Literal, TypedDict
 
 import pandas as pd
 
@@ -13,6 +13,7 @@ from src.application.research.expert.admission import _build_admission_context
 from src.application.research.technical.evaluation import _load_technical_market_data
 from src.common.errors import DataIntegrityError
 from src.core.settings import effective_worker_count
+from src.market_data.storage.loaders import timeframe_scale_factor
 from src.research.baseline.backtest import BacktestResult
 from src.research.contracts import CostModel
 from src.research.evaluation.metrics import compute_metrics
@@ -60,20 +61,23 @@ def _selected_symbol_worker(
     signal_delay_bars: int,
     *,
     timeframe: str = "4h",
+    stop_loss_mode: Literal["fixed_pct", "atr_multiple"] | None = None,
+    stop_loss_value: float | None = None,
+    atr_period: int = 14,
+    trailing_stop: bool = False,
 ) -> dict[str, _SelectedEvidence]:
     """Run all selected candidates for one symbol after one causal data load."""
     frame, funding = _load_technical_market_data(
         symbol, start, end, timeframe=timeframe,
     )
+    scaled_atr_period = max(1, round(atr_period * timeframe_scale_factor(timeframe)))
     evidence: dict[str, _SelectedEvidence] = {}
     for source in sources:
         try:
             result = run_technical_expert_backtest(
-                frame,
-                resolve_technical_candidate(source, timeframe=timeframe),
-                costs,
-                funding,
+                frame, resolve_technical_candidate(source, timeframe=timeframe), costs, funding,
                 signal_delay_bars=signal_delay_bars,
+                stop_loss_mode=stop_loss_mode, stop_loss_value=stop_loss_value, atr_period=scaled_atr_period, trailing_stop=trailing_stop,
             )
             trades = result.trades.copy()
             if len(trades) > 0:
@@ -139,6 +143,10 @@ def _run_selected_tasks(
     max_workers: int | None,
     *,
     timeframe: str = "4h",
+    stop_loss_mode: Literal["fixed_pct", "atr_multiple"] | None = None,
+    stop_loss_value: float | None = None,
+    atr_period: int = 14,
+    trailing_stop: bool = False,
 ) -> tuple[dict[str, dict[str, _SelectedEvidence]], int]:
     by_symbol: dict[str, list[str]] = {}
     for definition in definitions:
@@ -152,6 +160,10 @@ def _run_selected_tasks(
             symbol: _selected_symbol_worker(
                 symbol, sources[symbol], start, end, costs, signal_delay_bars,
                 timeframe=timeframe,
+                stop_loss_mode=stop_loss_mode,
+                stop_loss_value=stop_loss_value,
+                atr_period=atr_period,
+                trailing_stop=trailing_stop,
             )
             for symbol in symbols
         }, workers
@@ -167,6 +179,10 @@ def _run_selected_tasks(
                 costs,
                 signal_delay_bars,
                 timeframe=timeframe,
+                stop_loss_mode=stop_loss_mode,
+                stop_loss_value=stop_loss_value,
+                atr_period=atr_period,
+                trailing_stop=trailing_stop,
             )
             for symbol in symbols
         ]
@@ -236,6 +252,7 @@ def run_technical_library_admission_backtest(
     base_evidence, workers = _run_selected_tasks(
         definitions, request.start, end, costs, 0, request.max_workers,
         timeframe=request.timeframe,
+        stop_loss_mode=request.stop_loss_mode, stop_loss_value=request.stop_loss_value, atr_period=request.atr_period, trailing_stop=request.trailing_stop,
     )
     panel, component_trades = _assemble_selected_panel(base_evidence, definitions)
     context = _build_admission_context(
@@ -262,6 +279,7 @@ def run_technical_library_admission_backtest(
     stress_evidence, stress_workers = _run_selected_tasks(
         definitions, request.start, end, stress_costs, 1, request.max_workers,
         timeframe=request.timeframe,
+        stop_loss_mode=request.stop_loss_mode, stop_loss_value=request.stop_loss_value, atr_period=request.atr_period, trailing_stop=request.trailing_stop,
     )
     stress_panel, stress_trades = _assemble_selected_panel(
         stress_evidence, definitions,
