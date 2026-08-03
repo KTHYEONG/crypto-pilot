@@ -101,6 +101,10 @@
       "tests/unit/application/test_rolling_library_admission.py"
     ]
   },
+  "src/application/research/growth/evaluation.py": {
+    "testing": "tests/integration/cli/test_growth_engine_cli.py",
+    "architecture": "docs/results/growth_portfoilo.md"
+  },
   "src/application/research/oi/evaluation.py": {
     "testing": "tests/unit/application/test_oi_deleveraging_evaluation.py"
   },
@@ -157,6 +161,9 @@
     "testing": "tests/unit/cli/test_research_commands.py"
   },
   "src/cli/commands/research/portfolio_blend.py": {
+    "testing": "tests/unit/cli/test_research_commands.py"
+  },
+  "src/cli/commands/research/portfolio_growth.py": {
     "testing": "tests/unit/cli/test_research_commands.py"
   },
   "src/cli/commands/research/portfolio_multi.py": {
@@ -340,6 +347,9 @@
   "src/research/contracts.py": {
     "testing": "tests/unit/research/test_contracts.py"
   },
+  "src/research/evaluation/falsification.py": {
+    "testing": "tests/unit/research/evaluation/test_falsification.py"
+  },
   "src/research/evaluation/gate_feasibility.py": {
     "testing": [
       "tests/unit/research/evaluation/test_gate_feasibility.py",
@@ -360,6 +370,9 @@
   },
   "src/research/evaluation/reliability.py": {
     "testing": "tests/unit/research/evaluation/test_reliability.py"
+  },
+  "src/research/execution/intrabar_audit.py": {
+    "testing": "tests/unit/research/execution/test_intrabar_audit.py"
   },
   "src/research/expert_portfolio/admission.py": {
     "testing": "tests/unit/research/expert_portfolio/test_admission.py"
@@ -457,6 +470,9 @@
   "src/research/portfolio/defaults.py": {
     "testing": "tests/unit/application/test_portfolio_evaluation.py"
   },
+  "src/research/portfolio/net_construction.py": {
+    "testing": "tests/unit/research/portfolio/test_net_construction.py"
+  },
   "src/research/portfolio/universe.py": {
     "testing": "tests/unit/research/portfolio/test_universe.py"
   },
@@ -478,6 +494,9 @@
   "src/research/provenance/results.py": {
     "testing": "tests/unit/research/provenance/test_results.py"
   },
+  "src/research/risk/growth_sizing.py": {
+    "testing": "tests/unit/research/risk/test_growth_sizing.py"
+  },
   "src/research/sleeve_blend/backtest.py": {
     "testing": "tests/unit/research/sleeve_blend/test_contracts.py"
   },
@@ -494,8 +513,8 @@
     "testing": "tests/unit/research/sleeve_blend/test_fixed.py"
   },
   "src/research/sleeve_blend/tournament.py": {
-    "testing": "tests/unit/research/sleeve_blend/test_tournament.py",
-    "architecture": "docs/results/portfolio-blend-growth-gate-20260803.md"
+    "architecture": "docs/results/portfolio-blend-growth-gate-20260803.md",
+    "testing": "tests/unit/research/sleeve_blend/test_tournament.py"
   },
   "src/research/sleeve_blend/weights.py": {
     "testing": "tests/unit/research/sleeve_blend/test_weights.py"
@@ -517,6 +536,9 @@
   },
   "src/research/technical_experts/signals.py": {
     "testing": "tests/unit/research/technical_experts/test_signals.py"
+  },
+  "src/research/universe/pit_universe.py": {
+    "testing": "tests/unit/research/universe/test_pit_universe.py"
   },
   "src/strategy/cash_carry.py": {
     "testing": "tests/contract/test_legacy_imports.py"
