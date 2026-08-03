@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import numpy as np
+import pandas as pd
 import pytest
 
 from src.research.risk.growth_sizing import (
     GrowthSizingConfig,
     GrowthSizingResult,
+    apply_realised_risk_overlay,
     drawdown_risk_multiplier,
     solve_growth_optimal_risk,
 )
@@ -159,3 +161,78 @@ class TestSolveGrowthOptimalRisk:
         config = GrowthSizingConfig(risk_grid=(0.001,), n_paths=200)
         with pytest.raises(ValueError, match="finite"):
             solve_growth_optimal_risk(np.array([0.001, np.nan]), config)
+
+class TestApplyRealisedRiskOverlay:
+    def _index(self, n: int = 5) -> pd.DatetimeIndex:
+        return pd.date_range("2024-01-01", periods=n, freq="4h", tz="UTC")
+
+    # GPR-02-RISK-OVERLAY-CHANGES-EQUITY
+    def test_changing_selected_risk_changes_realised_equity_and_weights(self) -> None:
+        index = self._index()
+        net = pd.Series([0.01, 0.02, -0.005, 0.01, 0.005], index=index)
+        weights = pd.DataFrame({"A": [1.0] * 5, "B": [-1.0] * 5}, index=index)
+        low = apply_realised_risk_overlay(net, weights, 0.0025, 0.005)
+        full = apply_realised_risk_overlay(net, weights, 0.005, 0.005)
+        # the first multiplier is exactly one; scale = selected/reference
+        assert low[0].iloc[0] == pytest.approx(0.5 * net.iloc[0])
+        assert full[0].iloc[0] == pytest.approx(net.iloc[0])
+        assert low[1].iloc[0, 0] == pytest.approx(0.5)
+        assert full[1].iloc[0, 0] == pytest.approx(1.0)
+        assert not np.allclose(low[0].to_numpy(), full[0].to_numpy())
+        assert not np.allclose(low[1].to_numpy(), full[1].to_numpy())
+
+    # GPR-02-RISK-OVERLAY-CHANGES-EQUITY
+    def test_drawdown_overlay_never_increases_exposure(self) -> None:
+        index = self._index(7)
+        # a drawdown early in the ledger must de-risk every later bar
+        net = pd.Series([0.05, -0.18, 0.10, 0.02, -0.02, 0.01, 0.01], index=index)
+        weights = pd.DataFrame({"A": [1.0] * 7, "B": [-1.0] * 7}, index=index)
+        _scaled_net, scaled_weights = apply_realised_risk_overlay(net, weights, 0.005, 0.005)
+        magnitudes = np.abs(scaled_weights.to_numpy())
+        assert np.all(magnitudes <= 1.0 + 1e-12)
+        # after the drawdown, exposure is strictly below the full-scale first bar
+        assert np.all(magnitudes[2:] < magnitudes[0])
+
+    def test_first_multiplier_is_one(self) -> None:
+        index = self._index(3)
+        net = pd.Series([0.01, 0.01, 0.01], index=index)
+        weights = pd.DataFrame({"A": [1.0] * 3}, index=index)
+        scaled, _ = apply_realised_risk_overlay(net, weights, 0.005, 0.005)
+        assert scaled.iloc[0] == pytest.approx(0.01)
+
+    def test_rejects_non_finite_returns(self) -> None:
+        index = self._index(3)
+        net = pd.Series([0.01, np.nan, 0.01], index=index)
+        weights = pd.DataFrame({"A": [1.0] * 3}, index=index)
+        with pytest.raises(ValueError, match="finite"):
+            apply_realised_risk_overlay(net, weights, 0.005, 0.005)
+
+    def test_rejects_shared_index_mismatch(self) -> None:
+        index = self._index(3)
+        other = self._index(4)
+        net = pd.Series([0.01] * 3, index=index)
+        weights = pd.DataFrame({"A": [1.0] * 4}, index=other)
+        with pytest.raises(ValueError, match="identical index"):
+            apply_realised_risk_overlay(net, weights, 0.005, 0.005)
+
+    def test_rejects_non_positive_risk(self) -> None:
+        index = self._index(2)
+        net = pd.Series([0.01, 0.01], index=index)
+        weights = pd.DataFrame({"A": [1.0] * 2}, index=index)
+        with pytest.raises(ValueError, match="> 0"):
+            apply_realised_risk_overlay(net, weights, 0.0, 0.005)
+
+    def test_rejects_non_monotonic_index(self) -> None:
+        index = self._index(4)
+        shuffled = pd.DatetimeIndex([index[2], index[0], index[3], index[1]])
+        net = pd.Series([0.01] * 4, index=shuffled)
+        weights = pd.DataFrame({"A": [1.0] * 4}, index=shuffled)
+        with pytest.raises(ValueError, match="monotonic"):
+            apply_realised_risk_overlay(net, weights, 0.005, 0.005)
+
+    def test_rejects_non_datetime_index(self) -> None:
+        index = pd.RangeIndex(3)
+        net = pd.Series([0.01] * 3, index=index)
+        weights = pd.DataFrame({"A": [1.0] * 3}, index=index)
+        with pytest.raises(ValueError, match="DatetimeIndex"):
+            apply_realised_risk_overlay(net, weights, 0.005, 0.005)
