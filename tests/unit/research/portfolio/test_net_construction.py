@@ -67,8 +67,12 @@ class TestNetReturnStream:
     def test_series_share_index(self) -> None:
         idx = _index(2)
         z = pd.Series([0.0, 0.0], index=idx)
-        stream = NetReturnStream(z, z, z, z, pd.DataFrame({"A": [0.0, 0.0]}, index=idx))
+        stream = NetReturnStream(
+            gross=z, cost=z, funding=z, net=z, turnover=z,
+            realized_weights=pd.DataFrame({"A": [0.0, 0.0]}, index=idx),
+        )
         assert list(stream.net.index) == list(idx)
+        assert isinstance(stream.funding, pd.Series)
 
 
 class TestComputeNetReturnStream:
@@ -181,3 +185,62 @@ class TestComputeNetReturnStream:
         fr = pd.DataFrame({"B": [0.0] * 4}, index=idx)
         with pytest.raises(DataIntegrityError):
             compute_net_return_stream(tw, fr, NetConstructionSpec())
+
+    # GSD-05: positive funding debits a long, credits a short, and omission is
+    # byte-identical to zero funding.
+    def test_positive_funding_debits_a_long(self) -> None:
+        idx = _index(2)
+        rate = 0.0005 + 0.0003
+        tw = pd.DataFrame({"A": [1.0, 1.0]}, index=idx)
+        fr = pd.DataFrame({"A": [0.01, 0.01]}, index=idx)
+        ff = pd.DataFrame({"A": [0.001, 0.001]}, index=idx)
+        stream = compute_net_return_stream(
+            tw, fr, NetConstructionSpec(), forward_funding=ff,
+        )
+        # funding = realized * forward_funding = 1.0 * 0.001 per bar.
+        assert np.allclose(stream.funding.to_numpy(), [0.001, 0.001])
+        # net = gross - cost - funding: the long is debited below its gross.
+        assert np.allclose(
+            stream.net.to_numpy(), [0.01 - rate - 0.001, 0.01 - 0.001],
+        )
+
+    def test_positive_funding_credits_a_short(self) -> None:
+        idx = _index(2)
+        rate = 0.0005 + 0.0003
+        tw = pd.DataFrame({"B": [-1.0, -1.0]}, index=idx)
+        fr = pd.DataFrame({"B": [0.01, 0.01]}, index=idx)
+        ff = pd.DataFrame({"B": [0.001, 0.001]}, index=idx)
+        stream = compute_net_return_stream(
+            tw, fr, NetConstructionSpec(), forward_funding=ff,
+        )
+        # funding = realized * forward_funding = -1.0 * 0.001 per bar.
+        assert np.allclose(stream.funding.to_numpy(), [-0.001, -0.001])
+        # net = gross - cost - funding: the short is credited above its gross.
+        assert np.allclose(
+            stream.net.to_numpy(), [-0.01 - rate + 0.001, -0.01 + 0.001],
+        )
+
+    def test_omission_is_byte_identical_to_zero_funding(self) -> None:
+        idx = _index(6)
+        tw = pd.DataFrame({"A": [1.0, 1.0, 0.0, 0.0, 1.0, 1.0]}, index=idx)
+        fr = pd.DataFrame({"A": [0.01] * 6}, index=idx)
+        zero = pd.DataFrame({"A": [0.0] * 6}, index=idx)
+        omitted = compute_net_return_stream(tw, fr, NetConstructionSpec())
+        explicit_zero = compute_net_return_stream(
+            tw, fr, NetConstructionSpec(), forward_funding=zero,
+        )
+        assert omitted.net.equals(explicit_zero.net)
+        assert omitted.gross.equals(explicit_zero.gross)
+        assert omitted.cost.equals(explicit_zero.cost)
+        assert np.allclose(explicit_zero.funding.to_numpy(), 0.0)
+
+    def test_forward_funding_validation_rejects_mismatched_frames(self) -> None:
+        idx = _index(4)
+        tw = pd.DataFrame({"A": [0.0] * 4}, index=idx)
+        fr = pd.DataFrame({"A": [0.0] * 4}, index=idx)
+        ff = pd.DataFrame({"A": [0.0] * 4}, index=_index(4, start="2024-02-01"))
+        with pytest.raises(DataIntegrityError):
+            compute_net_return_stream(tw, fr, NetConstructionSpec(), forward_funding=ff)
+        ff_cols = pd.DataFrame({"B": [0.0] * 4}, index=idx)
+        with pytest.raises(DataIntegrityError):
+            compute_net_return_stream(tw, fr, NetConstructionSpec(), forward_funding=ff_cols)
