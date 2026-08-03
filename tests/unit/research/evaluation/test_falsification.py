@@ -125,6 +125,7 @@ class TestEvaluateFalsification:
             family_size=9,
             dev_score=0.674,
             holdout_score=0.589,
+            fold_gate_pass=True,
         )
         assert verdict.passed is False
         assert verdict.binding_constraint == "plateau"
@@ -138,9 +139,35 @@ class TestEvaluateFalsification:
             family_size=9,
             dev_score=1.0,
             holdout_score=0.9,
+            fold_gate_pass=True,
         )
         assert verdict.binding_constraint == "multiplicity"
         assert verdict.passed is False
+
+    def test_fold_concentration_gate_fails_between_multiplicity_and_holdout(self) -> None:
+        verdict = evaluate_falsification(
+            parameter_scores={1.0: 0.95, 2.0: 1.00, 3.0: 0.98},
+            chosen_parameter=2.0,
+            oos_t_stat=3.5,
+            family_size=1,
+            dev_score=1.0,
+            holdout_score=0.9,
+            fold_gate_pass=False,
+        )
+        assert verdict.binding_constraint == "fold_concentration"
+        assert verdict.passed is False
+
+    def test_fold_concentration_pass_falls_through_to_symbol_holdout(self) -> None:
+        verdict = evaluate_falsification(
+            parameter_scores={1.0: 0.95, 2.0: 1.00, 3.0: 0.98},
+            chosen_parameter=2.0,
+            oos_t_stat=3.5,
+            family_size=1,
+            dev_score=1.0,
+            holdout_score=0.4,
+            fold_gate_pass=True,
+        )
+        assert verdict.binding_constraint == "symbol_holdout"
 
     def test_symbol_holdout_gate_fails_closed_on_non_positive_dev(self) -> None:
         verdict = evaluate_falsification(
@@ -150,6 +177,7 @@ class TestEvaluateFalsification:
             family_size=1,
             dev_score=0.0,
             holdout_score=1.0,
+            fold_gate_pass=True,
         )
         assert verdict.binding_constraint == "symbol_holdout"
 
@@ -161,6 +189,7 @@ class TestEvaluateFalsification:
             family_size=1,
             dev_score=1.0,
             holdout_score=0.4,
+            fold_gate_pass=True,
         )
         assert verdict.binding_constraint == "symbol_holdout"
 
@@ -172,6 +201,7 @@ class TestEvaluateFalsification:
             family_size=1,
             dev_score=1.0,
             holdout_score=0.9,
+            fold_gate_pass=True,
         )
         assert verdict.passed is True
         assert verdict.binding_constraint == "none"
