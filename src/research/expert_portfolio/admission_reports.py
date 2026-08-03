@@ -11,6 +11,7 @@ from collections.abc import Mapping
 from dataclasses import asdict, dataclass, field
 from typing import cast
 
+from src.research.evaluation.gate_feasibility import BreadthRequirement, GateFeasibility
 from src.research.evaluation.metrics import Metrics
 from src.research.evaluation.promotion import PromotionResult
 from src.research.evaluation.reliability import (
@@ -232,6 +233,13 @@ class LibraryAdmissionBacktestReport:
     # advisory provenance supplied by the rolling service and never changes the
     # report's own gate semantics; legacy callers leave it empty.
     diversification_rank_key: tuple[float, float, float, float, str] = (0.0, 0.0, 0.0, 0.0, "")
+    # Closed-form pre-backtest feasibility screen of the realized observation
+    # equity. Advisory only: it never substitutes for the real gate and can be
+    # None when the observation equity is degenerate (zero vol / no drawdown).
+    observation_feasibility: GateFeasibility | None = None
+    # Breadth diagnostic over the proposing panel's realized per-leg Sharpes.
+    # Advisory only; never substitutes for the real gate.
+    breadth: BreadthRequirement | None = None
 
     def to_report_dict(self) -> dict[str, object]:
         """Return deterministic JSON-safe CLI output."""
@@ -246,6 +254,19 @@ class LibraryAdmissionBacktestReport:
                 "gate": asdict(self.observation_gate),
                 "folds": asdict(self.observation_folds),
                 "allocation_cost_total": self.allocation_cost_total,
+                "binding_constraint": (
+                    self.observation_feasibility.binding_constraint
+                    if self.observation_feasibility is not None
+                    else "none"
+                ),
+                "feasibility": (
+                    asdict(self.observation_feasibility)
+                    if self.observation_feasibility is not None
+                    else None
+                ),
+                "breadth": (
+                    asdict(self.breadth) if self.breadth is not None else None
+                ),
             },
             "stress": {
                 "metrics": asdict(self.stress_metrics),
