@@ -19,7 +19,9 @@ from src.research.evaluation.policy import resolve_evaluation_end
 from src.research.evaluation.promotion import PromotionResult, compose_promotion_verdict
 from src.research.evaluation.reliability import (
     FoldDistributionResult,
+    ReliabilityGateConfig,
     ReliabilityGateResult,
+    compute_equal_duration_fold_distribution,
 )
 from src.research.execution.intrabar_audit import intrabar_audit_required
 from src.research.portfolio.growth_strategy_library import (
@@ -261,6 +263,41 @@ def _oos_t_stat(net: pd.Series, *, test_fraction: float = 0.5) -> float:
     if std <= 0:
         return 0.0
     return float(test.mean() / std * np.sqrt(len(test)))
+
+
+_FOLD_DURATION = "6MS"
+
+
+def _qualification_fold_gate_pass(net: pd.Series) -> bool:
+    """Fail-closed fold-concentration check on the qualification net-return stream.
+
+    Reuses ``compute_equal_duration_fold_distribution`` (unchanged reliability
+    contract, docs/specs/growth_engine_fold_concentration_gate.md) on the
+    cumulative qualification equity split into 6-month folds, guarding against
+    an ``oos_t_stat`` that clears the multiplicity floor only because
+    performance concentrates in one favourable sub-period rather than being
+    distributed across the qualification window.  A span too short to admit at
+    least one fold, or fewer than two return observations, fails closed
+    (returns ``False``) rather than raising.
+    """
+    rets = net.dropna()
+    if len(rets) < 2:
+        return False
+    equity = (1.0 + rets).cumprod()
+    try:
+        result = compute_equal_duration_fold_distribution(
+            equity, ReliabilityGateConfig(), fold_duration=_FOLD_DURATION,
+        )
+    except ValueError as exc:
+        _logger.warning("[EVAL] fold_gate fail-closed reason=%s", exc)
+        return False
+    _logger.info(
+        "[EVAL] fold_gate n_folds=%d concentration=%.3f threshold=%.3f gate_pass=%s "
+        "median_fold_cagr=%.3f worst_fold_cagr=%.3f",
+        result.n_folds, result.fold_concentration, result.fold_concentration_threshold,
+        result.gate_pass, result.median_fold_cagr, result.worst_fold_cagr,
+    )
+    return result.gate_pass
 
 
 def family_window_correlation(
@@ -531,6 +568,7 @@ def _diagnostic_falsification(family: _FamilyScreen) -> FalsificationVerdict | N
         family_size=FAMILY_SIZE,
         dev_score=family.chosen_score,
         holdout_score=0.0,
+        fold_gate_pass=False,
         config=FalsificationConfig(),
     )
 
@@ -556,10 +594,12 @@ def run_growth_engine_evaluation(request: GrowthEngineEvaluationRequest) -> Grow
     ``resolve_evaluation_end`` -> ``earliest_admissible_start`` ->
     ``build_universe_schedule`` -> frozen dev discovery (every family/window on
     the discovery half) -> dev finalist qualification (net OOS t-stat and gross
-    score) + symbol-holdout gross score -> unchanged ``evaluate_falsification``
-    (plateau, Bonferroni multiplicity with ``family_size=12``, symbol holdout)
-    -> ``compute_net_return_stream`` -> ``solve_growth_optimal_risk`` ->
-    ``compose_promotion_verdict``.  Fail-closed: when the admissible start
+    score) + symbol-holdout gross score -> ``evaluate_falsification`` (plateau,
+    Bonferroni multiplicity with ``family_size=12``,
+    ``compute_equal_duration_fold_distribution`` fold-concentration on the
+    qualification equity, symbol holdout) -> ``compute_net_return_stream`` ->
+    ``solve_growth_optimal_risk`` -> ``compose_promotion_verdict``.  Fail-closed:
+    when the admissible start
     cannot be derived, no family passes the discovery plateau, or the
     falsification verdict fails, the report is ``NO_ADMISSIBLE_ALPHA`` with a
     flat CASH equity curve, zero trades, and a deterministic candidate
@@ -738,7 +778,9 @@ def run_growth_engine_evaluation(request: GrowthEngineEvaluationRequest) -> Grow
 
     full_pnl = (target_weights * fwd).sum(axis=1)
     dev_qualification_score = _gross_sharpe(full_pnl.loc[qualification_bars])
-    oos_t_stat = _oos_t_stat(stream.net.loc[qualification_bars])
+    qualification_net = stream.net.loc[qualification_bars]
+    oos_t_stat = _oos_t_stat(qualification_net)
+    fold_gate_pass = _qualification_fold_gate_pass(qualification_net)
 
     holdout_screen = screen_growth_strategy_weights(
         selected.strategy_id, selected_parameter, holdout_schedule, px, taker,
@@ -758,6 +800,7 @@ def run_growth_engine_evaluation(request: GrowthEngineEvaluationRequest) -> Grow
         family_size=FAMILY_SIZE,
         dev_score=dev_qualification_score,
         holdout_score=holdout_score,
+        fold_gate_pass=fold_gate_pass,
         config=FalsificationConfig(),
     )
 
