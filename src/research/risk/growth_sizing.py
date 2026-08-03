@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, fields
 
 import numpy as np
+import pandas as pd
 
 from src.research.evaluation.reliability import derive_block_size
 
@@ -195,6 +196,57 @@ def solve_growth_optimal_risk(
     )
 
 
+def apply_realised_risk_overlay(
+    net: pd.Series,
+    weights: pd.DataFrame,
+    selected_risk: float,
+    reference_risk: float,
+) -> tuple[pd.Series, pd.DataFrame]:
+    """Deterministic realised-risk overlay on net returns and realised weights.
+
+    Every bar is scaled by ``selected_risk / reference_risk`` and by the causal
+    drawdown multiplier ``drawdown_risk_multiplier(drawdown of the deployed
+    equity through the preceding bar)``; the first multiplier is exactly one.
+    The overlay is applied to BOTH the net return series and the realised
+    weights, so ``selected_risk`` changes the published equity and reported
+    weights by the defined scale.  The drawdown ladder only ever reduces
+    exposure; an invalid, non-finite, or non-shared-index input fails closed
+    with ``ValueError`` instead of silently mutating the ledger.
+    """
+    if not isinstance(net.index, pd.DatetimeIndex) or not isinstance(weights.index, pd.DatetimeIndex):
+        raise ValueError("net and weights must have a DatetimeIndex")
+    if not net.index.equals(weights.index):
+        raise ValueError("net and weights must share an identical index")
+    if not net.index.is_monotonic_increasing:
+        raise ValueError("net index must be monotonic increasing")
+    values = net.to_numpy(dtype=np.float64)
+    w_arr = weights.to_numpy(dtype=np.float64)
+    if not np.isfinite(values).all() or not np.isfinite(w_arr).all():
+        raise ValueError("net and weights must contain only finite values")
+    if selected_risk <= 0 or reference_risk <= 0:
+        raise ValueError("selected_risk and reference_risk must be > 0")
+
+    scale = selected_risk / reference_risk
+    n = len(values)
+    scaled_net = np.empty(n, dtype=np.float64)
+    scaled_w = np.empty_like(w_arr)
+    equity = 1.0
+    peak = 1.0
+    mdd = 0.0
+    for t in range(n):
+        multiplier = drawdown_risk_multiplier(np.asarray([mdd], dtype=np.float64))[0]
+        factor = scale * multiplier
+        scaled_net[t] = factor * values[t]
+        scaled_w[t] = factor * w_arr[t]
+        equity *= 1.0 + scaled_net[t]
+        peak = max(peak, equity)
+        mdd = max(mdd, 1.0 - equity / peak)
+    return (
+        pd.Series(scaled_net, index=net.index, dtype=np.float64),
+        pd.DataFrame(scaled_w, index=weights.index, columns=weights.columns, dtype=np.float64),
+    )
+
+
 def _check_contract() -> None:
     """Executable assertions locking the frozen growth-sizing contract surface."""
     config = GrowthSizingConfig(risk_grid=(0.0005, 0.001, 0.005))
@@ -212,6 +264,7 @@ def _check_contract() -> None:
     }
     dd = np.array([0.0, 0.05, 0.10, 0.15, 0.175, 0.20, 0.30])
     assert np.allclose(drawdown_risk_multiplier(dd), np.array([1.0, 1.0, 0.625, 0.25, 0.125, 0.0, 0.0]))
+    assert apply_realised_risk_overlay.__name__ == "apply_realised_risk_overlay"
 
 
 _check_contract()
