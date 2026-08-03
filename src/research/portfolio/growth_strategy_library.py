@@ -21,6 +21,12 @@ from src.common.errors import DataIntegrityError
 
 XS_QUANTILE = 0.30
 
+#: Binance perpetual funding is settled every 8 hours; a per-symbol funding
+#: history is causally alignable only when it covers its scheduled roster span
+#: with no settlement gap larger than one interval (plus sub-second jitter).
+_FUNDING_INTERVAL = pd.Timedelta(hours=8)
+_FUNDING_GAP_JITTER_TOLERANCE = pd.Timedelta(milliseconds=50)
+
 
 @dataclass(frozen=True, slots=True)
 class GrowthStrategyDefinition:
@@ -104,6 +110,7 @@ def align_funding_bars(
     grid: pd.DatetimeIndex,
     *,
     forward: bool = False,
+    symbol_spans: Mapping[str, tuple[pd.Timestamp, pd.Timestamp]] | None = None,
 ) -> pd.DataFrame:
     """Aggregate raw funding events into per-bar sums on the decision grid.
 
@@ -114,6 +121,18 @@ def align_funding_bars(
     previous completed settlement.  Missing, non-finite, non-UTC,
     non-monotonic, or unalignable funding raises ``DataIntegrityError`` and is
     never zero-filled.
+
+    Each column is validated on its own event index (``col = column.dropna()``):
+    the ``pd.DataFrame`` union of per-symbol event timestamps inserts NaN rows
+    where a symbol has no settlement, and those rows are not funding for that
+    symbol.  When ``symbol_spans`` is provided, ``align_funding_bars`` treats
+    the interval ``[span_start, span_end + bar_period]`` as the symbol's
+    required causal coverage window and raises only when the history begins
+    after the span or carries a mid-series gap inside it; events collected
+    before or after that window are clipped by the alignment and never
+    zero-fill a genuinely missing settlement.  Without ``symbol_spans`` the
+    exact global-grid behavior is preserved: every event must fall inside
+    ``[grid[0], grid[-1] + bar_period]``.
     """
     if not isinstance(funding.index, pd.DatetimeIndex):
         raise DataIntegrityError("funding must have a DatetimeIndex")
@@ -132,16 +151,42 @@ def align_funding_bars(
     out = pd.DataFrame(0.0, index=grid, columns=list(funding.columns), dtype="float64")
     side = "left" if forward else "right"
     for column in funding.columns:
-        rates = pd.to_numeric(funding[column], errors="coerce").to_numpy(dtype=np.float64)
+        col = funding[column].dropna()
+        if col.index.hasnans:
+            raise DataIntegrityError("funding index must not contain NaT")
+        if not col.index.is_monotonic_increasing:
+            raise DataIntegrityError("funding index must be monotonic increasing")
+        rates = pd.to_numeric(col, errors="coerce").to_numpy(dtype=np.float64)
         if not np.isfinite(rates).all():
             raise DataIntegrityError(f"funding for {column} must be finite")
-        ts = funding.index
-        if len(ts):
-            inside = (ts >= grid[0]) & (ts <= window_end)
-            if not inside.all():
-                raise DataIntegrityError(
-                    f"funding for {column} is not causally alignable to the bar window"
-                )
+        ts = col.index
+        span = symbol_spans.get(column) if symbol_spans is not None else None
+        if span is None:
+            if len(ts):
+                inside = (ts >= grid[0]) & (ts <= window_end)
+                if not inside.all():
+                    raise DataIntegrityError(
+                        f"funding for {column} is not causally alignable to the bar window"
+                    )
+        else:
+            span_start, span_end = span
+            span_hi = span_end + bar_period
+            if len(ts):
+                if ts.min() > span_start + _FUNDING_INTERVAL:
+                    raise DataIntegrityError(
+                        f"funding for {column} is not causally alignable to the bar window"
+                    )
+                window_ts = ts[(ts >= span_start) & (ts <= span_hi)]
+                if len(window_ts) == 0:
+                    raise DataIntegrityError(
+                        f"funding for {column} is not causally alignable to the bar window"
+                    )
+                if len(window_ts) >= 2:
+                    gaps = window_ts.to_series().diff().dropna()
+                    if gaps.max() > _FUNDING_INTERVAL + _FUNDING_GAP_JITTER_TOLERANCE:
+                        raise DataIntegrityError(
+                            f"funding for {column} has a mid-series gap in its scheduled span"
+                        )
         pos = grid.searchsorted(ts, side=side) - 1
         aligned = np.zeros(len(grid), dtype=np.float64)
         keep = pos >= 0
@@ -252,8 +297,16 @@ def build_growth_strategy_weights(
         missing = [sym for sym in roster_symbols if sym not in settled_funding.columns]
         if missing:
             raise DataIntegrityError(f"{strategy_id} is missing funding for {missing}")
+        symbol_spans = {
+            sym: (
+                min(date for date, roster in schedule.items() if sym in roster),
+                max(date for date, roster in schedule.items() if sym in roster),
+            )
+            for sym in roster_symbols
+        }
         funding_panel = align_funding_bars(
             settled_funding[list(roster_symbols)], prices.index, forward=False,
+            symbol_spans=symbol_spans,
         )
         if not np.isfinite(funding_panel.to_numpy(dtype=np.float64)).all():
             raise DataIntegrityError(
