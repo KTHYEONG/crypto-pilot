@@ -56,3 +56,23 @@ Passing the activity floor above only means enough trades fired to be measurable
 | RSI Trend Pullback [short] | 5 | -7.30% | -10.55% | 0/5 |
 
 **Verdict at 1d: 0/65 backtests passed the observation gate.** Every family/side tested at this timeframe shows a negative or flat mean CAGR. See `timeframe-census.md` §3 for the full cross-timeframe synthesis (0/499 across all 7 timeframes).
+
+## Stop-loss exit sweep (v2, `technical_expert_edge_recovery.md` §3)
+
+The rows above are the `stop_loss_mode=None` control (no stop-loss) - kept exactly as measured. This section adds
+the opt-in causal stop-loss engine, swept across all 4 exit combinations at 3 magnitudes each for all 13 alive
+candidates (BB Squeeze Breakout both sides, Stochastic Trend Pullback both sides, and MFI Trend Pullback short
+confirmed still dead, 0/5 activity floor, at 1d before spending sweep budget on them) - 780 additional
+single-symbol backtests. Full grid: `docs/results/stop-loss-edge-check.md`.
+
+**Result: 3/780 individual (candidate, symbol) cells passed the gate**, all at the single tightest setting
+(`fixed_pct`, `stop_loss_value=0.03`, trailing) - one symbol each for EMA Alignment long (XRPUSDT), Ichimoku
+Cloud short (ETHUSDT), and RSI Trend Pullback long (SOLUSDT). This is **not** read as recovered edge: the same
+setting produces CAGR outliers between -5% and +522% across the other symbols of the same candidates and
+inflates trade counts 2-4x (whipsaw churn from a 3% stop that is tighter than typical 1d crypto ATR), and no
+other magnitude or the ATR-normalized variants reproduce a pass for the same candidates. Aggregated across all
+5 symbols per candidate (the family-level measure the census/gate methodology actually uses), only 2 of the 156
+1d settings show a positive **median** LCB90 CAGR (Ichimoku Cloud short +1.11%, RSI Trend Pullback long
++1.66%, both from the same noisy 3%-trailing setting), and the aggregate family verdict stays 0/5 gate PASS for
+every family. **Verdict: the stop-loss engine did not flip any 1d family positive** either - see
+`docs/results/stop-loss-edge-check.md` for full per-symbol detail and the honest noise-vs-edge discussion.

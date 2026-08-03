@@ -60,3 +60,21 @@ Passing the activity floor above only means enough trades fired to be measurable
 | Stochastic Trend Pullback [short] | 5 | -0.59% | +0.00% | 0/5 |
 
 **Verdict at 4h: 0/80 backtests passed the observation gate.** Every family/side tested at this timeframe shows a negative or flat mean CAGR. See `timeframe-census.md` §3 for the full cross-timeframe synthesis (0/499 across all 7 timeframes).
+
+## Stop-loss exit sweep (v2, `technical_expert_edge_recovery.md` §3)
+
+The rows above are the `stop_loss_mode=None` control (no stop-loss, unmanaged full-notional exposure held until
+the model's own signal reverses) - kept exactly as measured, byte-identical to the pre-stop-loss baseline. This
+section adds the opt-in causal stop-loss engine, swept across all 4 exit combinations (`fixed_pct`/`atr_multiple`
+x static/trailing) at 3 magnitudes each (3%/5%/8% fixed; 1.5x/2.5x/4.0x ATR) for all 16 alive candidates
+(MFI Trend Pullback both sides confirmed still dead, 0/5 activity floor, before spending sweep budget on them) -
+960 additional single-symbol backtests. Full grid: `docs/results/stop-loss-edge-check.md`.
+
+**Result: 0/960 stop-loss cells passed the observation gate at 4h** - every one of the 192 (family/side x
+combo x magnitude) settings stayed at 0/5 gate PASS, identical in verdict to the no-stop control. Trailing
+variants do narrow the point-CAGR-vs-LCB90 gap for several trend-confirmation families (e.g. EMA Alignment
+short: mean CAGR swings from -4.55% baseline to as high as +5.14% under `fixed_pct`/trailing @3%, and
+ADX/DI short's LCB90 improves from -2.67% baseline to +0.00% under `atr_multiple`/trailing @1.5x), consistent
+with the spec's volatility-drag diagnosis, but no cell closes the remaining gap to the observation gate's
+hurdle. **Verdict: the stop-loss engine did not flip any 4h family positive** - the bottleneck remains the lack
+of gross edge identified in the census (0/499), not the exit mechanism.
