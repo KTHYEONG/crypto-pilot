@@ -48,7 +48,7 @@ def add_portfolio_growth_commands(
     )
     growth.add_argument("--universe-size", type=int, default=20)
     growth.add_argument("--max-positions", type=int, default=5)
-    growth.add_argument("--rebalance-bars", type=int, default=1)
+    growth.add_argument("--rebalance-bars", type=int, default=3)
     growth.add_argument("--no-trade-band", type=float, default=0.0)
     growth.add_argument("--symbol-scope", choices=("dev", "holdout", "all"), default="dev")
     growth.add_argument("--start", default=None)
