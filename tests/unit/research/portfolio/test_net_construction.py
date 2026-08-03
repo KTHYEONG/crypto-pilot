@@ -244,3 +244,23 @@ class TestComputeNetReturnStream:
         ff_cols = pd.DataFrame({"B": [0.0] * 4}, index=idx)
         with pytest.raises(DataIntegrityError):
             compute_net_return_stream(tw, fr, NetConstructionSpec(), forward_funding=ff_cols)
+
+    # GPR-07-NON-HELD-NAN-NEVER-POISONS-GROSS: a symbol with a missing forward
+    # return that is not held must not propagate NaN into the held portfolio's
+    # gross (0 * NaN = NaN was poisoning early discovery windows with backfill
+    # symbols that had not yet listed).
+    def test_non_held_nan_forward_returns_do_not_poison_gross(self) -> None:
+        idx = _index(4)
+        tw = pd.DataFrame({"A": [1.0] * 4, "B": [0.0] * 4}, index=idx)
+        fr = pd.DataFrame({"A": [0.01] * 4, "B": [np.nan] * 4}, index=idx)
+        stream = compute_net_return_stream(tw, fr, NetConstructionSpec())
+        assert np.isfinite(stream.gross.to_numpy()).all()
+        assert np.allclose(stream.gross.to_numpy(), [0.01] * 4)
+        assert np.isfinite(stream.net.to_numpy()).all()
+
+    def test_held_nan_forward_return_still_fails_closed(self) -> None:
+        idx = _index(2)
+        tw = pd.DataFrame({"A": [1.0, 1.0]}, index=idx)
+        fr = pd.DataFrame({"A": [0.01, np.nan]}, index=idx)
+        stream = compute_net_return_stream(tw, fr, NetConstructionSpec())
+        assert np.isnan(stream.gross.iloc[1])

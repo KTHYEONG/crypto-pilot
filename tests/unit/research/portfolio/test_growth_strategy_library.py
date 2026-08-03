@@ -16,6 +16,7 @@ from src.research.portfolio.growth_strategy_library import (
 )
 
 _SYMBOLS = ("AAAUSDT", "BBBUSDT", "CCCUSDT", "DDDUSDT", "EEEUSDT")
+_MAX_POSITIONS = 5
 
 
 def _grid(months: int = 3, start: str = "2024-01-01") -> pd.DatetimeIndex:
@@ -98,7 +99,7 @@ class TestRegistry:
         px = _prices(grid)
         with pytest.raises(ValueError, match="unknown growth strategy identity"):
             build_growth_strategy_weights(
-                "not_a_strategy_v9", 42, _schedule(grid), px, _taker(grid), _zero(grid),
+                "not_a_strategy_v9", 42, _schedule(grid), px, _taker(grid), _zero(grid), _MAX_POSITIONS,
             )
 
     @pytest.mark.parametrize("retired", RETIRED_STRATEGY_IDS)
@@ -108,7 +109,7 @@ class TestRegistry:
         px = _prices(grid)
         with pytest.raises(ValueError, match="retired"):
             build_growth_strategy_weights(
-                retired, 42, _schedule(grid), px, _taker(grid), _zero(grid),
+                retired, 42, _schedule(grid), px, _taker(grid), _zero(grid), _MAX_POSITIONS,
             )
         with pytest.raises(ValueError, match="retired"):
             registry_definition(retired)
@@ -118,7 +119,7 @@ class TestRegistry:
         px = _prices(grid)
         with pytest.raises(ValueError, match="not a registered window"):
             build_growth_strategy_weights(
-                "taker_imbalance_v1", 37, _schedule(grid), px, _taker(grid), _zero(grid),
+                "taker_imbalance_v1", 37, _schedule(grid), px, _taker(grid), _zero(grid), _MAX_POSITIONS,
             )
 
 
@@ -134,7 +135,7 @@ class TestBuildWeights:
         px = _prices(grid)
         schedule = _schedule(grid)
         weights = build_growth_strategy_weights(
-            strategy_id, 42, schedule, px, _taker(grid), _zero(grid),
+            strategy_id, 42, schedule, px, _taker(grid), _zero(grid), _MAX_POSITIONS,
         )
         assert weights.index.equals(px.index)
         assert list(weights.columns) == list(px.columns)
@@ -149,7 +150,7 @@ class TestBuildWeights:
         grid = _grid()
         px = _prices(grid)
         weights = build_growth_strategy_weights(
-            "funding_contrarian_v1", 42, _schedule(grid), px, _taker(grid), _funding(grid),
+            "funding_contrarian_v1", 42, _schedule(grid), px, _taker(grid), _funding(grid), _MAX_POSITIONS,
         )
         assert np.allclose(weights.sum(axis=1).to_numpy(), 0.0)
         assert not np.allclose(weights.iloc[100:].to_numpy(), 0.0)
@@ -160,7 +161,7 @@ class TestBuildWeights:
         px["ZZZUSDT"] = 100.0
         schedule = _schedule(grid)
         weights = build_growth_strategy_weights(
-            "donchian_channel_position_v1", 42, schedule, px, _taker(grid), _zero(grid),
+            "donchian_channel_position_v1", 42, schedule, px, _taker(grid), _zero(grid), _MAX_POSITIONS,
         )
         assert np.allclose(weights["ZZZUSDT"].to_numpy(), 0.0)
 
@@ -171,14 +172,14 @@ class TestBuildWeights:
         schedule = _schedule(grid)
         funding = _funding(grid)
         baseline = build_growth_strategy_weights(
-            "funding_contrarian_v1", 42, schedule, px, _taker(grid), funding,
+            "funding_contrarian_v1", 42, schedule, px, _taker(grid), funding, _MAX_POSITIONS,
         )
         mutated = funding.copy()
         t = 100
         mutated.iloc[t + 5, :] += 0.01
         mutated.iloc[t, :] += 0.05
         changed = build_growth_strategy_weights(
-            "funding_contrarian_v1", 42, schedule, px, _taker(grid), mutated,
+            "funding_contrarian_v1", 42, schedule, px, _taker(grid), mutated, _MAX_POSITIONS,
         )
         assert np.allclose(baseline.iloc[t].to_numpy(), changed.iloc[t].to_numpy())
 
@@ -186,9 +187,37 @@ class TestBuildWeights:
         grid = _grid()
         px = _prices(grid)
         weights = build_growth_strategy_weights(
-            "vol_adjusted_trend_v1", 42, _schedule(grid), px, _taker(grid), _zero(grid),
+            "vol_adjusted_trend_v1", 42, _schedule(grid), px, _taker(grid), _zero(grid), _MAX_POSITIONS,
         )
         assert np.allclose(weights.iloc[:41].to_numpy(), 0.0)
+
+    # GPR-01-POSITION-CAP
+    @pytest.mark.parametrize("max_positions", [2, 3, 4, 5])
+    def test_max_positions_bounds_active_symbols_on_every_bar(self, max_positions: int) -> None:
+        grid = _grid()
+        px = _prices(grid)
+        weights = build_growth_strategy_weights(
+            "taker_imbalance_v1", 42, _schedule(grid), px, _taker(grid), _zero(grid), max_positions,
+        )
+        active = np.count_nonzero(weights.to_numpy() != 0.0, axis=1)
+        assert active.max() <= max_positions
+        # gross long and short notional match exactly (dollar neutral)
+        arr = weights.to_numpy()
+        assert np.allclose(np.clip(arr, 0.0, None).sum(axis=1), np.clip(-arr, 0.0, None).sum(axis=1))
+        # a fully warmed bar is active (the book fills) and never exceeds the cap
+        assert active[100:].max() > 0
+        assert np.allclose(weights.sum(axis=1).to_numpy(), 0.0)
+
+    # GPR-01-POSITION-CAP
+    @pytest.mark.parametrize("max_positions", [0, 1, -3])
+    def test_max_positions_below_two_returns_all_zero(self, max_positions: int) -> None:
+        grid = _grid()
+        px = _prices(grid)
+        weights = build_growth_strategy_weights(
+            "taker_imbalance_v1", 42, _schedule(grid), px, _taker(grid), _zero(grid), max_positions,
+        )
+        assert np.allclose(weights.to_numpy(), 0.0)
+        assert np.allclose(weights.sum(axis=1).to_numpy(), 0.0)
 
 
 class TestFundingIntegrity:
@@ -201,13 +230,13 @@ class TestFundingIntegrity:
         funding = _funding(grid)
         funding = funding.drop(columns=["AAAUSDT"])
         funding_screen = screen_growth_strategy_weights(
-            "funding_contrarian_v1", 42, schedule, px, taker, funding,
+            "funding_contrarian_v1", 42, schedule, px, taker, funding, _MAX_POSITIONS,
         )
         assert funding_screen.status == "DATA_INVALID"
         assert "missing funding" in funding_screen.reason
         for strategy_id in ("taker_imbalance_v1", "vol_adjusted_trend_v1", "donchian_channel_position_v1"):
             screen = screen_growth_strategy_weights(
-                strategy_id, 42, schedule, px, taker, funding,
+                strategy_id, 42, schedule, px, taker, funding, _MAX_POSITIONS,
             )
             assert screen.status == "SCREENED"
 
@@ -221,10 +250,10 @@ class TestFundingIntegrity:
         funding.loc[grid[50], "BBBUSDT"] = np.inf
         with pytest.raises(DataIntegrityError, match="finite"):
             build_growth_strategy_weights(
-                "funding_contrarian_v1", 42, schedule, px, _taker(grid), funding,
+                "funding_contrarian_v1", 42, schedule, px, _taker(grid), funding, _MAX_POSITIONS,
             )
         screen = screen_growth_strategy_weights(
-            "funding_contrarian_v1", 42, schedule, px, _taker(grid), funding,
+            "funding_contrarian_v1", 42, schedule, px, _taker(grid), funding, _MAX_POSITIONS,
         )
         assert screen.status == "DATA_INVALID"
 
@@ -233,7 +262,7 @@ class TestFundingIntegrity:
         px = _prices(grid)
         empty = pd.DataFrame(index=grid)
         screen = screen_growth_strategy_weights(
-            "funding_contrarian_v1", 42, _schedule(grid), px, _taker(grid), empty,
+            "funding_contrarian_v1", 42, _schedule(grid), px, _taker(grid), empty, _MAX_POSITIONS,
         )
         assert screen.status == "DATA_INVALID"
 
@@ -244,7 +273,7 @@ class TestFundingIntegrity:
         funding.index = funding.index.tz_localize(None)
         with pytest.raises(DataIntegrityError, match="tz-aware"):
             build_growth_strategy_weights(
-                "funding_contrarian_v1", 42, _schedule(grid), px, _taker(grid), funding,
+                "funding_contrarian_v1", 42, _schedule(grid), px, _taker(grid), funding, _MAX_POSITIONS,
             )
 
     def test_non_monotonic_funding_raises_data_integrity_error(self) -> None:
@@ -254,7 +283,7 @@ class TestFundingIntegrity:
         funding = funding.iloc[::-1]
         with pytest.raises(DataIntegrityError, match="monotonic"):
             build_growth_strategy_weights(
-                "funding_contrarian_v1", 42, _schedule(grid), px, _taker(grid), funding,
+                "funding_contrarian_v1", 42, _schedule(grid), px, _taker(grid), funding, _MAX_POSITIONS,
             )
 
     def test_unalignable_funding_raises_data_integrity_error(self) -> None:
@@ -265,7 +294,7 @@ class TestFundingIntegrity:
         funding = _funding(grid).loc[grid[50]:]
         with pytest.raises(DataIntegrityError, match="alignable"):
             build_growth_strategy_weights(
-                "funding_contrarian_v1", 42, _schedule(grid), px, _taker(grid), funding,
+                "funding_contrarian_v1", 42, _schedule(grid), px, _taker(grid), funding, _MAX_POSITIONS,
             )
 
     def test_price_only_candidates_ignore_garbage_funding(self) -> None:
@@ -274,7 +303,7 @@ class TestFundingIntegrity:
         funding = _funding(grid)
         funding.loc[grid[50], "AAAUSDT"] = np.nan
         screen = screen_growth_strategy_weights(
-            "donchian_channel_position_v1", 42, _schedule(grid), px, _taker(grid), funding,
+            "donchian_channel_position_v1", 42, _schedule(grid), px, _taker(grid), funding, _MAX_POSITIONS,
         )
         assert screen.status == "SCREENED"
 
@@ -438,7 +467,7 @@ class TestAlignFundingBars:
         px = _prices(grid)
         funding = pd.DataFrame({"AAAUSDT": _late_funding(grid), "BBBUSDT": _late_funding(grid)})
         screen = screen_growth_strategy_weights(
-            "funding_contrarian_v1", 42, schedule, px, _taker(grid), funding,
+            "funding_contrarian_v1", 42, schedule, px, _taker(grid), funding, _MAX_POSITIONS,
         )
         assert screen.status == "SCREENED"
         assert screen.reason is None
@@ -449,7 +478,7 @@ class TestScreenResult:
         grid = _grid()
         px = _prices(grid)
         screen = screen_growth_strategy_weights(
-            "taker_imbalance_v1", 42, _schedule(grid), px, _taker(grid), _zero(grid),
+            "taker_imbalance_v1", 42, _schedule(grid), px, _taker(grid), _zero(grid), _MAX_POSITIONS,
         )
         assert screen.strategy_id == "taker_imbalance_v1"
         assert screen.parameter == 42
@@ -462,7 +491,7 @@ class TestScreenResult:
         px = _prices(grid)
         empty = pd.DataFrame(index=grid)
         screen = screen_growth_strategy_weights(
-            "funding_contrarian_v1", 42, _schedule(grid), px, _taker(grid), empty,
+            "funding_contrarian_v1", 42, _schedule(grid), px, _taker(grid), empty, _MAX_POSITIONS,
         )
         assert screen.status == "DATA_INVALID"
         assert screen.weights.index.equals(px.index)
