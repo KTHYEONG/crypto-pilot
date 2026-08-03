@@ -79,6 +79,10 @@
       "tests/unit/application/test_library_evaluation.py"
     ]
   },
+  "src/application/research/expert/exit_sweep.py": {
+    "testing": "tests/unit/application/test_exit_sweep.py",
+    "architecture": "docs/results/stop-loss-edge-check.md"
+  },
   "src/application/research/expert/rebalance_ledger.py": {
     "testing": "tests/unit/application/test_rolling_library_admission.py"
   },

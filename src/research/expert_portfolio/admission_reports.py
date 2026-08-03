@@ -20,6 +20,7 @@ from src.research.evaluation.reliability import (
 from src.research.expert_portfolio.admission_types import (
     AdmissionProposal,
     CandidateAdmissionResult,
+    ExitSweepSetting,
     LibraryAdmissionConfig,
 )
 from src.research.expert_portfolio.models import ContextualRouterSpec, ExpertDefinition
@@ -263,8 +264,98 @@ class LibraryAdmissionBacktestReport:
         }
 
 
+@dataclass(frozen=True, slots=True)
+class ExitSweepCellResult:
+    """One (candidate, symbol, timeframe, exit-setting) sweep cell result."""
+
+    candidate: str
+    symbol: str
+    timeframe: str
+    setting: ExitSweepSetting
+    cagr: float
+    lcb90_cagr: float
+    gate_pass: bool
+    trade_count: int
+
+
+@dataclass(frozen=True, slots=True)
+class ExitSweepFamilySummary:
+    """Pre-aggregated per-(candidate, timeframe, setting) sweep summary."""
+
+    candidate: str
+    timeframe: str
+    setting: ExitSweepSetting
+    symbol_count: int
+    mean_cagr: float
+    median_lcb90_cagr: float
+    gate_pass_count: int
+
+
+@dataclass(frozen=True, slots=True)
+class TechnicalExpertExitSweepReport:
+    """Full exit-mechanism sweep result: raw cells plus aggregated summaries.
+
+    ``execution_workers`` and ``wall_seconds`` are execution telemetry only and
+    never participate in any gate or admission decision.
+    """
+
+    cells: tuple[ExitSweepCellResult, ...]
+    family_summary: tuple[ExitSweepFamilySummary, ...]
+    execution_workers: int
+    wall_seconds: float
+
+    def to_report_dict(self) -> dict[str, object]:
+        """Return deterministic JSON-safe CLI output.
+
+        Each cell's ``setting`` is flattened to its scalar sub-keys (mirroring
+        the asdict-based flattening style used elsewhere in this file) rather
+        than nested as an object.
+        """
+
+        def _setting_dict(setting: ExitSweepSetting) -> dict[str, object]:
+            return {
+                "stop_loss_mode": setting.stop_loss_mode,
+                "stop_loss_value": setting.stop_loss_value,
+                "trailing_stop": setting.trailing_stop,
+                "setting_label": setting.label(),
+            }
+
+        return {
+            "cells": [
+                {
+                    "candidate": cell.candidate,
+                    "symbol": cell.symbol,
+                    "timeframe": cell.timeframe,
+                    "cagr": cell.cagr,
+                    "lcb90_cagr": cell.lcb90_cagr,
+                    "gate_pass": cell.gate_pass,
+                    "trade_count": cell.trade_count,
+                    **_setting_dict(cell.setting),
+                }
+                for cell in self.cells
+            ],
+            "family_summary": [
+                {
+                    "candidate": summary.candidate,
+                    "timeframe": summary.timeframe,
+                    "symbol_count": summary.symbol_count,
+                    "mean_cagr": summary.mean_cagr,
+                    "median_lcb90_cagr": summary.median_lcb90_cagr,
+                    "gate_pass_count": summary.gate_pass_count,
+                    **_setting_dict(summary.setting),
+                }
+                for summary in self.family_summary
+            ],
+            "execution_workers": self.execution_workers,
+            "wall_seconds": self.wall_seconds,
+        }
+
+
 __all__ = [
+    "ExitSweepCellResult",
+    "ExitSweepFamilySummary",
     "LibraryAdmissionBacktestReport",
     "LibraryAdmissionPipelineReport",
     "LibraryAdmissionReport",
+    "TechnicalExpertExitSweepReport",
 ]
