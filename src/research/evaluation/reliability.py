@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import dataclasses
+import math
 from dataclasses import dataclass, fields
 from typing import Literal
 
@@ -28,6 +29,8 @@ class ReliabilityGateConfig:
     t_stat_floor: float = 2.0
     lcb_confidence: float = 0.90
     max_period_contribution: float = 0.40
+    fold_false_rejection_rate: float = 0.10
+    fold_null_draws: int = 20000
 
     def __post_init__(self) -> None:
         if self.hurdle_rate < 0:
@@ -48,6 +51,13 @@ class ReliabilityGateConfig:
             raise ValueError(
                 f"max_period_contribution must be in (0.0, 1.0], got {self.max_period_contribution}"
             )
+        if not 0.0 < self.fold_false_rejection_rate < 0.5:
+            raise ValueError(
+                "fold_false_rejection_rate must be in (0.0, 0.5), "
+                f"got {self.fold_false_rejection_rate}"
+            )
+        if self.fold_null_draws < 1000:
+            raise ValueError(f"fold_null_draws must be >= 1000, got {self.fold_null_draws}")
 
 
 @dataclass(frozen=True, slots=True)
@@ -70,6 +80,9 @@ class FoldDistributionResult:
     median_fold_calmar: float
     max_period_contribution: float
     gate_pass: bool
+    fold_concentration: float = 0.0
+    fold_concentration_threshold: float = 0.0
+    fold_reference_sharpe: float = 0.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -324,6 +337,45 @@ def compute_portfolio_reliability_gate(
     return compute_equity_reliability_gate(equity, closed_trade_count, config)
 
 
+def derive_fold_concentration_threshold(
+    n_folds: int,
+    reference_sharpe: float,
+    *,
+    false_rejection_rate: float = 0.10,
+    draws: int = 20000,
+    seed: int = 0,
+) -> float:
+    """Derive the fold-concentration gate threshold from its own null distribution.
+
+    Under the null the ``n_folds`` per-fold log-return contributions are i.i.d.
+    ``Normal(reference_sharpe, 1.0)`` in per-fold Sharpe units, so the bounded
+    statistic ``max|v| / sum|v|`` depends only on ``(n_folds, reference_sharpe)``
+    and no bar-level simulation is required. ``reference_sharpe`` is the gate's
+    own minimum acceptable Sharpe (``t_stat_floor / sqrt(years)``), so the
+    returned threshold is the level a strategy that just barely deserves to pass
+    would exceed only ``false_rejection_rate`` of the time.
+
+    Deterministic for a fixed seed: two calls with identical arguments return
+    bit-identical values. The returned threshold is clamped from below to the
+    statistic's uniform-allocation floor ``1 / n_folds``.
+    """
+    if n_folds < 2:
+        raise ValueError(f"n_folds must be >= 2, got {n_folds}")
+    if not 0.0 < false_rejection_rate < 0.5:
+        raise ValueError(
+            f"false_rejection_rate must be in (0.0, 0.5), got {false_rejection_rate}"
+        )
+    if draws < 1000:
+        raise ValueError(f"draws must be >= 1000, got {draws}")
+
+    rng = np.random.default_rng(seed)
+    fold_values = rng.normal(reference_sharpe, 1.0, size=(draws, n_folds))
+    abs_values = np.abs(fold_values)
+    concentration = abs_values.max(axis=1) / abs_values.sum(axis=1)
+    threshold = float(np.quantile(concentration, 1.0 - false_rejection_rate))
+    return max(threshold, 1.0 / n_folds)
+
+
 def _year_log_return_contributions(equity: pd.Series) -> dict[int, float]:
     """Annual marked log-return contributions.
 
@@ -423,11 +475,27 @@ def compute_fold_distribution(
         )
 
     year_log_returns = _year_log_return_contributions(equity)
+    n_folds_used = len(year_log_returns)
     net_total = abs(sum(year_log_returns.values()))
+    gross_total = sum(abs(v) for v in year_log_returns.values())
     max_period_contribution = (
         max(abs(v) for v in year_log_returns.values()) / net_total if net_total > 0 else 0.0
     )
-    gate_pass = max_period_contribution <= config.max_period_contribution
+    fold_concentration = (
+        max(abs(v) for v in year_log_returns.values()) / gross_total if gross_total > 0 else 0.0
+    )
+    reference_sharpe = config.t_stat_floor / math.sqrt(equity_span_years(equity))
+    # A single contribution bucket is trivially concentrated (statistic == 1.0);
+    # derive the null at n=2 (the most lenient n>=2 threshold) so it always fails.
+    threshold_n_folds = max(n_folds_used, 2)
+    fold_concentration_threshold = derive_fold_concentration_threshold(
+        threshold_n_folds,
+        reference_sharpe,
+        false_rejection_rate=config.fold_false_rejection_rate,
+        draws=config.fold_null_draws,
+        seed=config.seed,
+    )
+    gate_pass = fold_concentration <= fold_concentration_threshold
 
     cagrs: list[float] = []
     calmars: list[float] = []
@@ -447,11 +515,16 @@ def compute_fold_distribution(
         n_folds=n_folds, median_fold_cagr=median_fold_cagr,
         worst_fold_cagr=worst_fold_cagr, median_fold_calmar=median_fold_calmar,
         max_period_contribution=max_period_contribution, gate_pass=gate_pass,
+        fold_concentration=fold_concentration,
+        fold_concentration_threshold=fold_concentration_threshold,
+        fold_reference_sharpe=reference_sharpe,
     )
     _logger.info(
-        "n_folds=%d max_period_contribution=%.4f gate_pass=%s median_fold_cagr=%.4f "
+        "n_folds=%d max_period_contribution=%.4f fold_concentration=%.4f "
+        "fold_concentration_threshold=%.4f gate_pass=%s median_fold_cagr=%.4f "
         "worst_fold_cagr=%.4f median_fold_calmar=%.4f",
-        n_folds, max_period_contribution, gate_pass, median_fold_cagr,
+        n_folds, max_period_contribution, fold_concentration,
+        fold_concentration_threshold, gate_pass, median_fold_cagr,
         worst_fold_cagr, median_fold_calmar, extra={"tag": "EVAL"},
     )
     return result_out
@@ -503,11 +576,27 @@ def compute_equal_duration_fold_distribution(
     for fold, log_ret in zip(fold_of_log_return, log_returns, strict=True):
         if fold is not None and fold == fold:
             contribution_by_fold[int(fold)] = contribution_by_fold.get(int(fold), 0.0) + float(log_ret)
+    n_folds_used = len(contribution_by_fold)
     net_total = abs(sum(contribution_by_fold.values()))
+    gross_total = sum(abs(v) for v in contribution_by_fold.values())
     max_period_contribution = (
         max(abs(v) for v in contribution_by_fold.values()) / net_total if net_total > 0 else 0.0
     )
-    gate_pass = max_period_contribution <= config.max_period_contribution
+    fold_concentration = (
+        max(abs(v) for v in contribution_by_fold.values()) / gross_total if gross_total > 0 else 0.0
+    )
+    reference_sharpe = config.t_stat_floor / math.sqrt(equity_span_years(equity))
+    # A single contribution bucket is trivially concentrated (statistic == 1.0);
+    # derive the null at n=2 (the most lenient n>=2 threshold) so it always fails.
+    threshold_n_folds = max(n_folds_used, 2)
+    fold_concentration_threshold = derive_fold_concentration_threshold(
+        threshold_n_folds,
+        reference_sharpe,
+        false_rejection_rate=config.fold_false_rejection_rate,
+        draws=config.fold_null_draws,
+        seed=config.seed,
+    )
+    gate_pass = fold_concentration <= fold_concentration_threshold
 
     cagrs: list[float] = []
     calmars: list[float] = []
@@ -526,11 +615,16 @@ def compute_equal_duration_fold_distribution(
         median_fold_calmar=float(np.median(calmars)) if calmars else 0.0,
         max_period_contribution=max_period_contribution,
         gate_pass=gate_pass,
+        fold_concentration=fold_concentration,
+        fold_concentration_threshold=fold_concentration_threshold,
+        fold_reference_sharpe=reference_sharpe,
     )
     _logger.info(
-        "stitched_folds n_folds=%d max_period_contribution=%.4f gate_pass=%s "
-        "median_fold_cagr=%.4f worst_fold_cagr=%.4f",
-        result.n_folds, result.max_period_contribution, result.gate_pass,
+        "stitched_folds n_folds=%d max_period_contribution=%.4f fold_concentration=%.4f "
+        "fold_concentration_threshold=%.4f gate_pass=%s median_fold_cagr=%.4f "
+        "worst_fold_cagr=%.4f",
+        result.n_folds, result.max_period_contribution, result.fold_concentration,
+        result.fold_concentration_threshold, result.gate_pass,
         result.median_fold_cagr, result.worst_fold_cagr, extra={"tag": "EVAL"},
     )
     return result
@@ -566,6 +660,8 @@ def _check_contract() -> None:
     assert (config.hurdle_rate, config.block_size, config.n_bootstrap, config.seed,
             config.min_trades, config.mdd_floor, config.t_stat_floor,
             config.max_period_contribution) == (0.15, None, 3000, 0, 30, -0.25, 2.0, 0.40)
+    assert config.fold_false_rejection_rate == 0.10
+    assert config.fold_null_draws == 20000
     assert {f.name for f in fields(ReliabilityGateResult)} == {
         "lcb90_cagr", "lcb95_cagr", "p_negative", "point_cagr",
         "t_stat", "trade_count", "block_size_used", "verdict",
@@ -573,7 +669,10 @@ def _check_contract() -> None:
     assert {f.name for f in fields(FoldDistributionResult)} == {
         "n_folds", "median_fold_cagr", "worst_fold_cagr",
         "median_fold_calmar", "max_period_contribution", "gate_pass",
+        "fold_concentration", "fold_concentration_threshold", "fold_reference_sharpe",
     }
+    assert derive_fold_concentration_threshold.__name__ == "derive_fold_concentration_threshold"
+    assert derive_fold_concentration_threshold(5, 0.987) == derive_fold_concentration_threshold(5, 0.987)
     assert compute_equity_reliability_gate.__name__ == "compute_equity_reliability_gate"
     assert equity_span_years.__name__ == "equity_span_years"
     assert derive_cost_multiple_hurdle_rate(0.02, 2.0, 2.0) == 0.02
