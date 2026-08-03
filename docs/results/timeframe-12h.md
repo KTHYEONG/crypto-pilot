@@ -57,3 +57,22 @@ Passing the activity floor above only means enough trades fired to be measurable
 | RSI Trend Pullback [short] | 5 | -1.52% | -6.23% | 0/5 |
 
 **Verdict at 12h: 0/70 backtests passed the observation gate.** Every family/side tested at this timeframe shows a negative or flat mean CAGR. See `timeframe-census.md` §3 for the full cross-timeframe synthesis (0/499 across all 7 timeframes).
+
+## Stop-loss exit sweep (`research run expert exit-sweep`, v3 fast batched tool)
+
+The rows above are the `stop_loss_mode=None` control (no stop-loss) - kept exactly as measured. This section adds
+the opt-in causal stop-loss engine, swept across all 4 exit combinations at 3 magnitudes each, for all 14 alive
+candidates at 12h (all full-N; BB Squeeze Breakout both sides and Stochastic Trend Pullback both sides excluded,
+confirmed still dead, 0/5 activity floor, at 12h) - 910 cells (candidate x setting x symbol, including the
+baseline row).
+
+**Result: 0/910 individual cells passed the gate.** Aggregated per (candidate, setting), **0 of the 168
+non-baseline settings show any gate PASS.** One isolated exception on the LCB90 metric only: Ichimoku Cloud
+short's `fixed_pct`/trailing @3% setting shows mean CAGR +1.20% and median LCB90 CAGR +0.15% (still 0/5 gate
+PASS - no individual symbol cleared the gate's own hurdle) - the same single tightest-fixed-percent-trailing
+setting that produced the isolated 1d noise passes in `stop-loss-edge-check.md`, consistent with that being
+whipsaw-driven sampling noise rather than a reproducible effect (no other magnitude, no static anchor, and no
+other family at 12h reproduces it). Every other family/side stays at 0/N gate PASS and non-positive median LCB90
+across every magnitude and anchor tested, matching the no-stop baseline's 0/70 finding. **Verdict: the stop-loss
+engine did not flip any 12h family positive** on the gate that matters (reproducible gate PASS). Full methodology
+and combined cross-timeframe verdict: `docs/results/stop-loss-edge-check.md`.
