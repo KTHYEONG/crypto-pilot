@@ -261,7 +261,7 @@ def record_sleeve_blend_run(
     symbols: tuple[str, ...],
     candidate_kind: str,
     mdd_budget_fraction: float | None,
-    leverage: float,
+    leverage: float | None,
     costs: CostModel,
     result: BacktestResult,
     metrics: Metrics,
@@ -273,9 +273,21 @@ def record_sleeve_blend_run(
     stress_gate: ReliabilityGateResult,
     holdout_gate: ReliabilityGateResult | None = None,
     promotion: PromotionResult | None = None,
+    universe_id: str | None = None,
+    candidate_return_sources: list[str] | None = None,
+    selection_window: str | None = None,
+    qualification_window: str | None = None,
+    leverage_schedule_hash: str | None = None,
+    rejected_candidate_reasons: dict[str, str] | None = None,
     log_path: Path = RUNS_LOG_PATH,
 ) -> dict[str, object]:
-    """Append one sleeve-blend run as a ledger evaluation event."""
+    """Append one sleeve-blend run as a ledger evaluation event.
+
+    For the causal tournament candidate the record binds the fixed universe id,
+    the selected return-source identities, the discovery/qualification windows,
+    the base leverage-schedule hash, and every rejected candidate reason, so the
+    promotion verdict is fully auditable and never silently refitted.
+    """
     git_sha, git_dirty = _git_head()
     event = build_evaluation_event(
         workflow="sleeve_blend",
@@ -295,6 +307,12 @@ def record_sleeve_blend_run(
         symbols=list(symbols),
         mdd_budget_fraction=mdd_budget_fraction,
         leverage=leverage,
+        universe_id=universe_id,
+        candidate_return_sources=candidate_return_sources or [],
+        selection_window=selection_window,
+        qualification_window=qualification_window,
+        leverage_schedule_hash=leverage_schedule_hash,
+        rejected_candidate_reasons=rejected_candidate_reasons or {},
         start=start,
         end=end,
         initial_equity=initial_equity,
