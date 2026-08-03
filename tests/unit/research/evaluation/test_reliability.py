@@ -45,6 +45,7 @@ class TestReliabilityGateConfig:
         assert {f.name for f in dataclasses.fields(FoldDistributionResult)} == {
             "n_folds", "median_fold_cagr", "worst_fold_cagr",
             "median_fold_calmar", "max_period_contribution", "gate_pass",
+            "fold_concentration", "fold_concentration_threshold", "fold_reference_sharpe",
         }
 
     def test_config_validation(self) -> None:
