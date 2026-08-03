@@ -166,20 +166,30 @@ class OIDeleveragingEvaluationRequest:
 
 @dataclass(frozen=True, slots=True)
 class SleeveBlendEvaluationRequest:
-    """Immutable request for a fixed-sleeve or directional-sleeve evaluation.
+    """Immutable request for a fixed-sleeve, directional-sleeve, or tournament evaluation.
 
     ``candidate_kind`` selects the sealed candidate: ``"fixed_long_only_v1"`` is
-    the existing MDD-budget equal-weight long-only blend, while
+    the existing MDD-budget equal-weight long-only blend and
     ``"funding_signed_directional_v1"`` is the funding-gated long/short sleeve
-    evaluated unlevered at ``leverage=1.0`` with causal inverse-vol risk
-    weights.
+    (both retained strictly as read-only controls), while
+    ``"core5_causal_tournament_v1`` is the pre-registered five-source strategy
+    tournament on the fixed ``universe_id`` with a causal leverage schedule.
+    For the tournament kind, ``discovery_end`` is the chronological boundary of
+    the discovery window and ``qualification_interval`` the untouched window
+    that follows it; ``symbols`` is then ignored in favor of the universe's
+    exact declared membership.
     """
 
     symbols: tuple[str, ...] = ("BTCUSDT", "ETHUSDT", "AVAXUSDT", "BNBUSDT", "DOGEUSDT")
+    universe_id: str = "core5_v1"
     mdd_budget_fraction: float = 0.85
-    candidate_kind: Literal["fixed_long_only_v1", "funding_signed_directional_v1"] = (
-        "fixed_long_only_v1"
-    )
+    candidate_kind: Literal[
+        "fixed_long_only_v1",
+        "funding_signed_directional_v1",
+        "core5_causal_tournament_v1",
+    ] = "fixed_long_only_v1"
+    discovery_end: str | pd.Timestamp | None = None
+    qualification_interval: str = "365D"
     start: str | None = None
     end: str | pd.Timestamp | None = None
     initial_equity: float = 10_000.0
@@ -190,12 +200,27 @@ class SleeveBlendEvaluationRequest:
         if self.candidate_kind not in (
             "fixed_long_only_v1",
             "funding_signed_directional_v1",
+            "core5_causal_tournament_v1",
         ):
             raise ValueError(
                 f"candidate_kind must be one of "
-                f"'fixed_long_only_v1'/'funding_signed_directional_v1', "
-                f"got {self.candidate_kind}"
+                f"'fixed_long_only_v1'/'funding_signed_directional_v1'/"
+                f"'core5_causal_tournament_v1', got {self.candidate_kind}"
             )
+        from src.research.sleeve_blend.contracts import BlendUniverseSpec
+
+        BlendUniverseSpec(universe_id=self.universe_id)
+        if self.candidate_kind == "core5_causal_tournament_v1":
+            if self.discovery_end is None:
+                raise ValueError(
+                    "discovery_end is required for candidate_kind "
+                    "'core5_causal_tournament_v1'"
+                )
+            end_ts = pd.Timestamp(self.discovery_end)
+            if end_ts.tzinfo is None:
+                raise ValueError("discovery_end must be tz-aware UTC")
+            if not self.qualification_interval:
+                raise ValueError("qualification_interval must not be empty")
 
 
 @dataclass(frozen=True, slots=True)
