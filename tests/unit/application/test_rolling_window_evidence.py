@@ -84,7 +84,9 @@ def _fake_load_technical_market_data(symbol, start, end, *, timeframe="4h"):
     return frame, funding
 
 
-def _fake_technical_backtest(frame, candidate, costs, funding, *, signal_delay_bars):
+def _fake_technical_backtest(frame, candidate, costs, funding, *, signal_delay_bars,
+                             stop_loss_mode=None, stop_loss_value=None, atr_period=14,
+                             trailing_stop=False):
     index = frame.index
     n = len(index)
     # Deterministic per-source returns keyed by the bar timestamp, so the cached
@@ -112,10 +114,14 @@ def _fake_context(router, index, start, end, **kwargs) -> pd.Series:
 def _patch_evidence_io(monkeypatch: pytest.MonkeyPatch) -> dict[str, int]:
     calls: dict[str, int] = {"n": 0}
 
-    def _counting_backtest(frame, candidate, costs, funding, *, signal_delay_bars):
+    def _counting_backtest(frame, candidate, costs, funding, *, signal_delay_bars,
+                           stop_loss_mode=None, stop_loss_value=None, atr_period=14,
+                           trailing_stop=False):
         calls["n"] += 1
         return _fake_technical_backtest(
             frame, candidate, costs, funding, signal_delay_bars=signal_delay_bars,
+            stop_loss_mode=stop_loss_mode, stop_loss_value=stop_loss_value,
+            atr_period=atr_period, trailing_stop=trailing_stop,
         )
 
     monkeypatch.setattr(abt, "_load_technical_market_data", _fake_load_technical_market_data)
@@ -250,7 +256,9 @@ class TestWindowScenarioEvidence:
         config = _config(request.symbols)
         window = _window(config)
 
-        def _broken(frame, candidate, costs, funding, *, signal_delay_bars):
+        def _broken(frame, candidate, costs, funding, *, signal_delay_bars,
+                    stop_loss_mode=None, stop_loss_value=None, atr_period=14,
+                    trailing_stop=False):
             raise RuntimeError("market data unavailable")
 
         monkeypatch.setattr(abt, "run_technical_expert_backtest", _broken)

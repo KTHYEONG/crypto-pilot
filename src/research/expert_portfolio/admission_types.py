@@ -10,6 +10,7 @@ from __future__ import annotations
 import dataclasses
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
+from typing import Literal
 
 import pandas as pd
 
@@ -203,6 +204,10 @@ class TechnicalLibraryAdmissionBacktestRequest:
     max_workers: int | None = None
     log_run: bool = False
     timeframe: str = "4h"
+    stop_loss_mode: Literal["fixed_pct", "atr_multiple"] | None = None
+    stop_loss_value: float | None = None
+    atr_period: int = 14
+    trailing_stop: bool = False
 
     def __post_init__(self) -> None:
         if not self.expert_ids:
@@ -216,6 +221,19 @@ class TechnicalLibraryAdmissionBacktestRequest:
         if self.max_workers is not None and self.max_workers < 1:
             raise ValueError(f"max_workers must be >= 1, got {self.max_workers}")
         validate_timeframe(self.timeframe)
+        if self.stop_loss_mode is not None:
+            if self.stop_loss_value is None or self.stop_loss_value <= 0.0:
+                raise ValueError(
+                    f"stop_loss_value must be > 0.0 when stop_loss_mode is set, "
+                    f"got {self.stop_loss_value}"
+                )
+            if self.stop_loss_mode == "fixed_pct" and self.stop_loss_value >= 1.0:
+                raise ValueError(
+                    f"fixed_pct stop_loss_value must be < 1.0, got "
+                    f"{self.stop_loss_value}"
+                )
+        if self.atr_period < 1:
+            raise ValueError(f"atr_period must be >= 1, got {self.atr_period}")
         if self.end is not None and pd.Timestamp(self.end, tz="UTC") > HOLDOUT_CUTOFF:
             raise RuntimeError(
                 f"Holdout sealed: end {self.end} > {HOLDOUT_CUTOFF}. Proposal "

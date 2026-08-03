@@ -34,6 +34,10 @@ def _fake_evidence(
     signal_delay_bars: int,
     *,
     timeframe: str = "4h",
+    stop_loss_mode: str | None = None,
+    stop_loss_value: float | None = None,
+    atr_period: int = 14,
+    trailing_stop: bool = False,
 ) -> dict[str, app._SelectedEvidence]:
     index = pd.date_range("2024-01-01", periods=1000, freq="D", tz="UTC")
     values = np.full(len(index), 0.0002, dtype=float)
@@ -180,4 +184,40 @@ def test_proposal_backtest_rejects_non_positive_initial_equity() -> None:
             expert_ids=("technical_macd_histogram_regime_long_v1:BTCUSDT",),
             router=ContextualRouterSpec("BTCUSDT", 1, 1, 1),
             initial_equity=0.0,
+        )
+
+
+def test_proposal_backtest_stop_loss_defaults_off() -> None:
+    request = _request("technical_ema_alignment_long_v1:BTCUSDT")
+    assert request.stop_loss_mode is None
+    assert request.stop_loss_value is None
+    assert request.atr_period == 14
+    assert request.trailing_stop is False
+
+
+def test_proposal_backtest_rejects_stop_loss_mode_without_value() -> None:
+    with pytest.raises(ValueError, match="stop_loss_value"):
+        TechnicalLibraryAdmissionBacktestRequest(
+            expert_ids=("technical_macd_histogram_regime_long_v1:BTCUSDT",),
+            router=ContextualRouterSpec("BTCUSDT", 1, 1, 1),
+            stop_loss_mode="fixed_pct",
+        )
+
+
+def test_proposal_backtest_rejects_fixed_pct_at_or_above_one() -> None:
+    with pytest.raises(ValueError, match="stop_loss_value"):
+        TechnicalLibraryAdmissionBacktestRequest(
+            expert_ids=("technical_macd_histogram_regime_long_v1:BTCUSDT",),
+            router=ContextualRouterSpec("BTCUSDT", 1, 1, 1),
+            stop_loss_mode="fixed_pct",
+            stop_loss_value=1.0,
+        )
+
+
+def test_proposal_backtest_rejects_zero_atr_period() -> None:
+    with pytest.raises(ValueError, match="atr_period"):
+        TechnicalLibraryAdmissionBacktestRequest(
+            expert_ids=("technical_macd_histogram_regime_long_v1:BTCUSDT",),
+            router=ContextualRouterSpec("BTCUSDT", 1, 1, 1),
+            atr_period=0,
         )
