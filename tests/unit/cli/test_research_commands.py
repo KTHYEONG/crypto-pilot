@@ -421,3 +421,46 @@ def test_every_tiered_command_module_registers_a_handler() -> None:
         add_portfolio_blend_commands,
     ):
         assert callable(adder)
+
+
+def test_exit_sweep_cli_parses_and_dispatches(monkeypatch, capsys) -> None:
+    # TES-06-CLI-EXIT-SWEEP-WIRING: the exit-sweep leaf builds a
+    # TechnicalExpertExitSweepRequest from its flags (no router flags accepted)
+    # and streams the report's to_report_dict() as JSON to stdout.
+    from src.cli.commands.research import expert_library as expert_library_cli
+
+    captured: list[object] = []
+
+    class _Report:
+        def to_report_dict(self) -> dict[str, object]:
+            return {"status": "COMPLETE"}
+
+    def _fake_sweep(request) -> _Report:
+        captured.append(request)
+        return _Report()
+
+    monkeypatch.setattr(
+        expert_library_cli.exit_sweep_module,
+        "run_technical_expert_exit_sweep",
+        _fake_sweep,
+    )
+    args = build_root_parser().parse_args([
+        "research", "run", "expert", "exit-sweep",
+        "--candidate-source", "technical_ema_alignment_long_v1",
+        "--symbols", "BTCUSDT", "ETHUSDT",
+        "--timeframes", "4h", "1d",
+    ])
+    assert args.handler is expert_library_cli._run_exit_sweep
+    args.handler(args)
+
+    assert len(captured) == 1
+    request = captured[0]
+    assert request.candidate_sources == ("technical_ema_alignment_long_v1",)
+    assert request.symbols == ("BTCUSDT", "ETHUSDT")
+    assert request.timeframes == ("4h", "1d")
+    assert request.fixed_pct_values == (0.03, 0.05, 0.08)
+    assert request.atr_multiple_values == (1.5, 2.5, 4.0)
+    assert request.atr_period == 14
+    assert request.include_baseline is True
+    assert request.max_workers is None
+    assert json.loads(capsys.readouterr().out)["status"] == "COMPLETE"

@@ -242,6 +242,96 @@ class TechnicalLibraryAdmissionBacktestRequest:
 
 
 @dataclass(frozen=True, slots=True)
+class ExitSweepSetting:
+    """One frozen stop-loss exit configuration in a sweep grid.
+
+    Field names/types mirror ``run_technical_expert_backtest``'s own
+    parameters for direct pass-through. Frozen/slots makes instances hashable
+    so they work as aggregation keys; ``label()`` is a human-readable JSON
+    output helper and never participates in gate or admission logic.
+    """
+
+    stop_loss_mode: Literal["fixed_pct", "atr_multiple"] | None
+    stop_loss_value: float | None
+    trailing_stop: bool
+
+    def label(self) -> str:
+        if self.stop_loss_mode is None:
+            return "baseline_no_stop"
+        suffix = "trailing" if self.trailing_stop else "static"
+        return f"{self.stop_loss_mode}_{self.stop_loss_value}_{suffix}"
+
+
+@dataclass(frozen=True, slots=True)
+class TechnicalExpertExitSweepRequest:
+    """Immutable in-process grid sweep of stop-loss exit settings.
+
+    The sweep evaluates every (candidate, symbol, timeframe, setting) cell
+    without any portfolio, router, stress, or promotion machinery; the settings
+    grid is derived deterministically from the value tuples. The request never
+    constructs an ``ExpertPortfolioSpec`` or ``ContextualRouterSpec``.
+    """
+
+    candidate_sources: tuple[str, ...]
+    symbols: tuple[str, ...]
+    timeframes: tuple[str, ...]
+    fixed_pct_values: tuple[float, ...] = (0.03, 0.05, 0.08)
+    atr_multiple_values: tuple[float, ...] = (1.5, 2.5, 4.0)
+    atr_period: int = 14
+    include_baseline: bool = True
+    start: str | None = None
+    end: str | pd.Timestamp | None = None
+    max_workers: int | None = None
+
+    def __post_init__(self) -> None:
+        if not self.candidate_sources:
+            raise ValueError("candidate_sources must not be empty")
+        if not self.symbols:
+            raise ValueError("symbols must not be empty")
+        if not self.timeframes:
+            raise ValueError("timeframes must not be empty")
+        for timeframe in self.timeframes:
+            validate_timeframe(timeframe)
+        if self.atr_period < 1:
+            raise ValueError(f"atr_period must be >= 1, got {self.atr_period}")
+        for value in self.fixed_pct_values:
+            if value <= 0.0 or value >= 1.0:
+                raise ValueError(
+                    f"fixed_pct_values entries must be in (0.0, 1.0), got {value}"
+                )
+        for value in self.atr_multiple_values:
+            if value <= 0.0:
+                raise ValueError(
+                    f"atr_multiple_values entries must be > 0.0, got {value}"
+                )
+        if self.max_workers is not None and self.max_workers < 1:
+            raise ValueError(f"max_workers must be >= 1, got {self.max_workers}")
+        if self.end is not None and pd.Timestamp(self.end, tz="UTC") > HOLDOUT_CUTOFF:
+            raise RuntimeError(
+                f"Holdout sealed: end {self.end} > {HOLDOUT_CUTOFF}. The exit "
+                "sweep never unseals the holdout."
+            )
+
+    def settings(self) -> tuple[ExitSweepSetting, ...]:
+        """Return the deterministic exit-setting grid for this request.
+
+        Baseline (no stop) first when enabled, then each ``fixed_pct`` value
+        crossed with static/trailing, then each ``atr_multiple`` value crossed
+        with static/trailing, preserving the declared value order.
+        """
+        grid: list[ExitSweepSetting] = []
+        if self.include_baseline:
+            grid.append(ExitSweepSetting(None, None, False))
+        for value in self.fixed_pct_values:
+            grid.append(ExitSweepSetting("fixed_pct", value, False))
+            grid.append(ExitSweepSetting("fixed_pct", value, True))
+        for value in self.atr_multiple_values:
+            grid.append(ExitSweepSetting("atr_multiple", value, False))
+            grid.append(ExitSweepSetting("atr_multiple", value, True))
+        return tuple(grid)
+
+
+@dataclass(frozen=True, slots=True)
 class CandidateAdmissionResult:
     """One candidate's integrity and activity admission evidence."""
 
@@ -450,7 +540,9 @@ __all__ = [
     "ROLLING_LIBRARY_ADMISSION_PROFILES",
     "AdmissionProposal",
     "CandidateAdmissionResult",
+    "ExitSweepSetting",
     "LibraryAdmissionConfig",
+    "TechnicalExpertExitSweepRequest",
     "TechnicalLibraryAdmissionBacktestRequest",
     "TechnicalLibraryAdmissionPipelineRequest",
     "TechnicalLibraryAdmissionRequest",
