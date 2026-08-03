@@ -4,8 +4,12 @@ The engine promotes exactly one frozen ``v1`` strategy family after the
 unchanged falsification and sizing gates, or publishes a reproducible
 scorecard and holds CASH.  Every family carries three calendar-horizon
 variants, so the family-wide multiplicity size is exactly ``FAMILY_SIZE``.
-All numerical work is vectorized NumPy/pandas; no ``DataFrame.apply`` and no
-per-row Python loops are used for scores or weights.
+Each screen builds an equal-weight, dollar-neutral top/bottom book whose
+total active symbols never exceed the enforced ``max_positions``; a smaller
+roster or a ``max_positions < 2`` request fails closed to CASH rather than
+substituting a quantile-derived position count.  All numerical work is
+vectorized NumPy/pandas; no ``DataFrame.apply`` and no per-row Python loops
+are used for scores or weights.
 """
 
 from __future__ import annotations
@@ -18,8 +22,6 @@ import numpy as np
 import pandas as pd
 
 from src.common.errors import DataIntegrityError
-
-XS_QUANTILE = 0.30
 
 #: Binance perpetual funding is settled every 8 hours; a per-symbol funding
 #: history is causally alignable only when it covers its scheduled roster span
@@ -76,6 +78,14 @@ RETIRED_STRATEGY_IDS: tuple[str, ...] = (
     "short_horizon_reversal_v1",
     "market_residual_trend_v1",
 )
+
+#: Data-gated twentieth-symbol growth sleeve.  Daily open-interest history
+#: currently covers only five symbols, so ``oi_basis_carry_v1`` is NOT a
+#: registered source label: it may be admitted as a distinct sleeve only after
+#: 20-symbol PIT coverage, verified ``available_at`` availability timestamps,
+#: and a new independent hypothesis ID exist (see
+#: docs/specs/growth_portfolio_gate_recovery.md).  Until then it remains CASH.
+DATA_GATED_SOURCES: tuple[str, ...] = ("oi_basis_carry_v1",)
 
 FAMILY_SIZE: int = sum(len(definition.windows) for definition in STRATEGY_REGISTRY)
 
@@ -230,15 +240,24 @@ def _cross_sectional_weights(
     schedule: Mapping[pd.Timestamp, tuple[str, ...]],
     grid: pd.DatetimeIndex,
     columns: Sequence[str],
-    quantile: float = XS_QUANTILE,
+    max_positions: int,
 ) -> pd.DataFrame:
-    """PIT-roster-only, dollar-neutral long/short weights for every grid bar.
+    """PIT-roster-only, dollar-neutral equal-weight top/bottom book for every bar.
 
-    Longs and shorts are the top/bottom ``quantile`` of the roster by score
-    with equal weight inside each leg; a missing window, a zero channel width,
-    or fewer than one valid long/short member yields zero weight for that bar.
+    Every bar holds at most ``max_positions`` active symbols: ``ceil(max_positions/2)``
+    longs at ``+0.5/k_long`` and ``floor(max_positions/2)`` shorts at ``-0.5/k_short``,
+    so gross long and short notional always match.  A bar with fewer than two valid
+    scores, a missing window, or a zero channel width yields zero weight for that bar
+    (fail-closed CASH), and a roster with fewer symbols than the full book contracts
+    both legs deterministically without ever exceeding ``max_positions``.  All score
+    and rank operations are vectorized NumPy/pandas; no ``DataFrame.apply`` and no
+    per-row Python score loop is used.
     """
     weights = pd.DataFrame(0.0, index=grid, columns=list(columns), dtype="float64")
+    if max_positions < 2:
+        return weights
+    k_long = float(int(np.ceil(max_positions / 2)))
+    k_short = float(int(np.floor(max_positions / 2)))
     month_key = grid.normalize() - pd.to_timedelta(grid.day - 1, unit="D")
     for date, roster in schedule.items():
         if not roster:
@@ -246,14 +265,22 @@ def _cross_sectional_weights(
         bars = grid[month_key == date]
         sub = score.loc[bars, list(roster)]
         valid = sub.notna()
-        cnt = valid.sum(axis=1)
-        rank = sub.rank(axis=1, ascending=False)
-        k = (cnt * quantile).round().astype(int).clip(lower=1)
-        longs = rank.le(k, axis=0) & valid
-        shorts = rank.gt(cnt - k, axis=0) & valid
-        w_long = longs.astype(float).div(longs.sum(axis=1).replace(0, np.nan), axis=0)
-        w_short = shorts.astype(float).div(shorts.sum(axis=1).replace(0, np.nan), axis=0)
-        w = (w_long - w_short) / 2
+        cnt = valid.sum(axis=1).to_numpy(dtype=np.float64)
+        insufficient = cnt < 2.0
+        n_short = np.minimum(k_short, cnt - 1.0)
+        n_long = np.minimum(k_long, cnt - n_short)
+        n_short = np.where(insufficient, 0.0, n_short)
+        n_long = np.where(insufficient, 0.0, n_long)
+        rank_asc = sub.rank(axis=1, ascending=True, method="first")
+        short_mask = (rank_asc <= n_short[:, None]) & valid
+        long_candidates = sub.mask(short_mask)
+        rank_desc = long_candidates.rank(axis=1, ascending=False, method="first")
+        long_mask = (rank_desc <= n_long[:, None]) & long_candidates.notna()
+        with np.errstate(divide="ignore", invalid="ignore"):
+            w = (
+                long_mask.astype(np.float64) * 0.5 / n_long[:, None]
+                - short_mask.astype(np.float64) * 0.5 / n_short[:, None]
+            )
         weights.loc[bars, list(roster)] = w.fillna(0.0).to_numpy()
     return weights
 
@@ -269,14 +296,18 @@ def build_growth_strategy_weights(
     prices: pd.DataFrame,
     taker_buy_ratio: pd.DataFrame,
     settled_funding: pd.DataFrame,
+    max_positions: int,
 ) -> pd.DataFrame:
     """Build UTC-indexed, roster-only, dollar-neutral weights for one candidate.
 
-    ``parameter`` must be a registered window of the strategy's family.  A
-    funding-dependent candidate raises ``DataIntegrityError`` (recorded as
-    ``DATA_INVALID`` by :func:`screen_growth_strategy_weights`) when any
-    scheduled symbol lacks a finite, causally alignable funding history; it is
-    never silently zero-filled and never invalidates price-only candidates.
+    ``parameter`` must be a registered window of the strategy's family.
+    ``max_positions`` bounds the total active non-zero symbols on every bar (an
+    equal-weight top/bottom book); ``max_positions < 2`` returns an all-zero
+    dollar-neutral frame.  A funding-dependent candidate raises
+    ``DataIntegrityError`` (recorded as ``DATA_INVALID`` by
+    :func:`screen_growth_strategy_weights`) when any scheduled symbol lacks a
+    finite, causally alignable funding history; it is never silently zero-filled
+    and never invalidates price-only candidates.
     """
     definition = registry_definition(strategy_id)
     if parameter not in definition.windows:
@@ -288,6 +319,8 @@ def build_growth_strategy_weights(
     _validate_frame(taker_buy_ratio, "taker_buy_ratio")
     if not taker_buy_ratio.index.equals(prices.index):
         raise DataIntegrityError("taker_buy_ratio must share the identical price index")
+    if max_positions < 2:
+        return pd.DataFrame(0.0, index=prices.index, columns=prices.columns, dtype="float64")
     roster_symbols = _schedule_symbols(schedule)
 
     funding_panel: pd.DataFrame | None = None
@@ -314,7 +347,9 @@ def build_growth_strategy_weights(
             )
 
     score = _score_panel(strategy_id, parameter, prices, taker_buy_ratio, funding_panel)
-    return _cross_sectional_weights(score, schedule, prices.index, prices.columns)
+    return _cross_sectional_weights(
+        score, schedule, prices.index, prices.columns, max_positions,
+    )
 
 
 def screen_growth_strategy_weights(
@@ -324,11 +359,13 @@ def screen_growth_strategy_weights(
     prices: pd.DataFrame,
     taker_buy_ratio: pd.DataFrame,
     settled_funding: pd.DataFrame,
+    max_positions: int,
 ) -> GrowthStrategyScreen:
     """Screen one candidate, recording funding-integrity failures as DATA_INVALID."""
     try:
         weights = build_growth_strategy_weights(
-            strategy_id, parameter, schedule, prices, taker_buy_ratio, settled_funding,
+            strategy_id, parameter, schedule, prices, taker_buy_ratio,
+            settled_funding, max_positions,
         )
     except DataIntegrityError as exc:
         empty_weights = (

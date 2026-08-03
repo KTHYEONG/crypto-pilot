@@ -128,8 +128,12 @@ def compute_net_return_stream(
             realized[t] = prev
         turnover[t] = float(np.abs(realized[t] - prev).sum())
         cost[t] = turnover[t] * rate
-        gross[t] = float(np.sum(realized[t] * forward_arr[t]))
-        funding[t] = float(np.sum(realized[t] * funding_arr[t]))
+        # A symbol that is not held (realized weight 0) never contributes its
+        # forward return, so a missing/NaN return for an unlisted or backfill
+        # symbol cannot poison the held portfolio's gross (0 * NaN = NaN).
+        nonzero = realized[t] != 0.0
+        gross[t] = float(np.sum(np.where(nonzero, realized[t] * forward_arr[t], 0.0)))
+        funding[t] = float(np.sum(np.where(nonzero, realized[t] * funding_arr[t], 0.0)))
         prev = realized[t]
 
     index = target_weights.index
