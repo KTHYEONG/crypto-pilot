@@ -107,6 +107,65 @@ def test_proposal_backtest_runs_base_and_stress_without_registration(
     }
 
 
+def test_proposal_report_surfaces_feasibility_binding_constraint(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # RGR-09-ADMISSION-REPORT-CARRIES-FEASIBILITY: a failing proposal states which
+    # constraint binds in to_report_dict() rather than only that it failed.
+    def noisy_evidence(
+        symbol: str,
+        sources: tuple[str, ...],
+        start: str | None,
+        end: str | pd.Timestamp | None,
+        costs,
+        signal_delay_bars: int,
+        **kwargs,
+    ) -> dict[str, app._SelectedEvidence]:
+        rng = np.random.default_rng(7)
+        index = pd.date_range("2024-01-01", periods=1000, freq="D", tz="UTC")
+        returns = np.full(len(index), 0.0002)
+        returns[1:] += rng.normal(0.0, 0.005, len(index) - 1)
+        returns[0] = np.nan
+        trade_index = np.arange(40)
+        frames = pd.DataFrame({
+            "pnl": np.ones(40),
+            "return_pct": np.full(40, 0.01),
+            "entry_bar": trade_index,
+            "exit_bar": trade_index + 1,
+        })
+        return {
+            source: {
+                "returns": pd.Series(returns, index=index),
+                "trades": frames.assign(expert_id=f"{source}:{symbol}"),
+            }
+            for source in sources
+        }
+
+    monkeypatch.setattr(app, "_selected_symbol_worker", noisy_evidence)
+    index = pd.date_range("2024-01-01", periods=1000, freq="D", tz="UTC")
+    monkeypatch.setattr(
+        app,
+        "_build_admission_context",
+        lambda router, panel_index, start, end, **kwargs: pd.Series(
+            ["up_low_vol"] * len(panel_index), index=panel_index,
+        ),
+    )
+    monkeypatch.setattr(app, "compute_code_hash", lambda _: "c" * 64)
+    monkeypatch.setattr(
+        app,
+        "technical_data_hashes",
+        lambda symbol: {"perp_ohlcv": "a" * 64, "funding": "b" * 64},
+    )
+
+    report = run_technical_library_admission_backtest(_request(
+        "technical_macd_histogram_regime_long_v1:BTCUSDT",
+    ))
+    observation = report.to_report_dict()["observation"]
+    assert "binding_constraint" in observation
+    assert observation["binding_constraint"] in {"t_stat", "mdd_floor", "hurdle_rate", "none"}
+    assert "feasibility" in observation
+
+
 def test_proposal_backtest_rejects_duplicate_family_before_worker() -> None:
     # LAE-11-PROPOSAL-INTEGRITY: malformed structural proposals fail closed.
     with pytest.raises(ValueError, match="duplicate family"):
