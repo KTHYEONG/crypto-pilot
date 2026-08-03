@@ -217,6 +217,7 @@
 - **차단/차입 이력 관리 및 Gap 복구**:
   ```bash
   uv run python -m src.cli.main data collect import-borrow BTCUSDT --source path/to/borrow.parquet --source-id op1
+  uv run python -m src.cli.main data collect collect-borrow BTCUSDT --end 2025-12-31
   uv run python -m src.cli.main data collect repair-spot-gap BTCUSDT 1h 2024-01-01T00:00:00
   ```
 
