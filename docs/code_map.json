@@ -493,6 +493,10 @@
   "src/research/sleeve_blend/fixed.py": {
     "testing": "tests/unit/research/sleeve_blend/test_fixed.py"
   },
+  "src/research/sleeve_blend/tournament.py": {
+    "testing": "tests/unit/research/sleeve_blend/test_tournament.py",
+    "architecture": "docs/results/portfolio-blend-growth-gate-20260803.md"
+  },
   "src/research/sleeve_blend/weights.py": {
     "testing": "tests/unit/research/sleeve_blend/test_weights.py"
   },

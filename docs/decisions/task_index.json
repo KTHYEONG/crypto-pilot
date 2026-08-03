@@ -1,6 +1,16 @@
 {
   "tasks": [
     {
+      "task_id": "TASK_PORTFOLIO_BLEND_GROWTH_GATE",
+      "date": "2026-08-03",
+      "adr_id": "ADR_20260803_PORTFOLIO_BLEND_GROWTH_GATE",
+      "domain": "risk",
+      "title": "Portfolio Blend Growth Gate 실행 및 CASH fail-closed 검증",
+      "why": "고정 Donchian blend는 observation/stress는 통과했지만 fold concentration에서 거절되었고, 전체-window MDD fitting 및 자유 심볼 입력은 배포 가능한 계약이 아니었다. 제한된 사전등록 심볼, 인과 leverage schedule, 전략 tournament의 실제 sealed 실행 결과를 기록할 필요가 있었다.",
+      "resolution": "core5_v1 고정 universe와 causal tournament를 sealed discovery/qualification 프로파일로 실행했다. Donchian, funding directional, Supertrend, Parabolic SAR, Keltner 후보 모두 discovery feasibility 또는 reliability gate를 통과하지 못해 selected source를 비우고 base/stress 모두 CASH로 fail-closed 반환했다. 기존 fixed control은 CAGR 31.15%, MDD -20.24%, LCB90 15.12%, observation/stress PASS이나 fold 0.4899>0.4413로 REJECTED를 재현했다.",
+      "impact": "새 경로가 근거 없는 전략을 qualification에서 재선택하거나 gate를 완화하지 않고 안전하게 자산을 현금으로 유지함을 확인했다. 새 post-2025 데이터 또는 독립 return source 없이는 promotion/PASS를 주장하지 않는다. 상세 실행 결과를 docs/results에 보존하고 tournament source/test와 연결했다."
+    },
+    {
       "task_id": "TASK_RELIABILITY_GATE_REPAIR",
       "date": "2026-08-03",
       "adr_id": "ADR_20260803_RELIABILITY_GATE_REPAIR",
