@@ -80,6 +80,8 @@ This result is also consistent with, and now fully substantiates, the CASH-heavy
 
 The only path to a positive standalone result from this catalog is a genuinely different signal family (TradingView/prop-desk candidates not yet in the catalog — Supertrend, Parabolic SAR, Keltner Channel breakout), or accepting that this catalog's role is diversification inputs to the blended portfolio rather than standalone strategies, and focusing further validation effort on the blend construction (correlation screen, routing, sizing) rather than on any individual family.
 
+**Update (`technical_expert_edge_recovery.md` v2 stop-loss verification, 4h + 1d re-swept):** the 0/499 finding was diagnosed as partly a volatility-drag / unmanaged-exit artifact (§1 of that spec), and an opt-in causal stop-loss engine (`fixed_pct`/`atr_multiple` x static/trailing, 3 magnitudes each) was swept across all alive candidates at 4h and 1d — the two representative timeframes, 1,740 additional single-symbol backtests. **The 0/499 finding does not change for either re-swept timeframe**: 0/960 stop-loss cells passed the gate at 4h, and while 3/780 individual cells passed at 1d, all three are isolated single-symbol passes at the single tightest, most whipsaw-prone setting (`fixed_pct` 3% trailing) with 100x+ CAGR dispersion across the same candidate's other symbols — read as noise, not recovered edge (full detail: `docs/results/stop-loss-edge-check.md`). 1h/2h/6h/8h/12h were not re-swept (time budget) and remain pre-stop-loss baselines in the table above.
+
 ## 4. What did NOT change
 
 - The dynamic symbol universe verification (BNB -> DOGE swap at the 2026-07-07 snapshot) is unaffected by this fix and still holds.
