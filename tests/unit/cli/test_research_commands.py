@@ -6,6 +6,7 @@ import pytest
 
 from src.cli.commands.research import expert_library as expert_library_cli
 from src.cli.commands.research.portfolio_blend import add_portfolio_blend_commands
+from src.cli.commands.research.portfolio_growth import add_portfolio_growth_commands
 from src.cli.commands.research.portfolio_multi import add_portfolio_multi_commands
 from src.cli.commands.research.single_baseline import add_single_baseline_commands
 from src.cli.commands.research.single_carry import add_single_carry_commands
@@ -15,6 +16,7 @@ from src.cli.main import build_root_parser
 from src.research.contracts import (
     BaselineEvaluationRequest,
     CashCarryEvaluationRequest,
+    GrowthEngineEvaluationRequest,
     PortfolioEvaluationRequest,
     SleeveBlendEvaluationRequest,
     TechnicalExpertEvaluationRequest,
@@ -367,6 +369,77 @@ def test_cash_carry_cli_parses_and_dispatches(monkeypatch) -> None:
     assert calls == [CashCarryEvaluationRequest(symbol="BTCUSDT", log_run=False)]
 
 
+def test_portfolio_growth_cli_parses_and_dispatches(monkeypatch) -> None:
+    # GEV2-CLI: the growth leaf threads the universe/construction knobs into a
+    # frozen request and defaults symbol_scope to 'dev' so the holdout partition
+    # is never touched by accident.
+    calls: list[GrowthEngineEvaluationRequest] = []
+
+    class _FakeReport:
+        status = "NO_ADMISSIBLE_ALPHA"
+        start = None
+        equity = ()
+        trades = ()
+        sizing = None
+
+    def _fake_run(request) -> _FakeReport:
+        calls.append(request)
+        return _FakeReport()
+
+    monkeypatch.setattr(
+        "src.application.research.growth.evaluation.run_growth_engine_evaluation", _fake_run,
+    )
+    args = build_root_parser().parse_args([
+        "research", "run", "portfolio", "growth",
+        "--universe-size", "4",
+        "--max-positions", "2",
+        "--rebalance-bars", "6",
+        "--no-trade-band", "0.01",
+        "--symbol-scope", "all",
+        "--start", "2022-04-01",
+        "--initial-equity", "5000",
+        "--no-log-run",
+    ])
+    args.handler(args)
+    assert len(calls) == 1
+    request = calls[0]
+    assert request.universe.universe_size == 4
+    assert request.universe.max_positions == 2
+    assert request.construction.rebalance_bars == 6
+    assert request.construction.no_trade_band == 0.01
+    assert request.symbol_scope == "all"
+    assert request.start == "2022-04-01"
+    assert request.initial_equity == 5000.0
+    assert request.log_run is False
+
+
+def test_portfolio_growth_cli_defaults_to_dev_scope(monkeypatch) -> None:
+    calls: list[GrowthEngineEvaluationRequest] = []
+
+    class _FakeReport:
+        status = "NO_ADMISSIBLE_ALPHA"
+        start = None
+        equity = ()
+        trades = ()
+        sizing = None
+
+    def _fake_run(request) -> _FakeReport:
+        calls.append(request)
+        return _FakeReport()
+
+    monkeypatch.setattr(
+        "src.application.research.growth.evaluation.run_growth_engine_evaluation", _fake_run,
+    )
+    args = build_root_parser().parse_args([
+        "research", "run", "portfolio", "growth", "--no-log-run",
+    ])
+    args.handler(args)
+    assert len(calls) == 1
+    assert calls[0].symbol_scope == "dev"
+    assert calls[0].universe.universe_size == 20
+    assert calls[0].universe.max_positions == 5
+
+
 def test_sleeve_blend_cli_parses_args_and_dispatches(monkeypatch) -> None:
     calls: list[SleeveBlendEvaluationRequest] = []
     monkeypatch.setattr("src.application.research.blend.evaluation.run_sleeve_blend_evaluation", calls.append)
@@ -454,6 +527,7 @@ def test_every_tiered_command_module_registers_a_handler() -> None:
         add_single_oi_commands,
         add_portfolio_multi_commands,
         add_portfolio_blend_commands,
+        add_portfolio_growth_commands,
     ):
         assert callable(adder)
 
