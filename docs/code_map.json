@@ -558,5 +558,8 @@
   "src/validation/reliability_gate.py": {
     "testing": "tests/contract/test_legacy_imports.py"
   },
-  "src/validation/research_memory.py": {}
+  "src/validation/research_memory.py": {},
+  "tools/research/structural_tuner.py": {
+    "architecture": "docs/results/growth_portfoilo.md"
+  }
 }
