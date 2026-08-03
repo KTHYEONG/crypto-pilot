@@ -472,7 +472,8 @@
     "testing": "tests/unit/research/sleeve_blend/test_weights.py"
   },
   "src/research/technical_experts/backtest.py": {
-    "testing": "tests/unit/research/technical_experts/test_backtest.py"
+    "testing": "tests/unit/research/technical_experts/test_backtest.py",
+    "architecture": "docs/results/stop-loss-edge-check.md"
   },
   "src/research/technical_experts/catalog.py": {
     "testing": "tests/unit/research/technical_experts/test_catalog.py"
