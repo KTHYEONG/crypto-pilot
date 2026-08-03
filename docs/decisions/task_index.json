@@ -1,6 +1,16 @@
 {
   "tasks": [
     {
+      "task_id": "TASK_GROWTH_ENGINE_V2_FIRST_RUN",
+      "date": "2026-08-03",
+      "adr_id": "ADR_20260803_GROWTH_ENGINE_V2_FIRST_RUN",
+      "domain": "risk",
+      "title": "Growth Engine v2 첫 CLI 실행 — 크래시/dev-holdout/backfill 범위 결함 3건 발견·수정",
+      "why": "spec growth_engine_v2(P1~P3)를 구현한 뒤 처음으로 research run portfolio growth CLI를 실행하자 shape mismatch로 즉시 크래시했다. 수정 후에도 symbol_scope=dev 기본값에서 holdout 파티션이 항상 공집합으로 계산되는 구조적 결함, derive_backfill_candidates가 봉인 이전 구간을 포함하는 범위 결함이 추가로 발견됐다.",
+      "resolution": "(1) _build_signal_weights의 weights.loc[bars] 대입에 컬럼 지정 누락 수정. (2) dev/holdout 분리를 symbol_scope 필터링 이전 full_schedule에서 계산하도록 순서 변경, symbol_scope는 매매 대상만 제한. (3) derive_backfill_candidates 호출을 start 이후 rebalance_dates로 제한. 세 수정 모두 lint/mypy/pytest 통과, 전체 회귀 없음. 최종 CLI 결과는 NO_ADMISSIBLE_ALPHA(binding_constraint=plateau, holdout_retention=0.117)로 CASH 유지. docs/specs/growth_engine_v2.md F1b의 backfill 후보 수치를 탐색 추정치 55에서 실측치 89로 갱신.",
+      "impact": "Growth Engine v2가 실데이터·실코드 경로로 처음 끝까지 실행되어 spec F3의 사전 반증(탐색 스크립트 기반)이 프로덕션 코드로도 재확인됐다. 향후 어떤 심볼 스코프로 실행해도 holdout 검정이 항상 정상 작동하고, backfill 우선순위 카운트가 봉인 경계를 정확히 지킨다."
+    },
+    {
       "task_id": "TASK_PORTFOLIO_BLEND_GROWTH_GATE",
       "date": "2026-08-03",
       "adr_id": "ADR_20260803_PORTFOLIO_BLEND_GROWTH_GATE",
