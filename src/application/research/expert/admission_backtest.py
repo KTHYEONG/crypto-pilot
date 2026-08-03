@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import dataclasses
 import logging
+import math
 from concurrent.futures import ProcessPoolExecutor
 from typing import Literal, TypedDict
 
+import numpy as np
 import pandas as pd
 
 from src.application.research.expert.admission import _build_admission_context
@@ -16,6 +18,8 @@ from src.core.settings import effective_worker_count
 from src.market_data.storage.loaders import timeframe_scale_factor
 from src.research.baseline.backtest import BacktestResult
 from src.research.contracts import CostModel
+from src.research.evaluation import gate_feasibility
+from src.research.evaluation.gate_feasibility import compute_gate_feasibility
 from src.research.evaluation.metrics import compute_metrics
 from src.research.evaluation.policy import resolve_evaluation_end
 from src.research.evaluation.promotion import compose_promotion_verdict
@@ -23,6 +27,7 @@ from src.research.evaluation.reliability import (
     ReliabilityGateConfig,
     compute_equity_reliability_gate,
     compute_fold_distribution,
+    equity_span_years,
 )
 from src.research.expert_portfolio.admission_reports import LibraryAdmissionBacktestReport
 from src.research.expert_portfolio.admission_types import (
@@ -271,6 +276,41 @@ def run_technical_library_admission_backtest(
         base_result.equity, len(base_result.trades),
     )
     observation_folds = compute_fold_distribution(base_result)
+    observation_feasibility = None
+    observation_returns = base_result.equity.pct_change().dropna().to_numpy(dtype=np.float64)
+    if len(observation_returns) > 1:
+        observation_vol = float(np.std(observation_returns)) * math.sqrt(2190.0)
+        if observation_vol > 0.0:
+            try:
+                observation_feasibility = compute_gate_feasibility(
+                    sharpe=observation_metrics.sharpe,
+                    vol=observation_vol,
+                    mdd_at_unit_leverage=min(
+                        float((base_result.equity / base_result.equity.cummax() - 1.0).min()),
+                        -1e-6,
+                    ),
+                    years=equity_span_years(base_result.equity),
+                )
+            except ValueError:
+                observation_feasibility = None
+    leg_sharpes: list[float] = []
+    for column in panel.columns:
+        leg_returns = panel[column].dropna().to_numpy(dtype=np.float64)
+        leg_std = float(np.std(leg_returns))
+        if len(leg_returns) > 1 and leg_std > 0.0:
+            leg_sharpes.append(float(np.mean(leg_returns) / leg_std) * math.sqrt(2190.0))
+        else:
+            leg_sharpes.append(0.0)
+    correlation_matrix = panel.corr().to_numpy(dtype=np.float64)
+    upper_mask = np.triu(np.ones_like(correlation_matrix, dtype=bool), k=1)
+    mean_pairwise_correlation = (
+        float(correlation_matrix[upper_mask].mean()) if upper_mask.sum() > 0 else 0.0
+    )
+    breadth = gate_feasibility.compute_breadth_requirement(
+        leg_sharpes,
+        mean_pairwise_correlation,
+        equity_span_years(base_result.equity),
+    )
 
     stress_costs = CostModel(
         fee_rate=costs.fee_rate * _STRESS_FEE_MULT,
@@ -319,6 +359,8 @@ def run_technical_library_admission_backtest(
         observation_metrics=observation_metrics,
         observation_gate=observation_gate,
         observation_folds=observation_folds,
+        observation_feasibility=observation_feasibility,
+        breadth=breadth,
         stress_metrics=stress_metrics,
         stress_gate=stress_gate,
         stress_folds=stress_folds,
