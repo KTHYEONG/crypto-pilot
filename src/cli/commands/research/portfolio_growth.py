@@ -30,12 +30,15 @@ def _run_portfolio_growth(args: argparse.Namespace) -> None:
     )
     report = growth_evaluation_module.run_growth_engine_evaluation(request)
     _logger.info(
-        "[EVAL] growth engine status=%s start=%s bars=%d trades=%d selected_risk=%s",
+        "[EVAL] growth engine status=%s start=%s bars=%d trades=%d selected_risk=%s "
+        "selected_strategy=%s scorecard_reason=%s",
         report.status,
         report.start,
         len(report.equity),
         len(report.trades),
         report.sizing.selected_risk if report.sizing is not None else None,
+        report.selected_strategy,
+        report.scorecard.reason if report.scorecard is not None else None,
     )
 
 
