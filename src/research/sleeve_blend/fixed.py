@@ -20,7 +20,83 @@ from src.research.sleeve_blend.common import (
     _concat_sleeve_trades,
     _equal_weight_blend,
 )
-from src.research.sleeve_blend.contracts import FixedSleevePortfolioSpec
+from src.research.sleeve_blend.contracts import (
+    CausalLeverageSpec,
+    FixedSleevePortfolioSpec,
+)
+
+
+def build_causal_leverage_schedule(
+    unit_equity: pd.Series,
+    risk_spec: CausalLeverageSpec,
+) -> pd.Series:
+    """Build the ex-ante causal gross-leverage schedule over a unit-leverage ledger.
+
+    Each schedule row at bar ``t`` sees only completed unit-leverage marks
+    strictly before ``t``: the trailing realized drawdown is the worst
+    ``mark / running-peak - 1`` within the trailing ``lookback_days`` window of
+    prior marks, and the row is
+    ``abs(mdd_floor) * risk_budget_fraction / abs(trailing_mdd)`` bounded by the
+    source-controlled hard ``max_gross_leverage`` cap. Before a complete
+    lookback exists the row is zero exposure. The computation is fully
+    vectorized (no ``pd.apply``) and is deterministic for identical input.
+    """
+    if not isinstance(unit_equity.index, pd.DatetimeIndex) or len(unit_equity) < 2:
+        raise ValueError(
+            "unit_equity must be a DatetimeIndex series with at least 2 points"
+        )
+    if not unit_equity.index.is_monotonic_increasing:
+        raise ValueError("unit_equity index must be monotonic increasing")
+    values = unit_equity.to_numpy(dtype=np.float64)
+    if not np.isfinite(values).all():
+        raise ValueError("unit_equity must contain only finite values")
+    if (values <= 0).any():
+        raise ValueError("unit_equity must be strictly positive")
+
+    bar_period = unit_equity.index[1] - unit_equity.index[0]
+    lookback_bars = max(
+        1,
+        round(pd.Timedelta(days=risk_spec.lookback_days) / bar_period),
+    )
+
+    # At bar t the schedule may use marks 0..t-1 only.
+    shifted = np.concatenate([[np.nan], values[:-1]])
+    running_peak = np.maximum.accumulate(np.where(np.isnan(shifted), -np.inf, shifted))
+    with np.errstate(divide="ignore", invalid="ignore"):
+        drawdown_prefix = shifted / running_peak - 1.0
+    drawdown = pd.Series(drawdown_prefix, index=unit_equity.index, dtype=np.float64)
+    trailing_mdd = drawdown.rolling(
+        lookback_bars, min_periods=lookback_bars
+    ).min()
+
+    target_mdd = abs(ReliabilityGateConfig().mdd_floor) * risk_spec.risk_budget_fraction
+    with np.errstate(divide="ignore", invalid="ignore"):
+        raw = target_mdd / trailing_mdd.abs()
+    schedule = raw.clip(upper=risk_spec.max_gross_leverage).fillna(0.0)
+    schedule = schedule.where(
+        trailing_mdd.isna() | (trailing_mdd < 0.0), risk_spec.max_gross_leverage
+    )
+    schedule = schedule.fillna(0.0)
+    return pd.Series(schedule, index=unit_equity.index, name="leverage", dtype=np.float64)
+
+
+def apply_leverage_schedule(
+    unit_equity: pd.Series,
+    schedule: pd.Series,
+    initial_equity: float = 10_000.0,
+) -> pd.Series:
+    """Apply a frozen per-bar leverage schedule to a unit-leverage equity ledger.
+
+    The schedule is reused verbatim (aligned by timestamp, missing rows default
+    to zero exposure) and never re-fitted, so a stressed replay of the same
+    returns stream shares the base allocation exactly.
+    """
+    if initial_equity <= 0:
+        raise ValueError(f"initial_equity must be > 0, got {initial_equity}")
+    aligned = schedule.reindex(unit_equity.index).fillna(0.0).to_numpy(dtype=np.float64)
+    returns = unit_equity.pct_change().fillna(0.0).to_numpy(dtype=np.float64)
+    equity = (1.0 + returns * aligned).cumprod() * initial_equity
+    return pd.Series(equity, index=unit_equity.index, name="equity", dtype=np.float64)
 
 
 def _run_blend(
@@ -148,8 +224,36 @@ def run_fixed_sleeve_portfolio_with_leverage(
     return BacktestResult(equity=equity, trades=trades, signals=pd.DataFrame())
 
 
+def run_fixed_sleeve_portfolio_with_schedule(
+    symbols: tuple[str, ...],
+    start: str | None,
+    end: str | pd.Timestamp | None,
+    costs: CostModel,
+    schedule: pd.Series,
+    initial_equity: float = 10_000.0,
+    signal_delay_bars: int = 0,
+) -> BacktestResult:
+    """Run the equal-weight fixed-sleeve blend under a frozen causal schedule.
+
+    Executes the unlevered blend exactly as ``run_fixed_sleeve_portfolio``
+    would at leverage 1.0 and applies ``schedule`` verbatim via
+    :func:`apply_leverage_schedule`; the schedule is never re-fitted around the
+    executed costs or delay.
+    """
+    equity, trades, _lev = _run_blend(
+        symbols=symbols, start=start, end=end, costs=costs,
+        initial_equity=initial_equity, signal_delay_bars=signal_delay_bars,
+        lev=1.0,
+    )
+    scheduled = apply_leverage_schedule(equity, schedule, initial_equity=initial_equity)
+    return BacktestResult(equity=scheduled, trades=trades, signals=pd.DataFrame())
+
+
 __all__ = [
+    "apply_leverage_schedule",
+    "build_causal_leverage_schedule",
     "run_fixed_sleeve_portfolio",
     "run_fixed_sleeve_portfolio_calibrated",
     "run_fixed_sleeve_portfolio_with_leverage",
+    "run_fixed_sleeve_portfolio_with_schedule",
 ]
