@@ -5,6 +5,9 @@ from typing import TYPE_CHECKING, Literal
 
 import pandas as pd
 
+from src.research.portfolio.net_construction import NetConstructionSpec
+from src.research.universe.pit_universe import PitUniverseSpec
+
 if TYPE_CHECKING:
     from src.research.baseline.backtest import BacktestResult
     from src.research.evaluation.metrics import Metrics
@@ -248,6 +251,35 @@ class TechnicalExpertEvaluationRequest:
             raise ValueError("symbol must not be empty")
         if self.initial_equity <= 0:
             raise ValueError(f"initial_equity must be > 0, got {self.initial_equity}")
+
+
+@dataclass(frozen=True, slots=True)
+class GrowthEngineEvaluationRequest:
+    """Immutable request for the growth-engine evaluation.
+
+    ``universe`` and ``construction`` carry the pre-registered PIT universe and
+    net-of-turnover construction parameters.  ``symbol_scope`` defaults to
+    ``'dev'`` so the holdout partition is never touched by accident;
+    ``unseal_holdout`` is the only way to extend past the sealed observation
+    end.
+    """
+
+    universe: PitUniverseSpec = PitUniverseSpec()
+    construction: NetConstructionSpec = NetConstructionSpec()
+    start: str | None = None
+    end: str | pd.Timestamp | None = None
+    initial_equity: float = 10_000.0
+    symbol_scope: Literal["dev", "holdout", "all"] = "dev"
+    unseal_holdout: bool = False
+    log_run: bool = True
+
+    def __post_init__(self) -> None:
+        if self.initial_equity <= 0:
+            raise ValueError(f"initial_equity must be > 0, got {self.initial_equity}")
+        if self.symbol_scope not in ("dev", "holdout", "all"):
+            raise ValueError(
+                f"symbol_scope must be one of 'dev'/'holdout'/'all', got {self.symbol_scope}"
+            )
 
 
 @dataclass(frozen=True)
