@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import dataclasses
 import logging
 import subprocess
 from collections.abc import Mapping, Sequence
@@ -13,7 +14,7 @@ import pandas as pd
 from src.common.config import funding_path, ohlcv_path
 from src.common.errors import DataIntegrityError
 from src.market_data.storage.loaders import load_funding_rates, load_ohlcv_1h_as
-from src.research.contracts import GrowthEngineEvaluationRequest
+from src.research.contracts import CostModel, GrowthEngineEvaluationRequest
 from src.research.evaluation.falsification import FalsificationConfig, evaluate_falsification, evaluate_parameter_plateau
 from src.research.evaluation.policy import resolve_evaluation_end
 from src.research.evaluation.promotion import PromotionResult, compose_promotion_verdict
@@ -22,21 +23,38 @@ from src.research.evaluation.reliability import (
     ReliabilityGateConfig,
     ReliabilityGateResult,
     compute_equal_duration_fold_distribution,
+    compute_equity_reliability_gate,
 )
 from src.research.execution.intrabar_audit import intrabar_audit_required
+from src.research.portfolio.growth_router import (
+    CONTEXT_WINDOW_BARS,
+    DISCOVERY_MONTHS,
+    MIN_CONTEXT_SAMPLES,
+    build_rolling_segments,
+    causal_router,
+    compute_context_features,
+    context_state_for,
+    enough_deployment_folds,
+)
 from src.research.portfolio.growth_strategy_library import (
     FAMILY_SIZE,
     STRATEGY_REGISTRY,
+    GrowthStrategyScreen,
     align_funding_bars,
     registry_definition,
     screen_growth_strategy_weights,
 )
 from src.research.portfolio.net_construction import NetConstructionSpec, compute_net_return_stream
-from src.research.risk.growth_sizing import GrowthSizingConfig, solve_growth_optimal_risk
+from src.research.risk.growth_sizing import (
+    GrowthSizingConfig,
+    apply_realised_risk_overlay,
+    solve_growth_optimal_risk,
+)
 from src.research.universe.pit_universe import PitUniverseSpec, SymbolCoverage, build_universe_schedule, earliest_admissible_start, symbol_partition, derive_backfill_candidates
 
 if TYPE_CHECKING:
     from src.research.evaluation.falsification import FalsificationVerdict
+    from src.research.portfolio.growth_router import ContextState
     from src.research.portfolio.net_construction import NetReturnStream
     from src.research.risk.growth_sizing import GrowthSizingResult
 
@@ -445,21 +463,90 @@ def _no_admissible_alpha(
     )
 
 
-def _split_dev_schedule(
-    dev_schedule: dict[pd.Timestamp, tuple[str, ...]],
-) -> tuple[dict[pd.Timestamp, tuple[str, ...]], dict[pd.Timestamp, tuple[str, ...]]]:
-    """Split the dev evaluation period chronologically at its midpoint.
+def _count_closed_trades(realized_weights: pd.DataFrame) -> int:
+    """Deterministic closed-trade sample-size proxy for a rebalanced cross-sectional book.
 
-    The split uses whole monthly rebalance boundaries so a monthly roster never
-    straddles the discovery/qualification seam.  The discovery half alone is
-    allowed to participate in family selection.
+    Counts every ``(bar, symbol)`` realised-weight transition (entry, exit, or
+    long/short flip) in the net-of-turnover construction stream.  This is only
+    the sample-size guard for ``compute_equity_reliability_gate`` -- the gate's
+    bootstrap always samples the marked equity return stream, never these
+    counts.  A book that is rebalanced but never changes composition yields a
+    near-zero count and therefore fails closed (PENDING), which is the honest
+    evidence for a static book.
     """
-    dates = sorted(dev_schedule)
-    mid = len(dates) // 2
-    return (
-        {date: dev_schedule[date] for date in dates[:mid]},
-        {date: dev_schedule[date] for date in dates[mid:]},
-    )
+    arr = realized_weights.to_numpy(dtype=np.float64)
+    if arr.size == 0:
+        return 0
+    delta = np.abs(np.diff(arr, axis=0))
+    return int(np.count_nonzero(delta > 1e-12))
+
+
+def _market_context_inputs(
+    forward_returns: pd.DataFrame,
+    panel_symbols: Sequence[str],
+) -> tuple[np.ndarray, np.ndarray]:
+    """Per-bar equal-weight market return and cross-sectional breadth arrays."""
+    arr = forward_returns[list(panel_symbols)].to_numpy(dtype=np.float64)
+    finite = np.isfinite(arr)
+    counts = finite.sum(axis=1)
+    with np.errstate(invalid="ignore"):
+        zeroed = np.where(finite, arr, 0.0)
+        market = np.where(
+            counts > 0, zeroed.sum(axis=1) / np.maximum(counts, 1), 0.0,
+        )
+    breadth = finite.mean(axis=1)
+    return np.asarray(market, dtype=np.float64), np.asarray(breadth, dtype=np.float64)
+
+
+def _context_features_at(
+    market_returns: np.ndarray,
+    breadth: np.ndarray,
+    bar_index: int,
+    *,
+    window: int = CONTEXT_WINDOW_BARS,
+) -> tuple[float, float, float]:
+    """Context features from completed bars strictly before ``bar_index``."""
+    return compute_context_features(market_returns, breadth, end_idx=bar_index, window=window)
+
+
+def _discovery_context_thresholds(
+    market_returns: np.ndarray,
+    breadth: np.ndarray,
+    discovery_bars: np.ndarray,
+) -> tuple[float, float]:
+    """Discovery-median vol/breadth thresholds used to partition context states."""
+    vols: list[float] = []
+    breadths: list[float] = []
+    for idx in discovery_bars:
+        _mean, vol, mean_breadth = _context_features_at(market_returns, breadth, int(idx))
+        if np.isfinite(vol):
+            vols.append(vol)
+        if np.isfinite(mean_breadth):
+            breadths.append(mean_breadth)
+    if not vols or not breadths:
+        return float("nan"), float("nan")
+    return float(np.median(vols)), float(np.median(breadths))
+
+
+def _segment_context_state(
+    market_returns: np.ndarray,
+    breadth: np.ndarray,
+    deploy_start_index: int,
+    vol_threshold: float,
+    breadth_threshold: float,
+) -> ContextState | None:
+    """Pre-decision context state from the trailing window before deployment."""
+    features = _context_features_at(market_returns, breadth, deploy_start_index)
+    if not all(np.isfinite(value) for value in features):
+        return None
+    if not np.isfinite(vol_threshold) or not np.isfinite(breadth_threshold):
+        return None
+    try:
+        return context_state_for(
+            features, vol_threshold=vol_threshold, breadth_threshold=breadth_threshold,
+        )
+    except ValueError:
+        return None
 
 
 def _build_settled_funding(
@@ -509,8 +596,9 @@ def _screen_discovery_candidates(
     taker: pd.DataFrame,
     settled_funding: pd.DataFrame,
     bars: pd.DatetimeIndex,
+    max_positions: int,
 ) -> tuple[tuple[GrowthCandidateScoreEntry, ...], tuple[_FamilyScreen, ...]]:
-    """Screen every frozen family/window on dev-discovery evidence only."""
+    """Screen every frozen family/window on a discovery evidence window only."""
     entries: list[GrowthCandidateScoreEntry] = []
     families: list[_FamilyScreen] = []
     for definition in STRATEGY_REGISTRY:
@@ -518,7 +606,8 @@ def _screen_discovery_candidates(
         invalid_windows: list[int] = []
         for window in definition.windows:
             screen = screen_growth_strategy_weights(
-                definition.strategy_id, window, schedule, px, taker, settled_funding,
+                definition.strategy_id, window, schedule, px, taker,
+                settled_funding, max_positions,
             )
             if screen.status == "DATA_INVALID":
                 invalid_windows.append(window)
@@ -550,6 +639,187 @@ def _screen_discovery_candidates(
             parameter_scores=scores,
         ))
     return tuple(entries), tuple(families)
+
+def _sleeve_net_stream(
+    screen: GrowthStrategyScreen,
+    fwd: pd.DataFrame,
+    construction: NetConstructionSpec,
+    settled_funding: pd.DataFrame,
+    grid: pd.DatetimeIndex,
+) -> NetReturnStream:
+    """Net-of-turnover return stream for one frozen screen on the trading panel."""
+    forward_returns = fwd[list(screen.weights.columns)]
+    definition = registry_definition(screen.strategy_id)
+    if definition.requires_funding:
+        forward_funding = _build_forward_funding(
+            settled_funding, grid, list(screen.weights.columns),
+        )
+        return _compute_stream(
+            screen.weights, forward_returns, construction, forward_funding,
+        )
+    return _compute_stream(screen.weights, forward_returns, construction)
+
+
+@dataclass(frozen=True)
+class _SleeveEvidence:
+    """Discovery-only evidence for one independently admitted sleeve.
+
+    ``admission_lcb`` is the block-aware lower confidence bound over the full
+    discovery window; ``context_lcb`` is the same bound restricted to discovery
+    bars whose pre-decision context matches the frozen deployment context.  A
+    sleeve with a non-positive admission LCB is CASH and is never routed.
+    """
+
+    family: _FamilyScreen
+    discovery_stream: NetReturnStream
+    discovery_net: pd.Series
+    discovery_realized: pd.DataFrame
+    discovery_net_sharpe: float
+    admission_lcb: float
+    context_lcb: float
+
+
+def _discovery_sleeve_evidence(
+    family: _FamilyScreen,
+    discovery_schedule: dict[pd.Timestamp, tuple[str, ...]],
+    px: pd.DataFrame,
+    fwd: pd.DataFrame,
+    taker: pd.DataFrame,
+    settled_funding: pd.DataFrame,
+    construction: NetConstructionSpec,
+    grid: pd.DatetimeIndex,
+    discovery_bars: pd.DatetimeIndex,
+    max_positions: int,
+    router_config: ReliabilityGateConfig,
+) -> _SleeveEvidence | None:
+    """Measure one sleeve's discovery-only net evidence; fail closed on invalid data."""
+    if family.chosen_parameter is None:
+        return None
+    screen = screen_growth_strategy_weights(
+        family.strategy_id, family.chosen_parameter, discovery_schedule, px, taker,
+        settled_funding, max_positions,
+    )
+    if screen.status != "SCREENED":
+        return None
+    stream = _sleeve_net_stream(screen, fwd, construction, settled_funding, grid)
+    net = stream.net.loc[discovery_bars].dropna()
+    realized = stream.realized_weights.loc[discovery_bars]
+    if len(net) < 2:
+        return None
+    equity = (1.0 + net).cumprod()
+    closed = _count_closed_trades(realized)
+    try:
+        admission_lcb = compute_equity_reliability_gate(
+            equity, closed, config=router_config,
+        ).lcb90_cagr
+    except ValueError:
+        return None
+    return _SleeveEvidence(
+        family=family,
+        discovery_stream=stream,
+        discovery_net=net,
+        discovery_realized=realized,
+        discovery_net_sharpe=_gross_sharpe(net),
+        admission_lcb=float(admission_lcb),
+        context_lcb=float("nan"),
+    )
+
+
+def _discovery_context_evidence(
+    market_returns: np.ndarray,
+    breadth: np.ndarray,
+    discovery_bars: pd.DatetimeIndex,
+    grid: pd.DatetimeIndex,
+) -> tuple[float, float, dict[int, ContextState]]:
+    """Discovery-median vol/breadth thresholds and per-bar pre-decision context states.
+
+    The medians are used only to partition the decision-time context; they are
+    derived from the discovery window alone and never touch the outer
+    deployment or symbol-holdout returns.
+    """
+    positions = grid.get_indexer(discovery_bars)
+    means = np.full(len(positions), np.nan)
+    vols = np.full(len(positions), np.nan)
+    breadths = np.full(len(positions), np.nan)
+    for i, idx in enumerate(positions):
+        mean_ret, vol, mean_breadth = _context_features_at(market_returns, breadth, int(idx))
+        means[i] = mean_ret
+        vols[i] = vol
+        breadths[i] = mean_breadth
+    finite_vols = vols[np.isfinite(vols)]
+    finite_breadths = breadths[np.isfinite(breadths)]
+    vol_threshold = float(np.nanmedian(finite_vols)) if len(finite_vols) else float("nan")
+    breadth_threshold = (
+        float(np.nanmedian(finite_breadths)) if len(finite_breadths) else float("nan")
+    )
+    states: dict[int, ContextState] = {}
+    for i, idx in enumerate(positions):
+        if not (np.isfinite(means[i]) and np.isfinite(vols[i]) and np.isfinite(breadths[i])):
+            continue
+        try:
+            states[int(idx)] = context_state_for(
+                (means[i], vols[i], breadths[i]),
+                vol_threshold=vol_threshold,
+                breadth_threshold=breadth_threshold,
+            )
+        except ValueError:
+            continue
+    return vol_threshold, breadth_threshold, states
+
+
+def _context_sleeve_lcb(
+    evidence: _SleeveEvidence,
+    context_state: ContextState,
+    states: Mapping[int, ContextState],
+    grid: pd.DatetimeIndex,
+    router_config: ReliabilityGateConfig,
+) -> float:
+    """Lower confidence bound of a sleeve restricted to its matching context.
+
+    Returns ``nan`` (fail closed) when the context-sleeve pair has fewer than
+    ``MIN_CONTEXT_SAMPLES`` discovery bars or the restricted equity is invalid,
+    so a rare context can never fabricate a positive LCB.
+    """
+    matched = [
+        int(idx) for idx, state in states.items()
+        if state == context_state and int(idx) < len(grid)
+    ]
+    if len(matched) < MIN_CONTEXT_SAMPLES:
+        return float("nan")
+    net = evidence.discovery_net.loc[grid[matched]].dropna()
+    realized = evidence.discovery_realized.loc[grid[matched]]
+    if len(net) < 2:
+        return float("nan")
+    equity = (1.0 + net).cumprod()
+    try:
+        return compute_equity_reliability_gate(
+            equity, _count_closed_trades(realized), config=router_config,
+        ).lcb90_cagr
+    except ValueError:
+        return float("nan")
+
+
+def _segment_sizing(
+    discovery_stream: NetReturnStream,
+    sizing_config: GrowthSizingConfig,
+) -> GrowthSizingResult:
+    """Size a segment strictly from returns known before its deployment window."""
+    unit_returns = discovery_stream.net.to_numpy(dtype=np.float64)
+    unit_returns = unit_returns[np.isfinite(unit_returns)]
+    return solve_growth_optimal_risk(unit_returns, sizing_config)
+
+
+def _stressed_construction(spec: NetConstructionSpec) -> NetConstructionSpec:
+    """1.5x fee, 2.0x slippage stress construction; cadence and band unchanged."""
+    costs = spec.costs
+    return NetConstructionSpec(
+        rebalance_bars=spec.rebalance_bars,
+        no_trade_band=spec.no_trade_band,
+        costs=CostModel(
+            fee_rate=costs.fee_rate * 1.5,
+            slippage_rate=costs.slippage_rate * 2.0,
+        ),
+    )
 
 
 def _family_tiebreak(family: _FamilyScreen) -> tuple[float, tuple[int, ...]]:
@@ -589,22 +859,23 @@ def _scorecard(
 
 
 def run_growth_engine_evaluation(request: GrowthEngineEvaluationRequest) -> GrowthEngineReport:
-    """Single orchestration path for the growth-engine evaluation.
+    """Rolling, context-conditioned multi-sleeve growth-engine evaluation.
 
     ``resolve_evaluation_end`` -> ``earliest_admissible_start`` ->
-    ``build_universe_schedule`` -> frozen dev discovery (every family/window on
-    the discovery half) -> dev finalist qualification (net OOS t-stat and gross
-    score) + symbol-holdout gross score -> ``evaluate_falsification`` (plateau,
-    Bonferroni multiplicity with ``family_size=12``,
-    ``compute_equal_duration_fold_distribution`` fold-concentration on the
-    qualification equity, symbol holdout) -> ``compute_net_return_stream`` ->
-    ``solve_growth_optimal_risk`` -> ``compose_promotion_verdict``.  Fail-closed:
-    when the admissible start
-    cannot be derived, no family passes the discovery plateau, or the
-    falsification verdict fails, the report is ``NO_ADMISSIBLE_ALPHA`` with a
-    flat CASH equity curve, zero trades, and a deterministic candidate
-    scorecard.  The holdout partition only ever inspects the dev-selected
-    finalist.
+    ``build_universe_schedule`` -> for every outer deployment segment: frozen
+    discovery on the immediately preceding 12 calendar months, plateau selection
+    of at most one parameter per source family, discovery-only block-aware
+    lower-confidence sleeve admission, and a pre-decision context router that
+    freezes identity/parameters/sleeve weights/risk before each frozen
+    3-month deployment segment -> stitched out-of-sample net returns ->
+    ``evaluate_falsification`` (plateau, Bonferroni multiplicity
+    ``family_size=12``, equal-duration 6-month fold concentration, symbol
+    holdout) -> realised-risk overlay -> ``compose_promotion_verdict`` from real
+    observation, fold, stress, and symbol-holdout reliability evidence.
+    Fail-closed: insufficient data/span/breadth, a missing fold, an infeasible
+    risk, or any observation/fold/stress/multiplicity/holdout gate failure
+    yields ``NO_ADMISSIBLE_ALPHA`` with a flat CASH equity curve, zero trades,
+    an empty promotion result, and a deterministic candidate scorecard.
     """
     end = resolve_evaluation_end(request.end, unseal_holdout=request.unseal_holdout)
     if end is None:
@@ -634,22 +905,22 @@ def run_growth_engine_evaluation(request: GrowthEngineEvaluationRequest) -> Grow
             scorecard=_empty_scorecard("no_admissible_start"),
         )
 
-    dates_from_start = [date for date in rebalance_dates if date >= start]
+    discovery_start = start - pd.DateOffset(months=DISCOVERY_MONTHS)
+    schedule_start = min(discovery_start, rebalance_dates[0])
 
-    # full_schedule (unscoped) is the realized universe used to derive the
-    # dev/holdout split for falsification; the symbol_scope filter is applied
-    # only afterwards, to the trading panel, so a default symbol_scope="dev"
-    # restricts capital deployment without silently emptying the holdout side
-    # of the falsification's symbol_holdout test.
-    full_schedule = build_universe_schedule(coverage, liquidity, rebalance_dates, request.universe)
-    full_schedule = {date: roster for date, roster in full_schedule.items() if date >= start}
+    full_schedule = build_universe_schedule(
+        coverage, liquidity,
+        [date for date in rebalance_dates if date >= schedule_start],
+        request.universe,
+    )
 
     backfill_candidates = derive_backfill_candidates(
-        coverage, liquidity, dates_from_start, request.universe,
+        coverage, liquidity, [date for date in rebalance_dates if date >= start],
+        request.universe,
     )
     _logger.info(
-        "[EVAL] start=%s backfill_candidates=%d universe_dates=%d",
-        start, len(backfill_candidates), len(full_schedule),
+        "[EVAL] start=%s discovery_start=%s backfill_candidates=%d universe_dates=%d",
+        start, discovery_start, len(backfill_candidates), len(full_schedule),
     )
 
     all_symbols = sorted({sym for roster in full_schedule.values() for sym in roster})
@@ -659,7 +930,7 @@ def run_growth_engine_evaluation(request: GrowthEngineEvaluationRequest) -> Grow
             scorecard=_empty_scorecard("empty_universe"),
         )
 
-    px, fwd, taker = _build_price_panel(all_symbols, frames, start, end_ts)
+    px, fwd, taker = _build_price_panel(all_symbols, frames, schedule_start, end_ts)
 
     dev_members = {
         sym for sym in all_symbols
@@ -669,7 +940,6 @@ def run_growth_engine_evaluation(request: GrowthEngineEvaluationRequest) -> Grow
         sym for sym in all_symbols
         if symbol_partition(sym, request.universe.dev_fraction) == "holdout"
     }
-    dev_schedule = _subset_schedule(full_schedule, dev_members)
     holdout_schedule = _subset_schedule(full_schedule, holdout_members)
 
     schedule = _apply_scope(full_schedule, request.symbol_scope, request.universe)
@@ -680,191 +950,320 @@ def run_growth_engine_evaluation(request: GrowthEngineEvaluationRequest) -> Grow
             scorecard=_empty_scorecard("empty_panel"),
         )
 
-    discovery_schedule, qualification_schedule = _split_dev_schedule(dev_schedule)
-    if len(discovery_schedule) < 2 or len(qualification_schedule) < 2:
+    segments = build_rolling_segments(sorted(schedule))
+    segments = [segment for segment in segments if segment.deployment_dates[0] >= start]
+    if not enough_deployment_folds(segments):
         return _no_admissible_alpha(
             request, end_ts, schedule, start=start, falsification=None, sizing=None,
-            scorecard=_empty_scorecard("insufficient_dev_rosters"),
+            scorecard=_empty_scorecard("insufficient_rolling_span"),
         )
 
     grid = px.index
     month_key = grid.normalize() - pd.to_timedelta(grid.day - 1, unit="D")
-    discovery_bars = grid[month_key.isin(set(discovery_schedule))]
-    qualification_bars = grid[month_key.isin(set(qualification_schedule))]
-
     settled_funding = _build_settled_funding(all_symbols, grid)
-    entries, families = _screen_discovery_candidates(
-        discovery_schedule, px, fwd, taker, settled_funding, discovery_bars,
-    )
-    for definition in STRATEGY_REGISTRY:
-        # C4 measurement-only diagnostic: the discovery screens carry weights
-        # only over discovery bars, so the qualification-period window streams
-        # are screened here against the qualification schedule. This pass feeds
-        # only the [EVAL] family_correlation log; it never alters FAMILY_SIZE,
-        # the multiplicity floor, or any falsification/promotion decision.
-        qualification_streams: dict[int, pd.Series] = {}
-        for window in definition.windows:
-            screen = screen_growth_strategy_weights(
-                definition.strategy_id, window, qualification_schedule, px, taker,
-                settled_funding,
-            )
-            if screen.status != "SCREENED":
-                continue
-            qualification_streams[window] = (
-                (screen.weights * fwd).sum(axis=1).loc[qualification_bars]
-            )
-        correlations = family_window_correlation(qualification_streams)
-        if correlations:
-            pairs = ",".join(
-                f"{left}-{right}:{value:.3f}"
-                for (left, right), value in sorted(correlations.items())
-            )
-            _logger.info(
-                "[EVAL] family_correlation strategy=%s windows=%d pairs=%s",
-                definition.strategy_id, len(qualification_streams), pairs,
-            )
+    market_returns, breadth = _market_context_inputs(fwd, panel_symbols)
 
-    passing = [f for f in families if f.passed and f.chosen_parameter is not None]
-    screened = [f for f in families if f.chosen_parameter is not None]
-    if passing:
-        selected = max(passing, key=_family_tiebreak)
-    elif screened:
-        selected = max(screened, key=_family_tiebreak)
-        return _no_admissible_alpha(
-            request, end_ts, schedule, start=start,
-            falsification=_diagnostic_falsification(selected), sizing=None,
-            scorecard=_scorecard(entries, selected=selected, reason="no_passing_family"),
-            selected_strategy=selected.strategy_id,
-        )
-    else:
-        return _no_admissible_alpha(
-            request, end_ts, schedule, start=start, falsification=None, sizing=None,
-            scorecard=_scorecard(entries, selected=None, reason="no_screenable_candidate"),
-        )
-
-    assert selected.chosen_parameter is not None
-    selected_parameter = int(selected.chosen_parameter)
-    screen = screen_growth_strategy_weights(
-        selected.strategy_id, selected_parameter, schedule, px, taker, settled_funding,
-    )
-    if screen.status == "DATA_INVALID":
-        return _no_admissible_alpha(
-            request, end_ts, schedule, start=start, falsification=None, sizing=None,
-            scorecard=_scorecard(entries, selected=selected, reason="finalist_data_invalid"),
-            selected_strategy=selected.strategy_id,
-        )
-
-    target_weights = screen.weights
-    forward_returns = fwd[list(target_weights.columns)]
-    definition = registry_definition(selected.strategy_id)
-    if definition.requires_funding:
-        forward_funding = _build_forward_funding(
-            settled_funding, grid, list(target_weights.columns),
-        )
-        stream = _compute_stream(
-            target_weights, forward_returns, request.construction, forward_funding,
-        )
-    else:
-        stream = _compute_stream(target_weights, forward_returns, request.construction)
-
-    unit_returns = stream.net.to_numpy(dtype=np.float64)
-    unit_returns = unit_returns[np.isfinite(unit_returns)]
     sizing_config = GrowthSizingConfig(
         risk_grid=(0.001, 0.005, 0.02),
         horizon_years=5.0,
         n_paths=500,
     )
-    sizing = solve_growth_optimal_risk(unit_returns, sizing_config)
+    router_config = dataclasses.replace(ReliabilityGateConfig(), n_bootstrap=500)
 
-    full_pnl = (target_weights * fwd).sum(axis=1)
-    dev_qualification_score = _gross_sharpe(full_pnl.loc[qualification_bars])
-    qualification_net = stream.net.loc[qualification_bars]
-    oos_t_stat = _oos_t_stat(qualification_net)
-    fold_gate_pass = _qualification_fold_gate_pass(qualification_net)
+    stitched_nets: list[pd.Series] = []
+    stitched_weights: list[pd.DataFrame] = []
+    stress_nets: list[pd.Series] = []
+    stress_weights: list[pd.DataFrame] = []
+    scorecard_entries: tuple[GrowthCandidateScoreEntry, ...] = ()
+    families: tuple[_FamilyScreen, ...] = ()
+    finalist: _FamilyScreen | None = None
+    finalist_sizing: GrowthSizingResult | None = None
+    finalist_context: ContextState | None = None
+    finalist_dev_score = 0.0
+    deployed_sleeve: str | None = None
+    binding: str | None = None
+    had_passing_family = False
+    had_admitted_sleeve = False
 
-    holdout_screen = screen_growth_strategy_weights(
-        selected.strategy_id, selected_parameter, holdout_schedule, px, taker,
-        settled_funding,
+    for segment in segments:
+        disc_schedule = {
+            date: schedule[date] for date in segment.discovery_dates if date in schedule
+        }
+        dep_schedule = {
+            date: schedule[date] for date in segment.deployment_dates if date in schedule
+        }
+        discovery_bars = grid[month_key.isin(set(disc_schedule))]
+        deployment_bars = grid[month_key.isin(set(dep_schedule))]
+        if len(discovery_bars) < 2 or len(deployment_bars) < 2:
+            binding = "insufficient_bars"
+            continue
+
+        entries, families = _screen_discovery_candidates(
+            disc_schedule, px, fwd, taker, settled_funding, discovery_bars,
+            request.universe.max_positions,
+        )
+        scorecard_entries = entries
+        passing = [f for f in families if f.passed and f.chosen_parameter is not None]
+        if not passing:
+            binding = "no_passing_family"
+            continue
+        had_passing_family = True
+
+        evidence: dict[str, _SleeveEvidence] = {}
+        for family in passing:
+            sleeve_ev = _discovery_sleeve_evidence(
+                family, disc_schedule, px, fwd, taker, settled_funding,
+                request.construction, grid, discovery_bars,
+                request.universe.max_positions, router_config,
+            )
+            if sleeve_ev is not None and sleeve_ev.admission_lcb > 0.0:
+                evidence[family.strategy_id] = sleeve_ev
+        if not evidence:
+            binding = "no_admitted_sleeve"
+            continue
+        had_admitted_sleeve = True
+
+        vol_threshold, breadth_threshold, states = _discovery_context_evidence(
+            market_returns, breadth, discovery_bars, grid,
+        )
+        deploy_start_index = int(grid.get_indexer([deployment_bars[0]])[0])
+        context = _segment_context_state(
+            market_returns, breadth, deploy_start_index, vol_threshold, breadth_threshold,
+        )
+        if context is None:
+            binding = "no_context"
+            continue
+
+        for sid, sleeve_ev in evidence.items():
+            evidence[sid] = _SleeveEvidence(
+                family=sleeve_ev.family,
+                discovery_stream=sleeve_ev.discovery_stream,
+                discovery_net=sleeve_ev.discovery_net,
+                discovery_realized=sleeve_ev.discovery_realized,
+                discovery_net_sharpe=sleeve_ev.discovery_net_sharpe,
+                admission_lcb=sleeve_ev.admission_lcb,
+                context_lcb=_context_sleeve_lcb(
+                    sleeve_ev, context, states, grid, router_config,
+                ),
+            )
+        chosen_sid = causal_router({
+            sid: sleeve_ev.context_lcb for sid, sleeve_ev in evidence.items()
+        })
+        if chosen_sid is None:
+            binding = "no_context_sleeve"
+            continue
+        chosen_evidence = evidence[chosen_sid]
+        chosen = chosen_evidence.family
+        if chosen.chosen_parameter is None:
+            binding = "no_chosen_parameter"
+            continue
+
+        screen = screen_growth_strategy_weights(
+            chosen.strategy_id, chosen.chosen_parameter, dep_schedule, px, taker,
+            settled_funding, request.universe.max_positions,
+        )
+        if screen.status == "DATA_INVALID":
+            binding = "finalist_data_invalid"
+            continue
+        dep_stream = _sleeve_net_stream(
+            screen, fwd, request.construction, settled_funding, grid,
+        )
+        dep_net = dep_stream.net.loc[deployment_bars].dropna()
+        if len(dep_net) < 2:
+            binding = "no_deployment_returns"
+            continue
+
+        sizing = _segment_sizing(chosen_evidence.discovery_stream, sizing_config)
+        if sizing.selected_risk is None:
+            binding = "infeasible_risk"
+            continue
+
+        realized = dep_stream.realized_weights.loc[dep_net.index]
+        scaled_net, scaled_weights = apply_realised_risk_overlay(
+            dep_net, realized, sizing.selected_risk, sizing_config.reference_risk,
+        )
+
+        stress_construction = _stressed_construction(request.construction)
+        delayed_weights = screen.weights.shift(1).fillna(0.0)
+        forward_funding = (
+            _build_forward_funding(
+                settled_funding, grid, list(delayed_weights.columns),
+            )
+            if registry_definition(chosen.strategy_id).requires_funding
+            else None
+        )
+        stress_stream = _compute_stream(
+            delayed_weights,
+            fwd[list(delayed_weights.columns)],
+            stress_construction,
+            forward_funding,
+        )
+        stress_net = stress_stream.net.loc[deployment_bars].dropna()
+        if len(stress_net) < 2:
+            binding = "no_stress_returns"
+            continue
+
+        stitched_nets.append(scaled_net)
+        stitched_weights.append(scaled_weights)
+        stress_nets.append(stress_net)
+        stress_weights.append(stress_stream.realized_weights.loc[stress_net.index])
+        finalist = chosen
+        finalist_sizing = sizing
+        finalist_context = context
+        finalist_dev_score = evidence[chosen_sid].discovery_net_sharpe
+        deployed_sleeve = chosen.strategy_id
+        binding = None
+
+    if not stitched_nets:
+        diagnostic = next(
+            (f for f in families if f.chosen_parameter is not None), None,
+        )
+        if not had_passing_family:
+            reason = "no_passing_family"
+        elif not had_admitted_sleeve:
+            reason = "no_admitted_sleeve"
+        else:
+            reason = binding or "no_deployed_segment"
+        return _no_admissible_alpha(
+            request, end_ts, schedule, start=start,
+            falsification=(
+                _diagnostic_falsification(diagnostic) if diagnostic is not None else None
+            ),
+            sizing=None,
+            scorecard=_scorecard(
+                scorecard_entries, selected=diagnostic, reason=reason,
+            ),
+            selected_strategy=diagnostic.strategy_id if diagnostic is not None else None,
+        )
+
+    oos_net = pd.concat(stitched_nets)
+    oos_net = oos_net[~oos_net.index.duplicated(keep="last")].sort_index()
+    oos_weights = pd.concat(stitched_weights)
+    oos_weights = oos_weights[~oos_weights.index.duplicated(keep="last")].sort_index()
+    closed_trades = _count_closed_trades(oos_weights)
+    deployed_equity = (1.0 + oos_net).cumprod()
+
+    oos_t_stat = _oos_t_stat(oos_net)
+    try:
+        folds = compute_equal_duration_fold_distribution(
+            deployed_equity, ReliabilityGateConfig(), fold_duration=_FOLD_DURATION,
+        )
+        fold_gate_pass = folds.gate_pass
+    except ValueError as exc:
+        _logger.warning("[EVAL] fold evidence fail-closed reason=%s", exc)
+        folds = FoldDistributionResult(
+            n_folds=0, median_fold_cagr=0.0, worst_fold_cagr=0.0,
+            median_fold_calmar=0.0, max_period_contribution=0.0, gate_pass=False,
+        )
+        fold_gate_pass = False
+
+    observation = compute_equity_reliability_gate(deployed_equity, closed_trades)
+
+    stress_net = pd.concat(stress_nets)
+    stress_net = stress_net[~stress_net.index.duplicated(keep="last")].sort_index()
+    stress_weights_concat = pd.concat(stress_weights)
+    stress_weights_concat = stress_weights_concat[
+        ~stress_weights_concat.index.duplicated(keep="last")
+    ].sort_index()
+    stress_equity = (1.0 + stress_net).cumprod()
+    stress_gate = compute_equity_reliability_gate(
+        stress_equity, _count_closed_trades(stress_weights_concat),
+        dataclasses.replace(ReliabilityGateConfig(), hurdle_rate=0.0),
     )
-    if holdout_screen.status == "SCREENED":
-        holdout_pnl = (holdout_screen.weights * fwd).sum(axis=1)
-        holdout_bars = grid[month_key.isin(set(holdout_schedule))]
-        holdout_score = _gross_sharpe(holdout_pnl.loc[holdout_bars])
-    else:
-        holdout_score = 0.0
+
+    assert finalist is not None
+    assert finalist.chosen_parameter is not None
+    holdout_gate: ReliabilityGateResult | None = None
+    holdout_score = 0.0
+    if holdout_schedule and any(roster for roster in holdout_schedule.values()):
+        holdout_screen = screen_growth_strategy_weights(
+            finalist.strategy_id, finalist.chosen_parameter, holdout_schedule, px, taker,
+            settled_funding, request.universe.max_positions,
+        )
+        if holdout_screen.status == "SCREENED":
+            holdout_stream = _sleeve_net_stream(
+                holdout_screen, fwd, request.construction, settled_funding, grid,
+            )
+            holdout_bars = grid[month_key.isin(set(holdout_schedule))]
+            holdout_net = holdout_stream.net.loc[holdout_bars].dropna()
+            if len(holdout_net) >= 2:
+                holdout_score = _gross_sharpe(holdout_net)
+                holdout_equity = (1.0 + holdout_net).cumprod()
+                holdout_gate = compute_equity_reliability_gate(
+                    holdout_equity,
+                    _count_closed_trades(holdout_stream.realized_weights.loc[holdout_net.index]),
+                )
 
     falsification = evaluate_falsification(
-        parameter_scores=selected.parameter_scores,
-        chosen_parameter=float(selected_parameter),
+        parameter_scores=finalist.parameter_scores,
+        chosen_parameter=float(finalist.chosen_parameter),
         oos_t_stat=oos_t_stat,
         family_size=FAMILY_SIZE,
-        dev_score=dev_qualification_score,
+        dev_score=finalist_dev_score,
         holdout_score=holdout_score,
         fold_gate_pass=fold_gate_pass,
         config=FalsificationConfig(),
     )
 
+    if not falsification.passed:
+        # The falsification verdict already composes plateau, multiplicity, the
+        # equal-duration fold-concentration gate, and the symbol-holdout
+        # retention gate, so its binding constraint is reported directly.
+        binding_gate = falsification.binding_constraint
+    elif observation.verdict != "PASS":
+        binding_gate = "observation"
+    elif stress_gate.verdict != "PASS":
+        binding_gate = "stress"
+    elif holdout_gate is None or holdout_gate.verdict != "PASS":
+        binding_gate = "symbol_holdout"
+    else:
+        binding_gate = "none"
+
+    scorecard = _scorecard(scorecard_entries, selected=finalist, reason=None)
+    active_mask = oos_weights.to_numpy(dtype=np.float64) != 0.0
+    active_symbols = (
+        float(np.mean(np.count_nonzero(active_mask, axis=1)))
+        if active_mask.size else 0.0
+    )
+    weight_delta = np.abs(np.diff(oos_weights.to_numpy(dtype=np.float64), axis=0))
+    turnover = float(np.mean(weight_delta.sum(axis=1))) if weight_delta.size else 0.0
     audit_required = intrabar_audit_required(
         competing_intrabar_exits=1, stop_atr_mult=3.0,
     )
     _logger.info(
-        "[EVAL] symbols=%d traded=%d dev=%d holdout=%d strategy=%s parameter=%s "
-        "oos_t=%.3f falsification=%s sizing=%s audit_required=%s",
+        "[EVAL] symbols=%d traded=%d dev=%d holdout=%d source=%s context=%s "
+        "fold=%d active_symbols=%.2f turnover=%.4f net_t=%.3f lcb=%.4f "
+        "stress=%s holdout=%s binding=%s audit_required=%s",
         len(all_symbols), len(panel_symbols), len(dev_members), len(holdout_members),
-        selected.strategy_id, selected_parameter, oos_t_stat,
-        falsification.binding_constraint, sizing.binding_constraint, audit_required,
+        deployed_sleeve, str(finalist_context), folds.n_folds, active_symbols,
+        turnover, oos_t_stat, observation.lcb90_cagr, stress_gate.verdict,
+        holdout_gate.verdict if holdout_gate is not None else "MISSING",
+        binding_gate, audit_required,
     )
 
-    scorecard = _scorecard(entries, selected=selected, reason=None)
-    if not falsification.passed or sizing.selected_risk is None:
+    if binding_gate != "none":
         return _no_admissible_alpha(
             request, end_ts, schedule, start=start,
-            falsification=falsification, sizing=sizing,
-            scorecard=scorecard, selected_strategy=selected.strategy_id,
+            falsification=falsification, sizing=finalist_sizing,
+            scorecard=_scorecard(
+                scorecard_entries, selected=finalist, reason=binding_gate,
+            ),
+            selected_strategy=finalist.strategy_id,
         )
 
-    equity = request.initial_equity * (1.0 + stream.net).cumprod()
-    promotion = compose_promotion_verdict(
-        observation=ReliabilityGateResult(
-            lcb90_cagr=0.0, lcb95_cagr=0.0, p_negative=0.0, point_cagr=0.0,
-            t_stat=falsification.oos_t_stat, trade_count=0, block_size_used=1,
-            verdict="PASS" if falsification.passed else "FAIL",
-        ),
-        folds=FoldDistributionResult(
-            n_folds=0, median_fold_cagr=0.0, worst_fold_cagr=0.0,
-            median_fold_calmar=0.0, max_period_contribution=0.0,
-            gate_pass=sizing.selected_risk is not None,
-        ),
-        stress=ReliabilityGateResult(
-            lcb90_cagr=0.0, lcb95_cagr=0.0, p_negative=0.0, point_cagr=0.0,
-            t_stat=0.0, trade_count=0, block_size_used=1, verdict="PASS",
-        ),
-        holdout=None,
-    )
-
+    equity = request.initial_equity * deployed_equity
+    promotion = compose_promotion_verdict(observation, folds, stress_gate, holdout_gate)
     report = GrowthEngineReport(
         status="PASS",
         equity=equity,
         trades=_empty_trades(),
         falsification=falsification,
-        sizing=sizing,
+        sizing=finalist_sizing,
         universe_schedule=schedule,
         start=start,
         promotion=promotion,
         scorecard=scorecard,
-        selected_strategy=selected.strategy_id,
+        selected_strategy=finalist.strategy_id,
     )
     record = _record_run(request, report, end) if request.log_run else None
-    return GrowthEngineReport(
-        status="PASS",
-        equity=equity,
-        trades=_empty_trades(),
-        falsification=falsification,
-        sizing=sizing,
-        universe_schedule=schedule,
-        start=start,
-        promotion=promotion,
-        record=record,
-        scorecard=scorecard,
-        selected_strategy=selected.strategy_id,
-    )
+    return dataclasses.replace(report, record=record)
