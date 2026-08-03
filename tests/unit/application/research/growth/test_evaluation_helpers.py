@@ -1,0 +1,187 @@
+from __future__ import annotations
+
+from pathlib import Path
+from unittest.mock import patch
+
+import numpy as np
+import pandas as pd
+
+from src.application.research.growth import evaluation as ev
+
+
+def _grid(n: int = 500, start: str = "2024-01-01") -> pd.DatetimeIndex:
+    return pd.date_range(start, periods=n, freq="4h", tz="UTC")
+
+
+def _schedule(grid: pd.DatetimeIndex) -> dict[pd.Timestamp, tuple[str, ...]]:
+    months = pd.unique(grid.normalize() - pd.to_timedelta(grid.day - 1, unit="D"))
+    return dict.fromkeys(
+        (pd.Timestamp(m) for m in months), ("AAAUSDT", "BBBUSDT"),
+    )
+
+
+class TestSplitDevSchedule:
+    def test_splits_chronologically_at_midpoint(self) -> None:
+        dates = [
+            pd.Timestamp(f"2024-{m:02d}-01", tz="UTC") for m in range(1, 13)
+        ]
+        schedule = dict.fromkeys(dates, ("AAAUSDT",))
+        discovery, qualification = ev._split_dev_schedule(schedule)
+        assert list(discovery) == dates[:6]
+        assert list(qualification) == dates[6:]
+
+    def test_odd_count_assigns_extra_month_to_qualification(self) -> None:
+        dates = [
+            pd.Timestamp(f"2024-{m:02d}-01", tz="UTC") for m in range(1, 9)
+        ]
+        schedule = dict.fromkeys(dates, ("AAAUSDT",))
+        discovery, qualification = ev._split_dev_schedule(schedule)
+        assert len(discovery) == 4
+        assert len(qualification) == 4
+
+
+class TestBuildForwardFunding:
+    def test_aligns_present_columns_and_zero_fills_target(self) -> None:
+        grid = _grid()
+        raw = pd.DataFrame(
+            {"AAAUSDT": [1e-4] * 3},
+            index=grid[:3],
+        )
+        out = ev._build_forward_funding(raw, grid, ["AAAUSDT", "BBBUSDT"])
+        assert out is not None
+        assert list(out.columns) == ["AAAUSDT", "BBBUSDT"]
+        assert out.index.equals(grid)
+        # The event at the first bar is pre-decision and is never realized; the
+        # events at bars 1 and 2 fall inside (bar[0], bar[1]] and (bar[1], bar[2]].
+        assert out["AAAUSDT"].iloc[0] == 1e-4
+        assert out["AAAUSDT"].iloc[1] == 1e-4
+        assert out["AAAUSDT"].iloc[2] == 0.0
+        assert np.allclose(out["BBBUSDT"].to_numpy(), 0.0)
+
+    def test_returns_none_when_no_target_column_has_funding(self) -> None:
+        grid = _grid()
+        raw = pd.DataFrame({"ZZZUSDT": [1e-4]}, index=grid[:1])
+        assert ev._build_forward_funding(raw, grid, ["AAAUSDT"]) is None
+
+
+class TestBuildSettledFunding:
+    def test_returns_empty_frame_when_funding_dir_missing(
+        self, tmp_path: Path,
+    ) -> None:
+        grid = _grid()
+        missing_dir = tmp_path / "does-not-exist"
+
+        def _path(symbol: str) -> Path:
+            return missing_dir / f"{symbol}.parquet"
+
+        with patch.object(ev, "funding_path", _path):
+            frame = ev._build_settled_funding(["AAAUSDT"], grid)
+        assert list(frame.columns) == []
+
+    def test_skips_symbols_whose_funding_cannot_be_loaded(
+        self, tmp_path: Path,
+    ) -> None:
+        grid = _grid()
+
+        def _path(symbol: str) -> Path:
+            if symbol == "":
+                return tmp_path
+            raise ev.DataIntegrityError("no funding file")
+
+        with patch.object(ev, "funding_path", _path):
+            frame = ev._build_settled_funding(["AAAUSDT", "BBBUSDT"], grid)
+        assert frame.empty
+
+    def test_builds_frame_from_loaded_series(self, tmp_path: Path) -> None:
+        grid = _grid()
+        rates = pd.Series([1e-4, 2e-4, 3e-4], index=grid[:3])
+
+        def _path(symbol: str) -> Path:
+            return tmp_path / f"{symbol}.parquet"
+
+        def _loader(path: Path) -> pd.Series:
+            return rates if "AAAUSDT" in str(path) else rates * 2.0
+
+        with (
+            patch.object(ev, "funding_path", _path),
+            patch.object(ev, "load_funding_rates", _loader),
+        ):
+            frame = ev._build_settled_funding(["AAAUSDT", "BBBUSDT"], grid)
+        assert list(frame.columns) == ["AAAUSDT", "BBBUSDT"]
+        assert len(frame) == 3
+        assert np.allclose(frame["AAAUSDT"].to_numpy(), [1e-4, 2e-4, 3e-4])
+
+
+class TestFamilySelection:
+    def _family(self, strategy_id: str, score: float, passed: bool = False) -> ev._FamilyScreen:
+        return ev._FamilyScreen(
+            strategy_id=strategy_id,
+            chosen_parameter=42,
+            chosen_score=score,
+            passed=passed,
+            parameter_scores={42.0: score},
+        )
+
+    def test_tiebreak_prefers_higher_score_then_smaller_id(self) -> None:
+        families = [self._family("zebra_v1", 5.0), self._family("alpha_v1", 9.0), self._family("mid_v1", 9.0)]
+        best = max(families, key=ev._family_tiebreak)
+        assert best.strategy_id == "alpha_v1"
+
+    def test_diagnostic_falsification_fails_closed_on_plateau(self) -> None:
+        family = self._family("taker_imbalance_v1", 0.5)
+        verdict = ev._diagnostic_falsification(family)
+        assert verdict is not None
+        assert verdict.passed is False
+        assert verdict.binding_constraint == "plateau"
+
+    def test_diagnostic_falsification_none_for_unscreened_family(self) -> None:
+        family = ev._FamilyScreen(
+            strategy_id="x", chosen_parameter=None, chosen_score=None,
+            passed=False, parameter_scores={},
+        )
+        assert ev._diagnostic_falsification(family) is None
+
+
+class TestScorecardHelpers:
+    def test_empty_scorecard_carries_reason_and_family_size(self) -> None:
+        card = ev._empty_scorecard("insufficient_data")
+        assert card.family_size == ev.FAMILY_SIZE
+        assert card.reason == "insufficient_data"
+        assert card.entries == ()
+        assert card.selected_strategy_id is None
+
+    def test_scorecard_records_selected_family(self) -> None:
+        entries: tuple[ev.GrowthCandidateScoreEntry, ...] = ()
+        family = ev._FamilyScreen(
+            strategy_id="donchian_channel_position_v1", chosen_parameter=84,
+            chosen_score=1.5, passed=True, parameter_scores={84.0: 1.5},
+        )
+        card = ev._scorecard(entries, selected=family, reason=None)
+        assert card.selected_strategy_id == "donchian_channel_position_v1"
+        assert card.selected_parameter == 84
+        assert card.reason is None
+
+
+class TestScreenDiscoveryCandidates:
+    def test_data_invalid_funding_rows_and_plateau_flag(self) -> None:
+        grid = _grid()
+        rng = np.random.default_rng(0)
+        px = pd.DataFrame({
+            "AAAUSDT": 100.0 + np.cumsum(rng.normal(0, 0.05, len(grid))),
+            "BBBUSDT": 100.0 + np.cumsum(rng.normal(0, 0.05, len(grid))),
+        }, index=grid)
+        fwd = px.pct_change().fillna(0.0)
+        taker = pd.DataFrame(0.5, index=grid, columns=px.columns)
+        empty = pd.DataFrame(index=grid)
+        schedule = _schedule(grid)
+        bars = grid
+        entries, families = ev._screen_discovery_candidates(
+            schedule, px, fwd, taker, empty, bars,
+        )
+        by_id = {entry.strategy_id: entry for entry in entries}
+        assert by_id["funding_contrarian_v1"].status == "DATA_INVALID"
+        assert by_id["funding_contrarian_v1"].dev_discovery_score is None
+        assert by_id["taker_imbalance_v1"].status == "SCREENED"
+        family_map = {f.strategy_id: f for f in families}
+        assert family_map["funding_contrarian_v1"].chosen_parameter is None
+        assert family_map["funding_contrarian_v1"].passed is False
