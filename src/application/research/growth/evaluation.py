@@ -10,11 +10,11 @@ from typing import TYPE_CHECKING, Literal
 import numpy as np
 import pandas as pd
 
-from src.common.config import ohlcv_path
+from src.common.config import funding_path, ohlcv_path
 from src.common.errors import DataIntegrityError
-from src.market_data.storage.loaders import load_ohlcv_1h_as
+from src.market_data.storage.loaders import load_funding_rates, load_ohlcv_1h_as
 from src.research.contracts import GrowthEngineEvaluationRequest
-from src.research.evaluation.falsification import FalsificationConfig, evaluate_falsification
+from src.research.evaluation.falsification import FalsificationConfig, evaluate_falsification, evaluate_parameter_plateau
 from src.research.evaluation.policy import resolve_evaluation_end
 from src.research.evaluation.promotion import PromotionResult, compose_promotion_verdict
 from src.research.evaluation.reliability import (
@@ -22,6 +22,13 @@ from src.research.evaluation.reliability import (
     ReliabilityGateResult,
 )
 from src.research.execution.intrabar_audit import intrabar_audit_required
+from src.research.portfolio.growth_strategy_library import (
+    FAMILY_SIZE,
+    STRATEGY_REGISTRY,
+    align_funding_bars,
+    registry_definition,
+    screen_growth_strategy_weights,
+)
 from src.research.portfolio.net_construction import NetConstructionSpec, compute_net_return_stream
 from src.research.risk.growth_sizing import GrowthSizingConfig, solve_growth_optimal_risk
 from src.research.universe.pit_universe import PitUniverseSpec, SymbolCoverage, build_universe_schedule, earliest_admissible_start, symbol_partition, derive_backfill_candidates
@@ -34,10 +41,6 @@ if TYPE_CHECKING:
 _logger = logging.getLogger("GrowthEngineEvaluation")
 
 BARS_PER_YEAR = 2190
-# Pre-registered xs_momentum hypothesis family, lookbacks in 4h bars.
-XS_MOMENTUM_LOOKBACKS: tuple[int, ...] = (6, 18, 42, 84, 180)  # 1d / 3d / 7d / 14d / 30d
-FAMILY_SIZE = 9
-XS_QUANTILE = 0.30
 _EMPTY_TRADE_COLUMNS = ("entry_bar", "exit_bar", "pnl", "return_pct")
 
 
@@ -46,8 +49,11 @@ class GrowthEngineReport:
     """Fail-closed result of a growth-engine evaluation.
 
     ``status`` is ``"NO_ADMISSIBLE_ALPHA"`` when the admissible start cannot be
-    derived or the falsification verdict fails; the equity curve is then a flat
-    CASH series at ``initial_equity`` with zero trades.
+    derived, no family survives the discovery plateau rule, or the falsification
+    verdict fails; the equity curve is then a flat CASH series at
+    ``initial_equity`` with zero trades.  ``scorecard`` is the reproducible
+    per-candidate evidence surface and ``selected_strategy`` the promoted
+    identity (or ``None`` when holding CASH).
     """
 
     status: Literal["PASS", "NO_ADMISSIBLE_ALPHA"]
@@ -59,6 +65,46 @@ class GrowthEngineReport:
     start: pd.Timestamp | None
     promotion: PromotionResult | None
     record: dict[str, object] | None = None
+    scorecard: GrowthCandidateScorecard | None = None
+    selected_strategy: str | None = None
+
+
+@dataclass(frozen=True)
+class GrowthCandidateScoreEntry:
+    """One immutable discovery-screen row for a single family/parameter candidate."""
+
+    strategy_id: str
+    parameter: int
+    dev_discovery_score: float | None
+    status: Literal["SCREENED", "DATA_INVALID"]
+    family_passed: bool
+
+
+@dataclass(frozen=True)
+class GrowthCandidateScorecard:
+    """Deterministic, immutable per-family evidence surface published on every run."""
+
+    family_size: int
+    entries: tuple[GrowthCandidateScoreEntry, ...]
+    selected_strategy_id: str | None
+    selected_parameter: int | None
+    reason: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class _FamilyScreen:
+    strategy_id: str
+    chosen_parameter: int | None
+    chosen_score: float | None
+    passed: bool
+    parameter_scores: dict[float, float]
+
+
+def _empty_scorecard(reason: str) -> GrowthCandidateScorecard:
+    return GrowthCandidateScorecard(
+        family_size=FAMILY_SIZE, entries=(), selected_strategy_id=None,
+        selected_parameter=None, reason=reason,
+    )
 
 
 def _empty_trades() -> pd.DataFrame:
@@ -158,12 +204,19 @@ def _build_price_panel(
     frames: Mapping[str, pd.DataFrame],
     start: pd.Timestamp,
     end: pd.Timestamp,
-) -> tuple[pd.DataFrame, pd.DataFrame]:
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     grid = pd.date_range(start, end, freq="4h", tz="UTC", inclusive="left")
     closes: dict[str, pd.Series] = {}
+    taker: dict[str, pd.Series] = {}
     for symbol in panel_symbols:
-        closes[symbol] = frames[symbol]["close"].reindex(grid)
+        frame = frames[symbol]
+        closes[symbol] = frame["close"].reindex(grid)
+        if "taker_buy_ratio" in frame.columns:
+            taker[symbol] = frame["taker_buy_ratio"].reindex(grid)
+        else:
+            taker[symbol] = pd.Series(np.nan, index=grid)
     px = pd.DataFrame(closes)
+    taker_ratio = pd.DataFrame(taker)
 
     # Decision-to-fill aligned forward returns: fwd[t] = close[t+1] / close[t] - 1,
     # so a signal decided at bar t earns the return realised on the following bar.
@@ -171,55 +224,18 @@ def _build_price_panel(
     fwd_arr = np.full_like(arr, np.nan)
     fwd_arr[:-1] = arr[1:] / arr[:-1] - 1.0
     fwd = pd.DataFrame(fwd_arr, index=px.index, columns=px.columns)
-    return px, fwd
-
-
-def _build_signal_weights(
-    schedule: dict[pd.Timestamp, tuple[str, ...]],
-    px: pd.DataFrame,
-    fwd: pd.DataFrame,
-    lookback_bars: int,
-    quantile: float = XS_QUANTILE,
-) -> pd.DataFrame:
-    grid = px.index
-    weights = pd.DataFrame(0.0, index=grid, columns=px.columns, dtype="float64")
-    momentum = px.pct_change(lookback_bars)
-    month_key = grid - pd.offsets.MonthBegin(0)
-    for date, roster in schedule.items():
-        if not roster:
-            continue
-        bars = grid[month_key == date]
-        sub = momentum.loc[bars, list(roster)]
-        valid = sub.notna()
-        cnt = valid.sum(axis=1)
-        rank = sub.rank(axis=1, ascending=False)
-        k = (cnt * quantile).round().astype(int).clip(lower=1)
-        longs = rank.le(k, axis=0) & valid
-        shorts = rank.gt(cnt - k, axis=0) & valid
-        w_long = longs.astype(float).div(longs.sum(axis=1).replace(0, np.nan), axis=0)
-        w_short = shorts.astype(float).div(shorts.sum(axis=1).replace(0, np.nan), axis=0)
-        w = (w_long - w_short) / 2
-        weights.loc[bars, list(roster)] = w.fillna(0.0).to_numpy()
-    return weights
-
-
-def _signal_pnl(
-    schedule: dict[pd.Timestamp, tuple[str, ...]],
-    px: pd.DataFrame,
-    fwd: pd.DataFrame,
-    lookback_bars: int,
-    quantile: float = XS_QUANTILE,
-) -> pd.Series:
-    weights = _build_signal_weights(schedule, px, fwd, lookback_bars, quantile)
-    return (weights * fwd).sum(axis=1)
+    return px, fwd, taker_ratio
 
 
 def _compute_stream(
     target_weights: pd.DataFrame,
     forward_returns: pd.DataFrame,
     construction: NetConstructionSpec,
+    forward_funding: pd.DataFrame | None = None,
 ) -> NetReturnStream:
-    return compute_net_return_stream(target_weights, forward_returns, construction)
+    return compute_net_return_stream(
+        target_weights, forward_returns, construction, forward_funding,
+    )
 
 
 def _gross_sharpe(pnl: pd.Series) -> float:
@@ -292,6 +308,7 @@ def _record_run(
             ),
             "n_bars": len(report.equity),
             "trade_count": len(report.trades),
+            "selected_strategy": report.selected_strategy,
         },
         reliability={
             "binding_constraint": (
@@ -329,10 +346,15 @@ def _no_admissible_alpha(
     start: pd.Timestamp | None,
     falsification: FalsificationVerdict | None,
     sizing: GrowthSizingResult | None,
+    scorecard: GrowthCandidateScorecard | None = None,
+    selected_strategy: str | None = None,
 ) -> GrowthEngineReport:
     _logger.warning(
-        "[EVAL] status=NO_ADMISSIBLE_ALPHA start=%s falsification=%s sizing=%s -- holding CASH",
+        "[EVAL] status=NO_ADMISSIBLE_ALPHA start=%s strategy=%s scorecard_reason=%s "
+        "falsification=%s sizing=%s -- holding CASH",
         start,
+        selected_strategy,
+        scorecard.reason if scorecard is not None else "unavailable",
         falsification.binding_constraint if falsification is not None else "unavailable",
         sizing.binding_constraint if sizing is not None else "unavailable",
     )
@@ -348,19 +370,168 @@ def _no_admissible_alpha(
         start=start,
         promotion=None,
         record=None,
+        scorecard=scorecard,
+        selected_strategy=selected_strategy,
+    )
+
+
+def _split_dev_schedule(
+    dev_schedule: dict[pd.Timestamp, tuple[str, ...]],
+) -> tuple[dict[pd.Timestamp, tuple[str, ...]], dict[pd.Timestamp, tuple[str, ...]]]:
+    """Split the dev evaluation period chronologically at its midpoint.
+
+    The split uses whole monthly rebalance boundaries so a monthly roster never
+    straddles the discovery/qualification seam.  The discovery half alone is
+    allowed to participate in family selection.
+    """
+    dates = sorted(dev_schedule)
+    mid = len(dates) // 2
+    return (
+        {date: dev_schedule[date] for date in dates[:mid]},
+        {date: dev_schedule[date] for date in dates[mid:]},
+    )
+
+
+def _build_settled_funding(
+    symbols: Sequence[str],
+    grid: pd.DatetimeIndex,
+) -> pd.DataFrame:
+    """Load raw per-symbol funding events into one aligned-able frame.
+
+    Symbols with missing or unreadable funding files are simply absent from the
+    frame; the funding screen then records ``DATA_INVALID`` for the candidate
+    instead of inventing zero funding.
+    """
+    directory = funding_path("").parent
+    if not directory.exists():
+        return pd.DataFrame(index=grid)
+    columns: dict[str, pd.Series] = {}
+    for symbol in symbols:
+        try:
+            rates = load_funding_rates(funding_path(symbol))
+        except (DataIntegrityError, FileNotFoundError):
+            continue
+        if len(rates):
+            columns[symbol] = rates
+    if not columns:
+        return pd.DataFrame(index=grid)
+    frame = pd.DataFrame(columns)
+    return frame[~frame.index.duplicated(keep="last")].sort_index()
+
+
+def _build_forward_funding(
+    raw_funding: pd.DataFrame,
+    grid: pd.DatetimeIndex,
+    target_columns: Sequence[str],
+) -> pd.DataFrame | None:
+    """Post-decision interval funding aligned to the trading panel columns."""
+    present = [column for column in target_columns if column in raw_funding.columns]
+    if not present:
+        return None
+    aligned = align_funding_bars(raw_funding[list(present)], grid, forward=True)
+    return aligned.reindex(columns=list(target_columns)).fillna(0.0)
+
+
+def _screen_discovery_candidates(
+    schedule: dict[pd.Timestamp, tuple[str, ...]],
+    px: pd.DataFrame,
+    fwd: pd.DataFrame,
+    taker: pd.DataFrame,
+    settled_funding: pd.DataFrame,
+    bars: pd.DatetimeIndex,
+) -> tuple[tuple[GrowthCandidateScoreEntry, ...], tuple[_FamilyScreen, ...]]:
+    """Screen every frozen family/window on dev-discovery evidence only."""
+    entries: list[GrowthCandidateScoreEntry] = []
+    families: list[_FamilyScreen] = []
+    for definition in STRATEGY_REGISTRY:
+        scores: dict[float, float] = {}
+        invalid_windows: list[int] = []
+        for window in definition.windows:
+            screen = screen_growth_strategy_weights(
+                definition.strategy_id, window, schedule, px, taker, settled_funding,
+            )
+            if screen.status == "DATA_INVALID":
+                invalid_windows.append(window)
+                continue
+            pnl = (screen.weights * fwd).sum(axis=1)
+            scores[float(window)] = _gross_sharpe(pnl.loc[bars])
+        chosen = max(scores, key=lambda key: (scores[key], -key)) if scores else None
+        passed = False
+        if chosen is not None:
+            passed = evaluate_parameter_plateau(scores, chosen, FalsificationConfig()).passed
+        for window in definition.windows:
+            if window in invalid_windows:
+                entries.append(GrowthCandidateScoreEntry(
+                    strategy_id=definition.strategy_id, parameter=window,
+                    dev_discovery_score=None, status="DATA_INVALID",
+                    family_passed=passed,
+                ))
+            else:
+                entries.append(GrowthCandidateScoreEntry(
+                    strategy_id=definition.strategy_id, parameter=window,
+                    dev_discovery_score=scores[float(window)], status="SCREENED",
+                    family_passed=passed,
+                ))
+        families.append(_FamilyScreen(
+            strategy_id=definition.strategy_id,
+            chosen_parameter=int(chosen) if chosen is not None else None,
+            chosen_score=scores[chosen] if chosen is not None else None,
+            passed=passed,
+            parameter_scores=scores,
+        ))
+    return tuple(entries), tuple(families)
+
+
+def _family_tiebreak(family: _FamilyScreen) -> tuple[float, tuple[int, ...]]:
+    score = family.chosen_score if family.chosen_score is not None else float("-inf")
+    return score, tuple(-ord(character) for character in family.strategy_id)
+
+
+def _diagnostic_falsification(family: _FamilyScreen) -> FalsificationVerdict | None:
+    """Compose a fail-closed verdict when no family survives the discovery plateau."""
+    if family.chosen_parameter is None or family.chosen_score is None:
+        return None
+    return evaluate_falsification(
+        parameter_scores=family.parameter_scores,
+        chosen_parameter=float(family.chosen_parameter),
+        oos_t_stat=0.0,
+        family_size=FAMILY_SIZE,
+        dev_score=family.chosen_score,
+        holdout_score=0.0,
+        config=FalsificationConfig(),
+    )
+
+
+def _scorecard(
+    entries: tuple[GrowthCandidateScoreEntry, ...],
+    *,
+    selected: _FamilyScreen | None,
+    reason: str | None,
+) -> GrowthCandidateScorecard:
+    return GrowthCandidateScorecard(
+        family_size=FAMILY_SIZE,
+        entries=entries,
+        selected_strategy_id=selected.strategy_id if selected is not None else None,
+        selected_parameter=selected.chosen_parameter if selected is not None else None,
+        reason=reason,
     )
 
 
 def run_growth_engine_evaluation(request: GrowthEngineEvaluationRequest) -> GrowthEngineReport:
     """Single orchestration path for the growth-engine evaluation.
 
-    ``resolve_evaluation_end`` -> build coverage -> ``earliest_admissible_start``
-    -> ``build_universe_schedule`` -> ``symbol_partition`` filter ->
-    ``compute_net_return_stream`` -> ``solve_growth_optimal_risk`` ->
-    ``evaluate_falsification`` -> ``compose_promotion_verdict``.  Fail-closed:
-    when the admissible start cannot be derived or the falsification verdict
-    fails the report is ``NO_ADMISSIBLE_ALPHA`` with a flat CASH equity curve and
-    zero trades.
+    ``resolve_evaluation_end`` -> ``earliest_admissible_start`` ->
+    ``build_universe_schedule`` -> frozen dev discovery (every family/window on
+    the discovery half) -> dev finalist qualification (net OOS t-stat and gross
+    score) + symbol-holdout gross score -> unchanged ``evaluate_falsification``
+    (plateau, Bonferroni multiplicity with ``family_size=12``, symbol holdout)
+    -> ``compute_net_return_stream`` -> ``solve_growth_optimal_risk`` ->
+    ``compose_promotion_verdict``.  Fail-closed: when the admissible start
+    cannot be derived, no family passes the discovery plateau, or the
+    falsification verdict fails, the report is ``NO_ADMISSIBLE_ALPHA`` with a
+    flat CASH equity curve, zero trades, and a deterministic candidate
+    scorecard.  The holdout partition only ever inspects the dev-selected
+    finalist.
     """
     end = resolve_evaluation_end(request.end, unseal_holdout=request.unseal_holdout)
     if end is None:
@@ -376,6 +547,7 @@ def run_growth_engine_evaluation(request: GrowthEngineEvaluationRequest) -> Grow
     if not coverage:
         return _no_admissible_alpha(
             request, end_ts, {}, start=None, falsification=None, sizing=None,
+            scorecard=_empty_scorecard("insufficient_data"),
         )
 
     data_start = min(cov.first_bar for cov in coverage)
@@ -386,6 +558,7 @@ def run_growth_engine_evaluation(request: GrowthEngineEvaluationRequest) -> Grow
     if start is None:
         return _no_admissible_alpha(
             request, end_ts, {}, start=None, falsification=None, sizing=None,
+            scorecard=_empty_scorecard("no_admissible_start"),
         )
 
     dates_from_start = [date for date in rebalance_dates if date >= start]
@@ -410,9 +583,10 @@ def run_growth_engine_evaluation(request: GrowthEngineEvaluationRequest) -> Grow
     if not all_symbols:
         return _no_admissible_alpha(
             request, end_ts, full_schedule, start=start, falsification=None, sizing=None,
+            scorecard=_empty_scorecard("empty_universe"),
         )
 
-    px, fwd = _build_price_panel(all_symbols, frames, start, end_ts)
+    px, fwd, taker = _build_price_panel(all_symbols, frames, start, end_ts)
 
     dev_members = {
         sym for sym in all_symbols
@@ -430,19 +604,68 @@ def run_growth_engine_evaluation(request: GrowthEngineEvaluationRequest) -> Grow
     if not panel_symbols:
         return _no_admissible_alpha(
             request, end_ts, schedule, start=start, falsification=None, sizing=None,
+            scorecard=_empty_scorecard("empty_panel"),
         )
 
-    parameter_scores = {
-        float(lookback): _gross_sharpe(_signal_pnl(dev_schedule, px, fwd, lookback))
-        for lookback in XS_MOMENTUM_LOOKBACKS
-    }
-    chosen_parameter = max(
-        parameter_scores, key=lambda lb: (parameter_scores[lb], -lb),
+    discovery_schedule, qualification_schedule = _split_dev_schedule(dev_schedule)
+    if len(discovery_schedule) < 2 or len(qualification_schedule) < 2:
+        return _no_admissible_alpha(
+            request, end_ts, schedule, start=start, falsification=None, sizing=None,
+            scorecard=_empty_scorecard("insufficient_dev_rosters"),
+        )
+
+    grid = px.index
+    month_key = grid.normalize() - pd.to_timedelta(grid.day - 1, unit="D")
+    discovery_bars = grid[month_key.isin(set(discovery_schedule))]
+    qualification_bars = grid[month_key.isin(set(qualification_schedule))]
+
+    settled_funding = _build_settled_funding(all_symbols, grid)
+    entries, families = _screen_discovery_candidates(
+        discovery_schedule, px, fwd, taker, settled_funding, discovery_bars,
     )
 
-    target_weights = _build_signal_weights(schedule, px, fwd, int(chosen_parameter))
+    passing = [f for f in families if f.passed and f.chosen_parameter is not None]
+    screened = [f for f in families if f.chosen_parameter is not None]
+    if passing:
+        selected = max(passing, key=_family_tiebreak)
+    elif screened:
+        selected = max(screened, key=_family_tiebreak)
+        return _no_admissible_alpha(
+            request, end_ts, schedule, start=start,
+            falsification=_diagnostic_falsification(selected), sizing=None,
+            scorecard=_scorecard(entries, selected=selected, reason="no_passing_family"),
+            selected_strategy=selected.strategy_id,
+        )
+    else:
+        return _no_admissible_alpha(
+            request, end_ts, schedule, start=start, falsification=None, sizing=None,
+            scorecard=_scorecard(entries, selected=None, reason="no_screenable_candidate"),
+        )
+
+    assert selected.chosen_parameter is not None
+    selected_parameter = int(selected.chosen_parameter)
+    screen = screen_growth_strategy_weights(
+        selected.strategy_id, selected_parameter, schedule, px, taker, settled_funding,
+    )
+    if screen.status == "DATA_INVALID":
+        return _no_admissible_alpha(
+            request, end_ts, schedule, start=start, falsification=None, sizing=None,
+            scorecard=_scorecard(entries, selected=selected, reason="finalist_data_invalid"),
+            selected_strategy=selected.strategy_id,
+        )
+
+    target_weights = screen.weights
     forward_returns = fwd[list(target_weights.columns)]
-    stream = _compute_stream(target_weights, forward_returns, request.construction)
+    definition = registry_definition(selected.strategy_id)
+    if definition.requires_funding:
+        forward_funding = _build_forward_funding(
+            settled_funding, grid, list(target_weights.columns),
+        )
+        stream = _compute_stream(
+            target_weights, forward_returns, request.construction, forward_funding,
+        )
+    else:
+        stream = _compute_stream(target_weights, forward_returns, request.construction)
 
     unit_returns = stream.net.to_numpy(dtype=np.float64)
     unit_returns = unit_returns[np.isfinite(unit_returns)]
@@ -453,17 +676,27 @@ def run_growth_engine_evaluation(request: GrowthEngineEvaluationRequest) -> Grow
     )
     sizing = solve_growth_optimal_risk(unit_returns, sizing_config)
 
-    oos_t_stat = _oos_t_stat(stream.net)
-    dev_score = _gross_sharpe(_signal_pnl(dev_schedule, px, fwd, int(chosen_parameter)))
-    holdout_score = _gross_sharpe(
-        _signal_pnl(holdout_schedule, px, fwd, int(chosen_parameter))
+    full_pnl = (target_weights * fwd).sum(axis=1)
+    dev_qualification_score = _gross_sharpe(full_pnl.loc[qualification_bars])
+    oos_t_stat = _oos_t_stat(stream.net.loc[qualification_bars])
+
+    holdout_screen = screen_growth_strategy_weights(
+        selected.strategy_id, selected_parameter, holdout_schedule, px, taker,
+        settled_funding,
     )
+    if holdout_screen.status == "SCREENED":
+        holdout_pnl = (holdout_screen.weights * fwd).sum(axis=1)
+        holdout_bars = grid[month_key.isin(set(holdout_schedule))]
+        holdout_score = _gross_sharpe(holdout_pnl.loc[holdout_bars])
+    else:
+        holdout_score = 0.0
+
     falsification = evaluate_falsification(
-        parameter_scores=parameter_scores,
-        chosen_parameter=chosen_parameter,
+        parameter_scores=selected.parameter_scores,
+        chosen_parameter=float(selected_parameter),
         oos_t_stat=oos_t_stat,
         family_size=FAMILY_SIZE,
-        dev_score=dev_score,
+        dev_score=dev_qualification_score,
         holdout_score=holdout_score,
         config=FalsificationConfig(),
     )
@@ -472,17 +705,19 @@ def run_growth_engine_evaluation(request: GrowthEngineEvaluationRequest) -> Grow
         competing_intrabar_exits=1, stop_atr_mult=3.0,
     )
     _logger.info(
-        "[EVAL] symbols=%d traded=%d dev=%d holdout=%d chosen_lb=%s oos_t=%.3f "
-        "falsification=%s sizing=%s audit_required=%s",
+        "[EVAL] symbols=%d traded=%d dev=%d holdout=%d strategy=%s parameter=%s "
+        "oos_t=%.3f falsification=%s sizing=%s audit_required=%s",
         len(all_symbols), len(panel_symbols), len(dev_members), len(holdout_members),
-        chosen_parameter, oos_t_stat, falsification.binding_constraint,
-        sizing.binding_constraint, audit_required,
+        selected.strategy_id, selected_parameter, oos_t_stat,
+        falsification.binding_constraint, sizing.binding_constraint, audit_required,
     )
 
+    scorecard = _scorecard(entries, selected=selected, reason=None)
     if not falsification.passed or sizing.selected_risk is None:
         return _no_admissible_alpha(
             request, end_ts, schedule, start=start,
             falsification=falsification, sizing=sizing,
+            scorecard=scorecard, selected_strategy=selected.strategy_id,
         )
 
     equity = request.initial_equity * (1.0 + stream.net).cumprod()
@@ -513,6 +748,8 @@ def run_growth_engine_evaluation(request: GrowthEngineEvaluationRequest) -> Grow
         universe_schedule=schedule,
         start=start,
         promotion=promotion,
+        scorecard=scorecard,
+        selected_strategy=selected.strategy_id,
     )
     record = _record_run(request, report, end) if request.log_run else None
     return GrowthEngineReport(
@@ -525,4 +762,6 @@ def run_growth_engine_evaluation(request: GrowthEngineEvaluationRequest) -> Grow
         start=start,
         promotion=promotion,
         record=record,
+        scorecard=scorecard,
+        selected_strategy=selected.strategy_id,
     )
