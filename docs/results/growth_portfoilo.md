@@ -1,8 +1,8 @@
-# Growth Engine v2 — 첫 CLI 실행 결과
+# Growth Engine — CLI 실행 결과 (v2 첫 실행 + v3 재조정 주기 변경 후)
 
 실행일: 2026-08-03 (Asia/Seoul)
 실행 경로: `research run portfolio growth`
-spec: `docs/specs/growth_engine_v2.md` (P1~P3 구현 완료분)
+spec: `docs/specs/growth_engine_v2.md`(P1~P3) + `docs/specs/growth_engine_v3.md`(재조정 주기 기본값 변경)
 데이터: futures 1h → 4h 리샘플, sealed end `2025-12-31 23:59:59 UTC`
 비용: `CostModel` 기본값(`fee_rate=0.0005`, `slippage_rate=0.0003`) 재사용
 로그: `--no-log-run`으로 provenance 원장에는 기록하지 않음
@@ -194,13 +194,81 @@ selected = CASH (no_admissible_alpha)
 독립적으로, 이번엔 실제 프로덕션 코드 경로(P1 유니버스 → P2 net
 construction → falsification → sizing)로 재확인됐다.
 
-## 8. 다음 단계
+## 8. 다음 단계 (v2 시점 기록)
 
 1. `docs/specs/growth_engine_v2.md` F1b의 backfill 후보 수치(55)를 이번
-   실측치(89)로 갱신 필요 — `/sync` 시 반영.
+   실측치(89)로 갱신 필요 — `/sync` 시 반영. **완료(§9 참조).**
 2. F4가 제안한 `rebalance_bars=3` + 무거래 밴드를 이번 파이프라인에도
    적용해 비용 절감 효과를 net_construction 계층에서 재검증할 수 있다
-   (단, 현재 신호 자체가 plateau FAIL이므로 우선순위는 낮음).
+   (단, 현재 신호 자체가 plateau FAIL이므로 우선순위는 낮음). **완료(§9
+   참조) — spec `growth_engine_v3.md` §1로 CLI 기본값 변경.**
 3. 새 사전등록 가설이 필요하다 — xs_momentum 계열은 이번까지 포함해
    실데이터 검증을 마쳤고(다른 룩백에서도 동일 패턴 재현), 재제출 대상이
-   아니다.
+   아니다. **spec `growth_engine_v3.md` §2에서 20개 신규 가설 스크린
+   완료, 전부 미채택(§9 참조).**
+
+---
+
+## 9. v3 재실행 — `rebalance_bars` 기본값 1→3 적용 후
+
+실행일: 2026-08-03. spec `docs/specs/growth_engine_v3.md` §1·§4.1 구현
+후 동일 CLI를 옵션 없이(신규 기본값 `--rebalance-bars 3`) 재실행했다.
+
+```bash
+uv run python -m src.cli.main research run portfolio growth --no-log-run
+```
+
+### 9.1 판정은 불변, CASH 유지
+
+| 항목 | v2(bar=1) | v3(bar=3) |
+|---|---:|---:|
+| status | NO_ADMISSIBLE_ALPHA | **NO_ADMISSIBLE_ALPHA**(동일) |
+| binding_constraint | plateau | **plateau**(동일) |
+| plateau ratio | 0.6042 | 0.6042(동일) |
+| chosen lookback | 1d(6봉) | 1d(6봉, 동일) |
+| oos_t_stat | −1.2769 | **−0.5104** |
+| 거래 수 | 0 | 0 |
+
+`plateau`·`multiplicity` 판정은 `dev_schedule`의 **gross**(비용·회전율
+반영 전) Sharpe로만 계산되므로(`_gross_sharpe(_signal_pnl(...))`)
+`rebalance_bars`·`no_trade_band`를 전혀 보지 않는다 — xs_momentum 1d가
+인접 룩백 대비 평탄역 기준 미달인 것은 재조정 주기와 무관한 **신호
+자체의 결함**이라 어떤 집행 방식으로도 이 게이트를 통과할 수 없다.
+
+### 9.2 oos_t_stat 개선의 진짜 원인 — 비용 절감이 아니라 타이밍 개선
+
+`rebalance_bars`가 net 비용을 줄여 개선됐을 것이라는 직관과 달리, 동일
+`target_weights`에 대해 `compute_net_return_stream`을 bar=1/3/6으로 직접
+비교한 결과는 다음과 같았다:
+
+| rebalance_bars | 평균 회전율/봉 | 연환산 비용 | 연환산 gross | 연환산 net(gross−cost) |
+|---:|---:|---:|---:|---:|
+| 1 | 0.3231 | 56.60%p | 8.63%p | −47.97%p |
+| **3(신규 기본값)** | **0.3231**(동일) | **56.60%p**(동일) | **33.97%p** | **−22.63%p** |
+| 6(참고, 미채택) | 0.2249 | 39.40%p | 52.79%p | **+13.38%p** |
+
+**bar=1→3 구간에서는 회전율·비용이 전혀 줄지 않았다** —
+`realized_weights`를 봉 단위로 직접 비교하면 1,950개 봉에서 실현 비중이
+서로 다르지만(재조정 타이밍이 다르므로 당연함), 33개월 전체에 걸친
+누적 회전율 "이벤트" 총합이 우연히 같았다(1950.0=1950.0). 대신
+**gross가 4배 가까이 개선됐다**(8.63%p→33.97%p) — 매 4h봉마다 신호를
+재계산해 즉시 반영하는 대신 3봉(12h) 동안 이전 비중을 유지하는 것이,
+노이즈에 휩쓸린 진입·청산("buy high sell low" 휘핑)을 줄여 **같은
+거래 수로 더 유리한 타이밍에 체결**되게 한 것으로 해석된다. bar=6은
+회전율도 줄고(0.225) gross는 더 오르면서(52.79%p) net이 처음으로
+양전환한다(+13.38%p) — 다만 이 수치는 §1의 평탄역 근거로 채택하지 않은
+지점이며, 신호 자체가 plateau FAIL이므로 어떤 net 수치도 admission에
+영향을 주지 않는다는 점은 동일하다.
+
+### 9.3 결론
+
+- 재조정 주기 기본값 변경(§4.1, 코드 diff 1줄)은 의도대로 **집행 구조를
+  개선**했고, 그 메커니즘은 사전에 가정했던 "비용 절감"이 아니라
+  **타이밍 개선**이었다 — 재현 시 이 구분을 명확히 해야 한다.
+- 신호 채택 여부는 여전히 **아니오**다. `growth_engine_v3.md` §2의
+  20개 전략 스크린 결과(전부 미채택, H17만 유망 보류)와 함께 보면,
+  "현재 채택 가능한 알파가 없다"는 결론이 재조정 주기 변경과 무관하게
+  유지된다.
+- 재현 근거: 직접 비교 실행 결과는 세션 로그에만 존재하며 파일로
+  영속화하지 않았다(§9.2 표가 그 결과다). 필요시 `compute_net_return_stream`을
+  동일 `target_weights`에 bar=1/3/6으로 각각 호출해 재현 가능하다.
