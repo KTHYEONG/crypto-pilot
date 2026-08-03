@@ -902,7 +902,10 @@ def main() -> None:
 
     deselect_args = [f"--deselect={node}" for node in args.deselect]
     core_cmd = ["uv", "run", "pytest", *cov_args, *test_files, *deselect_args, "-q", "--tb=line", "--cov-report=term-missing"]
-    pt_res = run_cmd(core_cmd, timeout=180)
+    # The growth evaluator's sealed integration fixtures exercise real rolling
+    # windows and reliability gates.  Package-wide coverage tracing can exceed
+    # the former three-minute limit even when the test command itself passes.
+    pt_res = run_cmd(core_cmd, timeout=300)
 
     cov_val: int | None = None
     missing_infos: list[str] = []
