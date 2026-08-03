@@ -372,7 +372,8 @@ def test_sleeve_blend_cli_parses_args_and_dispatches(monkeypatch) -> None:
     monkeypatch.setattr("src.application.research.blend.evaluation.run_sleeve_blend_evaluation", calls.append)
     args = build_root_parser().parse_args([
         "research", "run", "portfolio", "blend",
-        "--symbols", "BTCUSDT", "ETHUSDT",
+        "--universe-id", "core5_v1",
+        "--candidate-kind", "fixed_long_only_v1",
         "--mdd-budget-fraction", "0.80",
         "--start", "2022-04-01",
         "--end", "2025-01-01",
@@ -381,13 +382,44 @@ def test_sleeve_blend_cli_parses_args_and_dispatches(monkeypatch) -> None:
     ])
     args.handler(args)
     assert calls == [SleeveBlendEvaluationRequest(
-        symbols=("BTCUSDT", "ETHUSDT"),
+        symbols=("BTCUSDT", "ETHUSDT", "AVAXUSDT", "BNBUSDT", "DOGEUSDT"),
+        universe_id="core5_v1",
         mdd_budget_fraction=0.80,
         candidate_kind="fixed_long_only_v1",
+        discovery_end="2024-12-31 23:59:59+00:00",
+        qualification_interval="365D",
         start="2022-04-01",
         end="2025-01-01",
         initial_equity=5000.0,
         unseal_holdout=False,
+        log_run=False,
+    )]
+
+
+def test_sleeve_blend_cli_rejects_free_form_symbols(monkeypatch) -> None:
+    with pytest.raises(SystemExit):
+        build_root_parser().parse_args([
+            "research", "run", "portfolio", "blend", "--symbols", "BTCUSDT", "ETHUSDT",
+        ])
+
+
+def test_sleeve_blend_cli_tournament_candidate_kind(monkeypatch) -> None:
+    calls: list[SleeveBlendEvaluationRequest] = []
+    monkeypatch.setattr("src.application.research.blend.evaluation.run_sleeve_blend_evaluation", calls.append)
+    args = build_root_parser().parse_args([
+        "research", "run", "portfolio", "blend",
+        "--candidate-kind", "core5_causal_tournament_v1",
+        "--tournament-profile", "pbgt_discovery_v1",
+        "--no-log-run",
+    ])
+    args.handler(args)
+    assert calls == [SleeveBlendEvaluationRequest(
+        symbols=("BTCUSDT", "ETHUSDT", "AVAXUSDT", "BNBUSDT", "DOGEUSDT"),
+        universe_id="core5_v1",
+        mdd_budget_fraction=0.85,
+        candidate_kind="core5_causal_tournament_v1",
+        discovery_end="2024-12-31 23:59:59+00:00",
+        qualification_interval="365D",
         log_run=False,
     )]
 
@@ -402,8 +434,11 @@ def test_sleeve_blend_cli_directional_candidate_kind(monkeypatch) -> None:
     args.handler(args)
     assert calls == [SleeveBlendEvaluationRequest(
         symbols=("BTCUSDT", "ETHUSDT", "AVAXUSDT", "BNBUSDT", "DOGEUSDT"),
+        universe_id="core5_v1",
         mdd_budget_fraction=0.85,
         candidate_kind="funding_signed_directional_v1",
+        discovery_end="2024-12-31 23:59:59+00:00",
+        qualification_interval="365D",
         log_run=False,
     )]
 

@@ -205,6 +205,62 @@ def test_calibrated_leverage_matches_target_mdd_budget(monkeypatch) -> None:
     assert lev == pytest.approx(target_mdd / _mdd(_unlevered_blend(frames, costs)), rel=1e-9)
 
 
+def test_pbgt_02_causal_schedule_prefix_is_immune_to_later_returns(monkeypatch) -> None:
+    """PBGT-02: changing returns after a rebalance cannot change the leverage
+    scheduled at or before that rebalance; insufficient history is zero."""
+    from src.research.sleeve_blend.contracts import CausalLeverageSpec
+    from src.research.sleeve_blend.fixed import build_causal_leverage_schedule
+
+    idx = pd.date_range("2022-01-01", periods=2200, freq="4h", tz="UTC")
+    unit = pd.Series(np.linspace(100.0, 130.0, len(idx)), index=idx)
+    unit.iloc[1000:1050] = unit.iloc[1000:1050] * 0.7
+    spec = CausalLeverageSpec(lookback_days=120, risk_budget_fraction=0.85, max_gross_leverage=3.0)
+
+    schedule = build_causal_leverage_schedule(unit, spec)
+    altered = unit.copy()
+    altered.iloc[1500:] = altered.iloc[1500:] * 1.5
+    schedule_altered = build_causal_leverage_schedule(altered, spec)
+
+    assert schedule_altered.iloc[:1500].equals(schedule.iloc[:1500])
+    lookback_bars = round(pd.Timedelta(days=120) / pd.Timedelta(hours=4))
+    assert schedule.iloc[:lookback_bars].eq(0.0).all()
+    assert schedule.iloc[lookback_bars] > 0.0
+
+
+def test_run_fixed_sleeve_portfolio_with_schedule_applies_frozen_schedule(monkeypatch) -> None:
+    """The frozen-schedule execution reuses the pre-built schedule verbatim."""
+    from src.research.sleeve_blend.contracts import CausalLeverageSpec
+    from src.research.sleeve_blend.fixed import (
+        build_causal_leverage_schedule,
+        run_fixed_sleeve_portfolio_with_schedule,
+    )
+
+    frames = {
+        "A": _trend_drop_frame(drop_bar=481),
+        "B": _trend_drop_frame(drop_bar=1201),
+    }
+    _install_frames(monkeypatch, frames)
+    costs = CostModel()
+    from src.research.sleeve_blend.fixed import apply_leverage_schedule
+
+    unit = run_fixed_sleeve_portfolio_with_leverage(
+        ("A", "B"), None, None, costs, lev=1.0,
+    ).equity
+    schedule = build_causal_leverage_schedule(
+        unit, CausalLeverageSpec(lookback_days=60),
+    )
+    scheduled = run_fixed_sleeve_portfolio_with_schedule(
+        ("A", "B"), None, None, costs, schedule,
+    )
+    assert (scheduled.equity > 0).all()
+    lookback_bars = round(pd.Timedelta(days=60) / pd.Timedelta(hours=4))
+    assert scheduled.equity.iloc[:lookback_bars].nunique() == 1
+    pd.testing.assert_series_equal(
+        scheduled.equity,
+        apply_leverage_schedule(unit, schedule, initial_equity=10_000.0),
+    )
+
+
 def _unlevered_blend(frames: dict[str, pd.DataFrame], costs: CostModel) -> pd.Series:
     blend = run_fixed_sleeve_portfolio_with_leverage(
         tuple(frames), None, None, costs, lev=1.0,
