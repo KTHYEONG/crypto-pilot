@@ -30,7 +30,8 @@ Independent audit gate completing the main development loop (`spec` -> `implemen
 3. **Strict Audit Gate (No Code Mutation)**:
    - Perform auditing independently. Do NOT modify source code during the check pass.
    - Verify non-vacuous tests and contract compliance against `contract.json`.
-   - If audit fails, report the exact failure diagnosis clearly for resolution in `/implement` or `/spec`.
+   - **Pre-sync Housekeeping Exception**: If the *only* failure is `test_code_map.py` (due to newly added canonical modules not yet registered in `docs/code_map.json`), treat logic audit as **PASS** with a clear note to run `/sync` next to close out code_map registration. Do NOT waste tokens trying to debug code logic for this pre-sync gap.
+   - If actual logic/type/test audit fails, report the exact failure diagnosis clearly for resolution in `/implement` or `/spec`.
 
 ## Output
 
