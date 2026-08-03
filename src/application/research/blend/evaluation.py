@@ -3,6 +3,8 @@ from __future__ import annotations
 import dataclasses
 import logging
 
+import pandas as pd
+
 from src.research.contracts import (
     CostModel,
     EvaluationReport,
@@ -18,6 +20,10 @@ from src.research.evaluation.reliability import (
     split_holdout_segment,
 )
 from src.research.provenance.results import record_sleeve_blend_run
+from src.research.sleeve_blend.contracts import (
+    BlendUniverseSpec,
+    PortfolioBlendTournamentRequest,
+)
 from src.research.sleeve_blend.directional import (
     run_directional_sleeve_portfolio_fixed_weights,
     run_directional_sleeve_portfolio_with_weights,
@@ -26,13 +32,32 @@ from src.research.sleeve_blend.fixed import (
     run_fixed_sleeve_portfolio_calibrated,
     run_fixed_sleeve_portfolio_with_leverage,
 )
+from src.research.sleeve_blend.tournament import run_strategy_tournament
 
 _FUNDING_SIGNED_DIRECTIONAL_V1 = "funding_signed_directional_v1"
+_CORE5_CAUSAL_TOURNAMENT_V1 = "core5_causal_tournament_v1"
 
 _logger = logging.getLogger("SleeveBlendBacktestRunner")
 
 _STRESS_FEE_MULT = 1.5
 _STRESS_SLIPPAGE_MULT = 2.0
+
+
+def _build_tournament_request(
+    request: SleeveBlendEvaluationRequest,
+    end: str | pd.Timestamp | None,
+) -> PortfolioBlendTournamentRequest:
+    """Build the immutable tournament request from the sleeve evaluation request."""
+    discovery_end = pd.Timestamp(request.discovery_end)
+    return PortfolioBlendTournamentRequest(
+        universe=BlendUniverseSpec(universe_id=request.universe_id),
+        discovery_end=discovery_end,
+        qualification_interval=request.qualification_interval,
+        start=request.start,
+        end=end,
+        costs=CostModel(),
+        initial_equity=request.initial_equity,
+    )
 
 
 def run_sleeve_blend_evaluation(request: SleeveBlendEvaluationRequest) -> EvaluationReport:
@@ -44,15 +69,26 @@ def run_sleeve_blend_evaluation(request: SleeveBlendEvaluationRequest) -> Evalua
     *same* frozen scalar. ``funding_signed_directional_v1`` instead runs the
     funding-gated long/short sleeve unlevered (leverage 1.0) with causal
     inverse-vol risk weights; its stress re-run reuses the *base* weight series
-    verbatim and never re-calibrates around stressed costs. Both connect to the
-    existing reliability gates and fail-closed promotion.
+    verbatim and never re-calibrates around stressed costs.
+    ``core5_causal_tournament_v1`` runs the pre-registered five-source strategy
+    tournament on the fixed ``core5_v1`` universe with a causal leverage
+    schedule; its stress ledger reuses the identical universe, members,
+    weights, and schedule. A non-admitted tournament outcome is a fail-closed
+    CASH/REJECTED result and never falls back to a fitted Donchian blend. All
+    kinds connect to the existing reliability gates and fail-closed promotion.
     """
     end = resolve_evaluation_end(request.end, unseal_holdout=request.unseal_holdout)
     if request.unseal_holdout:
         _logger.info("[EVAL] holdout unsealed: --end=%s", end or "(latest available)")
 
     costs = CostModel()
-    if request.candidate_kind == _FUNDING_SIGNED_DIRECTIONAL_V1:
+    tournament = None
+    if request.candidate_kind == _CORE5_CAUSAL_TOURNAMENT_V1:
+        tournament = run_strategy_tournament(_build_tournament_request(request, end))
+        result = tournament.base_result
+        stress_result = tournament.stress_result
+        leverage = None
+    elif request.candidate_kind == _FUNDING_SIGNED_DIRECTIONAL_V1:
         result, weights = run_directional_sleeve_portfolio_with_weights(
             request.symbols,
             request.start,
@@ -73,7 +109,7 @@ def run_sleeve_blend_evaluation(request: SleeveBlendEvaluationRequest) -> Evalua
         )
     metrics = compute_metrics(result.equity, result.trades)
     _logger.info(
-        "[EVAL] sleeve_blend candidate=%s lev=%.4f cagr=%.4f mdd=%.4f sharpe=%.3f trades=%d",
+        "[EVAL] sleeve_blend candidate=%s lev=%s cagr=%.4f mdd=%.4f sharpe=%.3f trades=%d",
         request.candidate_kind, leverage, metrics.cagr, metrics.mdd,
         metrics.sharpe, metrics.trade_count,
     )
@@ -81,30 +117,36 @@ def run_sleeve_blend_evaluation(request: SleeveBlendEvaluationRequest) -> Evalua
     observation_gate = compute_equity_reliability_gate(result.equity, len(result.trades))
     fold_distribution = compute_fold_distribution(result)
 
-    stressed_costs = CostModel(
-        fee_rate=costs.fee_rate * _STRESS_FEE_MULT,
-        slippage_rate=costs.slippage_rate * _STRESS_SLIPPAGE_MULT,
-    )
-    if request.candidate_kind == _FUNDING_SIGNED_DIRECTIONAL_V1:
-        stress_result = run_directional_sleeve_portfolio_fixed_weights(
-            request.symbols,
-            request.start,
-            end,
-            stressed_costs,
-            weights,
-            initial_equity=request.initial_equity,
-            signal_delay_bars=1,
-        )
+    if request.candidate_kind == _CORE5_CAUSAL_TOURNAMENT_V1:
+        # The tournament already executed the stress ledger with the identical
+        # universe, members, weights, and frozen leverage schedule.
+        pass
     else:
-        stress_result = run_fixed_sleeve_portfolio_with_leverage(
-            request.symbols,
-            request.start,
-            end,
-            stressed_costs,
-            leverage,
-            initial_equity=request.initial_equity,
-            signal_delay_bars=1,
+        stressed_costs = CostModel(
+            fee_rate=costs.fee_rate * _STRESS_FEE_MULT,
+            slippage_rate=costs.slippage_rate * _STRESS_SLIPPAGE_MULT,
         )
+        if request.candidate_kind == _FUNDING_SIGNED_DIRECTIONAL_V1:
+            stress_result = run_directional_sleeve_portfolio_fixed_weights(
+                request.symbols,
+                request.start,
+                end,
+                stressed_costs,
+                weights,
+                initial_equity=request.initial_equity,
+                signal_delay_bars=1,
+            )
+        else:
+            assert isinstance(leverage, float), "fixed control requires a scalar leverage"
+            stress_result = run_fixed_sleeve_portfolio_with_leverage(
+                request.symbols,
+                request.start,
+                end,
+                stressed_costs,
+                leverage,
+                initial_equity=request.initial_equity,
+                signal_delay_bars=1,
+            )
     stress_metrics = compute_metrics(stress_result.equity, stress_result.trades)
     stress_gate = compute_equity_reliability_gate(
         stress_result.equity,
@@ -152,10 +194,11 @@ def run_sleeve_blend_evaluation(request: SleeveBlendEvaluationRequest) -> Evalua
     record = None
     if request.log_run:
         mdd_budget_fraction: float | None = request.mdd_budget_fraction
-        if request.candidate_kind == _FUNDING_SIGNED_DIRECTIONAL_V1:
+        if request.candidate_kind in (_FUNDING_SIGNED_DIRECTIONAL_V1, _CORE5_CAUSAL_TOURNAMENT_V1):
             mdd_budget_fraction = None
         record = record_sleeve_blend_run(
             symbols=tuple(request.symbols),
+            universe_id=request.universe_id,
             candidate_kind=request.candidate_kind,
             mdd_budget_fraction=mdd_budget_fraction,
             leverage=leverage,
@@ -170,6 +213,24 @@ def run_sleeve_blend_evaluation(request: SleeveBlendEvaluationRequest) -> Evalua
             stress_gate=stress_gate,
             holdout_gate=holdout_gate,
             promotion=promotion,
+            candidate_return_sources=(
+                list(tournament.selected_return_sources) if tournament else []
+            ),
+            selection_window=f"..{request.discovery_end}" if tournament else None,
+            qualification_window=(
+                f"{tournament.qualification_start}..{tournament.qualification_end or ''}"
+                if tournament is not None
+                else None
+            ),
+            leverage_schedule_hash=tournament.schedule_hash if tournament else None,
+            rejected_candidate_reasons=(
+                {
+                    candidate.return_source: (candidate.rejected_reason or "admitted")
+                    for candidate in tournament.candidates
+                }
+                if tournament is not None
+                else {}
+            ),
         )
         _logger.info("[EVAL] run logged: git_sha=%s dirty=%s", record["git_sha"], record["git_dirty"])
 

@@ -15,9 +15,12 @@ from src.research.sleeve_blend.directional import (
     run_directional_sleeve_portfolio_with_weights,
 )
 from src.research.sleeve_blend.fixed import (
+    apply_leverage_schedule,
+    build_causal_leverage_schedule,
     run_fixed_sleeve_portfolio,
     run_fixed_sleeve_portfolio_calibrated,
     run_fixed_sleeve_portfolio_with_leverage,
+    run_fixed_sleeve_portfolio_with_schedule,
 )
 from src.research.sleeve_blend.weights import (
     component_labels,
@@ -26,6 +29,8 @@ from src.research.sleeve_blend.weights import (
 )
 
 __all__ = [
+    "apply_leverage_schedule",
+    "build_causal_leverage_schedule",
     "component_labels",
     "compute_causal_risk_weights",
     "run_directional_sleeve_portfolio",
@@ -34,17 +39,23 @@ __all__ = [
     "run_fixed_sleeve_portfolio",
     "run_fixed_sleeve_portfolio_calibrated",
     "run_fixed_sleeve_portfolio_with_leverage",
+    "run_fixed_sleeve_portfolio_with_schedule",
     "symbol_of_component",
 ]
 
 
 def _check_contract() -> None:
     """Executable import-identity assertions locking the facade to its canon."""
+    assert apply_leverage_schedule.__module__ == "src.research.sleeve_blend.fixed"
+    assert build_causal_leverage_schedule.__module__ == "src.research.sleeve_blend.fixed"
     assert run_fixed_sleeve_portfolio.__module__ == "src.research.sleeve_blend.fixed"
     assert run_fixed_sleeve_portfolio_calibrated.__module__ == (
         "src.research.sleeve_blend.fixed"
     )
     assert run_fixed_sleeve_portfolio_with_leverage.__module__ == (
+        "src.research.sleeve_blend.fixed"
+    )
+    assert run_fixed_sleeve_portfolio_with_schedule.__module__ == (
         "src.research.sleeve_blend.fixed"
     )
     assert compute_causal_risk_weights.__module__ == "src.research.sleeve_blend.weights"
