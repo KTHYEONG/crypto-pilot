@@ -58,6 +58,7 @@ def apply_no_trade_band(target: np.ndarray, held: np.ndarray, band: float) -> np
 class NetReturnStream:
     gross: pd.Series
     cost: pd.Series
+    funding: pd.Series
     net: pd.Series
     turnover: pd.Series
     realized_weights: pd.DataFrame
@@ -82,15 +83,23 @@ def compute_net_return_stream(
     target_weights: pd.DataFrame,
     forward_returns: pd.DataFrame,
     spec: NetConstructionSpec,
+    forward_funding: pd.DataFrame | None = None,
 ) -> NetReturnStream:
-    """Compute the net return stream with explicit turnover accounting.
+    """Compute the net return stream with explicit turnover and funding accounting.
 
     On non-rebalance bars the previous realized weights are held; on rebalance
     bars ``apply_no_trade_band`` is applied to the target.  One-way turnover
     ``sum(abs(realized[t] - realized[t-1]))`` (the first position is traded from
-    cash) is charged at ``fee_rate + slippage_rate``, and ``net = gross - cost``
-    where ``gross[t] = sum(realized[t] * forward_returns[t])``.  ``forward_returns``
-    is already decision-to-fill aligned, so no shift happens here.
+    cash) is charged at ``fee_rate + slippage_rate``, and
+    ``net = gross - cost - funding`` where
+    ``gross[t] = sum(realized[t] * forward_returns[t])`` and
+    ``funding[t] = sum(realized[t] * forward_funding[t])``.  A positive funding
+    rate therefore debits a long and credits a short.  ``forward_returns`` is
+    already decision-to-fill aligned, so no shift happens here.
+
+    ``forward_funding`` is optional and, when supplied, must share the identical
+    UTC index and columns with ``target_weights``.  Omitting it is exactly a
+    zero matrix and preserves every existing caller's result byte-for-byte.
     """
     _validate_frames(target_weights, forward_returns)
     symbols = list(target_weights.columns)
@@ -99,10 +108,16 @@ def compute_net_return_stream(
 
     target_arr = target_weights.to_numpy(dtype=np.float64)
     forward_arr = forward_returns.to_numpy(dtype=np.float64)
+    if forward_funding is not None:
+        _validate_frames(target_weights, forward_funding)
+        funding_arr = forward_funding.to_numpy(dtype=np.float64)
+    else:
+        funding_arr = np.zeros((n, len(symbols)), dtype=np.float64)
 
     realized = np.zeros((n, len(symbols)), dtype=np.float64)
     gross = np.zeros(n, dtype=np.float64)
     cost = np.zeros(n, dtype=np.float64)
+    funding = np.zeros(n, dtype=np.float64)
     turnover = np.zeros(n, dtype=np.float64)
     prev = np.zeros(len(symbols), dtype=np.float64)
 
@@ -114,13 +129,15 @@ def compute_net_return_stream(
         turnover[t] = float(np.abs(realized[t] - prev).sum())
         cost[t] = turnover[t] * rate
         gross[t] = float(np.sum(realized[t] * forward_arr[t]))
+        funding[t] = float(np.sum(realized[t] * funding_arr[t]))
         prev = realized[t]
 
     index = target_weights.index
-    net = gross - cost
+    net = gross - cost - funding
     return NetReturnStream(
         gross=pd.Series(gross, index=index),
         cost=pd.Series(cost, index=index),
+        funding=pd.Series(funding, index=index),
         net=pd.Series(net, index=index),
         turnover=pd.Series(turnover, index=index),
         realized_weights=pd.DataFrame(realized, index=index, columns=symbols),
