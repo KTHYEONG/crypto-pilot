@@ -100,11 +100,11 @@ class FalsificationVerdict:
 
     def __post_init__(self) -> None:
         if self.binding_constraint not in (
-            "none", "plateau", "multiplicity", "symbol_holdout",
+            "none", "plateau", "multiplicity", "fold_concentration", "symbol_holdout",
         ):
             raise ValueError(
                 f"binding_constraint must be one of 'none'/'plateau'/'multiplicity'/"
-                f"'symbol_holdout', got {self.binding_constraint}"
+                f"'fold_concentration'/'symbol_holdout', got {self.binding_constraint}"
             )
 
 
@@ -116,14 +116,24 @@ def evaluate_falsification(
     family_size: int,
     dev_score: float,
     holdout_score: float,
+    fold_gate_pass: bool,
     config: FalsificationConfig = FalsificationConfig(),  # noqa: B008
 ) -> FalsificationVerdict:
-    """Compose the plateau, multiplicity, and symbol-holdout gates into one verdict.
+    """Compose the plateau, multiplicity, fold-concentration, and symbol-holdout
+    gates into one verdict.
 
     The first failing gate is named in ``binding_constraint`` in the fixed order
-    ``'plateau'``, ``'multiplicity'``, ``'symbol_holdout'``; ``'none'`` is
-    returned only when every gate passes.  The function only composes existing
-    evidence: it never mutates thresholds and never re-selects a parameter.
+    ``'plateau'``, ``'multiplicity'``, ``'fold_concentration'``,
+    ``'symbol_holdout'``; ``'none'`` is returned only when every gate passes.
+    ``fold_gate_pass`` is the caller's pre-computed
+    :func:`src.research.evaluation.reliability.compute_equal_duration_fold_distribution`
+    ``gate_pass`` on the qualification-period equity, guarding against an
+    ``oos_t_stat`` that clears the multiplicity floor only because it is
+    disproportionately concentrated in one favourable sub-period rather than
+    being distributed across the qualification window (see
+    ``docs/specs/growth_engine_fold_concentration_gate.md``).  The function only
+    composes existing evidence: it never mutates thresholds and never
+    re-selects a parameter or recomputes the fold distribution itself.
     """
     plateau = evaluate_parameter_plateau(parameter_scores, chosen_parameter, config)
     required_t_floor = multiplicity_adjusted_t_floor(family_size, config.base_t_floor)
@@ -133,6 +143,8 @@ def evaluate_falsification(
         binding_constraint = "plateau"
     elif oos_t_stat < required_t_floor:
         binding_constraint = "multiplicity"
+    elif not fold_gate_pass:
+        binding_constraint = "fold_concentration"
     elif dev_score <= 0 or holdout_score < config.holdout_retention * dev_score:
         binding_constraint = "symbol_holdout"
 
@@ -146,9 +158,9 @@ def evaluate_falsification(
     )
     _logger.info(
         "falsification passed=%s binding=%s plateau=%.3f oos_t=%.3f floor=%.3f "
-        "dev=%.3f holdout=%.3f",
+        "fold_gate_pass=%s dev=%.3f holdout=%.3f",
         verdict.passed, verdict.binding_constraint, verdict.plateau.neighbor_ratio,
-        verdict.oos_t_stat, verdict.required_t_floor, dev_score, holdout_score,
+        verdict.oos_t_stat, verdict.required_t_floor, fold_gate_pass, dev_score, holdout_score,
         extra={"tag": "EVAL"},
     )
     return verdict
@@ -168,6 +180,13 @@ def _check_contract() -> None:
         "passed", "binding_constraint", "plateau", "oos_t_stat",
         "required_t_floor", "holdout_retention",
     }
+    fold_verdict = evaluate_falsification(
+        parameter_scores={1.0: 0.95, 2.0: 1.00, 3.0: 0.98},
+        chosen_parameter=2.0, oos_t_stat=3.5, family_size=1,
+        dev_score=1.0, holdout_score=0.9, fold_gate_pass=False,
+    )
+    assert fold_verdict.binding_constraint == "fold_concentration"
+    assert fold_verdict.passed is False
 
 
 _check_contract()
