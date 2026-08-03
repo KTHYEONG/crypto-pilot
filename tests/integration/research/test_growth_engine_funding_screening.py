@@ -10,6 +10,7 @@ import pytest
 from src.application.research.growth import evaluation as ge
 from src.research.contracts import GrowthEngineEvaluationRequest
 from src.research.evaluation.policy import resolve_evaluation_end
+from src.research.portfolio.growth_router import build_rolling_segments
 from src.research.portfolio.growth_strategy_library import screen_growth_strategy_weights
 from src.research.portfolio.net_construction import NetConstructionSpec
 from src.research.universe.pit_universe import (
@@ -46,7 +47,13 @@ def _sealed_dev_discovery_inputs(
         if symbol_partition(sym, request.universe.dev_fraction) == "dev"
     }
     dev_schedule = ge._subset_schedule(full_schedule, dev_members)
-    discovery_schedule, _ = ge._split_dev_schedule(dev_schedule)
+    segments = build_rolling_segments(sorted(dev_schedule))
+    if not segments:
+        pytest.fail("no rolling discovery segment could be built on the sealed dev schedule")
+    discovery_dates = segments[0].discovery_dates
+    discovery_schedule = {
+        date: dev_schedule[date] for date in discovery_dates if date in dev_schedule
+    }
     settled_funding = ge._build_settled_funding(all_symbols, px.index)
     return discovery_schedule, px, taker, settled_funding
 
@@ -57,5 +64,6 @@ def test_funding_contrarian_v1_screens_successfully_on_dev_discovery_schedule() 
     for window in (42, 84, 168):
         screen = screen_growth_strategy_weights(
             "funding_contrarian_v1", window, schedule, px, taker, settled_funding,
+            max_positions=5,
         )
         assert screen.status == "SCREENED", screen.reason
