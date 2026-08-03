@@ -13,6 +13,7 @@ from src.application.research.expert import (
     admission_pipeline as admission_pipeline_module,
 )
 from src.application.research.expert import evaluation as evaluation_module
+from src.application.research.expert import exit_sweep as exit_sweep_module
 from src.application.research.expert import (
     rolling_admission as rolling_admission_module,
 )
@@ -20,6 +21,7 @@ from src.research.expert_portfolio.admission_types import (
     LIBRARY_ADMISSION_PROFILES,
     ROLLING_LIBRARY_ADMISSION_PROFILES,
     LibraryAdmissionConfig,
+    TechnicalExpertExitSweepRequest,
     TechnicalLibraryAdmissionBacktestRequest,
     TechnicalLibraryAdmissionPipelineRequest,
     TechnicalLibraryAdmissionRequest,
@@ -102,6 +104,26 @@ def _run_library_admission_backtest(args: argparse.Namespace) -> None:
         stop_loss_mode=args.stop_loss_mode, stop_loss_value=args.stop_loss_value, atr_period=args.atr_period, trailing_stop=args.trailing_stop,
     )
     report = admission_backtest_module.run_technical_library_admission_backtest(request)
+    sys.stdout.write(
+        json.dumps(report.to_report_dict(), sort_keys=True, indent=2, default=str)
+        + "\n"
+    )
+
+
+def _run_exit_sweep(args: argparse.Namespace) -> None:
+    request = TechnicalExpertExitSweepRequest(
+        candidate_sources=tuple(args.candidate_source),
+        symbols=tuple(args.symbols),
+        timeframes=tuple(args.timeframes),
+        fixed_pct_values=tuple(args.fixed_pct_values),
+        atr_multiple_values=tuple(args.atr_multiple_values),
+        atr_period=args.atr_period,
+        include_baseline=not args.no_baseline,
+        start=args.start,
+        end=args.end,
+        max_workers=args.max_workers,
+    )
+    report = exit_sweep_module.run_technical_expert_exit_sweep(request)
     sys.stdout.write(
         json.dumps(report.to_report_dict(), sort_keys=True, indent=2, default=str)
         + "\n"
@@ -235,6 +257,37 @@ def add_expert_library_commands(run_sub: argparse._SubParsersAction[argparse.Arg
         "--trailing-stop", action="store_true", default=False,
     )
     admission_backtest.set_defaults(handler=_run_library_admission_backtest)
+
+    exit_sweep = run_sub.add_parser(
+        "exit-sweep",
+        help="Sweep stop-loss exit settings for one or more technical candidates in-process, without the portfolio/router/stress path",
+    )
+    exit_sweep.add_argument(
+        "--candidate-source", action="append", required=True,
+        help="Frozen technical return source; repeatable",
+    )
+    exit_sweep.add_argument("--symbols", nargs="+", required=True)
+    exit_sweep.add_argument(
+        "--timeframes", nargs="+", default=["4h"],
+        help="Research timeframes to sweep (1h/2h/4h/6h/8h/12h/1d)",
+    )
+    exit_sweep.add_argument("--start", default=None)
+    exit_sweep.add_argument("--end", default=None)
+    exit_sweep.add_argument(
+        "--fixed-pct-values", nargs="*", type=float, default=[0.03, 0.05, 0.08],
+        help="Fixed-percent stop distances crossed with static/trailing anchors",
+    )
+    exit_sweep.add_argument(
+        "--atr-multiple-values", nargs="*", type=float, default=[1.5, 2.5, 4.0],
+        help="ATR-multiple stop distances crossed with static/trailing anchors",
+    )
+    exit_sweep.add_argument("--atr-period", type=int, default=14)
+    exit_sweep.add_argument(
+        "--no-baseline", action="store_true", default=False,
+        help="Omit the stop_loss_mode=None baseline cell from the grid",
+    )
+    exit_sweep.add_argument("--max-workers", type=int, default=None)
+    exit_sweep.set_defaults(handler=_run_exit_sweep)
 
     pipeline = run_sub.add_parser(
         "pipeline",
