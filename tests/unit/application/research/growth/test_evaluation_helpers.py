@@ -5,6 +5,7 @@ from unittest.mock import patch
 
 import numpy as np
 import pandas as pd
+import pytest
 
 from src.application.research.growth import evaluation as ev
 
@@ -160,6 +161,75 @@ class TestScorecardHelpers:
         assert card.selected_strategy_id == "donchian_channel_position_v1"
         assert card.selected_parameter == 84
         assert card.reason is None
+
+
+def _legacy_oos_t_stat(net: pd.Series) -> float:
+    rets = net.dropna()
+    if len(rets) < 10:
+        return 0.0
+    test = rets.iloc[len(rets) // 2 :]
+    if len(test) < 2:
+        return 0.0
+    std = float(test.std())
+    if std <= 0:
+        return 0.0
+    return float(test.mean() / std * np.sqrt(len(test)))
+
+
+class TestOosTStat:
+    def test_oos_t_stat_default_test_fraction_matches_legacy_half_split(self) -> None:
+        rng = np.random.default_rng(0)
+        net = pd.Series(rng.normal(0.0, 0.1, 20))
+        expected = _legacy_oos_t_stat(net)
+        assert ev._oos_t_stat(net) == pytest.approx(expected)
+        assert ev._oos_t_stat(net, test_fraction=0.5) == pytest.approx(expected)
+
+    def test_oos_t_stat_test_fraction_one_uses_full_series(self) -> None:
+        rng = np.random.default_rng(1)
+        net = pd.Series(rng.normal(0.0, 0.1, 20))
+        rets = net.dropna()
+        expected = float(rets.mean() / rets.std() * np.sqrt(len(rets)))
+        assert ev._oos_t_stat(net, test_fraction=1.0) == pytest.approx(expected)
+
+    def test_oos_t_stat_edge_cases_never_raise(self) -> None:
+        assert ev._oos_t_stat(pd.Series([1.0] * 5)) == 0.0
+        assert ev._oos_t_stat(pd.Series([np.nan] * 20)) == 0.0
+
+
+class TestFamilyWindowCorrelation:
+    def test_family_window_correlation_pairwise_values(self) -> None:
+        rng = np.random.default_rng(0)
+        index = pd.date_range("2024-01-01", periods=100, freq="4h", tz="UTC")
+        common = rng.normal(0.0, 1.0, 100)
+        a = pd.Series(common + 0.1 * rng.normal(0.0, 1.0, 100), index=index)
+        b = pd.Series(common + 0.1 * rng.normal(0.0, 1.0, 100), index=index)
+        c = pd.Series(-common + 0.1 * rng.normal(0.0, 1.0, 100), index=index)
+        result = ev.family_window_correlation({42: a, 84: b, 168: c})
+        assert set(result) == {(42, 84), (42, 168), (84, 168)}
+        assert all(-1.0 <= value <= 1.0 for value in result.values())
+        assert result[(42, 84)] > 0.5
+        assert result[(42, 168)] < -0.5
+
+    def test_family_window_correlation_empty_for_single_window(self) -> None:
+        net = pd.Series([1.0] * 20)
+        assert ev.family_window_correlation({42: net}) == {}
+
+    def test_family_window_correlation_skips_short_overlap(self) -> None:
+        index = pd.date_range("2024-01-01", periods=100, freq="4h", tz="UTC")
+        rng = np.random.default_rng(2)
+        a = pd.Series(rng.normal(0.0, 1.0, 100), index=index)
+        b = pd.Series(rng.normal(0.0, 1.0, 5), index=index[:5])
+        assert ev.family_window_correlation({42: a, 84: b}) == {}
+
+    def test_family_window_correlation_inner_joins_non_null_index(self) -> None:
+        index = pd.date_range("2024-01-01", periods=100, freq="4h", tz="UTC")
+        rng = np.random.default_rng(3)
+        a = pd.Series(rng.normal(0.0, 1.0, 100), index=index)
+        b = pd.Series(rng.normal(0.0, 1.0, 100), index=index)
+        b.loc[index[20:30]] = np.nan
+        result = ev.family_window_correlation({42: a, 84: b})
+        assert (42, 84) in result
+        assert -1.0 <= result[(42, 84)] <= 1.0
 
 
 class TestScreenDiscoveryCandidates:
