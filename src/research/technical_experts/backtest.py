@@ -9,6 +9,8 @@ exists at the settlement timestamp.
 
 from __future__ import annotations
 
+from typing import Literal
+
 import numpy as np
 import pandas as pd
 
@@ -39,6 +41,10 @@ def run_technical_expert_backtest(
     funding_rates: pd.Series,
     initial_equity: float = 10_000.0,
     signal_delay_bars: int = 0,
+    stop_loss_mode: Literal["fixed_pct", "atr_multiple"] | None = None,
+    stop_loss_value: float | None = None,
+    atr_period: int = 14,
+    trailing_stop: bool = False,
 ) -> BacktestResult:
     """Run one directional technical candidate on the completed-bar grid.
 
@@ -58,14 +64,47 @@ def run_technical_expert_backtest(
         raise DataIntegrityError(
             "technical expert mode requires a non-empty funding_rates series"
         )
+    if stop_loss_mode is not None:
+        if stop_loss_value is None or stop_loss_value <= 0.0:
+            raise ValueError(
+                f"stop_loss_value must be > 0.0 when stop_loss_mode is set, got "
+                f"{stop_loss_value}"
+            )
+        if stop_loss_mode == "fixed_pct" and stop_loss_value >= 1.0:
+            raise ValueError(
+                f"fixed_pct stop_loss_value must be < 1.0, got {stop_loss_value}"
+            )
+    if atr_period < 1:
+        raise ValueError(f"atr_period must be >= 1, got {atr_period}")
 
     events = generate_signal_events(frame, candidate)
     grid = frame.index
     bar_funding = _align_funding_rates(funding_rates, grid)
 
     open_arr = pd.to_numeric(frame["open"], errors="coerce").to_numpy(dtype=np.float64)
+    high_arr = pd.to_numeric(frame["high"], errors="coerce").to_numpy(dtype=np.float64)
+    low_arr = pd.to_numeric(frame["low"], errors="coerce").to_numpy(dtype=np.float64)
     close_arr = pd.to_numeric(frame["close"], errors="coerce").to_numpy(dtype=np.float64)
     n = len(grid)
+
+    atr_arr: np.ndarray | None = None
+    if stop_loss_mode == "atr_multiple":
+        prev_close = np.full(n, np.nan, dtype=np.float64)
+        prev_close[1:] = close_arr[:-1]
+        true_range = np.maximum.reduce([
+            high_arr - low_arr,
+            np.abs(high_arr - prev_close),
+            np.abs(low_arr - prev_close),
+        ])
+        true_range[0] = high_arr[0] - low_arr[0]
+        atr = (
+            pd.Series(true_range)
+            .rolling(window=atr_period, min_periods=atr_period)
+            .mean()
+            .to_numpy()
+        )
+        atr_arr = np.full(n, np.nan, dtype=np.float64)
+        atr_arr[1:] = atr[:-1]
 
     schedule: list[int | None] = [None] * n
     target_series: list[int] = []
@@ -83,7 +122,10 @@ def run_technical_expert_backtest(
             schedule[apply_bar] = current_target
 
     equity_series, trade_rows = _execute_target_schedule(
-        open_arr, close_arr, bar_funding, schedule, costs, initial_equity, grid,
+        open_arr, close_arr, high_arr, low_arr, bar_funding, schedule, costs,
+        initial_equity, grid,
+        stop_loss_mode=stop_loss_mode, stop_loss_value=stop_loss_value,
+        atr_arr=atr_arr, trailing_stop=trailing_stop,
     )
     trades_df = (
         pd.DataFrame(trade_rows)
@@ -97,11 +139,17 @@ def run_technical_expert_backtest(
 def _execute_target_schedule(
     open_arr: np.ndarray,
     close_arr: np.ndarray,
+    high_arr: np.ndarray,
+    low_arr: np.ndarray,
     bar_funding: np.ndarray,
     schedule: list[int | None],
     costs: CostModel,
     initial_equity: float,
     grid: pd.DatetimeIndex,
+    stop_loss_mode: Literal["fixed_pct", "atr_multiple"] | None = None,
+    stop_loss_value: float | None = None,
+    atr_arr: np.ndarray | None = None,
+    trailing_stop: bool = False,
 ) -> tuple[pd.Series, list[dict[str, object]]]:
     """Execute a per-bar signed target schedule at each bar's open.
 
@@ -111,6 +159,12 @@ def _execute_target_schedule(
     charged on every changed notional and positive funding is debited from a
     long while credited to a short, only while the position exists at the
     settlement timestamp.
+
+    When ``stop_loss_mode`` is set, an intrabar stop check runs before the
+    scheduled-target block for a position carried in from a prior bar. The stop
+    distance is fixed at entry (fixed fraction of the fill price, or an ATR
+    multiple evaluated on causally shifted bars); ``trailing_stop`` instead
+    anchors the stop to the favorable extreme seen while the position is open.
     """
     n = len(open_arr)
     cash = initial_equity
@@ -118,6 +172,8 @@ def _execute_target_schedule(
     side_sign = 0  # 1 long, -1 short, 0 flat
     entry_price = 0.0
     entry_bar_idx = -1
+    stop_distance: float | None = None
+    favorable_extreme = 0.0
     trade_funding_pnl = 0.0
     equity_arr = np.full(n, np.nan, dtype=np.float64)
     trade_rows: list[dict[str, object]] = []
@@ -149,7 +205,8 @@ def _execute_target_schedule(
         trade_funding_pnl = 0.0
 
     def _open(direction: int, fill: float, t: int) -> None:
-        nonlocal cash, position_qty, side_sign, entry_price, entry_bar_idx, trade_funding_pnl
+        nonlocal cash, position_qty, side_sign, entry_price, entry_bar_idx
+        nonlocal trade_funding_pnl, stop_distance, favorable_extreme
         qty = cash / fill
         if qty <= 0.0:
             return
@@ -163,6 +220,15 @@ def _execute_target_schedule(
         entry_price = fill
         entry_bar_idx = t
         trade_funding_pnl = 0.0
+        stop_distance = None
+        favorable_extreme = fill
+        if stop_loss_mode == "fixed_pct":
+            assert stop_loss_value is not None
+            stop_distance = fill * stop_loss_value
+        elif stop_loss_mode == "atr_multiple" and atr_arr is not None:
+            entry_atr = atr_arr[t]
+            if not np.isnan(entry_atr):
+                stop_distance = stop_loss_value * entry_atr
 
     for t in range(n):
         o = open_arr[t]
@@ -175,6 +241,30 @@ def _execute_target_schedule(
             funding_pnl = -side_sign * position_qty * o * bar_funding[t]
             cash += funding_pnl
             trade_funding_pnl += funding_pnl
+
+        if stop_loss_mode is not None and position_qty > 0 and stop_distance is not None:
+            if trailing_stop:
+                if side_sign == 1:
+                    favorable_extreme = max(favorable_extreme, high_arr[t])
+                    stop_price = favorable_extreme - stop_distance
+                else:
+                    favorable_extreme = min(favorable_extreme, low_arr[t])
+                    stop_price = favorable_extreme + stop_distance
+            elif side_sign == 1:
+                stop_price = entry_price - stop_distance
+            else:
+                stop_price = entry_price + stop_distance
+            stop_hit = (
+                (side_sign == 1 and low_arr[t] <= stop_price)
+                or (side_sign == -1 and high_arr[t] >= stop_price)
+            )
+            if stop_hit:
+                stop_fill = (
+                    stop_price * (1.0 - costs.slippage_rate)
+                    if side_sign == 1
+                    else stop_price * (1.0 + costs.slippage_rate)
+                )
+                _close("stop_loss", stop_fill, t)
 
         scheduled = schedule[t]
         if scheduled is not None:
@@ -226,9 +316,14 @@ def _check_contract() -> None:
     assert list(params) == [
         "frame", "candidate", "costs", "funding_rates",
         "initial_equity", "signal_delay_bars",
+        "stop_loss_mode", "stop_loss_value", "atr_period", "trailing_stop",
     ]
     assert params["initial_equity"].default == 10_000.0
     assert params["signal_delay_bars"].default == 0
+    assert params["stop_loss_mode"].default is None
+    assert params["stop_loss_value"].default is None
+    assert params["atr_period"].default == 14
+    assert params["trailing_stop"].default is False
 
 
 _check_contract()
