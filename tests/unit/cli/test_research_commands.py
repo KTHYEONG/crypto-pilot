@@ -381,6 +381,8 @@ def test_portfolio_growth_cli_parses_and_dispatches(monkeypatch) -> None:
         equity = ()
         trades = ()
         sizing = None
+        selected_strategy = None
+        scorecard = None
 
     def _fake_run(request) -> _FakeReport:
         calls.append(request)
@@ -422,6 +424,8 @@ def test_portfolio_growth_cli_defaults_to_dev_scope(monkeypatch) -> None:
         equity = ()
         trades = ()
         sizing = None
+        selected_strategy = None
+        scorecard = None
 
     def _fake_run(request) -> _FakeReport:
         calls.append(request)
