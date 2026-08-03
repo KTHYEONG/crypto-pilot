@@ -1,6 +1,16 @@
 {
   "tasks": [
     {
+      "task_id": "TASK_STOP_LOSS_EDGE_RECOVERY",
+      "date": "2026-08-03",
+      "adr_id": "ADR_20260803_STOP_LOSS_EDGE_RECOVERY",
+      "domain": "risk",
+      "title": "Technical Expert Edge Recovery — Causal Stop-Loss Engine (v2)",
+      "why": "18-candidate technical expert library showed 0/499 backtests passing the observation gate across all timeframes; re-mining win_rate/payoff_ratio showed trend-confirmation families near-breakeven arithmetically (profit_factor>1) but negative geometrically (volatility drag from full-notional, unmanaged-risk sizing with no stop-loss), and pullback families with high win-rate/low payoff-ratio (no-stop-loss unbounded-loss signature).",
+      "resolution": "Added an opt-in causal stop-loss engine to _execute_target_schedule (fixed_pct/atr_multiple modes x static/trailing anchors, causally-shifted ATR, default stop_loss_mode=None byte-identical to prior behavior), threaded through run_technical_expert_backtest, TechnicalLibraryAdmissionBacktestRequest, and the CLI. Ran the spec's own verification sweep: 1,740 real CLI backtests across 12 stop settings x 16(4h)/13(1d) candidates x 5 symbols.",
+      "impact": "Stop-loss mechanism confirmed working and non-regressive, but did NOT recover edge: 0/960 cells passed the gate at 4h, 3/780 at 1d (isolated single-symbol whipsaw noise, not real edge; family-level PASS stayed 0/5 everywhere). Volatility-drag mitigation is real but insufficient to overcome the underlying lack of gross alpha already established by the 0/499 census — confirms the bottleneck is entry/sizing, not exit risk management."
+    },
+    {
       "task_id": "TASK_TIMEFRAME_SCALING_ZERO_EDGE",
       "date": "2026-08-02",
       "adr_id": "ADR_20260802_TIMEFRAME_SCALING_ZERO_EDGE",
