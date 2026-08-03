@@ -6,14 +6,23 @@ Full grid measurement of the opt-in causal stop-loss engine (`stop_loss_mode`, `
 (`fixed_pct`/`atr_multiple` x static/trailing) at three magnitude values each, on the same 5 symbols
 (BTCUSDT, ETHUSDT, SOLUSDT, BNBUSDT, XRPUSDT), 2022-06-01 -> 2025-12-31 pre-holdout window.
 
-**Coverage**: 4h (reference timeframe, most existing baseline detail) and 1d (longest bar, cheapest/least-noisy,
-called out in spec §3 as a representative pair) were swept in full. Wall-clock cost measured first (~1.5-2s per
-single-symbol `research run expert backtest` call) made this tractable: **1,740 CLI invocations total**
-(4h: 16 alive candidates x 12 settings x 5 symbols = 960; 1d: 13 alive candidates x 12 settings x 5 symbols = 780;
-MFI Trend Pullback excluded at 4h and BB Squeeze Breakout/Stochastic Trend Pullback/MFI-short excluded at 1d -
-all confirmed still dead, 0/5 activity floor, before spending sweep budget on them, matching `timeframe-4h.md` /
-`timeframe-1d.md`). **1h/2h/6h/8h/12h were not re-swept in this pass** (time budget) and remain pre-stop-loss
-baselines; see each file's own note.
+**Coverage**: all 7 timeframes are now swept. 4h and 1d were swept first, in full, via 1,740 individual CLI
+`research run expert backtest` calls (see the original methodology below). 1h/2h/6h/8h/12h were swept in a second
+pass using the newer, ~12-15x faster batched tool `research run expert exit-sweep`
+(`src/application/research/expert/exit_sweep.py`, /check-verified), which produces the same
+`observation.gate`-derived `cagr`/`lcb90_cagr`/`verdict` statistics per (candidate, symbol, setting) cell but
+loads data once per (symbol, timeframe) and parallelizes across pairs via `ProcessPoolExecutor` instead of
+spawning one CLI process per cell. **Total across all 7 timeframes: 6,550 cells**
+(4h: 960, 1d: 780, 1h: 780, 2h: 910, 6h: 1,040, 8h: 1,170, 12h: 910 - candidate x setting x symbol, each including
+the `stop_loss_mode=None` baseline row). Partial-N families (candidates where fewer than 5/5 symbols cleared the
+activity floor at that timeframe, per each `timeframe-<TF>.md`'s admission table) were swept across the same
+5-symbol grid as every other candidate for tool-batching efficiency, but aggregated (`mean_cagr` /
+`median_lcb90_cagr` / `gate_pass_count`) only over the symbols that were actually admitted for that exact
+candidate at that timeframe, to stay apples-to-apples with each file's existing baseline N columns - the excluded
+symbols' cells are near-zero-trade/inert rows (`compute_metrics` returns gracefully for <2 equity points), not
+errors, and are simply dropped from the aggregation, not double-counted as passes or fails. Per-timeframe detail:
+`timeframe-1h.md`, `timeframe-2h.md`, `timeframe-6h.md`, `timeframe-8h.md`, `timeframe-12h.md` (each has its own
+"Stop-loss exit sweep" section).
 
 **Magnitudes tested**: `fixed_pct` in {3%, 5%, 8%} of entry price; `atr_multiple` in {1.5x, 2.5x, 4.0x} of the
 causally-shifted `ATR(14)` (timeframe-scaled). Both crossed with static and trailing anchors -> 12 settings per
@@ -44,6 +53,32 @@ already do for the no-stop baseline.
 | :--- | ---: | ---: | ---: | ---: |
 | 4h | 960 | 0 | 0 / 192 | 0 / 192 |
 | 1d | 780 | 3 | 3 / 156 | 2 / 156 |
+| 1h | 780 | 0 | 0 / 144 | 0 / 144 |
+| 2h | 910 | 0 | 0 / 168 | 0 / 168 |
+| 6h | 1,040 | 0 | 0 / 192 | 0 / 192 |
+| 8h | 1,170 | 0 | 0 / 216 | 0 / 216 |
+| 12h | 910 | 0 | 0 / 168 | 1 / 168 |
+| **All 7** | **6,550** | **3** | **3 / 1,236** | **3 / 1,236** |
+
+**1h/2h/6h/8h/12h: not a single one of the 4,810 additional cells passed the gate** - a stronger and cleaner null
+than 4h/1d, since these five sweeps found zero gate-PASS cells even before any noise-vs-edge filtering (unlike
+the 3 isolated 1d passes). 12h's single positive-median-LCB90 setting (Ichimoku Cloud short, `fixed_pct`/trailing
+@3%, median LCB90 CAGR +0.15%) still shows 0/5 gate PASS and reproduces the exact same setting signature as the
+1d noise passes (tightest fixed-percent stop x trailing) with no other magnitude, anchor, or family corroborating
+it at 12h - read as the same whipsaw-sampling-noise pattern, not independent evidence of recovered edge. See each
+`timeframe-<TF>.md`'s "Stop-loss exit sweep" section for detail.
+
+**Combined 7-timeframe verdict: the stop-loss engine does not recover edge anywhere in the full 6,550-cell
+census.** 6,547 of 6,550 cells (99.95%) are clean 0/5-gate-PASS negatives; the only 3 exceptions are the 1d
+whipsaw-noise passes already diagnosed above as artifacts of a 3% stop being tighter than daily crypto ATR, not a
+reproducible effect (no magnitude, anchor, or symbol-generalization corroborates them). The volatility-drag /
+payoff-ratio mechanism the engine targets is real and visible in the raw cell deltas at every timeframe (trailing
+variants routinely narrow the CAGR-vs-LCB90 gap for trend-confirmation families), but at no timeframe, on any of
+the 24 magnitude/anchor settings, for any of the up-to-18 alive candidates, does it close the gap to the
+observation gate's hurdle. This confirms the bottleneck diagnosed in `timeframe-census.md`'s cross-timeframe
+0/499 finding is the absence of gross directional edge in these technical-indicator candidates, not the
+choice of exit mechanism - stop-loss/exit-mechanism redesign is not a viable recovery lever for this expert
+library, at any of the 7 timeframes tested.
 
 **4h: no combination, at any magnitude, for any family/side, flipped a single gate PASS or a single positive
 median-LCB90-CAGR family cell.** Every one of the 192 (family/side x combo x magnitude) 4h settings remains

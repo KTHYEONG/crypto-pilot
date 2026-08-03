@@ -57,3 +57,19 @@ Passing the activity floor above only means enough trades fired to be measurable
 | Stochastic Trend Pullback [short] | 5 | -2.64% | +0.00% | 0/5 |
 
 **Verdict at 1h: 0/55 backtests passed the observation gate.** Every family/side tested at this timeframe shows a negative or flat mean CAGR. See `timeframe-census.md` §3 for the full cross-timeframe synthesis (0/499 across all 7 timeframes).
+
+## Stop-loss exit sweep (`research run expert exit-sweep`, v3 fast batched tool)
+
+The rows above are the `stop_loss_mode=None` control (no stop-loss) - kept exactly as measured. This section adds
+the opt-in causal stop-loss engine, swept across all 4 exit combinations (`fixed_pct`/`atr_multiple` x
+static/trailing) at 3 magnitudes each, for all 12 alive candidates at 1h (partial-N families CCI long/short kept
+at their admitted symbol subset - BTCUSDT/SOLUSDT and BTCUSDT/ETHUSDT/XRPUSDT respectively; ADX/DI short, MFI
+both sides, and RSI Trend Pullback both sides excluded, confirmed still dead, 0/5 activity floor, at 1h) - 780
+cells (candidate x setting x symbol, including the baseline row).
+
+**Result: 0/780 individual cells passed the gate**, and aggregated per (candidate, setting) over each family's
+correctly-admitted symbol subset, **0 of the 144 non-baseline settings (12 candidates x 12 settings) show any
+gate PASS, and none show a positive median LCB90 CAGR either.** Every family/side stays at 0/N gate PASS across
+every magnitude and anchor tested, matching the no-stop baseline's 0/55 finding. **Verdict: the stop-loss engine
+did not flip any 1h family positive** - no combination narrows the gap to the observation gate's hurdle at this
+timeframe. Full methodology and combined cross-timeframe verdict: `docs/results/stop-loss-edge-check.md`.

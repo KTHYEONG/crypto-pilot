@@ -61,3 +61,18 @@ Passing the activity floor above only means enough trades fired to be measurable
 | Stochastic Trend Pullback [short] | 5 | -1.03% | -1.10% | 0/5 |
 
 **Verdict at 6h: 0/79 backtests passed the observation gate.** Every family/side tested at this timeframe shows a negative or flat mean CAGR. See `timeframe-census.md` §3 for the full cross-timeframe synthesis (0/499 across all 7 timeframes).
+
+## Stop-loss exit sweep (`research run expert exit-sweep`, v3 fast batched tool)
+
+The rows above are the `stop_loss_mode=None` control (no stop-loss) - kept exactly as measured. This section adds
+the opt-in causal stop-loss engine, swept across all 4 exit combinations at 3 magnitudes each, for all 16 alive
+candidates at 6h (partial-N families kept at their admitted symbol subset - BB Squeeze Breakout long:
+BTCUSDT/ETHUSDT/BNBUSDT; MFI Trend Pullback short: BTCUSDT only; MFI Trend Pullback long excluded, confirmed
+still dead, 0/5 activity floor, at 6h) - 1,040 cells (candidate x setting x symbol, including the baseline row).
+
+**Result: 0/1,040 individual cells passed the gate**, and aggregated per (candidate, setting) over each family's
+correctly-admitted symbol subset, **0 of the 192 non-baseline settings (16 candidates x 12 settings) show any
+gate PASS, and none show a positive median LCB90 CAGR either.** Every family/side stays at 0/N gate PASS across
+every magnitude and anchor tested, matching the no-stop baseline's 0/79 finding. **Verdict: the stop-loss engine
+did not flip any 6h family positive.** Full methodology and combined cross-timeframe verdict:
+`docs/results/stop-loss-edge-check.md`.
