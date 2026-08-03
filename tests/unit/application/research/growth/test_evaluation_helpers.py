@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import itertools
+
 from pathlib import Path
 from unittest.mock import patch
 
@@ -8,6 +10,8 @@ import pandas as pd
 import pytest
 
 from src.application.research.growth import evaluation as ev
+from src.research.portfolio.net_construction import NetReturnStream
+from src.research.risk.growth_sizing import GrowthSizingConfig
 
 
 def _grid(n: int = 500, start: str = "2024-01-01") -> pd.DatetimeIndex:
@@ -21,24 +25,41 @@ def _schedule(grid: pd.DatetimeIndex) -> dict[pd.Timestamp, tuple[str, ...]]:
     )
 
 
-class TestSplitDevSchedule:
-    def test_splits_chronologically_at_midpoint(self) -> None:
-        dates = [
-            pd.Timestamp(f"2024-{m:02d}-01", tz="UTC") for m in range(1, 13)
+class TestRollingSegments:
+    def _dates(self, n: int) -> list[pd.Timestamp]:
+        return [
+            pd.Timestamp("2023-01-01", tz="UTC") + pd.DateOffset(months=i)
+            for i in range(n)
         ]
-        schedule = dict.fromkeys(dates, ("AAAUSDT",))
-        discovery, qualification = ev._split_dev_schedule(schedule)
-        assert list(discovery) == dates[:6]
-        assert list(qualification) == dates[6:]
 
-    def test_odd_count_assigns_extra_month_to_qualification(self) -> None:
-        dates = [
-            pd.Timestamp(f"2024-{m:02d}-01", tz="UTC") for m in range(1, 9)
-        ]
-        schedule = dict.fromkeys(dates, ("AAAUSDT",))
-        discovery, qualification = ev._split_dev_schedule(schedule)
-        assert len(discovery) == 4
-        assert len(qualification) == 4
+    def test_three_month_deployment_windows_with_prior_discovery(self) -> None:
+        dates = self._dates(36)
+        segments = ev.build_rolling_segments(dates)
+        # the first deployable window needs at least two discovery rebalance dates
+        first = segments[0]
+        assert first.deployment_dates == tuple(dates[3:6])
+        assert first.discovery_dates == tuple(dates[0:3])
+        assert all(d < first.deployment_dates[0] for d in first.discovery_dates)
+        assert len(segments) == 11
+        # deployment windows are non-overlapping and consecutive
+        for left, right in itertools.pairwise(segments):
+            assert left.deployment_dates[-1] < right.deployment_dates[0]
+
+    def test_trailing_partial_deployment_window_is_dropped(self) -> None:
+        dates = self._dates(36 + 2)  # trailing partial window of two months
+        segments = ev.build_rolling_segments(dates)
+        assert len(segments) == 11
+        assert segments[-1].deployment_dates[-1] <= dates[-1]
+
+    def test_enough_deployment_folds_requires_three_six_month_folds(self) -> None:
+        dates = self._dates(36)  # deployment span ~32 months > 18 months
+        segments = ev.build_rolling_segments(dates)
+        assert ev.enough_deployment_folds(segments) is True
+        short = ev.build_rolling_segments(self._dates(12 + 11))
+        assert ev.enough_deployment_folds(short) is False
+
+    def test_enough_deployment_folds_fails_closed_on_empty(self) -> None:
+        assert ev.enough_deployment_folds([]) is False
 
 
 class TestBuildForwardFunding:
@@ -220,6 +241,48 @@ class TestOosTStat:
         assert ev._oos_t_stat(pd.Series([1.0] * 5)) == 0.0
         assert ev._oos_t_stat(pd.Series([np.nan] * 20)) == 0.0
 
+class TestSegmentSizing:
+    def _stream(self, grid: pd.DatetimeIndex, net: pd.Series) -> NetReturnStream:
+        zeros = pd.Series(0.0, index=grid)
+        return NetReturnStream(
+            gross=net, cost=zeros, funding=zeros, net=net,
+            turnover=zeros, realized_weights=pd.DataFrame(index=grid),
+        )
+
+    # GPR-03-NO-DISCOVERY-IN-SIZING
+    def test_solver_receives_only_the_discovery_return_stream(self) -> None:
+        grid = _grid(n=500)
+        net = pd.Series(np.full(500, 0.001), index=grid)
+        captured: dict[str, object] = {}
+        original = ev.solve_growth_optimal_risk
+
+        def _spy(unit_returns, config, **kwargs):
+            captured["returns"] = np.asarray(unit_returns, dtype=np.float64)
+            return original(unit_returns, config, **kwargs)
+
+        with patch.object(ev, "solve_growth_optimal_risk", _spy):
+            ev._segment_sizing(
+                self._stream(grid, net),
+                GrowthSizingConfig(risk_grid=(0.001,), horizon_years=1.0, n_paths=200),
+            )
+        assert np.allclose(captured["returns"], net.to_numpy(dtype=np.float64))
+
+    # GPR-03-NO-DISCOVERY-IN-SIZING
+    def test_non_finite_or_empty_stream_fails_closed(self) -> None:
+        grid = _grid(n=50)
+        nan_net = pd.Series(np.full(50, np.nan), index=grid)
+        with pytest.raises(ValueError, match="empty"):
+            ev._segment_sizing(
+                self._stream(grid, nan_net),
+                GrowthSizingConfig(risk_grid=(0.001,), n_paths=200),
+            )
+        empty_net = pd.Series([], dtype=np.float64)
+        with pytest.raises(ValueError, match="empty"):
+            ev._segment_sizing(
+                self._stream(empty_net.index, empty_net),
+                GrowthSizingConfig(risk_grid=(0.001,), n_paths=200),
+            )
+
 
 class TestFamilyWindowCorrelation:
     def test_family_window_correlation_pairwise_values(self) -> None:
@@ -271,7 +334,7 @@ class TestScreenDiscoveryCandidates:
         schedule = _schedule(grid)
         bars = grid
         entries, families = ev._screen_discovery_candidates(
-            schedule, px, fwd, taker, empty, bars,
+            schedule, px, fwd, taker, empty, bars, max_positions=2,
         )
         by_id = {entry.strategy_id: entry for entry in entries}
         assert by_id["funding_contrarian_v1"].status == "DATA_INVALID"
