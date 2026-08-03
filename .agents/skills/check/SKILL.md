@@ -34,12 +34,11 @@ Independent audit gate completing the main development loop (`spec` -> `implemen
 
 ## Output
 
-Provide a clear, concise summary with emojis. Example:
+Do NOT add any intro, summary, or explanations. Print output format directly:
 
-### 🔍 [CHECK] <Audit Target>
+- **PASS** (Single-line only):
+  ✅ PASS: <Audit Target>
 
-- **Status**: ✅ PASS (or ❌ FAIL)
-- **Checks**:
-  - ⚙️ Contract Alignment: <PASS/FAIL>
-  - 🛡️ Strict Mypy & Ruff: <PASS/FAIL>
-  - 🧪 Regression & Tests: <PASS/FAIL>
+- **FAIL** (Compact format):
+  ❌ FAIL: <Audit Target> | Root: <Cause> | Impact: <Scope> | Fix: <Action>
+
