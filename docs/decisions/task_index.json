@@ -1,6 +1,16 @@
 {
   "tasks": [
     {
+      "task_id": "TASK_GROWTH_REGIME_FOLD_CONCENTRATION_GATE",
+      "date": "2026-08-03",
+      "adr_id": "ADR_20260803_GROWTH_REGIME_FOLD_CONCENTRATION_GATE",
+      "domain": "research",
+      "title": "성장 엔진 신규 전략 3라운드 탐색 + 레짐-분할 구조 진단 + fold-concentration 게이트 구현",
+      "why": "funding 버그 수정 이후에도 NO_ADMISSIBLE_ALPHA가 지속되어, 사용자 요청으로 신규 데이터차원 3종·고전지표+조합 8종·자율 광범위 지표 81개조합(24 패밀리) 등 총 약 100개 파라미터 조합을 3라운드에 걸쳐 실측(discovery/qualification/holdout/plateau 파이프라인 재사용). plateau 통과 10개 후보 전량이 qualification/holdout에서 실패해, 개별 신호 결함이 아니라 평가 방법론 자체의 구조적 결함 여부를 진단 요청받음.",
+      "resolution": "레짐 진단: discovery(2023-04~2024-07) breadth 48.5% vs qualification(2024-08~2025-12) breadth 16.9%, 4-fold 세분 시 36.8%→48.8%→20.2%→12.4%로 지속 악화(추세적 붕괴, 데이터 아티팩트 아님을 메이저 알트 실측으로 확인) — plateau 통과 후보 대부분이 추세추종류였다는 사실과 정합. 가장 견고한 해결책으로 reliability.py의 기존 compute_equal_duration_fold_distribution(미사용 상태였음)을 재사용해 evaluate_falsification에 fold_concentration 게이트를 신설(순서: plateau→multiplicity→fold_concentration→symbol_holdout). _qualification_fold_gate_pass 신설, fail-closed. 실전 검증: taker_imbalance_v1/84가 fold_concentration=0.776(임계값 0.645 초과)로 qualification 성과의 77.6%가 3개 fold 중 1개에 집중되어 있음을 정량 확인 — 최종 판정(NO_ADMISSIBLE_ALPHA/CASH)은 불변.",
+      "impact": "3라운드 탐색으로 breadth/추세/오실레이터/거래량/느린타임프레임 가설 공간을 광범위하게 소진해 향후 탐색 우선순위를 재조정. fold-concentration 게이트는 어떤 후보도 새로 통과시키지 않지만, 기존 단일분할 oos_t_stat이 놓치던 시간적 집중 위험을 자동 검증하는 위험관리 계측을 프로덕션에 처음 배선함 — 향후 근접통과 후보의 오탐 배포 위험을 줄임."
+    },
+    {
       "task_id": "TASK_GROWTH_FUNDING_GATE_FIX",
       "date": "2026-08-03",
       "adr_id": "ADR_20260803_GROWTH_FUNDING_GATE_FIX",

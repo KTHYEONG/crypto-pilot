@@ -102,7 +102,10 @@
     ]
   },
   "src/application/research/growth/evaluation.py": {
-    "testing": "tests/integration/cli/test_growth_engine_cli.py",
+    "testing": [
+      "tests/integration/cli/test_growth_engine_cli.py",
+      "tests/unit/research/evaluation/test_falsification.py"
+    ],
     "architecture": "docs/results/growth_portfoilo.md"
   },
   "src/application/research/oi/evaluation.py": {
