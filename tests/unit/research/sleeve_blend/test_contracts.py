@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import pandas as pd
 import pytest
 
 from src.research.sleeve_blend.contracts import (
@@ -33,6 +34,65 @@ def test_fixed_sleeve_portfolio_spec_rejects_out_of_range_budget() -> None:
         FixedSleevePortfolioSpec(symbols=("A", "B"), mdd_budget_fraction=1.0)
     with pytest.raises(ValueError, match="mdd_budget_fraction"):
         FixedSleevePortfolioSpec(symbols=("A", "B"), mdd_budget_fraction=1.5)
+
+
+def test_pbgt_01_core5_universe_accepts_only_exact_declared_membership() -> None:
+    """PBGT-01: core5_v1 accepts only its exact declared order; arbitrary,
+    duplicate, reordered, or substituted tuples raise ValueError."""
+    from src.research.sleeve_blend.contracts import BlendUniverseSpec
+
+    spec = BlendUniverseSpec()
+    assert spec.universe_id == "core5_v1"
+    assert spec.symbols == ("BTCUSDT", "ETHUSDT", "AVAXUSDT", "BNBUSDT", "DOGEUSDT")
+
+    BlendUniverseSpec(
+        universe_id="core5_v1",
+        symbols=("BTCUSDT", "ETHUSDT", "AVAXUSDT", "BNBUSDT", "DOGEUSDT"),
+    )
+    for bad in (
+        (),
+        ("BTCUSDT",),
+        ("BTCUSDT", "BTCUSDT", "AVAXUSDT", "BNBUSDT", "DOGEUSDT"),
+        ("ETHUSDT", "BTCUSDT", "AVAXUSDT", "BNBUSDT", "DOGEUSDT"),
+        ("BTCUSDT", "ETHUSDT", "AVAXUSDT", "BNBUSDT", "SOLUSDT"),
+    ):
+        with pytest.raises(ValueError, match="exact declared core5_v1 order"):
+            BlendUniverseSpec(universe_id="core5_v1", symbols=bad)
+    with pytest.raises(ValueError, match="unknown universe_id"):
+        BlendUniverseSpec(universe_id="core9_v9")
+
+
+def test_pbgt_01_tournament_request_validates_qualification_interval() -> None:
+    """An empty qualification interval is a contract violation."""
+    from src.research.sleeve_blend.contracts import PortfolioBlendTournamentRequest
+
+    with pytest.raises(ValueError, match="qualification_interval must not be empty"):
+        PortfolioBlendTournamentRequest(qualification_interval="")
+    with pytest.raises(ValueError, match="Invalid frequency"):
+        PortfolioBlendTournamentRequest(qualification_interval="not-a-frequency")
+    with pytest.raises(ValueError, match="initial_equity"):
+        PortfolioBlendTournamentRequest(initial_equity=0.0)
+    with pytest.raises(ValueError, match="discovery_end must be tz-aware UTC"):
+        PortfolioBlendTournamentRequest(
+            discovery_end=pd.Timestamp("2024-12-31 23:59:59"),
+        )
+
+
+def test_causal_leverage_spec_contract_ranges() -> None:
+    from src.research.sleeve_blend.contracts import CausalLeverageSpec
+
+    spec = CausalLeverageSpec()
+    assert spec.lookback_days == 365
+    assert spec.risk_budget_fraction == 0.85
+    assert spec.max_gross_leverage == 3.0
+    with pytest.raises(ValueError, match="lookback_days"):
+        CausalLeverageSpec(lookback_days=0)
+    with pytest.raises(ValueError, match="risk_budget_fraction"):
+        CausalLeverageSpec(risk_budget_fraction=0.0)
+    with pytest.raises(ValueError, match="risk_budget_fraction"):
+        CausalLeverageSpec(risk_budget_fraction=1.0)
+    with pytest.raises(ValueError, match="max_gross_leverage"):
+        CausalLeverageSpec(max_gross_leverage=0.5)
 
 
 def test_directional_sleeve_spec_freezes_symbols_and_limits_settings() -> None:
