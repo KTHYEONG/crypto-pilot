@@ -113,6 +113,31 @@ class TestBuildSettledFunding:
         assert np.allclose(frame["AAAUSDT"].to_numpy(), [1e-4, 2e-4, 3e-4])
 
 
+class TestQualificationFoldGatePass:
+    def test_fails_closed_on_span_shorter_than_one_fold(self) -> None:
+        grid = _grid(n=500)  # ~83 days, well under the 6MS fold duration
+        net = pd.Series(0.001, index=grid)
+        assert ev._qualification_fold_gate_pass(net) is False
+
+    def test_fails_closed_on_fewer_than_two_observations(self) -> None:
+        grid = _grid(n=1)
+        net = pd.Series([0.01], index=grid)
+        assert ev._qualification_fold_gate_pass(net) is False
+
+    def test_evenly_distributed_returns_pass(self) -> None:
+        grid = _grid(n=2200, start="2023-01-01")  # ~1 year, 4h bars -> 2 folds
+        net = pd.Series(0.0003, index=grid)
+        assert ev._qualification_fold_gate_pass(net) is True
+
+    def test_concentrated_returns_fail(self) -> None:
+        grid = _grid(n=2200, start="2023-01-01")
+        rets = np.zeros(len(grid))
+        # all the gain lands in the first ~10% of bars; the rest is flat/dead.
+        rets[:200] = 0.01
+        net = pd.Series(rets, index=grid)
+        assert ev._qualification_fold_gate_pass(net) is False
+
+
 class TestFamilySelection:
     def _family(self, strategy_id: str, score: float, passed: bool = False) -> ev._FamilyScreen:
         return ev._FamilyScreen(
