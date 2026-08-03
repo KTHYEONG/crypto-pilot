@@ -1,6 +1,16 @@
 {
   "tasks": [
     {
+      "task_id": "TASK_RELIABILITY_GATE_REPAIR",
+      "date": "2026-08-03",
+      "adr_id": "ADR_20260803_RELIABILITY_GATE_REPAIR",
+      "domain": "risk",
+      "title": "Reliability Gate Repair — Fold-Concentration Re-specification + Pre-Backtest Feasibility",
+      "why": "6,550-cell stop-loss census and prior single-leg technical-expert research repeatedly hit an unpassable observation gate. Root-cause analysis (scratch/test_*.py, closed-form + Monte-Carlo validated) found the concept was not the primary defect: t_stat is sizing-invariant so no exit/sizing tuning of a Sharpe<1.06 leg can ever pass; the 18-candidate technical-expert population has negative beta-neutral alpha (-0.112) and is dominated by BTC buy-and-hold; and the fold-concentration statistic (max|v|/|sum v|) is unbounded (BTC buy-and-hold scores 0.914, ETH 1.501) and had a ~78% false-rejection rate against i.i.d. stationary Sharpe-1.3 processes with zero true concentration, matching ADR_20260801's finding that 5 independent portfolio constructions all passed observation+stress but failed only the fold gate at a flat 0.40 threshold.",
+      "resolution": "Replaced the fold statistic's denominator from net |sum(v)| to gross sum(|v|), bounding it in [1/n_folds, 1] while keeping the legacy value as a reported diagnostic. Replaced the flat 0.40 threshold with derive_fold_concentration_threshold(), which derives the threshold from the statistic's own null distribution (i.i.d. Normal(reference_sharpe, 1) folds, reference_sharpe = the gate's own t_stat_floor/sqrt(years)) at a stated false-rejection rate (default 10%) - Invariant Logic Over Magic Numbers, not a relaxation. Applied identically to compute_fold_distribution and compute_equal_duration_fold_distribution. Added src/research/evaluation/gate_feasibility.py (compute_gate_feasibility, compute_breadth_requirement) as a closed-form, +-3pp pre-backtest screen wired into run_technical_library_admission_backtest so every proposal report states which constraint binds (t_stat / mdd_floor / hurdle_rate / none) instead of only pass/fail.",
+      "impact": "9/9 scenario tests (RGR-01~09) pass, full pytest suite green (351+ tests), mypy/ruff clean. The corrected fold statistic scores the previously-blocked fixed-sleeve portfolio blend at 0.4160 against a derived threshold of 0.5347 (would now PASS the fold gate) versus the legacy 0.5380 vs flat 0.40 (FAIL) - but ADR_20260801's LCB90 15.12% observation-PASS configuration could not be reproduced this cycle (re-run scored LCB90 7.04%, observation FAIL, no matching runs.jsonl entry), so promotion readiness remains open pending re-derivation of that configuration, not resolved by this fix alone. Diagnosis also retires the 18-candidate technical-expert single-leg library from further entry/exit tuning (measured alpha Sharpe -0.112, dominated by buy-and-hold) and quantifies the breadth requirement for any future multi-leg construction (mean leg Sharpe 0.288 needed at measured rho=0.043, N=80)."
+    },
+    {
       "task_id": "TASK_EXIT_SWEEP_PERFORMANCE",
       "date": "2026-08-03",
       "adr_id": "ADR_20260803_EXIT_SWEEP_PERFORMANCE",
