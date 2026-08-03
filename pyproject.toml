@@ -17,6 +17,9 @@ dependencies = [
     "pydantic-settings>=2.0.0",
 ]
 
+[project.optional-dependencies]
+tuning = ["optuna>=4.0.0"]
+
 [build-system]
 requires = ["setuptools>=61.0"]
 build-backend = "setuptools.build_meta"
