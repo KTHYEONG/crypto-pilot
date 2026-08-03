@@ -64,6 +64,17 @@ def _zero(grid: pd.DatetimeIndex) -> pd.DataFrame:
     return pd.DataFrame(0.0, index=grid, columns=list(_SYMBOLS))
 
 
+def _late_funding(grid: pd.DatetimeIndex) -> pd.Series:
+    """Funding history that starts after ``grid[0]`` and extends past window_end."""
+    span_start = pd.Timestamp("2024-02-01", tz="UTC")
+    times = [span_start + pd.Timedelta(hours=8 * i) for i in range(90)]
+    times.append(grid[-1] + pd.Timedelta(days=30))
+    return pd.Series(
+        1e-4 * np.sin(np.arange(len(times))),
+        index=pd.DatetimeIndex(times, tz="UTC"),
+    )
+
+
 class TestRegistry:
     def test_registry_is_exactly_four_families_and_twelve_variants(self) -> None:
         # GSD-04: registry is exactly four families and twelve variants.
@@ -205,7 +216,9 @@ class TestFundingIntegrity:
         px = _prices(grid)
         schedule = _schedule(grid)
         funding = _funding(grid)
-        funding.loc[grid[50], "BBBUSDT"] = np.nan
+        # A genuine non-finite rate (inf) survives the per-column dropna used to
+        # remove cross-symbol union NaN, so the finite contract still fails closed.
+        funding.loc[grid[50], "BBBUSDT"] = np.inf
         with pytest.raises(DataIntegrityError, match="finite"):
             build_growth_strategy_weights(
                 "funding_contrarian_v1", 42, schedule, px, _taker(grid), funding,
@@ -245,12 +258,11 @@ class TestFundingIntegrity:
             )
 
     def test_unalignable_funding_raises_data_integrity_error(self) -> None:
-        # Funding events far outside the bar window cannot be aligned.
+        # A funding history that begins after the symbol's scheduled span is
+        # unalignable: the roster period would otherwise be silently zero-funded.
         grid = _grid()
         px = _prices(grid)
-        funding = _funding(grid)
-        outside = grid[-1] + pd.Timedelta(days=30)
-        funding.loc[outside, "AAAUSDT"] = 1e-4
+        funding = _funding(grid).loc[grid[50]:]
         with pytest.raises(DataIntegrityError, match="alignable"):
             build_growth_strategy_weights(
                 "funding_contrarian_v1", 42, _schedule(grid), px, _taker(grid), funding,
@@ -299,7 +311,7 @@ class TestAlignFundingBars:
 
     def test_rejects_non_finite_rates(self) -> None:
         grid = _grid(1)
-        raw = pd.DataFrame({"A": [1.0, np.nan]}, index=grid[:2])
+        raw = pd.DataFrame({"A": [1.0, np.inf]}, index=grid[:2])
         with pytest.raises(DataIntegrityError, match="finite"):
             align_funding_bars(raw, grid, forward=False)
 
@@ -307,6 +319,129 @@ class TestAlignFundingBars:
         raw = pd.DataFrame({"A": [1.0]}, index=_grid(1)[:1])
         with pytest.raises(DataIntegrityError, match="two bars"):
             align_funding_bars(raw, _grid(1)[:1], forward=False)
+
+    def test_align_funding_bars_dropna_removes_cross_symbol_union_nan(self) -> None:
+        # C1: pd.DataFrame(dict) unions disjoint per-symbol event timestamps so
+        # each column carries non-adjacent NaN rows from the union; those rows
+        # are dropped per column and must not trigger the finite check.
+        grid = _grid(1)
+        base = grid[0]
+        offsets = [pd.Timedelta(hours=8 * i) for i in range(3)]
+        index_a = pd.DatetimeIndex([base + o for o in offsets], tz="UTC")
+        index_b = pd.DatetimeIndex(
+            [base + o + pd.Timedelta(milliseconds=1) for o in offsets], tz="UTC",
+        )
+        raw = pd.DataFrame(
+            {"AAA": pd.Series([1e-4] * 3, index=index_a),
+             "BBB": pd.Series([2e-4] * 3, index=index_b)},
+        )
+        aligned = align_funding_bars(raw, grid, forward=False)
+        assert np.isfinite(aligned.to_numpy(dtype=np.float64)).all()
+        assert float(aligned["AAA"].sum()) == pytest.approx(3e-4)
+        assert float(aligned["BBB"].sum()) == pytest.approx(6e-4)
+
+    def test_align_funding_bars_still_raises_on_genuine_non_finite_value(self) -> None:
+        # C1 fail-closed: inf (and coerced non-numeric values) survive dropna and
+        # still violate the finite contract.
+        grid = _grid(1)
+        raw = pd.DataFrame({"A": [1.0, np.inf]}, index=grid[:2])
+        with pytest.raises(DataIntegrityError, match="finite"):
+            align_funding_bars(raw, grid, forward=False)
+        raw_text = pd.DataFrame({"A": [1.0, "garbage"]}, index=grid[:2])
+        with pytest.raises(DataIntegrityError, match="finite"):
+            align_funding_bars(raw_text, grid, forward=False)
+
+    def test_align_funding_bars_existing_shared_index_behavior_unchanged(self) -> None:
+        # C1 regression: one shared index (no union NaN) keeps the legacy
+        # bucketed sums byte-for-byte.
+        grid = _grid(1)
+        events = pd.Series(
+            [1.0, 1.0, 1.0],
+            index=pd.DatetimeIndex(
+                [grid[0], grid[5] + pd.Timedelta(hours=1), grid[10]], tz="UTC",
+            ),
+        )
+        raw = pd.DataFrame({"A": events, "B": events * 2.0})
+        settled = align_funding_bars(raw, grid, forward=False)
+        assert float(settled.loc[grid[0], "A"]) == 1.0
+        assert float(settled.loc[grid[5], "A"]) == 1.0
+        assert float(settled.loc[grid[10], "A"]) == 1.0
+        assert float(settled.loc[grid[10], "B"]) == 2.0
+
+    def test_align_funding_bars_symbol_spans_scopes_causal_window(self) -> None:
+        # C2: a symbol listed after grid[0] whose funding covers its scheduled
+        # span (with post-window data-collection events) is valid once scoped,
+        # while the global-grid check still rejects it.
+        grid = _grid(3)
+        span_start = pd.Timestamp("2024-02-01", tz="UTC")
+        span_end = pd.Timestamp("2024-02-01", tz="UTC")
+        events = pd.Series(
+            [1e-4] * 5,
+            index=pd.DatetimeIndex(
+                [
+                    span_start,
+                    span_start + pd.Timedelta(hours=8),
+                    span_start + pd.Timedelta(hours=16),
+                    span_start + pd.Timedelta(hours=24),
+                    grid[-1] + pd.Timedelta(days=30),
+                ],
+                tz="UTC",
+            ),
+        )
+        raw = pd.DataFrame({"AAA": events})
+        symbol_spans = {"AAA": (span_start, span_end)}
+        aligned = align_funding_bars(raw, grid, forward=False, symbol_spans=symbol_spans)
+        assert np.isfinite(aligned.to_numpy(dtype=np.float64)).all()
+
+    def test_align_funding_bars_symbol_spans_none_preserves_global_grid_check(self) -> None:
+        grid = _grid(3)
+        span_start = pd.Timestamp("2024-02-01", tz="UTC")
+        events = pd.Series(
+            [1e-4] * 5,
+            index=pd.DatetimeIndex(
+                [
+                    span_start,
+                    span_start + pd.Timedelta(hours=8),
+                    span_start + pd.Timedelta(hours=16),
+                    span_start + pd.Timedelta(hours=24),
+                    grid[-1] + pd.Timedelta(days=30),
+                ],
+                tz="UTC",
+            ),
+        )
+        raw = pd.DataFrame({"AAA": events})
+        with pytest.raises(DataIntegrityError, match="alignable"):
+            align_funding_bars(raw, grid, forward=False)
+
+    def test_align_funding_bars_symbol_spans_still_fails_on_mid_series_gap(self) -> None:
+        grid = _grid(3)
+        span_start = pd.Timestamp("2024-02-01", tz="UTC")
+        span_end = span_start + pd.Timedelta(days=30)
+        times = [span_start + pd.Timedelta(hours=8 * i) for i in range(12)]
+        times += [span_end + pd.Timedelta(hours=8 * i) for i in range(3)]
+        raw = pd.DataFrame(
+            {"AAA": pd.Series([1e-4] * len(times), index=pd.DatetimeIndex(times, tz="UTC"))},
+        )
+        symbol_spans = {"AAA": (span_start, span_end)}
+        with pytest.raises(DataIntegrityError, match="gap"):
+            align_funding_bars(raw, grid, forward=False, symbol_spans=symbol_spans)
+
+    def test_build_growth_strategy_weights_derives_symbol_spans_from_schedule(self) -> None:
+        # C2 wiring: build derives per-symbol spans from the schedule and scopes
+        # the causal check, so a symbol listed mid-grid with post-window funding
+        # events screens successfully instead of failing DATA_INVALID.
+        grid = _grid(3)
+        schedule = dict.fromkeys(
+            [pd.Timestamp("2024-02-01", tz="UTC"), pd.Timestamp("2024-03-01", tz="UTC")],
+            ("AAAUSDT", "BBBUSDT"),
+        )
+        px = _prices(grid)
+        funding = pd.DataFrame({"AAAUSDT": _late_funding(grid), "BBBUSDT": _late_funding(grid)})
+        screen = screen_growth_strategy_weights(
+            "funding_contrarian_v1", 42, schedule, px, _taker(grid), funding,
+        )
+        assert screen.status == "SCREENED"
+        assert screen.reason is None
 
 
 class TestScreenResult:
