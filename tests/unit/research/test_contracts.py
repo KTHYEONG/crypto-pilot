@@ -3,7 +3,12 @@ from __future__ import annotations
 import pytest
 
 from src.research.cash_carry.contracts import CashCarrySpec, CarryCostModel
-from src.research.contracts import CostModel, StrategySpec, TechnicalExpertEvaluationRequest
+from src.research.contracts import (
+    CostModel,
+    GrowthEngineEvaluationRequest,
+    StrategySpec,
+    TechnicalExpertEvaluationRequest,
+)
 
 
 def test_strategy_spec_contract() -> None:
@@ -125,3 +130,25 @@ class TestCarryCostModel:
             CarryCostModel(perp_fee_rate=-0.01)
         with pytest.raises(ValueError, match="slippage_rate"):
             CarryCostModel(slippage_rate=-0.01)
+
+
+class TestGrowthEngineEvaluationRequest:
+    def test_defaults_keep_holdout_sealed(self) -> None:
+        request = GrowthEngineEvaluationRequest()
+        assert request.symbol_scope == "dev"
+        assert request.initial_equity == 10_000.0
+        assert request.unseal_holdout is False
+        assert request.universe.universe_size == 20
+        assert request.construction.rebalance_bars == 1
+
+    def test_rejects_unknown_symbol_scope(self) -> None:
+        with pytest.raises(ValueError, match="symbol_scope"):
+            GrowthEngineEvaluationRequest(symbol_scope="everything")
+
+    def test_rejects_non_positive_initial_equity(self) -> None:
+        with pytest.raises(ValueError, match="initial_equity"):
+            GrowthEngineEvaluationRequest(initial_equity=0.0)
+
+    def test_accepts_all_scopes(self) -> None:
+        for scope in ("dev", "holdout", "all"):
+            assert GrowthEngineEvaluationRequest(symbol_scope=scope).symbol_scope == scope
