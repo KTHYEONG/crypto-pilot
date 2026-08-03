@@ -471,8 +471,11 @@
     "testing": "tests/unit/application/test_portfolio_evaluation.py"
   },
   "src/research/portfolio/growth_strategy_library.py": {
-    "testing": "tests/unit/research/portfolio/test_growth_strategy_library.py",
-    "architecture": "docs/specs/growth_portfolio_strategy_discovery.md"
+    "testing": [
+      "tests/unit/research/portfolio/test_growth_strategy_library.py",
+      "tests/integration/research/test_growth_engine_funding_screening.py"
+    ],
+    "architecture": "docs/results/growth_portfoilo.md"
   },
   "src/research/portfolio/net_construction.py": {
     "testing": "tests/unit/research/portfolio/test_net_construction.py",
