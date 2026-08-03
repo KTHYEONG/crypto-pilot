@@ -4,6 +4,7 @@ import argparse
 
 from src.cli.commands.research.expert_library import add_expert_library_commands
 from src.cli.commands.research.portfolio_blend import add_portfolio_blend_commands
+from src.cli.commands.research.portfolio_growth import add_portfolio_growth_commands
 from src.cli.commands.research.portfolio_multi import add_portfolio_multi_commands
 from src.cli.commands.research.single_baseline import add_single_baseline_commands
 from src.cli.commands.research.single_carry import add_single_carry_commands
@@ -36,6 +37,7 @@ def add_research_commands(research_parser: argparse.ArgumentParser) -> None:
     portfolio_sub = portfolio.add_subparsers(dest="portfolio_command", required=True)
     add_portfolio_multi_commands(portfolio_sub)
     add_portfolio_blend_commands(portfolio_sub)
+    add_portfolio_growth_commands(portfolio_sub)
 
     expert = run_sub.add_parser("expert", help="Run one sealed expert-library lifecycle step")
     expert_sub = expert.add_subparsers(dest="expert_command", required=True)
