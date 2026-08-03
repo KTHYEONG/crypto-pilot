@@ -114,6 +114,60 @@ def test_library_admission_backtest_cli_threads_timeframe(monkeypatch, capsys) -
     assert captured[0].timeframe == "4h"
 
 
+def test_ter_06_cli_backtest_stop_loss_flags_wired(monkeypatch, capsys) -> None:
+    # TER-06: the four stop-loss flags construct an exact
+    # TechnicalLibraryAdmissionBacktestRequest; omitting all of them falls back
+    # to the master-switch-off defaults.
+    captured: list[object] = []
+
+    class _Report:
+        def to_report_dict(self) -> dict[str, object]:
+            return {"status": "COMPLETE"}
+
+    def _fake_run(request) -> _Report:
+        captured.append(request)
+        return _Report()
+
+    monkeypatch.setattr(
+        "src.application.research.expert.admission_backtest.run_technical_library_admission_backtest",
+        _fake_run,
+    )
+    args = build_root_parser().parse_args([
+        "research", "run", "expert", "backtest",
+        "--expert-id", "technical_ema_alignment_long_v1:BTCUSDT",
+        "--router-context-symbol", "BTCUSDT",
+        "--router-trend-lookback-bars", "48",
+        "--router-volatility-lookback-bars", "48",
+        "--router-min-context-history-bars", "96",
+        "--stop-loss-mode", "atr_multiple",
+        "--stop-loss-value", "2.0",
+        "--atr-period", "14",
+        "--trailing-stop",
+    ])
+    args.handler(args)
+    assert captured
+    assert captured[0].stop_loss_mode == "atr_multiple"
+    assert captured[0].stop_loss_value == 2.0
+    assert captured[0].atr_period == 14
+    assert captured[0].trailing_stop is True
+    assert json.loads(capsys.readouterr().out)["status"] == "COMPLETE"
+
+    captured.clear()
+    default_args = build_root_parser().parse_args([
+        "research", "run", "expert", "backtest",
+        "--expert-id", "technical_ema_alignment_long_v1:BTCUSDT",
+        "--router-context-symbol", "BTCUSDT",
+        "--router-trend-lookback-bars", "48",
+        "--router-volatility-lookback-bars", "48",
+        "--router-min-context-history-bars", "96",
+    ])
+    default_args.handler(default_args)
+    assert captured[0].stop_loss_mode is None
+    assert captured[0].stop_loss_value is None
+    assert captured[0].atr_period == 14
+    assert captured[0].trailing_stop is False
+
+
 def test_library_admission_pipeline_cli_parses_and_dispatches(monkeypatch) -> None:
     # LAP-CLI: the frozen profile leaf requires only a profile name and dispatches
     # one pipeline request with the OOS defaults frozen by the specification.
