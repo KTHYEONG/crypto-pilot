@@ -1,6 +1,16 @@
 {
   "tasks": [
     {
+      "task_id": "TASK_GROWTH_STRATEGY_DISCOVERY_V1",
+      "date": "2026-08-03",
+      "adr_id": "ADR_20260803_GROWTH_STRATEGY_DISCOVERY_V1",
+      "domain": "portfolio",
+      "title": "Growth portfolio multi-strategy discovery",
+      "why": "The growth engine had no admissible strategy after xs_momentum plateau and holdout failures.",
+      "resolution": "Added a frozen four-family twelve-hypothesis strategy library, causal funding accounting, dev-only discovery with finalist holdout evaluation, and fail-closed CASH reporting.",
+      "impact": "Growth CLI now identifies a plateau-passing finalist while preserving multiplicity and holdout gates; the latest sealed run remains CASH."
+    },
+    {
       "task_id": "TASK_GROWTH_ENGINE_V3_STRUCTURAL_SEARCH",
       "date": "2026-08-03",
       "adr_id": "ADR_20260803_GROWTH_ENGINE_V3_STRUCTURAL_SEARCH",
