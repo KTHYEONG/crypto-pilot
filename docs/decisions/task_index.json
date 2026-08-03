@@ -1,6 +1,16 @@
 {
   "tasks": [
     {
+      "task_id": "TASK_EXIT_SWEEP_PERFORMANCE",
+      "date": "2026-08-03",
+      "adr_id": "ADR_20260803_EXIT_SWEEP_PERFORMANCE",
+      "domain": "research",
+      "title": "Technical Expert Exit-Sweep Performance — In-Process Batched Sweep Tool",
+      "why": "The stop-loss edge-recovery verification sweep (spec technical_expert_edge_recovery.md §3) took ~34 minutes for 1,740 cells because each cell was a separate CLI subprocess re-running the full portfolio/router/stress/dual-bootstrap admission-backtest pipeline for a plain single-candidate exit-setting comparison, re-paying import and data-load costs 1,740 times over. Benchmarked root cause: ~1.9s of each 2.1s cell was orchestration overhead (stress duplicate + dual reliability-gate bootstrap + portfolio wrapping), not the ~227ms backtest loop itself.",
+      "resolution": "Added research run expert exit-sweep (src/application/research/expert/exit_sweep.py) plus ExitSweepSetting/TechnicalExpertExitSweepRequest (admission_types.py) and ExitSweepCellResult/ExitSweepFamilySummary/TechnicalExpertExitSweepReport (admission_reports.py). Batches data loading once per (symbol, timeframe) pair, parallelizes across pairs via the existing effective_worker_count/ProcessPoolExecutor pattern, calls run_technical_expert_backtest/compute_metrics/compute_equity_reliability_gate directly with no portfolio/router/stress/promotion machinery, and includes the no-stop baseline by default with pre-aggregated family_summary output. JIT/vectorizing the per-bar loop and multithreading were explicitly evaluated and rejected (already settled by the prior hybrid-compilation Phase 0 ADR; the loop is GIL-bound so only process-level parallelism helps).",
+      "impact": "Measured 12-15x wall-clock reduction (4h: 34min-equivalent scope down to 2m21s for 1,040 cells; 1d: 20s for 845 cells) while producing MORE data (baseline included) with numerically identical statistics. Used to complete the full 7-timeframframe stop-loss census (6,550 cells total, up from the original 1,740) in a single afternoon instead of an estimated 5+ hours: confirms 6,547/6,550 (99.95%) cells show no gate-PASS edge recovery at any timeframe, with the remaining 3 diagnosed as whipsaw noise from an overly tight stop, not real edge. Closes out the stop-loss exit-mechanism recovery avenue entirely - sizing/entry redesign is the only remaining lever per the original spec's §4."
+    },
+    {
       "task_id": "TASK_STOP_LOSS_EDGE_RECOVERY",
       "date": "2026-08-03",
       "adr_id": "ADR_20260803_STOP_LOSS_EDGE_RECOVERY",
