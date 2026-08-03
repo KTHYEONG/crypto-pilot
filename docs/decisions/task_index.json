@@ -1,6 +1,16 @@
 {
   "tasks": [
     {
+      "task_id": "TASK_GROWTH_PORTFOLIO_CLI_DATA_DIAGNOSIS",
+      "date": "2026-08-04",
+      "adr_id": "ADR_20260804_GROWTH_PORTFOLIO_CLI_DATA_DIAGNOSIS",
+      "domain": "research",
+      "title": "Growth portfolio CLI 데이터 기간 및 fold 원인 계측",
+      "why": "실제 CLI 결과가 90일 fold 입력으로 fail-closed되어 원자료 부족과 rolling segment 탈락을 구분해야 했다.",
+      "resolution": "652개 OHLCV parquet의 2020-01~2026-07 범위를 확인하고, sealed cutoff 2025-12-31 및 3개 segment 중 2개 causal-router reject를 수치로 기록했다.",
+      "impact": "데이터 수집 부족이 아니라 evaluator segment 유효성 부족이 binding임을 확정하고, 결과 문서에 CLI gate 수치와 데이터 gap 12개 심볼을 기록했다."
+    },
+    {
       "task_id": "TASK_GROWTH_REGIME_FOLD_CONCENTRATION_GATE",
       "date": "2026-08-03",
       "adr_id": "ADR_20260803_GROWTH_REGIME_FOLD_CONCENTRATION_GATE",
