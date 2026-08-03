@@ -248,17 +248,50 @@ def _gross_sharpe(pnl: pd.Series) -> float:
     return float(rets.mean() / std * np.sqrt(BARS_PER_YEAR))
 
 
-def _oos_t_stat(net: pd.Series) -> float:
+def _oos_t_stat(net: pd.Series, *, test_fraction: float = 0.5) -> float:
     rets = net.dropna()
     if len(rets) < 10:
         return 0.0
-    test = rets.iloc[len(rets) // 2 :]
+    # Recency-restricted OOS window (default: trailing half); dev_qualification_score
+    # separately uses the full qualification range -- see docs/specs/growth_engine_gate_diagnostics.md s3.
+    test = rets.iloc[int(len(rets) * (1.0 - test_fraction)) :]
     if len(test) < 2:
         return 0.0
     std = float(test.std())
     if std <= 0:
         return 0.0
     return float(test.mean() / std * np.sqrt(len(test)))
+
+
+def family_window_correlation(
+    net_return_streams: Mapping[int, pd.Series],
+) -> dict[tuple[int, int], float]:
+    """Pairwise Pearson correlation of per-window net-return streams.
+
+    Measurement-only diagnostic (docs/specs/growth_engine_gate_diagnostics.md
+    section 3): computes every window pair's correlation for one strategy
+    family and never feeds into falsification or promotion.  A pair is omitted
+    when fewer than two windows are provided, the shared non-null overlap has
+    fewer than 10 bars, or either stream is constant on the overlap (undefined
+    correlation).
+    """
+    windows = sorted(net_return_streams)
+    if len(windows) < 2:
+        return {}
+    out: dict[tuple[int, int], float] = {}
+    for index, left in enumerate(windows):
+        for right in windows[index + 1:]:
+            x = net_return_streams[left].dropna()
+            y = net_return_streams[right].dropna()
+            overlap = x.index.intersection(y.index)
+            if len(overlap) < 10:
+                continue
+            xv = x.loc[overlap].to_numpy(dtype=np.float64)
+            yv = y.loc[overlap].to_numpy(dtype=np.float64)
+            if float(np.std(xv)) <= 0.0 or float(np.std(yv)) <= 0.0:
+                continue
+            out[(left, right)] = float(np.corrcoef(xv, yv)[0, 1])
+    return out
 
 
 def _cash_curve_index(
@@ -623,6 +656,33 @@ def run_growth_engine_evaluation(request: GrowthEngineEvaluationRequest) -> Grow
     entries, families = _screen_discovery_candidates(
         discovery_schedule, px, fwd, taker, settled_funding, discovery_bars,
     )
+    for definition in STRATEGY_REGISTRY:
+        # C4 measurement-only diagnostic: the discovery screens carry weights
+        # only over discovery bars, so the qualification-period window streams
+        # are screened here against the qualification schedule. This pass feeds
+        # only the [EVAL] family_correlation log; it never alters FAMILY_SIZE,
+        # the multiplicity floor, or any falsification/promotion decision.
+        qualification_streams: dict[int, pd.Series] = {}
+        for window in definition.windows:
+            screen = screen_growth_strategy_weights(
+                definition.strategy_id, window, qualification_schedule, px, taker,
+                settled_funding,
+            )
+            if screen.status != "SCREENED":
+                continue
+            qualification_streams[window] = (
+                (screen.weights * fwd).sum(axis=1).loc[qualification_bars]
+            )
+        correlations = family_window_correlation(qualification_streams)
+        if correlations:
+            pairs = ",".join(
+                f"{left}-{right}:{value:.3f}"
+                for (left, right), value in sorted(correlations.items())
+            )
+            _logger.info(
+                "[EVAL] family_correlation strategy=%s windows=%d pairs=%s",
+                definition.strategy_id, len(qualification_streams), pairs,
+            )
 
     passing = [f for f in families if f.passed and f.chosen_parameter is not None]
     screened = [f for f in families if f.chosen_parameter is not None]
