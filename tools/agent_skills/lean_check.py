@@ -477,6 +477,12 @@ def _check_orphaned_implementations(fh: str, kind: str, name: str) -> list[JsonD
     reference outside the definition itself."""
     if kind == "field":
         return []
+    # Dev utilities under tools/ are spec-phase helpers, not runtime: they are
+    # wired by their own caller inside tools/ (or invoked from a tool CLI), so
+    # a src/-only grep can never see a caller. The orphan gate is scoped to the
+    # production tree it is designed to police.
+    if not fh.startswith("src"):
+        return []
     leaf = name.rpartition(".")[2] if "." in name else name
     if not leaf:
         return []
