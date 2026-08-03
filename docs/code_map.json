@@ -470,8 +470,13 @@
   "src/research/portfolio/defaults.py": {
     "testing": "tests/unit/application/test_portfolio_evaluation.py"
   },
+  "src/research/portfolio/growth_strategy_library.py": {
+    "testing": "tests/unit/research/portfolio/test_growth_strategy_library.py",
+    "architecture": "docs/specs/growth_portfolio_strategy_discovery.md"
+  },
   "src/research/portfolio/net_construction.py": {
-    "testing": "tests/unit/research/portfolio/test_net_construction.py"
+    "testing": "tests/unit/research/portfolio/test_net_construction.py",
+    "architecture": "docs/results/growth_portfoilo.md"
   },
   "src/research/portfolio/universe.py": {
     "testing": "tests/unit/research/portfolio/test_universe.py"
