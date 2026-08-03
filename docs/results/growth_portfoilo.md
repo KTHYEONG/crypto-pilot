@@ -1,5 +1,8 @@
 ## Growth Portfolio — 최신 다전략 라이브러리 실행 결과
 
+가장 최신 갱신: **2026-08-03 20:11 — fold-concentration 게이트 추가**(§5). 이 절 이전
+내용(§1~§4)은 2026-08-03 19:10 실행 기록으로 보존한다.
+
 실행일: **2026-08-03 19:10:16 (Asia/Seoul 로그 시각)**
 명령:
 
@@ -151,3 +154,35 @@ threshold 조정이 아니라 ①§2-1의 상관계수 실측치를 근거로 `f
 단위를 재판단하는 것, ②신규 전략군을 설계하기 전에 이미 존재하던 4개 전략군을
 모두 정당하게 소진했다는 사실을 확인한 상태에서 breadth 확장 여부를 판단하는
 것이다. 현재 선택은 계속 CASH다.
+
+### 5. fold-concentration 게이트 추가 (2026-08-03 20:11 재실행)
+
+3라운드에 걸친 신규 전략 탐색(`docs/specs/growth_engine_new_signal_exploration.md`,
+`growth_engine_classic_indicator_exploration.md`,
+`growth_engine_broad_indicator_sweep.md`, 약 100개 파라미터 조합, plateau 통과 10개
+전량 실패)과 그 원인 진단(`growth_engine_regime_split_structural_flaw.md`: discovery
+breadth 48.5% vs qualification breadth 16.9%→4-fold 세분 시 20.2%→12.4%로 지속 악화 —
+서로 다른 시장 레짐 비교)을 거쳐, 가장 견고하게 구성 가능한 해결책으로
+**fold-concentration 게이트**를 구현했다(`docs/specs/growth_engine_fold_concentration_gate.md`).
+`src/research/evaluation/reliability.py`에 이미 존재하던 `compute_equal_duration_fold_distribution`
+(그동안 growth engine에서는 `n_folds=0`으로 미사용)를 qualification 순수익 스트림에
+실전 배선해, `evaluate_falsification`의 게이트 순서를
+`plateau → multiplicity → fold_concentration → symbol_holdout`로 확장했다.
+
+재실행 결과:
+
+```text
+[EVAL] fold_gate n_folds=3 concentration=0.776 threshold=0.645 gate_pass=False
+       median_fold_cagr=0.130 worst_fold_cagr=-0.000
+[EVAL] falsification passed=False binding=multiplicity plateau=0.785 oos_t=1.893
+       floor=2.895 fold_gate_pass=False dev=1.338 holdout=-0.307
+status=NO_ADMISSIBLE_ALPHA selected_strategy=taker_imbalance_v1
+```
+
+`binding_constraint`는 여전히 `multiplicity`(오os_t=1.893이 fold_concentration 체크보다
+먼저 걸림)라 최종 판정(`NO_ADMISSIBLE_ALPHA`/CASH)은 불변이다. 그러나 새 진단은
+**현재 production 최선 후보(`taker_imbalance_v1/84`)조차 qualification 성과의
+77.6%가 3개 fold 중 1개에 쏠려 있다**는, 기존 단일분할 `oos_t_stat`만으로는 전혀
+드러나지 않던 취약성을 정량적으로 확인했다. 이 게이트는 어떤 후보도 새로 통과시키지
+않으며(gate를 느슨하게 만드는 변경이 아님), 향후 어떤 후보가 multiplicity를 근접
+통과할 때 "진짜 견고한 신호인지"를 자동으로 검증하는 위험관리 계측이다.
