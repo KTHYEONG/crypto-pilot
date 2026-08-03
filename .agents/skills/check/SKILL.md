@@ -35,9 +35,9 @@ Independent audit gate completing the main development loop (`spec` -> `implemen
 
 ## Output
 
-Do NOT add any intro, summary, or explanations. Print output format directly:
+Do NOT add any intro, preamble, sub-bullet checks, breakdown items, or extra explanations. Print EXACTLY one line for PASS:
 
-- **PASS** (Single-line only):
+- **PASS** (Strict 1-Line ONLY, No sub-bullets or details):
   ✅ PASS: <Audit Target>
 
 - **FAIL** (Compact format):
