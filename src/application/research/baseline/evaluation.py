@@ -2,7 +2,10 @@ from __future__ import annotations
 
 import logging
 
+import pandas as pd
+
 from src.common.config import ohlcv_path
+from src.common.errors import DataIntegrityError
 from src.market_data.storage.loaders import load_funding_rates, load_ohlcv_4h
 from src.research.baseline.backtest import run_backtest
 from src.research.contracts import (
@@ -25,12 +28,17 @@ from src.research.provenance.results import record_run
 _logger = logging.getLogger("BacktestRunner")
 
 
-def run_baseline_evaluation(request: BaselineEvaluationRequest) -> EvaluationReport:
-    """Execute one sealed single-symbol Donchian evaluation.
+def _run_baseline_engine(
+    request: BaselineEvaluationRequest,
+    funding_rates: pd.Series | None,
+    *,
+    funding_path_label: str | None,
+) -> EvaluationReport:
+    """Shared baseline evaluation body driven by an explicitly supplied funding stream.
 
-    Applies the shared holdout policy, runs the unchanged baseline backtest,
-    composes the reliability/promotion evidence, and appends a JSONL result only
-    when ``request.log_run`` is true. Never accepts an ``argparse.Namespace``.
+    ``funding_rates`` may be ``None`` only for the clearly named analytical
+    zero-funding diagnostic; the promotion path always supplies an aligned
+    stream, so a futures evaluation never silently assumes zero funding.
     """
     end = resolve_evaluation_end(request.end, unseal_holdout=request.unseal_holdout)
     if request.unseal_holdout:
@@ -42,11 +50,10 @@ def run_baseline_evaluation(request: BaselineEvaluationRequest) -> EvaluationRep
 
     df = load_ohlcv_4h(path, start=request.start, end=end)
 
-    funding_rates = None
-    if request.funding_path is not None:
-        funding_rates = load_funding_rates(request.funding_path)
+    if funding_rates is not None:
         _logger.info(
-            "[EVAL] funding loaded: path=%s rows=%d", request.funding_path, len(funding_rates),
+            "[EVAL] funding loaded: path=%s rows=%d",
+            funding_path_label or "(aligned)", len(funding_rates),
         )
         if len(df) > 0:
             bar_period = df.index[1] - df.index[0]
@@ -61,7 +68,7 @@ def run_baseline_evaluation(request: BaselineEvaluationRequest) -> EvaluationRep
         _logger.info(
             "[EVAL] candidate identity: taker_flow_confirmation "
             "min_taker_buy_ratio=%.3f funding_path=%s",
-            spec.min_taker_buy_ratio, request.funding_path or "(none)",
+            spec.min_taker_buy_ratio, funding_path_label or "(none)",
         )
 
     result = run_backtest(
@@ -148,4 +155,38 @@ def run_baseline_evaluation(request: BaselineEvaluationRequest) -> EvaluationRep
         holdout=holdout_gate,
         promotion=promotion,
         record=record,
+    )
+
+
+def run_baseline_analysis_without_funding(
+    request: BaselineEvaluationRequest,
+) -> EvaluationReport:
+    """Analytical zero-funding baseline for legacy diagnostics only.
+
+    Clearly named as non-promotable: funding completeness is mandatory for
+    futures promotion evidence. This path reproduces the frozen v1 result with
+    ``funding_rates=None`` and is retained only for legacy tests; it must never
+    be used for promotion evidence.
+    """
+    return _run_baseline_engine(request, None, funding_path_label=None)
+
+
+def run_baseline_evaluation(request: BaselineEvaluationRequest) -> EvaluationReport:
+    """Execute one sealed single-symbol Donchian promotion evaluation.
+
+    A futures promotion evaluation requires an aligned funding stream: a missing
+    ``funding_path`` raises ``DataIntegrityError`` (fail closed) instead of
+    silently assuming zero funding. The clearly named
+    :func:`run_baseline_analysis_without_funding` is the only zero-funding path
+    and exists solely for legacy diagnostics.
+    """
+    if request.funding_path is None:
+        raise DataIntegrityError(
+            "futures baseline promotion evaluation requires an aligned funding stream; "
+            "supply funding_path or use run_baseline_analysis_without_funding only "
+            "for the analytical zero-funding legacy diagnostic"
+        )
+    funding_rates = load_funding_rates(request.funding_path)
+    return _run_baseline_engine(
+        request, funding_rates, funding_path_label=request.funding_path,
     )
