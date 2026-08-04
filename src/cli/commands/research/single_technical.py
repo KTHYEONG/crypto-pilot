@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import argparse
+import logging
 
 from src.application.research.technical import evaluation as evaluation_module
 from src.research.contracts import TechnicalExpertEvaluationRequest
+
+_logger = logging.getLogger("XsScreen")
 
 
 def _run_technical_expert(args: argparse.Namespace) -> None:
@@ -37,6 +40,30 @@ def _run_trend_screen(args: argparse.Namespace) -> None:
     persist_trend_screen_report(report, trend_screen_report_path())
 
 
+def _run_xs_trend_screen(args: argparse.Namespace) -> None:
+    from src.application.research.technical.xs_trend_screen import (
+        XS_NEUTRAL_PROFILE_ID,
+        run_xs_trend_screen,
+    )
+
+    profile = args.profile or XS_NEUTRAL_PROFILE_ID
+    if profile != XS_NEUTRAL_PROFILE_ID:
+        raise ValueError(
+            f"unknown xs screen profile '{profile}'; the source-controlled "
+            f"profile is '{XS_NEUTRAL_PROFILE_ID}'"
+        )
+    report = run_xs_trend_screen(start=args.start, end=args.end, unseal_holdout=args.unseal_holdout)
+    _logger.info(
+        "xs-screen profile=%s discovery_admitted=%s qualification_admitted=%s "
+        "qualification_sharpe=%.4f binding_constraint=%s",
+        report.profile,
+        report.discovery.admitted,
+        report.qualification.admitted,
+        report.qualification.sharpe,
+        report.qualification.binding_constraint,
+    )
+
+
 def add_single_technical_commands(run_sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
     """Attach the ``research run single technical`` subcommands."""
     technical = run_sub.add_parser(
@@ -59,3 +86,14 @@ def add_single_technical_commands(run_sub: argparse._SubParsersAction[argparse.A
     trend_screen.add_argument("--end", default=None)
     trend_screen.add_argument("--no-log-run", action="store_true", default=False)
     trend_screen.set_defaults(handler=_run_trend_screen)
+
+    xs_screen = run_sub.add_parser(
+        "xs-screen",
+        help="Run the XS dollar-neutral composite trend screen (xs_neutral_composite_v1)",
+    )
+    xs_screen.add_argument("--profile", default=None)
+    xs_screen.add_argument("--start", default=None)
+    xs_screen.add_argument("--end", default=None)
+    xs_screen.add_argument("--unseal-holdout", action="store_true", default=False)
+    xs_screen.add_argument("--no-log-run", action="store_true", default=False)
+    xs_screen.set_defaults(handler=_run_xs_trend_screen)
