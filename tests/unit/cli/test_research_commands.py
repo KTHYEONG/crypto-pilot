@@ -342,8 +342,13 @@ def test_baseline_cli_parses_and_dispatches(monkeypatch) -> None:
         "research", "run", "single", "baseline", "--symbol", "ETHUSDT", "--no-log-run",
     ])
     args.handler(args)
+    # Futures promotion evidence resolves the canonical aligned funding stream.
+    from src.common.config import funding_path
+
     assert calls == [BaselineEvaluationRequest(
-        symbol="ETHUSDT", log_run=False, unseal_holdout=False,
+        symbol="ETHUSDT",
+        funding_path=str(funding_path("ETHUSDT")),
+        log_run=False, unseal_holdout=False,
     )]
 
 
