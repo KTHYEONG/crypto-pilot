@@ -225,6 +225,88 @@ class TestScreenPipeline:
         assert run.cell.stress_verdict == "PENDING"
 
 
+class TestSizingTournament:
+    def test_sizing_tournament_sealed_to_qualification_bars(self, monkeypatch) -> None:
+        # BGP-03: mutating qualification bars cannot alter the selected sizing
+        # policy, its fold score tuple, or its policy ranking; the tournament
+        # never reads qualification, holdout, or stress outcomes.
+        _install_fast_config(monkeypatch)
+        frame, funding = synthetic_market()
+        candidate = ts._candidate_by_source("technical_ema_alignment_long_v1")
+        base = ts._run_cell(frame, funding, candidate, "BTCUSDT", {"perp_ohlcv": "f"}, 1.0)
+        mutated = frame.copy()
+        mutated.loc[
+            mutated.index >= ts.QUALIFICATION_START, ["open", "high", "low", "close"]
+        ] *= 1.5
+        after = ts._run_cell(
+            mutated, funding, candidate, "BTCUSDT", {"perp_ohlcv": "f"}, 1.0,
+        )
+        assert base.cell.data_valid
+        assert after.cell.data_valid
+
+        tournament = ts._rank_sizing_policies([base], ts.ReliabilityGateConfig())
+        tournament_after = ts._rank_sizing_policies([after], ts.ReliabilityGateConfig())
+
+        assert tournament.selected_policy_id == tournament_after.selected_policy_id
+        assert tournament.fraction == tournament_after.fraction
+        assert tournament.mdd_cap_enabled == tournament_after.mdd_cap_enabled
+        assert tournament.policy_scores == tournament_after.policy_scores
+        assert tournament.fold_scores == tournament_after.fold_scores
+        assert len(tournament.fold_scores) == 2 * len(ts.KELLY_SIZING_POLICIES)
+
+    def test_tournament_ranks_and_picks_one_registered_candidate(self, monkeypatch) -> None:
+        # Every aggregate score must come from a registered candidate and each
+        # candidate must produce exactly one score per rolling-origin fold.
+        _install_fast_config(monkeypatch)
+        frame, funding = synthetic_market()
+        candidates = [
+            ts._candidate_by_source("technical_ema_alignment_long_v1"),
+            ts._candidate_by_source("technical_donchian_breakout_short_v1"),
+        ]
+        runs = [
+            ts._run_cell(frame, funding, c, "BTCUSDT", {"perp_ohlcv": "f"}, 1.0)
+            for c in candidates
+        ]
+        known_ids = {ts._sizing_policy_id(s) for s in ts.KELLY_SIZING_POLICIES}
+
+        tournament = ts._rank_sizing_policies(runs, ts.ReliabilityGateConfig())
+        assert tournament.selected_policy_id in known_ids
+        assert len(tournament.policy_scores) == 4
+        assert len(tournament.fold_scores) == 8
+        assert {s.policy_id for s in tournament.policy_scores} == known_ids
+        expected_order = [s.policy_id for s in sorted(
+            tournament.policy_scores,
+            key=lambda s: (
+                -s.worst_lcb90_cagr, -s.mean_lcb90_cagr,
+                -s.worst_mdd, s.mean_allocation_cost, s.policy_id,
+            ),
+        )]
+        assert [s.policy_id for s in tournament.policy_scores] == expected_order
+        assert tournament.selected_policy_id == tournament.policy_scores[0].policy_id
+        assert tournament.policy_scores[0].worst_lcb90_cagr >= min(
+            s.worst_lcb90_cagr for s in tournament.policy_scores
+        )
+
+    def test_report_includes_sizing_tournament_evidence(self, monkeypatch) -> None:
+        _install_fast_config(monkeypatch)
+        _install_synthetic_data(monkeypatch)
+        monkeypatch.setattr(ts, "TREND_SCREEN_CANDIDATES", _single_candidate_set())
+
+        report = ts.run_trend_screen()
+        payload = report.to_payload()
+        sizing = payload["sizing"]
+        known_ids = {ts._sizing_policy_id(s) for s in ts.KELLY_SIZING_POLICIES}
+
+        assert sizing["policy_id"] in known_ids
+        assert sizing["fraction"] == report.sizing.fraction
+        assert sizing["mdd_cap_enabled"] is report.sizing.mdd_cap_enabled
+        assert len(sizing["policy_scores"]) == 4
+        assert len(sizing["fold_scores"]) == 8
+        assert {s["policy_id"] for s in sizing["policy_scores"]} == known_ids
+        assert {s["policy_id"] for s in sizing["fold_scores"]} == known_ids
+        assert {s["fold_index"] for s in sizing["fold_scores"]} == {1, 2}
+
+
 class TestQualification:
     def _selected_runs(self) -> list[ts._CellRun]:
         frame, funding = synthetic_market()
