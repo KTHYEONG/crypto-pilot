@@ -118,6 +118,30 @@ def derive_block_size(returns: np.ndarray) -> int:
             block = lag
     return min(block, max(1, n // 5))
 
+def block_size_search_hit_cap(returns: np.ndarray) -> bool:
+    """True when the bootstrap block-length search stops at its max_lag cap.
+
+    The block search (:func:`derive_block_size`) inspects lags ``1..max_lag``
+    with ``max_lag = min(20, n // 4)`` and adopts the highest significant lag.
+    A hit at the final searched lag warns that dependence may extend beyond the
+    searched range, so the block bootstrap LCB may understate trend-return
+    dependence. This is a pure observability flag: it passes or fails nothing.
+    Returns False for tiny or constant samples (which the search also treats as
+    lag 1) and is deterministic for identical input.
+    """
+    n = len(returns)
+    if n < 10:
+        return False
+    x = returns - returns.mean()
+    denom = float(np.sum(x**2))
+    if denom <= 0.0:
+        return False
+    max_lag = min(20, n // 4)
+    band = float(1.96 / np.sqrt(n))
+    lag = max_lag
+    acf = float(np.sum(x[:-lag] * x[lag:])) / denom
+    return abs(acf) > band
+
 
 def _block_bootstrap_cagr(
     rets: np.ndarray,
