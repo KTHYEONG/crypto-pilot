@@ -6,7 +6,16 @@ import pytest
 
 from src.common.errors import DataIntegrityError
 from src.research.technical_experts.catalog import TECHNICAL_CANDIDATES, resolve_technical_candidate
-from src.research.technical_experts.signals import generate_signal_events
+from src.research.technical_experts.contracts import TechnicalCandidate
+from src.research.technical_experts.indicators import donchian
+from src.research.technical_experts.signals import (
+    assert_family_signal_liveness,
+    generate_signal_events,
+)
+from src.research.technical_experts.trend_screen_catalog import (
+    TREND_SCREEN_FAMILIES,
+    _FAMILY_CONFIGS,
+)
 
 
 def causal_ohlcv_fixture(n: int = 260) -> pd.DataFrame:
@@ -172,6 +181,91 @@ class TestNewFamilyGatedNotFreebied:
                 assert not events[other].any(), f"{family} {side}"
             with pytest.raises(ValueError, match="unknown or retired"):
                 resolve_technical_candidate(f"technical_{family}_long_v1")
+
+
+def two_regime_ohlcv_fixture(n: int = 700) -> pd.DataFrame:
+    """Up-then-down price path with low-frequency oscillation for liveness."""
+    index = pd.date_range("2024-01-01", periods=n, freq="4h", tz="UTC")
+    t = np.arange(n, dtype=np.float64)
+    trend = 100.0 * np.exp(0.0025 * np.minimum(t, 330.0) - 0.0025 * np.maximum(t - 330.0, 0.0))
+    osc = 6.0 * np.sin(t / 6.0) + 3.0 * np.sin(t / 2.3) + 14.0 * np.sin(t / 28.0)
+    p = trend + osc
+    return pd.DataFrame({
+        "open": p,
+        "high": p * 1.002,
+        "low": p * 0.998,
+        "close": p,
+        "volume": 1000.0 + 500.0 * np.abs(np.sin(t / 5.0)),
+    }, index=index)
+
+
+def donchian_exit_reachable_fixture() -> pd.DataFrame:
+    """Smooth up-then-down path used by the P0-1 liveness assertion."""
+    n = 600
+    index = pd.date_range("2024-01-01", periods=n, freq="4h", tz="UTC")
+    p = np.concatenate([np.linspace(100.0, 300.0, 350), np.linspace(300.0, 80.0, 250)])
+    return pd.DataFrame({
+        "open": p,
+        "high": p * 1.002,
+        "low": p * 0.998,
+        "close": p,
+        "volume": np.ones(n),
+    }, index=index)
+
+
+class TestSignalLivenessIntegrity:
+    def test_tsi_01_donchian_exit_reachable(self) -> None:
+        # TSI-01: P0-1 the exit channels must read only completed prior bars; a
+        # same-bar windowed extreme can never be crossed by the close.
+        frame = donchian_exit_reachable_fixture()
+        config = {"entry": 55, "exit": 20, "regime": 200}
+        long_candidate = TechnicalCandidate(
+            "technical_donchian_breakout_long_v1", "technical_donchian_breakout_long_v1",
+            "donchian_breakout", "LONG", config, 201,
+        )
+        short_candidate = TechnicalCandidate(
+            "technical_donchian_breakout_short_v1", "technical_donchian_breakout_short_v1",
+            "donchian_breakout", "SHORT", config, 201,
+        )
+        long_events = generate_signal_events(frame, long_candidate)
+        short_events = generate_signal_events(frame, short_candidate)
+        assert int(long_events["long_exit"].sum()) > 0
+        assert int(short_events["short_exit"].sum()) > 0
+
+        exit_upper, exit_lower = donchian(frame["high"], frame["low"], 20)
+        assert bool((long_events["long_exit"] == (frame["close"] < exit_lower.shift())).all())
+        assert bool((short_events["short_exit"] == (frame["close"] > exit_upper.shift())).all())
+
+    def test_tsi_04_family_liveness_fails_closed(self, monkeypatch) -> None:
+        # TSI-04: every trend-screen family must reach all four conditions on a noisy
+        # two-regime fixture; a dead condition fails closed instead of silently
+        # degrading a cell to buy-and-hold.
+        frame = two_regime_ohlcv_fixture()
+        for family in TREND_SCREEN_FAMILIES:
+            counts = assert_family_signal_liveness(frame, family, _FAMILY_CONFIGS[family])
+            assert set(counts) == {"long_entry", "short_entry", "long_exit", "short_exit"}
+            assert all(v > 0 for v in counts.values()), f"{family}: {counts}"
+
+        from src.research.technical_experts import signals as signals_mod
+
+        def dead(_frame: pd.DataFrame, _config: dict) -> dict[str, pd.Series]:
+            false = pd.Series(False, index=_frame.index)
+            return {
+                "long_entry": false,
+                "short_entry": false,
+                "long_exit": false,
+                "short_exit": false,
+            }
+
+        monkeypatch.setattr(
+            signals_mod, "_FAMILY_SIGNALS",
+            {**signals_mod._FAMILY_SIGNALS, "dead_family": dead},
+        )
+        with pytest.raises(DataIntegrityError, match=r"dead_family.*long_entry"):
+            assert_family_signal_liveness(frame, "dead_family", {})
+
+        with pytest.raises(ValueError, match="unknown technical family"):
+            assert_family_signal_liveness(frame, "not_a_family", {})
 
 
 TREND_SCREEN_FAMILY_CONFIGS: dict[str, dict] = {

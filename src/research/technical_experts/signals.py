@@ -47,6 +47,11 @@ from src.research.technical_experts.indicators import (
     vortex,
 )
 
+__all__ = (
+    "assert_family_signal_liveness",
+    "generate_signal_events",
+)
+
 _OHLCV_COLUMNS = ("open", "high", "low", "close", "volume")
 _EVENT_COLUMNS = ("long_entry", "short_entry", "long_exit", "short_exit")
 
@@ -329,8 +334,8 @@ def _donchian_breakout_conditions(
     return {
         "long_entry": (close > entry_upper.shift()) & (close > slow),
         "short_entry": (close < entry_lower.shift()) & (close < slow),
-        "long_exit": close < exit_lower,
-        "short_exit": close > exit_upper,
+        "long_exit": close < exit_lower.shift(),
+        "short_exit": close > exit_upper.shift(),
     }
 
 
@@ -499,6 +504,34 @@ def generate_signal_events(
     )
     assert list(events.columns) == list(_EVENT_COLUMNS)
     return events
+
+def assert_family_signal_liveness(
+    frame: pd.DataFrame, family: str, config: Mapping[str, int | float],
+) -> dict[str, int]:
+    """Count per-key activations of a family's four conditions, failing closed.
+
+    Audit/test surface only: an unreachable entry or exit condition would
+    silently degrade a screen cell to buy-and-hold, so a family whose
+    conditions never fire is reported as a ``DataIntegrityError`` naming the
+    family and the dead key. ``generate_signal_events`` never calls this on the
+    production path.
+    """
+    try:
+        family_fn = _FAMILY_SIGNALS[family]
+    except KeyError as exc:
+        raise ValueError(f"unknown technical family '{family}'") from exc
+    conditions = family_fn(frame, config)
+    counts = {
+        key: int(conditions[key].fillna(False).sum())
+        for key in _EVENT_COLUMNS
+    }
+    for key, count in counts.items():
+        if count == 0:
+            raise DataIntegrityError(
+                f"family '{family}' signal condition '{key}' is dead "
+                f"(0 activations on {len(frame)} bars)"
+            )
+    return counts
 
 
 def _check_contract() -> None:

@@ -391,6 +391,127 @@ class TestSizingTournament:
         )
         assert report.qualification.binding_constraint == "sizing_tournament_infeasible"
 
+    def _bare_run(self) -> ts._CellRun:
+        cell = ts.TrendScreenCell(
+            return_source="s", family="f", side="LONG", symbol="X",
+            data_valid=True, funding_coverage=1.0, trade_count=30,
+            net_cagr=0.0, mdd=0.0, lcb90=0.0, t_stat=0.0, fold_score=0.0,
+            stress_verdict="PENDING", p_negative=0.0, fingerprint={},
+            discovery_pass=True, rejected_reason=None,
+        )
+        return ts._CellRun(cell)
+
+    def _score_policy_fold_stub(self, lcb90_cagr: float):
+        def stub(runs, spec, fold_index, train_end, val_start, val_end, config, clones):
+            return ts.SizingFoldScore(
+                policy_id=ts._sizing_policy_id(spec),
+                fold_index=fold_index,
+                train_end=train_end,
+                validation_start=val_start,
+                validation_end=val_end,
+                status="VALID",
+                reason=None,
+                active_bars=100,
+                validation_trade_count=5,
+                lcb90_cagr=lcb90_cagr,
+                mdd=-0.05,
+                allocation_cost=0.001,
+            )
+        return stub
+
+    def test_tsi_05_weights_use_unit_ledger(self) -> None:
+        # TSI-05: P1 weights must follow the unit discovery ledger, not the
+        # Kelly-scaled policy ledger. The policy volatilities here are inverted
+        # relative to the discovery ledgers, so a policy-based weight would pick
+        # the wrong sleeve.
+        idx = pd.date_range("2022-04-01", periods=500, freq="4h", tz="UTC")
+
+        def make_run(vol: float, seed: int) -> ts._CellRun:
+            rng = np.random.default_rng(seed)
+            run = self._bare_run()
+            run.disc_equity = pd.Series(
+                10000.0 * np.exp(np.cumsum(rng.normal(0.0, vol, 500))), index=idx,
+            )
+            run.policy_equity = pd.Series(
+                10000.0 * np.exp(np.cumsum(rng.normal(0.0, 0.021 - vol, 500))), index=idx,
+            )
+            return run
+
+        low_vol, high_vol = make_run(0.001, 1), make_run(0.020, 2)
+        weights = ts._equal_risk_weights([low_vol, high_vol])
+        assert weights[0] > weights[1]
+        assert abs(sum(weights) - 1.0) < 1e-9
+
+        missing = self._bare_run()
+        missing.policy_equity = pd.Series(
+            10000.0 * np.exp(np.cumsum(np.full(500, 0.0001))), index=idx,
+        )
+        with pytest.raises(DataIntegrityError):
+            ts._equal_risk_weights([missing])
+
+        flat = make_run(0.0, 3)
+        flat2 = make_run(0.0, 4)
+        flat_weights = ts._equal_risk_weights([flat, flat2])
+        assert abs(flat_weights[0] - 0.5) < 1e-12
+
+    def test_tsi_06_tournament_edge_floor(self, monkeypatch) -> None:
+        # TSI-06: P2 minimizing risk on a negative-edge blend is exposure minimization,
+        # so the tournament must fail closed when no candidate has a positive
+        # validation edge instead of electing the smallest grid fraction.
+        runs = [self._bare_run(), self._bare_run()]
+        monkeypatch.setattr(ts, "_score_policy_fold", self._score_policy_fold_stub(-0.05))
+        tournament = ts._rank_sizing_policies(runs, ts.ReliabilityGateConfig())
+        assert tournament.status == "INFEASIBLE"
+        assert tournament.selected_policy_id == "sizing_tournament_infeasible"
+        assert tournament.fraction == 0.0
+        assert tournament.mdd_cap_enabled is False
+        assert tournament.reason == "no_policy_with_positive_validation_edge"
+        assert tournament.policy_scores == ()
+        assert len(tournament.fold_scores) == 2 * len(ts.KELLY_SIZING_POLICIES)
+        assert all(f.status == "VALID" for f in tournament.fold_scores)
+
+        monkeypatch.setattr(ts, "_score_policy_fold", self._score_policy_fold_stub(0.05))
+        tournament2 = ts._rank_sizing_policies(runs, ts.ReliabilityGateConfig())
+        assert tournament2.status == "VALID"
+        assert tournament2.reason is None
+        assert tournament2.selected_policy_id in {
+            ts._sizing_policy_id(spec) for spec in ts.KELLY_SIZING_POLICIES
+        }
+
+    def test_tsi_07_dead_parameter_diagnostic(self, monkeypatch) -> None:
+        # TSI-07: P2 candidates that share identical four-field scores are flagged
+        # dead_parameter in the persisted payload; the flag is diagnostic only
+        # and the report stays byte-deterministic across identical runs.
+        monkeypatch.setattr(ts, "_score_policy_fold", self._score_policy_fold_stub(0.05))
+        runs = [self._bare_run(), self._bare_run()]
+        tournament_a = ts._rank_sizing_policies(runs, ts.ReliabilityGateConfig())
+        tournament_b = ts._rank_sizing_policies(runs, ts.ReliabilityGateConfig())
+        assert len(tournament_a.policy_scores) == len(ts.KELLY_SIZING_POLICIES)
+        assert all(s.dead_parameter for s in tournament_a.policy_scores)
+
+        def make_report(sizing: ts.SizingTournament) -> ts.TrendScreenReport:
+            return ts.TrendScreenReport(
+                profile="p",
+                universe=("X",),
+                cells=(),
+                selection=None,
+                schedule_hash="h",
+                qualification=ts.TrendScreenQualification(
+                    admitted=False, observation_verdict="PENDING", fold_gate_pass=False,
+                    stress_verdict="PENDING", holdout_verdict=None, binding_constraint=None,
+                ),
+                sizing=sizing,
+            )
+
+        payload_a = make_report(tournament_a).to_payload()
+        payload_b = make_report(tournament_b).to_payload()
+        scores = payload_a["sizing"]["policy_scores"]
+        assert all(s["dead_parameter"] for s in scores)
+        assert {s["policy_id"] for s in scores} == {
+            ts._sizing_policy_id(spec) for spec in ts.KELLY_SIZING_POLICIES
+        }
+        assert make_report(tournament_a).to_json() == make_report(tournament_b).to_json()
+
 
 class TestAnchoredWindow:
     def test_boundary_loss_included_exactly_once(self) -> None:
