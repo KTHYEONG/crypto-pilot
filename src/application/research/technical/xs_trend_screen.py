@@ -48,6 +48,7 @@ from src.research.technical_experts.cross_sectional import (
     XsAdmissionResult,
     XsAlphaCompositeSpec,
     XsCompositeSpec,
+    build_xs_alpha_dual_family_weights,
     build_xs_alpha_family_scores,
     build_xs_alpha_family_weights,
     build_xs_alpha_weights,
@@ -76,6 +77,7 @@ XS_NEUTRAL_PROFILE_ID = "xs_neutral_composite_v1"
 XS_ALPHA_PROFILE_ID = "xs_alpha_multihorizon_v2"
 XS_CONTEXTUAL_ALPHA_PROFILE_ID = "xs_alpha_contextual_v3"
 XS_SCORE_ROUTED_ALPHA_PROFILE_ID = "xs_alpha_score_routed_v4"
+XS_DUAL_FAMILY_ALPHA_PROFILE_ID = "xs_alpha_dual_family_v5"
 # The four-symbol earliest-history gap is not recoverable before 2022-04-03.
 # Keep the baseline catalog window unchanged, but start XS panel evaluation on
 # the first timestamp with complete taker/quote fields across the universe.
@@ -86,6 +88,7 @@ _ALPHA_FAMILY_ORDER = ("trend", "funding_contrarian", "taker_imbalance")
 __all__ = [
     "XS_ALPHA_PROFILE_ID",
     "XS_CONTEXTUAL_ALPHA_PROFILE_ID",
+    "XS_DUAL_FAMILY_ALPHA_PROFILE_ID",
     "XS_NEUTRAL_PROFILE_ID",
     "XS_SCORE_ROUTED_ALPHA_PROFILE_ID",
     "XsTrendScreenReport",
@@ -402,12 +405,14 @@ def run_xs_trend_screen(
         XS_ALPHA_PROFILE_ID,
         XS_CONTEXTUAL_ALPHA_PROFILE_ID,
         XS_SCORE_ROUTED_ALPHA_PROFILE_ID,
+        XS_DUAL_FAMILY_ALPHA_PROFILE_ID,
     ):
         raise ValueError(
             f"unknown xs screen profile '{profile}'; the source-controlled "
             f"profiles are '{XS_NEUTRAL_PROFILE_ID}', '{XS_ALPHA_PROFILE_ID}', "
-            f"'{XS_CONTEXTUAL_ALPHA_PROFILE_ID}', and "
-            f"'{XS_SCORE_ROUTED_ALPHA_PROFILE_ID}'"
+            f"'{XS_CONTEXTUAL_ALPHA_PROFILE_ID}', "
+            f"'{XS_SCORE_ROUTED_ALPHA_PROFILE_ID}', and "
+            f"'{XS_DUAL_FAMILY_ALPHA_PROFILE_ID}'"
         )
     end = resolve_evaluation_end(end, unseal_holdout=unseal_holdout)
     requested_start = XS_DISCOVERY_START if start is None else pd.to_datetime(start, utc=True)
@@ -419,6 +424,7 @@ def run_xs_trend_screen(
             XS_ALPHA_PROFILE_ID,
             XS_CONTEXTUAL_ALPHA_PROFILE_ID,
             XS_SCORE_ROUTED_ALPHA_PROFILE_ID,
+            XS_DUAL_FAMILY_ALPHA_PROFILE_ID,
         )
         else None
     )
@@ -531,6 +537,10 @@ def run_xs_trend_screen(
                         execution_spec.halflife_bars,
                         execution_spec.no_trade_band,
                     )
+            elif profile == XS_DUAL_FAMILY_ALPHA_PROFILE_ID:
+                weights = build_xs_alpha_dual_family_weights(
+                    closes, taker, bar_funding, alpha_spec, execution_spec,
+                )
             else:
                 weights = build_xs_alpha_weights(
                     closes, taker, bar_funding, alpha_spec, execution_spec,
