@@ -1,6 +1,16 @@
 {
   "tasks": [
     {
+      "task_id": "trend_screen_fractional_kelly_gate",
+      "date": "2026-08-04",
+      "adr_id": "ADR_20260804_trend_screen_fractional_kelly_gate",
+      "domain": "research",
+      "title": "Trend screen fractional Kelly gate",
+      "why": "최신 trend-screen 실행 결과를 기준으로 discovery 및 qualification gate를 동기화",
+      "resolution": "최신 단일 실행 결과 JSON을 유지하고 fractional-Kelly 정책 및 qualification 결과를 코드맵과 작업 인덱스에 반영",
+      "impact": "Discovery 후보 23개와 5개 포트폴리오 선택 결과를 추적하며 observation/stress gate 실패를 기록"
+    },
+    {
       "task_id": "TASK_TREND_SCREEN_PERFORMANCE_OPTIMIZATION",
       "date": "2026-08-04",
       "adr_id": "ADR_20260804_TREND_SCREEN_PERFORMANCE_OPTIMIZATION",
