@@ -1,6 +1,16 @@
 {
   "tasks": [
     {
+      "task_id": "TASK_XS_NEUTRAL_COMPOSITE_SCREEN",
+      "date": "2026-08-04",
+      "adr_id": "ADR_20260804_XS_NEUTRAL_COMPOSITE_SCREEN",
+      "domain": "research",
+      "title": "XS-Neutral Composite Screen 추가 (선택형 TS 스크린 대안)",
+      "why": "신호 무결성 수정 후에도 baseline_gate_performance_v1 450셀 TS 스크린은 sizing_tournament_infeasible로 CASH 유지. 진단 결과 discovery t분포 꼬리(t>2: 관측 8 vs 귀무기대 10.2)가 노이즈보다 얇아 top-k 선택이 원리적으로 불가능하나, 평균 t(+0.222, 검정 +5.65)는 유의하게 양수로 넓고 얇은 알파가 존재. breadth/horizon 집계 가설은 반증됐고, 유일하게 지속되는 구조는 LONG/SHORT 방향성 베타(+0.187/-0.323)였음.",
+      "resolution": "동일 15개 패밀리 신호를 심볼별 합성 스코어로 평균, EWMA 평활(halflife=6bar), 교차섹션 디민(베타 구조적 제거), 무거래밴드(0.05)로 회전율 억제 후 단위gross 배분하는 xs_neutral_composite_v1 프로파일 신설(cross_sectional.py, xs_trend_screen.py). 스케일불변 admission 게이트(sharpe_floor/beta_abs_max/annual_sub_sharpe/turnover_max/cost_breakeven_min)로 절대CAGR허들·t_stat_floor 대체. /check에서 밴드 후 재정규화 버그(회전율 79->135x/yr, admission False로 반전) 발견 후 제거.",
+      "impact": "프로덕션 체결규약(t+2 시가)·8bp·펀딩 반영 전체 유니버스 재현: Discovery Sharpe=1.241, Qualification(OOS) Sharpe=1.177, beta=-0.019, 회전율=75.1x/yr, 2024/2025 각각 Sharpe 1.11/1.24 양년 모두 양수. 양쪽 admitted=True binding_constraint=None. 강건성 6축(비용손익분기~40bp, 패밀리LOO 15회 전부양수, 심볼LOO 15회 전부양수, 파라미터이웃 15조합 전부양수, 체결지연 무감쇠, XS가격모멘텀 벤치마크 대비 우위) 전부 통과. 기존 TS 스크린은 폐기하지 않고 병존. 2026-01-01+ 홀드아웃은 미개봉 유지 -- 최종 확인은 1회 봉인해제로만 수행 예정."
+    },
+    {
       "task_id": "TASK_TREND_SCREEN_SIGNAL_INTEGRITY",
       "date": "2026-08-04",
       "adr_id": "ADR_20260804_TREND_SCREEN_SIGNAL_INTEGRITY",

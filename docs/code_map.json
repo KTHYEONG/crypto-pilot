@@ -579,5 +579,9 @@
   "src/validation/reliability_gate.py": {
     "testing": "tests/contract/test_legacy_imports.py"
   },
-  "src/validation/research_memory.py": {}
+  "src/validation/research_memory.py": {},
+  "src/research/technical_experts/cross_sectional.py": {
+    "architecture": "docs/specs/xs_neutral_composite_screen.md",
+    "testing": "tests/unit/research/technical_experts/test_cross_sectional.py"
+  }
 }
