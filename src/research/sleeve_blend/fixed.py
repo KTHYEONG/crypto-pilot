@@ -27,6 +27,22 @@ from src.research.sleeve_blend.contracts import (
 )
 
 
+def _validate_unit_equity(unit_equity: pd.Series) -> None:
+    """Fail closed on malformed, non-monotonic, non-finite, or non-positive
+    unit-leverage ledgers; shared by every causal schedule builder."""
+    if not isinstance(unit_equity.index, pd.DatetimeIndex) or len(unit_equity) < 2:
+        raise ValueError(
+            "unit_equity must be a DatetimeIndex series with at least 2 points"
+        )
+    if not unit_equity.index.is_monotonic_increasing:
+        raise ValueError("unit_equity index must be monotonic increasing")
+    values = unit_equity.to_numpy(dtype=np.float64)
+    if not np.isfinite(values).all():
+        raise ValueError("unit_equity must contain only finite values")
+    if (values <= 0).any():
+        raise ValueError("unit_equity must be strictly positive")
+
+
 def build_causal_leverage_schedule(
     unit_equity: pd.Series,
     risk_spec: CausalLeverageSpec,
@@ -42,17 +58,8 @@ def build_causal_leverage_schedule(
     lookback exists the row is zero exposure. The computation is fully
     vectorized (no ``pd.apply``) and is deterministic for identical input.
     """
-    if not isinstance(unit_equity.index, pd.DatetimeIndex) or len(unit_equity) < 2:
-        raise ValueError(
-            "unit_equity must be a DatetimeIndex series with at least 2 points"
-        )
-    if not unit_equity.index.is_monotonic_increasing:
-        raise ValueError("unit_equity index must be monotonic increasing")
+    _validate_unit_equity(unit_equity)
     values = unit_equity.to_numpy(dtype=np.float64)
-    if not np.isfinite(values).all():
-        raise ValueError("unit_equity must contain only finite values")
-    if (values <= 0).any():
-        raise ValueError("unit_equity must be strictly positive")
 
     bar_period = unit_equity.index[1] - unit_equity.index[0]
     lookback_bars = max(
@@ -290,23 +297,28 @@ def build_causal_fractional_kelly_schedule(
     risk_spec: CausalLeverageSpec,
     kelly_spec: CausalFractionalKellySpec,
 ) -> pd.Series:
-    """Build the combined causal fractional-Kelly / MDD gross-leverage schedule.
+    """Build the causal fractional-Kelly gross-leverage schedule for one policy.
 
-    The applied exposure at bar ``t`` is the pointwise minimum of the
-    fractional-Kelly cap (:func:`_causal_fractional_kelly_cap`) and the
-    prior-mark MDD cap (:func:`build_causal_leverage_schedule`); both use only
-    completed marks strictly before ``t``, so the result lies in
-    ``[0, max_gross_leverage]`` and is zero before either cap has a complete
-    lookback. Fully vectorized (no ``pd.apply``) and byte-deterministic for
-    identical input.
+    When ``kelly_spec.mdd_cap_enabled`` the applied exposure at bar ``t`` is
+    the pointwise minimum of the fractional-Kelly cap
+    (:func:`_causal_fractional_kelly_cap`) and the prior-mark MDD cap
+    (:func:`build_causal_leverage_schedule`). When disabled the fractional-Kelly
+    cap is returned directly; ``build_causal_leverage_schedule`` is never
+    invoked. Both modes use only completed marks strictly before ``t``, so the
+    result lies in ``[0, max_gross_leverage]`` (the hard cap is always applied)
+    and is zero before the Kelly cap has a complete lookback. Fully vectorized
+    (no ``pd.apply``) and byte-deterministic for identical input.
     """
-    if risk_spec.lookback_days != kelly_spec.lookback_days:
+    if kelly_spec.mdd_cap_enabled and risk_spec.lookback_days != kelly_spec.lookback_days:
         raise ValueError(
-            "risk_spec.lookback_days must equal kelly_spec.lookback_days, got "
-            f"{risk_spec.lookback_days} != {kelly_spec.lookback_days}"
+            "risk_spec.lookback_days must equal kelly_spec.lookback_days when "
+            f"mdd_cap_enabled, got {risk_spec.lookback_days} != {kelly_spec.lookback_days}"
         )
-    mdd_schedule = build_causal_leverage_schedule(unit_equity, risk_spec)
+    _validate_unit_equity(unit_equity)
     kelly_cap = _causal_fractional_kelly_cap(unit_equity, risk_spec, kelly_spec)
+    if not kelly_spec.mdd_cap_enabled:
+        return kelly_cap.rename("leverage")
+    mdd_schedule = build_causal_leverage_schedule(unit_equity, risk_spec)
     combined = np.minimum(kelly_cap.to_numpy(), mdd_schedule.to_numpy())
     return pd.Series(
         combined, index=unit_equity.index, name="leverage", dtype=np.float64,
