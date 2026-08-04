@@ -45,6 +45,7 @@ def run_technical_expert_backtest(
     stop_loss_value: float | None = None,
     atr_period: int = 14,
     trailing_stop: bool = False,
+    execution_start: pd.Timestamp | None = None,
 ) -> BacktestResult:
     """Run one directional technical candidate on the completed-bar grid.
 
@@ -54,6 +55,14 @@ def run_technical_expert_backtest(
     when a position exists at the settlement timestamp. The equity series is
     the single marked ledger and the closed-trade records carry the exact
     ``BacktestResult`` shape used by the shared component panel.
+
+    When ``execution_start`` is supplied, signals are still generated on the
+    entire supplied frame (indicator warm-up) but cash, positions, funding,
+    equity marks, and trade rows begin at the first bar at or after
+    ``execution_start`` with fresh ``initial_equity``. Earlier bars carry the
+    flat initial-equity ledger so no pre-start PnL or bankruptcy can invalidate
+    the returned evaluation window. When omitted the behavior is byte-identical
+    to prior releases.
     """
     _validate_ohlcv_frame(frame, candidate.min_history_bars)
     if signal_delay_bars < 0:
@@ -80,6 +89,23 @@ def run_technical_expert_backtest(
     events = generate_signal_events(frame, candidate)
     grid = frame.index
     bar_funding = _align_funding_rates(funding_rates, grid)
+
+    execution_start_idx: int | None = None
+    if execution_start is not None:
+        start_ts = execution_start
+        if not isinstance(start_ts, pd.Timestamp):
+            start_ts = pd.Timestamp(start_ts)
+        if start_ts.tzinfo is None and grid.tz is not None:
+            start_ts = start_ts.tz_localize(grid.tz)
+        if start_ts.tzinfo is not None and grid.tz is None:
+            start_ts = start_ts.tz_localize(None)
+        if start_ts < grid[0] or start_ts > grid[-1]:
+            raise ValueError(
+                f"execution_start {start_ts.isoformat()} is outside the bar grid "
+                f"[{grid[0].isoformat()}, {grid[-1].isoformat()}]"
+            )
+        execution_start_idx = int(grid.searchsorted(start_ts, side="left"))
+
 
     open_arr = pd.to_numeric(frame["open"], errors="coerce").to_numpy(dtype=np.float64)
     high_arr = pd.to_numeric(frame["high"], errors="coerce").to_numpy(dtype=np.float64)
@@ -126,6 +152,7 @@ def run_technical_expert_backtest(
         initial_equity, grid,
         stop_loss_mode=stop_loss_mode, stop_loss_value=stop_loss_value,
         atr_arr=atr_arr, trailing_stop=trailing_stop,
+        execution_start_idx=execution_start_idx,
     )
     trades_df = (
         pd.DataFrame(trade_rows)
@@ -150,6 +177,7 @@ def _execute_target_schedule(
     stop_loss_value: float | None = None,
     atr_arr: np.ndarray | None = None,
     trailing_stop: bool = False,
+    execution_start_idx: int | None = None,
 ) -> tuple[pd.Series, list[dict[str, object]]]:
     """Execute a per-bar signed target schedule at each bar's open.
 
@@ -165,6 +193,11 @@ def _execute_target_schedule(
     distance is fixed at entry (fixed fraction of the fill price, or an ATR
     multiple evaluated on causally shifted bars); ``trailing_stop`` instead
     anchors the stop to the favorable extreme seen while the position is open.
+
+    When ``execution_start_idx`` is supplied, bars strictly before it are
+    indicator-only warm-up: they carry the flat ``initial_equity`` mark, never
+    open a position, accrue no funding, and produce no trade rows. Execution
+    begins at that bar with fresh capital.
     """
     n = len(open_arr)
     cash = initial_equity
@@ -233,6 +266,12 @@ def _execute_target_schedule(
     for t in range(n):
         o = open_arr[t]
         c = close_arr[t]
+
+        # Indicator-only warm-up: before execution_start the ledger is flat at
+        # initial_equity and no position, funding, or trade row exists.
+        if execution_start_idx is not None and t < execution_start_idx:
+            equity_arr[t] = initial_equity
+            continue
 
         # Funding accrual at this bar's published timestamp. Positive funding
         # debits a long and credits a short, only for a position already held
@@ -317,6 +356,7 @@ def _check_contract() -> None:
         "frame", "candidate", "costs", "funding_rates",
         "initial_equity", "signal_delay_bars",
         "stop_loss_mode", "stop_loss_value", "atr_period", "trailing_stop",
+        "execution_start",
     ]
     assert params["initial_equity"].default == 10_000.0
     assert params["signal_delay_bars"].default == 0
@@ -324,6 +364,7 @@ def _check_contract() -> None:
     assert params["stop_loss_value"].default is None
     assert params["atr_period"].default == 14
     assert params["trailing_stop"].default is False
+    assert params["execution_start"].default is None
 
 
 _check_contract()

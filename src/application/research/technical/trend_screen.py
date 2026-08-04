@@ -45,6 +45,7 @@ from src.research.evaluation.reliability import (
     FoldDistributionResult,
     ReliabilityGateConfig,
     ReliabilityGateResult,
+    block_size_search_hit_cap,
     compute_equity_reliability_gate,
     compute_fold_distribution,
     split_holdout_segment,
@@ -159,6 +160,7 @@ class TrendScreenCell:
     kelly_lookback_days: int = 365
     kelly_mdd_cap_enabled: bool = True
     allocation_cost: float = 0.0
+    block_cap_hit: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -169,6 +171,7 @@ class TrendScreenSelection:
     symbols: tuple[str, ...]
     weights: tuple[float, ...]
     discovery_lcb90: tuple[float, ...]
+    correlation: tuple[float, ...]
 
 
 @dataclass(frozen=True, slots=True)
@@ -190,6 +193,12 @@ class SizingFoldScore:
     The validation ledger is the frozen training-prefix sleeves/weights with the
     candidate's causal schedule applied and allocation-turnover costs deducted;
     it never reads qualification, holdout, or stress bars.
+
+    ``status`` is ``VALID`` only when the fold produced a non-empty selection,
+    at least two anchored validation marks, active leverage in the validation
+    window, and at least one closed validation trade; otherwise it is
+    ``INFEASIBLE`` with a stable ``reason`` and the numeric fields are zero --
+    an infeasible fold is never scored as a zero-performance evidence.
     """
 
     policy_id: str
@@ -197,6 +206,10 @@ class SizingFoldScore:
     train_end: pd.Timestamp
     validation_start: pd.Timestamp
     validation_end: pd.Timestamp
+    status: str
+    reason: str | None
+    active_bars: int
+    validation_trade_count: int
     lcb90_cagr: float
     mdd: float
     allocation_cost: float
@@ -220,12 +233,18 @@ class SizingTournament:
     ``policy_scores`` are ordered best-first by the deterministic lexicographic
     rank ``(worst validation LCB90, mean validation LCB90, worst validation MDD,
     lower mean allocation cost, policy id)``; ``selected_policy_id`` is the
-    winner. Qualification, holdout, and stress outcomes never enter this object.
+    winner. A candidate may only win when every configured fold is ``VALID``;
+    if no candidate qualifies, ``status`` is ``INFEASIBLE``,
+    ``selected_policy_id`` is ``"sizing_tournament_infeasible"`` and no policy
+    is elected. Qualification, holdout, and stress outcomes never enter this
+    object.
     """
 
     selected_policy_id: str
     fraction: float
     mdd_cap_enabled: bool
+    status: str
+    reason: str | None
     policy_scores: tuple[SizingPolicyScore, ...]
     fold_scores: tuple[SizingFoldScore, ...]
 
@@ -279,6 +298,7 @@ class TrendScreenReport:
                     "kelly_lookback_days": cell.kelly_lookback_days,
                     "kelly_mdd_cap_enabled": cell.kelly_mdd_cap_enabled,
                     "allocation_cost": round(cell.allocation_cost, 8),
+                    "block_cap_hit": cell.block_cap_hit,
                 }
                 for cell in self.cells
             ],
@@ -300,12 +320,14 @@ class TrendScreenReport:
                     "symbol": symbol,
                     "weight": round(weight, 8),
                     "lcb90": round(lcb90, 8),
+                    "correlation": round(corr, 8),
                 }
-                for rs, symbol, weight, lcb90 in zip(
+                for rs, symbol, weight, lcb90, corr in zip(
                     self.selection.return_sources,
                     self.selection.symbols,
                     self.selection.weights,
                     self.selection.discovery_lcb90,
+                    self.selection.correlation,
                     strict=True,
                 )
             ]
@@ -313,6 +335,8 @@ class TrendScreenReport:
             "policy_id": self.sizing.selected_policy_id,
             "fraction": self.sizing.fraction,
             "mdd_cap_enabled": self.sizing.mdd_cap_enabled,
+            "status": self.sizing.status,
+            "reason": self.sizing.reason,
             "policy_scores": [
                 {
                     "policy_id": s.policy_id,
@@ -330,6 +354,10 @@ class TrendScreenReport:
                     "train_end": f.train_end.isoformat(),
                     "validation_start": f.validation_start.isoformat(),
                     "validation_end": f.validation_end.isoformat(),
+                    "status": f.status,
+                    "reason": f.reason,
+                    "active_bars": f.active_bars,
+                    "validation_trade_count": f.validation_trade_count,
                     "lcb90_cagr": round(f.lcb90_cagr, 8),
                     "mdd": round(f.mdd, 8),
                     "allocation_cost": round(f.allocation_cost, 8),
@@ -349,6 +377,54 @@ def _fingerprint_without_self(payload: dict[str, object]) -> str:
     body = {k: v for k, v in payload.items() if k != "report_fingerprint"}
     encoded = json.dumps(body, sort_keys=True, default=str).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()
+
+def _anchored_equity(
+    equity: pd.Series,
+    start: pd.Timestamp,
+    end: pd.Timestamp,
+) -> pd.Series:
+    """Prefix the inclusive ``[start, end]`` window with its boundary anchor.
+
+    Returns the evaluation ledger from the last mark strictly before ``start``
+    through ``end`` inclusive, so the first in-window return and the allocation
+    turnover into that bar are included exactly once. When no mark exists
+    strictly before ``start`` (e.g. a symbol whose ledger begins exactly at the
+    window boundary) the window starts at its first in-window mark; there is no
+    boundary return to include. Trade attribution stays in the requested
+    ``[start, end]`` interval; only the return stream is anchored. Raises
+    ``ValueError`` on a malformed ledger, an inverted window, or an empty
+    window on the ledger.
+    """
+    if not isinstance(equity.index, pd.DatetimeIndex) or len(equity) < 2:
+        raise ValueError("anchored equity must be a DatetimeIndex series with at least 2 points")
+    if not equity.index.is_monotonic_increasing:
+        raise ValueError("anchored equity index must be monotonic increasing")
+    if start > end:
+        raise ValueError(f"anchored interval start {start} is after end {end}")
+
+    index = equity.index
+    prior = index[index < start]
+    anchor = prior[-1] if len(prior) > 0 else None
+    window = (
+        equity[(index >= start) & (index <= end)]
+        if anchor is None
+        else equity[(index >= anchor) & (index <= end)]
+    )
+    if len(window) == 0:
+        raise ValueError(
+            f"anchored interval [{start.isoformat()}, {end.isoformat()}] is empty on the ledger"
+        )
+    return window
+
+
+def _block_size_cap_hit(equity: pd.Series) -> bool:
+    """Whether the discovery bootstrap block-length search reached its cap.
+
+    Diagnostic only: a cap-hit never passes or fails a cell; it merely flags
+    that the LCB may understate trend-return dependence.
+    """
+    returns = equity.pct_change().dropna().to_numpy(dtype=np.float64)
+    return block_size_search_hit_cap(returns)
 
 
 class _CellRun:
@@ -493,10 +569,9 @@ def _run_cell(
     result = run_technical_expert_backtest(
         frame, candidate, costs, funding,
         initial_equity=_INITIAL_EQUITY, signal_delay_bars=_BASE_DELAY_BARS,
+        execution_start=DISCOVERY_START,
     )
-    disc_equity = result.equity[
-        (result.equity.index >= DISCOVERY_START) & (result.equity.index <= DISCOVERY_END)
-    ]
+    disc_equity = _anchored_equity(result.equity, DISCOVERY_START, DISCOVERY_END)
     disc_trades = _trades_in_window(
         result.trades, result.equity.index, DISCOVERY_START, DISCOVERY_END,
     )
@@ -534,6 +609,7 @@ def _run_cell(
         fingerprint=fingerprint,
         discovery_pass=False,
         rejected_reason=None,
+        block_cap_hit=_block_size_cap_hit(disc_equity),
     )
     run = _CellRun(cell, result)
     run.disc_equity = disc_equity
@@ -733,9 +809,7 @@ def _apply_policy_evidence(
         if not cell.data_valid or run.result is None:
             continue
         schedule, policy_equity, alloc_cost = run.policy_ledgers[_sizing_policy_id(kelly_spec)]
-        policy_disc = policy_equity[
-            (policy_equity.index >= DISCOVERY_START) & (policy_equity.index <= DISCOVERY_END)
-        ]
+        policy_disc = _anchored_equity(policy_equity, DISCOVERY_START, DISCOVERY_END)
         disc_trades = _trades_in_window(
             run.result.trades, run.result.equity.index, DISCOVERY_START, DISCOVERY_END,
         )
@@ -775,7 +849,9 @@ def _fold_base_clone(
     base = run.cell
     if not base.data_valid or run.result is None:
         return _CellRun(dataclasses.replace(base, discovery_pass=False, rejected_reason=None))
-    prefix_equity = run.result.equity[run.result.equity.index <= train_end]
+    prefix_equity = _anchored_equity(
+        run.result.equity, DISCOVERY_START, train_end,
+    )
     prefix_trades = _trades_in_window(
         run.result.trades, run.result.equity.index, DISCOVERY_START, train_end,
     )
@@ -826,8 +902,10 @@ def _apply_fold_policy(
     if not clone.cell.data_valid or base.result is None:
         return
     schedule, policy_equity, _cost = base.policy_ledgers[_sizing_policy_id(spec)]
-    policy_prefix = policy_equity[policy_equity.index <= train_end]
-    schedule_prefix = schedule[schedule.index <= train_end]
+    policy_prefix = _anchored_equity(policy_equity, DISCOVERY_START, train_end)
+    schedule_prefix = schedule[
+        (schedule.index >= DISCOVERY_START) & (schedule.index <= train_end)
+    ]
     if len(policy_prefix) < 2:
         policy_lcb90, policy_cagr, policy_mdd = 0.0, 0.0, 0.0
     else:
@@ -868,16 +946,31 @@ def _score_policy_fold(
 ) -> SizingFoldScore:
     """Score one candidate on one fold: train-prefix eligibility/sleeves/weights
     frozen, candidate schedule applied from prior marks only, validation ledger
-    scored after allocation-turnover costs."""
+    scored after allocation-turnover costs.
+
+    An infeasible fold (empty selection, fewer than two anchored validation
+    marks, zero active leverage in validation, or no closed validation trade) is
+    reported ``INFEASIBLE`` with a stable reason -- never a zero-performance
+    score that could be ranked as evidence.
+    """
     for clone, base in zip(clones, runs, strict=True):
         _apply_fold_policy(clone, base, spec, train_end, config)
     _apply_discovery_requirements(clones, config, start=DISCOVERY_START, end=train_end)
     selected = _greedy_portfolio_selection(_select_sleeves(clones))
     policy_id = _sizing_policy_id(spec)
-    if not selected:
+
+    def _infeasible(
+        reason: str, *, active_bars: int = 0, val_trades: int = 0,
+    ) -> SizingFoldScore:
         return SizingFoldScore(
-            policy_id, fold_index, train_end, val_start, val_end, 0.0, 0.0, 0.0,
+            policy_id, fold_index, train_end, val_start, val_end,
+            status="INFEASIBLE", reason=reason,
+            active_bars=active_bars, validation_trade_count=val_trades,
+            lcb90_cagr=0.0, mdd=0.0, allocation_cost=0.0,
         )
+
+    if not selected:
+        return _infeasible("empty_selection")
     selected_results: list[BacktestResult] = []
     for fr in selected:
         if fr.result is None:
@@ -887,17 +980,22 @@ def _score_policy_fold(
     blend = _blend_unit_equities([_unit_equity(r) for r in selected_results], weights)
     schedule = build_causal_fractional_kelly_schedule(blend, CausalLeverageSpec(), spec)
     policy_blend, _full_cost = _apply_policy_schedule(blend, schedule, CostModel())
-    val_equity = policy_blend[
-        (policy_blend.index >= val_start) & (policy_blend.index <= val_end)
-    ]
+    try:
+        val_equity = _anchored_equity(policy_blend, val_start, val_end)
+    except ValueError:
+        return _infeasible("insufficient_anchored_marks")
     if len(val_equity) < 2:
-        return SizingFoldScore(
-            policy_id, fold_index, train_end, val_start, val_end, 0.0, 0.0, 0.0,
-        )
+        return _infeasible("insufficient_anchored_marks")
+    val_schedule = _anchored_equity(schedule, val_start, val_end)
+    active_bars = int((val_schedule > 0.0).sum())
+    if active_bars == 0:
+        return _infeasible("zero_active_leverage")
     trades = _portfolio_trades(
         [(r.trades, r.equity.index) for r in selected_results],
     )
     val_trades = _trades_in_window(trades, policy_blend.index, val_start, val_end)
+    if len(val_trades) == 0:
+        return _infeasible("no_validation_trade", active_bars=active_bars)
     gate = compute_equity_reliability_gate(
         val_equity, len(val_trades),
         dataclasses.replace(config, hurdle_rate=0.0),
@@ -908,7 +1006,9 @@ def _score_policy_fold(
     )
     return SizingFoldScore(
         policy_id, fold_index, train_end, val_start, val_end,
-        gate.lcb90_cagr, mdd, alloc_cost,
+        status="VALID", reason=None,
+        active_bars=active_bars, validation_trade_count=len(val_trades),
+        lcb90_cagr=gate.lcb90_cagr, mdd=mdd, allocation_cost=alloc_cost,
     )
 
 
@@ -923,8 +1023,10 @@ def _rank_sizing_policies(
     under the candidate's causal schedule). Candidates are ranked lexicographically
     by (worst validation LCB90, mean validation LCB90, worst validation MDD,
     lower mean allocation cost, policy id); the best candidate is the global
-    policy. Only discovery bars are read; qualification/holdout/stress outcomes
-    never enter this ranking.
+    policy. A candidate is electable only when every configured fold is VALID;
+    otherwise the tournament is INFEASIBLE, reports the sentinel
+    ``sizing_tournament_infeasible``, and elects no policy. Only discovery bars
+    are read; qualification/holdout/stress outcomes never enter this ranking.
     """
     fold_clones: dict[int, list[_CellRun]] = {}
     for fold_index, (train_end, _val_start, _val_end) in enumerate(_SIZING_FOLDS, start=1):
@@ -941,6 +1043,8 @@ def _rank_sizing_policies(
             )
             spec_folds.append(score)
             fold_scores.append(score)
+        if any(f.status == "INFEASIBLE" for f in spec_folds):
+            continue
         policy_scores.append(SizingPolicyScore(
             policy_id=_sizing_policy_id(spec),
             worst_lcb90_cagr=min(s.lcb90_cagr for s in spec_folds),
@@ -948,6 +1052,17 @@ def _rank_sizing_policies(
             worst_mdd=min(s.mdd for s in spec_folds),
             mean_allocation_cost=float(np.mean([s.allocation_cost for s in spec_folds])),
         ))
+
+    if not policy_scores:
+        return SizingTournament(
+            selected_policy_id="sizing_tournament_infeasible",
+            fraction=0.0,
+            mdd_cap_enabled=False,
+            status="INFEASIBLE",
+            reason="no_policy_with_all_valid_folds",
+            policy_scores=(),
+            fold_scores=tuple(fold_scores),
+        )
 
     ranking = sorted(
         policy_scores,
@@ -968,16 +1083,21 @@ def _rank_sizing_policies(
         selected_policy_id=winner.policy_id,
         fraction=winner_spec.fraction,
         mdd_cap_enabled=winner_spec.mdd_cap_enabled,
+        status="VALID",
+        reason=None,
         policy_scores=tuple(ranking),
         fold_scores=tuple(fold_scores),
     )
 
 
 def _select_sleeves(runs: list[_CellRun]) -> list[_CellRun]:
-    """At most one side per family and at most one symbol per retained identity.
+    """At most one side per family, at most one identity per family, and at most
+    one sleeve per underlying symbol.
 
     Ranking uses the policy ledger (policy LCB90, policy MDD) with unit-risk
-    LCB90 and lexical identity as tie-breakers.
+    LCB90 and lexical identity as tie-breakers. The per-symbol restriction is a
+    structural concentration invariant (the observed three-SOL-long duplication
+    is removed) independent of any qualification-era threshold.
     """
     survivors = [run for run in runs if run.cell.discovery_pass]
     if not survivors:
@@ -996,12 +1116,23 @@ def _select_sleeves(runs: list[_CellRun]) -> list[_CellRun]:
     by_family: dict[str, list[_CellRun]] = {}
     for run in identity_best:
         by_family.setdefault(run.cell.family, []).append(run)
-    return [
+    family_best: list[_CellRun] = [
         max(members, key=lambda r: (
             r.cell.policy_lcb90, r.cell.policy_mdd, r.cell.lcb90,
             r.cell.return_source,
         ))
         for members in by_family.values()
+    ]
+
+    by_symbol: dict[str, list[_CellRun]] = {}
+    for run in family_best:
+        by_symbol.setdefault(run.cell.symbol, []).append(run)
+    return [
+        max(members, key=lambda r: (
+            r.cell.policy_lcb90, r.cell.policy_mdd, r.cell.lcb90,
+            r.cell.return_source,
+        ))
+        for members in by_symbol.values()
     ]
 
 
@@ -1133,9 +1264,7 @@ def _qualify(
         [(run.result.trades, run.result.equity.index) for run in selected if run.result is not None],
     )
 
-    qual_equity = scheduled[
-        (scheduled.index >= QUALIFICATION_START) & (scheduled.index <= QUALIFICATION_END)
-    ]
+    qual_equity = _anchored_equity(scheduled, QUALIFICATION_START, QUALIFICATION_END)
     qual_trades = _trades_in_window(
         trades, scheduled.index, QUALIFICATION_START, QUALIFICATION_END,
     )
@@ -1155,6 +1284,7 @@ def _qualify(
         stress_result = run_technical_expert_backtest(
             frame, _candidate_by_source(run.cell.return_source), stressed_costs, funding,
             initial_equity=_INITIAL_EQUITY, signal_delay_bars=_STRESS_DELAY_BARS,
+            execution_start=DISCOVERY_START,
         )
         stress_unit.append(_unit_equity(stress_result))
         stress_trade_rows.append((stress_result.trades, stress_result.equity.index))
@@ -1162,10 +1292,9 @@ def _qualify(
     stress_scheduled, _stress_cost = _apply_policy_schedule(
         stress_blend, schedule, stressed_costs,
     )
-    stress_qual_equity = stress_scheduled[
-        (stress_scheduled.index >= QUALIFICATION_START)
-        & (stress_scheduled.index <= QUALIFICATION_END)
-    ]
+    stress_qual_equity = _anchored_equity(
+        stress_scheduled, QUALIFICATION_START, QUALIFICATION_END,
+    )
     stress_trades = _portfolio_trades(stress_trade_rows)
     stress_trades = _trades_in_window(
         stress_trades, stress_scheduled.index, QUALIFICATION_START, QUALIFICATION_END,
@@ -1244,6 +1373,26 @@ def run_trend_screen(
 
     config = ReliabilityGateConfig()
     sizing = _rank_sizing_policies(runs, config)
+    if sizing.status == "INFEASIBLE":
+        # Fail closed: a two-fold 365-day Kelly tournament that has no VALID
+        # fold for any candidate cannot elect a policy or produce a
+        # qualification verdict. CASH is retained with a binding constraint.
+        return TrendScreenReport(
+            profile=TREND_SCREEN_PROFILE_ID,
+            universe=TREND_SCREEN_SYMBOLS,
+            cells=tuple(run.cell for run in runs),
+            selection=None,
+            schedule_hash=_schedule_hash(pd.Series(dtype="float64", name="leverage")),
+            qualification=TrendScreenQualification(
+                admitted=False,
+                observation_verdict="PENDING",
+                fold_gate_pass=True,
+                stress_verdict="PENDING",
+                holdout_verdict=None,
+                binding_constraint="sizing_tournament_infeasible",
+            ),
+            sizing=sizing,
+        )
     selected_spec = next(
         spec for spec in KELLY_SIZING_POLICIES
         if _sizing_policy_id(spec) == sizing.selected_policy_id
@@ -1254,11 +1403,16 @@ def run_trend_screen(
     selected_runs = _greedy_portfolio_selection(_select_sleeves(runs))
     if selected_runs:
         weights = _equal_risk_weights(selected_runs)
+        correlations = tuple(
+            _mean_abs_corr(run, [other for other in selected_runs if other is not run])
+            for run in selected_runs
+        )
         selection = TrendScreenSelection(
             return_sources=tuple(run.cell.return_source for run in selected_runs),
             symbols=tuple(run.cell.symbol for run in selected_runs),
             weights=tuple(weights),
             discovery_lcb90=tuple(run.cell.policy_lcb90 for run in selected_runs),
+            correlation=correlations,
         )
         selected_symbols = {run.cell.symbol for run in selected_runs}
         data = {
@@ -1314,6 +1468,13 @@ def _check_contract() -> None:
     assert _sizing_policy_id(KELLY_SIZING_POLICIES[1]) == "kelly_only_q25"
     assert _sizing_policy_id(KELLY_SIZING_POLICIES[2]) == "kelly_mdd_q10"
     assert _sizing_policy_id(KELLY_SIZING_POLICIES[3]) == "kelly_mdd_q25"
+    assert len(_SIZING_FOLDS) == 2
+    assert {"status", "reason", "active_bars", "validation_trade_count"} <= set(
+        SizingFoldScore.__dataclass_fields__
+    )
+    assert {"status", "reason"} <= set(SizingTournament.__dataclass_fields__)
+    assert "correlation" in TrendScreenSelection.__dataclass_fields__
+    assert "block_cap_hit" in TrendScreenCell.__dataclass_fields__
 
 
 _check_contract()
