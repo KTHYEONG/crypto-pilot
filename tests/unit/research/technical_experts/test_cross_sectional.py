@@ -16,8 +16,11 @@ import pytest
 from src.common.errors import DataIntegrityError
 from src.research.technical_experts.cross_sectional import (
     XsAdmissionConfig,
+    XsAlphaCompositeSpec,
     XsCompositeSpec,
     apply_no_trade_band,
+    build_xs_alpha_composite_score,
+    build_xs_alpha_weights,
     build_xs_neutral_weights,
     evaluate_xs_admission,
     run_xs_composite_ledger,
@@ -371,3 +374,183 @@ class TestCompositeEnsemble:
         best_single = max(correlation(latent, fam) for fam in per_family)
         composite_corr = correlation(latent, composite)
         assert composite_corr > best_single
+
+
+def _alpha_inputs(
+    rows: int = 300, cols: int = 5, seed: int = 21,
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    """Deterministic strictly-positive closes, in-[0,1] taker ratios, finite funding."""
+    index = pd.date_range("2024-01-01", periods=rows, freq="4h", tz="UTC")
+    columns = [chr(ord("A") + i) for i in range(cols)]
+    rng = np.random.default_rng(seed)
+    closes = 100.0 * np.exp(np.cumsum(rng.normal(0.0005, 0.01, size=(rows, cols)), axis=0))
+    closes = pd.DataFrame(closes, index=index, columns=columns)
+    taker = pd.DataFrame(
+        0.5 + 0.1 * np.sin(np.arange(rows)[:, None] / 9.0 + np.arange(cols)),
+        index=index, columns=columns,
+    )
+    funding = pd.DataFrame(
+        0.0001 * np.cos(np.arange(rows)[:, None] / 5.0 + np.arange(cols)),
+        index=index, columns=columns,
+    )
+    return closes, taker, funding
+
+
+def _ref_zscore(frame: pd.DataFrame) -> pd.DataFrame:
+    """Reference finite-only cross-sectional z-score (see XSA-02 docstring)."""
+    values = frame.to_numpy(dtype=np.float64)
+    finite = np.isfinite(values)
+    count = finite.sum(axis=1)
+    mean = np.where(finite, values, 0.0).sum(axis=1, keepdims=True) / np.maximum(count, 1)[:, None]
+    demeaned = np.where(finite, values - mean, 0.0)
+    var = (demeaned ** 2).sum(axis=1, keepdims=True) / np.maximum(count - 1, 1)[:, None]
+    std = np.sqrt(np.maximum(var, 0.0))
+    out = np.zeros_like(values)
+    np.divide(
+        demeaned, std, out=out,
+        where=(count[:, None] >= 2) & (std > 0.0),
+    )
+    return pd.DataFrame(out, index=frame.index, columns=frame.columns)
+
+
+class TestAlphaCompositeSpec:
+    def test_xsa_01_windows_frozen_and_rejects_others(self) -> None:
+        spec = XsAlphaCompositeSpec()
+        assert spec.signal_windows == (42, 84, 168)
+        assert spec.components == ("trend", "funding_contrarian", "taker_imbalance")
+        with pytest.raises(ValueError, match="signal_windows"):
+            XsAlphaCompositeSpec(signal_windows=(21, 42, 84))
+        with pytest.raises(ValueError, match="components"):
+            XsAlphaCompositeSpec(components=("a", "b", "c"))
+
+
+class TestAlphaCompositeScore:
+    def test_xsa_01_components_are_causal_prefix_invariant(self) -> None:
+        closes, taker, funding = _alpha_inputs()
+        full = build_xs_alpha_composite_score(closes, taker, funding, XsAlphaCompositeSpec())
+        cutoff = 200
+        prefix = build_xs_alpha_composite_score(
+            closes.iloc[:cutoff], taker.iloc[:cutoff], funding.iloc[:cutoff],
+            XsAlphaCompositeSpec(),
+        )
+        assert np.allclose(
+            full.iloc[:cutoff].to_numpy(), prefix.to_numpy(), atol=1e-12,
+        )
+
+    def test_xsa_01_early_incomplete_horizons_are_zero(self) -> None:
+        closes, taker, funding = _alpha_inputs()
+        score = build_xs_alpha_composite_score(closes, taker, funding, XsAlphaCompositeSpec())
+        assert score.index.equals(closes.index)
+        assert list(score.columns) == list(closes.columns)
+        # The taker imbalance window completes one bar earlier than trend/carry,
+        # so the score is exactly zero for the first min(window) - 1 rows.
+        assert float(score.iloc[:41].abs().sum().sum()) == 0.0
+        assert float(score.iloc[41:].abs().sum().sum()) > 0.0
+
+    def test_xsa_01_malformed_panels_fail_closed(self) -> None:
+        closes, taker, funding = _alpha_inputs()
+
+        bad_close = closes.copy()
+        bad_close.iloc[5, 0] = np.nan
+        with pytest.raises(DataIntegrityError, match="strictly positive"):
+            build_xs_alpha_composite_score(bad_close, taker, funding, XsAlphaCompositeSpec())
+
+        bad_close = closes.copy()
+        bad_close.iloc[5, 0] = 0.0
+        with pytest.raises(DataIntegrityError, match="strictly positive"):
+            build_xs_alpha_composite_score(bad_close, taker, funding, XsAlphaCompositeSpec())
+
+        bad_funding = funding.copy()
+        bad_funding.iloc[5, 0] = np.nan
+        with pytest.raises(DataIntegrityError, match="bar_funding must be finite"):
+            build_xs_alpha_composite_score(closes, taker, bad_funding, XsAlphaCompositeSpec())
+
+        bad_taker = taker.copy()
+        bad_taker.iloc[5, 0] = 1.5
+        with pytest.raises(DataIntegrityError, match=r"in \[0, 1\]"):
+            build_xs_alpha_composite_score(closes, bad_taker, funding, XsAlphaCompositeSpec())
+
+        bad_taker = taker.copy()
+        bad_taker.iloc[5, 0] = np.nan
+        with pytest.raises(DataIntegrityError, match="finite and in"):
+            build_xs_alpha_composite_score(closes, bad_taker, funding, XsAlphaCompositeSpec())
+
+        with pytest.raises(DataIntegrityError, match="identical index"):
+            build_xs_alpha_composite_score(
+                closes.iloc[1:], taker, funding, XsAlphaCompositeSpec(),
+            )
+
+        with pytest.raises(DataIntegrityError, match="ordered column"):
+            build_xs_alpha_composite_score(
+                closes.rename(columns={"A": "Z"}), taker, funding, XsAlphaCompositeSpec(),
+            )
+
+        dup = closes.copy()
+        dup.index = pd.DatetimeIndex([closes.index[0]] * len(closes))
+        with pytest.raises(DataIntegrityError, match="unique"):
+            build_xs_alpha_composite_score(dup, taker, funding, XsAlphaCompositeSpec())
+
+        unsorted = closes.sort_index(ascending=False)
+        with pytest.raises(DataIntegrityError, match="monotonic"):
+            build_xs_alpha_composite_score(
+                unsorted, taker.reindex(unsorted.index), funding.reindex(unsorted.index),
+                XsAlphaCompositeSpec(),
+            )
+
+        naive = closes.copy()
+        naive.index = naive.index.tz_localize(None)
+        with pytest.raises(DataIntegrityError, match="tz-aware"):
+            build_xs_alpha_composite_score(naive, taker, funding, XsAlphaCompositeSpec())
+
+
+class TestAlphaMultihorizonConstruction:
+    def test_xsa_02_score_is_deterministic(self) -> None:
+        closes, taker, funding = _alpha_inputs()
+        spec = XsAlphaCompositeSpec()
+        first = build_xs_alpha_composite_score(closes, taker, funding, spec)
+        second = build_xs_alpha_composite_score(closes, taker, funding, spec)
+        assert first.equals(second)
+
+    def test_xsa_02_nine_equally_weighted_component_panels(self) -> None:
+        # The score is the equal-weight (coefficient-one) sum of the nine z-scored
+        # component panels -- three horizons for each of trend, funding carry, and
+        # taker imbalance. A reference that reproduces the documented panel formulas
+        # must match the construction exactly.
+        closes, taker, funding = _alpha_inputs()
+        score = build_xs_alpha_composite_score(closes, taker, funding, XsAlphaCompositeSpec())
+
+        log_close = np.log(closes)
+        dlog = log_close.diff()
+        total: pd.DataFrame | None = None
+        for window in (42, 84, 168):
+            trend = np.log(closes / closes.shift(window)) / dlog.rolling(window).std()
+            carry = -funding.shift(1).rolling(window).sum()
+            taker_imbalance = taker.rolling(window).mean() - 0.5
+            for component in (trend, carry, taker_imbalance):
+                z = _ref_zscore(component)
+                total = z if total is None else total + z
+        assert total is not None
+        assert np.allclose(score.to_numpy(), total.to_numpy(), atol=1e-12)
+
+    def test_xsa_02_shared_construction_retains_preband_neutrality(self) -> None:
+        closes, taker, funding = _alpha_inputs()
+        weights = build_xs_alpha_weights(
+            closes, taker, funding, XsAlphaCompositeSpec(),
+            XsCompositeSpec(no_trade_band=0.0),
+        )
+        assert weights.index.equals(closes.index)
+        assert list(weights.columns) == list(closes.columns)
+        invested = weights[weights.abs().sum(axis=1) > 1e-12]
+        assert (invested.sum(axis=1).abs() < 1e-9).all()
+        assert ((invested.abs().sum(axis=1) - 1.0).abs() < 1e-9).all()
+
+    def test_xsa_02_band_applies_on_weights_never_score(self) -> None:
+        closes, taker, funding = _alpha_inputs()
+        banded = build_xs_alpha_weights(
+            closes, taker, funding, XsAlphaCompositeSpec(), XsCompositeSpec(),
+        )
+        no_band = build_xs_alpha_weights(
+            closes, taker, funding, XsAlphaCompositeSpec(),
+            XsCompositeSpec(no_trade_band=0.0),
+        )
+        assert not np.allclose(banded.to_numpy(), no_band.to_numpy())
