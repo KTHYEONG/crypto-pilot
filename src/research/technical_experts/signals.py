@@ -27,17 +27,24 @@ from src.common.errors import DataIntegrityError
 from src.research.technical_experts.contracts import TechnicalCandidate
 from src.research.technical_experts.indicators import (
     adx_di,
+    aroon,
+    atr,
     bollinger,
     cci,
+    donchian,
     ema,
+    hull_moving_average,
     ichimoku,
     keltner_channel,
     macd_histogram,
     mfi,
     parabolic_sar,
+    regression_slope_tstat,
     rsi,
+    sma,
     stochastic,
     supertrend,
+    vortex,
 )
 
 _OHLCV_COLUMNS = ("open", "high", "low", "close", "volume")
@@ -308,6 +315,135 @@ def _keltner_channel_breakout_conditions(
     }
 
 
+def _donchian_breakout_conditions(
+    frame: pd.DataFrame, config: Mapping[str, int | float],
+) -> dict[str, pd.Series]:
+    close = frame["close"].astype("float64")
+    slow = ema(close, int(config["regime"]))
+    entry_upper, entry_lower = donchian(
+        frame["high"], frame["low"], int(config["entry"]),
+    )
+    exit_upper, exit_lower = donchian(
+        frame["high"], frame["low"], int(config["exit"]),
+    )
+    return {
+        "long_entry": (close > entry_upper.shift()) & (close > slow),
+        "short_entry": (close < entry_lower.shift()) & (close < slow),
+        "long_exit": close < exit_lower,
+        "short_exit": close > exit_upper,
+    }
+
+
+def _chandelier_trend_conditions(
+    frame: pd.DataFrame, config: Mapping[str, int | float],
+) -> dict[str, pd.Series]:
+    close = frame["close"].astype("float64")
+    slow = ema(close, int(config["regime"]))
+    period = int(config["period"])
+    atr_series = atr(frame["high"], frame["low"], close, period)
+    longest_high = frame["high"].astype("float64").rolling(period).max()
+    longest_low = frame["low"].astype("float64").rolling(period).min()
+    stop_long = longest_high - float(config["mult"]) * atr_series
+    stop_short = longest_low + float(config["mult"]) * atr_series
+    return {
+        "long_entry": (
+            (close > stop_long) & (close.shift() <= stop_long.shift()) & (close > slow)
+        ),
+        "short_entry": (
+            (close < stop_short) & (close.shift() >= stop_short.shift()) & (close < slow)
+        ),
+        "long_exit": close < stop_long,
+        "short_exit": close > stop_short,
+    }
+
+
+def _aroon_trend_conditions(
+    frame: pd.DataFrame, config: Mapping[str, int | float],
+) -> dict[str, pd.Series]:
+    close = frame["close"].astype("float64")
+    slow = ema(close, int(config["regime"]))
+    aroon_up, aroon_down = aroon(
+        frame["high"], frame["low"], int(config["period"]),
+    )
+    oscillator = aroon_up - aroon_down
+    return {
+        "long_entry": (
+            (oscillator > 0.0) & (oscillator.shift() <= 0.0) & (close > slow)
+        ),
+        "short_entry": (
+            (oscillator < 0.0) & (oscillator.shift() >= 0.0) & (close < slow)
+        ),
+        "long_exit": oscillator < 0.0,
+        "short_exit": oscillator > 0.0,
+    }
+
+
+def _vortex_trend_conditions(
+    frame: pd.DataFrame, config: Mapping[str, int | float],
+) -> dict[str, pd.Series]:
+    close = frame["close"].astype("float64")
+    slow = ema(close, int(config["regime"]))
+    vi_plus, vi_minus = vortex(
+        frame["high"], frame["low"], close, int(config["period"]),
+    )
+    return {
+        "long_entry": (
+            (vi_plus > vi_minus) & (vi_plus.shift() <= vi_minus.shift()) & (close > slow)
+        ),
+        "short_entry": (
+            (vi_plus < vi_minus) & (vi_plus.shift() >= vi_minus.shift()) & (close < slow)
+        ),
+        "long_exit": vi_plus < vi_minus,
+        "short_exit": vi_plus > vi_minus,
+    }
+
+
+def _hull_moving_average_conditions(
+    frame: pd.DataFrame, config: Mapping[str, int | float],
+) -> dict[str, pd.Series]:
+    close = frame["close"].astype("float64")
+    slow = ema(close, int(config["regime"]))
+    hma = hull_moving_average(close, int(config["period"]))
+    return {
+        "long_entry": (hma > hma.shift()) & (close > slow) & (close > hma),
+        "short_entry": (hma < hma.shift()) & (close < slow) & (close < hma),
+        "long_exit": (close < hma) | (hma < hma.shift()),
+        "short_exit": (close > hma) | (hma > hma.shift()),
+    }
+
+
+def _regression_slope_conditions(
+    frame: pd.DataFrame, config: Mapping[str, int | float],
+) -> dict[str, pd.Series]:
+    close = frame["close"].astype("float64")
+    slow = ema(close, int(config["regime"]))
+    tstat = regression_slope_tstat(close, int(config["period"]))
+    return {
+        "long_entry": (tstat > 0.0) & (tstat.shift() <= 0.0) & (close > slow),
+        "short_entry": (tstat < 0.0) & (tstat.shift() >= 0.0) & (close < slow),
+        "long_exit": tstat < 0.0,
+        "short_exit": tstat > 0.0,
+    }
+
+
+def _atr_volatility_breakout_conditions(
+    frame: pd.DataFrame, config: Mapping[str, int | float],
+) -> dict[str, pd.Series]:
+    close = frame["close"].astype("float64")
+    slow = ema(close, int(config["regime"]))
+    period = int(config["period"])
+    atr_series = atr(frame["high"], frame["low"], close, period)
+    upper, lower = donchian(frame["high"], frame["low"], period)
+    expanded = (upper - lower) > float(config["mult"]) * atr_series
+    middle = sma(close, period)
+    return {
+        "long_entry": (close > upper.shift()) & expanded & (close > slow),
+        "short_entry": (close < lower.shift()) & expanded & (close < slow),
+        "long_exit": close < middle,
+        "short_exit": close > middle,
+    }
+
+
 _FAMILY_SIGNALS: dict[str, Callable[[pd.DataFrame, Mapping[str, int | float]], dict[str, pd.Series]]] = {
     "ema_alignment": _ema_alignment_conditions,
     "macd_histogram_regime": _macd_histogram_regime_conditions,
@@ -321,6 +457,13 @@ _FAMILY_SIGNALS: dict[str, Callable[[pd.DataFrame, Mapping[str, int | float]], d
     "supertrend": _supertrend_conditions,
     "parabolic_sar": _parabolic_sar_conditions,
     "keltner_channel_breakout": _keltner_channel_breakout_conditions,
+    "donchian_breakout": _donchian_breakout_conditions,
+    "chandelier_trend": _chandelier_trend_conditions,
+    "aroon_trend": _aroon_trend_conditions,
+    "vortex_trend": _vortex_trend_conditions,
+    "hull_moving_average": _hull_moving_average_conditions,
+    "regression_slope": _regression_slope_conditions,
+    "atr_volatility_breakout": _atr_volatility_breakout_conditions,
 }
 
 
@@ -373,6 +516,13 @@ def _check_contract() -> None:
         "supertrend",
         "parabolic_sar",
         "keltner_channel_breakout",
+        "donchian_breakout",
+        "chandelier_trend",
+        "aroon_trend",
+        "vortex_trend",
+        "hull_moving_average",
+        "regression_slope",
+        "atr_volatility_breakout",
     }
     assert _EVENT_COLUMNS == ("long_entry", "short_entry", "long_exit", "short_exit")
 
