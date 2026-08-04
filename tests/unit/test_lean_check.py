@@ -31,3 +31,27 @@ def test_find_test_files_includes_semantic_source_test() -> None:
     files = _lean_check._find_test_files(["src/cli/adapters/run_backtest.py"])
 
     assert "tests/integration/cli/test_candidate_promotion_cli.py" in files
+
+
+def test_import_index_contains_semantic_reference() -> None:
+    tf = "tests/integration/cli/test_candidate_promotion_cli.py"
+
+    mods = _lean_check._imported_source_modules(tf)
+
+    assert "src.cli.adapters.run_backtest" in mods
+
+
+def test_semantic_match_builds_index_once() -> None:
+    _lean_check._test_references_source.cache_clear()
+    _lean_check._imported_source_modules.cache_clear()
+    tf = "tests/integration/cli/test_candidate_promotion_cli.py"
+    src = "src/cli/adapters/run_backtest.py"
+
+    assert _lean_check._test_references_source(tf, src)
+    _lean_check._test_references_source(tf, src)
+
+    idx = _lean_check._imported_source_modules.cache_info()
+    assert idx.misses == 1  # test file parsed exactly once, not once per pair
+    pair = _lean_check._test_references_source.cache_info()
+    assert pair.misses == 1
+    assert pair.hits == 1
