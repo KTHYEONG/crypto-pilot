@@ -1,6 +1,16 @@
 {
   "tasks": [
     {
+      "task_id": "TREND_SCREEN_BACKTEST_INTEGRITY_DIAGNOSIS",
+      "date": "2026-08-04",
+      "adr_id": "ADR_20260804_TREND_SCREEN_BACKTEST_INTEGRITY_DIAGNOSIS",
+      "domain": "research",
+      "title": "Trend-screen 백테스트 무결성 및 qualification 진단",
+      "why": "최신 실행에서 discovery fold와 qualification 결과의 신뢰성을 점검한 결과, warmup/자본 시작 혼재·경계 수익 누락·지원되지 않는 sizing fold 처리·동일 심볼 집중 문제가 확인됨.",
+      "resolution": "execution_start 분리, 평가 구간 anchor 적용, sizing fold VALID/INFEASIBLE 명시, 심볼당 단일 sleeve 선택, block-cap 진단을 반영하고 최신 백테스트 결과를 동기화함.",
+      "impact": "유효 셀 436→444, 실패 셀 14→6으로 개선. fold gate는 통과했으나 observation/stress gate는 여전히 실패하며, 현재 병목은 Kelly가 아니라 qualification 구간의 통계적 재현성임."
+    },
+    {
       "task_id": "trend_screen_kelly_sizing_refinement",
       "date": "2026-08-04",
       "adr_id": "ADR_20260804_trend_screen_kelly_sizing_refinement",
