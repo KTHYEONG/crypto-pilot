@@ -172,3 +172,51 @@ class TestNewFamilyGatedNotFreebied:
                 assert not events[other].any(), f"{family} {side}"
             with pytest.raises(ValueError, match="unknown or retired"):
                 resolve_technical_candidate(f"technical_{family}_long_v1")
+
+
+TREND_SCREEN_FAMILY_CONFIGS: dict[str, dict] = {
+    "donchian_breakout": {"entry": 55, "exit": 20, "regime": 200},
+    "chandelier_trend": {"period": 22, "mult": 3.0, "regime": 200},
+    "aroon_trend": {"period": 25, "regime": 200},
+    "vortex_trend": {"period": 14, "regime": 200},
+    "hull_moving_average": {"period": 55, "regime": 200},
+    "regression_slope": {"period": 63, "regime": 200},
+    "atr_volatility_breakout": {"period": 20, "mult": 1.5, "regime": 200},
+}
+
+
+class TestTrendScreenFamilyCausality:
+    @pytest.mark.parametrize("family", list(TREND_SCREEN_FAMILY_CONFIGS))
+    def test_bgp_01_future_tail_invariance(self, family: str) -> None:
+        """BGP-01: mutating bars after a cutoff cannot change events at/before it."""
+        from src.research.technical_experts.contracts import TechnicalCandidate
+
+        config = TREND_SCREEN_FAMILY_CONFIGS[family]
+        candidate = TechnicalCandidate(
+            f"technical_{family}_long_v1", f"technical_{family}_long_v1",
+            family, "LONG", config, 201,
+        )
+        frame = causal_ohlcv_fixture(n=400)
+        base = generate_signal_events(frame, candidate)
+        mutated = frame.copy()
+        mutated.iloc[320:] = mutated.iloc[320:] * 2.5
+        after = generate_signal_events(mutated, candidate)
+        pd.testing.assert_frame_equal(base.iloc[:320], after.iloc[:320])
+
+    def test_trend_screen_families_mask_opposite_side(self) -> None:
+        from src.research.technical_experts.contracts import TechnicalCandidate
+
+        frame = causal_ohlcv_fixture(n=400)
+        for family, config in TREND_SCREEN_FAMILY_CONFIGS.items():
+            for side in ("long", "short"):
+                candidate = TechnicalCandidate(
+                    f"c_{family}_{side}_v1", f"technical_{family}_{side}_v1",
+                    family, side.upper(), config, 201,
+                )
+                events = generate_signal_events(frame, candidate)
+                other = "short_entry" if side == "long" else "long_entry"
+                assert not events[other].any(), f"{family} {side}"
+                assert set(events.columns) == {
+                    "long_entry", "short_entry", "long_exit", "short_exit",
+                }
+                assert events.dtypes.eq(bool).all()
