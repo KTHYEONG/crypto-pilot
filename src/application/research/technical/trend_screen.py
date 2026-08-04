@@ -1,17 +1,20 @@
 """Pre-registered baseline-gate trend screen: 450-cell discovery then qualification.
 
 Loads funding-complete 4h data once per symbol, executes exactly the 30
-frozen screen identities on the exact 15-symbol universe (450 cells), evaluates
-each cell at unit risk and under its causal fractional-Kelly/MDD policy ledger,
-screens discovery (2022-04-01..2023-12-31) by data validity, a complete causal
-policy lookback, one closed trade per complete discovery month, and a positive
-unit-risk LCB90 (raw CAGR / t-stat / bootstrap-negative fraction stay
-diagnostics, never hard gates), forms a maximum-five-sleeve portfolio ranked and
-weighted on policy discovery ledgers, and generates the qualification
-total-equity ledgers under the frozen base-derived schedule. Admission requires
-the unchanged observation, derived fold-concentration, stressed rerun with the
-same frozen schedule, and (when unsealed) holdout gates; otherwise the binding
-constraint is recorded and CASH is retained.
+frozen screen identities on the exact 15-symbol universe (450 cells), and
+evaluates each cell at unit risk (raw unit-risk LCB90 is the alpha
+eligibility criterion). A discovery-only sizing tournament freezes exactly one
+global causal fractional-Kelly policy from two rolling-origin folds before any
+selection: per-cell policy ledgers and the qualification schedule are then
+built under that one frozen policy. Discovery (2022-04-01..2023-12-31) screens
+by data validity, a complete causal policy lookback, one closed trade per
+complete discovery month, and a positive unit-risk LCB90, forms a
+maximum-five-sleeve portfolio ranked and weighted on policy discovery ledgers,
+and generates the qualification total-equity ledgers under the frozen
+base-derived schedule. Admission requires the unchanged observation, derived
+fold-concentration, stressed rerun with the same frozen schedule, and (when
+unsealed) holdout gates; otherwise the binding constraint is recorded and CASH
+is retained.
 
 The screen persists a deterministic report and never registers a production
 candidate: it is research evidence only.
@@ -76,10 +79,39 @@ _STRESS_DELAY_BARS = 2
 _INITIAL_EQUITY = 10_000.0
 _BARS_PER_YEAR = 2190
 
+# Immutable discovery-only global sizing candidates. Each entry maps to the
+# tuple (fraction, trailing-MDD cap enabled) as
+# (0.10, False), (0.25, False), (0.10, True), (0.25, True).
+KELLY_SIZING_POLICIES: tuple[CausalFractionalKellySpec, ...] = (
+    CausalFractionalKellySpec(fraction=0.10, mdd_cap_enabled=False),
+    CausalFractionalKellySpec(fraction=0.25, mdd_cap_enabled=False),
+    CausalFractionalKellySpec(fraction=0.10, mdd_cap_enabled=True),
+    CausalFractionalKellySpec(fraction=0.25, mdd_cap_enabled=True),
+)
+
+# Two fixed rolling-origin discovery folds: (train_end, validation_start,
+# validation_end), all inside the sealed discovery window.
+_SIZING_FOLDS: tuple[tuple[pd.Timestamp, pd.Timestamp, pd.Timestamp], ...] = (
+    (
+        pd.Timestamp("2022-10-31 23:59:59", tz="UTC"),
+        pd.Timestamp("2022-11-01 00:00:00", tz="UTC"),
+        pd.Timestamp("2023-05-31 23:59:59", tz="UTC"),
+    ),
+    (
+        pd.Timestamp("2023-05-31 23:59:59", tz="UTC"),
+        pd.Timestamp("2023-06-01 00:00:00", tz="UTC"),
+        pd.Timestamp("2023-12-31 23:59:59", tz="UTC"),
+    ),
+)
+
 __all__ = [
+    "KELLY_SIZING_POLICIES",
     "TREND_SCREEN_CANDIDATES",
     "TREND_SCREEN_PROFILE_ID",
     "TREND_SCREEN_SYMBOLS",
+    "SizingFoldScore",
+    "SizingPolicyScore",
+    "SizingTournament",
     "TrendScreenCell",
     "TrendScreenQualification",
     "TrendScreenReport",
@@ -125,6 +157,7 @@ class TrendScreenCell:
     policy_schedule_hash: str = ""
     kelly_fraction: float = 0.25
     kelly_lookback_days: int = 365
+    kelly_mdd_cap_enabled: bool = True
     allocation_cost: float = 0.0
 
 
@@ -151,6 +184,53 @@ class TrendScreenQualification:
 
 
 @dataclass(frozen=True, slots=True)
+class SizingFoldScore:
+    """One sizing candidate's validation score on one rolling-origin fold.
+
+    The validation ledger is the frozen training-prefix sleeves/weights with the
+    candidate's causal schedule applied and allocation-turnover costs deducted;
+    it never reads qualification, holdout, or stress bars.
+    """
+
+    policy_id: str
+    fold_index: int
+    train_end: pd.Timestamp
+    validation_start: pd.Timestamp
+    validation_end: pd.Timestamp
+    lcb90_cagr: float
+    mdd: float
+    allocation_cost: float
+
+
+@dataclass(frozen=True, slots=True)
+class SizingPolicyScore:
+    """A sizing candidate's aggregate discovery-fold ranking key."""
+
+    policy_id: str
+    worst_lcb90_cagr: float
+    mean_lcb90_cagr: float
+    worst_mdd: float
+    mean_allocation_cost: float
+
+
+@dataclass(frozen=True, slots=True)
+class SizingTournament:
+    """Discovery-only selection of the global fractional-Kelly sizing policy.
+
+    ``policy_scores`` are ordered best-first by the deterministic lexicographic
+    rank ``(worst validation LCB90, mean validation LCB90, worst validation MDD,
+    lower mean allocation cost, policy id)``; ``selected_policy_id`` is the
+    winner. Qualification, holdout, and stress outcomes never enter this object.
+    """
+
+    selected_policy_id: str
+    fraction: float
+    mdd_cap_enabled: bool
+    policy_scores: tuple[SizingPolicyScore, ...]
+    fold_scores: tuple[SizingFoldScore, ...]
+
+
+@dataclass(frozen=True, slots=True)
 class TrendScreenReport:
     """Deterministic persisted outcome of one sealed screen profile."""
 
@@ -160,6 +240,7 @@ class TrendScreenReport:
     selection: TrendScreenSelection | None
     schedule_hash: str
     qualification: TrendScreenQualification
+    sizing: SizingTournament
 
     def to_payload(self) -> dict[str, object]:
         """Canonical, deterministic JSON-ready payload (fingerprint included)."""
@@ -196,6 +277,7 @@ class TrendScreenReport:
                     "policy_schedule_hash": cell.policy_schedule_hash,
                     "kelly_fraction": cell.kelly_fraction,
                     "kelly_lookback_days": cell.kelly_lookback_days,
+                    "kelly_mdd_cap_enabled": cell.kelly_mdd_cap_enabled,
                     "allocation_cost": round(cell.allocation_cost, 8),
                 }
                 for cell in self.cells
@@ -227,6 +309,34 @@ class TrendScreenReport:
                     strict=True,
                 )
             ]
+        payload["sizing"] = {
+            "policy_id": self.sizing.selected_policy_id,
+            "fraction": self.sizing.fraction,
+            "mdd_cap_enabled": self.sizing.mdd_cap_enabled,
+            "policy_scores": [
+                {
+                    "policy_id": s.policy_id,
+                    "worst_lcb90_cagr": round(s.worst_lcb90_cagr, 8),
+                    "mean_lcb90_cagr": round(s.mean_lcb90_cagr, 8),
+                    "worst_mdd": round(s.worst_mdd, 8),
+                    "mean_allocation_cost": round(s.mean_allocation_cost, 8),
+                }
+                for s in self.sizing.policy_scores
+            ],
+            "fold_scores": [
+                {
+                    "policy_id": f.policy_id,
+                    "fold_index": f.fold_index,
+                    "train_end": f.train_end.isoformat(),
+                    "validation_start": f.validation_start.isoformat(),
+                    "validation_end": f.validation_end.isoformat(),
+                    "lcb90_cagr": round(f.lcb90_cagr, 8),
+                    "mdd": round(f.mdd, 8),
+                    "allocation_cost": round(f.allocation_cost, 8),
+                }
+                for f in self.sizing.fold_scores
+            ],
+        }
         payload["report_fingerprint"] = _fingerprint_without_self(payload)
         return payload
 
@@ -249,6 +359,7 @@ class _CellRun:
         "cell",
         "disc_equity",
         "policy_equity",
+        "policy_ledgers",
         "policy_schedule",
         "result",
     )
@@ -259,6 +370,7 @@ class _CellRun:
         self.disc_equity: pd.Series | None = None
         self.policy_equity: pd.Series | None = None
         self.policy_schedule: pd.Series | None = None
+        self.policy_ledgers: dict[str, tuple[pd.Series, pd.Series, float]] = {}
         self.allocation_cost: float = 0.0
 
 
@@ -334,6 +446,33 @@ def _candidate_by_source(return_source: str) -> TechnicalCandidate:
     raise ValueError(f"unknown trend screen return source '{return_source}'")
 
 
+def _sizing_policy_id(spec: CausalFractionalKellySpec) -> str:
+    """Deterministic id of one pre-registered sizing candidate."""
+    q = round(spec.fraction * 100)
+    mode = "mdd" if spec.mdd_cap_enabled else "only"
+    return f"kelly_{mode}_q{q}"
+
+
+def _policy_ledger(
+    result: BacktestResult,
+    spec: CausalFractionalKellySpec,
+    costs: CostModel,
+) -> tuple[pd.Series, pd.Series, float]:
+    """Build one candidate's causal policy schedule, ledger, and turnover cost.
+
+    The schedule uses only completed unit-leverage marks strictly before each
+    bar and is never re-fitted around the executed costs; the returned ledger is
+    the unit ledger with allocation-turnover costs deducted.
+    """
+    schedule = build_causal_fractional_kelly_schedule(
+        result.equity, CausalLeverageSpec(), spec,
+    )
+    policy_equity, allocation_cost = _apply_policy_schedule(
+        result.equity, schedule, costs,
+    )
+    return schedule, policy_equity, allocation_cost
+
+
 def _run_cell(
     frame: pd.DataFrame,
     funding: pd.Series,
@@ -346,25 +485,17 @@ def _run_cell(
 
     Stress is deliberately deferred until after discovery selection: it cannot
     affect candidate ranking and the qualification stage replays only the at
-    most five frozen sleeves under the same causal schedule.
+    most five frozen sleeves under the same causal schedule. Raw unit-risk
+    diagnostics are computed here; the policy fields are filled once the global
+    sizing policy is frozen (see :func:`_apply_policy_evidence`).
     """
     costs = CostModel()
     result = run_technical_expert_backtest(
         frame, candidate, costs, funding,
         initial_equity=_INITIAL_EQUITY, signal_delay_bars=_BASE_DELAY_BARS,
     )
-    policy_schedule = build_causal_fractional_kelly_schedule(
-        result.equity, CausalLeverageSpec(), CausalFractionalKellySpec(),
-    )
-    policy_equity, allocation_cost = _apply_policy_schedule(
-        result.equity, policy_schedule, costs,
-    )
-    kelly_spec = CausalFractionalKellySpec()
     disc_equity = result.equity[
         (result.equity.index >= DISCOVERY_START) & (result.equity.index <= DISCOVERY_END)
-    ]
-    policy_disc_equity = policy_equity[
-        (policy_equity.index >= DISCOVERY_START) & (policy_equity.index <= DISCOVERY_END)
     ]
     disc_trades = _trades_in_window(
         result.trades, result.equity.index, DISCOVERY_START, DISCOVERY_END,
@@ -373,11 +504,6 @@ def _run_cell(
     metrics = compute_metrics(disc_equity, disc_trades)
     gate = compute_equity_reliability_gate(
         disc_equity, len(disc_trades),
-        dataclasses.replace(ReliabilityGateConfig(), hurdle_rate=0.0),
-    )
-    policy_metrics = compute_metrics(policy_disc_equity, disc_trades)
-    policy_gate = compute_equity_reliability_gate(
-        policy_disc_equity, len(disc_trades),
         dataclasses.replace(ReliabilityGateConfig(), hurdle_rate=0.0),
     )
     disc_result = BacktestResult(
@@ -408,20 +534,11 @@ def _run_cell(
         fingerprint=fingerprint,
         discovery_pass=False,
         rejected_reason=None,
-        policy_lcb90=policy_gate.lcb90_cagr,
-        policy_cagr=policy_metrics.cagr,
-        policy_mdd=policy_metrics.mdd,
-        policy_trade_count=len(disc_trades),
-        policy_schedule_hash=_schedule_hash(policy_schedule),
-        kelly_fraction=kelly_spec.fraction,
-        kelly_lookback_days=kelly_spec.lookback_days,
-        allocation_cost=allocation_cost,
     )
     run = _CellRun(cell, result)
     run.disc_equity = disc_equity
-    run.policy_equity = policy_disc_equity
-    run.policy_schedule = policy_schedule
-    run.allocation_cost = allocation_cost
+    for spec in KELLY_SIZING_POLICIES:
+        run.policy_ledgers[_sizing_policy_id(spec)] = _policy_ledger(result, spec, costs)
     return run
 
 
@@ -504,16 +621,18 @@ def _discovery_duration_months(
 def _apply_discovery_requirements(
     runs: list[_CellRun],
     config: ReliabilityGateConfig,
+    start: pd.Timestamp = DISCOVERY_START,
+    end: pd.Timestamp = DISCOVERY_END,
 ) -> None:
-    """Gate discovery eligibility by data validity, causal lookback, trade
-    coverage, and positive unit-risk LCB90.
+    """Gate eligibility by data validity, causal lookback, trade coverage, and
+    positive unit-risk LCB90 over the ``[start, end]`` window.
 
     The required close count is duration-derived (one closed trade per complete
-    discovery month), replacing the fixed 30-close cliff. Holm, bootstrap
-    negative fraction, raw CAGR, and IID t-stat are reported diagnostics, never
-    hard gates here.
+    month), replacing the fixed 30-close cliff. Holm, bootstrap negative
+    fraction, raw CAGR, and IID t-stat are reported diagnostics, never hard
+    gates here. The sizing tournament calls this on each training prefix.
     """
-    required_trades = _discovery_duration_months(DISCOVERY_START, DISCOVERY_END)
+    required_trades = _discovery_duration_months(start, end)
     for run in runs:
         cell = run.cell
         if not cell.data_valid:
@@ -523,7 +642,7 @@ def _apply_discovery_requirements(
             reasons.append(f"min_trades:{cell.trade_count}<{required_trades}")
         if cell.lcb90 <= 0.0:
             reasons.append(f"lcb90:{cell.lcb90:.6f}<=0")
-        if not _policy_lookback_complete(run):
+        if not _policy_lookback_complete(run, start, end):
             reasons.append("incomplete_causal_lookback")
         if reasons:
             run.cell = dataclasses.replace(
@@ -535,17 +654,21 @@ def _apply_discovery_requirements(
             )
 
 
-def _policy_lookback_complete(run: _CellRun) -> bool:
-    """True when the policy schedule reaches non-zero exposure in discovery.
+def _policy_lookback_complete(
+    run: _CellRun,
+    start: pd.Timestamp = DISCOVERY_START,
+    end: pd.Timestamp = DISCOVERY_END,
+) -> bool:
+    """True when the policy schedule reaches non-zero exposure in the window.
 
     The schedule only turns non-zero after a complete causal lookback, so any
-    positive discovery bar certifies the required lookback was available.
+    positive bar in the window certifies the required lookback was available.
     """
     schedule = run.policy_schedule
     if schedule is None or len(schedule) == 0:
         return False
     active = schedule[
-        (schedule.index >= DISCOVERY_START) & (schedule.index <= DISCOVERY_END)
+        (schedule.index >= start) & (schedule.index <= end)
     ]
     if len(active) == 0:
         return False
@@ -574,6 +697,280 @@ def _apply_policy_schedule(
     equity = (1.0 + net_returns).cumprod() * _INITIAL_EQUITY
     ledger = pd.Series(equity, index=unit_equity.index, name="equity", dtype=np.float64)
     return ledger, float(turnover.sum())
+
+
+def _window_allocation_cost(
+    schedule: pd.Series,
+    index: pd.DatetimeIndex,
+    start: pd.Timestamp,
+    end: pd.Timestamp,
+    costs: CostModel,
+) -> float:
+    """Sum the allocation-turnover cost within ``[start, end]`` on a frozen
+    schedule, using the same ``0.5 * abs(Delta L) * (fee + slippage)`` formula
+    as :func:`_apply_policy_schedule` (the first validation bar's transition
+    cost into the window is included)."""
+    aligned = schedule.reindex(index).fillna(0.0).to_numpy(dtype=np.float64)
+    prev = np.concatenate([[0.0], aligned[:-1]])
+    turnover = 0.5 * np.abs(aligned - prev) * (costs.fee_rate + costs.slippage_rate)
+    mask = (index >= start) & (index <= end)
+    return float(np.sum(turnover[mask]))
+
+
+def _apply_policy_evidence(
+    runs: list[_CellRun],
+    kelly_spec: CausalFractionalKellySpec,
+) -> None:
+    """Recompute each valid cell's discovery policy fields under one frozen policy.
+
+    This is the only step that fills ``policy_*`` cell fields and
+    ``run.policy_equity``/``run.policy_schedule``/``run.allocation_cost`` for the
+    main screen path; it runs strictly after the sizing tournament freezes the
+    global policy, so ranking, weights, and qualification all share one policy.
+    """
+    for run in runs:
+        cell = run.cell
+        if not cell.data_valid or run.result is None:
+            continue
+        schedule, policy_equity, alloc_cost = run.policy_ledgers[_sizing_policy_id(kelly_spec)]
+        policy_disc = policy_equity[
+            (policy_equity.index >= DISCOVERY_START) & (policy_equity.index <= DISCOVERY_END)
+        ]
+        disc_trades = _trades_in_window(
+            run.result.trades, run.result.equity.index, DISCOVERY_START, DISCOVERY_END,
+        )
+        metrics = compute_metrics(policy_disc, disc_trades)
+        gate = compute_equity_reliability_gate(
+            policy_disc, len(disc_trades),
+            dataclasses.replace(ReliabilityGateConfig(), hurdle_rate=0.0),
+        )
+        run.cell = dataclasses.replace(
+            cell,
+            policy_lcb90=gate.lcb90_cagr,
+            policy_cagr=metrics.cagr,
+            policy_mdd=metrics.mdd,
+            policy_trade_count=len(disc_trades),
+            policy_schedule_hash=_schedule_hash(schedule),
+            kelly_fraction=kelly_spec.fraction,
+            kelly_lookback_days=kelly_spec.lookback_days,
+            kelly_mdd_cap_enabled=kelly_spec.mdd_cap_enabled,
+            allocation_cost=alloc_cost,
+        )
+        run.policy_equity = policy_disc
+        run.policy_schedule = schedule
+        run.allocation_cost = alloc_cost
+
+
+def _fold_base_clone(
+    run: _CellRun,
+    train_end: pd.Timestamp,
+    config: ReliabilityGateConfig,
+) -> _CellRun:
+    """Training-prefix raw evidence for one cell inside one sizing fold.
+
+    The clone carries prefix-only raw metrics/trades and the full ``result`` so
+    the later validation blend can reuse the untouched full unit ledger. Policy
+    evidence is attached per candidate by :func:`_apply_fold_policy`.
+    """
+    base = run.cell
+    if not base.data_valid or run.result is None:
+        return _CellRun(dataclasses.replace(base, discovery_pass=False, rejected_reason=None))
+    prefix_equity = run.result.equity[run.result.equity.index <= train_end]
+    prefix_trades = _trades_in_window(
+        run.result.trades, run.result.equity.index, DISCOVERY_START, train_end,
+    )
+    if len(prefix_equity) < 2:
+        cell = dataclasses.replace(
+            base,
+            trade_count=len(prefix_trades),
+            net_cagr=0.0,
+            mdd=0.0,
+            lcb90=0.0,
+            t_stat=0.0,
+            fold_score=0.0,
+            p_negative=1.0,
+            discovery_pass=False,
+            rejected_reason=None,
+        )
+        return _CellRun(cell, run.result)
+    metrics = compute_metrics(prefix_equity, prefix_trades)
+    gate = compute_equity_reliability_gate(
+        prefix_equity, len(prefix_trades),
+        dataclasses.replace(config, hurdle_rate=0.0),
+    )
+    cell = dataclasses.replace(
+        base,
+        trade_count=len(prefix_trades),
+        net_cagr=metrics.cagr,
+        mdd=metrics.mdd,
+        lcb90=gate.lcb90_cagr,
+        t_stat=gate.t_stat,
+        fold_score=0.0,
+        p_negative=gate.p_negative,
+        discovery_pass=False,
+        rejected_reason=None,
+    )
+    clone = _CellRun(cell, run.result)
+    clone.disc_equity = prefix_equity
+    return clone
+
+
+def _apply_fold_policy(
+    clone: _CellRun,
+    base: _CellRun,
+    spec: CausalFractionalKellySpec,
+    train_end: pd.Timestamp,
+    config: ReliabilityGateConfig,
+) -> None:
+    """Attach one candidate's training-prefix policy evidence to a fold clone."""
+    if not clone.cell.data_valid or base.result is None:
+        return
+    schedule, policy_equity, _cost = base.policy_ledgers[_sizing_policy_id(spec)]
+    policy_prefix = policy_equity[policy_equity.index <= train_end]
+    schedule_prefix = schedule[schedule.index <= train_end]
+    if len(policy_prefix) < 2:
+        policy_lcb90, policy_cagr, policy_mdd = 0.0, 0.0, 0.0
+    else:
+        prefix_trades = _trades_in_window(
+            base.result.trades, base.result.equity.index, DISCOVERY_START, train_end,
+        )
+        gate = compute_equity_reliability_gate(
+            policy_prefix, len(prefix_trades),
+            dataclasses.replace(config, hurdle_rate=0.0),
+        )
+        metrics = compute_metrics(policy_prefix, prefix_trades)
+        policy_lcb90, policy_cagr, policy_mdd = (
+            gate.lcb90_cagr, metrics.cagr, metrics.mdd,
+        )
+    clone.cell = dataclasses.replace(
+        clone.cell,
+        policy_lcb90=policy_lcb90,
+        policy_cagr=policy_cagr,
+        policy_mdd=policy_mdd,
+        policy_trade_count=clone.cell.trade_count,
+        kelly_fraction=spec.fraction,
+        kelly_lookback_days=spec.lookback_days,
+        kelly_mdd_cap_enabled=spec.mdd_cap_enabled,
+    )
+    clone.policy_equity = policy_prefix
+    clone.policy_schedule = schedule_prefix
+
+
+def _score_policy_fold(
+    runs: list[_CellRun],
+    spec: CausalFractionalKellySpec,
+    fold_index: int,
+    train_end: pd.Timestamp,
+    val_start: pd.Timestamp,
+    val_end: pd.Timestamp,
+    config: ReliabilityGateConfig,
+    clones: list[_CellRun],
+) -> SizingFoldScore:
+    """Score one candidate on one fold: train-prefix eligibility/sleeves/weights
+    frozen, candidate schedule applied from prior marks only, validation ledger
+    scored after allocation-turnover costs."""
+    for clone, base in zip(clones, runs, strict=True):
+        _apply_fold_policy(clone, base, spec, train_end, config)
+    _apply_discovery_requirements(clones, config, start=DISCOVERY_START, end=train_end)
+    selected = _greedy_portfolio_selection(_select_sleeves(clones))
+    policy_id = _sizing_policy_id(spec)
+    if not selected:
+        return SizingFoldScore(
+            policy_id, fold_index, train_end, val_start, val_end, 0.0, 0.0, 0.0,
+        )
+    selected_results: list[BacktestResult] = []
+    for fr in selected:
+        if fr.result is None:
+            raise DataIntegrityError("selected sizing-fold sleeve has no result")
+        selected_results.append(fr.result)
+    weights = _equal_risk_weights(selected)
+    blend = _blend_unit_equities([_unit_equity(r) for r in selected_results], weights)
+    schedule = build_causal_fractional_kelly_schedule(blend, CausalLeverageSpec(), spec)
+    policy_blend, _full_cost = _apply_policy_schedule(blend, schedule, CostModel())
+    val_equity = policy_blend[
+        (policy_blend.index >= val_start) & (policy_blend.index <= val_end)
+    ]
+    if len(val_equity) < 2:
+        return SizingFoldScore(
+            policy_id, fold_index, train_end, val_start, val_end, 0.0, 0.0, 0.0,
+        )
+    trades = _portfolio_trades(
+        [(r.trades, r.equity.index) for r in selected_results],
+    )
+    val_trades = _trades_in_window(trades, policy_blend.index, val_start, val_end)
+    gate = compute_equity_reliability_gate(
+        val_equity, len(val_trades),
+        dataclasses.replace(config, hurdle_rate=0.0),
+    )
+    mdd = float((val_equity / val_equity.cummax() - 1.0).min())
+    alloc_cost = _window_allocation_cost(
+        schedule, blend.index, val_start, val_end, CostModel(),
+    )
+    return SizingFoldScore(
+        policy_id, fold_index, train_end, val_start, val_end,
+        gate.lcb90_cagr, mdd, alloc_cost,
+    )
+
+
+def _rank_sizing_policies(
+    runs: list[_CellRun],
+    config: ReliabilityGateConfig,
+) -> SizingTournament:
+    """Freeze exactly one global sizing policy from the two rolling-origin folds.
+
+    Each candidate is scored on both folds (training prefix derives eligibility,
+    sleeves, and inverse-risk weights; the later validation period is scored
+    under the candidate's causal schedule). Candidates are ranked lexicographically
+    by (worst validation LCB90, mean validation LCB90, worst validation MDD,
+    lower mean allocation cost, policy id); the best candidate is the global
+    policy. Only discovery bars are read; qualification/holdout/stress outcomes
+    never enter this ranking.
+    """
+    fold_clones: dict[int, list[_CellRun]] = {}
+    for fold_index, (train_end, _val_start, _val_end) in enumerate(_SIZING_FOLDS, start=1):
+        fold_clones[fold_index] = [_fold_base_clone(run, train_end, config) for run in runs]
+
+    policy_scores: list[SizingPolicyScore] = []
+    fold_scores: list[SizingFoldScore] = []
+    for spec in KELLY_SIZING_POLICIES:
+        spec_folds: list[SizingFoldScore] = []
+        for fold_index, (train_end, val_start, val_end) in enumerate(_SIZING_FOLDS, start=1):
+            score = _score_policy_fold(
+                runs, spec, fold_index, train_end, val_start, val_end,
+                config, fold_clones[fold_index],
+            )
+            spec_folds.append(score)
+            fold_scores.append(score)
+        policy_scores.append(SizingPolicyScore(
+            policy_id=_sizing_policy_id(spec),
+            worst_lcb90_cagr=min(s.lcb90_cagr for s in spec_folds),
+            mean_lcb90_cagr=float(np.mean([s.lcb90_cagr for s in spec_folds])),
+            worst_mdd=min(s.mdd for s in spec_folds),
+            mean_allocation_cost=float(np.mean([s.allocation_cost for s in spec_folds])),
+        ))
+
+    ranking = sorted(
+        policy_scores,
+        key=lambda s: (
+            -s.worst_lcb90_cagr,
+            -s.mean_lcb90_cagr,
+            -s.worst_mdd,
+            s.mean_allocation_cost,
+            s.policy_id,
+        ),
+    )
+    winner = ranking[0]
+    winner_spec = next(
+        spec for spec in KELLY_SIZING_POLICIES
+        if _sizing_policy_id(spec) == winner.policy_id
+    )
+    return SizingTournament(
+        selected_policy_id=winner.policy_id,
+        fraction=winner_spec.fraction,
+        mdd_cap_enabled=winner_spec.mdd_cap_enabled,
+        policy_scores=tuple(ranking),
+        fold_scores=tuple(fold_scores),
+    )
 
 
 def _select_sleeves(runs: list[_CellRun]) -> list[_CellRun]:
@@ -697,25 +1094,40 @@ def _qualify(
     data: dict[str, tuple[pd.DataFrame, pd.Series]],
     *,
     unseal_holdout: bool,
+    kelly_spec: CausalFractionalKellySpec | None = None,
 ) -> tuple[pd.Series, pd.Series, pd.Series, TrendScreenQualification]:
     """Build the frozen-schedule qualification ledger and compose its gates.
 
-    The causal fractional-Kelly/MDD schedule is built once from the base unit
-    blend (prior marks only) and applied verbatim to the stressed rerun, so both
-    ledgers share the exact allocation. Full-window realized-MDD scalar
-    calibration is never used.
+    The causal schedule of the frozen ``kelly_spec`` policy is built once from
+    the base unit blend (prior marks only) and applied verbatim to the stressed
+    rerun, so both ledgers share the exact allocation. Full-window realized-MDD
+    scalar calibration is never used. The schedule must be finite and lie in
+    ``[0, max_gross_leverage]``; the trailing-MDD-cap domination assertion is
+    enforced only when ``kelly_spec.mdd_cap_enabled``.
     """
+    risk_spec = CausalLeverageSpec()
+    if kelly_spec is None:
+        kelly_spec = CausalFractionalKellySpec()
     base_unit: list[pd.Series] = []
     for run in selected:
         assert run.result is not None
         base_unit.append(_unit_equity(run.result))
     blend = _blend_unit_equities(base_unit, weights)
-    schedule = build_causal_fractional_kelly_schedule(
-        blend, CausalLeverageSpec(), CausalFractionalKellySpec(),
-    )
-    mdd_cap = build_causal_leverage_schedule(blend, CausalLeverageSpec())
-    if not (schedule.to_numpy() <= mdd_cap.to_numpy() + 1e-12).all():
-        raise DataIntegrityError("policy schedule exceeds the causal MDD cap")
+    schedule = build_causal_fractional_kelly_schedule(blend, risk_spec, kelly_spec)
+    schedule_values = schedule.to_numpy(dtype=np.float64)
+    if not np.isfinite(schedule_values).all():
+        raise DataIntegrityError("policy schedule must be finite")
+    if (
+        (schedule_values < 0.0).any()
+        or (schedule_values > risk_spec.max_gross_leverage + 1e-12).any()
+    ):
+        raise DataIntegrityError(
+            "policy schedule must lie in [0, max_gross_leverage]"
+        )
+    if kelly_spec.mdd_cap_enabled:
+        mdd_cap = build_causal_leverage_schedule(blend, risk_spec)
+        if not (schedule.to_numpy() <= mdd_cap.to_numpy() + 1e-12).all():
+            raise DataIntegrityError("policy schedule exceeds the causal MDD cap")
     scheduled, _base_cost = _apply_policy_schedule(blend, schedule, CostModel())
     trades = _portfolio_trades(
         [(run.result.trades, run.result.equity.index) for run in selected if run.result is not None],
@@ -831,6 +1243,12 @@ def run_trend_screen(
     runs = [run for symbol_runs in per_symbol for run in symbol_runs]
 
     config = ReliabilityGateConfig()
+    sizing = _rank_sizing_policies(runs, config)
+    selected_spec = next(
+        spec for spec in KELLY_SIZING_POLICIES
+        if _sizing_policy_id(spec) == sizing.selected_policy_id
+    )
+    _apply_policy_evidence(runs, selected_spec)
     _apply_discovery_requirements(runs, config)
 
     selected_runs = _greedy_portfolio_selection(_select_sleeves(runs))
@@ -849,6 +1267,7 @@ def run_trend_screen(
         }
         schedule, _scheduled, _stress_scheduled, qualification = _qualify(
             selected_runs, weights, data, unseal_holdout=unseal_holdout,
+            kelly_spec=selected_spec,
         )
     else:
         selection = None
@@ -869,6 +1288,7 @@ def run_trend_screen(
         selection=selection,
         schedule_hash=_schedule_hash(schedule),
         qualification=qualification,
+        sizing=sizing,
     )
 
 
@@ -889,6 +1309,11 @@ def _check_contract() -> None:
     assert len(TREND_SCREEN_CANDIDATES) == 30
     assert len(TREND_SCREEN_SYMBOLS) == 15
     assert TREND_SCREEN_PROFILE_ID == "baseline_gate_performance_v1"
+    assert len(KELLY_SIZING_POLICIES) == 4
+    assert _sizing_policy_id(KELLY_SIZING_POLICIES[0]) == "kelly_only_q10"
+    assert _sizing_policy_id(KELLY_SIZING_POLICIES[1]) == "kelly_only_q25"
+    assert _sizing_policy_id(KELLY_SIZING_POLICIES[2]) == "kelly_mdd_q10"
+    assert _sizing_policy_id(KELLY_SIZING_POLICIES[3]) == "kelly_mdd_q25"
 
 
 _check_contract()
