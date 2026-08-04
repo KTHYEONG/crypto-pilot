@@ -42,17 +42,24 @@ def _run_trend_screen(args: argparse.Namespace) -> None:
 
 def _run_xs_trend_screen(args: argparse.Namespace) -> None:
     from src.application.research.technical.xs_trend_screen import (
+        XS_ALPHA_PROFILE_ID,
         XS_NEUTRAL_PROFILE_ID,
+        persist_xs_screen_report,
         run_xs_trend_screen,
+        xs_screen_report_path,
     )
 
     profile = args.profile or XS_NEUTRAL_PROFILE_ID
-    if profile != XS_NEUTRAL_PROFILE_ID:
+    if profile not in (XS_NEUTRAL_PROFILE_ID, XS_ALPHA_PROFILE_ID):
         raise ValueError(
             f"unknown xs screen profile '{profile}'; the source-controlled "
-            f"profile is '{XS_NEUTRAL_PROFILE_ID}'"
+            f"profiles are '{XS_NEUTRAL_PROFILE_ID}' and '{XS_ALPHA_PROFILE_ID}'"
         )
-    report = run_xs_trend_screen(start=args.start, end=args.end, unseal_holdout=args.unseal_holdout)
+    report = run_xs_trend_screen(
+        start=args.start, end=args.end, unseal_holdout=args.unseal_holdout,
+        profile=profile,
+    )
+    persist_xs_screen_report(report, xs_screen_report_path(profile))
     _logger.info(
         "xs-screen profile=%s discovery_admitted=%s qualification_admitted=%s "
         "qualification_sharpe=%.4f binding_constraint=%s",
