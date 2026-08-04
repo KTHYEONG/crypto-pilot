@@ -1,6 +1,16 @@
 {
   "tasks": [
     {
+      "task_id": "xs_neutral_alpha_v2",
+      "date": "2026-08-04",
+      "adr_id": "ADR_20260804_xs_neutral_alpha_v2",
+      "domain": "research",
+      "title": "Cross-sectional multihorizon alpha evaluation",
+      "why": "Repair the XS alpha research workflow after field-level taker ratio gaps were identified in the required futures universe.",
+      "resolution": "Added validated close/taker/funding alpha panel construction, reran the required 15-symbol data collection, and set XS evaluation start to 2022-04-03, the first complete common data boundary.",
+      "impact": "xs_alpha_multihorizon_v2 now evaluates deterministically with complete panels; discovery, qualification, stress, and holdout gates pass."
+    },
+    {
       "task_id": "TASK_XS_NEUTRAL_COMPOSITE_SCREEN",
       "date": "2026-08-04",
       "adr_id": "ADR_20260804_XS_NEUTRAL_COMPOSITE_SCREEN",

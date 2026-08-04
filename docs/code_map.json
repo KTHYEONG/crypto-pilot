@@ -583,5 +583,8 @@
   "src/research/technical_experts/cross_sectional.py": {
     "architecture": "docs/specs/xs_neutral_composite_screen.md",
     "testing": "tests/unit/research/technical_experts/test_cross_sectional.py"
+  },
+  "src/application/research/technical/xs_trend_screen.py": {
+    "testing": "tests/unit/application/research/technical/test_xs_trend_screen.py"
   }
 }
