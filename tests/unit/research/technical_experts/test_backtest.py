@@ -306,9 +306,104 @@ def test_backtest_signature_is_frozen() -> None:
         "frame", "candidate", "costs", "funding_rates",
         "initial_equity", "signal_delay_bars",
         "stop_loss_mode", "stop_loss_value", "atr_period", "trailing_stop",
+        "execution_start",
     ]
     assert params["signal_delay_bars"].default == 0
     assert params["stop_loss_mode"].default is None
     assert params["stop_loss_value"].default is None
     assert params["atr_period"].default == 14
     assert params["trailing_stop"].default is False
+    assert params["execution_start"].default is None
+
+
+class TestExecutionStartWindow:
+    """TER-01-EXECUTION-WINDOW: warm-up vs evaluation capital separation."""
+
+    def _zero_funding(self, frame: pd.DataFrame) -> pd.Series:
+        return pd.Series(0.0, index=frame.index)
+
+    def test_execution_start_none_is_byte_identical(self, monkeypatch) -> None:
+        # TER-01: omitting execution_start preserves prior behavior exactly.
+        frame = execution_fixture()
+        monkeypatch.setattr(
+            "src.research.technical_experts.backtest.generate_signal_events",
+            lambda f, candidate: _long_cash_short_events(f),
+        )
+        candidate = resolve_technical_candidate("technical_macd_histogram_regime_long_v1")
+        base = run_technical_expert_backtest(
+            frame, candidate, ZERO_COSTS, self._zero_funding(frame),
+        )
+        explicit = run_technical_expert_backtest(
+            frame, candidate, ZERO_COSTS, self._zero_funding(frame),
+            execution_start=None,
+        )
+        assert base.equity.equals(explicit.equity)
+        assert base.trades.equals(explicit.trades)
+
+    def test_catastrophic_warmup_cannot_affect_reset_ledger(self, monkeypatch) -> None:
+        # TER-01: a pre-execution catastrophic path exhausts the full-history
+        # ledger but cannot invalidate a ledger that begins fresh at
+        # execution_start; pre-start trades never enter the returned rows.
+        frame = execution_fixture()
+        frame.loc[frame.index[4], "close"] = 250.0
+
+        def _warmup_blowup_events(f: pd.DataFrame) -> pd.DataFrame:
+            n = len(f)
+            data = {c: [False] * n for c in (
+                "long_entry", "short_entry", "long_exit", "short_exit",
+            )}
+            data["short_entry"][2] = True
+            data["short_exit"][10] = True
+            return pd.DataFrame(data, index=f.index)
+
+        monkeypatch.setattr(
+            "src.research.technical_experts.backtest.generate_signal_events",
+            lambda f, candidate: _warmup_blowup_events(f),
+        )
+        candidate = resolve_technical_candidate("technical_macd_histogram_regime_long_v1")
+        with pytest.raises(DataIntegrityError, match="equity exhausted"):
+            run_technical_expert_backtest(
+                frame, candidate, ZERO_COSTS, self._zero_funding(frame),
+            )
+
+        cut = frame.index[12]
+        restarted = run_technical_expert_backtest(
+            frame, candidate, ZERO_COSTS, self._zero_funding(frame),
+            execution_start=cut,
+        )
+        pre = restarted.equity[restarted.equity.index < cut]
+        assert len(pre) > 0
+        assert (pre == 10_000.0).all()
+        assert len(restarted.trades) == 0
+        assert (restarted.equity == 10_000.0).all()
+
+    def test_first_executable_target_uses_prior_decision(self, monkeypatch) -> None:
+        # TER-01: a decision formed strictly before execution_start determines
+        # the first causally executable target at the boundary bar; the trade
+        # bars are indexed against the returned full-grid ledger.
+        frame = execution_fixture()
+        monkeypatch.setattr(
+            "src.research.technical_experts.backtest.generate_signal_events",
+            lambda f, candidate: _long_cash_short_events(f),
+        )
+        candidate = resolve_technical_candidate("technical_macd_histogram_regime_long_v1")
+        cut = frame.index[1]
+        started = run_technical_expert_backtest(
+            frame, candidate, ZERO_COSTS, self._zero_funding(frame),
+            execution_start=cut,
+        )
+        assert started.equity.iloc[0] == 10_000.0
+        assert len(started.trades) == 2
+        assert int(started.trades.iloc[0]["entry_bar"]) == 1
+        assert started.trades.iloc[0]["side"] == "long"
+        assert int(started.trades.iloc[1]["entry_bar"]) == 3
+        assert started.trades.iloc[1]["side"] == "short"
+
+    def test_execution_start_outside_grid_fails_closed(self) -> None:
+        frame = execution_fixture()
+        candidate = resolve_technical_candidate("technical_macd_histogram_regime_long_v1")
+        with pytest.raises(ValueError, match="outside the bar grid"):
+            run_technical_expert_backtest(
+                frame, candidate, ZERO_COSTS, self._zero_funding(frame),
+                execution_start=pd.Timestamp("2023-01-01", tz="UTC"),
+            )
