@@ -3,7 +3,8 @@
 XSC-01-NO-TRADE-BAND-STATEFUL, XSC-02-WEIGHTS-DOLLAR-NEUTRAL,
 XSC-03-SPEC-FROZEN-BOUNDS, XSC-04-LEDGER-EXECUTION-LAG,
 XSC-05-ADMISSION-SCALE-INVARIANT, XSC-07-COMPOSITE-BEATS-SINGLE-FAMILY,
-XSA-02-COMPOSITE-PRESERVATION, XSV3-01-FAMILY-SUM.
+XSA-02-COMPOSITE-PRESERVATION, XSV3-01-FAMILY-SUM,
+SCENARIO_XSV5_01_DUAL_FAMILY_EXCLUDES_FUNDING.
 """
 
 from __future__ import annotations
@@ -21,6 +22,7 @@ from src.research.technical_experts.cross_sectional import (
     XsCompositeSpec,
     apply_no_trade_band,
     build_xs_alpha_composite_score,
+    build_xs_alpha_dual_family_weights,
     build_xs_alpha_family_scores,
     build_xs_alpha_family_weights,
     build_xs_alpha_weights,
@@ -599,3 +601,59 @@ class TestAlphaFamilyDecomposition:
             assert frame.index.equals(closes.index)
             assert list(frame.columns) == list(closes.columns)
             assert not frame.isna().any().any()
+
+
+class TestDualFamilyAlphaWeights:
+    def test_xsv5_01_equals_neutral_on_trend_plus_taker_only(self) -> None:
+        idx = pd.date_range("2024-01-01", periods=200, freq="4h", tz="UTC")
+        rng = np.random.default_rng(0)
+        closes = pd.DataFrame({
+            "A": 100 * np.exp(np.cumsum(rng.normal(0, 0.01, 200))),
+            "B": 100 * np.exp(np.cumsum(rng.normal(0, 0.01, 200))),
+        }, index=idx)
+        taker = pd.DataFrame(
+            np.clip(0.5 + rng.normal(0, 0.05, (200, 2)), 0.0, 1.0),
+            index=idx, columns=["A", "B"],
+        )
+        funding = pd.DataFrame(0.0, index=idx, columns=["A", "B"])
+        alpha_spec = XsAlphaCompositeSpec()
+        exec_spec = XsCompositeSpec()
+        scores = build_xs_alpha_family_scores(closes, taker, funding, alpha_spec)
+        expected = build_xs_neutral_weights(
+            scores["trend"] + scores["taker_imbalance"],
+            exec_spec.halflife_bars, exec_spec.no_trade_band,
+        )
+        actual = build_xs_alpha_dual_family_weights(
+            closes, taker, funding, alpha_spec, exec_spec,
+        )
+        assert actual.equals(expected)
+        assert list(actual.columns) == ["A", "B"]
+        assert actual.index.equals(closes.index)
+
+    def test_xsv5_01_bar_funding_input_does_not_change_output(self) -> None:
+        # funding_contrarian is the only family driven by bar_funding; with it
+        # dropped, the dual-family weights must be identical under any finite
+        # funding panel.
+        closes, taker, funding = _alpha_inputs()
+        spec = XsAlphaCompositeSpec()
+        exec_spec = XsCompositeSpec()
+        baseline = build_xs_alpha_dual_family_weights(
+            closes, taker, funding, spec, exec_spec,
+        )
+        other_funding = pd.DataFrame(
+            np.zeros_like(funding.to_numpy(dtype=np.float64)),
+            index=funding.index, columns=funding.columns,
+        )
+        other = build_xs_alpha_dual_family_weights(
+            closes, taker, other_funding, spec, exec_spec,
+        )
+        assert other.equals(baseline)
+
+    def test_xsv5_01_malformed_panels_fail_closed(self) -> None:
+        closes, taker, funding = _alpha_inputs()
+        bad_taker = taker.copy()
+        bad_taker.iloc[5, 0] = np.nan
+        with pytest.raises(DataIntegrityError, match="finite and in"):
+            build_xs_alpha_dual_family_weights(
+                closes, bad_taker, funding, XsAlphaCompositeSpec(), XsCompositeSpec(),
+            )

@@ -1,7 +1,8 @@
-"""Contract scenarios XSC-06, XSV3-04, XSV3-05, and XSV4-06 for the XS screen orchestration.
+"""Contract scenarios XSC-06, XSV3-04, XSV3-05, XSV4-06, SCENARIO_XSV5_02_PROFILE_DISPATCHES_DUAL_FAMILY_PIPELINE, and SCENARIO_XSV5_03_UNKNOWN_PROFILE_STILL_FAILS_CLOSED for the XS screen orchestration.
 
 XSC-06-SCREEN-DETERMINISTIC-AND-SEALED, XSV3-04-FINAL-LEDGER-COSTS,
-XSV3-05-FAIL-CLOSED, XSV4-06-PROFILE-DISPATCH.
+XSV3-05-FAIL-CLOSED, XSV4-06-PROFILE-DISPATCH, XSV5-02-PROFILE-DISPATCH,
+XSV5-03-UNKNOWN-PROFILE-FAIL-CLOSED.
 """
 
 from __future__ import annotations
@@ -435,3 +436,36 @@ class TestScoreRoutedProfileOrchestration:
         report = xs.run_xs_trend_screen(profile=xs.XS_SCORE_ROUTED_ALPHA_PROFILE_ID)
         assert report.router_spec is not None
         assert weighted["score"].equals(combined["score"])
+
+
+class TestDualFamilyProfileOrchestration:
+    def test_xsv5_02_profile_dispatches_dual_family_pipeline(self, monkeypatch) -> None:
+        _install_synthetic_data(monkeypatch)
+        report = xs.run_xs_trend_screen(profile=xs.XS_DUAL_FAMILY_ALPHA_PROFILE_ID)
+        assert report.profile == "xs_alpha_dual_family_v5"
+        assert report.alpha_spec is not None
+        assert report.router_spec is None
+        assert report.router_diagnostics is None
+        assert report.family_admission is None
+        assert report.holdout is None
+        payload = report.to_payload()
+        assert payload["stress"]["qualification"]["admitted"] is not None
+        assert len(payload["report_fingerprint"]) == 64
+
+    def test_xsv5_02_holdout_stays_sealed_by_default(self, monkeypatch) -> None:
+        _install_synthetic_data(monkeypatch)
+        report = xs.run_xs_trend_screen(profile=xs.XS_DUAL_FAMILY_ALPHA_PROFILE_ID)
+        assert report.holdout is None
+        assert report.holdout_start is None
+        assert report.holdout_end is None
+
+    def test_xsv5_03_unknown_profile_still_fails_closed(self, monkeypatch) -> None:
+        _install_synthetic_data(monkeypatch)
+        with pytest.raises(ValueError, match="unknown xs screen profile") as excinfo:
+            xs.run_xs_trend_screen(profile="not_a_profile")
+        message = str(excinfo.value)
+        assert "xs_neutral_composite_v1" in message
+        assert "xs_alpha_multihorizon_v2" in message
+        assert "xs_alpha_contextual_v3" in message
+        assert "xs_alpha_score_routed_v4" in message
+        assert "xs_alpha_dual_family_v5" in message
