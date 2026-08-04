@@ -116,6 +116,24 @@ def test_causal_fractional_kelly_spec_contract_ranges() -> None:
         CausalFractionalKellySpec(lookback_days=120)
 
 
+def test_causal_fractional_kelly_spec_mdd_cap_mode_contract() -> None:
+    from src.research.sleeve_blend.contracts import (
+        CausalFractionalKellySpec,
+        CausalLeverageSpec,
+    )
+
+    assert CausalFractionalKellySpec().mdd_cap_enabled is True
+    only = CausalFractionalKellySpec(fraction=0.10, mdd_cap_enabled=False)
+    assert only.fraction == 0.10
+    assert only.mdd_cap_enabled is False
+    assert only.lookback_days == CausalLeverageSpec().lookback_days
+    with pytest.raises(ValueError, match="lookback_days"):
+        CausalFractionalKellySpec(lookback_days=120, mdd_cap_enabled=True)
+    assert CausalFractionalKellySpec(
+        lookback_days=120, mdd_cap_enabled=False,
+    ).lookback_days == 120
+
+
 def test_directional_sleeve_spec_freezes_symbols_and_limits_settings() -> None:
     spec = DirectionalSleeveSpec()
     assert spec.symbols == FIXED_DIRECTIONAL_SYMBOLS
