@@ -31,7 +31,9 @@ _UNAVAILABLE = "unavailable"
 
 __all__ = [
     "XsContextualAllocation",
+    "XsScoreRoutedAllocation",
     "build_xs_causal_contextual_allocation",
+    "build_xs_causal_score_selection",
     "build_xs_context_market",
 ]
 
@@ -82,6 +84,103 @@ class XsContextualAllocation:
     conditional_lcb: pd.DataFrame
 
 
+@dataclass(frozen=True, slots=True)
+class XsScoreRoutedAllocation:
+    """Deterministic outcome of one causal score-layer family selection.
+
+    Field-for-field parallel to :class:`XsContextualAllocation` except
+    ``target_weights`` is replaced by ``combined_score``: the winner family's
+    raw (pre-EWMA, pre-demean, pre-band) score row per bar, all zero for
+    ``CASH`` rows.  ``decision_context``, ``selected_sleeve``, and
+    ``conditional_lcb`` carry identical semantics, so the application-layer
+    router diagnostics consume either allocation type unchanged.
+    """
+
+    combined_score: pd.DataFrame
+    decision_context: pd.Series
+    selected_sleeve: pd.Series
+    conditional_lcb: pd.DataFrame
+
+
+def _validate_router_sleeve_inputs(
+    sleeves: dict[str, pd.DataFrame],
+    sleeve_returns: pd.DataFrame,
+    decision_context: pd.Series,
+    *,
+    frame_kind: str,
+) -> tuple[pd.DatetimeIndex, list[str]]:
+    """Shared fail-closed validation for the causal router sleeve inputs.
+
+    ``frame_kind`` is ``"weight"`` or ``"score"`` and only selects the wording
+    of the error messages; every structural check is identical for the
+    weight-layer and score-layer routers so the two public builders share one
+    validation contract.  Returns the validated common index and ordered
+    column set of the sleeve frames.
+    """
+    if not isinstance(sleeves, dict):
+        raise DataIntegrityError(f"sleeve_{frame_kind}s must be a dict")
+    if set(sleeves) != set(_FAMILY_ORDER):
+        raise DataIntegrityError(
+            f"sleeve_{frame_kind}s must map exactly the families {list(_FAMILY_ORDER)}, "
+            f"got {sorted(sleeves)}"
+        )
+    for name in _FAMILY_ORDER:
+        if not isinstance(sleeves[name], pd.DataFrame):
+            raise DataIntegrityError(
+                f"sleeve {frame_kind} frame {name!r} must be a DataFrame"
+            )
+
+    reference = sleeves[_FAMILY_ORDER[0]]
+    index = reference.index
+    if not isinstance(index, pd.DatetimeIndex) or getattr(index, "tz", None) is None:
+        raise DataIntegrityError("sleeve index must be a tz-aware UTC DatetimeIndex")
+    if not index.is_unique:
+        raise DataIntegrityError("sleeve index must be unique")
+    if not index.is_monotonic_increasing:
+        raise DataIntegrityError("sleeve index must be monotonic increasing")
+    for name in _FAMILY_ORDER:
+        frame = sleeves[name]
+        if not frame.index.equals(reference.index):
+            raise DataIntegrityError(
+                f"sleeve {frame_kind} frames must share an identical index"
+            )
+        if list(frame.columns) != list(reference.columns):
+            raise DataIntegrityError(
+                f"sleeve {frame_kind} frames must share an identical ordered column set"
+            )
+    symbol_columns = list(reference.columns)
+    if len(symbol_columns) != len(set(symbol_columns)):
+        raise DataIntegrityError(f"sleeve {frame_kind} columns must be unique")
+
+    if not isinstance(sleeve_returns, pd.DataFrame):
+        raise DataIntegrityError("sleeve_returns must be a DataFrame")
+    if not sleeve_returns.index.equals(reference.index):
+        raise DataIntegrityError("sleeve_returns must share the sleeve index")
+    if list(sleeve_returns.columns) != list(_FAMILY_ORDER):
+        raise DataIntegrityError(
+            f"sleeve_returns columns must be {list(_FAMILY_ORDER)}"
+        )
+
+    if not isinstance(decision_context, pd.Series):
+        raise DataIntegrityError("decision_context must be a pd.Series")
+    if not decision_context.index.equals(reference.index):
+        raise DataIntegrityError(
+            "decision_context must be aligned to the sleeve index"
+        )
+    if decision_context.isna().any():
+        raise DataIntegrityError("decision_context must not contain missing labels")
+    if not all(isinstance(value, str) for value in decision_context.to_numpy()):
+        raise DataIntegrityError("decision_context must contain only string labels")
+    known = set(state_labels()) | {_UNAVAILABLE}
+    unknown = sorted(
+        {value for value in decision_context.unique() if value not in known}
+    )
+    if unknown:
+        raise DataIntegrityError(f"decision_context contains unknown labels: {unknown}")
+
+    return index, symbol_columns
+
+
 def build_xs_causal_contextual_allocation(
     sleeve_weights: dict[str, pd.DataFrame],
     sleeve_returns: pd.DataFrame,
@@ -109,68 +208,49 @@ def build_xs_causal_contextual_allocation(
     label) raises :class:`DataIntegrityError` -- missing data is never
     zero-filled.
     """
-    if not isinstance(sleeve_weights, dict):
-        raise DataIntegrityError("sleeve_weights must be a dict")
-    if set(sleeve_weights) != set(_FAMILY_ORDER):
-        raise DataIntegrityError(
-            f"sleeve_weights must map exactly the families {list(_FAMILY_ORDER)}, "
-            f"got {sorted(sleeve_weights)}"
-        )
-    for name in _FAMILY_ORDER:
-        if not isinstance(sleeve_weights[name], pd.DataFrame):
-            raise DataIntegrityError(
-                f"sleeve weight frame {name!r} must be a DataFrame"
-            )
-
-    reference = sleeve_weights[_FAMILY_ORDER[0]]
-    index = reference.index
-    if not isinstance(index, pd.DatetimeIndex) or getattr(index, "tz", None) is None:
-        raise DataIntegrityError("sleeve index must be a tz-aware UTC DatetimeIndex")
-    if not index.is_unique:
-        raise DataIntegrityError("sleeve index must be unique")
-    if not index.is_monotonic_increasing:
-        raise DataIntegrityError("sleeve index must be monotonic increasing")
-    for name in _FAMILY_ORDER:
-        frame = sleeve_weights[name]
-        if not frame.index.equals(reference.index):
-            raise DataIntegrityError(
-                "sleeve weight frames must share an identical index"
-            )
-        if list(frame.columns) != list(reference.columns):
-            raise DataIntegrityError(
-                "sleeve weight frames must share an identical ordered column set"
-            )
-    symbol_columns = list(reference.columns)
-    if len(symbol_columns) != len(set(symbol_columns)):
-        raise DataIntegrityError("sleeve weight columns must be unique")
-
-    if not isinstance(sleeve_returns, pd.DataFrame):
-        raise DataIntegrityError("sleeve_returns must be a DataFrame")
-    if not sleeve_returns.index.equals(reference.index):
-        raise DataIntegrityError("sleeve_returns must share the sleeve weight index")
-    if list(sleeve_returns.columns) != list(_FAMILY_ORDER):
-        raise DataIntegrityError(
-            f"sleeve_returns columns must be {list(_FAMILY_ORDER)}"
-        )
-
-    if not isinstance(decision_context, pd.Series):
-        raise DataIntegrityError("decision_context must be a pd.Series")
-    if not decision_context.index.equals(reference.index):
-        raise DataIntegrityError(
-            "decision_context must be aligned to the sleeve index"
-        )
-    if decision_context.isna().any():
-        raise DataIntegrityError("decision_context must not contain missing labels")
-    if not all(isinstance(value, str) for value in decision_context.to_numpy()):
-        raise DataIntegrityError("decision_context must contain only string labels")
-    known = set(state_labels()) | {_UNAVAILABLE}
-    unknown = sorted(
-        {value for value in decision_context.unique() if value not in known}
+    index, symbol_columns = _validate_router_sleeve_inputs(
+        sleeve_weights, sleeve_returns, decision_context, frame_kind="weight",
     )
-    if unknown:
-        raise DataIntegrityError(f"decision_context contains unknown labels: {unknown}")
+    family_matrices = {
+        name: sleeve_weights[name].to_numpy(dtype=np.float64)
+        for name in _FAMILY_ORDER
+    }
+    target, selected, lcb_out = _causal_family_lcb_selection(
+        family_matrices, sleeve_returns, decision_context, router_spec,
+    )
+    return XsContextualAllocation(
+        target_weights=pd.DataFrame(target, index=index, columns=symbol_columns),
+        decision_context=decision_context,
+        selected_sleeve=pd.Series(selected, index=index, name="selected_sleeve"),
+        conditional_lcb=pd.DataFrame(lcb_out, index=index, columns=list(_FAMILY_ORDER)),
+    )
 
-    n = len(index)
+
+def _causal_family_lcb_selection(
+    matrices: dict[str, np.ndarray],
+    sleeve_returns: pd.DataFrame,
+    decision_context: pd.Series,
+    router_spec: ContextualRouterSpec,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Block-aware-LCB winner selection over the six causal states (shared core).
+
+    Selects, for every decision bar, the single family whose conditional
+    block-aware lower confidence bound over fully completed same-state samples
+    is strictly positive and greatest, and copies that family's input row (a
+    banded weight row or a raw score row, whichever ``matrices`` holds) into
+    the target row.  This is the per-state/per-bar loop body shared verbatim by
+    :func:`build_xs_causal_contextual_allocation` (weight layer) and
+    :func:`build_xs_causal_score_selection` (score layer); only the write
+    target -- a bare ``ndarray`` row -- is generalized, so the selection logic
+    is byte-for-byte identical across both construction layers.
+
+    Returns ``(target, selected, lcb_out)`` where ``target`` is the
+    ``[n, n_cols]`` winner-row matrix (all zero for ``CASH`` rows),
+    ``selected`` is the ``[n]`` object array of family names or ``"CASH"``, and
+    ``lcb_out`` is the ``[n, len(_FAMILY_ORDER)]`` float64 array of per-family
+    lower confidence bounds (``NaN`` where no eligible completed evidence
+    exists).  Inputs are assumed already validated by the public builders.
+    """
     z_score = lcb_z_score(router_spec.confidence)
     min_history = router_spec.min_context_history_bars
     labels = decision_context.to_numpy(dtype=object)
@@ -182,13 +262,10 @@ def build_xs_causal_contextual_allocation(
             "return is never zero-filled"
         )
 
+    n = len(labels)
     lcb_out = np.full((n, len(_FAMILY_ORDER)), np.nan, dtype=np.float64)
     selected = np.full(n, _CASH, dtype=object)
-    target = np.zeros((n, len(symbol_columns)), dtype=np.float64)
-    family_matrices = {
-        name: sleeve_weights[name].to_numpy(dtype=np.float64)
-        for name in _FAMILY_ORDER
-    }
+    target = np.zeros((n, matrices[_FAMILY_ORDER[0]].shape[1]), dtype=np.float64)
 
     for state in state_labels():
         state_rows = np.flatnonzero(labels == state)
@@ -204,7 +281,7 @@ def build_xs_causal_contextual_allocation(
             [np.zeros((1, samples.shape[1])), np.cumsum(samples * samples, axis=0)]
         )
         eligible = np.searchsorted(state_rows, np.arange(n) - 1)
-        inflation_by_column = []
+        inflation_by_column: list[np.ndarray] = []
         for column in range(len(_FAMILY_ORDER)):
             completed = np.concatenate(
                 [samples[:, column], np.array([0.0])]
@@ -230,10 +307,43 @@ def build_xs_causal_contextual_allocation(
                 continue
             family = _FAMILY_ORDER[best]
             selected[t] = family
-            target[t, :] = family_matrices[family][t, :]
+            target[t, :] = matrices[family][t, :]
 
-    return XsContextualAllocation(
-        target_weights=pd.DataFrame(target, index=index, columns=symbol_columns),
+    return target, selected, lcb_out
+
+
+def build_xs_causal_score_selection(
+    sleeve_scores: dict[str, pd.DataFrame],
+    sleeve_returns: pd.DataFrame,
+    decision_context: pd.Series,
+    router_spec: ContextualRouterSpec,
+) -> XsScoreRoutedAllocation:
+    """Causal single-family score-row selection for the XS alpha score-layer router.
+
+    Row ``t`` is the decision made at the close of bar ``t`` and consumes the
+    identical six-state, block-aware-LCB winner rule as the weight-layer
+    router, but the winner's *raw pre-normalization score row* (never an
+    EWMA-smoothed, demeaned, or banded weight row) is written into
+    ``combined_score``; a ``CASH`` bar is an all-zero row.  The caller is
+    responsible for feeding ``combined_score`` through
+    :func:`build_xs_neutral_weights` exactly once -- the construction-layer
+    separation (smooth once after selection, never per family) is the entire
+    point of the score-layer relocation.  No future row ever influences a
+    decision.  Malformed input fails closed with
+    :class:`DataIntegrityError`, identical to the weight-layer function.
+    """
+    index, symbol_columns = _validate_router_sleeve_inputs(
+        sleeve_scores, sleeve_returns, decision_context, frame_kind="score",
+    )
+    family_matrices = {
+        name: sleeve_scores[name].to_numpy(dtype=np.float64)
+        for name in _FAMILY_ORDER
+    }
+    target, selected, lcb_out = _causal_family_lcb_selection(
+        family_matrices, sleeve_returns, decision_context, router_spec,
+    )
+    return XsScoreRoutedAllocation(
+        combined_score=pd.DataFrame(target, index=index, columns=symbol_columns),
         decision_context=decision_context,
         selected_sleeve=pd.Series(selected, index=index, name="selected_sleeve"),
         conditional_lcb=pd.DataFrame(lcb_out, index=index, columns=list(_FAMILY_ORDER)),
@@ -269,6 +379,13 @@ def _check_contract() -> None:
     )
     assert allocation.selected_sleeve.iloc[0] == _CASH
     assert float(allocation.target_weights.abs().to_numpy().max()) == 0.0
+
+    score_allocation = build_xs_causal_score_selection(
+        weights, returns, context, spec,
+    )
+    assert score_allocation.selected_sleeve.iloc[0] == _CASH
+    assert float(score_allocation.combined_score.abs().to_numpy().max()) == 0.0
+    assert score_allocation.selected_sleeve.equals(allocation.selected_sleeve)
 
 
 _check_contract()
