@@ -23,10 +23,12 @@ confirmation, not a re-tunable input.
 
 from __future__ import annotations
 
+import dataclasses
 import hashlib
 import json
 from dataclasses import dataclass
 from functools import reduce
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -39,7 +41,9 @@ from src.research.technical_experts.contracts import TechnicalCandidate
 from src.research.technical_experts.cross_sectional import (
     XsAdmissionConfig,
     XsAdmissionResult,
+    XsAlphaCompositeSpec,
     XsCompositeSpec,
+    build_xs_alpha_weights,
     build_xs_neutral_weights,
     evaluate_xs_admission,
     run_xs_composite_ledger,
@@ -47,7 +51,6 @@ from src.research.technical_experts.cross_sectional import (
 from src.research.technical_experts.signals import generate_signal_events
 from src.research.technical_experts.trend_screen_catalog import (
     DISCOVERY_END,
-    DISCOVERY_START,
     QUALIFICATION_END,
     QUALIFICATION_START,
     TREND_SCREEN_CANDIDATES,
@@ -56,8 +59,14 @@ from src.research.technical_experts.trend_screen_catalog import (
 )
 
 XS_NEUTRAL_PROFILE_ID = "xs_neutral_composite_v1"
+XS_ALPHA_PROFILE_ID = "xs_alpha_multihorizon_v2"
+# The four-symbol earliest-history gap is not recoverable before 2022-04-03.
+# Keep the baseline catalog window unchanged, but start XS panel evaluation on
+# the first timestamp with complete taker/quote fields across the universe.
+XS_DISCOVERY_START = pd.Timestamp("2022-04-03", tz="UTC")
 
 __all__ = [
+    "XS_ALPHA_PROFILE_ID",
     "XS_NEUTRAL_PROFILE_ID",
     "XsTrendScreenReport",
     "run_xs_trend_screen",
@@ -77,13 +86,18 @@ class XsTrendScreenReport:
     holdout: XsAdmissionResult | None = None
     holdout_start: pd.Timestamp | None = None
     holdout_end: pd.Timestamp | None = None
+    alpha_spec: XsAlphaCompositeSpec | None = None
+    stress_spec: XsCompositeSpec | None = None
+    stress_discovery: XsAdmissionResult | None = None
+    stress_qualification: XsAdmissionResult | None = None
+    stress_holdout: XsAdmissionResult | None = None
 
     def to_payload(self) -> dict[str, object]:
         """Canonical, deterministic JSON-ready payload (fingerprint included)."""
         payload: dict[str, object] = {
             "profile": self.profile,
             "universe": list(self.universe),
-            "discovery_start": DISCOVERY_START.isoformat(),
+            "discovery_start": XS_DISCOVERY_START.isoformat(),
             "discovery_end": DISCOVERY_END.isoformat(),
             "qualification_start": QUALIFICATION_START.isoformat(),
             "qualification_end": QUALIFICATION_END.isoformat(),
@@ -102,6 +116,33 @@ class XsTrendScreenReport:
             "holdout": _admission_payload(self.holdout) if self.holdout is not None else None,
             "symbols": self.symbols,
         }
+        if self.alpha_spec is not None:
+            payload["alpha_spec"] = {
+                "components": list(self.alpha_spec.components),
+                "signal_windows": list(self.alpha_spec.signal_windows),
+            }
+        if self.stress_spec is not None:
+            payload["stress_spec"] = {
+                "halflife_bars": self.stress_spec.halflife_bars,
+                "no_trade_band": self.stress_spec.no_trade_band,
+                "execution_delay_bars": self.stress_spec.execution_delay_bars,
+                "fee_rate": self.stress_spec.fee_rate,
+                "slippage_rate": self.stress_spec.slippage_rate,
+                "round_trip_cost_rate": round(self.stress_spec.round_trip_cost_rate(), 8),
+            }
+            stress_payload: dict[str, object] = {
+                "discovery": (
+                    _admission_payload(self.stress_discovery)
+                    if self.stress_discovery is not None else None
+                ),
+                "qualification": (
+                    _admission_payload(self.stress_qualification)
+                    if self.stress_qualification is not None else None
+                ),
+            }
+            if self.stress_holdout is not None:
+                stress_payload["holdout"] = _admission_payload(self.stress_holdout)
+            payload["stress"] = stress_payload
         payload["report_fingerprint"] = _fingerprint_without_self(payload)
         return payload
 
@@ -217,14 +258,20 @@ def _window_series(series: pd.Series, start: pd.Timestamp, end: pd.Timestamp) ->
 def _fail_closed_report(
     spec: XsCompositeSpec,
     constraint: str,
+    *,
+    profile: str = XS_NEUTRAL_PROFILE_ID,
+    alpha_spec: XsAlphaCompositeSpec | None = None,
+    stress_spec: XsCompositeSpec | None = None,
 ) -> XsTrendScreenReport:
     return XsTrendScreenReport(
-        profile=XS_NEUTRAL_PROFILE_ID,
+        profile=profile,
         universe=TREND_SCREEN_SYMBOLS,
         spec=spec,
         discovery=_failed_result(constraint),
         qualification=_failed_result(constraint),
         symbols={},
+        alpha_spec=alpha_spec,
+        stress_spec=stress_spec,
     )
 
 
@@ -234,42 +281,58 @@ def run_xs_trend_screen(
     end: str | pd.Timestamp | None = None,
     unseal_holdout: bool = False,
     max_workers: int | None = None,
+    profile: str = XS_NEUTRAL_PROFILE_ID,
 ) -> XsTrendScreenReport:
     """Execute one sealed XS composite screen profile.
 
-    Loads funding-complete 4h data once per symbol, builds the per-symbol
-    composite score, constructs the EWMA-smoothed dollar-neutral unit-gross
-    book with the frozen no-trade band, compounds it under the production
-    execution convention, and admits discovery and qualification with the
-    scale-invariant gates. Nothing is registered; ``end`` defaults to the
-    sealed cutoff unless ``unseal_holdout`` is set.
+    ``xs_neutral_composite_v1`` rebuilds the per-symbol composite score,
+    EWMA-smoothed dollar-neutral book, and production execution ledger. The
+    research-only ``xs_alpha_multihorizon_v2`` instead sources close, taker
+    ratio, and causally aligned settled funding panels and builds the
+    nine-component multi-horizon alpha book; its base and stress ledgers are
+    both replayed from the same frozen target weights. Nothing is registered;
+    ``end`` defaults to the sealed cutoff unless ``unseal_holdout`` is set.
     """
+    if profile not in (XS_NEUTRAL_PROFILE_ID, XS_ALPHA_PROFILE_ID):
+        raise ValueError(
+            f"unknown xs screen profile '{profile}'; the source-controlled "
+            f"profiles are '{XS_NEUTRAL_PROFILE_ID}' and '{XS_ALPHA_PROFILE_ID}'"
+        )
     end = resolve_evaluation_end(end, unseal_holdout=unseal_holdout)
-    spec = XsCompositeSpec()
+    requested_start = XS_DISCOVERY_START if start is None else pd.to_datetime(start, utc=True)
+    effective_start = max(requested_start, XS_DISCOVERY_START)
+    execution_spec = XsCompositeSpec()
+    alpha_spec = XsAlphaCompositeSpec() if profile == XS_ALPHA_PROFILE_ID else None
+    stress_spec = (
+        dataclasses.replace(
+            execution_spec,
+            fee_rate=execution_spec.fee_rate * 1.5,
+            slippage_rate=execution_spec.slippage_rate * 2.0,
+            execution_delay_bars=execution_spec.execution_delay_bars + 1,
+        )
+        if alpha_spec is not None
+        else None
+    )
 
     data: dict[str, tuple[pd.DataFrame, pd.Series]] = {}
     fingerprints: dict[str, dict[str, str]] = {}
     for symbol in TREND_SCREEN_SYMBOLS:
         try:
-            frame, funding, fingerprint, _coverage = _load_symbol_data(symbol, start, end)
+            frame, funding, fingerprint, _coverage = _load_symbol_data(symbol, effective_start, end)
         except (DataIntegrityError, FileNotFoundError) as exc:
             return _fail_closed_report(
-                spec, f"symbol_unavailable:{symbol}:{type(exc).__name__}",
+                execution_spec, f"symbol_unavailable:{symbol}:{type(exc).__name__}",
+                profile=profile, alpha_spec=alpha_spec, stress_spec=stress_spec,
             )
         data[symbol] = (frame, funding)
         fingerprints[symbol] = fingerprint
 
     common = _common_index([frame.index for frame, _funding in data.values()])
     if len(common) < 2:
-        return _fail_closed_report(spec, "insufficient_common_grid")
-
-    score_frames = {
-        symbol: _symbol_composite_score(frame) for symbol, (frame, _funding) in data.items()
-    }
-    score = pd.DataFrame(
-        {symbol: sf.reindex(common) for symbol, sf in score_frames.items()},
-    )
-    weights = build_xs_neutral_weights(score, spec.halflife_bars, spec.no_trade_band)
+        return _fail_closed_report(
+            execution_spec, "insufficient_common_grid",
+            profile=profile, alpha_spec=alpha_spec, stress_spec=stress_spec,
+        )
 
     opens = pd.DataFrame(
         {symbol: frame["open"].reindex(common) for symbol, (frame, _funding) in data.items()},
@@ -281,18 +344,53 @@ def run_xs_trend_screen(
         },
     )
 
+    score_frames: dict[str, pd.Series] | None = None
+    if alpha_spec is not None:
+        try:
+            closes = pd.DataFrame(
+                {
+                    symbol: frame["close"].reindex(common)
+                    for symbol, (frame, _funding) in data.items()
+                },
+            )
+            taker = pd.DataFrame(
+                {
+                    symbol: frame["taker_buy_ratio"].reindex(common)
+                    for symbol, (frame, _funding) in data.items()
+                },
+            )
+            weights = build_xs_alpha_weights(
+                closes, taker, bar_funding, alpha_spec, execution_spec,
+            )
+        except DataIntegrityError as exc:
+            return _fail_closed_report(
+                execution_spec, f"alpha_panel_invalid:{type(exc).__name__}",
+                profile=profile, alpha_spec=alpha_spec, stress_spec=stress_spec,
+            )
+    else:
+        score_frames = {
+            symbol: _symbol_composite_score(frame)
+            for symbol, (frame, _funding) in data.items()
+        }
+        score = pd.DataFrame(
+            {symbol: sf.reindex(common) for symbol, sf in score_frames.items()},
+        )
+        weights = build_xs_neutral_weights(
+            score, execution_spec.halflife_bars, execution_spec.no_trade_band,
+        )
+
     opens_arr = opens.to_numpy(dtype=np.float64)
     o2o = np.zeros_like(opens_arr)
     with np.errstate(divide="ignore", invalid="ignore"):
         o2o[1:] = opens_arr[1:] / opens_arr[:-1] - 1.0
     benchmark = pd.Series(o2o.mean(axis=1), index=common, name="benchmark")
 
-    equity, turnover = run_xs_composite_ledger(weights, opens, bar_funding, spec)
+    equity, turnover = run_xs_composite_ledger(weights, opens, bar_funding, execution_spec)
 
     discovery = evaluate_xs_admission(
-        _window_series(equity, DISCOVERY_START, DISCOVERY_END),
-        _window_series(turnover, DISCOVERY_START, DISCOVERY_END),
-        _window_series(benchmark, DISCOVERY_START, DISCOVERY_END),
+        _window_series(equity, XS_DISCOVERY_START, DISCOVERY_END),
+        _window_series(turnover, XS_DISCOVERY_START, DISCOVERY_END),
+        _window_series(benchmark, XS_DISCOVERY_START, DISCOVERY_END),
         XsAdmissionConfig(),
     )
     qualification = evaluate_xs_admission(
@@ -316,26 +414,72 @@ def run_xs_trend_screen(
                 XsAdmissionConfig(),
             )
 
+    stress_discovery: XsAdmissionResult | None = None
+    stress_qualification: XsAdmissionResult | None = None
+    stress_holdout: XsAdmissionResult | None = None
+    if stress_spec is not None:
+        stress_equity, stress_turnover = run_xs_composite_ledger(
+            weights, opens, bar_funding, stress_spec,
+        )
+        stress_discovery = evaluate_xs_admission(
+            _window_series(stress_equity, XS_DISCOVERY_START, DISCOVERY_END),
+            _window_series(stress_turnover, XS_DISCOVERY_START, DISCOVERY_END),
+            _window_series(benchmark, XS_DISCOVERY_START, DISCOVERY_END),
+            XsAdmissionConfig(),
+        )
+        stress_qualification = evaluate_xs_admission(
+            _window_series(stress_equity, QUALIFICATION_START, QUALIFICATION_END),
+            _window_series(stress_turnover, QUALIFICATION_START, QUALIFICATION_END),
+            _window_series(benchmark, QUALIFICATION_START, QUALIFICATION_END),
+            XsAdmissionConfig(),
+        )
+        if unseal_holdout and holdout_start is not None:
+            stress_holdout = evaluate_xs_admission(
+                _window_series(stress_equity, holdout_start, holdout_end),
+                _window_series(stress_turnover, holdout_start, holdout_end),
+                _window_series(benchmark, holdout_start, holdout_end),
+                XsAdmissionConfig(),
+            )
+
     symbols: dict[str, dict[str, object]] = {}
     for symbol in TREND_SCREEN_SYMBOLS:
-        sf = score_frames[symbol]
-        symbols[symbol] = {
-            "composite_mean": round(float(sf.mean()), 8),
-            "composite_std": round(float(sf.std()), 8),
-            "fingerprint": fingerprints[symbol],
-        }
+        if score_frames is not None:
+            sf = score_frames[symbol]
+            symbols[symbol] = {
+                "composite_mean": round(float(sf.mean()), 8),
+                "composite_std": round(float(sf.std()), 8),
+                "fingerprint": fingerprints[symbol],
+            }
+        else:
+            symbols[symbol] = {"fingerprint": fingerprints[symbol]}
 
     return XsTrendScreenReport(
-        profile=XS_NEUTRAL_PROFILE_ID,
+        profile=profile,
         universe=TREND_SCREEN_SYMBOLS,
-        spec=spec,
+        spec=execution_spec,
         discovery=discovery,
         qualification=qualification,
         symbols=symbols,
         holdout=holdout,
         holdout_start=holdout_start,
         holdout_end=holdout_end,
+        alpha_spec=alpha_spec,
+        stress_spec=stress_spec,
+        stress_discovery=stress_discovery,
+        stress_qualification=stress_qualification,
+        stress_holdout=stress_holdout,
     )
+
+
+def persist_xs_screen_report(report: XsTrendScreenReport, path: Path) -> None:
+    """Write the byte-deterministic report payload to ``path``."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(report.to_json(), encoding="utf-8")
+
+
+def xs_screen_report_path(profile: str = XS_NEUTRAL_PROFILE_ID) -> Path:
+    """Default persistence location for one source-controlled XS profile."""
+    return Path("docs/results") / f"{profile}.json"
 
 
 def _check_contract() -> None:
@@ -343,9 +487,10 @@ def _check_contract() -> None:
     from inspect import signature
 
     params = signature(run_xs_trend_screen).parameters
-    assert set(params) >= {"start", "end", "unseal_holdout", "max_workers"}
+    assert set(params) >= {"start", "end", "unseal_holdout", "max_workers", "profile"}
     assert all(p.kind == p.KEYWORD_ONLY for p in params.values())
     assert XS_NEUTRAL_PROFILE_ID == "xs_neutral_composite_v1"
+    assert XS_ALPHA_PROFILE_ID == "xs_alpha_multihorizon_v2"
     assert len(TREND_SCREEN_FAMILIES) == 15
     assert len(TREND_SCREEN_SYMBOLS) == 15
 
