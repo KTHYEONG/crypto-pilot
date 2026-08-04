@@ -53,7 +53,7 @@ def _run_xs_trend_screen(args: argparse.Namespace) -> None:
         xs_screen_report_path,
     )
 
-    profile = args.profile or XS_NEUTRAL_PROFILE_ID
+    profile = args.profile or XS_VOL_WEIGHTED_ALPHA_PROFILE_ID
     if profile not in (
         XS_NEUTRAL_PROFILE_ID,
         XS_ALPHA_PROFILE_ID,

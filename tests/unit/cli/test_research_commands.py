@@ -340,6 +340,7 @@ def test_technical_expert_cli_requires_candidate_id() -> None:
 def test_xs_screen_cli_parses_and_dispatches(monkeypatch) -> None:
     from src.application.research.technical.xs_trend_screen import (
         XS_NEUTRAL_PROFILE_ID,
+        XS_VOL_WEIGHTED_ALPHA_PROFILE_ID,
         XsAdmissionResult,
         XsCompositeSpec,
         XsTrendScreenReport,
@@ -383,8 +384,8 @@ def test_xs_screen_cli_parses_and_dispatches(monkeypatch) -> None:
         "--no-log-run",
     ])
     args.handler(args)
-    assert calls == [("2022-04-01", "2025-12-31", True, XS_NEUTRAL_PROFILE_ID)]
-    assert persisted == [(XS_NEUTRAL_PROFILE_ID, "docs/results/xs_neutral_composite_v1.json")]
+    assert calls == [("2022-04-01", "2025-12-31", True, XS_VOL_WEIGHTED_ALPHA_PROFILE_ID)]
+    assert persisted == [(XS_VOL_WEIGHTED_ALPHA_PROFILE_ID, "docs/results/xs_alpha_vol_weighted_v6.json")]
 
 
 def test_xs_screen_cli_dispatches_v2_profile(monkeypatch) -> None:
