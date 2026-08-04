@@ -1,6 +1,16 @@
 {
   "tasks": [
     {
+      "task_id": "TASK_XS_ALPHA_V6_CLI_DEFAULT",
+      "date": "2026-08-04",
+      "adr_id": "ADR_20260804_XS_ALPHA_V6_CLI_DEFAULT",
+      "domain": "futures",
+      "title": "xs-screen CLI default profile switched to xs_alpha_vol_weighted_v6",
+      "why": "v6 is now the first profile besides v2 admitted end-to-end (discovery+qualification+holdout+stress) and resolves v2's known qualification/stress weaknesses. Researchers running xs-screen with no --profile flag should see the strongest current evidence by default, scoped strictly to the CLI layer per explicit user confirmation (not a production/live-capital promotion -- no such registration pipeline exists in this codebase).",
+      "resolution": "Changed single_technical.py::_run_xs_trend_screen's fallback from 'profile = args.profile or XS_NEUTRAL_PROFILE_ID' to 'profile = args.profile or XS_VOL_WEIGHTED_ALPHA_PROFILE_ID'. Left run_xs_trend_screen's own library default and xs_screen_report_path's default untouched. Updated the one existing test whose no-flag assertions depended on the old default (test_xs_screen_cli_parses_and_dispatches).",
+      "impact": "xs-screen with no --profile now dispatches xs_alpha_vol_weighted_v6 and persists to docs/results/xs_alpha_vol_weighted_v6.json; xs_neutral_composite_v1 remains fully reachable via explicit --profile. All 5 xs-screen CLI tests and all 30 xs_trend_screen orchestration tests pass; ruff/mypy clean. No change to any research profile's evidence, no production/capital-allocation impact (no such pipeline exists yet)."
+    },
+    {
       "task_id": "TASK_XS_ALPHA_VOL_WEIGHTED_V6",
       "date": "2026-08-04",
       "adr_id": "ADR_20260804_XS_ALPHA_VOL_WEIGHTED_V6",
