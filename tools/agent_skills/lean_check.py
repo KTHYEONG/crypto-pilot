@@ -602,9 +602,13 @@ def _iter_contract_entries(contract: dict[str, Any]) -> list[dict[str, Any]]:
     entries: list[dict[str, Any]] = list(contract.get("contracts", []))
     for change in contract.get("changes", []):
         symbol = change.get("symbol", "")
+        # An explicit ``kind`` (e.g. ``"field"`` for an uppercase module-level
+        # constant like a profile-id) overrides the case-based default, matching
+        # the ``contracts`` schema which already passes ``kind`` through.
         entries.append({
             "file_hint": _repo_relative(change.get("target_file", "")),
-            "kind": "class" if symbol and symbol[0].isupper() else "function",
+            "kind": change.get("kind")
+            or ("class" if symbol and symbol[0].isupper() else "function"),
             "name": symbol,
             "assertions": [],
             "python_assertion": change.get("python_assertion", ""),
