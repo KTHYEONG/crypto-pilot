@@ -4,7 +4,9 @@ XSC-01-NO-TRADE-BAND-STATEFUL, XSC-02-WEIGHTS-DOLLAR-NEUTRAL,
 XSC-03-SPEC-FROZEN-BOUNDS, XSC-04-LEDGER-EXECUTION-LAG,
 XSC-05-ADMISSION-SCALE-INVARIANT, XSC-07-COMPOSITE-BEATS-SINGLE-FAMILY,
 XSA-02-COMPOSITE-PRESERVATION, XSV3-01-FAMILY-SUM,
-SCENARIO_XSV5_01_DUAL_FAMILY_EXCLUDES_FUNDING.
+SCENARIO_XSV5_01_DUAL_FAMILY_EXCLUDES_FUNDING,
+SCENARIO_XSV6_01_CAUSAL_VOL_WEIGHTS_EXCLUDE_CURRENT_BAR, and
+SCENARIO_XSV6_02_VOL_WEIGHTED_MATCHES_MANUAL_RECOMPUTE.
 """
 
 from __future__ import annotations
@@ -20,11 +22,13 @@ from src.research.technical_experts.cross_sectional import (
     XsAdmissionConfig,
     XsAlphaCompositeSpec,
     XsCompositeSpec,
+    _causal_family_inverse_vol_weights,
     apply_no_trade_band,
     build_xs_alpha_composite_score,
     build_xs_alpha_dual_family_weights,
     build_xs_alpha_family_scores,
     build_xs_alpha_family_weights,
+    build_xs_alpha_vol_weighted_weights,
     build_xs_alpha_weights,
     build_xs_neutral_weights,
     evaluate_xs_admission,
@@ -656,4 +660,97 @@ class TestDualFamilyAlphaWeights:
         with pytest.raises(DataIntegrityError, match="finite and in"):
             build_xs_alpha_dual_family_weights(
                 closes, bad_taker, funding, XsAlphaCompositeSpec(), XsCompositeSpec(),
+            )
+
+class TestCausalFamilyInverseVolWeights:
+    def test_xsv6_01_prior_window_fallback_and_causal_exclusion(self) -> None:
+        # SCENARIO_XSV6_01_CAUSAL_VOL_WEIGHTS_EXCLUDE_CURRENT_BAR
+        idx = pd.date_range("2024-01-01", periods=100, freq="4h", tz="UTC")
+        rng = np.random.default_rng(1)
+        cols = ["trend", "funding_contrarian", "taker_imbalance"]
+        base = pd.DataFrame(0.0, index=idx, columns=cols)
+        base["trend"] = rng.normal(0, 0.02, 100)
+        base["funding_contrarian"] = rng.normal(0, 0.001, 100)
+        base["taker_imbalance"] = rng.normal(0, 0.005, 100)
+        weights = _causal_family_inverse_vol_weights(base, 42)
+        assert list(weights.columns) == cols
+        # Rows before a full 42-bar strictly-prior window are equal-weight 1/3.
+        assert np.allclose(weights.iloc[:42].to_numpy(), 1.0 / 3.0, atol=1e-9)
+        assert bool(np.allclose(weights.sum(axis=1).to_numpy(), 1.0, atol=1e-9))
+        # Mutating bar 80's own return must not change bar 80's weight but must
+        # change bar 81's (its strictly-prior window includes bar 80).
+        mutated = base.copy()
+        mutated.iloc[80, 0] = 5.0
+        w2 = _causal_family_inverse_vol_weights(mutated, 42)
+        assert np.allclose(weights.iloc[80].to_numpy(), w2.iloc[80].to_numpy(), atol=1e-9)
+        assert not np.allclose(weights.iloc[81].to_numpy(), w2.iloc[81].to_numpy(), atol=1e-9)
+
+    def test_xsv6_01_zero_std_family_falls_back_and_row_still_normalizes(self) -> None:
+        idx = pd.date_range("2024-01-01", periods=60, freq="4h", tz="UTC")
+        rng = np.random.default_rng(7)
+        cols = ["trend", "funding_contrarian", "taker_imbalance"]
+        frame = pd.DataFrame(0.0, index=idx, columns=cols)
+        frame["trend"] = rng.normal(0, 0.01, 60)
+        # funding_contrarian and taker_imbalance stay constant at 0.0: their
+        # trailing std is zero after the fallback window, so only trend tilts.
+        weights = _causal_family_inverse_vol_weights(frame, 42)
+        assert np.allclose(weights.iloc[:42].to_numpy(), 1.0 / 3.0, atol=1e-9)
+        assert bool(np.allclose(weights.sum(axis=1).to_numpy(), 1.0, atol=1e-9))
+        late = weights.iloc[50:]
+        # Both constant families fall back to the same shared default and are
+        # renormalized identically, so they must stay equal to each other while
+        # the single non-degenerate family carries the bulk of the tilt.
+        assert np.allclose(late["funding_contrarian"].to_numpy(), late["taker_imbalance"].to_numpy(), atol=1e-9)
+        assert bool((late["trend"] > late["funding_contrarian"]).all())
+
+
+class TestVolWeightedAlphaWeights:
+    def test_xsv6_02_matches_manual_recompute(self) -> None:
+        # SCENARIO_XSV6_02_VOL_WEIGHTED_MATCHES_MANUAL_RECOMPUTE
+        idx = pd.date_range("2024-01-01", periods=250, freq="4h", tz="UTC")
+        rng = np.random.default_rng(2)
+        cols = ["A", "B", "C"]
+        closes = pd.DataFrame(
+            {c: 100 * np.exp(np.cumsum(rng.normal(0, 0.01, 250))) for c in cols},
+            index=idx,
+        )
+        opens = closes.shift(1).bfill()
+        taker = pd.DataFrame(
+            np.clip(0.5 + rng.normal(0, 0.05, (250, 3)), 0.0, 1.0),
+            index=idx, columns=cols,
+        )
+        funding = pd.DataFrame(0.0, index=idx, columns=cols)
+        alpha_spec = XsAlphaCompositeSpec()
+        exec_spec = XsCompositeSpec()
+        family_scores = build_xs_alpha_family_scores(closes, taker, funding, alpha_spec)
+        family_weights = build_xs_alpha_family_weights(closes, taker, funding, alpha_spec, exec_spec)
+        sleeve_returns = {}
+        for name, fw in family_weights.items():
+            equity, _turnover = run_xs_composite_ledger(fw, opens, funding, exec_spec)
+            sleeve_returns[name] = equity.pct_change()
+        sleeve_returns_frame = pd.DataFrame(sleeve_returns, index=idx)
+        vol_weights = _causal_family_inverse_vol_weights(
+            sleeve_returns_frame, alpha_spec.signal_windows[0],
+        )
+        combined = sum(
+            vol_weights[name].to_numpy()[:, None] * family_scores[name].to_numpy()
+            for name in family_scores
+        )
+        expected = build_xs_neutral_weights(
+            pd.DataFrame(combined, index=idx, columns=cols),
+            exec_spec.halflife_bars, exec_spec.no_trade_band,
+        )
+        actual = build_xs_alpha_vol_weighted_weights(
+            closes, taker, funding, opens, alpha_spec, exec_spec,
+        )
+        assert actual.equals(expected)
+
+    def test_xsv6_02_malformed_panels_fail_closed(self) -> None:
+        closes, taker, funding = _alpha_inputs(rows=250)
+        opens = closes.shift(1).bfill()
+        bad_taker = taker.copy()
+        bad_taker.iloc[5, 0] = np.nan
+        with pytest.raises(DataIntegrityError, match="finite and in"):
+            build_xs_alpha_vol_weighted_weights(
+                closes, bad_taker, funding, opens, XsAlphaCompositeSpec(), XsCompositeSpec(),
             )
