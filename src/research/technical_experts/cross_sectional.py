@@ -357,6 +357,30 @@ def build_xs_alpha_family_weights(
     }
 
 
+def build_xs_alpha_dual_family_weights(
+    closes: pd.DataFrame,
+    taker_buy_ratio: pd.DataFrame,
+    bar_funding: pd.DataFrame,
+    alpha_spec: XsAlphaCompositeSpec,
+    execution_spec: XsCompositeSpec,
+) -> pd.DataFrame:
+    """Build the equal-weight trend + taker_imbalance composite sleeve.
+
+    Drops the standalone-failing ``funding_contrarian`` family: reuses
+    :func:`build_xs_alpha_family_scores` verbatim (the frozen panel
+    construction) but sums only the ``trend`` and ``taker_imbalance`` keys and
+    then applies :func:`build_xs_neutral_weights` exactly once -- the same
+    smooth-once-after-selection invariant as the score-router relocation.
+    """
+    family_scores = build_xs_alpha_family_scores(
+        closes, taker_buy_ratio, bar_funding, alpha_spec,
+    )
+    combined = family_scores["trend"] + family_scores["taker_imbalance"]
+    return build_xs_neutral_weights(
+        combined, execution_spec.halflife_bars, execution_spec.no_trade_band,
+    )
+
+
 def run_xs_composite_ledger(
     weights: pd.DataFrame,
     opens: pd.DataFrame,
