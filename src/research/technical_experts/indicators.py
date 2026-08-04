@@ -202,7 +202,14 @@ def supertrend(
             final_lower[i] = max(float(basic_lower.iloc[i]), final_lower[i - 1])
         else:
             final_lower[i] = float(basic_lower.iloc[i])
-        if price > final_upper[i - 1]:
+        if long_trend[i - 1]:
+            if price < final_lower[i - 1]:
+                long_trend[i] = False
+                line[i] = final_upper[i]
+            else:
+                long_trend[i] = True
+                line[i] = final_lower[i]
+        elif price > final_upper[i - 1]:
             long_trend[i] = True
             line[i] = final_lower[i]
         else:
@@ -402,7 +409,7 @@ def regression_slope_tstat(close: pd.Series, period: int) -> pd.Series:
     window_first = pos_series - float(period - 1)
     sum_x_rel_y = txy - window_first * ysum
     slope = (sum_x_rel_y - xbar * ysum) / sxx
-    intercept = (ysum - slope * sum_x_rel_y) / n
+    intercept = (ysum - slope * (n * xbar)) / n
     sse = (y2sum - intercept * ysum - slope * sum_x_rel_y).clip(lower=0.0)
     se_slope = np.sqrt((sse / (n - 2.0)) / sxx)
     return slope / se_slope.replace(0.0, np.nan)

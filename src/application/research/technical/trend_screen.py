@@ -224,6 +224,7 @@ class SizingPolicyScore:
     mean_lcb90_cagr: float
     worst_mdd: float
     mean_allocation_cost: float
+    dead_parameter: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -344,6 +345,7 @@ class TrendScreenReport:
                     "mean_lcb90_cagr": round(s.mean_lcb90_cagr, 8),
                     "worst_mdd": round(s.worst_mdd, 8),
                     "mean_allocation_cost": round(s.mean_allocation_cost, 8),
+                    "dead_parameter": s.dead_parameter,
                 }
                 for s in self.sizing.policy_scores
             ],
@@ -1053,6 +1055,21 @@ def _rank_sizing_policies(
             mean_allocation_cost=float(np.mean([s.allocation_cost for s in spec_folds])),
         ))
 
+    score_keys = [
+        (s.worst_lcb90_cagr, s.mean_lcb90_cagr, s.worst_mdd, s.mean_allocation_cost)
+        for s in policy_scores
+    ]
+    duplicate_keys = {key for key in score_keys if score_keys.count(key) > 1}
+    policy_scores = [
+        dataclasses.replace(
+            s,
+            dead_parameter=(
+                s.worst_lcb90_cagr, s.mean_lcb90_cagr, s.worst_mdd, s.mean_allocation_cost,
+            ) in duplicate_keys,
+        )
+        for s in policy_scores
+    ]
+
     if not policy_scores:
         return SizingTournament(
             selected_policy_id="sizing_tournament_infeasible",
@@ -1064,8 +1081,20 @@ def _rank_sizing_policies(
             fold_scores=tuple(fold_scores),
         )
 
+    electable = [s for s in policy_scores if s.worst_lcb90_cagr > 0.0]
+    if not electable:
+        return SizingTournament(
+            selected_policy_id="sizing_tournament_infeasible",
+            fraction=0.0,
+            mdd_cap_enabled=False,
+            status="INFEASIBLE",
+            reason="no_policy_with_positive_validation_edge",
+            policy_scores=(),
+            fold_scores=tuple(fold_scores),
+        )
+
     ranking = sorted(
-        policy_scores,
+        electable,
         key=lambda s: (
             -s.worst_lcb90_cagr,
             -s.mean_lcb90_cagr,
@@ -1185,11 +1214,14 @@ def _greedy_portfolio_selection(runs: list[_CellRun], max_sleeves: int = 5) -> l
 
 
 def _equal_risk_weights(selected: list[_CellRun]) -> list[float]:
-    """Inverse-discovery-policy-volatility equal-risk weights frozen at the boundary."""
+    """Inverse-unit-discovery-volatility equal-risk weights frozen at the boundary."""
     inv: list[float] = []
     for run in selected:
-        assert run.policy_equity is not None
-        returns = run.policy_equity.pct_change().dropna()
+        if run.disc_equity is None:
+            raise DataIntegrityError(
+                f"selected run {run.cell.return_source} has no discovery equity ledger"
+            )
+        returns = run.disc_equity.pct_change().dropna()
         vol = float(returns.std() * np.sqrt(_BARS_PER_YEAR)) if len(returns) > 1 else 0.0
         inv.append(1.0 / vol if vol > 0.0 else 0.0)
     total = sum(inv)
