@@ -5,8 +5,8 @@ import pandas as pd
 import pytest
 
 from src.research.expert_portfolio.allocator import (
-    _causal_block_aware_inflation,
     _causal_lcb_weight_series,
+    causal_block_aware_inflation,
     compute_causal_lcb_weights,
 )
 from src.research.expert_portfolio.models import ExpertDefinition, ExpertPortfolioSpec
@@ -179,7 +179,7 @@ class TestBlockAwareInflation:
         values: list[float] = []
         for seed in range(40):
             rets = np.random.default_rng(seed).normal(0.0, 0.005, 300)
-            values.append(float(_causal_block_aware_inflation(rets)[250]))
+            values.append(float(causal_block_aware_inflation(rets)[250]))
         assert 0.70 <= float(np.mean(values)) <= 1.10
 
     def test_autocorrelated_series_inflates_above_one(self) -> None:
@@ -187,7 +187,7 @@ class TestBlockAwareInflation:
         # block-aware variance factor must be materially above one.
         rng = np.random.default_rng(6)
         rets = np.cumsum(rng.normal(0.0, 0.005, 300))
-        inflation = _causal_block_aware_inflation(rets)
+        inflation = causal_block_aware_inflation(rets)
         assert float(inflation[250]) > 1.0
         assert float(inflation[50]) > 1.0
 

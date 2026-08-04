@@ -37,12 +37,18 @@ from src.application.research.technical.trend_screen import _load_symbol_data
 from src.common.errors import DataIntegrityError
 from src.research.baseline.backtest import _align_funding_rates
 from src.research.evaluation.policy import HOLDOUT_CUTOFF, resolve_evaluation_end
+from src.research.expert_portfolio.contextual_router import (
+    build_causal_context_labels,
+    state_labels,
+)
+from src.research.expert_portfolio.models import ContextualRouterSpec
 from src.research.technical_experts.contracts import TechnicalCandidate
 from src.research.technical_experts.cross_sectional import (
     XsAdmissionConfig,
     XsAdmissionResult,
     XsAlphaCompositeSpec,
     XsCompositeSpec,
+    build_xs_alpha_family_weights,
     build_xs_alpha_weights,
     build_xs_neutral_weights,
     evaluate_xs_admission,
@@ -57,16 +63,25 @@ from src.research.technical_experts.trend_screen_catalog import (
     TREND_SCREEN_FAMILIES,
     TREND_SCREEN_SYMBOLS,
 )
+from src.research.technical_experts.xs_contextual_router import (
+    XsContextualAllocation,
+    build_xs_causal_contextual_allocation,
+    build_xs_context_market,
+)
 
 XS_NEUTRAL_PROFILE_ID = "xs_neutral_composite_v1"
 XS_ALPHA_PROFILE_ID = "xs_alpha_multihorizon_v2"
+XS_CONTEXTUAL_ALPHA_PROFILE_ID = "xs_alpha_contextual_v3"
 # The four-symbol earliest-history gap is not recoverable before 2022-04-03.
 # Keep the baseline catalog window unchanged, but start XS panel evaluation on
 # the first timestamp with complete taker/quote fields across the universe.
 XS_DISCOVERY_START = pd.Timestamp("2022-04-03", tz="UTC")
 
+_ALPHA_FAMILY_ORDER = ("trend", "funding_contrarian", "taker_imbalance")
+
 __all__ = [
     "XS_ALPHA_PROFILE_ID",
+    "XS_CONTEXTUAL_ALPHA_PROFILE_ID",
     "XS_NEUTRAL_PROFILE_ID",
     "XsTrendScreenReport",
     "run_xs_trend_screen",
@@ -91,6 +106,9 @@ class XsTrendScreenReport:
     stress_discovery: XsAdmissionResult | None = None
     stress_qualification: XsAdmissionResult | None = None
     stress_holdout: XsAdmissionResult | None = None
+    router_spec: dict[str, object] | None = None
+    router_diagnostics: dict[str, object] | None = None
+    family_admission: dict[str, object] | None = None
 
     def to_payload(self) -> dict[str, object]:
         """Canonical, deterministic JSON-ready payload (fingerprint included)."""
@@ -143,6 +161,12 @@ class XsTrendScreenReport:
             if self.stress_holdout is not None:
                 stress_payload["holdout"] = _admission_payload(self.stress_holdout)
             payload["stress"] = stress_payload
+        if self.router_spec is not None:
+            payload["router_spec"] = self.router_spec
+        if self.router_diagnostics is not None:
+            payload["router_diagnostics"] = self.router_diagnostics
+        if self.family_admission is not None:
+            payload["family_admission"] = self.family_admission
         payload["report_fingerprint"] = _fingerprint_without_self(payload)
         return payload
 
@@ -275,6 +299,81 @@ def _fail_closed_report(
     )
 
 
+def _router_spec_payload(spec: ContextualRouterSpec | None) -> dict[str, object] | None:
+    """Deterministic JSON-ready serialization of the frozen router spec."""
+    if spec is None:
+        return None
+    return {
+        "context_symbol": spec.context_symbol,
+        "trend_lookback_bars": spec.trend_lookback_bars,
+        "volatility_lookback_bars": spec.volatility_lookback_bars,
+        "min_context_history_bars": spec.min_context_history_bars,
+        "confidence": spec.confidence,
+    }
+
+
+def _selected_window(
+    selected: pd.Series,
+    start: pd.Timestamp,
+    end: pd.Timestamp,
+) -> dict[str, object]:
+    """Inclusive ``[start, end]`` selection counts and fractions per sleeve."""
+    rows = selected[(selected.index >= start) & (selected.index <= end)]
+    keys = (*_ALPHA_FAMILY_ORDER, "CASH")
+    counts = {key: int((rows == key).sum()) for key in keys}
+    total = len(rows)
+    fractions = {
+        key: round(count / total, 8) if total else 0.0
+        for key, count in counts.items()
+    }
+    return {"counts": counts, "fractions": fractions}
+
+
+def _build_router_diagnostics(
+    allocation: XsContextualAllocation,
+    holdout_start: pd.Timestamp | None,
+    holdout_end: pd.Timestamp | None,
+) -> dict[str, object]:
+    """Deterministic per-window and per-state router diagnostics."""
+    selected = allocation.selected_sleeve
+    windows: dict[str, object] = {
+        "discovery": _selected_window(selected, XS_DISCOVERY_START, DISCOVERY_END),
+        "qualification": _selected_window(selected, QUALIFICATION_START, QUALIFICATION_END),
+    }
+    if holdout_start is not None and holdout_end is not None:
+        windows["holdout"] = _selected_window(selected, holdout_start, holdout_end)
+
+    labels = allocation.decision_context
+    n = len(labels)
+    label_values = labels.to_numpy(dtype=object)
+    states: dict[str, object] = {}
+    for state in state_labels():
+        state_rows = np.flatnonzero(label_values == state)
+        completed = int((state_rows < n - 1).sum())
+        last_lcb: dict[str, object] = {}
+        for family in _ALPHA_FAMILY_ORDER:
+            values = allocation.conditional_lcb[labels == state][family].dropna()
+            last_lcb[family] = (
+                round(float(values.iloc[-1]), 8) if not values.empty else None
+            )
+        states[state] = {"completed_samples": completed, "last_lcb": last_lcb}
+    return {"windows": windows, "states": states}
+
+
+def _build_family_admission(
+    family_ledgers: dict[str, tuple[pd.Series, pd.Series]],
+    benchmark: pd.Series,
+) -> dict[str, object]:
+    """Diagnostic-only standalone family admission, never the combined result."""
+    out: dict[str, object] = {}
+    for family, (equity, turnover) in family_ledgers.items():
+        result = evaluate_xs_admission(equity, turnover, benchmark, XsAdmissionConfig())
+        payload = _admission_payload(result)
+        payload["diagnostic"] = True
+        out[family] = payload
+    return out
+
+
 def run_xs_trend_screen(
     *,
     start: str | pd.Timestamp | None = None,
@@ -293,16 +392,25 @@ def run_xs_trend_screen(
     both replayed from the same frozen target weights. Nothing is registered;
     ``end`` defaults to the sealed cutoff unless ``unseal_holdout`` is set.
     """
-    if profile not in (XS_NEUTRAL_PROFILE_ID, XS_ALPHA_PROFILE_ID):
+    if profile not in (
+        XS_NEUTRAL_PROFILE_ID,
+        XS_ALPHA_PROFILE_ID,
+        XS_CONTEXTUAL_ALPHA_PROFILE_ID,
+    ):
         raise ValueError(
             f"unknown xs screen profile '{profile}'; the source-controlled "
-            f"profiles are '{XS_NEUTRAL_PROFILE_ID}' and '{XS_ALPHA_PROFILE_ID}'"
+            f"profiles are '{XS_NEUTRAL_PROFILE_ID}', '{XS_ALPHA_PROFILE_ID}', "
+            f"and '{XS_CONTEXTUAL_ALPHA_PROFILE_ID}'"
         )
     end = resolve_evaluation_end(end, unseal_holdout=unseal_holdout)
     requested_start = XS_DISCOVERY_START if start is None else pd.to_datetime(start, utc=True)
     effective_start = max(requested_start, XS_DISCOVERY_START)
     execution_spec = XsCompositeSpec()
-    alpha_spec = XsAlphaCompositeSpec() if profile == XS_ALPHA_PROFILE_ID else None
+    alpha_spec = (
+        XsAlphaCompositeSpec()
+        if profile in (XS_ALPHA_PROFILE_ID, XS_CONTEXTUAL_ALPHA_PROFILE_ID)
+        else None
+    )
     stress_spec = (
         dataclasses.replace(
             execution_spec,
@@ -344,7 +452,18 @@ def run_xs_trend_screen(
         },
     )
 
+    opens_arr = opens.to_numpy(dtype=np.float64)
+    o2o = np.zeros_like(opens_arr)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        o2o[1:] = opens_arr[1:] / opens_arr[:-1] - 1.0
+    benchmark = pd.Series(o2o.mean(axis=1), index=common, name="benchmark")
+
     score_frames: dict[str, pd.Series] | None = None
+    router_spec: ContextualRouterSpec | None = None
+    allocation: XsContextualAllocation | None = None
+    family_ledgers: dict[str, tuple[pd.Series, pd.Series]] | None = None
+    router_diagnostics: dict[str, object] | None = None
+    family_admission: dict[str, object] | None = None
     if alpha_spec is not None:
         try:
             closes = pd.DataFrame(
@@ -359,12 +478,44 @@ def run_xs_trend_screen(
                     for symbol, (frame, _funding) in data.items()
                 },
             )
-            weights = build_xs_alpha_weights(
-                closes, taker, bar_funding, alpha_spec, execution_spec,
+            if profile == XS_CONTEXTUAL_ALPHA_PROFILE_ID:
+                router_spec = ContextualRouterSpec(
+                    context_symbol="XS_EQUAL_WEIGHT_MARKET",
+                    trend_lookback_bars=42,
+                    volatility_lookback_bars=42,
+                    min_context_history_bars=168,
+                    confidence=0.90,
+                )
+                family_weights = build_xs_alpha_family_weights(
+                    closes, taker, bar_funding, alpha_spec, execution_spec,
+                )
+                family_ledgers = {}
+                sleeve_returns: dict[str, pd.Series] = {}
+                for family, family_w in family_weights.items():
+                    equity, turnover = run_xs_composite_ledger(
+                        family_w, opens, bar_funding, execution_spec,
+                    )
+                    family_ledgers[family] = (equity, turnover)
+                    sleeve_returns[family] = equity.pct_change()
+                sleeve_returns_frame = pd.DataFrame(sleeve_returns, index=common)
+                market = build_xs_context_market(closes)
+                labels = build_causal_context_labels(market, router_spec)
+                allocation = build_xs_causal_contextual_allocation(
+                    family_weights, sleeve_returns_frame, labels, router_spec,
+                )
+                weights = allocation.target_weights
+            else:
+                weights = build_xs_alpha_weights(
+                    closes, taker, bar_funding, alpha_spec, execution_spec,
+                )
+        except (DataIntegrityError, ValueError) as exc:
+            constraint = (
+                f"contextual_router_invalid:{type(exc).__name__}"
+                if profile == XS_CONTEXTUAL_ALPHA_PROFILE_ID
+                else f"alpha_panel_invalid:{type(exc).__name__}"
             )
-        except DataIntegrityError as exc:
             return _fail_closed_report(
-                execution_spec, f"alpha_panel_invalid:{type(exc).__name__}",
+                execution_spec, constraint,
                 profile=profile, alpha_spec=alpha_spec, stress_spec=stress_spec,
             )
     else:
@@ -378,12 +529,6 @@ def run_xs_trend_screen(
         weights = build_xs_neutral_weights(
             score, execution_spec.halflife_bars, execution_spec.no_trade_band,
         )
-
-    opens_arr = opens.to_numpy(dtype=np.float64)
-    o2o = np.zeros_like(opens_arr)
-    with np.errstate(divide="ignore", invalid="ignore"):
-        o2o[1:] = opens_arr[1:] / opens_arr[:-1] - 1.0
-    benchmark = pd.Series(o2o.mean(axis=1), index=common, name="benchmark")
 
     equity, turnover = run_xs_composite_ledger(weights, opens, bar_funding, execution_spec)
 
@@ -441,6 +586,12 @@ def run_xs_trend_screen(
                 XsAdmissionConfig(),
             )
 
+    if router_spec is not None and allocation is not None and family_ledgers is not None:
+        router_diagnostics = _build_router_diagnostics(
+            allocation, holdout_start, holdout_end,
+        )
+        family_admission = _build_family_admission(family_ledgers, benchmark)
+
     symbols: dict[str, dict[str, object]] = {}
     for symbol in TREND_SCREEN_SYMBOLS:
         if score_frames is not None:
@@ -468,6 +619,9 @@ def run_xs_trend_screen(
         stress_discovery=stress_discovery,
         stress_qualification=stress_qualification,
         stress_holdout=stress_holdout,
+        router_spec=_router_spec_payload(router_spec),
+        router_diagnostics=router_diagnostics,
+        family_admission=family_admission,
     )
 
 
@@ -491,6 +645,7 @@ def _check_contract() -> None:
     assert all(p.kind == p.KEYWORD_ONLY for p in params.values())
     assert XS_NEUTRAL_PROFILE_ID == "xs_neutral_composite_v1"
     assert XS_ALPHA_PROFILE_ID == "xs_alpha_multihorizon_v2"
+    assert XS_CONTEXTUAL_ALPHA_PROFILE_ID == "xs_alpha_contextual_v3"
     assert len(TREND_SCREEN_FAMILIES) == 15
     assert len(TREND_SCREEN_SYMBOLS) == 15
 

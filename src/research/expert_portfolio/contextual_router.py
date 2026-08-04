@@ -18,10 +18,10 @@ import pandas as pd
 
 from src.market_data.storage.loaders import timeframe_scale_factor
 from src.research.expert_portfolio.allocator import (
-    _causal_block_aware_inflation,
     _group_matrices,
     _project_weights,
     _validate_panel,
+    causal_block_aware_inflation,
 )
 from src.research.expert_portfolio.models import (
     ContextualRouterSpec,
@@ -229,7 +229,7 @@ def compute_causal_contextual_winner_weights(
         inflation_by_column = []
         for column in range(len(expert_ids)):
             completed = np.concatenate([samples[:, column], np.array([0.0])])
-            inflation_by_column.append(_causal_block_aware_inflation(completed))
+            inflation_by_column.append(causal_block_aware_inflation(completed))
 
         for t in np.flatnonzero(labels == state):
             j = int(eligible[t])
@@ -349,7 +349,7 @@ def compute_causal_per_symbol_contextual_weights(
         inflation_by_column = []
         for column in range(len(expert_ids)):
             completed = np.concatenate([samples[:, column], np.array([0.0])])
-            inflation_by_column.append(_causal_block_aware_inflation(completed))
+            inflation_by_column.append(causal_block_aware_inflation(completed))
 
         for t in np.flatnonzero(labels == state):
             j = int(eligible[t])

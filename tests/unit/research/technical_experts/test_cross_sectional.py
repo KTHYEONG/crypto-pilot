@@ -1,8 +1,9 @@
-"""Contract scenarios XSC-01..XSC-05 and XSC-07 for the cross-sectional module.
+"""Contract scenarios XSC-01..XSC-05, XSC-07, XSA-02, and XSV3-01 for the cross-sectional module.
 
 XSC-01-NO-TRADE-BAND-STATEFUL, XSC-02-WEIGHTS-DOLLAR-NEUTRAL,
 XSC-03-SPEC-FROZEN-BOUNDS, XSC-04-LEDGER-EXECUTION-LAG,
-XSC-05-ADMISSION-SCALE-INVARIANT, XSC-07-COMPOSITE-BEATS-SINGLE-FAMILY.
+XSC-05-ADMISSION-SCALE-INVARIANT, XSC-07-COMPOSITE-BEATS-SINGLE-FAMILY,
+XSA-02-COMPOSITE-PRESERVATION, XSV3-01-FAMILY-SUM.
 """
 
 from __future__ import annotations
@@ -20,6 +21,8 @@ from src.research.technical_experts.cross_sectional import (
     XsCompositeSpec,
     apply_no_trade_band,
     build_xs_alpha_composite_score,
+    build_xs_alpha_family_scores,
+    build_xs_alpha_family_weights,
     build_xs_alpha_weights,
     build_xs_neutral_weights,
     evaluate_xs_admission,
@@ -554,3 +557,45 @@ class TestAlphaMultihorizonConstruction:
             XsCompositeSpec(no_trade_band=0.0),
         )
         assert not np.allclose(banded.to_numpy(), no_band.to_numpy())
+
+
+class TestAlphaFamilyDecomposition:
+    def test_xsv3_01_three_family_scores_sum_to_legacy_composite(self) -> None:
+        closes, taker, funding = _alpha_inputs()
+        spec = XsAlphaCompositeSpec()
+        composite = build_xs_alpha_composite_score(closes, taker, funding, spec)
+        families = build_xs_alpha_family_scores(closes, taker, funding, spec)
+        assert list(families) == ["trend", "funding_contrarian", "taker_imbalance"]
+        total = sum(families.values())
+        assert np.allclose(total.to_numpy(), composite.to_numpy(), atol=1e-12)
+        for name in ("trend", "funding_contrarian", "taker_imbalance"):
+            frame = families[name]
+            assert not frame.isna().any().any()
+            assert frame.index.equals(closes.index)
+            assert list(frame.columns) == list(closes.columns)
+
+    def test_xsv3_01_family_scores_are_prefix_invariant(self) -> None:
+        closes, taker, funding = _alpha_inputs()
+        cutoff = 200
+        full = build_xs_alpha_family_scores(
+            closes, taker, funding, XsAlphaCompositeSpec(),
+        )
+        prefix = build_xs_alpha_family_scores(
+            closes.iloc[:cutoff], taker.iloc[:cutoff], funding.iloc[:cutoff],
+            XsAlphaCompositeSpec(),
+        )
+        for name, frame in full.items():
+            assert np.allclose(
+                frame.iloc[:cutoff].to_numpy(), prefix[name].to_numpy(), atol=1e-12,
+            )
+
+    def test_xsv3_01_family_weights_map_exactly_the_three_families(self) -> None:
+        closes, taker, funding = _alpha_inputs()
+        weights = build_xs_alpha_family_weights(
+            closes, taker, funding, XsAlphaCompositeSpec(), XsCompositeSpec(),
+        )
+        assert list(weights) == ["trend", "funding_contrarian", "taker_imbalance"]
+        for frame in weights.values():
+            assert frame.index.equals(closes.index)
+            assert list(frame.columns) == list(closes.columns)
+            assert not frame.isna().any().any()
