@@ -1,6 +1,16 @@
 {
   "tasks": [
     {
+      "task_id": "TASK_XS_ALPHA_CONTEXTUAL_ROUTING_V3",
+      "date": "2026-08-04",
+      "adr_id": "ADR_20260804_XS_ALPHA_CONTEXTUAL_ROUTING_V3",
+      "domain": "futures",
+      "title": "XS alpha contextual routing v3 evaluation",
+      "why": "The fixed equal-weight xs_alpha_multihorizon_v2 book lost 0.495 Sharpe from discovery to qualification and showed materially worse stress sensitivity, motivating causal family-specialist routing.",
+      "resolution": "Implemented a research-only three-family contextual router using six-state causal labels, 90% block-aware LCB selection, CASH fallback, standalone diagnostics, final-ledger cost replay, and fail-closed validation; v2 remains unchanged.",
+      "impact": "The frozen v3 execution failed discovery and qualification: Sharpe -1.828/-1.515, turnover 216.5/293.6x per year, and stress Sharpe -3.299/-3.014. The negative result exposes an execution-delay attribution defect or excessive sleeve-switch turnover; v3 is not promotable and requires timing-aligned router repair."
+    },
+    {
       "task_id": "xs_neutral_alpha_v2",
       "date": "2026-08-04",
       "adr_id": "ADR_20260804_xs_neutral_alpha_v2",
