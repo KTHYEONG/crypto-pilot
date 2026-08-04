@@ -227,6 +227,68 @@ def test_pbgt_02_causal_schedule_prefix_is_immune_to_later_returns(monkeypatch) 
     assert schedule.iloc[lookback_bars] > 0.0
 
 
+def test_fractional_kelly_schedule_causal_capped_and_prefix_immune() -> None:
+    """FK-01: the fractional-Kelly/MDD schedule is causal, non-negative, capped
+    at the gross limit, never exceeds the MDD cap, and ignores later marks."""
+    from src.research.sleeve_blend.contracts import (
+        CausalFractionalKellySpec,
+        CausalLeverageSpec,
+    )
+    from src.research.sleeve_blend.fixed import (
+        build_causal_fractional_kelly_schedule,
+        build_causal_leverage_schedule,
+    )
+
+    idx = pd.date_range("2022-01-01", periods=4400, freq="4h", tz="UTC")
+    unit = pd.Series(np.linspace(100.0, 130.0, len(idx)), index=idx)
+    unit.iloc[1000:1050] = unit.iloc[1000:1050] * 0.7
+    spec = CausalLeverageSpec()
+    kelly = CausalFractionalKellySpec()
+
+    schedule = build_causal_fractional_kelly_schedule(unit, spec, kelly)
+    mdd_cap = build_causal_leverage_schedule(unit, spec)
+
+    lookback_bars = round(pd.Timedelta(days=365) / pd.Timedelta(hours=4))
+    assert schedule.iloc[:lookback_bars].eq(0.0).all()
+    assert (schedule >= 0).all()
+    assert (schedule <= spec.max_gross_leverage).all()
+    assert (schedule.to_numpy() <= mdd_cap.to_numpy() + 1e-12).all()
+
+    altered = unit.copy()
+    altered.iloc[3500:] = altered.iloc[3500:] * 1.5
+    rebuilt = build_causal_fractional_kelly_schedule(altered, spec, kelly)
+    assert rebuilt.iloc[:3500].equals(schedule.iloc[:3500])
+
+
+def test_fractional_kelly_zero_exposure_before_complete_lookback() -> None:
+    """FK-02: without a complete lookback or with non-positive Kelly moments
+    the policy exposure is zero, and malformed series raise ValueError."""
+    from src.research.sleeve_blend.contracts import (
+        CausalFractionalKellySpec,
+        CausalLeverageSpec,
+    )
+    from src.research.sleeve_blend.fixed import build_causal_fractional_kelly_schedule
+
+    idx = pd.date_range("2022-01-01", periods=400, freq="4h", tz="UTC")
+    spec = CausalLeverageSpec()
+    kelly = CausalFractionalKellySpec()
+
+    declining = pd.Series(np.linspace(100.0, 80.0, len(idx)), index=idx)
+    schedule = build_causal_fractional_kelly_schedule(declining, spec, kelly)
+    assert schedule.eq(0.0).all()
+
+    with pytest.raises(ValueError, match="unit_equity"):
+        build_causal_fractional_kelly_schedule(
+            pd.Series(np.full(200, -1.0), index=idx[:200]), spec, kelly,
+        )
+
+    with pytest.raises(ValueError, match="lookback_days"):
+        build_causal_fractional_kelly_schedule(
+            pd.Series(np.linspace(100.0, 110.0, 400), index=idx),
+            CausalLeverageSpec(lookback_days=120), kelly,
+        )
+
+
 def test_run_fixed_sleeve_portfolio_with_schedule_applies_frozen_schedule(monkeypatch) -> None:
     """The frozen-schedule execution reuses the pre-built schedule verbatim."""
     from src.research.sleeve_blend.contracts import CausalLeverageSpec
