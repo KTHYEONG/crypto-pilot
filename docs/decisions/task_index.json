@@ -1,6 +1,16 @@
 {
   "tasks": [
     {
+      "task_id": "TASK_TREND_SCREEN_SIGNAL_INTEGRITY",
+      "date": "2026-08-04",
+      "adr_id": "ADR_20260804_TREND_SCREEN_SIGNAL_INTEGRITY",
+      "domain": "research",
+      "title": "Trend screen 신호 무결성 및 가중치 차원 정합 수리",
+      "why": "baseline_gate_performance_v1 qualification이 admitted=False로 반복 실패. Kelly 재튜닝 대신 실측 진단한 결과 15개 패밀리 중 3개(donchian_breakout exit 항등False, regression_slope 절편 차원오류, supertrend 상태미지속)가 신호 생성 자체가 결함이었고, _equal_risk_weights가 Kelly 적용 원장으로 가중치를 만들어 unit blend에 적용하는 차원 불일치로 사이징 신호가 반전되고 있었음(격리실측 QUAL t 0.41->1.10).",
+      "resolution": "donchian exit 채널 .shift() 적용, regression_slope_tstat 절편식(n*xbar) 수정, supertrend를 상태기계(직전 상태 승계)로 수정, _equal_risk_weights를 disc_equity(unit 원장) 기준으로 재정합, 사이징 토너먼트에 양의 검증엣지 하한 추가(no_policy_with_positive_validation_edge로 fail-closed), SizingPolicyScore에 dead_parameter 진단 플래그 추가, assert_family_signal_liveness 감사 헬퍼 신설.",
+      "impact": "450셀 재실행: cell_failed 0건(이전 6건, donchian short 파산 은폐 해소), 8/8 sizing fold VALID(이전 zero-active-leverage로 일부 INFEASIBLE). 그러나 discovery 두 폴드 전부 검증 LCB90 음수로 판명되어 토너먼트가 정직하게 INFEASIBLE(binding_constraint=sizing_tournament_infeasible)을 반환, CASH 유지. 이전 코드는 음엣지 상태에서도 kelly_mdd_q10을 강제 선출했었음 -- 결함 수정으로 허위 admission 경로가 제거됨."
+    },
+    {
       "task_id": "TREND_SCREEN_BACKTEST_INTEGRITY_DIAGNOSIS",
       "date": "2026-08-04",
       "adr_id": "ADR_20260804_TREND_SCREEN_BACKTEST_INTEGRITY_DIAGNOSIS",
