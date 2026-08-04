@@ -1,14 +1,16 @@
 """Pre-registered baseline-gate trend screen: 450-cell discovery then qualification.
 
 Loads funding-complete 4h data once per symbol, executes exactly the 30
-frozen screen identities on the exact 15-symbol universe (450 cells), screens
-discovery (2022-04-01..2023-12-31) with a Holm-adjusted 90% block-bootstrap
-lower bound plus the frozen trade-count / point-CAGR / t-stat floors, forms a
-maximum-five-sleeve equal-risk portfolio with weights computed once at the
-discovery boundary, and generates the qualification total-equity ledger under a
-causal leverage schedule built only on prior marks. Admission requires the
-unchanged observation, derived fold-concentration, stressed rerun with the same
-frozen schedule, and (when unsealed) holdout gates; otherwise the binding
+frozen screen identities on the exact 15-symbol universe (450 cells), evaluates
+each cell at unit risk and under its causal fractional-Kelly/MDD policy ledger,
+screens discovery (2022-04-01..2023-12-31) by data validity, a complete causal
+policy lookback, one closed trade per complete discovery month, and a positive
+unit-risk LCB90 (raw CAGR / t-stat / bootstrap-negative fraction stay
+diagnostics, never hard gates), forms a maximum-five-sleeve portfolio ranked and
+weighted on policy discovery ledgers, and generates the qualification
+total-equity ledgers under the frozen base-derived schedule. Admission requires
+the unchanged observation, derived fold-concentration, stressed rerun with the
+same frozen schedule, and (when unsealed) holdout gates; otherwise the binding
 constraint is recorded and CASH is retained.
 
 The screen persists a deterministic report and never registers a production
@@ -44,8 +46,14 @@ from src.research.evaluation.reliability import (
     compute_fold_distribution,
     split_holdout_segment,
 )
-from src.research.sleeve_blend.contracts import CausalLeverageSpec
-from src.research.sleeve_blend.fixed import build_causal_leverage_schedule
+from src.research.sleeve_blend.contracts import (
+    CausalFractionalKellySpec,
+    CausalLeverageSpec,
+)
+from src.research.sleeve_blend.fixed import (
+    build_causal_fractional_kelly_schedule,
+    build_causal_leverage_schedule,
+)
 from src.research.technical_experts.backtest import run_technical_expert_backtest
 from src.research.technical_experts.contracts import TechnicalCandidate
 from src.research.technical_experts.provenance import technical_data_hashes
@@ -67,7 +75,6 @@ _BASE_DELAY_BARS = 1
 _STRESS_DELAY_BARS = 2
 _INITIAL_EQUITY = 10_000.0
 _BARS_PER_YEAR = 2190
-_HOLM_ALPHA = 0.10
 
 __all__ = [
     "TREND_SCREEN_CANDIDATES",
@@ -85,7 +92,14 @@ __all__ = [
 
 @dataclass(frozen=True, slots=True)
 class TrendScreenCell:
-    """One (identity x symbol) discovery cell of the pre-registered screen."""
+    """One (identity x symbol) discovery cell of the pre-registered screen.
+
+    Raw fields (``net_cagr``/``lcb90``/``t_stat``/``p_negative``) are the
+    unit-risk alpha diagnostics; ``policy_*`` fields describe the same return
+    stream under the causal fractional-Kelly/MDD policy ledger and drive
+    ranking, correlation, and portfolio construction. The latter never replace
+    the raw diagnostics.
+    """
 
     return_source: str
     family: str
@@ -104,6 +118,14 @@ class TrendScreenCell:
     fingerprint: dict[str, str]
     discovery_pass: bool
     rejected_reason: str | None
+    policy_lcb90: float = 0.0
+    policy_cagr: float = 0.0
+    policy_mdd: float = 0.0
+    policy_trade_count: int = 0
+    policy_schedule_hash: str = ""
+    kelly_fraction: float = 0.25
+    kelly_lookback_days: int = 365
+    allocation_cost: float = 0.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -167,10 +189,17 @@ class TrendScreenReport:
                     "fingerprint": cell.fingerprint,
                     "discovery_pass": cell.discovery_pass,
                     "rejected_reason": cell.rejected_reason,
+                    "policy_lcb90": round(cell.policy_lcb90, 8),
+                    "policy_cagr": round(cell.policy_cagr, 8),
+                    "policy_mdd": round(cell.policy_mdd, 8),
+                    "policy_trade_count": cell.policy_trade_count,
+                    "policy_schedule_hash": cell.policy_schedule_hash,
+                    "kelly_fraction": cell.kelly_fraction,
+                    "kelly_lookback_days": cell.kelly_lookback_days,
+                    "allocation_cost": round(cell.allocation_cost, 8),
                 }
                 for cell in self.cells
             ],
-            "holm_alpha": _HOLM_ALPHA,
             "selection": None,
             "schedule_hash": self.schedule_hash,
             "qualification": {
@@ -215,12 +244,22 @@ def _fingerprint_without_self(payload: dict[str, object]) -> str:
 class _CellRun:
     """Internal evidence for one cell while the screen is running."""
 
-    __slots__ = ("cell", "disc_equity", "result")
+    __slots__ = (
+        "allocation_cost",
+        "cell",
+        "disc_equity",
+        "policy_equity",
+        "policy_schedule",
+        "result",
+    )
 
     def __init__(self, cell: TrendScreenCell, result: BacktestResult | None = None) -> None:
         self.cell = cell
         self.result = result
         self.disc_equity: pd.Series | None = None
+        self.policy_equity: pd.Series | None = None
+        self.policy_schedule: pd.Series | None = None
+        self.allocation_cost: float = 0.0
 
 
 def _trades_in_window(
@@ -231,9 +270,29 @@ def _trades_in_window(
 ) -> pd.DataFrame:
     if len(trades) == 0:
         return trades
-    exit_ts = equity_index[trades["exit_bar"].astype(int).to_numpy()]
+    if "exit_time" in trades.columns:
+        exit_ts = pd.to_datetime(trades["exit_time"], utc=True, errors="raise")
+    else:
+        exit_ts = equity_index[trades["exit_bar"].astype(int).to_numpy()]
     mask = (exit_ts >= start_ts) & (exit_ts <= end_ts)
     return trades[mask]
+
+
+def _portfolio_trades(
+    trade_rows: list[tuple[pd.DataFrame, pd.DatetimeIndex]],
+) -> pd.DataFrame:
+    """Combine single-symbol trades with timestamp exits for portfolio ledgers."""
+    frames: list[pd.DataFrame] = []
+    for trades, equity_index in trade_rows:
+        if len(trades) == 0:
+            continue
+        frame = trades.copy()
+        bars = frame["exit_bar"].astype(int).to_numpy()
+        if (bars < 0).any() or (bars >= len(equity_index)).any():
+            raise DataIntegrityError("trade exit_bar is outside its equity index")
+        frame["exit_time"] = equity_index[bars]
+        frames.append(frame)
+    return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
 
 
 def _funding_coverage(funding: pd.Series, grid: pd.DatetimeIndex) -> float:
@@ -294,8 +353,18 @@ def _run_cell(
         frame, candidate, costs, funding,
         initial_equity=_INITIAL_EQUITY, signal_delay_bars=_BASE_DELAY_BARS,
     )
+    policy_schedule = build_causal_fractional_kelly_schedule(
+        result.equity, CausalLeverageSpec(), CausalFractionalKellySpec(),
+    )
+    policy_equity, allocation_cost = _apply_policy_schedule(
+        result.equity, policy_schedule, costs,
+    )
+    kelly_spec = CausalFractionalKellySpec()
     disc_equity = result.equity[
         (result.equity.index >= DISCOVERY_START) & (result.equity.index <= DISCOVERY_END)
+    ]
+    policy_disc_equity = policy_equity[
+        (policy_equity.index >= DISCOVERY_START) & (policy_equity.index <= DISCOVERY_END)
     ]
     disc_trades = _trades_in_window(
         result.trades, result.equity.index, DISCOVERY_START, DISCOVERY_END,
@@ -304,6 +373,11 @@ def _run_cell(
     metrics = compute_metrics(disc_equity, disc_trades)
     gate = compute_equity_reliability_gate(
         disc_equity, len(disc_trades),
+        dataclasses.replace(ReliabilityGateConfig(), hurdle_rate=0.0),
+    )
+    policy_metrics = compute_metrics(policy_disc_equity, disc_trades)
+    policy_gate = compute_equity_reliability_gate(
+        policy_disc_equity, len(disc_trades),
         dataclasses.replace(ReliabilityGateConfig(), hurdle_rate=0.0),
     )
     disc_result = BacktestResult(
@@ -334,9 +408,20 @@ def _run_cell(
         fingerprint=fingerprint,
         discovery_pass=False,
         rejected_reason=None,
+        policy_lcb90=policy_gate.lcb90_cagr,
+        policy_cagr=policy_metrics.cagr,
+        policy_mdd=policy_metrics.mdd,
+        policy_trade_count=len(disc_trades),
+        policy_schedule_hash=_schedule_hash(policy_schedule),
+        kelly_fraction=kelly_spec.fraction,
+        kelly_lookback_days=kelly_spec.lookback_days,
+        allocation_cost=allocation_cost,
     )
     run = _CellRun(cell, result)
     run.disc_equity = disc_equity
+    run.policy_equity = policy_disc_equity
+    run.policy_schedule = policy_schedule
+    run.allocation_cost = allocation_cost
     return run
 
 
@@ -407,43 +492,39 @@ def _run_symbol_cells_worker(
     return runs
 
 
-def _holm_adjusted_pass(p_negatives: list[float], alpha: float = _HOLM_ALPHA) -> list[bool]:
-    """Holm-Bonferroni-adjusted significance of each 90% bootstrap lower bound.
-
-    The null per hypothesis is a non-positive block-bootstrap CAGR; rejecting it
-    at family-wise alpha=0.10 means the Holm-adjusted 90% lower bound lies above
-    zero. The adjustment covers every screened hypothesis (data-invalid cells
-    carry p=1.0 so they consume a rank and can never pass).
-    """
-    n = len(p_negatives)
-    order = sorted(range(n), key=lambda i: p_negatives[i])
-    passed = [False] * n
-    running = 0.0
-    for rank, idx in enumerate(order):
-        adjusted = max(running, p_negatives[idx] * float(n - rank))
-        running = adjusted
-        passed[idx] = adjusted < alpha
-    return passed
+def _discovery_duration_months(
+    start: pd.Timestamp, end: pd.Timestamp,
+) -> int:
+    """Number of complete calendar months spanned by the inclusive window."""
+    return int(
+        (end.year - start.year) * 12 + (end.month - start.month) + 1
+    )
 
 
 def _apply_discovery_requirements(
     runs: list[_CellRun],
-    holm_pass: list[bool],
     config: ReliabilityGateConfig,
 ) -> None:
-    for run, passes in zip(runs, holm_pass, strict=True):
+    """Gate discovery eligibility by data validity, causal lookback, trade
+    coverage, and positive unit-risk LCB90.
+
+    The required close count is duration-derived (one closed trade per complete
+    discovery month), replacing the fixed 30-close cliff. Holm, bootstrap
+    negative fraction, raw CAGR, and IID t-stat are reported diagnostics, never
+    hard gates here.
+    """
+    required_trades = _discovery_duration_months(DISCOVERY_START, DISCOVERY_END)
+    for run in runs:
         cell = run.cell
         if not cell.data_valid:
             continue
         reasons: list[str] = []
-        if cell.trade_count < config.min_trades:
-            reasons.append(f"min_trades:{cell.trade_count}<{config.min_trades}")
-        if cell.net_cagr <= 0.0:
-            reasons.append(f"net_cagr:{cell.net_cagr:.6f}<=0")
-        if cell.t_stat <= config.t_stat_floor:
-            reasons.append(f"t_stat:{cell.t_stat:.4f}<={config.t_stat_floor}")
-        if not passes:
-            reasons.append("holm_lcb90_not_above_zero")
+        if cell.trade_count < required_trades:
+            reasons.append(f"min_trades:{cell.trade_count}<{required_trades}")
+        if cell.lcb90 <= 0.0:
+            reasons.append(f"lcb90:{cell.lcb90:.6f}<=0")
+        if not _policy_lookback_complete(run):
+            reasons.append("incomplete_causal_lookback")
         if reasons:
             run.cell = dataclasses.replace(
                 cell, discovery_pass=False, rejected_reason=";".join(reasons),
@@ -454,8 +535,53 @@ def _apply_discovery_requirements(
             )
 
 
+def _policy_lookback_complete(run: _CellRun) -> bool:
+    """True when the policy schedule reaches non-zero exposure in discovery.
+
+    The schedule only turns non-zero after a complete causal lookback, so any
+    positive discovery bar certifies the required lookback was available.
+    """
+    schedule = run.policy_schedule
+    if schedule is None or len(schedule) == 0:
+        return False
+    active = schedule[
+        (schedule.index >= DISCOVERY_START) & (schedule.index <= DISCOVERY_END)
+    ]
+    if len(active) == 0:
+        return False
+    return bool((active > 0.0).any())
+
+
+def _apply_policy_schedule(
+    unit_equity: pd.Series,
+    schedule: pd.Series,
+    costs: CostModel,
+) -> tuple[pd.Series, float]:
+    """Apply a frozen leverage schedule to a unit ledger with turnover cost.
+
+    On each causal bar the leveraged marked return is the unit simple return
+    times the applied leverage minus the allocation turnover cost
+    ``0.5 * abs(L_t - L_{t-1}) * (fee_rate + slippage_rate)``, then compounded
+    into the total-equity ledger. The schedule is reused verbatim (aligned by
+    timestamp, missing rows default to zero exposure). Returns the ledger and
+    the cumulative allocation cost.
+    """
+    aligned = schedule.reindex(unit_equity.index).fillna(0.0).to_numpy(dtype=np.float64)
+    returns = unit_equity.pct_change().fillna(0.0).to_numpy(dtype=np.float64)
+    prev = np.concatenate([[0.0], aligned[:-1]])
+    turnover = 0.5 * np.abs(aligned - prev) * (costs.fee_rate + costs.slippage_rate)
+    net_returns = returns * aligned - turnover
+    equity = (1.0 + net_returns).cumprod() * _INITIAL_EQUITY
+    ledger = pd.Series(equity, index=unit_equity.index, name="equity", dtype=np.float64)
+    return ledger, float(turnover.sum())
+
+
 def _select_sleeves(runs: list[_CellRun]) -> list[_CellRun]:
-    """At most one side per family and at most one symbol per retained identity."""
+    """At most one side per family and at most one symbol per retained identity.
+
+    Ranking uses the policy ledger (policy LCB90, policy MDD) with unit-risk
+    LCB90 and lexical identity as tie-breakers.
+    """
     survivors = [run for run in runs if run.cell.discovery_pass]
     if not survivors:
         return []
@@ -464,7 +590,9 @@ def _select_sleeves(runs: list[_CellRun]) -> list[_CellRun]:
     for run in survivors:
         by_identity.setdefault((run.cell.family, run.cell.side), []).append(run)
     identity_best: list[_CellRun] = [
-        max(members, key=lambda r: (r.cell.lcb90, r.cell.t_stat, r.cell.symbol))
+        max(members, key=lambda r: (
+            r.cell.policy_lcb90, r.cell.policy_mdd, r.cell.lcb90, r.cell.symbol,
+        ))
         for members in by_identity.values()
     ]
 
@@ -472,14 +600,17 @@ def _select_sleeves(runs: list[_CellRun]) -> list[_CellRun]:
     for run in identity_best:
         by_family.setdefault(run.cell.family, []).append(run)
     return [
-        max(members, key=lambda r: (r.cell.lcb90, r.cell.t_stat, r.cell.return_source))
+        max(members, key=lambda r: (
+            r.cell.policy_lcb90, r.cell.policy_mdd, r.cell.lcb90,
+            r.cell.return_source,
+        ))
         for members in by_family.values()
     ]
 
 
 def _discovery_log_returns(run: _CellRun) -> pd.Series:
-    assert run.disc_equity is not None
-    equity = run.disc_equity
+    assert run.policy_equity is not None
+    equity = run.policy_equity
     returns = np.log(equity / equity.shift()).dropna()
     returns.name = f"{run.cell.return_source}|{run.cell.symbol}"
     return returns
@@ -504,13 +635,16 @@ def _mean_abs_corr(candidate_run: _CellRun, selected: list[_CellRun]) -> float:
 
 
 def _greedy_portfolio_selection(runs: list[_CellRun], max_sleeves: int = 5) -> list[_CellRun]:
-    """Rank by discovery lower bound; break ties by |pairwise log-return corr| then lexical."""
+    """Rank by policy discovery LCB90/MDD; break ties by |pairwise policy
+    log-return corr| then lexical."""
     selected: list[_CellRun] = []
     remaining = list(runs)
     while len(selected) < max_sleeves and remaining:
         best = max(
             remaining,
             key=lambda r: (
+                r.cell.policy_lcb90,
+                r.cell.policy_mdd,
                 r.cell.lcb90,
                 -_mean_abs_corr(r, selected),
                 r.cell.return_source,
@@ -523,11 +657,11 @@ def _greedy_portfolio_selection(runs: list[_CellRun], max_sleeves: int = 5) -> l
 
 
 def _equal_risk_weights(selected: list[_CellRun]) -> list[float]:
-    """Inverse-discovery-volatility equal-risk weights computed once at the boundary."""
+    """Inverse-discovery-policy-volatility equal-risk weights frozen at the boundary."""
     inv: list[float] = []
     for run in selected:
-        assert run.disc_equity is not None
-        returns = run.disc_equity.pct_change().dropna()
+        assert run.policy_equity is not None
+        returns = run.policy_equity.pct_change().dropna()
         vol = float(returns.std() * np.sqrt(_BARS_PER_YEAR)) if len(returns) > 1 else 0.0
         inv.append(1.0 / vol if vol > 0.0 else 0.0)
     total = sum(inv)
@@ -566,21 +700,25 @@ def _qualify(
 ) -> tuple[pd.Series, pd.Series, pd.Series, TrendScreenQualification]:
     """Build the frozen-schedule qualification ledger and compose its gates.
 
-    The causal schedule is built once from the base unit blend (prior marks
-    only) and applied verbatim to the stressed rerun, so both ledgers share the
-    exact allocation. Full-window realized-MDD scalar calibration is never used.
+    The causal fractional-Kelly/MDD schedule is built once from the base unit
+    blend (prior marks only) and applied verbatim to the stressed rerun, so both
+    ledgers share the exact allocation. Full-window realized-MDD scalar
+    calibration is never used.
     """
     base_unit: list[pd.Series] = []
     for run in selected:
         assert run.result is not None
         base_unit.append(_unit_equity(run.result))
     blend = _blend_unit_equities(base_unit, weights)
-    schedule = build_causal_leverage_schedule(blend, CausalLeverageSpec())
-    scheduled = (1.0 + blend.pct_change().fillna(0.0) * schedule).cumprod() * _INITIAL_EQUITY
-    scheduled = pd.Series(scheduled, index=blend.index, name="equity", dtype=np.float64)
-    trades = pd.concat(
-        [run.result.trades for run in selected if run.result is not None],
-        ignore_index=True,
+    schedule = build_causal_fractional_kelly_schedule(
+        blend, CausalLeverageSpec(), CausalFractionalKellySpec(),
+    )
+    mdd_cap = build_causal_leverage_schedule(blend, CausalLeverageSpec())
+    if not (schedule.to_numpy() <= mdd_cap.to_numpy() + 1e-12).all():
+        raise DataIntegrityError("policy schedule exceeds the causal MDD cap")
+    scheduled, _base_cost = _apply_policy_schedule(blend, schedule, CostModel())
+    trades = _portfolio_trades(
+        [(run.result.trades, run.result.equity.index) for run in selected if run.result is not None],
     )
 
     qual_equity = scheduled[
@@ -599,7 +737,7 @@ def _qualify(
         slippage_rate=0.0003 * _STRESS_SLIPPAGE_MULT,
     )
     stress_unit: list[pd.Series] = []
-    stress_trade_rows: list[pd.DataFrame] = []
+    stress_trade_rows: list[tuple[pd.DataFrame, pd.DatetimeIndex]] = []
     for run in selected:
         frame, funding = data[run.cell.symbol]
         stress_result = run_technical_expert_backtest(
@@ -607,19 +745,16 @@ def _qualify(
             initial_equity=_INITIAL_EQUITY, signal_delay_bars=_STRESS_DELAY_BARS,
         )
         stress_unit.append(_unit_equity(stress_result))
-        stress_trade_rows.append(stress_result.trades)
+        stress_trade_rows.append((stress_result.trades, stress_result.equity.index))
     stress_blend = _blend_unit_equities(stress_unit, weights)
-    stress_scheduled = (
-        (1.0 + stress_blend.pct_change().fillna(0.0) * schedule).cumprod() * _INITIAL_EQUITY
-    )
-    stress_scheduled = pd.Series(
-        stress_scheduled, index=stress_blend.index, name="equity", dtype=np.float64,
+    stress_scheduled, _stress_cost = _apply_policy_schedule(
+        stress_blend, schedule, stressed_costs,
     )
     stress_qual_equity = stress_scheduled[
         (stress_scheduled.index >= QUALIFICATION_START)
         & (stress_scheduled.index <= QUALIFICATION_END)
     ]
-    stress_trades = pd.concat(stress_trade_rows, ignore_index=True)
+    stress_trades = _portfolio_trades(stress_trade_rows)
     stress_trades = _trades_in_window(
         stress_trades, stress_scheduled.index, QUALIFICATION_START, QUALIFICATION_END,
     )
@@ -696,8 +831,7 @@ def run_trend_screen(
     runs = [run for symbol_runs in per_symbol for run in symbol_runs]
 
     config = ReliabilityGateConfig()
-    holm_pass = _holm_adjusted_pass([run.cell.p_negative for run in runs])
-    _apply_discovery_requirements(runs, holm_pass, config)
+    _apply_discovery_requirements(runs, config)
 
     selected_runs = _greedy_portfolio_selection(_select_sleeves(runs))
     if selected_runs:
@@ -706,7 +840,7 @@ def run_trend_screen(
             return_sources=tuple(run.cell.return_source for run in selected_runs),
             symbols=tuple(run.cell.symbol for run in selected_runs),
             weights=tuple(weights),
-            discovery_lcb90=tuple(run.cell.lcb90 for run in selected_runs),
+            discovery_lcb90=tuple(run.cell.policy_lcb90 for run in selected_runs),
         )
         selected_symbols = {run.cell.symbol for run in selected_runs}
         data = {
@@ -725,7 +859,7 @@ def run_trend_screen(
             fold_gate_pass=True,
             stress_verdict="PENDING",
             holdout_verdict=None,
-            binding_constraint="no_discovery_survivors",
+            binding_constraint="no_discovery_eligible_cells",
         )
 
     return TrendScreenReport(
