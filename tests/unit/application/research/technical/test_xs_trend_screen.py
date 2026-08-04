@@ -1,7 +1,7 @@
-"""Contract scenarios XSC-06, XSV3-04, and XSV3-05 for the XS screen orchestration.
+"""Contract scenarios XSC-06, XSV3-04, XSV3-05, and XSV4-06 for the XS screen orchestration.
 
 XSC-06-SCREEN-DETERMINISTIC-AND-SEALED, XSV3-04-FINAL-LEDGER-COSTS,
-XSV3-05-FAIL-CLOSED.
+XSV3-05-FAIL-CLOSED, XSV4-06-PROFILE-DISPATCH.
 """
 
 from __future__ import annotations
@@ -386,3 +386,52 @@ class TestContextualProfileOrchestration:
         assert report.qualification.admitted is False
         assert "contextual_router_invalid" in report.qualification.binding_constraint
         assert report.alpha_spec is not None
+
+
+class TestScoreRoutedProfileOrchestration:
+    def test_xsv4_06_profile_dispatches_score_routed_pipeline(self, monkeypatch) -> None:
+        _install_synthetic_data(monkeypatch)
+        report = xs.run_xs_trend_screen(profile=xs.XS_SCORE_ROUTED_ALPHA_PROFILE_ID)
+        assert report.profile == "xs_alpha_score_routed_v4"
+        payload = report.to_payload()
+        assert payload["router_spec"]["context_symbol"] == "XS_EQUAL_WEIGHT_MARKET"
+        assert payload["router_spec"]["min_context_history_bars"] == 168
+        assert set(payload["router_diagnostics"]) == {"windows", "states"}
+        windows = payload["router_diagnostics"]["windows"]
+        assert set(windows["discovery"]["counts"]) == {
+            "trend", "funding_contrarian", "taker_imbalance", "CASH",
+        }
+        assert set(windows["qualification"]["counts"]) == {
+            "trend", "funding_contrarian", "taker_imbalance", "CASH",
+        }
+        for family in ("trend", "funding_contrarian", "taker_imbalance"):
+            assert payload["family_admission"][family]["diagnostic"] is True
+        assert payload["stress"]["qualification"]["admitted"] is not None
+        assert len(payload["report_fingerprint"]) == 64
+
+    def test_xsv4_06_weights_from_neutral_weights_on_combined_score(
+        self, monkeypatch,
+    ) -> None:
+        _install_synthetic_data(monkeypatch)
+        combined: dict[str, pd.DataFrame] = {}
+        original_build = xs.build_xs_causal_score_selection
+
+        def spy_build(sleeve_scores, sleeve_returns, decision_context, router_spec):
+            allocation = original_build(
+                sleeve_scores, sleeve_returns, decision_context, router_spec,
+            )
+            combined["score"] = allocation.combined_score.copy()
+            return allocation
+
+        monkeypatch.setattr(xs, "build_xs_causal_score_selection", spy_build)
+        weighted: dict[str, pd.DataFrame] = {}
+        original_weights = xs.build_xs_neutral_weights
+
+        def spy_weights(score, halflife, band):
+            weighted["score"] = score.copy()
+            return original_weights(score, halflife, band)
+
+        monkeypatch.setattr(xs, "build_xs_neutral_weights", spy_weights)
+        report = xs.run_xs_trend_screen(profile=xs.XS_SCORE_ROUTED_ALPHA_PROFILE_ID)
+        assert report.router_spec is not None
+        assert weighted["score"].equals(combined["score"])
