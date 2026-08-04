@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import ast
+import functools
 import importlib
 import inspect
 import json
@@ -71,6 +72,7 @@ def _fail_exit(phase: str, msg: str, diag: JsonDiag) -> None:
 def _find_test_files(py_files: list[str]) -> list[str]:
     test_files = [f for f in py_files if f.startswith("tests/") or "test_" in f]
     source_files = [f for f in py_files if not (f.startswith("tests/") or "test_" in f)]
+    repo_test_files = _repository_test_files()
     for sf in source_files:
         if sf.startswith("src/") and not sf.endswith("__init__.py"):
             parts = sf.split("/")
@@ -83,14 +85,19 @@ def _find_test_files(py_files: list[str]) -> list[str]:
                 if os.path.exists(tp) and tp not in test_files:
                     test_files.append(tp)
                     break
-            for tp in _repository_test_files():
+            for tp in repo_test_files:
                 if tp not in test_files and _test_references_source(tp, sf):
                     test_files.append(tp)
     return test_files
 
 
-def _repository_test_files() -> list[str]:
-    """Return test modules in deterministic order for semantic source matching."""
+@functools.lru_cache(maxsize=1)
+def _repository_test_files() -> tuple[str, ...]:
+    """Return test modules in deterministic order for semantic source matching.
+
+    Cached: a full check run collects tests for every changed source file, and
+    the previous list return forced a fresh ``os.walk("tests")`` per call.
+    """
     test_files: list[str] = []
     for root, _dirs, files in os.walk("tests"):
         test_files.extend(
@@ -98,38 +105,58 @@ def _repository_test_files() -> list[str]:
             for filename in sorted(files)
             if filename.startswith("test_") and filename.endswith(".py")
         )
-    return sorted(test_files)
+    return tuple(sorted(test_files))
 
 
+@functools.cache
+def _load_test_ast(test_file: str) -> ast.Module | None:
+    """Parse a test module's AST once per process.
+
+    The semantic matcher is invoked for every (source, test) pair; caching the
+    parse per test file turns N_test re-reads+re-parses per source into a single
+    parse per test file across the whole run.
+    """
+    try:
+        with open(test_file, encoding="utf-8") as handle:
+            return ast.parse(handle.read(), filename=test_file)
+    except (OSError, SyntaxError):
+        return None
+
+
+@functools.cache
+def _imported_source_modules(test_file: str) -> frozenset[str]:
+    """All importable module paths a test module references, built in one pass.
+
+    Mirrors the walk performed by ``_test_references_source``: ``import a.b``
+    records ``a.b``; ``from x import y`` records both ``x`` and ``x.y``.
+    """
+    tree = _load_test_ast(test_file)
+    if tree is None:
+        return frozenset()
+    mods: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                mods.add(alias.name)
+        elif isinstance(node, ast.ImportFrom) and node.module:
+            mods.add(node.module)
+            for alias in node.names:
+                if alias.name != "*":
+                    mods.add(f"{node.module}.{alias.name}")
+    return frozenset(mods)
+
+
+@functools.cache
 def _test_references_source(test_file: str, source_file: str) -> bool:
     """Match tests by imported source symbol when filenames are feature-oriented.
 
     Exact mirrored ``test_<module>.py`` paths remain the fast path. AST matching
     covers valid names such as ``test_candidate_promotion_cli.py`` without
-    relying on brittle substring searches.
+    relying on brittle substring searches. The per-test import index is built
+    once, so this is an O(1) set lookup per pair.
     """
     source_module = source_file[:-3].replace("/", ".")
-    try:
-        with open(test_file, encoding="utf-8") as handle:
-            tree = ast.parse(handle.read(), filename=test_file)
-    except (OSError, SyntaxError):
-        return False
-
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Import):
-            if any(alias.name == source_module for alias in node.names):
-                return True
-        elif isinstance(node, ast.ImportFrom) and node.module:
-            imported_module = node.module
-            if any(
-                f"{imported_module}.{alias.name}" == source_module
-                for alias in node.names
-                if alias.name != "*"
-            ):
-                return True
-            if imported_module == source_module:
-                return True
-    return False
+    return source_module in _imported_source_modules(test_file)
 
 
 def _source_has_matching_test(source_file: str, test_files: list[str]) -> bool:
@@ -162,22 +189,65 @@ def _get_target_coverage(file_path: str) -> int:
     return 50  # Fallback target for other source paths
 
 
-def _parse_file_coverage(stdout: str, file_path: str) -> int | None:
-    mkey = file_path.replace(".py", "")
-    module_key = mkey.replace("/", ".")
+def _parse_coverage_table(stdout: str) -> dict[str, tuple[int, set[int], str]]:
+    """Parse pytest --cov-report=term-missing output exactly once.
+
+    Every source file previously rescanned the full stdout three times
+    (percent, missing lines, raw missing column). This caches one parse of the
+    whole table, keyed by every spelling coverage may print for a module (file
+    path, dot-squashed path, and each without the '.py' suffix).
+    Value is (percent, missing_line_set, raw_missing_text).
+    """
+    table: dict[str, tuple[int, set[int], str]] = {}
     for line in stdout.splitlines():
         parts = line.split()
         if not parts:
             continue
-        first_token = parts[0]
-        if first_token in (file_path, mkey, module_key):
-            for part in parts[1:]:
-                if "%" in part:
-                    try:
-                        return int(part.replace("%", ""))
-                    except ValueError:
-                        pass
+        pct: int | None = None
+        for part in parts[1:]:
+            if part.endswith("%"):
+                try:
+                    pct = int(part[:-1])
+                except ValueError:
+                    pct = None
+                break
+        if pct is None:
+            continue
+        first = parts[0]
+        raw_missing = parts[-1] if len(parts) >= 5 else ""
+        missing: set[int] = set()
+        for token in raw_missing.split(","):
+            token = token.strip()
+            if not token:
+                continue
+            try:
+                if "-" in token:
+                    a, b = token.split("-", 1)
+                    missing.update(range(int(a.strip()), int(b.strip()) + 1))
+                else:
+                    missing.add(int(token))
+            except ValueError:
+                continue
+        bare = first[:-3] if first.endswith(".py") else first
+        entry = (pct, missing, raw_missing)
+        for key in (first, bare, first.replace("/", "."), bare.replace("/", ".")):
+            table[key] = entry
+    return table
+
+
+def _coverage_lookup(
+    table: dict[str, tuple[int, set[int], str]], file_path: str
+) -> tuple[int, set[int], str] | None:
+    mkey = file_path.replace(".py", "")
+    for key in (file_path, mkey, mkey.replace("/", "."), file_path.replace("/", ".")):
+        if key in table:
+            return table[key]
     return None
+
+
+def _parse_file_coverage(stdout: str, file_path: str) -> int | None:
+    entry = _coverage_lookup(_parse_coverage_table(stdout), file_path)
+    return entry[0] if entry else None
 
 
 def _get_changed_lines(file_path: str) -> set[int]:
@@ -215,31 +285,8 @@ def _is_new_file(file_path: str) -> bool:
 
 def _get_missing_lines(stdout: str, file_path: str) -> set[int]:
     """Parse the Missing column from coverage term-missing output."""
-    mkey = file_path.replace(".py", "")
-    module_key = mkey.replace("/", ".")
-    for line in stdout.splitlines():
-        parts = line.split()
-        if not parts:
-            continue
-        first_token = parts[0]
-        if first_token in (file_path, mkey, module_key) and len(parts) >= 5:
-            missing_raw = parts[-1]
-            missing: set[int] = set()
-            for token in missing_raw.split(","):
-                token = token.strip()
-                if not token:
-                    continue
-                try:
-                    if "-" in token:
-                        a, b = token.split("-", 1)
-                        for i in range(int(a.strip()), int(b.strip()) + 1):
-                            missing.add(i)
-                    else:
-                        missing.add(int(token))
-                except ValueError:
-                    continue
-            return missing
-    return set()
+    entry = _coverage_lookup(_parse_coverage_table(stdout), file_path)
+    return entry[1] if entry else set()
 
 
 def _is_stub_node(node: ast.AST) -> bool:
@@ -886,7 +933,6 @@ def main() -> None:
             _fail_exit("mypy", "FAIL | Mypy Type Check Failed", d)
 
     # 5. Single pytest with coverage
-    test_files = _find_test_files(py_files)
     source_files = _get_source_files(py_files)
 
     if not test_files:
@@ -918,6 +964,7 @@ def main() -> None:
                     cov_val = int(m.group(1))
 
         # Check coverage targets per file
+        cov_table = _parse_coverage_table(pt_res.stdout)
         coverage_violations: list[JsonDiag] = []
         for sf in source_files:
             target_cov = _get_target_coverage(sf)
@@ -974,12 +1021,9 @@ def main() -> None:
                         coverage_violations.append(d)
 
 
-            mkey = sf.replace(".py", "")
-            for line in pt_res.stdout.splitlines():
-                if mkey in line or sf in line:
-                    parts = line.split()
-                    if len(parts) >= 5 and "%" in parts[-2]:
-                        missing_infos.append(f"{sf.split('/')[-1]}:{parts[-1]}")
+            entry = _coverage_lookup(cov_table, sf)
+            if entry is not None and entry[2]:
+                missing_infos.append(f"{sf.split('/')[-1]}:{entry[2]}")
 
         if coverage_violations:
             n = len(coverage_violations)
