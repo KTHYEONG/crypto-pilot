@@ -323,6 +323,97 @@ def test_run_fixed_sleeve_portfolio_with_schedule_applies_frozen_schedule(monkey
     )
 
 
+def test_fractional_kelly_only_schedule_matches_kelly_cap_and_is_causal() -> None:
+    """FK-01-KELLY-ONLY: with mdd_cap_enabled=False the schedule is exactly the
+    causal fractional-Kelly cap: causal, finite, non-negative, bounded by the
+    gross cap, zero pre-lookback, and not constrained by the trailing-MDD cap."""
+    from src.research.sleeve_blend.contracts import (
+        CausalFractionalKellySpec,
+        CausalLeverageSpec,
+    )
+    from src.research.sleeve_blend.fixed import (
+        _causal_fractional_kelly_cap,
+        build_causal_fractional_kelly_schedule,
+        build_causal_leverage_schedule,
+    )
+
+    idx = pd.date_range("2022-01-01", periods=4400, freq="4h", tz="UTC")
+    unit = pd.Series(np.linspace(100.0, 200.0, len(idx)), index=idx)
+    unit.iloc[800:850] = unit.iloc[800:850] * 0.5
+    unit.iloc[850:1400] = unit.iloc[850:1400] * 1.4
+    spec = CausalLeverageSpec()
+    only = CausalFractionalKellySpec(fraction=0.10, mdd_cap_enabled=False)
+    mdd_mode = CausalFractionalKellySpec(fraction=0.10, mdd_cap_enabled=True)
+
+    schedule = build_causal_fractional_kelly_schedule(unit, spec, only)
+    cap = _causal_fractional_kelly_cap(unit, spec, only)
+    assert schedule.equals(cap)
+    assert np.isfinite(schedule.to_numpy()).all()
+    assert (schedule >= 0).all()
+    assert (schedule <= spec.max_gross_leverage).all()
+    lookback_bars = round(pd.Timedelta(days=365) / pd.Timedelta(hours=4))
+    assert schedule.iloc[:lookback_bars].eq(0.0).all()
+
+    mdd_cap = build_causal_leverage_schedule(unit, spec)
+    assert (schedule.to_numpy() > mdd_cap.to_numpy()).any()
+    combined = build_causal_fractional_kelly_schedule(unit, spec, mdd_mode)
+    assert (combined.to_numpy() < schedule.to_numpy()).any()
+
+    altered = unit.copy()
+    altered.iloc[3500:] = altered.iloc[3500:] * 1.5
+    rebuilt = build_causal_fractional_kelly_schedule(altered, spec, only)
+    assert rebuilt.iloc[:3500].equals(schedule.iloc[:3500])
+
+
+def test_fractional_kelly_mdd_mode_stays_min_and_fails_closed() -> None:
+    """FK-02-MDD-COMPATIBILITY: with mdd_cap_enabled=True the schedule remains
+    exactly min(kelly_cap, causal_mdd_cap); malformed ledgers and invalid
+    fraction/cap configuration fail closed."""
+    from src.research.sleeve_blend.contracts import (
+        CausalFractionalKellySpec,
+        CausalLeverageSpec,
+    )
+    from src.research.sleeve_blend.fixed import (
+        _causal_fractional_kelly_cap,
+        build_causal_fractional_kelly_schedule,
+        build_causal_leverage_schedule,
+    )
+
+    idx = pd.date_range("2022-01-01", periods=4400, freq="4h", tz="UTC")
+    unit = pd.Series(np.linspace(100.0, 200.0, len(idx)), index=idx)
+    unit.iloc[800:850] = unit.iloc[800:850] * 0.5
+    unit.iloc[850:1400] = unit.iloc[850:1400] * 1.4
+    spec = CausalLeverageSpec()
+    kelly = CausalFractionalKellySpec(fraction=0.10, mdd_cap_enabled=True)
+
+    schedule = build_causal_fractional_kelly_schedule(unit, spec, kelly)
+    cap = _causal_fractional_kelly_cap(unit, spec, kelly)
+    mdd_cap = build_causal_leverage_schedule(unit, spec)
+    assert (schedule.to_numpy() <= cap.to_numpy()).all()
+    assert (schedule.to_numpy() <= mdd_cap.to_numpy() + 1e-12).all()
+    assert np.array_equal(
+        schedule.to_numpy(), np.minimum(cap.to_numpy(), mdd_cap.to_numpy()),
+    )
+
+    with pytest.raises(ValueError, match="fraction"):
+        CausalFractionalKellySpec(fraction=1.0, mdd_cap_enabled=False)
+    with pytest.raises(ValueError, match="lookback_days"):
+        CausalFractionalKellySpec(lookback_days=120, mdd_cap_enabled=True)
+    assert CausalFractionalKellySpec(
+        lookback_days=120, mdd_cap_enabled=False,
+    ).lookback_days == 120
+
+    with pytest.raises(ValueError, match="unit_equity"):
+        build_causal_fractional_kelly_schedule(
+            pd.Series(np.full(200, -1.0), index=idx[:200]), spec,
+            CausalFractionalKellySpec(fraction=0.10, mdd_cap_enabled=False),
+        )
+    with pytest.raises(ValueError, match="lookback_days"):
+        build_causal_fractional_kelly_schedule(
+            unit, CausalLeverageSpec(lookback_days=120), kelly,
+        )
+
+
 def _unlevered_blend(frames: dict[str, pd.DataFrame], costs: CostModel) -> pd.Series:
     blend = run_fixed_sleeve_portfolio_with_leverage(
         tuple(frames), None, None, costs, lev=1.0,
