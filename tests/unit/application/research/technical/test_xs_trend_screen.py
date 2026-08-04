@@ -35,11 +35,18 @@ def _install_synthetic_data(monkeypatch) -> None:
 
     The composite-score math is covered by the cross_sectional unit tests; here
     a deterministic per-symbol oscillation drives the orchestration so the two
-    runs must agree byte-for-byte without the heavy 450-identity replay.
+    runs must agree byte-for-byte without the heavy 450-identity replay. The
+    per-symbol salt keeps the cross-sectional alpha panels non-degenerate.
     """
     def fake_load(symbol: str, start, end) -> tuple[pd.DataFrame, pd.Series, dict[str, str], float]:
         frame, funding = synthetic_market()
         frame = frame.copy()
+        salt = float(sum(ord(c) for c in symbol))
+        frame["close"] = frame["close"] * (1.0 + 0.02 * (salt % 7))
+        frame["open"] = frame["open"] * (1.0 + 0.02 * (salt % 7))
+        frame["taker_buy_ratio"] = (
+            0.5 + 0.03 * np.sin(np.arange(len(frame)) / 9.0 + salt)
+        )
         frame.attrs["symbol"] = symbol
         return frame, funding.copy(), {"perp_ohlcv": f"fp-{symbol}"}, 1.0
 
@@ -167,3 +174,122 @@ class TestXsScreenOrchestration:
     def test_xsc_06_unknown_family_fails_closed(self) -> None:
         with pytest.raises(ValueError, match="no LONG candidate"):
             xs._candidate_by_family_side("not_a_family", "LONG")
+
+
+class TestAlphaProfileOrchestration:
+    def test_xsa_03_unknown_profile_fails_closed(self, monkeypatch) -> None:
+        _install_synthetic_data(monkeypatch)
+        with pytest.raises(ValueError, match="unknown xs screen profile"):
+            xs.run_xs_trend_screen(profile="not_a_profile")
+
+    def test_xsa_03_v1_json_stays_unchanged(self, monkeypatch) -> None:
+        _install_synthetic_data(monkeypatch)
+        default = xs.run_xs_trend_screen()
+        explicit = xs.run_xs_trend_screen(profile=xs.XS_NEUTRAL_PROFILE_ID)
+        assert default.profile == "xs_neutral_composite_v1"
+        assert default.to_json() == explicit.to_json()
+        payload = default.to_payload()
+        assert "alpha_spec" not in payload
+        assert "stress" not in payload
+        assert "stress_spec" not in payload
+
+    def test_xsa_03_v2_payload_has_frozen_alpha_and_stress_records(self, monkeypatch) -> None:
+        _install_synthetic_data(monkeypatch)
+        first = xs.run_xs_trend_screen(profile=xs.XS_ALPHA_PROFILE_ID)
+        second = xs.run_xs_trend_screen(profile=xs.XS_ALPHA_PROFILE_ID)
+
+        assert first.profile == "xs_alpha_multihorizon_v2"
+        assert first.to_json() == second.to_json()
+        payload = first.to_payload()
+        assert len(payload["report_fingerprint"]) == 64
+        assert payload["alpha_spec"]["signal_windows"] == [42, 84, 168]
+        assert payload["alpha_spec"]["components"] == [
+            "trend", "funding_contrarian", "taker_imbalance",
+        ]
+        assert payload["stress_spec"]["execution_delay_bars"] == 2
+        assert payload["stress_spec"]["fee_rate"] == pytest.approx(0.00075)
+        assert payload["stress_spec"]["slippage_rate"] == pytest.approx(0.0006)
+        assert payload["stress"]["qualification"]["admitted"] is not None
+        assert payload["stress"]["discovery"]["admitted"] is not None
+        for stats in payload["symbols"].values():
+            assert stats["fingerprint"]["perp_ohlcv"].startswith("fp-")
+
+    def test_xsa_03_stress_reuses_base_target_weights_verbatim(self, monkeypatch) -> None:
+        _install_synthetic_data(monkeypatch)
+        captured: list[pd.DataFrame] = []
+        original = xs.run_xs_composite_ledger
+
+        def spy(weights, opens, bar_funding, spec):
+            captured.append(weights.copy())
+            return original(weights, opens, bar_funding, spec)
+
+        monkeypatch.setattr(xs, "run_xs_composite_ledger", spy)
+        xs.run_xs_trend_screen(profile=xs.XS_ALPHA_PROFILE_ID)
+
+        assert len(captured) == 2
+        assert captured[0].equals(captured[1])
+        assert captured[0].index.equals(captured[1].index)
+
+    def test_xsa_03_v2_research_only_registers_nothing(self, monkeypatch) -> None:
+        _install_synthetic_data(monkeypatch)
+        before = len(TECHNICAL_CANDIDATES)
+        xs.run_xs_trend_screen(profile=xs.XS_ALPHA_PROFILE_ID)
+        assert len(TECHNICAL_CANDIDATES) == before
+
+    def test_xsa_03_alpha_panel_invalid_fails_closed_named(self, monkeypatch) -> None:
+        def nan_taker_load(symbol: str, start, end):
+            frame, funding = synthetic_market()
+            frame = frame.copy()
+            frame["taker_buy_ratio"] = 0.5
+            frame.loc[frame.index[100], "taker_buy_ratio"] = 1.5
+            frame.attrs["symbol"] = symbol
+            return frame, funding.copy(), {"perp_ohlcv": f"fp-{symbol}"}, 1.0
+
+        monkeypatch.setattr(xs, "_load_symbol_data", nan_taker_load)
+        report = xs.run_xs_trend_screen(profile=xs.XS_ALPHA_PROFILE_ID)
+        assert report.qualification.admitted is False
+        assert "alpha_panel_invalid" in report.qualification.binding_constraint
+        assert report.alpha_spec is not None
+
+    def test_xsa_03_stress_holdout_replayed_when_unsealed(self, monkeypatch) -> None:
+        idx = pd.date_range("2022-01-01", "2026-07-07 20:00:00", freq="4h", tz="UTC")
+        t = np.arange(len(idx), dtype=np.float64)
+
+        def extended_load(symbol: str, start, end):
+            salt = float(sum(ord(c) for c in symbol))
+            close = 100.0 + 0.02 * t + 30.0 * np.sin(t / 40.0 + salt) + 20.0 * np.cos(t / 150.0)
+            frame = pd.DataFrame({
+                "open": close - 0.2,
+                "high": close + 1.0,
+                "low": close - 1.0,
+                "close": close,
+                "volume": 1000.0,
+                "taker_buy_ratio": 0.5 + 0.03 * np.sin(t / 9.0 + salt),
+            }, index=idx)
+            funding = pd.Series(0.0, index=idx, dtype=np.float64)
+            frame.attrs["symbol"] = symbol
+            return frame, funding, {"perp_ohlcv": f"fp-{symbol}"}, 1.0
+
+        monkeypatch.setattr(xs, "_load_symbol_data", extended_load)
+        report = xs.run_xs_trend_screen(profile=xs.XS_ALPHA_PROFILE_ID, unseal_holdout=True)
+        assert report.holdout is not None
+        assert report.holdout_start is not None
+        assert report.holdout_start >= xs.HOLDOUT_CUTOFF
+        payload = report.to_payload()
+        assert payload["stress"]["holdout"]["admitted"] is not None
+
+    def test_xsa_03_persistence_is_byte_deterministic(self, monkeypatch, tmp_path) -> None:
+        _install_synthetic_data(monkeypatch)
+        report = xs.run_xs_trend_screen(profile=xs.XS_ALPHA_PROFILE_ID)
+        path = tmp_path / "report.json"
+        xs.persist_xs_screen_report(report, path)
+        assert path.exists()
+        assert path.read_text(encoding="utf-8") == report.to_json()
+        assert (
+            xs.xs_screen_report_path(xs.XS_ALPHA_PROFILE_ID).name
+            == "xs_alpha_multihorizon_v2.json"
+        )
+        assert (
+            xs.xs_screen_report_path(xs.XS_NEUTRAL_PROFILE_ID).name
+            == "xs_neutral_composite_v1.json"
+        )
