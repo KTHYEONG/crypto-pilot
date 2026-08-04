@@ -586,5 +586,8 @@
   },
   "src/application/research/technical/xs_trend_screen.py": {
     "testing": "tests/unit/application/research/technical/test_xs_trend_screen.py"
+  },
+  "src/research/technical_experts/xs_contextual_router.py": {
+    "testing": "tests/unit/research/technical_experts/test_xs_contextual_router.py"
   }
 }
