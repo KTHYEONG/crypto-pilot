@@ -51,6 +51,7 @@ from src.research.technical_experts.cross_sectional import (
     build_xs_alpha_dual_family_weights,
     build_xs_alpha_family_scores,
     build_xs_alpha_family_weights,
+    build_xs_alpha_vol_weighted_weights,
     build_xs_alpha_weights,
     build_xs_neutral_weights,
     evaluate_xs_admission,
@@ -78,6 +79,7 @@ XS_ALPHA_PROFILE_ID = "xs_alpha_multihorizon_v2"
 XS_CONTEXTUAL_ALPHA_PROFILE_ID = "xs_alpha_contextual_v3"
 XS_SCORE_ROUTED_ALPHA_PROFILE_ID = "xs_alpha_score_routed_v4"
 XS_DUAL_FAMILY_ALPHA_PROFILE_ID = "xs_alpha_dual_family_v5"
+XS_VOL_WEIGHTED_ALPHA_PROFILE_ID = "xs_alpha_vol_weighted_v6"
 # The four-symbol earliest-history gap is not recoverable before 2022-04-03.
 # Keep the baseline catalog window unchanged, but start XS panel evaluation on
 # the first timestamp with complete taker/quote fields across the universe.
@@ -91,6 +93,7 @@ __all__ = [
     "XS_DUAL_FAMILY_ALPHA_PROFILE_ID",
     "XS_NEUTRAL_PROFILE_ID",
     "XS_SCORE_ROUTED_ALPHA_PROFILE_ID",
+    "XS_VOL_WEIGHTED_ALPHA_PROFILE_ID",
     "XsTrendScreenReport",
     "run_xs_trend_screen",
 ]
@@ -406,13 +409,15 @@ def run_xs_trend_screen(
         XS_CONTEXTUAL_ALPHA_PROFILE_ID,
         XS_SCORE_ROUTED_ALPHA_PROFILE_ID,
         XS_DUAL_FAMILY_ALPHA_PROFILE_ID,
+        XS_VOL_WEIGHTED_ALPHA_PROFILE_ID,
     ):
         raise ValueError(
             f"unknown xs screen profile '{profile}'; the source-controlled "
             f"profiles are '{XS_NEUTRAL_PROFILE_ID}', '{XS_ALPHA_PROFILE_ID}', "
             f"'{XS_CONTEXTUAL_ALPHA_PROFILE_ID}', "
-            f"'{XS_SCORE_ROUTED_ALPHA_PROFILE_ID}', and "
-            f"'{XS_DUAL_FAMILY_ALPHA_PROFILE_ID}'"
+            f"'{XS_SCORE_ROUTED_ALPHA_PROFILE_ID}', "
+            f"'{XS_DUAL_FAMILY_ALPHA_PROFILE_ID}', and "
+            f"'{XS_VOL_WEIGHTED_ALPHA_PROFILE_ID}'"
         )
     end = resolve_evaluation_end(end, unseal_holdout=unseal_holdout)
     requested_start = XS_DISCOVERY_START if start is None else pd.to_datetime(start, utc=True)
@@ -425,6 +430,7 @@ def run_xs_trend_screen(
             XS_CONTEXTUAL_ALPHA_PROFILE_ID,
             XS_SCORE_ROUTED_ALPHA_PROFILE_ID,
             XS_DUAL_FAMILY_ALPHA_PROFILE_ID,
+            XS_VOL_WEIGHTED_ALPHA_PROFILE_ID,
         )
         else None
     )
@@ -540,6 +546,10 @@ def run_xs_trend_screen(
             elif profile == XS_DUAL_FAMILY_ALPHA_PROFILE_ID:
                 weights = build_xs_alpha_dual_family_weights(
                     closes, taker, bar_funding, alpha_spec, execution_spec,
+                )
+            elif profile == XS_VOL_WEIGHTED_ALPHA_PROFILE_ID:
+                weights = build_xs_alpha_vol_weighted_weights(
+                    closes, taker, bar_funding, opens, alpha_spec, execution_spec,
                 )
             else:
                 weights = build_xs_alpha_weights(
@@ -687,6 +697,7 @@ def _check_contract() -> None:
     assert XS_ALPHA_PROFILE_ID == "xs_alpha_multihorizon_v2"
     assert XS_CONTEXTUAL_ALPHA_PROFILE_ID == "xs_alpha_contextual_v3"
     assert XS_SCORE_ROUTED_ALPHA_PROFILE_ID == "xs_alpha_score_routed_v4"
+    assert XS_VOL_WEIGHTED_ALPHA_PROFILE_ID == "xs_alpha_vol_weighted_v6"
     assert len(TREND_SCREEN_FAMILIES) == 15
     assert len(TREND_SCREEN_SYMBOLS) == 15
 
