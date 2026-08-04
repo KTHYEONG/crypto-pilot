@@ -3,17 +3,22 @@ from __future__ import annotations
 import argparse
 
 from src.application.research.baseline import evaluation as evaluation_module
+from src.common.config import funding_path
 from src.research.contracts import BaselineEvaluationRequest
 
 
 def _run_baseline(args: argparse.Namespace) -> None:
+    # Futures promotion evidence requires an aligned funding stream; the default
+    # resolves the canonical per-symbol funding file so a plain CLI run is never
+    # an accidental zero-funding evaluation.
+    resolved_funding = args.funding_path or str(funding_path(args.symbol))
     request = BaselineEvaluationRequest(
         symbol=args.symbol,
         start=args.start,
         end=args.end,
         initial_equity=args.initial_equity,
         min_taker_buy_ratio=args.min_taker_buy_ratio,
-        funding_path=args.funding_path,
+        funding_path=resolved_funding,
         unseal_holdout=args.unseal_holdout,
         log_run=not args.no_log_run,
     )
