@@ -335,6 +335,54 @@ def test_technical_expert_cli_requires_candidate_id() -> None:
         build_root_parser().parse_args(["research", "run", "single", "technical", "--symbol", "BTCUSDT"])
 
 
+def test_xs_screen_cli_parses_and_dispatches(monkeypatch) -> None:
+    from src.application.research.technical.xs_trend_screen import (
+        XS_NEUTRAL_PROFILE_ID,
+        XsAdmissionResult,
+        XsCompositeSpec,
+        XsTrendScreenReport,
+    )
+
+    calls: list[tuple[object, object, bool]] = []
+
+    def fake_run(*, start, end, unseal_holdout=False, max_workers=None):
+        calls.append((start, end, unseal_holdout))
+        failed = XsAdmissionResult(
+            admitted=False, binding_constraint="symbol_unavailable:X", sharpe=0.0,
+            beta=0.0, cagr=0.0, mdd=0.0, t_stat=0.0, annual_sharpe={},
+            annualized_turnover=0.0, breakeven_cost=0.0,
+        )
+        return XsTrendScreenReport(
+            profile=XS_NEUTRAL_PROFILE_ID,
+            universe=("BTCUSDT",),
+            spec=XsCompositeSpec(),
+            discovery=failed,
+            qualification=failed,
+            symbols={},
+        )
+
+    monkeypatch.setattr(
+        "src.application.research.technical.xs_trend_screen.run_xs_trend_screen", fake_run,
+    )
+    args = build_root_parser().parse_args([
+        "research", "run", "single", "xs-screen",
+        "--start", "2022-04-01",
+        "--end", "2025-12-31",
+        "--unseal-holdout",
+        "--no-log-run",
+    ])
+    args.handler(args)
+    assert calls == [("2022-04-01", "2025-12-31", True)]
+
+
+def test_xs_screen_cli_rejects_unknown_profile() -> None:
+    args = build_root_parser().parse_args([
+        "research", "run", "single", "xs-screen", "--profile", "bogus",
+    ])
+    with pytest.raises(ValueError, match="unknown xs screen profile"):
+        args.handler(args)
+
+
 def test_baseline_cli_parses_and_dispatches(monkeypatch) -> None:
     calls: list[BaselineEvaluationRequest] = []
     monkeypatch.setattr("src.application.research.baseline.evaluation.run_baseline_evaluation", calls.append)
