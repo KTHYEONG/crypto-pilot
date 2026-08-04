@@ -1,6 +1,7 @@
-"""Contract scenario XSC-06 for the XS screen orchestration.
+"""Contract scenarios XSC-06, XSV3-04, and XSV3-05 for the XS screen orchestration.
 
-XSC-06-SCREEN-DETERMINISTIC-AND-SEALED.
+XSC-06-SCREEN-DETERMINISTIC-AND-SEALED, XSV3-04-FINAL-LEDGER-COSTS,
+XSV3-05-FAIL-CLOSED.
 """
 
 from __future__ import annotations
@@ -293,3 +294,95 @@ class TestAlphaProfileOrchestration:
             xs.xs_screen_report_path(xs.XS_NEUTRAL_PROFILE_ID).name
             == "xs_neutral_composite_v1.json"
         )
+
+
+class TestContextualProfileOrchestration:
+    def test_xsv3_04_final_target_matrix_replayed_verbatim_for_base_and_stress(
+        self, monkeypatch,
+    ) -> None:
+        _install_synthetic_data(monkeypatch)
+        captured: list[pd.DataFrame] = []
+        original = xs.run_xs_composite_ledger
+
+        def spy(weights, opens, bar_funding, spec):
+            captured.append(weights.copy())
+            return original(weights, opens, bar_funding, spec)
+
+        monkeypatch.setattr(xs, "run_xs_composite_ledger", spy)
+        report = xs.run_xs_trend_screen(profile=xs.XS_CONTEXTUAL_ALPHA_PROFILE_ID)
+
+        assert report.profile == "xs_alpha_contextual_v3"
+        assert len(captured) == 5
+        assert captured[-2].equals(captured[-1])
+        assert captured[-1].index.equals(captured[-2].index)
+
+    def test_xsv3_04_report_carries_router_spec_and_diagnostics(self, monkeypatch) -> None:
+        _install_synthetic_data(monkeypatch)
+        report = xs.run_xs_trend_screen(profile=xs.XS_CONTEXTUAL_ALPHA_PROFILE_ID)
+        payload = report.to_payload()
+        assert payload["router_spec"]["context_symbol"] == "XS_EQUAL_WEIGHT_MARKET"
+        assert payload["router_spec"]["min_context_history_bars"] == 168
+        assert set(payload["router_diagnostics"]) == {"windows", "states"}
+        windows = payload["router_diagnostics"]["windows"]
+        assert set(windows["discovery"]["counts"]) == {
+            "trend", "funding_contrarian", "taker_imbalance", "CASH",
+        }
+        assert set(windows["qualification"]["counts"]) == {
+            "trend", "funding_contrarian", "taker_imbalance", "CASH",
+        }
+        for info in payload["router_diagnostics"]["states"].values():
+            assert "completed_samples" in info
+            assert set(info["last_lcb"]) == {
+                "trend", "funding_contrarian", "taker_imbalance",
+            }
+        for family in ("trend", "funding_contrarian", "taker_imbalance"):
+            assert payload["family_admission"][family]["diagnostic"] is True
+        assert len(payload["report_fingerprint"]) == 64
+
+    def test_xsv3_04_holdout_window_in_diagnostics_when_unsealed(self, monkeypatch) -> None:
+        idx = pd.date_range("2022-01-01", "2026-07-07 20:00:00", freq="4h", tz="UTC")
+        t = np.arange(len(idx), dtype=np.float64)
+
+        def extended_load(symbol: str, start, end):
+            salt = float(sum(ord(c) for c in symbol))
+            close = 100.0 + 0.02 * t + 30.0 * np.sin(t / 40.0 + salt) + 20.0 * np.cos(t / 150.0)
+            frame = pd.DataFrame({
+                "open": close - 0.2,
+                "high": close + 1.0,
+                "low": close - 1.0,
+                "close": close,
+                "volume": 1000.0,
+                "taker_buy_ratio": 0.5 + 0.03 * np.sin(t / 9.0 + salt),
+            }, index=idx)
+            funding = pd.Series(0.0, index=idx, dtype=np.float64)
+            frame.attrs["symbol"] = symbol
+            return frame, funding, {"perp_ohlcv": f"fp-{symbol}"}, 1.0
+
+        monkeypatch.setattr(xs, "_load_symbol_data", extended_load)
+        report = xs.run_xs_trend_screen(
+            profile=xs.XS_CONTEXTUAL_ALPHA_PROFILE_ID, unseal_holdout=True,
+        )
+        assert report.holdout is not None
+        payload = report.to_payload()
+        windows = payload["router_diagnostics"]["windows"]
+        assert "holdout" in windows
+        assert set(windows["holdout"]["counts"]) == {
+            "trend", "funding_contrarian", "taker_imbalance", "CASH",
+        }
+        assert payload["stress"]["holdout"]["admitted"] is not None
+
+    def test_xsv3_05_bad_router_data_fails_closed_named(self, monkeypatch) -> None:
+        def nan_taker_load(symbol: str, start, end):
+            frame, funding = synthetic_market()
+            frame = frame.copy()
+            frame["taker_buy_ratio"] = 0.5
+            frame.loc[frame.index[100], "taker_buy_ratio"] = 1.5
+            frame.attrs["symbol"] = symbol
+            return frame, funding.copy(), {"perp_ohlcv": f"fp-{symbol}"}, 1.0
+
+        monkeypatch.setattr(xs, "_load_symbol_data", nan_taker_load)
+        report = xs.run_xs_trend_screen(profile=xs.XS_CONTEXTUAL_ALPHA_PROFILE_ID)
+        assert report.discovery.admitted is False
+        assert report.qualification.admitted is False
+        assert "contextual_router_invalid" in report.qualification.binding_constraint
+        assert report.alpha_spec is not None

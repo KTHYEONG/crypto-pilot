@@ -72,7 +72,7 @@ def _causal_mean_var(rets: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     return mean, var
 
 
-def _causal_block_aware_inflation(rets: np.ndarray) -> np.ndarray:
+def causal_block_aware_inflation(rets: np.ndarray) -> np.ndarray:
     """Causal Bartlett (Newey-West) variance-inflation factor per decision bar.
 
     For decision bar ``k`` the factor inflates the mean's variance by the
@@ -122,7 +122,7 @@ def _raw_allocation(rets: np.ndarray, confidence: float, min_history_bars: int) 
     counts = np.arange(n)
     mean, var = _causal_mean_var(rets)
     with np.errstate(divide="ignore", invalid="ignore"):
-        inflation = _causal_block_aware_inflation(rets)
+        inflation = causal_block_aware_inflation(rets)
         se = np.sqrt(var * inflation / np.maximum(counts, 1))
         lcb = mean - lcb_z_score(confidence) * se
         u = np.maximum(0.0, lcb) / var

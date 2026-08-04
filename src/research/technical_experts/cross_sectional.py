@@ -243,6 +243,52 @@ def _cross_sectional_zscore(values: np.ndarray) -> np.ndarray:
     return out
 
 
+def build_xs_alpha_family_scores(
+    closes: pd.DataFrame,
+    taker_buy_ratio: pd.DataFrame,
+    bar_funding: pd.DataFrame,
+    spec: XsAlphaCompositeSpec,
+) -> dict[str, pd.DataFrame]:
+    """Build the three economically distinct multi-horizon alpha family scores.
+
+    For every horizon ``L`` the trend component is the volatility-adjusted log
+    return ``log(close / close.shift(L)) / rolling_std(dlog, L)``, the funding
+    component is the settled, causally aligned contrarian carry
+    ``-bar_funding.shift(1).rolling(L).sum()``, and the taker component is
+    ``taker_buy_ratio.rolling(L).mean() - 0.5``. Each of the nine component
+    panels is cross-sectionally z-scored (rows with fewer than two finite
+    observations are all zero). The returned mapping holds ``trend``,
+    ``funding_contrarian``, and ``taker_imbalance`` in that immutable order,
+    each being the equal-weight sum of its three z-scored horizon panels on the
+    common index and ordered columns.
+    """
+    _validate_alpha_panels(closes, taker_buy_ratio, bar_funding)
+    log_close = np.log(closes)
+    dlog = log_close.diff()
+
+    family_scores = {
+        name: np.zeros((len(closes.index), len(closes.columns)), dtype=np.float64)
+        for name in spec.components
+    }
+    for window in spec.signal_windows:
+        trend = np.log(closes / closes.shift(window)) / dlog.rolling(window).std()
+        carry = -bar_funding.shift(1).rolling(window).sum()
+        taker = taker_buy_ratio.rolling(window).mean() - 0.5
+        family_scores["trend"] += _cross_sectional_zscore(
+            trend.to_numpy(dtype=np.float64),
+        )
+        family_scores["funding_contrarian"] += _cross_sectional_zscore(
+            carry.to_numpy(dtype=np.float64),
+        )
+        family_scores["taker_imbalance"] += _cross_sectional_zscore(
+            taker.to_numpy(dtype=np.float64),
+        )
+    return {
+        name: pd.DataFrame(frame, index=closes.index, columns=list(closes.columns))
+        for name, frame in family_scores.items()
+    }
+
+
 def build_xs_alpha_composite_score(
     closes: pd.DataFrame,
     taker_buy_ratio: pd.DataFrame,
@@ -251,29 +297,19 @@ def build_xs_alpha_composite_score(
 ) -> pd.DataFrame:
     """Build the nine-component multi-horizon cross-sectional alpha score.
 
-    For every horizon ``L`` the trend component is the volatility-adjusted log
-    return ``log(close / close.shift(L)) / rolling_std(dlog, L)``, the funding
-    component is the settled, causally aligned contrarian carry
-    ``-bar_funding.shift(1).rolling(L).sum()``, and the taker component is
-    ``taker_buy_ratio.rolling(L).mean() - 0.5``. Each of the nine component
-    panels is cross-sectionally z-scored (rows with fewer than two finite
-    observations are all zero) and the equal-weight sum is returned on the
-    common index and ordered columns.
+    The composite is defined as the exact sum of the three family score frames
+    from :func:`build_xs_alpha_family_scores`; it therefore preserves the v2
+    panel formulas, causal prefix invariance, and the common index and ordered
+    columns exactly (within the existing floating-point tolerance).
     """
-    _validate_alpha_panels(closes, taker_buy_ratio, bar_funding)
-    log_close = np.log(closes)
-    dlog = log_close.diff()
-
-    total = np.zeros(
-        (len(closes.index), len(closes.columns)), dtype=np.float64,
+    family_scores = build_xs_alpha_family_scores(
+        closes, taker_buy_ratio, bar_funding, spec,
     )
-    for window in spec.signal_windows:
-        trend = np.log(closes / closes.shift(window)) / dlog.rolling(window).std()
-        carry = -bar_funding.shift(1).rolling(window).sum()
-        taker = taker_buy_ratio.rolling(window).mean() - 0.5
-        for component in (trend, carry, taker):
-            total += _cross_sectional_zscore(component.to_numpy(dtype=np.float64))
-    return pd.DataFrame(total, index=closes.index, columns=list(closes.columns))
+    return (
+        family_scores["trend"]
+        + family_scores["funding_contrarian"]
+        + family_scores["taker_imbalance"]
+    )
 
 
 def build_xs_alpha_weights(
@@ -294,6 +330,31 @@ def build_xs_alpha_weights(
     return build_xs_neutral_weights(
         score, execution_spec.halflife_bars, execution_spec.no_trade_band,
     )
+
+
+def build_xs_alpha_family_weights(
+    closes: pd.DataFrame,
+    taker_buy_ratio: pd.DataFrame,
+    bar_funding: pd.DataFrame,
+    alpha_spec: XsAlphaCompositeSpec,
+    execution_spec: XsCompositeSpec,
+) -> dict[str, pd.DataFrame]:
+    """Build per-family EWMA/demean/unit-gross/no-trade-band sleeve weights.
+
+    Applies :func:`build_xs_neutral_weights` exactly once to every family
+    score frame from :func:`build_xs_alpha_family_scores` with the execution
+    spec's half-life and no-trade band. Weights are never re-normalized after
+    the band and never shifted here -- execution lag is the ledger's contract.
+    """
+    family_scores = build_xs_alpha_family_scores(
+        closes, taker_buy_ratio, bar_funding, alpha_spec,
+    )
+    return {
+        name: build_xs_neutral_weights(
+            score, execution_spec.halflife_bars, execution_spec.no_trade_band,
+        )
+        for name, score in family_scores.items()
+    }
 
 
 def run_xs_composite_ledger(
@@ -532,7 +593,13 @@ def _check_contract() -> None:
     assert list(signature(build_xs_alpha_composite_score).parameters) == [
         "closes", "taker_buy_ratio", "bar_funding", "spec",
     ]
+    assert list(signature(build_xs_alpha_family_scores).parameters) == [
+        "closes", "taker_buy_ratio", "bar_funding", "spec",
+    ]
     assert list(signature(build_xs_alpha_weights).parameters) == [
+        "closes", "taker_buy_ratio", "bar_funding", "alpha_spec", "execution_spec",
+    ]
+    assert list(signature(build_xs_alpha_family_weights).parameters) == [
         "closes", "taker_buy_ratio", "bar_funding", "alpha_spec", "execution_spec",
     ]
     assert XsAlphaCompositeSpec().signal_windows == (42, 84, 168)
