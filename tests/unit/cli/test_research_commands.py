@@ -343,17 +343,68 @@ def test_xs_screen_cli_parses_and_dispatches(monkeypatch) -> None:
         XsTrendScreenReport,
     )
 
-    calls: list[tuple[object, object, bool]] = []
+    calls: list[tuple[object, object, bool, str]] = []
 
-    def fake_run(*, start, end, unseal_holdout=False, max_workers=None):
-        calls.append((start, end, unseal_holdout))
+    def fake_run(*, start, end, unseal_holdout=False, max_workers=None, profile=XS_NEUTRAL_PROFILE_ID):
+        calls.append((start, end, unseal_holdout, profile))
         failed = XsAdmissionResult(
             admitted=False, binding_constraint="symbol_unavailable:X", sharpe=0.0,
             beta=0.0, cagr=0.0, mdd=0.0, t_stat=0.0, annual_sharpe={},
             annualized_turnover=0.0, breakeven_cost=0.0,
         )
         return XsTrendScreenReport(
-            profile=XS_NEUTRAL_PROFILE_ID,
+            profile=profile,
+            universe=("BTCUSDT",),
+            spec=XsCompositeSpec(),
+            discovery=failed,
+            qualification=failed,
+            symbols={},
+        )
+
+    persisted: list[str] = []
+
+    def fake_persist(report, path):
+        persisted.append((report.profile, str(path)))
+
+    monkeypatch.setattr(
+        "src.application.research.technical.xs_trend_screen.run_xs_trend_screen", fake_run,
+    )
+    monkeypatch.setattr(
+        "src.application.research.technical.xs_trend_screen.persist_xs_screen_report",
+        fake_persist,
+    )
+    args = build_root_parser().parse_args([
+        "research", "run", "single", "xs-screen",
+        "--start", "2022-04-01",
+        "--end", "2025-12-31",
+        "--unseal-holdout",
+        "--no-log-run",
+    ])
+    args.handler(args)
+    assert calls == [("2022-04-01", "2025-12-31", True, XS_NEUTRAL_PROFILE_ID)]
+    assert persisted == [(XS_NEUTRAL_PROFILE_ID, "docs/results/xs_neutral_composite_v1.json")]
+
+
+def test_xs_screen_cli_dispatches_v2_profile(monkeypatch) -> None:
+    from src.application.research.technical.xs_trend_screen import (
+        XS_ALPHA_PROFILE_ID,
+        XS_NEUTRAL_PROFILE_ID,
+        XsAdmissionResult,
+        XsCompositeSpec,
+        XsTrendScreenReport,
+    )
+
+    calls: list[str] = []
+
+    def fake_run(*, start, end, unseal_holdout=False, max_workers=None, profile=XS_NEUTRAL_PROFILE_ID):
+        calls.append(profile)
+        failed = XsAdmissionResult(
+            admitted=False, binding_constraint="symbol_unavailable:X", sharpe=0.0,
+            beta=0.0, cagr=0.0, mdd=0.0, t_stat=0.0, annual_sharpe={},
+            annualized_turnover=0.0, breakeven_cost=0.0,
+        )
+        return XsTrendScreenReport(
+            profile=profile,
             universe=("BTCUSDT",),
             spec=XsCompositeSpec(),
             discovery=failed,
@@ -364,15 +415,15 @@ def test_xs_screen_cli_parses_and_dispatches(monkeypatch) -> None:
     monkeypatch.setattr(
         "src.application.research.technical.xs_trend_screen.run_xs_trend_screen", fake_run,
     )
+    monkeypatch.setattr(
+        "src.application.research.technical.xs_trend_screen.persist_xs_screen_report",
+        lambda report, path: None,
+    )
     args = build_root_parser().parse_args([
-        "research", "run", "single", "xs-screen",
-        "--start", "2022-04-01",
-        "--end", "2025-12-31",
-        "--unseal-holdout",
-        "--no-log-run",
+        "research", "run", "single", "xs-screen", "--profile", "xs_alpha_multihorizon_v2",
     ])
     args.handler(args)
-    assert calls == [("2022-04-01", "2025-12-31", True)]
+    assert calls == [XS_ALPHA_PROFILE_ID]
 
 
 def test_xs_screen_cli_rejects_unknown_profile() -> None:
