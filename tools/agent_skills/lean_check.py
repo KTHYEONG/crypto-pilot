@@ -901,7 +901,7 @@ def main() -> None:
     cov_args = ["--cov=src"]
 
     deselect_args = [f"--deselect={node}" for node in args.deselect]
-    core_cmd = ["uv", "run", "pytest", *cov_args, *test_files, *deselect_args, "-q", "--tb=line", "--cov-report=term-missing"]
+    core_cmd = ["uv", "run", "pytest", *cov_args, "-m", "not slow", *test_files, *deselect_args, "-q", "--tb=line", "--cov-report=term-missing"]
     # The growth evaluator's sealed integration fixtures exercise real rolling
     # windows and reliability gates.  Package-wide coverage tracing can exceed
     # the former three-minute limit even when the test command itself passes.
@@ -965,7 +965,11 @@ def main() -> None:
                             "file": sf,
                             "line": 0,
                             "error": f"Coverage target violation (Modified File): changed lines {sorted(uncovered_changed)} are not covered by tests",
-                            "fix_hint": f"Add test cases targeting the modified lines in {sf}: {sorted(uncovered_changed)}",
+                            "fix_hint": (
+                                f"Add fast unit tests targeting the modified lines in {sf}: "
+                                f"{sorted(uncovered_changed)} (the audit runs `-m 'not slow'`; "
+                                f"slow integration tests are excluded by design)"
+                            ),
                         }
                         coverage_violations.append(d)
 
