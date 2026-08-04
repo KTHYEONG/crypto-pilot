@@ -581,7 +581,7 @@
   },
   "src/validation/research_memory.py": {},
   "src/research/technical_experts/cross_sectional.py": {
-    "architecture": "docs/results/xs_alpha_dual_family_v5.json",
+    "architecture": "docs/results/xs_alpha_vol_weighted_v6.json",
     "testing": "tests/unit/research/technical_experts/test_cross_sectional.py"
   },
   "src/application/research/technical/xs_trend_screen.py": {
