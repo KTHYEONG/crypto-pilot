@@ -249,8 +249,27 @@ def run_fixed_sleeve_portfolio_with_schedule(
     return BacktestResult(equity=scheduled, trades=trades, signals=pd.DataFrame())
 
 
+def build_and_apply_causal_schedule(
+    unit_equity: pd.Series,
+    risk_spec: CausalLeverageSpec,
+    initial_equity: float = 10_000.0,
+) -> tuple[pd.Series, pd.Series]:
+    """Build the ex-ante causal schedule on prior marks and apply it to a unit ledger.
+
+    Qualification helper for promotion evidence: the schedule is built once from
+    the base unit-leverage ledger (only marks strictly before each bar) and
+    returned together with the scheduled total-equity ledger so a stressed replay
+    can reuse the identical schedule. Full-window realized-MDD scalar
+    calibration is never used here.
+    """
+    schedule = build_causal_leverage_schedule(unit_equity, risk_spec)
+    scheduled = apply_leverage_schedule(unit_equity, schedule, initial_equity=initial_equity)
+    return schedule, scheduled
+
+
 __all__ = [
     "apply_leverage_schedule",
+    "build_and_apply_causal_schedule",
     "build_causal_leverage_schedule",
     "run_fixed_sleeve_portfolio",
     "run_fixed_sleeve_portfolio_calibrated",
