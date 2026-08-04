@@ -1,6 +1,16 @@
 {
   "tasks": [
     {
+      "task_id": "TASK_XS_ALPHA_DUAL_FAMILY_V5",
+      "date": "2026-08-04",
+      "adr_id": "ADR_20260804_XS_ALPHA_DUAL_FAMILY_V5",
+      "domain": "futures",
+      "title": "XS alpha dual-family composite (v5) — funding_contrarian removal disproved",
+      "why": "v2's equal-weight 3-family blend carried funding_contrarian, which independently fails its own standalone admission gate (t=0.99, negative 2022 sub-year). v3/v4 tried fixing this via regime routing (v3 catastrophic turnover, v4 turnover-repaired but still discovery-sharpe_floor short). v5 tested the untried deterministic lever: drop the standalone-failing family entirely, equal-weight trend+taker_imbalance only, no routing.",
+      "resolution": "Added build_xs_alpha_dual_family_weights (cross_sectional.py), XS_DUAL_FAMILY_ALPHA_PROFILE_ID profile wiring (xs_trend_screen.py), and fixed a pre-existing CLI reachability gap where the xs-screen command allowlist never included v3/v4 (single_technical.py). Ran the sealed discovery+qualification screen on real data.",
+      "impact": "Discovery admitted (Sharpe 1.29, t=1.71) but qualification (OOS 2024-2025) FAILED: Sharpe fell to 0.53 with 2024 turning Sharpe-negative (-0.185), tripping annual_sub_sharpe;sharpe_floor. Hypothesis disproved -- funding_contrarian's pooled-diagnostic weakness masked a real 2024 OOS diversification contribution that trend+taker_imbalance alone did not replace. xs_alpha_multihorizon_v2 remains the only profile admitted end-to-end (incl. unsealed 2026 holdout, Sharpe 1.95); three consecutive next-step attempts (v3 routing, v4 routing, v5 composition) have all failed to beat it. Holdout correctly stayed sealed (qualification gate not cleared)."
+    },
+    {
       "task_id": "TASK_XS_ALPHA_SCORE_ROUTED_V4",
       "date": "2026-08-04",
       "adr_id": "ADR_20260804_XS_ALPHA_SCORE_ROUTED_V4",
