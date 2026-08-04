@@ -1,6 +1,16 @@
 {
   "tasks": [
     {
+      "task_id": "TASK_XS_ALPHA_SCORE_ROUTED_V4",
+      "date": "2026-08-04",
+      "adr_id": "ADR_20260804_XS_ALPHA_SCORE_ROUTED_V4",
+      "domain": "futures",
+      "title": "XS alpha score-routed contextual router (v4) turnover repair",
+      "why": "xs_alpha_contextual_v3's hard weight-layer family switching produced catastrophic turnover (216.5x/293.6x per year) and failed both discovery and qualification; empirical decomposition showed ~97% of turnover came from CASH/family transitions bypassing the EWMA/no-trade-band pipeline that bounds v2 and every standalone family (2.9-3.3% same-family drift only).",
+      "resolution": "Relocated the same causal six-state LCB family selection from the post-normalized weight layer to the pre-normalization score layer: build_xs_causal_score_selection now selects among raw per-family composite scores and feeds the combined row through build_xs_neutral_weights exactly once (shared halflife=6/band=0.05), reusing the extracted _causal_family_lcb_selection core for both the legacy weight-layer router and the new score-layer router.",
+      "impact": "Turnover normalized to 34.1x/42.8x per year (from 216.5x/293.6x), clearing turnover_max and cost_breakeven_min in both windows -- confirms the root-cause diagnosis. Qualification (OOS) now admits: Sharpe 0.964, t=1.36, CAGR 17.8%. Discovery still fails sharpe_floor (Sharpe 0.684, t=0.90) driven by a weak 2022 sub-year (Sharpe 0.29 vs 2023's 0.94); v4 is not promotable yet. Selection frequency (CASH ~55%, remaining split across 3 families) is essentially unchanged from v3, isolating the fix to turnover mechanics only, as intended."
+    },
+    {
       "task_id": "TASK_XS_ALPHA_CONTEXTUAL_ROUTING_V3",
       "date": "2026-08-04",
       "adr_id": "ADR_20260804_XS_ALPHA_CONTEXTUAL_ROUTING_V3",

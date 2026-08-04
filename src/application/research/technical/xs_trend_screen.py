@@ -48,6 +48,7 @@ from src.research.technical_experts.cross_sectional import (
     XsAdmissionResult,
     XsAlphaCompositeSpec,
     XsCompositeSpec,
+    build_xs_alpha_family_scores,
     build_xs_alpha_family_weights,
     build_xs_alpha_weights,
     build_xs_neutral_weights,
@@ -65,13 +66,16 @@ from src.research.technical_experts.trend_screen_catalog import (
 )
 from src.research.technical_experts.xs_contextual_router import (
     XsContextualAllocation,
+    XsScoreRoutedAllocation,
     build_xs_causal_contextual_allocation,
+    build_xs_causal_score_selection,
     build_xs_context_market,
 )
 
 XS_NEUTRAL_PROFILE_ID = "xs_neutral_composite_v1"
 XS_ALPHA_PROFILE_ID = "xs_alpha_multihorizon_v2"
 XS_CONTEXTUAL_ALPHA_PROFILE_ID = "xs_alpha_contextual_v3"
+XS_SCORE_ROUTED_ALPHA_PROFILE_ID = "xs_alpha_score_routed_v4"
 # The four-symbol earliest-history gap is not recoverable before 2022-04-03.
 # Keep the baseline catalog window unchanged, but start XS panel evaluation on
 # the first timestamp with complete taker/quote fields across the universe.
@@ -83,6 +87,7 @@ __all__ = [
     "XS_ALPHA_PROFILE_ID",
     "XS_CONTEXTUAL_ALPHA_PROFILE_ID",
     "XS_NEUTRAL_PROFILE_ID",
+    "XS_SCORE_ROUTED_ALPHA_PROFILE_ID",
     "XsTrendScreenReport",
     "run_xs_trend_screen",
 ]
@@ -330,7 +335,7 @@ def _selected_window(
 
 
 def _build_router_diagnostics(
-    allocation: XsContextualAllocation,
+    allocation: XsContextualAllocation | XsScoreRoutedAllocation,
     holdout_start: pd.Timestamp | None,
     holdout_end: pd.Timestamp | None,
 ) -> dict[str, object]:
@@ -396,11 +401,13 @@ def run_xs_trend_screen(
         XS_NEUTRAL_PROFILE_ID,
         XS_ALPHA_PROFILE_ID,
         XS_CONTEXTUAL_ALPHA_PROFILE_ID,
+        XS_SCORE_ROUTED_ALPHA_PROFILE_ID,
     ):
         raise ValueError(
             f"unknown xs screen profile '{profile}'; the source-controlled "
             f"profiles are '{XS_NEUTRAL_PROFILE_ID}', '{XS_ALPHA_PROFILE_ID}', "
-            f"and '{XS_CONTEXTUAL_ALPHA_PROFILE_ID}'"
+            f"'{XS_CONTEXTUAL_ALPHA_PROFILE_ID}', and "
+            f"'{XS_SCORE_ROUTED_ALPHA_PROFILE_ID}'"
         )
     end = resolve_evaluation_end(end, unseal_holdout=unseal_holdout)
     requested_start = XS_DISCOVERY_START if start is None else pd.to_datetime(start, utc=True)
@@ -408,7 +415,11 @@ def run_xs_trend_screen(
     execution_spec = XsCompositeSpec()
     alpha_spec = (
         XsAlphaCompositeSpec()
-        if profile in (XS_ALPHA_PROFILE_ID, XS_CONTEXTUAL_ALPHA_PROFILE_ID)
+        if profile in (
+            XS_ALPHA_PROFILE_ID,
+            XS_CONTEXTUAL_ALPHA_PROFILE_ID,
+            XS_SCORE_ROUTED_ALPHA_PROFILE_ID,
+        )
         else None
     )
     stress_spec = (
@@ -460,7 +471,7 @@ def run_xs_trend_screen(
 
     score_frames: dict[str, pd.Series] | None = None
     router_spec: ContextualRouterSpec | None = None
-    allocation: XsContextualAllocation | None = None
+    allocation: XsContextualAllocation | XsScoreRoutedAllocation | None = None
     family_ledgers: dict[str, tuple[pd.Series, pd.Series]] | None = None
     router_diagnostics: dict[str, object] | None = None
     family_admission: dict[str, object] | None = None
@@ -478,7 +489,10 @@ def run_xs_trend_screen(
                     for symbol, (frame, _funding) in data.items()
                 },
             )
-            if profile == XS_CONTEXTUAL_ALPHA_PROFILE_ID:
+            if profile in (
+                XS_CONTEXTUAL_ALPHA_PROFILE_ID,
+                XS_SCORE_ROUTED_ALPHA_PROFILE_ID,
+            ):
                 router_spec = ContextualRouterSpec(
                     context_symbol="XS_EQUAL_WEIGHT_MARKET",
                     trend_lookback_bars=42,
@@ -500,10 +514,23 @@ def run_xs_trend_screen(
                 sleeve_returns_frame = pd.DataFrame(sleeve_returns, index=common)
                 market = build_xs_context_market(closes)
                 labels = build_causal_context_labels(market, router_spec)
-                allocation = build_xs_causal_contextual_allocation(
-                    family_weights, sleeve_returns_frame, labels, router_spec,
-                )
-                weights = allocation.target_weights
+                if profile == XS_CONTEXTUAL_ALPHA_PROFILE_ID:
+                    allocation = build_xs_causal_contextual_allocation(
+                        family_weights, sleeve_returns_frame, labels, router_spec,
+                    )
+                    weights = allocation.target_weights
+                else:
+                    family_scores = build_xs_alpha_family_scores(
+                        closes, taker, bar_funding, alpha_spec,
+                    )
+                    allocation = build_xs_causal_score_selection(
+                        family_scores, sleeve_returns_frame, labels, router_spec,
+                    )
+                    weights = build_xs_neutral_weights(
+                        allocation.combined_score,
+                        execution_spec.halflife_bars,
+                        execution_spec.no_trade_band,
+                    )
             else:
                 weights = build_xs_alpha_weights(
                     closes, taker, bar_funding, alpha_spec, execution_spec,
@@ -511,7 +538,10 @@ def run_xs_trend_screen(
         except (DataIntegrityError, ValueError) as exc:
             constraint = (
                 f"contextual_router_invalid:{type(exc).__name__}"
-                if profile == XS_CONTEXTUAL_ALPHA_PROFILE_ID
+                if profile in (
+                    XS_CONTEXTUAL_ALPHA_PROFILE_ID,
+                    XS_SCORE_ROUTED_ALPHA_PROFILE_ID,
+                )
                 else f"alpha_panel_invalid:{type(exc).__name__}"
             )
             return _fail_closed_report(
@@ -646,6 +676,7 @@ def _check_contract() -> None:
     assert XS_NEUTRAL_PROFILE_ID == "xs_neutral_composite_v1"
     assert XS_ALPHA_PROFILE_ID == "xs_alpha_multihorizon_v2"
     assert XS_CONTEXTUAL_ALPHA_PROFILE_ID == "xs_alpha_contextual_v3"
+    assert XS_SCORE_ROUTED_ALPHA_PROFILE_ID == "xs_alpha_score_routed_v4"
     assert len(TREND_SCREEN_FAMILIES) == 15
     assert len(TREND_SCREEN_SYMBOLS) == 15
 
