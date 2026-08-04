@@ -118,7 +118,8 @@
     "testing": "tests/unit/application/test_expert_evaluation.py"
   },
   "src/application/research/technical/trend_screen.py": {
-    "testing": "tests/unit/application/research/technical/test_trend_screen.py"
+    "testing": "tests/unit/application/research/technical/test_trend_screen.py",
+    "architecture": "docs/specs/trend_screen_signal_integrity.md"
   },
   "src/cli/adapters/collect_data.py": {
     "testing": "tests/contract/test_cli_compatibility.py"
