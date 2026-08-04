@@ -93,13 +93,17 @@ class CausalFractionalKellySpec:
     At each bar ``t`` the estimate uses only completed unit-leverage simple
     returns strictly before ``t`` over a finished ``lookback_days`` window,
     scaled by the fixed ``fraction`` (quarter-Kelly). Full Kelly (``fraction
-    >= 1``) is forbidden and the lookback must equal
+    >= 1``) is forbidden. When ``mdd_cap_enabled`` the trailing-MDD cap is
+    combined (pointwise minimum) and the lookback must equal
     ``CausalLeverageSpec.lookback_days`` so the Kelly and MDD caps cover
-    identical history.
+    identical history; a no-MDD Kelly never requires a trailing-MDD
+    calculation and therefore may use any ``lookback_days >= 1``. Removing
+    ``mdd_cap_enabled`` never removes the hard ``max_gross_leverage`` cap.
     """
 
     fraction: float = 0.25
     lookback_days: int = 365
+    mdd_cap_enabled: bool = True
 
     def __post_init__(self) -> None:
         if not math.isfinite(self.fraction) or not 0.0 < self.fraction < 1.0:
@@ -110,10 +114,11 @@ class CausalFractionalKellySpec:
             raise ValueError(
                 f"lookback_days must be >= 1, got {self.lookback_days}"
             )
-        if self.lookback_days != CausalLeverageSpec().lookback_days:
+        if self.mdd_cap_enabled and self.lookback_days != CausalLeverageSpec().lookback_days:
             raise ValueError(
                 "lookback_days must equal CausalLeverageSpec.lookback_days "
-                f"({CausalLeverageSpec().lookback_days}), got {self.lookback_days}"
+                f"({CausalLeverageSpec().lookback_days}) when mdd_cap_enabled, "
+                f"got {self.lookback_days}"
             )
 
 
