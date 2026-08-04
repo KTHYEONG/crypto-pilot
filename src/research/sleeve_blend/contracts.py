@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
@@ -82,6 +83,37 @@ class CausalLeverageSpec:
         if self.max_gross_leverage < 1.0:
             raise ValueError(
                 f"max_gross_leverage must be >= 1.0, got {self.max_gross_leverage}"
+            )
+
+
+@dataclass(frozen=True, slots=True)
+class CausalFractionalKellySpec:
+    """Frozen parameters of the causal fractional-Kelly exposure policy.
+
+    At each bar ``t`` the estimate uses only completed unit-leverage simple
+    returns strictly before ``t`` over a finished ``lookback_days`` window,
+    scaled by the fixed ``fraction`` (quarter-Kelly). Full Kelly (``fraction
+    >= 1``) is forbidden and the lookback must equal
+    ``CausalLeverageSpec.lookback_days`` so the Kelly and MDD caps cover
+    identical history.
+    """
+
+    fraction: float = 0.25
+    lookback_days: int = 365
+
+    def __post_init__(self) -> None:
+        if not math.isfinite(self.fraction) or not 0.0 < self.fraction < 1.0:
+            raise ValueError(
+                f"fraction must be finite and in (0, 1), got {self.fraction}"
+            )
+        if self.lookback_days < 1:
+            raise ValueError(
+                f"lookback_days must be >= 1, got {self.lookback_days}"
+            )
+        if self.lookback_days != CausalLeverageSpec().lookback_days:
+            raise ValueError(
+                "lookback_days must equal CausalLeverageSpec.lookback_days "
+                f"({CausalLeverageSpec().lookback_days}), got {self.lookback_days}"
             )
 
 

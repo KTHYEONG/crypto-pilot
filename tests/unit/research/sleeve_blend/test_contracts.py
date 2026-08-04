@@ -95,6 +95,27 @@ def test_causal_leverage_spec_contract_ranges() -> None:
         CausalLeverageSpec(max_gross_leverage=0.5)
 
 
+def test_causal_fractional_kelly_spec_contract_ranges() -> None:
+    from src.research.sleeve_blend.contracts import (
+        CausalFractionalKellySpec,
+        CausalLeverageSpec,
+    )
+
+    spec = CausalFractionalKellySpec()
+    assert spec.fraction == 0.25
+    assert spec.lookback_days == CausalLeverageSpec().lookback_days
+    with pytest.raises(ValueError, match="fraction"):
+        CausalFractionalKellySpec(fraction=0.0)
+    with pytest.raises(ValueError, match="fraction"):
+        CausalFractionalKellySpec(fraction=1.0)
+    with pytest.raises(ValueError, match="fraction"):
+        CausalFractionalKellySpec(fraction=float("nan"))
+    with pytest.raises(ValueError, match="lookback_days"):
+        CausalFractionalKellySpec(lookback_days=0)
+    with pytest.raises(ValueError, match=r"CausalLeverageSpec\.lookback_days"):
+        CausalFractionalKellySpec(lookback_days=120)
+
+
 def test_directional_sleeve_spec_freezes_symbols_and_limits_settings() -> None:
     spec = DirectionalSleeveSpec()
     assert spec.symbols == FIXED_DIRECTIONAL_SYMBOLS

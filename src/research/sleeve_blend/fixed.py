@@ -21,6 +21,7 @@ from src.research.sleeve_blend.common import (
     _equal_weight_blend,
 )
 from src.research.sleeve_blend.contracts import (
+    CausalFractionalKellySpec,
     CausalLeverageSpec,
     FixedSleevePortfolioSpec,
 )
@@ -249,6 +250,69 @@ def run_fixed_sleeve_portfolio_with_schedule(
     return BacktestResult(equity=scheduled, trades=trades, signals=pd.DataFrame())
 
 
+def _causal_fractional_kelly_cap(
+    unit_equity: pd.Series,
+    risk_spec: CausalLeverageSpec,
+    kelly_spec: CausalFractionalKellySpec,
+) -> pd.Series:
+    """Vectorized quarter-Kelly cap on prior unit returns, clipped to ``[0, L_max]``.
+
+    At bar ``t`` the estimate uses only unit-leverage simple returns strictly
+    before ``t`` over the completed ``lookback_days`` window: with sample mean
+    ``mu`` and sample variance ``var`` the cap is ``fraction * mu / var``.
+    Non-positive mean, non-positive variance, or an incomplete lookback produce
+    zero exposure. Fully vectorized (no ``pd.apply``) and deterministic.
+    """
+    bar_period = unit_equity.index[1] - unit_equity.index[0]
+    lookback_bars = max(
+        1,
+        round(pd.Timedelta(days=kelly_spec.lookback_days) / bar_period),
+    )
+
+    returns = unit_equity.pct_change()
+    prior = returns.shift(1)
+    mean = prior.rolling(lookback_bars, min_periods=lookback_bars).mean()
+    var = prior.rolling(lookback_bars, min_periods=lookback_bars).var()
+
+    with np.errstate(divide="ignore", invalid="ignore"):
+        kelly = kelly_spec.fraction * mean / var
+    kelly = kelly.where((mean > 0.0) & (var > 0.0), 0.0)
+    kelly = kelly.clip(lower=0.0, upper=risk_spec.max_gross_leverage)
+    kelly = kelly.fillna(0.0)
+    return pd.Series(
+        kelly.to_numpy(dtype=np.float64), index=unit_equity.index,
+        name="kelly", dtype=np.float64,
+    )
+
+
+def build_causal_fractional_kelly_schedule(
+    unit_equity: pd.Series,
+    risk_spec: CausalLeverageSpec,
+    kelly_spec: CausalFractionalKellySpec,
+) -> pd.Series:
+    """Build the combined causal fractional-Kelly / MDD gross-leverage schedule.
+
+    The applied exposure at bar ``t`` is the pointwise minimum of the
+    fractional-Kelly cap (:func:`_causal_fractional_kelly_cap`) and the
+    prior-mark MDD cap (:func:`build_causal_leverage_schedule`); both use only
+    completed marks strictly before ``t``, so the result lies in
+    ``[0, max_gross_leverage]`` and is zero before either cap has a complete
+    lookback. Fully vectorized (no ``pd.apply``) and byte-deterministic for
+    identical input.
+    """
+    if risk_spec.lookback_days != kelly_spec.lookback_days:
+        raise ValueError(
+            "risk_spec.lookback_days must equal kelly_spec.lookback_days, got "
+            f"{risk_spec.lookback_days} != {kelly_spec.lookback_days}"
+        )
+    mdd_schedule = build_causal_leverage_schedule(unit_equity, risk_spec)
+    kelly_cap = _causal_fractional_kelly_cap(unit_equity, risk_spec, kelly_spec)
+    combined = np.minimum(kelly_cap.to_numpy(), mdd_schedule.to_numpy())
+    return pd.Series(
+        combined, index=unit_equity.index, name="leverage", dtype=np.float64,
+    )
+
+
 def build_and_apply_causal_schedule(
     unit_equity: pd.Series,
     risk_spec: CausalLeverageSpec,
@@ -270,6 +334,7 @@ def build_and_apply_causal_schedule(
 __all__ = [
     "apply_leverage_schedule",
     "build_and_apply_causal_schedule",
+    "build_causal_fractional_kelly_schedule",
     "build_causal_leverage_schedule",
     "run_fixed_sleeve_portfolio",
     "run_fixed_sleeve_portfolio_calibrated",

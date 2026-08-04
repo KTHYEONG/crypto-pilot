@@ -66,61 +66,59 @@ class TestTrendScreenScale:
         assert len(ts.TREND_SCREEN_CANDIDATES) * len(ts.TREND_SCREEN_SYMBOLS) == 450
 
 
-class TestHolmAdjustment:
-    def test_holm_strongest_survives_when_very_small(self) -> None:
-        p_values = [0.5] * 449 + [1e-6]
-        passed = ts._holm_adjusted_pass(p_values, alpha=0.10)
-        assert passed[-1] is True
-        assert sum(passed) == 1
-
-    def test_holm_adjusts_across_all_hypotheses(self) -> None:
-        # 0.01 > 0.10/100 -> none survive the family-wise adjustment.
-        assert not any(ts._holm_adjusted_pass([0.01] * 100, alpha=0.10))
-
-    def test_data_invalid_p_one_never_passes(self) -> None:
-        assert not any(ts._holm_adjusted_pass([1.0] * 450, alpha=0.10))
-
-
 class TestDiscoveryRequirements:
-    def _run(self, monkeypatch, *, net_cagr, t_stat, trade_count):
-        _install_fast_config(monkeypatch)
+    def _run(self, *, trade_count, lcb90=0.05, data_valid=True, policy_active=True):
         idx = pd.date_range("2022-04-01", periods=4000, freq="4h", tz="UTC")
         cell = ts.TrendScreenCell(
             return_source="technical_ema_alignment_long_v1",
             family="ema_alignment", side="LONG", symbol="BTCUSDT",
-            data_valid=True, funding_coverage=1.0, trade_count=trade_count,
-            net_cagr=net_cagr, mdd=-0.1, lcb90=0.05, t_stat=t_stat, fold_score=0.4,
-            stress_verdict="PASS", p_negative=0.0, fingerprint="f",
-            discovery_pass=False, rejected_reason=None,
+            data_valid=data_valid, funding_coverage=1.0, trade_count=trade_count,
+            net_cagr=-0.05, mdd=-0.1, lcb90=lcb90, t_stat=0.5, fold_score=0.4,
+            stress_verdict="PASS", p_negative=1.0, fingerprint="f",
+            discovery_pass=False,
+            rejected_reason="data_invalid" if not data_valid else None,
         )
         run = ts._CellRun(cell)
         run.disc_equity = pd.Series(np.linspace(100.0, 120.0, len(idx)), index=idx)
+        run.policy_equity = pd.Series(np.linspace(100.0, 130.0, len(idx)), index=idx)
+        run.policy_schedule = pd.Series(
+            1.0 if policy_active else 0.0, index=idx, dtype=np.float64,
+        )
         return run
 
-    def test_min_trades_fails_closed(self, monkeypatch) -> None:
-        run = self._run(monkeypatch, net_cagr=0.30, t_stat=3.0, trade_count=10)
-        ts._apply_discovery_requirements([run], [True], ts.ReliabilityGateConfig())
+    def test_positive_lcb_valid_cell_eligible_without_hard_gates(self) -> None:
+        # Raw CAGR, IID t-stat, and bootstrap-negative fraction are diagnostics,
+        # never discovery hard gates; a positive-LCB valid cell is eligible.
+        run = self._run(trade_count=30)
+        ts._apply_discovery_requirements([run], ts.ReliabilityGateConfig())
+        assert run.cell.discovery_pass is True
+        assert run.cell.rejected_reason is None
+
+    def test_invalid_data_remains_ineligible(self) -> None:
+        run = self._run(trade_count=30, data_valid=False)
+        ts._apply_discovery_requirements([run], ts.ReliabilityGateConfig())
+        assert run.cell.discovery_pass is False
+        assert run.cell.rejected_reason is not None
+
+    def test_insufficient_duration_remains_ineligible(self) -> None:
+        # Duration-derived coverage is one closed trade per complete discovery
+        # month (21 for 2022-04..2023-12), not the old fixed 30-close cliff.
+        run = self._run(trade_count=10)
+        ts._apply_discovery_requirements([run], ts.ReliabilityGateConfig())
         assert run.cell.discovery_pass is False
         assert "min_trades" in run.cell.rejected_reason
 
-    def test_negative_cagr_and_low_tstat_fail_closed(self, monkeypatch) -> None:
-        run = self._run(monkeypatch, net_cagr=-0.02, t_stat=1.2, trade_count=40)
-        ts._apply_discovery_requirements([run], [True], ts.ReliabilityGateConfig())
+    def test_non_positive_lcb90_remains_ineligible(self) -> None:
+        run = self._run(trade_count=30, lcb90=0.0)
+        ts._apply_discovery_requirements([run], ts.ReliabilityGateConfig())
         assert run.cell.discovery_pass is False
-        assert "net_cagr" in run.cell.rejected_reason
-        assert "t_stat" in run.cell.rejected_reason
+        assert "lcb90" in run.cell.rejected_reason
 
-    def test_holm_failure_fails_closed(self, monkeypatch) -> None:
-        run = self._run(monkeypatch, net_cagr=0.30, t_stat=3.0, trade_count=40)
-        ts._apply_discovery_requirements([run], [False], ts.ReliabilityGateConfig())
+    def test_incomplete_causal_lookback_remains_ineligible(self) -> None:
+        run = self._run(trade_count=30, policy_active=False)
+        ts._apply_discovery_requirements([run], ts.ReliabilityGateConfig())
         assert run.cell.discovery_pass is False
-        assert "holm_lcb90_not_above_zero" in run.cell.rejected_reason
-
-    def test_all_discovery_requirements_mark_cell_eligible(self, monkeypatch) -> None:
-        run = self._run(monkeypatch, net_cagr=0.30, t_stat=3.0, trade_count=40)
-        ts._apply_discovery_requirements([run], [True], ts.ReliabilityGateConfig())
-        assert run.cell.discovery_pass is True
-        assert run.cell.rejected_reason is None
+        assert "incomplete_causal_lookback" in run.cell.rejected_reason
 
 
 class TestScreenPipeline:
@@ -256,6 +254,7 @@ class TestQualification:
             )
             run = ts._CellRun(cell, result)
             run.disc_equity = disc_equity
+            run.policy_equity = disc_equity.copy()
             runs.append(run)
         return runs
 
@@ -278,3 +277,52 @@ class TestQualification:
         # The stressed replay shares the identical frozen schedule.
         assert qualification.admitted is False
         assert qualification.binding_constraint is not None
+
+    def test_qualification_reuses_base_derived_schedule(self, monkeypatch) -> None:
+        # Base and stress ledgers reuse the same base-derived causal
+        # fractional-Kelly/MDD schedule; no future mark changes its prefix.
+        from src.research.sleeve_blend.contracts import (
+            CausalFractionalKellySpec,
+            CausalLeverageSpec,
+        )
+        from src.research.sleeve_blend.fixed import (
+            build_causal_fractional_kelly_schedule,
+        )
+
+        _install_fast_config(monkeypatch)
+        frame, funding = synthetic_market()
+        data = {"BTCUSDT": (frame, funding)}
+        runs = self._selected_runs()
+        weights = ts._equal_risk_weights(runs)
+
+        schedule, _scheduled, _stress_scheduled, _ = ts._qualify(
+            runs, weights, data, unseal_holdout=False,
+        )
+
+        assert (schedule >= 0).all()
+        assert (schedule <= 3.0).all()
+        blend = ts._blend_unit_equities(
+            [ts._unit_equity(run.result) for run in runs], weights,
+        )
+        altered = blend.copy()
+        altered.loc[altered.index >= ts.QUALIFICATION_START] *= 1.5
+        rebuilt = build_causal_fractional_kelly_schedule(
+            altered, CausalLeverageSpec(), CausalFractionalKellySpec(),
+        )
+        prefix = schedule.index < ts.QUALIFICATION_START
+        assert rebuilt[prefix].equals(schedule[prefix])
+
+    def test_policy_ledger_debits_leverage_turnover_cost(self, monkeypatch) -> None:
+        # A leverage step-up debits 0.5 * abs(delta_leverage) * (fee + slippage)
+        # on the same causal bar before compounding the marked return.
+        _install_fast_config(monkeypatch)
+        idx = pd.date_range("2022-04-01", periods=6, freq="4h", tz="UTC")
+        unit = pd.Series([100.0] * 6, index=idx)
+        schedule = pd.Series([0.0, 0.0, 0.0, 2.0, 2.0, 2.0], index=idx)
+        costs = CostModel(fee_rate=0.0005, slippage_rate=0.0003)
+
+        equity, total_cost = ts._apply_policy_schedule(unit, schedule, costs)
+
+        unit_cost = 0.5 * 2.0 * (0.0005 + 0.0003)
+        assert total_cost == pytest.approx(unit_cost)
+        assert equity.iloc[-1] == pytest.approx(10_000.0 * (1.0 - unit_cost))
