@@ -381,6 +381,108 @@ def build_xs_alpha_dual_family_weights(
     )
 
 
+def _causal_family_inverse_vol_weights(
+    sleeve_returns: pd.DataFrame,
+    lookback_bars: int,
+) -> pd.DataFrame:
+    """Causal trailing inverse-realized-vol weights across the alpha families.
+
+    For each bar ``t`` and family column the weight is ``1/std`` over the
+    strictly-prior window ``[t - lookback_bars, t)`` of the family's standalone
+    net-of-cost realized returns; the current bar's own return never enters its
+    own weight. A family whose trailing window is incomplete (fewer than
+    ``lookback_bars`` prior completed bars) or whose trailing std is
+    zero/non-finite falls back to the shared default ``1/3`` (never CASH, never
+    NaN), and every row is renormalized to sum to exactly 1. Vectorized via
+    cumulative sums -- no per-row Python loop.
+    """
+    x = sleeve_returns.to_numpy(dtype=np.float64)
+    filled = np.where(np.isnan(x), 0.0, x)
+    cum = np.cumsum(filled, axis=0)
+    cum_sq = np.cumsum(filled * filled, axis=0)
+
+    n = len(sleeve_returns)
+    bar_pos = np.arange(n)
+    starts = np.maximum(bar_pos - lookback_bars, 0)
+    counts = bar_pos - starts
+
+    up_to_prev = np.where((bar_pos == 0)[:, None], 0.0, cum[bar_pos - 1])
+    before_start = np.where((starts == 0)[:, None], 0.0, cum[starts - 1])
+    sums = up_to_prev - before_start
+    up_to_prev_sq = np.where((bar_pos == 0)[:, None], 0.0, cum_sq[bar_pos - 1])
+    before_start_sq = np.where((starts == 0)[:, None], 0.0, cum_sq[starts - 1])
+    sums_sq = up_to_prev_sq - before_start_sq
+
+    count_col = np.maximum(counts, 1)[:, None]
+    with np.errstate(divide="ignore", invalid="ignore"):
+        mean = sums / count_col
+        var = (sums_sq - count_col * mean * mean) / np.maximum(counts - 1, 1)[:, None]
+    std = np.sqrt(np.clip(var, 0.0, None))
+
+    invalid = (
+        (counts < lookback_bars)[:, None]
+        | (std <= 0.0)
+        | ~np.isfinite(std)
+    )
+    std = np.where(invalid, np.nan, std)
+
+    with np.errstate(divide="ignore", invalid="ignore"):
+        inv = 1.0 / std
+    weights = np.where(np.isfinite(inv), inv, 1.0 / 3.0)
+    weights /= weights.sum(axis=1, keepdims=True)
+    return pd.DataFrame(
+        weights, index=sleeve_returns.index, columns=list(sleeve_returns.columns),
+    )
+
+
+def build_xs_alpha_vol_weighted_weights(
+    closes: pd.DataFrame,
+    taker_buy_ratio: pd.DataFrame,
+    bar_funding: pd.DataFrame,
+    opens: pd.DataFrame,
+    alpha_spec: XsAlphaCompositeSpec,
+    execution_spec: XsCompositeSpec,
+) -> pd.DataFrame:
+    """Build the causal inverse-realized-vol tilted multi-family alpha sleeve.
+
+    Replaces the fixed 1/3 family blend: every family score is built with
+    :func:`build_xs_alpha_family_scores` and its standalone net-of-cost ledger
+    replayed via :func:`run_xs_composite_ledger`, then :func:`_causal_family_inverse_vol_weights`
+    turns the per-family realized returns into strictly-causal inverse-vol
+    weights over ``alpha_spec.signal_windows[0]`` bars. The weighted family
+    scores are summed and passed through :func:`build_xs_neutral_weights`
+    exactly once (the smooth-once invariant shared with every profile in this
+    family). ``opens`` is required because realized-return vol estimation needs
+    the full execution-cost ledger replay. Malformed input fails closed via the
+    existing ``DataIntegrityError`` paths.
+    """
+    family_scores = build_xs_alpha_family_scores(
+        closes, taker_buy_ratio, bar_funding, alpha_spec,
+    )
+    family_weights = build_xs_alpha_family_weights(
+        closes, taker_buy_ratio, bar_funding, alpha_spec, execution_spec,
+    )
+    sleeve_returns: dict[str, pd.Series] = {}
+    for name, family_w in family_weights.items():
+        equity, _turnover = run_xs_composite_ledger(
+            family_w, opens, bar_funding, execution_spec,
+        )
+        sleeve_returns[name] = equity.pct_change()
+    sleeve_returns_frame = pd.DataFrame(sleeve_returns, index=closes.index)
+    vol_weights = _causal_family_inverse_vol_weights(
+        sleeve_returns_frame, alpha_spec.signal_windows[0],
+    )
+    combined = sum(
+        vol_weights[name].to_numpy()[:, None] * family_scores[name].to_numpy()
+        for name in family_scores
+    )
+    return build_xs_neutral_weights(
+        pd.DataFrame(combined, index=closes.index, columns=list(closes.columns)),
+        execution_spec.halflife_bars,
+        execution_spec.no_trade_band,
+    )
+
+
 def run_xs_composite_ledger(
     weights: pd.DataFrame,
     opens: pd.DataFrame,
@@ -625,6 +727,15 @@ def _check_contract() -> None:
     ]
     assert list(signature(build_xs_alpha_family_weights).parameters) == [
         "closes", "taker_buy_ratio", "bar_funding", "alpha_spec", "execution_spec",
+    ]
+    assert list(signature(build_xs_alpha_dual_family_weights).parameters) == [
+        "closes", "taker_buy_ratio", "bar_funding", "alpha_spec", "execution_spec",
+    ]
+    assert list(signature(_causal_family_inverse_vol_weights).parameters) == [
+        "sleeve_returns", "lookback_bars",
+    ]
+    assert list(signature(build_xs_alpha_vol_weighted_weights).parameters) == [
+        "closes", "taker_buy_ratio", "bar_funding", "opens", "alpha_spec", "execution_spec",
     ]
     assert XsAlphaCompositeSpec().signal_windows == (42, 84, 168)
 
