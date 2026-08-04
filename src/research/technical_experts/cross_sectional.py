@@ -133,6 +133,169 @@ class XsCompositeSpec:
         return self.fee_rate + self.slippage_rate
 
 
+@dataclass(frozen=True, slots=True)
+class XsAlphaCompositeSpec:
+    """Frozen identity of the multi-horizon cross-sectional alpha profile.
+
+    ``signal_windows`` fixes the one/two/four-calendar-week 4h-bar horizons
+    (42/84/168) and ``components`` names the three economically diversified
+    alpha families. The class contains no fitted coefficients and no return,
+    cost, or holdout input: every horizon and component enters the score with
+    equal weight by construction.
+    """
+
+    signal_windows: tuple[int, int, int] = (42, 84, 168)
+    components: tuple[str, str, str] = (
+        "trend", "funding_contrarian", "taker_imbalance",
+    )
+
+    def __post_init__(self) -> None:
+        if self.signal_windows != (42, 84, 168):
+            raise ValueError(
+                f"signal_windows must be (42, 84, 168), got {self.signal_windows}"
+            )
+        if self.components != ("trend", "funding_contrarian", "taker_imbalance"):
+            raise ValueError(
+                f"components must be trend/funding_contrarian/taker_imbalance, "
+                f"got {self.components}"
+            )
+
+
+def _validate_alpha_panels(
+    closes: pd.DataFrame,
+    taker_buy_ratio: pd.DataFrame,
+    bar_funding: pd.DataFrame,
+) -> None:
+    """Fail closed on any malformed or misaligned alpha input panel.
+
+    Every matrix must be a tz-aware UTC DataFrame with an identical unique,
+    monotonic index and an identical ordered column set. Closes must be finite
+    and strictly positive, taker ratios finite and in ``[0, 1]``, and funding
+    finite. Malformed input raises :class:`DataIntegrityError` -- never a
+    zero-filling fallback.
+    """
+    for name, frame in (
+        ("closes", closes),
+        ("taker_buy_ratio", taker_buy_ratio),
+        ("bar_funding", bar_funding),
+    ):
+        if not isinstance(frame, pd.DataFrame):
+            raise DataIntegrityError(f"{name} must be a DataFrame")
+        index = frame.index
+        if not isinstance(index, pd.DatetimeIndex) or getattr(index, "tz", None) is None:
+            raise DataIntegrityError(f"{name} index must be a tz-aware UTC DatetimeIndex")
+        if not index.is_unique:
+            raise DataIntegrityError(f"{name} index must be unique")
+        if not index.is_monotonic_increasing:
+            raise DataIntegrityError(f"{name} index must be monotonic increasing")
+    if not (
+        closes.index.equals(taker_buy_ratio.index)
+        and closes.index.equals(bar_funding.index)
+    ):
+        raise DataIntegrityError(
+            "closes, taker_buy_ratio, and bar_funding must share an identical index"
+        )
+    if not (
+        list(closes.columns) == list(taker_buy_ratio.columns)
+        and list(closes.columns) == list(bar_funding.columns)
+    ):
+        raise DataIntegrityError(
+            "closes, taker_buy_ratio, and bar_funding must share an identical "
+            "ordered column set"
+        )
+
+    closes_values = closes.to_numpy(dtype=np.float64)
+    taker_values = taker_buy_ratio.to_numpy(dtype=np.float64)
+    funding_values = bar_funding.to_numpy(dtype=np.float64)
+    if not np.isfinite(closes_values).all() or (closes_values <= 0.0).any():
+        raise DataIntegrityError("closes must be finite and strictly positive")
+    if not np.isfinite(taker_values).all() or (taker_values < 0.0).any() or (taker_values > 1.0).any():
+        raise DataIntegrityError("taker_buy_ratio must be finite and in [0, 1]")
+    if not np.isfinite(funding_values).all():
+        raise DataIntegrityError("bar_funding must be finite")
+
+
+def _cross_sectional_zscore(values: np.ndarray) -> np.ndarray:
+    """Finite-only cross-sectional z-score with explicit output buffers.
+
+    Rows with fewer than two finite observations (or zero cross-sectional
+    dispersion) produce an all-zero row rather than NaN or +/-inf. The common
+    index and ordered columns are preserved by the caller.
+    """
+    finite = np.isfinite(values)
+    count = finite.sum(axis=1)
+    safe_count = np.maximum(count, 1)
+    mean = np.divide(
+        np.where(finite, values, 0.0).sum(axis=1, keepdims=True),
+        safe_count[:, None],
+    )
+    demeaned = np.where(finite, values - mean, 0.0)
+    var = np.divide(
+        (demeaned ** 2).sum(axis=1, keepdims=True),
+        np.maximum(count - 1, 1)[:, None],
+    )
+    std = np.sqrt(np.maximum(var, 0.0))
+    out = np.zeros_like(values, dtype=np.float64)
+    np.divide(
+        demeaned, std, out=out,
+        where=(count[:, None] >= 2) & (std > 0.0),
+    )
+    return out
+
+
+def build_xs_alpha_composite_score(
+    closes: pd.DataFrame,
+    taker_buy_ratio: pd.DataFrame,
+    bar_funding: pd.DataFrame,
+    spec: XsAlphaCompositeSpec,
+) -> pd.DataFrame:
+    """Build the nine-component multi-horizon cross-sectional alpha score.
+
+    For every horizon ``L`` the trend component is the volatility-adjusted log
+    return ``log(close / close.shift(L)) / rolling_std(dlog, L)``, the funding
+    component is the settled, causally aligned contrarian carry
+    ``-bar_funding.shift(1).rolling(L).sum()``, and the taker component is
+    ``taker_buy_ratio.rolling(L).mean() - 0.5``. Each of the nine component
+    panels is cross-sectionally z-scored (rows with fewer than two finite
+    observations are all zero) and the equal-weight sum is returned on the
+    common index and ordered columns.
+    """
+    _validate_alpha_panels(closes, taker_buy_ratio, bar_funding)
+    log_close = np.log(closes)
+    dlog = log_close.diff()
+
+    total = np.zeros(
+        (len(closes.index), len(closes.columns)), dtype=np.float64,
+    )
+    for window in spec.signal_windows:
+        trend = np.log(closes / closes.shift(window)) / dlog.rolling(window).std()
+        carry = -bar_funding.shift(1).rolling(window).sum()
+        taker = taker_buy_ratio.rolling(window).mean() - 0.5
+        for component in (trend, carry, taker):
+            total += _cross_sectional_zscore(component.to_numpy(dtype=np.float64))
+    return pd.DataFrame(total, index=closes.index, columns=list(closes.columns))
+
+
+def build_xs_alpha_weights(
+    closes: pd.DataFrame,
+    taker_buy_ratio: pd.DataFrame,
+    bar_funding: pd.DataFrame,
+    alpha_spec: XsAlphaCompositeSpec,
+    execution_spec: XsCompositeSpec,
+) -> pd.DataFrame:
+    """Shared EWMA/demean/unit-gross/no-trade-band construction for the alpha score.
+
+    Delegates to :func:`build_xs_alpha_composite_score` and then applies
+    :func:`build_xs_neutral_weights` exactly once with the execution spec's
+    half-life and no-trade band. The weights are never re-normalized after the
+    band and never shifted here -- execution lag is the ledger's contract.
+    """
+    score = build_xs_alpha_composite_score(closes, taker_buy_ratio, bar_funding, alpha_spec)
+    return build_xs_neutral_weights(
+        score, execution_spec.halflife_bars, execution_spec.no_trade_band,
+    )
+
+
 def run_xs_composite_ledger(
     weights: pd.DataFrame,
     opens: pd.DataFrame,
@@ -366,6 +529,13 @@ def _check_contract() -> None:
     spec = XsCompositeSpec()
     assert (spec.halflife_bars, spec.no_trade_band, spec.execution_delay_bars) == (6, 0.05, 1)
     assert abs(spec.round_trip_cost_rate() - 0.0008) < 1e-12
+    assert list(signature(build_xs_alpha_composite_score).parameters) == [
+        "closes", "taker_buy_ratio", "bar_funding", "spec",
+    ]
+    assert list(signature(build_xs_alpha_weights).parameters) == [
+        "closes", "taker_buy_ratio", "bar_funding", "alpha_spec", "execution_spec",
+    ]
+    assert XsAlphaCompositeSpec().signal_windows == (42, 84, 168)
 
 
 _check_contract()
