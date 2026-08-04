@@ -1,6 +1,16 @@
 {
   "tasks": [
     {
+      "task_id": "trend_screen_kelly_sizing_refinement",
+      "date": "2026-08-04",
+      "adr_id": "ADR_20260804_trend_screen_kelly_sizing_refinement",
+      "domain": "research",
+      "title": "Trend screen Kelly sizing refinement",
+      "why": "최신 450-cell 실행에서 sizing policy 선택과 qualification 결과를 동기화",
+      "resolution": "kelly_mdd_q25가 선택되었고 observation/stress gate는 FAIL; 첫 validation fold는 모든 정책이 유효 노출 부족으로 0점이어서 후속 보완 대상으로 기록",
+      "impact": "최신 sizing policy·fold score·gate 결과를 ADR 및 코드맵에 등록하고 임시 spec/scratch 산출물을 정리"
+    },
+    {
       "task_id": "trend_screen_fractional_kelly_gate",
       "date": "2026-08-04",
       "adr_id": "ADR_20260804_trend_screen_fractional_kelly_gate",
