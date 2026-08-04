@@ -104,9 +104,9 @@
   "src/application/research/growth/evaluation.py": {
     "testing": [
       "tests/integration/cli/test_growth_engine_cli.py",
-      "tests/unit/research/evaluation/test_falsification.py"
-    ],
-    "architecture": "docs/results/growth_portfoilo.md"
+      "tests/integration/research/test_growth_engine_funding_screening.py",
+      "tests/unit/application/research/growth/test_evaluation_helpers.py"
+    ]
   },
   "src/application/research/oi/evaluation.py": {
     "testing": "tests/unit/application/test_oi_deleveraging_evaluation.py"
@@ -116,6 +116,9 @@
   },
   "src/application/research/technical/evaluation.py": {
     "testing": "tests/unit/application/test_expert_evaluation.py"
+  },
+  "src/application/research/technical/trend_screen.py": {
+    "testing": "tests/unit/application/research/technical/test_trend_screen.py"
   },
   "src/cli/adapters/collect_data.py": {
     "testing": "tests/contract/test_cli_compatibility.py"
@@ -167,7 +170,7 @@
     "testing": "tests/unit/cli/test_research_commands.py"
   },
   "src/cli/commands/research/portfolio_growth.py": {
-    "testing": "tests/unit/cli/test_research_commands.py"
+    "testing": "tests/unit/cli/commands/research/test_portfolio_growth.py"
   },
   "src/cli/commands/research/portfolio_multi.py": {
     "testing": "tests/unit/cli/test_research_commands.py"
@@ -200,6 +203,8 @@
     "testing": [
       "tests/contract/test_legacy_imports.py",
       "tests/integration/workflows/test_taker_flow_candidate.py",
+      "tests/unit/application/research/technical/test_trend_screen.py",
+      "tests/unit/application/test_baseline_evaluation.py",
       "tests/unit/application/test_cash_carry_evaluation.py",
       "tests/unit/application/test_expert_evaluation.py",
       "tests/unit/application/test_library_admission_pipeline.py",
@@ -219,6 +224,8 @@
       "tests/unit/research/oi_deleveraging/test_market_data.py",
       "tests/unit/research/oi_deleveraging/test_provenance.py",
       "tests/unit/research/portfolio/test_backtest.py",
+      "tests/unit/research/portfolio/test_growth_strategy_library.py",
+      "tests/unit/research/portfolio/test_net_construction.py",
       "tests/unit/research/provenance/test_fingerprints.py",
       "tests/unit/research/sleeve_blend/test_directional.py",
       "tests/unit/research/sleeve_blend/test_fixed.py",
@@ -354,10 +361,7 @@
     "testing": "tests/unit/research/evaluation/test_falsification.py"
   },
   "src/research/evaluation/gate_feasibility.py": {
-    "testing": [
-      "tests/unit/research/evaluation/test_gate_feasibility.py",
-      "tests/unit/research/evaluation/test_fold_concentration.py"
-    ]
+    "testing": "tests/unit/research/evaluation/test_gate_feasibility.py"
   },
   "src/research/evaluation/metrics.py": {
     "testing": "tests/unit/research/evaluation/test_metrics.py"
@@ -365,7 +369,8 @@
   "src/research/evaluation/policy.py": {
     "testing": [
       "tests/contract/test_cli_compatibility.py",
-      "tests/integration/cli/test_expert_portfolio_promotion.py"
+      "tests/integration/cli/test_expert_portfolio_promotion.py",
+      "tests/integration/research/test_growth_engine_funding_screening.py"
     ]
   },
   "src/research/evaluation/promotion.py": {
@@ -471,18 +476,19 @@
     "testing": "tests/unit/research/portfolio/test_backtest.py"
   },
   "src/research/portfolio/defaults.py": {
-    "testing": "tests/unit/application/test_portfolio_evaluation.py"
+    "testing": [
+      "tests/unit/application/test_portfolio_evaluation.py",
+      "tests/unit/research/portfolio/test_net_construction.py"
+    ]
+  },
+  "src/research/portfolio/growth_router.py": {
+    "testing": "tests/unit/research/portfolio/test_growth_router.py"
   },
   "src/research/portfolio/growth_strategy_library.py": {
-    "testing": [
-      "tests/unit/research/portfolio/test_growth_strategy_library.py",
-      "tests/integration/research/test_growth_engine_funding_screening.py"
-    ],
-    "architecture": "docs/results/growth_portfoilo.md"
+    "testing": "tests/unit/research/portfolio/test_growth_strategy_library.py"
   },
   "src/research/portfolio/net_construction.py": {
-    "testing": "tests/unit/research/portfolio/test_net_construction.py",
-    "architecture": "docs/results/growth_portfoilo.md"
+    "testing": "tests/unit/research/portfolio/test_net_construction.py"
   },
   "src/research/portfolio/universe.py": {
     "testing": "tests/unit/research/portfolio/test_universe.py"
@@ -524,7 +530,6 @@
     "testing": "tests/unit/research/sleeve_blend/test_fixed.py"
   },
   "src/research/sleeve_blend/tournament.py": {
-    "architecture": "docs/results/portfolio-blend-growth-gate-20260803.md",
     "testing": "tests/unit/research/sleeve_blend/test_tournament.py"
   },
   "src/research/sleeve_blend/weights.py": {
@@ -548,6 +553,9 @@
   "src/research/technical_experts/signals.py": {
     "testing": "tests/unit/research/technical_experts/test_signals.py"
   },
+  "src/research/technical_experts/trend_screen_catalog.py": {
+    "testing": "tests/unit/research/technical_experts/test_trend_screen_catalog.py"
+  },
   "src/research/universe/pit_universe.py": {
     "testing": "tests/unit/research/universe/test_pit_universe.py"
   },
@@ -569,8 +577,5 @@
   "src/validation/reliability_gate.py": {
     "testing": "tests/contract/test_legacy_imports.py"
   },
-  "src/validation/research_memory.py": {},
-  "tools/research/structural_tuner.py": {
-    "architecture": "docs/results/growth_portfoilo.md"
-  }
+  "src/validation/research_memory.py": {}
 }
