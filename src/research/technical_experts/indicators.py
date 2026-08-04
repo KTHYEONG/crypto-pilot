@@ -294,6 +294,120 @@ def keltner_channel(
     return middle, upper, lower
 
 
+def donchian(
+    high: pd.Series,
+    low: pd.Series,
+    period: int,
+) -> tuple[pd.Series, pd.Series]:
+    """Donchian upper/lower channels over ``period`` completed bars."""
+    if period < 1:
+        raise ValueError(f"period must be >= 1, got {period}")
+    upper = high.astype("float64").rolling(period).max()
+    lower = low.astype("float64").rolling(period).min()
+    return upper, lower
+
+
+def aroon(
+    high: pd.Series,
+    low: pd.Series,
+    period: int,
+) -> tuple[pd.Series, pd.Series]:
+    """Aroon up/down indicators on completed bars.
+
+    ``aroon_up`` measures how many bars ago the ``period``-bar high occurred
+    (100 when it is the current bar, 0 when it is the oldest bar in the window);
+    ``aroon_down`` mirrors the low. Both are NaN until a full window exists.
+    """
+    if period < 1:
+        raise ValueError(f"period must be >= 1, got {period}")
+    window = period + 1
+    up_offset = high.astype("float64").rolling(window).apply(
+        lambda values: int(np.argmax(values)), raw=True,
+    )
+    down_offset = low.astype("float64").rolling(window).apply(
+        lambda values: int(np.argmin(values)), raw=True,
+    )
+    return 100.0 * up_offset / period, 100.0 * down_offset / period
+
+
+def vortex(
+    high: pd.Series,
+    low: pd.Series,
+    close: pd.Series,
+    period: int,
+) -> tuple[pd.Series, pd.Series]:
+    """Vortex VI+ / VI- on completed true ranges.
+
+    ``vi_plus`` is the ratio of the sum of upward vortex movement to the sum of
+    true ranges over the window, ``vi_minus`` the mirror; both are NaN before a
+    full window exists.
+    """
+    if period < 1:
+        raise ValueError(f"period must be >= 1, got {period}")
+    h = high.astype("float64")
+    l = low.astype("float64")
+    c = close.astype("float64")
+    true_range = pd.concat(
+        (h - l, (h - c.shift()).abs(), (l - c.shift()).abs()), axis=1,
+    ).max(axis=1)
+    vm_plus = (h - l.shift()).abs()
+    vm_minus = (l - h.shift()).abs()
+    tr_sum = true_range.rolling(period).sum().replace(0.0, np.nan)
+    vi_plus = vm_plus.rolling(period).sum() / tr_sum
+    vi_minus = vm_minus.rolling(period).sum() / tr_sum
+    return vi_plus, vi_minus
+
+
+def wma(close: pd.Series, period: int) -> pd.Series:
+    """Weighted moving average with linearly increasing weights on completed closes."""
+    if period < 1:
+        raise ValueError(f"period must be >= 1, got {period}")
+    weights = np.arange(1.0, period + 1.0)
+    total = float(weights.sum())
+    return close.astype("float64").rolling(period).apply(
+        lambda values: float(np.dot(values, weights) / total), raw=True,
+    )
+
+
+def hull_moving_average(close: pd.Series, period: int) -> pd.Series:
+    """Hull moving average (WMA of 2*WMA(n/2) - WMA(n) over sqrt(n)) on completed closes."""
+    if period < 1:
+        raise ValueError(f"period must be >= 1, got {period}")
+    half = max(1, period // 2)
+    sqrt_period = max(1, round(np.sqrt(period)))
+    smoothed = 2.0 * wma(close, half) - wma(close, period)
+    return wma(smoothed, sqrt_period)
+
+
+def regression_slope_tstat(close: pd.Series, period: int) -> pd.Series:
+    """t-statistic of the OLS slope of ``log(close)`` over the trailing window.
+
+    The regression grid is ``x = 0..period-1``; the slope and its standard error
+    are recovered from rolling sums (``sum(y)``, ``sum(x*y)``, ``sum(y**2)``),
+    so the whole series is vectorized and reads only completed bars at or before
+    the decision index. NaN until a full window exists.
+    """
+    if period < 2:
+        raise ValueError(f"period must be >= 2, got {period}")
+    n = float(period)
+    x = np.arange(period, dtype=np.float64)
+    xbar = float(x.mean())
+    sxx = float(np.sum((x - xbar) ** 2))
+    logc = np.log(close.astype("float64"))
+    positions = np.arange(len(logc), dtype=np.float64)
+    pos_series = pd.Series(positions, index=close.index, dtype="float64")
+    ysum = logc.rolling(period).sum()
+    txy = (pos_series * logc).rolling(period).sum()
+    y2sum = (logc ** 2).rolling(period).sum()
+    window_first = pos_series - float(period - 1)
+    sum_x_rel_y = txy - window_first * ysum
+    slope = (sum_x_rel_y - xbar * ysum) / sxx
+    intercept = (ysum - slope * sum_x_rel_y) / n
+    sse = (y2sum - intercept * ysum - slope * sum_x_rel_y).clip(lower=0.0)
+    se_slope = np.sqrt((sse / (n - 2.0)) / sxx)
+    return slope / se_slope.replace(0.0, np.nan)
+
+
 def ichimoku(
     high: pd.Series,
     low: pd.Series,
@@ -340,6 +454,17 @@ def _check_contract() -> None:
     conversion, _base, span_b = ichimoku(high, low, 9, 26, 52)
     assert np.isfinite(float(span_b.iloc[-1]))
     assert np.isfinite(float(conversion.iloc[-1]))
+    donchian_upper, donchian_lower = donchian(high, low, 55)
+    assert donchian_upper.iloc[-1] > donchian_lower.iloc[-1]
+    aroon_up, aroon_down = aroon(high, low, 25)
+    assert np.isfinite(float(aroon_up.iloc[-1]))
+    assert np.isfinite(float(aroon_down.iloc[-1]))
+    vi_plus, vi_minus = vortex(high, low, close, 14)
+    assert np.isfinite(float(vi_plus.iloc[-1]))
+    assert np.isfinite(float(vi_minus.iloc[-1]))
+    assert np.isfinite(float(wma(close, 20).iloc[-1]))
+    assert np.isfinite(float(hull_moving_average(close, 55).iloc[-1]))
+    assert np.isfinite(float(regression_slope_tstat(close, 63).iloc[-1]))
 
 
 _check_contract()
