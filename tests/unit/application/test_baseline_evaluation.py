@@ -4,7 +4,10 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from src.application.research.baseline.evaluation import run_baseline_evaluation
+from src.application.research.baseline.evaluation import (
+    run_baseline_analysis_without_funding,
+    run_baseline_evaluation,
+)
 from src.research.baseline.backtest import run_backtest
 from src.research.contracts import BaselineEvaluationRequest, CostModel, StrategySpec
 from src.research.evaluation.metrics import compute_metrics
@@ -57,7 +60,7 @@ def test_baseline_evaluation_preserves_frozen_result(monkeypatch) -> None:
     request = BaselineEvaluationRequest(
         symbol="BTCUSDT", start="2024-01-01", unseal_holdout=False, log_run=False,
     )
-    report = run_baseline_evaluation(request)
+    report = run_baseline_analysis_without_funding(request)
 
     spec = StrategySpec(symbol="BTCUSDT")
     costs = CostModel()
@@ -79,8 +82,18 @@ def test_baseline_evaluation_preserves_frozen_result(monkeypatch) -> None:
 
 def test_baseline_evaluation_rejects_end_past_sealed_cutoff() -> None:
     with pytest.raises(RuntimeError, match="Holdout sealed"):
-        run_baseline_evaluation(
+        run_baseline_analysis_without_funding(
             BaselineEvaluationRequest(symbol="BTCUSDT", end="2026-01-01", log_run=False),
+        )
+
+
+def test_baseline_promotion_rejects_missing_funding() -> None:
+    """A futures baseline promotion evaluation with no funding stream fails closed."""
+    from src.common.errors import DataIntegrityError
+
+    with pytest.raises(DataIntegrityError, match="funding"):
+        run_baseline_evaluation(
+            BaselineEvaluationRequest(symbol="BTCUSDT", log_run=False),
         )
 
 
@@ -91,7 +104,7 @@ def test_baseline_evaluation_unseals_holdout(monkeypatch) -> None:
         "src.application.research.baseline.evaluation.load_ohlcv_4h",
         lambda path, start=None, end=None: df,
     )
-    report = run_baseline_evaluation(
+    report = run_baseline_analysis_without_funding(
         BaselineEvaluationRequest(
             symbol="BTCUSDT", end="2026-01-01", unseal_holdout=True, log_run=False,
         ),
