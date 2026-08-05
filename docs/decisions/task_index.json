@@ -1,6 +1,16 @@
 {
   "tasks": [
     {
+      "task_id": "xs_alpha_growth_sizing_cost_repricing",
+      "date": "2026-08-05",
+      "adr_id": "ADR_20260805_xs_alpha_growth_sizing_cost_repricing",
+      "domain": "risk",
+      "title": "XS Alpha Growth Sizing: True Turnover-Cost Repricing",
+      "why": "apply_realised_risk_overlay/apply_vol_target_overlay scale an already-net-of-original-cost return series by a per-bar factor, implicitly assuming rebalancing to track that factor is free; measured on v6 this was negligible (~1bps/yr) for the constant-factor scalar-only path (ADR_20260805_xs_alpha_v6_growth_sizing) but material (~296bps/yr, ~3%/yr) once vol-targeting made the factor vary every bar (ADR_20260805_xs_alpha_growth_vol_targeting), overstating its reported gains",
+      "resolution": "Extracted _ledger_pnl (frozen cost formula, no reimplementation) and added _true_realized_net to reprice P&L directly from realized weights; wired into size_xs_alpha_growth_optimal both before the discovery-window scalar search and before the final return. apply_realised_risk_overlay/apply_vol_target_overlay/solve_growth_optimal_risk/run_xs_composite_ledger signatures untouched",
+      "impact": "v6 growth-sized numbers corrected: selected_risk stays 1.5x (median_log_growth 1.029->0.831, still beats no-vol-target 0.518), but Sharpe/CAGR/MDD across discovery/qualification/holdout are now honestly costed -- qualification/holdout CAGR now below pre-scaling v6 (were reported above it), discovery CAGR ~unchanged from pre-scaling. Overlay's real benefit reframed from CAGR uplift to risk-adjusted (Sharpe/MDD) improvement only. docs/results/xs_alpha_vol_weighted_v6_growth_sized.json and xs-screen v6 default adopted_sizing log corrected"
+    },
+    {
       "task_id": "xs_alpha_growth_vol_targeting",
       "date": "2026-08-05",
       "adr_id": "ADR_20260805_xs_alpha_growth_vol_targeting",
