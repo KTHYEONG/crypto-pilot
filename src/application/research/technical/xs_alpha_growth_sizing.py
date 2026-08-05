@@ -30,10 +30,13 @@ from src.application.research.technical.xs_trend_screen import (
     _bar_funding_series,
     _common_index,
     _fingerprint_without_self,
+    _oos_reliability_window,
+    _reliability_payload,
     _window_series,
 )
 from src.common.errors import DataIntegrityError
 from src.research.evaluation.policy import HOLDOUT_CUTOFF, resolve_evaluation_end
+from src.research.evaluation.reliability import ReliabilityGateConfig
 from src.research.risk.growth_sizing import (
     GrowthSizingConfig,
     GrowthSizingResult,
@@ -44,9 +47,11 @@ from src.research.technical_experts.cross_sectional import (
     XsAdmissionResult,
     XsAlphaCompositeSpec,
     XsCompositeSpec,
+    XsReliabilityResult,
     build_xs_alpha_vol_weighted_weights,
     build_xs_alpha_weights,
     evaluate_xs_admission,
+    evaluate_xs_reliability,
     run_xs_composite_ledger,
     select_vol_target_window,
     size_xs_alpha_growth_optimal,
@@ -102,6 +107,7 @@ class XsGrowthSizingReport:
     pre_scaling_holdout: XsAdmissionResult | None
     vol_target_window: int | None = None
     vol_target: float | None = None
+    reliability: XsReliabilityResult | None = None
     report_fingerprint: str = ""
 
     def __post_init__(self) -> None:
@@ -125,6 +131,10 @@ class XsGrowthSizingReport:
             ),
             "vol_target_window": self.vol_target_window,
             "vol_target": self.vol_target,
+            "reliability": (
+                _reliability_payload(self.reliability)
+                if self.reliability is not None else None
+            ),
         }
 
     def to_payload(self) -> dict[str, object]:
@@ -316,6 +326,18 @@ def run_xs_alpha_growth_sizing(
             admission_config,
         )
 
+    reliability: XsReliabilityResult | None = None
+    if profile in (XS_ALPHA_PROFILE_ID, XS_VOL_WEIGHTED_ALPHA_PROFILE_ID):
+        oos_window = _oos_reliability_window(
+            scaled_equity, scaled_weights, QUALIFICATION_START, QUALIFICATION_END,
+            holdout_start, holdout_end,
+        )
+        if oos_window is not None:
+            oos_equity, oos_weights = oos_window
+            reliability = evaluate_xs_reliability(
+                oos_equity, oos_weights, ReliabilityGateConfig(),
+            )
+
     return XsGrowthSizingReport(
         profile=profile,
         sizing=sizing,
@@ -327,6 +349,7 @@ def run_xs_alpha_growth_sizing(
         pre_scaling_holdout=pre_scaling_holdout,
         vol_target_window=resolved_window,
         vol_target=vol_target,
+        reliability=reliability,
     )
 
 
