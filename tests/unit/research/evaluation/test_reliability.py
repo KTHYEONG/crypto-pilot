@@ -20,6 +20,7 @@ from src.research.evaluation.reliability import (
     compute_portfolio_reliability_gate,
     compute_reliability_gate,
     compute_stress_test_gate,
+    count_closed_trades,
     derive_block_size,
     derive_cost_multiple_hurdle_rate,
     equity_span_years,
@@ -101,6 +102,29 @@ def test_reliability_gate_execution() -> None:
     assert result.verdict == "PASS"
     assert result.trade_count == len(trades)
     assert result.lcb90_cagr > 0.15
+
+
+class TestCountClosedTrades:
+    """SCENARIO_RELIABILITY_RELOCATE_01: relocated closed-trade count proxy."""
+
+    def test_scenario_reliability_relocate_01_counts_transitions(self) -> None:
+        # SCENARIO_RELIABILITY_RELOCATE_01
+        weights = pd.DataFrame(
+            {"A": [0.0, 0.0, 0.5, 0.5], "B": [0.0, 0.0, 0.0, -0.5]},
+        )
+        assert count_closed_trades(weights) == 2
+
+    def test_scenario_reliability_relocate_01_zero_and_empty_frames(self) -> None:
+        assert count_closed_trades(pd.DataFrame({"A": [0.0, 0.0, 0.0]})) == 0
+        assert count_closed_trades(pd.DataFrame({"A": [0.5, 0.5]})) == 0
+        assert count_closed_trades(pd.DataFrame()) == 0
+
+    def test_scenario_reliability_relocate_01_matches_legacy_proxy_formula(self) -> None:
+        rng = np.random.default_rng(0)
+        weights = pd.DataFrame(rng.normal(0.0, 0.2, (40, 5)))
+        arr = weights.to_numpy(dtype=np.float64)
+        expected = int(np.count_nonzero(np.abs(np.diff(arr, axis=0)) > 1e-12))
+        assert count_closed_trades(weights) == expected
 
 
 class TestComputeReliabilityGate:
