@@ -10,12 +10,59 @@ import pandas as pd
 import pytest
 
 from src.application.research.growth import evaluation as ev
+from src.research.evaluation.reliability import count_closed_trades as _shared_count_closed_trades
 from src.research.portfolio.net_construction import NetReturnStream
-from src.research.risk.growth_sizing import GrowthSizingConfig
+from src.research.risk.growth_sizing import GrowthSizingConfig, GrowthSizingResult
 
 
 def _grid(n: int = 500, start: str = "2024-01-01") -> pd.DatetimeIndex:
     return pd.date_range(start, periods=n, freq="4h", tz="UTC")
+
+
+def _write_growth_engine_market(root: Path, nsym: int = 4) -> tuple[str, ...]:
+    """Write a small synthetic 1h market whose taker signal rotates positions.
+
+    The phase-spread taker-buy ratio drives deterministic cross-sectional
+    ``taker_imbalance_v1`` selection so the growth engine deploys segments --
+    and therefore reaches the stitched OOS observation / stress / symbol-holdout
+    closed-trade gates -- in a few seconds instead of the sealed integration
+    fixtures' minutes.
+    """
+    symbols = tuple(f"SYM{i:02d}" for i in range(nsym))
+    start = pd.Timestamp("2020-04-01", tz="UTC")
+    end = pd.Timestamp("2023-01-01", tz="UTC")
+    hourly = pd.date_range(start, end, freq="1h", inclusive="left")
+    n = len(hourly)
+    rng = np.random.default_rng(7)
+    epoch = pd.Timestamp("1970-01-01", tz="UTC")
+    timestamp = (hourly - epoch) // pd.Timedelta("1ms")
+    t_hours = np.arange(n, dtype=np.float64)
+    phases = np.radians(np.linspace(0.0, 360.0, nsym, endpoint=False))
+    directory = root / "futures" / "ohlcv" / "1h"
+    directory.mkdir(parents=True, exist_ok=True)
+    for i, symbol in enumerate(symbols):
+        ratio = 0.5 + 0.15 * np.sin(2.0 * np.pi * t_hours / 3000.0 + phases[i])
+        ratio = np.clip(ratio, 0.02, 0.98)
+        drift = 5e-4 * (ratio - 0.5)
+        eps = rng.normal(0.0, 2e-4, n)
+        price = 100.0
+        prices = np.empty(n)
+        for t in range(n):
+            price = price * (1.0 + drift[t] + eps[t])
+            prices[t] = price
+        quote_vol = 1000.0 * (1.0 + i)
+        frame = pd.DataFrame({
+            "timestamp": timestamp,
+            "open": prices,
+            "high": prices * 1.0005,
+            "low": prices * 0.9995,
+            "close": prices,
+            "volume": 100.0,
+            "quote_vol": quote_vol,
+            "taker_buy_quote": quote_vol * ratio,
+        })
+        frame.to_parquet(directory / f"{symbol}.parquet")
+    return symbols
 
 
 def _schedule(grid: pd.DatetimeIndex) -> dict[pd.Timestamp, tuple[str, ...]]:
@@ -318,6 +365,89 @@ class TestFamilyWindowCorrelation:
         result = ev.family_window_correlation({42: a, 84: b})
         assert (42, 84) in result
         assert -1.0 <= result[(42, 84)] <= 1.0
+
+
+class TestCountClosedTradesRelocation:
+    """SCENARIO_RELIABILITY_RELOCATE_02: growth/evaluation uses the relocated symbol."""
+
+    def test_scenario_reliability_relocate_02_imports_shared_symbol(self) -> None:
+        # SCENARIO_RELIABILITY_RELOCATE_02
+        assert ev.count_closed_trades is _shared_count_closed_trades
+        assert not hasattr(ev, "_count_closed_trades")
+
+    def test_scenario_reliability_relocate_02_behavior_preserved_on_fixture(self) -> None:
+        weights = pd.DataFrame(
+            {"A": [0.0, 0.0, 0.5, 0.5], "B": [0.0, 0.0, 0.0, -0.5]},
+        )
+        assert ev.count_closed_trades(weights) == 2
+
+
+class TestGrowthEngineClosedTradeWiring:
+    """SCENARIO_RELIABILITY_RELOCATE_02: the deployed-path call sites use the symbol."""
+
+    def test_deployed_path_reaches_stitched_closed_trade_gates(
+        self, tmp_path: Path, monkeypatch,
+    ) -> None:
+        # The OOS observation, stress, and symbol-holdout gates all feed the
+        # relocated count_closed_trades with the realized-weight path; run the
+        # engine on a small synthetic market so every call site is exercised.
+        symbols = _write_growth_engine_market(tmp_path)
+
+        def _fake_ohlcv_path(symbol: str, timeframe: str) -> Path:
+            return tmp_path / "futures" / "ohlcv" / "1h" / f"{symbol}.parquet"
+
+        def _fake_funding_path(symbol: str) -> Path:
+            return tmp_path / "futures" / "funding" / f"{symbol}.parquet"
+
+        original_config = ev.ReliabilityGateConfig
+
+        def _fast_config(*args, **kwargs):
+            kwargs.setdefault("n_bootstrap", 100)
+            return original_config(*args, **kwargs)
+
+        def _fast_feasible_solve(*args, **kwargs) -> GrowthSizingResult:
+            return GrowthSizingResult(
+                selected_risk=1.0, median_log_growth=0.1,
+                mdd_breach_prob=0.01, ruin_prob=0.0, feasible_risks=(1.0,),
+                binding_constraint="none", block_size_used=10,
+            )
+
+        monkeypatch.setattr(ev, "ohlcv_path", _fake_ohlcv_path)
+        monkeypatch.setattr(ev, "funding_path", _fake_funding_path)
+        monkeypatch.setattr(ev, "ReliabilityGateConfig", _fast_config)
+        monkeypatch.setattr(ev, "solve_growth_optimal_risk", _fast_feasible_solve)
+
+        calls: list[pd.DataFrame] = []
+        original = ev.count_closed_trades
+
+        def _spy(weights: pd.DataFrame) -> int:
+            calls.append(weights)
+            return original(weights)
+
+        monkeypatch.setattr(ev, "count_closed_trades", _spy)
+
+        report = ev.run_growth_engine_evaluation(
+            ev.GrowthEngineEvaluationRequest(
+                universe=ev.PitUniverseSpec(
+                    universe_size=len(symbols), max_positions=3, dev_fraction=0.60,
+                ),
+                construction=ev.NetConstructionSpec(
+                    rebalance_bars=12, no_trade_band=0.0,
+                ),
+                start="2020-04-01",
+                symbol_scope="dev",
+                log_run=False,
+            )
+        )
+
+        assert report.status in ("PASS", "NO_ADMISSIBLE_ALPHA")
+        assert report.selected_strategy is not None
+        assert len(report.equity) > 0
+        assert float(report.equity.iloc[0]) > 0
+        # the stitched OOS book spans the stitched deployment windows, so the
+        # relocated proxy saw it (individual discovery sleeves are ~3-month
+        # windows, roughly half the deployed span)
+        assert max(len(w) for w in calls) > 4_000
 
 
 class TestScreenDiscoveryCandidates:
