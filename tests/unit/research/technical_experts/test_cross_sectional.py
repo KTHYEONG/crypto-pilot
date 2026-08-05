@@ -7,6 +7,7 @@ XSA-02-COMPOSITE-PRESERVATION, XSV3-01-FAMILY-SUM,
 SCENARIO_XSV5_01_DUAL_FAMILY_EXCLUDES_FUNDING,
 SCENARIO_XSV6_01_CAUSAL_VOL_WEIGHTS_EXCLUDE_CURRENT_BAR,
 SCENARIO_XSV6_02_VOL_WEIGHTED_MATCHES_MANUAL_RECOMPUTE,
+SCENARIO_XS_POSITIONING_WEIGHTS_01,
 SCENARIO_XSV6SIZE_01_DISCOVERY_ONLY_SIZING_NO_LEAKAGE,
 SCENARIO_XSV6SIZE_02_INFEASIBLE_SIZING_FAILS_CLOSED, and
 SCENARIO_COSTFIX_01..07 (honest turnover-cost repricing of the vol-target
@@ -43,6 +44,7 @@ from src.research.technical_experts.cross_sectional import (
     XsCompositeSpec,
     XsReliabilityResult,
     _causal_family_inverse_vol_weights,
+    _cross_sectional_zscore,
     _ledger_pnl,
     _true_realized_net,
     apply_no_trade_band,
@@ -50,6 +52,7 @@ from src.research.technical_experts.cross_sectional import (
     build_xs_alpha_dual_family_weights,
     build_xs_alpha_family_scores,
     build_xs_alpha_family_weights,
+    build_xs_alpha_positioning_weights,
     build_xs_alpha_vol_weighted_weights,
     build_xs_alpha_weights,
     build_xs_neutral_weights,
@@ -813,6 +816,136 @@ class TestVolWeightedAlphaWeights:
             build_xs_alpha_vol_weighted_weights(
                 closes, bad_taker, funding, opens, XsAlphaCompositeSpec(), XsCompositeSpec(),
             )
+
+class TestPositioningAlphaWeights:
+    def test_xsp_01_dollar_neutral_unit_gross_on_synthetic_fixture(self) -> None:
+        # SCENARIO_XS_POSITIONING_WEIGHTS_01
+        idx = pd.date_range("2024-01-01", periods=250, freq="4h", tz="UTC")
+        rng = np.random.default_rng(2)
+        cols = ["A", "B", "C"]
+        closes = pd.DataFrame(
+            {c: 100 * np.exp(np.cumsum(rng.normal(0, 0.01, 250))) for c in cols},
+            index=idx,
+        )
+        opens = closes.shift(1).bfill()
+        taker = pd.DataFrame(
+            np.clip(0.5 + rng.normal(0, 0.05, (250, 3)), 0.0, 1.0),
+            index=idx, columns=cols,
+        )
+        funding = pd.DataFrame(0.0, index=idx, columns=cols)
+        long_short_ratio = pd.DataFrame(
+            0.5 + 0.3 * rng.normal(0, 1.0, (250, 3)),
+            index=idx, columns=cols,
+        )
+        alpha_spec = XsAlphaCompositeSpec()
+        exec_spec = dataclasses.replace(XsCompositeSpec(), no_trade_band=0.0)
+        weights = build_xs_alpha_positioning_weights(
+            closes, taker, funding, long_short_ratio, opens, alpha_spec, exec_spec,
+        )
+        assert weights.index.equals(idx)
+        assert list(weights.columns) == cols
+        invested = weights[weights.abs().sum(axis=1) > 1e-12]
+        assert (invested.sum(axis=1).abs() < 1e-9).all()
+        assert ((invested.abs().sum(axis=1) - 1.0).abs() < 1e-9).all()
+
+    def test_xsp_01_matches_manual_recompute(self) -> None:
+        # SCENARIO_XS_POSITIONING_WEIGHTS_01 (construction lock)
+        idx = pd.date_range("2024-01-01", periods=250, freq="4h", tz="UTC")
+        rng = np.random.default_rng(2)
+        cols = ["A", "B", "C"]
+        closes = pd.DataFrame(
+            {c: 100 * np.exp(np.cumsum(rng.normal(0, 0.01, 250))) for c in cols},
+            index=idx,
+        )
+        opens = closes.shift(1).bfill()
+        taker = pd.DataFrame(
+            np.clip(0.5 + rng.normal(0, 0.05, (250, 3)), 0.0, 1.0),
+            index=idx, columns=cols,
+        )
+        funding = pd.DataFrame(0.0, index=idx, columns=cols)
+        long_short_ratio = pd.DataFrame(
+            0.5 + 0.3 * rng.normal(0, 1.0, (250, 3)),
+            index=idx, columns=cols,
+        )
+        alpha_spec = XsAlphaCompositeSpec()
+        exec_spec = XsCompositeSpec()
+        family_scores = build_xs_alpha_family_scores(closes, taker, funding, alpha_spec)
+        family_weights = build_xs_alpha_family_weights(
+            closes, taker, funding, alpha_spec, exec_spec,
+        )
+        positioning_score = np.zeros((250, 3), dtype=np.float64)
+        for window in alpha_spec.signal_windows:
+            positioning_score += _cross_sectional_zscore(
+                long_short_ratio.rolling(window).mean().to_numpy(dtype=np.float64),
+            )
+        family_scores["positioning"] = pd.DataFrame(
+            -positioning_score, index=idx, columns=cols,
+        )
+        family_weights["positioning"] = build_xs_neutral_weights(
+            family_scores["positioning"],
+            exec_spec.halflife_bars, exec_spec.no_trade_band,
+        )
+        sleeve_returns = {}
+        for name, fw in family_weights.items():
+            equity, _turnover = run_xs_composite_ledger(fw, opens, funding, exec_spec)
+            sleeve_returns[name] = equity.pct_change()
+        sleeve_returns_frame = pd.DataFrame(sleeve_returns, index=idx)
+        vol_weights = _causal_family_inverse_vol_weights(
+            sleeve_returns_frame, alpha_spec.signal_windows[0],
+        )
+        combined = sum(
+            vol_weights[name].to_numpy()[:, None] * family_scores[name].to_numpy()
+            for name in family_scores
+        )
+        expected = build_xs_neutral_weights(
+            pd.DataFrame(combined, index=idx, columns=cols),
+            exec_spec.halflife_bars, exec_spec.no_trade_band,
+        )
+        actual = build_xs_alpha_positioning_weights(
+            closes, taker, funding, long_short_ratio, opens, alpha_spec, exec_spec,
+        )
+        assert actual.equals(expected)
+
+    def test_xsp_01_high_lsr_precedes_negative_tilt_causally(self) -> None:
+        # SCENARIO_XS_POSITIONING_WEIGHTS_01 (contrarian sign + causality)
+        # The other families are cross-sectionally flat, so only the positioning
+        # sleeve tilts: high long_short_ratio -> short, low -> long. The band
+        # is disabled so the causality check reads the raw construction instead
+        # of being absorbed by the stateful no-trade deadband.
+        idx = pd.date_range("2024-01-01", periods=400, freq="4h", tz="UTC")
+        cols = ["A", "B", "C", "D"]
+        path = 100.0 * np.exp(np.linspace(0.0, 0.05, len(idx)))
+        closes = pd.DataFrame(np.tile(path, (4, 1)).T, index=idx, columns=cols)
+        opens = closes.shift(1).bfill()
+        taker = pd.DataFrame(0.5, index=idx, columns=cols)
+        funding = pd.DataFrame(0.0, index=idx, columns=cols)
+        lsr = pd.DataFrame(1.0, index=idx, columns=cols)
+        lsr.loc[idx[170]:, "A"] = 2.0
+        lsr.loc[idx[170]:, "B"] = 1.8
+        lsr.loc[idx[170]:, "C"] = 0.4
+        lsr.loc[idx[170]:, "D"] = 0.4
+        alpha_spec = XsAlphaCompositeSpec()
+        exec_spec = dataclasses.replace(XsCompositeSpec(), no_trade_band=0.0)
+        base = build_xs_alpha_positioning_weights(
+            closes, taker, funding, lsr, opens, alpha_spec, exec_spec,
+        )
+        late = base.loc[idx[380]:]
+        assert bool((late["A"] < 0.0).all())
+        assert bool((late["B"] < 0.0).all())
+        assert bool((late["C"] > 0.0).all())
+        assert bool((late["D"] > 0.0).all())
+        # Causality: lifting A's lsr to 4.0 from bar 301 onward must leave
+        # every weight at or before bar 300 bit-identical (no lookahead), push
+        # A's tilt more negative on the following bar 301, and never touch the
+        # same bar 300.
+        raised = lsr.copy()
+        raised.loc[idx[301]:, "A"] = 4.0
+        altered = build_xs_alpha_positioning_weights(
+            closes, taker, funding, raised, opens, alpha_spec, exec_spec,
+        )
+        assert base.loc[:idx[300]].equals(altered.loc[:idx[300]])
+        assert base.loc[idx[300], "A"] == altered.loc[idx[300], "A"]
+        assert bool(altered.loc[idx[301], "A"] < base.loc[idx[301], "A"])
 
 
 class TestGrowthOptimalSizing:
