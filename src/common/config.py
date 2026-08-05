@@ -24,6 +24,16 @@ def metrics_path(symbol: str) -> Path:
     return FUTURES_DATA_DIR / "metrics" / "1d" / f"{_safe_symbol(symbol)}.parquet"
 
 
+def indicator_kline_path(dataset: str, symbol: str, timeframe: str) -> Path:
+    safe = _safe_symbol(symbol)
+    return FUTURES_DATA_DIR / dataset / timeframe / f"{safe}.parquet"
+
+
+def bookdepth_path(symbol: str) -> Path:
+    safe = _safe_symbol(symbol)
+    return FUTURES_DATA_DIR / "bookdepth" / f"{safe}.parquet"
+
+
 def spot_ohlcv_path(symbol: str, timeframe: str) -> Path:
     safe = _safe_symbol(symbol)
     return SPOT_DATA_DIR / "ohlcv" / timeframe / f"{safe}.parquet"
