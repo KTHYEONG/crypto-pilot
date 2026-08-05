@@ -15,12 +15,20 @@ fills, turnover costs, funding on the held book) is applied by
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, fields
 
 import numpy as np
 import pandas as pd
 
 from src.common.errors import DataIntegrityError
+from src.research.evaluation.reliability import (
+    FoldDistributionResult,
+    ReliabilityGateConfig,
+    ReliabilityGateResult,
+    compute_equal_duration_fold_distribution,
+    compute_equity_reliability_gate,
+    count_closed_trades,
+)
 from src.research.risk.growth_sizing import (
     GrowthSizingConfig,
     GrowthSizingResult,
@@ -647,6 +655,21 @@ class XsAdmissionResult:
     breakeven_cost: float
 
 
+@dataclass(frozen=True, slots=True)
+class XsReliabilityResult:
+    """Lifted block-bootstrap LCB + fold-concentration diagnostic for one XS book.
+
+    Wraps the two reliability primitives' results unmodified -- ``lcb`` is the
+    block-bootstrap LCB90 gate on the marked equity stream and ``fold`` is the
+    equal-duration fold-concentration distribution. This is a diagnostic field,
+    never a new admission gate: ``evaluate_xs_admission``'s scale-invariant,
+    structure-only verdict is unchanged by its presence.
+    """
+
+    lcb: ReliabilityGateResult
+    fold: FoldDistributionResult
+
+
 def _annualized_sharpe(returns: pd.Series) -> float:
     if len(returns) < 2:
         return 0.0
@@ -756,6 +779,30 @@ def evaluate_xs_admission(
         annualized_turnover=annualized_turnover,
         breakeven_cost=breakeven_cost,
     )
+
+
+def evaluate_xs_reliability(
+    equity: pd.Series,
+    realized_weights: pd.DataFrame,
+    config: ReliabilityGateConfig,
+) -> XsReliabilityResult:
+    """Compose the reliability-gate primitives over one realized XS book.
+
+    Thin composition, never a reimplementation: ``count_closed_trades`` is the
+    closed-trade sample-size proxy over the realized weight path,
+    :func:`compute_equity_reliability_gate` runs the block-bootstrap LCB90 on
+    the marked equity stream, and
+    :func:`compute_equal_duration_fold_distribution` measures equal-duration
+    fold concentration. Their results are returned unmodified inside
+    :class:`XsReliabilityResult`. The fold contract raises its own
+    ``ValueError`` when the equity span is too short for an equal-duration fold;
+    callers guard with a span check before calling so this never propagates out
+    of a report pipeline.
+    """
+    closed_trades = count_closed_trades(realized_weights)
+    lcb = compute_equity_reliability_gate(equity, closed_trades, config=config)
+    fold = compute_equal_duration_fold_distribution(equity, config=config)
+    return XsReliabilityResult(lcb=lcb, fold=fold)
 
 
 def size_xs_alpha_growth_optimal(
@@ -911,6 +958,10 @@ def _check_contract() -> None:
     assert list(signature(evaluate_xs_admission).parameters) == [
         "equity", "turnover", "benchmark", "config",
     ]
+    assert list(signature(evaluate_xs_reliability).parameters) == [
+        "equity", "realized_weights", "config",
+    ]
+    assert {f.name for f in fields(XsReliabilityResult)} == {"lcb", "fold"}
     assert list(signature(size_xs_alpha_growth_optimal).parameters) == [
         "weights", "opens", "bar_funding", "spec", "discovery_start",
         "discovery_end", "sizing_config", "vol_target_window",

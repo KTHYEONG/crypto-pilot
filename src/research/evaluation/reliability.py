@@ -244,6 +244,24 @@ def equity_span_years(equity: pd.Series) -> float:
     return years
 
 
+def count_closed_trades(realized_weights: pd.DataFrame) -> int:
+    """Deterministic closed-trade sample-size proxy for a rebalanced cross-sectional book.
+
+    Counts every ``(bar, symbol)`` realised-weight transition (entry, exit, or
+    long/short flip) in the net-of-turnover construction stream.  This is only
+    the sample-size guard for :func:`compute_equity_reliability_gate` -- the
+    gate's bootstrap always samples the marked equity return stream, never
+    these counts.  A book that is rebalanced but never changes composition
+    yields a near-zero count and therefore fails closed (PENDING), which is the
+    honest evidence for a static book.
+    """
+    arr = realized_weights.to_numpy(dtype=np.float64)
+    if arr.size == 0:
+        return 0
+    delta = np.abs(np.diff(arr, axis=0))
+    return int(np.count_nonzero(delta > 1e-12))
+
+
 def derive_cost_multiple_hurdle_rate(
     allocation_cost_total: float,
     years: float,

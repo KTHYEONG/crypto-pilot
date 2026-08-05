@@ -25,6 +25,7 @@ from src.research.evaluation.reliability import (
     compute_equal_duration_fold_distribution,
     compute_equity_reliability_gate,
 )
+from src.research.evaluation.reliability import count_closed_trades
 from src.research.execution.intrabar_audit import intrabar_audit_required
 from src.research.portfolio.growth_router import (
     CONTEXT_WINDOW_BARS,
@@ -463,24 +464,6 @@ def _no_admissible_alpha(
     )
 
 
-def _count_closed_trades(realized_weights: pd.DataFrame) -> int:
-    """Deterministic closed-trade sample-size proxy for a rebalanced cross-sectional book.
-
-    Counts every ``(bar, symbol)`` realised-weight transition (entry, exit, or
-    long/short flip) in the net-of-turnover construction stream.  This is only
-    the sample-size guard for ``compute_equity_reliability_gate`` -- the gate's
-    bootstrap always samples the marked equity return stream, never these
-    counts.  A book that is rebalanced but never changes composition yields a
-    near-zero count and therefore fails closed (PENDING), which is the honest
-    evidence for a static book.
-    """
-    arr = realized_weights.to_numpy(dtype=np.float64)
-    if arr.size == 0:
-        return 0
-    delta = np.abs(np.diff(arr, axis=0))
-    return int(np.count_nonzero(delta > 1e-12))
-
-
 def _market_context_inputs(
     forward_returns: pd.DataFrame,
     panel_symbols: Sequence[str],
@@ -707,7 +690,7 @@ def _discovery_sleeve_evidence(
     if len(net) < 2:
         return None
     equity = (1.0 + net).cumprod()
-    closed = _count_closed_trades(realized)
+    closed = count_closed_trades(realized)
     try:
         admission_lcb = compute_equity_reliability_gate(
             equity, closed, config=router_config,
@@ -793,7 +776,7 @@ def _context_sleeve_lcb(
     equity = (1.0 + net).cumprod()
     try:
         return compute_equity_reliability_gate(
-            equity, _count_closed_trades(realized), config=router_config,
+            equity, count_closed_trades(realized), config=router_config,
         ).lcb90_cagr
     except ValueError:
         return float("nan")
@@ -1140,7 +1123,7 @@ def run_growth_engine_evaluation(request: GrowthEngineEvaluationRequest) -> Grow
     oos_net = oos_net[~oos_net.index.duplicated(keep="last")].sort_index()
     oos_weights = pd.concat(stitched_weights)
     oos_weights = oos_weights[~oos_weights.index.duplicated(keep="last")].sort_index()
-    closed_trades = _count_closed_trades(oos_weights)
+    closed_trades = count_closed_trades(oos_weights)
     deployed_equity = (1.0 + oos_net).cumprod()
 
     oos_t_stat = _oos_t_stat(oos_net)
@@ -1167,7 +1150,7 @@ def run_growth_engine_evaluation(request: GrowthEngineEvaluationRequest) -> Grow
     ].sort_index()
     stress_equity = (1.0 + stress_net).cumprod()
     stress_gate = compute_equity_reliability_gate(
-        stress_equity, _count_closed_trades(stress_weights_concat),
+        stress_equity, count_closed_trades(stress_weights_concat),
         dataclasses.replace(ReliabilityGateConfig(), hurdle_rate=0.0),
     )
 
@@ -1191,7 +1174,7 @@ def run_growth_engine_evaluation(request: GrowthEngineEvaluationRequest) -> Grow
                 holdout_equity = (1.0 + holdout_net).cumprod()
                 holdout_gate = compute_equity_reliability_gate(
                     holdout_equity,
-                    _count_closed_trades(holdout_stream.realized_weights.loc[holdout_net.index]),
+                    count_closed_trades(holdout_stream.realized_weights.loc[holdout_net.index]),
                 )
 
     falsification = evaluate_falsification(
