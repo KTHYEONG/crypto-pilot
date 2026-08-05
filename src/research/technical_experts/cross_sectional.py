@@ -498,6 +498,69 @@ def build_xs_alpha_vol_weighted_weights(
         execution_spec.no_trade_band,
     )
 
+def build_xs_alpha_positioning_weights(
+    closes: pd.DataFrame,
+    taker_buy_ratio: pd.DataFrame,
+    bar_funding: pd.DataFrame,
+    long_short_ratio: pd.DataFrame,
+    opens: pd.DataFrame,
+    alpha_spec: XsAlphaCompositeSpec,
+    execution_spec: XsCompositeSpec,
+) -> pd.DataFrame:
+    """Build the causal inverse-vol-tilted 4-sleeve alpha book with positioning.
+
+    Mirrors :func:`build_xs_alpha_vol_weighted_weights` exactly and adds a 4th
+    "positioning" sleeve. The positioning score is the negated sum -- the
+    contrarian sign -- over the frozen ``alpha_spec.signal_windows`` (42, 84,
+    168) triple of the cross-sectional z-score of
+    ``long_short_ratio.rolling(window).mean()`` (long low long/short-ratio
+    names, short high ones). No single-window cherry-picking and no
+    combination with ``top_trader_long_short_ratio``: the family is
+    ``long_short_ratio`` alone. The per-sleeve standalone ledger replay and
+    the :func:`_causal_family_inverse_vol_weights` tilt over all four sleeves
+    are unchanged from the vol-weighted profile.
+    """
+    family_scores = build_xs_alpha_family_scores(
+        closes, taker_buy_ratio, bar_funding, alpha_spec,
+    )
+    family_weights = build_xs_alpha_family_weights(
+        closes, taker_buy_ratio, bar_funding, alpha_spec, execution_spec,
+    )
+    positioning_score = np.zeros(
+        (len(closes.index), len(closes.columns)), dtype=np.float64,
+    )
+    for window in alpha_spec.signal_windows:
+        positioning_score += _cross_sectional_zscore(
+            long_short_ratio.rolling(window).mean().to_numpy(dtype=np.float64),
+        )
+    family_scores["positioning"] = pd.DataFrame(
+        -positioning_score, index=closes.index, columns=list(closes.columns),
+    )
+    family_weights["positioning"] = build_xs_neutral_weights(
+        family_scores["positioning"],
+        execution_spec.halflife_bars,
+        execution_spec.no_trade_band,
+    )
+    sleeve_returns: dict[str, pd.Series] = {}
+    for name, family_w in family_weights.items():
+        equity, _turnover = run_xs_composite_ledger(
+            family_w, opens, bar_funding, execution_spec,
+        )
+        sleeve_returns[name] = equity.pct_change()
+    sleeve_returns_frame = pd.DataFrame(sleeve_returns, index=closes.index)
+    vol_weights = _causal_family_inverse_vol_weights(
+        sleeve_returns_frame, alpha_spec.signal_windows[0],
+    )
+    combined = sum(
+        vol_weights[name].to_numpy()[:, None] * family_scores[name].to_numpy()
+        for name in family_scores
+    )
+    return build_xs_neutral_weights(
+        pd.DataFrame(combined, index=closes.index, columns=list(closes.columns)),
+        execution_spec.halflife_bars,
+        execution_spec.no_trade_band,
+    )
+
 
 def _ledger_pnl(
     lagged: np.ndarray,
@@ -994,6 +1057,10 @@ def _check_contract() -> None:
     ]
     assert list(signature(build_xs_alpha_vol_weighted_weights).parameters) == [
         "closes", "taker_buy_ratio", "bar_funding", "opens", "alpha_spec", "execution_spec",
+    ]
+    assert list(signature(build_xs_alpha_positioning_weights).parameters) == [
+        "closes", "taker_buy_ratio", "bar_funding", "long_short_ratio",
+        "opens", "alpha_spec", "execution_spec",
     ]
     assert XsAlphaCompositeSpec().signal_windows == (42, 84, 168)
 

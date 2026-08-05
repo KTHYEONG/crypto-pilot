@@ -46,6 +46,7 @@ def _run_xs_trend_screen(args: argparse.Namespace) -> None:
         XS_CONTEXTUAL_ALPHA_PROFILE_ID,
         XS_DUAL_FAMILY_ALPHA_PROFILE_ID,
         XS_NEUTRAL_PROFILE_ID,
+        XS_POSITIONING_ALPHA_PROFILE_ID,
         XS_SCORE_ROUTED_ALPHA_PROFILE_ID,
         XS_VOL_WEIGHTED_ALPHA_PROFILE_ID,
         persist_xs_screen_report,
@@ -61,14 +62,16 @@ def _run_xs_trend_screen(args: argparse.Namespace) -> None:
         XS_SCORE_ROUTED_ALPHA_PROFILE_ID,
         XS_DUAL_FAMILY_ALPHA_PROFILE_ID,
         XS_VOL_WEIGHTED_ALPHA_PROFILE_ID,
+        XS_POSITIONING_ALPHA_PROFILE_ID,
     ):
         raise ValueError(
             f"unknown xs screen profile '{profile}'; the source-controlled "
             f"profiles are '{XS_NEUTRAL_PROFILE_ID}', '{XS_ALPHA_PROFILE_ID}', "
             f"'{XS_CONTEXTUAL_ALPHA_PROFILE_ID}', "
             f"'{XS_SCORE_ROUTED_ALPHA_PROFILE_ID}', "
-            f"'{XS_DUAL_FAMILY_ALPHA_PROFILE_ID}', and "
-            f"'{XS_VOL_WEIGHTED_ALPHA_PROFILE_ID}'"
+            f"'{XS_DUAL_FAMILY_ALPHA_PROFILE_ID}', "
+            f"'{XS_VOL_WEIGHTED_ALPHA_PROFILE_ID}', and "
+            f"'{XS_POSITIONING_ALPHA_PROFILE_ID}'"
         )
     report = run_xs_trend_screen(
         start=args.start, end=args.end, unseal_holdout=args.unseal_holdout,
