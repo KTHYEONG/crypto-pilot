@@ -1290,3 +1290,115 @@ def test_xs_baseline_blend_sized_cli_rejects_unknown_profile() -> None:
     ])
     with pytest.raises(ValueError, match="unknown baseline-blend profile"):
         args.handler(args)
+
+def test_xs_baseline_blend_joint_cli_parses_and_dispatches(monkeypatch) -> None:
+    # XABJS-CLI: the joint leaf threads the two frozen parameters into
+    # run_xs_alpha_baseline_blend_joint and persists to the v8 joint report.
+    from src.application.research.technical.xs_alpha_baseline_blend import (
+        XsBaselineBlendJointReport,
+    )
+    from src.research.technical_experts.cross_sectional import XsAdmissionResult
+
+    def _failed() -> XsAdmissionResult:
+        return XsAdmissionResult(
+            admitted=False, binding_constraint="x", sharpe=0.0, beta=0.0,
+            cagr=0.0, mdd=0.0, t_stat=0.0, annual_sharpe={},
+            annualized_turnover=0.0, breakeven_cost=0.0,
+        )
+
+    calls: list[tuple[float, float, bool]] = []
+
+    def fake_run(*, xs_alpha_weight, leverage_scale, unseal_holdout=False):
+        calls.append((xs_alpha_weight, leverage_scale, unseal_holdout))
+        return XsBaselineBlendJointReport(
+            profile="xs_alpha_vol_weighted_v6",
+            xs_alpha_weight=xs_alpha_weight,
+            leverage_scale=leverage_scale,
+            discovery=_failed(),
+            qualification=_failed(),
+            holdout=None,
+            pre_blend_discovery=_failed(),
+            pre_blend_qualification=_failed(),
+            pre_blend_holdout=None,
+            baseline_discovery=_failed(),
+            baseline_qualification=_failed(),
+            baseline_holdout=None,
+        )
+
+    persisted: list[str] = []
+    monkeypatch.setattr(
+        "src.application.research.technical.xs_alpha_baseline_blend.run_xs_alpha_baseline_blend_joint",
+        fake_run,
+    )
+    monkeypatch.setattr(
+        "src.application.research.technical.xs_alpha_baseline_blend.persist_xs_alpha_baseline_blend_joint_report",
+        lambda report, path: persisted.append(str(path)),
+    )
+    args = build_root_parser().parse_args([
+        "research", "run", "single", "xs-baseline-blend-joint",
+        "--profile", "xs_alpha_vol_weighted_v6",
+        "--xs-alpha-weight", "0.2713516311918738",
+        "--leverage-scale", "3.9768046145974894",
+        "--unseal-holdout",
+        "--no-log-run",
+    ])
+    args.handler(args)
+    assert calls == [(0.2713516311918738, 3.9768046145974894, True)]
+    assert persisted == ["docs/results/xs_alpha_baseline_blend_v8_joint.json"]
+
+
+def test_xs_baseline_blend_joint_cli_defaults_to_frozen_constants(monkeypatch) -> None:
+    from src.application.research.technical.xs_alpha_baseline_blend import (
+        _JOINT_LEVERAGE_SCALE,
+        _JOINT_XS_ALPHA_WEIGHT,
+        XsBaselineBlendJointReport,
+    )
+    from src.research.technical_experts.cross_sectional import XsAdmissionResult
+
+    def _failed() -> XsAdmissionResult:
+        return XsAdmissionResult(
+            admitted=False, binding_constraint="x", sharpe=0.0, beta=0.0,
+            cagr=0.0, mdd=0.0, t_stat=0.0, annual_sharpe={},
+            annualized_turnover=0.0, breakeven_cost=0.0,
+        )
+
+    calls: list[tuple[float, float, bool]] = []
+
+    def fake_run(*, xs_alpha_weight, leverage_scale, unseal_holdout=False):
+        calls.append((xs_alpha_weight, leverage_scale, unseal_holdout))
+        return XsBaselineBlendJointReport(
+            profile="xs_alpha_vol_weighted_v6",
+            xs_alpha_weight=xs_alpha_weight,
+            leverage_scale=leverage_scale,
+            discovery=_failed(),
+            qualification=_failed(),
+            holdout=None,
+            pre_blend_discovery=_failed(),
+            pre_blend_qualification=_failed(),
+            pre_blend_holdout=None,
+            baseline_discovery=_failed(),
+            baseline_qualification=_failed(),
+            baseline_holdout=None,
+        )
+
+    monkeypatch.setattr(
+        "src.application.research.technical.xs_alpha_baseline_blend.run_xs_alpha_baseline_blend_joint",
+        fake_run,
+    )
+    monkeypatch.setattr(
+        "src.application.research.technical.xs_alpha_baseline_blend.persist_xs_alpha_baseline_blend_joint_report",
+        lambda report, path: None,
+    )
+    args = build_root_parser().parse_args([
+        "research", "run", "single", "xs-baseline-blend-joint", "--no-log-run",
+    ])
+    args.handler(args)
+    assert calls == [(_JOINT_XS_ALPHA_WEIGHT, _JOINT_LEVERAGE_SCALE, False)]
+
+
+def test_xs_baseline_blend_joint_cli_rejects_unknown_profile() -> None:
+    args = build_root_parser().parse_args([
+        "research", "run", "single", "xs-baseline-blend-joint", "--profile", "bogus",
+    ])
+    with pytest.raises(ValueError, match="unknown baseline-blend profile"):
+        args.handler(args)
