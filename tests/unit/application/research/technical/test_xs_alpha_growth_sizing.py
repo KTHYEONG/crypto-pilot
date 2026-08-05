@@ -122,7 +122,8 @@ class TestGrowthSizingOrchestration:
         assert set(payload) == {
             "profile", "sizing", "discovery", "qualification", "holdout",
             "pre_scaling_discovery", "pre_scaling_qualification",
-            "pre_scaling_holdout", "report_fingerprint",
+            "pre_scaling_holdout", "vol_target_window", "vol_target",
+            "report_fingerprint",
         }
         assert payload["sizing"]["selected_risk"] == 1.0
 
@@ -166,3 +167,23 @@ class TestGrowthSizingOrchestration:
             xs_growth.xs_growth_sizing_report_path(XS_VOL_WEIGHTED_ALPHA_PROFILE_ID).name
             == "xs_alpha_vol_weighted_v6_growth_sized.json"
         )
+
+    # SCENARIO_VOLTARGET_08_ORCHESTRATOR_DEFAULT_ENABLED_42
+    def test_voltarget_08_orchestrator_defaults_to_42(self, monkeypatch) -> None:
+        _install_synthetic_data(monkeypatch)
+        _feasible_sizing(monkeypatch, selected_risk=1.0)
+        report = xs_growth.run_xs_alpha_growth_sizing(profile=XS_ALPHA_PROFILE_ID)
+        assert report.vol_target_window == 42
+        assert report.vol_target is not None
+        assert np.isfinite(report.vol_target)
+
+    # SCENARIO_VOLTARGET_09_ORCHESTRATOR_OPT_OUT_REPRODUCES_ORIGINAL
+    def test_voltarget_09_opt_out_reproduces_original(self, monkeypatch) -> None:
+        _install_synthetic_data(monkeypatch)
+        _feasible_sizing(monkeypatch, selected_risk=2.0)
+        report = xs_growth.run_xs_alpha_growth_sizing(
+            profile=XS_VOL_WEIGHTED_ALPHA_PROFILE_ID, vol_target_window=None,
+        )
+        assert report.vol_target_window is None
+        assert report.vol_target is None
+        assert report.sizing.selected_risk == 2.0

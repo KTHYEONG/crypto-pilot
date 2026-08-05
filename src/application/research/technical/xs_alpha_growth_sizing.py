@@ -34,7 +34,11 @@ from src.application.research.technical.xs_trend_screen import (
 )
 from src.common.errors import DataIntegrityError
 from src.research.evaluation.policy import HOLDOUT_CUTOFF, resolve_evaluation_end
-from src.research.risk.growth_sizing import GrowthSizingConfig, GrowthSizingResult
+from src.research.risk.growth_sizing import (
+    GrowthSizingConfig,
+    GrowthSizingResult,
+    compute_discovery_target_vol,
+)
 from src.research.technical_experts.cross_sectional import (
     XsAdmissionConfig,
     XsAdmissionResult,
@@ -64,6 +68,11 @@ _XS_GROWTH_SIZING_CONFIG = GrowthSizingConfig(
     reference_risk=1.0,
 )
 
+# Frozen vol-target window: reuses v6's own already-frozen family inverse-vol
+# tilt horizon (XsAlphaCompositeSpec().signal_windows[0] == 42) rather than
+# introducing a second hardcoded copy of the literal.
+_XS_GROWTH_SIZING_VOL_TARGET_WINDOW = XsAlphaCompositeSpec().signal_windows[0]
+
 
 def _sizing_payload(result: GrowthSizingResult) -> dict[str, object]:
     return {
@@ -89,6 +98,8 @@ class XsGrowthSizingReport:
     pre_scaling_discovery: XsAdmissionResult
     pre_scaling_qualification: XsAdmissionResult
     pre_scaling_holdout: XsAdmissionResult | None
+    vol_target_window: int | None = None
+    vol_target: float | None = None
     report_fingerprint: str = ""
 
     def __post_init__(self) -> None:
@@ -110,6 +121,8 @@ class XsGrowthSizingReport:
                 if self.pre_scaling_holdout is not None
                 else None
             ),
+            "vol_target_window": self.vol_target_window,
+            "vol_target": self.vol_target,
         }
 
     def to_payload(self) -> dict[str, object]:
@@ -138,6 +151,7 @@ def run_xs_alpha_growth_sizing(
     *,
     profile: str = XS_VOL_WEIGHTED_ALPHA_PROFILE_ID,
     unseal_holdout: bool = False,
+    vol_target_window: int | None = _XS_GROWTH_SIZING_VOL_TARGET_WINDOW,
 ) -> XsGrowthSizingReport:
     """Execute the growth-optimal gross-leverage sizing overlay for one profile.
 
@@ -149,6 +163,12 @@ def run_xs_alpha_growth_sizing(
     since turnover, breakeven cost, and realized MDD are not scale-invariant
     once the path-dependent drawdown ladder is in the loop. Holdout stays sealed
     unless ``unseal_holdout`` is set.
+
+    The proactive vol-target overlay (``compute_discovery_target_vol`` +
+    ``apply_vol_target_overlay`` in :mod:`src.research.risk.growth_sizing`) is
+    enabled by default with the frozen 42-bar window; the resolved anchor is
+    reported as ``vol_target``. Passing ``vol_target_window=None`` reproduces
+    the ADR_20260805 original sizing path byte-for-byte.
     """
     if profile not in (XS_ALPHA_PROFILE_ID, XS_VOL_WEIGHTED_ALPHA_PROFILE_ID):
         raise ValueError(
@@ -237,7 +257,16 @@ def run_xs_alpha_growth_sizing(
     scaled_net, scaled_weights, sizing = size_xs_alpha_growth_optimal(
         weights, opens, bar_funding, execution_spec,
         XS_DISCOVERY_START, DISCOVERY_END, _XS_GROWTH_SIZING_CONFIG,
+        vol_target_window=vol_target_window,
     )
+    if vol_target_window is not None:
+        discovery_net = base_equity.pct_change().dropna()
+        discovery_net = discovery_net[
+            (discovery_net.index >= XS_DISCOVERY_START) & (discovery_net.index <= DISCOVERY_END)
+        ]
+        vol_target = compute_discovery_target_vol(discovery_net, vol_target_window)
+    else:
+        vol_target = None
 
     if sizing.selected_risk is None:
         scaled_equity = base_equity
@@ -282,6 +311,8 @@ def run_xs_alpha_growth_sizing(
         pre_scaling_discovery=pre_scaling_discovery,
         pre_scaling_qualification=pre_scaling_qualification,
         pre_scaling_holdout=pre_scaling_holdout,
+        vol_target_window=vol_target_window,
+        vol_target=vol_target,
     )
 
 
@@ -301,8 +332,9 @@ def _check_contract() -> None:
     from inspect import signature
 
     params = signature(run_xs_alpha_growth_sizing).parameters
-    assert set(params) == {"profile", "unseal_holdout"}
+    assert set(params) == {"profile", "unseal_holdout", "vol_target_window"}
     assert all(p.kind == p.KEYWORD_ONLY for p in params.values())
+    assert _XS_GROWTH_SIZING_VOL_TARGET_WINDOW == 42
     assert XS_ALPHA_PROFILE_ID == "xs_alpha_multihorizon_v2"
     assert XS_VOL_WEIGHTED_ALPHA_PROFILE_ID == "xs_alpha_vol_weighted_v6"
     assert _XS_GROWTH_SIZING_CONFIG.reference_risk == 1.0
