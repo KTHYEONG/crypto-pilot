@@ -48,6 +48,7 @@ from src.research.technical_experts.cross_sectional import (
     build_xs_alpha_weights,
     evaluate_xs_admission,
     run_xs_composite_ledger,
+    select_vol_target_window,
     size_xs_alpha_growth_optimal,
 )
 from src.research.technical_experts.trend_screen_catalog import (
@@ -68,10 +69,11 @@ _XS_GROWTH_SIZING_CONFIG = GrowthSizingConfig(
     reference_risk=1.0,
 )
 
-# Frozen vol-target window: reuses v6's own already-frozen family inverse-vol
-# tilt horizon (XsAlphaCompositeSpec().signal_windows[0] == 42) rather than
-# introducing a second hardcoded copy of the literal.
-_XS_GROWTH_SIZING_VOL_TARGET_WINDOW = XsAlphaCompositeSpec().signal_windows[0]
+# Default vol-target window grid: v6's own already-frozen family inverse-vol
+# tilt horizons (XsAlphaCompositeSpec().signal_windows). Passing a tuple makes
+# run_xs_alpha_growth_sizing search the grid for the growth-optimal window
+# (select_vol_target_window); an explicit int or None bypasses the search and
+# reproduces the prior fixed-window / scalar-only behaviors byte-for-byte.
 
 
 def _sizing_payload(result: GrowthSizingResult) -> dict[str, object]:
@@ -151,7 +153,7 @@ def run_xs_alpha_growth_sizing(
     *,
     profile: str = XS_VOL_WEIGHTED_ALPHA_PROFILE_ID,
     unseal_holdout: bool = False,
-    vol_target_window: int | None = _XS_GROWTH_SIZING_VOL_TARGET_WINDOW,
+    vol_target_window: int | None | tuple[int, ...] = XsAlphaCompositeSpec().signal_windows,
 ) -> XsGrowthSizingReport:
     """Execute the growth-optimal gross-leverage sizing overlay for one profile.
 
@@ -166,9 +168,13 @@ def run_xs_alpha_growth_sizing(
 
     The proactive vol-target overlay (``compute_discovery_target_vol`` +
     ``apply_vol_target_overlay`` in :mod:`src.research.risk.growth_sizing`) is
-    enabled by default with the frozen 42-bar window; the resolved anchor is
-    reported as ``vol_target``. Passing ``vol_target_window=None`` reproduces
-    the ADR_20260805 original sizing path byte-for-byte.
+    enabled by default; when ``vol_target_window`` is a tuple (the frozen
+    ``XsAlphaCompositeSpec().signal_windows`` default), the growth-optimal
+    window is selected among it via :func:`select_vol_target_window`, and the
+    resolved anchor is reported as ``vol_target``. Passing an explicit int
+    bypasses the search (byte-for-byte reproduces ADR_20260805's fixed-``42``
+    path for ``42``), and passing ``None`` disables vol-targeting entirely
+    (byte-for-byte reproduces the ADR_20260805 original scalar-only path).
     """
     if profile not in (XS_ALPHA_PROFILE_ID, XS_VOL_WEIGHTED_ALPHA_PROFILE_ID):
         raise ValueError(
@@ -254,17 +260,25 @@ def run_xs_alpha_growth_sizing(
                 admission_config,
             )
 
-    scaled_net, scaled_weights, sizing = size_xs_alpha_growth_optimal(
-        weights, opens, bar_funding, execution_spec,
-        XS_DISCOVERY_START, DISCOVERY_END, _XS_GROWTH_SIZING_CONFIG,
-        vol_target_window=vol_target_window,
-    )
-    if vol_target_window is not None:
+    if isinstance(vol_target_window, tuple):
+        scaled_net, scaled_weights, sizing, resolved_window = select_vol_target_window(
+            weights, opens, bar_funding, execution_spec,
+            XS_DISCOVERY_START, DISCOVERY_END, _XS_GROWTH_SIZING_CONFIG,
+            window_grid=vol_target_window,
+        )
+    else:
+        resolved_window = vol_target_window
+        scaled_net, scaled_weights, sizing = size_xs_alpha_growth_optimal(
+            weights, opens, bar_funding, execution_spec,
+            XS_DISCOVERY_START, DISCOVERY_END, _XS_GROWTH_SIZING_CONFIG,
+            vol_target_window=vol_target_window,
+        )
+    if resolved_window is not None:
         discovery_net = base_equity.pct_change().dropna()
         discovery_net = discovery_net[
             (discovery_net.index >= XS_DISCOVERY_START) & (discovery_net.index <= DISCOVERY_END)
         ]
-        vol_target = compute_discovery_target_vol(discovery_net, vol_target_window)
+        vol_target = compute_discovery_target_vol(discovery_net, resolved_window)
     else:
         vol_target = None
 
@@ -311,7 +325,7 @@ def run_xs_alpha_growth_sizing(
         pre_scaling_discovery=pre_scaling_discovery,
         pre_scaling_qualification=pre_scaling_qualification,
         pre_scaling_holdout=pre_scaling_holdout,
-        vol_target_window=vol_target_window,
+        vol_target_window=resolved_window,
         vol_target=vol_target,
     )
 
@@ -334,7 +348,8 @@ def _check_contract() -> None:
     params = signature(run_xs_alpha_growth_sizing).parameters
     assert set(params) == {"profile", "unseal_holdout", "vol_target_window"}
     assert all(p.kind == p.KEYWORD_ONLY for p in params.values())
-    assert _XS_GROWTH_SIZING_VOL_TARGET_WINDOW == 42
+    assert params["vol_target_window"].default == (42, 84, 168)
+    assert params["vol_target_window"].default == XsAlphaCompositeSpec().signal_windows
     assert XS_ALPHA_PROFILE_ID == "xs_alpha_multihorizon_v2"
     assert XS_VOL_WEIGHTED_ALPHA_PROFILE_ID == "xs_alpha_vol_weighted_v6"
     assert _XS_GROWTH_SIZING_CONFIG.reference_risk == 1.0
