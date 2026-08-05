@@ -1,6 +1,16 @@
 {
   "tasks": [
     {
+      "task_id": "xs_alpha_v6_reliability_gate_wiring",
+      "date": "2026-08-05",
+      "adr_id": "ADR_20260805_xs_alpha_v6_reliability_gate_wiring",
+      "domain": "risk",
+      "title": "XS Alpha v6 신뢰도 게이트(LCB90+fold-concentration) 배선 및 실전 투입 준비도 실측",
+      "why": "v6가 discovery/qualification/holdout/stress 단일분할 admission 게이트는 전부 통과했으나, 2026-08-03 구축된 block-bootstrap LCB90+fold-concentration 신뢰도 게이트는 growth/evaluation.py·rolling_admission.py에만 배선되어 있고 xs-screen/cross_sectional 경로(v2~v6)에는 전혀 연결되지 않아 v6와 그로스사이징 오버레이 모두 이 강건성 검증을 거친 적이 없었음. 사용자 요청으로 실전 투입 준비도 평가 필요.",
+      "resolution": "count_closed_trades를 growth/evaluation.py에서 research/evaluation/reliability.py로 이동(레이어링 준수)하고, cross_sectional.py에 XsReliabilityResult+evaluate_xs_reliability를 신설(기존 compute_equity_reliability_gate/compute_equal_duration_fold_distribution 재사용, 신규 통계 없음). xs_trend_screen.py·xs_alpha_growth_sizing.py에 qualification(+holdout) stitched 구간에 대해 진단 필드로 배선(evaluate_xs_admission의 scale-invariant 계약은 불변). 6개월 미만 구간은 fail-closed to None. CLI 실행으로 실측: v6 기본/그로스사이징 모두 fold-concentration은 PASS(0.30/0.33 < threshold 0.407)하지만 LCB90 CAGR(9.98%/8.60%)이 15% 허들 미달로 신뢰도 게이트 FAIL.",
+      "impact": "v6는 실전 투입 불가로 확정(측정 기반, 추론 아님) — point-estimate 게이트는 통과하나 부트스트랩 하한이 허들 미달. 그로스사이징 오버레이(1.5x)는 실제 holdout에서 Sharpe 1.73->1.55·CAGR 28.3%->21.3%로 악화 확인, 채택 보류 권고. 실행/주문관리 파이프라인 부재는 별도 스펙 범위로 분리. lean_check --spec 전체 PASS(65% coverage), 기존 admission 판정 전부 불변."
+    },
+    {
       "task_id": "xs_alpha_growth_sizing_window_selection",
       "date": "2026-08-05",
       "adr_id": "ADR_20260805_xs_alpha_growth_sizing_window_selection",

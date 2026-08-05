@@ -14,7 +14,20 @@
     "sharpe": 1.78255293,
     "t_stat": 2.35640322
   },
-  "holdout": null,
+  "holdout": {
+    "admitted": true,
+    "annual_sharpe": {
+      "2026": 1.55345085
+    },
+    "annualized_turnover": 44.27526094,
+    "beta": -0.00692471,
+    "binding_constraint": null,
+    "breakeven_cost": 0.00533817,
+    "cagr": 0.21270035,
+    "mdd": -0.08411965,
+    "sharpe": 1.55345085,
+    "t_stat": 1.11488484
+  },
   "pre_scaling_discovery": {
     "admitted": true,
     "annual_sharpe": {
@@ -30,7 +43,20 @@
     "sharpe": 1.28301733,
     "t_stat": 1.69605409
   },
-  "pre_scaling_holdout": null,
+  "pre_scaling_holdout": {
+    "admitted": true,
+    "annual_sharpe": {
+      "2026": 1.7307715
+    },
+    "annualized_turnover": 25.76978251,
+    "beta": 0.00273576,
+    "binding_constraint": null,
+    "breakeven_cost": 0.01089273,
+    "cagr": 0.28296654,
+    "mdd": -0.08209349,
+    "sharpe": 1.7307715,
+    "t_stat": 1.24214481
+  },
   "pre_scaling_qualification": {
     "admitted": true,
     "annual_sharpe": {
@@ -62,7 +88,30 @@
     "sharpe": 1.49099445,
     "t_stat": 2.11002831
   },
-  "report_fingerprint": "67baf18cd9e855863e171ad7cc3732f2e6abc1f2f5c3935e8f42fe6987a944d3",
+  "reliability": {
+    "fold": {
+      "fold_concentration": 0.32810197,
+      "fold_concentration_threshold": 0.40667695,
+      "fold_reference_sharpe": 1.26086141,
+      "gate_pass": true,
+      "max_period_contribution": 0.34265083,
+      "median_fold_cagr": 0.26758428,
+      "median_fold_calmar": 3.6773514,
+      "n_folds": 6,
+      "worst_fold_cagr": -0.02036551
+    },
+    "lcb": {
+      "block_size_used": 10,
+      "lcb90_cagr": 0.08597095,
+      "lcb95_cagr": 0.05705229,
+      "p_negative": 0.01133333,
+      "point_cagr": 0.21305507,
+      "t_stat": 2.38435485,
+      "trade_count": 82710,
+      "verdict": "FAIL"
+    }
+  },
+  "report_fingerprint": "fba93d4ff6677067233ffa62d7d1e5c58ee8628a987c4af9cd83a2a1441f77f8",
   "sizing": {
     "binding_constraint": "none",
     "block_size_used": 17,
