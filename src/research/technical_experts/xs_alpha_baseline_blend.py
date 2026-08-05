@@ -36,6 +36,9 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
+from src.research.evaluation.reliability import ReliabilityGateConfig
+from src.research.technical_experts.cross_sectional import evaluate_xs_reliability
+
 # Frozen 4h calendar invariant, identical to
 # ``GrowthSizingConfig.bars_per_year`` / ``_BARS_PER_YEAR`` in
 # :mod:`src.research.technical_experts.cross_sectional`.
@@ -282,3 +285,72 @@ def apply_fixed_gross_leverage(
             scale * w_arr, index=weights.index, columns=weights.columns, dtype=np.float64,
         ),
     )
+
+def discovery_reliability_score(
+    xs_alpha_net: pd.Series,
+    xs_alpha_realized_weights: pd.DataFrame,
+    baseline_net: pd.Series,
+    baseline_realized_weight: pd.Series,
+    discovery_start: pd.Timestamp,
+    discovery_end: pd.Timestamp,
+    xs_alpha_weight: float,
+    leverage_scale: float,
+) -> float:
+    """Discovery-only LCB90 objective for the joint weight x leverage search.
+
+    Pure composition of three already-existing functions -- never a new
+    statistic and never a reimplementation: all four inputs are restricted to
+    the inclusive ``[discovery_start, discovery_end]`` window first (the same
+    fail-closed discovery-only contract as ``_discovery_common``, applied
+    before any of the composed calls so qualification/holdout bars are never
+    read), then :func:`build_blended_ledger` applies the sleeve weight,
+    :func:`apply_fixed_gross_leverage` applies the pure-linear gross-leverage
+    overlay, and :func:`evaluate_xs_reliability` returns the block-bootstrap
+    LCB90 in % CAGR terms. The score genuinely responds to ``leverage_scale``
+    (unlike a Sharpe/t_stat objective, which is scale-invariant under pure
+    linear leverage) -- exactly the property that lets one objective search
+    both axes jointly instead of the per-axis sequential pattern this project
+    measured to sign-flip out of sample.
+    """
+    xs_disc = xs_alpha_net[
+        (xs_alpha_net.index >= discovery_start) & (xs_alpha_net.index <= discovery_end)
+    ]
+    xs_w_disc = xs_alpha_realized_weights[
+        (xs_alpha_realized_weights.index >= discovery_start)
+        & (xs_alpha_realized_weights.index <= discovery_end)
+    ]
+    bl_disc = baseline_net[
+        (baseline_net.index >= discovery_start) & (baseline_net.index <= discovery_end)
+    ]
+    bl_w_disc = baseline_realized_weight[
+        (baseline_realized_weight.index >= discovery_start)
+        & (baseline_realized_weight.index <= discovery_end)
+    ]
+    common = (
+        xs_disc.index.intersection(bl_disc.index)
+        .intersection(xs_w_disc.index)
+        .intersection(bl_w_disc.index)
+    )
+    if len(common) < 2:
+        raise ValueError(
+            "fewer than 2 common bars remain in the discovery window; "
+            "cannot score a blend"
+        )
+    blended_equity, blended_weights = build_blended_ledger(
+        xs_disc.reindex(common).astype(np.float64),
+        xs_w_disc.reindex(common),
+        bl_disc.reindex(common).astype(np.float64),
+        bl_w_disc.reindex(common),
+        xs_alpha_weight,
+    )
+    blended_net = blended_equity.pct_change().fillna(0.0).rename("blended_net")
+    scaled_net, scaled_weights = apply_fixed_gross_leverage(
+        blended_net, blended_weights, leverage_scale,
+    )
+    scaled_equity = pd.Series(
+        np.cumprod(1.0 + scaled_net.to_numpy(dtype=np.float64)),
+        index=scaled_net.index,
+        name="scaled_equity",
+    )
+    result = evaluate_xs_reliability(scaled_equity, scaled_weights, ReliabilityGateConfig())
+    return float(result.lcb.lcb90_cagr)
