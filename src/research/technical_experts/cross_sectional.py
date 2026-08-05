@@ -25,6 +25,8 @@ from src.research.risk.growth_sizing import (
     GrowthSizingConfig,
     GrowthSizingResult,
     apply_realised_risk_overlay,
+    apply_vol_target_overlay,
+    compute_discovery_target_vol,
     solve_growth_optimal_risk,
 )
 
@@ -711,6 +713,8 @@ def size_xs_alpha_growth_optimal(
     discovery_start: pd.Timestamp,
     discovery_end: pd.Timestamp,
     sizing_config: GrowthSizingConfig,
+    vol_target_window: int | None = None,
+    vol_target_multiplier_bounds: tuple[float, float] = (0.25, 4.0),
 ) -> tuple[pd.Series, pd.DataFrame, GrowthSizingResult]:
     """Select a discovery-only growth-optimal gross-leverage overlay for an XS book.
 
@@ -727,10 +731,38 @@ def size_xs_alpha_growth_optimal(
     lag convention, recomputed here rather than changing the frozen ledger
     signature) over the full available history, so the path-dependent drawdown
     ladder sees one continuous deployed history.
+
+    When ``vol_target_window`` is set the proactive vol-target overlay
+    (:func:`compute_discovery_target_vol` + :func:`apply_vol_target_overlay`)
+    is applied over the full history BEFORE the static-scalar search, so the
+    scalar risk grid is searched over the already vol-normalized discovery
+    series. The anchor is computed strictly from the discovery slice and frozen
+    for the entire history. When ``vol_target_window is None`` (the default)
+    this function is byte-identical to the pre-existing static-scalar-only path.
     """
     equity, _turnover = run_xs_composite_ledger(weights, opens, bar_funding, spec)
     net = equity.pct_change().dropna()
     discovery_net = net[(net.index >= discovery_start) & (net.index <= discovery_end)]
+    if vol_target_window is not None:
+        target_vol = compute_discovery_target_vol(discovery_net, vol_target_window)
+        net_full = equity.pct_change().fillna(0.0)
+        lag = 1 + spec.execution_delay_bars
+        realized_weights = weights.shift(lag).fillna(0.0)
+        vt_net_full, vt_weights_full = apply_vol_target_overlay(
+            net_full, realized_weights, vol_target_window, target_vol,
+            vol_target_multiplier_bounds,
+        )
+        vt_discovery = vt_net_full[
+            (vt_net_full.index >= discovery_start) & (vt_net_full.index <= discovery_end)
+        ]
+        sizing = solve_growth_optimal_risk(vt_discovery.to_numpy(), sizing_config)
+        if sizing.selected_risk is None:
+            return net, weights, sizing
+        scaled_net, scaled_weights = apply_realised_risk_overlay(
+            vt_net_full, vt_weights_full, sizing.selected_risk, sizing_config.reference_risk,
+        )
+        return scaled_net, scaled_weights, sizing
+
     sizing = solve_growth_optimal_risk(discovery_net.to_numpy(), sizing_config)
     if sizing.selected_risk is None:
         return net, weights, sizing
@@ -762,7 +794,8 @@ def _check_contract() -> None:
     ]
     assert list(signature(size_xs_alpha_growth_optimal).parameters) == [
         "weights", "opens", "bar_funding", "spec", "discovery_start",
-        "discovery_end", "sizing_config",
+        "discovery_end", "sizing_config", "vol_target_window",
+        "vol_target_multiplier_bounds",
     ]
     spec = XsCompositeSpec()
     assert (spec.halflife_bars, spec.no_trade_band, spec.execution_delay_bars) == (6, 0.05, 1)
