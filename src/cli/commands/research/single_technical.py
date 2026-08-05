@@ -86,6 +86,41 @@ def _run_xs_trend_screen(args: argparse.Namespace) -> None:
     )
 
 
+def _run_xs_alpha_growth_sizing(args: argparse.Namespace) -> None:
+    from src.application.research.technical.xs_alpha_growth_sizing import (
+        persist_xs_growth_sizing_report,
+        run_xs_alpha_growth_sizing,
+        xs_growth_sizing_report_path,
+    )
+    from src.application.research.technical.xs_trend_screen import (
+        XS_ALPHA_PROFILE_ID,
+        XS_VOL_WEIGHTED_ALPHA_PROFILE_ID,
+    )
+
+    profile = args.profile or XS_VOL_WEIGHTED_ALPHA_PROFILE_ID
+    if profile not in (XS_ALPHA_PROFILE_ID, XS_VOL_WEIGHTED_ALPHA_PROFILE_ID):
+        raise ValueError(
+            f"unknown growth-sizing profile '{profile}'; sizing is restricted "
+            f"to the end-to-end admitted profiles '{XS_ALPHA_PROFILE_ID}' and "
+            f"'{XS_VOL_WEIGHTED_ALPHA_PROFILE_ID}'"
+        )
+    report = run_xs_alpha_growth_sizing(
+        profile=profile, unseal_holdout=args.unseal_holdout,
+    )
+    persist_xs_growth_sizing_report(report, xs_growth_sizing_report_path(profile))
+    _logger.info(
+        "xs-growth-sizing profile=%s selected_risk=%s "
+        "pre_qualification_admitted=%s post_qualification_admitted=%s "
+        "post_qualification_sharpe=%.4f binding_constraint=%s",
+        report.profile,
+        report.sizing.selected_risk,
+        report.pre_scaling_qualification.admitted,
+        report.qualification.admitted,
+        report.qualification.sharpe,
+        report.qualification.binding_constraint,
+    )
+
+
 def add_single_technical_commands(run_sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
     """Attach the ``research run single technical`` subcommands."""
     technical = run_sub.add_parser(
@@ -119,3 +154,14 @@ def add_single_technical_commands(run_sub: argparse._SubParsersAction[argparse.A
     xs_screen.add_argument("--unseal-holdout", action="store_true", default=False)
     xs_screen.add_argument("--no-log-run", action="store_true", default=False)
     xs_screen.set_defaults(handler=_run_xs_trend_screen)
+
+    xs_growth_sizing = run_sub.add_parser(
+        "xs-growth-sizing",
+        help="Select a growth-optimal gross-leverage overlay for an admitted XS alpha profile",
+    )
+    xs_growth_sizing.add_argument("--profile", default=None)
+    xs_growth_sizing.add_argument("--start", default=None)
+    xs_growth_sizing.add_argument("--end", default=None)
+    xs_growth_sizing.add_argument("--unseal-holdout", action="store_true", default=False)
+    xs_growth_sizing.add_argument("--no-log-run", action="store_true", default=False)
+    xs_growth_sizing.set_defaults(handler=_run_xs_alpha_growth_sizing)

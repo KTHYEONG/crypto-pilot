@@ -5,8 +5,10 @@ XSC-03-SPEC-FROZEN-BOUNDS, XSC-04-LEDGER-EXECUTION-LAG,
 XSC-05-ADMISSION-SCALE-INVARIANT, XSC-07-COMPOSITE-BEATS-SINGLE-FAMILY,
 XSA-02-COMPOSITE-PRESERVATION, XSV3-01-FAMILY-SUM,
 SCENARIO_XSV5_01_DUAL_FAMILY_EXCLUDES_FUNDING,
-SCENARIO_XSV6_01_CAUSAL_VOL_WEIGHTS_EXCLUDE_CURRENT_BAR, and
-SCENARIO_XSV6_02_VOL_WEIGHTED_MATCHES_MANUAL_RECOMPUTE.
+SCENARIO_XSV6_01_CAUSAL_VOL_WEIGHTS_EXCLUDE_CURRENT_BAR,
+SCENARIO_XSV6_02_VOL_WEIGHTED_MATCHES_MANUAL_RECOMPUTE,
+SCENARIO_XSV6SIZE_01_DISCOVERY_ONLY_SIZING_NO_LEAKAGE, and
+SCENARIO_XSV6SIZE_02_INFEASIBLE_SIZING_FAILS_CLOSED.
 """
 
 from __future__ import annotations
@@ -18,6 +20,7 @@ import pandas as pd
 import pytest
 
 from src.common.errors import DataIntegrityError
+from src.research.risk.growth_sizing import GrowthSizingConfig, GrowthSizingResult
 from src.research.technical_experts.cross_sectional import (
     XsAdmissionConfig,
     XsAlphaCompositeSpec,
@@ -33,6 +36,7 @@ from src.research.technical_experts.cross_sectional import (
     build_xs_neutral_weights,
     evaluate_xs_admission,
     run_xs_composite_ledger,
+    size_xs_alpha_growth_optimal,
 )
 
 
@@ -754,3 +758,76 @@ class TestVolWeightedAlphaWeights:
             build_xs_alpha_vol_weighted_weights(
                 closes, bad_taker, funding, opens, XsAlphaCompositeSpec(), XsCompositeSpec(),
             )
+
+
+class TestGrowthOptimalSizing:
+    def _sizing_inputs(self, rows: int = 300) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DatetimeIndex]:
+        # A constant long-A/short-B book earns positive drift (A up, B down); a
+        # single -80% A open inside the discovery window provides the tail event
+        # that makes the hard 1e-6 constraints infeasible while the easy 0.9
+        # constraints stay feasible.
+        idx = pd.date_range("2024-01-01", periods=rows, freq="4h", tz="UTC")
+        rng = np.random.default_rng(3)
+        closes = pd.DataFrame({
+            "A": 100 * np.exp(np.cumsum(rng.normal(0.0015, 0.008, rows))),
+            "B": 100 * np.exp(np.cumsum(rng.normal(-0.0015, 0.008, rows))),
+        }, index=idx)
+        opens = closes.shift(1).bfill()
+        opens.loc[idx[40], "A"] = opens.loc[idx[39], "A"] * 0.2
+        funding = pd.DataFrame(0.0, index=idx, columns=["A", "B"])
+        weights = pd.DataFrame({"A": 0.5, "B": -0.5}, index=idx)
+        return weights, opens, funding, idx
+
+    def _easy_config(self) -> GrowthSizingConfig:
+        return GrowthSizingConfig(
+            risk_grid=(0.5, 1.0, 2.0), reference_risk=1.0, horizon_years=0.5,
+            n_paths=100, max_drawdown_prob=0.9, max_ruin_prob=0.9,
+        )
+
+    def test_xsv6size_01_sizing_reads_only_discovery_window(self) -> None:
+        # SCENARIO_XSV6SIZE_01_DISCOVERY_ONLY_SIZING_NO_LEAKAGE
+        weights, opens, funding, idx = self._sizing_inputs()
+        discovery_start, discovery_end = idx[0], idx[149]
+        spec = XsCompositeSpec()
+
+        baseline_net, _baseline_weights, baseline = size_xs_alpha_growth_optimal(
+            weights, opens, funding, spec, discovery_start, discovery_end, self._easy_config(),
+        )
+        assert baseline.selected_risk is not None
+
+        mutated_opens = opens.copy()
+        mutated_opens.loc[idx[150]:] *= (
+            1.0 - 0.0005 * np.arange(1, len(idx) - 149)[:, None]
+        )
+        _net2, _w2, mutated = size_xs_alpha_growth_optimal(
+            weights, mutated_opens, funding, spec, discovery_start, discovery_end, self._easy_config(),
+        )
+        assert mutated == baseline
+
+        crashed_opens = opens.copy()
+        crashed_opens.loc[idx[:150]] *= (1.0 - 0.001 * np.arange(150))[:, None]
+        _net3, _w3, crashed = size_xs_alpha_growth_optimal(
+            weights, crashed_opens, funding, spec, discovery_start, discovery_end, self._easy_config(),
+        )
+        assert crashed != baseline
+        assert baseline_net.index.equals(_baseline_weights.index)
+
+    def test_xsv6size_02_infeasible_sizing_fails_closed(self) -> None:
+        # SCENARIO_XSV6SIZE_02_INFEASIBLE_SIZING_FAILS_CLOSED
+        weights, opens, funding, idx = self._sizing_inputs()
+        discovery_start, discovery_end = idx[0], idx[149]
+        hard_config = GrowthSizingConfig(
+            risk_grid=(0.5, 1.0, 2.0), reference_risk=1.0, horizon_years=0.5,
+            n_paths=100, max_drawdown_prob=1e-6, max_ruin_prob=1e-6,
+        )
+        net, weights_out, sizing = size_xs_alpha_growth_optimal(
+            weights, opens, funding, XsCompositeSpec(), discovery_start, discovery_end, hard_config,
+        )
+        assert sizing.selected_risk is None
+        assert isinstance(sizing, GrowthSizingResult)
+        unscaled_equity, _unscaled_turnover = run_xs_composite_ledger(
+            weights, opens, funding, XsCompositeSpec(),
+        )
+        unscaled_net = unscaled_equity.pct_change().dropna()
+        assert np.allclose(net.to_numpy(), unscaled_net.to_numpy(), atol=1e-12)
+        assert weights_out.equals(weights)

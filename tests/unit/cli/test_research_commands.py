@@ -1,4 +1,4 @@
-"""CLI research command dispatch. Covers SCENARIO_XSV5_04_CLI_DISPATCHES_V3_V4_V5 and SCENARIO_XSV6_05_CLI_DISPATCHES_V6."""
+"""CLI research command dispatch. Covers SCENARIO_XSV5_04_CLI_DISPATCHES_V3_V4_V5, SCENARIO_XSV6_05_CLI_DISPATCHES_V6, and SCENARIO_XSV6SIZE_06_CLI_DISPATCHES_GROWTH_SIZING."""
 
 from __future__ import annotations
 
@@ -773,3 +773,108 @@ def test_exit_sweep_cli_parses_and_dispatches(monkeypatch, capsys) -> None:
     assert request.include_baseline is True
     assert request.max_workers is None
     assert json.loads(capsys.readouterr().out)["status"] == "COMPLETE"
+
+
+def test_xs_growth_sizing_cli_parses_and_dispatches(monkeypatch) -> None:
+    # SCENARIO_XSV6SIZE_06_CLI_DISPATCHES_GROWTH_SIZING
+    from src.application.research.technical.xs_alpha_growth_sizing import (
+        XS_VOL_WEIGHTED_ALPHA_PROFILE_ID,
+        XsGrowthSizingReport,
+    )
+    from src.research.risk.growth_sizing import GrowthSizingResult
+    from src.research.technical_experts.cross_sectional import XsAdmissionResult
+
+    calls: list[tuple[str, bool]] = []
+
+    def _failed() -> XsAdmissionResult:
+        return XsAdmissionResult(
+            admitted=False, binding_constraint="x", sharpe=0.0, beta=0.0,
+            cagr=0.0, mdd=0.0, t_stat=0.0, annual_sharpe={},
+            annualized_turnover=0.0, breakeven_cost=0.0,
+        )
+
+    def fake_run(*, profile, unseal_holdout=False):
+        calls.append((profile, unseal_holdout))
+        return XsGrowthSizingReport(
+            profile=profile,
+            sizing=GrowthSizingResult(1.0, 0.5, 0.01, 0.0, (1.0,), "none", 10),
+            discovery=_failed(),
+            qualification=_failed(),
+            holdout=None,
+            pre_scaling_discovery=_failed(),
+            pre_scaling_qualification=_failed(),
+            pre_scaling_holdout=None,
+        )
+
+    persisted: list[str] = []
+    monkeypatch.setattr(
+        "src.application.research.technical.xs_alpha_growth_sizing.run_xs_alpha_growth_sizing",
+        fake_run,
+    )
+    monkeypatch.setattr(
+        "src.application.research.technical.xs_alpha_growth_sizing.persist_xs_growth_sizing_report",
+        lambda report, path: persisted.append(str(path)),
+    )
+    args = build_root_parser().parse_args([
+        "research", "run", "single", "xs-growth-sizing",
+        "--profile", "xs_alpha_vol_weighted_v6",
+        "--start", "2022-04-01",
+        "--end", "2025-12-31",
+        "--unseal-holdout",
+        "--no-log-run",
+    ])
+    args.handler(args)
+    assert calls == [(XS_VOL_WEIGHTED_ALPHA_PROFILE_ID, True)]
+    assert persisted == ["docs/results/xs_alpha_vol_weighted_v6_growth_sized.json"]
+
+
+def test_xs_growth_sizing_cli_defaults_profile_and_seals_holdout(monkeypatch) -> None:
+    from src.application.research.technical.xs_alpha_growth_sizing import (
+        XsGrowthSizingReport,
+    )
+    from src.research.risk.growth_sizing import GrowthSizingResult
+    from src.research.technical_experts.cross_sectional import XsAdmissionResult
+
+    calls: list[tuple[str, bool]] = []
+
+    def _failed() -> XsAdmissionResult:
+        return XsAdmissionResult(
+            admitted=False, binding_constraint="x", sharpe=0.0, beta=0.0,
+            cagr=0.0, mdd=0.0, t_stat=0.0, annual_sharpe={},
+            annualized_turnover=0.0, breakeven_cost=0.0,
+        )
+
+    def fake_run(*, profile, unseal_holdout=False):
+        calls.append((profile, unseal_holdout))
+        return XsGrowthSizingReport(
+            profile=profile,
+            sizing=GrowthSizingResult(1.0, 0.5, 0.01, 0.0, (1.0,), "none", 10),
+            discovery=_failed(),
+            qualification=_failed(),
+            holdout=None,
+            pre_scaling_discovery=_failed(),
+            pre_scaling_qualification=_failed(),
+            pre_scaling_holdout=None,
+        )
+
+    monkeypatch.setattr(
+        "src.application.research.technical.xs_alpha_growth_sizing.run_xs_alpha_growth_sizing",
+        fake_run,
+    )
+    monkeypatch.setattr(
+        "src.application.research.technical.xs_alpha_growth_sizing.persist_xs_growth_sizing_report",
+        lambda report, path: None,
+    )
+    args = build_root_parser().parse_args([
+        "research", "run", "single", "xs-growth-sizing", "--no-log-run",
+    ])
+    args.handler(args)
+    assert calls == [("xs_alpha_vol_weighted_v6", False)]
+
+
+def test_xs_growth_sizing_cli_rejects_unknown_profile() -> None:
+    args = build_root_parser().parse_args([
+        "research", "run", "single", "xs-growth-sizing", "--profile", "bogus",
+    ])
+    with pytest.raises(ValueError, match="unknown growth-sizing profile"):
+        args.handler(args)
