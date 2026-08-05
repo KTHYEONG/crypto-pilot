@@ -22,6 +22,7 @@
 - **Environment Tooling:** All execution, linting, typing, and tests MUST use `uv run` prefix (`uv run ruff check`, `uv run mypy`, `uv run pytest`).
 - **File Modification Policy:** Use available patch/edit tools for existing files. Create a new file only when it does not exist.
 - **Context Control:** Omit unchanged lines with `# ... existing code ...`. Specify line ranges when viewing large files over 300 lines.
+- **Scratch Scope:** Temp scripts & command output logs go to project `scratch/`, never external temp (`%TEMP%`, `/tmp`). Sync skill purges them.
 
 ## 5. Domain & Skill Rule Routing
 - **Python Architecture & Standards:** [python.md](file:///.agents/rules/python.md)
