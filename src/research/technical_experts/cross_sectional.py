@@ -491,6 +491,32 @@ def build_xs_alpha_vol_weighted_weights(
     )
 
 
+def _ledger_pnl(
+    lagged: np.ndarray,
+    o2o: np.ndarray,
+    funding: np.ndarray,
+    cost_rate: float,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Frozen ledger P&L formula: per-bar net returns and turnover.
+
+    ``lagged`` is the already-lagged weight matrix (row ``t`` is what is held
+    against the ``t``-th open-to-open return), ``o2o`` the open-to-open return
+    matrix, and ``funding`` the per-bar funding-rate matrix.  Turnover is the
+    row sum of absolute lagged-weight changes (the first row trades from zero);
+    each bar's net return is ``sum(lagged * o2o) - turnover * cost_rate -
+    sum(lagged * funding)``.  This is the single source of truth for the round
+    -trip cost formula -- callers must not reimplement it.
+    """
+    prev_lagged = np.zeros_like(lagged)
+    prev_lagged[1:] = lagged[:-1]
+    turnover = np.abs(lagged - prev_lagged).sum(axis=1)
+
+    book_return = (lagged * o2o).sum(axis=1)
+    funding_charge = (lagged * funding).sum(axis=1)
+    net_returns = book_return - turnover * cost_rate - funding_charge
+    return net_returns, turnover
+
+
 def run_xs_composite_ledger(
     weights: pd.DataFrame,
     opens: pd.DataFrame,
@@ -535,13 +561,9 @@ def run_xs_composite_ledger(
     with np.errstate(divide="ignore", invalid="ignore"):
         o2o[1:] = o[1:] / o[:-1] - 1.0
 
-    prev_lagged = np.zeros_like(lagged)
-    prev_lagged[1:] = lagged[:-1]
-    turnover = np.abs(lagged - prev_lagged).sum(axis=1)
-
-    book_return = (lagged * o2o).sum(axis=1)
-    funding = (lagged * f).sum(axis=1)
-    net_returns = book_return - turnover * spec.round_trip_cost_rate() - funding
+    net_returns, turnover = _ledger_pnl(
+        lagged, o2o, f, spec.round_trip_cost_rate()
+    )
 
     equity_values = _INITIAL_EQUITY * np.cumprod(1.0 + net_returns)
     if not np.isfinite(equity_values).all() or (equity_values <= 0.0).any():
@@ -550,6 +572,37 @@ def run_xs_composite_ledger(
     equity = pd.Series(equity_values, index=weights.index, name="equity", dtype=np.float64)
     turnover_series = pd.Series(turnover, index=weights.index, name="turnover", dtype=np.float64)
     return equity, turnover_series
+
+def _true_realized_net(
+    realized_weights: pd.DataFrame,
+    opens: pd.DataFrame,
+    bar_funding: pd.DataFrame,
+    cost_rate: float,
+) -> pd.Series:
+    """True ledger-consistent net P&L of an already-lagged realized weight path.
+
+    ``realized_weights`` must already be the lagged/realized weight series the
+    overlay stack produced (e.g. the weights output of
+    :func:`apply_vol_target_overlay` / :func:`apply_realised_risk_overlay`, or
+    ``weights.shift(1 + execution_delay_bars).fillna(0.0)``) -- no additional
+    lag shift is applied here, since doing so would double-lag it.  The
+    open-to-open returns are computed identically to
+    :func:`run_xs_composite_ledger` (first bar ``0.0``, ``o2o[t] =
+    opens[t]/opens[t-1] - 1``) and the frozen formula of :func:`_ledger_pnl` is
+    applied directly.  This is the single source of truth for repricing a
+    realized weight path's true P&L; callers must never approximate it via
+    ``factor * original_net``.
+    """
+    w = realized_weights.to_numpy(dtype=np.float64)
+    o = opens.to_numpy(dtype=np.float64)
+    f = bar_funding.to_numpy(dtype=np.float64)
+
+    o2o = np.zeros_like(o)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        o2o[1:] = o[1:] / o[:-1] - 1.0
+
+    net_returns, _turnover = _ledger_pnl(w, o2o, f, cost_rate)
+    return pd.Series(net_returns, index=realized_weights.index, dtype=np.float64)
 
 
 @dataclass(frozen=True, slots=True)
@@ -737,42 +790,49 @@ def size_xs_alpha_growth_optimal(
     is applied over the full history BEFORE the static-scalar search, so the
     scalar risk grid is searched over the already vol-normalized discovery
     series. The anchor is computed strictly from the discovery slice and frozen
-    for the entire history. When ``vol_target_window is None`` (the default)
-    this function is byte-identical to the pre-existing static-scalar-only path.
+    for the entire history.
+
+    Every returned net is the true ledger-consistent P&L of the returned
+    realized weights: the naive ``factor * net`` output of the overlay stack
+    under-charges turnover whenever the per-bar factor itself moves, so both
+    the discovery-window scalar search and the final return are repriced via
+    :func:`_true_realized_net` from the realized weight path the overlays
+    actually produce.
     """
     equity, _turnover = run_xs_composite_ledger(weights, opens, bar_funding, spec)
     net = equity.pct_change().dropna()
     discovery_net = net[(net.index >= discovery_start) & (net.index <= discovery_end)]
+    cost_rate = spec.round_trip_cost_rate()
+    lag = 1 + spec.execution_delay_bars
+    realized_weights = weights.shift(lag).fillna(0.0)
+    net_full = _true_realized_net(realized_weights, opens, bar_funding, cost_rate)
     if vol_target_window is not None:
         target_vol = compute_discovery_target_vol(discovery_net, vol_target_window)
-        net_full = equity.pct_change().fillna(0.0)
-        lag = 1 + spec.execution_delay_bars
-        realized_weights = weights.shift(lag).fillna(0.0)
-        vt_net_full, vt_weights_full = apply_vol_target_overlay(
+        _vt_net_naive, vt_weights_full = apply_vol_target_overlay(
             net_full, realized_weights, vol_target_window, target_vol,
             vol_target_multiplier_bounds,
         )
-        vt_discovery = vt_net_full[
-            (vt_net_full.index >= discovery_start) & (vt_net_full.index <= discovery_end)
+        vt_true_net = _true_realized_net(vt_weights_full, opens, bar_funding, cost_rate)
+        vt_discovery = vt_true_net[
+            (vt_true_net.index >= discovery_start) & (vt_true_net.index <= discovery_end)
         ]
         sizing = solve_growth_optimal_risk(vt_discovery.to_numpy(), sizing_config)
         if sizing.selected_risk is None:
             return net, weights, sizing
-        scaled_net, scaled_weights = apply_realised_risk_overlay(
-            vt_net_full, vt_weights_full, sizing.selected_risk, sizing_config.reference_risk,
+        _scaled_net_naive, scaled_weights = apply_realised_risk_overlay(
+            vt_true_net, vt_weights_full, sizing.selected_risk, sizing_config.reference_risk,
         )
+        scaled_net = _true_realized_net(scaled_weights, opens, bar_funding, cost_rate)
         return scaled_net, scaled_weights, sizing
 
     sizing = solve_growth_optimal_risk(discovery_net.to_numpy(), sizing_config)
     if sizing.selected_risk is None:
         return net, weights, sizing
 
-    net_full = equity.pct_change().fillna(0.0)
-    lag = 1 + spec.execution_delay_bars
-    realized_weights = weights.shift(lag).fillna(0.0)
-    scaled_net, scaled_weights = apply_realised_risk_overlay(
+    _scaled_net_naive, scaled_weights = apply_realised_risk_overlay(
         net_full, realized_weights, sizing.selected_risk, sizing_config.reference_risk,
     )
+    scaled_net = _true_realized_net(scaled_weights, opens, bar_funding, cost_rate)
     return scaled_net, scaled_weights, sizing
 
 
