@@ -1,6 +1,16 @@
 {
   "tasks": [
     {
+      "task_id": "xs_alpha_growth_sizing_window_selection",
+      "date": "2026-08-05",
+      "adr_id": "ADR_20260805_xs_alpha_growth_sizing_window_selection",
+      "domain": "risk",
+      "title": "XS Alpha Growth Sizing: Vol-Target Window Selection",
+      "why": "vol_target_window defaulted to a fixed 42 (signal_windows[0]) chosen for convenience, never validated as growth-optimal; measured post-cost-repricing across the frozen signal_windows=(42,84,168) triple that window=84 gives median_log_growth=1.081 vs window=42's 0.809 (+34%), with better CAGR in all three of discovery/qualification/holdout",
+      "resolution": "Added select_vol_target_window (argmax median_log_growth over a pre-registered grid, discovery-only, reusing size_xs_alpha_growth_optimal unchanged); made it run_xs_alpha_growth_sizing's new default (grid=XsAlphaCompositeSpec().signal_windows). Explicit int or None still reproduce the two prior ADRs' fixed-window/disabled behavior byte-for-byte. CLI --vol-target-window/--no-vol-target unchanged in name, default now omits the kwarg so the search applies",
+      "impact": "v6 growth-sized deployment: vol_target_window auto-selected to 84 (was 42), selected_risk stays 1.5x. Discovery/qualification/holdout CAGR improved materially (23.1%->34.4%, 14.5%->21.3%, 14.6%->21.3%) vs the window=42 baseline, all three admission gates still pass; qualification/holdout MDD deepened somewhat but stays better than pre-scaling v6. No-trade-band on the multiplier was tested and rejected (turnover-neutral-to-negative on median_log_growth)"
+    },
+    {
       "task_id": "xs_alpha_growth_sizing_cost_repricing",
       "date": "2026-08-05",
       "adr_id": "ADR_20260805_xs_alpha_growth_sizing_cost_repricing",
