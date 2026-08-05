@@ -1,6 +1,16 @@
 {
   "tasks": [
     {
+      "task_id": "xs_alpha_growth_vol_targeting",
+      "date": "2026-08-05",
+      "adr_id": "ADR_20260805_xs_alpha_growth_vol_targeting",
+      "domain": "risk",
+      "title": "XS Alpha Growth Sizing: Proactive Vol-Targeting Overlay",
+      "why": "v6 static-scalar leverage was closed (selected_risk=1.0, ADR_20260805) and v2+v6 combination measured non-diversifying (corr 0.906-0.918); v6 discovery net returns showed real vol clustering (ACF|r| lag1=+0.186) with no forward-looking response in growth_sizing.py (only reactive drawdown ladder existed)",
+      "resolution": "Added compute_discovery_target_vol/apply_vol_target_overlay (causal trailing-vol overlay, discovery-frozen anchor, fail-closed to 1.0x on insufficient history) in growth_sizing.py; wired as optional default-off params into size_xs_alpha_growth_optimal (backward compatible), default-on (window=42, reusing XsAlphaCompositeSpec signal_windows[0]) in run_xs_alpha_growth_sizing/CLI. Ran on v6: selected_risk 1.0->1.5, discovery Sharpe 1.18->1.59 (MDD -15.3%->-12.7%), qualification Sharpe 1.33->1.69 (MDD -14.3%->-7.5%), both admission gates still pass",
+      "impact": "v6 growth-sized deployment scale updated: static scalar 1.0x -> 1.5x with vol-targeting overlay; turnover rose (qualification 22.7x->41.0x annualized) but stays under the 150x/yr gate -- flagged for monitoring, not adopted into live capital allocation (research-only)"
+    },
+    {
       "task_id": "xs_alpha_v6_growth_sizing",
       "date": "2026-08-05",
       "adr_id": "ADR_20260805_xs_alpha_v6_growth_sizing",
