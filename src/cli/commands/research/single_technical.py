@@ -194,6 +194,40 @@ def _run_xs_alpha_baseline_blend(args: argparse.Namespace) -> None:
     )
 
 
+def _run_xs_alpha_baseline_blend_sized(args: argparse.Namespace) -> None:
+    from src.application.research.technical.xs_alpha_baseline_blend import (
+        persist_xs_alpha_baseline_blend_sized_report,
+        run_xs_alpha_baseline_blend_sized,
+        xs_baseline_blend_sized_report_path,
+    )
+    from src.application.research.technical.xs_trend_screen import (
+        XS_VOL_WEIGHTED_ALPHA_PROFILE_ID,
+    )
+
+    profile = args.profile or XS_VOL_WEIGHTED_ALPHA_PROFILE_ID
+    if profile != XS_VOL_WEIGHTED_ALPHA_PROFILE_ID:
+        raise ValueError(
+            f"unknown baseline-blend profile '{profile}'; blending is restricted "
+            f"to '{XS_VOL_WEIGHTED_ALPHA_PROFILE_ID}'"
+        )
+    report = run_xs_alpha_baseline_blend_sized(unseal_holdout=args.unseal_holdout)
+    persist_xs_alpha_baseline_blend_sized_report(
+        report, xs_baseline_blend_sized_report_path(),
+    )
+    _logger.info(
+        "xs-baseline-blend-sized profile=%s blend_weight=%.4f selected_risk=%s "
+        "pre_qualification_admitted=%s post_qualification_admitted=%s "
+        "post_qualification_sharpe=%.4f binding_constraint=%s",
+        report.profile,
+        report.blend_weight,
+        report.sizing.selected_risk,
+        report.pre_blend_qualification.admitted,
+        report.qualification.admitted,
+        report.qualification.sharpe,
+        report.sizing.binding_constraint,
+    )
+
+
 def add_single_technical_commands(run_sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
     """Attach the ``research run single technical`` subcommands."""
     technical = run_sub.add_parser(
@@ -252,3 +286,17 @@ def add_single_technical_commands(run_sub: argparse._SubParsersAction[argparse.A
     xs_baseline_blend.add_argument("--unseal-holdout", action="store_true", default=False)
     xs_baseline_blend.add_argument("--no-log-run", action="store_true", default=False)
     xs_baseline_blend.set_defaults(handler=_run_xs_alpha_baseline_blend)
+
+    xs_baseline_blend_sized = run_sub.add_parser(
+        "xs-baseline-blend-sized",
+        help=(
+            "Blend xs_alpha_vol_weighted_v6 with the frozen Donchian baseline "
+            "(worst-year-robust weight) and apply growth-optimal gross leverage"
+        ),
+    )
+    xs_baseline_blend_sized.add_argument("--profile", default=None)
+    xs_baseline_blend_sized.add_argument("--start", default=None)
+    xs_baseline_blend_sized.add_argument("--end", default=None)
+    xs_baseline_blend_sized.add_argument("--unseal-holdout", action="store_true", default=False)
+    xs_baseline_blend_sized.add_argument("--no-log-run", action="store_true", default=False)
+    xs_baseline_blend_sized.set_defaults(handler=_run_xs_alpha_baseline_blend_sized)
