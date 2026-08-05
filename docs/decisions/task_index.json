@@ -1,6 +1,16 @@
 {
   "tasks": [
     {
+      "task_id": "xs_alpha_v6_growth_sizing",
+      "date": "2026-08-05",
+      "adr_id": "ADR_20260805_xs_alpha_v6_growth_sizing",
+      "domain": "risk",
+      "title": "XS Alpha v6 Growth-Optimal Sizing Overlay",
+      "why": "v6 admitted at fixed unit-gross scale with no drawdown response; growth_sizing.py primitives existed but were never wired onto v6's realized returns",
+      "resolution": "Added size_xs_alpha_growth_optimal (discovery-only sizing, full-history drawdown-protected overlay, fail-closed on infeasible), run_xs_alpha_growth_sizing orchestrator restricted to v2/v6, xs-growth-sizing CLI subcommand. Ran on v6: selected_risk=1.0, sizing lever closed (current unit-gross already growth-optimal)",
+      "impact": "No leverage change to v6; confirms existing deployment scale is growth-optimal, sizing lever closed as growth source for this profile"
+    },
+    {
       "task_id": "TASK_XS_ALPHA_V6_CLI_DEFAULT",
       "date": "2026-08-04",
       "adr_id": "ADR_20260804_XS_ALPHA_V6_CLI_DEFAULT",
