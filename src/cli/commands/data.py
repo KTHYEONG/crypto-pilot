@@ -32,6 +32,20 @@ def _metrics(args: argparse.Namespace) -> None:
     _logger.info("Metrics collection complete for %s (through %s)", args.symbol, args.end)
 
 
+def _indicator_klines(args: argparse.Namespace) -> None:
+    end = args.end or str(pd.Timestamp.now(tz="UTC"))
+    collection.collect_indicator_klines(args.dataset, args.symbol, args.timeframe, args.start, end)
+    _logger.info(
+        "Indicator kline collection complete for %s %s %s (through %s)",
+        args.dataset, args.symbol, args.timeframe, end,
+    )
+
+
+def _bookdepth(args: argparse.Namespace) -> None:
+    collection.collect_bookdepth(args.symbol, args.start, args.end)
+    _logger.info("Bookdepth collection complete for %s (through %s)", args.symbol, args.end)
+
+
 def _import_borrow(args: argparse.Namespace) -> None:
     collection.import_borrow(args.symbol, args.source, args.source_id, args.rate_period)
     _logger.info("Borrow history imported for %s from %s", args.symbol, args.source)
@@ -85,6 +99,24 @@ def add_data_commands(data_parser: argparse.ArgumentParser) -> None:
     metrics.add_argument("--start", default="2022-04-01")
     metrics.add_argument("--end", required=True)
     metrics.set_defaults(handler=_metrics)
+
+    indicator_klines = collect_sub.add_parser(
+        "indicator-klines", help="Collect mark/index/premium klines from Vision archives",
+    )
+    indicator_klines.add_argument("dataset", type=str)
+    indicator_klines.add_argument("symbol", type=str)
+    indicator_klines.add_argument("timeframe", type=str)
+    indicator_klines.add_argument("--start", default="2022-04-01")
+    indicator_klines.add_argument("--end", default=None)
+    indicator_klines.set_defaults(handler=_indicator_klines)
+
+    bookdepth = collect_sub.add_parser(
+        "bookdepth", help="Collect daily book depth from Vision archives",
+    )
+    bookdepth.add_argument("symbol", type=str)
+    bookdepth.add_argument("--start", default="2022-04-01")
+    bookdepth.add_argument("--end", default=None)
+    bookdepth.set_defaults(handler=_bookdepth)
 
     import_borrow = collect_sub.add_parser(
         "import-borrow", help="Import a versioned quote-borrow export",
