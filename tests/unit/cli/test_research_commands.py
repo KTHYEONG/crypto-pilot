@@ -1,4 +1,4 @@
-"""CLI research command dispatch. Covers SCENARIO_XSV5_04_CLI_DISPATCHES_V3_V4_V5, SCENARIO_XSV6_05_CLI_DISPATCHES_V6, and SCENARIO_XSV6SIZE_06_CLI_DISPATCHES_GROWTH_SIZING."""
+"""CLI research command dispatch. Covers SCENARIO_XSV5_04_CLI_DISPATCHES_V3_V4_V5, SCENARIO_XSV6_05_CLI_DISPATCHES_V6, SCENARIO_XSV6SIZE_06_CLI_DISPATCHES_GROWTH_SIZING, and SCENARIO_CLI_POSITIONING_04."""
 
 from __future__ import annotations
 
@@ -525,6 +525,48 @@ def test_xs_screen_cli_dispatches_v6_profile(monkeypatch) -> None:
     ])
     args.handler(args)
     assert calls == ["xs_alpha_vol_weighted_v6"]
+
+
+def test_xs_screen_cli_dispatches_v7_positioning_profile(monkeypatch) -> None:
+    # SCENARIO_CLI_POSITIONING_04
+    from src.application.research.technical.xs_trend_screen import (
+        XS_NEUTRAL_PROFILE_ID,
+        XsAdmissionResult,
+        XsCompositeSpec,
+        XsTrendScreenReport,
+    )
+
+    calls: list[str] = []
+
+    def fake_run(*, start, end, unseal_holdout=False, max_workers=None, profile=XS_NEUTRAL_PROFILE_ID):
+        calls.append(profile)
+        failed = XsAdmissionResult(
+            admitted=False, binding_constraint="symbol_unavailable:X", sharpe=0.0,
+            beta=0.0, cagr=0.0, mdd=0.0, t_stat=0.0, annual_sharpe={},
+            annualized_turnover=0.0, breakeven_cost=0.0,
+        )
+        return XsTrendScreenReport(
+            profile=profile,
+            universe=("BTCUSDT",),
+            spec=XsCompositeSpec(),
+            discovery=failed,
+            qualification=failed,
+            symbols={},
+        )
+
+    monkeypatch.setattr(
+        "src.application.research.technical.xs_trend_screen.run_xs_trend_screen", fake_run,
+    )
+    monkeypatch.setattr(
+        "src.application.research.technical.xs_trend_screen.persist_xs_screen_report",
+        lambda report, path: None,
+    )
+    args = build_root_parser().parse_args([
+        "research", "run", "single", "xs-screen", "--profile", "xs_alpha_positioning_v7",
+        "--no-growth-sizing",
+    ])
+    args.handler(args)
+    assert calls == ["xs_alpha_positioning_v7"]
 
 
 def test_xs_screen_cli_v6_default_also_runs_growth_sizing(monkeypatch) -> None:

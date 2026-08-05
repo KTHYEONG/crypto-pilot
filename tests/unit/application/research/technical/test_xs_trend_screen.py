@@ -1,5 +1,6 @@
 """Contract scenarios XSC-06, XSV3-04, XSV3-05, XSV4-06, SCENARIO_XSV5_02_PROFILE_DISPATCHES_DUAL_FAMILY_PIPELINE, and SCENARIO_XSV5_03_UNKNOWN_PROFILE_STILL_FAILS_CLOSED for the XS screen orchestration.
 Covers SCENARIO_XSV6_03_PROFILE_DISPATCHES_VOL_WEIGHTED_PIPELINE and SCENARIO_XSV6_04_UNKNOWN_PROFILE_LISTS_SIX_PROFILES.
+Covers SCENARIO_LONG_SHORT_PANEL_02 and SCENARIO_XS_SCREEN_POSITIONING_03.
 
 XSC-06-SCREEN-DETERMINISTIC-AND-SEALED, XSV3-04-FINAL-LEDGER-COSTS,
 XSV3-05-FAIL-CLOSED, XSV4-06-PROFILE-DISPATCH, XSV5-02-PROFILE-DISPATCH,
@@ -588,3 +589,103 @@ class TestVolWeightedProfileOrchestration:
         assert report.holdout is not None
         assert report.reliability is not None
         assert report.reliability.lcb.trade_count > 0
+
+class TestPositioningProfileOrchestration:
+    def test_xsp_02_panel_reuses_load_metrics_asof_and_reindexes_to_common(self, monkeypatch) -> None:
+        # SCENARIO_LONG_SHORT_PANEL_02
+        idx_a = pd.date_range("2024-01-01", periods=100, freq="4h", tz="UTC")
+        idx_b = idx_a[:80]
+        frames: dict[str, pd.DataFrame] = {}
+        for symbol, symbol_idx in (("A", idx_a), ("B", idx_b)):
+            frame = pd.DataFrame({
+                "open": 100.0, "high": 101.0, "low": 99.0, "close": 100.0,
+                "volume": 1000.0, "taker_buy_ratio": 0.5,
+            }, index=symbol_idx)
+            frame.attrs["symbol"] = symbol
+            frames[symbol] = frame
+        data = {
+            "A": (frames["A"], pd.Series(0.0, index=idx_a)),
+            "B": (frames["B"], pd.Series(0.0, index=idx_b)),
+        }
+        common = xs._common_index([f.index for f, _funding in data.values()])
+        assert common.equals(idx_b)
+
+        calls: list[tuple[str, object, object, object]] = []
+
+        def fake_asof(symbol, bars, start, end):
+            calls.append((symbol, bars, start, end))
+            out = pd.DataFrame(index=bars.index)
+            out["feature_long_short_ratio"] = 1.0 + np.arange(len(bars)) / 1000.0
+            if symbol == "B":
+                out["feature_long_short_ratio"] = 0.5 - np.arange(len(bars)) / 1000.0
+            return out
+
+        monkeypatch.setattr(xs, "load_metrics_asof", fake_asof)
+        start = pd.Timestamp("2024-01-01", tz="UTC")
+        end = pd.Timestamp("2024-01-15", tz="UTC")
+        panel = xs._long_short_ratio_panel(data, common, start, end)
+
+        assert isinstance(panel, pd.DataFrame)
+        assert panel.index.equals(common)
+        assert list(panel.columns) == ["A", "B"]
+        # One call per symbol, each with that symbol's own bar frame and the
+        # exact start/end passthrough -- the available_at causality is
+        # load_metrics_asof's own contract, so the panel asserts delegation by
+        # call count/args rather than reimplementing the PIT check.
+        assert [c[0] for c in calls] == ["A", "B"]
+        assert calls[0][1] is frames["A"]
+        assert calls[1][1] is frames["B"]
+        assert calls[0][2] == start
+        assert calls[0][3] == end
+        assert calls[1][2] == start
+        assert calls[1][3] == end
+        # Values are exactly the delegate's per-bar values reindexed onto the
+        # common grid (A's last 20 bars fall outside the intersection).
+        assert np.allclose(
+            panel["A"].to_numpy(), 1.0 + np.arange(len(common)) / 1000.0,
+        )
+        assert np.allclose(
+            panel["B"].to_numpy(), 0.5 - np.arange(len(common)) / 1000.0,
+        )
+
+    def test_xsp_03_profile_dispatches_positioning_pipeline(self, monkeypatch) -> None:
+        # SCENARIO_XS_SCREEN_POSITIONING_03
+        _install_synthetic_data(monkeypatch)
+
+        def fake_asof(symbol, bars, start, end):
+            salt = float(sum(ord(c) for c in symbol))
+            out = pd.DataFrame(index=bars.index)
+            out["feature_long_short_ratio"] = (
+                1.0 + 0.4 * np.sin(np.arange(len(bars)) / 17.0 + salt)
+            )
+            return out
+
+        monkeypatch.setattr(xs, "load_metrics_asof", fake_asof)
+        original = xs.build_xs_alpha_positioning_weights
+        calls: list[str] = []
+
+        def spy(*args, **kwargs):
+            calls.append("positioning")
+            return original(*args, **kwargs)
+
+        monkeypatch.setattr(xs, "build_xs_alpha_positioning_weights", spy)
+        report = xs.run_xs_trend_screen(profile=xs.XS_POSITIONING_ALPHA_PROFILE_ID)
+
+        assert calls == ["positioning"]
+        assert report.profile == "xs_alpha_positioning_v7"
+        assert report.alpha_spec is not None
+        assert report.router_spec is None
+        assert report.reliability is not None
+        assert report.reliability.lcb.trade_count > 0
+        payload = report.to_payload()
+        assert len(payload["report_fingerprint"]) == 64
+        assert payload["reliability"] is not None
+
+    def test_xsp_03_unknown_profile_lists_seven_profiles(self, monkeypatch) -> None:
+        # SCENARIO_XS_SCREEN_POSITIONING_03 (validation surface)
+        _install_synthetic_data(monkeypatch)
+        with pytest.raises(ValueError, match="unknown xs screen profile") as excinfo:
+            xs.run_xs_trend_screen(profile="not_a_profile")
+        message = str(excinfo.value)
+        assert "xs_alpha_vol_weighted_v6" in message
+        assert "xs_alpha_positioning_v7" in message
