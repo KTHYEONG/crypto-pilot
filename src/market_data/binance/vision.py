@@ -329,10 +329,16 @@ class BinanceVisionDownloader:
         """Alias for docs name: fetch monthly funding archive."""
         return self.fetch_funding_rate_monthly(symbol=symbol, year=year, month=month)
 
-    def fetch_bookdepth_daily(self, symbol: str, date: datetime, level: str = "5") -> pd.DataFrame:
-        """Downloads daily bookDepth archive ZIP and returns it as DataFrame."""
+    def fetch_bookdepth_daily(self, symbol: str, date: datetime) -> pd.DataFrame:
+        """Downloads daily bookDepth archive ZIP and returns it as DataFrame.
+
+        Vision's actual archive filename carries no level component (verified
+        against the live S3 listing: ``SYMBOL-bookDepth-YYYY-MM-DD.zip``); the
+        5-level depth granularity is fixed by the dataset itself, not
+        selectable per file.
+        """
         date_str = date.strftime("%Y-%m-%d")
-        filename = f"{symbol}-bookDepth-{level}-{date_str}.zip"
+        filename = f"{symbol}-bookDepth-{date_str}.zip"
         return self._fetch_zip_by_path("daily", "bookDepth", symbol, filename)
 
     def fetch_premiumindex_daily(self, symbol: str, date: datetime) -> pd.DataFrame:

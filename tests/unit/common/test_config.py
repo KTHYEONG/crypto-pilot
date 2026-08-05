@@ -1,6 +1,14 @@
 from __future__ import annotations
 
-from src.common.config import borrow_path, funding_path, metrics_path, ohlcv_path, spot_ohlcv_path
+from src.common.config import (
+    bookdepth_path,
+    borrow_path,
+    funding_path,
+    indicator_kline_path,
+    metrics_path,
+    ohlcv_path,
+    spot_ohlcv_path,
+)
 
 
 class TestCoreConfigPaths:
@@ -23,6 +31,29 @@ class TestCoreConfigPaths:
             "spot", "ohlcv", "1h", "BTCUSDT.parquet",
         )
         assert borrow_path("BTC/USDT").parts[-3:] == ("spot", "borrow", "BTCUSDT.parquet")
+
+
+class TestIndicatorKlinePath:
+    def test_indicator_kline_path_scoped_by_dataset_symbol_timeframe(self) -> None:
+        # XS-EXP-01 / SCENARIO_INDICATOR_KLINE_PATH_01: mark/index/premium klines
+        # land under futures/<dataset>/<timeframe>/ with safe-symbol normalization.
+        p = indicator_kline_path("premiumIndexKlines", "BTC/USDT", "4h")
+        assert p.parts[-4:] == ("futures", "premiumIndexKlines", "4h", "BTCUSDT.parquet")
+        assert indicator_kline_path("indexPriceKlines", "ETHUSDT", "1h").parts[-3] == "indexPriceKlines"
+
+    def test_indicator_kline_path_contract_assertion(self) -> None:
+        p = indicator_kline_path("premiumIndexKlines", "BTCUSDT", "4h")
+        assert p.parts[-4:] == ("futures", "premiumIndexKlines", "4h", "BTCUSDT.parquet")
+
+
+class TestBookdepthPath:
+    def test_bookdepth_path_under_futures_bookdepth(self) -> None:
+        p = bookdepth_path("BTC/USDT")
+        assert p.parts[-3:] == ("futures", "bookdepth", "BTCUSDT.parquet")
+
+    def test_bookdepth_path_contract_assertion(self) -> None:
+        p = bookdepth_path("BTCUSDT")
+        assert p.parts[-3:] == ("futures", "bookdepth", "BTCUSDT.parquet")
 
 
 class TestMetricsPath:

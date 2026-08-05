@@ -78,3 +78,33 @@ def test_metrics_command_wires_collector(monkeypatch) -> None:
     collection.collect_metrics("BTCUSDT", "2022-04-01", "2025-01-01")
 
     assert calls == [("BTCUSDT", "2022-04-01", "2025-01-01")]
+
+def test_indicator_klines_command_wires_collector(monkeypatch) -> None:
+    # SCENARIO_COLLECTION_WRAPPERS_04: exact argument pass-through.
+    calls: list[tuple[str, str, str, str, str]] = []
+
+    class FakeCollector:
+        def ensure_indicator_kline_data(
+            self, dataset: str, symbol: str, timeframe: str, start: str, end: str,
+        ) -> None:
+            calls.append((dataset, symbol, timeframe, start, end))
+
+    monkeypatch.setattr(collection, "DataCollector", FakeCollector)
+    collection.collect_indicator_klines(
+        "premiumIndexKlines", "BTCUSDT", "4h", "2022-04-01", "2025-01-01",
+    )
+
+    assert calls == [("premiumIndexKlines", "BTCUSDT", "4h", "2022-04-01", "2025-01-01")]
+
+
+def test_bookdepth_command_wires_collector(monkeypatch) -> None:
+    calls: list[tuple[str, str, str]] = []
+
+    class FakeCollector:
+        def ensure_bookdepth_data(self, symbol: str, start: str, end: str) -> None:
+            calls.append((symbol, start, end))
+
+    monkeypatch.setattr(collection, "DataCollector", FakeCollector)
+    collection.collect_bookdepth("BTCUSDT", "2022-04-01", "2025-01-01")
+
+    assert calls == [("BTCUSDT", "2022-04-01", "2025-01-01")]

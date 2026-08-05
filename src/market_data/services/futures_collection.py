@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from src.common.config import funding_path, metrics_path, ohlcv_path
+from src.common.config import bookdepth_path, funding_path, indicator_kline_path, metrics_path, ohlcv_path
 from src.common.errors import DataIntegrityError
 from src.market_data.binance.futures import BinanceClient, BinanceKlinePermanentError
 from src.market_data.binance.vision import BinanceVisionDownloader, fetch_metrics_bulk
@@ -31,8 +31,20 @@ _METRICS_NUMERIC_COLUMNS: tuple[str, ...] = (
 _METRICS_RELEASE_LAG = pd.Timedelta(minutes=5)
 _METRICS_MERGE_TOLERANCE = pd.Timedelta(hours=6)
 
+_INDICATOR_KLINE_CANONICAL_COLUMNS: tuple[str, ...] = (
+    "timestamp", "datetime", "open", "high", "low", "close", "close_time",
+)
+
+_BOOKDEPTH_CANONICAL_COLUMNS: tuple[str, ...] = (
+    "timestamp", "datetime", "symbol", "percentage", "depth", "notional",
+)
+
 def _empty_metrics_frame() -> pd.DataFrame:
     return pd.DataFrame(columns=list(_METRICS_CANONICAL_COLUMNS))
+
+
+def _empty_bookdepth_frame() -> pd.DataFrame:
+    return pd.DataFrame(columns=list(_BOOKDEPTH_CANONICAL_COLUMNS))
 
 
 def _normalize_funding_frame(frame: pd.DataFrame) -> pd.DataFrame:
@@ -336,6 +348,302 @@ class DataCollector:
         self._validate_metrics_frame(combined, symbol)
         coverage = self._metrics_coverage_report(symbol, req_start, req_end, combined)
         self._save_metrics_cache(symbol, combined)
+        interior_missing = [
+            day for day in coverage["missing_dates"]
+            if not combined.empty
+            and pd.Timestamp(day, tz="UTC") > combined["datetime"].min()
+            and pd.Timestamp(day, tz="UTC") < combined["datetime"].max()
+        ]
+        if interior_missing:
+            raise DataIntegrityError(
+                f"requested coverage gap for {symbol}: missing interior dates "
+                f"{interior_missing}; never forward-filled"
+            )
+
+    def _load_indicator_kline_cache(self, dataset: str, symbol: str, timeframe: str) -> pd.DataFrame:
+        path = indicator_kline_path(dataset, symbol, timeframe)
+        if not path.exists():
+            return pd.DataFrame()
+        try:
+            frame = pd.read_parquet(path)
+        except Exception as exc:
+            self.logger.debug("Failed to load indicator kline cache %s: %s", path, exc)
+            return pd.DataFrame()
+        if frame.empty or not set(_INDICATOR_KLINE_CANONICAL_COLUMNS).issubset(frame.columns):
+            return pd.DataFrame()
+        frame = frame.loc[:, list(_INDICATOR_KLINE_CANONICAL_COLUMNS)]
+        frame["timestamp"] = pd.to_numeric(frame["timestamp"], errors="coerce")
+        frame["datetime"] = pd.to_datetime(frame["timestamp"], unit="ms", utc=True, errors="coerce")
+        return frame.dropna(subset=["datetime"]).sort_values("timestamp")
+
+    def _save_indicator_kline_cache(
+        self, dataset: str, symbol: str, timeframe: str, frame: pd.DataFrame,
+    ) -> None:
+        path = indicator_kline_path(dataset, symbol, timeframe)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        frame.loc[:, list(_INDICATOR_KLINE_CANONICAL_COLUMNS)].to_parquet(
+            path, index=False, compression="zstd",
+        )
+
+    def _normalize_indicator_kline_frame(self, frame: pd.DataFrame) -> pd.DataFrame:
+        """Normalize a raw Vision indicator-kline frame to the canonical columns."""
+        if frame is None or frame.empty or "timestamp" not in frame.columns:
+            return pd.DataFrame(columns=list(_INDICATOR_KLINE_CANONICAL_COLUMNS))
+        df = frame.copy()
+        df["timestamp"] = pd.to_numeric(df["timestamp"], errors="coerce")
+        df = df.dropna(subset=["timestamp"])
+        if df.empty:
+            return pd.DataFrame(columns=list(_INDICATOR_KLINE_CANONICAL_COLUMNS))
+        df["timestamp"] = df["timestamp"].astype("int64")
+        df["datetime"] = pd.to_datetime(df["timestamp"], unit="ms", utc=True, errors="coerce")
+        df = df.dropna(subset=["datetime"])
+        if df.empty:
+            return pd.DataFrame(columns=list(_INDICATOR_KLINE_CANONICAL_COLUMNS))
+        for col in ("open", "high", "low", "close"):
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+        # close_time is left as raw object dtype otherwise: Vision monthly
+        # archives inconsistently include a header row across months, which
+        # poisons pandas' per-column dtype inference to str for header-having
+        # months but leaves headerless months as native int64 -- concatenating
+        # both across months produces a mixed str/int object column that
+        # pyarrow's parquet writer rejects (ArrowTypeError: expected bytes,
+        # got int). Force it numeric like the other integer/float fields.
+        df["close_time"] = pd.to_numeric(df["close_time"], errors="coerce").astype("Int64")
+        df = df.dropna(subset=["close_time"])
+        if df.empty:
+            return pd.DataFrame(columns=list(_INDICATOR_KLINE_CANONICAL_COLUMNS))
+        return (
+            df.loc[:, list(_INDICATOR_KLINE_CANONICAL_COLUMNS)]
+            .drop_duplicates(subset=["timestamp"], keep="last")
+            .sort_values("timestamp")
+            .reset_index(drop=True)
+        )
+
+    def ensure_indicator_kline_data(self, dataset: str, symbol: str, timeframe: str, start_date: str, end_date: str) -> None:
+        """Collect and persist canonical monthly mark/index/premium klines.
+
+        Mirrors ``ensure_ohlcv_data``'s monthly-archive-then-cache pattern: only
+        months whose archive is missing from the cache are fetched via
+        ``BinanceVisionDownloader.fetch_indicator_klines_monthly`` (whose own
+        allowed-set check fails closed on unsupported datasets), merged
+        (deduplicated by timestamp, keep=last), and persisted as only the
+        meaningful canonical columns. The always-zero synthetic volume/count/
+        taker-buy fields of the raw Vision schema are dropped, never persisted.
+        """
+        req_start = pd.to_datetime(start_date, utc=True)
+        req_end = pd.to_datetime(end_date, utc=True)
+        cache_df = self._load_indicator_kline_cache(dataset, symbol, timeframe)
+        if (
+            not cache_df.empty
+            and cache_df["datetime"].min() <= req_start
+            and cache_df["datetime"].max() >= req_end - pd.Timedelta(hours=8)
+        ):
+            return
+        api_cutoff = pd.Timestamp.now(tz="UTC").replace(
+            day=1, hour=0, minute=0, second=0, microsecond=0
+        ) - pd.Timedelta(days=32)
+        new_parts: list[pd.DataFrame] = []
+        vision_symbol = symbol.replace("/", "")
+        current_month_start = req_start.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+        vision_tasks: list[tuple[int, int]] = []
+        while current_month_start < min(req_end, api_cutoff):
+            month_end = (current_month_start + pd.offsets.MonthEnd(1)).replace(
+                hour=23, minute=59, second=59
+            )
+            if (
+                cache_df.empty
+                or cache_df["datetime"].min() > current_month_start
+                or cache_df["datetime"].max() < month_end
+            ):
+                vision_tasks.append((current_month_start.year, current_month_start.month))
+            current_month_start += pd.offsets.MonthBegin(1)
+        if vision_tasks:
+            vision = BinanceVisionDownloader()
+
+            def _fetch_month(year: int, month: int) -> pd.DataFrame:
+                v_df = vision.fetch_indicator_klines_monthly(
+                    dataset, vision_symbol, timeframe, year, month
+                )
+                if v_df.empty:
+                    return pd.DataFrame()
+                v_df.columns = [
+                    "timestamp", "open", "high", "low", "close", "volume",
+                    "close_time", "quote_volume", "count", "taker_buy_volume",
+                    "taker_buy_quote_volume", "ignore",
+                ][: v_df.shape[1]]
+                return self._normalize_indicator_kline_frame(v_df)
+
+            with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
+                future_to_task = {
+                    executor.submit(_fetch_month, y, m): (y, m) for y, m in vision_tasks
+                }
+                for future in concurrent.futures.as_completed(future_to_task):
+                    try:
+                        res_df = future.result()
+                        if not res_df.empty:
+                            new_parts.append(res_df)
+                    except ValueError:
+                        raise
+                    except Exception as e:
+                        self.logger.warning(
+                            "Error fetching indicator kline data for %s: %s", symbol, e
+                        )
+        if new_parts:
+            combined = (
+                pd.concat([cache_df, *new_parts], ignore_index=True)
+                .drop_duplicates(subset=["timestamp"], keep="last")
+                .sort_values("timestamp")
+                .reset_index(drop=True)
+            )
+            self._save_indicator_kline_cache(dataset, symbol, timeframe, combined)
+
+    def _load_bookdepth_cache(self, symbol: str) -> pd.DataFrame:
+        path = bookdepth_path(symbol)
+        if not path.exists():
+            return _empty_bookdepth_frame()
+        try:
+            frame = pd.read_parquet(path)
+        except Exception as exc:
+            self.logger.debug("Failed to load bookdepth cache %s: %s", path, exc)
+            return _empty_bookdepth_frame()
+        if frame.empty or not set(_BOOKDEPTH_CANONICAL_COLUMNS).issubset(frame.columns):
+            return _empty_bookdepth_frame()
+        frame = frame.loc[:, list(_BOOKDEPTH_CANONICAL_COLUMNS)]
+        frame["datetime"] = pd.to_datetime(frame["datetime"], utc=True, errors="coerce")
+        return frame.dropna(subset=["datetime"]).sort_values("timestamp")
+
+    def _save_bookdepth_cache(self, symbol: str, frame: pd.DataFrame) -> None:
+        path = bookdepth_path(symbol)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        frame.loc[:, list(_BOOKDEPTH_CANONICAL_COLUMNS)].to_parquet(
+            path, index=False, compression="zstd",
+        )
+
+    def _normalize_bookdepth_frame(self, frame: pd.DataFrame, symbol: str) -> pd.DataFrame:
+        """Normalize a raw Vision book-depth frame to the canonical schema."""
+        if frame is None or frame.empty:
+            return _empty_bookdepth_frame()
+        df = frame.copy()
+        df = df.loc[:, ~df.columns.duplicated(keep="first")]
+        if "symbol" not in df.columns:
+            df["symbol"] = symbol
+        else:
+            df["symbol"] = df["symbol"].fillna(symbol).astype(str)
+        if "timestamp" not in df.columns:
+            return _empty_bookdepth_frame()
+        # bookDepth's raw timestamp is a human-readable "YYYY-MM-DD HH:MM:SS"
+        # string (verified against a live download), not an epoch-ms integer
+        # like klines/metrics -- branch on dtype the same way
+        # _normalize_metrics_frame already does for the analogous Vision
+        # format inconsistency, instead of assuming ms-epoch uniformly.
+        if pd.api.types.is_numeric_dtype(df["timestamp"]):
+            df["datetime"] = pd.to_datetime(
+                pd.to_numeric(df["timestamp"], errors="coerce"), unit="ms", utc=True, errors="coerce",
+            )
+        else:
+            df["datetime"] = pd.to_datetime(df["timestamp"], utc=True, errors="coerce")
+        df = df.dropna(subset=["datetime"])
+        if df.empty:
+            return _empty_bookdepth_frame()
+        _dt_naive = df["datetime"].dt.tz_localize(None)
+        df["timestamp"] = _dt_naive.astype("datetime64[ns]").astype("int64") // 10**6
+        for col in ("percentage", "depth", "notional"):
+            if col not in df.columns:
+                df[col] = float("nan")
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+        return df.loc[:, list(_BOOKDEPTH_CANONICAL_COLUMNS)]
+
+    @staticmethod
+    def _validate_bookdepth_frame(frame: pd.DataFrame, symbol: str) -> None:
+        missing = set(_BOOKDEPTH_CANONICAL_COLUMNS) - set(frame.columns)
+        if missing:
+            raise DataIntegrityError(
+                f"bookdepth frame for {symbol} missing canonical columns: {sorted(missing)}"
+            )
+        if frame["datetime"].dt.tz is None:
+            raise DataIntegrityError(f"bookdepth datetimes for {symbol} must be tz-aware UTC")
+        for _band, group in frame.groupby(["symbol", "percentage"], dropna=False):
+            if not group["timestamp"].is_monotonic_increasing:
+                raise DataIntegrityError(
+                    f"bookdepth timestamps for {symbol} are not monotonic within band"
+                )
+        if frame.duplicated(subset=["timestamp", "percentage"]).any():
+            raise DataIntegrityError(
+                f"bookdepth frame for {symbol} contains duplicate (timestamp, percentage) pairs"
+            )
+
+    def _bookdepth_coverage_report(
+        self,
+        symbol: str,
+        req_start: pd.Timestamp,
+        req_end: pd.Timestamp,
+        frame: pd.DataFrame,
+    ) -> dict[str, list[str]]:
+        """Compute requested dates absent from the collected book-depth frame."""
+        if frame.empty:
+            covered: set[pd.Timestamp] = set()
+        else:
+            covered = set(pd.DatetimeIndex(frame["datetime"]).date)
+        dates = pd.date_range(req_start.normalize(), req_end.normalize(), freq="1D")
+        missing = [d.date().isoformat() for d in dates if d.date() not in covered]
+        report = {"missing_dates": missing}
+        for day in missing:
+            self.logger.warning(
+                "bookdepth unavailable symbol=%s date=%s (reported, no forward-fill)",
+                symbol, day,
+            )
+        return report
+
+    def ensure_bookdepth_data(self, symbol: str, start_date: str, end_date: str) -> None:
+        """Collect and persist canonical daily Vision book depth for one symbol.
+
+        Mirrors ``ensure_metrics_data``'s daily-archive/cache/coverage-report
+        pattern: only days whose archive is missing from the cache are fetched
+        via ``fetch_bookdepth_daily``, merged, validated (monotonic per-band
+        timestamps, tz-aware UTC datetimes, no duplicate (timestamp, percentage)
+        pairs), and persisted. Missing archive dates are surfaced in the coverage
+        report and are never forward-filled; an interior coverage gap raises
+        ``DataIntegrityError``.
+        """
+        req_start = pd.to_datetime(start_date, utc=True)
+        req_end = pd.to_datetime(end_date, utc=True)
+        cache_df = self._load_bookdepth_cache(symbol)
+        if (
+            not cache_df.empty
+            and cache_df["datetime"].min() <= req_start.normalize()
+            and cache_df["datetime"].max() >= req_end.normalize()
+        ):
+            return
+
+        vision = BinanceVisionDownloader()
+        parts: list[pd.DataFrame] = []
+        if not cache_df.empty:
+            parts.append(cache_df)
+        covered_dates = (
+            set(pd.DatetimeIndex(cache_df["datetime"]).date) if not cache_df.empty else set()
+        )
+        curr = req_start.normalize()
+        while curr <= req_end.normalize():
+            if curr.date() not in covered_dates:
+                raw = vision.fetch_bookdepth_daily(symbol, curr.to_pydatetime())
+                if not raw.empty:
+                    raw = raw.copy()
+                    raw.columns = ["timestamp", "percentage", "depth", "notional"][: raw.shape[1]]
+                    normalized = self._normalize_bookdepth_frame(raw, symbol)
+                    if not normalized.empty:
+                        parts.append(normalized)
+            curr += pd.Timedelta(days=1)
+        if not parts:
+            return
+        combined = pd.concat(parts, ignore_index=True)
+        self._validate_bookdepth_frame(combined, symbol)
+        combined = (
+            combined.sort_values(["timestamp", "percentage"])
+            .drop_duplicates(subset=["timestamp", "percentage"], keep="last")
+            .reset_index(drop=True)
+        )
+        coverage = self._bookdepth_coverage_report(symbol, req_start, req_end, combined)
+        self._save_bookdepth_cache(symbol, combined)
         interior_missing = [
             day for day in coverage["missing_dates"]
             if not combined.empty
