@@ -1,6 +1,16 @@
 {
   "tasks": [
     {
+      "task_id": "xs_alpha_positioning_v7",
+      "date": "2026-08-05",
+      "adr_id": "ADR_20260805_xs_alpha_positioning_v7",
+      "domain": "signal",
+      "title": "XS Alpha v7 포지셔닝(long/short ratio) 4번째 패밀리 — admitted되나 신뢰도 게이트는 v6보다 악화",
+      "why": "50개+ 가격/거래량 파생지표 소진 후 신규 데이터축(long_short_ratio, 15종목 PIT-safe)에서 유일하게 discovery+qualification 동시 단독admission 통과 신호 발견. Bollinger 트랩 방지 위해 상관관계·윈도우선택·top_trader 결합 등 강건성 검증 후 계약화.",
+      "resolution": "cross_sectional.py에 build_xs_alpha_positioning_weights(기존 v6 패턴 재사용, 4번째 sleeve로 causal inverse-vol tilt 확장) 신설. xs_trend_screen.py에 _long_short_ratio_panel(load_metrics_asof 재사용, PIT-safe)과 XS_POSITIONING_ALPHA_PROFILE_ID='xs_alpha_positioning_v7' 배선, reliability 게이트 재사용(profile-agnostic). CLI 실행(holdout unseal)으로 실측: discovery/qualification/holdout/stress 전 구간 admitted(v6 이어 두번째).",
+      "impact": "discovery는 개선(Sharpe 1.28->1.57, t 1.70->2.07)했으나 qualification+holdout 통합 LCB90은 v6보다 악화(9.98%->8.50%, 여전히 15% 허들 미달)하고 worst-fold CAGR이 -2.7%->-20.0%로 크게 거칠어짐. 스펙 작성 전 scratch 검증은 qualification 단독 슬라이스만 봐서 이 저하를 놓쳤음(holdout 포함 최종 비교에서 드러남). v6가 여전히 더 나은 배포 후보 -- v7은 연구자산으로 보존, 채택 보류."
+    },
+    {
       "task_id": "xs_alpha_data_axis_expansion",
       "date": "2026-08-05",
       "adr_id": "ADR_20260805_xs_alpha_data_axis_expansion",
