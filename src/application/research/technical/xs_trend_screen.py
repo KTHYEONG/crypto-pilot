@@ -43,6 +43,7 @@ from src.research.expert_portfolio.contextual_router import (
     state_labels,
 )
 from src.research.expert_portfolio.models import ContextualRouterSpec
+from src.research.oi_deleveraging.market_data import load_metrics_asof
 from src.research.technical_experts.contracts import TechnicalCandidate
 from src.research.technical_experts.cross_sectional import (
     XsAdmissionConfig,
@@ -52,6 +53,7 @@ from src.research.technical_experts.cross_sectional import (
     build_xs_alpha_dual_family_weights,
     build_xs_alpha_family_scores,
     build_xs_alpha_family_weights,
+    build_xs_alpha_positioning_weights,
     build_xs_alpha_vol_weighted_weights,
     build_xs_alpha_weights,
     build_xs_neutral_weights,
@@ -85,6 +87,7 @@ XS_CONTEXTUAL_ALPHA_PROFILE_ID = "xs_alpha_contextual_v3"
 XS_SCORE_ROUTED_ALPHA_PROFILE_ID = "xs_alpha_score_routed_v4"
 XS_DUAL_FAMILY_ALPHA_PROFILE_ID = "xs_alpha_dual_family_v5"
 XS_VOL_WEIGHTED_ALPHA_PROFILE_ID = "xs_alpha_vol_weighted_v6"
+XS_POSITIONING_ALPHA_PROFILE_ID = "xs_alpha_positioning_v7"
 # The four-symbol earliest-history gap is not recoverable before 2022-04-03.
 # Keep the baseline catalog window unchanged, but start XS panel evaluation on
 # the first timestamp with complete taker/quote fields across the universe.
@@ -97,6 +100,7 @@ __all__ = [
     "XS_CONTEXTUAL_ALPHA_PROFILE_ID",
     "XS_DUAL_FAMILY_ALPHA_PROFILE_ID",
     "XS_NEUTRAL_PROFILE_ID",
+    "XS_POSITIONING_ALPHA_PROFILE_ID",
     "XS_SCORE_ROUTED_ALPHA_PROFILE_ID",
     "XS_VOL_WEIGHTED_ALPHA_PROFILE_ID",
     "XsTrendScreenReport",
@@ -313,6 +317,32 @@ def _common_index(indexes: list[pd.DatetimeIndex]) -> pd.DatetimeIndex:
 def _bar_funding_series(funding: pd.Series, grid: pd.DatetimeIndex) -> pd.Series:
     return pd.Series(_align_funding_rates(funding, grid), index=grid, name="bar_funding")
 
+def _long_short_ratio_panel(
+    data: dict[str, tuple[pd.DataFrame, pd.Series]],
+    common: pd.DatetimeIndex,
+    start: pd.Timestamp,
+    end: pd.Timestamp,
+) -> pd.DataFrame:
+    """Build the causally aligned long/short-ratio panel on the common grid.
+
+    Reuses :func:`load_metrics_asof` unchanged for the PIT-safe
+    (``available_at``-gated) daily-to-4h join; ``feature_long_short_ratio`` is
+    reattached to the per-symbol frame's DatetimeIndex (``load_metrics_asof``
+    preserves row order and count 1:1 with the input bars) and reindexed to
+    ``common``, matching :func:`_bar_funding_series`'s reindex-to-common
+    convention. No extra forward-fill beyond what
+    ``merge_asof(direction='backward')`` already provides.
+    """
+    panel: dict[str, pd.Series] = {}
+    for symbol, (frame, _funding) in data.items():
+        metrics = load_metrics_asof(symbol, frame, start, end)
+        panel[symbol] = pd.Series(
+            metrics["feature_long_short_ratio"].to_numpy(dtype=np.float64),
+            index=frame.index,
+            name=symbol,
+        ).reindex(common)
+    return pd.DataFrame(panel, index=common)
+
 
 def _window_series(series: pd.Series, start: pd.Timestamp, end: pd.Timestamp) -> pd.Series:
     """Inclusive ``[start, end]`` slice anchored to the mark before ``start``.
@@ -500,14 +530,16 @@ def run_xs_trend_screen(
         XS_SCORE_ROUTED_ALPHA_PROFILE_ID,
         XS_DUAL_FAMILY_ALPHA_PROFILE_ID,
         XS_VOL_WEIGHTED_ALPHA_PROFILE_ID,
+        XS_POSITIONING_ALPHA_PROFILE_ID,
     ):
         raise ValueError(
             f"unknown xs screen profile '{profile}'; the source-controlled "
             f"profiles are '{XS_NEUTRAL_PROFILE_ID}', '{XS_ALPHA_PROFILE_ID}', "
             f"'{XS_CONTEXTUAL_ALPHA_PROFILE_ID}', "
             f"'{XS_SCORE_ROUTED_ALPHA_PROFILE_ID}', "
-            f"'{XS_DUAL_FAMILY_ALPHA_PROFILE_ID}', and "
-            f"'{XS_VOL_WEIGHTED_ALPHA_PROFILE_ID}'"
+            f"'{XS_DUAL_FAMILY_ALPHA_PROFILE_ID}', "
+            f"'{XS_VOL_WEIGHTED_ALPHA_PROFILE_ID}', and "
+            f"'{XS_POSITIONING_ALPHA_PROFILE_ID}'"
         )
     end = resolve_evaluation_end(end, unseal_holdout=unseal_holdout)
     requested_start = XS_DISCOVERY_START if start is None else pd.to_datetime(start, utc=True)
@@ -521,6 +553,7 @@ def run_xs_trend_screen(
             XS_SCORE_ROUTED_ALPHA_PROFILE_ID,
             XS_DUAL_FAMILY_ALPHA_PROFILE_ID,
             XS_VOL_WEIGHTED_ALPHA_PROFILE_ID,
+            XS_POSITIONING_ALPHA_PROFILE_ID,
         )
         else None
     )
@@ -641,6 +674,14 @@ def run_xs_trend_screen(
                 weights = build_xs_alpha_vol_weighted_weights(
                     closes, taker, bar_funding, opens, alpha_spec, execution_spec,
                 )
+            elif profile == XS_POSITIONING_ALPHA_PROFILE_ID:
+                long_short_ratio = _long_short_ratio_panel(
+                    data, common, effective_start, end,
+                )
+                weights = build_xs_alpha_positioning_weights(
+                    closes, taker, bar_funding, long_short_ratio, opens,
+                    alpha_spec, execution_spec,
+                )
             else:
                 weights = build_xs_alpha_weights(
                     closes, taker, bar_funding, alpha_spec, execution_spec,
@@ -700,7 +741,11 @@ def run_xs_trend_screen(
             )
 
     reliability: XsReliabilityResult | None = None
-    if profile in (XS_ALPHA_PROFILE_ID, XS_VOL_WEIGHTED_ALPHA_PROFILE_ID):
+    if profile in (
+        XS_ALPHA_PROFILE_ID,
+        XS_VOL_WEIGHTED_ALPHA_PROFILE_ID,
+        XS_POSITIONING_ALPHA_PROFILE_ID,
+    ):
         realized_weights = weights.shift(1 + execution_spec.execution_delay_bars).fillna(0.0)
         oos_window = _oos_reliability_window(
             equity, realized_weights, QUALIFICATION_START, QUALIFICATION_END,
@@ -802,6 +847,7 @@ def _check_contract() -> None:
     assert XS_CONTEXTUAL_ALPHA_PROFILE_ID == "xs_alpha_contextual_v3"
     assert XS_SCORE_ROUTED_ALPHA_PROFILE_ID == "xs_alpha_score_routed_v4"
     assert XS_VOL_WEIGHTED_ALPHA_PROFILE_ID == "xs_alpha_vol_weighted_v6"
+    assert XS_POSITIONING_ALPHA_PROFILE_ID == "xs_alpha_positioning_v7"
     assert len(TREND_SCREEN_FAMILIES) == 15
     assert len(TREND_SCREEN_SYMBOLS) == 15
 
