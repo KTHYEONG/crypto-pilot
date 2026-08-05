@@ -290,3 +290,231 @@ class TestDataCollectorMetrics:
         out = pd.read_parquet(target)
         assert set(out["datetime"].dt.day) == {1, 2}
         assert out["sum_open_interest_value"].tolist() == [1000.0, 3000.0]
+
+_RAW_INDICATOR_KLINE_COLUMNS = [
+    "timestamp", "open", "high", "low", "close", "volume",
+    "close_time", "quote_volume", "count", "taker_buy_volume",
+    "taker_buy_quote_volume", "ignore",
+]
+
+
+def _raw_indicator_kline_frame() -> pd.DataFrame:
+    """Vision-style raw premium/index klines with the always-zero synthetic fields."""
+    return pd.DataFrame({
+        "timestamp": [1704067200000, 1704067200000 + 4 * 3600 * 1000],
+        "open": [100.0, 101.0],
+        "high": [101.0, 102.0],
+        "low": [99.0, 100.0],
+        "close": [100.5, 101.5],
+        "volume": [0.0, 0.0],
+        "close_time": [1704067200000 + 4 * 3600 * 1000 - 1] * 2,
+        "quote_volume": [0.0, 0.0],
+        "count": [0, 0],
+        "taker_buy_volume": [0.0, 0.0],
+        "taker_buy_quote_volume": [0.0, 0.0],
+        "ignore": [0, 0],
+    })
+
+
+class TestDataCollectorIndicatorKlines:
+    def test_ensure_indicator_kline_data_fetches_and_persists_canonical_columns(
+        self, tmp_path, monkeypatch,
+    ) -> None:
+        # XS-EXP-02 / SCENARIO_INDICATOR_KLINE_COLLECT_02: only the meaningful
+        # canonical columns are persisted; the always-zero volume/count/taker-buy
+        # fields are dropped, never fabricated.
+        target = tmp_path / "futures" / "premiumIndexKlines" / "4h" / "BTCUSDT.parquet"
+        monkeypatch.setattr(
+            collector_module, "indicator_kline_path",
+            lambda dataset, symbol, tf: target,
+        )
+
+        class FakeVision:
+            def fetch_indicator_klines_monthly(self, dataset, symbol, interval, year, month):
+                return _raw_indicator_kline_frame()
+
+        monkeypatch.setattr(collector_module, "BinanceVisionDownloader", FakeVision)
+        DataCollector().ensure_indicator_kline_data(
+            "premiumIndexKlines", "BTCUSDT", "4h", "2024-01-01", "2024-01-02",
+        )
+
+        out = pd.read_parquet(target)
+        assert list(out.columns) == [
+            "timestamp", "datetime", "open", "high", "low", "close", "close_time",
+        ]
+        assert len(out) == 2
+        assert out["datetime"].dt.tz is not None
+        assert out["open"].tolist() == [100.0, 101.0]
+        assert out["close"].tolist() == [100.5, 101.5]
+
+    def test_ensure_indicator_kline_data_merges_with_existing_cache(
+        self, tmp_path, monkeypatch,
+    ) -> None:
+        # XS-EXP-02: fetched months merge with the canonical cache instead of
+        # overwriting it, deduplicated by timestamp (keep=last).
+        target = tmp_path / "futures" / "premiumIndexKlines" / "4h" / "BTCUSDT.parquet"
+        monkeypatch.setattr(
+            collector_module, "indicator_kline_path",
+            lambda dataset, symbol, tf: target,
+        )
+        cached = pd.DataFrame({
+            "timestamp": [1704067200000],
+            "datetime": [pd.Timestamp("2024-01-01", tz="UTC")],
+            "open": [100.0], "high": [101.0], "low": [99.0], "close": [100.5],
+            "close_time": [0],
+        })
+        collector = DataCollector()
+        collector._save_indicator_kline_cache("premiumIndexKlines", "BTCUSDT", "4h", cached)
+        fetched = _raw_indicator_kline_frame().iloc[[1]].reset_index(drop=True)
+
+        class FakeVision:
+            def fetch_indicator_klines_monthly(self, dataset, symbol, interval, year, month):
+                return fetched
+
+        monkeypatch.setattr(collector_module, "BinanceVisionDownloader", FakeVision)
+        DataCollector().ensure_indicator_kline_data(
+            "premiumIndexKlines", "BTCUSDT", "4h", "2024-01-01", "2024-01-02",
+        )
+
+        out = pd.read_parquet(target)
+        assert set(out["datetime"].dt.day) == {1}
+        assert len(out) == 2
+        assert out["close"].tolist() == [100.5, 101.5]
+
+    def test_ensure_indicator_kline_data_raises_value_error_on_unsupported_dataset(
+        self, tmp_path, monkeypatch,
+    ) -> None:
+        # XS-EXP-02: the downloader's own allowed-set check fails closed.
+        target = tmp_path / "futures" / "bogus" / "4h" / "BTCUSDT.parquet"
+        monkeypatch.setattr(
+            collector_module, "indicator_kline_path",
+            lambda dataset, symbol, tf: target,
+        )
+
+        class BogusVision:
+            def fetch_indicator_klines_monthly(self, *args, **kwargs):
+                raise ValueError("unsupported indicator dataset: bogus")
+
+        monkeypatch.setattr(collector_module, "BinanceVisionDownloader", BogusVision)
+        with pytest.raises(ValueError, match="unsupported indicator dataset"):
+            DataCollector().ensure_indicator_kline_data(
+                "bogus", "BTCUSDT", "4h", "2024-01-01", "2024-01-02",
+            )
+
+
+class TestDataCollectorBookdepth:
+    def test_ensure_bookdepth_data_fetches_and_persists_canonical(
+        self, tmp_path, monkeypatch,
+    ) -> None:
+        # XS-EXP-03 / SCENARIO_BOOKDEPTH_COLLECT_03: book depth persists the
+        # canonical timestamp/datetime/symbol/percentage/depth/notional schema.
+        target = tmp_path / "futures" / "bookdepth" / "BTCUSDT.parquet"
+        monkeypatch.setattr(collector_module, "bookdepth_path", lambda symbol: target)
+        percentages = [0.0, 0.5, 1.0, 2.0, 5.0]
+        depths = [100.0, 90.0, 80.0, 70.0, 60.0]
+        notionals = [10000.0, 9000.0, 8000.0, 7000.0, 6000.0]
+
+        class FakeVision:
+            def fetch_bookdepth_daily(self, symbol, date, level="5"):
+                day = pd.Timestamp(date)
+                if day.tzinfo is None:
+                    day = day.tz_localize("UTC")
+                ts = int(_ms(pd.DatetimeIndex([day]))[0])
+                return pd.DataFrame({
+                    "timestamp": [ts] * 5,
+                    "percentage": percentages,
+                    "depth": depths,
+                    "notional": notionals,
+                })
+
+        monkeypatch.setattr(collector_module, "BinanceVisionDownloader", FakeVision)
+        DataCollector().ensure_bookdepth_data("BTCUSDT", "2024-01-01", "2024-01-02")
+
+        out = pd.read_parquet(target)
+        assert list(out.columns) == [
+            "timestamp", "datetime", "symbol", "percentage", "depth", "notional",
+        ]
+        assert len(out) == 10  # 5 bands x 2 days
+        assert out["symbol"].tolist() == ["BTCUSDT"] * 10
+        assert out["datetime"].dt.tz is not None
+        assert set(out["datetime"].dt.day) == {1, 2}
+        assert out["depth"].tolist() == depths * 2
+
+    def test_ensure_bookdepth_data_fetches_only_missing_days(
+        self, tmp_path, monkeypatch,
+    ) -> None:
+        # XS-EXP-03: days already covered by the cache are not re-fetched.
+        target = tmp_path / "futures" / "bookdepth" / "BTCUSDT.parquet"
+        monkeypatch.setattr(collector_module, "bookdepth_path", lambda symbol: target)
+        cached = pd.DataFrame({
+            "timestamp": [1704067200000],
+            "datetime": [pd.Timestamp("2024-01-01", tz="UTC")],
+            "symbol": ["BTCUSDT"],
+            "percentage": [0.0],
+            "depth": [100.0],
+            "notional": [10000.0],
+        })
+        DataCollector()._save_bookdepth_cache("BTCUSDT", cached)
+
+        fetched: list[object] = []
+
+        class FakeVision:
+            def fetch_bookdepth_daily(self, symbol, date, level="5"):
+                fetched.append(date)
+                day = pd.Timestamp(date)
+                if day.tzinfo is None:
+                    day = day.tz_localize("UTC")
+                ts = int(_ms(pd.DatetimeIndex([day]))[0])
+                return pd.DataFrame({
+                    "timestamp": [ts],
+                    "percentage": [0.0],
+                    "depth": [1.0],
+                    "notional": [1.0],
+                })
+
+        monkeypatch.setattr(collector_module, "BinanceVisionDownloader", FakeVision)
+        DataCollector().ensure_bookdepth_data("BTCUSDT", "2024-01-01", "2024-01-03")
+
+        assert len(fetched) == 2  # 01-02, 01-03 only; 01-01 already cached
+        out = pd.read_parquet(target)
+        assert sorted(out["datetime"].dt.day.tolist()) == [1, 2, 3]
+
+    def test_ensure_bookdepth_data_fails_closed_on_non_monotonic_band(
+        self, tmp_path, monkeypatch,
+    ) -> None:
+        # XS-EXP-03: timestamps must be monotonic within each (symbol, percentage) band.
+        target = tmp_path / "futures" / "bookdepth" / "BTCUSDT.parquet"
+        monkeypatch.setattr(collector_module, "bookdepth_path", lambda symbol: target)
+
+        class BadVision:
+            def fetch_bookdepth_daily(self, symbol, date, level="5"):
+                return pd.DataFrame({
+                    "timestamp": [1704067200000, 1704067140000],
+                    "percentage": [0.0, 0.0],
+                    "depth": [100.0, 90.0],
+                    "notional": [10000.0, 9000.0],
+                })
+
+        monkeypatch.setattr(collector_module, "BinanceVisionDownloader", BadVision)
+        with pytest.raises(DataIntegrityError, match="not monotonic"):
+            DataCollector().ensure_bookdepth_data("BTCUSDT", "2024-01-01", "2024-01-02")
+
+    def test_ensure_bookdepth_data_fails_closed_on_duplicate_pairs(
+        self, tmp_path, monkeypatch,
+    ) -> None:
+        # XS-EXP-03: duplicate (timestamp, percentage) pairs fail closed.
+        target = tmp_path / "futures" / "bookdepth" / "BTCUSDT.parquet"
+        monkeypatch.setattr(collector_module, "bookdepth_path", lambda symbol: target)
+
+        class DupVision:
+            def fetch_bookdepth_daily(self, symbol, date, level="5"):
+                return pd.DataFrame({
+                    "timestamp": [1704067200000, 1704067200000],
+                    "percentage": [0.0, 0.0],
+                    "depth": [100.0, 101.0],
+                    "notional": [10000.0, 10100.0],
+                })
+
+        monkeypatch.setattr(collector_module, "BinanceVisionDownloader", DupVision)
+        with pytest.raises(DataIntegrityError, match="duplicate"):
+            DataCollector().ensure_bookdepth_data("BTCUSDT", "2024-01-01", "2024-01-02")
