@@ -1,6 +1,11 @@
-"""Contract scenario XABB-05 for the XS alpha x baseline blend orchestration."""
+"""Contract scenarios XABB-05 and XABJS-04..XABJS-05 for the XS alpha x baseline
+blend orchestration."""
 
 from __future__ import annotations
+
+import ast
+from inspect import signature
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -311,3 +316,146 @@ class TestBaselineBlendSizedOrchestration:
         monkeypatch.setattr(xs_blend, "_common_index", lambda indexes: short_grid)
         with pytest.raises(DataIntegrityError, match="at least 2 common bars"):
             xs_blend.run_xs_alpha_baseline_blend_sized()
+
+class TestBaselineBlendJointOrchestration:
+    def test_xabjs_joint_orchestrator_runs_at_explicit_point(self, monkeypatch) -> None:
+        # The joint orchestrator replays v6 + baseline, blends at the explicit
+        # weight, applies the explicit leverage, and re-verifies every gate --
+        # the measured numbers are reported, never assumed to pass.
+        _install_synthetic_data(monkeypatch)
+        report = xs_blend.run_xs_alpha_baseline_blend_joint(
+            xs_alpha_weight=0.6, leverage_scale=1.0,
+        )
+
+        assert report.profile == XS_VOL_WEIGHTED_ALPHA_PROFILE_ID
+        assert report.xs_alpha_weight == 0.6
+        assert report.leverage_scale == 1.0
+        assert isinstance(report.discovery, XsAdmissionResult)
+        assert isinstance(report.qualification, XsAdmissionResult)
+        assert isinstance(report.pre_blend_discovery, XsAdmissionResult)
+        assert isinstance(report.pre_blend_qualification, XsAdmissionResult)
+        assert isinstance(report.baseline_discovery, XsAdmissionResult)
+        assert isinstance(report.baseline_qualification, XsAdmissionResult)
+        assert isinstance(report.reliability, XsReliabilityResult)
+        assert len(report.report_fingerprint) == 64
+
+    def test_xabjs_04_joint_requires_both_parameters(self) -> None:
+        # XABJS-04: neither parameter has a default in the function itself --
+        # the frozen discovered values must be supplied by the caller (the CLI
+        # handler), never baked in here.
+        with pytest.raises(TypeError):
+            xs_blend.run_xs_alpha_baseline_blend_joint()
+        with pytest.raises(TypeError):
+            xs_blend.run_xs_alpha_baseline_blend_joint(xs_alpha_weight=0.6)
+        with pytest.raises(TypeError):
+            xs_blend.run_xs_alpha_baseline_blend_joint(leverage_scale=1.0)
+
+        params = signature(xs_blend.run_xs_alpha_baseline_blend_joint).parameters
+        assert set(params) == {"xs_alpha_weight", "leverage_scale", "unseal_holdout"}
+        assert all(p.kind == p.KEYWORD_ONLY for p in params.values())
+        assert params["xs_alpha_weight"].default is params["xs_alpha_weight"].empty
+        assert params["leverage_scale"].default is params["leverage_scale"].empty
+
+    def test_xabjs_05_no_optuna_in_src(self) -> None:
+        # XABJS-05: neither the application orchestrator nor the pure blend
+        # module may import optuna, directly or transitively. Both modules were
+        # already imported successfully at collection time in the default
+        # environment (which does not install the optional tuning extra); this
+        # locks that property down against future edits via an AST import check
+        # (docstrings may freely discuss optuna's absence).
+        for path in (
+            Path("src/application/research/technical/xs_alpha_baseline_blend.py"),
+            Path("src/research/technical_experts/xs_alpha_baseline_blend.py"),
+        ):
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            for node in ast.walk(tree):
+                if isinstance(node, ast.Import):
+                    assert not any(
+                        alias.name == "optuna" or alias.name.startswith("optuna.")
+                        for alias in node.names
+                    )
+                elif isinstance(node, ast.ImportFrom):
+                    assert node.module is None or not node.module.startswith("optuna")
+
+    def test_xabjs_joint_holdout_stays_sealed_by_default(self, monkeypatch) -> None:
+        _install_synthetic_data(monkeypatch)
+        report = xs_blend.run_xs_alpha_baseline_blend_joint(
+            xs_alpha_weight=0.6, leverage_scale=1.0,
+        )
+        assert report.holdout is None
+        assert report.pre_blend_holdout is None
+        assert report.baseline_holdout is None
+
+    def test_xabjs_joint_holdout_replayed_only_when_unsealed(self, monkeypatch) -> None:
+        idx = pd.date_range("2022-01-01", "2026-07-07 20:00:00", freq="4h", tz="UTC")
+        t = np.arange(len(idx), dtype=np.float64)
+
+        def extended_load(symbol: str, start, end):
+            salt = float(sum(ord(c) for c in symbol))
+            close = (
+                100.0 + 0.02 * t + 30.0 * np.sin(t / 40.0 + salt) + 20.0 * np.cos(t / 150.0)
+            )
+            frame = pd.DataFrame({
+                "open": close - 0.2,
+                "high": close + 1.0,
+                "low": close - 1.0,
+                "close": close,
+                "volume": 1000.0,
+                "taker_buy_ratio": 0.5 + 0.03 * np.sin(t / 9.0 + salt),
+            }, index=idx)
+            funding = pd.Series(0.0, index=idx, dtype=np.float64)
+            frame.attrs["symbol"] = symbol
+            return frame, funding, {"perp_ohlcv": f"fp-{symbol}"}, 1.0
+
+        monkeypatch.setattr(xs_blend, "_load_symbol_data", extended_load)
+        report = xs_blend.run_xs_alpha_baseline_blend_joint(
+            xs_alpha_weight=0.6, leverage_scale=2.0, unseal_holdout=True,
+        )
+        assert report.holdout is not None
+        assert report.pre_blend_holdout is not None
+        assert report.baseline_holdout is not None
+
+    def test_xabjs_joint_payload_is_byte_deterministic(self, monkeypatch) -> None:
+        _install_synthetic_data(monkeypatch)
+        first = xs_blend.run_xs_alpha_baseline_blend_joint(
+            xs_alpha_weight=0.6, leverage_scale=1.5,
+        )
+        second = xs_blend.run_xs_alpha_baseline_blend_joint(
+            xs_alpha_weight=0.6, leverage_scale=1.5,
+        )
+        assert first.to_json() == second.to_json()
+        payload = first.to_payload()
+        assert set(payload) == {
+            "profile", "xs_alpha_weight", "leverage_scale",
+            "discovery", "qualification", "holdout",
+            "pre_blend_discovery", "pre_blend_qualification", "pre_blend_holdout",
+            "baseline_discovery", "baseline_qualification", "baseline_holdout",
+            "reliability", "report_fingerprint",
+        }
+        assert payload["xs_alpha_weight"] == 0.6
+        assert payload["leverage_scale"] == 1.5
+
+    def test_xabjs_joint_persistence_is_byte_deterministic(self, monkeypatch, tmp_path) -> None:
+        _install_synthetic_data(monkeypatch)
+        report = xs_blend.run_xs_alpha_baseline_blend_joint(
+            xs_alpha_weight=0.6, leverage_scale=2.0,
+        )
+        path = tmp_path / "joint.json"
+        xs_blend.persist_xs_alpha_baseline_blend_joint_report(report, path)
+        assert path.exists()
+        assert path.read_text(encoding="utf-8") == report.to_json()
+        assert (
+            xs_blend.xs_baseline_blend_joint_report_path().name
+            == "xs_alpha_baseline_blend_v8_joint.json"
+        )
+
+    def test_xabjs_joint_fails_closed_on_short_common_grid(self, monkeypatch) -> None:
+        _install_synthetic_data(monkeypatch)
+        short_grid = pd.DatetimeIndex(
+            [pd.Timestamp("2022-01-01", tz="UTC")],
+        )
+        monkeypatch.setattr(xs_blend, "_common_index", lambda indexes: short_grid)
+        with pytest.raises(DataIntegrityError, match="at least 2 common bars"):
+            xs_blend.run_xs_alpha_baseline_blend_joint(
+                xs_alpha_weight=0.6, leverage_scale=1.0,
+            )

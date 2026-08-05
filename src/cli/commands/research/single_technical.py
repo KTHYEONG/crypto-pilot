@@ -227,6 +227,43 @@ def _run_xs_alpha_baseline_blend_sized(args: argparse.Namespace) -> None:
         report.sizing.binding_constraint,
     )
 
+def _run_xs_alpha_baseline_blend_joint(args: argparse.Namespace) -> None:
+    from src.application.research.technical.xs_alpha_baseline_blend import (
+        persist_xs_alpha_baseline_blend_joint_report,
+        run_xs_alpha_baseline_blend_joint,
+        xs_baseline_blend_joint_report_path,
+    )
+    from src.application.research.technical.xs_trend_screen import (
+        XS_VOL_WEIGHTED_ALPHA_PROFILE_ID,
+    )
+
+    profile = args.profile or XS_VOL_WEIGHTED_ALPHA_PROFILE_ID
+    if profile != XS_VOL_WEIGHTED_ALPHA_PROFILE_ID:
+        raise ValueError(
+            f"unknown baseline-blend profile '{profile}'; blending is restricted "
+            f"to '{XS_VOL_WEIGHTED_ALPHA_PROFILE_ID}'"
+        )
+    report = run_xs_alpha_baseline_blend_joint(
+        xs_alpha_weight=args.xs_alpha_weight,
+        leverage_scale=args.leverage_scale,
+        unseal_holdout=args.unseal_holdout,
+    )
+    persist_xs_alpha_baseline_blend_joint_report(
+        report, xs_baseline_blend_joint_report_path(),
+    )
+    _logger.info(
+        "xs-baseline-blend-joint profile=%s xs_alpha_weight=%.4f leverage_scale=%.4f "
+        "pre_qualification_admitted=%s post_qualification_admitted=%s "
+        "post_qualification_sharpe=%.4f binding_constraint=%s",
+        report.profile,
+        report.xs_alpha_weight,
+        report.leverage_scale,
+        report.pre_blend_qualification.admitted,
+        report.qualification.admitted,
+        report.qualification.sharpe,
+        report.qualification.binding_constraint,
+    )
+
 
 def add_single_technical_commands(run_sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
     """Attach the ``research run single technical`` subcommands."""
@@ -300,3 +337,28 @@ def add_single_technical_commands(run_sub: argparse._SubParsersAction[argparse.A
     xs_baseline_blend_sized.add_argument("--unseal-holdout", action="store_true", default=False)
     xs_baseline_blend_sized.add_argument("--no-log-run", action="store_true", default=False)
     xs_baseline_blend_sized.set_defaults(handler=_run_xs_alpha_baseline_blend_sized)
+
+    from src.application.research.technical.xs_alpha_baseline_blend import (
+        _JOINT_LEVERAGE_SCALE,
+        _JOINT_XS_ALPHA_WEIGHT,
+    )
+
+    xs_baseline_blend_joint = run_sub.add_parser(
+        "xs-baseline-blend-joint",
+        help=(
+            "Blend xs_alpha_vol_weighted_v6 with the frozen Donchian baseline "
+            "at the jointly-searched sleeve weight and gross leverage"
+        ),
+    )
+    xs_baseline_blend_joint.add_argument("--profile", default=None)
+    xs_baseline_blend_joint.add_argument("--start", default=None)
+    xs_baseline_blend_joint.add_argument("--end", default=None)
+    xs_baseline_blend_joint.add_argument("--unseal-holdout", action="store_true", default=False)
+    xs_baseline_blend_joint.add_argument("--no-log-run", action="store_true", default=False)
+    xs_baseline_blend_joint.add_argument(
+        "--xs-alpha-weight", type=float, default=_JOINT_XS_ALPHA_WEIGHT,
+    )
+    xs_baseline_blend_joint.add_argument(
+        "--leverage-scale", type=float, default=_JOINT_LEVERAGE_SCALE,
+    )
+    xs_baseline_blend_joint.set_defaults(handler=_run_xs_alpha_baseline_blend_joint)
