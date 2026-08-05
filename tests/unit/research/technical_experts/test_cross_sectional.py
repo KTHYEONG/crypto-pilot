@@ -831,3 +831,87 @@ class TestGrowthOptimalSizing:
         unscaled_net = unscaled_equity.pct_change().dropna()
         assert np.allclose(net.to_numpy(), unscaled_net.to_numpy(), atol=1e-12)
         assert weights_out.equals(weights)
+
+
+class TestVolTargetGrowthOptimalSizing:
+    def _sizing_inputs(self, rows: int = 300, crash_factor: float = 0.2) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DatetimeIndex]:
+        idx = pd.date_range("2024-01-01", periods=rows, freq="4h", tz="UTC")
+        rng = np.random.default_rng(3)
+        closes = pd.DataFrame({
+            "A": 100 * np.exp(np.cumsum(rng.normal(0.0015, 0.008, rows))),
+            "B": 100 * np.exp(np.cumsum(rng.normal(-0.0015, 0.008, rows))),
+        }, index=idx)
+        opens = closes.shift(1).bfill()
+        opens.loc[idx[40], "A"] = opens.loc[idx[39], "A"] * crash_factor
+        funding = pd.DataFrame(0.0, index=idx, columns=["A", "B"])
+        weights = pd.DataFrame({"A": 0.5, "B": -0.5}, index=idx)
+        return weights, opens, funding, idx
+
+    def _easy_config(self) -> GrowthSizingConfig:
+        return GrowthSizingConfig(
+            risk_grid=(0.5, 1.0, 2.0), reference_risk=1.0, horizon_years=0.5,
+            n_paths=100, max_drawdown_prob=0.9, max_ruin_prob=0.9,
+        )
+
+    # SCENARIO_VOLTARGET_05_DEFAULT_DISABLED_BACKWARD_COMPATIBLE
+    def test_voltarget_05_default_disabled_is_backward_compatible(self) -> None:
+        weights, opens, funding, idx = self._sizing_inputs()
+        discovery_start, discovery_end = idx[0], idx[149]
+        config = self._easy_config()
+        net_off, _w_off, sizing_off = size_xs_alpha_growth_optimal(
+            weights, opens, funding, XsCompositeSpec(), discovery_start, discovery_end, config,
+        )
+        net_off2, _w_off2, sizing_off2 = size_xs_alpha_growth_optimal(
+            weights, opens, funding, XsCompositeSpec(), discovery_start, discovery_end, config,
+            vol_target_window=None,
+        )
+        assert np.allclose(net_off.to_numpy(), net_off2.to_numpy())
+        assert sizing_off.selected_risk == sizing_off2.selected_risk
+
+    # SCENARIO_VOLTARGET_06_ENABLED_DISCOVERY_ONLY_NO_LEAKAGE
+    def test_voltarget_06_enabled_anchor_is_discovery_only(self) -> None:
+        weights, opens, funding, idx = self._sizing_inputs()
+        discovery_start, discovery_end = idx[0], idx[149]
+        config = self._easy_config()
+        net_off, _w_off, _sizing_off = size_xs_alpha_growth_optimal(
+            weights, opens, funding, XsCompositeSpec(), discovery_start, discovery_end, config,
+        )
+        net_vt, w_vt, sizing_vt = size_xs_alpha_growth_optimal(
+            weights, opens, funding, XsCompositeSpec(), discovery_start, discovery_end, config,
+            vol_target_window=20,
+        )
+        assert net_vt.index.equals(net_off.index)
+        assert not np.allclose(net_vt.to_numpy(), net_off.to_numpy())
+        # mutating holdout-window opens must not change the anchor, the selected
+        # risk, or any discovery-window bar of the returned net.
+        opens_mut = opens.copy()
+        opens_mut.loc[idx[200]:, "A"] = opens_mut.loc[idx[200]:, "A"] * 1.5
+        net_vt_mut, _w_mut, sizing_vt_mut = size_xs_alpha_growth_optimal(
+            weights, opens_mut, funding, XsCompositeSpec(), discovery_start, discovery_end, config,
+            vol_target_window=20,
+        )
+        assert sizing_vt_mut.selected_risk == sizing_vt.selected_risk
+        assert np.allclose(net_vt_mut.iloc[:150].to_numpy(), net_vt.iloc[:150].to_numpy())
+
+    # SCENARIO_VOLTARGET_07_INFEASIBLE_BYPASSES_VOL_TARGETING_ENTIRELY
+    def test_voltarget_07_infeasible_bypasses_vol_targeting(self) -> None:
+        # A severe enough crash stays infeasible even after vol-targeting
+        # compresses the tail (the causal multiplier can never know the shock
+        # is coming), so the infeasible scalar branch is genuinely exercised.
+        weights, opens, funding, idx = self._sizing_inputs(crash_factor=0.05)
+        discovery_start, discovery_end = idx[0], idx[149]
+        hard_config = GrowthSizingConfig(
+            risk_grid=(0.5, 1.0, 2.0), reference_risk=1.0, horizon_years=0.5,
+            n_paths=100, max_drawdown_prob=1e-6, max_ruin_prob=1e-6,
+        )
+        net, weights_out, sizing = size_xs_alpha_growth_optimal(
+            weights, opens, funding, XsCompositeSpec(), discovery_start, discovery_end,
+            hard_config, vol_target_window=20,
+        )
+        assert sizing.selected_risk is None
+        unscaled_equity, _unscaled_turnover = run_xs_composite_ledger(
+            weights, opens, funding, XsCompositeSpec(),
+        )
+        unscaled_net = unscaled_equity.pct_change().dropna()
+        assert np.allclose(net.to_numpy(), unscaled_net.to_numpy(), atol=1e-12)
+        assert weights_out.equals(weights)

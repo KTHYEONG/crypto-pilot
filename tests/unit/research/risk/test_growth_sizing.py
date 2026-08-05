@@ -8,6 +8,8 @@ from src.research.risk.growth_sizing import (
     GrowthSizingConfig,
     GrowthSizingResult,
     apply_realised_risk_overlay,
+    apply_vol_target_overlay,
+    compute_discovery_target_vol,
     drawdown_risk_multiplier,
     solve_growth_optimal_risk,
 )
@@ -236,3 +238,112 @@ class TestApplyRealisedRiskOverlay:
         weights = pd.DataFrame({"A": [1.0] * 3}, index=index)
         with pytest.raises(ValueError, match="DatetimeIndex"):
             apply_realised_risk_overlay(net, weights, 0.005, 0.005)
+
+
+class TestVolTargetOverlay:
+    def _index(self, n: int = 100) -> pd.DatetimeIndex:
+        return pd.date_range("2024-01-01", periods=n, freq="4h", tz="UTC")
+
+    def _series(self, n: int = 100, seed: int = 7) -> tuple[pd.Series, pd.DataFrame]:
+        idx = self._index(n)
+        rng = np.random.default_rng(seed)
+        r = np.concatenate([rng.normal(0.0, 0.001, n // 2), rng.normal(0.0, 0.02, n // 2)])
+        net = pd.Series(r, index=idx)
+        weights = pd.DataFrame({"A": 0.5, "B": -0.5}, index=idx)
+        return net, weights
+
+    # SCENARIO_VOLTARGET_01_CAUSAL_NO_LOOKAHEAD
+    def test_voltarget_01_multiplier_never_looks_ahead(self) -> None:
+        net, weights = self._series()
+        scaled_net, _scaled_weights = apply_vol_target_overlay(
+            net, weights, window=10, target_vol=0.005, multiplier_bounds=(0.25, 4.0),
+        )
+        net_mut = net.copy()
+        net_mut.iloc[90] = 5.0
+        scaled_net_mut, _w = apply_vol_target_overlay(
+            net_mut, weights, window=10, target_vol=0.005, multiplier_bounds=(0.25, 4.0),
+        )
+        # bar t's multiplier uses strictly prior bars, so mutating bar 90 can
+        # only affect the multiplier from bar 91 onward; bars 0..89 (including
+        # their unmutated raw values) are reproduced exactly.
+        assert np.allclose(scaled_net_mut.iloc[:90].to_numpy(), scaled_net.iloc[:90].to_numpy())
+
+    # SCENARIO_VOLTARGET_02_FALLBACK_INSUFFICIENT_HISTORY
+    def test_voltarget_02_insufficient_history_falls_back_to_one(self) -> None:
+        net, weights = self._series()
+        scaled_net, scaled_weights = apply_vol_target_overlay(
+            net, weights, window=10, target_vol=0.005, multiplier_bounds=(0.25, 4.0),
+        )
+        # bars 0..window-1 have fewer than `window` strictly-prior bars: multiplier is exactly 1.0.
+        assert np.allclose(scaled_net.iloc[:10].to_numpy(), net.iloc[:10].to_numpy())
+        assert scaled_weights.iloc[:10].equals(weights.iloc[:10])
+
+    # SCENARIO_VOLTARGET_03_BOUNDS_CLIPPING
+    def test_voltarget_03_bounds_clip_unbounded_scale(self) -> None:
+        net, weights = self._series()
+        scaled_hi, _w = apply_vol_target_overlay(
+            net, weights, window=10, target_vol=10.0, multiplier_bounds=(0.25, 4.0),
+        )
+        assert np.allclose(
+            scaled_hi.iloc[15:].to_numpy(), 4.0 * net.iloc[15:].to_numpy(), atol=1e-9,
+        )
+        scaled_lo, _w2 = apply_vol_target_overlay(
+            net, weights, window=10, target_vol=1e-9, multiplier_bounds=(0.25, 4.0),
+        )
+        assert np.allclose(
+            scaled_lo.iloc[15:].to_numpy(), 0.25 * net.iloc[15:].to_numpy(), atol=1e-9,
+        )
+
+    # SCENARIO_VOLTARGET_04_TARGET_VOL_DISCOVERY_ONLY_FORMULA
+    def test_voltarget_04_target_vol_matches_causal_median_formula(self) -> None:
+        idx = pd.date_range("2024-01-01", periods=60, freq="4h", tz="UTC")
+        rng = np.random.default_rng(1)
+        sigma_envelope = np.concatenate([np.full(30, 0.001), np.full(30, 0.02)])
+        net = pd.Series(rng.normal(0.0, 1.0, 60) * sigma_envelope, index=idx)
+        tv = compute_discovery_target_vol(net, window=10)
+        expected = net.rolling(10, min_periods=10).std().shift(1).dropna().median()
+        assert isinstance(tv, float)
+        assert np.isfinite(tv)
+        assert tv > 0
+        assert abs(tv - float(expected)) < 1e-12
+        with pytest.raises(ValueError, match="window"):
+            compute_discovery_target_vol(net, window=1)
+        with pytest.raises(ValueError, match=r"window \+ 1"):
+            compute_discovery_target_vol(net, window=100)
+        with pytest.raises(ValueError, match="finite"):
+            compute_discovery_target_vol(
+                pd.Series(np.where(np.arange(30) == 5, np.nan, 0.001), index=idx[:30]),
+                window=10,
+            )
+
+    def test_voltarget_overlay_rejects_invalid_inputs(self) -> None:
+        net, weights = self._series()
+        with pytest.raises(ValueError, match="DatetimeIndex"):
+            apply_vol_target_overlay(
+                pd.Series(net.to_numpy(), index=pd.RangeIndex(100)),
+                weights, 10, 0.005, (0.25, 4.0),
+            )
+        with pytest.raises(ValueError, match="identical index"):
+            apply_vol_target_overlay(net.iloc[1:], weights, 10, 0.005, (0.25, 4.0))
+        shuffled = pd.DatetimeIndex(
+            [self._index(100)[i] for i in [5, 0, 9, 1, 2, 3, 4, 6, 7, 8, *range(10, 100)]]
+        )
+        with pytest.raises(ValueError, match="monotonic"):
+            apply_vol_target_overlay(
+                pd.Series(net.to_numpy(), index=shuffled),
+                weights.reindex(shuffled), 10, 0.005, (0.25, 4.0),
+            )
+        bad_net = net.copy()
+        bad_net.iloc[3] = np.nan
+        with pytest.raises(ValueError, match="finite"):
+            apply_vol_target_overlay(bad_net, weights, 10, 0.005, (0.25, 4.0))
+        with pytest.raises(ValueError, match="window"):
+            apply_vol_target_overlay(net, weights, 1, 0.005, (0.25, 4.0))
+        with pytest.raises(ValueError, match="target_vol"):
+            apply_vol_target_overlay(net, weights, 10, -1.0, (0.25, 4.0))
+        with pytest.raises(ValueError, match="target_vol"):
+            apply_vol_target_overlay(net, weights, 10, np.nan, (0.25, 4.0))
+        with pytest.raises(ValueError, match="multiplier_bounds"):
+            apply_vol_target_overlay(net, weights, 10, 0.005, (4.0, 0.25))
+        with pytest.raises(ValueError, match="multiplier_bounds"):
+            apply_vol_target_overlay(net, weights, 10, 0.005, (0.0, 4.0))
