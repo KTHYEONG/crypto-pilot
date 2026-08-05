@@ -13,6 +13,14 @@ qualification(+holdout) stitched OOS window via the shared
 ``_oos_reliability_window`` helper -- the actual reliability gate this cycle is
 aimed at, measured honestly rather than assumed from any diagnostic. Holdout
 stays sealed unless ``unseal_holdout`` is set.
+
+:func:`run_xs_alpha_baseline_blend_sized` is the sibling that adds the two
+sizing levers: the sleeve weight is chosen by the worst-year-robust selector
+and the gross leverage is chosen strictly from the discovery-window blended
+net returns via ``solve_growth_optimal_risk`` (``use_drawdown_overlay=False``)
+and applied as a pure linear scale -- the first configuration where the
+reliability gate is reachable at all this project-cycle, reported exactly as
+measured, never assumed to pass.
 """
 
 from __future__ import annotations
@@ -25,7 +33,10 @@ import numpy as np
 import pandas as pd
 
 from src.application.research.technical.trend_screen import _load_symbol_data
-from src.application.research.technical.xs_alpha_growth_sizing import _realised_turnover
+from src.application.research.technical.xs_alpha_growth_sizing import (
+    _realised_turnover,
+    _sizing_payload,
+)
 from src.application.research.technical.xs_trend_screen import (
     XS_DISCOVERY_START,
     XS_VOL_WEIGHTED_ALPHA_PROFILE_ID,
@@ -42,6 +53,11 @@ from src.research.baseline.backtest import run_backtest
 from src.research.contracts import CostModel, StrategySpec
 from src.research.evaluation.policy import HOLDOUT_CUTOFF, resolve_evaluation_end
 from src.research.evaluation.reliability import ReliabilityGateConfig
+from src.research.risk.growth_sizing import (
+    GrowthSizingConfig,
+    GrowthSizingResult,
+    solve_growth_optimal_risk,
+)
 from src.research.technical_experts.cross_sectional import (
     XsAdmissionConfig,
     XsAdmissionResult,
@@ -60,14 +76,23 @@ from src.research.technical_experts.trend_screen_catalog import (
     TREND_SCREEN_SYMBOLS,
 )
 from src.research.technical_experts.xs_alpha_baseline_blend import (
+    apply_fixed_gross_leverage,
     build_blended_ledger,
     select_baseline_blend_weight,
+    select_robust_baseline_blend_weight,
 )
 
 # Pre-registered, frozen weight grid (v8): selection is argmax annualized
 # Sharpe on the discovery window only. A coarse grid is deliberate -- the
 # whole point is a small, bounded, deterministic search, not matrix inversion.
 _DEFAULT_WEIGHT_GRID: tuple[float, ...] = (0.0, 0.2, 0.4, 0.5, 0.6, 0.8, 1.0)
+
+# Pre-registered, frozen gross-leverage grid (robust-blend sizing): 0.5 steps
+# matching ``_XS_GROWTH_SIZING_CONFIG``'s spacing convention, denser than its
+# ``(0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0)`` grid because the §2b passing band is
+# only ~0.8x wide. ``reference_risk = 1.0`` makes grid values literal gross-
+# leverage multiples, exactly the pure-linear scale §2b swept.
+_DEFAULT_RISK_GRID: tuple[float, ...] = (1.0, 1.5, 2.0, 2.5, 3.0, 3.5, 4.0)
 
 # Frozen persistence name (v8 of the XS alpha family), mirroring
 # ``xs_growth_sizing_report_path``'s naming convention.
@@ -103,6 +128,78 @@ class XsBaselineBlendReport:
             "profile": self.profile,
             "blend_weight": round(self.blend_weight, 8),
             "weight_grid": list(self.weight_grid),
+            "discovery": _admission_payload(self.discovery),
+            "qualification": _admission_payload(self.qualification),
+            "holdout": (
+                _admission_payload(self.holdout) if self.holdout is not None else None
+            ),
+            "pre_blend_discovery": _admission_payload(self.pre_blend_discovery),
+            "pre_blend_qualification": _admission_payload(self.pre_blend_qualification),
+            "pre_blend_holdout": (
+                _admission_payload(self.pre_blend_holdout)
+                if self.pre_blend_holdout is not None else None
+            ),
+            "baseline_discovery": _admission_payload(self.baseline_discovery),
+            "baseline_qualification": _admission_payload(self.baseline_qualification),
+            "baseline_holdout": (
+                _admission_payload(self.baseline_holdout)
+                if self.baseline_holdout is not None else None
+            ),
+            "reliability": (
+                _reliability_payload(self.reliability)
+                if self.reliability is not None else None
+            ),
+        }
+
+    def to_payload(self) -> dict[str, object]:
+        """Canonical, deterministic JSON-ready payload (fingerprint included)."""
+        payload = self._body_payload()
+        payload["report_fingerprint"] = self.report_fingerprint
+        return payload
+
+    def to_json(self) -> str:
+        """Byte-deterministic JSON serialization of the report payload."""
+        return json.dumps(self.to_payload(), sort_keys=True, indent=2) + "\n"
+
+@dataclass(frozen=True, slots=True)
+class XsBaselineBlendSizedReport:
+    """Deterministic persisted outcome of one robust-blend + growth-sizing run.
+
+    Same before/after/baseline admission structure as
+    :class:`XsBaselineBlendReport` plus the growth-sizing result: the
+    worst-year-robust blend weight, the discovery-only ``selected_risk``, and
+    every gate re-verified on the final scaled ledger. The measured
+    ``selected_risk`` and verdict are reported as-is -- never assumed to land
+    inside the narrow §2b passing band.
+    """
+
+    profile: str
+    blend_weight: float
+    weight_grid: tuple[float, ...]
+    sizing: GrowthSizingResult
+    discovery: XsAdmissionResult
+    qualification: XsAdmissionResult
+    holdout: XsAdmissionResult | None
+    pre_blend_discovery: XsAdmissionResult
+    pre_blend_qualification: XsAdmissionResult
+    pre_blend_holdout: XsAdmissionResult | None
+    baseline_discovery: XsAdmissionResult
+    baseline_qualification: XsAdmissionResult
+    baseline_holdout: XsAdmissionResult | None
+    reliability: XsReliabilityResult | None = None
+    report_fingerprint: str = ""
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self, "report_fingerprint", _fingerprint_without_self(self._body_payload()),
+        )
+
+    def _body_payload(self) -> dict[str, object]:
+        return {
+            "profile": self.profile,
+            "blend_weight": round(self.blend_weight, 8),
+            "weight_grid": list(self.weight_grid),
+            "sizing": _sizing_payload(self.sizing),
             "discovery": _admission_payload(self.discovery),
             "qualification": _admission_payload(self.qualification),
             "holdout": (
@@ -349,6 +446,220 @@ def run_xs_alpha_baseline_blend(
         reliability=reliability,
     )
 
+def run_xs_alpha_baseline_blend_sized(
+    *,
+    unseal_holdout: bool = False,
+    weight_grid: tuple[float, ...] = _DEFAULT_WEIGHT_GRID,
+    risk_grid: tuple[float, ...] = _DEFAULT_RISK_GRID,
+) -> XsBaselineBlendSizedReport:
+    """Execute the robust-blend + growth-optimal-leverage pipeline end to end.
+
+    Sibling to :func:`run_xs_alpha_baseline_blend` adding two levers: the
+    sleeve weight is selected by the worst-year-robust criterion
+    (:func:`select_robust_baseline_blend_weight`), and the gross leverage is
+    selected strictly from the discovery-window blended net returns via
+    ``solve_growth_optimal_risk`` (``use_drawdown_overlay=False`` -- the
+    drawdown ladder is measured net-harmful to LCB90) then applied as a pure
+    linear scale (:func:`apply_fixed_gross_leverage`). Every admission gate
+    and the reliability gate are re-verified on the final scaled ledger; the
+    measured ``selected_risk`` and verdict are reported exactly as measured.
+    """
+    end = resolve_evaluation_end(None, unseal_holdout=unseal_holdout)
+    execution_spec = XsCompositeSpec()
+    alpha_spec = XsAlphaCompositeSpec()
+
+    data: dict[str, tuple[pd.DataFrame, pd.Series]] = {}
+    for symbol in TREND_SCREEN_SYMBOLS:
+        frame, funding, _fingerprint, _coverage = _load_symbol_data(
+            symbol, XS_DISCOVERY_START, end,
+        )
+        data[symbol] = (frame, funding)
+
+    common = _common_index([frame.index for frame, _funding in data.values()])
+    if len(common) < 2:
+        raise DataIntegrityError("xs baseline blend requires at least 2 common bars")
+
+    opens = pd.DataFrame(
+        {symbol: frame["open"].reindex(common) for symbol, (frame, _funding) in data.items()},
+    )
+    bar_funding = pd.DataFrame(
+        {
+            symbol: _bar_funding_series(funding, frame.index).reindex(common)
+            for symbol, (frame, funding) in data.items()
+        },
+    )
+    closes = pd.DataFrame(
+        {symbol: frame["close"].reindex(common) for symbol, (frame, _funding) in data.items()},
+    )
+    taker = pd.DataFrame(
+        {symbol: frame["taker_buy_ratio"].reindex(common) for symbol, (frame, _funding) in data.items()},
+    )
+
+    opens_arr = opens.to_numpy(dtype=np.float64)
+    o2o = np.zeros_like(opens_arr)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        o2o[1:] = opens_arr[1:] / opens_arr[:-1] - 1.0
+    benchmark = pd.Series(o2o.mean(axis=1), index=common, name="benchmark")
+
+    weights = build_xs_alpha_vol_weighted_weights(
+        closes, taker, bar_funding, opens, alpha_spec, execution_spec,
+    )
+    xs_equity, _xs_turnover = run_xs_composite_ledger(
+        weights, opens, bar_funding, execution_spec,
+    )
+    xs_alpha_net = xs_equity.pct_change().fillna(0.0).rename("xs_alpha_net")
+
+    btc_frame, btc_funding = data["BTCUSDT"]
+    baseline_result = run_backtest(
+        btc_frame, StrategySpec(), CostModel(), funding_rates=btc_funding,
+    )
+    baseline_equity = baseline_result.equity.reindex(common).rename("baseline_equity")
+    baseline_net = baseline_equity.pct_change().fillna(0.0).rename("baseline_net")
+    baseline_realized_weight = _baseline_realized_position(
+        baseline_result.trades, btc_frame.index, common,
+    )
+
+    blend_weight = select_robust_baseline_blend_weight(
+        xs_alpha_net, baseline_net, XS_DISCOVERY_START, DISCOVERY_END, weight_grid,
+    )
+
+    xs_realized_weights = weights.shift(1 + execution_spec.execution_delay_bars).fillna(0.0)
+    blended_equity, blended_weights = build_blended_ledger(
+        xs_alpha_net, xs_realized_weights, baseline_net, baseline_realized_weight,
+        blend_weight,
+    )
+    blended_net = blended_equity.pct_change().fillna(0.0).rename("blended_net")
+
+    discovery_blended_net = blended_net[
+        (blended_net.index >= XS_DISCOVERY_START) & (blended_net.index <= DISCOVERY_END)
+    ]
+    sizing = solve_growth_optimal_risk(
+        discovery_blended_net.to_numpy(dtype=np.float64),
+        GrowthSizingConfig(
+            risk_grid=risk_grid, reference_risk=1.0, max_drawdown=0.20,
+        ),
+        use_drawdown_overlay=False,
+    )
+
+    if sizing.selected_risk is None:
+        scaled_equity = blended_equity
+        scaled_weights = blended_weights
+    else:
+        scaled_net, scaled_weights = apply_fixed_gross_leverage(
+            blended_net, blended_weights, sizing.selected_risk,
+        )
+        scaled_equity = pd.Series(
+            float(blended_equity.iloc[0]) * np.cumprod(
+                1.0 + scaled_net.to_numpy(dtype=np.float64),
+            ),
+            index=blended_equity.index,
+            name="scaled_equity",
+        )
+    scaled_turnover = _realised_turnover(scaled_weights)
+
+    admission_config = XsAdmissionConfig()
+    discovery = evaluate_xs_admission(
+        _window_series(scaled_equity, XS_DISCOVERY_START, DISCOVERY_END),
+        _window_series(scaled_turnover, XS_DISCOVERY_START, DISCOVERY_END),
+        _window_series(benchmark, XS_DISCOVERY_START, DISCOVERY_END),
+        admission_config,
+    )
+    qualification = evaluate_xs_admission(
+        _window_series(scaled_equity, QUALIFICATION_START, QUALIFICATION_END),
+        _window_series(scaled_turnover, QUALIFICATION_START, QUALIFICATION_END),
+        _window_series(benchmark, QUALIFICATION_START, QUALIFICATION_END),
+        admission_config,
+    )
+
+    holdout: XsAdmissionResult | None = None
+    holdout_start: pd.Timestamp | None = None
+    holdout_end: pd.Timestamp | None = None
+    if unseal_holdout:
+        post_cutoff = common[common > HOLDOUT_CUTOFF]
+        if len(post_cutoff) >= 2:
+            holdout_start = post_cutoff[0]
+            holdout_end = post_cutoff[-1]
+            holdout = evaluate_xs_admission(
+                _window_series(scaled_equity, holdout_start, holdout_end),
+                _window_series(scaled_turnover, holdout_start, holdout_end),
+                _window_series(benchmark, holdout_start, holdout_end),
+                admission_config,
+            )
+
+    xs_turnover = _realised_turnover(xs_realized_weights)
+    pre_blend_discovery = evaluate_xs_admission(
+        _window_series(xs_equity, XS_DISCOVERY_START, DISCOVERY_END),
+        _window_series(xs_turnover, XS_DISCOVERY_START, DISCOVERY_END),
+        _window_series(benchmark, XS_DISCOVERY_START, DISCOVERY_END),
+        admission_config,
+    )
+    pre_blend_qualification = evaluate_xs_admission(
+        _window_series(xs_equity, QUALIFICATION_START, QUALIFICATION_END),
+        _window_series(xs_turnover, QUALIFICATION_START, QUALIFICATION_END),
+        _window_series(benchmark, QUALIFICATION_START, QUALIFICATION_END),
+        admission_config,
+    )
+    pre_blend_holdout: XsAdmissionResult | None = None
+    if unseal_holdout and holdout_start is not None and holdout_end is not None:
+        pre_blend_holdout = evaluate_xs_admission(
+            _window_series(xs_equity, holdout_start, holdout_end),
+            _window_series(xs_turnover, holdout_start, holdout_end),
+            _window_series(benchmark, holdout_start, holdout_end),
+            admission_config,
+        )
+
+    baseline_turnover = _realised_turnover(
+        pd.DataFrame({"baseline": baseline_realized_weight}, index=common),
+    )
+    baseline_discovery = evaluate_xs_admission(
+        _window_series(baseline_equity, XS_DISCOVERY_START, DISCOVERY_END),
+        _window_series(baseline_turnover, XS_DISCOVERY_START, DISCOVERY_END),
+        _window_series(benchmark, XS_DISCOVERY_START, DISCOVERY_END),
+        admission_config,
+    )
+    baseline_qualification = evaluate_xs_admission(
+        _window_series(baseline_equity, QUALIFICATION_START, QUALIFICATION_END),
+        _window_series(baseline_turnover, QUALIFICATION_START, QUALIFICATION_END),
+        _window_series(benchmark, QUALIFICATION_START, QUALIFICATION_END),
+        admission_config,
+    )
+    baseline_holdout: XsAdmissionResult | None = None
+    if unseal_holdout and holdout_start is not None and holdout_end is not None:
+        baseline_holdout = evaluate_xs_admission(
+            _window_series(baseline_equity, holdout_start, holdout_end),
+            _window_series(baseline_turnover, holdout_start, holdout_end),
+            _window_series(benchmark, holdout_start, holdout_end),
+            admission_config,
+        )
+
+    reliability: XsReliabilityResult | None = None
+    oos_window = _oos_reliability_window(
+        scaled_equity, scaled_weights, QUALIFICATION_START, QUALIFICATION_END,
+        holdout_start, holdout_end,
+    )
+    if oos_window is not None:
+        oos_equity, oos_weights = oos_window
+        reliability = evaluate_xs_reliability(
+            oos_equity, oos_weights, ReliabilityGateConfig(),
+        )
+
+    return XsBaselineBlendSizedReport(
+        profile=XS_VOL_WEIGHTED_ALPHA_PROFILE_ID,
+        blend_weight=blend_weight,
+        weight_grid=weight_grid,
+        sizing=sizing,
+        discovery=discovery,
+        qualification=qualification,
+        holdout=holdout,
+        pre_blend_discovery=pre_blend_discovery,
+        pre_blend_qualification=pre_blend_qualification,
+        pre_blend_holdout=pre_blend_holdout,
+        baseline_discovery=baseline_discovery,
+        baseline_qualification=baseline_qualification,
+        baseline_holdout=baseline_holdout,
+        reliability=reliability,
+    )
+
 
 def persist_xs_alpha_baseline_blend_report(report: XsBaselineBlendReport, path: Path) -> None:
     """Write the byte-deterministic report payload to ``path``."""
@@ -360,6 +671,18 @@ def xs_baseline_blend_report_path() -> Path:
     """Default persistence location for the v8 blend report."""
     return Path("docs/results") / f"{_BLEND_REPORT_NAME}.json"
 
+def persist_xs_alpha_baseline_blend_sized_report(
+    report: XsBaselineBlendSizedReport, path: Path,
+) -> None:
+    """Write the byte-deterministic sized-blend report payload to ``path``."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(report.to_json(), encoding="utf-8")
+
+
+def xs_baseline_blend_sized_report_path() -> Path:
+    """Default persistence location for the robust-blend + sizing report."""
+    return Path("docs/results") / f"{_BLEND_REPORT_NAME}_sized.json"
+
 
 def _check_contract() -> None:
     """Executable assertions locking the baseline-blend entry-point surface."""
@@ -368,9 +691,16 @@ def _check_contract() -> None:
     params = signature(run_xs_alpha_baseline_blend).parameters
     assert set(params) == {"profile", "unseal_holdout", "weight_grid"}
     assert all(p.kind == p.KEYWORD_ONLY for p in params.values())
+    sized_params = signature(run_xs_alpha_baseline_blend_sized).parameters
+    assert set(sized_params) == {"unseal_holdout", "weight_grid", "risk_grid"}
+    assert all(p.kind == p.KEYWORD_ONLY for p in sized_params.values())
+    assert sized_params["risk_grid"].default == (1.0, 1.5, 2.0, 2.5, 3.0, 3.5, 4.0)
     assert XS_VOL_WEIGHTED_ALPHA_PROFILE_ID == "xs_alpha_vol_weighted_v6"
     assert _DEFAULT_WEIGHT_GRID == (0.0, 0.2, 0.4, 0.5, 0.6, 0.8, 1.0)
     assert xs_baseline_blend_report_path().name == "xs_alpha_baseline_blend_v8.json"
+    assert xs_baseline_blend_sized_report_path().name == (
+        "xs_alpha_baseline_blend_v8_sized.json"
+    )
 
 
 _check_contract()

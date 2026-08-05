@@ -18,8 +18,10 @@ import pandas as pd
 import pytest
 
 from src.research.technical_experts.xs_alpha_baseline_blend import (
+    apply_fixed_gross_leverage,
     build_blended_ledger,
     select_baseline_blend_weight,
+    select_robust_baseline_blend_weight,
 )
 
 _GRID = (0.0, 0.25, 0.5, 0.75, 1.0)
@@ -159,3 +161,118 @@ def test_xabb_fail_closed_build_validation() -> None:
     bad_bw.iloc[4] = np.inf
     with pytest.raises(ValueError, match="realized-weight inputs must be finite"):
         build_blended_ledger(a, aw, b, bad_bw, 0.5)
+
+def test_xabrs_python_assertion_selects_worst_year_robust_weight() -> None:
+    # Contract python_assertion: the baseline leg is strongly negative in 2022
+    # and strongly positive in 2023, so the worst-year-robust selector must
+    # refuse it and pick the all-xs_alpha grid point (1.0).
+    idx_2022 = pd.date_range("2022-01-01", periods=20, freq="4h", tz="UTC")
+    idx_2023 = pd.date_range("2023-01-01", periods=20, freq="4h", tz="UTC")
+    idx = idx_2022.append(idx_2023)
+    a = pd.Series([0.01, 0.008] * 20, index=idx)
+    b = pd.Series(([-0.02, -0.018] * 10) + ([0.05, 0.048] * 10), index=idx)
+    assert select_robust_baseline_blend_weight(
+        a, b, idx[0], idx[-1], (0.0, 0.25, 0.5, 0.75, 1.0),
+    ) == 1.0
+
+
+def test_xabrs_python_assertion_apply_fixed_gross_leverage() -> None:
+    # Contract python_assertion: every bar is exactly 2.0x the input, in both
+    # the net returns and the realised weights.
+    idx = pd.date_range("2022-01-01", periods=5, freq="4h", tz="UTC")
+    net = pd.Series([0.01, -0.02, 0.03, 0.0, 0.01], index=idx)
+    w = pd.DataFrame({"xs_alpha": [0.5] * 5, "baseline": [0.3] * 5}, index=idx)
+    scaled_net, scaled_w = apply_fixed_gross_leverage(net, w, 2.0)
+    assert list(scaled_net.round(6)) == [0.02, -0.04, 0.06, 0.0, 0.02]
+    assert float(scaled_w["xs_alpha"].iloc[0]) == 1.0
+    assert float(scaled_w["baseline"].iloc[0]) == 0.6
+
+
+def test_xabrs_01_worst_year_robust_differs_from_aggregate() -> None:
+    # XABRS-01: the baseline leg has one great year (2023) and one terrible
+    # year (2022); the aggregate selector is fooled into over-weighting it,
+    # while the worst-year-robust selector refuses it. The two selectors must
+    # not coincide by construction.
+    idx_2022 = pd.date_range("2022-01-01", periods=20, freq="4h", tz="UTC")
+    idx_2023 = pd.date_range("2023-01-01", periods=20, freq="4h", tz="UTC")
+    idx = idx_2022.append(idx_2023)
+    a = pd.Series(np.resize([0.005, -0.004], 40), index=idx)
+    b = pd.Series(
+        np.concatenate([np.full(20, -0.05), np.full(20, 0.08)]), index=idx,
+    )
+    robust = select_robust_baseline_blend_weight(a, b, idx[0], idx[-1], _GRID)
+    aggregate = select_baseline_blend_weight(a, b, idx[0], idx[-1], _GRID)
+    assert robust == 1.0
+    assert aggregate != robust
+
+
+def test_xabrs_02_single_year_discovery_fails_closed() -> None:
+    # XABRS-02: a discovery window spanning only one calendar year has no
+    # meaningful per-year minimum and must raise, never silently return.
+    a, b, idx = _antiseries()
+    with pytest.raises(ValueError, match="distinct calendar years"):
+        select_robust_baseline_blend_weight(a, b, idx[0], idx[-1], _GRID)
+
+
+def test_xabrs_03_no_ladder_in_application() -> None:
+    # XABRS-03: even immediately after a large drawdown bar, the overlay's
+    # output is exactly scale times the input -- unlike apply_realised_risk_overlay
+    # it never reduces the effective multiplier below scale on any bar.
+    idx = pd.date_range("2022-01-01", periods=6, freq="4h", tz="UTC")
+    net = pd.Series([0.01, -0.05, 0.02, 0.03, -0.01, 0.005], index=idx)
+    w = pd.DataFrame({"xs_alpha": [0.5] * 6, "baseline": [0.3] * 6}, index=idx)
+    scaled_net, scaled_w = apply_fixed_gross_leverage(net, w, 2.5)
+    assert np.allclose(scaled_net.to_numpy(), 2.5 * net.to_numpy())
+    assert np.allclose(scaled_w.to_numpy(), 2.5 * w.to_numpy())
+
+
+def test_xabrs_fail_closed_robust_selection_validation() -> None:
+    a, b, idx = _antiseries()
+    with pytest.raises(ValueError, match="must not be empty"):
+        select_robust_baseline_blend_weight(a, b, idx[0], idx[-1], ())
+    with pytest.raises(ValueError, match=r"\[0, 1\]"):
+        select_robust_baseline_blend_weight(a, b, idx[0], idx[-1], (0.0, 1.5))
+    bad = a.copy()
+    bad.iloc[5] = np.nan
+    with pytest.raises(ValueError, match="non-finite"):
+        select_robust_baseline_blend_weight(bad, b, idx[0], idx[-1], _GRID)
+
+
+def test_xabrs_fail_closed_leverage_validation() -> None:
+    idx = pd.date_range("2022-01-01", periods=5, freq="4h", tz="UTC")
+    net = pd.Series([0.01, -0.02, 0.03, 0.0, 0.01], index=idx)
+    w = pd.DataFrame({"xs_alpha": [0.5] * 5, "baseline": [0.3] * 5}, index=idx)
+    for bad_scale in (float("nan"), float("inf"), 0.0, -1.0):
+        with pytest.raises(ValueError, match="scale must be finite"):
+            apply_fixed_gross_leverage(net, w, bad_scale)
+    shifted = w.copy()
+    shifted.index = idx + pd.Timedelta(hours=4)
+    with pytest.raises(ValueError, match="identical index"):
+        apply_fixed_gross_leverage(net, shifted, 2.0)
+    non_dt = w.copy()
+    non_dt.index = pd.RangeIndex(len(w))
+    with pytest.raises(ValueError, match="DatetimeIndex"):
+        apply_fixed_gross_leverage(net, non_dt, 2.0)
+    bad_net = net.copy()
+    bad_net.iloc[2] = np.inf
+    with pytest.raises(ValueError, match="only finite values"):
+        apply_fixed_gross_leverage(bad_net, w, 2.0)
+    bad_w = w.copy()
+    bad_w.iloc[0, 0] = np.nan
+    with pytest.raises(ValueError, match="only finite values"):
+        apply_fixed_gross_leverage(net, bad_w, 2.0)
+
+def test_xabrs_fail_closed_leverage_non_monotonic_index() -> None:
+    # A non-monotonic DatetimeIndex must be rejected, mirroring
+    # apply_realised_risk_overlay's monotonicity contract.
+    idx = pd.DatetimeIndex([
+        pd.Timestamp("2022-01-01 08:00", tz="UTC"),
+        pd.Timestamp("2022-01-01 00:00", tz="UTC"),
+        pd.Timestamp("2022-01-01 04:00", tz="UTC"),
+    ])
+    net = pd.Series([0.01, 0.02, 0.03], index=idx)
+    w = pd.DataFrame(
+        {"xs_alpha": [0.5, 0.5, 0.5], "baseline": [0.3, 0.3, 0.3]}, index=idx,
+    )
+    with pytest.raises(ValueError, match="monotonic"):
+        apply_fixed_gross_leverage(net, w, 2.0)
