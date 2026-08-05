@@ -589,5 +589,8 @@
   },
   "src/research/technical_experts/xs_contextual_router.py": {
     "testing": "tests/unit/research/technical_experts/test_xs_contextual_router.py"
+  },
+  "src/research/technical_experts/xs_alpha_baseline_blend.py": {
+    "testing": "tests/unit/research/technical_experts/test_xs_alpha_baseline_blend.py"
   }
 }
