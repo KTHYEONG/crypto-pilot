@@ -1060,3 +1060,113 @@ def test_xs_growth_sizing_cli_vol_target_flags_dispatch(monkeypatch) -> None:
     args.handler(args)
     assert calls[-1][0] == "xs_alpha_vol_weighted_v6"
     assert calls[-1][2] is None
+
+
+def test_xs_baseline_blend_cli_parses_and_dispatches(monkeypatch) -> None:
+    from src.application.research.technical.xs_alpha_baseline_blend import (
+        XS_VOL_WEIGHTED_ALPHA_PROFILE_ID,
+        XsBaselineBlendReport,
+    )
+    from src.research.technical_experts.cross_sectional import XsAdmissionResult
+
+    calls: list[tuple[str, bool]] = []
+
+    def _failed() -> XsAdmissionResult:
+        return XsAdmissionResult(
+            admitted=False, binding_constraint="x", sharpe=0.0, beta=0.0,
+            cagr=0.0, mdd=0.0, t_stat=0.0, annual_sharpe={},
+            annualized_turnover=0.0, breakeven_cost=0.0,
+        )
+
+    def fake_run(*, profile, unseal_holdout=False, weight_grid=(0.0, 0.2, 0.4, 0.5, 0.6, 0.8, 1.0)):
+        calls.append((profile, unseal_holdout))
+        return XsBaselineBlendReport(
+            profile=profile,
+            blend_weight=0.5,
+            weight_grid=weight_grid,
+            discovery=_failed(),
+            qualification=_failed(),
+            holdout=None,
+            pre_blend_discovery=_failed(),
+            pre_blend_qualification=_failed(),
+            pre_blend_holdout=None,
+            baseline_discovery=_failed(),
+            baseline_qualification=_failed(),
+            baseline_holdout=None,
+        )
+
+    persisted: list[str] = []
+    monkeypatch.setattr(
+        "src.application.research.technical.xs_alpha_baseline_blend.run_xs_alpha_baseline_blend",
+        fake_run,
+    )
+    monkeypatch.setattr(
+        "src.application.research.technical.xs_alpha_baseline_blend.persist_xs_alpha_baseline_blend_report",
+        lambda report, path: persisted.append(str(path)),
+    )
+    args = build_root_parser().parse_args([
+        "research", "run", "single", "xs-baseline-blend",
+        "--profile", "xs_alpha_vol_weighted_v6",
+        "--start", "2022-04-01",
+        "--end", "2025-12-31",
+        "--unseal-holdout",
+        "--no-log-run",
+    ])
+    args.handler(args)
+    assert calls == [(XS_VOL_WEIGHTED_ALPHA_PROFILE_ID, True)]
+    assert persisted == ["docs/results/xs_alpha_baseline_blend_v8.json"]
+
+
+def test_xs_baseline_blend_cli_defaults_profile_and_seals_holdout(monkeypatch) -> None:
+    from src.application.research.technical.xs_alpha_baseline_blend import (
+        XsBaselineBlendReport,
+    )
+    from src.research.technical_experts.cross_sectional import XsAdmissionResult
+
+    calls: list[tuple[str, bool]] = []
+
+    def _failed() -> XsAdmissionResult:
+        return XsAdmissionResult(
+            admitted=False, binding_constraint="x", sharpe=0.0, beta=0.0,
+            cagr=0.0, mdd=0.0, t_stat=0.0, annual_sharpe={},
+            annualized_turnover=0.0, breakeven_cost=0.0,
+        )
+
+    def fake_run(*, profile, unseal_holdout=False, weight_grid=(0.0, 0.2, 0.4, 0.5, 0.6, 0.8, 1.0)):
+        calls.append((profile, unseal_holdout))
+        return XsBaselineBlendReport(
+            profile=profile,
+            blend_weight=0.4,
+            weight_grid=weight_grid,
+            discovery=_failed(),
+            qualification=_failed(),
+            holdout=None,
+            pre_blend_discovery=_failed(),
+            pre_blend_qualification=_failed(),
+            pre_blend_holdout=None,
+            baseline_discovery=_failed(),
+            baseline_qualification=_failed(),
+            baseline_holdout=None,
+        )
+
+    monkeypatch.setattr(
+        "src.application.research.technical.xs_alpha_baseline_blend.run_xs_alpha_baseline_blend",
+        fake_run,
+    )
+    monkeypatch.setattr(
+        "src.application.research.technical.xs_alpha_baseline_blend.persist_xs_alpha_baseline_blend_report",
+        lambda report, path: None,
+    )
+    args = build_root_parser().parse_args([
+        "research", "run", "single", "xs-baseline-blend", "--no-log-run",
+    ])
+    args.handler(args)
+    assert calls == [("xs_alpha_vol_weighted_v6", False)]
+
+
+def test_xs_baseline_blend_cli_rejects_unknown_profile() -> None:
+    args = build_root_parser().parse_args([
+        "research", "run", "single", "xs-baseline-blend", "--profile", "bogus",
+    ])
+    with pytest.raises(ValueError, match="unknown baseline-blend profile"):
+        args.handler(args)
