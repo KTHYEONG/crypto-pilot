@@ -2,32 +2,19 @@
   "discovery": {
     "admitted": true,
     "annual_sharpe": {
-      "2022": 1.63532132,
-      "2023": 1.05327117
+      "2022": 1.65548616,
+      "2023": 1.93469685
     },
-    "annualized_turnover": 72.6964774,
-    "beta": -0.00133388,
+    "annualized_turnover": 49.98649204,
+    "beta": -0.00249679,
     "binding_constraint": null,
-    "breakeven_cost": 0.00384303,
-    "cagr": 0.23076784,
-    "mdd": -0.13112648,
-    "sharpe": 1.33345181,
-    "t_stat": 1.76272473
+    "breakeven_cost": 0.00701215,
+    "cagr": 0.34399038,
+    "mdd": -0.10980378,
+    "sharpe": 1.78255293,
+    "t_stat": 2.35640322
   },
-  "holdout": {
-    "admitted": true,
-    "annual_sharpe": {
-      "2026": 1.53891409
-    },
-    "annualized_turnover": 46.29896848,
-    "beta": -0.00784473,
-    "binding_constraint": null,
-    "breakeven_cost": 0.00382602,
-    "cagr": 0.14587099,
-    "mdd": -0.06023508,
-    "sharpe": 1.53891409,
-    "t_stat": 1.10445206
-  },
+  "holdout": null,
   "pre_scaling_discovery": {
     "admitted": true,
     "annual_sharpe": {
@@ -43,20 +30,7 @@
     "sharpe": 1.28301733,
     "t_stat": 1.69605409
   },
-  "pre_scaling_holdout": {
-    "admitted": true,
-    "annual_sharpe": {
-      "2026": 1.7307715
-    },
-    "annualized_turnover": 25.76978251,
-    "beta": 0.00273576,
-    "binding_constraint": null,
-    "breakeven_cost": 0.01089273,
-    "cagr": 0.28296654,
-    "mdd": -0.08209349,
-    "sharpe": 1.7307715,
-    "t_stat": 1.24214481
-  },
+  "pre_scaling_holdout": null,
   "pre_scaling_qualification": {
     "admitted": true,
     "annual_sharpe": {
@@ -76,22 +50,22 @@
   "qualification": {
     "admitted": true,
     "annual_sharpe": {
-      "2024": 1.47663859,
-      "2025": 1.48016235
+      "2024": 1.138281,
+      "2025": 1.81737071
     },
-    "annualized_turnover": 37.98849794,
-    "beta": -0.04310698,
+    "annualized_turnover": 34.85619233,
+    "beta": -0.0643074,
     "binding_constraint": null,
-    "breakeven_cost": 0.00447087,
-    "cagr": 0.14467987,
-    "mdd": -0.07205592,
-    "sharpe": 1.47791796,
-    "t_stat": 2.0915227
+    "breakeven_cost": 0.00660165,
+    "cagr": 0.21314631,
+    "mdd": -0.10770727,
+    "sharpe": 1.49099445,
+    "t_stat": 2.11002831
   },
-  "report_fingerprint": "0642866b06f7df6f780f6886a403bb1724f03a8dc08afe03ff5b12c2275c61ea",
+  "report_fingerprint": "67baf18cd9e855863e171ad7cc3732f2e6abc1f2f5c3935e8f42fe6987a944d3",
   "sizing": {
     "binding_constraint": "none",
-    "block_size_used": 11,
+    "block_size_used": 17,
     "feasible_risks": [
       0.5,
       1.0,
@@ -102,10 +76,10 @@
       6.0
     ],
     "mdd_breach_prob": 0.0,
-    "median_log_growth": 0.83117886,
+    "median_log_growth": 1.08119604,
     "ruin_prob": 0.0,
     "selected_risk": 1.5
   },
-  "vol_target": 0.0030166620658293127,
-  "vol_target_window": 42
+  "vol_target": 0.0031513952185643975,
+  "vol_target_window": 84
 }
