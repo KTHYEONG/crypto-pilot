@@ -1,12 +1,15 @@
-"""Contract scenarios XABB-01..XABB-04 (and the frozen python_assertions) for
-the XS alpha x baseline blend primitives (``select_baseline_blend_weight`` /
-``build_blended_ledger``).
+"""Contract scenarios XABB-01..XABB-04 and XABJS-01..XABJS-02 (plus the frozen
+python_assertions) for the XS alpha x baseline blend primitives
+(``select_baseline_blend_weight`` / ``build_blended_ledger`` /
+``discovery_reliability_score``).
 
 Scenario coverage:
 * XABB-01-DISCOVERY-ONLY-SELECTION
 * XABB-02-ZERO-VARIANCE-SAFE-DIVISION
 * XABB-03-FULL-HISTORY-APPLICATION
 * XABB-04-FAIL-CLOSED-MISALIGNED-INDEX
+* XABJS-01-OBJECTIVE-RESPONDS-TO-LEVERAGE
+* XABJS-02-DISCOVERY-ONLY-WINDOW
 """
 
 from __future__ import annotations
@@ -20,6 +23,7 @@ import pytest
 from src.research.technical_experts.xs_alpha_baseline_blend import (
     apply_fixed_gross_leverage,
     build_blended_ledger,
+    discovery_reliability_score,
     select_baseline_blend_weight,
     select_robust_baseline_blend_weight,
 )
@@ -276,3 +280,68 @@ def test_xabrs_fail_closed_leverage_non_monotonic_index() -> None:
     )
     with pytest.raises(ValueError, match="monotonic"):
         apply_fixed_gross_leverage(net, w, 2.0)
+
+def _joint_discovery_fixture() -> tuple[pd.Series, pd.DataFrame, pd.Series, pd.Series, pd.DatetimeIndex]:
+    """Two-year daily fixture whose 0.5 blend has a positive drift.
+
+    The window must span well over the 6-month equal-duration fold guard of
+    ``evaluate_xs_reliability`` -- the contract's original 60-bar (10-day)
+    window is too short for that composed gate, so the synthetic fixture uses a
+    multi-year daily index instead.
+    """
+    idx = pd.date_range("2022-01-01", periods=730, freq="D", tz="UTC")
+    a = pd.Series([0.0005, 0.001] * 365, index=idx)
+    b = pd.Series([0.0008, -0.0002] * 365, index=idx)
+    aw = pd.DataFrame({"S": [1.0] * 730}, index=idx)
+    bw = pd.Series([1.0] * 730, index=idx)
+    return a, aw, b, bw, idx
+
+
+def test_xabjs_01_objective_responds_to_leverage() -> None:
+    # XABJS-01: the joint objective must NOT be scale-invariant -- the same
+    # xs_alpha_weight at two different leverage_scale values must yield two
+    # different LCB90 scores (unlike a Sharpe/t_stat objective, which is blind
+    # to pure linear leverage and is exactly why the sequential per-axis
+    # searches needed two different objectives).
+    a, aw, b, bw, idx = _joint_discovery_fixture()
+    s1 = discovery_reliability_score(a, aw, b, bw, idx[0], idx[-1], 0.5, 1.0)
+    s2 = discovery_reliability_score(a, aw, b, bw, idx[0], idx[-1], 0.5, 2.0)
+    assert isinstance(s1, float)
+    assert isinstance(s2, float)
+    assert s1 != s2
+
+
+def test_xabjs_02_discovery_only_window() -> None:
+    # XABJS-02: appending qualification-window data with a very different return
+    # profile to any of the four input series must not change the score -- the
+    # window restriction happens before any of the three composed calls.
+    a, aw, b, bw, idx = _joint_discovery_fixture()
+    disc_start = idx[0]
+    disc_end = idx[365]
+    disc_only = discovery_reliability_score(
+        a[:366], aw[:366], b[:366], bw[:366], disc_start, disc_end, 0.5, 1.5,
+    )
+
+    qual_idx = pd.date_range(
+        disc_end + pd.Timedelta(days=1), periods=365, freq="D", tz="UTC",
+    )
+    a_qual = pd.Series(0.02, index=qual_idx)
+    b_qual = pd.Series(-0.01, index=qual_idx)
+    aw_qual = pd.DataFrame({"S": [1.0] * 365}, index=qual_idx)
+    bw_qual = pd.Series([1.0] * 365, index=qual_idx)
+    a_full = pd.concat([a[:366], a_qual])
+    aw_full = pd.concat([aw[:366], aw_qual])
+    b_full = pd.concat([b[:366], b_qual])
+    bw_full = pd.concat([bw[:366], bw_qual])
+
+    with_qualification = discovery_reliability_score(
+        a_full, aw_full, b_full, bw_full, disc_start, disc_end, 0.5, 1.5,
+    )
+    assert disc_only == with_qualification
+
+def test_xabjs_fail_closed_fewer_than_two_discovery_bars() -> None:
+    # A discovery window admitting fewer than 2 common bars must fail closed
+    # with ValueError, never return a score built on an empty/single-bar set.
+    a, aw, b, bw, idx = _joint_discovery_fixture()
+    with pytest.raises(ValueError, match="fewer than 2 common bars"):
+        discovery_reliability_score(a, aw, b, bw, idx[-1], idx[-1], 0.5, 1.0)
