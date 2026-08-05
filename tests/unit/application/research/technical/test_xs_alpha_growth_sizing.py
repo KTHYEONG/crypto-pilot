@@ -13,6 +13,7 @@ from src.application.research.technical.xs_trend_screen import (
     XS_CONTEXTUAL_ALPHA_PROFILE_ID,
     XS_VOL_WEIGHTED_ALPHA_PROFILE_ID,
 )
+from src.research.evaluation.reliability import count_closed_trades
 from src.research.risk.growth_sizing import GrowthSizingResult
 from src.research.technical_experts import cross_sectional as cs
 
@@ -123,7 +124,7 @@ class TestGrowthSizingOrchestration:
             "profile", "sizing", "discovery", "qualification", "holdout",
             "pre_scaling_discovery", "pre_scaling_qualification",
             "pre_scaling_holdout", "vol_target_window", "vol_target",
-            "report_fingerprint",
+            "reliability", "report_fingerprint",
         }
         assert payload["sizing"]["selected_risk"] == 1.0
 
@@ -219,3 +220,30 @@ class TestGrowthSizingOrchestration:
         assert report.vol_target_window is None
         assert report.vol_target is None
         assert report.sizing.selected_risk == 2.0
+
+    def test_xsv6size_reliability_05_persists_scaled_book_diagnostic(self, monkeypatch) -> None:
+        # SCENARIO_XS_GROWTH_SIZING_RELIABILITY_05
+        _install_synthetic_data(monkeypatch)
+        _feasible_sizing(monkeypatch, selected_risk=2.0)
+        captured: dict[str, object] = {}
+        original = xs_growth.evaluate_xs_reliability
+
+        def spy(equity, realized_weights, config):
+            captured["equity"] = equity
+            captured["weights"] = realized_weights
+            return original(equity, realized_weights, config)
+
+        monkeypatch.setattr(xs_growth, "evaluate_xs_reliability", spy)
+        report = xs_growth.run_xs_alpha_growth_sizing(profile=XS_VOL_WEIGHTED_ALPHA_PROFILE_ID)
+
+        assert report.reliability is not None
+        payload = report.to_payload()
+        assert payload["reliability"] is not None
+        weights = captured["weights"]
+        equity = captured["equity"]
+        assert weights is not None
+        assert equity is not None
+        assert weights.index.equals(equity.index)
+        assert equity.index.min() < pd.Timestamp("2024-01-01", tz="UTC")
+        assert equity.index.max() <= pd.Timestamp("2025-12-31 23:59:59", tz="UTC")
+        assert report.reliability.lcb.trade_count == count_closed_trades(weights)

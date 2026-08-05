@@ -37,6 +37,7 @@ from src.application.research.technical.trend_screen import _load_symbol_data
 from src.common.errors import DataIntegrityError
 from src.research.baseline.backtest import _align_funding_rates
 from src.research.evaluation.policy import HOLDOUT_CUTOFF, resolve_evaluation_end
+from src.research.evaluation.reliability import ReliabilityGateConfig
 from src.research.expert_portfolio.contextual_router import (
     build_causal_context_labels,
     state_labels,
@@ -56,6 +57,10 @@ from src.research.technical_experts.cross_sectional import (
     build_xs_neutral_weights,
     evaluate_xs_admission,
     run_xs_composite_ledger,
+)
+from src.research.technical_experts.cross_sectional import (
+    XsReliabilityResult,
+    evaluate_xs_reliability,
 )
 from src.research.technical_experts.signals import generate_signal_events
 from src.research.technical_experts.trend_screen_catalog import (
@@ -120,6 +125,7 @@ class XsTrendScreenReport:
     router_spec: dict[str, object] | None = None
     router_diagnostics: dict[str, object] | None = None
     family_admission: dict[str, object] | None = None
+    reliability: XsReliabilityResult | None = None
 
     def to_payload(self) -> dict[str, object]:
         """Canonical, deterministic JSON-ready payload (fingerprint included)."""
@@ -178,6 +184,10 @@ class XsTrendScreenReport:
             payload["router_diagnostics"] = self.router_diagnostics
         if self.family_admission is not None:
             payload["family_admission"] = self.family_admission
+        payload["reliability"] = (
+            _reliability_payload(self.reliability)
+            if self.reliability is not None else None
+        )
         payload["report_fingerprint"] = _fingerprint_without_self(payload)
         return payload
 
@@ -198,6 +208,35 @@ def _admission_payload(result: XsAdmissionResult) -> dict[str, object]:
         "annual_sharpe": {k: round(v, 8) for k, v in result.annual_sharpe.items()},
         "annualized_turnover": round(result.annualized_turnover, 8),
         "breakeven_cost": round(result.breakeven_cost, 8),
+    }
+
+
+def _reliability_payload(result: XsReliabilityResult) -> dict[str, object]:
+    """Deterministic JSON-ready serialization of the reliability diagnostic."""
+    lcb = result.lcb
+    fold = result.fold
+    return {
+        "lcb": {
+            "lcb90_cagr": round(lcb.lcb90_cagr, 8),
+            "lcb95_cagr": round(lcb.lcb95_cagr, 8),
+            "p_negative": round(lcb.p_negative, 8),
+            "point_cagr": round(lcb.point_cagr, 8),
+            "t_stat": round(lcb.t_stat, 8),
+            "trade_count": lcb.trade_count,
+            "block_size_used": lcb.block_size_used,
+            "verdict": lcb.verdict,
+        },
+        "fold": {
+            "n_folds": fold.n_folds,
+            "median_fold_cagr": round(fold.median_fold_cagr, 8),
+            "worst_fold_cagr": round(fold.worst_fold_cagr, 8),
+            "median_fold_calmar": round(fold.median_fold_calmar, 8),
+            "max_period_contribution": round(fold.max_period_contribution, 8),
+            "gate_pass": fold.gate_pass,
+            "fold_concentration": round(fold.fold_concentration, 8),
+            "fold_concentration_threshold": round(fold.fold_concentration_threshold, 8),
+            "fold_reference_sharpe": round(fold.fold_reference_sharpe, 8),
+        },
     }
 
 
@@ -288,6 +327,57 @@ def _window_series(series: pd.Series, start: pd.Timestamp, end: pd.Timestamp) ->
     if anchor is None:
         return series[(index >= start) & (index <= end)]
     return series[(index >= anchor) & (index <= end)]
+
+
+def _window_frame(frame: pd.DataFrame, start: pd.Timestamp, end: pd.Timestamp) -> pd.DataFrame:
+    """Inclusive ``[start, end]`` slice of a weight frame, anchored like ``_window_series``.
+
+    Applies the identical boolean-mask convention as :func:`_window_series` so
+    the realized-weights frame and its equity ledger share the same index.
+    """
+    index = frame.index
+    prior = index[index < start]
+    anchor = prior[-1] if len(prior) > 0 else None
+    if anchor is None:
+        return frame[(index >= start) & (index <= end)]
+    return frame[(index >= anchor) & (index <= end)]
+
+
+def _oos_reliability_window(
+    equity: pd.Series,
+    realized_weights: pd.DataFrame,
+    qualification_start: pd.Timestamp,
+    qualification_end: pd.Timestamp,
+    holdout_start: pd.Timestamp | None,
+    holdout_end: pd.Timestamp | None,
+) -> tuple[pd.Series, pd.DataFrame] | None:
+    """Stitched qualification(+holdout) OOS window, fail-closed on a short span.
+
+    Concatenates the qualification slice and, when both holdout bounds are set,
+    the holdout slice -- the two OOS-representative stretches -- with
+    ``_window_series``/``_window_frame`` applied identically so the equity and
+    the realized weights share one index. Returns ``None`` (never raises) when
+    either holdout bound is missing or the stitched span is under six calendar
+    months, which would break the equal-duration fold contract.
+    """
+    if (holdout_start is None) != (holdout_end is None):
+        return None
+    oos_equity = _window_series(equity, qualification_start, qualification_end)
+    oos_weights = _window_frame(realized_weights, qualification_start, qualification_end)
+    if holdout_start is not None and holdout_end is not None:
+        oos_equity = pd.concat([
+            oos_equity,
+            _window_series(equity, holdout_start, holdout_end),
+        ])
+        oos_weights = pd.concat([
+            oos_weights,
+            _window_frame(realized_weights, holdout_start, holdout_end),
+        ])
+    if len(oos_equity) < 2:
+        return None
+    if oos_equity.index[-1] < oos_equity.index[0] + pd.DateOffset(months=6):
+        return None
+    return oos_equity, oos_weights
 
 
 def _fail_closed_report(
@@ -609,6 +699,19 @@ def run_xs_trend_screen(
                 XsAdmissionConfig(),
             )
 
+    reliability: XsReliabilityResult | None = None
+    if profile in (XS_ALPHA_PROFILE_ID, XS_VOL_WEIGHTED_ALPHA_PROFILE_ID):
+        realized_weights = weights.shift(1 + execution_spec.execution_delay_bars).fillna(0.0)
+        oos_window = _oos_reliability_window(
+            equity, realized_weights, QUALIFICATION_START, QUALIFICATION_END,
+            holdout_start, holdout_end,
+        )
+        if oos_window is not None:
+            oos_equity, oos_weights = oos_window
+            reliability = evaluate_xs_reliability(
+                oos_equity, oos_weights, ReliabilityGateConfig(),
+            )
+
     stress_discovery: XsAdmissionResult | None = None
     stress_qualification: XsAdmissionResult | None = None
     stress_holdout: XsAdmissionResult | None = None
@@ -672,6 +775,7 @@ def run_xs_trend_screen(
         router_spec=_router_spec_payload(router_spec),
         router_diagnostics=router_diagnostics,
         family_admission=family_admission,
+        reliability=reliability,
     )
 
 
