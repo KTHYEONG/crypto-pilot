@@ -521,9 +521,82 @@ def test_xs_screen_cli_dispatches_v6_profile(monkeypatch) -> None:
     )
     args = build_root_parser().parse_args([
         "research", "run", "single", "xs-screen", "--profile", "xs_alpha_vol_weighted_v6",
+        "--no-growth-sizing",
     ])
     args.handler(args)
     assert calls == ["xs_alpha_vol_weighted_v6"]
+
+
+def test_xs_screen_cli_v6_default_also_runs_growth_sizing(monkeypatch) -> None:
+    from src.application.research.technical.xs_trend_screen import (
+        XS_NEUTRAL_PROFILE_ID,
+        XsAdmissionResult,
+        XsCompositeSpec,
+        XsTrendScreenReport,
+    )
+
+    def fake_run(*, start, end, unseal_holdout=False, max_workers=None, profile=XS_NEUTRAL_PROFILE_ID):
+        failed = XsAdmissionResult(
+            admitted=False, binding_constraint="symbol_unavailable:X", sharpe=0.0,
+            beta=0.0, cagr=0.0, mdd=0.0, t_stat=0.0, annual_sharpe={},
+            annualized_turnover=0.0, breakeven_cost=0.0,
+        )
+        return XsTrendScreenReport(
+            profile=profile,
+            universe=("BTCUSDT",),
+            spec=XsCompositeSpec(),
+            discovery=failed,
+            qualification=failed,
+            symbols={},
+        )
+
+    monkeypatch.setattr(
+        "src.application.research.technical.xs_trend_screen.run_xs_trend_screen", fake_run,
+    )
+    monkeypatch.setattr(
+        "src.application.research.technical.xs_trend_screen.persist_xs_screen_report",
+        lambda report, path: None,
+    )
+
+    sizing_calls: list[str] = []
+
+    def fake_sizing(*, profile, unseal_holdout=False, vol_target_window=42):
+        sizing_calls.append(profile)
+        from src.research.risk.growth_sizing import GrowthSizingResult
+        from src.application.research.technical.xs_alpha_growth_sizing import (
+            XsGrowthSizingReport,
+        )
+        result = GrowthSizingResult(
+            selected_risk=1.5, median_log_growth=1.0, mdd_breach_prob=0.0,
+            ruin_prob=0.0, feasible_risks=(1.5,), binding_constraint="none",
+            block_size_used=10,
+        )
+        gate = XsAdmissionResult(
+            admitted=True, binding_constraint=None, sharpe=1.5, beta=0.0,
+            cagr=0.1, mdd=-0.05, t_stat=2.0, annual_sharpe={},
+            annualized_turnover=10.0, breakeven_cost=0.01,
+        )
+        return XsGrowthSizingReport(
+            profile=profile, sizing=result, discovery=gate, qualification=gate,
+            holdout=None, pre_scaling_discovery=gate, pre_scaling_qualification=gate,
+            pre_scaling_holdout=None, vol_target_window=vol_target_window,
+            vol_target=0.003,
+        )
+
+    monkeypatch.setattr(
+        "src.application.research.technical.xs_alpha_growth_sizing.run_xs_alpha_growth_sizing",
+        fake_sizing,
+    )
+    monkeypatch.setattr(
+        "src.application.research.technical.xs_alpha_growth_sizing.persist_xs_growth_sizing_report",
+        lambda report, path: None,
+    )
+
+    args = build_root_parser().parse_args([
+        "research", "run", "single", "xs-screen", "--profile", "xs_alpha_vol_weighted_v6",
+    ])
+    args.handler(args)
+    assert sizing_calls == ["xs_alpha_vol_weighted_v6"]
 
 
 def test_baseline_cli_parses_and_dispatches(monkeypatch) -> None:
@@ -793,7 +866,7 @@ def test_xs_growth_sizing_cli_parses_and_dispatches(monkeypatch) -> None:
             annualized_turnover=0.0, breakeven_cost=0.0,
         )
 
-    def fake_run(*, profile, unseal_holdout=False):
+    def fake_run(*, profile, unseal_holdout=False, vol_target_window=42):
         calls.append((profile, unseal_holdout))
         return XsGrowthSizingReport(
             profile=profile,
@@ -844,7 +917,7 @@ def test_xs_growth_sizing_cli_defaults_profile_and_seals_holdout(monkeypatch) ->
             annualized_turnover=0.0, breakeven_cost=0.0,
         )
 
-    def fake_run(*, profile, unseal_holdout=False):
+    def fake_run(*, profile, unseal_holdout=False, vol_target_window=42):
         calls.append((profile, unseal_holdout))
         return XsGrowthSizingReport(
             profile=profile,
@@ -878,3 +951,63 @@ def test_xs_growth_sizing_cli_rejects_unknown_profile() -> None:
     ])
     with pytest.raises(ValueError, match="unknown growth-sizing profile"):
         args.handler(args)
+
+
+def test_xs_growth_sizing_cli_vol_target_flags_dispatch(monkeypatch) -> None:
+    # SCENARIO_VOLTARGET_10_CLI_FLAGS_DISPATCH
+    from src.application.research.technical.xs_alpha_growth_sizing import (
+        XsGrowthSizingReport,
+    )
+    from src.research.risk.growth_sizing import GrowthSizingResult
+    from src.research.technical_experts.cross_sectional import XsAdmissionResult
+
+    calls: list[tuple[str, bool, int | None]] = []
+
+    def _failed() -> XsAdmissionResult:
+        return XsAdmissionResult(
+            admitted=False, binding_constraint="x", sharpe=0.0, beta=0.0,
+            cagr=0.0, mdd=0.0, t_stat=0.0, annual_sharpe={},
+            annualized_turnover=0.0, breakeven_cost=0.0,
+        )
+
+    def fake_run(*, profile, unseal_holdout=False, vol_target_window=42):
+        calls.append((profile, unseal_holdout, vol_target_window))
+        return XsGrowthSizingReport(
+            profile=profile,
+            sizing=GrowthSizingResult(1.0, 0.5, 0.01, 0.0, (1.0,), "none", 10),
+            discovery=_failed(),
+            qualification=_failed(),
+            holdout=None,
+            pre_scaling_discovery=_failed(),
+            pre_scaling_qualification=_failed(),
+            pre_scaling_holdout=None,
+        )
+
+    monkeypatch.setattr(
+        "src.application.research.technical.xs_alpha_growth_sizing.run_xs_alpha_growth_sizing",
+        fake_run,
+    )
+    monkeypatch.setattr(
+        "src.application.research.technical.xs_alpha_growth_sizing.persist_xs_growth_sizing_report",
+        lambda report, path: None,
+    )
+
+    args = build_root_parser().parse_args([
+        "research", "run", "single", "xs-growth-sizing", "--no-log-run",
+    ])
+    args.handler(args)
+    assert calls[-1] == ("xs_alpha_vol_weighted_v6", False, 42)
+
+    args = build_root_parser().parse_args([
+        "research", "run", "single", "xs-growth-sizing",
+        "--vol-target-window", "84", "--no-log-run",
+    ])
+    args.handler(args)
+    assert calls[-1] == ("xs_alpha_vol_weighted_v6", False, 84)
+
+    args = build_root_parser().parse_args([
+        "research", "run", "single", "xs-growth-sizing",
+        "--no-vol-target", "--vol-target-window", "21", "--no-log-run",
+    ])
+    args.handler(args)
+    assert calls[-1] == ("xs_alpha_vol_weighted_v6", False, None)
