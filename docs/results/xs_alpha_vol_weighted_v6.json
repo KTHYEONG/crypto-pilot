@@ -28,22 +28,9 @@
   },
   "discovery_end": "2023-12-31T23:59:59+00:00",
   "discovery_start": "2022-04-03T00:00:00+00:00",
-  "holdout": {
-    "admitted": true,
-    "annual_sharpe": {
-      "2026": 1.7307715
-    },
-    "annualized_turnover": 25.76978251,
-    "beta": 0.00273576,
-    "binding_constraint": null,
-    "breakeven_cost": 0.01089273,
-    "cagr": 0.28296654,
-    "mdd": -0.08209349,
-    "sharpe": 1.7307715,
-    "t_stat": 1.24214481
-  },
-  "holdout_end": "2026-07-07T20:00:00+00:00",
-  "holdout_start": "2026-01-01T00:00:00+00:00",
+  "holdout": null,
+  "holdout_end": null,
+  "holdout_start": null,
   "profile": "xs_alpha_vol_weighted_v6",
   "qualification": {
     "admitted": true,
@@ -62,7 +49,7 @@
   },
   "qualification_end": "2025-12-31T23:59:59+00:00",
   "qualification_start": "2024-01-01T00:00:00+00:00",
-  "report_fingerprint": "1c4882af0741fc71e9bdbfb97ff903e2a9de0bd9c5704642dd32ca7cb9a888b7",
+  "report_fingerprint": "f7dd8ce62f506fda9429f1a3627514486e6b3387b6fd9a9c902a320b54e82267",
   "spec": {
     "execution_delay_bars": 1,
     "fee_rate": 0.0005,
@@ -86,20 +73,6 @@
       "mdd": -0.1567522,
       "sharpe": 1.14899123,
       "t_stat": 1.51888149
-    },
-    "holdout": {
-      "admitted": true,
-      "annual_sharpe": {
-        "2026": 1.85900342
-      },
-      "annualized_turnover": 25.76978251,
-      "beta": 0.00076981,
-      "binding_constraint": null,
-      "breakeven_cost": 0.01151696,
-      "cagr": 0.30414075,
-      "mdd": -0.08752586,
-      "sharpe": 1.85900342,
-      "t_stat": 1.33417464
     },
     "qualification": {
       "admitted": true,
