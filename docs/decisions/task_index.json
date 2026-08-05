@@ -1,6 +1,16 @@
 {
   "tasks": [
     {
+      "task_id": "xs_alpha_baseline_blend_v8_sized",
+      "date": "2026-08-05",
+      "adr_id": "ADR_20260805_xs_alpha_baseline_blend_v8_sized",
+      "domain": "risk",
+      "title": "XS Alpha × Baseline 블렌드 robust 가중치+growth-optimal 레버리지 — t_stat 게이트 최초 통과, LCB90만 미달",
+      "why": "v8 블렌드(ADR_20260805_xs_alpha_baseline_blend_v8)가 aggregate discovery Sharpe로 뽑은 baseline 80% 가중치는 baseline 자체의 연도별 붕괴(2022 Sharpe -1.0, 2023 +2.77)에 낚여 qualification LCB90을 오히려 악화(7.74%->2.84%)시켰음. discovery 구간 연도별 최소 Sharpe(worst-year-robust) 기준으로 재선택하면 다른 가중치가 나오고, t_stat이 leverage-invariant이므로 이 블렌드를 재레버리지하면 t_stat 하락 없이 LCB90만 올릴 수 있는지 확인 필요. 진단(질적 구간 직접 스윕)에서 3.0x 지점이 신뢰도 게이트 3조건(LCB90/t_stat/MDD)을 전부 통과하는 것을 발견, 이 세션 최초 기록.",
+      "resolution": "xs_alpha_baseline_blend.py에 select_robust_baseline_blend_weight(연도별 최소 Sharpe argmax, discovery-only)와 apply_fixed_gross_leverage(순수 선형 스케일, 드로다운 사다리 미적용 -- v8에서 사다리가 LCB90을 악화시킴을 이미 확인) 신설. application 레이어에 run_xs_alpha_baseline_blend_sized 오케스트레이터 추가: robust 가중치 선택 -> build_blended_ledger 전체 이력 적용 -> growth_sizing.solve_growth_optimal_risk(use_drawdown_overlay=False, discovery 수익률만, max_drawdown=0.20 기존 기본값)로 레버리지 선택 -> apply_fixed_gross_leverage 적용 -> evaluate_xs_admission/evaluate_xs_reliability 재검증. xs-baseline-blend-sized CLI 서브커맨드 배선(xs-baseline-blend와 동일 패턴). CLI 실행(홀드아웃 봉인) 결과: blend_weight=0.6(구 0.2에서 변경), qualification t_stat 1.886->2.036(2.0 플로어 최초 통과), MDD -14.3%->-7.95%. 그러나 solve_growth_optimal_risk의 5년 시뮬레이션 기준 selected_risk=1.0(레버리지 없음) -- feasible_risks=[1.0]뿐, 1.5x부터는 5년 지평 MDD 초과확률(4.85%가 이미 5% 한계 근접)로 전부 기각되어 진단에서 봤던 3.0x는 채택되지 않음. 최종 LCB90=6.40%(<15% 여전히 미달), fold_concentration/worst_fold는 개선(0.17%).",
+      "impact": "3개 신뢰도 게이트 조건 중 t_stat과 MDD는 최초로 동시 통과, LCB90만 미달(6.40%<15%) -- 이번 프로젝트 전체 사이클 중 게이트에 가장 근접한 결과. 진단(질적 구간 스윕)과 실제 discovery-only 프로덕션 규칙(5년 장기 성장 리스크 기준)의 괴리가 확정됨: qualification 2년 정적 MDD 기준으로는 3.0x가 안전해 보이지만 5년 시뮬레이션 하에서는 1.5x부터 이미 위험. v6/v8 대비 개선(LCB90 6.40% vs v6 7.74%로는 여전히 낮지만 t_stat/MDD 마진 확보)이나 채택 보류. 다음 사이클 후보: solve_growth_optimal_risk의 5년/2년 지평 불일치를 좁히는 레버리지 선택 규칙 또는 LCB90 자체를 겨냥한 대안 셀렉터 설계."
+    },
+    {
       "task_id": "xs_alpha_baseline_blend_v8",
       "date": "2026-08-05",
       "adr_id": "ADR_20260805_xs_alpha_baseline_blend_v8",
