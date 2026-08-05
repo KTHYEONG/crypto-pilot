@@ -131,10 +131,18 @@ def _run_xs_alpha_growth_sizing(args: argparse.Namespace) -> None:
             f"to the end-to-end admitted profiles '{XS_ALPHA_PROFILE_ID}' and "
             f"'{XS_VOL_WEIGHTED_ALPHA_PROFILE_ID}'"
         )
+    # --no-vol-target (disable) and --vol-target-window (fixed int) are the
+    # only explicit overrides; when neither is given the kwarg is omitted so
+    # run_xs_alpha_growth_sizing's own default (the grid search) applies.
+    sizing_kwargs: dict[str, int | None] = {}
+    if args.no_vol_target:
+        sizing_kwargs["vol_target_window"] = None
+    elif args.vol_target_window is not None:
+        sizing_kwargs["vol_target_window"] = args.vol_target_window
     report = run_xs_alpha_growth_sizing(
         profile=profile,
         unseal_holdout=args.unseal_holdout,
-        vol_target_window=None if args.no_vol_target else args.vol_target_window,
+        **sizing_kwargs,
     )
     persist_xs_growth_sizing_report(report, xs_growth_sizing_report_path(profile))
     _logger.info(
@@ -194,6 +202,6 @@ def add_single_technical_commands(run_sub: argparse._SubParsersAction[argparse.A
     xs_growth_sizing.add_argument("--end", default=None)
     xs_growth_sizing.add_argument("--unseal-holdout", action="store_true", default=False)
     xs_growth_sizing.add_argument("--no-log-run", action="store_true", default=False)
-    xs_growth_sizing.add_argument("--vol-target-window", type=int, default=42)
+    xs_growth_sizing.add_argument("--vol-target-window", type=int, default=None)
     xs_growth_sizing.add_argument("--no-vol-target", action="store_true", default=False)
     xs_growth_sizing.set_defaults(handler=_run_xs_alpha_growth_sizing)

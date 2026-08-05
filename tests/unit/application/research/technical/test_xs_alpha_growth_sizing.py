@@ -168,19 +168,51 @@ class TestGrowthSizingOrchestration:
             == "xs_alpha_vol_weighted_v6_growth_sized.json"
         )
 
-    # SCENARIO_VOLTARGET_08_ORCHESTRATOR_DEFAULT_ENABLED_42
-    def test_voltarget_08_orchestrator_defaults_to_42(self, monkeypatch) -> None:
+    # SCENARIO_WINDOWSEARCH_04_ORCHESTRATOR_DEFAULT_SEARCHES_FROZEN_GRID
+    def test_voltarget_10_orchestrator_default_searches_frozen_grid(self, monkeypatch) -> None:
         _install_synthetic_data(monkeypatch)
         _feasible_sizing(monkeypatch, selected_risk=1.0)
+        real_select = cs.select_vol_target_window
+        calls: list[tuple[int, ...]] = []
+
+        def recording_select(weights, opens, bar_funding, spec, discovery_start,
+                             discovery_end, sizing_config, window_grid):
+            calls.append(window_grid)
+            return real_select(weights, opens, bar_funding, spec, discovery_start,
+                               discovery_end, sizing_config, window_grid)
+
+        monkeypatch.setattr(xs_growth, "select_vol_target_window", recording_select)
         report = xs_growth.run_xs_alpha_growth_sizing(profile=XS_ALPHA_PROFILE_ID)
-        assert report.vol_target_window == 42
+        assert calls == [cs.XsAlphaCompositeSpec().signal_windows]
+        assert report.vol_target_window in cs.XsAlphaCompositeSpec().signal_windows
         assert report.vol_target is not None
         assert np.isfinite(report.vol_target)
 
-    # SCENARIO_VOLTARGET_09_ORCHESTRATOR_OPT_OUT_REPRODUCES_ORIGINAL
+    # SCENARIO_WINDOWSEARCH_05_EXPLICIT_INT_OVERRIDE_BYPASSES_SEARCH
+    def test_voltarget_11_explicit_int_override_bypasses_search(self, monkeypatch) -> None:
+        _install_synthetic_data(monkeypatch)
+        _feasible_sizing(monkeypatch, selected_risk=2.0)
+
+        def _unexpected(*args, **kwargs):
+            raise AssertionError("select_vol_target_window must not run for an explicit int")
+
+        monkeypatch.setattr(xs_growth, "select_vol_target_window", _unexpected)
+        report = xs_growth.run_xs_alpha_growth_sizing(
+            profile=XS_ALPHA_PROFILE_ID, vol_target_window=42,
+        )
+        assert report.vol_target_window == 42
+        assert report.vol_target is not None
+        assert report.sizing.selected_risk == 2.0
+
+    # SCENARIO_WINDOWSEARCH_06_EXPLICIT_NONE_DISABLES
     def test_voltarget_09_opt_out_reproduces_original(self, monkeypatch) -> None:
         _install_synthetic_data(monkeypatch)
         _feasible_sizing(monkeypatch, selected_risk=2.0)
+
+        def _unexpected(*args, **kwargs):
+            raise AssertionError("select_vol_target_window must not run for None")
+
+        monkeypatch.setattr(xs_growth, "select_vol_target_window", _unexpected)
         report = xs_growth.run_xs_alpha_growth_sizing(
             profile=XS_VOL_WEIGHTED_ALPHA_PROFILE_ID, vol_target_window=None,
         )

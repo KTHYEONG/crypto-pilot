@@ -961,7 +961,8 @@ def test_xs_growth_sizing_cli_vol_target_flags_dispatch(monkeypatch) -> None:
     from src.research.risk.growth_sizing import GrowthSizingResult
     from src.research.technical_experts.cross_sectional import XsAdmissionResult
 
-    calls: list[tuple[str, bool, int | None]] = []
+    _ABSENT = object()
+    calls: list[tuple[str, bool, object]] = []
 
     def _failed() -> XsAdmissionResult:
         return XsAdmissionResult(
@@ -970,7 +971,7 @@ def test_xs_growth_sizing_cli_vol_target_flags_dispatch(monkeypatch) -> None:
             annualized_turnover=0.0, breakeven_cost=0.0,
         )
 
-    def fake_run(*, profile, unseal_holdout=False, vol_target_window=42):
+    def fake_run(*, profile, unseal_holdout=False, vol_target_window=_ABSENT):
         calls.append((profile, unseal_holdout, vol_target_window))
         return XsGrowthSizingReport(
             profile=profile,
@@ -992,22 +993,28 @@ def test_xs_growth_sizing_cli_vol_target_flags_dispatch(monkeypatch) -> None:
         lambda report, path: None,
     )
 
+    # SCENARIO_WINDOWSEARCH_07_CLI_DEFAULT_TRIGGERS_SEARCH: neither flag set means
+    # the vol_target_window kwarg is omitted entirely so the search default applies.
     args = build_root_parser().parse_args([
         "research", "run", "single", "xs-growth-sizing", "--no-log-run",
     ])
     args.handler(args)
-    assert calls[-1] == ("xs_alpha_vol_weighted_v6", False, 42)
+    assert calls[-1][0] == "xs_alpha_vol_weighted_v6"
+    assert calls[-1][1] is False
+    assert calls[-1][2] is _ABSENT
 
     args = build_root_parser().parse_args([
         "research", "run", "single", "xs-growth-sizing",
         "--vol-target-window", "84", "--no-log-run",
     ])
     args.handler(args)
-    assert calls[-1] == ("xs_alpha_vol_weighted_v6", False, 84)
+    assert calls[-1][0] == "xs_alpha_vol_weighted_v6"
+    assert calls[-1][2] == 84
 
     args = build_root_parser().parse_args([
         "research", "run", "single", "xs-growth-sizing",
         "--no-vol-target", "--vol-target-window", "21", "--no-log-run",
     ])
     args.handler(args)
-    assert calls[-1] == ("xs_alpha_vol_weighted_v6", False, None)
+    assert calls[-1][0] == "xs_alpha_vol_weighted_v6"
+    assert calls[-1][2] is None
