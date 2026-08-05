@@ -85,6 +85,33 @@ def _run_xs_trend_screen(args: argparse.Namespace) -> None:
         report.qualification.binding_constraint,
     )
 
+    # v6's adopted deployment scale (ADR_20260805_xs_alpha_growth_vol_targeting):
+    # the raw screen above answers "is there edge" (unscaled); this answers "how
+    # much of it to run" and is reported by default alongside it for v6.
+    if profile == XS_VOL_WEIGHTED_ALPHA_PROFILE_ID and not args.no_growth_sizing:
+        from src.application.research.technical.xs_alpha_growth_sizing import (
+            persist_xs_growth_sizing_report,
+            run_xs_alpha_growth_sizing,
+            xs_growth_sizing_report_path,
+        )
+
+        sizing_report = run_xs_alpha_growth_sizing(
+            profile=profile, unseal_holdout=args.unseal_holdout,
+        )
+        persist_xs_growth_sizing_report(
+            sizing_report, xs_growth_sizing_report_path(profile),
+        )
+        _logger.info(
+            "xs-screen profile=%s adopted_sizing selected_risk=%s "
+            "vol_target_window=%s qualification_admitted=%s "
+            "qualification_sharpe=%.4f",
+            sizing_report.profile,
+            sizing_report.sizing.selected_risk,
+            sizing_report.vol_target_window,
+            sizing_report.qualification.admitted,
+            sizing_report.qualification.sharpe,
+        )
+
 
 def _run_xs_alpha_growth_sizing(args: argparse.Namespace) -> None:
     from src.application.research.technical.xs_alpha_growth_sizing import (
@@ -105,7 +132,9 @@ def _run_xs_alpha_growth_sizing(args: argparse.Namespace) -> None:
             f"'{XS_VOL_WEIGHTED_ALPHA_PROFILE_ID}'"
         )
     report = run_xs_alpha_growth_sizing(
-        profile=profile, unseal_holdout=args.unseal_holdout,
+        profile=profile,
+        unseal_holdout=args.unseal_holdout,
+        vol_target_window=None if args.no_vol_target else args.vol_target_window,
     )
     persist_xs_growth_sizing_report(report, xs_growth_sizing_report_path(profile))
     _logger.info(
@@ -153,6 +182,7 @@ def add_single_technical_commands(run_sub: argparse._SubParsersAction[argparse.A
     xs_screen.add_argument("--end", default=None)
     xs_screen.add_argument("--unseal-holdout", action="store_true", default=False)
     xs_screen.add_argument("--no-log-run", action="store_true", default=False)
+    xs_screen.add_argument("--no-growth-sizing", action="store_true", default=False)
     xs_screen.set_defaults(handler=_run_xs_trend_screen)
 
     xs_growth_sizing = run_sub.add_parser(
@@ -164,4 +194,6 @@ def add_single_technical_commands(run_sub: argparse._SubParsersAction[argparse.A
     xs_growth_sizing.add_argument("--end", default=None)
     xs_growth_sizing.add_argument("--unseal-holdout", action="store_true", default=False)
     xs_growth_sizing.add_argument("--no-log-run", action="store_true", default=False)
+    xs_growth_sizing.add_argument("--vol-target-window", type=int, default=42)
+    xs_growth_sizing.add_argument("--no-vol-target", action="store_true", default=False)
     xs_growth_sizing.set_defaults(handler=_run_xs_alpha_growth_sizing)
