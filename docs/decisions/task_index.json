@@ -1,6 +1,16 @@
 {
   "tasks": [
     {
+      "task_id": "xs_alpha_baseline_blend_joint_search",
+      "date": "2026-08-05",
+      "adr_id": "ADR_20260805_xs_alpha_baseline_blend_joint_search",
+      "domain": "risk",
+      "title": "XS Alpha × Baseline 블렌드 Optuna 결합 탐색 — LCB90 역대 최근접이나 turnover_max 신규 위반",
+      "why": "v8_sized의 순차적(가중치→레버리지 별도목적함수) 선택은 이 프로젝트가 이미 실측으로 'OOS 부호반전'을 확인·기각한 패턴(ADR_20260803_GROWTH_ENGINE_V3_STRUCTURAL_SEARCH)과 동일 구조. 그 ADR이 만든 결합 Optuna 탐색 도구(tools/research/structural_tuner.py::run_structural_search, IS-only+trial상한[4,50]+필수 plateau 게이트)가 미사용 상태로 존재했음. t_stat이 레버리지에 불변이므로 결합탐색이 의미있으려면 목적함수가 LCB90처럼 스케일에 반응해야 함을 확인, discovery 전용 LCB90 목적함수로 (xs_alpha_weight, leverage_scale)를 동시 탐색.",
+      "resolution": "xs_alpha_baseline_blend.py에 discovery_reliability_score(build_blended_ledger+apply_fixed_gross_leverage+evaluate_xs_reliability 순수 조합) 신설. tools/research/xs_alpha_blend_joint_search.py(dev tool, src 아님, optuna 비런타임의존)에서 run_structural_search(search_space={weight:[0,1], leverage:[1,4]}, max_trials=30)로 1회 탐색 실행 -- best_params=(weight=0.2714, leverage=3.977), plateau_passed=True(ratio=0.910)로 통과, 동결. application 레이어에 run_xs_alpha_baseline_blend_joint(필수 kwarg, 하드코딩 없음) 추가, xs-baseline-blend-joint CLI 배선(기존 서브커맨드와 동일 패턴). CLI 실행(홀드아웃 봉인) 결과: LCB90=13.21%(v6단독 7.74%/v8 2.84%/v8_sized 6.40% 대비 역대 최고, 15% 허들에 가장 근접), t_stat=2.069(PASS), fold_concentration PASS, worst_fold=+6.18%(역대 최고). 그러나 qualification 회전율이 175.4x/yr로 급증해 기존 admission 게이트의 turnover_max(150x/yr)를 위반, qualification admitted=False -- discovery_reliability_score가 turnover 제약을 전혀 반영하지 않은 채 레버리지 상한(4.0x) 근처까지 밀어붙인 결과.",
+      "impact": "신뢰도 게이트 3조건 중 LCB90(13.21%<15%, 갭 최소)만 남기고 t_stat/fold_concentration은 통과 -- 이번 프로젝트 전체 사이클 중 LCB90에 가장 근접. 다만 admission 자체가 별개 게이트(turnover_max)로 막혀 채택 보류. Optuna 결합탐색 인프라(discovery_reliability_score, tools/research/xs_alpha_blend_joint_search.py)는 검증되어 재사용 가능. 다음 사이클 후보: discovery_reliability_score에 turnover_max 페널티/제약을 추가해 재탐색, 또는 leverage_scale 탐색 상한을 turnover 여유가 있는 구간으로 좁혀 재실행."
+    },
+    {
       "task_id": "xs_alpha_baseline_blend_v8_sized",
       "date": "2026-08-05",
       "adr_id": "ADR_20260805_xs_alpha_baseline_blend_v8_sized",
