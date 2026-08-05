@@ -47,6 +47,7 @@ from src.research.technical_experts.cross_sectional import (
     build_xs_neutral_weights,
     evaluate_xs_admission,
     run_xs_composite_ledger,
+    select_vol_target_window,
     size_xs_alpha_growth_optimal,
 )
 
@@ -926,6 +927,122 @@ class TestVolTargetGrowthOptimalSizing:
         unscaled_net = unscaled_equity.pct_change().dropna()
         assert np.allclose(net.to_numpy(), unscaled_net.to_numpy(), atol=1e-12)
         assert weights_out.equals(weights)
+
+class TestVolTargetWindowSelection:
+    """SCENARIO_WINDOWSEARCH_01/02/03 for select_vol_target_window."""
+
+    def _sizing_inputs(
+        self, rows: int = 400, seed: int = 5, crash_factor: float | None = None,
+    ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DatetimeIndex]:
+        idx = pd.date_range("2024-01-01", periods=rows, freq="4h", tz="UTC")
+        rng = np.random.default_rng(seed)
+        closes = pd.DataFrame({
+            "A": 100 * np.exp(np.cumsum(rng.normal(0.001, 0.01, rows))),
+            "B": 100 * np.exp(np.cumsum(rng.normal(-0.001, 0.01, rows))),
+        }, index=idx)
+        opens = closes.shift(1).bfill()
+        if crash_factor is not None:
+            opens.loc[idx[40], "A"] = opens.loc[idx[39], "A"] * crash_factor
+        funding = pd.DataFrame(0.0, index=idx, columns=["A", "B"])
+        weights = pd.DataFrame({"A": 0.5, "B": -0.5}, index=idx)
+        return weights, opens, funding, idx
+
+    def _easy_config(self) -> GrowthSizingConfig:
+        return GrowthSizingConfig(
+            risk_grid=(0.5, 1.0, 2.0), reference_risk=1.0, horizon_years=0.5,
+            n_paths=100, max_drawdown_prob=0.9, max_ruin_prob=0.9,
+        )
+
+    def _hard_config(self) -> GrowthSizingConfig:
+        return GrowthSizingConfig(
+            risk_grid=(0.5, 1.0, 2.0), reference_risk=1.0, horizon_years=0.5,
+            n_paths=100, max_drawdown_prob=1e-6, max_ruin_prob=1e-6,
+        )
+
+    # SCENARIO_WINDOWSEARCH_01_ARGMAX_MEDIAN_LOG_GROWTH
+    def test_windowsearch_01_argmax_median_log_growth(self) -> None:
+        weights, opens, funding, idx = self._sizing_inputs(seed=5)
+        discovery_start, discovery_end = idx[0], idx[249]
+        config = self._easy_config()
+        grid = (20, 40, 60)
+        net_sel, w_sel, sizing_sel, window_sel = select_vol_target_window(
+            weights, opens, funding, XsCompositeSpec(), discovery_start,
+            discovery_end, config, window_grid=grid,
+        )
+        assert window_sel in grid
+        assert sizing_sel.selected_risk is not None
+        # The winner is the strictly-highest median_log_growth feasible candidate.
+        growth_by_window: dict[int, float] = {}
+        for w in grid:
+            _n, _w2, s_w = size_xs_alpha_growth_optimal(
+                weights, opens, funding, XsCompositeSpec(), discovery_start,
+                discovery_end, config, vol_target_window=w,
+            )
+            assert s_w.selected_risk is not None
+            growth_by_window[w] = s_w.median_log_growth
+        assert window_sel == max(growth_by_window, key=growth_by_window.get)
+        assert sizing_sel.median_log_growth == growth_by_window[window_sel]
+        # No other feasible candidate scores higher.
+        assert max(growth_by_window.values()) <= sizing_sel.median_log_growth + 1e-9
+        # The returned result reproduces a direct call with the selected window.
+        net_direct, w_direct, sizing_direct = size_xs_alpha_growth_optimal(
+            weights, opens, funding, XsCompositeSpec(), discovery_start,
+            discovery_end, config, vol_target_window=window_sel,
+        )
+        assert np.allclose(net_sel.to_numpy(), net_direct.to_numpy())
+        assert w_sel.equals(w_direct)
+        assert sizing_sel == sizing_direct
+
+    # SCENARIO_WINDOWSEARCH_02_DISCOVERY_ONLY_LEAKAGE
+    def test_windowsearch_02_discovery_only_no_leakage(self) -> None:
+        weights, opens, funding, idx = self._sizing_inputs(seed=5)
+        discovery_start, discovery_end = idx[0], idx[249]
+        config = self._easy_config()
+        grid = (20, 40, 60)
+        net_sel, _w_sel, _sizing_sel, window_sel = select_vol_target_window(
+            weights, opens, funding, XsCompositeSpec(), discovery_start,
+            discovery_end, config, window_grid=grid,
+        )
+        opens_mut = opens.copy()
+        opens_mut.loc[idx[300]:] *= 1.5
+        net_mut, _w_mut, _sizing_mut, window_mut = select_vol_target_window(
+            weights, opens_mut, funding, XsCompositeSpec(), discovery_start,
+            discovery_end, config, window_grid=grid,
+        )
+        assert window_mut == window_sel
+        discovery_bars = (net_sel.index >= discovery_start) & (net_sel.index <= discovery_end)
+        assert np.allclose(
+            net_mut.loc[discovery_bars].to_numpy(), net_sel.loc[discovery_bars].to_numpy(),
+        )
+
+    # SCENARIO_WINDOWSEARCH_03_ALL_INFEASIBLE_FALLS_BACK_TO_SCALAR_ONLY
+    def test_windowsearch_03_all_infeasible_falls_back_to_scalar_only(self) -> None:
+        weights, opens, funding, idx = self._sizing_inputs(
+            seed=3, crash_factor=0.05,
+        )
+        discovery_start, discovery_end = idx[0], idx[249]
+        hard_config = self._hard_config()
+        grid = (20, 40, 60)
+        net_sel, w_sel, sizing_sel, window_sel = select_vol_target_window(
+            weights, opens, funding, XsCompositeSpec(), discovery_start,
+            discovery_end, hard_config, window_grid=grid,
+        )
+        assert window_sel is None
+        net_direct, w_direct, sizing_direct = size_xs_alpha_growth_optimal(
+            weights, opens, funding, XsCompositeSpec(), discovery_start,
+            discovery_end, hard_config, vol_target_window=None,
+        )
+        assert np.allclose(net_sel.to_numpy(), net_direct.to_numpy())
+        assert w_sel.equals(w_direct)
+        assert sizing_sel == sizing_direct
+
+    def test_windowsearch_empty_grid_raises(self) -> None:
+        weights, opens, funding, idx = self._sizing_inputs(seed=5)
+        with pytest.raises(ValueError, match="window_grid"):
+            select_vol_target_window(
+                weights, opens, funding, XsCompositeSpec(), idx[0], idx[249],
+                self._easy_config(), window_grid=(),
+            )
 
 
 class TestCostRepricing:

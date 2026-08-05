@@ -836,6 +836,65 @@ def size_xs_alpha_growth_optimal(
     return scaled_net, scaled_weights, sizing
 
 
+def select_vol_target_window(
+    weights: pd.DataFrame,
+    opens: pd.DataFrame,
+    bar_funding: pd.DataFrame,
+    spec: XsCompositeSpec,
+    discovery_start: pd.Timestamp,
+    discovery_end: pd.Timestamp,
+    sizing_config: GrowthSizingConfig,
+    window_grid: tuple[int, ...],
+) -> tuple[pd.Series, pd.DataFrame, GrowthSizingResult, int | None]:
+    """Select the growth-optimal vol-target window among a pre-registered grid.
+
+    Calls :func:`size_xs_alpha_growth_optimal` unchanged once per window in
+    ``window_grid`` -- no reimplementation of the discovery-only sizing search,
+    the vol-target overlay, or the cost repricing. Among the candidates where
+    ``sizing.selected_risk is not None`` (feasible), the window with the
+    strictly highest ``median_log_growth`` wins (a plain argmax over the
+    pre-registered grid, not a plateau rule: window length carries no
+    leverage-style risk-for-nothing asymmetry). The window choice and every
+    value derived from it depend only on ``discovery_start..discovery_end``
+    data, because each underlying call is itself discovery-only.
+
+    If every window in ``window_grid`` is infeasible the search falls back to
+    ``size_xs_alpha_growth_optimal(..., vol_target_window=None)`` (scalar-only)
+    and returns its result with ``None`` as the selected window; that call's
+    own existing fail-closed-to-raw-weights contract applies if it is
+    infeasible too. ``window_grid`` must not be empty.
+    """
+    if not window_grid:
+        raise ValueError("window_grid must not be empty")
+    best_window: int | None = None
+    best_net: pd.Series | None = None
+    best_weights: pd.DataFrame | None = None
+    best_sizing: GrowthSizingResult | None = None
+    best_growth = float("-inf")
+    for window in window_grid:
+        net, scaled_weights, sizing = size_xs_alpha_growth_optimal(
+            weights, opens, bar_funding, spec, discovery_start, discovery_end,
+            sizing_config, vol_target_window=window,
+        )
+        if sizing.selected_risk is None or sizing.median_log_growth <= best_growth:
+            continue
+        best_window = window
+        best_net = net
+        best_weights = scaled_weights
+        best_sizing = sizing
+        best_growth = sizing.median_log_growth
+    if (
+        best_window is not None and best_net is not None
+        and best_weights is not None and best_sizing is not None
+    ):
+        return best_net, best_weights, best_sizing, best_window
+    net, scaled_weights, sizing = size_xs_alpha_growth_optimal(
+        weights, opens, bar_funding, spec, discovery_start, discovery_end,
+        sizing_config, vol_target_window=None,
+    )
+    return net, scaled_weights, sizing, None
+
+
 def _check_contract() -> None:
     """Executable assertions locking the frozen cross-sectional surface."""
     from inspect import signature
@@ -856,6 +915,10 @@ def _check_contract() -> None:
         "weights", "opens", "bar_funding", "spec", "discovery_start",
         "discovery_end", "sizing_config", "vol_target_window",
         "vol_target_multiplier_bounds",
+    ]
+    assert list(signature(select_vol_target_window).parameters) == [
+        "weights", "opens", "bar_funding", "spec", "discovery_start",
+        "discovery_end", "sizing_config", "window_grid",
     ]
     spec = XsCompositeSpec()
     assert (spec.halflife_bars, spec.no_trade_band, spec.execution_delay_bars) == (6, 0.05, 1)
