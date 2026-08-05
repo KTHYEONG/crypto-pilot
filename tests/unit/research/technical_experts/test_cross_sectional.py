@@ -22,6 +22,13 @@ import pandas as pd
 import pytest
 
 from src.common.errors import DataIntegrityError
+from src.research.evaluation.reliability import (
+    FoldDistributionResult,
+    ReliabilityGateConfig,
+    ReliabilityGateResult,
+    count_closed_trades,
+    derive_block_size,
+)
 from src.research.risk.growth_sizing import (
     GrowthSizingConfig,
     GrowthSizingResult,
@@ -34,6 +41,7 @@ from src.research.technical_experts.cross_sectional import (
     XsAdmissionConfig,
     XsAlphaCompositeSpec,
     XsCompositeSpec,
+    XsReliabilityResult,
     _causal_family_inverse_vol_weights,
     _ledger_pnl,
     _true_realized_net,
@@ -46,6 +54,7 @@ from src.research.technical_experts.cross_sectional import (
     build_xs_alpha_weights,
     build_xs_neutral_weights,
     evaluate_xs_admission,
+    evaluate_xs_reliability,
     run_xs_composite_ledger,
     select_vol_target_window,
     size_xs_alpha_growth_optimal,
@@ -357,6 +366,40 @@ class TestAdmission:
         assert res.sharpe == 0.0
         assert res.admitted is False
         assert "sharpe_floor" in res.binding_constraint
+
+
+class TestXsReliability:
+    """SCENARIO_XS_RELIABILITY_03: thin composition of the reliability primitives."""
+
+    def _fixture(self, n: int = 2200) -> tuple[pd.Series, pd.DataFrame]:
+        index = pd.date_range("2024-01-01", periods=n, freq="4h", tz="UTC")
+        rng = np.random.default_rng(11)
+        r = rng.normal(0.0006, 0.0045, n)
+        equity = pd.Series(10000.0 * np.cumprod(1.0 + r), index=index)
+        weights = pd.DataFrame(
+            rng.normal(0.0, 0.2, (n, 3)),
+            index=index, columns=["A", "B", "C"],
+        )
+        return equity, weights
+
+    def test_xs_reliability_03_composes_existing_primitives(self) -> None:
+        # SCENARIO_XS_RELIABILITY_03
+        equity, weights = self._fixture()
+        result = evaluate_xs_reliability(equity, weights, ReliabilityGateConfig())
+        assert isinstance(result, XsReliabilityResult)
+        assert isinstance(result.lcb, ReliabilityGateResult)
+        assert result.lcb.verdict in ("PASS", "FAIL", "PENDING")
+        returns = equity.pct_change().dropna().to_numpy(dtype=np.float64)
+        assert result.lcb.block_size_used == derive_block_size(returns)
+        assert isinstance(result.fold, FoldDistributionResult)
+        assert isinstance(result.fold.gate_pass, bool)
+        assert result.fold.n_folds >= 2
+        assert 1.0 / result.fold.n_folds <= result.fold.fold_concentration <= 1.0
+
+    def test_xs_reliability_03_trade_count_is_the_realized_transition_proxy(self) -> None:
+        equity, weights = self._fixture()
+        result = evaluate_xs_reliability(equity, weights, ReliabilityGateConfig())
+        assert result.lcb.trade_count == count_closed_trades(weights)
 
 
 class TestCompositeEnsemble:

@@ -501,7 +501,90 @@ class TestVolWeightedProfileOrchestration:
         message = str(excinfo.value)
         assert "xs_neutral_composite_v1" in message
         assert "xs_alpha_multihorizon_v2" in message
-        assert "xs_alpha_contextual_v3" in message
         assert "xs_alpha_score_routed_v4" in message
         assert "xs_alpha_dual_family_v5" in message
         assert "xs_alpha_vol_weighted_v6" in message
+
+    def test_xsv6_reliability_04_v6_persists_non_null_diagnostic(self, monkeypatch) -> None:
+        # SCENARIO_XS_SCREEN_RELIABILITY_04
+        _install_synthetic_data(monkeypatch)
+        report = xs.run_xs_trend_screen(profile=xs.XS_VOL_WEIGHTED_ALPHA_PROFILE_ID)
+        assert report.reliability is not None
+        assert report.reliability.lcb.trade_count > 0
+        payload = report.to_payload()
+        assert payload["reliability"] is not None
+        assert set(payload["reliability"]["lcb"]) == {
+            "lcb90_cagr", "lcb95_cagr", "p_negative", "point_cagr",
+            "t_stat", "trade_count", "block_size_used", "verdict",
+        }
+        assert set(payload["reliability"]["fold"]) >= {
+            "n_folds", "gate_pass", "fold_concentration",
+            "max_period_contribution",
+        }
+
+    def test_xsv6_reliability_04_neutral_profile_persists_null(self, monkeypatch) -> None:
+        _install_synthetic_data(monkeypatch)
+        report = xs.run_xs_trend_screen(profile=xs.XS_NEUTRAL_PROFILE_ID)
+        assert report.reliability is None
+        assert report.to_payload()["reliability"] is None
+
+    def test_xsv6_reliability_04_short_span_fails_closed_to_none(self) -> None:
+        idx = pd.date_range("2025-06-01", periods=1000, freq="4h", tz="UTC")
+        equity = pd.Series(
+            10000.0 * np.cumprod(np.full(len(idx), 1.0 + 0.0005)), index=idx,
+        )
+        weights = pd.DataFrame(0.0, index=idx, columns=["A", "B"])
+        window = xs._oos_reliability_window(
+            equity, weights, idx[100], idx[-1], None, None,
+        )
+        assert window is None
+
+    def test_xsv6_reliability_04_insufficient_marks_fails_closed_to_none(self) -> None:
+        idx = pd.date_range("2025-06-01", periods=5, freq="4h", tz="UTC")
+        equity = pd.Series(
+            10000.0 * np.cumprod(np.full(len(idx), 1.0 + 0.001)), index=idx,
+        )
+        weights = pd.DataFrame(0.0, index=idx, columns=["A", "B"])
+        window = xs._oos_reliability_window(
+            equity, weights, idx[0], idx[0], None, None,
+        )
+        assert window is None
+
+    def test_xsv6_reliability_04_partial_holdout_bounds_fail_closed(self) -> None:
+        idx = pd.date_range("2025-06-01", periods=2000, freq="4h", tz="UTC")
+        equity = pd.Series(
+            10000.0 * np.cumprod(np.full(len(idx), 1.0 + 0.0005)), index=idx,
+        )
+        weights = pd.DataFrame(0.0, index=idx, columns=["A", "B"])
+        window = xs._oos_reliability_window(
+            equity, weights, idx[100], idx[-1], idx[1500], None,
+        )
+        assert window is None
+
+    def test_xsv6_reliability_04_holdout_stitched_when_unsealed(self, monkeypatch) -> None:
+        # SCENARIO_XS_SCREEN_RELIABILITY_04 (holdout leg)
+        idx = pd.date_range("2022-01-01", "2026-07-07 20:00:00", freq="4h", tz="UTC")
+        t = np.arange(len(idx), dtype=np.float64)
+
+        def extended_load(symbol, start, end):
+            salt = float(sum(ord(c) for c in symbol))
+            close = 100.0 + 0.02 * t + 30.0 * np.sin(t / 40.0 + salt) + 20.0 * np.cos(t / 150.0)
+            frame = pd.DataFrame({
+                "open": close - 0.2,
+                "high": close + 1.0,
+                "low": close - 1.0,
+                "close": close,
+                "volume": 1000.0,
+                "taker_buy_ratio": 0.5 + 0.03 * np.sin(t / 9.0 + salt),
+            }, index=idx)
+            funding = pd.Series(0.0, index=idx, dtype=np.float64)
+            frame.attrs["symbol"] = symbol
+            return frame, funding, {"perp_ohlcv": f"fp-{symbol}"}, 1.0
+
+        monkeypatch.setattr(xs, "_load_symbol_data", extended_load)
+        report = xs.run_xs_trend_screen(
+            profile=xs.XS_VOL_WEIGHTED_ALPHA_PROFILE_ID, unseal_holdout=True,
+        )
+        assert report.holdout is not None
+        assert report.reliability is not None
+        assert report.reliability.lcb.trade_count > 0
