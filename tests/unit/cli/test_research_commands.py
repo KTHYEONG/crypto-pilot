@@ -1170,3 +1170,123 @@ def test_xs_baseline_blend_cli_rejects_unknown_profile() -> None:
     ])
     with pytest.raises(ValueError, match="unknown baseline-blend profile"):
         args.handler(args)
+
+def test_xs_baseline_blend_sized_cli_parses_and_dispatches(monkeypatch) -> None:
+    from src.application.research.technical.xs_alpha_baseline_blend import (
+        XS_VOL_WEIGHTED_ALPHA_PROFILE_ID,
+        XsBaselineBlendSizedReport,
+    )
+    from src.research.risk.growth_sizing import GrowthSizingResult
+    from src.research.technical_experts.cross_sectional import XsAdmissionResult
+
+    def _failed() -> XsAdmissionResult:
+        return XsAdmissionResult(
+            admitted=False, binding_constraint="x", sharpe=0.0, beta=0.0,
+            cagr=0.0, mdd=0.0, t_stat=0.0, annual_sharpe={},
+            annualized_turnover=0.0, breakeven_cost=0.0,
+        )
+
+    calls: list[bool] = []
+
+    def fake_run(*, unseal_holdout=False, weight_grid=(0.0, 0.2, 0.4, 0.5, 0.6, 0.8, 1.0),
+                 risk_grid=(1.0, 1.5, 2.0, 2.5, 3.0, 3.5, 4.0)):
+        calls.append(unseal_holdout)
+        return XsBaselineBlendSizedReport(
+            profile=XS_VOL_WEIGHTED_ALPHA_PROFILE_ID,
+            blend_weight=0.6,
+            weight_grid=weight_grid,
+            sizing=GrowthSizingResult(
+                3.0, 0.5, 0.01, 0.0, (3.0,), "none", 10,
+            ),
+            discovery=_failed(),
+            qualification=_failed(),
+            holdout=None,
+            pre_blend_discovery=_failed(),
+            pre_blend_qualification=_failed(),
+            pre_blend_holdout=None,
+            baseline_discovery=_failed(),
+            baseline_qualification=_failed(),
+            baseline_holdout=None,
+        )
+
+    persisted: list[str] = []
+    monkeypatch.setattr(
+        "src.application.research.technical.xs_alpha_baseline_blend.run_xs_alpha_baseline_blend_sized",
+        fake_run,
+    )
+    monkeypatch.setattr(
+        "src.application.research.technical.xs_alpha_baseline_blend.persist_xs_alpha_baseline_blend_sized_report",
+        lambda report, path: persisted.append(str(path)),
+    )
+    args = build_root_parser().parse_args([
+        "research", "run", "single", "xs-baseline-blend-sized",
+        "--profile", "xs_alpha_vol_weighted_v6",
+        "--start", "2022-04-01",
+        "--end", "2025-12-31",
+        "--unseal-holdout",
+        "--no-log-run",
+    ])
+    args.handler(args)
+    assert calls == [True]
+    assert persisted == ["docs/results/xs_alpha_baseline_blend_v8_sized.json"]
+
+
+def test_xs_baseline_blend_sized_cli_defaults_profile_and_seals_holdout(monkeypatch) -> None:
+    from src.application.research.technical.xs_alpha_baseline_blend import (
+        XS_VOL_WEIGHTED_ALPHA_PROFILE_ID,
+        XsBaselineBlendSizedReport,
+    )
+    from src.research.risk.growth_sizing import GrowthSizingResult
+    from src.research.technical_experts.cross_sectional import XsAdmissionResult
+
+    def _failed() -> XsAdmissionResult:
+        return XsAdmissionResult(
+            admitted=False, binding_constraint="x", sharpe=0.0, beta=0.0,
+            cagr=0.0, mdd=0.0, t_stat=0.0, annual_sharpe={},
+            annualized_turnover=0.0, breakeven_cost=0.0,
+        )
+
+    calls: list[bool] = []
+
+    def fake_run(*, unseal_holdout=False, weight_grid=(0.0, 0.2, 0.4, 0.5, 0.6, 0.8, 1.0),
+                 risk_grid=(1.0, 1.5, 2.0, 2.5, 3.0, 3.5, 4.0)):
+        calls.append(unseal_holdout)
+        return XsBaselineBlendSizedReport(
+            profile=XS_VOL_WEIGHTED_ALPHA_PROFILE_ID,
+            blend_weight=0.6,
+            weight_grid=weight_grid,
+            sizing=GrowthSizingResult(
+                3.0, 0.5, 0.01, 0.0, (3.0,), "none", 10,
+            ),
+            discovery=_failed(),
+            qualification=_failed(),
+            holdout=None,
+            pre_blend_discovery=_failed(),
+            pre_blend_qualification=_failed(),
+            pre_blend_holdout=None,
+            baseline_discovery=_failed(),
+            baseline_qualification=_failed(),
+            baseline_holdout=None,
+        )
+
+    monkeypatch.setattr(
+        "src.application.research.technical.xs_alpha_baseline_blend.run_xs_alpha_baseline_blend_sized",
+        fake_run,
+    )
+    monkeypatch.setattr(
+        "src.application.research.technical.xs_alpha_baseline_blend.persist_xs_alpha_baseline_blend_sized_report",
+        lambda report, path: None,
+    )
+    args = build_root_parser().parse_args([
+        "research", "run", "single", "xs-baseline-blend-sized", "--no-log-run",
+    ])
+    args.handler(args)
+    assert calls == [False]
+
+
+def test_xs_baseline_blend_sized_cli_rejects_unknown_profile() -> None:
+    args = build_root_parser().parse_args([
+        "research", "run", "single", "xs-baseline-blend-sized", "--profile", "bogus",
+    ])
+    with pytest.raises(ValueError, match="unknown baseline-blend profile"):
+        args.handler(args)
