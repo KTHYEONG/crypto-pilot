@@ -21,6 +21,12 @@ import numpy as np
 import pandas as pd
 
 from src.common.errors import DataIntegrityError
+from src.research.risk.growth_sizing import (
+    GrowthSizingConfig,
+    GrowthSizingResult,
+    apply_realised_risk_overlay,
+    solve_growth_optimal_risk,
+)
 
 _BARS_PER_YEAR = 2190
 _INITIAL_EQUITY = 10_000.0
@@ -697,6 +703,47 @@ def evaluate_xs_admission(
     )
 
 
+def size_xs_alpha_growth_optimal(
+    weights: pd.DataFrame,
+    opens: pd.DataFrame,
+    bar_funding: pd.DataFrame,
+    spec: XsCompositeSpec,
+    discovery_start: pd.Timestamp,
+    discovery_end: pd.Timestamp,
+    sizing_config: GrowthSizingConfig,
+) -> tuple[pd.Series, pd.DataFrame, GrowthSizingResult]:
+    """Select a discovery-only growth-optimal gross-leverage overlay for an XS book.
+
+    The base ledger is replayed verbatim through :func:`run_xs_composite_ledger`
+    (unchanged signature -- the frozen contract shared by v1..v6). Sizing is
+    selected strictly from the ``[discovery_start, discovery_end]`` slice of
+    the realized net returns via :func:`solve_growth_optimal_risk` --
+    qualification and holdout bars never influence the chosen risk. When the
+    constraints are infeasible the original net returns and the original input
+    weights are returned unchanged (fail closed, never a default scale). When
+    feasible, :func:`apply_realised_risk_overlay` scales the net returns and
+    the lag-reconstructed realized weights
+    (``weights.shift(1 + execution_delay_bars).fillna(0.0)`` -- the ledger's own
+    lag convention, recomputed here rather than changing the frozen ledger
+    signature) over the full available history, so the path-dependent drawdown
+    ladder sees one continuous deployed history.
+    """
+    equity, _turnover = run_xs_composite_ledger(weights, opens, bar_funding, spec)
+    net = equity.pct_change().dropna()
+    discovery_net = net[(net.index >= discovery_start) & (net.index <= discovery_end)]
+    sizing = solve_growth_optimal_risk(discovery_net.to_numpy(), sizing_config)
+    if sizing.selected_risk is None:
+        return net, weights, sizing
+
+    net_full = equity.pct_change().fillna(0.0)
+    lag = 1 + spec.execution_delay_bars
+    realized_weights = weights.shift(lag).fillna(0.0)
+    scaled_net, scaled_weights = apply_realised_risk_overlay(
+        net_full, realized_weights, sizing.selected_risk, sizing_config.reference_risk,
+    )
+    return scaled_net, scaled_weights, sizing
+
+
 def _check_contract() -> None:
     """Executable assertions locking the frozen cross-sectional surface."""
     from inspect import signature
@@ -712,6 +759,10 @@ def _check_contract() -> None:
     ]
     assert list(signature(evaluate_xs_admission).parameters) == [
         "equity", "turnover", "benchmark", "config",
+    ]
+    assert list(signature(size_xs_alpha_growth_optimal).parameters) == [
+        "weights", "opens", "bar_funding", "spec", "discovery_start",
+        "discovery_end", "sizing_config",
     ]
     spec = XsCompositeSpec()
     assert (spec.halflife_bars, spec.no_trade_band, spec.execution_delay_bars) == (6, 0.05, 1)
