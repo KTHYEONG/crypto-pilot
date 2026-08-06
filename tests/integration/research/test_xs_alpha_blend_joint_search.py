@@ -24,9 +24,6 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
-import pytest
-
-pytestmark = pytest.mark.slow
 
 from src.research.technical_experts.cross_sectional import XsAdmissionConfig
 from tools.research import xs_alpha_blend_joint_search as _search_module
