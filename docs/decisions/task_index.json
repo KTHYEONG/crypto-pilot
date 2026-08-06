@@ -1,6 +1,16 @@
 {
   "tasks": [
     {
+      "task_id": "xs_alpha_basis_family_diagnostic",
+      "date": "2026-08-07",
+      "adr_id": "ADR_20260807_xs_alpha_basis_family_diagnostic",
+      "domain": "signal",
+      "title": "XS Alpha Basis 패밀리 진단 - funding_contrarian과 고상관 확인, 신규 독립 신호 아님으로 반증",
+      "why": "성장 상한 3개 레버(사이징/블렌드/유니버스) 전부 실측 소진(08-06) 후 남은 후보 중 신호 재설계가 유일한 근본 레버로 판단. premiumIndexKlines/indexPriceKlines/markPriceKlines가 xs_alpha_data_axis_expansion(08-05)에서 수집됐으나 실제 신호화된 적 없음을 rg 조사로 확인 -- 신규 수집 없이 즉시 진단 가능한 유일한 미탐색 데이터 축.",
+      "resolution": "_positioning_score와 구조 동일한 _basis_score(cross_sectional.py) 신설(신규 부호 파라미터 없음), _basis_panel 로더(xs_alpha_baseline_blend.py, indicator_kline_path 재사용), run_xs_alpha_basis_family_diagnostic 오케스트레이터(discovery/qualification admission + 기존 3패밀리 대비 discovery-window 상관계수 진단, 프로덕션 블렌드 미편입) + xs-basis-family-diagnostic CLI. 사전 등록 성공기준(admission 통과 AND 전 패밀리 |상관| <0.3)으로 실행.",
+      "impact": "CLI 실측: qualification admission=False(2025 Sharpe -1.56, MDD -38.9%), funding_contrarian과의 상관계수 rho=0.831(임계값 0.3 대폭 초과) -- 두 채택 조건 모두 실패, 사전 경고했던 collinearity 가설 확인. Basis는 새 독립 신호가 아니라 기존 funding_contrarian을 다른 집계창(4h 스냅샷 vs 정산 펀딩비 누적)으로 재관측한 것으로 정직하게 반증. 프로덕션 v6/v8_sized 무변경. 남은 미탐색 축은 bookdepth(주문호가 깊이, BTC만 3800만행/2초단위)뿐이며 별도 4h 집계설계 스펙 필요."
+    },
+    {
       "task_id": "xs_alpha_universe_breadth_expansion",
       "date": "2026-08-06",
       "adr_id": "ADR_20260806_xs_alpha_universe_breadth_expansion",
