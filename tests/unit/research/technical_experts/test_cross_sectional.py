@@ -43,6 +43,7 @@ from src.research.technical_experts.cross_sectional import (
     XsAlphaCompositeSpec,
     XsCompositeSpec,
     XsReliabilityResult,
+    _basis_score,
     _causal_family_inverse_vol_weights,
     _cross_sectional_zscore,
     _ledger_pnl,
@@ -1096,6 +1097,69 @@ class TestPositioningOnlyAlphaWeights:
         )
         assert bool(np.isfinite(sparse_weights.to_numpy()).all())
 
+
+class TestBasisScore:
+    def test_scenario_basis_score_contrarian_sign(self) -> None:
+        # SCENARIO_BASIS_SCORE_CONTRARIAN_SIGN: one symbol's rolling-mean basis
+        # uniformly higher than another's across the full signal_windows history
+        # gets a strictly lower (more negative) score -- the contrarian sign is
+        # wired exactly like _positioning_score (high premium -> short).
+        idx = pd.date_range("2024-01-01", periods=400, freq="4h", tz="UTC")
+        cols = ["A", "B", "C", "D"]
+        path = 100.0 * np.exp(np.linspace(0.0, 0.05, len(idx)))
+        closes = pd.DataFrame(np.tile(path, (4, 1)).T, index=idx, columns=cols)
+        basis = pd.DataFrame(0.0, index=idx, columns=cols)
+        basis.loc[idx[170]:, "A"] = 0.001
+        basis.loc[idx[170]:, "B"] = 0.0005
+        basis.loc[idx[170]:, "C"] = -0.0005
+        basis.loc[idx[170]:, "D"] = -0.001
+        alpha_spec = XsAlphaCompositeSpec()
+        score = _basis_score(closes, basis, alpha_spec)
+        late = score.loc[idx[380]:]
+        assert bool((late["A"] < late["C"]).all())
+        assert bool((late["B"] < late["D"]).all())
+        assert bool((late["A"] < 0.0).all())
+        assert bool((late["D"] > 0.0).all())
+
+    def test_scenario_basis_score_zero_variance_safe(self) -> None:
+        # SCENARIO_BASIS_SCORE_ZERO_VARIANCE_SAFE: a row with fewer than two
+        # finite observations (all-NaN basis bar) yields score 0.0 -- no NaN, no
+        # exception, matching _cross_sectional_zscore's finite-only contract.
+        idx = pd.date_range("2024-01-01", periods=300, freq="4h", tz="UTC")
+        cols = ["A", "B", "C"]
+        rng = np.random.default_rng(7)
+        closes = pd.DataFrame(
+            {c: 100 * np.exp(np.cumsum(rng.normal(0, 0.01, 300))) for c in cols},
+            index=idx,
+        )
+        basis = pd.DataFrame(
+            rng.normal(0.0, 0.001, (300, 3)), index=idx, columns=cols,
+        )
+        basis.loc[idx[150], :] = np.nan
+        alpha_spec = XsAlphaCompositeSpec()
+        score = _basis_score(closes, basis, alpha_spec)
+        assert bool(np.isfinite(score.to_numpy()).all())
+        assert float(score.loc[idx[150]].sum()) == 0.0
+        assert bool(np.allclose(score.loc[idx[150]].to_numpy(), 0.0))
+
+    def test_scenario_basis_score_shape_parity(self) -> None:
+        # SCENARIO_BASIS_SCORE_SHAPE_PARITY: output index and ordered columns
+        # mirror the input closes frame for any basis panel sharing that index.
+        idx = pd.date_range("2024-01-01", periods=250, freq="4h", tz="UTC")
+        cols = ["Z", "A", "M"]
+        closes = pd.DataFrame(
+            {c: 100.0 * np.exp(np.linspace(0.0, 0.02, 250)) for c in cols},
+            index=idx,
+        )
+        basis = pd.DataFrame(
+            np.random.default_rng(11).normal(0.0, 0.001, (250, 3)),
+            index=idx, columns=cols,
+        )
+        alpha_spec = XsAlphaCompositeSpec()
+        score = _basis_score(closes, basis, alpha_spec)
+        assert list(score.columns) == list(closes.columns) == cols
+        assert score.index.equals(closes.index)
+        assert score.shape == closes.shape
 
 class TestGrowthOptimalSizing:
     def _sizing_inputs(self, rows: int = 300) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DatetimeIndex]:

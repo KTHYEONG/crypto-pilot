@@ -6,8 +6,11 @@ import logging
 from src.application.research.technical import evaluation as evaluation_module
 from src.application.research.technical.xs_alpha_baseline_blend import (
     persist_xs_alpha_baseline_leg_selection_report,
+    persist_xs_alpha_basis_family_diagnostic_report,
     run_xs_alpha_baseline_leg_selection,
+    run_xs_alpha_basis_family_diagnostic,
     xs_baseline_leg_selection_report_path,
+    xs_basis_family_diagnostic_report_path,
 )
 from src.application.research.universe.candidate_scan import (
     xs_universe_candidate_scan_report_path,
@@ -359,6 +362,21 @@ def _run_xs_alpha_baseline_leg_selection(args: argparse.Namespace) -> None:
     )
 
 
+def _run_xs_alpha_basis_family_diagnostic(args: argparse.Namespace) -> None:
+    report = run_xs_alpha_basis_family_diagnostic(unseal_holdout=args.unseal_holdout)
+    persist_xs_alpha_basis_family_diagnostic_report(
+        report, xs_basis_family_diagnostic_report_path(),
+    )
+    _logger.info(
+        "xs-basis-family-diagnostic profile=%s discovery_admitted=%s "
+        "qualification_admitted=%s discovery_correlation=%s",
+        report.profile,
+        report.discovery.admitted,
+        report.qualification.admitted,
+        report.discovery_correlation,
+    )
+
+
 def add_single_technical_commands(run_sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
     """Attach the ``research run single technical`` subcommands."""
     technical = run_sub.add_parser(
@@ -497,3 +515,16 @@ def add_single_technical_commands(run_sub: argparse._SubParsersAction[argparse.A
     xs_baseline_leg_selection.add_argument("--unseal-holdout", action="store_true", default=False)
     xs_baseline_leg_selection.add_argument("--no-log-run", action="store_true", default=False)
     xs_baseline_leg_selection.set_defaults(handler=_run_xs_alpha_baseline_leg_selection)
+
+    xs_basis_family_diagnostic = run_sub.add_parser(
+        "xs-basis-family-diagnostic",
+        help=(
+            "Diagnostic-only standalone admission + collinearity screen for "
+            "the premium/basis family (premiumIndexKlines)"
+        ),
+    )
+    xs_basis_family_diagnostic.add_argument("--start", default=None)
+    xs_basis_family_diagnostic.add_argument("--end", default=None)
+    xs_basis_family_diagnostic.add_argument("--unseal-holdout", action="store_true", default=False)
+    xs_basis_family_diagnostic.add_argument("--no-log-run", action="store_true", default=False)
+    xs_basis_family_diagnostic.set_defaults(handler=_run_xs_alpha_basis_family_diagnostic)
