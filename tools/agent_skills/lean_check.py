@@ -50,9 +50,12 @@ def run_cmd(cmd: list[str], timeout: int = 120) -> subprocess.CompletedProcess[s
     # Strip unnecessary 'uv run' prefix when already running inside virtualenv to avoid double env setup overhead
     if len(cmd) >= 3 and cmd[0] == "uv" and cmd[1] == "run" and os.environ.get("VIRTUAL_ENV"):
         cmd = cmd[2:]
+    env = os.environ.copy()
+    env["COVERAGE_NO_CTRACE"] = "1"
+    env["PYTHONDONTWRITEBYTECODE"] = "1"
     try:
         return subprocess.run(  # noqa: S603
-            cmd, capture_output=True, text=True, shell=False, timeout=timeout
+            cmd, capture_output=True, text=True, shell=False, timeout=timeout, env=env
         )
     except subprocess.TimeoutExpired:
         return subprocess.CompletedProcess(
@@ -831,6 +834,10 @@ def main() -> None:
     parser.add_argument("--skip-lint", action="store_true", help="Skip Ruff linting")
     parser.add_argument("--skip-mypy", action="store_true", help="Skip Mypy static check")
     parser.add_argument(
+        "--fast", action="store_true",
+        help="Run fast checks only (Spec, Mapping, Print, Ruff, Mypy) and skip pytest/coverage."
+    )
+    parser.add_argument(
         "--spec-only", action="store_true",
         help="Run ONLY spec-compliance (AST non-dummy check, dynamic assertion execution, "
              "orphaned-implementation gate, wiring text-match) and exit -- no ruff/mypy/pytest/"
@@ -957,6 +964,11 @@ def main() -> None:
             out_sliced = "\n".join(out.splitlines()[:10])
             d = {"file": py_files[0] if py_files else "", "line": 0, "error": out_sliced, "fix_hint": "Resolve type errors"}
             _fail_exit("mypy", "FAIL | Mypy Type Check Failed", d)
+
+    if args.fast:
+        print("PASS | Fast Check Passed (Spec, Mapping, Print, Ruff, Mypy verified)")
+        print(_emit_json("PASS", "fast-check", [], None), file=sys.stderr)
+        return
 
     # 5. Single pytest with coverage
     source_files = _get_source_files(py_files)
