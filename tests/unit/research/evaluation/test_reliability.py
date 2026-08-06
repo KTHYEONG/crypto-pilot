@@ -26,6 +26,7 @@ from src.research.evaluation.reliability import (
     count_closed_trades,
     derive_block_size,
     derive_cost_multiple_hurdle_rate,
+    derive_realized_weights_cost_total,
     equity_span_years,
     split_holdout_segment,
 )
@@ -36,9 +37,10 @@ BTC_PATH = Path("data/futures/ohlcv/1h/BTCUSDT.parquet")
 class TestReliabilityGateConfig:
     def test_reliability_gate_config_defaults(self) -> None:
         c = ReliabilityGateConfig()
-        assert (c.hurdle_rate, c.block_size, c.n_bootstrap, c.seed, c.min_trades,
+        assert (c.hurdle_rate, c.hurdle_cost_multiple, c.block_size,
+                c.n_bootstrap, c.seed, c.min_trades,
                 c.mdd_floor, c.t_stat_floor, c.max_period_contribution) == (
-            0.15, None, 3000, 0, 30, -0.25, 2.0, 0.40,
+            0.15, 2.0, None, 3000, 0, 30, -0.25, 2.0, 0.40,
         )
 
     def test_reliability_gate_result_fields(self) -> None:
@@ -69,6 +71,10 @@ class TestReliabilityGateConfig:
             ReliabilityGateConfig(lcb_confidence=1.0)
         with pytest.raises(ValueError, match="max_period_contribution"):
             ReliabilityGateConfig(max_period_contribution=0.0)
+        # SCENARIO_HURDLE_COST_MULTIPLE_CONTRACT_LOCK: default 2.0 is locked by
+        # the defaults assertion above; a negative override must fail closed.
+        with pytest.raises(ValueError, match="hurdle_cost_multiple"):
+            ReliabilityGateConfig(hurdle_cost_multiple=-1.0)
 
 
 class TestDeriveBlockSize:
@@ -282,6 +288,37 @@ class TestDeriveCostMultipleHurdleRate:
             derive_cost_multiple_hurdle_rate(-0.01, 2.0, 2.0)
         with pytest.raises(ValueError, match="cost_multiple"):
             derive_cost_multiple_hurdle_rate(0.02, 2.0, -1.0)
+
+
+class TestDeriveRealizedWeightsCostTotal:
+    # SCENARIO_COST_TOTAL_MATCHES_LEDGER_CONVENTION
+    def test_derive_realized_weights_cost_total_matches_ledger_convention(self) -> None:
+        # 3-row 2-column weight path: deltas per column sum to (|1.0-0.0| +
+        # |-1.0-0.0|) = 2.0 on bar 1 and (|0.5-1.0| + |-0.5-(-1.0)|) = 1.0 on
+        # bar 2, total turnover 3.0 -- the exact sum-of-abs-changes convention
+        # run_xs_composite_ledger and evaluate_xs_admission's breakeven_cost
+        # charge, with no 0.5 factor.
+        idx = pd.date_range("2024-01-01", periods=3, freq="D", tz="UTC")
+        w = pd.DataFrame({"A": [0.0, 1.0, 0.5], "B": [0.0, -1.0, -0.5]}, index=idx)
+        assert abs(derive_realized_weights_cost_total(w, 0.0008) - (2.0 + 1.0) * 0.0008) < 1e-12
+
+    # SCENARIO_COST_TOTAL_ZERO_TURNOVER
+    def test_derive_realized_weights_cost_total_zero_turnover(self) -> None:
+        idx = pd.date_range("2024-01-01", periods=3, freq="D", tz="UTC")
+        w = pd.DataFrame({"A": [0.5, 0.5, 0.5], "B": [-0.5, -0.5, -0.5]}, index=idx)
+        assert derive_realized_weights_cost_total(w, 0.0008) == 0.0
+
+    def test_derive_realized_weights_cost_total_fewer_than_two_rows_fail_closed(self) -> None:
+        idx = pd.date_range("2024-01-01", periods=1, freq="D", tz="UTC")
+        single = pd.DataFrame({"A": [1.0], "B": [-1.0]}, index=idx)
+        assert derive_realized_weights_cost_total(single, 0.0008) == 0.0
+
+    # SCENARIO_COST_TOTAL_NEGATIVE_RATE_RAISES
+    def test_derive_realized_weights_cost_total_rejects_negative_rate(self) -> None:
+        idx = pd.date_range("2024-01-01", periods=3, freq="D", tz="UTC")
+        w = pd.DataFrame({"A": [0.0, 1.0, 0.5]}, index=idx)
+        with pytest.raises(ValueError, match="round_trip_cost_rate"):
+            derive_realized_weights_cost_total(w, -0.0001)
 
 
 class TestSplitHoldoutSegment:

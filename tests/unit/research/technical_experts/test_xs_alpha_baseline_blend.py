@@ -304,14 +304,17 @@ def _joint_discovery_fixture() -> tuple[pd.Series, pd.DataFrame, pd.Series, pd.S
 
 
 def test_xabjs_01_objective_responds_to_leverage() -> None:
+    # SCENARIO_DISCOVERY_RELIABILITY_SCORE_COST_AWARE: the cost-multiple hurdle
+    # changes the PASS/FAIL verdict but never the returned LCB90 float, so the
+    # s1 != s2 assertion below still holds with round_trip_cost_rate=0.0008.
     # XABJS-01: the joint objective must NOT be scale-invariant -- the same
     # xs_alpha_weight at two different leverage_scale values must yield two
     # different LCB90 scores (unlike a Sharpe/t_stat objective, which is blind
     # to pure linear leverage and is exactly why the sequential per-axis
     # searches needed two different objectives).
     a, aw, b, bw, idx = _joint_discovery_fixture()
-    s1 = discovery_reliability_score(a, aw, b, bw, idx[0], idx[-1], 0.5, 1.0)
-    s2 = discovery_reliability_score(a, aw, b, bw, idx[0], idx[-1], 0.5, 2.0)
+    s1 = discovery_reliability_score(a, aw, b, bw, idx[0], idx[-1], 0.5, 1.0, 0.0008)
+    s2 = discovery_reliability_score(a, aw, b, bw, idx[0], idx[-1], 0.5, 2.0, 0.0008)
     assert isinstance(s1, float)
     assert isinstance(s2, float)
     assert s1 != s2
@@ -325,7 +328,7 @@ def test_xabjs_02_discovery_only_window() -> None:
     disc_start = idx[0]
     disc_end = idx[365]
     disc_only = discovery_reliability_score(
-        a[:366], aw[:366], b[:366], bw[:366], disc_start, disc_end, 0.5, 1.5,
+        a[:366], aw[:366], b[:366], bw[:366], disc_start, disc_end, 0.5, 1.5, 0.0008,
     )
 
     qual_idx = pd.date_range(
@@ -341,7 +344,7 @@ def test_xabjs_02_discovery_only_window() -> None:
     bw_full = pd.concat([bw[:366], bw_qual])
 
     with_qualification = discovery_reliability_score(
-        a_full, aw_full, b_full, bw_full, disc_start, disc_end, 0.5, 1.5,
+        a_full, aw_full, b_full, bw_full, disc_start, disc_end, 0.5, 1.5, 0.0008,
     )
     assert disc_only == with_qualification
 
@@ -350,7 +353,7 @@ def test_xabjs_fail_closed_fewer_than_two_discovery_bars() -> None:
     # with ValueError, never return a score built on an empty/single-bar set.
     a, aw, b, bw, idx = _joint_discovery_fixture()
     with pytest.raises(ValueError, match="fewer than 2 common bars"):
-        discovery_reliability_score(a, aw, b, bw, idx[-1], idx[-1], 0.5, 1.0)
+        discovery_reliability_score(a, aw, b, bw, idx[-1], idx[-1], 0.5, 1.0, 0.0008)
 
 
 def test_xbls_python_assertion_compute_discovery_correlation() -> None:
