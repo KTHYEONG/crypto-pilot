@@ -1,6 +1,16 @@
 {
   "tasks": [
     {
+      "task_id": "xs_alpha_growth_ceiling_diagnostic",
+      "date": "2026-08-06",
+      "adr_id": "ADR_20260806_xs_alpha_growth_ceiling_diagnostic",
+      "domain": "risk",
+      "title": "XS Alpha 성장 상한(고점) 진단: 사이징은 소진된 레버, 3번째 다리(breadth)가 유일한 남은 지렛대",
+      "why": "PASS 2건(v6_growth_sized/v8_sized)의 point CAGR(21.3%/17.1%)이 실질 체감상 부족하다는 사용자 지적. 레버리지를 더 주면 고점이 오를지 실측 필요.",
+      "resolution": "5년 MC growth curve 전체 재구성(scratch, 프로덕션 코드 미변경) 결과: v6_growth_sized는 이미 Kelly 정점(2.75x)의 99%+를 1.5x에서 확보(레버리지 소진), v8_sized는 1.0x에서 이미 MDD 초과확률 4.9%(한계5%)로 꼬리위험에 막힘. 드로다운 오버레이 켜는 대안도 반증(2.5x 최적점 growth=0.832 < 현재 1.0x=0.930). diagnose_growth_headroom(growth_sizing.py)을 신설해 v8_sized 리포트(XsBaselineBlendSizedReport.growth_headroom)에 배선, CLI 재실측으로 risk_constrained=true/headroom_ratio=0.0 확정.",
+      "impact": "두 PASS 후보 모두 사이징으로 고점/저점 추가 개선 불가 확정. 유일한 다음 레버는 원천 Sharpe를 올리는 breadth(3번째 저상관 다리)이나, carry는 이미 은퇴(2026-07-31)·leg_selection 5후보 비교에서 Donchian이 이미 최우수로 확정되어 가까운 후보 소진 -- 새 신호원 발굴이 필요한 discovery 과제로 넘어감. v6_growth_sized 쪽 동일 진단 배선은 size_xs_alpha_growth_optimal의 frozen 반환타입 확장이 필요해 후속 과제로 분리."
+    },
+    {
       "task_id": "xs_alpha_reliability_cost_hurdle",
       "date": "2026-08-06",
       "adr_id": "ADR_20260806_xs_alpha_reliability_cost_hurdle",
