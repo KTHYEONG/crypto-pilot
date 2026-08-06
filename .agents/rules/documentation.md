@@ -13,6 +13,7 @@ priority: 8
 3. **Language Policy:**
    - **Docstrings & External Docs:** English only (maintains compatibility with standard Python IDE tools and global conventions).
    - **In-line Comments (`#`):** Korean preferred (ensures fast intuition and readability for Korean maintainers).
+4. **Chat Notification Conciseness:** Keep chat responses and skill status notifications strictly under 5 bullet points (under 80 tokens). Move detailed rationale, experiment logs, and failure histories into markdown files in `docs/` or artifact files.
 
 ## 2. Docstring Rules
 - **Standard Format:** Apply Google Style Docstrings (`Args:`, `Returns:`, `Raises:`) for all public classes, functions, and methods.
