@@ -232,6 +232,42 @@ def _run_xs_alpha_baseline_blend_sized(args: argparse.Namespace) -> None:
         report.sizing.binding_constraint,
     )
 
+
+def _run_xs_alpha_triple_blend_sized(args: argparse.Namespace) -> None:
+    from src.application.research.technical.xs_alpha_baseline_blend import (
+        persist_xs_alpha_triple_blend_sized_report,
+        run_xs_alpha_triple_blend_sized,
+        xs_triple_blend_sized_report_path,
+    )
+    from src.application.research.technical.xs_trend_screen import (
+        XS_VOL_WEIGHTED_ALPHA_PROFILE_ID,
+    )
+
+    profile = args.profile or XS_VOL_WEIGHTED_ALPHA_PROFILE_ID
+    if profile != XS_VOL_WEIGHTED_ALPHA_PROFILE_ID:
+        raise ValueError(
+            f"unknown baseline-blend profile '{profile}'; blending is restricted "
+            f"to '{XS_VOL_WEIGHTED_ALPHA_PROFILE_ID}'"
+        )
+    report = run_xs_alpha_triple_blend_sized(unseal_holdout=args.unseal_holdout)
+    persist_xs_alpha_triple_blend_sized_report(
+        report, xs_triple_blend_sized_report_path(),
+    )
+    _logger.info(
+        "xs-triple-blend-sized profile=%s xs_baseline_weight=%.4f "
+        "positioning_weight=%.4f selected_risk=%s "
+        "pre_qualification_admitted=%s post_qualification_admitted=%s "
+        "post_qualification_sharpe=%.4f binding_constraint=%s",
+        report.profile,
+        report.xs_baseline_weight,
+        report.positioning_weight,
+        report.sizing.selected_risk,
+        report.pre_blend_qualification.admitted,
+        report.qualification.admitted,
+        report.qualification.sharpe,
+        report.sizing.binding_constraint,
+    )
+
 def _run_xs_alpha_baseline_blend_joint(args: argparse.Namespace) -> None:
     from src.application.research.technical.xs_alpha_baseline_blend import (
         persist_xs_alpha_baseline_blend_joint_report,
@@ -370,6 +406,21 @@ def add_single_technical_commands(run_sub: argparse._SubParsersAction[argparse.A
     xs_baseline_blend_sized.add_argument("--unseal-holdout", action="store_true", default=False)
     xs_baseline_blend_sized.add_argument("--no-log-run", action="store_true", default=False)
     xs_baseline_blend_sized.set_defaults(handler=_run_xs_alpha_baseline_blend_sized)
+
+    xs_triple_blend_sized = run_sub.add_parser(
+        "xs-triple-blend-sized",
+        help=(
+            "Nested 3-leg blend of xs_alpha_vol_weighted_v6 + Donchian + "
+            "positioning-only (worst-year-robust weights) with growth-optimal "
+            "gross leverage re-derived on the 3-leg book"
+        ),
+    )
+    xs_triple_blend_sized.add_argument("--profile", default=None)
+    xs_triple_blend_sized.add_argument("--start", default=None)
+    xs_triple_blend_sized.add_argument("--end", default=None)
+    xs_triple_blend_sized.add_argument("--unseal-holdout", action="store_true", default=False)
+    xs_triple_blend_sized.add_argument("--no-log-run", action="store_true", default=False)
+    xs_triple_blend_sized.set_defaults(handler=_run_xs_alpha_triple_blend_sized)
 
     from src.application.research.technical.xs_alpha_baseline_blend import (
         _JOINT_LEVERAGE_SCALE,
