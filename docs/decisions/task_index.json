@@ -1,6 +1,16 @@
 {
   "tasks": [
     {
+      "task_id": "ADR_20260806_XS_ADMISSION_TURNOVER_MAX_RECALIBRATION",
+      "date": "2026-08-06",
+      "adr_id": "ADR_20260806_XS_ADMISSION_TURNOVER_MAX_RECALIBRATION",
+      "domain": "risk",
+      "title": "XS Admission Gate turnover_max 재보정 (150 -> 200, 실증 근거 기반)",
+      "why": "XsAdmissionConfig.turnover_max=150.0가 xs_alpha_baseline_blend_v8_joint의 qualification admission(turnover=175.42x/yr)을 단독으로 차단 -- 다른 게이트(sharpe_floor/beta_abs_max/annual_sub_sharpe/cost_breakeven_min)는 전부 통과, 데이터셋 전체 중 CAGR 1위(41.1%). git log -S로 150.0의 유도 근거를 추적했으나 존재하지 않음(참조된 spec 문서 소실). CostModel도 flat rate라 turnover 증가에 따른 비용 비선형성 근거 없음.",
+      "resolution": "docs/results/*.json 전체 git 히스토리(21개 커밋, 12개 파일, 42개 고유 측정치)를 Spearman 상관분석: 전체 무의미(rho=-0.06~-0.21), 비-turnover 게이트 통과분만 약한 양의 상관(rho=+0.233), 동일 알파(v6) 계열 내부(레버리지만 변화, confound 최소)에서는 rho=+0.546(p=0.005) 유의미 양의 상관 -- turnover가 높을수록 오히려 Sharpe가 좋음. 유일한 고turnover 파국 사례(v3, 216~294x)는 다른 3개 게이트에서도 동시 실패한 confound 케이스(기존 ADR에서 라우팅 버그로 귀속). 사용자 검토 후 200.0 채택(175.4x 후보에 여유, v3 파국구간과 거리 확보). cross_sectional.py의 XsAdmissionConfig.turnover_max 기본값 150.0->200.0 변경, docstring에 실증 근거 인용. 게이트 메커니즘 자체(evaluate_xs_admission, 다른 4개 임계값)는 불변.",
+      "impact": "xs_alpha_baseline_blend_v8_joint qualification admission True로 전환(discovery+qualification 양쪽 통과, v6 이후 두 번째). 다른 admitted 프로파일은 전부 150 미만이라 검증 결과 불변, 블라스트 반경은 이 후보 하나로 격리 확인. 단 신뢰도 게이트(LCB90>=15%)는 별개로 13.21%에서 여전히 미달 -- admission 통과와 실전 배포 가능은 계속 구분됨. 테스트 파일 수정 불필요(기존 테스트 전부 명시적 override이거나 동적 참조)."
+    },
+    {
       "task_id": "TASK_XS_ALPHA_GROWTH_DIRECTION_TURNOVER_DIAGNOSTIC",
       "date": "2026-08-06",
       "adr_id": "ADR_20260806_XS_ALPHA_GROWTH_DIRECTION_TURNOVER_DIAGNOSTIC",
