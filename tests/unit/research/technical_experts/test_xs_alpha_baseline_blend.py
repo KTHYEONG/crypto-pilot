@@ -10,6 +10,10 @@ Scenario coverage:
 * XABB-04-FAIL-CLOSED-MISALIGNED-INDEX
 * XABJS-01-OBJECTIVE-RESPONDS-TO-LEVERAGE
 * XABJS-02-DISCOVERY-ONLY-WINDOW
+* XABJS-03-DISCOVERY-OBJECTIVE-STAYS-TURNOVER-BLIND (the three XABJS tests
+  below pass byte-for-byte unmodified -- revision 3 adds no coupling between
+  discovery_reliability_score and turnover_max; the absence of a diff is the
+  verified outcome)
 """
 
 from __future__ import annotations
