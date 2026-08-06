@@ -476,7 +476,7 @@ class TestBaselineLegSelectionOrchestration:
         assert all(p.kind == p.KEYWORD_ONLY for p in params.values())
         assert params["weight_grid"].default == xs_blend._DEFAULT_WEIGHT_GRID
         assert xs_blend._DEFAULT_CANDIDATE_ORDER[0] == "donchian_long_only_v1"
-        assert len(xs_blend._DEFAULT_CANDIDATE_ORDER) == 5
+        assert len(xs_blend._DEFAULT_CANDIDATE_ORDER) == 32
 
     def test_xbls_06_orchestrator_holdout_stays_sealed_by_default(self, monkeypatch) -> None:
         # XBLS-06: default run seals holdout, picks one of the five frozen
@@ -510,7 +510,7 @@ class TestBaselineLegSelectionOrchestration:
             "profile", "blend_weight", "weight_grid",
             "discovery", "qualification", "holdout",
             "pre_blend_discovery", "pre_blend_qualification", "pre_blend_holdout",
-            "reliability", "report_fingerprint",
+            "reliability", "reliability_hurdle_neutral", "report_fingerprint",
             "selected_candidate", "candidate_diagnostics",
         }
         assert payload["weight_grid"] == list(xs_blend._DEFAULT_WEIGHT_GRID)
@@ -592,3 +592,59 @@ class TestBaselineLegSelectionOrchestration:
         disc_a, disc_b = _discovery_common(xs_net, bl_net, XS_DISCOVERY_START, DISCOVERY_END)
         expected_sharpe = _blended_sharpe(disc_a, disc_b, expected_weight)
         assert diag["blended_sharpe"] == expected_sharpe
+
+    def test_xbls_08_candidate_order_widened_to_32_no_duplicates(self) -> None:
+        # XBLS-08: the candidate pool grows from the 5 tournament sources to the
+        # 32-identity union with the trend-screen catalog, computed from the two
+        # frozen registries (no manual enumeration), Donchian still first.
+        order = xs_blend._DEFAULT_CANDIDATE_ORDER
+        assert len(order) == 32
+        assert len(set(order)) == 32
+        assert order[0] == "donchian_long_only_v1"
+        assert "technical_donchian_breakout_long_v1" in order
+        assert "technical_donchian_breakout_short_v1" in order
+
+    def test_xbls_09_dispatch_routes_non_tournament_candidates(self, monkeypatch) -> None:
+        # XBLS-09: non-tournament candidates are replayed through the shared
+        # technical-expert backtest engine; the default run reports exactly 32
+        # finite diagnostics entries including the mirror-short Donchian and a
+        # second non-tournament family.
+        _install_synthetic_data(monkeypatch)
+        report = xs_blend.run_xs_alpha_baseline_leg_selection()
+
+        assert report.selected_candidate in xs_blend._DEFAULT_CANDIDATE_ORDER
+        assert len(report.candidate_diagnostics) == 32
+        assert set(report.candidate_diagnostics) == set(xs_blend._DEFAULT_CANDIDATE_ORDER)
+        for diag in report.candidate_diagnostics.values():
+            assert set(diag) == {"correlation", "blend_weight", "blended_sharpe"}
+            for value in diag.values():
+                assert np.isfinite(value)
+        assert "technical_donchian_breakout_short_v1" in report.candidate_diagnostics
+        assert "technical_macd_histogram_regime_long_v1" in report.candidate_diagnostics
+        assert isinstance(report.reliability, XsReliabilityResult)
+        assert isinstance(report.reliability_hurdle_neutral, XsReliabilityResult)
+
+    def test_xbls_10_reliability_hurdle_neutral_never_stricter_than_default(self, monkeypatch) -> None:
+        # XBLS-10: the hurdle-neutral diagnostic runs on the identical OOS window
+        # and bootstrap config (same point/lcb90/t-stat); zeroing hurdle_rate can
+        # only relax the hurdle leg of the reliability AND, never tighten it.
+        _install_synthetic_data(monkeypatch)
+        report = xs_blend.run_xs_alpha_baseline_leg_selection()
+
+        assert report.reliability is not None
+        assert report.reliability_hurdle_neutral is not None
+        base = report.reliability.lcb
+        neutral = report.reliability_hurdle_neutral.lcb
+        assert neutral.point_cagr == base.point_cagr
+        assert neutral.lcb90_cagr == base.lcb90_cagr
+        assert neutral.t_stat == base.t_stat
+        assert not (neutral.verdict == "FAIL" and base.verdict == "PASS")
+        assert report.reliability.fold == report.reliability_hurdle_neutral.fold
+
+    def test_xbls_11_holdout_stays_sealed_by_default_with_widened_pool(self, monkeypatch) -> None:
+        # XBLS-11: the widened 32-candidate default keeps the sealed-holdout
+        # contract of revision 1 -- holdout is never peeked at by default.
+        _install_synthetic_data(monkeypatch)
+        report = xs_blend.run_xs_alpha_baseline_leg_selection()
+        assert report.holdout is None
+        assert report.pre_blend_holdout is None
