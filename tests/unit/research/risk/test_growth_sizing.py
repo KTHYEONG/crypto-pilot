@@ -5,11 +5,13 @@ import pandas as pd
 import pytest
 
 from src.research.risk.growth_sizing import (
+    GrowthHeadroomDiagnostic,
     GrowthSizingConfig,
     GrowthSizingResult,
     apply_realised_risk_overlay,
     apply_vol_target_overlay,
     compute_discovery_target_vol,
+    diagnose_growth_headroom,
     drawdown_risk_multiplier,
     solve_growth_optimal_risk,
 )
@@ -163,6 +165,138 @@ class TestSolveGrowthOptimalRisk:
         config = GrowthSizingConfig(risk_grid=(0.001,), n_paths=200)
         with pytest.raises(ValueError, match="finite"):
             solve_growth_optimal_risk(np.array([0.001, np.nan]), config)
+
+class TestDiagnoseGrowthHeadroom:
+    """Observability-only headroom diagnostic over the risk grid (never re-selects)."""
+
+    @staticmethod
+    def _plateau_series() -> np.ndarray:
+        # Deterministic Kelly-concave normal series (peak scale ~2.0); the config
+        # below relaxes the tail gates so the whole grid stays feasible, isolating
+        # the plateau rule from tail-risk gating (same relaxed-constraint pattern
+        # as test_constraints_define_feasible_set_before_plateau_rule).
+        rng = np.random.default_rng(7)
+        return rng.normal(8e-4, 2e-2, 50000)
+
+    @staticmethod
+    def _plateau_config() -> GrowthSizingConfig:
+        return GrowthSizingConfig(
+            risk_grid=(1.0, 1.5, 1.75, 2.0, 2.25, 2.5, 3.0, 4.0),
+            reference_risk=1.0, horizon_years=1.0, n_paths=300, seed=0,
+            max_drawdown=1.5, max_ruin_prob=0.99,
+        )
+
+    # SCENARIO_HEADROOM_NULL_WHEN_INFEASIBLE
+    def test_headroom_null_when_infeasible(self) -> None:
+        # selected_risk=None short-circuits before the bootstrap: block_size is
+        # echoed from the passed result, never re-derived from unit_returns.
+        selected = GrowthSizingResult(None, 0.0, 1.0, 0.5, (), "infeasible", 19)
+        diag = diagnose_growth_headroom(self._plateau_series(), self._plateau_config(), selected)
+        assert isinstance(diag, GrowthHeadroomDiagnostic)
+        assert diag.selected_risk is None
+        assert diag.selected_median_log_growth == 0.0
+        assert diag.peak_feasible_risk is None
+        assert diag.peak_feasible_median_log_growth == 0.0
+        assert diag.headroom_ratio == 0.0
+        assert diag.risk_constrained is False
+        assert diag.block_size_used == 19
+
+    # SCENARIO_HEADROOM_ZERO_AT_TRUE_PEAK
+    def test_headroom_zero_at_true_peak(self) -> None:
+        # A single-point grid: the selected point is the only grid point, so
+        # there is nothing higher to compare against -- headroom is exactly 0
+        # and nothing can be tail-constrained.
+        cfg = GrowthSizingConfig(
+            risk_grid=(1.0,), reference_risk=1.0, horizon_years=1.0,
+            n_paths=300, seed=0, max_drawdown=1.5, max_ruin_prob=0.99,
+        )
+        selected = solve_growth_optimal_risk(
+            self._plateau_series(), cfg, use_drawdown_overlay=False,
+        )
+        assert selected.selected_risk == 1.0
+        diag = diagnose_growth_headroom(
+            self._plateau_series(), cfg, selected, use_drawdown_overlay=False,
+        )
+        assert diag.headroom_ratio == 0.0
+        assert diag.risk_constrained is False
+        assert diag.peak_feasible_risk == selected.selected_risk
+        assert diag.peak_feasible_median_log_growth == selected.median_log_growth
+
+    # SCENARIO_HEADROOM_DETECTS_TAIL_RISK_CONSTRAINT
+    def test_headroom_detects_tail_risk_constraint(self) -> None:
+        # v8_sized shape: median log growth climbs monotonically with risk while
+        # mdd_breach_prob explodes past the selected point, so the best feasible
+        # grid point sits slightly above selection and everything beyond it is
+        # walled off by tail risk (not the plateau rule).
+        config = GrowthSizingConfig(
+            risk_grid=(1.0, 1.05, 1.1, 1.15, 1.2, 1.25, 1.3, 1.4, 1.5),
+            reference_risk=1.0, horizon_years=1.0, n_paths=400, seed=0,
+        )
+        selected = solve_growth_optimal_risk(
+            _crash_stream(), config, use_drawdown_overlay=False,
+        )
+        assert selected.selected_risk is not None
+        diag = diagnose_growth_headroom(
+            _crash_stream(), config, selected, use_drawdown_overlay=False,
+        )
+        assert diag.risk_constrained is True
+        assert diag.headroom_ratio > 0.0
+        assert diag.peak_feasible_risk is not None
+        assert diag.peak_feasible_risk > diag.selected_risk
+        assert diag.selected_risk == selected.selected_risk
+        assert diag.selected_median_log_growth == selected.median_log_growth
+
+    # SCENARIO_HEADROOM_PLATEAU_NOT_RISK_CONSTRAINED
+    def test_headroom_plateau_not_risk_constrained(self) -> None:
+        # v6_growth_sized shape: every higher grid point stays feasible and the
+        # median declines past the peak, so the selected point already captures
+        # ~99% of the best feasible median and nothing is tail-constrained.
+        config = self._plateau_config()
+        selected = solve_growth_optimal_risk(
+            self._plateau_series(), config, use_drawdown_overlay=False,
+        )
+        assert selected.selected_risk is not None
+        diag = diagnose_growth_headroom(
+            self._plateau_series(), config, selected, use_drawdown_overlay=False,
+        )
+        assert diag.risk_constrained is False
+        assert 0.0 < diag.headroom_ratio < 0.05
+        assert len(selected.feasible_risks) == len(config.risk_grid)
+        assert diag.selected_risk == selected.selected_risk
+        assert diag.selected_median_log_growth == selected.median_log_growth
+
+    # SCENARIO_HEADROOM_REJECTS_EMPTY_INPUT
+    def test_headroom_rejects_empty_input(self) -> None:
+        config = self._plateau_config()
+        selected = solve_growth_optimal_risk(
+            self._plateau_series(), config, use_drawdown_overlay=False,
+        )
+        with pytest.raises(ValueError, match="empty"):
+            diagnose_growth_headroom(np.array([]), config, selected)
+        with pytest.raises(ValueError, match="finite"):
+            diagnose_growth_headroom(
+                np.array([0.001, np.nan]), config, selected,
+            )
+
+    def test_headroom_with_drawdown_overlay_branch(self) -> None:
+        # The path-dependent de-risk ladder (use_drawdown_overlay=True) is a
+        # distinct simulation branch; the diagnostic must run it without ever
+        # re-selecting or mutating the passed result.
+        config = GrowthSizingConfig(
+            risk_grid=(1.0, 1.5, 2.0, 2.5, 3.0), reference_risk=1.0,
+            horizon_years=1.0, n_paths=300, seed=0,
+        )
+        selected = solve_growth_optimal_risk(
+            self._plateau_series(), config, use_drawdown_overlay=True,
+        )
+        assert selected.selected_risk is not None
+        diag = diagnose_growth_headroom(
+            self._plateau_series(), config, selected, use_drawdown_overlay=True,
+        )
+        assert diag.selected_risk == selected.selected_risk
+        assert diag.selected_median_log_growth == selected.median_log_growth
+        assert diag.peak_feasible_median_log_growth >= selected.median_log_growth - 1e-9
+        assert diag.headroom_ratio >= 0.0
 
 class TestApplyRealisedRiskOverlay:
     def _index(self, n: int = 5) -> pd.DatetimeIndex:

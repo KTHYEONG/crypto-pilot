@@ -58,6 +58,26 @@ class GrowthSizingResult:
     block_size_used: int
 
 
+@dataclass(frozen=True, slots=True)
+class GrowthHeadroomDiagnostic:
+    """Observability-only headroom report, mirroring ``block_size_search_hit_cap``.
+
+    Records where the selected risk sits relative to the best feasible point of
+    the *tested* grid and whether any higher-risk point is walled off by tail
+    risk instead of merely sitting off the 95% plateau. This diagnostic passes
+    or fails nothing -- it never re-selects a risk and never feeds back into the
+    ``GrowthSizingResult`` it describes.
+    """
+
+    selected_risk: float | None
+    selected_median_log_growth: float
+    peak_feasible_risk: float | None
+    peak_feasible_median_log_growth: float
+    headroom_ratio: float
+    risk_constrained: bool
+    block_size_used: int
+
+
 def drawdown_risk_multiplier(drawdown: np.ndarray) -> np.ndarray:
     """Vectorized piecewise de-risk ladder on a positive drawdown fraction.
 
@@ -192,6 +212,89 @@ def solve_growth_optimal_risk(
         ruin_prob=selected[3],
         feasible_risks=tuple(item[0] for item in feasible),
         binding_constraint="none",
+        block_size_used=block_size,
+    )
+
+
+def diagnose_growth_headroom(
+    unit_returns: np.ndarray,
+    config: GrowthSizingConfig,
+    selected: GrowthSizingResult,
+    *,
+    use_drawdown_overlay: bool = True,
+) -> GrowthHeadroomDiagnostic:
+    """Report whether leverage is exhausted and by which constraint.
+
+    Purely observational: independently re-runs the same risk-grid feasibility
+    loop :func:`solve_growth_optimal_risk` runs (same block-bootstrap draw,
+    same per-grid-point median/mdd/ruin computation, same overlay branch --
+    deliberate duplication so the frozen solver contract is never touched) and
+    reports, for grid points strictly above the selected risk, the best
+    feasible median log growth vs. the selected point and whether any higher
+    point that *would* beat the running peak is blocked by tail risk rather
+    than by the 95% plateau rule. Like ``block_size_search_hit_cap`` in
+    ``reliability.py`` this is a pure observability flag: it passes or fails
+    nothing, never re-selects, and never mutates ``selected``.
+
+    When ``selected.selected_risk`` is ``None`` (infeasible at every grid
+    point) the bootstrap is skipped and a degenerate diagnostic is returned.
+    """
+    arr = np.asarray(unit_returns, dtype=np.float64)
+    if arr.size == 0:
+        raise ValueError("unit_returns must not be empty")
+    if not np.isfinite(arr).all():
+        raise ValueError("unit_returns must contain only finite values")
+
+    if selected.selected_risk is None:
+        return GrowthHeadroomDiagnostic(
+            None, 0.0, None, 0.0, 0.0, False, selected.block_size_used,
+        )
+
+    path_len = round(config.horizon_years * config.bars_per_year)
+    block_size = derive_block_size(arr)
+    paths = _block_bootstrap_paths(
+        arr,
+        n_paths=config.n_paths,
+        path_len=path_len,
+        block_size=block_size,
+        seed=config.seed,
+    )
+
+    peak_risk: float | None = selected.selected_risk
+    peak_median_g = selected.median_log_growth
+    risk_constrained = False
+    for risk in config.risk_grid:
+        if risk <= selected.selected_risk:
+            continue
+        scale = risk / config.reference_risk
+        scaled = paths * scale
+        if use_drawdown_overlay:
+            finals, mdd = _simulate_with_drawdown_overlay(scaled)
+        else:
+            cum = np.cumprod(1.0 + scaled, axis=1)
+            finals = cum[:, -1]
+            mdd = (1.0 - cum / np.maximum.accumulate(cum, axis=1)).max(axis=1)
+        mdd_breach_prob = float(np.mean(mdd > config.max_drawdown))
+        ruin_prob = float(np.mean(finals < config.ruin_fraction))
+        median_g = float(np.median(np.log(np.maximum(finals, 1e-12))))
+        if mdd_breach_prob <= config.max_drawdown_prob and ruin_prob <= config.max_ruin_prob:
+            if median_g > peak_median_g:
+                peak_median_g = median_g
+                peak_risk = risk
+        elif median_g > peak_median_g:
+            risk_constrained = True
+
+    headroom_ratio = (
+        peak_median_g / selected.median_log_growth - 1.0
+        if selected.median_log_growth > 0.0 else 0.0
+    )
+    return GrowthHeadroomDiagnostic(
+        selected_risk=selected.selected_risk,
+        selected_median_log_growth=selected.median_log_growth,
+        peak_feasible_risk=peak_risk,
+        peak_feasible_median_log_growth=peak_median_g,
+        headroom_ratio=headroom_ratio,
+        risk_constrained=risk_constrained,
         block_size_used=block_size,
     )
 
@@ -336,6 +439,11 @@ def _check_contract() -> None:
     assert {f.name for f in fields(GrowthSizingResult)} == {
         "selected_risk", "median_log_growth", "mdd_breach_prob", "ruin_prob",
         "feasible_risks", "binding_constraint", "block_size_used",
+    }
+    assert {f.name for f in fields(GrowthHeadroomDiagnostic)} == {
+        "selected_risk", "selected_median_log_growth", "peak_feasible_risk",
+        "peak_feasible_median_log_growth", "headroom_ratio", "risk_constrained",
+        "block_size_used",
     }
     dd = np.array([0.0, 0.05, 0.10, 0.15, 0.175, 0.20, 0.30])
     assert np.allclose(drawdown_risk_multiplier(dd), np.array([1.0, 1.0, 0.625, 0.25, 0.125, 0.0, 0.0]))
