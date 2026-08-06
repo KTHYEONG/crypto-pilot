@@ -1,6 +1,16 @@
 {
   "tasks": [
     {
+      "task_id": "xs_alpha_universe_breadth_expansion",
+      "date": "2026-08-06",
+      "adr_id": "ADR_20260806_xs_alpha_universe_breadth_expansion",
+      "domain": "data",
+      "title": "XS Alpha 유니버스 확장 가설 실측 반증 + 원칙적 후보 스캔 진단 자산화",
+      "why": "PASS 후보 존재에도 성장 상한이 낮다는 지적에 대해 직전 사이클(sizing/book-blend/capital-split) 전부 반증됨에 따라, 사용자가 남은 축인 '유니버스 breadth'를 근거없는 유명코인 선정 금지 조건으로 전면 재검토하고 가설을 실측 검증하라고 요청함. TREND_SCREEN_SYMBOLS(15종목)는 git 고고학상 도입 커밋에 선정 근거가 전혀 없었음(원칙적 방법론 부재 확정).",
+      "resolution": "로컬 데이터 레이크(652종목, 신규 수집 없음)를 4중 객관적 기준(전체이력커버리지>=0.99, funding 존재, taker_buy_ratio 무결성, 현재 유동성>0)으로 스캔해 35종목의 원칙적 후보군을 도출(현재 15종목은 전원 부분집합). v6+Donchian growth_headroom 파이프라인을 15/25/35종목에서 동일 조건 실측: 25종목 Sharpe 0.80, 35종목 Sharpe 1.24 -- 둘 다 현재 15종목(1.76)보다 악화, selected_risk가 1.0에서 None(전 grid infeasible)으로 하락, 비단조. 유니버스 확장 가설 반증 확정, 프로덕션 TREND_SCREEN_SYMBOLS 무변경. 스캔 방법론은 src/research/universe/candidate_scan.py(순수 평가) + src/application/research/universe/candidate_scan.py(오케스트레이터+영속화) + xs-universe-candidate-scan CLI로 재현 가능한 진단 자산화(growth_headroom과 동일한 관측전용 철학).",
+      "impact": "성장 상한 반증 사이클 완결: sizing/book-blend(coarse+fine)/capital-split/universe-breadth(2개 크기) 총 5개 가설 전부 반증. 남은 레버는 신호 재설계·실행비용 최적화·tail-risk 정책 재검토(사용자 리스크성향 결정 필요)뿐임을 확정. 부수 발견: 18종목에 2022-10-01부터 552봉 taker_buy_ratio 시스템 결손 존재(수집 아카이브 버그, 별도 백필 과제로 분리)."
+    },
+    {
       "task_id": "xs_alpha_growth_ceiling_breadth",
       "date": "2026-08-06",
       "adr_id": "ADR_20260806_xs_alpha_growth_ceiling_breadth",
