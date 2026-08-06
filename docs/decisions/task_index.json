@@ -1,6 +1,16 @@
 {
   "tasks": [
     {
+      "task_id": "TASK_XS_ALPHA_BASELINE_LEG_SELECTION_EXIT_FAIRNESS",
+      "date": "2026-08-06",
+      "adr_id": "ADR_20260806_XS_ALPHA_BASELINE_LEG_SELECTION_EXIT_FAIRNESS",
+      "domain": "risk",
+      "title": "XS Alpha Baseline Leg Selection rev.3 - Exit-Side Fairness + Hurdle Decomposition",
+      "why": "Rev.2's 32-candidate comparison ran technical-expert legs with zero intrabar stop-loss while donchian_long_only_v1/funding_signed_directional_v1 always carried a hard-coded ATR x2.0/14 stop, an unfair exit-risk asymmetry; hurdle_rate=0.15 gated on LCB90 was mischaracterized as simply unfounded rather than structurally strict.",
+      "resolution": "Applied the identical frozen ATR x2.0/14-period stop to run_technical_expert_backtest across all 30 non-tournament legs in run_xs_alpha_baseline_leg_selection, added reliability_point_to_lcb90_ratio and reliability_block_size_hit_cap diagnostics (reusing block_size_search_hit_cap), and re-ran the sealed-holdout CLI.",
+      "impact": "donchian_long_only_v1 remains the winner (blended_sharpe=2.2978 unchanged) after exit-risk parity, confirming its edge is genuine, not a stop-loss privilege; reliability still FAILs on LCB90 hurdle (point_cagr 8.73% vs lcb90 3.39%, ratio 2.574x matches project-wide 2.48x-3.11x band) while block_size_search_hit_cap=False confirms LCB90 is not artificially punitive; hurdle_rate decision remains open for the user."
+    },
+    {
       "task_id": "xs_alpha_baseline_leg_selection_rev2",
       "date": "2026-08-06",
       "adr_id": "ADR_20260806_xs_alpha_baseline_leg_selection_rev2",
