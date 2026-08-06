@@ -1,6 +1,16 @@
 {
   "tasks": [
     {
+      "task_id": "xs_alpha_growth_ceiling_breadth",
+      "date": "2026-08-06",
+      "adr_id": "ADR_20260806_xs_alpha_growth_ceiling_breadth",
+      "domain": "risk",
+      "title": "XS Alpha 성장 상한: positioning-only 3번째 다리 nested blend 실측",
+      "why": "growth_ceiling_diagnostic(2026-08-06)이 두 PASS 후보(v6_growth_sized/v8_sized)의 사이징 레버 완전 소진을 확정하고, 유일한 다음 레버로 '3번째 저상관 다리(breadth)'를 지목함. 5회 이상의 원점 발굴 시도(carry/OI-deleveraging/funding-directional/5-way 블렌드)는 전부 반증됐고, xs_alpha_positioning_v7은 v6의 기존 3-family를 내부에 포함해 진짜 독립 다리가 아니었음. build_xs_alpha_positioning_weights 내부에서 계산 후 버려지던 positioning-only family 단독 스코어가 유일한 미시험 저상관 후보였음.",
+      "resolution": "select_baseline_blend_weight/build_blended_ledger/solve_growth_optimal_risk 등 기존 frozen 2-레그 순수 함수를 전혀 변경하지 않고, nested pairwise composition으로 2회 중첩 적용(v6⊕Donchian 다음 그 결과⊕positioning-only leg)하는 xs-triple-blend-sized를 구현. cross_sectional.py에 _positioning_score 헬퍼 추출 + build_xs_alpha_positioning_only_weights 신규 추가(v7 동작 무변경, 회귀 없음 확인). CLI 실행(holdout 봉인) 결과: positioning_weight=0.0000으로 discovery-window worst-year-robust 선택에서 그리드 최솟값(미채택)이 승리, xs_baseline_weight/selected_risk/qualification Sharpe/LCB90 전부 v8_sized와 완전 동일.",
+      "impact": "성장 상한이 사이징뿐 아니라 positioning 데이터축 레벨에서도 이미 소진됨을 실측 확정(스펙의 반증 가능 성공 기준 미충족, 정직한 negative result). positioning family 자체는 discovery에서 admitted=True/Sharpe 1.03이었으나 AB 블렌드보다 매 worst-year 구간에서 열위라 어떤 배합비에서도 개선 없음. 코드는 유효한 관측 인프라로 잔존(xs-triple-blend-sized CLI, 7개 테스트 시나리오 전부 PASS). 다음 레버는 이번 스펙 범위 밖의 Plan B: expert_portfolio/rolling_admission 인프라를 통한 자본 레벨 다중전략 분산."
+    },
+    {
       "task_id": "xs_alpha_growth_ceiling_diagnostic",
       "date": "2026-08-06",
       "adr_id": "ADR_20260806_xs_alpha_growth_ceiling_diagnostic",
