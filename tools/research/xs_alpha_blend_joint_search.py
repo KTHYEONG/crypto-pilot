@@ -35,6 +35,7 @@ from pathlib import Path
 if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
+import numpy as np
 import pandas as pd
 
 from src.application.research.technical.trend_screen import _load_symbol_data
@@ -50,6 +51,9 @@ from src.common.errors import DataIntegrityError
 from src.research.baseline.backtest import run_backtest
 from src.research.contracts import CostModel, StrategySpec
 from src.research.evaluation.policy import resolve_evaluation_end
+from src.research.evaluation.reliability import compute_turnover_fold_upper_bound
+from src.research.technical_experts.cross_sectional import XsAdmissionConfig
+from src.research.technical_experts.xs_alpha_baseline_blend import apply_fixed_gross_leverage, build_blended_ledger
 from src.research.technical_experts.cross_sectional import (
     XsAlphaCompositeSpec,
     XsCompositeSpec,
@@ -68,6 +72,11 @@ from tools.research.structural_tuner import (
     StructuralSearchResult,
     run_structural_search,
 )
+
+# Frozen 4h-calendar bars-per-year invariant, identical to
+# ``xs_alpha_baseline_blend._BARS_PER_YEAR`` /
+# ``GrowthSizingConfig.bars_per_year`` in ``cross_sectional``.
+_BARS_PER_YEAR_CONST = 2190
 
 # Joint search space over the blend's two free parameters. ``xs_alpha_weight``
 # is the sleeve weight in ``[0, 1]`` (the grid the v8 blend already searched
@@ -156,8 +165,11 @@ def run(*, max_trials: int = 30, seed: int = 0) -> StructuralSearchResult:
     ``run_structural_search`` unchanged (TPE sampler, ``max_trials`` grid-
     comparable budget cap, and the mandatory plateau-stability gate). Prints
     ``best_params``, ``best_is_score``, ``plateau_neighbor_ratio``, and
-    ``plateau_passed`` -- nothing else. Never calls ``evaluate_xs_admission``
-    and never touches qualification/holdout data.
+    ``plateau_passed``, then -- strictly after the search returns -- an
+    informational turnover diagnostic (``discovery_worst_fold_turnover`` vs
+    ``XsAdmissionConfig().turnover_max``) for the researcher to weigh; it never
+    influences the search or re-enters optuna. Never calls
+    ``evaluate_xs_admission`` and never touches qualification/holdout data.
     """
     xs_alpha_net, xs_realized_weights, baseline_net, baseline_realized_weight = (
         _load_net_returns()
@@ -178,6 +190,61 @@ def run(*, max_trials: int = 30, seed: int = 0) -> StructuralSearchResult:
     print(f"best_is_score={result.best_is_score:.6f}")
     print(f"plateau_neighbor_ratio={result.plateau_neighbor_ratio:.4f}")
     print(f"plateau_passed={result.plateau_passed}")
+
+    # Post-search turnover diagnostic -- informational only, never a rejection
+    # criterion. The real accept/reject decision stays exactly where it already
+    # was: evaluate_xs_admission, called honestly on real qualification-window
+    # data by the CLI orchestrator. turnover_max's own calibration could not be
+    # traced to any derivation in this repo (see the contract's 'why'), so the
+    # search reproduces the winning point's scaled realized-weight ledger and
+    # reports the worst-fold discovery-window turnover for the researcher to
+    # weigh -- not for the code to decide on.
+    best = result.best_params
+    xs_disc = xs_alpha_net[
+        (xs_alpha_net.index >= XS_DISCOVERY_START) & (xs_alpha_net.index <= DISCOVERY_END)
+    ]
+    xs_w_disc = xs_realized_weights[
+        (xs_realized_weights.index >= XS_DISCOVERY_START)
+        & (xs_realized_weights.index <= DISCOVERY_END)
+    ]
+    bl_disc = baseline_net[
+        (baseline_net.index >= XS_DISCOVERY_START) & (baseline_net.index <= DISCOVERY_END)
+    ]
+    bl_w_disc = baseline_realized_weight[
+        (baseline_realized_weight.index >= XS_DISCOVERY_START)
+        & (baseline_realized_weight.index <= DISCOVERY_END)
+    ]
+    common = (
+        xs_disc.index.intersection(bl_disc.index)
+        .intersection(xs_w_disc.index)
+        .intersection(bl_w_disc.index)
+    )
+    blended_equity, blended_weights = build_blended_ledger(
+        xs_disc.reindex(common).astype(np.float64),
+        xs_w_disc.reindex(common),
+        bl_disc.reindex(common).astype(np.float64),
+        bl_w_disc.reindex(common),
+        best["xs_alpha_weight"],
+    )
+    _scaled_net, scaled_weights = apply_fixed_gross_leverage(
+        blended_equity.pct_change().fillna(0.0).rename("blended_net"),
+        blended_weights,
+        best["leverage_scale"],
+    )
+    per_bar_turnover = pd.Series(
+        np.abs(np.diff(scaled_weights.to_numpy(dtype=np.float64), axis=0)).sum(axis=1),
+        index=scaled_weights.index[1:],
+        name="per_bar_turnover",
+    )
+    worst_fold_turnover = compute_turnover_fold_upper_bound(
+        per_bar_turnover, _BARS_PER_YEAR_CONST,
+    )
+    print(
+        f"discovery_worst_fold_turnover={worst_fold_turnover:.2f} "
+        f"turnover_max={XsAdmissionConfig().turnover_max:.1f} "
+        "(diagnostic only, not a rejection criterion -- calibration unverified "
+        "in this repo, see contract 'why')"
+    )
     return result
 
 
