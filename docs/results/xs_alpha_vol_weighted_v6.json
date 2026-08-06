@@ -28,22 +28,9 @@
   },
   "discovery_end": "2023-12-31T23:59:59+00:00",
   "discovery_start": "2022-04-03T00:00:00+00:00",
-  "holdout": {
-    "admitted": true,
-    "annual_sharpe": {
-      "2026": 1.7307715
-    },
-    "annualized_turnover": 25.76978251,
-    "beta": 0.00273576,
-    "binding_constraint": null,
-    "breakeven_cost": 0.01089273,
-    "cagr": 0.28296654,
-    "mdd": -0.08209349,
-    "sharpe": 1.7307715,
-    "t_stat": 1.24214481
-  },
-  "holdout_end": "2026-07-07T20:00:00+00:00",
-  "holdout_start": "2026-01-01T00:00:00+00:00",
+  "holdout": null,
+  "holdout_end": null,
+  "holdout_start": null,
   "profile": "xs_alpha_vol_weighted_v6",
   "qualification": {
     "admitted": true,
@@ -64,28 +51,28 @@
   "qualification_start": "2024-01-01T00:00:00+00:00",
   "reliability": {
     "fold": {
-      "fold_concentration": 0.30264145,
-      "fold_concentration_threshold": 0.40667695,
-      "fold_reference_sharpe": 1.26086141,
+      "fold_concentration": 0.37903559,
+      "fold_concentration_threshold": 0.54724357,
+      "fold_reference_sharpe": 1.41372982,
       "gate_pass": true,
-      "max_period_contribution": 0.31717045,
-      "median_fold_cagr": 0.35341258,
-      "median_fold_calmar": 3.94882493,
-      "n_folds": 6,
+      "max_period_contribution": 0.40221321,
+      "median_fold_cagr": 0.35004287,
+      "median_fold_calmar": 3.61095213,
+      "n_folds": 4,
       "worst_fold_cagr": -0.02710528
     },
     "lcb": {
-      "block_size_used": 16,
-      "lcb90_cagr": 0.09982187,
-      "lcb95_cagr": 0.05851585,
-      "p_negative": 0.01733333,
-      "point_cagr": 0.26560112,
-      "t_stat": 2.21526699,
-      "trade_count": 1133,
+      "block_size_used": 10,
+      "lcb90_cagr": 0.0773608,
+      "lcb95_cagr": 0.02552555,
+      "p_negative": 0.03266667,
+      "point_cagr": 0.26117317,
+      "t_stat": 1.88606764,
+      "trade_count": 879,
       "verdict": "FAIL"
     }
   },
-  "report_fingerprint": "284cd34966a472a2f4634f135b20422d034baf83e1797b200490c1b2987a3c34",
+  "report_fingerprint": "ce75619c48ea34267fcabdee4d31044252a92387d38842f5e8116a9e0b50aa79",
   "spec": {
     "execution_delay_bars": 1,
     "fee_rate": 0.0005,
@@ -109,20 +96,6 @@
       "mdd": -0.1567522,
       "sharpe": 1.14899123,
       "t_stat": 1.51888149
-    },
-    "holdout": {
-      "admitted": true,
-      "annual_sharpe": {
-        "2026": 1.85900342
-      },
-      "annualized_turnover": 25.76978251,
-      "beta": 0.00076981,
-      "binding_constraint": null,
-      "breakeven_cost": 0.01151696,
-      "cagr": 0.30414075,
-      "mdd": -0.08752586,
-      "sharpe": 1.85900342,
-      "t_stat": 1.33417464
     },
     "qualification": {
       "admitted": true,
