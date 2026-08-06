@@ -135,6 +135,9 @@
   "src/application/research/technical/xs_trend_screen.py": {
     "testing": "tests/unit/application/research/technical/test_xs_trend_screen.py"
   },
+  "src/application/research/universe/candidate_scan.py": {
+    "testing": "tests/unit/application/research/universe/test_candidate_scan_orchestrator.py"
+  },
   "src/cli/adapters/collect_data.py": {
     "testing": "tests/contract/test_cli_compatibility.py"
   },
@@ -584,6 +587,9 @@
   },
   "src/research/technical_experts/xs_contextual_router.py": {
     "testing": "tests/unit/research/technical_experts/test_xs_contextual_router.py"
+  },
+  "src/research/universe/candidate_scan.py": {
+    "testing": "tests/unit/research/universe/test_candidate_scan.py"
   },
   "src/research/universe/pit_universe.py": {
     "testing": "tests/unit/research/universe/test_pit_universe.py"
