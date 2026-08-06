@@ -572,6 +572,34 @@ def compute_fold_distribution(
     return result_out
 
 
+def _equal_duration_fold_labels(index: pd.DatetimeIndex, fold_duration: str) -> np.ndarray:
+    """Map each index point to its equal-duration month-start fold code.
+
+    Validates ``fold_duration`` and constructs the fold boundaries exactly as
+    :func:`compute_equal_duration_fold_distribution` did inline, returning the
+    integer ``pd.cut`` fold code per point (``None`` for points outside the
+    covered span -- e.g. a point sitting on the left edge of the first
+    boundary). Extracted so the same calendar alignment is reusable by the
+    turnover diagnostic without duplicating the validation or the boundary
+    arithmetic. Same bins semantics as the original inline block: right-closed
+    intervals, so a point exactly on an internal boundary belongs to the fold
+    ending there.
+    """
+    if not isinstance(fold_duration, str) or not fold_duration.endswith("MS"):
+        raise ValueError(f"fold_duration must be an 'NMS' month-start frequency, got {fold_duration!r}")
+    fold_months = int(fold_duration[:-2])
+    if index[-1] < index[0] + pd.DateOffset(months=fold_months):
+        raise ValueError(
+            f"equity span does not admit an equal-duration fold at {fold_duration}"
+        )
+    boundaries = pd.date_range(
+        start=index[0],
+        end=index[-1] + pd.DateOffset(months=fold_months),
+        freq=fold_duration,
+    )
+    return np.asarray(pd.cut(index, bins=boundaries, labels=False), dtype=object)
+
+
 def compute_equal_duration_fold_distribution(
     equity: pd.Series,
     config: ReliabilityGateConfig = ReliabilityGateConfig(),  # noqa: B008
@@ -599,19 +627,7 @@ def compute_equal_duration_fold_distribution(
     if (values <= 0).any():
         raise ValueError("equity must be strictly positive")
 
-    if not isinstance(fold_duration, str) or not fold_duration.endswith("MS"):
-        raise ValueError(f"fold_duration must be an 'NMS' month-start frequency, got {fold_duration!r}")
-    fold_months = int(fold_duration[:-2])
-    if equity.index[-1] < equity.index[0] + pd.DateOffset(months=fold_months):
-        raise ValueError(
-            f"equity span does not admit an equal-duration fold at {fold_duration}"
-        )
-    boundaries = pd.date_range(
-        start=equity.index[0],
-        end=equity.index[-1] + pd.DateOffset(months=fold_months),
-        freq=fold_duration,
-    )
-    fold_labels = np.asarray(pd.cut(equity.index, bins=boundaries, labels=False), dtype=object)
+    fold_labels = _equal_duration_fold_labels(equity.index, fold_duration)
     log_returns = np.log(values[1:] / values[:-1])
     fold_of_log_return = fold_labels[1:]
     contribution_by_fold: dict[int, float] = {}
@@ -672,6 +688,41 @@ def compute_equal_duration_fold_distribution(
     return result
 
 
+def compute_turnover_fold_upper_bound(
+    turnover: pd.Series, bars_per_year: int, fold_duration: str = "6MS"
+) -> float:
+    """Annualized worst equal-duration-fold turnover diagnostic.
+
+    Splits a per-bar turnover series into calendar ``fold_duration`` folds
+    (default ``6MS``, matching :func:`compute_equal_duration_fold_distribution`'s
+    own default) and returns the highest annualized fold mean
+    (``mean * bars_per_year``): a self-adapting, calibration-free estimate of
+    the turnover regime a candidate prints in its worst sustained window.
+    Deliberately a diagnostic primitive, not a gate -- it fails closed to
+    ``+inf`` whenever the span cannot admit at least two folds, so a caller
+    reporting the number is always told it is undeterminable rather than handed
+    a misleading finite value.
+    """
+    if not isinstance(turnover.index, pd.DatetimeIndex):
+        raise ValueError("turnover must have a DatetimeIndex")
+    if len(turnover) < 2:
+        return float("inf")
+    try:
+        fold_labels = _equal_duration_fold_labels(turnover.index, fold_duration)
+    except ValueError:
+        return float("inf")
+    values = turnover.to_numpy(dtype=np.float64)
+    fold_ids = sorted({f for f in fold_labels if f is not None and f == f})
+    fold_means: list[float] = []
+    for fold_id in fold_ids:
+        mask = fold_labels == fold_id
+        if mask.any():
+            fold_means.append(float(values[mask].mean()) * bars_per_year)
+    if len(fold_means) < 2:
+        return float("inf")
+    return max(fold_means)
+
+
 def compute_stress_test_gate(
     df: pd.DataFrame,
     spec: StrategySpec,
@@ -724,6 +775,7 @@ def _check_contract() -> None:
         compute_equal_duration_fold_distribution.__name__
         == "compute_equal_duration_fold_distribution"
     )
+    assert compute_turnover_fold_upper_bound.__name__ == "compute_turnover_fold_upper_bound"
 
 
 _check_contract()
