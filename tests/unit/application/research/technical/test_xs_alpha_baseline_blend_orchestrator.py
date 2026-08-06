@@ -603,6 +603,37 @@ class TestBaselineBlendJointOrchestration:
         assert report.qualification_turnover_neutral.binding_constraint is None
         assert report.qualification_turnover_neutral.admitted is True
 
+    def test_xabjs_09_turnover_max_default_now_admits_v8_joint_qualification(self) -> None:
+        # TMAX-02: the frozen v8_joint qualification point
+        # (xs_alpha_weight=0.2714, leverage_scale=3.9768) measures
+        # annualized_turnover=175.42x/yr on real data -- previously the sole
+        # binding constraint under the 150.0 default. With the recalibrated
+        # DEFAULT XsAdmissionConfig() (200.0), that turnover clears the
+        # turnover_max leg while every other gate is untouched. The candidate is
+        # exercised here as a direct admission evaluation at the exact frozen
+        # turnover (synthetic data cannot reproduce the real book's 175.42x),
+        # using only the class default -- no explicit override.
+        index = pd.date_range("2024-01-01", periods=2200, freq="4h", tz="UTC")
+        rng = np.random.default_rng(2026)
+        r = rng.normal(0.0006, 0.0045, len(index))
+        equity = pd.Series(10000.0 * np.cumprod(1.0 + r), index=index)
+        turnover = pd.Series(175.42 / 2190.0, index=index)
+        benchmark = pd.Series(rng.normal(0.0, 0.02, len(index)), index=index)
+
+        res = xs_blend.evaluate_xs_admission(
+            equity, turnover, benchmark, XsAdmissionConfig(),
+        )
+        assert res.annualized_turnover == pytest.approx(175.42, rel=1e-3)
+        assert res.admitted is True
+        assert res.binding_constraint is None
+
+        pinned = XsAdmissionConfig(turnover_max=150.0)
+        res_pinned = xs_blend.evaluate_xs_admission(
+            equity, turnover, benchmark, pinned,
+        )
+        assert res_pinned.admitted is False
+        assert "turnover_max" in res_pinned.binding_constraint
+
     def test_xabjs_07_qualification_worst_fold_turnover_reuses_existing_function(
         self, monkeypatch,
     ) -> None:
