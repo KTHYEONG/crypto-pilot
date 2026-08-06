@@ -14,6 +14,7 @@ never proved a discovery/qualification edge is out of scope.
 
 from __future__ import annotations
 
+import dataclasses
 import json
 from dataclasses import dataclass
 from pathlib import Path
@@ -21,6 +22,9 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
+from src.application.research.technical.reliability_ledger import (
+    persist_reliability_ledger_entry,
+)
 from src.application.research.technical.trend_screen import _load_symbol_data
 from src.application.research.technical.xs_trend_screen import (
     XS_ALPHA_PROFILE_ID,
@@ -36,7 +40,12 @@ from src.application.research.technical.xs_trend_screen import (
 )
 from src.common.errors import DataIntegrityError
 from src.research.evaluation.policy import HOLDOUT_CUTOFF, resolve_evaluation_end
-from src.research.evaluation.reliability import ReliabilityGateConfig
+from src.research.evaluation.reliability import (
+    ReliabilityGateConfig,
+    derive_cost_multiple_hurdle_rate,
+    derive_realized_weights_cost_total,
+    equity_span_years,
+)
 from src.research.risk.growth_sizing import (
     GrowthSizingConfig,
     GrowthSizingResult,
@@ -335,7 +344,18 @@ def run_xs_alpha_growth_sizing(
         if oos_window is not None:
             oos_equity, oos_weights = oos_window
             reliability = evaluate_xs_reliability(
-                oos_equity, oos_weights, ReliabilityGateConfig(),
+                oos_equity,
+                oos_weights,
+                dataclasses.replace(
+                    ReliabilityGateConfig(),
+                    hurdle_rate=derive_cost_multiple_hurdle_rate(
+                        derive_realized_weights_cost_total(
+                            oos_weights, admission_config.round_trip_cost_rate
+                        ),
+                        equity_span_years(oos_equity),
+                        2.0,
+                    ),
+                ),
             )
 
     return XsGrowthSizingReport(
@@ -354,13 +374,12 @@ def run_xs_alpha_growth_sizing(
 
 
 def persist_xs_growth_sizing_report(report: XsGrowthSizingReport, path: Path) -> None:
-    """Write the byte-deterministic report payload to ``path``."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(report.to_json(), encoding="utf-8")
+    """Upsert into the consolidated pass/fail ledger, keyed by ``path.stem``."""
+    persist_reliability_ledger_entry(path.stem, report.to_payload(), path.parent)
 
 
 def xs_growth_sizing_report_path(profile: str = XS_VOL_WEIGHTED_ALPHA_PROFILE_ID) -> Path:
-    """Default persistence location for one growth-sized XS profile."""
+    """Logical report key for one growth-sized XS profile (ledger entry name, not a literal write target)."""
     return Path("docs/results") / f"{profile}_growth_sized.json"
 
 
