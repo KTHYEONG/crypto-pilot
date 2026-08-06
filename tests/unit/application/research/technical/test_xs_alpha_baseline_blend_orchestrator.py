@@ -1,10 +1,20 @@
 """Contract scenarios XABB-05 and XABJS-04..XABJS-05 for the XS alpha x baseline
-blend orchestration."""
+blend orchestration.
+
+SCENARIO_XS_ALPHA_QUALIFICATION_RELIABILITY_CLI_REMEASURE: the post-wiring
+reliability verdicts (v6 / v6_growth_sized / v7 / v8_sized flip FAIL->PASS;
+v8 / v8_joint / baseline_leg_selection stay FAIL) must be confirmed from a real
+sealed-holdout CLI re-run's block-bootstrap output, never assumed from the
+closed-form approximation table in
+``docs/specs/xs_alpha_reliability_cost_hurdle.md``. The pytest layer here only
+locks the wiring; the verdict re-measure is an out-of-band CLI step.
+"""
 
 from __future__ import annotations
 
 import ast
 import inspect
+import json
 import math
 from inspect import signature
 from pathlib import Path
@@ -39,6 +49,18 @@ from src.research.technical_experts.xs_alpha_baseline_blend import (
     _blended_sharpe,
     _discovery_common,
 )
+
+
+def _assert_ledger_upsert(path: Path, report: object) -> None:
+    """Report is upserted into exactly one of the two pass/fail ledgers, keyed by ``path.stem``."""
+    candidates = [
+        path.parent / "xs_alpha_reliability_pass.json",
+        path.parent / "xs_alpha_reliability_fail.json",
+    ]
+    written = [p for p in candidates if p.exists()]
+    assert len(written) == 1
+    ledger = json.loads(written[0].read_text(encoding="utf-8"))
+    assert ledger[path.stem] == report.to_payload()  # type: ignore[attr-defined]
 
 
 def _synthetic_market(start: str = "2022-01-01", end: str = "2025-12-31 23:59:59"):
@@ -240,8 +262,7 @@ class TestBaselineBlendOrchestration:
         report = xs_blend.run_xs_alpha_baseline_blend()
         path = tmp_path / "blend.json"
         xs_blend.persist_xs_alpha_baseline_blend_report(report, path)
-        assert path.exists()
-        assert path.read_text(encoding="utf-8") == report.to_json()
+        _assert_ledger_upsert(path, report)
         assert xs_blend.xs_baseline_blend_report_path().name == "xs_alpha_baseline_blend_v8.json"
 
 def _feasible_sizing(monkeypatch, selected_risk: float = 3.0) -> None:
@@ -376,8 +397,7 @@ class TestBaselineBlendSizedOrchestration:
         report = xs_blend.run_xs_alpha_baseline_blend_sized()
         path = tmp_path / "sized.json"
         xs_blend.persist_xs_alpha_baseline_blend_sized_report(report, path)
-        assert path.exists()
-        assert path.read_text(encoding="utf-8") == report.to_json()
+        _assert_ledger_upsert(path, report)
         assert (
             xs_blend.xs_baseline_blend_sized_report_path().name
             == "xs_alpha_baseline_blend_v8_sized.json"
@@ -545,8 +565,7 @@ class TestBaselineBlendJointOrchestration:
         )
         path = tmp_path / "joint.json"
         xs_blend.persist_xs_alpha_baseline_blend_joint_report(report, path)
-        assert path.exists()
-        assert path.read_text(encoding="utf-8") == report.to_json()
+        _assert_ledger_upsert(path, report)
         assert (
             xs_blend.xs_baseline_blend_joint_report_path().name
             == "xs_alpha_baseline_blend_v8_joint.json"
@@ -771,8 +790,7 @@ class TestBaselineLegSelectionOrchestration:
         report = xs_blend.run_xs_alpha_baseline_leg_selection()
         path = tmp_path / "leg_selection.json"
         xs_blend.persist_xs_alpha_baseline_leg_selection_report(report, path)
-        assert path.exists()
-        assert path.read_text(encoding="utf-8") == report.to_json()
+        _assert_ledger_upsert(path, report)
 
     def test_xbls_06_holdout_replayed_only_when_unsealed(self, monkeypatch) -> None:
         idx = pd.date_range("2022-01-01", "2026-07-07 20:00:00", freq="4h", tz="UTC")

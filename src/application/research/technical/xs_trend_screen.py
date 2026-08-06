@@ -33,11 +33,19 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
+from src.application.research.technical.reliability_ledger import (
+    persist_reliability_ledger_entry,
+)
 from src.application.research.technical.trend_screen import _load_symbol_data
 from src.common.errors import DataIntegrityError
 from src.research.baseline.backtest import _align_funding_rates
 from src.research.evaluation.policy import HOLDOUT_CUTOFF, resolve_evaluation_end
-from src.research.evaluation.reliability import ReliabilityGateConfig
+from src.research.evaluation.reliability import (
+    ReliabilityGateConfig,
+    derive_cost_multiple_hurdle_rate,
+    derive_realized_weights_cost_total,
+    equity_span_years,
+)
 from src.research.expert_portfolio.contextual_router import (
     build_causal_context_labels,
     state_labels,
@@ -754,7 +762,18 @@ def run_xs_trend_screen(
         if oos_window is not None:
             oos_equity, oos_weights = oos_window
             reliability = evaluate_xs_reliability(
-                oos_equity, oos_weights, ReliabilityGateConfig(),
+                oos_equity,
+                oos_weights,
+                dataclasses.replace(
+                    ReliabilityGateConfig(),
+                    hurdle_rate=derive_cost_multiple_hurdle_rate(
+                        derive_realized_weights_cost_total(
+                            oos_weights, execution_spec.round_trip_cost_rate()
+                        ),
+                        equity_span_years(oos_equity),
+                        2.0,
+                    ),
+                ),
             )
 
     stress_discovery: XsAdmissionResult | None = None
@@ -825,13 +844,12 @@ def run_xs_trend_screen(
 
 
 def persist_xs_screen_report(report: XsTrendScreenReport, path: Path) -> None:
-    """Write the byte-deterministic report payload to ``path``."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(report.to_json(), encoding="utf-8")
+    """Upsert into the consolidated pass/fail ledger, keyed by ``path.stem``."""
+    persist_reliability_ledger_entry(path.stem, report.to_payload(), path.parent)
 
 
 def xs_screen_report_path(profile: str = XS_NEUTRAL_PROFILE_ID) -> Path:
-    """Default persistence location for one source-controlled XS profile."""
+    """Logical report key for one source-controlled XS profile (ledger entry name, not a literal write target)."""
     return Path("docs/results") / f"{profile}.json"
 
 
