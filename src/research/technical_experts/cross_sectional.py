@@ -527,6 +527,34 @@ def _positioning_score(
     )
 
 
+def _basis_score(
+    closes: pd.DataFrame,
+    basis: pd.DataFrame,
+    alpha_spec: XsAlphaCompositeSpec,
+) -> pd.DataFrame:
+    """Contrarian cross-sectional z-score of the premium/basis family.
+
+    The negated sum -- the contrarian sign -- over the frozen
+    ``alpha_spec.signal_windows`` (42, 84, 168) triple of the cross-sectional
+    z-score of ``basis.rolling(window).mean()`` (low-basis names long,
+    high-basis names short). Byte-for-byte the structural mirror of
+    :func:`_positioning_score`; the caller-supplied ``basis`` panel carries the
+    already-settled 4h premium values (premiumIndexKlines ``close``) on the
+    common bar grid, so no separate sign or threshold parameter exists
+    (``quant.md`` "Invariant Logic Over Magic Numbers").
+    """
+    basis_score = np.zeros(
+        (len(closes.index), len(closes.columns)), dtype=np.float64,
+    )
+    for window in alpha_spec.signal_windows:
+        basis_score += _cross_sectional_zscore(
+            basis.rolling(window).mean().to_numpy(dtype=np.float64),
+        )
+    return pd.DataFrame(
+        -basis_score, index=closes.index, columns=list(closes.columns),
+    )
+
+
 def build_xs_alpha_positioning_weights(
     closes: pd.DataFrame,
     taker_buy_ratio: pd.DataFrame,
