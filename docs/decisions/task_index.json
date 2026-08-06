@@ -1,6 +1,16 @@
 {
   "tasks": [
     {
+      "task_id": "xs_alpha_blend_joint_turnover_diagnostic",
+      "date": "2026-08-06",
+      "adr_id": "ADR_20260806_xs_alpha_blend_joint_turnover_diagnostic",
+      "domain": "risk",
+      "title": "XS Alpha 블렌드 Optuna 결합탐색: turnover_max 게이트 대신 진단 리포팅으로 전환",
+      "why": "v8_joint 결합탐색(discovery_reliability_score) 최적점이 admission turnover_max(150x/yr)에 막힘. rev1(고정비율 1.230x)은 과최적화된 매직넘버로 기각, rev2(block-bootstrap UCB)는 샌드박스 검증 결과 실제 격차(1.23x)를 과소추정(1.01~1.10x)해 기각, worst-6개월-fold 통계(1.62x)로 대체했으나 사용자가 turnover_max=150 자체의 근거를 질의. git log -S 추적 결과 도입 커밋의 'spec section 3.1' 인용 문서가 현재 저장소에 존재하지 않고, CostModel은 turnover에 대해 완전히 선형(시장충격/유동성 항 없음)이라 turnover_max가 비용현실성을 보정한다는 근거가 없으며, docs/results/*.json 10개 프로파일 실측 비교에서 turnover_max에 막힌 v8_joint(turnover=175.4)가 오히려 전체 중 최고 CAGR(41.1%)을 기록함 -- 게이트 자체가 검증되지 않은 임의 기준일 가능성이 높음을 확인.",
+      "resolution": "discovery_reliability_score는 turnover 인지 거부 로직 없이 원래(순수 LCB90) 형태로 유지(rev1/2 되돌림, 순변경 0). reliability.py에 _equal_duration_fold_labels(기존 compute_equal_duration_fold_distribution의 fold 경계 로직 추출, 동작 불변 리팩터)와 compute_turnover_fold_upper_bound(동일 6개월 캘린더 fold 컨벤션 재사용, worst-fold 회전율 산출, 결정론적, 외부 캘리브레이션 상수 없음) 신설. tools/research/xs_alpha_blend_joint_search.py의 run()이 탐색 완료 후 최적점의 discovery 구간 worst-fold turnover를 계산해 turnover_max와 함께 진단 전용(비차단) 정보로 출력하도록 확장 -- 실제 채택 판정은 기존 evaluate_xs_admission(turnover_max=150, 무변경)에 전적으로 위임.",
+      "impact": "재실행 결과 탐색은 동일 지점(xs_alpha_weight=0.2714, leverage_scale=3.9768, plateau_passed=True)을 재발견했고 새 진단선(discovery_worst_fold_turnover=296.53)만 추가 출력. 실제 CLI(xs-baseline-blend-joint) 결과는 이전과 완전 동일: qualification admitted=False binding=turnover_max(175.42x/yr), LCB90=13.21%(t_stat/fold_concentration PASS). 전략 판정 변경 없음(의도된 결과) -- turnover_max=150 자체의 재검증은 범위 밖 후속 과제로 명시(별도 스펙 필요), CostModel을 turnover에 볼록하게 만드는 구조적 대안도 플랫폼 공유 인프라라 별도 승인 필요로 기록."
+    },
+    {
       "task_id": "xs_alpha_baseline_blend_joint_search",
       "date": "2026-08-05",
       "adr_id": "ADR_20260805_xs_alpha_baseline_blend_joint_search",
