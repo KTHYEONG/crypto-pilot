@@ -4,6 +4,11 @@ import argparse
 import logging
 
 from src.application.research.technical import evaluation as evaluation_module
+from src.application.research.technical.xs_alpha_baseline_blend import (
+    persist_xs_alpha_baseline_leg_selection_report,
+    run_xs_alpha_baseline_leg_selection,
+    xs_baseline_leg_selection_report_path,
+)
 from src.research.contracts import TechnicalExpertEvaluationRequest
 
 _logger = logging.getLogger("XsScreen")
@@ -265,6 +270,34 @@ def _run_xs_alpha_baseline_blend_joint(args: argparse.Namespace) -> None:
     )
 
 
+def _run_xs_alpha_baseline_leg_selection(args: argparse.Namespace) -> None:
+    from src.application.research.technical.xs_trend_screen import (
+        XS_VOL_WEIGHTED_ALPHA_PROFILE_ID,
+    )
+
+    profile = args.profile or XS_VOL_WEIGHTED_ALPHA_PROFILE_ID
+    if profile != XS_VOL_WEIGHTED_ALPHA_PROFILE_ID:
+        raise ValueError(
+            f"unknown baseline-leg-selection profile '{profile}'; comparison is "
+            f"restricted to '{XS_VOL_WEIGHTED_ALPHA_PROFILE_ID}'"
+        )
+    report = run_xs_alpha_baseline_leg_selection(unseal_holdout=args.unseal_holdout)
+    persist_xs_alpha_baseline_leg_selection_report(
+        report, xs_baseline_leg_selection_report_path(),
+    )
+    _logger.info(
+        "xs-baseline-leg-selection profile=%s selected_candidate=%s "
+        "pre_qualification_admitted=%s post_qualification_admitted=%s "
+        "post_qualification_sharpe=%.4f binding_constraint=%s",
+        report.profile,
+        report.selected_candidate,
+        report.pre_blend_qualification.admitted,
+        report.qualification.admitted,
+        report.qualification.sharpe,
+        report.qualification.binding_constraint,
+    )
+
+
 def add_single_technical_commands(run_sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
     """Attach the ``research run single technical`` subcommands."""
     technical = run_sub.add_parser(
@@ -362,3 +395,14 @@ def add_single_technical_commands(run_sub: argparse._SubParsersAction[argparse.A
         "--leverage-scale", type=float, default=_JOINT_LEVERAGE_SCALE,
     )
     xs_baseline_blend_joint.set_defaults(handler=_run_xs_alpha_baseline_blend_joint)
+
+    xs_baseline_leg_selection = run_sub.add_parser(
+        "xs-baseline-leg-selection",
+        help="Compare the five frozen single-symbol candidates as xs_alpha_vol_weighted_v6's baseline diversifier leg",
+    )
+    xs_baseline_leg_selection.add_argument("--profile", default=None)
+    xs_baseline_leg_selection.add_argument("--start", default=None)
+    xs_baseline_leg_selection.add_argument("--end", default=None)
+    xs_baseline_leg_selection.add_argument("--unseal-holdout", action="store_true", default=False)
+    xs_baseline_leg_selection.add_argument("--no-log-run", action="store_true", default=False)
+    xs_baseline_leg_selection.set_defaults(handler=_run_xs_alpha_baseline_leg_selection)
