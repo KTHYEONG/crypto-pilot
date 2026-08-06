@@ -1530,6 +1530,101 @@ def test_xs_baseline_leg_selection_cli_handler_is_wired() -> None:
     names = {n.name for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)}
     assert "_run_xs_alpha_baseline_leg_selection" in names
 
+def test_xs_basis_family_diagnostic_cli_parses_and_dispatches(monkeypatch) -> None:
+    from src.application.research.technical.xs_alpha_baseline_blend import (
+        XsBasisFamilyDiagnosticReport,
+    )
+    from src.research.technical_experts.cross_sectional import XsAdmissionResult
+
+    def _failed() -> XsAdmissionResult:
+        return XsAdmissionResult(
+            admitted=False, binding_constraint="x", sharpe=0.0, beta=0.0,
+            cagr=0.0, mdd=0.0, t_stat=0.0, annual_sharpe={},
+            annualized_turnover=0.0, breakeven_cost=0.0,
+        )
+
+    calls: list[bool] = []
+
+    def fake_run(*, unseal_holdout=False):
+        calls.append(unseal_holdout)
+        return XsBasisFamilyDiagnosticReport(
+            profile="xs_alpha_basis_family_diagnostic",
+            discovery=_failed(),
+            qualification=_failed(),
+            discovery_correlation={
+                "trend": 0.1, "funding_contrarian": 0.9, "taker_imbalance": -0.1,
+            },
+        )
+
+    persisted: list[str] = []
+    monkeypatch.setattr(
+        "src.cli.commands.research.single_technical.run_xs_alpha_basis_family_diagnostic",
+        fake_run,
+    )
+    monkeypatch.setattr(
+        "src.cli.commands.research.single_technical.persist_xs_alpha_basis_family_diagnostic_report",
+        lambda report, path: persisted.append(str(path)),
+    )
+    args = build_root_parser().parse_args([
+        "research", "run", "single", "xs-basis-family-diagnostic",
+        "--unseal-holdout",
+        "--no-log-run",
+    ])
+    args.handler(args)
+    assert calls == [True]
+    assert persisted == ["docs/results/xs_alpha_basis_family_diagnostic.json"]
+
+
+def test_xs_basis_family_diagnostic_cli_defaults_seal_holdout(monkeypatch) -> None:
+    from src.application.research.technical.xs_alpha_baseline_blend import (
+        XsBasisFamilyDiagnosticReport,
+    )
+    from src.research.technical_experts.cross_sectional import XsAdmissionResult
+
+    def _failed() -> XsAdmissionResult:
+        return XsAdmissionResult(
+            admitted=False, binding_constraint="x", sharpe=0.0, beta=0.0,
+            cagr=0.0, mdd=0.0, t_stat=0.0, annual_sharpe={},
+            annualized_turnover=0.0, breakeven_cost=0.0,
+        )
+
+    calls: list[bool] = []
+
+    def fake_run(*, unseal_holdout=False):
+        calls.append(unseal_holdout)
+        return XsBasisFamilyDiagnosticReport(
+            profile="xs_alpha_basis_family_diagnostic",
+            discovery=_failed(),
+            qualification=_failed(),
+            discovery_correlation={},
+        )
+
+    monkeypatch.setattr(
+        "src.cli.commands.research.single_technical.run_xs_alpha_basis_family_diagnostic",
+        fake_run,
+    )
+    monkeypatch.setattr(
+        "src.cli.commands.research.single_technical.persist_xs_alpha_basis_family_diagnostic_report",
+        lambda report, path: None,
+    )
+    args = build_root_parser().parse_args([
+        "research", "run", "single", "xs-basis-family-diagnostic", "--no-log-run",
+    ])
+    args.handler(args)
+    assert calls == [False]
+
+
+def test_xs_basis_family_diagnostic_cli_handler_is_wired() -> None:
+    # Contract python_assertion (CLI change): the handler function exists in the
+    # single-technical leaf module.
+    import ast
+    import pathlib
+
+    src = pathlib.Path("src/cli/commands/research/single_technical.py").read_text()
+    tree = ast.parse(src)
+    names = {n.name for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)}
+    assert "_run_xs_alpha_basis_family_diagnostic" in names
+
 
 def _triple_blend_failed():
     from src.research.technical_experts.cross_sectional import XsAdmissionResult
