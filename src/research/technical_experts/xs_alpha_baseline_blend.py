@@ -33,12 +33,18 @@ the inputs are already realized net returns and realized weight paths.
 
 from __future__ import annotations
 
+import dataclasses
 from collections.abc import Mapping
 
 import numpy as np
 import pandas as pd
 
-from src.research.evaluation.reliability import ReliabilityGateConfig
+from src.research.evaluation.reliability import (
+    ReliabilityGateConfig,
+    derive_cost_multiple_hurdle_rate,
+    derive_realized_weights_cost_total,
+    equity_span_years,
+)
 from src.research.technical_experts.cross_sectional import evaluate_xs_reliability
 
 # Frozen 4h calendar invariant, identical to
@@ -297,6 +303,7 @@ def discovery_reliability_score(
     discovery_end: pd.Timestamp,
     xs_alpha_weight: float,
     leverage_scale: float,
+    round_trip_cost_rate: float,
 ) -> float:
     """Discovery-only LCB90 objective for the joint weight x leverage search.
 
@@ -308,7 +315,11 @@ def discovery_reliability_score(
     read), then :func:`build_blended_ledger` applies the sleeve weight,
     :func:`apply_fixed_gross_leverage` applies the pure-linear gross-leverage
     overlay, and :func:`evaluate_xs_reliability` returns the block-bootstrap
-    LCB90 in % CAGR terms. The score genuinely responds to ``leverage_scale``
+    LCB90 in % CAGR terms. The reliability gate's ``hurdle_rate`` is derived
+    from the realized weight path's own turnover cost (``round_trip_cost_rate``
+    times the sum-of-abs-changes convention) rather than a flat constant, so
+    the objective penalizes expensive, high-turnover rebalancing on the
+    discovery window itself. The score genuinely responds to ``leverage_scale``
     (unlike a Sharpe/t_stat objective, which is scale-invariant under pure
     linear leverage) -- exactly the property that lets one objective search
     both axes jointly instead of the per-axis sequential pattern this project
@@ -354,7 +365,20 @@ def discovery_reliability_score(
         index=scaled_net.index,
         name="scaled_equity",
     )
-    result = evaluate_xs_reliability(scaled_equity, scaled_weights, ReliabilityGateConfig())
+    result = evaluate_xs_reliability(
+        scaled_equity,
+        scaled_weights,
+        dataclasses.replace(
+            ReliabilityGateConfig(),
+            hurdle_rate=derive_cost_multiple_hurdle_rate(
+                derive_realized_weights_cost_total(
+                    scaled_weights, round_trip_cost_rate
+                ),
+                equity_span_years(scaled_equity),
+                2.0,
+            ),
+        ),
+    )
     return float(result.lcb.lcb90_cagr)
 
 

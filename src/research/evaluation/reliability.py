@@ -21,6 +21,7 @@ _SECONDS_PER_YEAR = 365.25 * 86400
 @dataclass(frozen=True, slots=True)
 class ReliabilityGateConfig:
     hurdle_rate: float = 0.15
+    hurdle_cost_multiple: float = 2.0
     block_size: int | None = None
     n_bootstrap: int = 3000
     seed: int = 0
@@ -35,6 +36,10 @@ class ReliabilityGateConfig:
     def __post_init__(self) -> None:
         if self.hurdle_rate < 0:
             raise ValueError(f"hurdle_rate must be >= 0, got {self.hurdle_rate}")
+        if self.hurdle_cost_multiple < 0:
+            raise ValueError(
+                f"hurdle_cost_multiple must be >= 0, got {self.hurdle_cost_multiple}"
+            )
         if self.block_size is not None and self.block_size < 1:
             raise ValueError(f"block_size must be >= 1, got {self.block_size}")
         if self.n_bootstrap < 100:
@@ -285,6 +290,35 @@ def derive_cost_multiple_hurdle_rate(
     if cost_multiple < 0:
         raise ValueError(f"cost_multiple must be >= 0, got {cost_multiple}")
     return cost_multiple * (allocation_cost_total / years)
+
+
+def derive_realized_weights_cost_total(
+    realized_weights: pd.DataFrame,
+    round_trip_cost_rate: float,
+) -> float:
+    """Cumulative realized turnover cost over an already-realized weight path.
+
+    Reconstructs what the book actually paid from the realized weights using
+    the identical sum-of-abs-changes convention
+    :func:`run_xs_composite_ledger` and ``evaluate_xs_admission``'s
+    ``breakeven_cost`` already charge (``L1(Delta(weights)).sum() *
+    round_trip_cost_rate``, no 0.5 factor). Feeds
+    :func:`derive_cost_multiple_hurdle_rate` so the reliability gate's LCB90
+    floor is a multiple of measured turnover cost rather than a flat number.
+    Returns ``0.0`` for a frame with fewer than 2 rows (no bar-to-bar turnover
+    can be measured; fail-closed, matching ``count_closed_trades``' zero-row
+    convention). Raises ``ValueError`` on a negative ``round_trip_cost_rate``.
+    """
+    if round_trip_cost_rate < 0:
+        raise ValueError(
+            f"round_trip_cost_rate must be >= 0, got {round_trip_cost_rate}"
+        )
+    if len(realized_weights) < 2:
+        return 0.0
+    turnover_per_bar = np.abs(
+        np.diff(realized_weights.to_numpy(dtype=np.float64), axis=0)
+    ).sum(axis=1)
+    return float(turnover_per_bar.sum() * round_trip_cost_rate)
 
 
 def compute_equity_reliability_gate(
@@ -753,6 +787,7 @@ def _check_contract() -> None:
     assert (config.hurdle_rate, config.block_size, config.n_bootstrap, config.seed,
             config.min_trades, config.mdd_floor, config.t_stat_floor,
             config.max_period_contribution) == (0.15, None, 3000, 0, 30, -0.25, 2.0, 0.40)
+    assert config.hurdle_cost_multiple == 2.0
     assert config.fold_false_rejection_rate == 0.10
     assert config.fold_null_draws == 20000
     assert {f.name for f in fields(ReliabilityGateResult)} == {
