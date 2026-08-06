@@ -47,6 +47,15 @@
       "sharpe": 1.75530938,
       "t_stat": 2.32038926
     },
+    "growth_headroom": {
+      "block_size_used": 18,
+      "headroom_ratio": 0.0,
+      "peak_feasible_median_log_growth": 0.92971756,
+      "peak_feasible_risk": 1.0,
+      "risk_constrained": true,
+      "selected_median_log_growth": 0.92971756,
+      "selected_risk": 1.0
+    },
     "holdout": null,
     "pre_blend_discovery": {
       "admitted": true,
@@ -118,7 +127,7 @@
         "verdict": "PASS"
       }
     },
-    "report_fingerprint": "19d8fc4d83b7e123b89fffdcf27dd5303b8f7b501c75557259158edb42a715e4",
+    "report_fingerprint": "39a63bce4e380a38c17e46c4a271bc700cbbf1ca8661634397ba780974bb7587",
     "sizing": {
       "binding_constraint": "none",
       "block_size_used": 18,
