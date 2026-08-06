@@ -11,20 +11,155 @@
       "blended_sharpe": 1.97010391,
       "correlation": 0.00777225
     },
+    "technical_adx_di_regime_long_v1": {
+      "blend_weight": 0.8,
+      "blended_sharpe": 1.35178791,
+      "correlation": -0.01402856
+    },
+    "technical_adx_di_regime_short_v1": {
+      "blend_weight": 0.5,
+      "blended_sharpe": 1.87125894,
+      "correlation": 0.01116574
+    },
+    "technical_aroon_trend_long_v1": {
+      "blend_weight": 1.0,
+      "blended_sharpe": 1.28284966,
+      "correlation": -0.00924449
+    },
+    "technical_aroon_trend_short_v1": {
+      "blend_weight": 0.8,
+      "blended_sharpe": 1.3843513,
+      "correlation": 0.01062903
+    },
+    "technical_atr_volatility_breakout_long_v1": {
+      "blend_weight": 0.6,
+      "blended_sharpe": 1.74789567,
+      "correlation": 0.00721126
+    },
+    "technical_atr_volatility_breakout_short_v1": {
+      "blend_weight": 0.6,
+      "blended_sharpe": 1.61038304,
+      "correlation": 0.02030503
+    },
+    "technical_bb_squeeze_breakout_long_v1": {
+      "blend_weight": 0.4,
+      "blended_sharpe": 2.26182869,
+      "correlation": 0.02848144
+    },
+    "technical_bb_squeeze_breakout_short_v1": {
+      "blend_weight": 1.0,
+      "blended_sharpe": 1.28284966,
+      "correlation": 0.02447039
+    },
+    "technical_chandelier_trend_long_v1": {
+      "blend_weight": 1.0,
+      "blended_sharpe": 1.28284966,
+      "correlation": -0.02871444
+    },
+    "technical_chandelier_trend_short_v1": {
+      "blend_weight": 1.0,
+      "blended_sharpe": 1.28284966,
+      "correlation": -0.00871891
+    },
+    "technical_donchian_breakout_long_v1": {
+      "blend_weight": 0.8,
+      "blended_sharpe": 1.42472423,
+      "correlation": 0.00355072
+    },
+    "technical_donchian_breakout_short_v1": {
+      "blend_weight": 0.8,
+      "blended_sharpe": 1.30397443,
+      "correlation": 0.00813742
+    },
+    "technical_ema_alignment_long_v1": {
+      "blend_weight": 0.8,
+      "blended_sharpe": 1.4112619,
+      "correlation": -0.01557575
+    },
+    "technical_ema_alignment_short_v1": {
+      "blend_weight": 1.0,
+      "blended_sharpe": 1.28284966,
+      "correlation": 0.00314039
+    },
+    "technical_hull_moving_average_long_v1": {
+      "blend_weight": 0.8,
+      "blended_sharpe": 1.332299,
+      "correlation": -0.0093211
+    },
+    "technical_hull_moving_average_short_v1": {
+      "blend_weight": 0.8,
+      "blended_sharpe": 1.28900596,
+      "correlation": 0.01074148
+    },
+    "technical_ichimoku_cloud_long_v1": {
+      "blend_weight": 0.8,
+      "blended_sharpe": 1.3448591,
+      "correlation": 0.01391468
+    },
+    "technical_ichimoku_cloud_short_v1": {
+      "blend_weight": 1.0,
+      "blended_sharpe": 1.28284966,
+      "correlation": 0.02344336
+    },
     "technical_keltner_channel_breakout_long_v1": {
       "blend_weight": 0.6,
       "blended_sharpe": 1.51622241,
       "correlation": 0.00208508
+    },
+    "technical_keltner_channel_breakout_short_v1": {
+      "blend_weight": 0.6,
+      "blended_sharpe": 1.468079,
+      "correlation": 0.02491063
+    },
+    "technical_macd_histogram_regime_long_v1": {
+      "blend_weight": 0.6,
+      "blended_sharpe": 1.60639767,
+      "correlation": 0.01060213
+    },
+    "technical_macd_histogram_regime_short_v1": {
+      "blend_weight": 1.0,
+      "blended_sharpe": 1.28284966,
+      "correlation": -0.00184082
     },
     "technical_parabolic_sar_long_v1": {
       "blend_weight": 1.0,
       "blended_sharpe": 1.28284966,
       "correlation": -0.01218052
     },
+    "technical_parabolic_sar_short_v1": {
+      "blend_weight": 1.0,
+      "blended_sharpe": 1.28284966,
+      "correlation": 0.00338485
+    },
+    "technical_regression_slope_long_v1": {
+      "blend_weight": 1.0,
+      "blended_sharpe": 1.28284966,
+      "correlation": -0.02840489
+    },
+    "technical_regression_slope_short_v1": {
+      "blend_weight": 1.0,
+      "blended_sharpe": 1.28284966,
+      "correlation": 0.00344112
+    },
     "technical_supertrend_long_v1": {
       "blend_weight": 1.0,
       "blended_sharpe": 1.28284966,
       "correlation": -0.01711481
+    },
+    "technical_supertrend_short_v1": {
+      "blend_weight": 1.0,
+      "blended_sharpe": 1.28284966,
+      "correlation": 0.01654524
+    },
+    "technical_vortex_trend_long_v1": {
+      "blend_weight": 0.8,
+      "blended_sharpe": 1.36512886,
+      "correlation": -0.02196398
+    },
+    "technical_vortex_trend_short_v1": {
+      "blend_weight": 1.0,
+      "blended_sharpe": 1.28284966,
+      "correlation": -0.00052865
     }
   },
   "discovery": {
@@ -113,7 +248,30 @@
       "verdict": "FAIL"
     }
   },
-  "report_fingerprint": "086a54c0e0ee57d1384c5764fc07a105bd191b804ea70df87a90e458668d4f4b",
+  "reliability_hurdle_neutral": {
+    "fold": {
+      "fold_concentration": 0.41576805,
+      "fold_concentration_threshold": 0.54724357,
+      "fold_reference_sharpe": 1.41372982,
+      "gate_pass": true,
+      "max_period_contribution": 0.41576805,
+      "median_fold_cagr": 0.08748364,
+      "median_fold_calmar": 2.64903884,
+      "n_folds": 4,
+      "worst_fold_cagr": 0.03009509
+    },
+    "lcb": {
+      "block_size_used": 14,
+      "lcb90_cagr": 0.03392808,
+      "lcb95_cagr": 0.02064088,
+      "p_negative": 0.01466667,
+      "point_cagr": 0.08733263,
+      "t_stat": 2.08081377,
+      "trade_count": 905,
+      "verdict": "PASS"
+    }
+  },
+  "report_fingerprint": "ed56e4b486b2ea9d79a12b3a586ab0c77ef9cedd6dafe30fd33472d5d67fcb86",
   "selected_candidate": "donchian_long_only_v1",
   "weight_grid": [
     0.0,
