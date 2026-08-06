@@ -94,6 +94,22 @@
     "sharpe": 1.46245276,
     "t_stat": 2.06963663
   },
+  "qualification_turnover_neutral": {
+    "admitted": true,
+    "annual_sharpe": {
+      "2024": 1.36126234,
+      "2025": 1.58143461
+    },
+    "annualized_turnover": 175.42227703,
+    "beta": -0.09909714,
+    "binding_constraint": null,
+    "breakeven_cost": 0.0029517,
+    "cagr": 0.41117156,
+    "mdd": -0.15028223,
+    "sharpe": 1.46245276,
+    "t_stat": 2.06963663
+  },
+  "qualification_worst_fold_turnover": 217.53410436,
   "reliability": {
     "fold": {
       "fold_concentration": 0.40780078,
@@ -117,6 +133,6 @@
       "verdict": "FAIL"
     }
   },
-  "report_fingerprint": "87454d16877d26ace62be2d142ad1c3969694b36741fbc7f54a5b9b719fa2e5a",
+  "report_fingerprint": "bc3f2b70b65a4331ddbf67dcb77c19eb23e8a1d432dd18b514c5bb8af4c6f382",
   "xs_alpha_weight": 0.27135163
 }
