@@ -14,12 +14,15 @@ from src.research.evaluation.reliability import (
     FoldDistributionResult,
     ReliabilityGateConfig,
     ReliabilityGateResult,
+    _equal_duration_fold_labels,
     _year_log_return_contributions,
+    compute_equal_duration_fold_distribution,
     compute_equity_reliability_gate,
     compute_fold_distribution,
     compute_portfolio_reliability_gate,
     compute_reliability_gate,
     compute_stress_test_gate,
+    compute_turnover_fold_upper_bound,
     count_closed_trades,
     derive_block_size,
     derive_cost_multiple_hurdle_rate,
@@ -464,6 +467,99 @@ class TestComputeFoldDistribution:
         short = BacktestResult(equity=equity, trades=trades, signals=pd.DataFrame(index=idx))
         with pytest.raises(ValueError, match="fewer than 2"):
             compute_fold_distribution(short)
+
+
+class TestEqualDurationFoldLabelsAndTurnoverBound:
+    def test_equal_duration_fold_labels_extraction_is_behavior_preserving(
+        self,
+    ) -> None:
+        # RELIAB-01: the private helper extracted from
+        # compute_equal_duration_fold_distribution's inline block must assign
+        # fold codes exactly as the original inline pd.cut did -- right-closed
+        # calendar month-start intervals. A monthly point exactly on an
+        # internal 6-month boundary (2022-07-01) belongs to the fold ENDING
+        # there (fold 0), and the first point sitting on the left bin edge is
+        # left unfolded (NaN).
+        idx = pd.date_range("2022-01-01", periods=13, freq="MS", tz="UTC")
+        labels = _equal_duration_fold_labels(idx, "6MS")
+        assert len(labels) == 13
+        assert labels[0] != labels[0]  # left edge of the first bin: no fold
+        assert labels[1] == 0
+        assert labels[6] == 0  # internal boundary point -> preceding fold
+        assert labels[7] == 1
+        assert labels[12] == 1  # final bin edge -> last fold
+
+        # The public routine built on the helper still admits the same folds --
+        # same window, same fold count as the pre-refactor inline construction.
+        daily = pd.date_range("2022-01-01", periods=400, freq="D", tz="UTC")
+        equity = pd.Series(np.cumprod(1.0 + np.full(400, 0.001)), index=daily)
+        assert compute_equal_duration_fold_distribution(equity).n_folds >= 2
+
+    def test_equal_duration_fold_labels_rejects_malformed_and_short_span(
+        self,
+    ) -> None:
+        # RELIAB-01: identical validation to the original inline block.
+        idx = pd.date_range("2022-01-01", periods=6, freq="2MS", tz="UTC")
+        with pytest.raises(ValueError, match="month-start frequency"):
+            _equal_duration_fold_labels(idx, "6ME")
+        short = pd.date_range("2022-01-01", periods=2, freq="4h", tz="UTC")
+        with pytest.raises(ValueError, match="does not admit"):
+            _equal_duration_fold_labels(short, "6MS")
+
+    def test_turnover_fold_upper_bound_targets_worst_regime(self) -> None:
+        # RELIAB-02: on a two-regime turnover series (first half near-zero,
+        # second half materially higher, spanning >= 12 months) the worst
+        # 6-month fold's annualized mean dominates the full-period pooled mean
+        # and lands close to the high-regime fold's own annualized level.
+        idx = pd.date_range("2022-01-01", periods=8760, freq="4h", tz="UTC")
+        values = np.concatenate([np.full(4380, 0.001), np.full(4380, 0.05)])
+        turnover = pd.Series(values, index=idx)
+        bound = compute_turnover_fold_upper_bound(turnover, 2190)
+        pooled = float(turnover.mean()) * 2190
+        assert bound > pooled
+        assert abs(bound - 0.05 * 2190) < 1.0
+
+    def test_turnover_fold_upper_bound_fail_closed_when_span_too_short(
+        self,
+    ) -> None:
+        # RELIAB-02: a single-fold (or shorter) span cannot define a worst-of-
+        # several-folds statistic -- fail closed to +inf, never a finite value.
+        too_short = pd.date_range("2022-01-01", periods=100, freq="4h", tz="UTC")
+        assert (
+            compute_turnover_fold_upper_bound(
+                pd.Series(np.full(100, 0.01), index=too_short), 2190,
+            )
+            == float("inf")
+        )
+        # Single-fold span: the last bar sits exactly one fold-duration after
+        # the first, so the helper admits exactly one fold -- still not enough
+        # to define a worst-of-folds statistic.
+        single_fold = pd.date_range("2022-01-01", periods=182, freq="D", tz="UTC")
+        assert (
+            compute_turnover_fold_upper_bound(
+                pd.Series(np.full(182, 0.01), index=single_fold), 2190,
+            )
+            == float("inf")
+        )
+        # A single bar cannot define any fold statistic either.
+        one_bar = pd.date_range("2022-01-01", periods=1, freq="4h", tz="UTC")
+        assert (
+            compute_turnover_fold_upper_bound(
+                pd.Series([0.01], index=one_bar), 2190,
+            )
+            == float("inf")
+        )
+
+    def test_turnover_fold_upper_bound_is_deterministic(self) -> None:
+        # RELIAB-03: identical input yields the exact same float every call.
+        rng = np.random.default_rng(0)
+        idx = pd.date_range("2022-01-01", periods=8760, freq="4h", tz="UTC")
+        turnover = pd.Series(np.abs(rng.normal(0.02, 0.01, 8760)), index=idx)
+        a = compute_turnover_fold_upper_bound(turnover, 2190)
+        b = compute_turnover_fold_upper_bound(turnover, 2190)
+        assert a == b
+        with pytest.raises(ValueError, match="DatetimeIndex"):
+            compute_turnover_fold_upper_bound(pd.Series([0.01, 0.02]), 2190)
 
 
 @pytest.mark.slow
