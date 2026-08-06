@@ -1,0 +1,107 @@
+{
+  "feature": "xs_alpha_blend_joint_turnover_aware",
+  "domain": "risk",
+  "revision": 3,
+  "why": "Revisions 1-2 both hard-baked XsAdmissionConfig.turnover_max=150.0 into discovery_reliability_score's rejection logic (a frozen ratio in rev 1, a self-adapting worst-fold statistic in rev 2). On review, the user asked whether turnover_max itself is empirically grounded, or an arbitrary cutoff that could be rejecting genuinely good candidates. Investigation (git log -S on cross_sectional.py, CostModel in contracts.py, and a cross-profile pull of docs/results/*.json) found: (1) no derivation for 150.0 anywhere in this repo -- the introducing commit's docstring cites a 'spec section 3.1' that no longer exists; (2) CostModel is a flat per-fill fee_rate/slippage_rate with no market-impact/liquidity-depth term, so the ledger's cost accounting doesn't get less accurate as turnover rises in any modeled way -- cost_breakeven_min already independently verifies the realized edge clears that flat cost assumption; (3) the actual measured v8_joint point blocked by turnover_max (turnover=175.4x/yr) has the best CAGR (41.1%) of any row across all 10 persisted docs/results/*.json profiles, with a healthy Sharpe (1.46) -- turnover does not empirically predict worse realized economics in this project's own data (the one case with genuinely catastrophic turnover, v3 at 293.6x/yr, is independently attributed by this project's own ADR history to an execution-delay routing bug, not a turnover/cost effect). Hard-baking an unexamined threshold into the search's own rejection criterion is not defensible given this. Revision 3 removes the objective-level rejection entirely and replaces it with non-blocking diagnostic reporting, leaving the actual accept/reject decision at the existing, authoritative evaluate_xs_admission gate (unchanged) plus explicit human review -- and flags turnover_max's own calibration as a separate, out-of-scope follow-up question for the user to decide whether to pursue.",
+  "supersedes": "Revisions 1 and 2 of this contract (both already reverted from src/ -- no production code was left modified). This revision's src/research/technical_experts/xs_alpha_baseline_blend.py and src/application/research/technical/xs_alpha_baseline_blend.py changes are: NONE. discovery_reliability_score reverts to (and stays at) its original pre-this-feature form.",
+  "changes": [
+    {
+      "target_file": "src/research/evaluation/reliability.py",
+      "symbol": "_equal_duration_fold_labels",
+      "signature": "def _equal_duration_fold_labels(index: pd.DatetimeIndex, fold_duration: str) -> np.ndarray",
+      "change_type": "add_new_function",
+      "description": "Unchanged from revision 2: extract the fold-boundary/fold_labels construction (the existing inline block at compute_equal_duration_fold_distribution's current lines ~602-614) into a standalone private helper. Pure refactor, zero behavior change -- that function's own existing test suite is the regression guard.",
+      "python_assertion": "import pandas as pd; from src.research.evaluation.reliability import _equal_duration_fold_labels; idx = pd.date_range('2022-01-01', periods=13, freq='MS', tz='UTC'); labels = _equal_duration_fold_labels(idx, '6MS'); assert len(labels) == 13; assert labels[1] == 0 and labels[6] == 0 and labels[7] == 1 and labels[12] == 1",
+      "requirements": [
+        "Raise ValueError on a malformed fold_duration string or a span too short to admit one fold -- identical validation and messages to the current inline code."
+      ]
+    },
+    {
+      "target_file": "src/research/evaluation/reliability.py",
+      "symbol": "compute_equal_duration_fold_distribution",
+      "signature": "def compute_equal_duration_fold_distribution(equity: pd.Series, config: ReliabilityGateConfig = ReliabilityGateConfig(), fold_duration: str = '6MS') -> FoldDistributionResult",
+      "change_type": "modify_existing_function",
+      "description": "Unchanged from revision 2: replace the inline fold_duration validation + boundaries + pd.cut block with a call to _equal_duration_fold_labels(equity.index, fold_duration). No other line changes.",
+      "python_assertion": "import pandas as pd, numpy as np; from src.research.evaluation.reliability import compute_equal_duration_fold_distribution; idx = pd.date_range('2022-01-01', periods=400, freq='D', tz='UTC'); equity = pd.Series(np.cumprod(1.0 + np.full(400, 0.001)), index=idx); result = compute_equal_duration_fold_distribution(equity); assert result.n_folds >= 2",
+      "requirements": [
+        "Zero numeric behavior change -- existing tests in tests/unit/research/evaluation/test_reliability.py must pass unmodified."
+      ]
+    },
+    {
+      "target_file": "src/research/evaluation/reliability.py",
+      "symbol": "compute_turnover_fold_upper_bound",
+      "signature": "def compute_turnover_fold_upper_bound(turnover: pd.Series, bars_per_year: int, fold_duration: str = '6MS') -> float",
+      "change_type": "add_new_function",
+      "description": "Unchanged from revision 2 in implementation, REPURPOSED in usage: this remains a genuinely useful, general-purpose, self-adapting statistic (worst equal-duration-fold annualized turnover, no external calibration constant, deterministic). It is kept in reliability.py as a reusable diagnostic primitive -- but revision 3 no longer wires it into any rejection/gating logic inside discovery_reliability_score. It is called only from the dev-tool search script (see below) to report a number, never to reject a point.",
+      "python_assertion": "import pandas as pd, numpy as np; from src.research.evaluation.reliability import compute_turnover_fold_upper_bound; idx = pd.date_range('2022-01-01', periods=8760, freq='4h', tz='UTC'); values = np.concatenate([np.full(4380, 0.001), np.full(4380, 0.05)]); turnover = pd.Series(values, index=idx); bound = compute_turnover_fold_upper_bound(turnover, 2190); pooled = float(turnover.mean()) * 2190; assert bound > pooled; assert abs(bound - 0.05 * 2190) < 1.0",
+      "requirements": [
+        "No config dataclass, no randomness, deterministic given its input.",
+        "fold_duration default '6MS' must match compute_equal_duration_fold_distribution's own default exactly."
+      ]
+    },
+    {
+      "target_file": "tools/research/xs_alpha_blend_joint_search.py",
+      "symbol": "run",
+      "signature": "def run(*, max_trials: int = 30, seed: int = 0) -> StructuralSearchResult",
+      "change_type": "modify_existing_function",
+      "description": "discovery_reliability_score itself and its call inside the objective closure are UNCHANGED (pure LCB90, exactly as before any of this feature's revisions -- no turnover_max parameter exists on it). After run_structural_search returns result, additionally: (1) restrict xs_alpha_net/xs_realized_weights/baseline_net/baseline_realized_weight to [XS_DISCOVERY_START, DISCOVERY_END] (the same window-restriction the objective itself performs internally), (2) call build_blended_ledger(..., result.best_params['xs_alpha_weight']) then apply_fixed_gross_leverage(..., result.best_params['leverage_scale']) to reproduce the winning point's scaled_weights, (3) compute per-bar turnover (sum of absolute per-bar weight changes -- a 4-line inline numpy snippet local to this script, not a new src/ symbol) and pass it to compute_turnover_fold_upper_bound(turnover, _BARS_PER_YEAR_CONST) to get a worst-fold discovery-window turnover estimate, (4) print this alongside a comparison against XsAdmissionConfig().turnover_max as a ratio, with an explicit comment that this is informational only -- a diagnostic for the researcher to weigh before deciding whether to freeze this point, never a rejection criterion, because turnover_max's own calibration could not be traced to any derivation in this repo (see contract 'why'). The real accept/reject decision stays exactly where it already was: evaluate_xs_admission, called honestly on real qualification-window data by the existing CLI orchestrator, unchanged.",
+      "python_assertion": "from tools.research.xs_alpha_blend_joint_search import run; import inspect; src = inspect.getsource(run); assert 'compute_turnover_fold_upper_bound' in src; assert 'diagnostic' in src.lower()",
+      "requirements": [
+        "discovery_reliability_score's call signature inside the objective closure must remain byte-for-byte identical to its pre-feature form (no turnover_max keyword) -- this function is not gated on turnover anywhere.",
+        "The new diagnostic block must run strictly after run_structural_search returns (never influences the search itself, never re-enters optuna).",
+        "Import compute_turnover_fold_upper_bound from src.research.evaluation.reliability and XsAdmissionConfig from src.research.technical_experts.cross_sectional (both already legal imports for this tools/ script, which already imports from both src/research and src/application layers).",
+        "Must not raise if the discovery window happens to be too short for 2 folds -- compute_turnover_fold_upper_bound already fails closed to +inf in that case; print it as-is (an infinite/undeterminable diagnostic is itself informative, not an error to suppress)."
+      ]
+    }
+  ],
+  "explicit_non_changes": [
+    "src/research/technical_experts/xs_alpha_baseline_blend.py: NO changes. discovery_reliability_score keeps its original signature (no turnover_max parameter) -- reverted from revisions 1 and 2.",
+    "src/application/research/technical/xs_alpha_baseline_blend.py: NO changes. _check_contract's signature-lock assertion needs no update since discovery_reliability_score's signature is unchanged.",
+    "src/research/technical_experts/cross_sectional.py: NO changes. XsAdmissionConfig.turnover_max stays at 150.0, evaluate_xs_admission's gate logic is completely untouched -- this remains the system's one authoritative turnover check, unweakened and unbypassed.",
+    "src/research/contracts.py: NO changes. CostModel's flat fee_rate/slippage_rate structure is out of scope for this spec -- a turnover-dependent nonlinear market-impact cost term (the more structurally correct fix if turnover_max is ultimately found to be compensating for a missing cost-model term) would be a platform-wide change to shared cost infrastructure used by every strategy in this codebase, not scoped to this blend feature, and requires its own dedicated investigation and explicit sign-off before touching."
+  ],
+  "scenarios": [
+    {
+      "scenario_id": "RELIAB-01-FOLD-LABELS-EXTRACTION-PARITY",
+      "target_test_file": "tests/unit/research/evaluation/test_reliability.py",
+      "expected_behavior": "compute_equal_duration_fold_distribution's full existing test suite passes byte-for-byte unmodified after the _equal_duration_fold_labels extraction."
+    },
+    {
+      "scenario_id": "RELIAB-02-TURNOVER-FOLD-BOUND-TARGETS-WORST-REGIME",
+      "target_test_file": "tests/unit/research/evaluation/test_reliability.py",
+      "expected_behavior": "compute_turnover_fold_upper_bound on a two-regime fixture (first half near-zero turnover, second half materially higher, spanning >=12 months) returns a value close to the high-turnover fold's own annualized mean, strictly greater than the full-period pooled mean. A single-fold-span input returns float('inf')."
+    },
+    {
+      "scenario_id": "RELIAB-03-TURNOVER-FOLD-BOUND-DETERMINISTIC",
+      "target_test_file": "tests/unit/research/evaluation/test_reliability.py",
+      "expected_behavior": "Two calls with identical input return the exact same float."
+    },
+    {
+      "scenario_id": "XABJS-03-DISCOVERY-OBJECTIVE-STAYS-TURNOVER-BLIND",
+      "target_test_file": "tests/unit/research/technical_experts/test_xs_alpha_baseline_blend.py",
+      "expected_behavior": "discovery_reliability_score's existing tests (test_xabjs_01_objective_responds_to_leverage, test_xabjs_02_discovery_only_window, test_xabjs_fail_closed_fewer_than_two_discovery_bars) pass with ZERO modification to either the test file or the function under test -- proving revision 3 introduces no coupling between this pure research-layer function and turnover_max anywhere. No new scenario logic needed here beyond re-running the existing, unmodified suite; this scenario id documents that the absence of a diff is itself the expected, verified outcome."
+    },
+    {
+      "scenario_id": "XABJS-04-SEARCH-REPORTS-TURNOVER-DIAGNOSTIC-WITHOUT-REJECTING",
+      "target_test_file": "tests/integration/research/test_xs_alpha_blend_joint_search.py",
+      "expected_behavior": "Running tools/research/xs_alpha_blend_joint_search.py's run() end-to-end (small max_trials, fixture-scale or the existing integration fixture) produces a StructuralSearchResult identical in type/fields to before this change (no new fields on StructuralSearchResult itself -- structural_tuner.py's shared contract is untouched), AND the function's stdout includes a turnover diagnostic line referencing compute_turnover_fold_upper_bound's output and a comparison to XsAdmissionConfig().turnover_max, clearly labeled as informational. The search's chosen best_params must be identical to what an un-diagnosed pure-LCB90 search would produce (i.e. adding the diagnostic must not alter which point gets selected) -- assert this by comparing against a direct run_structural_search(objective, _SEARCH_SPACE, config) call with no diagnostic step, same seed."
+    }
+  ],
+  "wiring": [
+    {
+      "caller_file": "tools/research/xs_alpha_blend_joint_search.py",
+      "anchor": "result = run_structural_search(\n        objective, _SEARCH_SPACE,\n        StructuralSearchConfig(max_trials=max_trials, seed=seed),\n    )\n    print(f\"best_params={result.best_params}\")",
+      "import_symbol": "from src.research.evaluation.reliability import compute_turnover_fold_upper_bound\nfrom src.research.technical_experts.cross_sectional import XsAdmissionConfig\nfrom src.research.technical_experts.xs_alpha_baseline_blend import apply_fixed_gross_leverage, build_blended_ledger",
+      "invocation_expression": "print(f\"discovery_worst_fold_turnover={worst_fold_turnover:.2f} turnover_max={XsAdmissionConfig().turnover_max:.1f} (diagnostic only, not a rejection criterion -- calibration unverified in this repo, see contract 'why')\")"
+    }
+  ],
+  "open_follow_up_not_in_scope": "Whether XsAdmissionConfig.turnover_max=150.0 is itself well-calibrated is a separate, project-wide empirical question this spec deliberately does not resolve: it would require correlating realized (net-of-cost) OOS Sharpe/CAGR/LCB90 against realized turnover across this project's full historical profile set (a first-pass pull across the 10 current docs/results/*.json files found no clear negative relationship, but N is small and confounded by different weight/leverage choices per profile -- not a rigorous study). If that investigation finds the cap is not predictive of worse realized economics, the more structurally correct fix would be to stop gating on a flat turnover count at all and instead make CostModel's cost accounting genuinely convex in trade frequency (a market-impact/liquidity-depth term) so excessive turnover is organically punished through the P&L it actually causes -- but CostModel is shared platform infrastructure used by every strategy in this codebase, so that change needs its own dedicated spec and explicit user sign-off, never bundled into a feature-scoped change like this one.",
+  "post_implementation_plan": [
+    "uv run pytest tests/unit/research/evaluation/test_reliability.py tests/unit/research/technical_experts/test_xs_alpha_baseline_blend.py tests/integration/research/test_xs_alpha_blend_joint_search.py -v",
+    "uv run ruff check src/research/evaluation/reliability.py tools/research/xs_alpha_blend_joint_search.py",
+    "uv run mypy src/research/evaluation/reliability.py tools/research/xs_alpha_blend_joint_search.py",
+    "uv run python tools/research/xs_alpha_blend_joint_search.py (requires optuna: uv sync --extra tuning) -- expect the SAME best_params as the original v8_joint run (objective unchanged), now printed alongside the turnover diagnostic",
+    "Present the diagnostic output to the user alongside this spec's 'open_follow_up_not_in_scope' note and let them decide: accept the existing turnover_max=150 gate's verdict as-is, or greenlight the separate calibration investigation before deciding whether to special-case or re-tune it",
+    "Delete scratch/test_turnover_ucb.py once compute_turnover_fold_upper_bound is implemented for real (Scratch Scope hygiene)"
+  ]
+}
