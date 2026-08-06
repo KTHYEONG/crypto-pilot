@@ -554,6 +554,45 @@
       1.0
     ]
   },
+  "xs_alpha_basis_family_diagnostic": {
+    "discovery": {
+      "admitted": true,
+      "annual_sharpe": {
+        "2022": 0.08712771,
+        "2023": 2.08377491
+      },
+      "annualized_turnover": 19.11332543,
+      "beta": 0.05559833,
+      "binding_constraint": null,
+      "breakeven_cost": 0.0124677,
+      "cagr": 0.2229007,
+      "mdd": -0.15304278,
+      "sharpe": 1.06034796,
+      "t_stat": 1.40170163
+    },
+    "discovery_correlation": {
+      "funding_contrarian": 0.8310262,
+      "taker_imbalance": 0.09812149,
+      "trend": -0.05745159
+    },
+    "profile": "xs_alpha_basis_family_diagnostic",
+    "qualification": {
+      "admitted": false,
+      "annual_sharpe": {
+        "2024": 0.56858352,
+        "2025": -1.56271005
+      },
+      "annualized_turnover": 15.38405571,
+      "beta": 0.01606958,
+      "binding_constraint": "annual_sub_sharpe;cost_breakeven_min;sharpe_floor",
+      "breakeven_cost": -0.00403065,
+      "cagr": -0.0898435,
+      "mdd": -0.3886368,
+      "sharpe": -0.37367583,
+      "t_stat": -0.52881926
+    },
+    "report_fingerprint": "7302db40e697398c861ad1ba78071fcd518ae7ecb4c2760aec54656c2bc99bb5"
+  },
   "xs_alpha_contextual_v3": {
     "alpha_spec": {
       "components": [
