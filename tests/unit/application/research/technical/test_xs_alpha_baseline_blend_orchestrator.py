@@ -4,6 +4,7 @@ blend orchestration."""
 from __future__ import annotations
 
 import ast
+import inspect
 from inspect import signature
 from pathlib import Path
 
@@ -17,6 +18,11 @@ from src.application.research.technical.xs_trend_screen import (
     XS_VOL_WEIGHTED_ALPHA_PROFILE_ID,
 )
 from src.common.errors import DataIntegrityError
+from src.research.evaluation.reliability import (
+    FoldDistributionResult,
+    ReliabilityGateResult,
+    block_size_search_hit_cap,
+)
 from src.research.risk.growth_sizing import GrowthSizingResult
 from src.research.technical_experts.cross_sectional import (
     XsAdmissionResult,
@@ -74,6 +80,91 @@ def _install_synthetic_data(monkeypatch, *, perturb_after: pd.Timestamp | None =
         return frame, funding.copy(), {"perp_ohlcv": f"fp-{symbol}"}, 1.0
 
     monkeypatch.setattr(xs_blend, "_load_symbol_data", fake_load)
+
+
+def _crash_market():
+    """Standard synthetic market with a localized breakout + crash injected.
+
+    Bar ``B`` closes above the prior 55-bar high, firing the Donchian long
+    entry; two bars later a deep crash blows far past a 2-ATR stop. After the
+    crash window the frame is restored to the standard formula so the rest of
+    the fixture stays byte-identical to :func:`_synthetic_market`.
+    """
+    idx = pd.date_range(
+        pd.Timestamp("2022-01-01", tz="UTC"),
+        pd.Timestamp("2026-07-07 20:00:00", tz="UTC"),
+        freq="4h",
+    )
+    t = np.arange(len(idx), dtype=np.float64)
+    close = 100.0 + 0.02 * t + 30.0 * np.sin(t / 40.0) + 20.0 * np.cos(t / 150.0)
+    open_ = close - 0.2
+    high = close + 1.0
+    low = close - 1.0
+
+    breakout_bar = 600
+    prev_55_high = float(high[breakout_bar - 55:breakout_bar].max())
+    breakout_close = prev_55_high + 5.0
+    crash_level = breakout_close - 16.0
+
+    close[breakout_bar] = breakout_close
+    open_[breakout_bar] = breakout_close - 0.2
+    high[breakout_bar] = breakout_close + 1.0
+    low[breakout_bar] = breakout_close - 1.0
+    close[breakout_bar + 1] = breakout_close
+    open_[breakout_bar + 1] = breakout_close - 0.2
+    for i in range(breakout_bar + 2, breakout_bar + 6):
+        close[i] = crash_level
+        open_[i] = crash_level + 0.1
+        high[i] = crash_level + 1.0
+        low[i] = crash_level - 2.0
+
+    frame = pd.DataFrame({
+        "open": open_, "high": high, "low": low, "close": close,
+        "volume": 1000.0 + 500.0 * np.abs(np.sin(t / 5.0)),
+    }, index=idx)
+    funding = pd.Series(0.0, index=idx, dtype=np.float64)
+    return frame, funding
+
+
+def _install_crash_market(monkeypatch) -> None:
+    """Stub the data loader with the crash fixture (identical for every symbol)."""
+
+    def fake_load(symbol: str, start, end):
+        frame, funding = _crash_market()
+        frame = frame.copy()
+        frame["taker_buy_ratio"] = 0.5 + 0.03 * np.sin(np.arange(len(frame)) / 9.0)
+        frame.attrs["symbol"] = symbol
+        return frame, funding.copy(), {"perp_ohlcv": f"fp-{symbol}"}, 1.0
+
+    monkeypatch.setattr(xs_blend, "_load_symbol_data", fake_load)
+
+
+def _fabricated_reliability(
+    *,
+    point_cagr: float,
+    lcb90_cagr: float,
+) -> XsReliabilityResult:
+    """Build a deterministic ``XsReliabilityResult`` with controllable lcb numbers."""
+    return XsReliabilityResult(
+        lcb=ReliabilityGateResult(
+            lcb90_cagr=lcb90_cagr,
+            lcb95_cagr=0.0,
+            p_negative=0.0,
+            point_cagr=point_cagr,
+            t_stat=1.0,
+            trade_count=10,
+            block_size_used=1,
+            verdict="PASS",
+        ),
+        fold=FoldDistributionResult(
+            n_folds=2,
+            median_fold_cagr=0.0,
+            worst_fold_cagr=0.0,
+            median_fold_calmar=0.0,
+            max_period_contribution=0.0,
+            gate_pass=True,
+        ),
+    )
 
 
 class TestBaselineBlendOrchestration:
@@ -510,7 +601,9 @@ class TestBaselineLegSelectionOrchestration:
             "profile", "blend_weight", "weight_grid",
             "discovery", "qualification", "holdout",
             "pre_blend_discovery", "pre_blend_qualification", "pre_blend_holdout",
-            "reliability", "reliability_hurdle_neutral", "report_fingerprint",
+            "reliability", "reliability_hurdle_neutral",
+            "reliability_point_to_lcb90_ratio", "reliability_block_size_hit_cap",
+            "report_fingerprint",
             "selected_candidate", "candidate_diagnostics",
         }
         assert payload["weight_grid"] == list(xs_blend._DEFAULT_WEIGHT_GRID)
@@ -648,3 +741,122 @@ class TestBaselineLegSelectionOrchestration:
         report = xs_blend.run_xs_alpha_baseline_leg_selection()
         assert report.holdout is None
         assert report.pre_blend_holdout is None
+
+    def test_xbls_12_stop_loss_parity_wired_to_technical_expert_branch(self, monkeypatch) -> None:
+        # XBLS-12: the non-tournament dispatch branch passes the identical
+        # StrategySpec() ATR x 2.0 / 14 stop to every technical-expert leg, and
+        # the parameters genuinely alter the equity path -- on a crash fixture
+        # the stop-capped leg's drawdown is strictly shallower than the
+        # equivalent call without the stop (not dead text in the source).
+        source = inspect.getsource(xs_blend.run_xs_alpha_baseline_leg_selection)
+        norm = source.replace('"', "'")
+        assert "stop_loss_mode='atr_multiple'" in norm
+        assert "stop_loss_value=2.0" in norm
+        assert "atr_period=14" in norm
+
+        _install_crash_market(monkeypatch)
+        captured: dict[str, dict] = {}
+        real_backtest = xs_blend.run_technical_expert_backtest
+
+        def recording_backtest(frame, candidate, costs, funding_rates, **kwargs):
+            result = real_backtest(frame, candidate, costs, funding_rates, **kwargs)
+            captured[candidate.candidate_id] = {"equity": result.equity, "kwargs": kwargs}
+            return result
+
+        monkeypatch.setattr(xs_blend, "run_technical_expert_backtest", recording_backtest)
+        xs_blend.run_xs_alpha_baseline_leg_selection()
+
+        cid = "technical_donchian_breakout_long_v1"
+        with_stop_equity = captured[cid]["equity"]
+        kwargs = captured[cid]["kwargs"]
+        assert kwargs["stop_loss_mode"] == "atr_multiple"
+        assert kwargs["stop_loss_value"] == 2.0
+        assert kwargs["atr_period"] == 14
+        assert kwargs.get("trailing_stop", False) is False
+
+        frame, funding = _crash_market()
+        candidate = next(
+            cand for cand in xs_blend.TREND_SCREEN_CANDIDATES if cand.candidate_id == cid
+        )
+        no_stop_equity = real_backtest(
+            frame, candidate, xs_blend.CostModel(), funding, signal_delay_bars=0,
+        ).equity
+
+        assert not bool((with_stop_equity == no_stop_equity).all())
+        stop_dd = (with_stop_equity / with_stop_equity.cummax() - 1.0).min()
+        no_stop_dd = (no_stop_equity / no_stop_equity.cummax() - 1.0).min()
+        assert stop_dd > no_stop_dd
+
+    def test_xbls_13_reliability_diagnostics_zero_division_safe(self, monkeypatch) -> None:
+        # XBLS-13: reliability_point_to_lcb90_ratio is None (never raises, never
+        # NaN) whenever lcb90_cagr == 0.0, otherwise it equals the exact ratio.
+        _install_synthetic_data(monkeypatch)
+
+        def stub_reliability(oos_equity, oos_weights, config):
+            if config.hurdle_rate == 0.0:
+                return _fabricated_reliability(point_cagr=8.0, lcb90_cagr=4.0)
+            return _fabricated_reliability(point_cagr=8.0, lcb90_cagr=0.0)
+
+        monkeypatch.setattr(xs_blend, "evaluate_xs_reliability", stub_reliability)
+        report = xs_blend.run_xs_alpha_baseline_leg_selection()
+        assert report.reliability.lcb.lcb90_cagr == 0.0
+        assert report.reliability_point_to_lcb90_ratio is None
+
+        monkeypatch.setattr(xs_blend, "evaluate_xs_reliability", lambda *a, **k: _fabricated_reliability(point_cagr=10.0, lcb90_cagr=4.0))
+        report = xs_blend.run_xs_alpha_baseline_leg_selection()
+        assert report.reliability_point_to_lcb90_ratio == 10.0 / 4.0
+        assert report.reliability_point_to_lcb90_ratio == (
+            report.reliability.lcb.point_cagr / report.reliability.lcb.lcb90_cagr
+        )
+
+    def test_xbls_14_block_size_hit_cap_reuses_existing_function(self, monkeypatch) -> None:
+        # XBLS-14: reliability_block_size_hit_cap equals block_size_search_hit_cap
+        # computed independently on the same OOS equity the report's reliability
+        # field was built from -- no divergent reimplementation.
+        _install_synthetic_data(monkeypatch)
+        captured_equity: dict[str, pd.Series] = {}
+        real_eval = xs_blend.evaluate_xs_reliability
+
+        def recording_eval(oos_equity, oos_weights, config):
+            captured_equity["oos"] = oos_equity
+            return real_eval(oos_equity, oos_weights, config)
+
+        monkeypatch.setattr(xs_blend, "evaluate_xs_reliability", recording_eval)
+        report = xs_blend.run_xs_alpha_baseline_leg_selection()
+
+        oos_equity = captured_equity["oos"]
+        expected = block_size_search_hit_cap(
+            oos_equity.pct_change().dropna().to_numpy(dtype=np.float64),
+        )
+        assert report.reliability_block_size_hit_cap == expected
+
+    def test_xbls_15_holdout_stays_sealed_and_existing_fields_unchanged(self, monkeypatch) -> None:
+        # XBLS-15: the default run still seals holdout and preserves the exact
+        # field shape of revision 2's contract -- only the two new optional
+        # diagnostics are added, and they never touch the admission verdicts.
+        _install_synthetic_data(monkeypatch)
+        report = xs_blend.run_xs_alpha_baseline_leg_selection()
+
+        assert report.holdout is None
+        assert report.pre_blend_holdout is None
+        assert report.selected_candidate in xs_blend._DEFAULT_CANDIDATE_ORDER
+        assert set(report.candidate_diagnostics) == set(xs_blend._DEFAULT_CANDIDATE_ORDER)
+        assert isinstance(report.discovery, XsAdmissionResult)
+        assert isinstance(report.qualification, XsAdmissionResult)
+        assert isinstance(report.reliability, XsReliabilityResult)
+        assert isinstance(report.reliability_hurdle_neutral, XsReliabilityResult)
+        assert len(report.report_fingerprint) == 64
+
+        payload = report.to_payload()
+        assert set(payload) == {
+            "profile", "blend_weight", "weight_grid",
+            "discovery", "qualification", "holdout",
+            "pre_blend_discovery", "pre_blend_qualification", "pre_blend_holdout",
+            "reliability", "reliability_hurdle_neutral",
+            "reliability_point_to_lcb90_ratio", "reliability_block_size_hit_cap",
+            "report_fingerprint", "selected_candidate", "candidate_diagnostics",
+        }
+        assert payload["reliability_point_to_lcb90_ratio"] is None or isinstance(
+            payload["reliability_point_to_lcb90_ratio"], float,
+        )
+        assert isinstance(payload["reliability_block_size_hit_cap"], bool)
