@@ -26,6 +26,7 @@ measured, never assumed to pass.
 from __future__ import annotations
 
 import json
+import math
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -58,6 +59,10 @@ from src.research.risk.growth_sizing import (
     GrowthSizingResult,
     solve_growth_optimal_risk,
 )
+from src.research.sleeve_blend.tournament import (
+    TOURNAMENT_RETURN_SOURCES,
+    _run_source,
+)
 from src.research.technical_experts.cross_sectional import (
     XsAdmissionConfig,
     XsAdmissionResult,
@@ -76,10 +81,14 @@ from src.research.technical_experts.trend_screen_catalog import (
     TREND_SCREEN_SYMBOLS,
 )
 from src.research.technical_experts.xs_alpha_baseline_blend import (
+    _blended_sharpe,
+    _discovery_common,
     apply_fixed_gross_leverage,
     build_blended_ledger,
+    compute_discovery_correlation,
     discovery_reliability_score,
     select_baseline_blend_weight,
+    select_best_baseline_leg,
     select_robust_baseline_blend_weight,
 )
 
@@ -94,6 +103,12 @@ _DEFAULT_WEIGHT_GRID: tuple[float, ...] = (0.0, 0.2, 0.4, 0.5, 0.6, 0.8, 1.0)
 # only ~0.8x wide. ``reference_risk = 1.0`` makes grid values literal gross-
 # leverage multiples, exactly the pure-linear scale §2b swept.
 _DEFAULT_RISK_GRID: tuple[float, ...] = (1.0, 1.5, 2.0, 2.5, 3.0, 3.5, 4.0)
+
+# Frozen comparison order for the baseline-leg selection, reusing the
+# tournament's source-controlled candidate tuple verbatim: Donchian is listed
+# first so an exact blended-Sharpe tie reproduces today's status quo baseline
+# choice (the tie-break in ``select_best_baseline_leg`` keeps the earliest id).
+_DEFAULT_CANDIDATE_ORDER: tuple[str, ...] = TOURNAMENT_RETURN_SOURCES
 
 # Frozen persistence name (v8 of the XS alpha family), mirroring
 # ``xs_growth_sizing_report_path``'s naming convention.
@@ -301,6 +316,91 @@ class XsBaselineBlendJointReport:
                 _admission_payload(self.baseline_holdout)
                 if self.baseline_holdout is not None else None
             ),
+            "reliability": (
+                _reliability_payload(self.reliability)
+                if self.reliability is not None else None
+            ),
+        }
+
+    def to_payload(self) -> dict[str, object]:
+        """Canonical, deterministic JSON-ready payload (fingerprint included)."""
+        payload = self._body_payload()
+        payload["report_fingerprint"] = self.report_fingerprint
+        return payload
+
+    def to_json(self) -> str:
+        """Byte-deterministic JSON serialization of the report payload."""
+        return json.dumps(self.to_payload(), sort_keys=True, indent=2) + "\n"
+
+
+def _round_finite(value: float) -> float:
+    """Round a diagnostic float to 8 decimals, coercing non-finite to 0.0.
+
+    ``candidate_diagnostics`` values must persist as a strict JSON document --
+    NaN/Infinity tokens are never written. The blended-Sharpe diagnostic is
+    theoretically ``+inf`` for an exactly zero-variance blend (``_blended_sharpe``'s
+    dominant case); in practice it is always finite, and this guard keeps the
+    payload valid either way.
+    """
+    rounded = round(value, 8)
+    return rounded if math.isfinite(rounded) else 0.0
+
+
+@dataclass(frozen=True, slots=True)
+class XsBaselineLegSelectionReport:
+    """Deterministic persisted outcome of one baseline-leg comparison run.
+
+    Same before/after admission and reliability structure as
+    :class:`XsBaselineBlendReport` (profile, blend_weight, discovery/
+    qualification/(holdout), pre-blend admission, reliability) plus the
+    comparison outcome: the selected candidate id and one diagnostics entry
+    per evaluated candidate carrying its discovery-window correlation, selected
+    blend weight, and achieved blended Sharpe. Reported exactly as measured --
+    the winner is never auto-promoted into any live entry point.
+    """
+
+    profile: str
+    blend_weight: float
+    weight_grid: tuple[float, ...]
+    discovery: XsAdmissionResult
+    qualification: XsAdmissionResult
+    holdout: XsAdmissionResult | None
+    pre_blend_discovery: XsAdmissionResult
+    pre_blend_qualification: XsAdmissionResult
+    pre_blend_holdout: XsAdmissionResult | None
+    selected_candidate: str
+    candidate_diagnostics: dict[str, dict[str, float]]
+    reliability: XsReliabilityResult | None = None
+    report_fingerprint: str = ""
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self, "report_fingerprint", _fingerprint_without_self(self._body_payload()),
+        )
+
+    def _body_payload(self) -> dict[str, object]:
+        return {
+            "profile": self.profile,
+            "blend_weight": round(self.blend_weight, 8),
+            "weight_grid": list(self.weight_grid),
+            "discovery": _admission_payload(self.discovery),
+            "qualification": _admission_payload(self.qualification),
+            "holdout": (
+                _admission_payload(self.holdout) if self.holdout is not None else None
+            ),
+            "pre_blend_discovery": _admission_payload(self.pre_blend_discovery),
+            "pre_blend_qualification": _admission_payload(self.pre_blend_qualification),
+            "pre_blend_holdout": (
+                _admission_payload(self.pre_blend_holdout)
+                if self.pre_blend_holdout is not None else None
+            ),
+            "selected_candidate": self.selected_candidate,
+            "candidate_diagnostics": {
+                candidate_id: {
+                    key: _round_finite(value) for key, value in diag.items()
+                }
+                for candidate_id, diag in self.candidate_diagnostics.items()
+            },
             "reliability": (
                 _reliability_payload(self.reliability)
                 if self.reliability is not None else None
@@ -942,6 +1042,204 @@ def run_xs_alpha_baseline_blend_joint(
     )
 
 
+def run_xs_alpha_baseline_leg_selection(
+    *,
+    unseal_holdout: bool = False,
+    weight_grid: tuple[float, ...] = _DEFAULT_WEIGHT_GRID,
+    candidate_order: tuple[str, ...] = _DEFAULT_CANDIDATE_ORDER,
+) -> XsBaselineLegSelectionReport:
+    """Compare the five frozen candidates as v6's baseline diversifier leg.
+
+    Fourth sibling to :func:`run_xs_alpha_baseline_blend` -- a new, additive
+    comparison tool, never a substitute. Loads v6's XS ledger exactly as the
+    existing sibling does, replays every candidate on ``BTCUSDT`` only via the
+    tournament's frozen ``_run_source`` dispatch (same ``StrategySpec()``/
+    ``CostModel()``/catalog parameters, single-symbol scope matching the
+    existing baseline), derives each leg's net returns and realized position
+    via the existing candidate-agnostic ``_baseline_realized_position``, builds
+    the per-candidate diagnostics (discovery-window correlation, selected blend
+    weight, achieved blended Sharpe), picks the winner by
+    :func:`select_best_baseline_leg`, applies the winning blend over the full
+    history, and re-verifies discovery/qualification/(sealed-unless-unsealed)
+    holdout admission plus the OOS reliability gate through the exact same
+    calls the existing sibling makes. The winner is reported -- never
+    auto-promoted into any live entry point.
+    """
+    end = resolve_evaluation_end(None, unseal_holdout=unseal_holdout)
+    execution_spec = XsCompositeSpec()
+    alpha_spec = XsAlphaCompositeSpec()
+
+    data: dict[str, tuple[pd.DataFrame, pd.Series]] = {}
+    for symbol in TREND_SCREEN_SYMBOLS:
+        frame, funding, _fingerprint, _coverage = _load_symbol_data(
+            symbol, XS_DISCOVERY_START, end,
+        )
+        data[symbol] = (frame, funding)
+
+    common = _common_index([frame.index for frame, _funding in data.values()])
+    if len(common) < 2:
+        raise DataIntegrityError("xs baseline blend requires at least 2 common bars")
+
+    opens = pd.DataFrame(
+        {symbol: frame["open"].reindex(common) for symbol, (frame, _funding) in data.items()},
+    )
+    bar_funding = pd.DataFrame(
+        {
+            symbol: _bar_funding_series(funding, frame.index).reindex(common)
+            for symbol, (frame, funding) in data.items()
+        },
+    )
+    closes = pd.DataFrame(
+        {symbol: frame["close"].reindex(common) for symbol, (frame, _funding) in data.items()},
+    )
+    taker = pd.DataFrame(
+        {symbol: frame["taker_buy_ratio"].reindex(common) for symbol, (frame, _funding) in data.items()},
+    )
+
+    opens_arr = opens.to_numpy(dtype=np.float64)
+    o2o = np.zeros_like(opens_arr)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        o2o[1:] = opens_arr[1:] / opens_arr[:-1] - 1.0
+    benchmark = pd.Series(o2o.mean(axis=1), index=common, name="benchmark")
+
+    weights = build_xs_alpha_vol_weighted_weights(
+        closes, taker, bar_funding, opens, alpha_spec, execution_spec,
+    )
+    xs_equity, _xs_turnover = run_xs_composite_ledger(
+        weights, opens, bar_funding, execution_spec,
+    )
+    xs_alpha_net = xs_equity.pct_change().fillna(0.0).rename("xs_alpha_net")
+
+    btc_frame, btc_funding = data["BTCUSDT"]
+    candidate_nets: dict[str, pd.Series] = {}
+    candidate_realized_weights: dict[str, pd.Series] = {}
+    for candidate_id in candidate_order:
+        candidate_result = _run_source(
+            candidate_id, "BTCUSDT", btc_frame, btc_funding, CostModel(),
+            signal_delay_bars=0,
+        )
+        candidate_equity = candidate_result.equity.reindex(common).rename(
+            f"{candidate_id}_equity",
+        )
+        candidate_nets[candidate_id] = (
+            candidate_equity.pct_change().fillna(0.0).rename(f"{candidate_id}_net")
+        )
+        candidate_realized_weights[candidate_id] = _baseline_realized_position(
+            candidate_result.trades, btc_frame.index, common,
+        )
+
+    candidate_diagnostics: dict[str, dict[str, float]] = {}
+    for candidate_id in candidate_order:
+        net = candidate_nets[candidate_id]
+        correlation = compute_discovery_correlation(
+            xs_alpha_net, net, XS_DISCOVERY_START, DISCOVERY_END,
+        )
+        blend_weight = select_baseline_blend_weight(
+            xs_alpha_net, net, XS_DISCOVERY_START, DISCOVERY_END, weight_grid,
+        )
+        disc_a, disc_b = _discovery_common(
+            xs_alpha_net, net, XS_DISCOVERY_START, DISCOVERY_END,
+        )
+        blended_sharpe = _blended_sharpe(disc_a, disc_b, blend_weight)
+        candidate_diagnostics[candidate_id] = {
+            "correlation": correlation,
+            "blend_weight": blend_weight,
+            "blended_sharpe": blended_sharpe,
+        }
+
+    selected_candidate, blend_weight = select_best_baseline_leg(
+        xs_alpha_net, candidate_nets, XS_DISCOVERY_START, DISCOVERY_END,
+        candidate_order, weight_grid,
+    )
+
+    baseline_net = candidate_nets[selected_candidate]
+    baseline_realized_weight = candidate_realized_weights[selected_candidate]
+
+    xs_realized_weights = weights.shift(1 + execution_spec.execution_delay_bars).fillna(0.0)
+    blended_equity, blended_weights = build_blended_ledger(
+        xs_alpha_net, xs_realized_weights, baseline_net, baseline_realized_weight,
+        blend_weight,
+    )
+    blended_turnover = _realised_turnover(blended_weights)
+    admission_config = XsAdmissionConfig()
+
+    discovery = evaluate_xs_admission(
+        _window_series(blended_equity, XS_DISCOVERY_START, DISCOVERY_END),
+        _window_series(blended_turnover, XS_DISCOVERY_START, DISCOVERY_END),
+        _window_series(benchmark, XS_DISCOVERY_START, DISCOVERY_END),
+        admission_config,
+    )
+    qualification = evaluate_xs_admission(
+        _window_series(blended_equity, QUALIFICATION_START, QUALIFICATION_END),
+        _window_series(blended_turnover, QUALIFICATION_START, QUALIFICATION_END),
+        _window_series(benchmark, QUALIFICATION_START, QUALIFICATION_END),
+        admission_config,
+    )
+
+    holdout: XsAdmissionResult | None = None
+    holdout_start: pd.Timestamp | None = None
+    holdout_end: pd.Timestamp | None = None
+    if unseal_holdout:
+        post_cutoff = common[common > HOLDOUT_CUTOFF]
+        if len(post_cutoff) >= 2:
+            holdout_start = post_cutoff[0]
+            holdout_end = post_cutoff[-1]
+            holdout = evaluate_xs_admission(
+                _window_series(blended_equity, holdout_start, holdout_end),
+                _window_series(blended_turnover, holdout_start, holdout_end),
+                _window_series(benchmark, holdout_start, holdout_end),
+                admission_config,
+            )
+
+    xs_turnover = _realised_turnover(xs_realized_weights)
+    pre_blend_discovery = evaluate_xs_admission(
+        _window_series(xs_equity, XS_DISCOVERY_START, DISCOVERY_END),
+        _window_series(xs_turnover, XS_DISCOVERY_START, DISCOVERY_END),
+        _window_series(benchmark, XS_DISCOVERY_START, DISCOVERY_END),
+        admission_config,
+    )
+    pre_blend_qualification = evaluate_xs_admission(
+        _window_series(xs_equity, QUALIFICATION_START, QUALIFICATION_END),
+        _window_series(xs_turnover, QUALIFICATION_START, QUALIFICATION_END),
+        _window_series(benchmark, QUALIFICATION_START, QUALIFICATION_END),
+        admission_config,
+    )
+    pre_blend_holdout: XsAdmissionResult | None = None
+    if unseal_holdout and holdout_start is not None and holdout_end is not None:
+        pre_blend_holdout = evaluate_xs_admission(
+            _window_series(xs_equity, holdout_start, holdout_end),
+            _window_series(xs_turnover, holdout_start, holdout_end),
+            _window_series(benchmark, holdout_start, holdout_end),
+            admission_config,
+        )
+
+    reliability: XsReliabilityResult | None = None
+    oos_window = _oos_reliability_window(
+        blended_equity, blended_weights, QUALIFICATION_START, QUALIFICATION_END,
+        holdout_start, holdout_end,
+    )
+    if oos_window is not None:
+        oos_equity, oos_weights = oos_window
+        reliability = evaluate_xs_reliability(
+            oos_equity, oos_weights, ReliabilityGateConfig(),
+        )
+
+    return XsBaselineLegSelectionReport(
+        profile=XS_VOL_WEIGHTED_ALPHA_PROFILE_ID,
+        blend_weight=blend_weight,
+        weight_grid=weight_grid,
+        discovery=discovery,
+        qualification=qualification,
+        holdout=holdout,
+        pre_blend_discovery=pre_blend_discovery,
+        pre_blend_qualification=pre_blend_qualification,
+        pre_blend_holdout=pre_blend_holdout,
+        reliability=reliability,
+        selected_candidate=selected_candidate,
+        candidate_diagnostics=candidate_diagnostics,
+    )
+
+
 def persist_xs_alpha_baseline_blend_report(report: XsBaselineBlendReport, path: Path) -> None:
     """Write the byte-deterministic report payload to ``path``."""
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -977,6 +1275,19 @@ def xs_baseline_blend_joint_report_path() -> Path:
     return Path("docs/results") / f"{_BLEND_REPORT_NAME}_joint.json"
 
 
+def persist_xs_alpha_baseline_leg_selection_report(
+    report: XsBaselineLegSelectionReport, path: Path,
+) -> None:
+    """Write the byte-deterministic leg-selection report payload to ``path``."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(report.to_json(), encoding="utf-8")
+
+
+def xs_baseline_leg_selection_report_path() -> Path:
+    """Default persistence location for the baseline-leg comparison report."""
+    return Path("docs/results") / "xs_alpha_baseline_leg_selection.json"
+
+
 def _check_contract() -> None:
     """Executable assertions locking the baseline-blend entry-point surface."""
     from inspect import signature
@@ -1009,6 +1320,13 @@ def _check_contract() -> None:
     assert _JOINT_LEVERAGE_SCALE > 0.0
     assert xs_baseline_blend_joint_report_path().name == (
         "xs_alpha_baseline_blend_v8_joint.json"
+    )
+    leg_selection_params = signature(run_xs_alpha_baseline_leg_selection).parameters
+    assert set(leg_selection_params) == {"unseal_holdout", "weight_grid", "candidate_order"}
+    assert all(p.kind == p.KEYWORD_ONLY for p in leg_selection_params.values())
+    assert _DEFAULT_CANDIDATE_ORDER[0] == "donchian_long_only_v1"
+    assert xs_baseline_leg_selection_report_path().name == (
+        "xs_alpha_baseline_leg_selection.json"
     )
 
 
