@@ -1095,6 +1095,24 @@ def _install_long_short_ratio_panel(monkeypatch) -> None:
 
     monkeypatch.setattr(xs_blend, "_long_short_ratio_panel", fake_panel)
 
+def _install_basis_panel(monkeypatch) -> None:
+    """Stub the premium/basis panel for the basis-family diagnostic.
+
+    The real ``_basis_panel`` reads premiumIndexKlines parquet from the data
+    lake -- unavailable under the synthetic market stubs. A deterministic,
+    per-symbol-varying basis panel gives the basis sleeve a distinct signal
+    path from the price/volume/funding families.
+    """
+
+    def fake_panel(symbols, common):
+        panel = pd.DataFrame(0.0, index=common, columns=list(symbols))
+        for symbol in symbols:
+            salt = float(sum(ord(c) for c in symbol))
+            panel[symbol] = 1e-3 * np.sin(np.arange(len(common)) / 17.0 + salt)
+        return panel
+
+    monkeypatch.setattr(xs_blend, "_basis_panel", fake_panel)
+
 
 class TestTripleBlendOrchestration:
     def test_xatb_04_triple_blend_discovery_only_contract(self, monkeypatch) -> None:
@@ -1245,3 +1263,113 @@ class TestTripleBlendOrchestration:
         args = argparse.Namespace(profile="xs_alpha_positioning_v7")
         with pytest.raises(ValueError, match="restricted"):
             single_technical._run_xs_alpha_triple_blend_sized(args)
+
+class TestBasisFamilyDiagnosticOrchestration:
+    def test_xbsf_01_holdout_stays_sealed_by_default(self, monkeypatch) -> None:
+        # SCENARIO_BASIS_DIAGNOSTIC_HOLDOUT_SEALED_BY_DEFAULT: the default
+        # sealed run never reads bars past the sealed cutoff -- the basis panel
+        # is built on a common grid that stops at the sealed boundary, while the
+        # unsealed run extends past it.
+        _install_synthetic_data(monkeypatch)
+        _install_basis_panel(monkeypatch)
+        captured: dict[str, pd.DatetimeIndex] = {}
+
+        def recording_panel(symbols, common):
+            captured["common"] = common
+            return pd.DataFrame(0.0, index=common, columns=list(symbols))
+
+        monkeypatch.setattr(xs_blend, "_basis_panel", recording_panel)
+        report = xs_blend.run_xs_alpha_basis_family_diagnostic()
+        assert isinstance(report.discovery, XsAdmissionResult)
+        assert isinstance(report.qualification, XsAdmissionResult)
+        assert captured["common"].max() <= xs_blend.HOLDOUT_CUTOFF
+
+        captured.clear()
+        xs_blend.run_xs_alpha_basis_family_diagnostic(unseal_holdout=True)
+        assert captured["common"].max() > xs_blend.HOLDOUT_CUTOFF
+
+    def test_xbsf_02_correlation_keys(self, monkeypatch) -> None:
+        # SCENARIO_BASIS_DIAGNOSTIC_CORRELATION_KEYS: discovery_correlation
+        # carries exactly the three existing-family keys, each a finite float in
+        # [-1.0, 1.0] -- the §2.3 collinearity hypothesis measured in one run.
+        _install_synthetic_data(monkeypatch)
+        _install_basis_panel(monkeypatch)
+        report = xs_blend.run_xs_alpha_basis_family_diagnostic()
+
+        assert report.profile == "xs_alpha_basis_family_diagnostic"
+        assert set(report.discovery_correlation) == {
+            "trend", "funding_contrarian", "taker_imbalance",
+        }
+        for value in report.discovery_correlation.values():
+            assert math.isfinite(value)
+            assert -1.0 <= value <= 1.0
+
+    def test_xbsf_03_no_production_wiring(self, monkeypatch) -> None:
+        # SCENARIO_BASIS_DIAGNOSTIC_NO_PRODUCTION_WIRING: the diagnostic builds
+        # only its own basis sleeve and never calls the production blend entry
+        # points nor reads/writes their result files -- no shared-state leakage
+        # into the deployed profiles.
+        source = inspect.getsource(xs_blend.run_xs_alpha_basis_family_diagnostic)
+        assert "build_xs_alpha_vol_weighted_weights" not in source
+        assert "build_xs_alpha_positioning_weights" not in source
+        assert "persist_xs_alpha_baseline_blend" not in source
+        assert "xs_baseline_blend_report_path" not in source
+
+        _install_synthetic_data(monkeypatch)
+        _install_basis_panel(monkeypatch)
+        report = xs_blend.run_xs_alpha_basis_family_diagnostic()
+        assert report.profile == "xs_alpha_basis_family_diagnostic"
+        assert set(report.discovery_correlation) == {
+            "trend", "funding_contrarian", "taker_imbalance",
+        }
+
+    def test_xbsf_04_report_payload_and_persistence(self, monkeypatch, tmp_path) -> None:
+        # Contract: the report dataclass exposes the exact payload keys and a
+        # deterministic fingerprint, persists through the shared ledger upsert,
+        # and the path helper points at the diagnostic-only result file (never
+        # a deployed profile).
+        _install_synthetic_data(monkeypatch)
+        _install_basis_panel(monkeypatch)
+        first = xs_blend.run_xs_alpha_basis_family_diagnostic()
+        second = xs_blend.run_xs_alpha_basis_family_diagnostic()
+        assert first.to_json() == second.to_json()
+        assert len(first.report_fingerprint) == 64
+        payload = first.to_payload()
+        assert set(payload) == {
+            "profile", "discovery", "qualification",
+            "discovery_correlation", "report_fingerprint",
+        }
+        assert xs_blend.xs_basis_family_diagnostic_report_path().name == (
+            "xs_alpha_basis_family_diagnostic.json"
+        )
+        path = tmp_path / "basis_diag.json"
+        xs_blend.persist_xs_alpha_basis_family_diagnostic_report(first, path)
+        _assert_ledger_upsert(path, first)
+
+    def test_xbsf_05_basis_panel_loader_reindex_and_fail_closed(self, monkeypatch, tmp_path) -> None:
+        # Contract python_assertion (_basis_panel): reads the premiumIndexKlines
+        # 4h 'close' column indexed by its tz-aware 'datetime', reindexes to the
+        # common grid, and fails closed when any requested symbol's file is
+        # missing (never silently skipped).
+        idx = pd.date_range("2024-01-01", periods=48, freq="4h", tz="UTC")
+        frame = pd.DataFrame({
+            "datetime": idx,
+            "close": 1e-3 * np.sin(np.arange(len(idx)) / 7.0),
+        })
+        path = tmp_path / "premiumIndexKlines" / "4h" / "BTCUSDT.parquet"
+        path.parent.mkdir(parents=True)
+        frame.to_parquet(path)
+
+        def fake_path(dataset, symbol, timeframe):
+            return tmp_path / dataset / timeframe / f"{symbol}.parquet"
+
+        monkeypatch.setattr(xs_blend, "indicator_kline_path", fake_path)
+        common = pd.date_range("2024-01-02", periods=24, freq="4h", tz="UTC")
+        panel = xs_blend._basis_panel(("BTCUSDT",), common)
+        assert set(panel.columns) == {"BTCUSDT"}
+        assert list(panel.index) == list(common)
+
+        missing = tmp_path / "premiumIndexKlines" / "4h" / "ETHUSDT.parquet"
+        assert not missing.exists()
+        with pytest.raises(DataIntegrityError, match="premiumIndexKlines missing"):
+            xs_blend._basis_panel(("ETHUSDT",), common)
