@@ -25,6 +25,7 @@ measured, never assumed to pass.
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import math
 from dataclasses import dataclass
@@ -63,6 +64,8 @@ from src.research.sleeve_blend.tournament import (
     TOURNAMENT_RETURN_SOURCES,
     _run_source,
 )
+from src.research.technical_experts.backtest import run_technical_expert_backtest
+from src.research.technical_experts.contracts import TechnicalCandidate
 from src.research.technical_experts.cross_sectional import (
     XsAdmissionConfig,
     XsAdmissionResult,
@@ -78,6 +81,7 @@ from src.research.technical_experts.trend_screen_catalog import (
     DISCOVERY_END,
     QUALIFICATION_END,
     QUALIFICATION_START,
+    TREND_SCREEN_CANDIDATES,
     TREND_SCREEN_SYMBOLS,
 )
 from src.research.technical_experts.xs_alpha_baseline_blend import (
@@ -104,11 +108,27 @@ _DEFAULT_WEIGHT_GRID: tuple[float, ...] = (0.0, 0.2, 0.4, 0.5, 0.6, 0.8, 1.0)
 # leverage multiples, exactly the pure-linear scale §2b swept.
 _DEFAULT_RISK_GRID: tuple[float, ...] = (1.0, 1.5, 2.0, 2.5, 3.0, 3.5, 4.0)
 
-# Frozen comparison order for the baseline-leg selection, reusing the
-# tournament's source-controlled candidate tuple verbatim: Donchian is listed
-# first so an exact blended-Sharpe tie reproduces today's status quo baseline
-# choice (the tie-break in ``select_best_baseline_leg`` keeps the earliest id).
-_DEFAULT_CANDIDATE_ORDER: tuple[str, ...] = TOURNAMENT_RETURN_SOURCES
+# Frozen comparison order for the baseline-leg selection: the tournament's
+# five source-controlled candidates first (Donchian listed first so an exact
+# blended-Sharpe tie reproduces today's status quo baseline choice -- the
+# tie-break in ``select_best_baseline_leg`` keeps the earliest id), then every
+# trend-screen catalog identity not already among them. Computed once at import
+# time from the two frozen registries (no manual enumeration): 5 + 30 - 3 = 32
+# distinct ids (revision 2 widening, answering "were only 5 tried").
+_DEFAULT_CANDIDATE_ORDER: tuple[str, ...] = (
+    TOURNAMENT_RETURN_SOURCES
+    + tuple(
+        candidate.candidate_id
+        for candidate in TREND_SCREEN_CANDIDATES
+        if candidate.candidate_id not in TOURNAMENT_RETURN_SOURCES
+    )
+)
+
+# Candidate-id -> frozen trend-screen identity lookup for the non-tournament
+# dispatch branch of ``run_xs_alpha_baseline_leg_selection``.
+_TREND_SCREEN_CANDIDATES_BY_ID: dict[str, TechnicalCandidate] = {
+    candidate.candidate_id: candidate for candidate in TREND_SCREEN_CANDIDATES
+}
 
 # Frozen persistence name (v8 of the XS alpha family), mirroring
 # ``xs_growth_sizing_report_path``'s naming convention.
@@ -371,6 +391,7 @@ class XsBaselineLegSelectionReport:
     selected_candidate: str
     candidate_diagnostics: dict[str, dict[str, float]]
     reliability: XsReliabilityResult | None = None
+    reliability_hurdle_neutral: XsReliabilityResult | None = None
     report_fingerprint: str = ""
 
     def __post_init__(self) -> None:
@@ -404,6 +425,10 @@ class XsBaselineLegSelectionReport:
             "reliability": (
                 _reliability_payload(self.reliability)
                 if self.reliability is not None else None
+            ),
+            "reliability_hurdle_neutral": (
+                _reliability_payload(self.reliability_hurdle_neutral)
+                if self.reliability_hurdle_neutral is not None else None
             ),
         }
 
@@ -1114,10 +1139,17 @@ def run_xs_alpha_baseline_leg_selection(
     candidate_nets: dict[str, pd.Series] = {}
     candidate_realized_weights: dict[str, pd.Series] = {}
     for candidate_id in candidate_order:
-        candidate_result = _run_source(
-            candidate_id, "BTCUSDT", btc_frame, btc_funding, CostModel(),
-            signal_delay_bars=0,
-        )
+        if candidate_id in TOURNAMENT_RETURN_SOURCES:
+            candidate_result = _run_source(
+                candidate_id, "BTCUSDT", btc_frame, btc_funding, CostModel(),
+                signal_delay_bars=0,
+            )
+        else:
+            candidate = _TREND_SCREEN_CANDIDATES_BY_ID[candidate_id]
+            candidate_result = run_technical_expert_backtest(
+                btc_frame, candidate, CostModel(), btc_funding,
+                signal_delay_bars=0,
+            )
         candidate_equity = candidate_result.equity.reindex(common).rename(
             f"{candidate_id}_equity",
         )
@@ -1214,6 +1246,7 @@ def run_xs_alpha_baseline_leg_selection(
         )
 
     reliability: XsReliabilityResult | None = None
+    reliability_hurdle_neutral: XsReliabilityResult | None = None
     oos_window = _oos_reliability_window(
         blended_equity, blended_weights, QUALIFICATION_START, QUALIFICATION_END,
         holdout_start, holdout_end,
@@ -1222,6 +1255,10 @@ def run_xs_alpha_baseline_leg_selection(
         oos_equity, oos_weights = oos_window
         reliability = evaluate_xs_reliability(
             oos_equity, oos_weights, ReliabilityGateConfig(),
+        )
+        reliability_hurdle_neutral = evaluate_xs_reliability(
+            oos_equity, oos_weights,
+            dataclasses.replace(ReliabilityGateConfig(), hurdle_rate=0.0),
         )
 
     return XsBaselineLegSelectionReport(
@@ -1235,6 +1272,7 @@ def run_xs_alpha_baseline_leg_selection(
         pre_blend_qualification=pre_blend_qualification,
         pre_blend_holdout=pre_blend_holdout,
         reliability=reliability,
+        reliability_hurdle_neutral=reliability_hurdle_neutral,
         selected_candidate=selected_candidate,
         candidate_diagnostics=candidate_diagnostics,
     )
