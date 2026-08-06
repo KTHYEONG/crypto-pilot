@@ -55,6 +55,7 @@ from src.application.research.technical.xs_trend_screen import (
     _reliability_payload,
     _window_series,
 )
+from src.common.config import indicator_kline_path
 from src.common.errors import DataIntegrityError
 from src.research.baseline.backtest import run_backtest
 from src.research.contracts import CostModel, StrategySpec
@@ -86,8 +87,11 @@ from src.research.technical_experts.cross_sectional import (
     XsAlphaCompositeSpec,
     XsCompositeSpec,
     XsReliabilityResult,
+    _basis_score,
+    build_xs_alpha_family_weights,
     build_xs_alpha_positioning_only_weights,
     build_xs_alpha_vol_weighted_weights,
+    build_xs_neutral_weights,
     evaluate_xs_admission,
     evaluate_xs_reliability,
     run_xs_composite_ledger,
@@ -571,6 +575,51 @@ class XsBaselineLegSelectionReport:
             ),
             "reliability_point_to_lcb90_ratio": self.reliability_point_to_lcb90_ratio,
             "reliability_block_size_hit_cap": self.reliability_block_size_hit_cap,
+        }
+
+    def to_payload(self) -> dict[str, object]:
+        """Canonical, deterministic JSON-ready payload (fingerprint included)."""
+        payload = self._body_payload()
+        payload["report_fingerprint"] = self.report_fingerprint
+        return payload
+
+    def to_json(self) -> str:
+        """Byte-deterministic JSON serialization of the report payload."""
+        return json.dumps(self.to_payload(), sort_keys=True, indent=2) + "\n"
+
+@dataclass(frozen=True, slots=True)
+class XsBasisFamilyDiagnosticReport:
+    """Deterministic persisted outcome of the basis-family diagnostic screen.
+
+    Discovery/qualification-only screening report for the premium/basis family:
+    standalone admission (``discovery``/``qualification``) plus the
+    discovery-window Pearson correlation of the basis net-return sleeve against
+    each of the three existing families (trend / funding_contrarian /
+    taker_imbalance). Mirror of the pre-blend ``family_admission`` diagnostic
+    tier -- diagnostic only, never wired into any production blend, and no
+    holdout field (holdout stays sealed until the §4 success criteria pass).
+    """
+
+    profile: str
+    discovery: XsAdmissionResult
+    qualification: XsAdmissionResult
+    discovery_correlation: dict[str, float]
+    report_fingerprint: str = ""
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self, "report_fingerprint", _fingerprint_without_self(self._body_payload()),
+        )
+
+    def _body_payload(self) -> dict[str, object]:
+        return {
+            "profile": self.profile,
+            "discovery": _admission_payload(self.discovery),
+            "qualification": _admission_payload(self.qualification),
+            "discovery_correlation": {
+                name: _round_finite(value)
+                for name, value in self.discovery_correlation.items()
+            },
         }
 
     def to_payload(self) -> dict[str, object]:
@@ -1556,6 +1605,139 @@ def run_xs_alpha_baseline_blend_joint(
     )
 
 
+def _basis_panel(
+    symbols: tuple[str, ...],
+    common: pd.DatetimeIndex,
+) -> pd.DataFrame:
+    """Build the premium/basis panel on the common grid from premiumIndexKlines.
+
+    ``premiumIndexKlines`` is already published at native 4h-bar cadence, so --
+    unlike :func:`_long_short_ratio_panel`'s daily-to-4h ``merge_asof`` PIT
+    join -- the already-settled ``close`` premium values are reindexed directly
+    to ``common``. Fail-closed: any requested symbol missing its indicator
+    kline file raises :class:`DataIntegrityError` rather than being silently
+    skipped, matching the module family's no-silent-skip precedent.
+    """
+    panel: dict[str, pd.Series] = {}
+    for symbol in symbols:
+        path = indicator_kline_path("premiumIndexKlines", symbol, "4h")
+        if not path.exists():
+            raise DataIntegrityError(
+                f"premiumIndexKlines missing for {symbol} at {path}"
+            )
+        frame = pd.read_parquet(path)
+        panel[symbol] = pd.Series(
+            frame["close"].to_numpy(dtype=np.float64),
+            index=pd.DatetimeIndex(pd.to_datetime(frame["datetime"])),
+            name=symbol,
+        ).reindex(common)
+    return pd.DataFrame(panel, index=common)
+
+
+def run_xs_alpha_basis_family_diagnostic(
+    *,
+    unseal_holdout: bool = False,
+) -> XsBasisFamilyDiagnosticReport:
+    """Diagnostic-only standalone admission + collinearity screen for the basis family.
+
+    Reuses ``run_xs_alpha_baseline_leg_selection``'s data-loading skeleton
+    exactly: ``TREND_SCREEN_SYMBOLS`` universe, ``XS_DISCOVERY_START``,
+    ``resolve_evaluation_end(None, unseal_holdout=unseal_holdout)``,
+    ``_load_symbol_data`` per symbol, ``_common_index``. The basis sleeve is
+    built via :func:`_basis_panel` + :func:`_basis_score` +
+    :func:`build_xs_neutral_weights` + :func:`run_xs_composite_ledger`, screened
+    through ``evaluate_xs_admission`` with default ``XsAdmissionConfig()`` on
+    the discovery and qualification windows, and the discovery-window Pearson
+    correlation of the basis net sleeve against each of the three existing
+    families' standalone net sleeves (trend / funding_contrarian /
+    taker_imbalance) is measured via :func:`compute_discovery_correlation` --
+    one run that directly tests the §2.3 collinearity hypothesis
+    (``premiumIndexKlines`` may just be a different aggregation window of the
+    same economic force as funding). Diagnostic only: never wired into any
+    production blend, no holdout field, and ``unseal_holdout`` controls only the
+    evaluation-end boundary like every other ``run_xs_alpha_*`` orchestrator.
+    """
+    end = resolve_evaluation_end(None, unseal_holdout=unseal_holdout)
+    execution_spec = XsCompositeSpec()
+    alpha_spec = XsAlphaCompositeSpec()
+
+    data: dict[str, tuple[pd.DataFrame, pd.Series]] = {}
+    for symbol in TREND_SCREEN_SYMBOLS:
+        frame, funding, _fingerprint, _coverage = _load_symbol_data(
+            symbol, XS_DISCOVERY_START, end,
+        )
+        data[symbol] = (frame, funding)
+
+    common = _common_index([frame.index for frame, _funding in data.values()])
+    if len(common) < 2:
+        raise DataIntegrityError("xs basis diagnostic requires at least 2 common bars")
+
+    opens = pd.DataFrame(
+        {symbol: frame["open"].reindex(common) for symbol, (frame, _funding) in data.items()},
+    )
+    bar_funding = pd.DataFrame(
+        {
+            symbol: _bar_funding_series(funding, frame.index).reindex(common)
+            for symbol, (frame, funding) in data.items()
+        },
+    )
+    closes = pd.DataFrame(
+        {symbol: frame["close"].reindex(common) for symbol, (frame, _funding) in data.items()},
+    )
+    taker = pd.DataFrame(
+        {symbol: frame["taker_buy_ratio"].reindex(common) for symbol, (frame, _funding) in data.items()},
+    )
+
+    opens_arr = opens.to_numpy(dtype=np.float64)
+    o2o = np.zeros_like(opens_arr)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        o2o[1:] = opens_arr[1:] / opens_arr[:-1] - 1.0
+    benchmark = pd.Series(o2o.mean(axis=1), index=common, name="benchmark")
+
+    basis = _basis_panel(TREND_SCREEN_SYMBOLS, common)
+    basis_weights = build_xs_neutral_weights(
+        _basis_score(closes, basis, alpha_spec),
+        execution_spec.halflife_bars, execution_spec.no_trade_band,
+    )
+    basis_equity, basis_turnover = run_xs_composite_ledger(
+        basis_weights, opens, bar_funding, execution_spec,
+    )
+    basis_net = basis_equity.pct_change().fillna(0.0).rename("basis_net")
+
+    family_weights = build_xs_alpha_family_weights(
+        closes, taker, bar_funding, alpha_spec, execution_spec,
+    )
+    discovery_correlation: dict[str, float] = {}
+    for name, weights in family_weights.items():
+        family_equity, _family_turnover = run_xs_composite_ledger(
+            weights, opens, bar_funding, execution_spec,
+        )
+        family_net = family_equity.pct_change().fillna(0.0)
+        discovery_correlation[name] = compute_discovery_correlation(
+            basis_net, family_net, XS_DISCOVERY_START, DISCOVERY_END,
+        )
+
+    admission_config = XsAdmissionConfig()
+    discovery = evaluate_xs_admission(
+        _window_series(basis_equity, XS_DISCOVERY_START, DISCOVERY_END),
+        _window_series(basis_turnover, XS_DISCOVERY_START, DISCOVERY_END),
+        _window_series(benchmark, XS_DISCOVERY_START, DISCOVERY_END),
+        admission_config,
+    )
+    qualification = evaluate_xs_admission(
+        _window_series(basis_equity, QUALIFICATION_START, QUALIFICATION_END),
+        _window_series(basis_turnover, QUALIFICATION_START, QUALIFICATION_END),
+        _window_series(benchmark, QUALIFICATION_START, QUALIFICATION_END),
+        admission_config,
+    )
+
+    return XsBasisFamilyDiagnosticReport(
+        profile="xs_alpha_basis_family_diagnostic",
+        discovery=discovery,
+        qualification=qualification,
+        discovery_correlation=discovery_correlation,
+    )
+
 def run_xs_alpha_baseline_leg_selection(
     *,
     unseal_holdout: bool = False,
@@ -1853,6 +2035,17 @@ def xs_baseline_leg_selection_report_path() -> Path:
     """Logical report key for the baseline-leg comparison report (ledger entry name, not a literal write target)."""
     return Path("docs/results") / "xs_alpha_baseline_leg_selection.json"
 
+def xs_basis_family_diagnostic_report_path() -> Path:
+    """Logical report key for the basis-family diagnostic report (ledger entry name, not a literal write target)."""
+    return Path("docs/results") / "xs_alpha_basis_family_diagnostic.json"
+
+
+def persist_xs_alpha_basis_family_diagnostic_report(
+    report: XsBasisFamilyDiagnosticReport, path: Path,
+) -> None:
+    """Upsert into the consolidated pass/fail ledger, keyed by ``path.stem``."""
+    persist_reliability_ledger_entry(path.stem, report.to_payload(), path.parent)
+
 
 def _check_contract() -> None:
     """Executable assertions locking the baseline-blend entry-point surface."""
@@ -1900,6 +2093,12 @@ def _check_contract() -> None:
     assert _DEFAULT_CANDIDATE_ORDER[0] == "donchian_long_only_v1"
     assert xs_baseline_leg_selection_report_path().name == (
         "xs_alpha_baseline_leg_selection.json"
+    )
+    basis_params = signature(run_xs_alpha_basis_family_diagnostic).parameters
+    assert set(basis_params) == {"unseal_holdout"}
+    assert all(p.kind == p.KEYWORD_ONLY for p in basis_params.values())
+    assert xs_basis_family_diagnostic_report_path().name == (
+        "xs_alpha_basis_family_diagnostic.json"
     )
 
 
