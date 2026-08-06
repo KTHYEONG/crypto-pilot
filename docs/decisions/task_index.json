@@ -1,6 +1,16 @@
 {
   "tasks": [
     {
+      "task_id": "xs_alpha_reliability_cost_hurdle",
+      "date": "2026-08-06",
+      "adr_id": "ADR_20260806_xs_alpha_reliability_cost_hurdle",
+      "domain": "risk",
+      "title": "XS Alpha 신뢰도 게이트: 무근거 hurdle_rate=0.15 -> 비용배수 기반 허들",
+      "why": "17개 hurdle_rate 호출부 중 11곳은 이미 derive_cost_multiple_hurdle_rate/hurdle_rate=0.0으로 무력화됐으나 xs_alpha 계열 6곳+discovery_reliability_score만 전파 누락으로 무근거 flat 0.15(git 고고학상 근거 문서 소실)를 그대로 사용, v6/v8_sized 등 이미 다른 모든 게이트를 통과한 후보를 부당하게 차단.",
+      "resolution": "reliability.py에 derive_realized_weights_cost_total 신설 + ReliabilityGateConfig.hurdle_cost_multiple=2.0 필드 추가, xs_alpha 6개 호출부(v6/v6_growth_sized/v8/v8_sized/v8_joint/baseline_leg_selection/positioning_v7 경로) 및 discovery_reliability_score를 rolling_admission.py의 기존 검증된 패턴(derive_cost_multiple_hurdle_rate)으로 재배선. CLI 재실측(holdout 봉인)으로 v6_growth_sized(LCB90 7.52%>cost hurdle)와 v8_sized(6.40%>hurdle) 신뢰도 게이트 FAIL->PASS 확정, v8/v8_joint/baseline_leg_selection/positioning_v7은 t_stat 또는 강화된 비용허들로 여전히 FAIL.",
+      "impact": "프로젝트 최초로 XS 알파 후보 2종(v6_growth_sized, v8_sized)이 admission+reliability 게이트를 모두 실측 통과. 나머지 5개 xs_alpha 파일 hurdle_rate 무근거 상수 소비 중단, 11개 기존 호출부와 동일 패턴으로 통일. 회전율 175x/yr인 v8_joint는 오히려 더 엄격한 벽(~28%)에 부딪혀 배포 보류 유지 -- 완화가 아닌 구조적 정합화임을 확인."
+    },
+    {
       "task_id": "ADR_20260806_XS_ADMISSION_TURNOVER_MAX_RECALIBRATION",
       "date": "2026-08-06",
       "adr_id": "ADR_20260806_XS_ADMISSION_TURNOVER_MAX_RECALIBRATION",
