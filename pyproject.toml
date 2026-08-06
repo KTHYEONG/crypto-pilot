@@ -84,7 +84,7 @@ ignore = [
 "src/cli/commands/research.py" = ["T20"]  # deterministic JSON diagnostic stdout
 "src/cli/commands/research/*.py" = ["T20"]  # deterministic JSON diagnostic stdout
 "tools/benchmark_library_admission.py" = ["T20"]  # deterministic JSON benchmark stdout
-"tools/research/xs_alpha_blend_joint_search.py" = ["T20", "E402"]  # one-shot search tool: prints its plateau audit to stdout (contract-mandated); imports tools.* only after a script-run sys.path bootstrap
+"tools/research/xs_alpha_blend_joint_search.py" = ["T20", "E402", "I001"]  # one-shot search tool: prints its plateau audit to stdout (contract-mandated); imports tools.* only after a script-run sys.path bootstrap; contract wiring mandates exact single-line import strings
 
 [tool.ruff.lint.mccabe]
 max-complexity = 15
