@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import ast
 import inspect
+import math
 from inspect import signature
 from pathlib import Path
 
@@ -22,9 +23,14 @@ from src.research.evaluation.reliability import (
     FoldDistributionResult,
     ReliabilityGateResult,
     block_size_search_hit_cap,
+    compute_turnover_fold_upper_bound,
 )
-from src.research.risk.growth_sizing import GrowthSizingResult
+from src.research.risk.growth_sizing import (
+    GrowthSizingConfig,
+    GrowthSizingResult,
+)
 from src.research.technical_experts.cross_sectional import (
+    XsAdmissionConfig,
     XsAdmissionResult,
     XsReliabilityResult,
 )
@@ -525,7 +531,9 @@ class TestBaselineBlendJointOrchestration:
             "discovery", "qualification", "holdout",
             "pre_blend_discovery", "pre_blend_qualification", "pre_blend_holdout",
             "baseline_discovery", "baseline_qualification", "baseline_holdout",
-            "reliability", "report_fingerprint",
+            "reliability",
+            "qualification_turnover_neutral", "qualification_worst_fold_turnover",
+            "report_fingerprint",
         }
         assert payload["xs_alpha_weight"] == 0.6
         assert payload["leverage_scale"] == 1.5
@@ -554,6 +562,120 @@ class TestBaselineBlendJointOrchestration:
             xs_blend.run_xs_alpha_baseline_blend_joint(
                 xs_alpha_weight=0.6, leverage_scale=1.0,
             )
+
+    def test_xabjs_06_qualification_turnover_neutral_mirrors_hurdle_neutral(self, monkeypatch) -> None:
+        # XABJS-06: the turnover-neutral diagnostic is wired exactly like rev.2's
+        # reliability_hurdle_neutral -- dataclasses.replace(admission_config,
+        # turnover_max=math.inf) -- and it genuinely neutralizes only the
+        # turnover leg. With every other gate made permissive (so the sole
+        # binding constraint is turnover_max at leverage 4.0x where annualized
+        # qualification turnover exceeds 150.0), the base qualification verdict
+        # fails while the neutral one is admitted on the identical window.
+        source = inspect.getsource(xs_blend.run_xs_alpha_baseline_blend_joint)
+        norm = source.replace('"', "'")
+        assert "turnover_max=math.inf" in norm
+        assert "compute_turnover_fold_upper_bound" in norm
+        assert "GrowthSizingConfig(_DEFAULT_RISK_GRID).bars_per_year" in norm
+
+        def permissive_config() -> XsAdmissionConfig:
+            return XsAdmissionConfig(
+                sharpe_floor=-1.0e6,
+                beta_abs_max=1.0e9,
+                annual_bars_min=10**9,
+                turnover_max=150.0,
+                cost_breakeven_min=-1.0,
+            )
+
+        monkeypatch.setattr(xs_blend, "XsAdmissionConfig", permissive_config)
+        _install_synthetic_data(monkeypatch)
+        report = xs_blend.run_xs_alpha_baseline_blend_joint(
+            xs_alpha_weight=0.6, leverage_scale=4.0,
+        )
+
+        assert report.qualification.annualized_turnover > 150.0
+        assert "turnover_max" in report.qualification.binding_constraint
+        assert report.qualification.admitted is False
+        assert report.qualification_turnover_neutral is not None
+        assert (
+            report.qualification_turnover_neutral.annualized_turnover
+            == report.qualification.annualized_turnover
+        )
+        assert report.qualification_turnover_neutral.binding_constraint is None
+        assert report.qualification_turnover_neutral.admitted is True
+
+    def test_xabjs_07_qualification_worst_fold_turnover_reuses_existing_function(
+        self, monkeypatch,
+    ) -> None:
+        # XABJS-07: the worst-fold-turnover diagnostic equals
+        # compute_turnover_fold_upper_bound computed independently on the exact
+        # qualification-window turnover series the report's qualification field
+        # was built from -- no divergent reimplementation, no re-derived window.
+        _install_synthetic_data(monkeypatch)
+        captured: list[tuple[pd.Series, pd.Series, object]] = []
+        real_eval = xs_blend.evaluate_xs_admission
+
+        def recording_eval(equity, turnover, benchmark, config):
+            captured.append((equity, turnover, config))
+            return real_eval(equity, turnover, benchmark, config)
+
+        monkeypatch.setattr(xs_blend, "evaluate_xs_admission", recording_eval)
+        report = xs_blend.run_xs_alpha_baseline_blend_joint(
+            xs_alpha_weight=0.6, leverage_scale=2.0,
+        )
+
+        qual_turnover = next(
+            turnover
+            for _equity, turnover, config in captured
+            if config.turnover_max == math.inf
+        )
+        expected = compute_turnover_fold_upper_bound(
+            qual_turnover,
+            bars_per_year=GrowthSizingConfig(xs_blend._DEFAULT_RISK_GRID).bars_per_year,
+        )
+        assert report.qualification_worst_fold_turnover is not None
+        assert report.qualification_worst_fold_turnover == expected
+
+    def test_xabjs_08_existing_joint_fields_and_holdout_seal_unchanged(self, monkeypatch) -> None:
+        # XABJS-08: the joint run still returns sealed holdout by default and
+        # the pre-change report surface stays byte-identical in value -- the
+        # only additions are the two new optional diagnostic fields.
+        _install_synthetic_data(monkeypatch)
+        report = xs_blend.run_xs_alpha_baseline_blend_joint(
+            xs_alpha_weight=0.6, leverage_scale=1.5, unseal_holdout=False,
+        )
+
+        assert report.holdout is None
+        assert report.pre_blend_holdout is None
+        assert report.baseline_holdout is None
+        assert report.profile == XS_VOL_WEIGHTED_ALPHA_PROFILE_ID
+        assert report.xs_alpha_weight == 0.6
+        assert report.leverage_scale == 1.5
+        assert isinstance(report.discovery, XsAdmissionResult)
+        assert isinstance(report.qualification, XsAdmissionResult)
+        assert isinstance(report.pre_blend_discovery, XsAdmissionResult)
+        assert isinstance(report.pre_blend_qualification, XsAdmissionResult)
+        assert isinstance(report.baseline_discovery, XsAdmissionResult)
+        assert isinstance(report.baseline_qualification, XsAdmissionResult)
+        assert isinstance(report.reliability, XsReliabilityResult)
+
+        payload = report.to_payload()
+        assert set(payload) == {
+            "profile", "xs_alpha_weight", "leverage_scale",
+            "discovery", "qualification", "holdout",
+            "pre_blend_discovery", "pre_blend_qualification", "pre_blend_holdout",
+            "baseline_discovery", "baseline_qualification", "baseline_holdout",
+            "reliability",
+            "qualification_turnover_neutral", "qualification_worst_fold_turnover",
+            "report_fingerprint",
+        }
+
+        from dataclasses import fields
+
+        names = {f.name for f in fields(xs_blend.XsBaselineBlendJointReport)}
+        assert {"qualification_turnover_neutral", "qualification_worst_fold_turnover"} <= names
+        body = inspect.getsource(xs_blend.XsBaselineBlendJointReport._body_payload)
+        assert "qualification_turnover_neutral" in body
+        assert "qualification_worst_fold_turnover" in body
 
 
 class TestBaselineLegSelectionOrchestration:
