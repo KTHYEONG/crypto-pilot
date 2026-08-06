@@ -54,7 +54,10 @@ from src.common.errors import DataIntegrityError
 from src.research.baseline.backtest import run_backtest
 from src.research.contracts import CostModel, StrategySpec
 from src.research.evaluation.policy import HOLDOUT_CUTOFF, resolve_evaluation_end
-from src.research.evaluation.reliability import ReliabilityGateConfig
+from src.research.evaluation.reliability import (
+    ReliabilityGateConfig,
+    block_size_search_hit_cap,
+)
 from src.research.risk.growth_sizing import (
     GrowthSizingConfig,
     GrowthSizingResult,
@@ -392,6 +395,8 @@ class XsBaselineLegSelectionReport:
     candidate_diagnostics: dict[str, dict[str, float]]
     reliability: XsReliabilityResult | None = None
     reliability_hurdle_neutral: XsReliabilityResult | None = None
+    reliability_point_to_lcb90_ratio: float | None = None
+    reliability_block_size_hit_cap: bool | None = None
     report_fingerprint: str = ""
 
     def __post_init__(self) -> None:
@@ -430,6 +435,8 @@ class XsBaselineLegSelectionReport:
                 _reliability_payload(self.reliability_hurdle_neutral)
                 if self.reliability_hurdle_neutral is not None else None
             ),
+            "reliability_point_to_lcb90_ratio": self.reliability_point_to_lcb90_ratio,
+            "reliability_block_size_hit_cap": self.reliability_block_size_hit_cap,
         }
 
     def to_payload(self) -> dict[str, object]:
@@ -1149,6 +1156,9 @@ def run_xs_alpha_baseline_leg_selection(
             candidate_result = run_technical_expert_backtest(
                 btc_frame, candidate, CostModel(), btc_funding,
                 signal_delay_bars=0,
+                stop_loss_mode="atr_multiple",
+                stop_loss_value=2.0,
+                atr_period=14,
             )
         candidate_equity = candidate_result.equity.reindex(common).rename(
             f"{candidate_id}_equity",
@@ -1247,6 +1257,8 @@ def run_xs_alpha_baseline_leg_selection(
 
     reliability: XsReliabilityResult | None = None
     reliability_hurdle_neutral: XsReliabilityResult | None = None
+    reliability_point_to_lcb90_ratio: float | None = None
+    reliability_block_size_hit_cap: bool | None = None
     oos_window = _oos_reliability_window(
         blended_equity, blended_weights, QUALIFICATION_START, QUALIFICATION_END,
         holdout_start, holdout_end,
@@ -1259,6 +1271,13 @@ def run_xs_alpha_baseline_leg_selection(
         reliability_hurdle_neutral = evaluate_xs_reliability(
             oos_equity, oos_weights,
             dataclasses.replace(ReliabilityGateConfig(), hurdle_rate=0.0),
+        )
+        reliability_point_to_lcb90_ratio = (
+            reliability.lcb.point_cagr / reliability.lcb.lcb90_cagr
+            if reliability.lcb.lcb90_cagr != 0.0 else None
+        )
+        reliability_block_size_hit_cap = block_size_search_hit_cap(
+            oos_equity.pct_change().dropna().to_numpy(dtype=np.float64),
         )
 
     return XsBaselineLegSelectionReport(
@@ -1273,6 +1292,8 @@ def run_xs_alpha_baseline_leg_selection(
         pre_blend_holdout=pre_blend_holdout,
         reliability=reliability,
         reliability_hurdle_neutral=reliability_hurdle_neutral,
+        reliability_point_to_lcb90_ratio=reliability_point_to_lcb90_ratio,
+        reliability_block_size_hit_cap=reliability_block_size_hit_cap,
         selected_candidate=selected_candidate,
         candidate_diagnostics=candidate_diagnostics,
     )
