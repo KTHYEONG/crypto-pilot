@@ -53,6 +53,17 @@ from src.research.technical_experts.xs_alpha_baseline_blend import (
 )
 
 
+@pytest.fixture(autouse=True)
+def _fast_reliability_config(monkeypatch: pytest.MonkeyPatch) -> None:
+    class FastReliabilityGateConfig(ReliabilityGateConfig):
+        def __init__(self, *args, **kwargs):
+            kwargs.setdefault("n_bootstrap", 100)
+            kwargs.setdefault("fold_null_draws", 1000)
+            super().__init__(*args, **kwargs)
+
+    monkeypatch.setattr(xs_blend, "ReliabilityGateConfig", FastReliabilityGateConfig)
+
+
 def _assert_ledger_upsert(path: Path, report: object) -> None:
     """Report is upserted into exactly one of the two pass/fail ledgers, keyed by ``path.stem``."""
     candidates = [
@@ -110,14 +121,6 @@ def _install_synthetic_data(monkeypatch, *, perturb_after: pd.Timestamp | None =
         return frame, funding.copy(), {"perp_ohlcv": f"fp-{symbol}"}, 1.0
 
     monkeypatch.setattr(xs_blend, "_load_symbol_data", fake_load)
-
-    class FastReliabilityGateConfig(ReliabilityGateConfig):
-        def __init__(self, *args, **kwargs):
-            kwargs.setdefault("n_bootstrap", 100)
-            kwargs.setdefault("fold_null_draws", 1000)
-            super().__init__(*args, **kwargs)
-
-    monkeypatch.setattr(xs_blend, "ReliabilityGateConfig", FastReliabilityGateConfig)
 
 
 def _crash_market():
