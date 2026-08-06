@@ -3,6 +3,9 @@ SCENARIO_XSV6SIZE_05 for the growth-optimal sizing overlay orchestration."""
 
 from __future__ import annotations
 
+import json
+from pathlib import Path
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -16,6 +19,18 @@ from src.application.research.technical.xs_trend_screen import (
 from src.research.evaluation.reliability import count_closed_trades
 from src.research.risk.growth_sizing import GrowthSizingResult
 from src.research.technical_experts import cross_sectional as cs
+
+
+def _assert_ledger_upsert(path: Path, report: object) -> None:
+    """Report is upserted into exactly one of the two pass/fail ledgers, keyed by ``path.stem``."""
+    candidates = [
+        path.parent / "xs_alpha_reliability_pass.json",
+        path.parent / "xs_alpha_reliability_fail.json",
+    ]
+    written = [p for p in candidates if p.exists()]
+    assert len(written) == 1
+    ledger = json.loads(written[0].read_text(encoding="utf-8"))
+    assert ledger[path.stem] == report.to_payload()  # type: ignore[attr-defined]
 
 
 def _synthetic_market(start: str = "2022-01-01", end: str = "2025-12-31 23:59:59"):
@@ -162,8 +177,7 @@ class TestGrowthSizingOrchestration:
         report = xs_growth.run_xs_alpha_growth_sizing(profile=XS_ALPHA_PROFILE_ID)
         path = tmp_path / "growth_sized.json"
         xs_growth.persist_xs_growth_sizing_report(report, path)
-        assert path.exists()
-        assert path.read_text(encoding="utf-8") == report.to_json()
+        _assert_ledger_upsert(path, report)
         assert (
             xs_growth.xs_growth_sizing_report_path(XS_VOL_WEIGHTED_ALPHA_PROFILE_ID).name
             == "xs_alpha_vol_weighted_v6_growth_sized.json"
