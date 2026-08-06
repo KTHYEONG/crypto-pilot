@@ -9,6 +9,9 @@ XSV5-03-UNKNOWN-PROFILE-FAIL-CLOSED.
 
 from __future__ import annotations
 
+import json
+from pathlib import Path
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -16,6 +19,18 @@ import pytest
 from src.application.research.technical import xs_trend_screen as xs
 from src.common.errors import DataIntegrityError
 from src.research.technical_experts.catalog import TECHNICAL_CANDIDATES
+
+
+def _assert_ledger_upsert(path: Path, report: object) -> None:
+    """Report is upserted into exactly one of the two pass/fail ledgers, keyed by ``path.stem``."""
+    candidates = [
+        path.parent / "xs_alpha_reliability_pass.json",
+        path.parent / "xs_alpha_reliability_fail.json",
+    ]
+    written = [p for p in candidates if p.exists()]
+    assert len(written) == 1
+    ledger = json.loads(written[0].read_text(encoding="utf-8"))
+    assert ledger[path.stem] == report.to_payload()  # type: ignore[attr-defined]
 
 
 def synthetic_market(start: str = "2022-01-01", end: str = "2025-12-31 23:59:59"):
@@ -287,8 +302,7 @@ class TestAlphaProfileOrchestration:
         report = xs.run_xs_trend_screen(profile=xs.XS_ALPHA_PROFILE_ID)
         path = tmp_path / "report.json"
         xs.persist_xs_screen_report(report, path)
-        assert path.exists()
-        assert path.read_text(encoding="utf-8") == report.to_json()
+        _assert_ledger_upsert(path, report)
         assert (
             xs.xs_screen_report_path(xs.XS_ALPHA_PROFILE_ID).name
             == "xs_alpha_multihorizon_v2.json"
