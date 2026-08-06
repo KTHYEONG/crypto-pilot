@@ -498,6 +498,35 @@ def build_xs_alpha_vol_weighted_weights(
         execution_spec.no_trade_band,
     )
 
+
+def _positioning_score(
+    closes: pd.DataFrame,
+    long_short_ratio: pd.DataFrame,
+    alpha_spec: XsAlphaCompositeSpec,
+) -> pd.DataFrame:
+    """Contrarian cross-sectional z-score of the long/short-ratio family.
+
+    The negated sum -- the contrarian sign -- over the frozen
+    ``alpha_spec.signal_windows`` (42, 84, 168) triple of the cross-sectional
+    z-score of ``long_short_ratio.rolling(window).mean()`` (long low
+    long/short-ratio names, short high ones). Byte-for-byte the inline block
+    that used to live inside :func:`build_xs_alpha_positioning_weights`; both
+    that function and the standalone positioning-only leg
+    (:func:`build_xs_alpha_positioning_only_weights`) share this one score
+    formula rather than duplicating it.
+    """
+    positioning_score = np.zeros(
+        (len(closes.index), len(closes.columns)), dtype=np.float64,
+    )
+    for window in alpha_spec.signal_windows:
+        positioning_score += _cross_sectional_zscore(
+            long_short_ratio.rolling(window).mean().to_numpy(dtype=np.float64),
+        )
+    return pd.DataFrame(
+        -positioning_score, index=closes.index, columns=list(closes.columns),
+    )
+
+
 def build_xs_alpha_positioning_weights(
     closes: pd.DataFrame,
     taker_buy_ratio: pd.DataFrame,
@@ -526,15 +555,8 @@ def build_xs_alpha_positioning_weights(
     family_weights = build_xs_alpha_family_weights(
         closes, taker_buy_ratio, bar_funding, alpha_spec, execution_spec,
     )
-    positioning_score = np.zeros(
-        (len(closes.index), len(closes.columns)), dtype=np.float64,
-    )
-    for window in alpha_spec.signal_windows:
-        positioning_score += _cross_sectional_zscore(
-            long_short_ratio.rolling(window).mean().to_numpy(dtype=np.float64),
-        )
-    family_scores["positioning"] = pd.DataFrame(
-        -positioning_score, index=closes.index, columns=list(closes.columns),
+    family_scores["positioning"] = _positioning_score(
+        closes, long_short_ratio, alpha_spec,
     )
     family_weights["positioning"] = build_xs_neutral_weights(
         family_scores["positioning"],
@@ -557,6 +579,57 @@ def build_xs_alpha_positioning_weights(
     )
     return build_xs_neutral_weights(
         pd.DataFrame(combined, index=closes.index, columns=list(closes.columns)),
+        execution_spec.halflife_bars,
+        execution_spec.no_trade_band,
+    )
+
+
+def build_xs_alpha_positioning_only_weights(
+    closes: pd.DataFrame,
+    long_short_ratio: pd.DataFrame,
+    alpha_spec: XsAlphaCompositeSpec,
+    execution_spec: XsCompositeSpec,
+) -> pd.DataFrame:
+    """Build the standalone 'positioning' family sleeve, isolated.
+
+    The genuinely novel primitive this spec exists to add: the positioning
+    family score alone (from ``long_short_ratio``, a data axis independent of
+    price/volume/funding), passed through :func:`build_xs_neutral_weights`
+    exactly once (the smooth-once invariant shared with every profile in this
+    family). It mirrors the positioning-only intermediate value inside
+    :func:`build_xs_alpha_positioning_weights` but returns it directly instead
+    of discarding it after computing an inverse-vol tilt weight. Malformed
+    input fails closed via the same ``DataIntegrityError``/``ValueError``
+    contract every sibling builder enforces.
+    """
+    for name, frame in (
+        ("closes", closes),
+        ("long_short_ratio", long_short_ratio),
+    ):
+        if not isinstance(frame, pd.DataFrame):
+            raise DataIntegrityError(f"{name} must be a DataFrame")
+        index = frame.index
+        if not isinstance(index, pd.DatetimeIndex) or getattr(index, "tz", None) is None:
+            raise DataIntegrityError(f"{name} index must be a tz-aware UTC DatetimeIndex")
+        if not index.is_unique:
+            raise DataIntegrityError(f"{name} index must be unique")
+        if not index.is_monotonic_increasing:
+            raise DataIntegrityError(f"{name} index must be monotonic increasing")
+    if not closes.index.equals(long_short_ratio.index):
+        raise DataIntegrityError(
+            "closes and long_short_ratio must share an identical index",
+        )
+    if not list(closes.columns) == list(long_short_ratio.columns):
+        raise DataIntegrityError(
+            "closes and long_short_ratio must share an identical ordered "
+            "column set",
+        )
+    closes_values = closes.to_numpy(dtype=np.float64)
+    if not np.isfinite(closes_values).all() or (closes_values <= 0.0).any():
+        raise DataIntegrityError("closes must be finite and strictly positive")
+
+    return build_xs_neutral_weights(
+        _positioning_score(closes, long_short_ratio, alpha_spec),
         execution_spec.halflife_bars,
         execution_spec.no_trade_band,
     )
