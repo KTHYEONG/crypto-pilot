@@ -1,6 +1,16 @@
 {
   "tasks": [
     {
+      "task_id": "xs_alpha_baseline_leg_selection",
+      "date": "2026-08-06",
+      "adr_id": "ADR_20260806_xs_alpha_baseline_leg_selection",
+      "domain": "risk",
+      "title": "XS Alpha 베이스라인 디버시파이어 레그 선택: 고정 Donchian → 5-후보 비교, 실측상 Donchian이 최우수로 재확인",
+      "why": "사용자가 xs_alpha_vol_weighted_v6와 블렌드되는 frozen Donchian baseline이 검증된 선택인지, 상관계수가 비슷하면서 더 나은 대안이 있는지 질의. 조사 결과 Donchian은 단독 admission 실패(baseline_qualification.admitted=False)에도 xs_alpha_vol_weighted_v6와의 상관계수가 거의 0(rho≈-0.0002)이라는 이유만으로 고정 선택된 것으로 확인, 대안 후보와 비교된 적이 없었음. tournament.py에 이미 구현된 4개 동형 단일종목 후보(funding_signed_directional_v1/Supertrend/Parabolic SAR/Keltner)가 있었으나 xs_alpha_vol_weighted_v6과 짝지어 측정된 적이 없었음.",
+      "resolution": "compute_discovery_correlation(진단용 상관계수, zero-variance-safe)과 select_best_baseline_leg(기존 select_baseline_blend_weight/_blended_sharpe 재사용, 후보별 블렌드 시너지 argmax, 동점시 candidate_order 최우선 후보 승리, fail-closed)를 xs_alpha_baseline_blend.py에 신설. run_xs_alpha_baseline_leg_selection 오케스트레이터(4번째 sibling, tournament._run_source 재사용)와 XsBaselineLegSelectionReport를 application 레이어에 추가, CLI에 xs-baseline-leg-selection 서브커맨드 배선. 홀드아웃 봉인 상태로 실행한 실측 결과 5개 후보 중 donchian_long_only_v1이 blended_sharpe=2.298로 압도적 1위(2위 funding_signed_directional_v1=1.970), 사용자의 '더 나은 대안이 있을 것' 가설은 반증됨 -- 상관계수 절댓값(Supertrend/PSAR가 -0.017/-0.012로 Donchian의 +0.011보다 큼)이 블렌드 시너지를 예측하지 못함을 확인.",
+      "impact": "docs/results/xs_alpha_baseline_leg_selection.json 신규 생성(5개 후보 비교표+선택결과). run_xs_alpha_baseline_blend/_sized/_joint 및 기존 v8 계열 산출물은 무변경(Donchian 기본값 유지, 이번 실측이 그 선택을 정당화). LCB90 신뢰도 게이트는 여전히 FAIL(3.39%<15% 허들)로 별개 트랙 -- 이번 스펙의 목표가 아니었음. 후속 과제: 3-way+ 조합 최적화, xs_alpha_positioning_v7 편입, v6 내부 family간 교차상관 측정."
+    },
+    {
       "task_id": "xs_alpha_blend_joint_turnover_diagnostic",
       "date": "2026-08-06",
       "adr_id": "ADR_20260806_xs_alpha_blend_joint_turnover_diagnostic",
