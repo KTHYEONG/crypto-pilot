@@ -80,14 +80,14 @@
   },
   "profile": "xs_alpha_vol_weighted_v6",
   "qualification": {
-    "admitted": false,
+    "admitted": true,
     "annual_sharpe": {
       "2024": 1.36126234,
       "2025": 1.58143461
     },
     "annualized_turnover": 175.42227703,
     "beta": -0.09909714,
-    "binding_constraint": "turnover_max",
+    "binding_constraint": null,
     "breakeven_cost": 0.0029517,
     "cagr": 0.41117156,
     "mdd": -0.15028223,
@@ -133,6 +133,6 @@
       "verdict": "FAIL"
     }
   },
-  "report_fingerprint": "bc3f2b70b65a4331ddbf67dcb77c19eb23e8a1d432dd18b514c5bb8af4c6f382",
+  "report_fingerprint": "0802aaca3616dbc4620c4f43dd895402ba9f8bc1d63dab385cd1adea36f3e232",
   "xs_alpha_weight": 0.27135163
 }
