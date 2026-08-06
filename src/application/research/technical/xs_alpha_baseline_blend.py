@@ -66,8 +66,10 @@ from src.research.evaluation.reliability import (
     equity_span_years,
 )
 from src.research.risk.growth_sizing import (
+    GrowthHeadroomDiagnostic,
     GrowthSizingConfig,
     GrowthSizingResult,
+    diagnose_growth_headroom,
     solve_growth_optimal_risk,
 )
 from src.research.sleeve_blend.tournament import (
@@ -219,6 +221,19 @@ class XsBaselineBlendReport:
         """Byte-deterministic JSON serialization of the report payload."""
         return json.dumps(self.to_payload(), sort_keys=True, indent=2) + "\n"
 
+def _growth_headroom_payload(diag: GrowthHeadroomDiagnostic) -> dict[str, object]:
+    """Deterministic JSON-ready serialization of the headroom diagnostic."""
+    return {
+        "selected_risk": diag.selected_risk,
+        "selected_median_log_growth": round(diag.selected_median_log_growth, 8),
+        "peak_feasible_risk": diag.peak_feasible_risk,
+        "peak_feasible_median_log_growth": round(diag.peak_feasible_median_log_growth, 8),
+        "headroom_ratio": round(diag.headroom_ratio, 8),
+        "risk_constrained": diag.risk_constrained,
+        "block_size_used": diag.block_size_used,
+    }
+
+
 @dataclass(frozen=True, slots=True)
 class XsBaselineBlendSizedReport:
     """Deterministic persisted outcome of one robust-blend + growth-sizing run.
@@ -245,6 +260,7 @@ class XsBaselineBlendSizedReport:
     baseline_qualification: XsAdmissionResult
     baseline_holdout: XsAdmissionResult | None
     reliability: XsReliabilityResult | None = None
+    growth_headroom: GrowthHeadroomDiagnostic | None = None
     report_fingerprint: str = ""
 
     def __post_init__(self) -> None:
@@ -278,6 +294,10 @@ class XsBaselineBlendSizedReport:
             "reliability": (
                 _reliability_payload(self.reliability)
                 if self.reliability is not None else None
+            ),
+            "growth_headroom": (
+                _growth_headroom_payload(self.growth_headroom)
+                if self.growth_headroom is not None else None
             ),
         }
 
@@ -784,6 +804,12 @@ def run_xs_alpha_baseline_blend_sized(
         ),
         use_drawdown_overlay=False,
     )
+    growth_headroom = diagnose_growth_headroom(
+        discovery_blended_net.to_numpy(dtype=np.float64),
+        GrowthSizingConfig(risk_grid=risk_grid, reference_risk=1.0, max_drawdown=0.20),
+        sizing,
+        use_drawdown_overlay=False
+    )
 
     if sizing.selected_risk is None:
         scaled_equity = blended_equity
@@ -913,6 +939,7 @@ def run_xs_alpha_baseline_blend_sized(
         baseline_qualification=baseline_qualification,
         baseline_holdout=baseline_holdout,
         reliability=reliability,
+        growth_headroom=growth_headroom,
     )
 
 def run_xs_alpha_baseline_blend_joint(
