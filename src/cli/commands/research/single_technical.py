@@ -9,6 +9,9 @@ from src.application.research.technical.xs_alpha_baseline_blend import (
     run_xs_alpha_baseline_leg_selection,
     xs_baseline_leg_selection_report_path,
 )
+from src.application.research.universe.candidate_scan import (
+    xs_universe_candidate_scan_report_path,
+)
 from src.research.contracts import TechnicalExpertEvaluationRequest
 
 _logger = logging.getLogger("XsScreen")
@@ -306,6 +309,28 @@ def _run_xs_alpha_baseline_blend_joint(args: argparse.Namespace) -> None:
     )
 
 
+def _run_xs_universe_candidate_scan(args: argparse.Namespace) -> None:
+    from src.application.research.technical.xs_trend_screen import XS_DISCOVERY_START
+    from src.application.research.universe.candidate_scan import (
+        persist_universe_candidate_scan,
+        run_universe_candidate_scan,
+    )
+    from src.common.config import ohlcv_path
+    from src.research.evaluation.policy import resolve_evaluation_end
+
+    end = resolve_evaluation_end(None, unseal_holdout=args.unseal_holdout)
+    pattern = ohlcv_path("", "1h")
+    symbols = tuple(sorted(p.stem for p in pattern.parent.glob("*.parquet")))
+    results = run_universe_candidate_scan(symbols, XS_DISCOVERY_START, end)
+    persist_universe_candidate_scan(results, xs_universe_candidate_scan_report_path())
+    _logger.info(
+        "xs-universe-candidate-scan scanned=%d qualifying=%d taker_ratio_invalid=%d",
+        len(results),
+        sum(r.qualifies for r in results),
+        sum(not r.taker_ratio_valid for r in results),
+    )
+
+
 def _run_xs_alpha_baseline_leg_selection(args: argparse.Namespace) -> None:
     from src.application.research.technical.xs_trend_screen import (
         XS_VOL_WEIGHTED_ALPHA_PROFILE_ID,
@@ -406,6 +431,21 @@ def add_single_technical_commands(run_sub: argparse._SubParsersAction[argparse.A
     xs_baseline_blend_sized.add_argument("--unseal-holdout", action="store_true", default=False)
     xs_baseline_blend_sized.add_argument("--no-log-run", action="store_true", default=False)
     xs_baseline_blend_sized.set_defaults(handler=_run_xs_alpha_baseline_blend_sized)
+
+    xs_universe_candidate_scan = run_sub.add_parser(
+        "xs-universe-candidate-scan",
+        help=(
+            "Scan the local data lake against the principled universe-"
+            "qualification filters (coverage, funding, taker-integrity, liquidity)"
+        ),
+    )
+    xs_universe_candidate_scan.add_argument(
+        "--unseal-holdout", action="store_true", default=False,
+    )
+    xs_universe_candidate_scan.add_argument(
+        "--no-log-run", action="store_true", default=False,
+    )
+    xs_universe_candidate_scan.set_defaults(handler=_run_xs_universe_candidate_scan)
 
     xs_triple_blend_sized = run_sub.add_parser(
         "xs-triple-blend-sized",
