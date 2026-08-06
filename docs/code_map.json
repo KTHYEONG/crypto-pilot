@@ -117,6 +117,9 @@
   "src/application/research/technical/evaluation.py": {
     "testing": "tests/unit/application/test_expert_evaluation.py"
   },
+  "src/application/research/technical/reliability_ledger.py": {
+    "testing": "tests/unit/application/research/technical/test_xs_alpha_baseline_blend_orchestrator.py"
+  },
   "src/application/research/technical/trend_screen.py": {
     "testing": "tests/unit/application/research/technical/test_trend_screen.py"
   },
