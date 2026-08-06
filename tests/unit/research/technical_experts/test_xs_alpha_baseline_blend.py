@@ -27,8 +27,10 @@ import pytest
 from src.research.technical_experts.xs_alpha_baseline_blend import (
     apply_fixed_gross_leverage,
     build_blended_ledger,
+    compute_discovery_correlation,
     discovery_reliability_score,
     select_baseline_blend_weight,
+    select_best_baseline_leg,
     select_robust_baseline_blend_weight,
 )
 
@@ -349,3 +351,86 @@ def test_xabjs_fail_closed_fewer_than_two_discovery_bars() -> None:
     a, aw, b, bw, idx = _joint_discovery_fixture()
     with pytest.raises(ValueError, match="fewer than 2 common bars"):
         discovery_reliability_score(a, aw, b, bw, idx[-1], idx[-1], 0.5, 1.0)
+
+
+def test_xbls_python_assertion_compute_discovery_correlation() -> None:
+    # Contract python_assertion: a perfectly anti-correlated pair scores below
+    # -0.99 on the discovery window; a constant leg scores exactly 0.0.
+    a, b, idx = _antiseries()
+    c = pd.Series([0.01] * 50, index=idx)
+    assert compute_discovery_correlation(a, b, idx[0], idx[-1]) < -0.99
+    assert compute_discovery_correlation(a, c, idx[0], idx[-1]) == 0.0
+
+
+def test_xbls_python_assertion_select_best_baseline_leg() -> None:
+    # Contract python_assertion: the zero-variance-dominant candidate (infinite
+    # blended Sharpe at weight 0.5) is chosen even though listed second.
+    a, b, idx = _antiseries()
+    weak = pd.Series([0.01, -0.005] * 25, index=idx)
+    best_id, best_weight = select_best_baseline_leg(
+        a, {"weak_v1": weak, "strong_v1": b}, idx[0], idx[-1],
+        ("weak_v1", "strong_v1"), _GRID,
+    )
+    assert best_id == "strong_v1"
+    assert best_weight == 0.5
+
+
+def test_xbls_01_diagnostic_correlation_anti_correlated() -> None:
+    # XBLS-01: discovery-window correlation of the perfectly anti-correlated
+    # fixture must be below -0.99.
+    a, b, idx = _antiseries()
+    assert compute_discovery_correlation(a, b, idx[0], idx[-1]) < -0.99
+
+
+def test_xbls_02_diagnostic_correlation_zero_variance_safe() -> None:
+    # XBLS-02: a constant leg must yield exactly 0.0 -- no exception, no NaN,
+    # no RuntimeWarning (quant.md zero-variance-safe contract).
+    a, b, idx = _antiseries()
+    c = pd.Series([0.01] * 50, index=idx)
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        corr = compute_discovery_correlation(a, c, idx[0], idx[-1])
+    assert corr == 0.0
+    assert np.isfinite(corr)
+
+
+def test_xbls_03_selects_dominant_candidate_by_blended_sharpe() -> None:
+    # XBLS-03: the candidate whose blend is zero-variance-positive-dominant at
+    # weight 0.5 (+inf blended Sharpe) wins regardless of candidate_order
+    # position -- the selection scores the combination effect, not standalone
+    # leg quality.
+    a, b, idx = _antiseries()
+    weak = pd.Series([0.01, -0.005] * 25, index=idx)
+    best_id, best_weight = select_best_baseline_leg(
+        a, {"weak_v1": weak, "dominant_v1": b}, idx[0], idx[-1],
+        ("weak_v1", "dominant_v1"), _GRID,
+    )
+    assert best_id == "dominant_v1"
+    assert best_weight == 0.5
+
+
+def test_xbls_04_tie_breaks_to_earliest_candidate_order() -> None:
+    # XBLS-04: byte-identical candidate legs tie exactly, and the earliest id
+    # in candidate_order wins (reproducing the Donchian-first status quo on a
+    # tie when Donchian is listed first).
+    a, b, idx = _antiseries()
+    dup = b.copy()
+    best_id, best_weight = select_best_baseline_leg(
+        a, {"first_v1": dup, "second_v1": b}, idx[0], idx[-1],
+        ("first_v1", "second_v1"), _GRID,
+    )
+    assert best_id == "first_v1"
+    assert best_weight == 0.5
+
+
+def test_xbls_05_fail_closed_missing_candidate() -> None:
+    # XBLS-05: referencing a candidate absent from candidate_nets (naming the
+    # missing id) or passing an empty candidate_order must raise ValueError --
+    # never silently drop a requested candidate.
+    a, b, idx = _antiseries()
+    with pytest.raises(ValueError, match="ghost_v1"):
+        select_best_baseline_leg(
+            a, {"present_v1": b}, idx[0], idx[-1], ("present_v1", "ghost_v1"), _GRID,
+        )
+    with pytest.raises(ValueError, match="must not be empty"):
+        select_best_baseline_leg(a, {"present_v1": b}, idx[0], idx[-1], (), _GRID)

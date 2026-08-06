@@ -33,6 +33,8 @@ the inputs are already realized net returns and realized weight paths.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
+
 import numpy as np
 import pandas as pd
 
@@ -354,3 +356,91 @@ def discovery_reliability_score(
     )
     result = evaluate_xs_reliability(scaled_equity, scaled_weights, ReliabilityGateConfig())
     return float(result.lcb.lcb90_cagr)
+
+
+def compute_discovery_correlation(
+    xs_alpha_net: pd.Series,
+    baseline_net: pd.Series,
+    discovery_start: pd.Timestamp,
+    discovery_end: pd.Timestamp,
+) -> float:
+    """Pearson correlation of two net-return legs on the discovery window.
+
+    Diagnostic only -- never used to gate or select a candidate, because
+    correlation alone says nothing about which direction is beneficial in
+    combination with a positive-mean leg (a positively-correlated-but-very-
+    high-Sharpe leg can still raise the blend's Sharpe; the ``_blended_sharpe``
+    grid search accounts for this correctly and must remain the sole selection
+    authority). Reuses :func:`_discovery_common` unmodified for the inclusive
+    window restriction and its fail-closed <2-common-bars / non-finite
+    validation. Zero-variance-safe per ``quant.md``: returns exactly ``0.0``
+    (never ``NaN``, never a ``ZeroDivisionError``/``RuntimeWarning``) when
+    either leg has no discovery-window variance.
+    """
+    a, b = _discovery_common(
+        xs_alpha_net, baseline_net, discovery_start, discovery_end,
+    )
+    a_dev = a.to_numpy(dtype=np.float64) - float(a.mean())
+    b_dev = b.to_numpy(dtype=np.float64) - float(b.mean())
+    a_var = float(np.dot(a_dev, a_dev))
+    b_var = float(np.dot(b_dev, b_dev))
+    if a_var == 0.0 or b_var == 0.0:
+        return 0.0
+    return float(np.dot(a_dev, b_dev) / np.sqrt(a_var * b_var))
+
+
+def select_best_baseline_leg(
+    xs_alpha_net: pd.Series,
+    candidate_nets: Mapping[str, pd.Series],
+    discovery_start: pd.Timestamp,
+    discovery_end: pd.Timestamp,
+    candidate_order: tuple[str, ...],
+    weight_grid: tuple[float, ...],
+) -> tuple[str, float]:
+    """Pick the candidate whose blend with ``xs_alpha_net`` scores best.
+
+    For every ``candidate_id`` in ``candidate_order`` calls the existing
+    :func:`select_baseline_blend_weight` unmodified to get that candidate's own
+    best grid weight, then scores the achieved blend via :func:`_blended_sharpe`
+    at that weight -- the combination effect, not either leg's standalone
+    Sharpe. Returns the ``(candidate_id, blend_weight)`` pair with the highest
+    achieved discovery-window blended Sharpe. An exact tie resolves to the
+    earliest ``candidate_id`` in ``candidate_order`` (mirroring
+    :func:`select_baseline_blend_weight`'s lowest-grid-value tie-break and, with
+    Donchian listed first, reproducing today's status quo). Fail-closed
+    ``ValueError`` on an empty ``candidate_order`` or any entry missing from
+    ``candidate_nets`` -- never silently drops a requested candidate.
+    """
+    if not candidate_order:
+        raise ValueError("candidate_order must not be empty")
+    missing = [candidate_id for candidate_id in candidate_order if candidate_id not in candidate_nets]
+    if missing:
+        raise ValueError(
+            "candidate_order references candidate ids missing from candidate_nets: "
+            f"{missing}"
+        )
+
+    best_id = candidate_order[0]
+    best_weight = select_baseline_blend_weight(
+        xs_alpha_net, candidate_nets[best_id], discovery_start, discovery_end,
+        weight_grid,
+    )
+    disc_a, disc_b = _discovery_common(
+        xs_alpha_net, candidate_nets[best_id], discovery_start, discovery_end,
+    )
+    best_sharpe = _blended_sharpe(disc_a, disc_b, best_weight)
+    for candidate_id in candidate_order[1:]:
+        weight = select_baseline_blend_weight(
+            xs_alpha_net, candidate_nets[candidate_id], discovery_start,
+            discovery_end, weight_grid,
+        )
+        disc_a, disc_b = _discovery_common(
+            xs_alpha_net, candidate_nets[candidate_id], discovery_start,
+            discovery_end,
+        )
+        sharpe = _blended_sharpe(disc_a, disc_b, weight)
+        if sharpe > best_sharpe:
+            best_sharpe = sharpe
+            best_id = candidate_id
+            best_weight = weight
+    return best_id, best_weight
