@@ -1,0 +1,127 @@
+{
+  "blend_weight": 0.2,
+  "candidate_diagnostics": {
+    "donchian_long_only_v1": {
+      "blend_weight": 0.2,
+      "blended_sharpe": 2.29776006,
+      "correlation": 0.01098552
+    },
+    "funding_signed_directional_v1": {
+      "blend_weight": 0.2,
+      "blended_sharpe": 1.97010391,
+      "correlation": 0.00777225
+    },
+    "technical_keltner_channel_breakout_long_v1": {
+      "blend_weight": 0.6,
+      "blended_sharpe": 1.51622241,
+      "correlation": 0.00208508
+    },
+    "technical_parabolic_sar_long_v1": {
+      "blend_weight": 1.0,
+      "blended_sharpe": 1.28284966,
+      "correlation": -0.01218052
+    },
+    "technical_supertrend_long_v1": {
+      "blend_weight": 1.0,
+      "blended_sharpe": 1.28284966,
+      "correlation": -0.01711481
+    }
+  },
+  "discovery": {
+    "admitted": true,
+    "annual_sharpe": {
+      "2022": 0.97652885,
+      "2023": 2.95102545
+    },
+    "annualized_turnover": 37.56058388,
+    "beta": 0.00231975,
+    "binding_constraint": null,
+    "breakeven_cost": 0.00521142,
+    "cagr": 0.17733752,
+    "mdd": -0.05404348,
+    "sharpe": 2.29806089,
+    "t_stat": 3.03786665
+  },
+  "holdout": null,
+  "pre_blend_discovery": {
+    "admitted": true,
+    "annual_sharpe": {
+      "2022": 1.81150769,
+      "2023": 0.8336865
+    },
+    "annualized_turnover": 23.48806553,
+    "beta": 0.00303518,
+    "binding_constraint": null,
+    "breakeven_cost": 0.01029712,
+    "cagr": 0.23137625,
+    "mdd": -0.15293961,
+    "sharpe": 1.28301733,
+    "t_stat": 1.69605409
+  },
+  "pre_blend_holdout": null,
+  "pre_blend_qualification": {
+    "admitted": true,
+    "annual_sharpe": {
+      "2024": 1.07466142,
+      "2025": 1.5885106
+    },
+    "annualized_turnover": 22.66347552,
+    "beta": -0.09106763,
+    "binding_constraint": null,
+    "breakeven_cost": 0.01179953,
+    "cagr": 0.26117317,
+    "mdd": -0.14344526,
+    "sharpe": 1.33304304,
+    "t_stat": 1.88649835
+  },
+  "profile": "xs_alpha_vol_weighted_v6",
+  "qualification": {
+    "admitted": true,
+    "annual_sharpe": {
+      "2024": 1.45199981,
+      "2025": 1.50461157
+    },
+    "annualized_turnover": 46.68891418,
+    "beta": -0.01842424,
+    "binding_constraint": null,
+    "breakeven_cost": 0.00262778,
+    "cagr": 0.08733263,
+    "mdd": -0.04316059,
+    "sharpe": 1.47068656,
+    "t_stat": 2.08128895
+  },
+  "reliability": {
+    "fold": {
+      "fold_concentration": 0.41576805,
+      "fold_concentration_threshold": 0.54724357,
+      "fold_reference_sharpe": 1.41372982,
+      "gate_pass": true,
+      "max_period_contribution": 0.41576805,
+      "median_fold_cagr": 0.08748364,
+      "median_fold_calmar": 2.64903884,
+      "n_folds": 4,
+      "worst_fold_cagr": 0.03009509
+    },
+    "lcb": {
+      "block_size_used": 14,
+      "lcb90_cagr": 0.03392808,
+      "lcb95_cagr": 0.02064088,
+      "p_negative": 0.01466667,
+      "point_cagr": 0.08733263,
+      "t_stat": 2.08081377,
+      "trade_count": 905,
+      "verdict": "FAIL"
+    }
+  },
+  "report_fingerprint": "086a54c0e0ee57d1384c5764fc07a105bd191b804ea70df87a90e458668d4f4b",
+  "selected_candidate": "donchian_long_only_v1",
+  "weight_grid": [
+    0.0,
+    0.2,
+    0.4,
+    0.5,
+    0.6,
+    0.8,
+    1.0
+  ]
+}
