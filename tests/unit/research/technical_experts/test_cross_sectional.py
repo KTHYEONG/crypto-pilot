@@ -299,11 +299,37 @@ class TestAdmission:
         assert "annual_sub_sharpe" in res.binding_constraint
 
     def test_xsc_05_high_turnover_names_turnover_max(self) -> None:
+        # TMAX-03: constant per-bar turnover 1.0 annualizes to ~2190x/yr --
+        # far above even the recalibrated 200.0 default -- so the gate still
+        # catches genuinely extreme turnover; only the 150-200x band moved.
         equity, turnover, benchmark = self._admission_inputs()
         high = pd.Series(1.0, index=turnover.index)
         res = evaluate_xs_admission(equity, high, benchmark, XsAdmissionConfig())
         assert res.admitted is False
         assert "turnover_max" in res.binding_constraint
+
+    def test_xsc_05_turnover_max_default_recalibrated_to_200(self) -> None:
+        # TMAX-01: the recalibration moved only the class default --
+        # 150.0 -> 200.0 -- with every other gate and the gate mechanism
+        # untouched.
+        assert XsAdmissionConfig().turnover_max == 200.0
+        assert XsAdmissionConfig().sharpe_floor == 0.80
+        assert XsAdmissionConfig().beta_abs_max == 0.15
+        assert XsAdmissionConfig().annual_bars_min == 60
+        assert XsAdmissionConfig().cost_breakeven_min == 0.0024
+        assert XsAdmissionConfig().round_trip_cost_rate == 0.0008
+
+    def test_xsc_05_turnover_max_recalibration_blast_radius_is_isolated(self) -> None:
+        # TMAX-04: the study's measured history shows every other admitted XS
+        # profile sits well under both caps (max observed ~83x,
+        # xs_neutral_composite_v1 discovery), so raising the default 150 -> 200
+        # flips exactly one verdict -- xs_alpha_baseline_blend_v8_joint's
+        # qualification (175.42x/yr). This is a regression guard documenting
+        # that isolation, not a runtime check (it's a property of the historical
+        # data the study verified, not something to re-derive here).
+        default = XsAdmissionConfig().turnover_max
+        assert default > 175.42  # admits the v8_joint qualification candidate
+        assert default < 216.5  # stays below the one known disaster zone
 
     def test_xsc_05_no_absolute_cagr_hurdle(self) -> None:
         # A book with a high CAGR but sub-floor Sharpe must fail on sharpe_floor,
