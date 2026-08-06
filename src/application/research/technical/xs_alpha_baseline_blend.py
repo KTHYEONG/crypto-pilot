@@ -57,6 +57,7 @@ from src.research.evaluation.policy import HOLDOUT_CUTOFF, resolve_evaluation_en
 from src.research.evaluation.reliability import (
     ReliabilityGateConfig,
     block_size_search_hit_cap,
+    compute_turnover_fold_upper_bound,
 )
 from src.research.risk.growth_sizing import (
     GrowthSizingConfig,
@@ -310,6 +311,8 @@ class XsBaselineBlendJointReport:
     baseline_qualification: XsAdmissionResult
     baseline_holdout: XsAdmissionResult | None
     reliability: XsReliabilityResult | None = None
+    qualification_turnover_neutral: XsAdmissionResult | None = None
+    qualification_worst_fold_turnover: float | None = None
     report_fingerprint: str = ""
 
     def __post_init__(self) -> None:
@@ -342,6 +345,14 @@ class XsBaselineBlendJointReport:
             "reliability": (
                 _reliability_payload(self.reliability)
                 if self.reliability is not None else None
+            ),
+            "qualification_turnover_neutral": (
+                _admission_payload(self.qualification_turnover_neutral)
+                if self.qualification_turnover_neutral is not None else None
+            ),
+            "qualification_worst_fold_turnover": (
+                _round_finite(self.qualification_worst_fold_turnover)
+                if self.qualification_worst_fold_turnover is not None else None
             ),
         }
 
@@ -984,6 +995,19 @@ def run_xs_alpha_baseline_blend_joint(
         _window_series(benchmark, QUALIFICATION_START, QUALIFICATION_END),
         admission_config,
     )
+    scaled_turnover_qualification = _window_series(
+        scaled_turnover, QUALIFICATION_START, QUALIFICATION_END,
+    )
+    qualification_turnover_neutral = evaluate_xs_admission(
+        _window_series(scaled_equity, QUALIFICATION_START, QUALIFICATION_END),
+        scaled_turnover_qualification,
+        _window_series(benchmark, QUALIFICATION_START, QUALIFICATION_END),
+        dataclasses.replace(admission_config, turnover_max=math.inf),
+    )
+    qualification_worst_fold_turnover = compute_turnover_fold_upper_bound(
+        scaled_turnover_qualification,
+        bars_per_year=GrowthSizingConfig(_DEFAULT_RISK_GRID).bars_per_year,
+    )
 
     holdout: XsAdmissionResult | None = None
     holdout_start: pd.Timestamp | None = None
@@ -1071,6 +1095,8 @@ def run_xs_alpha_baseline_blend_joint(
         baseline_qualification=baseline_qualification,
         baseline_holdout=baseline_holdout,
         reliability=reliability,
+        qualification_turnover_neutral=qualification_turnover_neutral,
+        qualification_worst_fold_turnover=qualification_worst_fold_turnover,
     )
 
 

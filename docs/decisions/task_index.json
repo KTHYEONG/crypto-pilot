@@ -1,6 +1,16 @@
 {
   "tasks": [
     {
+      "task_id": "TASK_XS_ALPHA_GROWTH_DIRECTION_TURNOVER_DIAGNOSTIC",
+      "date": "2026-08-06",
+      "adr_id": "ADR_20260806_XS_ALPHA_GROWTH_DIRECTION_TURNOVER_DIAGNOSTIC",
+      "domain": "risk",
+      "title": "XS Alpha Growth Direction - Turnover-Gate Diagnostic Exposure (Sizing/Leverage Lever)",
+      "why": "Rev.3 confirmed exit-side stop-loss parity does not move the winner or reliability (LCB90 stays 3.39%). User asked what other lever could raise asset-growth. Project's own measured history shows leverage/sizing is the only lever that has ever pushed LCB90 close to the 15% hurdle: v8(blend-only) 2.84% -> v8_sized(constrained leverage) 6.40% -> v8_joint(unconstrained joint-searched leverage_scale=3.977) 13.21%, closest ever. v8_joint's sole admission blocker is qualification turnover_max=150 (annualized_turnover=175.4x), which ADR_20260806_xs_alpha_blend_joint_turnover_diagnostic already found has no traceable justification in the repo and blocks the single highest-CAGR profile of 10 measured.",
+      "resolution": "Added qualification_turnover_neutral (evaluate_xs_admission re-run with dataclasses.replace(admission_config, turnover_max=math.inf), mirroring rev.2's reliability_hurdle_neutral pattern) and qualification_worst_fold_turnover (reuses existing compute_turnover_fold_upper_bound, promoted from a one-off dev-script print into the persisted run_xs_alpha_baseline_blend_joint report) as two new optional fields on XsBaselineBlendJointReport. No admission gate changed; report-only, mirrors the hurdle_rate precedent exactly.",
+      "impact": "CLI re-run (holdout sealed) confirms: qualification_turnover_neutral.admitted=True/binding_constraint=null (turnover_max was indeed the sole blocker, every other gate already passes), qualification_worst_fold_turnover=217.53x/yr (worse than the 175.4x average, i.e. even less margin than it looks). Reported alongside the unmodified discovery/qualification MDD (-22.9%/-15.0%), which breaches this project's own GrowthSizingConfig.max_drawdown=0.20 safety convention used elsewhere -- so the evidence is presented both ways, turnover_max recalibration and this leverage point's MDD risk both stay open decisions for the user."
+    },
+    {
       "task_id": "TASK_XS_ALPHA_BASELINE_LEG_SELECTION_EXIT_FAIRNESS",
       "date": "2026-08-06",
       "adr_id": "ADR_20260806_XS_ALPHA_BASELINE_LEG_SELECTION_EXIT_FAIRNESS",
