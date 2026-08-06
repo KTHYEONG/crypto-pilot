@@ -23,6 +23,10 @@ from src.research.technical_experts.cross_sectional import (
     XsReliabilityResult,
 )
 from src.research.technical_experts.trend_screen_catalog import DISCOVERY_END
+from src.research.technical_experts.xs_alpha_baseline_blend import (
+    _blended_sharpe,
+    _discovery_common,
+)
 
 
 def _synthetic_market(start: str = "2022-01-01", end: str = "2025-12-31 23:59:59"):
@@ -459,3 +463,132 @@ class TestBaselineBlendJointOrchestration:
             xs_blend.run_xs_alpha_baseline_blend_joint(
                 xs_alpha_weight=0.6, leverage_scale=1.0,
             )
+
+
+class TestBaselineLegSelectionOrchestration:
+    def test_xbls_06_entry_point_signature(self) -> None:
+        # Contract python_assertion: keyword-only surface with frozen candidate
+        # order default and Donchian listed first.
+        from inspect import signature
+
+        params = signature(xs_blend.run_xs_alpha_baseline_leg_selection).parameters
+        assert set(params) == {"unseal_holdout", "weight_grid", "candidate_order"}
+        assert all(p.kind == p.KEYWORD_ONLY for p in params.values())
+        assert params["weight_grid"].default == xs_blend._DEFAULT_WEIGHT_GRID
+        assert xs_blend._DEFAULT_CANDIDATE_ORDER[0] == "donchian_long_only_v1"
+        assert len(xs_blend._DEFAULT_CANDIDATE_ORDER) == 5
+
+    def test_xbls_06_orchestrator_holdout_stays_sealed_by_default(self, monkeypatch) -> None:
+        # XBLS-06: default run seals holdout, picks one of the five frozen
+        # candidate ids, and reports exactly five finite diagnostics entries.
+        _install_synthetic_data(monkeypatch)
+        report = xs_blend.run_xs_alpha_baseline_leg_selection()
+
+        assert report.profile == XS_VOL_WEIGHTED_ALPHA_PROFILE_ID
+        assert report.holdout is None
+        assert report.pre_blend_holdout is None
+        assert report.selected_candidate in xs_blend._DEFAULT_CANDIDATE_ORDER
+        assert set(report.candidate_diagnostics) == set(xs_blend._DEFAULT_CANDIDATE_ORDER)
+        for diag in report.candidate_diagnostics.values():
+            assert set(diag) == {"correlation", "blend_weight", "blended_sharpe"}
+            for value in diag.values():
+                assert np.isfinite(value)
+        assert isinstance(report.discovery, XsAdmissionResult)
+        assert isinstance(report.qualification, XsAdmissionResult)
+        assert isinstance(report.pre_blend_discovery, XsAdmissionResult)
+        assert isinstance(report.pre_blend_qualification, XsAdmissionResult)
+        assert isinstance(report.reliability, XsReliabilityResult)
+        assert len(report.report_fingerprint) == 64
+
+    def test_xbls_06_payload_is_byte_deterministic(self, monkeypatch) -> None:
+        _install_synthetic_data(monkeypatch)
+        first = xs_blend.run_xs_alpha_baseline_leg_selection()
+        second = xs_blend.run_xs_alpha_baseline_leg_selection()
+        assert first.to_json() == second.to_json()
+        payload = first.to_payload()
+        assert set(payload) == {
+            "profile", "blend_weight", "weight_grid",
+            "discovery", "qualification", "holdout",
+            "pre_blend_discovery", "pre_blend_qualification", "pre_blend_holdout",
+            "reliability", "report_fingerprint",
+            "selected_candidate", "candidate_diagnostics",
+        }
+        assert payload["weight_grid"] == list(xs_blend._DEFAULT_WEIGHT_GRID)
+        assert payload["selected_candidate"] == first.selected_candidate
+        assert set(payload["candidate_diagnostics"]) == set(xs_blend._DEFAULT_CANDIDATE_ORDER)
+        assert xs_blend.xs_baseline_leg_selection_report_path().name == (
+            "xs_alpha_baseline_leg_selection.json"
+        )
+
+    def test_xbls_06_persistence_is_byte_deterministic(self, monkeypatch, tmp_path) -> None:
+        _install_synthetic_data(monkeypatch)
+        report = xs_blend.run_xs_alpha_baseline_leg_selection()
+        path = tmp_path / "leg_selection.json"
+        xs_blend.persist_xs_alpha_baseline_leg_selection_report(report, path)
+        assert path.exists()
+        assert path.read_text(encoding="utf-8") == report.to_json()
+
+    def test_xbls_06_holdout_replayed_only_when_unsealed(self, monkeypatch) -> None:
+        idx = pd.date_range("2022-01-01", "2026-07-07 20:00:00", freq="4h", tz="UTC")
+        t = np.arange(len(idx), dtype=np.float64)
+
+        def extended_load(symbol: str, start, end):
+            salt = float(sum(ord(c) for c in symbol))
+            close = (
+                100.0 + 0.02 * t + 30.0 * np.sin(t / 40.0 + salt) + 20.0 * np.cos(t / 150.0)
+            )
+            frame = pd.DataFrame({
+                "open": close - 0.2,
+                "high": close + 1.0,
+                "low": close - 1.0,
+                "close": close,
+                "volume": 1000.0,
+                "taker_buy_ratio": 0.5 + 0.03 * np.sin(t / 9.0 + salt),
+            }, index=idx)
+            funding = pd.Series(0.0, index=idx, dtype=np.float64)
+            frame.attrs["symbol"] = symbol
+            return frame, funding, {"perp_ohlcv": f"fp-{symbol}"}, 1.0
+
+        monkeypatch.setattr(xs_blend, "_load_symbol_data", extended_load)
+        report = xs_blend.run_xs_alpha_baseline_leg_selection(unseal_holdout=True)
+        assert report.holdout is not None
+        assert report.pre_blend_holdout is not None
+
+    def test_xbls_06_fails_closed_on_short_common_grid(self, monkeypatch) -> None:
+        _install_synthetic_data(monkeypatch)
+        short_grid = pd.DatetimeIndex(
+            [pd.Timestamp("2022-01-01", tz="UTC")],
+        )
+        monkeypatch.setattr(xs_blend, "_common_index", lambda indexes: short_grid)
+        with pytest.raises(DataIntegrityError, match="at least 2 common bars"):
+            xs_blend.run_xs_alpha_baseline_leg_selection()
+
+    def test_xbls_07_donchian_candidate_matches_existing_baseline(self, monkeypatch) -> None:
+        # XBLS-07: the new orchestrator's Donchian leg construction must be
+        # numerically consistent with the existing run_xs_alpha_baseline_blend
+        # baseline on the identical synthetic fixture -- not a divergent
+        # reimplementation.
+        _install_synthetic_data(monkeypatch)
+        captured: dict[str, tuple[pd.Series, pd.Series]] = {}
+        real_select = xs_blend.select_baseline_blend_weight
+
+        def recording_select(xs_alpha_net, baseline_net, discovery_start, discovery_end, weight_grid):
+            captured["pair"] = (xs_alpha_net, baseline_net)
+            return real_select(xs_alpha_net, baseline_net, discovery_start, discovery_end, weight_grid)
+
+        monkeypatch.setattr(xs_blend, "select_baseline_blend_weight", recording_select)
+        xs_blend.run_xs_alpha_baseline_blend()
+        xs_net, bl_net = captured["pair"]
+
+        selection = xs_blend.run_xs_alpha_baseline_leg_selection()
+        diag = selection.candidate_diagnostics["donchian_long_only_v1"]
+
+        expected_weight = real_select(
+            xs_net, bl_net, XS_DISCOVERY_START, DISCOVERY_END,
+            xs_blend._DEFAULT_WEIGHT_GRID,
+        )
+        assert diag["blend_weight"] == expected_weight
+
+        disc_a, disc_b = _discovery_common(xs_net, bl_net, XS_DISCOVERY_START, DISCOVERY_END)
+        expected_sharpe = _blended_sharpe(disc_a, disc_b, expected_weight)
+        assert diag["blended_sharpe"] == expected_sharpe

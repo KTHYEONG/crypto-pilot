@@ -1402,3 +1402,130 @@ def test_xs_baseline_blend_joint_cli_rejects_unknown_profile() -> None:
     ])
     with pytest.raises(ValueError, match="unknown baseline-blend profile"):
         args.handler(args)
+
+
+def test_xs_baseline_leg_selection_cli_parses_and_dispatches(monkeypatch) -> None:
+    from src.application.research.technical.xs_alpha_baseline_blend import (
+        XS_VOL_WEIGHTED_ALPHA_PROFILE_ID,
+        XsBaselineLegSelectionReport,
+    )
+    from src.research.technical_experts.cross_sectional import XsAdmissionResult
+
+    def _failed() -> XsAdmissionResult:
+        return XsAdmissionResult(
+            admitted=False, binding_constraint="x", sharpe=0.0, beta=0.0,
+            cagr=0.0, mdd=0.0, t_stat=0.0, annual_sharpe={},
+            annualized_turnover=0.0, breakeven_cost=0.0,
+        )
+
+    calls: list[bool] = []
+    diag = {
+        "donchian_long_only_v1": {
+            "correlation": -0.0002, "blend_weight": 0.5, "blended_sharpe": 2.1,
+        },
+    }
+
+    def fake_run(*, unseal_holdout=False, weight_grid=(0.0, 0.2, 0.4, 0.5, 0.6, 0.8, 1.0),
+                 candidate_order=("donchian_long_only_v1",)):
+        calls.append(unseal_holdout)
+        return XsBaselineLegSelectionReport(
+            profile=XS_VOL_WEIGHTED_ALPHA_PROFILE_ID,
+            blend_weight=0.5,
+            weight_grid=weight_grid,
+            discovery=_failed(),
+            qualification=_failed(),
+            holdout=None,
+            pre_blend_discovery=_failed(),
+            pre_blend_qualification=_failed(),
+            pre_blend_holdout=None,
+            reliability=None,
+            selected_candidate="donchian_long_only_v1",
+            candidate_diagnostics=diag,
+        )
+
+    persisted: list[str] = []
+    monkeypatch.setattr(
+        "src.cli.commands.research.single_technical.run_xs_alpha_baseline_leg_selection",
+        fake_run,
+    )
+    monkeypatch.setattr(
+        "src.cli.commands.research.single_technical.persist_xs_alpha_baseline_leg_selection_report",
+        lambda report, path: persisted.append(str(path)),
+    )
+    args = build_root_parser().parse_args([
+        "research", "run", "single", "xs-baseline-leg-selection",
+        "--profile", "xs_alpha_vol_weighted_v6",
+        "--unseal-holdout",
+        "--no-log-run",
+    ])
+    args.handler(args)
+    assert calls == [True]
+    assert persisted == ["docs/results/xs_alpha_baseline_leg_selection.json"]
+
+
+def test_xs_baseline_leg_selection_cli_defaults_profile_and_seals_holdout(monkeypatch) -> None:
+    from src.application.research.technical.xs_alpha_baseline_blend import (
+        XsBaselineLegSelectionReport,
+    )
+    from src.research.technical_experts.cross_sectional import XsAdmissionResult
+
+    def _failed() -> XsAdmissionResult:
+        return XsAdmissionResult(
+            admitted=False, binding_constraint="x", sharpe=0.0, beta=0.0,
+            cagr=0.0, mdd=0.0, t_stat=0.0, annual_sharpe={},
+            annualized_turnover=0.0, breakeven_cost=0.0,
+        )
+
+    calls: list[bool] = []
+
+    def fake_run(*, unseal_holdout=False, weight_grid=(0.0, 0.2, 0.4, 0.5, 0.6, 0.8, 1.0),
+                 candidate_order=("donchian_long_only_v1",)):
+        calls.append(unseal_holdout)
+        return XsBaselineLegSelectionReport(
+            profile="xs_alpha_vol_weighted_v6",
+            blend_weight=0.5,
+            weight_grid=weight_grid,
+            discovery=_failed(),
+            qualification=_failed(),
+            holdout=None,
+            pre_blend_discovery=_failed(),
+            pre_blend_qualification=_failed(),
+            pre_blend_holdout=None,
+            reliability=None,
+            selected_candidate="donchian_long_only_v1",
+            candidate_diagnostics={},
+        )
+
+    monkeypatch.setattr(
+        "src.cli.commands.research.single_technical.run_xs_alpha_baseline_leg_selection",
+        fake_run,
+    )
+    monkeypatch.setattr(
+        "src.cli.commands.research.single_technical.persist_xs_alpha_baseline_leg_selection_report",
+        lambda report, path: None,
+    )
+    args = build_root_parser().parse_args([
+        "research", "run", "single", "xs-baseline-leg-selection", "--no-log-run",
+    ])
+    args.handler(args)
+    assert calls == [False]
+
+
+def test_xs_baseline_leg_selection_cli_rejects_unknown_profile() -> None:
+    args = build_root_parser().parse_args([
+        "research", "run", "single", "xs-baseline-leg-selection", "--profile", "bogus",
+    ])
+    with pytest.raises(ValueError, match="unknown baseline-leg-selection profile"):
+        args.handler(args)
+
+
+def test_xs_baseline_leg_selection_cli_handler_is_wired() -> None:
+    # Contract python_assertion (CLI change): the handler function exists in the
+    # single-technical leaf module.
+    import ast
+    import pathlib
+
+    src = pathlib.Path("src/cli/commands/research/single_technical.py").read_text()
+    tree = ast.parse(src)
+    names = {n.name for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)}
+    assert "_run_xs_alpha_baseline_leg_selection" in names
