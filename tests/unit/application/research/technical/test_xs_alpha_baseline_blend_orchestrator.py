@@ -23,8 +23,6 @@ import numpy as np
 import pandas as pd
 import pytest
 
-pytestmark = pytest.mark.slow
-
 from src.application.research.technical import xs_alpha_baseline_blend as xs_blend
 from src.application.research.technical.xs_trend_screen import (
     XS_DISCOVERY_START,
@@ -33,6 +31,7 @@ from src.application.research.technical.xs_trend_screen import (
 from src.common.errors import DataIntegrityError
 from src.research.evaluation.reliability import (
     FoldDistributionResult,
+    ReliabilityGateConfig,
     ReliabilityGateResult,
     block_size_search_hit_cap,
     compute_turnover_fold_upper_bound,
@@ -111,6 +110,14 @@ def _install_synthetic_data(monkeypatch, *, perturb_after: pd.Timestamp | None =
         return frame, funding.copy(), {"perp_ohlcv": f"fp-{symbol}"}, 1.0
 
     monkeypatch.setattr(xs_blend, "_load_symbol_data", fake_load)
+
+    class FastReliabilityGateConfig(ReliabilityGateConfig):
+        def __init__(self, *args, **kwargs):
+            kwargs.setdefault("n_bootstrap", 100)
+            kwargs.setdefault("fold_null_draws", 1000)
+            super().__init__(*args, **kwargs)
+
+    monkeypatch.setattr(xs_blend, "ReliabilityGateConfig", FastReliabilityGateConfig)
 
 
 def _crash_market():
@@ -1062,3 +1069,176 @@ class TestBaselineLegSelectionOrchestration:
             payload["reliability_point_to_lcb90_ratio"], float,
         )
         assert isinstance(payload["reliability_block_size_hit_cap"], bool)
+
+
+def _install_long_short_ratio_panel(monkeypatch) -> None:
+    """Stub the PIT long/short-ratio panel for the triple-blend orchestrator.
+
+    The real ``_long_short_ratio_panel`` delegates to ``load_metrics_asof``,
+    which reads the on-disk metrics store -- unavailable under the synthetic
+    market stubs. A deterministic, per-symbol-varying panel gives the
+    positioning-only leg a distinct signal path from the price/volume/funding
+    families.
+    """
+
+    def fake_panel(data, common, start, end):
+        panel = pd.DataFrame(1.0, index=common, columns=list(data))
+        for symbol in data:
+            salt = float(sum(ord(c) for c in symbol))
+            panel[symbol] = 1.0 + 0.2 * np.sin(
+                np.arange(len(common)) / 13.0 + salt,
+            )
+        return panel
+
+    monkeypatch.setattr(xs_blend, "_long_short_ratio_panel", fake_panel)
+
+
+class TestTripleBlendOrchestration:
+    def test_xatb_04_triple_blend_discovery_only_contract(self, monkeypatch) -> None:
+        # XATB-04: with holdout sealed, data loading never reads past the
+        # sealed cutoff, and BOTH blend-weight selections (stage 1
+        # v6-vs-Donchian, stage 2 positioning-vs-AB) are scored strictly on the
+        # discovery window -- perturbing the qualification-window market
+        # changes neither selected weight.
+        _install_synthetic_data(monkeypatch)
+        _install_long_short_ratio_panel(monkeypatch)
+        _feasible_sizing(monkeypatch, selected_risk=2.0)
+
+        captured_ends: list[object] = []
+        orig_load = xs_blend._load_symbol_data
+
+        def recording_load(symbol, start, end):
+            captured_ends.append(end)
+            return orig_load(symbol, start, end)
+
+        monkeypatch.setattr(xs_blend, "_load_symbol_data", recording_load)
+        first = xs_blend.run_xs_alpha_triple_blend_sized()
+        first_weights = (first.xs_baseline_weight, first.positioning_weight)
+
+        assert first.holdout is None
+        assert first.pre_blend_holdout is None
+        assert first.baseline_holdout is None
+        assert first.positioning_holdout is None
+        assert captured_ends
+        for end in captured_ends:
+            assert end is not None
+
+        _install_synthetic_data(
+            monkeypatch, perturb_after=DISCOVERY_END + pd.Timedelta(hours=4),
+        )
+        _install_long_short_ratio_panel(monkeypatch)
+        _feasible_sizing(monkeypatch, selected_risk=2.0)
+        second = xs_blend.run_xs_alpha_triple_blend_sized()
+
+        assert first.xs_baseline_weight == second.xs_baseline_weight
+        assert first.positioning_weight == second.positioning_weight
+
+    def test_xatb_05_triple_blend_growth_headroom_re_derived(self, monkeypatch) -> None:
+        # XATB-05: the 3-leg report's sizing.selected_risk and growth_headroom
+        # are computed fresh from the 3-leg discovery blended returns -- the
+        # input fed to solve_growth_optimal_risk is the discovery-window ABC
+        # net, and it differs from the 2-leg (v8_sized) discovery blend because
+        # the positioning-only third leg genuinely participates in the blend
+        # (fixed 0.5/0.5 blend weights so the ABC book is a true 3-way mixture,
+        # never a boundary point that degenerates to the 2-leg book).
+        expected_disc_bars = len(pd.date_range(
+            XS_DISCOVERY_START, DISCOVERY_END, freq="4h", tz="UTC",
+        ))
+        captured: dict[str, np.ndarray] = {}
+
+        def recording_solve(unit_returns, config, *, use_drawdown_overlay: bool):
+            captured["input"] = np.asarray(unit_returns, dtype=np.float64)
+            return GrowthSizingResult(
+                selected_risk=2.5, median_log_growth=0.5, mdd_breach_prob=0.01,
+                ruin_prob=0.0, feasible_risks=(2.5,), binding_constraint="none",
+                block_size_used=10,
+            )
+
+        def fixed_diagnose(
+            unit_returns, config, selected, *, use_drawdown_overlay: bool,
+        ) -> GrowthHeadroomDiagnostic:
+            return GrowthHeadroomDiagnostic(
+                selected_risk=2.5, selected_median_log_growth=0.5,
+                peak_feasible_risk=2.5, peak_feasible_median_log_growth=0.5,
+                headroom_ratio=0.0, risk_constrained=False, block_size_used=10,
+            )
+
+        def fixed_select(a, b, discovery_start, discovery_end, weight_grid):
+            return 0.5
+
+        _install_synthetic_data(monkeypatch)
+        _install_long_short_ratio_panel(monkeypatch)
+        monkeypatch.setattr(xs_blend, "solve_growth_optimal_risk", recording_solve)
+        monkeypatch.setattr(xs_blend, "diagnose_growth_headroom", fixed_diagnose)
+        monkeypatch.setattr(xs_blend, "select_robust_baseline_blend_weight", fixed_select)
+        triple = xs_blend.run_xs_alpha_triple_blend_sized()
+        triple_input = captured["input"]
+
+        captured.clear()
+        two_leg = xs_blend.run_xs_alpha_baseline_blend_sized()
+        two_leg_input = captured["input"]
+
+        assert triple_input.size == expected_disc_bars
+        assert two_leg_input.size == expected_disc_bars
+        assert not np.array_equal(triple_input, two_leg_input)
+        assert triple.sizing.selected_risk == 2.5
+        assert triple.growth_headroom is not None
+        assert triple.growth_headroom.selected_risk == 2.5
+
+    def test_xatb_06_triple_blend_report_fingerprint_deterministic(self) -> None:
+        # XATB-06: two XsTripleBlendSizedReport constructions from identical
+        # field values produce identical report_fingerprint, and to_json() is
+        # byte-deterministic (sort_keys=True) across repeated calls.
+        sizing = GrowthSizingResult(
+            2.5, 0.5, 0.01, 0.0, (2.5,), "none", 10,
+        )
+        headroom = GrowthHeadroomDiagnostic(
+            2.5, 0.5, 2.5, 0.5, 0.0, False, 10,
+        )
+        admission = XsAdmissionResult(
+            True, None, 1.0, 0.1, 0.2, 0.3, 2.0, {"2022": 1.0}, 5.0, 0.0008,
+        )
+
+        def build_report():
+            return xs_blend.XsTripleBlendSizedReport(
+                profile=XS_VOL_WEIGHTED_ALPHA_PROFILE_ID,
+                xs_baseline_weight=0.6,
+                positioning_weight=0.4,
+                weight_grid=xs_blend._DEFAULT_WEIGHT_GRID,
+                sizing=sizing,
+                discovery=admission,
+                qualification=admission,
+                holdout=None,
+                pre_blend_discovery=admission,
+                pre_blend_qualification=admission,
+                pre_blend_holdout=None,
+                baseline_discovery=admission,
+                baseline_qualification=admission,
+                baseline_holdout=None,
+                positioning_discovery=admission,
+                positioning_qualification=admission,
+                positioning_holdout=None,
+                reliability=None,
+                growth_headroom=headroom,
+            )
+
+        first = build_report()
+        second = build_report()
+        assert first.report_fingerprint == second.report_fingerprint
+        assert len(first.report_fingerprint) == 64
+        assert first.to_json() == second.to_json()
+        assert first.to_json() == (
+            json.dumps(first.to_payload(), sort_keys=True, indent=2) + "\n"
+        )
+
+    def test_xatb_07_cli_handler_profile_restriction(self) -> None:
+        # XATB-07: _run_xs_alpha_triple_blend_sized raises ValueError when
+        # args.profile is set to any value other than the v6 profile, matching
+        # every sibling xs-baseline-blend* handler.
+        import argparse
+
+        from src.cli.commands.research import single_technical
+
+        args = argparse.Namespace(profile="xs_alpha_positioning_v7")
+        with pytest.raises(ValueError, match="restricted"):
+            single_technical._run_xs_alpha_triple_blend_sized(args)
