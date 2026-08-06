@@ -34,6 +34,9 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
+from src.application.research.technical.reliability_ledger import (
+    persist_reliability_ledger_entry,
+)
 from src.application.research.technical.trend_screen import _load_symbol_data
 from src.application.research.technical.xs_alpha_growth_sizing import (
     _realised_turnover,
@@ -58,6 +61,9 @@ from src.research.evaluation.reliability import (
     ReliabilityGateConfig,
     block_size_search_hit_cap,
     compute_turnover_fold_upper_bound,
+    derive_cost_multiple_hurdle_rate,
+    derive_realized_weights_cost_total,
+    equity_span_years,
 )
 from src.research.risk.growth_sizing import (
     GrowthSizingConfig,
@@ -654,7 +660,18 @@ def run_xs_alpha_baseline_blend(
     if oos_window is not None:
         oos_equity, oos_weights = oos_window
         reliability = evaluate_xs_reliability(
-            oos_equity, oos_weights, ReliabilityGateConfig(),
+            oos_equity,
+            oos_weights,
+            dataclasses.replace(
+                ReliabilityGateConfig(),
+                hurdle_rate=derive_cost_multiple_hurdle_rate(
+                    derive_realized_weights_cost_total(
+                        oos_weights, admission_config.round_trip_cost_rate
+                    ),
+                    equity_span_years(oos_equity),
+                    2.0,
+                ),
+            ),
         )
 
     return XsBaselineBlendReport(
@@ -867,7 +884,18 @@ def run_xs_alpha_baseline_blend_sized(
     if oos_window is not None:
         oos_equity, oos_weights = oos_window
         reliability = evaluate_xs_reliability(
-            oos_equity, oos_weights, ReliabilityGateConfig(),
+            oos_equity,
+            oos_weights,
+            dataclasses.replace(
+                ReliabilityGateConfig(),
+                hurdle_rate=derive_cost_multiple_hurdle_rate(
+                    derive_realized_weights_cost_total(
+                        oos_weights, admission_config.round_trip_cost_rate
+                    ),
+                    equity_span_years(oos_equity),
+                    2.0,
+                ),
+            ),
         )
 
     return XsBaselineBlendSizedReport(
@@ -1078,7 +1106,18 @@ def run_xs_alpha_baseline_blend_joint(
     if oos_window is not None:
         oos_equity, oos_weights = oos_window
         reliability = evaluate_xs_reliability(
-            oos_equity, oos_weights, ReliabilityGateConfig(),
+            oos_equity,
+            oos_weights,
+            dataclasses.replace(
+                ReliabilityGateConfig(),
+                hurdle_rate=derive_cost_multiple_hurdle_rate(
+                    derive_realized_weights_cost_total(
+                        oos_weights, admission_config.round_trip_cost_rate
+                    ),
+                    equity_span_years(oos_equity),
+                    2.0,
+                ),
+            ),
         )
 
     return XsBaselineBlendJointReport(
@@ -1292,7 +1331,18 @@ def run_xs_alpha_baseline_leg_selection(
     if oos_window is not None:
         oos_equity, oos_weights = oos_window
         reliability = evaluate_xs_reliability(
-            oos_equity, oos_weights, ReliabilityGateConfig(),
+            oos_equity,
+            oos_weights,
+            dataclasses.replace(
+                ReliabilityGateConfig(),
+                hurdle_rate=derive_cost_multiple_hurdle_rate(
+                    derive_realized_weights_cost_total(
+                        oos_weights, admission_config.round_trip_cost_rate
+                    ),
+                    equity_span_years(oos_equity),
+                    2.0,
+                ),
+            ),
         )
         reliability_hurdle_neutral = evaluate_xs_reliability(
             oos_equity, oos_weights,
@@ -1326,50 +1376,46 @@ def run_xs_alpha_baseline_leg_selection(
 
 
 def persist_xs_alpha_baseline_blend_report(report: XsBaselineBlendReport, path: Path) -> None:
-    """Write the byte-deterministic report payload to ``path``."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(report.to_json(), encoding="utf-8")
+    """Upsert into the consolidated pass/fail ledger, keyed by ``path.stem``."""
+    persist_reliability_ledger_entry(path.stem, report.to_payload(), path.parent)
 
 
 def xs_baseline_blend_report_path() -> Path:
-    """Default persistence location for the v8 blend report."""
+    """Logical report key for the v8 blend report (ledger entry name, not a literal write target)."""
     return Path("docs/results") / f"{_BLEND_REPORT_NAME}.json"
 
 def persist_xs_alpha_baseline_blend_sized_report(
     report: XsBaselineBlendSizedReport, path: Path,
 ) -> None:
-    """Write the byte-deterministic sized-blend report payload to ``path``."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(report.to_json(), encoding="utf-8")
+    """Upsert into the consolidated pass/fail ledger, keyed by ``path.stem``."""
+    persist_reliability_ledger_entry(path.stem, report.to_payload(), path.parent)
 
 
 def xs_baseline_blend_sized_report_path() -> Path:
-    """Default persistence location for the robust-blend + sizing report."""
+    """Logical report key for the robust-blend + sizing report (ledger entry name, not a literal write target)."""
     return Path("docs/results") / f"{_BLEND_REPORT_NAME}_sized.json"
 
 def persist_xs_alpha_baseline_blend_joint_report(
     report: XsBaselineBlendJointReport, path: Path,
 ) -> None:
-    """Write the byte-deterministic joint-blend report payload to ``path``."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(report.to_json(), encoding="utf-8")
+    """Upsert into the consolidated pass/fail ledger, keyed by ``path.stem``."""
+    persist_reliability_ledger_entry(path.stem, report.to_payload(), path.parent)
 
 
 def xs_baseline_blend_joint_report_path() -> Path:
-    """Default persistence location for the joint-searched blend report."""
+    """Logical report key for the joint-searched blend report (ledger entry name, not a literal write target)."""
     return Path("docs/results") / f"{_BLEND_REPORT_NAME}_joint.json"
 
 
 def persist_xs_alpha_baseline_leg_selection_report(
     report: XsBaselineLegSelectionReport, path: Path,
 ) -> None:
-    """Write the byte-deterministic leg-selection report payload to ``path``."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(report.to_json(), encoding="utf-8")
+    """Upsert into the consolidated pass/fail ledger, keyed by ``path.stem``."""
+    persist_reliability_ledger_entry(path.stem, report.to_payload(), path.parent)
 
 
 def xs_baseline_leg_selection_report_path() -> Path:
-    """Default persistence location for the baseline-leg comparison report."""
+    """Logical report key for the baseline-leg comparison report (ledger entry name, not a literal write target)."""
     return Path("docs/results") / "xs_alpha_baseline_leg_selection.json"
 
 
@@ -1399,7 +1445,7 @@ def _check_contract() -> None:
     assert set(objective_params) == {
         "xs_alpha_net", "xs_alpha_realized_weights", "baseline_net",
         "baseline_realized_weight", "discovery_start", "discovery_end",
-        "xs_alpha_weight", "leverage_scale",
+        "xs_alpha_weight", "leverage_scale", "round_trip_cost_rate",
     }
     assert 0.0 <= _JOINT_XS_ALPHA_WEIGHT <= 1.0
     assert _JOINT_LEVERAGE_SCALE > 0.0

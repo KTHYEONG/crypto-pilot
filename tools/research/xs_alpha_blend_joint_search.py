@@ -180,6 +180,7 @@ def run(*, max_trials: int = 30, seed: int = 0) -> StructuralSearchResult:
             xs_alpha_net, xs_realized_weights, baseline_net, baseline_realized_weight,
             XS_DISCOVERY_START, DISCOVERY_END,
             params["xs_alpha_weight"], params["leverage_scale"],
+            XsAdmissionConfig().round_trip_cost_rate,
         )
 
     result = run_structural_search(
