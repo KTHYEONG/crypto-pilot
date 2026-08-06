@@ -23,6 +23,8 @@ import numpy as np
 import pandas as pd
 import pytest
 
+pytestmark = pytest.mark.slow
+
 from src.application.research.technical import xs_alpha_baseline_blend as xs_blend
 from src.application.research.technical.xs_trend_screen import (
     XS_DISCOVERY_START,
@@ -36,6 +38,7 @@ from src.research.evaluation.reliability import (
     compute_turnover_fold_upper_bound,
 )
 from src.research.risk.growth_sizing import (
+    GrowthHeadroomDiagnostic,
     GrowthSizingConfig,
     GrowthSizingResult,
 )
@@ -276,6 +279,28 @@ def _feasible_sizing(monkeypatch, selected_risk: float = 3.0) -> None:
 
     monkeypatch.setattr(xs_blend, "solve_growth_optimal_risk", fake_solve)
 
+    def fake_diagnose(
+        unit_returns, config, selected, *, use_drawdown_overlay: bool,
+    ) -> GrowthHeadroomDiagnostic:
+        return GrowthHeadroomDiagnostic(
+            selected_risk=selected_risk, selected_median_log_growth=0.5,
+            peak_feasible_risk=selected_risk, peak_feasible_median_log_growth=0.5,
+            headroom_ratio=0.0, risk_constrained=False, block_size_used=10,
+        )
+
+    monkeypatch.setattr(xs_blend, "diagnose_growth_headroom", fake_diagnose)
+
+
+def _infeasible_headroom(monkeypatch) -> None:
+    """Stub the headroom diagnostic for the selected_risk=None fail-closed path."""
+
+    def fake_diagnose(
+        unit_returns, config, selected, *, use_drawdown_overlay: bool,
+    ) -> GrowthHeadroomDiagnostic:
+        return GrowthHeadroomDiagnostic(None, 0.0, None, 0.0, 0.0, False, 10)
+
+    monkeypatch.setattr(xs_blend, "diagnose_growth_headroom", fake_diagnose)
+
 
 class TestBaselineBlendSizedOrchestration:
     def test_xabrs_sized_entry_point_signature(self) -> None:
@@ -346,9 +371,12 @@ class TestBaselineBlendSizedOrchestration:
 
         _install_synthetic_data(monkeypatch)
         monkeypatch.setattr(xs_blend, "solve_growth_optimal_risk", infeasible_solve)
+        _infeasible_headroom(monkeypatch)
         report_infeasible = xs_blend.run_xs_alpha_baseline_blend_sized()
         assert report_infeasible.sizing.selected_risk is None
         assert report_infeasible.sizing.binding_constraint == "infeasible"
+        assert report_infeasible.growth_headroom is not None
+        assert report_infeasible.growth_headroom.selected_risk is None
 
         _install_synthetic_data(monkeypatch)
 
@@ -360,6 +388,7 @@ class TestBaselineBlendSizedOrchestration:
             )
 
         monkeypatch.setattr(xs_blend, "solve_growth_optimal_risk", unit_solve)
+        _feasible_sizing(monkeypatch, selected_risk=1.0)
         report_unit = xs_blend.run_xs_alpha_baseline_blend_sized()
         assert report_unit.sizing.selected_risk == 1.0
         assert report_infeasible.discovery == report_unit.discovery
@@ -386,10 +415,12 @@ class TestBaselineBlendSizedOrchestration:
             "discovery", "qualification", "holdout",
             "pre_blend_discovery", "pre_blend_qualification", "pre_blend_holdout",
             "baseline_discovery", "baseline_qualification", "baseline_holdout",
-            "reliability", "report_fingerprint",
+            "reliability", "growth_headroom", "report_fingerprint",
         }
         assert payload["weight_grid"] == list(xs_blend._DEFAULT_WEIGHT_GRID)
         assert payload["sizing"]["selected_risk"] == 2.5
+        assert payload["growth_headroom"]["selected_risk"] == 2.5
+        assert payload["growth_headroom"]["risk_constrained"] is False
 
     def test_xabrs_sized_persistence_is_byte_deterministic(self, monkeypatch, tmp_path) -> None:
         _install_synthetic_data(monkeypatch)
