@@ -46,12 +46,14 @@ from src.research.technical_experts.cross_sectional import (
     _causal_family_inverse_vol_weights,
     _cross_sectional_zscore,
     _ledger_pnl,
+    _positioning_score,
     _true_realized_net,
     apply_no_trade_band,
     build_xs_alpha_composite_score,
     build_xs_alpha_dual_family_weights,
     build_xs_alpha_family_scores,
     build_xs_alpha_family_weights,
+    build_xs_alpha_positioning_only_weights,
     build_xs_alpha_positioning_weights,
     build_xs_alpha_vol_weighted_weights,
     build_xs_alpha_weights,
@@ -972,6 +974,127 @@ class TestPositioningAlphaWeights:
         assert base.loc[:idx[300]].equals(altered.loc[:idx[300]])
         assert base.loc[idx[300], "A"] == altered.loc[idx[300], "A"]
         assert bool(altered.loc[idx[301], "A"] < base.loc[idx[301], "A"])
+
+
+class TestPositioningOnlyAlphaWeights:
+    def test_xatb_01_positioning_score_extraction_parity(self) -> None:
+        # XATB-01-POSITIONING-SCORE-EXTRACTION-PARITY: the _positioning_score
+        # helper is a byte-for-byte extraction of the inline block that used to
+        # live inside build_xs_alpha_positioning_weights, so the already-admitted
+        # v7 profile's output must be identical whether the inline block or the
+        # shared helper is used.
+        idx = pd.date_range("2024-01-01", periods=250, freq="4h", tz="UTC")
+        rng = np.random.default_rng(2)
+        cols = ["A", "B", "C"]
+        closes = pd.DataFrame(
+            {c: 100 * np.exp(np.cumsum(rng.normal(0, 0.01, 250))) for c in cols},
+            index=idx,
+        )
+        opens = closes.shift(1).bfill()
+        taker = pd.DataFrame(
+            np.clip(0.5 + rng.normal(0, 0.05, (250, 3)), 0.0, 1.0),
+            index=idx, columns=cols,
+        )
+        funding = pd.DataFrame(0.0, index=idx, columns=cols)
+        long_short_ratio = pd.DataFrame(
+            0.5 + 0.3 * rng.normal(0, 1.0, (250, 3)),
+            index=idx, columns=cols,
+        )
+        alpha_spec = XsAlphaCompositeSpec()
+        exec_spec = dataclasses.replace(XsCompositeSpec(), no_trade_band=0.0)
+        family_scores = build_xs_alpha_family_scores(closes, taker, funding, alpha_spec)
+        family_weights = build_xs_alpha_family_weights(
+            closes, taker, funding, alpha_spec, exec_spec,
+        )
+        family_scores["positioning"] = _positioning_score(closes, long_short_ratio, alpha_spec)
+        family_weights["positioning"] = build_xs_neutral_weights(
+            family_scores["positioning"],
+            exec_spec.halflife_bars, exec_spec.no_trade_band,
+        )
+        sleeve_returns = {}
+        for name, fw in family_weights.items():
+            equity, _turnover = run_xs_composite_ledger(fw, opens, funding, exec_spec)
+            sleeve_returns[name] = equity.pct_change()
+        sleeve_returns_frame = pd.DataFrame(sleeve_returns, index=idx)
+        vol_weights = _causal_family_inverse_vol_weights(
+            sleeve_returns_frame, alpha_spec.signal_windows[0],
+        )
+        combined = sum(
+            vol_weights[name].to_numpy()[:, None] * family_scores[name].to_numpy()
+            for name in family_scores
+        )
+        expected = build_xs_neutral_weights(
+            pd.DataFrame(combined, index=idx, columns=cols),
+            exec_spec.halflife_bars, exec_spec.no_trade_band,
+        )
+        actual = build_xs_alpha_positioning_weights(
+            closes, taker, funding, long_short_ratio, opens, alpha_spec, exec_spec,
+        )
+        assert actual.equals(expected)
+
+    def test_xatb_02_positioning_only_contrarian_sign(self) -> None:
+        # XATB-02-POSITIONING-ONLY-CONTRARIAN-SIGN: the isolated positioning-only
+        # leg must carry the same contrarian sign as the v7 family: high
+        # long_short_ratio -> short (negative weight), low -> long (positive),
+        # on the final bars.
+        idx = pd.date_range("2024-01-01", periods=400, freq="4h", tz="UTC")
+        cols = ["A", "B", "C", "D"]
+        path = 100.0 * np.exp(np.linspace(0.0, 0.05, len(idx)))
+        closes = pd.DataFrame(np.tile(path, (4, 1)).T, index=idx, columns=cols)
+        lsr = pd.DataFrame(1.0, index=idx, columns=cols)
+        lsr.loc[idx[170]:, "A"] = 2.0
+        lsr.loc[idx[170]:, "B"] = 1.8
+        lsr.loc[idx[170]:, "C"] = 0.4
+        lsr.loc[idx[170]:, "D"] = 0.4
+        alpha_spec = XsAlphaCompositeSpec()
+        exec_spec = dataclasses.replace(XsCompositeSpec(), no_trade_band=0.0)
+        weights = build_xs_alpha_positioning_only_weights(
+            closes, lsr, alpha_spec, exec_spec,
+        )
+        late = weights.loc[idx[380]:]
+        assert bool((late["A"] < 0.0).all())
+        assert bool((late["B"] < 0.0).all())
+        assert bool((late["C"] > 0.0).all())
+        assert bool((late["D"] > 0.0).all())
+
+    def test_xatb_03_positioning_only_fail_closed(self) -> None:
+        # XATB-03-POSITIONING-ONLY-FAIL-CLOSED: malformed input (mismatched
+        # indices, non-finite panels) raises DataIntegrityError/ValueError,
+        # matching every sibling builder's fail-closed contract -- never a
+        # silent reindex or zero-filling fallback.
+        idx = pd.date_range("2022-01-01", periods=200, freq="4h", tz="UTC")
+        closes = pd.DataFrame(
+            {"HIGH": np.linspace(100.0, 110.0, 200), "LOW": np.linspace(100.0, 110.0, 200)},
+            index=idx,
+        )
+        ratio = pd.DataFrame(
+            {"HIGH": np.linspace(1.0, 3.0, 200), "LOW": np.full(200, 1.0)},
+            index=idx,
+        )
+        alpha_spec = XsAlphaCompositeSpec()
+        exec_spec = XsCompositeSpec()
+        valid = build_xs_alpha_positioning_only_weights(closes, ratio, alpha_spec, exec_spec)
+        assert bool(np.isfinite(valid.to_numpy()).all())
+        with pytest.raises((DataIntegrityError, ValueError)):
+            build_xs_alpha_positioning_only_weights(
+                closes, ratio.iloc[:100], alpha_spec, exec_spec,
+            )
+        bad_closes = closes.copy()
+        bad_closes.iloc[50, 0] = np.nan
+        with pytest.raises((DataIntegrityError, ValueError)):
+            build_xs_alpha_positioning_only_weights(
+                bad_closes, ratio, alpha_spec, exec_spec,
+            )
+        # Non-finite long_short_ratio bars are tolerated (finite-only
+        # cross-sectional z-score), matching the already-admitted v7 family --
+        # never a silent reindex, but never a hard failure on real PIT panels
+        # with leading-metrics gaps either.
+        sparse_ratio = ratio.copy()
+        sparse_ratio.iloc[:80, 0] = np.nan
+        sparse_weights = build_xs_alpha_positioning_only_weights(
+            closes, sparse_ratio, alpha_spec, exec_spec,
+        )
+        assert bool(np.isfinite(sparse_weights.to_numpy()).all())
 
 
 class TestGrowthOptimalSizing:
