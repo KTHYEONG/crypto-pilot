@@ -1,0 +1,290 @@
+from __future__ import annotations
+
+import itertools
+
+import numpy as np
+import pandas as pd
+import pytest
+
+from src.mhs.evaluation import (
+    AnchoredPurgedFold,
+    DeploymentReadinessResult,
+    autocorrelation_adjusted_sharpe,
+    compute_deployment_readiness,
+    cost_response_curve,
+    phase_1_anchored_purged_folds,
+    phase_diagnostic_metrics,
+    synthetic_stress_scenarios,
+    tail_sensitivity_curve,
+)
+from src.mhs.execution import simulated_inventory_ledger
+
+
+def test_mhs_5m_02_pit_roster_uses_only_eligible_trailing_volume() -> None:
+    """MHS-5M-02-PIT-ROSTER: ranking is causal and eligibility masked."""
+    from src.application.research.mhs.evaluation import _pit_execution_mask
+
+    idx = pd.date_range("2025-01-01", periods=720, freq="1h", tz="UTC")
+    volume = pd.DataFrame({"A": 10.0, "B": 20.0, "C": 30.0}, index=idx)
+    eligible = pd.DataFrame(True, index=idx, columns=volume.columns)
+    eligible.loc[idx[-1], "C"] = False
+    mask = _pit_execution_mask(volume, eligible, 2)
+    assert bool(mask.loc[idx[-1], "A"])
+    assert bool(mask.loc[idx[-1], "B"])
+    assert not bool(mask.loc[idx[-1], "C"])
+
+
+def _wsf() -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    weights = pd.DataFrame({"A": [0.5, 0.5, -0.5], "B": [-0.5, -0.5, 0.5]})
+    opens = pd.DataFrame({"A": [100.0, 101.0, 102.0], "B": [50.0, 49.0, 48.0]})
+    funding = pd.DataFrame({"A": [0.0, 0.0, 0.0], "B": [0.0, 0.0, 0.0]})
+    return weights, opens, funding
+
+
+class TestCostResponseCurve:
+    """MHS-08-COST-RESPONSE-MONOTONE: friction, not signal, is the binding constraint."""
+
+    def test_non_increasing_in_rate_and_gross_at_zero(self) -> None:
+        weights, opens, funding = _wsf()
+        curve = cost_response_curve(weights, opens, funding, (0.0, 2.0, 4.0, 8.0), 365.0 * 24)
+        rates = sorted(curve)
+        for low, high in itertools.pairwise(rates):
+            assert curve[high].net_ann <= curve[low].net_ann + 1e-12
+        assert set(rates) == {0.0, 2.0, 4.0, 8.0}
+
+    def test_must_include_measured_tiers(self) -> None:
+        from src.mhs.contracts import MEASURED_EXECUTION_COST_TIERS_BPS
+
+        weights, opens, funding = _wsf()
+        grid = tuple(MEASURED_EXECUTION_COST_TIERS_BPS.values())
+        curve = cost_response_curve(weights, opens, funding, grid, 365.0 * 24)
+        assert set(curve) == set(grid)
+        assert curve[grid[0]].net_ann > curve[grid[-1]].net_ann
+
+    def test_fails_closed_on_empty_or_negative_grid(self) -> None:
+        weights, opens, funding = _wsf()
+        with pytest.raises(ValueError, match="must not be empty"):
+            cost_response_curve(weights, opens, funding, (), 365.0 * 24)
+        with pytest.raises(ValueError, match="must be >= 0"):
+            cost_response_curve(weights, opens, funding, (-1.0,), 365.0 * 24)
+
+
+class TestPhaseDiagnosticMetrics:
+    """MHS-09-PHASE-DEGENERACY-FLAG: spread beyond the mean marks degenerate."""
+
+    def test_degenerate_flag_and_inf_sharpe(self) -> None:
+        a = pd.Series([0.01] * 4)
+        b = pd.Series([0.05] * 4)
+        result = phase_diagnostic_metrics({0: a, 1: b}, 4.0)
+        assert result.n_phases == 2
+        assert abs(result.min_phase_ann - 0.04) < 1e-12
+        assert abs(result.max_phase_ann - 0.20) < 1e-12
+        assert abs(result.mean_phase_ann - 0.12) < 1e-12
+        assert abs(result.ensemble_ann - 0.12) < 1e-12
+        assert abs(result.phase_spread_ann - 0.16) < 1e-12
+        assert result.degenerate is True
+        assert result.ensemble_sharpe == float("inf")
+
+    def test_negative_inf_for_non_positive_zero_variance_ensemble(self) -> None:
+        a = pd.Series([-0.01] * 4)
+        b = pd.Series([-0.05] * 4)
+        result = phase_diagnostic_metrics({0: a, 1: b}, 4.0)
+        assert result.ensemble_sharpe == float("-inf")
+
+    def test_fails_closed_on_empty(self) -> None:
+        with pytest.raises(ValueError, match="must not be empty"):
+            phase_diagnostic_metrics({}, 4.0)
+
+
+class TestTailSensitivityCurve:
+    """MHS-11-TAIL-CURVE-NOT-SINGLE-GATE: winsorize per symbol, events coalesce."""
+
+    def test_contract_sandbox(self) -> None:
+        weights = pd.DataFrame(
+            {"A": [0.5, 0.5, 0.5, 0.5], "B": [-0.5, -0.5, -0.5, -0.5]},
+        )
+        fwd = pd.DataFrame(
+            {"A": [0.02, 0.60, 0.50, 0.03], "B": [-0.01, -0.02, -0.02, -0.01]},
+        )
+        turnover = pd.Series([1.0, 0.0, 0.0, 0.0])
+        result = tail_sensitivity_curve(weights, fwd, turnover, 8.0, 365.0, 1)
+        assert result.winsor_curve[50][0] < result.base_net_ann
+        assert result.event_count == 1
+        assert result.top1_event_share > 0.5
+
+    def test_adjacent_top_bars_coalesce_into_one_event(self) -> None:
+        n = 200
+        fwd = pd.DataFrame({"A": [0.001] * n}, dtype=float)
+        fwd.loc[100, "A"] = 0.5
+        fwd.loc[101, "A"] = 0.6
+        weights = pd.DataFrame({"A": [1.0] * n}, dtype=float)
+        turnover = pd.Series(0.0, index=weights.index)
+        result = tail_sensitivity_curve(weights, fwd, turnover, 8.0, 365.0, 1)
+        assert result.event_count == 1
+        assert result.top1_event_share >= 0.8
+
+    def test_winsor_curve_changes_across_caps(self) -> None:
+        n = 200
+        fwd = pd.DataFrame({"A": [0.001] * n}, dtype=float)
+        fwd.loc[100, "A"] = 0.5
+        fwd.loc[101, "A"] = 0.6
+        weights = pd.DataFrame({"A": [1.0] * n}, dtype=float)
+        turnover = pd.Series(0.0, index=weights.index)
+        result = tail_sensitivity_curve(weights, fwd, turnover, 8.0, 365.0, 1)
+        assert set(result.winsor_curve) == {10, 20, 30, 50}
+        assert result.winsor_curve[10][0] < result.winsor_curve[50][0]
+
+    def test_leave_worst_event_out_removes_full_window(self) -> None:
+        n = 100
+        fwd = pd.DataFrame({"A": [0.001] * n}, dtype=float)
+        fwd.loc[50, "A"] = -0.9  # worst bar
+        fwd.loc[49, "A"] = 0.0
+        weights = pd.DataFrame({"A": [1.0] * n}, dtype=float)
+        turnover = pd.Series(0.0, index=weights.index)
+        result = tail_sensitivity_curve(weights, fwd, turnover, 8.0, 365.0, 1)
+        assert not np.isnan(result.leave_worst_event_out_sharpe)
+
+    def test_fails_closed_on_misaligned_frames(self) -> None:
+        weights = pd.DataFrame({"A": [0.5]}, index=pd.RangeIndex(1))
+        fwd = pd.DataFrame({"A": [0.01]}, index=pd.RangeIndex(2))
+        turnover = pd.Series([0.0])
+        with pytest.raises(ValueError, match="identically indexed"):
+            tail_sensitivity_curve(weights, fwd, turnover, 8.0, 365.0, 1)
+
+
+class TestAnchoredPurgedFolds:
+    """MHS-16-PURGED-ANCHOR-BOUNDARY: embargo is 168h, derived from the forward dependency."""
+
+    def test_three_preregistered_folds(self) -> None:
+        folds = phase_1_anchored_purged_folds()
+        assert len(folds) == 3
+        assert [f.purge_hours for f in folds] == [168, 168, 168]
+        assert folds[0].train_end == pd.Timestamp("2022-12-31", tz="UTC")
+        assert folds[0].validation_start == pd.Timestamp("2023-01-08", tz="UTC")
+        assert folds[1].train_end == pd.Timestamp("2023-12-31", tz="UTC")
+        assert folds[1].validation_start == pd.Timestamp("2024-01-08", tz="UTC")
+        assert folds[2].train_end == pd.Timestamp("2024-12-31", tz="UTC")
+        assert folds[2].validation_start == pd.Timestamp("2025-01-08", tz="UTC")
+        for fold in folds:
+            assert fold.purge_hours >= fold.forward_dependency_hours
+            embargo = fold.validation_start - fold.train_end
+            assert embargo >= pd.Timedelta(hours=fold.purge_hours)
+            assert embargo <= pd.Timedelta(hours=fold.purge_hours + 24)
+
+    def test_embargo_must_be_positive(self) -> None:
+        start = pd.Timestamp("2021-01-01", tz="UTC")
+        end = pd.Timestamp("2022-12-31", tz="UTC")
+        validation = pd.Timestamp("2023-12-31", tz="UTC")
+        with pytest.raises(ValueError, match=r"ascending|embargo"):
+            AnchoredPurgedFold(start, end, end, validation, 168, 168)
+
+    def test_training_label_boundary_rule(self) -> None:
+        folds = phase_1_anchored_purged_folds()
+        # The first fold's training labels must end at or before train_end.
+        assert folds[0].train_end == pd.Timestamp("2022-12-31", tz="UTC")
+        assert folds[1].train_end == pd.Timestamp("2023-12-31", tz="UTC")
+
+
+class TestDeploymentReadiness:
+    """MHS-17-CAPITAL-GO-DATA-BOUNDARY: Research GO can stand without forward data."""
+
+    def test_readiness_from_strict_proxy_equity(self) -> None:
+        marks = pd.DataFrame(
+            {"A": [100.0, 110.0, 121.0, 133.1]},
+            index=pd.date_range("2021-01-01", periods=4, freq="1D", tz="UTC"),
+        )
+        fills = pd.DataFrame(
+            [{"timestamp": marks.index[0], "symbol": "A", "quantity_delta": 1.0,
+              "fill_price": 100.0, "fee_bps": 0.0, "reason": "passive_fill"}],
+        )
+        ledger = simulated_inventory_ledger(
+            fills, marks, pd.DataFrame(0.0, index=marks.index, columns=["A"]),
+            1.0, "OHLCV_STRICT_PROXY", "MARK_PRICE",
+        )
+        result = compute_deployment_readiness(
+            ledger.equity, 365.0, n_bootstrap=50, mean_block_bars=2,
+        )
+        assert result.geometric_cagr > 0
+        assert result.max_drawdown <= 0
+        assert result.research_go_eligible is True
+        assert result.execution_go_eligible is False
+        assert result.pilot_go_eligible is False
+        assert result.scale_go_eligible is False
+
+    def test_eligibility_flags_are_booleans(self) -> None:
+        assert DeploymentReadinessResult.__dataclass_fields__["research_go_eligible"].type is bool
+        assert DeploymentReadinessResult.__dataclass_fields__["scale_go_eligible"].type is bool
+
+
+class TestMarkPriceGoValidity:
+    """MHS-MARK-05-GO-VALIDITY: a primary_valid=False replay never yields a Research GO."""
+
+    def test_invalid_primary_blocks_research_go_but_preserves_metrics(self) -> None:
+        idx = pd.date_range("2021-01-01", periods=10, freq="1h", tz="UTC")
+        equity = pd.Series(np.cumprod(1.0 + np.full(10, 0.001)), index=idx)
+        invalid = compute_deployment_readiness(equity, 8760.0, primary_valid=False, n_bootstrap=2, mean_block_bars=1)
+        assert invalid.research_go_eligible is False
+        assert invalid.execution_go_eligible is False
+        assert invalid.pilot_go_eligible is False
+        assert invalid.scale_go_eligible is False
+        valid = compute_deployment_readiness(equity, 8760.0, primary_valid=True, n_bootstrap=2, mean_block_bars=1)
+        assert valid.research_go_eligible is True
+        assert invalid.geometric_cagr == pytest.approx(valid.geometric_cagr)
+        assert invalid.max_drawdown == valid.max_drawdown
+        assert invalid.expected_shortfall == pytest.approx(valid.expected_shortfall)
+
+    def test_rejects_non_bool_primary_valid(self) -> None:
+        idx = pd.date_range("2021-01-01", periods=3, freq="1h", tz="UTC")
+        equity = pd.Series([1.0, 1.01, 1.02], index=idx)
+        with pytest.raises(ValueError, match="bool"):
+            compute_deployment_readiness(equity, 8760.0, primary_valid=1, n_bootstrap=2)
+
+
+class TestSyntheticStressScenarios:
+    """MHS-18-SYNTHETIC-STRESS-AND-TERMINATION-CLASSES: nine deterministic shocks."""
+
+    EXPECTED_NAMES = frozenset({
+        "BTC_DOWN_10",
+        "BTC_DOWN_20",
+        "ALT_BETA_UP",
+        "XS_CORRELATION_ONE",
+        "SPREAD_AND_COST_X3",
+        "PASSIVE_FILL_DEGRADATION",
+        "FUNDING_EXTREME",
+        "LIQUIDITY_DETERIORATION_50PCT",
+        "VENUE_API_OUTAGE_30M",
+    })
+
+    def test_all_nine_scenarios_present(self) -> None:
+        scenarios = synthetic_stress_scenarios()
+        assert len(scenarios) == 9
+        assert {s.name for s in scenarios} == self.EXPECTED_NAMES
+        assert all(s.description for s in scenarios)
+
+
+class TestAutocorrelationAdjustedSharpe:
+    """MHS-22-PRIMARY-SHARPE-AUTOCORRELATION-ADJUSTED: daily compounding, 7-day adjustment."""
+
+    def test_constant_series_is_inf(self) -> None:
+        r = pd.Series(
+            [0.01] * 10,
+            index=pd.date_range("2021-01-01", periods=10, freq="1D", tz="UTC"),
+        )
+        assert autocorrelation_adjusted_sharpe(r, 365, 7) == float("inf")
+
+    def test_positive_autocorrelation_reduces_adjusted_sharpe(self) -> None:
+        rng = np.random.default_rng(0)
+        idx = pd.date_range("2021-01-01", periods=120, freq="1D", tz="UTC")
+        eps = rng.normal(0.0, 0.01, len(idx))
+        returns = pd.Series(0.0005 + eps, index=idx)
+        returns = pd.Series(np.cumsum(0.4 * np.r_[0.0, returns.to_numpy()[:-1]]) * 0.0 + returns.to_numpy(), index=idx)
+        naive = returns.mean() / returns.std(ddof=1) * np.sqrt(365)
+        adjusted = autocorrelation_adjusted_sharpe(returns, 365, 7)
+        assert adjusted < naive
+
+    def test_fails_closed_on_tz_naive(self) -> None:
+        with pytest.raises(ValueError, match="tz-aware"):
+            autocorrelation_adjusted_sharpe(
+                pd.Series([0.01] * 10, index=pd.date_range("2021-01-01", periods=10)),
+                365, 7,
+            )
