@@ -1,19 +1,36 @@
-from __future__ import annotations
-
 import concurrent.futures
 import contextlib
+import json
 import logging
+from dataclasses import dataclass
 from pathlib import Path
 
 import pandas as pd
 
-from src.common.config import bookdepth_path, funding_path, indicator_kline_path, metrics_path, ohlcv_path
+from src.common.config import (
+    FUTURES_DATA_DIR,
+    bookdepth_path,
+    funding_path,
+    indicator_kline_path,
+    metrics_path,
+    ohlcv_path,
+)
 from src.common.errors import DataIntegrityError
 from src.market_data.binance.futures import BinanceClient, BinanceKlinePermanentError
 from src.market_data.binance.vision import BinanceVisionDownloader, fetch_metrics_bulk
 from src.market_data.storage.ohlcv import write_ohlcv
 
 _logger = logging.getLogger("DataCollector")
+
+
+def _mark_price_path(symbol: str, timeframe: str) -> Path:
+    safe = symbol.replace("/", "").replace("_", "")
+    return FUTURES_DATA_DIR / "markPriceKlines" / timeframe / f"{safe}.parquet"
+
+
+def _mark_price_manifest_path(symbol: str, timeframe: str) -> Path:
+    safe = symbol.replace("/", "").replace("_", "")
+    return FUTURES_DATA_DIR / "markPriceKlines" / timeframe / f"{safe}.coverage.json"
 
 _METRICS_CANONICAL_COLUMNS: tuple[str, ...] = (
     "timestamp", "datetime", "available_at", "symbol",
@@ -78,6 +95,28 @@ def _normalize_funding_frame(frame: pd.DataFrame) -> pd.DataFrame:
         .sort_values("timestamp")
         .reset_index(drop=True)
     )
+
+
+@dataclass(frozen=True, slots=True)
+class MarkPriceCoverage:
+    """Source-controlled mark-kline coverage manifest for one requested window.
+
+    All timestamps are tz-aware UTC. ``primary_usable`` exactly means no missing
+    interval overlaps the requested interval and every mark is finite and
+    strictly positive; it is not a statement about historical execution quality
+    or margin/liquidation completeness.
+    """
+
+    symbol: str
+    timeframe: str
+    requested_start: pd.Timestamp
+    requested_end: pd.Timestamp
+    observed_start: pd.Timestamp | None
+    observed_end: pd.Timestamp | None
+    missing_intervals: tuple[tuple[pd.Timestamp, pd.Timestamp], ...]
+    endpoint: str
+    collected_at: pd.Timestamp
+    primary_usable: bool
 
 
 class DataValidator:
@@ -242,6 +281,212 @@ class DataCollector:
                 .sort_values("timestamp")
             )
             self._save_cache(symbol, timeframe, combined)
+
+    @staticmethod
+    def _load_mark_price_cache(path: Path) -> pd.DataFrame:
+        if not path.exists():
+            return pd.DataFrame(columns=["timestamp", "open", "high", "low", "close", "datetime"])
+        try:
+            df = pd.read_parquet(path)
+        except Exception as exc:
+            _logger.warning("mark price cache read failed path=%s error=%s", path, exc)
+            return pd.DataFrame(columns=["timestamp", "open", "high", "low", "close", "datetime"])
+        if df.empty or "timestamp" not in df.columns:
+            return pd.DataFrame(columns=["timestamp", "open", "high", "low", "close", "datetime"])
+        if "datetime" not in df.columns:
+            df["datetime"] = pd.to_datetime(df["timestamp"], unit="ms", utc=True)
+        df = df.copy()
+        df["datetime"] = pd.to_datetime(df["datetime"], utc=True, errors="coerce")
+        for col in ("open", "high", "low", "close"):
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+        return (
+            df.dropna(subset=["datetime"])
+            .drop_duplicates(subset=["timestamp"], keep="last")
+            .sort_values("timestamp")
+        )
+
+    def _mark_price_coverage(
+        self,
+        symbol: str,
+        timeframe: str,
+        req_start: pd.Timestamp,
+        req_end: pd.Timestamp,
+        frame: pd.DataFrame,
+    ) -> MarkPriceCoverage:
+        """Compute the coverage manifest; empty/gapped/non-positive marks fail closed."""
+        period_map = {
+            "1m": "1min", "3m": "3min", "5m": "5min", "15m": "15min", "30m": "30min",
+            "1h": "1h", "2h": "2h", "4h": "4h", "6h": "6h", "8h": "8h",
+            "12h": "12h", "1d": "1D", "3d": "3D", "1w": "1W", "1M": "1ME",
+        }
+        period = period_map.get(timeframe, timeframe)
+        grid = pd.date_range(req_start, req_end, freq=period, tz="UTC")
+        observed = (
+            set(pd.DatetimeIndex(frame["datetime"]))
+            if not frame.empty
+            else set()
+        )
+        present = grid.isin(observed)
+        missing = grid[~present]
+        intervals: list[tuple[pd.Timestamp, pd.Timestamp]] = []
+        if len(missing):
+            start = missing[0]
+            prev = start
+            step = missing[1] - missing[0] if len(missing) > 1 else pd.Timedelta(0)
+            for t in missing[1:]:
+                if step != pd.Timedelta(0) and t != prev + step:
+                    intervals.append((start, prev))
+                    start = t
+                prev = t
+            intervals.append((start, prev))
+        all_finite = bool(frame["close"].notna().all()) if not frame.empty else False
+        all_positive = bool((frame["close"] > 0).all()) if not frame.empty else False
+        primary_usable = (not intervals) and all_finite and all_positive
+        return MarkPriceCoverage(
+            symbol=symbol,
+            timeframe=timeframe,
+            requested_start=req_start,
+            requested_end=req_end,
+            observed_start=frame["datetime"].min() if not frame.empty else None,
+            observed_end=frame["datetime"].max() if not frame.empty else None,
+            missing_intervals=tuple(intervals),
+            endpoint="GET /fapi/v1/markPriceKlines",
+            collected_at=pd.Timestamp.now(tz="UTC"),
+            primary_usable=primary_usable,
+        )
+
+    def _save_mark_price_coverage(
+        self, symbol: str, timeframe: str, coverage: MarkPriceCoverage,
+    ) -> None:
+        manifest = _mark_price_manifest_path(symbol, timeframe)
+        manifest.parent.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "symbol": coverage.symbol,
+            "timeframe": coverage.timeframe,
+            "requested_start": coverage.requested_start.isoformat(),
+            "requested_end": coverage.requested_end.isoformat(),
+            "observed_start": (
+                coverage.observed_start.isoformat() if coverage.observed_start is not None else None
+            ),
+            "observed_end": (
+                coverage.observed_end.isoformat() if coverage.observed_end is not None else None
+            ),
+            "missing_intervals": [
+                [a.isoformat(), b.isoformat()] for a, b in coverage.missing_intervals
+            ],
+            "endpoint": coverage.endpoint,
+            "collected_at": coverage.collected_at.isoformat(),
+            "primary_usable": coverage.primary_usable,
+        }
+        manifest.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+
+    def ensure_mark_price_data(
+        self, symbol: str, timeframe: str, start_date: str, end_date: str,
+    ) -> MarkPriceCoverage:
+        """Collect historical mark-price klines and persist a coverage manifest.
+
+        Canonical mark candles are stored separately at
+        ``data/futures/markPriceKlines/<timeframe>/<SYMBOL>.parquet``; an OHLCV
+        close is never coerced into a mark price while a mark interval is
+        requested. ``primary_usable`` is true only when every requested primary
+        interval is observed and valid.
+        """
+        req_start = pd.to_datetime(start_date, utc=True)
+        req_end = pd.to_datetime(end_date, utc=True)
+        path = _mark_price_path(symbol, timeframe)
+        cache_df = self._load_mark_price_cache(path)
+        observed = cache_df
+        coverage = self._mark_price_coverage(symbol, timeframe, req_start, req_end, observed)
+        intervals = coverage.missing_intervals
+        if observed.empty and not intervals:
+            intervals = ((req_start, req_end),)
+        new_parts: list[pd.DataFrame] = []
+        for interval_start, interval_end in intervals:
+            fetched = self.client.fetch_mark_price_klines(
+                symbol, timeframe, str(interval_start), str(interval_end),
+            )
+            if fetched.empty:
+                continue
+            fetched = fetched.copy()
+            fetched["datetime"] = pd.to_datetime(
+                fetched["timestamp"], unit="ms", utc=True,
+            )
+            new_parts.append(fetched)
+        if new_parts:
+            observed = (
+                pd.concat([cache_df, *new_parts], ignore_index=True)
+                .drop_duplicates(subset=["timestamp"], keep="last")
+                .sort_values("timestamp")
+            )
+            path.parent.mkdir(parents=True, exist_ok=True)
+            observed[["timestamp", "open", "high", "low", "close", "datetime"]].to_parquet(
+                path, index=False, compression="zstd",
+            )
+        coverage = self._mark_price_coverage(symbol, timeframe, req_start, req_end, observed)
+        self._save_mark_price_coverage(symbol, timeframe, coverage)
+        return coverage
+
+    def load_mark_price_panel(
+        self, symbols: list[str], timeframe: str, grid: pd.DatetimeIndex,
+    ) -> pd.DataFrame:
+        """Build a read-only causal mark-price panel for replay valuation.
+
+        Reads only the existing ``markPriceKlines/<timeframe>/<symbol>.parquet``
+        cache through ``_load_mark_price_cache``; it never calls a network API,
+        collects missing data, or substitutes an OHLCV close. For the Phase-1
+        ``1h`` cache each hourly close is observable only from ``open + 1h``
+        through the following 59 minutes (``ffill limit=59``) and is never
+        propagated across a missing hourly candle. The returned frame has
+        exactly ``grid`` as its index and exactly ``symbols`` as its column
+        order, preserving ``NaN`` for absent/non-finite/non-positive marks.
+        """
+        if timeframe != "1h":
+            raise ValueError(f"unsupported timeframe '{timeframe}'")
+        if not isinstance(grid, pd.DatetimeIndex) or grid.empty:
+            raise DataIntegrityError("grid must be a non-empty DatetimeIndex")
+        if grid.tz is None:
+            raise DataIntegrityError("grid must be tz-aware UTC")
+        if not grid.is_monotonic_increasing or grid.has_duplicates:
+            raise DataIntegrityError("grid must be monotonically increasing with no duplicates")
+        if not symbols:
+            raise DataIntegrityError("symbols must be non-empty")
+        if len(set(symbols)) != len(symbols):
+            raise DataIntegrityError("symbols must be unique")
+
+        panel = pd.DataFrame(index=grid, columns=list(symbols), dtype="float64")
+        if len(grid) > 1:
+            step = grid[1] - grid[0]
+            step_minutes = step / pd.Timedelta(minutes=1)
+            if step_minutes <= 0 or 60 % step_minutes != 0:
+                raise DataIntegrityError(
+                    "grid frequency must be a positive divisor of one hour"
+                )
+            ffill_limit = int(60 // step_minutes - 1)
+        else:
+            ffill_limit = 0
+        for sym in symbols:
+            cache = self._load_mark_price_cache(_mark_price_path(sym, timeframe))
+            if cache.empty or "close" not in cache.columns:
+                continue
+            valid = (
+                cache["datetime"].notna()
+                & cache["close"].notna()
+                & (cache["close"] > 0)
+            )
+            closes = (
+                cache.loc[valid, ["datetime", "close"]]
+                .drop_duplicates(subset=["datetime"], keep="last")
+                .sort_values("datetime")
+            )
+            if closes.empty:
+                continue
+            available = pd.Series(
+                closes["close"].to_numpy(dtype="float64"),
+                index=closes["datetime"] + pd.Timedelta(hours=1),
+            )
+            aligned = available.reindex(grid, method="ffill", limit=ffill_limit)
+            panel[sym] = aligned.to_numpy(dtype="float64")
+        return panel
 
     def _load_metrics_cache(self, symbol: str) -> pd.DataFrame:
         path = metrics_path(symbol)
