@@ -210,6 +210,125 @@ class BinanceClient:
         df = df[df["timestamp"] <= end_timestamp].copy()
         return df
 
+    def fetch_mark_price_klines(
+        self,
+        symbol: str,
+        timeframe: str,
+        start_date: str | datetime,
+        end_date: str | datetime | None = None,
+    ) -> pd.DataFrame:
+        """Page USD-S margined ``GET /fapi/v1/markPriceKlines``.
+
+        Normalizes timestamp/open/high/low/close/datetime identically to OHLCV
+        and retains no volume field the endpoint does not provide. This fetches
+        historical mark-price candles for portfolio MTM/risk simulation only --
+        it cannot reconstruct historical margin brackets, liquidation/ADL,
+        queue, spread path, or fills.
+        """
+        limit = 1000
+        base_url = "https://fapi.binance.com/fapi/v1/markPriceKlines"
+        timeout_sec = 30
+
+        if isinstance(start_date, datetime):
+            start_iso = start_date.strftime("%Y-%m-%dT%H:%M:%SZ")
+        else:
+            start_str = str(start_date).strip()
+            if "T" in start_str or " " in start_str:
+                start_iso = start_str.replace(" ", "T")
+                if not start_iso.endswith("Z"):
+                    start_iso += "Z"
+            else:
+                start_iso = f"{start_str}T00:00:00Z"
+        since = self.exchange.parse8601(start_iso)
+
+        if end_date is not None:
+            if isinstance(end_date, datetime):
+                end_iso = end_date.strftime("%Y-%m-%dT%H:%M:%SZ")
+            else:
+                end_str = str(end_date).strip()
+                if "T" in end_str or " " in end_str:
+                    end_iso = end_str.replace(" ", "T")
+                    if not end_iso.endswith("Z"):
+                        end_iso += "Z"
+                else:
+                    end_iso = f"{end_str}T23:59:59Z"
+            end_timestamp = self.exchange.parse8601(end_iso)
+        else:
+            end_timestamp = self.exchange.milliseconds()
+
+        try:
+            market = self.exchange.market(symbol)
+            binance_symbol: str = str(market.get("id", symbol).replace("/", ""))
+        except Exception:
+            binance_symbol = str(symbol).replace("/", "")
+
+        interval_map = {
+            "1m": "1m", "3m": "3m", "5m": "5m", "15m": "15m", "30m": "30m",
+            "1h": "1h", "2h": "2h", "4h": "4h", "6h": "6h", "8h": "8h",
+            "12h": "12h", "1d": "1d", "3d": "3d", "1w": "1w", "1M": "1M",
+        }
+        interval = interval_map.get(str(timeframe).strip().lower(), str(timeframe).strip().lower())
+
+        all_rows: list[list[float | int]] = []
+        while since < end_timestamp:
+            params = {
+                "symbol": binance_symbol,
+                "interval": interval,
+                "startTime": since,
+                "endTime": end_timestamp,
+                "limit": limit,
+            }
+            qs = urllib.parse.urlencode(params)
+            url = f"{base_url}?{qs}"
+            headers = {
+                "User-Agent": (
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) "
+                    "Chrome/91.0.4472.124 Safari/537.36"
+                )
+            }
+            req = urllib.request.Request(url, method="GET", headers=headers)  # noqa: S310
+            try:
+                with urllib.request.urlopen(req, timeout=timeout_sec) as resp:  # noqa: S310
+                    raw = resp.read().decode("utf-8")
+                data = json.loads(raw)
+            except Exception as e:  # noqa: BLE001
+                self.logger.error("Error fetching mark price klines for %s: %s", symbol, e)
+                break
+
+            if not data:
+                break
+
+            for row in data:
+                if not isinstance(row, (list, tuple)) or len(row) < 5:
+                    continue
+                ts = int(row[0])
+                all_rows.append([
+                    ts,
+                    float(row[1]), float(row[2]), float(row[3]), float(row[4]),
+                ])
+            if not all_rows:
+                break
+            last_ts = int(all_rows[-1][0])
+            since = last_ts + 1
+            if last_ts >= end_timestamp:
+                break
+            time.sleep(0.1)
+
+        if not all_rows:
+            return pd.DataFrame(columns=[
+                "timestamp", "open", "high", "low", "close", "datetime",
+            ])
+
+        df = pd.DataFrame(
+            all_rows,
+            columns=["timestamp", "open", "high", "low", "close"],
+        )
+        df["datetime"] = pd.to_datetime(df["timestamp"], unit="ms")
+        df = df.drop_duplicates(subset=["timestamp"])
+        df = df[df["timestamp"] <= end_timestamp].copy()
+        return df
+
     def fetch_funding_rate_history(
         self,
         symbol: str,
