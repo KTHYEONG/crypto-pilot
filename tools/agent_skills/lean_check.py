@@ -989,10 +989,15 @@ def main() -> None:
         # value ending in ".py" as a literal module literally named "...backtest.py"
         # (never imported), which silently reports 0%. Modules are importable via
         # the project's pythonpath and coverage reports them under their real path.
-        cov_args = [
-            f"--cov={sf[:-3].replace('/', '.')}" if sf.endswith(".py") else f"--cov={sf}"
-            for sf in source_files
-        ]
+        cov_args = []
+        for sf in source_files:
+            if not sf.endswith(".py"):
+                cov_args.append(f"--cov={sf}")
+                continue
+            module = sf[:-3].replace("/", ".")
+            if module.endswith(".__init__"):
+                module = module.removesuffix(".__init__")
+            cov_args.append(f"--cov={module}")
     report_args = ["--cov-report=term-missing"] if cov_args else []
 
     deselect_args = [f"--deselect={node}" for node in args.deselect]
