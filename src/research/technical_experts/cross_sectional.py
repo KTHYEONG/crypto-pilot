@@ -683,8 +683,20 @@ def _ledger_pnl(
     prev_lagged[1:] = lagged[:-1]
     turnover = np.abs(lagged - prev_lagged).sum(axis=1)
 
-    book_return = (lagged * o2o).sum(axis=1)
-    funding_charge = (lagged * funding).sum(axis=1)
+    active = lagged != 0.0
+    missing_active = active & (~np.isfinite(o2o) | ~np.isfinite(funding))
+    if missing_active.any():
+        row, col = np.argwhere(missing_active)[0]
+        raise DataIntegrityError(
+            "active ledger cell has non-finite open return/funding "
+            f"(row={row}, column={col})"
+        )
+    # Lifecycle NaNs in inactive symbols are expected and must not poison the
+    # cross-sectional sum through IEEE-754's 0 * NaN propagation.
+    safe_o2o = np.where(np.isfinite(o2o), o2o, 0.0)
+    safe_funding = np.where(np.isfinite(funding), funding, 0.0)
+    book_return = (lagged * safe_o2o).sum(axis=1)
+    funding_charge = (lagged * safe_funding).sum(axis=1)
     net_returns = book_return - turnover * cost_rate - funding_charge
     return net_returns, turnover
 
@@ -738,7 +750,9 @@ def run_xs_composite_ledger(
     )
 
     equity_values = _INITIAL_EQUITY * np.cumprod(1.0 + net_returns)
-    if not np.isfinite(equity_values).all() or (equity_values <= 0.0).any():
+    if not np.isfinite(equity_values).all():
+        raise DataIntegrityError("xs composite equity became non-finite")
+    if (equity_values <= 0.0).any():
         raise DataIntegrityError("xs composite equity would reach zero")
 
     equity = pd.Series(equity_values, index=weights.index, name="equity", dtype=np.float64)
