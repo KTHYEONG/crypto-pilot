@@ -245,6 +245,20 @@ class TestCompositeLedger:
         # only differ by the turnover cost term, which is identical.
         assert float(with_funding.iloc[-1]) == pytest.approx(float(without.iloc[-1]))
 
+    def test_xsc_04_inactive_lifecycle_nan_is_ignored(self) -> None:
+        weights, opens, funding = self._ledger_inputs(8)
+        weights["B"] = 0.0
+        opens.loc[opens.index[3:], "B"] = np.nan
+        funding.loc[funding.index[3:], "B"] = np.nan
+        equity, _turnover = run_xs_composite_ledger(weights, opens, funding, XsCompositeSpec())
+        assert bool(np.isfinite(equity.to_numpy()).all())
+
+    def test_xsc_04_active_lifecycle_nan_fails_closed(self) -> None:
+        weights, opens, funding = self._ledger_inputs(8)
+        opens.loc[opens.index[3], "A"] = np.nan
+        with pytest.raises(DataIntegrityError, match="active ledger cell"):
+            run_xs_composite_ledger(weights, opens, funding, XsCompositeSpec())
+
 
 class TestAdmission:
     def _admission_inputs(self, n: int = 2200) -> tuple[pd.Series, pd.Series, pd.Series]:
