@@ -1,6 +1,16 @@
 {
   "tasks": [
     {
+      "task_id": "TASK_MHS_RESEARCH_GO_EVALUATION",
+      "date": "2026-08-07",
+      "adr_id": "ADR_20260807_MHS_RESEARCH_GO_EVALUATION",
+      "domain": "risk",
+      "title": "MHS Research GO full-period evaluation",
+      "why": "Run the frozen MHS Phase-1 Research GO protocol on the complete dev 2021-2025 period after 5m execution and historical mark-cache wiring.",
+      "resolution": "Executed the 5m cache-required full-period replay. The strict simulated-inventory ledger failed closed when pre-trade equity became non-positive, so the preregistered two-band portfolio is rejected for Research GO; preserve the limited-window wiring validation as technical evidence.",
+      "impact": "No Research GO, Execution GO, Pilot GO, or Scale GO promotion. The implementation and data path remain available for diagnosis, but the current strategy cannot proceed to sizing or deployment."
+    },
+    {
       "task_id": "xs_alpha_basis_family_diagnostic",
       "date": "2026-08-07",
       "adr_id": "ADR_20260807_xs_alpha_basis_family_diagnostic",
