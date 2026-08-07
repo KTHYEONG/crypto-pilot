@@ -466,3 +466,31 @@ def test_futures_client_parses_ohlcv_and_funding_responses(monkeypatch) -> None:
 
     assert len(ohlcv) == 1
     assert rates.to_dict("records") == [{"timestamp": 1000, "funding_rate": 0.0001}]
+
+
+def test_fetch_mark_price_klines_normalizes_ohlc(monkeypatch) -> None:
+    """MHS-21-MARK-PRICE-COVERAGE-FAIL-CLOSED: mark klines normalize like OHLCV."""
+
+    class Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc_value, traceback):
+            return False
+
+        def read(self) -> bytes:
+            return (
+                b'[[1609459200000,"100","101","99","100.5"],'
+                b'[1609462800000,"100.5","102","100","101.0"]]'
+            )
+
+    monkeypatch.setattr("urllib.request.urlopen", lambda *args, **kwargs: Response())
+    client = BinanceClient()
+    frame = client.fetch_mark_price_klines(
+        "BTC/USDT", "1h", "2021-01-01T00:00:00Z", "2021-01-01T01:00:00Z",
+    )
+
+    assert list(frame.columns) == ["timestamp", "open", "high", "low", "close", "datetime"]
+    assert frame["timestamp"].tolist() == [1609459200000, 1609462800000]
+    assert frame["close"].tolist() == [100.5, 101.0]
+    assert frame["datetime"].is_monotonic_increasing
