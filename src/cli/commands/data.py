@@ -16,6 +16,24 @@ def _ohlcv(args: argparse.Namespace) -> None:
     _logger.info("Data collection complete for %s %s (through %s)", args.symbol, args.timeframe, end)
 
 
+def _mhs_execution(args: argparse.Namespace) -> None:
+    from src.application.data.mhs_execution_collection import (
+        build_mhs_execution_plan,
+        collect_mhs_execution_data,
+    )
+
+    end = args.end or str(pd.Timestamp.now(tz="UTC"))
+    plan = build_mhs_execution_plan(
+        args.start, end, timeframe=args.timeframe,
+        execution_universe_size=args.execution_universe_size,
+    )
+    result = collect_mhs_execution_data(plan, execute=args.execute, workers=args.workers)
+    _logger.info(
+        "MHS execution data %s: timeframe=%s symbols=%d manifest=%s",
+        result["mode"], plan.timeframe, len(plan.symbols), plan.manifest_path,
+    )
+
+
 def _spot_ohlcv(args: argparse.Namespace) -> None:
     end = args.end or str(pd.Timestamp.now(tz="UTC"))
     collection.collect_spot_ohlcv(args.symbol, args.timeframe, args.start, end)
@@ -78,6 +96,20 @@ def add_data_commands(data_parser: argparse.ArgumentParser) -> None:
     futures.add_argument("--start", default="2022-04-01")
     futures.add_argument("--end", default=None)
     futures.set_defaults(handler=_ohlcv)
+
+    mhs_execution = collect_sub.add_parser(
+        "mhs-execution", help="Plan or collect PIT MHS execution OHLCV (dry-run by default)",
+    )
+    mhs_execution.add_argument("--timeframe", choices=["1m", "5m"], default="5m")
+    mhs_execution.add_argument("--start", default="2021-01-01")
+    mhs_execution.add_argument("--end", default=None)
+    mhs_execution.add_argument("--execution-universe-size", type=int, default=30)
+    mhs_execution.add_argument("--workers", type=int, default=4)
+    mhs_execution.add_argument(
+        "--execute", action="store_true",
+        help="Actually download data; without this flag only the plan manifest is written",
+    )
+    mhs_execution.set_defaults(handler=_mhs_execution)
 
     spot = collect_sub.add_parser("spot-ohlcv", help="Collect independent spot OHLCV")
     spot.add_argument("symbol", type=str)
