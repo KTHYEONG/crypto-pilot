@@ -2,15 +2,6 @@ from __future__ import annotations
 
 import argparse
 
-from src.cli.commands.research.expert_library import add_expert_library_commands
-from src.cli.commands.research.portfolio_blend import add_portfolio_blend_commands
-from src.cli.commands.research.portfolio_growth import add_portfolio_growth_commands
-from src.cli.commands.research.portfolio_multi import add_portfolio_multi_commands
-from src.cli.commands.research.single_baseline import add_single_baseline_commands
-from src.cli.commands.research.single_carry import add_single_carry_commands
-from src.cli.commands.research.single_oi import add_single_oi_commands
-from src.cli.commands.research.single_technical import add_single_technical_commands
-
 
 def add_research_commands(research_parser: argparse.ArgumentParser) -> None:
     """Attach the ``research run <tier> <evaluation>`` group to the root parser.
@@ -20,6 +11,18 @@ def add_research_commands(research_parser: argparse.ArgumentParser) -> None:
     its ``argparse`` declaration and conversion to its typed request; this module
     only composes the tier registry.
     """
+    # Keep leaf-module imports lazy so coverage and command discovery can load
+    # one command without initializing every research backend first.
+    from src.cli.commands.research.expert_library import add_expert_library_commands
+    from src.cli.commands.research.mhs import add_mhs_commands
+    from src.cli.commands.research.portfolio_blend import add_portfolio_blend_commands
+    from src.cli.commands.research.portfolio_growth import add_portfolio_growth_commands
+    from src.cli.commands.research.portfolio_multi import add_portfolio_multi_commands
+    from src.cli.commands.research.single_baseline import add_single_baseline_commands
+    from src.cli.commands.research.single_carry import add_single_carry_commands
+    from src.cli.commands.research.single_oi import add_single_oi_commands
+    from src.cli.commands.research.single_technical import add_single_technical_commands
+
     sub = research_parser.add_subparsers(dest="research_command", required=True)
     run = sub.add_parser("run", help="Run one sealed research evaluation")
     run_sub = run.add_subparsers(dest="run_command", required=True)
@@ -38,6 +41,7 @@ def add_research_commands(research_parser: argparse.ArgumentParser) -> None:
     add_portfolio_multi_commands(portfolio_sub)
     add_portfolio_blend_commands(portfolio_sub)
     add_portfolio_growth_commands(portfolio_sub)
+    add_mhs_commands(portfolio_sub)
 
     expert = run_sub.add_parser("expert", help="Run one sealed expert-library lifecycle step")
     expert_sub = expert.add_subparsers(dest="expert_command", required=True)
