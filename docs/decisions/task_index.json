@@ -1,6 +1,16 @@
 {
   "tasks": [
     {
+      "task_id": "TASK_MHS_PIPELINE_COMPLETION",
+      "date": "2026-08-08",
+      "adr_id": "ADR_20260808_MHS_PIPELINE_COMPLETION",
+      "domain": "execution",
+      "title": "MHS pipeline terminal completion and memory diagnosis",
+      "why": "The full 2021-2025 MHS run terminated before terminal report generation while anchored folds loaded multi-year dense panels; the user requested root-cause analysis and a fail-closed completion path.",
+      "resolution": "Added windowed replay telemetry, typed book/fold failures, Arrow range filtering, deterministic report persistence, collection-safe pytest configuration, and lean-check semantic source-test mapping. Execution confirms short-period terminal completion but exposes residual multi-year fold panel RSS growth.",
+      "impact": "MHS now emits machine-readable terminal failures instead of silently losing the run; Research-GO remains ineligible until fold panel loading is streamed or bounded."
+    },
+    {
       "task_id": "TASK_MHS_STREAMED_EXECUTION_MEMORY",
       "date": "2026-08-08",
       "adr_id": "ADR_20260808_MHS_STREAMED_EXECUTION_MEMORY",
