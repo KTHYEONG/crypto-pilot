@@ -10,9 +10,11 @@ every report separates the two.
 from __future__ import annotations
 
 import dataclasses
+import hashlib
 import json
 import logging
 import os
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
@@ -61,6 +63,21 @@ _PERIODS_PER_YEAR_1H = 365.0 * 24
 _BOOTSTRAP_SEED = 20260807
 _BOOTSTRAP_REPLICATES = 2000
 _BOOTSTRAP_MEAN_BLOCK = 168
+
+# Frozen strict-proxy Research-GO criterion (spec §3.3): the primary
+# autocorrelation-adjusted Sharpe must be >= 0.6 for a candidate to pass.
+MHS_GO_PRIMARY_SHARPE_FLOOR = 0.6
+
+MHS_ARTIFACT_SCHEMA_VERSION = 1
+
+MHS_GO_REASON_INCOMPLETE_FOLD = "INCOMPLETE_ANCHORED_FOLD"
+MHS_GO_REASON_INVALID_PRIMARY = "INVALID_PRIMARY_LEDGER"
+MHS_GO_REASON_NONFINITE_EQUITY = "NONFINITE_EQUITY"
+MHS_GO_REASON_EXECUTION_GAP = "RELEVANT_EXECUTION_DATA_GAP"
+MHS_GO_REASON_PRIMARY_SHARPE = "PRIMARY_AUTOCORR_SHARPE_BELOW_0_6"
+MHS_GO_REASON_STRESS_SHARPE = "STRESS_SHARPE_NOT_POSITIVE"
+MHS_GO_REASON_CAPITAL_BREACH = "CAPITAL_INVARIANT_BREACH"
+MHS_GO_REASON_UNSPECIFIED_POLICY = "UNSPECIFIED_POLICY"
 
 
 @dataclass(frozen=True, slots=True)
@@ -120,6 +137,47 @@ class MhsBookReport:
 
 
 @dataclass(frozen=True, slots=True)
+class MhsResearchGoResult:
+    """Machine-readable Research-GO gate decision built from the fold evidence.
+
+    ``eligible`` is false unless every anchored fold passed and no policy gate
+    is left unspecified; the exact blocking reasons are carried as stable codes.
+    """
+
+    eligible: bool
+    reason_codes: tuple[str, ...]
+    evaluated_folds: int
+    folds_passed: int
+
+
+@dataclass(frozen=True, slots=True)
+class MhsFoldReport:
+    """One independently flat anchored-fold replay over the blend book.
+
+    ``strict``/``stress`` are ``None`` for an incomplete fold; ``failures``
+    carries the stable reason codes that blocked this fold's evidence.
+    """
+
+    fold_index: int
+    validation_start: str
+    validation_end: str
+    strict: StrategyExecutionReplayResult | None
+    stress: StrategyExecutionReplayResult | None
+    primary_valid: bool
+    primary_autocorr_sharpe: float
+    primary_naive_sharpe: float
+    primary_net_ann: float
+    primary_geometric_cagr: float
+    primary_max_drawdown: float
+    stress_naive_sharpe: float
+    decision_intents: int
+    termination_counts: dict[str, int]
+    failures: tuple[str, ...]
+    strict_elapsed_seconds: float
+    stress_elapsed_seconds: float
+
+
+@dataclass(frozen=True, slots=True)
 class MhsHorizonDiagnosticReport:
     feature: str
     status: str
@@ -146,11 +204,14 @@ class MhsHorizonDiagnosticReport:
     termination_counts: dict[str, int]
     unsupported_assumptions: tuple[str, ...]
     anchored_folds: tuple[AnchoredPurgedFold, ...]
+    folds: tuple[MhsFoldReport, ...]
+    research_go: MhsResearchGoResult
     fill_source: str
     mark_source: str
     execution_timeframe: str
     execution_universe_size: int
     execution_symbols: tuple[str, ...]
+    run_elapsed_seconds: float
 
     def to_payload(self) -> Any:
         return _jsonable(dataclasses.asdict(self))
@@ -219,12 +280,16 @@ def _load_minute_frames(
     timeframe: Literal["1m", "5m"],
 ) -> dict[str, pd.DataFrame]:
     frames: dict[str, pd.DataFrame] = {}
+    start_ms = int(start.value // 1_000_000)
+    end_ms = int(end.value // 1_000_000)
     for sym in symbols:
         path = os.path.join(root, timeframe, f"{sym}.parquet")
         if not os.path.exists(path):
             continue
         table = pq.read_table(
-            path, columns=["timestamp", "high", "low", "close", "quote_vol"],
+            path,
+            columns=["timestamp", "high", "low", "close", "quote_vol"],
+            filters=[[("timestamp", ">=", start_ms), ("timestamp", "<=", end_ms)]],
         )
         idx = pd.to_datetime(table.column("timestamp").to_numpy(), unit="ms", utc=True)
         frame = pd.DataFrame(
@@ -243,15 +308,17 @@ def _load_minute_frames(
 
 def _align_minute_frames(
     frames: dict[str, pd.DataFrame], timeframe: Literal["1m", "5m"],
+    start: pd.Timestamp, end: pd.Timestamp,
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame] | None:
     if not frames:
         return None
-    common_start = max(frame.index[0] for frame in frames.values())
-    common_end = min(frame.index[-1] for frame in frames.values())
-    if common_start >= common_end:
+    if start >= end:
         return None
+    # The requested evaluation grid is the replay grid. A late listing is kept
+    # as NaN on that grid and never trims the global start, so the replay
+    # horizon is never shortened by the union of first-observed timestamps.
     grid = pd.date_range(
-        common_start, common_end,
+        start, end,
         freq={"1m": "1min", "5m": "5min"}[timeframe],
         tz="UTC",
     )
@@ -559,6 +626,8 @@ def _book_outcome(
     highs, lows, closes, _quote_vol = minute_frames
     replay_symbols = [s for s in target_weights.columns if s in highs.columns]
     target_replay = target_weights[replay_symbols]
+    if minute_marks is not None:
+        _assert_cache_required_marks(name, target_replay, signal_available_at, minute_marks)
     primary = strategy_aware_execution_replay(
         target_replay, signal_available_at, highs, lows, closes, minute_marks,
         minute_bar_funding, initial_equity, "OHLCV_STRICT_PROXY", ExecutionSpec(),
@@ -567,9 +636,7 @@ def _book_outcome(
         target_replay, signal_available_at, highs, lows, closes, minute_marks,
         minute_bar_funding, initial_equity, "OHLCV_IMMEDIATE_TAKER", ExecutionSpec(),
     )
-    if minute_marks is not None:
-        _assert_cache_required_marks(name, target_replay, signal_available_at, minute_marks)
-        if not primary.ledger.primary_valid:
+    if minute_marks is not None and not primary.ledger.primary_valid:
             raise DataIntegrityError(
                 f"cache_required strict primary ledger invalid for {name}: "
                 f"{', '.join(primary.ledger.invalid_reasons)}"
@@ -596,6 +663,226 @@ def _book_outcome(
     )
 
 
+def _incomplete_fold_report(
+    fold: AnchoredPurgedFold, fold_index: int, failures: tuple[str, ...],
+) -> MhsFoldReport:
+    """A fold that could not be replayed, failed closed with its reason codes."""
+    return MhsFoldReport(
+        fold_index=fold_index,
+        validation_start=str(fold.validation_start),
+        validation_end=str(fold.validation_end),
+        strict=None,
+        stress=None,
+        primary_valid=False,
+        primary_autocorr_sharpe=float("nan"),
+        primary_naive_sharpe=float("nan"),
+        primary_net_ann=float("nan"),
+        primary_geometric_cagr=float("nan"),
+        primary_max_drawdown=float("nan"),
+        stress_naive_sharpe=float("nan"),
+        decision_intents=0,
+        termination_counts={},
+        failures=tuple(sorted(set(failures))),
+        strict_elapsed_seconds=0.0,
+        stress_elapsed_seconds=0.0,
+    )
+
+
+def _run_anchored_fold(
+    root: str,
+    fold: AnchoredPurgedFold,
+    request: MhsDiagnosticRequest,
+    funding_by_symbol: dict[str, pd.Series],
+    initial_equity: float,
+    fold_index: int,
+) -> MhsFoldReport:
+    """One independently flat strict/immediate-taker blend replay per fold.
+
+    The 1h panel spans ``[train_start, validation_end]`` so warm-up history
+    feeds features only; the replay decisions and the fresh flat ledger cover
+    only the validation window. A fold that cannot be replayed is reported
+    (not raised) with machine-readable failure codes.
+    """
+    try:
+        ts = fold.train_start
+        vs = fold.validation_start
+        ve = fold.validation_end
+        panel = load_base_panel(
+            root, "1h", ("close", "open", "quote_vol"), ts, ve,
+            partition="dev", min_bars=2000,
+        )
+        close, opens, quote_vol = panel["close"], panel["open"], panel["quote_vol"]
+        grid_1h = close.index
+        symbols = list(close.columns)
+        funded = [s for s in symbols if s in funding_by_symbol]
+        if not funded:
+            return _incomplete_fold_report(fold, fold_index, (MHS_GO_REASON_INCOMPLETE_FOLD,))
+        close = close[funded]
+        opens = opens[funded]
+        quote_vol = quote_vol[funded]
+        bar_period = grid_1h[1] - grid_1h[0]
+        funding_window = {
+            s: funding_by_symbol[s].loc[
+                (funding_by_symbol[s].index >= grid_1h[0])
+                & (funding_by_symbol[s].index < grid_1h[-1] + bar_period)
+            ]
+            for s in funded
+        }
+        bar_funding = bar_funding_panel(funding_window, grid_1h)
+        aligned_symbols = list(bar_funding.columns)
+        if not aligned_symbols:
+            return _incomplete_fold_report(fold, fold_index, (MHS_GO_REASON_INCOMPLETE_FOLD,))
+        close = close[aligned_symbols]
+        opens = opens[aligned_symbols]
+        quote_vol = quote_vol[aligned_symbols]
+        bar_funding = bar_funding[aligned_symbols]
+
+        eligible = liquid_half_eligibility(quote_vol, lookback_bars=720, min_history_bars=720)
+        log_close = np.log(close)
+        fast = PHASE_1_BOOK_SPECS["fast_reversal"]
+        slow = PHASE_1_BOOK_SPECS["slow_momentum"]
+        fast_grid = pd.date_range(ts, ve, freq="6h", tz="UTC")
+        slow_grid = pd.date_range(ts, ve, freq="24h", tz="UTC")
+        w_fast = _book_weights(log_close, eligible, fast, fast_grid)
+        w_slow = _book_weights(log_close, eligible, slow, slow_grid)
+        execution_mask = _pit_execution_mask(quote_vol, eligible, request.execution_universe_size)
+        w_fast_execution = w_fast.where(
+            execution_mask.reindex(w_fast.index).fillna(False), other=0.0,
+        )
+        w_slow_execution = w_slow.where(
+            execution_mask.reindex(w_slow.index).fillna(False), other=0.0,
+        )
+        blend_1h = (
+            PHASE_1_BOOK_BLEND_WEIGHTS["fast_reversal"] * w_fast_execution.reindex(grid_1h).ffill().fillna(0.0)
+            + PHASE_1_BOOK_BLEND_WEIGHTS["slow_momentum"] * w_slow_execution.reindex(grid_1h).ffill().fillna(0.0)
+        )
+        decision_grid = blend_1h.index[(blend_1h.index >= vs) & (blend_1h.index <= ve)]
+        target_weights = blend_1h.loc[decision_grid]
+        if target_weights.empty:
+            return _incomplete_fold_report(fold, fold_index, (MHS_GO_REASON_INCOMPLETE_FOLD,))
+        execution_symbols = sorted(
+            target_weights.columns[target_weights.ne(0.0).any(axis=0)]
+        )
+        minute_frames = _align_minute_frames(
+            _load_minute_frames(root, execution_symbols, vs, ve, request.execution_timeframe),
+            request.execution_timeframe,
+            vs, ve,
+        )
+        if minute_frames is None:
+            return _incomplete_fold_report(fold, fold_index, (MHS_GO_REASON_INCOMPLETE_FOLD,))
+        highs, _lows, closes, _quote_vol_1m = minute_frames
+        minute_grid = highs.index
+        minute_marks = (
+            DataCollector().load_mark_price_panel(
+                list(closes.columns), "1h", minute_grid,
+            )
+            if request.mark_mode == "cache_required"
+            else None
+        )
+        minute_period = minute_grid[1] - minute_grid[0]
+        minute_funding_window = {
+            s: funding_by_symbol[s].loc[
+                (funding_by_symbol[s].index >= minute_grid[0])
+                & (funding_by_symbol[s].index < minute_grid[-1] + minute_period)
+            ]
+            for s in aligned_symbols
+        }
+        minute_funding = bar_funding_panel(minute_funding_window, minute_grid)
+        minute_funding = minute_funding.reindex(columns=list(closes.columns))
+
+        target_replay = target_weights[list(closes.columns)]
+        signal_available_at = target_replay.index + pd.Timedelta(hours=1)
+        decision_intents = int(np.isfinite(target_replay.to_numpy()).sum())
+        if minute_marks is not None:
+            _assert_cache_required_marks("fold", target_replay, signal_available_at, minute_marks)
+        primary = strategy_aware_execution_replay(
+            target_replay, signal_available_at, highs, _lows, closes, minute_marks,
+            minute_funding, initial_equity, "OHLCV_STRICT_PROXY", ExecutionSpec(),
+        )
+        stress = strategy_aware_execution_replay(
+            target_replay, signal_available_at, highs, _lows, closes, minute_marks,
+            minute_funding, initial_equity, "OHLCV_IMMEDIATE_TAKER", ExecutionSpec(),
+        )
+
+        failures: list[str] = []
+        equity = primary.ledger.equity
+        if not np.isfinite(equity.to_numpy()).all() or not (equity > 0).all():
+            failures.append(MHS_GO_REASON_NONFINITE_EQUITY)
+        if not primary.ledger.primary_valid:
+            failures.append(MHS_GO_REASON_INVALID_PRIMARY)
+        if (
+            primary.termination_counts.get("MISSING_DATA", 0) > 0
+            or primary.termination_counts.get("UNKNOWN_TERMINATION", 0) > 0
+        ):
+            failures.append(MHS_GO_REASON_EXECUTION_GAP)
+        primary_autocorr = _daily_autocorr_sharpe(primary.ledger)
+        if not np.isfinite(primary_autocorr) or primary_autocorr < MHS_GO_PRIMARY_SHARPE_FLOOR:
+            failures.append(MHS_GO_REASON_PRIMARY_SHARPE)
+        stress_sharpe = _naive_sharpe(stress.ledger)
+        if not np.isfinite(stress_sharpe) or stress_sharpe <= 0.0:
+            failures.append(MHS_GO_REASON_STRESS_SHARPE)
+
+        return MhsFoldReport(
+            fold_index=fold_index,
+            validation_start=str(vs),
+            validation_end=str(ve),
+            strict=primary,
+            stress=stress,
+            primary_valid=primary.ledger.primary_valid,
+            primary_autocorr_sharpe=primary_autocorr,
+            primary_naive_sharpe=_naive_sharpe(primary.ledger),
+            primary_net_ann=_mean_ann(primary.ledger.net_returns, _PERIODS_PER_YEAR_1H),
+            primary_geometric_cagr=_geometric_cagr(equity),
+            primary_max_drawdown=_mdd(equity),
+            stress_naive_sharpe=stress_sharpe,
+            decision_intents=decision_intents,
+            termination_counts=dict(primary.termination_counts),
+            failures=tuple(sorted(set(failures))),
+            strict_elapsed_seconds=primary.elapsed_seconds,
+            stress_elapsed_seconds=stress.elapsed_seconds,
+        )
+    except DataIntegrityError as exc:
+        message = str(exc).lower()
+        if "pre-trade equity" in message or "capital" in message or "equity must be" in message:
+            code = MHS_GO_REASON_CAPITAL_BREACH
+        elif "finite" in message:
+            code = MHS_GO_REASON_NONFINITE_EQUITY
+        else:
+            code = MHS_GO_REASON_INVALID_PRIMARY
+        return _incomplete_fold_report(fold, fold_index, (code,))
+    except (RuntimeError, ValueError):
+        return _incomplete_fold_report(fold, fold_index, (MHS_GO_REASON_INCOMPLETE_FOLD,))
+
+
+def _mhs_research_go(folds: tuple[MhsFoldReport, ...]) -> MhsResearchGoResult:
+    """Fail-closed top-level Research-GO decision built from the fold reports.
+
+    A fold that was not replayed, an invalid primary, non-finite equity, a
+    relevant execution gap, a strict-Sharpe failure, or a non-positive stress
+    Sharpe each block the decision with a stable reason code. The cap-30 and
+    primary annual-return gate thresholds are not preregistered in source
+    contracts, so those checks are reported as ``UNSPECIFIED_POLICY`` and keep
+    Research GO conservative (false) until they are explicitly registered.
+    """
+    reasons: list[str] = []
+    passed = 0
+    for fold_report in folds:
+        if fold_report.strict is None:
+            reasons.append(MHS_GO_REASON_INCOMPLETE_FOLD)
+            continue
+        if not fold_report.failures:
+            passed += 1
+        reasons.extend(fold_report.failures)
+    reasons.append(MHS_GO_REASON_UNSPECIFIED_POLICY)
+    reasons = sorted(set(reasons))
+    return MhsResearchGoResult(
+        eligible=not reasons,
+        reason_codes=tuple(reasons),
+        evaluated_folds=len(folds),
+        folds_passed=passed,
+    )
+
+
 def run_mhs_horizon_diagnostic(request: MhsDiagnosticRequest) -> MhsHorizonDiagnosticReport:
     """Compose the dev-only Phase 1 diagnostic: pre-screen + strict-proxy evidence.
 
@@ -605,6 +892,7 @@ def run_mhs_horizon_diagnostic(request: MhsDiagnosticRequest) -> MhsHorizonDiagn
     fields; only strict simulated inventory is primary Research evidence.
     """
     resolved_end = resolve_evaluation_end(request.end, unseal_holdout=False)
+    _run_start = time.perf_counter()
     if request.partition != "dev":
         raise RuntimeError(
             "MHS Phase 1 is dev-only; the holdout partition requires an "
@@ -624,6 +912,7 @@ def run_mhs_horizon_diagnostic(request: MhsDiagnosticRequest) -> MhsHorizonDiagn
     symbols = list(close.columns)
 
     funding_by_symbol = _load_funding_series(symbols)
+    fold_funding = dict(funding_by_symbol)
     funded = [s for s in symbols if s in funding_by_symbol]
     if not funded:
         raise RuntimeError("no dev symbol has funding coverage; the MHS ledger requires funding")
@@ -686,6 +975,7 @@ def run_mhs_horizon_diagnostic(request: MhsDiagnosticRequest) -> MhsHorizonDiagn
     minute_frames = _align_minute_frames(
         _load_minute_frames(root, execution_symbols, start, end, request.execution_timeframe),
         request.execution_timeframe,
+        start, end,
     )
     initial_equity = 1.0
     quote_volume_1m = pd.DataFrame()
@@ -765,12 +1055,19 @@ def run_mhs_horizon_diagnostic(request: MhsDiagnosticRequest) -> MhsHorizonDiagn
             fast, blend_report.primary_naive_sharpe, 500, _BOOTSTRAP_SEED,
         )
 
+    folds = tuple(
+        _run_anchored_fold(root, fold, request, fold_funding, initial_equity, idx)
+        for idx, fold in enumerate(phase_1_anchored_purged_folds())
+    )
+    research_go = _mhs_research_go(folds)
+
     if blend_report is not None:
         deployment = compute_deployment_readiness(
             blend_report.primary.ledger.equity,
             _PERIODS_PER_YEAR_1H,
             participation_warnings=participation,
             primary_valid=blend_report.primary.ledger.primary_valid,
+            research_go_eligible=research_go.eligible,
             n_bootstrap=_BOOTSTRAP_REPLICATES,
             mean_block_bars=_BOOTSTRAP_MEAN_BLOCK,
             seed=_BOOTSTRAP_SEED,
@@ -782,6 +1079,7 @@ def run_mhs_horizon_diagnostic(request: MhsDiagnosticRequest) -> MhsHorizonDiagn
                 index=pd.DatetimeIndex([start, start + pd.Timedelta(hours=1)]),
             ),
             _PERIODS_PER_YEAR_1H,
+            research_go_eligible=research_go.eligible,
             n_bootstrap=_BOOTSTRAP_REPLICATES,
         )
 
@@ -792,6 +1090,8 @@ def run_mhs_horizon_diagnostic(request: MhsDiagnosticRequest) -> MhsHorizonDiagn
     if blend_report is not None:
         mark_source = blend_report.primary.ledger.mark_source
         fill_source = "OHLCV_STRICT_PROXY"
+
+    run_elapsed_seconds = time.perf_counter() - _run_start
 
     return MhsHorizonDiagnosticReport(
         feature=_MHS_FEATURE,
@@ -819,11 +1119,14 @@ def run_mhs_horizon_diagnostic(request: MhsDiagnosticRequest) -> MhsHorizonDiagn
         termination_counts=termination_counts,
         unsupported_assumptions=unsupported,
         anchored_folds=phase_1_anchored_purged_folds(),
+        folds=folds,
+        research_go=research_go,
         fill_source=fill_source,
         mark_source=mark_source,
         execution_timeframe=request.execution_timeframe,
         execution_universe_size=request.execution_universe_size,
         execution_symbols=tuple(execution_symbols),
+        run_elapsed_seconds=run_elapsed_seconds,
     )
 
 
@@ -860,11 +1163,63 @@ def persist_mhs_horizon_diagnostic_report(report: MhsHorizonDiagnosticReport, pa
         payload["blend"]["stress"] = _persist_replay_artifact(
             report.blend.stress, artifact_root, "blend_stress"
         )
+    for fold_report in report.folds:
+        fold_payload = payload["folds"][fold_report.fold_index]
+        if fold_report.strict is not None:
+            fold_payload["strict"] = _persist_replay_artifact(
+                fold_report.strict, artifact_root, f"fold{fold_report.fold_index}_strict"
+            )
+        if fold_report.stress is not None:
+            fold_payload["stress"] = _persist_replay_artifact(
+                fold_report.stress, artifact_root, f"fold{fold_report.fold_index}_stress"
+            )
 
     with target.open("w", encoding="utf-8") as fh:
         json.dump(payload, fh, indent=2, ensure_ascii=False)
     _logger.info("[MHS] report persisted path=%s", target)
     return target
+
+
+def _to_timestamped_table(frame: pd.DataFrame) -> pd.DataFrame:
+    """Promote a DatetimeIndex into an explicit UTC timestamp column.
+
+    The returned table carries a physical ``datetime64[ns, UTC]`` column named
+    ``timestamp`` and a RangeIndex, so readers need no string-parsing guess.
+    """
+    out = frame.copy()
+    if len(out):
+        out.insert(0, "timestamp", out.index)
+        out["timestamp"] = pd.to_datetime(out["timestamp"], utc=True)
+    else:
+        out["timestamp"] = pd.Series(dtype="datetime64[ns, UTC]")
+    return out.reset_index(drop=True)
+
+
+def _artifact_checksum(path: Path) -> str:
+    hasher = hashlib.sha256()
+    with path.open("rb") as fh:
+        for chunk in iter(lambda: fh.read(65536), b""):
+            hasher.update(chunk)
+    return hasher.hexdigest()
+
+
+def _artifact_reference(table: pd.DataFrame, path: Path) -> dict[str, Any]:
+    """Row count, time bounds, schema version, and content checksum per table."""
+    ts = (
+        pd.to_datetime(table["timestamp"], utc=True)
+        if "timestamp" in table.columns
+        else pd.Series(dtype="datetime64[ns, UTC]")
+    )
+    return {
+        "file": path.name,
+        "schema_version": MHS_ARTIFACT_SCHEMA_VERSION,
+        "row_count": len(table),
+        "time_bounds": {
+            "start": None if len(ts) == 0 else str(ts.iloc[0]),
+            "end": None if len(ts) == 0 else str(ts.iloc[-1]),
+        },
+        "checksum_sha256": _artifact_checksum(path),
+    }
 
 
 def _persist_replay_artifact(
@@ -874,15 +1229,21 @@ def _persist_replay_artifact(
 ) -> dict[str, Any]:
     """Write one replay's detailed tables and return a compact JSON reference."""
     prefix = artifact_root / name
-    replay.simulated_fills.to_parquet(
-        prefix.with_name(f"{name}_fills.parquet"), index=False, compression="zstd"
-    )
-    replay.simulated_units.to_parquet(
-        prefix.with_name(f"{name}_units.parquet"), compression="zstd"
-    )
-    replay.simulated_notional_weights.to_parquet(
-        prefix.with_name(f"{name}_notional_weights.parquet"), compression="zstd"
-    )
+
+    fills = replay.simulated_fills.copy()
+    if not fills.empty and "timestamp" in fills.columns:
+        fills["timestamp"] = pd.to_datetime(fills["timestamp"], utc=True)
+    fills_path = prefix.with_name(f"{name}_fills.parquet")
+    fills.to_parquet(fills_path, index=False, compression="zstd")
+
+    units_table = _to_timestamped_table(replay.simulated_units)
+    units_path = prefix.with_name(f"{name}_units.parquet")
+    units_table.to_parquet(units_path, index=False, compression="zstd")
+
+    notional_table = _to_timestamped_table(replay.simulated_notional_weights)
+    notional_path = prefix.with_name(f"{name}_notional_weights.parquet")
+    notional_table.to_parquet(notional_path, index=False, compression="zstd")
+
     ledger = pd.concat(
         {
             "equity": replay.ledger.equity,
@@ -894,22 +1255,26 @@ def _persist_replay_artifact(
         },
         axis=1,
     )
-    ledger.to_parquet(
-        prefix.with_name(f"{name}_ledger.parquet"), compression="zstd"
-    )
-    pd.DataFrame(
+    ledger_table = _to_timestamped_table(ledger)
+    ledger_path = prefix.with_name(f"{name}_ledger.parquet")
+    ledger_table.to_parquet(ledger_path, index=False, compression="zstd")
+
+    times = pd.DataFrame(
         {"submit_time": replay.submit_times, "fill_time": replay.fill_times}
-    ).to_parquet(
-        prefix.with_name(f"{name}_times.parquet"), compression="zstd"
     )
+    times["submit_time"] = pd.to_datetime(times["submit_time"], utc=True)
+    times["fill_time"] = pd.to_datetime(times["fill_time"], utc=True)
+    times_path = prefix.with_name(f"{name}_times.parquet")
+    times.to_parquet(times_path, index=False, compression="zstd")
+
     return {
         "artifact_format": "parquet",
         "artifact_dir": str(artifact_root),
-        "fills": f"{name}_fills.parquet",
-        "units": f"{name}_units.parquet",
-        "notional_weights": f"{name}_notional_weights.parquet",
-        "ledger": f"{name}_ledger.parquet",
-        "times": f"{name}_times.parquet",
+        "fills": _artifact_reference(fills, fills_path),
+        "units": _artifact_reference(units_table, units_path),
+        "notional_weights": _artifact_reference(notional_table, notional_path),
+        "ledger": _artifact_reference(ledger_table, ledger_path),
+        "times": _artifact_reference(times, times_path),
         "fill_source": replay.fill_source,
         "mark_source": replay.mark_source,
         "fill_count": replay.fill_count,
@@ -920,4 +1285,5 @@ def _persist_replay_artifact(
         "forced_exit_notional": replay.forced_exit_notional,
         "termination_counts": dict(replay.termination_counts),
         "unsupported_assumptions": list(replay.unsupported_assumptions),
+        "elapsed_seconds": replay.elapsed_seconds,
     }
