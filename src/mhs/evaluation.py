@@ -481,6 +481,7 @@ def compute_deployment_readiness(
     concentration: Mapping[str, float] | None = None,
     participation_warnings: Mapping[str, float] | None = None,
     primary_valid: bool = True,
+    research_go_eligible: bool | None = None,
     mean_block_bars: int = 168,
     n_bootstrap: int = 2000,
     seed: int = 20260807,
@@ -489,7 +490,10 @@ def compute_deployment_readiness(
     """Research/execution/pilot/scale readiness from strict-proxy simulated equity.
 
     Research GO can be true from historical strict-proxy evidence only when the
-    primary ledger is valid (``primary_valid``); Execution, Pilot, and Scale GO
+    primary ledger is valid (``primary_valid``). When ``research_go_eligible``
+    is passed, it is the explicit gate decision and overrides the ``primary_valid``
+    shortcut entirely, so a caller can route a fold-based Research-GO decision
+    without weakening the fail-closed default. Execution, Pilot, and Scale GO
     require forward evidence that is absent by construction until the respective
     calibration data exists.
     """
@@ -503,6 +507,9 @@ def compute_deployment_readiness(
         raise ValueError("periods_per_year must be > 0")
     if not isinstance(primary_valid, bool):
         raise ValueError("primary_valid must be a bool")
+    if research_go_eligible is not None and not isinstance(research_go_eligible, bool):
+        raise ValueError("research_go_eligible must be a bool or None")
+    research_go = primary_valid if research_go_eligible is None else research_go_eligible
 
     net = equity.pct_change().dropna()
     if len(net) == 0:
@@ -554,7 +561,7 @@ def compute_deployment_readiness(
         leverage_ruin_probabilities=ruin_probs,
         concentration=dict(concentration or {}),
         participation_warnings=dict(participation_warnings or {}),
-        research_go_eligible=primary_valid,
+        research_go_eligible=research_go,
         execution_go_eligible=False,
         pilot_go_eligible=False,
         scale_go_eligible=False,
