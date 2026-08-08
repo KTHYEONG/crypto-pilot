@@ -203,6 +203,7 @@ class StrategyExecutionReplayResult:
     unsupported_assumptions: tuple[str, ...]
     elapsed_seconds: float
     data_gaps: tuple[ExecutionDataGap, ...] = ()
+    event_snapshots_retained: bool = True
 
 
 def simulated_inventory_ledger(
@@ -892,6 +893,7 @@ def replay_execution_windows(
     initial_equity: float,
     execution_bound: _ExecutionBound,
     spec: ExecutionSpec,
+    retain_event_snapshots: bool = False,
 ) -> StrategyExecutionReplayResult:
     """Stateful windowed replay equivalent to ``strategy_aware_execution_replay``.
 
@@ -903,6 +905,14 @@ def replay_execution_windows(
     order never crosses a window boundary unresolved. The six ledger series are
     computed per window in chronological order and concatenated once, matching
     the single-panel oracle at ``rtol=atol=1e-12`` where the inputs are equal.
+
+    ``retain_event_snapshots`` defaults to ``False`` for bounded memory: the
+    dense per-fill ``simulated_units``/``simulated_notional_weights`` event
+    tables are then empty (correctly columned) and ``event_snapshots_retained``
+    is ``False``, so empty tables cannot be mistaken for no fills. Diagnostic
+    callers that compare event snapshots (the single-panel oracle and
+    equivalence tests) must explicitly opt in with ``True``; the ledger, fills,
+    gaps, termination data, and numerical results are identical either way.
     """
     if initial_equity <= 0:
         raise DataIntegrityError("initial_equity must be > 0")
@@ -919,6 +929,7 @@ def replay_execution_windows(
     n_cols = len(columns)
     gpos_of = {sym: i for i, sym in enumerate(columns)}
     mark_source: _MarkSource = "MARK_PRICE" if first.marks is not None else "OHLCV_CLOSE_FALLBACK"
+    first_grid = first.minute_grid
 
     units_arr = np.zeros(n_cols, dtype="float64")
     cash = float(initial_equity)
@@ -1206,10 +1217,11 @@ def replay_execution_windows(
                     )
                     fill_times.append(fill_time)
                     submit_times.append(submit_time)
-                    marks_row = np.full(n_cols, np.nan, dtype="float64")
-                    marks_row[gpos] = marks_values[fill_pos]
-                    units_after_events.append((fill_time, units_arr.copy()))
-                    notional_after_events.append((fill_time, units_arr * marks_row))
+                    if retain_event_snapshots:
+                        marks_row = np.full(n_cols, np.nan, dtype="float64")
+                        marks_row[gpos] = marks_values[fill_pos]
+                        units_after_events.append((fill_time, units_arr.copy()))
+                        notional_after_events.append((fill_time, units_arr * marks_row))
 
         if window_fills:
             fill_records.extend(window_fills)
@@ -1340,6 +1352,7 @@ def replay_execution_windows(
 
     _t0 = time.perf_counter()
     _process_window(first)
+    del first
     for w in it:
         _process_window(w)
         del w
@@ -1397,7 +1410,8 @@ def replay_execution_windows(
         )
         fill_times.append(exit_ts)
         units_arr[col] = 0.0
-        units_after_events.append((exit_ts, units_arr.copy()))
+        if retain_event_snapshots:
+            units_after_events.append((exit_ts, units_arr.copy()))
     elapsed_seconds = time.perf_counter() - _t0
 
     simulated_fills = pd.DataFrame(
@@ -1419,8 +1433,9 @@ def replay_execution_windows(
         funding_arr = np.concatenate(funding_chunks)
         fee_arr = np.concatenate(fee_chunks)
         turnover_arr = np.concatenate(turnover_chunks)
+        del equity_chunks, equity_times, mtm_chunks, funding_chunks, fee_chunks, turnover_chunks
     else:
-        full_index = first.minute_grid
+        full_index = first_grid
         equity_values_arr = np.array([], dtype="float64")
         mtm_arr = np.array([], dtype="float64")
         funding_arr = np.array([], dtype="float64")
@@ -1501,4 +1516,5 @@ def replay_execution_windows(
         ),
         elapsed_seconds=elapsed_seconds,
         data_gaps=tuple(data_gaps),
+        event_snapshots_retained=retain_event_snapshots,
     )
