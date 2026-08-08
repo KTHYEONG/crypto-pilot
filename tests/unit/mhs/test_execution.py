@@ -1,15 +1,19 @@
 from __future__ import annotations
 
+import dataclasses
+
 import numpy as np
 import pandas as pd
 import pytest
 
+from src.common.errors import DataIntegrityError
 from src.mhs.execution import (
     ExecutionReplayWindow,
     ExecutionSpec,
     bar_funding_panel,
     mhs_ledger_pnl,
     passive_fill_shortfall_bps,
+    replay_execution_window_pair,
     replay_execution_windows,
     simulated_inventory_ledger,
     strategy_aware_execution_replay,
@@ -481,6 +485,45 @@ def _assert_replay_equivalent(oracle, windowed) -> None:
     assert len(oracle.simulated_units) == len(windowed.simulated_units)
 
 
+def _assert_pair_equivalent(independent, paired, label: str) -> None:
+    """MHS-MEM-PAIR-01: the paired fan-out result equals the independent
+    single-bound call in fills, the six ledger series, gaps, counters,
+    snapshots, and terminal state."""
+    fill_o = independent.simulated_fills.sort_values(["timestamp", "symbol"]).reset_index(drop=True)
+    fill_p = paired.simulated_fills.sort_values(["timestamp", "symbol"]).reset_index(drop=True)
+    assert len(fill_o) == len(fill_p), label
+    for col in ("timestamp", "symbol", "quantity_delta", "fill_price", "fee_bps", "reason"):
+        assert fill_o[col].tolist() == fill_p[col].tolist(), (label, col)
+    np.testing.assert_allclose(
+        fill_o["pre_trade_equity"].to_numpy(dtype="float64"),
+        fill_p["pre_trade_equity"].to_numpy(dtype="float64"),
+        rtol=1e-12, atol=1e-12, err_msg=f"{label}: pre_trade_equity",
+    )
+    for field in ("equity", "net_returns", "mark_to_market_pnl", "funding_charge", "fee_charge", "fill_turnover"):
+        np.testing.assert_allclose(
+            getattr(independent.ledger, field).to_numpy(),
+            getattr(paired.ledger, field).to_numpy(),
+            rtol=1e-12, atol=1e-12, err_msg=f"{label}: {field}",
+        )
+    assert independent.ledger.primary_valid == paired.ledger.primary_valid
+    assert independent.ledger.invalid_reasons == paired.ledger.invalid_reasons
+    assert independent.data_gaps == paired.data_gaps
+    assert dict(independent.termination_counts) == dict(paired.termination_counts)
+    assert independent.fill_count == paired.fill_count
+    assert independent.unfilled_count == paired.unfilled_count
+    assert independent.fallback_count == paired.fallback_count
+    assert independent.forced_exit_count == paired.forced_exit_count
+    assert independent.forced_exit_notional == paired.forced_exit_notional
+    assert independent.submit_times.tolist() == paired.submit_times.tolist()
+    assert independent.fill_times.tolist() == paired.fill_times.tolist()
+    assert independent.all_intent_shortfall_bps == paired.all_intent_shortfall_bps
+    assert independent.fill_source == paired.fill_source
+    assert independent.mark_source == paired.mark_source
+    assert independent.event_snapshots_retained == paired.event_snapshots_retained
+    assert independent.simulated_units.equals(paired.simulated_units)
+    assert independent.simulated_notional_weights.equals(paired.simulated_notional_weights)
+
+
 class TestWindowedReplayEquivalence:
     """MHS-30-STREAMED-LEDGER-EQUIVALENCE: windowed strict and stress replays
     match the single-panel replay in fills, termination counts, ledger series,
@@ -562,6 +605,47 @@ class TestWindowedReplayEquivalence:
             assert gap.symbol
             assert gap.timestamp is not None
             assert gap.execution_bound == "OHLCV_STRICT_PROXY"
+
+    def test_paired_fanout_matches_independent_bounds(self) -> None:
+        """MHS-MEM-PAIR-01: a single window stream fanned out into the
+        strict/stress pair equals the two legacy independent single-bound
+        calls, and each window is consumed exactly once."""
+        wl = self._workload()
+        windows = _partition_windows(
+            wl["grid"], wl["weights"], wl["signals"], wl["highs"], wl["lows"],
+            wl["closes"], wl["marks"], wl["funding"], ExecutionSpec(), n_windows=3,
+        )
+        strict_single = replay_execution_windows(
+            windows, 1.0, "OHLCV_STRICT_PROXY", ExecutionSpec(), retain_event_snapshots=True,
+        )
+        stress_single = replay_execution_windows(
+            windows, 1.0, "OHLCV_IMMEDIATE_TAKER", ExecutionSpec(), retain_event_snapshots=True,
+        )
+        consumed = {"n": 0}
+
+        def _gen():
+            for w in windows:
+                consumed["n"] += 1
+                yield w
+
+        strict_pair, stress_pair = replay_execution_window_pair(
+            _gen(), 1.0, ExecutionSpec(), retain_event_snapshots=True,
+        )
+        assert consumed["n"] == len(windows)
+        _assert_pair_equivalent(strict_single, strict_pair, "strict")
+        _assert_pair_equivalent(stress_single, stress_pair, "stress")
+
+    def test_pair_strict_data_integrity_error_propagates(self) -> None:
+        """MHS-MEM-PAIR-01: a fatal strict DataIntegrityError propagates
+        unchanged; no stress result is fabricated."""
+        wl = self._workload()
+        windows = _partition_windows(
+            wl["grid"], wl["weights"], wl["signals"], wl["highs"], wl["lows"],
+            wl["closes"], wl["marks"], wl["funding"], ExecutionSpec(), n_windows=2,
+        )
+        windows[1] = dataclasses.replace(windows[1], bar_funding=windows[1].bar_funding * float("nan"))
+        with pytest.raises(DataIntegrityError, match="bar_funding must be finite"):
+            replay_execution_window_pair(windows, 1.0, ExecutionSpec())
 
 
 def _assert_full_equivalence(enabled, disabled) -> None:
