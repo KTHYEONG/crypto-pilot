@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import numpy as np
@@ -9,7 +10,6 @@ import pytest
 from src.application.research.mhs import evaluation as ev
 from src.application.research.mhs.evaluation import MhsDiagnosticRequest, run_mhs_horizon_diagnostic
 from src.cli.commands.research.mhs import add_mhs_commands
-from src.common.errors import DataIntegrityError
 from src.research.evaluation.policy import HOLDOUT_CUTOFF
 from src.research.universe.pit_universe import symbol_partition
 
@@ -219,7 +219,7 @@ class TestResourceTelemetry:
         assert any(s.startswith("replay_") for s in stages)
         assert "blend_participation" in stages
         assert "statistical_diagnostics" in stages
-        fold_stages = [s for s in stages if s.startswith("anchored_fold_")]
+        fold_stages = [s for s in stages if s.startswith("anchored_fold_") and "_window_" not in s]
         assert len(fold_stages) == 3
         # Anchored folds are recorded in their declared order.
         assert fold_stages == [f"anchored_fold_{i}" for i in range(3)]
@@ -380,18 +380,28 @@ class TestNoSilentMarkFallback:
             lambda symbol, timeframe: gap_dir / f"{symbol}.parquet",
         )
 
-    def test_cache_required_raises_on_affected_gap(
+    def test_cache_required_fails_closed_with_typed_rejection(
         self, synthetic_market, tmp_path, monkeypatch,
     ) -> None:
+        """MHS-MARK-04-NO-SILENT-FALLBACK: a cache gap is never silently
+        replaced by OHLCV closes under cache_required. The expected strict
+        replay failure becomes a typed book-level rejection in the terminal
+        report instead of escaping the diagnostic process."""
         root, end = synthetic_market
         self._gapped_market(root, tmp_path, monkeypatch)
-        with pytest.raises(DataIntegrityError, match="mark"):
-            run_mhs_horizon_diagnostic(
-                MhsDiagnosticRequest(
-                    start=str(START), end=str(end), data_root=str(root),
-                    mark_mode="cache_required", execution_timeframe="1m", log_run=False,
-                ),
-            )
+        report = run_mhs_horizon_diagnostic(
+            MhsDiagnosticRequest(
+                start=str(START), end=str(end), data_root=str(root),
+                mark_mode="cache_required", execution_timeframe="1m", log_run=False,
+            ),
+        )
+        assert report.status == "COMPLETE"
+        failed = [b for b in report.books.values() if b.failure is not None]
+        assert failed, "cache_required mark gap must reject every book"
+        for book in report.books.values():
+            assert book.primary is None
+            assert book.primary_autocorr_sharpe is None
+        assert report.research_go.eligible is False
 
     def test_explicit_ohlcv_fallback_completes_as_fallback(
         self, synthetic_market, tmp_path, monkeypatch,
@@ -746,3 +756,254 @@ class TestTypedArtifactRoundtrip:
         assert (artifact_dir / "fold0_stress_ledger.parquet").exists()
         strict_ledger = pd.read_parquet(artifact_dir / "fold0_strict_ledger.parquet")
         assert "timestamp" in strict_ledger.columns
+
+
+FOLD_WINDOW_FOLD = ev.AnchoredPurgedFold(
+    pd.Timestamp("2021-01-01", tz="UTC"),
+    pd.Timestamp("2021-01-31", tz="UTC"),
+    pd.Timestamp("2021-02-10", tz="UTC"),
+    pd.Timestamp("2021-04-19 08:00", tz="UTC"),
+    168,
+    168,
+)
+
+
+class TestFoldWindowTelemetryOracle:
+    """MHS-31-FOLD-WINDOW-TELEMETRY: a synthetic fold records monotonically
+    ordered per-window telemetry and is numerically equivalent to the
+    single-panel oracle."""
+
+    @pytest.fixture(scope="module")
+    def fold_market(self, tmp_path_factory) -> tuple[Path, pd.Timestamp]:
+        import src.market_data.services.futures_collection as fc
+
+        root = tmp_path_factory.mktemp("mhs_fold_market")
+        end = _write_mhs_market(root, DEV_SYMBOLS, n_hours=3000)
+        originals = {
+            "funding_path": ev.funding_path,
+            "mark_price_path": fc._mark_price_path,
+        }
+        ev.funding_path = lambda sym: root / "funding" / f"{sym}.parquet"
+        fc._mark_price_path = (
+            lambda symbol, timeframe: root / "markPriceKlines" / timeframe / f"{symbol}.parquet"
+        )
+        yield root, end
+        ev.funding_path = originals["funding_path"]
+        fc._mark_price_path = originals["mark_price_path"]
+
+    def _single_panel_oracle(
+        self, root: Path, funding_by_symbol: dict[str, pd.Series],
+    ):
+        """Replicate the fold's pre-replay decision construction and run the
+        dense single-panel oracle (``strategy_aware_execution_replay``) over
+        the whole validation window."""
+        from src.mhs.contracts import PHASE_1_BOOK_BLEND_WEIGHTS, PHASE_1_BOOK_SPECS, ExecutionSpec
+        from src.mhs.execution import strategy_aware_execution_replay
+
+        fold = FOLD_WINDOW_FOLD
+        ts, vs, ve = fold.train_start, fold.validation_start, fold.validation_end
+        panel = ev.load_base_panel(
+            str(root), "1h", ("close", "open", "quote_vol"), ts, ve,
+            partition="dev", min_bars=2000,
+        )
+        close, opens, quote_vol = panel["close"], panel["open"], panel["quote_vol"]
+        grid_1h = close.index
+        symbols = [s for s in close.columns if s in funding_by_symbol]
+        close, opens, quote_vol = close[symbols], opens[symbols], quote_vol[symbols]
+        bar_period = grid_1h[1] - grid_1h[0]
+        fwin = {
+            s: funding_by_symbol[s].loc[
+                (funding_by_symbol[s].index >= grid_1h[0])
+                & (funding_by_symbol[s].index < grid_1h[-1] + bar_period)
+            ]
+            for s in symbols
+        }
+        bar_funding = ev.bar_funding_panel(fwin, grid_1h)
+        aligned = list(bar_funding.columns)
+        close, opens, quote_vol = close[aligned], opens[aligned], quote_vol[aligned]
+        eligible = ev.liquid_half_eligibility(quote_vol, lookback_bars=720, min_history_bars=720)
+        log_close = np.log(close)
+        fast = PHASE_1_BOOK_SPECS["fast_reversal"]
+        slow = PHASE_1_BOOK_SPECS["slow_momentum"]
+        fast_grid = pd.date_range(ts, ve, freq="6h", tz="UTC")
+        slow_grid = pd.date_range(ts, ve, freq="24h", tz="UTC")
+        w_fast = ev._book_weights(log_close, eligible, fast, fast_grid)
+        w_slow = ev._book_weights(log_close, eligible, slow, slow_grid)
+        mask = ev._pit_execution_mask(quote_vol, eligible, 30)
+        wfe = w_fast.where(mask.reindex(w_fast.index).fillna(False), other=0.0)
+        wse = w_slow.where(mask.reindex(w_slow.index).fillna(False), other=0.0)
+        blend = (
+            PHASE_1_BOOK_BLEND_WEIGHTS["fast_reversal"] * wfe.reindex(grid_1h).ffill().fillna(0.0)
+            + PHASE_1_BOOK_BLEND_WEIGHTS["slow_momentum"] * wse.reindex(grid_1h).ffill().fillna(0.0)
+        )
+        dg = blend.index[(blend.index >= vs) & (blend.index <= ve)]
+        target_weights = blend.loc[dg]
+        exec_symbols = sorted(target_weights.columns[target_weights.ne(0.0).any(axis=0)])
+        roster = [s for s in exec_symbols if (root / "1m" / f"{s}.parquet").exists()]
+        target_replay = target_weights[roster]
+        signal_available_at = target_replay.index + pd.Timedelta(hours=1)
+        minute_grid = pd.date_range(vs, ve, freq="1min", tz="UTC")
+        target_replay, signal_available_at, _censored = ev._truncate_replayable_decisions(
+            target_replay, signal_available_at, minute_grid, ExecutionSpec(),
+        )
+        minute_frames = ev._align_minute_frames(
+            ev._load_minute_frames(str(root), list(target_replay.columns), vs, ve, "1m"),
+            "1m", vs, ve,
+        )
+        assert minute_frames is not None
+        highs, lows, closes = minute_frames
+        marks = ev.DataCollector().load_mark_price_panel(
+            list(closes.columns), "1h", minute_grid, max_stale_hours=0,
+        )
+        mper = minute_grid[1] - minute_grid[0]
+        mfwin = {
+            s: funding_by_symbol[s].loc[
+                (funding_by_symbol[s].index >= minute_grid[0])
+                & (funding_by_symbol[s].index < minute_grid[-1] + mper)
+            ]
+            for s in list(closes.columns)
+        }
+        minute_funding = ev.bar_funding_panel(mfwin, minute_grid).reindex(columns=list(closes.columns))
+        oracle = strategy_aware_execution_replay(
+            target_replay, signal_available_at, highs, lows, closes, marks,
+            minute_funding, 1.0, "OHLCV_STRICT_PROXY", ExecutionSpec(),
+        )
+        return oracle
+
+    def test_fold_window_telemetry_monotonic_and_oracle_equivalent(self, fold_market) -> None:
+        root, end = fold_market
+        symbols = list(DEV_SYMBOLS)
+        funding_by_symbol = ev._load_funding_series(symbols)
+        request = MhsDiagnosticRequest(
+            start=str(START), end=str(end), data_root=str(root),
+            mark_mode="cache_required", execution_timeframe="1m", log_run=False,
+        )
+        recorder = ev._StageRecorder(log_run=False)
+        fold_report = ev._run_anchored_fold(
+            str(root), FOLD_WINDOW_FOLD, request, funding_by_symbol, 1.0, 0, recorder,
+        )
+        assert fold_report.strict is not None
+        assert fold_report.strict.event_snapshots_retained is False
+        assert fold_report.stress is not None
+        assert fold_report.stress.event_snapshots_retained is False
+
+        window_stages = [m.stage for m in recorder.records if m.stage.startswith("anchored_fold_0_window_")]
+        assert window_stages, "fold strict window telemetry must be recorded"
+        assert window_stages == sorted(window_stages)
+        stress_window_stages = [m.stage for m in recorder.records if m.stage.startswith("anchored_fold_0_stress_window_")]
+        assert stress_window_stages == sorted(stress_window_stages)
+        seen: list[tuple[str, str]] = []
+        for m in recorder.records:
+            if not m.stage.startswith("anchored_fold_0_window_"):
+                continue
+            assert m.window_start is not None
+            assert m.window_end is not None
+            assert m.grid_bars is not None
+            assert m.grid_bars > 0
+            assert m.active_symbols is not None
+            assert m.active_symbols >= 0
+            assert m.peak_rss_bytes is not None
+            assert m.peak_rss_bytes >= m.rss_bytes
+            seen.append((m.window_start, m.window_end))
+        assert seen
+        # Windows are chronologically ordered: starts and ends are non-decreasing.
+        starts = [pd.Timestamp(s) for s, _ in seen]
+        ends = [pd.Timestamp(e) for _, e in seen]
+        assert starts == sorted(starts)
+        assert ends == sorted(ends)
+        assert starts[0] <= FOLD_WINDOW_FOLD.validation_start
+        assert ends[-1] >= FOLD_WINDOW_FOLD.validation_end
+
+        # Numerical equivalence to the single-panel oracle on the same inputs.
+        oracle = self._single_panel_oracle(root, funding_by_symbol)
+        windowed = fold_report.strict
+        fill_o = oracle.simulated_fills.sort_values(["timestamp", "symbol"]).reset_index(drop=True)
+        fill_w = windowed.simulated_fills.sort_values(["timestamp", "symbol"]).reset_index(drop=True)
+        assert len(fill_o) == len(fill_w)
+        for col in ("timestamp", "symbol", "quantity_delta", "fill_price", "fee_bps", "reason"):
+            assert fill_o[col].tolist() == fill_w[col].tolist()
+        for field in ("equity", "net_returns", "mark_to_market_pnl", "funding_charge", "fee_charge", "fill_turnover"):
+            np.testing.assert_allclose(
+                getattr(oracle.ledger, field).to_numpy(),
+                getattr(windowed.ledger, field).to_numpy(),
+                rtol=1e-12, atol=1e-12,
+            )
+        assert oracle.ledger.primary_valid == windowed.ledger.primary_valid
+        assert oracle.ledger.invalid_reasons == windowed.ledger.invalid_reasons
+        assert dict(oracle.termination_counts) == dict(windowed.termination_counts)
+        assert oracle.fill_count == windowed.fill_count
+
+
+_SUBPROCESS_SCRIPT = """
+import json, sys
+from pathlib import Path
+sys.path.insert(0, sys.argv[1])
+import pandas as pd
+import src.market_data.services.futures_collection as fc
+from src.application.research.mhs import evaluation as ev
+from src.application.research.mhs.evaluation import MhsDiagnosticRequest, run_mhs_horizon_diagnostic, persist_mhs_horizon_diagnostic_report
+
+root = Path(sys.argv[2])
+out = Path(sys.argv[3])
+ev.funding_path = lambda sym: root / "funding" / f"{sym}.parquet"
+fc._mark_price_path = lambda symbol, timeframe: root / "markPriceKlines" / timeframe / f"{symbol}.parquet"
+ev._BOOTSTRAP_REPLICATES = 20
+ev._BOOTSTRAP_MEAN_BLOCK = 24
+ev._BOOTSTRAP_SEED = 20260807
+report = run_mhs_horizon_diagnostic(
+    MhsDiagnosticRequest(
+        start="2021-01-01", end=str(ev.pd.Timestamp(sys.argv[4])),
+        data_root=str(root), mark_mode="cache_required",
+        execution_timeframe="1m", log_run=False,
+        max_rss_bytes=int(sys.argv[5]),
+    ),
+)
+persist_mhs_horizon_diagnostic_report(report, out)
+payload = json.loads(out.read_text())
+sys.stdout.write(json.dumps({
+    "status": report.status,
+    "persisted": out.exists(),
+    "go_eligible": report.research_go.eligible,
+    "reasons": list(report.research_go.reason_codes),
+    "stage_count": len(report.resource_measurements),
+}))
+"""
+
+
+class TestTerminalPersistenceSubprocess:
+    """MHS-28-TERMINAL-FAIL-CLOSED-REPORT: the full pipeline reaches report
+    persistence in a fresh process under a fixed RSS budget, proving a
+    resource breach yields a serializable terminal rejection rather than an
+    uncaught process error or a missing report."""
+
+    @pytest.mark.slow
+    def test_full_pipeline_persists_terminal_report_under_fixed_rss(self, tmp_path) -> None:
+        import subprocess
+        import sys
+
+        root = tmp_path / "market"
+        end = _write_mhs_market(root, DEV_SYMBOLS)
+        out = tmp_path / "terminal.json"
+        script = _SUBPROCESS_SCRIPT
+        proc = subprocess.run(  # noqa: S603 - fully static interpreter + fixed script
+            [sys.executable, "-c", script, str(Path(__file__).resolve().parents[3]), str(root), str(out), str(end), "1"],
+            cwd=str(Path(__file__).resolve().parents[3]),
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=900,
+        )
+        assert proc.returncode == 0, proc.stderr[-2000:]
+        assert out.exists(), "terminal report must be persisted even under a fixed RSS budget"
+        result = json.loads(proc.stdout.strip().splitlines()[-1])
+        assert result["status"] == "COMPLETE"
+        assert result["persisted"] is True
+        assert result["go_eligible"] is False
+        assert "RESOURCE_BUDGET_BREACH" in result["reasons"]
+        assert result["stage_count"] > 0
+        payload = json.loads(out.read_text())
+        assert payload["status"] == "COMPLETE"
+        assert any(
+            b.get("failure", {}).get("reason") == "RESOURCE_BUDGET_BREACH"
+            for b in payload["books"].values()
+        )

@@ -67,10 +67,16 @@ def load_base_panel(
     keep = set(partition_symbols(names, partition))
 
     frames: dict[str, dict[str, pd.Series]] = {c: {} for c in columns}
+    start_ms = int(start.value // 1_000_000)
+    end_ms = int(end.value // 1_000_000)
     for path, sym in zip(paths, names, strict=True):
         if sym not in keep:
             continue
-        table = pq.read_table(path, columns=["timestamp", *columns])
+        table = pq.read_table(
+            path,
+            columns=["timestamp", *columns],
+            filters=[[("timestamp", ">=", start_ms), ("timestamp", "<=", end_ms)]],
+        )
         idx = pd.to_datetime(table.column("timestamp").to_numpy(), unit="ms", utc=True)
         sub = pd.DataFrame(
             {c: table.column(c).to_numpy().astype("float64") for c in columns},
