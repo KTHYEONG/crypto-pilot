@@ -1,9 +1,13 @@
 """Contract coverage for the MHS application evaluation resource telemetry."""
 
+from pathlib import Path
+
 import numpy as np
 import pandas as pd
 import pytest
 
+import src.market_data.services.futures_collection as fc
+from src.application.research.mhs import evaluation as ev
 from src.application.research.mhs.evaluation import (
     MhsDiagnosticRequest,
     _StageRecorder,
@@ -16,6 +20,59 @@ from src.application.research.mhs.evaluation import (
 from src.common.errors import DataIntegrityError
 from src.mhs.contracts import ExecutionSpec
 from src.mhs.execution import ExecutionReplayWindow, replay_execution_windows
+from src.mhs.evaluation import AnchoredPurgedFold
+from src.research.universe.pit_universe import symbol_partition
+
+_START = pd.Timestamp("2021-01-01", tz="UTC")
+
+
+def _write_mhs_market(root: Path, n_hours: int = 2700) -> pd.Timestamp:
+    symbols = [
+        s for s in ("MHSAUSDT", "MHSBUSDT", "MHSCUSDT", "MHSDUSDT", "MHSEUSDT",
+                    "MHSGUSDT", "MHSHUSDT", "MHSIUSDT", "MHSJUSDT", "MHSLUSDT")
+        if symbol_partition(s) == "dev"
+    ][:8]
+    hourly = pd.date_range(_START, periods=n_hours, freq="1h", tz="UTC")
+    end = hourly[-1]
+    rng = np.random.default_rng(20260807)
+    epoch = (hourly - pd.Timestamp("1970-01-01", tz="UTC")) // pd.Timedelta("1ms")
+    hdir = root / "1h"
+    mdir = root / "1m"
+    fdir = root / "funding"
+    mkdir = root / "markPriceKlines" / "1h"
+    for d in (hdir, mdir, fdir, mkdir):
+        d.mkdir(parents=True, exist_ok=True)
+    minute_idx = pd.date_range(_START, end, freq="1min", tz="UTC")
+    minute_epoch = (minute_idx - pd.Timestamp("1970-01-01", tz="UTC")) // pd.Timedelta("1ms")
+    for i, sym in enumerate(symbols):
+        drift = 1e-5 * (i - len(symbols) / 2.0)
+        prices = 100.0 * np.exp(np.cumsum(rng.normal(drift, 0.002, n_hours)))
+        pd.DataFrame(
+            {"timestamp": epoch, "open": prices, "high": prices * 1.001,
+             "low": prices * 0.999, "close": prices, "quote_vol": [1000.0] * n_hours},
+        ).to_parquet(hdir / f"{sym}.parquet")
+        mp = 100.0 * np.exp(np.cumsum(rng.normal(drift, 0.002, len(minute_idx))))
+        pd.DataFrame(
+            {"timestamp": minute_epoch, "open": mp, "high": mp * 1.0005,
+             "low": mp * 0.9995, "close": mp, "quote_vol": [1000.0] * len(minute_idx)},
+        ).to_parquet(mdir / f"{sym}.parquet")
+        pd.DataFrame(
+            {"timestamp": epoch, "funding_rate": [0.00005] * n_hours, "datetime": hourly},
+        ).to_parquet(fdir / f"{sym}.parquet")
+        mark = pd.Series(mp, index=minute_idx).resample("1h").last().reindex(hourly).to_numpy()
+        pd.DataFrame(
+            {"timestamp": epoch, "open": mark, "high": mark, "low": mark, "close": mark, "datetime": hourly},
+        ).to_parquet(mkdir / f"{sym}.parquet")
+    return end
+
+
+@pytest.fixture
+def mhs_market(tmp_path, monkeypatch):
+    root = tmp_path / "market"
+    end = _write_mhs_market(root)
+    monkeypatch.setattr(ev, "funding_path", lambda sym: root / "funding" / f"{sym}.parquet")
+    monkeypatch.setattr(fc, "_mark_price_path", lambda symbol, timeframe: root / "markPriceKlines" / timeframe / f"{symbol}.parquet")
+    return root, end
 
 
 def test_mhs_resource_measurement_records_ordered_stage_data() -> None:
@@ -185,3 +242,79 @@ def test_mhs_mem_04_strict_gap_preserved() -> None:
     with pytest.raises(DataIntegrityError, match="cache_required strict primary ledger invalid"):
         _assert_cache_required_ledger_valid("held_mark_book", replay)
     assert replay.ledger.primary_valid is False
+
+
+_FOLD = AnchoredPurgedFold(
+    pd.Timestamp("2021-01-01", tz="UTC"),
+    pd.Timestamp("2021-01-31", tz="UTC"),
+    pd.Timestamp("2021-02-10", tz="UTC"),
+    pd.Timestamp("2021-04-19 08:00", tz="UTC"),
+    168,
+    168,
+)
+
+
+class TestAnchoredFoldBounded:
+    """MHS-MEM-03-ANCHORED-FOLD-BOUNDED: each anchored fold uses bounded
+    windowed replay (no dense fold-wide minute panel) and enforces the
+    configured RSS budget with stable provenance."""
+
+    def _run_fold(self, mhs_market, max_rss_bytes=None):
+        root, end = mhs_market
+        symbols = [
+            s for s in ("MHSAUSDT", "MHSBUSDT", "MHSCUSDT", "MHSDUSDT", "MHSEUSDT",
+                        "MHSGUSDT", "MHSHUSDT", "MHSIUSDT", "MHSJUSDT", "MHSLUSDT")
+            if symbol_partition(s) == "dev"
+        ][:8]
+        funding_by_symbol = ev._load_funding_series(symbols)
+        request = MhsDiagnosticRequest(
+            start=str(_START), end=str(end), data_root=str(root),
+            mark_mode="cache_required", execution_timeframe="1m", log_run=False,
+            max_rss_bytes=max_rss_bytes,
+        )
+        return ev._run_anchored_fold(
+            str(root), _FOLD, request, funding_by_symbol, 1.0, 0, None,
+        )
+
+    def test_fold_uses_windowed_replay_dense_snapshots_disabled(self, mhs_market) -> None:
+        report = self._run_fold(mhs_market)
+        assert report.strict is not None
+        assert report.strict.event_snapshots_retained is False
+        assert report.stress is not None
+        assert report.stress.event_snapshots_retained is False
+
+    def test_fold_records_ordered_window_telemetry(self, mhs_market) -> None:
+        root, end = mhs_market
+        symbols = [
+            s for s in ("MHSAUSDT", "MHSBUSDT", "MHSCUSDT", "MHSDUSDT", "MHSEUSDT",
+                        "MHSGUSDT", "MHSHUSDT", "MHSIUSDT", "MHSJUSDT", "MHSLUSDT")
+            if symbol_partition(s) == "dev"
+        ][:8]
+        funding_by_symbol = ev._load_funding_series(symbols)
+        request = MhsDiagnosticRequest(
+            start=str(_START), end=str(end), data_root=str(root),
+            mark_mode="cache_required", execution_timeframe="1m", log_run=False,
+        )
+        recorder = _StageRecorder(log_run=False)
+        ev._run_anchored_fold(str(root), _FOLD, request, funding_by_symbol, 1.0, 0, recorder)
+        strict_stages = [m.stage for m in recorder.records if m.stage.startswith("anchored_fold_0_window_")]
+        stress_stages = [m.stage for m in recorder.records if m.stage.startswith("anchored_fold_0_stress_window_")]
+        assert strict_stages, "fold strict window telemetry must be recorded"
+        assert strict_stages == sorted(strict_stages)
+        assert stress_stages == sorted(stress_stages)
+
+    def test_rss_budget_enforced_inside_fold_fails_closed(self, mhs_market, monkeypatch) -> None:
+        monkeypatch.setattr(ev, "_current_rss_bytes", lambda: 100_000_000_000)
+        report = self._run_fold(mhs_market, max_rss_bytes=1_000)
+        # The budget DataIntegrityError becomes a typed fold failure (not an
+        # uncaught process error) under the fold contract's fail-closed code set.
+        assert report.strict is None
+        assert report.stress is None
+        assert report.failures == (ev.MHS_GO_REASON_INVALID_PRIMARY,)
+
+    def test_no_rss_budget_returns_complete_fold(self, mhs_market) -> None:
+        report = self._run_fold(mhs_market, max_rss_bytes=None)
+        assert report.strict is not None or report.failures == (
+            ev.MHS_GO_REASON_PRIMARY_SHARPE,
+            ev.MHS_GO_REASON_STRESS_SHARPE,
+        )
