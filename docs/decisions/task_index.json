@@ -1,6 +1,16 @@
 {
   "tasks": [
     {
+      "task_id": "TASK_MHS_RUNTIME_RESOURCE_OPTIMIZATION",
+      "date": "2026-08-08",
+      "adr_id": "ADR_20260808_MHS_RUNTIME_RESOURCE_OPTIMIZATION",
+      "domain": "execution",
+      "title": "MHS runtime and memory optimization",
+      "why": "The full 2021-2025 MHS cache-required diagnostic used excessive memory and required measured runtime optimization.",
+      "resolution": "Implemented streamed inventory-ledger arithmetic, NumPy active-column replay state, lazy quote-volume loading, stage RSS telemetry, and deterministic resource benchmark coverage. Full 2021-2025 execution measured 304.09 seconds and 13,737,124 KiB peak RSS, then failed closed on slow_momentum strict-primary MISSING_DATA.",
+      "impact": "Replay correctness and Research-GO fail-closed semantics remain covered by tests; benchmark infrastructure now reports resource usage. The full-period run still cannot produce a GO decision until the slow_momentum missing-data gate is resolved."
+    },
+    {
       "task_id": "TASK_MHS_MARK_CACHE_BACKFILL",
       "date": "2026-08-08",
       "adr_id": "ADR_20260808_MHS_MARK_CACHE_BACKFILL",
