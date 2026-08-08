@@ -5,10 +5,12 @@ import pandas as pd
 import pytest
 
 from src.mhs.execution import (
+    ExecutionReplayWindow,
     ExecutionSpec,
     bar_funding_panel,
     mhs_ledger_pnl,
     passive_fill_shortfall_bps,
+    replay_execution_windows,
     simulated_inventory_ledger,
     strategy_aware_execution_replay,
 )
@@ -394,6 +396,170 @@ class TestStreamedLedgerEquivalence:
         np.testing.assert_allclose(
             dense.simulated_units.loc[idx[20]].to_numpy(), [0.02, -0.01, 0.03], atol=1e-12,
         )
+
+
+def _partition_windows(
+    grid: pd.DatetimeIndex,
+    weights: pd.DataFrame,
+    signals: pd.DatetimeIndex,
+    highs: pd.DataFrame,
+    lows: pd.DataFrame,
+    closes: pd.DataFrame,
+    marks: pd.DataFrame,
+    funding: pd.DataFrame,
+    spec: ExecutionSpec,
+    n_windows: int = 2,
+) -> list[ExecutionReplayWindow]:
+    """Split a full fixture into contiguous execution windows exactly like the
+    application planner: grid start at the previous window's last decision,
+    grid end at the final order's strict timeout bar (last window covers the
+    full grid)."""
+    full_ns = np.asarray(grid, dtype="datetime64[ns]").astype("int64")
+    timeout = spec.passive_timeout_minutes * 60_000_000_000
+    sig_ns = np.asarray(signals, dtype="datetime64[ns]").astype("int64")
+    spos = np.searchsorted(full_ns, sig_ns, side="right")
+    resolve = [None] * len(weights)
+    for i in range(len(weights)):
+        if spos[i] >= len(full_ns):
+            continue
+        tns = full_ns[spos[i]] + timeout
+        tpos = int(np.searchsorted(full_ns, tns, side="left"))
+        if tpos < len(full_ns) and full_ns[tpos] == tns:
+            resolve[i] = pd.Timestamp(tns, unit="ns", tz="UTC")
+    bounds = np.array_split(np.arange(len(weights)), n_windows)
+    out: list[ExecutionReplayWindow] = []
+    prev_last: pd.Timestamp | None = None
+    for bi, idxs in enumerate(bounds):
+        is_last = bi == len(bounds) - 1
+        ws = weights.iloc[idxs]
+        sg = signals[idxs]
+        grid_start = grid[0] if prev_last is None else prev_last
+        if is_last:
+            grid_end = grid[-1]
+        else:
+            grid_end = max((resolve[i] for i in idxs if resolve[i] is not None), default=ws.index[-1] + pd.Timedelta(hours=2))
+        wgrid = pd.date_range(grid_start, grid_end, freq="5min", tz="UTC")
+        out.append(
+            ExecutionReplayWindow(
+                window_start=grid_start,
+                window_end=grid_end,
+                columns=tuple(weights.columns),
+                symbols=tuple(weights.columns),
+                minute_grid=wgrid,
+                highs=highs.loc[wgrid],
+                lows=lows.loc[wgrid],
+                closes=closes.loc[wgrid],
+                marks=marks.loc[wgrid],
+                bar_funding=funding.loc[wgrid],
+                target_weights=ws,
+                signal_available_at=sg,
+            )
+        )
+        prev_last = ws.index[-1]
+    return out
+
+
+def _assert_replay_equivalent(oracle, windowed) -> None:
+    fill_o = oracle.simulated_fills.sort_values(["timestamp", "symbol"]).reset_index(drop=True)
+    fill_w = windowed.simulated_fills.sort_values(["timestamp", "symbol"]).reset_index(drop=True)
+    assert len(fill_o) == len(fill_w)
+    for col in ("timestamp", "symbol", "quantity_delta", "fill_price", "fee_bps", "reason"):
+        assert fill_o[col].tolist() == fill_w[col].tolist()
+    for field in ("equity", "net_returns", "mark_to_market_pnl", "funding_charge", "fee_charge", "fill_turnover"):
+        np.testing.assert_allclose(
+            getattr(oracle.ledger, field).to_numpy(),
+            getattr(windowed.ledger, field).to_numpy(),
+            rtol=1e-12, atol=1e-12,
+        )
+    assert oracle.ledger.primary_valid == windowed.ledger.primary_valid
+    assert oracle.ledger.invalid_reasons == windowed.ledger.invalid_reasons
+    assert dict(oracle.termination_counts) == dict(windowed.termination_counts)
+    assert oracle.fill_count == windowed.fill_count
+    assert oracle.unfilled_count == windowed.unfilled_count
+    assert oracle.fallback_count == windowed.fallback_count
+    assert list(oracle.simulated_units.columns) == list(windowed.simulated_units.columns)
+    assert len(oracle.simulated_units) == len(windowed.simulated_units)
+
+
+class TestWindowedReplayEquivalence:
+    """MHS-30-STREAMED-LEDGER-EQUIVALENCE: windowed strict and stress replays
+    match the single-panel replay in fills, termination counts, ledger series,
+    and validity at 1e-12 tolerance."""
+
+    def _workload(self, days: int = 40, n_symbols: int = 8) -> dict[str, object]:
+        grid = pd.date_range("2021-01-01", periods=days * 24 * 12, freq="5min", tz="UTC")
+        symbols = [f"SYM{i:03d}USDT" for i in range(n_symbols)]
+        rng = np.random.default_rng(7)
+        closes = pd.DataFrame(
+            {s: 100.0 * np.exp(np.cumsum(rng.normal(0.0, 0.002, len(grid)))) for s in symbols},
+            index=grid,
+        )
+        marks = closes.copy()
+        marks.iloc[100:105, 3] = np.nan
+        decision_grid = pd.date_range("2021-01-01", periods=days * 4, freq="6h", tz="UTC")
+        weights = pd.DataFrame(0.0, index=decision_grid, columns=symbols)
+        rng_w = np.random.default_rng(8)
+        for ts in decision_grid:
+            active = rng_w.choice(symbols, size=4, replace=False)
+            weights.loc[ts, active] = rng_w.uniform(0.01, 0.06, 4)
+        return {
+            "grid": grid,
+            "symbols": symbols,
+            "highs": closes * 1.001,
+            "lows": closes * 0.999,
+            "closes": closes,
+            "marks": marks,
+            "funding": pd.DataFrame(1.0e-5, index=grid, columns=symbols),
+            "weights": weights,
+            "signals": decision_grid + pd.Timedelta(hours=1),
+        }
+
+    @pytest.mark.parametrize("bound", ["OHLCV_STRICT_PROXY", "OHLCV_IMMEDIATE_TAKER"])
+    def test_windowed_matches_single_panel(self, bound: str) -> None:
+        wl = self._workload()
+        grid = wl["grid"]
+        weights = wl["weights"]
+        signals = wl["signals"]
+        oracle = strategy_aware_execution_replay(
+            weights, signals, wl["highs"], wl["lows"], wl["closes"], wl["marks"],
+            wl["funding"], 1.0, bound, ExecutionSpec(),
+        )
+        windows = _partition_windows(
+            grid, weights, signals, wl["highs"], wl["lows"], wl["closes"],
+            wl["marks"], wl["funding"], ExecutionSpec(), n_windows=3,
+        )
+        windowed = replay_execution_windows(windows, 1.0, bound, ExecutionSpec())
+        _assert_replay_equivalent(oracle, windowed)
+
+    def test_three_windows_follow_strict_timeout_overlap(self) -> None:
+        wl = self._workload(days=45)
+        windows = _partition_windows(
+            wl["grid"], wl["weights"], wl["signals"], wl["highs"], wl["lows"],
+            wl["closes"], wl["marks"], wl["funding"], ExecutionSpec(), n_windows=3,
+        )
+        assert len(windows) == 3
+        for w in windows[1:]:
+            assert w.minute_grid[0] == w.window_start
+            assert w.window_start < w.target_weights.index[0]
+        assert windows[-1].minute_grid[-1] == wl["grid"][-1]
+
+    def test_data_gap_provenance_codes(self) -> None:
+        wl = self._workload()
+        windowed = replay_execution_windows(
+            _partition_windows(
+                wl["grid"], wl["weights"], wl["signals"], wl["highs"], wl["lows"],
+                wl["closes"], wl["marks"], wl["funding"], ExecutionSpec(), n_windows=2,
+            ),
+            1.0, "OHLCV_STRICT_PROXY", ExecutionSpec(),
+        )
+        codes = {g.code for g in windowed.data_gaps}
+        # The synthetic mark gap at bars 100-105 is held through by a fill,
+        # so the real held-mark/held-funding provenance must be attributed.
+        assert codes >= {"MISSING_HELD_MARK", "MISSING_HELD_FUNDING"}
+        for gap in windowed.data_gaps:
+            assert gap.symbol
+            assert gap.timestamp is not None
+            assert gap.execution_bound == "OHLCV_STRICT_PROXY"
 
 
 class TestReplayEquivalencePerformance:
