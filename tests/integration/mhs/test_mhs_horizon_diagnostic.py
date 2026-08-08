@@ -196,6 +196,51 @@ class TestMhsHorizonDiagnostic:
             )
 
 
+class TestResourceTelemetry:
+    """MHS-31-RESOURCE-TELEMETRY-ORDER: the report carries ordered non-negative
+    stage elapsed/RSS records without changing its GO decision."""
+
+    STAGE_ORDER = (
+        "base_1h_panel",
+        "funding_alignment",
+        "minute_market_mark_funding",
+        "blend_participation",
+        "statistical_diagnostics",
+        "final_return",
+    )
+
+    def test_ordered_non_negative_stage_records(self, report) -> None:
+        measurements = report.resource_measurements
+        assert measurements
+        stages = [m.stage for m in measurements]
+        assert stages[0] == "base_1h_panel"
+        assert stages[-1] == "final_return"
+        assert "minute_market_mark_funding" in stages
+        assert any(s.startswith("replay_") for s in stages)
+        assert "blend_participation" in stages
+        assert "statistical_diagnostics" in stages
+        fold_stages = [s for s in stages if s.startswith("anchored_fold_")]
+        assert len(fold_stages) == 3
+        # Anchored folds are recorded in their declared order.
+        assert fold_stages == [f"anchored_fold_{i}" for i in range(3)]
+        # Key stages follow the execution order.
+        positions = {s: stages.index(s) for s in self.STAGE_ORDER if s in stages}
+        assert list(positions.values()) == sorted(positions.values())
+        for m in measurements:
+            assert m.stage
+            assert m.elapsed_ms >= 0
+            assert m.rss_bytes > 0
+
+    def test_stage_records_serialize_and_go_gate_unchanged(self, report) -> None:
+        payload = report.to_payload()
+        records = payload["resource_measurements"]
+        assert isinstance(records, list)
+        assert records
+        for record in records:
+            assert set(record) == {"stage", "elapsed_ms", "rss_bytes", "grid_bars", "n_symbols", "fill_count"}
+        assert report.research_go.eligible is False
+
+
 class TestStrictSimulatedPrimary:
     """MHS-19-STRICT-SIMULATED-PRIMARY: strict proxy is the only primary evidence."""
 
