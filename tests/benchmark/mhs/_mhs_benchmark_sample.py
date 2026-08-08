@@ -15,7 +15,12 @@ import time
 import numpy as np
 import pandas as pd
 
-from src.mhs.execution import ExecutionSpec, strategy_aware_execution_replay
+from src.mhs.execution import (
+    ExecutionReplayWindow,
+    ExecutionSpec,
+    replay_execution_windows,
+    strategy_aware_execution_replay,
+)
 
 N_SYMBOLS = 64
 N_DAYS = 90
@@ -23,6 +28,65 @@ FREQ = "5min"
 SEED = 20260807
 N_DECISIONS = 360
 ACTIVE_PER_DECISION = 20
+N_WINDOWS = 3
+WINDOW_MAX_DAYS = 31
+
+
+def _partition_windows(
+    grid, weights, signals, highs, lows, closes, marks, funding, spec,
+) -> list[ExecutionReplayWindow]:
+    """Split the fixed workload into contiguous execution windows with strict
+    timeout overlap, matching the production planner's residency change."""
+    full_ns = np.asarray(grid, dtype="datetime64[ns]").astype("int64")
+    timeout = spec.passive_timeout_minutes * 60_000_000_000
+    sig_ns = np.asarray(signals, dtype="datetime64[ns]").astype("int64")
+    spos = np.searchsorted(full_ns, sig_ns, side="right")
+    resolve = [None] * len(weights)
+    for i in range(len(weights)):
+        if spos[i] >= len(full_ns):
+            continue
+        tns = full_ns[spos[i]] + timeout
+        tpos = int(np.searchsorted(full_ns, tns, side="left"))
+        if tpos < len(full_ns) and full_ns[tpos] == tns:
+            resolve[i] = pd.Timestamp(tns, unit="ns", tz="UTC")
+    decision_times = pd.DatetimeIndex(weights.index)
+    max_window = pd.Timedelta(days=WINDOW_MAX_DAYS)
+    bounds: list[tuple[int, int]] = []
+    i0 = 0
+    while i0 < len(decision_times):
+        i1 = i0 + 1
+        while i1 < len(decision_times) and decision_times[i1] - decision_times[i0] <= max_window:
+            i1 += 1
+        bounds.append((i0, i1))
+        i0 = i1
+    out: list[ExecutionReplayWindow] = []
+    for bi, (i0, i1) in enumerate(bounds):
+        is_last = bi == len(bounds) - 1
+        ws = weights.iloc[i0:i1]
+        sg = signals[i0:i1]
+        grid_start = grid[0] if bi == 0 else decision_times[i0 - 1]
+        if is_last:
+            grid_end = grid[-1]
+        else:
+            grid_end = max((resolve[i] for i in range(i0, i1) if resolve[i] is not None), default=decision_times[i1 - 1] + pd.Timedelta(hours=2))
+        wgrid = pd.date_range(grid_start, grid_end, freq=FREQ, tz="UTC")
+        out.append(
+            ExecutionReplayWindow(
+                window_start=grid_start,
+                window_end=grid_end,
+                columns=tuple(weights.columns),
+                symbols=tuple(weights.columns),
+                minute_grid=wgrid,
+                highs=highs.loc[wgrid],
+                lows=lows.loc[wgrid],
+                closes=closes.loc[wgrid],
+                marks=marks.loc[wgrid],
+                bar_funding=funding.loc[wgrid],
+                target_weights=ws,
+                signal_available_at=sg,
+            )
+        )
+    return out
 
 
 def build_workload() -> dict[str, object]:
@@ -58,7 +122,8 @@ def build_workload() -> dict[str, object]:
 
 
 def run_sample() -> dict[str, object]:
-    """Run strict + stress replay once and report timing, RSS, and checksum."""
+    """Run strict + stress replay plus the windowed engine once and report
+    timing, RSS, window profile, and checksums."""
     workload = build_workload()
     weights = workload["weights"]
     signal = workload["signal_available_at"]
@@ -80,6 +145,30 @@ def run_sample() -> dict[str, object]:
         + str(sorted(strict.termination_counts.items())).encode()
         + str(sorted(stress.termination_counts.items())).encode()
     ).hexdigest()
+
+    windows = _partition_windows(
+        workload["grid"], weights, signal, workload["highs"], workload["lows"],
+        workload["closes"], workload["marks"], workload["funding"], ExecutionSpec(),
+    )
+    window_elapsed_start = time.perf_counter()
+    windowed = replay_execution_windows(
+        windows, 1.0, "OHLCV_STRICT_PROXY", ExecutionSpec(),
+    )
+    window_elapsed_seconds = time.perf_counter() - window_elapsed_start
+    windowed_fills = windowed.simulated_fills.sort_values(["timestamp", "symbol"], kind="stable")
+    windowed_checksum = hashlib.sha256(
+        pd.util.hash_pandas_object(windowed_fills, index=False).to_numpy().tobytes()
+        + windowed.ledger.equity.to_numpy().tobytes()
+        + str(sorted(windowed.termination_counts.items())).encode()
+    ).hexdigest()
+    windowed_matches_single_panel = bool(
+        len(windowed_fills) == len(fills)
+        and np.allclose(
+            windowed.ledger.equity.to_numpy(), strict.ledger.equity.to_numpy(),
+            rtol=1e-12, atol=1e-12,
+        )
+        and dict(windowed.termination_counts) == dict(strict.termination_counts)
+    )
     return {
         "elapsed_seconds": elapsed_seconds,
         "peak_rss_kb": peak_rss_kb,
@@ -88,4 +177,9 @@ def run_sample() -> dict[str, object]:
         "decisions": len(weights),
         "fill_count": len(fills),
         "checksum": checksum,
+        "n_windows": len(windows),
+        "max_window_grid_bars": max(len(w.minute_grid) for w in windows),
+        "window_elapsed_seconds": window_elapsed_seconds,
+        "windowed_checksum": windowed_checksum,
+        "windowed_matches_single_panel": windowed_matches_single_panel,
     }
