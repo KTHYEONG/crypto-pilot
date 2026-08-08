@@ -297,11 +297,45 @@ class TestAnchoredFoldBounded:
         )
         recorder = _StageRecorder(log_run=False)
         ev._run_anchored_fold(str(root), _FOLD, request, funding_by_symbol, 1.0, 0, recorder)
-        strict_stages = [m.stage for m in recorder.records if m.stage.startswith("anchored_fold_0_window_")]
-        stress_stages = [m.stage for m in recorder.records if m.stage.startswith("anchored_fold_0_stress_window_")]
-        assert strict_stages, "fold strict window telemetry must be recorded"
-        assert strict_stages == sorted(strict_stages)
-        assert stress_stages == sorted(stress_stages)
+        window_stages = [m.stage for m in recorder.records if m.stage.startswith("anchored_fold_0_window_")]
+        assert window_stages, "fold paired window telemetry must be recorded"
+        assert window_stages == sorted(window_stages)
+        # The paired fan-out records one physical window per stage: the stress
+        # bound consumes the same iterator, so no separate stress re-iteration
+        # telemetry exists.
+        assert not [
+            m.stage for m in recorder.records
+            if m.stage.startswith("anchored_fold_0_stress_window_")
+        ]
+
+    def test_fold_builds_window_iterator_once_per_pair(self, mhs_market, monkeypatch) -> None:
+        """MHS-MEM-PAIR-02: the fold orchestrator constructs its execution-window
+        iterator exactly once and feeds it to the paired strict/stress replay."""
+        root, end = mhs_market
+        symbols = [
+            s for s in ("MHSAUSDT", "MHSBUSDT", "MHSCUSDT", "MHSDUSDT", "MHSEUSDT",
+                        "MHSGUSDT", "MHSHUSDT", "MHSIUSDT", "MHSJUSDT", "MHSLUSDT")
+            if symbol_partition(s) == "dev"
+        ][:8]
+        funding_by_symbol = ev._load_funding_series(symbols)
+        request = MhsDiagnosticRequest(
+            start=str(_START), end=str(end), data_root=str(root),
+            mark_mode="cache_required", execution_timeframe="1m", log_run=False,
+        )
+        calls = {"n": 0}
+        original = ev._iter_mhs_execution_windows
+
+        def counting(*args, **kwargs):
+            calls["n"] += 1
+            return original(*args, **kwargs)
+
+        monkeypatch.setattr(ev, "_iter_mhs_execution_windows", counting)
+        report = ev._run_anchored_fold(
+            str(root), _FOLD, request, funding_by_symbol, 1.0, 0, None,
+        )
+        assert report.strict is not None
+        assert report.stress is not None
+        assert calls["n"] == 1
 
     def test_rss_budget_enforced_inside_fold_fails_closed(self, mhs_market, monkeypatch) -> None:
         monkeypatch.setattr(ev, "_current_rss_bytes", lambda: 100_000_000_000)
@@ -318,3 +352,144 @@ class TestAnchoredFoldBounded:
             ev.MHS_GO_REASON_PRIMARY_SHARPE,
             ev.MHS_GO_REASON_STRESS_SHARPE,
         )
+
+
+def _build_book_outcome_args(mhs_market) -> dict[str, object]:
+    """Replicate the top-level diagnostic setup needed to invoke ``_book_outcome``."""
+    root, end = mhs_market
+    symbols = [
+        s for s in ("MHSAUSDT", "MHSBUSDT", "MHSCUSDT", "MHSDUSDT", "MHSEUSDT",
+                    "MHSGUSDT", "MHSHUSDT", "MHSIUSDT", "MHSJUSDT", "MHSLUSDT")
+        if symbol_partition(s) == "dev"
+    ][:8]
+    funding_by_symbol = ev._load_funding_series(symbols)
+    request = MhsDiagnosticRequest(
+        start=str(_START), end=str(end), data_root=str(root),
+        mark_mode="cache_required", execution_timeframe="1m", log_run=False,
+    )
+    panel = ev.load_base_panel(
+        root, "1h", ("close", "open", "quote_vol"), _START, end,
+        partition="dev", min_bars=2000,
+    )
+    close, opens, quote_vol = panel["close"], panel["open"], panel["quote_vol"]
+    grid_1h = close.index
+    funded = [s for s in close.columns if s in funding_by_symbol]
+    close = close[funded]
+    opens = opens[funded]
+    quote_vol = quote_vol[funded]
+    bar_period = grid_1h[1] - grid_1h[0]
+    funding_window = {
+        s: funding_by_symbol[s].loc[
+            (funding_by_symbol[s].index >= grid_1h[0])
+            & (funding_by_symbol[s].index < grid_1h[-1] + bar_period)
+        ]
+        for s in funded
+    }
+    bar_funding = ev.bar_funding_panel(funding_window, grid_1h)
+    aligned = list(bar_funding.columns)
+    close = close[aligned]
+    opens = opens[aligned]
+    quote_vol = quote_vol[aligned]
+    bar_funding = bar_funding[aligned]
+    funding_by_symbol = {s: funding_by_symbol[s] for s in aligned}
+    eligible = ev.liquid_half_eligibility(quote_vol, lookback_bars=720, min_history_bars=720)
+    log_close = np.log(close)
+    fast = ev.PHASE_1_BOOK_SPECS["fast_reversal"]
+    fast_grid = pd.date_range(_START, end, freq="6h", tz="UTC")
+    w_fast = ev._book_weights(log_close, eligible, fast, fast_grid)
+    phase = ev._phase_diagnostics(log_close, eligible, opens, bar_funding, grid_1h, fast)
+    execution_mask = ev._pit_execution_mask(quote_vol, eligible, request.execution_universe_size)
+    w_fast_execution = w_fast.where(
+        execution_mask.reindex(w_fast.index).fillna(False), other=0.0,
+    )
+    return {
+        "name": "fast_reversal",
+        "spec": fast,
+        "n_symbols": len(aligned),
+        "step_grid": fast_grid,
+        "weights_step": w_fast,
+        "grid_1h": grid_1h,
+        "opens": opens,
+        "bar_funding": bar_funding,
+        "phase": phase,
+        "root": str(root),
+        "request": request,
+        "funding_by_symbol": funding_by_symbol,
+        "start": _START,
+        "end": end,
+        "event_window_bars": fast.horizon_hours,
+        "initial_equity": 1.0,
+        "replay_weights_step": w_fast_execution,
+    }
+
+
+class TestBookOutcomePaired:
+    """MHS-MEM-PAIR-02-BOOK: the top-level book orchestrator builds the
+    execution-window iterator once per strict/stress pair and preserves the
+    typed book failure conversion."""
+
+    def test_book_builds_window_iterator_once_per_pair(self, mhs_market, monkeypatch) -> None:
+        args = _build_book_outcome_args(mhs_market)
+        calls = {"n": 0}
+        original = ev._iter_mhs_execution_windows
+
+        def counting(*_args, **_kwargs):
+            calls["n"] += 1
+            return original(*_args, **_kwargs)
+
+        monkeypatch.setattr(ev, "_iter_mhs_execution_windows", counting)
+        report = ev._book_outcome(**args)
+        assert report.primary is not None
+        assert report.stress is not None
+        assert report.failure is None
+        assert calls["n"] == 1
+
+    def test_book_strict_resource_breach_is_typed_failure(self, mhs_market, monkeypatch) -> None:
+        args = _build_book_outcome_args(mhs_market)
+        args["request"] = MhsDiagnosticRequest(
+            start=str(_START), end=str(args["end"]), data_root=args["root"],
+            mark_mode="cache_required", execution_timeframe="1m", log_run=False,
+            max_rss_bytes=1_000,
+        )
+        monkeypatch.setattr(ev, "_current_rss_bytes", lambda: 100_000_000_000)
+        report = ev._book_outcome(**args)
+        assert report.primary is None
+        assert report.stress is None
+        assert report.failure is not None
+        assert report.failure.stage == "replay_fast_reversal"
+        assert report.failure.reason == ev.MHS_GO_REASON_RESOURCE_BREACH
+
+
+def test_xs_rank_ic_vectorized_contract_ignores_invalid_cross_section_cells() -> None:
+    index = pd.date_range("2021-01-01", periods=3, freq="1h", tz="UTC")
+    signal = pd.DataFrame(
+        [[1.0, 2.0, 3.0, 4.0, 5.0], [1.0, 2.0, np.nan, 4.0, 5.0], [1.0] * 5],
+        index=index,
+        columns=list("ABCDE"),
+    )
+    forward = pd.DataFrame(
+        [[5.0, 4.0, 3.0, 2.0, 1.0], [5.0, 4.0, 3.0, 2.0, 1.0], [1.0] * 5],
+        index=index,
+        columns=list("ABCDE"),
+    )
+
+    result = ev._xs_rank_ic(signal, forward)
+
+    assert result["n_dates"] == 1
+    assert result["mean_ic"] == pytest.approx(-1.0)
+
+
+def test_date_clustered_ols_vectorized_contract() -> None:
+    index = pd.date_range("2021-01-01", periods=48, freq="1h", tz="UTC")
+    past = pd.DataFrame(
+        {"A": np.arange(48, dtype=float), "B": np.arange(48, dtype=float) + 2.0},
+        index=index,
+    )
+    forward = 0.25 + 1.5 * past
+    forward.loc[index[3], "A"] = np.nan
+
+    result = ev._date_clustered_ols(forward, past)
+
+    assert result["n"] == 95
+    assert result["n_dates"] == 2
+    assert result["past_beta"] == pytest.approx(1.5)
