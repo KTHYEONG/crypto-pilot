@@ -170,6 +170,35 @@ class TestStrategyReplay:
         assert report.submit_times.iloc[0] > signal_at[0]
         assert report.fill_times.iloc[0] > signal_at[0]
 
+    def test_zero_target_closes_existing_inventory(self) -> None:
+        grid = pd.date_range("2021-01-01 12:01", periods=121, freq="1min", tz="UTC")
+        px = pd.DataFrame({"A": [100.0] * len(grid)}, index=grid)
+        target = pd.DataFrame(
+            {"A": [1.0, 0.0]},
+            index=pd.DatetimeIndex(
+                [
+                    pd.Timestamp("2021-01-01 11:00", tz="UTC"),
+                    pd.Timestamp("2021-01-01 12:00", tz="UTC"),
+                ]
+            ),
+        )
+        signal_at = pd.DatetimeIndex(
+            [
+                pd.Timestamp("2021-01-01 12:00", tz="UTC"),
+                pd.Timestamp("2021-01-01 13:00", tz="UTC"),
+            ]
+        )
+        report = strategy_aware_execution_replay(
+            target, signal_at, px, px, px, px,
+            pd.DataFrame(0.0, index=grid, columns=["A"]), 1.0,
+            "OHLCV_IMMEDIATE_TAKER", ExecutionSpec(),
+        )
+        fills = report.simulated_fills
+        assert len(fills) == 2
+        assert fills.iloc[0]["quantity_delta"] == pytest.approx(0.01)
+        assert fills.iloc[1]["quantity_delta"] == pytest.approx(-0.01)
+        assert report.simulated_units.iloc[-1]["A"] == pytest.approx(0.0)
+
     def test_persistent_termination_creates_forced_exit_plus_stress_penalty(self) -> None:
         # A is held, then its minute data permanently ends mid-grid.
         grid = pd.date_range("2021-01-01 01:01", periods=120, freq="1min", tz="UTC")
@@ -306,6 +335,65 @@ class TestFlatMarkNanLedger:
             1.0, "OHLCV_STRICT_PROXY", "MARK_PRICE",
         )
         assert (result.equity == 1.0).all()
+
+
+class TestStreamedLedgerEquivalence:
+    """MHS-30-STREAMED-LEDGER-EQUIVALENCE: the default streaming mode avoids the
+    dense ledger unit matrix and matches the opt-in dense diagnostic mode."""
+
+    def test_streaming_matches_dense_mode_within_1e12(self) -> None:
+        idx = pd.date_range("2021-01-01", periods=40, freq="5min", tz="UTC")
+        rng = np.random.default_rng(7)
+        marks = pd.DataFrame(
+            {
+                sym: 100.0 * np.exp(np.cumsum(rng.normal(0.0, 0.005, len(idx))))
+                for sym in ("AAAUSDT", "BBBUSDT", "CCCUSDT")
+            },
+            index=idx,
+        )
+        marks.iloc[15:18, 1] = np.nan
+        funding = pd.DataFrame(2.0e-5, index=idx, columns=list(marks.columns))
+        fills = pd.DataFrame(
+            [
+                {"timestamp": idx[3], "symbol": "AAAUSDT", "quantity_delta": 0.02,
+                 "fill_price": float(marks.loc[idx[3], "AAAUSDT"]), "fee_bps": 2.0,
+                 "reason": "passive_fill"},
+                {"timestamp": idx[3], "symbol": "BBBUSDT", "quantity_delta": -0.01,
+                 "fill_price": float(marks.loc[idx[3], "BBBUSDT"]), "fee_bps": 2.0,
+                 "reason": "passive_fill"},
+                {"timestamp": idx[20], "symbol": "CCCUSDT", "quantity_delta": 0.03,
+                 "fill_price": float(marks.loc[idx[20], "CCCUSDT"]), "fee_bps": 8.0,
+                 "reason": "timeout_taker"},
+            ],
+        )
+        streamed = simulated_inventory_ledger(
+            fills, marks, funding, 1.0, "OHLCV_STRICT_PROXY", "MARK_PRICE",
+        )
+        dense = simulated_inventory_ledger(
+            fills, marks, funding, 1.0, "OHLCV_STRICT_PROXY", "MARK_PRICE",
+            retain_simulated_units=True,
+        )
+        assert streamed.simulated_units is None
+        assert dense.simulated_units is not None
+        assert list(dense.simulated_units.columns) == list(marks.columns)
+        assert list(dense.simulated_units.index) == list(idx)
+        for field in (
+            "equity", "net_returns", "mark_to_market_pnl",
+            "funding_charge", "fee_charge", "fill_turnover",
+        ):
+            np.testing.assert_allclose(
+                getattr(streamed, field).to_numpy(),
+                getattr(dense, field).to_numpy(),
+                rtol=1e-12, atol=1e-12,
+            )
+        assert streamed.primary_valid is dense.primary_valid
+        assert streamed.invalid_reasons == dense.invalid_reasons
+        np.testing.assert_allclose(
+            dense.simulated_units.loc[idx[3]].to_numpy(), [0.02, -0.01, 0.0], atol=1e-12,
+        )
+        np.testing.assert_allclose(
+            dense.simulated_units.loc[idx[20]].to_numpy(), [0.02, -0.01, 0.03], atol=1e-12,
+        )
 
 
 class TestReplayEquivalencePerformance:
