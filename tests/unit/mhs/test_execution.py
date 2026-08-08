@@ -528,7 +528,9 @@ class TestWindowedReplayEquivalence:
             grid, weights, signals, wl["highs"], wl["lows"], wl["closes"],
             wl["marks"], wl["funding"], ExecutionSpec(), n_windows=3,
         )
-        windowed = replay_execution_windows(windows, 1.0, bound, ExecutionSpec())
+        windowed = replay_execution_windows(
+            windows, 1.0, bound, ExecutionSpec(), retain_event_snapshots=True,
+        )
         _assert_replay_equivalent(oracle, windowed)
 
     def test_three_windows_follow_strict_timeout_overlap(self) -> None:
@@ -560,6 +562,108 @@ class TestWindowedReplayEquivalence:
             assert gap.symbol
             assert gap.timestamp is not None
             assert gap.execution_bound == "OHLCV_STRICT_PROXY"
+
+
+def _assert_full_equivalence(enabled, disabled) -> None:
+    """MHS-MEM-01: fills, six ledger series, validity, gaps, counters, and
+    terminal state are identical between snapshot-disabled and snapshot-enabled
+    replay at rtol=atol=1e-12."""
+    fill_e = enabled.simulated_fills.sort_values(["timestamp", "symbol"]).reset_index(drop=True)
+    fill_d = disabled.simulated_fills.sort_values(["timestamp", "symbol"]).reset_index(drop=True)
+    assert len(fill_e) == len(fill_d)
+    for col in ("timestamp", "symbol", "quantity_delta", "fill_price", "fee_bps", "reason"):
+        assert fill_e[col].tolist() == fill_d[col].tolist()
+    for field in ("equity", "net_returns", "mark_to_market_pnl", "funding_charge", "fee_charge", "fill_turnover"):
+        np.testing.assert_allclose(
+            getattr(enabled.ledger, field).to_numpy(),
+            getattr(disabled.ledger, field).to_numpy(),
+            rtol=1e-12, atol=1e-12,
+        )
+    assert enabled.ledger.primary_valid == disabled.ledger.primary_valid
+    assert enabled.ledger.invalid_reasons == disabled.ledger.invalid_reasons
+    assert enabled.ledger.data_gaps == disabled.ledger.data_gaps
+    assert enabled.data_gaps == disabled.data_gaps
+    assert dict(enabled.termination_counts) == dict(disabled.termination_counts)
+    assert enabled.fill_count == disabled.fill_count
+    assert enabled.unfilled_count == disabled.unfilled_count
+    assert enabled.fallback_count == disabled.fallback_count
+    assert enabled.forced_exit_count == disabled.forced_exit_count
+    assert enabled.forced_exit_notional == disabled.forced_exit_notional
+    assert enabled.submit_times.tolist() == disabled.submit_times.tolist()
+    assert enabled.fill_times.tolist() == disabled.fill_times.tolist()
+    assert enabled.all_intent_shortfall_bps == disabled.all_intent_shortfall_bps
+    assert list(enabled.simulated_units.columns) == list(disabled.simulated_units.columns)
+    assert list(enabled.simulated_notional_weights.columns) == list(
+        disabled.simulated_notional_weights.columns
+    )
+
+
+class TestEventSnapshotOptIn:
+    """MHS-MEM-01/02: dense event snapshots are opt-in and bounded-memory by default."""
+
+    def _workload(self, days: int = 40, n_symbols: int = 8) -> dict[str, object]:
+        grid = pd.date_range("2021-01-01", periods=days * 24 * 12, freq="5min", tz="UTC")
+        symbols = [f"SYM{i:03d}USDT" for i in range(n_symbols)]
+        rng = np.random.default_rng(7)
+        closes = pd.DataFrame(
+            {s: 100.0 * np.exp(np.cumsum(rng.normal(0.0, 0.002, len(grid)))) for s in symbols},
+            index=grid,
+        )
+        marks = closes.copy()
+        marks.iloc[100:105, 3] = np.nan
+        decision_grid = pd.date_range("2021-01-01", periods=days * 4, freq="6h", tz="UTC")
+        weights = pd.DataFrame(0.0, index=decision_grid, columns=symbols)
+        rng_w = np.random.default_rng(8)
+        for ts in decision_grid:
+            active = rng_w.choice(symbols, size=4, replace=False)
+            weights.loc[ts, active] = rng_w.uniform(0.01, 0.06, 4)
+        return {
+            "grid": grid,
+            "symbols": symbols,
+            "highs": closes * 1.001,
+            "lows": closes * 0.999,
+            "closes": closes,
+            "marks": marks,
+            "funding": pd.DataFrame(1.0e-5, index=grid, columns=symbols),
+            "weights": weights,
+            "signals": decision_grid + pd.Timedelta(hours=1),
+        }
+
+    @pytest.mark.parametrize("bound", ["OHLCV_STRICT_PROXY", "OHLCV_IMMEDIATE_TAKER"])
+    def test_snapshot_disabled_equals_enabled(self, bound: str) -> None:
+        wl = self._workload()
+        windows = _partition_windows(
+            wl["grid"], wl["weights"], wl["signals"], wl["highs"], wl["lows"],
+            wl["closes"], wl["marks"], wl["funding"], ExecutionSpec(), n_windows=3,
+        )
+        enabled = replay_execution_windows(
+            windows, 1.0, bound, ExecutionSpec(), retain_event_snapshots=True,
+        )
+        disabled = replay_execution_windows(
+            windows, 1.0, bound, ExecutionSpec(),
+        )
+        assert disabled.event_snapshots_retained is False
+        assert enabled.event_snapshots_retained is True
+        assert len(disabled.simulated_units) == 0
+        assert len(disabled.simulated_notional_weights) == 0
+        assert len(enabled.simulated_units) > 0
+        _assert_full_equivalence(enabled, disabled)
+
+    def test_wide_fill_disabled_retains_zero_dense_rows(self) -> None:
+        wl = self._workload(days=60, n_symbols=32)
+        windows = _partition_windows(
+            wl["grid"], wl["weights"], wl["signals"], wl["highs"], wl["lows"],
+            wl["closes"], wl["marks"], wl["funding"], ExecutionSpec(), n_windows=4,
+        )
+        disabled = replay_execution_windows(
+            windows, 1.0, "OHLCV_STRICT_PROXY", ExecutionSpec(),
+        )
+        assert disabled.fill_count > 0
+        assert len(disabled.simulated_fills) > 0
+        assert disabled.event_snapshots_retained is False
+        assert disabled.simulated_units.empty
+        assert disabled.simulated_notional_weights.empty
+        assert list(disabled.simulated_units.columns) == list(wl["symbols"])
 
 
 class TestReplayEquivalencePerformance:

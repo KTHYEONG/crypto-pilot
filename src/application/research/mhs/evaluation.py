@@ -91,32 +91,34 @@ class MhsDiagnosticRequest:
 
     ``partition`` is forced to ``'dev'`` (a holdout request raises); ``data_root``
     allows tests to run against a synthetic market. ``mark_mode`` is a
-    reproducibility parameter: ``cache_required`` builds the causal mark panel
-    and fails closed on a missing/non-positive decision mark or invalid strict
-    ledger, while ``ohlcv_close_fallback`` deliberately passes ``None`` and
-    reports ``OHLCV_CLOSE_FALLBACK`` (fixtures and explicit comparison runs
-    only). Collection is a separate, resumable cache-building operation and is
-    never triggered by a sealed evaluation run.
+    reproducibility parameter: ``cache_required`` builds the strict causal mark
+    panel and fails closed, while ``cache_required_stale_carry`` permits a
+    bounded 24-hour causal carry for diagnostic-only continuity. The latter is
+    never a strict Research-GO source. ``ohlcv_close_fallback`` deliberately
+    passes ``None`` for fixtures and explicit comparison runs only.
     """
 
     start: str | pd.Timestamp | None = None
     end: str | pd.Timestamp | None = None
     partition: Literal["dev", "holdout", "all"] = "dev"
     data_root: str | None = None
-    mark_mode: Literal["cache_required", "ohlcv_close_fallback"] = "cache_required"
+    mark_mode: Literal["cache_required", "cache_required_stale_carry", "ohlcv_close_fallback"] = "cache_required"
     execution_timeframe: Literal["1m", "5m"] = "5m"
     execution_universe_size: int = 30
+    max_rss_bytes: int | None = None
     log_run: bool = True
 
     def __post_init__(self) -> None:
         if self.partition not in ("dev", "holdout", "all"):
             raise ValueError(f"unknown partition '{self.partition}'")
-        if self.mark_mode not in ("cache_required", "ohlcv_close_fallback"):
+        if self.mark_mode not in ("cache_required", "cache_required_stale_carry", "ohlcv_close_fallback"):
             raise ValueError(f"unknown mark_mode '{self.mark_mode}'")
         if self.execution_timeframe not in ("1m", "5m"):
             raise ValueError(f"unknown execution_timeframe '{self.execution_timeframe}'")
         if self.execution_universe_size < 8:
             raise ValueError("execution_universe_size must be >= 8")
+        if self.max_rss_bytes is not None and self.max_rss_bytes <= 0:
+            raise ValueError("max_rss_bytes must be > 0")
 
 
 @dataclass(frozen=True, slots=True)
@@ -251,6 +253,44 @@ def _current_rss_bytes() -> int:
         return int(psutil.Process().memory_info().rss)
     except Exception:  # noqa: BLE001
         return -1
+
+
+def _assert_cache_required_ledger_valid(
+    name: str,
+    primary: StrategyExecutionReplayResult,
+) -> None:
+    """Fail closed when a cache-required strict primary ledger is invalid.
+
+    ``cache_required_stale_carry`` and ``ohlcv_close_fallback`` are explicit
+    diagnostic modes and never call this gate.
+    """
+    if not primary.ledger.primary_valid:
+        raise DataIntegrityError(
+            f"cache_required strict primary ledger invalid for {name}: "
+            f"{', '.join(primary.ledger.invalid_reasons)}"
+        )
+
+
+def _assert_execution_rss_budget(
+    stage: str,
+    budget: int | None,
+    completed_windows: int,
+) -> None:
+    """Deterministic fail-closed provenance for a configured RSS budget.
+
+    A positive ``budget`` exceeded at a window boundary raises
+    ``DataIntegrityError`` carrying the stage, observed RSS, configured budget,
+    and completed window count; the default ``None`` applies no artificial cap.
+    """
+    if budget is None:
+        return
+    observed = _current_rss_bytes()
+    if observed > budget:
+        raise DataIntegrityError(
+            "execution RSS budget exceeded at window boundary: "
+            f"stage={stage} observed_rss={observed} "
+            f"budget={budget} completed_windows={completed_windows}"
+        )
 
 
 class _StageRecorder:
@@ -776,7 +816,7 @@ def _iter_mhs_execution_windows(
     start: pd.Timestamp,
     end: pd.Timestamp,
     funding_by_symbol: dict[str, pd.Series],
-    mark_mode: Literal["cache_required", "ohlcv_close_fallback"],
+    mark_mode: Literal["cache_required", "cache_required_stale_carry", "ohlcv_close_fallback"],
     spec: ExecutionSpec,
 ) -> Iterator[MhsExecutionWindow]:
     """Yield at-most-31-day execution windows with only the active roster read.
@@ -814,7 +854,7 @@ def _iter_mhs_execution_windows(
 
     if target_weights.empty:
         empty_marks = (
-            pd.DataFrame(index=full_grid) if mark_mode == "cache_required" else None
+            pd.DataFrame(index=full_grid) if mark_mode in ("cache_required", "cache_required_stale_carry") else None
         )
         yield ExecutionReplayWindow(
             window_start=start,
@@ -888,10 +928,14 @@ def _iter_mhs_execution_windows(
         closes = closes.reindex(columns=roster)
 
         minute_marks: pd.DataFrame | None = None
-        if mark_mode == "cache_required":
+        if mark_mode in ("cache_required", "cache_required_stale_carry"):
             if roster:
-                minute_marks = DataCollector().load_mark_price_panel(roster, "1h", minute_grid)
-                _assert_cache_required_marks("window", w_weights[roster], w_signals, minute_marks)
+                stale_hours = 24 if mark_mode == "cache_required_stale_carry" else 0
+                minute_marks = DataCollector().load_mark_price_panel(
+                    roster, "1h", minute_grid, max_stale_hours=stale_hours,
+                )
+                if mark_mode == "cache_required":
+                    _assert_cache_required_marks("window", w_weights[roster], w_signals, minute_marks)
             else:
                 minute_marks = pd.DataFrame(index=minute_grid)
 
@@ -986,10 +1030,12 @@ def _book_outcome(
                     window_end=str(w.window_end),
                 )
             yield w
+            _assert_execution_rss_budget(prefix, request.max_rss_bytes, idx + 1)
 
     primary = replay_execution_windows(
         _window_telemetry(_windows(), "execution_window"),
         initial_equity, "OHLCV_STRICT_PROXY", ExecutionSpec(),
+        retain_event_snapshots=False,
     )
     if telemetry is not None:
         telemetry.record(
@@ -1000,6 +1046,7 @@ def _book_outcome(
     stress = replay_execution_windows(
         _window_telemetry(_windows(), "execution_window"),
         initial_equity, "OHLCV_IMMEDIATE_TAKER", ExecutionSpec(),
+        retain_event_snapshots=False,
     )
     if telemetry is not None:
         telemetry.record(
@@ -1007,11 +1054,8 @@ def _book_outcome(
             n_symbols=len(replay_symbols),
             fill_count=len(stress.simulated_fills),
         )
-    if request.mark_mode == "cache_required" and not primary.ledger.primary_valid:
-        raise DataIntegrityError(
-            f"cache_required strict primary ledger invalid for {name}: "
-            f"{', '.join(primary.ledger.invalid_reasons)}"
-        )
+    if request.mark_mode == "cache_required":
+        _assert_cache_required_ledger_valid(name, primary)
     return MhsBookReport(
         name=name,
         band=spec.band.name,
@@ -1147,8 +1191,9 @@ def _run_anchored_fold(
         minute_marks = (
             DataCollector().load_mark_price_panel(
                 list(closes.columns), "1h", minute_grid,
+                max_stale_hours=24 if request.mark_mode == "cache_required_stale_carry" else 0,
             )
-            if request.mark_mode == "cache_required"
+            if request.mark_mode in ("cache_required", "cache_required_stale_carry")
             else None
         )
         minute_period = minute_grid[1] - minute_grid[0]
@@ -1168,7 +1213,7 @@ def _run_anchored_fold(
             target_replay, signal_available_at, minute_grid, ExecutionSpec(),
         )
         decision_intents = int(np.isfinite(target_replay.to_numpy()).sum())
-        if minute_marks is not None:
+        if minute_marks is not None and request.mark_mode == "cache_required":
             _assert_cache_required_marks("fold", target_replay, signal_available_at, minute_marks)
         primary = strategy_aware_execution_replay(
             target_replay, signal_available_at, highs, _lows, closes, minute_marks,
@@ -1673,6 +1718,7 @@ def _persist_replay_artifact(
         "times": _artifact_reference(times, times_path),
         "fill_source": replay.fill_source,
         "mark_source": replay.mark_source,
+        "event_snapshots_retained": replay.event_snapshots_retained,
         "fill_count": replay.fill_count,
         "unfilled_count": replay.unfilled_count,
         "fallback_count": replay.fallback_count,

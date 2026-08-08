@@ -1,6 +1,26 @@
 {
   "tasks": [
     {
+      "task_id": "TASK_MHS_STREAMED_EXECUTION_MEMORY",
+      "date": "2026-08-08",
+      "adr_id": "ADR_20260808_MHS_STREAMED_EXECUTION_MEMORY",
+      "domain": "execution",
+      "title": "MHS streamed execution memory completion",
+      "why": "Full 2021-2025 stale-carry execution terminated before report generation due retained dense per-fill universe snapshots and cumulative replay memory.",
+      "resolution": "Made dense event snapshots opt-in, preserved numerical replay equivalence, added bounded RSS handling and regression coverage, and fixed mark backfill/type robustness.",
+      "impact": "Reduces replay memory growth while retaining strict fail-closed semantics and enables full diagnostic execution under the available resource budget."
+    },
+    {
+      "task_id": "TASK_MHS_STALE_MARK_POLICY",
+      "date": "2026-08-08",
+      "adr_id": "ADR_20260808_MHS_STALE_MARK_POLICY",
+      "domain": "execution",
+      "title": "MHS listing-aware stale mark policy",
+      "why": "Preserve strict fail-closed mark-price validation while supporting bounded diagnostic continuity for irrecoverable short source gaps.",
+      "resolution": "Added cache_required_stale_carry with a bounded causal 24-hour mark carry, retained strict cache_required semantics, wired CLI mode, and added coverage tests.",
+      "impact": "Strict Research-GO behavior is unchanged; stale-carry runs are diagnostic-only and never replace primary ledger evidence."
+    },
+    {
       "task_id": "TASK_MHS_WINDOWED_REPLAY_FAIL_CLOSED",
       "date": "2026-08-08",
       "adr_id": "ADR_20260808_MHS_WINDOWED_REPLAY_FAIL_CLOSED",
