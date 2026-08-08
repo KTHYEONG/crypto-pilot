@@ -1,6 +1,16 @@
 {
   "tasks": [
     {
+      "task_id": "TASK_MHS_WINDOWED_REPLAY_FAIL_CLOSED",
+      "date": "2026-08-08",
+      "adr_id": "ADR_20260808_MHS_WINDOWED_REPLAY_FAIL_CLOSED",
+      "domain": "execution",
+      "title": "MHS windowed replay and fail-closed gap provenance",
+      "why": "The 2021-2025 cache-required 5-minute MHS run peaked at 13.10 GiB and reported ambiguous slow_momentum strict-primary MISSING_DATA; the replay also retained a five-year 252-symbol execution union despite a 30-symbol PIT roster.",
+      "resolution": "Added terminal execution-window censoring, structured symbol/time gap provenance, 31-day PIT-active window loading, stateful windowed replay and streamed ledger accumulation, RSS/window telemetry, and deterministic single-panel equivalence coverage. The full 2021-2025 run now executes the optimized path but still fails closed at slow_momentum strict-primary MISSING_DATA; no mark fallback or GO relaxation was introduced.",
+      "impact": "Benchmark equivalence passes with matching fills/ledger checksums and lower windowed fixture runtime. Full-period production execution remains Research-GO ineligible until the residual slow-band mark/source gap is identified and repaired; the failed run did not persist a new report or peak RSS measurement."
+    },
+    {
       "task_id": "TASK_MHS_RUNTIME_RESOURCE_OPTIMIZATION",
       "date": "2026-08-08",
       "adr_id": "ADR_20260808_MHS_RUNTIME_RESOURCE_OPTIMIZATION",
