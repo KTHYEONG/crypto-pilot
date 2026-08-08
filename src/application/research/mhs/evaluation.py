@@ -30,7 +30,6 @@ from src.mhs.evaluation import cost_response_curve, phase_diagnostic_metrics, ta
 from src.mhs.evaluation import AnchoredPurgedFold, DeploymentReadinessResult, autocorrelation_adjusted_sharpe, synthetic_stress_scenarios
 from src.mhs.execution import ExecutionReplayWindow, simulated_inventory_ledger
 from src.mhs.execution import replay_execution_windows
-from src.mhs.execution import strategy_aware_execution_replay
 from src.mhs.panel import liquid_half_eligibility, load_base_panel
 from src.research.evaluation.policy import resolve_evaluation_end
 
@@ -83,6 +82,7 @@ MHS_GO_REASON_PRIMARY_SHARPE = "PRIMARY_AUTOCORR_SHARPE_BELOW_0_6"
 MHS_GO_REASON_STRESS_SHARPE = "STRESS_SHARPE_NOT_POSITIVE"
 MHS_GO_REASON_CAPITAL_BREACH = "CAPITAL_INVARIANT_BREACH"
 MHS_GO_REASON_UNSPECIFIED_POLICY = "UNSPECIFIED_POLICY"
+MHS_GO_REASON_RESOURCE_BREACH = "RESOURCE_BUDGET_BREACH"
 
 
 @dataclass(frozen=True, slots=True)
@@ -122,6 +122,23 @@ class MhsDiagnosticRequest:
 
 
 @dataclass(frozen=True, slots=True)
+class MhsBookFailure:
+    """Typed, serializable book-level rejection of a strict replay error.
+
+    ``stage`` names the failing replay stage, ``error_class`` is the exact
+    exception class name, ``reason`` is a stable fail-closed code (one of the
+    ``MHS_GO_REASON_*`` strings), and ``message`` carries the deterministic
+    provenance. A failed book has no ledger/artifact reference and never
+    fabricates metrics, deployment readiness, or Research-GO evidence.
+    """
+
+    stage: str
+    error_class: str
+    reason: str
+    message: str
+
+
+@dataclass(frozen=True, slots=True)
 class MhsBookReport:
     name: str
     band: str
@@ -132,16 +149,17 @@ class MhsBookReport:
     phase: PhaseDiagnosticResult
     prescreen: dict[float, CostResponsePoint]
     tail: TailSensitivityResult
-    primary: StrategyExecutionReplayResult
-    stress: StrategyExecutionReplayResult
-    primary_autocorr_sharpe: float
-    primary_naive_sharpe: float
-    primary_net_ann: float
-    primary_geometric_cagr: float
-    primary_max_drawdown: float
-    primary_annualized_turnover: float
-    stress_naive_sharpe: float
+    primary: StrategyExecutionReplayResult | None
+    stress: StrategyExecutionReplayResult | None
+    primary_autocorr_sharpe: float | None
+    primary_naive_sharpe: float | None
+    primary_net_ann: float | None
+    primary_geometric_cagr: float | None
+    primary_max_drawdown: float | None
+    primary_annualized_turnover: float | None
+    stress_naive_sharpe: float | None
     terminal_censored_decisions: int = 0
+    failure: MhsBookFailure | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -269,6 +287,26 @@ def _assert_cache_required_ledger_valid(
             f"cache_required strict primary ledger invalid for {name}: "
             f"{', '.join(primary.ledger.invalid_reasons)}"
         )
+
+
+def _classify_execution_failure(exc: BaseException) -> str:
+    """Stable fail-closed reason code for an expected strict replay error.
+
+    The classifier is intentionally conservative: any unrecognized message maps
+    to ``INVALID_PRIMARY_LEDGER`` so an unanticipated integrity error is never
+    relabeled as a policy or Sharpe gate. Resource-budget breaches keep their
+    own stable code so a fixed-RSS regression can be proven end to end.
+    """
+    message = str(exc).lower()
+    if "pre-trade equity" in message or "capital" in message or "equity must be" in message:
+        return MHS_GO_REASON_CAPITAL_BREACH
+    if "rss budget" in message:
+        return MHS_GO_REASON_RESOURCE_BREACH
+    if "finite" in message:
+        return MHS_GO_REASON_NONFINITE_EQUITY
+    if "gap" in message or "mark" in message or "missing" in message:
+        return MHS_GO_REASON_EXECUTION_GAP
+    return MHS_GO_REASON_INVALID_PRIMARY
 
 
 def _assert_execution_rss_budget(
@@ -1032,30 +1070,66 @@ def _book_outcome(
             yield w
             _assert_execution_rss_budget(prefix, request.max_rss_bytes, idx + 1)
 
-    primary = replay_execution_windows(
-        _window_telemetry(_windows(), "execution_window"),
-        initial_equity, "OHLCV_STRICT_PROXY", ExecutionSpec(),
-        retain_event_snapshots=False,
-    )
-    if telemetry is not None:
-        telemetry.record(
-            f"replay_{name}_strict",
-            n_symbols=len(replay_symbols),
-            fill_count=len(primary.simulated_fills),
+    try:
+        primary = replay_execution_windows(
+            _window_telemetry(_windows(), "execution_window"),
+            initial_equity, "OHLCV_STRICT_PROXY", ExecutionSpec(),
+            retain_event_snapshots=False,
         )
-    stress = replay_execution_windows(
-        _window_telemetry(_windows(), "execution_window"),
-        initial_equity, "OHLCV_IMMEDIATE_TAKER", ExecutionSpec(),
-        retain_event_snapshots=False,
-    )
-    if telemetry is not None:
-        telemetry.record(
-            f"replay_{name}_stress",
-            n_symbols=len(replay_symbols),
-            fill_count=len(stress.simulated_fills),
+        if telemetry is not None:
+            telemetry.record(
+                f"replay_{name}_strict",
+                n_symbols=len(replay_symbols),
+                fill_count=len(primary.simulated_fills),
+            )
+        stress = replay_execution_windows(
+            _window_telemetry(_windows(), "execution_window"),
+            initial_equity, "OHLCV_IMMEDIATE_TAKER", ExecutionSpec(),
+            retain_event_snapshots=False,
         )
-    if request.mark_mode == "cache_required":
-        _assert_cache_required_ledger_valid(name, primary)
+        if telemetry is not None:
+            telemetry.record(
+                f"replay_{name}_stress",
+                n_symbols=len(replay_symbols),
+                fill_count=len(stress.simulated_fills),
+            )
+        if request.mark_mode == "cache_required":
+            _assert_cache_required_ledger_valid(name, primary)
+    except DataIntegrityError as exc:
+        failure = MhsBookFailure(
+            stage=f"replay_{name}",
+            error_class=type(exc).__name__,
+            reason=_classify_execution_failure(exc),
+            message=str(exc),
+        )
+        if telemetry is not None:
+            telemetry.record(
+                f"replay_{name}_failed",
+                n_symbols=len(replay_symbols),
+                fill_count=0,
+            )
+        return MhsBookReport(
+            name=name,
+            band=spec.band.name,
+            horizon_hours=spec.horizon_hours,
+            step_hours=spec.step_hours,
+            tranche_count=spec.tranche_count(),
+            n_symbols=n_symbols,
+            phase=phase,
+            prescreen=prescreen,
+            tail=tail,
+            primary=None,
+            stress=None,
+            primary_autocorr_sharpe=None,
+            primary_naive_sharpe=None,
+            primary_net_ann=None,
+            primary_geometric_cagr=None,
+            primary_max_drawdown=None,
+            primary_annualized_turnover=None,
+            stress_naive_sharpe=None,
+            terminal_censored_decisions=censored,
+            failure=failure,
+        )
     return MhsBookReport(
         name=name,
         band=spec.band.name,
@@ -1111,13 +1185,18 @@ def _run_anchored_fold(
     funding_by_symbol: dict[str, pd.Series],
     initial_equity: float,
     fold_index: int,
+    telemetry: _StageRecorder | None = None,
 ) -> MhsFoldReport:
     """One independently flat strict/immediate-taker blend replay per fold.
 
     The 1h panel spans ``[train_start, validation_end]`` so warm-up history
     feeds features only; the replay decisions and the fresh flat ledger cover
-    only the validation window. A fold that cannot be replayed is reported
-    (not raised) with machine-readable failure codes.
+    only the validation window. The fold uses the same at-most-31-day windowed
+    execution engine as the top-level books (``_iter_mhs_execution_windows`` +
+    ``replay_execution_windows``) so dense event snapshots stay disabled and
+    per-window resource telemetry/RSS budgets are applied inside the fold, not
+    only at the top level. A fold that cannot be replayed is reported (not
+    raised) with machine-readable failure codes.
     """
     try:
         ts = fold.train_start
@@ -1179,49 +1258,56 @@ def _run_anchored_fold(
         execution_symbols = sorted(
             target_weights.columns[target_weights.ne(0.0).any(axis=0)]
         )
-        minute_frames = _align_minute_frames(
-            _load_minute_frames(root, execution_symbols, vs, ve, request.execution_timeframe),
-            request.execution_timeframe,
-            vs, ve,
-        )
-        if minute_frames is None:
+        minute_roster = [
+            s for s in execution_symbols
+            if os.path.exists(os.path.join(root, request.execution_timeframe, f"{s}.parquet"))
+        ]
+        if not minute_roster:
             return _incomplete_fold_report(fold, fold_index, (MHS_GO_REASON_INCOMPLETE_FOLD,))
-        highs, _lows, closes = minute_frames
-        minute_grid = highs.index
-        minute_marks = (
-            DataCollector().load_mark_price_panel(
-                list(closes.columns), "1h", minute_grid,
-                max_stale_hours=24 if request.mark_mode == "cache_required_stale_carry" else 0,
-            )
-            if request.mark_mode in ("cache_required", "cache_required_stale_carry")
-            else None
-        )
-        minute_period = minute_grid[1] - minute_grid[0]
-        minute_funding_window = {
-            s: funding_by_symbol[s].loc[
-                (funding_by_symbol[s].index >= minute_grid[0])
-                & (funding_by_symbol[s].index < minute_grid[-1] + minute_period)
-            ]
-            for s in aligned_symbols
-        }
-        minute_funding = bar_funding_panel(minute_funding_window, minute_grid)
-        minute_funding = minute_funding.reindex(columns=list(closes.columns))
-
-        target_replay = target_weights[list(closes.columns)]
+        target_replay = target_weights[minute_roster]
         signal_available_at = target_replay.index + pd.Timedelta(hours=1)
+        execution_grid = pd.date_range(
+            vs, ve,
+            freq={"1m": "1min", "5m": "5min"}[request.execution_timeframe],
+            tz="UTC",
+        )
         target_replay, signal_available_at, terminal_censored = _truncate_replayable_decisions(
-            target_replay, signal_available_at, minute_grid, ExecutionSpec(),
+            target_replay, signal_available_at, execution_grid, ExecutionSpec(),
         )
         decision_intents = int(np.isfinite(target_replay.to_numpy()).sum())
-        if minute_marks is not None and request.mark_mode == "cache_required":
-            _assert_cache_required_marks("fold", target_replay, signal_available_at, minute_marks)
-        primary = strategy_aware_execution_replay(
-            target_replay, signal_available_at, highs, _lows, closes, minute_marks,
-            minute_funding, initial_equity, "OHLCV_STRICT_PROXY", ExecutionSpec(),
+
+        def _windows() -> Iterator[MhsExecutionWindow]:
+            return _iter_mhs_execution_windows(
+                target_replay, signal_available_at, root, request.execution_timeframe,
+                vs, ve, funding_by_symbol, request.mark_mode, ExecutionSpec(),
+            )
+
+        def _window_telemetry(
+            gen: Iterator[MhsExecutionWindow], prefix: str,
+        ) -> Iterator[MhsExecutionWindow]:
+            for idx, w in enumerate(gen):
+                if telemetry is not None:
+                    telemetry.record(
+                        f"{prefix}_{idx}",
+                        grid_bars=len(w.minute_grid),
+                        active_symbols=len(w.symbols),
+                        window_start=str(w.window_start),
+                        window_end=str(w.window_end),
+                    )
+                yield w
+                _assert_execution_rss_budget(prefix, request.max_rss_bytes, idx + 1)
+
+        strict_prefix = f"anchored_fold_{fold_index}_window"
+        primary = replay_execution_windows(
+            _window_telemetry(_windows(), strict_prefix),
+            initial_equity, "OHLCV_STRICT_PROXY", ExecutionSpec(),
+            retain_event_snapshots=False,
         )
-        stress = strategy_aware_execution_replay(
-            target_replay, signal_available_at, highs, _lows, closes, minute_marks,
-            minute_funding, initial_equity, "OHLCV_IMMEDIATE_TAKER", ExecutionSpec(),
+        stress_prefix = f"anchored_fold_{fold_index}_stress_window"
+        stress = replay_execution_windows(
+            _window_telemetry(_windows(), stress_prefix),
+            initial_equity, "OHLCV_IMMEDIATE_TAKER", ExecutionSpec(),
+            retain_event_snapshots=False,
         )
 
         failures: list[str] = []
@@ -1275,17 +1361,22 @@ def _run_anchored_fold(
         return _incomplete_fold_report(fold, fold_index, (MHS_GO_REASON_INCOMPLETE_FOLD,))
 
 
-def _mhs_research_go(folds: tuple[MhsFoldReport, ...]) -> MhsResearchGoResult:
-    """Fail-closed top-level Research-GO decision built from the fold reports.
+def _mhs_research_go(
+    folds: tuple[MhsFoldReport, ...],
+    book_reasons: tuple[str, ...] = (),
+) -> MhsResearchGoResult:
+    """Fail-closed top-level Research-GO decision from fold and book evidence.
 
     A fold that was not replayed, an invalid primary, non-finite equity, a
     relevant execution gap, a strict-Sharpe failure, or a non-positive stress
-    Sharpe each block the decision with a stable reason code. The cap-30 and
-    primary annual-return gate thresholds are not preregistered in source
-    contracts, so those checks are reported as ``UNSPECIFIED_POLICY`` and keep
-    Research GO conservative (false) until they are explicitly registered.
+    Sharpe each block the decision with a stable reason code. A book-level
+    strict replay rejection (capital invariant breach, execution gap, invalid
+    primary, or resource-budget breach) is aggregated with the fold reasons.
+    The cap-30 and primary annual-return gate thresholds are not preregistered
+    in source contracts, so those checks are reported as ``UNSPECIFIED_POLICY``
+    and keep Research GO conservative (false) until explicitly registered.
     """
-    reasons: list[str] = []
+    reasons: list[str] = list(book_reasons)
     passed = 0
     for fold_report in folds:
         if fold_report.strict is None:
@@ -1439,6 +1530,14 @@ def run_mhs_horizon_diagnostic(request: MhsDiagnosticRequest) -> MhsHorizonDiagn
         books = {}
         blend_report = None
 
+    book_reasons = tuple(
+        sorted(
+            b.failure.reason
+            for b in [*books.values(), blend_report]
+            if b is not None and b.failure is not None
+        )
+    )
+
     trials_attempted = 1
     deflated_sharpe_ratio = None
 
@@ -1458,7 +1557,7 @@ def run_mhs_horizon_diagnostic(request: MhsDiagnosticRequest) -> MhsHorizonDiagn
     participation: dict[str, float] = {}
     termination_counts: dict[str, int] = {}
     unsupported = ("partial_fill", "queue_position", "post_only_rejection", "cancel_replace_latency", "order_size_impact")
-    if blend_report is not None:
+    if blend_report is not None and blend_report.primary is not None:
         if minute_grid is None:
             raise DataIntegrityError("blend report requires a minute replay grid")
         equity_1h = blend_report.primary.ledger.equity.resample("1h").last().dropna()
@@ -1479,6 +1578,7 @@ def run_mhs_horizon_diagnostic(request: MhsDiagnosticRequest) -> MhsHorizonDiagn
             fill_count=len(blend_report.primary.simulated_fills),
         )
         termination_counts = dict(blend_report.primary.termination_counts)
+        assert blend_report.primary_naive_sharpe is not None
         placebo_percentile = _placebo_sharpe_percentile(
             horizon_log_return(log_close, 48), eligible, opens, bar_funding, grid_1h,
             fast, blend_report.primary_naive_sharpe, 500, _BOOTSTRAP_SEED,
@@ -1488,7 +1588,7 @@ def run_mhs_horizon_diagnostic(request: MhsDiagnosticRequest) -> MhsHorizonDiagn
     fold_reports: list[MhsFoldReport] = []
     for idx, fold in enumerate(phase_1_anchored_purged_folds()):
         fold_report = _run_anchored_fold(
-            root, fold, request, fold_funding, initial_equity, idx,
+            root, fold, request, fold_funding, initial_equity, idx, telemetry,
         )
         fill_count = (
             len(fold_report.strict.simulated_fills) + len(fold_report.stress.simulated_fills)
@@ -1498,9 +1598,9 @@ def run_mhs_horizon_diagnostic(request: MhsDiagnosticRequest) -> MhsHorizonDiagn
         telemetry.record(f"anchored_fold_{idx}", fill_count=fill_count)
         fold_reports.append(fold_report)
     folds = tuple(fold_reports)
-    research_go = _mhs_research_go(folds)
+    research_go = _mhs_research_go(folds, book_reasons)
 
-    if blend_report is not None:
+    if blend_report is not None and blend_report.primary is not None:
         deployment = compute_deployment_readiness(
             blend_report.primary.ledger.equity,
             _PERIODS_PER_YEAR_1H,
@@ -1526,7 +1626,7 @@ def run_mhs_horizon_diagnostic(request: MhsDiagnosticRequest) -> MhsHorizonDiagn
 
     mark_source = "NOT_RUN_NO_EXECUTION_DATA"
     fill_source = "NOT_RUN_NO_EXECUTION_DATA"
-    if blend_report is not None:
+    if blend_report is not None and blend_report.primary is not None:
         mark_source = blend_report.primary.ledger.mark_source
         fill_source = "OHLCV_STRICT_PROXY"
 
@@ -1591,19 +1691,23 @@ def persist_mhs_horizon_diagnostic_report(report: MhsHorizonDiagnosticReport, pa
 
     for book_name, book_report in report.books.items():
         book_payload = payload["books"][book_name]
-        book_payload["primary"] = _persist_replay_artifact(
-            book_report.primary, artifact_root, f"{book_name}_primary"
-        )
-        book_payload["stress"] = _persist_replay_artifact(
-            book_report.stress, artifact_root, f"{book_name}_stress"
-        )
+        if book_report.primary is not None:
+            book_payload["primary"] = _persist_replay_artifact(
+                book_report.primary, artifact_root, f"{book_name}_primary"
+            )
+        if book_report.stress is not None:
+            book_payload["stress"] = _persist_replay_artifact(
+                book_report.stress, artifact_root, f"{book_name}_stress"
+            )
     if report.blend is not None:
-        payload["blend"]["primary"] = _persist_replay_artifact(
-            report.blend.primary, artifact_root, "blend_primary"
-        )
-        payload["blend"]["stress"] = _persist_replay_artifact(
-            report.blend.stress, artifact_root, "blend_stress"
-        )
+        if report.blend.primary is not None:
+            payload["blend"]["primary"] = _persist_replay_artifact(
+                report.blend.primary, artifact_root, "blend_primary"
+            )
+        if report.blend.stress is not None:
+            payload["blend"]["stress"] = _persist_replay_artifact(
+                report.blend.stress, artifact_root, "blend_stress"
+            )
     for fold_report in report.folds:
         fold_payload = payload["folds"][fold_report.fold_index]
         if fold_report.strict is not None:
