@@ -10,6 +10,110 @@ from src.mhs.panel import build_uniform_grid, liquid_half_eligibility, load_base
 from src.research.universe.pit_universe import symbol_partition
 
 
+class TestBasePanelProjection:
+    """MHS-PROJECTION-PUSHDOWN: the inclusive [start, end] predicate is pushed
+    into the pyarrow read so out-of-range rows are never materialized, while
+    grid, PIT partition, duplicate-last, and min_bars results stay identical."""
+
+    def _write_long(self, tmp_path: Path, n: int = 3000) -> pd.DatetimeIndex:
+        directory = tmp_path / "1h"
+        directory.mkdir(parents=True)
+        ts = pd.date_range("2021-01-01", periods=n, freq="1h", tz="UTC")
+        epoch = (ts - pd.Timestamp("1970-01-01", tz="UTC")) // pd.Timedelta("1ms")
+        for sym in ("AAAUSDT", "BBBUSDT", "CCCUSDT"):
+            prices = pd.Series(100.0, index=ts).cumsum() / 100.0
+            pd.DataFrame(
+                {"timestamp": epoch, "close": prices, "quote_vol": [1000.0] * n},
+            ).to_parquet(directory / f"{sym}.parquet")
+        return ts
+
+    def test_window_projection_matches_full_load_slice(self, tmp_path: Path) -> None:
+        ts = self._write_long(tmp_path)
+        start = ts[500]
+        end = ts[1200]
+        window = load_base_panel(
+            root=str(tmp_path), interval="1h", columns=("close", "quote_vol"),
+            start=start, end=end, partition="all", min_bars=1,
+        )
+        full = load_base_panel(
+            root=str(tmp_path), interval="1h", columns=("close", "quote_vol"),
+            start=ts[0], end=ts[-1], partition="all", min_bars=1,
+        )
+        sliced = {c: full[c].loc[start:end] for c in ("close", "quote_vol")}
+        assert set(window) == {"close", "quote_vol"}
+        assert window["close"].index.equals(build_uniform_grid(start, end, "1h"))
+        for c in ("close", "quote_vol"):
+            assert list(window[c].columns) == list(sliced[c].columns)
+            assert window[c].notna().sum().eq(sliced[c].notna().sum()).all()
+            assert window[c].loc[start:end].reindex(sliced[c].index).equals(sliced[c])
+
+    def test_predicate_is_pushed_into_parquet_read(self, tmp_path: Path, monkeypatch) -> None:
+        import pyarrow.parquet as pq
+
+        ts = self._write_long(tmp_path)
+        start = ts[100]
+        end = ts[900]
+        captured: list[list] = []
+
+        real_read = pq.read_table
+
+        def fake_read(path, columns=None, filters=None):
+            captured.append(filters)
+            return real_read(path, columns=columns, filters=filters)
+
+        monkeypatch.setattr(pq, "read_table", fake_read)
+        load_base_panel(
+            root=str(tmp_path), interval="1h", columns=("close", "quote_vol"),
+            start=start, end=end, partition="all", min_bars=1,
+        )
+        assert captured
+        start_ms = int(start.value // 1_000_000)
+        end_ms = int(end.value // 1_000_000)
+        for filters in captured:
+            assert filters is not None
+            assert filters == [[("timestamp", ">=", start_ms), ("timestamp", "<=", end_ms)]]
+
+    def test_inclusive_bounds_and_duplicate_last_preserved(self, tmp_path: Path) -> None:
+        directory = tmp_path / "1h"
+        directory.mkdir(parents=True)
+        ts = pd.date_range("2021-01-01", periods=6, freq="1h", tz="UTC")
+        epoch = (ts - pd.Timestamp("1970-01-01", tz="UTC")) // pd.Timedelta("1ms")
+        # duplicate last bar for BBBUSDT: only the final duplicate survives.
+        pd.DataFrame(
+            {
+                "timestamp": [*list(epoch), int(epoch[-1])],
+                "close": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 99.0],
+                "quote_vol": [10.0] * 7,
+            },
+        ).to_parquet(directory / "AAAUSDT.parquet")
+        panel = load_base_panel(
+            root=str(tmp_path), interval="1h", columns=("close",),
+            start=ts[0], end=ts[-1], partition="all", min_bars=1,
+        )
+        assert panel["close"]["AAAUSDT"].loc[ts[-1]] == 99.0
+        assert panel["close"]["AAAUSDT"].loc[ts[0]] == 1.0
+
+    def test_min_bars_rule_applies_to_projected_rows(self, tmp_path: Path) -> None:
+        directory = tmp_path / "1h"
+        directory.mkdir(parents=True)
+        ts = pd.date_range("2021-01-01", periods=50, freq="1h", tz="UTC")
+        epoch = (ts - pd.Timestamp("1970-01-01", tz="UTC")) // pd.Timedelta("1ms")
+        for sym in ("AAAUSDT", "BBBUSDT"):
+            pd.DataFrame(
+                {"timestamp": epoch, "close": [1.0] * 50, "quote_vol": [10.0] * 50},
+            ).to_parquet(directory / f"{sym}.parquet")
+        window = load_base_panel(
+            root=str(tmp_path), interval="1h", columns=("close",),
+            start=ts[10], end=ts[40], partition="all", min_bars=25,
+        )
+        assert list(window["close"].columns) == ["AAAUSDT", "BBBUSDT"]
+        with pytest.raises(ValueError, match="no symbol survived"):
+            load_base_panel(
+                root=str(tmp_path), interval="1h", columns=("close",),
+                start=ts[10], end=ts[40], partition="all", min_bars=32,
+            )
+
+
 def _write_symbols(directory: Path, symbols: list[str], periods: int) -> pd.DatetimeIndex:
     ts = pd.date_range("2021-01-01", periods=periods, freq="1h", tz="UTC")
     epoch = (ts - pd.Timestamp("1970-01-01", tz="UTC")) // pd.Timedelta("1ms")

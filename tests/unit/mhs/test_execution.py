@@ -719,3 +719,62 @@ class TestReplayEquivalencePerformance:
         assert fills.iloc[0]["reason"] == "passive_fill"
         assert report.fill_count == 1
         assert report.unfilled_count == 0
+
+
+class TestTerminalFailClosedRejection:
+    """MHS-28-TERMINAL-FAIL-CLOSED-REPORT: a deterministic capital breach stays
+    fail-closed inside the ledger and is classified to the stable
+    CAPITAL_INVARIANT_BREACH reason so the diagnostic can persist a serializable
+    typed rejection instead of dying on an uncaught process error."""
+
+    def test_ledger_capital_breach_is_fail_closed(self) -> None:
+        from src.application.research.mhs.evaluation import _classify_execution_failure
+        from src.common.errors import DataIntegrityError
+
+        idx = pd.date_range("2021-01-01", periods=3, freq="1h", tz="UTC")
+        marks = pd.DataFrame({"A": [100.0, 200.0, 200.0]}, index=idx)
+        fills = pd.DataFrame(
+            [
+                {"timestamp": idx[0], "symbol": "A", "quantity_delta": -0.01,
+                 "fill_price": 100.0, "fee_bps": 0.0, "reason": "passive_fill"},
+                {"timestamp": idx[1], "symbol": "A", "quantity_delta": 0.01,
+                 "fill_price": 200.0, "fee_bps": 0.0, "reason": "passive_fill"},
+            ],
+        )
+        with pytest.raises(DataIntegrityError, match="pre-trade equity"):
+            simulated_inventory_ledger(
+                fills, marks, pd.DataFrame(0.0, index=idx, columns=["A"]),
+                1.0, "OHLCV_STRICT_PROXY", "MARK_PRICE",
+            )
+        reason = _classify_execution_failure(DataIntegrityError("pre-trade equity must be positive and finite"))
+        assert reason == "CAPITAL_INVARIANT_BREACH"
+
+    def test_book_failure_serializes_null_metrics(self) -> None:
+        import json
+
+        from src.application.research.mhs.evaluation import MhsBookFailure, MhsBookReport, _jsonable
+        from src.common.errors import DataIntegrityError
+
+        exc = DataIntegrityError("pre-trade equity must be positive and finite")
+        failed = MhsBookReport(
+            name="blend", band="fast_reversal", horizon_hours=48, step_hours=6,
+            tranche_count=8, n_symbols=8, phase=None, prescreen=None, tail=None,
+            primary=None, stress=None,
+            primary_autocorr_sharpe=None, primary_naive_sharpe=None,
+            primary_net_ann=None, primary_geometric_cagr=None,
+            primary_max_drawdown=None, primary_annualized_turnover=None,
+            stress_naive_sharpe=None, terminal_censored_decisions=0,
+            failure=MhsBookFailure(
+                stage="replay_blend", error_class="DataIntegrityError",
+                reason="CAPITAL_INVARIANT_BREACH", message=str(exc),
+            ),
+        )
+        payload = _jsonable(failed)
+        assert payload["primary"] is None
+        assert payload["primary_autocorr_sharpe"] is None
+        assert payload["failure"]["reason"] == "CAPITAL_INVARIANT_BREACH"
+        assert payload["failure"]["error_class"] == "DataIntegrityError"
+        # Strict JSON: no NaN/Infinity tokens leak into the terminal payload.
+        encoded = json.dumps(payload)
+        assert "NaN" not in encoded
+        assert "Infinity" not in encoded
