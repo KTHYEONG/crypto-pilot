@@ -22,8 +22,14 @@ DEV_SYMBOLS = [
 ][:8]
 
 
-def _write_mhs_market(root: Path, symbols: list[str]) -> pd.Timestamp:
-    hourly = pd.date_range(START, periods=N_HOURS, freq="1h", tz="UTC")
+def _write_mhs_market(
+    root: Path,
+    symbols: list[str],
+    late_listings: dict[str, pd.Timestamp] | None = None,
+    n_hours: int = N_HOURS,
+) -> pd.Timestamp:
+    late_listings = late_listings or {}
+    hourly = pd.date_range(START, periods=n_hours, freq="1h", tz="UTC")
     end = hourly[-1]
     rng = np.random.default_rng(20260807)
     epoch = (hourly - pd.Timestamp("1970-01-01", tz="UTC")) // pd.Timedelta("1ms")
@@ -43,56 +49,63 @@ def _write_mhs_market(root: Path, symbols: list[str]) -> pd.Timestamp:
     n_min = len(minute_idx)
 
     for i, sym in enumerate(symbols):
+        sym_start = late_listings.get(sym, START)
+        sym_hourly = hourly[hourly >= sym_start]
+        sym_epoch = (sym_hourly - pd.Timestamp("1970-01-01", tz="UTC")) // pd.Timedelta("1ms")
+        sym_n = len(sym_hourly)
         drift = 1e-5 * (i - len(symbols) / 2.0)
-        prices = 100.0 * np.exp(np.cumsum(rng.normal(drift, 0.002, n)))
+        prices = 100.0 * np.exp(np.cumsum(rng.normal(drift, 0.002, sym_n)))
         pd.DataFrame(
             {
-                "timestamp": epoch,
+                "timestamp": sym_epoch,
                 "open": prices,
                 "high": prices * 1.001,
                 "low": prices * 0.999,
                 "close": prices,
-                "quote_vol": [1000.0] * n,
+                "quote_vol": [1000.0] * sym_n,
             },
         ).to_parquet(hour_dir / f"{sym}.parquet")
 
+        sym_minute = minute_idx[minute_idx >= sym_start]
+        sym_minute_epoch = (sym_minute - pd.Timestamp("1970-01-01", tz="UTC")) // pd.Timedelta("1ms")
+        sym_n_min = len(sym_minute)
         minute_prices = 100.0 * np.exp(
-            np.cumsum(rng.normal(drift, 0.002, n_min)),
+            np.cumsum(rng.normal(drift, 0.002, sym_n_min)),
         )
         pd.DataFrame(
             {
-                "timestamp": minute_epoch,
+                "timestamp": sym_minute_epoch,
                 "open": minute_prices,
                 "high": minute_prices * 1.0005,
                 "low": minute_prices * 0.9995,
                 "close": minute_prices,
-                "quote_vol": [1000.0] * n_min,
+                "quote_vol": [1000.0] * sym_n_min,
             },
         ).to_parquet(minute_dir / f"{sym}.parquet")
 
         pd.DataFrame(
             {
-                "timestamp": epoch,
-                "funding_rate": [0.00005] * n,
-                "datetime": hourly,
+                "timestamp": sym_epoch,
+                "funding_rate": [0.00005] * sym_n,
+                "datetime": sym_hourly,
             },
         ).to_parquet(funding_dir / f"{sym}.parquet")
 
         mark_hourly = (
-            pd.Series(minute_prices, index=minute_idx)
+            pd.Series(minute_prices, index=sym_minute)
             .resample("1h")
             .last()
-            .reindex(hourly)
+            .reindex(sym_hourly)
             .to_numpy()
         )
         pd.DataFrame(
             {
-                "timestamp": epoch,
+                "timestamp": sym_epoch,
                 "open": mark_hourly,
                 "high": mark_hourly,
                 "low": mark_hourly,
                 "close": mark_hourly,
-                "datetime": hourly,
+                "datetime": sym_hourly,
             },
         ).to_parquet(mark_dir / f"{sym}.parquet")
     return end
@@ -352,3 +365,300 @@ class TestMarkModeCli:
         assert fallback.mark_mode == "ohlcv_close_fallback"
         with pytest.raises(SystemExit):
             parser.parse_args(["mhs-horizon-diagnostic", "--mark-mode", "bogus"])
+
+
+LATE_SYMBOL = "MHSAUSDT"
+LATE_START = pd.Timestamp("2021-02-01", tz="UTC")
+
+
+class TestPitExecutionGrid:
+    """MHS-25-FULL-PERIOD-PIT-GRID: a late-listed symbol never clips the replay
+    start; pre-listing NaNs are retained and no order is emitted before the
+    symbol is PIT eligible."""
+
+    @pytest.fixture(scope="module")
+    def late_market_report(self, tmp_path_factory):
+        import src.market_data.services.futures_collection as fc
+
+        root = tmp_path_factory.mktemp("mhs_late_market")
+        end = _write_mhs_market(
+            root, DEV_SYMBOLS,
+            late_listings={LATE_SYMBOL: LATE_START},
+            n_hours=3000,
+        )
+        originals = {
+            "funding_path": ev.funding_path,
+            "mark_price_path": fc._mark_price_path,
+            "_BOOTSTRAP_REPLICATES": ev._BOOTSTRAP_REPLICATES,
+            "_BOOTSTRAP_MEAN_BLOCK": ev._BOOTSTRAP_MEAN_BLOCK,
+            "_BOOTSTRAP_SEED": ev._BOOTSTRAP_SEED,
+            "_placebo_sharpe_percentile": ev._placebo_sharpe_percentile,
+            "_bootstrap_ci": ev._bootstrap_ci,
+        }
+        ev.funding_path = lambda sym: root / "funding" / f"{sym}.parquet"
+        fc._mark_price_path = (
+            lambda symbol, timeframe: root / "markPriceKlines" / timeframe / f"{symbol}.parquet"
+        )
+        ev._BOOTSTRAP_REPLICATES = 20
+        ev._BOOTSTRAP_MEAN_BLOCK = 24
+        ev._BOOTSTRAP_SEED = 20260807
+        # The 500-placebo / bootstrap stats are not the subject of this test.
+        ev._placebo_sharpe_percentile = lambda *a, **k: None
+        ev._bootstrap_ci = lambda *a, **k: None
+        try:
+            yield run_mhs_horizon_diagnostic(
+                MhsDiagnosticRequest(
+                    start=str(START), end=str(end), data_root=str(root),
+                    execution_timeframe="1m", log_run=False,
+                ),
+            )
+        finally:
+            for name, value in originals.items():
+                if name == "mark_price_path":
+                    fc._mark_price_path = value
+                else:
+                    setattr(ev, name, value)
+
+    def test_replay_grid_starts_at_requested_start(self, late_market_report) -> None:
+        report = late_market_report
+        assert report.blend is not None
+        # The requested evaluation grid is the replay grid: it must begin at the
+        # requested start, not at the late symbol's first-observed timestamp.
+        assert report.blend.primary.ledger.equity.index[0] == START
+        assert report.blend.stress.ledger.equity.index[0] == START
+
+    def test_no_pre_listing_order_for_late_symbol(self, late_market_report) -> None:
+        report = late_market_report
+        assert LATE_SYMBOL in report.execution_symbols
+        fills = report.blend.primary.simulated_fills
+        pre_listing = fills[
+            (fills["symbol"] == LATE_SYMBOL) & (fills["timestamp"] < LATE_START)
+        ]
+        assert pre_listing.empty
+
+    def test_late_symbol_kept_as_nan_then_traded(self, late_market_report) -> None:
+        report = late_market_report
+        units = report.blend.primary.simulated_units
+        if LATE_SYMBOL in units.columns and len(units):
+            before = units[units.index < LATE_START][LATE_SYMBOL]
+            assert before.isna().all() or (before == 0.0).all()
+
+
+class TestAnchoredFoldGoGate:
+    """MHS-26-ANCHOR-FOLD-GO-GATE: all three replayed folds are reported; an
+    incomplete fold, negative strict Sharpe, non-positive stress Sharpe, or
+    relevant termination produces Research GO false and reason codes."""
+
+    def test_three_folds_reported_and_go_false(self, report) -> None:
+        assert len(report.folds) == 3
+        assert len(report.anchored_folds) == 3
+        for fold_report in report.folds:
+            assert fold_report.validation_start.startswith("2023-01-08") or fold_report.validation_start.startswith("2024-01-08") or fold_report.validation_start.startswith("2025-01-08")
+            assert fold_report.validation_end.startswith("2023-12-31") or fold_report.validation_end.startswith("2024-12-31") or fold_report.validation_end.startswith("2025-12-31")
+        assert report.research_go.eligible is False
+        assert "INCOMPLETE_ANCHORED_FOLD" in report.research_go.reason_codes
+        assert report.research_go.evaluated_folds == 3
+        # The gate boolean routes to deployment readiness, never primary_valid alone.
+        assert report.deployment_readiness.research_go_eligible is False
+        # The cap-30 / annual-return policies are not source-registered.
+        assert "UNSPECIFIED_POLICY" in report.research_go.reason_codes
+
+    def test_fold_metrics_exposed(self, report) -> None:
+        fold_report = report.folds[0]
+        assert isinstance(fold_report.failures, tuple)
+        assert isinstance(fold_report.termination_counts, dict)
+        assert fold_report.strict_elapsed_seconds >= 0.0
+        assert fold_report.stress_elapsed_seconds >= 0.0
+
+    def test_gate_collects_each_fail_closed_reason(self) -> None:
+        from src.application.research.mhs.evaluation import (
+            MhsFoldReport,
+            _mhs_research_go,
+        )
+        from src.mhs.execution import ExecutionSpec, strategy_aware_execution_replay
+
+        idx = pd.date_range("2021-01-01 12:01", periods=31, freq="1min", tz="UTC")
+        target = pd.DataFrame({"A": [1.0]}, index=[pd.Timestamp("2021-01-01 11:00", tz="UTC")])
+        signal_at = pd.DatetimeIndex([pd.Timestamp("2021-01-01 12:00", tz="UTC")])
+        px = pd.DataFrame({"A": [100.0] * 31}, index=idx)
+        replay = strategy_aware_execution_replay(
+            target, signal_at, px, px, px, px,
+            pd.DataFrame(0.0, index=idx, columns=["A"]), 1.0,
+            "OHLCV_STRICT_PROXY", ExecutionSpec(),
+        )
+
+        def fold(index: int, failures: tuple[str, ...]) -> MhsFoldReport:
+            return MhsFoldReport(
+                fold_index=index,
+                validation_start="2023-01-08 00:00:00+00:00",
+                validation_end="2023-12-31 00:00:00+00:00",
+                strict=replay,
+                stress=replay,
+                primary_valid=True,
+                primary_autocorr_sharpe=1.0,
+                primary_naive_sharpe=1.0,
+                primary_net_ann=0.1,
+                primary_geometric_cagr=0.1,
+                primary_max_drawdown=-0.02,
+                stress_naive_sharpe=0.1,
+                decision_intents=1,
+                termination_counts={"MISSING_DATA": 0, "UNKNOWN_TERMINATION": 0},
+                failures=failures,
+                strict_elapsed_seconds=0.01,
+                stress_elapsed_seconds=0.01,
+            )
+
+        from src.application.research.mhs.evaluation import (
+            MHS_GO_REASON_EXECUTION_GAP,
+            MHS_GO_REASON_INCOMPLETE_FOLD,
+            MHS_GO_REASON_PRIMARY_SHARPE,
+            MHS_GO_REASON_STRESS_SHARPE,
+        )
+
+        gap = _mhs_research_go((fold(0, (MHS_GO_REASON_EXECUTION_GAP,)),))
+        assert gap.eligible is False
+        assert MHS_GO_REASON_EXECUTION_GAP in gap.reason_codes
+
+        sharpe = _mhs_research_go((fold(0, (MHS_GO_REASON_PRIMARY_SHARPE,)),))
+        assert MHS_GO_REASON_PRIMARY_SHARPE in sharpe.reason_codes
+
+        stress = _mhs_research_go((fold(0, (MHS_GO_REASON_STRESS_SHARPE,)),))
+        assert MHS_GO_REASON_STRESS_SHARPE in stress.reason_codes
+
+        incomplete = _mhs_research_go(
+            (
+                MhsFoldReport(
+                    fold_index=0,
+                    validation_start="2023-01-08 00:00:00+00:00",
+                    validation_end="2023-12-31 00:00:00+00:00",
+                    strict=None,
+                    stress=None,
+                    primary_valid=False,
+                    primary_autocorr_sharpe=float("nan"),
+                    primary_naive_sharpe=float("nan"),
+                    primary_net_ann=float("nan"),
+                    primary_geometric_cagr=float("nan"),
+                    primary_max_drawdown=float("nan"),
+                    stress_naive_sharpe=float("nan"),
+                    decision_intents=0,
+                    termination_counts={},
+                    failures=(MHS_GO_REASON_INCOMPLETE_FOLD,),
+                    strict_elapsed_seconds=0.0,
+                    stress_elapsed_seconds=0.0,
+                ),
+            ),
+        )
+        assert MHS_GO_REASON_INCOMPLETE_FOLD in incomplete.reason_codes
+        assert incomplete.eligible is False
+
+
+class TestTypedArtifactRoundtrip:
+    """MHS-29-TYPED-ARTIFACT-ROUNDTRIP: persisted ledger and times artifacts
+    retain an explicit UTC timestamp and round-trip without strings or
+    NaN-equity concealment."""
+
+    def test_ledger_and_times_round_trip_as_utc(self, report, tmp_path) -> None:
+        from src.application.research.mhs.evaluation import persist_mhs_horizon_diagnostic_report
+
+        out = tmp_path / "mhs_report.json"
+        persist_mhs_horizon_diagnostic_report(report, out)
+        artifact_dir = out.parent / "mhs_report_artifacts"
+
+        ledger = pd.read_parquet(artifact_dir / "blend_primary_ledger.parquet")
+        assert pd.api.types.is_datetime64_any_dtype(ledger["timestamp"])
+        assert ledger["timestamp"].dt.tz is not None
+        assert str(ledger["timestamp"].dt.tz) == "UTC"
+        assert np.isfinite(ledger["equity"].to_numpy()).all()
+        idx = pd.DatetimeIndex(pd.to_datetime(ledger["timestamp"], utc=True))
+        assert idx.tz is not None
+
+        times = pd.read_parquet(artifact_dir / "blend_primary_times.parquet")
+        assert pd.api.types.is_datetime64_any_dtype(times["submit_time"])
+        assert pd.api.types.is_datetime64_any_dtype(times["fill_time"])
+        assert times["submit_time"].dt.tz is not None
+
+    def test_json_reference_carries_schema_and_checksum(self, report, tmp_path) -> None:
+        import json
+
+        from src.application.research.mhs.evaluation import persist_mhs_horizon_diagnostic_report
+
+        out = tmp_path / "mhs_report.json"
+        persist_mhs_horizon_diagnostic_report(report, out)
+        payload = json.loads(out.read_text())
+        ledger_ref = payload["blend"]["primary"]["ledger"]
+        assert ledger_ref["schema_version"] == 1
+        assert ledger_ref["row_count"] > 0
+        assert ledger_ref["time_bounds"]["start"] is not None
+        assert ledger_ref["checksum_sha256"]
+        fills_ref = payload["blend"]["primary"]["fills"]
+        assert fills_ref["row_count"] == len(report.blend.primary.simulated_fills)
+
+    def test_empty_replay_artifacts_round_trip(self, tmp_path) -> None:
+        from src.application.research.mhs.evaluation import _persist_replay_artifact
+        from src.mhs.execution import ExecutionSpec, strategy_aware_execution_replay
+
+        idx = pd.date_range("2021-01-01 12:01", periods=31, freq="1min", tz="UTC")
+        px = pd.DataFrame({"A": [100.0] * 31}, index=idx)
+        px.loc["2021-01-01 12:10":, "A"] = np.nan
+        target = pd.DataFrame({"A": [1.0]}, index=[pd.Timestamp("2021-01-01 11:00", tz="UTC")])
+        signal_at = pd.DatetimeIndex([pd.Timestamp("2021-01-01 12:00", tz="UTC")])
+        replay = strategy_aware_execution_replay(
+            target, signal_at, px, px, px, px,
+            pd.DataFrame(0.0, index=idx, columns=["A"]), 1.0,
+            "OHLCV_STRICT_PROXY", ExecutionSpec(),
+        )
+        assert replay.simulated_fills.empty
+        ref = _persist_replay_artifact(replay, tmp_path, "empty")
+        units = pd.read_parquet(tmp_path / "empty_units.parquet")
+        assert "timestamp" in units.columns
+        assert pd.api.types.is_datetime64_any_dtype(units["timestamp"])
+        ledger = pd.read_parquet(tmp_path / "empty_ledger.parquet")
+        assert "timestamp" in ledger.columns
+        assert ref["units"]["row_count"] == 0
+
+    def test_completed_fold_artifacts_persisted(self, report, tmp_path) -> None:
+        from dataclasses import replace
+
+        from src.application.research.mhs.evaluation import (
+            MHS_GO_REASON_UNSPECIFIED_POLICY,
+            MhsFoldReport,
+            persist_mhs_horizon_diagnostic_report,
+        )
+        from src.mhs.execution import ExecutionSpec, strategy_aware_execution_replay
+
+        idx = pd.date_range("2021-01-01 12:01", periods=31, freq="1min", tz="UTC")
+        target = pd.DataFrame({"A": [1.0]}, index=[pd.Timestamp("2021-01-01 11:00", tz="UTC")])
+        signal_at = pd.DatetimeIndex([pd.Timestamp("2021-01-01 12:00", tz="UTC")])
+        px = pd.DataFrame({"A": [100.0] * 31}, index=idx)
+        replay = strategy_aware_execution_replay(
+            target, signal_at, px, px, px, px,
+            pd.DataFrame(0.0, index=idx, columns=["A"]), 1.0,
+            "OHLCV_STRICT_PROXY", ExecutionSpec(),
+        )
+        fold_report = MhsFoldReport(
+            fold_index=0,
+            validation_start="2023-01-08 00:00:00+00:00",
+            validation_end="2023-12-31 00:00:00+00:00",
+            strict=replay,
+            stress=replay,
+            primary_valid=True,
+            primary_autocorr_sharpe=1.0,
+            primary_naive_sharpe=1.0,
+            primary_net_ann=0.1,
+            primary_geometric_cagr=0.1,
+            primary_max_drawdown=-0.02,
+            stress_naive_sharpe=0.1,
+            decision_intents=1,
+            termination_counts={},
+            failures=(MHS_GO_REASON_UNSPECIFIED_POLICY,),
+            strict_elapsed_seconds=0.01,
+            stress_elapsed_seconds=0.01,
+        )
+        patched = replace(report, folds=(fold_report,))
+        out = tmp_path / "fold_report.json"
+        persist_mhs_horizon_diagnostic_report(patched, out)
+        artifact_dir = out.parent / "fold_report_artifacts"
+        assert (artifact_dir / "fold0_strict_ledger.parquet").exists()
+        assert (artifact_dir / "fold0_stress_ledger.parquet").exists()
+        strict_ledger = pd.read_parquet(artifact_dir / "fold0_strict_ledger.parquet")
+        assert "timestamp" in strict_ledger.columns
