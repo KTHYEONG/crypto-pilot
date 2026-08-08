@@ -118,7 +118,7 @@ class SimulatedInventoryLedgerResult:
 
     equity: pd.Series
     net_returns: pd.Series
-    simulated_units: pd.DataFrame
+    simulated_units: pd.DataFrame | None
     mark_to_market_pnl: pd.Series
     funding_charge: pd.Series
     fee_charge: pd.Series
@@ -159,6 +159,7 @@ def simulated_inventory_ledger(
     initial_equity: float,
     fill_source: str,
     mark_source: _MarkSource,
+    retain_simulated_units: bool = False,
 ) -> SimulatedInventoryLedgerResult:
     """Compound a timestamp-sorted proxy fill stream into a cash-and-inventory ledger.
 
@@ -168,6 +169,11 @@ def simulated_inventory_ledger(
     the pre-fill quantity times mark price, then timestamp-sorted fills and
     their fees are applied. A proxy fill cannot earn or lose PnL before its
     timestamp.
+
+    Symbols are streamed one at a time into six aggregate one-dimensional
+    ledger series so only one symbol-length work-buffer set exists at any
+    moment; the dense ``simulated_units`` matrix is materialized only when
+    ``retain_simulated_units`` is requested by a diagnostic caller.
     """
     if initial_equity <= 0:
         raise DataIntegrityError("initial_equity must be > 0")
@@ -211,78 +217,95 @@ def simulated_inventory_ledger(
     # at that grid position.
 
     n_grid = len(grid)
-    n_cols = len(columns)
-    col_index = {c: j for j, c in enumerate(columns)}
 
     fill_positions = np.searchsorted(grid, fill_ts)
-    delta_units = np.zeros((n_grid, n_cols), dtype="float64")
+    delta_positions: dict[str, list[int]] = {c: [] for c in columns}
+    delta_quantities: dict[str, list[float]] = {c: [] for c in columns}
     fill_flow = np.zeros(n_grid, dtype="float64")
     fee_by_ts = np.zeros(n_grid, dtype="float64")
     turnover_terms: dict[pd.Timestamp, list[tuple[float, float]]] = defaultdict(list)
     turnover_pos: dict[pd.Timestamp, int] = {}
     for k, row in enumerate(fills.itertuples(index=False)):
         pos = int(fill_positions[k])
-        col = col_index[str(row.symbol)]
+        sym = str(row.symbol)
         qty = float(row.quantity_delta)
         price = float(row.fill_price)
         fee_bps = float(row.fee_bps)
         if not (np.isfinite(qty) and np.isfinite(price) and np.isfinite(fee_bps)):
             raise DataIntegrityError("simulated fills, prices, and fees must be finite")
         fee = fee_bps / 1e4 * abs(qty) * price
-        delta_units[pos, col] += qty
+        delta_positions[sym].append(pos)
+        delta_quantities[sym].append(qty)
         fill_flow[pos] += -(qty * price + fee)
         fee_by_ts[pos] += fee
         turnover_terms[row.timestamp].append((qty, price))
         turnover_pos[row.timestamp] = pos
 
-    units_state = np.cumsum(delta_units, axis=0)
-    units_before = np.zeros_like(units_state)
-    units_before[1:] = units_state[:-1]
-
-    # An unavailable mark is valued at exactly zero for a flat position, so
-    # cash equity stays finite before the first tradable mark. A held position
-    # at an unavailable mark is reported below as primary-invalid and is carried
-    # at its last known mark so the ledger arithmetic stays finite and positive
-    # instead of leaking ``0 * NaN`` or a negative cash shortfall.
-    last_index = np.where(finite, np.arange(n_grid)[:, None], 0)
-    last_index = np.maximum.accumulate(last_index, axis=0)
-    forward = marks_values[last_index, np.arange(n_cols)[None, :]]
-    valuation = np.where(
-        finite | (units_state != 0.0),
-        np.where(finite, marks_values, forward),
-        0.0,
-    )
-
+    notional = np.zeros(n_grid, dtype="float64")
+    notional_before = np.zeros(n_grid, dtype="float64")
+    mtm = np.zeros(n_grid, dtype="float64")
+    funding_charge = np.zeros(n_grid, dtype="float64")
     primary_valid = True
     invalid_reasons: set[str] = set()
+    units_state_by_symbol: list[np.ndarray] | None = [] if retain_simulated_units else None
+    grid_index = np.arange(n_grid)
 
-    mtm = np.zeros(n_grid, dtype="float64")
-    delta_price = np.zeros_like(marks_values)
-    delta_price[1:] = marks_values[1:] - marks_values[:-1]
-    joint = np.zeros_like(finite)
-    joint[1:] = finite[1:] & finite[:-1]
-    held = units_before != 0.0
-    if np.any(held & ~joint):
-        primary_valid = False
-        invalid_reasons.add("MISSING_DATA")
-    mtm[1:] = np.sum(
-        np.where(joint[1:], units_before[1:] * delta_price[1:], 0.0), axis=1,
-    )
+    for j, sym in enumerate(columns):
+        m = marks_values[:, j]
+        f = funding_rates[:, j]
+        sym_finite = finite[:, j]
 
-    charged = funding_rates * units_before * marks_values
-    charged = np.where(finite, charged, 0.0)
-    if np.any(~finite & held & (funding_rates != 0.0)):
-        primary_valid = False
-        invalid_reasons.add("MISSING_DATA")
-    funding_charge = np.sum(charged, axis=1)
+        d = np.zeros(n_grid, dtype="float64")
+        np.add.at(
+            d,
+            np.asarray(delta_positions[sym], dtype=np.intp),
+            np.asarray(delta_quantities[sym], dtype="float64"),
+        )
+        units_state = np.cumsum(d)
+        units_before = np.zeros(n_grid, dtype="float64")
+        units_before[1:] = units_state[:-1]
+
+        # An unavailable mark is valued at exactly zero for a flat position, so
+        # cash equity stays finite before the first tradable mark. A held position
+        # at an unavailable mark is reported below as primary-invalid and is carried
+        # at its last known mark so the ledger arithmetic stays finite and positive
+        # instead of leaking ``0 * NaN`` or a negative cash shortfall.
+        last_index = np.maximum.accumulate(np.where(sym_finite, grid_index, 0))
+        forward = m[last_index]
+        valuation = np.where(
+            sym_finite | (units_state != 0.0),
+            np.where(sym_finite, m, forward),
+            0.0,
+        )
+
+        held = units_before != 0.0
+        joint = np.zeros(n_grid, dtype=bool)
+        joint[1:] = sym_finite[1:] & sym_finite[:-1]
+        if np.any(held & ~joint):
+            primary_valid = False
+            invalid_reasons.add("MISSING_DATA")
+
+        delta_price = np.zeros(n_grid, dtype="float64")
+        delta_price[1:] = m[1:] - m[:-1]
+        mtm[1:] += np.where(joint[1:], units_before[1:] * delta_price[1:], 0.0)
+
+        charged = f * units_before * m
+        charged = np.where(sym_finite, charged, 0.0)
+        if np.any(~sym_finite & held & (f != 0.0)):
+            primary_valid = False
+            invalid_reasons.add("MISSING_DATA")
+        funding_charge += charged
+
+        notional += units_state * valuation
+        notional_before += units_before * valuation
+        if units_state_by_symbol is not None:
+            units_state_by_symbol.append(units_state)
 
     cash_after = initial_equity + np.cumsum(fill_flow - funding_charge)
     cash_pre_fill = np.empty(n_grid, dtype="float64")
     cash_pre_fill[0] = initial_equity - funding_charge[0]
     cash_pre_fill[1:] = cash_after[:-1] - funding_charge[1:]
 
-    notional = np.sum(units_state * valuation, axis=1)
-    notional_before = np.sum(units_before * valuation, axis=1)
     equity_values_arr = cash_after + notional
 
     turnover_arr = np.zeros(n_grid, dtype="float64")
@@ -298,10 +321,15 @@ def simulated_inventory_ledger(
     equity = pd.Series(equity_values_arr, index=grid, dtype="float64")
     if not np.isfinite(equity_values_arr).all() or (equity_values_arr <= 0).any():
         raise DataIntegrityError("simulated inventory equity must be finite and strictly positive")
+    simulated_units_df = (
+        pd.DataFrame(np.column_stack(units_state_by_symbol), index=grid, columns=columns)
+        if units_state_by_symbol is not None
+        else None
+    )
     return SimulatedInventoryLedgerResult(
         equity=equity,
         net_returns=equity.pct_change().dropna(),
-        simulated_units=pd.DataFrame(units_state, index=grid, columns=columns),
+        simulated_units=simulated_units_df,
         mark_to_market_pnl=pd.Series(mtm, index=grid, dtype="float64"),
         funding_charge=pd.Series(funding_charge, index=grid, dtype="float64"),
         fee_charge=pd.Series(fee_by_ts, index=grid, dtype="float64"),
@@ -334,6 +362,11 @@ def strategy_aware_execution_replay(
     nets opposite fast/slow intents before any market intent is created. It
     must not create a bar-wise target-weight path that implicitly rebalances
     without a proxy event.
+
+    Units and last-price state are aligned NumPy vectors; mark-to-market and
+    interval funding use masked vector operations and intents are created only
+    for the active columns (finite non-zero targets plus non-zero held units),
+    so the work scales with the active roster instead of the full union width.
 
     Live forward collection (Phase 4B) records one ``ForwardExecutionObservation``
     per signal intent; this OHLCV replay cannot observe queue position, partial
@@ -378,51 +411,48 @@ def strategy_aware_execution_replay(
     if not bar_funding.index.equals(minute_grid):
         raise DataIntegrityError("bar_funding must align exactly to the minute grid")
     symbols = list(target_weights.columns)
-    col_index = {s: i for i, s in enumerate(symbols)}
+    n_cols = len(symbols)
     require_strict = execution_bound == "OHLCV_STRICT_PROXY"
 
-    marks_values = marks.to_numpy(dtype="float64")
-    highs_values = minute_highs.to_numpy(dtype="float64")
-    lows_values = minute_lows.to_numpy(dtype="float64")
-    closes_values = minute_closes.to_numpy(dtype="float64")
+    marks_values = marks[symbols].to_numpy(dtype="float64")
+    highs_values = minute_highs[symbols].to_numpy(dtype="float64")
+    lows_values = minute_lows[symbols].to_numpy(dtype="float64")
+    closes_values = minute_closes[symbols].to_numpy(dtype="float64")
     close_finite = np.isfinite(closes_values)
     mark_valid = np.isfinite(marks_values) & (marks_values > 0.0)
-    funding_values = [bar_funding[s].to_numpy(dtype="float64") for s in symbols]
+    funding_matrix = np.stack([bar_funding[s].to_numpy(dtype="float64") for s in symbols], axis=1)
 
     last_reliable: dict[str, pd.Timestamp] = {}
     for sym in symbols:
         valid = minute_closes[sym].dropna()
         last_reliable[sym] = valid.index[-1] if len(valid) else minute_grid[0]
 
-    units = dict.fromkeys(symbols, 0.0)
+    units_arr = np.zeros(n_cols, dtype="float64")
     cash = float(initial_equity)
-    last_prices: dict[str, float] = {}
+    last_prices_arr = np.full(n_cols, np.nan, dtype="float64")
     last_time_ns: int | None = None
 
     def _equity_at() -> float:
-        return cash + sum(
-            units[s] * last_prices[s] for s in symbols if s in last_prices
-        )
+        return cash + float(np.sum(units_arr * np.nan_to_num(last_prices_arr, nan=0.0)))
 
     def _advance(target_ns: int, dpos: int, on_grid: bool) -> None:
-        nonlocal cash, last_time_ns
+        nonlocal cash, last_time_ns, last_prices_arr
         if last_time_ns is not None and target_ns < last_time_ns:
             raise DataIntegrityError("decision times must be monotonically increasing")
         if on_grid:
-            for s in symbols:
-                price = marks_values[dpos, col_index[s]]
-                if np.isfinite(price):
-                    if s in last_prices:
-                        cash += units[s] * (price - last_prices[s])
-                    last_prices[s] = price
+            m = marks_values[dpos]
+            finite = np.isfinite(m)
+            prev = last_prices_arr
+            mark_changed = finite & np.isfinite(prev)
+            if mark_changed.any():
+                cash += float(np.sum(units_arr[mark_changed] * (m[mark_changed] - prev[mark_changed])))
+            last_prices_arr = np.where(finite, m, prev)
         lo = np.searchsorted(grid_ns, last_time_ns, side="right") if last_time_ns is not None else 0
         hi = int(np.searchsorted(grid_ns, target_ns, side="right"))
         if lo < hi:
-            for i in range(lo, min(hi, n_grid)):
-                for s in symbols:
-                    rate = funding_values[col_index[s]][i]
-                    if rate != 0.0 and units[s] != 0.0 and s in last_prices:
-                        cash -= rate * units[s] * last_prices[s]
+            rates_block = funding_matrix[lo:hi, :]
+            priced = np.isfinite(last_prices_arr)
+            cash -= float(np.sum(rates_block * units_arr * np.where(priced, last_prices_arr, 0.0)))
         last_time_ns = target_ns
 
     def _decision_price(col: int, on_grid: bool, dpos: int, spos: int) -> float | None:
@@ -445,8 +475,8 @@ def strategy_aware_execution_replay(
     unfilled_count = 0
     fallback_count = 0
     termination_counts: dict[str, int] = {"MISSING_DATA": 0, "UNKNOWN_TERMINATION": 0}
-    units_after_events: list[tuple[pd.Timestamp, list[float]]] = []
-    notional_after_events: list[tuple[pd.Timestamp, list[float]]] = []
+    units_after_events: list[tuple[pd.Timestamp, np.ndarray]] = []
+    notional_after_events: list[tuple[pd.Timestamp, np.ndarray]] = []
 
     decision_ns_all = np.asarray(target_weights.index, dtype="datetime64[ns]").astype("int64")
     signal_ns_all = np.asarray(signal_available_at, dtype="datetime64[ns]").astype("int64")
@@ -456,30 +486,33 @@ def strategy_aware_execution_replay(
     on_grid_all = np.where(
         dpos_all < n_grid, grid_ns[dpos_clipped] == decision_ns_all, False,
     )
+    target_values = target_weights.to_numpy(dtype="float64")
 
     _t0 = time.perf_counter()
-    for i, decision_time in enumerate(target_weights.index):
+    for i, _decision_time in enumerate(target_weights.index):
         dns = int(decision_ns_all[i])
         dpos = int(dpos_all[i])
         on_grid = bool(on_grid_all[i])
         _advance(dns, dpos, on_grid)
         equity = _equity_at()
-        row = target_weights.loc[decision_time]
+        row = target_values[i]
         spos = int(spos_all[i])
 
-        for sym in symbols:
-            weight = float(row[sym]) if sym in row.index else 0.0
-            if not np.isfinite(weight) or weight == 0.0:
-                continue
-            col = col_index[sym]
+        # Active columns: finite non-zero targets plus non-zero held units. The
+        # held-units term preserves the existing zero-target close behavior for
+        # inventory left over when a symbol leaves the target set.
+        active = np.where(np.isfinite(row) & ((row != 0.0) | (units_arr != 0.0)))[0]
+        for col in active.tolist():
+            sym = symbols[col]
+            weight = float(row[col])
             decision_price = _decision_price(col, on_grid, dpos, spos)
             if decision_price is None:
                 termination_counts["MISSING_DATA"] += 1
                 continue
-            if sym not in last_prices:
-                last_prices[sym] = decision_price
+            if not np.isfinite(last_prices_arr[col]):
+                last_prices_arr[col] = decision_price
             desired_units = weight * equity / decision_price
-            net_units = desired_units - units[sym]
+            net_units = desired_units - units_arr[col]
             if abs(net_units) < 1e-12:
                 continue
             side = 1 if net_units > 0 else -1
@@ -556,17 +589,17 @@ def strategy_aware_execution_replay(
             fill_time = minute_grid[fill_pos]
             submit_time = minute_grid[submit_pos]
 
-            if sym in last_prices:
-                mark_price = float(marks_values[fill_pos, col])
+            mark_price = float(marks_values[fill_pos, col])
+            if np.isfinite(last_prices_arr[col]):
                 if np.isfinite(mark_price):
-                    cash += units[sym] * (mark_price - last_prices[sym])
-                    last_prices[sym] = mark_price
-            elif np.isfinite(marks_values[fill_pos, col]):
-                last_prices[sym] = float(marks_values[fill_pos, col])
+                    cash += units_arr[col] * (mark_price - last_prices_arr[col])
+                    last_prices_arr[col] = mark_price
+            elif np.isfinite(mark_price):
+                last_prices_arr[col] = mark_price
             cash -= net_units * fill_price
             fee = fee_bps / 1e4 * abs(net_units) * fill_price
             cash -= fee
-            units[sym] += net_units
+            units_arr[col] += net_units
             if reason in ("passive_fill", "timeout_taker"):
                 pre_trade_equity = _equity_at()
                 fill_records.append(
@@ -582,27 +615,21 @@ def strategy_aware_execution_replay(
                 )
                 fill_times.append(fill_time)
                 submit_times.append(submit_time)
-                units_after_events.append((fill_time, [units[s] for s in symbols]))
+                units_after_events.append((fill_time, units_arr.copy()))
                 notional_after_events.append(
-                    (
-                        fill_time,
-                        [
-                            units[s] * float(marks_values[fill_pos, col_index[s]])
-                            for s in symbols
-                        ],
-                    )
+                    (fill_time, units_arr * marks_values[fill_pos, :])
                 )
 
     # Persistent source-end gap with held units: UNKNOWN_TERMINATION forced exit.
     forced_exit_count = 0
     forced_exit_notional = 0.0
     grid_end = minute_grid[-1]
-    for sym in symbols:
-        if units[sym] == 0.0:
+    for col in range(n_cols):
+        sym = symbols[col]
+        if units_arr[col] == 0.0:
             continue
         if last_reliable[sym] >= grid_end:
             continue
-        col = col_index[sym]
         exit_pos = int(np.searchsorted(grid_ns, last_reliable[sym].value, side="left"))
         exit_time = minute_grid[exit_pos]
         exit_price = float(closes_values[exit_pos, col])
@@ -611,25 +638,30 @@ def strategy_aware_execution_replay(
             continue
         termination_counts["UNKNOWN_TERMINATION"] += 1
         forced_exit_count += 1
-        forced_exit_notional += abs(units[sym] * exit_price)
+        forced_exit_notional += abs(units_arr[col] * exit_price)
         penalty = (
             TERMINATION_STRESS_PENALTY_BPS
             if execution_bound == "OHLCV_IMMEDIATE_TAKER"
             else 0.0
         )
         fee_bps = spec.taker_fee_bps + spec.taker_slippage_bps + penalty
+        prev_price = (
+            float(last_prices_arr[col])
+            if np.isfinite(last_prices_arr[col])
+            else exit_price
+        )
         mark_price = float(marks_values[exit_pos, col])
         if np.isfinite(mark_price):
-            cash -= units[sym] * (mark_price - last_prices.get(sym, exit_price))
-            last_prices[sym] = mark_price
-        cash -= -units[sym] * exit_price
-        fee = fee_bps / 1e4 * abs(units[sym]) * exit_price
+            cash -= units_arr[col] * (mark_price - prev_price)
+            last_prices_arr[col] = mark_price
+        cash -= -units_arr[col] * exit_price
+        fee = fee_bps / 1e4 * abs(units_arr[col]) * exit_price
         cash -= fee
         fill_records.append(
             {
                 "timestamp": exit_time,
                 "symbol": sym,
-                "quantity_delta": -units[sym],
+                "quantity_delta": -units_arr[col],
                 "fill_price": exit_price,
                 "fee_bps": fee_bps,
                 "reason": "forced_exit",
@@ -637,8 +669,8 @@ def strategy_aware_execution_replay(
             }
         )
         fill_times.append(exit_time)
-        units[sym] = 0.0
-        units_after_events.append((exit_time, [units[s] for s in symbols]))
+        units_arr[col] = 0.0
+        units_after_events.append((exit_time, units_arr.copy()))
     elapsed_seconds = time.perf_counter() - _t0
 
     simulated_fills = pd.DataFrame(
@@ -655,6 +687,7 @@ def strategy_aware_execution_replay(
 
     ledger = simulated_inventory_ledger(
         simulated_fills, marks, bar_funding, initial_equity, execution_bound, mark_source,
+        retain_simulated_units=False,
     )
     if units_after_events:
         events_index = pd.DatetimeIndex([t for t, _ in units_after_events])
