@@ -11,6 +11,7 @@ import os
 from collections.abc import Sequence
 from typing import Literal
 
+import numpy as np
 import pandas as pd
 import pyarrow.parquet as pq
 
@@ -66,32 +67,71 @@ def load_base_panel(
     names = [os.path.basename(p).removesuffix(".parquet") for p in paths]
     keep = set(partition_symbols(names, partition))
 
-    frames: dict[str, dict[str, pd.Series]] = {c: {} for c in columns}
     start_ms = int(start.value // 1_000_000)
     end_ms = int(end.value // 1_000_000)
+
+    # Discover survivors before allocating the wide panel.  The prior
+    # ``dict[Series] -> DataFrame -> reindex`` construction held as many as
+    # three full copies of every requested field while assembling long MHS
+    # folds.  A full 2021--2025 dev panel can contain hundreds of symbols, so
+    # that transient amplification terminates the process before the
+    # fail-closed replay/report path can run.
+    survivors: list[tuple[str, str]] = []
     for path, sym in zip(paths, names, strict=True):
         if sym not in keep:
             continue
+        table = pq.read_table(
+            path,
+            columns=["timestamp"],
+            filters=[[("timestamp", ">=", start_ms), ("timestamp", "<=", end_ms)]],
+        )
+        idx = pd.to_datetime(table.column("timestamp").to_numpy(), unit="ms", utc=True)
+        idx = idx[(idx >= start) & (idx <= end)]
+        if len(idx.drop_duplicates(keep="last")) < min_bars:
+            continue
+        survivors.append((path, sym))
+
+    if not survivors:
+        raise ValueError("no symbol survived the panel filters")
+
+    values = {
+        column: np.full((len(grid), len(survivors)), np.nan, dtype="float64")
+        for column in columns
+    }
+    for column_index, (path, _) in enumerate(survivors):
         table = pq.read_table(
             path,
             columns=["timestamp", *columns],
             filters=[[("timestamp", ">=", start_ms), ("timestamp", "<=", end_ms)]],
         )
         idx = pd.to_datetime(table.column("timestamp").to_numpy(), unit="ms", utc=True)
-        sub = pd.DataFrame(
-            {c: table.column(c).to_numpy().astype("float64") for c in columns},
-            index=idx,
-        )
-        sub = sub[(sub.index >= start) & (sub.index <= end)]
-        sub = sub[~sub.index.duplicated(keep="last")].sort_index()
-        if len(sub) < min_bars:
+        in_window = (idx >= start) & (idx <= end)
+        window_sources = np.flatnonzero(in_window)
+        positions = grid.get_indexer(idx[in_window])
+        valid_positions = positions >= 0
+        source_positions = window_sources[valid_positions]
+        target_positions = positions[valid_positions]
+        if not len(target_positions):
             continue
-        for c in columns:
-            frames[c][sym] = sub[c]
 
-    if not frames[columns[0]]:
-        raise ValueError("no symbol survived the panel filters")
-    return {c: pd.DataFrame(frames[c]).reindex(grid).sort_index(axis=1) for c in columns}
+        # Stable sorting makes the final source row win for duplicate
+        # timestamps, exactly matching ``duplicated(keep='last')``.
+        order = np.argsort(target_positions, kind="stable")
+        ordered_targets = target_positions[order]
+        keep_last = np.empty(len(order), dtype=bool)
+        keep_last[:-1] = ordered_targets[:-1] != ordered_targets[1:]
+        keep_last[-1] = True
+        selected_sources = source_positions[order[keep_last]]
+        selected_targets = ordered_targets[keep_last]
+        for column in columns:
+            field = table.column(column).to_numpy().astype("float64", copy=False)
+            values[column][selected_targets, column_index] = field[selected_sources]
+
+    symbols = [sym for _, sym in survivors]
+    return {
+        column: pd.DataFrame(values[column], index=grid, columns=symbols, copy=False)
+        for column in columns
+    }
 
 
 def liquid_half_eligibility(

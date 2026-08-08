@@ -10,6 +10,7 @@ every report separates the two.
 from __future__ import annotations
 
 import dataclasses
+import gc
 import hashlib
 import json
 import logging
@@ -29,7 +30,7 @@ from src.market_data.services.futures_collection import DataCollector
 from src.mhs.evaluation import cost_response_curve, phase_diagnostic_metrics, tail_sensitivity_curve
 from src.mhs.evaluation import AnchoredPurgedFold, DeploymentReadinessResult, autocorrelation_adjusted_sharpe, synthetic_stress_scenarios
 from src.mhs.execution import ExecutionReplayWindow, simulated_inventory_ledger
-from src.mhs.execution import replay_execution_windows
+from src.mhs.execution import replay_execution_window_pair
 from src.mhs.panel import liquid_half_eligibility, load_base_panel
 from src.research.evaluation.policy import resolve_evaluation_end
 
@@ -513,34 +514,44 @@ def _phase_diagnostics(
     spec: BookSpec,
 ) -> PhaseDiagnosticResult:
     phase_nets: dict[int, pd.Series] = {}
+    signal = horizon_log_return(log_close, spec.horizon_hours)
     for offset in range(spec.step_hours):
         phase_grid = grid_1h[offset :: spec.step_hours]
-        sig = horizon_log_return(log_close, spec.horizon_hours).reindex(phase_grid)
+        sig = signal.reindex(phase_grid)
         el = eligible.reindex(phase_grid)
         weights = rank_weight_book(sig, el, spec.band.sign, spec.min_symbols)
-        weights_1h = weights.reindex(grid_1h).ffill().fillna(0.0)
+        weights_1h = weights.reindex(grid_1h, method="ffill").fillna(0.0)
         net, _turnover = mhs_ledger_pnl(weights_1h, opens, bar_funding, 8.0)
         phase_nets[offset] = net
+        # Each phase is independent.  Explicitly dropping its full-grid
+        # target/ledger intermediates prevents allocator high-water growth on
+        # multi-year, hundreds-of-symbol diagnostics.
+        del sig, el, weights, weights_1h, _turnover
+        gc.collect()
     return phase_diagnostic_metrics(phase_nets, _PERIODS_PER_YEAR_1H)
 
 
 def _xs_rank_ic(signal: pd.DataFrame, fwd: pd.DataFrame) -> dict[str, float]:
-    common = signal.index.intersection(fwd.index)
-    ics: dict[pd.Timestamp, float] = {}
-    for t in common:
-        row_sig = signal.loc[t]
-        row_fwd = fwd.loc[t]
-        valid = row_sig.notna() & row_fwd.notna()
-        if int(valid.sum()) < 5:
-            continue
-        s = row_sig[valid].rank()
-        f = row_fwd[valid].rank()
-        if s.std() == 0 or f.std() == 0:
-            continue
-        ics[t] = float(np.corrcoef(s, f)[0, 1])
-    if not ics:
+    common_index = signal.index.intersection(fwd.index)
+    common_columns = signal.columns.intersection(fwd.columns)
+    if common_index.empty or common_columns.empty:
         return {}
-    series = pd.Series(ics)
+    signal_common = signal.loc[common_index, common_columns]
+    fwd_common = fwd.loc[common_index, common_columns]
+    valid = signal_common.notna() & fwd_common.notna()
+    signal_rank = signal_common.where(valid).rank(axis=1)
+    fwd_rank = fwd_common.where(valid).rank(axis=1)
+    signal_centered = signal_rank.sub(signal_rank.mean(axis=1), axis=0)
+    fwd_centered = fwd_rank.sub(fwd_rank.mean(axis=1), axis=0)
+    denominator = np.sqrt(
+        signal_centered.pow(2).sum(axis=1) * fwd_centered.pow(2).sum(axis=1),
+    )
+    correlations = (
+        (signal_centered * fwd_centered).sum(axis=1) / denominator
+    ).where(valid.sum(axis=1).ge(5) & denominator.gt(0.0)).dropna()
+    if correlations.empty:
+        return {}
+    series = correlations.astype("float64")
     n_dates = len(series)
     mean_ic = float(series.mean())
     sd = float(series.std(ddof=1)) if n_dates > 1 else 0.0
@@ -550,41 +561,35 @@ def _xs_rank_ic(signal: pd.DataFrame, fwd: pd.DataFrame) -> dict[str, float]:
 
 def _date_clustered_ols(fwd: pd.DataFrame, past: pd.DataFrame) -> dict[str, float]:
     """Pooled panel regression ``fwd ~ past`` with date-clustered standard errors."""
-    x_vals: list[float] = []
-    y_vals: list[float] = []
-    cluster_ids: list[int] = []
-    date_to_id: dict[pd.Timestamp, int] = {}
-    for t in past.index.intersection(fwd.index):
-        row_past = past.loc[t]
-        row_fwd = fwd.loc[t]
-        valid = row_past.notna() & row_fwd.notna()
-        for sym in past.columns:
-            if sym not in valid.index or not bool(valid[sym]):
-                continue
-            day = pd.Timestamp(t).normalize()
-            if day not in date_to_id:
-                date_to_id[day] = len(date_to_id)
-            x_vals.append(float(row_past[sym]))
-            y_vals.append(float(row_fwd[sym]))
-            cluster_ids.append(date_to_id[day])
-    n = len(x_vals)
+    common_index = past.index.intersection(fwd.index)
+    common_columns = past.columns.intersection(fwd.columns)
+    if common_index.empty or common_columns.empty:
+        return {"n": 0, "past_beta": float("nan"), "past_t": float("nan")}
+    x = past.loc[common_index, common_columns].to_numpy(dtype="float64", copy=False)
+    y = fwd.loc[common_index, common_columns].to_numpy(dtype="float64", copy=False)
+    valid = np.isfinite(x) & np.isfinite(y)
+    n = int(valid.sum())
     if n < 10:
         return {"n": n, "past_beta": float("nan"), "past_t": float("nan")}
-    design = np.column_stack([np.ones(n), np.asarray(x_vals, dtype="float64")])
-    outcome = np.asarray(y_vals, dtype="float64")
-    inv_xtx = np.linalg.inv(design.T @ design)
-    beta = inv_xtx @ (design.T @ outcome)
-    resid = outcome - design @ beta
-    cids = np.asarray(cluster_ids)
-    meat = np.zeros((2, 2))
-    for c in np.unique(cids):
-        cluster_mask = cids == c
-        score = design[cluster_mask].T @ resid[cluster_mask]
-        meat += np.outer(score, score)
+    x_valid = np.where(valid, x, 0.0)
+    y_valid = np.where(valid, y, 0.0)
+    sum_x = float(x_valid.sum())
+    sum_y = float(y_valid.sum())
+    xtx = np.array([[n, sum_x], [sum_x, float(np.square(x_valid).sum())]])
+    xty = np.array([sum_y, float((x_valid * y_valid).sum())])
+    inv_xtx = np.linalg.inv(xtx)
+    beta = inv_xtx @ xty
+    residual = np.where(valid, y - beta[0] - beta[1] * x, 0.0)
+    daily_scores = pd.DataFrame(
+        {"intercept": residual.sum(axis=1), "slope": (x_valid * residual).sum(axis=1)},
+        index=common_index,
+    ).resample("1D").sum()
+    scores = daily_scores.to_numpy(dtype="float64", copy=False)
+    meat = scores.T @ scores
     cov = inv_xtx @ meat @ inv_xtx
     se = np.sqrt(np.diag(cov))
     t_beta = beta[1] / se[1] if se[1] > 0 else float("nan")
-    return {"n": n, "n_dates": len(date_to_id), "past_beta": float(beta[1]), "past_t": float(t_beta)}
+    return {"n": n, "n_dates": len(daily_scores), "past_beta": float(beta[1]), "past_t": float(t_beta)}
 
 
 def _bootstrap_ci(net: pd.Series, n_replicates: int, mean_block: int, seed: int) -> tuple[float, float]:
@@ -1071,9 +1076,9 @@ def _book_outcome(
             _assert_execution_rss_budget(prefix, request.max_rss_bytes, idx + 1)
 
     try:
-        primary = replay_execution_windows(
+        primary, stress = replay_execution_window_pair(
             _window_telemetry(_windows(), "execution_window"),
-            initial_equity, "OHLCV_STRICT_PROXY", ExecutionSpec(),
+            initial_equity, ExecutionSpec(),
             retain_event_snapshots=False,
         )
         if telemetry is not None:
@@ -1082,12 +1087,6 @@ def _book_outcome(
                 n_symbols=len(replay_symbols),
                 fill_count=len(primary.simulated_fills),
             )
-        stress = replay_execution_windows(
-            _window_telemetry(_windows(), "execution_window"),
-            initial_equity, "OHLCV_IMMEDIATE_TAKER", ExecutionSpec(),
-            retain_event_snapshots=False,
-        )
-        if telemetry is not None:
             telemetry.record(
                 f"replay_{name}_stress",
                 n_symbols=len(replay_symbols),
@@ -1193,9 +1192,9 @@ def _run_anchored_fold(
     feeds features only; the replay decisions and the fresh flat ledger cover
     only the validation window. The fold uses the same at-most-31-day windowed
     execution engine as the top-level books (``_iter_mhs_execution_windows`` +
-    ``replay_execution_windows``) so dense event snapshots stay disabled and
-    per-window resource telemetry/RSS budgets are applied inside the fold, not
-    only at the top level. A fold that cannot be replayed is reported (not
+    ``replay_execution_window_pair``) so dense event snapshots stay disabled
+    and per-window resource telemetry/RSS budgets are applied inside the fold,
+    not only at the top level. A fold that cannot be replayed is reported (not
     raised) with machine-readable failure codes.
     """
     try:
@@ -1297,16 +1296,10 @@ def _run_anchored_fold(
                 yield w
                 _assert_execution_rss_budget(prefix, request.max_rss_bytes, idx + 1)
 
-        strict_prefix = f"anchored_fold_{fold_index}_window"
-        primary = replay_execution_windows(
-            _window_telemetry(_windows(), strict_prefix),
-            initial_equity, "OHLCV_STRICT_PROXY", ExecutionSpec(),
-            retain_event_snapshots=False,
-        )
-        stress_prefix = f"anchored_fold_{fold_index}_stress_window"
-        stress = replay_execution_windows(
-            _window_telemetry(_windows(), stress_prefix),
-            initial_equity, "OHLCV_IMMEDIATE_TAKER", ExecutionSpec(),
+        window_prefix = f"anchored_fold_{fold_index}_window"
+        primary, stress = replay_execution_window_pair(
+            _window_telemetry(_windows(), window_prefix),
+            initial_equity, ExecutionSpec(),
             retain_event_snapshots=False,
         )
 
@@ -1455,6 +1448,10 @@ def run_mhs_horizon_diagnostic(request: MhsDiagnosticRequest) -> MhsHorizonDiagn
 
     eligible = liquid_half_eligibility(quote_vol, lookback_bars=720, min_history_bars=720)
     log_close = np.log(close)
+    # The raw close panel is not used after its log transform.  Releasing it
+    # before phase/weight construction avoids retaining two full multi-year
+    # price matrices at once.
+    del close
 
     specs = PHASE_1_BOOK_SPECS
     fast = specs["fast_reversal"]
@@ -1473,6 +1470,10 @@ def run_mhs_horizon_diagnostic(request: MhsDiagnosticRequest) -> MhsHorizonDiagn
     w_slow_execution = w_slow.where(
         execution_mask.reindex(w_slow.index).fillna(False), other=0.0,
     )
+    # Eligibility and the execution roster are now materialized.  The raw
+    # volume matrix otherwise stays alive while phase diagnostics create their
+    # temporary target-weight matrices.
+    del quote_vol
     blend_1h = (
         PHASE_1_BOOK_BLEND_WEIGHTS["fast_reversal"] * w_fast_1h
         + PHASE_1_BOOK_BLEND_WEIGHTS["slow_momentum"] * w_slow_1h
@@ -1584,6 +1585,12 @@ def run_mhs_horizon_diagnostic(request: MhsDiagnosticRequest) -> MhsHorizonDiagn
             fast, blend_report.primary_naive_sharpe, 500, _BOOTSTRAP_SEED,
         )
         telemetry.record("statistical_diagnostics")
+
+    # Folds reconstruct their own PIT panels.  Release the top-level feature
+    # matrices after all top-level diagnostics have consumed them so the two
+    # multi-year panels never coexist.
+    del eligible, log_close, w_fast_1h, w_slow_1h
+    gc.collect()
 
     fold_reports: list[MhsFoldReport] = []
     for idx, fold in enumerate(phase_1_anchored_purged_folds()):
