@@ -15,6 +15,7 @@ import json
 import logging
 import os
 import time
+from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
@@ -27,7 +28,8 @@ import pyarrow.parquet as pq
 from src.market_data.services.futures_collection import DataCollector
 from src.mhs.evaluation import cost_response_curve, phase_diagnostic_metrics, tail_sensitivity_curve
 from src.mhs.evaluation import AnchoredPurgedFold, DeploymentReadinessResult, autocorrelation_adjusted_sharpe, synthetic_stress_scenarios
-from src.mhs.execution import simulated_inventory_ledger
+from src.mhs.execution import ExecutionReplayWindow, simulated_inventory_ledger
+from src.mhs.execution import replay_execution_windows
 from src.mhs.execution import strategy_aware_execution_replay
 from src.mhs.panel import liquid_half_eligibility, load_base_panel
 from src.research.evaluation.policy import resolve_evaluation_end
@@ -55,6 +57,8 @@ from src.research.evaluation.policy import HOLDOUT_CUTOFF
 from src.market_data.storage.loaders import load_funding_rates
 
 __all__ = ["simulated_inventory_ledger"]
+
+MhsExecutionWindow = ExecutionReplayWindow
 
 _logger = logging.getLogger("MhsHorizonDiagnostic")
 
@@ -135,6 +139,7 @@ class MhsBookReport:
     primary_max_drawdown: float
     primary_annualized_turnover: float
     stress_naive_sharpe: float
+    terminal_censored_decisions: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -176,6 +181,7 @@ class MhsFoldReport:
     failures: tuple[str, ...]
     strict_elapsed_seconds: float
     stress_elapsed_seconds: float
+    terminal_censored_decisions: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -234,6 +240,10 @@ class MhsResourceMeasurement:
     grid_bars: int | None = None
     n_symbols: int | None = None
     fill_count: int | None = None
+    window_start: str | None = None
+    window_end: str | None = None
+    active_symbols: int | None = None
+    peak_rss_bytes: int | None = None
 
 
 def _current_rss_bytes() -> int:
@@ -250,6 +260,7 @@ class _StageRecorder:
         self._records: list[MhsResourceMeasurement] = []
         self._log_run = log_run
         self._last = time.perf_counter()
+        self._peak_rss = -1
 
     @property
     def records(self) -> tuple[MhsResourceMeasurement, ...]:
@@ -261,11 +272,15 @@ class _StageRecorder:
         grid_bars: int | None = None,
         n_symbols: int | None = None,
         fill_count: int | None = None,
+        window_start: str | None = None,
+        window_end: str | None = None,
+        active_symbols: int | None = None,
     ) -> None:
         now = time.perf_counter()
         elapsed_ms = int((now - self._last) * 1000)
         self._last = now
         rss = _current_rss_bytes()
+        self._peak_rss = max(self._peak_rss, rss)
         self._records.append(
             MhsResourceMeasurement(
                 stage=stage,
@@ -274,6 +289,10 @@ class _StageRecorder:
                 grid_bars=grid_bars,
                 n_symbols=n_symbols,
                 fill_count=fill_count,
+                window_start=window_start,
+                window_end=window_end,
+                active_symbols=active_symbols,
+                peak_rss_bytes=self._peak_rss,
             )
         )
         if self._log_run:
@@ -670,6 +689,45 @@ def _mdd(equity: pd.Series) -> float:
     return float((equity / running_max - 1.0).min())
 
 
+def _truncate_replayable_decisions(
+    target_weights: pd.DataFrame,
+    signal_available_at: pd.DatetimeIndex,
+    execution_grid: pd.DatetimeIndex,
+    spec: ExecutionSpec,
+) -> tuple[pd.DataFrame, pd.DatetimeIndex, int]:
+    """Censor terminal-window decisions that can never be executed on the grid.
+
+    A decision is retained only when its first post-signal submit bar exists and
+    the exact strict ``passive_timeout_minutes`` bar exists on the execution
+    grid. The strict boundary is applied to both strict and immediate-taker
+    outputs so they cover the same decision population. Dropped rows are
+    terminal telemetry, never ``MISSING_DATA``: the returned count records them
+    so the report can distinguish censored terminal decisions from real source
+    gaps. Retained targets are byte-for-byte unchanged.
+    """
+    if len(target_weights) != len(signal_available_at):
+        raise DataIntegrityError("signal_available_at must align with target_weights")
+    grid_ns = np.asarray(execution_grid, dtype="datetime64[ns]").astype("int64")
+    n_grid = len(grid_ns)
+    if n_grid == 0:
+        return target_weights.iloc[0:0], signal_available_at[0:0], len(target_weights)
+    timeout_ns_delta = int(spec.passive_timeout_minutes) * 60_000_000_000
+    signal_ns = np.asarray(signal_available_at, dtype="datetime64[ns]").astype("int64")
+    spos = np.searchsorted(grid_ns, signal_ns, side="right")
+    spos_clipped = np.minimum(spos, n_grid - 1)
+    timeout_pos = np.searchsorted(grid_ns, grid_ns[spos_clipped] + timeout_ns_delta, side="left")
+    timeout_pos_clipped = np.minimum(timeout_pos, n_grid - 1)
+    replayable = (
+        (spos < n_grid)
+        & (timeout_pos < n_grid)
+        & (grid_ns[timeout_pos_clipped] == grid_ns[spos_clipped] + timeout_ns_delta)
+    )
+    censored = int((~replayable).sum())
+    if censored == 0:
+        return target_weights, signal_available_at, 0
+    return target_weights.loc[replayable], signal_available_at[replayable], censored
+
+
 def _assert_cache_required_marks(
     name: str,
     target_replay: pd.DataFrame,
@@ -681,7 +739,8 @@ def _assert_cache_required_marks(
     A mark is required at every decision time where the target weight is
     non-zero. ``minute_marks`` is exactly aligned to the minute closes; a
     missing/non-positive mark at a required decision point raises
-    ``DataIntegrityError`` rather than silently falling back to OHLCV closes.
+    ``DataIntegrityError`` carrying the stable provenance rather than silently
+    falling back to OHLCV closes.
     """
     grid_set = set(minute_marks.index)
     for i, decision_time in enumerate(target_replay.index):
@@ -703,9 +762,164 @@ def _assert_cache_required_marks(
                     mark = float(minute_marks.loc[after[0], sym])
             if not (np.isfinite(mark) and mark > 0):
                 raise DataIntegrityError(
-                    f"cache_required: no finite positive mark for {name} symbol={sym} "
-                    f"decision={decision_time}"
+                    "cache_required: no finite positive mark (MISSING_DECISION_MARK) "
+                    f"symbol={sym} decision={decision_time} signal={signal_time} "
+                    f"for {name}"
                 )
+
+
+def _iter_mhs_execution_windows(
+    target_weights: pd.DataFrame,
+    signal_available_at: pd.DatetimeIndex,
+    root: str,
+    timeframe: Literal["1m", "5m"],
+    start: pd.Timestamp,
+    end: pd.Timestamp,
+    funding_by_symbol: dict[str, pd.Series],
+    mark_mode: Literal["cache_required", "ohlcv_close_fallback"],
+    spec: ExecutionSpec,
+) -> Iterator[MhsExecutionWindow]:
+    """Yield at-most-31-day execution windows with only the active roster read.
+
+    Each window's minute grid starts at the previous window's last decision
+    (the decision-time funding/MTM lead) and ends at the final order's strict
+    timeout bar; the last window covers the full evaluation grid so a forced
+    exit can always resolve. Only symbols with a non-zero target in the window
+    or carried inventory from the previous window are read; the canonical
+    column order is preserved on every window for artifact-shape equivalence.
+    In ``cache_required`` mode each window's decision marks are asserted
+    fail-closed before the window is yielded.
+    """
+    if len(target_weights) != len(signal_available_at):
+        raise DataIntegrityError("signal_available_at must align with target_weights")
+    if start >= end:
+        raise DataIntegrityError("start must precede end")
+    columns = tuple(target_weights.columns)
+    freq = {"1m": "1min", "5m": "5min"}[timeframe]
+    full_grid = pd.date_range(start, end, freq=freq, tz="UTC")
+    full_grid_ns = np.asarray(full_grid, dtype="datetime64[ns]").astype("int64")
+    n_grid = len(full_grid_ns)
+    timeout_ns_delta = int(spec.passive_timeout_minutes) * 60_000_000_000
+    signal_ns = np.asarray(signal_available_at, dtype="datetime64[ns]").astype("int64")
+    spos_all = np.searchsorted(full_grid_ns, signal_ns, side="right")
+    resolve_ns = np.full(len(target_weights), -1, dtype="int64")
+    for i in range(len(target_weights)):
+        s = int(spos_all[i])
+        if s >= n_grid:
+            continue
+        tns = full_grid_ns[s] + timeout_ns_delta
+        tpos = int(np.searchsorted(full_grid_ns, tns, side="left"))
+        if tpos < n_grid and full_grid_ns[tpos] == tns:
+            resolve_ns[i] = tns
+
+    if target_weights.empty:
+        empty_marks = (
+            pd.DataFrame(index=full_grid) if mark_mode == "cache_required" else None
+        )
+        yield ExecutionReplayWindow(
+            window_start=start,
+            window_end=end,
+            columns=columns,
+            symbols=(),
+            minute_grid=full_grid,
+            highs=pd.DataFrame(index=full_grid),
+            lows=pd.DataFrame(index=full_grid),
+            closes=pd.DataFrame(index=full_grid),
+            marks=empty_marks,
+            bar_funding=pd.DataFrame(index=full_grid),
+            target_weights=target_weights,
+            signal_available_at=signal_available_at,
+        )
+        return
+
+    decision_times = pd.DatetimeIndex(target_weights.index)
+    max_window = pd.Timedelta(days=31)
+    bounds: list[tuple[int, int]] = []
+    i0 = 0
+    while i0 < len(decision_times):
+        i1 = i0 + 1
+        while i1 < len(decision_times) and decision_times[i1] - decision_times[i0] <= max_window:
+            i1 += 1
+        bounds.append((i0, i1))
+        i0 = i1
+
+    prev_active: set[str] = set()
+    for wi, (i0, i1) in enumerate(bounds):
+        w_weights = target_weights.iloc[i0:i1]
+        w_signals = signal_available_at[i0:i1]
+        is_last = wi == len(bounds) - 1
+        grid_start = start if wi == 0 else decision_times[i0 - 1]
+        if is_last:
+            grid_end = end
+        else:
+            max_resolve = int(resolve_ns[i0:i1].max())
+            if max_resolve < 0:
+                max_resolve = int(
+                    np.asarray(decision_times[i1 - 1] + pd.Timedelta(hours=2), dtype="datetime64[ns]").astype("int64")
+                )
+            grid_end = pd.Timestamp(max_resolve, unit="ns", tz="UTC")
+        if grid_end > end:
+            grid_end = end
+        minute_grid = pd.date_range(grid_start, grid_end, freq=freq, tz="UTC")
+        non_zero = w_weights.notna() & w_weights.ne(0.0)
+        active = set(w_weights.columns[non_zero.any(axis=0)])
+        roster_set = active | prev_active
+        prev_active = active
+        roster = [
+            s for s in columns
+            if s in roster_set and os.path.exists(os.path.join(root, timeframe, f"{s}.parquet"))
+        ]
+
+        frames = _load_minute_frames(root, roster, grid_start, grid_end, timeframe)
+        aligned = _align_minute_frames(frames, timeframe, grid_start, grid_end)
+        if aligned is None:
+            highs = pd.DataFrame(index=minute_grid)
+            lows = pd.DataFrame(index=minute_grid)
+            closes = pd.DataFrame(index=minute_grid)
+        else:
+            highs, lows, closes = aligned
+        for s in roster:
+            if s not in highs.columns:
+                highs[s] = np.nan
+                lows[s] = np.nan
+                closes[s] = np.nan
+        highs = highs.reindex(columns=roster)
+        lows = lows.reindex(columns=roster)
+        closes = closes.reindex(columns=roster)
+
+        minute_marks: pd.DataFrame | None = None
+        if mark_mode == "cache_required":
+            if roster:
+                minute_marks = DataCollector().load_mark_price_panel(roster, "1h", minute_grid)
+                _assert_cache_required_marks("window", w_weights[roster], w_signals, minute_marks)
+            else:
+                minute_marks = pd.DataFrame(index=minute_grid)
+
+        minute_period = minute_grid[1] - minute_grid[0] if len(minute_grid) > 1 else pd.Timedelta(minutes=1)
+        funding_window = {
+            s: funding_by_symbol[s].loc[
+                (funding_by_symbol[s].index >= grid_start)
+                & (funding_by_symbol[s].index < grid_end + minute_period)
+            ]
+            for s in roster
+            if s in funding_by_symbol
+        }
+        minute_funding = bar_funding_panel(funding_window, minute_grid).reindex(columns=roster)
+
+        yield ExecutionReplayWindow(
+            window_start=grid_start,
+            window_end=grid_end,
+            columns=columns,
+            symbols=tuple(roster),
+            minute_grid=minute_grid,
+            highs=highs,
+            lows=lows,
+            closes=closes,
+            marks=minute_marks,
+            bar_funding=minute_funding,
+            target_weights=w_weights[roster],
+            signal_available_at=w_signals,
+        )
 
 
 def _book_outcome(
@@ -718,9 +932,11 @@ def _book_outcome(
     opens: pd.DataFrame,
     bar_funding: pd.DataFrame,
     phase: PhaseDiagnosticResult,
-    minute_frames: tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame],
-    minute_bar_funding: pd.DataFrame,
-    minute_marks: pd.DataFrame | None,
+    root: str,
+    request: MhsDiagnosticRequest,
+    funding_by_symbol: dict[str, pd.Series],
+    start: pd.Timestamp,
+    end: pd.Timestamp,
     event_window_bars: int,
     initial_equity: float,
     replay_weights_step: pd.DataFrame | None = None,
@@ -741,14 +957,39 @@ def _book_outcome(
 
     target_weights = (replay_weights_step if replay_weights_step is not None else weights_step).reindex(step_grid)
     signal_available_at = step_grid + pd.Timedelta(hours=1)
-    highs, lows, closes = minute_frames
-    replay_symbols = [s for s in target_weights.columns if s in highs.columns]
-    target_replay = target_weights[replay_symbols]
-    if minute_marks is not None:
-        _assert_cache_required_marks(name, target_replay, signal_available_at, minute_marks)
-    primary = strategy_aware_execution_replay(
-        target_replay, signal_available_at, highs, lows, closes, minute_marks,
-        minute_bar_funding, initial_equity, "OHLCV_STRICT_PROXY", ExecutionSpec(),
+    execution_grid = pd.date_range(
+        start, end,
+        freq={"1m": "1min", "5m": "5min"}[request.execution_timeframe],
+        tz="UTC",
+    )
+    target_replay, signal_replay, censored = _truncate_replayable_decisions(
+        target_weights, signal_available_at, execution_grid, ExecutionSpec(),
+    )
+    replay_symbols = list(target_replay.columns)
+
+    def _windows() -> Iterator[MhsExecutionWindow]:
+        return _iter_mhs_execution_windows(
+            target_replay, signal_replay, root, request.execution_timeframe,
+            start, end, funding_by_symbol, request.mark_mode, ExecutionSpec(),
+        )
+
+    def _window_telemetry(
+        gen: Iterator[MhsExecutionWindow], prefix: str,
+    ) -> Iterator[MhsExecutionWindow]:
+        for idx, w in enumerate(gen):
+            if telemetry is not None:
+                telemetry.record(
+                    f"{prefix}_{idx}",
+                    grid_bars=len(w.minute_grid),
+                    active_symbols=len(w.symbols),
+                    window_start=str(w.window_start),
+                    window_end=str(w.window_end),
+                )
+            yield w
+
+    primary = replay_execution_windows(
+        _window_telemetry(_windows(), "execution_window"),
+        initial_equity, "OHLCV_STRICT_PROXY", ExecutionSpec(),
     )
     if telemetry is not None:
         telemetry.record(
@@ -756,9 +997,9 @@ def _book_outcome(
             n_symbols=len(replay_symbols),
             fill_count=len(primary.simulated_fills),
         )
-    stress = strategy_aware_execution_replay(
-        target_replay, signal_available_at, highs, lows, closes, minute_marks,
-        minute_bar_funding, initial_equity, "OHLCV_IMMEDIATE_TAKER", ExecutionSpec(),
+    stress = replay_execution_windows(
+        _window_telemetry(_windows(), "execution_window"),
+        initial_equity, "OHLCV_IMMEDIATE_TAKER", ExecutionSpec(),
     )
     if telemetry is not None:
         telemetry.record(
@@ -766,11 +1007,11 @@ def _book_outcome(
             n_symbols=len(replay_symbols),
             fill_count=len(stress.simulated_fills),
         )
-    if minute_marks is not None and not primary.ledger.primary_valid:
-            raise DataIntegrityError(
-                f"cache_required strict primary ledger invalid for {name}: "
-                f"{', '.join(primary.ledger.invalid_reasons)}"
-            )
+    if request.mark_mode == "cache_required" and not primary.ledger.primary_valid:
+        raise DataIntegrityError(
+            f"cache_required strict primary ledger invalid for {name}: "
+            f"{', '.join(primary.ledger.invalid_reasons)}"
+        )
     return MhsBookReport(
         name=name,
         band=spec.band.name,
@@ -790,6 +1031,7 @@ def _book_outcome(
         primary_max_drawdown=_mdd(primary.ledger.equity),
         primary_annualized_turnover=_mean_ann(primary.ledger.fill_turnover, _PERIODS_PER_YEAR_1H),
         stress_naive_sharpe=_naive_sharpe(stress.ledger),
+        terminal_censored_decisions=censored,
     )
 
 
@@ -922,6 +1164,9 @@ def _run_anchored_fold(
 
         target_replay = target_weights[list(closes.columns)]
         signal_available_at = target_replay.index + pd.Timedelta(hours=1)
+        target_replay, signal_available_at, terminal_censored = _truncate_replayable_decisions(
+            target_replay, signal_available_at, minute_grid, ExecutionSpec(),
+        )
         decision_intents = int(np.isfinite(target_replay.to_numpy()).sum())
         if minute_marks is not None:
             _assert_cache_required_marks("fold", target_replay, signal_available_at, minute_marks)
@@ -970,6 +1215,7 @@ def _run_anchored_fold(
             failures=tuple(sorted(set(failures))),
             strict_elapsed_seconds=primary.elapsed_seconds,
             stress_elapsed_seconds=stress.elapsed_seconds,
+            terminal_censored_decisions=terminal_censored,
         )
     except DataIntegrityError as exc:
         message = str(exc).lower()
@@ -1106,55 +1352,39 @@ def run_mhs_horizon_diagnostic(request: MhsDiagnosticRequest) -> MhsHorizonDiagn
         set(w_fast_execution.columns[w_fast_execution.ne(0.0).any(axis=0)])
         | set(w_slow_execution.columns[w_slow_execution.ne(0.0).any(axis=0)])
     )
-    minute_frames = _align_minute_frames(
-        _load_minute_frames(root, execution_symbols, start, end, request.execution_timeframe),
-        request.execution_timeframe,
-        start, end,
-    )
     initial_equity = 1.0
-    minute_grid: pd.DatetimeIndex | None = None
-    replay_symbols: list[str] = []
-    highs = lows = closes = minute_marks = minute_funding = None
-    if minute_frames is not None:
-        highs, lows, closes = minute_frames
-        minute_grid = highs.index
-        replay_symbols = list(closes.columns)
-        minute_marks = (
-            DataCollector().load_mark_price_panel(replay_symbols, "1h", minute_grid)
-            if request.mark_mode == "cache_required"
-            else None
-        )
-        minute_period = minute_grid[1] - minute_grid[0]
-        minute_funding_window = {
-            s: funding_by_symbol[s].loc[
-                (funding_by_symbol[s].index >= minute_grid[0])
-                & (funding_by_symbol[s].index < minute_grid[-1] + minute_period)
-            ]
-            for s in aligned_symbols
-        }
-        minute_funding = bar_funding_panel(minute_funding_window, minute_grid)
-        minute_symbols = list(closes.columns)
-        minute_funding = minute_funding.reindex(columns=minute_symbols)
+    minute_grid = pd.date_range(
+        start, end,
+        freq={"1m": "1min", "5m": "5min"}[request.execution_timeframe],
+        tz="UTC",
+    )
+    has_minute_data = any(
+        os.path.exists(os.path.join(root, request.execution_timeframe, f"{s}.parquet"))
+        for s in execution_symbols
+    )
+    if has_minute_data and execution_symbols:
         telemetry.record(
             "minute_market_mark_funding",
             grid_bars=len(minute_grid),
-            n_symbols=len(replay_symbols),
+            n_symbols=len(execution_symbols),
         )
         book_report_fast = _book_outcome(
             "fast_reversal", fast, len(funded), fast_grid, w_fast, grid_1h,
-            opens, bar_funding, phase_fast, minute_frames, minute_funding, minute_marks,
-            fast.horizon_hours, initial_equity, w_fast_execution, telemetry=telemetry,
+            opens, bar_funding, phase_fast, root, request, funding_by_symbol,
+            start, end, fast.horizon_hours, initial_equity, w_fast_execution,
+            telemetry=telemetry,
         )
         book_report_slow = _book_outcome(
             "slow_momentum", slow, len(funded), slow_grid, w_slow, grid_1h,
-            opens, bar_funding, phase_slow, minute_frames, minute_funding, minute_marks,
-            slow.horizon_hours, initial_equity, w_slow_execution, telemetry=telemetry,
+            opens, bar_funding, phase_slow, root, request, funding_by_symbol,
+            start, end, slow.horizon_hours, initial_equity, w_slow_execution,
+            telemetry=telemetry,
         )
         blend_step = blend_1h.reindex(fast_grid)
         book_report_blend = _book_outcome(
             "blend", fast, len(funded), fast_grid, blend_step, grid_1h,
-            opens, bar_funding, phase_blend, minute_frames, minute_funding, minute_marks,
-            168, initial_equity,
+            opens, bar_funding, phase_blend, root, request, funding_by_symbol,
+            start, end, 168, initial_equity,
             blend_1h.where(execution_mask, other=0.0),
             telemetry=telemetry,
         )
@@ -1196,7 +1426,7 @@ def run_mhs_horizon_diagnostic(request: MhsDiagnosticRequest) -> MhsHorizonDiagn
             blend_report.primary,
             root,
             request.execution_timeframe,
-            replay_symbols,
+            execution_symbols,
             minute_grid,
         )
         telemetry.record(
@@ -1209,9 +1439,6 @@ def run_mhs_horizon_diagnostic(request: MhsDiagnosticRequest) -> MhsHorizonDiagn
             fast, blend_report.primary_naive_sharpe, 500, _BOOTSTRAP_SEED,
         )
         telemetry.record("statistical_diagnostics")
-        # Release the main minute panels, marks, and funding before anchored-fold
-        # work begins; each fold loads its own sequential market panel.
-        del minute_frames, highs, lows, closes, minute_marks, minute_funding
 
     fold_reports: list[MhsFoldReport] = []
     for idx, fold in enumerate(phase_1_anchored_purged_folds()):
@@ -1455,4 +1682,15 @@ def _persist_replay_artifact(
         "termination_counts": dict(replay.termination_counts),
         "unsupported_assumptions": list(replay.unsupported_assumptions),
         "elapsed_seconds": replay.elapsed_seconds,
+        "data_gaps": [
+            {
+                "code": gap.code,
+                "symbol": gap.symbol,
+                "timestamp": _jsonable(gap.timestamp),
+                "decision_time": _jsonable(gap.decision_time),
+                "signal_time": _jsonable(gap.signal_time),
+                "execution_bound": gap.execution_bound,
+            }
+            for gap in replay.data_gaps
+        ],
     }
