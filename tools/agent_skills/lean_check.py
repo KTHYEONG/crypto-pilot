@@ -301,6 +301,41 @@ def _check_spec_compliance(spec_path: str) -> tuple[int, list[JsonDiag]]:
     return (1 if diagnostics else 0, diagnostics)
 
 
+@functools.cache
+def _imported_source_modules(test_file: str) -> frozenset[str]:
+    """Return canonical source module names imported by one test file."""
+    try:
+        with open(test_file, encoding="utf-8") as fh:
+            tree = ast.parse(fh.read(), filename=test_file)
+    except (OSError, SyntaxError):
+        return frozenset()
+
+    modules: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            modules.update(alias.name for alias in node.names if alias.name.startswith("src."))
+        elif isinstance(node, ast.ImportFrom) and node.module and node.module.startswith("src."):
+            modules.add(node.module)
+            modules.update(
+                f"{node.module}.{alias.name}"
+                for alias in node.names
+                if alias.name != "*"
+            )
+    return frozenset(modules)
+
+
+@functools.cache
+def _test_references_source(test_file: str, source: str) -> bool:
+    """Match a test to a source file through its canonical import graph."""
+    module = source.removesuffix(".py").replace("/", ".")
+    return module in _imported_source_modules(test_file)
+
+
+def _source_has_matching_test(source: str, test_files: list[str]) -> bool:
+    """Return whether any candidate test imports the canonical source module."""
+    return any(_test_references_source(test_file, source) for test_file in test_files)
+
+
 def _find_test_files(py_files: list[str]) -> list[str]:
     test_files = [f for f in py_files if f.startswith("tests/") or "test_" in f]
     source_files = [f for f in py_files if not (f.startswith("tests/") or "test_" in f)]
@@ -316,6 +351,15 @@ def _find_test_files(py_files: list[str]) -> list[str]:
                 if os.path.exists(tp) and tp not in test_files:
                     test_files.append(tp)
                     break
+            if _source_has_matching_test(sf, test_files):
+                continue
+            for root, _dirs, names in os.walk("tests"):
+                for name in names:
+                    if not name.startswith("test_") or not name.endswith(".py"):
+                        continue
+                    candidate = os.path.join(root, name)
+                    if candidate not in test_files and _test_references_source(candidate, sf):
+                        test_files.append(candidate)
     return test_files
 
 
