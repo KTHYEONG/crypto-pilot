@@ -621,6 +621,9 @@
     ]
   },
   "src/application/research/mhs/evaluation.py": {
-    "testing": "tests/benchmark/mhs/test_mhs_replay_resources.py"
+    "testing": [
+      "tests/benchmark/mhs/test_mhs_replay_resources.py",
+      "tests/unit/application/research/mhs/test_evaluation.py"
+    ]
   }
 }
