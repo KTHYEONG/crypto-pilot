@@ -1,6 +1,16 @@
 {
   "tasks": [
     {
+      "task_id": "TASK_MHS_MARK_CACHE_BACKFILL",
+      "date": "2026-08-08",
+      "adr_id": "ADR_20260808_MHS_MARK_CACHE_BACKFILL",
+      "domain": "execution",
+      "title": "MHS mark-price gap backfill and full-period validation",
+      "why": "The cache-required 2021-2025 MHS replay was blocked by internal mark-price gaps in 102 of 255 execution symbols; the user requested root-cause analysis and feasible backfill.",
+      "resolution": "Historical REST and Binance Vision backfill repaired 99 symbols, reducing the execution universe to 252 internally continuous symbols. Three residual source gaps remain in AERGOUSDT, LITUSDT, and PUMPUSDT because neither source provides those intervals. The post-backfill full replay passed the initial mark-gap blocker but failed closed at the strict fast-reversal pre-trade-equity invariant; no OHLCV mark fallback was introduced.",
+      "impact": "No MHS Research GO or strategy promotion. Residual source gaps remain fail-closed; follow-up work must diagnose the strict inventory capital breach. Temporary spec and scratch artifacts are cleaned per sync policy."
+    },
+    {
       "task_id": "TASK_MHS_RESEARCH_GO_EVALUATION",
       "date": "2026-08-07",
       "adr_id": "ADR_20260807_MHS_RESEARCH_GO_EVALUATION",
