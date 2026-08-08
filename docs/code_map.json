@@ -615,6 +615,9 @@
   "src/validation/research_memory.py": {},
   "src/mhs/execution.py": {
     "architecture": "docs/architecture/multi-horizon-market-state.md",
-    "testing": "tests/unit/mhs/test_collection.py"
+    "testing": [
+      "tests/unit/mhs/test_collection.py",
+      "tests/unit/mhs/test_execution.py"
+    ]
   }
 }
