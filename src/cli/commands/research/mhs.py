@@ -25,6 +25,7 @@ def _run_mhs_horizon_diagnostic(args: argparse.Namespace) -> None:
         end=args.end,
         mark_mode=args.mark_mode,
         execution_timeframe=args.execution_timeframe,
+        max_rss_bytes=args.max_rss_bytes,
         log_run=not args.no_log_run,
     )
     report = run_mhs_horizon_diagnostic(request)
@@ -47,12 +48,21 @@ def add_mhs_commands(portfolio_sub: argparse._SubParsersAction[argparse.Argument
     mhs.add_argument("--end", default=None)
     mhs.add_argument(
         "--mark-mode",
-        choices=["cache_required", "ohlcv_close_fallback"],
+        choices=["cache_required", "cache_required_stale_carry", "ohlcv_close_fallback"],
         default="cache_required",
         help=(
             "Mark-price valuation source: cache_required builds the causal mark "
-            "panel and fails closed on missing marks; ohlcv_close_fallback passes "
-            "None (fixtures/explicit comparison runs only)"
+            "panel and fails closed; cache_required_stale_carry allows bounded "
+            "diagnostic continuity; ohlcv_close_fallback is fixture-only"
+        ),
+    )
+    mhs.add_argument(
+        "--max-rss-bytes",
+        type=int,
+        default=None,
+        help=(
+            "Optional process RSS budget in bytes; exceeding it at an execution "
+            "window boundary fails closed with DataIntegrityError instead of OOM"
         ),
     )
     mhs.add_argument("--no-log-run", action="store_true", default=False)
