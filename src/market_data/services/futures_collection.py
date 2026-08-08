@@ -401,6 +401,7 @@ class DataCollector:
         if observed.empty and not intervals:
             intervals = ((req_start, req_end),)
         new_parts: list[pd.DataFrame] = []
+        vision_parts: list[pd.DataFrame] = []
         for interval_start, interval_end in intervals:
             fetched = self.client.fetch_mark_price_klines(
                 symbol, timeframe, str(interval_start), str(interval_end),
@@ -412,9 +413,70 @@ class DataCollector:
                 fetched["timestamp"], unit="ms", utc=True,
             )
             new_parts.append(fetched)
-        if new_parts:
+        # REST mark-price history is retention-limited.  Vision monthly files
+        # are the primary historical source, with daily files repairing partial
+        # or missing monthly days (without ever substituting OHLCV).
+        if intervals:
+            vision = BinanceVisionDownloader()
+            def _normalize_vision_frame(frame: pd.DataFrame) -> pd.DataFrame:
+                if frame is None or frame.empty:
+                    return pd.DataFrame()
+                renamed = frame.copy()
+                if "timestamp" not in renamed.columns:
+                    renamed.columns = [
+                        "timestamp", "open", "high", "low", "close", "volume",
+                        "close_time", "quote_volume", "count", "taker_buy_volume",
+                        "taker_buy_quote_volume", "ignore",
+                    ][: len(renamed.columns)]
+                return self._normalize_indicator_kline_frame(renamed)
+
+            month_keys: set[tuple[int, int]] = set()
+            for gap_start, gap_end in intervals:
+                month_keys.update((p.year, p.month) for p in pd.period_range(gap_start, gap_end, freq="M"))
+            sorted_month_keys = sorted(month_keys)
+            covered_months: set[tuple[int, int]] = set()
+            for year, month in sorted_month_keys:
+                try:
+                    fetched = vision.fetch_indicator_klines_monthly(
+                        "markPriceKlines", symbol.replace("/", ""), timeframe,
+                        year, month,
+                    )
+                    normalized = _normalize_vision_frame(fetched)
+                    if not normalized.empty:
+                        vision_parts.append(normalized)
+                        covered_months.add((year, month))
+                except Exception as exc:
+                    self.logger.warning("Vision monthly mark fetch failed for %s %s-%02d: %s", symbol, year, month, exc)
+            if vision_parts:
+                observed = pd.concat([observed, *vision_parts], ignore_index=True).drop_duplicates(
+                    subset=["timestamp"], keep="last"
+                ).sort_values("timestamp")
+            remaining = self._mark_price_coverage(symbol, timeframe, req_start, req_end, observed).missing_intervals
+            for gap_start, gap_end in remaining:
+                day = gap_start.normalize()
+                if day > gap_end.normalize():
+                    continue
+                while day <= gap_end.normalize():
+                    if (day.year, day.month) not in covered_months:
+                        day += pd.Timedelta(days=1)
+                        continue
+                    try:
+                        fetched = vision.fetch_indicator_klines_daily(
+                            "markPriceKlines", symbol.replace("/", ""), timeframe, day.to_pydatetime()
+                        )
+                        normalized = _normalize_vision_frame(fetched)
+                        if not normalized.empty:
+                            vision_parts.append(normalized)
+                    except Exception as exc:
+                        self.logger.warning("Vision daily mark fetch failed for %s %s: %s", symbol, day, exc)
+                    day += pd.Timedelta(days=1)
+            if vision_parts:
+                observed = pd.concat([observed, *vision_parts], ignore_index=True).drop_duplicates(
+                    subset=["timestamp"], keep="last"
+                ).sort_values("timestamp")
+        if new_parts or vision_parts:
             observed = (
-                pd.concat([cache_df, *new_parts], ignore_index=True)
+                pd.concat([cache_df, *new_parts, *vision_parts], ignore_index=True)
                 .drop_duplicates(subset=["timestamp"], keep="last")
                 .sort_values("timestamp")
             )
@@ -428,6 +490,7 @@ class DataCollector:
 
     def load_mark_price_panel(
         self, symbols: list[str], timeframe: str, grid: pd.DatetimeIndex,
+        max_stale_hours: int = 0,
     ) -> pd.DataFrame:
         """Build a read-only causal mark-price panel for replay valuation.
 
@@ -442,6 +505,8 @@ class DataCollector:
         """
         if timeframe != "1h":
             raise ValueError(f"unsupported timeframe '{timeframe}'")
+        if max_stale_hours < 0:
+            raise ValueError("max_stale_hours must be non-negative")
         if not isinstance(grid, pd.DatetimeIndex) or grid.empty:
             raise DataIntegrityError("grid must be a non-empty DatetimeIndex")
         if grid.tz is None:
@@ -461,7 +526,10 @@ class DataCollector:
                 raise DataIntegrityError(
                     "grid frequency must be a positive divisor of one hour"
                 )
-            ffill_limit = int(60 // step_minutes - 1)
+            if max_stale_hours == 0:
+                ffill_limit = int(60 // step_minutes - 1)
+            else:
+                ffill_limit = int(max_stale_hours * 60 // step_minutes - 1)
         else:
             ffill_limit = 0
         for sym in symbols:
@@ -484,7 +552,11 @@ class DataCollector:
                 closes["close"].to_numpy(dtype="float64"),
                 index=closes["datetime"] + pd.Timedelta(hours=1),
             )
-            aligned = available.reindex(grid, method="ffill", limit=ffill_limit)
+            aligned = (
+                available.reindex(grid)
+                if ffill_limit == 0
+                else available.reindex(grid, method="ffill", limit=ffill_limit)
+            )
             panel[sym] = aligned.to_numpy(dtype="float64")
         return panel
 

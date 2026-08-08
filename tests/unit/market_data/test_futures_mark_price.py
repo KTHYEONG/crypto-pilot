@@ -76,6 +76,23 @@ class TestMarkPriceCoverage:
     def test_field_types_are_concrete(self) -> None:
         assert MarkPriceCoverage.__dataclass_fields__["primary_usable"].type is bool
 
+    def test_strict_preserved_and_stale_carry_bounded(self, tmp_path: Path, monkeypatch) -> None:
+        # STRICT-PRESERVED / STALE-BOUNDED
+        collector = DataCollector()
+        monkeypatch.setattr(
+            "src.market_data.services.futures_collection._mark_price_path",
+            lambda symbol, timeframe: tmp_path / f"{symbol}.parquet",
+        )
+        source = _mark_frame(pd.DatetimeIndex([
+            pd.Timestamp("2023-01-01 00:00:00", tz="UTC"),
+        ]))
+        source.to_parquet(tmp_path / "BTCUSDT.parquet", index=False)
+        grid = pd.date_range("2023-01-01 01:00", periods=26, freq="1h", tz="UTC")
+        strict = collector.load_mark_price_panel(["BTCUSDT"], "1h", grid)
+        stale = collector.load_mark_price_panel(["BTCUSDT"], "1h", grid, max_stale_hours=24)
+        assert strict["BTCUSDT"].notna().sum() == 1
+        assert stale["BTCUSDT"].notna().sum() == 24
+
 
 class TestEnsureMarkPriceData:
     """MHS-21-MARK-PRICE-COVERAGE-FAIL-CLOSED: collection persists canonical mark candles."""
@@ -121,6 +138,40 @@ class TestEnsureMarkPriceData:
         assert coverage.primary_usable is False
         manifest = tmp_path / "1h" / "BTCUSDT.coverage.json"
         assert manifest.exists()
+
+    def test_vision_monthly_and_daily_repair_rest_gap(self, tmp_path: Path, monkeypatch) -> None:
+        collector = DataCollector()
+        monkeypatch.setattr(
+            "src.market_data.services.futures_collection._mark_price_path",
+            lambda symbol, timeframe: tmp_path / timeframe / f"{symbol}.parquet",
+        )
+        monkeypatch.setattr(
+            "src.market_data.services.futures_collection._mark_price_manifest_path",
+            lambda symbol, timeframe: tmp_path / timeframe / f"{symbol}.coverage.json",
+        )
+        collector.client.fetch_mark_price_klines = lambda *args: pd.DataFrame()
+        ts0 = pd.Timestamp("2023-02-24 00:00:00", tz="UTC")
+        raw0 = _mark_frame(pd.DatetimeIndex([ts0])).drop(columns=["datetime"])
+        raw1 = _mark_frame(pd.DatetimeIndex([ts0 + pd.Timedelta(hours=1)])).drop(columns=["datetime"])
+        raw0["close_time"] = raw0["timestamp"] + 3599999
+        raw1["close_time"] = raw1["timestamp"] + 3599999
+
+        class _Vision:
+            def fetch_indicator_klines_monthly(self, *args):
+                return raw0
+
+            def fetch_indicator_klines_daily(self, *args):
+                return raw1
+
+        monkeypatch.setattr(
+            "src.market_data.services.futures_collection.BinanceVisionDownloader",
+            _Vision,
+        )
+        coverage = collector.ensure_mark_price_data(
+            "LITUSDT", "1h", "2023-02-24", "2023-02-24T01:00:00Z",
+        )
+        assert coverage.primary_usable is True
+        assert len(pd.read_parquet(tmp_path / "1h" / "LITUSDT.parquet")) == 2
 
 
 class _MarkResponse:
