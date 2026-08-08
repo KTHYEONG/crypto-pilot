@@ -237,8 +237,47 @@ class TestResourceTelemetry:
         assert isinstance(records, list)
         assert records
         for record in records:
-            assert set(record) == {"stage", "elapsed_ms", "rss_bytes", "grid_bars", "n_symbols", "fill_count"}
+            assert set(record) == {
+                "stage", "elapsed_ms", "rss_bytes", "grid_bars", "n_symbols",
+                "fill_count", "window_start", "window_end", "active_symbols",
+                "peak_rss_bytes",
+            }
         assert report.research_go.eligible is False
+
+
+class TestWindowExecutionTelemetry:
+    """MHS-31-RESOURCE-TELEMETRY-ORDER: per-window telemetry is ordered and
+    carries non-negative elapsed time, positive RSS, and window provenance
+    without changing the GO decision."""
+
+    def test_window_stages_ordered_and_carry_provenance(self, report) -> None:
+        stages = [m.stage for m in report.resource_measurements]
+        window_stages = [s for s in stages if s.startswith("execution_window_")]
+        assert window_stages, "window execution stages must be recorded"
+        for m in report.resource_measurements:
+            if not m.stage.startswith("execution_window_"):
+                continue
+            assert m.elapsed_ms >= 0
+            assert m.rss_bytes > 0
+            assert m.peak_rss_bytes is not None
+            assert m.peak_rss_bytes >= m.rss_bytes
+            assert m.window_start is not None
+            assert m.window_end is not None
+            assert m.active_symbols is not None
+            assert m.active_symbols >= 0
+            assert m.grid_bars is not None
+            assert m.grid_bars > 0
+        # Window stages run between the minute-market stage and blend
+        # participation, preserving the existing stage order.
+        first_window = stages.index(window_stages[0])
+        assert "minute_market_mark_funding" in stages
+        assert "blend_participation" in stages
+        assert stages.index("minute_market_mark_funding") < first_window
+        assert first_window < stages.index("blend_participation")
+
+    def test_window_telemetry_does_not_change_go_gate(self, report) -> None:
+        assert report.research_go.eligible is False
+        assert "UNSPECIFIED_POLICY" in report.research_go.reason_codes
 
 
 class TestStrictSimulatedPrimary:
