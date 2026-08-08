@@ -17,11 +17,11 @@ Independent audit gate completing the main development loop (`spec` -> `implemen
      ```bash
      uv run python tools/agent_skills/lean_check.py --fast
      ```
-   - **Spec-Only Check** (verify contract non-dummy & assertions only):
+   - **Spec-Only Check** (verify contract non-dummy, wiring, & orphaned symbol check):
      ```bash
      uv run python tools/agent_skills/lean_check.py --spec-only --spec docs/specs/<feature>_contract.json
      ```
-   - **Full Audit Pass** (final gate completing the check protocol):
+   - **Full Audit Pass** (Ruff, Mypy, Print check, Orphan check, and Pytest):
      ```bash
      uv run python tools/agent_skills/lean_check.py
      ```
