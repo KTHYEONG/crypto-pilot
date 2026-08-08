@@ -304,6 +304,24 @@ class BinanceVisionDownloader:
         filename = f"{symbol}-{interval}-{year}-{month:02d}.zip"
         return self._fetch_zip_by_path("monthly", dataset, symbol, interval, filename)
 
+    def fetch_indicator_klines_daily(
+        self,
+        dataset: str,
+        symbol: str,
+        interval: str,
+        date: datetime,
+    ) -> pd.DataFrame:
+        """Fetch one daily indicator-kline archive.
+
+        Daily archives are required because Binance Vision monthly archives can
+        contain partial days or repaired historical gaps.
+        """
+        allowed = {"markPriceKlines", "indexPriceKlines", "premiumIndexKlines"}
+        if dataset not in allowed:
+            raise ValueError(f"unsupported indicator dataset: {dataset}")
+        filename = f"{symbol}-{interval}-{date:%Y-%m-%d}.zip"
+        return self._fetch_zip_by_path("daily", dataset, symbol, interval, filename)
+
     def fetch_klines_archive(
         self,
         symbol: str,
