@@ -29,9 +29,9 @@ Frontier reasoning model protocol for specification engineering and architecture
    - Emit `docs/specs/<feature>_contract.json` with explicit declarations:
      - `target_file`: Absolute path to modify or create.
      - `symbol` & `signature`: Full Python type-hinted signature without parenthetical hints.
-     - `python_assertion`: Directly executable Python assertion expression (e.g. `assert fee_calc(100) == 0.05`).
+     - `python_assertion`: Optional short Python assertion string.
+     - `scenarios`: Array of `{ scenario_id, target_test_file, expected_behavior }` for Phase A pytest generation.
      - `requirements`: Explicit fail-closed exception types (e.g., raise `ValueError` on bad inputs) and performance/vectorization constraints (e.g., vectorized NumPy without `pd.apply`).
-     - `scenarios`: Array of `{ scenario_id, target_test_file, expected_behavior }`.
      - `wiring`: Object or array containing explicit wiring declarations:
        - `caller_file`: Absolute path of the integration caller file.
        - `anchor`: Concrete line pattern, function signature, or class symbol in caller file.
