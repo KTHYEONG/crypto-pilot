@@ -888,10 +888,14 @@ class TestFoldWindowTelemetryOracle:
         assert fold_report.stress.event_snapshots_retained is False
 
         window_stages = [m.stage for m in recorder.records if m.stage.startswith("anchored_fold_0_window_")]
-        assert window_stages, "fold strict window telemetry must be recorded"
+        assert window_stages, "fold paired window telemetry must be recorded"
         assert window_stages == sorted(window_stages)
-        stress_window_stages = [m.stage for m in recorder.records if m.stage.startswith("anchored_fold_0_stress_window_")]
-        assert stress_window_stages == sorted(stress_window_stages)
+        # The paired fan-out records one physical window per stage: the stress
+        # bound consumes the same iterator, so no stress re-iteration exists.
+        assert not [
+            m.stage for m in recorder.records
+            if m.stage.startswith("anchored_fold_0_stress_window_")
+        ]
         seen: list[tuple[str, str]] = []
         for m in recorder.records:
             if not m.stage.startswith("anchored_fold_0_window_"):
