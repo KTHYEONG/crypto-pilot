@@ -21,6 +21,7 @@ from typing import Any, Literal
 
 import numpy as np
 import pandas as pd
+import psutil
 import pyarrow.parquet as pq
 
 from src.market_data.services.futures_collection import DataCollector
@@ -212,9 +213,74 @@ class MhsHorizonDiagnosticReport:
     execution_universe_size: int
     execution_symbols: tuple[str, ...]
     run_elapsed_seconds: float
+    resource_measurements: tuple[MhsResourceMeasurement, ...] = ()
 
     def to_payload(self) -> Any:
         return _jsonable(dataclasses.asdict(self))
+
+
+@dataclass(frozen=True, slots=True)
+class MhsResourceMeasurement:
+    """One ordered resource sample for a material diagnostic stage.
+
+    ``elapsed_ms`` is the wall time since the previous recorded stage; ``rss_bytes``
+    is the current process resident set size. Measurements are observational only
+    and must never alter control flow, replay data, or the GO gate.
+    """
+
+    stage: str
+    elapsed_ms: int
+    rss_bytes: int
+    grid_bars: int | None = None
+    n_symbols: int | None = None
+    fill_count: int | None = None
+
+
+def _current_rss_bytes() -> int:
+    try:
+        return int(psutil.Process().memory_info().rss)
+    except Exception:  # noqa: BLE001
+        return -1
+
+
+class _StageRecorder:
+    """Collects ordered ``MhsResourceMeasurement`` records and emits ``[SYS]`` logs."""
+
+    def __init__(self, log_run: bool) -> None:
+        self._records: list[MhsResourceMeasurement] = []
+        self._log_run = log_run
+        self._last = time.perf_counter()
+
+    @property
+    def records(self) -> tuple[MhsResourceMeasurement, ...]:
+        return tuple(self._records)
+
+    def record(
+        self,
+        stage: str,
+        grid_bars: int | None = None,
+        n_symbols: int | None = None,
+        fill_count: int | None = None,
+    ) -> None:
+        now = time.perf_counter()
+        elapsed_ms = int((now - self._last) * 1000)
+        self._last = now
+        rss = _current_rss_bytes()
+        self._records.append(
+            MhsResourceMeasurement(
+                stage=stage,
+                elapsed_ms=elapsed_ms,
+                rss_bytes=rss,
+                grid_bars=grid_bars,
+                n_symbols=n_symbols,
+                fill_count=fill_count,
+            )
+        )
+        if self._log_run:
+            _logger.info(
+                "[SYS] stage=%s rss=%d elapsed_ms=%d",
+                stage, rss, elapsed_ms,
+            )
 
 
 def _jsonable(value: Any) -> Any:
@@ -288,14 +354,14 @@ def _load_minute_frames(
             continue
         table = pq.read_table(
             path,
-            columns=["timestamp", "high", "low", "close", "quote_vol"],
+            columns=["timestamp", "high", "low", "close"],
             filters=[[("timestamp", ">=", start_ms), ("timestamp", "<=", end_ms)]],
         )
         idx = pd.to_datetime(table.column("timestamp").to_numpy(), unit="ms", utc=True)
         frame = pd.DataFrame(
             {
                 c: table.column(c).to_numpy().astype("float64")
-                for c in ("high", "low", "close", "quote_vol")
+                for c in ("high", "low", "close")
             },
             index=idx,
         )
@@ -309,7 +375,7 @@ def _load_minute_frames(
 def _align_minute_frames(
     frames: dict[str, pd.DataFrame], timeframe: Literal["1m", "5m"],
     start: pd.Timestamp, end: pd.Timestamp,
-) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame] | None:
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame] | None:
     if not frames:
         return None
     if start >= end:
@@ -325,8 +391,7 @@ def _align_minute_frames(
     highs = pd.DataFrame({s: f["high"] for s, f in frames.items()}).reindex(grid)
     lows = pd.DataFrame({s: f["low"] for s, f in frames.items()}).reindex(grid)
     closes = pd.DataFrame({s: f["close"] for s, f in frames.items()}).reindex(grid)
-    quote_vol = pd.DataFrame({s: f["quote_vol"] for s, f in frames.items()}).reindex(grid)
-    return highs, lows, closes, quote_vol
+    return highs, lows, closes
 
 
 def _book_weights(
@@ -487,31 +552,83 @@ def _placebo_sharpe_percentile(
     return float(np.mean([1.0 if observed_sharpe >= r else 0.0 for r in ranks]))
 
 
+def _load_symbol_quote_volume(
+    root: str,
+    symbol: str,
+    timeframe: Literal["1m", "5m"],
+    start: pd.Timestamp,
+    end: pd.Timestamp,
+) -> pd.Series | None:
+    """Load one symbol's ``quote_vol`` over ``[start, end]`` on demand.
+
+    Reads only the ``timestamp``/``quote_vol`` columns so participation metrics
+    never retain a wide quote-volume panel alongside the minute OHLCV frames.
+    Returns ``None`` when the symbol has no data (the same absent-data behavior
+    as a symbol missing from the historical wide panel).
+    """
+    path = os.path.join(root, timeframe, f"{symbol}.parquet")
+    if not os.path.exists(path):
+        return None
+    start_ms = int(start.value // 1_000_000)
+    end_ms = int(end.value // 1_000_000)
+    table = pq.read_table(
+        path,
+        columns=["timestamp", "quote_vol"],
+        filters=[[("timestamp", ">=", start_ms), ("timestamp", "<=", end_ms)]],
+    )
+    idx = pd.to_datetime(table.column("timestamp").to_numpy(), unit="ms", utc=True)
+    series = pd.Series(
+        table.column("quote_vol").to_numpy().astype("float64"), index=idx,
+    )
+    series = series[(series.index >= start) & (series.index <= end)]
+    series = series[~series.index.duplicated(keep="last")].sort_index()
+    if series.empty:
+        return None
+    return series
+
+
 def _participation_warnings(
     replay: StrategyExecutionReplayResult,
-    quote_volume_1m: pd.DataFrame,
+    root: str,
+    timeframe: Literal["1m", "5m"],
+    symbols: list[str],
+    minute_grid: pd.DatetimeIndex,
 ) -> dict[str, float]:
     if replay.simulated_fills.empty:
         return {}
     fills = replay.simulated_fills
     notional = float((fills["quantity_delta"].abs() * fills["fill_price"]).sum())
-    warnings: dict[str, float] = {}
-    for window_label, minutes in (("1m", 1), ("30m", 30)):
-        total_volume = 0.0
-        for _i, row in fills.iterrows():
+    fills_by_symbol: dict[str, pd.DataFrame] = {}
+    for _sym, group in fills.groupby("symbol"):
+        fills_by_symbol[str(_sym)] = group
+    daily_volume = 0.0
+    window_totals: dict[str, float] = {"1m": 0.0, "30m": 0.0}
+    window_minutes = (("1m", 1), ("30m", 30))
+    for sym in symbols:
+        series = _load_symbol_quote_volume(
+            root, sym, timeframe, minute_grid[0], minute_grid[-1],
+        )
+        if series is None:
+            continue
+        daily_volume += float(series.sum())
+        group = fills_by_symbol.get(sym)
+        if group is None:
+            continue
+        for _i, row in group.iterrows():
             t = row["timestamp"]
-            sym = row["symbol"]
-            if sym not in quote_volume_1m.columns or t not in quote_volume_1m.index:
+            if t not in series.index:
                 continue
-            window_end = t + pd.Timedelta(minutes=minutes)
-            total_volume += float(quote_volume_1m.loc[t:window_end, sym].sum())
+            for window_label, minutes in window_minutes:
+                window_end = t + pd.Timedelta(minutes=minutes)
+                window_totals[window_label] += float(series.loc[t:window_end].sum())
+    warnings: dict[str, float] = {}
+    for window_label, _minutes in window_minutes:
+        total_volume = window_totals[window_label]
         warnings[f"fill_notional_to_{window_label}_quote_volume"] = (
             notional / total_volume if total_volume > 0 else float("nan")
         )
-    daily_notional = notional
-    daily_volume = float(quote_volume_1m.sum().sum()) if not quote_volume_1m.empty else 0.0
     warnings["daily_trade_notional_to_daily_quote_volume"] = (
-        daily_notional / daily_volume if daily_volume > 0 else float("nan")
+        notional / daily_volume if daily_volume > 0 else float("nan")
     )
     return warnings
 
@@ -601,12 +718,13 @@ def _book_outcome(
     opens: pd.DataFrame,
     bar_funding: pd.DataFrame,
     phase: PhaseDiagnosticResult,
-    minute_frames: tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame],
+    minute_frames: tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame],
     minute_bar_funding: pd.DataFrame,
     minute_marks: pd.DataFrame | None,
     event_window_bars: int,
     initial_equity: float,
     replay_weights_step: pd.DataFrame | None = None,
+    telemetry: _StageRecorder | None = None,
 ) -> MhsBookReport:
     weights_1h = weights_step.reindex(grid_1h).ffill().fillna(0.0)
     cost_grid = tuple(dict.fromkeys((0.0, 2.0, 4.0, 8.0, *required_cost_tiers())))
@@ -623,7 +741,7 @@ def _book_outcome(
 
     target_weights = (replay_weights_step if replay_weights_step is not None else weights_step).reindex(step_grid)
     signal_available_at = step_grid + pd.Timedelta(hours=1)
-    highs, lows, closes, _quote_vol = minute_frames
+    highs, lows, closes = minute_frames
     replay_symbols = [s for s in target_weights.columns if s in highs.columns]
     target_replay = target_weights[replay_symbols]
     if minute_marks is not None:
@@ -632,10 +750,22 @@ def _book_outcome(
         target_replay, signal_available_at, highs, lows, closes, minute_marks,
         minute_bar_funding, initial_equity, "OHLCV_STRICT_PROXY", ExecutionSpec(),
     )
+    if telemetry is not None:
+        telemetry.record(
+            f"replay_{name}_strict",
+            n_symbols=len(replay_symbols),
+            fill_count=len(primary.simulated_fills),
+        )
     stress = strategy_aware_execution_replay(
         target_replay, signal_available_at, highs, lows, closes, minute_marks,
         minute_bar_funding, initial_equity, "OHLCV_IMMEDIATE_TAKER", ExecutionSpec(),
     )
+    if telemetry is not None:
+        telemetry.record(
+            f"replay_{name}_stress",
+            n_symbols=len(replay_symbols),
+            fill_count=len(stress.simulated_fills),
+        )
     if minute_marks is not None and not primary.ledger.primary_valid:
             raise DataIntegrityError(
                 f"cache_required strict primary ledger invalid for {name}: "
@@ -770,7 +900,7 @@ def _run_anchored_fold(
         )
         if minute_frames is None:
             return _incomplete_fold_report(fold, fold_index, (MHS_GO_REASON_INCOMPLETE_FOLD,))
-        highs, _lows, closes, _quote_vol_1m = minute_frames
+        highs, _lows, closes = minute_frames
         minute_grid = highs.index
         minute_marks = (
             DataCollector().load_mark_price_panel(
@@ -903,6 +1033,8 @@ def run_mhs_horizon_diagnostic(request: MhsDiagnosticRequest) -> MhsHorizonDiagn
     if end > HOLDOUT_CUTOFF:
         raise RuntimeError(f"Holdout sealed: requested end {end} past {HOLDOUT_CUTOFF}")
 
+    telemetry = _StageRecorder(log_run=request.log_run)
+
     root = request.data_root or str(FUTURES_DATA_DIR / "ohlcv")
     panel = load_base_panel(
         root, "1h", ("close", "open", "quote_vol"), start, end, partition="dev", min_bars=2000,
@@ -910,6 +1042,7 @@ def run_mhs_horizon_diagnostic(request: MhsDiagnosticRequest) -> MhsHorizonDiagn
     close, opens, quote_vol = panel["close"], panel["open"], panel["quote_vol"]
     grid_1h = close.index
     symbols = list(close.columns)
+    telemetry.record("base_1h_panel", grid_bars=len(grid_1h), n_symbols=len(symbols))
 
     funding_by_symbol = _load_funding_series(symbols)
     fold_funding = dict(funding_by_symbol)
@@ -936,6 +1069,7 @@ def run_mhs_horizon_diagnostic(request: MhsDiagnosticRequest) -> MhsHorizonDiagn
     quote_vol = quote_vol[aligned_symbols]
     funding_by_symbol = {s: funding_by_symbol[s] for s in aligned_symbols}
     bar_funding = bar_funding[aligned_symbols]
+    telemetry.record("funding_alignment", grid_bars=len(grid_1h), n_symbols=len(aligned_symbols))
 
     eligible = liquid_half_eligibility(quote_vol, lookback_bars=720, min_history_bars=720)
     log_close = np.log(close)
@@ -978,9 +1112,11 @@ def run_mhs_horizon_diagnostic(request: MhsDiagnosticRequest) -> MhsHorizonDiagn
         start, end,
     )
     initial_equity = 1.0
-    quote_volume_1m = pd.DataFrame()
+    minute_grid: pd.DatetimeIndex | None = None
+    replay_symbols: list[str] = []
+    highs = lows = closes = minute_marks = minute_funding = None
     if minute_frames is not None:
-        highs, _lows, closes, quote_volume_1m = minute_frames
+        highs, lows, closes = minute_frames
         minute_grid = highs.index
         replay_symbols = list(closes.columns)
         minute_marks = (
@@ -999,15 +1135,20 @@ def run_mhs_horizon_diagnostic(request: MhsDiagnosticRequest) -> MhsHorizonDiagn
         minute_funding = bar_funding_panel(minute_funding_window, minute_grid)
         minute_symbols = list(closes.columns)
         minute_funding = minute_funding.reindex(columns=minute_symbols)
+        telemetry.record(
+            "minute_market_mark_funding",
+            grid_bars=len(minute_grid),
+            n_symbols=len(replay_symbols),
+        )
         book_report_fast = _book_outcome(
             "fast_reversal", fast, len(funded), fast_grid, w_fast, grid_1h,
             opens, bar_funding, phase_fast, minute_frames, minute_funding, minute_marks,
-            fast.horizon_hours, initial_equity, w_fast_execution,
+            fast.horizon_hours, initial_equity, w_fast_execution, telemetry=telemetry,
         )
         book_report_slow = _book_outcome(
             "slow_momentum", slow, len(funded), slow_grid, w_slow, grid_1h,
             opens, bar_funding, phase_slow, minute_frames, minute_funding, minute_marks,
-            slow.horizon_hours, initial_equity, w_slow_execution,
+            slow.horizon_hours, initial_equity, w_slow_execution, telemetry=telemetry,
         )
         blend_step = blend_1h.reindex(fast_grid)
         book_report_blend = _book_outcome(
@@ -1015,6 +1156,7 @@ def run_mhs_horizon_diagnostic(request: MhsDiagnosticRequest) -> MhsHorizonDiagn
             opens, bar_funding, phase_blend, minute_frames, minute_funding, minute_marks,
             168, initial_equity,
             blend_1h.where(execution_mask, other=0.0),
+            telemetry=telemetry,
         )
         books = {"fast_reversal": book_report_fast, "slow_momentum": book_report_slow}
         blend_report = book_report_blend
@@ -1042,23 +1184,48 @@ def run_mhs_horizon_diagnostic(request: MhsDiagnosticRequest) -> MhsHorizonDiagn
     termination_counts: dict[str, int] = {}
     unsupported = ("partial_fill", "queue_position", "post_only_rejection", "cancel_replace_latency", "order_size_impact")
     if blend_report is not None:
+        if minute_grid is None:
+            raise DataIntegrityError("blend report requires a minute replay grid")
         equity_1h = blend_report.primary.ledger.equity.resample("1h").last().dropna()
         net_1h = equity_1h.pct_change().dropna()
         if len(net_1h) >= 2:
             bootstrap_ci = _bootstrap_ci(
                 net_1h, _BOOTSTRAP_REPLICATES, _BOOTSTRAP_MEAN_BLOCK, _BOOTSTRAP_SEED,
             )
-        participation = _participation_warnings(blend_report.primary, quote_volume_1m)
+        participation = _participation_warnings(
+            blend_report.primary,
+            root,
+            request.execution_timeframe,
+            replay_symbols,
+            minute_grid,
+        )
+        telemetry.record(
+            "blend_participation",
+            fill_count=len(blend_report.primary.simulated_fills),
+        )
         termination_counts = dict(blend_report.primary.termination_counts)
         placebo_percentile = _placebo_sharpe_percentile(
             horizon_log_return(log_close, 48), eligible, opens, bar_funding, grid_1h,
             fast, blend_report.primary_naive_sharpe, 500, _BOOTSTRAP_SEED,
         )
+        telemetry.record("statistical_diagnostics")
+        # Release the main minute panels, marks, and funding before anchored-fold
+        # work begins; each fold loads its own sequential market panel.
+        del minute_frames, highs, lows, closes, minute_marks, minute_funding
 
-    folds = tuple(
-        _run_anchored_fold(root, fold, request, fold_funding, initial_equity, idx)
-        for idx, fold in enumerate(phase_1_anchored_purged_folds())
-    )
+    fold_reports: list[MhsFoldReport] = []
+    for idx, fold in enumerate(phase_1_anchored_purged_folds()):
+        fold_report = _run_anchored_fold(
+            root, fold, request, fold_funding, initial_equity, idx,
+        )
+        fill_count = (
+            len(fold_report.strict.simulated_fills) + len(fold_report.stress.simulated_fills)
+            if fold_report.strict is not None and fold_report.stress is not None
+            else 0
+        )
+        telemetry.record(f"anchored_fold_{idx}", fill_count=fill_count)
+        fold_reports.append(fold_report)
+    folds = tuple(fold_reports)
     research_go = _mhs_research_go(folds)
 
     if blend_report is not None:
@@ -1092,6 +1259,7 @@ def run_mhs_horizon_diagnostic(request: MhsDiagnosticRequest) -> MhsHorizonDiagn
         fill_source = "OHLCV_STRICT_PROXY"
 
     run_elapsed_seconds = time.perf_counter() - _run_start
+    telemetry.record("final_return")
 
     return MhsHorizonDiagnosticReport(
         feature=_MHS_FEATURE,
@@ -1127,6 +1295,7 @@ def run_mhs_horizon_diagnostic(request: MhsDiagnosticRequest) -> MhsHorizonDiagn
         execution_universe_size=request.execution_universe_size,
         execution_symbols=tuple(execution_symbols),
         run_elapsed_seconds=run_elapsed_seconds,
+        resource_measurements=telemetry.records,
     )
 
 
