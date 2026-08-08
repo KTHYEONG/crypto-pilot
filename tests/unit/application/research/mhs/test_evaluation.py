@@ -5,13 +5,17 @@ import pandas as pd
 import pytest
 
 from src.application.research.mhs.evaluation import (
+    MhsDiagnosticRequest,
     _StageRecorder,
+    _assert_cache_required_ledger_valid,
     _assert_cache_required_marks,
+    _assert_execution_rss_budget,
     _iter_mhs_execution_windows,
     _truncate_replayable_decisions,
 )
 from src.common.errors import DataIntegrityError
 from src.mhs.contracts import ExecutionSpec
+from src.mhs.execution import ExecutionReplayWindow, replay_execution_windows
 
 
 def test_mhs_resource_measurement_records_ordered_stage_data() -> None:
@@ -74,6 +78,7 @@ def test_truncate_replayable_decisions_requires_exact_timeout_bar() -> None:
 
 
 def test_cache_required_marks_raise_structured_provenance() -> None:
+    # MHS-STRICT-FAIL-CLOSED
     grid = pd.date_range("2021-01-01", periods=31, freq="1min", tz="UTC")
     weights = pd.DataFrame({"A": [1.0]}, index=[pd.Timestamp("2021-01-01 00:00", tz="UTC")])
     signals = pd.DatetimeIndex([pd.Timestamp("2021-01-01 01:00", tz="UTC")])
@@ -123,3 +128,60 @@ def test_iter_mhs_execution_windows_preserves_columns_and_active_roster(tmp_path
         assert w.minute_grid.tz is not None
         assert len(w.minute_grid) > 1
     assert windows[-1].minute_grid[-1] == end
+
+
+def test_mhs_mem_03_rss_budget_fails_closed(monkeypatch) -> None:
+    """MHS-MEM-03: a configured RSS budget produces deterministic
+    DataIntegrityError provenance rather than a process-level OOM or a valid
+    partial report."""
+    assert MhsDiagnosticRequest().max_rss_bytes is None
+    with pytest.raises(ValueError, match="max_rss_bytes"):
+        MhsDiagnosticRequest(max_rss_bytes=0)
+    with pytest.raises(ValueError, match="max_rss_bytes"):
+        MhsDiagnosticRequest(max_rss_bytes=-1)
+    assert MhsDiagnosticRequest(max_rss_bytes=1_000_000_000).max_rss_bytes == 1_000_000_000
+
+    monkeypatch.setattr("src.application.research.mhs.evaluation._current_rss_bytes", lambda: 5_000_000_000)
+    with pytest.raises(DataIntegrityError, match="execution RSS budget exceeded") as excinfo:
+        _assert_execution_rss_budget("execution_window", 1_000_000_000, 7)
+    message = str(excinfo.value)
+    assert "stage=execution_window" in message
+    assert "observed_rss=5000000000" in message
+    assert "budget=1000000000" in message
+    assert "completed_windows=7" in message
+    _assert_execution_rss_budget("execution_window", None, 7)
+
+
+def test_mhs_mem_04_strict_gap_preserved() -> None:
+    """MHS-MEM-04: cache_required continues to fail closed on MISSING_HELD_MARK
+    for a held-mark fixture; stale carry remains explicit diagnostic mode."""
+    grid = pd.date_range("2021-01-01", periods=48, freq="5min", tz="UTC")
+    px = pd.DataFrame({"A": [100.0] * len(grid)}, index=grid)
+    marks = px.copy()
+    marks.loc[grid[20]:grid[25], "A"] = np.nan
+    target = pd.DataFrame({"A": [1.0]}, index=[pd.Timestamp("2021-01-01 00:00", tz="UTC")])
+    signals = pd.DatetimeIndex([pd.Timestamp("2021-01-01 01:00", tz="UTC")])
+    window = ExecutionReplayWindow(
+        window_start=grid[0],
+        window_end=grid[-1],
+        columns=("A",),
+        symbols=("A",),
+        minute_grid=grid,
+        highs=px,
+        lows=px,
+        closes=px,
+        marks=marks,
+        bar_funding=pd.DataFrame(0.0, index=grid, columns=["A"]),
+        target_weights=target,
+        signal_available_at=signals,
+    )
+    replay = replay_execution_windows(
+        [window], 1.0, "OHLCV_STRICT_PROXY", ExecutionSpec(),
+    )
+    assert replay.event_snapshots_retained is False
+    gap_codes = {g.code for g in replay.data_gaps}
+    assert "MISSING_HELD_MARK" in gap_codes
+    assert replay.ledger.primary_valid is False
+    with pytest.raises(DataIntegrityError, match="cache_required strict primary ledger invalid"):
+        _assert_cache_required_ledger_valid("held_mark_book", replay)
+    assert replay.ledger.primary_valid is False
