@@ -47,11 +47,16 @@ def test_mhs_replay_resource_benchmark() -> None:
     for sample in samples[1:]:
         assert sample["checksum"] == samples[0]["checksum"]
         assert sample["fill_count"] == samples[0]["fill_count"]
+        assert sample["windowed_checksum"] == samples[0]["windowed_checksum"]
     assert samples[0]["checksum"]
     assert samples[0]["grid_bars"] == 90 * 24 * 12
     assert samples[0]["n_symbols"] == 64
     assert samples[0]["decisions"] == 360
     assert samples[0]["fill_count"] > 0
+    assert samples[0]["windowed_matches_single_panel"] is True
+    assert samples[0]["n_windows"] >= 3
+    assert samples[0]["max_window_grid_bars"] > 0
+    assert samples[0]["window_elapsed_seconds"] > 0.0
 
     summary = {
         "workload": {
