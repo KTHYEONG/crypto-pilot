@@ -245,3 +245,119 @@ class TestMissingDataTermination:
         )
         assert set(report.termination_counts) == {"MISSING_DATA", "UNKNOWN_TERMINATION"}
         assert "DELIST" not in report.termination_counts
+
+
+class TestFlatMarkNanLedger:
+    """MHS-27-FLAT-MARK-NAN-LEDGER: an unavailable mark is zero only when flat.
+
+    Leading unavailable marks with zero units leave equity exactly at the
+    initial equity; a held position at an unavailable mark remains
+    primary-invalid instead of leaking ``0 * NaN`` into cash equity.
+    """
+
+    def test_leading_nan_marks_flat_stay_at_initial_equity(self) -> None:
+        idx = pd.date_range("2021-01-01", periods=5, freq="1h", tz="UTC")
+        marks = pd.DataFrame(
+            {"A": [np.nan, np.nan, 100.0, 101.0, 102.0]}, index=idx,
+        )
+        result = simulated_inventory_ledger(
+            pd.DataFrame(),
+            marks,
+            pd.DataFrame(0.0, index=idx, columns=["A"]),
+            1.0, "OHLCV_STRICT_PROXY", "MARK_PRICE",
+        )
+        assert np.isfinite(result.equity.to_numpy()).all()
+        assert result.equity.iloc[0] == pytest.approx(1.0)
+        assert result.equity.iloc[1] == pytest.approx(1.0)
+        assert result.primary_valid is True
+        assert result.net_returns.isna().sum() == 0
+
+    def test_held_unavailable_mark_is_primary_invalid(self) -> None:
+        idx = pd.date_range("2021-01-01", periods=4, freq="1h", tz="UTC")
+        marks = pd.DataFrame(
+            {"A": [100.0, 100.0, np.nan, 100.0]}, index=idx,
+        )
+        fills = pd.DataFrame(
+            [
+                {"timestamp": idx[0], "symbol": "A", "quantity_delta": 0.01,
+                 "fill_price": 100.0, "fee_bps": 2.0, "reason": "passive_fill"},
+            ],
+        )
+        result = simulated_inventory_ledger(
+            fills,
+            marks,
+            pd.DataFrame(0.0, index=idx, columns=["A"]),
+            1.0, "OHLCV_STRICT_PROXY", "MARK_PRICE",
+        )
+        assert result.primary_valid is False
+        assert "MISSING_DATA" in result.invalid_reasons
+        assert np.isfinite(result.equity.to_numpy()).all()
+        assert (result.equity > 0).all()
+
+    def test_flat_position_at_nan_never_raises_on_equity(self) -> None:
+        idx = pd.date_range("2021-01-01", periods=3, freq="1h", tz="UTC")
+        marks = pd.DataFrame(
+            {"A": [np.nan, np.nan, np.nan]}, index=idx,
+        )
+        result = simulated_inventory_ledger(
+            pd.DataFrame(),
+            marks,
+            pd.DataFrame(0.0, index=idx, columns=["A"]),
+            1.0, "OHLCV_STRICT_PROXY", "MARK_PRICE",
+        )
+        assert (result.equity == 1.0).all()
+
+
+class TestReplayEquivalencePerformance:
+    """MHS-28-REPLAY-EQUIVALENCE-PERFORMANCE: optimized replay matches the
+    frozen-fixture fills, equity, fees, funding, and turnover while reporting
+    measured elapsed seconds on a small deterministic fixture."""
+
+    def test_strict_timeout_matches_frozen_fixture(self) -> None:
+        idx = pd.date_range("2021-01-01 12:01", periods=31, freq="1min", tz="UTC")
+        target = pd.DataFrame({"A": [1.0]}, index=[pd.Timestamp("2021-01-01 11:00", tz="UTC")])
+        signal_at = pd.DatetimeIndex([pd.Timestamp("2021-01-01 12:00", tz="UTC")])
+        px = pd.DataFrame({"A": [100.0] * 31}, index=idx)
+        report = strategy_aware_execution_replay(
+            target, signal_at, px, px, px, px,
+            pd.DataFrame(0.0, index=idx, columns=["A"]), 1.0,
+            "OHLCV_STRICT_PROXY", ExecutionSpec(),
+        )
+        assert report.elapsed_seconds >= 0.0
+        fills = report.simulated_fills
+        assert len(fills) == 1
+        assert fills.iloc[0]["timestamp"] == pd.Timestamp("2021-01-01 12:31", tz="UTC")
+        assert fills.iloc[0]["symbol"] == "A"
+        assert fills.iloc[0]["quantity_delta"] == pytest.approx(0.01)
+        assert fills.iloc[0]["fill_price"] == pytest.approx(100.0)
+        assert fills.iloc[0]["fee_bps"] == pytest.approx(8.0)
+        assert report.submit_times.iloc[0] == pd.Timestamp("2021-01-01 12:01", tz="UTC")
+        equity = report.ledger.equity
+        assert np.allclose(equity.iloc[:30].to_numpy(), 1.0)
+        assert equity.iloc[30] == pytest.approx(0.9992)
+        assert report.ledger.fee_charge.iloc[30] == pytest.approx(0.0008)
+        assert (report.ledger.funding_charge == 0.0).all()
+        assert report.ledger.fill_turnover.iloc[30] == pytest.approx(1.0)
+        assert report.unfilled_count == 1
+        assert report.fallback_count == 1
+
+    def test_passive_fill_matches_frozen_fixture(self) -> None:
+        idx = pd.date_range("2021-01-01 12:01", periods=31, freq="1min", tz="UTC")
+        px = pd.DataFrame({"A": [100.0] * 31}, index=idx)
+        px.loc["2021-01-01 12:10", "A"] = 99.0
+        lows = px.copy()
+        target = pd.DataFrame({"A": [1.0]}, index=[pd.Timestamp("2021-01-01 11:00", tz="UTC")])
+        signal_at = pd.DatetimeIndex([pd.Timestamp("2021-01-01 12:00", tz="UTC")])
+        report = strategy_aware_execution_replay(
+            target, signal_at, px, lows, px, px,
+            pd.DataFrame(0.0, index=idx, columns=["A"]), 1.0,
+            "OHLCV_STRICT_PROXY", ExecutionSpec(),
+        )
+        fills = report.simulated_fills
+        assert len(fills) == 1
+        assert fills.iloc[0]["timestamp"] == pd.Timestamp("2021-01-01 12:10", tz="UTC")
+        assert fills.iloc[0]["fill_price"] == pytest.approx(100.0)
+        assert fills.iloc[0]["fee_bps"] == pytest.approx(2.0)
+        assert fills.iloc[0]["reason"] == "passive_fill"
+        assert report.fill_count == 1
+        assert report.unfilled_count == 0
