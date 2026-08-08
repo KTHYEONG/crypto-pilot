@@ -6,6 +6,10 @@
       "tests/unit/cli/test_main.py"
     ]
   },
+  "src/application/data/mhs_execution_collection.py": {
+    "architecture": "docs/architecture/multi-horizon-market-state.md",
+    "testing": "tests/unit/mhs/test_collection.py"
+  },
   "src/application/facades/admission_backtest.py": {
     "testing": "tests/contract/test_legacy_imports.py"
   },
@@ -183,6 +187,10 @@
   },
   "src/cli/commands/research/expert_library.py": {
     "testing": "tests/unit/cli/test_research_commands.py"
+  },
+  "src/cli/commands/research/mhs.py": {
+    "architecture": "docs/architecture/multi-horizon-market-state.md",
+    "testing": "tests/integration/mhs/test_mhs_horizon_diagnostic.py"
   },
   "src/cli/commands/research/portfolio_blend.py": {
     "testing": "tests/unit/cli/test_research_commands.py"
@@ -625,5 +633,8 @@
       "tests/benchmark/mhs/test_mhs_replay_resources.py",
       "tests/unit/application/research/mhs/test_evaluation.py"
     ]
+  },
+  "src/mhs/panel.py": {
+    "testing": "tests/unit/mhs/test_panel.py"
   }
 }
