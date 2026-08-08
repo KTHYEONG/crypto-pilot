@@ -6,6 +6,7 @@ the pinned target-weight *pre-screen* proxy only and must never back Research
 GO, OOS, capital, or capacity claims.
 """
 
+import time
 from collections import defaultdict
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -148,6 +149,7 @@ class StrategyExecutionReplayResult:
     forced_exit_notional: float
     termination_counts: Mapping[str, int]
     unsupported_assumptions: tuple[str, ...]
+    elapsed_seconds: float
 
 
 def simulated_inventory_ledger(
@@ -183,6 +185,7 @@ def simulated_inventory_ledger(
         raise DataIntegrityError("finite marks must be strictly positive")
 
     marks_values = finite
+    finite = np.isfinite(marks_values)
     funding_rates = bar_funding.to_numpy(dtype="float64")
     columns = list(marks.columns)
     grid = marks.index
@@ -223,6 +226,8 @@ def simulated_inventory_ledger(
         qty = float(row.quantity_delta)
         price = float(row.fill_price)
         fee_bps = float(row.fee_bps)
+        if not (np.isfinite(qty) and np.isfinite(price) and np.isfinite(fee_bps)):
+            raise DataIntegrityError("simulated fills, prices, and fees must be finite")
         fee = fee_bps / 1e4 * abs(qty) * price
         delta_units[pos, col] += qty
         fill_flow[pos] += -(qty * price + fee)
@@ -234,10 +239,19 @@ def simulated_inventory_ledger(
     units_before = np.zeros_like(units_state)
     units_before[1:] = units_state[:-1]
 
-    finite = np.isfinite(marks_values)
+    # An unavailable mark is valued at exactly zero for a flat position, so
+    # cash equity stays finite before the first tradable mark. A held position
+    # at an unavailable mark is reported below as primary-invalid and is carried
+    # at its last known mark so the ledger arithmetic stays finite and positive
+    # instead of leaking ``0 * NaN`` or a negative cash shortfall.
     last_index = np.where(finite, np.arange(n_grid)[:, None], 0)
     last_index = np.maximum.accumulate(last_index, axis=0)
-    valuation = marks_values[last_index, np.arange(n_cols)[None, :]]
+    forward = marks_values[last_index, np.arange(n_cols)[None, :]]
+    valuation = np.where(
+        finite | (units_state != 0.0),
+        np.where(finite, marks_values, forward),
+        0.0,
+    )
 
     primary_valid = True
     invalid_reasons: set[str] = set()
@@ -275,15 +289,15 @@ def simulated_inventory_ledger(
     for ts, terms in turnover_terms.items():
         pos = turnover_pos[ts]
         pre_trade_equity = cash_pre_fill[pos] + notional_before[pos]
-        if pre_trade_equity <= 0:
-            raise DataIntegrityError("pre-trade equity must be positive")
+        if not np.isfinite(pre_trade_equity) or pre_trade_equity <= 0:
+            raise DataIntegrityError("pre-trade equity must be positive and finite")
         turnover_arr[pos] = sum(
             abs(qty * price) / pre_trade_equity for qty, price in terms
         )
 
     equity = pd.Series(equity_values_arr, index=grid, dtype="float64")
-    if (equity <= 0).any():
-        raise DataIntegrityError("simulated inventory equity reached zero or below")
+    if not np.isfinite(equity_values_arr).all() or (equity_values_arr <= 0).any():
+        raise DataIntegrityError("simulated inventory equity must be finite and strictly positive")
     return SimulatedInventoryLedgerResult(
         equity=equity,
         net_returns=equity.pct_change().dropna(),
@@ -357,9 +371,23 @@ def strategy_aware_execution_replay(
         mark_source = "OHLCV_CLOSE_FALLBACK"
 
     minute_grid = minute_closes.index
-    minute_set = set(minute_grid)
+    # Normalize to nanoseconds regardless of the pandas index resolution so the
+    # searchsorted bounds and timeout arithmetic use one canonical epoch unit.
+    grid_ns = np.asarray(minute_grid, dtype="datetime64[ns]").astype("int64")
+    n_grid = len(grid_ns)
+    if not bar_funding.index.equals(minute_grid):
+        raise DataIntegrityError("bar_funding must align exactly to the minute grid")
     symbols = list(target_weights.columns)
+    col_index = {s: i for i, s in enumerate(symbols)}
     require_strict = execution_bound == "OHLCV_STRICT_PROXY"
+
+    marks_values = marks.to_numpy(dtype="float64")
+    highs_values = minute_highs.to_numpy(dtype="float64")
+    lows_values = minute_lows.to_numpy(dtype="float64")
+    closes_values = minute_closes.to_numpy(dtype="float64")
+    close_finite = np.isfinite(closes_values)
+    mark_valid = np.isfinite(marks_values) & (marks_values > 0.0)
+    funding_values = [bar_funding[s].to_numpy(dtype="float64") for s in symbols]
 
     last_reliable: dict[str, pd.Timestamp] = {}
     for sym in symbols:
@@ -369,51 +397,44 @@ def strategy_aware_execution_replay(
     units = dict.fromkeys(symbols, 0.0)
     cash = float(initial_equity)
     last_prices: dict[str, float] = {}
-    last_time: pd.Timestamp | None = None
+    last_time_ns: int | None = None
 
     def _equity_at() -> float:
         return cash + sum(
             units[s] * last_prices[s] for s in symbols if s in last_prices
         )
 
-    def _advance(target_time: pd.Timestamp) -> None:
-        nonlocal cash, last_time
-        if last_time is not None and target_time < last_time:
+    def _advance(target_ns: int, dpos: int, on_grid: bool) -> None:
+        nonlocal cash, last_time_ns
+        if last_time_ns is not None and target_ns < last_time_ns:
             raise DataIntegrityError("decision times must be monotonically increasing")
-        if last_time is not None:
-            between = minute_grid[(minute_grid > last_time) & (minute_grid <= target_time)]
-        else:
-            between = minute_grid[minute_grid <= target_time]
-        for s in symbols:
-            if target_time in minute_set:
-                price = float(marks.loc[target_time, s])
+        if on_grid:
+            for s in symbols:
+                price = marks_values[dpos, col_index[s]]
                 if np.isfinite(price):
                     if s in last_prices:
                         cash += units[s] * (price - last_prices[s])
                     last_prices[s] = price
-        if len(between) and len(bar_funding):
-            for t in between:
+        lo = np.searchsorted(grid_ns, last_time_ns, side="right") if last_time_ns is not None else 0
+        hi = int(np.searchsorted(grid_ns, target_ns, side="right"))
+        if lo < hi:
+            for i in range(lo, min(hi, n_grid)):
                 for s in symbols:
-                    rate = float(bar_funding.loc[t, s])
+                    rate = funding_values[col_index[s]][i]
                     if rate != 0.0 and units[s] != 0.0 and s in last_prices:
                         cash -= rate * units[s] * last_prices[s]
-        last_time = target_time
+        last_time_ns = target_ns
 
-    def _decision_price(sym: str, decision_time: pd.Timestamp, signal_time: pd.Timestamp) -> float | None:
-        if decision_time in minute_set:
-            price = float(marks.loc[decision_time, sym])
-            if np.isfinite(price) and price > 0:
-                return price
-        prior = minute_grid[(minute_grid <= signal_time) & minute_closes[sym].notna()]
-        if len(prior):
-            price = float(marks.loc[prior[-1], sym])
-            if np.isfinite(price) and price > 0:
-                return price
-        after = minute_grid[minute_grid > signal_time]
-        if len(after):
-            price = float(marks.loc[after[0], sym])
-            if np.isfinite(price) and price > 0:
-                return price
+    def _decision_price(col: int, on_grid: bool, dpos: int, spos: int) -> float | None:
+        if on_grid and mark_valid[dpos, col]:
+            return float(marks_values[dpos, col])
+        j = spos - 1
+        while j >= 0 and not close_finite[j, col]:
+            j -= 1
+        if j >= 0 and mark_valid[j, col]:
+            return float(marks_values[j, col])
+        if spos < n_grid and mark_valid[spos, col]:
+            return float(marks_values[spos, col])
         return None
 
     fill_records: list[dict[str, object]] = []
@@ -427,17 +448,31 @@ def strategy_aware_execution_replay(
     units_after_events: list[tuple[pd.Timestamp, list[float]]] = []
     notional_after_events: list[tuple[pd.Timestamp, list[float]]] = []
 
+    decision_ns_all = np.asarray(target_weights.index, dtype="datetime64[ns]").astype("int64")
+    signal_ns_all = np.asarray(signal_available_at, dtype="datetime64[ns]").astype("int64")
+    spos_all = np.searchsorted(grid_ns, signal_ns_all, side="right")
+    dpos_all = np.searchsorted(grid_ns, decision_ns_all, side="left")
+    dpos_clipped = np.minimum(dpos_all, n_grid - 1)
+    on_grid_all = np.where(
+        dpos_all < n_grid, grid_ns[dpos_clipped] == decision_ns_all, False,
+    )
+
+    _t0 = time.perf_counter()
     for i, decision_time in enumerate(target_weights.index):
-        signal_time = signal_available_at[i]
-        _advance(decision_time)
+        dns = int(decision_ns_all[i])
+        dpos = int(dpos_all[i])
+        on_grid = bool(on_grid_all[i])
+        _advance(dns, dpos, on_grid)
         equity = _equity_at()
         row = target_weights.loc[decision_time]
+        spos = int(spos_all[i])
 
         for sym in symbols:
             weight = float(row[sym]) if sym in row.index else 0.0
             if not np.isfinite(weight) or weight == 0.0:
                 continue
-            decision_price = _decision_price(sym, decision_time, signal_time)
+            col = col_index[sym]
+            decision_price = _decision_price(col, on_grid, dpos, spos)
             if decision_price is None:
                 termination_counts["MISSING_DATA"] += 1
                 continue
@@ -449,29 +484,30 @@ def strategy_aware_execution_replay(
                 continue
             side = 1 if net_units > 0 else -1
 
-            candidates = minute_grid[minute_grid > signal_time]
-            if not len(candidates):
+            if spos >= n_grid:
                 termination_counts["MISSING_DATA"] += 1
                 continue
-            submit_time = candidates[0]
-            timeout_bar = submit_time + pd.Timedelta(minutes=spec.passive_timeout_minutes)
-            adverse = np.array([], dtype="float64")
+            submit_pos = spos
+            timeout_ns = grid_ns[spos] + int(spec.passive_timeout_minutes) * 60_000_000_000
+            timeout_pos = int(np.searchsorted(grid_ns, timeout_ns, side="left"))
             timeout_close = float("nan")
+            adverse = np.array([], dtype="float64")
 
             if execution_bound == "OHLCV_IMMEDIATE_TAKER":
-                fill_time = submit_time
-                fill_price = float(minute_closes.loc[fill_time, sym])
+                fill_pos = submit_pos
+                fill_price = float(closes_values[fill_pos, col])
                 fee_bps = spec.taker_fee_bps + spec.taker_slippage_bps
                 reason = "timeout_taker"
             else:
-                window = minute_grid[
-                    (minute_grid > signal_time) & (minute_grid < timeout_bar)
-                ]
-                if len(window):
-                    adverse = minute_lows.loc[window, sym].to_numpy(dtype="float64")
-                    if side == -1:
-                        adverse = minute_highs.loc[window, sym].to_numpy(dtype="float64")
-                if not len(window) or not np.isfinite(adverse).all():
+                if timeout_pos <= spos:
+                    termination_counts["MISSING_DATA"] += 1
+                    continue
+                adverse = (
+                    lows_values[spos:timeout_pos, col]
+                    if side == 1
+                    else highs_values[spos:timeout_pos, col]
+                )
+                if not np.isfinite(adverse).all():
                     termination_counts["MISSING_DATA"] += 1
                     continue
                 if side == 1:
@@ -488,21 +524,21 @@ def strategy_aware_execution_replay(
                     )
                 if crossed.any():
                     hit = int(np.argmax(crossed))
-                    fill_time = window[hit]
+                    fill_pos = spos + hit
                     fill_price = decision_price
                     fee_bps = spec.maker_fee_bps
                     reason = "passive_fill"
                 else:
-                    if timeout_bar not in minute_set:
+                    if timeout_pos >= n_grid or grid_ns[timeout_pos] != timeout_ns:
                         termination_counts["MISSING_DATA"] += 1
                         continue
-                    timeout_close = float(minute_closes.loc[timeout_bar, sym])
+                    timeout_close = float(closes_values[timeout_pos, col])
                     if not np.isfinite(timeout_close):
                         termination_counts["MISSING_DATA"] += 1
                         continue
                     unfilled_count += 1
                     fallback_count += 1
-                    fill_time = timeout_bar
+                    fill_pos = timeout_pos
                     fill_price = timeout_close
                     fee_bps = spec.taker_fee_bps + spec.taker_slippage_bps
                     reason = "timeout_taker"
@@ -512,18 +548,21 @@ def strategy_aware_execution_replay(
             if execution_bound == "OHLCV_IMMEDIATE_TAKER":
                 shortfall = side * (fill_price / decision_price - 1.0) * 1e4 + fee_bps
             else:
-                timeout_price = timeout_close
                 shortfall = passive_fill_shortfall_bps(
-                    decision_price, adverse, timeout_price, side, spec,
+                    decision_price, adverse, timeout_close, side, spec,
                 )
             shortfalls.append(shortfall)
 
-            if fill_time in minute_set and sym in last_prices:
-                mark_price = float(marks.loc[fill_time, sym])
-                cash += units[sym] * (mark_price - last_prices[sym])
-                last_prices[sym] = mark_price
-            elif fill_time in minute_set:
-                last_prices[sym] = float(marks.loc[fill_time, sym])
+            fill_time = minute_grid[fill_pos]
+            submit_time = minute_grid[submit_pos]
+
+            if sym in last_prices:
+                mark_price = float(marks_values[fill_pos, col])
+                if np.isfinite(mark_price):
+                    cash += units[sym] * (mark_price - last_prices[sym])
+                    last_prices[sym] = mark_price
+            elif np.isfinite(marks_values[fill_pos, col]):
+                last_prices[sym] = float(marks_values[fill_pos, col])
             cash -= net_units * fill_price
             fee = fee_bps / 1e4 * abs(net_units) * fill_price
             cash -= fee
@@ -548,7 +587,7 @@ def strategy_aware_execution_replay(
                     (
                         fill_time,
                         [
-                            units[s] * float(marks.loc[fill_time, s])
+                            units[s] * float(marks_values[fill_pos, col_index[s]])
                             for s in symbols
                         ],
                     )
@@ -563,8 +602,10 @@ def strategy_aware_execution_replay(
             continue
         if last_reliable[sym] >= grid_end:
             continue
-        exit_time = last_reliable[sym]
-        exit_price = float(minute_closes.loc[exit_time, sym])
+        col = col_index[sym]
+        exit_pos = int(np.searchsorted(grid_ns, last_reliable[sym].value, side="left"))
+        exit_time = minute_grid[exit_pos]
+        exit_price = float(closes_values[exit_pos, col])
         if not np.isfinite(exit_price) or exit_price <= 0:
             termination_counts["MISSING_DATA"] += 1
             continue
@@ -577,8 +618,8 @@ def strategy_aware_execution_replay(
             else 0.0
         )
         fee_bps = spec.taker_fee_bps + spec.taker_slippage_bps + penalty
-        if exit_time in minute_set:
-            mark_price = float(marks.loc[exit_time, sym])
+        mark_price = float(marks_values[exit_pos, col])
+        if np.isfinite(mark_price):
             cash -= units[sym] * (mark_price - last_prices.get(sym, exit_price))
             last_prices[sym] = mark_price
         cash -= -units[sym] * exit_price
@@ -598,6 +639,7 @@ def strategy_aware_execution_replay(
         fill_times.append(exit_time)
         units[sym] = 0.0
         units_after_events.append((exit_time, [units[s] for s in symbols]))
+    elapsed_seconds = time.perf_counter() - _t0
 
     simulated_fills = pd.DataFrame(
         fill_records,
@@ -655,6 +697,7 @@ def strategy_aware_execution_replay(
             "cancel_replace_latency",
             "order_size_impact",
         ),
+        elapsed_seconds=elapsed_seconds,
     )
 
 
