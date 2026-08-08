@@ -132,7 +132,7 @@ exclude = [
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 python_files = ["test_*.py"]
-addopts = "-ra -q -m \"not slow\" -n auto --dist=loadfile --max-worker-restart=2"
+addopts = "-ra -q -m \"not slow\" --import-mode=importlib -n auto --dist=loadfile --max-worker-restart=2"
 pythonpath = ["."]
 markers = [
     "slow: full-pipeline integration tests (growth engine, baseline replication, funding screening) that run real backtests over multi-year data. Excluded from the default run via `-m \"not slow\"`; run explicitly with `uv run pytest -m slow`.",
