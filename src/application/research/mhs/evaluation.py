@@ -18,6 +18,7 @@ import os
 import time
 from collections.abc import Iterator
 from dataclasses import dataclass
+from functools import lru_cache
 from pathlib import Path
 from typing import Any, Literal
 
@@ -481,6 +482,25 @@ def _load_minute_frames(
     root: str, symbols: list[str], start: pd.Timestamp, end: pd.Timestamp,
     timeframe: Literal["1m", "5m"],
 ) -> dict[str, pd.DataFrame]:
+    """Load minute OHLCV frames for ``symbols`` over ``[start, end]``.
+
+    The expensive Parquet reads are cached for the current process by
+    ``(root, symbols, start, end, timeframe)`` so a repeated identical replay
+    window (e.g. the blend book re-requesting the fast book's most recent
+    windows) is served from memory instead of re-reading Parquet (spec §4,
+    ``_load_minute_frames`` cache).  The cache is a small bounded LRU -- a
+    multi-year 5m roster frame is tens of megabytes, so an unbounded cache
+    would violate the RSS budget.  It is cleared at the start of every
+    diagnostic run so data re-writes between runs are never served stale.
+    """
+    return dict(_load_minute_frames_cached(root, tuple(sorted(symbols)), start, end, timeframe))
+
+
+@lru_cache(maxsize=8)
+def _load_minute_frames_cached(
+    root: str, symbols: tuple[str, ...], start: pd.Timestamp, end: pd.Timestamp,
+    timeframe: Literal["1m", "5m"],
+) -> dict[str, pd.DataFrame]:
     frames: dict[str, pd.DataFrame] = {}
     start_ms = int(start.value // 1_000_000)
     end_ms = int(end.value // 1_000_000)
@@ -699,22 +719,77 @@ def _date_clustered_ols(fwd: pd.DataFrame, past: pd.DataFrame) -> dict[str, floa
     return {"n": n, "n_dates": len(daily_scores), "past_beta": float(beta[1]), "past_t": float(t_beta)}
 
 
+def _block_bootstrap_replicate_mean(
+    arr: np.ndarray, n: int, p_block: float, rng: np.random.Generator,
+) -> float:
+    """Mean of one block-bootstrap replicate (scalar fallback path).
+
+    Mirrors the original geometric block composition: block starts are uniform,
+    block lengths grow while ``rng.random() > p_block``, blocks are truncated at
+    the array end and again to the remaining sample length.  Only used for the
+    degenerate ``mean_block <= 0`` configuration and for the astronomically
+    rare vectorized shortfall, where a replicate's drawn blocks did not reach
+    length ``n``.
+    """
+    blocks: list[float] = []
+    while len(blocks) < n:
+        start = int(rng.integers(0, n))
+        length = 1
+        while length < n and rng.random() > p_block:
+            length += 1
+        length = min(length, n - len(blocks))
+        blocks.extend(arr[start : start + length].tolist())
+    return float(np.mean(blocks[:n]))
+
 def _bootstrap_ci(net: pd.Series, n_replicates: int, mean_block: int, seed: int) -> tuple[float, float]:
     rng = np.random.default_rng(seed)
     arr = net.to_numpy(dtype="float64")
     n = len(arr)
-    means: list[float] = []
+    if n == 0:
+        return float("nan"), float("nan")
+    if n == 1:
+        m = float(arr[0])
+        return m, m
     p_block = 1.0 / mean_block if mean_block > 0 else 0.0
-    for _r in range(n_replicates):
-        blocks: list[float] = []
-        while len(blocks) < n:
-            start = int(rng.integers(0, n))
-            length = 1
-            while length < n and rng.random() > p_block:
-                length += 1
-            length = min(length, n - len(blocks))
-            blocks.extend(arr[start : start + length].tolist())
-        means.append(float(np.mean(blocks[:n])))
+    if p_block <= 0.0:
+        means = np.empty(n_replicates, dtype=np.float64)
+        for r in range(n_replicates):
+            means[r] = _block_bootstrap_replicate_mean(arr, n, p_block, rng)
+        return float(np.percentile(means, 2.5)), float(np.percentile(means, 97.5))
+
+    # Vectorized block bootstrap: block lengths are ``geometric(p_block)`` --
+    # the same length law as the scalar ``while`` loop -- and block starts are
+    # uniform.  A 6x block-count safety margin makes running short effectively
+    # impossible; any shortfall still falls back to the scalar replicate path.
+    max_blocks = min(n, int(np.ceil(n * 6.0 / mean_block)) + 16)
+    means = np.empty(n_replicates, dtype=np.float64)
+    chunk = 128
+    for r0 in range(0, n_replicates, chunk):
+        r1 = min(r0 + chunk, n_replicates)
+        k = r1 - r0
+        lengths = rng.geometric(p_block, size=(k, max_blocks))
+        starts = rng.integers(0, n, size=(k, max_blocks))
+        ends = np.cumsum(lengths, axis=1)
+        short = ends[:, -1] < n
+        for r in np.flatnonzero(short).tolist():
+            means[r0 + r] = _block_bootstrap_replicate_mean(arr, n, p_block, rng)
+        valid = ~short
+        if valid.any():
+            ends_trunc = np.minimum(ends, n)
+            used = ends_trunc - np.concatenate(
+                [np.zeros((k, 1), dtype=np.int64), ends_trunc[:, :-1]], axis=1,
+            )
+            u = used[valid].ravel()
+            s = starts[valid].ravel()
+            keep = u > 0
+            u = u[keep]
+            s = s[keep]
+            block_start = np.cumsum(u) - u
+            offsets = np.arange(int(u.sum()), dtype=np.int64) - np.repeat(block_start, u)
+            arr_idx = (np.repeat(s, u) + offsets) % n
+            sample = arr[arr_idx].reshape(int(valid.sum()), n)
+            means[r0 + np.flatnonzero(valid)] = sample.mean(axis=1)
+
     return float(np.percentile(means, 2.5)), float(np.percentile(means, 97.5))
 
 
@@ -732,30 +807,66 @@ def _placebo_sharpe_percentile(
     rng = np.random.default_rng(seed)
     ranks: list[float] = []
     cols = list(signal.columns)
+    n_cols = len(cols)
     sig_step = signal.reindex(grid_1h)
     el_step = eligible.reindex(grid_1h)
+    # The frozen ledger raises ``DataIntegrityError`` unless weights, opens, and
+    # funding share an identical index and column set; preserve that contract
+    # instead of silently aligning via ``reindex``.
+    if not opens.index.equals(grid_1h) or not bar_funding.index.equals(grid_1h):
+        raise DataIntegrityError("opens and bar_funding must share the placebo grid index")
+    opens_arr = opens[cols].to_numpy(dtype="float64")
+    funding_arr = bar_funding[cols].to_numpy(dtype="float64")
+
+    # The placebo shuffle relabels the signal/eligible columns without moving
+    # their values, so ``rank_weight_book`` on any shuffled copy returns the
+    # identical weight matrix; only the price/funding columns are genuinely
+    # permuted relative to those weights.  The whole weight pipeline is
+    # therefore computed once as a 2D float64 matrix instead of re-materializing
+    # pandas DataFrames inside the 500-step loop (spec §3, Optimization 1).
+    weights = rank_weight_book(sig_step, el_step, spec.band.sign, spec.min_symbols)
+    weights = phase_tranche_book(weights, spec.tranche_count())
+    w_arr = weights.reindex(grid_1h).ffill().fillna(0.0).to_numpy(dtype="float64")
+
+    n_rows = opens_arr.shape[0]
+    lag = 1 + 1  # ``mhs_ledger_pnl`` uses ``execution_delay_bars=1``.
+    lagged = np.zeros_like(w_arr)
+    if lag < n_rows:
+        lagged[lag:] = w_arr[: n_rows - lag]
+
+    o2o = np.zeros_like(opens_arr)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        o2o[1:] = opens_arr[1:] / opens_arr[:-1] - 1.0
+
+    prev_lagged = np.zeros_like(lagged)
+    prev_lagged[1:] = lagged[:-1]
+    turnover = np.abs(lagged - prev_lagged).sum(axis=1)
+    half = 8.0 / 2.0 * 1e-4
+    cost_rate = half + half
+    nonfinite = ~np.isfinite(o2o) | ~np.isfinite(funding_arr)
+    safe_o2o = np.where(np.isfinite(o2o), o2o, 0.0)
+    safe_funding = np.where(np.isfinite(funding_arr), funding_arr, 0.0)
+    active = lagged != 0.0
+
     for _p in range(n_placebos):
-        perm = rng.permutation(len(cols))
-        shuffled = sig_step.copy()
-        permuted_cols = [cols[i] for i in perm]
-        shuffled.columns = permuted_cols
-        el_shuffled = el_step.copy()
-        el_shuffled.columns = permuted_cols
-        weights_p = rank_weight_book(shuffled, el_shuffled, spec.band.sign, spec.min_symbols)
-        weights_p = phase_tranche_book(weights_p, spec.tranche_count())
-        weights_1h = weights_p.reindex(grid_1h).ffill().fillna(0.0)
-        try:
-            net, _t = mhs_ledger_pnl(
-                weights_1h, opens[permuted_cols], bar_funding[permuted_cols], 8.0,
-            )
-        except DataIntegrityError:
-            # A shuffled placebo can assign a non-zero weight to a symbol
-            # outside its lifecycle. Such a placebo is invalid, not evidence
-            # that the production ledger should relax its active-cell guard.
+        perm = rng.permutation(n_cols)
+        # A shuffled placebo can pair a non-zero weight with a symbol outside
+        # its lifecycle; such a placebo is invalid, not evidence that the
+        # production ledger should relax its active-cell guard.
+        if (active & nonfinite[:, perm]).any():
             continue
-        sd = float(net.std(ddof=1)) if len(net) > 1 else 0.0
+        book_return = (lagged * safe_o2o[:, perm]).sum(axis=1)
+        funding_charge = (lagged * safe_funding[:, perm]).sum(axis=1)
+        net_returns = book_return - turnover * cost_rate - funding_charge
+        if np.any(net_returns <= -1.0):
+            continue
+        equity = 10000.0 * np.cumprod(1.0 + net_returns)
+        net = equity[1:] / equity[:-1] - 1.0
+        if len(net) <= 1:
+            continue
+        sd = float(np.std(net, ddof=1))
         if sd > 0:
-            ranks.append(float(net.mean() / sd * np.sqrt(_PERIODS_PER_YEAR_1H)))
+            ranks.append(float(np.mean(net) / sd * np.sqrt(_PERIODS_PER_YEAR_1H)))
     if not ranks:
         return None
     return float(np.mean([1.0 if observed_sharpe >= r else 0.0 for r in ranks]))
@@ -823,13 +934,24 @@ def _participation_warnings(
         group = fills_by_symbol.get(sym)
         if group is None:
             continue
-        for _i, row in group.iterrows():
-            t = row["timestamp"]
-            if t not in series.index:
-                continue
-            for window_label, minutes in window_minutes:
-                window_end = t + pd.Timedelta(minutes=minutes)
-                window_totals[window_label] += float(series.loc[t:window_end].sum())
+        # Locate each fill's ``[t, t+window]`` inclusive span with two
+        # ``searchsorted`` lookups (instead of an ``iterrows``/``.loc`` slice)
+        # and sum the small bounded window with ``np.add.reduce``, which is
+        # bit-identical to pandas ``Series.sum()`` over the same labels.
+        vol = series.to_numpy(dtype="float64")
+        idx = series.index.to_numpy(dtype="datetime64[ns]")
+        t_arr = group["timestamp"].to_numpy(dtype="datetime64[ns]")
+        start_pos = np.searchsorted(idx, t_arr, side="left")
+        in_idx = (start_pos < len(idx)) & (idx[start_pos] == t_arr)
+        valid_pos = start_pos[in_idx]
+        for window_label, minutes in window_minutes:
+            ends = t_arr[in_idx] + np.timedelta64(minutes, "m")
+            end_pos = np.searchsorted(idx, ends, side="right") - 1
+            # Accumulate directly into the running total in fill order -- the
+            # baseline's flat ``window_totals += window_sum`` chain -- so the
+            # float addition sequence is bit-identical to the iterrows baseline.
+            for p, e in zip(valid_pos, end_pos, strict=True):
+                window_totals[window_label] += float(np.add.reduce(vol[p : e + 1]))
     warnings: dict[str, float] = {}
     for window_label, _minutes in window_minutes:
         total_volume = window_totals[window_label]
@@ -1554,6 +1676,9 @@ def run_mhs_horizon_diagnostic(request: MhsDiagnosticRequest) -> MhsHorizonDiagn
     diagnostic-ensemble and executable-tranche numbers are reported as separate
     fields; only strict simulated inventory is primary Research evidence.
     """
+    # Each diagnostic run reads a static market snapshot; dropping the minute
+    # frame cache here keeps re-runs against re-written Parquet sources fresh.
+    _load_minute_frames_cached.cache_clear()
     resolved_end = resolve_evaluation_end(request.end, unseal_holdout=False)
     _run_start = time.perf_counter()
     if request.partition != "dev":
@@ -1931,6 +2056,14 @@ def persist_mhs_horizon_diagnostic_report(report: MhsHorizonDiagnosticReport, pa
         tables_by_replay[replay_id] = _build_replay_category_tables(replay)
 
     unified_tables = _write_unified_artifact_tables(tables_by_replay, artifact_root)
+
+    # Keep the artifact directory at exactly the 5 canonical unified tables:
+    # superseded per-replay Parquet files from earlier persistence formats are
+    # removed so re-persisting to the same directory never leaves orphans.
+    canonical_names = {f"{category}.parquet" for category in MHS_ARTIFACT_CATEGORIES}
+    for stale in artifact_root.glob("*.parquet"):
+        if stale.name not in canonical_names:
+            stale.unlink()
 
     # Fail-closed ledger integrity verification per replay_id partition.
     for replay_id, _replay in replay_entries:
