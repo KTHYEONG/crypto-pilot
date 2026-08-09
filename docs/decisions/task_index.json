@@ -1,6 +1,16 @@
 {
   "tasks": [
     {
+      "task_id": "MHS_HORIZON_OPT_R1R2R3_IMPL",
+      "date": "2026-08-09",
+      "adr_id": "ADR_20260809_MHS_HORIZON_OPT_R1R2R3_IMPL",
+      "domain": "research",
+      "title": "MHS top-level books 신호 품질 배선 완성 및 fill 메모리 columnar 최적화",
+      "why": "mhs_horizon_opt_spec_summary.md의 RSS 예산 초과(2.5~2.76GB)·Fold 0/1/2 Sharpe 미달 진단은 실제로는 248c9ee1(fold 경로만 수정) 이전 수치였고, 재실행 결과 fold 메모리는 이미 해결(3/3 완주)됐으나 top-level books는 fold와 동일한 신호-품질 배선(EMA/regime-scale)이 누락돼 있었고 fill_records가 fill당 Python dict를 누적해 메모리를 낭비했음. 1.80GB 목표 자체도 실측(free -h: 17GiB, cgroup 제한 없음) 없이 설정된 과보수적 값이었음.",
+      "resolution": "top-level books의 w_fast/w_slow에 fold와 동일한 ema_span 적용, blend_1h에 regime_cash_scale 적용(R1). _BoundExecutionReplayAccumulator.fill_records를 dict-list에서 columnar 병렬 list로 전환해 출력 동치성 유지한 채 메모리 절감(R2). xs_ic/regression/horizon_diagnostics를 book replay 루프 이전으로 재배치하고 log_close/eligible을 조기 해제(R3). RSS 예산을 실측 시스템 용량(17GiB, 여유 7.9GiB) 근거로 1.80GB→4.00GiB 재산정.",
+      "impact": "실측 재검증: overall peak RSS 2.264GB→2.124GB(4.00GiB 예산 대비 47% 여유). Fold 0/1/2는 R1/R2/R3와 무관하게 수치 불변(LIMIT-01 불변식 확인, 회귀 없음) — Autocorr Sharpe는 여전히 목표(0.60) 미달(fold0 -1.15/fold1 -3.27/fold2 -1.82), Stress Sharpe는 fold0만 양전환(+0.24). top-level books는 데이터 완결성 결함(funding NaN, LITUSDT mark 결측)으로 여전히 NONFINITE_EQUITY 실패 — R4로 별도 데이터 spec 필요, research_go.eligible은 계속 False."
+    },
+    {
       "task_id": "MHS_HORIZON_OPT_SPEC",
       "date": "2026-08-09",
       "adr_id": "ADR_20260809_MHS_HORIZON_OPT_SPEC",
