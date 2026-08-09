@@ -232,9 +232,12 @@ class TestFoldIntegrity:
         root, end = fold_market
         report = _run_anchored_fold(str(root), OPT_FOLD, _request(root, end), funding, 1.0, 0)
         assert report.strict is not None
-        prefix = tmp_path / "strict"
-        ref = ev._persist_replay_artifact(report.strict, tmp_path, "strict")
-        ledger_path = tmp_path / "strict_ledger.parquet"
+        tables = ev._build_replay_category_tables(report.strict)
+        unified = ev._write_unified_artifact_tables({"strict": tables}, tmp_path)
+        ledger_path = unified["ledger"][0]
+        ref = ev._build_replay_artifact_reference(
+            "strict", report.strict, tables, tmp_path, unified,
+        )
         assert ref["ledger"]["row_count"] == len(pd.read_parquet(ledger_path))
         # A tampered ledger (NULL equity) must fail closed on re-verification.
         tampered = pd.read_parquet(ledger_path)
@@ -242,4 +245,4 @@ class TestFoldIntegrity:
         tampered_path = tmp_path / "tampered_ledger.parquet"
         tampered.to_parquet(tampered_path, index=False)
         with pytest.raises(ev.DataIntegrityError):
-            _verify_ledger_artifact(tampered_path, len(tampered))
+            _verify_ledger_artifact(tampered_path, "strict", len(tampered))
