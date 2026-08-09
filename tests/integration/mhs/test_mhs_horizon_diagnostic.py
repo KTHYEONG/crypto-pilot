@@ -794,54 +794,24 @@ class TestFoldWindowTelemetryOracle:
     def _single_panel_oracle(
         self, root: Path, funding_by_symbol: dict[str, pd.Series],
     ):
-        """Replicate the fold's pre-replay decision construction and run the
-        dense single-panel oracle (``strategy_aware_execution_replay``) over
-        the whole validation window."""
-        from src.mhs.contracts import PHASE_1_BOOK_BLEND_WEIGHTS, PHASE_1_BOOK_SPECS, ExecutionSpec
+        """Replicate the fold's pre-replay decision construction via the shared
+        ``_build_fold_target_weights`` builder and run the dense single-panel
+        oracle (``strategy_aware_execution_replay``) over the whole validation
+        window."""
+        from src.mhs.contracts import ExecutionSpec
         from src.mhs.execution import strategy_aware_execution_replay
 
         fold = FOLD_WINDOW_FOLD
-        ts, vs, ve = fold.train_start, fold.validation_start, fold.validation_end
-        panel = ev.load_base_panel(
-            str(root), "1h", ("close", "open", "quote_vol"), ts, ve,
-            partition="dev", min_bars=2000,
+        vs, ve = fold.validation_start, fold.validation_end
+        request = MhsDiagnosticRequest(
+            start=str(fold.train_start), end=str(fold.validation_end),
+            data_root=str(root), mark_mode="cache_required",
+            execution_timeframe="1m", log_run=False,
         )
-        close, opens, quote_vol = panel["close"], panel["open"], panel["quote_vol"]
-        grid_1h = close.index
-        symbols = [s for s in close.columns if s in funding_by_symbol]
-        close, opens, quote_vol = close[symbols], opens[symbols], quote_vol[symbols]
-        bar_period = grid_1h[1] - grid_1h[0]
-        fwin = {
-            s: funding_by_symbol[s].loc[
-                (funding_by_symbol[s].index >= grid_1h[0])
-                & (funding_by_symbol[s].index < grid_1h[-1] + bar_period)
-            ]
-            for s in symbols
-        }
-        bar_funding = ev.bar_funding_panel(fwin, grid_1h)
-        aligned = list(bar_funding.columns)
-        close, opens, quote_vol = close[aligned], opens[aligned], quote_vol[aligned]
-        eligible = ev.liquid_half_eligibility(quote_vol, lookback_bars=720, min_history_bars=720)
-        log_close = np.log(close)
-        fast = PHASE_1_BOOK_SPECS["fast_reversal"]
-        slow = PHASE_1_BOOK_SPECS["slow_momentum"]
-        fast_grid = pd.date_range(ts, ve, freq="6h", tz="UTC")
-        slow_grid = pd.date_range(ts, ve, freq="24h", tz="UTC")
-        w_fast = ev._book_weights(log_close, eligible, fast, fast_grid)
-        w_slow = ev._book_weights(log_close, eligible, slow, slow_grid)
-        mask = ev._pit_execution_mask(quote_vol, eligible, 30)
-        wfe = w_fast.where(mask.reindex(w_fast.index).fillna(False), other=0.0)
-        wse = w_slow.where(mask.reindex(w_slow.index).fillna(False), other=0.0)
-        blend = (
-            PHASE_1_BOOK_BLEND_WEIGHTS["fast_reversal"] * wfe.reindex(grid_1h).ffill().fillna(0.0)
-            + PHASE_1_BOOK_BLEND_WEIGHTS["slow_momentum"] * wse.reindex(grid_1h).ffill().fillna(0.0)
+        target_weights, signal_available_at, roster, _grid_1h = ev._build_fold_target_weights(
+            str(root), fold, request, funding_by_symbol,
         )
-        dg = blend.index[(blend.index >= vs) & (blend.index <= ve)]
-        target_weights = blend.loc[dg]
-        exec_symbols = sorted(target_weights.columns[target_weights.ne(0.0).any(axis=0)])
-        roster = [s for s in exec_symbols if (root / "1m" / f"{s}.parquet").exists()]
         target_replay = target_weights[roster]
-        signal_available_at = target_replay.index + pd.Timedelta(hours=1)
         minute_grid = pd.date_range(vs, ve, freq="1min", tz="UTC")
         target_replay, signal_available_at, _censored = ev._truncate_replayable_decisions(
             target_replay, signal_available_at, minute_grid, ExecutionSpec(),
