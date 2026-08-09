@@ -107,6 +107,13 @@ MHS_GO_REASON_UNSPECIFIED_POLICY = "UNSPECIFIED_POLICY"
 MHS_GO_REASON_RESOURCE_BREACH = "RESOURCE_BUDGET_BREACH"
 
 
+# Unrecoverable source gap exclusions (Binance REST API & Vision archives have >4h gaps):
+# SLPUSDT, CTKUSDT, LITUSDT, AERGOUSDT, PUMPUSDT, CVXUSDT, CVCUSDT
+MHS_SOURCE_GAP_EXCLUDED_SYMBOLS = frozenset({
+    "SLPUSDT", "CTKUSDT", "LITUSDT", "AERGOUSDT", "PUMPUSDT", "CVXUSDT", "CVCUSDT",
+})
+
+
 @dataclass(frozen=True, slots=True)
 class MhsDiagnosticRequest:
     """Immutable request; the CLI carries ``--start``/``--end``/``--mark-mode``/``--no-log-run``.
@@ -1081,7 +1088,13 @@ def _iter_mhs_execution_windows(
             for s in roster
             if s in funding_by_symbol
         }
-        minute_funding = bar_funding_panel(funding_window, minute_grid).reindex(columns=roster)
+        minute_funding = (
+            bar_funding_panel(funding_window, minute_grid)
+            .reindex(columns=roster)
+            .replace([np.inf, -np.inf], np.nan)
+            .ffill()
+            .fillna(0.0)
+        )
 
         yield ExecutionReplayWindow(
             window_start=grid_start,
@@ -1305,7 +1318,10 @@ def _build_fold_target_weights(
     del panel
     grid_1h = close.index
     symbols = list(close.columns)
-    funded = [s for s in symbols if s in funding_by_symbol]
+    funded = [
+        s for s in symbols
+        if s in funding_by_symbol and s not in MHS_SOURCE_GAP_EXCLUDED_SYMBOLS
+    ]
     if not funded:
         raise RuntimeError("no fold symbol has funding coverage")
     close = close[funded]
@@ -1562,7 +1578,10 @@ def run_mhs_horizon_diagnostic(request: MhsDiagnosticRequest) -> MhsHorizonDiagn
 
     funding_by_symbol = _load_funding_series(symbols)
     fold_funding = dict(funding_by_symbol)
-    funded = [s for s in symbols if s in funding_by_symbol]
+    funded = [
+        s for s in symbols
+        if s in funding_by_symbol and s not in MHS_SOURCE_GAP_EXCLUDED_SYMBOLS
+    ]
     if not funded:
         raise RuntimeError("no dev symbol has funding coverage; the MHS ledger requires funding")
     close = close[funded]
