@@ -75,6 +75,16 @@ MHS_GO_PRIMARY_SHARPE_FLOOR = 0.6
 
 MHS_ARTIFACT_SCHEMA_VERSION = 1
 
+# Unified artifact storage: every replay session is consolidated into exactly
+# these category tables, partitioned by an explicit ``replay_id`` column.
+MHS_ARTIFACT_CATEGORIES: tuple[str, ...] = (
+    "fills",
+    "units",
+    "notional_weights",
+    "ledger",
+    "times",
+)
+
 # Signal-quality calibration (spec §3.2, ``signal_quality``).
 # ``MHS_REBALANCE_MIN_NOTIONAL_DELTA`` is the turnover deadband cap: a per-symbol
 # target-weight change smaller than 0.02 (2% of equity notional) is suppressed so
@@ -1882,11 +1892,16 @@ def mhs_horizon_diagnostic_report_path() -> str:
 
 
 def persist_mhs_horizon_diagnostic_report(report: MhsHorizonDiagnosticReport, path: str | Path) -> Path:
-    """Persist a compact summary JSON and columnar replay audit artifacts.
+    """Persist a compact summary JSON and unified columnar replay audit artifacts.
 
     Fill events and ledger time series are intentionally kept out of the JSON
     summary.  They are losslessly persisted as compressed Parquet tables and
     referenced from the corresponding replay section.
+
+    All replay sessions (books, blend, folds) are consolidated into exactly 5
+    category-based unified tables (``fills.parquet``, ``units.parquet``,
+    ``notional_weights.parquet``, ``ledger.parquet``, ``times.parquet``) with an
+    explicit ``replay_id`` column, replacing the per-replay file proliferation.
     """
     target = Path(path)
     target.parent.mkdir(parents=True, exist_ok=True)
@@ -1894,35 +1909,65 @@ def persist_mhs_horizon_diagnostic_report(report: MhsHorizonDiagnosticReport, pa
     artifact_root.mkdir(parents=True, exist_ok=True)
     payload = report.to_payload()
 
+    replay_entries: list[tuple[str, StrategyExecutionReplayResult]] = []
+    for book_name, book_report in report.books.items():
+        if book_report.primary is not None:
+            replay_entries.append((f"{book_name}_primary", book_report.primary))
+        if book_report.stress is not None:
+            replay_entries.append((f"{book_name}_stress", book_report.stress))
+    if report.blend is not None:
+        if report.blend.primary is not None:
+            replay_entries.append(("blend_primary", report.blend.primary))
+        if report.blend.stress is not None:
+            replay_entries.append(("blend_stress", report.blend.stress))
+    for fold_report in report.folds:
+        if fold_report.strict is not None:
+            replay_entries.append((f"fold{fold_report.fold_index}_strict", fold_report.strict))
+        if fold_report.stress is not None:
+            replay_entries.append((f"fold{fold_report.fold_index}_stress", fold_report.stress))
+
+    tables_by_replay: dict[str, dict[str, pd.DataFrame]] = {}
+    for replay_id, replay in replay_entries:
+        tables_by_replay[replay_id] = _build_replay_category_tables(replay)
+
+    unified_tables = _write_unified_artifact_tables(tables_by_replay, artifact_root)
+
+    # Fail-closed ledger integrity verification per replay_id partition.
+    for replay_id, _replay in replay_entries:
+        _verify_ledger_artifact(
+            unified_tables["ledger"][0], replay_id, len(tables_by_replay[replay_id]["ledger"])
+        )
+
+    replay_references = {
+        replay_id: _build_replay_artifact_reference(
+            replay_id, replay, tables_by_replay[replay_id], artifact_root, unified_tables
+        )
+        for replay_id, replay in replay_entries
+    }
+
     for book_name, book_report in report.books.items():
         book_payload = payload["books"][book_name]
         if book_report.primary is not None:
-            book_payload["primary"] = _persist_replay_artifact(
-                book_report.primary, artifact_root, f"{book_name}_primary"
-            )
+            book_payload["primary"] = replay_references[f"{book_name}_primary"]
         if book_report.stress is not None:
-            book_payload["stress"] = _persist_replay_artifact(
-                book_report.stress, artifact_root, f"{book_name}_stress"
-            )
+            book_payload["stress"] = replay_references[f"{book_name}_stress"]
     if report.blend is not None:
         if report.blend.primary is not None:
-            payload["blend"]["primary"] = _persist_replay_artifact(
-                report.blend.primary, artifact_root, "blend_primary"
-            )
+            payload["blend"]["primary"] = replay_references["blend_primary"]
         if report.blend.stress is not None:
-            payload["blend"]["stress"] = _persist_replay_artifact(
-                report.blend.stress, artifact_root, "blend_stress"
-            )
+            payload["blend"]["stress"] = replay_references["blend_stress"]
     for fold_report in report.folds:
         fold_payload = payload["folds"][fold_report.fold_index]
         if fold_report.strict is not None:
-            fold_payload["strict"] = _persist_replay_artifact(
-                fold_report.strict, artifact_root, f"fold{fold_report.fold_index}_strict"
-            )
+            fold_payload["strict"] = replay_references[f"fold{fold_report.fold_index}_strict"]
         if fold_report.stress is not None:
-            fold_payload["stress"] = _persist_replay_artifact(
-                fold_report.stress, artifact_root, f"fold{fold_report.fold_index}_stress"
-            )
+            fold_payload["stress"] = replay_references[f"fold{fold_report.fold_index}_stress"]
+
+    payload["artifacts"] = {
+        category: _artifact_reference(frame, path)
+        for category, (path, frame) in unified_tables.items()
+    }
+    payload["replay_ids"] = [replay_id for replay_id, _ in replay_entries]
 
     with target.open("w", encoding="utf-8") as fh:
         json.dump(payload, fh, indent=2, ensure_ascii=False)
@@ -1972,48 +2017,39 @@ def _artifact_reference(table: pd.DataFrame, path: Path) -> dict[str, Any]:
     }
 
 
-def _verify_ledger_artifact(path: Path, expected_rows: int) -> None:
-    """Re-read a written ledger parquet and verify its integrity fail-closed.
+def _verify_ledger_artifact(path: Path, replay_id: str, expected_rows: int) -> None:
+    """Re-read a written unified ledger parquet and verify one replay partition fail-closed.
 
     Checksum-only provenance cannot detect a silently-written NULL or truncated
-    equity column, so this pass re-reads the artifact and asserts the exact row
-    count and a fully finite positive equity column (spec §3.3, ``fold_integrity``).
+    equity column, so this pass re-reads the ``replay_id`` partition via PyArrow
+    pushdown filtering and asserts the exact row count and a fully finite
+    positive equity column (spec §3.3, ``fold_integrity``).
     """
-    roundtrip = pd.read_parquet(path)
+    roundtrip = pd.read_parquet(path, filters=[("replay_id", "==", replay_id)])
     if len(roundtrip) != expected_rows:
         raise DataIntegrityError(
-            f"ledger artifact row count mismatch path={path} "
+            f"ledger artifact row count mismatch path={path} replay_id={replay_id} "
             f"expected={expected_rows} got={len(roundtrip)}"
         )
     if expected_rows and "equity" in roundtrip.columns:
         equity = roundtrip["equity"].to_numpy(dtype="float64")
         if not np.isfinite(equity).all() or (equity <= 0).any():
             raise DataIntegrityError(
-                f"ledger artifact equity must be finite and strictly positive path={path}"
+                f"ledger artifact equity must be finite and strictly positive "
+                f"path={path} replay_id={replay_id}"
             )
 
 
-def _persist_replay_artifact(
+def _build_replay_category_tables(
     replay: StrategyExecutionReplayResult,
-    artifact_root: Path,
-    name: str,
-) -> dict[str, Any]:
-    """Write one replay's detailed tables and return a compact JSON reference."""
-    prefix = artifact_root / name
-
+) -> dict[str, pd.DataFrame]:
+    """Build the five category tables for one replay, without the ``replay_id`` column."""
     fills = replay.simulated_fills.copy()
     if not fills.empty and "timestamp" in fills.columns:
         fills["timestamp"] = pd.to_datetime(fills["timestamp"], utc=True)
-    fills_path = prefix.with_name(f"{name}_fills.parquet")
-    fills.to_parquet(fills_path, index=False, compression="zstd")
 
     units_table = _to_timestamped_table(replay.simulated_units)
-    units_path = prefix.with_name(f"{name}_units.parquet")
-    units_table.to_parquet(units_path, index=False, compression="zstd")
-
     notional_table = _to_timestamped_table(replay.simulated_notional_weights)
-    notional_path = prefix.with_name(f"{name}_notional_weights.parquet")
-    notional_table.to_parquet(notional_path, index=False, compression="zstd")
 
     ledger = pd.concat(
         {
@@ -2027,26 +2063,73 @@ def _persist_replay_artifact(
         axis=1,
     )
     ledger_table = _to_timestamped_table(ledger)
-    ledger_path = prefix.with_name(f"{name}_ledger.parquet")
-    ledger_table.to_parquet(ledger_path, index=False, compression="zstd")
-    _verify_ledger_artifact(ledger_path, len(ledger_table))
 
     times = pd.DataFrame(
         {"submit_time": replay.submit_times, "fill_time": replay.fill_times}
     )
     times["submit_time"] = pd.to_datetime(times["submit_time"], utc=True)
     times["fill_time"] = pd.to_datetime(times["fill_time"], utc=True)
-    times_path = prefix.with_name(f"{name}_times.parquet")
-    times.to_parquet(times_path, index=False, compression="zstd")
 
+    return {
+        "fills": fills,
+        "units": units_table,
+        "notional_weights": notional_table,
+        "ledger": ledger_table,
+        "times": times,
+    }
+
+
+def _write_unified_artifact_tables(
+    tables_by_replay: dict[str, dict[str, pd.DataFrame]],
+    artifact_root: Path,
+) -> dict[str, tuple[Path, pd.DataFrame]]:
+    """Concatenate per-replay category tables into exactly 5 unified Parquet files.
+
+    Every unified table carries a leading ``replay_id`` column; the 5 files are
+    written with zstd compression and returned as ``{category: (path, frame)}``.
+    """
+    unified_frames: dict[str, list[pd.DataFrame]] = {
+        category: [] for category in MHS_ARTIFACT_CATEGORIES
+    }
+    for replay_id, tables in tables_by_replay.items():
+        for category in MHS_ARTIFACT_CATEGORIES:
+            tagged = tables[category].copy()
+            tagged.insert(0, "replay_id", replay_id)
+            unified_frames[category].append(tagged)
+
+    unified_tables: dict[str, tuple[Path, pd.DataFrame]] = {}
+    for category in MHS_ARTIFACT_CATEGORIES:
+        frames = unified_frames[category]
+        if frames:
+            frame = pd.concat(frames, ignore_index=True)
+        else:
+            frame = pd.DataFrame({"replay_id": pd.Series(dtype="string")})
+        path = artifact_root / f"{category}.parquet"
+        frame.to_parquet(path, index=False, compression="zstd")
+        unified_tables[category] = (path, frame)
+    return unified_tables
+
+
+def _build_replay_artifact_reference(
+    replay_id: str,
+    replay: StrategyExecutionReplayResult,
+    tables: dict[str, pd.DataFrame],
+    artifact_root: Path,
+    unified_tables: dict[str, tuple[Path, pd.DataFrame]],
+) -> dict[str, Any]:
+    """Unified-file reference for one replay: per-category row/time provenance and
+    the shared unified file checksum, so readers load via ``load_mhs_replay_artifact``."""
     return {
         "artifact_format": "parquet",
         "artifact_dir": str(artifact_root),
-        "fills": _artifact_reference(fills, fills_path),
-        "units": _artifact_reference(units_table, units_path),
-        "notional_weights": _artifact_reference(notional_table, notional_path),
-        "ledger": _artifact_reference(ledger_table, ledger_path),
-        "times": _artifact_reference(times, times_path),
+        "replay_id": replay_id,
+        "fills": _artifact_reference(tables["fills"], unified_tables["fills"][0]),
+        "units": _artifact_reference(tables["units"], unified_tables["units"][0]),
+        "notional_weights": _artifact_reference(
+            tables["notional_weights"], unified_tables["notional_weights"][0]
+        ),
+        "ledger": _artifact_reference(tables["ledger"], unified_tables["ledger"][0]),
+        "times": _artifact_reference(tables["times"], unified_tables["times"][0]),
         "fill_source": replay.fill_source,
         "mark_source": replay.mark_source,
         "event_snapshots_retained": replay.event_snapshots_retained,
@@ -2071,3 +2154,17 @@ def _persist_replay_artifact(
             for gap in replay.data_gaps
         ],
     }
+
+
+def load_mhs_replay_artifact(
+    artifact_root: str | Path,
+    replay_id: str,
+    category: Literal["fills", "units", "notional_weights", "ledger", "times"],
+) -> pd.DataFrame:
+    """Load a specific replay's artifact table using PyArrow pushdown filtering."""
+    path = Path(artifact_root) / f"{category}.parquet"
+    if not path.exists():
+        raise FileNotFoundError(f"Unified artifact table missing: {path}")
+    return pd.read_parquet(path, filters=[("replay_id", "==", replay_id)]).drop(
+        columns=["replay_id"]
+    )

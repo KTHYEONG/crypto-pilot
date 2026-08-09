@@ -769,13 +769,26 @@ class TestTypedArtifactRoundtrip:
     NaN-equity concealment."""
 
     def test_ledger_and_times_round_trip_as_utc(self, report, tmp_path) -> None:
-        from src.application.research.mhs.evaluation import persist_mhs_horizon_diagnostic_report
+        from src.application.research.mhs.evaluation import (
+            load_mhs_replay_artifact,
+            persist_mhs_horizon_diagnostic_report,
+        )
 
         out = tmp_path / "mhs_report.json"
         persist_mhs_horizon_diagnostic_report(report, out)
         artifact_dir = out.parent / "mhs_report_artifacts"
 
-        ledger = pd.read_parquet(artifact_dir / "blend_primary_ledger.parquet")
+        parquet_files = list(artifact_dir.glob("*.parquet"))
+        assert len(parquet_files) == 5
+        assert {p.name for p in parquet_files} == {
+            "fills.parquet",
+            "units.parquet",
+            "notional_weights.parquet",
+            "ledger.parquet",
+            "times.parquet",
+        }
+
+        ledger = load_mhs_replay_artifact(artifact_dir, "blend_primary", "ledger")
         assert pd.api.types.is_datetime64_any_dtype(ledger["timestamp"])
         assert ledger["timestamp"].dt.tz is not None
         assert str(ledger["timestamp"].dt.tz) == "UTC"
@@ -783,7 +796,7 @@ class TestTypedArtifactRoundtrip:
         idx = pd.DatetimeIndex(pd.to_datetime(ledger["timestamp"], utc=True))
         assert idx.tz is not None
 
-        times = pd.read_parquet(artifact_dir / "blend_primary_times.parquet")
+        times = load_mhs_replay_artifact(artifact_dir, "blend_primary", "times")
         assert pd.api.types.is_datetime64_any_dtype(times["submit_time"])
         assert pd.api.types.is_datetime64_any_dtype(times["fill_time"])
         assert times["submit_time"].dt.tz is not None
@@ -791,7 +804,10 @@ class TestTypedArtifactRoundtrip:
     def test_json_reference_carries_schema_and_checksum(self, report, tmp_path) -> None:
         import json
 
-        from src.application.research.mhs.evaluation import persist_mhs_horizon_diagnostic_report
+        from src.application.research.mhs.evaluation import (
+            load_mhs_replay_artifact,
+            persist_mhs_horizon_diagnostic_report,
+        )
 
         out = tmp_path / "mhs_report.json"
         persist_mhs_horizon_diagnostic_report(report, out)
@@ -803,9 +819,20 @@ class TestTypedArtifactRoundtrip:
         assert ledger_ref["checksum_sha256"]
         fills_ref = payload["blend"]["primary"]["fills"]
         assert fills_ref["row_count"] == len(report.blend.primary.simulated_fills)
+        # The summary JSON references the 5 unified files and the replay_id mapping.
+        assert set(payload["artifacts"]) == {
+            "fills", "units", "notional_weights", "ledger", "times",
+        }
+        assert "blend_primary" in payload["replay_ids"]
+        roundtrip = load_mhs_replay_artifact(out.parent / "mhs_report_artifacts", "blend_primary", "ledger")
+        assert len(roundtrip) == ledger_ref["row_count"]
 
     def test_empty_replay_artifacts_round_trip(self, tmp_path) -> None:
-        from src.application.research.mhs.evaluation import _persist_replay_artifact
+        from src.application.research.mhs.evaluation import (
+            _build_replay_category_tables,
+            _write_unified_artifact_tables,
+            load_mhs_replay_artifact,
+        )
         from src.mhs.execution import ExecutionSpec, strategy_aware_execution_replay
 
         idx = pd.date_range("2021-01-01 12:01", periods=31, freq="1min", tz="UTC")
@@ -819,13 +846,13 @@ class TestTypedArtifactRoundtrip:
             "OHLCV_STRICT_PROXY", ExecutionSpec(),
         )
         assert replay.simulated_fills.empty
-        ref = _persist_replay_artifact(replay, tmp_path, "empty")
-        units = pd.read_parquet(tmp_path / "empty_units.parquet")
+        _write_unified_artifact_tables({"empty": _build_replay_category_tables(replay)}, tmp_path)
+        units = load_mhs_replay_artifact(tmp_path, "empty", "units")
         assert "timestamp" in units.columns
         assert pd.api.types.is_datetime64_any_dtype(units["timestamp"])
-        ledger = pd.read_parquet(tmp_path / "empty_ledger.parquet")
+        ledger = load_mhs_replay_artifact(tmp_path, "empty", "ledger")
         assert "timestamp" in ledger.columns
-        assert ref["units"]["row_count"] == 0
+        assert len(units) == 0
 
     def test_completed_fold_artifacts_persisted(self, report, tmp_path) -> None:
         from dataclasses import replace
@@ -833,6 +860,7 @@ class TestTypedArtifactRoundtrip:
         from src.application.research.mhs.evaluation import (
             MHS_GO_REASON_UNSPECIFIED_POLICY,
             MhsFoldReport,
+            load_mhs_replay_artifact,
             persist_mhs_horizon_diagnostic_report,
         )
         from src.mhs.execution import ExecutionSpec, strategy_aware_execution_replay
@@ -869,9 +897,13 @@ class TestTypedArtifactRoundtrip:
         out = tmp_path / "fold_report.json"
         persist_mhs_horizon_diagnostic_report(patched, out)
         artifact_dir = out.parent / "fold_report_artifacts"
-        assert (artifact_dir / "fold0_strict_ledger.parquet").exists()
-        assert (artifact_dir / "fold0_stress_ledger.parquet").exists()
-        strict_ledger = pd.read_parquet(artifact_dir / "fold0_strict_ledger.parquet")
+        parquet_files = list(artifact_dir.glob("*.parquet"))
+        assert len(parquet_files) == 5
+        assert {p.name for p in parquet_files} == {
+            "fills.parquet", "units.parquet", "notional_weights.parquet",
+            "ledger.parquet", "times.parquet",
+        }
+        strict_ledger = load_mhs_replay_artifact(artifact_dir, "fold0_strict", "ledger")
         assert "timestamp" in strict_ledger.columns
 
 
