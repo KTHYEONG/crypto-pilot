@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import inspect
 import json
 from pathlib import Path
 
@@ -145,6 +146,122 @@ def report(synthetic_market):
     return run_mhs_horizon_diagnostic(
         MhsDiagnosticRequest(start=str(START), end=str(end), data_root=str(root), execution_timeframe="1m", log_run=False),
     )
+
+
+@pytest.fixture(scope="module")
+def calibrated_report(synthetic_market):
+    """Full diagnostic run with spies on the R1/R3 wiring seams: records the
+    ``ema_span`` passed to every ``_book_weights`` call and which callers invoke
+    the regime cash scale and turnover deadband."""
+    root, end = synthetic_market
+    captured: dict[str, object] = {
+        "ema_spans": {}, "regime_callers": [], "deadband_callers": [],
+    }
+    real_book_weights = ev._book_weights
+    real_regime = ev._regime_cash_scale
+    real_deadband = ev._apply_rebalance_deadband
+
+    def _book_weights(log_close, eligible, spec, step_grid, ema_span=None):
+        captured["ema_spans"].setdefault(spec.band.name, []).append(ema_span)
+        return real_book_weights(log_close, eligible, spec, step_grid, ema_span=ema_span)
+
+    def _regime(*args, **kwargs):
+        caller = inspect.currentframe().f_back.f_code.co_name
+        captured["regime_callers"].append(caller)
+        return real_regime(*args, **kwargs)
+
+    def _deadband(*args, **kwargs):
+        caller = inspect.currentframe().f_back.f_code.co_name
+        captured["deadband_callers"].append(caller)
+        return real_deadband(*args, **kwargs)
+
+    ev._book_weights = _book_weights
+    ev._regime_cash_scale = _regime
+    ev._apply_rebalance_deadband = _deadband
+    try:
+        report = run_mhs_horizon_diagnostic(
+            MhsDiagnosticRequest(
+                start=str(START), end=str(end), data_root=str(root),
+                execution_timeframe="1m", log_run=False,
+            ),
+        )
+    finally:
+        ev._book_weights = real_book_weights
+        ev._regime_cash_scale = real_regime
+        ev._apply_rebalance_deadband = real_deadband
+    return report, captured
+
+
+class TestQualityCalibrationWiring:
+    """R1/R3 wiring contract (``docs/specs/mhs_horizon_opt.md``): the top-level
+    books path applies the same signal-quality calibration as the fold path
+    (EMA span on each book; regime cash scale and turnover deadband on the
+    blend), and the panel statistics are computed before the book replays so
+    ``log_close`` is released before them."""
+
+    @staticmethod
+    def _book_signal_ema_span(spec) -> int:
+        return max(1, round(spec.horizon_hours / spec.step_hours * ev.MHS_SIGNAL_EMA_HORIZON_SPAN))
+
+    def test_top_level_book_weights_use_ema_span_matching_fold_path(self, calibrated_report) -> None:
+        _report, captured = calibrated_report
+        fast = ev.PHASE_1_BOOK_SPECS["fast_reversal"]
+        slow = ev.PHASE_1_BOOK_SPECS["slow_momentum"]
+        assert captured["ema_spans"]["fast_reversal"]
+        assert captured["ema_spans"]["slow_momentum"]
+        # Every _book_weights call -- the top-level books AND the three
+        # anchored folds -- passes the same EMA span the fold path computes, so
+        # the top-level books are calibrated exactly like fold targets.
+        for span in captured["ema_spans"]["fast_reversal"]:
+            assert span == self._book_signal_ema_span(fast)
+        for span in captured["ema_spans"]["slow_momentum"]:
+            assert span == self._book_signal_ema_span(slow)
+        assert self._book_signal_ema_span(fast) >= 1
+        assert self._book_signal_ema_span(slow) >= 1
+
+    def test_top_level_blend_applies_regime_cash_scale_and_deadband(self, calibrated_report) -> None:
+        report, captured = calibrated_report
+        assert report.books, "top-level books must run on the synthetic market"
+        # The volatility-regime cash scale is now applied to the top-level blend
+        # path (run_mhs_horizon_diagnostic) -- the R1 wiring seam.  (The
+        # anchored folds on this synthetic market are out-of-range, so the
+        # top-level call is the observable evidence.)
+        assert captured["regime_callers"].count("run_mhs_horizon_diagnostic") == 1
+        # The turnover deadband is applied inside _book_outcome to every
+        # top-level book replay (fast, slow, blend).
+        assert captured["deadband_callers"].count("_book_outcome") == 3
+
+    def test_top_level_books_diagnostic_fields_populated_after_quality_calibration(self, report) -> None:
+        for name in ("fast_reversal", "slow_momentum"):
+            book = report.books[name]
+            assert book.primary is not None
+            assert len(book.prescreen) > 0
+            assert book.tail.event_window_bars > 0
+        assert report.blend is not None
+        assert report.blend.primary is not None
+        assert len(report.blend.prescreen) > 0
+        assert report.blend.tail.event_window_bars > 0
+
+    def test_run_mhs_horizon_diagnostic_xs_ic_regression_unchanged_after_reorder(self, report, synthetic_market) -> None:
+        root, end = synthetic_market
+        panel = ev.load_base_panel(
+            root, "1h", ("close", "open", "quote_vol"), START, end,
+            partition="dev", min_bars=2000,
+        )
+        log_close = np.log(panel["close"])
+        opens = panel["open"]
+        signal_48h = ev.horizon_log_return(log_close, 48)
+        # R3 reorders these computations before the book replays; the reported
+        # payload values must be identical to the same computation on the panel.
+        assert report.xs_rank_ic == ev._xs_rank_ic(signal_48h, opens.pct_change())
+        assert report.date_clustered_regression == ev._date_clustered_ols(opens.pct_change(), signal_48h)
+
+    def test_run_mhs_horizon_diagnostic_log_close_released_before_book_replay(self) -> None:
+        src = inspect.getsource(ev.run_mhs_horizon_diagnostic)
+        assert "del log_close" in src
+        assert "signal_48h" in src
+        # log_close must be released before the first top-level book replay.
+        assert src.index("del log_close") < src.index("_book_outcome(")
 
 
 class TestMhsHorizonDiagnostic:
