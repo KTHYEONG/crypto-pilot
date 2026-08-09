@@ -1,6 +1,16 @@
 {
   "tasks": [
     {
+      "task_id": "MHS_HORIZON_OPT_SPEC",
+      "date": "2026-08-09",
+      "adr_id": "ADR_20260809_MHS_HORIZON_OPT_SPEC",
+      "domain": "research",
+      "title": "MHS Horizon Diagnostic Optimization Spec and Contract Setup",
+      "why": "MHS replay execution RSS budget breach (>2.5GB) and Fold 0 strategy quality failure",
+      "resolution": "Created mhs_horizon_opt specification blueprint, precision contract json, integration tests, and timestamp timezone fix",
+      "impact": "Restructured MHS evaluation memory management policy, signal deadband caps, and timezone conversion compatibility"
+    },
+    {
       "task_id": "TASK_MHS_PAIRED_REPLAY_COMPLETION",
       "date": "2026-08-08",
       "adr_id": "ADR_20260808_MHS_PAIRED_REPLAY_COMPLETION",
