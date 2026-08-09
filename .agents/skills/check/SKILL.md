@@ -12,31 +12,22 @@ Independent audit gate completing the main development loop (`spec` -> `implemen
 1. **Identify Modified Scope**:
    - Inspect modified files using `git status` or `git diff --name-only`.
 
-2. **Audit Execution Modes**:
-   - **Fast Iteration Loop** (during `/implement` code edits for rapid feedback on lint, types, and specs without running long pytest suites):
-     ```bash
-     uv run python tools/agent_skills/lean_check.py --fast
-     ```
-   - **Spec-Only Check** (verify contract non-dummy, wiring, & orphaned symbol check):
-     ```bash
-     uv run python tools/agent_skills/lean_check.py --spec-only --spec docs/specs/<feature>_contract.json
-     ```
-   - **Full Audit Pass** (Ruff, Mypy, Print check, Orphan check, and Pytest):
+2. **Standard Audit Execution**:
+   - Run Smart Selective Verification runner (auto-detects modified `.py` files, calculates Impact Level 1~3, and runs targeted tests/static checks synchronously in seconds):
      ```bash
      uv run python tools/agent_skills/lean_check.py
+     ```
+   - If a specific contract is targeted, explicitly pass `--spec`:
+     ```bash
+     uv run python tools/agent_skills/lean_check.py --spec docs/specs/<feature>_contract.json
      ```
    - Fallback (if script fails):
      - Code Style: `uv run ruff check`
      - Strict Typing: `uv run mypy`
      - Target Tests: `uv run pytest`
 
-3. **Known Environment Defect Protocol**:
-   - If `cannot load module more than once per process` or NumPy C-extension loader errors occur during pytest:
-     - Recognize this as a `coverage.py` C-Tracer re-import environment artifact, **NOT** a code bug in implementation.
-     - `lean_check.py` automatically injects `COVERAGE_NO_CTRACE=1` to mitigate this. If running manually, prepend `COVERAGE_NO_CTRACE=1`.
-     - **NEVER** modify source code or refactor imports to try fixing C-extension environment crashes.
 
-4. **Strict Audit Gate (No Code Mutation)**:
+3. **Strict Audit Gate (No Code Mutation)**:
    - Perform auditing independently. Do NOT modify source code during the check pass.
    - Verify non-vacuous tests and contract compliance against `contract.json`.
    - **Pre-sync Housekeeping Exception**: If the *only* failure is `test_code_map.py` (due to newly added canonical modules not yet registered in `docs/code_map.json`), treat logic audit as **PASS** with a clear note to run `/sync` next to close out code_map registration. Do NOT waste tokens trying to debug code logic for this pre-sync gap.
