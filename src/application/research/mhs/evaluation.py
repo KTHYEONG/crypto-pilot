@@ -1600,8 +1600,10 @@ def run_mhs_horizon_diagnostic(request: MhsDiagnosticRequest) -> MhsHorizonDiagn
     fast_grid = pd.date_range(start, end, freq="6h", tz="UTC")
     slow_grid = pd.date_range(start, end, freq="24h", tz="UTC")
 
-    w_fast = _book_weights(log_close, eligible, fast, fast_grid)
-    w_slow = _book_weights(log_close, eligible, slow, slow_grid)
+    fast_ema = max(1, round(fast.horizon_hours / fast.step_hours * MHS_SIGNAL_EMA_HORIZON_SPAN))
+    slow_ema = max(1, round(slow.horizon_hours / slow.step_hours * MHS_SIGNAL_EMA_HORIZON_SPAN))
+    w_fast = _book_weights(log_close, eligible, fast, fast_grid, ema_span=fast_ema)
+    w_slow = _book_weights(log_close, eligible, slow, slow_grid, ema_span=slow_ema)
     w_fast_1h = w_fast.reindex(grid_1h).ffill().fillna(0.0)
     w_slow_1h = w_slow.reindex(grid_1h).ffill().fillna(0.0)
     execution_mask = _pit_execution_mask(quote_vol, eligible, request.execution_universe_size)
@@ -1621,6 +1623,14 @@ def run_mhs_horizon_diagnostic(request: MhsDiagnosticRequest) -> MhsHorizonDiagn
     )
     blend_gross = float(blend_1h.abs().sum(axis=1).mean())
     blend_cash_fraction = float((1.0 - blend_1h.abs().sum(axis=1)).mean())
+    # R1: apply the same volatility-regime cash scale the fold path applies to
+    # its blended targets (_build_fold_target_weights) so top-level prescreen/
+    # tail/execution diagnostics are comparable to fold primary evidence
+    # (spec §3.2, ``regime_cash_scale``).
+    vol_mean = realized_vol(log_close, 48).reindex(grid_1h).mean(axis=1)
+    regime_scale = _regime_cash_scale(vol_mean)
+    blend_1h = blend_1h.mul(regime_scale, axis=0)
+    del vol_mean, regime_scale
     # The 1h book views are only consumed by ``blend_1h`` above.  Releasing
     # them before phase diagnostics and the top-level replays keeps two full
     # multi-year weight matrices out of the replay baseline (spec §3.1).
@@ -1630,6 +1640,25 @@ def run_mhs_horizon_diagnostic(request: MhsDiagnosticRequest) -> MhsHorizonDiagn
     phase_fast = _phase_diagnostics(log_close, eligible, opens, bar_funding, grid_1h, fast)
     phase_slow = _phase_diagnostics(log_close, eligible, opens, bar_funding, grid_1h, slow)
     phase_blend = _phase_diagnostics(log_close, eligible, opens, bar_funding, grid_1h, fast)
+
+    # R3: the 48h cross-sectional statistics depend only on the 1h panel, not
+    # the book replays.  Computing them here -- and computing ``signal_48h``
+    # once so the placebo reuses it -- lets ``log_close`` be released before the
+    # three top-level replays instead of staying alive throughout them
+    # (spec §3.1, ``memory_opt``).
+    signal_48h = horizon_log_return(log_close, 48)
+    xs_ic = _xs_rank_ic(signal_48h, opens.pct_change())
+    regression = _date_clustered_ols(opens.pct_change(), signal_48h)
+    horizon_diagnostics = {
+        "realized_vol_48h_mean": float(
+            realized_vol(log_close, 48).mean().mean()
+        ),
+        "efficiency_ratio_48h_mean": float(
+            efficiency_ratio(log_close, 48).mean().mean()
+        ),
+    }
+    del log_close
+    gc.collect()
 
     execution_symbols = sorted(
         set(w_fast_execution.columns[w_fast_execution.ne(0.0).any(axis=0)])
@@ -1699,17 +1728,6 @@ def run_mhs_horizon_diagnostic(request: MhsDiagnosticRequest) -> MhsHorizonDiagn
     trials_attempted = 1
     deflated_sharpe_ratio = None
 
-    xs_ic = _xs_rank_ic(horizon_log_return(log_close, 48), opens.pct_change())
-    regression = _date_clustered_ols(opens.pct_change(), horizon_log_return(log_close, 48))
-    horizon_diagnostics = {
-        "realized_vol_48h_mean": float(
-            realized_vol(log_close, 48).mean().mean()
-        ),
-        "efficiency_ratio_48h_mean": float(
-            efficiency_ratio(log_close, 48).mean().mean()
-        ),
-    }
-
     bootstrap_ci: tuple[float, float] | None = None
     placebo_percentile: float | None = None
     participation: dict[str, float] = {}
@@ -1738,7 +1756,7 @@ def run_mhs_horizon_diagnostic(request: MhsDiagnosticRequest) -> MhsHorizonDiagn
         termination_counts = dict(blend_report.primary.termination_counts)
         assert blend_report.primary_naive_sharpe is not None
         placebo_percentile = _placebo_sharpe_percentile(
-            horizon_log_return(log_close, 48), eligible, opens, bar_funding, grid_1h,
+            signal_48h, eligible, opens, bar_funding, grid_1h,
             fast, blend_report.primary_naive_sharpe, 500, _BOOTSTRAP_SEED,
         )
         telemetry.record("statistical_diagnostics")
@@ -1748,7 +1766,7 @@ def run_mhs_horizon_diagnostic(request: MhsDiagnosticRequest) -> MhsHorizonDiagn
     # multi-year panels never coexist. The wide funding/price and weight
     # matrices are freed before the first fold so fold panel RSS starts from a
     # clean base (spec §3.1, ``memory_opt``).
-    del eligible, log_close
+    del eligible
     del opens, bar_funding
     del funding_window, minute_grid
     gc.collect()
