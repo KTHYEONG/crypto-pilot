@@ -88,7 +88,9 @@ def bar_funding_panel(
             cols[sym] = pd.Series(_align_funding_rates(series, grid), index=grid, dtype="float64")
         except DataIntegrityError:
             continue
-    return pd.DataFrame(cols, index=grid)
+    df = pd.DataFrame(cols, index=grid)
+    # Sanitize internal alignment NaNs/Infs by forward filling and zero-filling
+    return df.replace([np.inf, -np.inf], np.nan).ffill().fillna(0.0)
 
 
 @dataclass(frozen=True, slots=True)
