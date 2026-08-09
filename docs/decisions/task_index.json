@@ -1,6 +1,16 @@
 {
   "tasks": [
     {
+      "task_id": "mhs_artifact_refactor",
+      "date": "2026-08-09",
+      "adr_id": "ADR_20260809_mhs_artifact_refactor",
+      "domain": "research",
+      "title": "MHS Unified Artifact Store Refactoring",
+      "why": "MHS diagnostic evaluation generated over 60 discrete Parquet files per run causing IO overhead and repo clutter",
+      "resolution": "Consolidated discrete replay artifact files into 5 category-based unified Parquet tables with replay_id column and pushdown loader helper",
+      "impact": "Reduced artifact file count from 60+ to 5, improved AI maintainability and query efficiency"
+    },
+    {
       "task_id": "MHS_HORIZON_OPT_R1R2R3_IMPL",
       "date": "2026-08-09",
       "adr_id": "ADR_20260809_MHS_HORIZON_OPT_R1R2R3_IMPL",
