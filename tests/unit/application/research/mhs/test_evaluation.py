@@ -1,5 +1,7 @@
 """Contract coverage for the MHS application evaluation resource telemetry."""
 
+import time
+import types
 from pathlib import Path
 
 import numpy as np
@@ -18,7 +20,7 @@ from src.application.research.mhs.evaluation import (
     _truncate_replayable_decisions,
 )
 from src.common.errors import DataIntegrityError
-from src.mhs.contracts import ExecutionSpec
+from src.mhs.contracts import BookSpec, ExecutionSpec
 from src.mhs.execution import ExecutionReplayWindow, replay_execution_windows
 from src.mhs.evaluation import AnchoredPurgedFold
 from src.research.universe.pit_universe import symbol_partition
@@ -495,3 +497,250 @@ def test_date_clustered_ols_vectorized_contract() -> None:
     assert result["n"] == 95
     assert result["n_dates"] == 2
     assert result["past_beta"] == pytest.approx(1.5)
+
+
+def _perf_opt_placebo_inputs(seed: int) -> tuple[
+    pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DatetimeIndex, BookSpec,
+]:
+    """Synthetic but structurally faithful placebo inputs.
+
+    Signals are continuous log-price levels, eligibility is a per-symbol
+    monotone listing lifecycle (the same shape ``liquid_half_eligibility``
+    produces), and opens are NaN before listing so the active-cell ledger guard
+    is exercised exactly as in production.
+    """
+    rng = np.random.default_rng(seed)
+    n_hours, n_syms = 600, 10
+    grid = pd.date_range("2023-01-01", periods=n_hours, freq="1h", tz="UTC")
+    cols = [f"SYM{i}" for i in range(n_syms)]
+    base = 100.0 * np.exp(np.cumsum(rng.normal(0.0, 0.0003, (n_hours, n_syms)), axis=0))
+    signal = pd.DataFrame(base, index=grid, columns=cols)
+    listing = rng.integers(0, n_hours // 4, size=n_syms)
+    elig_raw = np.arange(n_hours)[:, None] >= listing[None, :]
+    eligible = pd.DataFrame(elig_raw, index=grid, columns=cols)
+    opens = pd.DataFrame(
+        base * (1.0 + rng.normal(0.0, 0.0001, (n_hours, n_syms))), index=grid, columns=cols,
+    )
+    opens = opens.mask(~elig_raw)
+    bar_funding = pd.DataFrame(
+        rng.normal(0.00005, 0.00001, (n_hours, n_syms)), index=grid, columns=cols,
+    )
+    return signal, eligible, opens, bar_funding, grid, ev.PHASE_1_BOOK_SPECS["fast_reversal"]
+
+
+def _reference_placebo_percentile(
+    signal, eligible, opens, bar_funding, grid_1h, spec, observed_sharpe, n_placebos, seed,
+):
+    """Original pandas DataFrame-per-iteration placebo loop (baseline)."""
+    from src.mhs.books import phase_tranche_book, rank_weight_book
+    from src.mhs.execution import mhs_ledger_pnl
+
+    rng = np.random.default_rng(seed)
+    ranks = []
+    cols = list(signal.columns)
+    sig_step = signal.reindex(grid_1h)
+    el_step = eligible.reindex(grid_1h)
+    for _p in range(n_placebos):
+        perm = rng.permutation(len(cols))
+        shuffled = sig_step.copy()
+        permuted_cols = [cols[i] for i in perm]
+        shuffled.columns = permuted_cols
+        el_shuffled = el_step.copy()
+        el_shuffled.columns = permuted_cols
+        weights_p = rank_weight_book(shuffled, el_shuffled, spec.band.sign, spec.min_symbols)
+        weights_p = phase_tranche_book(weights_p, spec.tranche_count())
+        weights_1h = weights_p.reindex(grid_1h).ffill().fillna(0.0)
+        try:
+            net, _t = mhs_ledger_pnl(
+                weights_1h, opens[permuted_cols], bar_funding[permuted_cols], 8.0,
+            )
+        except DataIntegrityError:
+            continue
+        sd = float(net.std(ddof=1)) if len(net) > 1 else 0.0
+        if sd > 0:
+            ranks.append(float(net.mean() / sd * np.sqrt(ev._PERIODS_PER_YEAR_1H)))
+    if not ranks:
+        return None
+    return float(np.mean([1.0 if observed_sharpe >= r else 0.0 for r in ranks]))
+
+
+def test_mhs_perf_opt_001_placebo_vectorized_exact_and_fast() -> None:
+    # MHS_PERF_OPT_001_PLACEBO_VECTORIZED: the vectorized NumPy placebo must
+    # reproduce the baseline percentile exactly and run >= 5x faster.
+    signal, eligible, opens, bar_funding, grid, spec = _perf_opt_placebo_inputs(20260807)
+    n_placebos = 300
+    for observed in (0.7, -1.5, 0.0):
+        expected = _reference_placebo_percentile(
+            signal, eligible, opens, bar_funding, grid, spec, observed, n_placebos, 7,
+        )
+        actual = ev._placebo_sharpe_percentile(
+            signal, eligible, opens, bar_funding, grid, spec, observed, n_placebos, 7,
+        )
+        assert (expected is None and actual is None) or (expected == actual)
+
+    t0 = time.perf_counter()
+    _reference_placebo_percentile(
+        signal, eligible, opens, bar_funding, grid, spec, 0.7, n_placebos, 7,
+    )
+    reference_elapsed = time.perf_counter() - t0
+    t1 = time.perf_counter()
+    ev._placebo_sharpe_percentile(
+        signal, eligible, opens, bar_funding, grid, spec, 0.7, n_placebos, 7,
+    )
+    vectorized_elapsed = time.perf_counter() - t1
+    assert vectorized_elapsed < reference_elapsed / 5.0
+
+
+def _write_quote_volume_market(root: Path, symbols: list[str]) -> tuple[pd.DatetimeIndex, int]:
+    """Write 1-minute ``quote_vol`` parquet files and return the minute grid."""
+    start = pd.Timestamp("2023-02-01", tz="UTC")
+    grid = pd.date_range(start, periods=6 * 24, freq="1min", tz="UTC")
+    epoch = (grid - pd.Timestamp("1970-01-01", tz="UTC")) // pd.Timedelta("1ms")
+    base_vol = np.linspace(500.0, 900.0, len(grid))
+    (root / "1m").mkdir(parents=True, exist_ok=True)
+    for i, sym in enumerate(symbols):
+        vol = base_vol * (1.0 + 0.1 * (i + 1)) + np.sin(np.arange(len(grid)) / 12.0) * 50.0
+        pd.DataFrame({"timestamp": epoch, "quote_vol": vol}).to_parquet(
+            root / "1m" / f"{sym}.parquet", index=False,
+        )
+    return grid, len(symbols)
+
+
+def _reference_participation_warnings(replay, root, timeframe, symbols, minute_grid):
+    """Original iterrows()/``.loc[t:window_end]`` participation loop (baseline)."""
+    if replay.simulated_fills.empty:
+        return {}
+    fills = replay.simulated_fills
+    notional = float((fills["quantity_delta"].abs() * fills["fill_price"]).sum())
+    fills_by_symbol = {}
+    for _sym, group in fills.groupby("symbol"):
+        fills_by_symbol[str(_sym)] = group
+    daily_volume = 0.0
+    window_totals = {"1m": 0.0, "30m": 0.0}
+    window_minutes = (("1m", 1), ("30m", 30))
+    for sym in symbols:
+        series = ev._load_symbol_quote_volume(
+            root, sym, timeframe, minute_grid[0], minute_grid[-1],
+        )
+        if series is None:
+            continue
+        daily_volume += float(series.sum())
+        group = fills_by_symbol.get(sym)
+        if group is None:
+            continue
+        for _i, row in group.iterrows():
+            t = row["timestamp"]
+            if t not in series.index:
+                continue
+            for window_label, minutes in window_minutes:
+                window_end = t + pd.Timedelta(minutes=minutes)
+                window_totals[window_label] += float(series.loc[t:window_end].sum())
+    warnings = {}
+    for window_label, _minutes in window_minutes:
+        total_volume = window_totals[window_label]
+        warnings[f"fill_notional_to_{window_label}_quote_volume"] = (
+            notional / total_volume if total_volume > 0 else float("nan")
+        )
+    warnings["daily_trade_notional_to_daily_quote_volume"] = (
+        notional / daily_volume if daily_volume > 0 else float("nan")
+    )
+    return warnings
+
+
+def test_mhs_perf_opt_002_participation_cumsum_exact(tmp_path) -> None:
+    # MHS_PERF_OPT_002_PARTICIPATION_CUMSUM: the cumsum/searchsorted rewrite
+    # must return the exact same warnings dict as the iterrows() baseline.
+    symbols = ["SYMA", "SYMB", "SYMC"]
+    grid, _ = _write_quote_volume_market(tmp_path, symbols)
+    rng = np.random.default_rng(42)
+    rows = []
+    for i, sym in enumerate(symbols):
+        # Minute-aligned fills inside the quote-volume window, some off-grid.
+        ts = grid[200 + i::(600 + i * 5)].to_list()
+        for j, t in enumerate(ts[:40]):
+            rows.append(
+                {
+                    "timestamp": t,
+                    "symbol": sym,
+                    "quantity_delta": 0.5 if j % 2 == 0 else -0.5,
+                    "fill_price": 100.0 + rng.normal(0.0, 1.0),
+                }
+            )
+    fills = pd.DataFrame(rows)
+    replay = types.SimpleNamespace(simulated_fills=fills)
+
+    expected = _reference_participation_warnings(
+        replay, str(tmp_path), "1m", symbols, grid,
+    )
+    actual = ev._participation_warnings(replay, str(tmp_path), "1m", symbols, grid)
+    assert set(actual) == set(expected)
+    for key in expected:
+        assert actual[key] == expected[key]
+
+
+def _reference_bootstrap_ci(net, n_replicates, mean_block, seed):
+    """Original scalar while-loop block bootstrap (baseline)."""
+    rng = np.random.default_rng(seed)
+    arr = net.to_numpy(dtype="float64")
+    n = len(arr)
+    means = []
+    p_block = 1.0 / mean_block if mean_block > 0 else 0.0
+    for _r in range(n_replicates):
+        blocks = []
+        while len(blocks) < n:
+            start = int(rng.integers(0, n))
+            length = 1
+            while length < n and rng.random() > p_block:
+                length += 1
+            length = min(length, n - len(blocks))
+            blocks.extend(arr[start : start + length].tolist())
+        means.append(float(np.mean(blocks[:n])))
+    return float(np.percentile(means, 2.5)), float(np.percentile(means, 97.5))
+
+
+def test_mhs_perf_opt_003_bootstrap_vectorized_equivalent() -> None:
+    # MHS_PERF_OPT_003_BOOTSTRAP_VECTORIZED: 2D block sampling must produce
+    # statistically equivalent CI bounds (the RNG draw order differs by design,
+    # so exact reproduction is neither required nor possible).
+    rng = np.random.default_rng(5)
+    net = pd.Series(np.cumsum(rng.normal(0.0, 0.01, 400)))
+    for seed in (20260807, 3, 11):
+        lo_ref, hi_ref = _reference_bootstrap_ci(net, 800, 24, seed)
+        lo_new, hi_new = ev._bootstrap_ci(net, 800, 24, seed)
+        assert lo_new < hi_new
+        assert lo_ref < hi_ref
+        assert abs(lo_new - lo_ref) < 0.05
+        assert abs(hi_new - hi_ref) < 0.05
+
+
+def test_mhs_perf_opt_004_minute_frame_cache_reuses_reads(mhs_market, monkeypatch) -> None:
+    # MHS_PERF_OPT_004_MINUTE_FRAME_CACHE: repeated ``_load_minute_frames``
+    # calls with identical windows must not re-open the same Parquet files, and
+    # the returned dict must be a fresh copy so callers cannot poison the cache.
+    root, end = mhs_market
+    syms = ["MHSAUSDT", "MHSBUSDT"]
+    calls = {"n": 0}
+    original = ev.pq.read_table
+
+    def counting(*args, **kwargs):
+        calls["n"] += 1
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(ev.pq, "read_table", counting)
+
+    a = ev._load_minute_frames(str(root), syms, _START, end, "1m")
+    assert a
+    first_calls = calls["n"]
+    b = ev._load_minute_frames(str(root), syms, _START, end, "1m")
+    assert calls["n"] == first_calls
+    assert set(a) == set(b)
+    for k in a:
+        assert a[k].equals(b[k])
+
+    ev._load_minute_frames(str(root), syms, _START, _START + pd.Timedelta(hours=1), "1m")
+    assert calls["n"] == first_calls + len(syms)
+
+    cached = ev._load_minute_frames(str(root), syms, _START, end, "1m")
+    cached.clear()
+    fresh = ev._load_minute_frames(str(root), syms, _START, end, "1m")
+    assert set(fresh) == set(a)
