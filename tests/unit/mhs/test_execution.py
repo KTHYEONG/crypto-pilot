@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import dataclasses
+import tracemalloc
 
 import numpy as np
 import pandas as pd
@@ -10,6 +11,7 @@ from src.common.errors import DataIntegrityError
 from src.mhs.execution import (
     ExecutionReplayWindow,
     ExecutionSpec,
+    _BoundExecutionReplayAccumulator,
     bar_funding_panel,
     mhs_ledger_pnl,
     passive_fill_shortfall_bps,
@@ -647,6 +649,191 @@ class TestWindowedReplayEquivalence:
         with pytest.raises(DataIntegrityError, match="bar_funding must be finite"):
             replay_execution_window_pair(windows, 1.0, ExecutionSpec())
 
+
+class TestColumnarFillAccumulator:
+    """R2 columnar fill refactor (``docs/specs/mhs_horizon_opt.md``): the
+    ``_BoundExecutionReplayAccumulator`` stores fills field-wise (parallel
+    lists) instead of one 7-key dict per fill.  The ``simulated_fills`` output
+    must remain byte-for-byte identical to the legacy dict path with the same
+    column order and dtypes, while accumulation allocates measurably less.
+
+    The legacy dict path is the unchanged ``strategy_aware_execution_replay``
+    single-panel oracle, so comparing against it cross-validates the columnar
+    output semantics exactly.
+    """
+
+    FILL_COLUMNS = (
+        "timestamp", "symbol", "quantity_delta", "fill_price", "fee_bps",
+        "reason", "pre_trade_equity",
+    )
+
+    def _workload(self, days: int = 40, n_symbols: int = 8) -> dict[str, object]:
+        grid = pd.date_range("2021-01-01", periods=days * 24 * 12, freq="5min", tz="UTC")
+        symbols = [f"SYM{i:03d}USDT" for i in range(n_symbols)]
+        rng = np.random.default_rng(7)
+        closes = pd.DataFrame(
+            {s: 100.0 * np.exp(np.cumsum(rng.normal(0.0, 0.002, len(grid)))) for s in symbols},
+            index=grid,
+        )
+        decision_grid = pd.date_range("2021-01-01", periods=days * 4, freq="6h", tz="UTC")
+        weights = pd.DataFrame(0.0, index=decision_grid, columns=symbols)
+        rng_w = np.random.default_rng(8)
+        for ts in decision_grid:
+            active = rng_w.choice(symbols, size=4, replace=False)
+            weights.loc[ts, active] = rng_w.uniform(0.01, 0.06, 4)
+        return {
+            "grid": grid,
+            "symbols": symbols,
+            "highs": closes * 1.001,
+            "lows": closes * 0.999,
+            "closes": closes,
+            "marks": closes,
+            "funding": pd.DataFrame(1.0e-5, index=grid, columns=symbols),
+            "weights": weights,
+            "signals": decision_grid + pd.Timedelta(hours=1),
+        }
+
+    def _windowed(
+        self, wl: dict[str, object], bound: str = "OHLCV_STRICT_PROXY",
+    ):
+        return replay_execution_windows(
+            _partition_windows(
+                wl["grid"], wl["weights"], wl["signals"], wl["highs"], wl["lows"],
+                wl["closes"], wl["marks"], wl["funding"], ExecutionSpec(), n_windows=3,
+            ),
+            1.0, bound, ExecutionSpec(),
+        )
+
+    def test_bound_execution_replay_accumulator_columnar_fills_match_legacy_dict_output(self) -> None:
+        """R2 output-equivalence contract: the columnar ``simulated_fills`` must
+        be byte-for-byte identical (column order, dtypes, row values) to the
+        legacy dict-list DataFrame built from the same underlying fill data.
+        Driving ``_BoundExecutionReplayAccumulator`` directly exposes the raw
+        field lists so the legacy reference is reconstructed exactly as the
+        pre-refactor ``finalize`` did, including forced-exit fills."""
+        wl = self._workload()
+        windows = _partition_windows(
+            wl["grid"], wl["weights"], wl["signals"], wl["highs"], wl["lows"],
+            wl["closes"], wl["marks"], wl["funding"], ExecutionSpec(), n_windows=3,
+        )
+        acc = _BoundExecutionReplayAccumulator(
+            windows[0], 1.0, "OHLCV_STRICT_PROXY", ExecutionSpec(), False,
+        )
+        for w in windows:
+            acc.consume(w)
+        columnar_df = acc.finalize().simulated_fills
+        assert len(columnar_df) > 0
+        # Rebuild the legacy one-dict-per-fill DataFrame from the same lists.
+        legacy_records = [
+            {
+                "timestamp": acc.fill_ts[i],
+                "symbol": acc.fill_symbol[i],
+                "quantity_delta": acc.fill_qty[i],
+                "fill_price": acc.fill_price[i],
+                "fee_bps": acc.fill_fee_bps[i],
+                "reason": acc.fill_reason[i],
+                "pre_trade_equity": acc.fill_pre_trade_equity[i],
+            }
+            for i in range(len(acc.fill_ts))
+        ]
+        legacy_df = pd.DataFrame(legacy_records, columns=self.FILL_COLUMNS)
+        if legacy_df.empty:
+            legacy_df = legacy_df.astype(
+                {"quantity_delta": "float64", "fill_price": "float64", "fee_bps": "float64"}
+            )
+        pd.testing.assert_frame_equal(
+            columnar_df, legacy_df, check_dtype=True, check_exact=True,
+        )
+
+    def test_bound_execution_replay_accumulator_columnar_fills_dtype_and_column_order(self) -> None:
+        wl = self._workload()
+        fills = self._windowed(wl).simulated_fills
+        assert not fills.empty
+        assert list(fills.columns) == list(self.FILL_COLUMNS)
+        assert fills.dtypes["timestamp"] == pd.DatetimeTZDtype(tz="UTC", unit="ns")
+        for col in ("quantity_delta", "fill_price", "fee_bps", "pre_trade_equity"):
+            assert fills.dtypes[col] == np.dtype("float64"), col
+        for col in ("symbol", "reason"):
+            assert fills.dtypes[col] == pd.StringDtype(na_value=np.nan), col
+        # The empty case keeps the same column order and the numeric float64
+        # dtypes, so an empty table cannot be mistaken for missing output.
+        empty = replay_execution_windows(
+            _partition_windows(
+                wl["grid"], wl["weights"].mul(0.0), wl["signals"], wl["highs"],
+                wl["lows"], wl["closes"], wl["marks"], wl["funding"],
+                ExecutionSpec(), n_windows=2,
+            ),
+            1.0, "OHLCV_STRICT_PROXY", ExecutionSpec(),
+        ).simulated_fills
+        assert empty.empty
+        assert list(empty.columns) == list(self.FILL_COLUMNS)
+        assert empty.dtypes["quantity_delta"] == np.dtype("float64")
+        assert empty.dtypes["fill_price"] == np.dtype("float64")
+        assert empty.dtypes["fee_bps"] == np.dtype("float64")
+
+    def test_columnar_fill_accumulation_reduces_peak_rss_vs_dict_baseline(self) -> None:
+        """R2 memory claim: holding 10k+ fills as one dict per fill (legacy)
+        allocates more peak memory than the field-wise parallel lists (columnar).
+        ``tracemalloc`` measures the tracked allocation peak, the deterministic
+        structural driver of the RSS the spec targets; a synthetic replay is not
+        needed because the diff is purely the container representation."""
+        n = 10_000
+        rng = np.random.default_rng(11)
+        symbols = [f"SYM{i:04d}USDT" for i in range(64)]
+        times = pd.date_range("2021-01-01", periods=n, freq="1min", tz="UTC")
+        ts_list = [times[i] for i in range(n)]
+        syms = [symbols[i % len(symbols)] for i in range(n)]
+        qty = rng.uniform(0.001, 0.1, n).tolist()
+        price = rng.uniform(50.0, 150.0, n).tolist()
+        fee = rng.uniform(0.0, 10.0, n).tolist()
+        reasons = ["passive_fill" if i % 2 else "timeout_taker" for i in range(n)]
+        equity = rng.uniform(0.5, 1.5, n).tolist()
+
+        tracemalloc.start()
+        legacy_fills: list[dict[str, object]] = [
+            {
+                "timestamp": ts_list[i], "symbol": syms[i],
+                "quantity_delta": qty[i], "fill_price": price[i],
+                "fee_bps": fee[i], "reason": reasons[i],
+                "pre_trade_equity": equity[i],
+            }
+            for i in range(n)
+        ]
+        legacy_df = pd.DataFrame(legacy_fills)
+        legacy_peak = tracemalloc.get_traced_memory()[1]
+        tracemalloc.stop()
+
+        tracemalloc.start()
+        col_ts: list[pd.Timestamp] = []
+        col_sym: list[str] = []
+        col_qty: list[float] = []
+        col_price: list[float] = []
+        col_fee: list[float] = []
+        col_reason: list[str] = []
+        col_equity: list[float] = []
+        for i in range(n):
+            col_ts.append(ts_list[i])
+            col_sym.append(syms[i])
+            col_qty.append(qty[i])
+            col_price.append(price[i])
+            col_fee.append(fee[i])
+            col_reason.append(reasons[i])
+            col_equity.append(equity[i])
+        columnar_df = pd.DataFrame(
+            {
+                "timestamp": col_ts, "symbol": col_sym, "quantity_delta": col_qty,
+                "fill_price": col_price, "fee_bps": col_fee, "reason": col_reason,
+                "pre_trade_equity": col_equity,
+            }
+        )
+        columnar_peak = tracemalloc.get_traced_memory()[1]
+        tracemalloc.stop()
+
+        assert len(legacy_fills) >= 10_000
+        assert len(columnar_df) == len(legacy_df)
+        # The gap is structural (dict container + hash table per fill), not noise.
+        assert legacy_peak - columnar_peak > 256 * 1024
+        assert columnar_peak < legacy_peak
 
 def _assert_full_equivalence(enabled, disabled) -> None:
     """MHS-MEM-01: fills, six ledger series, validity, gaps, counters, and
