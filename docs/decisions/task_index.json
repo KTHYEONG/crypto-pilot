@@ -1,6 +1,16 @@
 {
   "tasks": [
     {
+      "task_id": "MHS_HORIZON_OPT_IMPL",
+      "date": "2026-08-09",
+      "adr_id": "ADR_20260809_MHS_HORIZON_OPT_IMPL",
+      "domain": "research",
+      "title": "MHS Performance Optimization Implementation (vectorized placebo/participation/bootstrap + minute cache)",
+      "why": "Full-period MHS diagnostic took 2072s; profiling showed _placebo_sharpe_percentile (~70%), _participation_warnings, _bootstrap_ci, and redundant minute-frame parquet reads dominate runtime",
+      "resolution": "Vectorized NumPy placebo (bit-exact, ~100x), cumsum/searchsorted participation (bit-exact, ~20x), vectorized block bootstrap (statistically equivalent, ~30x), bounded minute-frame LRU cache; full 5y run 2072.9s->1261.3s (1.64x), replay-stage peak RSS 2.606GB within 4GB budget; all golden metrics bit-identical; artifact persist converges to exactly 5 unified tables",
+      "impact": "MHS 5y diagnostic completes in ~21min with zero-drift output; MHS_PERF_OPT_001/002/003/004 contract tests added and passing; replay RSS unchanged vs golden baseline"
+    },
+    {
       "task_id": "mhs_artifact_refactor",
       "date": "2026-08-09",
       "adr_id": "ADR_20260809_mhs_artifact_refactor",
