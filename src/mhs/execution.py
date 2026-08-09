@@ -10,7 +10,7 @@ import time
 from collections import defaultdict
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
-from typing import Literal, cast
+from typing import Literal
 
 import numpy as np
 import pandas as pd
@@ -949,7 +949,13 @@ class _BoundExecutionReplayAccumulator:
         self.last_close_value: dict[str, float] = {}
         self.last_close_mark: dict[str, float] = {}
 
-        self.fill_records: list[dict[str, object]] = []
+        self.fill_ts: list[pd.Timestamp] = []
+        self.fill_symbol: list[str] = []
+        self.fill_qty: list[float] = []
+        self.fill_price: list[float] = []
+        self.fill_fee_bps: list[float] = []
+        self.fill_reason: list[str] = []
+        self.fill_pre_trade_equity: list[float] = []
         self.submit_times: list[pd.Timestamp] = []
         self.fill_times: list[pd.Timestamp] = []
         self.shortfalls: list[float] = []
@@ -1075,7 +1081,7 @@ class _BoundExecutionReplayAccumulator:
         on_grid_all = np.where(dpos_all < n_grid, grid_ns[dpos_clipped] == decision_ns_all, False)
         target_values = w.target_weights[local_cols].to_numpy(dtype="float64")
 
-        window_fills: list[dict[str, object]] = []
+        fill_start = len(self.fill_ts)
         for i, decision_time in enumerate(w.target_weights.index):
             dns = int(decision_ns_all[i])
             dpos = int(dpos_all[i])
@@ -1208,17 +1214,13 @@ class _BoundExecutionReplayAccumulator:
                 self.units_arr[gcol] += net_units
                 if reason in ("passive_fill", "timeout_taker"):
                     pre_trade_equity = self._equity_at()
-                    window_fills.append(
-                        {
-                            "timestamp": fill_time,
-                            "symbol": sym,
-                            "quantity_delta": net_units,
-                            "fill_price": fill_price,
-                            "fee_bps": fee_bps,
-                            "reason": reason,
-                            "pre_trade_equity": pre_trade_equity,
-                        }
-                    )
+                    self.fill_ts.append(fill_time)
+                    self.fill_symbol.append(sym)
+                    self.fill_qty.append(net_units)
+                    self.fill_price.append(fill_price)
+                    self.fill_fee_bps.append(fee_bps)
+                    self.fill_reason.append(reason)
+                    self.fill_pre_trade_equity.append(pre_trade_equity)
                     self.fill_times.append(fill_time)
                     self.submit_times.append(submit_time)
                     if self.retain_event_snapshots:
@@ -1226,9 +1228,6 @@ class _BoundExecutionReplayAccumulator:
                         marks_row[gpos] = marks_values[fill_pos]
                         self.units_after_events.append((fill_time, self.units_arr.copy()))
                         self.notional_after_events.append((fill_time, self.units_arr * marks_row))
-
-        if window_fills:
-            self.fill_records.extend(window_fills)
 
         # ---- streamed ledger chunk over [ledger_start_ns, grid end] ----
         p0 = 0 if self.ledger_start_ns is None else int(np.searchsorted(grid_ns, self.ledger_start_ns, side="left"))
@@ -1241,16 +1240,16 @@ class _BoundExecutionReplayAccumulator:
             fill_flow = np.zeros(n_grid, dtype="float64")
             fee_by_ts = np.zeros(n_grid, dtype="float64")
             turnover_terms: list[tuple[int, float, float]] = []
-            for rec in window_fills:
-                ts = pd.Timestamp(rec["timestamp"])
+            for k in range(fill_start, len(self.fill_ts)):
+                ts = self.fill_ts[k]
                 ts_ns = int(ts.value)
                 pos = int(np.searchsorted(grid_ns, ts_ns, side="left"))
                 if pos >= n_grid or grid_ns[pos] != ts_ns:
                     raise DataIntegrityError("windowed fills must occur on the window minute grid")
-                j = local_cols.index(str(rec["symbol"]))
-                qty = cast(float, rec["quantity_delta"])
-                price = cast(float, rec["fill_price"])
-                fee_bps = cast(float, rec["fee_bps"])
+                j = local_cols.index(self.fill_symbol[k])
+                qty = self.fill_qty[k]
+                price = self.fill_price[k]
+                fee_bps = self.fill_fee_bps[k]
                 fee = fee_bps / 1e4 * abs(qty) * price
                 delta_pos[j].append(pos)
                 delta_qty[j].append(qty)
@@ -1398,17 +1397,13 @@ class _BoundExecutionReplayAccumulator:
             self.cash -= -self.units_arr[col] * exit_price
             fee = fee_bps / 1e4 * abs(self.units_arr[col]) * exit_price
             self.cash -= fee
-            self.fill_records.append(
-                {
-                    "timestamp": exit_ts,
-                    "symbol": sym,
-                    "quantity_delta": -self.units_arr[col],
-                    "fill_price": exit_price,
-                    "fee_bps": fee_bps,
-                    "reason": "forced_exit",
-                    "pre_trade_equity": self._equity_at(),
-                }
-            )
+            self.fill_ts.append(exit_ts)
+            self.fill_symbol.append(sym)
+            self.fill_qty.append(-self.units_arr[col])
+            self.fill_price.append(exit_price)
+            self.fill_fee_bps.append(fee_bps)
+            self.fill_reason.append("forced_exit")
+            self.fill_pre_trade_equity.append(self._equity_at())
             self.fill_times.append(exit_ts)
             self.units_arr[col] = 0.0
             if self.retain_event_snapshots:
@@ -1416,12 +1411,21 @@ class _BoundExecutionReplayAccumulator:
         elapsed_seconds = time.perf_counter() - self._t0
 
         simulated_fills = pd.DataFrame(
-            self.fill_records,
-            columns=[
+            {
+                "timestamp": self.fill_ts,
+                "symbol": self.fill_symbol,
+                "quantity_delta": self.fill_qty,
+                "fill_price": self.fill_price,
+                "fee_bps": self.fill_fee_bps,
+                "reason": self.fill_reason,
+                "pre_trade_equity": self.fill_pre_trade_equity,
+            }
+        )[
+            [
                 "timestamp", "symbol", "quantity_delta", "fill_price",
                 "fee_bps", "reason", "pre_trade_equity",
-            ],
-        )
+            ]
+        ]
         if simulated_fills.empty:
             simulated_fills = simulated_fills.astype(
                 {"quantity_delta": "float64", "fill_price": "float64", "fee_bps": "float64"}
