@@ -341,10 +341,12 @@ class TestAnchoredFoldBounded:
         monkeypatch.setattr(ev, "_current_rss_bytes", lambda: 100_000_000_000)
         report = self._run_fold(mhs_market, max_rss_bytes=1_000)
         # The budget DataIntegrityError becomes a typed fold failure (not an
-        # uncaught process error) under the fold contract's fail-closed code set.
+        # uncaught process error) under the fold contract's fail-closed code
+        # set. An RSS breach is classified as RESOURCE_BUDGET_BREACH (spec
+        # §3.3 ``fold_integrity``), never as an invalid primary ledger.
         assert report.strict is None
         assert report.stress is None
-        assert report.failures == (ev.MHS_GO_REASON_INVALID_PRIMARY,)
+        assert report.failures == (ev.MHS_GO_REASON_RESOURCE_BREACH,)
 
     def test_no_rss_budget_returns_complete_fold(self, mhs_market) -> None:
         report = self._run_fold(mhs_market, max_rss_bytes=None)

@@ -75,6 +75,27 @@ MHS_GO_PRIMARY_SHARPE_FLOOR = 0.6
 
 MHS_ARTIFACT_SCHEMA_VERSION = 1
 
+# Signal-quality calibration (spec §3.2, ``signal_quality``).
+# ``MHS_REBALANCE_MIN_NOTIONAL_DELTA`` is the turnover deadband cap: a per-symbol
+# target-weight change smaller than 0.02 (2% of equity notional) is suppressed so
+# the executor never churns the book on sub-threshold signal deltas.
+MHS_REBALANCE_MIN_NOTIONAL_DELTA = 0.02
+# The EMA smoothing span is one full horizon cycle in decision steps
+# (``horizon_hours // step_hours``), the structural invariant that the smoothed
+# signal cannot react faster than one horizon length.
+MHS_SIGNAL_EMA_HORIZON_SPAN = 1.0
+# Regime cash scaling: gross exposure is linearly reduced toward
+# ``MHS_REGIME_CASH_SCALE_FLOOR`` when trailing realized vol exceeds its
+# ``MHS_REGIME_CASH_MEDIAN_WINDOW_HOURS`` median, and never exceeds full exposure.
+MHS_REGIME_CASH_SCALE_FLOOR = 0.5
+MHS_REGIME_CASH_MEDIAN_WINDOW_HOURS = 720
+# Anchored-fold panel warm-up bound (spec §3.1, ``memory_opt``): the fold panel
+# is sliced to ``[validation_start - warmup, validation_end]`` instead of the
+# full ``[train_start, validation_end]``. The warm-up covers the 720-bar
+# liquidity-eligibility lookback plus the 168h slow horizon plus a one-day
+# boundary buffer; features only ever see history at or before each decision.
+MHS_FOLD_PANEL_WARMUP_HOURS = 720 + 168 + 24
+
 MHS_GO_REASON_INCOMPLETE_FOLD = "INCOMPLETE_ANCHORED_FOLD"
 MHS_GO_REASON_INVALID_PRIMARY = "INVALID_PRIMARY_LEDGER"
 MHS_GO_REASON_NONFINITE_EQUITY = "NONFINITE_EQUITY"
@@ -492,13 +513,82 @@ def _align_minute_frames(
     return highs, lows, closes
 
 
+def _smooth_signal_ema(signal: pd.DataFrame, span_steps: int) -> pd.DataFrame:
+    """Apply an exponential moving average to a step-grid signal.
+
+    The EMA is the spec's ``Autocorr Smoothing`` (§3.2): it removes the
+    high-frequency noise that drives negative return autocorrelation (whipsaw)
+    while preserving the trend polarity. ``span_steps`` is one full horizon
+    cycle in decision steps; ``adjust=False`` so the span is the constant
+    half-life ``span - 1`` and the filtered series is fully causal.
+    """
+    if span_steps < 1:
+        raise ValueError(f"span_steps must be >= 1, got {span_steps}")
+    return signal.ewm(span=span_steps, adjust=False).mean()
+
+
+def _apply_rebalance_deadband(target: pd.DataFrame, min_delta: float) -> pd.DataFrame:
+    """Suppress per-symbol rebalances smaller than the turnover deadband cap.
+
+    A target-weight change ``|w_t - w_held|`` below ``min_delta`` (2% notional)
+    carries the last decided (held) target forward instead of retrading, so the
+    executor never churns on sub-threshold signal deltas; the hold is stateful,
+    so a slow drift cannot creep through one small step at a time. The first
+    observation is always a decision, NaN targets remain NaN (a delisting is
+    never silently re-expressed), and a held NaN resets the deadband so a
+    re-listed symbol trades from its own first finite target.
+    """
+    if min_delta < 0:
+        raise ValueError(f"min_delta must be >= 0, got {min_delta}")
+    if target.empty:
+        return target.copy()
+    values = target.to_numpy(dtype="float64")
+    out = values.copy()
+    held = out[0].copy()
+    finite_values = np.isfinite(values)
+    for i in range(1, len(values)):
+        carry = (np.abs(values[i] - held) < min_delta) & finite_values[i] & np.isfinite(held)
+        out[i] = np.where(carry, held, values[i])
+        held = out[i]
+    return pd.DataFrame(out, index=target.index, columns=target.columns).fillna(0.0)
+
+
+def _regime_cash_scale(
+    vol_mean: pd.Series,
+    median_window_hours: int = MHS_REGIME_CASH_MEDIAN_WINDOW_HOURS,
+    floor: float = MHS_REGIME_CASH_SCALE_FLOOR,
+) -> pd.Series:
+    """Per-decision gross-exposure scale that raises cash in high-vol regimes.
+
+    Exposure is ``median(vol) / vol`` clipped to ``[floor, 1.0]``: a calm regime
+    keeps full gross, a high-vol regime scales toward the cash floor, and a
+    flat/insufficient-history window carries full exposure (never 0/0). This is
+    the spec's ``Dynamic Band Weighting`` (§3.2) expressed as cash weighting.
+    """
+    if not 0.0 < floor <= 1.0:
+        raise ValueError(f"floor must be in (0, 1], got {floor}")
+    if median_window_hours < 1:
+        raise ValueError(f"median_window_hours must be >= 1, got {median_window_hours}")
+    if vol_mean.empty:
+        return pd.Series(1.0, index=vol_mean.index)
+    median = vol_mean.rolling(
+        median_window_hours, min_periods=min(48, median_window_hours),
+    ).median()
+    scale = median.div(vol_mean.clip(lower=1e-12))
+    scale = scale.clip(lower=floor, upper=1.0)
+    return scale.fillna(1.0)
+
+
 def _book_weights(
     log_close: pd.DataFrame,
     eligible: pd.DataFrame,
     spec: BookSpec,
     step_grid: pd.DatetimeIndex,
+    ema_span: int | None = None,
 ) -> pd.DataFrame:
     sig = horizon_log_return(log_close, spec.horizon_hours)
+    if ema_span is not None:
+        sig = _smooth_signal_ema(sig, ema_span)
     sig_step = sig.reindex(step_grid)
     el_step = eligible.reindex(step_grid)
     weights = rank_weight_book(sig_step, el_step, spec.band.sign, spec.min_symbols)
@@ -1041,8 +1131,15 @@ def _book_outcome(
     tail = tail_sensitivity_curve(
         effective_weights, fwd, turnover, 8.0, _PERIODS_PER_YEAR_1H, event_window_bars,
     )
+    # The pre-screen matrices are consumed by ``prescreen``/``tail`` above and
+    # hold no references from those results.  Releasing them before the minute
+    # replay keeps three full multi-year price/weight matrices out of the replay
+    # baseline (spec §3.1, ``memory_opt``).
+    del weights_1h, effective_weights, fwd, _net, turnover
+    gc.collect()
 
     target_weights = (replay_weights_step if replay_weights_step is not None else weights_step).reindex(step_grid)
+    target_weights = _apply_rebalance_deadband(target_weights, MHS_REBALANCE_MIN_NOTIONAL_DELTA)
     signal_available_at = step_grid + pd.Timedelta(hours=1)
     execution_grid = pd.date_range(
         start, end,
@@ -1177,6 +1274,109 @@ def _incomplete_fold_report(
     )
 
 
+def _build_fold_target_weights(
+    root: str,
+    fold: AnchoredPurgedFold,
+    request: MhsDiagnosticRequest,
+    funding_by_symbol: dict[str, pd.Series],
+) -> tuple[pd.DataFrame, pd.DatetimeIndex, list[str], pd.DatetimeIndex]:
+    """Construct one fold's PIT decision targets with the quality calibration.
+
+    Returns ``(target_weights, signal_available_at, minute_roster, grid_1h)``:
+    the blend decision targets over the validation window, their ``+1h``
+    signal-availability stamps, the minute-data roster, and the 1h feature
+    grid. The 1h panel is sliced to ``[validation_start - warmup, validation_end]``
+    (spec §3.1) so warm-up history feeds the 720-bar eligibility lookback and
+    the 168h slow horizon without holding the full ``[train_start, validation_end]``
+    panel. Signal quality (spec §3.2) applies EMA smoothing on each book, a
+    volatility-regime cash scale, and the turnover deadband cap on the final
+    blend targets. All objects are local to this builder and released when it
+    returns, keeping per-fold peak memory bounded.
+    """
+    ts = fold.train_start
+    vs = fold.validation_start
+    ve = fold.validation_end
+    panel_start = max(ts, vs - pd.Timedelta(hours=MHS_FOLD_PANEL_WARMUP_HOURS))
+    panel = load_base_panel(
+        root, "1h", ("close", "open", "quote_vol"), panel_start, ve,
+        partition="dev", min_bars=2000,
+    )
+    close, opens, quote_vol = panel["close"], panel["open"], panel["quote_vol"]
+    del panel
+    grid_1h = close.index
+    symbols = list(close.columns)
+    funded = [s for s in symbols if s in funding_by_symbol]
+    if not funded:
+        raise RuntimeError("no fold symbol has funding coverage")
+    close = close[funded]
+    opens = opens[funded]
+    quote_vol = quote_vol[funded]
+    bar_period = grid_1h[1] - grid_1h[0]
+    funding_window = {
+        s: funding_by_symbol[s].loc[
+            (funding_by_symbol[s].index >= grid_1h[0])
+            & (funding_by_symbol[s].index < grid_1h[-1] + bar_period)
+        ]
+        for s in funded
+    }
+    bar_funding = bar_funding_panel(funding_window, grid_1h)
+    del funding_window
+    aligned_symbols = list(bar_funding.columns)
+    if not aligned_symbols:
+        raise RuntimeError("no fold symbol has causally aligned funding coverage")
+    close = close[aligned_symbols]
+    opens = opens[aligned_symbols]
+    quote_vol = quote_vol[aligned_symbols]
+    bar_funding = bar_funding[aligned_symbols]
+
+    eligible = liquid_half_eligibility(quote_vol, lookback_bars=720, min_history_bars=720)
+    log_close = np.log(close)
+    del close
+    fast = PHASE_1_BOOK_SPECS["fast_reversal"]
+    slow = PHASE_1_BOOK_SPECS["slow_momentum"]
+    fast_grid = pd.date_range(panel_start, ve, freq="6h", tz="UTC")
+    slow_grid = pd.date_range(panel_start, ve, freq="24h", tz="UTC")
+    fast_ema = max(1, round(fast.horizon_hours / fast.step_hours * MHS_SIGNAL_EMA_HORIZON_SPAN))
+    slow_ema = max(1, round(slow.horizon_hours / slow.step_hours * MHS_SIGNAL_EMA_HORIZON_SPAN))
+    w_fast = _book_weights(log_close, eligible, fast, fast_grid, ema_span=fast_ema)
+    w_slow = _book_weights(log_close, eligible, slow, slow_grid, ema_span=slow_ema)
+    execution_mask = _pit_execution_mask(quote_vol, eligible, request.execution_universe_size)
+    del quote_vol, eligible
+    w_fast_execution = w_fast.where(
+        execution_mask.reindex(w_fast.index).fillna(False), other=0.0,
+    )
+    w_slow_execution = w_slow.where(
+        execution_mask.reindex(w_slow.index).fillna(False), other=0.0,
+    )
+    del w_fast, w_slow, execution_mask
+    blend_1h = (
+        PHASE_1_BOOK_BLEND_WEIGHTS["fast_reversal"] * w_fast_execution.reindex(grid_1h).ffill().fillna(0.0)
+        + PHASE_1_BOOK_BLEND_WEIGHTS["slow_momentum"] * w_slow_execution.reindex(grid_1h).ffill().fillna(0.0)
+    )
+    del w_fast_execution, w_slow_execution
+    decision_grid = blend_1h.index[(blend_1h.index >= vs) & (blend_1h.index <= ve)]
+    target_weights = blend_1h.loc[decision_grid]
+    del blend_1h
+
+    vol_mean = realized_vol(log_close, 48).reindex(decision_grid).mean(axis=1)
+    del log_close
+    regime_scale = _regime_cash_scale(vol_mean)
+    target_weights = target_weights.mul(regime_scale, axis=0)
+    target_weights = _apply_rebalance_deadband(target_weights, MHS_REBALANCE_MIN_NOTIONAL_DELTA)
+
+    if target_weights.empty:
+        raise RuntimeError("fold decision grid is empty")
+    execution_symbols = sorted(target_weights.columns[target_weights.ne(0.0).any(axis=0)])
+    minute_roster = [
+        s for s in execution_symbols
+        if os.path.exists(os.path.join(root, request.execution_timeframe, f"{s}.parquet"))
+    ]
+    if not minute_roster:
+        raise RuntimeError("no fold decision symbol has minute execution data")
+    signal_available_at = target_weights.index + pd.Timedelta(hours=1)
+    return target_weights, signal_available_at, minute_roster, grid_1h
+
+
 def _run_anchored_fold(
     root: str,
     fold: AnchoredPurgedFold,
@@ -1198,73 +1398,12 @@ def _run_anchored_fold(
     raised) with machine-readable failure codes.
     """
     try:
-        ts = fold.train_start
         vs = fold.validation_start
         ve = fold.validation_end
-        panel = load_base_panel(
-            root, "1h", ("close", "open", "quote_vol"), ts, ve,
-            partition="dev", min_bars=2000,
+        target_weights, signal_available_at, minute_roster, _grid_1h = _build_fold_target_weights(
+            root, fold, request, funding_by_symbol,
         )
-        close, opens, quote_vol = panel["close"], panel["open"], panel["quote_vol"]
-        grid_1h = close.index
-        symbols = list(close.columns)
-        funded = [s for s in symbols if s in funding_by_symbol]
-        if not funded:
-            return _incomplete_fold_report(fold, fold_index, (MHS_GO_REASON_INCOMPLETE_FOLD,))
-        close = close[funded]
-        opens = opens[funded]
-        quote_vol = quote_vol[funded]
-        bar_period = grid_1h[1] - grid_1h[0]
-        funding_window = {
-            s: funding_by_symbol[s].loc[
-                (funding_by_symbol[s].index >= grid_1h[0])
-                & (funding_by_symbol[s].index < grid_1h[-1] + bar_period)
-            ]
-            for s in funded
-        }
-        bar_funding = bar_funding_panel(funding_window, grid_1h)
-        aligned_symbols = list(bar_funding.columns)
-        if not aligned_symbols:
-            return _incomplete_fold_report(fold, fold_index, (MHS_GO_REASON_INCOMPLETE_FOLD,))
-        close = close[aligned_symbols]
-        opens = opens[aligned_symbols]
-        quote_vol = quote_vol[aligned_symbols]
-        bar_funding = bar_funding[aligned_symbols]
-
-        eligible = liquid_half_eligibility(quote_vol, lookback_bars=720, min_history_bars=720)
-        log_close = np.log(close)
-        fast = PHASE_1_BOOK_SPECS["fast_reversal"]
-        slow = PHASE_1_BOOK_SPECS["slow_momentum"]
-        fast_grid = pd.date_range(ts, ve, freq="6h", tz="UTC")
-        slow_grid = pd.date_range(ts, ve, freq="24h", tz="UTC")
-        w_fast = _book_weights(log_close, eligible, fast, fast_grid)
-        w_slow = _book_weights(log_close, eligible, slow, slow_grid)
-        execution_mask = _pit_execution_mask(quote_vol, eligible, request.execution_universe_size)
-        w_fast_execution = w_fast.where(
-            execution_mask.reindex(w_fast.index).fillna(False), other=0.0,
-        )
-        w_slow_execution = w_slow.where(
-            execution_mask.reindex(w_slow.index).fillna(False), other=0.0,
-        )
-        blend_1h = (
-            PHASE_1_BOOK_BLEND_WEIGHTS["fast_reversal"] * w_fast_execution.reindex(grid_1h).ffill().fillna(0.0)
-            + PHASE_1_BOOK_BLEND_WEIGHTS["slow_momentum"] * w_slow_execution.reindex(grid_1h).ffill().fillna(0.0)
-        )
-        decision_grid = blend_1h.index[(blend_1h.index >= vs) & (blend_1h.index <= ve)]
-        target_weights = blend_1h.loc[decision_grid]
-        if target_weights.empty:
-            return _incomplete_fold_report(fold, fold_index, (MHS_GO_REASON_INCOMPLETE_FOLD,))
-        execution_symbols = sorted(
-            target_weights.columns[target_weights.ne(0.0).any(axis=0)]
-        )
-        minute_roster = [
-            s for s in execution_symbols
-            if os.path.exists(os.path.join(root, request.execution_timeframe, f"{s}.parquet"))
-        ]
-        if not minute_roster:
-            return _incomplete_fold_report(fold, fold_index, (MHS_GO_REASON_INCOMPLETE_FOLD,))
         target_replay = target_weights[minute_roster]
-        signal_available_at = target_replay.index + pd.Timedelta(hours=1)
         execution_grid = pd.date_range(
             vs, ve,
             freq={"1m": "1min", "5m": "5min"}[request.execution_timeframe],
@@ -1342,14 +1481,7 @@ def _run_anchored_fold(
             terminal_censored_decisions=terminal_censored,
         )
     except DataIntegrityError as exc:
-        message = str(exc).lower()
-        if "pre-trade equity" in message or "capital" in message or "equity must be" in message:
-            code = MHS_GO_REASON_CAPITAL_BREACH
-        elif "finite" in message:
-            code = MHS_GO_REASON_NONFINITE_EQUITY
-        else:
-            code = MHS_GO_REASON_INVALID_PRIMARY
-        return _incomplete_fold_report(fold, fold_index, (code,))
+        return _incomplete_fold_report(fold, fold_index, (_classify_execution_failure(exc),))
     except (RuntimeError, ValueError):
         return _incomplete_fold_report(fold, fold_index, (MHS_GO_REASON_INCOMPLETE_FOLD,))
 
@@ -1403,8 +1535,17 @@ def run_mhs_horizon_diagnostic(request: MhsDiagnosticRequest) -> MhsHorizonDiagn
             "MHS Phase 1 is dev-only; the holdout partition requires an "
             "architecture-freeze final-OOS command"
         )
-    start = pd.Timestamp(request.start, tz="UTC") if request.start is not None else MHS_DISCOVERY_START
-    end = pd.Timestamp(resolved_end, tz="UTC") if resolved_end is not None else HOLDOUT_CUTOFF
+    if request.start is not None:
+        start = pd.Timestamp(request.start)
+        start = start.tz_localize("UTC") if start.tz is None else start.tz_convert("UTC")
+    else:
+        start = MHS_DISCOVERY_START
+
+    if resolved_end is not None:
+        end = pd.Timestamp(resolved_end)
+        end = end.tz_localize("UTC") if end.tz is None else end.tz_convert("UTC")
+    else:
+        end = HOLDOUT_CUTOFF
     if end > HOLDOUT_CUTOFF:
         raise RuntimeError(f"Holdout sealed: requested end {end} past {HOLDOUT_CUTOFF}")
 
@@ -1480,6 +1621,11 @@ def run_mhs_horizon_diagnostic(request: MhsDiagnosticRequest) -> MhsHorizonDiagn
     )
     blend_gross = float(blend_1h.abs().sum(axis=1).mean())
     blend_cash_fraction = float((1.0 - blend_1h.abs().sum(axis=1)).mean())
+    # The 1h book views are only consumed by ``blend_1h`` above.  Releasing
+    # them before phase diagnostics and the top-level replays keeps two full
+    # multi-year weight matrices out of the replay baseline (spec §3.1).
+    del w_fast_1h, w_slow_1h
+    gc.collect()
 
     phase_fast = _phase_diagnostics(log_close, eligible, opens, bar_funding, grid_1h, fast)
     phase_slow = _phase_diagnostics(log_close, eligible, opens, bar_funding, grid_1h, slow)
@@ -1511,20 +1657,31 @@ def run_mhs_horizon_diagnostic(request: MhsDiagnosticRequest) -> MhsHorizonDiagn
             start, end, fast.horizon_hours, initial_equity, w_fast_execution,
             telemetry=telemetry,
         )
+        # Each book's step-weight inputs are single-use; releasing them before
+        # the next book keeps the running baseline flat across the three top-
+        # level replays (spec §3.1, ``memory_opt``).
+        del w_fast, w_fast_execution, phase_fast
         book_report_slow = _book_outcome(
             "slow_momentum", slow, len(funded), slow_grid, w_slow, grid_1h,
             opens, bar_funding, phase_slow, root, request, funding_by_symbol,
             start, end, slow.horizon_hours, initial_equity, w_slow_execution,
             telemetry=telemetry,
         )
+        del w_slow, w_slow_execution, phase_slow
         blend_step = blend_1h.reindex(fast_grid)
+        # The replay weights are reindexed to the 6h decision grid here so the
+        # full 1h ``blend_1h`` and ``execution_mask`` matrices are released
+        # before the blend replay begins; only the compact step-grid targets
+        # stay alive inside ``_book_outcome`` (spec §3.1, ``memory_opt``).
+        blend_replay = blend_1h.where(execution_mask, other=0.0).reindex(fast_grid)
+        del blend_1h, execution_mask
         book_report_blend = _book_outcome(
             "blend", fast, len(funded), fast_grid, blend_step, grid_1h,
             opens, bar_funding, phase_blend, root, request, funding_by_symbol,
-            start, end, 168, initial_equity,
-            blend_1h.where(execution_mask, other=0.0),
+            start, end, 168, initial_equity, blend_replay,
             telemetry=telemetry,
         )
+        del blend_step, blend_replay, phase_blend
         books = {"fast_reversal": book_report_fast, "slow_momentum": book_report_slow}
         blend_report = book_report_blend
     else:
@@ -1588,8 +1745,12 @@ def run_mhs_horizon_diagnostic(request: MhsDiagnosticRequest) -> MhsHorizonDiagn
 
     # Folds reconstruct their own PIT panels.  Release the top-level feature
     # matrices after all top-level diagnostics have consumed them so the two
-    # multi-year panels never coexist.
-    del eligible, log_close, w_fast_1h, w_slow_1h
+    # multi-year panels never coexist. The wide funding/price and weight
+    # matrices are freed before the first fold so fold panel RSS starts from a
+    # clean base (spec §3.1, ``memory_opt``).
+    del eligible, log_close
+    del opens, bar_funding
+    del funding_window, minute_grid
     gc.collect()
 
     fold_reports: list[MhsFoldReport] = []
@@ -1774,6 +1935,27 @@ def _artifact_reference(table: pd.DataFrame, path: Path) -> dict[str, Any]:
     }
 
 
+def _verify_ledger_artifact(path: Path, expected_rows: int) -> None:
+    """Re-read a written ledger parquet and verify its integrity fail-closed.
+
+    Checksum-only provenance cannot detect a silently-written NULL or truncated
+    equity column, so this pass re-reads the artifact and asserts the exact row
+    count and a fully finite positive equity column (spec §3.3, ``fold_integrity``).
+    """
+    roundtrip = pd.read_parquet(path)
+    if len(roundtrip) != expected_rows:
+        raise DataIntegrityError(
+            f"ledger artifact row count mismatch path={path} "
+            f"expected={expected_rows} got={len(roundtrip)}"
+        )
+    if expected_rows and "equity" in roundtrip.columns:
+        equity = roundtrip["equity"].to_numpy(dtype="float64")
+        if not np.isfinite(equity).all() or (equity <= 0).any():
+            raise DataIntegrityError(
+                f"ledger artifact equity must be finite and strictly positive path={path}"
+            )
+
+
 def _persist_replay_artifact(
     replay: StrategyExecutionReplayResult,
     artifact_root: Path,
@@ -1810,6 +1992,7 @@ def _persist_replay_artifact(
     ledger_table = _to_timestamped_table(ledger)
     ledger_path = prefix.with_name(f"{name}_ledger.parquet")
     ledger_table.to_parquet(ledger_path, index=False, compression="zstd")
+    _verify_ledger_artifact(ledger_path, len(ledger_table))
 
     times = pd.DataFrame(
         {"submit_time": replay.submit_times, "fill_time": replay.fill_times}
