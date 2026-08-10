@@ -1,6 +1,16 @@
 {
   "tasks": [
     {
+      "task_id": "MHS_ROSTER_HYSTERESIS_VOL_TILT",
+      "date": "2026-08-10",
+      "adr_id": "ADR_20260810_MHS_ROSTER_HYSTERESIS_VOL_TILT",
+      "domain": "research",
+      "title": "MHS roster 히스테리시스 + 역변동성 tilt로 CAPITAL_INVARIANT_BREACH 근본원인 대응",
+      "why": "1차 재정규화 수정(ADR_20260810_MHS_EXECUTION_ROSTER_RENORMALIZATION)으로 gross가 ~7%→100% 복원되자 fast/slow/blend 3북과 fold2가 CAPITAL_INVARIANT_BREACH로 중도실패, fold0/1 MDD도 -13%대→-58~-66%로 악화. 로직 추적 결과 두 메커니즘 확인: (A) _pit_execution_mask의 경계없는 즉시 재평가가 2% 리밸런스 데드밴드를 우회하는 강제 전량매매를 유발(roster 유출입=데드밴드 우회 대상), (B) rank_weight_book의 균등 rank-slot 가중이 밈코인 등 roster 내 최고변동성 종목에 신호 신뢰도와 무관하게 동일 비중을 배정해 timeout-taker 슬리피지(주문당 400~560bps) 노출을 극대화.",
+      "resolution": "src/mhs/books.py에 inverse_realized_vol_tilt() 신규 추가(각 북 고유 horizon의 causal realized_vol 역수로 rank weight 사전 tilt, renormalize_within_mask는 불변). _pit_execution_mask에 Schmitt-trigger 히스테리시스 추가(MHS_EXECUTION_ROSTER_EXIT_MULTIPLIER=2.0, 진입/이탈 임계값 분리, 시그니처 불변). fold/top-level 양쪽에 tilt를 renormalize 직전 배선, 이론적 prescreen용 w_fast_1h/w_slow_1h는 미tilt 유지.",
+      "impact": "unit 테스트 신규 10개 시나리오 전부 PASS, lean_check --spec 계약검증 PASS(Impact Level 3). exit multiplier(2.0)는 사전측정 상수가 아닌 엔지니어링 기본값이며 실제 turnover 저감 효과는 5년 재실행으로 검증 필요. 두 수정 후에도 자본잠식 지속 시 다음 레버(_regime_cash_scale floor/roster-only vol 분모 재설계, base gross target 재검토)가 필요함을 후속 과제로 명시."
+    },
+    {
       "task_id": "MHS_EXECUTION_ROSTER_RENORMALIZATION",
       "date": "2026-08-10",
       "adr_id": "ADR_20260810_MHS_EXECUTION_ROSTER_RENORMALIZATION",
