@@ -4,7 +4,11 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from src.mhs.books import phase_tranche_book, rank_weight_book
+from src.mhs.books import (
+    phase_tranche_book,
+    rank_weight_book,
+    renormalize_within_mask,
+)
 
 
 class TestRankWeightBook:
@@ -64,6 +68,75 @@ class TestRankWeightBook:
         eligible = pd.DataFrame({"B": [True]})
         with pytest.raises(ValueError, match="identically indexed"):
             rank_weight_book(signal, eligible, 1, 2)
+
+
+class TestRenormalizeWithinMask:
+    """Execution-roster renormalization: surviving roster cells are re-centered
+    and re-normalized while masked-out cells stay exactly zero."""
+
+    def test_renormalizes_surviving_cells_to_dollar_neutral_unit_gross(
+        self,
+    ) -> None:
+        # SCENARIO_MHS_RENORM_01_DOLLAR_NEUTRAL_UNIT_GROSS
+        weights = pd.DataFrame(
+            {"A": [0.4], "B": [-0.4], "C": [0.2], "D": [-0.2]},
+        )
+        mask = pd.DataFrame({"A": [True], "B": [True], "C": [False], "D": [False]})
+        out = renormalize_within_mask(weights, mask, 2)
+        assert abs(float(out.iloc[0][["A", "B"]].sum())) < 1e-9
+        assert abs(float(out.iloc[0][["A", "B"]].abs().sum()) - 1.0) < 1e-9
+        assert out.iloc[0]["C"] == 0.0
+        assert out.iloc[0]["D"] == 0.0
+
+    def test_masked_out_columns_are_exactly_zero_across_rows(self) -> None:
+        # SCENARIO_MHS_RENORM_02_MASKED_OUT_COLUMNS_ARE_ZERO
+        weights = pd.DataFrame(
+            {
+                "A": [0.5, 0.7],
+                "B": [-0.3, -0.1],
+                "C": [0.9, -0.2],
+                "D": [-0.4, 0.6],
+            },
+        )
+        mask = pd.DataFrame(
+            {"A": [True, False], "B": [True, True], "C": [False, True], "D": [False, False]},
+        )
+        out = renormalize_within_mask(weights, mask, 2)
+        assert out["C"].iloc[0] == 0.0
+        assert out["D"].iloc[0] == 0.0
+        assert out["A"].iloc[1] == 0.0
+        assert out["D"].iloc[1] == 0.0
+        assert out.abs().sum(axis=1).iloc[0] == pytest.approx(1.0)
+        assert out.abs().sum(axis=1).iloc[1] == pytest.approx(1.0)
+
+    def test_rows_below_min_symbols_return_all_zeros(self) -> None:
+        # SCENARIO_MHS_RENORM_03_MIN_SYMBOLS_FAIL_CLOSED_TO_ZERO
+        weights = pd.DataFrame({"A": [0.4], "B": [-0.4], "C": [0.2]})
+        mask = pd.DataFrame({"A": [True], "B": [True], "C": [True]})
+        out = renormalize_within_mask(weights, mask, 4)
+        assert out.to_numpy().tolist() == [[0.0, 0.0, 0.0]]
+
+    def test_fails_closed_on_misaligned_frames(self) -> None:
+        # SCENARIO_MHS_RENORM_04_FAILS_CLOSED_ON_MISALIGNED_FRAMES
+        weights = pd.DataFrame({"A": [0.4], "B": [-0.4]})
+        mask = pd.DataFrame({"A": [True], "C": [True]})
+        with pytest.raises(ValueError, match="identically indexed"):
+            renormalize_within_mask(weights, mask, 2)
+
+    def test_fails_closed_on_bad_min_symbols(self) -> None:
+        # SCENARIO_MHS_RENORM_05_FAILS_CLOSED_ON_BAD_MIN_SYMBOLS
+        weights = pd.DataFrame({"A": [0.4], "B": [-0.4]})
+        mask = pd.DataFrame({"A": [True], "B": [True]})
+        with pytest.raises(ValueError, match="min_symbols must be >= 2"):
+            renormalize_within_mask(weights, mask, 1)
+
+    def test_all_zero_surviving_gross_stays_zero_not_nan(self) -> None:
+        # SCENARIO_MHS_RENORM_06_ALL_ZERO_GROSS_STAYS_ZERO
+        weights = pd.DataFrame({"A": [0.0], "B": [0.0], "C": [0.0], "D": [0.0]})
+        mask = pd.DataFrame({"A": [True], "B": [True], "C": [False], "D": [False]})
+        out = renormalize_within_mask(weights, mask, 2)
+        assert out.to_numpy().tolist() == [[0.0, 0.0, 0.0, 0.0]]
+        assert bool(np.isfinite(out.to_numpy()).all())
 
 
 class TestPhaseTrancheBook:
