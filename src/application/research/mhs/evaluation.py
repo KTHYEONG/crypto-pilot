@@ -59,9 +59,11 @@ from src.mhs.evaluation import (
     phase_1_anchored_purged_folds,
     required_cost_tiers,
 )
-from src.mhs.execution import SimulatedInventoryLedgerResult, StrategyExecutionReplayResult, bar_funding_panel, mhs_ledger_pnl
+from src.mhs.execution import SimulatedInventoryLedgerResult, StrategyExecutionReplayResult, bar_funding_panel, laddered_fill_schedule, mhs_ledger_pnl
+from src.mhs.discovery import DiscoveryQualificationResult, select_horizon_by_discovery_qualification
 from src.mhs.horizons import efficiency_ratio, horizon_log_return, realized_vol
 from src.research.evaluation.policy import HOLDOUT_CUTOFF
+from src.research.technical_experts.trend_screen_catalog import DISCOVERY_END, QUALIFICATION_END
 from src.market_data.storage.loaders import load_funding_rates
 
 __all__ = ["simulated_inventory_ledger"]
@@ -174,6 +176,8 @@ class MhsDiagnosticRequest:
     max_rss_bytes: int | None = None
     log_run: bool = True
     touch_diagnostic: bool = False
+    ladder_diagnostic: bool = False
+    discovery_gate: bool = False
 
     def __post_init__(self) -> None:
         if self.partition not in ("dev", "holdout", "all"):
@@ -229,6 +233,8 @@ class MhsBookReport:
     failure: MhsBookFailure | None = None
     touch: StrategyExecutionReplayResult | None = None
     touch_naive_sharpe: float | None = None
+    ladder: StrategyExecutionReplayResult | None = None
+    ladder_naive_sharpe: float | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -309,6 +315,7 @@ class MhsHorizonDiagnosticReport:
     execution_symbols: tuple[str, ...]
     run_elapsed_seconds: float
     resource_measurements: tuple[MhsResourceMeasurement, ...] = ()
+    discovery_qualification: dict[str, DiscoveryQualificationResult] | None = None
 
     def to_payload(self) -> Any:
         return _jsonable(dataclasses.asdict(self))
@@ -1117,6 +1124,25 @@ def _naive_sharpe(ledger: SimulatedInventoryLedgerResult) -> float:
     return float(net.mean() / sd * np.sqrt(_PERIODS_PER_YEAR_1H))
 
 
+def _validate_ladder_schedule_contract() -> None:
+    """Runtime guard for the frozen ladder schedule contract (spec §1.4).
+
+    Runs once per ``--ladder-diagnostic`` book pass, before the expensive
+    windowed replay: a single tranche must reproduce the strict single-fill
+    schedule and the ladder's ``qty_fraction`` values must conserve notional.
+    """
+    one = laddered_fill_schedule(
+        100.0, 1, np.array([101.0]), np.array([101.0, 101.0]),
+        1, ExecutionSpec(), True,
+    )
+    assert one == [(1, 101.0, ExecutionSpec().one_way_taker_bps(), 1.0)]
+    ladder = laddered_fill_schedule(
+        100.0, 1, np.array([101.0] * 4), np.array([101.0] * 5),
+        4, ExecutionSpec(), True,
+    )
+    assert abs(sum(f[3] for f in ladder) - 1.0) < 1e-12
+
+
 def _mean_ann(series: pd.Series, periods_per_year: float) -> float:
     return float(series.mean()) * periods_per_year if len(series) else float("nan")
 
@@ -1477,6 +1503,8 @@ def _book_outcome(
 
     touch = None
     touch_naive_sharpe = None
+    ladder = None
+    ladder_naive_sharpe = None
     try:
         primary, stress = replay_execution_window_pair(
             _window_telemetry(_windows(), "execution_window"),
@@ -1490,6 +1518,14 @@ def _book_outcome(
                 retain_event_snapshots=False,
             )
             touch_naive_sharpe = _naive_sharpe(touch.ledger)
+        if request.ladder_diagnostic:
+            _validate_ladder_schedule_contract()
+            ladder = replay_execution_windows(
+                _window_telemetry(_windows(), "execution_window_ladder"),
+                initial_equity, "OHLCV_LADDERED_PROXY", ExecutionSpec(),
+                retain_event_snapshots=False,
+            )
+            ladder_naive_sharpe = _naive_sharpe(ladder.ledger)
         if telemetry is not None:
             telemetry.record(
                 f"replay_{name}_strict",
@@ -1539,6 +1575,8 @@ def _book_outcome(
             failure=failure,
             touch=touch,
             touch_naive_sharpe=touch_naive_sharpe,
+            ladder=ladder,
+            ladder_naive_sharpe=ladder_naive_sharpe,
         )
     return MhsBookReport(
         name=name,
@@ -1562,6 +1600,8 @@ def _book_outcome(
         terminal_censored_decisions=censored,
         touch=touch,
         touch_naive_sharpe=touch_naive_sharpe,
+        ladder=ladder,
+        ladder_naive_sharpe=ladder_naive_sharpe,
     )
 
 
@@ -2365,6 +2405,24 @@ def run_mhs_horizon_diagnostic(request: MhsDiagnosticRequest) -> MhsHorizonDiagn
             efficiency_ratio(log_close, 48).mean().mean()
         ),
     }
+    discovery_qualification = None
+    if request.discovery_gate:
+        discovery_qualification = {
+            "reversal": select_horizon_by_discovery_qualification(
+                sign=-1, horizon_candidates=(24, 48, 72, 96, 120, 168),
+                log_close=log_close, eligible=eligible, opens=opens,
+                bar_funding=bar_funding, grid_1h=grid_1h,
+                discovery_start=MHS_DISCOVERY_START, discovery_end=DISCOVERY_END,
+                qualification_end=QUALIFICATION_END,
+            ),
+            "momentum": select_horizon_by_discovery_qualification(
+                sign=1, horizon_candidates=(72, 120, 168, 240, 336, 504),
+                log_close=log_close, eligible=eligible, opens=opens,
+                bar_funding=bar_funding, grid_1h=grid_1h,
+                discovery_start=MHS_DISCOVERY_START, discovery_end=DISCOVERY_END,
+                qualification_end=QUALIFICATION_END,
+            ),
+        }
     del log_close
     gc.collect()
 
@@ -2521,6 +2579,7 @@ def run_mhs_horizon_diagnostic(request: MhsDiagnosticRequest) -> MhsHorizonDiagn
         execution_symbols=tuple(execution_symbols),
         run_elapsed_seconds=run_elapsed_seconds,
         resource_measurements=telemetry.records,
+        discovery_qualification=discovery_qualification,
     )
 
 
