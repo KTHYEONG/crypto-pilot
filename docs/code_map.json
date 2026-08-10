@@ -645,5 +645,9 @@
   },
   "src/mhs/books.py": {
     "testing": "tests/unit/mhs/test_books.py"
+  },
+  "src/mhs/discovery.py": {
+    "architecture": "docs/results/mhs-res.md",
+    "testing": "tests/unit/mhs/test_discovery.py"
   }
 }

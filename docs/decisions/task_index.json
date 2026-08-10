@@ -1,6 +1,16 @@
 {
   "tasks": [
     {
+      "task_id": "TASK_MHS_DISCOVERY_GATE_SIGN_FIX",
+      "date": "2026-08-10",
+      "adr_id": "ADR_20260810_MHS_DISCOVERY_GATE_SIGN_FIX",
+      "domain": "research",
+      "title": "MHS discovery 게이트 sign-unaware worst-year 버그 수정",
+      "why": "ladder 검증 전 'horizon 기반 전략 자체가 의미 있는지' 재확인하다, select_horizon_by_discovery_qualification의 worst-year 선택(min())과 admission 비교(best_score<2.0)가 momentum(sign=+1)에서만 우연히 맞고 reversal(sign=-1)에서는 min()이 best-year를 고르고 admission이 구조적으로 불가능(음수는 항상 2.0 미만)함을 발견함(docs/specs/mhs_discovery_gate_sign_fix.md §0).",
+      "resolution": "worst-year 선택과 admission 비교를 'sign * net_t' oriented 좌표계로 통일(discovery.py). momentum 경로는 min(sign*t)==min(t)로 바이트 동일 회귀 보장, reversal 경로만 실질적으로 수정됨. tie-break/qualification 단계(이미 sign-agnostic)는 무변경. efficiency_ratio 조건화 레버도 함께 실측해 개선 없음을 확인(음의 결과, 미채택).",
+      "impact": "수정 후 tranche_count=8로 재실행한 결과 reversal 최고 후보는 24h(worst-year net_t=-1.175), momentum은 336h(+0.220) -- 결론(admitted=False, 어느 후보도 미채택)은 우연히 유지됐으나 이전엔 '알고리즘이 reversal을 원천 차단해서' 나온 결론이었고 이제는 '데이터가 실제로 약해서' 나온 결론으로 근거가 바뀜. 부수적으로 discovery 2021년 전체가 non-finite(실질 2개 연도만 사용됨)라는 별도 데이터 무결성 이슈 발견, 후속 조사 필요."
+    },
+    {
       "task_id": "TASK_MHS_EXECUTION_LADDER_AND_DISCOVERY_GATE",
       "date": "2026-08-10",
       "adr_id": "ADR_20260810_MHS_EXECUTION_LADDER_AND_DISCOVERY_GATE",
