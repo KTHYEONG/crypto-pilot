@@ -16,7 +16,7 @@ def build_root_parser() -> argparse.ArgumentParser:
     """
     parser = argparse.ArgumentParser(
         prog="python -m src.cli.main",
-        description="Consolidated my_coin_traider command line",
+        description="Consolidated crypto-pilot command line",
     )
     subparsers = parser.add_subparsers(dest="group", required=True)
     add_data_commands(subparsers.add_parser("data", help="Collect and manage market data"))
