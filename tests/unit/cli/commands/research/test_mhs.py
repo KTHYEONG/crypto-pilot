@@ -36,6 +36,40 @@ def test_mhs_diagnostic_max_rss_bytes_flag_wired_to_request() -> None:
     assert args2.mark_mode == "cache_required_stale_carry"
 
 
+def test_mhs_diagnostic_output_tier_flag_threaded_to_persist(monkeypatch) -> None:
+    """``--output-tier full`` is parsed and threaded into the persist call;
+    the default stays ``compact``."""
+    import src.application.research.mhs.evaluation as ev
+
+    captured: dict = {}
+    sub = argparse.ArgumentParser().add_subparsers()
+    add_mhs_commands(sub)
+    parser = sub.choices["mhs-horizon-diagnostic"]
+
+    defaults = {action.dest: action.default for action in parser._actions}
+    assert defaults["output_tier"] == "compact"
+
+    monkeypatch.setattr(ev, "run_mhs_horizon_diagnostic", lambda request: _fake_report())
+
+    def _spy_persist(*args, **kwargs):
+        captured.update(kwargs)
+        return None
+
+    monkeypatch.setattr(ev, "persist_mhs_horizon_diagnostic_report", _spy_persist)
+    monkeypatch.setattr(ev, "mhs_horizon_diagnostic_report_path", lambda: "docs/results/mhs.json")
+
+    args = parser.parse_args(["--output-tier", "full"])
+    assert args.output_tier == "full"
+    _run_mhs_horizon_diagnostic(args)
+    assert captured["tier"].value == "full"
+
+    captured.clear()
+    args = parser.parse_args([])
+    assert args.output_tier == "compact"
+    _run_mhs_horizon_diagnostic(args)
+    assert captured["tier"].value == "compact"
+
+
 def test_mhs_diagnostic_touch_flag_threaded_to_request(monkeypatch) -> None:
     """SCENARIO_MHS_TOUCH_CLI_FLAG: ``--touch-diagnostic`` is parsed and
     threaded into the constructed ``MhsDiagnosticRequest``; omitting it
