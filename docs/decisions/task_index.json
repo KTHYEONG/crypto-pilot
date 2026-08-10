@@ -1,6 +1,16 @@
 {
   "tasks": [
     {
+      "task_id": "TASK_MHS_TOUCH_PROXY_FILL_MEASUREMENT",
+      "date": "2026-08-10",
+      "adr_id": "ADR_20260810_MHS_TOUCH_PROXY_FILL_MEASUREMENT",
+      "domain": "execution",
+      "title": "MHS Execution Touch-Proxy Fill Measurement -- Strict-Crossing Relaxation Falsified",
+      "why": "primary(OHLCV_STRICT_PROXY) replay shows 428-563bps intent shortfall vs stress(OHLCV_IMMEDIATE_TAKER) 5.7-33bps, flipping slow_momentum/blend Sharpe negative (0/3 Research-GO folds) despite a real statistical edge (prescreen net_sharpe t=1.63-1.86 at the realistic 2.64bps cost tier, underlying 48h feature xs_rank_ic t=68.4); hypothesized the require_trade_through strict-crossing boundary (adverse < decision_price) was the driver and OHLCV_TOUCH_PROXY (adverse <= decision_price, already declared in _ExecutionBound but never wired into any orchestration path) would close the gap",
+      "resolution": "Added opt-in touch_diagnostic:bool=False to MhsDiagnosticRequest, touch/touch_naive_sharpe fields to MhsBookReport, a third replay_execution_windows(...,'OHLCV_TOUCH_PROXY',...) pass in _book_outcome guarded by the flag, and a --touch-diagnostic CLI flag; verified default path is behavior-identical and touch weakly dominates strict fill count on synthetic data (lean_check PASS), then ran the full 2021-2025 real-data measurement",
+      "impact": "Falsified: touch_naive_sharpe equals primary_naive_sharpe to 4 decimals for all three books (slow_momentum -0.2313/-0.2313, fast_reversal -1.2045/-1.2045, blend -0.6245/-0.6245); fill_count rose <0.03%. Strict-vs-touch crossing semantics are not the shortfall driver -- exact-touch is a near-zero-probability event at 5m OHLCV resolution. The real STRICT-to-TAKER gap is structural: price does not return to the passive decision-price limit within the 30-minute timeout during signal-confirming (trending) moves. Next candidates: passive_timeout_minutes retuning or a partial-marketable-limit fill architecture, not crossing-boundary relaxation."
+    },
+    {
       "task_id": "MHS_PERF_OPTIMIZATION_PHASE3",
       "date": "2026-08-10",
       "adr_id": "ADR_20260810_MHS_PERF_OPTIMIZATION_PHASE3",
