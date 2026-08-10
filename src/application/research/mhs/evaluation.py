@@ -1616,6 +1616,32 @@ def _preload_symbol_minute_frames(
             _get_symbol_minute_frame(root, sym, timeframe)
 
 
+def _active_blend_book_and_grid(
+    fast: BookSpec,
+    slow: BookSpec,
+    fast_grid: pd.DatetimeIndex,
+    slow_grid: pd.DatetimeIndex,
+) -> tuple[BookSpec, pd.DatetimeIndex]:
+    """Select the blend's active book spec and execution grid from the capital contract.
+
+    The blend's decision cadence must derive from the same contract that
+    allocates capital (``PHASE_1_BOOK_BLEND_WEIGHTS``), never from a hardcoded
+    book name: with only ``slow_momentum`` weighted the blend replays on slow's
+    native 24h grid, while a nonzero ``fast_reversal`` weight (e.g. the
+    historical 50/50) admits fast's 6h grid -- a superset of slow's from the
+    same origin -- reproducing the pre-fix behavior byte-for-byte.  If no book
+    carries capital the allocation invariant is violated and we fail closed.
+    """
+    if PHASE_1_BOOK_BLEND_WEIGHTS["fast_reversal"] != 0.0:
+        return fast, fast_grid
+    if PHASE_1_BOOK_BLEND_WEIGHTS["slow_momentum"] != 0.0:
+        return slow, slow_grid
+    raise ValueError(
+        "PHASE_1_BOOK_BLEND_WEIGHTS allocates no capital to either book; "
+        "blend has no active execution grid"
+    )
+
+
 def _run_books_concurrent(
     root: str,
     request: MhsDiagnosticRequest,
@@ -1653,11 +1679,12 @@ def _run_books_concurrent(
     blow-up), matching the existing ``_run_folds_parallel`` pattern.  Per-book
     telemetry is merged into the parent recorder in declared book order.
     """
-    blend_step = blend_1h.reindex(fast_grid)
+    active_spec, active_grid = _active_blend_book_and_grid(fast, slow, fast_grid, slow_grid)
+    blend_step = blend_1h.reindex(active_grid)
     blend_replay = (
         PHASE_1_BOOK_BLEND_WEIGHTS["fast_reversal"] * w_fast_execution.reindex(grid_1h).ffill().fillna(0.0)
         + PHASE_1_BOOK_BLEND_WEIGHTS["slow_momentum"] * w_slow_execution.reindex(grid_1h).ffill().fillna(0.0)
-    ).reindex(fast_grid)
+    ).reindex(active_grid)
 
     with ProcessPoolExecutor(max_workers=3) as pool:
         f_fast = pool.submit(
@@ -1674,7 +1701,7 @@ def _run_books_concurrent(
         )
         f_blend = pool.submit(
             _book_outcome_worker,
-            "blend", fast, n_symbols, fast_grid, blend_step, grid_1h,
+            "blend", active_spec, n_symbols, active_grid, blend_step, grid_1h,
             opens, bar_funding, phase_blend, root, request, funding_by_symbol,
             start, end, 168, initial_equity, blend_replay,
         )
@@ -1960,8 +1987,10 @@ def _build_fold_target_weights(
         + PHASE_1_BOOK_BLEND_WEIGHTS["slow_momentum"] * w_slow_execution.reindex(grid_1h).ffill().fillna(0.0)
     )
     del w_fast_execution, w_slow_execution
-    decision_grid = blend_1h.index[(blend_1h.index >= vs) & (blend_1h.index <= ve)]
-    target_weights = blend_1h.loc[decision_grid]
+    _active_spec, active_grid = _active_blend_book_and_grid(fast, slow, fast_grid, slow_grid)
+    del _active_spec
+    decision_grid = active_grid[(active_grid >= vs) & (active_grid <= ve)]
+    target_weights = blend_1h.reindex(decision_grid)
     del blend_1h
 
     # The regime cash scale must read the traded execution roster, not the
@@ -2316,7 +2345,9 @@ def run_mhs_horizon_diagnostic(request: MhsDiagnosticRequest) -> MhsHorizonDiagn
 
     phase_fast = _phase_diagnostics(log_close, eligible, opens, bar_funding, grid_1h, fast)
     phase_slow = _phase_diagnostics(log_close, eligible, opens, bar_funding, grid_1h, slow)
-    phase_blend = _phase_diagnostics(log_close, eligible, opens, bar_funding, grid_1h, fast)
+    _blend_spec, _blend_grid = _active_blend_book_and_grid(fast, slow, fast_grid, slow_grid)
+    del _blend_grid
+    phase_blend = _phase_diagnostics(log_close, eligible, opens, bar_funding, grid_1h, _blend_spec)
 
     # R3: the 48h cross-sectional statistics depend only on the 1h panel, not
     # the book replays.  Computing them here -- and computing ``signal_48h``
