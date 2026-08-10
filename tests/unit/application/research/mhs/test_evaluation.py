@@ -1,5 +1,6 @@
 """Contract coverage for the MHS application evaluation resource telemetry."""
 
+import json
 import time
 import types
 import dataclasses
@@ -23,6 +24,7 @@ from src.application.research.mhs.evaluation import (
 from src.common.errors import DataIntegrityError
 from src.mhs.contracts import BookSpec, ExecutionSpec
 from src.mhs.execution import ExecutionReplayWindow, replay_execution_windows
+from src.mhs.execution import strategy_aware_execution_replay
 from src.mhs.evaluation import AnchoredPurgedFold
 from src.research.universe.pit_universe import symbol_partition
 
@@ -1081,3 +1083,175 @@ def test_p14_postbook_no_deadlock(monkeypatch) -> None:
     assert calls["n"] == 1
     assert result[4] == ()
     assert result[5] is None
+
+
+def _build_compact_report() -> ev.MhsHorizonDiagnosticReport:
+    """Minimal one-book report with a real small replay for tier tests."""
+    idx = pd.date_range("2021-01-01 12:01", periods=4000, freq="1min", tz="UTC")
+    px = pd.DataFrame({"A": [100.0] * len(idx)}, index=idx)
+    target = pd.DataFrame({"A": [1.0]}, index=[pd.Timestamp("2021-01-01 11:00", tz="UTC")])
+    signal_at = pd.DatetimeIndex([pd.Timestamp("2021-01-01 12:00", tz="UTC")])
+    replay = strategy_aware_execution_replay(
+        target, signal_at, px, px, px, px,
+        pd.DataFrame(0.0, index=idx, columns=["A"]), 1.0,
+        "OHLCV_STRICT_PROXY", ExecutionSpec(),
+    )
+    book = ev.MhsBookReport(
+        name="fast_reversal", band="FAST", horizon_hours=24, step_hours=6,
+        tranche_count=1, n_symbols=1,
+        phase=ev.PhaseDiagnosticResult(1, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, False),
+        prescreen={}, tail=ev.TailSensitivityResult(
+            0.0, 0.0, {}, 1, 0, 0.0, 0.0, 0.0, 0.0,
+        ),
+        primary=replay, stress=None,
+        primary_autocorr_sharpe=0.1, primary_naive_sharpe=0.1, primary_net_ann=0.01,
+        primary_geometric_cagr=0.01, primary_max_drawdown=-0.01,
+        primary_annualized_turnover=1.0, stress_naive_sharpe=None,
+    )
+    return ev.MhsHorizonDiagnosticReport(
+        feature="multi_horizon_market_state", status="COMPLETE", start="2021-01-01",
+        end="2021-01-04", resolved_end="2021-01-04", partition="dev",
+        execution_tiers_bps=(2.5, 5.0), books={"fast_reversal": book}, blend=None,
+        blend_target_gross=0.0, blend_cash_fraction=0.0, eligible_symbols=1,
+        trials_attempted=1, deflated_sharpe_ratio=None, xs_rank_ic={},
+        date_clustered_regression={}, horizon_diagnostics={}, bootstrap_ci=None,
+        placebo_sharpe_percentile=None,
+        deployment_readiness=ev.DeploymentReadinessResult(
+            0.01, -0.01, 1.0, -0.01, -0.01, -0.01, -0.01, 0, None, 0.5, 0.0, 0.0, {}, {},
+            {}, False, False, False, False,
+        ),
+        synthetic_stress={}, participation_warnings={}, termination_counts={},
+        unsupported_assumptions=(), anchored_folds=(), folds=(),
+        research_go=ev.MhsResearchGoResult(False, (), 0, 0),
+        fill_source="OHLCV_STRICT_PROXY", mark_source="MARK_PRICE",
+        execution_timeframe="1m", execution_universe_size=1,
+        execution_symbols=("A",), run_elapsed_seconds=0.1,
+    )
+
+
+def test_mhs_output_tier_enum_values() -> None:
+    assert ev.MhsOutputTier.COMPACT.value == "compact"
+    assert ev.MhsOutputTier.FULL.value == "full"
+    assert ev.MhsOutputTier("compact") is ev.MhsOutputTier.COMPACT
+    assert ev.MhsOutputTier("full") is ev.MhsOutputTier.FULL
+
+
+def test_daily_resample_ledger_fidelity() -> None:
+    # COMPACT_DAILY_LEDGER_FIDELITY: the daily rollup preserves the source
+    # ledger's per-day first/max/min/last equity and the cross-day return.
+    idx = pd.date_range("2021-01-01", periods=48 * 3, freq="30min", tz="UTC")
+    equity = pd.Series(np.linspace(100.0, 120.0, len(idx)), index=idx)
+    frame = pd.DataFrame(
+        {
+            "timestamp": idx,
+            "equity": equity.to_numpy(),
+            "fill_turnover": 0.0,
+        }
+    )
+    frame.loc[2, "fill_turnover"] = 0.5
+    frame.loc[5, "fill_turnover"] = 0.25
+    daily = ev._daily_resample_ledger(frame)
+    assert len(daily) == 3
+    assert list(daily.columns) == [
+        "date", "equity_open", "equity_high", "equity_low", "equity_close",
+        "daily_turnover", "daily_fill_count", "daily_return",
+    ]
+    d0 = daily.iloc[0]
+    day0 = idx.normalize()[0]
+    day0_mask = idx < day0 + pd.Timedelta("1D")
+    day0_eq = frame.loc[day0_mask, "equity"]
+    assert d0["equity_open"] == pytest.approx(day0_eq.iloc[0], rel=1e-6)
+    assert d0["equity_high"] == pytest.approx(day0_eq.max(), rel=1e-6)
+    assert d0["equity_low"] == pytest.approx(day0_eq.min(), rel=1e-6)
+    assert d0["equity_close"] == pytest.approx(day0_eq.iloc[-1], rel=1e-6)
+    assert d0["daily_turnover"] == pytest.approx(0.75, rel=1e-6)
+    assert d0["daily_fill_count"] == 2
+    assert np.isnan(d0["daily_return"])
+    d1 = daily.iloc[1]
+    day1_mask = (idx >= day0 + pd.Timedelta("1D")) & (idx < day0 + pd.Timedelta("2D"))
+    day1_eq = frame.loc[day1_mask, "equity"]
+    assert d1["equity_open"] == pytest.approx(day1_eq.iloc[0], rel=1e-6)
+    assert d1["daily_return"] == pytest.approx(day1_eq.iloc[-1] / d0["equity_close"] - 1.0, rel=1e-6)
+
+
+def test_daily_resample_ledger_fails_closed_on_bad_equity() -> None:
+    idx = pd.date_range("2021-01-01", periods=48, freq="30min", tz="UTC")
+    frame = pd.DataFrame(
+        {
+            "timestamp": idx,
+            "equity": [100.0] * 47 + [np.nan],
+            "fill_turnover": 0.0,
+        }
+    )
+    with pytest.raises(DataIntegrityError, match="equity"):
+        ev._daily_resample_ledger(frame)
+
+
+def test_compact_json_stripped_and_wired(tmp_path) -> None:
+    # COMPACT_JSON_STRIPPED: compact persist drops per-replay SHA-256/schema
+    # references while retaining only row counts and the scalar report fields.
+    report = _build_compact_report()
+    out = tmp_path / "mhs_report.json"
+    persisted = ev.persist_mhs_horizon_diagnostic_report(
+        report, out, tier=ev.MhsOutputTier.COMPACT,
+    )
+    assert persisted == out
+    payload = json.loads(out.read_text())
+    raw = json.dumps(payload)
+    assert "checksum_sha256" not in raw
+    assert "schema_version" not in raw
+    assert "time_bounds" not in raw
+    ref = payload["books"]["fast_reversal"]["primary"]
+    assert set(ref) == {"fills", "units", "notional_weights", "ledger", "times"}
+    assert all(set(v) == {"row_count"} for v in ref.values())
+    assert ref["ledger"]["row_count"] == len(report.books["fast_reversal"].primary.ledger.equity)
+    assert ref["fills"]["row_count"] == len(report.books["fast_reversal"].primary.simulated_fills)
+    assert payload["status"] == "COMPLETE"
+    assert "daily_ledger" in payload["artifacts"]
+    assert set(payload["artifacts"]["fills"]) == {"file", "row_count"}
+    assert "fast_reversal_primary" in payload["replay_ids"]
+
+
+def test_compact_size_budget(tmp_path) -> None:
+    # COMPACT_SIZE_BUDGET: compact artifacts stay far below the git-friendly
+    # budgets (daily ledger < 500KB, JSON < 20KB) for a small replay workload.
+    report = _build_compact_report()
+    out = tmp_path / "mhs_report.json"
+    ev.persist_mhs_horizon_diagnostic_report(report, out, tier=ev.MhsOutputTier.COMPACT)
+    artifact_dir = out.parent / "mhs_report_artifacts"
+    daily_path = artifact_dir / "daily_ledger.parquet"
+    assert daily_path.exists()
+    assert daily_path.stat().st_size < 500 * 1024
+    assert out.stat().st_size < 20 * 1024
+    daily = pd.read_parquet(daily_path)
+    assert "replay_id" in daily.columns
+    assert daily["replay_id"].eq("fast_reversal_primary").all()
+    assert len(daily) == 4
+    assert daily["equity_close"].gt(0).all()
+
+
+def test_compact_failure_escalates_past_artifacts(tmp_path, monkeypatch) -> None:
+    # A non-DataIntegrityError resample failure logs and returns None without
+    # writing compact artifacts (fail-closed escalation).
+    report = _build_compact_report()
+
+    def _boom(_table):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(ev, "_daily_resample_ledger", _boom)
+    out = tmp_path / "mhs_report.json"
+    persisted = ev.persist_mhs_horizon_diagnostic_report(
+        report, out, tier=ev.MhsOutputTier.COMPACT,
+    )
+    assert persisted is None
+    assert not out.exists()
+
+
+def test_gitignore_full_subdir_only() -> None:
+    # GITIGNORE_FULL_SUBDIR: only the _full/ audit subdirectory is gitignored;
+    # the compact daily ledger path and summary JSON stay trackable.
+    gitignore = Path(".gitignore").read_text(encoding="utf-8").splitlines()
+    assert "docs/results/mhs_horizon_diagnostic_artifacts/_full/" in gitignore
+    assert "docs/results/mhs_horizon_diagnostic_artifacts/" not in gitignore
+    assert "docs/results/mhs_horizon_diagnostic.json" not in gitignore
+    assert "docs/results/mhs_horizon_diagnostic_artifacts/daily_ledger.parquet" not in gitignore
