@@ -3,8 +3,13 @@
 from __future__ import annotations
 
 import argparse
+import types
 
-from src.cli.commands.research.mhs import add_mhs_commands
+from src.cli.commands.research.mhs import _run_mhs_horizon_diagnostic, add_mhs_commands
+
+
+def _fake_report() -> types.SimpleNamespace:
+    return types.SimpleNamespace(status="COMPLETE", books=[], blend=None)
 
 
 def test_mhs_diagnostic_defaults_and_mark_mode_choices() -> None:
@@ -16,6 +21,7 @@ def test_mhs_diagnostic_defaults_and_mark_mode_choices() -> None:
     assert defaults["execution_timeframe"] == "5m"
     assert defaults["max_rss_bytes"] is None
     assert defaults["no_log_run"] is False
+    assert defaults["touch_diagnostic"] is False
     args = parser.parse_args([])
     assert args.max_rss_bytes is None
 
@@ -28,3 +34,38 @@ def test_mhs_diagnostic_max_rss_bytes_flag_wired_to_request() -> None:
     assert args.max_rss_bytes == 8_000_000_000
     args2 = parser.parse_args(["--mark-mode", "cache_required_stale_carry"])
     assert args2.mark_mode == "cache_required_stale_carry"
+
+
+def test_mhs_diagnostic_touch_flag_threaded_to_request(monkeypatch) -> None:
+    """SCENARIO_MHS_TOUCH_CLI_FLAG: ``--touch-diagnostic`` is parsed and
+    threaded into the constructed ``MhsDiagnosticRequest``; omitting it
+    defaults to False."""
+    import src.application.research.mhs.evaluation as ev
+
+    captured: dict = {}
+
+    real_request = ev.MhsDiagnosticRequest
+
+    def _spy_request(*args, **kwargs):
+        captured.update(kwargs)
+        return real_request(*args, **kwargs)
+
+    monkeypatch.setattr(ev, "MhsDiagnosticRequest", _spy_request)
+    monkeypatch.setattr(ev, "run_mhs_horizon_diagnostic", lambda request: _fake_report())
+    monkeypatch.setattr(ev, "persist_mhs_horizon_diagnostic_report", lambda *a, **k: None)
+    monkeypatch.setattr(ev, "mhs_horizon_diagnostic_report_path", lambda: None)
+
+    sub = argparse.ArgumentParser().add_subparsers()
+    add_mhs_commands(sub)
+    parser = sub.choices["mhs-horizon-diagnostic"]
+
+    args = parser.parse_args(["--touch-diagnostic"])
+    assert args.touch_diagnostic is True
+    _run_mhs_horizon_diagnostic(args)
+    assert captured["touch_diagnostic"] is True
+
+    captured.clear()
+    args = parser.parse_args([])
+    assert args.touch_diagnostic is False
+    _run_mhs_horizon_diagnostic(args)
+    assert captured["touch_diagnostic"] is False
