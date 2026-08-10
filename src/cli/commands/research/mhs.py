@@ -27,6 +27,7 @@ def _run_mhs_horizon_diagnostic(args: argparse.Namespace) -> None:
         execution_timeframe=args.execution_timeframe,
         max_rss_bytes=args.max_rss_bytes,
         log_run=not args.no_log_run,
+        touch_diagnostic=args.touch_diagnostic,
     )
     report = run_mhs_horizon_diagnostic(request)
     path = persist_mhs_horizon_diagnostic_report(
@@ -71,5 +72,15 @@ def add_mhs_commands(portfolio_sub: argparse._SubParsersAction[argparse.Argument
         choices=["1m", "5m"],
         default="5m",
         help="OHLCV execution replay resolution; signal construction remains 1h",
+    )
+    mhs.add_argument(
+        "--touch-diagnostic",
+        action="store_true",
+        default=False,
+        help=(
+            "Additionally replay slow_momentum/blend under OHLCV_TOUCH_PROXY "
+            "alongside the strict/stress pair -- adds a second full window "
+            "pass, opt-in only"
+        ),
     )
     mhs.set_defaults(handler=_run_mhs_horizon_diagnostic)
