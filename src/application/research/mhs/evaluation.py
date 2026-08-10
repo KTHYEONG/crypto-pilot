@@ -17,7 +17,7 @@ import logging
 import os
 import time
 from collections.abc import Iterator
-from concurrent.futures import ProcessPoolExecutor, as_completed
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
@@ -419,6 +419,19 @@ class _StageRecorder:
                 "[SYS] stage=%s rss=%d elapsed_ms=%d",
                 stage, rss, elapsed_ms,
             )
+
+    def absorb(self, records: tuple[MhsResourceMeasurement, ...]) -> None:
+        """Merge frozen records (e.g. from a book subprocess) into this recorder.
+
+        Appends in arrival order, folds the peak-RSS tracking, and resets the
+        elapsed baseline so the next ``record`` measures from the absorption
+        point rather than from the last absorbed stage.
+        """
+        if not records:
+            return
+        self._records.extend(records)
+        self._peak_rss = max(self._peak_rss, max(r.peak_rss_bytes or 0 for r in records))
+        self._last = time.perf_counter()
 
 
 def _jsonable(value: Any) -> Any:
@@ -1156,6 +1169,32 @@ def _assert_cache_required_marks(
                 )
 
 
+def _resolve_ns_vectorized(
+    spos_all: np.ndarray,
+    full_grid_ns: np.ndarray,
+    n_grid: int,
+    timeout_ns_delta: int,
+) -> np.ndarray:
+    """Vectorized ``resolve_ns`` computation for the window generator.
+
+    Bit-identical to the scalar per-decision loop: ``resolve_ns[i]`` is the
+    exact timeout bar ``full_grid_ns[spos_all[i]] + timeout_ns_delta`` when it
+    lies on the grid, else ``-1``.  ``searchsorted`` (``side="left"``) keeps the
+    same semantics; the ``np.minimum`` guards keep out-of-range positions from
+    raising instead of silently skipping (matching the scalar ``continue``).
+    """
+    resolve_ns = np.full(len(spos_all), -1, dtype="int64")
+    s = np.minimum(spos_all, n_grid - 1)
+    timeout_ns = full_grid_ns[s] + timeout_ns_delta
+    tpos = np.searchsorted(full_grid_ns, timeout_ns, side="left")
+    valid = (
+        (spos_all < n_grid)
+        & (tpos < n_grid)
+        & (full_grid_ns[np.minimum(tpos, n_grid - 1)] == timeout_ns)
+    )
+    resolve_ns[valid] = timeout_ns[valid]
+    return resolve_ns
+
 def _iter_mhs_execution_windows(
     target_weights: pd.DataFrame,
     signal_available_at: pd.DatetimeIndex,
@@ -1190,15 +1229,7 @@ def _iter_mhs_execution_windows(
     timeout_ns_delta = int(spec.passive_timeout_minutes) * 60_000_000_000
     signal_ns = np.asarray(signal_available_at, dtype="datetime64[ns]").astype("int64")
     spos_all = np.searchsorted(full_grid_ns, signal_ns, side="right")
-    resolve_ns = np.full(len(target_weights), -1, dtype="int64")
-    for i in range(len(target_weights)):
-        s = int(spos_all[i])
-        if s >= n_grid:
-            continue
-        tns = full_grid_ns[s] + timeout_ns_delta
-        tpos = int(np.searchsorted(full_grid_ns, tns, side="left"))
-        if tpos < n_grid and full_grid_ns[tpos] == tns:
-            resolve_ns[i] = tns
+    resolve_ns = _resolve_ns_vectorized(spos_all, full_grid_ns, n_grid, timeout_ns_delta)
 
     if target_weights.empty:
         empty_marks = (
@@ -1475,6 +1506,284 @@ def _book_outcome(
         terminal_censored_decisions=censored,
     )
 
+
+def _book_outcome_worker(
+    name: str,
+    spec: BookSpec,
+    n_symbols: int,
+    step_grid: pd.DatetimeIndex,
+    weights_step: pd.DataFrame,
+    grid_1h: pd.DatetimeIndex,
+    opens: pd.DataFrame,
+    bar_funding: pd.DataFrame,
+    phase: PhaseDiagnosticResult,
+    root: str,
+    request: MhsDiagnosticRequest,
+    funding_by_symbol: dict[str, pd.Series],
+    start: pd.Timestamp,
+    end: pd.Timestamp,
+    event_window_bars: int,
+    initial_equity: float,
+    replay_weights_step: pd.DataFrame | None,
+) -> tuple[MhsBookReport, tuple[MhsResourceMeasurement, ...]]:
+    """Run one ``_book_outcome`` in a fork child with its own telemetry recorder.
+
+    The typed failure conversion inside ``_book_outcome`` is preserved; a book
+    that fails its replay is still returned (with ``failure`` set) so the other
+    two books' results are never lost.  The per-window telemetry is returned so
+    the parent can merge it in declared order.
+    """
+    recorder = _StageRecorder(log_run=False)
+    report = _book_outcome(
+        name, spec, n_symbols, step_grid, weights_step, grid_1h,
+        opens, bar_funding, phase, root, request, funding_by_symbol,
+        start, end, event_window_bars, initial_equity, replay_weights_step,
+        telemetry=recorder,
+    )
+    return report, recorder.records
+
+
+def _preload_symbol_minute_frames(
+    root: str, symbols: list[str], timeframe: Literal["1m", "5m"],
+) -> None:
+    """Populate the O6 per-symbol minute-frame cache before forking book workers.
+
+    Forked children inherit the populated cache copy-on-write, so the three
+    books share one set of full-period frames instead of independently re-reading
+    Parquet (up to 3x redundant reads).  Missing Parquet files are skipped (the
+    window generator applies the same existence guard).
+    """
+    for sym in symbols:
+        if os.path.exists(os.path.join(root, timeframe, f"{sym}.parquet")):
+            _get_symbol_minute_frame(root, sym, timeframe)
+
+
+def _run_books_concurrent(
+    root: str,
+    request: MhsDiagnosticRequest,
+    n_symbols: int,
+    grid_1h: pd.DatetimeIndex,
+    fast: BookSpec,
+    slow: BookSpec,
+    fast_grid: pd.DatetimeIndex,
+    slow_grid: pd.DatetimeIndex,
+    w_fast: pd.DataFrame,
+    w_slow: pd.DataFrame,
+    w_fast_execution: pd.DataFrame,
+    w_slow_execution: pd.DataFrame,
+    opens: pd.DataFrame,
+    bar_funding: pd.DataFrame,
+    phase_fast: PhaseDiagnosticResult,
+    phase_slow: PhaseDiagnosticResult,
+    phase_blend: PhaseDiagnosticResult,
+    start: pd.Timestamp,
+    end: pd.Timestamp,
+    funding_by_symbol: dict[str, pd.Series],
+    blend_1h: pd.DataFrame,
+    execution_mask: pd.DataFrame,
+    initial_equity: float,
+    telemetry: _StageRecorder | None = None,
+) -> tuple[MhsBookReport, MhsBookReport, MhsBookReport]:
+    """Run the three top-level books concurrently in fork children.
+
+    The books share zero mutable state and only read the immutable 1h panels and
+    the O6 minute-frame cache, so they are embarrassingly parallel.
+    ``ProcessPoolExecutor`` (fork) is used instead of threads: the replay loops
+    are a CPU-bound Python/numpy mix, so the GIL would serialize threads at
+    ~1.6x rather than the ~3x fork workers achieve, and fork lets the workers
+    share the read-only panels and preloaded cache via copy-on-write (no 3x RSS
+    blow-up), matching the existing ``_run_folds_parallel`` pattern.  Per-book
+    telemetry is merged into the parent recorder in declared book order.
+    """
+    blend_step = blend_1h.reindex(fast_grid)
+    blend_replay = blend_1h.where(execution_mask, other=0.0).reindex(fast_grid)
+
+    with ProcessPoolExecutor(max_workers=3) as pool:
+        f_fast = pool.submit(
+            _book_outcome_worker,
+            "fast_reversal", fast, n_symbols, fast_grid, w_fast, grid_1h,
+            opens, bar_funding, phase_fast, root, request, funding_by_symbol,
+            start, end, fast.horizon_hours, initial_equity, w_fast_execution,
+        )
+        f_slow = pool.submit(
+            _book_outcome_worker,
+            "slow_momentum", slow, n_symbols, slow_grid, w_slow, grid_1h,
+            opens, bar_funding, phase_slow, root, request, funding_by_symbol,
+            start, end, slow.horizon_hours, initial_equity, w_slow_execution,
+        )
+        f_blend = pool.submit(
+            _book_outcome_worker,
+            "blend", fast, n_symbols, fast_grid, blend_step, grid_1h,
+            opens, bar_funding, phase_blend, root, request, funding_by_symbol,
+            start, end, 168, initial_equity, blend_replay,
+        )
+        fast_report, fast_records = f_fast.result()
+        slow_report, slow_records = f_slow.result()
+        blend_report, blend_records = f_blend.result()
+
+    if telemetry is not None:
+        for records in (fast_records, slow_records, blend_records):
+            telemetry.absorb(records)
+    return fast_report, slow_report, blend_report
+
+
+def _run_post_diag_deploy(
+    blend_report: MhsBookReport,
+    root: str,
+    request: MhsDiagnosticRequest,
+    execution_symbols: list[str],
+    minute_grid: pd.DatetimeIndex,
+    signal_48h: pd.DataFrame,
+    eligible: pd.DataFrame,
+    opens: pd.DataFrame,
+    bar_funding: pd.DataFrame,
+    grid_1h: pd.DatetimeIndex,
+    fast: BookSpec,
+) -> tuple[
+    tuple[float, float] | None,
+    float | None,
+    dict[str, float],
+    dict[str, int],
+    DeploymentReadinessResult,
+]:
+    """Diagnostics + deployment readiness, one background-thread unit.
+
+    ``compute_deployment_readiness`` is invoked with ``research_go_eligible=None``:
+    the only value it needs from the anchored folds is the final Research-GO
+    boolean flag, which the caller patches in after the folds resolve.  This is
+    what lets the whole 77s post-book tail overlap the ~78s fold pool.
+    """
+    bootstrap_ci: tuple[float, float] | None = None
+    if blend_report.primary is None:
+        raise DataIntegrityError("post-book tail requires a blend primary replay")
+    equity_1h = blend_report.primary.ledger.equity.resample("1h").last().dropna()
+    net_1h = equity_1h.pct_change().dropna()
+    if len(net_1h) >= 2:
+        bootstrap_ci = _bootstrap_ci(
+            net_1h, _BOOTSTRAP_REPLICATES, _BOOTSTRAP_MEAN_BLOCK, _BOOTSTRAP_SEED,
+        )
+    participation = _participation_warnings(
+        blend_report.primary, root, request.execution_timeframe,
+        execution_symbols, minute_grid,
+    )
+    termination_counts = dict(blend_report.primary.termination_counts)
+    if blend_report.primary_naive_sharpe is None:
+        raise DataIntegrityError("blend report requires a naive Sharpe for the placebo")
+    placebo_percentile = _placebo_sharpe_percentile(
+        signal_48h, eligible, opens, bar_funding, grid_1h,
+        fast, blend_report.primary_naive_sharpe, 500, _BOOTSTRAP_SEED,
+    )
+    deployment = compute_deployment_readiness(
+        blend_report.primary.ledger.equity,
+        _PERIODS_PER_YEAR_1H,
+        participation_warnings=participation,
+        primary_valid=blend_report.primary.ledger.primary_valid,
+        research_go_eligible=None,
+        n_bootstrap=_BOOTSTRAP_REPLICATES,
+        mean_block_bars=_BOOTSTRAP_MEAN_BLOCK,
+        seed=_BOOTSTRAP_SEED,
+    )
+    return bootstrap_ci, placebo_percentile, participation, termination_counts, deployment
+
+
+def _run_post_book_concurrently(
+    blend_report: MhsBookReport | None,
+    root: str,
+    request: MhsDiagnosticRequest,
+    execution_symbols: list[str],
+    minute_grid: pd.DatetimeIndex | None,
+    signal_48h: pd.DataFrame,
+    eligible: pd.DataFrame,
+    opens: pd.DataFrame,
+    bar_funding: pd.DataFrame,
+    grid_1h: pd.DatetimeIndex,
+    fast: BookSpec,
+    fold_funding: dict[str, pd.Series],
+    initial_equity: float,
+    telemetry: _StageRecorder | None = None,
+) -> tuple[
+    tuple[float, float] | None,
+    float | None,
+    dict[str, float],
+    dict[str, int],
+    tuple[MhsFoldReport, ...],
+    DeploymentReadinessResult | None,
+]:
+    """Run anchored folds, diagnostics, and deployment readiness concurrently.
+
+    The fold pool is forked while the main process is quiescent (the book
+    workers have joined and no diagnostic thread exists yet), then a single
+    background thread runs the diagnostics + deployment-readiness tail in
+    parallel with the fold workers.  The fold result telemetry is recorded in
+    fold order; ``blend_participation``/``statistical_diagnostics`` telemetry is
+    left to the caller so the ordered-stage contract is preserved deterministically.
+    """
+    folds = phase_1_anchored_purged_folds()
+    has_primary = blend_report is not None and blend_report.primary is not None
+
+    bootstrap_ci: tuple[float, float] | None = None
+    placebo_percentile: float | None = None
+    participation: dict[str, float] = {}
+    termination_counts: dict[str, int] = {}
+    fold_reports: tuple[MhsFoldReport, ...] = ()
+    deployment: DeploymentReadinessResult | None = None
+
+    if not folds:
+        if has_primary:
+            (
+                bootstrap_ci, placebo_percentile, participation,
+                termination_counts, deployment,
+            ) = _run_post_diag_deploy(
+                blend_report, root, request, execution_symbols, minute_grid,
+                signal_48h, eligible, opens, bar_funding, grid_1h, fast,
+            )
+        return (
+            bootstrap_ci, placebo_percentile, participation,
+            termination_counts, fold_reports, deployment,
+        )
+
+    reports: dict[int, MhsFoldReport] = {}
+    with ProcessPoolExecutor(max_workers=min(3, len(folds))) as pool:
+        futures = {
+            pool.submit(
+                _run_anchored_fold,
+                root, fold, request, fold_funding, initial_equity, idx, None,
+            ): idx
+            for idx, fold in enumerate(folds)
+        }
+        # The fold pool is now forked; start the diagnostics/deployment thread.
+        with ThreadPoolExecutor(max_workers=1) as tpool:
+            post_future = None
+            if has_primary:
+                assert blend_report is not None
+                post_future = tpool.submit(
+                    _run_post_diag_deploy,
+                    blend_report, root, request, execution_symbols, minute_grid,
+                    signal_48h, eligible, opens, bar_funding, grid_1h, fast,
+                )
+            for future in as_completed(futures):
+                idx = futures[future]
+                reports[idx] = future.result()
+            if post_future is not None:
+                (
+                    bootstrap_ci, placebo_percentile, participation,
+                    termination_counts, deployment,
+                ) = post_future.result()
+
+    ordered = tuple(reports[i] for i in range(len(folds)))
+    fold_reports = ordered
+    if telemetry is not None:
+        for fold_report in ordered:
+            fill_count = (
+                len(fold_report.strict.simulated_fills) + len(fold_report.stress.simulated_fills)
+                if fold_report.strict is not None and fold_report.stress is not None
+                else 0
+            )
+            telemetry.record(f"anchored_fold_{fold_report.fold_index}", fill_count=fill_count)
+    return (
+        bootstrap_ci, placebo_percentile, participation,
+        termination_counts, fold_reports, deployment,
+    )
 
 def _incomplete_fold_report(
     fold: AnchoredPurgedFold, fold_index: int, failures: tuple[str, ...],
@@ -1970,37 +2279,23 @@ def run_mhs_horizon_diagnostic(request: MhsDiagnosticRequest) -> MhsHorizonDiagn
             grid_bars=len(minute_grid),
             n_symbols=len(execution_symbols),
         )
-        book_report_fast = _book_outcome(
-            "fast_reversal", fast, len(funded), fast_grid, w_fast, grid_1h,
-            opens, bar_funding, phase_fast, root, request, funding_by_symbol,
-            start, end, fast.horizon_hours, initial_equity, w_fast_execution,
-            telemetry=telemetry,
+        # Populate the O6 minute-frame cache before forking so the three book
+        # workers share one set of full-period frames via copy-on-write, then
+        # run the three books concurrently in fork children (spec Phase 3, P10).
+        _preload_symbol_minute_frames(root, execution_symbols, request.execution_timeframe)
+        _data_collector()
+        book_report_fast, book_report_slow, book_report_blend = _run_books_concurrent(
+            root, request, len(funded), grid_1h, fast, slow, fast_grid, slow_grid,
+            w_fast, w_slow, w_fast_execution, w_slow_execution, opens, bar_funding,
+            phase_fast, phase_slow, phase_blend, start, end, funding_by_symbol,
+            blend_1h, execution_mask, initial_equity, telemetry,
         )
-        # Each book's step-weight inputs are single-use; releasing them before
-        # the next book keeps the running baseline flat across the three top-
-        # level replays (spec §3.1, ``memory_opt``).
+        # All three books have completed; the single-use step-weight inputs are
+        # released together (spec §3.1, ``memory_opt``).
         del w_fast, w_fast_execution, phase_fast
-        book_report_slow = _book_outcome(
-            "slow_momentum", slow, len(funded), slow_grid, w_slow, grid_1h,
-            opens, bar_funding, phase_slow, root, request, funding_by_symbol,
-            start, end, slow.horizon_hours, initial_equity, w_slow_execution,
-            telemetry=telemetry,
-        )
         del w_slow, w_slow_execution, phase_slow
-        blend_step = blend_1h.reindex(fast_grid)
-        # The replay weights are reindexed to the 6h decision grid here so the
-        # full 1h ``blend_1h`` and ``execution_mask`` matrices are released
-        # before the blend replay begins; only the compact step-grid targets
-        # stay alive inside ``_book_outcome`` (spec §3.1, ``memory_opt``).
-        blend_replay = blend_1h.where(execution_mask, other=0.0).reindex(fast_grid)
-        del blend_1h, execution_mask
-        book_report_blend = _book_outcome(
-            "blend", fast, len(funded), fast_grid, blend_step, grid_1h,
-            opens, bar_funding, phase_blend, root, request, funding_by_symbol,
-            start, end, 168, initial_equity, blend_replay,
-            telemetry=telemetry,
-        )
-        del blend_step, blend_replay, phase_blend
+        del blend_1h, execution_mask, phase_blend
+        gc.collect()
         books = {"fast_reversal": book_report_fast, "slow_momentum": book_report_slow}
         blend_report = book_report_blend
     else:
@@ -2023,61 +2318,38 @@ def run_mhs_horizon_diagnostic(request: MhsDiagnosticRequest) -> MhsHorizonDiagn
     participation: dict[str, float] = {}
     termination_counts: dict[str, int] = {}
     unsupported = ("partial_fill", "queue_position", "post_only_rejection", "cancel_replace_latency", "order_size_impact")
-    if blend_report is not None and blend_report.primary is not None:
-        if minute_grid is None:
-            raise DataIntegrityError("blend report requires a minute replay grid")
-        equity_1h = blend_report.primary.ledger.equity.resample("1h").last().dropna()
-        net_1h = equity_1h.pct_change().dropna()
-        if len(net_1h) >= 2:
-            bootstrap_ci = _bootstrap_ci(
-                net_1h, _BOOTSTRAP_REPLICATES, _BOOTSTRAP_MEAN_BLOCK, _BOOTSTRAP_SEED,
-            )
-        participation = _participation_warnings(
-            blend_report.primary,
-            root,
-            request.execution_timeframe,
-            execution_symbols,
-            minute_grid,
-        )
-        telemetry.record(
-            "blend_participation",
-            fill_count=len(blend_report.primary.simulated_fills),
-        )
-        termination_counts = dict(blend_report.primary.termination_counts)
-        assert blend_report.primary_naive_sharpe is not None
-        placebo_percentile = _placebo_sharpe_percentile(
-            signal_48h, eligible, opens, bar_funding, grid_1h,
-            fast, blend_report.primary_naive_sharpe, 500, _BOOTSTRAP_SEED,
-        )
-        telemetry.record("statistical_diagnostics")
 
-    # Folds reconstruct their own PIT panels.  Release the top-level feature
-    # matrices after all top-level diagnostics have consumed them so the two
-    # multi-year panels never coexist. The wide funding/price and weight
-    # matrices are freed before the first fold so fold panel RSS starts from a
-    # clean base (spec §3.1, ``memory_opt``).
-    del eligible
-    del opens, bar_funding
-    del funding_window, minute_grid
-    gc.collect()
-
-    fold_reports = _run_folds_parallel(
-        root, request, fold_funding, initial_equity, telemetry,
+    # Folds, statistical diagnostics, and deployment readiness are independent
+    # post-book streams: the fold pool runs in fork workers while a background
+    # thread computes the diagnostics + deployment tail (spec Phase 3, P14).
+    # The top-level feature matrices stay alive through that thread and are
+    # released after it joins so the wide multi-year panels never coexist with
+    # the final assembly.
+    (
+        bootstrap_ci, placebo_percentile, participation, termination_counts,
+        fold_reports, deployment,
+    ) = _run_post_book_concurrently(
+        blend_report, root, request, execution_symbols, minute_grid,
+        signal_48h, eligible, opens, bar_funding, grid_1h, fast,
+        fold_funding, initial_equity, telemetry,
     )
     folds = tuple(fold_reports)
     research_go = _mhs_research_go(folds, book_reasons)
 
     if blend_report is not None and blend_report.primary is not None:
-        deployment = compute_deployment_readiness(
-            blend_report.primary.ledger.equity,
-            _PERIODS_PER_YEAR_1H,
-            participation_warnings=participation,
-            primary_valid=blend_report.primary.ledger.primary_valid,
-            research_go_eligible=research_go.eligible,
-            n_bootstrap=_BOOTSTRAP_REPLICATES,
-            mean_block_bars=_BOOTSTRAP_MEAN_BLOCK,
-            seed=_BOOTSTRAP_SEED,
+        if minute_grid is None:
+            raise DataIntegrityError("blend report requires a minute replay grid")
+        # The deployment tail was computed with ``research_go_eligible=None``;
+        # patch in the fold-derived gate decision now that it is resolved.
+        assert deployment is not None
+        deployment = dataclasses.replace(
+            deployment, research_go_eligible=research_go.eligible,
         )
+        telemetry.record(
+            "blend_participation",
+            fill_count=len(blend_report.primary.simulated_fills),
+        )
+        telemetry.record("statistical_diagnostics")
     else:
         deployment = compute_deployment_readiness(
             pd.Series(
@@ -2088,6 +2360,11 @@ def run_mhs_horizon_diagnostic(request: MhsDiagnosticRequest) -> MhsHorizonDiagn
             research_go_eligible=research_go.eligible,
             n_bootstrap=_BOOTSTRAP_REPLICATES,
         )
+
+    del eligible
+    del opens, bar_funding
+    del funding_window, minute_grid
+    gc.collect()
 
     synthetic_stress = {s.name: {"description": s.description} for s in synthetic_stress_scenarios()}
 
