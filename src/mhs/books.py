@@ -42,6 +42,30 @@ def rank_weight_book(
     return out.where(enough, other=0.0).fillna(0.0)
 
 
+def renormalize_within_mask(
+    weights: pd.DataFrame, mask: pd.DataFrame, min_symbols: int,
+) -> pd.DataFrame:
+    """Re-center and re-normalize an existing weight book onto a boolean subset.
+
+    Restores the dollar-neutral (row sum 0), unit-gross (row abs-sum 1)
+    invariant within the surviving ``mask`` columns after they have been
+    selected from a wider book (e.g. an execution roster). Columns outside
+    ``mask`` are excluded from the row mean/gross (not treated as 0, which
+    would bias the center); rows with fewer than ``min_symbols`` True mask
+    cells return all zeros, mirroring ``rank_weight_book``.
+    """
+    if min_symbols < 2:
+        raise ValueError(f"min_symbols must be >= 2, got {min_symbols}")
+    if not weights.index.equals(mask.index) or list(weights.columns) != list(mask.columns):
+        raise ValueError("weights and mask must be identically indexed and columned")
+    masked = weights.where(mask)
+    centered = masked.sub(masked.mean(axis=1), axis=0)
+    gross = centered.abs().sum(axis=1)
+    out = centered.div(gross.where(gross > 0), axis=0)
+    enough = mask.sum(axis=1) >= min_symbols
+    return out.where(enough, other=0.0).fillna(0.0)
+
+
 def phase_tranche_book(weights: pd.DataFrame, tranche_count: int) -> pd.DataFrame:
     """Combine ``tranche_count`` staggered single-phase books.
 
