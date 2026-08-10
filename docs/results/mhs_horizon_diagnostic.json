@@ -110,7 +110,9 @@
         "message": "pre-trade equity must be positive and finite"
       },
       "touch": null,
-      "touch_naive_sharpe": null
+      "touch_naive_sharpe": null,
+      "ladder": null,
+      "ladder_naive_sharpe": null
     },
     "slow_momentum": {
       "name": "slow_momentum",
@@ -238,7 +240,9 @@
       "terminal_censored_decisions": 0,
       "failure": null,
       "touch": null,
-      "touch_naive_sharpe": null
+      "touch_naive_sharpe": null,
+      "ladder": null,
+      "ladder_naive_sharpe": null
     }
   },
   "blend": {
@@ -367,7 +371,9 @@
     "terminal_censored_decisions": 0,
     "failure": null,
     "touch": null,
-    "touch_naive_sharpe": null
+    "touch_naive_sharpe": null,
+    "ladder": null,
+    "ladder_naive_sharpe": null
   },
   "blend_target_gross": 0.5623606547433655,
   "blend_cash_fraction": 0.4376393452566345,
@@ -549,8 +555,8 @@
         "PRIMARY_AUTOCORR_SHARPE_BELOW_0_6",
         "STRESS_SHARPE_NOT_POSITIVE"
       ],
-      "strict_elapsed_seconds": 18.474397114005114,
-      "stress_elapsed_seconds": 18.53301100900717,
+      "strict_elapsed_seconds": 19.987871627999994,
+      "stress_elapsed_seconds": 20.047411017993,
       "terminal_censored_decisions": 1
     },
     {
@@ -607,8 +613,8 @@
         "PRIMARY_AUTOCORR_SHARPE_BELOW_0_6",
         "STRESS_SHARPE_NOT_POSITIVE"
       ],
-      "strict_elapsed_seconds": 17.3015631140006,
-      "stress_elapsed_seconds": 17.36035511600494,
+      "strict_elapsed_seconds": 18.47718931399868,
+      "stress_elapsed_seconds": 18.539755921003234,
       "terminal_censored_decisions": 1
     },
     {
@@ -908,2025 +914,2026 @@
     "ZROUSDT",
     "ZRXUSDT"
   ],
-  "run_elapsed_seconds": 241.97270918400318,
+  "run_elapsed_seconds": 244.42797584000073,
   "resource_measurements": [
     {
       "stage": "base_1h_panel",
-      "elapsed_ms": 2680,
-      "rss_bytes": 807788544,
+      "elapsed_ms": 3073,
+      "rss_bytes": 793317376,
       "grid_bars": 43824,
       "n_symbols": 452,
       "fill_count": null,
       "window_start": null,
       "window_end": null,
       "active_symbols": null,
-      "peak_rss_bytes": 807788544
+      "peak_rss_bytes": 793317376
     },
     {
       "stage": "funding_alignment",
-      "elapsed_ms": 3144,
-      "rss_bytes": 1475604480,
+      "elapsed_ms": 3167,
+      "rss_bytes": 1460760576,
       "grid_bars": 43824,
       "n_symbols": 446,
       "fill_count": null,
       "window_start": null,
       "window_end": null,
       "active_symbols": null,
-      "peak_rss_bytes": 1475604480
+      "peak_rss_bytes": 1460760576
     },
     {
       "stage": "minute_market_mark_funding",
-      "elapsed_ms": 57121,
-      "rss_bytes": 1762246656,
+      "elapsed_ms": 56789,
+      "rss_bytes": 1752895488,
       "grid_bars": 525888,
       "n_symbols": 256,
       "fill_count": null,
       "window_start": null,
       "window_end": null,
       "active_symbols": null,
-      "peak_rss_bytes": 1762246656
+      "peak_rss_bytes": 1752895488
     },
     {
       "stage": "execution_window_0",
-      "elapsed_ms": 10721,
-      "rss_bytes": 4322742272,
+      "elapsed_ms": 7798,
+      "rss_bytes": 4312432640,
       "grid_bars": 8948,
       "n_symbols": null,
       "fill_count": null,
       "window_start": "2021-01-01 00:00:00+00:00",
       "window_end": "2021-02-01 01:35:00+00:00",
       "active_symbols": 0,
-      "peak_rss_bytes": 4322742272
+      "peak_rss_bytes": 4312432640
     },
     {
       "stage": "execution_window_1",
       "elapsed_ms": 8,
-      "rss_bytes": 4322746368,
+      "rss_bytes": 4312432640,
       "grid_bars": 9020,
       "n_symbols": null,
       "fill_count": null,
       "window_start": "2021-02-01 00:00:00+00:00",
       "window_end": "2021-03-04 07:35:00+00:00",
       "active_symbols": 0,
-      "peak_rss_bytes": 4322746368
+      "peak_rss_bytes": 4312432640
     },
     {
       "stage": "execution_window_2",
-      "elapsed_ms": 9,
-      "rss_bytes": 4322746368,
+      "elapsed_ms": 7,
+      "rss_bytes": 4312432640,
       "grid_bars": 9020,
       "n_symbols": null,
       "fill_count": null,
       "window_start": "2021-03-04 06:00:00+00:00",
       "window_end": "2021-04-04 13:35:00+00:00",
       "active_symbols": 0,
-      "peak_rss_bytes": 4322746368
+      "peak_rss_bytes": 4312432640
     },
     {
       "stage": "execution_window_3",
-      "elapsed_ms": 9,
-      "rss_bytes": 4322746368,
+      "elapsed_ms": 7,
+      "rss_bytes": 4312432640,
       "grid_bars": 9020,
       "n_symbols": null,
       "fill_count": null,
       "window_start": "2021-04-04 12:00:00+00:00",
       "window_end": "2021-05-05 19:35:00+00:00",
       "active_symbols": 0,
-      "peak_rss_bytes": 4322746368
+      "peak_rss_bytes": 4312432640
     },
     {
       "stage": "execution_window_4",
-      "elapsed_ms": 8,
-      "rss_bytes": 4322746368,
+      "elapsed_ms": 9,
+      "rss_bytes": 4312432640,
       "grid_bars": 9020,
       "n_symbols": null,
       "fill_count": null,
       "window_start": "2021-05-05 18:00:00+00:00",
       "window_end": "2021-06-06 01:35:00+00:00",
       "active_symbols": 0,
-      "peak_rss_bytes": 4322746368
+      "peak_rss_bytes": 4312432640
     },
     {
       "stage": "execution_window_5",
-      "elapsed_ms": 8,
-      "rss_bytes": 4322746368,
+      "elapsed_ms": 7,
+      "rss_bytes": 4312432640,
       "grid_bars": 9020,
       "n_symbols": null,
       "fill_count": null,
       "window_start": "2021-06-06 00:00:00+00:00",
       "window_end": "2021-07-07 07:35:00+00:00",
       "active_symbols": 0,
-      "peak_rss_bytes": 4322746368
+      "peak_rss_bytes": 4312432640
     },
     {
       "stage": "execution_window_6",
-      "elapsed_ms": 7,
-      "rss_bytes": 4322746368,
+      "elapsed_ms": 9,
+      "rss_bytes": 4312432640,
       "grid_bars": 9020,
       "n_symbols": null,
       "fill_count": null,
       "window_start": "2021-07-07 06:00:00+00:00",
       "window_end": "2021-08-07 13:35:00+00:00",
       "active_symbols": 0,
-      "peak_rss_bytes": 4322746368
+      "peak_rss_bytes": 4312432640
     },
     {
       "stage": "execution_window_7",
-      "elapsed_ms": 7,
-      "rss_bytes": 4322746368,
+      "elapsed_ms": 9,
+      "rss_bytes": 4312432640,
       "grid_bars": 9020,
       "n_symbols": null,
       "fill_count": null,
       "window_start": "2021-08-07 12:00:00+00:00",
       "window_end": "2021-09-07 19:35:00+00:00",
       "active_symbols": 0,
-      "peak_rss_bytes": 4322746368
+      "peak_rss_bytes": 4312432640
     },
     {
       "stage": "execution_window_8",
       "elapsed_ms": 9,
-      "rss_bytes": 4322746368,
+      "rss_bytes": 4312432640,
       "grid_bars": 9020,
       "n_symbols": null,
       "fill_count": null,
       "window_start": "2021-09-07 18:00:00+00:00",
       "window_end": "2021-10-09 01:35:00+00:00",
       "active_symbols": 0,
-      "peak_rss_bytes": 4322746368
+      "peak_rss_bytes": 4312432640
     },
     {
       "stage": "execution_window_9",
-      "elapsed_ms": 9,
-      "rss_bytes": 4322746368,
+      "elapsed_ms": 8,
+      "rss_bytes": 4312432640,
       "grid_bars": 9020,
       "n_symbols": null,
       "fill_count": null,
       "window_start": "2021-10-09 00:00:00+00:00",
       "window_end": "2021-11-09 07:35:00+00:00",
       "active_symbols": 0,
-      "peak_rss_bytes": 4322746368
+      "peak_rss_bytes": 4312432640
     },
     {
       "stage": "execution_window_10",
       "elapsed_ms": 8,
-      "rss_bytes": 4322746368,
+      "rss_bytes": 4312432640,
       "grid_bars": 9020,
       "n_symbols": null,
       "fill_count": null,
       "window_start": "2021-11-09 06:00:00+00:00",
       "window_end": "2021-12-10 13:35:00+00:00",
       "active_symbols": 0,
-      "peak_rss_bytes": 4322746368
+      "peak_rss_bytes": 4312432640
     },
     {
       "stage": "execution_window_11",
-      "elapsed_ms": 8,
-      "rss_bytes": 4322746368,
+      "elapsed_ms": 7,
+      "rss_bytes": 4312432640,
       "grid_bars": 9020,
       "n_symbols": null,
       "fill_count": null,
       "window_start": "2021-12-10 12:00:00+00:00",
       "window_end": "2022-01-10 19:35:00+00:00",
       "active_symbols": 0,
-      "peak_rss_bytes": 4322746368
+      "peak_rss_bytes": 4312432640
     },
     {
       "stage": "execution_window_12",
       "elapsed_ms": 7,
-      "rss_bytes": 4322746368,
+      "rss_bytes": 4312432640,
       "grid_bars": 9020,
       "n_symbols": null,
       "fill_count": null,
       "window_start": "2022-01-10 18:00:00+00:00",
       "window_end": "2022-02-11 01:35:00+00:00",
       "active_symbols": 0,
-      "peak_rss_bytes": 4322746368
+      "peak_rss_bytes": 4312432640
     },
     {
       "stage": "execution_window_13",
       "elapsed_ms": 7,
-      "rss_bytes": 4322746368,
+      "rss_bytes": 4312432640,
       "grid_bars": 9020,
       "n_symbols": null,
       "fill_count": null,
       "window_start": "2022-02-11 00:00:00+00:00",
       "window_end": "2022-03-14 07:35:00+00:00",
       "active_symbols": 0,
-      "peak_rss_bytes": 4322746368
+      "peak_rss_bytes": 4312432640
     },
     {
       "stage": "execution_window_14",
-      "elapsed_ms": 8,
-      "rss_bytes": 4322746368,
+      "elapsed_ms": 7,
+      "rss_bytes": 4312432640,
       "grid_bars": 9020,
       "n_symbols": null,
       "fill_count": null,
       "window_start": "2022-03-14 06:00:00+00:00",
       "window_end": "2022-04-14 13:35:00+00:00",
       "active_symbols": 0,
-      "peak_rss_bytes": 4322746368
+      "peak_rss_bytes": 4312432640
     },
     {
       "stage": "execution_window_15",
-      "elapsed_ms": 689,
-      "rss_bytes": 4335951872,
+      "elapsed_ms": 698,
+      "rss_bytes": 4326047744,
       "grid_bars": 9020,
       "n_symbols": null,
       "fill_count": null,
       "window_start": "2022-04-14 12:00:00+00:00",
       "window_end": "2022-05-15 19:35:00+00:00",
       "active_symbols": 27,
-      "peak_rss_bytes": 4335951872
+      "peak_rss_bytes": 4326047744
     },
     {
       "stage": "execution_window_16",
-      "elapsed_ms": 802,
-      "rss_bytes": 4379058176,
+      "elapsed_ms": 784,
+      "rss_bytes": 4366770176,
       "grid_bars": 9020,
       "n_symbols": null,
       "fill_count": null,
       "window_start": "2022-05-15 18:00:00+00:00",
       "window_end": "2022-06-16 01:35:00+00:00",
       "active_symbols": 30,
-      "peak_rss_bytes": 4379058176
+      "peak_rss_bytes": 4366770176
     },
     {
       "stage": "execution_window_17",
-      "elapsed_ms": 912,
-      "rss_bytes": 4403822592,
+      "elapsed_ms": 917,
+      "rss_bytes": 4386603008,
       "grid_bars": 9020,
       "n_symbols": null,
       "fill_count": null,
       "window_start": "2022-06-16 00:00:00+00:00",
       "window_end": "2022-07-17 07:35:00+00:00",
       "active_symbols": 34,
-      "peak_rss_bytes": 4403822592
+      "peak_rss_bytes": 4386603008
     },
     {
       "stage": "execution_window_18",
-      "elapsed_ms": 996,
-      "rss_bytes": 4424404992,
+      "elapsed_ms": 1184,
+      "rss_bytes": 4418641920,
       "grid_bars": 9020,
       "n_symbols": null,
       "fill_count": null,
       "window_start": "2022-07-17 06:00:00+00:00",
       "window_end": "2022-08-17 13:35:00+00:00",
       "active_symbols": 34,
-      "peak_rss_bytes": 4424404992
+      "peak_rss_bytes": 4418641920
     },
     {
       "stage": "execution_window_19",
-      "elapsed_ms": 930,
-      "rss_bytes": 4439625728,
+      "elapsed_ms": 1128,
+      "rss_bytes": 4428554240,
       "grid_bars": 9020,
       "n_symbols": null,
       "fill_count": null,
       "window_start": "2022-08-17 12:00:00+00:00",
       "window_end": "2022-09-17 19:35:00+00:00",
       "active_symbols": 34,
-      "peak_rss_bytes": 4439625728
+      "peak_rss_bytes": 4428554240
     },
     {
       "stage": "execution_window_20",
-      "elapsed_ms": 921,
-      "rss_bytes": 4453289984,
+      "elapsed_ms": 928,
+      "rss_bytes": 4442800128,
       "grid_bars": 9020,
       "n_symbols": null,
       "fill_count": null,
       "window_start": "2022-09-17 18:00:00+00:00",
       "window_end": "2022-10-19 01:35:00+00:00",
       "active_symbols": 34,
-      "peak_rss_bytes": 4453289984
+      "peak_rss_bytes": 4442800128
     },
     {
       "stage": "execution_window_21",
-      "elapsed_ms": 1176,
-      "rss_bytes": 4466429952,
+      "elapsed_ms": 1225,
+      "rss_bytes": 4455763968,
       "grid_bars": 9020,
       "n_symbols": null,
       "fill_count": null,
       "window_start": "2022-10-19 00:00:00+00:00",
       "window_end": "2022-11-19 07:35:00+00:00",
       "active_symbols": 45,
-      "peak_rss_bytes": 4466429952
+      "peak_rss_bytes": 4455763968
     },
     {
       "stage": "execution_window_22",
-      "elapsed_ms": 1123,
-      "rss_bytes": 4515606528,
+      "elapsed_ms": 1151,
+      "rss_bytes": 4504858624,
       "grid_bars": 9020,
       "n_symbols": null,
       "fill_count": null,
       "window_start": "2022-11-19 06:00:00+00:00",
       "window_end": "2022-12-20 13:35:00+00:00",
       "active_symbols": 42,
-      "peak_rss_bytes": 4515606528
+      "peak_rss_bytes": 4504858624
     },
     {
       "stage": "execution_window_23",
-      "elapsed_ms": 1238,
-      "rss_bytes": 4530470912,
+      "elapsed_ms": 1250,
+      "rss_bytes": 4518027264,
       "grid_bars": 9020,
       "n_symbols": null,
       "fill_count": null,
       "window_start": "2022-12-20 12:00:00+00:00",
       "window_end": "2023-01-20 19:35:00+00:00",
       "active_symbols": 44,
-      "peak_rss_bytes": 4530470912
+      "peak_rss_bytes": 4518027264
     },
     {
       "stage": "execution_window_24",
-      "elapsed_ms": 1390,
-      "rss_bytes": 4545126400,
+      "elapsed_ms": 1408,
+      "rss_bytes": 4545470464,
       "grid_bars": 9020,
       "n_symbols": null,
       "fill_count": null,
       "window_start": "2023-01-20 18:00:00+00:00",
       "window_end": "2023-02-21 01:35:00+00:00",
       "active_symbols": 54,
-      "peak_rss_bytes": 4545126400
+      "peak_rss_bytes": 4545470464
     },
     {
       "stage": "execution_window_25",
-      "elapsed_ms": 1625,
-      "rss_bytes": 4592009216,
+      "elapsed_ms": 1606,
+      "rss_bytes": 4592431104,
       "grid_bars": 9020,
       "n_symbols": null,
       "fill_count": null,
       "window_start": "2023-02-21 00:00:00+00:00",
       "window_end": "2023-03-24 07:35:00+00:00",
       "active_symbols": 59,
-      "peak_rss_bytes": 4592009216
+      "peak_rss_bytes": 4592431104
     },
     {
       "stage": "execution_window_26",
-      "elapsed_ms": 1691,
-      "rss_bytes": 4629463040,
+      "elapsed_ms": 1688,
+      "rss_bytes": 4629536768,
       "grid_bars": 9020,
       "n_symbols": null,
       "fill_count": null,
       "window_start": "2023-03-24 06:00:00+00:00",
       "window_end": "2023-04-24 13:35:00+00:00",
       "active_symbols": 65,
-      "peak_rss_bytes": 4629463040
+      "peak_rss_bytes": 4629536768
     },
     {
       "stage": "execution_window_27",
-      "elapsed_ms": 1958,
-      "rss_bytes": 4680335360,
+      "elapsed_ms": 1914,
+      "rss_bytes": 4670812160,
       "grid_bars": 9020,
       "n_symbols": null,
       "fill_count": null,
       "window_start": "2023-04-24 12:00:00+00:00",
       "window_end": "2023-05-25 19:35:00+00:00",
       "active_symbols": 70,
-      "peak_rss_bytes": 4680335360
+      "peak_rss_bytes": 4670812160
     },
     {
       "stage": "execution_window_28",
-      "elapsed_ms": 2040,
-      "rss_bytes": 4708556800,
+      "elapsed_ms": 2039,
+      "rss_bytes": 4715192320,
       "grid_bars": 9020,
       "n_symbols": null,
       "fill_count": null,
       "window_start": "2023-05-25 18:00:00+00:00",
       "window_end": "2023-06-26 01:35:00+00:00",
       "active_symbols": 73,
-      "peak_rss_bytes": 4708556800
+      "peak_rss_bytes": 4715192320
     },
     {
       "stage": "execution_window_29",
-      "elapsed_ms": 2229,
-      "rss_bytes": 4748947456,
+      "elapsed_ms": 2144,
+      "rss_bytes": 4755009536,
       "grid_bars": 9020,
       "n_symbols": null,
       "fill_count": null,
       "window_start": "2023-06-26 00:00:00+00:00",
       "window_end": "2023-07-27 07:35:00+00:00",
       "active_symbols": 78,
-      "peak_rss_bytes": 4748947456
+      "peak_rss_bytes": 4755009536
     },
     {
       "stage": "execution_window_30",
-      "elapsed_ms": 2280,
-      "rss_bytes": 4802777088,
+      "elapsed_ms": 2256,
+      "rss_bytes": 4809162752,
       "grid_bars": 9020,
       "n_symbols": null,
       "fill_count": null,
       "window_start": "2023-07-27 06:00:00+00:00",
       "window_end": "2023-08-27 13:35:00+00:00",
       "active_symbols": 87,
-      "peak_rss_bytes": 4802777088
+      "peak_rss_bytes": 4809162752
     },
     {
       "stage": "execution_window_31",
-      "elapsed_ms": 2531,
-      "rss_bytes": 4844883968,
+      "elapsed_ms": 2446,
+      "rss_bytes": 4857024512,
       "grid_bars": 9020,
       "n_symbols": null,
       "fill_count": null,
       "window_start": "2023-08-27 12:00:00+00:00",
       "window_end": "2023-09-27 19:35:00+00:00",
       "active_symbols": 91,
-      "peak_rss_bytes": 4844883968
+      "peak_rss_bytes": 4857024512
     },
     {
       "stage": "execution_window_32",
-      "elapsed_ms": 2681,
-      "rss_bytes": 4895170560,
+      "elapsed_ms": 2544,
+      "rss_bytes": 4908171264,
       "grid_bars": 9020,
       "n_symbols": null,
       "fill_count": null,
       "window_start": "2023-09-27 18:00:00+00:00",
       "window_end": "2023-10-29 01:35:00+00:00",
       "active_symbols": 93,
-      "peak_rss_bytes": 4895170560
+      "peak_rss_bytes": 4908171264
     },
     {
       "stage": "execution_window_33",
-      "elapsed_ms": 2726,
-      "rss_bytes": 4965908480,
+      "elapsed_ms": 2746,
+      "rss_bytes": 4965294080,
       "grid_bars": 9020,
       "n_symbols": null,
       "fill_count": null,
       "window_start": "2023-10-29 00:00:00+00:00",
       "window_end": "2023-11-29 07:35:00+00:00",
       "active_symbols": 97,
-      "peak_rss_bytes": 4965908480
+      "peak_rss_bytes": 4965294080
     },
     {
       "stage": "execution_window_34",
-      "elapsed_ms": 2755,
-      "rss_bytes": 4996673536,
+      "elapsed_ms": 2730,
+      "rss_bytes": 5010468864,
       "grid_bars": 9020,
       "n_symbols": null,
       "fill_count": null,
       "window_start": "2023-11-29 06:00:00+00:00",
       "window_end": "2023-12-30 13:35:00+00:00",
       "active_symbols": 99,
-      "peak_rss_bytes": 4996673536
+      "peak_rss_bytes": 5010468864
     },
     {
       "stage": "execution_window_35",
-      "elapsed_ms": 2702,
-      "rss_bytes": 5063856128,
+      "elapsed_ms": 2555,
+      "rss_bytes": 5091287040,
       "grid_bars": 9020,
       "n_symbols": null,
       "fill_count": null,
       "window_start": "2023-12-30 12:00:00+00:00",
       "window_end": "2024-01-30 19:35:00+00:00",
       "active_symbols": 99,
-      "peak_rss_bytes": 5063856128
+      "peak_rss_bytes": 5091287040
     },
     {
       "stage": "execution_window_36",
-      "elapsed_ms": 2964,
-      "rss_bytes": 5094838272,
+      "elapsed_ms": 2950,
+      "rss_bytes": 5114867712,
       "grid_bars": 9020,
       "n_symbols": null,
       "fill_count": null,
       "window_start": "2024-01-30 18:00:00+00:00",
       "window_end": "2024-03-02 01:35:00+00:00",
       "active_symbols": 106,
-      "peak_rss_bytes": 5094838272
+      "peak_rss_bytes": 5114867712
     },
     {
       "stage": "execution_window_37",
-      "elapsed_ms": 3060,
-      "rss_bytes": 5165223936,
+      "elapsed_ms": 3302,
+      "rss_bytes": 5181218816,
       "grid_bars": 9020,
       "n_symbols": null,
       "fill_count": null,
       "window_start": "2024-03-02 00:00:00+00:00",
       "window_end": "2024-04-02 07:35:00+00:00",
       "active_symbols": 109,
-      "peak_rss_bytes": 5165223936
+      "peak_rss_bytes": 5181218816
     },
     {
       "stage": "replay_fast_reversal_failed",
-      "elapsed_ms": 799,
-      "rss_bytes": 5209513984,
+      "elapsed_ms": 391,
+      "rss_bytes": 5209763840,
       "grid_bars": null,
       "n_symbols": 446,
       "fill_count": 0,
       "window_start": null,
       "window_end": null,
       "active_symbols": null,
-      "peak_rss_bytes": 5209513984
+      "peak_rss_bytes": 5209763840
     },
     {
       "stage": "execution_window_0",
-      "elapsed_ms": 9207,
-      "rss_bytes": 4250808320,
+      "elapsed_ms": 7498,
+      "rss_bytes": 4240420864,
       "grid_bars": 8948,
       "n_symbols": null,
       "fill_count": null,
       "window_start": "2021-01-01 00:00:00+00:00",
       "window_end": "2021-02-01 01:35:00+00:00",
       "active_symbols": 0,
-      "peak_rss_bytes": 4250808320
+      "peak_rss_bytes": 4240420864
     },
     {
       "stage": "execution_window_1",
       "elapsed_ms": 4,
-      "rss_bytes": 4250808320,
+      "rss_bytes": 4240420864,
       "grid_bars": 9236,
       "n_symbols": null,
       "fill_count": null,
       "window_start": "2021-02-01 00:00:00+00:00",
       "window_end": "2021-03-05 01:35:00+00:00",
       "active_symbols": 0,
-      "peak_rss_bytes": 4250808320
+      "peak_rss_bytes": 4240420864
     },
     {
       "stage": "execution_window_2",
-      "elapsed_ms": 3,
-      "rss_bytes": 4250808320,
+      "elapsed_ms": 4,
+      "rss_bytes": 4240424960,
       "grid_bars": 9236,
       "n_symbols": null,
       "fill_count": null,
       "window_start": "2021-03-05 00:00:00+00:00",
       "window_end": "2021-04-06 01:35:00+00:00",
       "active_symbols": 0,
-      "peak_rss_bytes": 4250808320
+      "peak_rss_bytes": 4240424960
     },
     {
       "stage": "execution_window_3",
-      "elapsed_ms": 4,
-      "rss_bytes": 4250808320,
+      "elapsed_ms": 3,
+      "rss_bytes": 4240424960,
       "grid_bars": 9236,
       "n_symbols": null,
       "fill_count": null,
       "window_start": "2021-04-06 00:00:00+00:00",
       "window_end": "2021-05-08 01:35:00+00:00",
       "active_symbols": 0,
-      "peak_rss_bytes": 4250808320
+      "peak_rss_bytes": 4240424960
     },
     {
       "stage": "execution_window_4",
       "elapsed_ms": 4,
-      "rss_bytes": 4250808320,
+      "rss_bytes": 4240424960,
       "grid_bars": 9236,
       "n_symbols": null,
       "fill_count": null,
       "window_start": "2021-05-08 00:00:00+00:00",
       "window_end": "2021-06-09 01:35:00+00:00",
       "active_symbols": 0,
-      "peak_rss_bytes": 4250808320
+      "peak_rss_bytes": 4240424960
     },
     {
       "stage": "execution_window_5",
       "elapsed_ms": 4,
-      "rss_bytes": 4250808320,
+      "rss_bytes": 4240424960,
       "grid_bars": 9236,
       "n_symbols": null,
       "fill_count": null,
       "window_start": "2021-06-09 00:00:00+00:00",
       "window_end": "2021-07-11 01:35:00+00:00",
       "active_symbols": 0,
-      "peak_rss_bytes": 4250808320
+      "peak_rss_bytes": 4240424960
     },
     {
       "stage": "execution_window_6",
       "elapsed_ms": 4,
-      "rss_bytes": 4250808320,
+      "rss_bytes": 4240424960,
       "grid_bars": 9236,
       "n_symbols": null,
       "fill_count": null,
       "window_start": "2021-07-11 00:00:00+00:00",
       "window_end": "2021-08-12 01:35:00+00:00",
       "active_symbols": 0,
-      "peak_rss_bytes": 4250808320
+      "peak_rss_bytes": 4240424960
     },
     {
       "stage": "execution_window_7",
-      "elapsed_ms": 4,
-      "rss_bytes": 4250808320,
+      "elapsed_ms": 5,
+      "rss_bytes": 4240424960,
       "grid_bars": 9236,
       "n_symbols": null,
       "fill_count": null,
       "window_start": "2021-08-12 00:00:00+00:00",
       "window_end": "2021-09-13 01:35:00+00:00",
       "active_symbols": 0,
-      "peak_rss_bytes": 4250808320
+      "peak_rss_bytes": 4240424960
     },
     {
       "stage": "execution_window_8",
       "elapsed_ms": 4,
-      "rss_bytes": 4251176960,
+      "rss_bytes": 4240863232,
       "grid_bars": 9236,
       "n_symbols": null,
       "fill_count": null,
       "window_start": "2021-09-13 00:00:00+00:00",
       "window_end": "2021-10-15 01:35:00+00:00",
       "active_symbols": 0,
-      "peak_rss_bytes": 4251176960
+      "peak_rss_bytes": 4240863232
     },
     {
       "stage": "execution_window_9",
-      "elapsed_ms": 3,
-      "rss_bytes": 4252123136,
+      "elapsed_ms": 5,
+      "rss_bytes": 4241813504,
       "grid_bars": 9236,
       "n_symbols": null,
       "fill_count": null,
       "window_start": "2021-10-15 00:00:00+00:00",
       "window_end": "2021-11-16 01:35:00+00:00",
       "active_symbols": 0,
-      "peak_rss_bytes": 4252123136
+      "peak_rss_bytes": 4241813504
     },
     {
       "stage": "execution_window_10",
       "elapsed_ms": 4,
-      "rss_bytes": 4253073408,
+      "rss_bytes": 4242763776,
       "grid_bars": 9236,
       "n_symbols": null,
       "fill_count": null,
       "window_start": "2021-11-16 00:00:00+00:00",
       "window_end": "2021-12-18 01:35:00+00:00",
       "active_symbols": 0,
-      "peak_rss_bytes": 4253073408
+      "peak_rss_bytes": 4242763776
     },
     {
       "stage": "execution_window_11",
-      "elapsed_ms": 3,
-      "rss_bytes": 4254023680,
+      "elapsed_ms": 4,
+      "rss_bytes": 4243714048,
       "grid_bars": 9236,
       "n_symbols": null,
       "fill_count": null,
       "window_start": "2021-12-18 00:00:00+00:00",
       "window_end": "2022-01-19 01:35:00+00:00",
       "active_symbols": 0,
-      "peak_rss_bytes": 4254023680
+      "peak_rss_bytes": 4243714048
     },
     {
       "stage": "execution_window_12",
-      "elapsed_ms": 4,
-      "rss_bytes": 4255039488,
+      "elapsed_ms": 5,
+      "rss_bytes": 4244729856,
       "grid_bars": 9236,
       "n_symbols": null,
       "fill_count": null,
       "window_start": "2022-01-19 00:00:00+00:00",
       "window_end": "2022-02-20 01:35:00+00:00",
       "active_symbols": 0,
-      "peak_rss_bytes": 4255039488
+      "peak_rss_bytes": 4244729856
     },
     {
       "stage": "execution_window_13",
       "elapsed_ms": 4,
-      "rss_bytes": 4255989760,
+      "rss_bytes": 4245680128,
       "grid_bars": 9236,
       "n_symbols": null,
       "fill_count": null,
       "window_start": "2022-02-20 00:00:00+00:00",
       "window_end": "2022-03-24 01:35:00+00:00",
       "active_symbols": 0,
-      "peak_rss_bytes": 4255989760
+      "peak_rss_bytes": 4245680128
     },
     {
       "stage": "execution_window_14",
-      "elapsed_ms": 4,
-      "rss_bytes": 4256940032,
+      "elapsed_ms": 3,
+      "rss_bytes": 4246634496,
       "grid_bars": 9236,
       "n_symbols": null,
       "fill_count": null,
       "window_start": "2022-03-24 00:00:00+00:00",
       "window_end": "2022-04-25 01:35:00+00:00",
       "active_symbols": 0,
-      "peak_rss_bytes": 4256940032
+      "peak_rss_bytes": 4246634496
     },
     {
       "stage": "execution_window_15",
-      "elapsed_ms": 586,
-      "rss_bytes": 4287197184,
+      "elapsed_ms": 597,
+      "rss_bytes": 4272934912,
       "grid_bars": 9236,
       "n_symbols": null,
       "fill_count": null,
       "window_start": "2022-04-25 00:00:00+00:00",
       "window_end": "2022-05-27 01:35:00+00:00",
       "active_symbols": 28,
-      "peak_rss_bytes": 4287197184
+      "peak_rss_bytes": 4272934912
     },
     {
       "stage": "execution_window_16",
-      "elapsed_ms": 682,
-      "rss_bytes": 4330717184,
+      "elapsed_ms": 684,
+      "rss_bytes": 4315095040,
       "grid_bars": 9236,
       "n_symbols": null,
       "fill_count": null,
       "window_start": "2022-05-27 00:00:00+00:00",
       "window_end": "2022-06-28 01:35:00+00:00",
       "active_symbols": 32,
-      "peak_rss_bytes": 4330717184
+      "peak_rss_bytes": 4315095040
     },
     {
       "stage": "execution_window_17",
       "elapsed_ms": 704,
-      "rss_bytes": 4349829120,
+      "rss_bytes": 4340436992,
       "grid_bars": 9236,
       "n_symbols": null,
       "fill_count": null,
       "window_start": "2022-06-28 00:00:00+00:00",
       "window_end": "2022-07-30 01:35:00+00:00",
       "active_symbols": 33,
-      "peak_rss_bytes": 4349829120
+      "peak_rss_bytes": 4340436992
     },
     {
       "stage": "execution_window_18",
-      "elapsed_ms": 787,
-      "rss_bytes": 4365594624,
+      "elapsed_ms": 865,
+      "rss_bytes": 4356378624,
       "grid_bars": 9236,
       "n_symbols": null,
       "fill_count": null,
       "window_start": "2022-07-30 00:00:00+00:00",
       "window_end": "2022-08-31 01:35:00+00:00",
       "active_symbols": 34,
-      "peak_rss_bytes": 4365594624
+      "peak_rss_bytes": 4356378624
     },
     {
       "stage": "execution_window_19",
-      "elapsed_ms": 758,
-      "rss_bytes": 4381822976,
+      "elapsed_ms": 927,
+      "rss_bytes": 4372566016,
       "grid_bars": 9236,
       "n_symbols": null,
       "fill_count": null,
       "window_start": "2022-08-31 00:00:00+00:00",
       "window_end": "2022-10-02 01:35:00+00:00",
       "active_symbols": 36,
-      "peak_rss_bytes": 4381822976
+      "peak_rss_bytes": 4372566016
     },
     {
       "stage": "execution_window_20",
-      "elapsed_ms": 807,
-      "rss_bytes": 4404887552,
+      "elapsed_ms": 878,
+      "rss_bytes": 4388777984,
       "grid_bars": 9236,
       "n_symbols": null,
       "fill_count": null,
       "window_start": "2022-10-02 00:00:00+00:00",
       "window_end": "2022-11-03 01:35:00+00:00",
       "active_symbols": 38,
-      "peak_rss_bytes": 4404887552
+      "peak_rss_bytes": 4388777984
     },
     {
       "stage": "execution_window_21",
-      "elapsed_ms": 776,
-      "rss_bytes": 4424978432,
+      "elapsed_ms": 797,
+      "rss_bytes": 4410806272,
       "grid_bars": 9236,
       "n_symbols": null,
       "fill_count": null,
       "window_start": "2022-11-03 00:00:00+00:00",
       "window_end": "2022-12-05 01:35:00+00:00",
       "active_symbols": 37,
-      "peak_rss_bytes": 4424978432
+      "peak_rss_bytes": 4410806272
     },
     {
       "stage": "execution_window_22",
-      "elapsed_ms": 938,
-      "rss_bytes": 4437164032,
+      "elapsed_ms": 988,
+      "rss_bytes": 4420726784,
       "grid_bars": 9236,
       "n_symbols": null,
       "fill_count": null,
       "window_start": "2022-12-05 00:00:00+00:00",
       "window_end": "2023-01-06 01:35:00+00:00",
       "active_symbols": 42,
-      "peak_rss_bytes": 4437164032
+      "peak_rss_bytes": 4420726784
     },
     {
       "stage": "execution_window_23",
-      "elapsed_ms": 1008,
-      "rss_bytes": 4465790976,
+      "elapsed_ms": 1014,
+      "rss_bytes": 4451540992,
       "grid_bars": 9236,
       "n_symbols": null,
       "fill_count": null,
       "window_start": "2023-01-06 00:00:00+00:00",
       "window_end": "2023-02-07 01:35:00+00:00",
       "active_symbols": 48,
-      "peak_rss_bytes": 4465790976
+      "peak_rss_bytes": 4451540992
     },
     {
       "stage": "execution_window_24",
-      "elapsed_ms": 1179,
-      "rss_bytes": 4490854400,
+      "elapsed_ms": 1203,
+      "rss_bytes": 4475994112,
       "grid_bars": 9236,
       "n_symbols": null,
       "fill_count": null,
       "window_start": "2023-02-07 00:00:00+00:00",
       "window_end": "2023-03-11 01:35:00+00:00",
       "active_symbols": 55,
-      "peak_rss_bytes": 4490854400
+      "peak_rss_bytes": 4475994112
     },
     {
       "stage": "execution_window_25",
-      "elapsed_ms": 1289,
-      "rss_bytes": 4535410688,
+      "elapsed_ms": 1295,
+      "rss_bytes": 4513230848,
       "grid_bars": 9236,
       "n_symbols": null,
       "fill_count": null,
       "window_start": "2023-03-11 00:00:00+00:00",
       "window_end": "2023-04-12 01:35:00+00:00",
       "active_symbols": 63,
-      "peak_rss_bytes": 4535410688
+      "peak_rss_bytes": 4513230848
     },
     {
       "stage": "execution_window_26",
-      "elapsed_ms": 1466,
-      "rss_bytes": 4581875712,
+      "elapsed_ms": 1470,
+      "rss_bytes": 4551716864,
       "grid_bars": 9236,
       "n_symbols": null,
       "fill_count": null,
       "window_start": "2023-04-12 00:00:00+00:00",
       "window_end": "2023-05-14 01:35:00+00:00",
       "active_symbols": 68,
-      "peak_rss_bytes": 4581875712
+      "peak_rss_bytes": 4551716864
     },
     {
       "stage": "execution_window_27",
-      "elapsed_ms": 1371,
-      "rss_bytes": 4621103104,
+      "elapsed_ms": 1373,
+      "rss_bytes": 4595748864,
       "grid_bars": 9236,
       "n_symbols": null,
       "fill_count": null,
       "window_start": "2023-05-14 00:00:00+00:00",
       "window_end": "2023-06-15 01:35:00+00:00",
       "active_symbols": 68,
-      "peak_rss_bytes": 4621103104
+      "peak_rss_bytes": 4595748864
     },
     {
       "stage": "execution_window_28",
-      "elapsed_ms": 1489,
-      "rss_bytes": 4638437376,
+      "elapsed_ms": 1501,
+      "rss_bytes": 4617740288,
       "grid_bars": 9236,
       "n_symbols": null,
       "fill_count": null,
       "window_start": "2023-06-15 00:00:00+00:00",
       "window_end": "2023-07-17 01:35:00+00:00",
       "active_symbols": 71,
-      "peak_rss_bytes": 4638437376
+      "peak_rss_bytes": 4617740288
     },
     {
       "stage": "execution_window_29",
-      "elapsed_ms": 1644,
-      "rss_bytes": 4683128832,
+      "elapsed_ms": 1613,
+      "rss_bytes": 4657434624,
       "grid_bars": 9236,
       "n_symbols": null,
       "fill_count": null,
       "window_start": "2023-07-17 00:00:00+00:00",
       "window_end": "2023-08-18 01:35:00+00:00",
       "active_symbols": 78,
-      "peak_rss_bytes": 4683128832
+      "peak_rss_bytes": 4657434624
     },
     {
       "stage": "execution_window_30",
-      "elapsed_ms": 1717,
-      "rss_bytes": 4716056576,
+      "elapsed_ms": 1705,
+      "rss_bytes": 4707471360,
       "grid_bars": 9236,
       "n_symbols": null,
       "fill_count": null,
       "window_start": "2023-08-18 00:00:00+00:00",
       "window_end": "2023-09-19 01:35:00+00:00",
       "active_symbols": 85,
-      "peak_rss_bytes": 4716056576
+      "peak_rss_bytes": 4707471360
     },
     {
       "stage": "execution_window_31",
-      "elapsed_ms": 1918,
-      "rss_bytes": 4777857024,
+      "elapsed_ms": 1815,
+      "rss_bytes": 4750741504,
       "grid_bars": 9236,
       "n_symbols": null,
       "fill_count": null,
       "window_start": "2023-09-19 00:00:00+00:00",
       "window_end": "2023-10-21 01:35:00+00:00",
       "active_symbols": 88,
-      "peak_rss_bytes": 4777857024
+      "peak_rss_bytes": 4750741504
     },
     {
       "stage": "execution_window_32",
-      "elapsed_ms": 1895,
-      "rss_bytes": 4813705216,
+      "elapsed_ms": 1869,
+      "rss_bytes": 4788510720,
       "grid_bars": 9236,
       "n_symbols": null,
       "fill_count": null,
       "window_start": "2023-10-21 00:00:00+00:00",
       "window_end": "2023-11-22 01:35:00+00:00",
       "active_symbols": 91,
-      "peak_rss_bytes": 4813705216
+      "peak_rss_bytes": 4788510720
     },
     {
       "stage": "execution_window_33",
-      "elapsed_ms": 1923,
-      "rss_bytes": 4851388416,
+      "elapsed_ms": 1851,
+      "rss_bytes": 4838817792,
       "grid_bars": 9236,
       "n_symbols": null,
       "fill_count": null,
       "window_start": "2023-11-22 00:00:00+00:00",
       "window_end": "2023-12-24 01:35:00+00:00",
       "active_symbols": 91,
-      "peak_rss_bytes": 4851388416
+      "peak_rss_bytes": 4838817792
     },
     {
       "stage": "execution_window_34",
-      "elapsed_ms": 1913,
-      "rss_bytes": 4873412608,
+      "elapsed_ms": 1829,
+      "rss_bytes": 4868059136,
       "grid_bars": 9236,
       "n_symbols": null,
       "fill_count": null,
       "window_start": "2023-12-24 00:00:00+00:00",
       "window_end": "2024-01-25 01:35:00+00:00",
       "active_symbols": 94,
-      "peak_rss_bytes": 4873412608
+      "peak_rss_bytes": 4868059136
     },
     {
       "stage": "execution_window_35",
-      "elapsed_ms": 2089,
-      "rss_bytes": 4932993024,
+      "elapsed_ms": 2015,
+      "rss_bytes": 4913004544,
       "grid_bars": 9236,
       "n_symbols": null,
       "fill_count": null,
       "window_start": "2024-01-25 00:00:00+00:00",
       "window_end": "2024-02-26 01:35:00+00:00",
       "active_symbols": 100,
-      "peak_rss_bytes": 4932993024
+      "peak_rss_bytes": 4913004544
     },
     {
       "stage": "execution_window_36",
-      "elapsed_ms": 2195,
-      "rss_bytes": 5002260480,
+      "elapsed_ms": 2184,
+      "rss_bytes": 4955402240,
       "grid_bars": 9236,
       "n_symbols": null,
       "fill_count": null,
       "window_start": "2024-02-26 00:00:00+00:00",
       "window_end": "2024-03-29 01:35:00+00:00",
       "active_symbols": 106,
-      "peak_rss_bytes": 5002260480
+      "peak_rss_bytes": 4955402240
     },
     {
       "stage": "execution_window_37",
-      "elapsed_ms": 2265,
-      "rss_bytes": 5051015168,
+      "elapsed_ms": 2218,
+      "rss_bytes": 5017800704,
       "grid_bars": 9236,
       "n_symbols": null,
       "fill_count": null,
       "window_start": "2024-03-29 00:00:00+00:00",
       "window_end": "2024-04-30 01:35:00+00:00",
       "active_symbols": 111,
-      "peak_rss_bytes": 5051015168
+      "peak_rss_bytes": 5017800704
     },
     {
       "stage": "execution_window_38",
-      "elapsed_ms": 2265,
-      "rss_bytes": 5106077696,
+      "elapsed_ms": 2179,
+      "rss_bytes": 5073801216,
       "grid_bars": 9236,
       "n_symbols": null,
       "fill_count": null,
       "window_start": "2024-04-30 00:00:00+00:00",
       "window_end": "2024-06-01 01:35:00+00:00",
       "active_symbols": 110,
-      "peak_rss_bytes": 5106077696
+      "peak_rss_bytes": 5073801216
     },
     {
       "stage": "execution_window_39",
-      "elapsed_ms": 2308,
-      "rss_bytes": 5133443072,
+      "elapsed_ms": 2171,
+      "rss_bytes": 5102084096,
       "grid_bars": 9236,
       "n_symbols": null,
       "fill_count": null,
       "window_start": "2024-06-01 00:00:00+00:00",
       "window_end": "2024-07-03 01:35:00+00:00",
       "active_symbols": 111,
-      "peak_rss_bytes": 5133443072
+      "peak_rss_bytes": 5102084096
     },
     {
       "stage": "execution_window_40",
-      "elapsed_ms": 2249,
-      "rss_bytes": 5203386368,
+      "elapsed_ms": 2272,
+      "rss_bytes": 5155454976,
       "grid_bars": 9236,
       "n_symbols": null,
       "fill_count": null,
       "window_start": "2024-07-03 00:00:00+00:00",
       "window_end": "2024-08-04 01:35:00+00:00",
       "active_symbols": 110,
-      "peak_rss_bytes": 5203386368
+      "peak_rss_bytes": 5155454976
     },
     {
       "stage": "execution_window_41",
-      "elapsed_ms": 2253,
-      "rss_bytes": 5208846336,
+      "elapsed_ms": 2356,
+      "rss_bytes": 5175164928,
       "grid_bars": 9236,
       "n_symbols": null,
       "fill_count": null,
       "window_start": "2024-08-04 00:00:00+00:00",
       "window_end": "2024-09-05 01:35:00+00:00",
       "active_symbols": 112,
-      "peak_rss_bytes": 5208846336
+      "peak_rss_bytes": 5175164928
     },
     {
       "stage": "execution_window_42",
-      "elapsed_ms": 2681,
-      "rss_bytes": 5295292416,
+      "elapsed_ms": 2308,
+      "rss_bytes": 5253742592,
       "grid_bars": 9236,
       "n_symbols": null,
       "fill_count": null,
       "window_start": "2024-09-05 00:00:00+00:00",
       "window_end": "2024-10-07 01:35:00+00:00",
       "active_symbols": 116,
-      "peak_rss_bytes": 5295292416
+      "peak_rss_bytes": 5253742592
     },
     {
       "stage": "execution_window_43",
-      "elapsed_ms": 2459,
-      "rss_bytes": 5326315520,
+      "elapsed_ms": 2377,
+      "rss_bytes": 5301682176,
       "grid_bars": 9236,
       "n_symbols": null,
       "fill_count": null,
       "window_start": "2024-10-07 00:00:00+00:00",
       "window_end": "2024-11-08 01:35:00+00:00",
       "active_symbols": 123,
-      "peak_rss_bytes": 5326315520
+      "peak_rss_bytes": 5301682176
     },
     {
       "stage": "execution_window_44",
-      "elapsed_ms": 2444,
-      "rss_bytes": 5388771328,
+      "elapsed_ms": 2438,
+      "rss_bytes": 5353316352,
       "grid_bars": 9236,
       "n_symbols": null,
       "fill_count": null,
       "window_start": "2024-11-08 00:00:00+00:00",
       "window_end": "2024-12-10 01:35:00+00:00",
       "active_symbols": 124,
-      "peak_rss_bytes": 5388771328
+      "peak_rss_bytes": 5353316352
     },
     {
       "stage": "execution_window_45",
-      "elapsed_ms": 2454,
-      "rss_bytes": 5450006528,
+      "elapsed_ms": 2482,
+      "rss_bytes": 5424189440,
       "grid_bars": 9236,
       "n_symbols": null,
       "fill_count": null,
       "window_start": "2024-12-10 00:00:00+00:00",
       "window_end": "2025-01-11 01:35:00+00:00",
       "active_symbols": 127,
-      "peak_rss_bytes": 5450006528
+      "peak_rss_bytes": 5424189440
     },
     {
       "stage": "execution_window_46",
-      "elapsed_ms": 2546,
-      "rss_bytes": 5494075392,
+      "elapsed_ms": 2609,
+      "rss_bytes": 5490229248,
       "grid_bars": 9236,
       "n_symbols": null,
       "fill_count": null,
       "window_start": "2025-01-11 00:00:00+00:00",
       "window_end": "2025-02-12 01:35:00+00:00",
       "active_symbols": 135,
-      "peak_rss_bytes": 5494075392
+      "peak_rss_bytes": 5490229248
     },
     {
       "stage": "execution_window_47",
-      "elapsed_ms": 2643,
-      "rss_bytes": 5551607808,
+      "elapsed_ms": 2662,
+      "rss_bytes": 5528375296,
       "grid_bars": 9236,
       "n_symbols": null,
       "fill_count": null,
       "window_start": "2025-02-12 00:00:00+00:00",
       "window_end": "2025-03-16 01:35:00+00:00",
       "active_symbols": 140,
-      "peak_rss_bytes": 5551607808
+      "peak_rss_bytes": 5528375296
     },
     {
       "stage": "execution_window_48",
-      "elapsed_ms": 2749,
-      "rss_bytes": 5620629504,
+      "elapsed_ms": 2818,
+      "rss_bytes": 5628964864,
       "grid_bars": 9236,
       "n_symbols": null,
       "fill_count": null,
       "window_start": "2025-03-16 00:00:00+00:00",
       "window_end": "2025-04-17 01:35:00+00:00",
       "active_symbols": 144,
-      "peak_rss_bytes": 5620629504
+      "peak_rss_bytes": 5628964864
     },
     {
       "stage": "execution_window_49",
-      "elapsed_ms": 2839,
-      "rss_bytes": 5669089280,
+      "elapsed_ms": 2798,
+      "rss_bytes": 5655363584,
       "grid_bars": 9236,
       "n_symbols": null,
       "fill_count": null,
       "window_start": "2025-04-17 00:00:00+00:00",
       "window_end": "2025-05-19 01:35:00+00:00",
       "active_symbols": 149,
-      "peak_rss_bytes": 5669089280
+      "peak_rss_bytes": 5655363584
     },
     {
       "stage": "execution_window_50",
-      "elapsed_ms": 2919,
-      "rss_bytes": 5754851328,
+      "elapsed_ms": 2849,
+      "rss_bytes": 5737975808,
       "grid_bars": 9236,
       "n_symbols": null,
       "fill_count": null,
       "window_start": "2025-05-19 00:00:00+00:00",
       "window_end": "2025-06-20 01:35:00+00:00",
       "active_symbols": 151,
-      "peak_rss_bytes": 5754851328
+      "peak_rss_bytes": 5737975808
     },
     {
       "stage": "execution_window_51",
-      "elapsed_ms": 2784,
-      "rss_bytes": 5793886208,
+      "elapsed_ms": 2781,
+      "rss_bytes": 5775790080,
       "grid_bars": 9236,
       "n_symbols": null,
       "fill_count": null,
       "window_start": "2025-06-20 00:00:00+00:00",
       "window_end": "2025-07-22 01:35:00+00:00",
       "active_symbols": 152,
-      "peak_rss_bytes": 5793886208
+      "peak_rss_bytes": 5775790080
     },
     {
       "stage": "execution_window_52",
-      "elapsed_ms": 2787,
-      "rss_bytes": 5880344576,
+      "elapsed_ms": 2809,
+      "rss_bytes": 5872816128,
       "grid_bars": 9236,
       "n_symbols": null,
       "fill_count": null,
       "window_start": "2025-07-22 00:00:00+00:00",
       "window_end": "2025-08-23 01:35:00+00:00",
       "active_symbols": 150,
-      "peak_rss_bytes": 5880344576
+      "peak_rss_bytes": 5872816128
     },
     {
       "stage": "execution_window_53",
-      "elapsed_ms": 2629,
-      "rss_bytes": 5894688768,
+      "elapsed_ms": 2678,
+      "rss_bytes": 5879951360,
       "grid_bars": 9236,
       "n_symbols": null,
       "fill_count": null,
       "window_start": "2025-08-23 00:00:00+00:00",
       "window_end": "2025-09-24 01:35:00+00:00",
       "active_symbols": 149,
-      "peak_rss_bytes": 5894688768
+      "peak_rss_bytes": 5879951360
     },
     {
       "stage": "execution_window_54",
-      "elapsed_ms": 2832,
-      "rss_bytes": 5942263808,
+      "elapsed_ms": 2887,
+      "rss_bytes": 5932777472,
       "grid_bars": 9236,
       "n_symbols": null,
       "fill_count": null,
       "window_start": "2025-09-24 00:00:00+00:00",
       "window_end": "2025-10-26 01:35:00+00:00",
       "active_symbols": 154,
-      "peak_rss_bytes": 5942263808
+      "peak_rss_bytes": 5932777472
     },
     {
       "stage": "execution_window_55",
-      "elapsed_ms": 3102,
-      "rss_bytes": 6057373696,
+      "elapsed_ms": 2961,
+      "rss_bytes": 6072000512,
       "grid_bars": 9236,
       "n_symbols": null,
       "fill_count": null,
       "window_start": "2025-10-26 00:00:00+00:00",
       "window_end": "2025-11-27 01:35:00+00:00",
       "active_symbols": 161,
-      "peak_rss_bytes": 6057373696
+      "peak_rss_bytes": 6072000512
     },
     {
       "stage": "execution_window_56",
-      "elapsed_ms": 2900,
-      "rss_bytes": 6134743040,
+      "elapsed_ms": 3069,
+      "rss_bytes": 6136344576,
       "grid_bars": 9236,
       "n_symbols": null,
       "fill_count": null,
       "window_start": "2025-11-27 00:00:00+00:00",
       "window_end": "2025-12-29 01:35:00+00:00",
       "active_symbols": 160,
-      "peak_rss_bytes": 6134743040
+      "peak_rss_bytes": 6136344576
     },
     {
       "stage": "execution_window_57",
-      "elapsed_ms": 2292,
-      "rss_bytes": 6187573248,
+      "elapsed_ms": 2435,
+      "rss_bytes": 6187802624,
       "grid_bars": 864,
       "n_symbols": null,
       "fill_count": null,
       "window_start": "2025-12-29 00:00:00+00:00",
       "window_end": "2025-12-31 23:59:59+00:00",
       "active_symbols": 152,
-      "peak_rss_bytes": 6187573248
+      "peak_rss_bytes": 6187802624
     },
     {
       "stage": "replay_slow_momentum_strict",
-      "elapsed_ms": 670,
-      "rss_bytes": 5862084608,
+      "elapsed_ms": 677,
+      "rss_bytes": 5272055808,
       "grid_bars": null,
       "n_symbols": 446,
       "fill_count": 118557,
       "window_start": null,
       "window_end": null,
       "active_symbols": null,
-      "peak_rss_bytes": 6187573248
+      "peak_rss_bytes": 6187802624
     },
     {
       "stage": "replay_slow_momentum_stress",
       "elapsed_ms": 0,
-      "rss_bytes": 5862084608,
+      "rss_bytes": 5272055808,
       "grid_bars": null,
       "n_symbols": 446,
       "fill_count": 118558,
       "window_start": null,
       "window_end": null,
       "active_symbols": null,
-      "peak_rss_bytes": 6187573248
+      "peak_rss_bytes": 6187802624
     },
     {
       "stage": "execution_window_0",
-      "elapsed_ms": 8310,
-      "rss_bytes": 4250738688,
+      "elapsed_ms": 7398,
+      "rss_bytes": 4240486400,
       "grid_bars": 8948,
       "n_symbols": null,
       "fill_count": null,
       "window_start": "2021-01-01 00:00:00+00:00",
       "window_end": "2021-02-01 01:35:00+00:00",
       "active_symbols": 0,
-      "peak_rss_bytes": 4250738688
+      "peak_rss_bytes": 4240486400
     },
     {
       "stage": "execution_window_1",
-      "elapsed_ms": 4,
-      "rss_bytes": 4250738688,
+      "elapsed_ms": 5,
+      "rss_bytes": 4240486400,
       "grid_bars": 9236,
       "n_symbols": null,
       "fill_count": null,
       "window_start": "2021-02-01 00:00:00+00:00",
       "window_end": "2021-03-05 01:35:00+00:00",
       "active_symbols": 0,
-      "peak_rss_bytes": 4250738688
+      "peak_rss_bytes": 4240486400
     },
     {
       "stage": "execution_window_2",
-      "elapsed_ms": 3,
-      "rss_bytes": 4250738688,
+      "elapsed_ms": 4,
+      "rss_bytes": 4240490496,
       "grid_bars": 9236,
       "n_symbols": null,
       "fill_count": null,
       "window_start": "2021-03-05 00:00:00+00:00",
       "window_end": "2021-04-06 01:35:00+00:00",
       "active_symbols": 0,
-      "peak_rss_bytes": 4250738688
+      "peak_rss_bytes": 4240490496
     },
     {
       "stage": "execution_window_3",
-      "elapsed_ms": 3,
-      "rss_bytes": 4250738688,
+      "elapsed_ms": 4,
+      "rss_bytes": 4240490496,
       "grid_bars": 9236,
       "n_symbols": null,
       "fill_count": null,
       "window_start": "2021-04-06 00:00:00+00:00",
       "window_end": "2021-05-08 01:35:00+00:00",
       "active_symbols": 0,
-      "peak_rss_bytes": 4250738688
+      "peak_rss_bytes": 4240490496
     },
     {
       "stage": "execution_window_4",
       "elapsed_ms": 4,
-      "rss_bytes": 4250738688,
+      "rss_bytes": 4240490496,
       "grid_bars": 9236,
       "n_symbols": null,
       "fill_count": null,
       "window_start": "2021-05-08 00:00:00+00:00",
       "window_end": "2021-06-09 01:35:00+00:00",
       "active_symbols": 0,
-      "peak_rss_bytes": 4250738688
+      "peak_rss_bytes": 4240490496
     },
     {
       "stage": "execution_window_5",
       "elapsed_ms": 4,
-      "rss_bytes": 4250738688,
+      "rss_bytes": 4240490496,
       "grid_bars": 9236,
       "n_symbols": null,
       "fill_count": null,
       "window_start": "2021-06-09 00:00:00+00:00",
       "window_end": "2021-07-11 01:35:00+00:00",
       "active_symbols": 0,
-      "peak_rss_bytes": 4250738688
+      "peak_rss_bytes": 4240490496
     },
     {
       "stage": "execution_window_6",
-      "elapsed_ms": 4,
-      "rss_bytes": 4250738688,
+      "elapsed_ms": 5,
+      "rss_bytes": 4240490496,
       "grid_bars": 9236,
       "n_symbols": null,
       "fill_count": null,
       "window_start": "2021-07-11 00:00:00+00:00",
       "window_end": "2021-08-12 01:35:00+00:00",
       "active_symbols": 0,
-      "peak_rss_bytes": 4250738688
+      "peak_rss_bytes": 4240490496
     },
     {
       "stage": "execution_window_7",
       "elapsed_ms": 4,
-      "rss_bytes": 4250738688,
+      "rss_bytes": 4240490496,
       "grid_bars": 9236,
       "n_symbols": null,
       "fill_count": null,
       "window_start": "2021-08-12 00:00:00+00:00",
       "window_end": "2021-09-13 01:35:00+00:00",
       "active_symbols": 0,
-      "peak_rss_bytes": 4250738688
+      "peak_rss_bytes": 4240490496
     },
     {
       "stage": "execution_window_8",
-      "elapsed_ms": 4,
-      "rss_bytes": 4251107328,
+      "elapsed_ms": 5,
+      "rss_bytes": 4240928768,
       "grid_bars": 9236,
       "n_symbols": null,
       "fill_count": null,
       "window_start": "2021-09-13 00:00:00+00:00",
       "window_end": "2021-10-15 01:35:00+00:00",
       "active_symbols": 0,
-      "peak_rss_bytes": 4251107328
+      "peak_rss_bytes": 4240928768
     },
     {
       "stage": "execution_window_9",
       "elapsed_ms": 4,
-      "rss_bytes": 4252053504,
+      "rss_bytes": 4241879040,
       "grid_bars": 9236,
       "n_symbols": null,
       "fill_count": null,
       "window_start": "2021-10-15 00:00:00+00:00",
       "window_end": "2021-11-16 01:35:00+00:00",
       "active_symbols": 0,
-      "peak_rss_bytes": 4252053504
+      "peak_rss_bytes": 4241879040
     },
     {
       "stage": "execution_window_10",
       "elapsed_ms": 4,
-      "rss_bytes": 4253003776,
+      "rss_bytes": 4242829312,
       "grid_bars": 9236,
       "n_symbols": null,
       "fill_count": null,
       "window_start": "2021-11-16 00:00:00+00:00",
       "window_end": "2021-12-18 01:35:00+00:00",
       "active_symbols": 0,
-      "peak_rss_bytes": 4253003776
+      "peak_rss_bytes": 4242829312
     },
     {
       "stage": "execution_window_11",
-      "elapsed_ms": 3,
-      "rss_bytes": 4253954048,
+      "elapsed_ms": 4,
+      "rss_bytes": 4243779584,
       "grid_bars": 9236,
       "n_symbols": null,
       "fill_count": null,
       "window_start": "2021-12-18 00:00:00+00:00",
       "window_end": "2022-01-19 01:35:00+00:00",
       "active_symbols": 0,
-      "peak_rss_bytes": 4253954048
+      "peak_rss_bytes": 4243779584
     },
     {
       "stage": "execution_window_12",
-      "elapsed_ms": 3,
-      "rss_bytes": 4254904320,
+      "elapsed_ms": 4,
+      "rss_bytes": 4244729856,
       "grid_bars": 9236,
       "n_symbols": null,
       "fill_count": null,
       "window_start": "2022-01-19 00:00:00+00:00",
       "window_end": "2022-02-20 01:35:00+00:00",
       "active_symbols": 0,
-      "peak_rss_bytes": 4254904320
+      "peak_rss_bytes": 4244729856
     },
     {
       "stage": "execution_window_13",
-      "elapsed_ms": 3,
-      "rss_bytes": 4255854592,
+      "elapsed_ms": 4,
+      "rss_bytes": 4245680128,
       "grid_bars": 9236,
       "n_symbols": null,
       "fill_count": null,
       "window_start": "2022-02-20 00:00:00+00:00",
       "window_end": "2022-03-24 01:35:00+00:00",
       "active_symbols": 0,
-      "peak_rss_bytes": 4255854592
+      "peak_rss_bytes": 4245680128
     },
     {
       "stage": "execution_window_14",
       "elapsed_ms": 4,
-      "rss_bytes": 4256804864,
+      "rss_bytes": 4246634496,
       "grid_bars": 9236,
       "n_symbols": null,
       "fill_count": null,
       "window_start": "2022-03-24 00:00:00+00:00",
       "window_end": "2022-04-25 01:35:00+00:00",
       "active_symbols": 0,
-      "peak_rss_bytes": 4256804864
+      "peak_rss_bytes": 4246634496
     },
     {
       "stage": "execution_window_15",
-      "elapsed_ms": 550,
-      "rss_bytes": 4288569344,
+      "elapsed_ms": 562,
+      "rss_bytes": 4269178880,
       "grid_bars": 9236,
       "n_symbols": null,
       "fill_count": null,
       "window_start": "2022-04-25 00:00:00+00:00",
       "window_end": "2022-05-27 01:35:00+00:00",
       "active_symbols": 28,
-      "peak_rss_bytes": 4288569344
+      "peak_rss_bytes": 4269178880
     },
     {
       "stage": "execution_window_16",
-      "elapsed_ms": 670,
-      "rss_bytes": 4331536384,
+      "elapsed_ms": 676,
+      "rss_bytes": 4311322624,
       "grid_bars": 9236,
       "n_symbols": null,
       "fill_count": null,
       "window_start": "2022-05-27 00:00:00+00:00",
       "window_end": "2022-06-28 01:35:00+00:00",
       "active_symbols": 32,
-      "peak_rss_bytes": 4331536384
+      "peak_rss_bytes": 4311322624
     },
     {
       "stage": "execution_window_17",
-      "elapsed_ms": 714,
-      "rss_bytes": 4354793472,
+      "elapsed_ms": 758,
+      "rss_bytes": 4335042560,
       "grid_bars": 9236,
       "n_symbols": null,
       "fill_count": null,
       "window_start": "2022-06-28 00:00:00+00:00",
       "window_end": "2022-07-30 01:35:00+00:00",
       "active_symbols": 33,
-      "peak_rss_bytes": 4354793472
+      "peak_rss_bytes": 4335042560
     },
     {
       "stage": "execution_window_18",
-      "elapsed_ms": 770,
-      "rss_bytes": 4370755584,
+      "elapsed_ms": 942,
+      "rss_bytes": 4350218240,
       "grid_bars": 9236,
       "n_symbols": null,
       "fill_count": null,
       "window_start": "2022-07-30 00:00:00+00:00",
       "window_end": "2022-08-31 01:35:00+00:00",
       "active_symbols": 34,
-      "peak_rss_bytes": 4370755584
+      "peak_rss_bytes": 4350218240
     },
     {
       "stage": "execution_window_19",
-      "elapsed_ms": 773,
-      "rss_bytes": 4390940672,
+      "elapsed_ms": 863,
+      "rss_bytes": 4367126528,
       "grid_bars": 9236,
       "n_symbols": null,
       "fill_count": null,
       "window_start": "2022-08-31 00:00:00+00:00",
       "window_end": "2022-10-02 01:35:00+00:00",
       "active_symbols": 36,
-      "peak_rss_bytes": 4390940672
+      "peak_rss_bytes": 4367126528
     },
     {
       "stage": "execution_window_20",
-      "elapsed_ms": 786,
-      "rss_bytes": 4408463360,
+      "elapsed_ms": 817,
+      "rss_bytes": 4385996800,
       "grid_bars": 9236,
       "n_symbols": null,
       "fill_count": null,
       "window_start": "2022-10-02 00:00:00+00:00",
       "window_end": "2022-11-03 01:35:00+00:00",
       "active_symbols": 38,
-      "peak_rss_bytes": 4408463360
+      "peak_rss_bytes": 4385996800
     },
     {
       "stage": "execution_window_21",
-      "elapsed_ms": 753,
-      "rss_bytes": 4434329600,
+      "elapsed_ms": 815,
+      "rss_bytes": 4404768768,
       "grid_bars": 9236,
       "n_symbols": null,
       "fill_count": null,
       "window_start": "2022-11-03 00:00:00+00:00",
       "window_end": "2022-12-05 01:35:00+00:00",
       "active_symbols": 37,
-      "peak_rss_bytes": 4434329600
+      "peak_rss_bytes": 4404768768
     },
     {
       "stage": "execution_window_22",
-      "elapsed_ms": 929,
-      "rss_bytes": 4436971520,
+      "elapsed_ms": 932,
+      "rss_bytes": 4414386176,
       "grid_bars": 9236,
       "n_symbols": null,
       "fill_count": null,
       "window_start": "2022-12-05 00:00:00+00:00",
       "window_end": "2023-01-06 01:35:00+00:00",
       "active_symbols": 42,
-      "peak_rss_bytes": 4436971520
+      "peak_rss_bytes": 4414386176
     },
     {
       "stage": "execution_window_23",
-      "elapsed_ms": 998,
-      "rss_bytes": 4467822592,
+      "elapsed_ms": 1013,
+      "rss_bytes": 4441739264,
       "grid_bars": 9236,
       "n_symbols": null,
       "fill_count": null,
       "window_start": "2023-01-06 00:00:00+00:00",
       "window_end": "2023-02-07 01:35:00+00:00",
       "active_symbols": 48,
-      "peak_rss_bytes": 4467822592
+      "peak_rss_bytes": 4441739264
     },
     {
       "stage": "execution_window_24",
-      "elapsed_ms": 1164,
-      "rss_bytes": 4489617408,
+      "elapsed_ms": 1202,
+      "rss_bytes": 4470415360,
       "grid_bars": 9236,
       "n_symbols": null,
       "fill_count": null,
       "window_start": "2023-02-07 00:00:00+00:00",
       "window_end": "2023-03-11 01:35:00+00:00",
       "active_symbols": 55,
-      "peak_rss_bytes": 4489617408
+      "peak_rss_bytes": 4470415360
     },
     {
       "stage": "execution_window_25",
-      "elapsed_ms": 1276,
-      "rss_bytes": 4534722560,
+      "elapsed_ms": 1284,
+      "rss_bytes": 4501860352,
       "grid_bars": 9236,
       "n_symbols": null,
       "fill_count": null,
       "window_start": "2023-03-11 00:00:00+00:00",
       "window_end": "2023-04-12 01:35:00+00:00",
       "active_symbols": 63,
-      "peak_rss_bytes": 4534722560
+      "peak_rss_bytes": 4501860352
     },
     {
       "stage": "execution_window_26",
-      "elapsed_ms": 1443,
-      "rss_bytes": 4572725248,
+      "elapsed_ms": 1449,
+      "rss_bytes": 4555522048,
       "grid_bars": 9236,
       "n_symbols": null,
       "fill_count": null,
       "window_start": "2023-04-12 00:00:00+00:00",
       "window_end": "2023-05-14 01:35:00+00:00",
       "active_symbols": 68,
-      "peak_rss_bytes": 4572725248
+      "peak_rss_bytes": 4555522048
     },
     {
       "stage": "execution_window_27",
-      "elapsed_ms": 1371,
-      "rss_bytes": 4615610368,
+      "elapsed_ms": 1385,
+      "rss_bytes": 4599582720,
       "grid_bars": 9236,
       "n_symbols": null,
       "fill_count": null,
       "window_start": "2023-05-14 00:00:00+00:00",
       "window_end": "2023-06-15 01:35:00+00:00",
       "active_symbols": 68,
-      "peak_rss_bytes": 4615610368
+      "peak_rss_bytes": 4599582720
     },
     {
       "stage": "execution_window_28",
-      "elapsed_ms": 1523,
-      "rss_bytes": 4638191616,
+      "elapsed_ms": 1492,
+      "rss_bytes": 4612259840,
       "grid_bars": 9236,
       "n_symbols": null,
       "fill_count": null,
       "window_start": "2023-06-15 00:00:00+00:00",
       "window_end": "2023-07-17 01:35:00+00:00",
       "active_symbols": 71,
-      "peak_rss_bytes": 4638191616
+      "peak_rss_bytes": 4612259840
     },
     {
       "stage": "execution_window_29",
-      "elapsed_ms": 1623,
-      "rss_bytes": 4677955584,
+      "elapsed_ms": 1635,
+      "rss_bytes": 4667863040,
       "grid_bars": 9236,
       "n_symbols": null,
       "fill_count": null,
       "window_start": "2023-07-17 00:00:00+00:00",
       "window_end": "2023-08-18 01:35:00+00:00",
       "active_symbols": 78,
-      "peak_rss_bytes": 4677955584
+      "peak_rss_bytes": 4667863040
     },
     {
       "stage": "execution_window_30",
-      "elapsed_ms": 1755,
-      "rss_bytes": 4716474368,
+      "elapsed_ms": 1706,
+      "rss_bytes": 4712140800,
       "grid_bars": 9236,
       "n_symbols": null,
       "fill_count": null,
       "window_start": "2023-08-18 00:00:00+00:00",
       "window_end": "2023-09-19 01:35:00+00:00",
       "active_symbols": 85,
-      "peak_rss_bytes": 4716474368
+      "peak_rss_bytes": 4712140800
     },
     {
       "stage": "execution_window_31",
-      "elapsed_ms": 1858,
-      "rss_bytes": 4759302144,
+      "elapsed_ms": 1788,
+      "rss_bytes": 4749762560,
       "grid_bars": 9236,
       "n_symbols": null,
       "fill_count": null,
       "window_start": "2023-09-19 00:00:00+00:00",
       "window_end": "2023-10-21 01:35:00+00:00",
       "active_symbols": 88,
-      "peak_rss_bytes": 4759302144
+      "peak_rss_bytes": 4749762560
     },
     {
       "stage": "execution_window_32",
-      "elapsed_ms": 1889,
-      "rss_bytes": 4796203008,
+      "elapsed_ms": 1873,
+      "rss_bytes": 4793851904,
       "grid_bars": 9236,
       "n_symbols": null,
       "fill_count": null,
       "window_start": "2023-10-21 00:00:00+00:00",
       "window_end": "2023-11-22 01:35:00+00:00",
       "active_symbols": 91,
-      "peak_rss_bytes": 4796203008
+      "peak_rss_bytes": 4793851904
     },
     {
       "stage": "execution_window_33",
-      "elapsed_ms": 1953,
-      "rss_bytes": 4846874624,
+      "elapsed_ms": 1894,
+      "rss_bytes": 4844244992,
       "grid_bars": 9236,
       "n_symbols": null,
       "fill_count": null,
       "window_start": "2023-11-22 00:00:00+00:00",
       "window_end": "2023-12-24 01:35:00+00:00",
       "active_symbols": 91,
-      "peak_rss_bytes": 4846874624
+      "peak_rss_bytes": 4844244992
     },
     {
       "stage": "execution_window_34",
-      "elapsed_ms": 1927,
-      "rss_bytes": 4868915200,
+      "elapsed_ms": 1830,
+      "rss_bytes": 4874014720,
       "grid_bars": 9236,
       "n_symbols": null,
       "fill_count": null,
       "window_start": "2023-12-24 00:00:00+00:00",
       "window_end": "2024-01-25 01:35:00+00:00",
       "active_symbols": 94,
-      "peak_rss_bytes": 4868915200
+      "peak_rss_bytes": 4874014720
     },
     {
       "stage": "execution_window_35",
-      "elapsed_ms": 2075,
-      "rss_bytes": 4921794560,
+      "elapsed_ms": 2027,
+      "rss_bytes": 4912062464,
       "grid_bars": 9236,
       "n_symbols": null,
       "fill_count": null,
       "window_start": "2024-01-25 00:00:00+00:00",
       "window_end": "2024-02-26 01:35:00+00:00",
       "active_symbols": 100,
-      "peak_rss_bytes": 4921794560
+      "peak_rss_bytes": 4912062464
     },
     {
       "stage": "execution_window_36",
-      "elapsed_ms": 2159,
-      "rss_bytes": 4966109184,
+      "elapsed_ms": 2183,
+      "rss_bytes": 4954664960,
       "grid_bars": 9236,
       "n_symbols": null,
       "fill_count": null,
       "window_start": "2024-02-26 00:00:00+00:00",
       "window_end": "2024-03-29 01:35:00+00:00",
       "active_symbols": 106,
-      "peak_rss_bytes": 4966109184
+      "peak_rss_bytes": 4954664960
     },
     {
       "stage": "execution_window_37",
-      "elapsed_ms": 2246,
-      "rss_bytes": 5046415360,
+      "elapsed_ms": 2241,
+      "rss_bytes": 5039763456,
       "grid_bars": 9236,
       "n_symbols": null,
       "fill_count": null,
       "window_start": "2024-03-29 00:00:00+00:00",
       "window_end": "2024-04-30 01:35:00+00:00",
       "active_symbols": 111,
-      "peak_rss_bytes": 5046415360
+      "peak_rss_bytes": 5039763456
     },
     {
       "stage": "execution_window_38",
-      "elapsed_ms": 2267,
-      "rss_bytes": 5101666304,
+      "elapsed_ms": 2176,
+      "rss_bytes": 5078642688,
       "grid_bars": 9236,
       "n_symbols": null,
       "fill_count": null,
       "window_start": "2024-04-30 00:00:00+00:00",
       "window_end": "2024-06-01 01:35:00+00:00",
       "active_symbols": 110,
-      "peak_rss_bytes": 5101666304
+      "peak_rss_bytes": 5078642688
     },
     {
       "stage": "execution_window_39",
-      "elapsed_ms": 2310,
-      "rss_bytes": 5130293248,
+      "elapsed_ms": 2222,
+      "rss_bytes": 5107609600,
       "grid_bars": 9236,
       "n_symbols": null,
       "fill_count": null,
       "window_start": "2024-06-01 00:00:00+00:00",
       "window_end": "2024-07-03 01:35:00+00:00",
       "active_symbols": 111,
-      "peak_rss_bytes": 5130293248
+      "peak_rss_bytes": 5107609600
     },
     {
       "stage": "execution_window_40",
-      "elapsed_ms": 2238,
-      "rss_bytes": 5201207296,
+      "elapsed_ms": 2417,
+      "rss_bytes": 5178011648,
       "grid_bars": 9236,
       "n_symbols": null,
       "fill_count": null,
       "window_start": "2024-07-03 00:00:00+00:00",
       "window_end": "2024-08-04 01:35:00+00:00",
       "active_symbols": 110,
-      "peak_rss_bytes": 5201207296
+      "peak_rss_bytes": 5178011648
     },
     {
       "stage": "execution_window_41",
-      "elapsed_ms": 2461,
-      "rss_bytes": 5203972096,
+      "elapsed_ms": 2272,
+      "rss_bytes": 5181648896,
       "grid_bars": 9236,
       "n_symbols": null,
       "fill_count": null,
       "window_start": "2024-08-04 00:00:00+00:00",
       "window_end": "2024-09-05 01:35:00+00:00",
       "active_symbols": 112,
-      "peak_rss_bytes": 5203972096
+      "peak_rss_bytes": 5181648896
     },
     {
       "stage": "execution_window_42",
-      "elapsed_ms": 2660,
-      "rss_bytes": 5274546176,
+      "elapsed_ms": 2303,
+      "rss_bytes": 5251813376,
       "grid_bars": 9236,
       "n_symbols": null,
       "fill_count": null,
       "window_start": "2024-09-05 00:00:00+00:00",
       "window_end": "2024-10-07 01:35:00+00:00",
       "active_symbols": 116,
-      "peak_rss_bytes": 5274546176
+      "peak_rss_bytes": 5251813376
     },
     {
       "stage": "execution_window_43",
-      "elapsed_ms": 2431,
-      "rss_bytes": 5322891264,
+      "elapsed_ms": 2363,
+      "rss_bytes": 5283889152,
       "grid_bars": 9236,
       "n_symbols": null,
       "fill_count": null,
       "window_start": "2024-10-07 00:00:00+00:00",
       "window_end": "2024-11-08 01:35:00+00:00",
       "active_symbols": 123,
-      "peak_rss_bytes": 5322891264
+      "peak_rss_bytes": 5283889152
     },
     {
       "stage": "execution_window_44",
-      "elapsed_ms": 2451,
-      "rss_bytes": 5393350656,
+      "elapsed_ms": 2453,
+      "rss_bytes": 5354217472,
       "grid_bars": 9236,
       "n_symbols": null,
       "fill_count": null,
       "window_start": "2024-11-08 00:00:00+00:00",
       "window_end": "2024-12-10 01:35:00+00:00",
       "active_symbols": 124,
-      "peak_rss_bytes": 5393350656
+      "peak_rss_bytes": 5354217472
     },
     {
       "stage": "execution_window_45",
-      "elapsed_ms": 2422,
-      "rss_bytes": 5455908864,
+      "elapsed_ms": 2521,
+      "rss_bytes": 5424857088,
       "grid_bars": 9236,
       "n_symbols": null,
       "fill_count": null,
       "window_start": "2024-12-10 00:00:00+00:00",
       "window_end": "2025-01-11 01:35:00+00:00",
       "active_symbols": 127,
-      "peak_rss_bytes": 5455908864
+      "peak_rss_bytes": 5424857088
     },
     {
       "stage": "execution_window_46",
-      "elapsed_ms": 2536,
-      "rss_bytes": 5509718016,
+      "elapsed_ms": 2609,
+      "rss_bytes": 5481336832,
       "grid_bars": 9236,
       "n_symbols": null,
       "fill_count": null,
       "window_start": "2025-01-11 00:00:00+00:00",
       "window_end": "2025-02-12 01:35:00+00:00",
       "active_symbols": 135,
-      "peak_rss_bytes": 5509718016
+      "peak_rss_bytes": 5481336832
     },
     {
       "stage": "execution_window_47",
-      "elapsed_ms": 2633,
-      "rss_bytes": 5567385600,
+      "elapsed_ms": 2679,
+      "rss_bytes": 5553184768,
       "grid_bars": 9236,
       "n_symbols": null,
       "fill_count": null,
       "window_start": "2025-02-12 00:00:00+00:00",
       "window_end": "2025-03-16 01:35:00+00:00",
       "active_symbols": 140,
-      "peak_rss_bytes": 5567385600
+      "peak_rss_bytes": 5553184768
     },
     {
       "stage": "execution_window_48",
-      "elapsed_ms": 2746,
-      "rss_bytes": 5646110720,
+      "elapsed_ms": 2848,
+      "rss_bytes": 5634265088,
       "grid_bars": 9236,
       "n_symbols": null,
       "fill_count": null,
       "window_start": "2025-03-16 00:00:00+00:00",
       "window_end": "2025-04-17 01:35:00+00:00",
       "active_symbols": 144,
-      "peak_rss_bytes": 5646110720
+      "peak_rss_bytes": 5634265088
     },
     {
       "stage": "execution_window_49",
-      "elapsed_ms": 2767,
-      "rss_bytes": 5704998912,
+      "elapsed_ms": 2799,
+      "rss_bytes": 5683912704,
       "grid_bars": 9236,
       "n_symbols": null,
       "fill_count": null,
       "window_start": "2025-04-17 00:00:00+00:00",
       "window_end": "2025-05-19 01:35:00+00:00",
       "active_symbols": 149,
-      "peak_rss_bytes": 5704998912
+      "peak_rss_bytes": 5683912704
     },
     {
       "stage": "execution_window_50",
-      "elapsed_ms": 2903,
-      "rss_bytes": 5779283968,
+      "elapsed_ms": 2864,
+      "rss_bytes": 5758394368,
       "grid_bars": 9236,
       "n_symbols": null,
       "fill_count": null,
       "window_start": "2025-05-19 00:00:00+00:00",
       "window_end": "2025-06-20 01:35:00+00:00",
       "active_symbols": 151,
-      "peak_rss_bytes": 5779283968
+      "peak_rss_bytes": 5758394368
     },
     {
       "stage": "execution_window_51",
-      "elapsed_ms": 2772,
-      "rss_bytes": 5818634240,
+      "elapsed_ms": 2829,
+      "rss_bytes": 5830352896,
       "grid_bars": 9236,
       "n_symbols": null,
       "fill_count": null,
       "window_start": "2025-06-20 00:00:00+00:00",
       "window_end": "2025-07-22 01:35:00+00:00",
       "active_symbols": 152,
-      "peak_rss_bytes": 5818634240
+      "peak_rss_bytes": 5830352896
     },
     {
       "stage": "execution_window_52",
-      "elapsed_ms": 2797,
-      "rss_bytes": 5915373568,
+      "elapsed_ms": 2822,
+      "rss_bytes": 5893627904,
       "grid_bars": 9236,
       "n_symbols": null,
       "fill_count": null,
       "window_start": "2025-07-22 00:00:00+00:00",
       "window_end": "2025-08-23 01:35:00+00:00",
       "active_symbols": 150,
-      "peak_rss_bytes": 5915373568
+      "peak_rss_bytes": 5893627904
     },
     {
       "stage": "execution_window_53",
-      "elapsed_ms": 2593,
-      "rss_bytes": 5925990400,
+      "elapsed_ms": 2694,
+      "rss_bytes": 5922418688,
       "grid_bars": 9236,
       "n_symbols": null,
       "fill_count": null,
       "window_start": "2025-08-23 00:00:00+00:00",
       "window_end": "2025-09-24 01:35:00+00:00",
       "active_symbols": 149,
-      "peak_rss_bytes": 5925990400
+      "peak_rss_bytes": 5922418688
     },
     {
       "stage": "execution_window_54",
-      "elapsed_ms": 2809,
-      "rss_bytes": 5967691776,
+      "elapsed_ms": 2893,
+      "rss_bytes": 5963202560,
       "grid_bars": 9236,
       "n_symbols": null,
       "fill_count": null,
       "window_start": "2025-09-24 00:00:00+00:00",
       "window_end": "2025-10-26 01:35:00+00:00",
       "active_symbols": 154,
-      "peak_rss_bytes": 5967691776
+      "peak_rss_bytes": 5963202560
     },
     {
       "stage": "execution_window_55",
-      "elapsed_ms": 3016,
-      "rss_bytes": 6123868160,
+      "elapsed_ms": 3027,
+      "rss_bytes": 6106566656,
       "grid_bars": 9236,
       "n_symbols": null,
       "fill_count": null,
       "window_start": "2025-10-26 00:00:00+00:00",
       "window_end": "2025-11-27 01:35:00+00:00",
       "active_symbols": 161,
-      "peak_rss_bytes": 6123868160
+      "peak_rss_bytes": 6106566656
     },
     {
       "stage": "execution_window_56",
-      "elapsed_ms": 2853,
-      "rss_bytes": 6165336064,
+      "elapsed_ms": 3154,
+      "rss_bytes": 6174371840,
       "grid_bars": 9236,
       "n_symbols": null,
       "fill_count": null,
       "window_start": "2025-11-27 00:00:00+00:00",
       "window_end": "2025-12-29 01:35:00+00:00",
       "active_symbols": 160,
-      "peak_rss_bytes": 6165336064
+      "peak_rss_bytes": 6174371840
     },
     {
       "stage": "execution_window_57",
-      "elapsed_ms": 2321,
-      "rss_bytes": 6216323072,
+      "elapsed_ms": 2482,
+      "rss_bytes": 6224740352,
       "grid_bars": 864,
       "n_symbols": null,
       "fill_count": null,
       "window_start": "2025-12-29 00:00:00+00:00",
       "window_end": "2025-12-31 23:59:59+00:00",
       "active_symbols": 152,
-      "peak_rss_bytes": 6216323072
+      "peak_rss_bytes": 6224740352
     },
     {
       "stage": "replay_blend_strict",
-      "elapsed_ms": 693,
-      "rss_bytes": 5856391168,
+      "elapsed_ms": 656,
+      "rss_bytes": 5476126720,
       "grid_bars": null,
       "n_symbols": 446,
       "fill_count": 118557,
       "window_start": null,
       "window_end": null,
       "active_symbols": null,
-      "peak_rss_bytes": 6216323072
+      "peak_rss_bytes": 6224740352
     },
     {
       "stage": "replay_blend_stress",
       "elapsed_ms": 0,
-      "rss_bytes": 5856391168,
+      "rss_bytes": 5476126720,
       "grid_bars": null,
       "n_symbols": 446,
       "fill_count": 118558,
       "window_start": null,
       "window_end": null,
       "active_symbols": null,
-      "peak_rss_bytes": 6216323072
+      "peak_rss_bytes": 6224740352
     },
     {
       "stage": "anchored_fold_0",
-      "elapsed_ms": 77127,
-      "rss_bytes": 4224516096,
+      "elapsed_ms": 83148,
+      "rss_bytes": 4222779392,
       "grid_bars": null,
       "n_symbols": null,
       "fill_count": 44408,
       "window_start": null,
       "window_end": null,
       "active_symbols": null,
-      "peak_rss_bytes": 6216323072
+      "peak_rss_bytes": 6224740352
     },
     {
       "stage": "anchored_fold_1",
       "elapsed_ms": 0,
-      "rss_bytes": 4224581632,
+      "rss_bytes": 4222779392,
       "grid_bars": null,
       "n_symbols": null,
       "fill_count": 45742,
       "window_start": null,
       "window_end": null,
       "active_symbols": null,
-      "peak_rss_bytes": 6216323072
+      "peak_rss_bytes": 6224740352
     },
     {
       "stage": "anchored_fold_2",
       "elapsed_ms": 0,
-      "rss_bytes": 4224581632,
+      "rss_bytes": 4222779392,
       "grid_bars": null,
       "n_symbols": null,
       "fill_count": 0,
       "window_start": null,
       "window_end": null,
       "active_symbols": null,
-      "peak_rss_bytes": 6216323072
+      "peak_rss_bytes": 6224740352
     },
     {
       "stage": "blend_participation",
       "elapsed_ms": 0,
-      "rss_bytes": 4224581632,
+      "rss_bytes": 4222779392,
       "grid_bars": null,
       "n_symbols": null,
       "fill_count": 118557,
       "window_start": null,
       "window_end": null,
       "active_symbols": null,
-      "peak_rss_bytes": 6216323072
+      "peak_rss_bytes": 6224740352
     },
     {
       "stage": "statistical_diagnostics",
       "elapsed_ms": 0,
-      "rss_bytes": 4224581632,
+      "rss_bytes": 4222779392,
       "grid_bars": null,
       "n_symbols": null,
       "fill_count": null,
       "window_start": null,
       "window_end": null,
       "active_symbols": null,
-      "peak_rss_bytes": 6216323072
+      "peak_rss_bytes": 6224740352
     },
     {
       "stage": "final_return",
-      "elapsed_ms": 66,
-      "rss_bytes": 3911852032,
+      "elapsed_ms": 76,
+      "rss_bytes": 3910049792,
       "grid_bars": null,
       "n_symbols": null,
       "fill_count": null,
       "window_start": null,
       "window_end": null,
       "active_symbols": null,
-      "peak_rss_bytes": 6216323072
+      "peak_rss_bytes": 6224740352
     }
   ],
+  "discovery_qualification": null,
   "artifacts": {
     "fills": {
       "file": "fills.parquet",
